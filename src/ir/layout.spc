@@ -55,13 +55,43 @@ struct LayoutAcc {
 }
 
 /// A payload-carrying enum's C shape: `{ tag; union payload; }`, with a one-byte tag when
-/// `Ast::enum_tag_is_byte` holds and a 4-byte C enum tag otherwise.
+/// `Ast::enum_tag_is_byte` holds and a 4-byte C enum tag otherwise. A niche enum (`niche`) is
+/// `{ union payload; }`: no tag, the payload at offset 0.
 pub(package) struct EnumLayout {
     pub(package) unbound: bool, // see Layout.unbound
     pub(package) ok: bool,
     pub(package) payload_off: u64, // tag sits at 0
     pub(package) size: u64,
     pub(package) align: u64,
+    pub(package) niche: bool,
+}
+
+// The niche of a payload enum of `Ast::niche_shape`: its `some` variant's payload keeps the
+// discriminant, and a null first pointer word of the payload is `none`. Every stage that lays out,
+// reads or writes an enum (this service, the C emitter, the LIR lowering) decides it the same way.
+/// No niche: the enum keeps its tag.
+pub(package) const NK_NONE: u8 = 0;
+/// The payload is a reference: never null.
+pub(package) const NK_REF: u8 = 1;
+/// The payload is a std `Box` of a value that is not `dyn`: its pointer is null only when it owns
+/// nothing (a `zeroed` seed or a box freed in place), and such a value reads as `none`.
+pub(package) const NK_BOX: u8 = 2;
+
+/// The niche kind of a payload of concrete type `t` of `a` (`boxd`: the prelude `Box`). For
+/// NK_BOX the caller checks, under its own substitution, that the box's value is not `dyn`.
+pub(package) const fn niche_kind(a: &Ast, boxd: loader::LookupHit, t: TypeId) u8 {
+    let y = *a.type_at(t);
+    if y.kind == TypeKind::TYPE_REFERENCE {
+        return NK_REF;
+    }
+    if y.kind != TypeKind::TYPE_INSTANCE || boxd.node == NODE_NONE {
+        return NK_NONE;
+    }
+    let it = *a.instance(y.as_data.inst);
+    if it.module != boxd.mid || it.decl != boxd.node || it.n == 0 {
+        return NK_NONE;
+    }
+    return NK_BOX;
 }
 
 const NONE: u32 = 0xFFFFFFFF;
@@ -184,7 +214,7 @@ pub(package) const fn round_up(v: u64, a: u64) u64 {
 /// The frame that binds instance `it`'s arguments (types of module `argm`) to the generic
 /// parameters of its declaration in `da`, below `parent`.
 pub(package) fn inst_frame(da: &Ast, it: &TyInstance, argm: ModuleId, parent: *const LayoutEnv) LayoutEnv {
-    let gens = da.at_const(it.decl).as_data.aggregate.generics;
+    let gens = da.ext(it.decl).aggregate.generics;
     let mut frame = LayoutEnv { parent: parent, penv: parent, pmod: it.module, params: da.list(gens), argm: argm, n: 0 };
     let mut i: u32 = 0;
     while i < gens.len && i as u8 < it.n && frame.n < 8 {
@@ -212,6 +242,8 @@ pub(package) struct Svc {
     /// The compile-time evaluation this service answers for (null: none). A member of an item the
     /// reader does not see checked (`Interp::visible_node`) is pending.
     pub(package) ev: *const iri::Interp,
+    boxd: loader::LookupHit, // the prelude `Box`, looked up on the first niche query (`box_on`)
+    box_on: bool,
 }
 
 extend Svc {
@@ -225,7 +257,75 @@ extend Svc {
             active: Vector::<u64>::new(),
             steps: Vector::<ConstStep>::new(),
             ms: Vector::<MemberAt>::new(),
+            boxd: loader::LookupHit { node: NODE_NONE, mid: 0 },
         };
+    }
+
+    // `t` of `m` with its generic parameters followed through `env` (as `layout_raw` binds them):
+    // the type and the env its own parameters resolve under.
+    fn ground(
+        self: &Self,
+        m: ModuleId,
+        t: TypeId,
+        env: *const LayoutEnv,
+        depth: i32,
+        rm: &mut ModuleId,
+        rt: &mut TypeId,
+        renv: &mut *const LayoutEnv,
+    ) bool {
+        let y = *self.a(m).type_at(t);
+        if y.kind != TypeKind::TYPE_GENERIC {
+            *rm = m;
+            *rt = t;
+            *renv = env;
+            return true;
+        }
+        if depth > MAX_DEPTH {
+            return false;
+        }
+        let mut e = env;
+        while e != null {
+            for i in 0..unsafe (*e).n {
+                if unsafe (*e).pmod == y.module && unsafe (*e).params[i as usize] == y.as_data.decl {
+                    if self.ground(
+                        unsafe (*e).argm,
+                        unsafe (*e).args[i as usize],
+                        unsafe (*e).penv,
+                        depth + 1,
+                        rm,
+                        rt,
+                        renv,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+            e = unsafe (*e).parent;
+        }
+        return false;
+    }
+
+    // Whether a payload of type `t` of `m` under `env` keeps a niche (`niche_kind`).
+    fn niche_on(self: &mut Self, m: ModuleId, t: TypeId, env: *const LayoutEnv, depth: i32) bool {
+        let mut rm: ModuleId = 0;
+        let mut rt = TYPE_NONE;
+        let mut renv: *const LayoutEnv = null;
+        if t == TYPE_NONE || !self.ground(m, t, env, depth, &mut rm, &mut rt, &mut renv) {
+            return false;
+        }
+        if !self.box_on {
+            self.boxd = self.p().prelude_lookup("Box", true);
+            self.box_on = true;
+        }
+        let k = niche_kind(self.a(rm), self.boxd, rt);
+        if k != NK_BOX {
+            return k == NK_REF;
+        }
+        let it = *self.a(rm).instance(self.a(rm).type_at(rt).as_data.inst);
+        let mut vm: ModuleId = 0;
+        let mut vt = TYPE_NONE;
+        let mut venv: *const LayoutEnv = null;
+        return self.ground(rm, it.args[0], renv, depth + 1, &mut vm, &mut vt, &mut venv) && self.a(vm).type_at(vt).kind != TypeKind::TYPE_DYN;
     }
 
     /// Drop every cached answer: the keys name type ids of one publication, so a checkpoint that
@@ -610,7 +710,7 @@ extend Svc {
     /// else its leading `@ordered` fields. The others follow by alignment, largest first.
     pub(package) fn ordered_prefix(self: &Self, dm: ModuleId, dn: NodeId) u32 {
         let ast = self.a(dm);
-        let agg = ast.at_const(dn).as_data.aggregate;
+        let agg = ast.ext(dn).aggregate;
         if agg.is_union || agg.is_extern || self.attr(dm, dn, AttrKind::ATTR_PACKED) != null || self.attr(
             dm,
             dn,
@@ -720,11 +820,11 @@ extend Svc {
         if dkind != NodeKind::NODE_STRUCT {
             return Layout { ok: false };
         }
-        let is_union = ast.at_const(dn).as_data.aggregate.is_union;
-        let is_tuple = ast.at_const(dn).as_data.aggregate.is_tuple;
+        let is_union = ast.ext(dn).aggregate.is_union;
+        let is_tuple = ast.ext(dn).aggregate.is_tuple;
         let mut acc = LayoutAcc { is_union: is_union };
         acc.packed = self.attr(dm, dn, AttrKind::ATTR_PACKED) != null;
-        let fs = ast.at_const(dn).as_data.aggregate.members;
+        let fs = ast.ext(dn).aggregate.members;
         let base = self.ordered(dm, dn, fs, is_tuple, self.ordered_prefix(dm, dn), acc.packed, env, depth, &mut acc);
         if base == NONE {
             return Layout { ok: false, unbound: acc.unbound, big: acc.big };
@@ -760,9 +860,21 @@ extend Svc {
     fn enum_shape(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv, depth: i32) EnumLayout {
         let ap = self.p().module_ast_const(dm);
         let ast = unsafe &*ap;
-        let ms = ast.at_const(dn).as_data.aggregate.members;
+        let ms = ast.ext(dn).aggregate.members;
         if !ast.enum_has_payload(dn) {
             return EnumLayout { ok: true, payload_off: 0, size: 4, align: 4 };
+        }
+        let mut sv = NODE_NONE;
+        let mut nv = NODE_NONE;
+        if ast.niche_shape(dn, &mut sv, &mut nv) {
+            let pid = unsafe ast.list(ast.at_const(sv).as_data.variant.payload)[0];
+            if self.niche_on(dm, ast.member_ty(pid), env, depth) {
+                let pl = self.member_layout(dm, pid, env, depth);
+                if !pl.ok {
+                    return EnumLayout { ok: false, unbound: pl.unbound };
+                }
+                return EnumLayout { ok: true, payload_off: 0, size: pl.size, align: pl.align, niche: true };
+            }
         }
         let mut un = LayoutAcc { is_union: true };
         for i in 0..ms.len {
@@ -842,7 +954,7 @@ extend Svc {
         if ast.at_const(dn).kind != NodeKind::NODE_STRUCT {
             return -1;
         }
-        let fs = ast.at_const(dn).as_data.aggregate.members;
+        let fs = ast.ext(dn).aggregate.members;
         let mut r: i64 = -1;
         let base = self.members(dm, dn, env);
         if base != NONE {
@@ -860,7 +972,7 @@ extend Svc {
     // `ms` from the returned base (NONE without a layout); the caller truncates.
     fn members(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv) u32 {
         self.offsets.insert(dm as u64 << 32 | dn as u64);
-        let agg = self.a(dm).at_const(dn).as_data.aggregate;
+        let agg = self.a(dm).ext(dn).aggregate;
         let mut acc = LayoutAcc { is_union: agg.is_union };
         acc.packed = self.attr(dm, dn, AttrKind::ATTR_PACKED) != null;
         let base = self.ordered(
@@ -938,5 +1050,61 @@ extend Svc {
             return self.enum_shape(it.module, it.decl, &frame, 0);
         }
         return EnumLayout { ok: false };
+    }
+
+    /// The bytes a value of variant `vdecl` of enum `(m, t)` occupies from the value's start: its
+    /// tag and its own payload. The whole value for a niche enum (the payload holds the discriminant)
+    /// and for an enum without payloads; -1 when `(m, t)` has no layout.
+    pub(package) fn variant_extent(self: &mut Self, m: ModuleId, t: TypeId, vdecl: NodeId) i64 {
+        let y = *self.a(m).type_at(t);
+        let mut frame = LayoutEnv { parent: null, pmod: 0, params: null, argm: m, n: 0 };
+        let mut env: *const LayoutEnv = null;
+        let mut dm: ModuleId = y.module;
+        let mut dn = NODE_NONE;
+        if y.kind == TypeKind::TYPE_ENUM {
+            dn = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.a(m).instance(y.as_data.inst);
+            dm = it.module;
+            dn = it.decl;
+            if self.a(dm).at_const(dn).kind != NodeKind::NODE_ENUM {
+                return -1;
+            }
+            frame = inst_frame(self.a(dm), &it, m, null);
+            if !self.steps_hold(dm, dn, &frame) {
+                return -1;
+            }
+            env = &frame;
+        } else {
+            return -1;
+        }
+        let el = self.enum_shape(dm, dn, env, 0);
+        if !el.ok {
+            return -1;
+        }
+        let ast = unsafe &*self.p().module_ast_const(dm);
+        if el.niche || !ast.enum_has_payload(dn) {
+            return el.size as i64;
+        }
+        let tag: i64 = if ast.enum_tag_is_byte(dn) {
+            1;
+        } else {
+            4;
+        };
+        let pl = ast.at_const(vdecl).as_data.variant.payload;
+        let mut vs = LayoutAcc {};
+        let base = self.ordered(dm, dn, pl, true, self.payload_prefix(dm, dn, pl), false, env, 0, &mut vs);
+        if base == NONE {
+            return -1;
+        }
+        let ok = self.acc_members(&mut vs, base);
+        self.ms.truncate(base as usize);
+        if !ok {
+            return -1;
+        }
+        if vs.size == 0 {
+            return tag;
+        }
+        return el.payload_off as i64 + vs.size as i64;
     }
 }

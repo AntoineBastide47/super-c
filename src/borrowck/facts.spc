@@ -693,7 +693,7 @@ extend Gen {
         }
         let n = self.owner().ast_of(m).at_const(lt);
         if n.kind == NodeKind::NODE_GENERIC_PARAM {
-            return self.lt_name(m, n.as_data.generic_param.name);
+            return self.lt_name(m, self.owner().ast_of(m).ext_name(lt));
         }
         if self.owner().span_text_is(m, n.as_data.name.text, "'_") {
             return tok::Span::empty();
@@ -778,7 +778,7 @@ extend Gen {
             let es = if n.kind == NodeKind::NODE_TUPLE_TYPE {
                 n.as_data.array_literal.elements;
             } else {
-                n.as_data.type_path.args;
+                a.at_const(tyn).as_data.type_path.args;
             };
             for i in 0..es.len {
                 self.fn_type_names(m, unsafe a.list(es)[i as usize], binders, out, depth + 1);
@@ -1344,7 +1344,7 @@ extend Gen {
         if mask == 0 {
             return;
         }
-        let args = n.as_data.type_path.args;
+        let args = self.owner().ast_of(cm).at_const(tn).as_data.type_path.args;
         let mut k: u64 = 0;
         for i in 0..args.len {
             let aid = unsafe self.owner().ast_of(cm).list(args)[i as usize];
@@ -1567,7 +1567,7 @@ extend Gen {
             if field != NODE_NONE && a.at_const(field).kind == NodeKind::NODE_FIELD {
                 return a.at_const(field).as_data.field.ty;
             }
-            ms = a.at_const(d.node).as_data.aggregate.members;
+            ms = a.ext(d.node).aggregate.members;
         }
         if idx >= ms.len {
             return NODE_NONE;
@@ -1609,10 +1609,10 @@ extend Gen {
             var = rv.item.node;
         } else {
             let a = self.owner().ast_of(d.module);
-            if a.at_const(d.node).kind != NodeKind::NODE_STRUCT || i >= a.at_const(d.node).as_data.aggregate.members.len {
+            if a.at_const(d.node).kind != NodeKind::NODE_STRUCT || i >= a.ext(d.node).aggregate.members.len {
                 return;
             }
-            field = unsafe a.list(a.at_const(d.node).as_data.aggregate.members)[i as usize];
+            field = unsafe a.list(a.ext(d.node).aggregate.members)[i as usize];
         }
         let ftn = self.member_type_node(d, var, i, field);
         if ftn == NODE_NONE {
@@ -2398,7 +2398,7 @@ extend Gen {
         } else {
             0u64;
         };
-        let caps = self.owner().ast_of(m).at_const(c).as_data.closure.captures;
+        let caps = self.owner().ast_of(m).ext(c).closure.captures;
         let mut r: u64 = 0;
         for k in 0..caps.len.min(64) {
             let ty = self.owner().ast_of(m).type_of(unsafe self.owner().ast_of(m).list(caps)[k as usize]);
@@ -2511,7 +2511,7 @@ extend Gen {
                 self.owner().sc_tys = tys;
                 return;
             }
-            let ps = nd.as_data.function.params;
+            let ps = a.ext(callee.node).function.params;
             for i in 0..ps.len {
                 let pid = unsafe a.list(ps)[i as usize];
                 tys.push(a.type_of(pid));
@@ -2682,7 +2682,7 @@ extend Gen {
             } else if k == NodeKind::NODE_ARRAY_TYPE {
                 inner = node.as_data.array_type.element;
             } else if k == NodeKind::NODE_TYPE_PATH {
-                args = node.as_data.type_path.args;
+                args = a.at_const(tyn).as_data.type_path.args;
             } else if k == NodeKind::NODE_TUPLE_TYPE {
                 args = node.as_data.array_literal.elements;
             }
@@ -2717,7 +2717,7 @@ extend Gen {
             };
             if dk == NodeKind::NODE_GENERIC_PARAM {
                 out.push(d.module as u64 << 32 | d.node as u64);
-                let bs = self.owner().ast_of(d.module).at_const(d.node).as_data.generic_param.bounds;
+                let bs = self.owner().ast_of(d.module).ext(d.node).generic_param.bounds;
                 self.bound_tokens(d.module, bs, out, depth);
                 let nw = self.owner().ast_of(d.module).where_bounds.len();
                 for w in 0..nw {
@@ -2735,7 +2735,7 @@ extend Gen {
                 for i in 0..lts.len {
                     self.lt_name_token(d.module, unsafe self.owner().ast_of(d.module).list(lts)[i as usize], out);
                 }
-                let gs = self.owner().ast_of(d.module).at_const(d.node).as_data.interface_def.generics;
+                let gs = self.owner().ast_of(d.module).ext(d.node).interface_def.generics;
                 for i in 0..gs.len {
                     out.push(d.module as u64 << 32 | (unsafe self.owner().ast_of(d.module).list(gs)[i as usize]) as u64);
                 }
@@ -2767,7 +2767,7 @@ extend Gen {
         let mut pool = replace(&mut self.owner().tok_pool, Vector::<u64>::new());
         let start = pool.len();
         if ret {
-            let rets = self.owner().ast_of(m).at_const(tyn).as_data.function.returns;
+            let rets = self.owner().ast_of(m).ext(tyn).function.returns;
             for r in 0..rets.len {
                 let a = self.owner().ast_of(m);
                 let rn = a.slot_type_node(unsafe a.list(rets)[r as usize]);
@@ -2846,7 +2846,7 @@ extend Gen {
             }
             return;
         }
-        let tp = n.as_data.type_path;
+        let tp = self.owner().ast_of(m).at_const(tyn).as_data.type_path;
         let nlt = self.owner().ast_of(d.module).lifetimes_of(d.node).len;
         let inner = behind || nlt != 0;
         let mut named: u32 = 0;
@@ -2945,7 +2945,7 @@ extend Gen {
             self.lt_tokens(m, tyn, out, depth);
             return;
         }
-        let args = n.as_data.type_path.args;
+        let args = self.owner().ast_of(m).at_const(tyn).as_data.type_path.args;
         // A view's type argument is its elements' type: they lie behind it, as `ref_steps` counts an
         // index into one.
         let sl = self.owner().slice;
@@ -2966,9 +2966,11 @@ extend Gen {
                 self.own_walk(m, aid, out, depth + 1, refs - 1);
             }
         }
-        if named < self.owner().ast_of(d.module).lifetimes_of(d.node).len && !(n.as_data.type_path.parts.len == 1 && self.owner().span_text_is(
+        if named < self.owner().ast_of(d.module).lifetimes_of(d.node).len && !(self.owner().ast_of(m).at_const(tyn).as_data.type_path.parts.len == 1 && self.owner().span_text_is(
             m,
-            self.owner().ast_of(m).at_const(unsafe self.owner().ast_of(m).list(n.as_data.type_path.parts)[0]).as_data.name.text,
+            self.owner().ast_of(m).at_const(
+                unsafe self.owner().ast_of(m).list(self.owner().ast_of(m).at_const(tyn).as_data.type_path.parts)[0],
+            ).as_data.name.text,
             "Self",
         )) {
             out.push(ELIDED_TOK);
@@ -3119,7 +3121,7 @@ extend Gen {
         if d.node == NODE_NONE || self.owner().ast_of(d.module).at_const(d.node).kind != NodeKind::NODE_GENERIC_PARAM {
             return false;
         }
-        let bs = self.owner().ast_of(d.module).at_const(d.node).as_data.generic_param.bounds;
+        let bs = self.owner().ast_of(d.module).ext(d.node).generic_param.bounds;
         if bs.len == 0 {
             return false;
         }
@@ -3139,7 +3141,7 @@ extend Gen {
         if y.module != self.body().module {
             return false;
         }
-        let ps = self.owner().ast_of(y.module).at_const(y.as_data.decl).as_data.closure.params;
+        let ps = self.owner().ast_of(y.module).ext(y.as_data.decl).closure.params;
         for i in 0..ps.len {
             let pt = self.owner().ast_of(y.module).type_of(unsafe self.owner().ast_of(y.module).list(ps)[i as usize]);
             if pt == TYPE_NONE || self.takes_store(pt) {
@@ -3229,7 +3231,7 @@ extend Gen {
         ) {
             return false;
         }
-        let bs = self.owner().ast_of(d.module).at_const(d.node).as_data.generic_param.bounds;
+        let bs = self.owner().ast_of(d.module).ext(d.node).generic_param.bounds;
         if bs.len == 0 {
             return false;
         }
@@ -3421,7 +3423,7 @@ extend Gen {
         if n.kind != NodeKind::NODE_TYPE_PATH {
             return false;
         }
-        let tp = n.as_data.type_path;
+        let tp = a.at_const(tyn).as_data.type_path;
         if tp.parts.len == 1 && self.owner().span_text_is(
             m,
             a.at_const(unsafe a.list(tp.parts)[0]).as_data.name.text,
@@ -3467,14 +3469,14 @@ extend Gen {
         }
         let a = self.owner().ast_of(m);
         let n = a.at_const(tyn);
-        if n.kind != NodeKind::NODE_TYPE_PATH || n.as_data.type_path.parts.len != 1 || !self.owner().span_text_is(
+        if n.kind != NodeKind::NODE_TYPE_PATH || a.at_const(tyn).as_data.type_path.parts.len != 1 || !self.owner().span_text_is(
             m,
-            a.at_const(unsafe a.list(n.as_data.type_path.parts)[0]).as_data.name.text,
+            a.at_const(unsafe a.list(a.at_const(tyn).as_data.type_path.parts)[0]).as_data.name.text,
             "Self",
         ) {
             return tyn;
         }
-        let tt = a.at_const(self.ext).as_data.extend_def.target_type;
+        let tt = a.ext(self.ext).extend_def.target_type;
         if tt == NODE_NONE {
             return tyn;
         }
@@ -3511,18 +3513,18 @@ extend Gen {
             let nd = a.at_const(callee.node);
             if nd.kind == NodeKind::NODE_FUNCTION {
                 isfn = true;
-                fn0 = a.at_const(nd.as_data.function.name).as_data.name.text;
-                if nd.as_data.function.params.len != 0 {
-                    let p0 = unsafe a.list(nd.as_data.function.params)[0];
+                fn0 = a.at_const(a.ext_name(callee.node)).as_data.name.text;
+                if a.ext(callee.node).function.params.len != 0 {
+                    let p0 = unsafe a.list(a.ext(callee.node).function.params)[0];
                     pn = a.at_const(a.at_const(p0).as_data.parameter.name).as_data.name.text;
                 }
-                rets = nd.as_data.function.returns;
+                rets = a.ext(callee.node).function.returns;
                 for r in 0..rets.len {
                     if self.has_elided_lt(callee.module, a.slot_type_node(unsafe a.list(rets)[r as usize]), 0) {
                         cs.fl = cs.fl | 8;
                     }
                 }
-                ps = nd.as_data.function.params;
+                ps = a.ext(callee.node).function.params;
                 for i in 0..ps.len.min(STATIC_PARAMS_MAX) {
                     let ptn = a.at_const(unsafe a.list(ps)[i as usize]).as_data.parameter.ty;
                     cs.fl = cs.fl | self.static_kind(callee.module, ptn, &stat) as u64 << (8 + 2 * i) as u64;
@@ -3639,14 +3641,14 @@ extend Gen {
         if n.kind == NodeKind::NODE_TUPLE_TYPE {
             es = n.as_data.array_literal.elements;
         } else if n.kind == NodeKind::NODE_TYPE_PATH {
-            es = n.as_data.type_path.args;
+            es = a.at_const(tyn).as_data.type_path.args;
             // A type parameter bounded `'static` (`F: fn() + 'static`) holds only `'static` borrows.
             let d = a.path_def(tyn);
             if d.node != NODE_NONE && self.owner().ast_of(d.module).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM {
                 if stat.contains(&(d.module as u64 << 32 | d.node as u64)) {
                     return true;
                 }
-                let bs = self.owner().ast_of(d.module).at_const(d.node).as_data.generic_param.bounds;
+                let bs = self.owner().ast_of(d.module).ext(d.node).generic_param.bounds;
                 for i in 0..bs.len {
                     let b = unsafe self.owner().ast_of(d.module).list(bs)[i as usize];
                     if self.owner().ast_of(d.module).at_const(b).kind == NodeKind::NODE_LIFETIME && self.owner().span_text_is(
@@ -3844,10 +3846,10 @@ extend Gen {
         if gn.kind != NodeKind::NODE_GENERIC_PARAM {
             return false;
         }
-        let bs = gn.as_data.generic_param.bounds;
+        let bs = ga.ext(y.as_data.decl).generic_param.bounds;
         for i in 0..bs.len {
             let b = ga.at_const(unsafe ga.list(bs)[i as usize]);
-            if b.kind != NodeKind::NODE_TYPE_PATH || b.as_data.type_path.args.len != 0 {
+            if b.kind != NodeKind::NODE_TYPE_PATH || ga.at_const(unsafe ga.list(bs)[i as usize]).as_data.type_path.args.len != 0 {
                 return true;
             }
         }
@@ -3879,7 +3881,7 @@ extend Gen {
         if n.kind != NodeKind::NODE_STRUCT && n.kind != NodeKind::NODE_ENUM {
             return false;
         }
-        let ms = n.as_data.aggregate.members;
+        let ms = a.ext(d.node).aggregate.members;
         for j in 0..ms.len {
             let mn = unsafe a.list(ms)[j as usize];
             let m = a.at_const(mn);
@@ -4102,7 +4104,7 @@ extend Gen {
                     let a = self.owner().ast_of(t.callee.module);
                     let nd = a.at_const(t.callee.node);
                     if nd.kind == NodeKind::NODE_FUNCTION {
-                        let ps = nd.as_data.function.params;
+                        let ps = a.ext(t.callee.node).function.params;
                         for i in 0..ps.len.min(t.args_len) {
                             ptyn.push(a.at_const(unsafe a.list(ps)[i as usize]).as_data.parameter.ty);
                         }
@@ -5203,7 +5205,7 @@ extend Owner {
         }
         let n = a.at_const(lt);
         if n.kind == NodeKind::NODE_GENERIC_PARAM {
-            return self.lt_name(a, n.as_data.generic_param.name);
+            return self.lt_name(a, a.ext_name(lt));
         }
         return n.as_data.name.text;
     }
@@ -5219,7 +5221,7 @@ extend Owner {
         let nd = a.at_const(callee.node);
         let mut r = false;
         if nd.kind == NodeKind::NODE_FUNCTION {
-            let ps = nd.as_data.function.params;
+            let ps = a.ext(callee.node).function.params;
             for i in 0..ps.len {
                 let ptn = a.at_const(unsafe a.list(ps)[i as usize]).as_data.parameter.ty;
                 if ptn != NODE_NONE && a.at_const(ptn).is_ref_type() && stat.contains(
@@ -5299,7 +5301,7 @@ extend Owner {
             return;
         }
         self.rel_lts(m, a.lifetimes_of(callee.node), out);
-        let wc = nd.as_data.function.where_clause;
+        let wc = a.ext(callee.node).function.where_clause;
         for w in 0..wc.len {
             let wp = a.at_const(unsafe a.list(wc)[w as usize]).as_data.where_predicate;
             if a.at_const(wp.ty).kind != NodeKind::NODE_LIFETIME {
@@ -5315,9 +5317,9 @@ extend Owner {
         let c = a.container_of(callee.node);
         if c != NODE_NONE && a.at_const(c).kind == NodeKind::NODE_EXTEND {
             self.rel_lts(m, a.lifetimes_of(c), out);
-            self.rel_implied(m, a.at_const(c).as_data.extend_def.target_type, out, 0);
+            self.rel_implied(m, a.ext(c).extend_def.target_type, out, 0);
         }
-        let ps = nd.as_data.function.params;
+        let ps = a.ext(callee.node).function.params;
         for i in 0..ps.len {
             self.rel_implied(m, a.at_const(unsafe a.list(ps)[i as usize]).as_data.parameter.ty, out, 0);
         }
@@ -5328,7 +5330,7 @@ extend Owner {
         let a = self.ast_of(m);
         for i in 0..lts.len {
             let lp = unsafe a.list(lts)[i as usize];
-            let bs = a.at_const(lp).as_data.generic_param.bounds;
+            let bs = a.ext(lp).generic_param.bounds;
             for b in 0..bs.len {
                 rel_push(out, self.lt_tok(m, lp), self.lt_tok(m, unsafe a.list(bs)[b as usize]));
             }
@@ -5356,7 +5358,7 @@ extend Owner {
         if n.kind == NodeKind::NODE_TUPLE_TYPE {
             es = n.as_data.array_literal.elements;
         } else if n.kind == NodeKind::NODE_TYPE_PATH {
-            es = n.as_data.type_path.args;
+            es = a.at_const(tyn).as_data.type_path.args;
         }
         for i in 0..es.len {
             let e = unsafe a.list(es)[i as usize];
@@ -5390,7 +5392,7 @@ extend Owner {
         }
         let st = static_tok();
         for i in 0..lts.len {
-            let bs = da.at_const(unsafe da.list(lts)[i as usize]).as_data.generic_param.bounds;
+            let bs = da.ext(unsafe da.list(lts)[i as usize]).generic_param.bounds;
             for b in 0..bs.len {
                 let bt = self.lt_tok(d.module, unsafe da.list(bs)[b as usize]);
                 if bt == st {
@@ -5504,17 +5506,17 @@ extend Owner {
                 if it.kind != NodeKind::NODE_EXTEND {
                     continue;
                 }
-                if it.as_data.extend_def.interface_type == NODE_NONE || it.as_data.extend_def.target_type == NODE_NONE {
+                if a.ext(iid).extend_def.interface_type == NODE_NONE || a.ext(iid).extend_def.target_type == NODE_NONE {
                     continue;
                 }
-                let tr = a.resolution_def(it.as_data.extend_def.interface_type);
+                let tr = a.resolution_def(a.ext(iid).extend_def.interface_type);
                 if tr.node == NODE_NONE {
                     continue;
                 }
                 if !self.p().is_prelude_item(tr, "Free") {
                     continue;
                 }
-                let tg = a.resolution_def(it.as_data.extend_def.target_type);
+                let tg = a.resolution_def(a.ext(iid).extend_def.target_type);
                 if tg.node == NODE_NONE {
                     continue;
                 }
@@ -5547,7 +5549,7 @@ extend Owner {
 
     fn param_has_free_bound(self: &Self, m: ModuleId, gp: NodeId) bool {
         let a = self.ast_of(m);
-        let bs = a.at_const(gp).as_data.generic_param.bounds;
+        let bs = a.ext(gp).generic_param.bounds;
         for i in 0..bs.len {
             let bid = unsafe a.list(bs)[i as usize];
             if a.at_const(bid).kind == NodeKind::NODE_FUNCTION_TYPE {
@@ -5588,7 +5590,7 @@ extend Owner {
             if cn.kind != NodeKind::NODE_INTERFACE {
                 continue;
             }
-            let bs = cn.as_data.interface_def.bounds;
+            let bs = a.ext(cur.node).interface_def.bounds;
             for b in 0..bs.len {
                 let bd = a.resolution_def(unsafe a.list(bs)[b as usize]);
                 if bd.node == NODE_NONE || self.ast_of(bd.module).at_const(bd.node).kind != NodeKind::NODE_INTERFACE {
@@ -5648,7 +5650,7 @@ extend Owner {
             return true;
         }
         let mut is_fn = false;
-        let r = self.bounds_own(m, a.at_const(gp).as_data.generic_param.bounds, &mut is_fn);
+        let r = self.bounds_own(m, a.ext(gp).generic_param.bounds, &mut is_fn);
         if is_fn || !r {
             return r;
         }
@@ -5779,7 +5781,7 @@ extend Owner {
         if ext.node == NODE_NONE {
             return self.derives(mid, y, f0, f1, depth);
         }
-        let gens = self.ast_of(ext.module).at_const(ext.node).as_data.extend_def.generics;
+        let gens = self.ast_of(ext.module).ext(ext.node).extend_def.generics;
         let mut i: u32 = 0;
         while i < gens.len && i as u8 < it.n {
             let gid = unsafe self.ast_of(ext.module).list(gens)[i as usize];
@@ -5811,11 +5813,11 @@ extend Owner {
             om = it.module;
             od = it.decl;
             s0 = self.subst.len() as u32;
-            let gens = self.ast_of(om).at_const(od).as_data.aggregate.generics;
+            let gens = self.ast_of(om).ext(od).aggregate.generics;
             let mut k: u8 = 0;
             for g in 0..gens.len {
                 let gid = unsafe self.ast_of(om).list(gens)[g as usize];
-                if self.ast_of(om).at_const(gid).as_data.generic_param.is_lifetime {
+                if self.ast_of(om).ext(gid).generic_param.is_lifetime {
                     continue;
                 }
                 if k < it.n {
@@ -5843,11 +5845,11 @@ extend Owner {
         if dn.kind != NodeKind::NODE_STRUCT && !is_enum {
             return false;
         }
-        if !is_enum && dn.as_data.aggregate.is_union {
+        if !is_enum && self.ast_of(om).ext(od).aggregate.is_union {
             return false;
         }
         let base = self.tys.len();
-        self.push_member_types(om, &dn);
+        self.push_member_types(om, od);
         let mut r = false;
         for i in base..self.tys.len() {
             if self.owns_f(om, self.tys[i], s0, s1, depth + 1) {
@@ -5859,14 +5861,15 @@ extend Owner {
     }
 
     // Push the member types of aggregate `dn` (fields, tuple members, variant payloads) onto `tys`.
-    fn push_member_types(self: &mut Self, om: ModuleId, dn: &Node) {
-        let is_enum = dn.kind == NodeKind::NODE_ENUM;
-        let ms = dn.as_data.aggregate.members;
+    fn push_member_types(self: &mut Self, om: ModuleId, od: NodeId) {
+        let is_enum = self.ast_of(om).at_const(od).kind == NodeKind::NODE_ENUM;
+        let ms = self.ast_of(om).ext(od).aggregate.members;
+        let is_tuple = self.ast_of(om).ext(od).aggregate.is_tuple;
         for i in 0..ms.len {
             let mid2 = unsafe self.ast_of(om).list(ms)[i as usize];
             let mn = *self.ast_of(om).at_const(mid2);
             // Tuple members are bare type nodes; named members are NODE_FIELD.
-            if !is_enum && (mn.kind == NodeKind::NODE_FIELD || dn.as_data.aggregate.is_tuple) {
+            if !is_enum && (mn.kind == NodeKind::NODE_FIELD || is_tuple) {
                 let tn = self.ast_of(om).member_type_node(mid2, true);
                 self.tys.push(self.ast_of(om).type_of(tn));
             } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
@@ -5938,13 +5941,13 @@ extend Owner {
             return false;
         }
         let dn = *self.ast_of(om).at_const(od);
-        if dn.kind != NodeKind::NODE_STRUCT || dn.as_data.aggregate.is_union {
+        if dn.kind != NodeKind::NODE_STRUCT || self.ast_of(om).ext(od).aggregate.is_union {
             return false;
         }
         {
             let oa = self.ast_of(om);
-            let is_tuple = dn.as_data.aggregate.is_tuple;
-            let ms = dn.as_data.aggregate.members;
+            let is_tuple = self.ast_of(om).ext(od).aggregate.is_tuple;
+            let ms = self.ast_of(om).ext(od).aggregate.members;
             for i in 0..ms.len {
                 let mid2 = unsafe oa.list(ms)[i as usize];
                 let mn = *oa.at_const(mid2);
@@ -6014,7 +6017,7 @@ extend Owner {
             } else {
                 0u64;
             };
-            let caps = self.ast_of(y.module).at_const(y.as_data.decl).as_data.closure.captures;
+            let caps = self.ast_of(y.module).ext(y.as_data.decl).closure.captures;
             for k in 0..caps.len {
                 if k < 64 && (by_ptr >> k as u64 & 1u64) != 0 {
                     continue;
@@ -6047,11 +6050,13 @@ extend Owner {
             return true;
         }
         let dn = *self.ast_of(om).at_const(od);
-        if dn.kind != NodeKind::NODE_STRUCT && dn.kind != NodeKind::NODE_ENUM || dn.kind == NodeKind::NODE_STRUCT && dn.as_data.aggregate.is_union {
+        if dn.kind != NodeKind::NODE_STRUCT && dn.kind != NodeKind::NODE_ENUM || dn.kind == NodeKind::NODE_STRUCT && self.ast_of(
+            om,
+        ).ext(od).aggregate.is_union {
             return true;
         }
         let base = self.tys.len();
-        self.push_member_types(om, &dn);
+        self.push_member_types(om, od);
         let mut r = false;
         for i in base..self.tys.len() {
             let t = self.tys[i];
@@ -6086,14 +6091,14 @@ extend Owner {
                 continue;
             }
             let dn = *self.ast_of(om).at_const(od);
-            if dn.kind != NodeKind::NODE_STRUCT || dn.as_data.aggregate.is_union {
+            if dn.kind != NodeKind::NODE_STRUCT || self.ast_of(om).ext(od).aggregate.is_union {
                 continue;
             }
-            let ms = dn.as_data.aggregate.members;
+            let ms = self.ast_of(om).ext(od).aggregate.members;
             let mut all = true;
             for i in 0..ms.len {
                 let m = unsafe self.ast_of(om).list(ms)[i as usize];
-                let c = if dn.as_data.aggregate.is_tuple {
+                let c = if self.ast_of(om).ext(od).aggregate.is_tuple {
                     forest.tuple_child(p as u32, i);
                 } else if self.ast_of(om).at_const(m).kind == NodeKind::NODE_FIELD {
                     forest.field_child(p as u32, m);
@@ -6134,7 +6139,7 @@ extend Owner {
         }
         self.interior_memo.insert(key, INTERIOR_BUSY);
         let mut mask: u64 = 0;
-        let ms = dn.as_data.aggregate.members;
+        let ms = self.ast_of(m).ext(decl).aggregate.members;
         for j in 0..ms.len {
             let fd = *self.ast_of(m).at_const(unsafe self.ast_of(m).list(ms)[j as usize]);
             if fd.kind == NodeKind::NODE_FIELD {
@@ -6168,7 +6173,7 @@ extend Owner {
         }
         self.cell_memo.insert(key, false);
         let mut r = false;
-        let ms = dn.as_data.aggregate.members;
+        let ms = self.ast_of(m).ext(decl).aggregate.members;
         for j in 0..ms.len {
             let mn = unsafe self.ast_of(m).list(ms)[j as usize];
             let mk = self.ast_of(m).at_const(mn).kind;
@@ -6221,7 +6226,7 @@ extend Owner {
         if n.kind != NodeKind::NODE_TYPE_PATH {
             return false;
         }
-        let args = n.as_data.type_path.args;
+        let args = self.ast_of(m).at_const(tyn).as_data.type_path.args;
         for i in 0..args.len {
             if self.node_has_cell(m, unsafe self.ast_of(m).list(args)[i as usize], depth + 1) {
                 return true;
@@ -6260,7 +6265,7 @@ extend Owner {
         } else {
             0u64;
         };
-        let args = n.as_data.type_path.args;
+        let args = self.ast_of(m).at_const(tyn).as_data.type_path.args;
         let mut k: u64 = 0;
         for i in 0..args.len {
             let aid = unsafe self.ast_of(m).list(args)[i as usize];
@@ -6294,10 +6299,10 @@ extend Owner {
         if n.kind == NodeKind::NODE_TUPLE_TYPE {
             es = n.as_data.array_literal.elements;
         } else if n.kind == NodeKind::NODE_TYPE_PATH {
-            es = n.as_data.type_path.args;
+            es = a.at_const(tyn).as_data.type_path.args;
             let d = a.path_def(tyn);
             if d.module == m && d.node != NODE_NONE {
-                let gs = a.at_const(decl).as_data.aggregate.generics;
+                let gs = a.ext(decl).aggregate.generics;
                 for i in 0..gs.len.min(64) {
                     if unsafe a.list(gs)[i as usize] == d.node {
                         r = r | 1u64 << i as u64;
@@ -6429,7 +6434,7 @@ extend Owner {
             return false;
         }
         let base = self.tys.len();
-        self.push_member_types(om, &dn);
+        self.push_member_types(om, od);
         let mut r = false;
         for i in base..self.tys.len() {
             if self.carries_f(om, self.tys[i], depth + 1) {

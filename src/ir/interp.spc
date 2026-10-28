@@ -1255,7 +1255,7 @@ pub(package) fn interp_master(pkg: *const loader::Package, steps: u32, mem: u64)
 // The type node of field ordinal `ord` of aggregate `dn` (a tuple member is its own type node);
 // NODE_NONE when out of range.
 fn field_type_node(a: &Ast, dn: NodeId, ord: u32) NodeId {
-    let agg = a.at_const(dn).as_data.aggregate;
+    let agg = a.ext(dn).aggregate;
     let mut oi: u32 = 0;
     for i in 0..agg.members.len {
         let fid = unsafe a.list(agg.members)[i as usize];
@@ -1273,7 +1273,7 @@ fn field_type_node(a: &Ast, dn: NodeId, ord: u32) NodeId {
 // The ordinal of generic parameter `p` among the first `nargs` parameters of aggregate `dn`; -1
 // when absent.
 fn gen_index(a: &Ast, dn: NodeId, nargs: u8, p: NodeId) i32 {
-    let gens = a.at_const(dn).as_data.aggregate.generics;
+    let gens = a.ext(dn).aggregate.generics;
     let mut gi: u32 = 0;
     while gi < gens.len && gi < nargs as u32 {
         if unsafe a.list(gens)[gi as usize] == p {
@@ -1287,7 +1287,7 @@ fn gen_index(a: &Ast, dn: NodeId, nargs: u8, p: NodeId) i32 {
 // Whether `list` binds every generic parameter `gens` (listed through `xa`) of an extend of module `xm`
 // whose target type is `pat`.
 fn ext_all_bound(list: &Vector<ISub>, xa: &Ast, xm: ModuleId, ext: NodeId, pat: TypeId) bool {
-    let gens = xa.at_const(ext).as_data.extend_def.generics;
+    let gens = xa.ext(ext).extend_def.generics;
     // The parameters only the interface's arguments name: the conformance search solves them.
     let free = pick(pat == TYPE_NONE, 0u64, ext_free_params(xa, pat, xa, xm, ext));
     let gids = xa.list(gens);
@@ -2054,16 +2054,16 @@ extend Interp {
             let items = a.at_const(a.root).as_data.program.items;
             for ii in 0..items.len {
                 let iid = unsafe a.list(items)[ii as usize];
-                if a.at_const(iid).kind != NodeKind::NODE_EXTEND || a.at_const(iid).as_data.extend_def.target_type == NODE_NONE {
+                if a.at_const(iid).kind != NodeKind::NODE_EXTEND || a.ext(iid).extend_def.target_type == NODE_NONE {
                     continue;
                 }
-                let ms = a.at_const(iid).as_data.extend_def.items;
+                let ms = a.ext(iid).extend_def.items;
                 for k in 0..ms.len {
                     let mid = unsafe a.list(ms)[k as usize];
                     if a.at_const(mid).kind == NodeKind::NODE_FUNCTION {
-                        let mname = a.at_const(a.at_const(mid).as_data.function.name).as_data.name.text;
+                        let mname = a.at_const(a.ext_name(mid)).as_data.name.text;
                         if self.span_is(mm as ModuleId, mname, "free") {
-                            let tg = a.resolution_def(a.at_const(iid).as_data.extend_def.target_type);
+                            let tg = a.resolution_def(a.ext(iid).extend_def.target_type);
                             self.ufree.insert(tg.module as u64 << 32 | tg.node as u64);
                             break;
                         }
@@ -2587,7 +2587,7 @@ extend Interp {
             let xm = cands.at(ci0).module as usize;
             let iid = cands.at(ci0).node;
             let xa = unsafe &*self.p().module_syntax(xm as ModuleId);
-            let ed = xa.at_const(iid).as_data.extend_def;
+            let ed = xa.ext(iid).extend_def;
             let bp = ext_blanket_syn(xa, xm as ModuleId, iid);
             if bp < 0 {
                 continue;
@@ -2634,7 +2634,7 @@ extend Interp {
     // arguments fit, the call takes the one whose bounds hold, as the checker does.
     fn isub_bounds_hold(self: &Self, em: ModuleId, ext: NodeId, list: &Vector<ISub>, dm: ModuleId) bool {
         let xa = unsafe &*self.p().module_ast_const(em);
-        let gens = xa.at_const(ext).as_data.extend_def.generics;
+        let gens = xa.ext(ext).extend_def.generics;
         if gens.len > 8 {
             return true;
         }
@@ -2728,8 +2728,8 @@ extend Interp {
         rat: *const TypeId,
     ) bool {
         let xa = unsafe &*self.p().module_ast_const(xm);
-        let gens = xa.at_const(extnode).as_data.extend_def.generics;
-        let target = xa.at_const(extnode).as_data.extend_def.target_type;
+        let gens = xa.ext(extnode).extend_def.generics;
+        let target = xa.ext(extnode).extend_def.target_type;
         let pat = self.tof(xm, xa, target);
         if gens.len == 0 {
             // An extend of one instance (`extend M<3>`) applies to that instance only.
@@ -2809,7 +2809,7 @@ extend Interp {
         rat: *const TypeId,
     ) bool {
         let xa = unsafe &*self.p().module_ast_const(xm);
-        let gens = xa.at_const(extnode).as_data.extend_def.generics;
+        let gens = xa.ext(extnode).extend_def.generics;
         let mut pi = TyInstance {};
         let _ = xa.targs_of(pat, &mut pi);
         let np = ext_arity(xa, extnode, pi.n);
@@ -2919,11 +2919,12 @@ extend Interp {
                 has_inst = true;
             }
             let da = unsafe &*self.p().module_ast_const(dm);
-            if da.at_const(dn).kind != NodeKind::NODE_STRUCT {
+            if da.at_const(dn).kind != NodeKind::NODE_STRUCT || has_inst && self.is_prelude_decl(dm, dn, "Box") {
+                // A Box has no zero value: constant evaluation stops, and the run-time instance panics.
                 return none();
             }
             // A union's zero is its first member's, as C's static initialization.
-            let is_union = da.at_const(dn).as_data.aggregate.is_union;
+            let is_union = da.ext(dn).aggregate.is_union;
             if self.user_free(dm, dn) {
                 return none();
             }
@@ -3164,7 +3165,7 @@ extend Interp {
             let bn = if closure {
                 fnode;
             } else {
-                unsafe (&*self.p().module_ast_const(m)).at_const(fnode).as_data.function.body;
+                unsafe (&*self.p().module_ast_const(m)).ext(fnode).function.body;
             };
             if !self.body_avail(m, bn) {
                 return -1;
@@ -3574,7 +3575,7 @@ extend Interp {
             let nd = ca.at_const(self.unsup_callee.node);
             out.push_str("the call of '");
             if nd.kind == NodeKind::NODE_FUNCTION {
-                let nsp = ca.at_const(nd.as_data.function.name).as_data.name.text;
+                let nsp = ca.at_const(ca.ext_name(self.unsup_callee.node)).as_data.name.text;
                 out.push_str(self.src_of(self.unsup_callee.module).slice(nsp.start as usize, nsp.end as usize));
             }
             out.push_str("'");
@@ -3634,7 +3635,7 @@ extend Interp {
         }
         // Only an instance of the extended declaration binds its parameters.
         let xa = unsafe &*self.p().module_ast_const(fm);
-        let pat = self.tof(fm, xa, xa.at_const(ext).as_data.extend_def.target_type);
+        let pat = self.tof(fm, xa, xa.ext(ext).extend_def.target_type);
         let mut pi = TyInstance {};
         if pat != TYPE_NONE && xa.targs_of(pat, &mut pi) && (pi.module != rdm || pi.decl != rdn) {
             return false;
@@ -3685,7 +3686,7 @@ extend Interp {
         args: &mut Vector<IVal>,
     ) bool {
         let fa = unsafe &*self.p().module_ast_const(fm);
-        let ps = fa.at_const(fnode).as_data.function.params;
+        let ps = fa.ext(fnode).function.params;
         let n = (t.args_len as usize).min(ps.len as usize);
         for i in 0..n {
             let v = *args.at(i);
@@ -3804,9 +3805,9 @@ extend Interp {
                     if k != NodeKind::NODE_FUNCTION {
                         return self.fail();
                     }
-                    if da.at_const(fnode).as_data.function.needs_features() {
+                    if da.ext(fnode).function.needs_features() {
                         // A function that needs CPU features computes with C intrinsics.
-                        let nm = da.at_const(da.at_const(fnode).as_data.function.name).as_data.name.text;
+                        let nm = da.at_const(da.ext_name(fnode)).as_data.name.text;
                         self.it_trap_text(
                             IT_TRAP_UNSUPPORTED,
                             format(
@@ -3817,7 +3818,7 @@ extend Interp {
                         return false;
                     }
                     // An `@unsafe(const)` extern function runs its body, the compile-time model.
-                    is_extern = da.at_const(fnode).as_data.function.is_extern() && da.at_const(fnode).as_data.function.body == NODE_NONE;
+                    is_extern = da.ext(fnode).function.is_extern() && da.ext(fnode).function.body == NODE_NONE;
                 }
             }
         }
@@ -3896,7 +3897,7 @@ extend Interp {
                     return self.fail();
                 }
                 let fa0 = unsafe &*self.p().module_ast_const(fm);
-                let mnm = fa0.at_const(fa0.at_const(fnode).as_data.function.name).as_data.name.text;
+                let mnm = fa0.at_const(fa0.ext_name(fnode)).as_data.name.text;
                 if rb != BuiltinType::BT_COUNT {
                     // A builtin receiver's conformances target its core declaration.
                     rdm = self.p().core_module;
@@ -3936,7 +3937,7 @@ extend Interp {
                         let di = *(unsafe &*self.p().module_ast_const(b.module)).instance(
                             (unsafe &*self.p().module_ast_const(b.module)).type_at(t.iface).as_data.inst,
                         );
-                        let igens = fa0.at_const(container).as_data.interface_def.generics;
+                        let igens = fa0.ext(container).interface_def.generics;
                         let mut gi: u32 = 0;
                         while gi < igens.len && gi < di.n as u32 {
                             let mut wm: ModuleId = 0;
@@ -3981,7 +3982,12 @@ extend Interp {
                     if self.failed {
                         return false;
                     }
-                    pick(kext.node != NODE_NONE, self.ext_own_method(kext, fm, mnm), m0);
+                    let mk = if kext.node != NODE_NONE {
+                        self.ext_own_method(kext, fm, mnm);
+                    } else {
+                        m0;
+                    };
+                    mk;
                 };
                 if md.node != NODE_NONE && kext.node != NODE_NONE && ext_keyed(
                     unsafe &*self.p().module_ast_const(kext.module),
@@ -4005,10 +4011,10 @@ extend Interp {
                     fm = md.module;
                     fnode = md.node;
                     let fa1 = unsafe &*self.p().module_ast_const(fm);
-                    if fa1.at_const(fnode).kind != NodeKind::NODE_FUNCTION || fa1.at_const(fnode).as_data.function.body == NODE_NONE {
+                    if fa1.at_const(fnode).kind != NodeKind::NODE_FUNCTION || fa1.ext(fnode).function.body == NODE_NONE {
                         return self.fail();
                     }
-                } else if fa0.at_const(fnode).as_data.function.body != NODE_NONE {
+                } else if fa0.ext(fnode).function.body != NODE_NONE {
                     // the interface's default body: Self binds to the receiver type, an instance too
                     let mut gm2: ModuleId = 0;
                     let mut gt2 = TYPE_NONE;
@@ -4029,7 +4035,7 @@ extend Interp {
                 // a bodyless callee survives only long enough for the interface dispatch above
                 // to redirect it; anything still without a body cannot fold
                 let fa9 = unsafe &*self.p().module_ast_const(fm);
-                if fa9.at_const(fnode).as_data.function.body == NODE_NONE {
+                if fa9.ext(fnode).function.body == NODE_NONE {
                     return self.fail();
                 }
             }
@@ -4038,7 +4044,7 @@ extend Interp {
             let mut ext = NODE_NONE;
             if !ext_bound && self.container_of(fm, fnode, &mut ext) == 1 {
                 let xa = unsafe &*self.p().module_ast_const(fm);
-                let xgens = xa.at_const(ext).as_data.extend_def.generics;
+                let xgens = xa.ext(ext).extend_def.generics;
                 if xgens.len != 0 {
                     // the receiver's instance binds the extend parameters; a receiver-less
                     // associated call binds them from the leading type arguments, or (like the
@@ -4066,7 +4072,7 @@ extend Interp {
                     }
                     if !bound {
                         // The leading type arguments are the extend's only ahead of the function's own.
-                        let own = (unsafe &*self.p().module_ast_const(fm)).at_const(fnode).as_data.function.generics.len;
+                        let own = (unsafe &*self.p().module_ast_const(fm)).ext(fnode).function.generics.len;
                         if t.targs_len < xgens.len + own {
                             return self.fail();
                         }
@@ -4077,7 +4083,7 @@ extend Interp {
                 }
             }
             let fa = unsafe &*self.p().module_ast_const(fm);
-            let fg = fa.at_const(fnode).as_data.function.generics;
+            let fg = fa.ext(fnode).function.generics;
             if fg.len != 0 {
                 if t.targs_len < fg.len {
                     return self.fail();
@@ -4115,7 +4121,7 @@ extend Interp {
         let mut is_constfn = false;
         if !closure {
             let fa2 = unsafe &*self.p().module_ast_const(fm);
-            is_constfn = fa2.at_const(fnode).as_data.function.is_const();
+            is_constfn = fa2.ext(fnode).function.is_const();
         }
         let bidx = self.body_of(fm, fnode, &binds, closure);
         if bidx < 0 {
@@ -4222,7 +4228,7 @@ extend Interp {
         if pin != null {
             return unsafe (*pin).str_span;
         }
-        return da.at_const(da.at_const(fnode).as_data.function.name).as_data.name.text;
+        return da.at_const(da.ext_name(fnode)).as_data.name.text;
     }
 
     // The function `std::rt::libm` exports as the C symbol of extern `fnode` of module `fm`; NODE_NONE
@@ -4325,7 +4331,7 @@ extend Interp {
         args: &Vector<IVal>,
     ) bool {
         let da = unsafe &*self.p().module_ast_const(fm);
-        let nm = da.at_const(da.at_const(fnode).as_data.function.name).as_data.name.text;
+        let nm = da.at_const(da.ext_name(fnode)).as_data.name.text;
         let nargs = args.len();
         // The memory routines dispatch on the lowering's verified tag; a call through a function
         // value carries none and names the routine.
@@ -4755,8 +4761,8 @@ extend Interp {
     /// Field/tuple-member count of aggregate decl `(dm, dn)` -- `type_info::<T>().fields.len`.
     pub(package) fn field_count(self: &Self, dm: ModuleId, dn: NodeId) u32 {
         let a = unsafe &*self.p().module_ast_const(dm);
-        let is_tuple = a.at_const(dn).as_data.aggregate.is_tuple;
-        let ms = a.at_const(dn).as_data.aggregate.members;
+        let is_tuple = a.ext(dn).aggregate.is_tuple;
+        let ms = a.ext(dn).aggregate.members;
         let mut n: u32 = 0;
         for i in 0..ms.len {
             let fid = unsafe a.list(ms)[i as usize];
@@ -4771,7 +4777,7 @@ extend Interp {
     // Field ordinal of decl `sub` inside its aggregate (payload fields ride the variant slot walk).
     fn field_ordinal(self: &Self, dm: ModuleId, owner: NodeId, sub: NodeId) i64 {
         let a = unsafe &*self.p().module_ast_const(dm);
-        let ms = a.at_const(owner).as_data.aggregate.members;
+        let ms = a.ext(owner).aggregate.members;
         if a.at_const(owner).kind == NodeKind::NODE_ENUM {
             // a struct-payload member (after a downcast): its position in its variant's payload
             for i in 0..ms.len {
@@ -4784,7 +4790,7 @@ extend Interp {
             }
             return -1;
         }
-        let is_tuple = a.at_const(owner).as_data.aggregate.is_tuple;
+        let is_tuple = a.ext(owner).aggregate.is_tuple;
         let mut ord: i64 = 0;
         for i in 0..ms.len {
             let fid = unsafe a.list(ms)[i as usize];
@@ -6125,6 +6131,27 @@ extend Interp {
             // path re-marks the active member after resolution. A plain read or write of a scalar
             // member while another scalar is active (`f64_bits`) resolves to the active one, the
             // member asked for in `pun_slot`, and the caller retypes the bits.
+            if is_union && unsafe (*op).uactive >= 0 && unsafe (*op).uactive != base_slot as i32 && unsafe (*op).slots[base_slot as usize].kind == IV_NONE && unsafe (*op).slots[(unsafe (*op).uactive) as usize].kind == IV_INT && (!self.pun_ok || i + 1 != pl.proj_len) {
+                // Storage that holds no value yet (`Uninit`: a scalar placeholder written, the member
+                // asked for never): the member becomes the active one, zero-filled as C's storage, and
+                // its parts are written through it. A Box has no zero: the evaluation stops.
+                let z = self.zero_field(
+                    unsafe (*op).dm,
+                    unsafe (*op).dn,
+                    unsafe (*op).nargs,
+                    &unsafe (*op).am[0],
+                    &unsafe (*op).at[0],
+                    base_slot as u32,
+                );
+                self.failed = false;
+                if z.kind == IV_NONE {
+                    return self.fail();
+                }
+                let op2 = self.obj_ptr(id);
+                unsafe (*op2).slots.set(base_slot as usize, z);
+                unsafe (*op2).slots.set((unsafe (*op2).uactive) as usize, none());
+                unsafe (*op2).uactive = base_slot as i32;
+            }
             if is_union && unsafe (*op).uactive >= 0 && unsafe (*op).uactive != base_slot as i32 {
                 let av = unsafe (*op).slots[(unsafe (*op).uactive) as usize];
                 if !self.pun_ok || i + 1 != pl.proj_len || av.kind != IV_INT && av.kind != IV_FLOAT {
@@ -6288,7 +6315,7 @@ extend Interp {
 
     const fn is_union_decl(self: &Self, dm: ModuleId, dn: NodeId) bool {
         let a = unsafe &*self.p().module_ast_const(dm);
-        return a.at_const(dn).kind == NodeKind::NODE_STRUCT && a.at_const(dn).as_data.aggregate.is_union;
+        return a.at_const(dn).kind == NodeKind::NODE_STRUCT && a.ext(dn).aggregate.is_union;
     }
 
     // ---- operands and rvalues ---------------------------------------------------------------------
@@ -7151,7 +7178,7 @@ extend Interp {
             return false;
         }
         let a = unsafe &*self.p().module_ast_const(vd.module);
-        let ms = a.at_const(nid).as_data.aggregate.members;
+        let ms = a.ext(nid).aggregate.members;
         // the C tag is the running discriminant; the ones after `vd` stay unevaluated,
         // so a discriminant may name an earlier variant of its own enum
         let mut cur: i64 = 0 - 1;
@@ -7172,7 +7199,7 @@ extend Interp {
     // `tag`; -1 when none has it.
     fn variant_ordinal(self: &mut Self, m: ModuleId, dn: NodeId, tag: i64) i64 {
         let a = unsafe &*self.p().module_ast_const(m);
-        let ms = a.at_const(dn).as_data.aggregate.members;
+        let ms = a.ext(dn).aggregate.members;
         let mut cur: i64 = 0 - 1;
         for k in 0..ms.len {
             if !self.discr(m, unsafe a.list(ms)[k as usize], cur, &mut cur) {
@@ -8876,7 +8903,7 @@ extend Interp {
             let xm = cands.at(ci0).module as usize;
             let iid = cands.at(ci0).node;
             let xa = unsafe &*self.p().module_syntax(xm as ModuleId);
-            let ed = xa.at_const(iid).as_data.extend_def;
+            let ed = xa.ext(iid).extend_def;
             let tg = xa.resolution_def(ed.target_type);
             if tg.module != rdm || tg.node != rdn {
                 continue;
@@ -8975,15 +9002,15 @@ extend Interp {
         if dn.kind != NodeKind::NODE_STRUCT && dn.kind != NodeKind::NODE_ENUM {
             return false;
         }
-        let gens = dn.as_data.aggregate.generics;
+        let gens = da.ext(it.decl).aggregate.generics;
         let mut gp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
         let mut gn: u32 = 0;
         while gn < gens.len && gn < it.n as u32 && gn < 8 {
             unsafe gp[gn as usize] = DefId { module: it.module, node: unsafe da.list(gens)[gn as usize] };
             gn += 1;
         }
-        let is_tuple = dn.as_data.aggregate.is_tuple;
-        let ms = dn.as_data.aggregate.members;
+        let is_tuple = da.ext(it.decl).aggregate.is_tuple;
+        let ms = da.ext(it.decl).aggregate.members;
         let mut tns = Vector::<NodeId>::new();
         for i in 0..ms.len {
             let mid = unsafe da.list(ms)[i as usize];
@@ -9069,7 +9096,7 @@ extend Interp {
                 if sync && self.span_is(
                     rdm,
                     (unsafe &*self.p().module_ast_const(rdm)).at_const(
-                        (unsafe &*self.p().module_ast_const(rdm)).at_const(rdn).as_data.aggregate.name,
+                        (unsafe &*self.p().module_ast_const(rdm)).ext_name(rdn),
                     ).as_data.name.text,
                     "UnsafeCell",
                 ) && self.p().modules.at(rdm as usize).prelude {
@@ -9126,7 +9153,7 @@ extend Interp {
             let iid = unsafe ia.list(items)[i as usize];
             if ia.at_const(iid).kind == NodeKind::NODE_INTERFACE && self.span_is(
                 peer.module,
-                ia.at_const(ia.at_const(iid).as_data.interface_def.name).as_data.name.text,
+                ia.at_const(ia.ext_name(iid)).as_data.name.text,
                 name,
             ) {
                 return DefId { module: peer.module, node: iid };
@@ -9156,7 +9183,7 @@ extend Interp {
     // a parameter `list` leaves unbound (one only the interface's arguments name) is not checked.
     fn rt_bounds_hold(self: &mut Self, own: &mut bcf::Owner, ext: DefId, list: &Vector<ISub>, depth: u32) bool {
         let xa = unsafe &*self.p().module_ast_const(ext.module);
-        let gens = xa.at_const(ext.node).as_data.extend_def.generics;
+        let gens = xa.ext(ext.node).extend_def.generics;
         for g in 0..gens.len {
             let gid = unsafe xa.list(gens)[g as usize];
             let mut bm: ModuleId = 0;
@@ -9170,7 +9197,7 @@ extend Interp {
             if bt == TYPE_NONE {
                 continue;
             }
-            let bs = xa.at_const(gid).as_data.generic_param.bounds;
+            let bs = xa.ext(gid).generic_param.bounds;
             for b in 0..bs.len {
                 let bi = xa.resolution_def(unsafe xa.list(bs)[b as usize]);
                 if bi.node != NODE_NONE && (unsafe &*self.p().module_ast_const(bi.module)).at_const(bi.node).kind == NodeKind::NODE_INTERFACE && !self.rt_satisfies(
@@ -9220,7 +9247,7 @@ extend Interp {
                 if xa.at_const(iid).kind != NodeKind::NODE_EXTEND {
                     continue;
                 }
-                let ed = xa.at_const(iid).as_data.extend_def;
+                let ed = xa.ext(iid).extend_def;
                 if ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE {
                     continue;
                 }
@@ -9327,7 +9354,7 @@ extend Interp {
         for i in 0..cands.len() {
             let c = *cands.at(i);
             let a = unsafe &*self.p().module_syntax(c.module);
-            let ed = a.at_const(c.node).as_data.extend_def;
+            let ed = a.ext(c.node).extend_def;
             let mut hit = false;
             if rdn != NODE_NONE {
                 let tg = a.resolution_def(ed.target_type);
@@ -9359,7 +9386,7 @@ extend Interp {
             for i in 0..all.len() {
                 let c = *all.at(i);
                 let a = unsafe &*self.p().module_syntax(c.module);
-                let r = a.resolution_def(a.at_const(c.node).as_data.extend_def.interface_type);
+                let r = a.resolution_def(a.ext(c.node).extend_def.interface_type);
                 keyed.push((r.module as u64 << 32 | r.node as u64) as u128 << 32 | i as u64);
             }
             keyed.sort();
@@ -9398,7 +9425,7 @@ extend Interp {
                 if a.at_const(iid).kind != NodeKind::NODE_EXTEND {
                     continue;
                 }
-                let ed = a.at_const(iid).as_data.extend_def;
+                let ed = a.ext(iid).extend_def;
                 if ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE {
                     continue;
                 }
@@ -9412,14 +9439,17 @@ extend Interp {
 
     fn ext_own_method(self: &Self, ext: DefId, nm: ModuleId, name: tok::Span) DefId {
         let xa = unsafe &*self.p().module_ast_const(ext.module);
-        let ms = xa.at_const(ext.node).as_data.extend_def.items;
+        let ms = xa.ext(ext.node).extend_def.items;
         for j in 0..ms.len {
             let mid = unsafe xa.list(ms)[j as usize];
-            let mn = xa.at_const(mid);
-            let ms2 = xa.at_const(mn.as_data.function.name).as_data.name.text;
-            if mn.kind == NodeKind::NODE_FUNCTION && self.src_of(ext.module).slice(ms2.start as usize, ms2.end as usize) == self.src_of(
-                nm,
-            ).slice(name.start as usize, name.end as usize) {
+            if xa.at_const(mid).kind != NodeKind::NODE_FUNCTION {
+                continue;
+            }
+            let ms2 = xa.at_const(xa.ext_name(mid)).as_data.name.text;
+            if self.src_of(ext.module).slice(ms2.start as usize, ms2.end as usize) == self.src_of(nm).slice(
+                name.start as usize,
+                name.end as usize,
+            ) {
                 return DefId { module: ext.module, node: mid };
             }
         }
@@ -9527,7 +9557,7 @@ extend Interp {
                 if a.at_const(iid).kind != NodeKind::NODE_EXTEND {
                     continue;
                 }
-                let target = a.at_const(iid).as_data.extend_def.target_type;
+                let target = a.ext(iid).extend_def.target_type;
                 if target == NODE_NONE {
                     continue;
                 }
@@ -9545,13 +9575,13 @@ extend Interp {
                 if !match_recv {
                     continue;
                 }
-                let ms = a.at_const(iid).as_data.extend_def.items;
+                let ms = a.ext(iid).extend_def.items;
                 for k in 0..ms.len {
                     let mid = unsafe a.list(ms)[k as usize];
                     if a.at_const(mid).kind != NodeKind::NODE_FUNCTION {
                         continue;
                     }
-                    let mname = a.at_const(a.at_const(mid).as_data.function.name).as_data.name.text;
+                    let mname = a.at_const(a.ext_name(mid)).as_data.name.text;
                     let asrc = self.src_of(mm);
                     let bsrc = self.src_of(nm);
                     let atxt = asrc.slice(mname.start as usize, mname.end as usize);
@@ -9853,7 +9883,7 @@ extend Interp {
                 g.am = unsafe (*op).am;
                 g.at = unsafe (*op).at;
                 let ga = unsafe &*self.p().module_ast_const(g.dm);
-                let gens = ga.at_const(g.dn).as_data.aggregate.generics.len;
+                let gens = ga.ext(g.dn).aggregate.generics.len;
                 // A standalone object spells its instance's name: every argument must be known.
                 if standalone && gens != 0 && g.nargs == 0 {
                     return self.cap_unsup(base);
@@ -10001,7 +10031,7 @@ extend Interp {
                     let fa = unsafe &*self.p().module_ast_const(fm2);
                     let mut fn_ok = fa.at_const(fnid).kind == NodeKind::NODE_FUNCTION;
                     if fn_ok {
-                        let fd = fa.at_const(fnid).as_data.function;
+                        let fd = fa.ext(fnid).function;
                         fn_ok = fd.generics.len == 0 && (fd.body != NODE_NONE || fd.is_extern());
                     }
                     if !fn_ok {
@@ -10042,15 +10072,15 @@ extend Interp {
         if a.nodes.len() == 0 || a.at_const(fn_id).kind != NodeKind::NODE_FUNCTION {
             return zero;
         }
-        let fd = a.at_const(fn_id).as_data.function;
+        let fd = a.ext(fn_id).function;
         if fd.body == NODE_NONE || fd.is_extern() || fd.generics.len != 0 {
             return zero;
         }
         {
             let mut cont = NODE_NONE;
-            if self.container_of(m, fn_id, &mut cont) != 0 && a.at_const(cont).kind == NodeKind::NODE_EXTEND && a.at_const(
+            if self.container_of(m, fn_id, &mut cont) != 0 && a.at_const(cont).kind == NodeKind::NODE_EXTEND && a.ext(
                 cont,
-            ).as_data.extend_def.generics.len != 0 {
+            ).extend_def.generics.len != 0 {
                 return zero;
             }
         }
@@ -10230,7 +10260,7 @@ extend Interp {
         if a.nodes.len() == 0 || a.at_const(fn_id).kind != NodeKind::NODE_FUNCTION {
             return FX_MAYBE;
         }
-        let fd = a.at_const(fn_id).as_data.function;
+        let fd = a.ext(fn_id).function;
         if fd.body == NODE_NONE {
             return FX_MAYBE; // externs are classified at their call sites; bodyless may re-dispatch
         }
@@ -10318,7 +10348,7 @@ extend Interp {
             }
             return fx_meet(c, self.fx_scan_body(m, owner, n.as_data.while_stmt.body, depth + 1));
         }
-        let d = n.as_data.for_stmt;
+        let d = a.ext(id).for_stmt;
         let mut acc = self.fx_scan_expr(m, owner, d.iterable, depth + 1, true);
         if acc == FX_NO {
             return FX_NO;
@@ -10727,7 +10757,7 @@ extend Interp {
         if dk != NodeKind::NODE_FUNCTION {
             return FX_MAYBE; // fn value bound to a const/local
         }
-        let cfd = fa.at_const(fd.node).as_data.function;
+        let cfd = fa.ext(fd.node).function;
         if cfd.is_extern() && cfd.body == NODE_NONE {
             let nm = fa.at_const(cfd.name).as_data.name.text;
             if self.intercept_name(fd.module, nm) {
@@ -10795,7 +10825,7 @@ extend Interp {
                 let a = unsafe &*self.p().module_ast_const(fv.module);
                 // A body-arena frame is a closure, whose syntax may already be released.
                 if !Ast::in_body(fv.node) && a.at_const(fv.node).kind == NodeKind::NODE_FUNCTION {
-                    let nm = a.at_const(a.at_const(fv.node).as_data.function.name).as_data.name.text;
+                    let nm = a.at_const(a.ext_name(fv.node)).as_data.name.text;
                     let src = self.src_of(fv.module);
                     self.dbuf.push_str(src.slice(nm.start as usize, nm.end as usize));
                 } else {
@@ -11448,7 +11478,7 @@ extend Interp {
     /// Variant count of enum decl `(dm, dn)` -- `type_info::<T>().variants.len`.
     pub(package) const fn variant_count_of(self: &Self, dm: ModuleId, dn: NodeId) u32 {
         let a = unsafe &*self.p().module_ast_const(dm);
-        let ms = a.at_const(dn).as_data.aggregate.members;
+        let ms = a.ext(dn).aggregate.members;
         let mut n: u32 = 0;
         for i in 0..ms.len {
             if a.at_const(unsafe a.list(ms)[i as usize]).kind == NodeKind::NODE_VARIANT {
@@ -11531,7 +11561,7 @@ extend Interp {
                 }
                 let da = unsafe &*self.p().module_ast_const(dm);
                 // SliceMut lives beside Slice; matching the decl's own name keeps the compare exact.
-                let tnm = da.at_const(da.at_const(dn).as_data.aggregate.name).as_data.name.text;
+                let tnm = da.at_const(da.ext_name(dn)).as_data.name.text;
                 if dm == slm && self.span_is(dm, tnm, "SliceMut") {
                     return 10;
                 }
@@ -11551,10 +11581,10 @@ extend Interp {
             if d.kind != NodeKind::NODE_STRUCT {
                 return 0 - 1;
             }
-            if d.as_data.aggregate.is_union {
+            if (unsafe &*self.p().module_ast_const(dm)).ext(dn).aggregate.is_union {
                 return 14;
             }
-            if d.as_data.aggregate.is_tuple {
+            if (unsafe &*self.p().module_ast_const(dm)).ext(dn).aggregate.is_tuple {
                 return 12;
             }
             return 13;
@@ -11769,7 +11799,7 @@ extend Interp {
     // Field ordinal of the field NAMED `name` in aggregate decl (dm, dn); -1 = absent.
     const fn ti_findf(self: &Self, dm: ModuleId, dn: NodeId, name: str) i32 {
         let da = unsafe &*self.p().module_ast_const(dm);
-        let ms = da.at_const(dn).as_data.aggregate.members;
+        let ms = da.ext(dn).aggregate.members;
         let mut idx: i32 = 0;
         for i in 0..ms.len {
             let fid = unsafe da.list(ms)[i as usize];
@@ -11947,7 +11977,7 @@ extend Interp {
         let em = yh.module;
         let en = yh.as_data.decl;
         let fa2 = unsafe &*self.p().module_ast_const(mm);
-        let fd = fa2.at_const(mid).as_data.function;
+        let fd = fa2.ext(mid).function;
         let sp = fa2.at_const(fd.name).as_data.name.text;
         let src2 = self.src_of(mm);
         let nmv = self.ti_str(cx.strm, cx.strn, cx.tim, cx.sty, src2.slice(sp.start as usize, sp.end as usize));
@@ -12107,7 +12137,7 @@ extend Interp {
         let mut vrty = TYPE_NONE; // Slice<VariantInfo>
         let mut mty = TYPE_NONE; // Slice<MetaInfo>
         let mut mmty = TYPE_NONE; // Slice<MethodInfo>
-        let tims = da.at_const(tin).as_data.aggregate.members;
+        let tims = da.ext(tin).aggregate.members;
         for i in 0..tims.len {
             let fid = unsafe da.list(tims)[i as usize];
             if da.at_const(fid).kind != NodeKind::NODE_FIELD {
@@ -12163,7 +12193,7 @@ extend Interp {
                     let mem0 = ymm.module;
                     let men0 = ymm.as_data.decl;
                     let mma = unsafe &*self.p().module_ast_const(mem0);
-                    let mms = mma.at_const(men0).as_data.aggregate.members;
+                    let mms = mma.ext(men0).aggregate.members;
                     for q in 0..mms.len {
                         let mfid = unsafe mma.list(mms)[q as usize];
                         if mma.at_const(mfid).kind != NodeKind::NODE_FIELD {
@@ -12242,7 +12272,7 @@ extend Interp {
             nm = bt_name(y.as_data.builtin);
         } else if yd.node != NODE_NONE {
             let na = unsafe &*self.p().module_ast_const(yd.module);
-            let sp = na.at_const(na.at_const(yd.node).as_data.aggregate.name).as_data.name.text;
+            let sp = na.at_const(na.ext_name(yd.node)).as_data.name.text;
             nm = self.src_of(yd.module).slice(sp.start as usize, sp.end as usize);
         }
         // Fields (struct/tuple/union) and variants (enum).
@@ -12265,7 +12295,7 @@ extend Interp {
                 return none();
             }
             let da2 = unsafe &*self.p().module_ast_const(dm2);
-            let agg = da2.at_const(dn2).as_data.aggregate;
+            let agg = da2.ext(dn2).aggregate;
             let is_tuple = agg.is_tuple;
             let fs = agg.members;
             let mut fobjs = Vector::<IVal>::new();
@@ -12334,7 +12364,7 @@ extend Interp {
                 return none();
             }
             let da2 = unsafe &*self.p().module_ast_const(dm2);
-            let vs = da2.at_const(dn2).as_data.aggregate.members;
+            let vs = da2.ext(dn2).aggregate.members;
             let mut vobjs = Vector::<IVal>::new();
             let mut vtag: i64 = 0 - 1;
             for i in 0..vs.len {
@@ -12397,7 +12427,7 @@ extend Interp {
                         if qa.at_const(iid).kind != NodeKind::NODE_EXTEND {
                             continue;
                         }
-                        let target = qa.at_const(iid).as_data.extend_def.target_type;
+                        let target = qa.ext(iid).extend_def.target_type;
                         if target == NODE_NONE {
                             continue;
                         }
@@ -12415,7 +12445,7 @@ extend Interp {
                         if !match_recv {
                             continue;
                         }
-                        let ms2 = qa.at_const(iid).as_data.extend_def.items;
+                        let ms2 = qa.ext(iid).extend_def.items;
                         for k2 in 0..ms2.len {
                             let mid = unsafe qa.list(ms2)[k2 as usize];
                             if qa.at_const(mid).kind != NodeKind::NODE_FUNCTION {
@@ -12446,7 +12476,7 @@ extend Interp {
                         break;
                     }
                     let ba = unsafe &*self.p().module_ast_const(bl.at(bi).module);
-                    let bms = ba.at_const(bl.at(bi).node).as_data.extend_def.items;
+                    let bms = ba.ext(bl.at(bi).node).extend_def.items;
                     for k2 in 0..bms.len {
                         let mid = unsafe ba.list(bms)[k2 as usize];
                         if ba.at_const(mid).kind != NodeKind::NODE_FUNCTION {

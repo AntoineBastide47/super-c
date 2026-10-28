@@ -406,7 +406,7 @@ fn call_ends(p: &loader::Package, t: &ir::Terminator) bool {
         return true;
     }
     let nd = a.at_const(d.node);
-    return nd.kind == NodeKind::NODE_FUNCTION && nd.as_data.function.is_extern() && t.intr == ir::CI_NONE;
+    return nd.kind == NodeKind::NODE_FUNCTION && a.ext(d.node).function.is_extern() && t.intr == ir::CI_NONE;
 }
 
 // The name of index item `item`.

@@ -19,7 +19,7 @@ import driver::util as *;
 import utils::persist as *;
 
 /// The image format; a change to any saved type's layout bumps it.
-const IMAGE_VER: u64 = 4;
+const IMAGE_VER: u64 = 5;
 
 /// The cache name of the prelude image for `p`'s settings, the constant-evaluation budgets and the
 /// type-table hash mode.

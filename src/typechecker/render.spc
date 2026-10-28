@@ -13,8 +13,8 @@ const fn rt_ast(pkg: *const loader::Package, a: *const Ast, m: ModuleId) *const 
 }
 // Whether closure node `n` returns its body's value without a written result list: an expression
 // body, or a block whose `return`s give one (`ClosureData.ret_infer`).
-pub(module) const fn closure_body_ret(n: &Node) bool {
-    return n.as_data.closure.expr_body || n.as_data.closure.ret_infer;
+pub(module) const fn closure_body_ret(a: &Ast, n: NodeId) bool {
+    return a.ext(n).closure.expr_body || a.ext(n).closure.ret_infer;
 }
 
 const fn rt_src(pkg: *const loader::Package, a: *const Ast, cur_src: str, m: ModuleId) str {
@@ -50,8 +50,8 @@ fn render_fn_sig_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, t
     out.push_str(")");
     let dn = unsafe (*ma).at_const(ty.as_data.decl);
     // A closure that lists no return and returns its body's value: the body's type is the return type.
-    let bt = if dn.kind == NodeKind::NODE_CLOSURE && closure_body_ret(dn) && rs.len == 0 {
-        unsafe (*ma).type_of(dn.as_data.closure.body);
+    let bt = if dn.kind == NodeKind::NODE_CLOSURE && closure_body_ret(unsafe &*ma, ty.as_data.decl) && rs.len == 0 {
+        unsafe (*ma).type_of(unsafe (*ma).ext(ty.as_data.decl).closure.body);
     } else {
         TYPE_NONE;
     };
@@ -291,9 +291,9 @@ fn render_lt_type(
             }
         }
         let nm = if k == TypeKind::TYPE_DYN {
-            unsafe (*ma).at_const(unsafe (*ma).at_const(it.decl).as_data.interface_def.name).as_data.name.text;
+            unsafe (*ma).at_const(unsafe (*ma).ext_name(it.decl)).as_data.name.text;
         } else {
-            unsafe (*ma).at_const(unsafe (*ma).at_const(it.decl).as_data.aggregate.name).as_data.name.text;
+            unsafe (*ma).at_const(unsafe (*ma).ext_name(it.decl)).as_data.name.text;
         };
         out.push_str(rt_src(pkg, a, cur_src, it.module).slice(nm.start as usize, nm.end as usize));
         let nlt = unsafe (*pkg).decl_nlt(unsafe &*a, it.module, it.decl);
@@ -440,7 +440,7 @@ fn rt_dyn_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty: &Ty,
         return;
     }
     let ddecl = unsafe (*a).dyn_decl_of(ty);
-    let s = unsafe (*ma).at_const(unsafe (*ma).at_const(ddecl).as_data.interface_def.name).as_data.name.text;
+    let s = unsafe (*ma).at_const(unsafe (*ma).ext_name(ddecl)).as_data.name.text;
     rt_put_name(pkg, a, cur_src, ty.module, s, out);
     let di = *unsafe (*a).instance(ty.as_data.inst);
     if di.n == 0 {
@@ -483,11 +483,11 @@ pub(package) fn render_qualified_name(pkg: *const loader::Package, a: *const Ast
 // `decl` (of `ma`)? Only a default naming a non-generic struct or enum is compared; any other keeps
 // its argument.
 fn default_arg(ma: *const Ast, decl: NodeId, i: u32, a: *const Ast, arg: TypeId) bool {
-    let gens = unsafe (*ma).at_const(decl).as_data.aggregate.generics;
+    let gens = unsafe (*ma).ext(decl).aggregate.generics;
     if i >= gens.len || arg == TYPE_NONE {
         return false;
     }
-    let dft = unsafe (*ma).at_const(unsafe (*ma).list(gens)[i as usize]).as_data.generic_param.default_type;
+    let dft = unsafe (*ma).ext(unsafe (*ma).list(gens)[i as usize]).generic_param.default_type;
     if dft == NODE_NONE {
         return false;
     }
@@ -535,9 +535,9 @@ fn render_ty(pkg: *const loader::Package, a: *const Ast, cur_src: str, elide: bo
     } else if ty.kind == TypeKind::TYPE_STRUCT || ty.kind == TypeKind::TYPE_ENUM || ty.kind == TypeKind::TYPE_GENERIC {
         let ma = rt_ast(pkg, a, ty.module);
         let d = unsafe (*ma).at_const(ty.as_data.decl);
-        let mut nm = d.as_data.aggregate.name;
+        let mut nm = unsafe (*ma).ext_name(ty.as_data.decl);
         if d.kind == NodeKind::NODE_GENERIC_PARAM {
-            nm = d.as_data.generic_param.name;
+            nm = unsafe (*ma).ext_name(ty.as_data.decl);
         }
         rt_put_name(pkg, a, cur_src, ty.module, unsafe (*ma).at_const(nm).as_data.name.text, out);
     } else if ty.kind == TypeKind::TYPE_OPAQUE {
@@ -556,7 +556,7 @@ fn render_ty(pkg: *const loader::Package, a: *const Ast, cur_src: str, elide: bo
         let mut it = TyInstance {};
         let _ = unsafe (*a).targs_of(tid, &mut it);
         let ma = rt_ast(pkg, a, it.module);
-        let s = unsafe (*ma).at_const(unsafe (*ma).at_const(it.decl).as_data.aggregate.name).as_data.name.text;
+        let s = unsafe (*ma).at_const(unsafe (*ma).ext_name(it.decl)).as_data.name.text;
         rt_put_name(pkg, a, cur_src, it.module, s, out);
         // A qualified name drops the trailing arguments that equal their parameter's default.
         let mut shown = it.n;
@@ -575,10 +575,10 @@ fn render_ty(pkg: *const loader::Package, a: *const Ast, cur_src: str, elide: bo
             if ai == TYPE_NONE || unsafe (*a).type_at(ai).kind == TypeKind::TYPE_ERROR {
                 // An argument inference never filled: name the declaration's own parameter;
                 // `UInt<BITS>` says WHAT is undetermined, where `UInt<?>` said nothing.
-                let gens = unsafe (*ma).at_const(it.decl).as_data.aggregate.generics;
+                let gens = unsafe (*ma).ext(it.decl).aggregate.generics;
                 if i as u32 < gens.len {
                     let gid = unsafe (*ma).list(gens)[i as usize];
-                    let gn = unsafe (*ma).at_const(unsafe (*ma).at_const(gid).as_data.generic_param.name).as_data.name.text;
+                    let gn = unsafe (*ma).at_const(unsafe (*ma).ext_name(gid)).as_data.name.text;
                     rt_put_name(pkg, a, cur_src, it.module, gn, out);
                 } else {
                     out.push_str("?");
@@ -629,7 +629,7 @@ fn render_ty(pkg: *const loader::Package, a: *const Ast, cur_src: str, elide: bo
             }
             let pd = unsafe l.p[i as usize];
             let pa = rt_ast(pkg, a, pd.module);
-            let ns = unsafe (*pa).at_const(unsafe (*pa).at_const(pd.node).as_data.generic_param.name).as_data.name.text;
+            let ns = unsafe (*pa).at_const(unsafe (*pa).ext_name(pd.node)).as_data.name.text;
             if t.len() > pick(paren, 2usize, 1usize) {
                 t.push_str(" + ");
             }
@@ -656,7 +656,7 @@ fn render_ty(pkg: *const loader::Package, a: *const Ast, cur_src: str, elide: bo
         // The symbolic per-field type of a reflection loop: name it by what it projects, a field or
         // (a `variants` or `payloads` loop's) a payload.
         let pa = rt_ast(pkg, a, ty.module);
-        let it = unsafe (*pa).at_const(ty.as_data.proj.binder).as_data.for_stmt.iterable;
+        let it = unsafe (*pa).ext(ty.as_data.proj.binder).for_stmt.iterable;
         let cs = unsafe (*pa).at_const(unsafe (*pa).at_const(it).as_data.call.callee).as_data.name.text;
         let cn = rt_src(pkg, a, cur_src, ty.module).slice(cs.start as usize, cs.end as usize);
         out.push_str(pick(cn == "variants" || cn == "payloads", "payload of ", "field of "));

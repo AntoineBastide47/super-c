@@ -175,7 +175,7 @@ and `300` against a `u8` is "integer literal is out of range for 'u8'". A method
 (`v.m`) is an error; `Type::m` is a function value.
 Payload-less enums lower to C `enum`s; payload-bearing ones to tagged unions whose tag is
 one byte when the enum has at most 256 variants and no explicit discriminant, and the
-4-byte C enum otherwise. A payload-less variant of either kind may take an explicit
+4-byte C enum otherwise. A niche enum has no tag: see Enums in `references/types.md`. A payload-less variant of either kind may take an explicit
 discriminant (`enum P { A(i32), B = 9, C }`: tags 0, 9, 10); the stored tag, matches,
 `type_info` and the derived `Ord` (discriminant first, then payloads) use it. Discriminants
 of one enum must differ and fit i32; an `extern` enum is exempt. Only a payload-less
@@ -200,6 +200,16 @@ only for resources RAII does not manage (file descriptors, C allocations). Use `
 for deliberate leaks. At a scope exit the defers run (LIFO) before the scope's locals drop,
 also locals declared after the `defer` (a `let _ = f()` result is one): a deferred signal
 (`defer wg.done()`) fires before them, so put locals that must drop first in an inner block.
+
+A `Box` is never null, as in Rust. `zeroed` cannot build a value that holds one by value ("'zeroed'
+cannot build a value that holds a Box"; in generic code the instance panics), and a struct literal
+cannot omit a field that holds one. An explicit `.free()` (the `Free` destructor) of a value that
+may hold a Box, which includes any type parameter, is an error through a reference outside a
+`free` method ("cannot free a value that holds a Box through a reference: its owner frees it
+again"). Free an owned value (`fn release<T>(x: T) {}` frees `x` on return), assign a new value
+(`*r = fresh;` frees the old one), or free through a raw pointer in `unsafe` code. Build a value part by part in an
+`Uninit<T>` (raw stores into `u.value`, then `unsafe u.value`), as the derived `Clone` and
+`Default` do.
 
 Assignment frees the old value first: `s.name = fresh;` never leaks. A store through a raw
 pointer (`unsafe *p = v`, also into an element `p[i]`) frees nothing: it may write into fresh,
@@ -925,7 +935,7 @@ enforced at spawn boundaries.
 | `TryFrom<T>` / `TryInto<T>` | Fallible conversion with an associated `type Error`; `x.try_into()` returns `Result<U, U::Error>` |
 | `std::time`, `std::net` | Durations, deadlines and task-aware `sleep`; task-aware TCP and UDP |
 | `std::text::utf16` | `encode`, `encode_into`, `decode` between UTF-8 and UTF-16 code units, with the offset of ill-formed input |
-| `std::collections` | `deque::Deque`, `deque::RingBuffer`, `heap::BinaryHeap` with `heap::Reverse`, `btree::BTreeMap` and `BTreeSet`, `hive::Hive` (stable addresses through `HiveHandle`), `bits::BitSet`, `BitVec` and `BitField`, `mdspan::MdSpan` and `MdSpanMut`; each module's header states its complexity, invalidation and allocator use |
+| `std::collections` | `deque::Deque`, `deque::RingBuffer`, `heap::BinaryHeap` with `heap::Reverse`, `btree::BTreeMap` and `BTreeSet`, `hive::Hive` (stable addresses through `HiveHandle`), `bits::BitSet`, `BitVec` and `BitField`, `mdspan::MdSpan` and `MdSpanMut`, `packed::PackedEnums` (enum values stored at the size of their own variant, read in order); each module's header states its complexity, invalidation and allocator use |
 | `std::alloc` | `Arena`, `Pool` and `NoAlloc` (C++ `<memory_resource>`): an owning resource and a `Copy` handle that implements `Allocator`; `std::parallel::pool::SyncPool` is the shared pool |
 | `std::mem` | `layout::Layout`, `ptr` (unaligned and raw copies, `bit_cast`), `endian` (byte-order reads and writes), `cell::Cell`, `RefCell`, `OnceCell`, `rc::Rc` and `rc::Weak`, `volatile` (volatile access and zeroization) |
 | `std::hash::keyed` | `KeyedHash` (SipHash-1-3 under a 128-bit key from `with_key` or the process's entropy, `random`), `SipHasher13`, `SipHasher24`: the builder for maps whose keys come from untrusted input |

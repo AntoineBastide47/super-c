@@ -184,7 +184,7 @@ pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>,
         let meta = *p.idx.items.at(it as usize);
         if meta.owner != loader::ITEM_NONE && !opened[(meta.owner - i0 as u32) as usize] {
             // The extend's header (generics, target, interface) precedes its first member.
-            let ed = a.at_const(p.idx.items.at(meta.owner as usize).node).as_data.extend_def;
+            let ed = a.ext(p.idx.items.at(meta.owner as usize).node).extend_def;
             let mut he = ed.target_type;
             if ed.interface_type != NODE_NONE {
                 he = he.max(ed.interface_type);
@@ -218,8 +218,8 @@ pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>,
         let it = p.sched.by_node[k];
         let meta = *p.idx.items.at(it as usize);
         let nd = a.at_const(meta.node);
-        if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(nd.as_data.function.body) {
-            let end = nd.as_data.function.body & NODE_BODY_MASK;
+        if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(a.ext(meta.node).function.body) {
+            let end = a.ext(meta.node).function.body & NODE_BODY_MASK;
             bs.push(Range { s: prev, e: end, o: it });
             bstart.set((it - i0 as u32) as usize, prev);
             bend.set((it - i0 as u32) as usize, end);
@@ -461,8 +461,8 @@ pub(package) fn open(p: &mut loader::Package) {
             }
             if p.modules.at(m).has_ast {
                 let nd = p.modules.at(m).ast.at_const(meta.node);
-                if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(nd.as_data.function.body) {
-                    let b = nd.as_data.function.body & NODE_BODY_MASK;
+                if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(p.modules.at(m).ast.ext(meta.node).function.body) {
+                    let b = p.modules.at(m).ast.ext(meta.node).function.body & NODE_BODY_MASK;
                     bmax = bmax.max(b);
                 }
             }
@@ -524,7 +524,7 @@ pub(package) fn build(p: &mut loader::Package, edges: &Vector<u64>) {
             continue;
         }
         let a = &p.modules.at(it.module as usize).ast;
-        let tn = a.at_const(it.node).as_data.extend_def.target_type;
+        let tn = a.ext(it.node).extend_def.target_type;
         if tn == NODE_NONE {
             continue;
         }
@@ -621,7 +621,7 @@ fn builtin_names(p: &loader::Package, sch: &mut loader::ItemSched) {
         }
         let a = &p.modules.at(m).ast;
         let src = p.modules.at(m).source.as_str();
-        let ed = a.at_const(it.node).as_data.extend_def;
+        let ed = a.ext(it.node).extend_def;
         if ed.target_type == NODE_NONE || a.at_const(ed.target_type).kind != NodeKind::NODE_TYPE_PATH {
             continue;
         }
@@ -654,11 +654,11 @@ fn builtin_names(p: &loader::Package, sch: &mut loader::ItemSched) {
             }
             let fa = &p.modules.at(fi.module as usize).ast;
             let fsrc = p.modules.at(fi.module as usize).source.as_str();
-            let its = fa.at_const(fi.node).as_data.interface_def.items;
+            let its = fa.ext(fi.node).interface_def.items;
             for k in 0..its.len {
                 let fnode = fa.at_const(unsafe fa.list(its)[k as usize]);
                 if fnode.kind == NodeKind::NODE_FUNCTION {
-                    let t = fa.at_const(fnode.as_data.function.name).as_data.name.text;
+                    let t = fa.at_const(fa.ext_name(unsafe fa.list(its)[k as usize])).as_data.name.text;
                     names.push(name_key(&mut sch.bmask, fsrc.slice(t.start as usize, t.end as usize)) << 32 | i as u64);
                 }
             }
@@ -716,8 +716,9 @@ pub(package) fn builtin_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>
         let mut name = NODE_NONE;
         if nd.kind == NodeKind::NODE_MEMBER {
             name = nd.as_data.member.member;
-        } else if nd.kind == NodeKind::NODE_TYPE_PATH && nd.as_data.type_path.parts.len > 1 {
-            name = unsafe a.list(nd.as_data.type_path.parts)[(nd.as_data.type_path.parts.len - 1) as usize];
+        } else if nd.kind == NodeKind::NODE_TYPE_PATH && a.at_const(id).as_data.type_path.parts.len > 1 {
+            let parts = a.at_const(id).as_data.type_path.parts;
+            name = unsafe a.list(parts)[(parts.len - 1) as usize];
         }
         if name == NODE_NONE {
             continue;
@@ -821,7 +822,9 @@ pub(package) fn owner_of(p: &loader::Package, m: ModuleId, node: NodeId) loader:
         let a = &p.modules.at(m as usize).ast;
         while lo < p.idx.mod_items[m as usize + 1] as usize {
             let nd = a.at_const(p.idx.items.at(p.sched.by_node[lo] as usize).node);
-            if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(nd.as_data.function.body) {
+            if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(
+                a.ext(p.idx.items.at(p.sched.by_node[lo] as usize).node).function.body,
+            ) {
                 break;
             }
             lo += 1;
@@ -981,7 +984,7 @@ fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize, a
     }
     let nd = a.at_const(it.node);
     if nd.kind == NodeKind::NODE_FUNCTION {
-        let fd = nd.as_data.function;
+        let fd = a.ext(it.node).function;
         h = mix(
             h,
             fd.is_extern() as u64 | fd.is_variadic() as u64 << 1 | fd.is_const() as u64 << 2 | fd.is_unsafe() as u64 << 3,
@@ -1005,19 +1008,19 @@ fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize, a
             h = mix(h, p.sched.key[it.owner as usize]);
         }
     } else if nd.kind == NodeKind::NODE_STRUCT || nd.kind == NodeKind::NODE_ENUM {
-        let ag = nd.as_data.aggregate;
+        let ag = a.ext(it.node).aggregate;
         h = mix(h, ag.members.len);
         for k in 0..ag.members.len {
             let mem = unsafe a.list(ag.members)[k as usize];
             h = ty_hash(p, sps, c, it.module, a.type_of(mem), h, 0);
         }
     } else if nd.kind == NodeKind::NODE_EXTEND {
-        let ed = nd.as_data.extend_def;
+        let ed = a.ext(it.node).extend_def;
         h = node_hash(p, sps, c, m, ed.target_type, h, 0);
         h = node_hash(p, sps, c, m, ed.interface_type, h, 0);
     } else if nd.kind == NodeKind::NODE_INTERFACE {
         // The method requirements: each member's parameter and return types.
-        let idf = nd.as_data.interface_def;
+        let idf = a.ext(it.node).interface_def;
         h = mix(h, idf.items.len);
         for k in 0..idf.items.len {
             let mem = unsafe a.list(idf.items)[k as usize];
@@ -1026,7 +1029,7 @@ fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize, a
                 h = ty_hash(p, sps, c, it.module, a.type_of(mem), h, 0);
                 continue;
             }
-            let fd = mn.as_data.function;
+            let fd = a.ext(mem).function;
             for q in 0..fd.params.len {
                 h = ty_hash(p, sps, c, it.module, a.type_of(unsafe a.list(fd.params)[q as usize]), h, 0);
             }

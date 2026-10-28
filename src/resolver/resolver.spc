@@ -990,7 +990,7 @@ extend Resolver {
             i -= 1;
             let lts = self.ast.lifetimes_of(self.lt_owners[i]);
             for k in 0..lts.len {
-                let pn = self.ast.at_const(self.child(lts, k)).as_data.generic_param.name;
+                let pn = self.ast.ext_name(self.child(lts, k));
                 if span_eq(self.source, self.ast.at_const(pn).as_data.name.text, name) {
                     found = true;
                     // Every enclosing closure names it: its value holds that region.
@@ -1020,7 +1020,7 @@ extend Resolver {
         let mark = self.lt_open(owner);
         let lts = self.ast.lifetimes_of(owner);
         for k in 0..lts.len {
-            self.resolve_bounds(self.ast.at_const(self.child(lts, k)).as_data.generic_param.bounds);
+            self.resolve_bounds(self.ast.ext(self.child(lts, k)).generic_param.bounds);
         }
         return mark;
     }
@@ -1041,7 +1041,7 @@ extend Resolver {
         let mut i: u32 = 0;
         while i < generics.len {
             let gid = self.child(generics, i);
-            let gp = self.ast.at_const(gid).as_data.generic_param;
+            let gp = self.ast.ext(gid).generic_param;
             self.declare(gp.name, gid, Namespace::NS_TYPE);
             // A const-generic param is also a value, so it resolves in value position (e.g. `[T; N]`).
             if gp.is_const {
@@ -1053,7 +1053,7 @@ extend Resolver {
         i = 0;
         while i < generics.len {
             let gid = self.child(generics, i);
-            let gp = self.ast.at_const(gid).as_data.generic_param;
+            let gp = self.ast.ext(gid).generic_param;
             self.resolve_bounds(gp.bounds);
             if gp.default_type != NODE_NONE {
                 // A CONST parameter's default is a VALUE: a named constant spelled as a bare path, or
@@ -1103,8 +1103,9 @@ extend Resolver {
                 for i in 0..tp.args.len {
                     self.resolve_generic_arg(self.child(tp.args, i));
                 }
-                for i in 0..tp.bindings.len {
-                    self.resolve_type(self.ast.at_const(self.child(tp.bindings, i)).as_data.type_alias.ty);
+                let binds = self.ast.type_bindings(id);
+                for i in 0..binds.len {
+                    self.resolve_type(self.ast.at_const(self.child(binds, i)).as_data.type_alias.ty);
                 }
                 return;
             }
@@ -1141,9 +1142,9 @@ extend Resolver {
                         if found != NODE_NONE {
                             self.ast.at(id).as_data.type_path.head = 1;
                             self.ast.set_resolution_def(id, DefId { module: self.ast.module, node: found });
-                        } else if tp.parts.len == 2 && cs.module == self.ast.module && self.ast.at_const(cs.node).kind == NodeKind::NODE_INTERFACE && self.ast.at_const(
+                        } else if tp.parts.len == 2 && cs.module == self.ast.module && self.ast.at_const(cs.node).kind == NodeKind::NODE_INTERFACE && self.ast.ext(
                             cs.node,
-                        ).as_data.interface_def.bounds.len != 0 {
+                        ).interface_def.bounds.len != 0 {
                             // A superinterface's associated type: the checker finds it through the
                             // interface's bounds (`Self` of the interface, as a bounded parameter).
                             self.ast.at(id).as_data.type_path.head = 0;
@@ -1171,8 +1172,9 @@ extend Resolver {
             for i in 0..tp.args.len {
                 self.resolve_generic_arg(self.child(tp.args, i));
             }
-            for i in 0..tp.bindings.len {
-                self.resolve_type(self.ast.at_const(self.child(tp.bindings, i)).as_data.type_alias.ty);
+            let binds = self.ast.type_bindings(id);
+            for i in 0..binds.len {
+                self.resolve_type(self.ast.at_const(self.child(binds, i)).as_data.type_alias.ty);
             }
             return;
         }
@@ -1251,7 +1253,7 @@ extend Resolver {
     // items ---------------------------------------------------------------------------------------------.
 
     fn resolve_function(self: &mut Self, id: NodeId) {
-        let fd = self.ast.at_const(id).as_data.function;
+        let fd = self.ast.ext(id).function;
         self.scope_enter();
         let lt_mark = self.declare_lifetimes(id);
         self.declare_generics(fd.generics);
@@ -1384,7 +1386,7 @@ extend Resolver {
                 self.resolve_function(id);
             },
             NODE_STRUCT | NODE_ENUM => {
-                let ag = self.ast.at_const(id).as_data.aggregate;
+                let ag = self.ast.ext(id).aggregate;
                 self.scope_enter();
                 let lt_mark = self.declare_lifetimes(id);
                 self.declare_generics(ag.generics);
@@ -1401,7 +1403,7 @@ extend Resolver {
                 self.scope_exit();
             },
             NODE_INTERFACE => {
-                let it = self.ast.at_const(id).as_data.interface_def;
+                let it = self.ast.ext(id).interface_def;
                 self.scope_enter();
                 let old_self = self.current_self;
                 // Self is in scope for the interface's OWN generics, not only its items: an operator
@@ -1418,7 +1420,7 @@ extend Resolver {
                 self.scope_exit();
             },
             NODE_EXTEND => {
-                let ex = self.ast.at_const(id).as_data.extend_def;
+                let ex = self.ast.ext(id).extend_def;
                 self.scope_enter();
                 let lt_mark = self.declare_lifetimes(id);
                 self.declare_generics(ex.generics);
@@ -1558,7 +1560,7 @@ extend Resolver {
             },
             NODE_ASM => {
                 // Template and clobbers are literals; only the operand expressions name bindings.
-                let d = self.ast.at_const(id).as_data.asm_stmt;
+                let d = self.ast.ext(id).asm_stmt;
                 self.resolve_expr(d.template);
                 self.resolve_asm_operands(d.outputs);
                 self.resolve_asm_operands(d.inputs);
@@ -1601,7 +1603,7 @@ extend Resolver {
                 self.resolve_block(wd.body);
             },
             NODE_FOR | NODE_INLINE_FOR => {
-                let fr = self.ast.at_const(id).as_data.for_stmt;
+                let fr = self.ast.ext(id).for_stmt;
                 // Evaluated before the binding is in scope.
                 self.resolve_expr(fr.iterable);
                 self.scope_enter();
@@ -1617,7 +1619,7 @@ extend Resolver {
                 // Sugar marker; `body` is the closure the parser built over the binding, so resolving
                 // it AS a closure is what fills its captures: desugar (which runs after this pass)
                 // could not. The binding is the closure's parameter, not a loop binding.
-                let fr = self.ast.at_const(id).as_data.for_stmt;
+                let fr = self.ast.ext(id).for_stmt;
                 self.resolve_expr(fr.iterable);
                 self.resolve_expr(fr.body);
             },
@@ -1630,9 +1632,7 @@ extend Resolver {
                 self.resolve_expr(left);
                 let f = self.cur_fn;
                 let n = self.ast.assert_fns.len();
-                let generic = f != NODE_NONE && (self.ast.at_const(f).as_data.function.generics.len != 0 || self.ast.extend_arity(
-                    f,
-                ) > 0);
+                let generic = f != NODE_NONE && (self.ast.ext(f).function.generics.len != 0 || self.ast.extend_arity(f) > 0);
                 if generic && (n == 0 || self.ast.assert_fns[n - 1] != f) {
                     self.ast.assert_fns.push(f);
                 }
@@ -1906,7 +1906,7 @@ extend Resolver {
             );
             return;
         }
-        let cl = self.ast.at_const(id).as_data.closure;
+        let cl = self.ast.ext(id).closure;
         self.scope_enter();
         self.closures.push(ClosureScope { floor: self.symbols.len() as u32, caps: Vector::<NodeId>::new(), node: id });
         for i in 0..cl.params.len {
@@ -1939,7 +1939,7 @@ extend Resolver {
             self.ast.push(cap);
         }
         let list = self.ast.commit(mark);
-        self.ast.at(id).as_data.closure.captures = list;
+        self.ast.ext_mut(id).closure.captures = list;
         // Frees the popped ClosureScope's caps (Vector::truncate drops removed elems).
         self.closures.truncate(top);
         self.scope_exit();
@@ -2024,7 +2024,7 @@ extend Resolver {
             let id = self.child(items, i);
             switch self.ast.at_const(id).kind {
                 NODE_FUNCTION => {
-                    let nm = self.ast.at_const(id).as_data.function.name;
+                    let nm = self.ast.ext_name(id);
                     self.declare(nm, id, Namespace::NS_VALUE);
                 },
                 NODE_CONST => {
@@ -2032,11 +2032,11 @@ extend Resolver {
                     self.declare(nm, id, Namespace::NS_VALUE);
                 },
                 NODE_STRUCT | NODE_ENUM => {
-                    let nm = self.ast.at_const(id).as_data.aggregate.name;
+                    let nm = self.ast.ext_name(id);
                     self.declare(nm, id, Namespace::NS_TYPE);
                 },
                 NODE_INTERFACE => {
-                    let nm = self.ast.at_const(id).as_data.interface_def.name;
+                    let nm = self.ast.ext_name(id);
                     self.declare(nm, id, Namespace::NS_TYPE);
                 },
                 NODE_TYPE_ALIAS => {
@@ -2116,12 +2116,12 @@ extend Resolver {
             let id = self.child(items, i);
             let n = *self.ast.at_const(id);
             switch n.kind {
-                NODE_FUNCTION => self.leak_fn(id, n.as_data.function.vis),
+                NODE_FUNCTION => self.leak_fn(id, self.ast.ext(id).function.vis),
                 NODE_STRUCT | NODE_ENUM => {
-                    let v = n.as_data.aggregate.vis;
-                    self.leak_generics(n.as_data.aggregate.generics, v);
-                    for k in 0..n.as_data.aggregate.members.len {
-                        let mn = *self.ast.at_const(self.child(n.as_data.aggregate.members, k));
+                    let v = self.ast.ext(id).aggregate.vis;
+                    self.leak_generics(self.ast.ext(id).aggregate.generics, v);
+                    for k in 0..self.ast.ext(id).aggregate.members.len {
+                        let mn = *self.ast.at_const(self.child(self.ast.ext(id).aggregate.members, k));
                         if mn.kind == NodeKind::NODE_FIELD && mn.as_data.field.vis >= VIS_FILE {
                             self.leak_type(mn.as_data.field.ty, pick(mn.as_data.field.vis < v, mn.as_data.field.vis, v));
                         } else if mn.kind == NodeKind::NODE_VARIANT {
@@ -2134,11 +2134,11 @@ extend Resolver {
                     self.leak_type(n.as_data.type_alias.ty, n.as_data.type_alias.vis);
                 },
                 NODE_INTERFACE => {
-                    let v = n.as_data.interface_def.vis;
-                    self.leak_generics(n.as_data.interface_def.generics, v);
-                    self.leak_list(n.as_data.interface_def.bounds, v);
-                    for k in 0..n.as_data.interface_def.items.len {
-                        let m = self.child(n.as_data.interface_def.items, k);
+                    let v = self.ast.ext(id).interface_def.vis;
+                    self.leak_generics(self.ast.ext(id).interface_def.generics, v);
+                    self.leak_list(self.ast.ext(id).interface_def.bounds, v);
+                    for k in 0..self.ast.ext(id).interface_def.items.len {
+                        let m = self.child(self.ast.ext(id).interface_def.items, k);
                         if self.ast.at_const(m).kind == NodeKind::NODE_FUNCTION {
                             self.leak_fn(m, v);
                         }
@@ -2146,18 +2146,21 @@ extend Resolver {
                 },
                 NODE_CONST => self.leak_type(n.as_data.const_def.ty, n.as_data.const_def.vis),
                 NODE_EXTEND => {
-                    if n.as_data.extend_def.interface_type == NODE_NONE {
-                        let td = self.ast.resolution_def(n.as_data.extend_def.target_type);
+                    if self.ast.ext(id).extend_def.interface_type == NODE_NONE {
+                        let td = self.ast.resolution_def(self.ast.ext(id).extend_def.target_type);
                         let tv = if td.node == NODE_NONE {
                             VIS_PUB;
                         } else {
                             unsafe (*self.package).decl_vis(td.module, td.node);
                         };
-                        for k in 0..n.as_data.extend_def.items.len {
-                            let m = self.child(n.as_data.extend_def.items, k);
+                        for k in 0..self.ast.ext(id).extend_def.items.len {
+                            let m = self.child(self.ast.ext(id).extend_def.items, k);
                             let mn = *self.ast.at_const(m);
                             if mn.kind == NodeKind::NODE_FUNCTION {
-                                self.leak_fn(m, pick(mn.as_data.function.vis < tv, mn.as_data.function.vis, tv));
+                                self.leak_fn(
+                                    m,
+                                    pick(self.ast.ext(m).function.vis < tv, self.ast.ext(m).function.vis, tv),
+                                );
                             } else if mn.kind == NodeKind::NODE_CONST {
                                 self.leak_type(
                                     mn.as_data.const_def.ty,
@@ -2174,7 +2177,7 @@ extend Resolver {
     }
 
     fn leak_fn(self: &mut Self, f: NodeId, v: u8) {
-        let fd = self.ast.at_const(f).as_data.function;
+        let fd = self.ast.ext(f).function;
         self.leak_generics(fd.generics, v);
         for k in 0..fd.params.len {
             self.leak_type(self.ast.at_const(self.child(fd.params, k)).as_data.parameter.ty, v);
@@ -2189,7 +2192,7 @@ extend Resolver {
 
     fn leak_generics(self: &mut Self, gs: NodeList, v: u8) {
         for k in 0..gs.len {
-            let g = self.ast.at_const(self.child(gs, k)).as_data.generic_param;
+            let g = self.ast.ext(self.child(gs, k)).generic_param;
             self.leak_list(g.bounds, v);
             self.leak_type(g.default_type, v);
             self.leak_type(g.const_type, v);
@@ -2243,12 +2246,9 @@ extend Resolver {
                         );
                     }
                 }
-                self.leak_list(n.as_data.type_path.args, v);
-                for k in 0..n.as_data.type_path.bindings.len {
-                    self.leak_type(
-                        self.ast.at_const(self.child(n.as_data.type_path.bindings, k)).as_data.type_alias.ty,
-                        v,
-                    );
+                self.leak_list(self.ast.at_const(t).as_data.type_path.args, v);
+                for k in 0..self.ast.type_bindings(t).len {
+                    self.leak_type(self.ast.at_const(self.child(self.ast.type_bindings(t), k)).as_data.type_alias.ty, v);
                 }
             },
             NODE_POINTER_TYPE | NODE_REFERENCE_TYPE | NODE_SLICE_TYPE | NODE_DYN_TYPE => self.leak_type(
@@ -2335,21 +2335,21 @@ extend Resolver {
         for k in 0..items.len {
             let iid = unsafe self.ast.list(items)[k as usize];
             let ik = self.ast.at_const(iid).kind;
-            let is_iface_ext = ik == NodeKind::NODE_EXTEND && self.ast.at_const(iid).as_data.extend_def.interface_type != NODE_NONE;
+            let is_iface_ext = ik == NodeKind::NODE_EXTEND && self.ast.ext(iid).extend_def.interface_type != NODE_NONE;
             if ik != NodeKind::NODE_INTERFACE && !is_iface_ext {
                 continue;
             }
             let ms = if is_iface_ext {
-                self.ast.at_const(iid).as_data.extend_def.items;
+                self.ast.ext(iid).extend_def.items;
             } else {
-                self.ast.at_const(iid).as_data.interface_def.items;
+                self.ast.ext(iid).interface_def.items;
             };
             for j in 0..ms.len {
                 let mid = unsafe self.ast.list(ms)[j as usize];
                 if self.ast.at_const(mid).kind != NodeKind::NODE_FUNCTION {
                     continue;
                 }
-                let ps = self.ast.at_const(mid).as_data.function.params;
+                let ps = self.ast.ext(mid).function.params;
                 for q in 0..ps.len {
                     let pid = unsafe self.ast.list(ps)[q as usize];
                     if self.ast.valid(pid) {
@@ -2380,7 +2380,7 @@ extend Resolver {
             } else if nd.kind == NodeKind::NODE_UNARY && nd.as_data.unary.op == TokenType::Ampersand {
                 self.ds_exempt_borrow(&mut fl, nd.as_data.unary.operand);
             } else if nd.kind == NodeKind::NODE_CLOSURE {
-                self.ds_exempt_caps(&mut fl, nd.as_data.closure.captures);
+                self.ds_exempt_caps(&mut fl, self.ast.ext(i).closure.captures);
             } else if nd.kind == NodeKind::NODE_BREAK || nd.kind == NodeKind::NODE_CONTINUE {
                 let fl = nd.as_data.flow.label;
                 if fl.end > fl.start {
@@ -2390,7 +2390,7 @@ extend Resolver {
                 let lsp = if nd.kind == NodeKind::NODE_WHILE {
                     nd.as_data.while_stmt.label;
                 } else {
-                    nd.as_data.for_stmt.label;
+                    self.ast.ext(i).for_stmt.label;
                 };
                 if lsp.end > lsp.start {
                     loops.push(LabelFlow { label: lsp, span: nd.span });
@@ -2400,14 +2400,14 @@ extend Resolver {
                 if (fl[k9 - 1] & (L_SEEN | L_USED)) == L_SEEN && nd.as_data.let_stmt.name != NODE_NONE {
                     self.lint_warn_unused("variable", nd.as_data.let_stmt.name);
                 }
-            } else if nd.kind == NodeKind::NODE_FUNCTION && nd.as_data.function.body != NODE_NONE && !nd.as_data.function.is_intrinsic() && (self.ast.unsafe_claims(
+            } else if nd.kind == NodeKind::NODE_FUNCTION && self.ast.ext(i).function.body != NODE_NONE && !self.ast.ext(
                 i,
-            ) & UNSAFE_NAKED) == 0 || nd.kind == NodeKind::NODE_CLOSURE {
+            ).function.is_intrinsic() && (self.ast.unsafe_claims(i) & UNSAFE_NAKED) == 0 || nd.kind == NodeKind::NODE_CLOSURE {
                 // Not for a naked function: its assembly reads the parameters where the calling convention puts them.
                 let params = if nd.kind == NodeKind::NODE_CLOSURE {
-                    nd.as_data.closure.params;
+                    self.ast.ext(i).closure.params;
                 } else {
-                    nd.as_data.function.params;
+                    self.ast.ext(i).function.params;
                 };
                 for k in 0..params.len {
                     let pid = unsafe self.ast.list(params)[k as usize];

@@ -124,12 +124,12 @@ extend<T, const N: usize> Array<T, N> {
     /// `self` and leaves it owning its elements, so it must not consume them (passing a Free element by
     /// value would free the Array's still-owned copy).
     pub const fn map<U, F: fn(&T) U>(self: &Array<T, N>, f: F) Array<U, N> {
-        let mut out = unsafe zeroed::<Array<U, N>>(); // every slot is written below before a read
-        let p = (&mut unsafe out.data[0]) as *mut U;
+        let mut out = Uninit::<Array<U, N>> { none: 0 }; // every slot is written below before a read
+        let p = (&mut unsafe out.value.data[0]) as *mut U;
         for i in 0..N {
             unsafe p[i] = f(self.at(i));
         }
-        return out;
+        return unsafe out.value;
     }
 
     /// A borrow of the first element matching `pred`, or `None`. `pred` borrows (`&T`); it must not consume.
@@ -153,24 +153,24 @@ extend<T, const N: usize> Array<T, N> {
 extend<T: Default, const N: usize> Array<T, N> {
     /// An array of N default values.
     pub const fn new() Array<T, N> {
-        let mut a = unsafe zeroed::<Array<T, N>>(); // every slot is written below before a read
-        let p = (&mut unsafe a.data[0]) as *mut T;
+        let mut a = Uninit::<Array<T, N>> { none: 0 }; // every slot is written below before a read
+        let p = (&mut unsafe a.value.data[0]) as *mut T;
         for i in 0..N {
             unsafe p[i] = T::default();
         }
-        return a;
+        return unsafe a.value;
     }
 }
 
 extend<T: Clone, const N: usize> Array<T, N> {
     /// An array of N clones of `x`.
     pub const fn filled(x: &T) Array<T, N> {
-        let mut a = unsafe zeroed::<Array<T, N>>(); // every slot is written below before a read
-        let p = (&mut unsafe a.data[0]) as *mut T;
+        let mut a = Uninit::<Array<T, N>> { none: 0 }; // every slot is written below before a read
+        let p = (&mut unsafe a.value.data[0]) as *mut T;
         for i in 0..N {
             unsafe p[i] = x.clone();
         }
-        return a;
+        return unsafe a.value;
     }
 }
 
@@ -319,13 +319,13 @@ extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
 extend<T: Clone, const N: usize> Array<T, N> as Clone {
     /// A deep copy whose elements are independent clones.
     pub const fn clone(self: &Array<T, N>) Array<T, N> {
-        let mut out = unsafe zeroed::<Array<T, N>>(); // every slot is written below before a read
-        let p = (&mut unsafe out.data[0]) as *mut T;
+        let mut out = Uninit::<Array<T, N>> { none: 0 }; // every slot is written below before a read
+        let p = (&mut unsafe out.value.data[0]) as *mut T;
         for i in 0..N {
             let e = self.at(i);
             unsafe p[i] = e.clone();
         }
-        return out;
+        return unsafe out.value;
     }
 }
 

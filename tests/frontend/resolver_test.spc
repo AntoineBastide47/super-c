@@ -118,7 +118,7 @@ fn closure_captures(src: str, out: *mut u32, cap: usize) usize {
     while k < c.ast.nnodes() {
         let id = c.ast.nth_id(k);
         if c.ast.at_const(id).kind == NodeKind::NODE_CLOSURE && n < cap {
-            unsafe out[n] = c.ast.at_const(id).as_data.closure.captures.len;
+            unsafe out[n] = c.ast.ext(id).closure.captures.len;
             n = n + 1;
         }
         k = k + 1;

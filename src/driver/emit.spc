@@ -301,11 +301,11 @@ fn module_asm(p: &loader::Package, m: usize) String {
     let a = unsafe &*p.module_ast_const(m as ModuleId);
     let its = a.at_const(a.root).as_data.program.items;
     for i in 0..its.len {
-        let n = a.at_const(unsafe a.list(its)[i as usize]);
-        if n.kind != NodeKind::NODE_ASM {
+        let it = unsafe a.list(its)[i as usize];
+        if a.at_const(it).kind != NodeKind::NODE_ASM {
             continue;
         }
-        let sp = a.at_const(n.as_data.asm_stmt.template).as_data.literal.raw;
+        let sp = a.at_const(a.ext(it).asm_stmt.template).as_data.literal.raw;
         cbe::asm_bytes(p.modules[m].source.as_str().slice(sp.start as usize, sp.end as usize), &mut out);
         out.push_byte(b'\n');
     }
@@ -1201,7 +1201,7 @@ pub(package) fn build_simd_table(p: &mut loader::Package, n: usize) String {
         }
         let ya = &p.modules[y.module as usize].ast;
         let xa = &p.modules[x.module as usize].ast;
-        let xn = xa.at_const(xa.at_const(x.node).as_data.function.name).as_data.name.text;
+        let xn = xa.at_const(xa.ext_name(x.node)).as_data.name.text;
         let mut errs = diag::Errors::new();
         errs.emit_span(
             dc::TWO_SIMD_IMPL_ENTRIES_ONE_OPERATION_LANE,
@@ -1235,7 +1235,7 @@ pub(package) fn check_feature_calls(p: &mut loader::Package, n: usize) {
             let at = *a.attrs.at(k);
             // The entries a function of the program may call render; a binding's features say what
             // its caller needs, not what any caller has.
-            if at.kind == AttrKind::ATTR_TARGET_FEATURE as u8 && !a.at_const(at.owner).as_data.function.is_extern() {
+            if at.kind == AttrKind::ATTR_TARGET_FEATURE as u8 && !a.ext(at.owner).function.is_extern() {
                 p.fn_union = cf::join(p.fn_union, p.fn_set(i as ModuleId, at.owner));
             }
         }
@@ -1266,7 +1266,7 @@ pub(package) fn feature_errors(p: &loader::Package, i: usize, errs: &mut diag::E
             AttrKind::ATTR_TEST_FREE,
             AttrKind::ATTR_BENCH,
         ];
-        let nsp = a.at_const(a.at_const(f).as_data.function.name).as_data.name.text;
+        let nsp = a.at_const(a.ext_name(f)).as_data.name.text;
         // The program entry `main` is called from outside the program.
         let mut outer = p.is_entry(i as ModuleId, f);
         for kd in ks {
@@ -1305,10 +1305,7 @@ fn feature_use(p: &loader::Package, m: usize, fc: &FeatureCall) u8 {
         return 0;
     }
     let ca = &p.modules[fc.callee.module as usize].ast;
-    let inl = ca.at_const(fc.callee.node).as_data.function.is_extern() || ca.attr_of(
-        fc.callee.node,
-        AttrKind::ATTR_ALWAYS_INLINE,
-    ) != null;
+    let inl = ca.ext(fc.callee.node).function.is_extern() || ca.attr_of(fc.callee.node, AttrKind::ATTR_ALWAYS_INLINE) != null;
     return pick(!tgt::isa(p.arch).fn_features || inl, 2u8, 1u8);
 }
 
@@ -1406,7 +1403,7 @@ fn feature_err(
         }
     }
     let ca = &p.modules[m as usize].ast;
-    let nm = ca.at_const(ca.at_const(f).as_data.function.name).as_data.name.text;
+    let nm = ca.at_const(ca.ext_name(f)).as_data.name.text;
     let fname = p.modules[m as usize].source.as_str().slice(nm.start as usize, nm.end as usize);
     if !tgt::isa(p.arch).fn_features || why.len() != 0 {
         errs.emit_span(
@@ -1568,7 +1565,7 @@ fn layout_pass(p: &mut loader::Package) {
             }
             if dn != NODE_NONE {
                 let da = unsafe &*p.module_ast_const(dm);
-                if da.at_const(dn).kind == NodeKind::NODE_STRUCT && !da.at_const(dn).as_data.aggregate.is_union {
+                if da.at_const(dn).kind == NodeKind::NODE_STRUCT && !da.ext(dn).aggregate.is_union {
                     // In layout order, which need not be the declared one. Zero-size members share
                     // offsets and may sit at the very end.
                     let mut ms = Vector::<lay::MemberAt>::new();
@@ -2013,10 +2010,11 @@ fn cemit_ty_disp(p: &loader::Package, m: ModuleId, t: TypeId, out: &mut String) 
         return;
     }
     let da = unsafe &*p.module_ast_const(dm);
-    let mut nm = da.at_const(dn).as_data.aggregate.name;
-    if da.at_const(dn).kind == NodeKind::NODE_TYPE_ALIAS {
-        nm = da.at_const(dn).as_data.type_alias.name;
-    }
+    let nm = if da.at_const(dn).kind == NodeKind::NODE_TYPE_ALIAS {
+        da.at_const(dn).as_data.type_alias.name;
+    } else {
+        da.ext_name(dn);
+    };
     let ns = da.at_const(nm).as_data.name.text;
     out.push_str(p.modules[dm as usize].source.as_str().slice(ns.start as usize, ns.end as usize));
     // The arguments are types of `a`; a type nests a finite depth.
@@ -2049,7 +2047,7 @@ fn inst_where(
         // An interface node stands for the interface's `Self`.
         let pn = pa.at_const(prm[k as usize]);
         let gn = if pn.kind == NodeKind::NODE_GENERIC_PARAM {
-            let gs = pa.at_const(pn.as_data.generic_param.name).as_data.name.text;
+            let gs = pa.at_const(pa.ext_name(prm[k as usize])).as_data.name.text;
             psrc.slice(gs.start as usize, gs.end as usize);
         } else {
             "Self";
@@ -2417,7 +2415,7 @@ fn cemit_layout_asserts(
             if nk != NodeKind::NODE_STRUCT && nk != NodeKind::NODE_ENUM {
                 continue;
             }
-            if a.at_const(nid).as_data.aggregate.generics.len != 0 {
+            if a.ext(nid).aggregate.generics.len != 0 {
                 continue;
             }
             if nk == NodeKind::NODE_ENUM && !a.enum_has_payload(nid) {
@@ -2644,7 +2642,7 @@ fn cemit_relower_census(
         let d = body.owner;
         let a = unsafe &*p.module_ast_const(d.module);
         let src = p.modules.at(d.module as usize).source.as_str();
-        let nsp = a.at_const(a.at_const(d.node).as_data.function.name).as_data.name.text;
+        let nsp = a.at_const(a.ext_name(d.node)).as_data.name.text;
         eprint(
             "cemit-relower {}::{} ({}): {} instances, {} re-lowerings, {} identical, {} KiB retained\n",
             p.modules.at(d.module as usize).path.as_str(),
@@ -2785,7 +2783,7 @@ fn reach_roots(p: &loader::Package, g: &ig::InstGraph, live: *const bool, testin
             let nid = unsafe a.list(its)[i as usize];
             let n = a.at_const(nid);
             if n.kind == NodeKind::NODE_FUNCTION {
-                if reach_root(p, a, m as ModuleId, nid, testing, all || lib && vis_exported(n.as_data.function.vis)) {
+                if reach_root(p, a, m as ModuleId, nid, testing, all || lib && vis_exported(a.ext(nid).function.vis)) {
                     fns.push(DefId { module: m as ModuleId, node: nid });
                 }
             } else if n.kind == NodeKind::NODE_CONST {
@@ -2793,8 +2791,8 @@ fn reach_roots(p: &loader::Package, g: &ig::InstGraph, live: *const bool, testin
                 if !n.as_data.const_def.is_extern && reach_root(p, a, m as ModuleId, nid, false, false) {
                     fns.push(DefId { module: m as ModuleId, node: nid });
                 }
-            } else if n.kind == NodeKind::NODE_EXTEND && n.as_data.extend_def.generics.len == 0 {
-                let ms = n.as_data.extend_def.items;
+            } else if n.kind == NodeKind::NODE_EXTEND && a.ext(nid).extend_def.generics.len == 0 {
+                let ms = a.ext(nid).extend_def.items;
                 for j in 0..ms.len {
                     let mid = unsafe a.list(ms)[j as usize];
                     let mn = a.at_const(mid);
@@ -2804,7 +2802,7 @@ fn reach_roots(p: &loader::Package, g: &ig::InstGraph, live: *const bool, testin
                         m as ModuleId,
                         mid,
                         testing,
-                        all || lib && vis_exported(mn.as_data.function.vis),
+                        all || lib && vis_exported(a.ext(mid).function.vis),
                     ) {
                         fns.push(DefId { module: m as ModuleId, node: mid });
                     }
@@ -2942,7 +2940,7 @@ fn cemit_seed_module(
         if n.kind == NodeKind::NODE_FUNCTION {
             cands.push(nid);
         } else if n.kind == NodeKind::NODE_EXTEND {
-            let ms = n.as_data.extend_def.items;
+            let ms = a.ext(nid).extend_def.items;
             for j in 0..ms.len {
                 let mid2 = unsafe a.list(ms)[j as usize];
                 if a.at_const(mid2).kind == NodeKind::NODE_FUNCTION {
@@ -2970,10 +2968,10 @@ fn cemit_seed_module(
 fn seed_emits(p: &loader::Package, cem: &mut cbe::CEmit, m: ModuleId, nid: NodeId, testing: bool) bool {
     let a = unsafe &*p.module_ast_const(m);
     let n = a.at_const(nid);
-    if n.kind != NodeKind::NODE_FUNCTION || n.as_data.function.is_extern() || n.as_data.function.body == NODE_NONE {
+    if n.kind != NodeKind::NODE_FUNCTION || a.ext(nid).function.is_extern() || a.ext(nid).function.body == NODE_NONE {
         return false;
     }
-    if n.as_data.function.needs_features() && (a.attr_of(nid, AttrKind::ATTR_SIMD_IMPL) != null || !tgt::isa(p.arch).fn_features && !cf::contains(
+    if a.ext(nid).function.needs_features() && (a.attr_of(nid, AttrKind::ATTR_SIMD_IMPL) != null || !tgt::isa(p.arch).fn_features && !cf::contains(
         p.features,
         p.fn_features(m, nid),
     )) {
@@ -3000,7 +2998,6 @@ fn cemit_seed_fn(
     acc: &mut SeedAcc,
 ) {
     let a = unsafe &*p.module_ast_const(m as ModuleId);
-    let n = a.at_const(nid);
     if !seed_emits(p, cem, m as ModuleId, nid, testing) {
         return;
     }
@@ -3052,7 +3049,7 @@ fn cemit_seed_fn(
         if is_main {
             acc.have_main = true;
             acc.main_mod = m as u64;
-            acc.main_argv = n.as_data.function.params.len != 0;
+            acc.main_argv = a.ext(nid).function.params.len != 0;
             if cem.mg.rec_on {
                 let mut ev9 = mbe::RecEv::blank(mbe::RK_MAIN);
                 ev9.a = acc.main_argv as u32;
@@ -3557,7 +3554,7 @@ fn bound_calls(
         ) {
             continue;
         }
-        let own = (unsafe &*(&*pkg).module_ast_const(md.module)).at_const(md.node).as_data.function.generics.len;
+        let own = (unsafe &*(&*pkg).module_ast_const(md.module)).ext(md.node).function.generics.len;
         if t.targs_len >= own {
             sites.push(BoundSite { blk: i as u32, md: md, recv: rv, own: own });
         }
@@ -4782,7 +4779,7 @@ pub(package) fn cemit_package(
         for i in 0..its.len {
             let nid = unsafe a.list(its)[i as usize];
             let n = a.at_const(nid);
-            if (n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM) && n.as_data.aggregate.generics.len == 0 {
+            if (n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM) && a.ext(nid).aggregate.generics.len == 0 {
                 items.push(tbe::AggItem { m: m as ModuleId, decl: nid, amod: m as ModuleId, aty: TYPE_NONE });
             }
         }
@@ -5530,7 +5527,7 @@ pub(package) fn cemit_package(
             for i9 in 0..its9.len {
                 let nid9 = unsafe a9.list(its9)[i9 as usize];
                 let n9 = a9.at_const(nid9);
-                if n9.kind != NodeKind::NODE_STRUCT || n9.as_data.aggregate.generics.len == 0 {
+                if n9.kind != NodeKind::NODE_STRUCT || a9.ext(nid9).aggregate.generics.len == 0 {
                     continue;
                 }
                 if a9.attr_of(nid9, AttrKind::ATTR_EMIT_MACRO) == null {
@@ -5542,7 +5539,7 @@ pub(package) fn cemit_package(
                 cem.mg.macro_on = true;
                 let mut okm = true;
                 mb_dec.push_str("typedef struct NAME NAME;\nstruct NAME {\n");
-                let fs9 = n9.as_data.aggregate.members;
+                let fs9 = a9.ext(nid9).aggregate.members;
                 for j9 in 0..fs9.len {
                     if !okm {
                         break;
@@ -5574,26 +5571,28 @@ pub(package) fn cemit_package(
                     }
                     let eid = unsafe a9.list(its9)[j9 as usize];
                     let en = a9.at_const(eid);
-                    if en.kind != NodeKind::NODE_EXTEND || en.as_data.extend_def.generics.len == 0 {
+                    if en.kind != NodeKind::NODE_EXTEND || a9.ext(eid).extend_def.generics.len == 0 {
                         continue;
                     }
-                    if en.as_data.extend_def.interface_type != NODE_NONE {
+                    if a9.ext(eid).extend_def.interface_type != NODE_NONE {
                         continue;
                     }
-                    if a9.resolution(en.as_data.extend_def.target_type) != nid9 {
+                    if a9.resolution(a9.ext(eid).extend_def.target_type) != nid9 {
                         continue;
                     }
-                    let ms9 = en.as_data.extend_def.items;
+                    let ms9 = a9.ext(eid).extend_def.items;
                     for k9 in 0..ms9.len {
                         if !okm {
                             break;
                         }
                         let mid9 = unsafe a9.list(ms9)[k9 as usize];
                         let mn9 = a9.at_const(mid9);
-                        if mn9.kind != NodeKind::NODE_FUNCTION || mn9.as_data.function.generics.len != 0 || mn9.as_data.function.returns.len > 1 {
+                        if mn9.kind != NodeKind::NODE_FUNCTION || a9.ext(mid9).function.generics.len != 0 || a9.ext(
+                            mid9,
+                        ).function.returns.len > 1 {
                             continue;
                         }
-                        if mn9.as_data.function.body == NODE_NONE {
+                        if a9.ext(mid9).function.body == NODE_NONE {
                             continue;
                         }
                         let mut mlw = irl::Lowerer::new(p, m9 as ModuleId, mid9);
@@ -5606,11 +5605,7 @@ pub(package) fn cemit_package(
                         let mut msym = String::from_str("NAME");
                         msym.push_byte(1);
                         msym.push_str("__");
-                        cem.mg.ident(
-                            m9 as ModuleId,
-                            a9.at_const(mn9.as_data.function.name).as_data.name.text,
-                            &mut msym,
-                        );
+                        cem.mg.ident(m9 as ModuleId, a9.at_const(a9.ext_name(mid9)).as_data.name.text, &mut msym);
                         cem.out.clear();
                         cem.fn_attrs.truncate(0);
                         cem.fs = p.fn_set(m9 as ModuleId, mid9);
@@ -5626,21 +5621,16 @@ pub(package) fn cemit_package(
                 cem.mg.macro_on = false;
                 if okm {
                     let mut stem = String::new();
-                    macro_stem(
-                        &mut cem.mg,
-                        m9 as ModuleId,
-                        a9.at_const(n9.as_data.aggregate.name).as_data.name.text,
-                        &mut stem,
-                    );
+                    macro_stem(&mut cem.mg, m9 as ModuleId, a9.at_const(a9.ext_name(nid9)).as_data.name.text, &mut stem);
                     macros_out.push_str("#define ");
                     macros_out.push_string(&stem);
                     macros_out.push_str("_DECLARE(");
-                    macro_params(p, &mut cem.mg, m9 as ModuleId, n9.as_data.aggregate.generics, &mut macros_out);
+                    macro_params(p, &mut cem.mg, m9 as ModuleId, a9.ext(nid9).aggregate.generics, &mut macros_out);
                     macro_finish(mb_dec.as_str(), &mut macros_out);
                     macros_out.push_str("#define ");
                     macros_out.push_string(&stem);
                     macros_out.push_str("_DEFINE(");
-                    macro_params(p, &mut cem.mg, m9 as ModuleId, n9.as_data.aggregate.generics, &mut macros_out);
+                    macro_params(p, &mut cem.mg, m9 as ModuleId, a9.ext(nid9).aggregate.generics, &mut macros_out);
                     macro_finish(mb_def.as_str(), &mut macros_out);
                     mac_ok += 1;
                 } else {
@@ -6102,7 +6092,7 @@ pub(package) fn cemit_package(
                     if nk9 != NodeKind::NODE_STRUCT && nk9 != NodeKind::NODE_ENUM {
                         continue;
                     }
-                    if a9.at_const(nid9).as_data.aggregate.generics.len != 0 {
+                    if a9.ext(nid9).aggregate.generics.len != 0 {
                         continue;
                     }
                     let mut tagged = false;
@@ -6137,11 +6127,7 @@ pub(package) fn cemit_package(
                     cem.mg.mark_ctx = mbe::CTX_INST | sd_own9 as i64;
                     let mut qn = String::new();
                     cem.mg.modpfx(m9 as ModuleId, &mut qn);
-                    cem.mg.ident(
-                        m9 as ModuleId,
-                        a9.at_const(a9.at_const(nid9).as_data.aggregate.name).as_data.name.text,
-                        &mut qn,
-                    );
+                    cem.mg.ident(m9 as ModuleId, a9.at_const(a9.ext_name(nid9)).as_data.name.text, &mut qn);
                     let mut nm9 = String::from_str("sc_typeinfo_");
                     nm9.push_string(&qn);
                     let mut rootd = String::new();
@@ -6188,8 +6174,9 @@ pub(package) fn cemit_package(
     while fi < cem.mg.fn_dem.len() {
         let d = *cem.mg.fn_dem.at(fi);
         fi += 1;
-        let dn9 = (unsafe &*p.module_ast_const(d.module)).at_const(d.node);
-        if module_emits(p, live, d.module as usize) && seed_emits(p, &mut cem, d.module, d.node, testing) && dn9.as_data.function.generics.len == 0 {
+        if module_emits(p, live, d.module as usize) && seed_emits(p, &mut cem, d.module, d.node, testing) && (unsafe &*p.module_ast_const(
+            d.module,
+        )).ext(d.node).function.generics.len == 0 {
             let mut sym9 = String::new();
             let _ = cem.mg.fn_sym(d.module, d.node, cem.mg.method_target(d.module, d.node), &mut sym9);
             eprint("error: internal: the emitted C names '{}' after the functions were emitted\n", sym9.as_str());
@@ -6661,7 +6648,7 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u
     let dm = unsafe (*g).dm;
     let dn = unsafe (*g).dn;
     let da = unsafe &*p.module_ast_const(dm);
-    if da.at_const(dn).as_data.aggregate.is_extern {
+    if da.ext(dn).aggregate.is_extern {
         // C's own type, spelled as `Mangler::ctype` spells it (a scoped header's by alias); no
         // definition header.
         extern_c_name(p, dm, dn, out);
@@ -6673,7 +6660,7 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u
     }
     let st = out.len();
     mg.type_depth += 1;
-    mg.qualified(dm, da.at_const(dn).as_data.aggregate.name, out);
+    mg.qualified(dm, da.ext_name(dn), out);
     let mut ok = true;
     if unsafe (*g).nargs != 0 {
         let mut last = unsafe (*g).nargs;
@@ -6712,8 +6699,8 @@ fn st_field_zst(p: &loader::Package, mg: &mut mbe::Mangler, g: *const iri::Stati
     let dm = unsafe (*g).dm;
     let dn = unsafe (*g).dn;
     let a = unsafe &*p.module_ast_const(dm);
-    let ms = a.at_const(dn).as_data.aggregate.members;
-    let is_tuple = a.at_const(dn).as_data.aggregate.is_tuple;
+    let ms = a.ext(dn).aggregate.members;
+    let is_tuple = a.ext(dn).aggregate.is_tuple;
     let mut fty = TYPE_NONE;
     let mut fi: u32 = 0;
     for i in 0..ms.len {
@@ -6736,10 +6723,18 @@ fn st_zst(p: &loader::Package, mg: &mut mbe::Mangler, g: *const iri::StaticObj, 
     if fty == TYPE_NONE {
         return false;
     }
+    let nb = st_push_args(p, mg, g);
+    let z = mg.is_zst(unsafe (*g).dm, fty);
+    mg.pop_subs(nb);
+    return z;
+}
+
+// Bind the generic parameters of static object `g`'s aggregate to its recorded arguments; the count
+// is what `pop_subs` takes.
+fn st_push_args(p: &loader::Package, mg: &mut mbe::Mangler, g: *const iri::StaticObj) usize {
     let dm = unsafe (*g).dm;
-    let dn = unsafe (*g).dn;
     let a = unsafe &*p.module_ast_const(dm);
-    let gens = a.at_const(dn).as_data.aggregate.generics;
+    let gens = a.ext(unsafe (*g).dn).aggregate.generics;
     let mut nb: usize = 0;
     for i in 0..gens.len {
         if i as u8 >= unsafe (*g).nargs {
@@ -6748,20 +6743,18 @@ fn st_zst(p: &loader::Package, mg: &mut mbe::Mangler, g: *const iri::StaticObj, 
         mg.push_sub(dm, unsafe a.list(gens)[i as usize], unsafe (*g).am[i as usize], unsafe (*g).at[i as usize]);
         nb += 1;
     }
-    let z = mg.is_zst(dm, fty);
-    mg.pop_subs(nb);
-    return z;
+    return nb;
 }
 
 // `.field` designator for member index `idx` of aggregate `(dm, dn)` (`._N` for tuples).
 fn st_field(p: &loader::Package, mg: &mut mbe::Mangler, dm: ModuleId, dn: NodeId, idx: u32, out: &mut String) {
     let a = unsafe &*p.module_ast_const(dm);
-    if a.at_const(dn).as_data.aggregate.is_tuple {
+    if a.ext(dn).aggregate.is_tuple {
         out.push_str("._");
         out.push_u64(idx);
         return;
     }
-    let ms = a.at_const(dn).as_data.aggregate.members;
+    let ms = a.ext(dn).aggregate.members;
     let mut fi: u32 = 0;
     for i in 0..ms.len {
         let fid = unsafe a.list(ms)[i as usize];
@@ -6813,7 +6806,7 @@ fn st_path(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
         st_field(p, mg, unsafe (*pg).dm, unsafe (*pg).dn, pslot, out);
     } else if pshape == iri::SS_ENUM {
         let a = unsafe &*p.module_ast_const(unsafe (*pg).dm);
-        let ms = a.at_const(unsafe (*pg).dn).as_data.aggregate.members;
+        let ms = a.ext(unsafe (*pg).dn).aggregate.members;
         let tag = (unsafe (*pg).slots.at(0).i) as u32;
         let vid = unsafe a.list(ms)[tag as usize];
         out.push_str(".payload.");
@@ -7054,7 +7047,7 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
         let dm = unsafe (*g).dm;
         let dn = unsafe (*g).dn;
         let a = unsafe &*p.module_ast_const(dm);
-        let ms = a.at_const(dn).as_data.aggregate.members;
+        let ms = a.ext(dn).aggregate.members;
         let tag = (unsafe (*g).slots.at(0).i) as u32;
         if tag >= ms.len {
             out.push_str("{0}");
@@ -7062,8 +7055,11 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
         }
         let vid = unsafe a.list(ms)[tag as usize];
         let vdat = a.at_const(vid).as_data.variant;
-        out.push_str("{ .tag = ");
-        cem.mg.enum_tag(dm, dn, vid, out);
+        let nb = st_push_args(p, &mut cem.mg, g);
+        let mut ns = NODE_NONE;
+        let mut nn = NODE_NONE;
+        let nk = cem.mg.niche(dm, dn, &mut ns, &mut nn);
+        cem.mg.pop_subs(nb);
         // A zero-sized payload member has no C storage: it takes no initializer.
         let mut pay = Vector::<u32>::new();
         for k in 1..nslots {
@@ -7076,8 +7072,18 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
                 pay.push(k);
             }
         }
+        if nk != lay::NK_NONE && pay.len() == 0 {
+            // A niche enum has no tag: `none` is the all-zero value.
+            out.push_str("{0}");
+            return true;
+        }
+        out.push_str("{ ");
+        if nk == lay::NK_NONE {
+            out.push_str(".tag = ");
+            cem.mg.enum_tag(dm, dn, vid, out);
+        }
         if pay.len() != 0 {
-            out.push_str(", .payload.");
+            out.push_str(mbe::if_s(nk == lay::NK_NONE, ", .payload.", ".payload."));
             cem.mg.ident(dm, a.at_const(a.at_const(vid).as_data.variant.name).as_data.name.text, out);
             out.push_str(" = { ");
             for i in 0..pay.len() {
@@ -7346,7 +7352,7 @@ fn macro_params(p: &loader::Package, mg: &mut mbe::Mangler, m: ModuleId, gens: N
     for i in 0..gens.len {
         let gid = unsafe a.list(gens)[i as usize];
         let mut nm = String::new();
-        mg.ident(m, a.at_const(a.at_const(gid).as_data.generic_param.name).as_data.name.text, &mut nm);
+        mg.ident(m, a.at_const(a.ext_name(gid)).as_data.name.text, &mut nm);
         out.push_string(&nm);
         out.push_str(", _SCM_");
         out.push_string(&nm);
@@ -7831,7 +7837,7 @@ fn extern_block_aliases(
                 c.push_str(src.slice((unsafe (*pin).str_span.start) as usize, (unsafe (*pin).str_span.end) as usize));
             } else {
                 let nm = if k == NodeKind::NODE_FUNCTION {
-                    a.at_const(id).as_data.function.name;
+                    a.ext_name(id);
                 } else {
                     a.at_const(id).as_data.const_def.name;
                 };
@@ -7850,7 +7856,7 @@ fn extern_block_aliases(
         x_define(c.as_str(), toks, names, defs);
         if k == NodeKind::NODE_ENUM {
             // `Mangler::enum_tag`: the variant's own name.
-            let ms = a.at_const(id).as_data.aggregate.members;
+            let ms = a.ext(id).aggregate.members;
             for v in 0..ms.len {
                 let vid = unsafe a.list(ms)[v as usize];
                 let vs = a.at_const(a.at_const(vid).as_data.variant.name).as_data.name.text;
@@ -7894,10 +7900,10 @@ fn extern_c_raw(p: &loader::Package, m: ModuleId, decl: NodeId, out: &mut String
     let nm = if dn.kind == NodeKind::NODE_TYPE_ALIAS {
         dn.as_data.type_alias.name;
     } else {
-        dn.as_data.aggregate.name;
+        a.ext_name(decl);
     };
     if dn.kind == NodeKind::NODE_STRUCT {
-        out.push_str(mbe::if_s(dn.as_data.aggregate.is_union, "union ", "struct "));
+        out.push_str(mbe::if_s(a.ext(decl).aggregate.is_union, "union ", "struct "));
     } else if dn.kind == NodeKind::NODE_ENUM {
         out.push_str("enum ");
     }
@@ -8087,7 +8093,7 @@ fn header_type_checks(p: &loader::Package, m: ModuleId, items: NodeList, out: &m
         if sk != NodeKind::NODE_STRUCT && sk != NodeKind::NODE_ENUM {
             continue;
         }
-        let agg = a.at_const(sid).as_data.aggregate;
+        let agg = a.ext(sid).aggregate;
         let ns = a.at_const(agg.name).as_data.name.text;
         let sname = src.slice(ns.start as usize, ns.end as usize);
         let mut ct = String::new();
@@ -8369,7 +8375,7 @@ fn cemit_free_glue_fields(
         return false;
     }
     let a = unsafe &*p.module_ast_const(m);
-    let f = a.at_const(fnid).as_data.function;
+    let f = a.ext(fnid).function;
     if f.body == NODE_NONE || f.params.len == 0 {
         return false;
     }
@@ -8379,11 +8385,11 @@ fn cemit_free_glue_fields(
         return false;
     }
     let tn = a.at_const(tgt.node);
-    if tn.kind != NodeKind::NODE_STRUCT || tn.as_data.aggregate.is_union || tn.as_data.aggregate.generics.len != 0 {
+    if tn.kind != NodeKind::NODE_STRUCT || a.ext(tgt.node).aggregate.is_union || a.ext(tgt.node).aggregate.generics.len != 0 {
         return false;
     }
-    let is_tuple = tn.as_data.aggregate.is_tuple;
-    let ms = tn.as_data.aggregate.members;
+    let is_tuple = a.ext(tgt.node).aggregate.is_tuple;
+    let ms = a.ext(tgt.node).aggregate.members;
     for i in 0..ms.len {
         let fid = unsafe a.list(ms)[i as usize];
         let fnode = a.at_const(fid);
@@ -9008,7 +9014,7 @@ fn cemit_assemble(
                     let nid9 = unsafe a9.list(its9)[i9 as usize];
                     if a9.at_const(nid9).kind == NodeKind::NODE_ASM {
                         // A module-level `asm` is file-scope basic assembly in its module's unit.
-                        let tsp9 = a9.at_const(a9.at_const(nid9).as_data.asm_stmt.template).as_data.literal.raw;
+                        let tsp9 = a9.at_const(a9.ext(nid9).asm_stmt.template).as_data.literal.raw;
                         head0.push_str("__asm__(");
                         cbe::push_c_asm_str(
                             p.modules[t].source.as_str().slice(tsp9.start as usize, tsp9.end as usize),
@@ -11187,7 +11193,7 @@ fn native_header_facts(p: &mut loader::Package) {
                 }
                 if sn.kind == NodeKind::NODE_FUNCTION {
                     // The C name (the `@import` pin, else its own), and the C types its signature names.
-                    let fd = sn.as_data.function;
+                    let fd = a.ext(sid).function;
                     fnames.index_mut(hi).push(c_item_name(a, src, sid, fd.name));
                     fkeys.index_mut(hi).push(key);
                     fsp.index_mut(hi).push(spell.clone());
@@ -11231,7 +11237,7 @@ fn native_header_facts(p: &mut loader::Package) {
                     // The C type, then `|<member>` per field (`bindgen::agg_facts`).
                     let mut q = String::new();
                     extern_c_raw(p, m as ModuleId, sid, &mut q);
-                    let agg = sn.as_data.aggregate;
+                    let agg = a.ext(sid).aggregate;
                     for f in 0..agg.members.len {
                         let fid = unsafe a.list(agg.members)[f as usize];
                         if a.at_const(fid).kind == NodeKind::NODE_FIELD {
@@ -11541,7 +11547,7 @@ fn check_agg(p: &mut loader::Package, key: u64, facts: str, smap: &Map<String, S
     let sid = (key & 0xFFFFFFFF) as NodeId;
     let a = unsafe &*p.module_ast_const(m as ModuleId);
     let src = p.modules[m].source.as_str();
-    let agg = a.at_const(sid).as_data.aggregate;
+    let agg = a.ext(sid).aggregate;
     let ns = a.at_const(agg.name).as_data.name.text;
     let sname = src.slice(ns.start as usize, ns.end as usize);
     if facts.len() == 0 {
@@ -11711,7 +11717,7 @@ fn check_fn(p: &mut loader::Package, key: u64, sig: str, smap: &Map<String, Stri
     let sid = (key & 0xFFFFFFFF) as NodeId;
     let a = unsafe &*p.module_ast_const(m as ModuleId);
     let src = p.modules[m].source.as_str();
-    let fd = a.at_const(sid).as_data.function;
+    let fd = a.ext(sid).function;
     let fs = a.at_const(fd.name).as_data.name.text;
     let fname = src.slice(fs.start as usize, fs.end as usize);
     let mut rest = sig;
@@ -13381,9 +13387,9 @@ fn report_len_faults(p: &mut loader::Package, fs: &Vector<ig::LenFault>) {
             let da = unsafe &*p.module_ast_const(f.inst.module);
             let dn = da.at_const(f.inst.node);
             let nm = if dn.kind == NodeKind::NODE_FUNCTION {
-                dn.as_data.function.name;
+                da.ext_name(f.inst.node);
             } else {
-                dn.as_data.aggregate.name;
+                da.ext_name(f.inst.node);
             };
             let ns = da.at_const(nm).as_data.name.text;
             let name = p.modules[f.inst.module as usize].source.as_str().slice(ns.start as usize, ns.end as usize);
@@ -13582,11 +13588,11 @@ fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut V
             continue;
         }
         if it.kind == NodeKind::NODE_EXTEND {
-            let in_iface = it.as_data.extend_def.interface_type != NODE_NONE;
+            let in_iface = unsafe (*a).ext(iid).extend_def.interface_type != NODE_NONE;
             // The header (target, interface, parameter bounds): a conformance uses its interface and
             // the interfaces of its bounds, never reported itself.
             ents.push(LintEnt { start: it.span.start, end: it.span.start + 1, node: iid, root: in_iface });
-            let ms = it.as_data.extend_def.items;
+            let ms = unsafe (*a).ext(iid).extend_def.items;
             for j in 0..ms.len {
                 let mid = unsafe (*a).list(ms)[j as usize];
                 let msp = unsafe (*a).at_const(mid).span;
@@ -13626,7 +13632,7 @@ fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_to
     }
     let keep = attr_bit(AttrKind::ATTR_EXPORT) | attr_bit(AttrKind::ATTR_USED);
     if it.kind == NodeKind::NODE_FUNCTION {
-        let f = it.as_data.function;
+        let f = unsafe (*a).ext(iid).function;
         if vis_exported(f.vis) && !pub_too || f.is_extern() || f.body == NODE_NONE {
             return false;
         }
@@ -13639,10 +13645,14 @@ fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_to
         );
     }
     if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
-        return !vis_exported(it.as_data.aggregate.vis) && !attr_any(a, iid, keep | attr_bit(AttrKind::ATTR_EMIT_MACRO));
+        return !vis_exported(unsafe (*a).ext(iid).aggregate.vis) && !attr_any(
+            a,
+            iid,
+            keep | attr_bit(AttrKind::ATTR_EMIT_MACRO),
+        );
     }
     if it.kind == NodeKind::NODE_INTERFACE {
-        return !vis_exported(it.as_data.interface_def.vis) && !attr_any(a, iid, keep);
+        return !vis_exported(unsafe (*a).ext(iid).interface_def.vis) && !attr_any(a, iid, keep);
     }
     if it.kind == NodeKind::NODE_TYPE_ALIAS {
         return !vis_exported(it.as_data.type_alias.vis) && !attr_any(a, iid, keep);
@@ -13655,13 +13665,13 @@ fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_to
 const fn lint_item_name(a: *const Ast, iid: NodeId) NodeId {
     let it = unsafe (*a).at_const(iid);
     if it.kind == NodeKind::NODE_FUNCTION {
-        return it.as_data.function.name;
+        return unsafe (*a).ext_name(iid);
     }
     if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
-        return it.as_data.aggregate.name;
+        return unsafe (*a).ext_name(iid);
     }
     if it.kind == NodeKind::NODE_INTERFACE {
-        return it.as_data.interface_def.name;
+        return unsafe (*a).ext_name(iid);
     }
     if it.kind == NodeKind::NODE_TYPE_ALIAS {
         return it.as_data.type_alias.name;
@@ -13698,7 +13708,7 @@ fn lint_report_item(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast,
     let src = p.modules[m as usize].source.as_str();
     let what = if it.kind == NodeKind::NODE_FUNCTION {
         "function";
-    } else if it.kind == NodeKind::NODE_STRUCT && it.as_data.aggregate.is_union {
+    } else if it.kind == NodeKind::NODE_STRUCT && unsafe (*a).ext(iid).aggregate.is_union {
         "union";
     } else if it.kind == NodeKind::NODE_STRUCT {
         "struct";
@@ -13714,7 +13724,7 @@ fn lint_report_item(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast,
     if it.kind == NodeKind::NODE_FUNCTION && p.is_entry(m, iid) {
         return;
     }
-    if it.kind == NodeKind::NODE_FUNCTION && vis_exported(it.as_data.function.vis) {
+    if it.kind == NodeKind::NODE_FUNCTION && vis_exported(unsafe (*a).ext(iid).function.vis) {
         errs.warn_span(
             dc::UNUSED_PUBLIC_FUNCTION_NOTHING_BINARY_REACHES,
             nsp,
@@ -13928,8 +13938,8 @@ pub(package) fn lint_unused_items(p: &mut loader::Package, only_mod: i32, sink: 
             let iid = unsafe (*a).list(items)[i as usize];
             let it = unsafe (*a).at_const(iid);
             if it.kind == NodeKind::NODE_EXTEND {
-                let in_iface = it.as_data.extend_def.interface_type != NODE_NONE;
-                let ms = it.as_data.extend_def.items;
+                let in_iface = unsafe (*a).ext(iid).extend_def.interface_type != NODE_NONE;
+                let ms = unsafe (*a).ext(iid).extend_def.items;
                 for j in 0..ms.len {
                     let mid = unsafe (*a).list(ms)[j as usize];
                     if lint_item_candidate(a, mid, in_iface, pa) && !used[eb + lint_entry(a, es, mid)] {
@@ -14001,7 +14011,7 @@ fn ap_check_module_on(p: &mut loader::Package, m: usize, errs: &mut diag::Errors
     for i in 0..items.len {
         let iid = unsafe (*a).list(items)[i as usize];
         if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND {
-            let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
+            let ms = unsafe (*a).ext(iid).extend_def.items;
             for j in 0..ms.len {
                 ap_check_fn(errs, a, m, unsafe (*a).list(ms)[j as usize], cev);
             }
@@ -14025,7 +14035,7 @@ fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
     ) {
         return;
     }
-    let f = unsafe (*a).at_const(fnode).as_data.function;
+    let f = unsafe (*a).ext(fnode).function;
     // A build-constant site this build decided removed code another build runs, which may call what a
     // constant cannot (an extern under LOCKDEP): such a function gets no suggestion.
     if f.is_const() || f.is_extern() || f.body == NODE_NONE || unsafe (*a).bc_cut_at(
@@ -14071,8 +14081,8 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
         for i in 0..items.len {
             let iid = unsafe (*a).list(items)[i as usize];
             if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND {
-                let in_iface = unsafe (*a).at_const(iid).as_data.extend_def.interface_type != NODE_NONE;
-                let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
+                let in_iface = unsafe (*a).ext(iid).extend_def.interface_type != NODE_NONE;
+                let ms = unsafe (*a).ext(iid).extend_def.items;
                 for j in 0..ms.len {
                     cs_check_fn(p, &mut errs, a, m, unsafe (*a).list(ms)[j as usize], in_iface);
                 }
@@ -14119,8 +14129,8 @@ fn import_side_effects(p: &loader::Package, mid: ModuleId) bool {
     for i in 0..items.len {
         let iid = unsafe (*a).list(items)[i as usize];
         if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND {
-            let d = unsafe (*a).resolution_def(unsafe (*a).at_const(iid).as_data.extend_def.target_type);
-            let tt = unsafe (*a).type_of(unsafe (*a).at_const(iid).as_data.extend_def.target_type);
+            let d = unsafe (*a).resolution_def(unsafe (*a).ext(iid).extend_def.target_type);
+            let tt = unsafe (*a).type_of(unsafe (*a).ext(iid).extend_def.target_type);
             if d.node == NODE_NONE || d.module != mid || ext_blanket(unsafe &*a, tt, unsafe &*a, mid, iid) >= 0 {
                 // Extends a foreign (or unresolved) type, or every type a generic extend's bounds admit.
                 return true;
@@ -14289,7 +14299,7 @@ fn dp_check_stmt(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m:
     if unsafe (*fa).at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
         return;
     }
-    let f = unsafe (*fa).at_const(fd.node).as_data.function;
+    let f = unsafe (*fa).ext(fd.node).function;
     if f.is_extern() || f.body == NODE_NONE || f.returns.len == 0 || f.generics.len != 0 {
         return;
     }
@@ -14411,7 +14421,7 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
             if it.kind != NodeKind::NODE_STRUCT && it.kind != NodeKind::NODE_ENUM {
                 continue;
             }
-            if vis_exported(it.as_data.aggregate.vis) || it.as_data.aggregate.is_union {
+            if vis_exported(unsafe (*a).ext(iid).aggregate.vis) || unsafe (*a).ext(iid).aggregate.is_union {
                 continue;
             }
             let keep = attr_bit(AttrKind::ATTR_EXPORT) | attr_bit(AttrKind::ATTR_USED) | attr_bit(
@@ -14420,10 +14430,10 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
             if attr_any(a, iid, keep | attr_bit(AttrKind::ATTR_PACKED) | attr_bit(AttrKind::ATTR_ALIGN)) {
                 continue;
             }
-            let ms = it.as_data.aggregate.members;
             if it.kind == NodeKind::NODE_ENUM && !unsafe (*a).enum_has_payload(iid) {
                 continue;
             }
+            let ms = unsafe (*a).ext(iid).aggregate.members;
             for j in 0..ms.len {
                 let mid2 = unsafe (*a).list(ms)[j as usize];
                 let mn = unsafe (*a).at_const(mid2);
@@ -15002,7 +15012,7 @@ fn mark_c_reads(p: &mut loader::Package) bool {
         if !used {
             continue;
         }
-        let nm = a.at_const(d.as_data.aggregate.name);
+        let nm = a.at_const(a.ext((added[k] & 0xFFFFFFFFu64) as NodeId).aggregate.name);
         let mut errs = diag::Errors::new();
         errs.emit_span(
             dc::REACHES_C_UNTYPED_POINTER_TAG_ORDERED,
@@ -15035,7 +15045,7 @@ fn c_decl(p: &mut loader::Package, from: usize, r: DefId, work: &mut Vector<DefI
     if added != null {
         unsafe (*added).push(key);
     }
-    let agg = ra.at_const(r.node).as_data.aggregate;
+    let agg = ra.ext(r.node).aggregate;
     for i in 0..agg.members.len {
         let mid = unsafe ra.list(agg.members)[i as usize];
         let mk = ra.at_const(mid).kind;
@@ -15068,7 +15078,7 @@ fn c_sig(a: &Ast, m: ModuleId, f: NodeId, ext: bool, work: &mut Vector<DefId>) {
     if a.at_const(f).kind != NodeKind::NODE_FUNCTION || !ext && a.attr_of(f, AttrKind::ATTR_EXPORT) == null {
         return;
     }
-    let fd = a.at_const(f).as_data.function;
+    let fd = a.ext(f).function;
     for i in 0..fd.params.len {
         let pid = unsafe a.list(fd.params)[i as usize];
         if a.at_const(pid).kind == NodeKind::NODE_PARAMETER {

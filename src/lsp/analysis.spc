@@ -533,7 +533,9 @@ const SLOT_NONE: u32 = 0xFFFFFFFF;
 // True when the item at `by_node` position `k` is a function with a body in the body arena.
 const fn slot_has_body(p: &loader::Package, m: usize, k: usize) bool {
     let nd = p.modules[m].ast.at_const(slot_node(p, k as u32));
-    return nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(nd.as_data.function.body);
+    return nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(
+        p.modules[m].ast.ext(slot_node(p, k as u32)).function.body,
+    );
 }
 
 // The `by_node` position of the item whose own ranges hold `node` of module `m` (the owner
@@ -811,7 +813,7 @@ const fn plain_fn(p: &loader::Package, m: usize, k: u32) bool {
         return false;
     }
     let nd = p.modules[m].ast.at_const(it.node);
-    return nd.kind == NodeKind::NODE_FUNCTION && !nd.as_data.function.is_const();
+    return nd.kind == NodeKind::NODE_FUNCTION && !p.modules[m].ast.ext(it.node).function.is_const();
 }
 
 // Item-level invalidation over the recorded references. The items an edit touched start
@@ -985,7 +987,7 @@ fn body_candidate(a: &Ast, ws: u32, we: u32) NodeId {
         if n.kind != NodeKind::NODE_FUNCTION {
             continue;
         }
-        let fd = n.as_data.function;
+        let fd = a.ext(id as NodeId).function;
         if fd.body == NODE_NONE || fd.is_const() {
             continue;
         }

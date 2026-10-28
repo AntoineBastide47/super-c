@@ -514,11 +514,11 @@ fn is_spelled_fn(pkg: *const loader::Package, d: DefId) bool {
     }
     let a = unsafe &*p.module_ast_const(d.module);
     let n = a.at_const(d.node);
-    if n.kind != NodeKind::NODE_FUNCTION || n.as_data.function.is_extern() {
+    if n.kind != NodeKind::NODE_FUNCTION || a.ext(d.node).function.is_extern() {
         return false;
     }
     let c = a.container_of(d.node);
-    return n.as_data.function.body != NODE_NONE || c != NODE_NONE && a.at_const(c).kind == NodeKind::NODE_INTERFACE;
+    return a.ext(d.node).function.body != NODE_NONE || c != NODE_NONE && a.at_const(c).kind == NodeKind::NODE_INTERFACE;
 }
 
 /// A public non-extern CONCRETE function with a body (no generics of its own, and any enclosing
@@ -530,12 +530,12 @@ fn is_concrete_pub_fn(pkg: *const loader::Package, d: DefId) bool {
     if n.kind != NodeKind::NODE_FUNCTION {
         return false;
     }
-    let f = n.as_data.function;
+    let f = a.ext(d.node).function;
     if !vis_exported(f.vis) || f.is_extern() || f.body == NODE_NONE || f.generics.len != 0 {
         return false;
     }
     let ext = extend_of(a, d.node);
-    return ext == NODE_NONE || a.at_const(ext).as_data.extend_def.generics.len == 0;
+    return ext == NODE_NONE || a.ext(ext).extend_def.generics.len == 0;
 }
 
 /// A non-variadic extern function whose header is not scoped. Every TU sees its declaration: the
@@ -551,7 +551,7 @@ fn is_global_extern_fn(pkg: *const loader::Package, d: DefId) bool {
     }
     let a = unsafe &*p.module_ast_const(d.module);
     let n = a.at_const(d.node);
-    return n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.is_extern() && !n.as_data.function.is_variadic();
+    return n.kind == NodeKind::NODE_FUNCTION && a.ext(d.node).function.is_extern() && !a.ext(d.node).function.is_variadic();
 }
 
 // Whether type `t` of module `m` is, or reaches through pointers, references, slices and arrays, a
@@ -990,7 +990,7 @@ fn env_receiver(p: &loader::Package, b: &ir::CoreBody, t: &ir::Terminator) bool 
     if a.extend_arity(d.node) <= 0 || a.at_const(d.node).kind != NodeKind::NODE_FUNCTION || t.recv != TYPE_NONE {
         return false;
     }
-    let ps = a.at_const(d.node).as_data.function.params;
+    let ps = a.ext(d.node).function.params;
     if ps.len != 0 {
         let nm = a.at_const(a.at_const(unsafe a.list(ps)[0]).as_data.parameter.name).as_data.name.text;
         if p.modules.at(d.module as usize).source.as_str().slice(nm.start as usize, nm.end as usize) == "self" {
@@ -998,7 +998,7 @@ fn env_receiver(p: &loader::Package, b: &ir::CoreBody, t: &ir::Terminator) bool 
         }
     }
     // The extend's target declaration.
-    let tn = a.at_const(a.container_of(d.node)).as_data.extend_def.target_type;
+    let tn = a.ext(a.container_of(d.node)).extend_def.target_type;
     let mut tg = TyInstance {};
     let mut tdecl = a.resolution_def(tn);
     if a.targs_of(a.type_of(tn), &mut tg) {
@@ -1023,7 +1023,9 @@ fn env_receiver(p: &loader::Package, b: &ir::CoreBody, t: &ir::Terminator) bool 
         return true;
     }
     let td = (unsafe &*p.module_ast_const(tdecl.module)).at_const(tdecl.node);
-    return !((td.kind == NodeKind::NODE_STRUCT || td.kind == NodeKind::NODE_ENUM) && td.as_data.aggregate.generics.len == t.targs_len);
+    return !((td.kind == NodeKind::NODE_STRUCT || td.kind == NodeKind::NODE_ENUM) && (unsafe &*p.module_ast_const(
+        tdecl.module,
+    )).ext(tdecl.node).aggregate.generics.len == t.targs_len);
 }
 
 // Is `d` a const or static outside any generic scope: a module's, or a non-generic extend's? Every TU
@@ -1034,7 +1036,7 @@ fn is_plain_item(p: &loader::Package, d: DefId) bool {
     }
     let a = unsafe &*p.module_ast_const(d.module);
     let c = a.container_of(d.node);
-    return c == NODE_NONE || a.at_const(c).kind == NodeKind::NODE_EXTEND && a.at_const(c).as_data.extend_def.generics.len == 0;
+    return c == NODE_NONE || a.at_const(c).kind == NodeKind::NODE_EXTEND && a.ext(c).extend_def.generics.len == 0;
 }
 
 // Is operand `o` of `b` a constant, or a read of a const-generic parameter (a constant once spliced)?
@@ -1154,7 +1156,7 @@ fn vet_decl(pkg: *const loader::Package, d: DefId, ext: &mut NodeId, demand: &mu
     if n.kind != NodeKind::NODE_FUNCTION {
         return REJ_BASE | IJ_NOT_FN as u64;
     }
-    let f = n.as_data.function;
+    let f = a.ext(d.node).function;
     if f.is_extern() || f.body == NODE_NONE {
         return REJ_BASE | IJ_NOT_FN as u64;
     }
@@ -1173,7 +1175,7 @@ fn vet_decl(pkg: *const loader::Package, d: DefId, ext: &mut NodeId, demand: &mu
     // A GENERIC body carrying a static_assert (`Ast.assert_fns`) defers it per instantiation; that
     // guard fires only when a call site DEMANDS the instance, so a splice of it records the call in
     // the caller's `demands` (`demand`).
-    *demand = (f.generics.len != 0 || *ext != NODE_NONE && a.at_const(*ext).as_data.extend_def.generics.len != 0) && a.assert_fns.contains(
+    *demand = (f.generics.len != 0 || *ext != NODE_NONE && a.ext(*ext).extend_def.generics.len != 0) && a.assert_fns.contains(
         &d.node,
     );
     return 0;
@@ -1253,7 +1255,7 @@ extend InlineStore {
             if at >= 0 {
                 let a = unsafe &*p.module_ast_const(d.module);
                 let ext = extend_of(a, d.node);
-                if ext != NODE_NONE && a.at_const(ext).as_data.extend_def.interface_type != NODE_NONE {
+                if ext != NODE_NONE && a.ext(ext).extend_def.interface_type != NODE_NONE {
                     called[at as usize / 64] |= 1u64 << at as u64 % 64;
                 }
             }
@@ -1307,7 +1309,7 @@ extend InlineStore {
     ) u64 {
         let p = unsafe &*pkg;
         let a = unsafe &*p.module_ast_const(d.module);
-        let f = a.at_const(d.node).as_data.function;
+        let f = a.ext(d.node).function;
         let shape = REJ_BASE | IJ_SHAPE as u64;
         // A callee that reads a module's constant or static, or makes an inner call another function
         // than a concrete public one or a non-variadic extern one names, inlines into vector code
@@ -1406,7 +1408,7 @@ extend InlineStore {
         let kb = ir::CoreBody::compact_from(body);
         let mut gp = Vector::<NodeId>::new();
         if ext != NODE_NONE {
-            let xg = a.at_const(ext).as_data.extend_def.generics;
+            let xg = a.ext(ext).extend_def.generics;
             for i in 0..xg.len {
                 gp.push(unsafe a.list(xg)[i as usize]);
             }
@@ -1547,7 +1549,7 @@ pub(package) fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineSt
         // A callee that needs features its caller lacks runs only after the caller's run-time check:
         // its body never splices into the caller (whose C has no `target` attribute for them).
         let ca = unsafe &*(*pkg).module_ast_const(t.callee.module);
-        if ca.at_const(t.callee.node).kind == NodeKind::NODE_FUNCTION && ca.at_const(t.callee.node).as_data.function.needs_features() && !cf::contains(
+        if ca.at_const(t.callee.node).kind == NodeKind::NODE_FUNCTION && ca.ext(t.callee.node).function.needs_features() && !cf::contains(
             unsafe (*pkg).fn_set(lw.body.owner.module, lw.body.owner.node),
             unsafe (*pkg).fn_features(t.callee.module, t.callee.node),
         ) {
@@ -1603,7 +1605,7 @@ pub(package) fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineSt
         // call made direct) binds the extend's parameters from that type, `Terminator.recv`.
         let ka = unsafe &*(&*pkg).module_ast_const(km);
         if t.recv != TYPE_NONE && ka.extend_arity(t.callee.node) > 0 {
-            let xt = ka.at_const(ka.container_of(t.callee.node)).as_data.extend_def.target_type;
+            let xt = ka.ext(ka.container_of(t.callee.node)).extend_def.target_type;
             unify(pkg, km, ka.type_of(xt), cm, t.recv, &mut binds, 0);
         }
         if t.targs_len as usize == ki0.gp.len() && ki0.gp.len() != 0 {
@@ -2445,7 +2447,7 @@ fn recv_ref(p: &loader::Package, t: &ir::Terminator) bool {
     if fnn.kind != NodeKind::NODE_FUNCTION {
         return true;
     }
-    let ps = fnn.as_data.function.params;
+    let ps = fa.ext(t.callee.node).function.params;
     if ps.len == 0 {
         return false;
     }
@@ -2792,7 +2794,7 @@ fn agg_field(p: &loader::Package, b: &ir::CoreBody, w: &Writes, r: u32, pj: &ir:
         }
         if d.node != NODE_NONE {
             let da = unsafe &*p.module_ast_const(d.module);
-            let ms = da.at_const(d.node).as_data.aggregate.members;
+            let ms = da.ext(d.node).aggregate.members;
             for j in 0..ms.len {
                 if unsafe da.list(ms)[j as usize] == pj.sub {
                     i = j;

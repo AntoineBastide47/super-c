@@ -29,6 +29,7 @@
 // value that may not exist or free storage a live thread can still write.
 
 import atomic;
+import std::mem::ptr;
 import sc_runtime;
 
 /// The shared result cell: raw value storage plus the two-party bookkeeping. `pub` for linkage only.
@@ -51,7 +52,7 @@ fn cell_drop<T>(c: *mut Cell<T>) {
         // destroyed: whoever observes the destruction (a `free` that counts) observes a released cell.
         // It is destroyed through a raw pointer exactly once, and `forget` keeps the local from a
         // second drop. (A zero-sized value has no storage and nothing to destroy.)
-        let mut v = replace(&mut unsafe (*c).value, unsafe zeroed::<T>());
+        let mut v = unsafe ptr::read_unaligned::<T>(((&unsafe (*c).value) as *const T) as *const u8);
         unsafe g.dealloc(c, sizeof(Cell<T>), alignof(Cell<T>));
         let vp = (&mut v) as *mut T;
         vp.free();

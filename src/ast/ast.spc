@@ -548,13 +548,14 @@ pub(package) const fn vis_exported(vis: u8) bool {
     return vis >= VIS_MODULE;
 }
 
-/// The `VIS_*` of declaration `n`; VIS_PUB for a kind without one.
-pub(package) const fn node_vis(n: &Node) u8 {
+/// The `VIS_*` of declaration `id` of `a`; VIS_PUB for a kind without one.
+pub(package) const fn node_vis(a: &Ast, id: NodeId) u8 {
+    let n = a.at_const(id);
     return switch n.kind {
-        NODE_STRUCT | NODE_ENUM => n.as_data.aggregate.vis,
+        NODE_STRUCT | NODE_ENUM => a.ext(id).aggregate.vis,
         NODE_TYPE_ALIAS => n.as_data.type_alias.vis,
-        NODE_INTERFACE => n.as_data.interface_def.vis,
-        NODE_FUNCTION => n.as_data.function.vis,
+        NODE_INTERFACE => a.ext(id).interface_def.vis,
+        NODE_FUNCTION => a.ext(id).function.vis,
         NODE_CONST => n.as_data.const_def.vis,
         _ => VIS_PUB,
     };
@@ -575,7 +576,7 @@ pub(package) const fn vis_text(vis: u8) str<'static> {
     };
 }
 
-static_assert(sizeof(Node) == 56, "Node must stay 56 bytes");
+static_assert(sizeof(Node) == 32, "Node must stay 32 bytes");
 pub(package) const FN_EXTERN: u8 = 2;
 pub(package) const FN_VARIADIC: u8 = 4;
 pub(package) const FN_CONST: u8 = 8; // `const fn`: must evaluate at compile time when its arguments are known
@@ -747,9 +748,8 @@ pub(package) const fn bt_of_name(src: str, s: tok::Span) i32 {
 pub(package) struct TypePathData {
     pub(package) parts: NodeList,
     pub(package) args: NodeList,
-    // Associated type bindings after the arguments (`Add<i32, Output = T>`), NODE_TYPE_ALIAS nodes;
-    // only a generic bound's interface may carry them.
-    pub(package) bindings: NodeList,
+    // The associated type bindings after the arguments (`Add<i32, Output = T>`) are rare: they live in
+    // the module's `path_bindings` (`Ast::type_bindings`).
     // The index of the segment that names the path's declaration, written by the resolver: the
     // segments before it are a module path (`m::T`) or `Self` (`Self::Assoc`), the segments after
     // it name a member of it (`E::V` as a literal's target), which a type position rejects.
@@ -840,7 +840,7 @@ pub(package) struct CallData {
     pub(package) args: NodeList,
 }
 // mut_caps is a u32 mutated-capture bitmask (≤32 captures). u32 (not u64) is deliberate: it leaves
-// ClosureData with no 8-aligned member, so NodeAs stays 4-aligned and Node needs no 8-byte padding.
+// ClosureData with no 8-aligned member, so NodeExt stays 4-aligned and needs no 8-byte padding.
 // own_mut marks the OWNING captures the body mutates: the env owns them and the body mutates its own
 // copy, unless the closure meets a plain `fn(..)` bound, which requires a closure that owns nothing.
 // Then its owning captures are borrowed instead: the mutated ones join mut_caps (an implicit
@@ -924,25 +924,20 @@ pub(package) struct PatternRangeData {
     pub(package) inclusive: bool,
 }
 
+/// The payload of a node, by kind. A kind whose payload is larger than 20 bytes keeps it out of the
+/// node, in the `ext` table of the node's arena (`NodeExt`), and the node holds its index.
 pub(package) union NodeAs {
-    pub(package) asm_stmt: AsmData,
     pub(package) program: ProgramData,
     pub(package) name: NameData,
     pub(package) literal: LiteralData,
-    pub(package) function: FunctionData,
     pub(package) parameter: ParameterData,
-    pub(package) aggregate: AggregateData,
     pub(package) field: FieldData,
     pub(package) variant: VariantData,
-    pub(package) interface_def: InterfaceData,
-    pub(package) extend_def: ExtendData,
     pub(package) type_alias: TypeAliasData,
     pub(package) const_def: ConstData,
     pub(package) extern_block: ExternBlockData,
     pub(package) import_decl: ImportData,
-    pub(package) generic_param: GenericParamData,
     pub(package) where_predicate: WherePredicateData,
-    pub(package) type_path: TypePathData,
     pub(package) indirect_type: IndirectTypeData,
     pub(package) array_type: ArrayTypeData,
     pub(package) function_type: FunctionTypeData,
@@ -953,12 +948,10 @@ pub(package) union NodeAs {
     pub(package) return_stmt: ReturnData,
     pub(package) if_stmt: IfData,
     pub(package) while_stmt: WhileData,
-    pub(package) for_stmt: ForData,
     pub(package) flow: FlowData,
     pub(package) unary: UnaryData,
     pub(package) binary: BinaryData,
     pub(package) call: CallData,
-    pub(package) closure: ClosureData,
     pub(package) index: IndexData,
     pub(package) member: MemberData,
     pub(package) cast: CastData,
@@ -971,6 +964,53 @@ pub(package) union NodeAs {
     pub(package) field_initializer: FieldInitializerData,
     pub(package) pattern: PatternData,
     pub(package) pattern_range: PatternRangeData,
+    pub(package) type_path: TypePathData,
+    pub(package) ext: ExtRef,
+}
+
+/// The inline part of a node whose payload lives in the arena's `ext` table: the payload's index,
+/// and the declaration's name for a function, struct, enum, interface or generic parameter (a copy:
+/// a scan by name reads the node alone). NODE_NONE for the kinds without a name.
+@derive(Copy)
+pub(package) struct ExtRef {
+    pub(package) name: NodeId,
+    pub(package) at: u32,
+}
+
+/// The payloads of the node kinds that keep them outside the node (`Ast::ext`): asm, function,
+/// struct and enum, interface, extend, generic parameter, `for` and closure. Moving them
+/// out keeps a node at 32 bytes; together they are about 1% of the nodes.
+pub(package) union NodeExt {
+    pub(package) asm_stmt: AsmData,
+    pub(package) function: FunctionData,
+    pub(package) aggregate: AggregateData,
+    pub(package) interface_def: InterfaceData,
+    pub(package) extend_def: ExtendData,
+    pub(package) generic_param: GenericParamData,
+    pub(package) for_stmt: ForData,
+    pub(package) closure: ClosureData,
+}
+
+// The node kinds that keep their payload outside the node, as a table by kind: `Ast::ext` tests it on
+// every read.
+const EXT_KINDS: [bool; 128] = [
+    [NodeKind::NODE_ASM as usize] = true,
+    [NodeKind::NODE_FUNCTION as usize] = true,
+    [NodeKind::NODE_STRUCT as usize] = true,
+    [NodeKind::NODE_ENUM as usize] = true,
+    [NodeKind::NODE_INTERFACE as usize] = true,
+    [NodeKind::NODE_EXTEND as usize] = true,
+    [NodeKind::NODE_GENERIC_PARAM as usize] = true,
+    [NodeKind::NODE_FOR as usize] = true,
+    [NodeKind::NODE_INLINE_FOR as usize] = true,
+    [NodeKind::NODE_PARALLEL_FOR as usize] = true,
+    [NodeKind::NODE_CLOSURE as usize] = true,
+];
+
+/// Whether a node of kind `k` keeps its payload outside itself (`NodeExt`).
+@always_inline
+pub(package) const fn ext_kind(k: NodeKind) bool {
+    return unsafe EXT_KINDS[k as usize];
 }
 
 @derive(Copy)
@@ -1633,7 +1673,7 @@ pub(package) fn iface_of_member(a: &Ast, member: NodeId) NodeId {
         if a.at_const(iid).kind != NodeKind::NODE_INTERFACE {
             continue;
         }
-        let ms = a.at_const(iid).as_data.interface_def.items;
+        let ms = a.ext(iid).interface_def.items;
         for j in 0..ms.len {
             if unsafe a.list(ms)[j as usize] == member {
                 return iid;
@@ -1647,7 +1687,7 @@ pub(package) fn iface_of_member(a: &Ast, member: NodeId) NodeId {
 /// (syntax in `ea`): the ones its target path writes, lifetimes aside, or all `n` when it writes none
 /// (an alias that names an instance).
 pub(package) fn ext_arity(ea: &Ast, ext: NodeId, n: u32) u32 {
-    let tt = ea.at_const(ext).as_data.extend_def.target_type;
+    let tt = ea.ext(ext).extend_def.target_type;
     if tt == NODE_NONE || ea.at_const(tt).kind != NodeKind::NODE_TYPE_PATH {
         return 0;
     }
@@ -1676,7 +1716,7 @@ pub(package) fn ext_is_identity(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext
     if !a.targs_of(pat, &mut it) {
         return true;
     }
-    let gens = ea.at_const(ext).as_data.extend_def.generics;
+    let gens = ea.ext(ext).extend_def.generics;
     if ext_arity(ea, ext, it.n) != gens.len {
         return false;
     }
@@ -1700,7 +1740,7 @@ pub(package) fn ext_blanket(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: No
     if y.kind != TypeKind::TYPE_GENERIC || y.module != m {
         return -1;
     }
-    let gens = ea.at_const(ext).as_data.extend_def.generics;
+    let gens = ea.ext(ext).extend_def.generics;
     for i in 0..gens.len {
         if unsafe ea.list(gens)[i as usize] == y.as_data.decl {
             return i as i32;
@@ -1713,7 +1753,7 @@ pub(package) fn ext_blanket(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: No
 /// `m`) names as its whole target, read through the resolution (resolve-final), so a reader may ask
 /// before the extend is checked. -1 for any other target.
 pub(package) const fn ext_blanket_syn(ea: &Ast, m: ModuleId, ext: NodeId) i32 {
-    let ed = ea.at_const(ext).as_data.extend_def;
+    let ed = ea.ext(ext).extend_def;
     let r = ea.resolution_def(ed.target_type);
     if r.module != m || r.node == NODE_NONE {
         return -1;
@@ -1731,7 +1771,7 @@ pub(package) const fn ext_blanket_syn(ea: &Ast, m: ModuleId, ext: NodeId) i32 {
 /// arguments solve (`N` of `extend<const N: usize> f32 as Mul<V<N>>`), and every parameter but the
 /// target of a generic extend. At most 64 parameters.
 pub(package) fn ext_free_params(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) u64 {
-    let gens = ea.at_const(ext).as_data.extend_def.generics;
+    let gens = ea.ext(ext).extend_def.generics;
     let all = pick(gens.len >= 64, ~0u64, (1u64 << gens.len as u64) - 1);
     let b = ext_blanket(a, pat, ea, m, ext);
     if b >= 0 {
@@ -1759,7 +1799,7 @@ pub(package) fn ext_free_params(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext
 /// (`ext_blanket`), or one whose target does not name every parameter (`ext_free_params`). Any other
 /// extend's arguments are its receiver instance's.
 pub(package) fn ext_keyed(ea: &Ast, ext: NodeId) bool {
-    let pat = ea.type_of(ea.at_const(ext).as_data.extend_def.target_type);
+    let pat = ea.type_of(ea.ext(ext).extend_def.target_type);
     return pat != TYPE_NONE && (ext_blanket(ea, pat, ea, ea.module, ext) >= 0 || ext_free_params(
         ea,
         pat,
@@ -3207,6 +3247,7 @@ extend TypePool {
 @derive(Persist)
 pub(package) struct BodyArena {
     pub(package) nodes: SplitVec<Node>,
+    pub(package) ext: SplitVec<NodeExt>,
     pub(package) children: SplitVec<u32>,
     pub(package) types: SplitVec<u32>,
     pub(package) resolutions: SplitVec<DefId>,
@@ -3221,6 +3262,7 @@ pub(package) struct BodyArena {
 extend BodyArena as Free {
     pub fn free(self: &mut Self) {
         self.nodes.free();
+        self.ext.free();
         self.children.free();
         self.types.free();
         self.resolutions.free();
@@ -3234,6 +3276,7 @@ extend BodyArena {
     pub(package) fn new() BodyArena {
         return BodyArena {
             nodes: SplitVec::<Node>::new(),
+            ext: SplitVec::<NodeExt>::new(),
             children: SplitVec::<u32>::new(),
             types: SplitVec::<u32>::new(),
             resolutions: SplitVec::<DefId>::new(),
@@ -3241,7 +3284,7 @@ extend BodyArena {
     }
 
     pub(package) const fn retained(self: &Self) usize {
-        return self.nodes.retained() + self.children.retained() + self.types.retained() + self.resolutions.retained() + self.mono_at.capacity() * 4 + self.dyn_at.capacity() * 4 + self.deref_at.capacity() * 4;
+        return self.nodes.retained() + self.ext.retained() + self.children.retained() + self.types.retained() + self.resolutions.retained() + self.mono_at.capacity() * 4 + self.dyn_at.capacity() * 4 + self.deref_at.capacity() * 4;
     }
 }
 
@@ -3251,6 +3294,8 @@ const WL_SPIN: u32 = 4096;
 @derive(Persist)
 pub(package) struct Ast {
     pub(package) nodes: SplitVec<Node>,
+    /// The payloads the module arena's nodes keep outside themselves (`NodeExt`).
+    pub(package) ext: SplitVec<NodeExt>,
     /// An identifier of the module names a vector type or the vector module (the lexer's
     /// `vector_name`): the build loads the vector backend file only then.
     pub(package) names_vectors: bool,
@@ -3346,6 +3391,9 @@ pub(package) struct Ast {
     pub(package) has_member_pins: bool,
     // Per call node: the (fmod<<40 | fdecl<<8 | skip) the borrow-check pass replays from typechecking.
     pub(package) call_info: Map<u32, u64>,
+    /// The associated type bindings of each type path that has some (`Add<i32, Output = T>`), by
+    /// node: few paths have one.
+    pub(package) path_bindings: Map<u32, NodeList>,
     /// What a call's arguments make the callee's lifetimes outlive (`TypeChecker::tc_lt_call_export`):
     /// `(span key, sup token, sub token, next)` quadruples, `next` the index + 1 of the call's next
     /// one (0: none); `call_lt_at` maps a call's span key (`start << 32 | end`) to its first + 1.
@@ -3425,6 +3473,7 @@ pub(package) struct Ast {
 extend Ast as Free {
     pub fn free(self: &mut Self) {
         self.nodes.free();
+        self.ext.free();
         self.children.free();
         self.b.free();
         self.scratch.free();
@@ -3466,6 +3515,7 @@ extend Ast as Free {
         self.feature_calls.free();
         self.unsafe_lints.free();
         self.call_info.free();
+        self.path_bindings.free();
         self.call_lts.free();
         self.call_lt_at.free();
         self.op_method.free();
@@ -3535,6 +3585,7 @@ extend Ast {
     pub(package) fn new(token_count: usize) Ast {
         let mut a = Ast {
             nodes: SplitVec::<Node>::new(),
+            ext: SplitVec::<NodeExt>::new(),
             children: SplitVec::<u32>::new(),
             b: BodyArena::new(),
             ilock_sem: psy::Semaphore::new(1),
@@ -3563,6 +3614,26 @@ extend Ast {
         let id = self.nodes.len() as NodeId;
         self.nodes.push(node);
         return id;
+    }
+
+    /// Add a node of `kind` whose payload `data` it keeps outside itself (`NodeExt`), in the arena
+    /// `add` writes to.
+    pub(package) fn add_ext(self: &mut Self, kind: NodeKind, span: tok::Span, data: NodeExt) NodeId {
+        let sv = if self.sink_body {
+            &mut self.b.ext;
+        } else {
+            &mut self.ext;
+        };
+        let x = sv.len() as u32;
+        let name = switch kind {
+            NODE_FUNCTION => data.function.name,
+            NODE_STRUCT | NODE_ENUM => data.aggregate.name,
+            NODE_INTERFACE => data.interface_def.name,
+            NODE_GENERIC_PARAM => data.generic_param.name,
+            _ => NODE_NONE,
+        };
+        sv.push(data);
+        return self.add(Node { kind: kind, span: span, as_data: NodeAs { ext: ExtRef { name: name, at: x } } });
     }
 
     /// True when `id` names the body arena.
@@ -3607,7 +3678,7 @@ extend Ast {
             return WHERE_NONE;
         }
         let fd = self.at_const(wb.func);
-        let gens = fd.as_data.function.generics;
+        let gens = self.ext(wb.func).function.generics;
         for i in 0..gens.len {
             if unsafe self.list(gens)[i as usize] == gp {
                 return WHERE_OWN;
@@ -3635,14 +3706,18 @@ extend Ast {
     /// Pin both arenas' allocations before a parallel stage appends (see SplitVec::freeze).
     pub(package) fn freeze_nodes(self: &mut Self) {
         self.nodes.freeze();
+        self.ext.freeze();
         self.children.freeze();
         self.b.nodes.freeze();
+        self.b.ext.freeze();
         self.b.children.freeze();
     }
     pub(package) fn thaw_nodes(self: &mut Self) {
         self.nodes.thaw();
+        self.ext.thaw();
         self.children.thaw();
         self.b.nodes.thaw();
+        self.b.ext.thaw();
         self.b.children.thaw();
     }
     pub(package) fn freeze_resolutions(self: &mut Self) {
@@ -5004,6 +5079,62 @@ extend Ast {
         };
         return sv.at((id & NODE_BODY_MASK) as usize);
     }
+    /// The payload node `id` keeps outside itself (`NodeExt`); its kind must keep one (`ext_kind`):
+    /// test the kind before reading the payload.
+    @always_inline
+    pub(package) const fn ext(self: &Self, id: NodeId) &NodeExt {
+        // One arena choice for the node and its payload; the payload index was written with the node
+        // (`add_ext`), so it is in bounds.
+        let i = (id & NODE_BODY_MASK) as usize;
+        if (id & NODE_BODY) != 0 {
+            let nb = self.b.nodes.at(i);
+            if !ext_kind(nb.kind) {
+                panic("Ast::ext: a node of this kind keeps its payload inline");
+            }
+            return unsafe &*self.b.ext.ptr_at(nb.as_data.ext.at as usize);
+        }
+        let n = self.nodes.at(i);
+        if !ext_kind(n.kind) {
+            panic("Ast::ext: a node of this kind keeps its payload inline");
+        }
+        return unsafe &*self.ext.ptr_at(n.as_data.ext.at as usize);
+    }
+    /// The associated type bindings of type path `id` (`Add<i32, Output = T>`): NODE_TYPE_ALIAS nodes,
+    /// empty for most paths; only a generic bound's interface may carry them.
+    pub(package) fn type_bindings(self: &Self, id: NodeId) NodeList {
+        if self.path_bindings.len() == 0 {
+            return NodeList { start: 0, len: 0 };
+        }
+        return switch self.path_bindings.get(&id) {
+            Some(l) => *l,
+            None => NodeList { start: 0, len: 0 },
+        };
+    }
+    /// The name node of declaration `id`, a function, struct, enum, interface or generic parameter:
+    /// its payload's `name`, read from the node.
+    @always_inline
+    pub(package) const fn ext_name(self: &Self, id: NodeId) NodeId {
+        let n = self.at_const(id);
+        let k = n.kind;
+        if k != NodeKind::NODE_FUNCTION && k != NodeKind::NODE_STRUCT && k != NodeKind::NODE_ENUM && k != NodeKind::NODE_INTERFACE && k != NodeKind::NODE_GENERIC_PARAM {
+            panic("Ast::ext_name: a node of this kind has no out-of-line name");
+        }
+        return n.as_data.ext.name;
+    }
+    /// The payload of node `id` to write; its kind keeps its payload outside the node (`ext_kind`).
+    @always_inline
+    pub(package) const fn ext_mut(self: &mut Self, id: NodeId) &mut NodeExt {
+        if !ext_kind(self.at_const(id).kind) {
+            panic("Ast::ext_mut: a node of this kind keeps its payload inline");
+        }
+        let x = self.at_const(id).as_data.ext.at as usize;
+        let sv = if (id & NODE_BODY) != 0 {
+            &mut self.b.ext;
+        } else {
+            &mut self.ext;
+        };
+        return sv.index_mut(x);
+    }
     @always_inline
     pub(package) const fn list(self: &Self, list: NodeList) *const NodeId {
         let sv = if (list.start & NODE_BODY) != 0 {
@@ -5017,7 +5148,7 @@ extend Ast {
     /// discriminant, so every tag is its variant's ordinal. Any other payload enum keeps the 4-byte C enum.
     /// The emitter's struct and the layout service both follow this.
     pub(package) const fn enum_tag_is_byte(self: &Self, decl: NodeId) bool {
-        let ms = self.at_const(decl).as_data.aggregate.members;
+        let ms = self.ext(decl).aggregate.members;
         let mut n: u32 = 0;
         for i in 0..ms.len {
             let vid = unsafe self.list(ms)[i as usize];
@@ -5030,6 +5161,36 @@ extend Ast {
             n += 1;
         }
         return n <= 256;
+    }
+    /// Whether payload enum `decl` has the shape that can keep its discriminant in its payload (the
+    /// niche; `ir::layout::niche_kind` decides on the payload's type): exactly two variants, no
+    /// explicit discriminant, one variant without payload (`none`) and one with a single payload
+    /// member (`some`). Never an `extern` enum.
+    pub(package) const fn niche_shape(self: &Self, decl: NodeId, some: &mut NodeId, none: &mut NodeId) bool {
+        if self.ext(decl).aggregate.is_extern {
+            return false;
+        }
+        let ms = self.ext(decl).aggregate.members;
+        *some = NODE_NONE;
+        *none = NODE_NONE;
+        let mut cnt: u32 = 0;
+        for i in 0..ms.len {
+            let vid = unsafe self.list(ms)[i as usize];
+            let v = self.at_const(vid);
+            if v.kind != NodeKind::NODE_VARIANT {
+                continue;
+            }
+            cnt += 1;
+            if v.as_data.variant.value != NODE_NONE {
+                return false;
+            }
+            if v.as_data.variant.payload.len == 0 {
+                *none = vid;
+            } else if v.as_data.variant.payload.len == 1 {
+                *some = vid;
+            }
+        }
+        return cnt == 2 && *some != NODE_NONE && *none != NODE_NONE;
     }
     /// Resolves `ref_id` to a decl in THIS module (the DefId is stamped with `self.module`); use
     /// set_resolution_def for a foreign target.
@@ -5216,11 +5377,11 @@ extend Ast {
     pub(package) const fn sig_lists(self: &Self, id: NodeId, ps: &mut NodeList, rs: &mut NodeList) bool {
         let n = self.at_const(id);
         if n.kind == NodeKind::NODE_FUNCTION {
-            *ps = n.as_data.function.params;
-            *rs = n.as_data.function.returns;
+            *ps = self.ext(id).function.params;
+            *rs = self.ext(id).function.returns;
         } else if n.kind == NodeKind::NODE_CLOSURE {
-            *ps = n.as_data.closure.params;
-            *rs = n.as_data.closure.returns;
+            *ps = self.ext(id).closure.params;
+            *rs = self.ext(id).closure.returns;
         } else if n.kind == NodeKind::NODE_FUNCTION_TYPE {
             *ps = n.as_data.function_type.params;
             *rs = n.as_data.function_type.returns;
@@ -5275,7 +5436,7 @@ extend Ast {
         if c == NODE_NONE || self.at_const(c).kind != NodeKind::NODE_EXTEND {
             return -1;
         }
-        return self.at_const(c).as_data.extend_def.generics.len as i32;
+        return self.ext(c).extend_def.generics.len as i32;
     }
 
     /// Record `container` as the extend or interface of every node in `items`, or forget it
@@ -5312,7 +5473,7 @@ extend Ast {
     /// True when enum `decl` has a variant with a payload (it emits as a tagged struct, tagged by
     /// declaration ordinal).
     pub(package) const fn enum_has_payload(self: &Self, decl: NodeId) bool {
-        let ms = self.at_const(decl).as_data.aggregate.members;
+        let ms = self.ext(decl).aggregate.members;
         for i in 0..ms.len {
             if self.at_const(unsafe self.list(ms)[i as usize]).as_data.variant.payload.len != 0 {
                 return true;
@@ -5344,6 +5505,20 @@ extend Ast {
         return t;
     }
 
+    /// The name node of item `decl` (a function, struct, enum, interface, type alias or constant);
+    /// NODE_NONE for another kind.
+    pub(package) const fn item_name(self: &Self, decl: NodeId) NodeId {
+        let n = self.at_const(decl);
+        return switch n.kind {
+            NODE_FUNCTION => self.ext_name(decl),
+            NODE_STRUCT | NODE_ENUM => self.ext_name(decl),
+            NODE_INTERFACE => self.ext_name(decl),
+            NODE_TYPE_ALIAS => n.as_data.type_alias.name,
+            NODE_CONST => n.as_data.const_def.name,
+            _ => NODE_NONE,
+        };
+    }
+
     /// The name text of binding declaration `decl` (a let, parameter, loop binding, pattern name
     /// or bare identifier); empty otherwise.
     pub(package) const fn decl_name_span(self: &Self, decl: NodeId) tok::Span {
@@ -5356,7 +5531,7 @@ extend Ast {
         }
         if n.kind == NodeKind::NODE_FOR || n.kind == NodeKind::NODE_INLINE_FOR {
             // A pattern binding's names declare themselves; a lone `mut x` names the loop's local.
-            let b = self.at_const(n.as_data.for_stmt.binding);
+            let b = self.at_const(self.ext(decl).for_stmt.binding);
             if b.kind == NodeKind::NODE_IDENTIFIER {
                 return b.as_data.name.text;
             }
@@ -5433,14 +5608,14 @@ extend Ast {
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
     pub(package) const fn retained_bytes(self: &Self) usize {
-        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.retained() + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.attr_vals.capacity() * sizeof(AttrVal) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.bound_calls.capacity() * sizeof(BoundCall) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.dmd_uses.capacity() * sizeof(ProjOb) + self.frame_uses.capacity() * sizeof(FrameUse) + self.ob_guards.capacity() * sizeof(GuardEnt) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.closure_lts.capacity() * 8 + self.free_touched.capacity() * 8;
+        return self.nodes.retained() + self.ext.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.retained() + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.attr_vals.capacity() * sizeof(AttrVal) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.bound_calls.capacity() * sizeof(BoundCall) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.dmd_uses.capacity() * sizeof(ProjOb) + self.frame_uses.capacity() * sizeof(FrameUse) + self.ob_guards.capacity() * sizeof(GuardEnt) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.closure_lts.capacity() * 8 + self.free_touched.capacity() * 8;
     }
 
     /// Add this module's syntax accounting to `out` (SC_SYNTAX_STATS): the body arena holds the
     /// releasable body syntax; a pinned body (generic, `const fn`, interface default, generic
     /// extend member) and every constant initializer stay in the module arena.
     pub(package) fn syntax_stats(self: &Self, out: &mut SyntaxStats) {
-        let nodes_cap = self.nodes.retained() + self.b.nodes.retained();
+        let nodes_cap = self.nodes.retained() + self.ext.retained() + self.b.nodes.retained() + self.b.ext.retained();
         let children_cap = self.children.retained() + self.b.children.retained();
         let resolutions = self.resolutions.retained() + self.b.resolutions.retained();
         let types = self.types.retained() + self.b.types.retained();
@@ -5462,18 +5637,18 @@ extend Ast {
             let id = unsafe self.list(items)[i as usize];
             let k = self.at_const(id).kind;
             if k == NodeKind::NODE_FUNCTION {
-                if self.at_const(id).as_data.function.body != NODE_NONE {
+                if self.ext(id).function.body != NODE_NONE {
                     out.bodies += 1;
                 }
             } else if k == NodeKind::NODE_EXTEND || k == NodeKind::NODE_INTERFACE {
                 let members = if k == NodeKind::NODE_EXTEND {
-                    self.at_const(id).as_data.extend_def.items;
+                    self.ext(id).extend_def.items;
                 } else {
-                    self.at_const(id).as_data.interface_def.items;
+                    self.ext(id).interface_def.items;
                 };
                 for j in 0..members.len {
                     let m = unsafe self.list(members)[j as usize];
-                    if self.at_const(m).kind == NodeKind::NODE_FUNCTION && self.at_const(m).as_data.function.body != NODE_NONE {
+                    if self.at_const(m).kind == NodeKind::NODE_FUNCTION && self.ext(m).function.body != NODE_NONE {
                         out.bodies += 1;
                     }
                 }
@@ -5800,6 +5975,20 @@ extend NodeList as Persist {
     }
 
     fn load(self: &mut NodeList, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend NodeExt as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &NodeExt, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut NodeExt, r: &mut Reader) {
         load_bytes(self, r);
     }
 }

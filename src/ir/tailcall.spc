@@ -92,7 +92,7 @@ pub(package) fn convert(b: &mut ir::CoreBody, ow: &mut bfx::Owner, misses: &mut 
 fn candidate(p: &loader::Package, b: &ir::CoreBody) bool {
     let a = unsafe &*p.module_ast_const(b.owner.module);
     let n = a.at_const(b.owner.node);
-    if n.kind != NodeKind::NODE_FUNCTION || n.as_data.function.is_variadic() {
+    if n.kind != NodeKind::NODE_FUNCTION || a.ext(b.owner.node).function.is_variadic() {
         return false;
     }
     let c = a.container_of(b.owner.node);
@@ -163,10 +163,10 @@ fn same_instance(p: &loader::Package, b: &ir::CoreBody, t: &ir::Terminator) bool
         return false;
     }
     let a = unsafe &*p.module_ast_const(b.owner.module);
-    let own = a.at_const(b.owner.node).as_data.function.generics;
+    let own = a.ext(b.owner.node).function.generics;
     let ext = a.container_of(b.owner.node);
     let eg = if ext != NODE_NONE {
-        a.at_const(ext).as_data.extend_def.generics;
+        a.ext(ext).extend_def.generics;
     } else {
         NodeList { start: 0, len: 0 };
     };
@@ -197,7 +197,7 @@ fn own_params(a: &Ast, b: &ir::CoreBody, start: u32, list: NodeList) bool {
 // Does the function take a parameter of its extend's target type (`Self`, `&Self`, `&mut Self`)?
 fn has_receiver(a: &Ast, b: &ir::CoreBody) bool {
     let ext = a.container_of(b.owner.node);
-    let tgt = a.type_of(a.at_const(ext).as_data.extend_def.target_type);
+    let tgt = a.type_of(a.ext(ext).extend_def.target_type);
     for k in 0..b.args {
         let mut ty = b.locals.at((b.returns + k) as usize).ty;
         let y = *a.type_at(ty);
@@ -694,7 +694,7 @@ fn callee_params(ow: &bfx::Owner, t: &ir::Terminator) NodeList {
     if n.kind != NodeKind::NODE_FUNCTION {
         return NodeList { start: 0, len: 0 };
     }
-    return n.as_data.function.params;
+    return ow.ast_of(t.callee.module).ext(t.callee.node).function.params;
 }
 
 // The taint call `t` moves: a call given a borrow of the frame (a borrowing argument, or an
@@ -799,7 +799,7 @@ fn autoref_returned(ow: &mut bfx::Owner, t: &ir::Terminator, k: u32) bool {
         ca.at_const(p0.as_data.parameter.name).as_data.name.text,
         "self",
     );
-    let rets = ca.at_const(t.callee.node).as_data.function.returns;
+    let rets = ca.ext(t.callee.node).function.returns;
     for r in 0..rets.len {
         let rn = ca.slot_type_node(unsafe ca.list(rets)[r as usize]);
         if tk != 0 && node_names_lt(ow, cm, rn, tk, 0) {
@@ -832,15 +832,15 @@ fn node_names_lt(ow: &bfx::Owner, m: ModuleId, tn: NodeId, tk: u64, depth: i32) 
         return node_names_lt(ow, m, n.as_data.array_type.element, tk, depth + 1);
     }
     let args = if n.kind == NodeKind::NODE_TYPE_PATH {
-        n.as_data.type_path.args;
+        a.at_const(tn).as_data.type_path.args;
     } else if n.kind == NodeKind::NODE_TUPLE_TYPE {
         n.as_data.array_literal.elements;
     } else {
         return n.kind != NodeKind::NODE_POINTER_TYPE;
     };
-    if n.kind == NodeKind::NODE_TYPE_PATH && n.as_data.type_path.parts.len == 1 && ow.span_text_is(
+    if n.kind == NodeKind::NODE_TYPE_PATH && a.at_const(tn).as_data.type_path.parts.len == 1 && ow.span_text_is(
         m,
-        a.at_const(unsafe a.list(n.as_data.type_path.parts)[0]).as_data.name.text,
+        a.at_const(unsafe a.list(a.at_const(tn).as_data.type_path.parts)[0]).as_data.name.text,
         "Self",
     ) {
         return true;
@@ -888,14 +888,14 @@ fn node_elides(ow: &bfx::Owner, m: ModuleId, tn: NodeId, depth: i32) bool {
     if n.kind != NodeKind::NODE_TYPE_PATH {
         return n.kind != NodeKind::NODE_POINTER_TYPE;
     }
-    if n.as_data.type_path.parts.len == 1 && ow.span_text_is(
+    if a.at_const(tn).as_data.type_path.parts.len == 1 && ow.span_text_is(
         m,
-        a.at_const(unsafe a.list(n.as_data.type_path.parts)[0]).as_data.name.text,
+        a.at_const(unsafe a.list(a.at_const(tn).as_data.type_path.parts)[0]).as_data.name.text,
         "Self",
     ) {
         return true;
     }
-    let args = n.as_data.type_path.args;
+    let args = a.at_const(tn).as_data.type_path.args;
     let mut named: u32 = 0;
     for i in 0..args.len {
         let aid = unsafe a.list(args)[i as usize];

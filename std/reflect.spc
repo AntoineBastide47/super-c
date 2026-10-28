@@ -9,8 +9,9 @@
 //                      those of the generic conformances whose bounds it satisfies (enumeration
 //                      only: a descriptor cannot invoke).
 //   zeroed::<T>()      An all-zero-bytes T. `unsafe`: zero bytes are not a valid value of every
-//                      type. It is the seed the reflection constructors fill field by field:
-//                      releasing an all-zero value is a no-op for every owning std type.
+//                      type. A T that holds a Box has none (a Box is never null): a build error
+//                      for a concrete T, a panic for a generic one. The reflection constructors
+//                      write into an empty `Uninit` instead.
 //   fields(&v)         The field binder: `inline for f in fields(&v) { .. }` typechecks the body
 //                      ONCE against a symbolic per-field type and the emitter unrolls one copy per
 //                      field, each with the field's concrete type: no runtime walk, no erasure.
@@ -38,6 +39,9 @@
 //                                  type.
 //   v.tag / v.payload / v.name     The variant's discriminant (its C enum constant's value), its
 //                                  payload count, and its name.
+//   v.size                         The bytes a value of the variant occupies from its start: the
+//                                  tag and the variant's own payload; the whole value for a niche
+//                                  enum and for an enum without payloads.
 //   v.is_active                    Whether the subject currently holds this variant.
 //   p.value / p.index / p.name     One payload of the active variant, like a field.
 //
@@ -257,21 +261,22 @@ pub fn reflect_any_cmp<T>(a: &T, b: &T) i32 {
     return reflect_cmp(a, b);
 }
 
-/// A fresh deep copy built field by field: a `zeroed` T seeded, then every field cloned in from the
-/// source through its own `Clone`. Overwriting the zeroed placeholder is safe: releasing an
-/// all-zero value is a no-op for every owning std type. Enums need the active variant CONSTRUCTED,
+/// A fresh deep copy built field by field: every field of an empty `Uninit` T is written with the
+/// clone of the source's field through its own `Clone`. Enums need the active variant CONSTRUCTED,
 /// and a union's overlapping fields cannot be cloned independently, so both refuse loudly.
 pub fn reflect_clone<T>(v: &T) T {
     if type_info::<T>().kind == TypeTag::Enum || type_info::<T>().kind == TypeTag::Union {
         panic("a derived 'clone' covers structs and tuples; write it by hand for an enum or union");
     }
-    let mut out = unsafe zeroed::<T>();
-    inline for f in fields(&mut out, v) {
+    let mut out = Uninit::<T> { none: 0 };
+    inline for f in fields(&mut unsafe out.value, v) {
         reflect_clone_field(&mut f.value, &f.other);
     }
-    return out;
+    return unsafe out.value;
 }
 
+// Write the clone of `src` into field `dst`, which holds no value yet: a raw store frees nothing.
 fn reflect_clone_field<V: Clone>(dst: &mut V, src: &V) {
-    *dst = src.clone();
+    let p = dst as *mut V;
+    unsafe *p = src.clone();
 }

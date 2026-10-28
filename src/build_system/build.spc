@@ -2862,7 +2862,7 @@ fn test_filter_imports(p: &loader::Package, prefix: str, filter: str, out: &mut 
                 hit = hit || test_name_has(a, src, id, path, "", filter);
             } else if item.kind == NodeKind::NODE_EXTEND {
                 // A suite test's runner name holds its type's declared name: the last segment of the target.
-                let ts = unsafe (*a).at_const(item.as_data.extend_def.target_type).span;
+                let ts = unsafe (*a).at_const(unsafe (*a).ext(id).extend_def.target_type).span;
                 let mut cut = ts.start as usize;
                 for k in cut + 1..ts.end as usize {
                     if src[k - 1] == b':' && src[k] == b':' {
@@ -2870,7 +2870,7 @@ fn test_filter_imports(p: &loader::Package, prefix: str, filter: str, out: &mut 
                     }
                 }
                 let ty = src.slice(cut, ts.end as usize);
-                let ed = item.as_data.extend_def;
+                let ed = unsafe (*a).ext(id).extend_def;
                 for j in 0..ed.items.len {
                     hit = hit || test_name_has(a, src, unsafe (*a).list(ed.items)[j as usize], path, ty, filter);
                 }
@@ -2894,7 +2894,7 @@ fn test_name_has(a: *const Ast, src: str, id: NodeId, path: str, ty: str, filter
     if f.kind != NodeKind::NODE_FUNCTION || unsafe (*a).attr_of(id, AttrKind::ATTR_TEST) == null {
         return false;
     }
-    let nm = unsafe (*a).at_const(f.as_data.function.name).as_data.name.text;
+    let nm = unsafe (*a).at_const(unsafe (*a).ext_name(id)).as_data.name.text;
     let fname = src.slice(nm.start as usize, nm.end as usize);
     let mut name = String::from_str(path);
     name.push_str("::");
@@ -2902,7 +2902,7 @@ fn test_name_has(a: *const Ast, src: str, id: NodeId, path: str, ty: str, filter
     if name.as_str().contains(filter) {
         return true;
     }
-    if ty.len() == 0 || f.as_data.function.params.len == 0 {
+    if ty.len() == 0 || unsafe (*a).ext(id).function.params.len == 0 {
         return false;
     }
     name.truncate(path.len() + 2);
@@ -2938,7 +2938,7 @@ fn bench_collect(p: &loader::Package, prefix: str, out: &mut Vector<String>) boo
                 // A `@bench` on anything else is the parser's error.
                 continue;
             }
-            if fnode.as_data.function.vis != VIS_PUB {
+            if unsafe (*a).ext(id).function.vis != VIS_PUB {
                 let sp = fnode.span;
                 eprintln(
                     "bench: '@bench' function at {}:{} must be 'pub' -- the generated runner calls it from another module",
@@ -2947,7 +2947,7 @@ fn bench_collect(p: &loader::Package, prefix: str, out: &mut Vector<String>) boo
                 );
                 return false;
             }
-            let nm = unsafe (*a).at_const(fnode.as_data.function.name).as_data.name.text;
+            let nm = unsafe (*a).at_const(unsafe (*a).ext_name(id)).as_data.name.text;
             let mut entry = String::new();
             if unsafe (*at).arg != 0 {
                 // `@bench(log_results = false)`: it prints for itself.

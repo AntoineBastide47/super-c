@@ -105,9 +105,9 @@ extend tc::TypeChecker {
             },
             NODE_STRUCT | NODE_ENUM => {
                 let td = ctx.st.pr.start();
-                self.tc_check_field_lifetimes(id, unsafe (*a).at_const(id).as_data.aggregate.members);
+                self.tc_check_field_lifetimes(id, unsafe (*a).ext(id).aggregate.members);
                 // Every layout is settled here: a type no object can hold is reported once.
-                let agg = unsafe (*a).at_const(id).as_data.aggregate;
+                let agg = unsafe (*a).ext(id).aggregate;
                 if agg.generics.len == 0 {
                     let _ = self.tc_size_limit(self.named_type_of(self.cur_module(), id), self.name_span(agg.name));
                 }
@@ -115,7 +115,7 @@ extend tc::TypeChecker {
             },
             NODE_EXTEND => {
                 self.bc_check_assoc_lifetimes(id);
-                let ms = unsafe (*a).at_const(id).as_data.extend_def.items;
+                let ms = unsafe (*a).ext(id).extend_def.items;
                 for j in 0..ms.len {
                     self.bc_item(unsafe (*a).list(ms)[j as usize], ow, ctx, bodies);
                 }
@@ -129,7 +129,7 @@ extend tc::TypeChecker {
     // (`type Output = Ref<'a>` for any `'a`), so a `'static` bound on it proves nothing.
     pub(package) fn bc_check_assoc_lifetimes(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
-        let ed = unsafe (*a).at_const(id).as_data.extend_def;
+        let ed = unsafe (*a).ext(id).extend_def;
         if ed.interface_type == NODE_NONE {
             return;
         }
@@ -166,7 +166,7 @@ extend tc::TypeChecker {
     /// `self` receiver) or rule 2 (exactly one borrowing input) pins which input it borrows from.
     pub(package) fn tc_check_elision(self: &mut Self, fnid: NodeId) {
         let a = self.cur_ast();
-        let fnd = unsafe (*a).at_const(fnid).as_data.function;
+        let fnd = unsafe (*a).ext(fnid).function;
         if fnd.returns.len == 0 || self.tc_elision_source(fnid) >= 0 {
             return;
         }
@@ -197,7 +197,7 @@ extend tc::TypeChecker {
     /// -1 when neither rule applies.
     pub(package) fn tc_elision_source(self: &mut Self, fnid: NodeId) i32 {
         let a = self.cur_ast();
-        let params = unsafe (*a).at_const(fnid).as_data.function.params;
+        let params = unsafe (*a).ext(fnid).function.params;
         let mut inputs: i32 = 0;
         let mut src: i32 = -1;
         for i in 0..params.len {
@@ -247,7 +247,7 @@ extend tc::TypeChecker {
         if dd.node != NODE_NONE {
             c = (unsafe (*self.mod_ast(dd.module)).lifetimes_of(dd.node).len) as i32;
         }
-        let args = n.as_data.type_path.args;
+        let args = unsafe (*self.mod_ast(m)).at_const(tyn).as_data.type_path.args;
         for i in 0..args.len {
             let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
             if unsafe (*self.mod_ast(m)).at_const(aid).kind != NodeKind::NODE_LIFETIME {
@@ -285,7 +285,7 @@ extend tc::TypeChecker {
         if n.kind != NodeKind::NODE_TYPE_PATH {
             return false;
         }
-        let args = n.as_data.type_path.args;
+        let args = unsafe (*self.mod_ast(m)).at_const(tyn).as_data.type_path.args;
         let mut nlt: i32 = 0;
         for i in 0..args.len {
             let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
@@ -318,7 +318,7 @@ extend tc::TypeChecker {
     /// Report fields of aggregate `decl` whose reference types name a lifetime the declaration does not
     /// declare.
     pub(package) fn tc_check_field_lifetimes(self: &mut Self, decl: NodeId, members: NodeList) {
-        let is_tuple = unsafe (*self.cur_ast()).at_const(decl).as_data.aggregate.is_tuple;
+        let is_tuple = unsafe (*self.cur_ast()).ext(decl).aggregate.is_tuple;
         for i in 0..members.len {
             let mid = unsafe (*self.cur_ast()).list(members)[i as usize];
             let tn = unsafe (*self.cur_ast()).member_type_node(mid, is_tuple);
@@ -371,7 +371,7 @@ extend tc::TypeChecker {
             // A field whose type is itself a BORROWING type (`str`, `Slice<T>`, any aggregate with
             // lifetime params) must name the lifetime it borrows for, exactly as a bare reference must.
             let dd = unsafe (*a).resolution_def(tyn);
-            let args = n.as_data.type_path.args;
+            let args = unsafe (*a).at_const(tyn).as_data.type_path.args;
             let mut named = false;
             for j in 0..args.len {
                 let aid = unsafe (*a).list(args)[j as usize];
@@ -413,7 +413,7 @@ extend tc::TypeChecker {
     @cold
     fn bc_flow_limit(self: &mut Self, what: str, cap: u32) {
         let a = self.cur_ast();
-        let sp = self.name_span(unsafe (*a).at_const(self.icx.current_fn).as_data.function.name);
+        let sp = self.name_span(unsafe (*a).ext_name(self.icx.current_fn));
         let msg = format("this function exceeds the borrow checker's limit of {} {}", cap, what);
         for k in self.err_wm..self.errors.errors.len() {
             if self.errors.errors[k].start == sp.start && self.errors.errors[k].msg.equals(&msg) {
@@ -1103,7 +1103,7 @@ extend tc::TypeChecker {
                 if es < 0 {
                     continue;
                 }
-                let params = unsafe (*a).at_const(self.icx.current_fn).as_data.function.params;
+                let params = unsafe (*a).ext(self.icx.current_fn).function.params;
                 let etyn = unsafe (*a).at_const(unsafe (*a).list(params)[es as usize]).as_data.parameter.ty;
                 let mut es_lts = Spans8 {};
                 if etyn == ptyn || self.tc_collect_slot_lts(self.cur_module(), etyn, &mut es_lts) == 0 {
@@ -1167,7 +1167,7 @@ extend tc::TypeChecker {
             for i in 0..lts.len {
                 let lp = unsafe (*self.cur_ast()).list(lts)[i as usize];
                 let sup = self.tc_lt_region_of_name(self.tc_lt_name(lp));
-                let bnds = unsafe (*self.cur_ast()).at_const(lp).as_data.generic_param.bounds;
+                let bnds = unsafe (*self.cur_ast()).ext(lp).generic_param.bounds;
                 for b in 0..bnds.len {
                     let bid = unsafe (*self.cur_ast()).list(bnds)[b as usize];
                     self.region_add_outlives(sup, self.tc_lt_region_of_name(self.tc_lt_name(bid)));
@@ -1176,16 +1176,16 @@ extend tc::TypeChecker {
         }
         // The bounds the parameter types and the extend's target imply (`s: &S<'x>` of `struct S<'a:
         // 'static>` gives `'x: 'static`): a caller proves them for its arguments.
-        let ps = unsafe (*self.cur_ast()).at_const(fnid).as_data.function.params;
+        let ps = unsafe (*self.cur_ast()).ext(fnid).function.params;
         for i in 0..ps.len {
             let ptn = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).list(ps)[i as usize]).as_data.parameter.ty;
             self.region_implied(ptn, 0);
         }
         let ext = self.enclosing(self.cur_module(), fnid, NodeKind::NODE_EXTEND);
         if ext != NODE_NONE {
-            self.region_implied(unsafe (*self.cur_ast()).at_const(ext).as_data.extend_def.target_type, 0);
+            self.region_implied(unsafe (*self.cur_ast()).ext(ext).extend_def.target_type, 0);
         }
-        let wc = unsafe (*self.cur_ast()).at_const(fnid).as_data.function.where_clause;
+        let wc = unsafe (*self.cur_ast()).ext(fnid).function.where_clause;
         for w in 0..wc.len {
             let wp = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).list(wc)[w as usize]).as_data.where_predicate;
             if unsafe (*self.cur_ast()).at_const(wp.ty).kind != NodeKind::NODE_LIFETIME {
@@ -1265,7 +1265,7 @@ extend tc::TypeChecker {
         if n.kind == NodeKind::NODE_TUPLE_TYPE {
             es = n.as_data.array_literal.elements;
         } else if n.kind == NodeKind::NODE_TYPE_PATH {
-            es = n.as_data.type_path.args;
+            es = unsafe (*a).at_const(tyn).as_data.type_path.args;
         }
         for i in 0..es.len {
             let e = unsafe (*a).list(es)[i as usize];
@@ -1287,7 +1287,7 @@ extend tc::TypeChecker {
             return;
         }
         for i in 0..lts.len {
-            let bs = unsafe (*da).at_const(unsafe (*da).list(lts)[i as usize]).as_data.generic_param.bounds;
+            let bs = unsafe (*da).ext(unsafe (*da).list(lts)[i as usize]).generic_param.bounds;
             for b in 0..bs.len {
                 let bn = self.tc_lt_name_in(d.module, unsafe (*da).list(bs)[b as usize]);
                 if span_is(self.mod_src(d.module), bn, "'static") {
@@ -1438,7 +1438,7 @@ extend tc::TypeChecker {
             return self.tc_container_elem_lt(m, n.as_data.indirect_type.ty);
         }
         if n.kind == NodeKind::NODE_TYPE_PATH {
-            let args = n.as_data.type_path.args;
+            let args = unsafe (*self.mod_ast(m)).at_const(ptyn).as_data.type_path.args;
             for i in 0..args.len {
                 let aid = unsafe (*self.mod_ast(m)).list(args)[i as usize];
                 if unsafe (*self.mod_ast(m)).at_const(aid).is_ref_type() {
@@ -1541,7 +1541,7 @@ extend tc::TypeChecker {
         if n.kind == NodeKind::NODE_TUPLE_TYPE {
             subs = n.as_data.array_literal.elements;
         } else if n.kind == NodeKind::NODE_TYPE_PATH {
-            subs = n.as_data.type_path.args;
+            subs = unsafe (*self.mod_ast(m)).at_const(node).as_data.type_path.args;
         }
         for i in 0..subs.len {
             let aid = unsafe (*self.mod_ast(m)).list(subs)[i as usize];
@@ -1697,7 +1697,7 @@ extend tc::TypeChecker {
         if unsafe (*fa).at_const(fdecl).kind != NodeKind::NODE_FUNCTION {
             return;
         }
-        let gens = unsafe (*fa).at_const(fdecl).as_data.function.generics;
+        let gens = unsafe (*fa).ext(fdecl).function.generics;
         if gens.len == 0 {
             return;
         }
@@ -1752,10 +1752,10 @@ extend tc::TypeChecker {
     /// True when generic param `g` of function `(fmod, fdecl)` carries a `'static` bound.
     pub(package) fn tc_generic_has_static_bound(self: &mut Self, fmod: ModuleId, fdecl: NodeId, g: NodeId) bool {
         let fa = self.mod_ast(fmod);
-        if self.tc_bounds_have_static(fmod, unsafe (*fa).at_const(g).as_data.generic_param.bounds) {
+        if self.tc_bounds_have_static(fmod, unsafe (*fa).ext(g).generic_param.bounds) {
             return true;
         }
-        let wc = unsafe (*fa).at_const(fdecl).as_data.function.where_clause;
+        let wc = unsafe (*fa).ext(fdecl).function.where_clause;
         for w in 0..wc.len {
             let wp = unsafe (*fa).at_const(unsafe (*fa).list(wc)[w as usize]).as_data.where_predicate;
             if unsafe (*fa).resolution(wp.ty) == g && self.tc_bounds_have_static(fmod, wp.bounds) {
@@ -1770,10 +1770,10 @@ extend tc::TypeChecker {
     pub(package) fn tc_param_shares_recv_region(self: &mut Self, md: DefId, recv_ty: TypeId, idx: i32, arg: NodeId) bool {
         let fa = self.mod_ast(md.module);
         let fnn = unsafe (*fa).at_const(md.node);
-        if fnn.kind != NodeKind::NODE_FUNCTION || fnn.as_data.function.params.len as i32 <= idx {
+        if fnn.kind != NodeKind::NODE_FUNCTION || (unsafe (*fa).ext(md.node).function.params.len) as i32 <= idx {
             return false;
         }
-        let pdecl = unsafe (*fa).list(fnn.as_data.function.params)[idx as usize];
+        let pdecl = unsafe (*fa).list(unsafe (*fa).ext(md.node).function.params)[idx as usize];
         let ptyn = unsafe (*fa).at_const(pdecl).as_data.parameter.ty;
         if ptyn == NODE_NONE {
             return false;
@@ -1790,7 +1790,7 @@ extend tc::TypeChecker {
         // (`extend<T, A> Vector<T, A> { fn push(value: T) }`) shares the receiver's region.
         let gdecl = self.type_at(pt).as_data.decl;
         let gmod = self.type_at(pt).module;
-        let own = fnn.as_data.function.generics;
+        let own = unsafe (*fa).ext(md.node).function.generics;
         for k in 0..own.len {
             if unsafe (*fa).list(own)[k as usize] == gdecl && gmod == md.module {
                 return false;
@@ -1953,7 +1953,7 @@ extend tc::TypeChecker {
         irbodies: &mut Vector<irl::Lowerer>,
     ) {
         let a = self.cur_ast();
-        let fnd = unsafe (*a).at_const(id).as_data.function;
+        let fnd = unsafe (*a).ext(id).function;
         // An intrinsic only `--bootstrap-tags` accepts has no operation to fill its empty body with.
         if fnd.body == NODE_NONE || self.tc_unknown_intrinsic(self.cur_module(), id) {
             return;
@@ -2075,7 +2075,7 @@ extend tc::TypeChecker {
                 self.bc_assign_post(node, bm);
             } else if k == ir::TP_RET_VAL {
                 if self.icx.current_fn != NODE_NONE {
-                    let rl = unsafe (*a).at_const(self.icx.current_fn).as_data.function.returns;
+                    let rl = unsafe (*a).ext(self.icx.current_fn).function.returns;
                     if aux < rl.len {
                         self.tc_check_return_lifetime(node, unsafe (*a).list(rl)[aux as usize]);
                     }
@@ -2174,7 +2174,7 @@ extend tc::TypeChecker {
                 let lbl = if nk9 == NodeKind::NODE_WHILE {
                     unsafe (*a).at_const(node).as_data.while_stmt.label;
                 } else {
-                    unsafe (*a).at_const(node).as_data.for_stmt.label;
+                    unsafe (*a).ext(node).for_stmt.label;
                 };
                 st.les.push(self.tc_loop_push(lbl, node, false));
             } else if k == ir::TP_LOOP_POP {
@@ -2189,7 +2189,7 @@ extend tc::TypeChecker {
                 if nk9 == NodeKind::NODE_FOR || nk9 == NodeKind::NODE_INLINE_FOR {
                     self.tc_record_binding_depth(node);
                     // A pattern binding's names are declarations of their own.
-                    self.bc_pattern_depths(unsafe (*a).at_const(node).as_data.for_stmt.binding);
+                    self.bc_pattern_depths(unsafe (*a).ext(node).for_stmt.binding);
                 }
                 st.seg.push((i + 1) as u64 << 32 | self.nmoved as u64 << 16 | self.nborrows as u64);
             } else if k == ir::TP_BODY_END {
@@ -2214,7 +2214,7 @@ extend tc::TypeChecker {
         let values = unsafe (*a).at_const(id).as_data.return_stmt.values;
         let mut ret_list = NodeList { start: 0, len: 0 };
         if self.icx.current_fn != NODE_NONE {
-            ret_list = unsafe (*a).at_const(self.icx.current_fn).as_data.function.returns;
+            ret_list = unsafe (*a).ext(self.icx.current_fn).function.returns;
         }
         for i in 0..values.len {
             let vid = unsafe (*a).list(values)[i as usize];
@@ -2452,8 +2452,8 @@ extend tc::TypeChecker {
         let md = DefId { module: (packed >> 40) as ModuleId, node: (packed >> 8 & 0xFFFFFFFFu64) as NodeId };
         let skip = (packed & 0xFFu64) as u32;
         let fa = self.mod_ast(md.module);
-        let params = unsafe (*fa).at_const(md.node).as_data.function.params;
-        let returns = unsafe (*fa).at_const(md.node).as_data.function.returns;
+        let params = unsafe (*fa).ext(md.node).function.params;
+        let returns = unsafe (*fa).ext(md.node).function.returns;
         // A ref->ptr coercion at an argument erases the borrow.
         for pi in skip..params.len.min(args.len + skip) {
             let i = pi - skip;
@@ -2521,7 +2521,7 @@ extend tc::TypeChecker {
                 let ra = self.bc_fn_ret_attr(m, id);
                 unsafe (&mut *self.package).set_item_ret_attr(m, id, ra);
             } else if k == NodeKind::NODE_EXTEND {
-                let ms = unsafe (*a).at_const(id).as_data.extend_def.items;
+                let ms = unsafe (*a).ext(id).extend_def.items;
                 for j in 0..ms.len {
                     let mid = unsafe (*a).list(ms)[j as usize];
                     if unsafe (*a).at_const(mid).kind == NodeKind::NODE_FUNCTION {
@@ -2536,7 +2536,7 @@ extend tc::TypeChecker {
     // The verdict of function `f`: a caller reads it only for a result that carries a borrow, so a
     // function without results records true without the body scan.
     fn bc_fn_ret_attr(self: &mut Self, m: ModuleId, f: NodeId) bool {
-        let fd = unsafe (*self.cur_ast()).at_const(f).as_data.function;
+        let fd = unsafe (*self.cur_ast()).ext(f).function;
         return fd.returns.len == 0 || self.tc_scan_returns_attributable(m, fd.body, 0);
     }
 
@@ -2552,7 +2552,7 @@ extend tc::TypeChecker {
             return v != 0;
         }
         let fa = self.mod_ast(md.module);
-        let body = unsafe (*fa).at_const(md.node).as_data.function.body;
+        let body = unsafe (*fa).ext(md.node).function.body;
         return self.tc_scan_returns_attributable(md.module, body, 0);
     }
 
@@ -2597,11 +2597,11 @@ extend tc::TypeChecker {
                 n.as_data.while_stmt.body,
                 d,
             ),
-            NODE_FOR | NODE_INLINE_FOR => self.tc_scan_returns_attributable(m, n.as_data.for_stmt.iterable, d) && self.tc_scan_returns_attributable(
+            NODE_FOR | NODE_INLINE_FOR => self.tc_scan_returns_attributable(
                 m,
-                n.as_data.for_stmt.body,
+                unsafe (*fa).ext(node).for_stmt.iterable,
                 d,
-            ),
+            ) && self.tc_scan_returns_attributable(m, unsafe (*fa).ext(node).for_stmt.body, d),
             NODE_MATCH => {
                 if !self.tc_scan_returns_attributable(m, n.as_data.match_expr.value, d) {
                     return false;
@@ -2982,7 +2982,7 @@ extend tc::TypeChecker {
     /// `cp`'s type at a position where parameter `c` names it must outlive it. False when one does not.
     pub(package) fn relate_store_lts_ok(self: &mut Self, md: DefId, c: u32, sp: NodeId, cp: NodeId, ps_pointee: NodeId) bool {
         let fa = self.mod_ast(md.module);
-        let params = unsafe (*fa).at_const(md.node).as_data.function.params;
+        let params = unsafe (*fa).ext(md.node).function.params;
         let ct = unsafe (*fa).at_const(unsafe (*fa).list(params)[c as usize]).as_data.parameter.ty;
         let rst = unsafe (*self.cur_ast()).at_const(sp).as_data.parameter.ty;
         let rct = unsafe (*self.cur_ast()).at_const(cp).as_data.parameter.ty;
@@ -3079,8 +3079,8 @@ extend tc::TypeChecker {
             ) {
                 return;
             }
-            cs = cn.as_data.type_path.args;
-            rs = rn.as_data.type_path.args;
+            cs = unsafe (*ca).at_const(ct).as_data.type_path.args;
+            rs = unsafe (*ra).at_const(rt).as_data.type_path.args;
         }
         // Lifetime arguments pair by lifetime index and type arguments by type index; an unwritten
         // caller lifetime argument is elided.
@@ -3139,7 +3139,7 @@ extend tc::TypeChecker {
             return self.tc_param_shares_recv_region(md, recv_ty, c as i32, aid);
         }
         let fa = self.mod_ast(md.module);
-        let params = unsafe (*fa).at_const(md.node).as_data.function.params;
+        let params = unsafe (*fa).ext(md.node).function.params;
         let pv_ty = unsafe (*fa).at_const(unsafe (*fa).list(params)[c as usize]).as_data.parameter.ty;
         if pv_ty == NODE_NONE {
             return false;
@@ -3165,9 +3165,9 @@ extend tc::TypeChecker {
     /// walk does after the closure body; shared with the tape replay.
     pub(package) fn bc_closure_caps(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
-        let caps = unsafe (*a).at_const(id).as_data.closure.captures;
-        let mut_caps = (unsafe (*a).at_const(id).as_data.closure.mut_caps) as u64;
-        let ref_caps = (unsafe (*a).at_const(id).as_data.closure.ref_caps) as u64;
+        let caps = unsafe (*a).ext(id).closure.captures;
+        let mut_caps = (unsafe (*a).ext(id).closure.mut_caps) as u64;
+        let ref_caps = (unsafe (*a).ext(id).closure.ref_caps) as u64;
         for i in 0..caps.len {
             let cid = unsafe (*a).list(caps)[i as usize];
             let cty = unsafe (*a).type_of(cid);
@@ -3240,6 +3240,73 @@ extend tc::TypeChecker {
         }
     }
 
+    // Whether method name `mem` of a `.free()` call names the destructor: the prelude `Free`'s `free`
+    // (through a bound, or an extend of `Free`), or the intrinsic derived one (no method resolved).
+    fn free_is_destructor(self: &Self, mem: NodeId) bool {
+        let d = unsafe (*self.cur_ast()).resolution_def(mem);
+        if d.node == NODE_NONE {
+            return true;
+        }
+        let da = self.mod_ast(d.module);
+        let ext = self.enclosing(d.module, d.node, NodeKind::NODE_EXTEND);
+        if ext != NODE_NONE {
+            let it = unsafe (*da).ext(ext).extend_def.interface_type;
+            return it != NODE_NONE && self.is_free_iface(unsafe (*da).resolution_def(it));
+        }
+        let itf = self.enclosing(d.module, d.node, NodeKind::NODE_INTERFACE);
+        return itf != NODE_NONE && self.is_free_iface(DefId { module: d.module, node: itf });
+    }
+
+    // Whether an explicit `.free()` of place `recv` would leave a freed Box for its owner to free again:
+    // the place is reached through a reference, not through a raw pointer (an unsafe drop in place),
+    // and its value holds a Box (`tc_holds_box`). A destructor (a `free` method) frees its own parts.
+    fn free_leaves_box(self: &mut Self, recv: NodeId) bool {
+        let a = self.cur_ast();
+        let mut vt = unsafe (*a).type_of(recv);
+        if vt == TYPE_NONE || self.type_at(vt).kind == TypeKind::TYPE_POINTER {
+            return false;
+        }
+        let mut thru_ref = false;
+        if self.type_at(vt).kind == TypeKind::TYPE_REFERENCE {
+            thru_ref = true;
+            vt = self.type_at(vt).as_data.elem;
+        }
+        let mut place = recv;
+        for _ in 0..unsafe (*a).nnodes() {
+            let pn = unsafe (*a).at_const(place);
+            let mut base = NODE_NONE;
+            if pn.kind == NodeKind::NODE_UNARY && pn.as_data.unary.op == TokenType::Star {
+                base = pn.as_data.unary.operand;
+            } else if pn.kind == NodeKind::NODE_MEMBER && !pn.as_data.member.path {
+                base = pn.as_data.member.object;
+            } else if pn.kind == NodeKind::NODE_INDEX {
+                base = pn.as_data.index.object;
+            } else {
+                break;
+            }
+            let bt = unsafe (*a).type_of(base);
+            if bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_POINTER {
+                return false;
+            }
+            if bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_REFERENCE {
+                thru_ref = true;
+            }
+            place = base;
+        }
+        if !thru_ref {
+            return false;
+        }
+        let f = self.icx.current_fn;
+        if f != NODE_NONE && unsafe (*a).at_const(f).kind == NodeKind::NODE_FUNCTION && unsafe (*a).ext(f).function.params.len >= 1 && span_is(
+            self.mod_src(self.cur_module()),
+            unsafe (*a).at_const(unsafe (*a).ext_name(f)).as_data.name.text,
+            "free",
+        ) {
+            return false;
+        }
+        return self.tc_holds_box(vt, true, 0);
+    }
+
     /// Check a method call's receiver: reject a reference-returning method on an owned temporary and
     /// tie the returned borrow to the receiver.
     pub(package) fn check_call_receiver(
@@ -3282,6 +3349,15 @@ extend tc::TypeChecker {
             }
         }
         let is_free = span_is(self.mod_src(self.cur_module()), unsafe (*a).at_const(mem).as_data.name.text, "free");
+        if is_free && self.free_is_destructor(mem) && self.free_leaves_box(recv) {
+            self.errors.emit_span(
+                dc::CANNOT_FREE_BOX_THROUGH_REFERENCE,
+                unsafe (*a).at_const(recv).span,
+                format(
+                    "cannot free a value that holds a Box through a reference: its owner frees it again; assign a new value or free the owner",
+                ),
+            );
+        }
         if is_free {
             let rty = *self.type_at(unsafe (*a).type_of(recv));
             let mut thru = NODE_NONE;

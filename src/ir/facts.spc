@@ -121,7 +121,7 @@ pub(package) const fn is_prelude_len_call(pkg: *const loader::Package, b: &ir::C
     if b.operands.at(b.oper_pool[t.args_start as usize] as usize).kind == ir::OP_CONST {
         return false;
     }
-    let ns = da.at_const(nd.as_data.function.name).as_data.name.text;
+    let ns = da.at_const(da.ext_name(t.callee.node)).as_data.name.text;
     let src = pk.modules.at(t.callee.module as usize).source.as_str();
     return src.slice(ns.start as usize, ns.end as usize) == "len";
 }
@@ -2627,7 +2627,7 @@ extend Facts {
         if n.kind != NodeKind::NODE_FUNCTION {
             return false;
         }
-        return !n.as_data.function.is_extern();
+        return !a.ext(d.node).function.is_extern();
     }
 
     /// `rv` casts a reference to a raw pointer: its target leaves the borrow discipline.
@@ -3022,7 +3022,7 @@ extend Facts {
             return vkey_none();
         }
         let da = unsafe &*pk.module_ast_const(rv.item.module);
-        let members = da.at_const(rv.item.node).as_data.aggregate.members;
+        let members = da.ext(rv.item.node).aggregate.members;
         for j in 0..members.len {
             let opid = b.oper_pool[(rv.a + j) as usize];
             if opid != ir::IR_NONE && self.is_prelude_field(b, rv.target, unsafe da.list(members)[j as usize], "len") {

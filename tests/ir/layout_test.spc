@@ -72,11 +72,11 @@ fn probe_ty(p: &loader::Package, name: str, m_out: &mut ModuleId) TypeId {
         if a.at_const(nid).kind != NodeKind::NODE_FUNCTION {
             continue;
         }
-        let sp = a.at_const(a.at_const(nid).as_data.function.name).as_data.name.text;
+        let sp = a.at_const(a.ext(nid).function.name).as_data.name.text;
         if src.slice(sp.start as usize, sp.end as usize) != name {
             continue;
         }
-        let ps = a.at_const(nid).as_data.function.params;
+        let ps = a.ext(nid).function.params;
         assert(ps.len == 1, "one probe parameter");
         *m_out = u as ModuleId;
         return a.type_of(unsafe a.list(ps)[0]);
@@ -98,7 +98,7 @@ fn field_decl(p: &loader::Package, m: ModuleId, t: TypeId, fname: str) NodeId {
     }
     let da = unsafe &*p.module_ast_const(dm);
     let src = p.modules.at(dm as usize).source.as_str();
-    let ms = da.at_const(dn).as_data.aggregate.members;
+    let ms = da.ext(dn).aggregate.members;
     for i in 0..ms.len {
         let fid = unsafe da.list(ms)[i as usize];
         if da.at_const(fid).kind != NodeKind::NODE_FIELD {

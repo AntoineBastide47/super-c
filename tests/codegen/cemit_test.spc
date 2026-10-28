@@ -76,7 +76,7 @@ fn find_fn(p: &loader::Package, name: str) NodeId {
         if a.at_const(nid).kind != NodeKind::NODE_FUNCTION {
             continue;
         }
-        let sp = a.at_const(a.at_const(nid).as_data.function.name).as_data.name.text;
+        let sp = a.at_const(a.ext(nid).function.name).as_data.name.text;
         if src.slice(sp.start as usize, sp.end as usize) == name {
             return nid;
         }

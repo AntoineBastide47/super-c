@@ -287,7 +287,7 @@ extend<'a> PatCx<'a> {
         *count = 0;
         if en != NODE_NONE {
             let a = unsafe &*(&*self.pkg).module_ast_const(vd.module);
-            *count = a.at_const(en).as_data.aggregate.members.len;
+            *count = a.ext(en).aggregate.members.len;
         }
         return ord;
     }
@@ -531,7 +531,7 @@ extend<'a> PatCx<'a> {
             return;
         }
         let a = unsafe &*(&*self.pkg).module_ast_const(sd.module);
-        let ms = a.at_const(sd.node).as_data.aggregate.members;
+        let ms = a.ext(sd.node).aggregate.members;
         let ch = self.f.node(pid).as_data.pattern.children;
         self.norm_children(pid, sd, ch, true, ms, ms.len, PC_STRUCT, 0, out);
     }
@@ -1425,7 +1425,7 @@ extend<'a> PatCx<'a> {
     const fn slot_field_decl(self: &Self, p: &NPat, f: u32) NodeId {
         if p.kind == PC_STRUCT && p.decl.node != NODE_NONE {
             let a = unsafe &*(&*self.pkg).module_ast_const(p.decl.module);
-            let ms = a.at_const(p.decl.node).as_data.aggregate.members;
+            let ms = a.ext(p.decl.node).aggregate.members;
             if f < ms.len {
                 return unsafe a.list(ms)[f as usize];
             }

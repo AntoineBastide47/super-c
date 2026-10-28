@@ -44,6 +44,11 @@ extend TypedFacts {
         return self.a().at_const(n);
     }
 
+    /// The payload node `n` keeps outside itself (`Ast::ext`).
+    pub(package) const fn ext(self: &Self, n: NodeId) &NodeExt {
+        return self.a().ext(n);
+    }
+
     pub(package) const fn list(self: &Self, l: NodeList) *const NodeId {
         return self.a().list(l);
     }
@@ -165,7 +170,7 @@ extend TypedFacts {
     /// A closure's captures: the binding list the type checker recorded on the closure node (its
     /// `mut_caps` mask names the captures taken as implicit `&mut`).
     pub(package) const fn captures(self: &Self, closure: NodeId) NodeList {
-        return self.node(closure).as_data.closure.captures;
+        return self.ext(closure).closure.captures;
     }
 }
 

@@ -88,22 +88,17 @@ extend<T, A: Allocator> Box<T, A> as DerefMut<T> {
 
 // Free the allocation AND deep-free the boxed value. Auto-`Free`: a `Box` is released at scope exit. Sound
 // because `get` returns a borrow (`&T`) rather than a sharing copy, so the box is the only owner of the
-// value. The inner `.free()` is a no-op when `T` isn't a Free type.
+// value. The inner `.free()` is a no-op when `T` isn't a Free type. A Box is never null (`zeroed`
+// cannot build one, and the checker rejects a `free` that would leave one to be freed again), so
+// freeing it leaves nothing behind.
 extend<T, A: Allocator> Box<T, A> as Free {
     pub fn free(self: &mut Box<T, A>) {
-        if self.ptr == null {
-            // An all-zero Box (a `zeroed` seed, or one already freed) owns nothing.
-            return;
-        }
         // Free the boxed value (no-op if T isn't Free).
         self.ptr.free();
-        if sizeof(T) == 0 {
-            self.ptr = null;
-            // The sentinel was never allocated.
-            return;
+        if sizeof(T) != 0 {
+            // A zero-sized value's sentinel was never allocated.
+            unsafe self.alloc.dealloc(self.ptr, sizeof(T), alignof(T));
         }
-        unsafe self.alloc.dealloc(self.ptr, sizeof(T), alignof(T));
-        self.ptr = null;
     }
 }
 
