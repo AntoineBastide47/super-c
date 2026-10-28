@@ -235,6 +235,62 @@ fn loop_kept_values_keep_their_homes() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A comparison only branches and selects read, an `and` only tested against 0 (an 8-bit one with the
+// bits above its width set in its register), a product added or subtracted, a shifted field masked:
+// each folds into its user's instruction where the target has one, with the scalar results.
+@test
+fn folded_compares_and_fields_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @tst8 fn global\nsym @tst64 fn global\nsym @msub fn global\nsym @madd fn global\nsym @field fn global\nsym @field32 fn global\nsym @spread fn global\nfn @tst8\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = trunc.i8 v0\n  v3 = trunc.i8 v1\n  v4 = and.i8 v2, v3\n  v5 = iconst.i8 0\n  v6 = icmp.eq v4, v5\n  v7 = iconst.i32 7\n  v8 = iconst.i32 9\n  v9 = select.i32 v6, v7, v8\n  ret v9\nfn @tst64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = and.i64 v0, v1\n  v3 = iconst.i64 0\n  v4 = icmp.ne v2, v3\n  br v4, b1, b2\nb1:\n  v5 = iconst.i64 1\n  ret v5\nb2:\n  v6 = iconst.i64 2\n  ret v6\nfn @msub\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = mul.i64 v1, v2\n  v4 = sub.i64 v0, v3\n  ret v4\nfn @madd\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = mul.i32 v1, v2\n  v4 = add.i32 v0, v3\n  ret v4\nfn @field\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 12\n  v2 = lshr.i64 v0, v1\n  v3 = iconst.i64 255\n  v4 = and.i64 v2, v3\n  ret v4\nfn @field32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 28\n  v2 = lshr.i32 v0, v1\n  v3 = iconst.i32 15\n  v4 = and.i32 v2, v3\n  ret v4\nfn @spread\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = icmp.slt v0, v1\n  v3 = select.i64 v2, v0, v1\n  v4 = select.i64 v2, v1, v0\n  v5 = sub.i64 v4, v3\n  ret v5\n";
+    let drv = "#include <stdint.h>\nint32_t tst8(int32_t, int32_t);\nint64_t tst64(int64_t, int64_t);\nint64_t msub(int64_t, int64_t, int64_t);\nint32_t madd(int32_t, int32_t, int32_t);\nint64_t field(int64_t);\nint32_t field32(int32_t);\nint64_t spread(int64_t, int64_t);\nint main(void) {\n  if (tst8(0x100, 0x1FF) != 7 || tst8(0x101, 0x01) != 9) return 1;\n  if (tst64(INT64_C(1) << 40, INT64_C(1) << 40) != 1 || tst64(INT64_C(1) << 40, 1) != 2) return 2;\n  if (msub(100, 7, 9) != 37 || msub(0, -3, 5) != 15) return 3;\n  if (madd(1, 0x10000, 0x10000) != 1 || madd(-4, 3, 2) != 2) return 4;\n  if (field(INT64_C(0xABCDE123456)) != 0x23 || field(-1) != 255) return 5;\n  if (field32((int32_t)0xF0000000u) != 15 || field32(0x0FFFFFFF) != 0) return 6;\n  if (spread(3, -5) != 8 || spread(-5, 3) != 8) return 7;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Products by 2^s + 1 and 2^s - 1 (a shifted sum, a shift and a difference; `lea` by 3, 5 and 9, then a
+// shift by their multiples by 2^s; a product by all ones, which no shift within the width gives,
+// multiplies), and
+// loads and stores of consecutive bytes through one address (`ldp`, `stp`), with their results.
+@test
+fn constant_products_and_paired_accesses_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @k3 fn global\nsym @k7 fn global\nsym @k9w fn global\nsym @kn fn global\nsym @kw fn global\nsym @ks fn global\nsym @ksw fn global\nsym @swap4 fn global\nfn @k3\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 3\n  v2 = mul.i64 v0, v1\n  ret v2\nfn @k7\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 7\n  v2 = mul.i64 v0, v1\n  ret v2\nfn @k9w\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 9\n  v2 = mul.i32 v0, v1\n  ret v2\nfn @kn\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 -1\n  v2 = mul.i64 v0, v1\n  ret v2\nfn @kw\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 4294967295\n  v2 = mul.i32 v0, v1\n  v3 = iconst.i32 2147483647\n  v4 = mul.i32 v0, v3\n  v5 = add.i32 v2, v4\n  ret v5\nfn @ks\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 40\n  v2 = mul.i64 v0, v1\n  v3 = iconst.i64 12\n  v4 = mul.i64 v0, v3\n  v5 = iconst.i64 31\n  v6 = mul.i64 v0, v5\n  v7 = add.i64 v2, v4\n  v8 = add.i64 v7, v6\n  ret v8\nfn @ksw\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 72\n  v2 = mul.i32 v0, v1\n  v3 = iconst.i32 10\n  v4 = mul.i32 v0, v3\n  v5 = add.i32 v2, v4\n  ret v5\nfn @swap4\n  sig (ptr) -> i64\nb0(v0: ptr):\n  v1 = load.i64 v0 align 3\n  v2 = load.i64 v0+8 align 3\n  v3 = load.i32 v0+16 align 2\n  v4 = load.i32 v0+20 align 2\n  store v2, v0 align 3\n  store v1, v0+8 align 3\n  store v4, v0+16 align 2\n  store v3, v0+20 align 2\n  v5 = sext.i64 v3\n  v6 = add.i64 v1, v5\n  ret v6\n";
+    let drv = "#include <stdint.h>\nint64_t k3(int64_t);\nint64_t k7(int64_t);\nint32_t k9w(int32_t);\nint64_t kn(int64_t);\nint32_t kw(int32_t);\nint64_t ks(int64_t);\nint32_t ksw(int32_t);\nint64_t swap4(void *);\nstruct S { int64_t a, b; int32_t c, d; };\nint main(void) {\n  if (k3(-5) != -15 || k3(INT64_C(1) << 62) != (int64_t)(UINT64_C(3) << 62)) return 1;\n  if (k7(6) != 42 || k7(-1) != -7) return 2;\n  if (k9w(-3) != -27 || k9w(0x10000000) != (int32_t)0x90000000u) return 3;\n  if (kn(5) != -5 || kn(INT64_MIN) != INT64_MIN) return 5;\n  if (kw(3) != (int32_t)(3u * 0xFFFFFFFFu + 3u * 0x7FFFFFFFu)) return 6;\n  if (ks(-7) != -7 * 83 || ks(INT64_C(1) << 60) != (int64_t)(UINT64_C(83) << 60)) return 7;\n  if (ksw(-9) != -9 * 82 || ksw(0x7FFFFFF) != (int32_t)(0x7FFFFFFu * 82u)) return 8;\n  struct S s = {1, 2, -3, 4};\n  if (swap4(&s) != -2 || s.a != 2 || s.b != 1 || s.c != 4 || s.d != -3) return 4;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// An aggregate passed in registers whose entry block only loads its parts: the loads take the registers
+// when no call comes before them, and read its memory after one (the call writes the registers: its
+// result arrives in the first one).
+@test
+fn register_passed_aggregate_parts_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @three fn global\nsym @before fn global\nsym @after fn global\nfn @before\n  layout l0 size 16 align 3 [0 i64, 8 i64]\n  sig (l0, i64) -> i64\nb0(v0: ptr, v1: i64):\n  v2 = load.i64 v0 align 3\n  v3 = load.i64 v0+8 align 3\n  v4 = call.i64 @three() : () -> i64\n  v5 = sub.i64 v2, v3\n  v6 = add.i64 v5, v4\n  v7 = add.i64 v6, v1\n  ret v7\nfn @after\n  layout l0 size 16 align 3 [0 i64, 8 i64]\n  sig (l0, i64) -> i64\nb0(v0: ptr, v1: i64):\n  v2 = call.i64 @three() : () -> i64\n  v3 = load.i64 v0 align 3\n  v4 = load.i64 v0+8 align 3\n  v5 = sub.i64 v3, v4\n  v6 = add.i64 v5, v2\n  v7 = add.i64 v6, v1\n  ret v7\n";
+    let drv = "#include <stdint.h>\nstruct P { int64_t a, b; };\nint64_t before(struct P, int64_t);\nint64_t after(struct P, int64_t);\nint64_t three(void) { return 3000; }\nint main(void) {\n  struct P p = {50, 8};\n  if (before(p, 3) != 3045) return 1;\n  if (after(p, 4) != 3046) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Float loop values across calls: callee-saved xmm homes under Microsoft x64 (the prologue saves them, so
+// the C caller's live doubles survive), memory under System V, v8..v15 on arm64.
+@test
+fn float_loop_values_live_across_calls() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @g fn global\nsym @fl fn global\nfn @fl\n  sig (i64) -> f64\nb0(v0: i64):\n  v1 = iconst.i64 0\n  v2 = fconst.f64 0x3ff0000000000000\n  v3 = fconst.f64 0x4000000000000000\n  jmp b1(v1, v2, v3, v3)\nb1(v4: i64, v5: f64, v6: f64, v7: f64):\n  v8 = call.f64 @g(v4) : (i64) -> f64\n  v9 = fadd.f64 v5, v8\n  v10 = fmul.f64 v6, v3\n  v11 = fsub.f64 v7, v8\n  v12 = iconst.i64 1\n  v13 = add.i64 v4, v12\n  v14 = icmp.slt v13, v0\n  br v14, b1(v13, v9, v10, v11), b2\nb2:\n  v15 = fadd.f64 v9, v10\n  v16 = fadd.f64 v15, v11\n  ret v16\n";
+    let drv = "#include <stdint.h>\ndouble fl(int64_t);\ndouble g(int64_t i) { return (double)i * 0.5; }\nint main(void) {\n  double s = 0, t = 1, u = 3, w = 7;\n  for (int k = 0; k < 4; k++) {\n    double r = fl(10);\n    s += r;\n    t *= 1.5;\n    u -= 0.25;\n    w += t;\n  }\n  return s == 4 * 2051.0 && t == 5.0625 && u == 2.0 && w == 19.1875 ? 0 : 1;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // A scalar in every lane (`splat`), for each lane type, of 8, 16 and 32 bytes: the vector's bytes and
 // not one past them.
 @test
@@ -244,6 +300,34 @@ fn splats_of_every_lane_type_run() {
     }
     let lir = "lir ptr 8\nsym @b16 fn global\nsym @h8 fn global\nsym @w4 fn global\nsym @d2 fn global\nsym @f4 fn global\nsym @g2 fn global\nsym @b8 fn global\nsym @f2 fn global\nsym @g4 fn global\nfn @b16\n  sig (ptr, i8) -> void\nb0(v0: ptr, v1: i8):\n  v2 = splat.v16i8 v1\n  store v2, v0 align 0\n  ret\nfn @h8\n  sig (ptr, i16) -> void\nb0(v0: ptr, v1: i16):\n  v2 = splat.v8i16 v1\n  store v2, v0 align 0\n  ret\nfn @w4\n  sig (ptr, i32) -> void\nb0(v0: ptr, v1: i32):\n  v2 = splat.v4i32 v1\n  store v2, v0 align 0\n  ret\nfn @d2\n  sig (ptr, i64) -> void\nb0(v0: ptr, v1: i64):\n  v2 = splat.v2i64 v1\n  store v2, v0 align 0\n  ret\nfn @f4\n  sig (ptr, f32) -> void\nb0(v0: ptr, v1: f32):\n  v2 = splat.v4f32 v1\n  store v2, v0 align 0\n  ret\nfn @g2\n  sig (ptr, f64) -> void\nb0(v0: ptr, v1: f64):\n  v2 = splat.v2f64 v1\n  store v2, v0 align 0\n  ret\nfn @b8\n  sig (ptr, i8) -> void\nb0(v0: ptr, v1: i8):\n  v2 = splat.v8i8 v1\n  store v2, v0 align 0\n  ret\nfn @f2\n  sig (ptr, f32) -> void\nb0(v0: ptr, v1: f32):\n  v2 = splat.v2f32 v1\n  store v2, v0 align 0\n  ret\nfn @g4\n  sig (ptr, f64) -> void\nb0(v0: ptr, v1: f64):\n  v2 = splat.v4f64 v1\n  store v2, v0 align 0\n  ret\n";
     let drv = "#include <stdint.h>\nvoid b16(void *, int8_t);\nvoid h8(void *, int16_t);\nvoid w4(void *, int32_t);\nvoid d2(void *, int64_t);\nvoid f4(void *, float);\nvoid g2(void *, double);\nvoid b8(void *, int8_t);\nvoid f2(void *, float);\nvoid g4(void *, double);\nint main(void) {\n  int r = 0;\n  { int8_t a[17] = {0}; b16(a, -7); for (int i = 0; i < 16; i++) if (a[i] != -7) r = 1; }\n  { int8_t a[17] = {0}; b16(a, -7); if (a[16] != 0) r = 20; }\n  { int16_t a[9] = {0}; h8(a, -1234); for (int i = 0; i < 8; i++) if (a[i] != -1234) r = 2; }\n  { int16_t a[9] = {0}; h8(a, -1234); if (a[8] != 0) r = 21; }\n  { int32_t a[5] = {0}; w4(a, -123456789); for (int i = 0; i < 4; i++) if (a[i] != -123456789) r = 3; }\n  { int32_t a[5] = {0}; w4(a, -123456789); if (a[4] != 0) r = 22; }\n  { int64_t a[3] = {0}; d2(a, INT64_C(-1234567890123)); for (int i = 0; i < 2; i++) if (a[i] != INT64_C(-1234567890123)) r = 4; }\n  { int64_t a[3] = {0}; d2(a, INT64_C(-1234567890123)); if (a[2] != 0) r = 23; }\n  { float a[5] = {0}; f4(a, 1.5f); for (int i = 0; i < 4; i++) if (a[i] != 1.5f) r = 5; }\n  { float a[5] = {0}; f4(a, 1.5f); if (a[4] != 0) r = 24; }\n  { double a[3] = {0}; g2(a, -2.25); for (int i = 0; i < 2; i++) if (a[i] != -2.25) r = 6; }\n  { double a[3] = {0}; g2(a, -2.25); if (a[2] != 0) r = 25; }\n  { int8_t a[9] = {0}; b8(a, -7); for (int i = 0; i < 8; i++) if (a[i] != -7) r = 7; }\n  { int8_t a[9] = {0}; b8(a, -7); if (a[8] != 0) r = 26; }\n  { float a[3] = {0}; f2(a, 1.5f); for (int i = 0; i < 2; i++) if (a[i] != 1.5f) r = 8; }\n  { float a[3] = {0}; f2(a, 1.5f); if (a[2] != 0) r = 27; }\n  { double a[5] = {0}; g4(a, -2.25); for (int i = 0; i < 4; i++) if (a[i] != -2.25) r = 9; }\n  { double a[5] = {0}; g4(a, -2.25); if (a[4] != 0) r = 28; }\n  return r;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Six sums a loop updates on one side of a branch, then passes through a block that jumps back to the
+// header: that block's parameters share the header parameters' registers or slots (`back_share`), and
+// the updates write them in place.
+@test
+fn sums_through_a_join_into_the_loop_header_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @acc fn global\nfn @acc\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 0\n  v2 = iconst.i64 1\n  v3 = iconst.i64 3\n  v4 = iconst.i64 5\n  jmp b1(v1, v1, v1, v1, v1, v1, v1)\nb1(v5: i64, v6: i64, v7: i64, v8: i64, v9: i64, v10: i64, v11: i64):\n  v12 = icmp.slt v5, v0\n  br v12, b2, b5\nb2:\n  v13 = and.i64 v5, v2\n  v14 = icmp.ne v13, v1\n  br v14, b3, b4(v6, v7, v8, v9, v10, v11)\nb3:\n  v15 = add.i64 v6, v5\n  v16 = add.i64 v7, v3\n  v17 = add.i64 v8, v13\n  v18 = mul.i64 v5, v4\n  v19 = add.i64 v9, v18\n  v20 = sub.i64 v10, v5\n  v21 = xor.i64 v11, v5\n  jmp b4(v15, v16, v17, v19, v20, v21)\nb4(v22: i64, v23: i64, v24: i64, v25: i64, v26: i64, v27: i64):\n  v28 = add.i64 v5, v2\n  jmp b1(v28, v22, v23, v24, v25, v26, v27)\nb5:\n  v29 = mul.i64 v7, v3\n  v30 = mul.i64 v8, v4\n  v31 = iconst.i64 7\n  v32 = mul.i64 v9, v31\n  v33 = iconst.i64 11\n  v34 = mul.i64 v10, v33\n  v35 = iconst.i64 13\n  v36 = mul.i64 v11, v35\n  v37 = add.i64 v6, v29\n  v38 = add.i64 v37, v30\n  v39 = add.i64 v38, v32\n  v40 = add.i64 v39, v34\n  v41 = add.i64 v40, v36\n  ret v41\n";
+    let drv = "#include <stdint.h>\nint64_t acc(int64_t);\nstatic int64_t want(int64_t n) {\n  int64_t a = 0, b = 0, c = 0, d = 0, e = 0, f = 0;\n  for (int64_t i = 0; i < n; i++) {\n    if (i & 1) { a += i; b += 3; c += i & 1; d += i * 5; e -= i; f ^= i; }\n  }\n  return a + b * 3 + c * 5 + d * 7 + e * 11 + f * 13;\n}\nint main(void) {\n  int64_t ns[4] = {0, 1, 10, 1001};\n  for (int k = 0; k < 4; k++) if (acc(ns[k]) != want(ns[k])) return k + 1;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// A loop whose latch exits on its other edge: the next counter is defined in the counter's register when
+// no path from that exit reads the counter before the header (`probe`; the header's own exit reads it
+// first), and not when one does (`last` reads the counter the latch leaves with).
+@test
+fn a_latch_exit_that_reads_no_counter_lets_the_step_take_its_register() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @probe fn global\nsym @last fn global\nfn @probe\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 0\n  v3 = iconst.i64 1\n  v4 = iconst.i64 3\n  v5 = iconst.i64 10\n  v6 = iconst.i64 -1\n  jmp b1(v2)\nb1(v7: i64):\n  v8 = mul.i64 v7, v4\n  v9 = icmp.eq v8, v1\n  br v9, b3, b2\nb2:\n  v10 = add.i64 v7, v3\n  v11 = icmp.slt v10, v0\n  br v11, b1(v10), b4\nb3:\n  v12 = mul.i64 v7, v5\n  ret v12\nb4:\n  ret v6\nfn @last\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 0\n  v3 = iconst.i64 1\n  v4 = iconst.i64 3\n  v5 = iconst.i64 10\n  v6 = iconst.i64 100\n  jmp b1(v2)\nb1(v7: i64):\n  v8 = mul.i64 v7, v4\n  v9 = icmp.eq v8, v1\n  br v9, b3, b2\nb2:\n  v10 = add.i64 v7, v3\n  v11 = icmp.slt v10, v0\n  br v11, b1(v10), b4\nb3:\n  v12 = mul.i64 v7, v5\n  ret v12\nb4:\n  v13 = mul.i64 v7, v6\n  ret v13\n";
+    let drv = "#include <stdint.h>\nint64_t probe(int64_t, int64_t);\nint64_t last(int64_t, int64_t);\nint main(void) {\n  if (probe(10, 9) != 30 || probe(10, 27) != 90 || probe(10, 11) != -1 || probe(1, 0) != 0) return 1;\n  if (last(10, 9) != 30 || last(10, 11) != 900 || last(1, 5) != 0) return 2;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }

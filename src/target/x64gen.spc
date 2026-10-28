@@ -68,6 +68,9 @@ const FIX_SCRATCH: u8 = 2;
 const XFIX_WIN: u64 = 0xF0C8; // rbx rsi rdi r12 r13 r14 r15
 const VALLOC_WIN: u64 = 0x3FCF0000; // xmm0..xmm3, xmm6..xmm13
 const VSAVE_WIN: u64 = 0xFFC00000; // xmm6..xmm15
+// The callee-saved xmm registers a value may hold for its whole range (Microsoft x64), in the order taken:
+// xmm14 and xmm15 (no temporary's), then xmm8..xmm13 (no intrinsic's template names xmm8 and up).
+const VFIX_WIN: [u8; 8] = [30, 31, 24, 25, 26, 27, 28, 29];
 
 const fn bit(r: u8) u64 {
     return 1u64 << r as u64;
@@ -231,6 +234,7 @@ pub struct Gen {
     xscr: u64,
     xscr_cap: u32, // the values `xscr` may hold at a time
     vscr: u64,
+    vfix: u64, // the callee-saved xmm registers a value may hold for its whole range (Microsoft x64)
     vs0: u8, // the vector scratch registers
     vs1: u8,
     // ---- per body ----
@@ -249,10 +253,13 @@ pub struct Gen {
     rr: u32, // the eviction cursor
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
+    called: bool, // the body's code calls
+    taken: Vector<u64>,
+    shared: Vector<u32>, // the block parameters that share a header parameter's slot (`back_share`) // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
     dying: Vector<u32>, // values whose register frees after the current instruction
     wparams: Vector<u32>, // the parameters the current terminator's edges write
     want: Vector<u8>, // per value, its request to `Live::plan`
-    lconst: Vector<bool>, // per instruction, a float constant a loop uses (`Live::loop_fconsts`)
+    lconst: Vector<bool>, // per instruction, a constant a loop keeps in a register (`Live::loop_consts`)
     vmem: Vector<bool>, // per value, a vector some instruction reads or writes in memory (`vec_homes`)
     ends: Vector<u32>, // values by the position their range ends at (CSR, `ends_at`)
     ends_at: Vector<u32>,
@@ -360,6 +367,11 @@ extend Gen {
             } else {
                 VSCR_SYSV;
             },
+            vfix: if win {
+                0xFF000000;
+            } else {
+                0;
+            },
             vs0: if win {
                 V0 + 4;
             } else {
@@ -385,6 +397,9 @@ extend Gen {
             rr: 0,
             pos: 0,
             cur: 0,
+            called: false,
+            taken: Vector::<u64>::new(),
+            shared: Vector::<u32>::new(),
             dying: Vector::<u32>::new(),
             wparams: Vector::<u32>::new(),
             want: Vector::<u8>::new(),
@@ -710,7 +725,10 @@ extend Gen {
         let x = self.vx(v);
         let xa = self.vx(a);
         let t = self.vt(v);
-        let sr = self.step_reg(v, a);
+        let mut sr = self.step_reg(v, a);
+        if sr == NOREG {
+            sr = self.fwd_reg(v, a);
+        }
         if sr != NOREG {
             // The parameter keeps the register, which its release frees; a `v` that outlives its block
             // takes it over as its home.
@@ -794,6 +812,66 @@ extend Gen {
         return self.va[px as usize].reg;
     }
 
+    // `step_reg` for instruction `v`, which dies in its block, whose block ends in a jump to a later block
+    // passing `v` once: the register home of the parameter it passes `v` to (taken now when this is the
+    // first edge into that block), when that register holds nothing, or holds the header parameter
+    // `back_share` gave it, which `v` reads as `a` alone if at all and nothing after `v` reads, so the
+    // jump's move vanishes. NOREG when not.
+    fn fwd_reg(self: &mut Self, v: Value, a: Value) u8 {
+        if (v & (VPARAM | VFLAG)) != 0 || self.lv.end[v as usize] != self.pos || self.va[v as usize].home != H_NONE || self.fix_class(
+            v,
+        ) != FIX_NONE || self.crosses_call(v, Gen::is_v(self.vt(v))) {
+            return NOREG;
+        }
+        let b = self.b();
+        let k = self.lv.def_blk[v as usize];
+        let bk = b.blocks[k as usize];
+        let tm = b.insts[(bk.start + bk.len - 1) as usize];
+        if self.lv.pos[k as usize] != self.pos || tm.op != O_JMP {
+            return NOREG;
+        }
+        let j = b.edge_target(tm.a);
+        if self.lv.pos[j as usize] == NONE || self.lv.pos[j as usize] <= self.pos {
+            return NOREG;
+        }
+        let ni = b.insts.len() as u32;
+        let mut x = NONE;
+        for q in 0..b.edge_nargs(tm.a) {
+            if b.edge_arg(tm.a, q) == v {
+                if x != NONE {
+                    return NOREG;
+                }
+                x = ni + b.blocks[j as usize].param_start + q;
+            }
+        }
+        if x == NONE || self.xty(x) != self.vt(v) || Gen::in_mem(self.xty(x)) {
+            return NOREG;
+        }
+        self.param_home(x);
+        let va = self.va[x as usize];
+        if va.home != H_FIXED || va.reg == NOREG || (self.tmps & bit(va.reg)) != 0 {
+            return NOREG;
+        }
+        let r = va.reg;
+        let ov = self.owner[r as usize];
+        if ov != x {
+            if ov == NONE || ov < ni {
+                return NOREG;
+            }
+            let pv = VPARAM | ov - ni;
+            let t = b.insts[v as usize];
+            if (t.a == pv || t.b == pv || t.c == pv) && a != pv || self.lv.reads_after(b, k, v, pv) {
+                return NOREG;
+            }
+            for q in 0..b.edge_nargs(tm.a) {
+                if b.edge_arg(tm.a, q) == pv {
+                    return NOREG;
+                }
+            }
+        }
+        return r;
+    }
+
     // The register home `fix_class` gives value index `x` of file `vr`, taken (`prefer`, a register `x`
     // arrives in, when it may be its home); NOREG for none.
     fn take_home(self: &mut Self, x: u32, vr: bool, prefer: u8) u8 {
@@ -815,12 +893,13 @@ extend Gen {
     // Plan the homes (`Live::plan`) over each value's request: none in memory or rematerialized; an integer a call that
     // returns runs in the range of, a callee-saved register; one that lives past its block or a block
     // parameter, either (a flag: callee-saved only); a float that lives past its block or a block
-    // parameter and no call that returns runs in the range of, a caller-saved one (System V keeps no xmm
-    // register across a call); none for the others, which temporaries hold. A vector of 16 bytes that
-    // lives past its block or is a block parameter, which no call that returns runs in the range of and
-    // no instruction reads or writes in memory (`vec_homes`: a loop's accumulator, a value splat before
-    // the loop), asks a caller-saved xmm register too. The homes leave 8 integer registers to one
-    // instruction (a masked store reads 8).
+    // parameter, an xmm register: under Microsoft x64 a callee-saved one (`vfix`), under System V, which
+    // keeps no xmm register across a call, a caller-saved one when no call that returns runs in its
+    // range; none for the others, which temporaries hold (an entry parameter that dies in the entry
+    // block stays in the register it arrives in). A vector of 16 bytes that lives past its block or is a
+    // block parameter and no instruction reads or writes in memory (`vec_homes`: a loop's accumulator, a
+    // value splat before the loop) asks an xmm register the same way. The homes leave 8 integer registers
+    // to one instruction (a masked store reads 8).
     fn plan_homes(self: &mut Self) {
         let b = self.b();
         let n = self.lv.end.len();
@@ -847,25 +926,42 @@ extend Gen {
                 }
             }
         }
-        self.lv.loop_fconsts(b, &mut self.lconst);
+        self.lv.loop_consts(b, &mut self.lconst);
+        // An integer a sign-extended 32-bit immediate holds stays an immediate.
+        for x in 0..ni {
+            let mut imm: i32 = 0;
+            if self.lconst[x] && b.insts[x].op == O_ICONST && self.imm32_of(
+                x as u32,
+                type_bits(b.insts[x].ty, 8),
+                &mut imm,
+            ) {
+                self.lconst[x] = false;
+            }
+        }
         self.vec_homes();
         self.want.truncate(0);
+        // An xmm home: Microsoft x64's callee-saved ones, System V's caller-saved ones.
+        let vw = lv::WANT_V | if self.win {
+            lv::WANT_CALLEE;
+        } else {
+            lv::WANT_SCRATCH;
+        };
         for x in 0..n {
             let t = self.xty(x as u32);
             let d = self.lv.def_blk[x];
             let mut w: u8 = 0;
-            if Gen::in_vreg(t) && type_bytes(t, 8) == 16 && x < nv && !self.vmem[x] && d != NONE && self.lv.pos[d as usize] != NONE && (self.lv.end[x] > self.lv.pos[d as usize] || x >= ni) && !self.crosses_call(
+            if Gen::in_vreg(t) && type_bytes(t, 8) == 16 && x < nv && !self.vmem[x] && d != NONE && self.lv.pos[d as usize] != NONE && (self.lv.end[x] > self.lv.pos[d as usize] || x >= ni) && (self.win || !self.crosses_call(
                 x as u32,
                 true,
-            ) {
-                w = lv::WANT_SCRATCH | lv::WANT_V;
+            )) {
+                w = vw;
             }
             if !Gen::in_mem(t) && d != NONE && self.lv.pos[d as usize] != NONE && !(x < ni && self.remat_inst(x as u32) && !self.lconst[x]) {
-                let past = self.lv.end[x] > self.lv.pos[d as usize] || x >= ni && x < nv;
+                let past = self.lv.end[x] > self.lv.pos[d as usize] || x >= ni && x < nv && d != 0;
                 let cross = x < nv && self.crosses_call(x as u32, Gen::is_v(t));
                 if Gen::is_v(t) {
-                    if x < nv && past && !cross {
-                        w = lv::WANT_SCRATCH | lv::WANT_V;
+                    if x < nv && past && (self.win || !cross) {
+                        w = vw;
                     }
                 } else if cross || x >= nv && self.lv.end[x] > self.lv.pos[d as usize] {
                     w = lv::WANT_CALLEE;
@@ -878,10 +974,32 @@ extend Gen {
             self.want.push(w);
         }
         let most = self.xfix.count_ones() + self.xalloc.count_ones() - 8;
+        // A body that calls nothing that returns (no instruction `clobbers` but one before a trap, no
+        // thread-local address's getter) and runs no system operation or variadic access: every register
+        // of `xscr` may be a home at once.
+        let mut leaf = true;
+        for x in 0..ni {
+            let t = b.insts[x];
+            leaf = leaf && !(Gen::clobbers(b, t) && !self.dead_end(x)) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !(t.op == O_SYMADDR && !self.remat_inst(
+                x as u32,
+            ));
+        }
+        let xs = if leaf {
+            self.xscr.count_ones() as u32;
+        } else {
+            self.xscr_cap;
+        };
+        // Six of Microsoft x64's callee-saved xmm homes (xmm0..xmm3, xmm6, xmm7 and two of xmm8..xmm13 stay
+        // for temporaries), or four of System V's caller-saved ones.
+        let (vc, vs) = if self.win {
+            (6u32, 0u32);
+        } else {
+            (0u32, 4u32);
+        };
         self.lv.plan(
             b,
             &self.want,
-            lv::Caps { xc: self.xfix.count_ones() as u32, xs: self.xscr_cap, xj: most as u32, vc: 0, vs: 4, vj: 4 },
+            lv::Caps { xc: self.xfix.count_ones() as u32, xs: xs, xj: most as u32, vc: vc, vs: vs, vj: vc + vs },
         );
         for x in 0..ni {
             if self.lconst[x] && self.fix_class(x as u32) != FIX_NONE {
@@ -905,7 +1023,7 @@ extend Gen {
                 t.op,
                 lane_type(t.ty),
                 &mut un,
-            ) != NONE;
+            ) != NONE || t.op == O_SPLAT && Gen::in_vreg(t.ty);
             if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
                 self.vmem[i] = true;
             }
@@ -1069,10 +1187,24 @@ extend Gen {
         return (self.xfix & ~self.fixed_busy & ~self.lock & ~self.tmps & bit(r)) != 0;
     }
 
-    // Give value index `x` a free callee-saved register as its home, the value there (from `alloc`'s
-    // fallback) evicted; NOREG when none is free.
+    // Give value index `x` a free callee-saved register of file `vr` as its home (an xmm one under
+    // Microsoft x64 only), the value there (from `alloc`'s fallback) evicted; NOREG when none is free.
     fn take_fixed(self: &mut Self, x: u32, vr: bool) u8 {
         if vr {
+            let open = self.vfix & ~self.fixed_busy & ~self.lock & ~self.tmps;
+            for r in VFIX_WIN {
+                if (open & bit(r)) != 0 {
+                    self.evict(r);
+                    self.fixed_busy |= bit(r);
+                    self.csr |= bit(r);
+                    self.set_owner(r, x);
+                    let va = self.va.index_mut(x as usize);
+                    va.reg = r;
+                    va.home = H_FIXED;
+                    va.dirty = false;
+                    return r;
+                }
+            }
             return NOREG;
         }
         for r in 0..16u32 {
@@ -1295,7 +1427,7 @@ extend Gen {
                 self.fixed_busy &= ~bit(va.reg);
             }
         }
-        if va.home == H_SLOT {
+        if va.home == H_SLOT && !self.is_shared(x) {
             let n = if Gen::in_mem(self.xty(x)) {
                 type_bytes(self.xty(x), self.ptr);
             } else {
@@ -1307,6 +1439,16 @@ extend Gen {
         w.reg = NOREG;
         w.home = H_NONE;
         w.dirty = false;
+    }
+
+    // Whether block parameter `x` shares a header parameter's slot (`back_share`).
+    fn is_shared(self: &Self, x: u32) bool {
+        for k in 0..self.shared.len() {
+            if self.shared[k] == x {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---- Frame ----
@@ -1463,6 +1605,7 @@ extend Gen {
         self.c.byte(0x66);
         self.c.byte(0x48);
         let at = self.c.call32();
+        self.called = true;
         let g = self.obj().sym("__tls_get_addr");
         self.rels.push(CRel { at: at, kind: x::R_PLT32, sym: g, addend: -4 });
     }
@@ -1506,6 +1649,7 @@ extend Gen {
     // A call of C function `name`.
     fn call_sym(self: &mut Self, name: str) {
         let at = self.c.call32();
+        self.called = true;
         let s = self.obj().sym(name);
         self.rels.push(CRel { at: at, kind: x::R_PLT32, sym: s, addend: -4 });
     }
@@ -1584,6 +1728,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 8;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST;
         self.lv.run(b);
         let n = self.lv.end.len();
         self.va.truncate(0);
@@ -1605,6 +1750,9 @@ extend Gen {
         self.epi.truncate(0);
         self.rels.truncate(0);
         self.free_slots.truncate(0);
+        self.taken.truncate(0);
+        self.shared.truncate(0);
+        self.called = false;
         self.dying.truncate(0);
         self.lock = 0;
         self.tmps = 0;
@@ -1799,6 +1947,8 @@ extend Gen {
                     self.va.index_mut(x as usize).home = H_SLOT;
                     self.va.index_mut(x as usize).off = off as i32;
                 }
+            } else if agg && self.parts_taken(x, loc) {
+                continue;
             } else if agg || Gen::in_mem(t) {
                 // Register parts into a slot: the aggregate's memory, or the memory value.
                 let (size, _) = sig_size(b, pt, self.ptr);
@@ -1837,6 +1987,74 @@ extend Gen {
             }
         }
         self.lock = 0;
+    }
+
+    // Whether the aggregate parameter `x`, passed in registers (`loc`), is read only by loads of the entry
+    // block that each read one part whole, before any instruction that may call (which writes the argument
+    // registers): each load then takes its part's register (`taken`), and the aggregate needs no memory.
+    fn parts_taken(self: &mut Self, x: u32, loc: ab::ALoc) bool {
+        let b = self.b();
+        let e = b.blocks[0];
+        let v = VPARAM | x - b.insts.len() as u32;
+        let mut n: u32 = 0;
+        let mark = self.taken.len();
+        for i in e.start..e.start + e.len {
+            let t = b.insts[i as usize];
+            self.lv.uses_at(b, i, &mut self.uses);
+            let mut reads: u32 = 0;
+            for q in 0..self.uses.len() {
+                reads += (self.uses[q] == v) as u32;
+            }
+            if reads == 0 {
+                // A call before a load would take its register.
+                if Gen::clobbers(b, t) {
+                    break;
+                }
+                continue;
+            }
+            if t.op != O_LOAD || reads != 1 || (t.aux & MEM_VOLATILE) != 0 || self.lv.fold[i as usize] || is_vec(t.ty) || t.ty == T_I128 {
+                self.taken.truncate(mark);
+                return false;
+            }
+            let mut part = NONE;
+            for q in 0..loc.n as u32 {
+                let pa = self.self_lay.parts[(loc.p0 + q) as usize];
+                if pa.off == t.c && pa.size as u32 == type_bytes(t.ty, self.ptr) && pa.v == Gen::is_v(t.ty) && type_bytes(
+                    t.ty,
+                    self.ptr,
+                ) >= 4 {
+                    part = q;
+                }
+            }
+            for q in mark..self.taken.len() {
+                if self.taken[q] >> 32 == part as u64 {
+                    part = NONE;
+                }
+            }
+            if part == NONE {
+                self.taken.truncate(mark);
+                return false;
+            }
+            self.taken.push(part as u64 << 32 | i as u64);
+            n += 1;
+        }
+        if n != self.lv.uses[x as usize] {
+            self.taken.truncate(mark);
+            return false;
+        }
+        for q in mark..self.taken.len() {
+            let i = self.taken[q] as u32;
+            let pa = self.self_lay.parts[(loc.p0 + (self.taken[q] >> 32) as u32) as usize];
+            self.entry_reg(
+                i,
+                pa.reg + if pa.v {
+                    V0;
+                } else {
+                    0;
+                },
+            );
+        }
+        return true;
     }
 
     // Parameter value index `x` arrives in register `r`.
@@ -1996,6 +2214,22 @@ extend Gen {
             return;
         }
         let t = self.xty(x);
+        let px = self.back_share(x);
+        if px != NONE {
+            // The header parameter keeps the register's ownership and the slot: its range holds this
+            // block's.
+            let pva = self.va[px as usize];
+            let va = self.va.index_mut(x as usize);
+            va.home = pva.home;
+            va.dirty = false;
+            if pva.home == H_FIXED {
+                va.reg = pva.reg;
+            } else {
+                va.off = pva.off;
+                self.shared.push(x);
+            }
+            return;
+        }
         if self.take_home(x, Gen::is_v(t) || Gen::in_vreg(t), NOREG) != NOREG {
             // The register holds nothing until the edge moves write it.
             self.set_owner(self.va[x as usize].reg, x);
@@ -2005,6 +2239,58 @@ extend Gen {
         let off = self.slot_alloc(n, type_align(t, self.ptr));
         self.va.index_mut(x as usize).home = H_SLOT;
         self.va.index_mut(x as usize).off = off as i32;
+    }
+
+    // The loop header parameter (a value index) that block parameter `x`'s block passes it to, when that
+    // block ends in its jump there and reads that parameter nowhere, and the parameter has a register or
+    // slot home: its value is dead from the block's start (the jump writes it), so `x` shares its home
+    // and the jump's move vanishes. NONE when not.
+    fn back_share(self: &Self, x: u32) u32 {
+        let b = self.b();
+        let ni = b.insts.len() as u32;
+        let p = x - ni;
+        let j = self.lv.def_blk[x as usize];
+        let jb = b.blocks[j as usize];
+        let t = b.insts[(jb.start + jb.len - 1) as usize];
+        if t.op != O_JMP {
+            return NONE;
+        }
+        let h = b.edge_target(t.a);
+        let hb = b.blocks[h as usize];
+        if self.lv.pos[h as usize] == NONE || self.lv.pos[h as usize] > self.lv.pos[j as usize] {
+            return NONE;
+        }
+        let mut px = NONE;
+        for q in 0..b.edge_nargs(t.a) {
+            if b.edge_arg(t.a, q) == (VPARAM | p) {
+                if px != NONE {
+                    return NONE;
+                }
+                px = ni + hb.param_start + q;
+            }
+        }
+        if px == NONE || self.va[px as usize].home != H_FIXED && self.va[px as usize].home != H_SLOT || self.xty(px) != self.xty(
+            x,
+        ) {
+            return NONE;
+        }
+        // No instruction of the block, nor its jump, reads the header parameter.
+        let pv = VPARAM | px - ni;
+        let mut us = Vector::<Value>::new();
+        for i in jb.start..jb.start + jb.len - 1 {
+            lv::each_use(b, b.insts[i as usize], &mut us);
+            for u in 0..us.len() {
+                if us[u] == pv {
+                    return NONE;
+                }
+            }
+        }
+        for q in 0..b.edge_nargs(t.a) {
+            if b.edge_arg(t.a, q) == pv {
+                return NONE;
+            }
+        }
+        return px;
     }
 
     // The location value index `x` is read from now.
@@ -2047,9 +2333,14 @@ extend Gen {
             } else {
                 Lc { kind: LC_MEM, reg: x::RSP, off: pva.off, val: px };
             };
+            // A home the argument shares (`back_share`) already holds it.
+            let src = self.loc_of(ax);
+            if src.kind == dst.kind && src.reg == dst.reg && src.off == dst.off && src.kind != LC_VAL {
+                continue;
+            }
             self.mv.push(
                 Mv {
-                    src: self.loc_of(ax),
+                    src: src,
                     dst: dst,
                     v: Gen::is_v(t) || Gen::in_mem(t),
                     bytes: type_bytes(t, self.ptr),
@@ -2406,6 +2697,11 @@ extend Gen {
             self.fconst(r, t.ty == T_F64, t.b as u64 << 32 | t.a as u64);
             return true;
         }
+        if op == O_ICONST {
+            let r = self.def(i);
+            self.mov_imm(r, t.b as u64 << 32 | t.a as u64, type_bytes(t.ty, 8));
+            return true;
+        }
         if op == O_WCONST {
             let off = self.mdef(i) as i32;
             for k in 0..t.b {
@@ -2597,21 +2893,30 @@ extend Gen {
 
     // The address `v` + `off` as a base register and an offset: a slot or frame address folds in.
     fn addr(self: &mut Self, v: Value, off: i64) (u8, i64) {
-        let xv = self.vx(v);
-        let va = self.va[xv as usize];
-        if va.home == H_SPADDR {
-            return x::RSP, va.off as i64 + off;
-        }
-        if va.home == H_FPADDR {
-            return self.fb, va.off as i64 + off;
-        }
-        if va.home == H_REMAT && va.reg == NOREG {
-            let it = self.b().insts[v as usize];
-            if it.op == O_SLOTADDR {
-                return x::RSP, self.slot_off[it.a as usize] as i64 + off;
-            }
+        let (fr, base, at) = self.frame_addr(v);
+        if fr {
+            return base, at + off;
         }
         return self.reg(v), off;
+    }
+
+    // Whether address `v` is a slot or frame address no register holds (`addr`'s folds), with the frame's
+    // register and the offset; else false, r11 and 0 (the caller puts `v` there).
+    const fn frame_addr(self: &Self, v: Value) (bool, u8, i64) {
+        let va = self.va[self.vx(v) as usize];
+        if va.home == H_SPADDR {
+            return true, x::RSP, va.off;
+        }
+        if va.home == H_FPADDR {
+            return true, self.fb, va.off;
+        }
+        if va.home == H_REMAT && va.reg == NOREG && (v & (VPARAM | VFLAG)) == 0 {
+            let it = self.b().insts[v as usize];
+            if it.op == O_SLOTADDR {
+                return true, x::RSP, self.slot_off[it.a as usize];
+            }
+        }
+        return false, S1, 0;
     }
 
     // The memory operand of a `bytes`-byte access at `v` + `off`: RIP-relative for a defined data
@@ -2715,13 +3020,53 @@ extend Gen {
     }
 
     fn icmp(self: &mut Self, i: u32, t: Inst) bool {
+        if self.lv.pfold[i as usize] {
+            return true; // each select or branch on it compares (`folded_cmp`)
+        }
         let ty = self.vt(t.a);
         assert(!is_vec(ty), "x64gen: a vector comparison the verifier rejects");
         if ty == T_I128 {
             return self.icmp128(i, t);
         }
+        let cc = self.compare(t);
+        self.cond_value(i, cc, NONE, false);
+        return true;
+    }
+
+    // The flags of the comparison condition value `v` folds into its select or branch (`lv::FOLD_CMP`),
+    // set here and kept; NONE when it does not fold.
+    fn folded_cmp(self: &mut Self, v: Value) u32 {
+        if (v & (VPARAM | VFLAG)) != 0 || !self.lv.pfold[v as usize] {
+            return NONE;
+        }
+        let cc = self.compare(self.b().insts[v as usize]);
+        self.keep_flags = true;
+        return cc;
+    }
+
+    // Comparison `t` of integers of at most 64 bits into the flags: its condition. A folded `and` compared
+    // with 0 is a test (`lv::FOLD_TST`; a narrow one's mask is within its width, so 32 bits test it).
+    fn compare(self: &mut Self, t: Inst) u32 {
+        let ty = self.vt(t.a);
         let bits = type_bits(ty, self.ptr);
         let sz = bits / 8;
+        if (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] {
+            let n = self.b().insts[t.a as usize];
+            let ra = self.reg(n.a);
+            let tz = if bits < 32 {
+                4u32;
+            } else {
+                sz;
+            };
+            let mut k: i32 = 0;
+            if self.imm32_of(n.b, bits.max(32), &mut k) {
+                self.c.test_ri(tz, ra, k as u32);
+            } else {
+                let rb = self.reg(n.b);
+                self.c.test_rr(tz, ra, rb);
+            }
+            return icond(t.aux);
+        }
         let ra = self.reg(t.a);
         let mut k: i32 = 0;
         if self.imm32_of(t.b, bits, &mut k) {
@@ -2734,8 +3079,7 @@ extend Gen {
             let rb = self.reg(t.b);
             self.c.alu_rr(x::CMP, sz, ra, rb);
         }
-        self.cond_value(i, icond(t.aux), NONE, false);
-        return true;
+        return icond(t.aux);
     }
 
     // A float comparison: `ucomis` sets ZF, PF and CF; `<` and `<=` compare the operands swapped.
@@ -2902,6 +3246,9 @@ extend Gen {
         if is_vec(ty) {
             return self.vec_arith(i, t);
         }
+        if self.lv.pfold[i as usize] {
+            return true; // its use computes it (`lv::FOLD_*`)
+        }
         if ty == T_I128 {
             return self.int128(i, t);
         }
@@ -2940,6 +3287,35 @@ extend Gen {
         }
         if op == O_MUL {
             let ra = self.reg(t.a);
+            // A product by 3, 5 or 9 is an address: `lea` (one cycle against `imul`'s three).
+            // A product by 3, 5 or 9 is an address: `lea` (one cycle against `imul`'s three); by one of them
+            // times 2^s, `lea` then a shift; by 2^s - 1, a shift and a subtraction.
+            let kw = k as i64;
+            let tz = if kw > 0 {
+                kw.trailing_zeros() as u32;
+            } else {
+                0u32;
+            };
+            let odd = kw >> tz as i64;
+            if kc && kw > 0 && (odd == 3 || odd == 5 || odd == 9) {
+                let rd = self.def(i);
+                self.c.rm(0, 0x8D, sz == 8, rd, x::ix(ra, ra, (odd - 1).trailing_zeros() as u8, 0), false);
+                if tz != 0 {
+                    self.c.shift_ri(x::SHL, sz, rd, tz);
+                }
+                return true;
+            }
+            if kc && kw >= 7 && (kw & kw + 1) == 0 {
+                let rd = self.def(i);
+                if rd != ra {
+                    self.c.mov_rr(sz, rd, ra);
+                    self.c.shift_ri(x::SHL, sz, rd, (kw + 1).trailing_zeros() as u32);
+                    self.c.alu_rr(x::SUB, sz, rd, ra);
+                    return true;
+                }
+                self.c.imul_ri(sz, rd, ra, k);
+                return true;
+            }
             if kc {
                 let rd = self.def(i);
                 self.c.imul_ri(sz, rd, ra, k);
@@ -3297,6 +3673,13 @@ extend Gen {
         let tb = type_bits(to, self.ptr);
         if op == O_SEXT || op == O_ZEXT {
             let ra = self.reg(t.a);
+            // A zero extension of a value whose register holds nothing above its bits (a byte load's, say)
+            // gives it another type.
+            if op == O_ZEXT && self.va[self.vx(t.a) as usize].clean {
+                let _ = self.def_from(i, t.a, ra);
+                self.va.index_mut(i as usize).clean = true;
+                return true;
+            }
             let rd = self.def(i);
             if op == O_SEXT {
                 self.c.ext(fb / 8, wsz(tb), true, rd, ra);
@@ -3626,6 +4009,12 @@ extend Gen {
 
     fn load(self: &mut Self, i: u32, t: Inst) bool {
         let ty = t.ty;
+        // A part of a register-passed aggregate: its register already.
+        for q in 0..self.taken.len() {
+            if self.taken[q] as u32 == i {
+                return true;
+            }
+        }
         let mut rs: u32 = NONE;
         let mut radd: i64 = 0;
         if Gen::in_mem(ty) && !Gen::in_vreg(ty) {
@@ -3772,6 +4161,10 @@ extend Gen {
     // The condition a `br` or `select` reads from boolean `v` (index `cx`): the flags an instruction left,
     // else its low byte tested.
     fn cond_of(self: &mut Self, cx: u32, v: Value) u32 {
+        let fc = self.folded_cmp(v);
+        if fc != NONE {
+            return fc;
+        }
         if self.pend.inst == cx && self.pend.inst != NONE {
             self.keep_flags = true;
             return self.pend.cc;
@@ -3785,6 +4178,8 @@ extend Gen {
     fn select_op(self: &mut Self, i: u32, t: Inst) bool {
         let ty = t.ty;
         let cx = self.vx(t.a);
+        // The condition first: a folded comparison loads its operands, which the values' registers survive.
+        let cc = self.cond_of(cx, t.a);
         if Gen::in_mem(ty) {
             // The chosen value's address, then a copy.
             let (b1, o1) = self.mloc(t.b);
@@ -3793,7 +4188,6 @@ extend Gen {
             let rb = self.tmp(false);
             self.c.lea(ra, x::at(b1, o1 as i32));
             self.c.lea(rb, x::at(b2, o2 as i32));
-            let cc = self.cond_of(cx, t.a);
             self.c.cmov(cc, 8, rb, ra);
             let d = self.mdef(i);
             self.copy_mem(x::RSP, d, rb, 0, type_bytes(ty, self.ptr));
@@ -3802,7 +4196,6 @@ extend Gen {
         if Gen::is_v(ty) {
             let rb = self.reg(t.b);
             let rc = self.reg(t.c);
-            let cc = self.cond_of(cx, t.a);
             let rd = self.def(i);
             self.c.vmov(rd - V0, rb - V0);
             let skip = self.c.jcc32(cc);
@@ -3812,7 +4205,6 @@ extend Gen {
         }
         let rb = self.reg(t.b);
         let rc = self.reg(t.c);
-        let cc = self.cond_of(cx, t.a);
         let rd = self.def(i);
         self.c.mov_rr(8, rd, rc);
         self.c.cmov(cc, 8, rd, rb);
@@ -4477,10 +4869,14 @@ extend Gen {
                 continue;
             }
             if (pt & AGG) != 0 {
-                self.materialize(v, S1);
+                // A frame address loads its parts through the frame's register.
+                let (fr, base, off) = self.frame_addr(v);
+                if !fr {
+                    self.materialize(v, S1);
+                }
                 for q in 0..loc.n as u32 {
                     let pa = self.lay.parts[(loc.p0 + q) as usize];
-                    self.load_part(pa, S1, pa.off);
+                    self.load_part(pa, base, off + pa.off as i64);
                 }
             } else if Gen::in_mem(vty) {
                 let (base, off) = self.mloc(v);
@@ -4551,6 +4947,7 @@ extend Gen {
         } else {
             self.c.call_r(S1);
         }
+        self.called = true;
         if rl.kind != ab::L_REG {
             return true;
         }
@@ -4813,6 +5210,10 @@ extend Gen {
     // The condition of a branch on boolean `v` (index `cx`): the flags an instruction left for it, else
     // its low byte tested.
     fn cond_test(self: &mut Self, cx: u32, v: Value) u32 {
+        let fc = self.folded_cmp(v);
+        if fc != NONE {
+            return fc;
+        }
         if self.pend.inst == cx && self.pend.inst != NONE {
             return self.pend.cc;
         }
@@ -4979,11 +5380,15 @@ extend Gen {
         if rl.kind == ab::L_REG {
             if (rt & AGG) != 0 {
                 let pv = VPARAM | b.blocks[0].param_start + np;
-                self.materialize(pv, S1);
+                let (base, off) = self.addr(pv, 0);
                 for q in 0..rl.n as u32 {
                     let pa = self.self_lay.parts[(rl.p0 + q) as usize];
-                    self.load_part(pa, S1, pa.off);
+                    self.load_part(pa, base, off + pa.off as i64);
                 }
+            } else if self.ret_in_vreg(t.a) {
+                // A vector a register holds, returned whole in one xmm register.
+                let pa = self.self_lay.parts[rl.p0 as usize];
+                self.c.vmov(pa.reg, self.va[self.vx(t.a) as usize].reg - V0);
             } else if Gen::in_mem(self.vt(t.a)) {
                 let (base, off) = self.mloc(t.a);
                 for q in 0..rl.n as u32 {
@@ -5125,10 +5530,24 @@ extend Gen {
         let omit = self.fb == x::IN;
         // The call left rsp 8 past a multiple of 16; `push rbp` (with a frame pointer), the pushes and the
         // locals end on one. The vector registers' save area tops the locals, 16-aligned.
-        let mut local = self.spill_base + self.spill_top + 15 & ~15u32;
+        // A System V body that calls nothing (no canary check either) and keeps nothing 16-aligned for
+        // other code (no slot aligned past 8, no inline assembly) leaves rsp where it falls.
+        let b = self.b();
+        let mut leaf = !self.win && !self.called && self.canary < 0;
+        for k in 0..b.slots.len() {
+            leaf = leaf && b.slots[k].align_log2 <= 3;
+        }
+        for k in 0..b.insts.len() {
+            leaf = leaf && b.insts[k].op != O_ASM;
+        }
+        let mut local = if leaf {
+            self.spill_base + self.spill_top + 7 & ~7u32;
+        } else {
+            self.spill_base + self.spill_top + 15 & ~15u32;
+        };
         let xsave = local;
         local += 16 * xregs.len() as u32;
-        if npush % 2 != 0 != omit {
+        if npush % 2 != 0 != omit && !leaf {
             local += 8;
         }
         if omit {
@@ -5689,6 +6108,16 @@ extend Gen {
     // free one (its home, a slot, comes when it spills).
     fn vec_def(self: &mut Self, i: u32) u8 {
         return self.def(i);
+    }
+
+    // Whether the body returns vector `v` whole in one xmm register and an xmm register holds it.
+    const fn ret_in_vreg(self: &Self, v: Value) bool {
+        let rl = self.self_lay.ret;
+        if rl.kind != ab::L_REG || rl.n != 1 || self.va[self.vx(v) as usize].reg == NOREG || !Gen::in_vreg(self.vt(v)) {
+            return false;
+        }
+        let pa = self.self_lay.parts[rl.p0 as usize];
+        return pa.v && pa.size as u32 == type_bytes(self.vt(v), 8);
     }
 
     // Scalar `t.a` into every lane of vector `i` (SSE2): a float's register copied, then `unpcklpd` or
