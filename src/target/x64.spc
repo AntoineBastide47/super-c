@@ -618,6 +618,40 @@ extend Code {
         }
     }
 
+    /// `[m]` = `k`, `sz` bytes (a 32-bit immediate sign-extended to 8 bytes).
+    pub fn mov_mi(self: &mut Self, sz: u32, m: Mem, k: i32) {
+        self.osize(sz);
+        if sz == 1 {
+            self.rm(0, 0xC6, false, 0, m, false);
+            self.byte(k as u32);
+            return;
+        }
+        self.rm(0, 0xC7, sz == 8, 0, m, false);
+        if sz == 2 {
+            self.byte(k as u32);
+            self.byte(k as u32 >> 8);
+        } else {
+            self.d32(k as u32);
+        }
+    }
+
+    /// `[m]` op= `src`.
+    pub fn alu_mr(self: &mut Self, op: u32, sz: u32, m: Mem, src: u8) {
+        self.osize(sz);
+        self.rm(
+            0,
+            (op << 3) + if sz == 1 {
+                0u32;
+            } else {
+                1u32;
+            },
+            sz == 8,
+            src,
+            m,
+            sz == 1,
+        );
+    }
+
     /// `[m]` op= `k` (`CMP` compares).
     pub fn alu_mi(self: &mut Self, op: u32, sz: u32, m: Mem, k: i32) {
         self.osize(sz);
