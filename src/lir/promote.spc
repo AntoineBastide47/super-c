@@ -1409,6 +1409,7 @@ extend Promoter {
         o.sig = b.sig;
         o.refs.truncate(0);
         o.refs.extend_copy(&b.refs);
+        o.bools = b.bools;
         // A scope's root: its replacement, renumbered; one in no reached block goes.
         o.scopes.truncate(0);
         for x in 0..b.scopes.len() {

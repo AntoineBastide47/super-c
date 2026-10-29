@@ -587,6 +587,15 @@ extend<'a> Parser<'a> {
                 self.body.refs.set(k as usize, n);
                 return self.line_end_loc(&mut loc);
             }
+            if w == "bool" {
+                // `bool p<k>`: signature parameter k holds 0 or 1.
+                let mut k: u32 = 0;
+                if !self.numbered(b'p', &mut k) || k >= 64 {
+                    return self.fail("expected 'bool p<parameter>', a parameter below 64");
+                }
+                self.body.bools |= 1u64 << k as u64;
+                return self.line_end_loc(&mut loc);
+            }
             if w == "scope" {
                 // `scope @<site> g<group> v<root>`: an inlined call's exclusive parameter.
                 let mut l = Loc { file: 0, line: 0, col: 0 };
@@ -1270,6 +1279,9 @@ extend<'a> Parser<'a> {
                     return self.fail("a type tag is 0 to 15");
                 }
                 t.aux |= tg as u16 << MEM_TBAA_SHIFT;
+            }
+            if t.op == O_LOAD && self.keyword("bool") {
+                t.aux |= MEM_BOOL;
             }
             return true;
         }

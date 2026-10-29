@@ -11,7 +11,7 @@ import lir::ir as *;
 import lir::eval as le;
 import lir::verify as lv;
 
-/// A caller takes no more callees past CALLER_MAX instructions.
+/// A caller takes no more callees past CALLER_MAX instructions, but the ones no bigger than their call.
 pub(package) const CALLER_MAX: u32 = 8000;
 
 /// The inline budgets: a callee inlines when it holds at most `warm` instructions outside cold blocks and
@@ -57,6 +57,27 @@ pub(package) const fn shape_ok(pk: &Package, s: u32, b: &Body) bool {
     return true;
 }
 
+/// Whether body `b` only forwards its parameters to one call: one block of loads of its parameters'
+/// bytes, constants and the call, then `ret` or `unreachable` (`panic_parts`, which passes the parts of
+/// two strings on). Inlined, its loads read what the caller stored, so it is no bigger than its call, on
+/// a failure path too.
+pub(package) const fn forwarder(b: &Body) bool {
+    if b.blocks.len() != 1 {
+        return false;
+    }
+    let n = b.insts.len();
+    let mut calls: u32 = 0;
+    for i in 0..n {
+        let t = b.insts[i];
+        let ok = t.op == O_LOAD && (t.a & VPARAM) != 0 && (t.aux & MEM_VOLATILE) == 0 || t.op == O_ICONST || (t.op == O_RET || t.op == O_UNREACHABLE) && i + 1 == n;
+        calls += (t.op == O_CALL) as u32;
+        if !ok && t.op != O_CALL {
+            return false;
+        }
+    }
+    return calls == 1;
+}
+
 /// Whether body `b` fits budget `bu`.
 pub(package) const fn small(b: &Body, bu: Budget) bool {
     let mut warm: u32 = 0;
@@ -72,6 +93,7 @@ pub(package) const fn small(b: &Body, bu: Budget) bool {
 // parameters, and the continuation block and its parameter (NONE: a call without a result).
 struct Site {
     pub(package) inst: u32,
+    pub(package) cold: u16, // BLOCK_COLD when the call's block is cold: so are the copy's blocks
     pub(package) callee: u32,
     pub(package) bbase: u32,
     pub(package) vbase: u32,
@@ -165,12 +187,12 @@ extend Inliner {
             let bk = c.blocks[k];
             self.cbmap[k] = nb;
             nb += 1;
-            // A failure path (a cold block, or one that ends the program) keeps its calls.
+            // A failure path (a cold block, or one that ends the program) keeps its calls but forwarders.
             let end = c.insts[(bk.start + bk.len - 1) as usize].op;
             let warm = (bk.flags & BLOCK_COLD) == 0 && end != O_UNREACHABLE && end != O_PANIC;
             for i in bk.start..bk.start + bk.len {
                 let t = c.insts[i as usize];
-                let callee = if t.op == O_CALL && warm {
+                let callee = if t.op == O_CALL {
                     callee_of(pk, c, t);
                 } else {
                     NONE;
@@ -181,7 +203,10 @@ extend Inliner {
                     continue;
                 }
                 let e = unsafe &*(bodies + callee as usize);
-                if size + e.insts.len() as u32 > CALLER_MAX || e.blocks[0].param_len as u32 != t.aux as u32 {
+                // A callee of one block and at most 3 instructions (a field read) is no bigger than its
+                // call: CALLER_MAX does not stop it. A failure path takes forwarders alone.
+                let tiny = e.blocks.len() == 1 && e.insts.len() <= 3;
+                if !warm && !forwarder(e) || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 {
                     self.cmap[i as usize] = ni;
                     ni += 1;
                     continue;
@@ -190,6 +215,7 @@ extend Inliner {
                 ni += 1; // the jump to the copy
                 let s = Site {
                     inst: i,
+                    cold: bk.flags & BLOCK_COLD,
                     callee: callee,
                     bbase: nb,
                     vbase: ni,
@@ -232,6 +258,7 @@ extend Inliner {
         o.params.extend_copy(&c.params);
         o.sig = c.sig;
         o.refs.extend_copy(&c.refs);
+        o.bools = c.bools;
         for x in 0..c.scopes.len() {
             let sc = c.scopes[x];
             o.scopes.push(Scope { site: sc.site, group: sc.group, root: self.cval(sc.root) });
@@ -473,7 +500,7 @@ extend Inliner {
                     len: o.insts.len() as u32 - start,
                     param_start: s.pbase + bk.param_start,
                     param_len: bk.param_len,
-                    flags: bk.flags,
+                    flags: bk.flags | s.cold,
                 },
             );
         }

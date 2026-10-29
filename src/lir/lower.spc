@@ -1529,7 +1529,7 @@ extend Lower {
             let a = self.new_slot(p.ti);
             let cs = b.asm_spans[(d.cons + k) as usize];
             if src.slice(cs.start as usize, cs.end as usize).contains("+") {
-                let cur = self.read(p);
+                let cur = self.read(c, p);
                 if cur == VNONE {
                     return false;
                 }
@@ -2411,6 +2411,7 @@ extend Lower {
         let mut etys = Vector::<u8>::new();
         let mut pl = Vector::<u32>::new();
         self.b.refs.truncate(0);
+        self.b.bools = 0;
         let mut any_ref = false;
         if ncaps != 0 {
             ptys.push(T_PTR);
@@ -2425,6 +2426,13 @@ extend Lower {
                 continue;
             }
             let mut r: u32 = 0;
+            if info.ti.cls == VC_SCALAR && info.ti.mty == T_I8 && ptys.len() < 64 && Lower::builtin(
+                c,
+                b.module,
+                b.locals[l as usize].ty,
+            ) == BuiltinType::BT_BOOL {
+                self.b.bools |= 1u64 << ptys.len() as u64;
+            }
             ptys.push(self.param_code(c, b.module, b.locals[l as usize].ty, info.ti));
             if info.ti.cls == VC_SCALAR {
                 etys.push(info.ti.mty);
@@ -3076,8 +3084,8 @@ extend Lower {
         return true;
     }
 
-    // The value of scalar place `p`.
-    fn read(self: &mut Self, p: PlaceRef) Value {
+    // The value of scalar place `p`; a `bool` one's load reads 0 or 1 (MEM_BOOL).
+    fn read(self: &mut Self, c: &cbe::CEmit, p: PlaceRef) Value {
         if p.kind == PR_VAR {
             return self.read_var(p.var, self.cur);
         }
@@ -3087,7 +3095,8 @@ extend Lower {
         if p.kind == PR_ZST || p.ti.cls != VC_SCALAR {
             return self.fail_v("read");
         }
-        return self.load_tagged(p.ti.mty, p.addr, 0, p.packed, self.tag_of(p.ti.mty, p.in_union));
+        let zo = ast::pick(p.ti.mty == T_I8 && Lower::builtin(c, p.m, p.t) == BuiltinType::BT_BOOL, MEM_BOOL, 0u16);
+        return self.load_tagged(p.ti.mty, p.addr, 0, p.packed, self.tag_of(p.ti.mty, p.in_union) | zo);
     }
 
     fn write(self: &mut Self, p: PlaceRef, v: Value) bool {
@@ -3149,7 +3158,7 @@ extend Lower {
         if p.kind == PR_ZST {
             return VNONE;
         }
-        return self.read(p);
+        return self.read(c, p);
     }
 
     // The address of operand `opid` held in memory: its place, or a temporary holding the constant.
@@ -3164,7 +3173,7 @@ extend Lower {
                 return p.addr;
             }
             // A scalar place standing for memory of its size (a vector read as its array).
-            let v = self.read(p);
+            let v = self.read(c, p);
             let t = self.temp(ti);
             self.store(v, t, 0, false);
             return t;
@@ -4451,7 +4460,7 @@ extend Lower {
         let mut addr = p.addr;
         let mut val = p.kind != PR_MEM;
         if val {
-            v = self.read(p);
+            v = self.read(c, p);
         }
         for _ in 0..4 {
             if y.kind != TypeKind::TYPE_REFERENCE && y.kind != TypeKind::TYPE_POINTER {
@@ -6161,6 +6170,20 @@ extend Lower {
             return true;
         }
         let signed = ty != TYPE_NONE && Lower::signed(c, b.module, ty);
+        if t.sw_len == 1 {
+            // One case (an enum's tag tested once): a branch on the equality.
+            let pr = b.switch_pool[t.sw_start as usize];
+            let mut cv = (pr >> 32) as i64;
+            if cv >= 2147483648 && signed {
+                cv -= 4294967296;
+            }
+            let to = pr as u32;
+            let ec = self.edge(self.lblk[to as usize], self.cur, to);
+            let ed = self.edge(self.lblk[t.t0 as usize], self.cur, t.t0);
+            let eq = self.icmp(C_EQ, v, self.iconst(self.vty(v), cv as u64));
+            let _ = self.inst(O_BR, T_NONE, 0, eq, ec, ed);
+            return true;
+        }
         let w0 = self.b.words.len() as u32;
         let mut es = Vector::<u32>::new();
         for k in 0..t.sw_len {
@@ -6392,7 +6415,7 @@ extend Lower {
         if !self.place(c, b, pid, &mut p) {
             return VNONE;
         }
-        return self.read(p);
+        return self.read(c, p);
     }
 
     // Free the value of resolved type `(rm, rt)` at `addr`.
@@ -6497,7 +6520,7 @@ extend Lower {
             if !self.intrinsic_call(c, b, t) {
                 return false;
             }
-            self.after_call(t);
+            self.after_call(c, t);
             return true;
         }
         let mut args = Vector::<Value>::new();
@@ -6657,7 +6680,7 @@ extend Lower {
                     let k = self.sym(name.as_str(), SK_FUNC);
                     self.inst(O_CALL, T_NONE, args.len() as u16, k, sg, at);
                 };
-                self.after_call(t);
+                self.after_call(c, t);
                 return true;
             }
             if dty == TYPE_NONE {
@@ -6733,7 +6756,7 @@ extend Lower {
                         self.memcpy(p.addr, src, ri.size);
                     }
                 }
-                self.after_call(t);
+                self.after_call(c, t);
                 return true;
             }
         }
@@ -6759,7 +6782,12 @@ extend Lower {
         } else if t.dests_len == 1 && ti.cls == VC_MEM && r != dst {
             self.memcpy(dplace.addr, r, ti.size);
         }
-        self.after_call(t);
+        // A C function the standard declares `_Noreturn` ends the path.
+        if ext && fv == VNONE && (nm == "abort" || nm == "exit" || nm == "_Exit" || nm == "quick_exit") {
+            let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
+            return true;
+        }
+        self.after_call(c, t);
         return true;
     }
 
@@ -7077,9 +7105,15 @@ extend Lower {
         return self.inst(O_TRUNC, T_I64, 0, self.high_wide(v), VNONE, VNONE);
     }
 
-    // Continue after a call: to its successor, or nowhere when it does not return.
-    fn after_call(self: &mut Self, t: irc::Terminator) {
-        if t.t0 == irc::IR_NONE {
+    // Continue after a call: to its successor, or nowhere when it does not return (no successor, or a
+    // `@noreturn` callee, whose returns abort).
+    fn after_call(self: &mut Self, c: &cbe::CEmit, t: irc::Terminator) {
+        let m = t.callee.module as usize;
+        let nr = t.callee.node != NODE_NONE && m < unsafe (*c.pkg).modules.len() && unsafe (*c.pkg).modules.at(m).has_ast && Lower::ast(
+            c,
+            t.callee.module,
+        ).attr_of(t.callee.node, AttrKind::ATTR_NORETURN) != null;
+        if t.t0 == irc::IR_NONE || nr {
             let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
             return;
         }

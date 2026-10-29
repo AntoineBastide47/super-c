@@ -50,7 +50,7 @@ fn parse_test_shard(s: *const char, topts: &mut TestOpts) bool {
 
 fn parse_test_flag(arg: str, topts: &mut TestOpts, bad: &mut bool) bool {
     if arg.starts_with("--test-jobs=") {
-        topts.jobs = unsafe stdlib::atoi(((&arg[12]) as *const u8) as *const char);
+        topts.jobs = unsafe stdlib::atoi((arg.ptr() + 12) as *const char);
         if topts.jobs < 1 {
             *bad = true;
         }
@@ -75,9 +75,9 @@ fn parse_test_flag(arg: str, topts: &mut TestOpts, bad: &mut bool) bool {
     } else if arg == "--quiet" {
         topts.quiet = true;
     } else if arg.starts_with("--filter=") {
-        topts.filter = ((&arg[9]) as *const u8) as *const char;
+        topts.filter = (unsafe (arg.ptr() + 9)) as *const char;
     } else if arg.starts_with("--test-shard=") {
-        if !parse_test_shard(((&arg[13]) as *const u8) as *const char, topts) {
+        if !parse_test_shard((unsafe (arg.ptr() + 13)) as *const char, topts) {
             *bad = true;
         }
     } else {
