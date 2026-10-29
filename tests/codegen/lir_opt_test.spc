@@ -35,6 +35,11 @@ fn optimized_loops(text: str, fm: u8, fma: bool, bu: lu::Budgets) (Package, Pack
 }
 
 fn optimized_cfg(text: str, fm: u8, fma: bool, inl: il::Budget, bu: lu::Budgets) (Package, Package) {
+    return optimized_split(text, fm, fma, inl, bu, false);
+}
+
+// `optimized_cfg` with each 128-bit integer split into its two words when `pairs` (`Package.pairs`).
+fn optimized_split(text: str, fm: u8, fma: bool, inl: il::Budget, bu: lu::Budgets, pairs: bool) (Package, Package) {
     let mut err = String::new();
     let q = lparse::parse(text, &mut err);
     assert(q.is_some(), err.as_str());
@@ -42,6 +47,7 @@ fn optimized_cfg(text: str, fm: u8, fma: bool, inl: il::Budget, bu: lu::Budgets)
     let mut after = lparse::parse(text, &mut err).unwrap();
     after.fmath = fm;
     after.fma = fma;
+    after.pairs = pairs;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut after, &none, lopt::Config { inline: inl, loops: bu });
     let mut v = verify::Verifier::new();
@@ -104,6 +110,189 @@ fn same_result(before: &Package, after: &Package, name: str, args: []u64, want: 
     assert_eq(o2.kind, leval::EV_OK);
     assert_eq(o.value, want);
     assert_eq(o2.value, want);
+}
+
+// The evaluator's binary16 conversions (`htof`, `ftoh`) agree with `std::float`'s limb code: every
+// encoding widened, and each finite one's value, its midpoints to its neighbours and the floats next to
+// those rounded, a NaN as a NaN.
+@test
+fn the_evaluator_converts_binary16_as_std_does() {
+    for h in 0u32..65536 {
+        let x = f16::from_raw(UInt::<16>::from_u64(h));
+        let w = leval::half_to_f32_bits(h);
+        if x.is_nan() {
+            assert((w & 0x7FFFFFFF) > 0x7F800000, "a NaN widens to a NaN");
+            continue;
+        }
+        assert_eq(w, f32_bits(x.to_f32()));
+        if (h & 0x7C00) == 0x7C00 {
+            continue;
+        }
+        let lo = x.to_f32();
+        let hi = if (h & 0x7FFF) == 0x7BFF {
+            65536.0f32;
+        } else {
+            f16::from_raw(UInt::<16>::from_u64(h as u64 + 1)).to_f32();
+        };
+        let mid = (lo + hi) / 2.0;
+        let probes: []f32 = [
+            lo,
+            mid,
+            f32_from_bits(f32_bits(mid) - 1),
+            f32_from_bits(f32_bits(mid) + 1),
+            (lo + mid) / 2.0,
+        ];
+        for k in 0..probes.len() {
+            let v = probes[k];
+            assert_eq(leval::f32_bits_to_half(f32_bits(v)) as u64, f16::from_f32(v).to_raw().to_u64());
+        }
+    }
+}
+
+// A 128-bit integer splits into its two 64-bit words (`Package.pairs`): sums and differences carry
+// between the words, products take the high half of the low words' product, shifts move bits within and
+// across the words (amounts 0, 1, 63, 64, 65, 100 and 127), orders of both signs compare the high words
+// first, and selects, a store, a load and a block parameter take the words; a call's argument and result
+// stay whole. Each result is the one of the body before.
+@test
+fn an_i128_splits_into_its_words() {
+    let (b, a) = optimized_split(
+        M"(lir ptr 8
+sym @wide fn global noinline
+sym @mix fn global
+fn @wide
+  sig (i128) -> i128
+b0(v0: i128):
+  v1 = wconst.i128 0x9e3779b97f4a7c15, 0x123456789abcdef
+  v2 = mul.i128 v0, v1
+  ret v2
+fn @mix
+  sig (i64, i64, i64) -> i64
+  slot s0 size 16 align 4
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = sext.i128 v0
+  v4 = zext.i128 v1
+  v5 = add.i128 v3, v4
+  v6 = sub.i128 v3, v4
+  v7 = mul.i128 v5, v6
+  v8 = iconst.i64 127
+  v9 = and.i64 v2, v8
+  v10 = zext.i128 v9
+  v11 = shl.i128 v7, v10
+  v12 = lshr.i128 v7, v10
+  v13 = ashr.i128 v7, v10
+  v14 = icmp.slt v11, v13
+  v15 = icmp.ult v12, v5
+  v16 = icmp.eq v6, v7
+  v17 = select.i128 v14, v11, v12
+  v18 = select.i128 v15, v17, v13
+  v19 = neg.i128 v18
+  v20 = not.i128 v19
+  v21 = xor.i128 v20, v5
+  v22 = slotaddr s0
+  store v21, v22 align 4
+  v23 = load.i128 v22 align 4
+  v24 = call.i128 @wide(v23) : (i128) -> i128
+  v25 = trunc.i64 v24
+  v26 = wconst.i128 0x40, 0x0
+  v27 = lshr.i128 v24, v26
+  v28 = trunc.i64 v27
+  v29 = xor.i64 v25, v28
+  v30 = zext.i64 v16
+  v31 = add.i64 v29, v30
+  v32 = icmp.sge v21, v5
+  v33 = zext.i64 v32
+  v34 = add.i64 v31, v33
+  jmp b1(v24, v34)
+b1(v35: i128, v36: i64):
+  v37 = trunc.i32 v35
+  v38 = zext.i64 v37
+  v39 = add.i64 v36, v38
+  ret v39
+)",
+        0,
+        false,
+        il::SPEED,
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+        true,
+    );
+    let t = text_of(&a, "mix");
+    // Only the call's argument joins the words again (`hi << 64 | lo`).
+    assert(
+        t.as_str().find("mul.i128") < 0 && t.as_str().find("ashr.i128") < 0 && t.as_str().find("load.i128") < 0,
+        t.as_str(),
+    );
+    assert(t.as_str().find("mulhu.i64") >= 0 && t.as_str().find("call.i128 @wide") >= 0, t.as_str());
+    // (a, b, the shift amount) per run.
+    let args: []u64 = [
+        5,
+        9,
+        3,
+        0xFFFFFFFFFFFFFFF9,
+        0xFFFFFFFFFFFFFFFF,
+        64,
+        0x8000000000000000,
+        1,
+        127,
+        123456789,
+        987654321,
+        0,
+        0xFFFFFFFFFFFFFFFF,
+        0xFFFFFFFFFFFFFFFF,
+        65,
+        0x7FFFFFFFFFFFFFFF,
+        0x8000000000000000,
+        100,
+        0,
+        0,
+        63,
+        0x0123456789ABCDEF,
+        0xFEDCBA9876543210,
+        1,
+    ];
+    for k in 0..args.len() / 3 {
+        let x = args[3 * k..3 * k + 3];
+        let mut e = leval::Eval::new(&b);
+        let o = e.run(b.find_symbol("mix"), x);
+        let mut e2 = leval::Eval::new(&a);
+        let o2 = e2.run(a.find_symbol("mix"), x);
+        assert_eq(o.kind, leval::EV_OK);
+        assert_eq(o2.kind, leval::EV_OK);
+        assert_eq(o2.value, o.value);
+    }
+}
+
+// A truncated sum, difference, product or bitwise operation of extended values is that operation in the
+// narrow type; a quotient is not, nor an operand extended from another type.
+@test
+fn a_truncated_operation_of_extensions_narrows() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (i32, i32, i16) -> i32
+b0(v0: i32, v1: i32, v2: i16):
+  v3 = zext.i64 v0
+  v4 = sext.i64 v1
+  v5 = mul.i64 v3, v4
+  v6 = trunc.i32 v5
+  v7 = udiv.i64 v3, v4
+  v8 = trunc.i32 v7
+  v9 = zext.i64 v2
+  v10 = sub.i64 v3, v9
+  v11 = trunc.i32 v10
+  v12 = xor.i32 v6, v8
+  v13 = add.i32 v12, v11
+  ret v13
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(t.as_str().find("mul.i32 v0, v1") >= 0 && t.as_str().find("mul.i64") < 0, t.as_str());
+    assert(t.as_str().find("udiv.i64") >= 0 && t.as_str().find("sub.i64") >= 0, t.as_str());
+    let args: []u64 = [0xFFFFFFF7, 0x80000003, 0xFFFE];
+    let mut e = leval::Eval::new(&b);
+    let o = e.run(b.find_symbol("f"), args);
+    same_result(&b, &a, "f", args, o.value);
 }
 
 // Tail recursion elimination (`Package.tail`): a call of the body's own function whose result its block
@@ -2565,6 +2754,57 @@ b0(v0: i32):
     assert(count_of(&t, "add.v4i32") == 1 && count_of(&t, "load.v4i32") == 2 && count_of(&t, "store ") == 1, t.as_str());
     let x: []u64 = [20];
     same_result(&b, &a, "top", x, 41);
+}
+
+// A callee whose packing makes vectors inlines as it was before the packing: the caller's slots become
+// values, which the callee's vector accesses of them would prevent; the callee's own body keeps its vectors.
+@test
+fn a_packed_callee_inlines_unpacked() {
+    let (b, a) = optimized_with(
+        M"(lir ptr 8
+sym @x2 fn global
+sym @top fn global
+fn @x2
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.i64 v1 align 3
+  v4 = load.i64 v1+8 align 3
+  v5 = load.i64 v2 align 3
+  v6 = load.i64 v2+8 align 3
+  v7 = xor.i64 v3, v5
+  v8 = xor.i64 v4, v6
+  store v7, v0 align 3
+  store v8, v0+8 align 3
+  ret
+fn @top
+  sig (i64, i64) -> i64
+  slot s0 size 16 align 3
+  slot s1 size 16 align 3
+  slot s2 size 16 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = slotaddr s2
+  store v0, v2 align 3
+  store v1, v2+8 align 3
+  store v1, v3 align 3
+  store v0, v3+8 align 3
+  call @x2(v4, v2, v3) : (ptr, ptr, ptr) -> void
+  v5 = load.i64 v4 align 3
+  v6 = load.i64 v4+8 align 3
+  v7 = add.i64 v5, v6
+  ret v7
+)",
+        0,
+        false,
+        4,
+    );
+    let f = text_of(&a, "x2");
+    assert(count_of(&f, "xor.v2i64") == 1, f.as_str());
+    let t = text_of(&a, "top");
+    assert(count_of(&t, "slotaddr") == 0 && count_of(&t, "v2i64") == 0 && count_of(&t, "call") == 0, t.as_str());
+    let x: []u64 = [0x0F0F, 0x3C3C];
+    same_result(&b, &a, "top", x, 2 * (0x0F0F ^ 0x3C3C));
 }
 
 // A loop's carried values whose start values are loads from consecutive addresses stay one vector across

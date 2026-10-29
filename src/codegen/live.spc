@@ -67,6 +67,12 @@ pub struct Live {
     pub fold_max: u32,
     pub fold: Vector<bool>,
     pub pfold: Vector<bool>,
+    /// Stores whose value a call takes in place of memory (the generator's, before `run`): per
+    /// instruction, a relayed store's call, else NONE (empty: none); `relayed`, call << 32 | store for each
+    /// store whose value the call reads. A relayed store reads nothing; its call reads those values
+    /// (`uses_at`).
+    pub relay: Vector<u32>,
+    pub relayed: Vector<u64>,
     /// The instructions that fold into their uses (`FOLD_*`, the target's): each use computes the folded
     /// instruction from its operands, which live to it (`uses_at`), and the instruction emits nothing
     /// (`pfold`).
@@ -110,6 +116,8 @@ extend Live {
             fold_max: 0,
             fold: Vector::<bool>::new(),
             pfold: Vector::<bool>::new(),
+            relay: Vector::<u32>::new(),
+            relayed: Vector::<u64>::new(),
             fold_ops: 0,
             cnd: Vector::<u32>::new(),
             base: Vector::<u32>::new(),
@@ -343,10 +351,21 @@ extend Live {
         return found;
     }
 
+    /// Whether the stores into slot `s` of `b` relay (`relay`): every use of its addresses is such a store
+    /// or a call's argument, so no instruction reads or writes its memory.
+    pub fn relays_slot(self: &Self, b: &Body, s: u32) bool {
+        for q in 0..self.relayed.len() {
+            if b.insts[b.insts[(self.relayed[q] & 0xFFFFFFFF) as usize].a as usize].a == s {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// The values instruction `i` of `b` uses, as `each_use` gives them but for the folded instructions
     /// (`pfold`): a use of one is a use of its two operands, and one uses none.
     pub fn uses_at(self: &Self, b: &Body, i: u32, out: &mut Vector<Value>) {
-        if self.pfold[i as usize] {
+        if self.pfold[i as usize] || self.relay.len() != 0 && self.relay[i as usize] != NONE {
             out.truncate(0);
             return;
         }
@@ -365,6 +384,11 @@ extend Live {
             out.swap_remove(u);
             out.push(p.a);
             out.push(p.b);
+        }
+        for q in 0..self.relayed.len() {
+            if (self.relayed[q] >> 32) as u32 == i {
+                out.push(b.insts[(self.relayed[q] & 0xFFFFFFFF) as usize].b);
+            }
         }
     }
 
@@ -1031,6 +1055,24 @@ extend Live {
 pub const fn reduces(t: Inst) bool {
     let code = (t.aux & VOP_CODE) as u32;
     return code >= core::OP_SIMD && code < core::OP_CMP_LANES && core::simd_op((code - core::OP_SIMD) as u8).rule == core::SR_REDUCE;
+}
+/// Whether instruction `t` of `b` uses an address of slot `s` (an operand, an argument or an edge's argument);
+/// `us` and `es` are scratch.
+pub fn reads_slot(b: &Body, t: Inst, s: u32, us: &mut Vector<Value>, es: &mut Vector<u32>) bool {
+    each_use(b, t, us);
+    b.succ_edges(t, es);
+    for e in 0..es.len() {
+        for q in 0..b.edge_nargs(es[e]) {
+            us.push(b.edge_arg(es[e], q));
+        }
+    }
+    for q in 0..us.len() {
+        let v = us[q];
+        if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_SLOTADDR && b.insts[v as usize].a == s {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// The values instruction `t` of `b` uses into `out`, each use once: its operands, a call's arguments, a

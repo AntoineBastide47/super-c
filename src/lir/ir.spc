@@ -233,7 +233,11 @@ pub const O_VCMP: u8 = 75;
 pub const O_VSEL: u8 = 76;
 /// The even lanes of vectors `a` then `b` (of the result's type): lane k is lane 2k of `a ++ b`.
 pub const O_VUNZIP: u8 = 77;
-pub const OP_COUNT: u8 = 78;
+/// The f32 value of the IEEE binary16 encoding `a` (an i16): exact (`Package.half`).
+pub const O_HTOF: u8 = 78;
+/// The IEEE binary16 encoding (an i16) of f32 `a`, rounded to nearest, ties to even (`Package.half`).
+pub const O_FTOH: u8 = 79;
+pub const OP_COUNT: u8 = 80;
 
 /// One opcode: its text name and its operand form.
 pub struct OpInfo {
@@ -241,7 +245,7 @@ pub struct OpInfo {
     pub form: u8,
 }
 
-pub const OPS: [OpInfo; 78] = [
+pub const OPS: [OpInfo; 80] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -320,6 +324,8 @@ pub const OPS: [OpInfo; 78] = [
     OpInfo { name: "vcmp", form: F_CMP },
     OpInfo { name: "vsel", form: F_TRI },
     OpInfo { name: "vunzip", form: F_BIN },
+    OpInfo { name: "htof", form: F_UN },
+    OpInfo { name: "ftoh", form: F_UN },
 ];
 
 /// The mask a lane-wise comparison of vectors of type `t` gives (`O_VCMP`): integer lanes of its lanes'
@@ -689,6 +695,11 @@ pub struct Sym {
 }
 
 pub const NONE: u32 = 0xFFFFFFFF;
+/// `Package.half`: no binary16 instruction; conversions to and from f32 (`O_HTOF`, `O_FTOH`); those and
+/// the arithmetic on binary16 values (arm64's FEAT_FP16).
+pub const HALF_NONE: u8 = 0;
+pub const HALF_CVT: u8 = 1;
+pub const HALF_ARITH: u8 = 2;
 /// `Sym.alloc`: a C library or runtime allocation, which returns a block no other pointer reaches and
 /// writes no memory the program reads but `errno` (an `i32`); a C library or runtime free, which writes no
 /// memory the program may read. Only for a call from outside it: a package that defines the function
@@ -1143,10 +1154,16 @@ pub struct Package {
     /// Whether the native backend computes `O_MULHU` of 64-bit integers in one instruction
     /// (`target::table::Isa`): the optimizer then divides by a 64-bit constant with a product.
     pub mul_high: bool,
+    /// Whether the optimizer splits each 128-bit integer into its two 64-bit words (`lir::pairs`), which
+    /// the native backend keeps in registers (`target::table::Isa`); it needs `mul_high`.
+    pub pairs: bool,
     /// The float rewrites the build allows (`FM_*`, `-ffast-math` and its parts), and whether the
     /// processor has a scalar fused multiply-add (`O_FMA` for contraction).
     pub fmath: u8,
     pub fma: bool,
+    /// What the processor does with IEEE binary16 values (`HALF_*`): `std::float`'s f16 computes in f32
+    /// through `O_HTOF` and `O_FTOH` where it converts them.
+    pub half: u8,
     /// The object sections split at their symbols, so the link can drop what nothing reaches
     /// (`codegen::obj::SPLIT_*`, `-ffunction-sections` and `-fdata-sections`); Mach-O splits at the link
     /// instead.
@@ -1221,6 +1238,7 @@ extend Package {
             vec_regs: 16,
             vector: 16,
             mul_high: true,
+            pairs: false,
             pic: false,
             no_plt: false,
             debug: false,
@@ -1230,6 +1248,7 @@ extend Package {
             protect: PROTECT_NONE,
             fmath: 0,
             fma: false,
+            half: HALF_NONE,
             names: nm::Names::with_capacity(1 << 14, 1 << 10),
             files: Vector::<u32>::new(),
             syms: Vector::<Sym>::new(),

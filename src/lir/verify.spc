@@ -343,6 +343,12 @@ extend Verifier {
         if op == O_VUNZIP {
             return self.need(name, b, i, is_vec(t.ty) && ta == t.ty && tb == t.ty, "two vectors of the result's type");
         }
+        if op == O_HTOF {
+            return self.need(name, b, i, t.ty == T_F32 && ta == T_I16, "an i16 operand and an f32 result");
+        }
+        if op == O_FTOH {
+            return self.need(name, b, i, t.ty == T_I16 && ta == T_F32, "an f32 operand and an i16 result");
+        }
         if op == O_VSEL {
             return self.need(
                 name,

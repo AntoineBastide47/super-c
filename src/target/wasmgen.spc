@@ -1347,6 +1347,10 @@ extend Gen {
         if is_vec(t.ty) && op != O_LOAD && op != O_SELECT && op != O_CALL && op != O_CALLIND && op != O_VAARG && op != O_BITCAST || op == O_VOP {
             return self.vector(i, t);
         }
+        if op == O_HTOF || op == O_FTOH {
+            // wasm32 converts no binary16 value (`Package.half` is HALF_NONE there).
+            return self.refuse("a binary16 conversion");
+        }
         if op >= O_ADD && op <= O_NOT {
             if t.ty == T_I128 {
                 return self.int128(i, t);

@@ -134,6 +134,44 @@ fn f16_known_encodings() {
     assert(f16::nan() == f16::nan());
 }
 
+// f16's sum, difference, product, quotient and square root (computed in f32, or in binary16 where the
+// processor computes it) are the correctly rounded ones. f64 holds each exact sum, difference and product
+// of two f16 values and rounds a quotient or a square root with 53 >= 2 * 11 + 2 bits, so its value rounded
+// once to f16 by the limb code (`from_f64`) is the oracle: every 131st encoding against every 127th (zeros,
+// subnormals, the largest values, infinities and NaNs among them), and every square root.
+@test
+fn f16_arithmetic_is_correctly_rounded() {
+    let mut a: u64 = 0;
+    while a < 65536 {
+        let x = f16::from_raw(UInt::<16>::from_u64(a));
+        let xd = x.to_f64();
+        let mut c: u64 = 0;
+        while c < 65536 {
+            let y = f16::from_raw(UInt::<16>::from_u64(c));
+            let yd = y.to_f64();
+            same16(x + y, f16::from_f64(xd + yd), a, c, "+");
+            same16(x - y, f16::from_f64(xd - yd), a, c, "-");
+            same16(x * y, f16::from_f64(xd * yd), a, c, "*");
+            same16(x / y, f16::from_f64(xd / yd), a, c, "/");
+            c += 127;
+        }
+        a += 131;
+    }
+    for r in 0u64..65536 {
+        let x = f16::from_raw(UInt::<16>::from_u64(r));
+        same16(x.sqrt(), f16::from_f64(x.to_f64().sqrt()), r, r, "sqrt");
+    }
+}
+
+// `got` is `want`, or both are NaN; else the operands' encodings `a`, `b` and the operation `op` fail.
+fn same16(got: f16, want: f16, a: u64, b: u64, op: str) {
+    if got == want || got.is_nan() && want.is_nan() {
+        return;
+    }
+    eprintln("{:x} {} {:x}: {:x}, the oracle {:x}", a, op, b, got.to_raw().to_u64(), want.to_raw().to_u64());
+    assert(false, "an f16 result differs from the correctly rounded one");
+}
+
 // The value of the IEEE encoding `raw` with `e` exponent and `f` fraction bits, from its fields in f64
 // arithmetic, exact for the formats below.
 const fn field_value(raw: u64, e: usize, f: usize) f64 {

@@ -241,6 +241,7 @@ pub struct Gen {
     vregs: u32, // the package's `vec_regs`
     win: bool, // Microsoft x64 and COFF, else System V and ELF
     avx: bool, // AVX2: 32-byte vectors in ymm registers (`Package.vector`)
+    z512: bool, // AVX-512 (F, BW, DQ, VL): 64-byte vectors in zmm registers too
     ymm: bool, // the body holds a 32-byte vector in a register: `vzeroupper` before each call and return
     yblk: Vector<bool>, // per block, whether it defines or reads a 32-byte vector (`ymm`)
     yvals: Vector<u32>, // the 32-byte vector values (indices)
@@ -364,7 +365,8 @@ extend Gen {
             ptr: pkg.ptr_bytes,
             vregs: pkg.vec_regs,
             win: win,
-            avx: pkg.vector == 32,
+            avx: pkg.vector >= 32,
+            z512: pkg.vector == 64,
             ymm: false,
             yblk: Vector::<bool>::new(),
             yvals: Vector::<u32>::new(),
@@ -522,10 +524,10 @@ extend Gen {
     }
 
     // Whether memory value type `t` may be in a vector register: `in_vreg`, or with AVX2 a vector of 32
-    // bytes in a ymm register. Only the instructions with 256-bit forms read this; the others take a
-    // 32-byte vector from its home.
+    // bytes in a ymm register, with AVX-512 one of 64 in a zmm register. Only the instructions with 256-
+    // and 512-bit forms read this; the others take such a vector from its home.
     const fn in_reg(self: &Self, t: u8) bool {
-        return Gen::in_vreg(t) || self.avx && is_vec(t) && type_bytes(t, 8) == 32;
+        return Gen::in_vreg(t) || is_vec(t) && (self.avx && type_bytes(t, 8) == 32 || self.z512 && type_bytes(t, 8) == 64);
     }
 
     // Whether `v` is an instruction value the generator recomputes at each use.
@@ -925,6 +927,17 @@ extend Gen {
                 r = pa.reg;
             }
         } else if t.op == O_JMP {
+            // A later block's parameter takes its home here, at the first edge into it, so `v` is defined
+            // there (`def_fwd` does the same).
+            let tg = b.edge_target(t.a);
+            if self.lv.pos[tg as usize] != NONE && self.lv.pos[tg as usize] > self.pos {
+                let tb = b.blocks[tg as usize];
+                for q in 0..b.edge_nargs(t.a) {
+                    if b.edge_arg(t.a, q) == v {
+                        self.param_home(b.insts.len() as u32 + tb.param_start + q, NOREG);
+                    }
+                }
+            }
             return self.jump_reg(b, t, v);
         }
         if r == NOREG || ((self.held | self.lock | self.tmps | self.fixed_busy) & bit(r)) != 0 || (self.xalloc & bit(r)) == 0 {
@@ -1231,6 +1244,9 @@ extend Gen {
             ) >= 16 && self.in_reg(t.ty) || t.op == O_VCMP && self.in_reg(self.vt(t.a)) && (is_float(
                 lane_type(self.vt(t.a)),
             ) || type_bytes(lane_type(t.ty), 8) < 8 || self.avx) || self.avx && is_vec(t.ty) && type_bytes(t.ty, 8) == 32 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG) && avx_of_op(
+                t.op,
+                lane_type(t.ty),
+            ) != NONE || self.z512 && is_vec(t.ty) && type_bytes(t.ty, 8) == 64 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG) && evex_of_op(
                 t.op,
                 lane_type(t.ty),
             ) != NONE;
@@ -1587,7 +1603,10 @@ extend Gen {
         if dst == src {
             return;
         }
-        if dst >= V0 && type_bytes(t, self.ptr) == 32 {
+        if dst >= V0 && type_bytes(t, self.ptr) == 64 {
+            // vmovdqa64 zmm (EVEX.512.66.0F.W1 6F).
+            self.c.evex_rr(0x66, 1, 0x6F, true, dst - V0, 0, src - V0);
+        } else if dst >= V0 && type_bytes(t, self.ptr) == 32 {
             // vmovaps ymm (VEX.256 0F 28).
             self.c.vex_rr(0, 1, 0x28, false, true, dst - V0, 0, src - V0);
         } else if dst >= V0 {
@@ -2040,6 +2059,7 @@ extend Gen {
         let b = self.b();
         self.lv.fold_max = 8;
         self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST;
+        self.arg_relays();
         self.lv.run(b);
         let n = self.lv.end.len();
         self.va.truncate(0);
@@ -2077,13 +2097,13 @@ extend Gen {
             for k in 0..b.blocks.len() {
                 let bk = b.blocks[k];
                 for i in bk.start..bk.start + bk.len {
-                    if is_vec(b.insts[i as usize].ty) && type_bytes(b.insts[i as usize].ty, 8) == 32 {
+                    if is_vec(b.insts[i as usize].ty) && type_bytes(b.insts[i as usize].ty, 8) >= 32 {
                         self.yvals.push(i);
                         self.yblk[k] = true;
                     }
                 }
                 for q in bk.param_start..bk.param_start + bk.param_len as u32 {
-                    if is_vec(b.params[q as usize]) && type_bytes(b.params[q as usize], 8) == 32 {
+                    if is_vec(b.params[q as usize]) && type_bytes(b.params[q as usize], 8) >= 32 {
                         self.yvals.push(b.insts.len() as u32 + q);
                         self.yblk[k] = true;
                     }
@@ -2096,7 +2116,7 @@ extend Gen {
                     lv::each_use(b, b.insts[i as usize], &mut self.uses);
                     for u in 0..self.uses.len() {
                         let v = self.uses[u];
-                        self.yblk[k] = self.yblk[k] || v != VNONE && is_vec(b.type_of(v)) && type_bytes(b.type_of(v), 8) == 32;
+                        self.yblk[k] = self.yblk[k] || v != VNONE && is_vec(b.type_of(v)) && type_bytes(b.type_of(v), 8) >= 32;
                     }
                 }
             }
@@ -2178,6 +2198,10 @@ extend Gen {
         fill32(&mut self.slot_off, b.slots.len(), 0);
         let mut at = out;
         for k in 0..b.slots.len() {
+            // A slot whose stores relay (`arg_relays`) has no memory access.
+            if self.lv.relays_slot(b, k as u32) {
+                continue;
+            }
             let sl = b.slots[k];
             let al = 1u32 << sl.align_log2 as u32;
             if al > self.max_align {
@@ -2844,6 +2868,8 @@ extend Gen {
             T_I128;
         } else if v && bytes == 32 {
             vec_type(T_I64, 4);
+        } else if v && bytes == 64 {
+            vec_type(T_I64, 8);
         } else {
             int_type(bytes);
         };
@@ -3172,6 +3198,10 @@ extend Gen {
         }
         if op == O_VUNZIP {
             self.vunzip(i, t);
+            return true;
+        }
+        if op == O_HTOF || op == O_FTOH {
+            self.half_conv(i, t);
             return true;
         }
         if op >= O_ADD && op <= O_NOT {
@@ -4694,6 +4724,10 @@ extend Gen {
 
     fn store(self: &mut Self, t: Inst) bool {
         let ty = self.vt(t.b);
+        // A store a call takes the value of (`arg_relays`) writes nothing.
+        if self.lv.relay.len() != 0 && self.lv.relay[self.cur as usize] != NONE {
+            return true;
+        }
         // A store of the result's part: its run's first moves the run into the part registers.
         let c = self.cur;
         if self.rstore[c as usize] != 0 {
@@ -5182,6 +5216,184 @@ extend Gen {
 
     // The argument and result locations of call `t` (`lay`): an intrinsic's (`abi::intrinsic_layout`, the
     // System V registers its instructions name), else the convention's.
+    // `lv.relay`: the stores whose value a call takes in place of a register-passed aggregate argument's
+    // memory. The argument is a slot's address; the stores into the slot before the call in its block (back
+    // to another use of the slot's addresses) each write a whole part (its offset, size and register file),
+    // and every part has one. When every use of the slot's addresses is such a store or such an argument,
+    // no other access reads the bytes: the stores write nothing, and each call moves the last store's
+    // value of each part into the part's register.
+    fn arg_relays(self: &mut Self) {
+        let b = self.b();
+        let ni = b.insts.len();
+        self.lv.relay.truncate(0);
+        self.lv.relayed.truncate(0);
+        // Each slot's address uses: operands, call arguments and edge arguments.
+        let mut uses = Vector::<u32>::new();
+        uses.resize_default(b.slots.len());
+        let mut calls = false;
+        let mut us = Vector::<Value>::new();
+        let mut es = Vector::<u32>::new();
+        for i in 0..ni {
+            let t = b.insts[i];
+            calls = calls || t.op == O_CALL || t.op == O_CALLIND;
+            lv::each_use(b, t, &mut us);
+            b.succ_edges(t, &mut es);
+            for e in 0..es.len() {
+                for q in 0..b.edge_nargs(es[e]) {
+                    us.push(b.edge_arg(es[e], q));
+                }
+            }
+            for q in 0..us.len() {
+                let v = us[q];
+                if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_SLOTADDR {
+                    uses[b.insts[v as usize].a as usize] += 1;
+                }
+            }
+        }
+        if !calls {
+            return;
+        }
+        let mut stores = Vector::<u32>::new();
+        // The groups: per argument, its slot << 32 | its call; per store, its group << 32 | the store
+        // (bit 31: a part's value). `covered`: per slot, the uses its groups account for.
+        let mut groups = Vector::<u64>::new();
+        let mut gst = Vector::<u64>::new();
+        let mut covered = Vector::<u32>::new();
+        covered.resize_default(b.slots.len());
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            for c in bk.start..bk.start + bk.len {
+                let t = b.insts[c as usize];
+                if t.op != O_CALL && t.op != O_CALLIND || t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
+                    continue;
+                }
+                self.call_layout(t);
+                let np = b.pool[t.b as usize];
+                for q in 0..np {
+                    let v = b.pool[(t.c + q) as usize];
+                    let loc = self.lay.locs[q as usize];
+                    if loc.kind != ab::L_REG || (b.pool[(t.b + 3 + q) as usize] & AGG) == 0 || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SLOTADDR {
+                        continue;
+                    }
+                    let s = b.insts[v as usize].a;
+                    // The stores into the slot before the call, nearest first; each part's first is its value.
+                    stores.truncate(0);
+                    let mut seen: u32 = 0;
+                    let mut whole = true;
+                    let mut j = c;
+                    while j > bk.start {
+                        j -= 1;
+                        let u = b.insts[j as usize];
+                        if u.op != O_STORE || (u.a & (VPARAM | VFLAG)) != 0 || b.insts[u.a as usize].op != O_SLOTADDR || b.insts[u.a as usize].a != s {
+                            // Another use of the slot's addresses (an earlier call's argument) ends the run.
+                            if lv::reads_slot(b, u, s, &mut us, &mut es) {
+                                break;
+                            }
+                            continue;
+                        }
+                        let pq = self.arg_part(loc, u);
+                        if pq == NONE {
+                            whole = false;
+                            break;
+                        }
+                        if (seen >> pq & 1) == 0 {
+                            stores.push(j);
+                        }
+                        seen |= 1u32 << pq;
+                        stores.push(j | 0x80000000);
+                    }
+                    if !whole || seen != (1u32 << loc.n as u32) - 1 {
+                        continue;
+                    }
+                    let g = groups.len() as u64;
+                    groups.push(s as u64 << 32 | c as u64);
+                    // The argument, and each store once.
+                    covered[s as usize] += 1;
+                    for z in 0..stores.len() {
+                        gst.push(g << 32 | stores[z] as u64);
+                        covered[s as usize] += ((stores[z] & 0x80000000) != 0) as u32;
+                    }
+                }
+            }
+        }
+        // A slot whose every address use its groups account for: their stores relay.
+        for z in 0..gst.len() {
+            let gr = groups[(gst[z] >> 32) as usize];
+            let s = (gr >> 32) as usize;
+            if covered[s] != uses[s] {
+                continue;
+            }
+            if self.lv.relay.len() == 0 {
+                fill32(&mut self.lv.relay, ni, NONE);
+            }
+            let c = gr as u32;
+            let st = gst[z] as u32 & 0x7FFFFFFF;
+            if (gst[z] & 0x80000000) != 0 {
+                self.lv.relay[st as usize] = c;
+            } else {
+                self.lv.relayed.push(c as u64 << 32 | st as u64);
+            }
+        }
+    }
+
+    // The part (0 ..) of register-passed argument `loc` that store `u` writes whole, else NONE.
+    fn arg_part(self: &Self, loc: ab::ALoc, u: Inst) u32 {
+        if (u.aux & MEM_VOLATILE) != 0 || (u.b & VFLAG) != 0 {
+            return NONE;
+        }
+        let ty = self.vt(u.b);
+        for q in 0..loc.n as u32 {
+            let pa = self.lay.parts[(loc.p0 + q) as usize];
+            if pa.off == u.c && pa.size as u32 == type_bytes(ty, self.ptr) && pa.v == Gen::is_v(ty) && !Gen::in_mem(ty) {
+                return q;
+            }
+        }
+        return NONE;
+    }
+
+    // Aggregate argument `v` (`loc`) of call `i` taken from its relayed stores' values (`arg_relays`): into
+    // the parallel move (`mv`) for those in a register or a home, else into `vals` (part register << 32 |
+    // value) for after it; whether it is.
+    fn relay_parts(self: &mut Self, i: u32, v: Value, loc: ab::ALoc, vals: &mut Vector<u64>) bool {
+        let b = self.b();
+        if self.lv.relay.len() == 0 || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SLOTADDR {
+            return false;
+        }
+        let s = b.insts[v as usize].a;
+        let mut any = false;
+        for q in 0..self.lv.relayed.len() {
+            if (self.lv.relayed[q] >> 32) as u32 != i {
+                continue;
+            }
+            let st = b.insts[(self.lv.relayed[q] & 0xFFFFFFFF) as usize];
+            if b.insts[st.a as usize].a != s {
+                continue;
+            }
+            any = true;
+            let pa = self.lay.parts[(loc.p0 + self.arg_part(loc, st)) as usize];
+            let r = pa.reg + if pa.v {
+                V0;
+            } else {
+                0;
+            };
+            let src = self.loc_of(self.vx(st.b));
+            if src.kind == LC_VAL {
+                vals.push(r as u64 << 32 | st.b as u64);
+                continue;
+            }
+            self.mv.push(
+                Mv {
+                    src: src,
+                    dst: Lc { kind: LC_REG, reg: r, off: 0, val: NONE },
+                    v: pa.v,
+                    bytes: pa.size,
+                    done: false,
+                },
+            );
+        }
+        return any;
+    }
+
     fn call_layout(self: &mut Self, t: Inst) {
         let b = self.b();
         if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
@@ -5407,7 +5619,17 @@ extend Gen {
                 keep.push(x);
             }
         }
+        // The values of the stores this call takes in place of its aggregates' memory (`arg_relays`).
+        for q in 0..self.lv.relayed.len() {
+            if (self.lv.relayed[q] >> 32) as u32 == i {
+                let x = self.vx(b.insts[(self.lv.relayed[q] & 0xFFFFFFFF) as usize].b);
+                if self.va[x as usize].reg != NOREG {
+                    keep.push(x);
+                }
+            }
+        }
         self.spill_around_call(&keep);
+        let mut rvals = Vector::<u64>::new();
         // The registers the template reads in place of its argument registers hold no temporary.
         for j in 0..to.len() {
             self.lock |= bit(V0 + to[j] as u8);
@@ -5479,12 +5701,22 @@ extend Gen {
                 self.st(vty, r, x::at(x::RSP, loc.off as i32));
             }
         }
-        // The scalars from registers and homes as one parallel move; a narrow one then extends in place.
+        // The scalars from registers and homes as one parallel move; a narrow one then extends in place. An
+        // aggregate whose stores relay (`arg_relays`) takes their values.
         self.mv.truncate(0);
+        let mut relayed = Vector::<bool>::with_capacity(np as usize);
         for k in 0..np {
             let loc = self.lay.locs[k as usize];
             let v = b.pool[(t.c + k) as usize];
             let vty = self.vt(v);
+            relayed.push(
+                loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && self.relay_parts(
+                    i,
+                    v,
+                    loc,
+                    &mut rvals,
+                ),
+            );
             if loc.kind != ab::L_REG || (b.pool[(sig + 3 + k) as usize] & AGG) != 0 || Gen::in_mem(vty) && !self.vec_in_reg(
                 loc,
                 vty,
@@ -5527,15 +5759,22 @@ extend Gen {
                 loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) == 0 && (!Gen::in_mem(vty) || self.vec_in_reg(
                     loc,
                     vty,
-                )) && self.loc_of(x).kind != LC_VAL || ren[k as usize],
+                )) && self.loc_of(x).kind != LC_VAL || ren[k as usize] || relayed[k as usize],
             );
             clean.push(va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG));
         }
         self.resolve_moves();
         // The moved values' registers now hold arguments.
         self.forget_caller_saved();
+        // The relayed aggregate parts' constants and addresses (`relay_parts`).
+        for q in 0..rvals.len() {
+            self.materialize(rvals[q] as u32, (rvals[q] >> 32) as u8);
+        }
         for k in 0..np {
             let loc = self.lay.locs[k as usize];
+            if relayed[k as usize] {
+                continue;
+            }
             if loc.kind == ab::L_REF_REG {
                 let at = self.ref_copy(b.pool[(t.c + k) as usize], b.pool[(sig + 3 + k) as usize]);
                 self.c.lea(self.lay.parts[loc.p0 as usize].reg, x::at(x::RSP, at));
@@ -5755,12 +5994,28 @@ extend Gen {
     // A call of C function `name` with the integer or pointer values `vs` in the argument registers and
     // no result.
     fn rt_call(self: &mut Self, name: str, vs: []Value) {
-        self.spill_for_call();
+        // The operands in registers stay there for the parallel move, as a call's arguments do; one that
+        // lives on is in its home too.
+        let mut keep = Vector::<u32>::with_capacity(vs.len());
         let mut rs = Vector::<u8>::with_capacity(vs.len());
         for k in 0..vs.len() {
+            let x = self.vx(vs[k]);
+            if self.va[x as usize].reg != NOREG {
+                keep.push(x);
+            }
             rs.push(self.arg(k as u32));
         }
+        self.clob = ~0u64;
+        self.spill_around_call(&keep);
         self.args_to(vs, rs[0..rs.len()]);
+        // A narrow integer (a 32-bit size, a fill byte) extends to the register's width, as C reads it.
+        for k in 0..vs.len() {
+            let n = type_bytes(self.vt(vs[k]), self.ptr);
+            if n < 8 {
+                self.c.ext(n, 8, false, rs[k], rs[k]);
+            }
+        }
+        self.forget_caller_saved();
         self.call_sym(name);
     }
 
@@ -6745,10 +7000,11 @@ const fn sse_of_op(op: u8, lt: u8, un: &mut bool) u32 {
     return NONE;
 }
 
-// Whether call layout `lay` passes an argument or the result in a ymm register: a 32-byte vector part.
+// Whether call layout `lay` passes an argument or the result in a ymm or zmm register: a 32- or 64-byte
+// vector part.
 fn ymm_parts(lay: &ab::CallLayout) bool {
     for k in 0..lay.parts.len() {
-        if lay.parts[k].v && lay.parts[k].size == 32 {
+        if lay.parts[k].v && lay.parts[k].size >= 32 {
             return true;
         }
     }
@@ -6793,6 +7049,57 @@ const fn avx_of_op(op: u8, lt: u8) u32 {
         0x6601EB;
     } else if op == O_XOR || op == O_NOT {
         0x6601EF;
+    } else {
+        NONE;
+    };
+}
+
+// The AVX-512 form of vector operation `op` on lanes of `lt` (64 bytes): EVEX.W << 24 | its legacy prefix
+// << 16 | opcode map << 8 | opcode, NONE when it has none (a product of bytes). `neg` is a subtraction
+// from 0, `not` a `vpternlogd` (`zmm_reg`), `fneg` an xor of the sign bits (`vxorps`/`vxorpd`, DQ).
+const fn evex_of_op(op: u8, lt: u8) u32 {
+    let eb = type_bytes(lt, 8);
+    if is_float(lt) {
+        let pd: u32 = if lt == T_F64 {
+            0x1660000;
+        } else {
+            0;
+        };
+        return if op == O_FADD {
+            pd | 0x158;
+        } else if op == O_FSUB {
+            pd | 0x15C;
+        } else if op == O_FMUL {
+            pd | 0x159;
+        } else if op == O_FDIV {
+            pd | 0x15E;
+        } else if op == O_FNEG {
+            pd | 0x157;
+        } else {
+            NONE;
+        };
+    }
+    let w: u32 = if eb == 8 {
+        0x1000000;
+    } else {
+        0;
+    };
+    return if op == O_ADD {
+        w | 0x660100 | padd(eb) & 0xFF;
+    } else if op == O_SUB || op == O_NEG {
+        w | 0x660100 | psub(eb) & 0xFF;
+    } else if op == O_MUL && eb == 2 {
+        0x6601D5;
+    } else if op == O_MUL && eb >= 4 {
+        w | 0x660240;
+    } else if op == O_AND {
+        0x6601DB;
+    } else if op == O_OR {
+        0x6601EB;
+    } else if op == O_XOR {
+        0x6601EF;
+    } else if op == O_NOT {
+        0x660325;
     } else {
         NONE;
     };
@@ -7038,8 +7345,59 @@ extend Gen {
         self.c.vex_rr(pfx, mm, opc, false, true, r - V0, rx, ry);
     }
 
-    // Vector constant `t` into a register for `i`: 0 by `pxor`, all ones by `pcmpeqd`, one 8-byte word
-    // repeated through r11 and a broadcast, else its words through a slot of the frame.
+    // AVX-512 operation `w` (`evex_of_op`) of 64-byte vectors `xv` and `yv` (VNONE for one operand: `neg`
+    // subtracts from 0, `not` is `vpternlogd` of the operand alone, `fneg` xors the sign bits) into `i`: the
+    // three-operand EVEX.512 form.
+    fn zmm_reg(self: &mut Self, w: u32, op: u8, lt: u8, i: u32, xv: Value, yv: Value) {
+        let ew = w >> 24 != 0;
+        let pfx = w >> 16 & 0xFF;
+        let mm = w >> 8 & 0xFF;
+        let opc = w & 0xFF;
+        let rx = self.vec_use(xv, self.vs0) - V0;
+        if yv == VNONE {
+            let rd = self.vec_def(i) - V0;
+            let s = self.vs1 - V0;
+            if op == O_NEG {
+                self.c.evex_rr(0x66, 1, 0xEF, false, s, s, s);
+                self.c.evex_rr(pfx, mm, opc, ew, rd, s, rx);
+            } else if op == O_NOT {
+                // vpternlogd 0x33: NOT of the second operand.
+                self.c.evex_rr(0x66, 3, 0x25, false, rd, rx, rx);
+                self.c.byte(0x33);
+            } else {
+                self.zmm_splat64(
+                    s,
+                    if lt == T_F64 {
+                        0x8000000000000000u64;
+                    } else {
+                        0x8000000080000000u64;
+                    },
+                );
+                self.c.evex_rr(pfx, mm, opc, ew, rd, rx, s);
+            }
+            return;
+        }
+        let ry = self.vec_use(yv, self.vs1) - V0;
+        // A loop's accumulator: the result takes the back edge's parameter register (`avx_reg`).
+        let mut r = self.def_shared(i, xv);
+        if r == NOREG {
+            r = self.def_shared(i, yv);
+        }
+        if r == NOREG {
+            r = self.vec_def(i);
+        }
+        self.c.evex_rr(pfx, mm, opc, ew, r - V0, rx, ry);
+    }
+
+    // zmm `r` = every 8-byte lane `x`: through r11, then `vpbroadcastq` (EVEX.512.66.0F38.W1 7C).
+    fn zmm_splat64(self: &mut Self, r: u8, x: u64) {
+        self.c.mov_ri(S1, x);
+        self.c.evex_rr(0x66, 2, 0x7C, true, r, 0, S1);
+    }
+
+    // Vector constant `t` into a register for `i`: 0 by `pxor`, all ones by `pcmpeqd` (`vpternlogd` 0xFF
+    // for 64 bytes), one 8-byte word repeated through r11 and a broadcast, else its words through a slot of
+    // the frame.
     fn wconst_reg(self: &mut Self, i: u32, t: Inst) {
         let b = self.b();
         let mut zero = true;
@@ -7053,6 +7411,24 @@ extend Gen {
         }
         let nb = type_bytes(t.ty, 8);
         let rd = self.vec_def(i) - V0;
+        if nb == 64 {
+            if zero {
+                self.c.evex_rr(0x66, 1, 0xEF, false, rd, rd, rd);
+            } else if ones {
+                self.c.evex_rr(0x66, 3, 0x25, false, rd, rd, rd);
+                self.c.byte(0xFF);
+            } else if same {
+                self.zmm_splat64(rd, b.words[t.a as usize]);
+            } else {
+                let s = self.slot_alloc(64, 16) as i32;
+                for k in 0..8u32 {
+                    self.c.mov_ri(S1, b.words[(t.a + k) as usize]);
+                    self.c.store(8, S1, x::at(x::RSP, s + 8 * k as i32));
+                }
+                self.c.vload(64, rd, x::at(x::RSP, s));
+            }
+            return;
+        }
         if nb == 32 {
             if zero || ones {
                 self.c.vex_rr(
@@ -7167,6 +7543,25 @@ extend Gen {
         return pa.v && pa.size as u32 == type_bytes(self.vt(v), 8);
     }
 
+    // A binary16 conversion (`O_HTOF`, `O_FTOH`, F16C: `Package.half`): the encoding moved into the low
+    // word of an xmm register, `vcvtph2ps`; or `vcvtps2ph` rounding to nearest even (immediate 0) into the
+    // vector scratch register, then moved out.
+    fn half_conv(self: &mut Self, i: u32, t: Inst) {
+        if t.op == O_HTOF {
+            let ra = self.reg(t.a);
+            let rd = self.def(i) - V0;
+            self.c.movd_to_x(4, rd, ra);
+            self.c.vex_rr(0x66, 2, 0x13, false, false, rd, 0, rd);
+            return;
+        }
+        let ra = self.reg(t.a) - V0;
+        let rd = self.def(i);
+        let s = self.vs0 - V0;
+        self.c.vex_rr(0x66, 3, 0x1D, false, false, ra, 0, s);
+        self.c.byte(0);
+        self.c.movd_from_x(4, rd, s);
+    }
+
     // Scalar `t.a` into every lane of vector `i` (SSE2): a float's register copied, then `unpcklpd` or
     // `shufps`; an integer moved in by `movd`/`movq`, then `punpcklqdq`, or for narrower lanes `punpcklbw`
     // (bytes) and `pshuflw` (halves) to fill the low dword, which `pshufd` copies. A vector wider than an
@@ -7174,6 +7569,19 @@ extend Gen {
     fn splat(self: &mut Self, i: u32, t: Inst) {
         let lt = lane_type(t.ty);
         let eb = type_bytes(lt, 8);
+        if type_bytes(t.ty, 8) == 64 && self.in_reg(t.ty) {
+            // AVX-512: `vbroadcastss`/`vbroadcastsd` of a float's register; `vpbroadcastb`/`w`/`d`/`q` of
+            // an integer's general register (EVEX.512.66.0F38 18/19 and 7A/7B/7C).
+            let rs = self.reg(t.a);
+            let rd = self.vec_def(i) - V0;
+            if is_float(lt) {
+                self.c.evex_rr(0x66, 2, 0x18 + (lt == T_F64) as u32, lt == T_F64, rd, 0, rs - V0);
+                return;
+            }
+            let ops: [u32; 4] = [0x7A, 0x7B, 0x7C, 0x7C];
+            self.c.evex_rr(0x66, 2, unsafe ops[eb.trailing_zeros()], eb == 8, rd, 0, rs);
+            return;
+        }
         if type_bytes(t.ty, 8) == 32 && self.in_reg(t.ty) {
             // AVX2: `vbroadcastss`/`vbroadcastsd` of a float's register; an integer moved in (`vmovd`/
             // `vmovq`), then `vpbroadcastb`/`w`/`d`/`q`.
@@ -7276,6 +7684,10 @@ extend Gen {
         } else {
             4;
         };
+        if self.in_reg(vt) && type_bytes(vt, 8) == 64 {
+            self.zmm_cmp(i, t, vt);
+            return;
+        }
         if self.in_reg(vt) && self.avx && (type_bytes(vt, 8) == 32 || !fl && eb == 8) {
             self.avx_cmp(i, t, vt);
             return;
@@ -7373,6 +7785,51 @@ extend Gen {
         let lt = lane_type(t.ty);
         let eb = type_bytes(lt, 8);
         let n = lanes(t.ty);
+        if type_bytes(t.ty, 8) == 64 && self.in_reg(t.ty) {
+            // AVX-512: as AVX2 in each 16-byte block, which leaves the 8-byte quarters of the result's
+            // first operand and second operand alternating; `vpermq` 0xD8 pairs them in each 32-byte half,
+            // and `vshufi64x2` 0xD8 puts the blocks in the order 0, 2, 1, 3.
+            let rx = self.vec_use(t.a, self.vs0) - V0;
+            let ry = self.vec_use(t.b, self.vs1) - V0;
+            let rd = self.vec_def(i) - V0;
+            if eb == 4 {
+                self.c.evex_rr(0, 1, 0xC6, false, rd, rx, ry);
+                self.c.byte(0x88);
+            } else if eb == 8 {
+                self.c.evex_rr(0x66, 1, 0x6C, true, rd, rx, ry);
+            } else {
+                let s = self.tmp(true) - V0;
+                let sh: u32 = if eb == 1 {
+                    0x71;
+                } else {
+                    0x72;
+                };
+                for (r, a) in [(rd, rx), (s, ry)] {
+                    self.c.evex_rr(0x66, 1, sh, false, 6, r, a);
+                    self.c.byte(eb * 8);
+                    self.c.evex_rr(0x66, 1, sh, false, 4, r, r);
+                    self.c.byte(eb * 8);
+                }
+                self.c.evex_rr(
+                    0x66,
+                    1,
+                    if eb == 1 {
+                        0x63u32;
+                    } else {
+                        0x6Bu32;
+                    },
+                    false,
+                    rd,
+                    rd,
+                    s,
+                );
+            }
+            self.c.evex_rr(0x66, 3, 0x00, true, rd, 0, rd);
+            self.c.byte(0xD8);
+            self.c.evex_rr(0x66, 3, 0x43, true, rd, rd, rd);
+            self.c.byte(0xD8);
+            return;
+        }
         if type_bytes(t.ty, 8) == 32 && self.in_reg(t.ty) {
             // AVX2: the in-lane forms (`vshufps`, `vpunpcklqdq`, shifts and packs) unzip each 16-byte half;
             // `vpermq` then puts the halves' even lanes in order.
@@ -7472,6 +7929,64 @@ extend Gen {
         }
     }
 
+    // `vcmp` with AVX-512 of 64-byte vectors: `vcmpps`/`vcmppd` or `vpcmp[u]b`/`w`/`d`/`q` into k1, whose
+    // bits `vpmovm2b`/`w`/`d`/`q` turn into lanes of all ones or zeros.
+    fn zmm_cmp(self: &mut Self, i: u32, t: Inst, vt: u8) {
+        let lt = lane_type(vt);
+        let eb = type_bytes(lt, 8);
+        let c = t.aux;
+        let rx = self.vec_use(t.a, self.vs0) - V0;
+        let ry = self.vec_use(t.b, self.vs1) - V0;
+        let rd = self.vec_def(i) - V0;
+        if is_float(lt) {
+            // EQ_OQ, LT_OS, LE_OS, GT_OS, GE_OS, NEQ_UQ.
+            let imm: u32 = if c == C_OEQ {
+                0;
+            } else if c == C_OLT {
+                1;
+            } else if c == C_OLE {
+                2;
+            } else if c == C_OGT {
+                0x0E;
+            } else if c == C_OGE {
+                0x0D;
+            } else {
+                4;
+            };
+            let d = lt == T_F64;
+            self.c.evex_rr(d as u32 * 0x66, 1, 0xC2, d, 1, rx, ry);
+            self.c.byte(imm);
+        } else {
+            // EQ, LT, LE, NE, NLT, NLE.
+            let imm: u32 = if c == C_EQ {
+                0;
+            } else if c == C_NE {
+                4;
+            } else if c == C_SLT || c == C_ULT {
+                1;
+            } else if c == C_SLE || c == C_ULE {
+                2;
+            } else if c == C_SGE || c == C_UGE {
+                5;
+            } else {
+                6;
+            };
+            let opc = if eb <= 2 {
+                0x3Fu32;
+            } else {
+                0x1Fu32;
+            } - (c >= C_ULT) as u32;
+            self.c.evex_rr(0x66, 3, opc, eb == 2 || eb == 8, 1, rx, ry);
+            self.c.byte(imm);
+        }
+        let m = if eb <= 2 {
+            0x28u32;
+        } else {
+            0x38u32;
+        };
+        self.c.evex_rr(0xF3, 2, m, eb == 2 || eb == 8, rd, 0, 1);
+    }
+
     // `vcmp` with AVX2 (VEX.128 or VEX.256): as the SSE2 form, `vpcmpeqq`/`vpcmpgtq` for 8-byte lanes.
     fn avx_cmp(self: &mut Self, i: u32, t: Inst, vt: u8) {
         let lt = lane_type(vt);
@@ -7555,6 +8070,19 @@ extend Gen {
     // Lane select `t` into vector `i`: `c ^ ((b ^ c) & mask)` (SSE2); a vector outside an xmm register
     // selects each lane's bits the same way.
     fn vsel(self: &mut Self, i: u32, t: Inst) {
+        if type_bytes(t.ty, 8) == 64 && self.in_reg(t.ty) {
+            // AVX-512: the mask copied into the result, then `vpternlogq` 0xCA (the first operand's bit
+            // chooses the second's or the third's).
+            let rm = self.vec_use(t.a, self.vs0);
+            let rx = self.vec_use(t.b, self.vs1) - V0;
+            let s = self.tmp(true);
+            let ry = self.vec_use(t.c, s) - V0;
+            let rd = self.vec_def(i);
+            self.move_reg(t.ty, rd, rm);
+            self.c.evex_rr(0x66, 3, 0x25, true, rd - V0, rx, ry);
+            self.c.byte(0xCA);
+            return;
+        }
         if type_bytes(t.ty, 8) == 32 && self.in_reg(t.ty) {
             let rm = self.vec_use(t.a, self.vs0) - V0;
             let rx = self.vec_use(t.b, self.vs1) - V0;
@@ -7658,6 +8186,10 @@ extend Gen {
         }
         if nb == 32 && self.in_reg(t.ty) && avx_of_op(op, lt) != NONE {
             self.avx_reg(avx_of_op(op, lt), op, lt, i, t.a, y);
+            return true;
+        }
+        if nb == 64 && self.in_reg(t.ty) && evex_of_op(op, lt) != NONE {
+            self.zmm_reg(evex_of_op(op, lt), op, lt, i, t.a, y);
             return true;
         }
         self.sync(t.a);

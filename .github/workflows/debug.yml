@@ -1,11 +1,11 @@
 # The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
 # content, run on demand from the Actions tab. Edit the job for the next investigation; do not remove
 # the file. Current probe: every check of the release workflow before its packaging (the test shards
-# with no C compiler, the x86-64 levels, the correctness gate, the comparison job with clang-22 as the
-# C oracle and bindgen's C environment tables, the wasm compiler's checks, target lane and suite), the
-# suite with no C compiler and no linker on every target (`*-nocc`), and the native backend against the
-# emitted C built by clang on macOS, Linux and Windows (`speed`, ci/speed.sh), with the release's
-# transpile counts.
+# with no C compiler, the x86-64 levels, AVX-512 under Intel SDE, the correctness gate, the comparison
+# job with clang-22 as the C oracle and bindgen's C environment tables, the wasm compiler's checks, target
+# lane and suite), the suite with no C compiler and no linker on every target (`*-nocc`), and the native
+# backend against the emitted C built by clang on macOS, Linux and Windows (`speed`, ci/speed.sh), with
+# the release's transpile counts.
 # Each platform builds its compiler once (`compile`) from the latest release's; Linux arm64's is
 # cross-built on the x86-64 runner against the arm64 C library (`libc6-dev-arm64-cross`). It restores the
 # release workflow's caches and saves none.
@@ -144,9 +144,9 @@ jobs:
           SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
 
   # The x86-64 levels beside the shards: every vector test at each level, each entry model run checking
-  # the entries the baseline run does not reach. No job runs x86-64-v4: a hosted runner's CPU is not
-  # selectable, so AVX-512 is not certain. The platform cache serves the compiler's rebuild; a level's
-  # -march keys its own compiles apart, so the job saves no cache.
+  # the entries the baseline run does not reach. No level job runs x86-64-v4: a hosted runner's CPU is not
+  # selectable, so AVX-512 is not certain (`avx512` emulates it). The platform cache serves the compiler's
+  # rebuild; a level's -march keys its own compiles apart, so the job saves no cache.
   levels:
     needs: compile
     name: levels (${{ matrix.target }}, ${{ matrix.level }})
@@ -190,6 +190,43 @@ jobs:
           bin="super-c${BINEXT:-}"
           chmod +x "./$bin"
           SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-timeout=900 --filter=simd_
+
+  # AVX-512 beside the shards, under Intel SDE (a hosted runner's CPU may lack it): the native tests' 64-byte
+  # vector programs (`run_zmm`, `SC_SDE`) run on an emulated Sapphire Rapids. SDE 10.13.1 from a mirror of
+  # Intel's file (Intel's download page needs its license accepted), checked against Intel's SHA-256.
+  avx512:
+    needs: compile
+    name: avx512 (linux, sde)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux
+
+      - name: Install Intel SDE
+        run: |
+          set -eu
+          f=sde-external-10.13.1-2026-07-28-lin.tar.xz
+          curl -fsSL --retry 3 -o "$f" "https://github.com/petarpetrovt/setup-sde/releases/download/binaries/$f"
+          echo "94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50  $f" | sha256sum -c -
+          mkdir sde
+          tar -xJf "$f" -C sde --strip-components=1
+
+      - name: Native tests with 64-byte vectors under SDE
+        run: |
+          set -eu
+          chmod +x ./super-c
+          SC_SDE="$PWD/sde/sde64 -spr --" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=1800 --filter=native_test
 
   # The correctness gate beside the shards: it needs only the compiler, not their results.
   gate:

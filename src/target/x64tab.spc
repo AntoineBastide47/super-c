@@ -162,7 +162,7 @@ pub const fn fixed_modrm(dig: u8) u8 {
 const D: u8 = D_REG;
 const N: u8 = D_NONE;
 
-pub const ROWS: [Row; 1014] = [
+pub const ROWS: [Row; 1037] = [
     r("nop", 0x90, 0, N, 0, F_NOSFX, 0),
     r("add", 0x0, 0, D, SB, F_LOCK, k2(K::RM, K::R)),
     r("add", 0x1, 0, D, SWLQ, F_LOCK, k2(K::RM, K::R)),
@@ -486,6 +486,30 @@ pub const ROWS: [Row; 1014] = [
     r("punpcklqdq", 0xF6C, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("punpckhqdq", 0xF6D, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("pshufd", 0xF70, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
+    // The AVX-512 forms the code generator's 64-byte vectors take beyond the intrinsics' rows below.
+    v("vpandd", 0xFDB, 0x66, D, EVEX | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),
+    v("vpxord", 0xFEF, 0x66, D, EVEX | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),
+    v("vpternlogq", 0xF3A25, 0x66, D, EVEX | W1 | L2 | MK | MZ, k4(K::Z, K::ZV, K::ZM, K::I8)),
+    v("vxorps", 0xF57, 0, D, EVEX | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),
+    v("vxorpd", 0xF57, 0x66, D, EVEX | W1 | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),
+    v("vpmovm2b", 0xF3828, 0xF3, D, EVEX | L2, k2(K::Z, K::KRM)),
+    v("vpmovm2w", 0xF3828, 0xF3, D, EVEX | W1 | L2, k2(K::Z, K::KRM)),
+    v("vpmovm2d", 0xF3838, 0xF3, D, EVEX | L2, k2(K::Z, K::KRM)),
+    v("vpmovm2q", 0xF3838, 0xF3, D, EVEX | W1 | L2, k2(K::Z, K::KRM)),
+    v("vpbroadcastb", 0xF387A, 0x66, D, EVEX | L2 | MK | MZ, k2(K::Z, K::RR32)),
+    v("vpbroadcastw", 0xF387B, 0x66, D, EVEX | L2 | MK | MZ, k2(K::Z, K::RR32)),
+    v("vbroadcastss", 0xF3818, 0x66, D, EVEX | L2 | N6 | MK | MZ, k2(K::Z, K::XM)),
+    v("vbroadcastsd", 0xF3819, 0x66, D, EVEX | W1 | L2 | N7 | MK | MZ, k2(K::Z, K::XM)),
+    v("vshufps", 0xFC6, 0, D, EVEX | L2 | MK | MZ, k4(K::Z, K::ZV, K::ZM, K::I8)),
+    v("vpunpcklqdq", 0xF6C, 0x66, D, EVEX | W1 | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),
+    v("vpacksswb", 0xF63, 0x66, D, EVEX | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),
+    v("vpackssdw", 0xF6B, 0x66, D, EVEX | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),
+    v("vpsllw", 0xF71, 0x66, 6, EVEX | L2 | MK | MZ, k3(K::ZV, K::ZM, K::I8)),
+    v("vpsraw", 0xF71, 0x66, 4, EVEX | L2 | MK | MZ, k3(K::ZV, K::ZM, K::I8)),
+    v("vpslld", 0xF72, 0x66, 6, EVEX | L2 | MK | MZ, k3(K::ZV, K::ZM, K::I8)),
+    v("vpsrad", 0xF72, 0x66, 4, EVEX | L2 | MK | MZ, k3(K::ZV, K::ZM, K::I8)),
+    v("vpermq", 0xF3A00, 0x66, D, EVEX | W1 | L2 | MK | MZ, k3(K::Z, K::ZM, K::I8)),
+    v("vshufi64x2", 0xF3A43, 0x66, D, EVEX | W1 | L2 | MK | MZ, k4(K::Z, K::ZV, K::ZM, K::I8)),
     // SSE, AVX and AVX-512 for the intrinsics, derived from LLVM's encodings.
     r("aesdec", 0xF38DE, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("aesdeclast", 0xF38DF, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),

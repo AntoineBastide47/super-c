@@ -4431,9 +4431,16 @@ extend Interp {
         } else if self.span_is(fm, nm, "sc_int_div_zero") {
             self.it_trap(IT_TRAP_UB_DIV_ZERO, "division by zero");
             return false;
-        } else if self.span_is(fm, nm, "sc_has_i128") || self.span_is(fm, nm, "sc_has_f128") {
+        } else if self.span_is(fm, nm, "sc_has_i128") || self.span_is(fm, nm, "sc_has_f128") || self.span_is(
+            fm,
+            nm,
+            "sc_has_f16",
+        ) {
             // The runtime's 128-bit primitives: the limb code gives the native path's results, so compile
-            // time runs it.
+            // time runs it. A run-time call's fold (`pause_folds`) stops here: the target answers there.
+            if self.record_pause != 0 {
+                return self.fail();
+            }
             out = iv_int(b.module, rt, 0);
         } else if self.wrap_name(fm, nm) {
             // The runtime's wrapping arithmetic: C's unsigned operators modulo 2^64.
@@ -10631,7 +10638,10 @@ extend Interp {
             fm,
             nm,
             "sc_int_div_overflow",
-        ) || self.span_is(fm, nm, "sc_has_i128") || self.bits_name(fm, nm) || self.wrap_name(fm, nm) {
+        ) || self.span_is(fm, nm, "sc_has_i128") || self.span_is(fm, nm, "sc_has_f16") || self.bits_name(fm, nm) || self.wrap_name(
+            fm,
+            nm,
+        ) {
             return true;
         }
         let mut f32suf = false;

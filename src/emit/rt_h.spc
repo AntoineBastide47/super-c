@@ -570,6 +570,29 @@ inline void sc_f128_div(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
+/* Native binary16 conversions for std's f16 (`Float<5, 10>`, see float.spc), whose sums, differences,
+   products, quotients and square roots compute in float and round once: where the C compiler building
+   the emitted code has `_Float16` on aarch64 (whose every processor converts it in hardware),
+   sc_has_f16() folds to 1 and these convert an encoding to and from float, rounding to nearest even.
+   Elsewhere it folds to 0, std's own conversions stand, and the stubs are never reached. */
+#if defined(__aarch64__) && defined(__FLT16_MANT_DIG__)
+inline int sc_has_f16(void) { return 1; }
+inline float sc_f16_to_f32(uint16_t sc_h) {
+  _Float16 sc_v;
+  memcpy(&sc_v, &sc_h, sizeof sc_v);
+  return (float)sc_v;
+}
+inline uint16_t sc_f32_to_f16(float sc_x) {
+  _Float16 sc_v = (_Float16)sc_x;
+  uint16_t sc_h;
+  memcpy(&sc_h, &sc_v, sizeof sc_h);
+  return sc_h;
+}
+#else
+inline int sc_has_f16(void) { return 0; }
+inline float sc_f16_to_f32(uint16_t sc_h) { (void)sc_h; abort(); }
+inline uint16_t sc_f32_to_f16(float sc_x) { (void)sc_x; abort(); }
+#endif
 /* The external declaration of every helper above, for the registry unit. */
 #define SC_RT_EXTERNS SC_RT_ATOMIC_NAMES SC_RT_X(__sc_bounds) SC_RT_X(__sc_range) SC_RT_X(__sc_bounds_group) SC_RT_X(__sc_fits) \
 SC_SIGNED_TYPES(SC_SIGNED_NAMES) SC_UNSIGNED_TYPES(SC_UNSIGNED_NAMES) SC_F2I_SIGNED_TYPES(SC_F2I_SIGNED_NAMES) \
@@ -578,7 +601,8 @@ SC_RT_X(sc_popcount64) SC_RT_X(sc_bitrev64) SC_RT_X(sc_wadd64) SC_RT_X(sc_wsub64
 SC_RT_X(sc_wshr64) SC_RT_X(sc_wsar64) SC_RT_X(sc_mulo_u64) SC_RT_X(sc_mulo_i64) SC_RT_X(sc_has_i128) SC_RT_X(sc_i128_add) \
 SC_RT_X(sc_i128_sub) SC_RT_X(sc_i128_mul) SC_RT_X(sc_i128_divmod) SC_RT_X(sc_mul64) SC_RT_X(sc_div128by64) \
 SC_RT_X(sc_int_overflow) SC_RT_X(sc_int_div_zero) SC_RT_X(sc_int_div_overflow) SC_RT_X(sc_has_f128) \
-SC_RT_X(sc_f128_add) SC_RT_X(sc_f128_mul) SC_RT_X(sc_f128_div) SC_RT_F128_CODEC SC_RT_X(sc_sys_barrier) \
+SC_RT_X(sc_f128_add) SC_RT_X(sc_f128_mul) SC_RT_X(sc_f128_div) SC_RT_F128_CODEC SC_RT_X(sc_has_f16) \
+SC_RT_X(sc_f16_to_f32) SC_RT_X(sc_f32_to_f16) SC_RT_X(sc_sys_barrier) \
 SC_RT_X(sc_sys_keep) SC_RT_SYS_NAMES
 )";
 }

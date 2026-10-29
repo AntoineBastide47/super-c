@@ -349,7 +349,8 @@ pub fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
     }
     let symtab = at;
     let nsyms = 2 * nsec + o.syms.len() as u32;
-    // The header.
+    // The header, at the start of `out` as ELF's and Mach-O's are.
+    out.truncate(0);
     ob::w16(out, 0x8664);
     ob::w16(out, nsec);
     ob::w32(out, 0);
