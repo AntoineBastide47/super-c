@@ -675,6 +675,78 @@ extend Opt {
         return any;
     }
 
+    /// Turn each call of body `b`'s own function (body `j`) whose result its block returns at once into a
+    /// jump back to the body's start with the call's arguments (tail recursion elimination, LLVM's
+    /// TailCallElim; `Package.tail`): a new entry block jumps to the old one, which the calls' jumps then
+    /// enter too. Only when the call's signature is the body's, no parameter or result is an aggregate (an
+    /// aggregate argument is a copy in the caller's frame) and no slot's address escapes (each call had a
+    /// frame of its own). Whether any call did.
+    pub(package) fn tail_self(self: &mut Self, pk: &Package, b: &mut Body, j: u32) bool {
+        if !pk.tail || b.naked || b.sig == NONE || (b.pool[b.sig as usize + 1] & SIG_VARIADIC) != 0 {
+            return false;
+        }
+        let np = b.pool[b.sig as usize];
+        for k in 0..np + 1 {
+            // The result, then the parameters.
+            let code = b.pool[(b.sig + 2 + k) as usize];
+            if (code & AGG) != 0 {
+                return false;
+            }
+        }
+        let nb = b.blocks.len() as u32;
+        let mut sites = Vector::<u32>::new();
+        for k in 0..nb {
+            let bk = b.blocks[k as usize];
+            if bk.len < 2 {
+                continue;
+            }
+            let ci = bk.start + bk.len - 2;
+            let c = b.insts[ci as usize];
+            let r = b.insts[ci as usize + 1];
+            if r.op != O_RET || c.op != O_CALL || pk.syms[b.syms[c.a as usize] as usize].def != j || pk.syms[b.syms[c.a as usize] as usize].kind != SK_FUNC {
+                continue;
+            }
+            if (r.a == ci || c.ty == T_NONE && r.a == VNONE) && same_sig(b, c.b, b.sig) {
+                sites.push(k);
+            }
+        }
+        if sites.len() == 0 || lv::frame_escapes(b) {
+            return false;
+        }
+        // The new entry: the old one's parameters again, passed on to it.
+        let e0 = b.blocks[0];
+        let mut types = Vector::<u8>::with_capacity(e0.param_len as usize);
+        for q in 0..e0.param_len as u32 {
+            types.push(b.params[(e0.param_start + q) as usize]);
+        }
+        let ne = b.add_block(types.as_slice());
+        let mut args = Vector::<Value>::with_capacity(types.len());
+        for q in 0..e0.param_len as u32 {
+            args.push(b.param(ne, q));
+        }
+        b.begin(ne);
+        let _ = b.emit(jump(b.edge(ne, args.as_slice())), b.locs[e0.start as usize]);
+        if b.inl.len() != 0 {
+            b.inl.push(0);
+        }
+        let old = b.blocks[0];
+        b.blocks.set(0, b.blocks[ne as usize]);
+        b.blocks.set(ne as usize, old);
+        // Each call: a jump to the old entry (now block `ne`) with its arguments, its return gone.
+        for x in 0..sites.len() {
+            let k = sites[x] as usize;
+            let ci = b.blocks[k].start + b.blocks[k].len - 2;
+            let c = b.insts[ci as usize];
+            args.truncate(0);
+            for q in 0..np {
+                args.push(b.pool[(c.c + q) as usize]);
+            }
+            b.insts[ci as usize] = jump(b.edge(ne, args.as_slice()));
+            b.blocks.index_mut(k).len -= 1;
+        }
+        return true;
+    }
+
     /// Keep in a register the place each innermost loop of body `b` reads and writes through an exclusive
     /// pointer from outside the loop (LLVM's LICM scalar promotion), when the loop has a preheader, calls
     /// nothing and no other access of it may touch the place's bytes: a new slot takes the place's accesses
@@ -5269,6 +5341,9 @@ extend Run {
         let b = unsafe &mut *(base + j as usize);
         let inlined = sc.il.run(p, base, &r.ok, &r.level, &r.unit, j, b);
         let _ = sc.o.run(p, b, inlined);
+        if sc.o.tail_self(p, b, j) {
+            let _ = sc.o.run(p, b, true);
+        }
         // A loop a round copied is innermost again for the next one.
         let bu = r.cf.loops;
         let mut round: u32 = 0;
@@ -6116,6 +6191,21 @@ fn regular(ty: u8, r: u64) bool {
 // Whether `v` of `b` is a scalar float product of type `ty`.
 fn is_fmul(b: &Body, v: Value, ty: u8) bool {
     return (v & (VPARAM | VFLAG)) == 0 && v != VNONE && b.insts[v as usize].op == O_FMUL && b.insts[v as usize].ty == ty;
+}
+
+// Whether signatures `s` and `r` of `b`'s pool are one: the parameter counts, the result and the
+// parameters' codes.
+fn same_sig(b: &Body, s: u32, r: u32) bool {
+    let n = b.pool[s as usize];
+    if n != b.pool[r as usize] {
+        return false;
+    }
+    for k in 0..n + 2 {
+        if b.pool[(s + 1 + k) as usize] != b.pool[(r + 1 + k) as usize] {
+            return false;
+        }
+    }
+    return true;
 }
 
 // `zero_one` follows at most ZO_DEPTH operations.
