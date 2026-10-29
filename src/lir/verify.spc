@@ -331,6 +331,27 @@ extend Verifier {
                 "a vector of the operand's type in each lane",
             );
         }
+        if op == O_VCMP {
+            return self.need(
+                name,
+                b,
+                i,
+                is_vec(ta) && tb == ta && t.ty == mask_type(ta) && vcmp_ok(t.aux, lane_type(ta)),
+                "two vector operands of one type, a condition of their lanes and a mask result",
+            );
+        }
+        if op == O_VUNZIP {
+            return self.need(name, b, i, is_vec(t.ty) && ta == t.ty && tb == t.ty, "two vectors of the result's type");
+        }
+        if op == O_VSEL {
+            return self.need(
+                name,
+                b,
+                i,
+                is_vec(t.ty) && ta == mask_type(t.ty) && tb == t.ty && tc == t.ty,
+                "a mask and two vectors of the result's type",
+            );
+        }
         if op == O_MULHU {
             return self.need(
                 name,

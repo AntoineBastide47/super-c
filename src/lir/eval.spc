@@ -453,6 +453,50 @@ extend Eval {
             }
             return true;
         }
+        if op == O_VCMP {
+            let vt = b.type_of(t.a);
+            let lt = lane_type(vt);
+            let lb = type_bits(lt, ptr);
+            let wa = self.word(&f, b, t.a);
+            let wb = self.word(&f, b, t.b);
+            for k in 0..lanes(vt) {
+                let x = get_lane(&self.vals, wa, k, lb);
+                let y = get_lane(&self.vals, wb, k, lb);
+                let holds = if is_float(lt) {
+                    fcmp(t.aux, to_f64(lt, x), to_f64(lt, y));
+                } else {
+                    icmp(t.aux, lt, ptr, x, y);
+                };
+                set_lane(&mut self.vals, dst, k, lb, ast::pick(holds, ~0u64, 0u64));
+            }
+            return true;
+        }
+        if op == O_VUNZIP {
+            let lb = type_bits(lane_type(t.ty), ptr);
+            let n = lanes(t.ty);
+            let wa = self.word(&f, b, t.a);
+            let wb = self.word(&f, b, t.b);
+            for k in 0..n {
+                let j = 2 * k;
+                let x = if j < n {
+                    get_lane(&self.vals, wa, j, lb);
+                } else {
+                    get_lane(&self.vals, wb, j - n, lb);
+                };
+                set_lane(&mut self.vals, dst, k, lb, x);
+            }
+            return true;
+        }
+        if op == O_VSEL {
+            let wm = self.word(&f, b, t.a);
+            let wx = self.word(&f, b, t.b);
+            let wy = self.word(&f, b, t.c);
+            for q in 0..value_words(t.ty, ptr) {
+                let m = self.vals[(wm + q) as usize];
+                self.vals[(dst + q) as usize] = self.vals[(wx + q) as usize] & m | self.vals[(wy + q) as usize] & ~m;
+            }
+            return true;
+        }
         if op == O_MULHU {
             let bits = type_bits(t.ty, ptr);
             let x = trunc_bits(self.val(&f, b, t.a), bits) as u128;

@@ -3802,6 +3802,45 @@ extend Gen {
             self.vec_arith(i, t);
             return true;
         }
+        if op == O_VCMP {
+            self.vcmp(i, t);
+            return true;
+        }
+        if op == O_VUNZIP {
+            // Lane k is lane 2k of `a ++ b`.
+            let lt = lane_type(t.ty);
+            let n = lanes(t.ty);
+            let d = self.vdef(i);
+            let x = self.tmp(w::I64);
+            for k in 0..n {
+                if 2 * k < n {
+                    self.ld_lane(t.a, 2 * k, lt, false, true);
+                } else {
+                    self.ld_lane(t.b, 2 * k - n, lt, false, true);
+                }
+                self.c.local(w::LOCAL_SET, x);
+                self.st_lane(x, d, k, lt, true);
+            }
+            return true;
+        }
+        if op == O_VSEL {
+            // Per lane `c ^ ((b ^ c) & mask)` on the lanes' bits.
+            let lt = lane_type(t.ty);
+            let d = self.vdef(i);
+            let x = self.tmp(w::I64);
+            for k in 0..lanes(t.ty) {
+                self.ld_lane(t.b, k, lt, false, true);
+                self.ld_lane(t.c, k, lt, false, true);
+                self.c.op(w::I64_XOR);
+                self.ld_lane(t.a, k, lt, false, true);
+                self.c.op(w::I64_AND);
+                self.ld_lane(t.c, k, lt, false, true);
+                self.c.op(w::I64_XOR);
+                self.c.local(w::LOCAL_SET, x);
+                self.st_lane(x, d, k, lt, true);
+            }
+            return true;
+        }
         if op >= O_SEXT && op <= O_UITOFP {
             let fl = lane_type(self.vt(t.a));
             let tl = lane_type(t.ty);
@@ -3810,6 +3849,60 @@ extend Gen {
             return true;
         }
         return self.refuse("a vector instruction the verifier rejects");
+    }
+
+    // Lane-wise comparison `t` into mask `i`, lane by lane: the comparison's 0 or 1 negated to the lane's
+    // mask.
+    fn vcmp(self: &mut Self, i: u32, t: Inst) {
+        let vt = self.vt(t.a);
+        let lt = lane_type(vt);
+        let ml = lane_type(mask_type(vt));
+        let c = t.aux;
+        let d = self.vdef(i);
+        let x = self.tmp(w::I64);
+        let iops: []u8 = [
+            w::I64_EQ,
+            w::I64_NE,
+            w::I64_LT_S,
+            w::I64_LE_S,
+            w::I64_GT_S,
+            w::I64_GE_S,
+            w::I64_LT_U,
+            w::I64_LE_U,
+            w::I64_GT_U,
+            w::I64_GE_U,
+        ];
+        let fd = pick8(lt == T_F64, w::F64_EQ - w::F32_EQ, 0);
+        let fo = if c == C_OEQ {
+            w::F32_EQ;
+        } else if c == C_UNE {
+            w::F32_NE;
+        } else if c == C_OLT {
+            w::F32_LT;
+        } else if c == C_OLE {
+            w::F32_LE;
+        } else if c == C_OGT {
+            w::F32_GT;
+        } else {
+            w::F32_GE;
+        };
+        let sg = c >= C_SLT && c <= C_SGE;
+        for k in 0..lanes(vt) {
+            self.c.i64_const(0);
+            if is_float(lt) {
+                self.ld_lane(t.a, k, lt, false, false);
+                self.ld_lane(t.b, k, lt, false, false);
+                self.c.op(fo + fd);
+            } else {
+                self.ld_lane(t.a, k, lt, sg, false);
+                self.ld_lane(t.b, k, lt, sg, false);
+                self.c.op(iops[c as usize]);
+            }
+            self.c.op(w::I64_EXTEND_I32_U);
+            self.c.op(w::I64_SUB);
+            self.c.local(w::LOCAL_SET, x);
+            self.st_lane(x, d, k, ml, false);
+        }
     }
 
     // Vector arithmetic: O_ADD .. O_NOT and O_FADD .. O_FNEG, lane by lane.

@@ -66,8 +66,10 @@ const MAX_OUT: usize = 32;
 // A loop versions on at most MAX_CHECKS bounds checks; a vectorized loop checks at most MAX_CHECKS pairs
 // of ranges.
 const MAX_CHECKS: usize = 8;
-// The bytes of a vector the vectorizer makes.
+// The fewest bytes of a vector the vectorizer makes; it makes the target's widest (`LoopOpt.vbytes`).
 const VBYTES: u32 = 16;
+// The blocks of a chain unroll and jam takes before or after the inner loop (`jam_chain`).
+const JAM_CHAIN: u32 = 4;
 // The most instructions of a loop's body the vectorizer interleaves as scalars.
 const ILV_SIZE: u32 = 12;
 // Final values: loops of at most CF_SIZE instructions, values of degree at most CF_DEG.
@@ -81,6 +83,8 @@ const VK_LANE: u8 = 3; // a lane value: a load or arithmetic
 const VK_STORE: u8 = 4;
 const VK_RED: u8 = 5; // a reduction's update
 const VK_INV: u8 = 6; // a load of an address the loop does not define, which no store of it touches
+const VK_MASK: u8 = 7; // a comparison of lane values, or `and`/`or` of two: a select's condition
+const VK_GADDR: u8 = 8; // scalar copies: `base + lane value * size + offset`, a gathered load's address
 
 /// The peeling's scratch, reused from body to body.
 pub(package) struct LoopOpt {
@@ -140,9 +144,19 @@ pub(package) struct LoopOpt {
     vsz: u32,
     vlanes: u32,
     vone: bool, // the plan runs scalar copies (a lane per copy)
+    vbytes: u32, // the bytes of the vectors (`run`'s `vec`)
+    vstrided: bool, // a vector load reads every 2nd or 4th element: the loop runs the last iteration
+    vgat: Vector<u32>, // the gathered loads (scalar copies)
     vmap: Vector<Value>,
     vinv: Vector<Value>,
     vspl: Vector<Value>,
+    // If-conversion (`linearize`): the body's sizes before it (instructions, parameters, pool, blocks), the
+    // branch's block and the latch; the loop's blocks before, the header's edge into the branch's block,
+    // and per new instruction its original (`lorig`, for the alias classes).
+    lsave: [u32; 6],
+    lold: Vector<u32>,
+    ledge: u32,
+    lorig: Vector<u32>,
     // Final values (`final_values`): the header; its counted test (the tested value, the counter, the
     // bound, the step's size and direction, whether the test lets the bound through, tests inequality,
     // compares signed, the counter's bits, needs a guard that the bound is at most or at least `cf_limit`);
@@ -179,6 +193,17 @@ pub(package) struct LoopOpt {
     cf_poly: Vector<bool>,
     cf_val: Vector<Value>,
     cf_pv: Vector<Value>,
+    // Unroll and jam (`jam_factor`): the outer header, its preheader, the inner header and body; the inner
+    // counter; the chains of blocks before and after the inner loop (`jblk`, the first `jna` before); per
+    // copy the outer counter's value (`jq`) and the values of the chain before (`jcopy`); the inner
+    // loop's back edge arguments (`jargs`).
+    jb: [u32; 4],
+    jiv: Value,
+    jblk: Vector<u32>,
+    jna: u32,
+    jq: Vector<Value>,
+    jcopy: Vector<Value>,
+    jargs: Vector<Value>,
 }
 
 /// The optimizer's alias classes (`lir::opt::Opt::classes`) for the loop transforms: per instruction its
@@ -194,11 +219,12 @@ pub(package) struct Classes<'a> {
 extend Classes as Copy {}
 
 /// The instructions a loop transform's copies may take (0: none): full unrolling (all its copies),
-/// versioning on bounds checks and unswitching (the loop itself), rotation (the header's copy), final
-/// values (the copies of the iterations they take); the vectors a vectorized loop interleaves (0: no
-/// vectorization).
+/// partial unrolling (the unrolled loop's copies of the body), versioning on bounds checks and unswitching
+/// (the loop itself), rotation (the header's copy), final values (the copies of the iterations they
+/// take); the vectors a vectorized loop interleaves (0: no vectorization).
 pub(package) struct Budgets {
     pub(package) peel: u32,
+    pub(package) partial: u32,
     pub(package) version: u32,
     pub(package) unswitch: u32,
     pub(package) rotate: u32,
@@ -255,9 +281,16 @@ extend LoopOpt {
             vsz: 0,
             vlanes: 0,
             vone: false,
+            vbytes: VBYTES,
+            vstrided: false,
+            vgat: Vector::<u32>::new(),
             vmap: Vector::<Value>::new(),
             vinv: Vector::<Value>::new(),
             vspl: Vector::<Value>::new(),
+            lsave: [0, 0, 0, 0, 0, 0],
+            lold: Vector::<u32>::new(),
+            ledge: NONE,
+            lorig: Vector::<u32>::new(),
             cf_h: NONE,
             cf_x: VNONE,
             cf_q: VNONE,
@@ -285,6 +318,13 @@ extend LoopOpt {
             cf_poly: Vector::<bool>::new(),
             cf_val: Vector::<Value>::new(),
             cf_pv: Vector::<Value>::new(),
+            jb: [0, 0, 0, 0],
+            jiv: VNONE,
+            jblk: Vector::<u32>::new(),
+            jna: 0,
+            jq: Vector::<Value>::new(),
+            jcopy: Vector::<Value>::new(),
+            jargs: Vector::<Value>::new(),
         };
     }
 
@@ -294,7 +334,8 @@ extend LoopOpt {
     /// numbers in the dominator tree); pointers are `ptr` bytes, the float rewrites `fmath` allows
     /// (`FM_*`), and `vec` the bytes of the widest vector the target holds in a register (0: none). A loop
     /// goes when its final values have a closed form, else peels when its trip count is known, else
-    /// vectorizes, else versions on its bounds checks, else unswitches. Whether any changed.
+    /// vectorizes, else unrolls and jams the loop around it, else unrolls partially, else versions on its
+    /// bounds checks, else unswitches. Whether any changed.
     pub(package) fn run(
         self: &mut Self,
         b: &mut Body,
@@ -311,6 +352,7 @@ extend LoopOpt {
     ) bool {
         let cand = self.candidates(b, inner, lparent, preh);
         let mut any = false;
+        self.vbytes = vec;
         for c in 0..cand.len() {
             let h = cand[c];
             let p = preh[h as usize];
@@ -345,6 +387,19 @@ extend LoopOpt {
                 any = true;
                 continue;
             }
+            if bu.vector != 0 && vec >= VBYTES && self.lblocks.len() > 2 {
+                // A body with a branch: vectorized as one block of selects, else as it was.
+                let nb = self.linearize(b, h, u);
+                if nb != NONE {
+                    if self.vplan(b, ptr, fmath, h, p, nb, cl, false) {
+                        self.commit_linear(b, u);
+                        self.vectorize(b, h, p, nb, bu.vector);
+                        any = true;
+                        continue;
+                    }
+                    self.unlinearize(b);
+                }
+            }
             if bu.vector > 1 && u != h && b.blocks[u as usize].len <= ILV_SIZE && self.vplan(
                 b,
                 ptr,
@@ -358,6 +413,24 @@ extend LoopOpt {
                 self.vectorize(b, h, p, u, bu.vector);
                 any = true;
                 continue;
+            }
+            if bu.vector != 0 && bu.partial != 0 && vec >= VBYTES {
+                let k = self.jam_factor(b, inner, lparent, preh, h, u, cl, 2 * bu.partial);
+                if k != 0 {
+                    self.jam(b, k);
+                    any = true;
+                    continue;
+                }
+                // The inner loop's tables again.
+                let _ = self.shape(b, inner, h);
+            }
+            if bu.partial != 0 && self.counted(b, h, u) {
+                let k = self.unroll_factor(b, h, u, bu.partial);
+                if k != 0 {
+                    self.unroll(b, h, p, u, k);
+                    any = true;
+                    continue;
+                }
             }
             if size <= bu.version && self.checks(b, ptr, h, p, u) {
                 if self.close(b, dpre, dpost) {
@@ -1343,50 +1416,17 @@ extend LoopOpt {
     // `one` as scalar copies: sets the plan (`vk` ..`vone`).
     fn vplan(self: &mut Self, b: &Body, ptr: u32, fmath: u8, h: u32, p: u32, u: u32, cl: Classes, one: bool) bool {
         self.vone = one;
-        if self.lblocks.len() != 2 || u == h {
+        if !self.counted(b, h, u) {
             return false;
         }
         let hb = b.blocks[h as usize];
         let ub = b.blocks[u as usize];
-        let t = term(b, h);
-        if (hb.flags & BLOCK_NOVEC) != 0 || hb.len != 2 || t.op != O_BR || (t.a & (VPARAM | VFLAG)) != 0 || t.a != hb.start || b.edge_target(
-            t.b,
-        ) != u && b.edge_target(t.c) != u {
-            return false;
-        }
-        let ci = b.insts[t.a as usize];
-        let in_taken = b.edge_target(t.b) == u;
-        if ci.op != O_ICMP || b.edge_nargs(
-            if in_taken {
-                t.b;
-            } else {
-                t.c;
-            },
-        ) != 0 {
-            return false;
-        }
-        // The test read as `q < n` on the in-loop side.
-        let (q, n, cond) = if in_taken && (ci.aux == C_ULT || ci.aux == C_SLT) {
-            (ci.a, ci.b, ci.aux);
-        } else if in_taken && (ci.aux == C_UGT || ci.aux == C_SGT) {
-            (ci.b, ci.a, ci.aux - C_SGT + C_SLT);
-        } else if !in_taken && (ci.aux == C_UGE || ci.aux == C_SGE) {
-            (ci.a, ci.b, ci.aux - C_SGE + C_SLT);
-        } else if !in_taken && (ci.aux == C_ULE || ci.aux == C_SLE) {
-            (ci.b, ci.a, ci.aux - C_SLE + C_SLT);
-        } else {
-            return false;
-        };
-        if (q & VPARAM) == 0 || (q & ~VPARAM) < hb.param_start || (q & ~VPARAM) >= hb.param_start + hb.param_len as u32 || n == VNONE || self.defined_in(
-            n,
-        ) {
-            return false;
-        }
+        let q = self.viv;
         let qt = b.params[(q & ~VPARAM) as usize];
-        if !is_int(qt) || qt == T_I128 || type_bytes(qt, ptr) != ptr {
+        if type_bytes(qt, ptr) != ptr {
             return false;
         }
-        if cond == C_SLT {
+        if self.vsigned {
             let init = b.edge_arg(term(b, p).a, (q & ~VPARAM) - hb.param_start);
             if !is_const(b, init) || le::sign_ext(
                 b.insts[init as usize].a as u64 | b.insts[init as usize].b as u64 << 32,
@@ -1395,13 +1435,7 @@ extend LoopOpt {
                 return false;
             }
         }
-        self.viv = q;
-        self.vn = n;
-        self.vsigned = cond == C_SLT;
         let tu = term(b, u);
-        if tu.op != O_JMP || b.edge_target(tu.a) != h {
-            return false;
-        }
         // The body's instructions: the step, the reductions, then the rest in order.
         fill_u8(&mut self.vk, ub.len as usize, 0);
         self.vred.truncate(0);
@@ -1437,6 +1471,8 @@ extend LoopOpt {
         }
         // The rest: addresses, loads, arithmetic, stores.
         self.vacc.truncate(0);
+        self.vgat.truncate(0);
+        self.vstrided = false;
         for i in ub.start..ub.start + ub.len - 1 {
             let x = (i - ub.start) as usize;
             let t = b.insts[i as usize];
@@ -1463,7 +1499,11 @@ extend LoopOpt {
             }
             self.vk[x] = k;
             if (t.op == O_LOAD || t.op == O_STORE) && k != VK_INV {
-                self.vacc.push(i);
+                if self.kind(b, u, t.a) == VK_GADDR {
+                    self.vgat.push(i);
+                } else {
+                    self.vacc.push(i);
+                }
             }
         }
         // The counter only steps and indexes.
@@ -1483,9 +1523,66 @@ extend LoopOpt {
         self.vlanes = if one {
             1;
         } else {
-            VBYTES / self.vsz;
+            self.vbytes / self.vsz;
         };
         return self.vchecks(b, cl);
+    }
+
+    // Whether loop `h` (latch `u`, its blocks `lblocks`) is counted: a header of a test
+    // `q < n` alone (`q` its parameter, `n` defined outside the loop, the test's sides either way) that
+    // enters body `u`, which jumps back to it; sets the counter, the bound and the test's signedness
+    // (`viv`, `vn`, `vsigned`). The vectorizer and partial unrolling read this shape.
+    fn counted(self: &mut Self, b: &Body, h: u32, u: u32) bool {
+        return self.lblocks.len() == 2 && u != h && self.counted_by(b, h, u, u);
+    }
+
+    // `counted` for loop `h` (its blocks `lblocks`) whose header enters block `e`, and whose block `u`
+    // jumps back.
+    fn counted_by(self: &mut Self, b: &Body, h: u32, e: u32, u: u32) bool {
+        let hb = b.blocks[h as usize];
+        let t = term(b, h);
+        if (hb.flags & BLOCK_NOVEC) != 0 || hb.len != 2 || t.op != O_BR || (t.a & (VPARAM | VFLAG)) != 0 || t.a != hb.start || b.edge_target(
+            t.b,
+        ) != e && b.edge_target(t.c) != e {
+            return false;
+        }
+        let ci = b.insts[t.a as usize];
+        let in_taken = b.edge_target(t.b) == e;
+        if ci.op != O_ICMP || b.edge_nargs(
+            if in_taken {
+                t.b;
+            } else {
+                t.c;
+            },
+        ) != 0 {
+            return false;
+        }
+        // The test read as `q < n` on the in-loop side.
+        let (q, n, cond) = if in_taken && (ci.aux == C_ULT || ci.aux == C_SLT) {
+            (ci.a, ci.b, ci.aux);
+        } else if in_taken && (ci.aux == C_UGT || ci.aux == C_SGT) {
+            (ci.b, ci.a, ci.aux - C_SGT + C_SLT);
+        } else if !in_taken && (ci.aux == C_UGE || ci.aux == C_SGE) {
+            (ci.a, ci.b, ci.aux - C_SGE + C_SLT);
+        } else if !in_taken && (ci.aux == C_ULE || ci.aux == C_SLE) {
+            (ci.b, ci.a, ci.aux - C_SLE + C_SLT);
+        } else {
+            return false;
+        };
+        if (q & VPARAM) == 0 || (q & ~VPARAM) < hb.param_start || (q & ~VPARAM) >= hb.param_start + hb.param_len as u32 || n == VNONE || self.defined_in(
+            n,
+        ) {
+            return false;
+        }
+        let qt = b.params[(q & ~VPARAM) as usize];
+        let tu = term(b, u);
+        if !is_int(qt) || qt == T_I128 || tu.op != O_JMP || b.edge_target(tu.a) != h {
+            return false;
+        }
+        self.viv = q;
+        self.vn = n;
+        self.vsigned = cond == C_SLT;
+        return true;
     }
 
     // The kind (VK_*) instruction `t` of body `u` takes, 0 when it does not vectorize; sets the lane size
@@ -1493,11 +1590,22 @@ extend LoopOpt {
     fn vclass(self: &mut Self, b: &Body, ptr: u32, u: u32, t: Inst) u8 {
         let op = t.op;
         if op == O_PTRADD {
-            return if t.b == self.viv && t.a != VNONE && !self.defined_in(t.a) && t.aux != 0 {
+            if t.a == VNONE || self.defined_in(t.a) {
+                return 0;
+            }
+            return if t.b == self.viv && t.aux != 0 {
                 VK_ADDR;
+            } else if self.vone && self.kind(b, u, t.b) == VK_LANE {
+                VK_GADDR;
             } else {
                 0;
             };
+        }
+        if self.vone && (op == O_SEXT || op == O_ZEXT || op == O_TRUNC) && is_int(t.ty) && t.ty != T_I128 && self.lane_size(
+            t.ty,
+            ptr,
+        ) {
+            return self.lane_operands(b, u, t, true);
         }
         if op == O_LOAD && !self.defined_in(t.a) && (t.aux & MEM_VOLATILE) == 0 && is_int(t.ty) && t.ty != T_I128 || op == O_LOAD && !self.defined_in(
             t.a,
@@ -1514,18 +1622,60 @@ extend LoopOpt {
             } else {
                 value_type(b, t.b);
             };
-            if (t.aux & MEM_VOLATILE) != 0 || is_vec(ty) || ty == T_PTR || !self.lane_size(ty, ptr) || self.kind(
-                b,
-                u,
-                t.a,
-            ) != VK_ADDR || b.insts[t.a as usize].aux as u32 != type_bytes(ty, ptr) {
+            // Through `base + i * size`, or scalar copies through any step and a gathered address; a vector
+            // load through every 2nd or 4th element (`vunzip`).
+            let ka = self.kind(b, u, t.a);
+            let eb = type_bytes(ty, ptr);
+            if (t.aux & MEM_VOLATILE) != 0 || is_vec(ty) || ty == T_PTR || !self.lane_size(ty, ptr) || ka != VK_ADDR && ka != VK_GADDR || ka == VK_GADDR && op == O_STORE {
                 return 0;
+            }
+            if ka == VK_ADDR {
+                let step = b.insts[t.a as usize].aux as u32;
+                let s = step / eb;
+                if step != eb && !self.vone && !(op == O_LOAD && step % eb == 0 && (s == 2 || s == 4)) {
+                    return 0;
+                }
+                self.vstrided = self.vstrided || step != eb && !self.vone;
             }
             if op == O_LOAD {
                 return VK_LANE;
             }
             return if self.kind(b, u, t.b) == VK_LANE || self.kind(b, u, t.b) == VK_INV || !self.defined_in(t.b) {
                 VK_STORE;
+            } else {
+                0;
+            };
+        }
+        if op == O_ICMP || op == O_FCMP {
+            // A mask of the operands' lane width: a vector comparison, integers or floats of the plan's
+            // lane size.
+            let ot = value_type(b, t.a);
+            if !(is_int(ot) && ot != T_I128 || is_float(ot)) || op == O_FCMP && !vcmp_ok(t.aux, ot) || !self.lane_size(
+                ot,
+                ptr,
+            ) {
+                return 0;
+            }
+            return self.lane_operands(b, u, t, false);
+        }
+        if (op == O_AND || op == O_OR) && self.kind(b, u, t.a) == VK_MASK && self.kind(b, u, t.b) == VK_MASK {
+            return VK_MASK;
+        }
+        if op == O_SELECT {
+            // The condition a mask, or a value from outside the loop (one side for every lane).
+            let kc = self.kind(b, u, t.a);
+            if kc != VK_MASK && self.defined_in(t.a) || !(is_int(t.ty) && t.ty != T_I128 || is_float(t.ty)) || !self.lane_size(
+                t.ty,
+                ptr,
+            ) {
+                return 0;
+            }
+            let ks = self.kind(b, u, t.b);
+            let kt = self.kind(b, u, t.c);
+            let os = ks == VK_LANE || ks == VK_INV || !self.defined_in(t.b);
+            let ot = kt == VK_LANE || kt == VK_INV || !self.defined_in(t.c);
+            return if (kc == VK_MASK || ks == VK_LANE || kt == VK_LANE) && os && ot {
+                VK_LANE;
             } else {
                 0;
             };
@@ -1539,7 +1689,13 @@ extend LoopOpt {
         if op == O_MUL && type_bytes(t.ty, ptr) == 8 && !self.vone {
             return 0;
         }
-        let unary = op == O_NEG || op == O_NOT || op == O_FNEG;
+        return self.lane_operands(b, u, t, op == O_NEG || op == O_NOT || op == O_FNEG);
+    }
+
+    // The kind of lane operation `t` of body `u` (`unary`: one operand): a mask for a comparison, else a lane
+    // value, when an operand is a lane value and each is one, an invariant load or from outside the loop;
+    // else 0.
+    fn lane_operands(self: &Self, b: &Body, u: u32, t: Inst, unary: bool) u8 {
         let ka = self.kind(b, u, t.a);
         let kb = if unary {
             0u8;
@@ -1550,14 +1706,17 @@ extend LoopOpt {
         let lb = kb == VK_LANE;
         let oa = la || ka == VK_INV || !self.defined_in(t.a);
         let ob = unary || lb || kb == VK_INV || !self.defined_in(t.b);
-        return if (la || lb) && oa && ob {
-            VK_LANE;
-        } else {
+        return if !((la || lb) && oa && ob) {
             0;
+        } else if t.op == O_ICMP || t.op == O_FCMP {
+            VK_MASK;
+        } else {
+            VK_LANE;
         };
     }
 
     // Whether scalar type `ty` has the plan's lane size, setting it when unset.
+    // Scalar copies mix lane sizes.
     fn lane_size(self: &mut Self, ty: u8, ptr: u32) bool {
         let n = type_bytes(ty, ptr);
         if n == 0 || n > 8 {
@@ -1566,7 +1725,7 @@ extend LoopOpt {
         if self.vsz == 0 {
             self.vsz = n;
         }
-        return self.vsz == n;
+        return self.vsz == n || self.vone;
     }
 
     // The plan's kind of value `v` defined in body `u` (0: none or outside it).
@@ -1617,6 +1776,14 @@ extend LoopOpt {
                 }
             }
         }
+        // A gathered load may read any element: apart from every store.
+        for x in 0..self.vgat.len() {
+            for y in 0..self.vacc.len() {
+                if b.insts[self.vacc[y] as usize].op == O_STORE && !self.apart(cl, self.vgat[x], self.vacc[y]) {
+                    return false;
+                }
+            }
+        }
         for x in 0..self.vacc.len() {
             let s = b.insts[self.vacc[x] as usize];
             if s.op != O_STORE {
@@ -1630,7 +1797,7 @@ extend LoopOpt {
                 let o = b.insts[self.vacc[y] as usize];
                 let oa = b.insts[o.a as usize];
                 if oa.a == sa.a {
-                    if (oa.c as i32) as i64 + (o.c as i32) as i64 != (sa.c as i32) as i64 + (s.c as i32) as i64 {
+                    if oa.aux != sa.aux || (oa.c as i32) as i64 + (o.c as i32) as i64 != (sa.c as i32) as i64 + (s.c as i32) as i64 {
                         return false;
                     }
                     continue;
@@ -1660,8 +1827,8 @@ extend LoopOpt {
     // (`cl`): different classes, neither CL_MANY nor a scope's whose roots the loop holds, each in the
     // other's scope.
     fn apart(self: &Self, cl: Classes, x: u32, y: u32) bool {
-        let cx = class_at(cl, x);
-        let cy = class_at(cl, y);
+        let cx = class_at(cl, self.orig(x));
+        let cy = class_at(cl, self.orig(y));
         return cx != cy && self.scope_ok(cl, cx, y) && self.scope_ok(cl, cy, x);
     }
 
@@ -1675,8 +1842,9 @@ extend LoopOpt {
             return true;
         }
         let r = cl.root[c as usize];
-        let m = if i as usize < cl.member.len() {
-            cl.member[i as usize];
+        let o = self.orig(i);
+        let m = if o as usize < cl.member.len() {
+            cl.member[o as usize];
         } else {
             0u64;
         };
@@ -1719,7 +1887,13 @@ extend LoopOpt {
             },
             l0,
         );
-        let d = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: i0, c: 0 }, l0);
+        let mut d = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: i0, c: 0 }, l0);
+        if self.vstrided {
+            // A strided load's last vector reads up to the next iteration's element: the loop runs the
+            // last iteration, whose element is past every byte the vectors read.
+            let one = self.vconst(b, qt, 1, l0);
+            d = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: d, b: one, c: 0 }, l0);
+        }
         let z = self.vconst(b, qt, 0, l0);
         let trips = self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: d, c: z }, l0);
         let mk = self.vconst(b, qt, ~((step - 1) as u64), l0);
@@ -1762,11 +1936,15 @@ extend LoopOpt {
         for i in ub.start..ub.start + ub.len - 1 {
             let x = (i - ub.start) as usize;
             let t = b.insts[i as usize];
-            // A reduction's update reads its parameter and a lane value: no splat.
-            if self.vk[x] == VK_LANE || self.vk[x] == VK_STORE {
+            // A reduction's update reads its parameter and a lane value: no splat; nor does a select's
+            // condition from outside the loop, which picks a side for every lane.
+            if self.vk[x] == VK_LANE || self.vk[x] == VK_STORE || self.vk[x] == VK_MASK || self.vk[x] == VK_GADDR {
                 let f = op_info(t.op).form;
                 if t.op == O_STORE {
                     self.vsplat(b, u, t.b, l0);
+                } else if t.op == O_SELECT {
+                    self.vsplat(b, u, t.b, l0);
+                    self.vsplat(b, u, t.c, l0);
                 } else if t.op != O_LOAD {
                     if lv::operand_a(f) {
                         self.vsplat(b, u, t.a, l0);
@@ -1820,20 +1998,73 @@ extend LoopOpt {
                     } else {
                         self.vmap[x as usize];
                     };
-                } else if k == VK_LANE || k == VK_STORE {
+                } else if k == VK_LANE || k == VK_STORE || k == VK_MASK || k == VK_GADDR {
                     let mut nt = t;
                     let f = op_info(t.op).form;
                     if t.op != O_STORE {
                         nt.ty = self.lane_ty(t.ty);
                     }
-                    if t.op == O_LOAD || t.op == O_STORE {
-                        nt.c = (((t.c as i32) as i64 + (c * self.vlanes * self.vsz) as i64) as i32) as u32;
+                    let strided = (t.op == O_LOAD || t.op == O_STORE) && self.kind(b, u, t.a) == VK_ADDR;
+                    if strided {
+                        // Copy c starts `c * lanes` iterations on.
+                        let step = b.insts[t.a as usize].aux as u32;
+                        nt.c = (((t.c as i32) as i64 + (c * self.vlanes * step) as i64) as i32) as u32;
+                        let eb = type_bytes(t.ty, 8);
+                        if t.op == O_LOAD && step != eb && !self.vone {
+                            // The vectors from the element on, each lane its own element's, then the
+                            // even lanes of each pair until one vector is left.
+                            nt.a = self.vval(b, u, c, t.a);
+                            let mut parts = Vector::<Value>::new();
+                            for j in 0..step / eb {
+                                let mut lt = nt;
+                                lt.c = (((nt.c as i32) as i64 + (j * self.vbytes) as i64) as i32) as u32;
+                                parts.push(self.vi(b, lt, b.locs[i as usize]));
+                            }
+                            while parts.len() > 1 {
+                                let mut next = Vector::<Value>::new();
+                                for q in 0..parts.len() / 2 {
+                                    next.push(
+                                        self.vi(
+                                            b,
+                                            Inst {
+                                                op: O_VUNZIP,
+                                                ty: nt.ty,
+                                                aux: 0,
+                                                a: parts[2 * q],
+                                                b: parts[2 * q + 1],
+                                                c: VNONE,
+                                            },
+                                            b.locs[i as usize],
+                                        ),
+                                    );
+                                }
+                                parts = next;
+                            }
+                            self.vmap[at] = parts[0];
+                            continue;
+                        }
                     }
-                    if lv::operand_a(f) {
+                    if lv::operand_a(f) && !(t.op == O_SELECT && !self.defined_in(t.a)) {
                         nt.a = self.vval(b, u, c, t.a);
                     }
                     if lv::operand_b(f) && t.b != VNONE {
                         nt.b = self.vval(b, u, c, t.b);
+                    }
+                    if lv::operand_c(f) {
+                        nt.c = self.vval(b, u, c, t.c);
+                    }
+                    if !self.vone {
+                        // A mask's lanes are integers of the lane width: a vector comparison, a select on
+                        // a mask.
+                        let mt = mask_type(vec_type(T_I8 + self.vsz.trailing_zeros() as u8, self.vlanes));
+                        if k == VK_MASK {
+                            nt.ty = mt;
+                        }
+                        if t.op == O_ICMP || t.op == O_FCMP {
+                            nt.op = O_VCMP;
+                        } else if t.op == O_SELECT && self.defined_in(t.a) {
+                            nt.op = O_VSEL;
+                        }
                     }
                     self.vmap[at] = self.vi(b, nt, b.locs[i as usize]);
                 } else if k == VK_RED {
@@ -1928,6 +2159,844 @@ extend LoopOpt {
         let pe = term(b, p).a;
         b.pool[pe as usize] = g;
         b.blocks.index_mut(h as usize).flags |= BLOCK_NOVEC;
+    }
+
+    // ---- Partial unrolling ----
+
+    // The copies of counted loop `h`'s body `u` (`counted`) an unrolled loop runs within `budget`
+    // instructions: 4 or 2, 0 when the body does not unroll (its counter steps by other than 1, it calls,
+    // whose cost the saved tests do not change, holds inline assembly, or reads the header's test).
+    fn unroll_factor(self: &mut Self, b: &Body, h: u32, u: u32, budget: u32) u32 {
+        let ub = b.blocks[u as usize];
+        let n = ub.len - 1;
+        let mut k: u32 = 4;
+        while k > 1 && k * n > budget {
+            k /= 2;
+        }
+        let hb = b.blocks[h as usize];
+        if k == 1 || !self.steps_by_one(b, h, u, self.viv, (self.viv & ~VPARAM) - hb.param_start) {
+            return 0;
+        }
+        for i in ub.start..ub.start + n {
+            let op = b.insts[i as usize].op;
+            if op == O_CALL || op == O_CALLIND || op == O_ASM {
+                return 0;
+            }
+        }
+        return if self.reads(b, u, hb.start) == 0 {
+            k;
+        } else {
+            0;
+        };
+    }
+
+    // Unroll counted loop `h` (preheader `p`, body `u`) by `k`: the preheader enters a guard that runs the
+    // iterations a multiple of `k` covers in a loop of `k` copies of the body, each copy's header values
+    // the previous one's back edge arguments, then enters the loop with the rest (fewer than `k`), which
+    // unrolls and vectorizes no more.
+    fn unroll(self: &mut Self, b: &mut Body, h: u32, p: u32, u: u32, k: u32) {
+        let hb = b.blocks[h as usize];
+        let ub = b.blocks[u as usize];
+        let l0 = b.locs[hb.start as usize];
+        let qx = (self.viv & ~VPARAM) - hb.param_start;
+        let np = hb.param_len as u32;
+        // The block numbers: guard, unrolled loop, the loop's new preheader.
+        let g = b.blocks.len() as u32;
+        let ul = g + 1;
+        let sp = g + 2;
+        let iend = self.unroll_guard(b, h, p, k, ul, sp);
+        // The unrolled loop: `vmap` holds the header's values for the copy at hand, `imap` the body's.
+        let lps = self.vblock_params(b, h);
+        let lstart = b.insts.len() as u32;
+        self.vmap.truncate(0);
+        for q in 0..np {
+            self.vmap.push(VPARAM | lps + q);
+        }
+        fill(&mut self.imap, b.insts.len(), NONE);
+        self.pmap.truncate(0);
+        let te = term(b, u).a;
+        for _ in 0..k {
+            for i in ub.start..ub.start + ub.len - 1 {
+                self.imap[i as usize] = self.copy_unrolled(b, i, h);
+            }
+            self.args.truncate(0);
+            for q in 0..np {
+                self.args.push(self.um(b, h, b.edge_arg(te, q)));
+            }
+            for q in 0..np {
+                self.vmap[q as usize] = self.args[q as usize];
+            }
+        }
+        let more = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: self.vmap[qx as usize], b: iend, c: 0 }, l0);
+        let back = b.edge(ul, self.args.as_slice());
+        let out = b.edge(sp, self.args.as_slice());
+        let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: more, b: back, c: out }, l0);
+        self.vblock(b, ul, lstart, lps, hb.param_len, hb.flags, g);
+        self.unroll_exit(b, h, p, sp, g);
+    }
+
+    // The guard of a loop `h` (preheader `p`, counter `viv`, bound `vn`) that unrolls by `k`, block
+    // `b.blocks.len()`, which `p` enters, of the header's parameters: it enters block `ul` with them when
+    // the loop runs `k` iterations or more, else `sp`. The end of the iterations a multiple of `k` covers.
+    fn unroll_guard(self: &mut Self, b: &mut Body, h: u32, p: u32, k: u32, ul: u32, sp: u32) Value {
+        let hb = b.blocks[h as usize];
+        let l0 = b.locs[hb.start as usize];
+        let qx = (self.viv & ~VPARAM) - hb.param_start;
+        let qt = b.params[(self.viv & ~VPARAM) as usize];
+        let np = hb.param_len as u32;
+        let g = b.blocks.len() as u32;
+        // The iterations the unrolled loop runs, `(n - i0) & -k` when `i0 < n`, and their end.
+        let gps = self.vblock_params(b, h);
+        let gstart = b.insts.len() as u32;
+        let i0 = VPARAM | gps + qx;
+        let lt = self.vi(
+            b,
+            Inst {
+                op: O_ICMP,
+                ty: T_I8,
+                aux: if self.vsigned {
+                    C_SLT;
+                } else {
+                    C_ULT;
+                },
+                a: i0,
+                b: self.vn,
+                c: 0,
+            },
+            l0,
+        );
+        let d = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: i0, c: 0 }, l0);
+        let z = self.vconst(b, qt, 0, l0);
+        let trips = self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: d, c: z }, l0);
+        let mk = self.vconst(b, qt, ~((k - 1) as u64) & ~0u64 >> (64 - type_bits(qt, 8)) as u64, l0);
+        let cnt = self.vi(b, Inst { op: O_AND, ty: qt, aux: 0, a: trips, b: mk, c: 0 }, l0);
+        let ok = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: cnt, b: z, c: 0 }, l0);
+        let iend = self.vi(b, Inst { op: O_ADD, ty: qt, aux: 0, a: i0, b: cnt, c: 0 }, l0);
+        self.args.truncate(0);
+        for q in 0..np {
+            self.args.push(VPARAM | gps + q);
+        }
+        let to_ul = b.edge(ul, self.args.as_slice());
+        let to_sp = b.edge(sp, self.args.as_slice());
+        let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: ok, b: to_ul, c: to_sp }, l0);
+        self.vblock(b, g, gstart, gps, hb.param_len, hb.flags, p);
+        return iend;
+    }
+
+    // Block `sp` (dominated as guard `g` is), loop `h`'s new preheader, which jumps to it with its
+    // parameters; preheader `p` enters the guard. The loop runs what the unrolled one leaves and
+    // vectorizes or unrolls no more.
+    fn unroll_exit(self: &mut Self, b: &mut Body, h: u32, p: u32, sp: u32, g: u32) {
+        let hb = b.blocks[h as usize];
+        let l0 = b.locs[hb.start as usize];
+        let np = hb.param_len as u32;
+        let sps = self.vblock_params(b, h);
+        let sstart = b.insts.len() as u32;
+        self.args.truncate(0);
+        for q in 0..np {
+            self.args.push(VPARAM | sps + q);
+        }
+        let to_h = b.edge(h, self.args.as_slice());
+        let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_h, b: 0, c: 0 }, l0);
+        self.vblock(b, sp, sstart, sps, hb.param_len, hb.flags, g);
+        let pe = term(b, p).a;
+        b.pool[pe as usize] = g;
+        b.blocks.index_mut(h as usize).flags |= BLOCK_NOVEC;
+    }
+
+    // A copy of instruction `i` of loop `h` for the copy at hand (`unrolled`), at the end of the
+    // instructions with `i`'s location: its value.
+    fn copy_unrolled(self: &mut Self, b: &mut Body, i: u32, h: u32) Value {
+        let t = self.unrolled(b, b.insts[i as usize], h);
+        let v = b.insts.len() as u32;
+        b.insts.push(t);
+        let l = b.locs[i as usize];
+        b.locs.push(l);
+        if b.inl.len() != 0 {
+            let s = b.inl[i as usize];
+            b.inl.push(s);
+        }
+        return v;
+    }
+
+    // ---- Unroll and jam ----
+
+    // The copies of the loop around innermost loop `h` (latch `u`) that `jam` runs at once, so that the
+    // element each iteration stores (4 or 8 bytes, at the outer counter's index) and the values the inner
+    // loop computes for it pack into one 16-byte vector per iteration of the jammed inner loop
+    // (`lir::slp`); 0 when the loops are not of this shape: an outer header of a counted test that enters
+    // a chain of blocks to the inner header, which leaves for a chain of blocks back to the outer header
+    // (`jam_chain`); both loops counted and stepping by 1, the inner one's start and bound outside the
+    // outer loop (every copy runs it as often); the first chain and the inner loop read the outer
+    // header's counter alone of its parameters; the blocks compute without effects or traps but for
+    // loads and the second chain's stores, which touch no byte a load of the first chain or of the inner
+    // loop reads (`cl`); the copies take at most `budget` instructions. Sets `jb`, `jiv`, the chains
+    // (`jblk`, the first `jna` blocks the first one) and the tables to the outer loop.
+    fn jam_factor(
+        self: &mut Self,
+        b: &Body,
+        inner: []u32,
+        lparent: []u32,
+        preh: []u32,
+        h: u32,
+        u: u32,
+        cl: Classes,
+        budget: u32,
+    ) u32 {
+        if !self.counted(b, h, u) {
+            return 0;
+        }
+        let iv = self.viv;
+        let n2 = self.vn;
+        let ib = b.blocks[h as usize];
+        let ivx = (iv & ~VPARAM) - ib.param_start;
+        if !self.steps_by_one(b, h, u, iv, ivx) {
+            return 0;
+        }
+        let ho = lparent[h as usize];
+        if ho == NONE || preh[ho as usize] == NONE || term(b, ho).op != O_BR {
+            return 0;
+        }
+        let to = term(b, ho);
+        let th = term(b, h);
+        let ex = if b.edge_target(th.b) == u {
+            th.c;
+        } else {
+            th.b;
+        };
+        let a = if b.edge_target(to.b) as usize < inner.len() && inner[b.edge_target(to.b) as usize] == ho {
+            b.edge_target(to.b);
+        } else {
+            b.edge_target(to.c);
+        };
+        self.jblk.truncate(0);
+        if !self.jam_chain(b, a, h) {
+            return 0;
+        }
+        self.jna = self.jblk.len() as u32;
+        if !self.jam_chain(b, b.edge_target(ex), ho) {
+            return 0;
+        }
+        // The outer loop is its header, the chains and the inner loop.
+        let nb = b.blocks.len();
+        let mut others: u32 = 0;
+        for k in 0..inner.len().min(nb) {
+            others += (inner[k] == ho) as u32;
+        }
+        let mut listed: u32 = 1;
+        for x in 0..self.jblk.len() {
+            let k = self.jblk[x] as usize;
+            if k < inner.len() {
+                if inner[k] != ho {
+                    return 0;
+                }
+                listed += 1;
+            }
+        }
+        if others != listed || self.preds(b, h) != 2 {
+            return 0;
+        }
+        for k in 0..nb {
+            self.inl[k] = false;
+        }
+        self.lblocks.truncate(0);
+        self.lblocks.push(ho);
+        self.lblocks.push(h);
+        self.lblocks.push(u);
+        for x in 0..self.jblk.len() {
+            self.lblocks.push(self.jblk[x]);
+        }
+        for x in 0..self.lblocks.len() {
+            self.inl[self.lblocks[x] as usize] = true;
+        }
+        let hb = b.blocks[ho as usize];
+        let nj = self.jblk.len();
+        let na = self.jna as usize;
+        let lc = self.jblk[nj - 1];
+        if !self.counted_by(b, ho, a, lc) || !self.steps_by_one(
+            b,
+            ho,
+            lc,
+            self.viv,
+            (self.viv & ~VPARAM) - hb.param_start,
+        ) || self.defined_in(n2) || self.defined_in(b.edge_arg(term(b, self.jblk[na - 1]).a, ivx)) {
+            return 0;
+        }
+        // The effects, and the outer header's values the first chain and the inner loop read.
+        let mut size: u32 = 0;
+        for x in 0..nj + 1 {
+            let k = if x == nj {
+                u;
+            } else {
+                self.jblk[x];
+            };
+            let late = x >= na && x < nj;
+            let bk = b.blocks[k as usize];
+            size += bk.len - 1;
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                let mem = (t.op == O_LOAD || t.op == O_STORE && late) && (t.aux & MEM_VOLATILE) == 0;
+                if i + 1 < bk.start + bk.len && !mem && !cf_pure(b, t) {
+                    return 0;
+                }
+                if late {
+                    continue;
+                }
+                self.outside_uses(b, t);
+                for q in 0..self.uses.len() {
+                    let v = self.uses[q];
+                    if v != VNONE && (v & VPARAM) != 0 && v != self.viv && self.powner[(v & ~VPARAM) as usize] == ho {
+                        return 0;
+                    }
+                }
+            }
+        }
+        // The second chain's stores, apart from the loads the copies run before them; the element stored at
+        // the outer counter's index.
+        let mut sz: u32 = 0;
+        for x in na..nj {
+            let cb = b.blocks[self.jblk[x] as usize];
+            for i in cb.start..cb.start + cb.len - 1 {
+                let s = b.insts[i as usize];
+                if s.op != O_STORE {
+                    continue;
+                }
+                for y in 0..na + 1 {
+                    let k = if y == na {
+                        u;
+                    } else {
+                        self.jblk[y];
+                    };
+                    let bk = b.blocks[k as usize];
+                    for j in bk.start..bk.start + bk.len - 1 {
+                        if b.insts[j as usize].op == O_LOAD && !self.apart(cl, i, j) {
+                            return 0;
+                        }
+                    }
+                }
+                if (s.a & (VPARAM | VFLAG)) != 0 || !self.defined_in(s.b) {
+                    continue;
+                }
+                let st = b.type_of(s.b);
+                let ad = b.insts[s.a as usize];
+                let n = type_bytes(st, 8);
+                if !is_vec(st) && st != T_I128 && (n == 4 || n == 8) && ad.op == O_PTRADD && ad.b == self.viv && ad.aux == n && !self.defined_in(
+                    ad.a,
+                ) {
+                    sz = n;
+                }
+            }
+        }
+        if sz == 0 || VBYTES / sz * size > budget {
+            return 0;
+        }
+        self.jb = [ho, preh[ho as usize], h, u];
+        self.jiv = iv;
+        return VBYTES / sz;
+    }
+
+    // Block `k0` and the blocks after it up to block `end` (not included), onto `jblk`: at most JAM_CHAIN,
+    // each entered from the one before alone (`k0` from outside the chain) and ending in a jump to the
+    // next. Whether they are such a chain.
+    fn jam_chain(self: &mut Self, b: &Body, k0: u32, end: u32) bool {
+        let mut k = k0;
+        for _ in 0..JAM_CHAIN {
+            let t = term(b, k);
+            if k == end || t.op != O_JMP || self.preds(b, k) != 1 {
+                return false;
+            }
+            self.jblk.push(k);
+            if b.edge_target(t.a) == end {
+                return true;
+            }
+            k = b.edge_target(t.a);
+        }
+        return false;
+    }
+
+    // The edges into block `k`.
+    fn preds(self: &mut Self, b: &Body, k: u32) u32 {
+        let mut n: u32 = 0;
+        for j in 0..b.blocks.len() {
+            b.succ_edges(term(b, j as u32), &mut self.edges);
+            for e in 0..self.edges.len() {
+                n += (b.edge_target(self.edges[e]) == k) as u32;
+            }
+        }
+        return n;
+    }
+
+    // Unroll the loop `jam_factor` took by `k` and jam the copies of its inner loop into one: a guard
+    // (`unroll_guard`) enters a block of the copies of the first chain, each with its counter's value,
+    // which enters one inner loop of the copies' parameters (the counter one, copy 0's) that tests copy
+    // 0's counter and runs the copies of its body, then leaves for a block of the copies of the second
+    // chain in order, each with the outer header's values the previous one passes back, which enters the
+    // first block again or the outer loop's new preheader with the iterations left (`unroll_exit`).
+    fn jam(self: &mut Self, b: &mut Body, k: u32) {
+        let ho = self.jb[0];
+        let p = self.jb[1];
+        let h = self.jb[2];
+        let u = self.jb[3];
+        let na = self.jna as usize;
+        let nj = self.jblk.len();
+        let hb = b.blocks[ho as usize];
+        let ib = b.blocks[h as usize];
+        let ub = b.blocks[u as usize];
+        let l0 = b.locs[hb.start as usize];
+        let qx = (self.viv & ~VPARAM) - hb.param_start;
+        let qt = b.params[(self.viv & ~VPARAM) as usize];
+        let np = hb.param_len as u32;
+        let ni = ib.param_len as u32;
+        let ivx = (self.jiv & ~VPARAM) - ib.param_start;
+        let th = term(b, h);
+        let ex = if b.edge_target(th.b) == u {
+            th.c;
+        } else {
+            th.b;
+        };
+        // The block numbers: guard, first chain's copies, inner header, its body, second chain's copies,
+        // the outer loop's new preheader.
+        let g = b.blocks.len() as u32;
+        let ua = g + 1;
+        let fh = g + 2;
+        let fb = g + 3;
+        let fc = g + 4;
+        let sp = g + 5;
+        fill(&mut self.imap, b.insts.len(), NONE);
+        fill(&mut self.pmap, b.params.len(), NONE);
+        let iend = self.unroll_guard(b, ho, p, k, ua, sp);
+        // The first chain's copies, and the inner loop's start values.
+        let lps = self.vblock_params(b, ho);
+        let ustart = b.insts.len() as u32;
+        self.vmap.truncate(0);
+        for q in 0..np {
+            self.vmap.push(VPARAM | lps + q);
+        }
+        self.jq.truncate(0);
+        self.jcopy.truncate(0);
+        self.args.truncate(0);
+        let q0 = VPARAM | lps + qx;
+        for j in 0..k {
+            let qj = if j == 0 {
+                q0;
+            } else {
+                let cj = self.vconst(b, qt, j, l0);
+                self.vi(b, Inst { op: O_ADD, ty: qt, aux: 0, a: q0, b: cj, c: 0 }, l0);
+            };
+            self.jq.push(qj);
+            self.vmap[qx as usize] = qj;
+            self.jam_blocks(b, ho, 0, na, NONE, true);
+            let te = term(b, self.jblk[na - 1]).a;
+            for x in 0..ni {
+                self.args.push(self.um(b, ho, b.edge_arg(te, x)));
+            }
+        }
+        let to_fh = b.edge(fh, self.args.as_slice());
+        let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_fh, b: 0, c: 0 }, l0);
+        self.vblock(b, ua, ustart, lps, hb.param_len, hb.flags, g);
+        // The inner header: copy `j`'s parameter `x` is `fps + j * ni + x`; its test copy 0's.
+        let fps = b.params.len() as u32;
+        for _ in 0..k {
+            for x in 0..ni {
+                let pt = b.params[(ib.param_start + x) as usize];
+                b.params.push(pt);
+            }
+        }
+        self.jam_params(b, h, fps, ni, ivx, 0);
+        let fstart = b.insts.len() as u32;
+        let cv = self.copy_unrolled(b, ib.start, ho);
+        self.imap[ib.start as usize] = cv;
+        self.args.truncate(0);
+        let to_fb = b.edge(fb, self.args.as_slice());
+        let to_fc = b.edge(fc, self.args.as_slice());
+        let (eb, ec) = if b.edge_target(th.b) == u {
+            (to_fb, to_fc);
+        } else {
+            (to_fc, to_fb);
+        };
+        let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: cv, b: eb, c: ec }, l0);
+        self.vblock(b, fh, fstart, fps, (k * ni) as u16, ib.flags | BLOCK_NOVEC, g);
+        // The inner body: each copy with its counter, its copy of the first chain and its parameters.
+        let bstart = b.insts.len() as u32;
+        self.jargs.truncate(0);
+        for j in 0..k {
+            self.jam_copy(b, j, k, h, fps, ni, ivx);
+            self.vmap[qx as usize] = self.jq[j as usize];
+            for i in ub.start..ub.start + ub.len - 1 {
+                self.imap[i as usize] = self.copy_unrolled(b, i, ho);
+            }
+            let te = term(b, u).a;
+            for x in 0..ni {
+                self.jargs.push(self.um(b, ho, b.edge_arg(te, x)));
+            }
+        }
+        for j in 1..k {
+            self.jargs[(j * ni + ivx) as usize] = self.jargs[ivx as usize];
+        }
+        let back = b.edge(fh, self.jargs.as_slice());
+        let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: back, b: 0, c: 0 }, l0);
+        self.vblock(b, fb, bstart, b.params.len() as u32, 0, ub.flags, g);
+        // The second chain's copies in order, the outer header's values passed from one to the next.
+        let cstart = b.insts.len() as u32;
+        for q in 0..np {
+            self.vmap[q as usize] = VPARAM | lps + q;
+        }
+        for j in 0..k {
+            self.jam_copy(b, j, k, h, fps, ni, ivx);
+            self.jam_blocks(b, ho, na, nj, ex, false);
+            let te = term(b, self.jblk[nj - 1]).a;
+            self.args.truncate(0);
+            for q in 0..np {
+                self.args.push(self.um(b, ho, b.edge_arg(te, q)));
+            }
+            for q in 0..np {
+                self.vmap[q as usize] = self.args[q as usize];
+            }
+        }
+        let more = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: self.vmap[qx as usize], b: iend, c: 0 }, l0);
+        let again = b.edge(ua, self.args.as_slice());
+        let out = b.edge(sp, self.args.as_slice());
+        let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: more, b: again, c: out }, l0);
+        self.vblock(b, fc, cstart, b.params.len() as u32, 0, b.blocks[self.jblk[nj - 1] as usize].flags, g);
+        self.unroll_exit(b, ho, p, sp, g);
+    }
+
+    // Copies of chain blocks `jblk[from .. to]` of the loop of header `ho` for the copy at hand, in order:
+    // each block's parameters the arguments of the edge into it (`e` for the first), its instructions
+    // copied (`copy_unrolled`); with `keep`, each parameter's and instruction's value onto `jcopy`.
+    fn jam_blocks(self: &mut Self, b: &mut Body, ho: u32, from: usize, to: usize, e: u32, keep: bool) {
+        let mut pe = e;
+        for x in from..to {
+            let k = self.jblk[x];
+            let bk = b.blocks[k as usize];
+            for q in 0..bk.param_len as u32 {
+                let v = self.um(b, ho, b.edge_arg(pe, q));
+                self.pmap[(bk.param_start + q) as usize] = v;
+                if keep {
+                    self.jcopy.push(v);
+                }
+            }
+            for i in bk.start..bk.start + bk.len - 1 {
+                let v = self.copy_unrolled(b, i, ho);
+                self.imap[i as usize] = v;
+                if keep {
+                    self.jcopy.push(v);
+                }
+            }
+            pe = term(b, k).a;
+        }
+    }
+
+    // The maps for copy `j` of the `k` of `jam`: the inner header's parameters (`fps`, `ni` per copy; the
+    // counter `ivx` copy 0's) and the first chain's values (`jcopy`, as `jam_blocks` kept them).
+    fn jam_copy(self: &mut Self, b: &Body, j: u32, k: u32, h: u32, fps: u32, ni: u32, ivx: u32) {
+        self.jam_params(b, h, fps, ni, ivx, j);
+        let mut s = j as usize * self.jcopy.len() / k as usize;
+        for x in 0..self.jna as usize {
+            let bk = b.blocks[self.jblk[x] as usize];
+            for q in 0..bk.param_len as u32 {
+                self.pmap[(bk.param_start + q) as usize] = self.jcopy[s];
+                s += 1;
+            }
+            for i in bk.start..bk.start + bk.len - 1 {
+                self.imap[i as usize] = self.jcopy[s];
+                s += 1;
+            }
+        }
+    }
+
+    // `pmap` of inner header `h`'s parameters for copy `j` of `jam`.
+    fn jam_params(self: &mut Self, b: &Body, h: u32, fps: u32, ni: u32, ivx: u32, j: u32) {
+        let ps = b.blocks[h as usize].param_start;
+        for x in 0..ni {
+            self.pmap[(ps + x) as usize] = VPARAM | fps + if x == ivx {
+                0u32;
+            } else {
+                j * ni;
+            } + x;
+        }
+    }
+
+    // Value `v` of loop `h` in the copy at hand (`unroll`, `linearize`): a header parameter's value
+    // (`vmap`), another parameter's (`pmap`, NONE: itself), a body instruction's copy (`imap`), any other
+    // as it is.
+    fn um(self: &Self, b: &Body, h: u32, v: Value) Value {
+        if v == VNONE {
+            return v;
+        }
+        let hb = b.blocks[h as usize];
+        if (v & VPARAM) != 0 {
+            let x = v & ~VPARAM;
+            return if x >= hb.param_start && x < hb.param_start + hb.param_len as u32 {
+                self.vmap[(x - hb.param_start) as usize];
+            } else if x as usize < self.pmap.len() && self.pmap[x as usize] != NONE {
+                self.pmap[x as usize];
+            } else {
+                v;
+            };
+        }
+        let x = v & ~VFLAG;
+        return if x as usize < self.imap.len() && self.imap[x as usize] != NONE {
+            self.imap[x as usize] | v & VFLAG;
+        } else {
+            v;
+        };
+    }
+
+    // Body instruction `t0` of loop `h` for the copy at hand (`um`): its values the copy's.
+    fn unrolled(self: &Self, b: &mut Body, t0: Inst, h: u32) Inst {
+        let mut t = t0;
+        let f = op_info(t.op).form;
+        if lv::operand_a(f) {
+            t.a = self.um(b, h, t.a);
+        }
+        if lv::operand_b(f) {
+            t.b = self.um(b, h, t.b);
+        }
+        if lv::operand_c(f) {
+            t.c = self.um(b, h, t.c);
+        }
+        if f == F_VOP {
+            let at = b.pool.len() as u32;
+            for q in 0..t.b {
+                let v = self.um(b, h, b.pool[(t.a + q) as usize]);
+                b.pool.push(v);
+            }
+            t.a = at;
+        }
+        return t;
+    }
+
+    // ---- If-conversion ----
+
+    // Loop `h` (latch `u`, its blocks `lblocks`) whose body branches on `c` at the end of its first block,
+    // the two sides joining at `u` (each through its edge, or a block without parameters that jumps there),
+    // `u` jumping back: a new block of the body's instructions in order (the first block's, each side's,
+    // a select on `c` for each parameter of `u` whose sides' values differ, then `u`'s) that jumps back to
+    // `h`, which enters it; the loop's blocks `h` and it. A side runs only what may run in every iteration:
+    // pure instructions that cannot trap, and loads of an element the loop reads or writes in every
+    // iteration. The block, NONE when the loop is not of this shape; `unlinearize` takes it back,
+    // `commit_linear` keeps it.
+    fn linearize(self: &mut Self, b: &mut Body, h: u32, u: u32) u32 {
+        let th = term(b, h);
+        if th.op != O_BR || u == h || term(b, u).op != O_JMP || b.edge_target(term(b, u).a) != h {
+            return NONE;
+        }
+        let ein = if self.inl[b.edge_target(th.b) as usize] {
+            th.b;
+        } else {
+            th.c;
+        };
+        let e = b.edge_target(ein);
+        let te = term(b, e);
+        if e == u || e == h || b.edge_nargs(ein) != 0 || te.op != O_BR {
+            return NONE;
+        }
+        // Each side: its edge into `u` and its block (NONE: none).
+        let (ex, ax) = self.lin_side(b, te.b, e, u);
+        let (ey, ay) = self.lin_side(b, te.c, e, u);
+        if ex == NONE || ey == NONE || ax != NONE && ax == ay {
+            return NONE;
+        }
+        let nl = 3 + (ax != NONE) as usize + (ay != NONE) as usize;
+        if self.lblocks.len() != nl {
+            return NONE;
+        }
+        // The instructions: forms the vectorizer reads; on a side, what may run in every iteration.
+        let order: [u32; 4] = [e, ax, ay, u];
+        for k in 0..4usize {
+            let blk = unsafe order[k];
+            if blk == NONE {
+                continue;
+            }
+            let bk = b.blocks[blk as usize];
+            for i in bk.start..bk.start + bk.len - 1 {
+                let t = b.insts[i as usize];
+                let f = op_info(t.op).form;
+                if !(f == F_IMM || f == F_UN || f == F_BIN || f == F_CMP || f == F_TRI || f == F_PTRADD || f == F_LOAD || f == F_STORE) {
+                    return NONE;
+                }
+                let side = k == 1 || k == 2;
+                if side && !(t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 && self.every_iteration(b, e, u, t) || t.op != O_LOAD && cf_pure(
+                    b,
+                    t,
+                )) {
+                    return NONE;
+                }
+            }
+        }
+        // Saved for `unlinearize`.
+        self.lsave = [b.insts.len() as u32, b.params.len() as u32, b.pool.len() as u32, b.blocks.len() as u32, e, u];
+        self.ledge = ein;
+        self.lold.truncate(0);
+        for k in 0..self.lblocks.len() {
+            self.lold.push(self.lblocks[k]);
+        }
+        let ub = b.blocks[u as usize];
+        let nb = b.blocks.len() as u32;
+        let hb = b.blocks[h as usize];
+        self.vmap.truncate(0);
+        for q in 0..hb.param_len as u32 {
+            self.vmap.push(VPARAM | hb.param_start + q);
+        }
+        fill(&mut self.imap, b.insts.len(), NONE);
+        fill(&mut self.pmap, b.params.len(), NONE);
+        self.lorig.truncate(0);
+        let start = b.insts.len() as u32;
+        for k in 0..4usize {
+            let blk = unsafe order[k];
+            if blk == NONE {
+                continue;
+            }
+            if k == 3 {
+                // `u`'s parameters: the sides' values, a select where they differ.
+                let c = self.um(b, h, te.a);
+                for q in 0..ub.param_len as u32 {
+                    let x = self.um(b, h, b.edge_arg(ex, q));
+                    let y = self.um(b, h, b.edge_arg(ey, q));
+                    let mut v = x;
+                    if x != y {
+                        let ty = b.params[(ub.param_start + q) as usize];
+                        v = self.vi(
+                            b,
+                            Inst { op: O_SELECT, ty: ty, aux: 0, a: c, b: x, c: y },
+                            b.locs[(ub.start + ub.len - 1) as usize],
+                        );
+                        self.lorig.push(NONE);
+                    }
+                    self.pmap[(ub.param_start + q) as usize] = v;
+                }
+            }
+            let bk = b.blocks[blk as usize];
+            for i in bk.start..bk.start + bk.len - 1 {
+                let t = self.unrolled(b, b.insts[i as usize], h);
+                let v = b.insts.len() as u32;
+                b.insts.push(t);
+                let l = b.locs[i as usize];
+                b.locs.push(l);
+                if b.inl.len() != 0 {
+                    let s = b.inl[i as usize];
+                    b.inl.push(s);
+                }
+                self.imap[i as usize] = v;
+                self.lorig.push(i);
+            }
+        }
+        self.args.truncate(0);
+        let tu = term(b, u).a;
+        for q in 0..b.edge_nargs(tu) {
+            self.args.push(self.um(b, h, b.edge_arg(tu, q)));
+        }
+        let back = b.edge(h, self.args.as_slice());
+        let _ = self.vi(
+            b,
+            Inst { op: O_JMP, ty: T_NONE, aux: 0, a: back, b: 0, c: 0 },
+            b.locs[(ub.start + ub.len - 1) as usize],
+        );
+        self.lorig.push(NONE);
+        self.vblock(b, nb, start, b.params.len() as u32, 0, ub.flags, e);
+        b.pool[ein as usize] = nb;
+        for k in 0..self.lold.len() {
+            self.inl[self.lold[k] as usize] = false;
+        }
+        self.inl[h as usize] = true;
+        self.inl[nb as usize] = true;
+        self.lblocks.truncate(0);
+        self.lblocks.push(h);
+        self.lblocks.push(nb);
+        self.latch = nb;
+        return nb;
+    }
+
+    // Branch edge `s` out of block `e` toward `u` (`linearize`): the edge into `u` and the block between
+    // (NONE: none), or (NONE, NONE) when neither the edge enters `u` nor a block of the loop without
+    // parameters that only jumps to `u`.
+    fn lin_side(self: &Self, b: &Body, s: u32, e: u32, u: u32) (u32, u32) {
+        let a = b.edge_target(s);
+        if a == u {
+            return s, NONE;
+        }
+        let t = term(b, a);
+        if a == e || !self.inl[a as usize] || b.blocks[a as usize].param_len != 0 || b.edge_nargs(s) != 0 || t.op != O_JMP || b.edge_target(
+            t.a,
+        ) != u {
+            return NONE, NONE;
+        }
+        return t.a, a;
+    }
+
+    // Whether the loop (body blocks `e` then `u`) reads or writes in every iteration the element load `t`
+    // reads: an access in `e` or `u` through the same address and offset, of the same size.
+    fn every_iteration(self: &Self, b: &Body, e: u32, u: u32, t: Inst) bool {
+        let n = type_bytes(t.ty, 8);
+        let blks: [u32; 2] = [e, u];
+        for blk in blks {
+            let bk = b.blocks[blk as usize];
+            for i in bk.start..bk.start + bk.len - 1 {
+                let s = b.insts[i as usize];
+                let sz = if s.op == O_LOAD {
+                    type_bytes(s.ty, 8);
+                } else if s.op == O_STORE {
+                    type_bytes(value_type(b, s.b), 8);
+                } else {
+                    0u32;
+                };
+                if sz == n && s.c == t.c && same_address(b, s.a, t.a) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Keep `linearize`'s block: the old latch `u` traps, so it no longer enters the header.
+    fn commit_linear(self: &mut Self, b: &mut Body, u: u32) {
+        let ub = b.blocks[u as usize];
+        b.insts[(ub.start + ub.len - 1) as usize] = Inst {
+            op: O_UNREACHABLE,
+            ty: T_NONE,
+            aux: 0,
+            a: VNONE,
+            b: VNONE,
+            c: VNONE,
+        };
+        self.lsave = [0, 0, 0, 0, 0, 0];
+    }
+
+    // Take back `linearize`: the header enters the branch's body again, the new block and its values go.
+    fn unlinearize(self: &mut Self, b: &mut Body) {
+        let nb = self.lsave[3];
+        b.pool[self.ledge as usize] = self.lsave[4];
+        self.latch = self.lsave[5];
+        b.insts.truncate(self.lsave[0] as usize);
+        b.locs.truncate(self.lsave[0] as usize);
+        if b.inl.len() != 0 {
+            b.inl.truncate(self.lsave[0] as usize);
+        }
+        b.params.truncate(self.lsave[1] as usize);
+        b.pool.truncate(self.lsave[2] as usize);
+        b.blocks.truncate(nb as usize);
+        self.owner.truncate(self.lsave[0] as usize);
+        self.powner.truncate(self.lsave[1] as usize);
+        self.inl.truncate(nb as usize);
+        self.proxy.truncate(nb as usize);
+        self.lblocks.truncate(0);
+        for k in 0..self.lold.len() {
+            self.inl[self.lold[k] as usize] = true;
+            self.lblocks.push(self.lold[k]);
+        }
+        self.lorig.truncate(0);
+        self.lsave = [0, 0, 0, 0, 0, 0];
+    }
+
+    // An instruction's original for the alias classes: itself, or for one `linearize` made its source.
+    fn orig(self: &Self, i: u32) u32 {
+        let base = self.lsave[0];
+        return if base != 0 && i >= base && (i - base) as usize < self.lorig.len() && self.lorig[(i - base) as usize] != NONE {
+            self.lorig[(i - base) as usize];
+        } else {
+            i;
+        };
     }
 
     // New parameters of header `h`'s types; the first one's number.
@@ -3724,6 +4793,19 @@ fn cf_pure(b: &Body, t: Inst) bool {
         return d != 0 && (op == O_UDIV || op == O_UREM || d != mask_of(type_bits(t.ty, 8)));
     }
     return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_CLZ || op == O_CTZ || op == O_POPCNT || op == O_FMA || op == O_MULHU || op == O_SPLAT;
+}
+
+// Whether addresses `x` and `y` are one: the same value, or the same `ptradd` of the same operands.
+fn same_address(b: &Body, x: Value, y: Value) bool {
+    if x == y {
+        return true;
+    }
+    if ((x | y) & (VPARAM | VFLAG)) != 0 || x == VNONE || y == VNONE {
+        return false;
+    }
+    let s = b.insts[x as usize];
+    let t = b.insts[y as usize];
+    return s.op == O_PTRADD && t.op == O_PTRADD && s.a == t.a && s.b == t.b && s.aux == t.aux && s.c == t.c;
 }
 
 // Push instruction `t` with the location of instruction `from`.

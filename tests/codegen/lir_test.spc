@@ -304,6 +304,9 @@ b0(v0: f32, v1: f64):
   v28 = select.f64 v27, v18, v15
   v29 = fma.f64 v28, v15, v18
   v30 = splat.v2f64 v29
+  v31 = vcmp.olt.v2i64 v30, v30
+  v32 = vsel.v2f64 v31, v30, v30
+  v33 = vunzip.v2f64 v32, v30
   ret v29
 fn @memory
   sig (ptr, i64) -> void

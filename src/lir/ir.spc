@@ -226,7 +226,14 @@ pub(package) const O_SYS: u8 = 72;
 pub(package) const O_MULHU: u8 = 73;
 /// A vector whose every lane is scalar `a` (of the lane type).
 pub(package) const O_SPLAT: u8 = 74;
-pub(package) const OP_COUNT: u8 = 75;
+/// The lane-wise comparison of vectors `a` and `b` (`vcmp_ok`): a vector of integer lanes of their lanes'
+/// width (`mask_type`), each all ones where the condition holds, else 0.
+pub(package) const O_VCMP: u8 = 75;
+/// Per lane, the bits of `b` where mask `a` (`mask_type` of the result) has ones, else those of `c`.
+pub(package) const O_VSEL: u8 = 76;
+/// The even lanes of vectors `a` then `b` (of the result's type): lane k is lane 2k of `a ++ b`.
+pub(package) const O_VUNZIP: u8 = 77;
+pub(package) const OP_COUNT: u8 = 78;
 
 /// One opcode: its text name and its operand form.
 pub(package) struct OpInfo {
@@ -234,7 +241,7 @@ pub(package) struct OpInfo {
     pub(package) form: u8,
 }
 
-pub(package) const OPS: [OpInfo; 75] = [
+pub(package) const OPS: [OpInfo; 78] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -310,7 +317,26 @@ pub(package) const OPS: [OpInfo; 75] = [
     OpInfo { name: "sys", form: F_SYS },
     OpInfo { name: "mulhu", form: F_BIN },
     OpInfo { name: "splat", form: F_UN },
+    OpInfo { name: "vcmp", form: F_CMP },
+    OpInfo { name: "vsel", form: F_TRI },
+    OpInfo { name: "vunzip", form: F_BIN },
 ];
+
+/// The mask a lane-wise comparison of vectors of type `t` gives (`O_VCMP`): integer lanes of its lanes'
+/// width.
+pub(package) const fn mask_type(t: u8) u8 {
+    return T_VEC | type_bytes(lane_type(t), 8).trailing_zeros() as u8 << 3 | t & 7;
+}
+
+/// Whether `O_VCMP` takes condition `c` on lanes of type `lt`: every integer condition, and the float ones
+/// one vector instruction makes (`C_OEQ` .. `C_OGE`, `C_UNE`).
+pub(package) const fn vcmp_ok(c: u16, lt: u8) bool {
+    return if is_float(lt) {
+        c == C_OEQ || c >= C_OLT && c <= C_OGE || c == C_UNE;
+    } else {
+        c <= C_UGE;
+    };
+}
 
 /// An `O_ASM` record at pool index `r` of `b`: its output, input and clobber counts.
 pub(package) const fn asm_nout(b: &Body, r: u32) u32 {
@@ -602,7 +628,8 @@ pub(package) struct Block {
 
 /// The block holds only a failure path (a panic or a trap).
 pub(package) const BLOCK_COLD: u16 = 1;
-/// The loop this block heads runs what a vector copy of it left (`lir::loops`): it does not vectorize.
+/// The loop this block heads runs what a vector or unrolled copy of it left (`lir::loops`): it neither
+/// vectorizes nor unrolls.
 pub(package) const BLOCK_NOVEC: u16 = 2;
 
 /// A stack slot: `size` bytes aligned to `1 << align_log2`.

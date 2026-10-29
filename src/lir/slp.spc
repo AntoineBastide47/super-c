@@ -175,7 +175,7 @@ extend Slp {
                 } else {
                     self.def_block(l0);
                 };
-                cost += if self.consts(b, pk) {
+                cost += if self.consts(b, pk) || pk.kind == PK_SPLAT {
                     1u64;
                 } else {
                     pk.n as u64 + 1 + GATHER_COST;
@@ -677,8 +677,8 @@ extend Slp {
             t.c = off as u32;
             v = self.make(b, t, self.iblk[first as usize], first, false);
         } else {
-            // A splat right after its value's definition (out of the loops that do not define it); a
-            // gather at its user.
+            // A splat (`splat`) right after its value's definition (out of the loops that do not define
+            // it); a gather through memory at its user.
             let mut k = pk.blk;
             let mut at = pk.at;
             if pk.kind == PK_SPLAT {
@@ -688,6 +688,8 @@ extend Slp {
             }
             if self.consts(b, pk) {
                 v = self.wide(b, pk, vt, k, at);
+            } else if pk.kind == PK_SPLAT {
+                v = self.make(b, Inst { op: O_SPLAT, ty: vt, aux: 0, a: l0, b: VNONE, c: VNONE }, k, at, false);
             } else {
                 let sa = self.slot(b, k, at);
                 let size = type_bytes(pk.ty, self.ptr);

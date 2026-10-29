@@ -81,12 +81,29 @@ fn same_outcome(before: &Package, after: &Package, name: str, args: []u64, want:
     }
 }
 
-const NO_LOOPS: lu::Budgets = lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 };
-const PEEL: lu::Budgets = lu::Budgets { peel: 200, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 };
-const VERSION: lu::Budgets = lu::Budgets { peel: 0, version: 200, unswitch: 0, rotate: 0, vector: 0, fin: 0 };
-const UNSWITCH: lu::Budgets = lu::Budgets { peel: 0, version: 0, unswitch: 50, rotate: 0, vector: 0, fin: 0 };
-const ROTATE: lu::Budgets = lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 8, vector: 0, fin: 0 };
-const VECTOR: lu::Budgets = lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 0, vector: 2, fin: 0 };
+const NO_LOOPS: lu::Budgets = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 };
+const PEEL: lu::Budgets = lu::Budgets { peel: 200, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 };
+const VERSION: lu::Budgets = lu::Budgets {
+    peel: 0,
+    partial: 0,
+    version: 200,
+    unswitch: 0,
+    rotate: 0,
+    vector: 0,
+    fin: 0,
+};
+const UNSWITCH: lu::Budgets = lu::Budgets {
+    peel: 0,
+    partial: 0,
+    version: 0,
+    unswitch: 50,
+    rotate: 0,
+    vector: 0,
+    fin: 0,
+};
+const ROTATE: lu::Budgets = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 8, vector: 0, fin: 0 };
+const VECTOR: lu::Budgets = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 2, fin: 0 };
+const PARTIAL: lu::Budgets = lu::Budgets { peel: 0, partial: 32, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 };
 
 // `x` times 0 + 1 + ... + (`bound` - 1), by a loop counted from 0 by 1 while `i <u bound`, the bound the
 // text's.
@@ -163,7 +180,10 @@ b4:
 b5:
   ret v8
 )";
-    let (b, a) = optimized(src, lu::Budgets { peel: 40, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 });
+    let (b, a) = optimized(
+        src,
+        lu::Budgets { peel: 40, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+    );
     let t = text_of(&a, "bytes");
     assert(!t.contains("icmp") && !t.contains("panic"), t.as_str());
     let x: []u64 = [0x0102030405060708];
@@ -387,10 +407,732 @@ b3:
         q.as_str(),
     );
     same_outcome(&b, &a, "squares", four, 14, false);
-    let (b2, a2) = optimized(src, lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 1, vector: 0, fin: 0 });
+    let (b2, a2) = optimized(
+        src,
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 1, vector: 0, fin: 0 },
+    );
     let q2 = text_of(&a2, "squares");
     assert(count(&q2, "icmp.ult") == 1 && q2.contains("jmp"), q2.as_str());
     same_outcome(&b2, &a2, "squares", four, 14, false);
+}
+
+// A counted loop of unknown trip count unrolls partially: a loop of 4 copies of its body runs while 4
+// iterations are left, a signed counter from below zero too, then the loop runs the rest. A body that
+// calls, or one past the budget at 2 copies, stays.
+@test
+fn a_counted_loop_unrolls_partially() {
+    let text = M"(lir ptr 8
+sym @g fn global noinline
+sym @mix fn global
+sym @calls fn global
+fn @g
+  sig (i32) -> i32
+b0(v0: i32):
+  ret v0
+fn @mix
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  jmp b1(v0, v0)
+b1(v2: i32, v3: i32):
+  v4 = icmp.slt v2, v1
+  br v4, b2, b3
+b2:
+  v5 = mul.i32 v3, v3
+  v6 = xor.i32 v5, v2
+  v7 = iconst.i32 1
+  v8 = add.i32 v2, v7
+  jmp b1(v8, v6)
+b3:
+  ret v3
+fn @calls
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  jmp b1(v1, v1)
+b1(v2: i32, v3: i32):
+  v4 = icmp.ult v2, v0
+  br v4, b2, b3
+b2:
+  v5 = call.i32 @g(v3) : (i32) -> i32
+  v6 = add.i32 v5, v2
+  v7 = iconst.i32 1
+  v8 = add.i32 v2, v7
+  jmp b1(v8, v6)
+b3:
+  ret v3
+)";
+    let (before, after) = optimized(text, PARTIAL);
+    let m = text_of(&after, "mix");
+    assert_eq(count(&m, "mul.i32"), 5);
+    assert_eq(count(&m, "and.i32"), 1);
+    let c = text_of(&after, "calls");
+    assert_eq(count(&c, "call.i32"), 1);
+    let neg: u64 = 0xFFFFFFFD;
+    let starts: [u64; 3] = [0, 2, neg];
+    let ends: [u64; 6] = [0, 1, 3, 4, 9, 13];
+    for s in starts {
+        for n in ends {
+            let args: [u64; 2] = [s, n];
+            let mut e = leval::Eval::new(&before);
+            let want = e.run(before.find_symbol("mix"), args).value;
+            same_outcome(&before, &after, "mix", args, want, false);
+        }
+    }
+    let (_, small) = optimized(
+        text,
+        lu::Budgets { peel: 0, partial: 5, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+    );
+    let s = text_of(&small, "mix");
+    assert_eq(count(&s, "mul.i32"), 1);
+}
+
+// A loop whose lanes pick by a comparison vectorizes: a float `max(x, 0)` map (`vcmp` of floats, `vsel`),
+// and an integer sum of the values inside a range else the bound (two masks `and`ed, a select into a
+// reduction).
+@test
+fn a_loop_of_selects_vectorizes() {
+    let src = M"(lir ptr 8
+sym @relu fn global noinline
+sym @clamp fn global noinline
+sym @fill fn global noinline
+sym @drive fn global
+sym @drive2 fn global
+fn @relu
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = fconst.f32 0x0
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 4
+  v9 = load.f32 v8 align 2
+  v10 = fcmp.ogt v9, v5
+  v11 = select.f32 v10, v9, v5
+  v12 = ptradd v0, v6 * 4
+  store v11, v12 align 2
+  v13 = add.i64 v6, v4
+  jmp b1(v13)
+b3:
+  ret
+fn @clamp
+  sig (ptr, i64, i32) -> i32
+b0(v0: ptr, v1: i64, v2: i32):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v1
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 4
+  v10 = load.i32 v9 align 2
+  v11 = icmp.slt v10, v2
+  v12 = icmp.sgt v10, v5
+  v13 = and.i8 v11, v12
+  v14 = select.i32 v13, v10, v2
+  v15 = add.i32 v7, v14
+  v16 = add.i64 v6, v4
+  jmp b1(v16, v15)
+b3:
+  ret v7
+fn @fill
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 5
+  v6 = iconst.i32 100
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v2
+  br v8, b2, b3
+b2:
+  v9 = trunc.i32 v7
+  v10 = mul.i32 v9, v5
+  v11 = sub.i32 v10, v6
+  v12 = ptradd v0, v7 * 4
+  store v11, v12 align 2
+  v13 = sitofp.f32 v11
+  v14 = ptradd v1, v7 * 4
+  store v13, v14 align 2
+  v15 = add.i64 v7, v4
+  jmp b1(v15)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 256 align 3
+  slot s1 size 256 align 3
+  slot s2 size 256 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = iconst.i64 64
+  call @fill(v1, v2, v4) : (ptr, ptr, i64) -> void
+  call @relu(v3, v2, v0) : (ptr, ptr, i64) -> void
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  jmp b1(v5, v5)
+b1(v7: i64, v8: i64):
+  v9 = icmp.ult v7, v0
+  br v9, b2, b3
+b2:
+  v10 = ptradd v3, v7 * 4
+  v11 = load.i32 v10 align 2
+  v12 = sext.i64 v11
+  v13 = mul.i64 v12, v7
+  v14 = add.i64 v8, v13
+  v15 = add.i64 v7, v6
+  jmp b1(v15, v14)
+b3:
+  ret v8
+fn @drive2
+  sig (i64, i32) -> i32
+  slot s0 size 256 align 3
+  slot s1 size 256 align 3
+b0(v0: i64, v1: i32):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = iconst.i64 64
+  call @fill(v2, v3, v4) : (ptr, ptr, i64) -> void
+  v5 = call.i32 @clamp(v2, v0, v1) : (ptr, i64, i32) -> i32
+  ret v5
+)";
+    let (b, a) = optimized(src, VECTOR);
+    let r = text_of(&a, "relu");
+    assert(r.contains("vcmp.ogt.v4i32") && r.contains("vsel.v4f32"), r.as_str());
+    let c = text_of(&a, "clamp");
+    assert(c.contains("and.v4i32") && c.contains("vsel.v4i32"), c.as_str());
+    // `drive` sums the bits of the first `n` results, each times its index.
+    let lens: [u64; 5] = [0, 3, 8, 13, 64];
+    for k in 0..5usize {
+        let n = unsafe lens[k];
+        let args: []u64 = [n];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        let bounds: [u64; 3] = [50, 0, 0xFFFFFF9C];
+        for q in 0..3usize {
+            let args2: []u64 = [n, unsafe bounds[q]];
+            same_outcome(&b, &a, "drive2", args2, run_value(&b, "drive2", args2), false);
+        }
+    }
+}
+
+// A loop whose body branches vectorizes as one block of selects: each side's float arithmetic runs for
+// every lane, the side's value picked by the condition's mask. A side that loads an element no iteration
+// reads otherwise keeps the branch, and the loop stays scalar.
+@test
+fn a_loop_with_a_branch_vectorizes_as_selects() {
+    let src = M"(lir ptr 8
+sym @f fn global noinline
+sym @g fn global noinline
+sym @fill fn global noinline
+sym @drive fn global
+sym @drive2 fn global
+fn @f
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = fconst.f32 0x0
+  v6 = fconst.f32 0x40000000
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v2
+  br v8, b2, b6
+b2:
+  v9 = ptradd v1, v7 * 4
+  v10 = load.f32 v9 align 2
+  v11 = fcmp.ogt v10, v5
+  br v11, b3, b4
+b3:
+  v12 = fmul.f32 v10, v6
+  jmp b5(v12)
+b4:
+  v13 = fsub.f32 v5, v10
+  jmp b5(v13)
+b5(v14: f32):
+  v15 = ptradd v0, v7 * 4
+  store v14, v15 align 2
+  v16 = add.i64 v7, v4
+  jmp b1(v16)
+b6:
+  ret
+fn @g
+  sig (ptr, ptr, i64) -> i32
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v2
+  br v8, b2, b5
+b2:
+  v9 = ptradd v1, v6 * 4
+  v10 = load.i32 v9 align 2
+  v11 = icmp.ne v10, v5
+  br v11, b3, b4(v7)
+b3:
+  v12 = ptradd v0, v6 * 4
+  v13 = load.i32 v12 align 2
+  v14 = add.i32 v7, v13
+  jmp b4(v14)
+b4(v15: i32):
+  v16 = add.i64 v6, v4
+  jmp b1(v16, v15)
+b5:
+  ret v7
+fn @fill
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 7
+  v5 = iconst.i32 30
+  jmp b1(v2)
+b1(v6: i64):
+  v7 = icmp.ult v6, v1
+  br v7, b2, b3
+b2:
+  v8 = trunc.i32 v6
+  v9 = mul.i32 v8, v4
+  v10 = sub.i32 v9, v5
+  v11 = sitofp.f32 v10
+  v12 = ptradd v0, v6 * 4
+  store v11, v12 align 2
+  v13 = add.i64 v6, v3
+  jmp b1(v13)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 256 align 3
+  slot s1 size 256 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 64
+  call @fill(v1, v3) : (ptr, i64) -> void
+  call @f(v2, v1, v0) : (ptr, ptr, i64) -> void
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4, v4)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b3
+b2:
+  v9 = ptradd v2, v6 * 4
+  v10 = load.i32 v9 align 2
+  v11 = sext.i64 v10
+  v12 = mul.i64 v11, v6
+  v13 = add.i64 v7, v12
+  v14 = add.i64 v6, v5
+  jmp b1(v14, v13)
+b3:
+  ret v7
+fn @drive2
+  sig (i64) -> i32
+  slot s0 size 256 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 64
+  call @fill(v1, v2) : (ptr, i64) -> void
+  v3 = call.i32 @g(v1, v1, v0) : (ptr, ptr, i64) -> i32
+  ret v3
+)";
+    let (b, a) = optimized(src, VECTOR);
+    let f = text_of(&a, "f");
+    assert(f.contains("vsel.v4f32") && f.contains("fmul.v4f32") && f.contains("fsub.v4f32"), f.as_str());
+    let g = text_of(&a, "g");
+    assert(!g.contains("v4i32"), g.as_str());
+    let lens: [u64; 5] = [0, 3, 8, 13, 64];
+    for k in 0..5usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        same_outcome(&b, &a, "drive2", args, run_value(&b, "drive2", args), false);
+    }
+}
+
+// Loads of every 2nd element vectorize: the vectors from each field on, their even lanes (`vunzip`), and
+// the loop runs the last iteration, so no vector reads past the element it reads. A sum through indices
+// a load gives (a gather) interleaves scalar copies.
+@test
+fn strided_and_gathered_loads_vectorize() {
+    let src = M"(lir ptr 8
+sym @mag fn global noinline
+sym @gsum fn global noinline
+sym @fill fn global noinline
+sym @drive fn global
+sym @drive2 fn global
+fn @mag
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 8
+  v8 = load.i32 v7 align 2
+  v9 = load.i32 v7+4 align 2
+  v10 = mul.i32 v8, v8
+  v11 = mul.i32 v9, v9
+  v12 = add.i32 v10, v11
+  v13 = ptradd v0, v5 * 4
+  store v12, v13 align 2
+  v14 = add.i64 v5, v4
+  jmp b1(v14)
+b3:
+  ret
+fn @gsum
+  sig (ptr, ptr, i64) -> i64
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3, v3)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v5 * 4
+  v9 = load.i32 v8 align 2
+  v10 = sext.i64 v9
+  v11 = ptradd v0, v10 * 8
+  v12 = load.i64 v11 align 3
+  v13 = add.i64 v6, v12
+  v14 = add.i64 v5, v4
+  jmp b1(v14, v13)
+b3:
+  ret v6
+fn @fill
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 63
+  v6 = iconst.i32 3
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v2
+  br v8, b2, b3
+b2:
+  v9 = mul.i64 v7, v7
+  v10 = ptradd v0, v7 * 8
+  store v9, v10 align 3
+  v11 = sub.i64 v5, v7
+  v12 = trunc.i32 v11
+  v13 = ptradd v1, v7 * 4
+  store v12, v13 align 2
+  v14 = add.i64 v7, v4
+  jmp b1(v14)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 256 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 64
+  call @fill(v1, v2, v3) : (ptr, ptr, i64) -> void
+  call @mag(v2, v1, v0) : (ptr, ptr, i64) -> void
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4, v4)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b3
+b2:
+  v9 = ptradd v2, v6 * 4
+  v10 = load.i32 v9 align 2
+  v11 = sext.i64 v10
+  v12 = mul.i64 v11, v6
+  v13 = add.i64 v7, v12
+  v14 = add.i64 v6, v5
+  jmp b1(v14, v13)
+b3:
+  ret v7
+fn @drive2
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 256 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 64
+  call @fill(v1, v2, v3) : (ptr, ptr, i64) -> void
+  v4 = call.i64 @gsum(v1, v2, v0) : (ptr, ptr, i64) -> i64
+  ret v4
+)";
+    let (b, a) = optimized(src, VECTOR);
+    let m = text_of(&a, "mag");
+    assert(count(&m, "vunzip.v4i32") == 4 && m.contains("mul.v4i32"), m.as_str());
+    let g = text_of(&a, "gsum");
+    assert_eq(count(&g, "load.i64"), 3);
+    // `mag` reads 64 words as 32 pairs.
+    let lens: [u64; 6] = [0, 1, 3, 8, 9, 32];
+    for k in 0..6usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        same_outcome(&b, &a, "drive2", args, run_value(&b, "drive2", args), false);
+    }
+    let all: []u64 = [64];
+    same_outcome(&b, &a, "drive2", all, run_value(&b, "drive2", all), false);
+}
+
+// A loop around an inner loop that does not vectorize (it reads a column: a stride the call gives) unrolls
+// and jams: 4 iterations of the outer loop run their inner loops as one, and the 4 sums and their
+// stores pack into vectors. The output (`noalias`) is apart from what the loops read; without that the
+// loops stay as they are. Each count runs as before (0, fewer than 4, not a multiple of 4).
+@test
+fn an_outer_loop_unrolls_and_jams_into_vectors() {
+    let body = M"(  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i32 0
+  jmp b1(v5)
+b1(v8: i64):
+  v9 = icmp.ult v8, v3
+  br v9, b2, b6
+b2:
+  v10 = ptradd v0, v8 * 4
+  jmp b3(v5, v7)
+b3(v11: i64, v12: i32):
+  v13 = icmp.ult v11, v4
+  br v13, b4, b5
+b4:
+  v14 = mul.i64 v11, v3
+  v15 = ptradd v10, v14 * 4
+  v16 = load.i32 v15 align 2
+  v17 = ptradd v1, v11 * 4
+  v18 = load.i32 v17 align 2
+  v19 = mul.i32 v16, v18
+  v20 = add.i32 v12, v19
+  v21 = add.i64 v11, v6
+  jmp b3(v21, v20)
+b5:
+  v22 = ptradd v2, v8 * 4
+  store v12, v22 align 2
+  v23 = add.i64 v8, v6
+  jmp b1(v23)
+b6:
+  ret
+)";
+    let drive = M"(fn @drive
+  sig (i64, i64) -> i64
+  slot s0 size 4096 align 3
+  slot s1 size 256 align 3
+  slot s2 size 256 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = slotaddr s2
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i64 1024
+  v8 = iconst.i32 7
+  v9 = iconst.i32 300
+  v10 = iconst.i64 63
+  jmp b1(v5)
+b1(v11: i64):
+  v12 = icmp.ult v11, v7
+  br v12, b2, b3
+b2:
+  v13 = trunc.i32 v11
+  v14 = mul.i32 v13, v8
+  v15 = sub.i32 v14, v9
+  v16 = ptradd v2, v11 * 4
+  store v15, v16 align 2
+  v17 = and.i64 v11, v10
+  v18 = ptradd v3, v17 * 4
+  store v13, v18 align 2
+  v19 = add.i64 v11, v6
+  jmp b1(v19)
+b3:
+  call @mv(v2, v3, v4, v0, v1) : (ptr, ptr, ptr, i64, i64) -> void
+  jmp b4(v5, v5)
+b4(v20: i64, v21: i64):
+  v22 = icmp.ult v20, v0
+  br v22, b5, b6
+b5:
+  v23 = ptradd v4, v20 * 4
+  v24 = load.i32 v23 align 2
+  v25 = sext.i64 v24
+  v26 = add.i64 v20, v6
+  v27 = mul.i64 v25, v26
+  v28 = add.i64 v21, v27
+  jmp b4(v26, v28)
+b6:
+  ret v21
+)";
+    let jam = lu::Budgets { peel: 0, partial: 32, version: 0, unswitch: 0, rotate: 0, vector: 2, fin: 0 };
+    for excl in 0..2usize {
+        let src = format(
+            "lir ptr 8\nsym @mv fn global noinline\nsym @drive fn global\nfn @mv\n  sig (ptr, ptr, ptr, i64, i64) -> void\n{}b0(v0: ptr, v1: ptr, v2: ptr, v3: i64, v4: i64):\n{}{}",
+            if excl == 1 {
+                "  ref p2 256 noalias\n";
+            } else {
+                "";
+            },
+            body,
+            drive,
+        );
+        let mut err = String::new();
+        let q = lparse::parse(src.as_str(), &mut err);
+        assert(q.is_some(), err.as_str());
+        let b = q.unwrap();
+        let mut a = lparse::parse(src.as_str(), &mut err).unwrap();
+        let none = Vector::<bool>::new();
+        lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: jam });
+        let mut v = verify::Verifier::new();
+        for i in 0..a.syms.len() {
+            let s = a.syms[i];
+            if s.def != NONE && s.kind == SK_FUNC {
+                assert(v.check(&a, a.spell(s.name), &a.bodies[s.def as usize]), v.err.as_str());
+            }
+        }
+        let m = text_of(&a, "mv");
+        assert(excl == 1 == (m.contains("mul.v4i32") && m.contains("add.v4i32") && m.contains("store v")), m.as_str());
+        let ns: [u64; 5] = [0, 3, 4, 13, 64];
+        let ms: [u64; 3] = [0, 1, 9];
+        for x in 0..5usize {
+            for y in 0..3usize {
+                let args: []u64 = [unsafe ns[x], unsafe ms[y]];
+                same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+            }
+        }
+    }
+}
+
+// A target with 32-byte vectors (`Package.vector`, AVX2) takes 8 lanes of 4 bytes: the sum of selected
+// values and the strided map vectorize as with 16 bytes, the strided loads 32 bytes apart.
+@test
+fn a_target_with_32_byte_vectors_takes_them() {
+    let src = M"(lir ptr 8
+sym @clamp fn global noinline
+sym @mag fn global noinline
+sym @fill fn global noinline
+sym @drive fn global
+fn @clamp
+  sig (ptr, i64, i32) -> i32
+b0(v0: ptr, v1: i64, v2: i32):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v1
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 4
+  v10 = load.i32 v9 align 2
+  v11 = icmp.slt v10, v2
+  v12 = select.i32 v11, v10, v2
+  v13 = add.i32 v7, v12
+  v14 = add.i64 v6, v4
+  jmp b1(v14, v13)
+b3:
+  ret v7
+fn @mag
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 8
+  v8 = load.i32 v7 align 2
+  v9 = load.i32 v7+4 align 2
+  v10 = mul.i32 v8, v9
+  v11 = ptradd v0, v5 * 4
+  store v10, v11 align 2
+  v12 = add.i64 v5, v4
+  jmp b1(v12)
+b3:
+  ret
+fn @fill
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 7
+  v5 = iconst.i32 300
+  jmp b1(v2)
+b1(v6: i64):
+  v7 = icmp.ult v6, v1
+  br v7, b2, b3
+b2:
+  v8 = trunc.i32 v6
+  v9 = mul.i32 v8, v4
+  v10 = sub.i32 v9, v5
+  v11 = ptradd v0, v6 * 4
+  store v10, v11 align 2
+  v12 = add.i64 v6, v3
+  jmp b1(v12)
+b3:
+  ret
+fn @drive
+  sig (i64, i32) -> i64
+  slot s0 size 1024 align 3
+  slot s1 size 512 align 3
+b0(v0: i64, v1: i32):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = iconst.i64 256
+  call @fill(v2, v4) : (ptr, i64) -> void
+  v5 = call.i32 @clamp(v2, v0, v1) : (ptr, i64, i32) -> i32
+  call @mag(v3, v2, v0) : (ptr, ptr, i64) -> void
+  v6 = sext.i64 v5
+  v7 = iconst.i64 0
+  v8 = iconst.i64 1
+  jmp b1(v7, v6)
+b1(v9: i64, v10: i64):
+  v11 = icmp.ult v9, v0
+  br v11, b2, b3
+b2:
+  v12 = ptradd v3, v9 * 4
+  v13 = load.i32 v12 align 2
+  v14 = sext.i64 v13
+  v15 = mul.i64 v14, v9
+  v16 = add.i64 v10, v15
+  v17 = add.i64 v9, v8
+  jmp b1(v17, v16)
+b3:
+  ret v10
+)";
+    let mut err = String::new();
+    let b = lparse::parse(src, &mut err).unwrap();
+    let mut a = lparse::parse(src, &mut err).unwrap();
+    a.vector = 32;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: VECTOR });
+    let mut v = verify::Verifier::new();
+    for i in 0..a.syms.len() {
+        let s = a.syms[i];
+        if s.def != NONE && s.kind == SK_FUNC {
+            assert(v.check(&a, a.spell(s.name), &a.bodies[s.def as usize]), v.err.as_str());
+        }
+    }
+    let c = text_of(&a, "clamp");
+    assert(c.contains("vcmp.slt.v8i32") && c.contains("add.v8i32"), c.as_str());
+    let m = text_of(&a, "mag");
+    assert(m.contains("vunzip.v8i32") && m.contains("+32 align"), m.as_str());
+    let lens: [u64; 5] = [0, 7, 16, 33, 128];
+    for k in 0..5usize {
+        let args: []u64 = [unsafe lens[k], 100];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
 }
 
 // A counted loop over slices vectorizes: a sum (a reduction), and a map with a value from before the loop
@@ -713,7 +1455,7 @@ b3:
     same_outcome(&b, &a, "top", x, 360, false);
 }
 
-const FIN: lu::Budgets = lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 512 };
+const FIN: lu::Budgets = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 512 };
 
 // A loop whose final values are polynomials of the iteration goes: its body copied for iterations 0 to
 // the degree, the copies' differences times the binomials of the trip count.

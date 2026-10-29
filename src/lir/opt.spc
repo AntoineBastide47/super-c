@@ -5347,7 +5347,7 @@ extend Run {
         // A loop a round copied is innermost again for the next one.
         let bu = r.cf.loops;
         let mut round: u32 = 0;
-        while round < LOOP_ROUNDS && (bu.peel != 0 || bu.version != 0 || bu.unswitch != 0 || bu.vector != 0 || bu.fin != 0) && sc.o.loop_opts(
+        while round < LOOP_ROUNDS && (bu.peel != 0 || bu.partial != 0 || bu.version != 0 || bu.unswitch != 0 || bu.vector != 0 || bu.fin != 0) && sc.o.loop_opts(
             p,
             b,
             bu,
@@ -5360,7 +5360,7 @@ extend Run {
             let _ = sc.o.loop_opts(
                 p,
                 b,
-                lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: bu.fin },
+                lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: bu.fin },
             );
         }
         // Then the packing of straight-line values into vectors, on the loops' final shape.
@@ -6424,7 +6424,7 @@ const fn join(a: u8, b: u8) u8 {
 
 // Whether opcode `op` computes a value from its operands alone, the same each time it does not trap.
 const fn pure_op(op: u8) bool {
-    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_SPLAT;
+    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP;
 }
 
 // Whether pure `t` of `b` may run where the program would not run it: it has operands (a constant is
