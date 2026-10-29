@@ -335,6 +335,18 @@ const fn bit_clear(v: &mut Vector<u64>, i: u32) {
     }
 }
 
+// Copy the `w` words at `src` to `dst`. Unsafe: the caller promises `w` valid words at each, in rows
+// that do not overlap. As views, a `[]mut` and a `[]` are apart, so the copy needs no overlap check.
+unsafe fn copy_row(dst: *mut u64, src: *const u64, w: usize) {
+    copy_words(unsafe SliceMut::<u64> { ptr: dst, len: w }, unsafe Slice::<u64> { ptr: src, len: w });
+}
+
+fn copy_words(dst: []mut u64, src: []u64) {
+    for k in 0..dst.len() {
+        dst[k] = src[k];
+    }
+}
+
 /// Apply one init/move event to caller-held state rows (the transfer function, reporting-free).
 /// EV_MOVE_CUT applies as a move.
 pub(package) fn apply_event(
@@ -643,12 +655,10 @@ extend MoveFlow {
                 ee = f.mev_start[bi as usize + 1];
             }
             if es != ee {
-                for k in 0..w as usize {
-                    unsafe {
-                        *(qmi + k) = *(pmi + base + k);
-                        *(qdi + k) = *(pdi + base + k);
-                        *(qmm + k) = *(pmm + base + k);
-                    }
+                unsafe {
+                    copy_row(qmi, pmi + base, w as usize);
+                    copy_row(qdi, pdi + base, w as usize);
+                    copy_row(qmm, pmm + base, w as usize);
                 }
                 for e in es..ee {
                     let ev = if fused {
@@ -669,12 +679,12 @@ extend MoveFlow {
                 let mut changed = false;
                 if !mf.s_reached[t as usize] {
                     mf.s_reached.set(t as usize, true);
-                    for k in 0..w as usize {
-                        unsafe {
-                            *(pmi + tb + k) = *(smi + soff + k);
-                            *(pdi + tb + k) = *(sdi + soff + k);
-                            *(pmm + tb + k) = *(smm + soff + k);
-                        }
+                    // `bi` was reached before its visit (an earlier predecessor in the sweep, or the queue),
+                    // so `t`, not reached yet, is another block: its row is apart from the source row.
+                    unsafe {
+                        copy_row(pmi + tb, smi + soff, w as usize);
+                        copy_row(pdi + tb, sdi + soff, w as usize);
+                        copy_row(pmm + tb, smm + soff, w as usize);
                     }
                     changed = true;
                 } else {
@@ -730,12 +740,10 @@ extend MoveFlow {
                     continue;
                 }
             }
-            for k in 0..w as usize {
-                unsafe {
-                    *(qmi + k) = *(pmi + base + k);
-                    *(qdi + k) = *(pdi + base + k);
-                    *(qmm + k) = *(pmm + base + k);
-                }
+            unsafe {
+                copy_row(qmi, pmi + base, w as usize);
+                copy_row(qdi, pdi + base, w as usize);
+                copy_row(qmm, pmm + base, w as usize);
             }
             for e in f.ev_start[bi as usize]..f.ev_start[bi as usize + 1] {
                 let ev = *f.events.at(e as usize);

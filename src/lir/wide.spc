@@ -74,6 +74,7 @@ extend Wide {
         out.lines.extend_copy(&b.lines);
         out.sig = b.sig;
         out.refs.extend_copy(&b.refs);
+        out.owned.extend_copy(&b.owned);
         out.bools = b.bools;
         out.naked = b.naked;
         // The blocks, a wide parameter of a block but the entry as its parts.

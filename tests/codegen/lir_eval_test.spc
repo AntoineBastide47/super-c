@@ -203,3 +203,75 @@ fn head_of(text: &String, name: str) String {
     assert(end >= 0, rest);
     return String::from_str(rest.slice(0, end as usize));
 }
+
+// The lowering lists a reference parameter's `@owned` pointer fields (`owned p<k> <offset>`), those of
+// the structs its referent holds by value too; for a `&T`, only those whose buffer holds no cell.
+@test(timeout = 300)
+fn owned_fields_of_reference_parameters_are_listed() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::mem::cell;
+
+struct Inner {
+    @owned pub p: *mut u64,
+    pub n: usize,
+}
+
+struct Outer {
+    pub tag: u64,
+    pub i: Inner,
+    @owned pub q: *const u32,
+}
+
+struct Cells {
+    @owned pub c: *mut cell::Cell<u32>,
+}
+
+@noinline
+fn take(o: &mut Outer) u64 {
+    return o.tag;
+}
+
+@noinline
+fn look(o: &Outer) u64 {
+    return o.tag + o.i.n as u64;
+}
+
+@noinline
+fn cells(c: &Cells) u32 {
+    return unsafe (*c.c).get();
+}
+
+fn main() i32 {
+    let mut x: u64 = 1;
+    let y: u32 = 2;
+    let mut o = Outer { tag: 3, i: Inner { p: &mut x, n: 0 }, q: &y };
+    let z = cell::Cell::<u32>::new(4);
+    let c = Cells { c: (&z as *const cell::Cell<u32>) as *mut cell::Cell<u32> };
+    return (take(&mut o) + look(&o) + cells(&c) as u64 - 10) as i32;
+}
+)",
+    );
+    let env = format("SC_LIR=1 SC_LIR_OPT=0 SC_NO_TU_CACHE=1 SC_NO_EMIT_CACHE=1 SC_LIR_TEXT={}/pkg.lir", p.dir());
+    let r = p.compile_flags_env("", "main.spc", env.as_str());
+    assert(r.ok(), "the program builds and returns 0");
+    let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
+    let take = head_of(&text, "main__take");
+    let look = head_of(&text, "main__look");
+    assert(lines_with(take.as_str(), "owned p0 ") == 2 && take.contains("noalias"), text.as_str());
+    assert(lines_with(look.as_str(), "owned p0 ") == 2 && look.contains("readonly"), text.as_str());
+    assert(!head_of(&text, "main__cells").contains("owned"), text.as_str());
+}
+
+// The lines of `text` that hold `pat`.
+fn lines_with(text: str, pat: str) u32 {
+    let mut n: u32 = 0;
+    for l in text.lines() {
+        n += l.contains(pat) as u32;
+    }
+    return n;
+}

@@ -823,6 +823,7 @@ source text, values, and file:line on failure.
 | `@value(size, align)` | An opaque `extern "C"` type is a C register type of that layout (see `super-c-ffi`) |
 | `@layout(size, align)` | An opaque `extern "C"` type is a C value of that exact layout, checked in C (see `super-c-ffi`) |
 | `@thread_local` | A `static mut` (an extern one too) has one object per OS thread. Every access calls a non-inlined accessor, so a coroutine that moves to another thread reads that thread's object. A constant or a `static mut` initializer cannot read one ("a thread-local has one object per thread: ...") |
+| `@owned` | On a raw pointer field (`*mut T`, `*const T`; an error elsewhere): the user promises that while a reference to the struct lives, the buffer the field points to is reached only through the field. Through a `&mut` the buffer is then apart from other memory, through a `&` read-only, so loops over such buffers need no run-time overlap check. Breaking the promise is undefined behavior. User code only: `std` and the compiler write such loops over views (`references/style.md`, Loops Over Buffers) |
 | `@reads(p, bytes)` / `@writes(p, bytes)` / `@lane_access` | The memory an extern function reads or writes through pointer parameter `p` (see `super-c-ffi`) |
 | `@test` / `@test_init` / `@test_free` | Test harness; `@test(should_panic, timeout = N)` takes either argument or both |
 | `@blocking` | Run extern on blocking pool |

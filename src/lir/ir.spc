@@ -849,6 +849,11 @@ pub(package) struct Body {
     /// whose `T` holds no `UnsafeCell`); 0 for any other parameter. Empty when no parameter is a
     /// reference.
     pub(package) refs: Vector<u32>,
+    /// The `@owned` pointer fields of the reference parameters' referents (a user's promise: the buffer
+    /// the field points to is reached only through it while the reference lives): `parameter << 32 |
+    /// field offset` each, for a `&mut` (REF_NOALIAS) or a `&T` (REF_READONLY) whose buffer holds no
+    /// `UnsafeCell`. Empty when none.
+    pub(package) owned: Vector<u64>,
     /// Per signature parameter of the first 64, whether it holds 0 or 1 (a `bool`), a bit each.
     pub(package) bools: u64,
     /// The scopes of the inlined calls' exclusive parameters (`Scope`); empty when there is none.
@@ -903,6 +908,7 @@ extend Body {
             inl: Vector::<u32>::new(),
             sig: NONE,
             refs: Vector::<u32>::new(),
+            owned: Vector::<u64>::new(),
             bools: 0,
             scopes: Vector::<Scope>::new(),
             naked: false,
@@ -927,6 +933,7 @@ extend Body {
         self.inl.truncate(0);
         self.sig = NONE;
         self.refs.truncate(0);
+        self.owned.truncate(0);
         self.bools = 0;
         self.scopes.truncate(0);
         self.naked = false;
@@ -949,6 +956,7 @@ extend Body {
             inl: exact(&self.inl),
             sig: self.sig,
             refs: exact(&self.refs),
+            owned: exact(&self.owned),
             bools: self.bools,
             scopes: exact(&self.scopes),
             naked: self.naked,

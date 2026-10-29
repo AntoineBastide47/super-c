@@ -110,6 +110,9 @@ pub(package) enum AttrKind {
     // `@ordered`: on a struct, its fields keep their declared order in memory; on a field, it and the
     // fields before it (each `@ordered` too) keep the first positions (`layout::Svc::ordered_prefix`).
     ATTR_ORDERED,
+    // `@owned` on a raw pointer field: while a reference to the struct lives, the buffer the field
+    // points to is reached only through the field (`lir::ir::Body.owned`).
+    ATTR_OWNED,
 }
 
 /// `@unsafe` claims (`Attr.arg` bits): `safe` makes an extern function callable without `unsafe`;

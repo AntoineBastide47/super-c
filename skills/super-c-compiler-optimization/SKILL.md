@@ -283,8 +283,8 @@ objdump -d build/super-c | grep -A 100 '<function_name>'
 ```
 
 What to look for:
-- **Scalar loops**: the backend does not auto-vectorize; a hot loop over lanes uses
-  `std::simd` explicitly
+- **Scalar loops**: `SC_VEC_REPORT=1` gives the reason the vectorizer left a loop scalar; a
+  hot loop it cannot take uses `std::simd` explicitly
 - **Branch misprediction**: a hot branch with poor prediction (reorder to put the common
   case first, or convert to branchless with conditional moves)
 - **Redundant loads**: the same memory loaded repeatedly because the optimizer cannot

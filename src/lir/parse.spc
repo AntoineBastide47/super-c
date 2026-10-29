@@ -591,6 +591,16 @@ extend<'a> Parser<'a> {
                 self.body.refs.set(k as usize, n);
                 return self.line_end_loc(&mut loc);
             }
+            if w == "owned" {
+                // `owned p<k> <offset>`: an `@owned` pointer field of parameter k's referent.
+                let mut k: u32 = 0;
+                let mut off: u32 = 0;
+                if !self.numbered(b'p', &mut k) || !self.uint(&mut off) || k >= 65536 {
+                    return self.fail("expected 'owned p<parameter> <offset>'");
+                }
+                self.body.owned.push(k as u64 << 32 | off as u64);
+                return self.line_end_loc(&mut loc);
+            }
             if w == "bool" {
                 // `bool p<k>`: signature parameter k holds 0 or 1.
                 let mut k: u32 = 0;

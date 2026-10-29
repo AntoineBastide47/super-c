@@ -1373,7 +1373,17 @@ fn diagnostics_by_message() {
     h::expect_err_msg(
         "field attribute",
         "struct S { @test pub x: i32 }\nfn main() i32 { return 0; }\n",
-        "only '@reflect' and '@ordered' apply to a field declaration",
+        "only '@reflect', '@ordered' and '@owned' apply to a field declaration",
+    );
+    h::expect_err_msg(
+        "owned off a field",
+        "@owned\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "may only be applied to a field",
+    );
+    h::expect_err_msg(
+        "owned on no raw pointer",
+        "struct S { @owned pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "'@owned' applies to a raw pointer field ('*mut T' or '*const T')",
     );
     h::expect_err_msg(
         "variant attribute",

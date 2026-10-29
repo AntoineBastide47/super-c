@@ -2373,6 +2373,68 @@ extend Lower {
         };
     }
 
+    // `Body.owned` of reference parameter local `l`, the body's parameter `k`: the `@owned` pointer fields
+    // of its referent (`owned_fields`), whose buffers hold no `UnsafeCell` when `shared` (a `&T`).
+    fn owned_of(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, l: u32, k: u64, shared: bool) {
+        let mut rm = b.module;
+        let mut rt = b.locals[l as usize].ty;
+        let y = Lower::resolved(c, b.module, rt, &mut rm, &mut rt);
+        let mut offs = Vector::<u32>::new();
+        self.owned_fields(c, rm, y.as_data.elem, 0, shared, FROZEN_DEPTH, &mut offs);
+        for x in 0..offs.len() {
+            self.b.owned.push(k << 32 | offs[x] as u64);
+        }
+    }
+
+    // The `@owned` raw pointer fields of `(m, t)`, a struct or an instance of one, and of the structs it
+    // holds by value, at most `depth` levels deep: `base` plus each one's offset into `out`; with
+    // `frozen`, only those whose buffer holds no `UnsafeCell`.
+    fn owned_fields(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        m: ModuleId,
+        t: TypeId,
+        base: u32,
+        frozen: bool,
+        depth: u32,
+        out: &mut Vector<u32>,
+    ) {
+        let mut rm = m;
+        let mut rt = t;
+        let y = Lower::resolved(c, m, t, &mut rm, &mut rt);
+        let (dm, dn) = if y.kind == TypeKind::TYPE_STRUCT {
+            (y.module, y.as_data.decl);
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *Lower::ast(c, rm).instance(y.as_data.inst);
+            (it.module, it.decl);
+        } else {
+            return;
+        };
+        if Lower::ast(c, dm).at_const(dn).kind != NodeKind::NODE_STRUCT || Lower::ast(c, dm).ext(dn).aggregate.is_union {
+            return;
+        }
+        let mut fl = Vector::<FieldAt>::new();
+        if !self.fields_of(c, rm, rt, &mut fl) {
+            return;
+        }
+        for k in 0..fl.len() {
+            let f = fl[k];
+            if f.t == TYPE_NONE {
+                continue;
+            }
+            if f.node != NODE_NONE && Lower::ast(c, dm).attr_of(f.node, AttrKind::ATTR_OWNED) != null {
+                let mut pm = f.m;
+                let mut pt = f.t;
+                let py = Lower::resolved(c, f.m, f.t, &mut pm, &mut pt);
+                if py.kind == TypeKind::TYPE_POINTER && (!frozen || self.frozen(c, pm, py.as_data.elem, FROZEN_DEPTH)) {
+                    out.push(base + f.off);
+                }
+            } else if depth != 0 {
+                self.owned_fields(c, f.m, f.t, base + f.off, frozen, depth - 1, out);
+            }
+        }
+    }
+
     // Whether a value of `(m, t)` holds no `UnsafeCell`, conservatively: a scalar, a pointer or a
     // reference (its own bytes), a payload-free enum, or an array, a struct, an enum or an instance of one
     // whose members all are, at most `depth` aggregates deep (an `UnsafeCell` is not).
@@ -2491,6 +2553,7 @@ extend Lower {
         let mut etys = Vector::<u8>::new();
         let mut pl = Vector::<u32>::new();
         self.b.refs.truncate(0);
+        self.b.owned.truncate(0);
         self.b.bools = 0;
         let mut any_ref = false;
         if ncaps != 0 {
@@ -2517,6 +2580,9 @@ extend Lower {
             if info.ti.cls == VC_SCALAR {
                 etys.push(info.ti.mty);
                 r = self.ref_of(c, b, l);
+                if (r & (REF_NOALIAS | REF_READONLY)) != 0 {
+                    self.owned_of(c, b, l, self.b.refs.len() as u64, (r & REF_READONLY) != 0);
+                }
             } else {
                 etys.push(T_PTR);
                 r = self.view_ref(c, b, l);

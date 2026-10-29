@@ -85,6 +85,7 @@ extend Body as Persist {
         self.inl.save(w);
         self.sig.save(w);
         self.refs.save(w);
+        self.owned.save(w);
         self.bools.save(w);
         self.scopes.save(w);
         self.naked.save(w);
@@ -104,6 +105,7 @@ extend Body as Persist {
         self.inl.load(r);
         self.sig.load(r);
         self.refs.load(r);
+        self.owned.load(r);
         self.bools.load(r);
         self.scopes.load(r);
         self.naked.load(r);

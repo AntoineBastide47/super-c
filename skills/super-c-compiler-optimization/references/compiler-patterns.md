@@ -191,6 +191,10 @@ the single largest waste before the keep existed.
 - **Premature SIMD.** Let the vectorizer (`-fvectorize`, `lir::loops`) take counted loops over
   slices. Only hand-write SIMD if the profiler shows it left a hot loop scalar and you understand
   why.
+- **Loops over raw pointers or `Vector` fields.** Their buffers may overlap, so the vectorized loop
+  keeps a run-time check (or stays scalar). Write the loop over views (`[]mut T` and `[]T`, a helper
+  of view parameters) or use `copy_from_slice` and `fill` (`super-c-language`, references/style.md,
+  Loops Over Buffers). No `@owned` in the compiler or `std`.
 - **Parallelism as a substitute for serial efficiency.** Optimize the serial path first.
   A parallel version of a slow algorithm is still slow.
 - **Speculative prefetch.** Modern CPUs have hardware prefetchers that handle sequential

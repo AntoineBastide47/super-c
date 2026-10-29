@@ -169,6 +169,9 @@ extend Printer {
                 out.push_byte(b'\n');
             }
         }
+        for k in 0..b.owned.len() {
+            out.format_into("  owned p{} {}\n", b.owned[k] >> 32, b.owned[k] & 0xFFFFFFFF);
+        }
         for k in 0..64u32 {
             if (b.bools >> k as u64 & 1) != 0 {
                 out.format_into("  bool p{}\n", k);

@@ -3914,3 +3914,112 @@ b3:
         same_outcome(&b, &a, "drive", args, 1, false);
     }
 }
+
+// An `@owned` pointer field (`owned p0 <offset>`) of an exclusive parameter's referent: the buffer it
+// points to is its own class, apart from another owned field's, so a loop between the two buffers
+// vectorizes without an overlap guard. Not when the parameter goes to a call, which could reach the field
+// another way, nor when the body stores the field. Through a read-only parameter, the buffer is read-only:
+// apart from a store through any other pointer.
+@test
+fn owned_buffers_need_no_overlap_guard() {
+    let body = M"(
+b0(v0: ptr, v1: ptr):
+  v2 = load.ptr v0 align 3
+  v3 = load.ptr v0+8 align 3
+  v4 = load.i64 v0+16 align 3
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  jmp b1(v5)
+b1(v7: i64):
+  v8 = icmp.ult v7, v4
+  br v8, b2, b3
+b2:
+  v9 = ptradd v3, v7 * 8
+  v10 = load.i64 v9 align 3
+  v11 = add.i64 v10, v6
+  v12 = ptradd v2, v7 * 8
+  store v11, v12 align 3
+  v13 = add.i64 v7, v6
+  jmp b1(v13)
+b3:
+)";
+    let mut src = String::from_str(
+        M"(lir ptr 8
+sym @own fn global noinline
+sym @called fn global noinline
+sym @stored fn global noinline
+sym @plain fn global noinline
+sym @shared fn global noinline
+sym @look fn global noinline
+fn @look
+  sig (ptr) -> void
+b0(v0: ptr):
+  ret
+fn @own
+  sig (ptr, ptr) -> void
+  ref p0 24 noalias
+  owned p0 0
+  owned p0 8)",
+    );
+    src.push_str(body);
+    src.push_str(M"(  ret
+fn @called
+  sig (ptr, ptr) -> void
+  ref p0 24 noalias
+  owned p0 0
+  owned p0 8)");
+    src.push_str(body);
+    src.push_str(
+        M"(  call @look(v0) : (ptr) -> void
+  ret
+fn @stored
+  sig (ptr, ptr) -> void
+  ref p0 24 noalias
+  owned p0 0
+  owned p0 8)",
+    );
+    src.push_str(body);
+    src.push_str(M"(  store v3, v0 align 3
+  ret
+fn @plain
+  sig (ptr, ptr) -> void
+  ref p0 24 noalias)");
+    src.push_str(body);
+    src.push_str(
+        M"(  ret
+fn @shared
+  sig (ptr, ptr) -> void
+  ref p0 24 readonly
+  owned p0 8
+b0(v0: ptr, v1: ptr):
+  v2 = load.ptr v0+8 align 3
+  v3 = load.i64 v0+16 align 3
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.ult v6, v3
+  br v7, b2, b3
+b2:
+  v8 = ptradd v2, v6 * 8
+  v9 = load.i64 v8 align 3
+  v10 = ptradd v1, v6 * 8
+  store v9, v10 align 3
+  v11 = add.i64 v6, v5
+  jmp b1(v11)
+b3:
+  ret
+)",
+    );
+    let (_, a) = optimized(src.as_str(), VECTOR);
+    let names: [str; 2] = ["own", "shared"];
+    for k in 0..2usize {
+        let t = text_of(&a, unsafe names[k]);
+        assert(t.contains("v2i64") && !t.contains("icmp.ule"), t.as_str());
+    }
+    let kept: [str; 3] = ["called", "stored", "plain"];
+    for k in 0..3usize {
+        let t = text_of(&a, unsafe kept[k]);
+        assert(t.contains("v2i64") && t.contains("icmp.ule"), t.as_str());
+    }
+}

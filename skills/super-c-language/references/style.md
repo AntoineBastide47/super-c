@@ -140,6 +140,26 @@ let mut mul: u64 = 1;  // scale factor
 - An `unsafe` block on a multi-statement sequence is acceptable when every statement in it
   touches the same raw resource.
 
+## Loops Over Buffers
+
+`std` and the compiler write a loop over two or more buffers so the language proves them apart, and
+the vectorizer then needs no run-time overlap check:
+
+- Pass the buffers as views: a `[]mut T` destination and `[]T` sources (a small helper of view
+  parameters, which the inliner copies into the caller, is enough). Two raw pointers, or the buffers
+  of two `Vector` fields, may overlap: the loop keeps a check, or stays scalar past 8 pairs.
+- Prefer the slice operations: `copy_from_slice`, `fill`.
+- Do not use `@owned` in `std` or the compiler: it is a promise for user code only.
+
+```superc
+fn copy_words(dst: []mut u64, src: []u64) {
+    for k in 0..dst.len() {
+        dst[k] = src[k];
+    }
+}
+tus.as_mut_slice().fill(1);
+```
+
 ## Imports
 
 - Import what you use. `super-c lint` flags unused imports.

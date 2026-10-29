@@ -126,6 +126,11 @@ pub(package) struct Opt {
     fbits: u64, // the classes of allocations' blocks (`fresh_seeds`)
     cnext: u32, // the first class index past the parameters' and the scopes'
     fcall: Vector<u32>, // per class index, the allocation whose block it is (`fresh_seeds`)
+    oparam: Vector<u32>, // per class index, the parameter whose owned buffer it is (`owned_seeds`)
+    ooff: Vector<u32>, // per class index, the owned field's offset in the parameter's referent
+    oload: Vector<u32>, // per instruction, the class index of the owned field it loads (NONE: none)
+    oder: Vector<u32>, // per instruction, the parameter its address arithmetic starts from (`owned_seeds`)
+    ooffs: Vector<i64>, // per instruction, that arithmetic's constant offset (OFF_ANY: not constant)
     ipin: Vector<bool>,
     ppin: Vector<bool>,
     acls: Vector<u8>,
@@ -300,6 +305,11 @@ extend Opt {
             fbits: 0,
             cnext: 0,
             fcall: Vector::<u32>::new(),
+            oparam: Vector::<u32>::new(),
+            ooff: Vector::<u32>::new(),
+            oload: Vector::<u32>::new(),
+            oder: Vector::<u32>::new(),
+            ooffs: Vector::<i64>::new(),
             ipin: Vector::<bool>::new(),
             ppin: Vector::<bool>::new(),
             acls: Vector::<u8>::new(),
@@ -1408,6 +1418,8 @@ extend Opt {
         seeds |= cand;
         let fresh = self.fresh_seeds(pk, b);
         seeds |= fresh;
+        let owned = self.owned_seeds(b, seeds, self.cnext + fresh.count_ones() as u32);
+        seeds |= owned;
         // Each pass drops at least one seed that escapes.
         for _ in 0..CL_MANY {
             if seeds == 0 || !self.class_flow(b, seeds, fresh) {
@@ -1416,7 +1428,13 @@ extend Opt {
                 self.sbits = 0;
                 return;
             }
-            let kept = seeds & ~self.escaped(pk, b, cand << 1, fresh << 1);
+            let mut kept = seeds & ~self.escaped(pk, b, cand << 1, fresh << 1);
+            // An owned buffer's class goes with its parameter's: another pointer may then load the field.
+            for idx in 0..(CL_FROZEN - CL_NOALIAS) as u64 {
+                if (owned >> idx & 1) != 0 && (kept >> self.oparam[idx as usize] as u64 & 1) == 0 {
+                    kept &= ~(1u64 << idx);
+                }
+            }
             if kept == seeds {
                 self.sbits = (seeds & cand) << 1;
                 self.fbits = (seeds & fresh) << 1;
@@ -1516,6 +1534,149 @@ extend Opt {
         return out;
     }
 
+    // The owned buffers' seeds (bits of their class indices, from `start`): per `Body.owned` field of an
+    // exclusive parameter `params` holds (no view), while class indices are left, unless an address into
+    // the parameter's referent has a use but as an access's address, the base of address arithmetic or a
+    // comparison's operand (a copy, a call or a join could reach the field another way), or an access may
+    // touch the field's bytes but a pointer load of exactly them, which `oload` pins to the class (a load
+    // of it elsewhere would give a pointer of no class); `oparam`, `ooff` set. The user's promise
+    // (`@owned`): while the parameter lives, no pointer but one loaded from the field reaches the buffer.
+    fn owned_seeds(self: &mut Self, b: &Body, params: u64, start: u32) u64 {
+        self.oload.truncate(0);
+        if b.owned.len() == 0 {
+            return 0;
+        }
+        fill(&mut self.oparam, CL_MANY as usize, NONE);
+        fill(&mut self.ooff, CL_MANY as usize, 0);
+        let mut out: u64 = 0;
+        let mut next = start;
+        for x in 0..b.owned.len() {
+            let k = (b.owned[x] >> 32) as u32;
+            if next >= (CL_FROZEN - CL_NOALIAS) as u32 {
+                break;
+            }
+            if k < 64 && (params >> k as u64 & 1) != 0 && !inner(b, k) {
+                self.oparam[next as usize] = k;
+                self.ooff[next as usize] = b.owned[x] as u32;
+                out |= 1u64 << next as u64;
+                next += 1;
+            }
+        }
+        if out == 0 {
+            return 0;
+        }
+        // Per instruction, the parameter its address arithmetic starts from and the constant offset. Each
+        // pass sets one more or ends: at most `ni + 1`.
+        let ni = b.insts.len();
+        fill(&mut self.oder, ni, NONE);
+        self.ooffs.truncate(0);
+        for _ in 0..ni {
+            self.ooffs.push(OFF_ANY);
+        }
+        for _ in 0..ni + 1 {
+            let mut changed = false;
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op != O_PTRADD || self.oder[i] != NONE {
+                    continue;
+                }
+                let (k, o) = self.param_at(b, t.a);
+                if k == NONE {
+                    continue;
+                }
+                let n = if t.b == VNONE {
+                    Option::<u64>::Some(0);
+                } else {
+                    const_of(b, t.b);
+                };
+                self.oder[i] = k;
+                self.ooffs[i] = if o == OFF_ANY || n.is_none() {
+                    OFF_ANY;
+                } else {
+                    o + n.unwrap() as i64 * t.aux as i64 + (t.c as i32) as i64;
+                };
+                changed = true;
+            }
+            if !changed {
+                break;
+            }
+        }
+        fill(&mut self.oload, ni, NONE);
+        let mut lost: u64 = 0; // the parameters whose fields lose their classes
+        let mut gone: u64 = 0;
+        for i in 0..ni {
+            let t = b.insts[i];
+            lv::uses(b, t, &mut self.uses);
+            if is_terminator(t.op) {
+                b.succ_edges(t, &mut self.edges);
+                for x in 0..self.edges.len() {
+                    for a in 0..b.edge_nargs(self.edges[x]) {
+                        self.uses.push(b.edge_arg(self.edges[x], a));
+                    }
+                }
+            }
+            for u in 0..self.uses.len() {
+                let v = self.uses[u];
+                let (k, o) = self.param_at(b, v);
+                if k == NONE || k >= 64 {
+                    continue;
+                }
+                let addr = t.op == O_LOAD && t.a == v && u == 0 || t.op == O_STORE && t.a == v && t.b != v || t.op == O_PTRADD && t.a == v && t.b != v || t.op == O_ICMP;
+                if !addr {
+                    lost |= 1u64 << k as u64;
+                    continue;
+                }
+                if t.op != O_LOAD && t.op != O_STORE {
+                    continue;
+                }
+                let ty = if t.op == O_LOAD {
+                    t.ty;
+                } else {
+                    b.type_of(t.b);
+                };
+                let at = if o == OFF_ANY {
+                    OFF_ANY;
+                } else {
+                    o + (t.c as i32) as i64;
+                };
+                for idx in 0..(CL_FROZEN - CL_NOALIAS) as usize {
+                    if (out >> idx as u64 & 1) == 0 || self.oparam[idx] != k {
+                        continue;
+                    }
+                    let f = self.ooff[idx] as i64;
+                    if at == OFF_ANY {
+                        if ty == T_PTR || is_vec(ty) {
+                            gone |= 1u64 << idx as u64;
+                        }
+                    } else if at == f && t.op == O_LOAD && ty == T_PTR {
+                        self.oload[i] = idx as u32;
+                    } else if at < f + 8 && f < at + type_bytes(ty, 8) as i64 {
+                        gone |= 1u64 << idx as u64;
+                    }
+                }
+            }
+        }
+        for idx in 0..(CL_FROZEN - CL_NOALIAS) as usize {
+            if (out >> idx as u64 & 1) != 0 && (lost >> self.oparam[idx] as u64 & 1) != 0 {
+                gone |= 1u64 << idx as u64;
+            }
+        }
+        return out & ~gone;
+    }
+
+    // The entry parameter value `v` of `b` is or is address arithmetic on (`oder`), with the constant offset
+    // (`ooffs`, OFF_ANY when not constant); NONE for none.
+    fn param_at(self: &Self, b: &Body, v: Value) (u32, i64) {
+        let k = entry_param(b, v);
+        if k != NONE {
+            return k, 0i64;
+        }
+        if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || v as usize >= self.oder.len() {
+            return NONE, 0i64;
+        }
+        return self.oder[v as usize], self.ooffs[v as usize];
+    }
+
     // The scope classes instruction `i` belongs to (`imem`).
     const fn member(self: &Self, i: u32) u64 {
         return if i as usize < self.imem.len() {
@@ -1597,6 +1758,14 @@ extend Opt {
         for idx in 0..(CL_FROZEN - CL_NOALIAS) as u32 {
             if ((seeds & fresh) >> idx as u64 & 1) != 0 {
                 let i = self.fcall[idx as usize] as usize;
+                self.icls[i] = CL_NOALIAS + idx as u8;
+                self.ipin[i] = true;
+            }
+        }
+        // The owned buffers' pointer loads, pinned to their classes.
+        for i in 0..self.oload.len() {
+            let idx = self.oload[i];
+            if idx != NONE && (seeds >> idx as u64 & 1) != 0 {
                 self.icls[i] = CL_NOALIAS + idx as u8;
                 self.ipin[i] = true;
             }
@@ -6957,6 +7126,8 @@ fn frozen(b: &Body, out: &mut Vector<bool>) {
                     fp[i] = via;
                     continue;
                 }
+                // An `@owned` field's pointer: its buffer is read-only too (`Body.owned`).
+                fp[i] = via && t.op == O_LOAD && t.ty == T_PTR && owned_at(b, q as u32, t.c);
             }
         } else if base != VNONE && (base & VFLAG) == 0 {
             via = fp[base as usize];
@@ -6972,6 +7143,16 @@ fn frozen(b: &Body, out: &mut Vector<bool>) {
 }
 
 // Whether signature parameter `k` of `b` is a view whose loaded pointer is exclusive (`REF_INNER`).
+// Whether `Body.owned` holds a field of parameter `k` at offset `off`.
+fn owned_at(b: &Body, k: u32, off: u32) bool {
+    for x in 0..b.owned.len() {
+        if b.owned[x] == (k as u64 << 32 | off as u64) {
+            return true;
+        }
+    }
+    return false;
+}
+
 const fn inner(b: &Body, k: u32) bool {
     return k < b.refs.len() as u32 && (b.refs[k as usize] & REF_INNER) != 0;
 }
@@ -6985,6 +7166,9 @@ fn any_inner(b: &Body) bool {
     }
     return false;
 }
+
+// `Opt::owned_seeds`: an offset that is not constant.
+const OFF_ANY: i64 = -0x8000000000000000;
 
 // An alias class (`CL_*`) not yet joined.
 const CL_UNSET: u8 = 65;

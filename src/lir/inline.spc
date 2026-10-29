@@ -260,6 +260,7 @@ extend Inliner {
         o.params.extend_copy(&c.params);
         o.sig = c.sig;
         o.refs.extend_copy(&c.refs);
+        o.owned.extend_copy(&c.owned);
         o.bools = c.bools;
         for x in 0..c.scopes.len() {
             let sc = c.scopes[x];

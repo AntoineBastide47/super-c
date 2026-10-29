@@ -33906,6 +33906,15 @@ extend TypeChecker {
                             // The field's own record: every reader takes it from the slot.
                             let ft = self.decl_type(mid);
                             self.tc_no_reg(mn.as_data.field.ty, ft);
+                            if ft != TYPE_NONE && self.tc_attr(self.cur_module(), mid, AttrKind::ATTR_OWNED) != null && self.type_at(
+                                ft,
+                            ).kind != TypeKind::TYPE_POINTER {
+                                self.errors.emit_span(
+                                    dc::OWNED_APPLIES_RAW_POINTER_FIELD,
+                                    unsafe (*self.cur_ast()).at_const(mn.as_data.field.ty).span,
+                                    format("'@owned' applies to a raw pointer field ('*mut T' or '*const T')"),
+                                );
+                            }
                             if packed {
                                 self.tc_packed_field(mn.as_data.field.ty, ft);
                             }

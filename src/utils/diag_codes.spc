@@ -525,9 +525,10 @@ pub(package) const ORDERED_FIELDS_PREFIX_STRUCT: u16 = 518;
 pub(package) const REACHES_C_UNTYPED_POINTER_TAG_ORDERED: u16 = 519;
 pub(package) const CANNOT_FREE_BOX_THROUGH_REFERENCE: u16 = 520;
 pub(package) const ZEROED_BOX_HAS_NO_ZERO_VALUE: u16 = 521;
+pub(package) const OWNED_APPLIES_RAW_POINTER_FIELD: u16 = 522;
 
 /// The number of codes, `NONE` included.
-pub(package) const COUNT: u16 = 522;
+pub(package) const COUNT: u16 = 523;
 
 /// The stable name of `code` (`mismatched_types_expected_found`), empty for `NONE` or an unknown code.
 pub(package) const fn name(code: u16) str<'static> {
@@ -1053,6 +1054,7 @@ pub(package) const fn name(code: u16) str<'static> {
         519 => "reaches_c_untyped_pointer_tag_ordered",
         520 => "cannot_free_box_through_reference",
         521 => "zeroed_box_has_no_zero_value",
+        522 => "owned_applies_raw_pointer_field",
         _ => "",
     };
 }

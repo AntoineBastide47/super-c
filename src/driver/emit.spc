@@ -10729,10 +10729,8 @@ fn shard_meta_read(root: str, p: &loader::Package, tus: &mut Vector<u32>, insts:
         return;
     }
     let text = textv.unwrap();
-    for m in 0..p.modules.len() {
-        tus.set(m, 1);
-        insts.set(m, 1);
-    }
+    tus.as_mut_slice().fill(1);
+    insts.as_mut_slice().fill(1);
     let s = text.as_str();
     let mut i: usize = 0;
     while i < s.len() {

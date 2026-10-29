@@ -351,7 +351,7 @@ struct AttrDoc {
     pub(package) doc: str<'static>,
 }
 
-const ATTR_DOCS: [AttrDoc; 37] = [
+const ATTR_DOCS: [AttrDoc; 38] = [
     AttrDoc {
         name: "emit_macro",
         sig: "@emit_macro",
@@ -445,6 +445,11 @@ const ATTR_DOCS: [AttrDoc; 37] = [
         name: "ordered",
         sig: "@ordered",
         doc: "On a struct, keeps its fields in their declared order in memory; on a field, keeps it and the fields before it, each `@ordered` too, in the first positions.",
+    },
+    AttrDoc {
+        name: "owned",
+        sig: "@owned",
+        doc: "On a raw pointer field: while a reference to the struct lives, the buffer the field points to is reached only through the field, so the optimizer keeps it apart from other memory.",
     },
     AttrDoc { name: "used", sig: "@used", doc: "Prevents dead-code elimination of the item." },
     AttrDoc { name: "unused", sig: "@unused", doc: "Suppresses unused warnings for the item." },
