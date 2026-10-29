@@ -346,8 +346,8 @@ fn record_item_edges(p: &mut loader::Package, i: usize, sps: &Vector<gitems::Spa
     gitems::module_edges(p, i, sps, &mut ev);
     let mut v = Vector::<loader::RefEdge>::with_capacity(ev.len());
     for k in 0..ev.len() {
-        let o = p.idx.items.at((ev[k] >> 32) as usize);
-        let t = p.idx.items.at((ev[k] & 0xFFFFFFFFu64) as usize);
+        let o = p.idx().items.at((ev[k] >> 32) as usize);
+        let t = p.idx().items.at((ev[k] & 0xFFFFFFFFu64) as usize);
         v.push(loader::RefEdge { key: t.module as u64 << 32 | t.node as u64, owner: o.node });
     }
     while p.item_edges.len() <= i {
@@ -543,8 +543,8 @@ const fn slot_has_body(p: &loader::Package, m: usize, k: usize) bool {
 // node order, a body node to the function whose body run holds it), or SLOT_NONE past every
 // range (a desugar appended later).
 fn slot_of(p: &loader::Package, m: usize, node: NodeId) u32 {
-    let mut lo = p.idx.mod_items[m] as usize;
-    let end = p.idx.mod_items[m + 1] as usize;
+    let mut lo = p.idx().mod_items[m] as usize;
+    let end = p.idx().mod_items[m + 1] as usize;
     let mut hi = end;
     if Ast::in_body(node) {
         let b = node & NODE_BODY_MASK;
@@ -565,7 +565,7 @@ fn slot_of(p: &loader::Package, m: usize, node: NodeId) u32 {
     } else {
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if p.idx.items.at(p.sched.by_node[mid] as usize).node < node {
+            if p.idx().items.at(p.sched.by_node[mid] as usize).node < node {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -580,13 +580,13 @@ fn slot_of(p: &loader::Package, m: usize, node: NodeId) u32 {
 
 // The declaration node at `by_node` position `k`.
 const fn slot_node(p: &loader::Package, k: u32) NodeId {
-    return p.idx.items.at(p.sched.by_node[k as usize] as usize).node;
+    return p.idx().items.at(p.sched.by_node[k as usize] as usize).node;
 }
 
 // The module-arena node range (lo, hi] of the item at position `k` of module `m`, pushed as
 // (lo + 1, hi): the nodes after the previous item's declaration up to its own.
 fn push_slot_range(p: &loader::Package, m: usize, k: u32, out: &mut Vector<u32>) {
-    let lo = if k as usize > p.idx.mod_items[m] as usize {
+    let lo = if k as usize > p.idx().mod_items[m] as usize {
         slot_node(p, k - 1) + 1;
     } else {
         0u32;
@@ -631,7 +631,7 @@ fn record_refs(p: &mut loader::Package, i: usize) {
                 cur = slot_of(p, i, n);
                 cur_body = body;
                 if cur != SLOT_NONE {
-                    let first = cur as usize == p.idx.mod_items[i] as usize;
+                    let first = cur as usize == p.idx().mod_items[i] as usize;
                     if body {
                         cur_lo = if first {
                             0u32;
@@ -732,12 +732,12 @@ fn ref_owners(p: &loader::Package, m: usize, dm: u32, lo: u32, hi: u32, out: &mu
 // conformance it declares reaches modules that never name it.
 fn touched_items(p: &loader::Package, i: usize, ws: u32, we: u32, out: &mut Vector<u32>) bool {
     let a = &p.modules[i].ast;
-    let i0 = p.idx.mod_items[i] as usize;
-    let i1 = p.idx.mod_items[i + 1] as usize;
+    let i0 = p.idx().mod_items[i] as usize;
+    let i1 = p.idx().mod_items[i + 1] as usize;
     // Items by source start; a member follows its extend's start.
     let mut order = Vector::<u64>::new();
     for k in i0..i1 {
-        let it = p.idx.items.at(p.sched.by_node[k] as usize);
+        let it = p.idx().items.at(p.sched.by_node[k] as usize);
         order.push(a.at_const(it.node).span.start as u64 << 32 | (k - i0) as u64);
     }
     order.sort();
@@ -747,7 +747,7 @@ fn touched_items(p: &loader::Package, i: usize, ws: u32, we: u32, out: &mut Vect
     let mut open_end: u32 = 0;
     for q in 0..order.len() {
         let k = (order[q] & 0xFFFFFFFFu64) as u32 + i0 as u32;
-        let it = p.idx.items.at(p.sched.by_node[k as usize] as usize);
+        let it = p.idx().items.at(p.sched.by_node[k as usize] as usize);
         let sp = a.at_const(it.node).span;
         if open_ext != SLOT_NONE && it.owner == loader::ITEM_NONE {
             // Past the last member: the extend's closing bytes.
@@ -764,7 +764,7 @@ fn touched_items(p: &loader::Package, i: usize, ws: u32, we: u32, out: &mut Vect
             // The header runs to the first member's start.
             let mut first: u32 = sp.end;
             for j in i0..i1 {
-                let mem = p.idx.items.at(j);
+                let mem = p.idx().items.at(j);
                 if mem.owner == p.sched.by_node[k as usize] {
                     let ms = a.at_const(mem.node).span.start;
                     if ms < first {
@@ -808,7 +808,7 @@ const ST_FULL: u8 = 2; // its declaration changed: everything that names it is s
 // `const fn`: only its body reads it, so a change of its body alone reaches no caller, and
 // only a signature or a compile-time evaluation reads anything else.
 const fn plain_fn(p: &loader::Package, m: usize, k: u32) bool {
-    let it = p.idx.items.at(p.sched.by_node[k as usize] as usize);
+    let it = p.idx().items.at(p.sched.by_node[k as usize] as usize);
     if it.kind != loader::ItemKind::IK_FUNCTION as u8 && it.kind != loader::ItemKind::IK_METHOD as u8 {
         return false;
     }
@@ -834,7 +834,7 @@ fn propagate_touched(
 ) {
     let n = p.modules.len();
     let mut state = Vector::<u8>::new();
-    state.resize_default(p.idx.items.len());
+    state.resize_default(p.idx().items.len());
     // Per module: (lo, hi, state) triples not yet propagated.
     let mut pend = Vector::<Vector<u32>>::new();
     let mut queued = Vector::<bool>::new();
@@ -868,7 +868,7 @@ fn propagate_touched(
     let mut steps: usize = 0;
     while work.len() != 0 {
         steps += 1;
-        assert(steps <= 2 * p.idx.items.len() + n, "every module is queued once per state rise");
+        assert(steps <= 2 * p.idx().items.len() + n, "every module is queued once per state rise");
         let x = work.remove(work.len() - 1).unwrap();
         queued.set(x, false);
         let rg = replace(&mut pend[x], Vector::<u32>::new());
@@ -886,8 +886,8 @@ fn propagate_touched(
                     let ow = owners[o];
                     let in_body = (ow & loader::REF_BODY_EDGE) != 0;
                     let node = ow & loader::REF_MODULE_WIDE; // the node bits
-                    let mut k0 = p.idx.mod_items[m];
-                    let mut k1 = p.idx.mod_items[m + 1];
+                    let mut k0 = p.idx().mod_items[m];
+                    let mut k1 = p.idx().mod_items[m + 1];
                     if node != loader::REF_MODULE_WIDE {
                         k0 = slot_of(p, m, node);
                         k1 = k0 + 1;
@@ -1647,7 +1647,7 @@ fn dep_order(p: &mut loader::Package, set: &Vector<bool>) Vector<usize> {
 }
 
 const fn has_items(p: &loader::Package, i: usize) bool {
-    return p.idx.mod_items[i] != p.idx.mod_items[i + 1];
+    return p.idx().mod_items[i] != p.idx().mod_items[i + 1];
 }
 
 fn dep_visit(p: &mut loader::Package, set: &Vector<bool>, seen: &mut Vector<bool>, out: &mut Vector<usize>, i: usize) {
@@ -1750,8 +1750,8 @@ fn save_ret_attr(p: &loader::Package, keys: &mut Vector<u64>, vals: &mut Vector<
     if !p.sched.built {
         return;
     }
-    for it in 0..p.idx.items.len() {
-        let meta = p.idx.items.at(it);
+    for it in 0..p.idx().items.len() {
+        let meta = p.idx().items.at(it);
         let v = p.item_ret_attr(meta.module, meta.node);
         if v == 0 || v == 1 {
             keys.push(meta.module as u64 << 32 | meta.node as u64);

@@ -104,6 +104,8 @@ pub(package) struct LTest {
 // (`ctfe_agrees`). The evaluator takes up to 1.4x CTFE's steps for a run both finish.
 const CTFE_PROBE_STEPS: u32 = 1 << 18;
 const EVAL_STEPS: u64 = 1 << 21;
+// `Lower::frozen` enters at most FROZEN_DEPTH nested aggregates.
+const FROZEN_DEPTH: u32 = 8;
 
 /// How CTFE ended test `(m, node)`: its trap kind (`ir::interp::IT_TRAP_*`), the message, and the
 /// line and column of the test's statement that trapped.
@@ -2364,7 +2366,7 @@ extend Lower {
         let fixed = !b.locals[l as usize].is_mutable;
         return ei.size | if mt && fixed {
             REF_NOALIAS;
-        } else if !mt && fixed && Lower::frozen(c, rm, y.as_data.elem) {
+        } else if !mt && fixed && self.frozen(c, rm, y.as_data.elem, FROZEN_DEPTH) {
             REF_READONLY;
         } else {
             0u32;
@@ -2372,8 +2374,9 @@ extend Lower {
     }
 
     // Whether a value of `(m, t)` holds no `UnsafeCell`, conservatively: a scalar, a pointer or a
-    // reference (its own bytes), a payload-free enum, or an array of them.
-    fn frozen(c: &cbe::CEmit, m: ModuleId, t: TypeId) bool {
+    // reference (its own bytes), a payload-free enum, or an array, a struct, an enum or an instance of one
+    // whose members all are, at most `depth` aggregates deep (an `UnsafeCell` is not).
+    fn frozen(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId, depth: u32) bool {
         let mut rm = m;
         let mut rt = t;
         let mut y = Lower::resolved(c, m, t, &mut rm, &mut rt);
@@ -2388,18 +2391,43 @@ extend Lower {
         if y.kind == TypeKind::TYPE_BUILTIN {
             return y.as_data.builtin != BuiltinType::BT_VOID && y.as_data.builtin != BuiltinType::BT_VALIST;
         }
-        if y.kind == TypeKind::TYPE_ENUM {
-            return !Lower::ast(c, y.module).enum_has_payload(y.as_data.decl);
+        if y.kind == TypeKind::TYPE_ENUM && !Lower::ast(c, y.module).enum_has_payload(y.as_data.decl) {
+            return true;
         }
-        return y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE;
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
+            return true;
+        }
+        if depth == 0 || y.kind != TypeKind::TYPE_STRUCT && y.kind != TypeKind::TYPE_ENUM && y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let d = if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *Lower::ast(c, rm).instance(y.as_data.inst);
+            DefId { module: it.module, node: it.decl };
+        } else {
+            DefId { module: y.module, node: y.as_data.decl };
+        };
+        if Lower::p(c).is_prelude_item(d, "UnsafeCell") {
+            return false;
+        }
+        let mut fl = Vector::<FieldAt>::new();
+        if !self.fields_of(c, rm, rt, &mut fl) {
+            return false;
+        }
+        for k in 0..fl.len() {
+            if fl[k].t != TYPE_NONE && !self.frozen(c, fl[k].m, fl[k].t, depth - 1) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // `Body.refs` of aggregate parameter local `l`: REF_INNER | REF_NOALIAS for a by-value `[]mut T` the
     // body does not rebind. The language makes it the only path to its elements during the call (it is
     // not `Copy`, a call's arguments reach no storage a mutable one reaches, and building one from raw
     // parts is `unsafe`), when its element pointer is at offset 0. REF_INNER | REF_READONLY for a `[]T`
-    // the body does not rebind whose `T` holds no `UnsafeCell` (`frozen`): the language keeps its elements
-    // unchanged during the call. 0 for any other.
+    // the body does not rebind whose `T` holds no `UnsafeCell` (`frozen`), or a `str` it does not rebind:
+    // the language keeps its elements unchanged during the call (`str::from_raw`'s promise for a `str`).
+    // 0 for any other.
     fn view_ref(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, l: u32) u32 {
         if b.locals[l as usize].is_mutable {
             return 0;
@@ -2407,13 +2435,20 @@ extend Lower {
         let mut rm = b.module;
         let mut rt = b.locals[l as usize].ty;
         let y = Lower::resolved(c, b.module, rt, &mut rm, &mut rt);
-        if y.kind != TypeKind::TYPE_INSTANCE {
+        let text = y.kind == TypeKind::TYPE_STRUCT && Lower::p(c).is_prelude_item(
+            DefId { module: y.module, node: y.as_data.decl },
+            "str",
+        );
+        if y.kind != TypeKind::TYPE_INSTANCE && !text {
             return 0;
         }
-        let it = *Lower::ast(c, rm).instance(y.as_data.inst);
-        let excl = Lower::p(c).is_prelude_item(DefId { module: it.module, node: it.decl }, "SliceMut");
-        if !excl && !Lower::p(c).is_prelude_item(DefId { module: it.module, node: it.decl }, "Slice") {
-            return 0;
+        let mut excl = false;
+        if !text {
+            let it = *Lower::ast(c, rm).instance(y.as_data.inst);
+            excl = Lower::p(c).is_prelude_item(DefId { module: it.module, node: it.decl }, "SliceMut");
+            if !excl && !Lower::p(c).is_prelude_item(DefId { module: it.module, node: it.decl }, "Slice") {
+                return 0;
+            }
         }
         let mut f = FieldAt {
             m: 0,
@@ -2435,7 +2470,7 @@ extend Lower {
         let mut pm = f.m;
         let mut pt = f.t;
         let py = Lower::resolved(c, f.m, f.t, &mut pm, &mut pt);
-        return if py.kind == TypeKind::TYPE_POINTER && Lower::frozen(c, pm, py.as_data.elem) {
+        return if py.kind == TypeKind::TYPE_POINTER && self.frozen(c, pm, py.as_data.elem, FROZEN_DEPTH) {
             REF_INNER | REF_READONLY;
         } else {
             0u32;

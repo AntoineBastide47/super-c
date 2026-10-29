@@ -128,7 +128,7 @@ extend<'s> Symbol<'s> {
         let n = self.node();
         let it = p.item_of(self.d.module, self.d.node);
         // A function the item index does not hold is an interface member.
-        let method = it == loader::ITEM_NONE || p.idx.items[it as usize].kind == loader::ItemKind::IK_METHOD as u8;
+        let method = it == loader::ITEM_NONE || p.idx().items[it as usize].kind == loader::ItemKind::IK_METHOD as u8;
         return switch n.kind {
             NODE_FUNCTION => if method {
                 SymbolKind::Method;
@@ -206,9 +206,9 @@ extend<'s> Symbol<'s> {
         let mut ordinal: u32 = 0;
         let it = p.item_of(self.d.module, self.d.node);
         if it != loader::ITEM_NONE {
-            let lo = p.idx.mod_items[self.d.module as usize];
+            let lo = p.idx().mod_items[self.d.module as usize];
             for j in lo..it {
-                let o = Symbol { s: self.s, d: DefId { module: self.d.module, node: p.idx.items[j as usize].node } };
+                let o = Symbol { s: self.s, d: DefId { module: self.d.module, node: p.idx().items[j as usize].node } };
                 if o.kind() == k && o.name() == name.as_str() && owner_text(p, o.d).as_str() == owner.as_str() {
                     ordinal += 1;
                 }
@@ -233,18 +233,18 @@ fn owner_text(p: &loader::Package, d: DefId) String {
     let a = ast_of(p, d.module);
     let src = p.modules[d.module as usize].source.as_str();
     if it != loader::ITEM_NONE {
-        let ow = p.idx.items[it as usize].owner;
+        let ow = p.idx().items[it as usize].owner;
         if ow == loader::ITEM_NONE {
             return String::new();
         }
-        let e = a.at_const(p.idx.items[ow as usize].node);
+        let e = a.at_const(p.idx().items[ow as usize].node);
         if e.kind != NodeKind::NODE_EXTEND {
             return String::new();
         }
-        let ts = a.at_const(a.ext(p.idx.items[ow as usize].node).extend_def.target_type).span;
+        let ts = a.at_const(a.ext(p.idx().items[ow as usize].node).extend_def.target_type).span;
         let mut out = String::from_str(src.slice(ts.start as usize, ts.end as usize));
-        if a.ext(p.idx.items[ow as usize].node).extend_def.interface_type != NODE_NONE {
-            let is = a.at_const(a.ext(p.idx.items[ow as usize].node).extend_def.interface_type).span;
+        if a.ext(p.idx().items[ow as usize].node).extend_def.interface_type != NODE_NONE {
+            let is = a.at_const(a.ext(p.idx().items[ow as usize].node).extend_def.interface_type).span;
             out.push_str(" as ");
             out.push_str(src.slice(is.start as usize, is.end as usize));
         }
@@ -255,17 +255,17 @@ fn owner_text(p: &loader::Package, d: DefId) String {
         return String::new();
     }
     // The aggregate whose members hold it.
-    let lo = p.idx.mod_items[d.module as usize];
-    let hi = p.idx.mod_items[d.module as usize + 1];
+    let lo = p.idx().mod_items[d.module as usize];
+    let hi = p.idx().mod_items[d.module as usize + 1];
     for j in lo..hi {
-        let n = a.at_const(p.idx.items[j as usize].node);
+        let n = a.at_const(p.idx().items[j as usize].node);
         if n.kind != NodeKind::NODE_STRUCT && n.kind != NodeKind::NODE_ENUM {
             continue;
         }
-        let ms = a.ext(p.idx.items[j as usize].node).aggregate.members;
+        let ms = a.ext(p.idx().items[j as usize].node).aggregate.members;
         for i in 0..ms.len {
             if unsafe a.list(ms)[i as usize] == d.node {
-                return String::from_str(name_text(p, d.module, a.ext_name(p.idx.items[j as usize].node)));
+                return String::from_str(name_text(p, d.module, a.ext_name(p.idx().items[j as usize].node)));
             }
         }
     }
@@ -287,11 +287,11 @@ pub fn resolve<'s>(s: &'s ses::Session, key: &SymbolKey) Option<Symbol<'s>> {
     if m < 0 {
         return Option::<Symbol>::None;
     }
-    let lo = p.idx.mod_items[m as usize];
-    let hi = p.idx.mod_items[m as usize + 1];
+    let lo = p.idx().mod_items[m as usize];
+    let hi = p.idx().mod_items[m as usize + 1];
     let a = ast_of(p, m as u32);
     for j in lo..hi {
-        let node = p.idx.items[j as usize].node;
+        let node = p.idx().items[j as usize].node;
         let sy = Symbol { s: s, d: DefId { module: m as ModuleId, node: node } };
         if key.kind == SymbolKind::Field || key.kind == SymbolKind::Variant {
             // A member: its type by name, then the member by name.

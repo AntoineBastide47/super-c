@@ -1457,8 +1457,8 @@ fn count_of(text: &String, pat: str) u32 {
 }
 
 // A load of an exclusive reference parameter's referent (`ref p0 16 noalias`, a `&mut`) leaves a loop
-// whose stores go through other pointers; not when the parameter escapes into a call, nor when it is a
-// shared reference, which another pointer may reach.
+// whose stores go through other pointers; not when the parameter escapes into a call (one that keeps the
+// pointer), nor when it is a shared reference, which another pointer may reach.
 @test
 fn a_load_of_an_exclusive_reference_leaves_a_loop_that_writes_elsewhere() {
     let (b, a) = optimized(
@@ -1468,9 +1468,13 @@ sym @fill fn global noinline
 sym @leaky fn global noinline
 sym @shared fn global noinline
 sym @drive fn global
+sym @kept data global
+data @kept size 8 align 3
 fn @sink
   sig (ptr) -> void
 b0(v0: ptr):
+  v1 = symaddr @kept
+  store v0, v1 align 3
   ret
 fn @fill
   sig (ptr) -> i64
@@ -4019,4 +4023,220 @@ b0(v0: i64):
     let w = text_of(&a, "twice");
     assert(!w.contains("slot"), w.as_str());
     same_result(&b, &a, "top", x, e2 + e2 + 1 + 3 * 4);
+}
+
+// A call whose callee keeps no pointer it is passed (`Sym.esc`: no store of it, no return, no pass to a
+// call that keeps it) leaves an exclusive parameter's class in place: a load of the referent still leaves
+// a later loop that writes elsewhere. The call writes the class: a load after it reads the referent
+// again. A callee that passes the pointer on to one that keeps it lets it escape.
+@test
+fn a_call_that_keeps_no_pointer_leaves_the_exclusive_class() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @bump fn global noinline
+sym @look fn global noinline
+sym @stash fn global noinline
+sym @keep fn global noinline
+sym @after fn global noinline
+sym @hoist fn global noinline
+sym @leaky fn global noinline
+sym @drive fn global
+sym @kept data global
+data @kept size 8 align 3
+fn @bump
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  v2 = iconst.i64 1
+  v3 = add.i64 v1, v2
+  store v3, v0 align 3
+  ret
+fn @look
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0+8 align 3
+  ret v1
+fn @stash
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = symaddr @kept
+  store v0, v1 align 3
+  ret
+fn @keep
+  sig (ptr) -> void
+b0(v0: ptr):
+  call @stash(v0) : (ptr) -> void
+  ret
+fn @after
+  sig (ptr) -> i64
+  ref p0 16 noalias
+b0(v0: ptr):
+  v1 = iconst.i64 5
+  store v1, v0 align 3
+  call @bump(v0) : (ptr) -> void
+  v2 = load.i64 v0 align 3
+  ret v2
+fn @hoist
+  sig (ptr) -> i64
+  ref p0 16 noalias
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = call.i64 @look(v0) : (ptr) -> i64
+  jmp b1(v1, v3)
+b1(v4: i64, v5: i64):
+  v6 = load.i64 v0+8 align 3
+  v7 = icmp.ult v4, v6
+  br v7, b2, b3
+b2:
+  v8 = load.ptr v0 align 3
+  v9 = ptradd v8, v4 * 8
+  store v6, v9 align 3
+  v10 = add.i64 v5, v6
+  v11 = add.i64 v4, v2
+  jmp b1(v11, v10)
+b3:
+  ret v5
+fn @leaky
+  sig (ptr) -> i64
+  ref p0 16 noalias
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  call @keep(v0) : (ptr) -> void
+  jmp b1(v1, v1)
+b1(v3: i64, v4: i64):
+  v5 = load.i64 v0+8 align 3
+  v6 = icmp.ult v3, v5
+  br v6, b2, b3
+b2:
+  v7 = load.ptr v0 align 3
+  v8 = ptradd v7, v3 * 8
+  store v5, v8 align 3
+  v9 = add.i64 v4, v5
+  v10 = add.i64 v3, v2
+  jmp b1(v10, v9)
+b3:
+  ret v4
+fn @drive
+  sig () -> i64
+  slot s0 size 16 align 3
+  slot s1 size 32 align 3
+b0:
+  v0 = slotaddr s0
+  v1 = slotaddr s1
+  v2 = iconst.i64 4
+  v3 = iconst.i64 7
+  store v3, v0 align 3
+  v4 = call.i64 @after(v0) : (ptr) -> i64
+  store v1, v0 align 3
+  store v2, v0+8 align 3
+  v5 = call.i64 @hoist(v0) : (ptr) -> i64
+  v6 = call.i64 @leaky(v0) : (ptr) -> i64
+  v7 = add.i64 v4, v5
+  v8 = add.i64 v7, v6
+  ret v8
+)",
+    );
+    let h = text_of(&a, "hoist");
+    let at = h.as_str().find("load.i64 v0+8");
+    assert(at >= 0 && at < h.as_str().find("b1("), h.as_str());
+    let l = text_of(&a, "leaky");
+    assert(l.as_str().find("load.i64 v0+8") > l.as_str().find("b1("), l.as_str());
+    let f = text_of(&a, "after");
+    assert(f.as_str().find("load.i64 v0") > f.as_str().find("call @bump"), f.as_str());
+    let mut e = leval::Eval::new(&b);
+    let o = e.run(b.find_symbol("drive"), []);
+    let mut e2 = leval::Eval::new(&a);
+    let o2 = e2.run(a.find_symbol("drive"), []);
+    assert(o.kind == leval::EV_OK && o2.kind == leval::EV_OK && o.value == o2.value, o2.msg.as_str());
+}
+
+// An inlined call's exclusive parameter rooted at an offset into the caller's (`Body.scopes`) escapes
+// through a call argument in its copy, though the callee keeps no pointer (`Sym.esc`): the copy's loads
+// fold onto the caller's parameter, and the call writes them. The buffer pointer and capacity of the
+// inlined `push` stay in the loop past `grow`, which replaces them.
+@test
+fn an_inlined_scope_passed_to_a_call_that_keeps_no_pointer_escapes() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+file f0 "grow.spc"
+sym @grow fn global noinline
+sym @push fn global
+sym @fill fn global noinline
+sym @top fn global
+sym @small data global
+sym @big data global
+data @small size 8 align 3
+data @big size 64 align 3
+fn @grow
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = symaddr @big
+  store v1, v0 align 3
+  v2 = iconst.i64 8
+  store v2, v0+16 align 3
+  ret
+fn @push
+  sig (ptr, i64) -> void
+  ref p0 24 noalias
+b0(v0: ptr, v1: i64):
+  v2 = load.i64 v0+8 align 3
+  v3 = load.i64 v0+16 align 3
+  v4 = icmp.eq v2, v3
+  br v4, b1, b2
+b1:
+  call @grow(v0) : (ptr) -> void
+  jmp b2
+b2:
+  v5 = load.ptr v0 align 3
+  v6 = load.i64 v0+8 align 3
+  v7 = ptradd v5, v6 * 8
+  store v1, v7 align 3
+  v8 = iconst.i64 1
+  v9 = add.i64 v6, v8
+  store v9, v0+8 align 3
+  ret
+fn @fill
+  file f0
+  sig (ptr, i64) -> i64
+  ref p0 32 noalias
+b0(v0: ptr, v1: i64):
+  v2 = ptradd v0+8
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v1
+  br v6, b2, b3
+b2:
+  call @push(v2, v5) : (ptr, i64) -> void !7:5
+  v7 = add.i64 v5, v4
+  jmp b1(v7)
+b3:
+  v8 = load.i64 v0+16 align 3
+  ret v8
+fn @top
+  sig (i64) -> i64
+  slot s0 size 32 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = symaddr @small
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  store v3, v1 align 3
+  store v2, v1+8 align 3
+  store v3, v1+16 align 3
+  store v4, v1+24 align 3
+  v5 = call.i64 @fill(v1, v0) : (ptr, i64) -> i64
+  v6 = symaddr @big
+  v7 = load.i64 v6+24 align 3
+  v8 = add.i64 v5, v7
+  ret v8
+)",
+    );
+    let t = text_of(&a, "fill");
+    assert(t.contains("scope") && !t.contains("call @push"), t.as_str());
+    let x: [u64; 1] = [4];
+    same_result(&b, &a, "top", x, 4 + 3);
 }

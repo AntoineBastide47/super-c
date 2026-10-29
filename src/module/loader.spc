@@ -378,13 +378,15 @@ pub(package) struct Package {
     /// import adjacency, and SCCs. Built once on first use after loading
     /// (top-level decl names and imports are parse-final); `ensure_index` rebuilds it when a module
     /// is appended later (the LSP's batch load). `lookup`/`glob_lookup`/`prelude_lookup` and the
-    /// import-closure cache are adapters over it.
-    pub(package) idx: PkgIndex,
+    /// import-closure cache are adapters over it. A cell: the lookups build it through a shared `&`
+    /// (`idx` reads it).
+    index: UnsafeCell<PkgIndex>,
     /// Per-module transitive import closure: clo_lists[mid] = [mid, BFS over its imports...],
     /// built lazily on first glob_lookup into `mid` (imports are load-final). Replaces glob_lookup's
-    /// per-call seen/queue vectors and per-import path re-joins with a flat cached walk.
-    pub(package) clo_lists: Vector<Vector<ModuleId>>,
-    pub(package) clo_built: Vector<bool>,
+    /// per-call seen/queue vectors and per-import path re-joins with a flat cached walk. Cells, as
+    /// `index`.
+    clo_lists: UnsafeCell<Vector<Vector<ModuleId>>>,
+    clo_built: UnsafeCell<Vector<bool>>,
     /// Recycled token vector: each module's lexer adopts it (capacity kept), the parser hands it back.
     /// The batch driver frees it once the load is done.
     pub(package) tok_scratch: Vector<tok::Token>,
@@ -3694,8 +3696,8 @@ extend Package {
         }
         {
             let mut stack = Vector::<u32>::new();
-            for k in 0..self.idx.items.len() {
-                let it = *self.idx.items.at(k);
+            for k in 0..self.idx().items.len() {
+                let it = *self.idx().items.at(k);
                 if it.kind != ItemKind::IK_FUNCTION as u8 && it.kind != ItemKind::IK_METHOD as u8 {
                     continue;
                 }
@@ -3884,6 +3886,9 @@ extend Package {
     /// An empty package for the host architecture; `load_module` fills it.
     pub(package) fn new() Package {
         return Package {
+            index: UnsafeCell::<PkgIndex>::new(PkgIndex {}),
+            clo_lists: UnsafeCell::<Vector<Vector<ModuleId>>>::new(Vector::<Vector<ModuleId>>::new()),
+            clo_built: UnsafeCell::<Vector<bool>>::new(Vector::<bool>::new()),
             arch: if unsafe G_ARCH < 0 {
                 unsafe shim::sc_host_arch();
             } else {
@@ -5199,15 +5204,15 @@ extend Package {
     /// The index record of declaration node `node` in module `m`, or ITEM_NONE when the node is
     /// not a top-level or associated declaration (`by_node` binary search over the module).
     pub(package) const fn item_of(self: &Self, m: ModuleId, node: NodeId) ItemId {
-        if !self.sched.built || m as usize + 1 >= self.idx.mod_items.len() {
+        if !self.sched.built || m as usize + 1 >= self.idx().mod_items.len() {
             return ITEM_NONE;
         }
-        let mut lo = self.idx.mod_items[m as usize] as usize;
-        let mut hi = self.idx.mod_items[m as usize + 1] as usize;
+        let mut lo = self.idx().mod_items[m as usize] as usize;
+        let mut hi = self.idx().mod_items[m as usize + 1] as usize;
         while lo < hi {
             let mid = (lo + hi) / 2;
             let it = self.sched.by_node[mid];
-            let n = self.idx.items.at(it as usize).node;
+            let n = self.idx().items.at(it as usize).node;
             if n < node {
                 lo = mid + 1;
             } else if n > node {
@@ -5273,9 +5278,9 @@ extend Package {
     /// it as owner: a member is checked with its extend) to state `st`.
     pub(package) fn set_item_state_deep(self: &mut Self, it: ItemId, st: u8) {
         self.set_item_state(it, st);
-        let n = self.idx.items.len();
+        let n = self.idx().items.len();
         for k in it as usize + 1..n {
-            if self.idx.items.at(k).owner != it {
+            if self.idx().items.at(k).owner != it {
                 break;
             }
             self.set_item_state(k as ItemId, st);
@@ -5287,7 +5292,7 @@ extend Package {
         if !self.sched.built {
             return;
         }
-        for it in self.idx.mod_items[m] as usize..self.idx.mod_items[m + 1] as usize {
+        for it in self.idx().mod_items[m] as usize..self.idx().mod_items[m + 1] as usize {
             if self.item_state_at(it as ItemId) < st {
                 self.set_item_state(it as ItemId, st);
             }
@@ -5300,7 +5305,7 @@ extend Package {
         if !self.sched.built {
             return;
         }
-        for it in self.idx.mod_items[m] as usize..self.idx.mod_items[m + 1] as usize {
+        for it in self.idx().mod_items[m] as usize..self.idx().mod_items[m + 1] as usize {
             self.sched.state.set(it, IS_RESOLVED);
         }
     }
@@ -5322,7 +5327,7 @@ extend Package {
     /// The enum declaring member `vd` (NODE_NONE when `vd` is no enum member) and `vd`'s position
     /// in it (-1 when none), from the package index.
     pub(package) const fn variant_enum(self: &Self, vd: DefId, pos: &mut i64) NodeId {
-        if let Some(v) = self.idx.variants.get(&skey_mix(0, vd.module as u64 << 32 | vd.node as u64)) {
+        if let Some(v) = self.idx().variants.get(&skey_mix(0, vd.module as u64 << 32 | vd.node as u64)) {
             *pos = (*v & 0xFFFFFFFFu64) as i64;
             return (*v >> 32) as NodeId;
         }
@@ -6243,8 +6248,8 @@ extend Package {
         let mut scan = Vector::<u64>::new();
         let mut lo: usize = 0;
         let mut hi: usize = 0;
-        if self.idx.sigs_built {
-            switch self.idx.conf_of.get(&skey_mix(0, iface.module as u64 << 32 | iface.node as u64)) {
+        if self.idx().sigs_built {
+            switch self.idx().conf_of.get(&skey_mix(0, iface.module as u64 << 32 | iface.node as u64)) {
                 Some(v) => {
                     lo = (*v >> 32) as usize;
                     hi = (*v & 0xFFFFFFFFu64) as usize;
@@ -6253,8 +6258,8 @@ extend Package {
             };
         } else {
             for m in 0..self.modules.len() {
-                for k in self.idx.mod_exts[m] as usize..self.idx.mod_exts[m + 1] as usize {
-                    let row = m as u64 << 32 | self.idx.exts[k] as u64;
+                for k in self.idx().mod_exts[m] as usize..self.idx().mod_exts[m + 1] as usize {
+                    let row = m as u64 << 32 | self.idx().exts[k] as u64;
                     let d = self.ext_iface(row);
                     if d.module == iface.module && d.node == iface.node {
                         scan.push(row);
@@ -6263,8 +6268,8 @@ extend Package {
             }
             hi = scan.len();
         }
-        let rows = if self.idx.sigs_built {
-            &self.idx.confs;
+        let rows = if self.idx().sigs_built {
+            &self.idx().confs;
         } else {
             &scan;
         };
@@ -6864,7 +6869,7 @@ extend Package {
     /// on first lookup after loading; a module appended later (the LSP's batch load) triggers a full
     /// rebuild. Declaration names, spans, and imports are parse-final, so the result stays valid for
     /// the whole pipeline.
-    pub(package) fn build_index(self: &mut Self) {
+    pub(package) fn build_index(self: &Self) {
         let n = self.modules.len();
         let mut idx = PkgIndex {};
         idx.built_mods = n as u32;
@@ -6921,7 +6926,9 @@ extend Package {
             }
         }
         self.index_shadows(&mut idx);
-        self.idx = idx;
+        // Through a reference, so the assignment drops the index it replaces (a raw place's does not).
+        let slot = unsafe &mut *self.index.get();
+        *slot = idx;
         // Sugar-shim table: (module path, fn name) hooks, resolved through the finished index (find
         // and glob_lookup read self.idx). glob_lookup only warms closure caches; the index tables it
         // answers from are final above, so resolving after the swap sees exactly the built state.
@@ -6933,7 +6940,7 @@ extend Package {
             if m >= 0 {
                 hit = self.glob_lookup(m as ModuleId, names[si], false);
             }
-            self.idx.sugar_items.push(hit);
+            unsafe (*self.index.get()).sugar_items.push(hit);
         }
     }
 
@@ -6942,16 +6949,16 @@ extend Package {
     /// them. The import components, the sugar shims and the signature table are computed again.
     pub(package) fn index_append(self: &mut Self) {
         let n = self.modules.len();
-        let from = self.idx.built_mods as usize;
+        let from = self.idx().built_mods as usize;
         if from == n {
             return;
         }
         // Drop the end sentinels, append the new modules' rows, put the sentinels back.
-        let _ = self.idx.mod_items.pop();
-        let _ = self.idx.mod_imports.pop();
-        let _ = self.idx.mod_globs.pop();
-        let _ = self.idx.mod_exts.pop();
-        let mut idx = replace(&mut self.idx, PkgIndex {});
+        let _ = self.idx_mut().mod_items.pop();
+        let _ = self.idx_mut().mod_imports.pop();
+        let _ = self.idx_mut().mod_globs.pop();
+        let _ = self.idx_mut().mod_exts.pop();
+        let mut idx = replace(self.idx_mut(), PkgIndex {});
         for m in from..n {
             idx.mod_items.push(idx.items.len() as u32);
             idx.name_maps.push(Map::<u64, u32>::new());
@@ -6982,7 +6989,7 @@ extend Package {
         idx.sigs_built = false;
         idx.shadow = Set::<SymbolId>::new();
         self.index_shadows(&mut idx);
-        self.idx = idx;
+        *self.idx_mut() = idx;
         for si in 0..SI_COUNT_N {
             let mods: []str = SI_MODULES;
             let names: []str = SI_NAMES;
@@ -6991,13 +6998,13 @@ extend Package {
             if m >= 0 {
                 hit = self.glob_lookup(m as ModuleId, names[si], false);
             }
-            self.idx.sugar_items.push(hit);
+            self.idx_mut().sugar_items.push(hit);
         }
     }
 
     /// The resolved decl behind a sugar-lowering shim (NODE_NONE DefId when its module is not loaded).
     pub(package) const fn sugar_item(self: &Self, k: SugarItem) DefId {
-        let h = self.idx.sugar_items.at(k as usize);
+        let h = self.idx().sugar_items.at(k as usize);
         return DefId { module: h.mid, node: h.node };
     }
 
@@ -7008,12 +7015,12 @@ extend Package {
     /// appended later) clears the tables, and the next call refills them.
     pub(package) fn ensure_sigs(self: &mut Self) {
         self.ensure_index();
-        if self.idx.sigs_built {
+        if self.idx().sigs_built {
             return;
         }
-        self.idx.sigs_built = true;
-        for k in 0..self.idx.items.len() {
-            let it = *self.idx.items.at(k);
+        self.idx_mut().sigs_built = true;
+        for k in 0..self.idx().items.len() {
+            let it = *self.idx().items.at(k);
             if it.kind != ItemKind::IK_FUNCTION as u8 && it.kind != ItemKind::IK_METHOD as u8 {
                 continue;
             }
@@ -7024,15 +7031,16 @@ extend Package {
                 continue;
             }
             let fd = a.ext(it.node).function;
-            let start = self.idx.sig_types.len() as u32;
+            let start = self.idx().sig_types.len() as u32;
             for pi in 0..fd.params.len {
-                self.idx.sig_types.push(a.type_of(unsafe a.list(fd.params)[pi as usize]));
+                self.idx_mut().sig_types.push(a.type_of(unsafe a.list(fd.params)[pi as usize]));
             }
             for ri in 0..fd.returns.len {
-                self.idx.sig_types.push(a.type_of(unsafe a.list(fd.returns)[ri as usize]));
+                self.idx_mut().sig_types.push(a.type_of(unsafe a.list(fd.returns)[ri as usize]));
             }
-            self.idx.sig_of.insert(skey_mix(0, it.module as u64 << 32 | it.node as u64), self.idx.sigs.len() as u32);
-            self.idx.sigs.push(
+            let at = self.idx().sigs.len() as u32;
+            self.idx_mut().sig_of.insert(skey_mix(0, it.module as u64 << 32 | it.node as u64), at);
+            self.idx_mut().sigs.push(
                 ItemSig {
                     start: start,
                     np: fd.params.len as u16,
@@ -7041,11 +7049,11 @@ extend Package {
                 },
             );
         }
-        let mut rows = Vector::<u64>::with_capacity(self.idx.exts.len());
-        let mut keys = Vector::<u64>::with_capacity(self.idx.exts.len());
+        let mut rows = Vector::<u64>::with_capacity(self.idx().exts.len());
+        let mut keys = Vector::<u64>::with_capacity(self.idx().exts.len());
         for m in 0..self.modules.len() {
-            for k in self.idx.mod_exts[m] as usize..self.idx.mod_exts[m + 1] as usize {
-                let row = m as u64 << 32 | self.idx.exts[k] as u64;
+            for k in self.idx().mod_exts[m] as usize..self.idx().mod_exts[m + 1] as usize {
+                let row = m as u64 << 32 | self.idx().exts[k] as u64;
                 let d = self.ext_iface(row);
                 if d.node != NODE_NONE {
                     rows.push(row);
@@ -7066,18 +7074,19 @@ extend Package {
             });
             head.insert(keys[x], x as u32);
         }
-        self.idx.confs.reserve(rows.len());
+        self.idx_mut().confs.reserve(rows.len());
         for x in 0..rows.len() {
             if *head.get(&keys[x]).unwrap() != x as u32 {
                 continue;
             }
-            let lo = self.idx.confs.len() as u64;
+            let lo = self.idx().confs.len() as u64;
             let mut r = x as u32;
             while r != CO_NONE {
-                self.idx.confs.push(rows[r as usize]);
+                self.idx_mut().confs.push(rows[r as usize]);
                 r = next[r as usize];
             }
-            self.idx.conf_of.insert(keys[x], lo << 32 | self.idx.confs.len() as u64);
+            let hi = self.idx().confs.len() as u64;
+            self.idx_mut().conf_of.insert(keys[x], lo << 32 | hi);
         }
     }
 
@@ -7094,29 +7103,39 @@ extend Package {
 
     /// The signature metadata for fn decl (m, node), or null when none is recorded.
     pub(package) const fn item_sig(self: &Self, m: ModuleId, node: NodeId) *const ItemSig {
-        if let Some(i) = self.idx.sig_of.get(&skey_mix(0, m as u64 << 32 | node as u64)) {
-            return self.idx.sigs.at((*i) as usize);
+        if let Some(i) = self.idx().sig_of.get(&skey_mix(0, m as u64 << 32 | node as u64)) {
+            return self.idx().sigs.at((*i) as usize);
         }
         return null;
     }
 
     /// Entry `i` of the signature type pool (see `sigs`).
     pub(package) const fn sig_type(self: &Self, i: u32) TypeId {
-        return self.idx.sig_types[i as usize];
+        return self.idx().sig_types[i as usize];
     }
 
     /// Build the index if it does not cover the current module set (cheap check; see build_index).
-    pub(package) fn ensure_index(self: &mut Self) {
-        if self.idx.built_mods as usize != self.modules.len() {
+    pub(package) fn ensure_index(self: &Self) {
+        if self.idx().built_mods as usize != self.modules.len() {
             self.build_index();
         }
+    }
+
+    /// The package declaration index (`index`).
+    pub(package) const fn idx(self: &Self) &PkgIndex {
+        return self.index.get_ref();
+    }
+
+    /// The package declaration index, to change.
+    pub(package) fn idx_mut(self: &mut Self) &mut PkgIndex {
+        return unsafe &mut *self.index.get();
     }
 
     // Record one named declaration: intern the name, append its ItemMeta, and (for top-level names
     // only, owner == ITEM_NONE) claim its (name, namespace, visibility) key first-occurrence-wins.
     // A function or const under an extend (`owner`) is a method or an associated const; a node of
     // any other kind records nothing.
-    fn index_decl(self: &mut Self, idx: &mut PkgIndex, mid: ModuleId, srcp: *const char, node: NodeId, owner: ItemId) {
+    fn index_decl(self: &Self, idx: &mut PkgIndex, mid: ModuleId, srcp: *const char, node: NodeId, owner: ItemId) {
         let ast = unsafe &*self.module_ast_const(mid);
         let n = ast.at_const(node);
         let mut is_type = true;
@@ -7240,7 +7259,7 @@ extend Package {
     // Collect module `mid`'s declarations, associated items, and resolved imports into `idx`.
     // Classification matches the pre-index lookup scan exactly (same kinds, same first-wins order);
     // extend bodies additionally contribute IK_EXTEND/IK_METHOD/IK_ASSOC_CONST records.
-    fn index_module(self: &mut Self, idx: &mut PkgIndex, mid: ModuleId) {
+    fn index_module(self: &Self, idx: &mut PkgIndex, mid: ModuleId) {
         let m = mid as usize;
         // Srcp is raw (Copy) so no borrow of self lingers across the &mut self index_decl calls below;
         // `ast` comes from a raw ptr (not a tracked self-borrow), so reading it across them is fine.
@@ -7331,9 +7350,8 @@ extend Package {
         if !self.modules[mid as usize].has_ast {
             return NODE_NONE;
         }
-        let mp = (self as *const Package) as *mut Package;
-        unsafe (*mp).ensure_index();
-        let s = self.idx.syms.find(name);
+        self.ensure_index();
+        let s = self.idx().syms.find(name);
         if s == SYM_NONE {
             return NODE_NONE;
         }
@@ -7349,11 +7367,11 @@ extend Package {
         } else {
             0u64;
         } + 1u64;
-        let it = self.idx.name_maps[mid as usize].get(&key);
+        let it = self.idx().name_maps[mid as usize].get(&key);
         if it.is_none() {
             return NODE_NONE;
         }
-        let im = self.idx.items.at((*it.unwrap()) as usize);
+        let im = self.idx().items.at((*it.unwrap()) as usize);
         if !self.vis_ok(from, mid, im.vis) {
             return NODE_NONE;
         }
@@ -7370,13 +7388,12 @@ extend Package {
         }
         let ii = self.modules[mid as usize].implicit_index;
         let mut hit = LookupHit { node: NODE_NONE, mid: 0 };
-        let mp = (self as *const Package) as *mut Package;
-        for g in self.idx.mod_globs[mid as usize] as usize..self.idx.mod_globs[mid as usize + 1] as usize {
-            let gm = self.idx.globs[g];
+        for g in self.idx().mod_globs[mid as usize] as usize..self.idx().mod_globs[mid as usize + 1] as usize {
+            let gm = self.idx().globs[g];
             let mut h = LookupHit { node: self.lookup_sym(from, gm, s, want_type), mid: gm };
             if !ii {
-                unsafe (*mp).ensure_closure(gm);
-                let lst = self.clo_lists.at(gm as usize);
+                self.ensure_closure(gm);
+                let lst = self.clo_lists.get_ref().at(gm as usize);
                 let mut i: usize = 1; // the closure starts with `gm` itself
                 while h.node == NODE_NONE && i < lst.len() {
                     h = LookupHit { node: self.lookup_sym(from, lst[i], s, want_type), mid: lst[i] };
@@ -7411,9 +7428,8 @@ extend Package {
     }
 
     pub(package) fn prelude_lookup(self: &Self, name: str, want_type: bool) LookupHit {
-        let mp = (self as *const Package) as *mut Package;
-        unsafe (*mp).ensure_index();
-        let s = self.idx.syms.find(name);
+        self.ensure_index();
+        let s = self.idx().syms.find(name);
         if s == SYM_NONE {
             return LookupHit { node: NODE_NONE, mid: 0 };
         }
@@ -7422,7 +7438,7 @@ extend Package {
         } else {
             0u64;
         };
-        return switch self.idx.pl_map.get(&lk) {
+        return switch self.idx().pl_map.get(&lk) {
             Some(v) => LookupHit { node: (*v >> 32) as NodeId, mid: (*v & 0xFFFFFFFFu64) as ModuleId },
             None => LookupHit { node: NODE_NONE, mid: 0 },
         };
@@ -7430,22 +7446,24 @@ extend Package {
 
     // Build (once) the cached [mid, transitive imports...] walk order for glob_lookup. Imports are
     // load-final, so the list stays valid for the whole pipeline.
-    fn ensure_closure(self: &mut Self, mid: ModuleId) {
+    fn ensure_closure(self: &Self, mid: ModuleId) {
         let n = self.modules.len();
-        while self.clo_lists.len() < n {
-            self.clo_lists.push(Vector::<ModuleId>::new());
-            self.clo_built.push(false);
+        let lists = unsafe &mut *self.clo_lists.get();
+        let built = unsafe &mut *self.clo_built.get();
+        while lists.len() < n {
+            lists.push(Vector::<ModuleId>::new());
+            built.push(false);
         }
-        if self.clo_built[mid as usize] {
+        if built[mid as usize] {
             return;
         }
         let clo = self.import_closure(mid);
-        let lst = &mut self.clo_lists[mid as usize];
+        let lst = &mut lists[mid as usize];
         lst.push(mid);
         for i in 0..clo.len() {
             lst.push(clo[i]);
         }
-        self.clo_built.set(mid as usize, true);
+        built.set(mid as usize, true);
     }
 
     /// `mid`'s cached [mid, transitive imports...] list (built on first use; imports are load-final).
@@ -7453,7 +7471,7 @@ extend Package {
     /// implicit prelude is NOT in the list: a prelude edit must be treated as reaching everything.
     pub(package) fn module_closure(self: &mut Self, mid: ModuleId) *const Vector<ModuleId> {
         self.ensure_closure(mid);
-        return self.clo_lists.at(mid as usize);
+        return self.clo_lists.get_ref().at(mid as usize);
     }
 
     /// Lookup extended over `mid`'s transitive imports (imports are public, C-style): searches `mid` itself,
@@ -7463,9 +7481,8 @@ extend Package {
         if mid as usize >= self.modules.len() {
             return LookupHit { node: NODE_NONE, mid: 0 };
         }
-        let mp = (self as *const Package) as *mut Package;
-        unsafe (*mp).ensure_closure(mid);
-        let lst = self.clo_lists.at(mid as usize);
+        self.ensure_closure(mid);
+        let lst = self.clo_lists.get_ref().at(mid as usize);
         for i in 0..lst.len() {
             let mo = lst[i];
             let d = self.lookup(FROM_ANY, mo, name, want_type);
@@ -7484,8 +7501,7 @@ extend Package {
         if mid as usize > n {
             return out;
         } // the standalone Ast (module == count) has no imports to walk
-        let mp = (self as *const Package) as *mut Package;
-        unsafe (*mp).ensure_index();
+        self.ensure_index();
         let mut seen = Vector::<bool>::new();
         for s in 0..n + 1 {
             seen.push(false);
@@ -7496,10 +7512,10 @@ extend Package {
         let mut go = true;
         while go {
             if cur as usize < n {
-                let from = self.idx.mod_imports[cur as usize] as usize;
-                let to = self.idx.mod_imports[cur as usize + 1] as usize;
+                let from = self.idx().mod_imports[cur as usize] as usize;
+                let to = self.idx().mod_imports[cur as usize + 1] as usize;
                 for e in from..to {
-                    let c = self.idx.imports[e];
+                    let c = self.idx().imports[e];
                     if !seen[c as usize] {
                         seen.set(c as usize, true);
                         out.push(c);

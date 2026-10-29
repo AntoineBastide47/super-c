@@ -3804,3 +3804,113 @@ b0(v0: ptr):
     let t = text_of(&a, "reset");
     assert(count(&t, "store") == 2 && t.contains("iconst.i64 0"), t.as_str());
 }
+
+// Two data symbols the package defines are two objects, and a slot whose address only addresses
+// accesses (private) is reached by no other pointer: a loop between such accesses vectorizes without an
+// overlap guard. Two unknown pointers keep it.
+@test
+fn data_symbols_and_private_slots_need_no_overlap_guard() {
+    let src = M"(lir ptr 8
+sym @src data global
+sym @dst data global
+sym @copy fn global noinline
+sym @fill fn global noinline
+sym @plain fn global noinline
+sym @drive fn global
+data @src size 256 align 3
+data @dst size 256 align 3
+fn @copy
+  sig (i64) -> void
+b0(v0: i64):
+  v1 = symaddr @src
+  v2 = symaddr @dst
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v0
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 4
+  v8 = load.i32 v7 align 2
+  v9 = ptradd v2, v5 * 4
+  store v8, v9 align 2
+  v10 = add.i64 v5, v4
+  jmp b1(v10)
+b3:
+  ret
+fn @fill
+  sig (ptr, i64) -> i32
+  slot s0 size 256 align 2
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v1
+  br v6, b2, b3
+b2:
+  v7 = ptradd v0, v5 * 4
+  v8 = load.i32 v7 align 2
+  v9 = ptradd v2, v5 * 4
+  store v8, v9 align 2
+  v10 = add.i64 v5, v4
+  jmp b1(v10)
+b3:
+  v11 = load.i32 v2+4 align 2
+  ret v11
+fn @plain
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v0, v5 * 4
+  v8 = load.i32 v7 align 2
+  v9 = ptradd v1, v5 * 4
+  store v8, v9 align 2
+  v10 = add.i64 v5, v4
+  jmp b1(v10)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 256 align 2
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 64
+  jmp b1(v2)
+b1(v5: i64):
+  v6 = icmp.ult v5, v4
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 4
+  v8 = trunc.i32 v5
+  store v8, v7 align 2
+  v9 = add.i64 v5, v3
+  jmp b1(v9)
+b3:
+  v10 = call.i32 @fill(v1, v0) : (ptr, i64) -> i32
+  v11 = zext.i64 v10
+  ret v11
+)";
+    let (b, a) = optimized(src, VECTOR);
+    let c = text_of(&a, "copy");
+    assert(c.contains("v4i32") && !c.contains("icmp.ule"), c.as_str());
+    let f = text_of(&a, "fill");
+    assert(f.contains("v4i32") && !f.contains("icmp.ule"), f.as_str());
+    let p = text_of(&a, "plain");
+    assert(p.contains("v4i32") && p.contains("icmp.ule"), p.as_str());
+    let ns: [u64; 3] = [2, 17, 64];
+    for k in 0..3usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, 1, false);
+    }
+}

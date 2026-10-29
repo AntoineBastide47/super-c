@@ -122,14 +122,16 @@ pub(package) struct HRef {
 
 extend HRef as Persist {}
 
-// A function of the object: its spelling, walk facts (`HELD_*`), effects (`Sym.fx`) and the parameters
-// whose memory it may write, direct calls (spellings, in instruction order) and, with HELD_OK, its
-// optimized body, whose symbols are `refs`, whose messages and line files are spellings.
+// A function of the object: its spelling, walk facts (`HELD_*`), effects (`Sym.fx`), the parameters
+// whose memory it may write and those it may let escape (`Sym.esc`), direct calls (spellings, in
+// instruction order) and, with HELD_OK, its optimized body, whose symbols are `refs`, whose messages and
+// line files are spellings.
 pub(package) struct HFunc {
     pub(package) name: u32,
     pub(package) flags: u8,
     pub(package) fx: u8,
     pub(package) wargs: u64,
+    pub(package) esc: u64,
     pub(package) calls: Vector<u32>,
     pub(package) body: Body,
     pub(package) refs: Vector<HRef>,
@@ -283,6 +285,7 @@ pub(package) fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut
                 },
                 fx: sy.fx,
                 wargs: r.wargs_of(k),
+                esc: sy.esc,
                 calls: Vector::<u32>::new(),
                 body: Body::new(),
                 refs: Vector::<HRef>::new(),
@@ -471,6 +474,7 @@ pub(package) fn add(pk: &mut Package, unit: u32, rec: &Rec) {
         pk.held.flags.push(f.flags);
         pk.held.fx.push(f.fx);
         pk.held.wargs.push(f.wargs);
+        pk.held.esc.push(f.esc);
         for c in 0..f.calls.len() {
             pk.held.calls.push(pk.symbol(rec.names.at(f.calls[c] as usize).as_str(), SK_FUNC));
         }

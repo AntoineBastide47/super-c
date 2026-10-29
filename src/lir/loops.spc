@@ -279,16 +279,25 @@ pub(package) struct LoopOpt {
 }
 
 /// The optimizer's alias classes (`lir::opt::Opt::classes`) for the loop transforms: per instruction its
-/// access's class (`acc`, CL_MANY for none), the scope classes it belongs to (`member`, empty when the
-/// body has no scope), the scope classes (`scoped`, bits), and per class its roots' block (`root`).
+/// access's class (`acc`, CL_MANY for none) and object (`obj`, NONE for an unknown one), the scope classes
+/// it belongs to (`member`, empty when the body has no scope), the scope classes (`scoped`, bits), and
+/// per class its roots' block (`root`).
 pub(package) struct Classes<'a> {
     pub(package) acc: Slice<'a, u8>,
+    pub(package) obj: Slice<'a, u32>,
     pub(package) member: Slice<'a, u64>,
     pub(package) scoped: u64,
     pub(package) root: Slice<'a, u32>,
 }
 
 extend Classes as Copy {}
+
+/// `Classes.obj`: a data symbol the package defines (its number), a slot (OBJ_SLOT | its number), a slot
+/// no pointer but its accesses' addresses reaches (OBJ_PRIVATE | its number, `lir::opt`'s `privates`).
+/// Two accesses of different objects touch different bytes when neither object is unknown, or one is a
+/// private slot.
+pub(package) const OBJ_SLOT: u32 = 0x40000000;
+pub(package) const OBJ_PRIVATE: u32 = 0x80000000;
 
 /// The instructions a loop transform's copies may take (0: none): full unrolling (all its copies),
 /// partial unrolling (the unrolled loop's copies of the body), versioning on bounds checks and unswitching
@@ -2406,6 +2415,11 @@ extend LoopOpt {
     // (`cl`): different classes, neither CL_MANY nor a scope's whose roots the loop holds, each in the
     // other's scope.
     fn apart(self: &Self, cl: Classes, x: u32, y: u32) bool {
+        let ox = obj_at(cl, self.orig(x));
+        let oy = obj_at(cl, self.orig(y));
+        if ox != oy && (ox != NONE && oy != NONE || private_obj(ox) || private_obj(oy)) {
+            return true;
+        }
         let cx = class_at(cl, self.orig(x));
         let cy = class_at(cl, self.orig(y));
         return cx != cy && self.scope_ok(cl, cx, y) && self.scope_ok(cl, cy, x);
@@ -6161,6 +6175,18 @@ const fn class_at(cl: Classes, i: u32) u8 {
     } else {
         CL_MANY;
     };
+}
+
+const fn obj_at(cl: Classes, i: u32) u32 {
+    return if i as usize < cl.obj.len() {
+        cl.obj[i as usize];
+    } else {
+        NONE;
+    };
+}
+
+const fn private_obj(o: u32) bool {
+    return o != NONE && (o & OBJ_PRIVATE) != 0;
 }
 
 fn is_const(b: &Body, v: Value) bool {

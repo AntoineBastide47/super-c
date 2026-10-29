@@ -351,8 +351,8 @@ pub(package) fn check_kept(p: &loader::Package, keep: &irl::Keep, reported: &Vec
         if !reported[m] || !p.modules.at(m).has_ast {
             continue;
         }
-        for k in p.idx.mod_items[m]..p.idx.mod_items[m + 1] {
-            let it = *p.idx.items.at(k as usize);
+        for k in p.idx().mod_items[m]..p.idx().mod_items[m + 1] {
+            let it = *p.idx().items.at(k as usize);
             if it.kind != loader::ItemKind::IK_FUNCTION as u8 && it.kind != loader::ItemKind::IK_METHOD as u8 {
                 continue;
             }
@@ -411,7 +411,7 @@ fn call_ends(p: &loader::Package, t: &ir::Terminator) bool {
 
 // The name of index item `item`.
 const fn item_name(p: &loader::Package, item: u32) str {
-    let it = *p.idx.items.at(item as usize);
+    let it = *p.idx().items.at(item as usize);
     return p.modules.at(it.module as usize).source.as_str().slice(it.start as usize, (it.start + it.len) as usize);
 }
 

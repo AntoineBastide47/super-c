@@ -281,10 +281,10 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
             }
         }
         while let Some(cur) = stack.pop() {
-            let lo = (*p.idx.mod_imports.at(cur as usize)) as usize;
-            let hi = (*p.idx.mod_imports.at(cur as usize + 1)) as usize;
+            let lo = (*p.idx().mod_imports.at(cur as usize)) as usize;
+            let hi = (*p.idx().mod_imports.at(cur as usize + 1)) as usize;
             for e in lo..hi {
-                let d = (*p.idx.imports.at(e)) as usize;
+                let d = (*p.idx().imports.at(e)) as usize;
                 if (inq[d / 64] >> (d as u64 & 63) & 1) == 0 {
                     inq.set(d / 64, inq[d / 64] | 1u64 << (d as u64 & 63));
                     stack.push(d as u32);

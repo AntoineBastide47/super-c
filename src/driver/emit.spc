@@ -219,11 +219,11 @@ fn emit_live_row(p: &loader::Package, tm: &TypeMarks, m: usize, row: *mut u64) {
         }
     }
     assert(p.sched.final_edges, "the post-typecheck item edges precede emission liveness");
-    let i0 = p.idx.mod_items[m] as usize;
-    let i1 = p.idx.mod_items[m + 1] as usize;
+    let i0 = p.idx().mod_items[m] as usize;
+    let i1 = p.idx().mod_items[m + 1] as usize;
     for it in i0..i1 {
         for e in p.sched.fin_off[it] as usize..p.sched.fin_off[it + 1] as usize {
-            let tm9 = p.idx.items.at(p.sched.fin_edges[e] as usize);
+            let tm9 = p.idx().items.at(p.sched.fin_edges[e] as usize);
             if tm9.module as usize != m && p.builtin_of_decl(tm9.module, tm9.node) < 0 {
                 mark_live(row, n, tm9.module);
             }
@@ -326,8 +326,8 @@ fn compute_emit_live(p: &loader::Package) Vector<bool> {
     let mut by = Vector::<u8>::new();
     by.resize_default(sz);
     for x in 0..n {
-        for e in p.idx.mod_imports[x]..p.idx.mod_imports[x + 1] {
-            let d = p.idx.imports[e as usize] as usize;
+        for e in p.idx().mod_imports[x]..p.idx().mod_imports[x + 1] {
+            let d = p.idx().imports[e as usize] as usize;
             by[d] |= pick(p.modules[x].backend, 1u8, 2u8);
         }
     }
@@ -684,7 +684,7 @@ fn tc_job(ctx: *mut void, j: u32) {
     }
     for k in p.sched.citem_off[j as usize] as usize..p.sched.citem_off[j as usize + 1] as usize {
         let it = p.sched.citem[k];
-        let meta = *p.idx.items.at(it as usize);
+        let meta = *p.idx().items.at(it as usize);
         // A member goes with its extend; the prelude stage checked the items before `root_module`.
         if meta.owner != loader::ITEM_NONE || meta.module as u32 < p.root_module {
             continue;
@@ -753,7 +753,7 @@ fn tc_order(p: &loader::Package, order: &mut Vector<u32>) {
     gitems::import_levels(p, false, &mut lvl);
     let mut mods = Vector::<u64>::with_capacity(nm);
     for m in 0..nm {
-        mods.push(lvl[p.idx.scc_of[m] as usize] as u64 << 32 | m as u64);
+        mods.push(lvl[p.idx().scc_of[m] as usize] as u64 << 32 | m as u64);
     }
     mods.sort();
     let mut done = Vector::<bool>::new();
@@ -765,7 +765,7 @@ fn tc_order(p: &loader::Package, order: &mut Vector<u32>) {
             if p.modules.at(m).prelude != (pass == 0) {
                 continue;
             }
-            for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
+            for it in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
                 let root = s.comp[it] as usize;
                 if done[root] {
                     continue;
@@ -813,7 +813,7 @@ fn tc_jobs(p: &loader::Package) sch::Jobs {
     let mut stack = Vector::<u32>::new();
     for c in 0..nc {
         let first = s.citem[s.citem_off[c] as usize];
-        if p.modules.at(p.idx.items.at(first as usize).module as usize).prelude {
+        if p.modules.at(p.idx().items.at(first as usize).module as usize).prelude {
             pre.set(c, true);
             stack.push(c as u32);
         }
@@ -859,7 +859,7 @@ fn tc_jobs(p: &loader::Package) sch::Jobs {
                 continue;
             }
             for i in s.citem_off[c] as usize..s.citem_off[c + 1] as usize {
-                let m = p.idx.items.at(s.citem[i] as usize).module as usize;
+                let m = p.idx().items.at(s.citem[i] as usize).module as usize;
                 if first[m] == 0 {
                     first.set(m, k as u32 + 1);
                 }
@@ -891,8 +891,8 @@ fn tc_jobs(p: &loader::Package) sch::Jobs {
         let mut nodes: u64 = 0;
         for k in s.citem_off[c] as usize..s.citem_off[c + 1] as usize {
             let it = s.citem[k] as usize;
-            if p.idx.items.at(it).owner == loader::ITEM_NONE {
-                nodes += p.idx.items.at(it).node - s.top_lo[it];
+            if p.idx().items.at(it).owner == loader::ITEM_NONE {
+                nodes += p.idx().items.at(it).node - s.top_lo[it];
             }
         }
         g.est.set(c, nodes * 96);
@@ -912,7 +912,7 @@ fn typecheck_stage(
     ftexts: *mut Vector<String>,
 ) bool {
     let n = p.modules.len();
-    let ni = p.idx.items.len();
+    let ni = p.idx().items.len();
     let par = p.jobs != 1 && n > 1;
     if par {
         set_stage_locks(p, true);
@@ -943,8 +943,8 @@ fn typecheck_stage(
         lease.push(psync::Mutex::<u8>::new(0));
         edges.push(Vector::<u64>::new());
         let mut tops: u32 = 0;
-        for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
-            if p.idx.items.at(it).owner == loader::ITEM_NONE {
+        for it in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
+            if p.idx().items.at(it).owner == loader::ITEM_NONE {
                 tops += 1;
             }
         }
@@ -987,7 +987,7 @@ fn typecheck_stage(
     // A module without items has no job: its top-level nodes (a `static_assert`) check now, once
     // every item is typed.
     for m in 0..n {
-        if p.modules[m].has_ast && p.idx.mod_items[m] == p.idx.mod_items[m + 1] {
+        if p.modules[m].has_ast && p.idx().mod_items[m] == p.idx().mod_items[m + 1] {
             let pkg = p as *mut loader::Package;
             let mm = &mut p.modules[m];
             let src = mm.source.as_str().ptr() as *const char;
@@ -1054,7 +1054,7 @@ fn typecheck_stage(
                 }
             }
         }
-        for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
+        for it in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
             let lg = logs.at(m);
             for k in outs.at(it).log_lo as usize..outs.at(it).log_hi as usize {
                 let dv = lg.a[k];
@@ -7501,7 +7501,7 @@ fn extern_block_gated(p: &loader::Package, m: ModuleId, items: NodeList, lacking
 
 // Whether a module other than the backend file imports module `m`.
 const fn imported_beyond_backends(p: &loader::Package, m: ModuleId) bool {
-    let ix = &p.idx;
+    let ix = p.idx();
     for x in 0..p.modules.len() {
         let mut imp = false;
         for e in ix.mod_imports[x]..ix.mod_imports[x + 1] {
@@ -13004,8 +13004,8 @@ fn bc_job(ctx: *mut void, j: u32) {
     slot.ctx.st.pr.stop(bfi::BP_SETUP, ts);
     for k in job.lo as usize..job.hi as usize {
         let it = p.sched.by_node[k] as usize;
-        let meta = *p.idx.items.at(it);
-        if meta.owner != loader::ITEM_NONE && p.idx.items.at(meta.owner as usize).kind != loader::ItemKind::IK_EXTEND as u8 {
+        let meta = *p.idx().items.at(it);
+        if meta.owner != loader::ITEM_NONE && p.idx().items.at(meta.owner as usize).kind != loader::ItemKind::IK_EXTEND as u8 {
             continue; // an interface's members have no body of their own to analyze
         }
         let kd = meta.kind;
@@ -13048,7 +13048,7 @@ fn bc_jobs(p: &loader::Package, out: &mut Vector<BcJob>) {
         if !p.modules.at(m).has_ast {
             continue;
         }
-        out.push(BcJob { m: m as u32, lo: p.idx.mod_items[m], hi: p.idx.mod_items[m + 1] });
+        out.push(BcJob { m: m as u32, lo: p.idx().mod_items[m], hi: p.idx().mod_items[m + 1] });
     }
 }
 
@@ -13148,7 +13148,7 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
     }
     let mut jobs = Vector::<BcJob>::new();
     bc_jobs(p, &mut jobs);
-    let ni = p.idx.items.len();
+    let ni = p.idx().items.len();
     let mut outs = Vector::<Option<Box<diag::Errors>>>::with_capacity(ni);
     for _ in 0..ni {
         outs.push(Option::<Box<diag::Errors>>::None);
@@ -13196,7 +13196,7 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
     let mut ok = true;
     for m in 0..n {
         let mut errs = diag::Errors::new();
-        for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
+        for it in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
             append_errs(&mut errs, outs.index_mut(it));
         }
         errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
@@ -13830,10 +13830,10 @@ pub(package) fn lint_unused_items(p: &mut loader::Package, only_mod: i32, sink: 
     // releasable body syntax. `iown`: each item's owner entry, LINT_NONE outside the entries, with
     // LINT_IFACE when the item is an interface (the one target an extend header uses).
     assert(p.sched.final_edges, "the post-typecheck item edges precede the unused-item lint");
-    let ni = p.idx.items.len();
+    let ni = p.idx().items.len();
     let mut iown = Vector::<u32>::with_capacity(ni);
     for it in 0..ni {
-        let tm = p.idx.items.at(it);
+        let tm = p.idx().items.at(it);
         let dm = tm.module as usize;
         let mut o = LINT_NONE;
         if dm < nm && ents[dm].len() != 0 {
@@ -13851,8 +13851,8 @@ pub(package) fn lint_unused_items(p: &mut loader::Package, only_mod: i32, sink: 
             continue;
         }
         let a = p.module_ast_const(m as ModuleId);
-        let i0 = p.idx.mod_items[m] as usize;
-        let i1 = p.idx.mod_items[m + 1] as usize;
+        let i0 = p.idx().mod_items[m] as usize;
+        let i1 = p.idx().mod_items[m + 1] as usize;
         for it in i0..i1 {
             if iown[it] == LINT_NONE {
                 continue;
@@ -14208,8 +14208,8 @@ pub(package) fn unused_imports(p: &mut loader::Package, m: usize, out: &mut Vect
     p.ensure_index();
     let mut imported = Vector::<bool>::new();
     imported.resize_default(nm);
-    for k in 0..p.idx.imports.len() {
-        imported.set(p.idx.imports[k] as usize, true);
+    for k in 0..p.idx().imports.len() {
+        imported.set(p.idx().imports[k] as usize, true);
     }
     let a = p.module_ast_const(m as ModuleId);
     if module_platform_gated(a) {
@@ -14558,7 +14558,7 @@ fn ap_job(ctx: *mut void, j: u32) {
     };
     for k in job.lo as usize..job.hi as usize {
         let it = p.sched.by_node[k] as usize;
-        let meta = *p.idx.items.at(it);
+        let meta = *p.idx().items.at(it);
         if meta.kind != loader::ItemKind::IK_FUNCTION as u8 && meta.kind != loader::ItemKind::IK_METHOD as u8 {
             continue;
         }
@@ -14616,7 +14616,7 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
         }
     }
     jobs.truncate(w);
-    let ni = p.idx.items.len();
+    let ni = p.idx().items.len();
     let mut outs = Vector::<Option<Box<diag::Errors>>>::with_capacity(ni);
     for _ in 0..ni {
         outs.push(Option::<Box<diag::Errors>>::None);
@@ -14665,7 +14665,7 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
     }
     for m in 0..n {
         let mut errs = diag::Errors::new();
-        for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
+        for it in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
             append_errs(&mut errs, outs.index_mut(it));
         }
         if errs.errors.len() != 0 {
@@ -15206,10 +15206,11 @@ fn check_prelude(q: &mut loader::Package, target: i32) bool {
     if !q.ok {
         return false;
     }
+    let n = q.idx().items.len();
     let c = &mut q.carry;
     c.keep = false;
-    c.items = q.idx.items.len() as u32;
-    for i in 0..q.idx.items.len() {
+    c.items = n as u32;
+    for i in 0..n {
         c.state.push(q.sched.state[i]);
         c.ret_attr.push(q.sched.ret_attr[i]);
     }

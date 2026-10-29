@@ -6,6 +6,7 @@
 // Raw pointers have no conformance: a type holding one writes its own `save` and `load`, or keeps the
 // pointer in a wrapper that does. The image is only ever read by the compiler binary that wrote it.
 import string as cstring;
+import std::mem::cell;
 
 /// The image being written. A sizing writer writes nothing and counts the bytes a save gives
 /// (`len`), so the save can then write into one allocation of that size.
@@ -498,5 +499,27 @@ extend<T: Persist + Hash + Eq> Set<T> as Persist {
         for _ in 0..n {
             self.insert(load_new::<T>(r));
         }
+    }
+}
+
+// A cell saves and loads its value.
+extend<T: Persist> UnsafeCell<T> as Persist {
+    fn save(self: &UnsafeCell<T>, w: &mut Writer) {
+        self.get_ref().save(w);
+    }
+
+    fn load(self: &mut UnsafeCell<T>, r: &mut Reader) {
+        unsafe (*self.get()).load(r);
+    }
+}
+
+extend<T: Copy + Persist> cell::Cell<T> as Persist {
+    fn save(self: &cell::Cell<T>, w: &mut Writer) {
+        let v = self.get();
+        v.save(w);
+    }
+
+    fn load(self: &mut cell::Cell<T>, r: &mut Reader) {
+        self.get_mut().load(r);
     }
 }

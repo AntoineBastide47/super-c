@@ -1837,13 +1837,13 @@ extend Mangler {
     // Whether the identifiers of module `m` take the shadow escape: a program module of a package whose
     // index lists shadowing names. Never the runtime, whose C then does not depend on the program's names.
     const fn shadows(self: &Self, m: ModuleId) bool {
-        return self.p().idx.shadow.len() != 0 && !self.p().modules.at(m as usize).prelude && !self.p().is_rt(m);
+        return self.p().idx().shadow.len() != 0 && !self.p().modules.at(m as usize).prelude && !self.p().is_rt(m);
     }
 
     // Whether `w` is a non-prelude top-level name that a prelude declaration also has (`PkgIndex.shadow`).
     fn shadowed(self: &Self, w: str) bool {
-        let s = self.p().idx.syms.find(w);
-        return s != loader::SYM_NONE && self.p().idx.shadow.contains(&s);
+        let s = self.p().idx().syms.find(w);
+        return s != loader::SYM_NONE && self.p().idx().shadow.contains(&s);
     }
 
     // Whether `w` begins prelude C symbols `w__..`: a prelude type's, interface's or generic function's
@@ -1854,8 +1854,8 @@ extend Mangler {
                 return true;
             }
         }
-        let s = self.p().idx.syms.find(w);
-        return s != loader::SYM_NONE && self.p().idx.pl_stems.contains(&s);
+        let s = self.p().idx().syms.find(w);
+        return s != loader::SYM_NONE && self.p().idx().pl_stems.contains(&s);
     }
 
     /// The C member field `fid` of module `m` names: the `@import` pin of a header type's field
@@ -2673,7 +2673,7 @@ extend Mangler {
         } else if !unsafe (*self.p().module_ast_const(rm)).targs_of(rt, &mut it) {
             return;
         }
-        let x = &self.p().idx;
+        let x = self.p().idx();
         for m in 0..self.p().modules.len() {
             let a = self.p().module_ast_const(m as ModuleId);
             for i in x.mod_exts[m]..x.mod_exts[m + 1] {
@@ -2695,7 +2695,7 @@ extend Mangler {
     /// item order, into `out`.
     pub(package) fn blanket_confs(self: &mut Self, iface: DefId, out: &mut Vector<DefId>) {
         out.clear();
-        let x = &self.p().idx;
+        let x = self.p().idx();
         for m in 0..self.p().modules.len() {
             let a = self.p().module_ast_const(m as ModuleId);
             for i in x.mod_exts[m]..x.mod_exts[m + 1] {
@@ -2739,7 +2739,7 @@ extend Mangler {
         let ia = self.p().module_ast_const(tr.module);
         self.ident(tr.module, unsafe (*ia).at_const(unsafe (*ia).ext_name(tr.node)).as_data.name.text, out);
         let mut ord: u32 = 0;
-        let x = &self.p().idx;
+        let x = self.p().idx();
         for i in x.mod_exts[m as usize]..x.mod_exts[m as usize + 1] {
             let e = x.exts[i as usize];
             if e == ext {
@@ -2993,7 +2993,7 @@ extend Mangler {
     fn ext_first(self: &mut Self, d: DefId) u32 {
         if !self.ext_built {
             self.ext_built = true;
-            let idx = &self.p().idx;
+            let idx = self.p().idx();
             let mut keys = Vector::<u64>::with_capacity(idx.exts.len());
             self.ext_rows.reserve(idx.exts.len());
             for m in 0..self.p().modules.len() {

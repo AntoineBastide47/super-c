@@ -235,9 +235,9 @@ const fn mod_of(p: &loader::Package, name: str) usize {
 
 // The item of module `m` named `name` (the first, in source order), or ITEM_NONE.
 fn item_named(p: &loader::Package, m: usize, name: str) loader::ItemId {
-    let sym = p.idx.syms.find(name);
-    for i in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
-        if p.idx.items.at(i).name == sym {
+    let sym = p.idx().syms.find(name);
+    for i in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
+        if p.idx().items.at(i).name == sym {
             return i as loader::ItemId;
         }
     }
@@ -288,7 +288,7 @@ fn index_edges_cover_reference_kinds() {
     assert(pre(&p, main, even), "a same-module call");
     assert(pre(&p, sum, pt), "a field access names the aggregate");
     assert(pre(&p, bee, cee), "an import-cycle module's call");
-    let ext = p.idx.items.at(sum as usize).owner;
+    let ext = p.idx().items.at(sum as usize).owner;
     assert(ext != loader::ITEM_NONE && pre(&p, sum, ext) && pre(&p, twice, ext), "members own their extend");
     assert(!pre(&p, main, main) && !pre(&p, sum, sum), "no self edges");
     // Final: the method calls typecheck resolved, and the generated format body's shim.
@@ -297,13 +297,13 @@ fn index_edges_cover_reference_kinds() {
     let mut prelude_edge = false;
     for e in p.sched.fin_off[main as usize] as usize..p.sched.fin_off[main as usize + 1] as usize {
         let t = p.sched.fin_edges[e] as usize;
-        if p.modules.at(p.idx.items.at(t).module as usize).prelude {
+        if p.modules.at(p.idx().items.at(t).module as usize).prelude {
             prelude_edge = true;
         }
     }
     assert(prelude_edge, "the generated format body references a prelude item");
-    for i in 0..p.sched.pre_off[p.idx.items.len()] as usize {
-        assert(p.sched.pre_edges[i] as usize < p.idx.items.len(), "edge targets are items");
+    for i in 0..p.sched.pre_off[p.idx().items.len()] as usize {
+        assert(p.sched.pre_edges[i] as usize < p.idx().items.len(), "edge targets are items");
     }
 }
 
@@ -415,8 +415,8 @@ fn index_edges_reach_builtin_extends() {
     let get = item_named(&p, am, "get");
     let kc = item_named(&p, am, "K");
     assert(f != loader::ITEM_NONE && k != loader::ITEM_NONE && get != loader::ITEM_NONE, "items indexed");
-    let conf = p.idx.items.at(get as usize).owner;
-    let inh = p.idx.items.at(kc as usize).owner;
+    let conf = p.idx().items.at(get as usize).owner;
+    let inh = p.idx().items.at(kc as usize).owner;
     assert(pre(&p, f, conf), "a method call on a builtin receiver depends on the conformance");
     assert(pre(&p, k, inh), "a qualified constant of a builtin depends on its extend");
     assert(p.sched.comp[conf as usize] < p.sched.comp[f as usize], "the extend precedes its caller");
@@ -439,7 +439,7 @@ fn index_components_collapse_cycles() {
     assert(p.sched.comp[back as usize] != p.sched.comp[bee as usize], "recursion through a callee is no cycle with it");
     // Dependency-first numbering: a callee's component precedes its caller's.
     assert(p.sched.comp[cee as usize] < p.sched.comp[bee as usize], "callee first");
-    assert(p.sched.ncomp as usize <= p.idx.items.len(), "bounded");
+    assert(p.sched.ncomp as usize <= p.idx().items.len(), "bounded");
     // A const fn recursion is one component and no error; a conformance names its interface and
     // target, and the interface default's call to `area` reaches the conformer only at final time.
     let fact = item_named(&p, cm, "fact");
@@ -449,7 +449,7 @@ fn index_components_collapse_cycles() {
     let shape = item_named(&p, cm, "Shape");
     let sq = item_named(&p, cm, "Sq");
     let area = item_named(&p, cm, "area");
-    let ext = p.idx.items.at(area as usize).owner;
+    let ext = p.idx().items.at(area as usize).owner;
     assert(
         ext != loader::ITEM_NONE && pre(&p, ext, shape) && pre(&p, ext, sq),
         "the conformance names interface and target",
@@ -528,8 +528,8 @@ fn main() i32 {
 }
 )";
     let p1 = indexed(&ws, a1, B0, C0, true);
-    assert(p0.idx.items.len() == p1.idx.items.len(), "same items");
-    for i in 0..p0.idx.items.len() {
+    assert(p0.idx().items.len() == p1.idx().items.len(), "same items");
+    for i in 0..p0.idx().items.len() {
         assert(p0.sched.key[i] == p1.sched.key[i], "keys are node-id independent");
         assert(p0.sched.sig_hash[i] == p1.sched.sig_hash[i], "a body edit changes no signature hash");
         assert(p0.sched.comp[i] == p1.sched.comp[i], "components stable");
@@ -543,7 +543,7 @@ fn main() i32 {
     let am = mod_of(&p0, "/a.spc");
     let main0 = item_named(&p0, am, "main");
     assert(
-        p0.idx.items.at(main0 as usize).node != p1.idx.items.at(main0 as usize).node,
+        p0.idx().items.at(main0 as usize).node != p1.idx().items.at(main0 as usize).node,
         "the edited body renumbers later nodes",
     );
 }
@@ -674,18 +674,18 @@ fn index_states_after_analysis() {
     let p = indexed(&ws, A0, B0, C0, false);
     // Every workspace item is Checked; a prelude item the platform filter removed after the
     // index was built stays Resolved (it is never checked); nothing is left mid-transition.
-    for i in 0..p.idx.items.len() {
+    for i in 0..p.idx().items.len() {
         let st = p.item_state_at(i as loader::ItemId);
         assert(st == loader::IS_CHECKED || st == loader::IS_RESOLVED, "no item mid-transition");
-        if !p.modules.at(p.idx.items.at(i).module as usize).prelude {
+        if !p.modules.at(p.idx().items.at(i).module as usize).prelude {
             assert(st == loader::IS_CHECKED, "every workspace item checked by the analysis");
         }
     }
     let am = mod_of(&p, "/a.spc");
     let main = item_named(&p, am, "main");
-    assert(p.item_state(am as ModuleId, p.idx.items.at(main as usize).node) == loader::IS_CHECKED, "the node query");
+    assert(p.item_state(am as ModuleId, p.idx().items.at(main as usize).node) == loader::IS_CHECKED, "the node query");
     assert(p.item_state(am as ModuleId, 1) == loader::IS_PARSED, "a node that is no item");
     // The index stays a few dozen bytes per item (34 at the time of writing), the prelude's items
     // (std/simd.spc's lane operations among them) most of them.
-    assert(p.sched.retained() < p.idx.items.len() * 64, "the index holds a small record per item");
+    assert(p.sched.retained() < p.idx().items.len() * 64, "the index holds a small record per item");
 }

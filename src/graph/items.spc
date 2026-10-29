@@ -82,8 +82,8 @@ fn spans_of(p: &loader::Package, m: usize) Spans {
         return sp;
     }
     let a = &p.modules.at(m).ast;
-    for i in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
-        let it = p.idx.items.at(i);
+    for i in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
+        let it = p.idx().items.at(i);
         let s = a.at_const(it.node).span;
         if it.owner == loader::ITEM_NONE {
             sp.top_s.push(s.start);
@@ -137,7 +137,7 @@ const fn owner_at(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: u3
         c.item = sp.top_id[t as usize];
         c.s = sp.top_s[t as usize];
         c.e = sp.top_e[t as usize];
-        c.leaf = p.idx.items.at(c.item as usize).kind != loader::ItemKind::IK_EXTEND as u8;
+        c.leaf = p.idx().items.at(c.item as usize).kind != loader::ItemKind::IK_EXTEND as u8;
         return c.item;
     }
     c.item = NONE;
@@ -161,11 +161,11 @@ pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>,
         return;
     }
     let a = &p.modules.at(m).ast;
-    let i0 = p.idx.mod_items[m] as usize;
-    let i1 = p.idx.mod_items[m + 1] as usize;
+    let i0 = p.idx().mod_items[m] as usize;
+    let i1 = p.idx().mod_items[m + 1] as usize;
     let nl = i1 - i0;
     for i in i0..i1 {
-        let ow = p.idx.items.at(i).owner;
+        let ow = p.idx().items.at(i).owner;
         if ow != loader::ITEM_NONE {
             out.push(i as u64 << 32 | ow as u64);
         }
@@ -181,10 +181,10 @@ pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>,
     let mut prev: u32 = 0;
     for k in i0..i1 {
         let it = p.sched.by_node[k];
-        let meta = *p.idx.items.at(it as usize);
+        let meta = *p.idx().items.at(it as usize);
         if meta.owner != loader::ITEM_NONE && !opened[(meta.owner - i0 as u32) as usize] {
             // The extend's header (generics, target, interface) precedes its first member.
-            let ed = a.ext(p.idx.items.at(meta.owner as usize).node).extend_def;
+            let ed = a.ext(p.idx().items.at(meta.owner as usize).node).extend_def;
             let mut he = ed.target_type;
             if ed.interface_type != NODE_NONE {
                 he = he.max(ed.interface_type);
@@ -216,7 +216,7 @@ pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>,
     prev = 0;
     for k in i0..i1 {
         let it = p.sched.by_node[k];
-        let meta = *p.idx.items.at(it as usize);
+        let meta = *p.idx().items.at(it as usize);
         let nd = a.at_const(meta.node);
         if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(a.ext(meta.node).function.body) {
             let end = a.ext(meta.node).function.body & NODE_BODY_MASK;
@@ -395,7 +395,7 @@ const fn tgt_max(tgt: &Vector<u32>) usize {
 /// `module_edges` reads. `build` completes it.
 pub(package) fn open(p: &mut loader::Package) {
     p.ensure_index();
-    let n = p.idx.items.len();
+    let n = p.idx().items.len();
     let nm = p.modules.len();
     let mut sch = loader::ItemSched {};
     // Stable keys: the module path, the top-level ordinal, the member ordinal (0 at top level).
@@ -404,8 +404,8 @@ pub(package) fn open(p: &mut loader::Package) {
         let mh = fnv(p.modules.at(m).path.as_str());
         let mut top: u64 = 0;
         let mut mem: u64 = 0;
-        for i in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
-            if p.idx.items.at(i).owner == loader::ITEM_NONE {
+        for i in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
+            if p.idx().items.at(i).owner == loader::ITEM_NONE {
                 top += 1;
                 mem = 0;
                 sch.key.push(mix(mix(mh, top), 0));
@@ -418,8 +418,8 @@ pub(package) fn open(p: &mut loader::Package) {
     // The lookup: each module's items ordered by declaration node.
     sch.by_node.reserve(n);
     for m in 0..nm {
-        let i0 = p.idx.mod_items[m] as usize;
-        let i1 = p.idx.mod_items[m + 1] as usize;
+        let i0 = p.idx().mod_items[m] as usize;
+        let i1 = p.idx().mod_items[m + 1] as usize;
         let base = sch.by_node.len();
         for i in i0..i1 {
             sch.by_node.push(i as u32);
@@ -427,9 +427,9 @@ pub(package) fn open(p: &mut loader::Package) {
         // Insertion sort: an extend's record precedes its members but its node follows them.
         for i in base + 1..sch.by_node.len() {
             let v = sch.by_node[i];
-            let vn = p.idx.items.at(v as usize).node;
+            let vn = p.idx().items.at(v as usize).node;
             let mut j = i;
-            while j > base && p.idx.items.at(sch.by_node[j - 1] as usize).node > vn {
+            while j > base && p.idx().items.at(sch.by_node[j - 1] as usize).node > vn {
                 sch.by_node.set(j, sch.by_node[j - 1]);
                 j -= 1;
             }
@@ -442,17 +442,17 @@ pub(package) fn open(p: &mut loader::Package) {
     sch.top_lo.resize_default(n);
     sch.body_hi.resize_default(n);
     for m in 0..nm {
-        let i0 = p.idx.mod_items[m] as usize;
-        let i1 = p.idx.mod_items[m + 1] as usize;
+        let i0 = p.idx().mod_items[m] as usize;
+        let i1 = p.idx().mod_items[m + 1] as usize;
         let mut prev: u32 = 0;
         let mut bmax: u32 = 0;
         for k in i0..i1 {
             let it = sch.by_node[k] as usize;
-            let meta = *p.idx.items.at(it);
+            let meta = *p.idx().items.at(it);
             if meta.owner == loader::ITEM_NONE {
                 sch.top_lo.set(it, prev);
                 for j in it + 1..n {
-                    if p.idx.items.at(j).owner != it as u32 {
+                    if p.idx().items.at(j).owner != it as u32 {
                         break;
                     }
                     sch.top_lo.set(j, prev);
@@ -509,7 +509,7 @@ pub(package) fn open(p: &mut loader::Package) {
 /// keep a callee's component before its caller's, which is what the visibility rule reads.
 pub(package) fn build(p: &mut loader::Package, edges: &Vector<u64>) {
     let t0 = plat::now_ns();
-    let n = p.idx.items.len();
+    let n = p.idx().items.len();
     // Extends by target type item (CSR): the extend's target resolution, or the alias it names;
     // and per item the type its own extend targets (an extend or a member), for the exemption.
     let mut xe = Vector::<u64>::new();
@@ -519,7 +519,7 @@ pub(package) fn build(p: &mut loader::Package, edges: &Vector<u64>) {
         self_t.set(i, loader::ITEM_NONE);
     }
     for i in 0..n {
-        let it = *p.idx.items.at(i);
+        let it = *p.idx().items.at(i);
         if it.kind != loader::ItemKind::IK_EXTEND as u8 || !p.modules.at(it.module as usize).has_ast {
             continue;
         }
@@ -537,7 +537,7 @@ pub(package) fn build(p: &mut loader::Package, edges: &Vector<u64>) {
             xe.push(t as u64 << 32 | i as u64);
             self_t.set(i, t);
             for j in i + 1..n {
-                if p.idx.items.at(j).owner != i as u32 {
+                if p.idx().items.at(j).owner != i as u32 {
                     break;
                 }
                 self_t.set(j, t);
@@ -560,15 +560,15 @@ pub(package) fn build(p: &mut loader::Package, edges: &Vector<u64>) {
         // A prelude item never reaches a method of an extend outside the prelude (it cannot name one,
         // and such an extend adds only new names), and every prelude component completes before any
         // other starts (the type check's gate): no edge.
-        let pre = p.modules.at(p.idx.items.at((e >> 32) as usize).module as usize).prelude;
+        let pre = p.modules.at(p.idx().items.at((e >> 32) as usize).module as usize).prelude;
         for k in xoff[t] as usize..xoff[t + 1] as usize {
-            if !pre || p.modules.at(p.idx.items.at(xtgt[k] as usize).module as usize).prelude {
+            if !pre || p.modules.at(p.idx().items.at(xtgt[k] as usize).module as usize).prelude {
                 all.push(e & 0xFFFFFFFF00000000u64 | xtgt[k] as u64);
             }
         }
     }
     for i in 0..n {
-        let ow = p.idx.items.at(i).owner;
+        let ow = p.idx().items.at(i).owner;
         if ow != loader::ITEM_NONE {
             all.push(ow as u64 << 32 | i as u64);
         }
@@ -611,10 +611,10 @@ pub(package) fn build(p: &mut loader::Package, edges: &Vector<u64>) {
 // prelude the common names (`fmt`, `eq`, `hash`) would merge most of it into one component (940 of
 // 1,832 items where the largest is 336 without them).
 fn builtin_names(p: &loader::Package, sch: &mut loader::ItemSched) {
-    let n = p.idx.items.len();
+    let n = p.idx().items.len();
     let names = &mut sch.bnames;
     for i in 0..n {
-        let it = *p.idx.items.at(i);
+        let it = *p.idx().items.at(i);
         let m = it.module as usize;
         if it.kind != loader::ItemKind::IK_EXTEND as u8 || !p.modules.at(m).has_ast || p.modules.at(m).prelude {
             continue;
@@ -630,7 +630,7 @@ fn builtin_names(p: &loader::Package, sch: &mut loader::ItemSched) {
             continue;
         }
         for j in i + 1..n {
-            let mj = *p.idx.items.at(j);
+            let mj = *p.idx().items.at(j);
             if mj.owner != i as u32 {
                 break;
             }
@@ -643,12 +643,12 @@ fn builtin_names(p: &loader::Package, sch: &mut loader::ItemSched) {
         }
         let ip = a.at_const(ed.interface_type).as_data.type_path.parts;
         let iname = a.at_const(unsafe a.list(ip)[(ip.len - 1) as usize]).as_data.name.text;
-        let sym = p.idx.syms.find(src.slice(iname.start as usize, iname.end as usize));
+        let sym = p.idx().syms.find(src.slice(iname.start as usize, iname.end as usize));
         if sym == loader::SYM_NONE {
             continue;
         }
         for f in 0..n {
-            let fi = *p.idx.items.at(f);
+            let fi = *p.idx().items.at(f);
             if fi.kind != loader::ItemKind::IK_INTERFACE as u8 || fi.name != sym || !p.modules.at(fi.module as usize).has_ast {
                 continue;
             }
@@ -787,8 +787,8 @@ pub(package) fn visible(p: &loader::Package, reader: loader::ItemId, target: loa
     if ct == s.comp[reader as usize] {
         return target < reader;
     }
-    let tm = p.idx.items.at(target as usize).module as usize;
-    let rm = p.idx.items.at(reader as usize).module as usize;
+    let tm = p.idx().items.at(target as usize).module as usize;
+    let rm = p.idx().items.at(reader as usize).module as usize;
     if p.modules.at(tm).prelude && !p.modules.at(rm).prelude {
         return true;
     }
@@ -800,11 +800,11 @@ pub(package) fn visible(p: &loader::Package, reader: loader::ItemId, target: loa
 /// extend); a body-arena node the function whose body run holds it. ITEM_NONE past every
 /// range (an appended desugar node, an import path).
 pub(package) fn owner_of(p: &loader::Package, m: ModuleId, node: NodeId) loader::ItemId {
-    if !p.sched.built || m as usize + 1 >= p.idx.mod_items.len() {
+    if !p.sched.built || m as usize + 1 >= p.idx().mod_items.len() {
         return loader::ITEM_NONE;
     }
-    let mut lo = p.idx.mod_items[m as usize] as usize;
-    let mut hi = p.idx.mod_items[m as usize + 1] as usize;
+    let mut lo = p.idx().mod_items[m as usize] as usize;
+    let mut hi = p.idx().mod_items[m as usize + 1] as usize;
     if Ast::in_body(node) {
         let b = node & NODE_BODY_MASK;
         while lo < hi {
@@ -820,29 +820,29 @@ pub(package) fn owner_of(p: &loader::Package, m: ModuleId, node: NodeId) loader:
         // block id when it is one node. The owner is the first position at or past the search
         // that owns a body.
         let a = &p.modules.at(m as usize).ast;
-        while lo < p.idx.mod_items[m as usize + 1] as usize {
-            let nd = a.at_const(p.idx.items.at(p.sched.by_node[lo] as usize).node);
+        while lo < p.idx().mod_items[m as usize + 1] as usize {
+            let nd = a.at_const(p.idx().items.at(p.sched.by_node[lo] as usize).node);
             if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(
-                a.ext(p.idx.items.at(p.sched.by_node[lo] as usize).node).function.body,
+                a.ext(p.idx().items.at(p.sched.by_node[lo] as usize).node).function.body,
             ) {
                 break;
             }
             lo += 1;
         }
-        if lo >= p.idx.mod_items[m as usize + 1] as usize {
+        if lo >= p.idx().mod_items[m as usize + 1] as usize {
             return loader::ITEM_NONE;
         }
         return p.sched.by_node[lo];
     }
     while lo < hi {
         let mid = (lo + hi) / 2;
-        if p.idx.items.at(p.sched.by_node[mid] as usize).node < node {
+        if p.idx().items.at(p.sched.by_node[mid] as usize).node < node {
             lo = mid + 1;
         } else {
             hi = mid;
         }
     }
-    if lo >= p.idx.mod_items[m as usize + 1] as usize {
+    if lo >= p.idx().mod_items[m as usize + 1] as usize {
         return loader::ITEM_NONE;
     }
     return p.sched.by_node[lo];
@@ -891,7 +891,7 @@ pub(package) fn spans_all(p: &loader::Package) Vector<Spans> {
 /// Lay the post-typecheck edges (every module's `module_edges` run at the end of its type check,
 /// with the resolutions the checker added) out as the final ranges.
 pub(package) fn build_final(p: &mut loader::Package, edges: &Vector<u64>) {
-    let n = p.idx.items.len();
+    let n = p.idx().items.len();
     let mut off = Vector::<u32>::new();
     let mut tgt = Vector::<u32>::new();
     csr(n, edges, &mut off, &mut tgt);
@@ -909,7 +909,7 @@ pub(package) fn finalize(p: &mut loader::Package) {
     }
     p.sched.finalized = true;
     let t0 = plat::now_ns();
-    let n = p.idx.items.len();
+    let n = p.idx().items.len();
     let sps = spans_all(p);
     let mut edges = Vector::<u64>::new();
     for m in 0..p.modules.len() {
@@ -937,7 +937,7 @@ pub(package) fn finalize(p: &mut loader::Package) {
     let mut akeys = Vector::<u64>::new();
     let mut am = p.modules.len();
     for i in 0..n {
-        let m = p.idx.items.at(i).module as usize;
+        let m = p.idx().items.at(i).module as usize;
         if m != am {
             am = m;
             akeys.clear();
@@ -959,7 +959,7 @@ pub(package) fn finalize(p: &mut loader::Package) {
 // interface, fields and variants, the aliased or constant type). Types hash structurally with
 // nominal declarations spelled as item keys, so neither node ids nor type numbering enter.
 fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize, akeys: &Vector<u64>) u64 {
-    let it = *p.idx.items.at(i);
+    let it = *p.idx().items.at(i);
     let m = it.module as usize;
     let a = &p.modules.at(m).ast;
     let mut h = mix(mix(p.sched.key[i], it.kind), it.vis);
@@ -1371,7 +1371,7 @@ const fn ms(ns: u64) f64 {
 pub(package) fn report(p: &mut loader::Package, task_ns: u64) {
     finalize(p);
     let s = &p.sched;
-    let n = p.idx.items.len();
+    let n = p.idx().items.len();
     let nm = p.modules.len();
     // Per-item typecheck cost.
     let mut icost = Vector::<u64>::new();
@@ -1459,8 +1459,8 @@ pub(package) fn report(p: &mut loader::Package, task_ns: u64) {
         ms(mcost[maxm]),
         p.modules.at(maxm).path.as_str(),
         ms(icost[maxi]),
-        p.modules.at(p.idx.items.at(maxi).module as usize).path.as_str(),
-        p.idx.items.at(maxi).node,
+        p.modules.at(p.idx().items.at(maxi).module as usize).path.as_str(),
+        p.idx().items.at(maxi).node,
     );
     eprint(
         "item-stats typecheck item schedule with {} ns per task ({} ms of task overhead over {} jobs):",
@@ -1574,16 +1574,16 @@ pub(package) fn import_levels(p: &loader::Package, lift: bool, lvl: &mut Vector<
     let n = p.modules.len();
     let mut nscc: usize = 0;
     for i in 0..n {
-        nscc = nscc.max(p.idx.scc_of[i] as usize + 1);
+        nscc = nscc.max(p.idx().scc_of[i] as usize + 1);
     }
     lvl.clear();
     lvl.resize_default(nscc);
     for _ in 0..nscc + 2 {
         let mut changed = false;
         for i in 0..n {
-            let si = p.idx.scc_of[i] as usize;
-            for e in p.idx.mod_imports[i] as usize..p.idx.mod_imports[i + 1] as usize {
-                let sj = p.idx.scc_of[p.idx.imports[e] as usize] as usize;
+            let si = p.idx().scc_of[i] as usize;
+            for e in p.idx().mod_imports[i] as usize..p.idx().mod_imports[i + 1] as usize {
+                let sj = p.idx().scc_of[p.idx().imports[e] as usize] as usize;
                 if sj != si && lvl[sj] + 1 > lvl[si] {
                     lvl.set(si, lvl[sj] + 1);
                     changed = true;
@@ -1594,11 +1594,11 @@ pub(package) fn import_levels(p: &loader::Package, lift: bool, lvl: &mut Vector<
             let mut plvl: u32 = 0;
             for i in 0..n {
                 if p.modules.at(i).prelude {
-                    plvl = plvl.max(lvl[p.idx.scc_of[i] as usize] + 1);
+                    plvl = plvl.max(lvl[p.idx().scc_of[i] as usize] + 1);
                 }
             }
             for i in 0..n {
-                let si = p.idx.scc_of[i] as usize;
+                let si = p.idx().scc_of[i] as usize;
                 if !p.modules.at(i).prelude && lvl[si] < plvl {
                     lvl.set(si, plvl);
                     changed = true;
@@ -1627,7 +1627,7 @@ fn module_schedule_ns(p: &loader::Package, mcost: &Vector<u64>) u64 {
         if p.modules.at(i).prelude {
             gcost.set(nscc, gcost[nscc] + mcost[i]);
         } else {
-            let si = p.idx.scc_of[i] as usize;
+            let si = p.idx().scc_of[i] as usize;
             gcost.set(si, gcost[si] + mcost[i]);
             glvl.set(si, lvl[si]);
         }
@@ -1670,7 +1670,7 @@ extend Reach {
     /// component they depend on.
     pub(package) fn of_module(self: &mut Self, p: &loader::Package, m: usize) {
         self.reset(p);
-        for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
+        for it in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
             let c = p.sched.comp[it] as usize;
             self.mark(c);
             self.low = self.low.max(c + 1);

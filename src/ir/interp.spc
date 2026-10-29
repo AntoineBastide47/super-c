@@ -3174,7 +3174,7 @@ extend Interp {
         if self.p().icost_on && self.cur_item != loader::ITEM_NONE {
             // Item-schedule measurement: a dynamic evaluation edge from the checking item.
             let pm = self.pkg as *mut loader::Package;
-            let ci = self.p().idx.items.at(self.cur_item as usize);
+            let ci = self.p().idx().items.at(self.cur_item as usize);
             unsafe (*pm).ctfe_edges.push(ci.module as u64 << 32 | ci.node as u64);
             unsafe (*pm).ctfe_edges.push(m as u64 << 32 | fnode as u64);
         }

@@ -202,7 +202,7 @@ fn save_into(q: &loader::Package, e: &iri::Interp, w: &mut Writer) {
     q.pub_map.save(w);
     q.publications.save(w);
     q.tt_class.save(w);
-    q.idx.save(w);
+    q.idx().save(w);
     q.lint_warnings.save(w);
     q.carry.save(w);
     e.pending.save(w);
@@ -234,7 +234,7 @@ pub(package) fn load(p: &mut loader::Package, e: &mut iri::Interp, img: str) boo
     p.pub_map.load(&mut r);
     p.publications.load(&mut r);
     p.tt_class.load(&mut r);
-    p.idx.load(&mut r);
+    p.idx_mut().load(&mut r);
     p.lint_warnings.load(&mut r);
     p.carry.load(&mut r);
     e.pending.load(&mut r);

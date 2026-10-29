@@ -717,6 +717,10 @@ pub(package) struct Sym {
     /// The memory outside its own frame a call of it may read or write (`FX_*`): `lir::opt::Run::new`
     /// infers it for a function with a body; both for any other. The text form does not carry it.
     pub(package) fx: u8,
+    /// The parameters (a bit each) whose pointer a call of it may keep past the call or hand back (store,
+    /// return, pass on to a call that may): `lir::opt::Run::new` infers it for a function with a body;
+    /// all for any other. The text form does not carry it.
+    pub(package) esc: u64,
     /// What a call of it does to memory by its name (`alloc_of`): ALLOC_FRESH, ALLOC_FREE or ALLOC_NONE.
     pub(package) alloc: u8,
 }
@@ -807,7 +811,7 @@ pub(package) const SIG_VARIADIC: u32 = 0x80000000;
 pub(package) const VOPS_SOME: u8 = 1;
 pub(package) const VOPS_ALL: u8 = 2;
 /// `Body.refs`: the bytes, the exclusive flag, the read-only flag, and REF_INNER for an aggregate parameter
-/// (a by-value `[]mut T` or `[]T`) whose pointer at offset 0, rather than the parameter, is the one.
+/// (a by-value `[]mut T`, `[]T` or `str`) whose pointer at offset 0, rather than the parameter, is the one.
 pub(package) const REF_BYTES: u32 = 0x1FFFFFFF;
 pub(package) const REF_READONLY: u32 = 0x20000000;
 pub(package) const REF_INNER: u32 = 0x40000000;
@@ -1222,13 +1226,15 @@ pub(package) struct Held {
     pub(package) data: u32,
     pub(package) bytes: u32,
     pub(package) relocs: u32,
-    /// Per held body: its symbol, its walk facts (`HELD_SHAPE`, `HELD_OK`, `HELD_COLD`), its effects (`Sym.fx`) and
-    /// the parameters whose memory it may write (a bit each), and its direct calls before optimization
+    /// Per held body: its symbol, its walk facts (`HELD_SHAPE`, `HELD_OK`, `HELD_COLD`), its effects (`Sym.fx`), the
+    /// parameters whose memory it may write and those it may let escape (`Sym.esc`), a bit each, and its
+    /// direct calls before optimization
     /// (`calls[at[k]..at[k + 1]]`: symbols, in instruction order).
     pub(package) syms: Vector<u32>,
     pub(package) flags: Vector<u8>,
     pub(package) fx: Vector<u8>,
     pub(package) wargs: Vector<u64>,
+    pub(package) esc: Vector<u64>,
     pub(package) at: Vector<u32>,
     pub(package) calls: Vector<u32>,
     /// Per held data definition, its symbol.
@@ -1253,6 +1259,7 @@ extend Held {
             flags: Vector::<u8>::new(),
             fx: Vector::<u8>::new(),
             wargs: Vector::<u64>::new(),
+            esc: Vector::<u64>::new(),
             at: Vector::<u32>::new(),
             calls: Vector::<u32>::new(),
             dsyms: Vector::<u32>::new(),
@@ -1350,6 +1357,7 @@ extend Package {
                 noinline: false,
                 cold: false,
                 fx: FX_READ | FX_WRITE,
+                esc: ~0u64,
                 alloc: if kind == SK_FUNC {
                     alloc_of(name);
                 } else {

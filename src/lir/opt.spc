@@ -129,6 +129,7 @@ pub(package) struct Opt {
     ipin: Vector<bool>,
     ppin: Vector<bool>,
     acls: Vector<u8>,
+    aobj: Vector<u32>, // per load or store, the object it accesses (`object`)
     frz: Vector<bool>, // per instruction, a load of a read-only referent (`frozen`)
     mark: Vector<u32>,
     hdr: Vector<bool>, // per block, whether it heads a loop (`thread`)
@@ -302,6 +303,7 @@ extend Opt {
             ipin: Vector::<bool>::new(),
             ppin: Vector::<bool>::new(),
             acls: Vector::<u8>::new(),
+            aobj: Vector::<u32>::new(),
             frz: Vector::<bool>::new(),
             mark: Vector::<u32>::new(),
             hdr: Vector::<bool>::new(),
@@ -713,6 +715,7 @@ extend Opt {
             self.dpost.as_slice(),
             lu::Classes {
                 acc: self.acls.as_slice(),
+                obj: self.aobj.as_slice(),
                 member: self.imem.as_slice(),
                 scoped: self.sbits,
                 root: self.croot.as_slice(),
@@ -1716,11 +1719,14 @@ extend Opt {
     }
 
     // The parameters (bits) whose value escapes: a use of a value of their class but as an access's
-    // address, address arithmetic's base, a select's operand, a comparison's operand or a block argument;
-    // for a view parameter (`REF_INNER`), any use of the parameter itself but as a load's address. A scope
-    // class (bits `scoped`) escapes only through a use in its own copy, and a use outside it is one of its
-    // roots' base (`escape_bits`); an allocation's (bits `fresh`) escapes not through a return or a free
-    // (`ALLOC_FREE`).
+    // address, address arithmetic's base, a select's operand, a comparison's operand, a block argument or
+    // an argument of a parameter the callee does not let escape (`Sym.esc`; the call then writes the
+    // class, `arg_bits`); for a view parameter (`REF_INNER`), any use of the parameter itself but as a
+    // load's address. A scope class (bits `scoped`) escapes only through a use in its own copy, there
+    // through any call argument too: its root may be an offset into a parameter's referent, and the
+    // copy's accesses folded onto the parameter's address are of the parameter's class, which the call's
+    // write would not reach; a use outside its copy is one of its roots' base (`escape_bits`). An
+    // allocation's class (bits `fresh`) escapes not through a return or a free (`ALLOC_FREE`).
     fn escaped(self: &mut Self, pk: &Package, b: &Body, scoped: u64, fresh: u64) u64 {
         let views = any_inner(b);
         let mut out: u64 = 0;
@@ -1752,13 +1758,23 @@ extend Opt {
                 out |= self.escape_bits(self.class(t.b), foreign);
                 continue;
             }
-            let kept = if op == O_RET || op == O_CALL && call_alloc(pk, b, t) == ALLOC_FREE {
+            let freed = if op == O_RET || op == O_CALL && call_alloc(pk, b, t) == ALLOC_FREE {
                 fresh;
             } else {
                 0u64;
             };
+            // A call's uses are its arguments.
+            let kept = if op == O_CALL {
+                ~pk.syms[b.syms[t.a as usize] as usize].esc;
+            } else {
+                0u64;
+            };
             for u in 0..nu {
-                out |= self.escape_bits(self.class(self.uses[u]), foreign) & ~kept;
+                let c = self.class(self.uses[u]);
+                if u < 64 && (kept >> u as u64 & 1) != 0 && (class_bit(c) & scoped) == 0 {
+                    continue;
+                }
+                out |= self.escape_bits(c, foreign) & ~freed;
             }
         }
         return out >> 1;
@@ -1816,7 +1832,19 @@ extend Opt {
         } else {
             CL_OTHER;
         };
-        return class_bit(c) | self.sbits & ~self.member(i);
+        return class_bit(c) | self.sbits & ~self.member(i) | self.arg_bits(b, i, t);
+    }
+
+    // The classes call `t`, instruction `i` of `b`, may write through its arguments (a class a callee does
+    // not let escape stays, `escaped`); none for any other instruction.
+    fn arg_bits(self: &Self, b: &Body, i: u32, t: Inst) u64 {
+        let mut out: u64 = 0;
+        if t.op == O_CALL || t.op == O_CALLIND {
+            for q in 0..t.aux as u32 {
+                out |= class_bit(self.acc(i, b.pool[(t.c + q) as usize]));
+            }
+        }
+        return out;
     }
 
     // The plain stores of block `k` of `b` whose class is an exclusive parameter's, into `lst`; the classes
@@ -1839,7 +1867,7 @@ extend Opt {
                     imp |= class_bit(c) | other;
                 }
             } else if writes(pk, b, t) {
-                imp |= class_bit(CL_OTHER) | other;
+                imp |= class_bit(CL_OTHER) | other | self.arg_bits(b, i, t);
             }
         }
         return imp;
@@ -1937,6 +1965,7 @@ extend Opt {
         // The classes of the loads' and stores' accesses before the walk forwards their addresses: a
         // parameter an inlined body's accesses go through, a scope's, becomes the caller's pointer.
         fill(&mut self.acls, b.insts.len(), CL_MANY);
+        fill(&mut self.aobj, b.insts.len(), NONE);
         frozen(b, &mut self.frz);
         for i in 0..b.insts.len() {
             let op = b.insts[i].op;
@@ -1944,6 +1973,9 @@ extend Opt {
                 self.acls[i] = CL_FROZEN;
             } else if op == O_LOAD || op == O_STORE {
                 self.acls[i] = self.acc(i as u32, b.insts[i].a);
+            }
+            if op == O_LOAD || op == O_STORE {
+                self.aobj[i] = self.object(pk, b, b.insts[i].a);
             }
         }
         for hi in 0..self.order.len() {
@@ -4540,6 +4572,41 @@ extend Opt {
         }
     }
 
+    // The object address `a` of `b` points into (`lu::Classes.obj`): a slot (`privates`), private or not,
+    // or a data symbol the package defines (not a C library's, which another name may alias), through at
+    // most FRAME_DEPTH steps of address arithmetic; NONE for any other.
+    fn object(self: &Self, pk: &Package, b: &Body, a: Value) u32 {
+        if (a & (VPARAM | VFLAG)) != 0 {
+            return NONE;
+        }
+        let s = self.pder[a as usize];
+        if s != NONE {
+            return s | if self.pesc[s as usize] {
+                lu::OBJ_SLOT;
+            } else {
+                lu::OBJ_PRIVATE;
+            };
+        }
+        let mut v = a;
+        for _ in 0..FRAME_DEPTH {
+            let t = b.insts[v as usize];
+            if t.op == O_SYMADDR {
+                let s = b.syms[t.a as usize];
+                let y = pk.syms[s as usize];
+                return if y.kind != SK_FUNC && !y.ext {
+                    s;
+                } else {
+                    NONE;
+                };
+            }
+            if t.op != O_PTRADD || (t.a & (VPARAM | VFLAG)) != 0 {
+                return NONE;
+            }
+            v = t.a;
+        }
+        return NONE;
+    }
+
     // Whether instruction `t` accesses only a private slot's memory (`privates`): a load from one, or a
     // store, copy or fill into one.
     fn private(self: &Self, t: Inst) bool {
@@ -5359,11 +5426,13 @@ extend Run {
     pub(package) fn new(pk: &mut Package, sealed: &Vector<bool>, cf: Config) Run {
         let bodies = replace(&mut pk.bodies, Vector::<Body>::new());
         let mut wargs = Vector::<u64>::new();
-        let fx = effects(pk, &bodies, &mut wargs);
+        let mut esc = Vector::<u64>::new();
+        let fx = effects(pk, &bodies, &mut wargs, &mut esc);
         for s in 0..pk.syms.len() {
             let d = pk.syms[s].def;
             if pk.syms[s].kind == SK_FUNC && d != NONE {
                 pk.syms.index_mut(s).fx = fx[d as usize];
+                pk.syms.index_mut(s).esc = esc[d as usize];
             }
         }
         let p: &Package = pk;
@@ -5675,8 +5744,10 @@ pub(package) fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
 // body), both for any other call. A block that ends the program (`panic`, `unreachable`) counts for
 // nothing: no code of the caller runs after it. A held body (`Package.held`) keeps the flags and the
 // parameters its unit's build found: the others then take the values a build without held bodies gives
-// them. Into `wargs`, per body, the parameters whose memory it may write (`FX_ARG`), a bit each.
-fn effects(p: &Package, bodies: &Vector<Body>, wargs: &mut Vector<u64>) Vector<u8> {
+// them. Into `wargs`, per body, the parameters whose memory it may write (`FX_ARG`), a bit each; into
+// `esc`, those whose pointer it may let escape (`Sym.esc`): its own uses' (`own_escapes`), and a pass to
+// a body's parameter that escapes.
+fn effects(p: &Package, bodies: &Vector<Body>, wargs: &mut Vector<u64>, esc: &mut Vector<u64>) Vector<u8> {
     let n = bodies.len();
     let held = if p.held.body == NONE {
         n;
@@ -5685,23 +5756,38 @@ fn effects(p: &Package, bodies: &Vector<Body>, wargs: &mut Vector<u64>) Vector<u
     };
     let mut fx = Vector::<u8>::with_capacity(n);
     wargs.truncate(0);
+    esc.truncate(0);
+    // Per body below `held`, its parameters' passes to a body (`own_escapes`): `pass[at[k]..at[k + 1]]`.
+    let mut pass = Vector::<u64>::new();
+    let mut at = Vector::<u32>::with_capacity(held + 1);
     for k in 0..n {
         if k >= held {
             fx.push(p.held.fx[k - held]);
             wargs.push(p.held.wargs[k - held]);
+            esc.push(p.held.esc[k - held]);
             continue;
         }
         let mut w: u64 = 0;
         fx.push(own_effects(p, &bodies[k], &mut w));
         wargs.push(w);
+        at.push(pass.len() as u32);
+        esc.push(own_escapes(p, &bodies[k], &mut pass));
     }
-    // Each round adds one of a body's 3 flags or 64 parameters, or ends.
-    for _ in 0..67 * n + 1 {
+    at.push(pass.len() as u32);
+    // Each round adds one of a body's 3 flags, 64 written or 64 escaping parameters, or ends.
+    for _ in 0..131 * n + 1 {
         let mut changed = false;
         for k in 0..held {
             let b = &bodies[k];
             let mut f = fx[k];
             let mut w = wargs[k];
+            let mut s = esc[k];
+            for x in at[k]..at[k + 1] {
+                let e = pass[x as usize];
+                if (esc[(e >> 32) as usize] >> (e >> 8 & 0xFF) & 1) != 0 {
+                    s |= 1u64 << (e & 0xFF);
+                }
+            }
             for i in 0..b.insts.len() {
                 let t = b.insts[i];
                 let c = call_target(p, b, t);
@@ -5716,9 +5802,10 @@ fn effects(p: &Package, bodies: &Vector<Body>, wargs: &mut Vector<u64>) Vector<u
                     }
                 }
             }
-            if f != fx[k] || w != wargs[k] {
+            if f != fx[k] || w != wargs[k] || s != esc[k] {
                 fx[k] = f;
                 wargs[k] = w;
+                esc[k] = s;
                 changed = true;
             }
         }
@@ -5767,6 +5854,100 @@ fn own_effects(p: &Package, b: &Body, w: &mut u64) u8 {
         }
     }
     return f;
+}
+
+// The parameters (the first 64, a bit each) whose pointer body `b`'s own instructions may let escape
+// (`effects`): a use of the parameter, or of address arithmetic on it, but as an access's address, the
+// base of more arithmetic or a comparison's operand. A pass to a body's parameter goes into `pass`
+// instead (`body << 32 | argument << 8 | parameter`): it escapes when that parameter does. A block that
+// ends the program counts for nothing.
+fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>) u64 {
+    let ni = b.insts.len();
+    // Per instruction, the parameter its value is address arithmetic on (NONE: none). Each pass sets at
+    // least one more or ends: at most `ni + 1`.
+    let mut der = Vector::<u32>::with_capacity(ni);
+    for _ in 0..ni {
+        der.push(NONE);
+    }
+    for _ in 0..ni + 1 {
+        let mut changed = false;
+        for i in 0..ni {
+            let t = b.insts[i];
+            if t.op == O_PTRADD && der[i] == NONE {
+                let k = param_of(b, &der, t.a);
+                if k != NONE {
+                    der[i] = k;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut out: u64 = 0;
+    let mut uses = Vector::<Value>::new();
+    let mut edges = Vector::<u32>::new();
+    for k in 0..b.blocks.len() {
+        let bk = b.blocks[k];
+        let end = b.insts[(bk.start + bk.len - 1) as usize].op;
+        if end == O_PANIC || end == O_UNREACHABLE {
+            continue;
+        }
+        for i in bk.start..bk.start + bk.len {
+            let t = b.insts[i as usize];
+            let c = call_target(p, b, t);
+            if c != NONE {
+                for q in 0..t.aux as u32 {
+                    let x = param_of(b, &der, b.pool[(t.c + q) as usize]);
+                    if x == NONE {
+                        continue;
+                    }
+                    if q < 64 {
+                        pass.push(c as u64 << 32 | q as u64 << 8 | x as u64);
+                    } else {
+                        out |= 1u64 << x as u64;
+                    }
+                }
+                continue;
+            }
+            lv::uses(b, t, &mut uses);
+            if is_terminator(t.op) {
+                b.succ_edges(t, &mut edges);
+                for d in 0..edges.len() {
+                    for a in 0..b.edge_nargs(edges[d]) {
+                        uses.push(b.edge_arg(edges[d], a));
+                    }
+                }
+            }
+            for u in 0..uses.len() {
+                let v = uses[u];
+                let x = param_of(b, &der, v);
+                let kept = t.op == O_LOAD && t.a == v && u == 0 || t.op == O_STORE && t.a == v && t.b != v || t.op == O_MEMCPY && (t.a == v || t.b == v) && t.c != v || t.op == O_MEMSET && t.a == v && t.b != v && t.c != v || t.op == O_PTRADD && t.a == v && t.b != v || t.op == O_ICMP;
+                if x != NONE && !kept {
+                    out |= 1u64 << x as u64;
+                }
+            }
+        }
+    }
+    return out;
+}
+
+// The parameter (of the first 64) value `v` of `b` is or is address arithmetic on (`der`), NONE for none.
+fn param_of(b: &Body, der: &Vector<u32>, v: Value) u32 {
+    if v == VNONE || (v & VFLAG) != 0 {
+        return NONE;
+    }
+    if (v & VPARAM) != 0 {
+        let e = b.blocks[0];
+        let x = v & ~VPARAM;
+        return if x >= e.param_start && x - e.param_start < (e.param_len as u32).min(64) {
+            x - e.param_start;
+        } else {
+            NONE;
+        };
+    }
+    return der[v as usize];
 }
 
 // Whether instruction `i` of `b` lies in a block that ends the program.

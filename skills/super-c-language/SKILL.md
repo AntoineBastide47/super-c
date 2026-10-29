@@ -322,7 +322,11 @@ lifetime must be declared to outlive the storage's (`fn fill<'x>(w: &mut Vector<
 
 A `&mut` reference is exclusive also for unsafe code: reaching its referent through any
 other path while it is live is undefined behavior (its C parameter is `restrict`, see
-`types.md`). A `[]mut T` view is exclusive the same way (Rust's `&mut [T]`). A `&mut` or a
+`types.md`). A `[]mut T` view is exclusive the same way (Rust's `&mut [T]`). A `&T`, a `[]T` and a
+`str` are read-only the same way: while one is live, changing its referent's or elements' bytes
+outside an `UnsafeCell` is undefined behavior, also through `&T as *const T as *mut T` (the
+optimizer keeps their loads across every write). Lazy state a `&self` method fills goes in a cell
+(`std::mem::cell::Cell`, `UnsafeCell`). A `&mut` or a
 `[]mut T` copied into a local of its own kind moves (`let t = s;`); passed to a call it is
 reborrowed for the call, and for as long as the result lives when the signature ties them
 (`let d = r.index_mut(0); let n = r.len(); *d = 1` is "cannot use this value while it is

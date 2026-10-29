@@ -7,7 +7,8 @@ const E: str = "SC_NO_EMIT_CACHE";
 
 // A program each flag changes: a counted loop (unrolling), a loop with bounds checks (versioning), a loop
 // with a branch on a parameter (unswitching), a reduction over a slice (vectorization), a loop that
-// writes floats through a struct's pointer and reads its integer length (strict aliasing), a small and a
+// writes floats through a struct's pointer and reads its integer length through a raw pointer, which
+// only the type tags keep apart (strict aliasing; a `&Buf` is read-only without them), a small and a
 // mid-sized callee (inlining), leaf functions (the frame pointer), slots (the stack protector) and float
 // arithmetic whose rewrites stay exact (the float flags).
 const PROGRAM: str = M"(import stdio;
@@ -68,10 +69,10 @@ struct Buf {
 }
 
 @noinline
-fn spread(b: &Buf, x: f64) {
+fn spread(b: *const Buf, x: f64) {
     let mut i: usize = 0;
-    while i < b.n {
-        unsafe b.data[i] = x * i as f64;
+    while i < unsafe (*b).n {
+        unsafe (*b).data[i] = x * i as f64;
         i += 1;
     }
 }

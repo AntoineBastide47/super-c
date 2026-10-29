@@ -6,6 +6,7 @@
 import string as cstring;
 import atomic;
 import sc_runtime;
+import std::mem::cell;
 import std::parallel::sync as psy;
 import std::parallel::runtime as prt;
 import lexer::token as tok;
@@ -3308,11 +3309,12 @@ pub(package) struct Ast {
     pub(package) scratch: Vector<u32>,
     // Intern serialization for parallel stages: off = single-threaded (no locking). Task-aware
     // (waiters PARK -- a raw mutex here deadlocks under safepoint preemption) and reentrant by
-    // task token, because intern_dyn/intern_const_lin nest into intern_type/intern_instance.
+    // task token, because intern_dyn/intern_const_lin nest into intern_type/intern_instance. A reader
+    // through a shared `&` takes it too (`closure_env`): the owner and depth are cells.
     pub(package) ilock_on: bool,
     pub(package) ilock_sem: psy::Semaphore,
-    pub(package) ilock_owner: usize,
-    pub(package) ilock_depth: u32,
+    pub(package) ilock_owner: UnsafeCell<usize>,
+    pub(package) ilock_depth: cell::Cell<u32>,
     // The module's write lock in the parallel type check (not reentrant): the module's checker
     // holds it while it checks an item, except inside the constant engine, and the engine takes it
     // before it reads the module (`Package::module_ast_const`), so no read meets a table that grows.
@@ -3589,6 +3591,8 @@ extend Ast {
             children: SplitVec::<u32>::new(),
             b: BodyArena::new(),
             ilock_sem: psy::Semaphore::new(1),
+            ilock_owner: UnsafeCell::<usize>::new(0),
+            ilock_depth: cell::Cell::<u32>::new(0),
             wl_sem: psy::Semaphore::new(1),
             resolutions: SplitVec::<DefId>::new(),
             types: SplitVec::<u32>::new(),
@@ -3955,28 +3959,28 @@ extend Ast {
         return c;
     }
 
-    fn ilock_enter(self: &mut Self) {
+    fn ilock_enter(self: &Self) {
         if !self.ilock_on {
             return;
         }
         let tok = Ast::itok();
         // atomic fast path: the owner read can only equal `tok` when THIS task stored it
-        if unsafe atomic::load_usize(&self.ilock_owner, 0) == tok {
-            self.ilock_depth += 1;
+        if unsafe atomic::load_usize(self.ilock_owner.get(), 0) == tok {
+            self.ilock_depth.set(self.ilock_depth.get() + 1);
             return;
         }
         self.ilock_sem.acquire_masked();
-        unsafe atomic::store_usize(&mut self.ilock_owner, tok, 0);
-        self.ilock_depth = 1;
+        unsafe atomic::store_usize(self.ilock_owner.get(), tok, 0);
+        self.ilock_depth.set(1);
     }
 
-    fn ilock_leave(self: &mut Self) {
+    fn ilock_leave(self: &Self) {
         if !self.ilock_on {
             return;
         }
-        self.ilock_depth -= 1;
-        if self.ilock_depth == 0 {
-            unsafe atomic::store_usize(&mut self.ilock_owner, 0, 0);
+        self.ilock_depth.set(self.ilock_depth.get() - 1);
+        if self.ilock_depth.get() == 0 {
+            unsafe atomic::store_usize(self.ilock_owner.get(), 0, 0);
             self.ilock_sem.release();
         }
     }
@@ -5292,8 +5296,7 @@ extend Ast {
     /// or `&`) as bits in `by_ref`, copied under the intern lock: the reader may run on another
     /// task than the module's checker. False when the closure records no capture.
     pub(package) fn closure_env(self: &Self, node: NodeId, tys: &mut Vector<TypeId>, by_ref: &mut u64) bool {
-        let me = (self as *const Ast) as *mut Ast;
-        unsafe (*me).ilock_enter();
+        self.ilock_enter();
         let cf = self.closure_fact(node);
         let ok = cf != null && unsafe (&*cf).ncaps != 0;
         if ok {
@@ -5303,7 +5306,7 @@ extend Ast {
             }
             *by_ref = unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
         }
-        unsafe (*me).ilock_leave();
+        self.ilock_leave();
         return ok;
     }
 

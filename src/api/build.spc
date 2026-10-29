@@ -252,9 +252,9 @@ fn modules_of(p: &loader::Package) Vector<ModuleInfo> {
     let mut out = Vector::<ModuleInfo>::with_capacity(n);
     for i in 0..n {
         let mut imps = Vector::<u32>::new();
-        if i + 1 < p.idx.mod_imports.len() {
-            for k in p.idx.mod_imports[i]..p.idx.mod_imports[i + 1] {
-                imps.push(p.idx.imports[k as usize]);
+        if i + 1 < p.idx().mod_imports.len() {
+            for k in p.idx().mod_imports[i]..p.idx().mod_imports[i + 1] {
+                imps.push(p.idx().imports[k as usize]);
             }
         }
         out.push(
@@ -518,7 +518,7 @@ pub fn plan(req: &Request) Result<Plan, ApiError> {
             },
         );
     }
-    let mut p = loader::package_load_rooted(
+    let p = loader::package_load_rooted(
         m.root.as_str(),
         loader::dirname_of(m.root.as_str()),
         "",

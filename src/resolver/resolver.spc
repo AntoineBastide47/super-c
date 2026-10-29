@@ -521,7 +521,7 @@ extend Resolver {
         let pm = self.package as *mut loader::Package;
         unsafe (*pm).ensure_index();
         let pkg = unsafe &*self.package;
-        let sym = pkg.idx.syms.find(self.source.slice(name.start as usize, name.end as usize));
+        let sym = pkg.idx().syms.find(self.source.slice(name.start as usize, name.end as usize));
         if sym == loader::SYM_NONE {
             return miss;
         }
@@ -538,7 +538,7 @@ extend Resolver {
     // The directory this module glob-imports without an index whose files declare `name` twice, or -1.
     fn glob_ambiguous(self: &Self, name: tok::Span, want_type: bool) i32 {
         let pkg = unsafe &*self.package;
-        let sym = pkg.idx.syms.find(self.source.slice(name.start as usize, name.end as usize));
+        let sym = pkg.idx().syms.find(self.source.slice(name.start as usize, name.end as usize));
         for i in 0..self.glob_mids.len() {
             let mo = self.glob_mids[i];
             let mut amb = false;
@@ -565,7 +565,7 @@ extend Resolver {
     fn qual_hit(self: &Self, mid: ModuleId, name: tok::Span, want_type: bool, amb: &mut bool) loader::LookupHit {
         unsafe (*(self.package as *mut loader::Package)).ensure_index();
         let pkg = unsafe &*self.package;
-        let sym = pkg.idx.syms.find(self.source.slice(name.start as usize, name.end as usize));
+        let sym = pkg.idx().syms.find(self.source.slice(name.start as usize, name.end as usize));
         if sym == loader::SYM_NONE {
             return loader::LookupHit { node: NODE_NONE, mid: 0 };
         }
@@ -590,7 +590,7 @@ extend Resolver {
     // The note of a qualified miss: the item exists but this module does not see it, or it is missing.
     fn qual_miss_note(self: &mut Self, mid: ModuleId, name: tok::Span) {
         let pkg = unsafe &*self.package;
-        let sym = pkg.idx.syms.find(self.source.slice(name.start as usize, name.end as usize));
+        let sym = pkg.idx().syms.find(self.source.slice(name.start as usize, name.end as usize));
         let mut amb = false;
         let mut hit = loader::LookupHit { node: NODE_NONE, mid: 0 };
         if sym != loader::SYM_NONE {

@@ -521,11 +521,11 @@ fn import_order(p: &loader::Package) Vector<u32> {
         while stack.len() != 0 {
             let top = stack.len() - 1;
             let (cur, k) = stack[top];
-            let lo = p.idx.mod_imports[cur as usize];
-            let hi = p.idx.mod_imports[cur as usize + 1];
+            let lo = p.idx().mod_imports[cur as usize];
+            let hi = p.idx().mod_imports[cur as usize + 1];
             if lo + k < hi {
                 stack[top] = (cur, k + 1);
-                let c = p.idx.imports[(lo + k) as usize];
+                let c = p.idx().imports[(lo + k) as usize];
                 if state[c as usize] == 0 {
                     state[c as usize] = 1;
                     stack.push((c, 0));
@@ -550,8 +550,8 @@ fn closures(p: &loader::Package) Vector<Vector<bool>> {
         stack.push(m as u32);
         // Each module enters the stack once.
         while let Some(cur) = stack.pop() {
-            for e in p.idx.mod_imports[cur as usize]..p.idx.mod_imports[cur as usize + 1] {
-                let c = p.idx.imports[e as usize];
+            for e in p.idx().mod_imports[cur as usize]..p.idx().mod_imports[cur as usize + 1] {
+                let c = p.idx().imports[e as usize];
                 if !seen[c as usize] {
                     seen[c as usize] = true;
                     stack.push(c);

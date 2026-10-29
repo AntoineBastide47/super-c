@@ -5,6 +5,7 @@
 // region fields here are its state. Invariant: TC-* memoizations must not change type-pool interning
 // order: emitted C is byte-compared across bootstrap generations.
 import string as cstring;
+import std::mem::cell;
 import math;
 import lexer::token as tok;
 import lexer::token_type as *;
@@ -613,7 +614,7 @@ pub(package) struct TypeChecker<'a> {
     pub(package) method_all_pool: Vector<DefId>,
     /// The receiver type the last aggregate lookup resolved on: what tc_mark_method_used pairs a method
     /// with, since the lookups themselves are keyed by the receiver's DECL and never carry its arguments.
-    pub(package) mark_recv: TypeId,
+    pub(package) mark_recv: cell::Cell<TypeId>,
     // Tc_peel_target memo, (module<<32|node) -> packed DefId. The first peel does the
     // named_type_of interning; repeats re-derived the same DefId from frozen inputs.
     pub(package) peel_memo: Map<u64, u64>,
@@ -650,7 +651,7 @@ pub(package) struct TypeChecker<'a> {
     sat_memo: Map<SatKey, u64>,
     sat_nest: u32,
     // `mark_recv` writes so far: a memoized verdict replays the last write of its walk.
-    mark_n: u32,
+    mark_n: cell::Cell<u32>,
     // `subst_type`'s memo for one call: instance nodes with compound arguments -> substituted type.
     subst_memo: Map<TypeId, TypeId>,
     // The module's conformance extends by (interface, target), built on the first conformance check:
@@ -1555,7 +1556,7 @@ extend<'a> TypeChecker<'a> {
             member_memo: Map::<MQKey, NodeId>::new(),
             method_all_memo: Map::<MQKey, u64>::new(),
             method_all_pool: Vector::<DefId>::new(),
-            mark_recv: TYPE_NONE,
+            mark_recv: cell::Cell::<TypeId>::new(TYPE_NONE),
             peel_memo: Map::<u64, u64>::new(),
             ext_id_memo: Map::<u64, bool>::new(),
             lower_memo: Map::<u64, TypeId>::new(),
@@ -1564,7 +1565,7 @@ extend<'a> TypeChecker<'a> {
             carries_memo: Map::<u64, u8>::new(),
             sat_memo: Map::<SatKey, u64>::new(),
             sat_nest: 0,
-            mark_n: 0,
+            mark_n: cell::Cell::<u32>::new(0),
             subst_memo: Map::<TypeId, TypeId>::new(),
             dup_heads: Map::<ConfKey, u32>::new(),
             dup_next: Vector::<u32>::new(),
@@ -2508,8 +2509,8 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         let it = gitems::owner_of(pk, self.cur_module(), id);
-        let ext = if it != loader::ITEM_NONE && pk.idx.items.at(it as usize).owner != loader::ITEM_NONE {
-            pk.idx.items.at(pk.idx.items.at(it as usize).owner as usize).node;
+        let ext = if it != loader::ITEM_NONE && pk.idx().items.at(it as usize).owner != loader::ITEM_NONE {
+            pk.idx().items.at(pk.idx().items.at(it as usize).owner as usize).node;
         } else {
             NODE_NONE;
         };
@@ -3291,8 +3292,7 @@ extend<'a> TypeChecker<'a> {
         }
         for i in 0..n {
             if self.tc_method_applies(recv, cands[i as usize]) {
-                self.mark_recv = self.strip(recv);
-                self.mark_n += 1;
+                self.mark(self.strip(recv));
                 self.tc_mark_method_used(cands[i as usize]);
                 return cands[i as usize];
             }
@@ -7829,9 +7829,7 @@ extend<'a> TypeChecker<'a> {
         *n_out = 0;
         // Every method lookup reaches its (module, decl) through here, so this is where the RECEIVER a
         // method is resolved on is recorded: the one piece the lookups themselves never carry.
-        let mself = (self as *const TypeChecker) as *mut TypeChecker;
-        unsafe (*mself).mark_recv = ty;
-        unsafe (*mself).mark_n += 1;
+        self.mark(ty);
         let y = *self.type_at(ty);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             *mod_out = y.module;
@@ -7864,9 +7862,7 @@ extend<'a> TypeChecker<'a> {
     /// `aggregate_of` without the generic arguments, for callers that only need the declaration: it
     /// skips the parameter/argument copy.
     const fn aggregate_decl(self: &Self, ty: TypeId, mod_out: &mut ModuleId, decl_out: &mut NodeId) bool {
-        let mself = (self as *const TypeChecker) as *mut TypeChecker;
-        unsafe (*mself).mark_recv = ty;
-        unsafe (*mself).mark_n += 1;
+        self.mark(ty);
         let y = *self.type_at(ty);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             *mod_out = y.module;
@@ -8580,7 +8576,7 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         let mut t = s;
-        t.owner = unsafe (*self.package).idx.items.at(owner as usize).node;
+        t.owner = unsafe (*self.package).idx().items.at(owner as usize).node;
         // This checker alone writes the module's steps: its reads need no lock.
         let pubd = unsafe &(*self.cur_ast()).csteps;
         for i in 0..pubd.len() {
@@ -8605,16 +8601,16 @@ extend<'a> TypeChecker<'a> {
         if it == loader::ITEM_NONE || Ast::in_body(key) {
             return it;
         }
-        let up = p.idx.items.at(it as usize).owner;
+        let up = p.idx().items.at(it as usize).owner;
         if up == loader::ITEM_NONE {
             return it;
         }
-        let en = unsafe (*self.mod_ast(m)).at_const(p.idx.items.at(up as usize).node);
-        if en.kind == NodeKind::NODE_EXTEND && (key <= unsafe (*self.mod_ast(m)).ext(p.idx.items.at(up as usize).node).extend_def.target_type || unsafe (*self.mod_ast(
+        let en = unsafe (*self.mod_ast(m)).at_const(p.idx().items.at(up as usize).node);
+        if en.kind == NodeKind::NODE_EXTEND && (key <= unsafe (*self.mod_ast(m)).ext(p.idx().items.at(up as usize).node).extend_def.target_type || unsafe (*self.mod_ast(
             m,
-        )).ext(p.idx.items.at(up as usize).node).extend_def.interface_type != NODE_NONE && key <= unsafe (*self.mod_ast(
+        )).ext(p.idx().items.at(up as usize).node).extend_def.interface_type != NODE_NONE && key <= unsafe (*self.mod_ast(
             m,
-        )).ext(p.idx.items.at(up as usize).node).extend_def.interface_type) {
+        )).ext(p.idx().items.at(up as usize).node).extend_def.interface_type) {
             return up;
         }
         return it;
@@ -8630,7 +8626,7 @@ extend<'a> TypeChecker<'a> {
         let mut keep: usize = 0;
         for i in 0..self.st_pend.len() {
             let ps = *self.st_pend.at(i);
-            if ps.owner == it || p.idx.items.at(ps.owner as usize).owner == it {
+            if ps.owner == it || p.idx().items.at(ps.owner as usize).owner == it {
                 unsafe (*self.cur_ast()).publish_step(ps.s);
             } else {
                 self.st_pend.set(keep, ps);
@@ -12157,16 +12153,16 @@ extend<'a> TypeChecker<'a> {
     // The most `ext_next` calls one cursor takes to reach NODE_NONE: the index holds each extend of
     // the package once, in one target's list or in `ext_blankets`.
     const fn ext_bound(self: &Self) usize {
-        return (unsafe (*self.package).idx.exts).len() + 1;
+        return (unsafe (*self.package).idx().exts).len() + 1;
     }
 
     // Module `m`'s top-level EXTEND items, in item order, from the package index.
     const fn ext_count(self: &Self, m: ModuleId) usize {
-        let x = unsafe &(*self.package).idx;
+        let x = unsafe (*self.package).idx();
         return (x.mod_exts[m as usize + 1] - x.mod_exts[m as usize]) as usize;
     }
     const fn ext_at(self: &Self, m: ModuleId, i: usize) NodeId {
-        let x = unsafe &(*self.package).idx;
+        let x = unsafe (*self.package).idx();
         return x.exts[x.mod_exts[m as usize] as usize + i];
     }
 
@@ -12261,11 +12257,11 @@ extend<'a> TypeChecker<'a> {
         let pk = unsafe &*self.package;
         let it = gitems::owner_of(pk, m, id);
         if it != loader::ITEM_NONE {
-            let meta = *pk.idx.items.at(it as usize);
+            let meta = *pk.idx().items.at(it as usize);
             if unsafe (*a).at_const(meta.node).kind == NodeKind::NODE_EXTEND {
                 ext = meta.node;
             } else if meta.owner != loader::ITEM_NONE {
-                ext = pk.idx.items.at(meta.owner as usize).node;
+                ext = pk.idx().items.at(meta.owner as usize).node;
             }
         }
         if ext == NODE_NONE || unsafe (*a).at_const(ext).kind != NodeKind::NODE_EXTEND {
@@ -12320,11 +12316,18 @@ extend<'a> TypeChecker<'a> {
     // with every instance of its target even when the caller is pruned. Every other context
     // (top-level code, conformance/interface methods, generic methods, @emit_macro targets: all
     // emitted unconditionally) marks directly.
+    // Record that a lookup resolved a method on receiver `ty` (`mark_recv`), through a shared `&` (the
+    // lookups take one).
+    const fn mark(self: &Self, ty: TypeId) {
+        self.mark_recv.set(ty);
+        self.mark_n.set(self.mark_n.get() + 1);
+    }
+
     fn tc_mark_method_used(self: &mut Self, d: DefId) {
         // Recorded before the early return below: the demand this stands for is per (instance, method),
         // and the first mark settles only the instance it was reached through.
         if d.node != NODE_NONE {
-            let r = self.mark_recv;
+            let r = self.mark_recv.get();
             if r == TYPE_NONE {
                 if self.mark_log != null {
                     let lg = unsafe &mut *self.mark_log;
@@ -12985,8 +12988,7 @@ extend<'a> TypeChecker<'a> {
         }
         *conf = cc[k];
         if cc[k] == TYPE_NONE && self.enclosing(cm[k].module, cm[k].node, NodeKind::NODE_INTERFACE) == NODE_NONE {
-            self.mark_recv = rs;
-            self.mark_n += 1;
+            self.mark(rs);
             self.tc_mark_method_used(cm[k]);
         }
         return cm[k];
@@ -13625,8 +13627,7 @@ extend<'a> TypeChecker<'a> {
             return first;
         }
         if have && best.node != NODE_NONE {
-            self.mark_recv = recv;
-            self.mark_n += 1;
+            self.mark(recv);
             self.tc_mark_method_used(best);
             return best;
         }
@@ -16654,8 +16655,7 @@ extend<'a> TypeChecker<'a> {
                 Some(v) => {
                     let w = *v;
                     if (w & 2u64) != 0 {
-                        self.mark_recv = (w >> 32) as TypeId;
-                        self.mark_n += 1;
+                        self.mark((w >> 32) as TypeId);
                     }
                     return (w & 1u64) as i32;
                 },
@@ -16663,7 +16663,7 @@ extend<'a> TypeChecker<'a> {
             };
         }
         f.fx = self.sat_fx();
-        f.mark_n = self.mark_n;
+        f.mark_n = self.mark_n.get();
         self.sat_nest += 1;
         return -1;
     }
@@ -16684,7 +16684,11 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         if self.sat_fx() == f.fx {
-            let w = self.mark_recv as u64 << 32 | pick(self.mark_n != f.mark_n, 2u64, 0u64) | pick(r, 1u64, 0u64);
+            let w = self.mark_recv.get() as u64 << 32 | pick(self.mark_n.get() != f.mark_n, 2u64, 0u64) | pick(
+                r,
+                1u64,
+                0u64,
+            );
             self.sat_memo.insert(key, w);
         }
     }
@@ -17939,8 +17943,7 @@ extend<'a> TypeChecker<'a> {
         self.fmt_marked = true;
         // Resolved by decl with no receiver: they land in always_methods, which is what the print
         // lowering needs: it names them for whatever String instance it happens to build.
-        self.mark_recv = TYPE_NONE;
-        self.mark_n += 1;
+        self.mark(TYPE_NONE);
         let fh: []str = FORMAT_HELPERS;
         for k in 0..fh.len() {
             self.find_method_cstr(sh.mid, sh.node, fh[k]);
@@ -18655,8 +18658,7 @@ extend<'a> TypeChecker<'a> {
                 continue;
             }
             if !probe {
-                self.mark_recv = want;
-                self.mark_n += 1;
+                self.mark(want);
                 self.tc_mark_method_used(md);
                 unsafe (*self.cur_ast()).set_coerce(node, want, md);
                 unsafe (*self.cur_ast()).set_type_args(node, &bnd[0], np as u8);
@@ -27993,8 +27995,7 @@ extend TypeChecker {
         }
         // `T::assoc()` names its type rather than passing a receiver, so aggregate_of never sees it:
         // hand the qualifying instance to the used-marking directly.
-        self.mark_recv = inst_ty;
-        self.mark_n += 1;
+        self.mark(inst_ty);
         // A call chooses among the type's same-named methods and the defaults its conformances inherit
         // by its arguments, the receiver first (`K::sum(&k, true, false)`), as a method call does.
         let precv = if inst_ty != TYPE_NONE {
@@ -31973,8 +31974,8 @@ extend TypeChecker {
         // A method of a conformance is called through bounds and `dyn`, where no call site names it.
         let pk = unsafe &*self.package;
         let it = gitems::owner_of(pk, self.cur_module(), owner);
-        let ext = if it != loader::ITEM_NONE && pk.idx.items.at(it as usize).owner != loader::ITEM_NONE {
-            pk.idx.items.at(pk.idx.items.at(it as usize).owner as usize).node;
+        let ext = if it != loader::ITEM_NONE && pk.idx().items.at(it as usize).owner != loader::ITEM_NONE {
+            pk.idx().items.at(pk.idx().items.at(it as usize).owner as usize).node;
         } else {
             NODE_NONE;
         };
@@ -34503,8 +34504,8 @@ extend TypeChecker {
             return;
         }
         let m = self.cur_module();
-        let i0 = unsafe (*self.package).idx.mod_items[m as usize];
-        let i1 = unsafe (*self.package).idx.mod_items[m as usize + 1];
+        let i0 = unsafe (*self.package).idx().mod_items[m as usize];
+        let i1 = unsafe (*self.package).idx().mod_items[m as usize + 1];
         let items = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).root).as_data.program.items;
         let mut prev: NodeId = 0;
         let mut set = false;

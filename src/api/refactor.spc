@@ -697,7 +697,7 @@ fn item_at(p: &loader::Package, m: usize, off: u32) NodeId {
         return NODE_NONE;
     }
     let it = p.item_of(d.module, d.node);
-    if it == loader::ITEM_NONE || p.idx.items[it as usize].owner != loader::ITEM_NONE {
+    if it == loader::ITEM_NONE || p.idx().items[it as usize].owner != loader::ITEM_NONE {
         return NODE_NONE;
     }
     let k = p.modules[m].ast.at_const(d.node).kind;
@@ -816,7 +816,7 @@ extend MoveItem as Refactoring {
         let asrc = p.modules[ma].source.as_str();
         let (istart, iend) = item_bytes(p, ma, node);
         let it = p.item_of(d.module, d.node);
-        let public = p.idx.items[it as usize].vis == VIS_PUB;
+        let public = p.idx().items[it as usize].vis == VIS_PUB;
         let mut we = syn::WorkspaceEdit::new();
         // The declaration's own uses of the items of its old module.
         let mut inner = Vector::<Edit>::new();
@@ -835,7 +835,7 @@ extend MoveItem as Refactoring {
                     continue;
                 }
                 let ri = p.item_of(rd.module, rd.node);
-                if ri == loader::ITEM_NONE || p.idx.items[ri as usize].owner != loader::ITEM_NONE {
+                if ri == loader::ITEM_NONE || p.idx().items[ri as usize].owner != loader::ITEM_NONE {
                     continue;
                 }
                 let k = a.at_const(i).kind;

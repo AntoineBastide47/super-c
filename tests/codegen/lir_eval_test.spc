@@ -137,3 +137,69 @@ fn main() i32 {
     let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
     assert(!text.contains("callind") && text.contains("closure_b"), text.as_str());
 }
+
+// The lowering marks a parameter's referent read-only (`readonly`) for a `&T` of a struct whose members
+// hold no `UnsafeCell` and for a `str` (`inner readonly`, its bytes); not for a `&T` whose `T` holds a
+// cell, which changes through the shared reference.
+@test(timeout = 300)
+fn shared_references_to_frozen_structs_and_strs_are_read_only() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::mem::cell;
+
+struct Pair {
+    pub a: u64,
+    pub b: [u32; 4],
+}
+
+struct Counter {
+    pub n: cell::Cell<u32>,
+}
+
+@noinline
+fn pair_sum(p: &Pair) u64 {
+    return p.a + p.b[1] as u64;
+}
+
+@noinline
+fn text_len(s: str) usize {
+    return s.len();
+}
+
+@noinline
+fn counted(c: &Counter) u32 {
+    c.n.set(c.n.get() + 1);
+    return c.n.get();
+}
+
+fn main() i32 {
+    let p = Pair { a: 2, b: [0, 3, 0, 0] };
+    let c = Counter { n: cell::Cell::<u32>::new(4) };
+    return (pair_sum(&p) as u32 + text_len("ab") as u32 + counted(&c) - 12) as i32;
+}
+)",
+    );
+    let env = format("SC_LIR=1 SC_LIR_OPT=0 SC_NO_TU_CACHE=1 SC_NO_EMIT_CACHE=1 SC_LIR_TEXT={}/pkg.lir", p.dir());
+    let r = p.compile_flags_env("", "main.spc", env.as_str());
+    assert(r.ok(), "the program builds and returns 0");
+    let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
+    assert(head_of(&text, "main__pair_sum").contains("ref p0 24 readonly"), text.as_str());
+    assert(head_of(&text, "main__text_len").contains("ref p0 0 inner readonly"), text.as_str());
+    assert(!head_of(&text, "main__counted").contains("readonly"), text.as_str());
+}
+
+// The lines of function `name` in LIR text `text` before its entry block.
+fn head_of(text: &String, name: str) String {
+    let t = text.as_str();
+    let h = format("fn @{}\n", name);
+    let at = t.find(h.as_str());
+    assert(at >= 0, h.as_str());
+    let rest = t.slice(at as usize, t.len());
+    let end = rest.find("\nb0(");
+    assert(end >= 0, rest);
+    return String::from_str(rest.slice(0, end as usize));
+}
