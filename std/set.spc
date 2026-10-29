@@ -225,26 +225,26 @@ extend<T: Hash + Eq + Clone, A: Allocator + Default, S: BuildHasher + Default> S
 
 /// The elements of one set that another lacks (`Set::difference`); borrows both.
 pub struct SetDifference<'b, T, A, S> {
-    pub(file) it: MapKeys<'b, T>,
-    pub(file) other: &'b Set<T, A, S>,
+    pub(module) it: MapKeys<'b, T>,
+    pub(module) other: &'b Set<T, A, S>,
 }
 
 /// The elements two sets share (`Set::intersection`); borrows both.
 pub struct SetIntersection<'b, T, A, S> {
-    pub(file) it: MapKeys<'b, T>,
-    pub(file) other: &'b Set<T, A, S>,
+    pub(module) it: MapKeys<'b, T>,
+    pub(module) other: &'b Set<T, A, S>,
 }
 
 /// Every element of either set once (`Set::set_union`); borrows both.
 pub struct SetUnion<'b, T, A, S> {
-    pub(file) first: MapKeys<'b, T>,
-    pub(file) rest: SetDifference<'b, T, A, S>,
+    pub(module) first: MapKeys<'b, T>,
+    pub(module) rest: SetDifference<'b, T, A, S>,
 }
 
 /// The elements in exactly one of two sets (`Set::symmetric_difference`); borrows both.
 pub struct SetSymmetricDifference<'b, T, A, S> {
-    pub(file) first: SetDifference<'b, T, A, S>,
-    pub(file) rest: SetDifference<'b, T, A, S>,
+    pub(module) first: SetDifference<'b, T, A, S>,
+    pub(module) rest: SetDifference<'b, T, A, S>,
 }
 
 extend<'b, T: Hash + Eq, A: Allocator, S: BuildHasher> SetDifference<'b, T, A, S> as Iterator<&'b T> {

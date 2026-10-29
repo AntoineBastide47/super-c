@@ -12379,10 +12379,12 @@ extend<'a> TypeChecker<'a> {
         }
     }
 
-    // Argument `aid` of a call of an `extern "C"` function, as an untyped pointer (`*void`) or a C variadic:
-    // C may read what it points to (`tc_c_reads`). Through casts and `unsafe`, the innermost operand's
-    // pointer type says what that is (`(&mut s as *mut S) as *mut void`).
-    fn tc_c_arg(self: &mut Self, aid: NodeId) {
+    // Argument `aid` of a call of an `extern "C"` function, for a pointer parameter to `pelem` or a C
+    // variadic (`pelem` TYPE_NONE): C may read what it points to (`tc_c_reads`). Through casts and `unsafe`,
+    // the innermost operand's pointer type says what that is (`(&mut s as *mut S) as *mut void`). The
+    // signature already names what a parameter that is not `*void` points to, unless a cast hides it
+    // (`(&mut s as *mut S) as *mut *mut void`).
+    fn tc_c_arg(self: &mut Self, aid: NodeId, pelem: TypeId) {
         let a = self.cur_ast();
         let mut e = aid;
         // Each step peels one wrapper of the argument's finite expression.
@@ -12398,7 +12400,10 @@ extend<'a> TypeChecker<'a> {
         }
         let t = unsafe (*a).type_of(e);
         if t != TYPE_NONE && (self.type_at(t).kind == TypeKind::TYPE_POINTER || self.type_at(t).kind == TypeKind::TYPE_REFERENCE) {
-            self.tc_c_reads(self.type_at(t).as_data.elem);
+            let el = self.type_at(t).as_data.elem;
+            if pelem == TYPE_NONE || pelem == Ast::builtin(BuiltinType::BT_VOID) || el != pelem {
+                self.tc_c_reads(el);
+            }
         }
     }
 
@@ -24602,9 +24607,9 @@ extend TypeChecker {
         return self.tc_lt_value_fits(self.subst_type(self.subst_type(exid, rp, ra, rn), gp, ga, gn), acid);
     }
 
-    fn check_field_visibility(self: &mut Self, m: ModuleId, field: NodeId, owner: NodeId, at: tok::Span) {
+    fn check_field_visibility(self: &mut Self, m: ModuleId, field: NodeId, at: tok::Span) {
         let f = unsafe (*self.mod_ast(m)).at_const(field);
-        if f.kind == NodeKind::NODE_FIELD && !self.field_seen(m, owner, f.as_data.field.vis) {
+        if f.kind == NodeKind::NODE_FIELD && !self.vis_seen(m, f.as_data.field.vis) {
             self.errors.emit_span(
                 dc::INACCESSIBLE_FIELD,
                 at,
@@ -24621,23 +24626,14 @@ extend TypeChecker {
         }
     }
 
-    // Whether the module being checked sees an item of module `m` with visibility `v`: one of its own, or a
-    // `VIS_MODULE` or wider one `Package::vis_ok` admits.
+    // Whether the module being checked sees an item or field of module `m` with visibility `v`: one of its own,
+    // or a `VIS_MODULE` or wider one `Package::vis_ok` admits.
     const fn vis_seen(self: &Self, m: ModuleId, v: u8) bool {
         return m == self.cur_module() || v >= VIS_MODULE && (self.package == null || unsafe (*self.package).vis_ok(
             self.cur_module(),
             m,
             v,
         ));
-    }
-
-    // Whether the module being checked sees a field of visibility `v` of type `owner` of module `m`: a field
-    // without a modifier inside the type's own `extend` blocks, a `pub(file)` one in its file.
-    const fn field_seen(self: &Self, m: ModuleId, owner: NodeId, v: u8) bool {
-        if v == VIS_PRIVATE {
-            return m == self.cur_module() && owner == self.current_self;
-        }
-        return self.vis_seen(m, v);
     }
 
     // Whether the module being checked sees method or associated constant visibility `v` of extend `ext`
@@ -26241,10 +26237,10 @@ extend TypeChecker {
                     }
                 } else if !self.compatible(pt, aid) {
                     self.err_mismatch_ann(aid, pt, fmod, unsafe (*fa).slot_type_node(pid));
-                } else if named && self.type_at(pt).kind == TypeKind::TYPE_POINTER && self.type_at(pt).as_data.elem == Ast::builtin(
-                    BuiltinType::BT_VOID,
-                ) && unsafe (*fa).at_const(fdecl).kind == NodeKind::NODE_FUNCTION && unsafe (*fa).ext(fdecl).function.is_extern() {
-                    self.tc_c_arg(aid);
+                } else if named && self.type_at(pt).kind == TypeKind::TYPE_POINTER && unsafe (*fa).at_const(fdecl).kind == NodeKind::NODE_FUNCTION && unsafe (*fa).ext(
+                    fdecl,
+                ).function.is_extern() {
+                    self.tc_c_arg(aid, self.type_at(pt).as_data.elem);
                 }
                 self.lt_call.span = tok::Span { start: 0, end: 0 };
                 self.lt_conv = oc;
@@ -26256,7 +26252,7 @@ extend TypeChecker {
             fdecl,
         ).function.is_extern() {
             for i in expected..args.len {
-                self.tc_c_arg(unsafe (*a).list(args)[i as usize]);
+                self.tc_c_arg(unsafe (*a).list(args)[i as usize], TYPE_NONE);
             }
         }
         // C-vararg string-literal default to *const char.
@@ -27381,7 +27377,7 @@ extend TypeChecker {
                 unsafe (*self.cur_ast()).set_resolution_def(mname, DefId { module: bmod, node: fhit });
                 let fty = self.subst_type(self.decl_type_in(bmod, fhit), &gp[0], &ga[0], gn);
                 if unsafe (*self.mod_ast(bmod)).at_const(fhit).kind == NodeKind::NODE_FIELD {
-                    self.check_field_visibility(bmod, fhit, bdecl, name);
+                    self.check_field_visibility(bmod, fhit, name);
                     // A field through a raw pointer is rejected by `tc_raw_member` (no auto-dereference);
                     // the explicit `(*p).f` form is gated by the dereference itself.
                     // A reference-typed field of an untagged UNION overlaps every other field, so
@@ -27605,7 +27601,7 @@ extend TypeChecker {
                     unsafe (*self.cur_ast()).add_deref_use(&du);
                     unsafe (*self.cur_ast()).set_resolution_def(mname, DefId { module: tm, node: tfhit });
                     if unsafe (*self.mod_ast(tm)).at_const(tfhit).kind == NodeKind::NODE_FIELD {
-                        self.check_field_visibility(tm, tfhit, td, name);
+                        self.check_field_visibility(tm, tfhit, name);
                     }
                     return self.subst_type(self.decl_type_in(tm, tfhit), &tgp[0], &tga[0], tgn);
                 }
@@ -28353,7 +28349,7 @@ extend TypeChecker {
             }
             unsafe (*self.cur_ast()).set_resolution_def(fnn, DefId { module: smod, node: field });
             if variant == NODE_NONE {
-                self.check_field_visibility(smod, field, decl, fname);
+                self.check_field_visibility(smod, field, fname);
             }
             if !self.compatible(ft, fval) {
                 self.err_mismatch_ann(fval, ft, smod, unsafe (*self.mod_ast(smod)).member_type_node(field, false));
@@ -28390,7 +28386,7 @@ extend TypeChecker {
             unsafe (*da).ext(decl).aggregate.members;
         };
         let fields = unsafe (*a).at_const(id).as_data.struct_initializer.fields;
-        let inside = m == self.cur_module() && decl == self.current_self || self.tc_zeroable(m, decl, ga, gn);
+        let zeroable = self.tc_zeroable(m, decl, ga, gn);
         for j in 0..members.len {
             let mid = unsafe (*da).list(members)[j as usize];
             let mn = unsafe (*da).at_const(mid);
@@ -28409,10 +28405,7 @@ extend TypeChecker {
                 continue;
             }
             let ft = self.subst_type(self.decl_type_in(m, mid), gp, ga, gn);
-            if (self.field_seen(m, decl, mn.as_data.field.vis) || inside || variant != NODE_NONE) && self.tc_zero_ok(
-                ft,
-                0,
-            ) {
+            if (self.vis_seen(m, mn.as_data.field.vis) || zeroable || variant != NODE_NONE) && self.tc_zero_ok(ft, 0) {
                 continue;
             }
             let nm = unsafe (*da).at_const(mn.as_data.field.name).as_data.name.text;
@@ -28475,7 +28468,7 @@ extend TypeChecker {
         }
         // A type asserting `Zeroable` (std's views and containers) is empty when zero: its private
         // fields hold no other invariant, and each field's type is still checked below.
-        let inside = m == self.cur_module() && decl == self.current_self || self.tc_zeroable(m, decl, &ga[0], gn);
+        let zeroable = self.tc_zeroable(m, decl, &ga[0], gn);
         let members = unsafe (*self.mod_ast(m)).ext(decl).aggregate.members;
         for j in 0..members.len {
             let mid = unsafe (*self.mod_ast(m)).list(members)[j as usize];
@@ -28483,7 +28476,7 @@ extend TypeChecker {
             if mn.kind != NodeKind::NODE_FIELD {
                 continue;
             }
-            if !inside && !self.field_seen(m, decl, mn.as_data.field.vis) {
+            if !zeroable && !self.vis_seen(m, mn.as_data.field.vis) {
                 return false;
             }
             if !self.tc_zero_ok(self.subst_type(self.decl_type_in(m, mid), &gp[0], &ga[0], gn), depth + 1) {
@@ -33295,7 +33288,7 @@ extend TypeChecker {
                 let field = self.find_member(bmod, decl, fname);
                 if field != NODE_NONE {
                     unsafe (*self.cur_ast()).set_resolution_def(nameId, DefId { module: bmod, node: field });
-                    self.check_field_visibility(bmod, field, decl, fname);
+                    self.check_field_visibility(bmod, field, fname);
                     field_type = self.subst_type(self.decl_type_in(bmod, field), &gp[0], &ga[0], gn);
                 } else {
                     self.err_no_field(fname, base);

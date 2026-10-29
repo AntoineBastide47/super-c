@@ -321,11 +321,11 @@ pub(package) struct Package {
     pub(package) opaque_cls: Map<u64, u8>,
     /// The structs C code reads, as `module << 32 | node`: those an extern function's or an `@export`
     /// function's signature reaches by value or through a pointer (`driver::emit::mark_c_shaped`), and
-    /// those an untyped pointer argument of an `extern "C"` call reaches (`c_reads`,
+    /// those a pointer argument of an `extern "C"` call reaches (`c_reads`,
     /// `driver::emit::mark_c_reads`). Their
     /// fields keep the declared order (`layout::Svc::ordered_prefix`).
     pub(package) c_shaped: Set<u64>,
-    /// The declarations the typechecker saw an `extern "C"` call reach through an untyped pointer argument,
+    /// The declarations the typechecker saw an `extern "C"` call reach through a pointer argument,
     /// as `module << 32 | node` (`TypeChecker::tc_c_arg`), until the end of the typecheck stage adds them
     /// to `c_shaped`.
     pub(package) c_reads: Vector<u64>,

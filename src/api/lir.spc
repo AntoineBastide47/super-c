@@ -22,7 +22,7 @@ import build_system::manifest as bman;
 
 /// A LIR program: its symbols, data and function bodies.
 pub struct Program {
-    pub(file) p: lir::Package,
+    p: lir::Package,
 }
 
 /// How an evaluation ended: normally with the function's result word, or with a trap (a panic, an
@@ -310,8 +310,8 @@ fn shared_name() str<'static> {
 /// A loaded program. Dropping it unloads it and removes its files: every function pointer taken from it
 /// dangles after.
 pub struct Library {
-    pub(file) lib: Option<dylib::Library>,
-    pub(file) dir: String,
+    pub(module) lib: Option<dylib::Library>,
+    pub(module) dir: String,
 }
 
 extend Library {

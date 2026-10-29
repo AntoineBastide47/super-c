@@ -78,19 +78,19 @@ static_assert(B >= 2, "a B-tree node splits into two nodes of at least one key")
 // A node. A leaf is this struct alone; an internal node is an `Internal`, whose first field is this
 // header, so a pointer to either is a `*mut Leaf`. Only the first `len` key and value slots hold
 // live values; the node never drops them itself.
-struct Leaf<K, V> {
-    pub(file) parent: *mut Leaf<K, V>, // the internal node above, null at the root
-    pub(file) parent_idx: u16, // the edge of `parent` that points here
-    pub(file) len: u16,
-    pub(file) keys: [K; CAPACITY],
-    pub(file) vals: [V; CAPACITY],
+pub(module) struct Leaf<K, V> {
+    parent: *mut Leaf<K, V>, // the internal node above, null at the root
+    parent_idx: u16, // the edge of `parent` that points here
+    len: u16,
+    keys: [K; CAPACITY],
+    vals: [V; CAPACITY],
 }
 
 // An internal node: edge i leads to the keys between keys[i - 1] and keys[i]; edges 0..=len are live.
 struct Internal<K, V> {
     @ordered
-    pub(file) data: Leaf<K, V>, // first, so a `*mut Internal` is a `*mut Leaf`
-    pub(file) edges: [*mut Leaf<K, V>; CAPACITY + 1],
+    pub(module) data: Leaf<K, V>, // first, so a `*mut Internal` is a `*mut Leaf`
+    pub(module) edges: [*mut Leaf<K, V>; CAPACITY + 1],
 }
 
 /// One end of a range: `Included(x)` and `Excluded(x)` bound the range at `x`, `Unbounded` does not
@@ -104,10 +104,10 @@ pub enum Bound<T> {
 /// An ordered map from K to V through allocator A: a B-tree of nodes that hold up to 15 keys and
 /// values each in flat arrays. Iteration is in increasing key order.
 pub struct BTreeMap<K, V, A = Global> {
-    pub(file) root: *mut Leaf<K, V>, // null exactly when len == 0
-    pub(file) height: usize, // edges from the root to every leaf
-    pub(file) len: usize,
-    pub(file) alloc: A,
+    root: *mut Leaf<K, V>, // null exactly when len == 0
+    height: usize, // edges from the root to every leaf
+    len: usize,
+    pub(module) alloc: A,
 }
 
 // A BTreeMap owns its keys and values, so it is Send / Sync when they and its allocator are.
@@ -118,52 +118,52 @@ unsafe extend<K: Sync, V: Sync, A: Sync> BTreeMap<K, V, A> as Sync {}
 // The two leaf positions an iterator has not passed: the gap before its next element from the front,
 // and the gap after its next element from the back. Every gap between two neighbor elements is exactly
 // one leaf position, so two positions are equal exactly when no element lies between them.
-struct Gaps<K, V> {
-    pub(file) front: *mut Leaf<K, V>,
-    pub(file) front_idx: usize,
-    pub(file) back: *mut Leaf<K, V>,
-    pub(file) back_idx: usize,
+pub(module) struct Gaps<K, V> {
+    pub(module) front: *mut Leaf<K, V>,
+    pub(module) front_idx: usize,
+    pub(module) back: *mut Leaf<K, V>,
+    pub(module) back_idx: usize,
 }
 
 // Moves every element out in key order and frees each node once it has passed the node. Dropping it
 // drops the elements it did not reach and frees the rest of the nodes.
 struct Drain<K, V, A> {
-    pub(file) front: *mut Leaf<K, V>,
-    pub(file) idx: usize,
-    pub(file) len: usize,
-    pub(file) alloc: A,
+    pub(module) front: *mut Leaf<K, V>,
+    pub(module) idx: usize,
+    pub(module) len: usize,
+    pub(module) alloc: A,
 }
 
 /// Iterator over a map's `(&K, &V)` pairs in key order; borrows the map.
 pub struct BTreeIter<'a, K, V> {
-    pub(file) gaps: Gaps<K, V>,
-    pub(file) len: usize,
+    pub(module) gaps: Gaps<K, V>,
+    pub(module) len: usize,
 }
 
 /// Iterator over a map's `(&K, &mut V)` pairs in key order; borrows the map mutably.
 pub struct BTreeIterMut<'a, K, V> {
-    pub(file) gaps: Gaps<K, V>,
-    pub(file) len: usize,
+    pub(module) gaps: Gaps<K, V>,
+    pub(module) len: usize,
 }
 
 /// Iterator over a map's keys in order.
 pub struct BTreeKeys<'a, K, V> {
-    pub(file) it: BTreeIter<'a, K, V>,
+    pub(module) it: BTreeIter<'a, K, V>,
 }
 
 /// Iterator over a map's values in key order.
 pub struct BTreeValues<'a, K, V> {
-    pub(file) it: BTreeIter<'a, K, V>,
+    pub(module) it: BTreeIter<'a, K, V>,
 }
 
 /// Iterator over a map's values in key order, by mutable reference.
 pub struct BTreeValuesMut<'a, K, V> {
-    pub(file) it: BTreeIterMut<'a, K, V>,
+    pub(module) it: BTreeIterMut<'a, K, V>,
 }
 
 /// Iterator over the `(&K, &V)` pairs of a key range in key order; borrows the map.
 pub struct BTreeRange<'a, K, V> {
-    pub(file) gaps: Gaps<K, V>,
+    pub(module) gaps: Gaps<K, V>,
 }
 
 /// The slot of one key in a map, from `BTreeMap::entry`: occupied or vacant.
@@ -174,69 +174,69 @@ pub enum BTreeEntry<'a, K, V, A> {
 
 /// An entry whose key is in the map. Holds the map borrowed mutably.
 pub struct BTreeOccupiedEntry<'a, K, V, A> {
-    pub(file) map: &'a mut BTreeMap<K, V, A>,
-    pub(file) node: *mut Leaf<K, V>,
-    pub(file) idx: usize,
-    pub(file) height: usize, // of `node`
+    pub(module) map: &'a mut BTreeMap<K, V, A>,
+    pub(module) node: *mut Leaf<K, V>,
+    pub(module) idx: usize,
+    pub(module) height: usize, // of `node`
 }
 
 /// An entry whose key is not in the map; it owns the key until `insert`. Holds the map borrowed
 /// mutably.
 pub struct BTreeVacantEntry<'a, K, V, A> {
-    pub(file) map: &'a mut BTreeMap<K, V, A>,
-    pub(file) key: K,
-    pub(file) leaf: *mut Leaf<K, V>, // where the key goes, null for an empty map
-    pub(file) idx: usize,
+    pub(module) map: &'a mut BTreeMap<K, V, A>,
+    pub(module) key: K,
+    pub(module) leaf: *mut Leaf<K, V>, // where the key goes, null for an empty map
+    pub(module) idx: usize,
 }
 
 // The zero-sized value every member of a set maps to.
-struct Member {}
+pub(module) struct Member {}
 
 /// An ordered set of T through allocator A: a BTreeMap<T, Member, A> whose value takes no space.
 pub struct BTreeSet<T, A = Global> {
-    pub(file) m: BTreeMap<T, Member, A>,
+    m: BTreeMap<T, Member, A>,
 }
 
 /// Iterator over a set's elements in order; borrows the set.
 pub struct BTreeSetIter<'a, T> {
-    pub(file) it: BTreeIter<'a, T, Member>,
+    pub(module) it: BTreeIter<'a, T, Member>,
 }
 
 /// Iterator over the elements of a range of a set, in order.
 pub struct BTreeSetRange<'a, T> {
-    pub(file) it: BTreeRange<'a, T, Member>,
+    pub(module) it: BTreeRange<'a, T, Member>,
 }
 
 /// The elements of either set, in order, each once.
 pub struct BTreeUnion<'a, T> {
-    pub(file) a: BTreeSetIter<'a, T>,
-    pub(file) b: BTreeSetIter<'a, T>,
-    pub(file) pa: *const T, // the next element of `a`, null at its end
-    pub(file) pb: *const T,
+    pub(module) a: BTreeSetIter<'a, T>,
+    pub(module) b: BTreeSetIter<'a, T>,
+    pub(module) pa: *const T, // the next element of `a`, null at its end
+    pub(module) pb: *const T,
 }
 
 /// The elements of both sets, in order.
 pub struct BTreeIntersection<'a, T> {
-    pub(file) a: BTreeSetIter<'a, T>,
-    pub(file) b: BTreeSetIter<'a, T>,
-    pub(file) pa: *const T,
-    pub(file) pb: *const T,
+    pub(module) a: BTreeSetIter<'a, T>,
+    pub(module) b: BTreeSetIter<'a, T>,
+    pub(module) pa: *const T,
+    pub(module) pb: *const T,
 }
 
 /// The elements of the first set that are not in the second, in order.
 pub struct BTreeDifference<'a, T> {
-    pub(file) a: BTreeSetIter<'a, T>,
-    pub(file) b: BTreeSetIter<'a, T>,
-    pub(file) pa: *const T,
-    pub(file) pb: *const T,
+    pub(module) a: BTreeSetIter<'a, T>,
+    pub(module) b: BTreeSetIter<'a, T>,
+    pub(module) pa: *const T,
+    pub(module) pb: *const T,
 }
 
 /// The elements of exactly one of the two sets, in order.
 pub struct BTreeSymmetricDifference<'a, T> {
-    pub(file) a: BTreeSetIter<'a, T>,
-    pub(file) b: BTreeSetIter<'a, T>,
-    pub(file) pa: *const T,
-    pub(file) pb: *const T,
+    pub(module) a: BTreeSetIter<'a, T>,
+    pub(module) b: BTreeSetIter<'a, T>,
+    pub(module) pa: *const T,
+    pub(module) pb: *const T,
 }
 
 // Where a full node of CAPACITY keys splits when one more key goes in at `edge_idx`: the index of the

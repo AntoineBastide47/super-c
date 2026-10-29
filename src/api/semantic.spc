@@ -56,8 +56,8 @@ pub struct SymbolKey {
 
 /// A declaration of a checked session.
 pub struct Symbol<'s> {
-    pub(file) s: &'s ses::Session,
-    pub(file) d: DefId,
+    pub(module) s: &'s ses::Session,
+    pub(module) d: DefId,
 }
 
 extend<'s> Symbol<'s> as Copy {}
@@ -334,9 +334,9 @@ pub fn symbol_at<'s>(s: &'s ses::Session, file: str, off: u32) Result<Option<Sym
 
 /// A type of a checked session.
 pub struct TypeView<'s> {
-    pub(file) s: &'s ses::Session,
-    pub(file) m: u32,
-    pub(file) t: TypeId,
+    pub(module) s: &'s ses::Session,
+    pub(module) m: u32,
+    pub(module) t: TypeId,
 }
 
 extend<'s> TypeView<'s> {

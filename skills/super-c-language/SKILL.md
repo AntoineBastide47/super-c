@@ -111,8 +111,8 @@ extend Counter {
 }
 ```
 
-Fields are private by default: only the type's own `extend` blocks can name a private field, even
-in the same module; `pub` exposes it everywhere. One `extend` block per
+Fields are private to their file by default, as items are: code in the declaring file names them, code in
+another file does not; `pub` exposes them everywhere. One `extend` block per
 type at file end. Interface conformance blocks (`extend T as I { .. }`) stay separate. A method's
 `self` is the extend's target (`Self`), a reference to it, or a raw pointer to it.
 
@@ -539,8 +539,7 @@ always names the module.
 
 | Spelling | Item visible to | Field visible to |
 | --- | --- | --- |
-| none | its file | its type's own `extend` blocks (member access, struct literals and patterns), in the declaring file too |
-| `pub(file)` | an error ("'pub(file)' is the default visibility of an item") | its file |
+| none | its file | its file |
 | `pub(module)` | the files whose path is the declaring file's path minus its last segment, or starts with it and `::` (a directory index's whole path; a root-level file's: its package) | the same |
 | `pub(package)` | the files of its package: the project (root, `src/`, `tests/`, `bench/`), std, `ffi/`, or one `vendor/<name>` | the same |
 | `pub` | every file | every file |
@@ -943,7 +942,7 @@ enforced at spawn boundaries.
 | `std::time`, `std::net` | Durations, deadlines and task-aware `sleep`; task-aware TCP and UDP |
 | `std::text::utf16` | `encode`, `encode_into`, `decode` between UTF-8 and UTF-16 code units, with the offset of ill-formed input |
 | `std::collections` | `deque::Deque`, `deque::RingBuffer`, `heap::BinaryHeap` with `heap::Reverse`, `btree::BTreeMap` and `BTreeSet`, `hive::Hive` (stable addresses through `HiveHandle`), `bits::BitSet`, `BitVec` and `BitField`, `mdspan::MdSpan` and `MdSpanMut`, `packed::PackedEnums` (enum values stored at the size of their own variant, read in order); each module's header states its complexity, invalidation and allocator use |
-| `std::alloc` | `Arena`, `Pool` and `NoAlloc` (C++ `<memory_resource>`): an owning resource and a `Copy` handle that implements `Allocator`; `std::parallel::pool::SyncPool` is the shared pool |
+| `std::alloc` | `Arena`, `Pool` and `NoAlloc` (C++ `<memory_resource>`): an owning resource and a `Copy` handle that implements `Allocator`; `Stack`, a zero-sized allocator like `Global` over a region of the running task, neither `Send` nor `Sync` (`Vector::<T, Stack>::new()`); `std::parallel::pool::SyncPool` is the shared pool |
 | `std::mem` | `layout::Layout`, `ptr` (unaligned and raw copies, `bit_cast`), `endian` (byte-order reads and writes), `cell::Cell`, `RefCell`, `OnceCell`, `rc::Rc` and `rc::Weak`, `volatile` (volatile access and zeroization) |
 | `std::hash::keyed` | `KeyedHash` (SipHash-1-3 under a 128-bit key from `with_key` or the process's entropy, `random`), `SipHasher13`, `SipHasher24`: the builder for maps whose keys come from untrusted input |
 | `std::platform::*` | std's internal operating-system layer (files, paths, clocks, entropy, memory, threads, processes, environment, signals, sockets, libraries): unstable, for std and projects with `std_internals = true` |

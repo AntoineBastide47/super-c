@@ -42,20 +42,20 @@ pub interface Analyzer {
 
 /// What one analyzer sees of one module, and where it reports.
 pub struct Pass<'p> {
-    pub(file) s: &'p ses::Session,
-    pub(file) tree: &'p syn::SyntaxTree,
-    pub(file) module: u32,
-    pub(file) id: str<'p>,
-    pub(file) config: str<'p>,
-    pub(file) reads: Slice<'p, u32>, // the analyzers whose facts it reads (`Runner.list` indexes)
-    pub(file) run: &'p mut Run,
-    pub(file) out: Vector<Finding>,
-    pub(file) facts: Vector<Fact>,
-    pub(file) fact_bytes: usize,
+    pub(module) s: &'p ses::Session,
+    pub(module) tree: &'p syn::SyntaxTree,
+    pub(module) module: u32,
+    pub(module) id: str<'p>,
+    pub(module) config: str<'p>,
+    pub(module) reads: Slice<'p, u32>, // the analyzers whose facts it reads (`Runner.list` indexes)
+    pub(module) run: &'p mut Run,
+    pub(module) out: Vector<Finding>,
+    pub(module) facts: Vector<Fact>,
+    pub(module) fact_bytes: usize,
 }
 
 // One fact: an analyzer, a module, a key, and its bytes.
-struct Fact {
+pub(module) struct Fact {
     pub analyzer: u32,
     pub module: String,
     pub key: String,
@@ -174,7 +174,7 @@ pub struct Budget {
 }
 
 // The state the passes of one run share.
-struct Run {
+pub(module) struct Run {
     pub ids: Vector<String>,
     pub facts: Vector<Fact>,
     pub closure: Vector<Vector<bool>>, // per module: the modules it imports, directly or not
@@ -206,12 +206,12 @@ struct Cached {
 /// reuses them while the module's text, the analyzer's version and configuration, and the facts it reads
 /// stay the same.
 pub struct Runner {
-    pub(file) list: Vector<Box<dyn Analyzer>>,
-    pub(file) order: Vector<u32>, // prerequisites first
-    pub(file) reads: Vector<Vector<u32>>, // per analyzer: itself and the analyzers it requires, transitively
-    pub(file) config: Vector<String>,
-    pub(file) budget: Budget,
-    pub(file) cache: Vector<Cached>,
+    list: Vector<Box<dyn Analyzer>>,
+    order: Vector<u32>, // prerequisites first
+    reads: Vector<Vector<u32>>, // per analyzer: itself and the analyzers it requires, transitively
+    config: Vector<String>,
+    budget: Budget,
+    cache: Vector<Cached>,
 }
 
 extend Runner {

@@ -35,7 +35,7 @@ extern "C" {
 /// as little-endian words, 8 per round; a partial last word carries its byte count in its top byte, so
 /// trailing zero bytes change the hash.
 pub struct DefaultHasher {
-    pub(file) h: u64,
+    h: u64,
 }
 
 extend DefaultHasher {
@@ -143,13 +143,13 @@ extend<K, V, F: fn(&K) bool> KeyKeep<F> as MapKeep<K, V> {
 /// An open-addressing hash map from K to V through allocator A, hashed by S. Iteration order is slot
 /// order, not insertion order.
 pub struct Map<K, V, A = Global, S = DefaultHash> {
-    pub(file) keys: *mut K, // parallel arrays, slot i valid when used[i] == 1 (private)
-    pub(file) vals: *mut V,
-    pub(file) used: *mut u8, // 0 = empty, 1 = occupied
-    pub(file) len: usize, // occupied slots
-    pub(file) cap: usize, // total slots; ALWAYS a power of two (grow doubles from 8) so slot() can mask
-    pub(file) alloc: A, // the allocator the arrays were obtained through (private; zero-sized for Global)
-    pub(file) hasher: S, // the hash builder (private; zero-sized for DefaultHash)
+    pub(module) keys: *mut K, // parallel arrays, slot i valid when used[i] == 1 (private)
+    pub(module) vals: *mut V,
+    pub(module) used: *mut u8, // 0 = empty, 1 = occupied
+    pub(module) len: usize, // occupied slots
+    pub(module) cap: usize, // total slots; ALWAYS a power of two (grow doubles from 8) so slot() can mask
+    alloc: A, // the allocator the arrays were obtained through (private; zero-sized for Global)
+    hasher: S, // the hash builder (private; zero-sized for DefaultHash)
 }
 
 unsafe extend<K, V, A, S> Map<K, V, A, S> as Zeroable {}
@@ -650,15 +650,15 @@ pub enum Entry<'a, K, V, A, S> {
 
 /// A present key's entry; it borrows the map.
 pub struct OccupiedEntry<'a, K, V, A, S> {
-    pub(file) map: &'a mut Map<K, V, A, S>,
-    pub(file) slot: usize,
+    pub(module) map: &'a mut Map<K, V, A, S>,
+    pub(module) slot: usize,
 }
 
 /// An absent key's entry: the key and the empty slot it takes; it borrows the map.
 pub struct VacantEntry<'a, K, V, A, S> {
-    pub(file) map: &'a mut Map<K, V, A, S>,
-    pub(file) key: K,
-    pub(file) slot: usize,
+    pub(module) map: &'a mut Map<K, V, A, S>,
+    pub(module) key: K,
+    pub(module) slot: usize,
 }
 
 extend<'a, K: Hash + Eq, V, A: Allocator, S: BuildHasher> Entry<'a, K, V, A, S> {
@@ -798,7 +798,7 @@ pub struct MapKeys<'a, K> {
     pub used: *const u8,
     pub idx: usize, // the next slot from the front
     pub cap: usize, // one past the next slot from the back
-    pub(file) left: usize, // entries not yet yielded
+    pub(module) left: usize, // entries not yet yielded
 }
 
 /// Iterator over a map's values in slot order; borrows the map.
@@ -807,43 +807,43 @@ pub struct MapValues<'a, V> {
     pub used: *const u8,
     pub idx: usize,
     pub cap: usize,
-    pub(file) left: usize,
+    pub(module) left: usize,
 }
 
 /// Iterator over a map's values, writable, in slot order; borrows the map mutably.
 pub struct MapValuesMut<'a, V> {
-    pub(file) vals: *mut V,
-    pub(file) used: *const u8,
-    pub(file) idx: usize,
-    pub(file) cap: usize,
-    pub(file) left: usize,
+    pub(module) vals: *mut V,
+    pub(module) used: *const u8,
+    pub(module) idx: usize,
+    pub(module) cap: usize,
+    pub(module) left: usize,
 }
 
 /// Iterator over a map's `(key, value)` pairs in slot order; borrows the map.
 pub struct MapIter<'a, K, V> {
-    pub(file) keys: *const K,
-    pub(file) vals: *const V,
-    pub(file) used: *const u8,
-    pub(file) idx: usize,
-    pub(file) cap: usize,
-    pub(file) left: usize,
+    pub(module) keys: *const K,
+    pub(module) vals: *const V,
+    pub(module) used: *const u8,
+    pub(module) idx: usize,
+    pub(module) cap: usize,
+    pub(module) left: usize,
 }
 
 /// Iterator over a map's `(key, writable value)` pairs in slot order; borrows the map mutably.
 pub struct MapIterMut<'a, K, V> {
-    pub(file) keys: *const K,
-    pub(file) vals: *mut V,
-    pub(file) used: *const u8,
-    pub(file) idx: usize,
-    pub(file) cap: usize,
-    pub(file) left: usize,
+    pub(module) keys: *const K,
+    pub(module) vals: *mut V,
+    pub(module) used: *const u8,
+    pub(module) idx: usize,
+    pub(module) cap: usize,
+    pub(module) left: usize,
 }
 
 /// The entries of a map moved out one by one (`Map::drain`); dropping it frees the rest and leaves the
 /// map empty.
 pub struct MapDrain<'a, K, V, A, S> {
-    pub(file) map: &'a mut Map<K, V, A, S>,
-    pub(file) idx: usize,
+    pub(module) map: &'a mut Map<K, V, A, S>,
+    pub(module) idx: usize,
 }
 
 extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {

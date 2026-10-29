@@ -11,8 +11,7 @@ name per operation and no alias for an upstream name.
 | `pub(module)` (its directory and subdirectories) | none | `pub(super)`, `pub(in path)` | none | none |
 | `pub(package)` (its import root) | lowercase name (package) | `pub(crate)` | `@(private)` (package) | none |
 | `pub` | uppercase name | `pub` | default | `extern`, header |
-| field without a modifier (its type's `extend` blocks) | none | none | none | `private` |
-| field `pub(file)` | none | none | none | none |
+| field without a modifier (its file) | none | private field (module) | none | none |
 | `import a::b;` of a directory without `b.spc` | `import "a/b"` | `mod b;` with `b/mod.rs` | `import "a/b"` | none |
 | `import m as *;` (re-export: `x::name` reaches `m`'s names) | dot import | `pub use m::*;` | none | `using namespace` |
 | `std_internals = true` in `build.toml` | `internal/` | none | none | none |
@@ -121,6 +120,7 @@ reach them through `as_slice()` / `as_mut_slice()` and keep `sort`, `sort_by`, `
 | `std::alloc::Pool` | none | none | none | `std::pmr::unsynchronized_pool_resource` |
 | `std::parallel::pool::SyncPool` | `sync.Pool` (an object cache, not an allocator) | none | none | `std::pmr::synchronized_pool_resource` |
 | `std::alloc::NoAlloc` | none | none | `mem.panic_allocator` | `std::pmr::null_memory_resource` |
+| `std::alloc::Stack` (zero-sized, task-local, last-in first-out reclaim) | none | none | `mem.Stack` (a fixed buffer) | none |
 
 ## Memory and shared ownership
 

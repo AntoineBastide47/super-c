@@ -2122,7 +2122,7 @@ extend Resolver {
                     self.leak_generics(self.ast.ext(id).aggregate.generics, v);
                     for k in 0..self.ast.ext(id).aggregate.members.len {
                         let mn = *self.ast.at_const(self.child(self.ast.ext(id).aggregate.members, k));
-                        if mn.kind == NodeKind::NODE_FIELD && mn.as_data.field.vis >= VIS_FILE {
+                        if mn.kind == NodeKind::NODE_FIELD && mn.as_data.field.vis != VIS_PRIVATE {
                             self.leak_type(mn.as_data.field.ty, pick(mn.as_data.field.vis < v, mn.as_data.field.vis, v));
                         } else if mn.kind == NodeKind::NODE_VARIANT {
                             self.leak_list(mn.as_data.variant.payload, v);

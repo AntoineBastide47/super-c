@@ -124,15 +124,15 @@ const NONE: u32 = 0xFFFFFFFF;
 
 /// One file's parse.
 pub struct SyntaxTree {
-    pub(file) path: String,
-    pub(file) text: String, // padded with lexer::SOURCE_PAD NULs past its length
-    pub(file) tokens: Vector<tok::Token>, // every token, comments included, in order; no end-of-file token
-    pub(file) ast: Ast,
-    pub(file) nodes: Vector<NodeId>, // in preorder: a node, then its subtree
-    pub(file) ends: Vector<u32>, // per preorder index: one past its last descendant
-    pub(file) parents: Vector<u32>, // per preorder index: its parent's, NONE for the root
-    pub(file) pos: Vector<u32>, // per dense AST index (`Ast::dense`): its preorder index
-    pub(file) errors: Vector<SyntaxError>,
+    path: String,
+    pub(module) text: String, // padded with lexer::SOURCE_PAD NULs past its length
+    pub(module) tokens: Vector<tok::Token>, // every token, comments included, in order; no end-of-file token
+    pub(module) ast: Ast,
+    pub(module) nodes: Vector<NodeId>, // in preorder: a node, then its subtree
+    pub(module) ends: Vector<u32>, // per preorder index: one past its last descendant
+    pub(module) parents: Vector<u32>, // per preorder index: its parent's, NONE for the root
+    pos: Vector<u32>, // per dense AST index (`Ast::dense`): its preorder index
+    pub(module) errors: Vector<SyntaxError>,
 }
 
 // Copy the records of `e` into `out` as syntax errors: the message and its first note line.
@@ -379,8 +379,8 @@ fn node_order(a: &Ast, len: u32, x: NodeId, y: NodeId) i32 {
 
 /// A node of a tree.
 pub struct Node<'t> {
-    pub(file) t: &'t SyntaxTree,
-    pub(file) i: u32,
+    pub(module) t: &'t SyntaxTree,
+    pub(module) i: u32,
 }
 
 extend<'t> Node<'t> as Copy {}
@@ -515,7 +515,7 @@ extend<'t> Node<'t> {
 
 /// A function: `fn name<generics>(params) returns where .. { body }`.
 pub struct FnSyntax<'t> {
-    pub(file) n: Node<'t>,
+    pub(module) n: Node<'t>,
 }
 
 extend<'t> FnSyntax<'t> {
@@ -564,7 +564,7 @@ extend<'t> Node<'t> {
 
 /// A struct, union or enum.
 pub struct AggregateSyntax<'t> {
-    pub(file) n: Node<'t>,
+    pub(module) n: Node<'t>,
 }
 
 extend<'t> AggregateSyntax<'t> {
@@ -588,7 +588,7 @@ extend<'t> AggregateSyntax<'t> {
 
 /// An import: `import a::b as c;` or `import a::b as *;`.
 pub struct ImportSyntax<'t> {
-    pub(file) n: Node<'t>,
+    pub(module) n: Node<'t>,
 }
 
 extend<'t> ImportSyntax<'t> {
@@ -613,7 +613,7 @@ extend<'t> ImportSyntax<'t> {
 
 /// A call: `callee(args)`.
 pub struct CallSyntax<'t> {
-    pub(file) n: Node<'t>,
+    pub(module) n: Node<'t>,
 }
 
 extend<'t> CallSyntax<'t> {
@@ -632,7 +632,7 @@ extend<'t> CallSyntax<'t> {
 
 /// A `let` statement.
 pub struct LetSyntax<'t> {
-    pub(file) n: Node<'t>,
+    pub(module) n: Node<'t>,
 }
 
 extend<'t> LetSyntax<'t> {
@@ -661,10 +661,10 @@ extend<'t> LetSyntax<'t> {
 /// The nodes of a list a typed view reads (parameters, members, arguments), in order. A list entry the
 /// parser left empty is skipped.
 pub struct NodeIter<'t> {
-    pub(file) t: &'t SyntaxTree,
-    pub(file) ids: *const NodeId,
-    pub(file) at: u32,
-    pub(file) len: u32,
+    pub(module) t: &'t SyntaxTree,
+    pub(module) ids: *const NodeId,
+    pub(module) at: u32,
+    pub(module) len: u32,
 }
 
 extend<'t> NodeIter<'t> as Iterator<Node<'t>> {
@@ -686,9 +686,9 @@ extend<'t> NodeIter<'t> as Iterator<Node<'t>> {
 
 /// The children of a node.
 pub struct Children<'t> {
-    pub(file) t: &'t SyntaxTree,
-    pub(file) at: u32,
-    pub(file) end: u32,
+    pub(module) t: &'t SyntaxTree,
+    pub(module) at: u32,
+    pub(module) end: u32,
 }
 
 extend<'t> Children<'t> as Iterator<Node<'t>> {
@@ -704,9 +704,9 @@ extend<'t> Children<'t> as Iterator<Node<'t>> {
 
 /// The nodes inside a node, in preorder.
 pub struct Descendants<'t> {
-    pub(file) t: &'t SyntaxTree,
-    pub(file) at: u32,
-    pub(file) end: u32,
+    pub(module) t: &'t SyntaxTree,
+    pub(module) at: u32,
+    pub(module) end: u32,
 }
 
 extend<'t> Descendants<'t> as Iterator<Node<'t>> {
@@ -726,8 +726,8 @@ extend<'t> Descendants<'t> as Iterator<Node<'t>> {
 
 /// A token of a tree.
 pub struct Token<'t> {
-    pub(file) t: &'t SyntaxTree,
-    pub(file) i: u32,
+    pub(module) t: &'t SyntaxTree,
+    pub(module) i: u32,
 }
 
 extend<'t> Token<'t> as Copy {}
@@ -755,9 +755,9 @@ extend<'t> Token<'t> {
 
 /// Consecutive tokens of a tree.
 pub struct Tokens<'t> {
-    pub(file) t: &'t SyntaxTree,
-    pub(file) at: u32,
-    pub(file) end: u32,
+    pub(module) t: &'t SyntaxTree,
+    pub(module) at: u32,
+    pub(module) end: u32,
 }
 
 extend<'t> Tokens<'t> as Iterator<Token<'t>> {
@@ -1032,8 +1032,8 @@ extend WorkspaceEdit {
 /// Generated source, line by line, checked by the parser before use. Indentation is four spaces per open
 /// block.
 pub struct Builder {
-    pub(file) out: String,
-    pub(file) depth: u32,
+    out: String,
+    depth: u32,
 }
 
 extend Builder {

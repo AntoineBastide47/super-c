@@ -14981,8 +14981,8 @@ fn c_walk(p: &mut loader::Package, from: usize, work: &mut Vector<DefId>, added:
     }
 }
 
-// Add to `Package.c_shaped` the declarations of modules `root_module..` that an `extern "C"` call's untyped
-// pointer argument reaches (`Package.c_reads`), with the types of their fields and payloads: C may read
+// Add to `Package.c_shaped` the declarations of modules `root_module..` that an `extern "C"` call's pointer
+// argument reaches (`Package.c_reads`), with the types of their fields and payloads: C may read
 // the value through that pointer. A declaration whose reordered layout a compile-time evaluation of the typecheck already
 // used (`layout::Svc::resized`, `offsets`) cannot take its declared order any more: an error asks for
 // `@ordered`. False after an error.
@@ -15025,7 +15025,7 @@ fn mark_c_reads(p: &mut loader::Package) bool {
             dc::REACHES_C_UNTYPED_POINTER_TAG_ORDERED,
             nm.span,
             format(
-                "'{}' reaches C through an untyped pointer argument, so its fields keep their declared order, but a compile-time evaluation already used its reordered layout: tag it '@ordered'",
+                "'{}' reaches C through a pointer argument, so its fields keep their declared order, but a compile-time evaluation already used its reordered layout: tag it '@ordered'",
                 p.modules[m].source.as_str().slice(
                     nm.as_data.name.text.start as usize,
                     nm.as_data.name.text.end as usize,

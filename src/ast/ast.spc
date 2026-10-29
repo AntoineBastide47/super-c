@@ -539,10 +539,9 @@ pub(package) struct FunctionData {
     pub(package) flags: u8, // FN_* bits; one byte keeps Node at 56 bytes
     pub(package) vis: u8,
 }
-/// Visibility levels, narrowest first (the `vis` of items and fields). An item without a modifier is visible to
-/// its file; a field without one to its type's own `extend` blocks.
+/// Visibility levels, narrowest first (the `vis` of items and fields). An item or field without a modifier is
+/// visible to its file.
 pub(package) const VIS_PRIVATE: u8 = 0;
-pub(package) const VIS_FILE: u8 = 1; // `pub(file)`: a field only
 pub(package) const VIS_MODULE: u8 = 2; // `pub(module)`: the files of the declaring file's directory and its subdirectories
 pub(package) const VIS_PACKAGE: u8 = 3; // `pub(package)`: the files of the declaring package
 pub(package) const VIS_PUB: u8 = 4; // `pub`
@@ -573,8 +572,6 @@ pub(package) const fn vis_text(vis: u8) str<'static> {
         "pub(package) ";
     } else if vis == VIS_MODULE {
         "pub(module) ";
-    } else if vis == VIS_FILE {
-        "pub(file) ";
     } else {
         "";
     };

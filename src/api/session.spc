@@ -91,19 +91,19 @@ const S_STALE: u8 = 1;
 const S_CHECKED: u8 = 2;
 
 pub struct Session {
-    pub(file) files: Option<Box<dyn FileProvider>>,
-    pub(file) std_dir: String,
-    pub(file) target: i32,
-    pub(file) memory_limit: usize,
-    pub(file) root_file: String,
-    pub(file) root_dir: String,
-    pub(file) alt_dir: String,
-    pub(file) lint_dir: String, // the project directory whose files report lints; "" for a lone file
-    pub(file) bufs: Vector<Buffer>,
-    pub(file) pkg: loader::Package,
-    pub(file) diags: Vector<an::DiagRec>,
-    pub(file) state: u8,
-    pub(file) revision: u64,
+    files: Option<Box<dyn FileProvider>>,
+    std_dir: String,
+    target: i32,
+    memory_limit: usize,
+    root_file: String,
+    root_dir: String,
+    alt_dir: String,
+    lint_dir: String, // the project directory whose files report lints; "" for a lone file
+    bufs: Vector<Buffer>,
+    pub(module) pkg: loader::Package,
+    pub(module) diags: Vector<an::DiagRec>,
+    state: u8,
+    revision: u64,
 }
 
 // The provider calls the loader makes during a check (`loader::FileSource`): `ctx` is a `SourceCtx`.
@@ -679,8 +679,8 @@ pub const SEV_WARNING: u8 = 2;
 
 /// A diagnostic of a checked session.
 pub struct Diag<'s> {
-    pub(file) s: &'s Session,
-    pub(file) i: u32,
+    pub(module) s: &'s Session,
+    pub(module) i: u32,
 }
 
 extend<'s> Diag<'s> {
@@ -745,9 +745,9 @@ extend<'s> Diag<'s> {
 
 /// The diagnostics of a checked session, in order.
 pub struct Diagnostics<'s> {
-    pub(file) s: &'s Session,
-    pub(file) order: Vector<u32>,
-    pub(file) at: usize,
+    pub(module) s: &'s Session,
+    pub(module) order: Vector<u32>,
+    pub(module) at: usize,
 }
 
 extend<'s> Diagnostics<'s> as Iterator<Diag<'s>> {
@@ -767,8 +767,8 @@ extend<'s> Diagnostics<'s> as Iterator<Diag<'s>> {
 
 /// A module of a checked session.
 pub struct Module<'s> {
-    pub(file) s: &'s Session,
-    pub(file) i: u32,
+    pub(module) s: &'s Session,
+    pub(module) i: u32,
 }
 
 extend<'s> Module<'s> {
@@ -800,8 +800,8 @@ extend<'s> Module<'s> {
 
 /// The modules of a checked session, in load order.
 pub struct Modules<'s> {
-    pub(file) s: &'s Session,
-    pub(file) at: u32,
+    pub(module) s: &'s Session,
+    pub(module) at: u32,
 }
 
 extend<'s> Modules<'s> as Iterator<Module<'s>> {

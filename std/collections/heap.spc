@@ -18,7 +18,7 @@
 
 /// A max-heap of T through allocator A.
 pub struct BinaryHeap<T, A = Global> {
-    pub(file) data: Vector<T, A>,
+    pub(module) data: Vector<T, A>,
 }
 
 /// `T` in the reverse order: a `BinaryHeap<Reverse<T>>` pops the smallest element first.
@@ -35,7 +35,7 @@ extend<T: Ord> Reverse<T> as Ord {
 
 /// A writable borrow of a heap's top (`BinaryHeap::peek_mut`); dropping it restores the heap order.
 pub struct PeekMut<'a, T, A> {
-    pub(file) heap: &'a mut BinaryHeap<T, A>,
+    pub(module) heap: &'a mut BinaryHeap<T, A>,
 }
 
 extend<T: Ord, A: Allocator> BinaryHeap<T, A> {

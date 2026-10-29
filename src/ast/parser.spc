@@ -156,9 +156,8 @@ extend Parser {
         return true;
     }
 
-    // A visibility modifier: none, `pub`, or `pub(file)`, `pub(module)`, `pub(package)`. `pub(file)` is a field
-    // level only: on an item it is the default, an error.
-    pub(package) fn parse_vis(self: &mut Self, field: bool) u8 {
+    // A visibility modifier: none, `pub`, `pub(module)` or `pub(package)`.
+    pub(package) fn parse_vis(self: &mut Self) u8 {
         if !self.match(TokenType::Pub) {
             return VIS_PRIVATE;
         }
@@ -172,20 +171,10 @@ extend Parser {
             v = VIS_MODULE;
         } else if self.text_is(t, "package") {
             v = VIS_PACKAGE;
-        } else if self.text_is(t, "file") {
-            v = VIS_FILE;
         } else {
             return VIS_PUB;
         }
         self.current = i + 3;
-        if v == VIS_FILE && !field {
-            self.errors.emit_span(
-                dc::PUB_FILE_DEFAULT_VISIBILITY_ITEM_REMOVE,
-                t.span(),
-                format("'pub(file)' is the default visibility of an item: remove it"),
-            );
-            return VIS_PRIVATE;
-        }
         return v;
     }
 
@@ -1177,7 +1166,7 @@ extend Parser {
         // span starts AFTER the attributes: the formatter prints them as leading trivia from the
         // inter-field gap, so the field's own span must not swallow them
         let start = self.raw_peek().start();
-        let vis = self.parse_vis(true);
+        let vis = self.parse_vis();
         let name = self.identifier();
         self.expect(TokenType::Colon, "':'");
         let ty = self.parse_type();
@@ -1555,7 +1544,7 @@ extend Parser {
         while !self.check(TokenType::RightBrace) && !self.at_end() {
             let mut attrs = self.parse_attributes(16);
             self.reject_derive_here();
-            let vis = self.parse_vis(false);
+            let vis = self.parse_vis();
             if self.check(TokenType::Fn) {
                 let f = self.parse_function(true, false);
                 self.ast.ext_mut(f).function.vis = vis;
@@ -1661,7 +1650,7 @@ extend Parser {
         while !self.check(TokenType::RightBrace) && !self.at_end() {
             let mut attrs = self.parse_attributes(16);
             self.reject_derive_here();
-            let vis = self.parse_vis(false);
+            let vis = self.parse_vis();
             if self.check(TokenType::Fn) {
                 let f = self.parse_function(false, true);
                 // The body of an `@unsafe(const)` function is its compile-time model; any other
@@ -1831,7 +1820,7 @@ extend Parser {
             self.add_attrs_to(&mut attrs, id);
             return id;
         }
-        let vis = self.parse_vis(false);
+        let vis = self.parse_vis();
         if self.check(TokenType::Static) {
             self.reject_derive_here();
             let sid = self.parse_static();

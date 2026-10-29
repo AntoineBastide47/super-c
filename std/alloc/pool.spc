@@ -52,27 +52,27 @@ static_assert(1 << CLASS_SHIFT_MIN == POOL_BLOCK_SIZE_MIN, "the class index is l
 
 // The record of one chunk, in a block of class 0 (for a class-0 chunk, its own first block). The chunk's
 // size follows from its class and its position in the list (`chunk_blocks`).
-struct PoolChunk {
-    pub(file) next: *mut PoolChunk, // older chunk of the same class
-    pub(file) base: *mut u8, // the chunk's address
+pub(module) struct PoolChunk {
+    pub(module) next: *mut PoolChunk, // older chunk of the same class
+    pub(module) base: *mut u8, // the chunk's address
 }
 
 static_assert(sizeof(PoolChunk) <= POOL_BLOCK_SIZE_MIN, "a chunk descriptor fits the smallest block");
 
 // One size class. `cur <= end`; both null until the first chunk.
-struct PoolClass {
-    pub(file) free: *mut u8, // free-list head; null when empty
-    pub(file) cur: *mut u8, // next uncarved block of the newest chunk
-    pub(file) end: *mut u8, // one past the newest chunk
-    pub(file) chunks: *mut PoolChunk, // descriptors, newest first
-    pub(file) chunk_count: usize,
+pub(module) struct PoolClass {
+    pub(module) free: *mut u8, // free-list head; null when empty
+    pub(module) cur: *mut u8, // next uncarved block of the newest chunk
+    pub(module) end: *mut u8, // one past the newest chunk
+    pub(module) chunks: *mut PoolChunk, // descriptors, newest first
+    pub(module) chunk_count: usize,
 }
 
-struct PoolState<A> {
-    pub(file) classes: [PoolClass; CLASS_COUNT],
-    pub(file) reserved: usize, // bytes of the chunks held
-    pub(file) unpooled: usize, // bytes of the live unpooled blocks
-    pub(file) upstream: A,
+pub(module) struct PoolState<A> {
+    pub(module) classes: [PoolClass; CLASS_COUNT],
+    pub(module) reserved: usize, // bytes of the chunks held
+    pub(module) unpooled: usize, // bytes of the live unpooled blocks
+    pub(module) upstream: A,
 }
 
 /// A size-class allocator over chunks from `A`, with O(1) pooled `alloc` and `dealloc`. Owns its chunks
@@ -84,7 +84,7 @@ pub struct Pool<A = Global> {
 /// The `Allocator` handle of a `Pool`: one pointer, `Copy`, valid while the pool is borrowed for `'a`.
 @derive(Copy)
 pub struct PoolAlloc<'a, A = Global> {
-    pub(file) state: *mut PoolState<A>,
+    pub(module) state: *mut PoolState<A>,
 }
 
 // The class of a request: log2 of the smallest power of two that is at least 16, `size` and `align`, minus

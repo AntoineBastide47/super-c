@@ -932,8 +932,8 @@ extend MoveItem as Refactoring {
 /// What one match found: the matched node and the nodes it bound, by name, as node identities of the tree
 /// (`syn::Node::id`), so a match holds no borrow.
 pub struct Match {
-    pub(file) names: Vector<String>,
-    pub(file) ids: Vector<u32>,
+    pub(module) names: Vector<String>,
+    pub(module) ids: Vector<u32>,
 }
 
 extend Match {

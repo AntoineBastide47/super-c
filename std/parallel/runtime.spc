@@ -185,6 +185,7 @@ pub struct Coroutine {
     pub ctx_mem: Array<u64, 2>, // the inline context (`sc_rt_ctx_inline_size` bytes, zeroed before use)
     pub env_mem: Array<u64, 6>, // the inline closure (`ENV_INLINE` bytes, 8-aligned)
     pub memb: Membership, // cancellation-source memberships, unlinked at completion: see `Membership`
+    pub stk: *mut void, // the task's std::alloc::stack region, or null: current while it runs, released at completion
 }
 
 /// The task's cancellation-source memberships. The runtime knows nothing of sources: it keeps the list
@@ -2160,7 +2161,9 @@ fn worker_main(arg: *mut void) *mut void {
         unsafe __sc_set_task_id((*co).run.id);
         // The leak tracker must not unwind the coroutine's stack.
         unsafe sc_lk_bt_pause();
+        unsafe sc_runtime::sc_rt_stk_enter((*co).stk);
         unsafe sc_runtime::sc_rt_ctx_switch(sched_ctx, (*co).ctx);
+        unsafe (*co).stk = unsafe sc_runtime::sc_rt_stk_leave();
         unsafe sc_lk_bt_resume();
         unsafe __sc_set_task_id(0);
         unsafe sc_runtime::sc_rt_tls_set(null);
@@ -2181,6 +2184,11 @@ fn worker_main(arg: *mut void) *mut void {
             if unsafe (*co).memb.head != null {
                 let hook = unsafe (*co).memb.hook;
                 hook(&mut unsafe (*co).memb);
+            }
+            // The body has returned: no container of the task's `Stack` region is left.
+            if unsafe (*co).stk != null {
+                unsafe sc_runtime::sc_rt_stk_release((*co).stk);
+                unsafe (*co).stk = null;
             }
             // Completion accounting BEFORE the block is recycled: an accepted cancellation that reaches
             // this point was reclaimed; publish Completed last so a registry scan never reads a half-done
@@ -2598,6 +2606,7 @@ pub unsafe fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inl
     unsafe (*co).handoff = 0;
     unsafe (*co).unwound = 0;
     unsafe (*co).memb.head = null;
+    unsafe (*co).stk = null;
     if fresh {
         reg_assign(co);
     } else if reuse_slot != null {

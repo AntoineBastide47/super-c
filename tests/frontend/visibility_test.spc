@@ -1,5 +1,5 @@
-// Visibility levels across files, directories and packages (`pub(module)`, `pub(package)`, a field's
-// `pub(file)`), the signature leak rule, implicit directory modules and the `std_internals` manifest key,
+// Visibility levels across files, directories and packages (`pub(module)`, `pub(package)`), the signature
+// leak rule, implicit directory modules and the `std_internals` manifest key,
 // driven through `$SUPERC` on scratch projects.
 import tests::cli_harness as cli;
 import module::loader as loader;
@@ -42,10 +42,10 @@ pub(package) fn pkgf() i32 { return 2; }
 fn filef() i32 { return 3; }
 pub(module) struct MS { pub v: i32 }
 extend MS { pub fn get(self: &Self) i32 { return self.v; } }
-pub struct F { pub(file) f: i32, pub(module) m: i32, pub(package) p: i32, q: i32 }
-extend F { pub fn new() F { return F { f: 1, m: 2, p: 3, q: 4 }; } }
+pub struct F { pub(module) m: i32, pub(package) p: i32, q: i32 }
+extend F { pub fn new() F { return F { m: 2, p: 3, q: 4 }; } }
 pub fn mkf() F { return F::new(); }
-pub fn own_file(x: &F) i32 { return x.f + filef(); }
+pub fn own_file(x: &F) i32 { return x.q + filef(); }
 )",
     );
     p.mkfile(
@@ -121,24 +121,30 @@ fn main() i32 {
     assert(all.text() == r.text(), "the diagnostics do not depend on the worker count");
 }
 
-// A field without a modifier is its type's, `pub(file)` its file's, `pub(module)` its directory's.
+// A field without a modifier is its file's (`own_file` reads `q`), `pub(module)` its directory's.
 @test
 fn field_levels() {
     let p = levels_project();
-    p.mkfile(
-        "main.spc",
-        "import a::m1;\nfn main() i32 {\n    let x = m1::mkf();\n    return x.p + x.f + x.m + x.q;\n}\n",
-    );
+    p.mkfile("main.spc", "import a::m1;\nfn main() i32 {\n    let x = m1::mkf();\n    return x.p + x.m + x.q;\n}\n");
     let r = p.compile("main.spc");
     assert(r.exit != 0);
-    assert(r_has(&r, "error: field 'f' is not visible here", "main.spc:4:20"));
-    assert(r_has(&r, "error: field 'm' is not visible here", "main.spc:4:26"));
-    assert(r_has(&r, "error: field 'q' is private", "main.spc:4:32"));
+    assert(r_has(&r, "error: field 'm' is not visible here", "main.spc:4:20"));
+    assert(r_has(&r, "error: field 'q' is private", "main.spc:4:26"));
     assert(!r.out_has("'p'"));
+    // A literal and the patterns of another file name the field the same way.
+    p.mkfile(
+        "main.spc",
+        "import a::m1 as *;\nfn main() i32 {\n    let y = F { m: 1, p: 2, q: 3 };\n    let z = switch y { F { q, .. } => q, };\n    if let F { q: w, .. } = y { return w; }\n    return z;\n}\n",
+    );
+    let r2 = p.compile("main.spc");
+    assert(r_has(&r2, "error: field 'm' is not visible here", "main.spc:3:17"));
+    assert(r_has(&r2, "error: field 'q' is private", "main.spc:3:29"));
+    assert(r_has(&r2, "error: field 'q' is private", "main.spc:4:28"));
+    assert(r_has(&r2, "error: field 'q' is private", "main.spc:5:16"));
 }
 
 // A signature, field type, alias target or bound names no type less visible than its item; a method wider
-// than its type is accepted and reaches no further than the type; `pub(file)` on an item is an error.
+// than its type is accepted and reaches no further than the type.
 @test
 fn leaks_and_member_widths() {
     let p = levels_project();
@@ -172,9 +178,6 @@ pub(module) fn tuple() (i32, m1::MS) { return (1, m1::MS { v: 1 }); }
     p.mkfile("main.spc", "import b::m7;\nfn main() i32 {\n    return m7::far();\n}\n");
     let r2 = p.compile("main.spc");
     assert(r_has(&r2, "error: no visible type 'MS' in the imported module", "b/m7.spc:2:31"));
-    p.mkfile("main.spc", "pub(file) fn f() {}\nfn main() i32 {\n    return 0;\n}\n");
-    let r3 = p.compile("main.spc");
-    assert(r_has(&r3, "error: 'pub(file)' is the default visibility of an item: remove it", "main.spc:1:5"));
 }
 
 // A directory without an index file imports as a module that sees the visible items of every file directly

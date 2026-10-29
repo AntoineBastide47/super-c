@@ -167,6 +167,71 @@ pub fn sc_rt_widx_get() i32 {
     return unsafe WIDX_SLOT;
 }
 
+// The current region of std::alloc::stack: the running coroutine's while a worker has switched into one
+// (`sc_rt_stk_enter`), else this thread's own; null until made. A region is an address range from
+// `sc_rt_region_reserve` whose first word is its length in bytes.
+@thread_local
+static mut STK_SLOT: *mut void = null;
+// This thread's own region while a coroutine runs on the thread.
+@thread_local
+static mut STK_THREAD: *mut void = null;
+// A coroutine runs on this thread.
+@thread_local
+static mut STK_TASK: bool = false;
+// The regions made and not yet released: one relaxed add per region, next to its system calls.
+static mut STK_LIVE: usize = 0;
+
+/// The std::alloc::stack regions that exist: made by `sc_rt_stk_adopt` and not yet released.
+pub fn sc_rt_stk_live() usize {
+    return unsafe atomic::load_usize(&mut STK_LIVE, RELAXED);
+}
+
+/// The current region of std::alloc::stack: the running coroutine's, else this thread's; null when it has
+/// none.
+pub fn sc_rt_stk_get() *mut void {
+    return unsafe STK_SLOT;
+}
+
+/// Make new region `r` current: the running coroutine's, which the scheduler keeps with the coroutine and
+/// releases when its body returns, or else this thread's, released when the thread exits.
+pub unsafe fn sc_rt_stk_adopt(r: *mut void) {
+    unsafe atomic::add_usize(&mut STK_LIVE, 1, RELAXED);
+    unsafe STK_SLOT = r;
+    if !unsafe STK_TASK {
+        stk_release_at_exit(r);
+    }
+}
+
+/// The scheduler switches into a coroutine whose region is `r` (null for none).
+pub unsafe fn sc_rt_stk_enter(r: *mut void) {
+    unsafe STK_THREAD = unsafe STK_SLOT;
+    unsafe STK_SLOT = r;
+    unsafe STK_TASK = true;
+}
+
+/// The coroutine has switched back to the scheduler: its region (null for none), which the scheduler keeps.
+pub unsafe fn sc_rt_stk_leave() *mut void {
+    let r = unsafe STK_SLOT;
+    unsafe STK_SLOT = unsafe STK_THREAD;
+    unsafe STK_THREAD = null;
+    unsafe STK_TASK = false;
+    return r;
+}
+
+/// Release region `r` and every block in it.
+pub unsafe fn sc_rt_stk_release(r: *mut void) {
+    unsafe sc_rt_region_release(r, unsafe *(r as *const usize));
+    unsafe atomic::sub_usize(&mut STK_LIVE, 1, RELAXED);
+}
+
+// The destructor of a thread's region (`stk_release_at_exit`): the thread is exiting.
+fn stk_exit(r: *mut void) {
+    if unsafe STK_SLOT == r {
+        unsafe STK_SLOT = null;
+    }
+    unsafe sc_rt_stk_release(r);
+}
+
 // ---- spin hint, cycle counter, spinlock -------------------------------------------------------------
 
 // Processor operations (`lir::ir::SYS_*`): each backend expands them for its target.
@@ -484,6 +549,7 @@ extern "C" "sys/mman.h" {
     const PROT_READ: i32 = 1;
     const PROT_WRITE: i32 = 2;
     const MAP_PRIVATE: i32 = 2;
+    const MAP_FIXED: i32 = 0x10;
     @platform(linux | android)
     @import("MAP_ANONYMOUS")
     const MAP_ANON: i32 = 0x20;
@@ -1020,6 +1086,67 @@ pub unsafe fn sc_rt_stack_note_size(bytes: usize) {
     unsafe rt_stack_task_size(bytes);
 }
 
+/// Reserve `len` bytes of address space, a whole number of pages, with no access and no memory behind
+/// them: a region of std::alloc::stack. Null when the system refuses.
+@platform(macos | ios | linux | android)
+pub unsafe fn sc_rt_region_reserve(len: usize) *mut void {
+    let m = unsafe mmap(null, len, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if m as usize == usize::MAX {
+        return null; // MAP_FAILED
+    }
+    return m;
+}
+
+/// Back the pages `[p, p + len)` of a reservation with zero-filled memory that can be read and written.
+/// False when the system refuses.
+@platform(macos | ios | linux | android)
+pub unsafe fn sc_rt_region_commit(p: *mut void, len: usize) bool {
+    return unsafe mprotect(p, len, PROT_READ | PROT_WRITE) == 0;
+}
+
+/// Give the committed pages `[p, p + len)` of a reservation back to the system: their memory is freed and
+/// they are reserved again, as `sc_rt_region_reserve` left them. A refusal is fatal.
+@platform(macos | ios | linux | android)
+pub unsafe fn sc_rt_region_decommit(p: *mut void, len: usize) {
+    if unsafe mmap(p, len, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) != p {
+        die("cannot give back the pages of a Stack region");
+    }
+}
+
+/// Release the reservation `[p, p + len)`. A release the OS refuses is fatal.
+@platform(macos | ios | linux | android)
+pub unsafe fn sc_rt_region_release(p: *mut void, len: usize) {
+    if unsafe munmap(p, len) != 0 {
+        die("cannot release a Stack region");
+    }
+}
+
+// The key whose destructor releases a thread's region when the thread exits, created by the first thread
+// that makes one.
+@platform(macos | ios | linux | android)
+static mut STK_KEY: pthread_key_t = unsafe zeroed::<pthread_key_t>();
+@platform(macos | ios | linux | android)
+static mut STK_KEY_STATE: i32 = 0; // 0 not created, 1 being created, 2 created
+
+@platform(macos | ios | linux | android)
+fn stk_release_at_exit(r: *mut void) {
+    let st = (unsafe &mut STK_KEY_STATE) as *mut i32;
+    if unsafe atomic::load_i32(st, ACQUIRE) != 2 {
+        if unsafe atomic::cas_i32(st, 0, 1, false, ACQUIRE, RELAXED) {
+            if unsafe pthread_key_create(&mut STK_KEY, stk_exit) != 0 {
+                die("cannot create the thread key of Stack regions");
+            }
+            unsafe atomic::store_i32(st, 2, RELEASE);
+        }
+        while unsafe atomic::load_i32(st, ACQUIRE) != 2 {
+            sc_rt_thread_yield();
+        }
+    }
+    if unsafe pthread_setspecific(STK_KEY, r) != 0 {
+        die("cannot record a thread's Stack region");
+    }
+}
+
 // ---- POSIX stack-overflow reporting ---------------------------------------------------------------
 // The handler is the program's own (std/rt/base.spc, armed for the main thread before main); each thread the
 // runtime starts arms itself here. Each thread's signal stack is released when the thread exits, through
@@ -1403,6 +1530,8 @@ extern "C" "windows.h" {
     fn WakeByAddressAll(addr: *mut void);
     fn VirtualAlloc(addr: *mut void, size: usize, kind: u32, protect: u32) *mut void;
     fn VirtualFree(addr: *mut void, size: usize, kind: u32) i32;
+    fn FlsAlloc(callback: fn(*mut void)) u32;
+    fn FlsSetValue(index: u32, value: *mut void) i32;
     fn AddVectoredExceptionHandler(first: u32, handler: PVECTORED_EXCEPTION_HANDLER) *mut void;
     fn WaitForSingleObject(h: *mut void, ms: u32) u32;
     fn CloseHandle(h: *mut void) i32;
@@ -1420,7 +1549,9 @@ extern "C" "windows.h" {
     const MEM_COMMIT: u32 = 0x1000;
     const MEM_RESERVE: u32 = 0x2000;
     const MEM_RELEASE: u32 = 0x8000;
+    const MEM_DECOMMIT: u32 = 0x4000;
     const MEM_RESET: u32 = 0x80000;
+    const FLS_OUT_OF_INDEXES: u32 = 0xFFFFFFFF;
     const PAGE_NOACCESS: u32 = 1;
     const PAGE_READWRITE: u32 = 4;
     const PAGE_GUARD: u32 = 0x100;
@@ -1756,6 +1887,65 @@ pub unsafe fn sc_rt_stack_guard_install() {
     if unsafe atomic::cas_i32(&mut VEH_ONCE, 0, 1, false, ACQ_REL, RELAXED) {
         let v = VehBits { f: stack_veh };
         unsafe AddVectoredExceptionHandler(1, v.h);
+    }
+}
+
+/// Reserve `len` bytes of address space, a whole number of pages, with no access and no memory behind
+/// them: a region of std::alloc::stack. Null when the system refuses.
+@platform(windows)
+pub unsafe fn sc_rt_region_reserve(len: usize) *mut void {
+    return unsafe VirtualAlloc(null, len, MEM_RESERVE, PAGE_NOACCESS);
+}
+
+/// Back the pages `[p, p + len)` of a reservation with zero-filled memory that can be read and written.
+/// False when the system refuses.
+@platform(windows)
+pub unsafe fn sc_rt_region_commit(p: *mut void, len: usize) bool {
+    return unsafe VirtualAlloc(p, len, MEM_COMMIT, PAGE_READWRITE) != null;
+}
+
+/// Give the committed pages `[p, p + len)` of a reservation back to the system: their memory is freed and
+/// they are reserved again, as `sc_rt_region_reserve` left them. A refusal is fatal.
+@platform(windows)
+pub unsafe fn sc_rt_region_decommit(p: *mut void, len: usize) {
+    if unsafe VirtualFree(p, len, MEM_DECOMMIT) == 0 {
+        die("cannot give back the pages of a Stack region");
+    }
+}
+
+/// Release the reservation `[p, p + len)`. A release the OS refuses is fatal.
+@platform(windows)
+pub unsafe fn sc_rt_region_release(p: *mut void, _len: usize) {
+    if unsafe VirtualFree(p, 0, MEM_RELEASE) == 0 {
+        die("cannot release a Stack region");
+    }
+}
+
+// The fiber-local slot whose callback releases a thread's region when the thread exits, allocated by the
+// first thread that makes one. A coroutine never stores in it, so on a thread that runs fibers the slot of
+// the thread's own fiber holds the region.
+@platform(windows)
+static mut STK_FLS: u32 = 0;
+@platform(windows)
+static mut STK_FLS_STATE: i32 = 0; // 0 not allocated, 1 being allocated, 2 allocated
+
+@platform(windows)
+fn stk_release_at_exit(r: *mut void) {
+    let st = (unsafe &mut STK_FLS_STATE) as *mut i32;
+    if unsafe atomic::load_i32(st, ACQUIRE) != 2 {
+        if unsafe atomic::cas_i32(st, 0, 1, false, ACQUIRE, RELAXED) {
+            unsafe STK_FLS = unsafe FlsAlloc(stk_exit);
+            if unsafe STK_FLS == FLS_OUT_OF_INDEXES {
+                die("cannot allocate the fiber-local slot of Stack regions");
+            }
+            unsafe atomic::store_i32(st, 2, RELEASE);
+        }
+        while unsafe atomic::load_i32(st, ACQUIRE) != 2 {
+            sc_rt_thread_yield();
+        }
+    }
+    if unsafe FlsSetValue(STK_FLS, r) == 0 {
+        die("cannot record a thread's Stack region");
     }
 }
 
@@ -2134,6 +2324,26 @@ pub unsafe fn sc_rt_ctx_switch(_from: *mut void, _to: *mut void) {
 pub unsafe fn sc_rt_ctx_free(ctx: *mut void) {
     unsafe stdlib::free(ctx);
 }
+
+// No regions: std::alloc::stack takes its blocks from `Global` on wasm, and the one thread never exits.
+@platform(wasm)
+pub unsafe fn sc_rt_region_reserve(_len: usize) *mut void {
+    return null;
+}
+@platform(wasm)
+pub unsafe fn sc_rt_region_commit(_p: *mut void, _len: usize) bool {
+    return false;
+}
+@platform(wasm)
+pub unsafe fn sc_rt_region_decommit(_p: *mut void, _len: usize) {
+    die("wasm has no Stack regions");
+}
+@platform(wasm)
+pub unsafe fn sc_rt_region_release(_p: *mut void, _len: usize) {
+    die("wasm has no Stack regions");
+}
+@platform(wasm)
+fn stk_release_at_exit(_r: *mut void) {}
 
 // ---- stackful context switch ------------------------------------------------------------------------
 // `sc_ctx_swap(save_sp, to_sp)` pushes the callee-saved set onto the running stack, stores the resulting

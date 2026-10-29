@@ -58,9 +58,9 @@ pub struct HookDiagnostic {
 
 /// What a hook adds at a stage.
 pub struct HookOutput {
-    pub(file) hook: String,
-    pub(file) diags: Vector<HookDiagnostic>,
-    pub(file) arts: Vector<be::Artifact>,
+    pub(module) hook: String,
+    pub(module) diags: Vector<HookDiagnostic>,
+    pub(module) arts: Vector<be::Artifact>,
 }
 
 extend HookOutput {
@@ -143,8 +143,8 @@ pub interface Hook {
 /// A custom backend as a hook: after the emission it runs the backend over the program's LIR
 /// (`api::backend::run`) and adds its artifacts.
 pub struct BackendHook {
-    pub(file) id: String,
-    pub(file) b: Box<dyn be::Backend>,
+    id: String,
+    b: Box<dyn be::Backend>,
 }
 
 extend BackendHook {
@@ -174,7 +174,7 @@ extend BackendHook as Hook {
 }
 
 // The installed hooks, sorted by id, and what their stages reported.
-struct Hooks {
+pub(module) struct Hooks {
     pub list: Vector<Box<dyn Hook>>,
     pub set: ext::HookSet,
     pub diags: Vector<HookDiagnostic>,
@@ -183,7 +183,7 @@ struct Hooks {
 
 /// Hooks installed for the builds of this process (`install`) until this value drops.
 pub struct Installed {
-    pub(file) h: Box<Hooks>,
+    pub(module) h: Box<Hooks>,
 }
 
 extend Installed as Free {

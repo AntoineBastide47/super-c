@@ -42,8 +42,8 @@ fn golden_for_modifiers() {
 @test
 fn golden_visibility_levels() {
     expect_fmt(
-        "pub(package)   struct S{pub(file) a:i32,pub(module) b:i32,c:i32}\npub(module) fn f(){}\nextend S{pub(package) fn g(self:&Self)i32{return self.a;}}\n",
-        "pub(package) struct S {\n    pub(file) a: i32,\n    pub(module) b: i32,\n    c: i32,\n}\npub(module) fn f() {}\nextend S {\n    pub(package) fn g(self: &Self) i32 {\n        return self.a;\n    }\n}\n",
+        "pub(package)   struct S{pub a:i32,pub(module) b:i32,c:i32}\npub(module) fn f(){}\nextend S{pub(package) fn g(self:&Self)i32{return self.a;}}\n",
+        "pub(package) struct S {\n    pub a: i32,\n    pub(module) b: i32,\n    c: i32,\n}\npub(module) fn f() {}\nextend S {\n    pub(package) fn g(self: &Self) i32 {\n        return self.a;\n    }\n}\n",
     );
 }
 

@@ -21,19 +21,19 @@ pub struct Ex<T, E> {
 
 /// The elements of a view.
 pub struct Leaf<'a, T> {
-    pub(file) s: Slice<'a, T>,
+    pub(module) s: Slice<'a, T>,
 }
 
 /// An operation `O` on the elements of `A` and `B`, element by element.
 pub struct Zip<A, B, O> {
-    pub(file) a: A,
-    pub(file) b: B,
+    pub(module) a: A,
+    pub(module) b: B,
 }
 
 /// The elements of `A`, each multiplied by `k` (`k * a[i]`).
 pub struct Scaled<T, A> {
-    pub(file) a: A,
-    pub(file) k: T,
+    pub(module) a: A,
+    pub(module) k: T,
 }
 
 /// An element operation of `Zip`.

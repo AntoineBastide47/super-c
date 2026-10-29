@@ -1,7 +1,7 @@
 // Field order: the compiler lays a struct's or a tuple's fields, and an enum variant's payload, out
 // by alignment, largest first, keeping the declared order for `@ordered` structs, a leading run of
 // `@ordered` fields, `@packed` structs, unions, the structs an extern or `@export` signature reaches,
-// and those an `extern "C"` call reaches through an untyped pointer argument or a C variadic. The native and the C backends place every field where the layout service says
+// and those an `extern "C"` call reaches through a pointer argument or a C variadic. The native and the C backends place every field where the layout service says
 // (`std::reflect`'s `f.offset`), so a program prints the same layouts through both.
 import tests::harness as h;
 import tests::cli_harness as cli;
@@ -84,6 +84,12 @@ struct ViaVoid {
     pub c: u8,
 }
 
+struct ViaPtrPtr {
+    pub a: u8,
+    pub b: u64,
+    pub c: u8,
+}
+
 struct ViaVariadic {
     pub a: u8,
     pub b: u64,
@@ -106,7 +112,13 @@ extern "C" {
     fn fo_set(p: *mut void, c: i32, n: usize) *mut void;
     @import("snprintf")
     fn fo_print(buf: *mut char, n: usize, fmt: *const char, ...) i32;
+    @import("fo_keep")
+    fn fo_keep_c(p: *mut *mut void);
 }
+
+// A C function with a `void **` parameter that writes nothing.
+@export("fo_keep")
+fn fo_keep(_p: *mut *mut void) {}
 
 enum En {
     V(u8, u64, u16),
@@ -160,10 +172,14 @@ fn main() i32 {
     ok = show("ForC", &ForC { a: 1, b: 2, c: 3 }) && ok;
     let x = ByExport { a: 1, b: 2, c: 3 };
     ok = show("ByExport", &x) && ok;
-    // C reads these through untyped pointers: none of the calls changes a byte.
+    // C reads these through pointer arguments: none of the calls changes a byte.
     let mut vv = ViaVoid { a: 1, b: 2, c: 3 };
     let _ = unsafe fo_set(&mut vv, 0, 0);
     ok = show("ViaVoid", &vv) && ok;
+    // A cast hides the struct from a typed parameter: `(&mut s as *mut S) as *mut *mut void`.
+    let mut pp = ViaPtrPtr { a: 1, b: 2, c: 3 };
+    unsafe fo_keep_c((&mut pp as *mut ViaPtrPtr) as *mut *mut void);
+    ok = show("ViaPtrPtr", &pp) && ok;
     let mut va = ViaVariadic { a: 1, b: 2, c: 3 };
     let _ = unsafe fo_print(null, 0, "%p".ptr() as *const char, &mut va);
     ok = show("ViaVariadic", &va) && ok;
@@ -195,6 +211,7 @@ WithZst 16 a=8 z=9 b=0
 ForC 24 a=0 b=8 c=16
 ByExport 24 a=0 b=8 c=16
 ViaVoid 24 a=0 b=8 c=16
+ViaPtrPtr 24 a=0 b=8 c=16
 ViaVariadic 24 a=0 b=8 c=16
 HoldsNested 32 t=0 n=8
 Nested 24 a=0 b=8 c=16
@@ -250,7 +267,7 @@ fn ordered_tags_are_checked() {
     );
 }
 
-// A struct C reads through an untyped pointer keeps its declared order, which must not change a layout the
+// A struct C reads through a pointer argument keeps its declared order, which must not change a layout the
 // typecheck already evaluated: here the order changes the size `static_assert` read.
 @test
 fn a_c_read_after_a_compile_time_layout_is_an_error() {
@@ -281,7 +298,7 @@ fn main() i32 {
     assert(r.exit != 0, "the build fails");
     assert(
         r.out_has(
-            "'G' reaches C through an untyped pointer argument, so its fields keep their declared order, but a compile-time evaluation already used its reordered layout: tag it '@ordered'",
+            "'G' reaches C through a pointer argument, so its fields keep their declared order, but a compile-time evaluation already used its reordered layout: tag it '@ordered'",
         ),
         "the error names the struct and the fix",
     );

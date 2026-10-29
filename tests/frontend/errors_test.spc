@@ -122,12 +122,17 @@ fn offset_past_eof() {
     assert(contains(&b, "error: eof"), "renders without overrun");
 }
 
-// Every diagnostic code has a stable name, and the name gives the code back.
+// Every diagnostic code but a removed one (5) has a stable name, and the name gives the code back.
 @test
 fn diagnostic_codes_round_trip_their_names() {
     for c in 1..dc::COUNT {
+        if c == 5 {
+            assert_eq(dc::name(c).len(), 0);
+            continue;
+        }
         assert(dc::name(c).len() != 0, "a code has a name");
         assert_eq(dc::by_name(dc::name(c)), c);
     }
     assert_eq(dc::by_name("no such code"), dc::NONE);
+    assert_eq(dc::by_name(""), dc::NONE);
 }

@@ -12,7 +12,7 @@ allowed-tools: Bash Read
 - Keep every extern call inside an explicit `unsafe` boundary, except a call of a function whose `@unsafe(...)` lists `safe`.
 - Check whether a link flag is already declared.
 - Validate opaque types against a real included C declaration.
-- Pass a struct C reads through an untyped pointer in the `extern "C"` call itself, or give it a fixed order (Field Order).
+- Pass a struct C reads through a pointer in the `extern "C"` call itself, or give it a fixed order (Field Order).
 
 Super-C interoperates with C through `extern "C"` blocks. Bindings map directly to C
 symbols with no wrapper or mangling.
@@ -305,9 +305,10 @@ offsets, so these keep the declared order:
 - every struct and enum that the signature of an `extern "C"` function or an `@export` function
   reaches by value or through a pointer, a reference, a slice, an array, a function type, a tuple, a
   type alias or a generic argument, with the types of their fields and payloads;
-- every struct and enum an argument of an `extern "C"` call points to when the parameter is `*void`
-  or the argument is a C variadic one, with the types of their fields and payloads. The compiler
-  looks through casts and `unsafe` to the argument's pointer or reference type;
+- every struct and enum an argument of an `extern "C"` call points to when the parameter is a pointer
+  (`*void`, `**void`, or a pointer a cast argument hides the struct behind) or the argument is a C
+  variadic one, with the types of their fields and payloads. The compiler looks through casts and
+  `unsafe` to the argument's pointer or reference type;
 - `@ordered` structs.
 
 A type of a module the std prelude loads keeps the layout the prelude gives it: user code does not
@@ -330,7 +331,7 @@ and gives back to Super-C (a callback context) needs nothing.
 Marks from call arguments are known only when the typecheck ends. If a compile-time evaluation (a
 `static_assert`, a constant, `sizeof` in an array length) already used the reordered layout, and the
 declared order changes what it read (the size, or a field offset), the build fails: "'Req' reaches C
-through an untyped pointer argument, so its fields keep their declared order, but a compile-time
+through a pointer argument, so its fields keep their declared order, but a compile-time
 evaluation already used its reordered layout: tag it '@ordered'".
 
 ## Header Constants

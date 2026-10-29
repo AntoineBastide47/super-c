@@ -40,16 +40,16 @@ pub enum MdSpanError {
 // Extents and strides of a view. Invariant, set by `checked_span`: the element count and every offset of an
 // in-range index tuple fit `usize`.
 @derive(Copy)
-struct Shape<const R: usize> {
-    pub(file) extents: [usize; R],
-    pub(file) strides: [usize; R],
+pub(module) struct Shape<const R: usize> {
+    pub(module) extents: [usize; R],
+    pub(module) strides: [usize; R],
 }
 
 /// A read-only view of a slice with R dimensions. See the module comment for the layout rules.
 @derive(Copy)
 pub struct MdSpan<'a, T, const R: usize> {
-    pub(file) data: Slice<'a, T>, // starts at the element of index (0, .., 0); len is the required span size
-    pub(file) shape: Shape<R>,
+    pub(module) data: Slice<'a, T>, // starts at the element of index (0, .., 0); len is the required span size
+    pub(module) shape: Shape<R>,
 }
 
 /// A writable view of a slice with R dimensions; exclusive like `[]mut T`.
@@ -60,20 +60,20 @@ pub struct MdSpanMut<'a, T, const R: usize> {
 
 /// The elements of an `MdSpan` in row-major index order (the last index fastest); double-ended, exact size.
 pub struct MdIter<'a, T, const R: usize> {
-    pub(file) ptr: *const T,
-    pub(file) shape: Shape<R>,
+    pub(module) ptr: *const T,
+    pub(module) shape: Shape<R>,
     // A run is a sequence of elements one `step` apart: the last dimensions, fused while each stride is the
     // run's reach. `outer` dimensions remain, and their indices are the digits below.
-    pub(file) step: usize,
-    pub(file) run_len: usize,
-    pub(file) outer: usize,
-    pub(file) front: [usize; R], // indices of the outer dimensions at the front
-    pub(file) front_offset: usize, // offset of the next element from the front
-    pub(file) front_run: usize, // elements left in the front run
-    pub(file) back: [usize; R], // indices of the outer dimensions at the back
-    pub(file) back_offset: usize, // offset of the next element from the back
-    pub(file) back_run: usize, // elements left in the back run
-    pub(file) left: usize, // elements not yet yielded from either end
+    pub(module) step: usize,
+    pub(module) run_len: usize,
+    pub(module) outer: usize,
+    pub(module) front: [usize; R], // indices of the outer dimensions at the front
+    pub(module) front_offset: usize, // offset of the next element from the front
+    pub(module) front_run: usize, // elements left in the front run
+    pub(module) back: [usize; R], // indices of the outer dimensions at the back
+    pub(module) back_offset: usize, // offset of the next element from the back
+    pub(module) back_run: usize, // elements left in the back run
+    pub(module) left: usize, // elements not yet yielded from either end
 }
 
 // The strides of a dense layout: `last_fastest` gives `layout_right`, else `layout_left`.

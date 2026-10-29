@@ -221,46 +221,11 @@ fn errors() {
         "fn f(s: str) i32 { return s.bogus as i32; }\n",
         "no field or method 'bogus'",
     );
-    h::expect_err_msg(
-        "private field read outside",
-        "struct S { v: i32, }\nfn f(s: S) i32 { return s.v; }\n",
-        "field 'v' is private",
-    );
-    h::expect_err_msg(
-        "private field init outside",
-        "struct S { v: i32, }\nfn main() i32 { let s: S = S { v: 1, }; return 0; }\n",
-        "field 'v' is private",
-    );
-    h::expect_err_msg(
-        "private field of another struct inside extend",
-        "struct A { v: i32, }\nstruct B {}\nextend B { fn peek(a: A) i32 { return a.v; } }\n",
-        "field 'v' is private",
-    );
-    // A pattern that names a field reads it: the same rule as member access, in every pattern form.
-    h::expect_err_msg(
-        "private field in a switch struct pattern",
-        "struct S { v: i32, }\nfn f(s: S) i32 { return switch s { S { v } => v, }; }\n",
-        "field 'v' is private",
-    );
-    h::expect_err_msg(
-        "private field in an if-let struct pattern",
-        "struct S { v: i32, pub w: i32, }\nfn f(s: S) i32 { if let S { w, v: x } = s { return w + x; } return 0; }\n",
-        "field 'v' is private",
-    );
-    h::expect_err_msg(
-        "private field in a while-let struct pattern",
-        "struct S { v: i32, }\nfn f(o: Option<S>) i32 { while let Some(S { v }) = o { return v; } return 0; }\n",
-        "field 'v' is private",
-    );
-    h::expect_err_msg(
-        "private field in a for pattern",
-        "struct S { v: i32, }\nfn f(a: [S; 2]) i32 { let mut n = 0; for S { v } in a { n += v; } return n; }\n",
-        "field 'v' is private",
-    );
-    h::expect_err_msg(
-        "private field in a nested struct pattern",
-        "struct S { v: i32, }\nfn f(o: Option<S>) i32 { return switch o { Some(S { v: 1 }) => 1, _ => 0, }; }\n",
-        "field 'v' is private",
+    // A field without a modifier is its file's: every code of the file reads it, in member access, literals
+    // and every pattern form; another file is `visibility_test`'s.
+    h::expect_ok(
+        "a private field in its file",
+        "struct S { v: i32, pub w: i32, }\nstruct B {}\nextend B { fn peek(s: S) i32 { return s.v; } }\nfn f(s: S, o: Option<S>, a: [S; 2]) i32 {\n    let t: S = S { v: 1, w: 2, };\n    let mut n = s.v + t.v + switch s { S { v, .. } => v, };\n    if let S { w, v: x } = t { n += w + x; }\n    while let Some(S { v }) = o { return v; }\n    for S { v, .. } in a { n += v; }\n    return n + switch o { Some(S { v: 1, .. }) => 1, _ => 0, };\n}\n",
     );
     h::expect_ok(
         "a rest pattern names no field",

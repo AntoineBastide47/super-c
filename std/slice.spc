@@ -1808,9 +1808,9 @@ extend<T: Format> Slice<T> as Format {
 /// A borrowing iterator over the elements of a `[]mut T`, yielding `&mut T` in order. Double-ended,
 /// with an exact size.
 pub struct SliceIterMut<'a, T> {
-    pub(file) data: *mut T,
-    pub(file) idx: usize,
-    pub(file) stop: usize,
+    pub(module) data: *mut T,
+    pub(module) idx: usize,
+    pub(module) stop: usize,
 }
 
 extend<'a, T> SliceIterMut<'a, T> as Iterator<&'a mut T> {

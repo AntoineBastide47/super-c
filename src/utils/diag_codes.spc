@@ -1,6 +1,7 @@
 // The stable codes of the compiler's diagnostics: a client branches on a code, never on message text. A
-// code keeps its number and its name once given; a new diagnostic takes the next number. The names are
-// provisional until the compiler API promotes the diagnostic schema.
+// code keeps its number and its name once given; a new diagnostic takes the next number, and a removed one
+// leaves its number unused, with an empty name (5, `pub(file)` on an item). The names are provisional until
+// the compiler API promotes the diagnostic schema.
 
 /// No code: a diagnostic of a tool that gave none.
 pub(package) const NONE: u16 = 0;
@@ -8,7 +9,6 @@ pub(package) const LEXICAL_ERROR: u16 = 1;
 pub(package) const UNEXPECTED_CHARACTER: u16 = 2;
 pub(package) const SOURCE_FILE_MUST_SMALLER_THAN_4: u16 = 3;
 pub(package) const UNTERMINATED_MATCHERTEXT_LITERAL_UNCLOSED_INTERPOLATION_HOLE: u16 = 4;
-pub(package) const PUB_FILE_DEFAULT_VISIBILITY_ITEM_REMOVE: u16 = 5;
 pub(package) const SYNTAX_ERROR: u16 = 6;
 pub(package) const MATCHERTEXT_INTERPOLATION_HOLE_EMPTY: u16 = 7;
 pub(package) const EXPECTED_REST_MATCHERTEXT_LITERAL: u16 = 8;
@@ -537,7 +537,6 @@ pub(package) const fn name(code: u16) str<'static> {
         2 => "unexpected_character",
         3 => "source_file_must_smaller_than_4",
         4 => "unterminated_matchertext_literal_unclosed_interpolation_hole",
-        5 => "pub_file_default_visibility_item_remove",
         6 => "syntax_error",
         7 => "matchertext_interpolation_hole_empty",
         8 => "expected_rest_matchertext_literal",
@@ -1061,6 +1060,9 @@ pub(package) const fn name(code: u16) str<'static> {
 
 /// The code named `n`, or `NONE`.
 pub(package) const fn by_name(n: str) u16 {
+    if n.len() == 0 {
+        return NONE;
+    }
     for c in 1..COUNT {
         if name(c) == n {
             return c;

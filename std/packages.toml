@@ -170,13 +170,15 @@ errors = "Lookups and removals return `Option`, except the `Hive` handle operati
 
 [package.alloc]
 tier = 2
-targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "full" }
-capabilities = []
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "reduced" }
+limits = "WebAssembly: no address-range reservations, so `Stack` takes its blocks from `Global`."
+capabilities = ["address-range reservation and commit, and a thread-exit callback, for `Stack` (through the runtime substrate)"]
 accelerations = []
-allocator = "`Arena` and `Pool` take their chunks from an upstream `A: Allocator = Global` and hand out blocks through the `Copy` handles `ArenaAlloc` and `PoolAlloc`; `NoAlloc` has no memory. Chunks grow geometrically: an arena's from 4 KiB, doubling up to 64 MiB; a pool class's from 1 KiB, doubling up to 64 KiB. A pool request above 4096 bytes goes to the upstream."
-thread_safety = "`Arena` and `Pool` are `Send` when their upstream is, never `Sync`; their handles are neither. `std::parallel::pool::SyncPool` is the shared pool."
+allocator = "`Arena` and `Pool` take their chunks from an upstream `A: Allocator = Global` and hand out blocks through the `Copy` handles `ArenaAlloc` and `PoolAlloc`; `NoAlloc` has no memory. Chunks grow geometrically: an arena's from 4 KiB, doubling up to 64 MiB; a pool class's from 1 KiB, doubling up to 64 KiB. A pool request above 4096 bytes goes to the upstream. `Stack` is a zero-sized allocator over a 4 GiB address range per task and per thread, committed from 64 KiB, at least doubling."
+thread_safety = "`Arena` and `Pool` are `Send` when their upstream is, never `Sync`; their handles are neither. `Stack` is neither: each task allocates from its own region. `std::parallel::pool::SyncPool` is the shared pool."
 blocking = "Never blocks."
-errors = "No error values: on exhaustion the upstream decides (`Global` aborts, `NoAlloc` panics), and an arena chunk size past `usize` panics. A size or alignment that does not describe the block is undefined, as for every `Allocator`."
+errors = "No error values: on exhaustion the upstream decides (`Global` aborts, `NoAlloc` panics), and an arena chunk size past `usize` panics. `Stack` panics when its region is full or the system refuses a reservation or commit. A size or alignment that does not describe the block is undefined, as for every `Allocator`."
+platform_ffi = ["stack"]
 
 [package.mem]
 tier = 2

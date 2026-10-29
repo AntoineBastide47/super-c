@@ -1126,7 +1126,7 @@ const fn name_str(p: &loader::Package, m: usize, name_node: NodeId) str {
 }
 
 // Whether module `req` sees an item or member of module `m` with visibility `v` (`Package::vis_ok`); one
-// without a modifier or `pub(file)` only in its module.
+// without a modifier only in its module.
 const fn seen(p: &loader::Package, req: usize, m: usize, v: u8) bool {
     return req == m || v >= VIS_MODULE && p.vis_ok(req as u32, m as ModuleId, v);
 }

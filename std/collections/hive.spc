@@ -54,21 +54,21 @@ const MAX_CAP_WIDE: usize = 8192;
 
 // An element, or, in the first slot of a skipblock, the first slots of the previous and the next skipblock
 // of the block's free list (NONE at an end).
-union Slot<T> {
-    pub(file) val: T,
-    pub(file) link: [u16; 2],
+pub(module) union Slot<T> {
+    val: T,
+    link: [u16; 2],
 }
 
 // A block header. The slots follow it at offset `slot_offset()`, the skipfield follows the slots. Every
 // active block holds an element; every active block other than the tail has used all its slots.
-struct Block<T> {
-    pub(file) next: *mut Block<T>, // the next active block; in the reserved list, the next reserved block
-    pub(file) prev: *mut Block<T>, // the previous active block
-    pub(file) erased_next: *mut Block<T>, // the next block with a skipblock
-    pub(file) erased_prev: *mut Block<T>,
-    pub(file) cap: u16,
-    pub(file) len: u16, // live elements
-    pub(file) free_head: u16, // the first slot of the first skipblock, or NONE
+pub(module) struct Block<T> {
+    pub(module) next: *mut Block<T>, // the next active block; in the reserved list, the next reserved block
+    pub(module) prev: *mut Block<T>, // the previous active block
+    pub(module) erased_next: *mut Block<T>, // the next block with a skipblock
+    pub(module) erased_prev: *mut Block<T>,
+    pub(module) cap: u16,
+    pub(module) len: u16, // live elements
+    pub(module) free_head: u16, // the first slot of the first skipblock, or NONE
 }
 
 /// A container whose elements keep their address until removed, in blocks from allocator A. An insert
@@ -94,28 +94,28 @@ unsafe extend<T: Sync, A: Sync> Hive<T, A> as Sync {}
 /// A copy that does not borrow the hive.
 @derive(Copy)
 pub struct HiveHandle<T> {
-    pub(file) slot: *mut Slot<T>,
-    pub(file) block: *mut Block<T>,
+    pub(module) slot: *mut Slot<T>,
+    pub(module) block: *mut Block<T>,
 }
 
 // The position of a walk over the live elements: `block` and `i` name the next one, while `rem` > 0.
-struct Cursor<T> {
-    pub(file) block: *mut Block<T>,
-    pub(file) slots: *mut Slot<T>, // the slots of `block`
-    pub(file) skip: *const u8, // the skipfield of `block`
-    pub(file) cap: usize, // the slots of `block`
-    pub(file) i: usize,
-    pub(file) rem: usize, // live elements not yet passed
+pub(module) struct Cursor<T> {
+    pub(module) block: *mut Block<T>,
+    slots: *mut Slot<T>, // the slots of `block`
+    skip: *const u8, // the skipfield of `block`
+    cap: usize, // the slots of `block`
+    pub(module) i: usize,
+    pub(module) rem: usize, // live elements not yet passed
 }
 
 /// A borrowing iterator over a Hive, in block and slot order; exact size.
 pub struct HiveIter<'a, T> {
-    pub(file) c: Cursor<T>,
+    pub(module) c: Cursor<T>,
 }
 
 /// A mutably borrowing iterator over a Hive, in block and slot order; exact size.
 pub struct HiveIterMut<'a, T> {
-    pub(file) c: Cursor<T>,
+    pub(module) c: Cursor<T>,
 }
 
 // Skipfield entry `i`, u8 or u16 as Block<T>::narrow() selects.

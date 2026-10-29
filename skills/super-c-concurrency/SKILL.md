@@ -46,6 +46,10 @@ Each task is a stackful coroutine on its own guard-paged stack (256 KiB via
 callee-saved registers, the FP control state and, on Windows, the TEB stack fields. Windows on
 arm64 runs each context on an OS fiber instead (`FiberCtx`, a heap context).
 
+Each coroutine also owns its `std::alloc::Stack` region (`Coroutine.stk`): the worker makes it current
+around the switch (`sc_rt_stk_enter`, `sc_rt_stk_leave`) and releases it when the body returns. Off a
+coroutine (a plain thread, a job) the thread's region is current, released at thread exit.
+
 Blocking **parks** the coroutine (saves context, returns worker to scheduler) instead of
 blocking the OS thread. A worker and its coroutine share an OS thread (the switch only
 swaps stacks), so per-coroutine fields need no atomics.

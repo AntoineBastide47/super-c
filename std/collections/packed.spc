@@ -170,9 +170,9 @@ extend<E: Copy, A: Allocator> PackedEnums<E, A> {
 
 /// An iterator over the values of a `PackedEnums` of a `Copy` enum, in order; exact size.
 pub struct PackedIter<'a, E, A> {
-    pub(file) s: &'a PackedEnums<E, A>,
-    pub(file) off: usize, // the byte of the next value
-    pub(file) rem: usize, // the values left
+    pub(module) s: &'a PackedEnums<E, A>,
+    pub(module) off: usize, // the byte of the next value
+    pub(module) rem: usize, // the values left
 }
 
 extend<'a, E: Copy, A: Allocator> PackedIter<'a, E, A> as Iterator<E> {

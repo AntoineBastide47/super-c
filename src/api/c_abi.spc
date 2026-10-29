@@ -17,12 +17,12 @@ pub const TABLE_V1: u32 = 1;
 
 /// `superc_session`: a session and the message of its last failed call.
 pub struct Handle {
-    pub(file) s: ses::Session,
-    pub(file) err: String,
+    pub(module) s: ses::Session,
+    pub(module) err: String,
 }
 
 // One item of a result: a location, a severity and code for a diagnostic, and a text.
-struct ResItem {
+pub(module) struct ResItem {
     pub file: String,
     pub start: u32,
     pub end: u32,
@@ -33,8 +33,8 @@ struct ResItem {
 
 /// `superc_result`: a text and items.
 pub struct Res {
-    pub(file) text: String,
-    pub(file) items: Vector<ResItem>,
+    pub(module) text: String,
+    pub(module) items: Vector<ResItem>,
 }
 
 /// `superc_item`: what `superc_result_item` writes. The caller sets `size` to the size it was compiled with;

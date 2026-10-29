@@ -234,8 +234,8 @@ extend<A: DoubleEndedIterator<TA>, B: DoubleEndedIterator<TB>, TA, TB> ZipIter<A
 
 /// Yields at most `n` values of the source.
 pub struct TakeIter<I, T> {
-    pub(file) it: I,
-    pub(file) n: usize, // values still allowed
+    pub(module) it: I,
+    pub(module) n: usize, // values still allowed
 }
 
 /// An iterator over the first `n` items of `it`; it stops pulling `it` after the `n`th.
@@ -283,8 +283,8 @@ extend<I: DoubleEndedIterator<T>, T> TakeIter<I, T> as DoubleEndedIterator<T> {
 
 /// Yields the source's values after the first `n`.
 pub struct SkipIter<I, T> {
-    pub(file) it: I,
-    pub(file) n: usize, // values still to drop before the first `next`
+    pub(module) it: I,
+    pub(module) n: usize, // values still to drop before the first `next`
 }
 
 /// An iterator over the items of `it` after the first `n`, which the first `next` drops.
@@ -327,10 +327,10 @@ extend<I: DoubleEndedIterator<T>, T> SkipIter<I, T> as DoubleEndedIterator<T> {
 
 /// Yields every value of `a`, then every value of `b`.
 pub struct ChainIter<A, B, T> {
-    pub(file) a: A,
-    pub(file) b: B,
-    pub(file) a_done: bool, // `a` has ended: never pulled again
-    pub(file) b_done: bool,
+    pub(module) a: A,
+    pub(module) b: B,
+    pub(module) a_done: bool, // `a` has ended: never pulled again
+    pub(module) b_done: bool,
 }
 
 /// An iterator over the items of `a` followed by the items of `b`. Each input is pulled again after it ends
@@ -388,7 +388,7 @@ extend<A: DoubleEndedIterator<T>, B: DoubleEndedIterator<T>, T> ChainIter<A, B, 
 
 /// Yields the source's values from its far end.
 pub struct RevIter<I, T> {
-    pub(file) it: I,
+    pub(module) it: I,
 }
 
 /// An iterator over the items of `it` in reverse order (its `next_back`).
@@ -414,11 +414,11 @@ extend<I: DoubleEndedIterator<T>, T> RevIter<I, T> as DoubleEndedIterator<T> {
 
 /// Yields every value of every inner iterator `f(x)` makes from the source's values, in order.
 pub struct FlatMapIter<I, T, J, U, F> {
-    pub(file) it: I,
-    pub(file) f: F,
-    pub(file) front: Option<J>, // the inner iterator `next` drains; None when it ended
-    pub(file) back: Option<J>, // the inner iterator `next_back` drains
-    pub(file) done: bool, // the source has ended: never pulled again
+    pub(module) it: I,
+    pub(module) f: F,
+    pub(module) front: Option<J>, // the inner iterator `next` drains; None when it ended
+    pub(module) back: Option<J>, // the inner iterator `next_back` drains
+    pub(module) done: bool, // the source has ended: never pulled again
 }
 
 /// The iterator of `flatten`: a `FlatMapIter` whose map is the identity.
@@ -504,9 +504,9 @@ extend<I: DoubleEndedIterator<T>, T, J: DoubleEndedIterator<U>, U, F: fn(T) J> F
 
 /// Yields the source's values while the predicate holds.
 pub struct TakeWhileIter<I, T, P> {
-    pub(file) it: I,
-    pub(file) p: P,
-    pub(file) done: bool, // a value failed `p`: never pulled again
+    pub(module) it: I,
+    pub(module) p: P,
+    pub(module) done: bool, // a value failed `p`: never pulled again
 }
 
 /// An iterator over the leading items of `it` for which `p` holds. The first item that fails `p` is
@@ -543,9 +543,9 @@ extend<I: Iterator<T>, T, P: fn(&T) bool> TakeWhileIter<I, T, P> as Iterator<T> 
 
 /// Yields the source's values from the first one the predicate rejects.
 pub struct SkipWhileIter<I, T, P> {
-    pub(file) it: I,
-    pub(file) p: P,
-    pub(file) done: bool, // the leading run has been dropped
+    pub(module) it: I,
+    pub(module) p: P,
+    pub(module) done: bool, // the leading run has been dropped
 }
 
 /// An iterator over the items of `it` after its leading run of items for which `p` holds, which the first
@@ -585,8 +585,8 @@ extend<I: Iterator<T>, T, P: fn(&T) bool> SkipWhileIter<I, T, P> as Iterator<T> 
 
 /// Yields `v` for each `Some(v)` that `f` makes from the source's values, until the first `None`.
 pub struct MapWhileIter<I, T, U, F> {
-    pub(file) it: I,
-    pub(file) f: F,
+    pub(module) it: I,
+    pub(module) f: F,
 }
 
 /// An iterator over `f(x)`'s payloads for the leading items `x` of `it`, ending at the first `None`. Not
@@ -611,9 +611,9 @@ extend<I: Iterator<T>, T, U, F: fn(T) Option<U>> MapWhileIter<I, T, U, F> as Ite
 
 /// Yields the source's first value, then every `step`th one after it.
 pub struct StepByIter<I, T> {
-    pub(file) it: I,
-    pub(file) gap: usize, // `step - 1`: the values dropped between two results
-    pub(file) first: bool, // the first value is still to come
+    pub(module) it: I,
+    pub(module) gap: usize, // `step - 1`: the values dropped between two results
+    pub(module) first: bool, // the first value is still to come
 }
 
 /// An iterator over the items of `it` at positions 0, `step`, `2 * step`, ... Panics when `step` is 0.
@@ -682,8 +682,8 @@ extend<I: DoubleEndedIterator<T>, T> StepByIter<I, T> as DoubleEndedIterator<T> 
 
 /// Yields the source's values and can show the next one without consuming it.
 pub struct PeekableIter<I, T> {
-    pub(file) it: I,
-    pub(file) peeked: Option<Option<T>>, // Some: the source's next result, already pulled
+    pub(module) it: I,
+    pub(module) peeked: Option<Option<T>>, // Some: the source's next result, already pulled
 }
 
 /// An iterator over the items of `it` with `peek` and `next_if`.
@@ -766,8 +766,8 @@ extend<I: DoubleEndedIterator<T>, T> PeekableIter<I, T> as DoubleEndedIterator<T
 
 /// Yields the source's values and calls `f` on each as it passes.
 pub struct InspectIter<I, T, F> {
-    pub(file) it: I,
-    pub(file) f: F,
+    pub(module) it: I,
+    pub(module) f: F,
 }
 
 /// An iterator over the items of `it` that runs `f` on each one first. `f` borrows the item.
@@ -803,8 +803,8 @@ extend<I: DoubleEndedIterator<T>, T, F: fn(&T) void> InspectIter<I, T, F> as Dou
 
 /// Yields the source's values until its first `None`, then only `None`.
 pub struct FuseIter<I, T> {
-    pub(file) it: I,
-    pub(file) done: bool, // the source returned None: never pulled again
+    pub(module) it: I,
+    pub(module) done: bool, // the source returned None: never pulled again
 }
 
 /// An iterator over the items of `it` that never pulls `it` again after it ends.
@@ -844,8 +844,8 @@ extend<I: DoubleEndedIterator<T>, T> FuseIter<I, T> as DoubleEndedIterator<T> {
 
 /// Yields the source's values over and over.
 pub struct CycleIter<I, T> {
-    pub(file) orig: I, // the source as it was built
-    pub(file) cur: I, // the pass in progress
+    pub(module) orig: I, // the source as it was built
+    pub(module) cur: I, // the pass in progress
 }
 
 /// An iterator that restarts a copy of `it` each time the copy ends; empty when `it` is. `it` must be
@@ -880,9 +880,9 @@ extend<I: Iterator<T> + Copy, T> CycleIter<I, T> as Iterator<T> {
 
 /// Yields what `f` makes from a running state and each source value, until `f` returns `None`.
 pub struct ScanIter<I, T, S, U, F> {
-    pub(file) it: I,
-    pub(file) state: S,
-    pub(file) f: F,
+    pub(module) it: I,
+    pub(module) state: S,
+    pub(module) f: F,
 }
 
 /// An iterator over the payloads of `f(&mut state, x)` for the items `x` of `it`, starting from `init`,
@@ -907,7 +907,7 @@ extend<I: Iterator<T>, T, S, U, F: fn(&mut S, T) Option<U>> ScanIter<I, T, S, U,
 
 /// Yields a copy of each value a borrowing source points at.
 pub struct CopiedIter<I, T> {
-    pub(file) it: I,
+    pub(module) it: I,
 }
 
 /// An iterator over `*r` for the references `r` of `it` (`copied(v.iter())` yields `T`, so `T: Ord`
@@ -940,7 +940,7 @@ extend<'a, I: DoubleEndedIterator<&'a T>, T: Copy> CopiedIter<I, T> as DoubleEnd
 
 /// Yields a clone of each value a borrowing source points at.
 pub struct ClonedIter<I, T> {
-    pub(file) it: I,
+    pub(module) it: I,
 }
 
 /// An iterator over `r.clone()` for the references `r` of `it`: one deep copy per item.
