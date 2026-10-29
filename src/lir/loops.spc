@@ -47,6 +47,15 @@
 // vector's terms) runs `vector` scalar copies of its body the same way (LLVM's interleaving at a vector
 // factor of 1): each instruction's copies together, so their loads and stores pair (`ldp`, `stp`).
 //
+// Beyond that shape: a load through every 2nd or 4th element unzips its vectors (`vunzip`); a group of
+// stores that writes every element of such a step zips its vectors and stores them whole (`vziplo`,
+// `vziphi`: `store_groups`); a header parameter that a select of a lane value and itself on their
+// comparison updates is a min or max reduction (`minmax`); the counter truncated is a lane value (a splat
+// plus each lane's iteration); a body with one branch whose sides meet again runs both as selects
+// (`linearize`). Where the target converts vectors and shifts their lanes in registers (`Package.vops`),
+// a plan mixes lane widths up to a factor of two (narrower vectors fill half a register), converts and
+// shifts. `SC_VEC_REPORT=1` prints why each loop that stays scalar does (a debugging aid).
+//
 // Rotation (LLVM's LoopRotate, GCC's loop header copying): a loop whose header only tests whether to run
 // the body gets a copy of the header the latch enters instead, so each iteration ends in one conditional
 // branch back into the body rather than a jump to the test. The header stays as the test before the
@@ -56,6 +65,8 @@ import lir::ir as *;
 import lir::eval as le;
 import lir::verify as lv;
 import ir::core as core;
+import ast::ast as ast;
+import stdlib;
 
 /// A loop peels at most MAX_PEEL times.
 pub(package) const MAX_PEEL: u32 = 32;
@@ -76,6 +87,9 @@ const ILV_SIZE: u32 = 12;
 const CF_SIZE: u32 = 256;
 const CF_DEG: u32 = 8;
 
+// No condition (`LoopOpt::minmax`).
+const NONE16: u16 = 0xFFFF;
+
 // What a vectorized loop's instruction is (`LoopOpt.vk`).
 const VK_STEP: u8 = 1; // the counter's step
 const VK_ADDR: u8 = 2; // `base + i * size + offset`
@@ -84,7 +98,8 @@ const VK_STORE: u8 = 4;
 const VK_RED: u8 = 5; // a reduction's update
 const VK_INV: u8 = 6; // a load of an address the loop does not define, which no store of it touches
 const VK_MASK: u8 = 7; // a comparison of lane values, or `and`/`or` of two: a select's condition
-const VK_GADDR: u8 = 8; // scalar copies: `base + lane value * size + offset`, a gathered load's address
+const VK_GADDR: u8 = 8; // `base + lane value * size + offset`: a gathered load's or a scattered store's address
+const VK_RCMP: u8 = 9; // the comparison of a min or max reduction's select (`minmax`)
 
 /// The peeling's scratch, reused from body to body.
 pub(package) struct LoopOpt {
@@ -109,11 +124,14 @@ pub(package) struct LoopOpt {
     ctr: Value, // the counted loop's counter, a header parameter (`trip`)
     fixed: Vector<bool>, // per instruction, whether a copy computes it from constants (`residual`)
     // Bounds-check versioning (`checks`): the blocks whose branches the fast copy drops, the side each one
-    // keeps (0: its taken edge, 1: the other), and the guard's comparisons (`n <= len` each).
+    // keeps (0: its taken edge, 1: the other), and the guard's comparisons (`n <= len` each; for a check of
+    // `q << gsh + goff`, `n <= bound(len)`: `checks`).
     fixes: Vector<u32>,
     fside: Vector<u8>,
     gx: Vector<Value>,
     gy: Vector<Value>,
+    gsh: Vector<u8>,
+    goff: Vector<u64>,
     gcond: u16,
     // Rotation: the header's values the body uses (`hvals`), and per header parameter, instruction and
     // flag its index there (NONE: not used); the body's parameters' first new number and old range; the
@@ -138,15 +156,59 @@ pub(package) struct LoopOpt {
     vsigned: bool,
     vred: Vector<Value>,
     vrup: Vector<u32>,
+    // Per reduction, 0 for an arithmetic one; for a min or max one the condition under which a lane value
+    // `x` replaces the accumulator `m` (`x < m` for a min, `x > m` for a max: signed, unsigned or ordered).
+    vrel: Vector<u16>,
+    // Per reduction, whether it keeps its order (a float one the build does not reassociate): one scalar
+    // accumulator that the update takes each lane of each copy into in turn (`vextract`).
+    vord: Vector<bool>,
+    // Per reduction, whether it is a float min or max with signed zeros: the lanes keep their own extreme,
+    // and a result of zero (whose sign the order of equal values decides) runs the loop again from its
+    // start, in order. Only for a loop that stores nothing.
+    vzr: Vector<bool>,
+    vnv: u32, // the vector copies a vector loop interleaves (`Budgets.vector`)
+    vne: bool, // the counted test is `i != n` (`counted_by`)
+    // The counter counts down by 1 while it is not 0 (`counted_by`): a vector iteration runs the counter's
+    // next `k` values, its lanes in the order of their elements (the reverse of the iterations').
+    vrev: bool,
+    // The body leaves the loop early too (`counted_by`): its branch's back edge `vback`, which runs while
+    // condition `vxc` is `vxs` (true or false). A vector iteration whose lanes would leave hands its
+    // iterations to the loop, which leaves at the right one.
+    vexit: bool,
+    vqk: u32, // the counter's step (a power of 2): each access steps by its scale times it
+    // The loop maps elements (no reduction, no early exit, no store through a base it loads through):
+    // its last vector iteration runs at `n - k` (the tail block past the new preheader), over iterations
+    // an earlier one ran too, and leaves the loop nothing.
+    vtail: bool,
+    vback: u32,
+    vxc: Value,
+    vxs: bool,
+    gq: u32, // `checks` of a test `i != n`: the counter's index among the header's parameters, else NONE
+    grev: bool, // `checks` of a counter down by 1 while not 0 (`gq` its index): each check of `i - 1` needs `i0 <= len`
     vacc: Vector<u32>,
     vca: Vector<u32>,
     vcb: Vector<u32>,
     vsz: u32,
     vlanes: u32,
     vone: bool, // the plan runs scalar copies (a lane per copy)
+    // `SC_VEC_REPORT=1` (a debugging aid): why the last plan failed (`no`), and per loop `run` left
+    // scalar, its header's location (later transforms renumber the instructions) and that reason.
+    report: bool,
+    why: str<'static>,
+    why_op: u8,
+    pub(package) rejected: Vector<(Loc, String)>,
+    /// A plan made vectors wider than a register (`plan_lanes`): `lir::opt` splits them (`lir::wide`).
+    pub(package) wide: bool,
     vbytes: u32, // the bytes of the vectors (`run`'s `vec`)
     vstrided: bool, // a vector load reads every 2nd or 4th element: the loop runs the last iteration
-    vgat: Vector<u32>, // the gathered loads (scalar copies)
+    vgroups: bool, // stores write every 2nd or 4th element, each group of them every element (`store_groups`)
+    vind: Vector<u32>, // the truncations of the counter the plan reads as lanes (`vclass`)
+    vmax: u32, // the bytes of the widest vector of the target (`run`); `vbytes` the plan's
+    vmin: u32, // the narrowest lane's bytes; `vsz` the widest's (at most twice as wide: `lane_size`)
+    /// How the target converts vectors and shifts their lanes (`Package.vops`): with VOPS_SOME or
+    /// VOPS_ALL a plan may mix lane widths and shift.
+    pub(package) vops: u8,
+    vgat: Vector<u32>, // the gathered loads and scattered stores (`vgather`)
     vmap: Vector<Value>,
     vinv: Vector<Value>,
     vspl: Vector<Value>,
@@ -154,8 +216,18 @@ pub(package) struct LoopOpt {
     // branch's block and the latch; the loop's blocks before, the header's edge into the branch's block,
     // and per new instruction its original (`lorig`, for the alias classes).
     lsave: [u32; 6],
+    // `linearize_exit`: the instructions of the new block before the exit test's block ends (NONE: no
+    // such block), and whether the rest does what the scalar loop may not do past the exit (a store, a
+    // load of any element), so that the loop keeps its own body for the scalar iterations.
+    lsplit: u32,
+    lkeep: bool,
     lold: Vector<u32>,
     ledge: u32,
+    // `linearize`'s stores of a side: each store, the branch's condition, and whether it stores when the
+    // condition holds. The vector loop stores the lanes the condition picks alone (`store_masked_ptr`).
+    lcs: Vector<u32>,
+    lcc: Vector<Value>,
+    lcw: Vector<bool>,
     lorig: Vector<u32>,
     // Final values (`final_values`): the header; its counted test (the tested value, the counter, the
     // bound, the step's size and direction, whether the test lets the bound through, tests inequality,
@@ -258,6 +330,8 @@ extend LoopOpt {
             fixes: Vector::<u32>::new(),
             fside: Vector::<u8>::new(),
             gx: Vector::<Value>::new(),
+            gsh: Vector::<u8>::new(),
+            goff: Vector::<u64>::new(),
             gy: Vector::<Value>::new(),
             gcond: 0,
             hvals: Vector::<Value>::new(),
@@ -275,20 +349,49 @@ extend LoopOpt {
             vsigned: false,
             vred: Vector::<Value>::new(),
             vrup: Vector::<u32>::new(),
+            vrel: Vector::<u16>::new(),
+            vord: Vector::<bool>::new(),
+            vzr: Vector::<bool>::new(),
+            vnv: 1,
+            vne: false,
+            vrev: false,
+            vexit: false,
+            vqk: 1,
+            vtail: false,
+            vback: 0,
+            vxc: VNONE,
+            vxs: true,
+            gq: NONE,
+            grev: false,
             vacc: Vector::<u32>::new(),
             vca: Vector::<u32>::new(),
             vcb: Vector::<u32>::new(),
             vsz: 0,
             vlanes: 0,
             vone: false,
+            report: stdlib::env_is("SC_VEC_REPORT", "1"),
+            why: "",
+            why_op: 0,
+            rejected: Vector::<(Loc, String)>::new(),
+            wide: false,
             vbytes: VBYTES,
             vstrided: false,
+            vgroups: false,
+            vind: Vector::<u32>::new(),
+            vmax: 0,
+            vmin: 0,
+            vops: 0,
             vgat: Vector::<u32>::new(),
             vmap: Vector::<Value>::new(),
             vinv: Vector::<Value>::new(),
             vspl: Vector::<Value>::new(),
             lsave: [0, 0, 0, 0, 0, 0],
+            lsplit: NONE,
+            lkeep: false,
             lold: Vector::<u32>::new(),
+            lcs: Vector::<u32>::new(),
+            lcc: Vector::<Value>::new(),
+            lcw: Vector::<bool>::new(),
             ledge: NONE,
             lorig: Vector::<u32>::new(),
             cf_h: NONE,
@@ -353,6 +456,11 @@ extend LoopOpt {
         let cand = self.candidates(b, inner, lparent, preh);
         let mut any = false;
         self.vbytes = vec;
+        self.vmax = vec;
+        self.vnv = bu.vector;
+        if bu.vector != 0 {
+            self.rejected.truncate(0);
+        }
         for c in 0..cand.len() {
             let h = cand[c];
             let p = preh[h as usize];
@@ -392,13 +500,43 @@ extend LoopOpt {
                 let nb = self.linearize(b, h, u);
                 if nb != NONE {
                     if self.vplan(b, ptr, fmath, h, p, nb, cl, false) {
-                        self.commit_linear(b, u);
-                        self.vectorize(b, h, p, nb, bu.vector);
+                        if self.lcs.len() == 0 && !self.lkeep {
+                            self.commit_linear(b, u);
+                            self.vectorize(b, h, p, nb, bu.vector);
+                            self.lsplit = NONE;
+                        } else {
+                            // The vectors store a side's lanes alone; the loop keeps its branch for the
+                            // rest, the new block left unreached.
+                            let e = self.lsave[4];
+                            let ein = self.ledge;
+                            self.lsave = [0, 0, 0, 0, 0, 0];
+                            self.vectorize(b, h, p, nb, bu.vector);
+                            self.lcs.truncate(0);
+                            self.lkeep = false;
+                            self.lsplit = NONE;
+                            b.pool[ein as usize] = e;
+                            let nbk = b.blocks[nb as usize];
+                            b.insts[(nbk.start + nbk.len - 1) as usize] = Inst {
+                                op: O_UNREACHABLE,
+                                ty: T_NONE,
+                                aux: 0,
+                                a: VNONE,
+                                b: VNONE,
+                                c: VNONE,
+                            };
+                        }
                         any = true;
                         continue;
                     }
                     self.unlinearize(b);
                 }
+            }
+            if self.report && bu.vector != 0 && vec >= VBYTES && (b.blocks[h as usize].flags & BLOCK_NOVEC) == 0 {
+                let mut s = String::from_str(self.why);
+                if self.why_op != 0 {
+                    s.format_into(" (`{}`)", op_info(self.why_op).name);
+                }
+                self.rejected.push((b.lines[b.locs[b.blocks[h as usize].start as usize] as usize], s));
             }
             if bu.vector > 1 && u != h && b.blocks[u as usize].len <= ILV_SIZE && self.vplan(
                 b,
@@ -1412,11 +1550,24 @@ extend LoopOpt {
 
     // ---- Vectorization ----
 
+    // The plan fails for reason `why` (`report`), about an instruction of opcode `op` (0: none).
+    fn no(self: &mut Self, why: str<'static>, op: u8) bool {
+        self.why = why;
+        self.why_op = op;
+        return false;
+    }
+
     // Whether loop `h` (preheader `p`, latch `u`, its blocks `lblocks`) vectorizes (the module comment), with
     // `one` as scalar copies: sets the plan (`vk` ..`vone`).
     fn vplan(self: &mut Self, b: &Body, ptr: u32, fmath: u8, h: u32, p: u32, u: u32, cl: Classes, one: bool) bool {
         self.vone = one;
+        self.vbytes = self.vmax;
+        self.vgroups = false;
+        self.vind.truncate(0);
         if !self.counted(b, h, u) {
+            if self.lblocks.len() != 2 || u == h {
+                return self.no("its body is not one block", 0);
+            }
             return false;
         }
         let hb = b.blocks[h as usize];
@@ -1424,7 +1575,7 @@ extend LoopOpt {
         let q = self.viv;
         let qt = b.params[(q & ~VPARAM) as usize];
         if type_bytes(qt, ptr) != ptr {
-            return false;
+            return self.no("its counter is narrower than a pointer", 0);
         }
         if self.vsigned {
             let init = b.edge_arg(term(b, p).a, (q & ~VPARAM) - hb.param_start);
@@ -1432,7 +1583,7 @@ extend LoopOpt {
                 b.insts[init as usize].a as u64 | b.insts[init as usize].b as u64 << 32,
                 type_bits(qt, ptr),
             ) < 0 {
-                return false;
+                return self.no("its signed counter may start below 0", 0);
             }
         }
         let tu = term(b, u);
@@ -1440,34 +1591,79 @@ extend LoopOpt {
         fill_u8(&mut self.vk, ub.len as usize, 0);
         self.vred.truncate(0);
         self.vrup.truncate(0);
+        self.vrel.truncate(0);
+        self.vord.truncate(0);
+        self.vzr.truncate(0);
+        self.vqk = 1;
         self.vsz = 0;
+        self.vmin = 0;
         for k in 0..hb.param_len as u32 {
             let pv = VPARAM | hb.param_start + k;
-            let a = b.edge_arg(tu.a, k);
+            let a = b.edge_arg(ast::pick(self.vexit, self.vback, tu.a), k);
             if !self.in_body(b, u, a) {
-                return false;
+                return self.no("a value it carries does not come from its body", 0);
             }
             let at = b.insts[a as usize];
             if pv == q {
-                if at.op != O_ADD || !(at.a == q && is_one(b, at.b) || at.b == q && is_one(b, at.a)) {
-                    return false;
+                // By 1, or forward by a power of 2 up to 16.
+                let kq = if at.op == O_ADD && at.a == q && is_const(b, at.b) {
+                    raw_const(b, at.b);
+                } else if at.op == O_ADD && at.b == q && is_const(b, at.a) {
+                    raw_const(b, at.a);
+                } else {
+                    0u64;
+                };
+                if !self.vrev && (kq == 0 || kq > 16 || (kq & kq - 1) != 0 || kq > 1 && (one || self.vexit)) {
+                    return self.no("its counter does not step by 1", at.op);
                 }
+                self.vqk = ast::pick(self.vrev, 1u32, kq as u32);
                 self.vk[(a - ub.start) as usize] = VK_STEP;
                 continue;
             }
             let ty = b.params[(hb.param_start + k) as usize];
-            let int_op = at.op == O_ADD || at.op == O_AND || at.op == O_OR || at.op == O_XOR;
-            let ok_op = is_int(ty) && ty != T_I128 && int_op || is_float(ty) && at.op == O_FADD && (fmath & FM_ASSOC) != 0;
+            if at.op == O_SELECT && !one {
+                let rel = self.minmax(b, ptr, fmath, u, pv, a);
+                // A float one with signed zeros: its lanes' extremes, run again in order on a zero (`vzr`;
+                // ordered when the loop stores).
+                let rz = if rel == NONE16 && is_float(ty) {
+                    self.minmax(b, ptr, fmath | FM_NSZ, u, pv, a);
+                } else {
+                    NONE16;
+                };
+                if rel == NONE16 && rz == NONE16 {
+                    return self.no("a value it carries is no reduction it widens", at.op);
+                }
+                self.vk[(a - ub.start) as usize] = VK_RED;
+                self.vk[(at.a - ub.start) as usize] = VK_RCMP;
+                self.vred.push(pv);
+                self.vrup.push(a);
+                self.vrel.push(ast::pick(rel == NONE16, rz, rel));
+                self.vord.push(false);
+                self.vzr.push(rel == NONE16);
+                continue;
+            }
+            // An integer product of lanes below 8 bytes (a vector multiply), a float sum or product, an
+            // ordered float difference from the accumulator.
+            let int_op = at.op == O_ADD || at.op == O_AND || at.op == O_OR || at.op == O_XOR || at.op == O_MUL && (one || type_bytes(
+                ty,
+                ptr,
+            ) < 8);
+            let assoc = (fmath & FM_ASSOC) != 0;
+            let f_op = at.op == O_FADD || at.op == O_FMUL || at.op == O_FSUB && at.a == pv && !assoc;
+            let ok_op = is_int(ty) && ty != T_I128 && int_op || is_float(ty) && f_op;
             if !ok_op || at.ty != ty || !(at.a == pv) == !(at.b == pv) || self.reads(b, u, pv) != 1 || self.reads(
                 b,
                 u,
                 a,
             ) != 1 || !self.lane_size(ty, ptr) {
-                return false;
+                return self.no("a value it carries is no reduction it widens", at.op);
             }
             self.vk[(a - ub.start) as usize] = VK_RED;
             self.vred.push(pv);
             self.vrup.push(a);
+            self.vrel.push(0);
+            self.vord.push(is_float(ty) && !assoc);
+            self.vzr.push(false);
         }
         // The rest: addresses, loads, arithmetic, stores.
         self.vacc.truncate(0);
@@ -1478,24 +1674,37 @@ extend LoopOpt {
             let t = b.insts[i as usize];
             if self.vk[x] == VK_STEP {
                 if self.reads(b, u, i) != 1 {
-                    return false;
+                    return self.no("its counter's next value has another use", 0);
                 }
                 continue;
             }
+            if self.vk[x] == VK_RCMP {
+                continue;
+            }
             if self.vk[x] == VK_RED {
-                let o = if contains(&self.vred, t.a) {
+                let o = if t.op == O_SELECT && contains(&self.vred, t.b) {
+                    t.c;
+                } else if t.op == O_SELECT {
+                    t.b;
+                } else if contains(&self.vred, t.a) {
                     t.b;
                 } else {
                     t.a;
                 };
                 if self.kind(b, u, o) != VK_LANE && self.kind(b, u, o) != VK_INV {
-                    return false;
+                    return self.no("a reduction takes no lane value", t.op);
                 }
                 continue;
             }
-            let k = self.vclass(b, ptr, u, t);
+            let k = if !one && self.vqk == 1 && t.op == O_TRUNC && t.a == q && is_int(t.ty) && self.lane_size(t.ty, ptr) {
+                // The counter truncated: the lanes count on from it (`vector_ind`).
+                self.vind.push(i);
+                VK_LANE;
+            } else {
+                self.vclass(b, ptr, u, t);
+            };
             if k == 0 {
-                return false;
+                return self.no("an instruction it does not widen", t.op);
             }
             self.vk[x] = k;
             if (t.op == O_LOAD || t.op == O_STORE) && k != VK_INV {
@@ -1509,23 +1718,235 @@ extend LoopOpt {
         // The counter only steps and indexes.
         for i in ub.start..ub.start + ub.len {
             let x = (i - ub.start) as usize;
-            if i < ub.start + ub.len - 1 && (self.vk[x] == VK_ADDR || self.vk[x] == VK_STEP) {
+            if i < ub.start + ub.len - 1 && (self.vk[x] == VK_ADDR || self.vk[x] == VK_STEP || contains_u32(
+                &self.vind,
+                i,
+            )) {
+                continue;
+            }
+            if self.vexit && i == ub.start + ub.len - 1 {
+                // The exit edge enters the code after the loop, which the loop runs.
+                if tu.a == q {
+                    return self.no("its counter is a value besides an index", O_BR);
+                }
                 continue;
             }
             self.outside_uses(b, b.insts[i as usize]);
             if contains(&self.uses, q) {
-                return false;
+                return self.no("its counter is a value besides an index", b.insts[i as usize].op);
             }
         }
         if self.vsz == 0 {
-            return false;
+            return self.no("it computes no lane value", 0);
+        }
+        // A store of a branch's side: its condition one comparison of lane values (`store_masked_ptr`).
+        for x in 0..self.lcs.len() {
+            let s = self.lcs[x];
+            if s < ub.start || s >= ub.start + ub.len {
+                continue;
+            }
+            let c = self.lcc[x];
+            if one || !self.in_body(b, u, c) || cmp_code(b.insts[c as usize]) == NONE16 || self.kind(b, u, c) != VK_MASK {
+                return self.no("a store of a branch's side has no lane condition", O_STORE);
+            }
+        }
+        // An early exit: a lane condition; no store, as a vector iteration runs the lanes past the exit;
+        // each load of the slice whose length the loop counts to, element by element, so every byte up
+        // to it may be read.
+        if self.vexit {
+            let k = self.kind(b, u, self.vxc);
+            if one || k != VK_LANE && k != VK_MASK || b.insts[self.vxc as usize].op != O_ICMP && b.insts[self.vxc as usize].op != O_FCMP && k != VK_MASK {
+                return self.no("its early exit is no lane condition", 0);
+            }
+            // Before the test (`lsplit`): the lanes past the exit run it too. The rest runs when no lane
+            // leaves.
+            let at = ub.start + ast::pick(self.lsplit == NONE, ub.len - 1, self.lsplit);
+            if self.vstrided || self.vgroups || self.vrev {
+                return self.no("an early exit reads past its iteration", 0);
+            }
+            for x in 0..self.vgat.len() {
+                if self.vgat[x] < at {
+                    return self.no("an early exit reads past its iteration", O_LOAD);
+                }
+            }
+            for x in 0..self.vacc.len() {
+                let t = b.insts[self.vacc[x] as usize];
+                if self.vacc[x] < at && (t.op == O_STORE || !self.counted_slice(b, t, ptr)) {
+                    return self.no("an early exit reads past its iteration", t.op);
+                }
+            }
+            if at <= self.vxc {
+                return self.no("its early exit is no lane condition", 0);
+            }
+        }
+        // A loop that stores keeps the order of a float min or max with signed zeros.
+        let mut stores = false;
+        for x in 0..self.vacc.len() {
+            stores = stores || b.insts[self.vacc[x] as usize].op == O_STORE;
+        }
+        for r in 0..self.vzr.len() {
+            if self.vzr[r] && stores {
+                self.vzr[r] = false;
+                self.vrel[r] = 0;
+                self.vord[r] = true;
+            }
+        }
+        // An ordered reduction runs its lanes one by one: worth it when the lanes compute more than a load.
+        if !one && contains_bool(&self.vord, true) {
+            let mut work = false;
+            for x in 0..ub.len as usize - 1 {
+                let o = b.insts[ub.start as usize + x].op;
+                work = work || self.vk[x] == VK_LANE && o != O_LOAD && o != O_PTRADD;
+            }
+            if !work {
+                return self.no("an ordered reduction of loads alone gains nothing", 0);
+            }
+        }
+        if self.vgroups && !self.store_groups(b) {
+            return self.no("a strided store's group does not write every element", 0);
+        }
+        // Counting down, each vector holds its elements in order: no lane may stand for its iteration.
+        if self.vrev {
+            if self.vind.len() != 0 || self.vgroups || self.vstrided || self.vgat.len() != 0 {
+                return self.no("a loop counting down reads its counter or a stride per lane", 0);
+            }
+            for x in 0..self.vacc.len() {
+                let t = b.insts[self.vacc[x] as usize];
+                let ty = if t.op == O_STORE {
+                    value_type(b, t.b);
+                } else {
+                    t.ty;
+                };
+                if self.stride(b, t.a) != type_bytes(ty, ptr) {
+                    return self.no("a loop counting down reads its counter or a stride per lane", 0);
+                }
+            }
+        }
+        // The interleaving of a group's vectors, past 32 bytes, would move each lane.
+        if self.vgroups && self.vbytes > 32 {
+            self.vbytes = 32;
+        }
+        // An overlapping last vector iteration runs each element's work again: a map's alone.
+        self.vtail = !one && self.vred.len() == 0 && !self.vexit && !self.vrev && self.vqk == 1 && !self.vstrided && !self.vgroups && self.vgat.len() == 0;
+        for x in 0..self.vacc.len() {
+            let s = b.insts[self.vacc[x] as usize];
+            if s.op != O_STORE {
+                continue;
+            }
+            for y in 0..self.vacc.len() {
+                let o = b.insts[self.vacc[y] as usize];
+                if o.op == O_LOAD && b.insts[o.a as usize].a == b.insts[s.a as usize].a {
+                    self.vtail = false;
+                }
+            }
+        }
+        if !one && !self.cheaper(b, ub, ptr) {
+            return self.no("its vector iterations cost more than its scalar ones", 0);
         }
         self.vlanes = if one {
             1;
         } else {
-            self.vbytes / self.vsz;
+            self.plan_lanes();
         };
         return self.vchecks(b, cl);
+    }
+
+    // The lanes of the plan's vectors: a register of the widest lane, or past a width ratio of 2 those of
+    // 8 bytes of the narrowest (the widest then two registers wide).
+    const fn plan_lanes(self: &Self) u32 {
+        return (self.vbytes / self.vsz).max(ast::pick(self.vsz > 2 * self.vmin, 8 / self.vmin, 1u32));
+    }
+
+    // The cost model: whether a vector iteration of body `ub` runs fewer instructions than its lanes'
+    // scalar iterations. An address or a hoisted load costs neither; a vector operation 1; a gathered
+    // load 2 per lane (a load and an insert); a load or store through every s-th element 2s - 1 (the
+    // loads or stores and the zips); a masked store 1 + 1 per lane; a conversion or shift the target does
+    // lane by lane (`Package.vops`) 3 per lane; an ordered reduction's update 2 per lane (an extract and
+    // the operation); each loop 2 for its latch.
+    fn cheaper(self: &Self, b: &Body, ub: Block, ptr: u32) bool {
+        let lanes = self.plan_lanes();
+        let mut s: u32 = 2;
+        let mut v: u32 = 2;
+        for x in 0..ub.len - 1 {
+            let i = ub.start + x;
+            let t = b.insts[i as usize];
+            let k = self.vk[x as usize];
+            if k == VK_ADDR || k == VK_GADDR || k == VK_INV || k == VK_STEP || k == 0 {
+                continue;
+            }
+            s += 1;
+            let ty = if t.op == O_STORE {
+                value_type(b, t.b);
+            } else {
+                t.ty;
+            };
+            if t.op == O_LOAD && contains_u32(&self.vgat, i) {
+                v += 2 * lanes;
+            } else if t.op == O_STORE && contains_u32(&self.vgat, i) {
+                v += 3 * lanes;
+            } else if (t.op == O_LOAD || t.op == O_STORE) && self.stride(b, t.a) != type_bytes(ty, ptr) {
+                v += 2 * (self.stride(b, t.a) / type_bytes(ty, ptr)) - 1;
+            } else if t.op == O_STORE && self.cond_store(i) != NONE {
+                v += 1 + lanes;
+            } else if self.by_lane(b, t, ptr) {
+                v += 3 * lanes;
+            } else {
+                v += 1;
+            }
+        }
+        for r in 0..self.vord.len() {
+            if self.vord[r] {
+                v += 2 * lanes;
+            }
+        }
+        return v < s * lanes;
+    }
+
+    // Whether each store through `base + i * step` with `step` 2 or 4 times its element's size (a strided
+    // store, `vgroups`) is one of a group: the stores through that address of its element's type, one at
+    // each element of the step (offsets `c`, `c + size`, ...).
+    fn store_groups(self: &Self, b: &Body) bool {
+        for x in 0..self.vacc.len() {
+            let s = b.insts[self.vacc[x] as usize];
+            if !self.strided_store(b, s) {
+                continue;
+            }
+            let ty = value_type(b, s.b);
+            let eb = type_bytes(ty, 8);
+            let n = self.stride(b, s.a) / eb;
+            // The group's offsets from the lowest: each element once.
+            let mut lo = (s.c as i32) as i64;
+            for y in 0..self.vacc.len() {
+                let o = b.insts[self.vacc[y] as usize];
+                if o.op == O_STORE && o.a == s.a {
+                    lo = lo.min(o.c as i32);
+                }
+            }
+            let mut seen: u32 = 0;
+            for y in 0..self.vacc.len() {
+                let o = b.insts[self.vacc[y] as usize];
+                if o.a != s.a {
+                    continue;
+                }
+                let d = (o.c as i32) as i64 - lo;
+                if o.op != O_STORE || value_type(b, o.b) != ty || d % eb as i64 != 0 || d / eb as i64 >= n as i64 || (seen >> (d / eb as i64) as u32 & 1) != 0 {
+                    return false;
+                }
+                seen |= 1u32 << (d / eb as i64) as u32;
+            }
+            if seen != (1u32 << n) - 1 {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Whether `s` is a store of the plan through `base + i * step` with `step` past its element's size.
+    fn strided_store(self: &Self, b: &Body, s: Inst) bool {
+        return s.op == O_STORE && !self.vone && b.insts[s.a as usize].op == O_PTRADD && self.stride(b, s.a) != type_bytes(
+            value_type(b, s.b),
+            8,
+        );
     }
 
     // Whether loop `h` (latch `u`, its blocks `lblocks`) is counted: a header of a test
@@ -1541,10 +1962,13 @@ extend LoopOpt {
     fn counted_by(self: &mut Self, b: &Body, h: u32, e: u32, u: u32) bool {
         let hb = b.blocks[h as usize];
         let t = term(b, h);
-        if (hb.flags & BLOCK_NOVEC) != 0 || hb.len != 2 || t.op != O_BR || (t.a & (VPARAM | VFLAG)) != 0 || t.a != hb.start || b.edge_target(
-            t.b,
-        ) != e && b.edge_target(t.c) != e {
-            return false;
+        if (hb.flags & BLOCK_NOVEC) != 0 {
+            return self.no("its header is marked `novec`", 0);
+        }
+        if hb.len != 2 || t.op != O_BR || (t.a & (VPARAM | VFLAG)) != 0 || t.a != hb.start || b.edge_target(t.b) != e && b.edge_target(
+            t.c,
+        ) != e {
+            return self.no("its header does more than test the counter", 0);
         }
         let ci = b.insts[t.a as usize];
         let in_taken = b.edge_target(t.b) == e;
@@ -1557,8 +1981,40 @@ extend LoopOpt {
         ) != 0 {
             return false;
         }
-        // The test read as `q < n` on the in-loop side.
-        let (q, n, cond) = if in_taken && (ci.aux == C_ULT || ci.aux == C_SLT) {
+        // A counter down by 1 while `q != 0` (or `q >u 0`).
+        let pa = (ci.a & VPARAM) != 0 && (ci.a & ~VPARAM) >= hb.param_start && (ci.a & ~VPARAM) < hb.param_start + hb.param_len as u32;
+        let pb = (ci.b & VPARAM) != 0 && (ci.b & ~VPARAM) >= hb.param_start && (ci.b & ~VPARAM) < hb.param_start + hb.param_len as u32;
+        let za = is_const(b, ci.a) && raw_const(b, ci.a) == 0;
+        let zb = is_const(b, ci.b) && raw_const(b, ci.b) == 0;
+        let nz_a = pa && zb && (in_taken && (ci.aux == C_NE || ci.aux == C_UGT) || !in_taken && (ci.aux == C_EQ || ci.aux == C_ULE));
+        let nz_b = pb && za && (in_taken && (ci.aux == C_NE || ci.aux == C_ULT) || !in_taken && (ci.aux == C_EQ || ci.aux == C_UGE));
+        self.vrev = false;
+        self.vne = false;
+        self.vexit = false;
+        if nz_a || nz_b {
+            let q = ast::pick(nz_a, ci.a, ci.b);
+            let qt = b.params[(q & ~VPARAM) as usize];
+            let tu = term(b, u);
+            if is_int(qt) && qt != T_I128 && tu.op == O_JMP && b.edge_target(tu.a) == h {
+                let nx = b.edge_arg(tu.a, (q & ~VPARAM) - hb.param_start);
+                if (nx & (VPARAM | VFLAG)) == 0 && down_by_one(b, b.insts[nx as usize], q) {
+                    self.viv = q;
+                    self.vn = ast::pick(nz_a, ci.b, ci.a);
+                    self.vsigned = false;
+                    self.vrev = true;
+                    return true;
+                }
+            }
+        }
+        // The test read as `q < n` on the in-loop side. `q != n` stepping by 1 reads as `q <u n`: a copy that
+        // runs while `q + k <= n` (unsigned) runs only iterations the loop runs, and leaves the rest to it.
+        let ne = in_taken && ci.aux == C_NE || !in_taken && ci.aux == C_EQ;
+        self.vne = ne;
+        let (q, n, cond) = if ne && pa {
+            (ci.a, ci.b, C_ULT);
+        } else if ne {
+            (ci.b, ci.a, C_ULT);
+        } else if in_taken && (ci.aux == C_ULT || ci.aux == C_SLT) {
             (ci.a, ci.b, ci.aux);
         } else if in_taken && (ci.aux == C_UGT || ci.aux == C_SGT) {
             (ci.b, ci.a, ci.aux - C_SGT + C_SLT);
@@ -1567,16 +2023,31 @@ extend LoopOpt {
         } else if !in_taken && (ci.aux == C_ULE || ci.aux == C_SLE) {
             (ci.b, ci.a, ci.aux - C_SLE + C_SLT);
         } else {
-            return false;
+            return self.no("its test is no `i < n`", ci.op);
         };
         if (q & VPARAM) == 0 || (q & ~VPARAM) < hb.param_start || (q & ~VPARAM) >= hb.param_start + hb.param_len as u32 || n == VNONE || self.defined_in(
             n,
         ) {
-            return false;
+            return self.no("its test is no `i < n` of a counter and a bound from outside it", 0);
         }
         let qt = b.params[(q & ~VPARAM) as usize];
         let tu = term(b, u);
-        if !is_int(qt) || qt == T_I128 || tu.op != O_JMP || b.edge_target(tu.a) != h {
+        if !is_int(qt) || qt == T_I128 {
+            return false;
+        }
+        // A body that ends in a branch back or out of the loop: an early exit.
+        self.vexit = false;
+        if tu.op == O_BR && (tu.a & (VPARAM | VFLAG)) == 0 && tu.a != VNONE && e == u {
+            let tb = b.edge_target(tu.b);
+            let tc = b.edge_target(tu.c);
+            if tb == h && !self.inl[tc as usize] || tc == h && !self.inl[tb as usize] {
+                self.vexit = true;
+                self.vback = ast::pick(tb == h, tu.b, tu.c);
+                self.vxc = tu.a;
+                self.vxs = tb == h;
+            }
+        }
+        if !self.vexit && (tu.op != O_JMP || b.edge_target(tu.a) != h) {
             return false;
         }
         self.viv = q;
@@ -1595,7 +2066,7 @@ extend LoopOpt {
             }
             return if t.b == self.viv && t.aux != 0 {
                 VK_ADDR;
-            } else if self.vone && self.kind(b, u, t.b) == VK_LANE {
+            } else if self.kind(b, u, t.b) == VK_LANE && is_int(value_type(b, t.b)) {
                 VK_GADDR;
             } else {
                 0;
@@ -1605,6 +2076,14 @@ extend LoopOpt {
             t.ty,
             ptr,
         ) {
+            return self.lane_operands(b, u, t, true);
+        }
+        if !self.vone && self.vops != 0 && op >= O_SEXT && op <= O_UITOFP && t.ty != T_I128 && value_type(b, t.a) != T_I128 && vconv_ok(
+            op,
+            value_type(b, t.a),
+            t.ty,
+            ptr,
+        ) && self.lane_size(value_type(b, t.a), ptr) && self.lane_size(t.ty, ptr) {
             return self.lane_operands(b, u, t, true);
         }
         if op == O_LOAD && !self.defined_in(t.a) && (t.aux & MEM_VOLATILE) == 0 && is_int(t.ty) && t.ty != T_I128 || op == O_LOAD && !self.defined_in(
@@ -1626,16 +2105,20 @@ extend LoopOpt {
             // load through every 2nd or 4th element (`vunzip`).
             let ka = self.kind(b, u, t.a);
             let eb = type_bytes(ty, ptr);
-            if (t.aux & MEM_VOLATILE) != 0 || is_vec(ty) || ty == T_PTR || !self.lane_size(ty, ptr) || ka != VK_ADDR && ka != VK_GADDR || ka == VK_GADDR && op == O_STORE {
+            if (t.aux & MEM_VOLATILE) != 0 || is_vec(ty) || ty == T_PTR || !self.lane_size(ty, ptr) || ka != VK_ADDR && ka != VK_GADDR {
                 return 0;
             }
             if ka == VK_ADDR {
-                let step = b.insts[t.a as usize].aux as u32;
+                let step = self.stride(b, t.a);
                 let s = step / eb;
-                if step != eb && !self.vone && !(op == O_LOAD && step % eb == 0 && (s == 2 || s == 4)) {
+                if step != eb && !self.vone && !(step % eb == 0 && (s == 2 || s == 4)) {
                     return 0;
                 }
-                self.vstrided = self.vstrided || step != eb && !self.vone;
+                if op == O_LOAD {
+                    self.vstrided = self.vstrided || step != eb && !self.vone;
+                } else {
+                    self.vgroups = self.vgroups || step != eb && !self.vone;
+                }
             }
             if op == O_LOAD {
                 return VK_LANE;
@@ -1680,8 +2163,10 @@ extend LoopOpt {
                 0;
             };
         }
-        let int_op = op == O_ADD || op == O_SUB || op == O_AND || op == O_OR || op == O_XOR || op == O_NEG || op == O_NOT || op == O_MUL;
-        let float_op = op >= O_FADD && op <= O_FNEG;
+        // A shift's amounts are lanes too (each below the width, as the scalar shift's).
+        let shift = (op == O_SHL || op == O_LSHR || op == O_ASHR) && self.vops != 0 && !self.vone;
+        let int_op = op == O_ADD || op == O_SUB || op == O_AND || op == O_OR || op == O_XOR || op == O_NEG || op == O_NOT || op == O_MUL || shift;
+        let float_op = op >= O_FADD && op <= O_FNEG || op == O_FSQRT;
         if !(is_int(t.ty) && t.ty != T_I128 && int_op || is_float(t.ty) && float_op) || !self.lane_size(t.ty, ptr) {
             return 0;
         }
@@ -1689,7 +2174,7 @@ extend LoopOpt {
         if op == O_MUL && type_bytes(t.ty, ptr) == 8 && !self.vone {
             return 0;
         }
-        return self.lane_operands(b, u, t, op == O_NEG || op == O_NOT || op == O_FNEG);
+        return self.lane_operands(b, u, t, op == O_NEG || op == O_NOT || op == O_FNEG || op == O_FSQRT);
     }
 
     // The kind of lane operation `t` of body `u` (`unary`: one operand): a mask for a comparison, else a lane
@@ -1715,8 +2200,9 @@ extend LoopOpt {
         };
     }
 
-    // Whether scalar type `ty` has the plan's lane size, setting it when unset.
-    // Scalar copies mix lane sizes.
+    // Whether scalar type `ty` has the plan's lane size, setting it when unset. Scalar copies mix lane
+    // sizes; vectors do when the target converts them in registers (`vops`), the widest lane at most twice
+    // the narrowest, or 4 times with registers of at most 32 bytes (`plan_lanes`).
     fn lane_size(self: &mut Self, ty: u8, ptr: u32) bool {
         let n = type_bytes(ty, ptr);
         if n == 0 || n > 8 {
@@ -1724,8 +2210,19 @@ extend LoopOpt {
         }
         if self.vsz == 0 {
             self.vsz = n;
+            self.vmin = n;
         }
-        return self.vsz == n || self.vone;
+        if self.vsz == n && self.vmin == n || self.vone {
+            return true;
+        }
+        let lo = self.vmin.min(n);
+        let hi = self.vsz.max(n);
+        if self.vops == 0 || hi > 4 * lo || hi > 2 * lo && self.vmax > 32 {
+            return false;
+        }
+        self.vmin = lo;
+        self.vsz = hi;
+        return true;
     }
 
     // The plan's kind of value `v` defined in body `u` (0: none or outside it).
@@ -1772,15 +2269,23 @@ extend LoopOpt {
             }
             for y in 0..self.vacc.len() {
                 if b.insts[self.vacc[y] as usize].op == O_STORE && !self.apart(cl, ub.start + x, self.vacc[y]) {
-                    return false;
+                    return self.no("a store may write the place an invariant load reads", 0);
                 }
             }
         }
-        // A gathered load may read any element: apart from every store.
+        // A gathered load may read any element: apart from every store. A scattered store may write any
+        // element: apart from every other access.
         for x in 0..self.vgat.len() {
+            let g = self.vgat[x];
+            let sc = b.insts[g as usize].op == O_STORE;
             for y in 0..self.vacc.len() {
-                if b.insts[self.vacc[y] as usize].op == O_STORE && !self.apart(cl, self.vgat[x], self.vacc[y]) {
-                    return false;
+                if (sc || b.insts[self.vacc[y] as usize].op == O_STORE) && !self.apart(cl, g, self.vacc[y]) {
+                    return self.no("a store may write what a gathered load reads", 0);
+                }
+            }
+            for y in 0..self.vgat.len() {
+                if sc && y != x && !self.apart(cl, g, self.vgat[y]) {
+                    return self.no("a scattered store may write what another access touches", 0);
                 }
             }
         }
@@ -1796,9 +2301,14 @@ extend LoopOpt {
                 }
                 let o = b.insts[self.vacc[y] as usize];
                 let oa = b.insts[o.a as usize];
+                // Stores of one group write different elements of each iteration's step.
+                if o.a == s.a && self.strided_store(b, s) && self.strided_store(b, o) {
+                    continue;
+                }
                 if oa.a == sa.a {
-                    if oa.aux != sa.aux || (oa.c as i32) as i64 + (o.c as i32) as i64 != (sa.c as i32) as i64 + (s.c as i32) as i64 {
-                        return false;
+                    let d = (oa.c as i32) as i64 + (o.c as i32) as i64 - (sa.c as i32) as i64 - (s.c as i32) as i64;
+                    if oa.aux != sa.aux || d != 0 && !self.distance_ok(b, self.vacc[x], self.vacc[y], d) {
+                        return self.no("a store and another access through its base touch different elements", 0);
                     }
                     continue;
                 }
@@ -1814,13 +2324,82 @@ extend LoopOpt {
                     continue;
                 }
                 if self.vca.len() == MAX_CHECKS {
-                    return false;
+                    return self.no("its accesses need too many overlap checks", 0);
                 }
                 self.vca.push(self.vacc[x]);
                 self.vcb.push(self.vacc[y]);
             }
         }
         return true;
+    }
+
+    // The bytes access address `a` (`base + i * scale`) steps by per iteration: its scale times the counter's
+    // step.
+    fn stride(self: &Self, b: &Body, a: Value) u32 {
+        return b.insts[a as usize].aux as u32 * self.vqk;
+    }
+
+    // Whether the target converts or shifts as instruction `t` does lane by lane (`Package.vops`
+    // VOPS_SOME).
+    fn by_lane(self: &Self, b: &Body, t: Inst, ptr: u32) bool {
+        if self.vops != VOPS_SOME {
+            return false;
+        }
+        let op = t.op;
+        let eb = type_bytes(t.ty, ptr);
+        if op == O_SHL || op == O_LSHR || op == O_ASHR {
+            return self.vbytes < 32 || eb < 4 || op == O_ASHR && eb == 8;
+        }
+        // A narrower integer to a float extends, then converts as signed (`vconv`).
+        let ft = value_type(b, t.a);
+        let wider = is_int(ft) && type_bytes(ft, ptr) < eb;
+        return (op == O_SITOFP || op == O_UITOFP) && t.ty == T_F64 || op == O_FPTOSI && t.ty == T_I64 || op == O_UITOFP && !wider || op == O_FPTOUI;
+    }
+
+    // Whether load `t` reads element `i` of a slice at least as long as the bound the loop counts to:
+    // through `ptr + i * size` at offset 0, `ptr` and the bound `n` the loads of one slice's two words, or
+    // `n` the least of the slice's length and another.
+    fn counted_slice(self: &Self, b: &Body, t: Inst, ptr: u32) bool {
+        let a = b.insts[t.a as usize];
+        if a.op != O_PTRADD || a.c != 0 || t.c != 0 || a.aux as u32 != type_bytes(t.ty, ptr) || (a.a & (VPARAM | VFLAG)) != 0 || (self.vn & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        let pl = b.insts[a.a as usize];
+        if slice_len(b, pl, self.vn, ptr) {
+            return true;
+        }
+        // The least of lengths (`select (x <u y), x, y`), the slice's one of them.
+        let s = b.insts[self.vn as usize];
+        if s.op != O_SELECT || (s.a & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        let c = b.insts[s.a as usize];
+        return c.op == O_ICMP && (c.aux == C_ULT && c.a == s.b && c.b == s.c || c.aux == C_UGT && c.a == s.c && c.b == s.b) && (slice_len(
+            b,
+            pl,
+            s.b,
+            ptr,
+        ) || slice_len(b, pl, s.c, ptr));
+    }
+
+    // Whether store `s` and access `o` through one base `d` bytes apart (both `base + i * step`) keep their
+    // order in the vector loop: `o` a load, its elements no wider than the step; ahead of the store (`d` > 0)
+    // and before it in the body, it reads each element before any iteration writes it; behind it by at least
+    // a vector loop's iterations, it reads what an earlier vector iteration wrote (the dependence distance).
+    fn distance_ok(self: &Self, b: &Body, s: u32, o: u32, d: i64) bool {
+        let st = b.insts[s as usize];
+        let ot = b.insts[o as usize];
+        let step = self.stride(b, st.a) as i64;
+        if ot.op != O_LOAD || step < type_bytes(ot.ty, 8) as i64 || step < type_bytes(value_type(b, st.b), 8) as i64 {
+            return false;
+        }
+        if self.vrev {
+            return false;
+        }
+        if d > 0 {
+            return o < s;
+        }
+        return -d >= (self.vlanes * self.vnv) as i64 * step;
     }
 
     // Whether accesses `x` and `y` touch different bytes in every iteration of the loop at hand
@@ -1855,18 +2434,21 @@ extend LoopOpt {
     // enters a guard that runs the vector loop or enters the loop through a new preheader; the vector
     // loop's exit reduces its accumulators and enters the loop with the iterations left.
     fn vectorize(self: &mut Self, b: &mut Body, h: u32, p: u32, u: u32, nv: u32) {
+        self.wide = self.wide || !self.vone && self.vlanes * self.vsz > self.vmax;
         let hb = b.blocks[h as usize];
         let ub = b.blocks[u as usize];
         let l0 = b.locs[hb.start as usize];
         let qt = b.params[(self.viv & ~VPARAM) as usize];
         let step = self.vlanes * nv;
         let nred = self.vred.len() as u32;
-        // The block numbers: guard, vector preheader, vector loop, vector exit, the loop's new preheader.
+        // The block numbers: guard, vector preheader, vector loop, (with an early exit, the vector loop's
+        // latch,) vector exit, the loop's new preheader.
         let g = b.blocks.len() as u32;
         let vp = g + 1;
         let vl = g + 2;
-        let vx = g + 3;
-        let sp = g + 4;
+        let lb = g + 3;
+        let vx = g + 3 + self.vexit as u32;
+        let sp = vx + 1;
         // The guard: the header's parameters; the count of iterations the vectors run, and the checks.
         let gps = self.vblock_params(b, h);
         let gstart = b.insts.len() as u32;
@@ -1887,7 +2469,20 @@ extend LoopOpt {
             },
             l0,
         );
-        let mut d = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: i0, c: 0 }, l0);
+        let mut d = if self.vrev {
+            i0;
+        } else {
+            self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: i0, c: 0 }, l0);
+        };
+        let ks = self.vqk.trailing_zeros();
+        if self.vqk > 1 {
+            // The iterations from `i0` by `k` below `n`: ((n - i0 - 1) >> log2 k) + 1 (`i0 < n`).
+            let one = self.vconst(b, qt, 1, l0);
+            let sh = self.vconst(b, qt, ks as u64, l0);
+            let d1 = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: d, b: one, c: 0 }, l0);
+            let d2 = self.vi(b, Inst { op: O_LSHR, ty: qt, aux: 0, a: d1, b: sh, c: 0 }, l0);
+            d = self.vi(b, Inst { op: O_ADD, ty: qt, aux: 0, a: d2, b: one, c: 0 }, l0);
+        }
         if self.vstrided {
             // A strided load's last vector reads up to the next iteration's element: the loop runs the
             // last iteration, whose element is past every byte the vectors read.
@@ -1895,7 +2490,12 @@ extend LoopOpt {
             d = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: d, b: one, c: 0 }, l0);
         }
         let z = self.vconst(b, qt, 0, l0);
-        let trips = self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: d, c: z }, l0);
+        // Counting down from `i0`, the loop runs `i0` iterations.
+        let trips = if self.vrev {
+            d;
+        } else {
+            self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: d, c: z }, l0);
+        };
         let mk = self.vconst(b, qt, ~((step - 1) as u64), l0);
         let cnt = self.vi(b, Inst { op: O_AND, ty: qt, aux: 0, a: trips, b: mk, c: 0 }, l0);
         let mut ok = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: cnt, b: z, c: 0 }, l0);
@@ -1918,7 +2518,14 @@ extend LoopOpt {
         self.vblock(b, g, gstart, gps, hb.param_len, hb.flags, p);
         // The vector preheader: the end of the vector iterations, the splats, the accumulators' start.
         let pstart = b.insts.len() as u32;
-        let iend = self.vi(b, Inst { op: O_ADD, ty: qt, aux: 0, a: i0, b: cnt, c: 0 }, l0);
+        // The counter's end: the iterations times its step.
+        let cu = if self.vqk > 1 {
+            let sh = self.vconst(b, qt, ks as u64, l0);
+            self.vi(b, Inst { op: O_SHL, ty: qt, aux: 0, a: cnt, b: sh, c: 0 }, l0);
+        } else {
+            cnt;
+        };
+        let iend = self.vi(b, Inst { op: ast::pick(self.vrev, O_SUB, O_ADD), ty: qt, aux: 0, a: i0, b: cu, c: 0 }, l0);
         self.vinv.truncate(0);
         self.vspl.truncate(0);
         fill(&mut self.vmap, (nv * ub.len) as usize, VNONE);
@@ -1960,8 +2567,17 @@ extend LoopOpt {
         for r in 0..nred {
             let rt = b.params[(self.vred[r as usize] & ~VPARAM) as usize];
             let vt = self.lane_ty(rt);
-            let idv = self.identity(b, b.insts[self.vrup[r as usize] as usize].op, rt);
-            let id = self.vsplat_const(b, vt, idv, l0);
+            // An ordered one starts from the start value; a min or max starts each lane at it, which it may
+            // take again.
+            let id = if self.vord[r as usize] {
+                VPARAM | gps + (self.vred[r as usize] & ~VPARAM) - hb.param_start;
+            } else if self.vrel[r as usize] != 0 {
+                let r0 = VPARAM | gps + (self.vred[r as usize] & ~VPARAM) - hb.param_start;
+                self.vi(b, Inst { op: O_SPLAT, ty: vt, aux: 0, a: r0, b: VNONE, c: VNONE }, l0);
+            } else {
+                let idv = self.identity(b, b.insts[self.vrup[r as usize] as usize].op, rt);
+                self.vsplat_const(b, vt, idv, l0);
+            };
             for _ in 0..nv {
                 self.args.push(id);
             }
@@ -1975,29 +2591,49 @@ extend LoopOpt {
         b.params.push(qt);
         for r in 0..nred {
             let rt = b.params[(self.vred[r as usize] & ~VPARAM) as usize];
+            let pt = ast::pick(self.vord[r as usize], rt, self.lane_ty(rt));
             for _ in 0..nv {
-                b.params.push(self.lane_ty(rt));
+                b.params.push(pt);
             }
         }
         let lstart = b.insts.len() as u32;
         let vi = VPARAM | vps;
+        // With an early exit, the latch block's start: past the exit test.
+        let mut ls: u32 = 0;
         for i in ub.start..ub.start + ub.len - 1 {
+            if self.vexit && self.lsplit != NONE && i == ub.start + self.lsplit {
+                ls = self.vexit_test(b, ub, nv, vps, vi, vx, lb, lstart, hb.flags, vp, l0);
+            }
             for c in 0..nv {
                 let x = i - ub.start;
                 let t = b.insts[i as usize];
                 let k = self.vk[x as usize];
                 let at = (c * ub.len + x) as usize;
                 if k == VK_ADDR {
-                    // One address per iteration: the copies' accesses add their offsets to it.
+                    // One address per iteration: the copies' accesses add their offsets to it. Counting
+                    // down, the lowest element's: the counter's value `step - 1` on.
                     self.vmap[at] = if c == 0 {
+                        let ix = if self.vrev {
+                            let sk1 = self.vconst(b, qt, step - 1, l0);
+                            self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: vi, b: sk1, c: 0 }, l0);
+                        } else {
+                            vi;
+                        };
                         self.vi(
                             b,
-                            Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux, a: t.a, b: vi, c: t.c },
+                            Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux, a: t.a, b: ix, c: t.c },
                             b.locs[i as usize],
                         );
                     } else {
                         self.vmap[x as usize];
                     };
+                } else if !self.vone && k == VK_GADDR {
+                    // A gathered address: each lane's at its access (`vgather`).
+                    self.vmap[at] = VNONE;
+                } else if !self.vone && (t.op == O_LOAD || t.op == O_STORE) && self.kind(b, u, t.a) == VK_GADDR {
+                    self.vmap[at] = self.vgather(b, u, c, t, b.locs[i as usize]);
+                } else if k == VK_LANE && contains_u32(&self.vind, i) {
+                    self.vmap[at] = self.vector_ind(b, t, vi, c, b.locs[i as usize]);
                 } else if k == VK_LANE || k == VK_STORE || k == VK_MASK || k == VK_GADDR {
                     let mut nt = t;
                     let f = op_info(t.op).form;
@@ -2005,10 +2641,17 @@ extend LoopOpt {
                         nt.ty = self.lane_ty(t.ty);
                     }
                     let strided = (t.op == O_LOAD || t.op == O_STORE) && self.kind(b, u, t.a) == VK_ADDR;
+                    if strided && self.strided_store(b, t) {
+                        // A group's vectors interleaved, stored after its last store (`store_group`).
+                        self.store_group(b, u, c, i);
+                        continue;
+                    }
                     if strided {
-                        // Copy c starts `c * lanes` iterations on.
-                        let step = b.insts[t.a as usize].aux as u32;
-                        nt.c = (((t.c as i32) as i64 + (c * self.vlanes * step) as i64) as i32) as u32;
+                        // Copy c starts `c * lanes` iterations on; counting down, its elements are the
+                        // `nv - 1 - c`th lanes' from the lowest.
+                        let step = self.stride(b, t.a);
+                        let cc = ast::pick(self.vrev, nv - 1 - c, c);
+                        nt.c = (((t.c as i32) as i64 + (cc * self.vlanes * step) as i64) as i32) as u32;
                         let eb = type_bytes(t.ty, 8);
                         if t.op == O_LOAD && step != eb && !self.vone {
                             // The vectors from the element on, each lane its own element's, then the
@@ -2017,7 +2660,7 @@ extend LoopOpt {
                             let mut parts = Vector::<Value>::new();
                             for j in 0..step / eb {
                                 let mut lt = nt;
-                                lt.c = (((nt.c as i32) as i64 + (j * self.vbytes) as i64) as i32) as u32;
+                                lt.c = (((nt.c as i32) as i64 + (j * self.vlanes * eb) as i64) as i32) as u32;
                                 parts.push(self.vi(b, lt, b.locs[i as usize]));
                             }
                             while parts.len() > 1 {
@@ -2044,6 +2687,35 @@ extend LoopOpt {
                             continue;
                         }
                     }
+                    let cs = if t.op == O_STORE {
+                        self.cond_store(i);
+                    } else {
+                        NONE;
+                    };
+                    if cs != NONE {
+                        // The lanes the condition picks: a lane mask of the comparison, its complement for
+                        // the other side; the store's address at the copy's offset.
+                        let l = b.locs[i as usize];
+                        let ci = b.insts[self.lcc[cs as usize] as usize];
+                        let mt = mask_int_of(self.vlanes);
+                        let ops = [self.vval(b, u, c, ci.a), self.vval(b, u, c, ci.b)];
+                        let at2 = b.pool_list(ops[0..2]);
+                        let mut m = self.vi(b, Inst { op: O_VOP, ty: mt, aux: cmp_code(ci), a: at2, b: 2, c: VNONE }, l);
+                        if !self.lcw[cs as usize] {
+                            let full = self.vconst(b, mt, mask_of(self.vlanes), l);
+                            m = self.vi(b, Inst { op: O_XOR, ty: mt, aux: 0, a: m, b: full, c: 0 }, l);
+                        }
+                        let pa = self.vi(
+                            b,
+                            Inst { op: O_PTRADD, ty: T_PTR, aux: 0, a: self.vval(b, u, c, t.a), b: VNONE, c: nt.c },
+                            l,
+                        );
+                        let sv = [pa, m, self.vval(b, u, c, t.b)];
+                        let at3 = b.pool_list(sv[0..3]);
+                        let code = (core::OP_SIMD + core::SIMD_STORE_MASKED_PTR as u32) as u16;
+                        self.vmap[at] = self.vi(b, Inst { op: O_VOP, ty: T_NONE, aux: code, a: at3, b: 3, c: VNONE }, l);
+                        continue;
+                    }
                     if lv::operand_a(f) && !(t.op == O_SELECT && !self.defined_in(t.a)) {
                         nt.a = self.vval(b, u, c, t.a);
                     }
@@ -2054,19 +2726,75 @@ extend LoopOpt {
                         nt.c = self.vval(b, u, c, t.c);
                     }
                     if !self.vone {
-                        // A mask's lanes are integers of the lane width: a vector comparison, a select on
-                        // a mask.
-                        let mt = mask_type(vec_type(T_I8 + self.vsz.trailing_zeros() as u8, self.vlanes));
-                        if k == VK_MASK {
-                            nt.ty = mt;
-                        }
+                        // A mask's lanes are integers of its comparison's operands' width: a vector
+                        // comparison; `and` and `or` of masks, and a select on one, convert one of
+                        // another width (`vmask`).
+                        let l = b.locs[i as usize];
                         if t.op == O_ICMP || t.op == O_FCMP {
                             nt.op = O_VCMP;
+                            nt.ty = mask_type(self.lane_ty(value_type(b, t.a)));
+                        } else if k == VK_MASK {
+                            nt.ty = value_type(b, nt.a);
+                            nt.b = self.vmask(b, nt.b, nt.ty, l);
                         } else if t.op == O_SELECT && self.defined_in(t.a) {
                             nt.op = O_VSEL;
+                            nt.a = self.vmask(b, nt.a, mask_type(nt.ty), l);
+                        } else if t.op >= O_SEXT && t.op <= O_UITOFP {
+                            self.vmap[at] = self.vconv(b, nt, l);
+                            continue;
                         }
                     }
                     self.vmap[at] = self.vi(b, nt, b.locs[i as usize]);
+                } else if k == VK_RED && self.vord[self.red_of(i) as usize] {
+                    // In order: copy c's lanes after copy c - 1's, each through the update.
+                    let r = self.red_of(i);
+                    let mut acc = if c == 0 {
+                        VPARAM | vps + 1 + r * nv;
+                    } else {
+                        self.vmap[((c - 1) * ub.len + x) as usize];
+                    };
+                    let pv = self.vred[r as usize];
+                    let lx = if t.op == O_SELECT {
+                        ast::pick(t.b == pv, t.c, t.b);
+                    } else {
+                        ast::pick(t.a == pv, t.b, t.a);
+                    };
+                    let xv = self.vval(b, u, c, lx);
+                    let l = b.locs[i as usize];
+                    let nl = ast::pick(self.vone, 1u32, self.vlanes);
+                    for j0 in 0..nl {
+                        // Counting down, the highest lane is the first iteration.
+                        let j = ast::pick(self.vrev, nl - 1 - j0, j0);
+                        let e = if self.vone {
+                            xv;
+                        } else {
+                            self.vi(b, Inst { op: O_VEXTRACT, ty: t.ty, aux: j as u16, a: xv, b: VNONE, c: VNONE }, l);
+                        };
+                        let mut nt = t;
+                        if t.op == O_SELECT {
+                            let mut ct = b.insts[t.a as usize];
+                            ct.a = ast::pick(ct.a == pv, acc, e);
+                            ct.b = ast::pick(ct.b == pv, acc, e);
+                            nt.a = self.vi(b, ct, l);
+                            nt.b = ast::pick(t.b == pv, acc, e);
+                            nt.c = ast::pick(t.c == pv, acc, e);
+                        } else {
+                            nt.a = ast::pick(t.a == pv, acc, e);
+                            nt.b = ast::pick(t.b == pv, acc, e);
+                        }
+                        acc = self.vi(b, nt, l);
+                    }
+                    self.vmap[at] = acc;
+                } else if k == VK_RED && self.vrel[self.red_of(i) as usize] != 0 {
+                    let r = self.red_of(i);
+                    let acc = VPARAM | vps + 1 + r * nv + c;
+                    let x = if t.b == self.vred[r as usize] {
+                        t.c;
+                    } else {
+                        t.b;
+                    };
+                    let xv = self.vval(b, u, c, x);
+                    self.vmap[at] = self.vbeat(b, self.vrel[r as usize], xv, acc, b.locs[i as usize]);
                 } else if k == VK_RED {
                     let r = self.red_of(i);
                     let acc = VPARAM | vps + 1 + r * nv + c;
@@ -2083,27 +2811,57 @@ extend LoopOpt {
                 }
             }
         }
-        let sk = self.vconst(b, qt, step, l0);
-        let vnext = self.vi(b, Inst { op: O_ADD, ty: qt, aux: 0, a: vi, b: sk, c: 0 }, l0);
-        let more = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: vnext, b: iend, c: 0 }, l0);
+        if self.vexit && (self.lsplit == NONE || self.lsplit == ub.len - 1) {
+            ls = self.vexit_test(b, ub, nv, vps, vi, vx, lb, lstart, hb.flags, vp, l0);
+        }
+        let sk = self.vconst(b, qt, step * self.vqk, l0);
+        let vnext = self.vi(b, Inst { op: ast::pick(self.vrev, O_SUB, O_ADD), ty: qt, aux: 0, a: vi, b: sk, c: 0 }, l0);
+        // An overlapping last iteration: on while below `n - k`, then the tail block (`sp + 1`) runs the
+        // iteration at `n - k` once when elements are left; the counter's chain stays an add.
+        let last = if self.vtail {
+            self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: sk, c: 0 }, l0);
+        } else {
+            VNONE;
+        };
+        let more = if self.vtail {
+            self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: vnext, b: last, c: 0 }, l0);
+        } else {
+            self.vi(
+                b,
+                Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(self.vrev, C_UGT, C_ULT), a: vnext, b: iend, c: 0 },
+                l0,
+            );
+        };
         self.args.truncate(0);
         self.args.push(vnext);
         for r in 0..nred {
             for c in 0..nv {
                 let x = self.vrup[r as usize] - ub.start;
-                self.args.push(self.vmap[(c * ub.len + x) as usize]);
+                // An ordered one's last copy holds its accumulator: in each parameter.
+                let cc = ast::pick(self.vord[r as usize], nv - 1, c);
+                self.args.push(self.vmap[(cc * ub.len + x) as usize]);
             }
         }
         let back = b.edge(vl, self.args.as_slice());
-        let out = b.edge(vx, self.args.as_slice()[1..self.args.len()]);
+        // Out of the loop the counter is the vectors' end; past the overlapping iteration's tail block, `n`.
+        self.args[0] = ast::pick(self.vtail, vnext, iend);
+        let out = b.edge(ast::pick(self.vtail, sp + 1, vx), self.args.as_slice());
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: more, b: back, c: out }, l0);
-        self.vblock(b, vl, lstart, vps, (1 + nred * nv) as u16, hb.flags, vp);
-        // The vector exit: each reduction's accumulators combined and reduced into its start value.
+        if self.vexit {
+            self.vblock(b, lb, ls, b.params.len() as u32, 0, hb.flags, vl);
+        } else {
+            self.vblock(b, vl, lstart, vps, (1 + nred * nv) as u16, hb.flags | BLOCK_NOVEC, vp);
+        }
+        // The vector exit: the counter where the vectors stop; each reduction's accumulators combined and
+        // reduced into its start value.
+        let xq = b.params.len() as u32;
+        b.params.push(qt);
         let xps = b.params.len() as u32;
         for r in 0..nred {
             let rt = b.params[(self.vred[r as usize] & ~VPARAM) as usize];
+            let pt = ast::pick(self.vord[r as usize], rt, self.lane_ty(rt));
             for _ in 0..nv {
-                b.params.push(self.lane_ty(rt));
+                b.params.push(pt);
             }
         }
         let xstart = b.insts.len() as u32;
@@ -2111,16 +2869,46 @@ extend LoopOpt {
         for q in 0..hb.param_len as u32 {
             let pv = VPARAM | hb.param_start + q;
             if pv == self.viv {
-                self.args.push(iend);
+                self.args.push(VPARAM | xq);
                 continue;
             }
             let r = self.red_param(pv);
+            if self.vord[r as usize] {
+                self.args.push(VPARAM | xps + r * nv);
+                continue;
+            }
             let rt = b.params[(pv & ~VPARAM) as usize];
             let op = b.insts[self.vrup[r as usize] as usize].op;
             let vt = self.lane_ty(rt);
+            let rel = self.vrel[r as usize];
             let mut acc = VPARAM | xps + r * nv;
             for c in 1..nv {
-                acc = self.vi(b, Inst { op: op, ty: vt, aux: 0, a: acc, b: VPARAM | xps + r * nv + c, c: 0 }, l0);
+                acc = if rel != 0 {
+                    self.vbeat(b, rel, VPARAM | xps + r * nv + c, acc, l0);
+                } else {
+                    self.vi(b, Inst { op: op, ty: vt, aux: 0, a: acc, b: VPARAM | xps + r * nv + c, c: 0 }, l0);
+                };
+            }
+            if rel != 0 {
+                // The extreme lane; the start value is in every lane already.
+                let lo = rel == C_SLT || rel == C_ULT || rel == C_OLT;
+                let code = (core::OP_SIMD + if is_float(rt) && lo {
+                    core::SIMD_REDUCE_MIN_NUM;
+                } else if is_float(rt) {
+                    core::SIMD_REDUCE_MAX_NUM;
+                } else if lo {
+                    core::SIMD_REDUCE_MIN;
+                } else {
+                    core::SIMD_REDUCE_MAX;
+                } as u32) as u16 | if rel == C_SLT || rel == C_SGT {
+                    VOP_SIGNED;
+                } else {
+                    0;
+                };
+                let one = [acc];
+                let at = b.pool_list(one[0..1]);
+                self.args.push(self.vi(b, Inst { op: O_VOP, ty: rt, aux: code, a: at, b: 1, c: VNONE }, l0));
+                continue;
             }
             let r0 = VPARAM | gps + (pv & ~VPARAM) - hb.param_start;
             if self.vone {
@@ -2133,6 +2921,8 @@ extend LoopOpt {
                 core::SIMD_REDUCE_OR;
             } else if op == O_XOR {
                 core::SIMD_REDUCE_XOR;
+            } else if op == O_MUL || op == O_FMUL {
+                core::SIMD_REDUCE_MUL;
             } else {
                 core::SIMD_REDUCE_ADD;
             } as u32) as u16;
@@ -2143,8 +2933,33 @@ extend LoopOpt {
             self.args.push(sum);
         }
         let to_sp2 = b.edge(sp, self.args.as_slice());
-        let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_sp2, b: 0, c: 0 }, l0);
-        self.vblock(b, vx, xstart, xps, (nred * nv) as u16, hb.flags, vl);
+        // A float min or max of zero: the loop again from the start (`vzr`).
+        let mut again = VNONE;
+        for q in 0..hb.param_len as u32 {
+            let pv = VPARAM | hb.param_start + q;
+            if pv == self.viv || !self.vzr[self.red_param(pv) as usize] {
+                continue;
+            }
+            let rt = b.params[(pv & ~VPARAM) as usize];
+            let z = self.vi(b, Inst { op: O_FCONST, ty: rt, aux: 0, a: 0, b: 0, c: VNONE }, l0);
+            let e = self.vi(b, Inst { op: O_FCMP, ty: T_I8, aux: C_OEQ, a: self.args[q as usize], b: z, c: 0 }, l0);
+            again = if again == VNONE {
+                e;
+            } else {
+                self.vi(b, Inst { op: O_OR, ty: T_I8, aux: 0, a: again, b: e, c: 0 }, l0);
+            };
+        }
+        if again == VNONE {
+            let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_sp2, b: 0, c: 0 }, l0);
+        } else {
+            self.args.truncate(0);
+            for q in 0..hb.param_len as u32 {
+                self.args.push(VPARAM | gps + q);
+            }
+            let from0 = b.edge(sp, self.args.as_slice());
+            let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: again, b: from0, c: to_sp2 }, l0);
+        }
+        self.vblock(b, vx, xstart, xq, (1 + nred * nv) as u16, hb.flags, vl);
         // The loop's new preheader.
         let sps = self.vblock_params(b, h);
         let sstart = b.insts.len() as u32;
@@ -2155,6 +2970,19 @@ extend LoopOpt {
         let to_h = b.edge(h, self.args.as_slice());
         let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_h, b: 0, c: 0 }, l0);
         self.vblock(b, sp, sstart, sps, hb.param_len, hb.flags, g);
+        if self.vtail {
+            // The tail block: the vector loop once more at `n - k` while elements are left, else out.
+            let tq = b.params.len() as u32;
+            b.params.push(qt);
+            let tstart = b.insts.len() as u32;
+            let rem = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: VPARAM | tq, b: self.vn, c: 0 }, l0);
+            let again = [last];
+            let to_vl = b.edge(vl, again[0..1]);
+            let done = [self.vn];
+            let to_vx = b.edge(vx, done[0..1]);
+            let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: rem, b: to_vl, c: to_vx }, l0);
+            self.vblock(b, sp + 1, tstart, tq, 1, hb.flags, vl);
+        }
         // The preheader enters the guard; the loop runs what the vectors leave and vectorizes no more.
         let pe = term(b, p).a;
         b.pool[pe as usize] = g;
@@ -2343,7 +3171,7 @@ extend LoopOpt {
         cl: Classes,
         budget: u32,
     ) u32 {
-        if !self.counted(b, h, u) {
+        if !self.counted(b, h, u) || self.vne || self.vrev || self.vexit {
             return 0;
         }
         let iv = self.viv;
@@ -2413,7 +3241,7 @@ extend LoopOpt {
         let nj = self.jblk.len();
         let na = self.jna as usize;
         let lc = self.jblk[nj - 1];
-        if !self.counted_by(b, ho, a, lc) || !self.steps_by_one(
+        if !self.counted_by(b, ho, a, lc) || self.vne || self.vrev || self.vexit || !self.steps_by_one(
             b,
             ho,
             lc,
@@ -2778,8 +3606,11 @@ extend LoopOpt {
     // iteration. The block, NONE when the loop is not of this shape; `unlinearize` takes it back,
     // `commit_linear` keeps it.
     fn linearize(self: &mut Self, b: &mut Body, h: u32, u: u32) u32 {
+        self.lkeep = false;
+        self.lsplit = NONE;
         let th = term(b, h);
         if th.op != O_BR || u == h || term(b, u).op != O_JMP || b.edge_target(term(b, u).a) != h {
+            let _ = self.no("its branches are not one test in its body", 0);
             return NONE;
         }
         let ein = if self.inl[b.edge_target(th.b) as usize] {
@@ -2790,16 +3621,22 @@ extend LoopOpt {
         let e = b.edge_target(ein);
         let te = term(b, e);
         if e == u || e == h || b.edge_nargs(ein) != 0 || te.op != O_BR {
+            let _ = self.no("its body has more than one branch, or exits early", 0);
             return NONE;
+        }
+        if !self.inl[b.edge_target(te.b) as usize] || !self.inl[b.edge_target(te.c) as usize] {
+            return self.linearize_exit(b, h, u, ein, e, te);
         }
         // Each side: its edge into `u` and its block (NONE: none).
         let (ex, ax) = self.lin_side(b, te.b, e, u);
         let (ey, ay) = self.lin_side(b, te.c, e, u);
         if ex == NONE || ey == NONE || ax != NONE && ax == ay {
+            let _ = self.no("its branch's sides do not meet again at once", 0);
             return NONE;
         }
         let nl = 3 + (ax != NONE) as usize + (ay != NONE) as usize;
         if self.lblocks.len() != nl {
+            let _ = self.no("its body has more than one branch, or exits early", 0);
             return NONE;
         }
         // The instructions: forms the vectorizer reads; on a side, what may run in every iteration.
@@ -2814,19 +3651,25 @@ extend LoopOpt {
                 let t = b.insts[i as usize];
                 let f = op_info(t.op).form;
                 if !(f == F_IMM || f == F_UN || f == F_BIN || f == F_CMP || f == F_TRI || f == F_PTRADD || f == F_LOAD || f == F_STORE) {
+                    let _ = self.no("an instruction it does not widen", t.op);
                     return NONE;
                 }
                 let side = k == 1 || k == 2;
-                if side && !(t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 && self.every_iteration(b, e, u, t) || t.op != O_LOAD && cf_pure(
+                let store = t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0;
+                if side && !store && !(t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 && self.every_iteration(b, e, u, t) || t.op != O_LOAD && cf_pure(
                     b,
                     t,
                 )) {
+                    let _ = self.no("a conditional side does what it may not do in every iteration", t.op);
                     return NONE;
                 }
             }
         }
         // Saved for `unlinearize`.
         self.lsave = [b.insts.len() as u32, b.params.len() as u32, b.pool.len() as u32, b.blocks.len() as u32, e, u];
+        self.lcs.truncate(0);
+        self.lcc.truncate(0);
+        self.lcw.truncate(0);
         self.ledge = ein;
         self.lold.truncate(0);
         for k in 0..self.lblocks.len() {
@@ -2880,6 +3723,11 @@ extend LoopOpt {
                 }
                 self.imap[i as usize] = v;
                 self.lorig.push(i);
+                if (k == 1 || k == 2) && t.op == O_STORE {
+                    self.lcs.push(v);
+                    self.lcc.push(self.um(b, h, te.a));
+                    self.lcw.push(k == 1);
+                }
             }
         }
         self.args.truncate(0);
@@ -2893,6 +3741,132 @@ extend LoopOpt {
             Inst { op: O_JMP, ty: T_NONE, aux: 0, a: back, b: 0, c: 0 },
             b.locs[(ub.start + ub.len - 1) as usize],
         );
+        self.lorig.push(NONE);
+        self.vblock(b, nb, start, b.params.len() as u32, 0, ub.flags, e);
+        b.pool[ein as usize] = nb;
+        for k in 0..self.lold.len() {
+            self.inl[self.lold[k] as usize] = false;
+        }
+        self.inl[h as usize] = true;
+        self.inl[nb as usize] = true;
+        self.lblocks.truncate(0);
+        self.lblocks.push(h);
+        self.lblocks.push(nb);
+        self.latch = nb;
+        return nb;
+    }
+
+    // `linearize` of a body whose branch (`te`, ending block `e`, which the header enters by `ein`) leaves
+    // the loop on one side and enters latch `u` on the other (through a block or not): one block of `e`'s
+    // instructions, the other side's and `u`'s (each one that may run in every iteration), then the
+    // branch, out as before or back to the header with `u`'s arguments.
+    fn linearize_exit(self: &mut Self, b: &mut Body, h: u32, u: u32, ein: u32, e: u32, te: Inst) u32 {
+        let out_b = !self.inl[b.edge_target(te.b) as usize];
+        if out_b == !self.inl[b.edge_target(te.c) as usize] {
+            let _ = self.no("its body has more than one branch, or exits early", 0);
+            return NONE;
+        }
+        let (es, xs) = if out_b {
+            (te.b, te.c);
+        } else {
+            (te.c, te.b);
+        };
+        let (ex, ax) = self.lin_side(b, xs, e, u);
+        if ex == NONE || self.lblocks.len() != 3 + (ax != NONE) as usize {
+            let _ = self.no("its body has more than one branch, or exits early", 0);
+            return NONE;
+        }
+        let order: [u32; 3] = [e, ax, u];
+        for k in 0..3usize {
+            let blk = unsafe order[k];
+            if blk == NONE {
+                continue;
+            }
+            let bk = b.blocks[blk as usize];
+            for i in bk.start..bk.start + bk.len - 1 {
+                let t = b.insts[i as usize];
+                let f = op_info(t.op).form;
+                let st = k != 0 && f == F_STORE && (t.aux & MEM_VOLATILE) == 0;
+                if !(f == F_IMM || f == F_UN || f == F_BIN || f == F_CMP || f == F_TRI || f == F_PTRADD || f == F_LOAD || st) {
+                    let _ = self.no("an instruction it does not widen", t.op);
+                    return NONE;
+                }
+                if t.op == O_LOAD && (t.aux & MEM_VOLATILE) != 0 {
+                    let _ = self.no("a conditional side does what it may not do in every iteration", t.op);
+                    return NONE;
+                }
+                // Past the exit test: what the scalar loop may do only in an iteration that stays.
+                if k != 0 && !(t.op == O_LOAD && self.every_iteration(b, e, e, t) || t.op != O_LOAD && !st && cf_pure(
+                    b,
+                    t,
+                )) {
+                    self.lkeep = true;
+                }
+            }
+        }
+        self.lsave = [b.insts.len() as u32, b.params.len() as u32, b.pool.len() as u32, b.blocks.len() as u32, e, u];
+        self.lcs.truncate(0);
+        self.lsplit = b.blocks[e as usize].len - 1;
+        self.ledge = ein;
+        self.lold.truncate(0);
+        for k in 0..self.lblocks.len() {
+            self.lold.push(self.lblocks[k]);
+        }
+        let ub = b.blocks[u as usize];
+        let nb = b.blocks.len() as u32;
+        let hb = b.blocks[h as usize];
+        self.vmap.truncate(0);
+        for q in 0..hb.param_len as u32 {
+            self.vmap.push(VPARAM | hb.param_start + q);
+        }
+        fill(&mut self.imap, b.insts.len(), NONE);
+        fill(&mut self.pmap, b.params.len(), NONE);
+        self.lorig.truncate(0);
+        let start = b.insts.len() as u32;
+        for k in 0..3usize {
+            let blk = unsafe order[k];
+            if blk == NONE {
+                continue;
+            }
+            if k == 2 {
+                for q in 0..ub.param_len as u32 {
+                    self.pmap[(ub.param_start + q) as usize] = self.um(b, h, b.edge_arg(ex, q));
+                }
+            }
+            let bk = b.blocks[blk as usize];
+            for i in bk.start..bk.start + bk.len - 1 {
+                let t = self.unrolled(b, b.insts[i as usize], h);
+                let v = b.insts.len() as u32;
+                b.insts.push(t);
+                let l = b.locs[i as usize];
+                b.locs.push(l);
+                if b.inl.len() != 0 {
+                    let s = b.inl[i as usize];
+                    b.inl.push(s);
+                }
+                self.imap[i as usize] = v;
+                self.lorig.push(i);
+            }
+        }
+        // The exit edge's arguments, then the back edge's.
+        self.args.truncate(0);
+        for q in 0..b.edge_nargs(es) {
+            self.args.push(self.um(b, h, b.edge_arg(es, q)));
+        }
+        let leave = b.edge(b.edge_target(es), self.args.as_slice());
+        self.args.truncate(0);
+        let tu = term(b, u).a;
+        for q in 0..b.edge_nargs(tu) {
+            self.args.push(self.um(b, h, b.edge_arg(tu, q)));
+        }
+        let back = b.edge(h, self.args.as_slice());
+        let c = self.um(b, h, te.a);
+        let l = b.locs[(ub.start + ub.len - 1) as usize];
+        let _ = if out_b {
+            self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: c, b: leave, c: back }, l);
+        } else {
+            self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: c, b: back, c: leave }, l);
+        };
         self.lorig.push(NONE);
         self.vblock(b, nb, start, b.params.len() as u32, 0, ub.flags, e);
         b.pool[ein as usize] = nb;
@@ -2960,7 +3934,68 @@ extend LoopOpt {
             b: VNONE,
             c: VNONE,
         };
+        // A block outside the loop that reads a value of the old body (an early exit's target, which the
+        // exit's block dominated) reads its copy in the new block, which now dominates it.
+        let nb = self.lsave[3];
+        for k in 0..nb {
+            if contains_u32(&self.lold, k) {
+                continue;
+            }
+            let bk = b.blocks[k as usize];
+            for i in bk.start..bk.start + bk.len {
+                let mut t = b.insts[i as usize];
+                let f = op_info(t.op).form;
+                if lv::operand_a(f) {
+                    t.a = self.lin_map(t.a);
+                }
+                if lv::operand_b(f) {
+                    t.b = self.lin_map(t.b);
+                }
+                if lv::operand_c(f) {
+                    t.c = self.lin_map(t.c);
+                }
+                b.insts[i as usize] = t;
+                if f == F_CALL || f == F_CALLIND {
+                    for q in 0..t.aux as u32 {
+                        b.pool[(t.c + q) as usize] = self.lin_map(b.pool[(t.c + q) as usize]);
+                    }
+                } else if f == F_VOP || f == F_ASM {
+                    for q in 0..t.b {
+                        b.pool[(t.a + q) as usize] = self.lin_map(b.pool[(t.a + q) as usize]);
+                    }
+                } else if f == F_JMP || f == F_BR || f == F_SWITCH {
+                    b.succ_edges(t, &mut self.edges);
+                    for x in 0..self.edges.len() {
+                        let e = self.edges[x];
+                        for q in 0..b.edge_nargs(e) {
+                            b.pool[(e + 2 + q) as usize] = self.lin_map(b.edge_arg(e, q));
+                        }
+                    }
+                }
+            }
+        }
         self.lsave = [0, 0, 0, 0, 0, 0];
+    }
+
+    // Value `v` of the old body as `linearize` copied it into the new block (`imap`, `pmap`); any other
+    // value as it is.
+    fn lin_map(self: &Self, v: Value) Value {
+        if v == VNONE {
+            return v;
+        }
+        if (v & VPARAM) != 0 {
+            let x = v & ~VPARAM;
+            return if x as usize < self.pmap.len() && self.pmap[x as usize] != NONE {
+                self.pmap[x as usize];
+            } else {
+                v;
+            };
+        }
+        let x = v & ~VFLAG;
+        if x as usize >= self.imap.len() || self.imap[x as usize] == NONE {
+            return v;
+        }
+        return self.imap[x as usize] | v & VFLAG;
     }
 
     // Take back `linearize`: the header enters the branch's body again, the new block and its values go.
@@ -2986,6 +4021,9 @@ extend LoopOpt {
             self.lblocks.push(self.lold[k]);
         }
         self.lorig.truncate(0);
+        self.lcs.truncate(0);
+        self.lkeep = false;
+        self.lsplit = NONE;
         self.lsave = [0, 0, 0, 0, 0, 0];
     }
 
@@ -3048,9 +4086,254 @@ extend LoopOpt {
         let t = b.insts[i as usize];
         let a = b.insts[t.a as usize];
         let off = (((a.c as i32) as i64 + (t.c as i32) as i64) as i32) as u32;
+        if self.vrev {
+            // The counter's values `i0` down to 1.
+            let o1 = (((off as i32) as i64 + a.aux as i64) as i32) as u32;
+            let lo = self.vi(b, Inst { op: O_PTRADD, ty: T_PTR, aux: 0, a: a.a, b: VNONE, c: o1 }, l);
+            let hi = self.vi(b, Inst { op: O_PTRADD, ty: T_PTR, aux: a.aux, a: a.a, b: i0, c: o1 }, l);
+            return lo, hi;
+        }
         let lo = self.vi(b, Inst { op: O_PTRADD, ty: T_PTR, aux: a.aux, a: a.a, b: i0, c: off }, l);
         let hi = self.vi(b, Inst { op: O_PTRADD, ty: T_PTR, aux: a.aux, a: a.a, b: self.vn, c: off }, l);
         return lo, hi;
+    }
+
+    // Copy `c` of strided store `i` of body `u` (`store_groups`): at the group's last store, its stores' lane
+    // vectors (`n`, by offset) interleaved into `n` vectors (zips of zips: for 4, the pairs 0 and 2, 1 and 3,
+    // then the pairs of those), stored one after the other from the group's lowest offset. The other stores
+    // of the group store nothing: the plan keeps every access of their place apart from the loop's others.
+    fn store_group(self: &mut Self, b: &mut Body, u: u32, c: u32, i: u32) {
+        let t = b.insts[i as usize];
+        let ty = value_type(b, t.b);
+        let eb = type_bytes(ty, 8);
+        let step = self.stride(b, t.a);
+        let n = step / eb;
+        let mut lo = (t.c as i32) as i64;
+        let mut last = i;
+        for y in 0..self.vacc.len() {
+            let o = b.insts[self.vacc[y] as usize];
+            if o.op == O_STORE && o.a == t.a {
+                lo = lo.min(o.c as i32);
+                last = last.max(self.vacc[y]);
+            }
+        }
+        if last != i {
+            return;
+        }
+        let mut parts = Vector::<Value>::with_capacity(n as usize);
+        parts.resize_default(n as usize);
+        for y in 0..self.vacc.len() {
+            let o = b.insts[self.vacc[y] as usize];
+            if o.op == O_STORE && o.a == t.a {
+                parts[(((o.c as i32) as i64 - lo) / eb as i64) as usize] = self.vval(b, u, c, o.b);
+            }
+        }
+        let vt = vec_type(ty, self.vlanes);
+        let l = b.locs[i as usize];
+        // Each round zips part k with part k + n/2 of the parts in order: twice for 4, once for 2.
+        let mut r: u32 = n;
+        while r > 1 {
+            let mut next = Vector::<Value>::with_capacity(n as usize);
+            next.resize_default(n as usize);
+            let hf = n / 2;
+            for k in 0..hf {
+                next[(2 * k) as usize] = self.vi(
+                    b,
+                    Inst { op: O_VZIPLO, ty: vt, aux: 0, a: parts[k as usize], b: parts[(k + hf) as usize], c: VNONE },
+                    l,
+                );
+                next[(2 * k + 1) as usize] = self.vi(
+                    b,
+                    Inst { op: O_VZIPHI, ty: vt, aux: 0, a: parts[k as usize], b: parts[(k + hf) as usize], c: VNONE },
+                    l,
+                );
+            }
+            parts = next;
+            r /= 2;
+        }
+        let a = self.vval(b, u, c, t.a);
+        let base = lo + (c * self.vlanes * step) as i64;
+        for k in 0..n {
+            let off = ((base + (k * self.vlanes * eb) as i64) as i32) as u32;
+            let _ = self.vi(b, Inst { op: O_STORE, ty: T_NONE, aux: t.aux, a: a, b: parts[k as usize], c: off }, l);
+        }
+    }
+
+    // The vector loop's early exit test, ending block `vl` (from `lstart`; its parameters from `vps`, the
+    // counter `vi`): when a lane of any copy would leave, the exit block `vx` hands this iteration's lanes to
+    // the loop (the counter and the accumulators as this iteration found them); else latch block `lb`,
+    // which starts at the returned instruction. Before the instructions past the test (`lsplit`), which run
+    // only when no lane leaves.
+    fn vexit_test(
+        self: &mut Self,
+        b: &mut Body,
+        ub: Block,
+        nv: u32,
+        vps: u32,
+        vi: Value,
+        vx: u32,
+        lb: u32,
+        lstart: u32,
+        fl: u16,
+        vp: u32,
+        l0: u32,
+    ) u32 {
+        let nred = self.vred.len() as u32;
+        let vl = lb - 1;
+        let x = self.vxc - ub.start;
+        let mut m = self.vmap[x as usize];
+        let mt = value_type(b, m);
+        for c in 1..nv {
+            m = self.vi(
+                b,
+                Inst {
+                    op: ast::pick(self.vxs, O_AND, O_OR),
+                    ty: mt,
+                    aux: 0,
+                    a: m,
+                    b: self.vmap[(c * ub.len + x) as usize],
+                    c: 0,
+                },
+                l0,
+            );
+        }
+        // While the condition holds in every lane (`vxs`), or in none.
+        let lt2 = lane_type(mt);
+        let rc = (core::OP_SIMD + ast::pick(self.vxs, core::SIMD_REDUCE_AND, core::SIMD_REDUCE_OR) as u32) as u16;
+        let one = [m];
+        let at = b.pool_list(one[0..1]);
+        let r = self.vi(b, Inst { op: O_VOP, ty: lt2, aux: rc, a: at, b: 1, c: VNONE }, l0);
+        let want = self.vconst(b, lt2, ast::pick(self.vxs, mask_of(type_bits(lt2, 8)), 0u64), l0);
+        let stay = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_EQ, a: r, b: want, c: 0 }, l0);
+        self.args.truncate(0);
+        self.args.push(vi);
+        for r2 in 0..nred {
+            for c in 0..nv {
+                self.args.push(VPARAM | vps + 1 + r2 * nv + c);
+            }
+        }
+        let leave = b.edge(vx, self.args.as_slice());
+        let none2: []Value = [];
+        let on = b.edge(lb, none2);
+        let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: stay, b: on, c: leave }, l0);
+        let ls = b.insts.len() as u32;
+        self.vblock(b, vl, lstart, vps, (1 + nred * nv) as u16, fl | BLOCK_NOVEC, vp);
+        return ls;
+    }
+
+    // Copy `c` of gathered load or scattered store `t` of body `u`, lane by lane in order: each lane's
+    // index out of the index vector, its address, then a scalar load into its lane (the first a splat), or
+    // the value's lane stored.
+    fn vgather(self: &mut Self, b: &mut Body, u: u32, c: u32, t: Inst, l: u32) Value {
+        let ga = b.insts[t.a as usize];
+        let iv = self.vval(b, u, c, ga.b);
+        let it = value_type(b, ga.b);
+        let xv = if t.op == O_STORE {
+            self.vval(b, u, c, t.b);
+        } else {
+            VNONE;
+        };
+        let st = if t.op == O_STORE {
+            value_type(b, t.b);
+        } else {
+            t.ty;
+        };
+        let vt = vec_type(st, self.vlanes);
+        let mut v = VNONE;
+        for k in 0..self.vlanes {
+            let ik = self.vi(b, Inst { op: O_VEXTRACT, ty: it, aux: k as u16, a: iv, b: VNONE, c: VNONE }, l);
+            let ak = self.vi(b, Inst { op: O_PTRADD, ty: T_PTR, aux: ga.aux, a: ga.a, b: ik, c: ga.c }, l);
+            if t.op == O_STORE {
+                let xk = self.vi(b, Inst { op: O_VEXTRACT, ty: st, aux: k as u16, a: xv, b: VNONE, c: VNONE }, l);
+                let _ = self.vi(b, Inst { op: O_STORE, ty: T_NONE, aux: t.aux, a: ak, b: xk, c: t.c }, l);
+                continue;
+            }
+            let xk = self.vi(b, Inst { op: O_LOAD, ty: t.ty, aux: t.aux, a: ak, b: VNONE, c: t.c }, l);
+            v = if k == 0 {
+                self.vi(b, Inst { op: O_SPLAT, ty: vt, aux: 0, a: xk, b: VNONE, c: VNONE }, l);
+            } else {
+                self.vi(b, Inst { op: O_VINSERT, ty: vt, aux: k as u16, a: v, b: xk, c: VNONE }, l);
+            };
+        }
+        return v;
+    }
+
+    // Copy `c` of truncation `t` of the counter, in the vector loop whose counter is `vi`: the truncated
+    // counter in every lane plus the lane's iteration, `c * vlanes` up.
+    fn vector_ind(self: &mut Self, b: &mut Body, t: Inst, vi: Value, c: u32, l: u32) Value {
+        let vt = vec_type(t.ty, self.vlanes);
+        let s = self.vi(b, Inst { op: O_TRUNC, ty: t.ty, aux: 0, a: vi, b: VNONE, c: VNONE }, l);
+        let sv = self.vi(b, Inst { op: O_SPLAT, ty: vt, aux: 0, a: s, b: VNONE, c: VNONE }, l);
+        let lb = type_bits(t.ty, 8);
+        let nw = (self.vlanes * lb + 63) / 64;
+        let w = b.words.len() as u32;
+        for _ in 0..nw {
+            b.words.push(0);
+        }
+        for k in 0..self.vlanes {
+            let mut v = (c * self.vlanes + k) as u64;
+            if lb < 64 {
+                v &= (1u64 << lb as u64) - 1;
+            }
+            let bit = (k * lb) as u64;
+            let at = (w as u64 + bit / 64) as usize;
+            b.words[at] = b.words[at] | v << bit % 64;
+        }
+        let ks = self.vi(b, Inst { op: O_WCONST, ty: vt, aux: 0, a: w, b: nw, c: VNONE }, l);
+        return self.vi(b, Inst { op: O_ADD, ty: vt, aux: 0, a: sv, b: ks, c: VNONE }, l);
+    }
+
+    // Vector conversion `t` as steps the targets have (`vconv_ok`): an integer to 4 times its width or a
+    // quarter through twice or half; a narrower integer to a float extended to the float's width (by its
+    // sign, or zeros for `uitofp`), then converted as signed, which the extended value fits.
+    fn vconv(self: &mut Self, b: &mut Body, t: Inst, l: u32) Value {
+        let ft = value_type(b, t.a);
+        let fl = lane_type(ft);
+        let tl = lane_type(t.ty);
+        let fb = type_bytes(fl, 8);
+        let tb = type_bytes(tl, 8);
+        let n = lanes(t.ty);
+        let mut v = t.a;
+        if (t.op == O_SITOFP || t.op == O_UITOFP) && fb < tb {
+            let it = int_of_bytes(tb);
+            let e = Inst {
+                op: ast::pick(t.op == O_SITOFP, O_SEXT, O_ZEXT),
+                ty: vec_type(it, n),
+                aux: 0,
+                a: v,
+                b: VNONE,
+                c: VNONE,
+            };
+            v = self.vconv(b, e, l);
+            return self.vi(b, Inst { op: O_SITOFP, ty: t.ty, aux: t.aux, a: v, b: VNONE, c: VNONE }, l);
+        }
+        if (t.op == O_SEXT || t.op == O_ZEXT) && tb == 4 * fb || t.op == O_TRUNC && fb == 4 * tb {
+            let mt = vec_type(int_of_bytes(ast::pick(t.op == O_TRUNC, tb, fb) * 2), n);
+            v = self.vi(b, Inst { op: t.op, ty: mt, aux: 0, a: v, b: VNONE, c: VNONE }, l);
+        }
+        return self.vi(b, Inst { op: t.op, ty: t.ty, aux: t.aux, a: v, b: VNONE, c: VNONE }, l);
+    }
+
+    // Mask `m` as one of type `want`: itself, or its lanes extended or truncated to the other width (every
+    // lane all ones or 0 either way).
+    fn vmask(self: &mut Self, b: &mut Body, m: Value, want: u8, l: u32) Value {
+        let mt = value_type(b, m);
+        if mt == want {
+            return m;
+        }
+        let op = if type_bytes(lane_type(want), 8) > type_bytes(lane_type(mt), 8) {
+            O_SEXT;
+        } else {
+            O_TRUNC;
+        };
+        return self.vi(b, Inst { op: op, ty: want, aux: 0, a: m, b: VNONE, c: VNONE }, l);
+    }
+
+    // The lanes of vector `x` where `x REL m` holds (`vrel`), else those of `m`: a min or max step.
+    fn vbeat(self: &mut Self, b: &mut Body, rel: u16, x: Value, m: Value, l: u32) Value {
+        let vt = value_type(b, x);
+        let mk = self.vi(b, Inst { op: O_VCMP, ty: mask_type(vt), aux: rel, a: x, b: m, c: 0 }, l);
+        return self.vi(b, Inst { op: O_VSEL, ty: vt, aux: 0, a: mk, b: x, c: m }, l);
     }
 
     // The splat of value `v` of body `u` when the loop does not define it (a constant as a wide constant,
@@ -3135,6 +4418,16 @@ extend LoopOpt {
                 0x8000000000000000u64;
             };
         }
+        if op == O_MUL {
+            return 1;
+        }
+        if op == O_FMUL {
+            return if ty == T_F32 {
+                0x3F800000u64;
+            } else {
+                0x3FF0000000000000u64;
+            };
+        }
         return 0;
     }
 
@@ -3154,6 +4447,16 @@ extend LoopOpt {
         return VNONE;
     }
 
+    // The index in `lcs` of store `i`, NONE when it stores in every iteration.
+    fn cond_store(self: &Self, i: u32) u32 {
+        for x in 0..self.lcs.len() {
+            if self.lcs[x] == i {
+                return x as u32;
+            }
+        }
+        return NONE;
+    }
+
     // The reduction whose update is instruction `i`.
     fn red_of(self: &Self, i: u32) u32 {
         for r in 0..self.vrup.len() {
@@ -3163,6 +4466,70 @@ extend LoopOpt {
         }
         assert(false, "loops: no reduction for the update");
         return 0;
+    }
+
+    // For header parameter `pv` of body `u` whose back edge passes select `a`: a min or max reduction when the
+    // select takes a lane value `x` or `pv` on a comparison of the two that only it reads (an integer one,
+    // or an ordered float one that takes `x` when it holds, with no signed zeros in `fmath`: the lanes keep
+    // their own extreme, which reorders the comparisons of equal values). The condition under which `x`
+    // replaces `pv` (`vrel`), NONE16 when it is not one.
+    fn minmax(self: &mut Self, b: &Body, ptr: u32, fmath: u8, u: u32, pv: Value, a: u32) u16 {
+        let s = b.insts[a as usize];
+        let ty = s.ty;
+        if !(is_int(ty) && ty != T_I128 || is_float(ty) && (fmath & FM_NSZ) != 0) || !self.lane_size(ty, ptr) || !self.in_body(
+            b,
+            u,
+            s.a,
+        ) {
+            return NONE16;
+        }
+        let c = b.insts[s.a as usize];
+        let x = if s.b == pv {
+            s.c;
+        } else {
+            s.b;
+        };
+        if s.b != pv && s.c != pv || x == pv || c.op != O_ICMP && c.op != O_FCMP || !(c.a == x && c.b == pv || c.a == pv && c.b == x) {
+            return NONE16;
+        }
+        if self.reads(b, u, pv) != 2 || self.reads(b, u, a) != 1 || self.reads(b, u, s.a) != 1 {
+            return NONE16;
+        }
+        // The condition as `x REL pv` when the select takes `x`.
+        let mut rel = c.aux;
+        if c.a == pv && c.op == O_FCMP && rel >= C_OLT && rel <= C_OGE {
+            // `<` and `>`, `<=` and `>=`.
+            rel ^= 2;
+        } else if c.a == pv {
+            rel = mirror(rel);
+        }
+        if s.b == pv {
+            if c.op == O_FCMP {
+                return NONE16;
+            }
+            rel = opposite(rel);
+        }
+        let less = rel == C_SLT || rel == C_SLE || rel == C_ULT || rel == C_ULE || rel == C_OLT || rel == C_OLE;
+        let more = rel == C_SGT || rel == C_SGE || rel == C_UGT || rel == C_UGE || rel == C_OGT || rel == C_OGE;
+        if !less && !more {
+            return NONE16;
+        }
+        // Strict: an equal value replaces nothing.
+        return if rel == C_SLE {
+            C_SLT;
+        } else if rel == C_ULE {
+            C_ULT;
+        } else if rel == C_OLE {
+            C_OLT;
+        } else if rel == C_SGE {
+            C_SGT;
+        } else if rel == C_UGE {
+            C_UGT;
+        } else if rel == C_OGE {
+            C_OGT;
+        } else {
+            rel;
+        };
     }
 
     // The reduction of header parameter `pv`.
@@ -3712,15 +5079,24 @@ extend LoopOpt {
     }
 
     // Whether loop `h` (preheader `p`, latch `u`) has bounds checks a guard before it proves: branches
-    // into a cold block on `i <u len` (or `len >u i`) with `len` defined outside the loop and `i` the header
-    // parameter that the header's exit test keeps below `n` (`i <u n`, or `i <s n` with `i` starting at a
-    // constant of at least 0 and stepping by 1), `n` defined outside the loop. Each check holds wherever
-    // `n <= len` does: sets `fixes`, `fside` and the guard's `gx` (the `n`s) and `gy` (the `len`s).
+    // into a cold block on `x <u len` (or `len >u x`) with `len` defined outside the loop, `x` the header
+    // parameter `i` that the header's exit test keeps below `n` (`i <u n`, or `i <s n` with `i` starting at
+    // a constant of at least 0 and stepping by 1), or `i << s + c` (a shift or a product by `2^s`, plus or
+    // or-ed with a constant `c`, below `2^s` for an `or`), `n` defined outside the loop. A check of `i`
+    // holds wherever `n <= len` does; one of `i << s + c` wherever `n <= bound(len)`, with `bound(len)`
+    // `((len - c - 1) >> s) + 1` when `len > c`, else 0: then `(n - 1) << s + c` stays below `len` and wraps
+    // nowhere. Sets `fixes`, `fside` and the guard's `gx` (the `n`s), `gy` (the `len`s), `gsh` and `goff`.
+    // The loop with the checks a guard keeps (`BLOCK_NOVEC`) has none.
     fn checks(self: &mut Self, b: &Body, ptr: u32, h: u32, p: u32, u: u32) bool {
         self.fixes.truncate(0);
         self.fside.truncate(0);
         self.gx.truncate(0);
         self.gy.truncate(0);
+        self.gsh.truncate(0);
+        self.goff.truncate(0);
+        if (b.blocks[h as usize].flags & BLOCK_NOVEC) != 0 {
+            return false;
+        }
         // The header's exit test: in-loop when `q < n`.
         let t = term(b, h);
         if t.op != O_BR || (t.a & (VPARAM | VFLAG)) != 0 || t.a == VNONE {
@@ -3731,8 +5107,34 @@ extend LoopOpt {
         if ci.op != O_ICMP || in_taken == self.inl[b.edge_target(t.c) as usize] {
             return false;
         }
-        // The comparison read as `q < n` on the in-loop side.
-        let (q, n, cond) = if in_taken && (ci.aux == C_ULT || ci.aux == C_SLT) {
+        // The comparison read as `q < n` on the in-loop side; `q != n` too, by steps of 1 from at most `n`
+        // (`gq`: the guard checks the start).
+        let ne = in_taken && ci.aux == C_NE || !in_taken && ci.aux == C_EQ;
+        let hb0 = b.blocks[h as usize];
+        let pa = (ci.a & VPARAM) != 0 && (ci.a & ~VPARAM) >= hb0.param_start && (ci.a & ~VPARAM) < hb0.param_start + hb0.param_len as u32;
+        let pb = (ci.b & VPARAM) != 0 && (ci.b & ~VPARAM) >= hb0.param_start && (ci.b & ~VPARAM) < hb0.param_start + hb0.param_len as u32;
+        self.gq = NONE;
+        // A counter down by 1 while not 0 (`grev`).
+        let za = is_const(b, ci.a) && raw_const(b, ci.a) == 0;
+        let zb = is_const(b, ci.b) && raw_const(b, ci.b) == 0;
+        let qd = if pa && zb && (in_taken && (ci.aux == C_NE || ci.aux == C_UGT) || !in_taken && (ci.aux == C_EQ || ci.aux == C_ULE)) {
+            ci.a;
+        } else if pb && za && (in_taken && (ci.aux == C_NE || ci.aux == C_ULT) || !in_taken && (ci.aux == C_EQ || ci.aux == C_UGE)) {
+            ci.b;
+        } else {
+            VNONE;
+        };
+        self.grev = qd != VNONE && self.steps_down(b, h, u, qd, (qd & ~VPARAM) - hb0.param_start);
+        if self.grev {
+            self.gq = (qd & ~VPARAM) - hb0.param_start;
+        }
+        let (q, n, cond) = if self.grev {
+            (qd, VNONE, C_ULT);
+        } else if ne && pa {
+            (ci.a, ci.b, C_ULT);
+        } else if ne {
+            (ci.b, ci.a, C_ULT);
+        } else if in_taken && (ci.aux == C_ULT || ci.aux == C_SLT) {
             (ci.a, ci.b, ci.aux);
         } else if in_taken && (ci.aux == C_UGT || ci.aux == C_SGT) {
             (ci.b, ci.a, ci.aux - C_SGT + C_SLT);
@@ -3747,8 +5149,15 @@ extend LoopOpt {
         if (q & VPARAM) == 0 || (q & ~VPARAM) < hb.param_start || (q & ~VPARAM) >= hb.param_start + hb.param_len as u32 {
             return false;
         }
-        if self.defined_in(n) || n == VNONE {
+        if !self.grev && (self.defined_in(n) || n == VNONE) {
             return false;
+        }
+        if ne && !self.grev {
+            let qi = (q & ~VPARAM) - hb.param_start;
+            if !self.steps_by_one(b, h, u, q, qi) {
+                return false;
+            }
+            self.gq = qi;
         }
         if cond == C_SLT {
             // From a constant of at least 0, by 1: no value below 0, none past `n` wraps.
@@ -3779,17 +5188,29 @@ extend LoopOpt {
             if bc.op != O_ICMP || cold_b == cold_c {
                 continue;
             }
-            // `q <u len` holds on the edge that does not fail.
-            let ok = bc.a == q && (bc.aux == C_ULT && cold_c || bc.aux == C_UGE && cold_b) || bc.b == q && (bc.aux == C_UGT && cold_c || bc.aux == C_ULE && cold_b);
+            // `x <u len` holds on the edge that does not fail, `x` of `q` (counting down, `x` is `q - 1`).
+            let (mut sa, oa) = self.affine(b, ptr, bc.a, q);
+            let (mut sb, ob) = self.affine(b, ptr, bc.b, q);
+            if self.grev {
+                sa = ast::pick(self.down_of(b, bc.a, q), 0u8, 0xFFu8);
+                sb = ast::pick(self.down_of(b, bc.b, q), 0u8, 0xFFu8);
+            }
+            let ok = sa != 0xFF && (bc.aux == C_ULT && cold_c || bc.aux == C_UGE && cold_b) || sb != 0xFF && (bc.aux == C_UGT && cold_c || bc.aux == C_ULE && cold_b);
             if !ok {
                 continue;
             }
-            let len = if bc.a == q {
+            let on_a = sa != 0xFF && (bc.aux == C_ULT || bc.aux == C_UGE);
+            let len = if on_a {
                 bc.b;
             } else {
                 bc.a;
             };
-            if len == VNONE || self.defined_in(len) || value_type(b, len) != value_type(b, n) {
+            let (sh, off) = if on_a {
+                (sa, oa);
+            } else {
+                (sb, ob);
+            };
+            if len == VNONE || self.defined_in(len) || value_type(b, len) != value_type(b, ast::pick(self.grev, q, n)) {
                 continue;
             }
             if self.fixes.len() == MAX_CHECKS {
@@ -3803,13 +5224,52 @@ extend LoopOpt {
                     1u8;
                 },
             );
-            if !contains(&self.gy, len) {
+            let mut seen = false;
+            for g in 0..self.gy.len() {
+                seen = seen || self.gy[g] == len && self.gsh[g] == sh && self.goff[g] == off;
+            }
+            if !seen {
                 self.gx.push(n);
                 self.gy.push(len);
+                self.gsh.push(sh);
+                self.goff.push(off);
             }
         }
         self.gcond = C_ULE;
         return self.fixes.len() != 0 && !self.guarded(b, p);
+    }
+
+    // `x` as `q << s + c` (`checks`): (s, c), (0xFF, 0) when it is not of that form.
+    fn affine(self: &Self, b: &Body, ptr: u32, x: Value, q: Value) (u8, u64) {
+        if x == q {
+            return 0u8, 0u64;
+        }
+        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || !self.defined_in(x) {
+            return 0xFFu8, 0u64;
+        }
+        let t = b.insts[x as usize];
+        let bits = type_bits(t.ty, ptr);
+        let k = if (t.b & (VPARAM | VFLAG)) == 0 && t.b != VNONE && t.b < b.insts.len() as u32 && b.insts[t.b as usize].op == O_ICONST {
+            b.insts[t.b as usize].a as u64 | b.insts[t.b as usize].b as u64 << 32;
+        } else {
+            u64::MAX;
+        };
+        if k == u64::MAX {
+            return 0xFFu8, 0u64;
+        }
+        if t.a == q && t.op == O_SHL && k >= 1 && k < 16 {
+            return k as u8, 0u64;
+        }
+        if t.a == q && t.op == O_MUL && k >= 2 && k <= 0x8000 && (k & k - 1) == 0 {
+            return k.trailing_zeros() as u8, 0u64;
+        }
+        if (t.op == O_ADD || t.op == O_OR) && k < 0x80000000 && bits == type_bits(value_type(b, q), ptr) {
+            let (s, c) = self.affine(b, ptr, t.a, q);
+            if s != 0xFF && c == 0 && (t.op == O_ADD || k < 1u64 << s as u64) {
+                return s, k;
+            }
+        }
+        return 0xFFu8, 0u64;
     }
 
     // Whether a branch on the guard `version` would make (`gx`, `gy`, `gcond`) already enters preheader
@@ -3865,6 +5325,25 @@ extend LoopOpt {
             return (si.op == O_ADD || si.op == O_ADDO) && si.a == q && is_const(b, si.b) && b.insts[si.b as usize].a == 1 && b.insts[si.b as usize].b == 0;
         }
         return false;
+    }
+
+    // Whether the back edge of loop `h` from `u` passes `q - 1` (`down_by_one`) as `q` (header parameter `qi`).
+    fn steps_down(self: &mut Self, b: &Body, h: u32, u: u32, q: Value, qi: u32) bool {
+        b.succ_edges(term(b, u), &mut self.edges);
+        for j in 0..self.edges.len() {
+            let e = self.edges[j];
+            if b.edge_target(e) != h {
+                continue;
+            }
+            let nv = b.edge_arg(e, qi);
+            return (nv & (VPARAM | VFLAG)) == 0 && nv != VNONE && down_by_one(b, b.insts[nv as usize], q);
+        }
+        return false;
+    }
+
+    // Whether `x` is `q - 1` (`down_by_one`), defined in the loop.
+    fn down_of(self: &Self, b: &Body, x: Value, q: Value) bool {
+        return x != VNONE && (x & (VPARAM | VFLAG)) == 0 && self.defined_in(x) && down_by_one(b, b.insts[x as usize], q);
     }
 
     // A branch of loop `h` on a value defined outside it, not a constant (VNONE: none): unswitching
@@ -3923,8 +5402,29 @@ extend LoopOpt {
         let mut gv = g;
         if g == VNONE {
             for k in 0..self.gx.len() {
+                let mut y = self.gy[k];
+                if self.gsh[k] != 0 || self.goff[k] != 0 {
+                    // bound(len) = len > c ? ((len - c - 1) >> s) + 1 : 0 (`checks`).
+                    let ty = value_type(b, y);
+                    let c0 = vpush(b, iconst_of(ty, self.goff[k]), l0);
+                    let c1 = vpush(b, iconst_of(ty, self.goff[k] + 1), l0);
+                    let cs = vpush(b, iconst_of(ty, self.gsh[k]), l0);
+                    let one = vpush(b, iconst_of(ty, 1), l0);
+                    let zero = vpush(b, iconst_of(ty, 0), l0);
+                    let gt = vpush(b, Inst { op: O_ICMP, ty: T_I8, aux: C_UGT, a: y, b: c0, c: 0 }, l0);
+                    let d = vpush(b, bin(O_SUB, ty, y, c1), l0);
+                    let s = vpush(b, bin(O_LSHR, ty, d, cs), l0);
+                    let s1 = vpush(b, bin(O_ADD, ty, s, one), l0);
+                    y = vpush(b, Inst { op: O_SELECT, ty: ty, aux: 0, a: gt, b: s1, c: zero }, l0);
+                }
                 let c = b.insts.len() as u32;
-                b.insts.push(Inst { op: O_ICMP, ty: T_I8, aux: self.gcond, a: self.gx[k], b: self.gy[k], c: 0 });
+                // Counting down from `i0`, the checks read `i0 - 1` at most: `i0 <= len`.
+                let x = if self.grev {
+                    VPARAM | ps + self.gq;
+                } else {
+                    self.gx[k];
+                };
+                b.insts.push(Inst { op: O_ICMP, ty: T_I8, aux: self.gcond, a: x, b: y, c: 0 });
                 b.locs.push(l0);
                 if gv != VNONE {
                     let a2 = b.insts.len() as u32;
@@ -3934,6 +5434,15 @@ extend LoopOpt {
                 } else {
                     gv = c;
                 }
+            }
+            if self.gq != NONE && !self.grev && gv != VNONE {
+                // `i != n` from at most `n`: every value below `n`.
+                let c = vpush(
+                    b,
+                    Inst { op: O_ICMP, ty: T_I8, aux: C_ULE, a: VPARAM | ps + self.gq, b: self.gx[0], c: 0 },
+                    l0,
+                );
+                gv = vpush(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: gv, b: c, c: 0 }, l0);
             }
         }
         self.args.truncate(0);
@@ -4473,6 +5982,60 @@ extend LoopOpt {
 }
 
 // The terminator of block `k`.
+// Whether `t` is `q - 1` (or `q + -1`).
+fn down_by_one(b: &Body, t: Inst, q: Value) bool {
+    if t.op == O_SUB {
+        return t.a == q && is_const(b, t.b) && raw_const(b, t.b) == 1;
+    }
+    if t.op != O_ADD {
+        return false;
+    }
+    let m = mask_of(type_bits(t.ty, 8));
+    return t.a == q && is_const(b, t.b) && (raw_const(b, t.b) & m) == m || t.b == q && is_const(b, t.a) && (raw_const(
+        b,
+        t.a,
+    ) & m) == m;
+}
+
+// The `vop` lane comparison (a `SIMD_CMP_*` code and VOP_SIGNED) of comparison `t` (`icmp`, `fcmp`),
+// NONE16 when none matches it: an equality, an order of integers, an ordered order of floats, `une`.
+fn cmp_code(t: Inst) u16 {
+    if t.op != O_ICMP && t.op != O_FCMP {
+        return NONE16;
+    }
+    let c = t.aux;
+    let (k, sg) = if c == C_EQ || c == C_OEQ && t.op == O_FCMP {
+        (core::SIMD_CMP_EQ, false);
+    } else if c == C_NE && t.op == O_ICMP || c == C_UNE && t.op == O_FCMP {
+        (core::SIMD_CMP_NE, false);
+    } else if c == C_SLT || c == C_ULT || c == C_OLT && t.op == O_FCMP {
+        (core::SIMD_CMP_LT, c == C_SLT);
+    } else if c == C_SLE || c == C_ULE || c == C_OLE && t.op == O_FCMP {
+        (core::SIMD_CMP_LE, c == C_SLE);
+    } else if c == C_SGT || c == C_UGT || c == C_OGT && t.op == O_FCMP {
+        (core::SIMD_CMP_GT, c == C_SGT);
+    } else if c == C_SGE || c == C_UGE || c == C_OGE && t.op == O_FCMP {
+        (core::SIMD_CMP_GE, c == C_SGE);
+    } else {
+        return NONE16;
+    };
+    return (core::OP_SIMD + k as u32) as u16 | ast::pick(sg, VOP_SIGNED, 0);
+}
+
+// The integer of a lane mask of `l` lanes (bit k for lane k), as the lowering's.
+const fn mask_int_of(l: u32) u8 {
+    if l <= 8 {
+        return T_I8;
+    }
+    if l <= 16 {
+        return T_I16;
+    }
+    if l <= 32 {
+        return T_I32;
+    }
+    return T_I64;
+}
+
 const fn term(b: &Body, k: u32) Inst {
     let bk = b.blocks[k as usize];
     return b.insts[(bk.start + bk.len - 1) as usize];
@@ -4498,6 +6061,70 @@ fn cold(b: &Body, k: u32) bool {
 }
 
 // Whether `vs` holds `v`.
+// Whether vector conversion `op` of lanes of `from` into lanes of `to` is one the targets that convert
+// vectors in registers do (`Package.vops`), in at most two steps (`vconv`): an integer to a float of its
+// width and back, an integer to twice or 4 times its width and back, a narrower integer to a float, f32
+// to f64 and back.
+const fn vconv_ok(op: u8, from: u8, to: u8, ptr: u32) bool {
+    let fb = type_bytes(from, ptr);
+    let tb = type_bytes(to, ptr);
+    let fi = is_int(from);
+    let ti = is_int(to);
+    return (op == O_SEXT || op == O_ZEXT) && fi && ti && (tb == 2 * fb || tb == 4 * fb) || op == O_TRUNC && fi && ti && (fb == 2 * tb || fb == 4 * tb) || (op == O_SITOFP || op == O_UITOFP) && fi && is_float(
+        to,
+    ) && (fb == tb || tb == 2 * fb || tb == 4 * fb) || (op == O_FPTOSI || op == O_FPTOUI) && is_float(from) && ti && fb == tb || op == O_FPEXT && from == T_F32 && to == T_F64 || op == O_FPTRUNC && from == T_F64 && to == T_F32;
+}
+
+// Whether `v` is the length of the slice whose pointer load `pl` reads: a load of the word after it.
+fn slice_len(b: &Body, pl: Inst, v: Value, ptr: u32) bool {
+    if (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let nl = b.insts[v as usize];
+    return pl.op == O_LOAD && nl.op == O_LOAD && pl.a == nl.a && (pl.aux & MEM_VOLATILE) == 0 && (nl.c as i32) as i64 == (pl.c as i32) as i64 + ptr as i64 && is_int(
+        nl.ty,
+    ) && type_bytes(nl.ty, ptr) == ptr;
+}
+
+// The integer type of `n` bytes (1, 2, 4 or 8).
+const fn int_of_bytes(n: u32) u8 {
+    return if n == 1 {
+        T_I8;
+    } else if n == 2 {
+        T_I16;
+    } else if n == 4 {
+        T_I32;
+    } else {
+        T_I64;
+    };
+}
+
+// Append `t` at location `l` to `b` (in the block being built at its end); its value.
+fn vpush(b: &mut Body, t: Inst, l: u32) Value {
+    let v = b.insts.len() as u32;
+    b.insts.push(t);
+    b.locs.push(l);
+    return v;
+}
+
+fn contains_bool(vs: &Vector<bool>, v: bool) bool {
+    for k in 0..vs.len() {
+        if vs[k] == v {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn contains_u32(vs: &Vector<u32>, v: u32) bool {
+    for k in 0..vs.len() {
+        if vs[k] == v {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn contains(vs: &Vector<Value>, v: Value) bool {
     for q in 0..vs.len() {
         if vs[q] == v {
@@ -4516,11 +6143,6 @@ fn value_type(b: &Body, v: Value) u8 {
         return T_I8;
     }
     return b.insts[v as usize].ty;
-}
-
-// Whether `v` is the integer constant 1.
-fn is_one(b: &Body, v: Value) bool {
-    return is_const(b, v) && b.insts[v as usize].a == 1 && b.insts[v as usize].b == 0;
 }
 
 fn fill_u8(v: &mut Vector<u8>, n: usize, x: u8) {

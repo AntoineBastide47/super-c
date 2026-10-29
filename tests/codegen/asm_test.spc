@@ -1183,6 +1183,33 @@ fn x64_generated_code_round_trips() {
     x64_generated("windows");
 }
 
+// A 16-bit operation on memory with an immediate takes a 16-bit immediate past 8 bits (the operand-size
+// prefix sizes it): each instruction the encoder writes decodes to one row and assembles back to its bytes.
+@test
+fn x64_word_immediates_to_memory_round_trip() {
+    let mut c = x::Code::new();
+    c.alu_mi(x::AND, 2, x::at(x::RSP, 0x3c), -3841);
+    c.alu_mi(x::ADD, 2, x::at(x::RBP, -8), 300);
+    c.alu_mi(x::CMP, 2, x::at(x::RAX, 0), 5);
+    let mut k: usize = 0;
+    let mut insts: u32 = 0;
+    while k < c.b.len() {
+        let mut s = String::new();
+        let n = xa::disassemble(c.b.as_slice(), k, &mut s);
+        assert(n != 0, "each instruction decodes to a row");
+        let mut b1 = Vector::<u8>::new();
+        let mut fx = xa::Fix::new();
+        let mut err = String::new();
+        assert(xa::assemble(s.as_str(), xa::NOTGT, &mut b1, &mut fx, &mut err) && b1.len() == n as usize, s.as_str());
+        for j in 0..b1.len() {
+            assert(b1[j] == c.b[k + j], s.as_str());
+        }
+        k += n as usize;
+        insts += 1;
+    }
+    assert_eq(insts, 3);
+}
+
 @test
 fn x64_rows_round_trip() {
     let mut text = String::new();

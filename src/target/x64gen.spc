@@ -1260,19 +1260,23 @@ extend Gen {
         for i in 0..ni {
             let t = b.insts[i];
             let mut un = false;
-            let reg_op = is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG) && sse_of_op(
+            let reg_op = is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && sse_of_op(
                 t.op,
                 lane_type(t.ty),
                 &mut un,
-            ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_WCONST) && self.in_reg(t.ty) || t.op == O_VUNZIP && type_bytes(
+            ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_WCONST) && self.in_reg(t.ty) || self.conv_reg(
+                t,
+            ) || self.shift_reg(t) || (t.op == O_VEXTRACT || t.op == O_VINSERT) && self.lane_reg(t) || (t.op == O_VZIPLO || t.op == O_VZIPHI) && type_bytes(
                 t.ty,
                 8,
-            ) >= 16 && self.in_reg(t.ty) || t.op == O_VCMP && self.in_reg(self.vt(t.a)) && (is_float(
-                lane_type(self.vt(t.a)),
-            ) || type_bytes(lane_type(t.ty), 8) < 8 || self.avx) || self.avx && is_vec(t.ty) && type_bytes(t.ty, 8) == 32 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG) && avx_of_op(
+            ) <= 32 && self.in_reg(t.ty) || t.op == O_VUNZIP && type_bytes(t.ty, 8) >= 16 && self.in_reg(t.ty) || t.op == O_VCMP && self.in_reg(
+                self.vt(t.a),
+            ) && (is_float(lane_type(self.vt(t.a))) || type_bytes(lane_type(t.ty), 8) < 8 || self.avx) || self.avx && is_vec(
+                t.ty,
+            ) && type_bytes(t.ty, 8) == 32 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && avx_of_op(
                 t.op,
                 lane_type(t.ty),
-            ) != NONE || self.z512 && is_vec(t.ty) && type_bytes(t.ty, 8) == 64 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG) && evex_of_op(
+            ) != NONE || self.z512 && is_vec(t.ty) && type_bytes(t.ty, 8) == 64 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && evex_of_op(
                 t.op,
                 lane_type(t.ty),
             ) != NONE;
@@ -1693,7 +1697,9 @@ extend Gen {
         // Code that may branch past a lane reads a vector from its home: a vector in a register reaches
         // it first, but for the instructions with register forms (`vop` and `vec_arith` sync their others)
         // and calls (a vector passed in memory goes through `mloc`).
-        let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP);
+        let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI) || t.op == O_VEXTRACT || t.op == O_VINSERT || self.conv_reg(
+            t,
+        );
         if !reg_form && !is_terminator(t.op) {
             for k in 0..self.uses.len() {
                 self.sync(self.uses[k]);
@@ -3329,6 +3335,14 @@ extend Gen {
             self.vunzip(i, t);
             return true;
         }
+        if op == O_VZIPLO || op == O_VZIPHI {
+            self.vzip(i, t);
+            return true;
+        }
+        if op == O_VEXTRACT || op == O_VINSERT {
+            self.vlane(i, t);
+            return true;
+        }
         if op == O_HTOF || op == O_FTOH {
             self.half_conv(i, t);
             return true;
@@ -3386,7 +3400,7 @@ extend Gen {
             self.c.vfma231(t.ty == T_F64, rd - V0, ra - V0, rb - V0);
             return true;
         }
-        if op >= O_FADD && op <= O_FNEG {
+        if op >= O_FADD && op <= O_FNEG || op == O_FSQRT {
             if is_vec(t.ty) {
                 return self.vec_arith(i, t);
             }
@@ -3395,6 +3409,11 @@ extend Gen {
             if op == O_FNEG {
                 let rd = self.def_from(i, t.a, ra);
                 self.fsign(d, false, rd);
+                return true;
+            }
+            if op == O_FSQRT {
+                let rd = self.def_from(i, t.a, ra);
+                self.c.sse_rr(fpfx(d), 0x0F51, rd - V0, rd - V0);
                 return true;
             }
             let rb = self.reg(t.b);
@@ -4292,6 +4311,10 @@ extend Gen {
         let from = self.vt(t.a);
         let to = t.ty;
         if is_vec(from) || is_vec(to) {
+            if self.conv_reg(t) {
+                self.vconv_reg(i, t);
+                return true;
+            }
             if op == O_BITCAST && Gen::in_mem(from) && Gen::in_mem(to) {
                 let (base, off) = self.mloc(t.a);
                 let d = self.mdef(i);
@@ -7282,9 +7305,12 @@ const fn sse_of_op(op: u8, lt: u8, un: &mut bool) u32 {
     } else {
         0;
     };
-    *un = op == O_NOT || op == O_NEG || op == O_FNEG;
+    *un = op == O_NOT || op == O_NEG || op == O_FNEG || op == O_FSQRT;
     if op == O_FADD {
         return pd | 0x0F58;
+    }
+    if op == O_FSQRT {
+        return pd | 0x0F51;
     }
     if op == O_FSUB {
         return pd | 0x0F5C;
@@ -7322,6 +7348,22 @@ const fn sse_of_op(op: u8, lt: u8, un: &mut bool) u32 {
     return NONE;
 }
 
+// The LIR condition (`C_*`) of lane comparison `c` (`SIMD_CMP_*`) of lanes signed `sg` or of floats `fl`:
+// the float ones ordered but `ne`.
+const fn simd_cond(c: u8, sg: bool, fl: bool) u16 {
+    let k = (c - core::SIMD_CMP_EQ) as usize;
+    let f: [u16; 6] = [C_OEQ, C_UNE, C_OLT, C_OLE, C_OGT, C_OGE];
+    let s: [u16; 6] = [C_EQ, C_NE, C_SLT, C_SLE, C_SGT, C_SGE];
+    let u: [u16; 6] = [C_EQ, C_NE, C_ULT, C_ULE, C_UGT, C_UGE];
+    return if fl {
+        unsafe f[k];
+    } else if sg {
+        unsafe s[k];
+    } else {
+        unsafe u[k];
+    };
+}
+
 // Whether call layout `lay` passes an argument or the result in a ymm or zmm register: a 32- or 64-byte
 // vector part.
 fn ymm_parts(lay: &ab::CallLayout) bool {
@@ -7353,6 +7395,8 @@ const fn avx_of_op(op: u8, lt: u8) u32 {
             pd | 0x15E;
         } else if op == O_FNEG {
             pd | 0x157;
+        } else if op == O_FSQRT {
+            pd | 0x151;
         } else {
             NONE;
         };
@@ -7397,6 +7441,8 @@ const fn evex_of_op(op: u8, lt: u8) u32 {
             pd | 0x15E;
         } else if op == O_FNEG {
             pd | 0x157;
+        } else if op == O_FSQRT {
+            pd | 0x151;
         } else {
             NONE;
         };
@@ -7623,7 +7669,6 @@ extend Gen {
         }
     }
 
-    // `sse` of one register's width on `xv` and `yv` into a register that holds result `i`.
     // AVX2 operation `w` (`avx_of_op`) of 32-byte vectors `xv` and `yv` (VNONE for one operand: `neg`
     // subtracts from 0, `not` xors all ones, `fneg` the sign bits) into `i`: the three-operand VEX.256
     // form.
@@ -7641,6 +7686,8 @@ extend Gen {
             } else if op == O_NOT {
                 self.c.vex_rr(0x66, 1, 0x76, false, true, s, s, s);
                 self.c.vex_rr(pfx, mm, opc, false, true, rd, rx, s);
+            } else if op == O_FSQRT {
+                self.c.vex_rr(pfx, mm, opc, false, true, rd, 0, rx);
             } else {
                 self.ymm_splat64(
                     s,
@@ -7686,6 +7733,8 @@ extend Gen {
                 // vpternlogd 0x33: NOT of the second operand.
                 self.c.evex_rr(0x66, 3, 0x25, false, rd, rx, rx);
                 self.c.byte(0x33);
+            } else if op == O_FSQRT {
+                self.c.evex_rr(pfx, mm, opc, ew, rd, 0, rx);
             } else {
                 self.zmm_splat64(
                     s,
@@ -7821,6 +7870,7 @@ extend Gen {
         self.c.byte(0xD8);
     }
 
+    // `sse` of one register's width on `xv` and `yv` into a register that holds result `i`.
     fn sse_reg(self: &mut Self, w: u32, op: u8, lt: u8, i: u32, xv: Value, yv: Value) {
         let pfx = w >> 16;
         let opc = w & 0xFFFF;
@@ -8015,52 +8065,7 @@ extend Gen {
             return;
         }
         if Gen::in_vreg(vt) && (fl || eb < 8) {
-            let swap = if fl {
-                fswap;
-            } else {
-                c == C_SLT || c == C_SGE || c == C_ULT || c == C_UGE;
-            };
-            let (xv, yv) = if swap {
-                (t.b, t.a);
-            } else {
-                (t.a, t.b);
-            };
-            let rx = self.vec_use(xv, self.vs0);
-            let ry = self.vec_use(yv, self.vs1);
-            let rd = self.vec_def(i);
-            if fl {
-                self.c.vmov(rd - V0, rx - V0);
-                self.c.sse_rr((lt == T_F64) as u32 * 0x66, 0x0FC2, rd - V0, ry - V0);
-                self.c.byte(imm);
-                return;
-            }
-            let eq = c == C_EQ || c == C_NE;
-            let opc = 0x0F64 + eq as u32 * 0x10 + eb.trailing_zeros() as u32;
-            if c >= C_ULT {
-                // The sign bits flipped: an unsigned order is the signed one.
-                let s = self.tmp(true);
-                let sb = if eb == 1 {
-                    0x8080808080808080u64;
-                } else if eb == 2 {
-                    0x8000800080008000u64;
-                } else {
-                    0x8000000080000000u64;
-                };
-                self.c.mov_ri(S1, sb);
-                self.c.movd_to_x(8, s - V0, S1);
-                self.c.sse_rr(0x66, 0x0F6C, s - V0, s - V0);
-                self.c.vmov(rd - V0, s - V0);
-                self.c.sse_rr(0x66, 0x0FEF, rd - V0, rx - V0);
-                self.c.sse_rr(0x66, 0x0FEF, s - V0, ry - V0);
-                self.c.sse_rr(0x66, opc, rd - V0, s - V0);
-            } else {
-                self.c.vmov(rd - V0, rx - V0);
-                self.c.sse_rr(0x66, opc, rd - V0, ry - V0);
-            }
-            if c == C_NE || c == C_SGE || c == C_SLE || c == C_UGE || c == C_ULE {
-                self.c.sse_rr(0x66, 0x0F76, self.vs1 - V0, self.vs1 - V0);
-                self.c.sse_rr(0x66, 0x0FEF, rd - V0, self.vs1 - V0);
-            }
+            let _ = self.sse_mask(i, c, t.a, t.b);
             return;
         }
         self.sync(t.a);
@@ -8099,10 +8104,378 @@ extend Gen {
         }
     }
 
+    // Lane comparison `c` (a `C_*` condition) of vectors `a` and `b` in xmm registers (float lanes, or
+    // integer ones below 8 bytes) into the lane masks of vector `i`, else (`i` NONE) of a temporary register:
+    // `cmpps`/`cmppd` (`gt` and `ge` swapped), `pcmpeq`/`pcmpgt` (an unsigned order with the sign bits
+    // flipped; `ne`, `ge` and `le` inverted). The register.
+    fn sse_mask(self: &mut Self, i: u32, c: u16, a: Value, b: Value) u8 {
+        let vt = self.vt(a);
+        let lt = lane_type(vt);
+        let eb = type_bytes(lt, 8);
+        let fl = is_float(lt);
+        let fswap = c == C_OGT || c == C_OGE;
+        let imm: u32 = if c == C_OEQ {
+            0;
+        } else if c == C_OLT || c == C_OGT {
+            1;
+        } else if c == C_OLE || c == C_OGE {
+            2;
+        } else {
+            4;
+        };
+        let swap = if fl {
+            fswap;
+        } else {
+            c == C_SLT || c == C_SGE || c == C_ULT || c == C_UGE;
+        };
+        let (xv, yv) = if swap {
+            (b, a);
+        } else {
+            (a, b);
+        };
+        let rx = self.vec_use(xv, self.vs0);
+        let ry = self.vec_use(yv, self.vs1);
+        let rd = if i == NONE {
+            self.tmp(true);
+        } else {
+            self.vec_def(i);
+        };
+        if fl {
+            self.c.vmov(rd - V0, rx - V0);
+            self.c.sse_rr((lt == T_F64) as u32 * 0x66, 0x0FC2, rd - V0, ry - V0);
+            self.c.byte(imm);
+            return rd;
+        }
+        let eq = c == C_EQ || c == C_NE;
+        let opc = 0x0F64 + eq as u32 * 0x10 + eb.trailing_zeros() as u32;
+        if c >= C_ULT {
+            // The sign bits flipped: an unsigned order is the signed one.
+            let s = self.tmp(true);
+            let sb = if eb == 1 {
+                0x8080808080808080u64;
+            } else if eb == 2 {
+                0x8000800080008000u64;
+            } else {
+                0x8000000080000000u64;
+            };
+            self.c.mov_ri(S1, sb);
+            self.c.movd_to_x(8, s - V0, S1);
+            self.c.sse_rr(0x66, 0x0F6C, s - V0, s - V0);
+            self.c.vmov(rd - V0, s - V0);
+            self.c.sse_rr(0x66, 0x0FEF, rd - V0, rx - V0);
+            self.c.sse_rr(0x66, 0x0FEF, s - V0, ry - V0);
+            self.c.sse_rr(0x66, opc, rd - V0, s - V0);
+        } else {
+            self.c.vmov(rd - V0, rx - V0);
+            self.c.sse_rr(0x66, opc, rd - V0, ry - V0);
+        }
+        if c == C_NE || c == C_SGE || c == C_SLE || c == C_UGE || c == C_ULE {
+            self.c.sse_rr(0x66, 0x0F76, self.vs1 - V0, self.vs1 - V0);
+            self.c.sse_rr(0x66, 0x0FEF, rd - V0, self.vs1 - V0);
+        }
+        return rd;
+    }
+
+    // Lane test `c` (a comparison, or a float class test: NaN, infinite, finite, sign) of the vectors `ops`
+    // in xmm registers (`nb` bytes of lanes of `lt`, signed `sg`) into bitmask `i` (bit k for lane k): the
+    // lane masks (`sse_mask`; `nan` as unordered with itself, the magnitude against infinity), then
+    // `movmskps`/`movmskpd`/`pmovmskb` (2-byte lanes packed to bytes first; the sign test reads the lanes'
+    // sign bits alone), the bits past the lanes cleared.
+    fn mask_reg(self: &mut Self, i: u32, c: u8, sg: bool, lt: u8, nb: u32, ops: &[Value; 4]) {
+        let eb = type_bytes(lt, 8);
+        let fl = is_float(lt);
+        let pd = (lt == T_F64) as u32 * 0x66;
+        let m = if c >= core::SIMD_CMP_EQ && c <= core::SIMD_CMP_GE {
+            self.sse_mask(NONE, simd_cond(c, sg, fl), ops[0], ops[1]);
+        } else if c == core::SIMD_IS_SIGN_NEG {
+            self.vec_use(ops[0], self.vs0);
+        } else {
+            let rx = self.vec_use(ops[0], self.vs0);
+            let m = self.tmp(true);
+            self.c.vmov(m - V0, rx - V0);
+            if c == core::SIMD_IS_NAN {
+                // cmpunordps x, x.
+                self.c.sse_rr(pd, 0x0FC2, m - V0, rx - V0);
+                self.c.byte(3);
+            } else {
+                // |x| (andps with every bit but the sign), then against infinity: `cmpltps` for finite,
+                // `cmpeqps` for infinite.
+                let s = self.vs1;
+                let (ab, ib) = if pd != 0 {
+                    (0x7FFFFFFFFFFFFFFFu64, 0x7FF0000000000000u64);
+                } else {
+                    (0x7FFFFFFF7FFFFFFFu64, 0x7F8000007F800000u64);
+                };
+                self.c.mov_ri(S1, ab);
+                self.c.movd_to_x(8, s - V0, S1);
+                self.c.sse_rr(0x66, 0x0F6C, s - V0, s - V0);
+                self.c.sse_rr(0, 0x0F54, m - V0, s - V0);
+                self.c.mov_ri(S1, ib);
+                self.c.movd_to_x(8, s - V0, S1);
+                self.c.sse_rr(0x66, 0x0F6C, s - V0, s - V0);
+                self.c.sse_rr(pd, 0x0FC2, m - V0, s - V0);
+                self.c.byte(
+                    if c == core::SIMD_IS_FINITE {
+                        1u32;
+                    } else {
+                        0u32;
+                    },
+                );
+            }
+            m;
+        };
+        let rd = self.def(i);
+        if eb == 2 {
+            // packsswb: each lane's mask to a byte.
+            let s = self.vs1;
+            self.c.vmov(s - V0, m - V0);
+            self.c.sse_rr(0x66, 0x0F63, s - V0, s - V0);
+            self.c.rr(0x66, 0x0FD7, false, rd, s - V0, false);
+        } else if eb == 1 {
+            self.c.rr(0x66, 0x0FD7, false, rd, m - V0, false);
+        } else {
+            self.c.rr(
+                if eb == 8 {
+                    0x66u32;
+                } else {
+                    0u32;
+                },
+                0x0F50,
+                false,
+                rd,
+                m - V0,
+                false,
+            );
+        }
+        let n = nb / eb;
+        let all = if eb == 2 {
+            8u32;
+        } else {
+            16 / eb;
+        };
+        if n < all {
+            self.c.alu_ri(x::AND, 4, rd, ((1u32 << n) - 1) as i32);
+        }
+    }
+
+    // Lane choice `ops[1]` where bitmask `ops[0]` has the lane's bit, else `ops[2]` (vectors in xmm
+    // registers, lanes of `lt`): the bitmask in every lane (bytes: its low byte in the low half, its high
+    // byte in the high one), ANDed with each lane's bit and compared equal to it (`pcmpeq`; 8-byte lanes
+    // compare their low dwords, copied to the high ones), then `y ^ ((x ^ y) & mask)`.
+    fn choose_reg(self: &mut Self, i: u32, ops: &[Value; 4], lt: u8) {
+        let eb = type_bytes(lt, 8);
+        let rx = self.vec_use(ops[1], self.vs0);
+        let ry = self.vec_use(ops[2], self.vs1);
+        let rm = self.reg(ops[0]);
+        let m = self.tmp(true);
+        let w = self.tmp(true);
+        let mv = m - V0;
+        let wv = w - V0;
+        self.c.movd_to_x(4, mv, rm);
+        if eb == 1 {
+            // punpcklbw, punpcklwd: each byte four times; pshufd 0x50: the low one in the low half.
+            self.c.sse_rr(0x66, 0x0F60, mv, mv);
+            self.c.sse_rr(0x66, 0x0F61, mv, mv);
+            self.c.sse_rr(0x66, 0x0F70, mv, mv);
+            self.c.byte(0x50);
+        } else if eb == 2 {
+            // pshuflw 0, then pshufd 0.
+            self.c.sse_rr(0xF2, 0x0F70, mv, mv);
+            self.c.byte(0);
+            self.c.sse_rr(0x66, 0x0F70, mv, mv);
+            self.c.byte(0);
+        } else {
+            self.c.sse_rr(0x66, 0x0F70, mv, mv);
+            self.c.byte(0);
+        }
+        let (w0, w1) = if eb == 8 {
+            (1u64, 2u64);
+        } else if eb == 4 {
+            (0x0000000200000001u64, 0x0000000800000004u64);
+        } else if eb == 2 {
+            (0x0008000400020001u64, 0x0080004000200010u64);
+        } else {
+            (0x8040201008040201u64, 0x8040201008040201u64);
+        };
+        // Each lane's bit: w0 low, w1 high (punpcklqdq of the two).
+        self.c.mov_ri(S1, w0);
+        self.c.movd_to_x(8, wv, S1);
+        let s = self.tmp(true);
+        self.c.mov_ri(S1, w1);
+        self.c.movd_to_x(8, s - V0, S1);
+        self.c.sse_rr(0x66, 0x0F6C, wv, s - V0);
+        // pand, then pcmpeqb/w/d (8-byte lanes: pcmpeqd, then each low dword's result to its high one).
+        self.c.sse_rr(0x66, 0x0FDB, mv, wv);
+        let k = if eb == 8 {
+            2u32;
+        } else {
+            eb.trailing_zeros() as u32;
+        };
+        self.c.sse_rr(0x66, 0x0F74 + k, mv, wv);
+        if eb == 8 {
+            self.c.sse_rr(0x66, 0x0F70, mv, mv);
+            self.c.byte(0xA0);
+        }
+        let rd = self.vec_def(i);
+        // rd = y ^ ((x ^ y) & mask).
+        self.c.vmov(rd - V0, rx - V0);
+        self.c.sse_rr(0x66, 0x0FEF, rd - V0, ry - V0);
+        self.c.sse_rr(0x66, 0x0FDB, rd - V0, mv);
+        self.c.sse_rr(0x66, 0x0FEF, rd - V0, ry - V0);
+    }
+
     // The even lanes of `t.a ++ t.b` into vector `i` (SSE2, 16 bytes): `shufps` 0x88 of 4-byte lanes,
     // `punpcklqdq` of 8-byte ones; 2- and 1-byte lanes shifted to the low half of their pair, sign-extended,
     // then packed (`packssdw`, `packsswb`), which never saturates. An 8-byte vector or one outside an xmm
     // register moves each lane.
+    // Lane interleave `t` (`O_VZIPLO`, `O_VZIPHI`) into vector `i`: the unpack of the lanes' width (`punpckl*`,
+    // `punpckh*`) on 16 bytes; on 32 (AVX2) the unpack within each 16-byte half after `vpermq` 0xD8 put the
+    // operands' quarters 0, 2, 1, 3; a vector outside a register moves each lane.
+    fn vzip(self: &mut Self, i: u32, t: Inst) {
+        let lt = lane_type(t.ty);
+        let eb = type_bytes(lt, 8);
+        let nb = type_bytes(t.ty, 8);
+        let hi = t.op == O_VZIPHI;
+        // punpckl{bw,wd,dq,qdq}: 60, 61, 62, 6C; the high forms 68, 69, 6A, 6D.
+        let mut opc: u32 = 0x6C;
+        if eb < 8 {
+            opc = 0x60 + eb.trailing_zeros() as u32;
+        }
+        if hi {
+            opc += if eb == 8 {
+                1u32;
+            } else {
+                8u32;
+            };
+        }
+        if nb == 32 && self.in_reg(t.ty) {
+            let rx = self.vec_use(t.a, self.vs0) - V0;
+            let ry = self.vec_use(t.b, self.vs1) - V0;
+            let rd = self.vec_def(i) - V0;
+            let s = self.tmp(true) - V0;
+            // `b` first: the result's register may be its.
+            self.c.vex_rr(0x66, 3, 0x00, true, true, s, 0, ry);
+            self.c.byte(0xD8);
+            self.c.vex_rr(0x66, 3, 0x00, true, true, rd, 0, rx);
+            self.c.byte(0xD8);
+            self.c.vex_rr(0x66, 1, opc, false, true, rd, rd, s);
+            return;
+        }
+        if nb == 16 && Gen::in_vreg(t.ty) {
+            let rx = self.vec_use(t.a, self.vs0);
+            let ry = self.vec_use(t.b, self.vs1);
+            let rd = self.vec_def(i);
+            self.c.vmov(rd - V0, rx - V0);
+            self.c.sse_rr(0x66, 0x0F00 | opc, rd - V0, ry - V0);
+            return;
+        }
+        self.sync(t.a);
+        self.sync(t.b);
+        let d = self.mdef(i);
+        let n = lanes(t.ty);
+        let h = if hi {
+            n / 2;
+        } else {
+            0;
+        };
+        let x = self.tmp(false);
+        for k in 0..n / 2 {
+            self.ld_lane(x, t.a, h + k, lt, false, true);
+            self.st_lane(x, d, 2 * k, lt, true);
+            self.ld_lane(x, t.b, h + k, lt, false, true);
+            self.st_lane(x, d, 2 * k + 1, lt, true);
+        }
+    }
+
+    // Whether lane access `t` (`O_VEXTRACT`, `O_VINSERT`) has an SSE2 register form (`vlane`): a lane out
+    // of an xmm register but a byte; an f32 into lane 0, an f64 into either lane, a 16-bit lane.
+    fn lane_reg(self: &Self, t: Inst) bool {
+        if t.op == O_VEXTRACT {
+            return Gen::in_vreg(self.vt(t.a)) && type_bytes(t.ty, 8) >= 2;
+        }
+        let lt = lane_type(t.ty);
+        return Gen::in_vreg(t.ty) && (lt == T_F32 && t.aux == 0 || lt == T_F64 || type_bytes(lt, 8) == 2);
+    }
+
+    // Lane access `t` (lane `t.aux`) into `i`. Out of an xmm register (`lane_reg`): the lane moved to lane 0
+    // by `pshufd`, then a float as it is, an integer by `movd`, `movq` or `pextrw`. Into one: the vector's
+    // copy, then `movss` or `movsd` (lane 0), `unpcklpd` (lane 1 of two), `pinsrw`. Else through memory:
+    // the lane's load, or the vector's bytes copied and the lane stored.
+    fn vlane(self: &mut Self, i: u32, t: Inst) {
+        let k = t.aux as u32;
+        let reg = self.lane_reg(t);
+        if t.op == O_VEXTRACT {
+            let lt = t.ty;
+            let eb = type_bytes(lt, 8);
+            if !reg {
+                let rd = self.def(i);
+                self.ld_lane(rd, t.a, k, lt, false, false);
+                return;
+            }
+            let rv = self.vec_use(t.a, self.vs0) - V0;
+            if eb == 2 {
+                let rd = self.def(i);
+                self.c.sse_rr(0x66, 0x0FC5, rd, rv);
+                self.c.byte(k);
+                return;
+            }
+            // pshufd: lane k (of 4 bytes, or the two of an 8-byte lane) to lane 0.
+            let imm = if eb == 8 {
+                2 * k | 2 * k + 1 << 2;
+            } else {
+                k;
+            };
+            if is_float(lt) {
+                let rd = self.def(i) - V0;
+                if k == 0 {
+                    self.c.vmov(rd, rv);
+                } else {
+                    self.c.sse_rr(0x66, 0x0F70, rd, rv);
+                    self.c.byte(imm);
+                }
+                return;
+            }
+            let mut s = rv;
+            if k != 0 {
+                s = self.vs1 - V0;
+                self.c.sse_rr(0x66, 0x0F70, s, rv);
+                self.c.byte(imm);
+            }
+            let rd = self.def(i);
+            self.c.movd_from_x(eb, rd, s);
+            return;
+        }
+        let lt = lane_type(t.ty);
+        let eb = type_bytes(lt, 8);
+        if !reg {
+            let (sb, so) = self.mloc(t.a);
+            let rs = self.reg(t.b);
+            let d = self.mdef(i);
+            self.copy_mem(x::RSP, d, sb, so, type_bytes(t.ty, 8));
+            self.st_lane(rs, d, k, lt, false);
+            return;
+        }
+        let mut rs = self.reg(t.b);
+        let ra = self.vec_use(t.a, self.vs0) - V0;
+        let rd = self.vec_def(i) - V0;
+        if is_float(lt) && rs - V0 == rd {
+            // The scalar shares the result's register: kept in the second scratch across the copy.
+            self.c.vmov(self.vs1 - V0, rd);
+            rs = self.vs1;
+        }
+        self.c.vmov(rd, ra);
+        if eb == 2 {
+            self.c.sse_rr(0x66, 0x0FC4, rd, rs);
+            self.c.byte(k);
+        } else if lt == T_F32 {
+            self.c.sse_rr(0xF3, 0x0F10, rd, rs - V0);
+        } else if k == 0 {
+            self.c.sse_rr(0xF2, 0x0F10, rd, rs - V0);
+        } else {
+            self.c.sse_rr(0x66, 0x0F14, rd, rs - V0);
+        }
+    }
+
     fn vunzip(self: &mut Self, i: u32, t: Inst) {
         let lt = lane_type(t.ty);
         let eb = type_bytes(lt, 8);
@@ -8480,7 +8853,7 @@ extend Gen {
         self.c.alu_rr(x::OR, 4, fr, S1);
     }
 
-    // Vector arithmetic: O_ADD .. O_NOT and O_FADD .. O_FNEG on vectors.
+    // Vector arithmetic: O_ADD .. O_NOT, O_FADD .. O_FNEG and O_FSQRT on vectors.
     fn vec_arith(self: &mut Self, i: u32, t: Inst) bool {
         let op = t.op;
         let lt = lane_type(t.ty);
@@ -8498,6 +8871,21 @@ extend Gen {
         if div {
             self.vacate(x::RAX);
             self.vacate(x::RDX);
+        }
+        if self.shift_reg(t) {
+            // AVX2: `vpsllv`, `vpsrlv`, `vpsrav` (VEX.66.0F38 47, 45, 46) shift each lane by its own amount.
+            let rx = self.vec_use(t.a, self.vs0) - V0;
+            let ry = self.vec_use(t.b, self.vs1) - V0;
+            let rd = self.vec_def(i) - V0;
+            let opc: u32 = if op == O_SHL {
+                0x47;
+            } else if op == O_LSHR {
+                0x45;
+            } else {
+                0x46;
+            };
+            self.c.vex_rr(0x66, 2, opc, type_bytes(lt, 8) == 8, nb == 32, rd, rx, ry);
+            return true;
         }
         if sh {
             self.vacate(x::RCX);
@@ -8531,6 +8919,8 @@ extend Gen {
                 self.ld_lane(fa, t.a, k, lt, false, false);
                 if op == O_FNEG {
                     self.fsign(dd, false, fa);
+                } else if op == O_FSQRT {
+                    self.c.sse_rr(fpfx(dd), 0x0F51, fa - V0, fa - V0);
                 } else {
                     self.ld_lane(fb, t.b, k, lt, false, false);
                     self.c.sse_rr(fpfx(dd), fop(op), fa - V0, fb - V0);
@@ -8650,6 +9040,188 @@ extend Gen {
                 self.st_lane(xr, d, k, tl, false);
             } else {
                 self.st_lane(xr, d, k, tl, false);
+            }
+        }
+    }
+
+    // Whether vector shift `t` has an AVX2 form in registers (`vec_arith`): lanes of 4 or 8 bytes, but an
+    // arithmetic shift of 8-byte lanes.
+    fn shift_reg(self: &Self, t: Inst) bool {
+        let eb = type_bytes(lane_type(t.ty), 8);
+        return self.avx && is_vec(t.ty) && (t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR && eb == 4) && (eb == 4 || eb == 8) && type_bytes(
+            t.ty,
+            8,
+        ) <= 32 && self.in_reg(t.ty);
+    }
+
+    // Whether vector conversion `t` has a form in vector registers (`vconv_reg`): an integer to twice or
+    // half its width, i32 to f32 and back, f32 to f64 and back; SSE2 for vectors of 8 or 16 bytes, AVX2
+    // when one is of 32.
+    fn conv_reg(self: &Self, t: Inst) bool {
+        let op = t.op;
+        if !is_vec(t.ty) || op < O_SEXT || op > O_UITOFP {
+            return false;
+        }
+        let ft = self.vt(t.a);
+        let wide = self.avx && type_bytes(t.ty, 8) <= 32 && type_bytes(ft, 8) <= 32 && type_bytes(t.ty, 8) + type_bytes(
+            ft,
+            8,
+        ) >= 48;
+        if !(Gen::in_vreg(t.ty) && Gen::in_vreg(ft)) && !wide {
+            return false;
+        }
+        let fl = lane_type(self.vt(t.a));
+        let tl = lane_type(t.ty);
+        let fb = type_bytes(fl, 8);
+        let tb = type_bytes(tl, 8);
+        return (op == O_SEXT || op == O_ZEXT) && is_int(fl) && tb == 2 * fb || op == O_TRUNC && is_int(fl) && fb == 2 * tb || op == O_SITOFP && fl == T_I32 && tl == T_F32 || op == O_FPTOSI && fl == T_F32 && tl == T_I32 || op == O_FPEXT && fl == T_F32 && tl == T_F64 || op == O_FPTRUNC && fl == T_F64 && tl == T_F32;
+    }
+
+    // Vector conversion `t` (`conv_reg`) in xmm registers. An integer widens from its low half through
+    // `punpckl` with zeros or its sign (`pcmpgt` against 0), and narrows through `pshufd` (64-bit lanes) or
+    // a shift of each lane's low half to its top and back with its sign, then a signed pack, which is then
+    // exact; i32 and f32 through `cvtdq2ps` and `cvttps2dq`, f32 and f64 through `cvtps2pd` and `cvtpd2ps`.
+    // A float to an integer saturates unless unchecked: a lane at or above 2^31 (`cmpleps`) flips the
+    // indefinite 0x80000000 to 0x7FFFFFFF, a NaN lane (`cmpordps`) is 0.
+    fn vconv_reg(self: &mut Self, i: u32, t: Inst) {
+        let op = t.op;
+        let fb = type_bytes(lane_type(self.vt(t.a)), 8);
+        let tb = type_bytes(lane_type(t.ty), 8);
+        let rx = self.vec_use(t.a, self.vs0) - V0;
+        let rd = self.vec_def(i) - V0;
+        let lg = fb.trailing_zeros() as u32;
+        if type_bytes(t.ty, 8) == 32 || type_bytes(self.vt(t.a), 8) == 32 {
+            self.vconv_ymm(t, fb, tb, rd, rx);
+            return;
+        }
+        if op == O_SEXT || op == O_ZEXT {
+            let s = self.tmp(true) - V0;
+            self.c.sse_rr(0x66, 0x0FEF, s, s);
+            if op == O_SEXT {
+                self.c.sse_rr(0x66, 0x0F64 + lg, s, rx);
+            }
+            self.c.vmov(rd, rx);
+            self.c.sse_rr(0x66, 0x0F60 + lg, rd, s);
+        } else if op == O_TRUNC && fb == 8 {
+            self.c.sse_rr(0x66, 0x0F70, rd, rx);
+            self.c.byte(0x08);
+        } else if op == O_TRUNC {
+            let sh: u32 = if fb == 2 {
+                0x0F71;
+            } else {
+                0x0F72;
+            };
+            self.c.vmov(rd, rx);
+            self.c.sse_rr(0x66, sh, 6, rd);
+            self.c.byte(tb * 8);
+            self.c.sse_rr(0x66, sh, 4, rd);
+            self.c.byte(tb * 8);
+            self.c.sse_rr(
+                0x66,
+                if fb == 2 {
+                    0x0F63u32;
+                } else {
+                    0x0F6Bu32;
+                },
+                rd,
+                rd,
+            );
+        } else if op == O_SITOFP {
+            self.c.sse_rr(0, 0x0F5B, rd, rx);
+        } else if op == O_FPEXT {
+            self.c.sse_rr(0, 0x0F5A, rd, rx);
+        } else if op == O_FPTRUNC {
+            self.c.sse_rr(0x66, 0x0F5A, rd, rx);
+        } else {
+            self.c.sse_rr(0xF3, 0x0F5B, rd, rx);
+            if t.aux != CV_UNCHECKED {
+                let s = self.tmp(true) - V0;
+                self.c.mov_ri(S1, 0x4F000000);
+                self.c.movd_to_x(4, s, S1);
+                self.c.sse_rr(0x66, 0x0F70, s, s);
+                self.c.byte(0);
+                self.c.sse_rr(0, 0x0FC2, s, rx);
+                self.c.byte(2);
+                self.c.sse_rr(0x66, 0x0FEF, rd, s);
+                self.c.vmov(s, rx);
+                self.c.sse_rr(0, 0x0FC2, s, s);
+                self.c.byte(7);
+                self.c.sse_rr(0x66, 0x0FDB, rd, s);
+            }
+        }
+    }
+
+    // `vconv_reg` with AVX2, a vector of 32 bytes in ymm register `rx` or `rd`: an integer widens through
+    // `vpmovsx` or `vpmovzx` (VEX.66.0F38 20, 23 or 25 by its bytes, + 0x10 for zeros), narrows as with
+    // SSE2 in each 16-byte half, then `vpermq` 0x08 joins the halves' low quarters; the float forms as with
+    // SSE2 on ymm registers (`vpbroadcastd` splats 2^31).
+    fn vconv_ymm(self: &mut Self, t: Inst, fb: u32, tb: u32, rd: u8, rx: u8) {
+        let op = t.op;
+        if op == O_SEXT || op == O_ZEXT {
+            let z: u32 = if op == O_ZEXT {
+                0x10;
+            } else {
+                0;
+            };
+            // bw, wd, dq: 20, 23, 25.
+            let w: u32 = if fb == 1 {
+                0x20;
+            } else if fb == 2 {
+                0x23;
+            } else {
+                0x25;
+            };
+            self.c.vex_rr(0x66, 2, w + z, false, true, rd, 0, rx);
+        } else if op == O_TRUNC {
+            if fb == 8 {
+                self.c.vex_rr(0x66, 1, 0x70, false, true, rd, 0, rx);
+                self.c.byte(0x08);
+            } else {
+                let sh: u32 = if fb == 2 {
+                    0x71;
+                } else {
+                    0x72;
+                };
+                self.c.vex_rr(0x66, 1, sh, false, true, 6, rd, rx);
+                self.c.byte(tb * 8);
+                self.c.vex_rr(0x66, 1, sh, false, true, 4, rd, rd);
+                self.c.byte(tb * 8);
+                self.c.vex_rr(
+                    0x66,
+                    1,
+                    if fb == 2 {
+                        0x63u32;
+                    } else {
+                        0x6Bu32;
+                    },
+                    false,
+                    true,
+                    rd,
+                    rd,
+                    rd,
+                );
+            }
+            self.c.vex_rr(0x66, 3, 0x00, true, true, rd, 0, rd);
+            self.c.byte(0x08);
+        } else if op == O_SITOFP {
+            self.c.vex_rr(0, 1, 0x5B, false, true, rd, 0, rx);
+        } else if op == O_FPEXT {
+            self.c.vex_rr(0, 1, 0x5A, false, true, rd, 0, rx);
+        } else if op == O_FPTRUNC {
+            self.c.vex_rr(0x66, 1, 0x5A, false, true, rd, 0, rx);
+        } else {
+            self.c.vex_rr(0xF3, 1, 0x5B, false, true, rd, 0, rx);
+            if t.aux != CV_UNCHECKED {
+                let s = self.tmp(true) - V0;
+                self.c.mov_ri(S1, 0x4F000000);
+                self.c.movd_to_x(4, s, S1);
+                self.c.vex_rr(0x66, 2, 0x58, false, true, s, 0, s);
+                self.c.vex_rr(0, 1, 0xC2, false, true, s, s, rx);
+                self.c.byte(2);
+                self.c.vex_rr(0, 1, 0x57, false, true, rd, rd, s);
+                self.c.vex_rr(0, 1, 0xC2, false, true, s, rx, rx);
+                self.c.byte(7);
+                self.c.vex_rr(0, 1, 0x54, false, true, rd, rd, s);
             }
         }
     }
@@ -8790,6 +9362,16 @@ extend Gen {
         let n = lanes(vt);
         let nb = n * eb;
         let fl = is_float(lt);
+        // A mask (`Mask<N>`, one bit per lane) of vectors in xmm registers, and a choice by one: lane masks.
+        let lane_test = c >= core::SIMD_CMP_EQ && c <= core::SIMD_CMP_GE && (fl || eb < 8) || fl && (c == core::SIMD_IS_NAN || c == core::SIMD_IS_INF || c == core::SIMD_IS_FINITE || c == core::SIMD_IS_SIGN_NEG);
+        if n >= 2 && Gen::in_vreg(vt) && (rule == core::SR_MASK && lane_test || rule == core::SR_CHOOSE) {
+            if rule == core::SR_CHOOSE {
+                self.choose_reg(i, ops, lt);
+            } else {
+                self.mask_reg(i, c, sg, lt, nb, ops);
+            }
+            return;
+        }
         if rule == core::SR_BITCAST || rule == core::SR_HALF || rule == core::SR_CONCAT {
             let d = self.mdef(i);
             let rb = type_bytes(t.ty, 8);

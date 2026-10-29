@@ -9,7 +9,8 @@
 // where the field is live (Cytron et al.'s placement, pruned by liveness, then renaming in one walk of
 // the dominator tree); a copy into the slot becomes loads of the source's fields, a copy out of it
 // stores of its fields, a copy between two promoted slots nothing. A field read where no store reaches
-// reads the zero of its type (the slot's bytes are unspecified there).
+// reads the zero of its type (the slot's bytes are unspecified there). A load or store of a vector field's
+// lane (of its lane type, at a lane's offset) reads it as `vextract` or sets it as `vinsert`.
 //
 // Before that, a copy between two slots of its size whose source no instruction reads after it and whose
 // destination none uses before it (the copy in no cycle, the source's address passed nowhere it may stay
@@ -90,9 +91,10 @@ pub(package) struct Promoter {
     pcand: Vector<bool>, // per slot, whether it promotes as the body stands, before any merge
     reach: Vector<u32>,
     xwords: Vector<u64>, // the words of the zeros of wide types
-    // Per instruction: the field a promoted load reads or a promoted store writes (NONE: none), and what
-    // replaced a promoted load.
+    // Per instruction: the field a promoted load reads or a promoted store writes (NONE: none), the lane
+    // of a vector field it accesses (NONE: the whole field), and what replaced a promoted load.
     fid: Vector<u32>,
+    lane: Vector<u32>,
     repl: Vector<u32>,
     drop: Vector<bool>,
     // The dominance frontiers: block `k`'s are `df[df_at[k] .. df_at[k + 1]]`.
@@ -156,6 +158,7 @@ extend Promoter {
             reach: Vector::<u32>::new(),
             xwords: Vector::<u64>::new(),
             fid: Vector::<u32>::new(),
+            lane: Vector::<u32>::new(),
             repl: Vector::<u32>::new(),
             drop: Vector::<bool>::new(),
             df_at: Vector::<u32>::new(),
@@ -441,10 +444,10 @@ extend Promoter {
         }
     }
 
-    // Note instruction `i`'s uses of slot addresses: an access through one (a load's or store's address,
-    // a copy's or fill's side, an address computation, a vector operation's operand, an aggregate argument
-    // the callee owns, an aggregate result's memory) is a use; any other (a stored value, an edge's argument, another argument) lets
-    // the address stay where the slot's merges cannot see it.
+    // Note instruction `i`'s uses of slot addresses: an access through one (a load's or store's address, a copy's or
+    // fill's side, an address computation, a vector operation's operand, an aggregate argument the callee owns, an
+    // aggregate result's memory) is a use; any other (a stored value, an edge's argument, another argument) lets the
+    // address stay where the slot's merges cannot see it.
     fn note_uses(self: &mut Self, b: &Body, i: u32, t: Inst) {
         let f = op_info(t.op).form;
         if f == F_LOAD {
@@ -732,6 +735,7 @@ extend Promoter {
         }
         // The field of each load and store.
         fill(&mut self.fid, b.insts.len(), NONE);
+        fill(&mut self.lane, b.insts.len(), NONE);
         let mut any = false;
         for s in 0..ns {
             any = any || self.cand[s];
@@ -749,7 +753,13 @@ extend Promoter {
                     } else {
                         b.type_of(t.b);
                     };
-                    self.fid[i] = self.field_at(s, self.doff[t.a as usize] + (t.c as i32) as i64, ty);
+                    let off = self.doff[t.a as usize] + (t.c as i32) as i64;
+                    self.fid[i] = self.field_at(s, off, ty);
+                    if self.fid[i] == NONE {
+                        let (f, k) = self.lane_at(s, off, ty);
+                        self.fid[i] = f;
+                        self.lane[i] = k;
+                    }
                 }
             }
         }
@@ -834,6 +844,14 @@ extend Promoter {
                         let n = self.flds.len();
                         // The same bytes as another type that converts to the field's: one field.
                         if n > start && self.flds[n - 1].off == f.off && conv_op(f.ty, self.flds[n - 1].ty, self.ptr) != NO_CONV {
+                            continue;
+                        }
+                        // A lane of a vector field is part of it; a vector over lane 0 takes its place.
+                        if n > start && is_lane(self.flds[n - 1], f) {
+                            continue;
+                        }
+                        if n > start && self.flds[n - 1].off == f.off && is_lane(f, self.flds[n - 1]) {
+                            self.flds[n - 1] = f;
                             continue;
                         }
                         if n > start && self.flds[n - 1].off + size_of(self.flds[n - 1].ty, self.ptr) > f.off {
@@ -928,6 +946,18 @@ extend Promoter {
     }
 
     // The global index of slot `s`'s field at `off` whose type `ty` converts to (NONE: none).
+    // The vector field of slot `s` that bytes `off` as `ty` are a lane of, and the lane; NONE twice when
+    // none.
+    const fn lane_at(self: &Self, s: u32, off: i64, ty: u8) (u32, u32) {
+        for f in self.fat[s as usize]..self.fat[s as usize + 1] {
+            let fl = self.flds[f as usize];
+            if is_lane(fl, Fld { off: off, ty: ty }) {
+                return f, ((off - fl.off) / size_of(ty, self.ptr)) as u32;
+            }
+        }
+        return NONE, NONE;
+    }
+
     const fn field_at(self: &Self, s: u32, off: i64, ty: u8) u32 {
         for f in self.fat[s as usize]..self.fat[s as usize + 1] {
             if self.flds[f as usize].off == off && conv_op(ty, self.flds[f as usize].ty, self.ptr) != NO_CONV {
@@ -1080,9 +1110,11 @@ extend Promoter {
         let t = b.insts[i as usize];
         let f = self.fid[i as usize];
         if f != NONE {
-            if t.op == O_LOAD {
+            // A lane's store keeps the other lanes: it reads the field too.
+            if t.op == O_LOAD || self.lane[i as usize] != NONE {
                 self.read(f, k);
-            } else {
+            }
+            if t.op == O_STORE {
                 self.write(f, k);
             }
             return;
@@ -1268,7 +1300,18 @@ extend Promoter {
         if f != NONE {
             self.drop[i as usize] = true;
             let fty = self.flds[f as usize].ty;
-            if t.op == O_LOAD {
+            let k = self.lane[i as usize];
+            if k != NONE {
+                let v = self.value(b, f);
+                let x = (b.insts.len() + self.xins.len()) as u32;
+                if t.op == O_LOAD {
+                    self.xins.push((i, Inst { op: O_VEXTRACT, ty: t.ty, aux: k as u16, a: v, b: VNONE, c: VNONE }));
+                    self.repl[i as usize] = x;
+                } else {
+                    self.xins.push((i, Inst { op: O_VINSERT, ty: fty, aux: k as u16, a: v, b: t.b, c: VNONE }));
+                    self.set(f, x);
+                }
+            } else if t.op == O_LOAD {
                 let v = self.value(b, f);
                 self.repl[i as usize] = self.convert(b, i, v, fty, t.ty);
             } else {
@@ -1652,6 +1695,15 @@ const fn fill_const(ty: u8, byte: u64, ptr: u32) Inst {
 }
 
 // `v[lo .. hi]` by offset (insertion sort: a slot has few accesses).
+// Whether access `x` is a lane of vector field `v`: of its lane type, at a lane's offset within it.
+const fn is_lane(v: Fld, x: Fld) bool {
+    if !is_vec(v.ty) || is_vec(x.ty) || x.ty != lane_type(v.ty) {
+        return false;
+    }
+    let eb = type_bytes(x.ty, 8) as i64;
+    return x.off >= v.off && x.off < v.off + type_bytes(v.ty, 8) as i64 && (x.off - v.off) % eb == 0;
+}
+
 const fn sort_fields(v: &mut Vector<Fld>, lo: usize, hi: usize) {
     for i in lo + 1..hi {
         let x = v[i];

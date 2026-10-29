@@ -163,6 +163,9 @@ extend Printer {
                 if (r & REF_NOALIAS) != 0 {
                     out.push_str(" noalias");
                 }
+                if (r & REF_READONLY) != 0 {
+                    out.push_str(" readonly");
+                }
                 out.push_byte(b'\n');
             }
         }
@@ -365,6 +368,8 @@ extend Printer {
             out.push_str(".exact");
         } else if (t.op == O_FPTOSI || t.op == O_FPTOUI) && t.aux == CV_UNCHECKED {
             out.push_str(".unchecked");
+        } else if t.op == O_VEXTRACT || t.op == O_VINSERT {
+            out.format_into(".{}", t.aux);
         } else if t.op == O_SYS {
             out.push_byte(b'.');
             out.push_str(sys_name(t.aux));

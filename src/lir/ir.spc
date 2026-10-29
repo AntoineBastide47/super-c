@@ -237,7 +237,18 @@ pub(package) const O_VUNZIP: u8 = 77;
 pub(package) const O_HTOF: u8 = 78;
 /// The IEEE binary16 encoding (an i16) of f32 `a`, rounded to nearest, ties to even (`Package.half`).
 pub(package) const O_FTOH: u8 = 79;
-pub(package) const OP_COUNT: u8 = 80;
+/// The square root of float `a` (or of each lane), correctly rounded; NaN for a value below zero.
+pub(package) const O_FSQRT: u8 = 80;
+/// The low halves of vectors `a` and `b` (of the result's type) interleaved: lane 2k is lane k of `a`, lane
+/// 2k + 1 lane k of `b`.
+pub(package) const O_VZIPLO: u8 = 81;
+/// The high halves interleaved: lane 2k is lane n/2 + k of `a`, lane 2k + 1 that of `b` (n lanes).
+pub(package) const O_VZIPHI: u8 = 82;
+/// Lane `aux` of vector `a` (the result's type is the lane type).
+pub(package) const O_VEXTRACT: u8 = 83;
+/// Vector `a` (of the result's type) with lane `aux` replaced by scalar `b`.
+pub(package) const O_VINSERT: u8 = 84;
+pub(package) const OP_COUNT: u8 = 85;
 
 /// One opcode: its text name and its operand form.
 pub(package) struct OpInfo {
@@ -245,7 +256,7 @@ pub(package) struct OpInfo {
     pub(package) form: u8,
 }
 
-pub(package) const OPS: [OpInfo; 80] = [
+pub(package) const OPS: [OpInfo; 85] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -326,6 +337,11 @@ pub(package) const OPS: [OpInfo; 80] = [
     OpInfo { name: "vunzip", form: F_BIN },
     OpInfo { name: "htof", form: F_UN },
     OpInfo { name: "ftoh", form: F_UN },
+    OpInfo { name: "fsqrt", form: F_UN },
+    OpInfo { name: "vziplo", form: F_BIN },
+    OpInfo { name: "vziphi", form: F_BIN },
+    OpInfo { name: "vextract", form: F_UN },
+    OpInfo { name: "vinsert", form: F_BIN },
 ];
 
 /// The mask a lane-wise comparison of vectors of type `t` gives (`O_VCMP`): integer lanes of its lanes'
@@ -785,16 +801,25 @@ pub(package) const AGG: u32 = 0x80000000;
 /// zero-extends it.
 pub(package) const SIG_SEXT: u32 = 0x40000000;
 pub(package) const SIG_VARIADIC: u32 = 0x80000000;
-/// `Body.refs`: the bytes, the exclusive flag, and REF_INNER for an aggregate parameter (a by-value
-/// `[]mut T`) whose pointer at offset 0, rather than the parameter, is the exclusive one.
-pub(package) const REF_BYTES: u32 = 0x3FFFFFFF;
+/// `Package.vops`: conversions and shifts in registers but a 64-bit integer to or from f64, an unsigned
+/// integer to or from a float, and a shift of 16-byte vectors or of lanes of 1, 2 or (arithmetic) 8 bytes
+/// (x86-64); each one (aarch64).
+pub(package) const VOPS_SOME: u8 = 1;
+pub(package) const VOPS_ALL: u8 = 2;
+/// `Body.refs`: the bytes, the exclusive flag, the read-only flag, and REF_INNER for an aggregate parameter
+/// (a by-value `[]mut T` or `[]T`) whose pointer at offset 0, rather than the parameter, is the one.
+pub(package) const REF_BYTES: u32 = 0x1FFFFFFF;
+pub(package) const REF_READONLY: u32 = 0x20000000;
 pub(package) const REF_INNER: u32 = 0x40000000;
 pub(package) const REF_NOALIAS: u32 = 0x80000000;
 
 /// Alias classes (`lir::opt::Opt::classes`): no exclusive parameter's referent, exclusive parameter k's
-/// (CL_NOALIAS + k), any. Two accesses of different classes, neither CL_MANY, touch different bytes.
+/// (CL_NOALIAS + k), a read-only referent's loads (CL_FROZEN), any. Two accesses of different classes,
+/// neither CL_MANY, touch different bytes; no write is CL_FROZEN.
 pub(package) const CL_OTHER: u8 = 0;
 pub(package) const CL_NOALIAS: u8 = 1;
+/// A load of a read-only parameter's referent (`REF_READONLY`): no write of the body touches its bytes.
+pub(package) const CL_FROZEN: u8 = 63;
 pub(package) const CL_MANY: u8 = 64;
 
 /// A body: its instructions and every table they index. `syms` and `msgs` map the body's symbol and
@@ -816,7 +841,8 @@ pub(package) struct Body {
     pub(package) sig: u32, // the body's own signature (pool); NONE until set
     /// Per signature parameter, what a reference parameter points to for the whole call: the bytes a
     /// load may read (`REF_BYTES`), with REF_NOALIAS when no pointer that does not come from the
-    /// parameter reaches them (a `&mut`); 0 for any other parameter. Empty when no parameter is a
+    /// parameter reaches them (a `&mut`), REF_READONLY when nothing writes them during the call (a `&T`
+    /// whose `T` holds no `UnsafeCell`); 0 for any other parameter. Empty when no parameter is a
     /// reference.
     pub(package) refs: Vector<u32>,
     /// Per signature parameter of the first 64, whether it holds 0 or 1 (a `bool`), a bit each.
@@ -1149,6 +1175,10 @@ pub(package) struct Package {
     /// The bytes of a vector the native backend computes in one register (`target::table::Isa`), 0 for
     /// none: the loop vectorizer's vectors (`lir::loops`).
     pub(package) vector: u32,
+    /// How the native backend converts vectors and shifts their lanes (`target::table::Isa`): 0 lane by
+    /// lane, VOPS_SOME or VOPS_ALL in registers. With either the loop vectorizer mixes lane widths up to a
+    /// factor of two and shifts; its cost model counts the lane by lane forms of VOPS_SOME.
+    pub(package) vops: u8,
     /// Whether the native backend computes `O_MULHU` of 64-bit integers in one instruction
     /// (`target::table::Isa`): the optimizer then divides by a 64-bit constant with a product.
     pub(package) mul_high: bool,
@@ -1237,6 +1267,7 @@ extend Package {
             ptr_bytes: ptr_bytes,
             vec_regs: 16,
             vector: 16,
+            vops: 0,
             mul_high: true,
             pairs: false,
             pic: false,

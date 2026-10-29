@@ -44,13 +44,21 @@ framed code one with a prologue of 0 bytes, each entry stub one with its prologu
 
 - Integers up to 64 bits and pointers live in general registers, floats in vector registers; an i128
   splits into its two words before (`split_pairs`, `Isa.pairs`), and a vector lives in a stack slot
-  (wasm: frame memory) unless it lives in a vector register (`vec_homes`). The bits above
+  (wasm: frame memory) unless a register form keeps it in a vector register (below). The bits above
   an i8, i16 or i32 value are undefined in its register: an operation that reads them extends first.
 - Every `O_*` of `src/lir/ir.spc` is emitted or refused. Groups: constants and addresses; integer and
   float arithmetic with the overflow forms (two results: the value and a flag); comparisons and
   `select`; conversions; `ptradd`, loads, stores, `memcpy`, `memset`; atomics and fences; calls (direct,
   indirect, variadic); `O_VOP` (vector operations by `ir::core` SIMD code); `O_SYS` (system operations:
   barriers, cycle counter, floating-point control state, the context switch); `O_ASM`; terminators.
+- Vectors of a register's size may live in vector registers (`vec_homes`: a vector some instruction
+  reads or defines in memory stays there). Register forms: lane-wise arithmetic, comparisons, selects,
+  splats, wide constants, `vunzip`, `vziplo`/`vziphi`, lane extracts and inserts (`vlane`), the `O_VOP`s
+  with a form (`vop_reg`, arm64: NEON lane rules, masks, choices, bitcasts, shifts by a scalar,
+  unchecked gathers, masked loads and stores, absolute differences), conversions (`conv_reg`: arm64
+  each `Isa.vector_ops` allows; x86-64 SSE2 for integers to twice or half their width, i32 and f32, f32
+  and f64, AVX2 for those of 32-byte vectors) and shifts by vector amounts (x86-64 with AVX2,
+  `shift_reg`). Any other form computes lane by lane through memory.
 - `O_ASM` and module-level assembly assemble through the instruction table (`src/target/assembler.spc`
   for directives, labels and sections; the instruction set's assembler for instructions).
 

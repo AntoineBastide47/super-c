@@ -32,6 +32,7 @@ import lir::promote as pr;
 import lir::loops as lu;
 import lir::slp as sl;
 import lir::pairs as pa;
+import lir::wide as wd;
 import lir::print as lp;
 import stdlib;
 import std::platform::clock as pclock;
@@ -128,6 +129,7 @@ pub(package) struct Opt {
     ipin: Vector<bool>,
     ppin: Vector<bool>,
     acls: Vector<u8>,
+    frz: Vector<bool>, // per instruction, a load of a read-only referent (`frozen`)
     mark: Vector<u32>,
     hdr: Vector<bool>, // per block, whether it heads a loop (`thread`)
     preader: Vector<u32>, // per block parameter, the block outside its own that reads it (`thread`)
@@ -226,9 +228,10 @@ pub(package) struct Opt {
     // Promotion of private slots (`lir::promote`) and the body it builds.
     prom: pr::Promoter,
     pbody: Body,
-    unr: lu::LoopOpt,
+    pub(package) unr: lu::LoopOpt,
     slp: sl::Slp,
     pairs: pa::Pairs,
+    wide: wd::Wide,
     wgt: Vector<u64>, // per block, the weight of an instruction there (`weigh`)
 }
 
@@ -299,6 +302,7 @@ extend Opt {
             ipin: Vector::<bool>::new(),
             ppin: Vector::<bool>::new(),
             acls: Vector::<u8>::new(),
+            frz: Vector::<bool>::new(),
             mark: Vector::<u32>::new(),
             hdr: Vector::<bool>::new(),
             preader: Vector::<u32>::new(),
@@ -388,6 +392,7 @@ extend Opt {
             unr: lu::LoopOpt::new(),
             slp: sl::Slp::new(),
             pairs: pa::Pairs::new(),
+            wide: wd::Wide::new(),
             wgt: Vector::<u64>::new(),
         };
     }
@@ -500,7 +505,7 @@ extend Opt {
             return false;
         }
         let before = self.weigh(pk, b);
-        if !self.slp.plan(b, pk.ptr_bytes, self.wgt.as_slice()) {
+        if !self.slp.plan(b, pk.ptr_bytes, pk.vector.min(64), (pk.fmath & FM_ASSOC) != 0, self.wgt.as_slice()) {
             return false;
         }
         let saved = b.compact();
@@ -694,6 +699,7 @@ extend Opt {
             self.dominators(b);
             self.loops(pk, b);
         }
+        self.unr.vops = pk.vops;
         let any = self.unr.run(
             b,
             pk.ptr_bytes,
@@ -854,6 +860,21 @@ extend Opt {
         }
         self.graph(b);
         if !self.pairs.run(b, self.order.as_slice(), self.rpo.as_slice(), &mut self.pbody) {
+            return false;
+        }
+        let nb = replace(&mut self.pbody, Body::new());
+        self.pbody = replace(b, nb);
+        return true;
+    }
+
+    /// Split each vector of body `b` wider than the native backend's registers into register-wide parts
+    /// (`lir::wide`). Whether `b` had one.
+    pub(package) fn split_wide(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        if pk.vector == 0 {
+            return false;
+        }
+        self.graph(b);
+        if !self.wide.run(b, pk.vector, self.order.as_slice(), self.rpo.as_slice(), &mut self.pbody) {
             return false;
         }
         let nb = replace(&mut self.pbody, Body::new());
@@ -1373,7 +1394,7 @@ extend Opt {
         self.cnext = e.param_len;
         let mut seeds: u64 = 0;
         for k in 0..b.refs.len() {
-            if (b.refs[k] & REF_NOALIAS) != 0 && k < (CL_MANY - CL_NOALIAS) as usize && k < e.param_len as usize {
+            if (b.refs[k] & REF_NOALIAS) != 0 && k < (CL_FROZEN - CL_NOALIAS) as usize && k < e.param_len as usize {
                 seeds |= 1u64 << k as u64;
             }
         }
@@ -1441,7 +1462,7 @@ extend Opt {
                     idx = c - CL_NOALIAS as u32;
                 }
             }
-            if idx == NONE && next < (CL_MANY - CL_NOALIAS) as u32 {
+            if idx == NONE && next < (CL_FROZEN - CL_NOALIAS) as u32 {
                 idx = next;
                 next += 1;
                 out |= 1u64 << idx as u64;
@@ -1479,7 +1500,7 @@ extend Opt {
         let mut out: u64 = 0;
         let mut next = self.cnext;
         for i in 0..b.insts.len() {
-            if next >= (CL_MANY - CL_NOALIAS) as u32 {
+            if next >= (CL_FROZEN - CL_NOALIAS) as u32 {
                 break;
             }
             let t = b.insts[i];
@@ -1570,7 +1591,7 @@ extend Opt {
             }
         }
         // The allocations' blocks, pinned to their classes.
-        for idx in 0..(CL_MANY - CL_NOALIAS) as u32 {
+        for idx in 0..(CL_FROZEN - CL_NOALIAS) as u32 {
             if ((seeds & fresh) >> idx as u64 & 1) != 0 {
                 let i = self.fcall[idx as usize] as usize;
                 self.icls[i] = CL_NOALIAS + idx as u8;
@@ -1916,9 +1937,12 @@ extend Opt {
         // The classes of the loads' and stores' accesses before the walk forwards their addresses: a
         // parameter an inlined body's accesses go through, a scope's, becomes the caller's pointer.
         fill(&mut self.acls, b.insts.len(), CL_MANY);
+        frozen(b, &mut self.frz);
         for i in 0..b.insts.len() {
             let op = b.insts[i].op;
-            if op == O_LOAD || op == O_STORE {
+            if op == O_LOAD && self.frz[i] {
+                self.acls[i] = CL_FROZEN;
+            } else if op == O_LOAD || op == O_STORE {
                 self.acls[i] = self.acc(i as u32, b.insts[i].a);
             }
         }
@@ -3761,8 +3785,9 @@ extend Opt {
                 return true;
             }
             // A store of a constant right after one of the bytes next to it, both of 1, 2 or 4 bytes: one
-            // store of both, twice as wide (little-endian), the other dropped. The bytes written are the
-            // same, so are the memory states.
+            // store of both, twice as wide (little-endian), the other dropped, untagged (its bytes are two
+            // values of the narrower type; the verifier takes a tag of the stored type only). The bytes
+            // written are the same; an untagged write starts the states of every tag.
             if i > 0 && self.blk_of[i as usize - 1] == k && self.repl[i as usize - 1] == VNONE && !self.moved[i as usize - 1] && b.insts[i as usize - 1].op == O_STORE {
                 let p = b.insts[i as usize - 1];
                 let ty = b.type_of(t.b);
@@ -3790,6 +3815,7 @@ extend Opt {
                     };
                     t.b = self.constant(b, wty, lo & m | (hi & m) << 8 * n as u64);
                     t.c = at;
+                    t.aux = t.aux & ~MEM_TBAA;
                     b.insts[i as usize] = t;
                     self.repl[i as usize - 1] = DROPPED;
                 }
@@ -5317,6 +5343,8 @@ pub(package) struct Run {
     cf: Config,
     // `SC_LIR_PRINT`: each optimized body whose function's name holds it prints to stderr (a debugging aid).
     print: String,
+    // `SC_VEC_REPORT=1`: each loop the vectorizer left prints its location and why (a debugging aid).
+    report: bool,
     // Scratch a job takes and gives back: it grows once per worker, not once per body.
     free: psync::Mutex<Vector<Box<Scratch>>>,
 }
@@ -5454,6 +5482,7 @@ extend Run {
             inline: !stdlib::env_is("SC_LIR_INLINE", "0"),
             cf: cf,
             print: stdlib::get_env("SC_LIR_PRINT").unwrap_or(String::new()),
+            report: stdlib::env_is("SC_VEC_REPORT", "1"),
             free: psync::Mutex::<Vector<Box<Scratch>>>::new(Vector::<Box<Scratch>>::new()),
         };
     }
@@ -5480,6 +5509,9 @@ extend Run {
         if sc.o.split_pairs(p, b) {
             let _ = sc.o.run(p, b, true);
         }
+        if sc.o.split_wide(p, b) {
+            let _ = sc.o.run(p, b, true);
+        }
         // A body callers may inline keeps its form before the loop transforms and the packing: when those
         // make vectors, callers inline that form, as LLVM vectorizes after inlining. A caller packs its
         // copy once the copy's slots are values (`lir::promote`), which a vector access of a slot prevents.
@@ -5490,6 +5522,7 @@ extend Run {
             Option::<Body>::None;
         };
         // A loop a round copied is innermost again for the next one.
+        sc.o.unr.wide = false;
         let mut round: u32 = 0;
         while round < LOOP_ROUNDS && (bu.peel != 0 || bu.partial != 0 || bu.version != 0 || bu.unswitch != 0 || bu.vector != 0 || bu.fin != 0) && sc.o.loop_opts(
             p,
@@ -5506,6 +5539,13 @@ extend Run {
                 b,
                 lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: bu.fin },
             );
+        }
+        // Vectors of mixed lane widths two registers wide, by parts.
+        if sc.o.unr.wide && sc.o.split_wide(p, b) {
+            let _ = sc.o.run(p, b, true);
+        }
+        if r.report && sc.o.unr.rejected.len() != 0 {
+            r.vec_report(p, &sc.o.unr.rejected);
         }
         // Then the packing of straight-line values into vectors, on the loops' final shape.
         if bu.vector != 0 {
@@ -5525,6 +5565,20 @@ extend Run {
         }
         unsafe *(r.ok.as_ptr() as *mut bool + j as usize) = r.inline && r.shape[j as usize] && il::small(b, r.cf.inline);
         r.give(sc);
+    }
+
+    // `SC_VEC_REPORT`: each loop the vectorizer left (`rs`: its header's location and the reason), as
+    // `file:line:col: not vectorized: reason` on stderr.
+    fn vec_report(self: &Self, p: &Package, rs: &Vector<(Loc, String)>) {
+        for k in 0..rs.len() {
+            let l = rs[k].0;
+            let file = if l.file < p.files.len() as u32 {
+                p.spell(p.files[l.file as usize]);
+            } else {
+                "?";
+            };
+            eprint("{}:{}:{}: not vectorized: {}\n", file, l.line, l.col, rs[k].1.as_str());
+        }
     }
 
     // Body `j`'s text on stderr when its function's name holds `print`.
@@ -5980,6 +6034,59 @@ const fn ext_from(b: &Body, v: Value, ty: u8) Value {
     };
 }
 
+// Lane access `i` of `b` (`O_VEXTRACT`, `O_VINSERT`) through the lanes it reads: a lane of a splat is its
+// scalar; a lane of an insert is the inserted scalar, or the same lane of the vector inserted into; an
+// insert of a vector's own lane is the vector; an insert into an insert of the same lane replaces it. The
+// value it equals, else VNONE (and maybe `i` rewritten in place).
+fn lane_fold(b: &mut Body, i: u32) Value {
+    let mut t = b.insts[i as usize];
+    if t.op == O_VINSERT {
+        if (t.b & (VPARAM | VFLAG)) == 0 && b.insts[t.b as usize].op == O_VEXTRACT && b.insts[t.b as usize].a == t.a && b.insts[t.b as usize].aux == t.aux {
+            return t.a;
+        }
+        if (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_VINSERT && b.insts[t.a as usize].aux == t.aux {
+            t.a = b.insts[t.a as usize].a;
+            b.insts[i as usize] = t;
+        }
+        return VNONE;
+    }
+    // Past the inserts of other lanes, at most LANE_WALK of them.
+    let mut v = t.a;
+    for _ in 0..LANE_WALK {
+        if (v & (VPARAM | VFLAG)) != 0 {
+            break;
+        }
+        let s = b.insts[v as usize];
+        if s.op == O_SPLAT {
+            return s.a;
+        }
+        if s.op != O_VINSERT {
+            break;
+        }
+        if s.aux == t.aux {
+            return s.b;
+        }
+        v = s.a;
+    }
+    if v != t.a {
+        t.a = v;
+        b.insts[i as usize] = t;
+    }
+    return VNONE;
+}
+
+// Whether float `v` of `b` is the result of an arithmetic operation or a conversion, so no signaling NaN.
+const fn quiet(b: &Body, v: Value) bool {
+    if (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let op = b.insts[v as usize].op;
+    return op >= O_FADD && op <= O_FDIV || op == O_FMA || op == O_FSQRT || op >= O_FPEXT && op <= O_FPTRUNC || op == O_SITOFP || op == O_UITOFP;
+}
+
+// The inserts `lane_fold` looks through.
+const LANE_WALK: u32 = 64;
+
 const fn float_const(b: &Body, v: Value) Option<u64> {
     if (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_FCONST {
         return Option::<u64>::None;
@@ -5993,6 +6100,9 @@ const fn float_const(b: &Body, v: Value) Option<u64> {
 // an address with its constant index and its base address's offset in its own.
 fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     let mut t = b.insts[i as usize];
+    if t.op == O_VEXTRACT || t.op == O_VINSERT {
+        return lane_fold(b, i);
+    }
     if t.ty == T_I128 {
         return simplify_wide(b, i);
     }
@@ -6103,23 +6213,53 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             t.a,
         ) {
             let x = b.insts[t.b as usize];
+            // An `or` of a constant below `2^s` with a value shifted left by `s` adds it.
+            let low = if x.op == O_OR && (x.a & (VPARAM | VFLAG)) == 0 && b.insts[x.a as usize].op == O_SHL {
+                const_of(b, b.insts[x.a as usize].b);
+            } else {
+                Option::<u64>::None;
+            };
             let k = if x.op == O_ADD || x.op == O_SUB {
+                const_of(b, x.b);
+            } else if low.is_some() && low.unwrap() < 64 && const_of(b, x.b).is_some() && const_of(b, x.b).unwrap() < 1u64 << low.unwrap() {
                 const_of(b, x.b);
             } else {
                 Option::<u64>::None;
             };
             if k.is_some() {
                 let kv = le::sign_ext(k.unwrap(), ptr * 8);
-                let d = if x.op == O_ADD {
-                    kv;
-                } else {
+                let d = if x.op == O_SUB {
                     -kv;
+                } else {
+                    kv;
                 };
                 let off = (t.c as i32) as i64 + d * t.aux as i64;
                 if kv > -0x80000000 && kv < 0x80000000 && off >= -0x80000000 && off <= 0x7FFFFFFF {
                     t.b = x.a;
                     t.c = off as u32;
                 }
+            }
+            // A pointer-wide index times a constant (a product, or a left shift below the width): the
+            // constant joins the scale when the product fits it (modulo 2^64 both ways), so a strided access
+            // is one of the counter.
+            let x2 = if (t.b & (VPARAM | VFLAG)) == 0 {
+                b.insts[t.b as usize];
+            } else {
+                Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE };
+            };
+            let f = if x2.op == O_MUL && (x2.b & (VPARAM | VFLAG)) == 0 && b.insts[x2.b as usize].op == O_ICONST {
+                const_of(b, x2.b);
+            } else if x2.op == O_SHL && (x2.b & (VPARAM | VFLAG)) == 0 && b.insts[x2.b as usize].op == O_ICONST && const_of(
+                b,
+                x2.b,
+            ).unwrap() < 16 {
+                Option::<u64>::Some(1u64 << const_of(b, x2.b).unwrap());
+            } else {
+                Option::<u64>::None;
+            };
+            if f.is_some() && f.unwrap() != 0 && t.aux as u64 * f.unwrap() <= 0xFFFF {
+                t.aux = (t.aux as u64 * f.unwrap()) as u16;
+                t.b = x2.a;
             }
         }
         if t.b == VNONE && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_PTRADD && b.insts[t.a as usize].b == VNONE {
@@ -6217,6 +6357,26 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     if t.op >= O_FADD && t.op <= O_FDIV {
         let x = float_const(b, t.a);
         let y = float_const(b, t.b);
+        // -0.0 + v is v when v is no signaling NaN: the result of an arithmetic operation.
+        let neg0 = 1u64 << (type_bits(t.ty, 8) - 1) as u64;
+        if t.op == O_FADD && x.is_some() && x.unwrap() == neg0 && quiet(b, t.b) {
+            return t.b;
+        }
+        if t.op == O_FADD && y.is_some() && y.unwrap() == neg0 && quiet(b, t.a) {
+            return t.a;
+        }
+        // So is 1.0 * v.
+        let one: u64 = if t.ty == T_F32 {
+            0x3F800000;
+        } else {
+            0x3FF0000000000000;
+        };
+        if t.op == O_FMUL && x.is_some() && x.unwrap() == one && quiet(b, t.b) && (t.ty == T_F32 || t.ty == T_F64) {
+            return t.b;
+        }
+        if t.op == O_FMUL && y.is_some() && y.unwrap() == one && quiet(b, t.a) && (t.ty == T_F32 || t.ty == T_F64) {
+            return t.a;
+        }
         if x.is_some() && y.is_some() {
             let r = le::float_op(t.op, t.ty, x.unwrap(), y.unwrap());
             // A NaN result keeps its operation: the machine chooses its payload.
@@ -6574,6 +6734,62 @@ const fn entry_param(b: &Body, v: Value) u32 {
     return (v & ~VPARAM) - e.param_start;
 }
 
+// Per instruction of `b` into `out`: whether it is a load through a read-only parameter's referent
+// (`REF_READONLY`): through the parameter, or a view's (`REF_INNER`) pointer at its offset 0, then
+// offsets of either (`ptradd`, a `select` of two). One pass in order: a pointer defined after its use
+// counts as none.
+fn frozen(b: &Body, out: &mut Vector<bool>) {
+    let ni = b.insts.len();
+    out.truncate(0);
+    out.resize_default(ni);
+    let e = b.blocks[0];
+    let mut any = false;
+    for k in 0..b.refs.len() {
+        any = any || (b.refs[k] & REF_READONLY) != 0 && k < e.param_len as usize;
+    }
+    if !any {
+        return;
+    }
+    // Per instruction, whether its value points into a read-only referent.
+    let mut fp = Vector::<bool>::new();
+    fp.resize_default(ni);
+    for i in 0..ni {
+        let t = b.insts[i];
+        let base = if t.op == O_LOAD || t.op == O_PTRADD {
+            t.a;
+        } else {
+            VNONE;
+        };
+        let mut via = false;
+        if (base & VPARAM) != 0 && (base & VFLAG) == 0 {
+            let p = base & ~VPARAM;
+            if p >= e.param_start && p < e.param_start + e.param_len as u32 {
+                let q = (p - e.param_start) as usize;
+                let r = if q < b.refs.len() {
+                    b.refs[q];
+                } else {
+                    0u32;
+                };
+                via = (r & REF_READONLY) != 0 && ((r & REF_INNER) == 0 || t.op == O_LOAD && t.c == 0 && t.ty == T_PTR);
+                // A view's own words are no element: its pointer, through which the elements are.
+                if (r & REF_INNER) != 0 {
+                    fp[i] = via;
+                    continue;
+                }
+            }
+        } else if base != VNONE && (base & VFLAG) == 0 {
+            via = fp[base as usize];
+        }
+        if t.op == O_LOAD {
+            out[i] = via;
+        } else if t.op == O_PTRADD {
+            fp[i] = via;
+        } else if t.op == O_SELECT && (t.b & (VPARAM | VFLAG)) == 0 && (t.c & (VPARAM | VFLAG)) == 0 && t.b != VNONE && t.c != VNONE {
+            fp[i] = fp[t.b as usize] && fp[t.c as usize];
+        }
+    }
+}
+
 // Whether signature parameter `k` of `b` is a view whose loaded pointer is exclusive (`REF_INNER`).
 const fn inner(b: &Body, k: u32) bool {
     return k < b.refs.len() as u32 && (b.refs[k as usize] & REF_INNER) != 0;
@@ -6616,7 +6832,7 @@ const fn join(a: u8, b: u8) u8 {
 
 // Whether opcode `op` computes a value from its operands alone, the same each time it does not trap.
 const fn pure_op(op: u8) bool {
-    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH;
+    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT;
 }
 
 // Whether pure `t` of `b` may run where the program would not run it: it has operands (a constant is

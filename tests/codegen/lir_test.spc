@@ -310,7 +310,12 @@ b0(v0: f32, v1: f64):
   v34 = fptrunc.f32 v29
   v35 = ftoh.i16 v34
   v36 = htof.f32 v35
-  ret v29
+  v37 = fsqrt.f64 v29
+  v38 = vziplo.v2f64 v33, v30
+  v39 = vziphi.v2f64 v38, v30
+  v40 = vinsert.1.v2f64 v39, v37
+  v41 = vextract.1.f64 v40
+  ret v41
 fn @memory
   sig (ptr, i64) -> void
   slot s0 size 32 align 3

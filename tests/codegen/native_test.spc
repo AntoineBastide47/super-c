@@ -2572,6 +2572,418 @@ fn many_loops_free_their_registers() {
     assert_eq(run_wasm(lir.as_str(), drv), 0);
 }
 
+// A vector conversion case of `vector_conversions_and_lane_shifts_run`: LIR types `from` and `to`,
+// operation `op`, C lane types `cf` and `ct`, `n` lanes, a lane's input of `i` and its result of `x` (a
+// shift's of `x` by `s`).
+struct Conv {
+    pub from: str<'static>,
+    pub to: str<'static>,
+    pub op: str<'static>,
+    pub cf: str<'static>,
+    pub ct: str<'static>,
+    pub n: u32,
+    pub init: str<'static>,
+    pub res: str<'static>,
+}
+
+extend Conv as Copy {}
+
+// Vector conversions of each kind the loop vectorizer mixes widths with (`Package.vops`), and shifts of
+// each lane by its own amount: in vector registers where the target has the form (x86-64: SSE2 for
+// integer widening and narrowing, i32 to f32 and back, f32 to f64 and back, AVX2 for those of 32-byte
+// vectors and for the shifts), lane by lane in memory elsewhere. A float to an integer saturates (NaN
+// gives 0), as the scalar conversion does.
+@test
+fn vector_conversions_and_lane_shifts_run() {
+    let cases: []Conv = [
+        Conv {
+            from: "v4i32",
+            to: "v4f32",
+            op: "sitofp",
+            cf: "int32_t",
+            ct: "float",
+            n: 4,
+            init: "(int32_t)(i * 0x9E3779B9u)",
+            res: "(float)x",
+        },
+        Conv {
+            from: "v4f32",
+            to: "v4i32",
+            op: "fptosi",
+            cf: "float",
+            ct: "int32_t",
+            n: 4,
+            init: "fl[i % 8]",
+            res: "sat32(x)",
+        },
+        Conv {
+            from: "v4i16",
+            to: "v4i32",
+            op: "sext",
+            cf: "int16_t",
+            ct: "int32_t",
+            n: 4,
+            init: "(int16_t)(i * 40503u)",
+            res: "(int32_t)x",
+        },
+        Conv {
+            from: "v4i16",
+            to: "v4i32",
+            op: "zext",
+            cf: "int16_t",
+            ct: "int32_t",
+            n: 4,
+            init: "(int16_t)(i * 40503u)",
+            res: "(int32_t)(uint16_t)x",
+        },
+        Conv {
+            from: "v2i64",
+            to: "v2i32",
+            op: "trunc",
+            cf: "int64_t",
+            ct: "int32_t",
+            n: 2,
+            init: "(int64_t)(i * 0x9E3779B97F4A7C15u)",
+            res: "(int32_t)(uint32_t)x",
+        },
+        Conv {
+            from: "v4i32",
+            to: "v4i16",
+            op: "trunc",
+            cf: "int32_t",
+            ct: "int16_t",
+            n: 4,
+            init: "(int32_t)(i * 0x9E3779B9u)",
+            res: "(int16_t)(uint16_t)x",
+        },
+        Conv {
+            from: "v8i16",
+            to: "v8i8",
+            op: "trunc",
+            cf: "int16_t",
+            ct: "int8_t",
+            n: 8,
+            init: "(int16_t)(i * 40503u)",
+            res: "(int8_t)(uint8_t)x",
+        },
+        Conv {
+            from: "v8i8",
+            to: "v8i16",
+            op: "sext",
+            cf: "int8_t",
+            ct: "int16_t",
+            n: 8,
+            init: "(int8_t)(i * 157u)",
+            res: "(int16_t)x",
+        },
+        Conv {
+            from: "v2i32",
+            to: "v2i64",
+            op: "zext",
+            cf: "int32_t",
+            ct: "int64_t",
+            n: 2,
+            init: "(int32_t)(i * 0x9E3779B9u)",
+            res: "(int64_t)(uint32_t)x",
+        },
+        Conv {
+            from: "v2f32",
+            to: "v2f64",
+            op: "fpext",
+            cf: "float",
+            ct: "double",
+            n: 2,
+            init: "fin[i % 8]",
+            res: "(double)x",
+        },
+        Conv {
+            from: "v2f64",
+            to: "v2f32",
+            op: "fptrunc",
+            cf: "double",
+            ct: "float",
+            n: 2,
+            init: "(double)fin[i % 8] * 1.000001",
+            res: "(float)x",
+        },
+        Conv {
+            from: "v2i64",
+            to: "v2f64",
+            op: "sitofp",
+            cf: "int64_t",
+            ct: "double",
+            n: 2,
+            init: "(int64_t)(i * 0x9E3779B97F4A7C15u)",
+            res: "(double)x",
+        },
+        Conv {
+            from: "v4i32",
+            to: "v4f32",
+            op: "uitofp",
+            cf: "int32_t",
+            ct: "float",
+            n: 4,
+            init: "(int32_t)(i * 0x9E3779B9u)",
+            res: "(float)(uint32_t)x",
+        },
+        Conv {
+            from: "v4f32",
+            to: "v4i32",
+            op: "fptoui",
+            cf: "float",
+            ct: "int32_t",
+            n: 4,
+            init: "fl[i % 8]",
+            res: "(int32_t)satu32(x)",
+        },
+        Conv {
+            from: "v8i32",
+            to: "v8f32",
+            op: "sitofp",
+            cf: "int32_t",
+            ct: "float",
+            n: 8,
+            init: "(int32_t)(i * 0x9E3779B9u)",
+            res: "(float)x",
+        },
+        Conv {
+            from: "v8f32",
+            to: "v8i32",
+            op: "fptosi",
+            cf: "float",
+            ct: "int32_t",
+            n: 8,
+            init: "fl[i % 8]",
+            res: "sat32(x)",
+        },
+        Conv {
+            from: "v8i16",
+            to: "v8i32",
+            op: "sext",
+            cf: "int16_t",
+            ct: "int32_t",
+            n: 8,
+            init: "(int16_t)(i * 40503u)",
+            res: "(int32_t)x",
+        },
+        Conv {
+            from: "v8i16",
+            to: "v8i32",
+            op: "zext",
+            cf: "int16_t",
+            ct: "int32_t",
+            n: 8,
+            init: "(int16_t)(i * 40503u)",
+            res: "(int32_t)(uint16_t)x",
+        },
+        Conv {
+            from: "v4i64",
+            to: "v4i32",
+            op: "trunc",
+            cf: "int64_t",
+            ct: "int32_t",
+            n: 4,
+            init: "(int64_t)(i * 0x9E3779B97F4A7C15u)",
+            res: "(int32_t)(uint32_t)x",
+        },
+        Conv {
+            from: "v8i32",
+            to: "v8i16",
+            op: "trunc",
+            cf: "int32_t",
+            ct: "int16_t",
+            n: 8,
+            init: "(int32_t)(i * 0x9E3779B9u)",
+            res: "(int16_t)(uint16_t)x",
+        },
+        Conv {
+            from: "v16i16",
+            to: "v16i8",
+            op: "trunc",
+            cf: "int16_t",
+            ct: "int8_t",
+            n: 16,
+            init: "(int16_t)(i * 40503u)",
+            res: "(int8_t)(uint8_t)x",
+        },
+        Conv {
+            from: "v16i8",
+            to: "v16i16",
+            op: "sext",
+            cf: "int8_t",
+            ct: "int16_t",
+            n: 16,
+            init: "(int8_t)(i * 157u)",
+            res: "(int16_t)x",
+        },
+        Conv {
+            from: "v4i32",
+            to: "v4i64",
+            op: "zext",
+            cf: "int32_t",
+            ct: "int64_t",
+            n: 4,
+            init: "(int32_t)(i * 0x9E3779B9u)",
+            res: "(int64_t)(uint32_t)x",
+        },
+        Conv {
+            from: "v4f32",
+            to: "v4f64",
+            op: "fpext",
+            cf: "float",
+            ct: "double",
+            n: 4,
+            init: "fin[i % 8]",
+            res: "(double)x",
+        },
+        Conv {
+            from: "v4f64",
+            to: "v4f32",
+            op: "fptrunc",
+            cf: "double",
+            ct: "float",
+            n: 4,
+            init: "(double)fin[i % 8] * 1.000001",
+            res: "(float)x",
+        },
+    ];
+    let shifts: []Conv = [
+        Conv {
+            from: "v4i32",
+            to: "v4i32",
+            op: "shl",
+            cf: "int32_t",
+            ct: "int32_t",
+            n: 4,
+            init: "",
+            res: "(int32_t)((uint32_t)x << s)",
+        },
+        Conv {
+            from: "v4i32",
+            to: "v4i32",
+            op: "lshr",
+            cf: "int32_t",
+            ct: "int32_t",
+            n: 4,
+            init: "",
+            res: "(int32_t)((uint32_t)x >> s)",
+        },
+        Conv { from: "v4i32", to: "v4i32", op: "ashr", cf: "int32_t", ct: "int32_t", n: 4, init: "", res: "x >> s" },
+        Conv {
+            from: "v2i64",
+            to: "v2i64",
+            op: "shl",
+            cf: "int64_t",
+            ct: "int64_t",
+            n: 2,
+            init: "",
+            res: "(int64_t)((uint64_t)x << s)",
+        },
+        Conv {
+            from: "v2i64",
+            to: "v2i64",
+            op: "lshr",
+            cf: "int64_t",
+            ct: "int64_t",
+            n: 2,
+            init: "",
+            res: "(int64_t)((uint64_t)x >> s)",
+        },
+        Conv { from: "v2i64", to: "v2i64", op: "ashr", cf: "int64_t", ct: "int64_t", n: 2, init: "", res: "x >> s" },
+        Conv {
+            from: "v8i32",
+            to: "v8i32",
+            op: "shl",
+            cf: "int32_t",
+            ct: "int32_t",
+            n: 8,
+            init: "",
+            res: "(int32_t)((uint32_t)x << s)",
+        },
+        Conv { from: "v8i32", to: "v8i32", op: "ashr", cf: "int32_t", ct: "int32_t", n: 8, init: "", res: "x >> s" },
+        Conv {
+            from: "v4i64",
+            to: "v4i64",
+            op: "lshr",
+            cf: "int64_t",
+            ct: "int64_t",
+            n: 4,
+            init: "",
+            res: "(int64_t)((uint64_t)x >> s)",
+        },
+    ];
+    let mut lir = String::from_str("lir ptr 8\n");
+    let mut drv = String::from_str(
+        "#include <stdint.h>\n#include <string.h>\n#include <math.h>\nstatic const float fl[8] = {0.0f, -0.5f, 1.5f, 3e9f, -3e9f, NAN, 2147483520.0f, -2147483648.0f};\nstatic const float fin[8] = {0.0f, -0.5f, 1.5f, 3e9f, -3e9f, 1e-40f, 3.4e38f, -7.25f};\nstatic int32_t sat32(float f) { return f != f ? 0 : f >= 2147483648.0f ? INT32_MAX : f < -2147483648.0f ? INT32_MIN : (int32_t)f; }\nstatic uint32_t satu32(float f) { return f != f || f <= -1.0f ? 0 : f >= 4294967296.0f ? UINT32_MAX : (uint32_t)f; }\n",
+    );
+    let mut body = String::from_str("int main(void) {\n  int r = 0;\n");
+    for k in 0..cases.len() {
+        let c = cases[k];
+        lir.format_into(
+            "sym @c{} fn global\nfn @c{}\n  sig (ptr, ptr) -> void\nb0(v0: ptr, v1: ptr):\n  v2 = load.{} v1 align 0\n  v3 = {}.{} v2\n  store v3, v0 align 0\n  ret\n",
+            k,
+            k,
+            c.from,
+            c.op,
+            c.to,
+        );
+        drv.format_into("void c{}(void *, const void *);\n", k);
+        body.format_into(
+            "  {{\n    {} a[64]; {} o[64];\n    for (int i = 0; i < 64; i++) a[i] = {};\n    for (int b = 0; b < 64; b += {}) c{}(o + b, a + b);\n    for (int i = 0; i < 64; i++) {{ {} x = a[i]; {} e = {}; if (memcmp(&e, &o[i], sizeof e) != 0) r = {}; }}\n  }}\n",
+            c.cf,
+            c.ct,
+            c.init,
+            c.n,
+            k,
+            c.cf,
+            c.ct,
+            c.res,
+            k + 1,
+        );
+    }
+    for k in 0..shifts.len() {
+        let c = shifts[k];
+        let bits = if c.cf == "int32_t" {
+            32;
+        } else {
+            64;
+        };
+        lir.format_into(
+            "sym @s{} fn global\nfn @s{}\n  sig (ptr, ptr, ptr) -> void\nb0(v0: ptr, v1: ptr, v2: ptr):\n  v3 = load.{} v1 align 0\n  v4 = load.{} v2 align 0\n  v5 = {}.{} v3, v4\n  store v5, v0 align 0\n  ret\n",
+            k,
+            k,
+            c.from,
+            c.from,
+            c.op,
+            c.from,
+        );
+        drv.format_into("void s{}(void *, const void *, const void *);\n", k);
+        body.format_into(
+            "  {{\n    {} a[64], m[64], o[64];\n    for (int i = 0; i < 64; i++) {{ a[i] = ({})(i * 0x9E3779B97F4A7C15u); m[i] = (i * 7 + 3) % {}; }}\n    for (int b = 0; b < 64; b += {}) s{}(o + b, a + b, m + b);\n    for (int i = 0; i < 64; i++) {{ {} x = a[i]; int s = (int)m[i]; if (({}) != o[i]) r = {}; }}\n  }}\n",
+            c.cf,
+            c.cf,
+            bits,
+            c.n,
+            k,
+            c.cf,
+            c.res,
+            k + 41,
+        );
+    }
+    body.push_str("  return r;\n}\n");
+    drv.push_str(body.as_str());
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir.as_str(), tgt::axis_index("linux", false), x64, 0, &mut obj), "the SSE2 object");
+    assert(object_of(lir.as_str(), tgt::axis_index("linux", false), x64, WIDE, &mut obj), "the AVX2 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir.as_str(), drv.as_str()), 0);
+    assert_eq(run_wide(lir.as_str(), drv.as_str()), 0);
+    assert_eq(run_wasm(lir.as_str(), drv.as_str()), 0);
+}
+
 // The little-endian `n`-byte word at byte `at` of `b`.
 fn word_at(b: &Vector<u8>, at: u32, n: u32) u32 {
     let mut w: u32 = 0;

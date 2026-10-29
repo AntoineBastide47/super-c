@@ -1345,6 +1345,15 @@ extend Gen {
             }
             return true;
         }
+        if op == O_VEXTRACT {
+            // The lane's load from the vector's home; an integer narrowed to its i32 local.
+            self.ld_lane(t.a, t.aux, t.ty, false, false);
+            if !is_float(t.ty) && wa::wtype(t.ty) == w::I32 {
+                self.c.op(w::I32_WRAP_I64);
+            }
+            self.put(i);
+            return true;
+        }
         if is_vec(t.ty) && op != O_LOAD && op != O_SELECT && op != O_CALL && op != O_CALLIND && op != O_VAARG && op != O_BITCAST || op == O_VOP {
             return self.vector(i, t);
         }
@@ -1386,7 +1395,7 @@ extend Gen {
             self.put(i);
             return true;
         }
-        if op >= O_FADD && op <= O_FNEG {
+        if op >= O_FADD && op <= O_FNEG || op == O_FSQRT {
             let d = t.ty == T_F64;
             if op == O_FNEG {
                 self.get(t.a);
@@ -1397,6 +1406,9 @@ extend Gen {
                         w::F32_NEG;
                     },
                 );
+            } else if op == O_FSQRT {
+                self.get(t.a);
+                self.c.op(pick8(d, w::F64_SQRT, w::F32_SQRT));
             } else {
                 self.get(t.a);
                 self.get(t.b);
@@ -3803,12 +3815,54 @@ extend Gen {
             }
             return true;
         }
-        if op >= O_ADD && op <= O_NOT || op >= O_FADD && op <= O_FNEG {
+        if op >= O_ADD && op <= O_NOT || op >= O_FADD && op <= O_FNEG || op == O_FSQRT {
             self.vec_arith(i, t);
             return true;
         }
         if op == O_VCMP {
             self.vcmp(i, t);
+            return true;
+        }
+        if op == O_VINSERT {
+            // The vector's lanes copied, then the scalar as lane `t.aux`.
+            let lt = lane_type(t.ty);
+            let d = self.vdef(i);
+            let x = self.tmp(w::I64);
+            for k in 0..lanes(t.ty) {
+                self.ld_lane(t.a, k, lt, false, true);
+                self.c.local(w::LOCAL_SET, x);
+                self.st_lane(x, d, k, lt, true);
+            }
+            let l = if is_float(lt) {
+                self.get(t.b);
+                self.tmp(pick8(lt == T_F64, w::F64, w::F32));
+            } else {
+                self.get64(t.b);
+                x;
+            };
+            self.c.local(w::LOCAL_SET, l);
+            self.st_lane(l, d, t.aux, lt, false);
+            return true;
+        }
+        if op == O_VZIPLO || op == O_VZIPHI {
+            // Lane 2k is lane h + k of `a`, lane 2k + 1 that of `b` (h: 0, or half the lanes).
+            let lt = lane_type(t.ty);
+            let n = lanes(t.ty);
+            let h = if op == O_VZIPHI {
+                n / 2;
+            } else {
+                0;
+            };
+            let d = self.vdef(i);
+            let x = self.tmp(w::I64);
+            for k in 0..n / 2 {
+                self.ld_lane(t.a, h + k, lt, false, true);
+                self.c.local(w::LOCAL_SET, x);
+                self.st_lane(x, d, 2 * k, lt, true);
+                self.ld_lane(t.b, h + k, lt, false, true);
+                self.c.local(w::LOCAL_SET, x);
+                self.st_lane(x, d, 2 * k + 1, lt, true);
+            }
             return true;
         }
         if op == O_VUNZIP {
@@ -3910,7 +3964,7 @@ extend Gen {
         }
     }
 
-    // Vector arithmetic: O_ADD .. O_NOT and O_FADD .. O_FNEG, lane by lane.
+    // Vector arithmetic: O_ADD .. O_NOT, O_FADD .. O_FNEG and O_FSQRT, lane by lane.
     fn vec_arith(self: &mut Self, i: u32, t: Inst) {
         let op = t.op;
         let lt = lane_type(t.ty);
@@ -3924,6 +3978,8 @@ extend Gen {
                 self.ld_lane(t.a, k, lt, false, false);
                 if op == O_FNEG {
                     self.c.op(pick8(lt == T_F64, w::F64_NEG, w::F32_NEG));
+                } else if op == O_FSQRT {
+                    self.c.op(pick8(lt == T_F64, w::F64_SQRT, w::F32_SQRT));
                 } else {
                     self.ld_lane(t.b, k, lt, false, false);
                     self.c.op(w::F32_ADD + (op - O_FADD) + fd);

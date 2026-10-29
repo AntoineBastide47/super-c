@@ -570,7 +570,7 @@ extend<'a> Parser<'a> {
                 return self.line_end_loc(&mut loc);
             }
             if w == "ref" {
-                // `ref p<k> <bytes> [inner] [noalias]`: what signature parameter k points to.
+                // `ref p<k> <bytes> [inner] [noalias] [readonly]`: what signature parameter k points to.
                 let mut k: u32 = 0;
                 let mut n: u32 = 0;
                 if !self.numbered(b'p', &mut k) || !self.uint(&mut n) || n > REF_BYTES || k >= 65536 {
@@ -581,6 +581,9 @@ extend<'a> Parser<'a> {
                 }
                 if self.keyword("noalias") {
                     n |= REF_NOALIAS;
+                }
+                if self.keyword("readonly") {
+                    n |= REF_READONLY;
                 }
                 if self.body.refs.len() <= k as usize {
                     self.body.refs.resize_default(k as usize + 1);
@@ -1055,6 +1058,26 @@ extend<'a> Parser<'a> {
             pi += 1;
         } else if (op == O_FPTOSI || op == O_FPTOUI) && pi < self.parts.len() && self.parts[pi] == "unchecked" {
             t.aux = CV_UNCHECKED;
+            pi += 1;
+        } else if op == O_VEXTRACT || op == O_VINSERT {
+            // The lane: decimal digits.
+            let mut lane: u32 = 0;
+            let d = if pi < self.parts.len() {
+                self.parts[pi];
+            } else {
+                "";
+            };
+            if d.len() == 0 || d.len() > 2 {
+                return self.fail("expected a lane");
+            }
+            for q in 0..d.len() {
+                let c = d.byte_at(q);
+                if c < b'0' || c > b'9' {
+                    return self.fail("expected a lane");
+                }
+                lane = lane * 10 + (c - b'0') as u32;
+            }
+            t.aux = lane as u16;
             pi += 1;
         } else if op == O_SYS {
             let mut found = false;

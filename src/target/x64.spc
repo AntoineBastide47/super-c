@@ -689,7 +689,12 @@ extend Code {
             return;
         }
         self.rm(0, 0x81, sz == 8, op as u8, m, false);
-        self.d32(k as u32);
+        if sz == 2 {
+            self.byte(k as u32);
+            self.byte(k as u32 >> 8);
+        } else {
+            self.d32(k as u32);
+        }
     }
 
     /// The flags of `a` & `b`.

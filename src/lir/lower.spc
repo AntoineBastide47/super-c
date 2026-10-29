@@ -2340,8 +2340,10 @@ extend Lower {
 
 extend Lower {
     // `Body.refs` of parameter local `l`: a reference's referent bytes, exclusive (REF_NOALIAS) for a
-    // `&mut` the body does not rebind, which the language makes the only path to them during the call;
-    // 0 for any other parameter or a referent of no known size.
+    // `&mut` the body does not rebind, which the language makes the only path to them during the call,
+    // read-only (REF_READONLY) for a `&T` the body does not rebind whose `T` holds no `UnsafeCell`
+    // (`frozen`), which the language keeps unchanged during the call; 0 for any other parameter or a
+    // referent of no known size.
     fn ref_of(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, l: u32) u32 {
         let mut rm = b.module;
         let mut rt = b.locals[l as usize].ty;
@@ -2358,18 +2360,46 @@ extend Lower {
         if ei.cls == VC_ZST || ei.size == 0 || ei.size > REF_BYTES {
             return 0;
         }
-        let excl = y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !b.locals[l as usize].is_mutable;
-        return ei.size | if excl {
+        let mt = y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
+        let fixed = !b.locals[l as usize].is_mutable;
+        return ei.size | if mt && fixed {
             REF_NOALIAS;
+        } else if !mt && fixed && Lower::frozen(c, rm, y.as_data.elem) {
+            REF_READONLY;
         } else {
             0u32;
         };
     }
 
+    // Whether a value of `(m, t)` holds no `UnsafeCell`, conservatively: a scalar, a pointer or a
+    // reference (its own bytes), a payload-free enum, or an array of them.
+    fn frozen(c: &cbe::CEmit, m: ModuleId, t: TypeId) bool {
+        let mut rm = m;
+        let mut rt = t;
+        let mut y = Lower::resolved(c, m, t, &mut rm, &mut rt);
+        // Each step enters one array level: at most 8.
+        for _ in 0..8 {
+            if y.kind != TypeKind::TYPE_ARRAY {
+                break;
+            }
+            let em = rm;
+            y = Lower::resolved(c, em, y.as_data.arr.elem, &mut rm, &mut rt);
+        }
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            return y.as_data.builtin != BuiltinType::BT_VOID && y.as_data.builtin != BuiltinType::BT_VALIST;
+        }
+        if y.kind == TypeKind::TYPE_ENUM {
+            return !Lower::ast(c, y.module).enum_has_payload(y.as_data.decl);
+        }
+        return y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE;
+    }
+
     // `Body.refs` of aggregate parameter local `l`: REF_INNER | REF_NOALIAS for a by-value `[]mut T` the
     // body does not rebind. The language makes it the only path to its elements during the call (it is
     // not `Copy`, a call's arguments reach no storage a mutable one reaches, and building one from raw
-    // parts is `unsafe`), when its element pointer is at offset 0; 0 for any other.
+    // parts is `unsafe`), when its element pointer is at offset 0. REF_INNER | REF_READONLY for a `[]T`
+    // the body does not rebind whose `T` holds no `UnsafeCell` (`frozen`): the language keeps its elements
+    // unchanged during the call. 0 for any other.
     fn view_ref(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, l: u32) u32 {
         if b.locals[l as usize].is_mutable {
             return 0;
@@ -2381,7 +2411,8 @@ extend Lower {
             return 0;
         }
         let it = *Lower::ast(c, rm).instance(y.as_data.inst);
-        if !Lower::p(c).is_prelude_item(DefId { module: it.module, node: it.decl }, "SliceMut") {
+        let excl = Lower::p(c).is_prelude_item(DefId { module: it.module, node: it.decl }, "SliceMut");
+        if !excl && !Lower::p(c).is_prelude_item(DefId { module: it.module, node: it.decl }, "Slice") {
             return 0;
         }
         let mut f = FieldAt {
@@ -2394,8 +2425,18 @@ extend Lower {
             mty: T_NONE,
             packed: false,
         };
-        return if self.named_field(c, rm, rt, "ptr", &mut f) && f.off == 0 {
-            REF_INNER | REF_NOALIAS;
+        if !self.named_field(c, rm, rt, "ptr", &mut f) || f.off != 0 {
+            return 0;
+        }
+        if excl {
+            return REF_INNER | REF_NOALIAS;
+        }
+        // The element type: the pointer's.
+        let mut pm = f.m;
+        let mut pt = f.t;
+        let py = Lower::resolved(c, f.m, f.t, &mut pm, &mut pt);
+        return if py.kind == TypeKind::TYPE_POINTER && Lower::frozen(c, pm, py.as_data.elem) {
+            REF_INNER | REF_READONLY;
         } else {
             0u32;
         };
@@ -4815,6 +4856,29 @@ extend Lower {
             let (a, o) = self.fold_addr(self.vaddr(args[0], st, self.vty(v), raw), 0);
             return self.inst(O_STORE, T_NONE, 0, a, v, o);
         }
+        // An ordered float sum or product: each lane in order into one scalar chain, which the optimizer
+        // sees through (a lane an insert set is the scalar inserted).
+        let ord = rv.c == irc::SIMD_REDUCE_ADD_ORD || rv.c == irc::SIMD_REDUCE_MUL_ORD;
+        if ord && ti.cls == VC_SCALAR && !mem_arg && args.len() == 1 && (ti.mty == T_F32 || ti.mty == T_F64) && self.vty(
+            args[0],
+        ) != T_NONE && is_vec(self.vty(args[0])) && lane_type(self.vty(args[0])) == ti.mty {
+            let lt = ti.mty;
+            let add = rv.c == irc::SIMD_REDUCE_ADD_ORD;
+            let bits: u64 = if add {
+                1u64 << (type_bits(lt, 8) - 1) as u64;
+            } else if lt == T_F32 {
+                0x3F800000;
+            } else {
+                0x3FF0000000000000;
+            };
+            let mut acc = self.fconst(lt, bits);
+            // `lanes` names the index list here: the lane count from the sizes.
+            for k in 0..type_bytes(self.vty(args[0]), 8) / type_bytes(lt, 8) {
+                let x = self.inst(O_VEXTRACT, lt, k as u16, args[0], VNONE, VNONE);
+                acc = self.inst(ast::pick(add, O_FADD, O_FMUL), lt, 0, acc, x, VNONE);
+            }
+            return acc;
+        }
         // An operation one backend entry computes whole calls it (`CEmit::lir_simd_entry`): its intrinsics
         // in place of the lane loop, which the inliner then splices.
         let mut ename = String::new();
@@ -6795,7 +6859,12 @@ extend Lower {
         }
         let mut r = VNONE;
         let nm = name.as_str();
-        if fv != VNONE || !self.rt_prim(nm, &args, &mut r) && !self.mem_intrin(c, nm, &args, &tys, ti, &mut r) && !self.lanes_intrin(
+        if fv == VNONE && ext && ti.cls == VC_SCALAR && args.len() == 1 && (nm == "sqrt" && ti.mty == T_F64 || nm == "sqrtf" && ti.mty == T_F32) && self.vty(
+            args[0],
+        ) == ti.mty {
+            // The C library's square root, correctly rounded as the instruction is.
+            r = self.inst(O_FSQRT, ti.mty, 0, args[0], VNONE, VNONE);
+        } else if fv != VNONE || !self.rt_prim(nm, &args, &mut r) && !self.mem_intrin(c, nm, &args, &tys, ti, &mut r) && !self.lanes_intrin(
             c,
             nm,
             &args,

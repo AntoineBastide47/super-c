@@ -340,8 +340,26 @@ extend Verifier {
                 "two vector operands of one type, a condition of their lanes and a mask result",
             );
         }
-        if op == O_VUNZIP {
+        if op == O_VUNZIP || op == O_VZIPLO || op == O_VZIPHI {
             return self.need(name, b, i, is_vec(t.ty) && ta == t.ty && tb == t.ty, "two vectors of the result's type");
+        }
+        if op == O_VEXTRACT {
+            return self.need(
+                name,
+                b,
+                i,
+                is_vec(ta) && t.ty == lane_type(ta) && t.aux as u32 < lanes(ta),
+                "a vector operand, a lane of it and its lane type",
+            );
+        }
+        if op == O_VINSERT {
+            return self.need(
+                name,
+                b,
+                i,
+                is_vec(t.ty) && ta == t.ty && tb == lane_type(t.ty) && t.aux as u32 < lanes(t.ty),
+                "a vector of the result's type, a lane of it and a scalar of its lane type",
+            );
         }
         if op == O_HTOF {
             return self.need(name, b, i, t.ty == T_F32 && ta == T_I16, "an i16 operand and an f32 result");
@@ -412,7 +430,7 @@ extend Verifier {
                 "two float operands of the result's type",
             );
         }
-        if op == O_FNEG {
+        if op == O_FNEG || op == O_FSQRT {
             return self.need(name, b, i, float_like(t.ty) && ta == t.ty, "a float operand of the result's type");
         }
         if op >= O_SEXT && op <= O_INTTOPTR {

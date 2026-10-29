@@ -925,13 +925,15 @@ extend Gen {
         for i in 0..ni {
             let t = b.insts[i];
             let mut un = false;
-            let reg_op = is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG) && neon_of_op(
+            let reg_op = is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && neon_of_op(
                 t.op,
                 lane_type(t.ty),
                 &mut un,
-            ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_WCONST) && Gen::in_vreg(
+            ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_WCONST || t.op == O_VINSERT) && Gen::in_vreg(
                 t.ty,
-            ) || t.op == O_VCMP && Gen::in_vreg(self.vt(t.a));
+            ) || (t.op == O_VCMP || t.op == O_VEXTRACT) && Gen::in_vreg(self.vt(t.a)) || t.op == O_VOP && self.vop_reg(
+                t,
+            ) || self.conv_reg(t) || (t.op == O_LSHR || t.op == O_ASHR) && is_vec(t.ty) && Gen::in_vreg(t.ty);
             if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
                 self.vmem[i] = true;
             }
@@ -954,6 +956,54 @@ extend Gen {
                 }
             }
         }
+    }
+
+    // Whether `vop` `t` computes in v registers (`vlanes`' register forms, a bitcast, a shift by a scalar):
+    // its vector operands and result need no memory.
+    fn vop_reg(self: &Self, t: Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        if t.b == 0 || t.c != VNONE {
+            return false;
+        }
+        let t0 = self.vt(self.b().pool[t.a as usize]);
+        if code == core::OP_SHL_SCALAR || code == core::OP_SHR_SCALAR {
+            return Gen::in_vreg(t.ty) && t0 == t.ty;
+        }
+        if code < core::OP_SIMD || code >= core::OP_CMP_LANES {
+            return false;
+        }
+        let c = (code - core::OP_SIMD) as u8;
+        let rule = core::simd_op(c).rule;
+        if rule == core::SR_BITCAST {
+            return Gen::in_vreg(t.ty) && Gen::in_vreg(t0) && type_bytes(t.ty, 8) == type_bytes(t0, 8);
+        }
+        if c == core::SIMD_GATHER_UNCHECKED {
+            return Gen::gather_reg(self.b(), t);
+        }
+        if c == core::SIMD_LOAD_MASKED_PTR || c == core::SIMD_STORE_MASKED_PTR {
+            return Gen::masked_reg(self.b(), t);
+        }
+        if c == core::SIMD_ABS_DIFF {
+            return Gen::in_vreg(t.ty) && Gen::in_vreg(t0) && type_bytes(lane_type(t0), 8) < 8;
+        }
+        if rule == core::SR_CHOOSE {
+            return Gen::in_vreg(t.ty) && lanes(t.ty) >= 2;
+        }
+        let lt = lane_type(t0);
+        if rule == core::SR_MASK {
+            let fl = is_float(lt);
+            let test = c >= core::SIMD_CMP_EQ && c <= core::SIMD_CMP_GE || fl && (c == core::SIMD_IS_NAN || c == core::SIMD_IS_INF || c == core::SIMD_IS_FINITE || c == core::SIMD_IS_SIGN_NEG);
+            return test && Gen::in_vreg(t0) && lanes(t0) >= 2;
+        }
+        let mut un = false;
+        let mut fma = false;
+        return rule == core::SR_VEC && Gen::in_vreg(t.ty) && neon_of_simd(
+            c,
+            lt,
+            (t.aux & VOP_SIGNED) != 0,
+            &mut un,
+            &mut fma,
+        ) != NONE;
     }
 
     // Whether a call that returns (`clobbers`) runs while value index `x` (an instruction's or a
@@ -1161,11 +1211,16 @@ extend Gen {
         }
     }
 
-    // Whether instruction `t` of `b` may call a function, which writes the caller-saved registers: a call,
-    // inline assembly, a vector operation, a copy or a fill, an i128 division or conversion.
+    // Whether instruction `t` of `b` may call a function that returns, which writes the caller-saved
+    // registers: a call, inline assembly, a float vector remainder (`fmod` per lane), a copy or a fill,
+    // an i128 division or conversion. Another vector operation calls only a lane's trap, which does not
+    // return.
     const fn clobbers(b: &Body, t: Inst) bool {
         let op = t.op;
-        if op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_VOP && !lv::reduces(t) || op == O_MEMCPY || op == O_MEMSET {
+        let fmod = op == O_VOP && (t.aux & VOP_CODE) as u32 == core::OP_REM && t.b != 0 && is_float(
+            lane_type(b.type_of(b.pool[t.a as usize])),
+        );
+        if op == O_CALL || op == O_CALLIND || op == O_ASM || fmod || op == O_MEMCPY || op == O_MEMSET {
             return true;
         }
         if op >= O_SDIV && op <= O_UREM {
@@ -1368,7 +1423,9 @@ extend Gen {
         // Code that may branch past a lane reads a vector from its home: a vector in a register reaches
         // it first, but for the instructions with register forms (`vop` and `vec_arith` sync their others)
         // and calls (a vector passed in memory goes through `mloc`).
-        let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP);
+        let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT) || t.op == O_VEXTRACT || self.conv_reg(
+            t,
+        );
         if !reg_form && !is_terminator(t.op) {
             for k in 0..self.uses.len() {
                 self.sync(self.uses[k]);
@@ -3067,6 +3124,14 @@ extend Gen {
             self.vunzip(i, t);
             return true;
         }
+        if op == O_VZIPLO || op == O_VZIPHI {
+            self.vzip(i, t);
+            return true;
+        }
+        if op == O_VEXTRACT || op == O_VINSERT {
+            self.vlane(i, t);
+            return true;
+        }
         if op == O_HTOF || op == O_FTOH {
             self.half_conv(i, t);
             return true;
@@ -3120,15 +3185,17 @@ extend Gen {
             self.emit(a::lsr_imm(true, rd, rd, bits));
             return true;
         }
-        if op >= O_FADD && op <= O_FNEG {
+        if op >= O_FADD && op <= O_FNEG || op == O_FSQRT {
             if is_vec(t.ty) {
                 return self.vec_arith(i, t);
             }
             let d = t.ty == T_F64;
             let ra = self.reg(t.a);
-            if op == O_FNEG {
+            if op == O_FNEG || op == O_FSQRT {
                 let rd = self.def(i);
-                self.emit(a::fp1(d, a::FP_NEG, rd - V0, ra - V0));
+                self.emit(
+                    a::fp1(d, a::on(op == O_FNEG, a::FP_NEG) | a::on(op == O_FSQRT, a::FP_SQRT), rd - V0, ra - V0),
+                );
                 return true;
             }
             let rb = self.reg(t.b);
@@ -6917,13 +6984,43 @@ const fn vsize(eb: u32) u32 {
     return eb.trailing_zeros() as u32;
 }
 
+// The NEON instruction (registers 0) of conversion `op` of lanes of `fl` into lanes of `tl`, NONE without
+// one: an integer to a float of its width (SCVTF, UCVTF) and back (FCVTZS, FCVTZU: toward zero, saturating,
+// NaN to 0, as the scalar conversions), an integer to twice its width (SSHLL, USHLL by 0) or half (XTN), a
+// float to twice its width (FCVTL) or half (FCVTN).
+const fn neon_conv(op: u8, fl: u8, tl: u8) u32 {
+    let fb = type_bytes(fl, 8);
+    let tb = type_bytes(tl, 8);
+    let fi = !is_float(fl);
+    let ti = !is_float(tl);
+    if (op == O_SEXT || op == O_ZEXT) && fi && ti && tb == 2 * fb {
+        return 0x0F00A400 | a::on(op == O_ZEXT, 1u32 << 29) | fb * 8 << 16;
+    }
+    if op == O_TRUNC && fi && ti && fb == 2 * tb {
+        return a::v2op(false, 0x12, vsize(tb), 0, 0);
+    }
+    if (op == O_SITOFP || op == O_UITOFP) && fi && !ti && fb == tb {
+        return a::v2op(false, 0x1D | a::on(op == O_UITOFP, 0x20), (tb == 8) as u32, 0, 0);
+    }
+    if (op == O_FPTOSI || op == O_FPTOUI) && !fi && ti && fb == tb {
+        return a::v2op(false, 0x1B | a::on(op == O_FPTOUI, 0x20), 2 | (fb == 8) as u32, 0, 0);
+    }
+    if op == O_FPEXT && fl == T_F32 && tl == T_F64 {
+        return a::v2op(false, 0x17, 1, 0, 0);
+    }
+    if op == O_FPTRUNC && fl == T_F64 && tl == T_F32 {
+        return a::v2op(false, 0x16, 1, 0, 0);
+    }
+    return NONE;
+}
+
 // The NEON instruction (8 bytes, registers 0) of element-wise LIR operation `op` on lanes of `lt`, NONE
 // without one; `un` set for one operand.
 const fn neon_of_op(op: u8, lt: u8, un: &mut bool) u32 {
     let eb = type_bytes(lt, 8);
     let s = vsize(eb);
     let sz = (lt == T_F64) as u32;
-    *un = op == O_NOT || op == O_NEG || op == O_FNEG;
+    *un = op == O_NOT || op == O_NEG || op == O_FNEG || op == O_FSQRT;
     if op == O_ADD {
         return a::v3op(false, a::V3_ADD, s, 0, 0, 0);
     }
@@ -6932,6 +7029,10 @@ const fn neon_of_op(op: u8, lt: u8, un: &mut bool) u32 {
     }
     if op == O_MUL && eb < 8 {
         return a::v3op(false, a::V3_MUL, s, 0, 0, 0);
+    }
+    if op == O_SHL {
+        // USHL: each lane by its amount's low byte.
+        return 0x2E204400 | s << 22;
     }
     if op == O_AND {
         return a::v3op(false, a::V3_AND, 0, 0, 0, 0);
@@ -6962,6 +7063,9 @@ const fn neon_of_op(op: u8, lt: u8, un: &mut bool) u32 {
     }
     if op == O_FNEG {
         return a::v2op(false, a::V2_FNEG, 2 | sz, 0, 0);
+    }
+    if op == O_FSQRT {
+        return a::v2op(false, a::V2_FSQRT, 2 | sz, 0, 0);
     }
     return NONE;
 }
@@ -7142,6 +7246,13 @@ extend Gen {
         }
     }
 
+    // NEON instruction `w` of vector `x` and register v`m` into vector `i`'s register.
+    fn neon_reg_m(self: &mut Self, w: u32, i: u32, x: Value, m: u32, nb: u32) {
+        let rx = self.vec_use(x, V0 + 30);
+        let rd = self.def_step(i);
+        self.emit(w | a::on(nb == 16, 1u32 << 30) | (rd - V0) as u32 | (rx - V0) as u32 << 5 | m << 16);
+    }
+
     // Neon instruction `w` (its register fields 0) of one register's width (`nb`, 8 or 16 bytes) on `x`
     // and `y` (VNONE: none), accumulating into a copy of `acc` (VNONE: none), into a register that holds
     // result `i`.
@@ -7282,6 +7393,93 @@ extend Gen {
         }
     }
 
+    // Lane interleave `t` (`O_VZIPLO`, `O_VZIPHI`) into vector `i`: ZIP1 or ZIP2; a vector outside a v
+    // register moves each lane.
+    fn vzip(self: &mut Self, i: u32, t: Inst) {
+        let nb = type_bytes(t.ty, 8);
+        let lt = lane_type(t.ty);
+        if Gen::in_vreg(t.ty) {
+            let w = if t.op == O_VZIPLO {
+                0x0E003800u32;
+            } else {
+                0x0E007800u32;
+            };
+            self.neon_reg(w | vsize(type_bytes(lt, 8)) << 22, i, t.a, t.b, VNONE, nb);
+            return;
+        }
+        self.sync(t.a);
+        self.sync(t.b);
+        let d = self.mdef(i);
+        let n = lanes(t.ty);
+        let h = if t.op == O_VZIPHI {
+            n / 2;
+        } else {
+            0;
+        };
+        let x = self.tmp(false);
+        for k in 0..n / 2 {
+            self.ld_lane(x, t.a, h + k, lt, false, true);
+            self.st_lane(x, d, 2 * k, lt, true);
+            self.ld_lane(x, t.b, h + k, lt, false, true);
+            self.st_lane(x, d, 2 * k + 1, lt, true);
+        }
+    }
+
+    // Lane access `t` (`O_VEXTRACT`, `O_VINSERT`, lane `t.aux`) into `i`: DUP (a float) or UMOV (an
+    // integer) of the lane, or a copy of the vector then INS of the scalar; a vector outside a v register
+    // loads the lane, or copies its bytes and stores the lane.
+    fn vlane(self: &mut Self, i: u32, t: Inst) {
+        let k = t.aux as u32;
+        if t.op == O_VEXTRACT {
+            let eb = type_bytes(t.ty, 8);
+            if Gen::in_vreg(self.vt(t.a)) {
+                let rv = self.vec_use(t.a, V0 + 31) as u32 - V0 as u32;
+                let rd = self.def(i) as u32;
+                // imm5: the index above the lane size's bit.
+                let imm5 = (k << 1 | 1) << eb.trailing_zeros() as u32;
+                if is_float(t.ty) {
+                    self.emit(0x5E000400 | imm5 << 16 | rv << 5 | rd - V0 as u32);
+                } else {
+                    self.emit(0x0E003C00 | a::on(eb == 8, 1u32 << 30) | imm5 << 16 | rv << 5 | rd);
+                }
+                return;
+            }
+            let rd = self.def(i);
+            self.ld_lane(rd, t.a, k, t.ty, false, false);
+            return;
+        }
+        let lt = lane_type(t.ty);
+        let eb = type_bytes(lt, 8);
+        let nb = type_bytes(t.ty, 8);
+        if !Gen::in_vreg(t.ty) {
+            let (sb, so) = self.mloc(t.a);
+            let rs = self.reg(t.b);
+            let d = self.mdef(i);
+            self.copy_mem(a::SP, d, sb, so, nb);
+            self.st_lane(rs, d, k, lt, false);
+            return;
+        }
+        let mut rs = self.reg(t.b) as u32;
+        let ra = self.vec_use(t.a, V0 + 30);
+        let rd = self.vec_def(i);
+        if is_float(lt) && rs == rd as u32 {
+            // The scalar shares the result's register: kept in v31 across the vector's copy.
+            self.emit(a::vmov(true, 31, rd - V0));
+            rs = V0 as u32 + 31;
+        }
+        if ra != rd {
+            self.emit(a::vmov(nb == 16, rd - V0, ra - V0));
+        }
+        let imm5 = (k << 1 | 1) << eb.trailing_zeros() as u32;
+        if is_float(lt) {
+            // INS Vd.T[k], Vn.T[0].
+            self.emit(0x6E000400 | imm5 << 16 | rs - V0 as u32 << 5 | (rd - V0) as u32);
+        } else {
+            // INS Vd.T[k], Wn or Xn.
+            self.emit(0x4E001C00 | imm5 << 16 | rs << 5 | (rd - V0) as u32);
+        }
+    }
+
     // Lane select `t` into vector `i`: BSL over a copy of the mask; a vector outside a v register selects
     // each lane's bits.
     fn vsel(self: &mut Self, i: u32, t: Inst) {
@@ -7377,6 +7575,156 @@ extend Gen {
         return scratch;
     }
 
+    // Lane test `c` (a comparison, or a float class test: NaN, infinite, finite, sign) of the vectors `ops`
+    // in v registers (`nb` bytes of lanes of `lt`, signed `sg`) into bitmask `i`: the NEON compare's lane
+    // masks (`neon_cmp`, NOT for `ne`; `nan` as `x != x`, the magnitude against infinity by FACGT or FACGE,
+    // the sign by CMLT #0), then `mask_bits`.
+    fn mask_reg(self: &mut Self, i: u32, c: u8, sg: bool, lt: u8, nb: u32, ops: &[Value; 4]) {
+        let q = nb == 16;
+        let fl = is_float(lt);
+        let sz = (lt == T_F64) as u32;
+        let rx = self.vec_use(ops[0], V0 + 30) - V0;
+        let m = self.tmp(true);
+        let mv = (m - V0) as u32;
+        if c >= core::SIMD_CMP_EQ && c <= core::SIMD_CMP_GE {
+            let ry = self.vec_use(ops[1], V0 + 31) - V0;
+            let (w, swap) = neon_cmp(simd_cond(c, sg, fl), lt);
+            let (p, r) = if swap {
+                (ry, rx);
+            } else {
+                (rx, ry);
+            };
+            self.emit(w | a::on(q, 1u32 << 30) | mv | p as u32 << 5 | r as u32 << 16);
+            if c == core::SIMD_CMP_NE {
+                self.emit(a::v2op(q, a::V2_NOT, 0, mv, mv));
+            }
+        } else if c == core::SIMD_IS_NAN {
+            self.emit(a::v3op(q, 0x1C, sz, mv, rx, rx));
+            self.emit(a::v2op(q, a::V2_NOT, 0, mv, mv));
+        } else if c == core::SIMD_IS_SIGN_NEG {
+            // CMLT #0 of the lanes' bits.
+            self.emit(0x0E20A800 | a::on(q, 1u32 << 30) | vsize(type_bytes(lt, 8)) << 22 | rx as u32 << 5 | mv);
+        } else {
+            let inf = self.tmp(true);
+            let ib = if sz != 0 {
+                0x7FF0000000000000u64;
+            } else {
+                0x7F8000007F800000u64;
+            };
+            self.vwords(inf, ib, ib, q);
+            if c == core::SIMD_IS_FINITE {
+                // FACGT: |inf| > |x|.
+                self.emit(a::v3op(q, 0x3D, 2 | sz, mv, inf - V0, rx));
+            } else {
+                // FACGE: |x| >= |inf|.
+                self.emit(a::v3op(q, 0x3D, sz, mv, rx, inf - V0));
+            }
+        }
+        let mk = self.def(i);
+        self.mask_bits(mk, m, type_bytes(lt, 8), nb);
+    }
+
+    // The bitmask of lane masks `m` (`nb` bytes of `eb`-byte lanes, each all ones or 0) into general
+    // register `mk`, bit k for lane k: each lane ANDed with its bit, then summed across the lanes (ADDV;
+    // ADDP for two lanes; each half of sixteen bytes on its own). `m` is clobbered.
+    fn mask_bits(self: &mut Self, mk: u8, m: u8, eb: u32, nb: u32) {
+        let q = nb == 16;
+        let n = nb / eb;
+        let mv = (m - V0) as u32;
+        let w = self.tmp(true);
+        let wv = (w - V0) as u32;
+        self.lane_bits(w, eb, q);
+        self.emit(a::v3op(q, a::V3_AND, 0, mv, mv, wv));
+        if n == 16 {
+            // EXT w, m, m, #8; ADDV of each half's bytes.
+            self.emit(0x6E004000 | mv << 16 | mv << 5 | wv);
+            self.emit(0x0E31B800 | mv << 5 | mv);
+            self.emit(0x0E31B800 | wv << 5 | wv);
+            let hi = self.tmp(false);
+            self.emit(a::fmov_gv(false, false, mk, mv));
+            self.emit(a::fmov_gv(false, false, hi, wv));
+            self.emit(a::logic_reg(true, 1, false, mk, mk, hi, 0, 8));
+            return;
+        }
+        if n == 2 && eb == 8 {
+            // ADDP Dd, Vn.2D.
+            self.emit(0x5EF1B800 | mv << 5 | mv);
+            self.emit(a::fmov_gv(true, false, mk, mv));
+            return;
+        }
+        if n == 2 {
+            // ADDP Vd.2S.
+            self.emit(0x0E20BC00 | 2u32 << 22 | mv << 16 | mv << 5 | mv);
+        } else {
+            self.emit(0x0E31B800 | a::on(q, 1u32 << 30) | vsize(eb) << 22 | mv << 5 | mv);
+        }
+        self.emit(a::fmov_gv(false, false, mk, mv));
+    }
+
+    // Each lane k of v register `w` (`eb`-byte lanes, 16 bytes when `q`, else 8) set to 1 << k, counted
+    // from 0 again in each 8-byte half of byte lanes.
+    fn lane_bits(self: &mut Self, w: u8, eb: u32, q: bool) {
+        let (w0, w1) = if eb == 8 {
+            (1u64, 2u64);
+        } else if eb == 4 {
+            (0x0000000200000001u64, 0x0000000800000004u64);
+        } else if eb == 2 {
+            (0x0008000400020001u64, 0x0080004000200010u64);
+        } else {
+            (0x8040201008040201u64, 0x8040201008040201u64);
+        };
+        self.vwords(w, w0, w1, q);
+    }
+
+    // v register `w` = 8-byte words `w0`, then `w1` when `q`, through ip0 (DUP when they are equal).
+    fn vwords(self: &mut Self, w: u8, w0: u64, w1: u64, q: bool) {
+        let wv = (w - V0) as u32;
+        self.mov_imm(a::IP0 as u8, w0, true);
+        if q && w0 == w1 {
+            // DUP Vd.2D, ip0.
+            self.emit(0x4E080C00 | a::IP0 << 5 | wv);
+            return;
+        }
+        self.emit(a::fmov_gv(true, true, wv, a::IP0));
+        if q {
+            self.mov_imm(a::IP0 as u8, w1, true);
+            // INS Vd.D[1], ip0.
+            self.emit(0x4E181C00 | a::IP0 << 5 | wv);
+        }
+    }
+
+    // Lane choice `ops[1]` where bitmask `ops[0]` has the lane's bit, else `ops[2]` (vectors in v
+    // registers, `nb` bytes of lanes of `lt`): the bitmask in every lane (bytes: its low byte in the low
+    // half, its high byte in the high one), CMTST against each lane's bit, then BSL.
+    fn choose_reg(self: &mut Self, i: u32, ops: &[Value; 4], lt: u8, nb: u32) {
+        let q = nb == 16;
+        let eb = type_bytes(lt, 8);
+        let rx = self.vec_use(ops[1], V0 + 30) - V0;
+        let ry = self.vec_use(ops[2], V0 + 31) - V0;
+        let rm = self.reg(ops[0]) as u32;
+        let m = self.tmp(true);
+        let mv = (m - V0) as u32;
+        let w = self.tmp(true);
+        let wv = (w - V0) as u32;
+        if eb == 1 && q {
+            // DUP m.8H; UZP1 w.16B (the low bytes); UZP2 m.16B (the high ones); ZIP1 m.2D, w, m.
+            self.emit(0x4E020C00 | rm << 5 | mv);
+            self.emit(0x4E001800 | mv << 16 | mv << 5 | wv);
+            self.emit(0x4E005800 | mv << 16 | mv << 5 | mv);
+            self.emit(0x4EC03800 | mv << 16 | wv << 5 | mv);
+        } else {
+            // DUP m.T, the bitmask.
+            self.emit(0x0E000C00 | a::on(q, 1u32 << 30) | eb << 16 | rm << 5 | mv);
+        }
+        self.lane_bits(w, eb, q);
+        // CMTST m, m, w.
+        self.emit(a::v3op(q, 0x11, vsize(eb), mv, mv, wv));
+        let rd = self.vec_def(i);
+        self.emit(a::vmov(q, rd - V0, mv));
+        // BSL rd, x, y.
+        self.emit(a::v3op(q, a::V3_EOR, 1, rd - V0, rx, ry));
+    }
+
     // `mk` |= 1 << `k` when condition `cond` holds (`tr` a temporary).
     fn mask_bit(self: &mut Self, mk: u8, cond: u32, k: u32, tr: u8) {
         self.emit(a::cset(true, tr, cond));
@@ -7393,7 +7741,7 @@ extend Gen {
         self.call_rt("__sc_lane_panic");
     }
 
-    // Vector arithmetic: O_ADD .. O_NOT and O_FADD .. O_FNEG on vectors.
+    // Vector arithmetic: O_ADD .. O_NOT, O_FADD .. O_FNEG and O_FSQRT on vectors.
     fn vec_arith(self: &mut Self, i: u32, t: Inst) bool {
         let op = t.op;
         let lt = lane_type(t.ty);
@@ -7408,6 +7756,24 @@ extend Gen {
         };
         if w != NONE && Gen::in_vreg(t.ty) {
             self.neon_reg(w, i, t.a, y, VNONE, nb);
+            return true;
+        }
+        if (op == O_LSHR || op == O_ASHR) && Gen::in_vreg(t.ty) {
+            // USHL or SSHL by the negated amounts.
+            let s = vsize(type_bytes(lt, 8));
+            let rx = self.vec_use(t.a, V0 + 30);
+            let ry = self.vec_use(t.b, V0 + 31);
+            let rd = self.vec_def(i);
+            let m = self.tmp(true);
+            self.emit(a::v2op(nb == 16, a::V2_NEG, s, m - V0, ry - V0));
+            let sh = if op == O_ASHR {
+                0x0E204400u32;
+            } else {
+                0x2E204400u32;
+            };
+            self.emit(
+                sh | a::on(nb == 16, 1u32 << 30) | s << 22 | (m - V0) as u32 << 16 | (rx - V0) as u32 << 5 | (rd - V0) as u32,
+            );
             return true;
         }
         self.sync(t.a);
@@ -7434,8 +7800,10 @@ extend Gen {
             };
             for k in 0..n {
                 self.ld_lane(fa, t.a, k, lt, false, false);
-                if op == O_FNEG {
-                    self.emit(a::fp1(dd, a::FP_NEG, fa - V0, fa - V0));
+                if op == O_FNEG || op == O_FSQRT {
+                    self.emit(
+                        a::fp1(dd, a::on(op == O_FNEG, a::FP_NEG) | a::on(op == O_FSQRT, a::FP_SQRT), fa - V0, fa - V0),
+                    );
                 } else {
                     self.ld_lane(fb, t.b, k, lt, false, false);
                     self.emit(a::fp2(dd, f, fa - V0, fa - V0, fb - V0));
@@ -7570,11 +7938,32 @@ extend Gen {
         }
     }
 
-    // A vector conversion of LIR (O_SEXT .. O_UITOFP on vectors).
+    // Whether vector conversion `t` has one NEON form (`neon_conv`) and both its vectors are in v registers.
+    fn conv_reg(self: &Self, t: Inst) bool {
+        return is_vec(t.ty) && t.op >= O_SEXT && t.op <= O_UITOFP && Gen::in_vreg(t.ty) && Gen::in_vreg(self.vt(t.a)) && neon_conv(
+            t.op,
+            lane_type(self.vt(t.a)),
+            lane_type(t.ty),
+        ) != NONE;
+    }
+
+    // A vector conversion of LIR (O_SEXT .. O_UITOFP on vectors): one NEON instruction in v registers
+    // (`neon_conv`), else lane by lane.
     fn vec_convert(self: &mut Self, i: u32, t: Inst) {
         let op = t.op;
         let fl = lane_type(self.vt(t.a));
         let tl = lane_type(t.ty);
+        if self.conv_reg(t) {
+            // The forms between widths read or write the low 8 bytes (Q = 0).
+            let same = type_bytes(fl, 8) == type_bytes(tl, 8);
+            let nb = if same {
+                type_bytes(t.ty, 8);
+            } else {
+                8;
+            };
+            self.neon_reg(neon_conv(op, fl, tl), i, t.a, VNONE, VNONE, nb);
+            return;
+        }
         let fs = op == O_SEXT || op == O_SITOFP;
         let ts = op == O_FPTOSI;
         self.vec_conv(i, t.a, fl, fs, tl, ts, t.aux == CV_UNCHECKED);
@@ -7599,8 +7988,26 @@ extend Gen {
         } else {
             0u8;
         };
-        if !simd || rule == core::SR_MLOAD || rule == core::SR_MSTORE || rule == core::SR_REDUCE || rule == core::SR_DOT || rule == core::SR_INDEX || rule == core::SR_RT_INDEX || rule == core::SR_MASKED {
+        let sc = if simd {
+            (code - core::OP_SIMD) as u8;
+        } else {
+            0u8;
+        };
+        let mreg = (sc == core::SIMD_LOAD_MASKED_PTR || sc == core::SIMD_STORE_MASKED_PTR) && Gen::masked_reg(
+            self.b(),
+            t,
+        );
+        if mreg {
+            self.masked_in_reg(i, sc == core::SIMD_STORE_MASKED_PTR, &ops, &tys);
+            return true;
+        }
+        let greg = sc == core::SIMD_GATHER_UNCHECKED && Gen::gather_reg(self.b(), t);
+        if !greg && (!simd || rule == core::SR_MLOAD || rule == core::SR_MSTORE || rule == core::SR_REDUCE || rule == core::SR_DOT || rule == core::SR_INDEX || rule == core::SR_RT_INDEX || rule == core::SR_MASKED) {
             self.sync_ops(&ops);
+        }
+        if greg {
+            self.gather_in_reg(i, &ops, &tys);
+            return true;
         }
         if code == core::OP_CAST {
             let fl = lane_type(tys[0]);
@@ -7623,6 +8030,19 @@ extend Gen {
             let cnt = self.reg(ops[1]);
             let kr = self.tmp(false);
             self.emit(a::logic_imm(true, 0, kr, cnt, a::logical_imm(lb - 1, true)));
+            if Gen::in_vreg(t.ty) {
+                // The count in each lane of v31 (negated for a right shift), then USHL or SSHL.
+                let nb = type_bytes(t.ty, 8);
+                let eb = type_bytes(lt, 8);
+                if code == core::OP_SHR_SCALAR {
+                    self.emit(a::addsub_reg(true, 1, false, kr, a::ZR, kr, 0, 0));
+                }
+                self.emit(0x0E000C00 | a::on(nb == 16, 1u32 << 30) | eb << 16 | kr as u32 << 5 | 31);
+                let u = code == core::OP_SHL_SCALAR || !sg;
+                let w = a::on(u, 0x20000000) | 0x0E204400 | vsize(eb) << 22;
+                self.neon_reg_m(w, i, ops[0], 31, nb);
+                return true;
+            }
             let x = self.tmp(false);
             let d = self.mdef(i);
             let sop = if code == core::OP_SHL_SCALAR {
@@ -7719,6 +8139,30 @@ extend Gen {
         let n = lanes(vt);
         let nb = n * eb;
         let fl = is_float(lt);
+        // A mask (`Mask<N>`, one bit per lane) of vectors in v registers, and a choice by one: lane masks.
+        let lane_test = c >= core::SIMD_CMP_EQ && c <= core::SIMD_CMP_GE || fl && (c == core::SIMD_IS_NAN || c == core::SIMD_IS_INF || c == core::SIMD_IS_FINITE || c == core::SIMD_IS_SIGN_NEG);
+        if n >= 2 && Gen::in_vreg(vt) && (rule == core::SR_MASK && lane_test || rule == core::SR_CHOOSE) {
+            if rule == core::SR_CHOOSE {
+                self.choose_reg(i, ops, lt, nb);
+            } else {
+                self.mask_reg(i, c, sg, lt, nb, ops);
+            }
+            return;
+        }
+        if c == core::SIMD_ABS_DIFF && Gen::in_vreg(t.ty) && Gen::in_vreg(vt) && eb < 8 {
+            // UABD or SABD.
+            self.neon_reg(a::on(!sg, 0x20000000) | 0x0E207400 | vsize(eb) << 22, i, ops[0], ops[1], VNONE, nb);
+            return;
+        }
+        if rule == core::SR_BITCAST && Gen::in_vreg(t.ty) && Gen::in_vreg(vt) && type_bytes(t.ty, 8) == nb {
+            // The same bits in a register: a copy.
+            let rx = self.vec_use(ops[0], V0 + 30);
+            let rd = self.def_step(i);
+            if rd != rx {
+                self.emit(a::vmov(nb == 16, rd - V0, rx - V0));
+            }
+            return;
+        }
         if rule == core::SR_BITCAST || rule == core::SR_HALF || rule == core::SR_CONCAT {
             let d = self.mdef(i);
             let rb = type_bytes(t.ty, 8);
@@ -8474,6 +8918,119 @@ extend Gen {
 
     // The masked, partial and gather forms (the evaluator's `vmem_masked`): every active lane is checked
     // before the first access, the lowest failing one traps; an inactive lane never touches its element.
+    // Whether unchecked gather `t` of `b` (place, indexes, mask, fallback) runs in v registers: its
+    // indexes and result each one register of integer indexes of 4 or 8 bytes.
+    const fn gather_reg(b: &Body, t: Inst) bool {
+        if t.b != 4 {
+            return false;
+        }
+        let it = b.type_of(b.pool[(t.a + 1) as usize]);
+        return Gen::in_vreg(t.ty) && Gen::in_vreg(it) && lanes(it) == lanes(t.ty) && type_bytes(lane_type(it), 8) >= 4;
+    }
+
+    // Whether masked access `t` of `b` through a pointer (pointer, mask, vector) runs in a v register.
+    const fn masked_reg(b: &Body, t: Inst) bool {
+        return t.b == 3 && Gen::in_vreg(b.type_of(b.pool[(t.a + 2) as usize]));
+    }
+
+    // Masked load (into vector `i`, from the fallback's copy) or `store` through a pointer (`masked_reg`):
+    // per lane the mask sets (each without a test for a constant mask), the lane's bytes through a
+    // general register and INS or UMOV.
+    fn masked_in_reg(self: &mut Self, i: u32, store: bool, ops: &[Value; 4], tys: &[u8; 4]) {
+        let vt = tys[2];
+        let lt = lane_type(vt);
+        let eb = type_bytes(lt, 8);
+        let n = lanes(vt);
+        let nb = type_bytes(vt, 8);
+        let mut mc: u64 = 0;
+        let known = self.const_of(ops[1], &mut mc);
+        let act = if known {
+            NOREG;
+        } else {
+            self.reg(ops[1]);
+        };
+        let p = self.reg(ops[0]);
+        let x = self.tmp(false);
+        let rv = self.vec_use(ops[2], V0 + 31);
+        let rd = if store {
+            rv;
+        } else {
+            let r = self.vec_def(i);
+            if r != rv {
+                self.emit(a::vmov(nb == 16, r - V0, rv - V0));
+            }
+            r;
+        };
+        for k in 0..n {
+            if known && (mc >> k as u64 & 1) == 0 {
+                continue;
+            }
+            let w0 = self.code.len() as u32;
+            if !known {
+                self.emit(a::tbz(false, act, k, 0));
+            }
+            let im = (k << 1 | 1) << eb.trailing_zeros() as u32;
+            if store {
+                // UMOV x, rd.T[k]; its bytes at p + k * eb.
+                self.emit(0x0E003C00 | a::on(eb == 8, 1u32 << 30) | im << 16 | (rd - V0) as u32 << 5 | x as u32);
+                self.mem(lane_st(lt, true), false, x, p, k * eb);
+            } else {
+                self.mem(lane_ld(lt, false, true), true, x, p, k * eb);
+                self.emit(0x4E001C00 | im << 16 | x as u32 << 5 | (rd - V0) as u32);
+            }
+            if !known {
+                self.here(w0);
+            }
+        }
+    }
+
+    // Unchecked gather `ops` (`gather_reg`) into vector `i`: the fallback's copy, then per lane the mask
+    // allows (every lane for a constant mask of all of them) the index by UMOV, the element's load and
+    // INS into its lane.
+    fn gather_in_reg(self: &mut Self, i: u32, ops: &[Value; 4], tys: &[u8; 4]) {
+        let vt = tys[3];
+        let lt = lane_type(vt);
+        let eb = type_bytes(lt, 8);
+        let ib = type_bytes(lane_type(tys[1]), 8);
+        let n = lanes(vt);
+        let nb = type_bytes(vt, 8);
+        let mut mc: u64 = 0;
+        let all = trunc64(~0u64, n);
+        let act = if self.const_of(ops[2], &mut mc) && (mc & all) == all {
+            NOREG;
+        } else {
+            self.reg(ops[2]);
+        };
+        let r0 = self.reg(ops[0]);
+        let p = self.tmp(false);
+        self.mem(a::M_X, true, p, r0, 0);
+        let ix = self.tmp(false);
+        let x = self.tmp(false);
+        let ri = self.vec_use(ops[1], V0 + 30) as u32 - V0 as u32;
+        let rf = self.vec_use(ops[3], V0 + 31);
+        let rd = self.vec_def(i);
+        if rd != rf {
+            self.emit(a::vmov(nb == 16, rd - V0, rf - V0));
+        }
+        let s = eb.trailing_zeros() as u32;
+        for k in 0..n {
+            let w0 = self.code.len() as u32;
+            if act != NOREG {
+                self.emit(a::tbz(false, act, k, 0));
+            }
+            // UMOV ix, ri.T[k]; the element at p + (ix << s); INS rd.T[k] from it.
+            let im = (k << 1 | 1) << ib.trailing_zeros() as u32;
+            self.emit(0x0E003C00 | a::on(ib == 8, 1u32 << 30) | im << 16 | ri << 5 | ix as u32);
+            self.emit(a::addsub_reg(true, 0, false, x, p, ix, 0, s));
+            self.mem(lane_ld(lt, false, true), true, x, x, 0);
+            let em = (k << 1 | 1) << eb.trailing_zeros() as u32;
+            self.emit(0x4E001C00 | em << 16 | x as u32 << 5 | (rd - V0) as u32);
+            if act != NOREG {
+                self.here(w0);
+            }
+        }
+    }
+
     fn vmem_masked(self: &mut Self, i: u32, t: Inst, c: u8, ops: &[Value; 4], tys: &[u8; 4]) {
         let op = core::simd_op(c);
         let ar = op.arity as usize;
@@ -8705,6 +9262,22 @@ const fn int_cond(c: u8, sg: bool) u32 {
 }
 
 // The condition of float comparison rule `c` after `fcmp`: ordered, but `!=` holds for a NaN.
+// The LIR condition (`C_*`) of lane comparison `c` (`SIMD_CMP_*`) of lanes signed `sg` or of floats `fl`:
+// the float ones ordered but `ne`.
+const fn simd_cond(c: u8, sg: bool, fl: bool) u16 {
+    let k = (c - core::SIMD_CMP_EQ) as usize;
+    let f: [u16; 6] = [C_OEQ, C_UNE, C_OLT, C_OLE, C_OGT, C_OGE];
+    let s: [u16; 6] = [C_EQ, C_NE, C_SLT, C_SLE, C_SGT, C_SGE];
+    let u: [u16; 6] = [C_EQ, C_NE, C_ULT, C_ULE, C_UGT, C_UGE];
+    return if fl {
+        unsafe f[k];
+    } else if sg {
+        unsafe s[k];
+    } else {
+        unsafe u[k];
+    };
+}
+
 const fn float_cond(c: u8) u32 {
     if c == core::SIMD_CMP_EQ {
         return a::EQ;

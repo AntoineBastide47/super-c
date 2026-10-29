@@ -471,6 +471,39 @@ extend Eval {
             }
             return true;
         }
+        if op == O_VEXTRACT {
+            let vt = b.type_of(t.a);
+            let wa = self.word(&f, b, t.a);
+            self.vals[dst as usize] = get_lane(&self.vals, wa, t.aux, type_bits(lane_type(vt), ptr));
+            return true;
+        }
+        if op == O_VINSERT {
+            let wa = self.word(&f, b, t.a);
+            let x = self.val(&f, b, t.b);
+            for k in 0..value_words(t.ty, ptr) {
+                self.vals[(dst + k) as usize] = self.vals[(wa + k) as usize];
+            }
+            set_lane(&mut self.vals, dst, t.aux, type_bits(lane_type(t.ty), ptr), x);
+            return true;
+        }
+        if op == O_VZIPLO || op == O_VZIPHI {
+            let lb = type_bits(lane_type(t.ty), ptr);
+            let n = lanes(t.ty);
+            let wa = self.word(&f, b, t.a);
+            let wb = self.word(&f, b, t.b);
+            let h = if op == O_VZIPHI {
+                n / 2;
+            } else {
+                0;
+            };
+            for k in 0..n / 2 {
+                let x = get_lane(&self.vals, wa, h + k, lb);
+                let y = get_lane(&self.vals, wb, h + k, lb);
+                set_lane(&mut self.vals, dst, 2 * k, lb, x);
+                set_lane(&mut self.vals, dst, 2 * k + 1, lb, y);
+            }
+            return true;
+        }
         if op == O_VUNZIP {
             let lb = type_bits(lane_type(t.ty), ptr);
             let n = lanes(t.ty);
@@ -554,7 +587,7 @@ extend Eval {
             self.vals[dst as usize] = fcmp(t.aux, to_f64(ty, self.val(&f, b, t.a)), to_f64(ty, self.val(&f, b, t.b))) as u64;
             return true;
         }
-        if op >= O_FADD && op <= O_FNEG {
+        if op >= O_FADD && op <= O_FNEG || op == O_FSQRT {
             if is_vec(t.ty) {
                 return self.vec_float(&f, b, t, dst);
             }
@@ -562,7 +595,7 @@ extend Eval {
                 op,
                 t.ty,
                 self.val(&f, b, t.a),
-                if op != O_FNEG {
+                if op != O_FNEG && op != O_FSQRT {
                     self.val(&f, b, t.b);
                 } else {
                     0;
@@ -1477,7 +1510,7 @@ extend Eval {
         let n = lanes(t.ty);
         let lb = type_bits(lt, 8);
         let wa = self.word(f, b, t.a);
-        let wb = if t.op != O_FNEG {
+        let wb = if t.op != O_FNEG && t.op != O_FSQRT {
             self.word(f, b, t.b);
         } else {
             NONE;
@@ -2130,6 +2163,8 @@ pub(package) const fn float_op(op: u8, ty: u8, x: u64, y: u64) u64 {
             a * c;
         } else if op == O_FDIV {
             a / c;
+        } else if op == O_FSQRT {
+            a.sqrt();
         } else {
             -a;
         };
@@ -2154,6 +2189,8 @@ pub(package) const fn float_op(op: u8, ty: u8, x: u64, y: u64) u64 {
         a * c;
     } else if op == O_FDIV {
         a / c;
+    } else if op == O_FSQRT {
+        a.sqrt();
     } else {
         -a;
     };

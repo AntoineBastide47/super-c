@@ -610,6 +610,7 @@ extend CEmit {
                 tgt::isa(pk.arch).vector_bytes;
             };
             l.pkg.mul_high = tgt::isa(pk.arch).mul_high;
+            l.pkg.vops = tgt::isa(pk.arch).vector_ops;
             // binary16: every arm64 processor converts it (FCVT) and one with FEAT_FP16 computes with it;
             // x86-64 converts it with F16C.
             let h16 = cf::find("fp16", pk.arch);

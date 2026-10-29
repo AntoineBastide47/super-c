@@ -33,6 +33,12 @@ pub(package) struct Isa {
     /// The bytes of a vector the native backend computes in one register, 0 when it computes vectors
     /// lane by lane in memory (wasm32): the LIR vectorizer runs only with registers.
     pub(package) vector_bytes: u8,
+    /// How the native backend converts a vector to one of the same lane count (an integer to a float of
+    /// its width and back, an integer or a float to twice or half its width) and shifts each lane by its
+    /// own amount (`lir::ir::Package::vops`): 0 lane by lane, 1 (x86-64) in registers but a 64-bit integer
+    /// to or from f64, an unsigned integer to or from a float, and a shift of 16-byte vectors or of lanes
+    /// of 1, 2 or (arithmetic) 8 bytes, 2 each in registers.
+    pub(package) vector_ops: u8,
     /// One instruction gives the high half of a 64-bit product (UMULH, MUL's rdx): the optimizer divides
     /// a 64-bit value by a constant with a product (`lir::ir::Package::mul_high`).
     pub(package) mul_high: bool,
@@ -163,6 +169,7 @@ pub(package) const ISAS: [Isa; 3] = [
         scalar_fma: false,
         merge_apart: false,
         vector_bytes: 16,
+        vector_ops: 1,
         mul_high: true,
         pairs: true,
         half_cvt: false,
@@ -182,6 +189,7 @@ pub(package) const ISAS: [Isa; 3] = [
         scalar_fma: true,
         merge_apart: false,
         vector_bytes: 16,
+        vector_ops: 2,
         mul_high: true,
         pairs: true,
         half_cvt: true,
@@ -201,6 +209,7 @@ pub(package) const ISAS: [Isa; 3] = [
         scalar_fma: false,
         merge_apart: true,
         vector_bytes: 0,
+        vector_ops: 0,
         mul_high: false,
         pairs: false,
         half_cvt: false,
@@ -525,6 +534,7 @@ const UNKNOWN_ISA: Isa = Isa {
     mask_fold: false,
     merge_apart: false,
     vector_bytes: 0,
+    vector_ops: 0,
     mul_high: false,
     pairs: false,
     half_cvt: false,
