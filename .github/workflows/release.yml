@@ -304,7 +304,8 @@ jobs:
           SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-timeout=900 --filter=simd_
 
   # AVX-512 beside the shards, under Intel SDE (a hosted runner's CPU may lack it): the native tests' 64-byte
-  # vector programs (`run_zmm`, `SC_SDE`) run on an emulated Sapphire Rapids. SDE 10.13.1 from a mirror of
+  # vector programs (`run_zmm`, `SC_SDE`) run on an emulated Sapphire Rapids, linked with the runner's C
+  # compiler (`SC_TEST_CC`: the tests that link a C driver run only with one). SDE 10.13.1 from a mirror of
   # Intel's file (Intel's download page needs its license accepted), checked against Intel's SHA-256.
   avx512:
     needs: [resolve, compile]
@@ -341,7 +342,7 @@ jobs:
         run: |
           set -eu
           chmod +x ./super-c
-          SC_SDE="$PWD/sde/sde64 -spr --" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=1800 --filter=native_test
+          SC_SDE="$PWD/sde/sde64 -spr --" SC_TEST_CC=cc SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=1800 --filter=native_test
 
   # The correctness gate beside the shards: it needs only the compiler, not their results.
   gate:

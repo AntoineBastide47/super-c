@@ -6,6 +6,7 @@
 // identities the shared generic code must preserve.
 
 import math;
+import tests::cli_harness as cli;
 
 const fn dvals() [f64; 22] {
     return [
@@ -899,4 +900,26 @@ fn square_roots_are_correctly_rounded() {
     check_sqrt::<15, 112>(62, 3000);
     check_sqrt::<19, 236>(63, 2000);
     check_sqrt::<23, 492>(64, 500);
+}
+
+// f16 and f128 arithmetic lowers to LIR for a target whose processor converts no binary16 value
+// (`Package.half`: x86-64 without F16C): the conversions behind `sc_has_f16` are dead code there and
+// lower all the same.
+@test
+fn binary16_code_lowers_without_the_conversions() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(fn main() i32 {
+    let a = f128::from_f64(1.5);
+    let b = f128::from_f64(2.25);
+    let c = a + b * a / b;
+    let h = f16::from_f64(1.5);
+    let k = h + h * h;
+    return (c.to_f64() + k.to_f32() as f64) as i32;
+}
+)",
+    );
+    let r = p.compile_flags_env("--target=linux --arch=x86_64", "main.spc", "SC_LIR=1");
+    assert(r.ok() && !r.out_has("refused"), "the f16 and f128 bodies lower");
 }

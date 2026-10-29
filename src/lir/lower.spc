@@ -6988,12 +6988,17 @@ extend Lower {
         if n == 1 && (name == "sc_f16_to_f32" || name == "sc_f32_to_f16") {
             let to_f = name == "sc_f16_to_f32";
             if self.pkg.half == HALF_NONE {
-                // Unreachable behind `sc_has_f16` (0): the C stubs abort.
+                // Unreachable behind `sc_has_f16` (0): an abort, as the C stubs, then a zero of the result's
+                // type for the code after it.
                 let sg = self.b.signature([T_PTR as u32][0..0], 0, false, T_NONE);
                 let at = self.b.pool_list(a[0..0]);
                 let k = self.sym("abort", SK_FUNC);
                 let _ = self.inst(O_CALL, T_NONE, 0, k, sg, at);
-                let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
+                *out = if to_f {
+                    self.fconst(T_F32, 0);
+                } else {
+                    self.iconst(T_I16, 0);
+                };
                 return true;
             }
             *out = if to_f {
