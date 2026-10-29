@@ -12,13 +12,41 @@ import stdio;
 import stdlib;
 import module::loader;
 
+// The package options a test may set (`object_of`): sibling calls (`Package.tail`), 32-byte vectors
+// (`Package.vector`: x86-64's ymm registers with AVX2).
+const TAIL: u32 = 1;
+const WIDE: u32 = 2;
+
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
 fn run_native(text: str, driver: str) i32 {
+    return run_native_with(text, driver, 0);
+}
+
+// `run_native` with package options `opts` (TAIL, WIDE).
+fn run_native_with(text: str, driver: str, opts: u32) i32 {
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return 0;
     }
-    return run_lir(text, driver, tgt::host_os(), tgt::host_isa(), unsafe str::from_cstr(cli::cc_name()), "");
+    return run_lir(text, driver, tgt::host_os(), tgt::host_isa(), unsafe str::from_cstr(cli::cc_name()), "", opts);
+}
+
+// `run_native` with 32-byte vectors on an x86-64 host: the driver's `main` (`int main(void) {`) returns 0
+// first on a processor without AVX2. 0 on another host.
+fn run_wide(text: str, driver: str) i32 {
+    if tgt::host_isa() != tgt::axis_index("x86_64", true) {
+        return 0;
+    }
+    let head = "int main(void) {\n";
+    let at = driver.find(head);
+    assert(at >= 0, "the driver's main");
+    let d = format(
+        "{}{}  if (!__builtin_cpu_supports(\"avx2\")) return 0;\n{}",
+        driver.slice(0, at as usize),
+        head,
+        driver.slice(at as usize + head.len(), driver.len()),
+    );
+    return run_native_with(text, d.as_str(), WIDE);
 }
 
 // `run_native` for wasm32, its pointers 4 bytes in place of the text's 8: the wasi-sdk's clang links,
@@ -38,26 +66,30 @@ fn run_wasm(text: str, driver: str) i32 {
         tgt::axis_index("wasm32", true),
         cc.as_str(),
         "wasmtime run ",
+        0,
     );
 }
 
-// Compile LIR `text` for `(os, isa)`, link it with C `driver` by C compiler command `cc` and run the
-// program through command prefix `runner`; the exit code, or -1 when a step failed (the failure on
-// stderr).
-fn run_lir(text: str, driver: str, os: i32, isa: i32, cc: str, runner: str) i32 {
+// Compile LIR `text` for `(os, isa)` into object `obj`, with package options `opts` (TAIL, WIDE);
+// whether it did (the failure on stderr).
+fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool {
     let mut err = String::new();
     let q = lparse::parse(text, &mut err);
     if q.is_none() {
         eprint("parse: {}\n", err.as_str());
-        return -1;
+        return false;
     }
-    let p = q.unwrap();
+    let mut p = q.unwrap();
+    p.tail = (opts & TAIL) != 0;
+    if (opts & WIDE) != 0 {
+        p.vector = 32;
+    }
     let mut v = verify::Verifier::new();
     for i in 0..p.syms.len() {
         let s = p.syms[i];
         if s.def != NONE && s.kind == SK_FUNC && !v.check(&p, p.spell(s.name), &p.bodies[s.def as usize]) {
             eprint("verify: {}\n", v.err.as_str());
-            return -1;
+            return false;
         }
     }
     let mut fs_ = Vector::<u32>::new();
@@ -72,9 +104,19 @@ fn run_lir(text: str, driver: str, os: i32, isa: i32, cc: str, runner: str) i32 
             }
         }
     }
-    let mut obj = Vector::<u8>::new();
-    if !nat::object(&p, os, isa, fs_[0..fs_.len()], ds[0..ds.len()], "", &mut obj, &mut err) {
+    if !nat::object(&p, os, isa, fs_[0..fs_.len()], ds[0..ds.len()], "", obj, &mut err) {
         eprint("native: {}\n", err.as_str());
+        return false;
+    }
+    return true;
+}
+
+// Compile LIR `text` for `(os, isa)` (with package options `opts`), link it with C `driver` by C compiler
+// command `cc` and run the program through command prefix `runner`; the exit code, or -1 when a step
+// failed (the failure on stderr).
+fn run_lir(text: str, driver: str, os: i32, isa: i32, cc: str, runner: str, opts: u32) i32 {
+    let mut obj = Vector::<u8>::new();
+    if !object_of(text, os, isa, opts, &mut obj) {
         return -1;
     }
     let dir = format("{}/native_{}", cli::tmp_dir().as_str(), process::pid().unwrap_or(1));
@@ -332,6 +374,461 @@ fn a_latch_exit_that_reads_no_counter_lets_the_step_take_its_register() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Lane-wise comparisons (`vcmp`) of every lane type and condition, and lane selects (`vsel`), in vector
+// registers (8 and 16 bytes) and in memory (32 bytes): each lane's mask against C's comparison, signed
+// and unsigned limits, NaN and signed zeros included. The x86-64 objects build on every host.
+@test
+fn lane_compares_and_selects_run() {
+    // Per vector type: its text, its C lane type and the unsigned one, its lanes, whether its lanes are
+    // floats.
+    let names: []str = [
+        "v16i8",
+        "v8i16",
+        "v4i32",
+        "v2i64",
+        "v8i32",
+        "v8i8",
+        "v4f32",
+        "v2f64",
+        "v4f64",
+        "v2f32",
+        "v32i8",
+        "v16i16",
+        "v4i64",
+        "v8f32",
+    ];
+    let cty: []str = [
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "int32_t",
+        "int8_t",
+        "float",
+        "double",
+        "double",
+        "float",
+        "int8_t",
+        "int16_t",
+        "int64_t",
+        "float",
+    ];
+    let uty: []str = [
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "uint32_t",
+        "uint8_t",
+        "int32_t",
+        "int64_t",
+        "int64_t",
+        "int32_t",
+        "uint8_t",
+        "uint16_t",
+        "uint64_t",
+        "int32_t",
+    ];
+    let nl: []u32 = [16, 8, 4, 2, 8, 8, 4, 2, 4, 2, 32, 16, 4, 8];
+    let isf: []bool = [false, false, false, false, false, false, true, true, true, true, false, false, false, true];
+    let conds: []str = ["eq", "ne", "slt", "sle", "sgt", "sge", "ult", "ule", "ugt", "uge"];
+    let cops: []str = ["==", "!=", "<", "<=", ">", ">=", "<", "<=", ">", ">="];
+    let fconds: []str = ["oeq", "une", "olt", "ole", "ogt", "oge"];
+    let fops: []str = ["==", "!=", "<", "<=", ">", ">="];
+    let mut lir = String::from_str("lir ptr 8\n");
+    let mut decl = String::from_str("#include <stdint.h>\n#include <math.h>\n#include <string.h>\n");
+    let mut body = String::from_str("int main(void) {\n  int r = 0;\n");
+    let mut nf: u32 = 0;
+    for k in 0..names.len() {
+        let fl = isf[k];
+        let n = if fl {
+            6usize;
+        } else {
+            10usize;
+        };
+        // The inputs: limits and repeats, equal lanes among them.
+        let eb = if cty[k] == "int8_t" {
+            1u32;
+        } else if cty[k] == "int16_t" {
+            2u32;
+        } else if cty[k] == "int32_t" || cty[k] == "float" {
+            4u32;
+        } else {
+            8u32;
+        };
+        let vals = if fl {
+            "0.0, -0.0, 1.5, -2.0, NAN, INFINITY, -INFINITY, 3.0";
+        } else if eb == 1 {
+            "0, 1, -1, 127, -128, 5, -5, 100";
+        } else if eb == 2 {
+            "0, 1, -1, 32767, -32768, 5, -5, 1000";
+        } else if eb == 4 {
+            "0, 1, -1, 2147483647, -2147483647 - 1, 5, -5, 100000";
+        } else {
+            "0, 1, -1, INT64_MAX, INT64_MIN, 5, -5, 100000";
+        };
+        let mty = if fl && eb == 4 {
+            "int32_t";
+        } else if fl {
+            "int64_t";
+        } else {
+            cty[k];
+        };
+        let mname = if names[k] == "v4f32" {
+            "v4i32";
+        } else if names[k] == "v2f64" {
+            "v2i64";
+        } else if names[k] == "v4f64" {
+            "v4i64";
+        } else if names[k] == "v2f32" {
+            "v2i32";
+        } else if names[k] == "v8f32" {
+            "v8i32";
+        } else {
+            names[k];
+        };
+        body.format_into(
+            "  {{\n    {} v[8] = {{{}}};\n    {} a[32], b[32], o[32], x[32], y[32]; {} m[32], w[32];\n    for (int i = 0; i < 32; i++) {{ a[i] = v[i % 8]; b[i] = i % 4 == 0 ? a[i] : v[(i * 3 + 1) % 8]; m[i] = i % 3 == 0 ? -1 : 0; x[i] = a[i]; y[i] = b[i]; }}\n",
+            cty[k],
+            vals,
+            cty[k],
+            mty,
+        );
+        for c in 0..n {
+            let cond = if fl {
+                fconds[c];
+            } else {
+                conds[c];
+            };
+            lir.format_into(
+                "sym @c{} fn global\nfn @c{}\n  sig (ptr, ptr, ptr) -> void\nb0(v0: ptr, v1: ptr, v2: ptr):\n  v3 = load.{} v1 align 0\n  v4 = load.{} v2 align 0\n  v5 = vcmp.{}.{} v3, v4\n  store v5, v0 align 0\n  ret\n",
+                nf,
+                nf,
+                names[k],
+                names[k],
+                cond,
+                mname,
+            );
+            decl.format_into("void c{}(void *, const void *, const void *);\n", nf);
+            let (l, rr) = if !fl && c >= 6 {
+                (format("({})a[i]", uty[k]), format("({})b[i]", uty[k]));
+            } else {
+                (String::from_str("a[i]"), String::from_str("b[i]"));
+            };
+            let op = if fl {
+                fops[c];
+            } else {
+                cops[c];
+            };
+            body.format_into(
+                "    c{}(w, a, b); for (int i = 0; i < {}; i++) if (w[i] != ({} {} {} ? -1 : 0)) r = {};\n",
+                nf,
+                nl[k],
+                l.as_str(),
+                op,
+                rr.as_str(),
+                nf + 1,
+            );
+            nf += 1;
+        }
+        lir.format_into(
+            "sym @s{} fn global\nfn @s{}\n  sig (ptr, ptr, ptr, ptr) -> void\nb0(v0: ptr, v1: ptr, v2: ptr, v3: ptr):\n  v4 = load.{} v1 align 0\n  v5 = load.{} v2 align 0\n  v6 = load.{} v3 align 0\n  v7 = vsel.{} v4, v5, v6\n  store v7, v0 align 0\n  ret\n",
+            k,
+            k,
+            mname,
+            names[k],
+            names[k],
+            names[k],
+        );
+        decl.format_into("void s{}(void *, const void *, const void *, const void *);\n", k);
+        body.format_into(
+            "    s{}(o, m, x, y); if (memcmp(o, x, 0) != 0) r = 999; for (int i = 0; i < {}; i++) if (memcmp(&o[i], m[i] ? &x[i] : &y[i], sizeof o[i]) != 0) r = {};\n  }}\n",
+            k,
+            nl[k],
+            200 + k,
+        );
+    }
+    body.push_str("  return r;\n}\n");
+    decl.push_str(body.as_str());
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir.as_str(), tgt::axis_index("linux", false), x64, 0, &mut obj), "the System V object");
+    obj.truncate(0);
+    assert(object_of(lir.as_str(), tgt::axis_index("windows", false), x64, 0, &mut obj), "the Microsoft x64 object");
+    obj.truncate(0);
+    assert(object_of(lir.as_str(), tgt::axis_index("linux", false), x64, WIDE, &mut obj), "the AVX2 object");
+    obj.truncate(0);
+    assert(
+        object_of(lir.as_str(), tgt::axis_index("windows", false), x64, WIDE, &mut obj),
+        "the Microsoft x64 AVX2 object",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir.as_str(), decl.as_str()), 0);
+    assert_eq(run_wide(lir.as_str(), decl.as_str()), 0);
+    assert_eq(run_wasm(lir.as_str(), decl.as_str()), 0);
+}
+
+// The even lanes of two vectors (`vunzip`) of every lane width, in vector registers (8 and 16 bytes) and
+// in memory (32 bytes): lane k is lane 2k of the two operands' lanes in order, its bits unchanged (lanes
+// with the sign bit set included).
+@test
+fn even_lanes_of_two_vectors_run() {
+    let names: []str = [
+        "v16i8",
+        "v8i16",
+        "v4i32",
+        "v2i64",
+        "v4f32",
+        "v2f64",
+        "v8i8",
+        "v8i32",
+        "v32i8",
+        "v16i16",
+        "v4i64",
+        "v8f32",
+        "v4f64",
+    ];
+    let cty: []str = [
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "float",
+        "double",
+        "int8_t",
+        "int32_t",
+        "int8_t",
+        "int16_t",
+        "int64_t",
+        "float",
+        "double",
+    ];
+    let nl: []u32 = [16, 8, 4, 2, 4, 2, 8, 8, 32, 16, 4, 8, 4];
+    let mut lir = String::from_str("lir ptr 8\n");
+    let mut drv = String::from_str("#include <stdint.h>\n#include <string.h>\n");
+    let mut body = String::from_str("int main(void) {\n  int r = 0;\n");
+    for k in 0..names.len() {
+        lir.format_into(
+            "sym @u{} fn global\nfn @u{}\n  sig (ptr, ptr, ptr) -> void\nb0(v0: ptr, v1: ptr, v2: ptr):\n  v3 = load.{} v1 align 0\n  v4 = load.{} v2 align 0\n  v5 = vunzip.{} v3, v4\n  store v5, v0 align 0\n  ret\n",
+            k,
+            k,
+            names[k],
+            names[k],
+            names[k],
+        );
+        drv.format_into("void u{}(void *, const void *, const void *);\n", k);
+        body.format_into(
+            "  {{\n    {} a[32], b[32], o[32];\n    for (int i = 0; i < 32; i++) {{ a[i] = ({})(i * 37 - 100); b[i] = ({})(i * 53 + 7); }}\n    u{}(o, a, b);\n    for (int i = 0; i < {}; i++) if (memcmp(&o[i], 2 * i < {} ? &a[2 * i] : &b[2 * i - {}], sizeof o[i]) != 0) r = {};\n  }}\n",
+            cty[k],
+            cty[k],
+            cty[k],
+            k,
+            nl[k],
+            nl[k],
+            nl[k],
+            k + 1,
+        );
+    }
+    body.push_str("  return r;\n}\n");
+    drv.push_str(body.as_str());
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir.as_str(), tgt::axis_index("linux", false), x64, 0, &mut obj), "the System V object");
+    obj.truncate(0);
+    assert(object_of(lir.as_str(), tgt::axis_index("windows", false), x64, 0, &mut obj), "the Microsoft x64 object");
+    obj.truncate(0);
+    assert(object_of(lir.as_str(), tgt::axis_index("linux", false), x64, WIDE, &mut obj), "the AVX2 object");
+    obj.truncate(0);
+    assert(
+        object_of(lir.as_str(), tgt::axis_index("windows", false), x64, WIDE, &mut obj),
+        "the Microsoft x64 AVX2 object",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir.as_str(), drv.as_str()), 0);
+    assert_eq(run_wide(lir.as_str(), drv.as_str()), 0);
+    assert_eq(run_wasm(lir.as_str(), drv.as_str()), 0);
+}
+
+// Lane-wise arithmetic of 16- and 32-byte vectors of every lane type, splats and vector constants (zero,
+// all ones, one word repeated, four words): each result's bits against C's, integers wrapping. With 32-byte
+// vectors in ymm registers too (`run_wide`).
+@test
+fn vector_arithmetic_of_every_width_runs() {
+    let names: []str = [
+        "v16i8",
+        "v8i16",
+        "v4i32",
+        "v2i64",
+        "v4f32",
+        "v2f64",
+        "v32i8",
+        "v16i16",
+        "v8i32",
+        "v4i64",
+        "v8f32",
+        "v4f64",
+    ];
+    let lty: []str = ["i8", "i16", "i32", "i64", "f32", "f64", "i8", "i16", "i32", "i64", "f32", "f64"];
+    let cty: []str = [
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "float",
+        "double",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "float",
+        "double",
+    ];
+    let nl: []u32 = [16, 8, 4, 2, 4, 2, 32, 16, 8, 4, 8, 4];
+    let iops: []str = ["add", "sub", "mul", "and", "or", "xor", "neg", "not"];
+    let icx: []str = [
+        "a[i] + b[i]",
+        "a[i] - b[i]",
+        "a[i] * b[i]",
+        "a[i] & b[i]",
+        "a[i] | b[i]",
+        "a[i] ^ b[i]",
+        "0 - a[i]",
+        "~a[i]",
+    ];
+    let fops: []str = ["fadd", "fsub", "fmul", "fdiv", "fneg"];
+    let fcx: []str = ["a[i] + b[i]", "a[i] - b[i]", "a[i] * b[i]", "a[i] / b[i]", "-a[i]"];
+    let mut lir = String::from_str("lir ptr 8\n");
+    let mut drv = String::from_str("#include <stdint.h>\n#include <string.h>\n");
+    let mut body = String::from_str("int main(void) {\n  int r = 0;\n");
+    let mut nf: u32 = 0;
+    for k in 0..names.len() {
+        let fl = lty[k] == "f32" || lty[k] == "f64";
+        body.format_into(
+            "  {{\n    {} a[32], b[32], o[32], e[32];\n    for (int i = 0; i < 32; i++) {{ a[i] = ({})(i * 37 - 100); b[i] = ({})(i * 53 + 7); }}\n",
+            cty[k],
+            cty[k],
+            cty[k],
+        );
+        let n = if fl {
+            fops.len();
+        } else {
+            iops.len();
+        };
+        for o in 0..n {
+            let (op, cx) = if fl {
+                (fops[o], fcx[o]);
+            } else {
+                (iops[o], icx[o]);
+            };
+            let un = op == "neg" || op == "not" || op == "fneg";
+            lir.format_into(
+                "sym @a{} fn global\nfn @a{}\n  sig (ptr, ptr, ptr) -> void\nb0(v0: ptr, v1: ptr, v2: ptr):\n  v3 = load.{} v1 align 0\n  v4 = load.{} v2 align 0\n",
+                nf,
+                nf,
+                names[k],
+                names[k],
+            );
+            if un {
+                lir.format_into("  v5 = {}.{} v3\n", op, names[k]);
+            } else {
+                lir.format_into("  v5 = {}.{} v3, v4\n", op, names[k]);
+            }
+            lir.push_str("  store v5, v0 align 0\n  ret\n");
+            drv.format_into("void a{}(void *, const void *, const void *);\n", nf);
+            body.format_into(
+                "    a{}(o, a, b); for (int i = 0; i < {}; i++) {{ e[i] = ({})({}); if (memcmp(&o[i], &e[i], sizeof o[i]) != 0) r = {}; }}\n",
+                nf,
+                nl[k],
+                cty[k],
+                cx,
+                nf + 1,
+            );
+            nf += 1;
+        }
+        // A splat of the scalar argument.
+        lir.format_into(
+            "sym @p{} fn global\nfn @p{}\n  sig (ptr, {}) -> void\nb0(v0: ptr, v1: {}):\n  v2 = splat.{} v1\n  store v2, v0 align 0\n  ret\n",
+            k,
+            k,
+            lty[k],
+            lty[k],
+            names[k],
+        );
+        drv.format_into("void p{}(void *, {});\n", k, cty[k]);
+        body.format_into(
+            "    p{}(o, a[5]); for (int i = 0; i < {}; i++) if (memcmp(&o[i], &a[5], sizeof o[i]) != 0) r = {};\n  }}\n",
+            k,
+            nl[k],
+            500 + k,
+        );
+    }
+    // Vector constants: zero, all ones, one word repeated, four words.
+    let words: []str = [
+        "0x0, 0x0, 0x0, 0x0",
+        "0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff",
+        "0x123456789abcdef0, 0x123456789abcdef0, 0x123456789abcdef0, 0x123456789abcdef0",
+        "0x1, 0x8000000000000000, 0x7f7f7f7f7f7f7f7f, 0xfedcba9876543210",
+    ];
+    let cwords: []str = [
+        "0, 0, 0, 0",
+        "~0ull, ~0ull, ~0ull, ~0ull",
+        "0x123456789ABCDEF0ull, 0x123456789ABCDEF0ull, 0x123456789ABCDEF0ull, 0x123456789ABCDEF0ull",
+        "1, 0x8000000000000000ull, 0x7F7F7F7F7F7F7F7Full, 0xFEDCBA9876543210ull",
+    ];
+    for c in 0..words.len() {
+        for wide in 0..2usize {
+            let (ty, nw, w) = if wide == 1 {
+                ("v8i32", 4u32, String::from_str(words[c]));
+            } else {
+                // The first two words of the four.
+                let s = words[c];
+                let cut = s.find(", ");
+                let rest = s.slice(cut as usize + 2, s.len());
+                let cut2 = rest.find(", ");
+                ("v4i32", 2u32, String::from_str(s.slice(0, cut as usize + 2 + cut2 as usize)));
+            };
+            lir.format_into(
+                "sym @w{} fn global\nfn @w{}\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = wconst.{} {}\n  store v1, v0 align 0\n  ret\n",
+                2 * c + wide,
+                2 * c + wide,
+                ty,
+                w.as_str(),
+            );
+            drv.format_into("void w{}(void *);\n", 2 * c + wide);
+            body.format_into(
+                "  {{ uint64_t e[4] = {{{}}}, o[4]; w{}(o); if (memcmp(o, e, {}) != 0) r = {}; }}\n",
+                cwords[c],
+                2 * c + wide,
+                8 * nw,
+                700 + 2 * c + wide,
+            );
+        }
+    }
+    body.push_str("  return r;\n}\n");
+    drv.push_str(body.as_str());
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    let lin = tgt::axis_index("linux", false);
+    let win = tgt::axis_index("windows", false);
+    assert(object_of(lir.as_str(), lin, x64, 0, &mut obj), "the System V object");
+    obj.truncate(0);
+    assert(object_of(lir.as_str(), win, x64, 0, &mut obj), "the Microsoft x64 object");
+    obj.truncate(0);
+    assert(object_of(lir.as_str(), lin, x64, WIDE, &mut obj), "the AVX2 object");
+    obj.truncate(0);
+    assert(object_of(lir.as_str(), win, x64, WIDE, &mut obj), "the Microsoft x64 AVX2 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir.as_str(), drv.as_str()), 0);
+    assert_eq(run_wide(lir.as_str(), drv.as_str()), 0);
+    assert_eq(run_wasm(lir.as_str(), drv.as_str()), 0);
+}
+
 // A frame of exactly 4 KiB (the slot and two spills): the stack pointer moves by all of it.
 @test
 fn a_page_sized_frame_runs() {
@@ -396,8 +893,319 @@ b5:
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Branches on a value against zero (`cbz` on arm64) at every width, on one bit (`tbz`), and on the result of
+// a subtraction (its flags on x86-64); an index scaled by 16; and a loop of eight values in registers
+// across a call in a cold block (`@mix` takes every temporary register), which saves them around it.
+@test
+fn zero_tests_scales_and_cold_calls_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @z8 fn global
+sym @z16 fn global
+sym @z64 fn global
+sym @bit fn global
+sym @steps fn global
+sym @at16 fn global
+sym @mix fn global
+sym @sums fn global
+fn @z8
+  sig (i8) -> i32
+b0(v0: i8):
+  v1 = iconst.i8 0
+  v2 = iconst.i32 1
+  v3 = iconst.i32 2
+  v4 = icmp.ne v0, v1
+  br v4, b1, b2
+b1:
+  ret v2
+b2:
+  ret v3
+fn @z16
+  sig (i16) -> i32
+b0(v0: i16):
+  v1 = iconst.i16 0
+  v2 = iconst.i32 1
+  v3 = iconst.i32 2
+  v4 = icmp.eq v0, v1
+  br v4, b1, b2
+b1:
+  ret v2
+b2:
+  ret v3
+fn @z64
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i32 1
+  v3 = iconst.i32 2
+  v4 = icmp.eq v0, v1
+  br v4, b1, b2
+b1:
+  ret v2
+b2:
+  ret v3
+fn @bit
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 -9223372036854775808
+  v3 = iconst.i64 16
+  v4 = iconst.i32 1
+  v5 = iconst.i32 2
+  v6 = iconst.i32 4
+  v7 = and.i64 v0, v2
+  v8 = icmp.ne v7, v1
+  br v8, b1, b2
+b1:
+  ret v4
+b2:
+  v9 = and.i64 v0, v3
+  v10 = icmp.eq v9, v1
+  br v10, b3, b4
+b3:
+  ret v5
+b4:
+  ret v6
+fn @steps
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 1
+  jmp b1(v0, v1)
+b1(v3: i32, v4: i32):
+  v5 = sub.i32 v3, v2
+  v6 = add.i32 v4, v2
+  v7 = icmp.eq v5, v1
+  br v7, b2, b1(v5, v6)
+b2:
+  ret v6
+fn @at16
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = ptradd v0, v1 * 16
+  v3 = load.i64 v2+8 align 3
+  ret v3
+fn @mix
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 3
+  v2 = mul.i64 v0, v1
+  v3 = add.i64 v2, v1
+  v4 = xor.i64 v3, v0
+  v5 = mul.i64 v4, v3
+  v6 = add.i64 v5, v2
+  v7 = sub.i64 v6, v4
+  v8 = mul.i64 v7, v6
+  v9 = xor.i64 v8, v5
+  v10 = add.i64 v9, v7
+  v11 = mul.i64 v10, v2
+  v12 = add.i64 v11, v3
+  v13 = xor.i64 v12, v4
+  v14 = add.i64 v13, v5
+  v15 = add.i64 v14, v6
+  v16 = add.i64 v15, v7
+  v17 = add.i64 v16, v8
+  v18 = add.i64 v17, v9
+  v19 = add.i64 v18, v10
+  v20 = add.i64 v19, v11
+  v21 = iconst.i64 0
+  v22 = and.i64 v20, v21
+  ret v22
+fn @sums
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = iconst.i64 7
+  jmp b1(v1, v1, v1, v1, v1, v1, v1, v1)
+b1(v4: i64, v5: i64, v6: i64, v7: i64, v8: i64, v9: i64, v10: i64, v11: i64):
+  v12 = icmp.ult v4, v0
+  br v12, b2, b5
+b2:
+  v13 = and.i64 v4, v3
+  v14 = icmp.eq v13, v1
+  br v14, b3, b4(v5)
+b3: cold
+  v15 = call.i64 @mix(v4) : (i64) -> i64
+  v16 = add.i64 v5, v15
+  jmp b4(v16)
+b4(v17: i64):
+  v18 = add.i64 v17, v4
+  v19 = add.i64 v6, v18
+  v20 = add.i64 v7, v19
+  v21 = add.i64 v8, v20
+  v22 = add.i64 v9, v21
+  v23 = add.i64 v10, v22
+  v24 = add.i64 v11, v23
+  v25 = add.i64 v4, v2
+  jmp b1(v25, v18, v19, v20, v21, v22, v23, v24)
+b5:
+  v26 = add.i64 v5, v6
+  v27 = add.i64 v26, v7
+  v28 = add.i64 v27, v8
+  v29 = add.i64 v28, v9
+  v30 = add.i64 v29, v10
+  v31 = add.i64 v30, v11
+  ret v31
+)";
+    let drv = M"(
+#include <stdint.h>
+int z8(int8_t);
+int z16(int16_t);
+int z64(int64_t);
+int bit(int64_t);
+int steps(int);
+int64_t at16(int64_t *, int64_t);
+int64_t sums(int64_t);
+static int64_t model(int64_t n) {
+    int64_t a[7] = {0};
+    for (int64_t i = 0; i < n; i++) {
+        int64_t s = a[0] + i;
+        a[0] = s;
+        for (int k = 1; k < 7; k++) {
+            s = a[k] + s;
+            a[k] = s;
+        }
+    }
+    int64_t t = 0;
+    for (int k = 0; k < 7; k++) {
+        t += a[k];
+    }
+    return t;
+}
+int main(void) {
+    int64_t t[6] = {1, 2, 3, 4, 5, 6};
+    int ok = z8(0) == 2 && z8(-128) == 1 && z8(1) == 1 && z16(0) == 1 && z16(-32768) == 2 && z16(256) == 2;
+    ok = ok && z64(0) == 1 && z64(INT64_MIN) == 2 && z64((int64_t)1 << 32) == 2;
+    ok = ok && bit(INT64_MIN) == 1 && bit(16) == 4 && bit(15) == 2 && bit(0) == 2;
+    ok = ok && steps(1) == 1 && steps(5) == 5 && at16(t, 0) == 2 && at16(t, 2) == 6;
+    ok = ok && sums(0) == 0 && sums(1) == model(1) && sums(100) == model(100);
+    return ok ? 0 : 1;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // Switches: dense ones (a jump table), a sparse one, a wide one whose value less the lowest case does not
 // fit 32 bits, and one that drives a loop.
+// The instructions that hold the most registers on x86-64 besides the homes, each with values that live
+// past it in rax and rdx and a result a call later reads: an unsigned 64-bit division, checked product and
+// high product, a narrow division and checked sum (their operands extended). They compile for x86-64 on
+// every host (`end_inst` asserts each one's count against `need`) and run on the host.
+@test
+fn register_hungry_instructions_compile_and_run() {
+    let lir = "lir ptr 8\nsym @id fn global\nsym @dv fn global\nsym @mo fn global\nsym @mh fn global\nsym @nr fn global\nfn @dv\n  sig (i64, i64, ptr) -> i64\nb0(v0: i64, v1: i64, v2: ptr):\n  v3 = load.i64 v2 align 3\n  v4 = udiv.i64 v0, v1\n  v5 = load.i64 v2+8 align 3\n  v6 = add.i64 v3, v5\n  v7 = call.i64 @id(v6) : (i64) -> i64\n  v8 = add.i64 v7, v4\n  ret v8\nfn @mo\n  sig (i64, i64, ptr) -> i64\nb0(v0: i64, v1: i64, v2: ptr):\n  v3 = load.i64 v2 align 3\n  v4, v5 = mulo.u.i64 v0, v1\n  v6 = zext.i64 v5\n  v7 = load.i64 v2+8 align 3\n  v8 = add.i64 v3, v7\n  v9 = call.i64 @id(v8) : (i64) -> i64\n  v10 = add.i64 v9, v4\n  v11 = add.i64 v10, v6\n  ret v11\nfn @mh\n  sig (i64, i64, ptr) -> i64\nb0(v0: i64, v1: i64, v2: ptr):\n  v3 = load.i64 v2 align 3\n  v4 = mulhu.i64 v0, v1\n  v5 = load.i64 v2+8 align 3\n  v6 = add.i64 v3, v5\n  v7 = call.i64 @id(v6) : (i64) -> i64\n  v8 = add.i64 v7, v4\n  ret v8\nfn @nr\n  sig (i64, i64, ptr) -> i64\nb0(v0: i64, v1: i64, v2: ptr):\n  v3 = load.i64 v2 align 3\n  v4 = trunc.i8 v0\n  v5 = trunc.i8 v1\n  v6 = sdiv.i8 v4, v5\n  v7, v8 = addo.s.i8 v4, v5\n  v9 = sext.i64 v6\n  v10 = sext.i64 v7\n  v11 = zext.i64 v8\n  v12 = load.i64 v2+8 align 3\n  v13 = add.i64 v3, v12\n  v14 = call.i64 @id(v13) : (i64) -> i64\n  v15 = add.i64 v14, v9\n  v16 = add.i64 v15, v10\n  v17 = add.i64 v16, v11\n  ret v17\n";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the System V object");
+    obj.truncate(0);
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Microsoft x64 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t id(int64_t x) { return x; }\nuint64_t dv(uint64_t, uint64_t, const int64_t *);\nuint64_t mo(uint64_t, uint64_t, const int64_t *);\nuint64_t mh(uint64_t, uint64_t, const int64_t *);\nint64_t nr(int64_t, int64_t, const int64_t *);\nstatic int64_t n(int8_t a, int8_t b) { int8_t s = (int8_t)(uint8_t)((uint8_t)a + (uint8_t)b); return 3 + a / b + s + (a + b != s); }\nint main(void) {\n  const int64_t m[2] = {1, 2};\n  unsigned __int128 p = (unsigned __int128)UINT64_MAX * 3;\n  if (dv(1000, 7, m) != 3 + 1000 / 7 || mh(UINT64_MAX, 3, m) != 3 + (uint64_t)(p >> 64)) return 1;\n  if (mo(UINT64_MAX, 3, m) != 3 + (uint64_t)p + 1 || mo(6, 7, m) != 3 + 42) return 2;\n  if (nr(100, 7, m) != n(100, 7) || nr(100, 60, m) != n(100, 60) || nr(-100, -60, m) != n(-100, -60)) return 3;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// Sibling calls (`Package.tail`): a call whose result its block returns at once jumps to its callee after
+// the caller's epilogue, so mutual recursion ten million deep runs in a constant stack; through a pointer
+// too, after a call that keeps a value in a callee-saved register, which the epilogue restores, and before
+// a block that returns at the body's end, which keeps the epilogue. They compile for x86-64 on every host.
+@test
+fn sibling_calls_run_in_a_constant_stack() {
+    let lir = M"(lir ptr 8
+sym @g fn global noinline
+sym @even fn global
+sym @odd fn global
+sym @apply fn global
+sym @framed fn global
+sym @pick fn global
+fn @g
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = mul.i64 v0, v1
+  ret v2
+fn @even
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1:
+  v3 = iconst.i64 1
+  ret v3
+b2:
+  v4 = iconst.i64 1
+  v5 = sub.i64 v0, v4
+  v6 = call.i64 @odd(v5) : (i64) -> i64
+  ret v6
+fn @odd
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1:
+  ret v1
+b2:
+  v3 = iconst.i64 1
+  v4 = sub.i64 v0, v3
+  v5 = call.i64 @even(v4) : (i64) -> i64
+  ret v5
+fn @apply
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = call.ind.i64 v0(v1) : (i64) -> i64
+  ret v2
+fn @framed
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = call.i64 @g(v0, v0) : (i64, i64) -> i64
+  v2 = add.i64 v1, v0
+  v3 = call.i64 @g(v2, v1) : (i64, i64) -> i64
+  ret v3
+fn @pick
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 10
+  v2 = icmp.sgt v0, v1
+  br v2, b2, b1
+b1:
+  v3 = iconst.i64 2
+  v4 = call.i64 @g(v0, v3) : (i64, i64) -> i64
+  ret v4
+b2:
+  ret v0
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, TAIL, &mut obj), "the System V object");
+    obj.truncate(0);
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, TAIL, &mut obj), "the Microsoft x64 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t even(int64_t);
+int64_t odd(int64_t);
+int64_t apply(int64_t (*)(int64_t), int64_t);
+int64_t framed(int64_t);
+int64_t pick(int64_t);
+static int64_t neg(int64_t x) { return -x; }
+int main(void) {
+  if (even(10000000) != 1 || odd(10000001) != 1 || even(7) != 0) return 1;
+  if (apply(neg, 5) != -5) return 2;
+  if (framed(3) != 108) return 3;
+  if (pick(4) != 8 || pick(11) != 11) return 4;
+  return 0;
+}
+)";
+    assert_eq(run_native_with(lir, drv, TAIL), 0);
+}
+
 @test
 fn switches_run() {
     if !cli::has_cc() {

@@ -84,6 +84,10 @@ pub const CG_STRICT_ALIASING: u64 = 131072;
 /// of calling a procedure linkage table stub (`-fno-plt`, its bit set by the `no` form): the loader
 /// binds it at start.
 pub const CG_NO_PLT: u64 = 262144;
+/// A call whose result the caller returns at once becomes a jump: into the function's own start for a
+/// call of itself (`lir::opt`), to the callee after the caller's epilogue for another
+/// (`-foptimize-sibling-calls`).
+pub const CG_SIBLING_CALLS: u64 = 524288;
 // Whether flag `b` (`CG_NAMES`) is set by its `no` form.
 const fn negated(b: u64) bool {
     return b == CG_NO_SIGNED_ZEROS || b == CG_NO_PLT;
@@ -91,7 +95,7 @@ const fn negated(b: u64) bool {
 
 // The flags by name: `-f<name>` sets the bits, `-fno-<name>` clears them; the reverse for
 // `signed-zeros` and `plt` (`negated`).
-const CG_NAMES: [(str<'static>, u64); 20] = [
+const CG_NAMES: [(str<'static>, u64); 21] = [
     ("omit-frame-pointer", CG_OMIT_FRAME_POINTER),
     ("inline", CG_INLINE),
     ("inline-functions", CG_INLINE_FUNCTIONS),
@@ -112,6 +116,7 @@ const CG_NAMES: [(str<'static>, u64); 20] = [
     ("vectorize", CG_VECTORIZE),
     ("strict-aliasing", CG_STRICT_ALIASING),
     ("plt", CG_NO_PLT),
+    ("optimize-sibling-calls", CG_SIBLING_CALLS),
 ];
 
 // The bits flag `name` names: 0 for none.
@@ -232,7 +237,8 @@ pub fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
 /// ABI allows), calls inline, and functions and variables take sections of their own, which the link
 /// drops when nothing reaches them (`link_gc`); past the ones that shrink the code at 2, 3 and "s"; loops unroll at 2
 /// and 3, vectorize at 2, 3 and "s" (as LLVM's), unswitch and version on their bounds checks at 3;
-/// aliasing is strict from 2 on, "s" and "z" included (as GCC's).
+/// aliasing is strict and calls whose result is returned at once become jumps from 2 on, "s" and "z"
+/// included (as GCC's).
 pub const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
     let mut f: u64 = 0;
     if opt > 0 {
@@ -251,7 +257,7 @@ pub const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
         f |= CG_UNSWITCH | CG_VERSION_LOOPS;
     }
     if opt >= 2 {
-        f |= CG_STRICT_ALIASING;
+        f |= CG_STRICT_ALIASING | CG_SIBLING_CALLS;
     }
     return (f | on) & ~off;
 }

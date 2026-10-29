@@ -226,7 +226,14 @@ pub const O_SYS: u8 = 72;
 pub const O_MULHU: u8 = 73;
 /// A vector whose every lane is scalar `a` (of the lane type).
 pub const O_SPLAT: u8 = 74;
-pub const OP_COUNT: u8 = 75;
+/// The lane-wise comparison of vectors `a` and `b` (`vcmp_ok`): a vector of integer lanes of their lanes'
+/// width (`mask_type`), each all ones where the condition holds, else 0.
+pub const O_VCMP: u8 = 75;
+/// Per lane, the bits of `b` where mask `a` (`mask_type` of the result) has ones, else those of `c`.
+pub const O_VSEL: u8 = 76;
+/// The even lanes of vectors `a` then `b` (of the result's type): lane k is lane 2k of `a ++ b`.
+pub const O_VUNZIP: u8 = 77;
+pub const OP_COUNT: u8 = 78;
 
 /// One opcode: its text name and its operand form.
 pub struct OpInfo {
@@ -234,7 +241,7 @@ pub struct OpInfo {
     pub form: u8,
 }
 
-pub const OPS: [OpInfo; 75] = [
+pub const OPS: [OpInfo; 78] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -310,7 +317,26 @@ pub const OPS: [OpInfo; 75] = [
     OpInfo { name: "sys", form: F_SYS },
     OpInfo { name: "mulhu", form: F_BIN },
     OpInfo { name: "splat", form: F_UN },
+    OpInfo { name: "vcmp", form: F_CMP },
+    OpInfo { name: "vsel", form: F_TRI },
+    OpInfo { name: "vunzip", form: F_BIN },
 ];
+
+/// The mask a lane-wise comparison of vectors of type `t` gives (`O_VCMP`): integer lanes of its lanes'
+/// width.
+pub const fn mask_type(t: u8) u8 {
+    return T_VEC | type_bytes(lane_type(t), 8).trailing_zeros() as u8 << 3 | t & 7;
+}
+
+/// Whether `O_VCMP` takes condition `c` on lanes of type `lt`: every integer condition, and the float ones
+/// one vector instruction makes (`C_OEQ` .. `C_OGE`, `C_UNE`).
+pub const fn vcmp_ok(c: u16, lt: u8) bool {
+    return if is_float(lt) {
+        c == C_OEQ || c >= C_OLT && c <= C_OGE || c == C_UNE;
+    } else {
+        c <= C_UGE;
+    };
+}
 
 /// An `O_ASM` record at pool index `r` of `b`: its output, input and clobber counts.
 pub const fn asm_nout(b: &Body, r: u32) u32 {
@@ -439,6 +465,8 @@ pub const fn tbaa_of(ty: u8) u16 {
 pub const fn tbaa(t: Inst) usize {
     return ((t.aux & MEM_TBAA) >> MEM_TBAA_SHIFT) as usize;
 }
+/// `O_LOAD`: the value read is 0 or 1 (a `bool`).
+pub const MEM_BOOL: u16 = 32;
 /// `O_MEMCPY`: the regions may overlap (memmove).
 pub const MEM_OVERLAP: u16 = 1;
 /// A logical right shift (`lshr`) that shifts out only zero bits (the text's `lshr.exact`): its operand's
@@ -600,7 +628,8 @@ pub struct Block {
 
 /// The block holds only a failure path (a panic or a trap).
 pub const BLOCK_COLD: u16 = 1;
-/// The loop this block heads runs what a vector copy of it left (`lir::loops`): it does not vectorize.
+/// The loop this block heads runs what a vector or unrolled copy of it left (`lir::loops`): it neither
+/// vectorizes nor unrolls.
 pub const BLOCK_NOVEC: u16 = 2;
 
 /// A stack slot: `size` bytes aligned to `1 << align_log2`.
@@ -655,9 +684,33 @@ pub struct Sym {
     /// The memory outside its own frame a call of it may read or write (`FX_*`): `lir::opt::Run::new`
     /// infers it for a function with a body; both for any other. The text form does not carry it.
     pub fx: u8,
+    /// What a call of it does to memory by its name (`alloc_of`): ALLOC_FRESH, ALLOC_FREE or ALLOC_NONE.
+    pub alloc: u8,
 }
 
 pub const NONE: u32 = 0xFFFFFFFF;
+/// `Sym.alloc`: a C library or runtime allocation, which returns a block no other pointer reaches and
+/// writes no memory the program reads but `errno` (an `i32`); a C library or runtime free, which writes no
+/// memory the program may read.
+pub const ALLOC_NONE: u8 = 0;
+pub const ALLOC_FRESH: u8 = 1;
+pub const ALLOC_FREE: u8 = 2;
+
+/// The `Sym.alloc` of the function named `name0` (`__sc_x_<c name>` is a C library name's alias).
+pub const fn alloc_of(name0: str) u8 {
+    let name = if name0.starts_with("__sc_x_") {
+        name0.slice(7, name0.len());
+    } else {
+        name0;
+    };
+    if name == "malloc" || name == "calloc" || name == "realloc" || name == "aligned_alloc" || name == "_aligned_malloc" || name == "sc_lk_malloc" || name == "sc_lk_calloc" || name == "sc_lk_realloc" || name == "sc_lk_aligned_alloc" {
+        return ALLOC_FRESH;
+    }
+    if name == "free" || name == "_aligned_free" || name == "sc_lk_free" || name == "sc_lk_aligned_free" {
+        return ALLOC_FREE;
+    }
+    return ALLOC_NONE;
+}
 /// `Sym.fx`: a call may read memory; a call may write memory; a call may write the memory its pointer
 /// arguments address (and no other).
 pub const FX_READ: u8 = 1;
@@ -756,6 +809,8 @@ pub struct Body {
     /// parameter reaches them (a `&mut`); 0 for any other parameter. Empty when no parameter is a
     /// reference.
     pub refs: Vector<u32>,
+    /// Per signature parameter of the first 64, whether it holds 0 or 1 (a `bool`), a bit each.
+    pub bools: u64,
     /// The scopes of the inlined calls' exclusive parameters (`Scope`); empty when there is none.
     pub scopes: Vector<Scope>,
     /// A naked function (`@unsafe(naked)`): its machine code is its `O_ASM` templates alone, in order,
@@ -808,6 +863,7 @@ extend Body {
             inl: Vector::<u32>::new(),
             sig: NONE,
             refs: Vector::<u32>::new(),
+            bools: 0,
             scopes: Vector::<Scope>::new(),
             naked: false,
             cur: 0,
@@ -831,6 +887,7 @@ extend Body {
         self.inl.truncate(0);
         self.sig = NONE;
         self.refs.truncate(0);
+        self.bools = 0;
         self.scopes.truncate(0);
         self.naked = false;
         self.cur = 0;
@@ -852,6 +909,7 @@ extend Body {
             inl: exact(&self.inl),
             sig: self.sig,
             refs: exact(&self.refs),
+            bools: self.bools,
             scopes: exact(&self.scopes),
             naked: self.naked,
             cur: 0,
@@ -1072,6 +1130,10 @@ pub struct Package {
     pub comp_dir: String,
     /// Bodies address their frames through the stack pointer, without a frame pointer, where they can.
     pub omit_fp: bool,
+    /// A call whose result its caller returns at once becomes a jump (`-foptimize-sibling-calls`): a call
+    /// of the body's own function, into its start (`lir::opt`); another, to the callee after the caller's
+    /// epilogue (the native backends).
+    pub tail: bool,
     /// The bodies with a stack canary (`PROTECT_*`).
     pub protect: u8,
     /// The bytes of a vector the native backend computes in one register (`target::table::Isa`), 0 for
@@ -1163,6 +1225,7 @@ extend Package {
             debug: false,
             comp_dir: String::new(),
             omit_fp: false,
+            tail: false,
             protect: PROTECT_NONE,
             fmath: 0,
             fma: false,
@@ -1235,6 +1298,11 @@ extend Package {
                 used: false,
                 noinline: false,
                 fx: FX_READ | FX_WRITE,
+                alloc: if kind == SK_FUNC {
+                    alloc_of(name);
+                } else {
+                    ALLOC_NONE;
+                },
                 own: false,
                 ext: false,
                 sig: NONE,

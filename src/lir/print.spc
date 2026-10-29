@@ -163,6 +163,11 @@ extend Printer {
                 out.push_byte(b'\n');
             }
         }
+        for k in 0..64u32 {
+            if (b.bools >> k as u64 & 1) != 0 {
+                out.format_into("  bool p{}\n", k);
+            }
+        }
         for x in 0..b.scopes.len() {
             let sc = b.scopes[x];
             out.push_str("  scope @");
@@ -370,7 +375,7 @@ extend Printer {
                 out.push_str(".unchecked");
             }
         }
-        if t.ty != T_NONE && f != F_CMP && t.op != O_ACAS && t.op != O_SLOTADDR && t.op != O_SYMADDR && t.op != O_RETADDR && t.op != O_PTRADD {
+        if t.ty != T_NONE && (f != F_CMP || t.op == O_VCMP) && t.op != O_ACAS && t.op != O_SLOTADDR && t.op != O_SYMADDR && t.op != O_RETADDR && t.op != O_PTRADD {
             out.push_byte(b'.');
             push_type(t.ty, out);
         }
@@ -631,6 +636,9 @@ extend Printer {
         }
         if tbaa(t) != 0 {
             out.format_into(" tbaa {}", tbaa(t));
+        }
+        if t.op == O_LOAD && (t.aux & MEM_BOOL) != 0 {
+            out.push_str(" bool");
         }
     }
 }
