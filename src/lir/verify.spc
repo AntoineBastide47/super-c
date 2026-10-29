@@ -187,6 +187,11 @@ extend Verifier {
                 return self.fail_body(name, "an entry parameter's type is not the signature's");
             }
         }
+        for k in 0..64u32 {
+            if (b.bools >> k as u64 & 1) != 0 && (k >= np || b.params[(entry.param_start + k) as usize] != T_I8) {
+                return self.fail_body(name, "a bool parameter is no i8 parameter of the signature");
+            }
+        }
         if (ret & AGG) != 0 && b.params[(entry.param_start + np) as usize] != T_PTR {
             return self.fail_body(name, "an aggregate result's entry parameter is not a pointer");
         }
@@ -412,8 +417,11 @@ extend Verifier {
         }
         if op == O_LOAD || op == O_STORE {
             let vt = ast::pick(op == O_LOAD, t.ty, tb);
-            if ta != T_PTR || vt == T_NONE || op == O_STORE && t.ty != T_NONE || (t.aux & ~(MEM_VOLATILE | MEM_TBAA | 15)) != 0 {
+            if ta != T_PTR || vt == T_NONE || op == O_STORE && t.ty != T_NONE || (t.aux & ~(MEM_VOLATILE | MEM_TBAA | MEM_BOOL | 15)) != 0 {
                 return self.fail_at(name, b, i, "a pointer address and a typed value");
+            }
+            if (t.aux & MEM_BOOL) != 0 && (op != O_LOAD || vt != T_I8) {
+                return self.fail_at(name, b, i, "a bool load of an i8");
             }
             if tbaa(t) != 0 && tbaa(t) != tbaa_of(vt) as usize {
                 return self.fail_at(name, b, i, "a type tag of the accessed type");

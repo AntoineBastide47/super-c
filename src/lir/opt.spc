@@ -44,6 +44,7 @@ const LOG_MEM: u8 = 1;
 const LOG_COND: u8 = 2;
 const LOG_REL: u8 = 3;
 const LOG_UB: u8 = 4;
+const LOG_EQ: u8 = 5;
 // `Opt::overwrite` keeps at most PEND_MAX stores.
 const PEND_MAX: u32 = 8;
 // `Opt::ubound` follows at most UB_DEPTH instructions.
@@ -79,6 +80,8 @@ const THREAD_BLOCK_MAX: u32 = 8;
 const THREAD_DEPTH: u32 = 4;
 // `Opt::implied` follows a parameter back through at most IMPLY_FAN edges into its block.
 const IMPLY_FAN: u32 = 4;
+// A write carries at most RECENT_MAX of the places known last into its memory state (`Opt::carry`).
+const RECENT_MAX: usize = 16;
 
 /// The optimizer's scratch, reused from body to body.
 pub struct Opt {
@@ -117,6 +120,9 @@ pub struct Opt {
     site_cls: Vector<u64>, // per `lines` entry, the scope classes of its inline site (`scope_seeds`)
     imem: Vector<u64>,
     sbits: u64,
+    fbits: u64, // the classes of allocations' blocks (`fresh_seeds`)
+    cnext: u32, // the first class index past the parameters' and the scopes'
+    fcall: Vector<u32>, // per class index, the allocation whose block it is (`fresh_seeds`)
     ipin: Vector<bool>,
     ppin: Vector<bool>,
     acls: Vector<u8>,
@@ -138,11 +144,17 @@ pub struct Opt {
     prepl: Vector<u32>, // per block parameter, the value that replaced it (VNONE: none)
     frepl: Vector<u32>, // per checked operation, the value that replaced its flag (VNONE: none)
     extra: Vector<u32>, // the constants the walk made, which the entry block starts with
+    aggp: u64, // the entry parameters whose loads move to the entry's start (`agg_params`)
     made: Map<u64, u32>, // a made constant's hash to the constant
     moved: Vector<bool>,
     hoisted: Vector<u64>, // block << 32 | instruction, in the order they moved
     pnew: Vector<bool>, // per block, a preheader `preheaders` made
+    touched: Vector<bool>, // per block, one `promote_places` changed: a preheader or a block of a loop
     pre: Vector<u64>, // instruction << 32 | an instruction the walk made to run right before it, in order
+    unbiased: Map<u32, u32>, // per indexed address with an offset, the address without it (`visit`)
+    merged: bool, // the last rebuild merged blocks
+    selected: bool, // the last walk made selects (`diamond`), which no walk simplified
+    unstored: bool, // the last walk dropped a store in a loop, whose loads may leave it now
     pre_at: Vector<u32>, // the rebuild's ranges of `pre_list` per instruction
     pre_list: Vector<u32>,
     // The scoped tables: a pure instruction's hash to the instruction, a memory place's hash to its
@@ -152,11 +164,18 @@ pub struct Opt {
     mem: Map<u64, u32>,
     cond: Map<u64, u32>,
     rel: Map<u64, u32>, // `y << 32 | x` -> whether `x <u y` holds (`rel_key`)
+    eqs: Map<u64, u32>, // the pairs of values the branches in scope make equal (`rel_key` of the lower first)
     ub: Map<u64, u32>, // value -> constant `k` << 1 | 1 when `value <u k` holds, `k` << 1 when `value <=u k`
     log: Vector<(u8, u64, u32)>,
     places: Vector<Place>,
+    recent: Vector<u32>, // the `places` entries made last in the walk's block and its dominators (`carry`)
+    end_recent: Vector<u32>, // per block, `recent` at its end: RECENT_MAX entries, NONE past its count
     state: u32, // the current memory state of the visited access (its tag's)
     prior: u32, // the memory state of the visited access's tag before it
+    // The private and the untagged memory states before the visited instruction: no write between two
+    // instructions when both are the same.
+    pprior: u32,
+    tprior: u32,
     tstate: [u32; TBAA_TAGS], // per type tag, the current memory state of its accesses
     tags: Vector<u16>, // per loop header, the type tags its blocks write (`tags_in`)
     // Private memory (`slot_writes`): the slots, then the aggregate arguments (each a copy the callee
@@ -270,6 +289,9 @@ extend Opt {
             site_cls: Vector::<u64>::new(),
             imem: Vector::<u64>::new(),
             sbits: 0,
+            fbits: 0,
+            cnext: 0,
+            fcall: Vector::<u32>::new(),
             ipin: Vector::<bool>::new(),
             ppin: Vector::<bool>::new(),
             acls: Vector::<u8>::new(),
@@ -289,16 +311,24 @@ extend Opt {
             moved: Vector::<bool>::new(),
             hoisted: Vector::<u64>::new(),
             pnew: Vector::<bool>::new(),
+            touched: Vector::<bool>::new(),
             pre: Vector::<u64>::new(),
+            unbiased: Map::<u32, u32>::new(),
+            merged: false,
+            selected: false,
+            unstored: false,
             pre_at: Vector::<u32>::new(),
             pre_list: Vector::<u32>::new(),
             pure: Map::<u64, u32>::new(),
             mem: Map::<u64, u32>::new(),
             cond: Map::<u64, u32>::new(),
             rel: Map::<u64, u32>::new(),
+            eqs: Map::<u64, u32>::new(),
             ub: Map::<u64, u32>::new(),
             log: Vector::<(u8, u64, u32)>::new(),
             places: Vector::<Place>::new(),
+            recent: Vector::<u32>::new(),
+            end_recent: Vector::<u32>::new(),
             sbase: Vector::<u32>::new(),
             soff: Vector::<i64>::new(),
             sesc: Vector::<bool>::new(),
@@ -307,6 +337,8 @@ extend Opt {
             wl: Vector::<SlotWrite>::new(),
             state: 0,
             prior: 0,
+            pprior: 0,
+            tprior: 0,
             end_state: Vector::<u32>::new(),
             pstate: 0,
             end_pstate: Vector::<u32>::new(),
@@ -334,6 +366,7 @@ extend Opt {
             prepl: Vector::<u32>::new(),
             frepl: Vector::<u32>::new(),
             extra: Vector::<u32>::new(),
+            aggp: 0,
             made: Map::<u64, u32>::new(),
             pmap: Vector::<u32>::new(),
             params: Vector::<u8>::new(),
@@ -360,6 +393,7 @@ extend Opt {
         if b.naked {
             return false;
         }
+        self.merged = false;
         // `thread` computes the graph and the dominators: they stand when it moves no edge.
         let threaded = self.thread(pk, b);
         if threaded {
@@ -384,7 +418,8 @@ extend Opt {
         }
         // SC_LIR_PROMOTE=0 promotes nothing (a debugging aid).
         if b.slots.len() == 0 || stdlib::env_is("SC_LIR_PROMOTE", "0") {
-            return self.thread_rounds(pk, b) || changed;
+            let r = self.thread_rounds(pk, b) || changed;
+            return self.rewalk(pk, b) || r;
         }
         // Promotion, once the walk forwarded the parameters an inlined body's entry takes (a slot's
         // address among them); it keeps the blocks and their edges' targets, so the graph and the
@@ -405,7 +440,8 @@ extend Opt {
             &mut self.pbody,
         );
         if !promoted {
-            return self.thread_rounds(pk, b) || changed;
+            let r = self.thread_rounds(pk, b) || changed;
+            return self.rewalk(pk, b) || r;
         }
         let nb = replace(&mut self.pbody, Body::new());
         self.pbody = replace(b, nb);
@@ -415,6 +451,23 @@ extend Opt {
         self.rebuild(b);
         // Promotion turns the flags a `&&` or `||` stores into parameters `thread` reads.
         let _ = self.thread_rounds(pk, b);
+        let _ = self.rewalk(pk, b);
+        return true;
+    }
+
+    // Blocks the last rebuild merged are one block now, the selects the last walk made are new, and a
+    // loop may write less: one more walk numbers and forwards across the blocks (a load the second
+    // repeats), simplifies the selects and hoists the loads. Whether it ran.
+    fn rewalk(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        if !self.merged && !self.selected && !self.unstored {
+            return false;
+        }
+        self.graph(b);
+        self.dominators(b);
+        self.loops(pk, b);
+        self.slot_writes(pk, b);
+        let _ = self.walk(pk, b);
+        self.rebuild(b);
         return true;
     }
 
@@ -534,7 +587,8 @@ extend Opt {
         self.graph(b);
         self.dominators(b);
         self.loops(pk, b);
-        if self.preheaders(b) {
+        let pre = self.preheaders(b);
+        if pre {
             self.graph(b);
             self.dominators(b);
             self.loops(pk, b);
@@ -557,7 +611,11 @@ extend Opt {
                 root: self.croot.as_slice(),
             },
         );
+        // The preheaders no transform used go again with the walk's merges.
         if !any {
+            if pre {
+                let _ = self.run(pk, b, true);
+            }
             return false;
         }
         let _ = self.run(pk, b, true);
@@ -613,6 +671,196 @@ extend Opt {
             any = true;
         }
         return any;
+    }
+
+    /// Keep in a register the place each innermost loop of body `b` reads and writes through an exclusive
+    /// pointer from outside the loop (LLVM's LICM scalar promotion), when the loop has a preheader, calls
+    /// nothing and no other access of it may touch the place's bytes: a new slot takes the place's accesses
+    /// in the loop, loaded from the place in a block between the preheader and the loop and stored back to
+    /// it in a block on each edge out; the promotion of `run` makes the slot values. Whether any loop's did.
+    pub fn promote_places(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        if b.naked {
+            return false;
+        }
+        self.graph(b);
+        self.dominators(b);
+        self.loops(pk, b);
+        self.fresh(b);
+        let nb = b.blocks.len();
+        fill_bool(&mut self.touched, nb, false);
+        let none: []u8 = [];
+        let noargs: []Value = [];
+        let mut any = false;
+        for h in 0..nb as u32 {
+            let s = self.place_of(pk, b, h);
+            if s == NONE {
+                continue;
+            }
+            let st = b.insts[s as usize];
+            let ty = b.type_of(st.b);
+            let al = type_align(ty, pk.ptr_bytes).trailing_zeros() as u16;
+            let slot = b.slot(type_bytes(ty, pk.ptr_bytes), al as u8);
+            // The block before the loop: the place's value into the slot.
+            let pre = self.preh[h as usize];
+            let pi = b.blocks[pre as usize].start + b.blocks[pre as usize].len - 1;
+            let pt = b.insts[pi as usize];
+            let nk = b.add_block(none);
+            b.begin(nk);
+            let loc = b.locs[pi as usize];
+            let sa = b.emit(Inst { op: O_SLOTADDR, ty: T_PTR, aux: 0, a: slot, b: 0, c: 0 }, loc);
+            let v = b.emit(Inst { op: O_LOAD, ty: ty, aux: st.aux, a: st.a, b: VNONE, c: st.c }, loc);
+            let _ = b.emit(Inst { op: O_STORE, ty: T_NONE, aux: al, a: sa, b: v, c: 0 }, loc);
+            let _ = b.emit(pt, loc);
+            if b.inl.len() != 0 {
+                for _ in 0..4 {
+                    b.inl.push(b.inl[pi as usize]);
+                }
+            }
+            b.insts[pi as usize] = jump(b.edge(nk, noargs));
+            self.touched[pre as usize] = true;
+            for x in 0..nb {
+                if self.inner[x] != h {
+                    continue;
+                }
+                self.touched[x] = true;
+                let bk = b.blocks[x];
+                // The loop's accesses of the place: the slot's.
+                for i in bk.start..bk.start + bk.len {
+                    let t = b.insts[i as usize];
+                    if (t.op == O_LOAD || t.op == O_STORE) && t.a == st.a && t.c == st.c {
+                        b.insts[i as usize] = Inst { op: t.op, ty: t.ty, aux: al, a: sa, b: t.b, c: 0 };
+                    }
+                }
+                // Each edge out: a block that stores the slot's value back to the place, then goes on.
+                let ti = bk.start + bk.len - 1;
+                let mut t = b.insts[ti as usize];
+                b.succ_edges(t, &mut self.edges);
+                for q in 0..self.edges.len() {
+                    let e = self.edges[q];
+                    let to = b.edge_target(e);
+                    if self.inner[to as usize] == h {
+                        continue;
+                    }
+                    let ek = b.add_block(none);
+                    b.blocks.index_mut(ek as usize).flags = b.blocks[to as usize].flags & BLOCK_COLD;
+                    b.begin(ek);
+                    let l = b.locs[ti as usize];
+                    let w = b.emit(Inst { op: O_LOAD, ty: ty, aux: al, a: sa, b: VNONE, c: 0 }, l);
+                    let _ = b.emit(Inst { op: O_STORE, ty: T_NONE, aux: st.aux, a: st.a, b: w, c: st.c }, l);
+                    let _ = b.emit(jump(e), l);
+                    if b.inl.len() != 0 {
+                        for _ in 0..3 {
+                            b.inl.push(b.inl[ti as usize]);
+                        }
+                    }
+                    let ne = b.edge(ek, noargs);
+                    if t.op == O_JMP {
+                        t.a = ne;
+                    } else if q == 0 {
+                        t.b = ne;
+                    } else {
+                        t.c = ne;
+                    }
+                }
+                b.insts[ti as usize] = t;
+            }
+            any = true;
+        }
+        return any;
+    }
+
+    // The store that names the place `promote_places` keeps in a register for loop `h`: an innermost loop
+    // with a preheader no earlier loop's change touched, whose blocks end in jumps and branches and hold no
+    // call nor other access of memory but loads and stores. The place: a store's address from outside the
+    // loop, of an exclusive class, and an offset; a scalar that a load of the loop reads too, whose load
+    // before the loop cannot fault; every other access of the loop of another class (neither may be any),
+    // of other bytes of the same address, or of another type tag. NONE when none.
+    fn place_of(self: &Self, pk: &Package, b: &Body, h: u32) u32 {
+        // The blocks the loop tables cover: `promote_places` adds others.
+        let nb = self.inner.len();
+        if self.inner[h as usize] != h || self.preh[h as usize] == NONE || self.touched[self.preh[h as usize] as usize] {
+            return NONE;
+        }
+        for x in 0..nb {
+            if self.inner[x] == h && self.touched[x] || self.inner[x] != h && self.inner[x] != NONE && self.in_loop(
+                h,
+                x as u32,
+            ) {
+                return NONE;
+            }
+        }
+        let mut cand = NONE;
+        for x in 0..nb {
+            if self.inner[x] != h {
+                continue;
+            }
+            let bk = b.blocks[x];
+            let te = b.insts[(bk.start + bk.len - 1) as usize].op;
+            if te != O_JMP && te != O_BR {
+                return NONE;
+            }
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                if t.op != O_LOAD && t.op != O_STORE && (writes_memory(t) || t.op == O_VAARG) {
+                    return NONE;
+                }
+                if cand == NONE && t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 && self.outside(t.a, h) && self.loop_acc(
+                    i,
+                    h,
+                ) >= CL_NOALIAS && self.loop_acc(i, h) < CL_MANY {
+                    cand = i;
+                }
+            }
+        }
+        if cand == NONE {
+            return NONE;
+        }
+        let s = b.insts[cand as usize];
+        let ty = b.type_of(s.b);
+        let n = type_bytes(ty, pk.ptr_bytes) as i64;
+        let cls = self.loop_acc(cand, h);
+        let lo = (s.c as i32) as i64;
+        if !(is_int(ty) && ty != T_I128 || ty == T_PTR || ty == T_F32 || ty == T_F64) {
+            return NONE;
+        }
+        let mut read = false;
+        for x in 0..nb {
+            if self.inner[x] != h {
+                continue;
+            }
+            let bk = b.blocks[x];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                if t.op != O_LOAD && t.op != O_STORE {
+                    continue;
+                }
+                let tt = if t.op == O_LOAD {
+                    t.ty;
+                } else {
+                    b.type_of(t.b);
+                };
+                if t.a == s.a && t.c == s.c {
+                    // The place itself, whole, in its type.
+                    if tt != ty || (t.aux & MEM_VOLATILE) != 0 {
+                        return NONE;
+                    }
+                    read = read || t.op == O_LOAD;
+                    continue;
+                }
+                let c = self.loop_acc(i, h);
+                let qlo = (t.c as i32) as i64;
+                let apart = c < CL_MANY && c != cls || c == cls && t.a == s.a && (qlo + type_bytes(tt, pk.ptr_bytes) as i64 <= lo || lo + n <= qlo) || c >= CL_MANY && tbaa(
+                    t,
+                ) != 0 && tbaa(s) != 0 && tbaa(t) != tbaa(s);
+                if !apart {
+                    return NONE;
+                }
+            }
+        }
+        if !read || !self.safe_load(pk, b, Inst { op: O_LOAD, ty: ty, aux: s.aux, a: s.a, b: VNONE, c: s.c }) {
+            return NONE;
+        }
+        return cand;
     }
 
     // Give each loop header no preheader enters one (LLVM's LoopSimplify): a block that the jumps and
@@ -920,14 +1168,21 @@ extend Opt {
     // its roots pinned to it, that holds only for the accesses of the call's copy (`acc`, `imem`) and
     // only for the loops its roots are outside of (`loop_acc`): a root inside a loop is a new pointer in
     // each iteration, each a call of its own. A use of it outside the copy is no escape.
-    fn classes(self: &mut Self, b: &Body) {
+    //
+    // The block an allocation returns (`ALLOC_FRESH`) is a class of its own past those, its call pinned
+    // to it: no other pointer reaches the block until the pointer escapes, and returning it or freeing it
+    // is no escape (no access of the body follows the one, any access of the block after the other is
+    // undefined).
+    fn classes(self: &mut Self, pk: &Package, b: &Body) {
         fill(&mut self.icls, b.insts.len(), CL_OTHER);
         fill(&mut self.pcls, b.params.len(), CL_OTHER);
         fill(&mut self.csite, CL_MANY as usize, NONE);
         fill(&mut self.croot, CL_MANY as usize, NONE);
         self.sbits = 0;
+        self.fbits = 0;
         self.imem.truncate(0);
         let e = b.blocks[0];
+        self.cnext = e.param_len;
         let mut seeds: u64 = 0;
         for k in 0..b.refs.len() {
             if (b.refs[k] & REF_NOALIAS) != 0 && k < (CL_MANY - CL_NOALIAS) as usize && k < e.param_len as usize {
@@ -939,17 +1194,20 @@ extend Opt {
             cand = self.scope_seeds(b, seeds);
         }
         seeds |= cand;
+        let fresh = self.fresh_seeds(pk, b);
+        seeds |= fresh;
         // Each pass drops at least one seed that escapes.
         for _ in 0..CL_MANY {
-            if seeds == 0 || !self.class_flow(b, seeds) {
+            if seeds == 0 || !self.class_flow(b, seeds, fresh) {
                 fill(&mut self.icls, b.insts.len(), CL_OTHER);
                 fill(&mut self.pcls, b.params.len(), CL_OTHER);
                 self.sbits = 0;
                 return;
             }
-            let kept = seeds & ~self.escaped(b, cand << 1);
+            let kept = seeds & ~self.escaped(pk, b, cand << 1, fresh << 1);
             if kept == seeds {
                 self.sbits = (seeds & cand) << 1;
+                self.fbits = (seeds & fresh) << 1;
                 return;
             }
             seeds = kept;
@@ -1004,6 +1262,7 @@ extend Opt {
                 self.croot[(CL_NOALIAS as u32 + idx) as usize] = blk;
             }
             self.sgroup[x] = idx;
+            self.cnext = next;
             // A group's roots in two blocks, or one that is an exclusive parameter, end it.
             if idx != NONE && (blk == NONE || self.croot[(CL_NOALIAS as u32 + idx) as usize] != blk || k < 64 && (params >> k as u64 & 1) != 0) {
                 out &= ~(1u64 << idx as u64);
@@ -1021,6 +1280,26 @@ extend Opt {
         fill(&mut self.imem, ni, 0);
         for i in 0..ni {
             self.imem[i] = self.site_cls[b.inl[i] as usize];
+        }
+        return out;
+    }
+
+    // The allocations' seeds (bits of their class indices, from `cnext`): each call of an `ALLOC_FRESH`
+    // function that returns a pointer, while class indices are left; `fcall` set.
+    fn fresh_seeds(self: &mut Self, pk: &Package, b: &Body) u64 {
+        fill(&mut self.fcall, CL_MANY as usize, NONE);
+        let mut out: u64 = 0;
+        let mut next = self.cnext;
+        for i in 0..b.insts.len() {
+            if next >= (CL_MANY - CL_NOALIAS) as u32 {
+                break;
+            }
+            let t = b.insts[i];
+            if t.op == O_CALL && t.ty == T_PTR && call_alloc(pk, b, t) == ALLOC_FRESH {
+                self.fcall[next as usize] = i as u32;
+                out |= 1u64 << next as u64;
+                next += 1;
+            }
         }
         return out;
     }
@@ -1061,8 +1340,9 @@ extend Opt {
         return c;
     }
 
-    // The classes of `classes` from the parameters `seeds` marks: whether the joins settled.
-    fn class_flow(self: &mut Self, b: &Body, seeds: u64) bool {
+    // The classes of `classes` from the parameters, scopes and allocations `seeds` marks (the allocations'
+    // bits `fresh`): whether the joins settled.
+    fn class_flow(self: &mut Self, b: &Body, seeds: u64, fresh: u64) bool {
         let e = b.blocks[0];
         for i in 0..b.insts.len() {
             let op = b.insts[i].op;
@@ -1099,6 +1379,14 @@ extend Opt {
             } else if !self.ipin[r as usize] {
                 self.icls[r as usize] = c;
                 self.ipin[r as usize] = true;
+            }
+        }
+        // The allocations' blocks, pinned to their classes.
+        for idx in 0..(CL_MANY - CL_NOALIAS) as u32 {
+            if ((seeds & fresh) >> idx as u64 & 1) != 0 {
+                let i = self.fcall[idx as usize] as usize;
+                self.icls[i] = CL_NOALIAS + idx as u8;
+                self.ipin[i] = true;
             }
         }
         // A view parameter's elements: the pointer a load reads from its offset 0.
@@ -1168,8 +1456,9 @@ extend Opt {
     // The parameters (bits) whose value escapes: a use of a value of their class but as an access's
     // address, address arithmetic's base, a select's operand, a comparison's operand or a block argument;
     // for a view parameter (`REF_INNER`), any use of the parameter itself but as a load's address. A scope
-    // class (bits `scoped`) escapes only through a use in its own copy.
-    fn escaped(self: &mut Self, b: &Body, scoped: u64) u64 {
+    // class (bits `scoped`) escapes only through a use in its own copy; an allocation's (bits `fresh`), not
+    // through a return or a free (`ALLOC_FREE`).
+    fn escaped(self: &mut Self, pk: &Package, b: &Body, scoped: u64, fresh: u64) u64 {
         let views = any_inner(b);
         let mut out: u64 = 0;
         for i in 0..b.insts.len() {
@@ -1195,10 +1484,13 @@ extend Opt {
             if op == O_LOAD || op == O_MEMCPY || op == O_MEMSET || op == O_PTRADD || op == O_SELECT || op == O_ICMP || op == O_JMP || op == O_BR || op == O_SWITCH {
                 continue;
             }
-            let foreign = scoped & ~self.member(i as u32);
+            let mut foreign = scoped & ~self.member(i as u32);
             if op == O_STORE {
                 out |= class_bit(self.class(t.b)) & ~foreign;
                 continue;
+            }
+            if op == O_RET || op == O_CALL && call_alloc(pk, b, t) == ALLOC_FREE {
+                foreign |= fresh;
             }
             for u in 0..nu {
                 out |= class_bit(self.class(self.uses[u])) & ~foreign;
@@ -1238,13 +1530,28 @@ extend Opt {
             if self.private(t) {
                 continue; // `pwrites_in`
             }
-            if t.op == O_STORE || t.op == O_MEMCPY || t.op == O_MEMSET {
-                out |= class_bit(self.acc(i, t.a)) | self.sbits & ~self.member(i);
-            } else if writes(pk, b, t) {
-                out |= class_bit(CL_OTHER) | self.sbits & ~self.member(i);
+            if writes(pk, b, t) {
+                out |= self.write_bits(pk, b, i);
             }
         }
         return out;
+    }
+
+    // The alias classes write `i` of `b` touches (`class_bit`): a store's, a copy's or a fill's access
+    // class (`acc`); CL_OTHER for any other write, which reaches no exclusive parameter's referent; and,
+    // outside a scope's copy, the scope's class too.
+    // A free writes none.
+    fn write_bits(self: &Self, pk: &Package, b: &Body, i: u32) u64 {
+        let t = b.insts[i as usize];
+        if call_alloc(pk, b, t) == ALLOC_FREE {
+            return 0;
+        }
+        let c = if t.op == O_STORE || t.op == O_MEMCPY || t.op == O_MEMSET {
+            self.acc(i, t.a);
+        } else {
+            CL_OTHER;
+        };
+        return class_bit(c) | self.sbits & ~self.member(i);
     }
 
     // The plain stores of block `k` of `b` whose class is an exclusive parameter's, into `lst`; the classes
@@ -1314,8 +1621,8 @@ extend Opt {
         return false;
     }
 
-    // The type tags block `k` of `b` writes (bit 0: an untagged write, all of them), a private slot's
-    // writes aside (`pwrites_in`).
+    // The type tags block `k` of `b` writes (bit 0: an untagged write, all of them; `write_tag`), a private
+    // slot's writes aside (`pwrites_in`).
     fn tags_in(self: &Self, pk: &Package, b: &Body, k: u32) u16 {
         let bk = b.blocks[k as usize];
         let mut out: u16 = 0;
@@ -1324,11 +1631,16 @@ extend Opt {
             if self.private(t) {
                 continue;
             }
-            if t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 {
-                out |= 1u16 << tbaa(t) as u16;
-            } else if writes(pk, b, t) {
-                out |= 1;
+            let g = write_tag(pk, b, t);
+            if !writes(pk, b, t) || g >= TBAA_TAGS {
+                continue;
             }
+            // A volatile store, like any write but a store or a call, may touch any tag.
+            out |= if t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 || t.op == O_CALL {
+                1u16 << g as u16;
+            } else {
+                1u16;
+            };
         }
         return out;
     }
@@ -1356,7 +1668,7 @@ extend Opt {
         fill(&mut self.imprecise, nb, 0);
         self.lst.truncate(0);
         self.privates(b);
-        self.classes(b);
+        self.classes(pk, b);
         // The classes of the loads' and stores' accesses before the walk forwards their addresses: a
         // parameter an inlined body's accesses go through, a scope's, becomes the caller's pointer.
         fill(&mut self.acls, b.insts.len(), CL_MANY);
@@ -1475,12 +1787,64 @@ extend Opt {
         self.extra.truncate(0);
         self.hoisted.truncate(0);
         self.pre.truncate(0);
+        self.unbiased.clear();
+    }
+
+    // The entry parameters (bits) that point at a by-value aggregate of at most 16 bytes, which the targets
+    // pass in registers, that only loads outside cold blocks read: their loads may move to the entry's
+    // start, where the code generator takes each part's register for its load and the aggregate needs no
+    // memory.
+    fn agg_params(self: &mut Self, b: &Body) u64 {
+        if b.sig == NONE {
+            return 0;
+        }
+        let np = b.pool[b.sig as usize];
+        let ps = b.blocks[0].param_start;
+        let mut out: u64 = 0;
+        for k in 0..np {
+            let pt = b.pool[(b.sig + 3 + k) as usize];
+            if k < 64 && (pt & AGG) != 0 && b.pool[(pt & ~AGG) as usize] <= 16 {
+                out |= 1u64 << k as u64;
+            }
+        }
+        if out == 0 {
+            return 0;
+        }
+        let mut edges = Vector::<u32>::new();
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                lv::uses(b, t, &mut self.uses);
+                if is_terminator(t.op) {
+                    b.succ_edges(t, &mut edges);
+                    for e in 0..edges.len() {
+                        for q in 0..b.edge_nargs(edges[e]) {
+                            self.uses.push(b.edge_arg(edges[e], q));
+                        }
+                    }
+                }
+                for q in 0..self.uses.len() {
+                    let v = self.uses[q];
+                    if (v & VPARAM) == 0 || v == VNONE || (v & ~VPARAM) < ps || (v & ~VPARAM) - ps >= 64 {
+                        continue;
+                    }
+                    let load = t.op == O_LOAD && t.a == v && (t.aux & MEM_VOLATILE) == 0 && self.uses.len() == 1;
+                    if !load || (bk.flags & BLOCK_COLD) != 0 {
+                        out &= ~(1u64 << ((v & ~VPARAM) - ps) as u64);
+                    }
+                }
+            }
+        }
+        return out;
     }
 
     fn walk(self: &mut Self, pk: &Package, b: &mut Body) bool {
         let nb = b.blocks.len();
         self.fresh(b);
         self.made.clear();
+        self.selected = false;
+        self.unstored = false;
         // What `thread` made and replaced.
         for x in 0..self.textra.len() {
             let i = self.textra[x];
@@ -1499,24 +1863,29 @@ extend Opt {
         self.cond.clear();
         self.rel.clear();
         self.ub.clear();
+        self.eqs.clear();
         self.log.truncate(0);
         self.places.truncate(0);
         fill(&mut self.end_state, nb * TBAA_TAGS, 0);
+        fill(&mut self.end_recent, nb * RECENT_MAX, NONE);
         fill(&mut self.end_pstate, nb, 0);
         fill(&mut self.bwrites, nb, 0);
         fill(&mut self.rmark, nb, NONE);
         self.privates(b);
+        self.aggp = self.agg_params(b);
         for k in 0..nb {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
                 let t = b.insts[i as usize];
                 if writes(pk, b, t) && !self.private(t) {
-                    let g = if (t.op == O_LOAD || t.op == O_STORE) && (t.aux & MEM_VOLATILE) == 0 {
-                        tbaa(t);
-                    } else {
+                    let g = if (t.aux & MEM_VOLATILE) != 0 && (t.op == O_LOAD || t.op == O_STORE) {
                         0usize;
+                    } else {
+                        write_tag(pk, b, t);
                     };
-                    self.bwrites[k] |= 1u16 << g as u16;
+                    if g < TBAA_TAGS {
+                        self.bwrites[k] |= 1u16 << g as u16;
+                    }
                 }
             }
         }
@@ -1535,6 +1904,19 @@ extend Opt {
             }
             let k = (x >> 1) as usize;
             self.stack.push(self.log.len() as u64 << 33 | 1);
+            // The places its dominator knew last; those of a state no longer current are not found.
+            self.recent.truncate(0);
+            for r in 0..RECENT_MAX {
+                let at = if k == 0 {
+                    NONE;
+                } else {
+                    self.end_recent[self.idom[k] as usize * RECENT_MAX + r];
+                };
+                if at == NONE {
+                    break;
+                }
+                self.recent.push(at);
+            }
             if k != 0 && self.pred_at[k + 1] - self.pred_at[k] == 1 && self.preds[self.pred_at[k] as usize] == self.idom[k] {
                 let d = self.idom[k] as usize * TBAA_TAGS;
                 for g in 0..TBAA_TAGS {
@@ -1577,25 +1959,26 @@ extend Opt {
             }
             let bk = b.blocks[k];
             self.pend.truncate(0);
+            let mut called = false;
             for i in bk.start..bk.start + bk.len {
                 // A write starts a new state for its tag's accesses and the untagged ones; an untagged
                 // write, for all.
                 let t = b.insts[i as usize];
-                let g = if t.op == O_LOAD || t.op == O_STORE {
-                    tbaa(t);
-                } else {
-                    0usize;
-                };
+                let g = write_tag(pk, b, t);
                 let before = self.tstate;
                 let pbefore = self.pstate;
                 // An access of a private slot's memory has states of its own: no other access touches it.
                 let private = self.private(t);
                 self.prior = if private {
                     pbefore;
-                } else {
+                } else if g < TBAA_TAGS {
                     unsafe before[g];
+                } else {
+                    before[0];
                 };
-                if writes(pk, b, t) {
+                self.pprior = pbefore;
+                self.tprior = before[0];
+                if writes(pk, b, t) && g < TBAA_TAGS {
                     states += 1;
                     if private {
                         self.pstate = states;
@@ -1608,8 +1991,10 @@ extend Opt {
                 }
                 self.state = if private {
                     self.pstate;
-                } else {
+                } else if g < TBAA_TAGS {
                     unsafe self.tstate[g];
+                } else {
+                    self.tstate[0];
                 };
                 // An instruction `thread` replaced is gone; one `speculate` moved stays as it is.
                 if self.moved[i as usize] {
@@ -1622,10 +2007,23 @@ extend Opt {
                     if self.pre.len() != np {
                         self.pend.truncate(0);
                     }
+                    // A load of a small by-value aggregate parameter moves to the entry's start, before any
+                    // call (`agg_params`).
+                    let u = b.insts[i as usize];
+                    if self.aggp != 0 && u.op == O_LOAD && self.repl[i as usize] == VNONE && (k != 0 || called) && (u.a & VPARAM) != 0 && (u.a & ~VPARAM) - b.blocks[0].param_start < 64 && (self.aggp >> ((u.a & ~VPARAM) - b.blocks[0].param_start) as u64 & 1) != 0 {
+                        self.moved[i as usize] = true;
+                        self.blk_of[i as usize] = 0;
+                        self.extra.push(i);
+                        changed = true;
+                    }
+                    called = called || u.op == O_CALL || u.op == O_CALLIND;
                     // A store the visit dropped wrote nothing.
                     if t.op == O_STORE && self.repl[i as usize] == DROPPED {
                         self.tstate = before;
                         self.pstate = pbefore;
+                        self.unstored = self.unstored || self.inner[k] != NONE;
+                    } else if !private && writes(pk, b, t) && g < TBAA_TAGS {
+                        self.carry(pk, b, i, before);
                     }
                     if self.repl[i as usize] == VNONE {
                         changed = self.overwrite(pk, b, i) || changed;
@@ -1636,6 +2034,9 @@ extend Opt {
             }
             for g in 0..TBAA_TAGS {
                 self.end_state[k * TBAA_TAGS + g] = unsafe self.tstate[g];
+            }
+            for r in 0..self.recent.len() {
+                self.end_recent[k * RECENT_MAX + r] = self.recent[r];
             }
             self.end_pstate[k] = self.pstate;
             for c in self.kid_at[k]..self.kid_at[k + 1] {
@@ -1729,6 +2130,8 @@ extend Opt {
                 &mut self.cond;
             } else if table == LOG_REL {
                 &mut self.rel;
+            } else if table == LOG_EQ {
+                &mut self.eqs;
             } else {
                 &mut self.ub;
             };
@@ -1749,6 +2152,8 @@ extend Opt {
             &mut self.cond;
         } else if table == LOG_REL {
             &mut self.rel;
+        } else if table == LOG_EQ {
+            &mut self.eqs;
         } else {
             &mut self.ub;
         };
@@ -1792,6 +2197,7 @@ extend Opt {
         if nsel == 0 || nsel > MAX_SELECTS {
             return NONE;
         }
+        self.selected = true;
         // The sides' instructions move to the end of `k`, in order, before the selects that read them.
         self.speculate(b, k, s0);
         self.speculate(b, k, s1);
@@ -1919,6 +2325,13 @@ extend Opt {
     // Condition `c`, `holds` on the edge into the scope: `x <u y` decided, and with it `x <u m` for each
     // minimum `m` that `y` is made of (`min_parts`).
     fn order_facts(self: &mut Self, b: &Body, c: Value, holds: bool) {
+        // An equality that holds here: its sides are one value below.
+        if (c & (VPARAM | VFLAG)) == 0 && b.insts[c as usize].op == O_ICMP && !is_vec(b.insts[c as usize].ty) {
+            let t = b.insts[c as usize];
+            if t.aux == C_EQ && holds || t.aux == C_NE && !holds {
+                self.enter(LOG_EQ, eq_key(t.a, t.b), 1);
+            }
+        }
         let (x, y, neg) = Opt::as_ult(b, c);
         if x == VNONE {
             return;
@@ -2971,6 +3384,70 @@ extend Opt {
                 }
             }
         }
+        // A load or a store through a constant offset from another address takes that address and the sum
+        // of the offsets: one place per base for `recall`, and an addressing mode for the code generator.
+        if (t.op == O_LOAD || t.op == O_STORE) && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_PTRADD && b.insts[t.a as usize].b == VNONE {
+            let off = (t.c as i32) as i64 + (b.insts[t.a as usize].c as i32) as i64;
+            if off >= -0x80000000 && off <= 0x7FFFFFFF {
+                t.a = b.insts[t.a as usize].a;
+                t.c = off as u32;
+            }
+        }
+        // Through an indexed address with an offset (a field of an element): that address without the
+        // offset, made right before it once, and the offset joins the access's (`ldr x, [x, #off]` on
+        // arm64 after one `add`; the accesses of other fields share the address). Not for an address moved
+        // or made in this walk: its place in the instructions is not where it runs.
+        if (t.op == O_LOAD || t.op == O_STORE) && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_PTRADD && b.insts[t.a as usize].b != VNONE && b.insts[t.a as usize].c != 0 && !self.moved[t.a as usize] && !slot_based(
+            b,
+            b.insts[t.a as usize].a,
+        ) {
+            let pa = b.insts[t.a as usize];
+            let off = (t.c as i32) as i64 + (pa.c as i32) as i64;
+            if off >= -0x80000000 && off <= 0x7FFFFFFF {
+                let mut q = switch self.unbiased.get(&t.a) {
+                    Some(x) => *x,
+                    None => NONE,
+                };
+                if q == NONE {
+                    q = self.before(
+                        b,
+                        self.blk_of[t.a as usize],
+                        t.a,
+                        Inst { op: O_PTRADD, ty: pa.ty, aux: pa.aux, a: pa.a, b: pa.b, c: 0 },
+                    );
+                    self.unbiased.insert(t.a, q);
+                }
+                t.a = q;
+                t.c = off as u32;
+            }
+        }
+        // An indexed address from an indexed address with an offset (an element of a row at an offset):
+        // from that address without the offset, made as above, the offset joining this one's. The rows'
+        // elements at one index are then one address and constant offsets (`lir::slp` packs their loads).
+        if t.op == O_PTRADD && t.b != VNONE && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_PTRADD && b.insts[t.a as usize].b != VNONE && b.insts[t.a as usize].c != 0 && !self.moved[t.a as usize] && !slot_based(
+            b,
+            b.insts[t.a as usize].a,
+        ) {
+            let pa = b.insts[t.a as usize];
+            let off = (t.c as i32) as i64 + (pa.c as i32) as i64;
+            if off >= -0x80000000 && off <= 0x7FFFFFFF {
+                let mut q = switch self.unbiased.get(&t.a) {
+                    Some(x) => *x,
+                    None => NONE,
+                };
+                if q == NONE {
+                    q = self.before(
+                        b,
+                        self.blk_of[t.a as usize],
+                        t.a,
+                        Inst { op: O_PTRADD, ty: pa.ty, aux: pa.aux, a: pa.a, b: pa.b, c: 0 },
+                    );
+                    self.unbiased.insert(t.a, q);
+                }
+                t.a = q;
+                t.c = off as u32;
+            }
+        }
         b.insts[i as usize] = t;
         // A copy or a fill of no byte does nothing.
         let size = if t.op == O_MEMCPY || t.op == O_MEMSET {
@@ -3003,11 +3480,67 @@ extend Opt {
                 b.insts[i as usize] = t;
             }
         }
+        if t.op == O_MEMCPY && (t.aux & MEM_VOLATILE) == 0 && size.is_some() {
+            // A copy of the bytes a copy of as many wrote, with no write since (neither memory state
+            // changed): a copy of that copy's source, which holds them still when that copy did not
+            // overlap it (no move, or one between two private memories), as a move (the source may be
+            // the destination's bytes). The source copy may then go.
+            let m = self.recall(t.b, self.pprior, T_NONE, self.tprior);
+            if m != VNONE {
+                let c = b.insts[m as usize];
+                let ca = self.base(b, c.a);
+                let cb = self.base(b, c.b);
+                let apart = (c.aux & MEM_OVERLAP) == 0 || ca != NONE && cb != NONE && ca != cb;
+                if c.op == O_MEMCPY && c.a == t.b && const_of(b, c.c) == size && c.b != t.b && apart {
+                    t.b = c.b;
+                    t.aux |= MEM_OVERLAP;
+                    b.insts[i as usize] = t;
+                }
+            }
+            // Keyed by the destination and both states after the copy; not in `recent`, whose places
+            // `carry` keeps across writes that do not touch them, as a source's write would.
+            self.enter(LOG_MEM, place_hash(t.a, self.pstate, T_NONE, self.tstate[0]), self.places.len() as u32);
+            self.places.push(Place { addr: t.a, off: self.pstate, ty: T_NONE, state: self.tstate[0], val: i });
+        }
         if t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 {
             // A store of the value its place holds (a load of it, or a store to it) does nothing.
             if self.recall(t.a, t.c, b.type_of(t.b), self.prior) == t.b {
                 self.repl[i as usize] = DROPPED;
                 return true;
+            }
+            // A store of a constant right after one of the bytes next to it, both of 1, 2 or 4 bytes: one
+            // store of both, twice as wide (little-endian), the other dropped. The bytes written are the
+            // same, so are the memory states.
+            if i > 0 && self.blk_of[i as usize - 1] == k && self.repl[i as usize - 1] == VNONE && !self.moved[i as usize - 1] && b.insts[i as usize - 1].op == O_STORE {
+                let p = b.insts[i as usize - 1];
+                let ty = b.type_of(t.b);
+                let n = type_bytes(ty, pk.ptr_bytes);
+                let kp = const_of(b, p.b);
+                let kt = const_of(b, t.b);
+                let fit = (n == 1 || n == 2 || n == 4) && ty != T_PTR && is_int(ty) && p.aux == t.aux && p.a == t.a && kp.is_some() && kt.is_some() && b.type_of(
+                    p.b,
+                ) == ty;
+                let pc = (p.c as i32) as i64;
+                let tc = (t.c as i32) as i64;
+                if fit && (tc == pc + n as i64 || pc == tc + n as i64) {
+                    let m = (1u64 << 8 * n as u64) - 1;
+                    let (lo, hi, at) = if pc < tc {
+                        (kp.unwrap(), kt.unwrap(), p.c);
+                    } else {
+                        (kt.unwrap(), kp.unwrap(), t.c);
+                    };
+                    let wty = if n == 1 {
+                        T_I16;
+                    } else if n == 2 {
+                        T_I32;
+                    } else {
+                        T_I64;
+                    };
+                    t.b = self.constant(b, wty, lo & m | (hi & m) << 8 * n as u64);
+                    t.c = at;
+                    b.insts[i as usize] = t;
+                    self.repl[i as usize - 1] = DROPPED;
+                }
             }
             // A load of the place the store wrote, in the state the store starts, reads the stored value.
             self.remember(t.a, t.c, b.type_of(t.b), t.b, self.state);
@@ -3036,6 +3569,11 @@ extend Opt {
             let seen = self.recall(t.a, t.c, t.ty, st);
             if seen != VNONE {
                 self.repl[i as usize] = seen;
+                return true;
+            }
+            let part = self.recall_part(pk, b, k, i, t, st);
+            if part != VNONE {
+                self.repl[i as usize] = part;
                 return true;
             }
             if fold_data(pk, b, i) {
@@ -3083,9 +3621,20 @@ extend Opt {
                     return true;
                 }
             }
+            // Two operands the branches in scope make equal: one of them twice (`x - y` is 0 where `x == y`).
+            if (t.op == O_SUB || t.op == O_XOR || t.op == O_AND || t.op == O_OR || t.op == O_ICMP) && t.a != t.b && !is_vec(
+                t.ty,
+            ) && self.eqs.get(&eq_key(t.a, t.b)).is_some() {
+                let mut u = b.insts[i as usize];
+                u.b = u.a;
+                b.insts[i as usize] = u;
+            }
             let r = simplify(pk, b, i);
             if r != VNONE {
                 self.repl[i as usize] = r;
+                return true;
+            }
+            if self.combine_loads(pk, b, k, i) {
                 return true;
             }
             let rr = self.range_fold(pk, b, i);
@@ -3154,6 +3703,90 @@ extend Opt {
             O_LSHR;
         };
         b.insts[i as usize] = Inst { op: op, ty: t.ty, aux: 0, a: t.a, b: s, c: VNONE };
+    }
+
+    // `or` `i` of block `k` that assembles a little-endian word from its bytes (`b0 | b1 << 8 | ...`, each
+    // the zero extension of a byte load, of consecutive bytes from one address): one load of the word,
+    // unaligned, when the byte loads are in the block and nothing between the first and `i` writes. Every
+    // native target is little-endian. Whether it did.
+    fn combine_loads(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        let n = type_bytes(t.ty, pk.ptr_bytes);
+        if t.op != O_OR || !is_int(t.ty) || n != 2 && n != 4 && n != 8 {
+            return false;
+        }
+        let mut stack = [VNONE; 16];
+        stack[0] = t.a;
+        stack[1] = t.b;
+        let mut sp: usize = 2;
+        let mut seen: u32 = 0;
+        let mut base = VNONE;
+        let mut boff: i64 = 0;
+        let mut first = i;
+        // Each step takes one node of the tree: at most 2n of them before the bytes run out.
+        for _ in 0..4 * n {
+            if sp == 0 {
+                break;
+            }
+            sp -= 1;
+            let v = self.val(unsafe stack[sp]);
+            if (v & (VPARAM | VFLAG)) != 0 {
+                return false;
+            }
+            let x = b.insts[v as usize];
+            if x.op == O_OR && x.ty == t.ty {
+                if sp + 2 > 16 {
+                    return false;
+                }
+                unsafe stack[sp] = x.a;
+                unsafe stack[sp + 1] = x.b;
+                sp += 2;
+                continue;
+            }
+            let mut sh: u64 = 0;
+            let mut zv = v;
+            if x.op == O_SHL && x.ty == t.ty {
+                let c = const_of(b, x.b);
+                if c.is_none() {
+                    return false;
+                }
+                sh = c.unwrap();
+                zv = self.val(x.a);
+            }
+            if (zv & (VPARAM | VFLAG)) != 0 || b.insts[zv as usize].op != O_ZEXT || b.insts[zv as usize].ty != t.ty {
+                return false;
+            }
+            let lv = self.val(b.insts[zv as usize].a);
+            if (lv & (VPARAM | VFLAG)) != 0 {
+                return false;
+            }
+            let l = b.insts[lv as usize];
+            let j = sh / 8;
+            if l.op != O_LOAD || l.ty != T_I8 || (l.aux & MEM_VOLATILE) != 0 || sh % 8 != 0 || j >= n as u64 || (seen >> j as u32 & 1) != 0 || self.blk_of[lv as usize] != k || self.moved[lv as usize] {
+                return false;
+            }
+            seen |= 1u32 << j as u32;
+            let o = (l.c as i32) as i64 - j as i64;
+            if base == VNONE {
+                base = l.a;
+                boff = o;
+            } else if l.a != base || o != boff {
+                return false;
+            }
+            if lv < first {
+                first = lv;
+            }
+        }
+        if sp != 0 || seen != (1u32 << n) - 1 || boff < -0x80000000 || boff > 0x7FFFFFFF {
+            return false;
+        }
+        for q in first..i {
+            if writes_memory(b.insts[q as usize]) {
+                return false;
+            }
+        }
+        b.insts[i as usize] = Inst { op: O_LOAD, ty: t.ty, aux: 0, a: base, b: VNONE, c: boff as u32 };
+        return true;
     }
 
     // An instruction for block `k` that runs right before instruction `at` (`pre`), its operands final;
@@ -3656,9 +4289,83 @@ extend Opt {
         };
     }
 
+    // Load `t`, instruction `i` of block `k`, of an integer of at most 4 bytes: the bytes of a wider integer
+    // a store left in the place that holds them in memory state `st`, shifted down and truncated
+    // (little-endian, as every native target is). VNONE when none.
+    fn recall_part(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst, st: u32) Value {
+        let n = type_bytes(t.ty, pk.ptr_bytes) as i64;
+        if !is_int(t.ty) || n > 4 {
+            return VNONE;
+        }
+        let off = (t.c as i32) as i64;
+        let wides: [u8; 3] = [T_I16, T_I32, T_I64];
+        for w in wides {
+            let m = type_bytes(w, pk.ptr_bytes) as i64;
+            if m <= n {
+                continue;
+            }
+            // Each start of a wider place that holds the load's bytes: at most 7.
+            for d in 0..m - n + 1 {
+                let o0 = off + n - m + d;
+                let v = self.recall(t.a, (o0 as i32) as u32, w, st);
+                if v == VNONE {
+                    continue;
+                }
+                let mut x = v;
+                if off != o0 {
+                    let sh = self.constant(b, w, ((off - o0) * 8) as u64);
+                    x = self.before(b, k, i, Inst { op: O_LSHR, ty: w, aux: 0, a: v, b: sh, c: VNONE });
+                }
+                return self.before(b, k, i, Inst { op: O_TRUNC, ty: t.ty, aux: 0, a: x, b: VNONE, c: VNONE });
+            }
+        }
+        return VNONE;
+    }
+
     fn remember(self: &mut Self, addr: u32, off: u32, ty: u8, v: Value, state: u32) {
+        if self.recent.len() == RECENT_MAX {
+            let _ = self.recent.remove(0);
+        }
+        self.recent.push(self.places.len() as u32);
         self.enter(LOG_MEM, place_hash(addr, off, ty, state), self.places.len() as u32);
         self.places.push(Place { addr: addr, off: off, ty: ty, state: state, val: v });
+    }
+
+    // Write `i`, which started memory state `states` for the type tags whose state `before` held
+    // otherwise: each place of `recent` known in such a state that the write cannot touch holds its value
+    // in the new state too. A write cannot touch a place of an alias class it writes none of (`write_bits`,
+    // a scope's class aside), nor a store bytes of its own address apart from its own. A place moves only
+    // along the states a load of it reads: the untagged accesses' and its type's tag's; another tag's
+    // state may be its number by chance and then miss the writes of the place's own tag.
+    fn carry(self: &mut Self, pk: &Package, b: &Body, i: u32, before: [u32; TBAA_TAGS]) {
+        let t = b.insts[i as usize];
+        let wb = self.write_bits(pk, b, i);
+        let n = self.recent.len();
+        // Each entry is checked once; the carried ones join `recent` after the old ones.
+        for r in 0..n {
+            let p = self.places[self.recent[r] as usize];
+            let mut to = NONE;
+            let tags: [usize; 2] = [0, tbaa_of(p.ty) as usize];
+            for g in tags {
+                if unsafe before[g] == p.state && unsafe self.tstate[g] != p.state {
+                    to = unsafe self.tstate[g];
+                }
+            }
+            if to == NONE {
+                continue;
+            }
+            let c = self.class(p.addr);
+            let other_class = c < CL_MANY && (class_bit(c) & self.sbits) == 0 && (wb & class_bit(c)) == 0;
+            let lo = (p.off as i32) as i64;
+            let tlo = (t.c as i32) as i64;
+            let other_bytes = t.op == O_STORE && t.a == p.addr && (tlo >= lo + type_bytes(p.ty, pk.ptr_bytes) as i64 || lo >= tlo + type_bytes(
+                b.type_of(t.b),
+                pk.ptr_bytes,
+            ) as i64);
+            if (other_class || other_bytes) && self.recall(p.addr, p.off, p.ty, to) == VNONE {
+                self.remember(p.addr, p.off, p.ty, p.val, to);
+            }
+        }
     }
 
     // Whether load `t` cannot fault wherever its address is defined: it reads inside a slot, a data
@@ -3943,9 +4650,11 @@ extend Opt {
         // The heads: the reached blocks no other continues, numbered in order; a merged block takes its
         // head's number.
         fill_bool(&mut self.done, nb, false);
+        self.merged = false;
         for k in 0..nb {
             if self.nxt[k] != NONE {
                 self.done[self.nxt[k] as usize] = true;
+                self.merged = true;
             }
         }
         let mut nk: u32 = 0;
@@ -4211,16 +4920,16 @@ extend Opt {
             if (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SLOTADDR {
                 continue;
             }
-            let into = (t.op == O_STORE || t.op == O_MEMSET) && t.a == v && t.b != v && (t.op == O_STORE || t.c != v);
+            let into = (t.op == O_STORE || t.op == O_MEMSET || t.op == O_MEMCPY) && t.a == v && t.b != v && (t.op == O_STORE || t.c != v);
             if !into {
                 self.sread[b.insts[v as usize].a as usize] = true;
             }
         }
     }
 
-    // Whether `t` of `b` stores or fills into a slot nothing reads (`sread`), not volatile.
+    // Whether `t` of `b` stores, fills or copies into a slot nothing reads (`sread`), not volatile.
     const fn dead_store(self: &Self, b: &Body, t: Inst) bool {
-        if t.op != O_STORE && t.op != O_MEMSET || t.op == O_STORE && (t.aux & MEM_VOLATILE) != 0 || (t.a & (VPARAM | VFLAG)) != 0 {
+        if t.op != O_STORE && t.op != O_MEMSET && t.op != O_MEMCPY || (t.op == O_STORE || t.op == O_MEMCPY) && (t.aux & MEM_VOLATILE) != 0 || (t.a & (VPARAM | VFLAG)) != 0 {
             return false;
         }
         let a = b.insts[t.a as usize];
@@ -4524,6 +5233,9 @@ extend Run {
         // Then the packing of straight-line values into vectors, on the loops' final shape.
         if bu.vector != 0 {
             let _ = sc.o.slp(p, b);
+        }
+        if sc.o.promote_places(p, b) {
+            let _ = sc.o.run(p, b, true);
         }
         let _ = sc.o.split_exits(p, b);
         unsafe *(r.ok.as_ptr() as *mut bool + j as usize) = r.inline && r.shape[j as usize] && il::small(b, r.cf.inline);
@@ -4985,16 +5697,63 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
                 t.c;
             };
         }
-        // A flag chosen as 1 or 0 is the flag; as 0 or 1, the opposite comparison.
+        // A flag (`zero_one`) chosen as 1 or 0 is the flag; as 0 or 1, the opposite comparison, or the
+        // flag's equality with that 0.
         let x = const_of(b, t.b);
         let y = const_of(b, t.c);
-        let f = (t.a & (VPARAM | VFLAG)) == 0 && (b.insts[t.a as usize].op == O_ICMP || b.insts[t.a as usize].op == O_FCMP) && b.insts[t.a as usize].ty == t.ty && x.is_some() && y.is_some();
+        let zc = zero_one(b, t.a, ZO_DEPTH);
+        let ct = b.type_of(t.a);
+        let f = zc && ct == t.ty && x.is_some() && y.is_some();
         if f && x.unwrap() == 1 && y.unwrap() == 0 {
             return t.a;
         }
-        if f && x.unwrap() == 0 && y.unwrap() == 1 && b.insts[t.a as usize].op == O_ICMP {
-            let ci = b.insts[t.a as usize];
+        // Of another width: the flag extended or truncated, as its value is 0 or 1.
+        let g = zc && is_int(t.ty) && x.is_some() && y.is_some();
+        if g && !f && x.unwrap() == 1 && y.unwrap() == 0 {
+            let wide = type_bits(t.ty, ptr) > type_bits(ct, ptr);
+            b.insts[i as usize] = Inst {
+                op: if wide {
+                    O_ZEXT;
+                } else {
+                    O_TRUNC;
+                },
+                ty: t.ty,
+                aux: 0,
+                a: t.a,
+                b: VNONE,
+                c: VNONE,
+            };
+            return VNONE;
+        }
+        if f && x.unwrap() == 0 && y.unwrap() == 1 {
+            let icmp = (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_ICMP;
+            let ci = if icmp {
+                b.insts[t.a as usize];
+            } else {
+                Inst { op: O_ICMP, ty: t.ty, aux: C_NE, a: t.a, b: t.b, c: VNONE };
+            };
             b.insts[i as usize] = Inst { op: O_ICMP, ty: t.ty, aux: opposite(ci.aux), a: ci.a, b: ci.b, c: VNONE };
+            return VNONE;
+        }
+        // A choice between a constant 0 or 1 and another flag, on a flag: one operation on the two flags
+        // (`c ? 0 : f` is `f >u c`, `c ? f : 1` is `f >=u c`).
+        let fc = zc && ct == t.ty;
+        let flag_b = zero_one(b, t.b, ZO_DEPTH) && b.type_of(t.b) == t.ty;
+        let flag_c = zero_one(b, t.c, ZO_DEPTH) && b.type_of(t.c) == t.ty;
+        if fc && x.is_some() && x.unwrap() <= 1 && flag_c {
+            b.insts[i as usize] = if x.unwrap() == 0 {
+                Inst { op: O_ICMP, ty: t.ty, aux: C_UGT, a: t.c, b: t.a, c: VNONE };
+            } else {
+                Inst { op: O_OR, ty: t.ty, aux: 0, a: t.a, b: t.c, c: VNONE };
+            };
+            return VNONE;
+        }
+        if fc && y.is_some() && y.unwrap() <= 1 && flag_b {
+            b.insts[i as usize] = if y.unwrap() == 0 {
+                Inst { op: O_AND, ty: t.ty, aux: 0, a: t.a, b: t.b, c: VNONE };
+            } else {
+                Inst { op: O_ICMP, ty: t.ty, aux: C_UGE, a: t.b, b: t.a, c: VNONE };
+            };
             return VNONE;
         }
         // A choice between the two sides of an equality on it is one side: `x != y ? x : y` is `x`.
@@ -5023,6 +5782,32 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             if off >= -0x80000000 && off <= 0x7FFFFFFF {
                 t.b = VNONE;
                 t.c = off as u32;
+            }
+        }
+        // A pointer-wide index plus or minus a constant: the constant scaled joins the offset (modulo
+        // 2^64 both ways).
+        if t.b != VNONE && (t.b & (VPARAM | VFLAG)) == 0 && type_bits(b.type_of(t.b), ptr) == ptr * 8 && !slot_based(
+            b,
+            t.a,
+        ) {
+            let x = b.insts[t.b as usize];
+            let k = if x.op == O_ADD || x.op == O_SUB {
+                const_of(b, x.b);
+            } else {
+                Option::<u64>::None;
+            };
+            if k.is_some() {
+                let kv = le::sign_ext(k.unwrap(), ptr * 8);
+                let d = if x.op == O_ADD {
+                    kv;
+                } else {
+                    -kv;
+                };
+                let off = (t.c as i32) as i64 + d * t.aux as i64;
+                if kv > -0x80000000 && kv < 0x80000000 && off >= -0x80000000 && off <= 0x7FFFFFFF {
+                    t.b = x.a;
+                    t.c = off as u32;
+                }
             }
         }
         if t.b == VNONE && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_PTRADD && b.insts[t.a as usize].b == VNONE {
@@ -5056,10 +5841,49 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
                 return VNONE;
             }
             // The constant second (an immediate operand), the condition mirrored; an unsigned order
-            // against zero is equality.
+            // against zero is equality or a constant.
             let mut c = t;
             if ca.is_some() {
                 c = Inst { op: O_ICMP, ty: t.ty, aux: mirror(t.aux), a: t.b, b: t.a, c: VNONE };
+            }
+            // A flag (a comparison, extended or not) against 0 or 1 is the comparison or its opposite; another
+            // flag (`zero_one`) of the result's type, the flag itself when the test is its being 1.
+            let kk = const_of(b, c.b).unwrap();
+            let mut fl = c.a;
+            if (fl & (VPARAM | VFLAG)) == 0 && b.insts[fl as usize].op == O_ZEXT && zero_one(
+                b,
+                b.insts[fl as usize].a,
+                ZO_DEPTH,
+            ) {
+                fl = b.insts[fl as usize].a;
+            }
+            if (c.aux == C_EQ || c.aux == C_NE) && kk <= 1 && c.aux == C_NE == (kk == 0) && b.type_of(fl) == t.ty && zero_one(
+                b,
+                fl,
+                ZO_DEPTH,
+            ) {
+                return fl;
+            }
+            if (c.aux == C_EQ || c.aux == C_NE) && kk <= 1 && (fl & (VPARAM | VFLAG)) == 0 && b.insts[fl as usize].op == O_ICMP {
+                let f = b.insts[fl as usize];
+                let same_dir = c.aux == C_NE == (kk == 0);
+                b.insts[i as usize] = Inst {
+                    op: O_ICMP,
+                    ty: t.ty,
+                    aux: if same_dir {
+                        f.aux;
+                    } else {
+                        opposite(f.aux);
+                    },
+                    a: f.a,
+                    b: f.b,
+                    c: VNONE,
+                };
+                return VNONE;
+            }
+            if const_of(b, c.b).unwrap() == 0 && (c.aux == C_ULT || c.aux == C_UGE) {
+                b.insts[i as usize] = iconst(t.ty, (c.aux == C_UGE) as u64);
+                return VNONE;
             }
             if const_of(b, c.b).unwrap() == 0 && (c.aux == C_UGT || c.aux == C_ULE) {
                 c.aux = if c.aux == C_UGT {
@@ -5236,6 +6060,44 @@ fn is_fmul(b: &Body, v: Value, ty: u8) bool {
     return (v & (VPARAM | VFLAG)) == 0 && v != VNONE && b.insts[v as usize].op == O_FMUL && b.insts[v as usize].ty == ty;
 }
 
+// `zero_one` follows at most ZO_DEPTH operations.
+const ZO_DEPTH: u32 = 3;
+
+// Whether value `v` of `b` is 0 or 1: a comparison, an overflow flag, a `bool` parameter (`Body.bools`), a
+// `bool` load (`MEM_BOOL`), and the `and`, `or`, `xor`, select, extension or truncation of such values,
+// `depth` operations deep.
+fn zero_one(b: &Body, v: Value, depth: u32) bool {
+    if v == VNONE {
+        return false;
+    }
+    if (v & VFLAG) != 0 {
+        return true;
+    }
+    if (v & VPARAM) != 0 {
+        let k = entry_param(b, v);
+        return k < 64 && (b.bools >> k as u64 & 1) != 0;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_ICMP || t.op == O_FCMP || t.op == O_LOAD && (t.aux & MEM_BOOL) != 0 {
+        return true;
+    }
+    if depth == 0 || !is_int(t.ty) {
+        return false;
+    }
+    if t.op == O_AND {
+        return zero_one(b, t.a, depth - 1) || zero_one(b, t.b, depth - 1);
+    }
+    if t.op == O_OR || t.op == O_XOR {
+        return zero_one(b, t.a, depth - 1) && (zero_one(b, t.b, depth - 1) || t.op == O_XOR && const_of(b, t.b) == Option::<
+            u64
+        >::Some(1));
+    }
+    if t.op == O_SELECT {
+        return zero_one(b, t.b, depth - 1) && zero_one(b, t.c, depth - 1);
+    }
+    return (t.op == O_ZEXT || t.op == O_TRUNC) && zero_one(b, t.a, depth - 1);
+}
+
 // Whether address `v` of `b` is a slot's address plus constant offsets.
 const fn slot_based(b: &Body, v: Value) bool {
     let mut x = v;
@@ -5318,6 +6180,36 @@ const fn header_read(b: &Body, t: Inst, v: Value) bool {
     let c = (code - core::OP_SIMD) as u8;
     let rule = core::simd_op(c).rule;
     return rule == core::SR_LOAD && c != core::SIMD_LOAD_RAW || rule == core::SR_STORE && c != core::SIMD_STORE_RAW || (rule == core::SR_MLOAD || rule == core::SR_MSTORE) && c < core::SIMD_GATHER_PTR;
+}
+
+// The `Sym.alloc` of the function call `t` calls, ALLOC_NONE for any other instruction and for a function
+// the package defines: its own code (wasm's C library, the runtime's leak tracker) reads what it writes.
+fn call_alloc(pk: &Package, b: &Body, t: Inst) u8 {
+    if t.op != O_CALL {
+        return ALLOC_NONE;
+    }
+    let s = pk.syms[b.syms[t.a as usize] as usize];
+    return if s.def == NONE {
+        s.alloc;
+    } else {
+        ALLOC_NONE;
+    };
+}
+
+// The type tag of the memory write `t` writes that the program may read (`TBAA_TAGS` past the tags: none):
+// a load's or a store's own, an allocation's `errno` (an `i32`); a free writes none; 0 for any other write,
+// which may touch any.
+fn write_tag(pk: &Package, b: &Body, t: Inst) usize {
+    let a = call_alloc(pk, b, t);
+    return if t.op == O_LOAD || t.op == O_STORE {
+        tbaa(t);
+    } else if a == ALLOC_FRESH {
+        tbaa_of(T_I32) as usize;
+    } else if a == ALLOC_FREE {
+        TBAA_TAGS;
+    } else {
+        0usize;
+    };
 }
 
 // `writes_memory`, but for a call of a function whose body writes no memory outside its frame
@@ -5442,6 +6334,15 @@ fn same_value(b: &Body, t: Inst, u: Inst) bool {
 }
 
 // The `Opt.rel` key of `x <u y`.
+// The key of `x` and `y` in `Opt.eqs`, either order.
+const fn eq_key(x: Value, y: Value) u64 {
+    return if x < y {
+        rel_key(x, y);
+    } else {
+        rel_key(y, x);
+    };
+}
+
 const fn rel_key(x: Value, y: Value) u64 {
     return y as u64 << 32 | x as u64;
 }
@@ -5476,10 +6377,37 @@ fn sel_cmp(b: &Body, t: Inst, ptr: u32, left: bool, depth: u32) (u8, Value) {
         };
         return r as u8, VNONE;
     }
-    if depth == 0 || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SELECT {
+    if depth == 0 || (v & (VPARAM | VFLAG)) != 0 {
         return SC_NONE, VNONE;
     }
-    let sel = b.insts[v as usize];
+    // A comparison widened (`simplify`'s form of a select of 1 or 0): as that select.
+    let z = b.insts[v as usize];
+    if z.op == O_ZEXT && (z.a & (VPARAM | VFLAG)) == 0 && b.insts[z.a as usize].op == O_ICMP {
+        let o = if left {
+            const_of(b, t.b);
+        } else {
+            const_of(b, t.a);
+        };
+        if o.is_none() {
+            return SC_NONE, VNONE;
+        }
+        let (x, y) = if left {
+            (le::icmp(t.aux, ty, ptr, 1, o.unwrap()) as u8, le::icmp(t.aux, ty, ptr, 0, o.unwrap()) as u8);
+        } else {
+            (le::icmp(t.aux, ty, ptr, o.unwrap(), 1) as u8, le::icmp(t.aux, ty, ptr, o.unwrap(), 0) as u8);
+        };
+        if x == y {
+            return x, VNONE;
+        }
+        if x == 1 {
+            return SC_VALUE, z.a;
+        }
+        return SC_NONE, VNONE;
+    }
+    if z.op != O_SELECT {
+        return SC_NONE, VNONE;
+    }
+    let sel = z;
     let mut tx = t;
     let mut ty2 = t;
     if left {

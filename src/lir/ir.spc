@@ -439,6 +439,8 @@ pub const fn tbaa_of(ty: u8) u16 {
 pub const fn tbaa(t: Inst) usize {
     return ((t.aux & MEM_TBAA) >> MEM_TBAA_SHIFT) as usize;
 }
+/// `O_LOAD`: the value read is 0 or 1 (a `bool`).
+pub const MEM_BOOL: u16 = 32;
 /// `O_MEMCPY`: the regions may overlap (memmove).
 pub const MEM_OVERLAP: u16 = 1;
 /// A logical right shift (`lshr`) that shifts out only zero bits (the text's `lshr.exact`): its operand's
@@ -655,9 +657,34 @@ pub struct Sym {
     /// The memory outside its own frame a call of it may read or write (`FX_*`): `lir::opt::Run::new`
     /// infers it for a function with a body; both for any other. The text form does not carry it.
     pub fx: u8,
+    /// What a call of it does to memory by its name (`alloc_of`): ALLOC_FRESH, ALLOC_FREE or ALLOC_NONE.
+    pub alloc: u8,
 }
 
 pub const NONE: u32 = 0xFFFFFFFF;
+/// `Sym.alloc`: a C library or runtime allocation, which returns a block no other pointer reaches and
+/// writes no memory the program reads but `errno` (an `i32`); a C library or runtime free, which writes no
+/// memory the program may read. Only for a call from outside it: a package that defines the function
+/// (wasm's C library, the runtime's leak tracker) treats it as any other (`lir::opt`'s `call_alloc`).
+pub const ALLOC_NONE: u8 = 0;
+pub const ALLOC_FRESH: u8 = 1;
+pub const ALLOC_FREE: u8 = 2;
+
+/// The `Sym.alloc` of the function named `name0` (`__sc_x_<c name>` is a C library name's alias).
+pub const fn alloc_of(name0: str) u8 {
+    let name = if name0.starts_with("__sc_x_") {
+        name0.slice(7, name0.len());
+    } else {
+        name0;
+    };
+    if name == "malloc" || name == "calloc" || name == "realloc" || name == "aligned_alloc" || name == "_aligned_malloc" || name == "sc_lk_malloc" || name == "sc_lk_calloc" || name == "sc_lk_realloc" || name == "sc_lk_aligned_alloc" {
+        return ALLOC_FRESH;
+    }
+    if name == "free" || name == "_aligned_free" || name == "sc_lk_free" || name == "sc_lk_aligned_free" {
+        return ALLOC_FREE;
+    }
+    return ALLOC_NONE;
+}
 /// `Sym.fx`: a call may read memory; a call may write memory; a call may write the memory its pointer
 /// arguments address (and no other).
 pub const FX_READ: u8 = 1;
@@ -756,6 +783,8 @@ pub struct Body {
     /// parameter reaches them (a `&mut`); 0 for any other parameter. Empty when no parameter is a
     /// reference.
     pub refs: Vector<u32>,
+    /// Per signature parameter of the first 64, whether it holds 0 or 1 (a `bool`), a bit each.
+    pub bools: u64,
     /// The scopes of the inlined calls' exclusive parameters (`Scope`); empty when there is none.
     pub scopes: Vector<Scope>,
     /// A naked function (`@unsafe(naked)`): its machine code is its `O_ASM` templates alone, in order,
@@ -808,6 +837,7 @@ extend Body {
             inl: Vector::<u32>::new(),
             sig: NONE,
             refs: Vector::<u32>::new(),
+            bools: 0,
             scopes: Vector::<Scope>::new(),
             naked: false,
             cur: 0,
@@ -831,6 +861,7 @@ extend Body {
         self.inl.truncate(0);
         self.sig = NONE;
         self.refs.truncate(0);
+        self.bools = 0;
         self.scopes.truncate(0);
         self.naked = false;
         self.cur = 0;
@@ -852,6 +883,7 @@ extend Body {
             inl: exact(&self.inl),
             sig: self.sig,
             refs: exact(&self.refs),
+            bools: self.bools,
             scopes: exact(&self.scopes),
             naked: self.naked,
             cur: 0,
@@ -1235,6 +1267,11 @@ extend Package {
                 used: false,
                 noinline: false,
                 fx: FX_READ | FX_WRITE,
+                alloc: if kind == SK_FUNC {
+                    alloc_of(name);
+                } else {
+                    ALLOC_NONE;
+                },
                 own: false,
                 ext: false,
                 sig: NONE,
