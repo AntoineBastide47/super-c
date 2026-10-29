@@ -599,6 +599,18 @@ extend CEmit {
                 tgt::isa(pk.arch).vector_bytes;
             };
             l.pkg.mul_high = tgt::isa(pk.arch).mul_high;
+            // binary16: every arm64 processor converts it (FCVT) and one with FEAT_FP16 computes with it;
+            // x86-64 converts it with F16C.
+            let h16 = cf::find("fp16", pk.arch);
+            let hc = cf::find("f16c", pk.arch);
+            l.pkg.half = if h16 >= 0 && cf::has(pk.features, h16 as usize) {
+                lir_ir::HALF_ARITH;
+            } else if tgt::isa(pk.arch).half_cvt || hc >= 0 && cf::has(pk.features, hc as usize) {
+                lir_ir::HALF_CVT;
+            } else {
+                lir_ir::HALF_NONE;
+            };
+            l.pkg.pairs = tgt::isa(pk.arch).pairs;
             l.pkg.split = pick((pk.cg & bman::CG_FUNCTION_SECTIONS) != 0, cob::SPLIT_FUNCS, 0u8) | pick(
                 (pk.cg & bman::CG_DATA_SECTIONS) != 0,
                 cob::SPLIT_DATA,

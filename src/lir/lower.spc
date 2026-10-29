@@ -6974,6 +6974,11 @@ extend Lower {
                 *out = self.iconst(T_I32, ast::pick(name == "sc_has_i128", 1u64, 0u64));
                 return true;
             }
+            if name == "sc_has_f16" {
+                // The processor converts binary16 values (`Package.half`): `std::float`'s f16 computes in f32.
+                *out = self.iconst(T_I32, ast::pick(self.pkg.half != HALF_NONE, 1u64, 0u64));
+                return true;
+            }
             return false;
         }
         if n == 1 && (name == "sc_clz64" || name == "sc_ctz64" || name == "sc_popcount64") {
@@ -7064,6 +7069,29 @@ extend Lower {
             self.store(self.inst(O_TRUNC, T_I64, 0, self.high_wide(q), VNONE, VNONE), a[5], 0, false);
             self.store(self.inst(O_TRUNC, T_I64, 0, r, VNONE, VNONE), a[6], 0, false);
             self.store(self.inst(O_TRUNC, T_I64, 0, self.high_wide(r), VNONE, VNONE), a[7], 0, false);
+            return true;
+        }
+        if n == 1 && (name == "sc_f16_to_f32" || name == "sc_f32_to_f16") {
+            let to_f = name == "sc_f16_to_f32";
+            if self.pkg.half == HALF_NONE {
+                // Unreachable behind `sc_has_f16` (0): an abort, as the C stubs, then a zero of the result's
+                // type for the code after it.
+                let sg = self.b.signature([T_PTR as u32][0..0], 0, false, T_NONE);
+                let at = self.b.pool_list(a[0..0]);
+                let k = self.sym("abort", SK_FUNC);
+                let _ = self.inst(O_CALL, T_NONE, 0, k, sg, at);
+                *out = if to_f {
+                    self.fconst(T_F32, 0);
+                } else {
+                    self.iconst(T_I16, 0);
+                };
+                return true;
+            }
+            *out = if to_f {
+                self.inst(O_HTOF, T_F32, 0, a[0], VNONE, VNONE);
+            } else {
+                self.inst(O_FTOH, T_I16, 0, a[0], VNONE, VNONE);
+            };
             return true;
         }
         if name.starts_with("sc_f128_") {

@@ -13,9 +13,11 @@ import stdlib;
 import module::loader;
 
 // The package options a test may set (`object_of`): sibling calls (`Package.tail`), 32-byte vectors
-// (`Package.vector`: x86-64's ymm registers with AVX2).
+// (`Package.vector`: x86-64's ymm registers with AVX2), binary16 instructions (`Package.half`: arithmetic
+// on macOS arm64, whose every processor has FEAT_FP16, else conversions).
 const TAIL: u32 = 1;
 const WIDE: u32 = 2;
+const HALF: u32 = 4;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -23,7 +25,7 @@ fn run_native(text: str, driver: str) i32 {
     return run_native_with(text, driver, 0);
 }
 
-// `run_native` with package options `opts` (TAIL, WIDE).
+// `run_native` with package options `opts` (TAIL, WIDE, HALF).
 fn run_native_with(text: str, driver: str, opts: u32) i32 {
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return 0;
@@ -70,7 +72,7 @@ fn run_wasm(text: str, driver: str) i32 {
     );
 }
 
-// Compile LIR `text` for `(os, isa)` into object `obj`, with package options `opts` (TAIL, WIDE);
+// Compile LIR `text` for `(os, isa)` into object `obj`, with package options `opts` (TAIL, WIDE, HALF);
 // whether it did (the failure on stderr).
 fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool {
     let mut err = String::new();
@@ -83,6 +85,13 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.tail = (opts & TAIL) != 0;
     if (opts & WIDE) != 0 {
         p.vector = 32;
+    }
+    if (opts & HALF) != 0 {
+        p.half = if isa == tgt::axis_index("aarch64", true) && os == tgt::axis_index("macos", false) {
+            HALF_ARITH;
+        } else {
+            HALF_CVT;
+        };
     }
     let mut v = verify::Verifier::new();
     for i in 0..p.syms.len() {
@@ -318,6 +327,88 @@ fn register_passed_aggregate_parts_run() {
     let drv = "#include <stdint.h>\nstruct P { int64_t a, b; };\nint64_t before(struct P, int64_t);\nint64_t after(struct P, int64_t);\nint64_t three(void) { return 3000; }\nint main(void) {\n  struct P p = {50, 8};\n  if (before(p, 3) != 3045) return 1;\n  if (after(p, 4) != 3046) return 2;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Aggregates a call takes in registers, built by stores into a slot no other access reads: the stores'
+// values go to the argument registers (the last of each part, a constant, a float part, a slot two calls
+// share); a slot read after the call keeps its stores. A runtime call (`memset`) takes its operands from
+// their registers, its fill byte extended.
+@test
+fn relayed_aggregate_arguments_and_runtime_calls_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @take fn global
+sym @takef fn global
+sym @relay fn global
+sym @kept fn global
+sym @fill fn global
+fn @relay
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  layout l1 size 16 align 3 [0 f64, 8 i64]
+  sig (i64, i64, f64) -> i64
+  slot s0 size 16 align 3
+  slot s1 size 16 align 3
+b0(v0: i64, v1: i64, v2: f64):
+  v3 = slotaddr s0
+  v4 = iconst.i64 7
+  store v0, v3 align 3
+  store v4, v3+8 align 3
+  store v1, v3+8 align 3
+  v5 = call.i64 @take(v3, v0) : (l0, i64) -> i64
+  store v5, v3 align 3
+  store v4, v3+8 align 3
+  v6 = call.i64 @take(v3, v1) : (l0, i64) -> i64
+  v7 = slotaddr s1
+  store v2, v7 align 3
+  store v6, v7+8 align 3
+  v8 = call.i64 @takef(v7) : (l1) -> i64
+  v9 = add.i64 v8, v5
+  ret v9
+fn @kept
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3
+  store v0, v1+8 align 3
+  v2 = call.i64 @take(v1, v0) : (l0, i64) -> i64
+  v3 = load.i64 v1+8 align 3
+  v4 = add.i64 v2, v3
+  ret v4
+fn @fill
+  sig (ptr, i32, i64) -> void
+b0(v0: ptr, v1: i32, v2: i64):
+  v3 = trunc.i8 v1
+  memset v0, v3, v2
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+struct P { int64_t a, b; };
+struct Q { double d; int64_t b; };
+int64_t relay(int64_t, int64_t, double);
+int64_t kept(int64_t);
+void fill(unsigned char *, int, int64_t);
+int64_t take(struct P p, int64_t k) { return p.a * 3 + p.b * 5 + k; }
+int64_t takef(struct Q q) { return (int64_t)(q.d * 2) + q.b; }
+int main(void) {
+  int64_t t1 = 11 * 3 + 13 * 5 + 11;
+  int64_t t2 = t1 * 3 + 7 * 5 + 13;
+  if (relay(11, 13, 2.5) != 5 + t2 + t1) return 1;
+  if (kept(4) != 4 * 3 + 4 * 5 + 4 + 4) return 2;
+  unsigned char b[40];
+  memset(b, 1, sizeof b);
+  fill(b + 3, 0x1A5, 29);
+  for (int k = 0; k < 40; k++) {
+    if (b[k] != (k >= 3 && k < 32 ? 0xA5 : 1)) return 3;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
 }
 
 // Float loop values across calls: callee-saved xmm homes under Microsoft x64 (the prologue saves them, so
@@ -699,7 +790,6 @@ int main(void) {
     let mut obj = Vector::<u8>::new();
     let x64 = tgt::axis_index("x86_64", true);
     assert(object_of(ymm.as_str(), tgt::axis_index("linux", false), x64, WIDE | TAIL, &mut obj), "the AVX2 object");
-    obj.truncate(0);
     assert(
         object_of(ymm.as_str(), tgt::axis_index("windows", false), x64, WIDE | TAIL, &mut obj),
         "the Microsoft x64 AVX2 object",
@@ -952,6 +1042,110 @@ b5:
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// binary16 conversions (`htof`, `ftoh`) and arithmetic (an `fadd`, `fsub`, `fmul` or `fdiv` between them,
+// in binary16 on macOS arm64) against the C compiler's `_Float16`: every encoding widened, every finite
+// one's value, its midpoints to its neighbours and the floats next to those rounded, and pseudo-random pairs
+// combined, NaNs alike as NaNs. A C compiler without `_Float16`, or an x86-64 processor without F16C, runs
+// nothing. The x86-64 objects build on every host.
+@test
+fn binary16_conversions_and_arithmetic_run() {
+    let lir = M"(lir ptr 8
+sym @h2f fn global
+sym @f2h fn global
+sym @hop fn global
+fn @h2f
+  sig (i16) -> f32
+b0(v0: i16):
+  v1 = htof.f32 v0
+  ret v1
+fn @f2h
+  sig (f32) -> i16
+b0(v0: f32):
+  v1 = ftoh.i16 v0
+  ret v1
+fn @hop
+  sig (i16, i16, i32) -> i16
+b0(v0: i16, v1: i16, v2: i32):
+  v3 = htof.f32 v0
+  v4 = htof.f32 v1
+  v5 = fadd.f32 v3, v4
+  v6 = ftoh.i16 v5
+  v7 = fsub.f32 v3, v4
+  v8 = ftoh.i16 v7
+  v9 = fmul.f32 v3, v4
+  v10 = ftoh.i16 v9
+  v11 = fdiv.f32 v3, v4
+  v12 = ftoh.i16 v11
+  v13 = iconst.i32 1
+  v14 = iconst.i32 2
+  v15 = iconst.i32 3
+  v16 = icmp.eq v2, v13
+  v17 = icmp.eq v2, v14
+  v18 = icmp.eq v2, v15
+  v19 = select.i16 v16, v8, v6
+  v20 = select.i16 v17, v10, v19
+  v21 = select.i16 v18, v12, v20
+  ret v21
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+#include <stdio.h>
+float h2f(uint16_t);
+uint16_t f2h(float);
+uint16_t hop(uint16_t, uint16_t, int32_t);
+#ifdef __FLT16_MANT_DIG__
+static uint32_t fbits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+static float hval(uint16_t h) { _Float16 v; memcpy(&v, &h, 2); return (float)v; }
+static uint16_t hround(float f) { _Float16 v = (_Float16)f; uint16_t h; memcpy(&h, &v, 2); return h; }
+static int hnan(uint16_t h) { return (h & 0x7FFF) > 0x7C00; }
+static int same(uint16_t got, uint16_t want) { return got == want || hnan(got) && hnan(want); }
+static float fnext(float f, int up) { uint32_t u = fbits(f); u = up ? u + 1 : u - 1; memcpy(&f, &u, 4); return f; }
+#endif
+int main(void) {
+#ifndef __FLT16_MANT_DIG__
+  return 0;
+#else
+#if defined(__x86_64__)
+  if (!__builtin_cpu_supports("f16c")) return 0;
+#endif
+  for (uint32_t h = 0; h < 65536; h++) {
+    float want = hval((uint16_t)h), got = h2f((uint16_t)h);
+    if (want != want ? got == got : fbits(got) != fbits(want)) { printf("h2f %x\n", h); return 1; }
+    if ((h & 0x7C00) == 0x7C00) continue;
+    float lo = want, hi = hval((uint16_t)(h + 1));
+    if ((h & 0x7FFF) == 0x7BFF) hi = 65536.0f;
+    float mid = (lo + hi) / 2;
+    float probes[5] = {lo, mid, fnext(mid, 0), fnext(mid, 1), (lo + mid) / 2};
+    for (int k = 0; k < 5; k++) {
+      if (!same(f2h(probes[k]), hround(probes[k]))) { printf("f2h %x %d\n", h, k); return 2; }
+    }
+  }
+  uint32_t s = 12345;
+  for (int n = 0; n < 200000; n++) {
+    s = s * 1103515245u + 12345u;
+    uint16_t a = (uint16_t)(s >> 8);
+    s = s * 1103515245u + 12345u;
+    uint16_t b = (uint16_t)(s >> 8);
+    float x = hval(a), y = hval(b);
+    uint16_t want[4] = {hround(x + y), hround(x - y), hround(x * y), hround(x / y)};
+    for (int k = 0; k < 4; k++) {
+      if (!same(hop(a, b, k), want[k])) { printf("hop %x %x %d\n", a, b, k); return 3; }
+    }
+  }
+  return 0;
+#endif
+}
+)";
+    let x64 = tgt::axis_index("x86_64", true);
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, HALF, &mut obj), "the System V object");
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, HALF, &mut obj), "the Microsoft x64 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native_with(lir, drv, HALF), 0);
+}
+
 // Branches on a value against zero (`cbz` on arm64) at every width, on one bit (`tbz`), and on the result of
 // a subtraction (its flags on x86-64); an index scaled by 16; and a loop of eight values in registers
 // across a call in a cold block (`@mix` takes every temporary register), which saves them around it.
@@ -1160,7 +1354,6 @@ fn register_hungry_instructions_compile_and_run() {
     let mut obj = Vector::<u8>::new();
     let x64 = tgt::axis_index("x86_64", true);
     assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the System V object");
-    obj.truncate(0);
     assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Microsoft x64 object");
     if !cli::has_cc() {
         return; // a C driver links it
@@ -1275,7 +1468,6 @@ b2:
     let mut obj = Vector::<u8>::new();
     let x64 = tgt::axis_index("x86_64", true);
     assert(object_of(lir, tgt::axis_index("linux", false), x64, TAIL, &mut obj), "the System V object");
-    obj.truncate(0);
     assert(object_of(lir, tgt::axis_index("windows", false), x64, TAIL, &mut obj), "the Microsoft x64 object");
     if !cli::has_cc() {
         return; // a C driver links it

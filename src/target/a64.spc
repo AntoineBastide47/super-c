@@ -504,6 +504,11 @@ pub(package) const fn fp2(d: bool, opc: u32, rd: u32, rn: u32, rm: u32) u32 {
     return 0x1E200800 | ftype(d) | rm << 16 | opc << 12 | rn << 5 | rd;
 }
 
+/// `fp2` on binary16 values (FEAT_FP16): FMUL, FDIV, FADD or FSUB of H registers.
+pub(package) const fn fp2_h(opc: u32, rd: u32, rn: u32, rm: u32) u32 {
+    return 0x1EE00800 | rm << 16 | opc << 12 | rn << 5 | rd;
+}
+
 pub(package) const FP_MUL: u32 = 0;
 pub(package) const FP_DIV: u32 = 1;
 pub(package) const FP_ADD: u32 = 2;
@@ -528,6 +533,15 @@ pub(package) const FP_RINTM: u32 = 10;
 pub(package) const FP_RINTZ: u32 = 11;
 pub(package) const FP_RINTA: u32 = 12;
 pub(package) const FP_RINTX: u32 = 14;
+
+/// FCVT between binary16 and single: half to single (`to_s`), or single to half (rounding to nearest even).
+pub(package) const fn fcvt_h(to_s: bool, rd: u32, rn: u32) u32 {
+    return if to_s {
+        0x1EE24000 | rn << 5 | rd;
+    } else {
+        0x1E23C000 | rn << 5 | rd;
+    };
+}
 
 /// FCVT: single to double (`to_d`) or double to single.
 pub(package) const fn fcvt(to_d: bool, rd: u32, rn: u32) u32 {

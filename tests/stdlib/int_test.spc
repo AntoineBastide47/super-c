@@ -6,6 +6,7 @@
 // These read like the built-in integers: a prelude module, so the aliases need no import, and an integer
 // literal or a `u64`/`i64` value converts through the `From` conformances wherever one is expected.
 import tests::harness as h;
+import tests::cli_harness as cli;
 
 const SUFFIXED: [u64; 4] = [1u64, 0x1Fu64, 1_000u64, 0b101u64];
 
@@ -2185,4 +2186,21 @@ fn arithmetic_is_the_same_at_compile_time() {
         eprintln("{}", d.as_str());
     }
     assert(d.len() == 0, "an integer or f128 result differs between compile time and run time");
+}
+
+// A 128-bit product on a native target takes the target's 128-bit path: `use_i128` stays a run-time
+// question there (no compile-time fold answers it with the limb code), so the high half is one high
+// multiply and the words stay apart.
+@test
+fn a_native_wide_product_is_one_high_multiply() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "@noinline\nfn wide(a: u128, b: u128) u128 {\n    return a * b;\n}\n\nfn main() i32 {\n    let x: u128 = 0x123456789ABCDEF;\n    return ((wide(x, x) >> 100) as i32) - 1;\n}\n",
+    );
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "wide", "build -O2 main.spc -o app");
+    if !r.ok() || !r.out_has("mulhu.i64") || r.out_has("mul.i128") {
+        r.show();
+    }
+    assert(r.ok() && r.out_has("mulhu.i64") && !r.out_has("mul.i128"), "the high multiply, the words split");
 }

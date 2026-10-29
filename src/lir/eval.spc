@@ -487,6 +487,14 @@ extend Eval {
             }
             return true;
         }
+        if op == O_HTOF {
+            self.vals[dst as usize] = half_to_f32_bits(self.val(&f, b, t.a) as u32 & 0xFFFF);
+            return true;
+        }
+        if op == O_FTOH {
+            self.vals[dst as usize] = f32_bits_to_half(self.val(&f, b, t.a) as u32);
+            return true;
+        }
         if op == O_VSEL {
             let wm = self.word(&f, b, t.a);
             let wx = self.word(&f, b, t.b);
@@ -1713,6 +1721,77 @@ const fn pick_str(c: bool, a: str<'static>, b: str<'static>) str<'static> {
 }
 
 // `x` truncated to its low `bits` bits.
+/// The f32 encoding of IEEE binary16 encoding `h`: exact; a NaN quiet, its payload's bits on top (as
+/// FCVT and VCVTPH2PS give it).
+pub(package) const fn half_to_f32_bits(h: u32) u32 {
+    let s = (h & 0x8000) << 16;
+    let e = h >> 10 & 0x1F;
+    let m = h & 0x3FF;
+    if e == 0x1F {
+        return s | 0x7F800000 | m << 13 | ast::pick(m != 0, 0x400000u32, 0u32);
+    }
+    if e != 0 {
+        return s | e + 112 << 23 | m << 13;
+    }
+    if m == 0 {
+        return s;
+    }
+    // A subnormal, normalized: each step moves the significand's top bit up one, at most 10 steps.
+    let mut k: u32 = 0;
+    let mut n = m;
+    while (n & 0x400) == 0 {
+        n <<= 1;
+        k += 1;
+    }
+    return s | 113 - k << 23 | (n & 0x3FF) << 13;
+}
+
+/// The IEEE binary16 encoding of f32 encoding `x`, rounded to nearest, ties to even; a NaN quiet, the top
+/// bits of its payload kept (as FCVT and VCVTPS2PH give it).
+pub(package) const fn f32_bits_to_half(x: u32) u32 {
+    let s = x >> 16 & 0x8000;
+    let e = (x >> 23 & 0xFF) as i32;
+    let m = x & 0x7FFFFF;
+    if e == 0xFF {
+        return s | ast::pick(m != 0, 0x7E00 | m >> 13 & 0x1FF, 0x7C00u32);
+    }
+    // An f32 below 2^-126 lies far below half the smallest binary16 step (2^-25): zero.
+    if e == 0 {
+        return s;
+    }
+    let sig = m | 0x800000;
+    // The binary16 exponent field; at 0 or below, the result is subnormal and keeps fewer bits.
+    let he = e - 127 + 15;
+    let sh = if he >= 1 {
+        13i32;
+    } else {
+        14 - he;
+    };
+    if sh > 24 {
+        return s;
+    }
+    let mut r = sig >> sh as u32;
+    let rem = sig & (1u32 << sh as u32) - 1;
+    let half = 1u32 << (sh - 1) as u32;
+    if rem > half || rem == half && (r & 1) != 0 {
+        r += 1;
+    }
+    if he < 1 {
+        // A subnormal that rounds up to 0x400 is the smallest normal: its field bits say so.
+        return s | r;
+    }
+    // A significand that rounds up to 2^11 moves the exponent up one.
+    let mut ef = he as u32;
+    if r == 0x800 {
+        r = 0x400;
+        ef += 1;
+    }
+    if ef >= 0x1F {
+        return s | 0x7C00;
+    }
+    return s | ef << 10 | r & 0x3FF;
+}
+
 pub(package) const fn trunc_bits(x: u64, bits: u32) u64 {
     if bits >= 64 {
         return x;
@@ -2290,7 +2369,7 @@ const fn icode_of(name0: str) u8 {
     if name == "sc_int_div_zero" {
         return IC_DIV_ZERO;
     }
-    if name == "sc_has_i128" || name == "sc_has_f128" || name == "__sc_cancel_tick" {
+    if name == "sc_has_i128" || name == "sc_has_f128" || name == "sc_has_f16" || name == "__sc_cancel_tick" {
         return IC_ZERO;
     }
     if name == "__sc_preempt_check" {

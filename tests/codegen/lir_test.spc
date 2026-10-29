@@ -307,6 +307,9 @@ b0(v0: f32, v1: f64):
   v31 = vcmp.olt.v2i64 v30, v30
   v32 = vsel.v2f64 v31, v30, v30
   v33 = vunzip.v2f64 v32, v30
+  v34 = fptrunc.f32 v29
+  v35 = ftoh.i16 v34
+  v36 = htof.f32 v35
   ret v29
 fn @memory
   sig (ptr, i64) -> void

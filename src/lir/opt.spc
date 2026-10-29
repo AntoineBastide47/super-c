@@ -31,6 +31,7 @@ import lir::inline as il;
 import lir::promote as pr;
 import lir::loops as lu;
 import lir::slp as sl;
+import lir::pairs as pa;
 import lir::print as lp;
 import stdlib;
 import std::platform::clock as pclock;
@@ -227,6 +228,7 @@ pub(package) struct Opt {
     pbody: Body,
     unr: lu::LoopOpt,
     slp: sl::Slp,
+    pairs: pa::Pairs,
     wgt: Vector<u64>, // per block, the weight of an instruction there (`weigh`)
 }
 
@@ -385,6 +387,7 @@ extend Opt {
             pbody: Body::new(),
             unr: lu::LoopOpt::new(),
             slp: sl::Slp::new(),
+            pairs: pa::Pairs::new(),
             wgt: Vector::<u64>::new(),
         };
     }
@@ -744,6 +747,21 @@ extend Opt {
             b.insts[ci as usize] = jump(b.edge(ne, args.as_slice()));
             b.blocks.index_mut(k).len -= 1;
         }
+        return true;
+    }
+
+    /// Split each 128-bit integer of body `b` into its two 64-bit words (`Package.pairs`, `lir::pairs`).
+    /// Whether any was.
+    pub(package) fn split_pairs(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        if !pk.pairs {
+            return false;
+        }
+        self.graph(b);
+        if !self.pairs.run(b, self.order.as_slice(), self.rpo.as_slice(), &mut self.pbody) {
+            return false;
+        }
+        let nb = replace(&mut self.pbody, Body::new());
+        self.pbody = replace(b, nb);
         return true;
     }
 
@@ -5188,6 +5206,9 @@ pub(package) struct Run {
     level: Vector<u32>,
     // Per body, whether a caller may inline it: written by the body's job, read by its callers' jobs.
     ok: Vector<bool>,
+    // Per body whose loop transforms or packing made vectors, its final form: `bodies` holds the form
+    // before them, which callers inline (`job`), until `finish`.
+    finals: Vector<Option<Body>>,
     inline: bool,
     cf: Config,
     // `SC_LIR_PRINT`: each optimized body whose function's name holds it prints to stderr (a debugging aid).
@@ -5307,11 +5328,16 @@ extend Run {
                 }
             }
         }
+        let mut finals = Vector::<Option<Body>>::with_capacity(n);
+        for _ in 0..n {
+            finals.push(Option::<Body>::None);
+        }
         return Run {
             edges: edges,
             order: order,
             pk: pkp,
             bodies: bodies,
+            finals: finals,
             held: held,
             call_at: call_at,
             calls: calls,
@@ -5344,8 +5370,19 @@ extend Run {
         if sc.o.tail_self(p, b, j) {
             let _ = sc.o.run(p, b, true);
         }
-        // A loop a round copied is innermost again for the next one.
+        if sc.o.split_pairs(p, b) {
+            let _ = sc.o.run(p, b, true);
+        }
+        // A body callers may inline keeps its form before the loop transforms and the packing: when those
+        // make vectors, callers inline that form, as LLVM vectorizes after inlining. A caller packs its
+        // copy once the copy's slots are values (`lir::promote`), which a vector access of a slot prevents.
         let bu = r.cf.loops;
+        let pre = if r.inline && r.shape[j as usize] && bu.vector != 0 && !packed(b) {
+            Option::<Body>::Some(b.compact());
+        } else {
+            Option::<Body>::None;
+        };
+        // A loop a round copied is innermost again for the next one.
         let mut round: u32 = 0;
         while round < LOOP_ROUNDS && (bu.peel != 0 || bu.partial != 0 || bu.version != 0 || bu.unswitch != 0 || bu.vector != 0 || bu.fin != 0) && sc.o.loop_opts(
             p,
@@ -5371,10 +5408,14 @@ extend Run {
             let _ = sc.o.run(p, b, true);
         }
         let _ = sc.o.split_exits(p, b);
-        unsafe *(r.ok.as_ptr() as *mut bool + j as usize) = r.inline && r.shape[j as usize] && il::small(b, r.cf.inline);
         if r.print.len() != 0 {
             r.print_body(p, j, b);
         }
+        if pre.is_some() && packed(b) {
+            let fin = replace(b, pre.unwrap());
+            unsafe *(r.finals.as_ptr() as *mut Option<Body> + j as usize) = Option::<Body>::Some(fin);
+        }
+        unsafe *(r.ok.as_ptr() as *mut bool + j as usize) = r.inline && r.shape[j as usize] && il::small(b, r.cf.inline);
         r.give(sc);
     }
 
@@ -5410,6 +5451,12 @@ extend Run {
 
     /// Give the bodies back to `pk`, the package `new` took them from.
     pub(package) fn finish(self: &mut Self, pk: &mut Package) {
+        for j in 0..self.finals.len() {
+            let f = replace(&mut self.finals[j], Option::<Body>::None);
+            if f.is_some() {
+                self.bodies[j] = f.unwrap();
+            }
+        }
         pk.bodies = replace(&mut self.bodies, Vector::<Body>::new());
     }
 
@@ -5432,6 +5479,17 @@ extend Run {
     pub(package) const fn calls_of(self: &Self, k: u32) Slice<u32> {
         return self.calls[self.call_at[k as usize] as usize..self.call_at[k as usize + 1] as usize];
     }
+}
+
+// Whether `b` holds a vector value or stores one.
+fn packed(b: &Body) bool {
+    for i in 0..b.insts.len() {
+        let t = b.insts[i];
+        if is_vec(t.ty) || t.op == O_STORE && is_vec(b.type_of(t.b)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// `Run::job` for `driver::sched::run_jobs`: `ctx` is the `Run`.
@@ -5801,6 +5859,19 @@ fn simplify_wide(b: &mut Body, i: u32) Value {
     return VNONE;
 }
 
+// The value of type `ty` that `v` extends (`zext`, `sext`), else VNONE.
+const fn ext_from(b: &Body, v: Value, ty: u8) Value {
+    if (v & (VPARAM | VFLAG)) != 0 {
+        return VNONE;
+    }
+    let t = b.insts[v as usize];
+    return if (t.op == O_ZEXT || t.op == O_SEXT) && b.type_of(t.a) == ty {
+        t.a;
+    } else {
+        VNONE;
+    };
+}
+
 const fn float_const(b: &Body, v: Value) Option<u64> {
     if (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_FCONST {
         return Option::<u64>::None;
@@ -6076,6 +6147,19 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             b.insts[i as usize] = iconst(t.ty, x.unwrap().0);
         }
         return VNONE;
+    }
+    // A truncation of an addition, subtraction, product or bitwise operation of two values extended from
+    // its type is that operation on them: the result's low bits are those of the operands'.
+    if t.op == O_TRUNC && is_int(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 {
+        let w = b.insts[t.a as usize];
+        if w.op >= O_ADD && w.op <= O_XOR && !(w.op >= O_SDIV && w.op <= O_UREM) {
+            let x = ext_from(b, w.a, t.ty);
+            let y = ext_from(b, w.b, t.ty);
+            if x != VNONE && y != VNONE {
+                b.insts[i as usize] = Inst { op: w.op, ty: t.ty, aux: 0, a: x, b: y, c: VNONE };
+                return VNONE;
+            }
+        }
     }
     if t.op == O_SEXT || t.op == O_ZEXT || t.op == O_TRUNC || t.op == O_INTTOPTR || t.op == O_PTRTOINT {
         let x = const_of(b, t.a);
@@ -6424,7 +6508,7 @@ const fn join(a: u8, b: u8) u8 {
 
 // Whether opcode `op` computes a value from its operands alone, the same each time it does not trap.
 const fn pure_op(op: u8) bool {
-    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP;
+    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH;
 }
 
 // Whether pure `t` of `b` may run where the program would not run it: it has operands (a constant is
