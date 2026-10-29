@@ -10493,6 +10493,31 @@ fn replayed_unit_keeps_its_effects() {
     assert(warm.equals(&cold), "main's object does not depend on the cache");
 }
 
+// A replayed unit's `@cold` function stays `@cold` (`lir::hold`, `Sym.cold`): `main`'s call of `slow`, a
+// body past SHRINK, stays a call, and `main`'s object matches one built without the per-TU cache.
+@test
+fn replayed_unit_keeps_its_cold_mark() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/b.spc",
+        "static mut K: i32 = 3;\n\n@cold\npub fn slow(x: i32) i32 {\n    let k = unsafe K;\n    return x * k + x / k - (x ^ k) + x % 7 * k;\n}\n",
+    );
+    p.mkfile("src/main.spc", "import b;\n\nfn main() i32 {\n    return b::slow(5) - 25;\n}\n");
+    let root = p.dir();
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the first build succeeds");
+    p.mkfile("src/main.spc", "import b;\n\nfn main() i32 {\n    return b::slow(5) - 26 + 1;\n}\n");
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the build that replays `b` succeeds");
+    assert_eq(p.run_bin(), 0);
+    let obj = format("{}/build/release/raw/main.o", root);
+    let warm = loader::read_file(obj.as_str()).unwrap_or(String::new());
+    assert(warm.len() > 0, "the build writes main's object");
+    let r = cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build --profile=release -o bin");
+    assert(r.ok(), "the build without the cache succeeds");
+    let cold = loader::read_file(obj.as_str()).unwrap_or(String::new());
+    assert(warm.equals(&cold), "main's object does not depend on the cache");
+}
+
 // A wasm import of a function takes its type from the package: a static of `a`, in the object of the
 // build's additions, holds the address of `seven`, which `a`'s own object defines. A build that replays
 // that object holds no body and no call of `seven`: the lowering records the signature where it takes the

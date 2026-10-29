@@ -524,6 +524,102 @@ extend Opt {
         return true;
     }
 
+    /// Mark the rare blocks of body `b` past the lowering's marks (`BLOCK_COLD`, `BLOCK_UNLIKELY`): a block
+    /// that panics is cold; one that calls a `@cold` function, or ends in `unreachable` (after a call that
+    /// does not return), is unlikely. A block whose every successor is rare is too (cold when each one is),
+    /// and so is a block the entry reaches only through rare blocks (cold when only through cold ones). It
+    /// only adds marks.
+    pub(package) fn estimate(self: &mut Self, pk: &Package, b: &mut Body) {
+        if b.naked {
+            return;
+        }
+        self.graph(b);
+        let nb = b.blocks.len();
+        for k in 0..nb {
+            let bk = b.blocks[k];
+            let mut f = bk.flags;
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                if t.op == O_PANIC {
+                    f |= BLOCK_COLD;
+                } else if t.op == O_UNREACHABLE || t.op == O_CALL && pk.syms[b.syms[t.a as usize] as usize].cold {
+                    f |= BLOCK_UNLIKELY;
+                }
+            }
+            b.blocks.index_mut(k).flags = f;
+        }
+        let n = self.order.len();
+        let mut seen = Vector::<bool>::new();
+        // Each round but the last adds a mark to a block: at most two per block.
+        for _ in 0..2 * n + 1 {
+            let mut changed = false;
+            // The successors, in postorder.
+            for i in 0..n {
+                let k = self.order[n - 1 - i] as usize;
+                if self.succ_at[k] == self.succ_at[k + 1] {
+                    continue;
+                }
+                let mut all = BLOCK_RARE;
+                for e in self.succ_at[k]..self.succ_at[k + 1] {
+                    let f = b.blocks[self.succs[e as usize] as usize].flags;
+                    all &= if (f & BLOCK_COLD) != 0 {
+                        BLOCK_RARE;
+                    } else {
+                        f & BLOCK_UNLIKELY;
+                    };
+                }
+                let add = if all == BLOCK_RARE {
+                    BLOCK_COLD;
+                } else {
+                    all;
+                };
+                if (b.blocks[k].flags | add) != b.blocks[k].flags {
+                    b.blocks.index_mut(k).flags |= add;
+                    changed = true;
+                }
+            }
+            // The blocks reached only through marked ones.
+            changed = self.unreached(b, BLOCK_COLD, BLOCK_COLD, &mut seen) || changed;
+            changed = self.unreached(b, BLOCK_RARE, BLOCK_UNLIKELY, &mut seen) || changed;
+            if !changed {
+                return;
+            }
+        }
+        assert(false, "opt: the rare blocks do not settle");
+    }
+
+    // Mark `add` on each reachable block of `b` the entry reaches only through a block marked in `mask`
+    // (`graph`'s); none when the entry is marked. Whether any was not marked yet.
+    fn unreached(self: &mut Self, b: &mut Body, mask: u16, add: u16, seen: &mut Vector<bool>) bool {
+        if (b.blocks[0].flags & mask) != 0 {
+            return false;
+        }
+        let nb = b.blocks.len();
+        fill_bool(seen, nb, false);
+        seen[0] = true;
+        self.stack.truncate(0);
+        self.stack.push(0);
+        // Each block enters the stack once.
+        while self.stack.len() != 0 {
+            let k = self.stack.pop().unwrap() as usize;
+            for e in self.succ_at[k]..self.succ_at[k + 1] {
+                let s = self.succs[e as usize] as usize;
+                if !seen[s] && (b.blocks[s].flags & mask) == 0 {
+                    seen[s] = true;
+                    self.stack.push(s as u64);
+                }
+            }
+        }
+        let mut changed = false;
+        for k in 0..nb {
+            if self.rpo[k] != NONE && !seen[k] && (b.blocks[k].flags & mask) == 0 {
+                b.blocks.index_mut(k).flags |= add;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
     // `wgt` for body `b`: an instruction weighs 16 per loop around it, up to three; and the instruction
     // count with each instruction weighed, a vector load from a slot (`lir::slp`'s gathers) GATHER_COST
     // more.
@@ -834,7 +930,7 @@ extend Opt {
                         continue;
                     }
                     let ek = b.add_block(none);
-                    b.blocks.index_mut(ek as usize).flags = b.blocks[to as usize].flags & BLOCK_COLD;
+                    b.blocks.index_mut(ek as usize).flags = b.blocks[to as usize].flags & BLOCK_RARE;
                     b.begin(ek);
                     let l = b.locs[ti as usize];
                     let w = b.emit(Inst { op: O_LOAD, ty: ty, aux: al, a: sa, b: VNONE, c: 0 }, l);
@@ -2324,7 +2420,15 @@ extend Opt {
         let (e0, s0) = self.arm(b, k, t.b);
         let (e1, s1) = self.arm(b, k, t.c);
         let j = b.edge_target(e0);
-        if j != b.edge_target(e1) || j == k || self.speculated(pk, b, k, s0) + self.speculated(pk, b, k, s1) > SPEC_MAX {
+        // A rare side of a warm branch keeps its branch: the warm path then neither runs its code nor waits for
+        // a select.
+        let rare = (b.blocks[s0 as usize].flags | b.blocks[s1 as usize].flags) & ~b.blocks[k as usize].flags & BLOCK_RARE;
+        if j != b.edge_target(e1) || j == k || rare != 0 || self.speculated(pk, b, k, s0) + self.speculated(
+            pk,
+            b,
+            k,
+            s1,
+        ) > SPEC_MAX {
             return NONE;
         }
         // The join's parameters are the selects when the two sides alone enter it.
@@ -5365,6 +5469,9 @@ extend Run {
         let base = r.bodies.as_ptr() as *mut Body;
         let mut sc = r.take();
         let b = unsafe &mut *(base + j as usize);
+        // The inliner reads the rare blocks, the loop transforms and the code generators too: marked before
+        // the inlining (a copy takes its call's marks) and once the transforms made their blocks.
+        sc.o.estimate(p, b);
         let inlined = sc.il.run(p, base, &r.ok, &r.level, &r.unit, j, b);
         let _ = sc.o.run(p, b, inlined);
         if sc.o.tail_self(p, b, j) {
@@ -5408,6 +5515,7 @@ extend Run {
             let _ = sc.o.run(p, b, true);
         }
         let _ = sc.o.split_exits(p, b);
+        sc.o.estimate(p, b);
         if r.print.len() != 0 {
             r.print_body(p, j, b);
         }

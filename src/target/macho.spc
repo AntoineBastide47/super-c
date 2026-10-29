@@ -209,7 +209,7 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
             ob::w64(&mut e, 0);
             ob::w64(&mut e, 0);
             o.put(cu, e.as_slice());
-            o.reloc(cu, a::R_ABS64, at, fr.sym, 0);
+            o.reloc(cu, a::R_ABS64, at, fr.sym, fr.off);
         }
     }
     // Thread-local variables: the descriptors section, the variable symbols moved onto it, their values

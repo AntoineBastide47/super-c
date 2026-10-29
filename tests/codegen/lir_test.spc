@@ -207,7 +207,7 @@ sym @swap fn global
 sym @entry fn global
 sym @atomics fn global
 sym @calls fn global
-sym @va fn global
+sym @va fn global noinline cold
 sym @vectors fn global
 sym @"odd name" fn local
 sym @puts fn global ext
@@ -265,7 +265,7 @@ b1: cold
   panic "attempt to add with overflow" !f1:9:9
 b2(v49: i64):
   switch v49 [0 -> b3, -1 -> b4(v49)] else b5
-b3:
+b3: unlikely
   v50 = mulhu.i64 v49, v49
   jmp b4(v50)
 b4(v51: i64):

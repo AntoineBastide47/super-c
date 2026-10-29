@@ -801,7 +801,7 @@ source text, values, and file:line on failure.
 | `@inline` | Suggest inlining |
 | `@always_inline` | Force inlining |
 | `@noinline` | Prevent inlining |
-| `@cold` | Mark rarely called: under `--emit-c` C `cold`, which implies `noinline`, and the C compiler lays out the branches that call it as unlikely; the native build ignores it |
+| `@cold` | Mark rarely called: under `--emit-c` C `cold`, which implies `noinline`, and the C compiler lays out the branches that call it as unlikely. The native build marks each block that calls it unlikely (laid out after the warm code, as `unlikely` does), inlines it only when it is no bigger than its call, and puts its code in a cold section (ELF `.text.unlikely`, Mach-O `__text_cold`, COFF `.text$u`) |
 | `@noreturn` | Mark non-returning |
 | `@align(N)` | Set alignment of a struct or a union (a header type of an `extern "C"` block too), or of a `static mut` outside an `extern "C"` block (an error on any other item): a power of two from 1 to 4096 (a page: a larger one is misaligned on some hosts and could move a task's frame past its guard page); `N` is an integer literal or a constant expression of type `u32`. An emitted struct or union definition takes `__attribute__((aligned(N)))`; a static whose `N` is above its type's own alignment takes `_Alignas(N)` on its definition and every declaration (C rejects a weaker specifier) |
 | `@packed` | Pack a struct or a union, a header type of an `extern "C"` block too (an error on any other item). A reference or autoref to a field whose alignment exceeds 1 is "cannot borrow a field of a '@packed' struct" (copy it into a local first), and such a field cannot need a `free` |
@@ -851,8 +851,10 @@ one occurrence (`@derive(Format, Hash)`, `@reflect(a, b = 1)`, `@platform(linux 
 
 `likely(c)` and `unlikely(c)` (prelude, `std/core.spc`) return `c`, also in a constant. The `if`
 or loop condition that tests the call tells the C compiler of an `--emit-c` tree which way the
-branch usually goes: `if (__builtin_expect(c, 1))` or `(c, 0)`; the native build ignores the hint.
-Wrap the WHOLE condition: a hint on one operand of
+branch usually goes: `if (__builtin_expect(c, 1))` or `(c, 0)`. The native build marks the rare
+side unlikely: its blocks go after the warm code, the branch stays a branch (no select), the warm
+code gets the registers first, and a body whose calls are all on rare sides sets its frame up only
+there (shrink-wrapping). Wrap the WHOLE condition: a hint on one operand of
 `||` or `&&` stays inside the lowered short circuit and the final branch has none.
 
 ```superc
@@ -864,7 +866,7 @@ for x in xs {
 ```
 
 Use a hint where the branch is predictable and its taken side is rare: an error or slow path, a
-new minimum in a scan. There it also stops the C compiler of an `--emit-c` tree from turning the branch into selects,
+new minimum in a scan. There it also stops the compiler from turning the branch into selects,
 which chain each iteration to the previous one: Apple clang does this to the loop above without
 the hint (3.06 ns per element on an M5 Pro, 0.55 with it). A wrong hint costs the mispredicted
 side; leave unpredictable branches unhinted.

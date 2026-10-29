@@ -276,6 +276,10 @@ pub(package) fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut
                     HELD_OK;
                 } else {
                     0u8;
+                } | if sy.cold {
+                    HELD_COLD;
+                } else {
+                    0u8;
                 },
                 fx: sy.fx,
                 wargs: r.wargs_of(k),
@@ -462,6 +466,7 @@ pub(package) fn add(pk: &mut Package, unit: u32, rec: &Rec) {
         y.def = pk.bodies.len() as u32 - 1;
         y.unit = unit;
         y.own = true;
+        y.cold = (f.flags & HELD_COLD) != 0;
         pk.held.syms.push(s);
         pk.held.flags.push(f.flags);
         pk.held.fx.push(f.fx);

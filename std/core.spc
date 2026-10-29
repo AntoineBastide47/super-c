@@ -17,8 +17,9 @@
 // Each method is O(1), except `pow` (O(log exp) multiplications) and `ilog` (O(log_base self) divisions).
 
 /// Branch hint: this condition is expected to be TRUE. Returns `c` (const-evaluable); the branch that
-/// tests the call tells the C compiler (`__builtin_expect(c, 1)`), which then lays out the expected
-/// path first and keeps the branch instead of turning it into a select.
+/// tests the call tells the C compiler (`__builtin_expect(c, 1)`), or the native backends (the other
+/// side rare), which then lay out the expected path first, keep the branch instead of turning it into a
+/// select, and give the expected path the registers and the frame (set up on the rare side only).
 @intrinsic("hint.likely")
 pub const fn likely(c: bool) bool;
 

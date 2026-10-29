@@ -5967,7 +5967,22 @@ fn exit_cases_09() {
     zero_sized_fields_of_generic_instances(&mut b);
     literal_spellings_reach_a_c_parameter(&mut b);
     loop_condition_temporaries_drop_per_evaluation(&mut b);
+    rare_paths_set_the_frame_up(&mut b);
     b.run();
+}
+
+// Code an `unlikely` branch, a `@cold` call or a failure path makes rare runs out of line: a body whose
+// calls are all there keeps no frame on its other paths and sets it up on the edges into them
+// (shrink-wrapping). Each path runs: a rare call that returns, one in a loop that goes on in the warm
+// code, and a failing check whose message the run prints.
+fn rare_paths_set_the_frame_up(b: &mut h::ExitBatch) {
+    let src = "@cold\n@noinline\nfn report(x: i64) i64 { return x * 3; }\n@noinline\nfn pick(p: []i64, k: i64) i64 { if unlikely(k < 0) { return report(k); } return p[k as usize] + k; }\n@noinline\nfn sum(p: []i64) i64 { let mut s: i64 = 0; for v in p { if unlikely(v < 0) { s += report(v); } else { s += v; } } return s; }\nfn main() i32 { let mut v = Vector::<i64>::new(); v.push(4); v.push(-2); v.push(9); let a = pick(v.as_slice(), 2) + pick(v.as_slice(), -5) + sum(v.as_slice()); unsafe exit(a as i32 + 20); }\n";
+    exit_case(b, "rare calls set the frame up", src, 23);
+    b.add_trap(
+        "a rare failure sets the frame up",
+        "@noinline\nfn at(p: []i32, i: usize) i32 { return p[i] + 1; }\nfn main(args: Vector<str>) i32 { let mut v = Vector::<i32>::new(); v.push(1); return at(v.as_slice(), args.len() + 2); }\n",
+        "index out of bounds",
+    );
 }
 
 // An integer the checker widens to a C function's parameter type is converted in the call, so C checks

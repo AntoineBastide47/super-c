@@ -4663,15 +4663,14 @@ extend CEmit {
         self.uput(defs);
     }
 
-    // For each gather (`simd.gather`, `simd.gather_unchecked`), the slice load that defined its index
-    // vector, through whole copies, at most 32 statements before it on its straight path: its block,
-    // then each block whose goto, constant switch or assertion alone reaches the one before (an inlined
-    // body's blocks; a call may write memory and ends the path). When no statement between writes memory, a projection, an
-    // address-taken local or a local the load reads, and no address-taken local's storage ends, the
-    // slice still holds the indexes, and the lane loop reads `s.ptr[start + i]`: a C compiler that
-    // keeps the loaded vector in registers otherwise extracts each lane and widens it (Clang 18 on
-    // aarch64: 1.6 to 1.9 times a scalar index read). A scatter writes in its loop, so its indexes stay
-    // in the vector.
+    // For each gather (`simd.gather`, `simd.gather_unchecked`), the slice load that defined its index vector, through
+    // whole copies, at most 32 statements before it on its straight path: its block, then each block whose goto,
+    // constant switch or assertion alone reaches the one before (an inlined body's blocks; a call may write memory and
+    // ends the path). When no statement between writes memory, a projection, an address-taken local or a local the load
+    // reads, and no address-taken local's storage ends, the slice still holds the indexes, and the lane loop reads
+    // `s.ptr[start + i]`: a C compiler that keeps the loaded vector in registers otherwise extracts each lane and
+    // widens it (Clang 18 on aarch64: 1.6 to 1.9 times a scalar index read). A scatter writes in its loop, so its
+    // indexes stay in the vector.
     fn gather_loads(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) {
         self.sx_gload.clear();
         for _ in 0..b.rvalues.len() {
@@ -7036,11 +7035,11 @@ extend CEmit {
         }
     }
 
-    // A switch terminator as an `if`/`else` (or `else if` chain), or a native C `switch` when it has
-    // >= 2 cases on a non-boolean discriminant (`emit_native_switch`; inside a loop an arm's loop
-    // break spells a forward `goto`, as a C `break` would only leave the switch). Arms stop at the
-    // branch join `f`, or at the region stop when the arms do not rejoin. When no arm falls through and the arms do not rejoin, the otherwise region follows the `if` unwrapped as
-    // the rest of the caller's region: `tail` receives its entry and the caller continues there.
+    // A switch terminator as an `if`/`else` (or `else if` chain), or a native C `switch` when it has >= 2 cases on a
+    // non-boolean discriminant (`emit_native_switch`; inside a loop an arm's loop break spells a forward `goto`, as a C
+    // `break` would only leave the switch). Arms stop at the branch join `f`, or at the region stop when the arms do
+    // not rejoin. When no arm falls through and the arms do not rejoin, the otherwise region follows the `if` unwrapped
+    // as the rest of the caller's region: `tail` receives its entry and the caller continues there.
     fn emit_branch(
         self: &mut Self,
         o: &mut String,

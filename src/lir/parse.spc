@@ -454,6 +454,7 @@ extend<'a> Parser<'a> {
             }
             self.pkg.syms.index_mut(s as usize).used = self.keyword("used");
             self.pkg.syms.index_mut(s as usize).noinline = self.keyword("noinline");
+            self.pkg.syms.index_mut(s as usize).cold = self.keyword("cold");
             self.pkg.syms.index_mut(s as usize).ext = self.keyword("ext");
             if self.keyword("section") {
                 let mut sp = String::new();
@@ -755,7 +756,7 @@ extend<'a> Parser<'a> {
         return true;
     }
 
-    // `b<k>[(v<n>: type, ...)]:[ cold]`.
+    // `b<k>[(v<n>: type, ...)]:[ cold][ unlikely][ novec]`.
     fn block_header(self: &mut Self) bool {
         if self.sym == NONE {
             return self.fail("a block outside a function");
@@ -793,6 +794,7 @@ extend<'a> Parser<'a> {
             return false;
         }
         let cold = self.keyword("cold");
+        let unlikely = self.keyword("unlikely");
         let novec = self.keyword("novec");
         let mut loc = Loc { file: 0, line: 0, col: 0 };
         if !self.line_end_loc(&mut loc) {
@@ -804,6 +806,9 @@ extend<'a> Parser<'a> {
         let blk = self.body.add_block(tys[0..tys.len()]);
         if cold {
             self.body.blocks.index_mut(blk as usize).flags |= BLOCK_COLD;
+        }
+        if unlikely {
+            self.body.blocks.index_mut(blk as usize).flags |= BLOCK_UNLIKELY;
         }
         if novec {
             self.body.blocks.index_mut(blk as usize).flags |= BLOCK_NOVEC;

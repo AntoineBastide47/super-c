@@ -58,13 +58,15 @@ pub(package) struct ORel {
 /// The unwind rules of one function: the function symbol, its code size, its DWARF call frame
 /// instructions, `cfi_len` bytes at `cfi_at` of `Obj.cfi` (after the format's common entry, which states
 /// the rules at the function's first byte) for ELF's `.eh_frame`, and its compact unwind encoding for
-/// Mach-O's `__compact_unwind`.
+/// Mach-O's `__compact_unwind`, which may cover `size` bytes from byte `off` of the function alone (a
+/// function whose frame its rare code alone sets up has two).
 pub(package) struct OFrame {
     pub(package) sym: u32,
     pub(package) size: u32,
     pub(package) cfi_at: u32,
     pub(package) cfi_len: u32,
     pub(package) compact: u32,
+    pub(package) off: u32,
 }
 
 /// A row of a function's line table: from byte `off` of the function its code comes from line `line`,

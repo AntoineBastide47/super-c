@@ -209,6 +209,8 @@ pub(package) struct Lower {
     lblk: Vector<u32>, // per core block: its LIR block, NONE when unreachable
     npred: Vector<u32>, // per core block (and the virtual entry): predecessor range in `preds`
     preds: Vector<u32>,
+    // The body's branch hints (`likely`, `unlikely`): value << 1 | 1 for a likely value, 0 for an unlikely one.
+    hints: Vector<u64>,
     edges: Vector<DEdge>,
     cur: u32, // the core block being lowered (`virt` in the entry block)
     virt: u32,
@@ -287,6 +289,7 @@ extend Lower {
             lblk: Vector::<u32>::new(),
             npred: Vector::<u32>::new(),
             preds: Vector::<u32>::new(),
+            hints: Vector::<u64>::new(),
             edges: Vector::<DEdge>::new(),
             cur: 0,
             virt: 0,
@@ -1942,6 +1945,7 @@ extend Lower {
         self.lblk.truncate(0);
         self.npred.truncate(0);
         self.preds.truncate(0);
+        self.hints.truncate(0);
         self.edges.truncate(0);
         self.panics.clear();
         self.pan_list.truncate(0);
@@ -4682,6 +4686,7 @@ extend Lower {
             return self.int_to(v[1], ti.mty, false);
         }
         if k == irc::IN_LIKELY || k == irc::IN_UNLIKELY {
+            self.hints.push(v[0] as u64 << 1 | (k == irc::IN_LIKELY) as u64);
             return v[0];
         }
         if k == irc::IN_RETURN_ADDRESS {
@@ -6075,7 +6080,7 @@ extend Lower {
         self.store(z, r, 0, false);
         let hit = self.icmp(C_EQ, m, z);
         let cold = self.block();
-        self.b.blocks.index_mut(cold as usize).flags = BLOCK_COLD;
+        self.b.blocks.index_mut(cold as usize).flags = BLOCK_UNLIKELY;
         let join = self.block();
         let ec = self.edge(cold, NONE, NONE);
         let ej = self.edge(join, NONE, NONE);
@@ -6162,6 +6167,24 @@ extend Lower {
             let to = pr as u32;
             let ec = self.edge(self.lblk[to as usize], self.cur, to);
             let ed = self.edge(self.lblk[t.t0 as usize], self.cur, t.t0);
+            // A hinted condition: the side it makes rare is unlikely, when the branch alone enters it.
+            let (yes, no) = if pr >> 32 == 0 {
+                (t.t0, to);
+            } else {
+                (to, t.t0);
+            };
+            for q in 0..self.hints.len() {
+                if (self.hints[q] >> 1) as u32 == v {
+                    let rare = if (self.hints[q] & 1) != 0 {
+                        no;
+                    } else {
+                        yes;
+                    };
+                    if self.npred[rare as usize + 1] - self.npred[rare as usize] == 1 && self.lblk[rare as usize] != NONE {
+                        self.b.blocks.index_mut(self.lblk[rare as usize] as usize).flags |= BLOCK_UNLIKELY;
+                    }
+                }
+            }
             if pr >> 32 == 0 {
                 let _ = self.inst(O_BR, T_NONE, 0, v, ed, ec);
             } else {
@@ -6532,6 +6555,7 @@ extend Lower {
         let mut nfixed = NONE;
         let mut variadic = t.is_variadic;
         let mut ext = false; // the callee is an extern declaration's (`Sym.ext`)
+        let mut cold = false; // the callee is `@cold`
         let pb = self.pkg.ptr_bytes;
         let fat = TyI { cls: VC_MEM, mty: T_NONE, size: 2 * pb, align: pb };
         if t.callee.node == NODE_NONE {
@@ -6631,6 +6655,10 @@ extend Lower {
                 variadic = true;
             }
             ext = fd.kind == NodeKind::NODE_FUNCTION && Lower::ast(c, pcallee.module).ext(pcallee.node).function.is_extern();
+            cold = fd.kind == NodeKind::NODE_FUNCTION && Lower::ast(c, pcallee.module).attr_of(
+                pcallee.node,
+                AttrKind::ATTR_COLD,
+            ) != null;
         }
         // A generic callee's parameter types read the bindings of its instance (`arg_mode`); the
         // arguments read the caller's.
@@ -6653,6 +6681,11 @@ extend Lower {
         self.ind_t = TYPE_NONE;
         if nfixed == NONE {
             nfixed = args.len() as u32;
+        }
+        // A call of a `@cold` function runs rarely: so does its block (`BLOCK_UNLIKELY`).
+        if cold {
+            let cb = self.b.current();
+            self.b.blocks.index_mut(cb as usize).flags |= BLOCK_UNLIKELY;
         }
         // The result: one value or memory, or a pack of several.
         let mut ti = TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 };
@@ -7627,6 +7660,9 @@ extend Lower {
         if a.attr_of(n, AttrKind::ATTR_NOINLINE) != null {
             self.pkg.syms.index_mut(s as usize).noinline = true;
         }
+        if a.attr_of(n, AttrKind::ATTR_COLD) != null {
+            self.pkg.syms.index_mut(s as usize).cold = true;
+        }
     }
 
     /// Data symbol `name` belongs to unit `unit`; without a LIR definition the unit does not compile.
@@ -8517,10 +8553,9 @@ extend Lower {
         return ok;
     }
 
-    // The element type of array or heap object `gi`, the value type of a cell: the recorded one, the
-    // element of the array (or the type) an item's object declares, a share of the parent's place for an embedded array,
-    // else the type of its first typed slot; a refusal when none is known (offsets need the element's
-    // size).
+    // The element type of array or heap object `gi`, the value type of a cell: the recorded one, the element of the
+    // array (or the type) an item's object declares, a share of the parent's place for an embedded array, else the type
+    // of its first typed slot; a refusal when none is known (offsets need the element's size).
     fn elem_ty(self: &mut Self, c: &mut cbe::CEmit, cev: &iri::Interp, gi: u32, out: &mut TyI) bool {
         let g = cev.static_at(gi);
         if unsafe (*g).ety != TYPE_NONE {

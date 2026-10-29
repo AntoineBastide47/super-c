@@ -454,7 +454,7 @@ native object's key.
 | `vectorize` | 2, 3, s | Counted loops over slices run 16-byte vectors, 4 interleaved (1 at s); isomorphic straight-line values, a loop's carried ones too, pack into vectors (`src/lir/slp.spc`); arm64 and x86-64 only |
 | `strict-aliasing` | 2, 3, s, z | A typed access touches no object of another scalar type (language skill, `operations.md`) |
 | `fast-math` | | `associative-math`, `reciprocal-math`, `finite-math-only`, `-fno-signed-zeros` and `fp-contract=fast` (`-ffp-contract=off` clears it), each its own flag too |
-| `stack-protector`, `-strong`, `-all` | | A canary between a function's stack memory and its saved registers, checked before it returns: functions with a slot of 8 bytes or more, with any slot, or all; one at a time (`-fno-stack-protector` clears them) |
+| `stack-protector`, `-strong`, `-all` | | A canary between a function's stack memory and its saved registers, checked before it returns: functions with a slot of 8 bytes or more, with any slot, or all; one at a time (`-fno-stack-protector` clears them). The native build counts a slot only when a block that may return reads its address: a slot only failure paths use (a panic's message) adds no canary (`lir::verify::protected`) |
 | `function-sections`, `data-sections` | 1, 2, 3, s, z | A section per function or variable, and the link drops what nothing reaches from the entry, the exports and the kept symbols (the build adds `-Wl,-dead_strip` on Mach-O, `-Wl,--gc-sections` elsewhere) |
 | `plt` | 0 to z | `-fno-plt`, ELF: a call of an extern declaration's function loads its address from its GOT slot; the x86-64 link turns one whose target the output defines into a direct call |
 

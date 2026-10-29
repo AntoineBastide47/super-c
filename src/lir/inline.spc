@@ -14,10 +14,10 @@ import lir::verify as lv;
 /// A caller takes no more callees past CALLER_MAX instructions, but the ones no bigger than their call.
 pub(package) const CALLER_MAX: u32 = 8000;
 
-/// The inline budgets: a callee inlines when it holds at most `warm` instructions outside cold blocks and
-/// `all` in all. `optimize`'s levels: none, the callees no bigger than their calls (`SHRINK`), and past
-/// them by optimization level (scaled as LLVM's and GCC's thresholds: for size a fifth of the
-/// speed one, at the highest level half again).
+/// The inline budgets: a callee inlines when it holds at most `warm` instructions outside rare blocks
+/// (`BLOCK_RARE`) and `all` in all; a `@cold` one, within SHRINK. `optimize`'s levels: none, the callees
+/// no bigger than their calls (`SHRINK`), and past them by optimization level (scaled as LLVM's and GCC's
+/// thresholds: for size a fifth of the speed one, at the highest level half again).
 pub(package) struct Budget {
     pub(package) warm: u32,
     pub(package) all: u32,
@@ -82,7 +82,7 @@ pub(package) const fn forwarder(b: &Body) bool {
 pub(package) const fn small(b: &Body, bu: Budget) bool {
     let mut warm: u32 = 0;
     for k in 0..b.blocks.len() {
-        if (b.blocks[k].flags & BLOCK_COLD) == 0 {
+        if (b.blocks[k].flags & BLOCK_RARE) == 0 {
             warm += b.blocks[k].len;
         }
     }
@@ -93,7 +93,7 @@ pub(package) const fn small(b: &Body, bu: Budget) bool {
 // parameters, and the continuation block and its parameter (NONE: a call without a result).
 struct Site {
     pub(package) inst: u32,
-    pub(package) cold: u16, // BLOCK_COLD when the call's block is cold: so are the copy's blocks
+    pub(package) cold: u16, // the call's block's rare marks (`BLOCK_RARE`): the copy's blocks take them
     pub(package) callee: u32,
     pub(package) bbase: u32,
     pub(package) vbase: u32,
@@ -206,7 +206,9 @@ extend Inliner {
                 // A callee of one block and at most 3 instructions (a field read) is no bigger than its
                 // call: CALLER_MAX does not stop it. A failure path takes forwarders alone.
                 let tiny = e.blocks.len() == 1 && e.insts.len() <= 3;
-                if !warm && !forwarder(e) || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 {
+                // A `@cold` callee stays a call unless it is no bigger than one: its callers' code stays small.
+                let cold = pk.syms[c.syms[t.a as usize] as usize].cold && !small(e, SHRINK);
+                if !warm && !forwarder(e) || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 {
                     self.cmap[i as usize] = ni;
                     ni += 1;
                     continue;
@@ -215,7 +217,7 @@ extend Inliner {
                 ni += 1; // the jump to the copy
                 let s = Site {
                     inst: i,
-                    cold: bk.flags & BLOCK_COLD,
+                    cold: bk.flags & BLOCK_RARE,
                     callee: callee,
                     bbase: nb,
                     vbase: ni,

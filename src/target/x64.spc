@@ -114,17 +114,26 @@ pub(package) const fn rip() Mem {
 /// The code position of the displacement of the last RIP-relative operand an encoder wrote: the
 /// caller's relocation goes there. Set by every form that takes a `Mem`. `jumps`: the positions of the
 /// 32-bit displacements of the jumps, ascending, for `relax`; `in_at`: the positions of the displacements of
-/// the operands based on `IN`.
+/// the operands based on `IN`; `stack_at`: the first position in an instruction that uses the stack (a
+/// memory operand based on rsp, rbp or `IN`, a push, a pop, a call), 0xFFFFFFFF before
+/// one.
 pub(package) struct Code {
     pub(package) b: Vector<u8>,
     pub(package) rip_at: u32,
     pub(package) jumps: Vector<u32>,
     pub(package) in_at: Vector<u32>,
+    pub(package) stack_at: u32,
 }
 
 extend Code {
     pub(package) fn new() Code {
-        return Code { b: Vector::<u8>::new(), rip_at: 0, jumps: Vector::<u32>::new(), in_at: Vector::<u32>::new() };
+        return Code {
+            b: Vector::<u8>::new(),
+            rip_at: 0,
+            jumps: Vector::<u32>::new(),
+            in_at: Vector::<u32>::new(),
+            stack_at: 0xFFFFFFFF,
+        };
     }
 
     /// Empty the code for the next function.
@@ -132,6 +141,14 @@ extend Code {
         self.b.truncate(0);
         self.jumps.truncate(0);
         self.in_at.truncate(0);
+        self.stack_at = 0xFFFFFFFF;
+    }
+
+    // An instruction that uses the stack is being written (`stack_at`).
+    const fn stack_use(self: &mut Self) {
+        if self.stack_at == 0xFFFFFFFF {
+            self.stack_at = self.len();
+        }
     }
 
     /// Add `d` to the displacement of every operand based on `IN`: the distance from rsp to the incoming
@@ -338,6 +355,9 @@ extend Code {
 
     // `modrm_m` with 8-bit displacements counted in `n8`-byte units (EVEX's compressed displacement).
     fn modrm_n(self: &mut Self, reg: u8, m: Mem, n8: i32) {
+        if m.base == RSP || m.base == RBP || m.base == IN {
+            self.stack_use();
+        }
         let rg = (reg as u32 & 7) << 3;
         if m.base == RIP {
             self.byte(rg | 5);
@@ -400,6 +420,9 @@ extend Code {
 
     /// `op reg, [m]` with mandatory prefix `pfx` and REX.W `w`.
     pub(package) fn rm(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, m: Mem, byte: bool) {
+        if op == 0xFF && reg == 2 {
+            self.stack_use();
+        }
         if pfx != 0 {
             self.byte(pfx);
         }
@@ -951,6 +974,7 @@ extend Code {
 
     /// A call with a 32-bit displacement (for a relocation); the field's position.
     pub(package) fn call32(self: &mut Self) u32 {
+        self.stack_use();
         self.byte(0xE8);
         let at = self.len();
         self.d32(0);
@@ -959,6 +983,7 @@ extend Code {
 
     /// A call of the address in `r`.
     pub(package) fn call_r(self: &mut Self, r: u8) {
+        self.stack_use();
         self.rr(0, 0xFF, false, 2, r, false);
     }
 
@@ -967,6 +992,7 @@ extend Code {
     }
 
     pub(package) fn push(self: &mut Self, r: u8) {
+        self.stack_use();
         if r >= 8 {
             self.byte(0x41);
         }
@@ -974,6 +1000,7 @@ extend Code {
     }
 
     pub(package) fn pop(self: &mut Self, r: u8) {
+        self.stack_use();
         if r >= 8 {
             self.byte(0x41);
         }

@@ -11,9 +11,12 @@ set first: it states the value, register and frame model.
 ## Per body
 
 1. Analysis: set `Live.fold_ops` to the `FOLD_*` patterns the backend fuses into their users, then
-   `Live::run`. It gives the block layout (reverse postorder, each loop contiguous, cold blocks last),
-   the loop nesting, each value's last live position and use count. A folded instruction emits no code;
-   its user reads its operands (`Live::uses_at`).
+   `Live::run`. It gives the block layout (reverse postorder, each loop contiguous, rare blocks last:
+   `Live::rare`, a block the entry reaches only through a `BLOCK_RARE` one), the loop nesting, each
+   value's last live position and use count. A folded instruction emits no code; its user reads its
+   operands (`Live::uses_at`). The warm code's values take the registers first; a call in a rare block
+   saves around it the scratch registers whose values live past it (`save_scratch`), so it is no call
+   for the homes.
 2. Frame: the outgoing argument area (the largest call's stack arguments, from the calling convention),
    the LIR slots, then the spills; the callee-saved registers and the frame pointer last.
 3. Homes: `Live::plan` gives each value a home class per register file (none, callee-saved for a value
@@ -26,11 +29,23 @@ set first: it states the value, register and frame model.
 A body the backend cannot compile fails with a reason (`refuse`): the build reports the function and
 the reason. Never emit code for an unsupported case.
 
+## Rare code
+
+Shrink-wrapping (`shrinkable`): when every call is in a rare block, the warm code keeps no frame and
+returns with `ret`; the rare blocks joined by edges to one with a call set the frame up
+(`Live::after`, laid out last), the prologue on each edge into them, the epilogue on each edge out.
+Not with a canary, a slot aligned past 16 bytes, inline assembly, a return address or variadic
+access. Microsoft x64: no edge may leave them for the warm code (its unwinder reads an epilogue only
+where it ends in `ret` or a jump out); the warm code has no function table entry (a leaf's rule), the
+framed code one with a prologue of 0 bytes, each entry stub one with its prologue (`OFrame.off`). A
+`@cold` function's code goes to its own section (`cold_text`).
+
 ## Values and ops
 
-- Integers up to 64 bits and pointers live in general registers, floats in vector registers; i128 and
-  vectors live in stack slots (wasm: frame memory). The bits above an i8, i16 or i32 value are
-  undefined in its register: an operation that reads them extends first.
+- Integers up to 64 bits and pointers live in general registers, floats in vector registers; an i128
+  splits into its two words before (`split_pairs`, `Isa.pairs`), and a vector lives in a stack slot
+  (wasm: frame memory) unless it lives in a vector register (`vec_homes`). The bits above
+  an i8, i16 or i32 value are undefined in its register: an operation that reads them extends first.
 - Every `O_*` of `src/lir/ir.spc` is emitted or refused. Groups: constants and addresses; integer and
   float arithmetic with the overflow forms (two results: the value and a flag); comparisons and
   `select`; conversions; `ptradd`, loads, stores, `memcpy`, `memset`; atomics and fences; calls (direct,

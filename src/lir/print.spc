@@ -45,6 +45,9 @@ pub(package) fn print_package(p: &Package, out: &mut String) {
         if s.noinline {
             out.push_str(" noinline");
         }
+        if s.cold {
+            out.push_str(" cold");
+        }
         if s.ext {
             out.push_str(" ext");
         }
@@ -196,6 +199,9 @@ extend Printer {
             out.push_byte(b':');
             if (blk.flags & BLOCK_COLD) != 0 {
                 out.push_str(" cold");
+            }
+            if (blk.flags & BLOCK_UNLIKELY) != 0 {
+                out.push_str(" unlikely");
             }
             if (blk.flags & BLOCK_NOVEC) != 0 {
                 out.push_str(" novec");

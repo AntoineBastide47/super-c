@@ -3,11 +3,12 @@
 // code generation pass reads to allocate registers in one pass.
 //
 // Layout: reverse postorder, each loop contiguous (a block's key is the list of its loop headers'
-// positions, then its own, compared in order), a loop's cold blocks after its warm ones, the other cold
-// blocks last. A value's range is the layout positions from its definition's block to `end`: its last
-// use, or the last block of the outermost loop that holds a use but not the definition (the value must
-// survive the back edge). The CFG is reducible (the verifier checks it), so an edge to a block not later
-// in reverse postorder is a back edge.
+// positions, then its own, compared in order), a loop's rare blocks after its warm ones, the other rare
+// blocks last. A block is rare when the entry reaches it only through a block marked rare (`BLOCK_RARE`:
+// cold or unlikely), so no warm block follows a rare one in dominance. A value's range is the layout
+// positions from its definition's block to `end`: its last use, or the last block of the outermost loop
+// that holds a use but not the definition (the value must survive the back edge). The CFG is reducible
+// (the verifier checks it), so an edge to a block not later in reverse postorder is a back edge.
 import lir::ir as *;
 import lir::verify as lv;
 import ir::core as core;
@@ -55,6 +56,10 @@ pub(package) struct Live {
     pub(package) inner: Vector<u32>, // per block, the header of its innermost loop, NONE outside loops
     pub(package) lend: Vector<u32>, // per loop header, the layout position of the loop's last block
     pub(package) parent: Vector<u32>, // per loop header, the header of the loop around it, NONE
+    pub(package) rare: Vector<bool>, // per block, whether the entry reaches it only through a block marked rare
+    /// Per block (empty: none), whether the layout puts it after every other block, in layout order: a
+    /// generator's rare blocks that alone set its frame up, after the code that has none.
+    pub(package) after: Vector<bool>,
     pub(package) def_blk: Vector<u32>, // per value, its block
     pub(package) end: Vector<u32>, // per value, the last layout position it is live in
     pub(package) uses: Vector<u32>, // per value, its use count, one more when a loop keeps it past its last use
@@ -107,6 +112,8 @@ extend Live {
             inner: Vector::<u32>::new(),
             lend: Vector::<u32>::new(),
             parent: Vector::<u32>::new(),
+            rare: Vector::<bool>::new(),
+            after: Vector::<bool>::new(),
             def_blk: Vector::<u32>::new(),
             end: Vector::<u32>::new(),
             uses: Vector::<u32>::new(),
@@ -169,6 +176,7 @@ extend Live {
             }
         }
         self.reverse_postorder(b);
+        self.rare_blocks(b);
         self.loops(b);
         self.layout(b);
         self.folds(b);
@@ -330,6 +338,46 @@ extend Live {
             }
         }
         return NONE;
+    }
+
+    /// The rare blocks of `b` (`rare`) that edges between rare blocks connect to one of `framed` (per block:
+    /// it holds a call that needs the frame): `after`, which the next `run` lays out last.
+    pub(package) fn set_after(self: &mut Self, b: &Body, framed: &Vector<bool>) {
+        // Per block, its component's root (union by index, paths halved: each step shortens a path).
+        let nb = b.blocks.len();
+        let mut root = Vector::<u32>::with_capacity(nb);
+        for k in 0..nb {
+            root.push(k as u32);
+        }
+        let mut es = Vector::<u32>::new();
+        for k in 0..nb {
+            if !self.rare[k] {
+                continue;
+            }
+            let bk = b.blocks[k];
+            b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut es);
+            for e in 0..es.len() {
+                let s = b.edge_target(es[e]);
+                if self.rare[s as usize] {
+                    let x = find_root(&mut root, k as u32);
+                    let y = find_root(&mut root, s);
+                    if x != y {
+                        root[x.max(y) as usize] = x.min(y);
+                    }
+                }
+            }
+        }
+        let mut fr = Vector::<bool>::new();
+        fr.resize_default(nb);
+        for k in 0..nb {
+            if framed[k] {
+                fr[find_root(&mut root, k as u32) as usize] = true;
+            }
+        }
+        self.after.truncate(0);
+        for k in 0..nb {
+            self.after.push(self.rare[k] && fr[find_root(&mut root, k as u32) as usize]);
+        }
     }
 
     /// Whether an instruction of block `k` of `b` after instruction `i`, its terminator's edges included,
@@ -507,14 +555,44 @@ extend Live {
         }
     }
 
+    // `rare`: the reachable blocks the entry reaches only through a block marked rare, that block included;
+    // none when the entry is marked.
+    fn rare_blocks(self: &mut Self, b: &Body) {
+        let nb = b.blocks.len();
+        self.rare.truncate(0);
+        let marked = (b.blocks[0].flags & BLOCK_RARE) != 0;
+        for k in 0..nb {
+            self.rare.push(self.rpo[k] != NONE && !marked);
+        }
+        if marked {
+            return;
+        }
+        self.rare[0] = false;
+        self.stack.truncate(0);
+        self.stack.push(0);
+        // Each block enters the stack once.
+        while self.stack.len() != 0 {
+            let k = self.stack.pop().unwrap();
+            let t = b.insts[(b.blocks[k as usize].start + b.blocks[k as usize].len - 1) as usize];
+            b.succ_edges(t, &mut self.succ);
+            for e in 0..self.succ.len() {
+                let s = b.edge_target(self.succ[e]);
+                if self.rare[s as usize] && (b.blocks[s as usize].flags & BLOCK_RARE) == 0 {
+                    self.rare[s as usize] = false;
+                    self.stack.push(s);
+                }
+            }
+        }
+    }
+
     // `order` and `pos`: the reachable warm blocks in reverse postorder, where a loop header brings its
-    // whole loop (its members in reverse postorder, nested loops likewise); then the cold blocks.
+    // whole loop (its members in reverse postorder, nested loops likewise); then the rare blocks.
     fn layout(self: &mut Self, b: &Body) {
         let nb = b.blocks.len();
         // The warm blocks in reverse postorder.
         self.keys.truncate(0);
         for k in 0..nb {
-            if self.rpo[k] != NONE && (b.blocks[k].flags & BLOCK_COLD) == 0 {
+            if self.rpo[k] != NONE && !self.rare[k] {
                 self.keys.push(self.rpo[k] as u64 << 32 | k as u64);
             }
         }
@@ -584,21 +662,21 @@ extend Live {
             placed[k as usize] = true;
             self.order.push(k);
         }
-        // The cold blocks in reverse postorder: one of a loop with a warm header right after the loop's last
-        // warm block (the loop stays contiguous, and the values live at a block it enters live no
-        // further), the others last.
+        // The rare blocks in reverse postorder: one inside a loop with a warm header right after the innermost
+        // such loop's last warm block (the loop stays contiguous, and the values live at a block it enters
+        // live no further), the others last.
         self.loop_ends();
         self.keys.truncate(0);
         for k in 0..nb {
-            if self.rpo[k] != NONE && (b.blocks[k].flags & BLOCK_COLD) != 0 {
+            if self.rare[k] {
                 self.keys.push(self.rpo[k] as u64 << 32 | k as u64);
             }
         }
         self.keys.sort();
         let mut tail = Vector::<u64>::new();
         for j in 0..self.keys.len() {
-            let h = self.inner[(self.keys[j] as u32) as usize];
-            if h != NONE && (b.blocks[h as usize].flags & BLOCK_COLD) == 0 {
+            let h = self.warm_loop(self.keys[j] as u32);
+            if h != NONE {
                 tail.push(self.lend[h as usize] as u64 << 32 | j as u64);
             }
         }
@@ -614,10 +692,24 @@ extend Live {
             }
         }
         for j in 0..self.keys.len() {
-            let h = self.inner[(self.keys[j] as u32) as usize];
-            if h == NONE || (b.blocks[h as usize].flags & BLOCK_COLD) != 0 {
+            if self.warm_loop(self.keys[j] as u32) == NONE {
                 out.push(self.keys[j] as u32);
             }
+        }
+        // The blocks the generator puts last (`after`), in order.
+        if self.after.len() == nb {
+            let mut tail = Vector::<u32>::new();
+            let mut j: usize = 0;
+            for i in 0..out.len() {
+                if self.after[out[i] as usize] {
+                    tail.push(out[i]);
+                } else {
+                    out[j] = out[i];
+                    j += 1;
+                }
+            }
+            out.truncate(j);
+            out.extend_copy(&tail);
         }
         self.order = out;
         for i in 0..self.order.len() {
@@ -625,6 +717,16 @@ extend Live {
         }
         fill(&mut self.lend, nb, 0);
         self.loop_ends();
+    }
+
+    // The header of the innermost loop with a warm header around block `k`, NONE when none.
+    const fn warm_loop(self: &Self, k: u32) u32 {
+        let mut h = self.inner[k as usize];
+        // Each step leaves one loop.
+        while h != NONE && self.rare[h as usize] {
+            h = self.parent[h as usize];
+        }
+        return h;
     }
 
     // `lend`: each loop's last block in `order`.
@@ -728,7 +830,7 @@ extend Live {
                 }
             }
         }
-        self.cold_entries(b, &mut kept);
+        self.rare_entries(b, &mut kept);
         // One more use, which no instruction makes: a kept value lives to the end of its last block.
         for x in 0..n {
             if kept[x] {
@@ -770,10 +872,10 @@ extend Live {
     /// Plan which values hold one register for their whole range (`home`): the ones `want` (WANT_* per
     /// value) asks one for, by a linear scan over the layout in the order the ranges start (Poletto and
     /// Sarkar's); when a file's registers are taken, the active value of least weight (the frequency of
-    /// its definition and uses: 8 per loop level up to 5, 0 in a cold block) gives its register up to a
-    /// heavier one. A range runs from its definition (a parameter's: the first edge into it) to its last
-    /// use (a kept value's, a parameter's or a flag's: the end of its last block). After `run`, before the
-    /// generator counts the uses down.
+    /// its definition and uses: 8 per loop level up to 5, an eighth of that in an unlikely block, 0 in a
+    /// cold one) gives its register up to a heavier one. A range runs from its definition (a parameter's:
+    /// the first edge into it) to its last use (a kept value's, a parameter's or a flag's: the end of its
+    /// last block). After `run`, before the generator counts the uses down.
     pub(package) fn plan(self: &mut Self, b: &Body, want: &Vector<u8>, caps: Caps) {
         let n = self.end.len();
         let ni = b.insts.len();
@@ -802,7 +904,11 @@ extend Live {
                 f *= 8;
                 h = self.parent[h as usize];
             }
-            self.freq[k] = f;
+            self.freq[k] = if self.rare[k] {
+                f / 8;
+            } else {
+                f;
+            };
         }
         fill(&mut self.start, n, NONE);
         fill(&mut self.stop, n, 0);
@@ -911,6 +1017,18 @@ extend Live {
         }
     }
 
+    /// Whether `plan` gave no register to a used value that `want` asked one for, in a block the layout
+    /// does not put last (`after`).
+    pub(package) fn homeless(self: &Self, want: &Vector<u8>) bool {
+        for x in 0..self.home.len() {
+            let d = self.def_blk[x];
+            if (want[x] & (WANT_CALLEE | WANT_SCRATCH)) != 0 && self.home[x] == HOME_NONE && self.au[x] != 0 && d != NONE && self.pos[d as usize] != NONE && !self.after[d as usize] {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // The home value `x` takes with `want`'s request among the registers taken (`cnt`), those of value
     // `without` given back: a caller-saved one first; HOME_NONE when its file has none to give.
     const fn fits(self: &Self, x: u32, want: &Vector<u8>, caps: Caps, without: u32) u8 {
@@ -959,21 +1077,21 @@ extend Live {
         self.act.truncate(last);
     }
 
-    // A cold block that branches into the body runs inside the ranges of the values live at its target,
+    // A rare block that branches into the body runs inside the ranges of the values live at its target,
     // though the layout puts it last: each value whose range holds the position of such a target, past the
     // block it is defined in (an instruction is not live at its own block's entry, a parameter is), lives
-    // to the cold block too, and is kept (its last use does not end it), also when its own use there
-    // already ends its range at the cold block (a loop counter a cold call reads). A range max over the
-    // targets' positions (a sparse table of `best`: per position, the last cold block with an edge into
+    // to the rare block too, and is kept (its last use does not end it), also when its own use there
+    // already ends its range at the rare block (a loop counter a rare call reads). A range max over the
+    // targets' positions (a sparse table of `best`: per position, the last rare block with an edge into
     // it) finds the extension of each value.
-    fn cold_entries(self: &mut Self, b: &Body, kept: &mut Vector<bool>) {
+    fn rare_entries(self: &mut Self, b: &Body, kept: &mut Vector<bool>) {
         let np = self.order.len();
         let mut best = Vector::<u32>::new();
         fill(&mut best, np, 0);
         let mut any = false;
         for p in 0..np {
             let bk = b.blocks[self.order[p] as usize];
-            if (bk.flags & BLOCK_COLD) == 0 {
+            if !self.rare[self.order[p] as usize] {
                 continue;
             }
             b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut self.succ);
@@ -1020,7 +1138,7 @@ extend Live {
                 continue;
             }
             let lo = self.pos[d as usize] as usize + (x < ni) as usize;
-            // Each step moves the end to a later cold block: at most one step per cold block.
+            // Each step moves the end to a later rare block: at most one step per rare block.
             loop {
                 let hi = self.end[x] as usize;
                 if lo > hi {
@@ -1037,7 +1155,8 @@ extend Live {
                 } else {
                     c;
                 };
-                if e < self.end[x] {
+                // 0: no rare block's edge (the entry, at 0, is not rare).
+                if e < self.end[x] || e == 0 {
                     break;
                 }
                 kept[x] = true;
@@ -1183,6 +1302,17 @@ fn reads_before(b: &Body, from: u32, stop: u32, v: Value, pos: &Vector<u32>, las
         }
     }
     return false;
+}
+
+// The root of `k0`'s set in union-find forest `root`, its path halved.
+fn find_root(root: &mut Vector<u32>, k0: u32) u32 {
+    let mut k = k0;
+    // Each step moves `k` closer to the root: at most `root.len()` steps.
+    while root[k as usize] != k {
+        root[k as usize] = root[root[k as usize] as usize];
+        k = root[k as usize];
+    }
+    return k;
 }
 
 const fn contains_u32(xs: &Vector<u32>, x: u32) bool {

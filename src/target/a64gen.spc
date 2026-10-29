@@ -43,10 +43,10 @@ const H_FPADDR: u8 = 6; // the address x29 + off
 const XALLOC: u64 = 0xFFFF;
 const XFIX: u64 = 0x1FF80000;
 // The caller-saved x registers a value may hold for its whole range: x9..x15 (no argument register); in
-// a body that calls nothing, x0..x8 too; in one that calls in cold blocks only, x2..x8 too (`Gen.scr`).
+// a body that calls nothing, x0..x8 too; in one that calls in rare blocks only, x2..x8 too (`Gen.scr`).
 const XSCR: u64 = 0xFE00;
 const XSCR_LEAF: u64 = 0xFFFF;
-const XSCR_COLD: u64 = 0xFFFC;
+const XSCR_RARE: u64 = 0xFFFC;
 
 // The caller-saved v registers a value may hold for its whole range: v16..v29.
 const fn vscr() u64 {
@@ -134,11 +134,11 @@ pub(package) struct Gen {
     cur: u32, // the instruction being compiled
     paired: u32, // the access the one before it took into an `ldp` or `stp` (NONE: none)
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
-    csave: Vector<(u8, i64)>, // the scratch homes saved around a cold call (`save_scratch`)
-    coldc: Vector<bool>, // per instruction, a call that returns in a cold block (`call_tables`)
+    csave: Vector<(u8, i64)>, // the scratch homes saved around a rare call (`save_scratch`)
+    rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
     hform: Vector<bool>, // per instruction, whether it computes in binary16 (`half_forms`)
     shared: Vector<u32>, // the block parameters that share a header parameter's slot (`back_share`)
-    scr: u64, // the x registers that may be scratch homes (`plan_homes`): XSCR_LEAF, XSCR_COLD or XSCR
+    scr: u64, // the x registers that may be scratch homes (`plan_homes`): XSCR_LEAF, XSCR_RARE or XSCR
     dying: Vector<u32>, // values whose register frees after the current instruction
     wparams: Vector<u32>, // the parameters the current terminator's edges write
     want: Vector<u8>, // per value, its request to `Live::plan`
@@ -171,6 +171,13 @@ pub(package) struct Gen {
     // A conditional branch to a block is an inverted one over a `B`: the function is past the 1 MiB a
     // conditional branch reaches (`func`).
     far: bool,
+    // Shrink-wrapping: the frame is set up on the edges into the rare blocks and taken down on the edges out
+    // (`shrinkable`); the warm code, which calls nothing, keeps no value in memory and no callee-saved
+    // register, has none. Whether the body is compiled so, whether it touched the frame in a warm block
+    // (`frame_use`: the body is compiled again without), and whether that try failed.
+    shrink: bool,
+    shrink_bad: bool,
+    no_shrink: bool,
     epi: Vector<u32>, // branches to the epilogue
     // The sibling calls (`sibling`): the word of each one's branch << 32 | its callee's object symbol
     // (NONE: the callee in x16); whether the body may make them; the return they replace.
@@ -248,7 +255,7 @@ extend Gen {
             paired: NONE,
             taken: Vector::<u64>::new(),
             csave: Vector::<(u8, i64)>::new(),
-            coldc: Vector::<bool>::new(),
+            rarec: Vector::<bool>::new(),
             hform: Vector::<bool>::new(),
             shared: Vector::<u32>::new(),
             scr: XSCR,
@@ -276,6 +283,9 @@ extend Gen {
             blk_at: Vector::<u32>::new(),
             fix: Vector::<u64>::new(),
             far: false,
+            shrink: false,
+            shrink_bad: false,
+            no_shrink: false,
             epi: Vector::<u32>::new(),
             tails: Vector::<u64>::new(),
             tail_ok: false,
@@ -802,15 +812,14 @@ extend Gen {
         return self.lv.home[x as usize];
     }
 
-    // Plan the homes (`Live::plan`) over each value's request: none in memory or rematerialized; a callee-saved register
-    // for a value a call that returns runs in the range of (v8..v15 keep only their low 8 bytes: no
-    // vector asks); either for one that lives past its block or a block parameter (a flag: callee-saved
-    // only); none for the others, which temporaries hold (an entry parameter that dies in the entry block
-    // stays in the register it arrives in). A vector of 16 bytes that lives past its block
-    // or is a block parameter, which no call that returns runs in the range of and no instruction reads
-    // or writes in memory (`vec_homes`: a loop's accumulator, a value splat before the loop), asks a
-    // caller-saved v register. x19..x28 and v8..v15; six of x9..x15 and eight of v16..v29, the others
-    // left to temporaries.
+    // Plan the homes (`Live::plan`) over each value's request: none in memory or rematerialized; a callee-saved
+    // register for a value a call that returns runs in the range of (v8..v15 keep only their low 8 bytes: no vector
+    // asks); either for one that lives past its block or a block parameter (a flag: callee-saved only); none for the
+    // others, which temporaries hold (an entry parameter that dies in the entry block stays in the register it arrives
+    // in). A vector of 16 bytes that lives past its block or is a block parameter, which no call that returns runs in
+    // the range of and no instruction reads or writes in memory (`vec_homes`: a loop's accumulator, a value splat
+    // before the loop), asks a caller-saved v register. x19..x28 and v8..v15; six of x9..x15 and twelve of v16..v29,
+    // the others left to temporaries.
     fn plan_homes(self: &mut Self) {
         let b = self.b();
         let n = self.lv.end.len();
@@ -834,10 +843,10 @@ extend Gen {
         self.vec_homes();
         // A body that calls nothing that returns (no instruction `clobbers` but one before a trap, no
         // thread-local address's getter) and runs no system operation or variadic access: its homes may
-        // take x0..x8; x2..x8 when it calls in cold blocks only, as a call's result arrives in x0 and x1,
+        // take x0..x8; x2..x8 when it calls in rare blocks only, as a call's result arrives in x0 and x1,
         // where a home saved around it (`save_scratch`) would come back.
         let mut leaf = true;
-        let mut cold = true;
+        let mut rare = true;
         for x in 0..ni {
             let t = b.insts[x];
             let calls = Gen::clobbers(b, t) && !self.dead_end(x);
@@ -845,12 +854,12 @@ extend Gen {
                 x as u32,
             );
             leaf = leaf && !calls && !other;
-            cold = cold && !(calls && !self.coldc[x]) && !other;
+            rare = rare && !(calls && !self.rarec[x]) && !other;
         }
         self.scr = if leaf {
             XSCR_LEAF;
-        } else if cold {
-            XSCR_COLD;
+        } else if rare {
+            XSCR_RARE;
         } else {
             XSCR;
         };
@@ -876,6 +885,11 @@ extend Gen {
                     w |= lv::WANT_V;
                 }
             }
+            // Shrink-wrapped, the warm code saves no callee-saved register: every home is a scratch one, which
+            // the rare calls save around them.
+            if self.shrink && (w & lv::WANT_CALLEE) != 0 {
+                w = w & ~lv::WANT_CALLEE | lv::WANT_SCRATCH;
+            }
             self.want.push(w);
         }
         // Six of x0..x15 stay for temporaries in a leaf (no call's arguments, no masked vector access),
@@ -885,7 +899,14 @@ extend Gen {
         } else {
             6;
         };
-        self.lv.plan(b, &self.want, lv::Caps { xc: 10, xs: xs, xj: 16, vc: 8, vs: 8, vj: 16 });
+        // Twelve scratch homes of v16..v29 (the others, v30, v31 and v0..v7 stay for temporaries);
+        // shrink-wrapped, no callee-saved home.
+        let (xc, vc, vs) = if self.shrink {
+            (0u32, 0u32, 12u32);
+        } else {
+            (10u32, 8u32, 12u32);
+        };
+        self.lv.plan(b, &self.want, lv::Caps { xc: xc, xs: xs, xj: 16, vc: vc, vs: vs, vj: 16 });
         for x in 0..ni {
             if self.lconst[x] && self.fix_class(x as u32) != FIX_NONE {
                 self.va.index_mut(x).home = H_NONE;
@@ -956,17 +977,16 @@ extend Gen {
         return self.cpre[(bk.start + bk.len) as usize] > self.cpre[from as usize] || self.cpos[e as usize + 1] > self.cpos[dp as usize + 1];
     }
 
-    // Whether instruction `i` is in a cold block: when it calls, the scratch homes that live past it are
-    // saved around it (`save_scratch`), so it counts as no call for the homes.
-    const fn cold(self: &Self, i: u32) bool {
-        let b = self.b();
-        return (b.blocks[self.lv.def_blk[i as usize] as usize].flags & BLOCK_COLD) != 0;
+    // Whether instruction `i` is in a rare block (`Live::rare`): when it calls, the scratch homes that live past
+    // it are saved around it (`save_scratch`), so it counts as no call for the homes.
+    const fn rare(self: &Self, i: u32) bool {
+        return self.lv.rare[self.lv.def_blk[i as usize] as usize];
     }
 
-    // Before instruction `i` of a cold block that calls and returns: each scratch home whose value lives
+    // Before instruction `i` of a rare block that calls and returns: each scratch home whose value lives
     // past it into a slot of its own (`csave`). The count saved.
     fn save_scratch(self: &mut Self, i: u32) usize {
-        if !self.coldc[i as usize] {
+        if !self.rarec[i as usize] {
             return 0;
         }
         let mut m = self.held & self.fixed_busy & (XSCR_LEAF | vscr());
@@ -1112,14 +1132,14 @@ extend Gen {
         let b = self.b();
         let ni = b.insts.len();
         fill32(&mut self.cpre, ni + 1, 0);
-        self.coldc.truncate(0);
-        self.coldc.resize_default(ni);
+        self.rarec.truncate(0);
+        self.rarec.resize_default(ni);
         for i in 0..ni {
             // An intrinsic's template writes x0, x1 and v0 to v4 and its arguments' registers: no
             // scratch home.
             let t = b.insts[i];
-            if Gen::clobbers(b, t) && !self.dead_end(i) && self.cold(i as u32) {
-                self.coldc[i] = true;
+            if Gen::clobbers(b, t) && !self.dead_end(i) && self.rare(i as u32) {
+                self.rarec[i] = true;
             } else if Gen::clobbers(b, t) && !self.dead_end(i) && !(t.op == O_CALL && self.intrinsic(t.a).len() != 0) {
                 self.cpre[i + 1] = 1;
             }
@@ -1446,6 +1466,7 @@ extend Gen {
 
     // `rd` = `base` + `off` (base may be sp).
     fn add_off(self: &mut Self, rd: u8, base: u32, off: i64) {
+        self.frame_use(base);
         if off >= 0 && off < 4096 {
             self.emit(a::add_imm(true, rd, base, off as u32));
         } else if off < 0 && off > -4096 {
@@ -1480,6 +1501,7 @@ extend Gen {
     }
 
     fn mem(self: &mut Self, m: u32, load: bool, rt: u8, base: u32, off: i64) {
+        self.frame_use(base);
         let r = if m >= a::M_VB {
             (rt - V0) as u32;
         } else {
@@ -1659,6 +1681,16 @@ extend Gen {
         self.emit(a::fmov_gv(d, true, r - V0, a::IP0));
     }
 
+    // The code section of a `@cold` function (`Sym.cold`): apart from the other functions', which the
+    // linker lays out together.
+    const fn cold_text(self: &Self) str<'static> {
+        return if self.elf {
+            ".text.unlikely";
+        } else {
+            "__TEXT,__text_cold";
+        };
+    }
+
     // Register `r` = the address of body symbol `s` plus `addend`.
     fn sym_addr(self: &mut Self, r: u8, s: u32, addend: i64) {
         let os = self.osym_of(s);
@@ -1798,7 +1830,13 @@ extend Gen {
         self.lv.fold_max = 16;
         self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX;
         self.arg_relays();
+        self.lv.after.truncate(0);
         self.lv.run(b);
+        self.shrink = !self.no_shrink && self.shrinkable();
+        self.shrink_bad = false;
+        if self.shrink {
+            self.lv.run(b);
+        }
         let n = self.lv.end.len();
         self.va.truncate(0);
         self.va.reserve(n);
@@ -1839,6 +1877,9 @@ extend Gen {
         self.call_tables();
         self.half_forms();
         self.plan_homes();
+        if self.shrink && self.lv.homeless(&self.want) {
+            return self.unshrunk(s, local);
+        }
         if self.err.len() != 0 || !self.entry() {
             return false;
         }
@@ -1864,6 +1905,9 @@ extend Gen {
             }
         }
         assert(self.fixed_busy == 0, "a64gen: a register home outlives its value");
+        if self.shrink && (self.shrink_bad || self.csr != 0 || self.warm_calls()) {
+            return self.unshrunk(s, local);
+        }
         if self.finish(s) {
             return true;
         }
@@ -1875,6 +1919,89 @@ extend Gen {
         let ok = self.func(s, local);
         self.far = false;
         return ok;
+    }
+
+    // The warm code of shrink-wrapped function `s` needs the frame: once more, with the frame set up at the
+    // entry.
+    fn unshrunk(self: &mut Self, s: u32, local: bool) bool {
+        self.no_shrink = true;
+        let ok = self.func(s, local);
+        self.no_shrink = false;
+        return ok;
+    }
+
+    // Whether the body may set its frame up in its rare blocks alone (`shrink`): every call (one that does
+    // not return too: it needs the frame's alignment) is in a rare block (`Live::rare`), there is one, and
+    // the body reads no return address, variadic argument or inline assembly, runs no system operation,
+    // aligns no slot past 16 bytes and has no canary. The rare blocks connected to one with a call by edges
+    // between rare blocks set the frame up: `Live::after`, which the layout puts after the others.
+    fn shrinkable(self: &mut Self) bool {
+        let b = self.b();
+        if lver::protected(unsafe (*self.pkg).protect, b) {
+            return false;
+        }
+        for k in 0..b.slots.len() {
+            if b.slots[k].align_log2 > 4 {
+                return false;
+            }
+        }
+        let mut framed = Vector::<bool>::new();
+        framed.resize_default(b.blocks.len());
+        let mut any = false;
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if t.op == O_RETADDR || t.op == O_VASTART || t.op == O_ASM || t.op == O_SYS {
+                return false;
+            }
+            let d = self.lv.def_blk[i];
+            // A vector operation's lane trap calls too: its block needs the frame.
+            if d == NONE || self.lv.pos[d as usize] == NONE || !Gen::clobbers(b, t) && !(t.op == O_VOP && !lv::reduces(
+                t,
+            )) {
+                continue;
+            }
+            if !self.lv.rare[d as usize] {
+                return false;
+            }
+            framed[d as usize] = true;
+            any = true;
+        }
+        if any {
+            self.lv.set_after(b, &framed);
+        }
+        return any;
+    }
+
+    // Under `shrink`, a stack or frame address `base` (sp, x29) in a warm block: the try fails.
+    const fn frame_use(self: &mut Self, base: u32) {
+        if self.shrink && (base == a::SP || base == a::FP) && self.pos as usize < self.lv.order.len() && !self.lv.after[self.lv.order[self.pos as usize] as usize] {
+            self.shrink_bad = true;
+        }
+    }
+
+    // Whether the warm code (the words before the first rare block) branches with a link (`BL`, `BLR`):
+    // it would lose the return address its frame does not save.
+    fn warm_calls(self: &Self) bool {
+        let end = self.rare_at();
+        for w in 0..end {
+            let x = self.code[w as usize];
+            if (x & 0xFC000000) == 0x94000000 || (x & 0xFFFFFC1F) == 0xD63F0000 {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The first word of the blocks that set the frame up, which the layout puts last (`Live::after`); the
+    // code's length when there is none.
+    const fn rare_at(self: &Self) u32 {
+        for q in 0..self.lv.order.len() {
+            let k = self.lv.order[q] as usize;
+            if self.lv.after[k] && self.blk_at[k] != NONE {
+                return self.blk_at[k];
+            }
+        }
+        return self.code.len() as u32;
     }
 
     // The outgoing argument area (the largest call's stack arguments), then the LIR slots; spills follow.
@@ -1921,7 +2048,7 @@ extend Gen {
         }
         // The canary between the slots and the spills and saved registers above them.
         self.canary = -1;
-        if protected(unsafe (*self.pkg).protect, b) {
+        if lver::protected(unsafe (*self.pkg).protect, b) {
             at = at + 7 & ~7u32;
             self.canary = at;
             at += 8;
@@ -4181,6 +4308,7 @@ extend Gen {
         } else {
             r2;
         };
+        self.frame_use(base);
         self.emit(a::ldstp(m, load, 2, n1, n2, base, off as i32));
         if load && !vr {
             self.va.index_mut(i as usize).clean = size < 8;
@@ -5823,13 +5951,18 @@ extend Gen {
     // Whether block `k` follows the current one.
     const fn next_is(self: &Self, k: u32) bool {
         let q = self.pos as usize + 1;
-        return q < self.lv.order.len() && self.lv.order[q] == k;
+        return q < self.lv.order.len() && self.lv.order[q] == k && !self.crosses(k);
+    }
+
+    // Whether block `k` is on the other side of the frame's edge from the current one (`shrink`).
+    const fn crosses(self: &Self, k: u32) bool {
+        return self.shrink && self.lv.after[k as usize] != self.lv.after[self.lv.order[self.pos as usize] as usize];
     }
 
     // Jump to block `k` (nothing when it follows, unless `force`).
     fn goto(self: &mut Self, k: u32, force: bool) {
         let q = self.pos as usize + 1;
-        if !force && q < self.lv.order.len() && self.lv.order[q] == k {
+        if !force && q < self.lv.order.len() && self.lv.order[q] == k && !self.crosses(k) {
             return;
         }
         self.fix.push(self.code.len() as u64 << 32 | k as u64);
@@ -5885,7 +6018,7 @@ extend Gen {
         let tt = b.edge_target(et);
         let tf = b.edge_target(ef);
         let q = self.pos as usize + 1;
-        let next = if q < self.lv.order.len() {
+        let next = if q < self.lv.order.len() && !self.crosses(self.lv.order[q]) {
             self.lv.order[q];
         } else {
             NONE;
@@ -6158,9 +6291,11 @@ extend Gen {
     fn finish(self: &mut Self, s: u32) bool {
         // A last branch to the epilogue falls through instead, and so does the one before it when the
         // block between held only that branch: one step per branch.
+        let mut popped = false;
         while self.epi.len() != 0 && self.epi[self.epi.len() - 1] + 1 == self.code.len() as u32 {
             let _ = self.epi.pop();
             let _ = self.code.pop();
+            popped = true;
         }
         let mut local = self.spill_base + self.spill_top + 15 & ~15u32;
         if self.max_align > 16 {
@@ -6226,7 +6361,20 @@ extend Gen {
             pro.push(a::mov_sp(a::IP1, a::SP));
             pro.push(a::logic_imm(true, 0, a::SP, a::IP1, a::logical_imm(~(self.max_align as u64 - 1), true)));
         }
-        let pl = pro.len() as u32;
+        // Shrink-wrapped (`shrink`), the prologue runs on each edge into the rare code (its words before the
+        // warm code's end, `ra`), the epilogue but its `ret` on each edge out; a return from the warm code is a
+        // `ret` alone.
+        let sw = self.shrink;
+        let ra = if sw {
+            self.rare_at();
+        } else {
+            0u32;
+        };
+        let pl = if sw {
+            0u32;
+        } else {
+            pro.len() as u32;
+        };
         let body_n = self.code.len() as u32;
         // The canary's check: on a mismatch `__stack_chk_fail`, which does not return.
         if self.canary >= 0 {
@@ -6282,6 +6430,24 @@ extend Gen {
         }
         // An epilogue of `ret` alone (no frame, no canary check) takes each branch's place.
         let lone = epi.len() == 1 && self.code.len() as u32 == body_n;
+        // Shrink-wrapped, the epilogue is in the code when the rare code returns (it falls into it, or
+        // branches); its words `elen`.
+        let mut used = !sw || popped;
+        for q in 0..self.epi.len() {
+            used = used || self.epi[q] >= ra;
+        }
+        let elen = if used {
+            epi.len() as u32;
+        } else {
+            0u32;
+        };
+        let mut stubs = Vector::<u32>::new();
+        // Shrink-wrapped: per target word, its entry or exit stub (NONE: none yet); the warm code's `ret`, and
+        // the rare code's copy of the epilogue when the code holds none.
+        let mut enter = Map::<u32, u32>::new();
+        let mut leave = Map::<u32, u32>::new();
+        let mut wret = NONE;
+        let mut fret = NONE;
         for q in 0..self.fix.len() {
             let w = (self.fix[q] >> 32) as u32;
             let mut to = self.blk_at[(self.fix[q] as u32) as usize];
@@ -6304,6 +6470,52 @@ extend Gen {
                 self.code[w as usize] = a::RET;
                 continue;
             }
+            if sw && w < ra && to >= ra {
+                // From the warm code into the rare code: through the prologue, or to a `ret` for the epilogue.
+                let base = body_n + elen;
+                to = if to >= body_n {
+                    if wret == NONE {
+                        wret = base + stubs.len() as u32;
+                        stubs.push(a::RET);
+                    }
+                    wret;
+                } else {
+                    switch enter.get(&to) {
+                        Some(x) => *x,
+                        None => {
+                            let at = base + stubs.len() as u32;
+                            stubs.extend_copy(&pro);
+                            let bw = base + stubs.len() as u32;
+                            stubs.push(a::b(((to as i64 - bw as i64) * 4) as i32));
+                            enter.insert(to, at);
+                            at;
+                        },
+                    };
+                };
+            } else if sw && w >= ra && to >= body_n && !used {
+                // From the rare code to the epilogue, which is not in the code: a copy of it.
+                if fret == NONE {
+                    fret = body_n + elen + stubs.len() as u32;
+                    stubs.extend_copy(&epi);
+                }
+                to = fret;
+            } else if sw && w >= ra && to < ra {
+                // From the rare code into the warm code: through the epilogue but its `ret`.
+                let base = body_n + elen;
+                to = (switch leave.get(&to) {
+                    Some(x) => *x,
+                    None => {
+                        let at = base + stubs.len() as u32;
+                        for e in 0..epi.len() - 1 {
+                            stubs.push(epi[e]);
+                        }
+                        let bw = base + stubs.len() as u32;
+                        stubs.push(a::b(((to as i64 - bw as i64) * 4) as i32));
+                        leave.insert(to, at);
+                        at;
+                    },
+                });
+            }
             let off = (to as i64 - w as i64) * 4;
             if !a::reaches(self.code[w as usize], off) {
                 // A conditional one makes `func` try again with every one over a `B`.
@@ -6313,16 +6525,15 @@ extend Gen {
         }
         for q in 0..self.epi.len() {
             let w = self.epi[q];
-            self.code[w as usize] = if lone {
+            self.code[w as usize] = if lone || sw && w < ra {
                 a::RET;
             } else {
                 a::repatch(self.code[w as usize], ((body_n - w) * 4) as i32);
             };
         }
         // Each sibling call: the epilogue but its `ret`, then the branch to the callee (`b`, or `br x16`).
-        // With no epilogue but the `ret`, the branch is the call's own; else the call branches to a copy
-        // past the epilogue.
-        let mut stubs = Vector::<u32>::new();
+        // With no epilogue but the `ret` (or from shrink-wrapped warm code, which has no frame), the branch is
+        // the call's own; else the call branches to a copy past the epilogue.
         // The body's last word a sibling call's branch, and no branch to the epilogue nor to a block at the
         // body's end (one whose branch to the epilogue went): nothing reaches the epilogue but that call, so
         // the branch goes and its copy of the epilogue takes the epilogue's place.
@@ -6331,7 +6542,7 @@ extend Gen {
         for q in 0..self.fix.len() {
             reached = reached || self.blk_at[(self.fix[q] as u32) as usize] >= body_n;
         }
-        if nt != 0 && !reached && self.epi.len() == 0 && self.code.len() as u32 == body_n && (self.tails[nt - 1] >> 32) as u32 + 1 == body_n {
+        if !sw && nt != 0 && !reached && self.epi.len() == 0 && self.code.len() as u32 == body_n && (self.tails[nt - 1] >> 32) as u32 + 1 == body_n {
             let os = self.tails[nt - 1] as u32;
             let _ = self.tails.pop();
             let _ = self.code.pop();
@@ -6349,8 +6560,8 @@ extend Gen {
             let w = (self.tails[q] >> 32) as u32;
             let os = self.tails[q] as u32;
             let mut at = w;
-            if epi.len() > 1 {
-                at = self.code.len() as u32 + epi.len() as u32 + stubs.len() as u32;
+            if epi.len() > 1 && !(sw && w < ra) {
+                at = self.code.len() as u32 + elen + stubs.len() as u32;
                 self.code[w as usize] = a::repatch(self.code[w as usize], ((at - w) * 4) as i32);
                 for k in 0..epi.len() - 1 {
                     stubs.push(epi[k]);
@@ -6374,9 +6585,11 @@ extend Gen {
         let ps = p.syms[s as usize];
         let o = self.obj();
         let k2 = o.sym(p.spell(ps.name));
-        let size = (pl + self.code.len() as u32 + epi.len() as u32 + stubs.len() as u32) * 4;
+        let size = (pl + self.code.len() as u32 + elen + stubs.len() as u32) * 4;
         let sec = if ps.sect != NONE {
             o.named(p.spell(ps.sect), true);
+        } else if ps.cold {
+            o.named(self.cold_text(), true);
         } else {
             ob::S_TEXT;
         };
@@ -6392,20 +6605,30 @@ extend Gen {
             fl |= ob::SF_USED;
         }
         let at = o.define(k2, sec, 2, size, fl);
-        put_words(o, sec, &pro);
+        if !sw {
+            put_words(o, sec, &pro);
+        }
         put_words(o, sec, &self.code);
-        put_words(o, sec, &epi);
+        if used {
+            put_words(o, sec, &epi);
+        }
         put_words(o, sec, &stubs);
         for q in 0..self.rels.len() {
             let r = self.rels[q];
             o.reloc(sec, r.kind, at as u32 + (pl + r.at) * 4, r.sym, r.addend);
         }
-        if self.elf && leaf {
+        if sw && self.elf {
+            shrink_rules(o, k2, size, ra);
+        } else if sw {
+            // The warm code: no frame, the return address in x30. The rest: the frame record.
+            o.frames.push(ob::OFrame { sym: k2, size: ra * 4, cfi_at: 0, cfi_len: 0, compact: 0x02000000, off: 0 });
+            o.frames.push(ob::OFrame { sym: k2, size: size - ra * 4, cfi_at: 0, cfi_len: 0, compact: enc, off: ra * 4 });
+        } else if self.elf && leaf {
             leaf_rules(o, k2, size, &xs, &vs, pl, local);
         } else if self.elf {
             frame_rules(o, k2, size, &xs, &vs);
         } else {
-            o.frames.push(ob::OFrame { sym: k2, size: size, cfi_at: 0, cfi_len: 0, compact: enc });
+            o.frames.push(ob::OFrame { sym: k2, size: size, cfi_at: 0, cfi_len: 0, compact: enc, off: 0 });
         }
         if p.debug {
             dw::rows(o, self.b(), k2, size, pl * 4, &self.rows, body_n, 4);
@@ -6438,6 +6661,8 @@ extend Gen {
         let k2 = o.sym(p.spell(ps.name));
         let sec = if ps.sect != NONE {
             o.named(p.spell(ps.sect), true);
+        } else if ps.cold {
+            o.named(self.cold_text(), true);
         } else {
             ob::S_TEXT;
         };
@@ -6562,6 +6787,29 @@ fn frame_rules(o: &mut ob::Obj, sym: u32, size: u32, xs: &Vector<u32>, vs: &Vect
         }
     }
     o.frames.push(ob::OFrame { sym: sym, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0, compact: 0 });
+}
+
+// The unwind rules of shrink-wrapped function `sym` (`size` bytes) for `.eh_frame`: the common entry's
+// (no frame, the return address in x30) to its rare code's first word `ra`; from there the frame record (CFA
+// = x29 + 16, x29 and x30 saved below it).
+fn shrink_rules(o: &mut ob::Obj, sym: u32, size: u32, ra: u32) {
+    let c0 = o.cfi.len() as u32;
+    if ra < 64 {
+        o.cfi.push((0x40 | ra) as u8);
+    } else {
+        // DW_CFA_advance_loc4.
+        o.cfi.push(0x04);
+        ob::w32(&mut o.cfi, ra);
+    }
+    // DW_CFA_def_cfa x29, 16; x29 at CFA - 16, x30 at CFA - 8.
+    o.cfi.push(0x0C);
+    o.cfi.push(a::FP as u8);
+    o.cfi.push(16);
+    o.cfi.push(0x80 | a::FP as u8);
+    o.cfi.push(2);
+    o.cfi.push(0x80 | a::LR as u8);
+    o.cfi.push(1);
+    o.frames.push(ob::OFrame { sym: sym, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0, compact: 0, off: 0 });
 }
 
 // The unwind rules of leaf function `sym` (`size` bytes, a prologue of `pl` words) for `.eh_frame`: the

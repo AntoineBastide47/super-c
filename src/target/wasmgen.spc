@@ -12,6 +12,7 @@
 // the homes of the memory values. Control flow is Ramsey's structured translation (`codegen::structure`),
 // run with an explicit task stack so a deep dominator tree does not deepen the compiler's own stack.
 import lir::ir as *;
+import lir::verify as lver;
 import codegen::live as lv;
 import codegen::structure as st;
 import target::wasm as w;
@@ -504,7 +505,7 @@ extend Gen {
         }
         // The canary between the slots and the frame memory above them.
         self.canary = NONE;
-        if protected(self.p().protect, b) {
+        if lver::protected(self.p().protect, b) {
             at = at + 3 & ~3u32;
             self.canary = at;
             at += 4;

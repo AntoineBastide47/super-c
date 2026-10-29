@@ -496,7 +496,6 @@ pub(package) const RMW_XOR: u16 = 5;
 pub(package) const ORDER_NAMES: [str<'static>; 5] = ["relaxed", "acquire", "release", "acq_rel", "seq_cst"];
 pub(package) const RMW_NAMES: [str<'static>; 6] = ["xchg", "add", "sub", "and", "or", "xor"];
 
-/// The text of condition `c`.
 // The integer comparison code of `b op a` for `a op` = `c`: `<` and `>`, `<=` and `>=`, signed and unsigned;
 // `==` and `!=` stay.
 pub(package) const fn mirror(c: u16) u16 {
@@ -522,6 +521,7 @@ pub(package) const fn opposite(c: u16) u16 {
     };
 }
 
+/// The text of condition `c`.
 pub(package) const fn cond_name(c: u16) str<'static> {
     let t: []str<'static> = COND_NAMES;
     return t[c as usize];
@@ -632,11 +632,19 @@ pub(package) struct Block {
     pub(package) flags: u16, // BLOCK_*
 }
 
-/// The block holds only a failure path (a panic or a trap).
+/// The block holds only a failure path (a panic or a trap): the one code an optimizing build may make
+/// smaller rather than faster.
 pub(package) const BLOCK_COLD: u16 = 1;
 /// The loop this block heads runs what a vector or unrolled copy of it left (`lir::loops`): it neither
 /// vectorizes nor unrolls.
 pub(package) const BLOCK_NOVEC: u16 = 2;
+/// The block runs rarely, though not only to fail: the side an `unlikely` (or `likely`) branch makes rare,
+/// a block that calls a `@cold` function, a block only rare blocks reach or lead to (`lir::opt::estimate`).
+/// It is optimized as a warm block; the code generators place it out of line, give its values' registers
+/// to the warm paths' first, and save around its calls the scratch registers the warm paths keep values in.
+pub(package) const BLOCK_UNLIKELY: u16 = 4;
+/// A block that runs rarely: cold or unlikely.
+pub(package) const BLOCK_RARE: u16 = BLOCK_COLD | BLOCK_UNLIKELY;
 
 /// A stack slot: `size` bytes aligned to `1 << align_log2`.
 pub(package) struct Slot {
@@ -677,6 +685,9 @@ pub(package) struct Sym {
     pub(package) used: bool,
     /// A function the optimizer never inlines (`@noinline`).
     pub(package) noinline: bool,
+    /// A function that runs rarely (`@cold`): the blocks that call it are unlikely, and its object places its
+    /// code apart from the other functions'. Its own body is optimized as any other.
+    pub(package) cold: bool,
     /// Defined by its unit's own items, not added by the build (an instance, glue, data): a cached
     /// emission of the unit holds it. The text form does not carry it.
     pub(package) own: bool,
@@ -743,19 +754,6 @@ pub(package) const FM_RECIP: u8 = 2;
 pub(package) const FM_FINITE: u8 = 4;
 pub(package) const FM_NSZ: u8 = 8;
 pub(package) const FM_CONTRACT: u8 = 16;
-
-/// Whether body `b` of a package whose `protect` is `p` has a stack canary.
-pub(package) fn protected(p: u8, b: &Body) bool {
-    if p == PROTECT_ALL {
-        return true;
-    }
-    for k in 0..b.slots.len() {
-        if p == PROTECT_SLOTS || p == PROTECT_LARGE && b.slots[k].size >= 8 {
-            return true;
-        }
-    }
-    return false;
-}
 
 /// Initialized data: `size` bytes aligned to `1 << align_log2`, the first `nbytes` from `bytes`
 /// (`Package.bytes`), the rest zero, then `nrelocs` relocations from `relocs`.
@@ -1194,7 +1192,7 @@ pub(package) struct Held {
     pub(package) data: u32,
     pub(package) bytes: u32,
     pub(package) relocs: u32,
-    /// Per held body: its symbol, its walk facts (`HELD_SHAPE`, `HELD_OK`), its effects (`Sym.fx`) and
+    /// Per held body: its symbol, its walk facts (`HELD_SHAPE`, `HELD_OK`, `HELD_COLD`), its effects (`Sym.fx`) and
     /// the parameters whose memory it may write (a bit each), and its direct calls before optimization
     /// (`calls[at[k]..at[k + 1]]`: symbols, in instruction order).
     pub(package) syms: Vector<u32>,
@@ -1211,6 +1209,8 @@ pub(package) struct Held {
 /// optimized body.
 pub(package) const HELD_SHAPE: u8 = 1;
 pub(package) const HELD_OK: u8 = 2;
+/// The function is `@cold` (`Sym.cold`): a replayed unit's functions are not lowered, which marks it.
+pub(package) const HELD_COLD: u8 = 4;
 
 extend Held {
     pub(package) fn new() Held {
@@ -1317,6 +1317,7 @@ extend Package {
                 sect: NONE,
                 used: false,
                 noinline: false,
+                cold: false,
                 fx: FX_READ | FX_WRITE,
                 alloc: if kind == SK_FUNC {
                     alloc_of(name);
@@ -1474,6 +1475,7 @@ extend Package {
             self.syms.index_mut(s as usize).unit = os.unit;
             self.syms.index_mut(s as usize).used = os.used;
             self.syms.index_mut(s as usize).noinline = os.noinline;
+            self.syms.index_mut(s as usize).cold = os.cold;
             self.syms.index_mut(s as usize).own = os.own;
             if os.sect != NONE {
                 self.syms.index_mut(s as usize).sect = self.name(other.spell(os.sect));

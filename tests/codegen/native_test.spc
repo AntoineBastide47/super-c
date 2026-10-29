@@ -2060,8 +2060,8 @@ fn wide_vectors_cross_the_c_abi() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
-// A program of two modules, `main` and `lib`, that pass arrays, results, a widened f32, enums with
-// payloads and borrowed dyn values across modules: built with each module alone native, the calls cross between C and native code
+// A program of two modules, `main` and `lib`, that pass arrays, results, a widened f32, enums with payloads and
+// borrowed dyn values across modules: built with each module alone native, the calls cross between C and native code
 // both ways and must agree with C's ABI.
 const MIXED_LIB: str<'static> = M"(pub interface Sh { fn area(self: &Self) i32; }
 pub struct Row { pub w: i32 }
@@ -2570,4 +2570,75 @@ fn many_loops_free_their_registers() {
     let drv = "#include <stdint.h>\nint64_t many(int64_t);\nint main(void) { return many(4) == 3360 + 240 ? 0 : 1; }\n";
     assert_eq(run_native(lir.as_str(), drv), 0);
     assert_eq(run_wasm(lir.as_str(), drv), 0);
+}
+
+// The little-endian `n`-byte word at byte `at` of `b`.
+fn word_at(b: &Vector<u8>, at: u32, n: u32) u32 {
+    let mut w: u32 = 0;
+    for k in 0..n {
+        w |= b[(at + k) as usize] as u32 << 8 * k;
+    }
+    return w;
+}
+
+// The file offset of the raw data of the COFF section named `name` of object `b`, its size in the high
+// half; 0 when there is none.
+fn coff_section(b: &Vector<u8>, name: str) u64 {
+    let ns = word_at(b, 2, 2);
+    let at = 20 + word_at(b, 16, 2);
+    for s in 0..ns {
+        let h = at + 40 * s;
+        let mut ok = true;
+        for k in 0..8u32 {
+            let c = if k as usize < name.len() {
+                name.byte_at(k as usize);
+            } else {
+                0u8;
+            };
+            ok = ok && b[(h + k) as usize] == c;
+        }
+        if ok {
+            return word_at(b, h + 16, 4) as u64 << 32 | word_at(b, h + 20, 4) as u64;
+        }
+    }
+    return 0;
+}
+
+// Shrink-wrapped under Microsoft x64: the warm code, which keeps no frame, has no function table entry
+// (an entry's absence is a leaf's rule); the framed code after it has one whose prologue is done (0
+// bytes), and the stub that sets the frame up on the edge into it one with its prologue. The rare path
+// leaves through its own epilogue: no edge goes back to the warm code.
+@test
+fn shrink_wrapped_windows_code_has_its_unwind_entries() {
+    let src = M"(lir ptr 8
+sym @g fn global
+sym @f fn global
+fn @f
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 100
+  v2 = icmp.ugt v0, v1
+  br v2, b2, b1
+b1:
+  v3 = add.i64 v0, v0
+  ret v3
+b2: unlikely
+  v4 = call.i64 @g(v0) : (i64) -> i64
+  v5 = add.i64 v4, v0
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(src, tgt::axis_index("windows", false), tgt::axis_index("x86_64", true), 0, &mut obj), "object");
+    let pd = coff_section(&obj, ".pdata");
+    let xd = coff_section(&obj, ".xdata");
+    assert_eq(pd >> 32, 24);
+    let p = pd as u32;
+    let x = xd as u32;
+    // (start, end, unwind information) twice: the framed code, then the stub right after it.
+    assert(
+        word_at(&obj, p, 4) > 0 && word_at(&obj, p + 4, 4) == word_at(&obj, p + 12, 4),
+        "two entries in a row past the warm code",
+    );
+    assert_eq(word_at(&obj, x + word_at(&obj, p + 8, 4) + 1, 1), 0);
+    assert(word_at(&obj, x + word_at(&obj, p + 20, 4) + 1, 1) > 0, "the stub's prologue");
 }

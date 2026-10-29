@@ -303,8 +303,8 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
         let xs = fxs[f];
         let p = secs.index_mut(fps[f] as usize - 1);
         let at = p.bytes.len() as u32;
-        ob::w32(&mut p.bytes, 0);
-        ob::w32(&mut p.bytes, fr.size);
+        ob::w32(&mut p.bytes, fr.off);
+        ob::w32(&mut p.bytes, fr.off + fr.size);
         ob::w32(
             &mut p.bytes,
             if per_fn {

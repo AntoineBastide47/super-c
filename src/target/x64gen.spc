@@ -273,10 +273,16 @@ pub(package) struct Gen {
     cur: u32, // the instruction being compiled
     called: bool, // the body's code calls
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
-    csave: Vector<(u8, i64)>, // the scratch homes saved around a cold call (`save_scratch`)
+    csave: Vector<(u8, i64)>, // the scratch homes saved around a rare call (`save_scratch`)
     fused: u32, // the last instruction an earlier one did (`rmw`), NONE
     cmp_at: u32, // the code byte the last compare starts at (`reflag`), NONE
-    coldc: Vector<bool>, // per instruction, a call that returns in a cold block (`call_tables`)
+    // Shrink-wrapping (System V): the frame is set up on the edges into the rare blocks and taken down on
+    // the edges out (`shrinkable`); the warm code, which calls nothing, keeps no value in memory and no
+    // callee-saved register, has none. Whether the body is compiled so, and whether that try failed (the
+    // warm code used the stack: the body is compiled again without).
+    shrink: bool,
+    no_shrink: bool,
+    rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
     shared: Vector<u32>, // the block parameters that share a header parameter's slot (`back_share`)
     dying: Vector<u32>, // values whose register frees after the current instruction
     wparams: Vector<u32>, // the parameters the current terminator's edges write
@@ -436,7 +442,9 @@ extend Gen {
             csave: Vector::<(u8, i64)>::new(),
             fused: NONE,
             cmp_at: NONE,
-            coldc: Vector::<bool>::new(),
+            shrink: false,
+            no_shrink: false,
+            rarec: Vector::<bool>::new(),
             shared: Vector::<u32>::new(),
             dying: Vector::<u32>::new(),
             wparams: Vector::<u32>::new(),
@@ -1151,6 +1159,13 @@ extend Gen {
                     w = lv::WANT_CALLEE | lv::WANT_SCRATCH;
                 }
             }
+            // Shrink-wrapped, the warm code saves no callee-saved register: every home is a scratch one, which
+            // the rare calls save around them, but for a value a call reads after its argument moves (none).
+            if self.shrink && late[x] {
+                w = 0;
+            } else if self.shrink && (w & lv::WANT_CALLEE) != 0 {
+                w = w & ~lv::WANT_CALLEE | lv::WANT_SCRATCH;
+            }
             self.want.push(w);
         }
         let mut nd: u32 = 4;
@@ -1159,12 +1174,12 @@ extend Gen {
         }
         let most = self.xfix.count_ones() as u32 + self.xalloc.count_ones() as u32 - nd;
         // A body that calls nothing that returns (no instruction `clobbers` but one before a trap or in a
-        // cold block, no thread-local address's getter) and runs no system operation or variadic access:
+        // rare block, no thread-local address's getter) and runs no system operation or variadic access:
         // every register of `xscr` may be a home at once.
         let mut leaf = true;
         for x in 0..ni {
             let t = b.insts[x];
-            leaf = leaf && !(Gen::clobbers(b, t) && !self.dead_end(x) && !self.coldc[x]) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !(t.op == O_SYMADDR && !self.remat_inst(
+            leaf = leaf && !(Gen::clobbers(b, t) && !self.dead_end(x) && !self.rarec[x]) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !(t.op == O_SYMADDR && !self.remat_inst(
                 x as u32,
             ));
         }
@@ -1183,7 +1198,18 @@ extend Gen {
         self.lv.plan(
             b,
             &self.want,
-            lv::Caps { xc: self.xfix.count_ones() as u32, xs: xs, xj: most, vc: vc, vs: vs, vj: vc + vs },
+            lv::Caps {
+                xc: if self.shrink {
+                    0;
+                } else {
+                    self.xfix.count_ones() as u32;
+                },
+                xs: xs,
+                xj: most,
+                vc: vc,
+                vs: vs,
+                vj: vc + vs,
+            },
         );
         for x in 0..ni {
             if self.lconst[x] && self.fix_class(x as u32) != FIX_NONE {
@@ -1304,17 +1330,26 @@ extend Gen {
         return pre[(bk.start + bk.len) as usize] > pre[from as usize] || pos[e as usize + 1] > pos[dp as usize + 1];
     }
 
-    // Whether instruction `i` is in a cold block: when it calls, the scratch homes that live past it are
-    // saved around it (`save_scratch`), so it counts as no call for the homes.
-    const fn cold(self: &Self, i: u32) bool {
-        let b = self.b();
-        return (b.blocks[self.lv.def_blk[i as usize] as usize].flags & BLOCK_COLD) != 0;
+    // The code section of a `@cold` function (`Sym.cold`): apart from the other functions', which the
+    // linker lays out together (COFF: after `.text`, grouped by the name past `$`).
+    const fn cold_text(self: &Self) str<'static> {
+        return if self.win {
+            ".text$u";
+        } else {
+            ".text.unlikely";
+        };
     }
 
-    // Before instruction `i` of a cold block that calls and returns: each scratch home whose value lives
+    // Whether instruction `i` is in a rare block (`Live::rare`): when it calls, the scratch homes that live past
+    // it are saved around it (`save_scratch`), so it counts as no call for the homes.
+    const fn rare(self: &Self, i: u32) bool {
+        return self.lv.rare[self.lv.def_blk[i as usize] as usize];
+    }
+
+    // Before instruction `i` of a rare block that calls and returns: each scratch home whose value lives
     // past it into a slot of its own (`csave`). The count saved.
     fn save_scratch(self: &mut Self, i: u32) usize {
-        if !self.coldc[i as usize] {
+        if !self.rarec[i as usize] {
             return 0;
         }
         let mut m = self.held & self.fixed_busy & ~self.xfix & ~self.vsave();
@@ -1371,12 +1406,12 @@ extend Gen {
         let ni = b.insts.len();
         fill32(&mut self.cpre, ni + 1, 0);
         fill32(&mut self.vpre, ni + 1, 0);
-        self.coldc.truncate(0);
-        self.coldc.resize_default(ni);
+        self.rarec.truncate(0);
+        self.rarec.resize_default(ni);
         for i in 0..ni {
             let t = b.insts[i];
-            if Gen::clobbers(b, t) && !self.dead_end(i) && self.cold(i as u32) {
-                self.coldc[i] = true;
+            if Gen::clobbers(b, t) && !self.dead_end(i) && self.rare(i as u32) {
+                self.rarec[i] = true;
             } else if Gen::clobbers(b, t) && !self.dead_end(i) {
                 self.cpre[i + 1] = 1;
                 self.vpre[i + 1] = (!(t.op == O_CALL && self.intrinsic(t.a).len() != 0)) as u32;
@@ -2060,7 +2095,12 @@ extend Gen {
         self.lv.fold_max = 8;
         self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST;
         self.arg_relays();
+        self.lv.after.truncate(0);
         self.lv.run(b);
+        self.shrink = !self.no_shrink && self.shrinkable();
+        if self.shrink {
+            self.lv.run(b);
+        }
         let n = self.lv.end.len();
         self.va.truncate(0);
         self.va.reserve(n);
@@ -2158,6 +2198,9 @@ extend Gen {
         self.bucket_ends();
         self.call_tables();
         self.plan_homes();
+        if self.shrink && self.lv.homeless(&self.want) {
+            return self.unshrunk(s, local);
+        }
         self.entry();
         if self.err.len() != 0 {
             return false;
@@ -2168,7 +2211,93 @@ extend Gen {
             }
         }
         assert(self.fixed_busy == 0, "x64gen: a register home outlives its value");
+        if self.shrink && (self.c.stack_at < self.rare_at() || self.csr != 0) {
+            return self.unshrunk(s, local);
+        }
         return self.finish(s);
+    }
+
+    // The warm code of shrink-wrapped function `s` needs the frame: once more, with the frame set up at the
+    // entry.
+    fn unshrunk(self: &mut Self, s: u32, local: bool) bool {
+        self.no_shrink = true;
+        let ok = self.func(s, local);
+        self.no_shrink = false;
+        return ok;
+    }
+
+    // Whether the body may set its frame up in its rare blocks alone (`shrink`): every call (one that does
+    // not return too: it needs the frame's alignment) is in a rare block (`Live::rare`), there is one, and
+    // the body reads no return address, variadic argument or inline assembly, runs no system operation,
+    // aligns no slot past 16 bytes and has no canary. The rare blocks connected to one with a call by edges
+    // between rare blocks set the frame up: `Live::after`, which the layout puts after the others. Under
+    // Microsoft x64 no edge leaves them for the warm code: its unwinder reads an epilogue only where it
+    // ends in `ret` or a jump out of the function.
+    fn shrinkable(self: &mut Self) bool {
+        let b = self.b();
+        if lver::protected(unsafe (*self.pkg).protect, b) {
+            return false;
+        }
+        for k in 0..b.slots.len() {
+            if b.slots[k].align_log2 > 4 {
+                return false;
+            }
+        }
+        let mut framed = Vector::<bool>::new();
+        framed.resize_default(b.blocks.len());
+        let mut any = false;
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if t.op == O_RETADDR || t.op == O_VASTART || t.op == O_ASM || t.op == O_SYS {
+                return false;
+            }
+            let d = self.lv.def_blk[i];
+            if d == NONE || self.lv.pos[d as usize] == NONE || !Gen::clobbers(b, t) {
+                continue;
+            }
+            if !self.lv.rare[d as usize] {
+                return false;
+            }
+            framed[d as usize] = true;
+            any = true;
+        }
+        if !any {
+            return false;
+        }
+        self.lv.set_after(b, &framed);
+        if self.win {
+            let mut es = Vector::<u32>::new();
+            for k in 0..b.blocks.len() {
+                if !self.lv.after[k] || self.lv.pos[k] == NONE {
+                    continue;
+                }
+                b.succ_edges(b.insts[(b.blocks[k].start + b.blocks[k].len - 1) as usize], &mut es);
+                for e in 0..es.len() {
+                    if !self.lv.after[b.edge_target(es[e]) as usize] {
+                        self.lv.after.truncate(0);
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    // The first code byte of the blocks that set the frame up, which the layout puts last (`Live::after`);
+    // the code's length when there is none.
+    const fn rare_at(self: &Self) u32 {
+        for q in 0..self.lv.order.len() {
+            let k = self.lv.order[q] as usize;
+            if self.lv.after[k] && self.blk_at[k] != NONE {
+                return self.blk_at[k];
+            }
+        }
+        return self.c.len();
+    }
+
+    // Whether block `k` is on the other side of the frame's edge from the current one (`shrink`).
+    const fn crosses(self: &Self, k: u32) bool {
+        return self.shrink && self.lv.after[k as usize] != self.lv.after[self.lv.order[self.pos as usize] as usize];
     }
 
     // The outgoing argument area (the largest call's stack arguments), then the LIR slots; spills follow.
@@ -2213,7 +2342,7 @@ extend Gen {
         }
         // The canary between the slots and the spills and saved registers above them.
         self.canary = -1;
-        if protected(unsafe (*self.pkg).protect, b) {
+        if lver::protected(unsafe (*self.pkg).protect, b) {
             at = at + 7 & ~7u32;
             self.canary = at;
             at += 8;
@@ -6199,13 +6328,13 @@ extend Gen {
     // Whether block `k` follows the current one.
     const fn next_is(self: &Self, k: u32) bool {
         let q = self.pos as usize + 1;
-        return q < self.lv.order.len() && self.lv.order[q] == k;
+        return q < self.lv.order.len() && self.lv.order[q] == k && !self.crosses(k);
     }
 
     // Jump to block `k` (nothing when it follows, unless `force`).
     fn goto(self: &mut Self, k: u32, force: bool) {
         let q = self.pos as usize + 1;
-        if !force && q < self.lv.order.len() && self.lv.order[q] == k {
+        if !force && q < self.lv.order.len() && self.lv.order[q] == k && !self.crosses(k) {
             return;
         }
         let at = self.c.jmp32();
@@ -6236,7 +6365,7 @@ extend Gen {
         let tt = b.edge_target(et);
         let tf = b.edge_target(ef);
         let q = self.pos as usize + 1;
-        let next = if q < self.lv.order.len() {
+        let next = if q < self.lv.order.len() && !self.crosses(self.lv.order[q]) {
             self.lv.order[q];
         } else {
             NONE;
@@ -6500,7 +6629,6 @@ extend Gen {
 
     // ---- Prologue, epilogue and output ----
 
-    // Frame the body's code and define function symbol `s` with it, with its unwind rules.
     // A sibling call's jump to object symbol `os` (`jmp rel32`, a relocation), or to r11 for NONE.
     fn tail_jump(self: &mut Self, os: u32) {
         if os == NONE {
@@ -6515,7 +6643,28 @@ extend Gen {
         self.rels.push(CRel { at: at, kind: x::R_PLT32, sym: os, addend: -4 });
     }
 
+    // Frame the body's code and define function symbol `s` with it, with its unwind rules. Shrink-wrapped
+    // (`shrink`), the prologue runs on each edge into the code past `ra` (its bytes before a jump, once per
+    // target) and the epilogue on each edge out; the warm code returns with `ret` and its sibling calls jump
+    // straight to the callee.
+    // Remove the jump whose displacement is at `at` from the jumps `relax` shortens.
+    fn drop_jump(self: &mut Self, at: u32) {
+        for k in 0..self.c.jumps.len() {
+            if self.c.jumps[k] == at {
+                let _ = self.c.jumps.remove(k);
+                return;
+            }
+        }
+        assert(false, "x64gen: a dropped jump is a jump");
+    }
+
     fn finish(self: &mut Self, s: u32) bool {
+        let sw = self.shrink;
+        let ra = if sw {
+            self.rare_at();
+        } else {
+            0;
+        };
         // A last jump to the epilogue falls through instead, and so does the one before it when the block
         // between held only that jump: one step per jump.
         while self.epi.len() != 0 && self.epi[self.epi.len() - 1] + 4 == self.c.len() {
@@ -6537,7 +6686,7 @@ extend Gen {
         for q in 0..self.fix.len() {
             reached = reached || self.blk_at[(self.fix[q] as u32) as usize] >= self.c.len();
         }
-        if nt != 0 && !reached && self.epi.len() == 0 && self.canary < 0 && (self.tails[nt - 1] >> 32) as u32 + 4 == self.c.len() {
+        if !sw && nt != 0 && !reached && self.epi.len() == 0 && self.canary < 0 && (self.tails[nt - 1] >> 32) as u32 + 4 == self.c.len() {
             ends = true;
             last = self.tails[nt - 1] as u32;
             let _ = self.tails.pop();
@@ -6651,12 +6800,19 @@ extend Gen {
         if self.win && pl > 255 {
             return self.refuse("a prologue past 255 bytes on Windows");
         }
+        // The bytes before the body: the prologue, none when shrink-wrapped.
+        let lead = if sw {
+            0;
+        } else {
+            pl;
+        };
         let body_n = self.c.len();
         // Before the epilogue proper, which Microsoft x64's unwinder reads instruction by instruction; not
         // when the result is a 32-byte vector in ymm0.
         if !ymm_parts(&self.self_lay) {
             self.upper_clear();
         }
+        let core_at = self.c.len();
         // The canary's check: on a mismatch `__stack_chk_fail`, which does not return.
         if self.canary >= 0 {
             self.guard(S0);
@@ -6713,9 +6869,45 @@ extend Gen {
             self.c.ret();
         }
         let epi_end = self.c.len();
+        if sw {
+            // The warm code's jumps to the epilogue become its `ret`, with the upper halves' clear before.
+            let mut keep = Vector::<u32>::with_capacity(self.epi.len());
+            for q in 0..self.epi.len() {
+                let at = self.epi[q];
+                if at >= ra {
+                    keep.push(at);
+                    continue;
+                }
+                let n = core_at - body_n;
+                for k in 0..5u32 {
+                    self.c.b[(at - 1 + k) as usize] = if k < n {
+                        self.c.b[(body_n + k) as usize];
+                    } else if k == n {
+                        0xC3;
+                    } else {
+                        0xCC;
+                    };
+                }
+                self.drop_jump(at);
+            }
+            self.epi = keep;
+        }
         for q in 0..self.tails.len() {
             let at = (self.tails[q] >> 32) as u32;
             let os = self.tails[q] as u32;
+            if sw && at < ra {
+                // From the warm code, which has no frame: the callee's jump in the jump's place.
+                self.drop_jump(at);
+                if os == NONE {
+                    let jr: []u8 = [0x41, 0xFF, 0xE3, 0xCC, 0xCC];
+                    for k in 0..5u32 {
+                        self.c.b[(at - 1 + k) as usize] = jr[k as usize];
+                    }
+                } else {
+                    self.rels.push(CRel { at: at, kind: x::R_PLT32, sym: os, addend: -4 });
+                }
+                continue;
+            }
             let to = self.c.len();
             self.c.land(at, to);
             for k in body_n..core_end {
@@ -6760,6 +6952,14 @@ extend Gen {
         for q in 0..self.epi.len() {
             thru.insert(self.epi[q] - 1, body_n);
         }
+        // Shrink-wrapped: per target, its entry or exit stub; the warm code's `ret`. The framed code's
+        // epilogue and sibling calls end here; each entry stub's start and end (Microsoft x64's unwind
+        // information covers them apart).
+        let tails_end = self.c.len();
+        let mut stubs = Vector::<u32>::new();
+        let mut enter = Map::<u32, u32>::new();
+        let mut leave = Map::<u32, u32>::new();
+        let mut wret = NONE;
         for q in 0..self.fix.len() {
             let at = (self.fix[q] >> 32) as u32;
             let mut to = self.blk_at[(self.fix[q] as u32) as usize];
@@ -6778,6 +6978,50 @@ extend Gen {
             if to > body_n {
                 to = body_n;
             }
+            if sw && at < ra && to == body_n {
+                // From the warm code to the epilogue: a `ret`.
+                if wret == NONE {
+                    wret = self.c.len();
+                    for k in body_n..core_at {
+                        self.c.byte(self.c.b[k as usize]);
+                    }
+                    self.c.ret();
+                }
+                to = wret;
+            } else if sw && at < ra && to >= ra {
+                to = (switch enter.get(&to) {
+                    Some(e) => *e,
+                    None => {
+                        // Into the framed code: the prologue, then the jump.
+                        let e = self.c.len();
+                        for k in 0..pl {
+                            self.c.byte(pro.b[k as usize]);
+                        }
+                        let j = self.c.jmp32();
+                        self.c.land(j, to);
+                        enter.insert(to, e);
+                        stubs.push(e);
+                        stubs.push(self.c.len());
+                        e;
+                    },
+                });
+            } else if sw && at >= ra && to < ra {
+                to = (switch leave.get(&to) {
+                    Some(e) => *e,
+                    None => {
+                        // Out of the framed code: the epilogue but the upper halves' clear and the `ret`,
+                        // then the jump.
+                        let e = self.c.len();
+                        for k in core_at..core_end {
+                            self.c.byte(self.c.b[k as usize]);
+                        }
+                        let j = self.c.jmp32();
+                        self.c.land(j, to);
+                        leave.insert(to, e);
+                        e;
+                    },
+                });
+            }
             self.c.land(at, to);
         }
         for q in 0..self.epi.len() {
@@ -6792,6 +7036,11 @@ extend Gen {
         for q in 0..self.rows.len() {
             ats.push(ast_min((self.rows[q] >> 32) as u32, body_n));
         }
+        for q in 0..stubs.len() {
+            ats.push(stubs[q]);
+        }
+        ats.push(tails_end);
+        ats.push(ra);
         ats.push(body_n);
         self.c.relax(&mut ats);
         for q in 0..self.rels.len() {
@@ -6802,14 +7051,22 @@ extend Gen {
             self.rows[q] = ats[nr + q] as u64 << 32 | self.rows[q] & 0xFFFFFFFF;
         }
         let body_end = ats[ats.len() - 1];
+        let framed_at = ats[ats.len() - 2];
+        let framed_end = ats[ats.len() - 3];
+        let ns = stubs.len();
+        for q in 0..ns {
+            stubs[q] = ats[ats.len() - 3 - ns + q];
+        }
         // Into the object.
         let p = unsafe &*self.pkg;
         let ps = p.syms[s as usize];
         let o = self.obj();
         let k2 = o.sym(p.spell(ps.name));
-        let size = pl + self.c.len();
+        let size = lead + self.c.len();
         let sec = if ps.sect != NONE {
             o.named(p.spell(ps.sect), true);
+        } else if ps.cold {
+            o.named(self.cold_text(), true);
         } else {
             ob::S_TEXT;
         };
@@ -6825,18 +7082,83 @@ extend Gen {
             fl |= ob::SF_USED;
         }
         let at = o.define(k2, sec, 4, size, fl);
-        o.put(sec, pro.b[0..pro.b.len()]);
+        o.put(sec, pro.b[0..lead as usize]);
         o.put(sec, self.c.b[0..self.c.b.len()]);
         for q in 0..self.rels.len() {
             let r = self.rels[q];
-            o.reloc(sec, r.kind, at as u32 + pl + r.at, r.sym, r.addend);
+            o.reloc(sec, r.kind, at as u32 + lead + r.at, r.sym, r.addend);
         }
         if p.debug {
-            dw::rows(o, self.b(), k2, size, pl, &self.rows, body_end, 1);
+            dw::rows(o, self.b(), k2, size, lead, &self.rows, body_end, 1);
         }
         let c0 = o.cfi.len() as u32;
+        if self.win && sw {
+            // Shrink-wrapped: the warm code, no entry (a leaf's rule: rsp at the return address); the framed
+            // code with its epilogue and sibling calls, its prologue done (0 bytes); each entry stub with
+            // its prologue.
+            let mut zs = Vector::<u32>::new();
+            zs.resize_default(regs.len());
+            let mut zx = Vector::<u32>::new();
+            zx.resize_default(xregs.len());
+            win_unwind(&mut o.cfi, 0, !omit, &zs, &regs, 0, local, &zx, &xregs, xsave, fp, 0);
+            o.frames.push(
+                ob::OFrame {
+                    sym: k2,
+                    size: framed_end - framed_at,
+                    cfi_at: c0,
+                    cfi_len: o.cfi.len() as u32 - c0,
+                    off: framed_at,
+                },
+            );
+            for q in 0..ns / 2 {
+                let c1 = o.cfi.len() as u32;
+                win_unwind(
+                    &mut o.cfi,
+                    pl,
+                    !omit,
+                    &push_at,
+                    &regs,
+                    alloc_end,
+                    local,
+                    &xsave_at,
+                    &xregs,
+                    xsave,
+                    fp,
+                    fp_at,
+                );
+                let s0 = stubs[2 * q];
+                o.frames.push(
+                    ob::OFrame {
+                        sym: k2,
+                        size: stubs[2 * q + 1] - s0,
+                        cfi_at: c1,
+                        cfi_len: o.cfi.len() as u32 - c1,
+                        off: s0,
+                    },
+                );
+            }
+            return true;
+        }
         if self.win {
             win_unwind(&mut o.cfi, pl, !omit, &push_at, &regs, alloc_end, local, &xsave_at, &xregs, xsave, fp, fp_at);
+            o.frames.push(ob::OFrame { sym: k2, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0 });
+            return true;
+        }
+        if sw {
+            // Shrink-wrapped: the entry's rule (the CFA rsp + 8) up to the framed code, then the frame's (no
+            // register pushed).
+            cfa_advance(&mut o.cfi, framed_at);
+            if !omit {
+                o.cfi.push(0x0E);
+                o.cfi.push(16);
+                o.cfi.push(0x80 | 6);
+                o.cfi.push(2);
+                o.cfi.push(0x0D);
+                o.cfi.push(6);
+            } else if local != 0 {
+                o.cfi.push(0x0E);
+                dw::uleb(&mut o.cfi, 8 + local);
+            }
             o.frames.push(ob::OFrame { sym: k2, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0 });
             return true;
         }
@@ -10516,6 +10838,8 @@ extend Gen {
         let k2 = o.sym(p.spell(ps.name));
         let sec = if ps.sect != NONE {
             o.named(p.spell(ps.sect), true);
+        } else if ps.cold {
+            o.named(self.cold_text(), true);
         } else {
             ob::S_TEXT;
         };

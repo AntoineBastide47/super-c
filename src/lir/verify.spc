@@ -1097,6 +1097,54 @@ pub(package) fn uses(b: &Body, t: Inst, out: &mut Vector<Value>) {
     }
 }
 
+/// Whether body `b` of a package whose `protect` is `p` has a stack canary (`PROTECT_*`). A slot counts
+/// only when a block that may return reads its address: one that ends the program (a panic, or
+/// `unreachable` after a call that does not return, say with the message a failure path passes on) never
+/// reaches the canary's check at the return, and passes nothing to another block.
+pub(package) fn protected(p: u8, b: &Body) bool {
+    if p == PROTECT_ALL {
+        return true;
+    }
+    if p == PROTECT_NONE || b.slots.len() == 0 {
+        return false;
+    }
+    let mut live = Vector::<bool>::new();
+    live.resize_default(b.slots.len());
+    let mut us = Vector::<Value>::new();
+    let mut es = Vector::<u32>::new();
+    for k in 0..b.blocks.len() {
+        let bk = b.blocks[k];
+        let end = b.insts[(bk.start + bk.len - 1) as usize].op;
+        if end == O_UNREACHABLE || end == O_PANIC {
+            continue;
+        }
+        for i in bk.start..bk.start + bk.len {
+            let t = b.insts[i as usize];
+            uses(b, t, &mut us);
+            if is_terminator(t.op) {
+                b.succ_edges(t, &mut es);
+                for e in 0..es.len() {
+                    for q in 0..b.edge_nargs(es[e]) {
+                        us.push(b.edge_arg(es[e], q));
+                    }
+                }
+            }
+            for u in 0..us.len() {
+                let v = us[u];
+                if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_SLOTADDR {
+                    live[b.insts[v as usize].a as usize] = true;
+                }
+            }
+        }
+    }
+    for k in 0..b.slots.len() {
+        if live[k] && (p == PROTECT_SLOTS || p == PROTECT_LARGE && b.slots[k].size >= 8) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// Whether the address of a slot of `b` (through address arithmetic, selects and block parameters) is
 /// used but as an access's or a copy's address or a comparison's operand: a call, a store of it, a
 /// return. True also when the derivation does not settle in FRAME_ROUNDS rounds.

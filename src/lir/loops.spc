@@ -3965,6 +3965,11 @@ extend LoopOpt {
         // The preheader enters the guard.
         let pe = term(b, p).a;
         b.pool[pe as usize] = gb;
+        if g == VNONE {
+            // The loop with the checks runs only when one of them may fail: rarely, and as it is.
+            b.blocks.index_mut(gb as usize + 2).flags |= BLOCK_UNLIKELY;
+            b.blocks.index_mut(h as usize).flags |= BLOCK_NOVEC;
+        }
     }
 
     // A block with header `h`'s parameters that jumps to `to` with them, dominated as `p` is.

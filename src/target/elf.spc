@@ -1,8 +1,8 @@
-// The ELF relocatable object writer for x86-64 and arm64: the header, a section per non-empty object
-// section kind and per named section (with `-ffunction-sections` and `-fdata-sections` the code and the
-// variables split at their symbols into a section each, `.text.<name>`), `.eh_frame` with one common entry
-// and a frame entry per function, `.rela` sections, the symbol table (locals first) and the string tables. A thread-local variable is an
-// STT_TLS symbol in `.tdata` or `.tbss`. `.note.GNU-stack` marks the stack non-executable.
+// The ELF relocatable object writer for x86-64 and arm64: the header, a section per non-empty object section kind and
+// per named section (with `-ffunction-sections` and `-fdata-sections` the code and the variables split at their symbols
+// into a section each, `.text.<name>`), `.eh_frame` with one common entry and a frame entry per function, `.rela`
+// sections, the symbol table (locals first) and the string tables. A thread-local variable is an STT_TLS symbol in
+// `.tdata` or `.tbss`. `.note.GNU-stack` marks the stack non-executable.
 import codegen::obj as ob;
 import target::x64 as x;
 import target::a64 as a;
