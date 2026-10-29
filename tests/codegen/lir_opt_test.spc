@@ -25,7 +25,7 @@ fn optimized_with(text: str, fm: u8, fma: bool, vector: u32) (Package, Package) 
         text,
         fm,
         fma,
-        lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 0, vector: vector, fin: 0 },
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: vector, fin: 0 },
     );
 }
 
@@ -161,7 +161,7 @@ b2:
         &none,
         lopt::Config {
             inline: il::SPEED,
-            loops: lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+            loops: lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
         },
     );
     let s = text_of(&after, "sum");
@@ -923,7 +923,7 @@ b0(v0: i32):
         &sealed,
         lopt::Config {
             inline: il::SPEED,
-            loops: lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+            loops: lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
         },
     );
     assert(!text_of(&p, "same").contains("@leaf"), "a body of the same unit inlines it");
@@ -2931,7 +2931,7 @@ b0(v0: i64):
         0,
         false,
         il::FAST,
-        lu::Budgets { peel: 300, version: 200, unswitch: 50, rotate: 8, vector: 4, fin: 0 },
+        lu::Budgets { peel: 300, partial: 0, version: 200, unswitch: 50, rotate: 8, vector: 4, fin: 0 },
     );
     let x: []u64 = [0x2020202041202020];
     same_result(&b, &a, "top", x, 3);

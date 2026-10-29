@@ -582,7 +582,13 @@ extend CEmit {
             ) | pick((pk.cg & bman::CG_FP_CONTRACT) != 0, lir_ir::FM_CONTRACT, 0u8);
             let fi = cf::find("fma", pk.arch);
             l.pkg.fma = tgt::isa(pk.arch).scalar_fma || fi >= 0 && cf::has(pk.features, fi as usize);
-            l.pkg.vector = tgt::isa(pk.arch).vector_bytes;
+            // x86-64 with AVX2 (`x86-64-v3`) holds 32-byte vectors in its ymm registers.
+            let av = cf::find("avx2", pk.arch);
+            l.pkg.vector = if av >= 0 && cf::has(pk.features, av as usize) {
+                32u32;
+            } else {
+                tgt::isa(pk.arch).vector_bytes;
+            };
             l.pkg.mul_high = tgt::isa(pk.arch).mul_high;
             l.pkg.split = pick((pk.cg & bman::CG_FUNCTION_SECTIONS) != 0, cob::SPLIT_FUNCS, 0u8) | pick(
                 (pk.cg & bman::CG_DATA_SECTIONS) != 0,

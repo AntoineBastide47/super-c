@@ -863,7 +863,9 @@ extend Gen {
                 t.op,
                 lane_type(t.ty),
                 &mut un,
-            ) != NONE || t.op == O_SPLAT && Gen::in_vreg(t.ty);
+            ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_WCONST) && Gen::in_vreg(
+                t.ty,
+            ) || t.op == O_VCMP && Gen::in_vreg(self.vt(t.a));
             if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
                 self.vmem[i] = true;
             }
@@ -1219,7 +1221,7 @@ extend Gen {
         // Code that may branch past a lane reads a vector from its home: a vector in a register reaches
         // it first, but for the instructions with register forms (`vop` and `vec_arith` sync their others)
         // and calls (a vector passed in memory goes through `mloc`).
-        let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG);
+        let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP);
         if !reg_form && !is_terminator(t.op) {
             for k in 0..self.uses.len() {
                 self.sync(self.uses[k]);
@@ -2759,6 +2761,10 @@ extend Gen {
             self.mov_imm(r, t.b as u64 << 32 | t.a as u64, type_bytes(t.ty, self.ptr) == 8);
             return true;
         }
+        if op == O_WCONST && Gen::in_vreg(t.ty) {
+            self.wconst_reg(i, t);
+            return true;
+        }
         if op == O_WCONST {
             let off = self.mdef(i);
             // A zero word is xzr's.
@@ -2787,6 +2793,18 @@ extend Gen {
         }
         if op == O_SPLAT {
             self.splat(i, t);
+            return true;
+        }
+        if op == O_VCMP {
+            self.vcmp(i, t);
+            return true;
+        }
+        if op == O_VSEL {
+            self.vsel(i, t);
+            return true;
+        }
+        if op == O_VUNZIP {
+            self.vunzip(i, t);
             return true;
         }
         if op >= O_ADD && op <= O_NOT {
@@ -6307,6 +6325,33 @@ const fn neon_of_op(op: u8, lt: u8, un: &mut bool) u32 {
     return NONE;
 }
 
+// The NEON compare (as `neon_of_op`) of `O_VCMP` condition `c` on lanes of `lt`, and whether it takes the
+// operands swapped (the less-than conditions); `ne` and `une` are `eq`'s and `oeq`'s, NOT after.
+const fn neon_cmp(c: u16, lt: u8) (u32, bool) {
+    if is_float(lt) {
+        let sz = (lt == T_F64) as u32;
+        if c == C_OEQ || c == C_UNE {
+            return a::v3op(false, 0x1C, sz, 0, 0, 0), false;
+        }
+        // FCMGE size 0|sz, FCMGT size 2|sz.
+        let size = if c == C_OGE || c == C_OLE {
+            sz;
+        } else {
+            2 | sz;
+        };
+        return a::v3op(false, 0x3C, size, 0, 0, 0), c == C_OLT || c == C_OLE;
+    }
+    let s = vsize(type_bytes(lt, 8));
+    if c == C_EQ || c == C_NE {
+        return a::v3op(false, 0x31, s, 0, 0, 0), false;
+    }
+    // CMGT 0x06, CMGE 0x07, CMHI 0x26, CMHS 0x27.
+    let u = c >= C_ULT;
+    let ge = c == C_SGE || c == C_SLE || c == C_UGE || c == C_ULE;
+    let op = a::on(u, 0x20) | 0x06 | ge as u32;
+    return a::v3op(false, op, s, 0, 0, 0), c == C_SLT || c == C_SLE || c == C_ULT || c == C_ULE;
+}
+
 // The NEON instruction (as `neon_of_op`) of lane rule `c` (a `SIMD_*` code) on lanes of `lt`, signed `sg`;
 // `un` set for one operand, `fma` for an accumulation into operand 2.
 const fn neon_of_simd(c: u8, lt: u8, sg: bool, un: &mut bool, fma: &mut bool) u32 {
@@ -6490,6 +6535,137 @@ extend Gen {
             0u32;
         };
         self.emit(wq | (rd - V0) as u32 | (rx - V0) as u32 << 5 | rm);
+    }
+
+    // Lane-wise comparison `t` into mask `i`: one NEON compare (`neon_cmp`), then NOT for `ne` and `une`; a
+    // vector outside a v register compares each lane, CSETM giving its mask.
+    fn vcmp(self: &mut Self, i: u32, t: Inst) {
+        let vt = self.vt(t.a);
+        let lt = lane_type(vt);
+        let nb = type_bytes(vt, 8);
+        if Gen::in_vreg(vt) {
+            let (w, swap) = neon_cmp(t.aux, lt);
+            if swap {
+                self.neon_reg(w, i, t.b, t.a, VNONE, nb);
+            } else {
+                self.neon_reg(w, i, t.a, t.b, VNONE, nb);
+            }
+            if t.aux == C_NE || t.aux == C_UNE {
+                let rd = self.va[self.vx(i) as usize].reg;
+                self.emit(a::v2op(nb == 16, a::V2_NOT, 0, rd - V0, rd - V0));
+            }
+            return;
+        }
+        self.sync(t.a);
+        self.sync(t.b);
+        let d = self.mdef(i);
+        let ml = lane_type(mask_type(vt));
+        let x = self.tmp(false);
+        if is_float(lt) {
+            let dd = lt == T_F64;
+            let fa = self.tmp(true);
+            let fb = self.tmp(true);
+            let mut c2: u32 = NONE;
+            let cond = fcond(t.aux, &mut c2);
+            for k in 0..lanes(vt) {
+                self.ld_lane(fa, t.a, k, lt, false, false);
+                self.ld_lane(fb, t.b, k, lt, false, false);
+                self.emit(a::fcmp(dd, fa - V0, fb - V0));
+                self.emit(a::csel(true, 1, 0, x, a::ZR, a::ZR, a::invert(cond)));
+                self.st_lane(x, d, k, ml, false);
+            }
+            return;
+        }
+        let y = self.tmp(false);
+        let sg = signed_cond(t.aux);
+        for k in 0..lanes(vt) {
+            self.ld_lane(x, t.a, k, lt, sg, false);
+            self.ld_lane(y, t.b, k, lt, sg, false);
+            self.emit(a::addsub_reg(true, 1, true, a::ZR, x, y, 0, 0));
+            self.emit(a::csel(true, 1, 0, x, a::ZR, a::ZR, a::invert(icond(t.aux))));
+            self.st_lane(x, d, k, ml, false);
+        }
+    }
+
+    // Vector constant `t` into a v register for `i`: 0 and all ones by MOVI, else each 8-byte word through
+    // ip0 (DUP when one word repeats, else FMOV then INS).
+    fn wconst_reg(self: &mut Self, i: u32, t: Inst) {
+        let b = self.b();
+        let q = type_bytes(t.ty, 8) == 16;
+        let w0 = b.words[t.a as usize];
+        let w1 = if q {
+            b.words[t.a as usize + 1];
+        } else {
+            w0;
+        };
+        let rd = self.vec_def(i) - V0;
+        if w0 == w1 && (w0 == 0 || w0 == ~0u64) {
+            // MOVI Vd.2D (or Dd), #0 or #-1: cmode 1110, op 1, imm8 0 or 0xFF.
+            self.emit(0x2F00E400 | a::on(q, 1u32 << 30) | a::on(w0 != 0, 0x7u32 << 16 | 0x1Fu32 << 5) | rd as u32);
+            return;
+        }
+        self.mov_imm(a::IP0 as u8, w0, true);
+        if q && w0 == w1 {
+            // DUP Vd.2D, ip0.
+            self.emit(0x4E080C00 | a::IP0 << 5 | rd as u32);
+            return;
+        }
+        self.emit(a::fmov_gv(true, true, rd, a::IP0 as u8));
+        if q {
+            self.mov_imm(a::IP0 as u8, w1, true);
+            // INS Vd.D[1], ip0.
+            self.emit(0x4E181C00 | a::IP0 << 5 | rd as u32);
+        }
+    }
+
+    // The even lanes of `t.a ++ t.b` into vector `i`: UZP1; a vector outside a v register moves each lane.
+    fn vunzip(self: &mut Self, i: u32, t: Inst) {
+        let nb = type_bytes(t.ty, 8);
+        let lt = lane_type(t.ty);
+        if Gen::in_vreg(t.ty) {
+            self.neon_reg(0x0E001800 | vsize(type_bytes(lt, 8)) << 22, i, t.a, t.b, VNONE, nb);
+            return;
+        }
+        self.sync(t.a);
+        self.sync(t.b);
+        let d = self.mdef(i);
+        let n = lanes(t.ty);
+        let x = self.tmp(false);
+        for k in 0..n {
+            if 2 * k < n {
+                self.ld_lane(x, t.a, 2 * k, lt, false, true);
+            } else {
+                self.ld_lane(x, t.b, 2 * k - n, lt, false, true);
+            }
+            self.st_lane(x, d, k, lt, true);
+        }
+    }
+
+    // Lane select `t` into vector `i`: BSL over a copy of the mask; a vector outside a v register selects
+    // each lane's bits.
+    fn vsel(self: &mut Self, i: u32, t: Inst) {
+        let nb = type_bytes(t.ty, 8);
+        if Gen::in_vreg(t.ty) {
+            self.neon_reg(a::v3op(false, a::V3_EOR, 1, 0, 0, 0), i, t.b, t.c, t.a, nb);
+            return;
+        }
+        self.sync(t.a);
+        self.sync(t.b);
+        self.sync(t.c);
+        let d = self.mdef(i);
+        let lt = lane_type(t.ty);
+        let m = self.tmp(false);
+        let x = self.tmp(false);
+        let y = self.tmp(false);
+        for k in 0..lanes(t.ty) {
+            self.ld_lane(m, t.a, k, lt, false, true);
+            self.ld_lane(x, t.b, k, lt, false, true);
+            self.ld_lane(y, t.c, k, lt, false, true);
+            self.emit(a::logic_reg(true, 0, false, x, x, m, 0, 0));
+            self.emit(a::logic_reg(true, 0, true, y, y, m, 0, 0));
+            self.emit(a::logic_reg(true, 1, false, x, x, y, 0, 0));
+            self.st_lane(x, d, k, lt, true);
+        }
     }
 
     // `dup` of scalar `t.a` into every lane of vector `i`: from a general register, or lane 0 of a float's v

@@ -988,9 +988,11 @@ extend Code {
         self.rr(pfx, op, false, dst, src, false);
     }
 
-    /// Load `n` bytes (4, 8 or 16) at `m` into xmm `dst` (the bytes above zeroed).
+    /// Load `n` bytes (4, 8, 16, or 32 into a ymm register) at `m` into xmm `dst` (the bytes above zeroed).
     pub fn vload(self: &mut Self, n: u32, dst: u8, m: Mem) {
-        if n == 4 {
+        if n == 32 {
+            self.ymov(true, dst, m);
+        } else if n == 4 {
             self.rm(0xF3, 0x0F10, false, dst, m, false);
         } else if n == 8 {
             self.rm(0xF3, 0x0F7E, false, dst, m, false);
@@ -999,15 +1001,52 @@ extend Code {
         }
     }
 
-    /// Store the low `n` bytes (4, 8 or 16) of xmm `src` to `m`.
+    /// Store the low `n` bytes (4, 8, 16, or 32 of a ymm register) of xmm `src` to `m`.
     pub fn vstore(self: &mut Self, n: u32, src: u8, m: Mem) {
-        if n == 4 {
+        if n == 32 {
+            self.ymov(false, src, m);
+        } else if n == 4 {
             self.rm(0xF3, 0x0F11, false, src, m, false);
         } else if n == 8 {
             self.rm(0x66, 0x0FD6, false, src, m, false);
         } else {
             self.rm(0xF3, 0x0F7F, false, src, m, false);
         }
+    }
+
+    /// A VEX instruction on registers: `dst` (ModRM.reg) = `src1` (VEX.vvvv; 0 for none) op `src2`
+    /// (ModRM.rm, an xmm or a general register), its legacy prefix `pfx` (0, 0x66, 0xF3 or 0xF2), opcode map
+    /// `mm` (1: 0F, 2: 0F38, 3: 0F3A), opcode `op`, VEX.W `w`, 256 bits when `l`.
+    pub fn vex_rr(self: &mut Self, pfx: u32, mm: u32, op: u32, w: bool, l: bool, dst: u8, src1: u8, src2: u8) {
+        let pp: u32 = if pfx == 0x66 {
+            1;
+        } else if pfx == 0xF3 {
+            2;
+        } else if pfx == 0xF2 {
+            3;
+        } else {
+            0;
+        };
+        let r = (~(dst as u32) >> 3 & 1) << 7;
+        let b = (~(src2 as u32) >> 3 & 1) << 5;
+        let tail = (~(src1 as u32) & 15) << 3 | l as u32 << 2 | pp;
+        if mm == 1 && !w && b != 0 {
+            self.byte(0xC5);
+            self.byte(r | tail);
+        } else {
+            self.byte(0xC4);
+            self.byte(r | 1u32 << 6 | b | mm);
+            self.byte(w as u32 << 7 | tail);
+        }
+        self.byte(op);
+        self.modrm_rr(dst, src2);
+    }
+
+    /// vzeroupper: the ymm registers' upper halves zeroed, before code of the legacy SSE encoding.
+    pub fn vzeroupper(self: &mut Self) {
+        self.byte(0xC5);
+        self.byte(0xF8);
+        self.byte(0x77);
     }
 
     /// xmm `dst` = xmm `src` (all 16 bytes).
