@@ -244,6 +244,9 @@ pub(package) struct Svc {
     pub(package) ev: *const iri::Interp,
     boxd: loader::LookupHit, // the prelude `Box`, looked up on the first niche query (`box_on`)
     box_on: bool,
+    /// Lay out a generic parameter no env binds as its default, when that names a struct or enum without
+    /// generic parameters: the layout of a generic declaration's default instance (LSP hover).
+    pub(package) defaults: bool,
 }
 
 extend Svc {
@@ -658,6 +661,20 @@ extend Svc {
                 }
                 e = unsafe (*e).parent;
             }
+            if self.defaults {
+                let dft = self.a(y.module).ext(y.as_data.decl).generic_param.default_type;
+                let d = if dft == NODE_NONE {
+                    DefId { module: 0, node: NODE_NONE };
+                } else {
+                    self.a(y.module).resolution_def(dft);
+                };
+                if d.node != NODE_NONE && self.has_ast(d.module) {
+                    let k = self.a(d.module).at_const(d.node).kind;
+                    if (k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM) && self.a(d.module).ext(d.node).aggregate.generics.len == 0 {
+                        return self.aggregate_layout(d.module, d.node, null, depth + 1);
+                    }
+                }
+            }
             return Layout { ok: false, unbound: true };
         }
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
@@ -937,13 +954,15 @@ extend Svc {
         return self.offset_in(dm, dn, env, fdecl);
     }
 
-    /// The layout of the struct or union `dn` of module `dm`, which has no generic parameters.
+    /// The layout of the struct or union `dn` of module `dm`, which has no generic parameters (`defaults`:
+    /// none without a default that decides the layout).
     pub(package) fn decl_layout(self: &mut Self, dm: ModuleId, dn: NodeId) Layout {
         return self.aggregate_layout(dm, dn, null, 0);
     }
 
     /// The byte offset of field `fdecl` of the struct or union `dn` of module `dm`, which has no
-    /// generic parameters; -1 when it has no layout.
+    /// generic parameters (`defaults`: none without a default that decides the layout); -1 when it has
+    /// no layout.
     pub(package) fn decl_field_offset(self: &mut Self, dm: ModuleId, dn: NodeId, fdecl: NodeId) i64 {
         return self.offset_in(dm, dn, null, fdecl);
     }

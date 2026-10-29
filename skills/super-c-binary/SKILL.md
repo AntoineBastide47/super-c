@@ -282,7 +282,11 @@ site does not spell the method's name. Hover documents the reflection
 constructs no declaration documents (`reflect_hover`): the intrinsics and the members of an
 `inline for` binder, by binder kind. Hover on an interface in a bound or a conformance shows the interface
 instance with its defaulted arguments (`Mul<V<T, N>>`); a type's signature shows its generic
-parameters. Signature help (also on `<`) covers a type argument list (`Mul<`, `f::<`), read from the
+parameters. Hover adds the layout, as C++ language servers do (`layout_line`), one item per line in a
+code block: a struct, union or enum's size and alignment, a variable's, a field's offset, size and
+alignment. A use takes the instance it names (`S<i32>`, `g.t`); a declaration lays out its default
+instance (each defaulted parameter bound to its default, `Svc.defaults`); none where a parameter without
+a default decides it. Signature help (also on `<`) covers a type argument list (`Mul<`, `f::<`), read from the
 text so a list still being typed is found (`type_args_help`). Completion offers the generic
 parameters of every declaration around the cursor; where no parsed item spans the cursor (a header
 that does not parse yet), it completes from a probe that splices `__lsp_c`, `__lsp_c;` or `__lsp_c>`. The VS Code extension is in

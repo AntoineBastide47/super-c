@@ -1945,3 +1945,53 @@ fn incr_extern_type_sizes_fold() {
     assert(errors_in(&p, &diags, "/b.spc") == 0, "the sizes fold");
     assert(diags.len() == 0, "no diagnostic");
 }
+
+// Hover gives a type's size and alignment, a variable's, and a field's offset, size and alignment, as C++
+// language servers do. A use names its instance; a generic declaration lays out its default instance,
+// and has no layout where a parameter without a default decides it.
+@test
+fn hover_shows_layouts() {
+    let a = "struct P {\n    pub x: u8,\n    pub y: u64,\n}\nunion U {\n    pub a: u32,\n    pub b: u16,\n}\nenum E {\n    A,\n    B(u32),\n}\nstruct G<T> {\n    pub t: T,\n}\nstruct W {\n    pub w: u32,\n}\nstruct D<T, A = W> {\n    pub p: *mut T,\n    pub al: A,\n}\nfn main() i32 {\n    let pt = P { x: 1, y: 2 };\n    let g = G::<u16> { t: 3 };\n    let e = E::B(4);\n    let dv: D<u8, u16> = D::<u8, u16> { p: null, al: 5 };\n    return pt.x as i32 + g.t as i32 + dv.al as i32 + switch e { A => 0, B(v) => v as i32, };\n}\n";
+    let ws = ws_of(a, "", "", "");
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    ov(&ws, "a.spc", a, &mut ovf, &mut ovt);
+    let mut diags = Vector::<an::DiagRec>::new();
+    let p = fresh(&ws, &ovf, &ovt, &mut diags);
+    let m = mod_of(&p, "/a.spc");
+    let cases: [](str, str) = [
+        ("struct P", "```super-c\nsize: 16 bytes\nalignment: 8 bytes\n```"),
+        ("union U", "```super-c\nsize: 4 bytes\nalignment: 4 bytes\n```"),
+        ("enum E", "```super-c\nsize: 8 bytes\nalignment: 4 bytes\n```"),
+        ("let pt", "```super-c\nsize: 16 bytes\nalignment: 8 bytes\n```"),
+        ("let g", "```super-c\nsize: 2 bytes\nalignment: 2 bytes\n```"),
+        ("return pt", "```super-c\nsize: 16 bytes\nalignment: 8 bytes\n```"),
+        // Fields are laid out by alignment: `y` first.
+        ("pt.x", "```super-c\noffset: 8 bytes\nsize: 1 byte\nalignment: 1 byte\n```"),
+        ("pub y", "```super-c\noffset: 0 bytes\nsize: 8 bytes\nalignment: 8 bytes\n```"),
+        ("pub b", "```super-c\noffset: 0 bytes\nsize: 2 bytes\nalignment: 2 bytes\n```"),
+        // The default instance `D<T, W>`: `T` sits behind a pointer.
+        ("struct D", "```super-c\nsize: 16 bytes\nalignment: 8 bytes\n```"),
+        ("pub al", "```super-c\noffset: 8 bytes\nsize: 4 bytes\nalignment: 4 bytes\n```"),
+        // A use: the instance's name, a type argument in it, and a field through it.
+        ("let g = G", "```super-c\nsize: 2 bytes\nalignment: 2 bytes\n```"),
+        ("dv: D", "```super-c\nsize: 16 bytes\nalignment: 8 bytes\n```"),
+        ("dv: D<u8, u1", "```super-c\nsize: 16 bytes\nalignment: 8 bytes\n```"),
+        ("g.t", "```super-c\noffset: 0 bytes\nsize: 2 bytes\nalignment: 2 bytes\n```"),
+        ("dv.al", "```super-c\noffset: 8 bytes\nsize: 2 bytes\nalignment: 2 bytes\n```"),
+    ];
+    for i in 0..cases.len() {
+        let (at, want) = cases[i];
+        let off = a.find(at) as u32 + at.len() as u32 - 1;
+        let h = feat::hover(&p, m, off);
+        assert(h.is_some(), at);
+        let hs = h.unwrap();
+        if !hs.as_str().contains(want) {
+            eprintln("{}: {}", at, hs.as_str());
+        }
+        assert(hs.as_str().contains(want), at);
+    }
+    let off = a.find("struct G") as u32 + 7;
+    let hg = feat::hover(&p, m, off);
+    assert(hg.is_some() && !hg.unwrap().as_str().contains("size:"), "a generic declaration has no layout");
+}

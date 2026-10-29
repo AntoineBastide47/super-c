@@ -9,6 +9,7 @@ import ast::ast as *;
 import module::loader as loader;
 import target::table as tgt;
 import typechecker::render as rnd;
+import ir::layout as lay;
 import ast::parser as par;
 import lsp::text as ltext;
 
@@ -767,6 +768,11 @@ pub(package) fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
             out.push_string(&sig);
             out.push_str("\n```");
         }
+        let ll = layout_line(p, mi, off, t, d);
+        if ll.len() != 0 {
+            out.push_str("\n\n");
+            out.push_string(&ll);
+        }
         let doc = decl_doc(p, d);
         if doc.len() != 0 {
             out.push_str("\n\n");
@@ -777,6 +783,149 @@ pub(package) fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
         return Option::<String>::None;
     }
     return Option::<String>::Some(out);
+}
+
+// The layout block of a hover, as C++ language servers give it: a struct, union or enum's size and
+// alignment, a variable's (its type's), a field's offset, size and alignment. `t` is the type of the
+// hovered expression at `off`. A use takes the instance it names (`S<i32>`, `g.t` of a `g: S<i32>`);
+// a declaration lays out its default instance, each defaulted generic parameter bound to its default.
+// Empty for another declaration, and where an unbound generic parameter decides the layout.
+fn layout_line(p: &loader::Package, mi: usize, off: u32, t: TypeId, d: DefId) String {
+    let a = mod_ast(p, mi);
+    let da = mod_ast(p, d.module as usize);
+    let k = unsafe (*da).at_const(d.node).kind;
+    let mut svc = lay::Svc::new(p);
+    let mut l = lay::Layout { ok: false };
+    let mut at: i64 = -1;
+    if k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM {
+        let it = type_naming(a, off, d);
+        if it != TYPE_NONE {
+            l = svc.layout(mi as ModuleId, it);
+        }
+        if !l.ok {
+            svc.defaults = true;
+            l = svc.decl_layout(d.module, d.node);
+        }
+    } else if k == NodeKind::NODE_FIELD {
+        let ma = member_at(a, off);
+        if ma != NODE_NONE {
+            let mut ot = unsafe (*a).type_of(unsafe (*a).at_const(ma).as_data.member.object);
+            for _ in 0..8 {
+                if ot == TYPE_NONE {
+                    break;
+                }
+                let y = *unsafe (*a).type_at(ot);
+                if y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
+                    break;
+                }
+                ot = y.as_data.elem;
+            }
+            if ot != TYPE_NONE {
+                at = svc.field_offset(mi as ModuleId, ot, d.node);
+                l = svc.layout(mi as ModuleId, unsafe (*a).type_of(ma));
+            }
+        }
+        let owner = field_owner(da, d.node);
+        if (at < 0 || !l.ok) && owner != NODE_NONE {
+            svc.defaults = true;
+            at = svc.decl_field_offset(d.module, owner, d.node);
+            l = svc.layout(d.module, unsafe (*da).member_ty(d.node));
+        }
+        if at < 0 {
+            return String::new();
+        }
+    } else if k == NodeKind::NODE_LET || k == NodeKind::NODE_PARAMETER || k == NodeKind::NODE_CONST || k == NodeKind::NODE_IDENTIFIER {
+        // A use has the type of the expression; the declaration itself, the type the checker gave it.
+        l = if t != TYPE_NONE {
+            svc.layout(mi as ModuleId, t);
+        } else {
+            svc.layout(d.module, unsafe (*da).type_of(d.node));
+        };
+    }
+    if !l.ok {
+        return String::new();
+    }
+    let mut out = String::from_str("```super-c\n");
+    if at >= 0 {
+        out.format_into("offset: {}\n", bytes(at as u64));
+    }
+    out.format_into("size: {}\nalignment: {}\n```", bytes(l.size), bytes(l.align));
+    return out;
+}
+
+// The type of the innermost node around `off` that is struct or enum `d` or an instance of it (a use:
+// `S<i32>`), TYPE_NONE when none is.
+fn type_naming(a: *const Ast, off: u32, d: DefId) TypeId {
+    let mut best = TYPE_NONE;
+    let mut blen: u32 = 0xFFFFFFFF;
+    let n = unsafe (*a).nnodes();
+    for i0 in 1..n {
+        let i = unsafe (*a).nth_id(i0);
+        let sp = unsafe (*a).at_const(i).span;
+        if sp.start > off || off > sp.end || sp.end - sp.start >= blen || !unsafe (*a).valid(i) {
+            continue;
+        }
+        let t = unsafe (*a).type_of(i);
+        if t == TYPE_NONE {
+            continue;
+        }
+        let y = *unsafe (*a).type_at(t);
+        let named = if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *unsafe (*a).instance(y.as_data.inst);
+            it.module == d.module && it.decl == d.node;
+        } else {
+            (y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM) && y.module == d.module && y.as_data.decl == d.node;
+        };
+        if named {
+            best = t;
+            blen = sp.end - sp.start;
+        }
+    }
+    return best;
+}
+
+// The field access whose member name holds `off` (`g.t`), with a checked object; NODE_NONE off one.
+fn member_at(a: *const Ast, off: u32) NodeId {
+    let n = unsafe (*a).nnodes();
+    for i0 in 1..n {
+        let i = unsafe (*a).nth_id(i0);
+        let nd = unsafe (*a).at_const(i);
+        if nd.kind != NodeKind::NODE_MEMBER || nd.as_data.member.path || !unsafe (*a).valid(i) || !unsafe (*a).valid(
+            nd.as_data.member.object,
+        ) {
+            continue;
+        }
+        let ms = unsafe (*a).at_const(nd.as_data.member.member).span;
+        if ms.start <= off && off <= ms.end {
+            return i;
+        }
+    }
+    return NODE_NONE;
+}
+
+// `n` bytes, in words: "1 byte", "16 bytes".
+fn bytes(n: u64) String {
+    return format("{} {}", n, pick(n == 1, "byte", "bytes"));
+}
+
+// The struct whose members hold field `fid`, NODE_NONE when none does.
+fn field_owner(a: *const Ast, fid: NodeId) NodeId {
+    let items = unsafe (*a).at_const(unsafe (*a).root).as_data.program.items;
+    let at = unsafe (*a).at_const(fid).span.start;
+    for i in 0..items.len {
+        let id = unsafe (*a).list(items)[i as usize];
+        let n = unsafe (*a).at_const(id);
+        if n.kind != NodeKind::NODE_STRUCT || at < n.span.start || at >= n.span.end {
+            continue;
+        }
+        let ms = unsafe (*a).ext(id).aggregate.members;
+        for j in 0..ms.len {
+            if unsafe (*a).list(ms)[j as usize] == fid {
+                return id;
+            }
+        }
+    }
+    return NODE_NONE;
 }
 
 /// The definition site for the position: the resolved decl's name span (decl span as the fallback).

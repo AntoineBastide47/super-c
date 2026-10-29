@@ -114,6 +114,13 @@
     "keywords": {
       "patterns": [
         {
+          "match": "\\b(pub)\\s*\\(\\s*(module|package)\\s*\\)",
+          "captures": {
+            "1": { "name": "keyword.other.super-c" },
+            "2": { "name": "keyword.other.super-c" }
+          }
+        },
+        {
           "name": "keyword.control.super-c",
           "match": "\\b(if|else|while|for|do|loop|switch|case|break|continue|return|defer|launch|select|in|where)\\b"
         },
