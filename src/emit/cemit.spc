@@ -106,6 +106,12 @@ struct DynDue {
 pub(package) const BK_C: u8 = 1;
 pub(package) const BK_LIR: u8 = 2;
 
+// Whether `pk`'s target has CPU feature `name`.
+fn feature(pk: &loader::Package, name: str) bool {
+    let k = cf::find(name, pk.arch);
+    return k >= 0 && cf::has(pk.features, k as usize);
+}
+
 /// The backends of each module of `pk`: LIR for every module of a native build (`native_on`) and for the
 /// modules `SC_LIR` names (`in_list`), which the LIR check covers (`Lower::check_all`); the C renderer
 /// for every module of a build that is not native. A native build's declarations still render.
@@ -591,9 +597,14 @@ extend CEmit {
             ) | pick((pk.cg & bman::CG_FP_CONTRACT) != 0, lir_ir::FM_CONTRACT, 0u8);
             let fi = cf::find("fma", pk.arch);
             l.pkg.fma = tgt::isa(pk.arch).scalar_fma || fi >= 0 && cf::has(pk.features, fi as usize);
-            // x86-64 with AVX2 (`x86-64-v3`) holds 32-byte vectors in its ymm registers.
-            let av = cf::find("avx2", pk.arch);
-            l.pkg.vector = if av >= 0 && cf::has(pk.features, av as usize) {
+            // x86-64 with AVX2 (`x86-64-v3`) holds 32-byte vectors in its ymm registers; with AVX-512 F, BW,
+            // DQ and VL (`x86-64-v4`), 64-byte ones in its zmm registers.
+            l.pkg.vector = if feature(pk, "avx512f") && feature(pk, "avx512bw") && feature(pk, "avx512dq") && feature(
+                pk,
+                "avx512vl",
+            ) {
+                64u32;
+            } else if feature(pk, "avx2") {
                 32u32;
             } else {
                 tgt::isa(pk.arch).vector_bytes;

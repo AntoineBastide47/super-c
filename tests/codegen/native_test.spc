@@ -14,10 +14,12 @@ import module::loader;
 
 // The package options a test may set (`object_of`): sibling calls (`Package.tail`), 32-byte vectors
 // (`Package.vector`: x86-64's ymm registers with AVX2), binary16 instructions (`Package.half`: arithmetic
-// on macOS arm64, whose every processor has FEAT_FP16, else conversions).
+// on macOS arm64, whose every processor has FEAT_FP16, else conversions), 64-byte vectors (x86-64's zmm
+// registers with AVX-512).
 const TAIL: u32 = 1;
 const WIDE: u32 = 2;
 const HALF: u32 = 4;
+const Z512: u32 = 8;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -25,7 +27,7 @@ fn run_native(text: str, driver: str) i32 {
     return run_native_with(text, driver, 0);
 }
 
-// `run_native` with package options `opts` (TAIL, WIDE, HALF).
+// `run_native` with package options `opts` (TAIL, WIDE, HALF, Z512).
 fn run_native_with(text: str, driver: str, opts: u32) i32 {
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return 0;
@@ -51,6 +53,38 @@ fn run_wide(text: str, driver: str) i32 {
     return run_native_with(text, d.as_str(), WIDE);
 }
 
+// `run_native` with 64-byte vectors on an x86-64 host: under the emulator command `SC_SDE` names (Intel
+// SDE, as CI's AVX-512 lane runs), else the driver's `main` returns 0 first on a processor without
+// AVX-512 BW. 0 on another host.
+fn run_zmm(text: str, driver: str) i32 {
+    if tgt::host_isa() != tgt::axis_index("x86_64", true) || !nat::supported(tgt::host_os(), tgt::host_isa()) {
+        return 0;
+    }
+    let sde = stdlib::get_env("SC_SDE").unwrap_or(String::new());
+    if sde.len() != 0 {
+        let runner = format("{} ", sde.as_str());
+        return run_lir(
+            text,
+            driver,
+            tgt::host_os(),
+            tgt::host_isa(),
+            unsafe str::from_cstr(cli::cc_name()),
+            runner.as_str(),
+            Z512,
+        );
+    }
+    let head = "int main(void) {\n";
+    let at = driver.find(head);
+    assert(at >= 0, "the driver's main");
+    let d = format(
+        "{}{}  if (!__builtin_cpu_supports(\"avx512bw\")) return 0;\n{}",
+        driver.slice(0, at as usize),
+        head,
+        driver.slice(at as usize + head.len(), driver.len()),
+    );
+    return run_native_with(text, d.as_str(), Z512);
+}
+
 // `run_native` for wasm32, its pointers 4 bytes in place of the text's 8: the wasi-sdk's clang links,
 // wasmtime runs. 0 without WASI_SDK_PATH.
 fn run_wasm(text: str, driver: str) i32 {
@@ -72,7 +106,7 @@ fn run_wasm(text: str, driver: str) i32 {
     );
 }
 
-// Compile LIR `text` for `(os, isa)` into object `obj`, with package options `opts` (TAIL, WIDE, HALF);
+// Compile LIR `text` for `(os, isa)` into object `obj`, with package options `opts` (TAIL, WIDE, HALF, Z512);
 // whether it did (the failure on stderr).
 fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool {
     let mut err = String::new();
@@ -85,6 +119,9 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.tail = (opts & TAIL) != 0;
     if (opts & WIDE) != 0 {
         p.vector = 32;
+    }
+    if (opts & Z512) != 0 {
+        p.vector = 64;
     }
     if (opts & HALF) != 0 {
         p.half = if isa == tgt::axis_index("aarch64", true) && os == tgt::axis_index("macos", false) {
@@ -466,8 +503,9 @@ fn a_latch_exit_that_reads_no_counter_lets_the_step_take_its_register() {
 }
 
 // Lane-wise comparisons (`vcmp`) of every lane type and condition, and lane selects (`vsel`), in vector
-// registers (8 and 16 bytes) and in memory (32 bytes): each lane's mask against C's comparison, signed
-// and unsigned limits, NaN and signed zeros included. The x86-64 objects build on every host.
+// registers (8 and 16 bytes) and in memory (32 and 64 bytes; ymm and zmm registers with AVX2 and AVX-512):
+// each lane's mask against C's comparison, signed and unsigned limits, NaN and signed zeros included. The
+// x86-64 objects build on every host.
 @test
 fn lane_compares_and_selects_run() {
     // Per vector type: its text, its C lane type and the unsigned one, its lanes, whether its lanes are
@@ -487,6 +525,12 @@ fn lane_compares_and_selects_run() {
         "v16i16",
         "v4i64",
         "v8f32",
+        "v64i8",
+        "v32i16",
+        "v16i32",
+        "v8i64",
+        "v16f32",
+        "v8f64",
     ];
     let cty: []str = [
         "int8_t",
@@ -503,6 +547,12 @@ fn lane_compares_and_selects_run() {
         "int16_t",
         "int64_t",
         "float",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "float",
+        "double",
     ];
     let uty: []str = [
         "uint8_t",
@@ -519,9 +569,36 @@ fn lane_compares_and_selects_run() {
         "uint16_t",
         "uint64_t",
         "int32_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "int32_t",
+        "int64_t",
     ];
-    let nl: []u32 = [16, 8, 4, 2, 8, 8, 4, 2, 4, 2, 32, 16, 4, 8];
-    let isf: []bool = [false, false, false, false, false, false, true, true, true, true, false, false, false, true];
+    let nl: []u32 = [16, 8, 4, 2, 8, 8, 4, 2, 4, 2, 32, 16, 4, 8, 64, 32, 16, 8, 16, 8];
+    let isf: []bool = [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+    ];
     let conds: []str = ["eq", "ne", "slt", "sle", "sgt", "sge", "ult", "ule", "ugt", "uge"];
     let cops: []str = ["==", "!=", "<", "<=", ">", ">=", "<", "<=", ">", ">="];
     let fconds: []str = ["oeq", "une", "olt", "ole", "ogt", "oge"];
@@ -575,11 +652,15 @@ fn lane_compares_and_selects_run() {
             "v2i32";
         } else if names[k] == "v8f32" {
             "v8i32";
+        } else if names[k] == "v16f32" {
+            "v16i32";
+        } else if names[k] == "v8f64" {
+            "v8i64";
         } else {
             names[k];
         };
         body.format_into(
-            "  {{\n    {} v[8] = {{{}}};\n    {} a[32], b[32], o[32], x[32], y[32]; {} m[32], w[32];\n    for (int i = 0; i < 32; i++) {{ a[i] = v[i % 8]; b[i] = i % 4 == 0 ? a[i] : v[(i * 3 + 1) % 8]; m[i] = i % 3 == 0 ? -1 : 0; x[i] = a[i]; y[i] = b[i]; }}\n",
+            "  {{\n    {} v[8] = {{{}}};\n    {} a[64], b[64], o[64], x[64], y[64]; {} m[64], w[64];\n    for (int i = 0; i < 64; i++) {{ a[i] = v[i % 8]; b[i] = i % 4 == 0 ? a[i] : v[(i * 3 + 1) % 8]; m[i] = i % 3 == 0 ? -1 : 0; x[i] = a[i]; y[i] = b[i]; }}\n",
             cty[k],
             vals,
             cty[k],
@@ -644,26 +725,29 @@ fn lane_compares_and_selects_run() {
     let mut obj = Vector::<u8>::new();
     let x64 = tgt::axis_index("x86_64", true);
     assert(object_of(lir.as_str(), tgt::axis_index("linux", false), x64, 0, &mut obj), "the System V object");
-    obj.truncate(0);
     assert(object_of(lir.as_str(), tgt::axis_index("windows", false), x64, 0, &mut obj), "the Microsoft x64 object");
-    obj.truncate(0);
     assert(object_of(lir.as_str(), tgt::axis_index("linux", false), x64, WIDE, &mut obj), "the AVX2 object");
-    obj.truncate(0);
     assert(
         object_of(lir.as_str(), tgt::axis_index("windows", false), x64, WIDE, &mut obj),
         "the Microsoft x64 AVX2 object",
+    );
+    assert(object_of(lir.as_str(), tgt::axis_index("linux", false), x64, Z512, &mut obj), "the AVX-512 object");
+    assert(
+        object_of(lir.as_str(), tgt::axis_index("windows", false), x64, Z512, &mut obj),
+        "the Microsoft x64 AVX-512 object",
     );
     if !cli::has_cc() {
         return; // a C driver links it
     }
     assert_eq(run_native(lir.as_str(), decl.as_str()), 0);
     assert_eq(run_wide(lir.as_str(), decl.as_str()), 0);
+    assert_eq(run_zmm(lir.as_str(), decl.as_str()), 0);
     assert_eq(run_wasm(lir.as_str(), decl.as_str()), 0);
 }
 
 // The even lanes of two vectors (`vunzip`) of every lane width, in vector registers (8 and 16 bytes) and
-// in memory (32 bytes): lane k is lane 2k of the two operands' lanes in order, its bits unchanged (lanes
-// with the sign bit set included).
+// in memory (32 and 64 bytes; ymm and zmm registers with AVX2 and AVX-512): lane k is lane 2k of the two
+// operands' lanes in order, its bits unchanged (lanes with the sign bit set included).
 @test
 fn even_lanes_of_two_vectors_run() {
     let names: []str = [
@@ -680,6 +764,12 @@ fn even_lanes_of_two_vectors_run() {
         "v4i64",
         "v8f32",
         "v4f64",
+        "v64i8",
+        "v32i16",
+        "v16i32",
+        "v8i64",
+        "v16f32",
+        "v8f64",
     ];
     let cty: []str = [
         "int8_t",
@@ -695,8 +785,14 @@ fn even_lanes_of_two_vectors_run() {
         "int64_t",
         "float",
         "double",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "float",
+        "double",
     ];
-    let nl: []u32 = [16, 8, 4, 2, 4, 2, 8, 8, 32, 16, 4, 8, 4];
+    let nl: []u32 = [16, 8, 4, 2, 4, 2, 8, 8, 32, 16, 4, 8, 4, 64, 32, 16, 8, 16, 8];
     let mut lir = String::from_str("lir ptr 8\n");
     let mut drv = String::from_str("#include <stdint.h>\n#include <string.h>\n");
     let mut body = String::from_str("int main(void) {\n  int r = 0;\n");
@@ -711,7 +807,7 @@ fn even_lanes_of_two_vectors_run() {
         );
         drv.format_into("void u{}(void *, const void *, const void *);\n", k);
         body.format_into(
-            "  {{\n    {} a[32], b[32], o[32];\n    for (int i = 0; i < 32; i++) {{ a[i] = ({})(i * 37 - 100); b[i] = ({})(i * 53 + 7); }}\n    u{}(o, a, b);\n    for (int i = 0; i < {}; i++) if (memcmp(&o[i], 2 * i < {} ? &a[2 * i] : &b[2 * i - {}], sizeof o[i]) != 0) r = {};\n  }}\n",
+            "  {{\n    {} a[64], b[64], o[64];\n    for (int i = 0; i < 64; i++) {{ a[i] = ({})(i * 37 - 100); b[i] = ({})(i * 53 + 7); }}\n    u{}(o, a, b);\n    for (int i = 0; i < {}; i++) if (memcmp(&o[i], 2 * i < {} ? &a[2 * i] : &b[2 * i - {}], sizeof o[i]) != 0) r = {};\n  }}\n",
             cty[k],
             cty[k],
             cty[k],
@@ -727,26 +823,29 @@ fn even_lanes_of_two_vectors_run() {
     let mut obj = Vector::<u8>::new();
     let x64 = tgt::axis_index("x86_64", true);
     assert(object_of(lir.as_str(), tgt::axis_index("linux", false), x64, 0, &mut obj), "the System V object");
-    obj.truncate(0);
     assert(object_of(lir.as_str(), tgt::axis_index("windows", false), x64, 0, &mut obj), "the Microsoft x64 object");
-    obj.truncate(0);
     assert(object_of(lir.as_str(), tgt::axis_index("linux", false), x64, WIDE, &mut obj), "the AVX2 object");
-    obj.truncate(0);
     assert(
         object_of(lir.as_str(), tgt::axis_index("windows", false), x64, WIDE, &mut obj),
         "the Microsoft x64 AVX2 object",
+    );
+    assert(object_of(lir.as_str(), tgt::axis_index("linux", false), x64, Z512, &mut obj), "the AVX-512 object");
+    assert(
+        object_of(lir.as_str(), tgt::axis_index("windows", false), x64, Z512, &mut obj),
+        "the Microsoft x64 AVX-512 object",
     );
     if !cli::has_cc() {
         return; // a C driver links it
     }
     assert_eq(run_native(lir.as_str(), drv.as_str()), 0);
     assert_eq(run_wide(lir.as_str(), drv.as_str()), 0);
+    assert_eq(run_zmm(lir.as_str(), drv.as_str()), 0);
     assert_eq(run_wasm(lir.as_str(), drv.as_str()), 0);
 }
 
-// 32-byte vectors passed to and returned from calls, in a body that holds them in registers: with AVX2
-// and 32-byte vector registers (`vec 32`) in ymm registers, which no `vzeroupper` before the call or the
-// return clears; a sibling call too.
+// 32- and 64-byte vectors passed to and returned from calls, in a body that holds them in registers: with
+// AVX2 and 32-byte vector registers (`vec 32`) in ymm registers, with AVX-512 and 64-byte ones (`vec 64`)
+// in zmm registers, which no `vzeroupper` before the call or the return clears; a sibling call too.
 @test
 fn wide_vectors_cross_calls() {
     let lir = M"(lir ptr 8
@@ -800,11 +899,22 @@ int main(void) {
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_native_with(lir, drv, TAIL), 0);
     assert_eq(run_wide(ymm.as_str(), drv), 0);
+    // The same with 16 lanes.
+    let zlir = String::from_str(lir).replace("v8i32", "v16i32");
+    let zmm = format("lir ptr 8 vec 64\n{}", zlir.as_str().slice(10, zlir.len()));
+    let zdrv = String::from_str(drv).replace("[8]", "[16]").replace("i < 8", "i < 16");
+    assert(object_of(zmm.as_str(), tgt::axis_index("linux", false), x64, Z512 | TAIL, &mut obj), "the AVX-512 object");
+    assert(
+        object_of(zmm.as_str(), tgt::axis_index("windows", false), x64, Z512 | TAIL, &mut obj),
+        "the Microsoft x64 AVX-512 object",
+    );
+    assert_eq(run_native(zlir.as_str(), zdrv.as_str()), 0);
+    assert_eq(run_zmm(zmm.as_str(), zdrv.as_str()), 0);
 }
 
-// Lane-wise arithmetic of 16- and 32-byte vectors of every lane type, splats and vector constants (zero,
-// all ones, one word repeated, four words): each result's bits against C's, integers wrapping. With 32-byte
-// vectors in ymm registers too (`run_wide`).
+// Lane-wise arithmetic of 16-, 32- and 64-byte vectors of every lane type, splats and vector constants
+// (zero, all ones, one word repeated, several words): each result's bits against C's, integers wrapping.
+// With 32-byte vectors in ymm registers too (`run_wide`), and 64-byte ones in zmm registers (`run_zmm`).
 @test
 fn vector_arithmetic_of_every_width_runs() {
     let names: []str = [
@@ -820,8 +930,33 @@ fn vector_arithmetic_of_every_width_runs() {
         "v4i64",
         "v8f32",
         "v4f64",
+        "v64i8",
+        "v32i16",
+        "v16i32",
+        "v8i64",
+        "v16f32",
+        "v8f64",
     ];
-    let lty: []str = ["i8", "i16", "i32", "i64", "f32", "f64", "i8", "i16", "i32", "i64", "f32", "f64"];
+    let lty: []str = [
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "f32",
+        "f64",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "f32",
+        "f64",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "f32",
+        "f64",
+    ];
     let cty: []str = [
         "uint8_t",
         "uint16_t",
@@ -835,8 +970,14 @@ fn vector_arithmetic_of_every_width_runs() {
         "uint64_t",
         "float",
         "double",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "float",
+        "double",
     ];
-    let nl: []u32 = [16, 8, 4, 2, 4, 2, 32, 16, 8, 4, 8, 4];
+    let nl: []u32 = [16, 8, 4, 2, 4, 2, 32, 16, 8, 4, 8, 4, 64, 32, 16, 8, 16, 8];
     let iops: []str = ["add", "sub", "mul", "and", "or", "xor", "neg", "not"];
     let icx: []str = [
         "a[i] + b[i]",
@@ -857,7 +998,7 @@ fn vector_arithmetic_of_every_width_runs() {
     for k in 0..names.len() {
         let fl = lty[k] == "f32" || lty[k] == "f64";
         body.format_into(
-            "  {{\n    {} a[32], b[32], o[32], e[32];\n    for (int i = 0; i < 32; i++) {{ a[i] = ({})(i * 37 - 100); b[i] = ({})(i * 53 + 7); }}\n",
+            "  {{\n    {} a[64], b[64], o[64], e[64];\n    for (int i = 0; i < 64; i++) {{ a[i] = ({})(i * 37 - 100); b[i] = ({})(i * 53 + 7); }}\n",
             cty[k],
             cty[k],
             cty[k],
@@ -915,7 +1056,7 @@ fn vector_arithmetic_of_every_width_runs() {
             500 + k,
         );
     }
-    // Vector constants: zero, all ones, one word repeated, four words.
+    // Vector constants: zero, all ones, one word repeated, four words (eight for 64 bytes: the four twice).
     let words: []str = [
         "0x0, 0x0, 0x0, 0x0",
         "0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff",
@@ -929,8 +1070,10 @@ fn vector_arithmetic_of_every_width_runs() {
         "1, 0x8000000000000000ull, 0x7F7F7F7F7F7F7F7Full, 0xFEDCBA9876543210ull",
     ];
     for c in 0..words.len() {
-        for wide in 0..2usize {
-            let (ty, nw, w) = if wide == 1 {
+        for wide in 0..3usize {
+            let (ty, nw, w) = if wide == 2 {
+                ("v16i32", 8u32, format("{}, {}", words[c], words[c]));
+            } else if wide == 1 {
                 ("v8i32", 4u32, String::from_str(words[c]));
             } else {
                 // The first two words of the four.
@@ -942,18 +1085,19 @@ fn vector_arithmetic_of_every_width_runs() {
             };
             lir.format_into(
                 "sym @w{} fn global\nfn @w{}\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = wconst.{} {}\n  store v1, v0 align 0\n  ret\n",
-                2 * c + wide,
-                2 * c + wide,
+                3 * c + wide,
+                3 * c + wide,
                 ty,
                 w.as_str(),
             );
-            drv.format_into("void w{}(void *);\n", 2 * c + wide);
+            drv.format_into("void w{}(void *);\n", 3 * c + wide);
             body.format_into(
-                "  {{ uint64_t e[4] = {{{}}}, o[4]; w{}(o); if (memcmp(o, e, {}) != 0) r = {}; }}\n",
+                "  {{ uint64_t e[8] = {{{}, {}}}, o[8]; w{}(o); if (memcmp(o, e, {}) != 0) r = {}; }}\n",
                 cwords[c],
-                2 * c + wide,
+                cwords[c],
+                3 * c + wide,
                 8 * nw,
-                700 + 2 * c + wide,
+                700 + 3 * c + wide,
             );
         }
     }
@@ -964,17 +1108,17 @@ fn vector_arithmetic_of_every_width_runs() {
     let lin = tgt::axis_index("linux", false);
     let win = tgt::axis_index("windows", false);
     assert(object_of(lir.as_str(), lin, x64, 0, &mut obj), "the System V object");
-    obj.truncate(0);
     assert(object_of(lir.as_str(), win, x64, 0, &mut obj), "the Microsoft x64 object");
-    obj.truncate(0);
     assert(object_of(lir.as_str(), lin, x64, WIDE, &mut obj), "the AVX2 object");
-    obj.truncate(0);
     assert(object_of(lir.as_str(), win, x64, WIDE, &mut obj), "the Microsoft x64 AVX2 object");
+    assert(object_of(lir.as_str(), lin, x64, Z512, &mut obj), "the AVX-512 object");
+    assert(object_of(lir.as_str(), win, x64, Z512, &mut obj), "the Microsoft x64 AVX-512 object");
     if !cli::has_cc() {
         return; // a C driver links it
     }
     assert_eq(run_native(lir.as_str(), drv.as_str()), 0);
     assert_eq(run_wide(lir.as_str(), drv.as_str()), 0);
+    assert_eq(run_zmm(lir.as_str(), drv.as_str()), 0);
     assert_eq(run_wasm(lir.as_str(), drv.as_str()), 0);
 }
 

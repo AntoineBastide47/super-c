@@ -988,9 +988,12 @@ extend Code {
         self.rr(pfx, op, false, dst, src, false);
     }
 
-    /// Load `n` bytes (4, 8, 16, or 32 into a ymm register) at `m` into xmm `dst` (the bytes above zeroed).
+    /// Load `n` bytes (4, 8, 16, or 32 into a ymm register, 64 into a zmm one) at `m` into xmm `dst` (the
+    /// bytes above zeroed).
     pub(package) fn vload(self: &mut Self, n: u32, dst: u8, m: Mem) {
-        if n == 32 {
+        if n == 64 {
+            self.zmov(true, dst, m);
+        } else if n == 32 {
             self.ymov(true, dst, m);
         } else if n == 4 {
             self.rm(0xF3, 0x0F10, false, dst, m, false);
@@ -1001,9 +1004,11 @@ extend Code {
         }
     }
 
-    /// Store the low `n` bytes (4, 8, 16, or 32 of a ymm register) of xmm `src` to `m`.
+    /// Store the low `n` bytes (4, 8, 16, or 32 of a ymm register, 64 of a zmm one) of xmm `src` to `m`.
     pub(package) fn vstore(self: &mut Self, n: u32, src: u8, m: Mem) {
-        if n == 32 {
+        if n == 64 {
+            self.zmov(false, src, m);
+        } else if n == 32 {
             self.ymov(false, src, m);
         } else if n == 4 {
             self.rm(0xF3, 0x0F11, false, src, m, false);
@@ -1018,18 +1023,9 @@ extend Code {
     /// (ModRM.rm, an xmm or a general register), its legacy prefix `pfx` (0, 0x66, 0xF3 or 0xF2), opcode map
     /// `mm` (1: 0F, 2: 0F38, 3: 0F3A), opcode `op`, VEX.W `w`, 256 bits when `l`.
     pub(package) fn vex_rr(self: &mut Self, pfx: u32, mm: u32, op: u32, w: bool, l: bool, dst: u8, src1: u8, src2: u8) {
-        let pp: u32 = if pfx == 0x66 {
-            1;
-        } else if pfx == 0xF3 {
-            2;
-        } else if pfx == 0xF2 {
-            3;
-        } else {
-            0;
-        };
         let r = (~(dst as u32) >> 3 & 1) << 7;
         let b = (~(src2 as u32) >> 3 & 1) << 5;
-        let tail = (~(src1 as u32) & 15) << 3 | l as u32 << 2 | pp;
+        let tail = (~(src1 as u32) & 15) << 3 | l as u32 << 2 | pp_of(pfx);
         if mm == 1 && !w && b != 0 {
             self.byte(0xC5);
             self.byte(r | tail);
@@ -1038,6 +1034,20 @@ extend Code {
             self.byte(r | 1u32 << 6 | b | mm);
             self.byte(w as u32 << 7 | tail);
         }
+        self.byte(op);
+        self.modrm_rr(dst, src2);
+    }
+
+    /// An EVEX.512 instruction on registers, as `vex_rr` on zmm registers (or a mask or general register
+    /// where the opcode takes one), all below 16, unmasked; EVEX.W `w`.
+    pub(package) fn evex_rr(self: &mut Self, pfx: u32, mm: u32, op: u32, w: bool, dst: u8, src1: u8, src2: u8) {
+        self.byte(0x62);
+        // P0: R X B R' 0 0 m m, the register bits inverted (R' and X set: no register above 15).
+        self.byte((~(dst as u32) >> 3 & 1) << 7 | 1u32 << 6 | (~(src2 as u32) >> 3 & 1) << 5 | 1u32 << 4 | mm);
+        // P1: W vvvv 1 pp.
+        self.byte(w as u32 << 7 | (~(src1 as u32) & 15) << 3 | 4 | pp_of(pfx));
+        // P2: z L'L b V' aaa: 512 bits, V' set, no mask.
+        self.byte(2u32 << 5 | 1u32 << 3);
         self.byte(op);
         self.modrm_rr(dst, src2);
     }
@@ -1178,6 +1188,19 @@ extend Code {
         );
         self.modrm_n(r, m, 64);
     }
+}
+
+// The VEX and EVEX `pp` field of legacy prefix `pfx` (0, 0x66, 0xF3 or 0xF2).
+const fn pp_of(pfx: u32) u32 {
+    return if pfx == 0x66 {
+        1;
+    } else if pfx == 0xF3 {
+        2;
+    } else if pfx == 0xF2 {
+        3;
+    } else {
+        0;
+    };
 }
 
 // The little-endian 32 bits of `b` at `at`.

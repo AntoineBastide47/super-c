@@ -18,6 +18,8 @@ import target::intrin as intrin;
 import target::a64intrin as a64i;
 import target::x64intrin as x64i;
 import target::wasmintrin as wasmi;
+import target::native as nat;
+import lir::parse as lparse;
 import stdlib;
 import tests::cli_harness as cli;
 import std::platform::fs;
@@ -975,6 +977,201 @@ fn x64_generated(os: str) {
     }
     assert(insts > 10000, "the corpus's code");
     assert_eq(bad, 0);
+}
+
+// The x86-64 generator's 64-byte vector code (AVX-512, `Package.vector` 64) for lane-wise arithmetic,
+// splats, constants, comparisons, selects and unzips of every lane type, and vectors kept across a call:
+// every instruction decodes to a table row and assembles back, and the zmm forms are there. (CI runs
+// this code under Intel SDE: `native_test`.)
+@test
+fn x64_zmm_code_round_trips() {
+    let names: []str = ["v64i8", "v32i16", "v16i32", "v8i64", "v16f32", "v8f64"];
+    let mnames: []str = ["v64i8", "v32i16", "v16i32", "v8i64", "v16i32", "v8i64"];
+    let lty: []str = ["i8", "i16", "i32", "i64", "f32", "f64"];
+    let iops: []str = ["add", "sub", "mul", "and", "or", "xor", "neg", "not"];
+    let fops: []str = ["fadd", "fsub", "fmul", "fdiv", "fneg"];
+    let iconds: []str = ["eq", "ne", "slt", "sle", "sgt", "sge", "ult", "ule", "ugt", "uge"];
+    let fconds: []str = ["oeq", "une", "olt", "ole", "ogt", "oge"];
+    let mut lir = String::from_str("lir ptr 8\nsym @keep fn global noinline\nfn @keep\n  sig () -> void\nb0:\n  ret\n");
+    let mut nf: u32 = 0;
+    for k in 0..names.len() {
+        let fl = lty[k] == "f32" || lty[k] == "f64";
+        let ops = if fl {
+            fops;
+        } else {
+            iops;
+        };
+        for o in 0..ops.len() {
+            lir.format_into(
+                "sym @f{} fn global\nfn @f{}\n  sig (ptr, ptr, ptr) -> void\nb0(v0: ptr, v1: ptr, v2: ptr):\n  v3 = load.{} v1 align 0\n  v4 = load.{} v2 align 0\n",
+                nf,
+                nf,
+                names[k],
+                names[k],
+            );
+            if ops[o] == "neg" || ops[o] == "not" || ops[o] == "fneg" {
+                lir.format_into("  v5 = {}.{} v3\n", ops[o], names[k]);
+            } else {
+                lir.format_into("  v5 = {}.{} v3, v4\n", ops[o], names[k]);
+            }
+            lir.push_str("  store v5, v0 align 0\n  ret\n");
+            nf += 1;
+        }
+        let conds = if fl {
+            fconds;
+        } else {
+            iconds;
+        };
+        for c in 0..conds.len() {
+            lir.format_into(
+                "sym @f{} fn global\nfn @f{}\n  sig (ptr, ptr, ptr) -> void\nb0(v0: ptr, v1: ptr, v2: ptr):\n  v3 = load.{} v1 align 0\n  v4 = load.{} v2 align 0\n  v5 = vcmp.{}.{} v3, v4\n  v6 = vsel.{} v5, v3, v4\n  store v6, v0 align 0\n  ret\n",
+                nf,
+                nf,
+                names[k],
+                names[k],
+                conds[c],
+                mnames[k],
+                names[k],
+            );
+            nf += 1;
+        }
+        // A splat, an unzip, constants, and a vector kept across a call.
+        lir.format_into(
+            "sym @f{} fn global\nfn @f{}\n  sig (ptr, ptr, {}) -> void\nb0(v0: ptr, v1: ptr, v2: {}):\n  v3 = splat.{} v2\n  v4 = load.{} v1 align 0\n  v5 = vunzip.{} v3, v4\n  call @keep() : () -> void\n  v6 = {}.{} v5, v4\n  store v6, v0 align 0\n  ret\n",
+            nf,
+            nf,
+            lty[k],
+            lty[k],
+            names[k],
+            names[k],
+            names[k],
+            if fl {
+                "fadd";
+            } else {
+                "add";
+            },
+            names[k],
+        );
+        nf += 1;
+    }
+    let consts: []str = [
+        "0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0",
+        "0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff",
+        "0x5, 0x5, 0x5, 0x5, 0x5, 0x5, 0x5, 0x5",
+        "0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8",
+    ];
+    for c in 0..consts.len() {
+        lir.format_into(
+            "sym @f{} fn global\nfn @f{}\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = wconst.v8i64 {}\n  store v1, v0 align 0\n  ret\n",
+            nf,
+            nf,
+            consts[c],
+        );
+        nf += 1;
+    }
+    let mut err = String::new();
+    let q = lparse::parse(lir.as_str(), &mut err);
+    assert(q.is_some(), err.as_str());
+    let mut pk = q.unwrap();
+    pk.vector = 64;
+    let mut fs_ = Vector::<u32>::new();
+    let ds = Vector::<u32>::new();
+    for i in 0..pk.syms.len() {
+        if pk.syms[i].def != lir_ir::NONE {
+            fs_.push(i as u32);
+        }
+    }
+    for os in ["linux", "windows"] {
+        let mut o = Vector::<u8>::new();
+        assert(
+            nat::object(
+                &pk,
+                tgt::axis_index(os, false),
+                tgt::axis_index("x86_64", true),
+                fs_[0..fs_.len()],
+                ds[0..ds.len()],
+                "",
+                &mut o,
+                &mut err,
+            ),
+            err.as_str(),
+        );
+        let code = text_section(&o);
+        let mut all = String::new();
+        let mut k: usize = 0;
+        let mut bad: u32 = 0;
+        while k < code.len() {
+            let mut s = String::new();
+            let n = xa::disassemble(code.as_slice(), k, &mut s);
+            if n == 0 {
+                let mut b = Vector::<u8>::new();
+                let e = if k + 12 < code.len() {
+                    k + 12;
+                } else {
+                    code.len();
+                };
+                for j in k..e {
+                    b.push(code[j]);
+                }
+                eprint("{}\n", all.as_str());
+                assert(false, format("{} at 0x{}: no row decodes {}", os, hex(k as u32), bhex(&b).as_str()).as_str());
+            }
+            let mut b1 = Vector::<u8>::new();
+            let mut fx = xa::Fix::new();
+            let mut same = xa::assemble(s.as_str(), xa::NOTGT, &mut b1, &mut fx, &mut err) && b1.len() == n as usize;
+            for j in 0..b1.len() {
+                same = same && j < n as usize && b1[j] == code[k + j];
+            }
+            if !same {
+                eprint("{} at 0x{}: '{}' assembles to {}\n", os, hex(k as u32), s.as_str(), bhex(&b1).as_str());
+                bad += 1;
+            }
+            all.push_str(s.as_str());
+            all.push_str("\n");
+            k += n as usize;
+        }
+        assert_eq(bad, 0);
+        let want: []str = [
+            "vpaddb",
+            "vpaddw",
+            "vpaddd",
+            "vpaddq",
+            "vpmullw",
+            "vpmulld",
+            "vpmullq",
+            "vpandd",
+            "vpternlogd",
+            "vpternlogq",
+            "vaddps",
+            "vdivpd",
+            "vxorps",
+            "vpcmpb",
+            "vpcmpuw",
+            "vpcmpd",
+            "vpcmpuq",
+            "vcmpps",
+            "vcmppd",
+            "vpmovm2b",
+            "vpmovm2q",
+            "vpbroadcastb",
+            "vpbroadcastq",
+            "vbroadcastss",
+            "vbroadcastsd",
+            "vshufps",
+            "vpunpcklqdq",
+            "vpackssdw",
+            "vpacksswb",
+            "vpermq",
+            "vshufi64x2",
+            "vmovdqu64",
+            "vmovdqa64",
+            "%zmm",
+            "%k1",
+        ];
+        for w in want {
+            assert(all.as_str().find(w) >= 0, w);
+        }
+    }
 }
 
 @test

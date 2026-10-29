@@ -253,9 +253,9 @@ jobs:
           sha: ${{ needs.resolve.outputs.sha }}
 
   # The x86-64 levels beside the shards: every vector test at each level, each entry model run checking
-  # the entries the baseline run does not reach. No job runs x86-64-v4: a hosted runner's CPU is not
-  # selectable, so AVX-512 is not certain. The platform cache serves the compiler's rebuild; a level's
-  # -march keys its own compiles apart, so the job saves no cache.
+  # the entries the baseline run does not reach. No level job runs x86-64-v4: a hosted runner's CPU is not
+  # selectable, so AVX-512 is not certain (`avx512` emulates it). The platform cache serves the compiler's
+  # rebuild; a level's -march keys its own compiles apart, so the job saves no cache.
   levels:
     needs: [resolve, compile]
     if: github.actor == github.repository_owner
@@ -302,6 +302,47 @@ jobs:
           bin="super-c${BINEXT:-}"
           chmod +x "./$bin"
           SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-timeout=900 --filter=simd_
+
+  # AVX-512 beside the shards, under Intel SDE (a hosted runner's CPU may lack it): the native tests' 64-byte
+  # vector programs (`run_zmm`, `SC_SDE`) run on an emulated Sapphire Rapids, linked with the runner's C
+  # compiler (`SC_TEST_CC`: the tests that link a C driver run only with one). SDE 10.13.1 from a mirror of
+  # Intel's file (Intel's download page needs its license accepted), checked against Intel's SHA-256.
+  avx512:
+    needs: [resolve, compile]
+    if: github.actor == github.repository_owner
+    name: avx512 (linux, sde)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          sha: ${{ needs.resolve.outputs.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux
+
+      - name: Install Intel SDE
+        run: |
+          set -eu
+          f=sde-external-10.13.1-2026-07-28-lin.tar.xz
+          curl -fsSL --retry 3 -o "$f" "https://github.com/petarpetrovt/setup-sde/releases/download/binaries/$f"
+          echo "94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50  $f" | sha256sum -c -
+          mkdir sde
+          tar -xJf "$f" -C sde --strip-components=1
+
+      - name: Native tests with 64-byte vectors under SDE
+        run: |
+          set -eu
+          chmod +x ./super-c
+          SC_SDE="$PWD/sde/sde64 -spr --" SC_TEST_CC=cc SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=1800 --filter=native_test
 
   # The correctness gate beside the shards: it needs only the compiler, not their results.
   gate:
@@ -510,7 +551,7 @@ jobs:
 
   # The release binary, built by the compiler the suite and the gate passed with.
   package:
-    needs: [resolve, compile, test, levels, gate, compare]
+    needs: [resolve, compile, test, levels, avx512, gate, compare]
     if: github.actor == github.repository_owner
     name: package (${{ matrix.target }})
     strategy:
