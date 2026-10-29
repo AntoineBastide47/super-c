@@ -57,6 +57,16 @@ extern "C" {
     fn sc_f128_div(al: u64, ah: u64, bl: u64, bh: u64, rl: *mut u64, rh: *mut u64) void;
 }
 
+// The processor's binary16 conversions. Whether it has them is knowable only where the code is
+// generated: `sc_has_f16()` folds to a constant there (1 on arm64, and on x86-64 with F16C), so a `half()`
+// branch keeps exactly one side. Compile time takes the other (the interpreter answers 0): both convert
+// exactly or round to nearest even, the same bits.
+extern "C" {
+    fn sc_has_f16() i32;
+    fn sc_f16_to_f32(h: u16) f32;
+    fn sc_f32_to_f16(v: f32) u16;
+}
+
 // Integer square roots, for `sqrt`.
 extend<const W: usize> UInt<W> {
     // The floor of the square root of `self`, its remainder self - r^2 stored through `rem`: the Karatsuba square
@@ -237,6 +247,47 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     // then run natively.
     fn native() bool {
         return E == 15 && F == 112 && FAMILY == FloatFamily::FF_IEEE && unsafe sc_has_f128() != 0;
+    }
+
+    // Whether this format's sum, difference, product, quotient and square root compute in f32, rounded
+    // once more to it: an IEEE format whose values and exact results lie inside f32's normal range or past
+    // its largest value (an exponent field of at most 7 bits), and whose F + 1 significand bits are at most
+    // half of f32's 24 less 2, so the second rounding gives the correctly rounded result (Figueroa 1995):
+    // f16 and the 8-bit IEEE formats.
+    const fn by_f32() bool {
+        return FAMILY == FloatFamily::FF_IEEE && E <= 7 && 2 * F + 4 <= 24;
+    }
+
+    // Whether this format is IEEE binary16 and the processor converts it (`sc_has_f16`).
+    fn half() bool {
+        return E == 5 && F == 10 && FAMILY == FloatFamily::FF_IEEE && unsafe sc_has_f16() != 0;
+    }
+
+    // This value in f32, exactly (a `by_f32` format): the processor's conversion where it has one.
+    fn in_f32(self: &Float<E, F, FAMILY>) f32 {
+        if Float::<E, F, FAMILY>::half() {
+            return unsafe sc_f16_to_f32(self.bits.to_u64() as u16);
+        }
+        return f32_from_bits(self.widen_f32_bits());
+    }
+
+    // `v` rounded to this format (a `by_f32` one); a NaN as `nan()`, the limb code's NaN. For binary16 the
+    // NaN test reads the rounded encoding, so `v` feeds the conversion alone and an arm64 processor with
+    // FEAT_FP16 computes the operation in binary16 (`target::a64gen`'s `half_forms`).
+    fn of_f32(v: f32) Float<E, F, FAMILY> {
+        if Float::<E, F, FAMILY>::half() {
+            let h = unsafe sc_f32_to_f16(v);
+            if (h & 0x7FFF) > 0x7C00 {
+                return Float::<E, F, FAMILY>::nan();
+            }
+            let mut b = UInt::<{1 + E + F}>::zero();
+            b.set_limb(0, h);
+            return Float::<E, F, FAMILY> { bits: b };
+        }
+        if (f32_bits(v) & 0x7FFFFFFF) > 0x7F800000 {
+            return Float::<E, F, FAMILY>::nan();
+        }
+        return Float::<E, F, FAMILY>::from_f32(v);
     }
 
     // Operation `op` (0 add, 1 multiply, 2 divide) on two binary128 values by the native type; a NaN
@@ -585,6 +636,9 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     /// Correctly rounded: the significand's integer square root with a remainder-driven sticky bit is
     /// exact by construction, and round_pack does the one rounding.
     pub fn sqrt(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if Float::<E, F, FAMILY>::by_f32() {
+            return Float::<E, F, FAMILY>::of_f32(self.in_f32().sqrt());
+        }
         if self.is_nan() {
             return Float::<E, F, FAMILY>::nan();
         }
@@ -1700,6 +1754,9 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         if Float::<E, F, FAMILY>::native() {
             return self.native_op(other, 0);
         }
+        if Float::<E, F, FAMILY>::by_f32() {
+            return Float::<E, F, FAMILY>::of_f32(self.in_f32() + other.in_f32());
+        }
         if unlikely(self.is_nan() || other.is_nan()) {
             return Float::<E, F, FAMILY>::nan();
         }
@@ -1788,6 +1845,9 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         if Float::<E, F, FAMILY>::native() {
             return self.native_op(other, 1);
         }
+        if Float::<E, F, FAMILY>::by_f32() {
+            return Float::<E, F, FAMILY>::of_f32(self.in_f32() * other.in_f32());
+        }
         let neg = self.sign() != other.sign();
         if unlikely(self.is_nan() || other.is_nan()) {
             return Float::<E, F, FAMILY>::nan();
@@ -1848,6 +1908,9 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     pub fn div(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
         if Float::<E, F, FAMILY>::native() {
             return self.native_op(other, 2);
+        }
+        if Float::<E, F, FAMILY>::by_f32() {
+            return Float::<E, F, FAMILY>::of_f32(self.in_f32() / other.in_f32());
         }
         let neg = self.sign() != other.sign();
         if self.is_nan() || other.is_nan() {
