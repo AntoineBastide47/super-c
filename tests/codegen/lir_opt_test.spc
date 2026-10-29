@@ -241,6 +241,417 @@ b2:
     same_result(&b, &a, "twice", zero, 4);
 }
 
+// A C library allocation writes no memory the program reads but `errno`: a load of a place stored before
+// it reads the stored value, and the fresh block's stores touch no other place. A place moves to a new
+// memory state only along its own type's tag (and the untagged accesses'): a pointer field read before
+// two allocations, stored between them, then a store of another pointer field, reads the new pointer. A
+// `_aligned_free` the package defines is any other call.
+@test
+fn an_allocation_writes_no_place_the_program_reads() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @malloc fn global
+sym @abort fn global
+sym @_aligned_free fn global noinline
+sym @past fn global noinline
+sym @pdrive fn global
+sym @swap fn global noinline
+sym @drive fn global
+sym @wipe fn global
+fn @_aligned_free
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  store v1, v0 align 3 tbaa 4
+  ret
+fn @past
+  sig (ptr, i64) -> i64
+  ref p0 8 noalias
+b0(v0: ptr, v1: i64):
+  store v1, v0 align 3 tbaa 4
+  v2 = iconst.i64 16
+  v3 = call.ptr @malloc(v2) : (i64) -> ptr
+  v4 = iconst.i64 9
+  store v4, v3 align 3 tbaa 4
+  v5 = load.i64 v0 align 3 tbaa 4
+  v6 = load.i64 v3 align 3 tbaa 4
+  v7 = add.i64 v5, v6
+  ret v7
+fn @pdrive
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = call.i64 @past(v1, v0) : (ptr, i64) -> i64
+  ret v2
+fn @swap
+  sig (ptr) -> i64
+  ref p0 32 noalias
+b0(v0: ptr):
+  v1 = iconst.i64 16
+  v2 = load.ptr v0 align 3 tbaa 8
+  v3 = load.ptr v0+8 align 3 tbaa 8
+  v4 = load.ptr v0+16 align 3 tbaa 8
+  v5 = load.i32 v0+28 align 2 tbaa 3
+  v6 = call.ptr @malloc(v1) : (i64) -> ptr
+  v7 = iconst.ptr 0
+  v8 = icmp.eq v6, v7
+  br v8, b1, b2
+b1:
+  call @abort() : () -> void
+  unreachable
+b2:
+  store v6, v0 align 3 tbaa 8
+  v9 = call.ptr @malloc(v1) : (i64) -> ptr
+  v10 = icmp.eq v9, v7
+  br v10, b3, b4
+b3:
+  call @abort() : () -> void
+  unreachable
+b4:
+  store v9, v0+8 align 3 tbaa 8
+  v11 = call.ptr @malloc(v1) : (i64) -> ptr
+  v12 = icmp.eq v11, v7
+  br v12, b5, b6
+b5:
+  call @abort() : () -> void
+  unreachable
+b6:
+  store v11, v0+16 align 3 tbaa 8
+  v13 = iconst.i8 0
+  memset v11, v13, v1
+  v14 = iconst.i32 16
+  store v14, v0+28 align 2 tbaa 3
+  v15 = iconst.i32 0
+  store v15, v0+24 align 2 tbaa 3
+  v16 = load.ptr v0 align 3 tbaa 8
+  v17 = load.ptr v0+16 align 3 tbaa 8
+  v18 = icmp.eq v16, v6
+  v19 = icmp.eq v17, v11
+  v20 = and.i8 v18, v19
+  v21 = icmp.ne v16, v2
+  v22 = and.i8 v20, v21
+  v23 = zext.i64 v22
+  ret v23
+fn @drive
+  sig () -> i64
+  slot s0 size 32 align 3
+b0:
+  v0 = slotaddr s0
+  v1 = iconst.i64 0
+  store v1, v0 align 3
+  store v1, v0+8 align 3
+  store v1, v0+16 align 3
+  store v1, v0+24 align 3
+  v2 = call.i64 @swap(v0) : (ptr) -> i64
+  ret v2
+fn @wipe
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3 tbaa 4
+  call @_aligned_free(v1) : (ptr) -> void
+  v2 = load.i64 v1 align 3 tbaa 4
+  ret v2
+)",
+    );
+    let p = text_of(&a, "past");
+    assert(!p.contains("load"), p.as_str());
+    let x: []u64 = [7];
+    same_result(&b, &a, "pdrive", x, 16);
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 1);
+    same_result(&b, &a, "wipe", x, 0);
+}
+
+// A place moves to a new memory state only along its own type's tag and the untagged accesses': a map's
+// rehash (as the wasm compiler's walk receives it) reads its key array's pointer after storing the new one
+// between allocations and loads of an `i32` (tag 3, as `errno`'s and the map's sizes are), and the new
+// entries go to the new arrays.
+@test
+fn a_rehash_reads_the_arrays_it_stored() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @sc_lk_malloc fn global
+sym @sc_lk_aligned_alloc fn global
+sym @sc_lk_free fn global
+sym @sc_lk_aligned_free fn global
+sym @abort fn global
+sym @MALLOC_ALIGN data global
+sym @rehash fn global noinline
+sym @drive fn global
+fn @rehash
+  sig (ptr, i32) -> void
+  ref p0 32 noalias
+  slot s0 size 8 align 3
+  slot s1 size 8 align 3
+b0(v0: ptr, v1: i32):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = iconst.i32 8
+  v5 = symaddr @MALLOC_ALIGN
+  v6 = iconst.i32 0
+  v7 = iconst.i32 1
+  v8 = iconst.i8 0
+  v9 = iconst.i8 1
+  v10 = iconst.i64 0
+  v11 = iconst.i64 32
+  v12 = load.ptr v0 align 3 tbaa 8
+  store v12, v2 align 3 tbaa 8
+  v13 = load.ptr v0+8 align 3 tbaa 8
+  v14 = load.ptr v0+16 align 3 tbaa 8
+  v15 = load.i32 v0+28 align 2 tbaa 3
+  v16 = mul.i32 v1, v4
+  v17 = load.i32 v5 align 2 tbaa 3
+  v18 = icmp.ugt v4, v17
+  br v18, b2, b1
+b1:
+  v19 = call.ptr @sc_lk_malloc(v16) : (i32) -> ptr
+  jmp b3(v19)
+b2:
+  v20 = call.ptr @sc_lk_aligned_alloc(v16, v4) : (i32, i32) -> ptr
+  jmp b3(v20)
+b3(v21: ptr):
+  v22 = sext.i64 v6
+  v23 = inttoptr.ptr v22
+  v24 = icmp.eq v21, v23
+  br v24, b4, b5
+b4:
+  call @abort() : () -> void
+  unreachable
+b5:
+  store v21, v0 align 3 tbaa 8
+  v25 = mul.i32 v1, v4
+  v26 = load.i32 v5 align 2 tbaa 3
+  v27 = icmp.ugt v4, v26
+  br v27, b7, b6
+b6:
+  v28 = call.ptr @sc_lk_malloc(v25) : (i32) -> ptr
+  jmp b8(v28)
+b7:
+  v29 = call.ptr @sc_lk_aligned_alloc(v25, v4) : (i32, i32) -> ptr
+  jmp b8(v29)
+b8(v30: ptr):
+  v31 = sext.i64 v6
+  v32 = inttoptr.ptr v31
+  v33 = icmp.eq v30, v32
+  br v33, b9, b10
+b9:
+  call @abort() : () -> void
+  unreachable
+b10:
+  store v30, v0+8 align 3 tbaa 8
+  v34 = load.i32 v5 align 2 tbaa 3
+  v35 = icmp.ugt v7, v34
+  br v35, b12, b11
+b11:
+  v36 = call.ptr @sc_lk_malloc(v1) : (i32) -> ptr
+  jmp b13(v36)
+b12:
+  v37 = call.ptr @sc_lk_aligned_alloc(v1, v7) : (i32, i32) -> ptr
+  jmp b13(v37)
+b13(v38: ptr):
+  v39 = sext.i64 v6
+  v40 = inttoptr.ptr v39
+  v41 = icmp.eq v38, v40
+  br v41, b14, b15
+b14:
+  call @abort() : () -> void
+  unreachable
+b15:
+  store v38, v0+16 align 3 tbaa 8
+  v42 = load.ptr v0+16 align 3 tbaa 8
+  memset v42, v8, v1
+  store v1, v0+28 align 2 tbaa 3
+  store v6, v0+24 align 2 tbaa 3
+  jmp b16(v6)
+b16(v43: i32):
+  v44 = icmp.ult v43, v15
+  br v44, b28, b17
+b17:
+  v45 = icmp.ugt v15, v6
+  br v45, b18, b27
+b18:
+  v46 = load.ptr v2 align 3 tbaa 8
+  v47 = load.i32 v5 align 2 tbaa 3
+  v48 = icmp.ugt v4, v47
+  br v48, b20, b19
+b19:
+  call @sc_lk_free(v46) : (ptr) -> void
+  jmp b21
+b20:
+  call @sc_lk_aligned_free(v46) : (ptr) -> void
+  jmp b21
+b21:
+  v49 = load.i32 v5 align 2 tbaa 3
+  v50 = icmp.ugt v4, v49
+  br v50, b23, b22
+b22:
+  call @sc_lk_free(v13) : (ptr) -> void
+  jmp b24
+b23:
+  call @sc_lk_aligned_free(v13) : (ptr) -> void
+  jmp b24
+b24:
+  v51 = load.i32 v5 align 2 tbaa 3
+  v52 = icmp.ugt v7, v51
+  br v52, b26, b25
+b25:
+  call @sc_lk_free(v14) : (ptr) -> void
+  jmp b27
+b26:
+  call @sc_lk_aligned_free(v14) : (ptr) -> void
+  jmp b27
+b27:
+  ret
+b28:
+  v53 = sext.i64 v43
+  v54 = ptradd v14, v53 * 1
+  v55 = load.i8 v54 align 0
+  v56 = icmp.eq v55, v9
+  br v56, b29, b36
+b29:
+  v57 = load.ptr v2 align 3 tbaa 8
+  v58 = sext.i64 v43
+  v59 = ptradd v57, v58 * 8
+  store v10, v3 align 3
+  jmp b30(v59, v3)
+b30(v60: ptr, v61: ptr):
+  v62 = iconst.i64 32
+  v63 = iconst.i64 -7046029254386353131
+  v64 = load.i64 v60 align 3 tbaa 4
+  v65 = load.i64 v61 align 3 tbaa 4
+  v66 = xor.i64 v65, v64
+  v67 = lshr.i64 v66, v62
+  v68 = xor.i64 v66, v67
+  v69 = mul.i64 v68, v63
+  store v69, v61 align 3 tbaa 4
+  jmp b31
+b31:
+  v70 = load.i64 v3 align 3 tbaa 4
+  v71 = lshr.i64 v70, v11
+  v72 = load.i64 v3 align 3 tbaa 4
+  v73 = xor.i64 v72, v71
+  v74 = trunc.i32 v73
+  v75 = load.i32 v0+28 align 2 tbaa 3
+  v76 = sub.i32 v75, v7
+  v77 = and.i32 v74, v76
+  jmp b32(v77)
+b32(v78: i32):
+  v79 = load.ptr v0+16 align 3 tbaa 8
+  v80 = sext.i64 v78
+  v81 = ptradd v79, v80 * 1
+  v82 = load.i8 v81 align 0
+  v83 = icmp.ne v82, v8
+  br v83, b33, b35
+b33:
+  v84 = load.ptr v0 align 3 tbaa 8
+  v85 = sext.i64 v78
+  v86 = ptradd v84, v85 * 8
+  v87 = load.i64 v86 align 3 tbaa 4
+  v88 = load.i64 v59 align 3 tbaa 4
+  v89 = icmp.eq v87, v88
+  br v89, b35, b34
+b34:
+  v90 = add.i32 v78, v7
+  v91 = load.i32 v0+28 align 2 tbaa 3
+  v92 = icmp.uge v90, v91
+  br v92, b32(v6), b32(v90)
+b35:
+  v93 = load.ptr v2 align 3 tbaa 8
+  v94 = sext.i64 v43
+  v95 = ptradd v93, v94 * 8
+  v96 = load.i64 v95 align 3 tbaa 4
+  v97 = load.ptr v0 align 3 tbaa 8
+  v98 = sext.i64 v78
+  v99 = ptradd v97, v98 * 8
+  store v96, v99 align 3 tbaa 4
+  v100 = sext.i64 v43
+  v101 = ptradd v13, v100 * 8
+  v102 = load.i64 v101 align 3 tbaa 4
+  v103 = load.ptr v0+8 align 3 tbaa 8
+  v104 = sext.i64 v78
+  v105 = ptradd v103, v104 * 8
+  store v102, v105 align 3 tbaa 4
+  v106 = load.ptr v0+16 align 3 tbaa 8
+  v107 = sext.i64 v78
+  v108 = ptradd v106, v107 * 1
+  store v9, v108 align 0
+  v109 = load.i32 v0+24 align 2 tbaa 3
+  v110 = add.i32 v109, v7
+  store v110, v0+24 align 2 tbaa 3
+  jmp b36
+b36:
+  v111 = add.i32 v43, v7
+  jmp b16(v111)
+fn @drive
+  sig () -> i64
+  slot s0 size 32 align 3
+b0:
+  v0 = slotaddr s0
+  v1 = iconst.i64 16
+  v2 = iconst.i64 2
+  v3 = call.ptr @sc_lk_malloc(v1) : (i64) -> ptr
+  v4 = call.ptr @sc_lk_malloc(v1) : (i64) -> ptr
+  v5 = call.ptr @sc_lk_malloc(v2) : (i64) -> ptr
+  v6 = iconst.i64 5
+  v7 = iconst.i64 9
+  v8 = iconst.i64 50
+  v9 = iconst.i64 90
+  v10 = iconst.i8 1
+  store v6, v3 align 3
+  store v7, v3+8 align 3
+  store v8, v4 align 3
+  store v9, v4+8 align 3
+  store v10, v5 align 0
+  store v10, v5+1 align 0
+  store v3, v0 align 3
+  store v4, v0+8 align 3
+  store v5, v0+16 align 3
+  v11 = iconst.i32 2
+  store v11, v0+24 align 2
+  store v11, v0+28 align 2
+  v12 = iconst.i32 8
+  call @rehash(v0, v12) : (ptr, i32) -> void
+  v13 = load.ptr v0 align 3
+  v14 = load.ptr v0+8 align 3
+  v15 = load.ptr v0+16 align 3
+  v16 = iconst.i64 0
+  v17 = iconst.i64 1
+  v18 = iconst.i64 8
+  jmp b1(v16, v16)
+b1(v19: i64, v20: i64):
+  v21 = icmp.ult v19, v18
+  br v21, b2, b5
+b2:
+  v22 = ptradd v15, v19 * 1
+  v23 = load.i8 v22 align 0
+  v24 = icmp.ne v23, v10
+  br v24, b4(v20), b3
+b3:
+  v25 = ptradd v13, v19 * 8
+  v26 = load.i64 v25 align 3
+  v27 = ptradd v14, v19 * 8
+  v28 = load.i64 v27 align 3
+  v29 = mul.i64 v26, v28
+  v30 = add.i64 v20, v29
+  jmp b4(v30)
+b4(v31: i64):
+  v32 = add.i64 v19, v17
+  jmp b1(v32, v31)
+b5:
+  call @sc_lk_free(v13) : (ptr) -> void
+  call @sc_lk_free(v14) : (ptr) -> void
+  call @sc_lk_free(v15) : (ptr) -> void
+  ret v20
+data @MALLOC_ALIGN size 4 align 2 ro bytes 10000000
+)",
+    );
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 1060);
+}
+
 // A copy of the bytes another copy wrote, no write since, copies from that copy's source (written later,
 // so not one slot with the copy's); the first copy then goes, its slot read by nothing else. Not after a store into the source, nor from a move whose
 // source and destination overlap (its source holds other bytes after it).

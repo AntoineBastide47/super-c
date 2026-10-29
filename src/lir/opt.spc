@@ -4406,7 +4406,9 @@ extend Opt {
     // Write `i`, which started memory state `states` for the type tags whose state `before` held
     // otherwise: each place of `recent` known in such a state that the write cannot touch holds its value
     // in the new state too. A write cannot touch a place of an alias class it writes none of (`write_bits`,
-    // a scope's class aside), nor a store bytes of its own address apart from its own.
+    // a scope's class aside), nor a store bytes of its own address apart from its own. A place moves only
+    // along the states a load of it reads: the untagged accesses' and its type's tag's; another tag's
+    // state may be its number by chance and then miss the writes of the place's own tag.
     fn carry(self: &mut Self, pk: &Package, b: &Body, i: u32, before: [u32; TBAA_TAGS]) {
         let t = b.insts[i as usize];
         let wb = self.write_bits(pk, b, i);
@@ -4415,7 +4417,8 @@ extend Opt {
         for r in 0..n {
             let p = self.places[self.recent[r] as usize];
             let mut to = NONE;
-            for g in 0..TBAA_TAGS {
+            let tags: [usize; 2] = [0, tbaa_of(p.ty) as usize];
+            for g in tags {
                 if unsafe before[g] == p.state && unsafe self.tstate[g] != p.state {
                     to = unsafe self.tstate[g];
                 }
@@ -6269,10 +6272,15 @@ const fn header_read(b: &Body, t: Inst, v: Value) bool {
     return rule == core::SR_LOAD && c != core::SIMD_LOAD_RAW || rule == core::SR_STORE && c != core::SIMD_STORE_RAW || (rule == core::SR_MLOAD || rule == core::SR_MSTORE) && c < core::SIMD_GATHER_PTR;
 }
 
-// The `Sym.alloc` of the function call `t` calls, ALLOC_NONE for any other instruction.
+// The `Sym.alloc` of the function call `t` calls, ALLOC_NONE for any other instruction and for a function
+// the package defines: its own code (wasm's C library, the runtime's leak tracker) reads what it writes.
 fn call_alloc(pk: &Package, b: &Body, t: Inst) u8 {
-    return if t.op == O_CALL {
-        pk.syms[b.syms[t.a as usize] as usize].alloc;
+    if t.op != O_CALL {
+        return ALLOC_NONE;
+    }
+    let s = pk.syms[b.syms[t.a as usize] as usize];
+    return if s.def == NONE {
+        s.alloc;
     } else {
         ALLOC_NONE;
     };

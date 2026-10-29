@@ -653,6 +653,65 @@ fn even_lanes_of_two_vectors_run() {
     assert_eq(run_wasm(lir.as_str(), drv.as_str()), 0);
 }
 
+// 32-byte vectors passed to and returned from calls, in a body that holds them in registers: with AVX2
+// and 32-byte vector registers (`vec 32`) in ymm registers, which no `vzeroupper` before the call or the
+// return clears; a sibling call too.
+@test
+fn wide_vectors_cross_calls() {
+    let lir = M"(lir ptr 8
+sym @twice fn global noinline
+sym @again fn global noinline
+sym @wide fn global
+fn @twice
+  sig (v8i32) -> v8i32
+b0(v0: v8i32):
+  v1 = add.v8i32 v0, v0
+  ret v1
+fn @again
+  sig (v8i32) -> v8i32
+b0(v0: v8i32):
+  v1 = sub.v8i32 v0, v0
+  v2 = add.v8i32 v1, v0
+  v3 = call.v8i32 @twice(v2) : (v8i32) -> v8i32
+  ret v3
+fn @wide
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8i32 v1 align 0
+  v3 = add.v8i32 v2, v2
+  v4 = call.v8i32 @twice(v3) : (v8i32) -> v8i32
+  v5 = call.v8i32 @again(v4) : (v8i32) -> v8i32
+  v6 = add.v8i32 v5, v2
+  store v6, v0 align 0
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+void wide(int32_t *, const int32_t *);
+int main(void) {
+  int32_t a[8], o[8];
+  for (int i = 0; i < 8; i++) a[i] = i * 1000 - 3000;
+  wide(o, a);
+  for (int i = 0; i < 8; i++) if (o[i] != a[i] * 9) return i + 1;
+  return 0;
+}
+)";
+    let ymm = format("lir ptr 8 vec 32\n{}", lir.slice(10, lir.len()));
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(ymm.as_str(), tgt::axis_index("linux", false), x64, WIDE | TAIL, &mut obj), "the AVX2 object");
+    obj.truncate(0);
+    assert(
+        object_of(ymm.as_str(), tgt::axis_index("windows", false), x64, WIDE | TAIL, &mut obj),
+        "the Microsoft x64 AVX2 object",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_native_with(lir, drv, TAIL), 0);
+    assert_eq(run_wide(ymm.as_str(), drv), 0);
+}
+
 // Lane-wise arithmetic of 16- and 32-byte vectors of every lane type, splats and vector constants (zero,
 // all ones, one word repeated, four words): each result's bits against C's, integers wrapping. With 32-byte
 // vectors in ymm registers too (`run_wide`).

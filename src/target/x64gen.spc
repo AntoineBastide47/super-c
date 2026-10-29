@@ -1948,6 +1948,14 @@ extend Gen {
         }
     }
 
+    // `upper_clear` before the call `lay` lays out, unless it passes or returns a 32-byte vector in a ymm
+    // register (its upper half an argument's; the callee runs the AVX encoding).
+    fn call_clear(self: &mut Self) {
+        if !ymm_parts(&self.lay) {
+            self.upper_clear();
+        }
+    }
+
     // A call of C function `name`.
     fn call_sym(self: &mut Self, name: str) {
         self.upper_clear();
@@ -5228,6 +5236,10 @@ extend Gen {
                 return false;
             }
         }
+        // The epilogue's `vzeroupper` would clear a 32-byte argument's upper half.
+        if self.ymm && ymm_parts(&self.lay) {
+            return false;
+        }
         self.tail_ret = i + 1;
         return true;
     }
@@ -5635,16 +5647,16 @@ extend Gen {
             let p = unsafe &*self.pkg;
             if p.no_plt && !self.win && p.syms[b.syms[t.a as usize] as usize].ext {
                 // `call *x@GOTPCREL(%rip)`: through the address slot (`-fno-plt`).
-                self.upper_clear();
+                self.call_clear();
                 self.c.rm(0, 0xFF, false, 2, x::rip(), false);
                 self.reloc_rip(x::R_GOTPCRELX, os, 0);
             } else {
-                self.upper_clear();
+                self.call_clear();
                 let at = self.c.call32();
                 self.rels.push(CRel { at: at, kind: x::R_PLT32, sym: os, addend: -4 });
             }
         } else {
-            self.upper_clear();
+            self.call_clear();
             self.c.call_r(S1);
         }
         self.called = true;
@@ -6385,8 +6397,11 @@ extend Gen {
             return self.refuse("a prologue past 255 bytes on Windows");
         }
         let body_n = self.c.len();
-        // Before the epilogue proper, which Microsoft x64's unwinder reads instruction by instruction.
-        self.upper_clear();
+        // Before the epilogue proper, which Microsoft x64's unwinder reads instruction by instruction; not
+        // when the result is a 32-byte vector in ymm0.
+        if !ymm_parts(&self.self_lay) {
+            self.upper_clear();
+        }
         // The canary's check: on a mismatch `__stack_chk_fail`, which does not return.
         if self.canary >= 0 {
             self.guard(S0);
@@ -6728,6 +6743,16 @@ const fn sse_of_op(op: u8, lt: u8, un: &mut bool) u32 {
         return 0x66_0FEF;
     }
     return NONE;
+}
+
+// Whether call layout `lay` passes an argument or the result in a ymm register: a 32-byte vector part.
+fn ymm_parts(lay: &ab::CallLayout) bool {
+    for k in 0..lay.parts.len() {
+        if lay.parts[k].v && lay.parts[k].size == 32 {
+            return true;
+        }
+    }
+    return false;
 }
 
 // The AVX2 form of vector operation `op` on lanes of `lt` (32 bytes): its legacy prefix << 16 | opcode map

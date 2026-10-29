@@ -691,7 +691,8 @@ pub struct Sym {
 pub const NONE: u32 = 0xFFFFFFFF;
 /// `Sym.alloc`: a C library or runtime allocation, which returns a block no other pointer reaches and
 /// writes no memory the program reads but `errno` (an `i32`); a C library or runtime free, which writes no
-/// memory the program may read.
+/// memory the program may read. Only for a call from outside it: a package that defines the function
+/// (wasm's C library, the runtime's leak tracker) treats it as any other (`lir::opt`'s `call_alloc`).
 pub const ALLOC_NONE: u8 = 0;
 pub const ALLOC_FRESH: u8 = 1;
 pub const ALLOC_FREE: u8 = 2;
