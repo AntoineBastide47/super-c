@@ -1070,6 +1070,95 @@ pub fn uses(b: &Body, t: Inst, out: &mut Vector<Value>) {
     }
 }
 
+/// Whether the address of a slot of `b` (through address arithmetic, selects and block parameters) is
+/// used but as an access's or a copy's address or a comparison's operand: a call, a store of it, a
+/// return. True also when the derivation does not settle in FRAME_ROUNDS rounds.
+pub fn frame_escapes(b: &Body) bool {
+    if b.slots.len() == 0 {
+        return false;
+    }
+    let ni = b.insts.len();
+    let mut d = Vector::<bool>::new();
+    d.resize_default(ni + b.params.len());
+    let mut uses_ = Vector::<Value>::new();
+    let mut edges = Vector::<u32>::new();
+    // Each round marks at least one more value or ends.
+    for round in 0..FRAME_ROUNDS + 1 {
+        if round == FRAME_ROUNDS {
+            return true;
+        }
+        let mut changed = false;
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                let der = t.op == O_SLOTADDR || t.op == O_PTRADD && derived(&d, ni, t.a) || t.op == O_SELECT && (derived(
+                    &d,
+                    ni,
+                    t.b,
+                ) || derived(&d, ni, t.c));
+                if der && !d[i as usize] {
+                    d[i as usize] = true;
+                    changed = true;
+                }
+            }
+            b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut edges);
+            for e in 0..edges.len() {
+                let tb = b.blocks[b.edge_target(edges[e]) as usize];
+                for q in 0..b.edge_nargs(edges[e]) {
+                    let p = ni + (tb.param_start + q) as usize;
+                    if derived(&d, ni, b.edge_arg(edges[e], q)) && !d[p] {
+                        d[p] = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for k in 0..b.blocks.len() {
+        let bk = b.blocks[k];
+        for i in bk.start..bk.start + bk.len {
+            let t = b.insts[i as usize];
+            if t.op == O_PTRADD || t.op == O_SELECT || t.op == O_ICMP || t.op == O_LOAD || t.op == O_JMP || t.op == O_BR || t.op == O_SWITCH {
+                continue;
+            }
+            // A store's, a copy's or a fill's address may be one (a copy's source too); a stored value or
+            // a length may not.
+            if t.op == O_STORE && derived(&d, ni, t.b) || (t.op == O_MEMCPY || t.op == O_MEMSET) && derived(&d, ni, t.c) {
+                return true;
+            }
+            if t.op == O_STORE || t.op == O_MEMCPY || t.op == O_MEMSET {
+                continue;
+            }
+            uses(b, t, &mut uses_);
+            for u in 0..uses_.len() {
+                if derived(&d, ni, uses_[u]) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Whether value `v` is marked in `d` (instructions, then block parameters past `ni`).
+fn derived(d: &Vector<bool>, ni: usize, v: Value) bool {
+    if v == VNONE || (v & VFLAG) != 0 {
+        return false;
+    }
+    return if (v & VPARAM) != 0 {
+        d[ni + (v & ~VPARAM) as usize];
+    } else {
+        d[v as usize];
+    };
+}
+
+// `frame_escapes` derives addresses in at most FRAME_ROUNDS rounds.
+const FRAME_ROUNDS: u32 = 8;
+
 /// Whether operand `c` of form `f` is a value.
 pub const fn operand_c(f: u8) bool {
     return f == F_TRI || f == F_SYS;

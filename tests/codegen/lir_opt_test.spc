@@ -106,6 +106,74 @@ fn same_result(before: &Package, after: &Package, name: str, args: []u64, want: 
     assert_eq(o2.value, want);
 }
 
+// Tail recursion elimination (`Package.tail`): a call of the body's own function whose result its block
+// returns becomes a jump back to the body's start; not when a slot's address escapes to another call,
+// since each call had a frame of its own.
+@test
+fn a_call_of_itself_returned_at_once_is_a_loop() {
+    let text = M"(lir ptr 8
+sym @keep fn global noinline
+sym @sum fn global
+sym @esc fn global
+fn @keep
+  sig (ptr) -> void
+b0(v0: ptr):
+  ret
+fn @sum
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v0, v2
+  br v3, b1, b2
+b1:
+  ret v1
+b2:
+  v4 = iconst.i64 1
+  v5 = sub.i64 v0, v4
+  v6 = add.i64 v1, v0
+  v7 = call.i64 @sum(v5, v6) : (i64, i64) -> i64
+  ret v7
+fn @esc
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1:
+  ret v0
+b2:
+  v3 = slotaddr s0
+  store v0, v3 align 3
+  call @keep(v3) : (ptr) -> void
+  v4 = iconst.i64 1
+  v5 = sub.i64 v0, v4
+  v6 = call.i64 @esc(v5) : (i64) -> i64
+  ret v6
+)";
+    let mut err = String::new();
+    let before = lparse::parse(text, &mut err).unwrap();
+    let mut after = lparse::parse(text, &mut err).unwrap();
+    after.tail = true;
+    let none = Vector::<bool>::new();
+    lopt::optimize(
+        &mut after,
+        &none,
+        lopt::Config {
+            inline: il::SPEED,
+            loops: lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+        },
+    );
+    let s = text_of(&after, "sum");
+    assert(!s.contains("call"), s.as_str());
+    let e = text_of(&after, "esc");
+    assert(e.contains("call.i64 @esc"), e.as_str());
+    let x: []u64 = [1000, 7];
+    same_result(&before, &after, "sum", x, 500507);
+    let y: []u64 = [5];
+    same_result(&before, &after, "esc", y, 0);
+}
+
 // A load of a slot whose address does not escape reads the value of the one store that writes its bytes
 // and dominates it, across a call; not when the address escapes, nor when another store writes them.
 @test

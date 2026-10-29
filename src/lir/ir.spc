@@ -1104,6 +1104,10 @@ pub struct Package {
     pub comp_dir: String,
     /// Bodies address their frames through the stack pointer, without a frame pointer, where they can.
     pub omit_fp: bool,
+    /// A call whose result its caller returns at once becomes a jump (`-foptimize-sibling-calls`): a call
+    /// of the body's own function, into its start (`lir::opt`); another, to the callee after the caller's
+    /// epilogue (the native backends).
+    pub tail: bool,
     /// The bodies with a stack canary (`PROTECT_*`).
     pub protect: u8,
     /// The bytes of a vector the native backend computes in one register (`target::table::Isa`), 0 for
@@ -1195,6 +1199,7 @@ extend Package {
             debug: false,
             comp_dir: String::new(),
             omit_fp: false,
+            tail: false,
             protect: PROTECT_NONE,
             fmath: 0,
             fma: false,
