@@ -68,10 +68,10 @@ extend<'a> Parser<'a> {
 
     fn run(self: &mut Self, err: &mut String) Option<Package> {
         if self.package() {
-            return Option::<Package>::Some(replace(&mut self.pkg, Package::new(8)));
+            return Some(replace(&mut self.pkg, Package::new(8)));
         }
         err.format_into("{}:{}: {}", self.line_no, self.at - self.line_start + 1, self.why);
-        return Option::<Package>::None;
+        return None;
     }
 
     const fn fail(self: &mut Self, why: str<'static>) bool {
@@ -173,9 +173,9 @@ extend<'a> Parser<'a> {
             return self.fail("expected an integer");
         }
         *out = if neg {
-            (v as i64).wrapping_neg();
+            (v as i64).wrapping_neg()
         } else {
-            v as i64;
+            v as i64
         };
         return true;
     }
@@ -288,7 +288,7 @@ extend<'a> Parser<'a> {
         if !self.name(&mut nm) {
             return false;
         }
-        *out = self.pkg.find_symbol(nm.as_str());
+        *out = self.pkg.find_symbol(&nm);
         return *out != NONE || self.fail("no symbol of this name is declared");
     }
 
@@ -404,11 +404,11 @@ extend<'a> Parser<'a> {
                 continue;
             }
             let ok = if self.at == self.line_start && self.peek() == b'b' {
-                self.block_header();
+                self.block_header()
             } else if self.at != self.line_start {
-                self.body_line();
+                self.body_line()
             } else {
-                self.top_line();
+                self.top_line()
             };
             if !ok {
                 return false;
@@ -426,7 +426,7 @@ extend<'a> Parser<'a> {
             if !self.numbered(b'f', &mut k) || !self.quoted(&mut path) {
                 return false;
             }
-            if k as usize != self.pkg.files.len() || self.pkg.add_file(path.as_str()) != k {
+            if k as usize != self.pkg.files.len() || self.pkg.add_file(&path) != k {
                 return self.fail("files are numbered in order, each path once");
             }
             return self.line_end_loc(&mut loc);
@@ -442,13 +442,13 @@ extend<'a> Parser<'a> {
                 return self.fail("expected 'fn', 'data' or 'tls', then 'global' or 'local'");
             }
             let sk = if kind == "fn" {
-                SK_FUNC;
+                SK_FUNC
             } else if kind == "tls" {
-                SK_TLS;
+                SK_TLS
             } else {
-                SK_DATA;
+                SK_DATA
             };
-            let s = self.pkg.add_symbol(nm.as_str(), sk, ast::pick(link == "global", SL_GLOBAL, SL_LOCAL));
+            let s = self.pkg.add_symbol(&nm, sk, ast::pick(link == "global", SL_GLOBAL, SL_LOCAL));
             if s == NONE {
                 return self.fail("the symbol is declared twice");
             }
@@ -461,7 +461,7 @@ extend<'a> Parser<'a> {
                 if !self.quoted(&mut sp) {
                     return false;
                 }
-                self.pkg.set_section(s, sp.as_str());
+                self.pkg.set_section(s, &sp);
             }
             return self.line_end_loc(&mut loc);
         }
@@ -713,9 +713,9 @@ extend<'a> Parser<'a> {
         let s = w.ends_with(".s");
         let t = type_of_text(
             if s {
-                w.slice(0, w.len() - 2);
+                w.slice(0, w.len() - 2)
             } else {
-                w;
+                w
             },
         );
         if t == T_NONE || s && t != T_I8 && t != T_I16 {
@@ -1020,7 +1020,7 @@ extend<'a> Parser<'a> {
                     }
                 },
                 None => {},
-            };
+            }
         }
         if op == 0 || op == O_CALLIND && first == 1 {
             return self.fail("unknown opcode");
@@ -1073,9 +1073,9 @@ extend<'a> Parser<'a> {
             // The lane: decimal digits.
             let mut lane: u32 = 0;
             let d = if pi < self.parts.len() {
-                self.parts[pi];
+                self.parts[pi]
             } else {
-                "";
+                ""
             };
             if d.len() == 0 || d.len() > 2 {
                 return self.fail("expected a lane");
@@ -1111,7 +1111,7 @@ extend<'a> Parser<'a> {
                         t.aux = *k;
                     },
                     None => {},
-                };
+                }
             }
             if !found {
                 return self.fail("unknown vector operation");
@@ -1162,9 +1162,9 @@ extend<'a> Parser<'a> {
         // The inline sites: one per instruction from the first one on, the earlier ones 0.
         if site.line != 0 || self.body.inl.len() != 0 {
             let sl = if site.line == 0 {
-                0u32;
+                0u32
             } else {
-                self.site_line(site, self.ord);
+                self.site_line(site, self.ord)
             };
             self.body.inl.resize_default(v as usize);
             self.body.inl.push(sl);
@@ -1192,9 +1192,9 @@ extend<'a> Parser<'a> {
                 }
                 let bits = type_bits(t.ty, self.pkg.ptr_bytes);
                 let u = if bits >= 64 {
-                    v as u64;
+                    v as u64
                 } else {
-                    v as u64 & (1u64 << bits as u64) - 1;
+                    v as u64 & (1u64 << bits as u64) - 1
                 };
                 t.a = u as u32;
                 t.b = (u >> 32) as u32;
@@ -1460,7 +1460,7 @@ extend<'a> Parser<'a> {
             if !self.quoted(&mut m) {
                 return false;
             }
-            t.a = self.body.ref_msg(self.pkg.add_message(m.as_str()));
+            t.a = self.body.ref_msg(self.pkg.add_message(&m));
             return !self.keyword("lane") || self.inst_value(1, &mut t.b);
         }
         if op == O_FENCE {
@@ -1475,7 +1475,7 @@ extend<'a> Parser<'a> {
         if !self.quoted(&mut m) {
             return false;
         }
-        let k = self.body.ref_msg(self.pkg.add_message(m.as_str()));
+        let k = self.body.ref_msg(self.pkg.add_message(&m));
         self.body.pool.push(k);
         return true;
     }
@@ -1572,9 +1572,9 @@ extend<'a> Parser<'a> {
         for k in 0..self.fixes.len() {
             let fx = self.fixes[k];
             let n = if fx.pool {
-                self.body.pool[fx.at as usize];
+                self.body.pool[fx.at as usize]
             } else {
-                match_field(self.body.insts[(fx.at >> 2) as usize], fx.at & 3);
+                match_field(self.body.insts[(fx.at >> 2) as usize], fx.at & 3)
             };
             if n as usize >= self.vmap.len() {
                 // Report at the use: its line and the column after the value.

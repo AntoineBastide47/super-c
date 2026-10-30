@@ -51,7 +51,7 @@ pub(package) fn compiler_id() u64 {
     if exe.len() == 0 {
         return 0;
     }
-    let h = file_id(exe.as_str());
+    let h = file_id(&exe);
     unsafe atomic::store_u64(&mut G_CID, h, 0);
     return h;
 }
@@ -198,9 +198,9 @@ pub(package) type Buf64 = Array<char, 64>;
 
 /// Format `src` into `out` at `width` columns. Returns false on lex/parse errors or a
 /// comment-count mismatch; callers must not use `out` after failure.
-pub(package) fn format_source(src: &String, path: str, width: i32, migrate: bool, out: &mut String) bool {
+pub(package) fn format_source(src: &String, path: str, width: i32, out: &mut String) bool {
     let mut errs = diag::Errors::new();
-    if format_quiet(src, path, width, migrate, out, &mut errs) {
+    if format_quiet(src, path, width, out, &mut errs) {
         return true;
     }
     errs.finalize(src.as_str(), path);
@@ -210,14 +210,7 @@ pub(package) fn format_source(src: &String, path: str, width: i32, migrate: bool
 
 /// `format_source` with the lexer and parser errors, and the formatter's own refusal, recorded in `errs`
 /// against `src` instead of printed.
-pub(package) fn format_quiet(
-    src: &String,
-    path: str,
-    width: i32,
-    migrate: bool,
-    out: &mut String,
-    errs: &mut diag::Errors,
-) bool {
+pub(package) fn format_quiet(src: &String, path: str, width: i32, out: &mut String, errs: &mut diag::Errors) bool {
     let mut vsrc = src.clone();
     let mut lx = lex::Lexer::new(&mut vsrc, path);
     lx.keep_trivia = true;
@@ -238,7 +231,7 @@ pub(package) fn format_quiet(
             sig.push(t);
         }
     }
-    let mut ps = par::Parser::new(sig, vsrc.as_str(), path);
+    let mut ps = par::Parser::new(sig, &vsrc, path);
     // The formatter prints `@derive` as attribute text and reprints the source items 1:1, so the
     // synthesized extends must not exist in its AST.
     ps.expand_derive = false;
@@ -248,7 +241,7 @@ pub(package) fn format_quiet(
         return false;
     }
     let ast = ps.take_ast();
-    let emitted = fbld::format_program(&ast, src.as_str(), width, migrate, out);
+    let emitted = fbld::format_program(&ast, src.as_str(), width, out);
     if emitted != ncomments {
         // Either direction is a formatter defect: a dropped comment or a comment printed twice.
         errs.emit(
@@ -357,7 +350,7 @@ pub(package) fn process_allowed(prog: str) bool {
 /// `spawn_args` of program `file` (a path; empty: `args[0]` searched in PATH), `args` its argv.
 pub(package) fn spawn_at(file: str, args: &Vector<String>, log: str) Option<process::Child> {
     if !process_allowed(args.at(0).as_str()) {
-        return Option::<process::Child>::None;
+        return None;
     }
     let mut argv = Vector::<str>::with_capacity(args.len());
     for i in 0..args.len() {
@@ -365,7 +358,7 @@ pub(package) fn spawn_at(file: str, args: &Vector<String>, log: str) Option<proc
     }
     let mut cmd = process::Command::new(argv[0..argv.len()]);
     if file.len() != 0 {
-        cmd.program = Option::<str>::Some(file);
+        cmd.program = Some(file);
     }
     if log.len() != 0 {
         cmd.stdout = process::Redirect::Path(log);
@@ -436,11 +429,11 @@ pub(package) fn copy_file(srcp: str, dstp: str) bool {
 pub(package) fn unity_members(root: str, out: &mut Set<String>) {
     for k in 0..SHARD_MAX + 1 {
         let up = if k == 0 {
-            format("{}/__sc_unity.c", root);
+            format("{}/__sc_unity.c", root)
         } else {
-            format("{}/__sc_pack{}.c", root, k - 1);
+            format("{}/__sc_pack{}.c", root, k - 1)
         };
-        let body = loader::read_file(up.as_str());
+        let body = loader::read_file(&up);
         if body.is_none() {
             if k != 0 {
                 return;
@@ -505,10 +498,10 @@ pub(package) fn write_file_atomic(path: str, body: str) bool {
 pub(package) fn write_file_atomic_parts(path: str, head: str, body: str) bool {
     let mut tmp = String::from_str(path);
     tmp.push_str(".tmp");
-    if write_file_parts(tmp.as_str(), head, body) && fs::rename(tmp.as_str(), path).is_ok() {
+    if write_file_parts(&tmp, head, body) && fs::rename(&tmp, path).is_ok() {
         return true;
     }
-    let _ = fs::unlink(tmp.as_str());
+    let _ = fs::unlink(&tmp);
     return false;
 }
 
@@ -517,7 +510,7 @@ pub(package) fn write_file_atomic_parts(path: str, head: str, body: str) bool {
 pub(package) fn list_dir(dir: str, hidden: bool) Option<Vector<String>> {
     let opened = fs::read_dir(dir);
     if opened.is_err() {
-        return Option::<Vector<String>>::None;
+        return None;
     }
     let mut d = opened.unwrap();
     let mut names = Vector::<String>::new();
@@ -528,7 +521,7 @@ pub(package) fn list_dir(dir: str, hidden: bool) Option<Vector<String>> {
         }
         names.push(String::from_str(e.name));
     }
-    return Option::<Vector<String>>::Some(names);
+    return Some(names);
 }
 
 /// Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
@@ -558,7 +551,7 @@ pub(package) fn publish_file(path: str, body: str) i32 {
 pub(package) fn prune_orphans(dir: str, keep: &Vector<String>) {
     let mut ks = Set::<str>::new();
     for i in 0..keep.len() {
-        ks.insert(keep[i].as_str());
+        ks.insert(&keep[i]);
     }
     let mut path = String::from_str(dir);
     prune_dir(&mut path, &ks);
@@ -602,7 +595,7 @@ pub(package) fn write_super_rt(gen_dir: str) i32 {
     let mut h = String::from_str("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n");
     h.push_str(rth::super_rt_h());
     h.push_str("#endif\n");
-    let hr = publish_file(path.as_str(), h.as_str());
+    let hr = publish_file(&path, &h);
     if hr < 0 {
         unsafe stdio::perror(path.cstr());
         return -1;

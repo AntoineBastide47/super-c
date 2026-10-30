@@ -72,11 +72,11 @@ const fn int(s: str, i: &mut usize, out: &mut i64) bool {
     while j < s.len() {
         let c = lower(s.byte_at(j));
         let d: u64 = if c >= b'0' && c <= b'9' {
-            c - b'0';
+            c - b'0'
         } else if c >= b'a' && c <= b'f' {
-            c - b'a' + 10;
+            c - b'a' + 10
         } else {
-            99u64;
+            99u64
         };
         if d >= radix {
             break;
@@ -88,9 +88,9 @@ const fn int(s: str, i: &mut usize, out: &mut i64) bool {
         return false;
     }
     *out = if neg {
-        (v as i64).wrapping_neg();
+        (v as i64).wrapping_neg()
     } else {
-        v as i64;
+        v as i64
     };
     *i = j;
     return true;
@@ -111,14 +111,14 @@ pub(package) fn float_bits(s: str, i: &mut usize, f64: bool, out: &mut u64) bool
         j += 1;
     }
     let mb: u32 = if f64 {
-        52;
+        52
     } else {
-        23;
+        23
     };
     let eb: u32 = if f64 {
-        11;
+        11
     } else {
-        8;
+        8
     };
     let sign: u64 = neg as u64 << mb + eb;
     let emax: u64 = (1u64 << eb) - 1;
@@ -126,9 +126,9 @@ pub(package) fn float_bits(s: str, i: &mut usize, f64: bool, out: &mut u64) bool
     if rest.starts_with("infinity") || rest.starts_with("inf") {
         *out = sign | emax << mb;
         *i = j + if rest.starts_with("infinity") {
-            8usize;
+            8usize
         } else {
-            3usize;
+            3usize
         };
         return true;
     }
@@ -164,7 +164,7 @@ pub(package) fn float_bits(s: str, i: &mut usize, f64: bool, out: &mut u64) bool
                 None => {
                     return false;
                 },
-            };
+            }
         } else {
             switch txt.parse_f32() {
                 Some(v) => {
@@ -173,7 +173,7 @@ pub(package) fn float_bits(s: str, i: &mut usize, f64: bool, out: &mut u64) bool
                 None => {
                     return false;
                 },
-            };
+            }
         }
         *i = e;
         return true;
@@ -194,9 +194,9 @@ pub(package) fn float_bits(s: str, i: &mut usize, f64: bool, out: &mut u64) bool
             continue;
         }
         let d: u64 = if c >= b'0' && c <= b'9' {
-            c - b'0';
+            c - b'0'
         } else if c >= b'a' && c <= b'f' {
-            c - b'a' + 10;
+            c - b'a' + 10
         } else {
             break;
         };
@@ -252,9 +252,9 @@ const fn round_bits(m0: u64, e0: i64, sticky0: bool, mb: u32, eb: u32) u64 {
         // Below half the smallest subnormal rounds to 0; exactly half to 0 (even); above to it.
         let half = keep == 0 && (m > 1u64 << 63 || sticky0);
         return if half {
-            1u64;
+            1u64
         } else {
-            0u64;
+            0u64
         };
     }
     let drop = 64 - keep as u32;
@@ -283,14 +283,14 @@ const fn round_bits(m0: u64, e0: i64, sticky0: bool, mb: u32, eb: u32) u64 {
 /// hexadecimal `0x1.<digits>p<exp>` (a subnormal normalized), each signed.
 pub(package) fn float_text(o: &mut String, v: u64, f64: bool) {
     let mb: u32 = if f64 {
-        52;
+        52
     } else {
-        23;
+        23
     };
     let eb: u32 = if f64 {
-        11;
+        11
     } else {
-        8;
+        8
     };
     let bias: i64 = (1i64 << eb - 1) - 1;
     if (v >> mb + eb & 1) != 0 {
@@ -340,9 +340,9 @@ pub(package) fn float_text(o: &mut String, v: u64, f64: bool) {
             let d = (f >> 4 * k & 0xF) as u8;
             o.push_byte(
                 if d < 10 {
-                    b'0' + d;
+                    b'0' + d
                 } else {
-                    b'a' + d - 10;
+                    b'a' + d - 10
                 },
             );
         }
@@ -442,9 +442,9 @@ fn sym_ref(s: str, i: &mut usize, name: &mut String, addend: &mut i64) bool {
             return false;
         }
         *addend = if neg {
-            -v;
+            -v
         } else {
-            v;
+            v
         };
         j = k;
     }
@@ -491,9 +491,9 @@ pub(package) fn assemble(text: str, out: &mut Vector<u8>, fx: &mut Vector<Fix>, 
             if !int(text, &mut i, &mut n.a) {
                 ok = sym_ref(text, &mut i, &mut sym, &mut add) && add == 0;
                 k1 = if r.imm == t::K::FUNC {
-                    w::R_FUNCTION_INDEX_LEB;
+                    w::R_FUNCTION_INDEX_LEB
                 } else {
-                    w::R_GLOBAL_INDEX_LEB;
+                    w::R_GLOBAL_INDEX_LEB
                 };
                 n.wide |= 1;
             }
@@ -588,7 +588,7 @@ pub(package) fn assemble(text: str, out: &mut Vector<u8>, fx: &mut Vector<Fix>, 
         _ => {
             ok = false;
         },
-    };
+    }
     ws(text, &mut i);
     if !ok || i != text.len() {
         err.format_into("bad operands in '{}'", text);
@@ -664,9 +664,9 @@ fn v128_lanes(s: str, i: &mut usize, shuf: bool, lo: &mut u64, hi: &mut u64) boo
     *hi = 0;
     for k in 0..n {
         let x = if lb == 64 {
-            vals[k];
+            vals[k]
         } else {
-            vals[k] & (1u64 << lb) - 1;
+            vals[k] & (1u64 << lb) - 1
         };
         let bit = k as u32 * lb;
         if bit < 64 {
@@ -737,24 +737,24 @@ pub(package) fn print_ins(n: &t::Ins, o: &mut String) {
         },
         t::K::V128 | t::K::SHUF => {
             let lb: u32 = if r.imm == t::K::SHUF {
-                8;
+                8
             } else {
-                32;
+                32
             };
             let cnt = 128 / lb;
             for k in 0..cnt {
                 o.push_str(
                     if k == 0 {
-                        " ";
+                        " "
                     } else {
-                        ", ";
+                        ", "
                     },
                 );
                 let bit = k * lb;
                 let x = if bit < 64 {
-                    n.lo >> bit;
+                    n.lo >> bit
                 } else {
-                    n.hi >> bit - 64;
+                    n.hi >> bit - 64
                 };
                 o.push_u64(x & (1u64 << lb) - 1);
             }
@@ -765,5 +765,5 @@ pub(package) fn print_ins(n: &t::Ins, o: &mut String) {
         _ => {
             o.format_into(" {}", n.a);
         },
-    };
+    }
 }

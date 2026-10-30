@@ -87,7 +87,7 @@ extend Kernels {
         let name = format("k{}", self.labels.len());
         self.decls.format_into(
             "@noinline\n{}",
-            String::from_str(src).replace("fn k(", format("fn {}(", name.as_str()).as_str()).as_str(),
+            String::from_str(src).replace("fn k(", format("fn {}(", &name).as_str()).as_str(),
         );
         self.calls.format_into("    t = t + ({}{}) as i32;\n", name.as_str(), args.slice(1, args.len()));
         self.labels.push(String::from_str(label));
@@ -112,7 +112,7 @@ extend Kernels {
             self.calls.as_str(),
         );
         let ops: []str = RELEASE;
-        let b = h::diff_build(src.as_str(), ops);
+        let b = h::diff_build(&src, ops);
         if !b.built {
             eprintln("{}", b.diag.as_str());
         }
@@ -125,19 +125,19 @@ extend Kernels {
         for i in 0..self.labels.len() {
             let fname = format("main__k{}", i);
             let label = self.labels.at(i).as_str();
-            if !fn_body(c.as_str(), fname.as_str()).contains("__sc_si_aarch64__") {
+            if !fn_body(&c, &fname).contains("__sc_si_aarch64__") {
                 eprintln("{}: no entry call in the C of {}", label, fname.as_str());
                 failed = true;
             }
             for w in 0..self.want.at(i).len() {
-                let d = h::asm_match(code.as_str(), fname.as_str(), [self.want.at(i).at(w).as_str()], []);
+                let d = h::asm_match(&code, &fname, [self.want.at(i).at(w).as_str()], []);
                 if d.len() != 0 {
                     eprintln("{}: {}", label, d.as_str());
                     failed = true;
                 }
             }
             for a in 0..self.avoid.at(i).len() {
-                let d = h::asm_match(code.as_str(), fname.as_str(), [], [self.avoid.at(i).at(a).as_str()]);
+                let d = h::asm_match(&code, &fname, [], [self.avoid.at(i).at(a).as_str()]);
                 if d.len() != 0 {
                     eprintln("{}: {}", label, d.as_str());
                     failed = true;
@@ -154,7 +154,7 @@ fn fn_body<'a>(c: str<'a>, name: str) str<'a> {
     let head = format(" {}(", name);
     let mut at: usize = 0;
     loop {
-        let k = c.slice(at, c.len()).find(head.as_str());
+        let k = c.slice(at, c.len()).find(&head);
         if k < 0 {
             return "";
         }
@@ -164,9 +164,9 @@ fn fn_body<'a>(c: str<'a>, name: str) str<'a> {
         if eol > 0 && rest.slice(0, eol as usize).ends_with("{") {
             let end = rest.find("\n}\n");
             return if end > 0 {
-                rest.slice(0, end as usize);
+                rest.slice(0, end as usize)
             } else {
-                "";
+                ""
             };
         }
         at = st + head.len();
@@ -438,7 +438,7 @@ fn main() i32 {
 }
 )",
     );
-    p.mkfile("main.spc", src.as_str());
+    p.mkfile("main.spc", &src);
     assert_eq(build_run(&p, ""), 0);
 }
 
@@ -489,7 +489,7 @@ fn build_run(p: &cli::Proj, flags: str) i32 {
     let mut out = format("{}/.app_out", root);
     let rc = cli::run_io(cmd.cstr(), null, out.cstr(), null);
     if rc != 0 {
-        eprintln("{}", cli::read_text(out.as_str()).as_str());
+        eprintln("{}", cli::read_text(&out).as_str());
     }
     return rc;
 }
@@ -574,9 +574,9 @@ fn crc(c0: u32, data: u64, bytes: u64, poly: u32) u32 {
     for i in 0..bytes * 8 {
         let bit = (data >> i & 1) as u32;
         c = if ((c ^ bit) & 1) != 0 {
-            c >> 1 ^ poly;
+            c >> 1 ^ poly
         } else {
-            c >> 1;
+            c >> 1
         };
     }
     return c;

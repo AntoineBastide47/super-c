@@ -113,9 +113,9 @@ pub fn get_env(name: str) Option<String> {
     let mut n = String::from_str(name);
     let p = unsafe c_getenv(n.cstr());
     if p == null {
-        return Option::<String>::None;
+        return None;
     }
-    return Option::<String>::Some(unsafe String::from_cstr(p));
+    return Some(unsafe String::from_cstr(p));
 }
 
 /// Whether environment variable `name` is set to exactly `value`.

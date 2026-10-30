@@ -226,9 +226,9 @@ const fn isnanf(x: f32) bool {
 // musl's `__math_*`: the results of the special cases, computed so they are correctly signed.
 const fn xflow(sign: u32, y: f64) f64 {
     return if sign != 0 {
-        -y;
+        -y
     } else {
-        y;
+        y
     } * y;
 }
 
@@ -246,17 +246,17 @@ const fn invalid(x: f64) f64 {
 
 const fn divzero(sign: u32) f64 {
     return if sign != 0 {
-        -1.0;
+        -1.0
     } else {
-        1.0;
+        1.0
     } / 0.0;
 }
 
 const fn xflowf(sign: u32, y: f32) f32 {
     return if sign != 0 {
-        -y;
+        -y
     } else {
-        y;
+        y
     } * y;
 }
 
@@ -274,9 +274,9 @@ const fn invalidf(x: f32) f32 {
 
 const fn divzerof(sign: u32) f32 {
     return if sign != 0 {
-        -1.0f32;
+        -1.0f32
     } else {
-        1.0f32;
+        1.0f32
     } / 0.0f32;
 }
 
@@ -580,14 +580,14 @@ pub const fn remquo(x0: f64, y0: f64, quo: *mut i32) f64 {
     }
     q &= 0x7fffffff;
     unsafe *quo = if sx != sy {
-        0 - q as i32;
+        0 - q as i32
     } else {
-        q as i32;
+        q as i32
     };
     return if sx {
-        -x;
+        -x
     } else {
-        x;
+        x
     };
 }
 
@@ -681,14 +681,14 @@ pub const fn remquof(x0: f32, y0: f32, quo: *mut i32) f32 {
     }
     q &= 0x7fffffff;
     unsafe *quo = if sx != sy {
-        0 - q as i32;
+        0 - q as i32
     } else {
-        q as i32;
+        q as i32
     };
     return if sx {
-        -x;
+        -x
     } else {
-        x;
+        x
     };
 }
 
@@ -718,15 +718,15 @@ pub const fn fmin(x: f64, y: f64) f64 {
     let sx = bits(x) >> 63 != 0;
     if sx != (bits(y) >> 63 != 0) {
         return if sx {
-            x;
+            x
         } else {
-            y;
+            y
         };
     }
     return if x < y {
-        x;
+        x
     } else {
-        y;
+        y
     };
 }
 
@@ -742,15 +742,15 @@ pub const fn fmax(x: f64, y: f64) f64 {
     let sx = bits(x) >> 63 != 0;
     if sx != (bits(y) >> 63 != 0) {
         return if sx {
-            y;
+            y
         } else {
-            x;
+            x
         };
     }
     return if x < y {
-        y;
+        y
     } else {
-        x;
+        x
     };
 }
 
@@ -766,15 +766,15 @@ pub const fn fminf(x: f32, y: f32) f32 {
     let sx = bitsf(x) >> 31 != 0;
     if sx != (bitsf(y) >> 31 != 0) {
         return if sx {
-            x;
+            x
         } else {
-            y;
+            y
         };
     }
     return if x < y {
-        x;
+        x
     } else {
-        y;
+        y
     };
 }
 
@@ -790,15 +790,15 @@ pub const fn fmaxf(x: f32, y: f32) f32 {
     let sx = bitsf(x) >> 31 != 0;
     if sx != (bitsf(y) >> 31 != 0) {
         return if sx {
-            y;
+            y
         } else {
-            x;
+            x
         };
     }
     return if x < y {
-        y;
+        y
     } else {
-        x;
+        x
     };
 }
 
@@ -894,9 +894,9 @@ const fn normalize(x: f64) Num {
         ix = bits(x * 0x1p63);
         e = (ix >> 52 & 0x7ff) as i32;
         e = if e != 0 {
-            e - 63;
+            e - 63
         } else {
-            0x800;
+            0x800
         };
     }
     ix &= (1u64 << 52) - 1;
@@ -1079,9 +1079,9 @@ pub const fn fmaf(x: f32, y: f32, z: f32) f32 {
     // bit in the direction of the error.
     let neg = ui >> 63 != 0;
     let err = if neg == z as f64 > xy {
-        xy - result + z as f64;
+        xy - result + z as f64
     } else {
-        z as f64 - result + xy;
+        z as f64 - result + xy
     };
     if neg == err < 0.0 {
         ui += 1;
@@ -1183,9 +1183,9 @@ fn rem_pio2_large(x: &[f64; 3], y: &mut [f64; 2], e0: i32, nx: i32, prec: i32) i
     let mut fq: [f64; 20] = [0.0; 20];
     let mut q: [f64; 20] = [0.0; 20];
     let jk: i32 = if prec == 0 {
-        3;
+        3
     } else {
-        4;
+        4
     };
     let jp = jk;
     // Determine jx, jv, q0; note that 3 > q0.
@@ -1200,9 +1200,9 @@ fn rem_pio2_large(x: &[f64; 3], y: &mut [f64; 2], e0: i32, nx: i32, prec: i32) i
     let m = jx + jk;
     for i in 0..(m + 1) as usize {
         unsafe f[i] = if j < 0 {
-            0.0;
+            0.0
         } else {
-            (unsafe IPIO2[j as usize]) as f64;
+            (unsafe IPIO2[j as usize]) as f64
         };
         j += 1;
     }
@@ -1358,9 +1358,9 @@ fn rem_pio2_large(x: &[f64; 3], y: &mut [f64; 2], e0: i32, nx: i32, prec: i32) i
         i -= 1;
     }
     y[0] = if ih == 0 {
-        fw3;
+        fw3
     } else {
-        -fw3;
+        -fw3
     };
     if prec != 0 {
         fw3 = fq[0] - fw3;
@@ -1368,9 +1368,9 @@ fn rem_pio2_large(x: &[f64; 3], y: &mut [f64; 2], e0: i32, nx: i32, prec: i32) i
             fw3 += unsafe fq[ii];
         }
         y[1] = if ih == 0 {
-            fw3;
+            fw3
         } else {
-            -fw3;
+            -fw3
         };
     }
     return n & 7;
@@ -1638,9 +1638,9 @@ const fn k_tan(x0: f64, y0: f64, odd: i32) f64 {
         s = (1 - 2 * odd) as f64;
         v = s - 2.0 * (x + (r - w * w / (w + s)));
         return if sign {
-            -v;
+            -v
         } else {
-            v;
+            v
         };
     }
     if odd == 0 {
@@ -1784,9 +1784,9 @@ const fn k_tandf(x: f64, odd: i32) f32 {
     let u = TF[0] + z * TF[1];
     r = x + s * u + s * w * (t + w * r);
     return if odd != 0 {
-        -1.0 / r;
+        -1.0 / r
     } else {
-        r;
+        r
     } as f32;
 }
 
@@ -1821,9 +1821,9 @@ pub fn sinf(x: f32) f32 {
         }
         return k_sindf(
             if sign {
-                -(xd + PIO2_D2);
+                -(xd + PIO2_D2)
             } else {
-                -(xd - PIO2_D2);
+                -(xd - PIO2_D2)
             },
         );
     }
@@ -1838,9 +1838,9 @@ pub fn sinf(x: f32) f32 {
         }
         return k_sindf(
             if sign {
-                xd + PIO2_D4;
+                xd + PIO2_D4
             } else {
-                xd - PIO2_D4;
+                xd - PIO2_D4
             },
         );
     }
@@ -1885,9 +1885,9 @@ pub fn cosf(x: f32) f32 {
             // |x| ~> 3*pi/4
             return -k_cosdf(
                 if sign {
-                    xd + PIO2_D2;
+                    xd + PIO2_D2
                 } else {
-                    xd - PIO2_D2;
+                    xd - PIO2_D2
                 },
             );
         }
@@ -1902,9 +1902,9 @@ pub fn cosf(x: f32) f32 {
             // |x| ~> 7*pi/4
             return k_cosdf(
                 if sign {
-                    xd + PIO2_D4;
+                    xd + PIO2_D4
                 } else {
-                    xd - PIO2_D4;
+                    xd - PIO2_D4
                 },
             );
         }
@@ -1953,18 +1953,18 @@ pub fn tanf(x: f32) f32 {
             // |x| ~<= 3pi/4
             return k_tandf(
                 if sign {
-                    xd + PIO2_D1;
+                    xd + PIO2_D1
                 } else {
-                    xd - PIO2_D1;
+                    xd - PIO2_D1
                 },
                 1,
             );
         }
         return k_tandf(
             if sign {
-                xd + PIO2_D2;
+                xd + PIO2_D2
             } else {
-                xd - PIO2_D2;
+                xd - PIO2_D2
             },
             0,
         );
@@ -1975,18 +1975,18 @@ pub fn tanf(x: f32) f32 {
             // |x| ~<= 7*pi/4
             return k_tandf(
                 if sign {
-                    xd + PIO2_D3;
+                    xd + PIO2_D3
                 } else {
-                    xd - PIO2_D3;
+                    xd - PIO2_D3
                 },
                 1,
             );
         }
         return k_tandf(
             if sign {
-                xd + PIO2_D4;
+                xd + PIO2_D4
             } else {
-                xd - PIO2_D4;
+                xd - PIO2_D4
             },
             0,
         );
@@ -3997,9 +3997,9 @@ fn pow_special(tmp: f64, sbits0: u64, ki: u64) f64 {
         // rounding that can cause 0.5+E/2 ulp error where E is the worst-case ulp error outside the
         // subnormal range. So this is only useful if the goal is better than 1 ulp worst-case error.
         let one = if y < 0.0 {
-            -1.0;
+            -1.0
         } else {
-            1.0;
+            1.0
         };
         let mut lo = scale - y + scale * tmp;
         let hi = one + y;
@@ -4022,9 +4022,9 @@ fn pow_exp(x: f64, xtail: f64, sign_bias: u32) f64 {
         if abstop.wrapping_sub(top12(0x1p-54)) >= 0x80000000 {
             // Avoid spurious underflow for tiny x. Note: 0 is common input.
             return if sign_bias != 0 {
-                -1.0;
+                -1.0
             } else {
-                1.0;
+                1.0
             };
         }
         if abstop >= top12(1024.0) {
@@ -4131,9 +4131,9 @@ pub fn pow(x: f64, y: f64) f64 {
             // Without the barrier some versions of clang hoist the 1/x2 and thus division by zero
             // exception can be signaled spuriously.
             return if iy >> 63 != 0 {
-                1.0 / x2;
+                1.0 / x2
             } else {
-                x2;
+                x2
             };
         }
         // Here x and y are non-zero finite.
@@ -4159,9 +4159,9 @@ pub fn pow(x: f64, y: f64) f64 {
                 return 1.0;
             }
             return if ix > bits(1.0) == topy < 0x800 {
-                oflow(0);
+                oflow(0)
             } else {
-                uflow(0);
+                uflow(0)
             };
         }
         if topx == 0 {
@@ -4618,9 +4618,9 @@ pub const fn powf(x: f32, y: f32) f32 {
             // Without the barrier some versions of clang hoist the 1/x2 and thus division by zero
             // exception can be signaled spuriously.
             return if (iy & 0x80000000) != 0 {
-                1.0f32 / x2;
+                1.0f32 / x2
             } else {
-                x2;
+                x2
             };
         }
         // x and y are non-zero finite.
@@ -4887,9 +4887,9 @@ pub fn atan(x0: f64) f64 {
         }
         let z = ATANHI[3] + 0x1p-120;
         return if sign != 0 {
-            -z;
+            -z
         } else {
-            z;
+            z
         };
     }
     let mut id: i32 = -1;
@@ -4933,9 +4933,9 @@ pub fn atan(x0: f64) f64 {
     }
     z = unsafe ATANHI[id as usize] - (x * (s1 + s2) - unsafe ATANLO[id as usize] - x);
     return if sign != 0 {
-        -z;
+        -z
     } else {
-        z;
+        z
     };
 }
 
@@ -4972,9 +4972,9 @@ pub fn atan2(y: f64, x: f64) f64 {
     // when x = 0
     if (ix | lx) == 0 {
         return if (m & 1) != 0 {
-            -PI / 2.0;
+            -PI / 2.0
         } else {
-            PI / 2.0;
+            PI / 2.0
         };
     }
     // when x is INF
@@ -5005,17 +5005,17 @@ pub fn atan2(y: f64, x: f64) f64 {
     // |y/x| > 0x1p64
     if ix + (64 << 20) < iy || iy == 0x7ff00000 {
         return if (m & 1) != 0 {
-            -PI / 2.0;
+            -PI / 2.0
         } else {
-            PI / 2.0;
+            PI / 2.0
         };
     }
     // z = atan(|y/x|) without spurious underflow
     let z = if (m & 2) != 0 && iy + (64 << 20) < ix {
         // |y/x| < 0x1p-64, x<0
-        0.0;
+        0.0
     } else {
-        atan(fabs(y / x));
+        atan(fabs(y / x))
     };
     if m == 0 {
         return z; // atan(+,+)
@@ -5053,9 +5053,9 @@ pub fn atanf(x0: f32) f32 {
         }
         let z = ATANHIF[3] + 0x1p-120f32;
         return if sign != 0 {
-            -z;
+            -z
         } else {
-            z;
+            z
         };
     }
     let mut id: i32 = -1;
@@ -5099,9 +5099,9 @@ pub fn atanf(x0: f32) f32 {
     }
     z = unsafe ATANHIF[id as usize] - (x * (s1 + s2) - unsafe ATANLOF[id as usize] - x);
     return if sign != 0 {
-        -z;
+        -z
     } else {
-        z;
+        z
     };
 }
 
@@ -5136,9 +5136,9 @@ pub fn atan2f(y: f32, x: f32) f32 {
     // when x = 0
     if ix == 0 {
         return if (m & 1) != 0 {
-            -PIF / 2.0f32;
+            -PIF / 2.0f32
         } else {
-            PIF / 2.0f32;
+            PIF / 2.0f32
         };
     }
     // when x is INF
@@ -5169,17 +5169,17 @@ pub fn atan2f(y: f32, x: f32) f32 {
     // |y/x| > 0x1p26
     if ix + (26 << 23) < iy || iy == 0x7f800000 {
         return if (m & 1) != 0 {
-            -PIF / 2.0f32;
+            -PIF / 2.0f32
         } else {
-            PIF / 2.0f32;
+            PIF / 2.0f32
         };
     }
     // z = atan(|y/x|) with correct underflow
     let z = if (m & 2) != 0 && iy + (26 << 23) < ix {
         // |y/x| < 0x1p-26, x < 0
-        0.0f32;
+        0.0f32
     } else {
-        atanf(fabsf(y / x));
+        atanf(fabsf(y / x))
     };
     if m == 0 {
         return z; // atan(+,+)
@@ -5246,9 +5246,9 @@ pub const fn expm1(x0: f64) f64 {
             }
         } else {
             k = (INVLN2 * x + if sign {
-                -0.5;
+                -0.5
             } else {
-                0.5;
+                0.5
             }) as i32;
             let t = k as f64;
             hi_ = x - t * LN2_HI; // t*ln2_hi is exact here
@@ -5350,9 +5350,9 @@ pub const fn expm1f(x0: f32) f32 {
             }
         } else {
             k = (INVLN2F * x + if sign {
-                -0.5f32;
+                -0.5f32
             } else {
-                0.5f32;
+                0.5f32
             }) as i32;
             let t = k as f32;
             hi_ = x - t * LN2F_HI; // t*ln2_hi is exact here
@@ -5449,9 +5449,9 @@ pub const fn log1p(x: f64) f64 {
         // correction term ~ log(1+x)-log(u), avoid underflow in c/u
         if k < 54 {
             c = if k >= 2 {
-                1.0 - (uf - x);
+                1.0 - (uf - x)
             } else {
-                x - (uf - 1.0);
+                x - (uf - 1.0)
             };
             c /= uf;
         } else {
@@ -5515,9 +5515,9 @@ pub const fn log1pf(x: f32) f32 {
         // correction term ~ log(1+x)-log(u), avoid underflow in c/u
         if k < 25 {
             c = if k >= 2 {
-                1.0f32 - (uf - x);
+                1.0f32 - (uf - x)
             } else {
-                x - (uf - 1.0f32);
+                x - (uf - 1.0f32)
             };
             c /= uf;
         } else {
@@ -5799,9 +5799,9 @@ pub const fn tanh(x0: f64) f64 {
         t = x;
     }
     return if sign {
-        -t;
+        -t
     } else {
-        t;
+        t
     };
 }
 
@@ -5836,9 +5836,9 @@ pub const fn tanhf(x0: f32) f32 {
         t = x;
     }
     return if sign {
-        -t;
+        -t
     } else {
-        t;
+        t
     };
 }
 
@@ -5865,9 +5865,9 @@ pub fn asinh(x0: f64) f64 {
         x = log1p(x + x * x / (sqrt(x * x + 1.0) + 1.0));
     }
     return if s {
-        -x;
+        -x
     } else {
-        x;
+        x
     };
 }
 
@@ -5889,9 +5889,9 @@ pub fn asinhf(x0: f32) f32 {
         x = log1pf(x + x * x / (sqrtf(x * x + 1.0f32) + 1.0f32));
     }
     return if s {
-        -x;
+        -x
     } else {
-        x;
+        x
     };
 }
 
@@ -5947,9 +5947,9 @@ pub const fn atanh(x: f64) f64 {
         y = 0.5 * log1p(2.0 * (y / (1.0 - y)));
     }
     return if s {
-        -y;
+        -y
     } else {
-        y;
+        y
     };
 }
 
@@ -5970,9 +5970,9 @@ pub const fn atanhf(x: f32) f32 {
         y = 0.5f32 * log1pf(2.0f32 * (y / (1.0f32 - y)));
     }
     return if s {
-        -y;
+        -y
     } else {
-        y;
+        y
     };
 }
 
@@ -6322,14 +6322,14 @@ pub fn erf(x: f64) f64 {
     }
     let y = if ix < 0x40180000 {
         // 0.84375 <= |x| < 6
-        1.0 - erfc2(ix, x);
+        1.0 - erfc2(ix, x)
     } else {
-        1.0 - 0x1p-1022;
+        1.0 - 0x1p-1022
     };
     return if sign != 0 {
-        -y;
+        -y
     } else {
-        y;
+        y
     };
 }
 
@@ -6387,14 +6387,14 @@ pub fn erff(x: f32) f32 {
     }
     let y = if ix < 0x40c00000 {
         // |x| < 6
-        1.0f32 - erfc2f(ix, x);
+        1.0f32 - erfc2f(ix, x)
     } else {
-        1.0f32 - 0x1p-120f32;
+        1.0f32 - 0x1p-120f32
     };
     return if sign != 0 {
-        -y;
+        -y
     } else {
-        y;
+        y
     };
 }
 
@@ -6427,15 +6427,15 @@ pub fn erfc(x: f64) f64 {
     if ix < 0x403c0000 {
         // 0.84375 <= |x| < 28
         return if sign != 0 {
-            2.0 - erfc2(ix, x);
+            2.0 - erfc2(ix, x)
         } else {
-            erfc2(ix, x);
+            erfc2(ix, x)
         };
     }
     return if sign != 0 {
-        2.0 - 0x1p-1022;
+        2.0 - 0x1p-1022
     } else {
-        0x1p-1022 * 0x1p-1022;
+        0x1p-1022 * 0x1p-1022
     };
 }
 
@@ -6468,15 +6468,15 @@ pub fn erfcf(x: f32) f32 {
     if ix < 0x41e00000 {
         // |x| < 28
         return if sign != 0 {
-            2.0f32 - erfc2f(ix, x);
+            2.0f32 - erfc2f(ix, x)
         } else {
-            erfc2f(ix, x);
+            erfc2f(ix, x)
         };
     }
     return if sign != 0 {
-        2.0f32 - 0x1p-120f32;
+        2.0f32 - 0x1p-120f32
     } else {
-        0x1p-120f32 * 0x1p-120f32;
+        0x1p-120f32 * 0x1p-120f32
     };
 }
 
@@ -7192,9 +7192,9 @@ pub fn tgamma(x0: f64) f64 {
         return x;
     }
     let absx = if sign {
-        -x;
+        -x
     } else {
-        x;
+        x
     };
     // handle the error of x + g - 0.5
     let mut y = absx + GMHALF;

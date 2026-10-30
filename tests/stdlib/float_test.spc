@@ -182,15 +182,15 @@ const fn field_value(raw: u64, e: usize, f: usize) f64 {
     let mut v: f64 = 0.0;
     if ef == emask {
         v = if fr == 0 {
-            1.0 / 0.0;
+            1.0 / 0.0
         } else {
-            0.0 / 0.0;
+            0.0 / 0.0
         };
     } else {
         let sig = if ef == 0 {
-            fr;
+            fr
         } else {
-            fr | 1u64 << f as u64;
+            fr | 1u64 << f as u64
         };
         let x = ef.max(1) as i64 - ((1i64 << (e - 1) as i64) - 1) - f as i64;
         v = sig as f64 * f64_from_bits((x + 1023) as u64 << 52);
@@ -270,21 +270,21 @@ const fn f128_operand(r: &mut u64, near: u64) f128 {
         return f128::from_raw(b);
     }
     let e = if pick == 1 {
-        0;
+        0
     } else if pick == 2 {
-        32767;
+        32767
     } else if pick == 3 {
-        (z >> 8) % 160;
+        (z >> 8) % 160
     } else if pick == 4 {
-        32766 - (z >> 8) % 160;
+        32766 - (z >> 8) % 160
     } else {
-        (near + 32768 + (z >> 8) % 129 - 64) % 32768;
+        (near + 32768 + (z >> 8) % 129 - 64) % 32768
     };
     // A short fraction half the time: ties and exact results.
     let frac = if (z >> 7 & 1) == 0 {
-        z >> 16 & 0xFFFFFFFFFFFF;
+        z >> 16 & 0xFFFFFFFFFFFF
     } else {
-        z >> 16 & 0xFF0000000000;
+        z >> 16 & 0xFF0000000000
     };
     if (z >> 7 & 1) != 0 {
         b.set_limb(0, 0);
@@ -482,14 +482,14 @@ fn decimal_text_round_trips() {
         let a = unsafe vs[i];
         let f = Float::<11, 52>::from_f64(a);
         let s = f.to_string();
-        switch Float::<11, 52>::from_str(s.as_str()) {
+        switch Float::<11, 52>::from_str(&s) {
             Some(b) => {
                 assert_eq(f64_bits(b.to_f64()), f64_bits(a));
             },
             None => {
                 assert(false);
             },
-        };
+        }
     }
     switch Float::<11, 52>::from_str("0.1") {
         Some(v) => {
@@ -498,7 +498,7 @@ fn decimal_text_round_trips() {
         None => {
             assert(false);
         },
-    };
+    }
     let so = f16::from_f64(1.5).to_string();
     assert(so.as_str() == "1.5e+0");
     let sz = f16::zero().to_string();
@@ -510,7 +510,7 @@ fn decimal_text_round_trips() {
         None => {
             assert(false);
         },
-    };
+    }
     switch f16::from_str("-inf") {
         Some(v) => {
             assert(v.is_infinite() && v.is_negative());
@@ -518,20 +518,20 @@ fn decimal_text_round_trips() {
         None => {
             assert(false);
         },
-    };
+    }
     assert(f16::from_str("12x").is_none());
     assert(f16::from_str("").is_none());
     // A 36-digit f128 value survives its own text.
     let third = f128::one() / f128::from_f64(3.0);
     let ts = third.to_string();
-    switch f128::from_str(ts.as_str()) {
+    switch f128::from_str(&ts) {
         Some(b) => {
             assert(b == third);
         },
         None => {
             assert(false);
         },
-    };
+    }
 }
 
 // The remainder and the integer-rounding family, bit-for-bit against libm at the f64 format over the
@@ -823,7 +823,7 @@ fn decimal_text_matches_the_hardware_parse() {
         }
         let t = Float::<11, 52>::from_f64(a).to_string();
         assert(same64(t.as_str().parse_f64().unwrap(), a));
-        assert(same64(Float::<11, 52>::from_str(t.as_str()).unwrap().to_f64(), a));
+        assert(same64(Float::<11, 52>::from_str(&t).unwrap().to_f64(), a));
     }
     for _ in 0..3000 {
         let r = step(&mut s);
@@ -843,7 +843,7 @@ fn decimal_text_matches_the_hardware_parse() {
         let e = ((r >> 24) % 660) as i64 - 340;
         t.push_i64(e);
         let want = t.as_str().parse_f64().unwrap();
-        assert(same64(Float::<11, 52>::from_str(t.as_str()).unwrap().to_f64(), want));
+        assert(same64(Float::<11, 52>::from_str(&t).unwrap().to_f64(), want));
     }
 }
 
@@ -856,7 +856,7 @@ fn check_text_round_trip<const E: usize, const F: usize>(seed: u64, n: usize) {
         let r = step(&mut s);
         let x = Float::<E, F, IEEE>::from_parts((r & 1) == 1, 1 + (r >> 8) % (2 * span - 2), &f);
         let t = x.to_string();
-        assert(Float::<E, F, IEEE>::from_str(t.as_str()).unwrap() == x, "the text parses back to the value");
+        assert(Float::<E, F, IEEE>::from_str(&t).unwrap() == x, "the text parses back to the value");
     }
 }
 

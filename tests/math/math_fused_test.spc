@@ -98,9 +98,9 @@ fn values(r: &mut u64, n: usize) Vector<f64> {
         let x = next(r) as f64 * 3.0;
         v.push(
             if i % 13 == 5 {
-                -0.0;
+                -0.0
             } else {
-                x;
+                x
             },
         );
     }
@@ -361,10 +361,10 @@ fn kernels_run(p: &cli::Proj, env: str) String {
     let mut err = format("{}/.err", root);
     let rc = cli::run_with(cmd.cstr(), null, out.cstr(), err.cstr(), env);
     if rc != 0 {
-        eprintln("[{}]: exit {}: {}", env, rc, cli::read_text(err.as_str()).as_str());
+        eprintln("[{}]: exit {}: {}", env, rc, cli::read_text(&err).as_str());
         return String::from_str("fail");
     }
-    return cli::read_text(out.as_str());
+    return cli::read_text(&out);
 }
 
 // The machine's kernels (SME where the CPU has them) and the portable ones (`SC_CPU_OFF`) give the

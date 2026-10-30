@@ -27,8 +27,8 @@ fn part(k: usize) {
         return;
     }
     let text = cli::read_text(backend());
-    assert(se::entries(text.as_str()).len() > 200, "the backend file parses");
-    let r = se::check(text.as_str(), k, 16, 4);
+    assert(se::entries(&text).len() > 200, "the backend file parses");
+    let r = se::check(&text, k, 16, 4);
     if r.len() != 0 {
         eprintln("{}", r.as_str());
     }

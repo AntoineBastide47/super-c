@@ -315,9 +315,9 @@ fn module_asm(p: &loader::Package, m: usize) String {
 fn compute_emit_live(p: &loader::Package) Vector<bool> {
     let n = p.modules.len();
     let sz = if n != 0 {
-        n;
+        n
     } else {
-        1 as usize;
+        1 as usize
     };
     let mut live = Vector::<bool>::new();
     live.resize_default(sz);
@@ -450,9 +450,9 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool, dup_
     // every module is typechecked, like the obligations below. The parallel checking path already
     // ran this as its own level (dup_done); only the serial path sweeps here.
     let dup_n = if dup_done {
-        0usize;
+        0usize
     } else {
-        n;
+        n
     };
     for i in 0..dup_n {
         let pkg = p as *mut loader::Package;
@@ -463,7 +463,7 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool, dup_
         t.check_cross_module_dup_conformances(dup_idx);
         t.check_cross_module_dup_items();
         if t.has_errors() {
-            t.errors.finalize(unsafe str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
+            t.errors.finalize(unsafe str::from_raw(src as *const u8, len), &p.modules[i].file);
             t.log_errors();
             p.ok = false;
         }
@@ -491,7 +491,7 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool, dup_
             }
             t.discharge_conformance_obligations(starts.as_ptr(), ends.as_ptr());
             if t.has_errors() {
-                t.errors.finalize(unsafe str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
+                t.errors.finalize(unsafe str::from_raw(src as *const u8, len), &p.modules[i].file);
                 t.log_errors();
                 p.ok = false;
             }
@@ -514,7 +514,7 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool, dup_
         let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
         t.run_dmd_uses();
         if t.has_errors() {
-            t.errors.finalize(unsafe str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
+            t.errors.finalize(unsafe str::from_raw(src as *const u8, len), &p.modules[i].file);
             t.log_errors();
             p.ok = false;
         }
@@ -636,9 +636,9 @@ struct TcOut {
 // something, so the many silent items keep no buffer of their own.
 fn take_errs(e: &mut diag::Errors) Option<Box<diag::Errors>> {
     if e.errors.len() == 0 && e.warns.len() == 0 && e.fixes.len() == 0 {
-        return Option::<Box<diag::Errors>>::None;
+        return None;
     }
-    return Option::<Box<diag::Errors>>::Some(Box::new(replace(e, diag::Errors::new())));
+    return Some(Box::new(replace(e, diag::Errors::new())));
 }
 
 // Move a result slot's diagnostics, if any, into `dst`.
@@ -649,7 +649,7 @@ fn append_errs(dst: &mut diag::Errors, slot: &mut Option<Box<diag::Errors>>) {
             dst.append(e.deref_mut());
         },
         None => {},
-    };
+    }
 }
 
 struct TcStage {
@@ -926,7 +926,7 @@ fn typecheck_stage(
     }
     let mut outs = Vector::<TcOut>::with_capacity(ni);
     for _ in 0..ni {
-        outs.push(TcOut { errors: Option::<Box<diag::Errors>>::None, log_lo: 0, log_hi: 0 });
+        outs.push(TcOut { errors: None, log_lo: 0, log_hi: 0 });
     }
     let mut logs = Vector::<tc::TcMarkLog>::with_capacity(n);
     let mut tail = Vector::<diag::Errors>::with_capacity(n);
@@ -1024,7 +1024,7 @@ fn typecheck_stage(
             }
         }
         errs.append(tail.index_mut(m));
-        errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+        errs.finalize(&p.modules[m].source, &p.modules[m].file);
         let had = errs.has_errors();
         if had {
             ok = false;
@@ -1036,9 +1036,9 @@ fn typecheck_stage(
         if fixes != null && lint[m] {
             // Replace fixes index into the caller's shared fix_texts pool: rebase and copy the payloads.
             let base = if ftexts != null {
-                (unsafe (*ftexts).len()) as u32;
+                (unsafe (*ftexts).len()) as u32
             } else {
-                0u32;
+                0u32
             };
             for k in 0..errs.fixes.len() {
                 let mut f = errs.fixes[k];
@@ -1082,7 +1082,11 @@ fn typecheck_stage(
         eprint("typecheck-stage publish: {} ms\n", ticks_ms() - tj0);
     }
     if ok {
-        assert_no_error_type(p);
+        // `fmt -s` drops the diagnostics of the bodies it checks again without candidates, whose
+        // superseded records may hold TYPE_ERROR.
+        if !unsafe tc::SIMPLIFY {
+            assert_no_error_type(p);
+        }
         ok = mark_c_reads(p);
     }
     return ok;
@@ -1212,7 +1216,7 @@ pub(package) fn build_simd_table(p: &mut loader::Package, n: usize) String {
                 p.modules[x.module as usize].file.as_str(),
             ),
         );
-        errs.finalize(p.modules[y.module as usize].source.as_str(), p.modules[y.module as usize].file.as_str());
+        errs.finalize(&p.modules[y.module as usize].source, &p.modules[y.module as usize].file);
         errs.log();
         if first.len() == 0 {
             first = errs.rendered_errors.at(0).clone();
@@ -1242,7 +1246,7 @@ pub(package) fn check_feature_calls(p: &mut loader::Package, n: usize) {
         let mut errs = diag::Errors::new();
         feature_errors(p, i, &mut errs);
         if errs.has_errors() {
-            errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
+            errs.finalize(&p.modules[i].source, &p.modules[i].file);
             errs.log();
             p.ok = false;
         }
@@ -1394,9 +1398,9 @@ fn feature_err(
         if cf::has(need, k) && !cf::has(have, k) {
             miss.push_str(
                 if miss.len() == 0 {
-                    "+";
+                    "+"
                 } else {
-                    ",+";
+                    ",+"
                 },
             );
             miss.push_str(cf::row(k).name);
@@ -1870,7 +1874,7 @@ extend CemitOut {
             tuc_keys: Vector::<u64>::new(),
             tuc_hit: Vector::<bool>::new(),
             pr: prb::Probe::new(false, false),
-            lir: Option::<Box<lw::Lower>>::None,
+            lir: None,
         };
         o.protos_h.resize_default(n);
         o.tu_incs.resize_default(n);
@@ -2011,9 +2015,9 @@ fn cemit_ty_disp(p: &loader::Package, m: ModuleId, t: TypeId, out: &mut String) 
     }
     let da = unsafe &*p.module_ast_const(dm);
     let nm = if da.at_const(dn).kind == NodeKind::NODE_TYPE_ALIAS {
-        da.at_const(dn).as_data.type_alias.name;
+        da.at_const(dn).as_data.type_alias.name
     } else {
-        da.ext_name(dn);
+        da.ext_name(dn)
     };
     let ns = da.at_const(nm).as_data.name.text;
     out.push_str(p.modules[dm as usize].source.as_str().slice(ns.start as usize, ns.end as usize));
@@ -2048,9 +2052,9 @@ fn inst_where(
         let pn = pa.at_const(prm[k as usize]);
         let gn = if pn.kind == NodeKind::NODE_GENERIC_PARAM {
             let gs = pa.at_const(pa.ext_name(prm[k as usize])).as_data.name.text;
-            psrc.slice(gs.start as usize, gs.end as usize);
+            psrc.slice(gs.start as usize, gs.end as usize)
         } else {
-            "Self";
+            "Self"
         };
         let mut seen = false;
         for j in 0..nn {
@@ -2095,7 +2099,7 @@ fn cemit_inst_error(p: &mut loader::Package, d: DefId, subs: &Vector<mbe::MSub>,
     let mut errs = diag::Errors::new();
     errs.emit_span(dc::STATIC_ASSERTION_FAILED, a.at_const(lw.user_err).span, format("{}", lw.user_msg));
     errs.note(inst_where(p, d.module, &prm, &ams, &ats, np));
-    errs.finalize(p.modules[d.module as usize].source.as_str(), p.modules[d.module as usize].file.as_str());
+    errs.finalize(&p.modules[d.module as usize].source, &p.modules[d.module as usize].file);
     errs.log();
     p.ok = false;
 }
@@ -2218,7 +2222,7 @@ fn cemit_inst_asserts(
         if np > 0 {
             errs.note(inst_where(p, pmod, &prm, &ams, &ats, np));
         }
-        errs.finalize(src, p.modules[d_def.module as usize].file.as_str());
+        errs.finalize(src, &p.modules[d_def.module as usize].file);
         errs.log();
         p.ok = false;
     }
@@ -2430,9 +2434,9 @@ fn cemit_layout_asserts(
         let nid = decls[i];
         let nk = unsafe (&*p.module_ast_const(m)).at_const(nid).kind;
         let tkind = if nk == NodeKind::NODE_ENUM {
-            TypeKind::TYPE_ENUM;
+            TypeKind::TYPE_ENUM
         } else {
-            TypeKind::TYPE_STRUCT;
+            TypeKind::TYPE_STRUCT
         };
         let t = (&mut p.modules[m as usize].ast).intern_type(Ty { kind: tkind, module: m, as_data: TyAs { decl: nid } });
         let lo = svc.layout(m, t);
@@ -2452,20 +2456,15 @@ fn cemit_layout_asserts(
         }
         if !is_ext {
             // Demand-driven emission: only aggregates the plan DEFINED can be sized.
-            if !struct_def_hit(defined, nm.as_str()) {
+            if !struct_def_hit(defined, &nm) {
                 continue;
             }
         }
         if is_ext {
-            push_layout_assert(out, nm.as_str(), lo.size, lo.align);
+            push_layout_assert(out, &nm, lo.size, lo.align);
             any = true;
         } else {
-            push_layout_assert(
-                lay.index_mut((*ds.idx.get(&nkey(fnv(nm.as_str()))).unwrap()) as usize),
-                nm.as_str(),
-                lo.size,
-                lo.align,
-            );
+            push_layout_assert(lay.index_mut((*ds.idx.get(&nkey(fnv(&nm))).unwrap()) as usize), &nm, lo.size, lo.align);
         }
     }
     {
@@ -2490,15 +2489,10 @@ fn cemit_layout_asserts(
             if !cem.mg.ctype(m, t, "", &mut nm) {
                 continue;
             }
-            if !struct_def_hit(defined, nm.as_str()) {
+            if !struct_def_hit(defined, &nm) {
                 continue;
             }
-            push_layout_assert(
-                lay.index_mut((*ds.idx.get(&nkey(fnv(nm.as_str()))).unwrap()) as usize),
-                nm.as_str(),
-                lo.size,
-                lo.align,
-            );
+            push_layout_assert(lay.index_mut((*ds.idx.get(&nkey(fnv(&nm))).unwrap()) as usize), &nm, lo.size, lo.align);
         }
     }
     if any {
@@ -2617,25 +2611,25 @@ fn cemit_relower_census(
         }
         pr.count(
             if reflect {
-                prb::C_INST_REFLECT;
+                prb::C_INST_REFLECT
             } else {
-                prb::C_INST_ZST;
+                prb::C_INST_ZST
             },
             ninst[b],
         );
         pr.count(
             if reflect {
-                prb::C_SAME_REFLECT;
+                prb::C_SAME_REFLECT
             } else {
-                prb::C_SAME_ZST;
+                prb::C_SAME_ZST
             },
             nsame[b],
         );
         pr.count(
             if reflect {
-                prb::C_KEEP_REFLECT;
+                prb::C_KEEP_REFLECT
             } else {
-                prb::C_KEEP_ZST;
+                prb::C_KEEP_ZST
             },
             nbytes[b],
         );
@@ -2648,9 +2642,9 @@ fn cemit_relower_census(
             p.modules.at(d.module as usize).path.as_str(),
             src.slice(nsp.start as usize, nsp.end as usize),
             if reflect {
-                "reflection";
+                "reflection"
             } else {
-                "zero-size";
+                "zero-size"
             },
             ninst[b],
             nrel[b],
@@ -2740,9 +2734,9 @@ fn cemit_take_body(
         }
     }
     let ok = if closure {
-        lw_out.lower_closure_body(nid);
+        lw_out.lower_closure_body(nid)
     } else {
-        lw_out.lower_fn(nid);
+        lw_out.lower_fn(nid)
     };
     pr.count(prb::C_LOWERED, 1);
     pr.stop(prb::P_ACQUIRE, am);
@@ -2860,9 +2854,9 @@ fn cemit_tuc_replay(p: &mut loader::Package, cem: &mut cbe::CEmit, m: usize, t: 
             acc.env_bodies.push(ev.s1.clone());
             acc.env_own.push(m as ModuleId);
         } else if ev.kind == mbe::RK_AUX {
-            cem.aux_replay(ev.h, ev.a as ModuleId, ev.s1.as_str());
+            cem.aux_replay(ev.h, ev.a as ModuleId, &ev.s1);
         } else if ev.kind == mbe::RK_EFWD {
-            cem.env_fwd.push_str(ev.s1.as_str());
+            cem.env_fwd.push_str(&ev.s1);
         } else if ev.kind == mbe::RK_EDGE {
             for k in 0..ev.xs.len() {
                 cem.mg.mark_used(ev.xs[k] as ModuleId);
@@ -3044,7 +3038,7 @@ fn cemit_seed_fn(
     cem.fn_attrs.truncate(0);
     cem.fs = p.fn_set(m as ModuleId, nid);
     cemit_fn_attrs(p, m as ModuleId, nid, cem.fs, &mut cem.fn_attrs);
-    if cem.emit_fn(&lw.body, sym.as_str()) {
+    if cem.emit_fn(&lw.body, &sym) {
         acc.seeds += 1;
         if is_main {
             acc.have_main = true;
@@ -3078,7 +3072,7 @@ fn cemit_seed_fn(
             let mut selfp = String::new();
             cem.lspell(lw.body.returns, &mut selfp);
             wr.push_str("\n  ");
-            wr.push_str(sym.as_str());
+            wr.push_str(&sym);
             wr.push_str("(");
             wr.push_string(&selfp);
             wr.push_str(");\n");
@@ -3117,10 +3111,10 @@ fn cemit_seed_fn(
                 let tgt9 = cem.mg.method_target(m as ModuleId, nid);
                 let a9 = unsafe &mut *(p.module_ast_const(m as ModuleId) as *mut Ast);
                 let st9 = a9.intern_type(
-                    Ty { kind: TypeKind::TYPE_STRUCT, module: m as ModuleId, as_data: TyAs { decl: tgt9.node } },
+                    Ty { kind: TYPE_STRUCT, module: m as ModuleId, as_data: TyAs { decl: tgt9.node } },
                 );
                 let wsym = sym.as_str().slice(0, sym.len() - 4);
-                cem.lir_free_wrapper(m as ModuleId, st9, wsym, sym.as_str(), gns[0..gns.len()]);
+                cem.lir_free_wrapper(m as ModuleId, st9, wsym, &sym, gns[0..gns.len()]);
                 cem.lir_claim(m as u32, "a `free` wrapper", true);
             }
         }
@@ -3181,13 +3175,13 @@ fn cemit_closure_queue(
                     clws.push(cl);
                 }
                 cl_cache.insert(ckey, slot);
-                slot;
+                slot
             },
         };
         let clp: *const irl::Lowerer = if ci != 0xFFFFFFFFFFFFFFFFu64 {
-            clws.at(ci as usize);
+            clws.at(ci as usize)
         } else {
-            null;
+            null
         };
         let mut csym = String::new();
         let mut envs = String::new();
@@ -3197,7 +3191,7 @@ fn cemit_closure_queue(
         }
         acc.clos_ok += 1;
         if envs.len() != 0 {
-            let eh9 = fnv_cont(fnv(csym.as_str()), "_env");
+            let eh9 = fnv_cont(fnv(&csym), "_env");
             if rec {
                 let mut ev9 = mbe::RecEv::blank(mbe::RK_ENV);
                 ev9.h = eh9;
@@ -3447,7 +3441,7 @@ fn bound_variant(cem: &mut cbe::CEmit, dow: &mut DropCtx, base: &irl::Lowerer, s
     irl::Lowerer
 > {
     if dow.inl.off {
-        return Option::<irl::Lowerer>::None;
+        return None;
     }
     cem.mg.clear_subs();
     for i in 0..subs.len() {
@@ -3466,7 +3460,7 @@ fn bound_variant_in(cem: &mut cbe::CEmit, dow: &mut DropCtx, base: &irl::Lowerer
     bound_calls(cem, dow, base.pkg, &base.body, &mut sites);
     dow.inl.only_fixed = false;
     if sites.len() == 0 {
-        return Option::<irl::Lowerer>::None;
+        return None;
     }
     let m = base.body.module;
     // Innermost first: the first binding of a parameter wins.
@@ -3484,10 +3478,10 @@ fn bound_variant_in(cem: &mut cbe::CEmit, dow: &mut DropCtx, base: &irl::Lowerer
     out.body = irc::CoreBody::compact_from(&base.body);
     out.closures = base.closures.clone();
     if !inl::ground_body(&mut out, &binds) {
-        return Option::<irl::Lowerer>::None;
+        return None;
     }
     bind_calls(cem, dow, &mut out, &mut sites);
-    return Option::<irl::Lowerer>::Some(out);
+    return Some(out);
 }
 
 // The calls of concrete body `lw` that dispatch through an interface to a method the inliner keeps
@@ -3623,7 +3617,7 @@ fn cemit_drain_demand(
                 eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw.err);
             }
             lw_cache.insert(key, slot);
-            slot;
+            slot
         },
     };
     if li == 0xFFFFFFFFFFFFFFFFu64 {
@@ -3676,7 +3670,7 @@ fn cemit_drain_demand(
                     }
                 }
                 lw_cache.insert(zkey, slot2);
-                slot2;
+                slot2
             },
         };
         if zi == 0xFFFFFFFFFFFFFFFFu64 {
@@ -3696,7 +3690,7 @@ fn cemit_drain_demand(
             li2 = lws.len() as u64 - 1;
         },
         None => {},
-    };
+    }
     cem.mg.clear_subs();
     for i2 in 0..d_subs.len() {
         cem.mg.push_msub(*d_subs.at(i2));
@@ -3727,7 +3721,7 @@ fn cemit_drain_demand(
     cemit_fn_attrs(p, d_def.module, d_def.node, cem.fs, &mut cem.fn_attrs);
     // The instance lands in its generic's module instance shard: spell under that context.
     cem.mg.mark_ctx = mbe::CTX_INST | d_def.module as i64;
-    let em_ok9 = cem.emit_fn(&lws.at(li2 as usize).body, d_sym.as_str());
+    let em_ok9 = cem.emit_fn(&lws.at(li2 as usize).body, &d_sym);
     cem.cf_ext = null;
     if em_ok9 {
         done.insert(dk, 1);
@@ -3932,15 +3926,15 @@ fn cemit_drain_slice_one(
     }
     // The bound variant serves this demand only: it stays out of the slice's variants.
     let base = if var_on {
-        o.dvars.at(vix as usize);
+        o.dvars.at(vix as usize)
     } else {
-        lws.at(li2 as usize);
+        lws.at(li2 as usize)
     };
     let mut bvs = Vector::<irl::Lowerer>::new();
     switch bound_variant(&mut o.cem, dow2, base, d_subs) {
         Some(x) => bvs.push(x),
         None => {},
-    };
+    }
     let bv_on = bvs.len() != 0;
     let sh = &mut o.cem;
     sh.mg.mark_ctx = mbe::CTX_INST | d_def.module as i64;
@@ -3952,11 +3946,11 @@ fn cemit_drain_slice_one(
     sh.mg.clos_sfx.push_str(d_sfx);
     sh.mg.clos_ids.truncate(0);
     let blw = if bv_on {
-        bvs.at(0);
+        bvs.at(0)
     } else if var_on {
-        o.dvars.at(vix as usize);
+        o.dvars.at(vix as usize)
     } else {
-        lws.at(li2 as usize);
+        lws.at(li2 as usize)
     };
     for c2 in 0..blw.closures.len() {
         sh.mg.clos_ids.push(blw.closures[c2]);
@@ -4032,18 +4026,18 @@ fn cemit_drain_slice_one(
             shared_ci = 0xFFFFFFFFFFFFFFFFu64;
         }
         let clp: *const irl::Lowerer = if shared_ci < 0xFFFFFFFFFFFFFFFEu64 {
-            clws0.at(shared_ci as usize);
+            clws0.at(shared_ci as usize)
         } else if own_ci != 0xFFFFFFFFFFFFFFFFu64 {
-            o.dclo.at(own_ci as usize);
+            o.dclo.at(own_ci as usize)
         } else {
-            null;
+            null
         };
         let mut csym = String::new();
         let mut envs = String::new();
         if cemit_queued_closure(sh, d_def.module, cn, clp, &mut clsq, &mut csym, &mut envs) {
             o.acc.clos_ok += 1;
             if envs.len() != 0 {
-                o.acc.env_names.push(fnv_cont(fnv(csym.as_str()), "_env"));
+                o.acc.env_names.push(fnv_cont(fnv(&csym), "_env"));
                 o.acc.env_bodies.push(envs);
                 o.acc.env_own.push(d_def.module);
             }
@@ -4115,9 +4109,9 @@ fn cemit_low_launch(
     let mut nsl: usize = 1;
     if jobs >= 2 && nd > 1 {
         nsl = if nd < jobs as usize {
-            nd;
+            nd
         } else {
-            jobs as usize;
+            jobs as usize
         };
     }
     let wgl = psync::WaitGroup::new();
@@ -4282,9 +4276,9 @@ fn cemit_seed_master(
     };
     cem.mg.rec_on = rec;
     let ts0 = if p.icost_on {
-        std::parallel::platform::now_ns();
+        std::parallel::platform::now_ns()
     } else {
-        0u64;
+        0u64
     };
     cemit_seed_module(p, cem, g, dow, cl_cache, clws, m, testing, verbose, null, acc);
     if p.icost_on {
@@ -4718,9 +4712,9 @@ pub(package) fn cemit_package(
             g.bodies,
             g.rounds,
             if g.overflow {
-                ", budget exhausted";
+                ", budget exhausted"
             } else {
-                "";
+                ""
             },
         );
         tt0 = t9;
@@ -4754,9 +4748,9 @@ pub(package) fn cemit_package(
         // A call of an inline candidate splices its body: with the inliner on, the call alone does
         // not make the callee emitted (`InstGraph::reach`).
         let st = if stdlib::env_is("SC_INLINE", "0") {
-            null;
+            null
         } else {
-            (&inls) as *const inl::InlineStore;
+            (&inls) as *const inl::InlineStore
         };
         g.reach(&rf, st);
         pred = replace(&mut g.reached, Set::<u64>::new());
@@ -4876,9 +4870,9 @@ pub(package) fn cemit_package(
         target,
         if testing {
             // The wrapper set would join the fingerprint for little gain.
-            "";
+            ""
         } else {
-            p.gen_root.as_str();
+            p.gen_root.as_str()
         },
         // A section carries its module's C text, as large as the module's TU buffer.
         2 * src_total,
@@ -4900,9 +4894,9 @@ pub(package) fn cemit_package(
             let used = module_emits(p, live, m) && !(tuc.on && tuc.hit[m]);
             // A shard renders into the buffer reserved for its module above; a hit module keeps it.
             let buf = if used {
-                replace(acc.ch.bufs.index_mut(m), String::new());
+                replace(acc.ch.bufs.index_mut(m), String::new())
             } else {
-                String::new();
+                String::new()
             };
             let mut sh = SeedShard::new(p, TuBufs::one(m, buf), used, &em.env_defined, &ext_keys, m as i64, predp);
             sh.cem.mg.share_short(&mut em.mg);
@@ -5038,14 +5032,14 @@ pub(package) fn cemit_package(
             let tc = tplan.cases[ci];
             let suite = tc.suite.node != NODE_NONE;
             let fxi = if suite {
-                tc.suite_init;
+                tc.suite_init
             } else {
-                tplan.fx_init[tc.mod as usize];
+                tplan.fx_init[tc.mod as usize]
             };
             let fxf = if suite {
-                tc.suite_free;
+                tc.suite_free
             } else {
-                tplan.fx_free[tc.mod as usize];
+                tplan.fx_free[tc.mod as usize]
             };
             cem.out.clear();
             if cem.emit_test_wrapper(tc.mod, tc.func, tc.wants, fxi, fxf, tplan.genv_mod, tplan.genv_init) {
@@ -5143,7 +5137,7 @@ pub(package) fn cemit_package(
             let mut newsyms = Vector::<String>::new(); // first demanding symbol, for the failure print
             let mut newdef_seen = Map::<u64, u64>::new();
             for j in qi..len0 {
-                let dkj = fnv(cem.demand.at(j).sym.as_str());
+                let dkj = fnv(&cem.demand.at(j).sym);
                 let seenj = done.contains_key(&dkj);
                 if seenj {
                     continue;
@@ -5317,9 +5311,9 @@ pub(package) fn cemit_package(
                 {
                     let o = dsh.index_mut(scur);
                     let ma = if d_ord == 0 {
-                        cap_zero();
+                        cap_zero()
                     } else {
-                        *o.dmarks.at(d_ord - 1);
+                        *o.dmarks.at(d_ord - 1)
                     };
                     let mb = *o.dmarks.at(d_ord);
                     let out9 = o.douts[d_ord];
@@ -5555,12 +5549,7 @@ pub(package) fn cemit_package(
                         &mut fnm,
                     );
                     mb_dec.push_str("  ");
-                    okm = cem.mg.ctype(
-                        m9 as ModuleId,
-                        a9.type_of(a9.at_const(fid).as_data.field.ty),
-                        fnm.as_str(),
-                        &mut mb_dec,
-                    );
+                    okm = cem.mg.ctype(m9 as ModuleId, a9.type_of(a9.at_const(fid).as_data.field.ty), &fnm, &mut mb_dec);
                     mb_dec.push_str(";\n");
                 }
                 mb_dec.push_str("};\n");
@@ -5610,7 +5599,7 @@ pub(package) fn cemit_package(
                         cem.fn_attrs.truncate(0);
                         cem.fs = p.fn_set(m9 as ModuleId, mid9);
                         cemit_fn_attrs(p, m9 as ModuleId, mid9, cem.fs, &mut cem.fn_attrs);
-                        if cem.emit_fn(&mlw.body, msym.as_str()) {
+                        if cem.emit_fn(&mlw.body, &msym) {
                             proto_of(&cem.out, &mut mb_dec);
                             mb_def.push_string(&cem.out);
                         } else {
@@ -5626,12 +5615,12 @@ pub(package) fn cemit_package(
                     macros_out.push_string(&stem);
                     macros_out.push_str("_DECLARE(");
                     macro_params(p, &mut cem.mg, m9 as ModuleId, a9.ext(nid9).aggregate.generics, &mut macros_out);
-                    macro_finish(mb_dec.as_str(), &mut macros_out);
+                    macro_finish(&mb_dec, &mut macros_out);
                     macros_out.push_str("#define ");
                     macros_out.push_string(&stem);
                     macros_out.push_str("_DEFINE(");
                     macro_params(p, &mut cem.mg, m9 as ModuleId, a9.ext(nid9).aggregate.generics, &mut macros_out);
-                    macro_finish(mb_def.as_str(), &mut macros_out);
+                    macro_finish(&mb_def, &mut macros_out);
                     mac_ok += 1;
                 } else {
                     mac_skip += 1;
@@ -5731,9 +5720,9 @@ pub(package) fn cemit_package(
             }
             // A constant this pass cannot define is reported at its name.
             let csp = if cdn.kind == NodeKind::NODE_CONST {
-                cda.at_const(cdn.as_data.const_def.name).as_data.name.text;
+                cda.at_const(cdn.as_data.const_def.name).as_data.name.text
             } else {
-                cdn.span;
+                cdn.span
             };
             let crefuse = cbe::Refusal {
                 m: cdef.module,
@@ -5766,17 +5755,17 @@ pub(package) fn cemit_package(
                 unsafe cat[k] = cargs.at(k).at;
             }
             let mut v = if cargs.len() == 0 {
-                cdit.eval_const_in(cdef.module, cdef.node);
+                cdit.eval_const_in(cdef.module, cdef.node)
             } else {
-                cdit.eval_const_inst(cdef.module, cdef.node, &cpm[0], &cpn[0], &cam[0], &cat[0], cargs.len());
+                cdit.eval_const_inst(cdef.module, cdef.node, &cpm[0], &cpn[0], &cam[0], &cat[0], cargs.len())
             };
             if v.kind == iri::IV_NONE && cargs.len() != 0 {
                 // A per-instance constant first evaluates here, for the instance its reference named:
                 // its failure is the program's error, located at the constant.
                 let why = if cdit.trap_get().len() != 0 {
-                    cdit.trap_detail();
+                    cdit.trap_detail()
                 } else {
-                    "the initializer does not fold to a constant";
+                    "the initializer does not fold to a constant"
                 };
                 let csrc = p.modules[cdef.module as usize].source.as_str();
                 let mut errs = diag::Errors::new();
@@ -5790,7 +5779,7 @@ pub(package) fn cemit_package(
                         why,
                     ),
                 );
-                errs.finalize(csrc, p.modules[cdef.module as usize].file.as_str());
+                errs.finalize(csrc, &p.modules[cdef.module as usize].file);
                 errs.log();
                 p.ok = false;
                 continue;
@@ -5810,9 +5799,9 @@ pub(package) fn cemit_package(
                 let at = cda.attr_of(cdef.node, AttrKind::ATTR_ALIGN);
                 if at != null {
                     lal = if unsafe (*at).expr {
-                        cda.attr_value(cdef.node, AttrKind::ATTR_ALIGN).v;
+                        cda.attr_value(cdef.node, AttrKind::ATTR_ALIGN).v
                     } else {
-                        unsafe (*at).arg;
+                        unsafe (*at).arg
                     };
                 }
             }
@@ -5821,12 +5810,12 @@ pub(package) fn cemit_package(
                 let vn0 = cda.at_const(cdn.as_data.const_def.value);
                 if vn0.kind == NodeKind::NODE_STRUCT_INITIALIZER && vn0.as_data.struct_initializer.fields.len == 0 {
                     let mut line3 = csec.clone();
-                    if cem.mg.ctype(em2, cty, csym.as_str(), &mut line3) {
+                    if cem.mg.ctype(em2, cty, &csym, &mut line3) {
                         line3.push_str(" = {0};\n");
                         cdefs.txt.push_string(&line3);
                         cd_ok += 1;
-                        lir_zero(&mut cem, csym.as_str(), em2, cty, lro, ltls, lal);
-                        lir_own_item(&mut cem, csym.as_str(), cd_own9, cdef);
+                        lir_zero(&mut cem, &csym, em2, cty, lro, ltls, lal);
+                        lir_own_item(&mut cem, &csym, cd_own9, cdef);
                         continue;
                     }
                 }
@@ -5856,7 +5845,7 @@ pub(package) fn cemit_package(
                         // view points at the aligned sentinel; a zero-length array spells as a
                         // pointer nothing reads.
                         line2.push_string(&csec);
-                        ok2 = cem.mg.ctype(em2, cty, csym.as_str(), &mut line2);
+                        ok2 = cem.mg.ctype(em2, cty, &csym, &mut line2);
                         if ok2 && is_slice2 {
                             line2.push_str(" = { ");
                             ok2 = cem.zst_sentinel_ref(em2, ety2, &mut line2);
@@ -5875,7 +5864,7 @@ pub(package) fn cemit_package(
                         }
                     } else {
                         line2.push_string(&csec);
-                        ok2 = cem.mg.ctype(em2, cty, csym.as_str(), &mut line2);
+                        ok2 = cem.mg.ctype(em2, cty, &csym, &mut line2);
                         if ok2 {
                             line2.push_str(mbe::if_s(vec2, " = { { ", " = { "));
                         }
@@ -5896,7 +5885,7 @@ pub(package) fn cemit_package(
                         line2.push_str(mbe::if_s(vec2, " } };\n", " };\n"));
                         if is_slice2 {
                             let mut view2 = csec.clone();
-                            if cem.mg.ctype(em2, cty, csym.as_str(), &mut view2) {
+                            if cem.mg.ctype(em2, cty, &csym, &mut view2) {
                                 line2.push_string(&view2);
                                 line2.push_str(" = { ");
                                 line2.push_string(&csym);
@@ -5916,7 +5905,7 @@ pub(package) fn cemit_package(
                         lir_elems(
                             &mut cem,
                             &mut cdit,
-                            csym.as_str(),
+                            &csym,
                             em2,
                             cty,
                             cdef.module,
@@ -5925,7 +5914,7 @@ pub(package) fn cemit_package(
                             ltls,
                             lal,
                         );
-                        lir_own_item(&mut cem, csym.as_str(), cd_own9, cdef);
+                        lir_own_item(&mut cem, &csym, cd_own9, cdef);
                         continue;
                     }
                 }
@@ -5954,19 +5943,10 @@ pub(package) fn cemit_package(
                     }
                 }
                 let mut rootd3 = String::new();
-                if root3 >= 0 && st_define(
-                    p,
-                    &mut cem,
-                    &cdit,
-                    csym.as_str(),
-                    root3 as u32,
-                    csec.as_str(),
-                    &mut cdefs.txt,
-                    &mut rootd3,
-                ) {
+                if root3 >= 0 && st_define(p, &mut cem, &cdit, &csym, root3 as u32, &csec, &mut cdefs.txt, &mut rootd3) {
                     cd_ok += 1;
-                    lir_group(&mut cem, &cdit, csym.as_str(), root3 as u32, lro, ltls, lal);
-                    lir_own_item(&mut cem, csym.as_str(), cd_own9, cdef);
+                    lir_group(&mut cem, &cdit, &csym, root3 as u32, lro, ltls, lal);
+                    lir_own_item(&mut cem, &csym, cd_own9, cdef);
                     continue;
                 }
             }
@@ -5974,7 +5954,7 @@ pub(package) fn cemit_package(
             // A NULL pointer constant is scalar data (`= 0`).
             let mut okc = v.kind == iri::IV_INT || v.kind == iri::IV_BOOL || v.kind == iri::IV_FLOAT || v.kind == iri::IV_STR || v.kind == iri::IV_PTR && v.i == 0;
             if okc {
-                okc = cem.mg.ctype(em2, cty, csym.as_str(), &mut line);
+                okc = cem.mg.ctype(em2, cty, &csym, &mut line);
             }
             if okc {
                 line.push_str(" = ");
@@ -5986,9 +5966,9 @@ pub(package) fn cemit_package(
                 } else if v.kind == iri::IV_BOOL {
                     line.push_str(
                         if v.i != 0 {
-                            "true";
+                            "true"
                         } else {
-                            "false";
+                            "false"
                         },
                     );
                 } else if v.kind == iri::IV_FLOAT {
@@ -6006,13 +5986,13 @@ pub(package) fn cemit_package(
                     let mut tmp = String::new();
                     let mut bytes = String::new();
                     cbe::str_const_bytes(csrc.slice(a0, b0), v.f as i64, &mut tmp, &mut bytes);
-                    cbe::push_c_str_data(bytes.as_str(), &mut line);
+                    cbe::push_c_str_data(&bytes, &mut line);
                 }
                 line.push_str(";\n");
                 cdefs.txt.push_string(&line);
                 cd_ok += 1;
-                lir_value(&mut cem, &mut cdit, csym.as_str(), em2, cty, v, lro, ltls, lal);
-                lir_own_item(&mut cem, csym.as_str(), cd_own9, cdef);
+                lir_value(&mut cem, &mut cdit, &csym, em2, cty, v, lro, ltls, lal);
+                lir_own_item(&mut cem, &csym, cd_own9, cdef);
             } else {
                 if verbose {
                     eprint("const-skip: `{}` kind {}\n", csym.as_str(), v.kind);
@@ -6032,9 +6012,9 @@ pub(package) fn cemit_package(
     // scope const data (extern roots; `__ct%u` auxiliaries static per group).
     // Descriptor roots the registry indexes carry hidden visibility where the target supports it.
     let vis9 = if tgt::obj_of(target).hidden {
-        "__attribute__((visibility(\"hidden\"))) ";
+        "__attribute__((visibility(\"hidden\"))) "
     } else {
-        "";
+        ""
     };
     let mut sdefs = Segs::new();
     let mut tdecl = Segs::new();
@@ -6055,19 +6035,17 @@ pub(package) fn cemit_package(
                 sd_own9 = ti_owner(&mut cem, p.core_module, em9, ty9);
                 cem.mg.mark_ctx = mbe::CTX_INST | sd_own9 as i64;
                 let a9 = unsafe &mut *(p.module_ast_const(em9) as *mut Ast);
-                let rty9 = a9.intern_type(
-                    Ty { kind: TypeKind::TYPE_STRUCT, module: tih.mid, as_data: TyAs { decl: tih.node } },
-                );
+                let rty9 = a9.intern_type(Ty { kind: TYPE_STRUCT, module: tih.mid, as_data: TyAs { decl: tih.node } });
                 let sr = cdit.eval_type_info_export(em9, rty9, em9, ty9);
                 let mut ok9b = sr.ok;
                 if ok9b {
                     let root9 = sr.root;
                     st_group_types(&mut em, &cdit, root9);
                     let mut rootd = String::new();
-                    ok9b = st_define(p, &mut cem, &cdit, sym9.as_str(), root9, "const ", &mut sdefs.txt, &mut rootd);
+                    ok9b = st_define(p, &mut cem, &cdit, &sym9, root9, "const ", &mut sdefs.txt, &mut rootd);
                     if ok9b {
-                        lir_group(&mut cem, &cdit, sym9.as_str(), root9, true, false, 0);
-                        lir_own(&mut cem, sym9.as_str(), sd_own9);
+                        lir_group(&mut cem, &cdit, &sym9, root9, true, false, 0);
+                        lir_own(&mut cem, &sym9, sd_own9);
                         tdecl.txt.push_str("extern const ");
                         tdecl.txt.push_string(&rootd);
                         tdecl.txt.push_str(";\n");
@@ -6106,13 +6084,13 @@ pub(package) fn cemit_package(
                         continue;
                     }
                     let tk9 = if nk9 == NodeKind::NODE_ENUM {
-                        TypeKind::TYPE_ENUM;
+                        TypeKind::TYPE_ENUM
                     } else {
-                        TypeKind::TYPE_STRUCT;
+                        TypeKind::TYPE_STRUCT
                     };
                     let tt9 = a9.intern_type(Ty { kind: tk9, module: m9 as ModuleId, as_data: TyAs { decl: nid9 } });
                     let rty9 = a9.intern_type(
-                        Ty { kind: TypeKind::TYPE_STRUCT, module: tih.mid, as_data: TyAs { decl: tih.node } },
+                        Ty { kind: TYPE_STRUCT, module: tih.mid, as_data: TyAs { decl: tih.node } },
                     );
                     let sr = cdit.eval_type_info_export(m9 as ModuleId, rty9, m9 as ModuleId, tt9);
                     if !sr.ok {
@@ -6134,21 +6112,12 @@ pub(package) fn cemit_package(
                     let mut pfx = String::from_str(vis9);
                     pfx.push_str("const ");
                     sdefs.txt.push_str("/* @reflect export */\n");
-                    let ok9b = st_define(
-                        p,
-                        &mut cem,
-                        &cdit,
-                        nm9.as_str(),
-                        root9,
-                        pfx.as_str(),
-                        &mut sdefs.txt,
-                        &mut rootd,
-                    );
+                    let ok9b = st_define(p, &mut cem, &cdit, &nm9, root9, &pfx, &mut sdefs.txt, &mut rootd);
                     if ok9b {
                         reg_names.push(nm9.clone());
                         reg_decls.push(rootd.clone());
-                        lir_group(&mut cem, &cdit, nm9.as_str(), root9, true, false, 0);
-                        lir_own(&mut cem, nm9.as_str(), sd_own9);
+                        lir_group(&mut cem, &cdit, &nm9, root9, true, false, 0);
+                        lir_own(&mut cem, &nm9, sd_own9);
                     }
                     if ok9b {
                         ti_ok += 1;
@@ -6215,9 +6184,9 @@ pub(package) fn cemit_package(
         for src in 0..nm9 + 1 {
             // Past the modules: 65534, the union of the package-level row and every instance shard's.
             let s9 = if src < nm9 {
-                src as u64;
+                src as u64
             } else {
-                65534u64;
+                65534u64
             };
             for k in 0..w9 {
                 let mut b = cem.mg.um_word(s9, k, true) | cem.mg.um_word(s9, k, false);
@@ -6313,7 +6282,7 @@ pub(package) fn cemit_package(
             let mut text = String::new();
             lprint::print_package(&l.deref().pkg, &mut text);
             if let Some(path) = &tp {
-                let _ = write_file(path.as_str(), text.as_str());
+                let _ = write_file(path.as_str(), &text);
             }
             if p.lir_out != null {
                 unsafe *p.lir_out = text;
@@ -6340,7 +6309,7 @@ pub(package) fn cemit_package(
         let mut txt = String::new();
         p.type_table_dump(&mut txt);
         let path = dumpp.unwrap();
-        let f = stdio::fopen(path.as_str(), "wb");
+        let f = stdio::fopen(&path, "wb");
         if f != null {
             unsafe stdio::fwrite(txt.as_ptr(), 1, txt.len(), f);
             unsafe stdio::fclose(f);
@@ -6538,7 +6507,7 @@ fn render_const_elem(p: &loader::Package, mg: &mut mbe::Mangler, a: &Ast, src: s
             let mut tmp = String::new();
             let mut bytes = String::new();
             cbe::str_const_bytes(txt, tk as i64, &mut tmp, &mut bytes);
-            cbe::push_c_str_data(bytes.as_str(), out);
+            cbe::push_c_str_data(&bytes, out);
             return true;
         }
         if tk == TokenType::FloatLiteral {
@@ -6639,7 +6608,7 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u
         d2.push_str("[");
         d2.push_u64(n2);
         d2.push_str("]");
-        let ok = mg.ctype(unsafe (*g).etm, unsafe (*g).ety, d2.as_str(), out);
+        let ok = mg.ctype(unsafe (*g).etm, unsafe (*g).ety, &d2, out);
         return ok;
     }
     if shape == iri::SS_CELL {
@@ -6887,16 +6856,16 @@ fn push_c_float(out: &mut String, v: f64) {
     if v.is_infinite() {
         out.push_str(
             if v < 0.0 {
-                "-__builtin_inf()";
+                "-__builtin_inf()"
             } else {
-                "__builtin_inf()";
+                "__builtin_inf()"
             },
         );
         return;
     }
     let mut buf = Buf64 {};
     let n = (unsafe stdio::snprintf(&mut buf[0], 64, "%.17g".ptr() as *const char, v)) as usize;
-    out.push_str(str::from_cbuf(buf.as_slice()));
+    out.push_str(str::from_cbuf(&buf));
     for i in 0..n {
         let c = buf[i] as u8;
         if c == b'.' || c == b'e' {
@@ -6933,9 +6902,9 @@ fn st_slot(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
     if sl.kind == iri::SK_BOOL {
         out.push_str(
             if sl.i != 0 {
-                "true";
+                "true"
             } else {
-                "false";
+                "false"
             },
         );
         return true;
@@ -6980,11 +6949,11 @@ fn st_all_zero(cev: &iri::Interp, gi: u32) bool {
     for k in 0..unsafe (*g).slots.len() {
         let sl = *unsafe (*g).slots.at(k);
         let zero = if sl.kind == iri::SK_INT || sl.kind == iri::SK_BOOL || sl.kind == iri::SK_FLOAT {
-            sl.i == 0;
+            sl.i == 0
         } else if sl.kind == iri::SK_AGG {
-            st_all_zero(cev, sl.child());
+            st_all_zero(cev, sl.child())
         } else {
-            sl.kind == iri::SK_ZERO || sl.kind == iri::SK_NULL;
+            sl.kind == iri::SK_ZERO || sl.kind == iri::SK_NULL
         };
         if !zero {
             return false;
@@ -7176,7 +7145,7 @@ fn st_group(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: 
         nm2.push_str("__ct");
         nm2.push_u64(unsafe (*cev.static_at(gi)).ord - 1);
         let mut dl = String::new();
-        if !st_ctype(p, &mut cem.mg, cev, gi, nm2.as_str(), &mut dl) {
+        if !st_ctype(p, &mut cem.mg, cev, gi, &nm2, &mut dl) {
             return false;
         }
         // A declarator that spells a const pointee already (`const T *p`) takes no second `const`.
@@ -7434,7 +7403,7 @@ fn cemit_simd_entries(
         let r0 = sc.refused.len();
         // A native build has no object for a function only a C compile defines.
         let mut why = "the vector entry does not lower, or calls a function of its file that does not inline";
-        if ok && sc.emit_fn(&lw.body, nm.as_str()) {
+        if ok && sc.emit_fn(&lw.body, &nm) {
             if !sc.lir_take_pend_c() {
                 names.push(nm);
                 defs.push(sc.out.clone());
@@ -7454,7 +7423,7 @@ fn cemit_simd_entries(
     }
     // The constants the entries address (a shuffle's index table): defined with every other one.
     for j in 0..sc.stat_items.len() {
-        let k = fnv(sc.stat_items.at(j).sym.as_str()); // before the move below
+        let k = fnv(&sc.stat_items.at(j).sym); // before the move below
         if cem.stat_seen.contains(&k) {
             continue;
         }
@@ -7555,7 +7524,7 @@ fn cemit_extern_includes(
     // header defines.
     let mut checks = String::new();
     // The forward header sits at the tree's root, the definition headers in `__sc_t/`.
-    let gen_real = loader::real_path_of(p.gen_root.as_str());
+    let gen_real = loader::real_path_of(&p.gen_root);
     let mut t_real = gen_real.clone();
     t_real.push_str("/__sc_t");
     let mut toks = Set::<u64>::new(); // the alias tokens defined so far: the first header owns one
@@ -7622,10 +7591,10 @@ fn cemit_extern_includes(
                     rel.push_str("./");
                 }
                 rel.push_str(htxt);
-                if let Ok(real) = fs::realpath(rel.as_str()) {
+                if let Ok(real) = fs::realpath(&rel) {
                     let abs = real.as_str();
-                    line.format_into("#include \"{}\"\n", include_name(abs, gen_real.as_str()).as_str());
-                    gline.format_into("#include \"{}\"\n", include_name(abs, t_real.as_str()).as_str());
+                    line.format_into("#include \"{}\"\n", include_name(abs, &gen_real).as_str());
+                    gline.format_into("#include \"{}\"\n", include_name(abs, &t_real).as_str());
                     done = true;
                 }
             }
@@ -7838,9 +7807,9 @@ fn extern_block_aliases(
                 c.push_str(src.slice((unsafe (*pin).str_span.start) as usize, (unsafe (*pin).str_span.end) as usize));
             } else {
                 let nm = if k == NodeKind::NODE_FUNCTION {
-                    a.ext_name(id);
+                    a.ext_name(id)
                 } else {
-                    a.at_const(id).as_data.const_def.name;
+                    a.at_const(id).as_data.const_def.name
                 };
                 let ns = a.at_const(nm).as_data.name.text;
                 let txt = src.slice(ns.start as usize, ns.end as usize);
@@ -7854,7 +7823,7 @@ fn extern_block_aliases(
         } else {
             continue;
         }
-        x_define(c.as_str(), toks, names, defs);
+        x_define(&c, toks, names, defs);
         if k == NodeKind::NODE_ENUM {
             // `Mangler::enum_tag`: the variant's own name.
             let ms = a.ext(id).aggregate.members;
@@ -7871,7 +7840,7 @@ fn extern_block_aliases(
 fn x_define(c: str, toks: &mut Set<u64>, names: &mut Vector<String>, defs: &mut String) {
     let mut t = String::new();
     mbe::x_token(c, &mut t);
-    let h = fnv(t.as_str());
+    let h = fnv(&t);
     if !toks.contains(&h) {
         toks.insert(h);
         defs.format_into("#define {} {}\n", t.as_str(), c);
@@ -7899,9 +7868,9 @@ fn extern_c_raw(p: &loader::Package, m: ModuleId, decl: NodeId, out: &mut String
     }
     let dn = a.at_const(decl);
     let nm = if dn.kind == NodeKind::NODE_TYPE_ALIAS {
-        dn.as_data.type_alias.name;
+        dn.as_data.type_alias.name
     } else {
-        a.ext_name(decl);
+        a.ext_name(decl)
     };
     if dn.kind == NodeKind::NODE_STRUCT {
         out.push_str(mbe::if_s(a.ext(decl).aggregate.is_union, "union ", "struct "));
@@ -7967,15 +7936,15 @@ fn header_field_check(p: &loader::Package, m: ModuleId, t0: TypeId, e0: str, con
         let unsigned = b == BuiltinType::BT_U8 || b == BuiltinType::BT_U16 || b == BuiltinType::BT_U32 || b == BuiltinType::BT_U64 || b == BuiltinType::BT_USIZE;
         if signed || unsigned {
             let w = if b == BuiltinType::BT_I8 || b == BuiltinType::BT_U8 {
-                "1";
+                "1"
             } else if b == BuiltinType::BT_I16 || b == BuiltinType::BT_U16 {
-                "2";
+                "2"
             } else if b == BuiltinType::BT_I32 || b == BuiltinType::BT_U32 {
-                "4";
+                "4"
             } else if b == BuiltinType::BT_I64 || b == BuiltinType::BT_U64 {
-                "8";
+                "8"
             } else {
-                "sizeof(void *)";
+                "sizeof(void *)"
             };
             cond.format_into(
                 "sizeof({}) == {} && _Generic({}, {}, default: 0)",
@@ -7991,11 +7960,11 @@ fn header_field_check(p: &loader::Package, m: ModuleId, t0: TypeId, e0: str, con
             desc.push_str(mbe::if_s(signed, "a signed integer of ", "an unsigned integer of "));
             desc.push_str(
                 if w.len() != 1 {
-                    "pointer size";
+                    "pointer size"
                 } else if w == "1" {
-                    "1 byte";
+                    "1 byte"
                 } else {
-                    w;
+                    w
                 },
             );
             if w.len() == 1 && w != "1" {
@@ -8004,25 +7973,25 @@ fn header_field_check(p: &loader::Package, m: ModuleId, t0: TypeId, e0: str, con
             return;
         }
         let c = if b == BuiltinType::BT_BOOL {
-            "_Bool";
+            "_Bool"
         } else if b == BuiltinType::BT_CHAR {
-            "char: 1, signed char: 1, unsigned char";
+            "char: 1, signed char: 1, unsigned char"
         } else if b == BuiltinType::BT_F32 {
-            "float";
+            "float"
         } else if b == BuiltinType::BT_F64 {
-            "double";
+            "double"
         } else if b == BuiltinType::BT_C32 {
-            "float _Complex";
+            "float _Complex"
         } else {
             assert(b == BuiltinType::BT_C64, "the checker admits only C field types in a header type");
-            "double _Complex";
+            "double _Complex"
         };
         cond.format_into("_Generic({}, {}: 1, default: 0)", e.as_str(), c);
         desc.push_str(
             if b == BuiltinType::BT_CHAR {
-                "a char";
+                "a char"
             } else {
-                c;
+                c
             },
         );
         return;
@@ -8039,9 +8008,9 @@ fn header_const_check(p: &loader::Package, m: ModuleId, cid: NodeId, out: &mut S
     let name = src.slice(ns.start as usize, ns.end as usize);
     let pin = a.attr_of(cid, AttrKind::ATTR_IMPORT);
     let cname = if pin != null {
-        src.slice((unsafe (*pin).str_span.start) as usize, (unsafe (*pin).str_span.end) as usize);
+        src.slice((unsafe (*pin).str_span.start) as usize, (unsafe (*pin).str_span.end) as usize)
     } else {
-        name;
+        name
     };
     let v = unsafe (*(p.cir as *mut iri::Interp)).eval_const_in(m, cid);
     assert(v.kind == iri::IV_INT || v.kind == iri::IV_BOOL, "the checker folds every constant of an extern block");
@@ -8160,7 +8129,7 @@ fn header_type_checks(p: &loader::Package, m: ModuleId, items: NodeList, out: &m
             let e = format("(({} *)0)->{}", ct.as_str(), cf.as_str());
             let mut cond = String::new();
             let mut desc = String::new();
-            header_field_check(p, m, a.member_ty(fid), e.as_str(), &mut cond, &mut desc);
+            header_field_check(p, m, a.member_ty(fid), &e, &mut cond, &mut desc);
             out.format_into(
                 "_Static_assert({}, \"super-c: field '{}.{}' must be {} in C\");\n",
                 cond.as_str(),
@@ -8207,7 +8176,7 @@ fn dctx_take(p: *const loader::Package) DropCtx {
                 return d9;
             },
             _ => {},
-        };
+        }
     }
     unsafe sc_runtime::sc_rt_spin_unlock(&mut G_DPOOL_LOCK);
     return DropCtx::new(p);
@@ -8399,9 +8368,9 @@ fn cemit_free_glue_fields(
             continue;
         }
         let ftn = if is_tuple {
-            fid;
+            fid
         } else {
-            fnode.as_data.field.ty;
+            fnode.as_data.field.ty
         };
         let ft = a.type_of(ftn);
         if ft == TYPE_NONE {
@@ -8461,7 +8430,7 @@ fn cemit_assemble(
     // The previous build's shard counts: the size policy keeps them while they fit.
     let mut prev_tus = Vector::<u32>::new();
     let mut prev_insts = Vector::<u32>::new();
-    shard_meta_read(p.gen_root.as_str(), p, &mut prev_tus, &mut prev_insts);
+    shard_meta_read(&p.gen_root, p, &mut prev_tus, &mut prev_insts);
     let ps = acc.protos.as_str();
     let mut poff = Vector::<u64>::new();
     {
@@ -8525,10 +8494,10 @@ fn cemit_assemble(
         nm.push_u64(i as u64);
         let mut body = xhdrs[i].defs.clone();
         body.push_string(&xhdrs[i].checks);
-        let d = ds.add(nm.as_str(), body.as_str(), p.core_module);
+        let d = ds.add(&nm, &body, p.core_module);
         assert(d == i as u32, "the extern headers are the first definition headers");
         for k in 0..xhdrs[i].names.len() {
-            fd.add_header(xhdrs[i].names[k].as_str(), d);
+            fd.add_header(&xhdrs[i].names[k], d);
         }
     }
     // Array wrapper structs (`Mangler::ptr_wraps`): each is defined in the definition header of
@@ -8544,7 +8513,7 @@ fn cemit_assemble(
     ws.sort_by(wrap_req_cmp);
     let mut wfirst = Map::<u64, u32>::new(); // element name key -> its first wrapper in `ws`
     for j in 0..ws.len() {
-        let k = nkey(fnv(ws[j].elem.as_str()));
+        let k = nkey(fnv(&ws[j].elem));
         if !wfirst.contains_key(&k) {
             wfirst.insert(k, j as u32);
         }
@@ -8555,9 +8524,9 @@ fn cemit_assemble(
     for i in 0..nck {
         let a = em.chunk_off[i] as usize;
         let b = if i + 1 < nck {
-            em.chunk_off[i + 1] as usize;
+            em.chunk_off[i + 1] as usize
         } else {
-            em.out.len();
+            em.out.len()
         };
         let body = em.out.as_str().slice(a, b);
         let nm = em.chunk_name.as_str().slice(
@@ -8573,23 +8542,23 @@ fn cemit_assemble(
             w1 += 1;
         }
         let d = if w0 == w1 {
-            ds.add(nm, body, em.chunk_own[i]);
+            ds.add(nm, body, em.chunk_own[i])
         } else {
             let mut wt = String::new();
             for j in w0..w1 {
-                wrap_typedef(struct_def_name(ws[j].body.as_str()), &mut wt);
+                wrap_typedef(struct_def_name(&ws[j].body), &mut wt);
             }
             wt.push_str(body);
             for j in w0..w1 {
                 wt.push_string(&ws[j].body);
             }
-            ds.add(nm, wt.as_str(), em.chunk_own[i]);
+            ds.add(nm, &wt, em.chunk_own[i])
         };
         for j in w0..w1 {
             let mut line = String::new();
-            let wn = struct_def_name(ws[j].body.as_str());
+            let wn = struct_def_name(&ws[j].body);
             wrap_typedef(wn, &mut line);
-            fd.add(wn, line.as_str(), d);
+            fd.add(wn, &line, d);
             wplaced.set(j, true);
         }
         if em.chunk_enum[i] {
@@ -8613,9 +8582,9 @@ fn cemit_assemble(
     for j in 0..ws.len() {
         if !wplaced[j] {
             let mut line = String::new();
-            let wn = struct_def_name(ws[j].body.as_str());
+            let wn = struct_def_name(&ws[j].body);
             wrap_typedef(wn, &mut line);
-            fd.add(wn, line.as_str(), ANY_HOME);
+            fd.add(wn, &line, ANY_HOME);
         }
     }
     // Result packs (`Mangler::ret_pack`): each in its own definition header, by name; any other
@@ -8636,13 +8605,13 @@ fn cemit_assemble(
             pks.push(replace(spk.index_mut(j), mbe::WrapReq { h: 0, elem: String::new(), body: String::new() }));
         }
         for j in 0..pks.len() {
-            let d = ds.add(pks[j].elem.as_str(), pks[j].body.as_str(), p.core_module);
+            let d = ds.add(&pks[j].elem, &pks[j].body, p.core_module);
             if j == np {
                 lp0 = d as usize;
             }
             let mut line = String::new();
-            wrap_typedef(pks[j].elem.as_str(), &mut line);
-            fd.add(pks[j].elem.as_str(), line.as_str(), d);
+            wrap_typedef(&pks[j].elem, &mut line);
+            fd.add(&pks[j].elem, &line, d);
         }
     }
     // The `@simd_impl` entries' definitions (`cemit_simd_entries`), each after the headers of the
@@ -8653,16 +8622,16 @@ fn cemit_assemble(
         let def = si_defs.at(i).as_str();
         let mut body = gated_incs.clone();
         body.push_str(def);
-        let d = ds.add(si_names.at(i).as_str(), body.as_str(), p.core_module);
+        let d = ds.add(si_names.at(i).as_str(), &body, p.core_module);
         let mut line = String::from_str(def.slice(0, def.find("{") as usize).trim_end());
         line.push_str(";\n");
-        fd.add(si_names.at(i).as_str(), line.as_str(), d);
+        fd.add(si_names.at(i).as_str(), &line, d);
     }
     // A backend constant (defined with the core module's) is declared in each header that names it.
     for j in 0..cem.stat_items.len() {
         if p.modules[cem.stat_items.at(j).def.module as usize].backend {
             let sl = cem.stat_decls.as_str().slice(cap_pe(&cem.stat_end, j as u32) as usize, cem.stat_end[j] as usize);
-            fd.add(cem.stat_items.at(j).sym.as_str(), sl, ANY_HOME);
+            fd.add(&cem.stat_items.at(j).sym, sl, ANY_HOME);
         }
     }
     let nd = ds.key.len();
@@ -8676,9 +8645,9 @@ fn cemit_assemble(
     tf.resize_default(nd);
     for pass in 0..2 {
         let src = if pass == 0 {
-            em.fwd2.as_str();
+            em.fwd2.as_str()
         } else {
-            cem.env_fwd.as_str();
+            cem.env_fwd.as_str()
         };
         let mut a: usize = 0;
         while a < src.len() {
@@ -8710,7 +8679,7 @@ fn cemit_assemble(
         switch ds.idx.get(&k) {
             Some(d) => needp.index_mut(own).push(*d),
             None => {},
-        };
+        }
     }
     // Prototype header bodies: `_ret` typedefs, cross-TU prototypes, constant and
     // descriptor declarations, each by owner. Shared assert helpers go to the forward header.
@@ -8750,11 +8719,11 @@ fn cemit_assemble(
     let mut xd = XDecls::new();
     for i in 0..xhdrs.len() {
         for k in 0..xhdrs[i].names.len() {
-            xd.add_header(xhdrs[i].names[k].as_str(), i as u32);
+            xd.add_header(&xhdrs[i].names[k], i as u32);
         }
     }
     for m in 0..n {
-        xd.add_all(ph[m].as_str(), &fd);
+        xd.add_all(&ph[m], &fd);
     }
     {
         // The forward header: fixed runtime text, extern headers, then the copies its other
@@ -8764,13 +8733,13 @@ fn cemit_assemble(
         let mut protos = String::new();
         let mut xp = String::new();
         let mut deps = Vector::<u32>::new();
-        split_protos(cem.extern_protos.as_str(), &mut fd, &mut incd, &mut deps, &mut protos, &mut xp);
+        split_protos(&cem.extern_protos, &mut fd, &mut incd, &mut deps, &mut protos, &mut xp);
         if cem.blk_protos.len() != 0 {
             // The pool's C-callable entry point (std::parallel::blocking, symbol pinned @export).
             protos.push_str("void __sc_blocking_run(void (*__r)(void *), void *__e);\n");
         }
-        split_protos(cem.blk_protos.as_str(), &mut fd, &mut incd, &mut deps, &mut protos, &mut xp);
-        xd.add_all(xp.as_str(), &fd);
+        split_protos(&cem.blk_protos, &mut fd, &mut incd, &mut deps, &mut protos, &mut xp);
+        xd.add_all(&xp, &fd);
         let mut rest = String::new();
         rest.reserve(
             cem.dyn_defs.len() + macros_out.len() + fwd_aux.len() + protos.len() + cem.dyn_decls.len() + cem.sent_decls.len(),
@@ -8789,16 +8758,16 @@ fn cemit_assemble(
         // every file sees it.
         deps.clear();
         fd.scan_def(ext_incs.as_str(), NO_HOME, 0, &mut incd, &mut deps);
-        fd.scan_def(rest.as_str(), NO_HOME, 0, &mut incd, &mut deps);
+        fd.scan_def(&rest, NO_HOME, 0, &mut incd, &mut deps);
         ds.sort_by_stem(&mut deps);
         for k in 0..deps.len() {
             if deps[k] < nx {
-                def_inc(0, ds.stem[deps[k] as usize].as_str(), &mut fh);
+                def_inc(0, &ds.stem[deps[k] as usize], &mut fh);
             }
             incd.set(deps[k] as usize, 0);
         }
         simd_level_fn(p, &mut fh);
-        fd.copy(rest.as_str(), NO_HOME, &incd, &mut fh);
+        fd.copy(&rest, NO_HOME, &incd, &mut fh);
         fh.push_string(&rest);
         fh.push_str("#endif\n");
         o.fwd_h = fh;
@@ -8832,10 +8801,10 @@ fn cemit_assemble(
         for k in 0..np.len() {
             incd.set(np[k] as usize, 1);
         }
-        fd.scan_def(ph[m].as_str(), NO_HOME, 0, &mut incd, np);
+        fd.scan_def(&ph[m], NO_HOME, 0, &mut incd, np);
         ds.sort_by_stem(np);
         for k in 0..np.len() {
-            def_inc(d, ds.stem[np[k] as usize].as_str(), &mut t);
+            def_inc(d, &ds.stem[np[k] as usize], &mut t);
         }
         fd.flush_unseen(NO_HOME, &incd, &mut t);
         for k in 0..np.len() {
@@ -8846,7 +8815,7 @@ fn cemit_assemble(
         o.protos_h.set(m, t);
     }
     let mut sdefs9 = Set::<u64>::new();
-    struct_def_names(ds.body.txt.as_str(), &mut sdefs9);
+    struct_def_names(&ds.body.txt, &mut sdefs9);
     let recs9 = inst_recs(p);
     // Instance-shard data heads by owner: block wrappers, constant definitions, descriptor
     // groups and dyn tables.
@@ -8923,7 +8892,7 @@ fn cemit_assemble(
         &o.ck_end,
         &ih,
         acc.main_mod as usize,
-        tail9.as_str(),
+        &tail9,
         p.jobs,
         &mut rsel,
     );
@@ -8934,9 +8903,9 @@ fn cemit_assemble(
             let is_inst = pass == 1;
             let has_wrap = !is_inst && acc.have_main && !testing && t as u64 == acc.main_mod;
             let cks = if is_inst {
-                o.inst_chunks.at(t);
+                o.inst_chunks.at(t)
             } else {
-                o.tu_chunks.at(t);
+                o.tu_chunks.at(t)
             };
             if cks.len() == 0 && !has_wrap && (!is_inst || ih[t].len() == 0) && (is_inst || !module_has_asm(p, t)) {
                 continue;
@@ -8944,9 +8913,9 @@ fn cemit_assemble(
             let path = p.modules[t].path.as_str();
             let d = mod_depth(path);
             let src9 = if is_inst {
-                (mbe::CTX_INST | t as i64) as u64;
+                (mbe::CTX_INST | t as i64) as u64
             } else {
-                t as u64;
+                t as u64
             };
             let mut nsh = shard_rule(p, t, is_inst) as usize;
             if nsh == 0 {
@@ -8958,9 +8927,9 @@ fn cemit_assemble(
                     bytes += (o.ck_end[i] - o.ck_off[i]) as usize + (poff[i + 1] - poff[i]) as usize;
                 }
                 let prev = if is_inst {
-                    prev_insts[t];
+                    prev_insts[t]
                 } else {
-                    prev_tus[t];
+                    prev_tus[t]
                 };
                 nsh = shard_policy(bytes, prev) as usize;
             }
@@ -8975,9 +8944,9 @@ fn cemit_assemble(
                 let is_static = pl.len() >= 7 && pl.slice(0, 7) == "static ";
                 if !is_static {
                     last = if nsh == 1 {
-                        0u8;
+                        0u8
                     } else {
-                        (item_hash(pl) % nsh as u64) as u8;
+                        (item_hash(pl) % nsh as u64) as u8
                     };
                 } else {
                     heads.index_mut(last as usize).push_str(pl);
@@ -9081,15 +9050,15 @@ fn cemit_assemble(
     // chunk pack a used wide one names (`Mangler::vec_def`), which names no pack.
     let ne = nd - si0;
     let lazy = if lp0 < si0 {
-        si0 - lp0;
+        si0 - lp0
     } else {
-        0;
+        0
     };
     for j in 0..ne + lazy {
         let x = if j < ne {
-            si0 + j;
+            si0 + j
         } else {
-            lp0 + j - ne;
+            lp0 + j - ne
         };
         if def_used[x] == 0 {
             continue;
@@ -9123,7 +9092,7 @@ fn cemit_assemble(
         ds.sort_by_stem(&mut deps);
         let mut t = String::new();
         t.reserve(body.len() + 64 * deps.len() + 128);
-        def_guard(ds.stem[d].as_str(), &mut t);
+        def_guard(&ds.stem[d], &mut t);
         t.push_str("#include \"../__sc_fwd.h\"\n");
         for k in 0..deps.len() {
             let x = deps[k] as usize;
@@ -9163,7 +9132,7 @@ fn cemit_assemble(
     let mut xall = String::new();
     for d in 0..nx {
         if xhdrs[d as usize].checks.len() != 0 && (!used[d as usize] || p.native) {
-            def_inc(0, ds.stem[d as usize].as_str(), &mut xall);
+            def_inc(0, &ds.stem[d as usize], &mut xall);
         }
     }
     o.reg_x = xall.len() != 0;
@@ -9221,7 +9190,7 @@ fn cemit_assemble(
         let mut rc = String::from_str("#include \"__sc_fwd.h\"\n");
         rc.push_string(&xall);
         rc.push_str("SC_RT_EXTERNS\nSC_RT_X(__sc_wrap)\n");
-        fd.copy(rg.as_str(), NO_HOME, &incd, &mut rc);
+        fd.copy(&rg, NO_HOME, &incd, &mut rc);
         rc.push_string(&rg);
         o.registry_c = rc;
     }
@@ -9322,9 +9291,9 @@ extend FwdDecls {
             let cls = c_class(text.byte_at(i));
             if cls != C_IDENT {
                 i = if cls == C_OPEN {
-                    c_skip(text, i);
+                    c_skip(text, i)
                 } else {
-                    i + 1;
+                    i + 1
                 };
                 continue;
             }
@@ -9379,9 +9348,9 @@ extend FwdDecls {
                     depth -= 1;
                 }
                 i = if cls == C_OPEN {
-                    c_skip(text, i);
+                    c_skip(text, i)
                 } else {
-                    i + 1;
+                    i + 1
                 };
                 continue;
             }
@@ -9514,7 +9483,7 @@ extend DefSet {
         for d in 0..nd {
             let mut st = String::new();
             stem_of(self.name.at(d), self.key[d], false, &mut st);
-            fv.push(fold_hash(st.as_str()));
+            fv.push(fold_hash(&st));
             self.stem.push(st);
         }
         let mut sorted = fv.clone();
@@ -9542,7 +9511,7 @@ extend DefSet {
                     self.stem.set(d, st);
                 }
                 // Distinct 64-bit name hashes cannot fold together.
-                let f = fold_hash(self.stem[d].as_str());
+                let f = fold_hash(&self.stem[d]);
                 assert(!again.contains(&f));
                 again.insert(f);
             }
@@ -9604,7 +9573,7 @@ extend DefSet {
         if pa != pb {
             return pa < pb;
         }
-        return str_cmp(self.stem[a as usize].as_str(), self.stem[b as usize].as_str()) <= 0;
+        return str_cmp(&self.stem[a as usize], &self.stem[b as usize]) <= 0;
     }
 
     /// Order distinct header indexes by stem (the include order of every file).
@@ -9711,8 +9680,8 @@ fn unit_incs(
         }
     }
     fd.begin();
-    fd.scan(tdefs.as_str(), NO_HOME, 1, incd, dv);
-    fd.scan(decls.as_str(), NO_HOME, 0, incd, dv);
+    fd.scan(&tdefs, NO_HOME, 1, incd, dv);
+    fd.scan(&decls, NO_HOME, 0, incd, dv);
     for k in 0..pend.len() {
         fd.want(pend[k], NO_HOME, incd);
     }
@@ -9721,7 +9690,7 @@ fn unit_incs(
     }
     ds.sort_by_stem(dv);
     for k in 0..dv.len() {
-        def_inc(d, ds.stem[dv[k] as usize].as_str(), &mut inc);
+        def_inc(d, &ds.stem[dv[k] as usize], &mut inc);
     }
     fd.flush_unseen(NO_HOME, incd, &mut inc);
     inc.push_string(&tdefs);
@@ -9822,9 +9791,9 @@ extend XDecls {
             let cls = c_class(text.byte_at(i));
             if cls != C_IDENT {
                 i = if cls == C_OPEN {
-                    c_skip(text, i);
+                    c_skip(text, i)
                 } else {
-                    i + 1;
+                    i + 1
                 };
                 continue;
             }
@@ -9845,7 +9814,7 @@ extend XDecls {
                     }
                 },
                 None => {},
-            };
+            }
         }
     }
 }
@@ -9885,14 +9854,14 @@ fn xd_range(t: XdTask) {
         let r = (unsafe t.rows[j]) as usize;
         let inst = r >= n;
         let m = if inst {
-            r - n;
+            r - n
         } else {
-            r;
+            r
         };
         let cks = if inst {
-            unsafe (*t.inst).at(m);
+            unsafe (*t.inst).at(m)
         } else {
-            unsafe (*t.tu).at(m);
+            unsafe (*t.tu).at(m)
         };
         let buf = unsafe (*t.bufs).at(pick(inst, n, m)).as_str();
         let out = unsafe &mut t.out[r];
@@ -9943,9 +9912,9 @@ fn xd_rows(
     let mut size = Vector::<u64>::with_capacity(2 * n);
     for r in 0..2 * n {
         let cks = if r < n {
-            tu.at(r);
+            tu.at(r)
         } else {
-            inst.at(r - n);
+            inst.at(r - n)
         };
         let mut b: u64 = pick(r < n, 0, ih.at(r % n).len() as u64);
         for k in 0..cks.len() {
@@ -10166,9 +10135,9 @@ fn split_protos(
             // `extern` line as an object's, and C needs no `extern` on a prototype.
             unit.push_str(
                 if line.starts_with("extern ") {
-                    line.slice(7, line.len());
+                    line.slice(7, line.len())
                 } else {
-                    line;
+                    line
                 },
             );
         }
@@ -10209,11 +10178,11 @@ fn wrap_collect(src: &mut Vector<mbe::WrapReq>, seen: &mut Set<u64>, out: &mut V
 
 // Wrapper requests by element name, then by definition (which starts with the wrapper's name).
 const fn wrap_req_cmp(a: &mbe::WrapReq, b: &mbe::WrapReq) i32 {
-    let c = str_cmp(a.elem.as_str(), b.elem.as_str());
+    let c = str_cmp(&a.elem, &b.elem);
     if c != 0 {
         return c;
     }
-    return str_cmp(a.body.as_str(), b.body.as_str());
+    return str_cmp(&a.body, &b.body);
 }
 
 // The typedef line of struct `nm`.
@@ -10415,9 +10384,9 @@ const fn key_idx_cmp(a: &KeyIdx, b: &KeyIdx) i32 {
 // Byte-wise order of two names (a stable key for headers, shards and registry roots).
 const fn str_cmp(a: str, b: str) i32 {
     let n = if a.len() < b.len() {
-        a.len();
+        a.len()
     } else {
-        b.len();
+        b.len()
     };
     for i in 0..n {
         if a.byte_at(i) != b.byte_at(i) {
@@ -10503,9 +10472,9 @@ const fn shard_rule(p: &loader::Package, m: usize, inst: bool) u32 {
     for i in 0..p.shard_rules.len() {
         if p.shard_rules.at(i).module.as_str() == p.modules[m].path.as_str() {
             return if inst {
-                p.shard_rules.at(i).insts;
+                p.shard_rules.at(i).insts
             } else {
-                p.shard_rules.at(i).tus;
+                p.shard_rules.at(i).tus
             };
         }
     }
@@ -10594,14 +10563,14 @@ fn pack_plan(
         return 0;
     }
     let np = if unity {
-        1u32;
+        1u32
     } else {
-        shard_policy(bytes as usize, prev);
+        shard_policy(bytes as usize, prev)
     };
     for k in 0..lm.len() {
         let t = lm[k] as usize;
         if pack_small(unity, co.tu_heads.at(t).len(), tsz[t]) && !co.tu_x[t] {
-            tu_pk.set(t, (fnv(p.modules[t].path.as_str()) % np as u64) as u32 + 1);
+            tu_pk.set(t, (fnv(&p.modules[t].path) % np as u64) as u32 + 1);
         }
     }
     for k in 0..iq.len() {
@@ -10725,7 +10694,7 @@ fn shard_meta_read(root: str, p: &loader::Package, tus: &mut Vector<u32>, insts:
         return;
     }
     let mp = build_out_path(root, "__sc_shards", "");
-    let textv = loader::read_file(mp.as_str());
+    let textv = loader::read_file(&mp);
     if textv.is_none() {
         return;
     }
@@ -10773,19 +10742,19 @@ fn shard_meta_text(p: &loader::Package, co: &CemitOut) String {
     let mut out = String::from_str("super-c-shards\t1\n");
     for m in 0..p.modules.len() {
         let tus = if co.tu_heads.at(m).len() > 1 {
-            co.tu_heads.at(m).len();
+            co.tu_heads.at(m).len()
         } else {
-            1usize;
+            1usize
         };
         let insts = if co.inst_heads.at(m).len() > 1 {
-            co.inst_heads.at(m).len();
+            co.inst_heads.at(m).len()
         } else {
-            1usize;
+            1usize
         };
         if tus == 1 && insts == 1 {
             continue;
         }
-        out.push_str(p.modules[m].path.as_str());
+        out.push_str(&p.modules[m].path);
         out.push_byte(b'\t');
         out.push_u64(tus as u64);
         out.push_byte(b'\t');
@@ -10815,19 +10784,19 @@ fn out_hash(text: str) u64 {
 // order), `tail`. A shard past the first with nothing in it has no file: false, `body` untouched.
 fn shard_text(co: &CemitOut, t: usize, x: u8, inst: bool, tail: str, sg: &ShardGroups, body: &mut String) bool {
     let head = if inst {
-        co.inst_heads.at(t).at(x as usize).as_str();
+        co.inst_heads.at(t).at(x as usize).as_str()
     } else {
-        co.tu_heads.at(t).at(x as usize).as_str();
+        co.tu_heads.at(t).at(x as usize).as_str()
     };
     let inc = if inst {
-        co.inst_incs.at(t).as_str();
+        co.inst_incs.at(t).as_str()
     } else {
-        co.tu_incs.at(t).as_str();
+        co.tu_incs.at(t).as_str()
     };
     let buf = if inst {
-        co.inst_c.as_str();
+        co.inst_c.as_str()
     } else {
-        co.tus.at(t).as_str();
+        co.tus.at(t).as_str()
     };
     let lo = sg.off[x as usize] as usize;
     let hi = sg.off[x as usize + 1] as usize;
@@ -10984,7 +10953,7 @@ fn c_build_files(p: &loader::Package, root: str, members: &Vector<String>, keep:
     }
     fl.push_byte(b'\n');
     let lp = build_out_path(root, "__ldflags", "");
-    let mut ld = loader::read_file(lp.as_str()).unwrap_or(String::new());
+    let mut ld = loader::read_file(&lp).unwrap_or(String::new());
     let mut lw = Vector::<String>::new();
     split_args(&mut lw, tgt::os(target).exe_link);
     for i in 0..lw.len() {
@@ -10992,10 +10961,7 @@ fn c_build_files(p: &loader::Package, root: str, members: &Vector<String>, keep:
     }
     let up = build_out_path(root, "__units", "");
     let fp = build_out_path(root, "__cflags", "");
-    if !write_file_atomic(up.as_str(), units.as_str()) || !write_file_atomic(fp.as_str(), fl.as_str()) || ld.len() != 0 && !write_file_atomic(
-        lp.as_str(),
-        ld.as_str(),
-    ) {
+    if !write_file_atomic(&up, &units) || !write_file_atomic(&fp, &fl) || ld.len() != 0 && !write_file_atomic(&lp, &ld) {
         eprintln("super-c: cannot write the C build files under '{}'", root);
         return false;
     }
@@ -11006,7 +10972,7 @@ fn c_build_files(p: &loader::Package, root: str, members: &Vector<String>, keep:
 
 fn manifest_publish(root: str, man: &String, keep: &mut Vector<String>) {
     let mp = build_out_path(root, "__sc_manifest", "");
-    switch loader::read_file(mp.as_str()) {
+    switch loader::read_file(&mp) {
         Some(old) => {
             let os = old.as_str();
             let ns = man.as_str();
@@ -11033,7 +10999,7 @@ fn manifest_publish(root: str, man: &String, keep: &mut Vector<String>) {
                     let mut full = String::from_str("\n");
                     full.push_str(line);
                     full.push_str("\n");
-                    if ns.contains(pat.as_str()) && !ns.contains(full.as_str()) {
+                    if ns.contains(&pat) && !ns.contains(&full) {
                         eprint(
                             "super-c: shard policy migration for {}: every shard of the module is rewritten\n",
                             line.slice(7, t2 - 1),
@@ -11044,8 +11010,8 @@ fn manifest_publish(root: str, man: &String, keep: &mut Vector<String>) {
             }
         },
         None => {},
-    };
-    if write_file_atomic(mp.as_str(), man.as_str()) {
+    }
+    if write_file_atomic(&mp, man.as_str()) {
         keep.push(mp);
     }
 }
@@ -11056,9 +11022,9 @@ const fn word_in(list: str, w: str) bool {
     for _ in 0..list.len() + 1 {
         let sp = rest.find_byte(b' ');
         let item = if sp < 0 {
-            rest;
+            rest
         } else {
-            rest.slice(0, sp as usize);
+            rest.slice(0, sp as usize)
         };
         if item == w {
             return true;
@@ -11140,7 +11106,7 @@ fn native_header_facts(p: &mut loader::Package) {
             let htxt = block_header(a, src, nid);
             if htxt.len() != 0 {
                 let line = format("#include {}\n", include_operand(p, m, htxt).as_str());
-                if !inc.as_str().contains(line.as_str()) {
+                if !inc.as_str().contains(&line) {
                     inc.push_string(&line);
                 }
             }
@@ -11168,7 +11134,7 @@ fn native_header_facts(p: &mut loader::Package) {
                 akeys.push(Vector::<u64>::new());
                 asp.push(Vector::<String>::new());
                 snames.push(Vector::<String>::new());
-                k;
+                k
             },
         }) as usize;
         for i in 0..its.len {
@@ -11223,9 +11189,9 @@ fn native_header_facts(p: &mut loader::Package) {
                     let av = a.attr_value(
                         sid,
                         if exact {
-                            AttrKind::ATTR_LAYOUT;
+                            ATTR_LAYOUT
                         } else {
-                            AttrKind::ATTR_C_VALUE;
+                            ATTR_C_VALUE
                         },
                     );
                     assert(av.ok, "the checker folds every '@layout' and '@value'");
@@ -11272,16 +11238,16 @@ fn native_header_facts(p: &mut loader::Package) {
     // Each header's facts: the record of an earlier build's scan when every file it read is unchanged,
     // else a scan, the headers in parallel.
     let cpath = if p.gen_root.len() != 0 {
-        build_out_path(p.gen_root.as_str(), HF_RECORD, "");
+        build_out_path(&p.gen_root, HF_RECORD, "")
     } else {
-        String::new();
+        String::new()
     };
-    let read = loader::read_file(cpath.as_str()).unwrap_or(String::new());
+    let read = loader::read_file(&cpath).unwrap_or(String::new());
     // A record of another format has no entry for this one.
     let old = if read.as_str().starts_with(HF_FORMAT) {
-        read.as_str().slice(HF_FORMAT.len(), read.len());
+        read.as_str().slice(HF_FORMAT.len(), read.len())
     } else {
-        "";
+        ""
     };
     let mut tasks = Vector::<HfTask>::new();
     for k in 0..hincs.len() {
@@ -11326,7 +11292,7 @@ fn native_header_facts(p: &mut loader::Package) {
     }
     // One C environment for every scan: each would build the same.
     let mut env = ct::CTarget::new();
-    if miss != 0 && bg::header_env(p.build_target, p.arch, sysroot.as_str(), flags.as_str(), &mut env) {
+    if miss != 0 && bg::header_env(p.build_target, p.arch, &sysroot, &flags, &mut env) {
         for q in 0..tasks.len() {
             tasks.index_mut(q).env = &env;
         }
@@ -11418,7 +11384,7 @@ fn native_header_facts(p: &mut loader::Package) {
         }
     }
     if cpath.len() != 0 && rec.as_str() != read.as_str() {
-        let _ = write_file_atomic(cpath.as_str(), rec.as_str());
+        let _ = write_file_atomic(&cpath, &rec);
     }
 }
 
@@ -11427,9 +11393,9 @@ fn native_header_facts(p: &mut loader::Package) {
 // An error at the type when they differ.
 fn check_type(p: &mut loader::Package, key: u64, exact: bool, want: u64, got: u64, header: str) {
     let ok = if exact {
-        got == want;
+        got == want
     } else {
-        got >> 32 == want >> 32 && (got & 0xFFFFFFFF) >= (want & 0xFFFFFFFF);
+        got >> 32 == want >> 32 && (got & 0xFFFFFFFF) >= (want & 0xFFFFFFFF)
     };
     if ok {
         return;
@@ -11441,9 +11407,9 @@ fn check_type(p: &mut loader::Package, key: u64, exact: bool, want: u64, got: u6
     let src = p.modules[m].source.as_str();
     let tn = src.slice(name.start as usize, name.end as usize);
     let what = if exact {
-        "@layout";
+        "@layout"
     } else {
-        "@value";
+        "@value"
     };
     let mut msg = format(
         "'{}' must have {} bytes aligned to {}{} in C ('{}'), ",
@@ -11517,7 +11483,7 @@ fn check_obj(p: &mut loader::Package, key: u64, obj: str, smap: &Map<String, Str
     let mut want = String::new();
     sc_shape(p, m as ModuleId, a.type_of(cd.ty), smap, &mut want);
     let ptr = format("{}", lay::target_for(p.arch).ptr);
-    if abi_eq(want.as_str(), rest, ptr.as_str()) {
+    if abi_eq(&want, rest, &ptr) {
         p.extern_objs.insert(key, String::from_str(sym));
         return;
     }
@@ -11525,7 +11491,7 @@ fn check_obj(p: &mut loader::Package, key: u64, obj: str, smap: &Map<String, Str
     let src = p.modules[m].source.as_str();
     let mut wd = String::new();
     let mut od = String::new();
-    shape_desc(want.as_str(), &mut wd);
+    shape_desc(&want, &mut wd);
     shape_desc(rest, &mut od);
     let msg = format(
         "constant '{}' must be {} in C, but {} declares {}",
@@ -11615,9 +11581,9 @@ fn check_agg(p: &mut loader::Package, key: u64, facts: str, smap: &Map<String, S
                 l.size,
                 l.align,
                 if kind == "E" {
-                    format("{} defines it as an enum", header);
+                    format("{} defines it as an enum", header)
                 } else {
-                    format("its layout does not follow from {}", header);
+                    format("its layout does not follow from {}", header)
                 },
             ),
         );
@@ -11648,7 +11614,7 @@ fn check_agg(p: &mut loader::Package, key: u64, facts: str, smap: &Map<String, S
         let fname = src.slice(fs.start as usize, fs.end as usize);
         let mut cf = String::new();
         field_c_name(p, m as ModuleId, fid, &mut cf);
-        let got = hf_entry(facts, cf.as_str());
+        let got = hf_entry(facts, &cf);
         if got.len() == 0 {
             hf_err(
                 p,
@@ -11687,12 +11653,12 @@ fn check_agg(p: &mut loader::Package, key: u64, facts: str, smap: &Map<String, S
         }
         let mut want = String::new();
         sc_shape(p, m as ModuleId, a.member_ty(fid), smap, &mut want);
-        if want.as_str().contains("?") || cshape.contains("?") || shape_eq(want.as_str(), cshape) {
+        if want.as_str().contains("?") || cshape.contains("?") || shape_eq(&want, cshape) {
             continue;
         }
         let mut wd = String::new();
         let mut cd = String::new();
-        shape_desc(want.as_str(), &mut wd);
+        shape_desc(&want, &mut wd);
         shape_desc(cshape, &mut cd);
         hf_err(
             p,
@@ -11770,10 +11736,10 @@ fn check_fn(p: &mut loader::Package, key: u64, sig: str, smap: &Map<String, Stri
         let pid = unsafe a.list(fd.params)[q];
         let mut want = String::new();
         sc_shape(p, m as ModuleId, a.type_of(a.at_const(pid).as_data.parameter.ty), smap, &mut want);
-        if !abi_eq(want.as_str(), cps[q], ptr.as_str()) {
+        if !abi_eq(&want, cps[q], &ptr) {
             let mut wd = String::new();
             let mut cd = String::new();
-            shape_desc(want.as_str(), &mut wd);
+            shape_desc(&want, &mut wd);
             shape_desc(cps[q], &mut cd);
             hf_err(
                 p,
@@ -11798,10 +11764,10 @@ fn check_fn(p: &mut loader::Package, key: u64, sig: str, smap: &Map<String, Stri
     } else {
         want.push_str("?");
     }
-    if !abi_eq(want.as_str(), cret, ptr.as_str()) {
+    if !abi_eq(&want, cret, &ptr) {
         let mut wd = String::new();
         let mut cd = String::new();
-        shape_desc(want.as_str(), &mut wd);
+        shape_desc(&want, &mut wd);
         shape_desc(cret, &mut cd);
         hf_err(
             p,
@@ -11918,37 +11884,37 @@ fn sc_shape(p: &loader::Package, m: ModuleId, t0: TypeId, smap: &Map<String, Str
         let b = y.as_data.builtin;
         out.push_str(
             if y.kind != TypeKind::TYPE_BUILTIN {
-                "?";
+                "?"
             } else if b == BuiltinType::BT_I8 {
-                "s1";
+                "s1"
             } else if b == BuiltinType::BT_I16 {
-                "s2";
+                "s2"
             } else if b == BuiltinType::BT_I32 {
-                "s4";
+                "s4"
             } else if b == BuiltinType::BT_I64 {
-                "s8";
+                "s8"
             } else if b == BuiltinType::BT_ISIZE {
-                pick(pb == 8, "s8", "s4");
+                pick(pb == 8, "s8", "s4")
             } else if b == BuiltinType::BT_U8 {
-                "u1";
+                "u1"
             } else if b == BuiltinType::BT_U16 {
-                "u2";
+                "u2"
             } else if b == BuiltinType::BT_U32 {
-                "u4";
+                "u4"
             } else if b == BuiltinType::BT_U64 {
-                "u8";
+                "u8"
             } else if b == BuiltinType::BT_USIZE {
-                pick(pb == 8, "u8", "u4");
+                pick(pb == 8, "u8", "u4")
             } else if b == BuiltinType::BT_CHAR {
-                "c";
+                "c"
             } else if b == BuiltinType::BT_BOOL {
-                "b";
+                "b"
             } else if b == BuiltinType::BT_F32 {
-                "f4";
+                "f4"
             } else if b == BuiltinType::BT_F64 {
-                "f8";
+                "f8"
             } else {
-                "?";
+                "?"
             },
         );
         return;
@@ -12030,7 +11996,7 @@ fn hf_err(p: &mut loader::Package, m: usize, n: NodeId, msg: String) {
     let src = p.modules[m].source.as_str();
     let mut errs = diag::Errors::new();
     errs.emit_span(dc::EXTERN_DECLARATION_DISAGREES_WITH_C_HEADER, a.at_const(n).span, msg);
-    errs.finalize(src, p.modules[m].file.as_str());
+    errs.finalize(src, &p.modules[m].file);
     errs.log();
     p.ok = false;
 }
@@ -12061,13 +12027,13 @@ fn include_operand(p: &loader::Package, m: usize, htxt: str) String {
         let rel = format(
             "{}{}",
             if dend != 0 {
-                mf.slice(0, dend);
+                mf.slice(0, dend)
             } else {
-                "./";
+                "./"
             },
             htxt,
         );
-        if let Ok(real) = fs::realpath(rel.as_str()) {
+        if let Ok(real) = fs::realpath(&rel) {
             return format("\"{}\"", real.as_str());
         }
     }
@@ -12246,9 +12212,9 @@ fn hf_write(out: &mut String, t: &HfTask) {
     for j in 0..t.sts.len() {
         out.push_byte(
             if t.sts[j] {
-                b'1';
+                b'1'
             } else {
-                b'0';
+                b'0'
             },
         );
     }
@@ -12282,9 +12248,9 @@ fn hf_write(out: &mut String, t: &HfTask) {
 // File `path`'s size and modification time in nanoseconds; zeros when it is gone.
 fn hf_stat(path: str) (u64, i64) {
     if let Ok(m) = fs::stat(path) {
-        return m.size, m.modified_ns;
+        return (m.size, m.modified_ns);
     }
-    return 0, 0;
+    return (0, 0);
 }
 
 // `t`'s facts from record `rec` (`hf_write`) when it holds `t`'s key and every file the scan read is
@@ -12474,7 +12440,7 @@ fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc, held: &mut Vector<Option<lho
     if !t.on || !p.native {
         return;
     }
-    let rec = nat_record(build_out_path(p.gen_root.as_str(), NAT_RECORD, "").as_str());
+    let rec = nat_record(build_out_path(&p.gen_root, NAT_RECORD, "").as_str());
     let pb = lay::target_for(p.arch).ptr as u32;
     for m in 0..p.modules.len() {
         if !t.hit[m] {
@@ -12505,11 +12471,11 @@ fn inline_budget(opt: i32, cg: u64) il::Budget {
         return il::SHRINK;
     }
     return if opt == bman::OPT_S || opt == bman::OPT_Z {
-        il::SIZE;
+        il::SIZE
     } else if opt == 3 {
-        il::FAST;
+        il::FAST
     } else {
-        il::SPEED;
+        il::SPEED
     };
 }
 
@@ -12526,40 +12492,40 @@ fn inline_budget(opt: i32, cg: u64) il::Budget {
 fn loop_budgets(opt: i32, cg: u64) lu::Budgets {
     return lu::Budgets {
         peel: if (cg & bman::CG_UNROLL) == 0 {
-            0u32;
+            0u32
         } else if opt == 3 {
-            300u32;
+            300u32
         } else {
-            150u32;
+            150u32
         },
         partial: if (cg & bman::CG_UNROLL) == 0 {
-            0u32;
+            0u32
         } else if opt == 3 {
-            64u32;
+            64u32
         } else {
-            32u32;
+            32u32
         },
         version: if (cg & bman::CG_VERSION_LOOPS) != 0 {
-            200u32;
+            200u32
         } else {
-            0u32;
+            0u32
         },
         unswitch: if (cg & bman::CG_UNSWITCH) != 0 {
-            50u32;
+            50u32
         } else {
-            0u32;
+            0u32
         },
         rotate: if opt == bman::OPT_S || opt == bman::OPT_Z {
-            0u32;
+            0u32
         } else {
-            8u32;
+            8u32
         },
         vector: if (cg & bman::CG_VECTORIZE) == 0 {
-            0u32;
+            0u32
         } else if opt == bman::OPT_S {
-            1u32;
+            1u32
         } else {
-            4u32;
+            4u32
         },
         fin: 512,
     };
@@ -12592,7 +12558,7 @@ fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
             None => {
                 break;
             },
-        };
+        }
     }
     // Order-free sums over the opaque types' classes and layouts and the constants.
     let mut ot = p.opaque_cls.keys();
@@ -12610,7 +12576,7 @@ fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
             None => {
                 break;
             },
-        };
+        }
     }
     let mut it = p.extern_ints.keys();
     loop {
@@ -12622,7 +12588,7 @@ fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
             None => {
                 break;
             },
-        };
+        }
     }
     let mut xo = p.extern_objs.keys();
     loop {
@@ -12634,7 +12600,7 @@ fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
             None => {
                 break;
             },
-        };
+        }
     }
     return h;
 }
@@ -12699,9 +12665,9 @@ fn native_plan(
     for q in 0..2 * n {
         for d in 0..2usize {
             let v = if d == 0 {
-                funcs.index_mut(q);
+                funcs.index_mut(q)
             } else {
-                datas.index_mut(q);
+                datas.index_mut(q)
             };
             if v.len() < 2 {
                 continue;
@@ -12750,7 +12716,7 @@ fn native_plan(
             // The record holds the module under its key (`nat_trust`).
             let r = *rec.get(&p.modules[m].path).unwrap();
             if (r & NAT_OBJ) != 0 {
-                let old = loader::read_file(build_out_path(root, p.modules[m].path.as_str(), ".o").as_str());
+                let old = loader::read_file(build_out_path(root, &p.modules[m].path, ".o").as_str());
                 if old.is_none() {
                     why.push_str("its cached emission has no native object");
                     continue;
@@ -12810,9 +12776,9 @@ fn native_plan(
             nn += 1;
             for part in 0..2usize {
                 let old = if part == 0 {
-                    replace(olds.index_mut(m), String::new());
+                    replace(olds.index_mut(m), String::new())
                 } else {
-                    String::new();
+                    String::new()
                 };
                 if bytes.at(2 * m + part).len() != 0 || old.len() != 0 {
                     let b = replace(bytes.index_mut(2 * m + part), Vector::<u8>::new());
@@ -12827,9 +12793,9 @@ fn native_plan(
         nc += 1;
         ok = false;
         let w = if whys.at(2 * m).len() != 0 {
-            whys.at(2 * m).as_str();
+            whys.at(2 * m).as_str()
         } else {
-            whys.at(2 * m + 1).as_str();
+            whys.at(2 * m + 1).as_str()
         };
         eprint("error: module '{}' does not compile: {}\n", p.modules[m].path.as_str(), w);
     }
@@ -12963,7 +12929,7 @@ fn bc_slot_take(pool: &psync::Mutex<BcPool>, p: *const loader::Package) BcSlot {
             return s;
         },
         _ => {},
-    };
+    }
     return bc_slot_new(p);
 }
 
@@ -12991,9 +12957,9 @@ fn bc_job(ctx: *mut void, j: u32) {
     let mut keep = irl::Keep::new();
     if st.master != null {
         slot.ctx.keep = if p.jobs == 1 {
-            st.master;
+            st.master
         } else {
-            &mut keep;
+            &mut keep
         };
     }
     slot.ctx.validate = st.validate;
@@ -13110,9 +13076,9 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
         w: w,
         bodies: bodies.as_ptr() as *mut usize,
         scans: if reach {
-            scans.as_ptr() as *mut loader::ReachScan;
+            scans.as_ptr() as *mut loader::ReachScan
         } else {
-            null;
+            null
         },
     };
     let mut gp = sch::Jobs::independent(n);
@@ -13198,7 +13164,7 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
         for it in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
             append_errs(&mut errs, outs.index_mut(it));
         }
-        errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+        errs.finalize(&p.modules[m].source, &p.modules[m].file);
         if errs.has_errors() {
             ok = false;
             errs.log();
@@ -13282,9 +13248,9 @@ struct FoldRef {
 const fn fold_ref_cmp(a: &FoldRef, b: &FoldRef) i32 {
     if a.key != b.key {
         return if a.key < b.key {
-            -1;
+            -1
         } else {
-            1;
+            1
         };
     }
     return a.i as i32 - b.i as i32;
@@ -13366,7 +13332,7 @@ fn report_fold_errs(p: &mut loader::Package) {
                 ),
             );
         }
-        errs.finalize(p.modules[e.m as usize].source.as_str(), p.modules[e.m as usize].file.as_str());
+        errs.finalize(&p.modules[e.m as usize].source, &p.modules[e.m as usize].file);
         errs.log();
         p.ok = false;
     }
@@ -13380,12 +13346,12 @@ fn report_len_faults(p: &mut loader::Package, fs: &Vector<ig::LenFault>) {
     let mut user = Set::<u64>::new();
     for i in 0..fs.len() {
         if !p.modules[fs.at(i).module as usize].prelude {
-            user.insert(fnv(fs.at(i).msg.as_str()));
+            user.insert(fnv(&fs.at(i).msg));
         }
     }
     for i in 0..fs.len() {
         let f = fs.at(i);
-        if p.modules[f.module as usize].prelude && user.contains(&fnv(f.msg.as_str())) {
+        if p.modules[f.module as usize].prelude && user.contains(&fnv(&f.msg)) {
             continue;
         }
         let mut errs = diag::Errors::new();
@@ -13394,26 +13360,21 @@ fn report_len_faults(p: &mut loader::Package, fs: &Vector<ig::LenFault>) {
             let da = unsafe &*p.module_ast_const(f.inst.module);
             let dn = da.at_const(f.inst.node);
             let nm = if dn.kind == NodeKind::NODE_FUNCTION {
-                da.ext_name(f.inst.node);
+                da.ext_name(f.inst.node)
             } else {
-                da.ext_name(f.inst.node);
+                da.ext_name(f.inst.node)
             };
             let ns = da.at_const(nm).as_data.name.text;
             let name = p.modules[f.inst.module as usize].source.as_str().slice(ns.start as usize, ns.end as usize);
             if f.site.end != 0 {
                 let sm = &p.modules[f.site_module as usize];
-                let site = diag::render_site(
-                    sm.source.as_str(),
-                    sm.file.as_str(),
-                    f.site.start,
-                    f.site.end - f.site.start,
-                );
+                let site = diag::render_site(&sm.source, &sm.file, f.site.start, f.site.end - f.site.start);
                 errs.note(format("in the instantiation of '{}' demanded here\n{}", name, site.as_str()));
             } else {
                 errs.note(format("in an instantiation of '{}'", name));
             }
         }
-        errs.finalize(p.modules[f.module as usize].source.as_str(), p.modules[f.module as usize].file.as_str());
+        errs.finalize(&p.modules[f.module as usize].source, &p.modules[f.module as usize].file);
         errs.log();
         p.ok = false;
     }
@@ -13433,18 +13394,18 @@ fn report_refusals(p: &loader::Package, rs: &mut Vector<cbe::Refusal>, depth: bo
         }
         any = true;
         let msg = if depth {
-            format("{}", r.why);
+            format("{}", r.why)
         } else {
-            format("internal: the C backend cannot emit this body ({})", r.why);
+            format("internal: the C backend cannot emit this body ({})", r.why)
         };
         let code = if depth {
-            dc::INSTANCE_DEPTH_LIMIT;
+            dc::INSTANCE_DEPTH_LIMIT
         } else {
-            dc::BACKEND_REFUSAL;
+            dc::BACKEND_REFUSAL
         };
         let mut errs = diag::Errors::new();
         errs.emit(code, r.start, r.end - r.start, msg);
-        errs.finalize(p.modules[r.m as usize].source.as_str(), p.modules[r.m as usize].file.as_str());
+        errs.finalize(&p.modules[r.m as usize].source, &p.modules[r.m as usize].file);
         errs.log();
     }
     return any;
@@ -13510,7 +13471,7 @@ fn lint_flush(p: &mut loader::Package, m: usize, errs: &mut diag::Errors, fixes:
     if errs.has_warnings() {
         p.lint_warnings = p.lint_warnings + errs.warns.len() as u32;
         if fixes == null {
-            errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+            errs.finalize(&p.modules[m].source, &p.modules[m].file);
             errs.log();
         }
     }
@@ -13714,17 +13675,17 @@ fn lint_report_item(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast,
     }
     let src = p.modules[m as usize].source.as_str();
     let what = if it.kind == NodeKind::NODE_FUNCTION {
-        "function";
+        "function"
     } else if it.kind == NodeKind::NODE_STRUCT && unsafe (*a).ext(iid).aggregate.is_union {
-        "union";
+        "union"
     } else if it.kind == NodeKind::NODE_STRUCT {
-        "struct";
+        "struct"
     } else if it.kind == NodeKind::NODE_ENUM {
-        "enum";
+        "enum"
     } else if it.kind == NodeKind::NODE_INTERFACE {
-        "interface";
+        "interface"
     } else {
-        "type alias";
+        "type alias"
     };
     let nid = lint_item_name(a, iid);
     let nsp = unsafe (*a).at_const(nid).as_data.name.text;
@@ -14235,7 +14196,7 @@ pub(package) fn unused_imports(p: &mut loader::Package, m: usize, out: &mut Vect
             continue;
         }
         let path = loader::join_parts(unsafe &*a, src, unsafe (*a).at_const(iid).as_data.import_decl.path, "::");
-        let mid = p.find_in(m as ModuleId, path.as_str());
+        let mid = p.find_in(m as ModuleId, &path);
         if mid < 0 || mid as usize == m {
             continue;
         }
@@ -14457,9 +14418,9 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
                     nsp = unsafe (*a).at_const(mn.as_data.variant.name).as_data.name.text;
                 }
                 let hit = if it.kind == NodeKind::NODE_STRUCT {
-                    read[starts[m] + mid2 as usize];
+                    read[starts[m] + mid2 as usize]
                 } else {
-                    used[starts[m] + mid2 as usize];
+                    used[starts[m] + mid2 as usize]
                 };
                 // Code the platform filter removed may hold the only use.
                 if nsp.end <= nsp.start || src[nsp.start as usize] == b'_' || hit || removed.binary_search(
@@ -14513,7 +14474,7 @@ fn ap_engine_take(st: &ApStage) Box<iri::Interp> {
             return e;
         },
         _ => {},
-    };
+    }
     unsafe sc_runtime::sc_rt_spin_unlock(st.elock);
     let mut cev = iri::interp_new(st.p);
     let master = (unsafe (&*st.p).cir) as *mut iri::Interp;
@@ -14550,10 +14511,10 @@ fn ap_job(ctx: *mut void, j: u32) {
     let serial = p.jobs == 1;
     let mut own = Vector::<Box<iri::Interp>>::new();
     let cev: *mut iri::Interp = if serial {
-        p.cir as *mut iri::Interp;
+        p.cir as *mut iri::Interp
     } else {
         own.push(ap_engine_take(st));
-        own.index_mut(0).as_ptr() as *mut iri::Interp;
+        own.index_mut(0).as_ptr() as *mut iri::Interp
     };
     for k in job.lo as usize..job.hi as usize {
         let it = p.sched.by_node[k] as usize;
@@ -14562,9 +14523,9 @@ fn ap_job(ctx: *mut void, j: u32) {
             continue;
         }
         let tp9 = if p.icost_on {
-            std::parallel::platform::now_ns();
+            std::parallel::platform::now_ns()
         } else {
-            0u64;
+            0u64
         };
         let mut errs = diag::Errors::new();
         ap_check_fn(&mut errs, a, m, meta.node, cev);
@@ -14572,7 +14533,7 @@ fn ap_job(ctx: *mut void, j: u32) {
             gitems::mod_cost(p, m, 1, std::parallel::platform::now_ns() - tp9);
         }
         if errs.errors.len() != 0 {
-            *unsafe &mut *(st.outs + it) = Option::<Box<diag::Errors>>::Some(Box::new(errs));
+            *unsafe &mut *(st.outs + it) = Some(Box::new(errs));
         }
     }
     if !serial {
@@ -14581,7 +14542,7 @@ fn ap_job(ctx: *mut void, j: u32) {
                 ap_engine_give(st, e);
             },
             _ => {},
-        };
+        }
     }
 }
 
@@ -14669,7 +14630,7 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
         }
         if errs.errors.len() != 0 {
             p.ok = false;
-            errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+            errs.finalize(&p.modules[m].source, &p.modules[m].file);
             errs.log();
         }
     }
@@ -14681,6 +14642,29 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
 /// report-only passes restricted to the same set. No code is emitted. Returns 0 only when clean; any
 /// error or remaining warning returns 1. `fixes != null` (`lint --fix`) collects machine fixes instead
 /// of printing.
+/// Name resolution and type checking of every module of `p`, nothing after (`fmt -s`): whether no error
+/// was found. The checked bodies stay with their types.
+pub(package) fn check_package(p: &mut loader::Package, target: i32) bool {
+    defer {
+        if p.jobs != 1 {
+            prt::shutdown();
+        }
+    }
+    p.platform_filter(target);
+    let n = p.modules.len();
+    for i in 0..n {
+        p.ok = resolve_module(p, i, false, null) && p.ok;
+    }
+    if !p.ok {
+        return false;
+    }
+    gitems::build_serial(p);
+    let mut want = Vector::<bool>::new();
+    want.resize_default(n);
+    p.ok = typecheck_stage(p, &want, null, null) && p.ok;
+    return p.ok;
+}
+
 pub(package) fn lint_package(
     p: &mut loader::Package,
     target: i32,
@@ -14699,9 +14683,9 @@ pub(package) fn lint_package(
     for i in 0..n {
         let sel = lint_reported(p, i, lint_mod as i32);
         let fx = if sel {
-            fixes;
+            fixes
         } else {
-            null;
+            null
         };
         let ok = resolve_module(p, i, sel, fx);
         p.ok = ok && p.ok;
@@ -14835,9 +14819,9 @@ fn publish_batch(paths: &Vector<String>, texts: &Vector<usize>, lens: &Vector<us
     let n = paths.len();
     rc.resize_default(n);
     let nw = if jobs == 1 || n < PUB_PAR_MIN {
-        1;
+        1
     } else {
-        PUB_WORKERS.min(jobs as usize);
+        PUB_WORKERS.min(jobs as usize)
     };
     let t0 = PubTask {
         path: paths.as_ptr(),
@@ -14888,7 +14872,7 @@ fn stage_ms(on: bool, t0: &mut i64, label: str) {
 /// sources, one tree per profile (PROFILE makes the emitted C depend on it).
 pub(package) fn default_gen_root(p: &mut loader::Package) {
     if p.gen_root.len() == 0 {
-        let mut g = String::from_str(p.root_dir.as_str());
+        let mut g = String::from_str(&p.root_dir);
         g.push_str("/build/");
         g.push_str(p.profile_name());
         g.push_str("/raw");
@@ -15032,7 +15016,7 @@ fn mark_c_reads(p: &mut loader::Package) bool {
                 ),
             ),
         );
-        errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+        errs.finalize(&p.modules[m].source, &p.modules[m].file);
         errs.log();
         ok = false;
     }
@@ -15066,9 +15050,9 @@ fn c_decl(p: &mut loader::Package, from: usize, r: DefId, work: &mut Vector<DefI
                     DefId {
                         module: r.module,
                         node: if ra.at_const(pid).kind == NodeKind::NODE_FIELD {
-                            ra.at_const(pid).as_data.field.ty;
+                            ra.at_const(pid).as_data.field.ty
                         } else {
-                            pid;
+                            pid
                         },
                     },
                 );
@@ -15140,7 +15124,7 @@ pub(package) fn prelude_stage(
                 e.inst_asserts.clear();
             },
             None => {},
-        };
+        }
     }
     let mut img = String::new();
     let mut spec = loader::UserSpec::new();
@@ -15152,9 +15136,9 @@ pub(package) fn prelude_stage(
         q.alt_root = String::new();
         // The std listing the image records, taken before the load lists it.
         let std_id = if cid != 0 {
-            pimg::dir_id(std_dir);
+            pimg::dir_id(std_dir)
         } else {
-            0 as u64;
+            0 as u64
         };
         q.load_prelude_stage(std_dir, q.bootstrap, target);
         if !q.ok {
@@ -15176,7 +15160,7 @@ pub(package) fn prelude_stage(
         }
     }
     let mut t = p.settings_copy();
-    let ok = pimg::load(&mut t, e, img.as_str());
+    let ok = pimg::load(&mut t, e, &img);
     if !ok {
         panic("the prelude image did not load back");
     }
@@ -15222,7 +15206,7 @@ fn check_prelude(q: &mut loader::Package, target: i32) bool {
             None => {
                 break;
             },
-        };
+        }
     }
     return true;
 }
@@ -15258,9 +15242,9 @@ pub(package) fn run_package(
     p.native = links;
     let so = stdlib::get_env("SC_LIR_OPT");
     p.lir_opt = if so.is_some() {
-        so.unwrap().as_str() == "1";
+        so.unwrap().as_str() == "1"
     } else {
-        p.opt > 0;
+        p.opt > 0
     };
     p.cg = bman::cg_effective(p.opt, p.cg_on, p.cg_off);
     syntax_stats_report(p, "parse");
@@ -15418,9 +15402,9 @@ pub(package) fn run_package(
 
     default_gen_root(p);
     // A tree that did not exist before this build holds no orphan to prune afterwards.
-    let gr9 = String::from_str(p.gen_root.as_str());
-    let fresh_tree = !is_dir(gr9.as_str());
-    let rt9 = write_super_rt(gr9.as_str());
+    let gr9 = String::from_str(&p.gen_root);
+    let fresh_tree = !is_dir(&gr9);
+    let rt9 = write_super_rt(&gr9);
     let mut err = rt9 < 0;
     let root = gr9.as_str();
     let mut keep = Vector::<String>::new();
@@ -15532,9 +15516,9 @@ pub(package) fn run_package(
     }
     // A failed emission leaves instances out: the C compiler must not see the units that call them.
     let osink = if !err {
-        sink;
+        sink
     } else {
-        null;
+        null
     };
     // With a sink, the tree is the one a build compiles incrementally: a failed emission leaves its
     // files as the last successful one wrote them, so no unchanged-looking file carries this build's
@@ -15619,7 +15603,7 @@ pub(package) fn run_package(
     if co.lir.is_some() && !err {
         // The record of the objects an earlier build left, for the modules the emission cache replayed.
         if co.tuc_keys.len() != 0 {
-            nat_rec = nat_record(nat_rp.as_str());
+            nat_rec = nat_record(&nat_rp);
         }
         if let Some(l) = &co.lir {
             if !native_plan(p, l, &lm, &iq, root, &co.tuc_hit, &nat_rec, &mut nat_mod, &mut nat_objs) {
@@ -15643,7 +15627,7 @@ pub(package) fn run_package(
         }
         iq = iq2;
         nat_all = lm.len() == 0 && iq.len() == 0;
-        co.lir = Option::<Box<lw::Lower>>::None;
+        co.lir = None;
     }
     let tw0 = ticks_ms();
     let pub9 = co.pr.start();
@@ -15748,7 +15732,7 @@ pub(package) fn run_package(
             if co.protos_h.at(m).len() == 0 {
                 continue;
             }
-            hps.push(build_out_path(root, p.modules[m].path.as_str(), ".h"));
+            hps.push(build_out_path(root, &p.modules[m].path, ".h"));
             hts.push(co.protos_h.at(m).as_str().ptr() as usize);
             hls.push(co.protos_h.at(m).len());
             hos.push(m as u32);
@@ -15761,18 +15745,18 @@ pub(package) fn run_package(
             let mut hp = replace(hps.index_mut(i), String::new());
             // A failure again on this thread: the message gets its own error.
             let rc = if hrc[i] < 0 {
-                publish_file(hp.as_str(), ht);
+                publish_file(&hp, ht)
             } else {
-                hrc[i];
+                hrc[i]
             };
             if rc < 0 {
                 unsafe stdio::perror(hp.cstr());
                 err = true;
                 continue;
             }
-            man_line(&mut man, "h", root, hp.as_str(), out_hash(ht), hos[i], 0, ht, "");
+            man_line(&mut man, "h", root, &hp, out_hash(ht), hos[i], 0, ht, "");
             // The first header is `__sc_fwd.h`: a tree of separate units compiles it once, precompiled.
-            sink_notify(osink, &mut co.pr, hp.as_str(), ht, pick(pch && i == 0, 2, 0), rc == 1);
+            sink_notify(osink, &mut co.pr, &hp, ht, pick(pch && i == 0, 2, 0), rc == 1);
             keep.push(hp);
         }
         let mut sg = ShardGroups::new();
@@ -15787,27 +15771,27 @@ pub(package) fn run_package(
             let nsh = co.tu_heads.at(t).len();
             sg.fill(&co.ck_shard, co.tu_chunks.at(t), nsh);
             for x in 0..nsh {
-                let mut stem = String::from_str(p.modules[t].path.as_str());
+                let mut stem = String::from_str(&p.modules[t].path);
                 if x != 0 {
                     stem.push_str("__p");
                     stem.push_u64(x as u64);
                 }
                 let tail = if x == 0 {
-                    co.tu_tail.at(t).as_str();
+                    co.tu_tail.at(t).as_str()
                 } else {
-                    "";
+                    ""
                 };
                 if !shard_text(&co, t, x as u8, false, tail, &sg, &mut sbody) {
                     continue;
                 }
-                let mut cp = build_out_path(root, stem.as_str(), ".c");
-                if publish_out(osink, &mut co.pr, &mut cp, sbody.as_str(), pick(tu_pk[t] != 0, 0, 1)) {
+                let mut cp = build_out_path(root, &stem, ".c");
+                if publish_out(osink, &mut co.pr, &mut cp, &sbody, pick(tu_pk[t] != 0, 0, 1)) {
                     man_line(
                         &mut man,
                         "c",
                         root,
-                        cp.as_str(),
-                        out_hash(sbody.as_str()),
+                        &cp,
+                        out_hash(&sbody),
                         t as u32,
                         x as u32,
                         co.tu_incs.at(t).as_str(),
@@ -15825,7 +15809,7 @@ pub(package) fn run_package(
             let nsh = co.inst_heads.at(q).len();
             sg.fill(&co.ck_shard, co.inst_chunks.at(q), nsh);
             for x in 0..nsh {
-                let mut stem = String::from_str(p.modules[q].path.as_str());
+                let mut stem = String::from_str(&p.modules[q].path);
                 stem.push_str("__inst");
                 if x != 0 {
                     stem.push_str("__p");
@@ -15834,14 +15818,14 @@ pub(package) fn run_package(
                 if !shard_text(&co, q, x as u8, true, "", &sg, &mut sbody) {
                     continue;
                 }
-                let mut cp = build_out_path(root, stem.as_str(), ".c");
-                if publish_out(osink, &mut co.pr, &mut cp, sbody.as_str(), pick(in_pk[q] != 0, 0, 1)) {
+                let mut cp = build_out_path(root, &stem, ".c");
+                if publish_out(osink, &mut co.pr, &mut cp, &sbody, pick(in_pk[q] != 0, 0, 1)) {
                     man_line(
                         &mut man,
                         "i",
                         root,
-                        cp.as_str(),
-                        out_hash(sbody.as_str()),
+                        &cp,
+                        out_hash(&sbody),
                         q as u32,
                         x as u32,
                         co.inst_incs.at(q).as_str(),
@@ -15856,18 +15840,8 @@ pub(package) fn run_package(
         }
         if co.registry_c.len() != 0 {
             let mut rp = build_out_path(root, "__sc_registry", ".c");
-            if publish_out(osink, &mut co.pr, &mut rp, co.registry_c.as_str(), pick(reg_pk != 0, 0, 1)) {
-                man_line(
-                    &mut man,
-                    "r",
-                    root,
-                    rp.as_str(),
-                    out_hash(co.registry_c.as_str()),
-                    0xFFFF,
-                    0,
-                    co.registry_c.as_str(),
-                    co.reg_inputs.as_str(),
-                );
+            if publish_out(osink, &mut co.pr, &mut rp, &co.registry_c, pick(reg_pk != 0, 0, 1)) {
+                man_line(&mut man, "r", root, &rp, out_hash(&co.registry_c), 0xFFFF, 0, &co.registry_c, &co.reg_inputs);
                 pack_join(&mut packs, &mut members, root, &rp, reg_pk);
                 keep.push(rp);
             } else {
@@ -15876,20 +15850,20 @@ pub(package) fn run_package(
         }
         for k in 0..npk as usize {
             let mut up = if unity {
-                build_out_path(root, "__sc_unity", ".c");
+                build_out_path(root, "__sc_unity", ".c")
             } else {
-                build_out_path(root, format("__sc_pack{}", k).as_str(), ".c");
+                build_out_path(root, format("__sc_pack{}", k).as_str(), ".c")
             };
             let mut ut = String::from_str(
                 if unity {
-                    "/* every unit of this program in one compile -- generated, do not edit */\n";
+                    "/* every unit of this program in one compile -- generated, do not edit */\n"
                 } else {
-                    "/* units of this program compiled as one: generated, do not edit */\n";
+                    "/* units of this program compiled as one: generated, do not edit */\n"
                 },
             );
             ut.push_string(packs.at(k));
-            if publish_out(osink, &mut co.pr, &mut up, ut.as_str(), 1) {
-                man_line(&mut man, "u", root, up.as_str(), out_hash(ut.as_str()), 0xFFFF, 0, ut.as_str(), "");
+            if publish_out(osink, &mut co.pr, &mut up, &ut, 1) {
+                man_line(&mut man, "u", root, &up, out_hash(&ut), 0xFFFF, 0, &ut, "");
                 keep.push(up);
             } else {
                 err = true;
@@ -15908,15 +15882,15 @@ pub(package) fn run_package(
                 root,
                 mp,
                 if ob.own {
-                    ".o";
+                    ".o"
                 } else {
-                    "__inst.o";
+                    "__inst.o"
                 },
             );
             let body = if ob.old.len() != 0 {
-                ob.old.as_str();
+                ob.old.as_str()
             } else {
-                unsafe str::from_raw(ob.bytes.as_ptr(), ob.bytes.len());
+                unsafe str::from_raw(ob.bytes.as_ptr(), ob.bytes.len())
             };
             if publish_out(osink, &mut co.pr, &mut op, body, 3) {
                 nat_paths.push(op.clone());
@@ -15928,7 +15902,7 @@ pub(package) fn run_package(
         if nat_all && !err {
             let mut bytes = Vector::<u8>::new();
             let mut op = build_out_path(root, NAT_REGISTRY, ".o");
-            if native_registry(p, &co.zst, co.reg_inputs.as_str(), &mut bytes) && publish_out(
+            if native_registry(p, &co.zst, &co.reg_inputs, &mut bytes) && publish_out(
                 osink,
                 &mut co.pr,
                 &mut op,
@@ -15952,19 +15926,19 @@ pub(package) fn run_package(
             }
             for m in 0..p.modules.len() {
                 let fl = if has[m] {
-                    NAT_OBJ;
+                    NAT_OBJ
                 } else {
-                    0;
+                    0
                 };
                 rec_txt.format_into("{} {}\n", nat_key(p, &co.tuc_keys, m) & ~3u64 | fl, p.modules[m].path.as_str());
             }
         }
         if !err && rec_txt.len() != 0 {
-            if write_file_atomic(nat_rp.as_str(), rec_txt.as_str()) {
+            if write_file_atomic(&nat_rp, &rec_txt) {
                 keep.push(nat_rp.clone());
             }
         } else {
-            let _ = fs::unlink(nat_rp.as_str());
+            let _ = fs::unlink(&nat_rp);
         }
     }
     if stdlib::getenv("SC_CEMIT_STATS") != null {
@@ -15977,14 +15951,14 @@ pub(package) fn run_package(
     // Publish the per-TU cache only after a fully successful emission; keep[] shields it from pruning.
     // Atomic: the reader checks only bounds, so a torn image would replay sections of corrupt content.
     if !err && co.skips == 0 && co.tuc_path.len() != 0 {
-        if write_file_atomic(co.tuc_path.as_str(), co.tuc_img.as_str()) {
-            keep.push(String::from_str(co.tuc_path.as_str()));
+        if write_file_atomic(&co.tuc_path, &co.tuc_img) {
+            keep.push(String::from_str(&co.tuc_path));
         }
     }
     if !err {
         manifest_publish(root, &man, &mut keep);
         let smp = build_out_path(root, "__sc_shards", "");
-        if write_file(smp.as_str(), shard_meta.as_str()) {
+        if write_file(&smp, &shard_meta) {
             keep.push(smp);
         }
     }
@@ -16052,7 +16026,7 @@ fn native_test_main(p: &loader::Package, plan: &TestPlan, out: &mut Vector<u8>) 
     test_main_lir(p, plan, lay::target_for(p.arch).ptr as u32, &mut text);
     let mut err = String::new();
     let mut ok = false;
-    switch lparse::parse(text.as_str(), &mut err) {
+    switch lparse::parse(&text, &mut err) {
         Some(pk) => {
             let mut fs = Vector::<u32>::new();
             let mut ds = Vector::<u32>::new();
@@ -16068,7 +16042,7 @@ fn native_test_main(p: &loader::Package, plan: &TestPlan, out: &mut Vector<u8>) 
             ok = nat::object(&pk, p.build_target, p.arch, fs[0..fs.len()], ds[0..ds.len()], "", out, &mut err);
         },
         None => {},
-    };
+    }
     if !ok {
         eprintln("super-c: the test runner's entry does not compile natively: {}", err.as_str());
     }
@@ -16084,14 +16058,14 @@ pub(package) const NAT_REGISTRY: str = "__sc_registry_n";
 fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut Vector<u8>) bool {
     let ptr = lay::target_for(p.arch).ptr as u32;
     let int = if ptr == 4 {
-        "i32";
+        "i32"
     } else {
-        "i64";
+        "i64"
     };
     let al: u32 = if ptr == 4 {
-        2;
+        2
     } else {
-        3;
+        3
     };
     let mut t = String::new();
     t.format_into("lir ptr {}\n", ptr);
@@ -16111,11 +16085,11 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
     if names.len() != 0 {
         let f = tgt::obj_of(p.build_target).name;
         let sec = if f == "macho" {
-            "__DATA,__mod_init_func,mod_init_funcs";
+            "__DATA,__mod_init_func,mod_init_funcs"
         } else if f == "coff" {
-            ".CRT$XCU";
+            ".CRT$XCU"
         } else {
-            ".init_array";
+            ".init_array"
         };
         for i in 0..names.len() {
             t.format_into("sym @{} data global ext\n", names[i]);
@@ -16159,7 +16133,7 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
     }
     let mut err = String::new();
     let mut ok = false;
-    switch lparse::parse(t.as_str(), &mut err) {
+    switch lparse::parse(&t, &mut err) {
         Some(pk) => {
             let mut fs = Vector::<u32>::new();
             let mut ds = Vector::<u32>::new();
@@ -16175,7 +16149,7 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
             ok = nat::object(&pk, p.build_target, p.arch, fs[0..fs.len()], ds[0..ds.len()], "", out, &mut err);
         },
         None => {},
-    };
+    }
     if !ok {
         eprintln("super-c: the registry does not compile natively: {}", err.as_str());
     }

@@ -1197,7 +1197,7 @@ pub unsafe fn sc_rt_stack_guard_install() {
 // pointer is; (0, 0) when unknown. The program's runtime reads them itself on macOS.
 @platform(macos | ios)
 const fn own_stack_bounds() (usize, usize) {
-    return 0, 0;
+    return (0, 0);
 }
 @platform(linux | android)
 fn own_stack_bounds() (usize, usize) {
@@ -1213,7 +1213,7 @@ fn own_stack_bounds() (usize, usize) {
         }
         unsafe pthread_attr_destroy(&mut at);
     }
-    return lo, hi;
+    return (lo, hi);
 }
 
 // ---- POSIX threads and locks ----------------------------------------------------------------------
@@ -1386,7 +1386,7 @@ fn diag_run(sig: i32) {
         switch unsafe DIAG_FNS[i] {
             Some(f) => f(),
             None => {},
-        };
+        }
     }
     unsafe c_close(DIAG_FD);
     unsafe DIAG_FD = -1;
@@ -1423,10 +1423,10 @@ pub unsafe fn sc_rt_diag_chain(dump: fn()) {
                 known = known || f == dump;
             },
             None => {},
-        };
+        }
     }
     if !known && n < DIAG_MAX {
-        unsafe DIAG_FNS[n] = Option::<fn()>::Some(dump);
+        unsafe DIAG_FNS[n] = Some(dump);
         unsafe atomic::store_usize(&mut DIAG_N, n + 1, RELEASE);
         if n == 0 {
             for i in 0..len + 1 {

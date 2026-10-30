@@ -43,7 +43,7 @@ fn fx() Fx {
     proj.mkfile("util.spc", UTIL);
     proj.mkfile("other.spc", OTHER);
     let main = format("{}/main.spc", proj.dir());
-    let mut s = ses::Session::open_file(main.as_str(), ses::Config::host("std")).unwrap();
+    let mut s = ses::Session::open_file(&main, ses::Config::host("std")).unwrap();
     assert(s.check().is_ok(), "checks");
     let mut util = String::new();
     let mut other = String::new();
@@ -107,11 +107,11 @@ fn changes_a_signature_and_its_calls(fx: &mut Fx) {
     let o = prepare(&mut r, &mut fx.s, sel(&fx.util, at, at), "1,0", Validation::Semantic).unwrap();
     let _ = o.edit.apply(&mut fx.s).unwrap();
     assert(
-        fx.s.text(fx.util.as_str()).unwrap().unwrap().as_str().find("pub fn add(b: i32, a: i32) i32") >= 0,
+        fx.s.text(&fx.util).unwrap().unwrap().as_str().find("pub fn add(b: i32, a: i32) i32") >= 0,
         "the parameters swap",
     );
     assert(
-        fx.s.text(fx.main.as_str()).unwrap().unwrap().as_str().find("util::add(2, 1) * util::add(4, 3)") >= 0,
+        fx.s.text(&fx.main).unwrap().unwrap().as_str().find("util::add(2, 1) * util::add(4, 3)") >= 0,
         "every call swaps",
     );
     assert_eq(errors(&mut fx.s), 0);
@@ -120,7 +120,7 @@ fn changes_a_signature_and_its_calls(fx: &mut Fx) {
 @test
 fn adds_an_import(fx: &mut Fx) {
     let src = "import util;\n\nfn main() i32 {\n    return zero() + util::add(0, 0);\n}\n";
-    let _ = fx.s.set_text(fx.main.as_str(), src);
+    let _ = fx.s.set_text(&fx.main, src);
     assert(errors(&mut fx.s) >= 1, "the name does not resolve");
     let at = src.find("zero") as u32;
     let mut r = AddImport {};
@@ -134,7 +134,7 @@ fn adds_an_import(fx: &mut Fx) {
 @test
 fn implements_interface_members(fx: &mut Fx) {
     let src = "interface Shape {\n    fn area(self: &Self) i32;\n    fn name(self: &Self) i32 {\n        return 0;\n    }\n}\n\nstruct Sq {}\n\nextend Sq as Shape {\n}\n\nfn main() i32 {\n    return 0;\n}\n";
-    let _ = fx.s.set_text(fx.main.as_str(), src);
+    let _ = fx.s.set_text(&fx.main, src);
     assert(fx.s.check().is_ok(), "checks");
     let at = src.find("extend Sq") as u32 + 3;
     let mut r = ImplementMembers {};
@@ -150,15 +150,15 @@ fn implements_interface_members(fx: &mut Fx) {
 fn moves_an_item(fx: &mut Fx) {
     let at = UTIL.find("add(a") as u32;
     let mut r = MoveItem {};
-    let o = prepare(&mut r, &mut fx.s, sel(&fx.util, at, at), fx.other.as_str(), Validation::Semantic).unwrap();
+    let o = prepare(&mut r, &mut fx.s, sel(&fx.util, at, at), &fx.other, Validation::Semantic).unwrap();
     let _ = o.edit.apply(&mut fx.s).unwrap();
     assert_eq(errors(&mut fx.s), 0);
-    let m = fx.s.text(fx.main.as_str()).unwrap().unwrap();
+    let m = fx.s.text(&fx.main).unwrap().unwrap();
     assert(
         m.as_str().find("other::add(1, 2)") >= 0 && m.as_str().find("import other;") >= 0,
         "the uses follow the item",
     );
-    let o2 = fx.s.text(fx.other.as_str()).unwrap().unwrap();
+    let o2 = fx.s.text(&fx.other).unwrap().unwrap();
     assert(
         o2.as_str().find("pub fn add(a: i32, b: i32) i32 {\n    return a + b - zero();") >= 0,
         "the item lives in its new module",
@@ -167,9 +167,9 @@ fn moves_an_item(fx: &mut Fx) {
 
 @test
 fn matches_structure_with_semantic_predicates(fx: &mut Fx) {
-    let t = syn::tree_of(&mut fx.s, fx.main.as_str()).unwrap();
+    let t = syn::tree_of(&mut fx.s, &fx.main).unwrap();
     let at = UTIL.find("add(a") as u32;
-    let key = sem::symbol_at(&fx.s, fx.util.as_str(), at).unwrap().unwrap().key().unwrap();
+    let key = sem::symbol_at(&fx.s, &fx.util, at).unwrap().unwrap().key().unwrap();
     let s = &fx.s;
     let file = fx.main.as_str();
     let k = &key;
@@ -185,5 +185,5 @@ fn matches_structure_with_semantic_predicates(fx: &mut Fx) {
     );
     assert_eq(ms.len(), 2);
     assert_eq(ms[0].get(&t, "call").unwrap().text(), "util::add(1, 2)");
-    assert(has_type(&fx.s, fx.main.as_str(), ms[1].get(&t, "").unwrap(), "i32"), "a call's type");
+    assert(has_type(&fx.s, &fx.main, ms[1].get(&t, "").unwrap(), "i32"), "a call's type");
 }

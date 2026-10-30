@@ -74,9 +74,9 @@ extend<T: Float> Quat<T> {
         let real_part = norm_u_norm_v + dot(u, v);
         if real_part.less(T::from_f32(1e-6) * norm_u_norm_v) {
             let t = if u.e[0].abs().greater(u.e[2].abs()) {
-                Vec::<T, 3>::new(-u.e[1], u.e[0], T::zero());
+                Vec::<T, 3>::new(-u.e[1], u.e[0], T::zero())
             } else {
-                Vec::<T, 3>::new(T::zero(), -u.e[2], u.e[1]);
+                Vec::<T, 3>::new(T::zero(), -u.e[2], u.e[1])
             };
             return normalize(Quat::<T>::new(T::zero(), t.e[0], t.e[1], t.e[2]));
         }
@@ -113,9 +113,9 @@ extend<T: Float> Quat<T> as Index<T, []T> {
     }
     pub fn index_range(self: &Quat<T>, r: Range<usize>) []T {
         let hi = if r.inclusive {
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         if r.start > hi || hi > 4 {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
@@ -136,9 +136,9 @@ extend<T: Float> Quat<T> as IndexMut<T, []mut T> {
     }
     pub fn index_range_mut(self: &mut Quat<T>, r: Range<usize>) []mut T {
         let hi = if r.inclusive {
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         if r.start > hi || hi > 4 {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");

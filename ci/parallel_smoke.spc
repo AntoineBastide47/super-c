@@ -125,7 +125,7 @@ fn check_coroutines() i32 {
             None => {
                 break;
             },
-        };
+        }
     }
     let joined = wg.wait_timeout(time::Duration::from_secs(120));
     if !joined {
@@ -163,7 +163,7 @@ fn check_select() i32 {
         TimedOut => {
             rc = 7;
         },
-    };
+    }
 
     // The keyword, with the value arriving 50ms late so the select really parks.
     let wg = sync::WaitGroup::new();

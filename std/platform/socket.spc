@@ -33,9 +33,9 @@ pub fn tcp_listen(host: str, port: i32, backlog: i32) Result<i32, IoError> {
 pub fn local_port(fd: i32) Result<i32, IoError> {
     let p = unsafe sc_io::sc_tcp_port(fd);
     if p < 0 {
-        return Result::<i32, IoError>::Err(last(IoOp::Bind));
+        return Err(last(IoOp::Bind));
     }
-    return Result::<i32, IoError>::Ok(p);
+    return Ok(p);
 }
 
 /// One pending connection of listening socket `fd`, non-blocking: WouldBlock when none waits.
@@ -44,11 +44,11 @@ pub fn tcp_accept(fd: i32) Result<i32, IoError> {
     loop {
         let c = unsafe sc_io::sc_tcp_accept(fd);
         if c >= 0 {
-            return Result::<i32, IoError>::Ok(c);
+            return Ok(c);
         }
         let e = last(IoOp::Accept);
         if e.kind != IoErrorKind::Interrupted {
-            return Result::<i32, IoError>::Err(e);
+            return Err(e);
         }
     }
 }
@@ -74,11 +74,11 @@ pub fn unix_accept(fd: i32) Result<i32, IoError> {
     loop {
         let c = unsafe sc_io::sc_unix_accept(fd);
         if c >= 0 {
-            return Result::<i32, IoError>::Ok(c);
+            return Ok(c);
         }
         let e = last(IoOp::Accept);
         if e.kind != IoErrorKind::Interrupted {
-            return Result::<i32, IoError>::Err(e);
+            return Err(e);
         }
     }
 }
@@ -94,9 +94,9 @@ pub fn unix_connect(path: str) Result<i32, IoError> {
 pub fn peer_uid(fd: i32) Result<u32, IoError> {
     let mut u: u32 = 0;
     if unsafe sc_io::sc_peer_uid(fd, &mut u) != 0 {
-        return Result::<u32, IoError>::Err(last(IoOp::Other));
+        return Err(last(IoOp::Other));
     }
-    return Result::<u32, IoError>::Ok(u);
+    return Ok(u);
 }
 
 /// The real user ID of this process.
@@ -109,12 +109,12 @@ pub fn uid() u32 {
 pub fn connect_result(fd: i32) Result<Unit, IoError> {
     let r = unsafe sc_io::sc_tcp_connect_result(fd);
     if r == 0 {
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
     if r < 0 {
-        return Result::<Unit, IoError>::Err(last(IoOp::Connect));
+        return Err(last(IoOp::Connect));
     }
-    return Result::<Unit, IoError>::Err(error::code_error(r, IoOp::Connect));
+    return Err(error::code_error(r, IoOp::Connect));
 }
 
 /// A non-blocking UDP socket bound to `host:port` (port 0: the system chooses).
@@ -132,11 +132,11 @@ pub fn udp_send_to(fd: i32, buf: []u8, host: str, port: i32) Result<usize, IoErr
     loop {
         let n = unsafe sc_io::sc_udp_send_to(fd, buf.ptr, buf.len(), hp, port);
         if n >= 0 {
-            return Result::<usize, IoError>::Ok(n as usize);
+            return Ok(n as usize);
         }
         let e = last(IoOp::Send);
         if e.kind != IoErrorKind::Interrupted {
-            return Result::<usize, IoError>::Err(e);
+            return Err(e);
         }
     }
 }
@@ -148,11 +148,11 @@ pub fn udp_recv(fd: i32, buf: []mut u8) Result<usize, IoError> {
     loop {
         let n = unsafe sc_io::sc_udp_recv(fd, buf.as_mut_ptr(), buf.len());
         if n >= 0 {
-            return Result::<usize, IoError>::Ok(n as usize);
+            return Ok(n as usize);
         }
         let e = last(IoOp::Recv);
         if e.kind != IoErrorKind::Interrupted {
-            return Result::<usize, IoError>::Err(e);
+            return Err(e);
         }
     }
 }
@@ -164,11 +164,11 @@ pub fn read(fd: i32, buf: []mut u8) Result<usize, IoError> {
     loop {
         let n = unsafe sc_io::sc_io_read(fd, buf.as_mut_ptr(), buf.len());
         if n >= 0 {
-            return Result::<usize, IoError>::Ok(n as usize);
+            return Ok(n as usize);
         }
         let e = last(IoOp::Recv);
         if e.kind != IoErrorKind::Interrupted {
-            return Result::<usize, IoError>::Err(e);
+            return Err(e);
         }
     }
 }
@@ -180,11 +180,11 @@ pub fn write(fd: i32, buf: []u8) Result<usize, IoError> {
     loop {
         let n = unsafe sc_io::sc_io_write(fd, buf.ptr, buf.len());
         if n >= 0 {
-            return Result::<usize, IoError>::Ok(n as usize);
+            return Ok(n as usize);
         }
         let e = last(IoOp::Send);
         if e.kind != IoErrorKind::Interrupted {
-            return Result::<usize, IoError>::Err(e);
+            return Err(e);
         }
     }
 }
@@ -192,17 +192,17 @@ pub fn write(fd: i32, buf: []u8) Result<usize, IoError> {
 /// Close socket `fd`. The number is free again even when an error is reported.
 pub fn close(fd: i32) Result<Unit, IoError> {
     if unsafe sc_io::sc_io_close(fd) != 0 {
-        return Result::<Unit, IoError>::Err(last(IoOp::Close));
+        return Err(last(IoOp::Close));
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 
 /// Make descriptor `fd` non-blocking.
 pub fn set_nonblocking(fd: i32) Result<Unit, IoError> {
     if unsafe sc_io::sc_io_set_nonblocking(fd) != 0 {
-        return Result::<Unit, IoError>::Err(last(IoOp::Other));
+        return Err(last(IoOp::Other));
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 
 /// Block until `fd` is readable (writable when `write`), or `timeout_ms` passes (< 0: no limit): true
@@ -210,24 +210,24 @@ pub fn set_nonblocking(fd: i32) Result<Unit, IoError> {
 pub fn wait_fd(fd: i32, write: bool, timeout_ms: i32) Result<bool, IoError> {
     let r = unsafe sc_io::sc_io_wait_fd(fd, write as i32, timeout_ms);
     if r < 0 {
-        return Result::<bool, IoError>::Err(last(IoOp::Poll));
+        return Err(last(IoOp::Poll));
     }
-    return Result::<bool, IoError>::Ok(r > 0);
+    return Ok(r > 0);
 }
 
 // `host` as the C string the resolver takes (bytes on every target): InvalidInput when it holds a NUL.
 fn c_host(host: str, op: IoOp) Result<String, IoError> {
     if host.find_byte(0) >= 0 {
-        return Result::<String, IoError>::Err(IoError::new(IoErrorKind::InvalidInput, op));
+        return Err(IoError::new(IoErrorKind::InvalidInput, op));
     }
-    return Result::<String, IoError>::Ok(String::from_str(host));
+    return Ok(String::from_str(host));
 }
 
 fn fd_result(fd: i32, op: IoOp) Result<i32, IoError> {
     if fd < 0 {
-        return Result::<i32, IoError>::Err(last(op));
+        return Err(last(op));
     }
-    return Result::<i32, IoError>::Ok(fd);
+    return Ok(fd);
 }
 
 // The error of the last failed socket call: errno, or the Winsock code.
@@ -240,9 +240,9 @@ extend Poller {
     pub fn new() Result<Poller, IoError> {
         let p = unsafe sc_io::sc_io_new();
         if p == null {
-            return Result::<Poller, IoError>::Err(last(IoOp::Poll));
+            return Err(last(IoOp::Poll));
         }
-        return Result::<Poller, IoError>::Ok(Poller { p: p });
+        return Ok(Poller { p: p });
     }
     /// Add the one-shot interest `want` (READABLE, WRITABLE) in `fd`: a bit that fires is reported once and
     /// dropped. `known` tells the backend it still holds a registration for `fd`. True when `fd` cannot be
@@ -250,9 +250,9 @@ extend Poller {
     pub fn set(self: &Poller, fd: i32, want: i32, known: bool) Result<bool, IoError> {
         let r = unsafe sc_io::sc_io_set(self.p, fd, want, known as i32);
         if r < 0 {
-            return Result::<bool, IoError>::Err(last(IoOp::Poll));
+            return Err(last(IoOp::Poll));
         }
-        return Result::<bool, IoError>::Ok(r == 1);
+        return Ok(r == 1);
     }
     /// Make a concurrent `wait` return.
     pub fn wake(self: &Poller) {
@@ -267,11 +267,11 @@ extend Poller {
         loop {
             let n = unsafe sc_io::sc_io_wait(self.p, out.as_mut_ptr(), max, timeout_ms);
             if n >= 0 {
-                return Result::<usize, IoError>::Ok(n as usize);
+                return Ok(n as usize);
             }
             let e = last(IoOp::Poll);
             if e.kind != IoErrorKind::Interrupted {
-                return Result::<usize, IoError>::Err(e);
+                return Err(e);
             }
         }
     }

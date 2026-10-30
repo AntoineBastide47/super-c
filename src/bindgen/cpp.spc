@@ -779,9 +779,9 @@ fn tokenize(names: &mut nm::Names, text: str, toks: &mut Vector<Tok>) u32 {
         clean.push_str(text.slice(at, spelling));
         cuts.push(clean.len() as u32);
         at = spelling + if unsafe p0[spelling + 1] == b'\r' {
-            3;
+            3
         } else {
-            2;
+            2
         };
         spelling = find_splice(p0, at, n0);
     }
@@ -837,9 +837,9 @@ fn lex(names: &mut nm::Names, p: *const u8, n: usize, cuts: &Vector<u32>, toks: 
         if c == b'/' && unsafe p[i + 1] == b'/' {
             let f = (unsafe memchr(p + i, b'\n', n - i)) as *const u8;
             i = if f == null {
-                n;
+                n
             } else {
-                f as usize - p as usize;
+                f as usize - p as usize
             };
             spc = true;
             continue;
@@ -860,9 +860,9 @@ fn lex(names: &mut nm::Names, p: *const u8, n: usize, cuts: &Vector<u32>, toks: 
                 if quote_end != 0 {
                     e = quote_end;
                     kind = if q == b'"' {
-                        K_STR;
+                        K_STR
                     } else {
-                        K_CHAR;
+                        K_CHAR
                     };
                 }
             }
@@ -883,9 +883,9 @@ fn lex(names: &mut nm::Names, p: *const u8, n: usize, cuts: &Vector<u32>, toks: 
             if quote_end != 0 {
                 e = quote_end;
                 kind = if c == b'"' {
-                    K_STR;
+                    K_STR
                 } else {
-                    K_CHAR;
+                    K_CHAR
                 };
             } else {
                 kind = K_OTHER;
@@ -896,9 +896,9 @@ fn lex(names: &mut nm::Names, p: *const u8, n: usize, cuts: &Vector<u32>, toks: 
             kind = K_OTHER;
         }
         let id = if e == i + 1 {
-            c as u32;
+            c as u32
         } else {
-            names.intern(unsafe str::from_raw(p + i, e - i));
+            names.intern(unsafe str::from_raw(p + i, e - i))
         };
         let mut flags: u8 = 0;
         if spc {
@@ -1192,7 +1192,7 @@ extend Pp {
             return;
         }
         self.failed = true;
-        report(&mut self.err, self.name.as_str(), self.error_line, msg, self.quiet);
+        report(&mut self.err, &self.name, self.error_line, msg, self.quiet);
     }
 
     fn take_vec(self: &mut Pp) Vector<Tok> {
@@ -1223,7 +1223,7 @@ extend Pp {
     }
 
     fn intern_tmp(self: &mut Pp) u32 {
-        return self.names.intern(self.tmp.as_str());
+        return self.names.intern(&self.tmp);
     }
 
     // ---- Files -------------------------------------------------------------------------------------------
@@ -1236,14 +1236,14 @@ extend Pp {
             self.toks.truncate(start);
             self.failed = true;
             report(&mut self.err, path, error_line, "unterminated /* comment", self.quiet);
-            return Option::<u32>::None;
+            return None;
         }
         let end = self.toks.len();
         let guard = self.detect_guard(start, end);
         self.file_names.push(String::from_str(path));
         let idx = self.files.len() as u32;
         self.files.push(FileInfo { start: start as u32, end: end as u32, guard: guard, once: false });
-        return Option::<u32>::Some(idx);
+        return Some(idx);
     }
 
     // The macro G when the whole file is `#ifndef G`, `#define G ..`, a body and the matching `#endif`.
@@ -1302,9 +1302,9 @@ extend Pp {
         let key = String::from_str(path);
         if let Some(v) = self.by_path.get(&key) {
             if *v == NONE {
-                return Option::<u32>::None;
+                return None;
             }
-            return Option::<u32>::Some(*v);
+            return Some(*v);
         }
         let mut vfile_index = NONE;
         if let Some(v) = self.memory_file_index.get(&key) {
@@ -1314,27 +1314,27 @@ extend Pp {
         let mut disk = String::new();
         if vfile_index == NONE {
             // The identity of a regular file: two paths of one physical file give one key.
-            let st = fs::stat(key.as_str());
+            let st = fs::stat(&key);
             if st.is_err() {
                 self.by_path.insert(key, NONE);
-                return Option::<u32>::None;
+                return None;
             }
             let m = st.unwrap();
             if m.kind == fs::FileKind::Dir {
                 self.by_path.insert(key, NONE);
-                return Option::<u32>::None;
+                return None;
             }
             identity = format("\x01{}:{}", m.dev, m.ino);
         }
         if let Some(v) = self.by_ident.get(&identity) {
             let f = *v;
             self.by_path.insert(key, f);
-            return Option::<u32>::Some(f);
+            return Some(f);
         }
         let found: Option<u32>;
         if vfile_index != NONE {
             let text = replace(&mut self.memory_files[vfile_index as usize].text, String::new());
-            found = self.add_file(text.as_str(), path);
+            found = self.add_file(&text, path);
             self.memory_files[vfile_index as usize].text = text;
         } else {
             if let Some(t) = loader::read_file(path) {
@@ -1342,11 +1342,11 @@ extend Pp {
             } else {
                 self.failed = true;
                 report(&mut self.err, path, 0, "cannot read file", self.quiet);
-                return Option::<u32>::None;
+                return None;
             }
             disk.pad_nul(TEXT_PAD);
             self.disk_paths.push(String::from_str(path));
-            found = self.add_file(disk.as_str(), path);
+            found = self.add_file(&disk, path);
         }
         if let Some(f) = found {
             self.by_path.insert(key, f);
@@ -1371,14 +1371,14 @@ extend Pp {
         if absolute {
             if let Some(f) = self.load(name) {
                 self.found_dir = NONE;
-                return Option::<u32>::Some(f);
+                return Some(f);
             }
-            return Option::<u32>::None;
+            return None;
         }
         let mut start: usize = if angled {
-            self.n_quote;
+            self.n_quote
         } else {
-            0;
+            0
         };
         if next && self.dir != NONE {
             start = self.dir as usize + 1;
@@ -1391,21 +1391,21 @@ extend Pp {
             // clang names the includer's own directory `.` when the includer has none: `./inc/h.h`.
             Pp::join_path(
                 if cut == 0 {
-                    ".";
+                    "."
                 } else {
-                    p.slice(0, cut);
+                    p.slice(0, cut)
                 },
                 name,
                 &mut cand,
             );
-            if let Some(f) = self.load(cand.as_str()) {
+            if let Some(f) = self.load(&cand) {
                 self.found_dir = NONE;
-                return Option::<u32>::Some(f);
+                return Some(f);
             }
             if cut == 0 {
                 if let Some(f) = self.load(name) {
                     self.found_dir = NONE;
-                    return Option::<u32>::Some(f);
+                    return Some(f);
                 }
             }
         }
@@ -1414,16 +1414,16 @@ extend Pp {
                 break;
             }
             if i < self.n_plain {
-                Pp::join_path(self.search_dirs[i].as_str(), name, &mut cand);
-                if let Some(f) = self.load(cand.as_str()) {
+                Pp::join_path(&self.search_dirs[i], name, &mut cand);
+                if let Some(f) = self.load(&cand) {
                     self.found_dir = i as u32;
-                    return Option::<u32>::Some(f);
+                    return Some(f);
                 }
             } else {
                 let dir = self.search_dirs[i].clone();
-                if let Some(f) = self.framework_header(dir.as_str(), name) {
+                if let Some(f) = self.framework_header(&dir, name) {
                     self.found_dir = i as u32;
-                    return Option::<u32>::Some(f);
+                    return Some(f);
                 }
             }
         }
@@ -1432,14 +1432,14 @@ extend Pp {
         let fw = self.path.as_str().find(".framework/");
         if fw >= 0 && !self.failed {
             let outer = String::from_str(self.path.as_str().slice(0, fw as usize + 10));
-            Pp::join_path(outer.as_str(), "Frameworks", &mut cand);
+            Pp::join_path(&outer, "Frameworks", &mut cand);
             let sub = cand.clone();
-            if let Some(f) = self.framework_header(sub.as_str(), name) {
+            if let Some(f) = self.framework_header(&sub, name) {
                 self.found_dir = NONE;
-                return Option::<u32>::Some(f);
+                return Some(f);
             }
         }
-        return Option::<u32>::None;
+        return None;
     }
 
     // `Name/Header.h` in framework directory `dir`: `Name.framework/Headers/Header.h`, then
@@ -1447,21 +1447,21 @@ extend Pp {
     fn framework_header(self: &mut Pp, dir: str, name: str) Option<u32> {
         let slash = name.find_byte(b'/');
         if slash <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
         let k = slash as usize;
         let mut cand = String::new();
         for sub in ["Headers", "PrivateHeaders"] {
             cand.clear();
             cand.format_into("{}/{}.framework/{}/{}", dir, name.slice(0, k), sub, name.slice(k + 1, name.len()));
-            if let Some(f) = self.load(cand.as_str()) {
-                return Option::<u32>::Some(f);
+            if let Some(f) = self.load(&cand) {
+                return Some(f);
             }
             if self.failed {
                 break;
             }
         }
-        return Option::<u32>::None;
+        return None;
     }
 
     // ---- Output ------------------------------------------------------------------------------------------
@@ -1473,7 +1473,7 @@ extend Pp {
         out.push_str("# ");
         out.push_u64(line);
         out.push_str(" \"");
-        push_escaped(out, self.name.as_str());
+        push_escaped(out, &self.name);
         out.push_byte(b'"');
         if flag != 0 {
             out.push_byte(b' ');
@@ -1553,9 +1553,9 @@ extend Pp {
             self.primed = true;
             let mut scratch = String::new();
             let predefs = replace(&mut self.predefs, String::new());
-            self.run_text("<built-in>", predefs.as_str(), &mut scratch);
+            self.run_text("<built-in>", &predefs, &mut scratch);
             let cmdline = replace(&mut self.cmdline, String::new());
-            self.run_text("<command line>", cmdline.as_str(), &mut scratch);
+            self.run_text("<command line>", &cmdline, &mut scratch);
         }
         self.base = String::from_str(path);
         if self.failed {
@@ -1567,7 +1567,7 @@ extend Pp {
         let main = self.load(path);
         if main.is_some() {
             let first = self.file_names[main.unwrap() as usize].clone();
-            self.run_file(main.unwrap(), first.as_str(), NONE, NONE, out);
+            self.run_file(main.unwrap(), &first, NONE, NONE, out);
         } else if !self.failed {
             self.failed = true;
             report(&mut self.err, path, 0, "cannot open file", self.quiet);
@@ -1582,7 +1582,7 @@ extend Pp {
     fn run_text(self: &mut Pp, name: str, text: str, out: &mut String) {
         let mut t = String::from_str(text);
         t.pad_nul(TEXT_PAD);
-        if let Some(f) = self.add_file(t.as_str(), name) {
+        if let Some(f) = self.add_file(&t, name) {
             self.run_file(f, name, NONE, NONE, out);
         }
     }
@@ -1694,9 +1694,9 @@ extend Pp {
         self.flush(&mut sink, out);
         if !self.failed && self.conditions.len() > self.cond_base {
             self.error_line = if self.end > 0 {
-                self.fix_line(self.toks[self.end - 1]).line;
+                self.fix_line(self.toks[self.end - 1]).line
             } else {
-                1;
+                1
             };
             self.error("unterminated conditional directive");
         }
@@ -1738,9 +1738,9 @@ extend Pp {
         let old = replace(&mut self.expr, sink);
         self.expr_pos = 0;
         let r = if self.failed {
-            false;
+            false
         } else {
-            self.expr_top();
+            self.expr_top()
         };
         let used = replace(&mut self.expr, old);
         self.give_vec(used);
@@ -1792,9 +1792,9 @@ extend Pp {
                 let v = self.eval_if(a, tokens_end);
                 self.push_cond(
                     if v {
-                        C_TAKE;
+                        C_TAKE
                     } else {
-                        C_WAIT;
+                        C_WAIT
                     },
                 );
             }
@@ -1805,9 +1805,9 @@ extend Pp {
                 let d = self.name_defined(a, tokens_end);
                 self.push_cond(
                     if d == (name_id == ID_IFDEF) {
-                        C_TAKE;
+                        C_TAKE
                     } else {
-                        C_WAIT;
+                        C_WAIT
                     },
                 );
             }
@@ -1825,11 +1825,11 @@ extend Pp {
                 return;
             }
             self.conditions[k] = if (s & 3) == C_WAIT {
-                C_TAKE;
+                C_TAKE
             } else if (s & 3) == C_TAKE {
-                C_DONE;
+                C_DONE
             } else {
-                s & 3;
+                s & 3
             } | C_ELSE;
         } else if name_id == ID_ENDIF {
             if self.conditions.len() <= self.cond_base {
@@ -1867,7 +1867,7 @@ extend Pp {
                 self.tmp.push_str(self.names.spell(self.toks[k].id));
             }
             let msg = self.tmp.clone();
-            self.error(msg.as_str());
+            self.error(&msg);
         } else if name_id == ID_PRAGMA {
             self.do_pragma(a, tokens_end, sink, out);
         } else if name_id == ID_WARNING || name_id == ID_IDENT || name_id == ID_SCCS || name_id == ID_ASSERT || name_id == ID_UNASSERT {
@@ -1898,9 +1898,9 @@ extend Pp {
                 v = self.name_defined(a, tokens_end) == (name_id == ID_ELIFDEF);
             }
             self.conditions[k] = if v {
-                C_TAKE;
+                C_TAKE
             } else {
-                C_WAIT;
+                C_WAIT
             };
         }
     }
@@ -2126,14 +2126,14 @@ extend Pp {
             return;
         }
         let ret = (self.toks[tokens_end - 1].line as i64 + self.delta + 1) as u32;
-        let found = self.find_include(name.as_str(), kind == 2, next);
+        let found = self.find_include(&name, kind == 2, next);
         if self.failed {
             return;
         }
         if found.is_none() {
             let mut msg = String::new();
             msg.format_into("'{}' file not found", name.as_str());
-            self.error(msg.as_str());
+            self.error(&msg);
             return;
         }
         let f = found.unwrap();
@@ -2150,7 +2150,7 @@ extend Pp {
         }
         let path = self.file_names[f as usize].clone();
         let dir = self.found_dir;
-        self.run_file(f, path.as_str(), dir, ret, out);
+        self.run_file(f, &path, dir, ret, out);
     }
 
     // `#line N "file"` and the GNU `# N "file" flags`.
@@ -2277,10 +2277,10 @@ extend Pp {
             let k = st.len() - 1;
             let t = st[k];
             st.truncate(k);
-            return Option::<Tok>::Some(t);
+            return Some(t);
         }
         if !from_file {
-            return Option::<Tok>::None;
+            return None;
         }
         // Inside the arguments of a macro call a directive is processed, as clang does.
         while self.in_args && self.pos < self.end && self.at_directive() && !self.failed {
@@ -2293,9 +2293,9 @@ extend Pp {
         if !self.failed && self.file_ready() {
             let t = self.toks[self.pos];
             self.pos += 1;
-            return Option::<Tok>::Some(self.fix_line(t));
+            return Some(self.fix_line(t));
         }
-        return Option::<Tok>::None;
+        return None;
     }
 
     // The next token; on the end of the source an error, and a `K_OTHER` token.
@@ -2391,9 +2391,9 @@ extend Pp {
                 continue;
             }
             x.hide = if x.hide == 0 {
-                new_hide;
+                new_hide
             } else {
-                self.hides.merge(x.hide, new_hide);
+                self.hides.merge(x.hide, new_hide)
             };
             // An argument token that began a source line keeps that: clang starts a new output line there, at the
             // line of the macro name.
@@ -2540,7 +2540,7 @@ extend Pp {
     fn arg_expanded(self: &mut Pp, ranges_base: usize, p: usize) (usize, usize) {
         let o = ranges_base + 4 * p;
         if self.arg_ranges[o + 2] != NONE {
-            return self.arg_ranges[o + 2] as usize, self.arg_ranges[o + 3] as usize;
+            return (self.arg_ranges[o + 2] as usize, self.arg_ranges[o + 3] as usize);
         }
         let s = self.arg_ranges[o] as usize;
         let l = self.arg_ranges[o + 1] as usize;
@@ -2555,7 +2555,7 @@ extend Pp {
         if !need {
             self.arg_ranges[o + 2] = s as u32;
             self.arg_ranges[o + 3] = l as u32;
-            return s, l;
+            return (s, l);
         }
         let mut st2 = self.take_vec();
         let mut sink2 = self.take_vec();
@@ -2574,7 +2574,7 @@ extend Pp {
         self.give_vec(sink2);
         self.arg_ranges[o + 2] = expanded_start as u32;
         self.arg_ranges[o + 3] = expanded_len as u32;
-        return expanded_start, expanded_len;
+        return (expanded_start, expanded_len);
     }
 
     // Append argument `p` to `res`. A raw argument that is empty leaves a placemarker.
@@ -2618,24 +2618,24 @@ extend Pp {
             let l = self.arg_ranges[ranges_base + 4 * p + 1] as usize;
             id = stringify_tokens(&mut self.names, &mut self.tmp, &self.arg_tokens, s, l);
         }
-        return Tok { kind: K_STR, flags: 0, id: id, line: 0, hide: 0 }, next;
+        return (Tok { kind: K_STR, flags: 0, id: id, line: 0, hide: 0 }, next);
     }
 
     fn glue(self: &mut Pp, l: Tok, r: Tok) Option<Tok> {
         if l.kind == K_PLACE {
             let mut x = r;
             x.flags = l.flags & F_SPC;
-            return Option::<Tok>::Some(x);
+            return Some(x);
         }
         if r.kind == K_PLACE {
-            return Option::<Tok>::Some(l);
+            return Some(l);
         }
         self.tmp.clear();
         self.tmp.push_str(self.names.spell(l.id));
         self.tmp.push_str(self.names.spell(r.id));
         self.tmp.pad_nul(TEXT_PAD);
         let mut pasted = self.take_vec();
-        let error_line = tokenize(&mut self.names, self.tmp.as_str(), &mut pasted);
+        let error_line = tokenize(&mut self.names, &self.tmp, &mut pasted);
         let ok = error_line == 0 && pasted.len() == 1;
         let mut x = l;
         if ok {
@@ -2646,9 +2646,9 @@ extend Pp {
         }
         self.give_vec(pasted);
         if !ok {
-            return Option::<Tok>::None;
+            return None;
         }
-        return Option::<Tok>::Some(x);
+        return Some(x);
     }
 
     const fn vaopt_close(self: &Pp, m: &Macro, i: u32, hi: u32) u32 {
@@ -2732,7 +2732,7 @@ extend Pp {
                 self.names.spell(lhs.id),
                 self.names.spell(right[0].id),
             );
-            self.error(msg.as_str());
+            self.error(&msg);
         }
         self.give_vec(right);
         return next;
@@ -2790,9 +2790,9 @@ extend Pp {
                 kind: K_NUM,
                 flags: t.flags & (F_SPC | F_CONT),
                 id: if d {
-                    49;
+                    49
                 } else {
-                    48;
+                    48
                 },
                 line: t.line,
                 hide: 0,
@@ -2825,7 +2825,7 @@ extend Pp {
         let id = self.intern_tmp();
         let mut v = self.take_vec();
         self.tmp.pad_nul(TEXT_PAD);
-        let _ = tokenize(&mut self.names, self.tmp.as_str(), &mut v);
+        let _ = tokenize(&mut self.names, &self.tmp, &mut v);
         if !self.pragma_effect(&v) {
             sink.push(Tok { kind: K_PRAGMA, flags: 0, id: id, line: t.line, hide: 0 });
         }
@@ -2844,9 +2844,9 @@ extend Pp {
         } else if code == B_LINE {
             self.tmp.push_u64(
                 if t.hide != 0 {
-                    self.exp_end;
+                    self.exp_end
                 } else {
-                    t.line;
+                    t.line
                 },
             );
         } else if code == B_COUNTER {
@@ -2858,9 +2858,9 @@ extend Pp {
             r.kind = K_STR;
             self.tmp.push_byte(b'"');
             if code == B_FILE {
-                push_escaped(&mut self.tmp, self.name.as_str());
+                push_escaped(&mut self.tmp, &self.name);
             } else if code == B_BASE {
-                push_escaped(&mut self.tmp, self.base.as_str());
+                push_escaped(&mut self.tmp, &self.base);
             } else {
                 let full = self.name.as_str();
                 let mut cut = full.len();
@@ -2927,7 +2927,7 @@ extend Pp {
             if kind == 0 {
                 self.error("expected \"FILENAME\" or <FILENAME>");
             } else {
-                value = self.find_include(name.as_str(), kind == 2, code == B_HAS_INCLUDE_NEXT).is_some();
+                value = self.find_include(&name, kind == 2, code == B_HAS_INCLUDE_NEXT).is_some();
             }
         } else if code != B_HAS_WARNING && code != B_BUILDING_MODULE {
             let mut key = String::new();
@@ -2967,13 +2967,13 @@ extend Pp {
                 for k in 0..KEYWORDS.len() {
                     reserved = reserved || self.tmp.as_str() == KEYWORDS[k];
                 }
-                key.push_str(self.tmp.as_str());
+                key.push_str(&self.tmp);
                 value = args.len() == 1 && args[0].kind == K_IDENT && !reserved && !self.has.contains(&key);
             } else {
                 if code == B_HAS_BUILTIN || code >= B_IS_TARGET_ARCH {
-                    key.push_str(self.tmp.as_str());
+                    key.push_str(&self.tmp);
                 } else {
-                    push_attribute_name(&mut key, self.tmp.as_str());
+                    push_attribute_name(&mut key, &self.tmp);
                 }
                 value = self.has.contains(&key);
                 if !self.queried_seen.contains(&key) {
@@ -2988,9 +2988,9 @@ extend Pp {
                 kind: K_NUM,
                 flags: t.flags & (F_SPC | F_CONT),
                 id: if value {
-                    49;
+                    49
                 } else {
-                    48;
+                    48
                 },
                 line: t.line,
                 hide: 0,
@@ -3059,9 +3059,9 @@ extend Pp {
         let b = self.expr_cond(live && c.v == 0, depth + 1);
         return Val {
             v: if c.v != 0 {
-                a.v;
+                a.v
             } else {
-                b.v;
+                b.v
             },
             u: a.u || b.u,
         };
@@ -3106,14 +3106,14 @@ extend Pp {
         }
         if op == b'<' as u32 || op == b'>' as u32 || op == OP_LE || op == OP_GE {
             let lt = if u {
-                a.v < b.v;
+                a.v < b.v
             } else {
-                sa < sb;
+                sa < sb
             };
             let gt = if u {
-                a.v > b.v;
+                a.v > b.v
             } else {
-                sa > sb;
+                sa > sb
             };
             let mut r = !lt;
             if op == b'<' as u32 {
@@ -3178,9 +3178,9 @@ extend Pp {
         if u {
             return Val {
                 v: if div {
-                    a.v / b.v;
+                    a.v / b.v
                 } else {
-                    a.v % b.v;
+                    a.v % b.v
                 },
                 u: true,
             };
@@ -3188,18 +3188,18 @@ extend Pp {
         if sb == -1 {
             return Val {
                 v: if div {
-                    0u64.wrapping_sub(a.v);
+                    0u64.wrapping_sub(a.v)
                 } else {
-                    0;
+                    0
                 },
                 u: false,
             };
         }
         return Val {
             v: if div {
-                sa / sb;
+                sa / sb
             } else {
-                sa % sb;
+                sa % sb
             } as u64,
             u: false,
         };
@@ -3220,9 +3220,9 @@ extend Pp {
         if t.kind == K_NUM || t.kind == K_CHAR {
             let mut v = zero;
             let fault = if t.kind == K_NUM {
-                self.parse_int(t.id, &mut v);
+                self.parse_int(t.id, &mut v)
             } else {
-                self.parse_char(t.id, &mut v);
+                self.parse_char(t.id, &mut v)
             };
             if fault.len() != 0 {
                 self.error(fault);
@@ -3380,11 +3380,11 @@ extend Pp {
                 } else if e == b'x' || e == b'u' || e == b'U' {
                     code = 0;
                     let limit: u32 = if e == b'u' {
-                        4;
+                        4
                     } else if e == b'U' {
-                        8;
+                        8
                     } else {
-                        16;
+                        16
                     };
                     let mut digits: u32 = 0;
                     while i < end && digits < limit {
@@ -3409,11 +3409,11 @@ extend Pp {
                 }
             } else if wide != 0 && c >= 0xC0 {
                 let extra: u32 = if c >= 0xF0 {
-                    3;
+                    3
                 } else if c >= 0xE0 {
-                    2;
+                    2
                 } else {
-                    1;
+                    1
                 };
                 code = c as u64 & 0x3Fu64 >> extra;
                 let mut k: u32 = 0;
@@ -3452,9 +3452,9 @@ extend Pp {
         }
         *out = Val {
             v: if wide == 2 {
-                value & 0xFFFF;
+                value & 0xFFFF
             } else {
-                value & 0xFFFFFFFFu64;
+                value & 0xFFFFFFFFu64
             },
             u: true,
         };

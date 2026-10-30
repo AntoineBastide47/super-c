@@ -251,19 +251,19 @@ pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>,
     for pass in 0..2 {
         let body = pass == 1;
         let sv = if body {
-            &a.b.resolutions;
+            &a.b.resolutions
         } else {
-            &a.resolutions;
+            &a.resolutions
         };
         let nv = if body {
-            &a.b.nodes;
+            &a.b.nodes
         } else {
-            &a.nodes;
+            &a.nodes
         };
         let rng = if body {
-            &bs;
+            &bs
         } else {
-            &rs;
+            &rs
         };
         let nr = rng.len();
         let mut r: usize = 0;
@@ -271,9 +271,9 @@ pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>,
         let nb = sv.base_len();
         for x in 0..n {
             let d = if x < nb {
-                unsafe *(sv.base_ptr() + x);
+                unsafe *(sv.base_ptr() + x)
             } else {
-                unsafe *sv.ptr_at(x);
+                unsafe *sv.ptr_at(x)
             };
             if d.node == NODE_NONE {
                 continue;
@@ -314,7 +314,7 @@ pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>,
             let dkey = d.module as u64 << 32 | d.node as u64;
             let slot = (dkey.wrapping_mul(0x9E3779B97F4A7C15u64) >> 54) as usize;
             let target = if tk[slot] == dkey {
-                tv[slot];
+                tv[slot]
             } else {
                 // A declaration that is an item answers from the lookup; a nested one (a field,
                 // a variant, a foreign local) from the declaration spans of its module.
@@ -325,7 +325,7 @@ pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>,
                 }
                 tk.set(slot, dkey);
                 tv.set(slot, t);
-                t;
+                t
             };
             if target == NONE || target == owner {
                 continue;
@@ -401,7 +401,7 @@ pub(package) fn open(p: &mut loader::Package) {
     // Stable keys: the module path, the top-level ordinal, the member ordinal (0 at top level).
     sch.key.reserve(n);
     for m in 0..nm {
-        let mh = fnv(p.modules.at(m).path.as_str());
+        let mh = fnv(&p.modules.at(m).path);
         let mut top: u64 = 0;
         let mut mem: u64 = 0;
         for i in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
@@ -490,7 +490,7 @@ pub(package) fn open(p: &mut loader::Package) {
             None => {
                 break;
             },
-        };
+        }
     }
     sch.sig_hash.resize_default(n);
     sch.fin_off.resize_default(n + 1);
@@ -684,34 +684,34 @@ pub(package) fn builtin_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>
     let src = p.modules.at(m).source.as_str();
     let nm = a.nodes.len();
     let nb = if a.b.released {
-        0usize;
+        0usize
     } else {
-        a.b.nodes.len();
+        a.b.nodes.len()
     };
     for x in 0..nm + nb {
         // The arenas' contiguous prefixes through raw pointers, as `module_edges` reads them.
         let sv = if x < nm {
-            &a.nodes;
+            &a.nodes
         } else {
-            &a.b.nodes;
+            &a.b.nodes
         };
         let xi = if x < nm {
-            x;
+            x
         } else {
-            x - nm;
+            x - nm
         };
         let nd = if xi < sv.base_len() {
-            unsafe &*(sv.base_ptr() + xi);
+            unsafe &*(sv.base_ptr() + xi)
         } else {
-            unsafe &*sv.ptr_at(xi);
+            unsafe &*sv.ptr_at(xi)
         };
         if nd.kind != NodeKind::NODE_MEMBER && nd.kind != NodeKind::NODE_TYPE_PATH {
             continue;
         }
         let id = if x < nm {
-            x as NodeId;
+            x as NodeId
         } else {
-            xi as NodeId | NODE_BODY;
+            xi as NodeId | NODE_BODY
         };
         let mut name = NODE_NONE;
         if nd.kind == NodeKind::NODE_MEMBER {
@@ -972,9 +972,9 @@ fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize, a
         let at = a.attrs.at(ai as usize);
         // A constant-expression argument hashes as its value: `arg` is a node id.
         let v = if at.expr {
-            a.attr_value_of(ai).v;
+            a.attr_value_of(ai).v
         } else {
-            at.arg as u64;
+            at.arg as u64
         };
         h = mix(mix(h, at.kind), v);
         k += 1;
@@ -1075,7 +1075,7 @@ fn decl_key(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: usize, n
     let s = a.at_const(node).span.start;
     let ow = owner_at(p, sps, c, m as u32, s);
     if ow == NONE {
-        return mix(fnv(p.modules.at(m).path.as_str()), s);
+        return mix(fnv(&p.modules.at(m).path), s);
     }
     return mix(p.sched.key[ow as usize], s - c.s);
 }
@@ -1478,9 +1478,9 @@ pub(package) fn report(p: &mut loader::Package, task_ns: u64) {
             ms(mk),
             wd.max,
             wd.sum / if wd.picks == 0 {
-                1u64;
+                1u64
             } else {
-                wd.picks;
+                wd.picks
             },
         );
     }
@@ -1688,14 +1688,14 @@ extend Reach {
                 let base = k * 64;
                 // The bits of word `k` below `low` and above `c`.
                 let mut below = if self.low - base < 64 {
-                    (1u64 << (self.low - base) as u64) - 1;
+                    (1u64 << (self.low - base) as u64) - 1
                 } else {
-                    ~0u64;
+                    ~0u64
                 };
                 let above = if c >= base {
-                    ~((2u64 << (c - base) as u64) - 1);
+                    ~((2u64 << (c - base) as u64) - 1)
                 } else {
-                    ~0u64;
+                    ~0u64
                 };
                 for _ in 0..64 {
                     let bits = self.seen[k] & below & above;

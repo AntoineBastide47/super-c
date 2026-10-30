@@ -57,9 +57,9 @@ const fn zero_stores_in_scope(text: str) u32 {
         let rest = text.slice(at, text.len());
         let e = rest.find("\n");
         let mut line = if e < 0 {
-            rest;
+            rest
         } else {
-            rest.slice(0, e as usize);
+            rest.slice(0, e as usize)
         };
         at += line.len() + 1;
         if line.ends_with("\r") {
@@ -97,17 +97,17 @@ fn zeroize_of_a_dead_buffer_survives_release() {
     assert(c.as_str().contains("(*(size_t volatile *)("), "the emitted C keeps the volatile word stores");
     let bin = format("{}/bin{}", root, unsafe str::from_cstr(cli::binext()));
     let mut cmd = if unsafe shim::sc_host_platform() == 1 {
-        format("otool -tv \"{}\"", bin.as_str());
+        format("otool -tv \"{}\"", bin.as_str())
     } else {
-        format("objdump -d \"{}\"", bin.as_str());
+        format("objdump -d \"{}\"", bin.as_str())
     };
     let mut outp = format("{}/.dis", root);
     if cli::run_with(cmd.cstr(), null, outp.cstr(), null, "") != 0 {
         eprintln("skipped the object-code half: `{}` failed (no disassembler on this host)", cmd.as_str());
         return;
     }
-    let dis = cli::read_text(outp.as_str());
-    let n = zero_stores_in_scope(dis.as_str());
+    let dis = cli::read_text(&outp);
+    let n = zero_stores_in_scope(&dis);
     if n == 0 {
         eprintln("`{}` printed:\n{}", cmd.as_str(), dis.as_str().slice(0, dis.len().min(4000)));
     }

@@ -611,7 +611,7 @@ fn bc_lw_take(ctx: &mut BorrowCtx, pkg: *const loader::Package, m: ModuleId, own
             return l;
         },
         _ => {},
-    };
+    }
     return irl::Lowerer::new(pkg, m, owner);
 }
 
@@ -699,9 +699,9 @@ pub(package) fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &i
     let sskip = stage_skip(ft);
     let on9 = ctx.st.pr.on;
     let tb = if ctx.st.all {
-        platform_ns();
+        platform_ns()
     } else {
-        0u64;
+        0u64
     };
     if on9 {
         ctx.st.t[BT_BODIES] += 1;
@@ -1030,9 +1030,9 @@ extend tc::TypeChecker {
         }
         let a = self.cur_ast();
         let sp = if lw.err_node != NODE_NONE {
-            unsafe (*a).at_const(lw.err_node).span;
+            unsafe (*a).at_const(lw.err_node).span
         } else {
-            unsafe (*a).at_const(owner).span;
+            unsafe (*a).at_const(owner).span
         };
         self.errors.emit_span(
             dc::CANNOT_BORROW_CHECK_BODY_UNSUPPORTED_CONSTRUCT,
@@ -1050,9 +1050,9 @@ extend tc::TypeChecker {
         let m = self.cur_module();
         let mut lw = bc_lw_take(ctx, pkg, m, fnid);
         let tl0 = if ctx.st.all {
-            platform_ns();
+            platform_ns()
         } else {
-            0u64;
+            0u64
         };
         let lowered = lw.lower_fn(fnid);
         if tl0 != 0 {
@@ -1187,9 +1187,9 @@ extend tc::TypeChecker {
         let convert = ctx.keep != null || tagged;
         for oi in 0..n {
             let b = if n > 1 {
-                order[oi];
+                order[oi]
             } else {
-                0usize;
+                0usize
             };
             if ctx.st.pr.on {
                 ctx.st.tally_ir(bodies.at(b));
@@ -1293,9 +1293,9 @@ extend tc::TypeChecker {
             irt::TR_NOT_TAIL => format("it is not in tail position: the function does not return its result as it is"),
             irt::TR_DROP => format("{} is dropped after it returns", nm.as_str()),
             irt::TR_AFTER => if self.bc_in_defer(ms.at) {
-                format("a 'defer' block runs after it returns");
+                format("a 'defer' block runs after it returns")
             } else {
-                format("code runs after it returns");
+                format("code runs after it returns")
             },
             irt::TR_INSTANCE => format("it may call another instance of the function (other generic arguments)"),
             irt::TR_ADJUST => format(
@@ -1548,9 +1548,9 @@ extend tc::TypeChecker {
         }
         let base_ty = body.locals.at(pl.base as usize).ty;
         let bk = if base_ty != TYPE_NONE {
-            self.type_at(base_ty).kind;
+            self.type_at(base_ty).kind
         } else {
-            TypeKind::TYPE_ERROR;
+            TypeKind::TYPE_ERROR
         };
         // The whole pointee moved out of a dereference (`*r`, `p[i]`): the input type of the final
         // projection is the reference/pointer itself.
@@ -1560,9 +1560,9 @@ extend tc::TypeChecker {
             last_in = body.projections.at((pl.proj_start + pl.proj_len - 2) as usize).ty;
         }
         let lik = if last_in != TYPE_NONE {
-            self.type_at(last_in).kind;
+            self.type_at(last_in).kind
         } else {
-            TypeKind::TYPE_ERROR;
+            TypeKind::TYPE_ERROR
         };
         // An indexed element of a view (slice, str, Vector: an instance or struct) lives in storage
         // the view reaches through a pointer; only an array holds its elements in place.
@@ -1573,9 +1573,9 @@ extend tc::TypeChecker {
                 let msg = if self.type_at(pl.ty).kind == TypeKind::TYPE_GENERIC {
                     format(
                         "cannot move a value of a type parameter out of a dereference (it would be freed twice); add a 'Copy' bound to the parameter to copy it, or borrow it",
-                    );
+                    )
                 } else {
-                    format("cannot move a Free value out of a dereference (it would be freed twice)");
+                    format("cannot move a Free value out of a dereference (it would be freed twice)")
                 };
                 self.bc_ir_push(out, seen, CAT_F_DEREF, sp, msg);
             }
@@ -1698,9 +1698,9 @@ extend tc::TypeChecker {
                 } else {
                     let pty = ctx.forest.paths.at(er.path as usize).ty;
                     let cat = if pty != TYPE_NONE && self.type_at(pty).kind == TypeKind::TYPE_GENERIC {
-                        CAT_MOVED_PARAM;
+                        CAT_MOVED_PARAM
                     } else {
-                        CAT_MOVED;
+                        CAT_MOVED
                     };
                     self.bc_ir_push(out, seen, cat, er.span, format("use of moved value"));
                 }
@@ -1739,14 +1739,14 @@ extend tc::TypeChecker {
             for c in 0..ctx.facts.clashes.len() {
                 let cl = *ctx.facts.clashes.at(c);
                 let k1 = if cl.second == 2 {
-                    "mutable";
+                    "mutable"
                 } else {
-                    "immutable";
+                    "immutable"
                 };
                 let k2 = if cl.first == 2 {
-                    "mutable";
+                    "mutable"
                 } else {
-                    "immutable";
+                    "immutable"
                 };
                 self.bc_ir_push(
                     out,
@@ -1852,9 +1852,9 @@ extend tc::TypeChecker {
                         let mut si: u32 = 0;
                         let blk = *body.blocks.at(self.bc_uni_site(f, e.point, &mut si));
                         let sp = if si < blk.stmt_len {
-                            body.statements.at((blk.stmt_start + si) as usize).span;
+                            body.statements.at((blk.stmt_start + si) as usize).span
                         } else {
-                            blk.term.span;
+                            blk.term.span
                         };
                         self.bc_ir_push(
                             out,
@@ -1879,9 +1879,9 @@ extend tc::TypeChecker {
                 let uo = f.arg_universal[l];
                 if lo != bfx::BF_NONE && reach[lo as usize] || uo != bfx::BF_NONE && reach[uo as usize] {
                     m = if k - np < 64 {
-                        m | 1u64 << (k - np) as u64;
+                        m | 1u64 << (k - np) as u64
                     } else {
-                        0xFFFFFFFFFFFFFFFFu64;
+                        0xFFFFFFFFFFFFFFFFu64
                     };
                 }
             }
@@ -1901,9 +1901,9 @@ extend tc::TypeChecker {
         }
         let cf = unsafe (*self.mod_ast(body.owner.module)).closure_fact(body.owner.node);
         let by_ptr = if cf != null {
-            unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
+            unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps
         } else {
-            0u64;
+            0u64
         };
         // The origins that reach a return slot, found backward from the slots.
         let mut into = Vector::<bool>::new();
@@ -2039,9 +2039,9 @@ extend tc::TypeChecker {
         let no = f.norigins as usize;
         let cf = unsafe (*self.mod_ast(body.owner.module)).closure_fact(body.owner.node);
         let by_ptr = if cf != null {
-            unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
+            unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps
         } else {
-            0u64;
+            0u64
         };
         let mut keep: u64 = 0;
         // The origins that reach an observing owned capture, found backward from those captures.
@@ -2332,9 +2332,9 @@ extend tc::TypeChecker {
             }
             for j in 0..n {
                 let rj = if j == 0 {
-                    tc::REGION_STATIC;
+                    tc::REGION_STATIC
                 } else {
-                    self.tc_lt_region_of_name(u.names[j]);
+                    self.tc_lt_region_of_name(u.names[j])
                 };
                 if j != i && rj != tc::REGION_NONE && self.region_outlives(ri, rj) {
                     u.ol.set(i, u.ol[i] | 1u64 << j as u64);
@@ -2342,9 +2342,9 @@ extend tc::TypeChecker {
             }
         }
         let every = if n == UNI_MAX {
-            0xFFFFFFFFFFFFFFFFu64;
+            0xFFFFFFFFFFFFFFFFu64
         } else {
-            (1u64 << n as u64) - 1u64;
+            (1u64 << n as u64) - 1u64
         };
         u.ol.set(0, every);
         for k in 0..n {
@@ -2524,9 +2524,9 @@ extend tc::TypeChecker {
             // A store into a parameter's local reaches caller storage at its positions behind a
             // reference or a view.
             let tl = if e.to >= nu {
-                f.origin_local[e.to as usize];
+                f.origin_local[e.to as usize]
             } else {
-                bfx::BF_NONE;
+                bfx::BF_NONE
             };
             let mut vis = rs == UNI_NONE && tl != bfx::BF_NONE && tl >= body.returns && tl < body.returns + np;
             if vis {
@@ -2546,9 +2546,9 @@ extend tc::TypeChecker {
                 continue;
             }
             let ph = if rs == UNI_NONE {
-                e.to as usize;
+                e.to as usize
             } else {
-                f.ret_origin[rs as usize] as usize;
+                f.ret_origin[rs as usize] as usize
             };
             if !self.bc_uni_check(ow, u, body, f, k as u32, ph == 0, vis) {
                 continue;
@@ -2618,9 +2618,9 @@ extend tc::TypeChecker {
             u.toks = lv;
         }
         let el = if param {
-            UNI_NONE;
+            UNI_NONE
         } else {
-            elide;
+            elide
         };
         u.keys.truncate(0);
         if !u.opq[o as usize] && self.bc_uni_walk(ow, u, self.cur_module(), self.bc_uni_ext(), tn, ty, false, 0) {
@@ -2673,11 +2673,11 @@ extend tc::TypeChecker {
                     u.vr.set(
                         b + i,
                         if v == 3 {
-                            2;
+                            2
                         } else if v == 2 {
-                            1;
+                            1
                         } else {
-                            0;
+                            0
                         },
                     );
                 }
@@ -2849,9 +2849,9 @@ extend tc::TypeChecker {
             return;
         }
         let b = if behind {
-            1u64;
+            1u64
         } else {
-            0u64;
+            0u64
         };
         let y = *self.type_at(ty);
         if y.kind == TypeKind::TYPE_REFERENCE {
@@ -2908,9 +2908,9 @@ extend tc::TypeChecker {
         }
         for k in 0..len {
             let oi = if pool {
-                body.oper_pool[(start + k) as usize];
+                body.oper_pool[(start + k) as usize]
             } else {
-                start;
+                start
             };
             if oi == ir::IR_NONE {
                 continue;
@@ -3094,9 +3094,9 @@ extend tc::TypeChecker {
         let a = self.mod_ast(m);
         let n = *unsafe (*a).at_const(tn);
         let bf = if behind {
-            UA_BEHIND;
+            UA_BEHIND
         } else {
-            0;
+            0
         };
         if n.kind == NodeKind::NODE_TYPE_PATH {
             let mut d = unsafe (*a).path_def(tn);
@@ -3216,20 +3216,20 @@ extend tc::TypeChecker {
             for i in 0..ft.returns.len + ft.params.len {
                 let r = i < ft.returns.len;
                 let sl = if r {
-                    unsafe (*a).list(ft.returns)[i as usize];
+                    unsafe (*a).list(ft.returns)[i as usize]
                 } else {
-                    unsafe (*a).list(ft.params)[(i - ft.returns.len) as usize];
+                    unsafe (*a).list(ft.params)[(i - ft.returns.len) as usize]
                 };
                 let j = if r {
-                    i;
+                    i
                 } else {
-                    i - ft.returns.len;
+                    i - ft.returns.len
                 };
                 let st = unsafe (*self.cur_ast()).sig_at(y, r, j);
                 let f = if r {
-                    UA_CO;
+                    UA_CO
                 } else {
-                    UA_CONTRA;
+                    UA_CONTRA
                 };
                 if !self.bc_uni_outer(ow, u, m, unsafe (*a).slot_type_node(sl), st, y, &mut kp, k0, f, depth + 1) {
                     return false;
@@ -3261,9 +3261,9 @@ extend tc::TypeChecker {
         let a = self.mod_ast(m);
         let n = *unsafe (*a).at_const(tn);
         let bf = if behind {
-            UA_BEHIND;
+            UA_BEHIND
         } else {
-            0;
+            0
         };
         if n.kind == NodeKind::NODE_SLICE_TYPE {
             if !self.bc_uni_view(d.module, d.node) || nargs != 1 {
@@ -3387,9 +3387,9 @@ extend tc::TypeChecker {
             self.bc_uni_outer_at(ow, u, m, n.as_data.indirect_type.lifetime, tn, 0, fy, kp, k0, vf);
             // Behind a `&mut`, a lifetime is invariant.
             let iv = if y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-                UA_CO | UA_CONTRA;
+                UA_CO | UA_CONTRA
             } else {
-                vf;
+                vf
             };
             return self.bc_uni_outer(ow, u, m, n.as_data.indirect_type.ty, y.as_data.elem, fy, kp, k0, iv, depth + 1);
         }
@@ -3744,9 +3744,9 @@ extend tc::TypeChecker {
         }
         let da = self.mod_ast(d.module);
         let ms = if variant != NODE_NONE {
-            unsafe (*da).at_const(variant).as_data.variant.payload;
+            unsafe (*da).at_const(variant).as_data.variant.payload
         } else {
-            unsafe (*da).ext(d.node).aggregate.members;
+            unsafe (*da).ext(d.node).aggregate.members
         };
         let mut mn = NODE_NONE;
         if pj.sub != NODE_NONE {
@@ -3931,9 +3931,9 @@ extend tc::TypeChecker {
         if e.to < f.nuniversal {
             let l = u.phl[e.to as usize];
             tor = if l == bfx::BF_NONE {
-                bfx::BF_NONE;
+                bfx::BF_NONE
             } else {
-                f.local_origin[l as usize];
+                f.local_origin[l as usize]
             };
         }
         let mut r = EM_COARSE;
@@ -4163,9 +4163,9 @@ extend tc::TypeChecker {
                         if self.bc_uni_decl(dty, &mut d, &mut nargs) {
                             let da = self.mod_ast(d.module);
                             let ms = if rv.c == ir::AGG_VARIANT {
-                                unsafe (*da).at_const(rv.item.node).as_data.variant.payload;
+                                unsafe (*da).at_const(rv.item.node).as_data.variant.payload
                             } else {
-                                unsafe (*da).ext(d.node).aggregate.members;
+                                unsafe (*da).ext(d.node).aggregate.members
                             };
                             if i < ms.len {
                                 fnode = unsafe (*da).list(ms)[i as usize];
@@ -4585,9 +4585,9 @@ extend tc::TypeChecker {
         }
         let y = *self.type_at(ty);
         let bf = if behind {
-            UA_BEHIND;
+            UA_BEHIND
         } else {
-            0;
+            0
         };
         if y.kind == TypeKind::TYPE_REFERENCE {
             if emit && !self.bc_uni_fn_key(u, fy, *kpos, ncls, single, bf) {
@@ -4970,11 +4970,11 @@ extend tc::TypeChecker {
             return self.bc_names_lt(m, n.as_data.array_type.element, nm, depth + 1);
         }
         let args = if n.kind == NodeKind::NODE_TYPE_PATH {
-            unsafe (*a).at_const(tyn).as_data.type_path.args;
+            unsafe (*a).at_const(tyn).as_data.type_path.args
         } else if n.kind == NodeKind::NODE_TUPLE_TYPE {
-            n.as_data.array_literal.elements;
+            n.as_data.array_literal.elements
         } else {
-            NodeList { start: 0, len: 0 };
+            NodeList { start: 0, len: 0 }
         };
         for i in 0..args.len {
             if self.bc_names_lt(m, unsafe (*a).list(args)[i as usize], nm, depth + 1) {
@@ -5178,9 +5178,9 @@ extend tc::TypeChecker {
         let ft = unsafe (*a).at_const(fnn).as_data.function_type;
         for i in 0..ft.params.len + ft.returns.len {
             let sl = if i < ft.params.len {
-                unsafe (*a).list(ft.params)[i as usize];
+                unsafe (*a).list(ft.params)[i as usize]
             } else {
-                unsafe (*a).list(ft.returns)[(i - ft.params.len) as usize];
+                unsafe (*a).list(ft.returns)[(i - ft.params.len) as usize]
             };
             self.tc_typenode_lifetimes(self.cur_module(), unsafe (*a).slot_type_node(sl), &mut out, 0);
         }
@@ -5260,11 +5260,11 @@ extend tc::TypeChecker {
         }
         if ret == bfx::BF_NONE {
             let msg = if sv.origin_reaches(lo.origin, 0) {
-                format("borrowed value does not live long enough: this value must satisfy 'static");
+                format("borrowed value does not live long enough: this value must satisfy 'static")
             } else {
                 format(
                     "borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive",
-                );
+                )
             };
             self.bc_ir_push(out, seen, CAT_ESCAPE, er.span, msg);
             return;

@@ -421,13 +421,13 @@ fn burst_and_idle_cycles_plateau() {
                         fn() i64 {
                             return hold(2, want);
                         },
-                    );
+                    )
                 } else {
                     blocking::call_c(
                         fn() i64 {
                             return hold(2, want);
                         },
-                    ).unwrap_or(-1);
+                    ).unwrap_or(-1)
                 };
                 if got == want {
                     let _ = o.get().fetch_add(1, atomics::MemoryOrder::Relaxed);

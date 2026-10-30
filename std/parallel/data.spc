@@ -62,7 +62,7 @@ pub struct Options {
 extend Options {
     /// Static scheduling with an automatic grain: what the plain `range`/`each`/... forms use.
     pub const fn default() Options {
-        return Options { schedule: Schedule::Static, grain_size: 0 };
+        return Options { schedule: Static, grain_size: 0 };
     }
 }
 
@@ -201,9 +201,9 @@ pub fn chunk_count(total: usize, opts: Options) usize {
         return 1;
     }
     let per = if opts.grain_size == 0 {
-        MIN_UNITS_PER_CHUNK;
+        MIN_UNITS_PER_CHUNK
     } else {
-        opts.grain_size;
+        opts.grain_size
     };
     let mut n = runtime::worker_count() * CHUNKS_PER_WORKER;
     let by_units = (total + per - 1) / per;
@@ -229,13 +229,13 @@ pub unsafe fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, s
     }
     let mode = switch opts.schedule {
         Static => {
-            0;
+            0
         },
         Dynamic => {
-            1;
+            1
         },
         Guided => {
-            2;
+            2
         },
     };
     if nchunks == 1 {
@@ -340,9 +340,9 @@ pub fn range<F: fn(usize) + Send + Sync>(r: Range<usize>, body: F) {
 /// `range` with an explicit schedule and grain.
 pub fn range_with<F: fn(usize) + Send + Sync>(r: Range<usize>, opts: Options, body: F) {
     let end = if r.inclusive {
-        r.end + 1;
+        r.end + 1
     } else {
-        r.end;
+        r.end
     };
     if end <= r.start {
         return;
@@ -490,9 +490,9 @@ pub fn chunks_mut<T, F: fn([]mut T) + Send + Sync>(items: []mut T, size: usize, 
 pub fn chunks_mut_with<T, F: fn([]mut T) + Send + Sync>(items: []mut T, size: usize, opts: Options, body: F) {
     let n = items.len();
     let step = if size == 0 {
-        1usize;
+        1usize
     } else {
-        size;
+        size
     };
     if n == 0 {
         return;
@@ -575,11 +575,11 @@ pub fn reduce_with<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + Sy
     unsafe dispatch(n, opts, reduce_chunk::<T, A, MK, FOLD>, &mut sh);
     // Every chunk wrote its slot (a chunk that drew no work wrote the identity), so all `nslots` are live.
     let mut acc = unsafe {
-        out[0];
+        out[0]
     };
     for k in 1..nslots {
         let part = unsafe {
-            out[k];
+            out[k]
         };
         acc = combine(acc, part);
     }
@@ -606,7 +606,7 @@ pub struct Sections {
 pub unsafe fn section_entry<F: fn() + Send + Sync>(env: *mut void) {
     let pp = env as *mut F;
     let f = unsafe {
-        pp[0];
+        pp[0]
     };
     let mut g = Global {};
     unsafe g.dealloc(env, sizeof(F), alignof(F));
@@ -666,7 +666,7 @@ pub fn sections<F: fn(&mut Sections)>(build: F) {
     if n > 0 {
         let view = s.entries[0..n];
         let mut sh = SectionsShared { jobs: view.ptr };
-        unsafe dispatch(n, Options { schedule: Schedule::Dynamic, grain_size: 1 }, sections_chunk, &mut sh);
+        unsafe dispatch(n, Options { schedule: Dynamic, grain_size: 1 }, sections_chunk, &mut sh);
     }
     // `s` (and its entry vector) is auto-freed at scope exit; each section's closure box was released by the
     // trampoline that ran it.

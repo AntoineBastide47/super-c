@@ -41,10 +41,10 @@ const fn align_up(x: u32, a: u32) u32 {
 fn size_align(b: &Body, pt: u32, ptr: u32) (u32, u32) {
     if (pt & AGG) != 0 {
         let l = (pt & ~AGG) as usize;
-        return b.pool[l], 1u32 << b.pool[l + 1];
+        return (b.pool[l], 1u32 << b.pool[l + 1]);
     }
     let t = pt as u8;
-    return type_bytes(t, ptr), type_align(t, ptr);
+    return (type_bytes(t, ptr), type_align(t, ptr));
 }
 
 // The class of a scalar of type `t` (`vregs`: the package's `vec_regs`) at byte `off`: its eightbytes
@@ -87,15 +87,15 @@ const fn merge(cls: &mut u64, e: u32, k: u8) {
     }
     let c = kof(*cls, e);
     let m = if c == k || k == K_NONE {
-        c;
+        c
     } else if c == K_NONE {
-        k;
+        k
     } else if c == K_MEM || k == K_MEM {
-        K_MEM;
+        K_MEM
     } else if c == K_INT || k == K_INT {
-        K_INT;
+        K_INT
     } else {
-        K_SSE;
+        K_SSE
     };
     *cls = *cls & ~(0xFFu64 << (8 * e) as u64) | m as u64 << (8 * e) as u64;
 }
@@ -155,9 +155,9 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, vregs: u32, out: &mut Cal
     }
     let fixed = b.pool[sig as usize + 1];
     let nfixed = if (fixed & SIG_VARIADIC) != 0 {
-        fixed & ~SIG_VARIADIC;
+        fixed & ~SIG_VARIADIC
     } else {
-        np;
+        np
     };
     let mut cls: u64 = 0;
     let mut gp: u32 = 0;
@@ -205,17 +205,17 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, vregs: u32, out: &mut Cal
             let t = pt as u8;
             if (pt & AGG) == 0 && !is_vec(t) && !is_float(t) && size < 4 {
                 loc.ext = if (pt & SIG_SEXT) != 0 {
-                    2;
+                    2
                 } else {
-                    1;
+                    1
                 };
             }
         } else {
             // On the stack, at least eightbyte-aligned.
             let a = if al > 8 {
-                al;
+                al
             } else {
-                8;
+                8
             };
             stack = align_up(stack, a);
             loc.kind = L_STACK;
@@ -262,14 +262,14 @@ fn put_parts(
         }
         if k == K_INT {
             let r = if ret {
-                gp_ret(*gp);
+                gp_ret(*gp)
             } else {
-                gp_arg(*gp);
+                gp_arg(*gp)
             };
             let s = if size - off < 8 {
-                size - off;
+                size - off
             } else {
-                8;
+                8
             };
             parts.push(Part { reg: r, v: false, size: s as u8, off: off });
             *gp += 1;
@@ -281,9 +281,9 @@ fn put_parts(
             w += 1;
         }
         let s = if size - off < 8 * w {
-            size - off;
+            size - off
         } else {
-            8 * w;
+            8 * w
         };
         parts.push(Part { reg: (*vr) as u8, v: true, size: s as u8, off: off });
         *vr += 1;

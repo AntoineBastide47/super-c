@@ -68,9 +68,9 @@ pub fn remaining_ns(deadline: u64) u64 {
 pub fn sleep(d: Duration) {
     // Clamped to the largest `i64`: the cast alone turns a huge duration negative, which sleeps not at all.
     let ns = if d > 9223372036854775807u64 {
-        9223372036854775807i64;
+        9223372036854775807i64
     } else {
-        d as i64;
+        d as i64
     };
     runtime::sleep_ns(ns);
 }

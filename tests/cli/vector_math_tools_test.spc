@@ -11,11 +11,11 @@ fn tool(p: &cli::Proj, root: str, bin: str) String {
     for f in ["build.toml", "gen.spc", "check.spc", "bench.spc", "real.spc", "ref.spc", "remez.spc"] {
         let mut src = String::from_str(root);
         src.format_into("/tools/simd_math/{}", f);
-        assert(p.copyfile(f, src.as_str()), "the tool's source copies");
+        assert(p.copyfile(f, &src), "the tool's source copies");
     }
     let path = format("{}/{}{}", p.dir(), bin, unsafe str::from_cstr(cli::binext()));
     let args = format("release --bin={} -o \"{}\"", bin, path.as_str());
-    let r = cli::superc_env_in(p.dir(), "SC_LEAK_CHECK", "0", args.as_str());
+    let r = cli::superc_env_in(p.dir(), "SC_LEAK_CHECK", "0", &args);
     if !r.ok() {
         r.show();
     }
@@ -34,13 +34,13 @@ fn repo_root() String {
 fn generator_reproduces_coefficients() {
     let root = repo_root();
     let p = cli::proj_new();
-    let exe = tool(&p, root.as_str(), "simd-math-gen");
+    let exe = tool(&p, &root, "simd-math-gen");
     let mut out = String::from_str(p.dir());
     out.push_str("/out");
-    let _ = fs::mkdir_all(out.as_str());
+    let _ = fs::mkdir_all(&out);
     let mut args = String::from_str("--jobs=1 ");
-    args.push_str(out.as_str());
-    let r = cli::exe_env_in(exe.as_str(), p.dir(), "SC_LEAK_CHECK", "0", args.as_str());
+    args.push_str(&out);
+    let r = cli::exe_env_in(&exe, p.dir(), "SC_LEAK_CHECK", "0", &args);
     if !r.ok() {
         r.show();
     }
@@ -50,8 +50,8 @@ fn generator_reproduces_coefficients() {
         a.format_into("/{}", f);
         let mut b = root.clone();
         b.format_into("/std/simd/math/{}", f);
-        let ta = cli::read_text(a.as_str());
-        let tb = cli::read_text(b.as_str());
+        let ta = cli::read_text(&a);
+        let tb = cli::read_text(&b);
         assert(ta.len() > 0, "the generator writes the coefficients");
         assert(ta.equals(&tb), "the generator reproduces the committed coefficients");
     }
@@ -62,11 +62,11 @@ fn generator_reproduces_coefficients() {
 fn reduced_accuracy(part: str) {
     let root = repo_root();
     let p = cli::proj_new();
-    let exe = tool(&p, root.as_str(), "simd-math-check");
+    let exe = tool(&p, &root, "simd-math-check");
     // 10^6 inputs per function: half in each lane type, every special value.
     let mut args = String::from_str("--jobs=1 --n=500000 --sample32=500000 --part=");
     args.push_str(part);
-    let r = cli::exe_env_in(exe.as_str(), p.dir(), "SC_LEAK_CHECK", "0", args.as_str());
+    let r = cli::exe_env_in(&exe, p.dir(), "SC_LEAK_CHECK", "0", &args);
     if !r.ok() {
         r.show();
     }

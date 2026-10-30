@@ -193,9 +193,9 @@ extend Inliner {
             for i in bk.start..bk.start + bk.len {
                 let t = c.insts[i as usize];
                 let callee = if t.op == O_CALL {
-                    callee_of(pk, c, t);
+                    callee_of(pk, c, t)
                 } else {
-                    NONE;
+                    NONE
                 };
                 if callee == NONE || level[callee as usize] >= level[ci as usize] || !ok[callee as usize] || unit[callee as usize] != NONE && unit[callee as usize] != unit[ci as usize] {
                     self.cmap[i as usize] = ni;
@@ -224,22 +224,22 @@ extend Inliner {
                     pbase: np,
                     kblock: nb + e.blocks.len() as u32,
                     kparam: if t.ty == T_NONE {
-                        NONE;
+                        NONE
                     } else {
-                        np + e.params.len() as u32;
+                        np + e.params.len() as u32
                     },
                 };
                 nb += e.blocks.len() as u32 + 1;
                 ni += e.insts.len() as u32;
                 np += e.params.len() as u32 + if t.ty == T_NONE {
-                    0u32;
+                    0u32
                 } else {
-                    1u32;
+                    1u32
                 };
                 self.cmap[i as usize] = if s.kparam == NONE {
-                    VNONE;
+                    VNONE
                 } else {
-                    VPARAM | s.kparam;
+                    VPARAM | s.kparam
                 };
                 self.sites.push(s);
             }
@@ -292,7 +292,7 @@ extend Inliner {
                     for q in 0..t.aux as u32 {
                         args.push(self.cval(c.pool[(t.c + q) as usize]));
                     }
-                    let edge = o.edge(s.bbase, args.as_slice());
+                    let edge = o.edge(s.bbase, &args);
                     o.insts.push(Inst { op: O_JMP, ty: T_NONE, aux: 0, a: edge, b: 0, c: 0 });
                     o.locs.push(c.locs[i as usize]);
                     o.inl.push(site_of(c, i, false));
@@ -490,9 +490,9 @@ extend Inliner {
                 let l = e.locs[i as usize];
                 o.locs.push(
                     if l == 0 {
-                        loc;
+                        loc
                     } else {
-                        bs.lines + l - 1;
+                        bs.lines + l - 1
                     },
                 );
                 o.inl.push(site);
@@ -533,7 +533,7 @@ extend Inliner {
             if s.kparam != NONE {
                 args.push(ev(s, t.a));
             }
-            return Inst { op: O_JMP, ty: T_NONE, aux: 0, a: o.edge(s.kblock, args.as_slice()), b: 0, c: 0 };
+            return Inst { op: O_JMP, ty: T_NONE, aux: 0, a: o.edge(s.kblock, &args), b: 0, c: 0 };
         }
         if lv::operand_a(f) {
             t.a = ev(s, t.a);
@@ -623,9 +623,9 @@ extend Inliner {
 const fn callee_of(pk: &Package, c: &Body, t: Inst) u32 {
     let sy = pk.syms[c.syms[t.a as usize] as usize];
     return if sy.kind == SK_FUNC && sy.def != NONE {
-        sy.def;
+        sy.def
     } else {
-        NONE;
+        NONE
     };
 }
 
@@ -633,14 +633,14 @@ const fn callee_of(pk: &Package, c: &Body, t: Inst) u32 {
 // `copy`, that of an instruction inlined from it: its own location when it is the caller's.
 const fn site_of(c: &Body, i: u32, copy: bool) u32 {
     let s = if c.inl.len() != 0 {
-        c.inl[i as usize];
+        c.inl[i as usize]
     } else {
-        0u32;
+        0u32
     };
     return if copy && s == 0 {
-        c.locs[i as usize];
+        c.locs[i as usize]
     } else {
-        s;
+        s
     };
 }
 

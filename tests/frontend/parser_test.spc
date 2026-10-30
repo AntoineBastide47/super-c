@@ -122,7 +122,7 @@ fn unsafe_extend() {
 
 @test
 fn grouped_parameters_and_returns() {
-    let src = "fn slice(self: *mut Self, start, end, len: isize) *mut Self {}\nfn divmod(a, b: int) (int, int) { return a / b, a % b; }\nfn open(path: str) (file: File, err: IOError) {}\nfn log(message: str) {}\nfn risky(ptr: *mut int) { unsafe { consume(ptr); } unsafe consume(ptr); }\n";
+    let src = "fn slice(self: *mut Self, start, end, len: isize) *mut Self {}\nfn divmod(a, b: int) (int, int) { return (a / b, a % b); }\nfn open(path: str) (file: File, err: IOError) {}\nfn log(message: str) {}\nfn risky(ptr: *mut int) { unsafe { consume(ptr); } unsafe consume(ptr); }\n";
     let c = h::parse_ast(src);
     assert(c.errors == 0, "grouped parameters and returns parses");
     let root = c.ast.root;
@@ -283,7 +283,7 @@ fn first_error_at(src: str) u32 {
     let mut s = String::from_str(src);
     let mut lx = lex::Lexer::new(&mut s, "");
     lx.scan_tokens();
-    let mut ps = par::Parser::new(lx.take_tokens(), s.as_str(), "");
+    let mut ps = par::Parser::new(lx.take_tokens(), &s, "");
     ps.build_ast();
     if !ps.has_errors() {
         return 0xFFFFFFFF;
@@ -770,7 +770,7 @@ fn one_part_c_attributes() {
             continue;
         }
         let old = format("@c.{}\nfn f() {{}}\n", n);
-        assert(h::parse_has_error(old.as_str()), "a '@c.' spelling is an unknown attribute");
+        assert(h::parse_has_error(&old), "a '@c.' spelling is an unknown attribute");
     }
     h::expect_err_msg(
         "old spelling",
@@ -807,7 +807,7 @@ fn test_attribute_list() {
         let mut src = String::from_str("@test(");
         src.push_str(bad);
         src.push_str(")\nfn t() {}\n");
-        assert(h::parse_has_error(src.as_str()), bad);
+        assert(h::parse_has_error(&src), bad);
     }
     h::expect_err_msg(
         "unknown test argument",
@@ -1041,7 +1041,7 @@ fn bug_regressions() {
             i = i + 1;
         }
         s.push_str("}");
-        assert(h::parse_has_error(s.as_str()), "deeply nested blocks should diagnose, not crash");
+        assert(h::parse_has_error(&s), "deeply nested blocks should diagnose, not crash");
     }
     // P3: an expression statement exactly at the depth cap consumed no token; the block loop must still
     // make progress instead of spinning on the same token.
@@ -1056,7 +1056,7 @@ fn bug_regressions() {
             s.push_str("}");
         }
         s.push_str(" return 0; }");
-        assert(h::parse_has_error(s.as_str()), "an expression at the depth cap should diagnose, not hang");
+        assert(h::parse_has_error(&s), "an expression at the depth cap should diagnose, not hang");
     }
     // P4: `@bench()` at end of input reads no argument past the token stream.
     assert(h::parse_has_error("@bench()"), "empty @bench arguments rejected");
@@ -1119,7 +1119,7 @@ fn pathological_depth() {
             i = i + 1;
         }
         s.push_str("; }\n");
-        assert(h::parse_has_error(s.as_str()), "over-long binary chain is rejected");
+        assert(h::parse_has_error(&s), "over-long binary chain is rejected");
     }
     {
         let mut s = String::new();
@@ -1130,7 +1130,7 @@ fn pathological_depth() {
             i = i + 1;
         }
         s.push_str("1; }\n");
-        assert(h::parse_has_error(s.as_str()), "over-deep assignment chain is rejected");
+        assert(h::parse_has_error(&s), "over-deep assignment chain is rejected");
     }
 }
 
@@ -1417,12 +1417,12 @@ fn diagnostics_by_message() {
 fn tuple_let_mut_elements() {
     h::expect_exit(
         "tuple let takes mut per element",
-        "fn f() (i32, i32) { return 1, 2; }\nfn main() i32 { let (_, mut x) = f(); x += 10; let (mut a, b) = f(); a += b; return x + a - 15; }\n",
+        "fn f() (i32, i32) { return (1, 2); }\nfn main() i32 { let (_, mut x) = f(); x += 10; let (mut a, b) = f(); a += b; return x + a - 15; }\n",
         0,
     );
     h::expect_err_msg(
         "tuple let element without mut stays immutable",
-        "fn f() (i32, i32) { return 1, 2; }\nfn main() i32 { let (a, mut b) = f(); a += 1; b += 1; return a + b; }\n",
+        "fn f() (i32, i32) { return (1, 2); }\nfn main() i32 { let (a, mut b) = f(); a += 1; b += 1; return a + b; }\n",
         "cannot assign",
     );
 }

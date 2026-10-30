@@ -13,12 +13,7 @@ fn same_output_agrees_across_profiles() {
     src.push_str(
         "fn main() i32 {\n    let a = opr::<i32>(i32::MAX);\n    println(\"{}\", a.wrapping_add(opr::<i32>(1)));\n    println(\"{}\", a / opr::<i32>(0));\n    return 0;\n}\n",
     );
-    h::expect_same_output(
-        "a division trap and a wrapping add",
-        src.as_str(),
-        ["--profile=debug"],
-        ["--profile=release"],
-    );
+    h::expect_same_output("a division trap and a wrapping add", &src, ["--profile=debug"], ["--profile=release"]);
 }
 
 // Each libm call runs as written under every profile: release's optimizer neither merges `sin(x)` and
@@ -38,7 +33,7 @@ fn libm_calls_agree_across_profiles() {
 fn same_output_reports_profile_dependent_overflow() {
     let mut src = String::from_str(OPR);
     src.push_str("fn main() i32 {\n    println(\"{}\", opr::<i32>(i32::MAX) + opr::<i32>(1));\n    return 0;\n}\n");
-    let d = h::same_output(src.as_str(), ["--profile=debug"], ["--profile=release"], [""]);
+    let d = h::same_output(&src, ["--profile=debug"], ["--profile=release"], [""]);
     assert(d.contains("differs"), "an overflow traps under debug and wraps under release");
     assert(d.contains("super-c: attempt to add with overflow"), "the trap text is part of the report");
     assert(d.contains("-2147483648"), "the release stdout is part of the report");
@@ -50,8 +45,8 @@ fn same_output_with_bounds_checks_forced() {
     src.push_str(
         "fn main() i32 {\n    let mut v = Vector::<i64>::new();\n    for k in 0..opr::<usize>(9) {\n        v.push(k as i64);\n    }\n    let mut acc: i64 = 0;\n    for i in 0..v.len() {\n        acc += v[i];\n    }\n    println(\"{}\", acc);\n    let mut i: usize = 0;\n    while i < 13 {\n        acc += v[i];\n        i += 4;\n    }\n    println(\"{}\", acc);\n    return 0;\n}\n",
     );
-    let b = h::diff_build(src.as_str(), []);
-    let z = h::diff_build(src.as_str(), ["SC_BCE=0"]);
+    let b = h::diff_build(&src, []);
+    let z = h::diff_build(&src, ["SC_BCE=0"]);
     if !b.built || !z.built {
         eprintln("{}{}", b.diag.as_str(), z.diag.as_str());
     }
@@ -198,7 +193,7 @@ fn f32_libm_parity(opts: []str) {
 fn f64_literal_contexts_keep_double_precision() {
     h::expect_exit(
         "f64 literal contexts",
-        "fn bits(x: f64) u64 {\n    return unsafe *((&x) as *const f64 as *const u64);\n}\nfn g(x: f64) f64 {\n    return x;\n}\nstruct S { pub a: f64, pub b: [f64; 2] }\nfn main() i32 {\n    let w: [f64; 2] = [0.1, 0.2];\n    let r: [f64; 3] = [0.3; 3];\n    let s = S { a: 0.4, b: [0.5, 0.6] };\n    let ok = bits(g(0.7)) == 0x3FE6666666666666 && bits(w[0]) == 0x3FB999999999999A && bits(w[1]) == 0x3FC999999999999A && bits(r[2]) == 0x3FD3333333333333 && bits(s.a) == 0x3FD999999999999A && bits(s.b[0]) == 0x3FE0000000000000 && bits(s.b[1]) == 0x3FE3333333333333 && bits(-0.8) == 0xBFE999999999999A;\n    return if ok { 0; } else { 1; };\n}\n",
+        "fn bits(x: f64) u64 {\n    return unsafe *((&x) as *const f64 as *const u64);\n}\nfn g(x: f64) f64 {\n    return x;\n}\nstruct S { pub a: f64, pub b: [f64; 2] }\nfn main() i32 {\n    let w: [f64; 2] = [0.1, 0.2];\n    let r: [f64; 3] = [0.3; 3];\n    let s = S { a: 0.4, b: [0.5, 0.6] };\n    let ok = bits(g(0.7)) == 0x3FE6666666666666 && bits(w[0]) == 0x3FB999999999999A && bits(w[1]) == 0x3FC999999999999A && bits(r[2]) == 0x3FD3333333333333 && bits(s.a) == 0x3FD999999999999A && bits(s.b[0]) == 0x3FE0000000000000 && bits(s.b[1]) == 0x3FE3333333333333 && bits(-0.8) == 0xBFE999999999999A;\n    return if ok { 0 } else { 1 };\n}\n",
         0,
     );
 }
@@ -296,13 +291,13 @@ fn asm_host_function() {
     // The lane builds every program for wasm32: a host instruction check does not apply.
     if !h::simd_lane() {
         let m = if ARCH == Arch::AArch64 {
-            h::asm_match(code.as_str(), "mulw", ["mul"], ["bl", "x0"]);
+            h::asm_match(&code, "mulw", ["mul"], ["bl", "x0"])
         } else {
-            h::asm_match(code.as_str(), "mulw", ["imul"], ["call", "rax"]);
+            h::asm_match(code.as_str(), "mulw", ["imul"], ["call", "rax"])
         };
         assert(m.len() == 0, m.as_str());
     }
-    let d = h::asm_match(code.as_str(), "mulw", ["div"], []);
+    let d = h::asm_match(&code, "mulw", ["div"], []);
     assert(d.contains("contains 'div'"), "a missing instruction is reported");
     let mut none = String::new();
     let n = h::asm_text(&b, ["--profile=release"], "no_such_fn", &mut none);

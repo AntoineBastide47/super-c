@@ -140,7 +140,7 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     // The ordered path list: prefixing (`user_mods > 1`), short-prefix collisions and ModuleId
     // numbering are all pure functions of it.
     for i in 0..p.modules.len() {
-        h = fnv_cont(h, p.modules[i].path.as_str());
+        h = fnv_cont(h, &p.modules[i].path);
         h = fnv_mix(h, p.modules[i].has_ast as u64);
     }
     // The extend surface: method_by_name resolves first-match over EVERY module's extends, so a
@@ -234,7 +234,7 @@ pub(package) const fn reach_fold(h0: u64, p: &loader::Package) u64 {
                 _ => {
                     break;
                 },
-            };
+            }
         }
         h = fnv_mix(h, acc);
     }
@@ -293,7 +293,7 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
         }
         let mut h = FNV_BASIS;
         h = fnv_mix(h, m as u64);
-        h = fnv_cont(h, p.modules[m].path.as_str());
+        h = fnv_cont(h, &p.modules[m].path);
         for k in 0..w {
             let mut b = inq[k];
             while b != 0 {
@@ -307,9 +307,9 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
             h = fnv_mix(
                 h,
                 if unsafe live[m] {
-                    0x1Eu64;
+                    0x1Eu64
                 } else {
-                    0xDEADu64;
+                    0xDEADu64
                 },
             );
         }
@@ -396,7 +396,7 @@ pub(package) fn tuc_setup(
         // the tree would otherwise hold a cache this build did not produce.
         let mut old = String::from_str(gen_root);
         old.push_str("/.tu_cache");
-        let _ = fs::unlink(old.as_str());
+        let _ = fs::unlink(&old);
         return t;
     }
     t.hdr = header_hash(p, target);
@@ -417,7 +417,7 @@ pub(package) fn tuc_setup(
     w32(&mut t.out, TUC_VER);
     w64(&mut t.out, t.hdr);
     w32(&mut t.out, n as u32);
-    let prev = switch loader::read_file(t.path.as_str()) {
+    let prev = switch loader::read_file(&t.path) {
         Some(s) => s,
         None => String::new(),
     };
@@ -512,7 +512,7 @@ pub(package) fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: Typ
             return (*v) as u32;
         },
         None => {},
-    };
+    }
     let a = unsafe &*p.module_ast_const(am);
     let ty = *a.type_at(at);
     let k = ty.kind;
@@ -528,9 +528,9 @@ pub(package) fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: Typ
         let er = tt_ref(p, r, am, ty.as_data.arr.elem);
         // A symbolic length is a type too: its table ref replaces the pool id.
         let lr = if ty.arr_sym() {
-            tt_ref(p, r, am, ty.as_data.arr.len);
+            tt_ref(p, r, am, ty.as_data.arr.len)
         } else {
-            ty.as_data.arr.len;
+            ty.as_data.arr.len
         };
         r.tab.push_byte(TT_ARR);
         r.tab.push_byte(ty.qualifier);
@@ -632,7 +632,7 @@ pub(package) fn tt_id(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<
             return (*v) as TypeId;
         },
         None => {},
-    };
+    }
     let e = tab.at(idx as usize);
     let a = unsafe &mut *(p.module_ast_const(am) as *mut Ast);
     let mut id = TYPE_NONE;
@@ -657,13 +657,13 @@ pub(package) fn tt_id(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<
     } else if e.tag == TT_ARR {
         let el = tt_id(p, tab, cache, e.r0, am);
         let ln = if e.qual == ARR_SYM {
-            tt_id(p, tab, cache, e.aux, am);
+            tt_id(p, tab, cache, e.aux, am)
         } else {
-            e.aux;
+            e.aux
         };
         id = a.intern_type(
             Ty {
-                kind: TypeKind::TYPE_ARRAY,
+                kind: TYPE_ARRAY,
                 qualifier: e.qual,
                 concrete: e.conc != 0,
                 module: e.module as ModuleId,
@@ -676,23 +676,23 @@ pub(package) fn tt_id(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<
             ar[i as usize] = tt_id(p, tab, cache, unsafe e.argr[i as usize], am);
         }
         id = if e.kind as TypeKind == TypeKind::TYPE_DYN {
-            a.intern_dyn(e.im as ModuleId, e.idecl, &ar[0], e.n, e.qual);
+            a.intern_dyn(e.im as ModuleId, e.idecl, &ar[0], e.n, e.qual)
         } else if e.kind as TypeKind == TypeKind::TYPE_ASSOC {
-            a.intern_assoc(e.im as ModuleId, e.idecl, &ar[0], e.n);
+            a.intern_assoc(e.im as ModuleId, e.idecl, &ar[0], e.n)
         } else if e.kind as TypeKind == TypeKind::TYPE_FUNCTION {
             let mut it = TyInstance { module: e.im as ModuleId, decl: e.idecl, n: e.n, lts: e.lts };
             for i in 0..e.n {
                 unsafe it.args[i as usize] = ar[i as usize];
             }
-            a.intern_sig_rec(&it, e.qual);
+            a.intern_sig_rec(&it, e.qual)
         } else {
-            a.intern_instance(e.im as ModuleId, e.idecl, &ar[0], e.n);
+            a.intern_instance(e.im as ModuleId, e.idecl, &ar[0], e.n)
         };
     } else if e.tag == TT_PROJ {
         let ow = tt_id(p, tab, cache, e.r0, am);
         id = a.intern_type(
             Ty {
-                kind: TypeKind::TYPE_FIELD_PROJECTION,
+                kind: TYPE_FIELD_PROJECTION,
                 qualifier: e.qual,
                 concrete: e.conc != 0,
                 module: e.module as ModuleId,
@@ -829,8 +829,8 @@ fn ser_ev_tr(
     w32(o, ev.c);
     w32(o, d);
     w64(o, ev.h);
-    wstr(o, ev.s1.as_str());
-    wstr(o, ev.s2.as_str());
+    wstr(o, &ev.s1);
+    wstr(o, &ev.s2);
     w32(o, ev.subs.len() as u32);
     for i in 0..ev.subs.len() {
         let sb = *ev.subs.at(i);

@@ -126,7 +126,7 @@ extend<T> JoinHandle<T> {
         me.handle = null;
         me.cell = null;
         let v = unsafe {
-            (*c).value;
+            (*c).value
         };
         let mut g = Global {};
         unsafe g.dealloc(c, sizeof(Cell<T>), alignof(Cell<T>));
@@ -174,7 +174,7 @@ pub fn spawn<F: fn move() T + Send + 'static, T: Send>(f: F) JoinHandle<T> {
         // cell, then stop.
         {
             let _payload = unsafe {
-                env[0];
+                env[0]
             };
             unsafe g.dealloc(env, sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>));
         }

@@ -41,7 +41,7 @@ fn variant_sizes() {
     assert_eq(sizeof(Shape), 40);
     // A niche enum keeps its discriminant in its payload, and an enum without payloads is its tag.
     let x = 3;
-    let o: Option<&i32> = Option::Some(&x);
+    let o: Option<&i32> = Some(&x);
     assert_eq(packed_size(&o), sizeof(usize));
     let g = Light::Green;
     assert_eq(packed_size(&g), sizeof(Light));
@@ -120,7 +120,7 @@ fn owning_payloads_move_once() {
                     texts += 1;
                 },
                 Ping => {},
-            };
+            }
         },
     );
     assert_eq(p.len(), 0);

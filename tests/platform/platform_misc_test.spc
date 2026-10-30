@@ -190,9 +190,9 @@ const LIBRARY: str = switch PLATFORM {
 fn libraries_load_and_resolve_symbols() {
     let lib = unsafe dylib::open(LIBRARY).unwrap();
     let sym = if PLATFORM == Platform::Windows {
-        "GetCurrentProcessId";
+        "GetCurrentProcessId"
     } else {
-        "getpid";
+        "getpid"
     };
     assert(unsafe lib.symbol(sym).unwrap() != null);
     assert(unsafe lib.symbol("sc_platform_no_such_symbol").unwrap_err().kind == IoErrorKind::NotFound);

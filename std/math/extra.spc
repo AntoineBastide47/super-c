@@ -364,9 +364,9 @@ pub fn find_eigenvalues_sym_real<T: Float, const N: usize>(covar: Mat<T, N, N>) 
                     }
                     let mut f = a.c[l - 1].e[i - 1];
                     let mut g = if f.greater_equal(zero) {
-                        -h.sqrt();
+                        -h.sqrt()
                     } else {
-                        h.sqrt();
+                        h.sqrt()
                     };
                     e[i - 1] = scale * g;
                     h = h - f * g;
@@ -441,7 +441,7 @@ pub fn find_eigenvalues_sym_real<T: Float, const N: usize>(covar: Mat<T, N, N>) 
                     break;
                 }
                 if iter == EIGEN_ITERATIONS_MAX {
-                    return 0, Vec::<T, N>::zero(), Mat::<T, N, N>::zero();
+                    return (0, Vec::<T, N>::zero(), Mat::<T, N, N>::zero());
                 }
                 let mut g = (d[l] - d[l - 1]) / (two * e[l - 1]);
                 let mut r = pythag(g, one);
@@ -483,7 +483,7 @@ pub fn find_eigenvalues_sym_real<T: Float, const N: usize>(covar: Mat<T, N, N>) 
             }
         }
     }
-    return N as u32, Vec::<T, N> { e: d }, a;
+    return (N as u32, Vec::<T, N> { e: d }, a);
 }
 
 // `x >= 0 ? x : -x`: -0 stays -0 and a NaN changes sign.
@@ -547,7 +547,7 @@ pub fn sort_eigenvalues<T: Scalar, const N: usize>(eigenvalues: Vec<T, N>, eigen
         sort_eigen_pair(&mut values, &mut vectors, 2, 3);
         sort_eigen_pair(&mut values, &mut vectors, 1, 2);
     }
-    return values, vectors;
+    return (values, vectors);
 }
 
 // Swap entries i and j (i < j < N) when values[i] < values[j].
@@ -628,12 +628,12 @@ fn qr_of<T: Float, const C: usize, const R: usize, const K: usize>(m: Mat<T, C, 
             }
         }
     }
-    return q, r;
+    return (q, r);
 }
 
 fn rq_of<T: Float, const C: usize, const R: usize, const K: usize>(m: Mat<T, C, R>) (Mat<T, K, R>, Mat<T, C, K>) {
     let (tq, tr) = qr_of::<T, R, C, K>(fliplr(transpose(m)));
-    return fliplr(transpose(fliplr(tr))), transpose(fliplr(tq));
+    return (fliplr(transpose(fliplr(tr))), transpose(fliplr(tq)));
 }
 
 extend<T: Float> Mat<T, 2, 2> as QrDecompose {
@@ -1202,9 +1202,9 @@ extend i32 as PowSqrtMod {
     pub fn pow_int(self: i32, y: u32) i32 {
         if y == 0 {
             return if self >= 0 {
-                1;
+                1
             } else {
-                -1;
+                -1
             };
         }
         let mut result = self;

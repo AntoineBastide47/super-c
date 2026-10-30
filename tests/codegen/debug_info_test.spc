@@ -67,7 +67,7 @@ fn dwarfdump(dir: str) String {
     }
     let sdk = stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new());
     let w = format("{}/bin/llvm-dwarfdump", sdk.as_str());
-    if sdk.len() != 0 && fs::stat(w.as_str()).is_ok() {
+    if sdk.len() != 0 && fs::stat(&w).is_ok() {
         return w;
     }
     if PLATFORM == Platform::macOS {
@@ -186,7 +186,7 @@ fn objects(dir: str, rel: str, out: &mut Vector<String>) {
             let path = format("{}/{}", dir, e.name);
             let r = format("{}/{}", rel, e.name);
             if e.kind == Option::<fs::FileKind>::Some(fs::FileKind::Dir) {
-                objects(path.as_str(), r.as_str(), out);
+                objects(&path, &r, out);
             } else if e.name.ends_with(".o") {
                 out.push(r);
             }
@@ -254,8 +254,8 @@ fn line_tables_verify_and_leave_the_code_unchanged() {
     for t in 0..targets.len() {
         let a = format("build {} --out-dir=d{}", targets[t], t);
         let b = format("build {} --profile=nog --out-dir=n{}", targets[t], t);
-        let ra = cli::superc_in(p.dir(), a.as_str());
-        let rb = cli::superc_in(p.dir(), b.as_str());
+        let ra = cli::superc_in(p.dir(), &a);
+        let rb = cli::superc_in(p.dir(), &b);
         if t == 0 {
             assert(ra.ok() && rb.ok(), "the host builds both profiles");
         } else if ra.out_has("no sysroot found") {
@@ -282,9 +282,9 @@ fn line_tables_verify_and_leave_the_code_unchanged() {
         let ow = read_bytes(format("{}/{}", p.dir(), main.as_str()).as_str());
         let on = read_bytes(format("{}/n{}/nog/raw/main.o", p.dir(), t).as_str());
         assert(ow.len() > on.len(), "debug information adds sections to main's object");
-        let v = tool(p.dir(), dd.as_str(), format("--verify {}", main.as_str()).as_str());
+        let v = tool(p.dir(), &dd, format("--verify {}", main.as_str()).as_str());
         assert(v.contains("No errors."), "the debug information verifies");
-        let lt = tool(p.dir(), dd.as_str(), format("--debug-line {}", main.as_str()).as_str());
+        let lt = tool(p.dir(), &dd, format("--debug-line {}", main.as_str()).as_str());
         assert(has_row(&lt, 10) && has_row(&lt, 21), "the line table has rows for the calls");
     }
 }
@@ -306,9 +306,9 @@ fn a_debugger_backtraces_native_frames() {
             p.dir(),
             "lldb",
             format("--batch -o \"breakpoint set --name leaf\" -o run -o bt {}", bin.as_str()).as_str(),
-        );
+        )
     } else {
-        tool(p.dir(), "gdb", format("-batch -ex \"break leaf\" -ex run -ex bt {}", bin.as_str()).as_str());
+        tool(p.dir(), "gdb", format("-batch -ex \"break leaf\" -ex run -ex bt {}", bin.as_str()).as_str())
     };
     // gdb names a stop `Breakpoint 1, leaf (...)`, lldb `stop reason = breakpoint`: without one no debugger
     // ran the program.

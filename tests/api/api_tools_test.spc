@@ -29,7 +29,7 @@ extend NoTodo as an::Analyzer {
         for i in 0..hits.len() {
             pass.report(hits[i].start, hits[i].end, 2, "todo", "a TODO is left");
         }
-        return Result::<Unit, er::ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 
@@ -69,7 +69,7 @@ extend Count as bld::Hook {
         bytes.push(b'0' + n);
         out.artifact("count.txt", bytes);
         out.warning("counted");
-        return Result::<Unit, er::ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 

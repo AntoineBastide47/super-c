@@ -543,11 +543,11 @@ pub struct DirEntry<'a> {
 pub fn open(path: str, opts: OpenOptions) Result<File, IoError> {
     let np = path::native(path, IoOp::Open)?;
     let mut flags = if opts.read && (opts.write || opts.append) {
-        fcntl::O_RDWR;
+        fcntl::O_RDWR
     } else if opts.write || opts.append {
-        fcntl::O_WRONLY;
+        fcntl::O_WRONLY
     } else {
-        fcntl::O_RDONLY;
+        fcntl::O_RDONLY
     };
     if opts.append {
         flags = flags | fcntl::O_APPEND;
@@ -561,15 +561,15 @@ pub fn open(path: str, opts: OpenOptions) Result<File, IoError> {
         flags = flags | fcntl::O_CREAT;
     }
     let mode = if opts.mode == 0 {
-        0o666;
+        0o666
     } else {
-        opts.mode;
+        opts.mode
     };
     // Bounded by the signals that interrupt the open (of a FIFO, a slow device).
     loop {
         let fd = unsafe fcntl::open(np.ptr(), flags | fcntl::O_CLOEXEC, mode);
         if fd >= 0 {
-            return Result::<File, IoError>::Ok(File::adopt(fd));
+            return Ok(File::adopt(fd));
         }
         if !error::interrupted() {
             return fail::<File>(IoOp::Open);
@@ -591,22 +591,22 @@ pub fn open(path: str, opts: OpenOptions) Result<File, IoError> {
         access = access | GENERIC_WRITE;
     }
     let disposition = if opts.create_new {
-        CREATE_NEW;
+        CREATE_NEW
     } else if opts.create && opts.truncate {
-        CREATE_ALWAYS;
+        CREATE_ALWAYS
     } else if opts.create {
-        OPEN_ALWAYS;
+        OPEN_ALWAYS
     } else if opts.truncate {
-        TRUNCATE_EXISTING;
+        TRUNCATE_EXISTING
     } else {
-        OPEN_EXISTING;
+        OPEN_EXISTING
     };
     // Backup semantics opens a directory too, as POSIX `open` does for reading.
     let h = unsafe CreateFileW(np.ptr(), access, SHARE_ALL, null, disposition, FILE_FLAG_BACKUP_SEMANTICS, null);
     if h == INVALID_HANDLE_VALUE {
         return fail::<File>(IoOp::Open);
     }
-    return Result::<File, IoError>::Ok(File::adopt(h));
+    return Ok(File::adopt(h));
 }
 
 @platform(windows)
@@ -616,7 +616,7 @@ const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 /// release it again with `File::into_raw`. NotFound on Windows when the process has no such stream.
 @platform(!windows)
 pub const fn std_handle(s: StdStream) Result<RawHandle, IoError> {
-    return Result::<RawHandle, IoError>::Ok(
+    return Ok(
         switch s {
             Input => 0,
             Output => 1,
@@ -638,9 +638,9 @@ pub fn std_handle(s: StdStream) Result<RawHandle, IoError> {
         return fail::<RawHandle>(IoOp::Open);
     }
     if h == null {
-        return Result::<RawHandle, IoError>::Err(IoError::new(IoErrorKind::NotFound, IoOp::Open));
+        return Err(IoError::new(IoErrorKind::NotFound, IoOp::Open));
     }
-    return Result::<RawHandle, IoError>::Ok(h);
+    return Ok(h);
 }
 
 // ---- Metadata ---------------------------------------------------------------------------------------
@@ -653,7 +653,7 @@ pub fn stat(path: str) Result<Metadata, IoError> {
     if unsafe c_stat(np.ptr(), &mut st) != 0 {
         return fail::<Metadata>(IoOp::Stat);
     }
-    return Result::<Metadata, IoError>::Ok(metadata_of(&st));
+    return Ok(metadata_of(&st));
 }
 /// The metadata of the file `path` names, following symbolic links.
 @platform(windows)
@@ -669,7 +669,7 @@ pub fn lstat(path: str) Result<Metadata, IoError> {
     if unsafe c_lstat(np.ptr(), &mut st) != 0 {
         return fail::<Metadata>(IoOp::Stat);
     }
-    return Result::<Metadata, IoError>::Ok(metadata_of(&st));
+    return Ok(metadata_of(&st));
 }
 /// The metadata of `path` itself: a symbolic link reports as one, not as its target.
 @platform(windows)
@@ -699,13 +699,13 @@ const fn metadata_of(st: &stat) Metadata {
     let mode: u32 = st.st_mode;
     let fmt = mode & S_IFMT;
     let kind = if fmt == S_IFREG {
-        FileKind::File;
+        FileKind::File
     } else if fmt == S_IFDIR {
-        FileKind::Dir;
+        FileKind::Dir
     } else if fmt == S_IFLNK {
-        FileKind::Symlink;
+        FileKind::Symlink
     } else {
-        FileKind::Other;
+        FileKind::Other
     };
     let (m, a, c) = times_of(st);
     let dev: u64 = (st.st_dev as i64) as u64;
@@ -726,15 +726,19 @@ const fn metadata_of(st: &stat) Metadata {
 // The modification, access and creation times of `st`.
 @platform(macos | ios)
 const fn times_of(st: &stat) (i64, i64, Option<i64>) {
-    return ns_of(st.st_mtime, st.st_mtimensec as i64), ns_of(st.st_atime, st.st_atimensec as i64), Option::<i64>::Some(
-        ns_of(st.st_birthtime, st.st_birthtimensec as i64),
+    return (
+        ns_of(st.st_mtime, st.st_mtimensec as i64),
+        ns_of(st.st_atime, st.st_atimensec as i64),
+        Option::<i64>::Some(ns_of(st.st_birthtime, st.st_birthtimensec as i64))
     );
 }
 @platform(linux | android | wasm)
 fn times_of(st: &stat) (i64, i64, Option<i64>) {
-    return ns_of(st.st_mtim.tv_sec, st.st_mtim.tv_nsec as i64), ns_of(st.st_atim.tv_sec, st.st_atim.tv_nsec as i64), Option::<
-        i64
-    >::None;
+    return (
+        ns_of(st.st_mtim.tv_sec, st.st_mtim.tv_nsec as i64),
+        ns_of(st.st_atim.tv_sec, st.st_atim.tv_nsec as i64),
+        Option::<i64>::None
+    );
 }
 
 @platform(!windows)
@@ -752,14 +756,14 @@ fn kind_of_attributes(attributes: u32, tag: u32) FileKind {
     let dir = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 && (tag == IO_REPARSE_TAG_SYMLINK || tag == IO_REPARSE_TAG_MOUNT_POINT) {
         if dir {
-            return FileKind::DirSymlink;
+            return DirSymlink;
         }
-        return FileKind::Symlink;
+        return Symlink;
     }
     if dir {
-        return FileKind::Dir;
+        return Dir;
     }
-    return FileKind::File;
+    return File;
 }
 
 // ---- Directories ------------------------------------------------------------------------------------
@@ -772,7 +776,7 @@ pub fn read_dir(path: str) Result<ReadDir, IoError> {
     if d == null {
         return fail::<ReadDir>(IoOp::ReadDir);
     }
-    return Result::<ReadDir, IoError>::Ok(ReadDir::adopt(DirState { dir: d }));
+    return Ok(ReadDir::adopt(DirState { dir: d }));
 }
 /// Open directory `path` for listing.
 @platform(windows)
@@ -783,7 +787,7 @@ pub fn read_dir(path: str) Result<ReadDir, IoError> {
         pattern.push_byte(b'\\');
     }
     pattern.push_byte(b'*');
-    let np = path::native(pattern.as_str(), IoOp::ReadDir)?;
+    let np = path::native(&pattern, IoOp::ReadDir)?;
     let mut st = DirState {
         find: INVALID_HANDLE_VALUE,
         data: unsafe zeroed::<WIN32_FIND_DATAW>(),
@@ -799,7 +803,7 @@ pub fn read_dir(path: str) Result<ReadDir, IoError> {
     } else {
         st.pending = true;
     }
-    return Result::<ReadDir, IoError>::Ok(ReadDir::adopt(st));
+    return Ok(ReadDir::adopt(st));
 }
 
 /// Create directory `path` (mode 0o775 before the umask on POSIX). AlreadyExists when anything is there.
@@ -838,11 +842,11 @@ pub fn mkdir_all(path: str) Result<Unit, IoError> {
                 return done();
             }
         }
-        return Result::<Unit, IoError>::Err(e);
+        return Err(e);
     }
     let cut = parent_len(path);
     if e.kind != IoErrorKind::NotFound || cut == 0 {
-        return Result::<Unit, IoError>::Err(e);
+        return Err(e);
     }
     // Each level shortens the path by at least one component.
     mkdir_all(path.slice(0, cut))?;
@@ -923,7 +927,7 @@ pub fn remove_all(path: str) Result<Unit, IoError> {
         if e.kind == IoErrorKind::NotFound {
             return done();
         }
-        return Result::<Unit, IoError>::Err(e);
+        return Err(e);
     }
     let mut buf = String::from_str(path);
     return remove_tree(&mut buf, Option::<FileKind>::Some(m.unwrap().kind));
@@ -933,13 +937,13 @@ pub fn remove_all(path: str) Result<Unit, IoError> {
 // tree's depth: each level holds one open directory.
 fn remove_tree(p: &mut String, kind: Option<FileKind>) Result<Unit, IoError> {
     let k = if let Some(x) = kind {
-        x;
+        x
     } else {
         let m = lstat(p.as_str());
         if m.is_err() {
-            return Result::<Unit, IoError>::Err(m.unwrap_err());
+            return Err(m.unwrap_err());
         }
-        m.unwrap().kind;
+        m.unwrap().kind
     };
     if k != FileKind::Dir {
         if k == FileKind::DirSymlink {
@@ -952,7 +956,7 @@ fn remove_tree(p: &mut String, kind: Option<FileKind>) Result<Unit, IoError> {
     {
         let opened = read_dir(p.as_str());
         if opened.is_err() {
-            return Result::<Unit, IoError>::Err(opened.unwrap_err());
+            return Err(opened.unwrap_err());
         }
         let mut d = opened.unwrap();
         // Bounded by the entries of the directory.
@@ -966,7 +970,7 @@ fn remove_tree(p: &mut String, kind: Option<FileKind>) Result<Unit, IoError> {
                 let r = next.unwrap();
                 if r.is_err() {
                     if first.is_ok() {
-                        first = Result::<Unit, IoError>::Err(r.unwrap_err());
+                        first = Err(r.unwrap_err());
                     }
                     break;
                 }
@@ -1001,9 +1005,9 @@ fn remove_writable(p: str, dir: bool) Result<Unit, IoError> {
 @platform(windows)
 fn remove_writable(p: str, dir: bool) Result<Unit, IoError> {
     let mut r = if dir {
-        rmdir(p);
+        rmdir(p)
     } else {
-        unlink(p);
+        unlink(p)
     };
     if r.is_ok() || r.unwrap_err().code != ERROR_ACCESS_DENIED as i32 {
         return r;
@@ -1017,9 +1021,9 @@ fn remove_writable(p: str, dir: bool) Result<Unit, IoError> {
         return r;
     }
     r = if dir {
-        rmdir(p);
+        rmdir(p)
     } else {
-        unlink(p);
+        unlink(p)
     };
     return r;
 }
@@ -1053,17 +1057,17 @@ pub fn rename(from: str, to: str) Result<Unit, IoError> {
     // holds the file object, not the name.
     let mut side = String::from_str(to);
     side.push_str(".old");
-    let s = path::native(side.as_str(), IoOp::Rename)?;
+    let s = path::native(&side, IoOp::Rename)?;
     unsafe DeleteFileW(s.ptr());
     if unsafe MoveFileExW(b.ptr(), s.ptr(), MOVEFILE_REPLACE_EXISTING) == 0 {
-        return Result::<Unit, IoError>::Err(e);
+        return Err(e);
     }
     if unsafe MoveFileExW(a.ptr(), b.ptr(), MOVEFILE_REPLACE_EXISTING) != 0 {
         return done();
     }
     let e2 = error::last_error(IoOp::Rename);
     unsafe MoveFileExW(s.ptr(), b.ptr(), MOVEFILE_REPLACE_EXISTING); // the name must not stay empty
-    return Result::<Unit, IoError>::Err(e2);
+    return Err(e2);
 }
 
 /// Give the file `from` the second name `to` (a hard link).
@@ -1116,7 +1120,7 @@ pub fn symlink(target: str, link: str) Result<Unit, IoError> {
         }
     }
     probe.push_str(target);
-    if let Ok(m) = stat(probe.as_str()) {
+    if let Ok(m) = stat(&probe) {
         if m.kind == FileKind::Dir {
             flags = flags | SYMBOLIC_LINK_FLAG_DIRECTORY;
         }
@@ -1139,7 +1143,7 @@ pub fn readlink(path: str) Result<String, IoError> {
     if n as usize < 1024 {
         let mut out = String::new();
         out.push_bytes(unsafe Slice::<u8> { ptr: ((&small[0]) as *const char) as *const u8, len: n as usize });
-        return Result::<String, IoError>::Ok(out);
+        return Ok(out);
     }
     // A text that fills the buffer may be cut: read it again into a buffer that doubles each pass, up to
     // a size no file system allows.
@@ -1152,11 +1156,11 @@ pub fn readlink(path: str) Result<String, IoError> {
         }
         if m as usize < cap {
             out.advance_len(m as usize);
-            return Result::<String, IoError>::Ok(out);
+            return Ok(out);
         }
         cap = cap * 2;
     }
-    return Result::<String, IoError>::Err(IoError::new(IoErrorKind::LimitExceeded, IoOp::ReadLink));
+    return Err(IoError::new(IoErrorKind::LimitExceeded, IoOp::ReadLink));
 }
 /// The text of symbolic link `path` (the link need not resolve). InvalidInput when `path` is no link.
 @platform(windows)
@@ -1189,9 +1193,9 @@ fn reparse_text(b: []u8) Result<String, IoError> {
     }
     let tag = le32(b, 0);
     let names: usize = if tag == IO_REPARSE_TAG_SYMLINK {
-        20;
+        20
     } else if tag == IO_REPARSE_TAG_MOUNT_POINT {
-        16;
+        16
     } else {
         return bad;
     };
@@ -1216,7 +1220,7 @@ fn reparse_text(b: []u8) Result<String, IoError> {
     }
     let mut out = String::new();
     path::push_wide(&mut out, units[0..units.len()], false, IoOp::ReadLink)?;
-    return Result::<String, IoError>::Ok(out);
+    return Ok(out);
 }
 
 @platform(windows)
@@ -1241,7 +1245,7 @@ pub fn realpath(path: str) Result<String, IoError> {
         return fail::<String>(IoOp::RealPath);
     }
     out.advance_len(unsafe cstring::strlen(r));
-    return Result::<String, IoError>::Ok(out);
+    return Ok(out);
 }
 /// The absolute path of `path`, which must exist, with every symbolic link and `..` resolved. Windows gives
 /// the final path of the file it opens, in long names, with '/' separators and without the `\\?\` prefix:
@@ -1276,11 +1280,11 @@ pub fn realpath(path: str) Result<String, IoError> {
             } else {
                 path::push_wide(&mut out, w, true, IoOp::RealPath)?;
             }
-            return Result::<String, IoError>::Ok(out);
+            return Ok(out);
         }
         cap = n;
     }
-    return Result::<String, IoError>::Err(IoError::new(IoErrorKind::Other, IoOp::RealPath));
+    return Err(IoError::new(IoErrorKind::Other, IoOp::RealPath));
 }
 
 // Whether the wide string `w` starts with the ASCII text `p`.
@@ -1319,9 +1323,9 @@ pub fn set_permissions(path: str, mode: u32) Result<Unit, IoError> {
         return fail::<Unit>(IoOp::SetPermissions);
     }
     let b = if (mode & 0o200) == 0 {
-        a | FILE_ATTRIBUTE_READONLY;
+        a | FILE_ATTRIBUTE_READONLY
     } else {
-        a & ~FILE_ATTRIBUTE_READONLY;
+        a & ~FILE_ATTRIBUTE_READONLY
     };
     if b != a && unsafe SetFileAttributesW(np.ptr(), b) == 0 {
         return fail::<Unit>(IoOp::SetPermissions);
@@ -1367,14 +1371,14 @@ pub fn set_times(path: str, accessed: FileTime, modified: FileTime) Result<Unit,
     let a = filetime_of(accessed, now);
     let m = filetime_of(modified, now);
     let pa: *const FILETIME = if accessed == FileTime::Keep {
-        null;
+        null
     } else {
-        &a;
+        &a
     };
     let pm: *const FILETIME = if modified == FileTime::Keep {
-        null;
+        null
     } else {
-        &m;
+        &m
     };
     if unsafe SetFileTime(f.raw(), null, pa, pm) == 0 {
         return fail::<Unit>(IoOp::SetTimes);
@@ -1389,7 +1393,7 @@ const fn timespec_of(t: FileTime) timespec {
         Keep => timespec { tv_sec: 0, tv_nsec: UTIME_OMIT },
         At(ns) => {
             let (sec, sub) = split_ns(ns);
-            timespec { tv_sec: sec, tv_nsec: sub as stdlib::c_long };
+            timespec { tv_sec: sec, tv_nsec: sub as stdlib::c_long }
         },
     };
 }
@@ -1400,9 +1404,9 @@ const fn split_ns(ns: i64) (i64, i64) {
     let sec = ns / 1000000000;
     let sub = ns % 1000000000;
     if sub < 0 {
-        return sec - 1, sub + 1000000000;
+        return (sec - 1, sub + 1000000000);
     }
-    return sec, sub;
+    return (sec, sub);
 }
 
 @platform(windows)
@@ -1410,12 +1414,12 @@ fn filetime_of(t: FileTime, now: FILETIME) FILETIME {
     return switch t {
         At(ns) => {
             let ticks = if ns < 0 && ns % 100 != 0 {
-                ns / 100 - 1;
+                ns / 100 - 1
             } else {
-                ns / 100;
+                ns / 100
             };
             let v = (ticks + 116444736000000000) as u64;
-            FILETIME { dwLowDateTime: v as u32, dwHighDateTime: (v >> 32) as u32 };
+            FILETIME { dwLowDateTime: v as u32, dwHighDateTime: (v >> 32) as u32 }
         },
         _ => now,
     };
@@ -1430,26 +1434,26 @@ fn filetime_of(t: FileTime, now: FILETIME) FILETIME {
 pub fn publish(path: str, bytes: []u8) Result<bool, IoError> {
     if let Ok(mut f) = open(path, OpenOptions { read: true }) {
         if f.holds(bytes)? {
-            return Result::<bool, IoError>::Ok(false);
+            return Ok(false);
         }
     }
     let w = OpenOptions { write: true, create: true, truncate: true };
     let first = open(path, w);
     let mut f = if first.is_ok() {
-        first.unwrap();
+        first.unwrap()
     } else {
         // The parent directories exist for all but the first file written into each.
         let e = first.unwrap_err();
         let cut = parent_len(path);
         if e.kind != IoErrorKind::NotFound || cut == 0 {
-            return Result::<bool, IoError>::Err(e);
+            return Err(e);
         }
         mkdir_all(path.slice(0, cut))?;
-        open(path, w)?;
+        open(path, w)?
     };
     f.write_all(bytes)?;
     f.close()?;
-    return Result::<bool, IoError>::Ok(true);
+    return Ok(true);
 }
 
 /// The system's directory for temporary files, without a trailing separator: TMPDIR, else /tmp, on POSIX
@@ -1458,14 +1462,14 @@ pub fn publish(path: str, bytes: []u8) Result<bool, IoError> {
 pub fn temp_dir() Result<String, IoError> {
     let t = unsafe c_getenv("TMPDIR".ptr() as *const char);
     let mut out = if t == null || unsafe *t == 0 as char {
-        String::from_str("/tmp");
+        String::from_str("/tmp")
     } else {
-        unsafe String::from_cstr(t);
+        unsafe String::from_cstr(t)
     };
     while out.len() > 1 && out.byte(out.len() - 1) == b'/' {
         out.truncate(out.len() - 1);
     }
-    return Result::<String, IoError>::Ok(out);
+    return Ok(out);
 }
 /// The system's directory for temporary files, without a trailing separator: TMPDIR, else /tmp, on POSIX
 /// and WASI; GetTempPathW (TMP, TEMP, USERPROFILE, the Windows directory) in long names (an 8.3 short name
@@ -1490,17 +1494,17 @@ pub fn temp_dir() Result<String, IoError> {
     while out.len() > 1 && out.byte(out.len() - 1) == b'/' {
         out.truncate(out.len() - 1);
     }
-    return Result::<String, IoError>::Ok(out);
+    return Ok(out);
 }
 
 // ---- Helpers ----------------------------------------------------------------------------------------
 
 const fn done() Result<Unit, IoError> {
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 
 fn fail<T>(op: IoOp) Result<T, IoError> {
-    return Result::<T, IoError>::Err(error::last_error(op));
+    return Err(error::last_error(op));
 }
 
 // ---- File -------------------------------------------------------------------------------------------
@@ -1559,7 +1563,7 @@ extend File {
             }
             got += n;
         }
-        return Result::<usize, IoError>::Ok(got);
+        return Ok(got);
     }
 
     /// Write all of `bytes`. A write that accepts no byte is an error (Other).
@@ -1569,7 +1573,7 @@ extend File {
         while off < bytes.len() {
             let n = self.write(bytes[off..bytes.len()])?;
             if n == 0 {
-                return Result::<Unit, IoError>::Err(IoError::new(IoErrorKind::Other, IoOp::Write));
+                return Err(IoError::new(IoErrorKind::Other, IoOp::Write));
             }
             off += n;
         }
@@ -1581,7 +1585,7 @@ extend File {
     fn holds(self: &mut File, want: []u8) Result<bool, IoError> {
         let m = self.metadata()?;
         if m.kind != FileKind::File || m.size != want.len() as u64 {
-            return Result::<bool, IoError>::Ok(false);
+            return Ok(false);
         }
         let mut buf: [u8; 16384] = [0; 16384];
         let mut off: usize = 0;
@@ -1589,10 +1593,10 @@ extend File {
         loop {
             let n = self.read(buf)?;
             if n == 0 {
-                return Result::<bool, IoError>::Ok(off == want.len());
+                return Ok(off == want.len());
             }
             if n > want.len() - off || unsafe cstring::memcmp(&buf[0], unsafe (want.ptr + off), n) != 0 {
-                return Result::<bool, IoError>::Ok(false);
+                return Ok(false);
             }
             off += n;
         }
@@ -1610,7 +1614,7 @@ extend File {
         if r < 0 {
             return fail::<u64>(IoOp::Seek);
         }
-        return Result::<u64, IoError>::Ok(r as u64);
+        return Ok(r as u64);
     }
     /// Move the position: the new position from the start of the file.
     @platform(windows)
@@ -1624,7 +1628,7 @@ extend File {
         if unsafe SetFilePointerEx(self.raw, LARGE_INTEGER { quad: off }, &mut pos, method) == 0 {
             return fail::<u64>(IoOp::Seek);
         }
-        return Result::<u64, IoError>::Ok(pos.quad as u64);
+        return Ok(pos.quad as u64);
     }
 
     /// Write the file's data and metadata through to the device, and wait for it.
@@ -1651,7 +1655,7 @@ extend File {
         if unsafe fstat(self.raw, &mut st) != 0 {
             return fail::<Metadata>(IoOp::Stat);
         }
-        return Result::<Metadata, IoError>::Ok(metadata_of(&st));
+        return Ok(metadata_of(&st));
     }
     /// The metadata of the open file.
     @platform(windows)
@@ -1670,18 +1674,18 @@ extend File {
             tag = ti.ReparseTag;
         }
         let perms: u32 = if (fi.dwFileAttributes & FILE_ATTRIBUTE_READONLY) != 0 {
-            0o444;
+            0o444
         } else {
-            0o666;
+            0o666
         };
-        return Result::<Metadata, IoError>::Ok(
+        return Ok(
             Metadata {
                 kind: kind_of_attributes(fi.dwFileAttributes, tag),
                 size: fi.nFileSizeHigh as u64 << 32 | fi.nFileSizeLow as u64,
                 permissions: perms,
                 modified_ns: ft_ns(fi.ftLastWriteTime),
                 accessed_ns: ft_ns(fi.ftLastAccessTime),
-                created_ns: Option::<i64>::Some(ft_ns(fi.ftCreationTime)),
+                created_ns: Some(ft_ns(fi.ftCreationTime)),
                 dev: fi.dwVolumeSerialNumber,
                 ino: fi.nFileIndexHigh as u64 << 32 | fi.nFileIndexLow as u64,
                 links: fi.nNumberOfLinks,
@@ -1701,7 +1705,7 @@ extend File {
                 return done();
             }
             if clock::monotonic_ns() >= until {
-                return Result::<Unit, IoError>::Err(IoError::new(IoErrorKind::TimedOut, IoOp::Lock));
+                return Err(IoError::new(IoErrorKind::TimedOut, IoOp::Lock));
             }
             clock::sleep_ns(100000000);
         }
@@ -1716,7 +1720,7 @@ extend File {
         // Bounded by the signals that interrupt the call.
         loop {
             if unsafe fcntl::fcntl(self.raw, F_SETLK, &mut fl) == 0 {
-                return Result::<bool, IoError>::Ok(true);
+                return Ok(true);
             }
             if !error::interrupted() {
                 break;
@@ -1724,18 +1728,18 @@ extend File {
         }
         let e = error::last_error(IoOp::Lock);
         if e.kind == IoErrorKind::WouldBlock || e.kind == IoErrorKind::PermissionDenied {
-            return Result::<bool, IoError>::Ok(false); // EAGAIN or EACCES: another process holds it
+            return Ok(false); // EAGAIN or EACCES: another process holds it
         }
-        return Result::<bool, IoError>::Err(e);
+        return Err(e);
     }
     @platform(windows)
     fn try_lock(self: &mut File) Result<bool, IoError> {
         let mut ov = unsafe zeroed::<OVERLAPPED>();
         if unsafe LockFileEx(self.raw, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &mut ov) != 0 {
-            return Result::<bool, IoError>::Ok(true);
+            return Ok(true);
         }
         if unsafe GetLastError() == ERROR_LOCK_VIOLATION {
-            return Result::<bool, IoError>::Ok(false);
+            return Ok(false);
         }
         return fail::<bool>(IoOp::Lock);
     }
@@ -1777,7 +1781,7 @@ extend File {
         if r < 0 {
             return fail::<bool>(IoOp::Poll);
         }
-        return Result::<bool, IoError>::Ok(r > 0);
+        return Ok(r > 0);
     }
     /// Whether a read returns at once: bytes are waiting, or the stream ended or failed.
     @platform(windows)
@@ -1785,11 +1789,11 @@ extend File {
         if unsafe GetFileType(self.raw) == FILE_TYPE_PIPE {
             let mut avail: u32 = 0;
             if unsafe PeekNamedPipe(self.raw, null, 0, null, &mut avail, null) == 0 {
-                return Result::<bool, IoError>::Ok(true); // a broken pipe: the read reports it
+                return Ok(true); // a broken pipe: the read reports it
             }
-            return Result::<bool, IoError>::Ok(avail > 0);
+            return Ok(avail > 0);
         }
-        return Result::<bool, IoError>::Ok(unsafe WaitForSingleObject(self.raw, 0) == WAIT_OBJECT_0);
+        return Ok(unsafe WaitForSingleObject(self.raw, 0) == WAIT_OBJECT_0);
     }
 }
 
@@ -1802,7 +1806,7 @@ extend File as Reader {
         loop {
             let n = unsafe unistd::read(self.raw, buf.as_mut_ptr(), buf.len().min(1 << 30));
             if n >= 0 {
-                return Result::<usize, IoError>::Ok(n as usize);
+                return Ok(n as usize);
             }
             if !error::interrupted() {
                 return fail::<usize>(IoOp::Read);
@@ -1818,11 +1822,11 @@ extend File as Reader {
         if unsafe ReadFile(self.raw, buf.as_mut_ptr(), n, &mut got, null) == 0 {
             let e = unsafe GetLastError();
             if e == ERROR_BROKEN_PIPE || e == ERROR_HANDLE_EOF {
-                return Result::<usize, IoError>::Ok(0);
+                return Ok(0);
             }
-            return Result::<usize, IoError>::Err(error::code_error(e as i32, IoOp::Read));
+            return Err(error::code_error(e as i32, IoOp::Read));
         }
-        return Result::<usize, IoError>::Ok(got as usize);
+        return Ok(got as usize);
     }
 }
 
@@ -1835,7 +1839,7 @@ extend File as Writer {
         loop {
             let n = unsafe unistd::write(self.raw, bytes.ptr, bytes.len().min(1 << 30));
             if n >= 0 {
-                return Result::<usize, IoError>::Ok(n as usize);
+                return Ok(n as usize);
             }
             if !error::interrupted() {
                 return fail::<usize>(IoOp::Write);
@@ -1851,7 +1855,7 @@ extend File as Writer {
         if unsafe WriteFile(self.raw, bytes.ptr, n, &mut put, null) == 0 {
             return fail::<usize>(IoOp::Write);
         }
-        return Result::<usize, IoError>::Ok(put as usize);
+        return Ok(put as usize);
     }
 }
 
@@ -1883,9 +1887,9 @@ extend ReadDir {
             let e = unsafe readdir(self.state.dir);
             if e == null {
                 if errno::errno() != 0 {
-                    return Option::<Result<DirEntry, IoError>>::Some(fail::<DirEntry>(IoOp::ReadDir));
+                    return Some(fail::<DirEntry>(IoOp::ReadDir));
                 }
-                return Option::<Result<DirEntry, IoError>>::None;
+                return None;
             }
             let p = ((unsafe &(*e).d_name) as *const [char; D_NAME_LEN]) as *const u8;
             let name = unsafe str::from_raw(p, cstring::strlen(p as *const char));
@@ -1894,19 +1898,17 @@ extend ReadDir {
             }
             let t = unsafe (*e).d_type;
             let kind = if t == DT_UNKNOWN {
-                Option::<FileKind>::None;
+                Option::<FileKind>::None
             } else if t == DT_DIR {
-                Option::<FileKind>::Some(FileKind::Dir);
+                Option::<FileKind>::Some(Dir)
             } else if t == DT_REG {
-                Option::<FileKind>::Some(FileKind::File);
+                Option::<FileKind>::Some(File)
             } else if t == DT_LNK {
-                Option::<FileKind>::Some(FileKind::Symlink);
+                Option::<FileKind>::Some(Symlink)
             } else {
-                Option::<FileKind>::Some(FileKind::Other);
+                Option::<FileKind>::Some(Other)
             };
-            return Option::<Result<DirEntry, IoError>>::Some(
-                Result::<DirEntry, IoError>::Ok(DirEntry { name: name, kind: kind }),
-            );
+            return Some(Ok(DirEntry { name: name, kind: kind }));
         }
     }
     /// The next entry, or None after the last. An entry another process adds or removes during the
@@ -1917,13 +1919,13 @@ extend ReadDir {
         loop {
             if !self.state.pending {
                 if self.state.find == INVALID_HANDLE_VALUE {
-                    return Option::<Result<DirEntry, IoError>>::None;
+                    return None;
                 }
                 if unsafe FindNextFileW(self.state.find, &mut self.state.data) == 0 {
                     if unsafe GetLastError() == ERROR_NO_MORE_FILES {
-                        return Option::<Result<DirEntry, IoError>>::None;
+                        return None;
                     }
-                    return Option::<Result<DirEntry, IoError>>::Some(fail::<DirEntry>(IoOp::ReadDir));
+                    return Some(fail::<DirEntry>(IoOp::ReadDir));
                 }
             }
             self.state.pending = false;
@@ -1934,12 +1936,12 @@ extend ReadDir {
             }
             self.state.name.clear();
             if let Err(e) = path::push_wide(&mut self.state.name, units, false, IoOp::ReadDir) {
-                return Option::<Result<DirEntry, IoError>>::Some(Result::<DirEntry, IoError>::Err(e));
+                return Some(Err(e));
             }
             // A reparse point's tag is in dwReserved0.
             let kind = kind_of_attributes(self.state.data.dwFileAttributes, self.state.data.dwReserved0);
-            let entry = DirEntry { name: self.state.name.as_str(), kind: Option::<FileKind>::Some(kind) };
-            return Option::<Result<DirEntry, IoError>>::Some(Result::<DirEntry, IoError>::Ok(entry));
+            let entry = DirEntry { name: self.state.name.as_str(), kind: Some(kind) };
+            return Some(Ok(entry));
         }
     }
 }

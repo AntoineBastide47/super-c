@@ -32,12 +32,12 @@ fn uri_path_roundtrip() {
     uri_path_is("file:///home/u/a%20b.spc", "/home/u/a b.spc");
     // A path this platform could hand us survives the round trip.
     let p = if cli::on_windows() {
-        "C:/w/a b.spc";
+        "C:/w/a b.spc"
     } else {
-        "/home/u/a b.spc";
+        "/home/u/a b.spc"
     };
     let uri = text::path_to_uri(p);
-    uri_path_is(uri.as_str(), p);
+    uri_path_is(&uri, p);
     assert(uri.as_str().starts_with("file:///"), "the authority is empty and the path is absolute");
 }
 
@@ -72,7 +72,7 @@ fn attribute_hover_covers_parser_inventory() {
     for i in 0..names.len() {
         let mut src = String::from_str("@");
         src.push_string(names.at(i));
-        assert(feat::attribute_hover(src.as_str(), 1).is_some(), "an attribute has no hover documentation");
+        assert(feat::attribute_hover(&src, 1).is_some(), "an attribute has no hover documentation");
     }
 }
 
@@ -162,7 +162,7 @@ fn lsp_diagnostics_lifecycle() {
     b.clear();
     b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
     frame(&mut ses, &b);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     let rc = lsp_run(root);
     // Exit after shutdown = success.
@@ -170,7 +170,7 @@ fn lsp_diagnostics_lifecycle() {
 
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
-    let out_opt = loader::read_file(op.as_str());
+    let out_opt = loader::read_file(&op);
     assert(out_opt.is_some());
     let out = out_opt.unwrap();
     let o = out.as_str();
@@ -228,7 +228,7 @@ fn lsp_inactive_code_fades() {
     b.clear();
     b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
     frame(&mut ses, &b);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = loader::read_file(format("{}/out.txt", root).as_str()).unwrap();
     let o = out.as_str();
@@ -274,14 +274,14 @@ fn lsp_unknown_method_and_bad_json() {
     b.clear();
     b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
     frame(&mut ses, &b);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     let rc = lsp_run(root);
     assert_eq(rc, 0);
 
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
-    let out = loader::read_file(op.as_str()).unwrap();
+    let out = loader::read_file(&op).unwrap();
     let o = out.as_str();
     assert(o.contains("\"id\":7,\"error\":{\"code\":-32601"));
     assert(o.contains("-32700"));
@@ -377,14 +377,14 @@ fn lsp_positional_features() {
     b.clear();
     b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
     frame(&mut ses, &b);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     let rc = lsp_run(root);
     assert_eq(rc, 0);
 
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
-    let out = loader::read_file(op.as_str()).unwrap();
+    let out = loader::read_file(&op).unwrap();
     let o = out.as_str();
     // Hover: the receiver's rendered type.
     assert(o.contains("```super-c\\nPoint\\n```"));
@@ -470,14 +470,14 @@ fn lsp_completion_formatting_tokens() {
     b.clear();
     b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
     frame(&mut ses, &b);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     let rc = lsp_run(root);
     assert_eq(rc, 0);
 
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
-    let out = loader::read_file(op.as_str()).unwrap();
+    let out = loader::read_file(&op).unwrap();
     let o = out.as_str();
     // Canonical file: no formatting edits.
     assert(o.contains("\"id\":2,\"result\":[]"));
@@ -532,14 +532,14 @@ fn lsp_code_actions() {
     b.clear();
     b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
     frame(&mut ses, &b);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     let rc = lsp_run(root);
     assert_eq(rc, 0);
 
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
-    let out = loader::read_file(op.as_str()).unwrap();
+    let out = loader::read_file(&op).unwrap();
     let o = out.as_str();
     assert(o.contains("\"title\":\"Prefix with '_'\",\"kind\":\"quickfix\""));
     assert(o.contains("\"message\":\"unused variable 'unused'\""));
@@ -594,7 +594,7 @@ fn lsp_completion_survives_pattern_nodes() {
     b.clear();
     b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
     frame(&mut ses, &b);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     let rc = lsp_run(root);
     // The server must not crash.
@@ -602,7 +602,7 @@ fn lsp_completion_survives_pattern_nodes() {
 
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
-    let out = loader::read_file(op.as_str()).unwrap();
+    let out = loader::read_file(&op).unwrap();
     let o = out.as_str();
     // Locals still complete through the probe build.
     assert(o.contains("{\"label\":\"r\""));
@@ -649,14 +649,14 @@ fn rename_session(root: str, doc_uri_prefix: str, ses: &mut String) {
 fn run_lsp_session(root: str, ses: &String) String {
     let mut sp = String::from_str(root);
     sp.push_str("/session.bin");
-    let f = stdio::fopen(sp.as_str(), "wb");
+    let f = stdio::fopen(&sp, "wb");
     unsafe stdio::fwrite(ses.as_str().ptr(), 1, ses.len(), f);
     unsafe stdio::fclose(f);
     let rc = lsp_run(root);
     assert_eq(rc, 0);
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
-    return loader::read_file(op.as_str()).unwrap();
+    return loader::read_file(&op).unwrap();
 }
 
 // The inside case indexes this whole repository with the compiler under test: past 90 s on a loaded
@@ -685,14 +685,14 @@ fn lsp_rename_workspace_relative() {
     rename_session(repo, repo, &mut ses2);
     let mut sp = String::from_str(root2);
     sp.push_str("/session.bin");
-    let f = stdio::fopen(sp.as_str(), "wb");
+    let f = stdio::fopen(&sp, "wb");
     unsafe stdio::fwrite(ses2.as_str().ptr(), 1, ses2.len(), f);
     unsafe stdio::fclose(f);
     let rc = lsp_run(root2);
     assert_eq(rc, 0);
     let mut op = String::from_str(root2);
     op.push_str("/out.txt");
-    let out2 = loader::read_file(op.as_str()).unwrap();
+    let out2 = loader::read_file(&op).unwrap();
     assert(out2.as_str().contains("std/vector.spc"));
     assert(out2.as_str().contains("\"newText\":\"shove\""));
     assert(!out2.as_str().contains("cannot rename"));
@@ -799,14 +799,14 @@ fn lsp_build_toml() {
     b.clear();
     b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
     frame(&mut ses, &b);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     let rc = lsp_run(root);
     assert_eq(rc, 0);
 
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
-    let out_opt = loader::read_file(op.as_str());
+    let out_opt = loader::read_file(&op);
     assert(out_opt.is_some());
     let out = out_opt.unwrap();
     let o = out.as_str();
@@ -888,13 +888,13 @@ fn lsp_workspace_lifecycle() {
     b.clear();
     b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
     frame(&mut ses, &b);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     let rc = lsp_run(root);
     assert_eq(rc, 0);
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
-    let out = loader::read_file(op.as_str()).unwrap();
+    let out = loader::read_file(&op).unwrap();
     // The dynamic watcher registration was sent in response to `initialized`.
     assert(out.as_str().contains("client/registerCapability"), "watchers were registered");
     assert(out.as_str().contains("workspace/didChangeWatchedFiles"), "the watch registration names the method");

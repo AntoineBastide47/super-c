@@ -78,18 +78,18 @@ extend Layout {
     /// `size` rounded up to `align` exceeds `isize::MAX`.
     pub const fn from_size_align(size: usize, align: usize) Option<Layout> {
         if !align.is_power_of_two() || size > ISIZE_MAX - (align - 1) {
-            return Option::<Layout>::None;
+            return None;
         }
-        return Option::<Layout>::Some(Layout { size: size, align: align });
+        return Some(Layout { size: size, align: align });
     }
 
     /// The layout of `n` consecutive `T`s, or `None` when the size exceeds the `isize::MAX` limit.
     pub const fn array<T>(n: usize) Option<Layout> {
         // `sizeof(T)` is a multiple of `alignof(T)`, so `n * sizeof(T)` needs no padding.
         if sizeof(T) != 0 && n > (ISIZE_MAX - (alignof(T) - 1)) / sizeof(T) {
-            return Option::<Layout>::None;
+            return None;
         }
-        return Option::<Layout>::Some(Layout { size: n * sizeof(T), align: alignof(T) });
+        return Some(Layout { size: n * sizeof(T), align: alignof(T) });
     }
 
     /// The size in bytes.
@@ -124,7 +124,7 @@ extend Layout {
     /// the size no longer fits.
     pub const fn align_to(self: &Layout, align: usize) Option<Layout> {
         if !align.is_power_of_two() {
-            return Option::<Layout>::None;
+            return None;
         }
         return Layout::from_size_align(self.size, self.align.max(align));
     }
@@ -136,10 +136,10 @@ extend Layout {
         // `self.size` and the padding are each below 2^(N-1), so the offset cannot wrap.
         let offset = self.size + self.padding_needed_for(next.align);
         if offset > ISIZE_MAX || next.size > ISIZE_MAX - offset {
-            return Option::<(Layout, usize)>::None;
+            return None;
         }
         return switch Layout::from_size_align(offset + next.size, self.align.max(next.align)) {
-            Some(l) => Option::<(Layout, usize)>::Some((l, offset)),
+            Some(l) => Some((l, offset)),
             None => Option::<(Layout, usize)>::None,
         };
     }

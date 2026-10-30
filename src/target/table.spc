@@ -515,10 +515,10 @@ pub(package) const fn find(os: i32, isa: i32) i32 {
 pub(package) const fn target_of(os: i32, isa: i32) Option<Target> {
     let k = find(os, isa);
     if k < 0 {
-        return Option::<Target>::None;
+        return None;
     }
     let t: []Target = TARGETS;
-    return Option::<Target>::Some(t[k as usize]);
+    return Some(t[k as usize]);
 }
 
 // An unknown instruction set (`--arch` absent where no host decides it): 64-bit, no features of its own.
@@ -585,9 +585,9 @@ const fn os_words(variant: bool) [str<'static>; 6] {
     let mut r: [str<'static>; 6] = [""; 6];
     for i in 0..t.len() {
         unsafe r[i] = if variant {
-            t[i].variant;
+            t[i].variant
         } else {
-            t[i].name;
+            t[i].name
         };
     }
     return r;
@@ -598,9 +598,9 @@ const fn isa_words(variant: bool) [str<'static>; 3] {
     let mut r: [str<'static>; 3] = [""; 3];
     for i in 0..t.len() {
         unsafe r[i] = if variant {
-            t[i].variant;
+            t[i].variant
         } else {
-            t[i].name;
+            t[i].name
         };
     }
     return r;
@@ -649,9 +649,9 @@ pub(package) fn axis_list(is_isa: bool) String {
         if i != 0 {
             s.push_str(
                 if n > 2 {
-                    ", ";
+                    ", "
                 } else {
-                    " ";
+                    " "
                 },
             );
         }

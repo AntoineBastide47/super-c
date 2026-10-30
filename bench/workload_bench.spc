@@ -53,7 +53,7 @@ fn check(name: str, got: i64, want: i64) {
         what.push_i64(got);
         what.push_str(" of ");
         what.push_i64(want);
-        bench::fail(what.as_str());
+        bench::fail(&what);
     }
 }
 
@@ -216,7 +216,7 @@ fn sockets_once() {
                     // had is released here so the group still completes.
                     wg2.done();
                 },
-            };
+            }
         }
         wa.done();
     };
@@ -367,7 +367,7 @@ fn shape_once(name: str, listener: net::TcpListener, conns: i64, delay_ns: u64, 
                 Err(_) => {
                     wg2.done();
                 },
-            };
+            }
         }
         wa.done();
     };
@@ -491,7 +491,7 @@ fn bidir_once() {
                 Err(_) => {
                     wg2.done();
                 },
-            };
+            }
         }
         wa.done();
     };
@@ -506,7 +506,7 @@ fn bidir_once() {
                 Err(_) => {
                     w.done();
                 },
-            };
+            }
         };
     }
     wg.wait();
@@ -561,7 +561,7 @@ fn conn_burst_once() {
                 Err(_) => {
                     wg2.done();
                 },
-            };
+            }
         }
         wa.done();
     };
@@ -584,7 +584,7 @@ fn conn_burst_once() {
                     let _ = s.get().fetch_add(got, atomics::MemoryOrder::Relaxed);
                 },
                 Err(_) => {},
-            };
+            }
             w.done();
         };
     }
@@ -622,7 +622,7 @@ fn idle_setup() Option<Idle> {
     let lr = net::TcpListener::bind("127.0.0.1", 0);
     if lr.is_err() {
         bench::fail("socket_idle_many: bind failed");
-        return Option::<Idle>::None;
+        return None;
     }
     let listener = lr.unwrap();
     let port = listener.port();
@@ -637,9 +637,9 @@ fn idle_setup() Option<Idle> {
             },
             Err(_) => {
                 bench::fail("socket_idle_many: connect failed");
-                return Option::<Idle>::None;
+                return None;
             },
-        };
+        }
         switch listener.accept_until(time::deadline_in(time::Duration::from_secs(10))) {
             Ok(s) => {
                 let w = parked.clone();
@@ -656,15 +656,15 @@ fn idle_setup() Option<Idle> {
             },
             Err(_) => {
                 bench::fail("socket_idle_many: accept failed");
-                return Option::<Idle>::None;
+                return None;
             },
-        };
+        }
     }
     if !wait_parked(rt::WK_IO, IDLE_CONNS as usize) {
         bench::fail("socket_idle_many: the idle readers did not all park");
-        return Option::<Idle>::None;
+        return None;
     }
-    return Option::<Idle>::Some(Idle { listener: listener, peers: peers, parked: parked, woke: woke });
+    return Some(Idle { listener: listener, peers: peers, parked: parked, woke: woke });
 }
 
 // Wake every idle reader with one byte and count them in; the batch of a thousand wakes is timed.
@@ -817,9 +817,9 @@ pub fn timer_patterns(b: &mut bench::Bencher) {
                 let sm = bench::summarize(&mut ms);
                 let sc = bench::summarize(&mut cyc);
                 let sl = if late.len() != 0 {
-                    bench::summarize(&mut late);
+                    bench::summarize(&mut late)
                 } else {
-                    bench::summarize(&mut ms); // the cancelled pattern has no expiry: the column is dashed
+                    bench::summarize(&mut ms) // the cancelled pattern has no expiry: the column is dashed
                 };
                 let mut p99: f64 = -1.0;
                 if late.len() != 0 {
@@ -894,9 +894,9 @@ pub fn cancel_membership(b: &mut bench::Bencher) {
         let mut left = MEMB_TASKS;
         while left > 0 {
             let n = if left < MEMB_LIVE {
-                left;
+                left
             } else {
-                MEMB_LIVE;
+                MEMB_LIVE
             };
             let wg = sync::WaitGroup::new();
             wg.add(n);
@@ -947,7 +947,7 @@ pub fn cancel_membership(b: &mut bench::Bencher) {
     note.push_f64_prec((t1 - t0) as f64 / 1000.0, 1);
     note.push_str(" us; members held after: ");
     note.push_i64(src.members() as i64);
-    b.note(note.as_str());
+    b.note(&note);
 }
 
 // --- parked-task memory ---------------------------------------------------------------------------------.
@@ -981,7 +981,7 @@ pub fn parked_task_memory(b: &mut bench::Bencher) {
                     None => {
                         let _ = k.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
                     },
-                };
+                }
                 w.done();
             };
         }
@@ -1011,7 +1011,7 @@ pub fn parked_task_memory(b: &mut bench::Bencher) {
     note.push_str(", ");
     note.push_f64_prec(stack_per_task / 1024.0, 1);
     note.push_str(" KiB mapped");
-    b.note(note.as_str());
+    b.note(&note);
 }
 
 // --- burst / idle cycles --------------------------------------------------------------------------------.
@@ -1188,10 +1188,10 @@ pub fn blocking_saturation(b: &mut bench::Bencher) {
     note.push_str(" queued, ");
     note.push_u64(st.admit_waits as u64);
     note.push_str(" admission waits");
-    b.note(note.as_str());
+    b.note(&note);
     let mut g = lat.get().lock();
     let t = bench::dist_text("call latency", "us", g.get_mut());
-    b.note_more(t.as_str());
+    b.note_more(&t);
 }
 
 // --- task counts on both sides of the block pool --------------------------------------------------------.
@@ -1230,7 +1230,7 @@ fn live_lane(b: &mut bench::Bencher, n: i64) {
     let mut note = String::from_str("stacks mapped after: ");
     note.push_f64_prec(platform::stack_bytes() as f64 / 1048576.0, 1);
     note.push_str(" MiB");
-    b.note(note.as_str());
+    b.note(&note);
 }
 
 @bench

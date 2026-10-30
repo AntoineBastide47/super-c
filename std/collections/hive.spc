@@ -54,21 +54,21 @@ const MAX_CAP_WIDE: usize = 8192;
 
 // An element, or, in the first slot of a skipblock, the first slots of the previous and the next skipblock
 // of the block's free list (NONE at an end).
-pub(module) union Slot<T> {
+union Slot<T> {
     val: T,
     link: [u16; 2],
 }
 
 // A block header. The slots follow it at offset `slot_offset()`, the skipfield follows the slots. Every
 // active block holds an element; every active block other than the tail has used all its slots.
-pub(module) struct Block<T> {
-    pub(module) next: *mut Block<T>, // the next active block; in the reserved list, the next reserved block
-    pub(module) prev: *mut Block<T>, // the previous active block
-    pub(module) erased_next: *mut Block<T>, // the next block with a skipblock
-    pub(module) erased_prev: *mut Block<T>,
-    pub(module) cap: u16,
-    pub(module) len: u16, // live elements
-    pub(module) free_head: u16, // the first slot of the first skipblock, or NONE
+struct Block<T> {
+    next: *mut Block<T>, // the next active block; in the reserved list, the next reserved block
+    prev: *mut Block<T>, // the previous active block
+    erased_next: *mut Block<T>, // the next block with a skipblock
+    erased_prev: *mut Block<T>,
+    cap: u16,
+    len: u16, // live elements
+    free_head: u16, // the first slot of the first skipblock, or NONE
 }
 
 /// A container whose elements keep their address until removed, in blocks from allocator A. An insert
@@ -94,28 +94,28 @@ unsafe extend<T: Sync, A: Sync> Hive<T, A> as Sync {}
 /// A copy that does not borrow the hive.
 @derive(Copy)
 pub struct HiveHandle<T> {
-    pub(module) slot: *mut Slot<T>,
-    pub(module) block: *mut Block<T>,
+    slot: *mut Slot<T>,
+    block: *mut Block<T>,
 }
 
 // The position of a walk over the live elements: `block` and `i` name the next one, while `rem` > 0.
-pub(module) struct Cursor<T> {
-    pub(module) block: *mut Block<T>,
+struct Cursor<T> {
+    block: *mut Block<T>,
     slots: *mut Slot<T>, // the slots of `block`
     skip: *const u8, // the skipfield of `block`
     cap: usize, // the slots of `block`
-    pub(module) i: usize,
-    pub(module) rem: usize, // live elements not yet passed
+    i: usize,
+    rem: usize, // live elements not yet passed
 }
 
 /// A borrowing iterator over a Hive, in block and slot order; exact size.
 pub struct HiveIter<'a, T> {
-    pub(module) c: Cursor<T>,
+    c: Cursor<T>,
 }
 
 /// A mutably borrowing iterator over a Hive, in block and slot order; exact size.
 pub struct HiveIterMut<'a, T> {
-    pub(module) c: Cursor<T>,
+    c: Cursor<T>,
 }
 
 // Skipfield entry `i`, u8 or u16 as Block<T>::narrow() selects.
@@ -368,9 +368,9 @@ extend<T, A: Allocator> Hive<T, A> {
         let sk = b.skips();
         let v = unsafe *((slots + i) as *mut T);
         let left = if i > 0 {
-            skip_get::<T>(sk, i - 1);
+            skip_get::<T>(sk, i - 1)
         } else {
-            0;
+            0
         };
         let right = skip_get::<T>(sk, i + 1);
         if left == 0 && right == 0 {
@@ -431,9 +431,9 @@ extend<T, A: Allocator> Hive<T, A> {
         if n == null {
             self.tail = p;
             self.tail_used = if p == null {
-                0;
+                0
             } else {
-                p.cap();
+                p.cap()
             };
         } else {
             unsafe (*n).prev = p;
@@ -580,28 +580,28 @@ extend<T> Cursor<T> {
 extend<'a, T> HiveIter<'a, T> as Iterator<&'a T> {
     pub fn next(self: &mut HiveIter<'a, T>) Option<&'a T> {
         if self.c.rem == 0 {
-            return Option::<&'a T>::None;
+            return None;
         }
         let p = self.c.next();
-        return Option::<&'a T>::Some(unsafe &*(p as *const T));
+        return Some(unsafe &*(p as *const T));
     }
 
     pub const fn size_hint(self: &HiveIter<'a, T>) (usize, Option<usize>) {
-        return self.c.rem, Option::<usize>::Some(self.c.rem);
+        return (self.c.rem, Option::<usize>::Some(self.c.rem));
     }
 }
 
 extend<'a, T> HiveIterMut<'a, T> as Iterator<&'a mut T> {
     pub fn next(self: &mut HiveIterMut<'a, T>) Option<&'a mut T> {
         if self.c.rem == 0 {
-            return Option::<&'a mut T>::None;
+            return None;
         }
         let p = self.c.next();
-        return Option::<&'a mut T>::Some(unsafe &mut *(p as *mut T));
+        return Some(unsafe &mut *(p as *mut T));
     }
 
     pub const fn size_hint(self: &HiveIterMut<'a, T>) (usize, Option<usize>) {
-        return self.c.rem, Option::<usize>::Some(self.c.rem);
+        return (self.c.rem, Option::<usize>::Some(self.c.rem));
     }
 }
 

@@ -109,14 +109,14 @@ fn wrap(decls: &mut String, ty: str, n: usize, name: str, params: str, call: str
 // quickly at opt-level 0.
 fn special_cases(m: str, f64_lanes: bool, decls: &mut String, exprs: &mut Vector<String>, tys: &mut Vector<String>) {
     let ty = if f64_lanes {
-        "f64";
+        "f64"
     } else {
-        "f32";
+        "f32"
     };
     let n: usize = if f64_lanes {
-        2;
+        2
     } else {
-        4;
+        4
     };
     let mut args = Vector::<String>::new();
     for i in 0usize..NS {
@@ -130,23 +130,23 @@ fn special_cases(m: str, f64_lanes: bool, decls: &mut String, exprs: &mut Vector
         args.push(a);
     }
     let lane = if f64_lanes {
-        1;
+        1
     } else {
-        3;
+        3
     };
     let x = format("x: Simd<{}, {}>", ty, n);
     for f in ONE {
         if absent(m, f) {
             continue;
         }
-        wrap(decls, ty, n, f, x.as_str(), format("{}::{}(x)", m, f).as_str());
+        wrap(decls, ty, n, f, &x, format("{}::{}(x)", m, f).as_str());
         for i in 0usize..NS {
             exprs.push(format("w_{}({})[{}]", f, args[i].as_str(), lane));
             tys.push(String::from_str(ty));
         }
     }
     for sc in ["s", "c"] {
-        wrap(decls, ty, n, format("sc_{}", sc).as_str(), x.as_str(), format("sc_{}_{}(x)", sc, m).as_str());
+        wrap(decls, ty, n, format("sc_{}", sc).as_str(), &x, format("sc_{}_{}(x)", sc, m).as_str());
     }
     for i in 0usize..NS {
         exprs.push(format("w_sc_s({})[{}]", args[i].as_str(), lane));
@@ -156,7 +156,7 @@ fn special_cases(m: str, f64_lanes: bool, decls: &mut String, exprs: &mut Vector
     }
     let xy = format("x: Simd<{}, {}>, y: Simd<{}, {}>", ty, n, ty, n);
     for f in ["pow", "atan2", "hypot"] {
-        wrap(decls, ty, n, f, xy.as_str(), format("{}::{}(x, y)", m, f).as_str());
+        wrap(decls, ty, n, f, &xy, format("{}::{}(x, y)", m, f).as_str());
         for p in PAIRS {
             exprs.push(format("w_{}({}, {})[{}]", f, args[p[0]].as_str(), args[p[1]].as_str(), lane));
             tys.push(String::from_str(ty));
@@ -186,10 +186,10 @@ fn expect_specials(m: str, f64_lanes: bool) {
     let mut ev = Vector::<str>::new();
     let mut tv = Vector::<str>::new();
     for i in 0..exprs.len() {
-        ev.push(exprs[i].as_str());
-        tv.push(tys[i].as_str());
+        ev.push(&exprs[i]);
+        tv.push(&tys[i]);
     }
-    let d = h::const_runtime_parity(decls.as_str(), ev[0..ev.len()], tv[0..tv.len()], ["--jobs=1"]);
+    let d = h::const_runtime_parity(&decls, ev[0..ev.len()], tv[0..tv.len()], ["--jobs=1"]);
     if d.len() != 0 {
         eprintln("{}", d.as_str());
     }
@@ -231,7 +231,7 @@ fn simd_math_specials_fast_f64() {
 // The lanes of one call do not depend on each other: on the first 10^4 inputs, each lane of a call at
 // the other lane count equals the call on that lane's inputs alone. The program prints each hash and
 // their combination.
-const HASH_SRC: str<'static> = "import std::simd::math as mp;\nimport std::simd::math::balanced as mb;\nimport std::simd::math::fast as mf;\nimport std::simd::math::lane as ln;\nimport std::float as fl;\nconst INPUTS: usize = 100000;\nconst LANE_CHECK: usize = 10000;\nstatic mut ALL: u64 = 0xcbf29ce484222325;\nfn mix(h: u64, b: u64) u64 {\n    return (h ^ b).wrapping_mul(0x100000001b3);\n}\nfn bits64(v: f64) u64 {\n    return if v != v { 0x7FF8000000000000; } else { fl::f64_bits(v); };\n}\nfn bits32(v: f32) u64 {\n    return if v != v { 0x7FC00000; } else { fl::f32_bits(v) as u64; };\n}\nfn input(i: usize) u64 {\n    let mut z = (i as u64).wrapping_add(0x9E3779B97F4A7C15).wrapping_mul(0xBF58476D1CE4E5B9);\n    z = (z ^ z >> 31).wrapping_mul(0x94D049BB133111EB);\n    return z ^ z >> 29;\n}\nfn x64(i: usize) f64 {\n    let r = input(i);\n    if r % 3 == 0 {\n        return fl::f64_from_bits(r);\n    }\n    let e = (r >> 8) % 120;\n    let m = 1.0 + ((r >> 12) % 4503599627370496) as f64 * 0x1p-52;\n    let v = m * fl::f64_from_bits((1023 + e - 60) << 52);\n    return if (r >> 7 & 1) == 0 { v; } else { -v; };\n}\nfn x32(i: usize) f32 {\n    let r = input(i);\n    if r % 3 == 0 {\n        return fl::f32_from_bits((r >> 32) as u32);\n    }\n    return x64(i) as f32;\n}\nfn y64(i: usize) f64 {\n    return x64(i + 7777777);\n}\nfn y32(i: usize) f32 {\n    return x32(i + 7777777);\n}\nfn ni(i: usize) i32 {\n    return (input(i) >> 40) as i32 % 300;\n}\nfn xv64<const N: usize>(i: usize) Simd<f64, N> {\n    let mut a: [f64; N] = [0.0; N];\n    for k in 0usize..N {\n        unsafe a[k] = x64(i + k);\n    }\n    return Simd::from_array(a);\n}\nfn xv32<const N: usize>(i: usize) Simd<f32, N> {\n    let mut a: [f32; N] = [0.0; N];\n    for k in 0usize..N {\n        unsafe a[k] = x32(i + k);\n    }\n    return Simd::from_array(a);\n}\nfn yv64<const N: usize>(i: usize) Simd<f64, N> {\n    return xv64::<N>(i + 7777777);\n}\nfn yv32<const N: usize>(i: usize) Simd<f32, N> {\n    return xv32::<N>(i + 7777777);\n}\nfn nv<const N: usize>(i: usize) Simd<i32, N> {\n    let mut a: [i32; N] = [0; N];\n    for k in 0usize..N {\n        unsafe a[k] = ni(i + k);\n    }\n    return Simd::from_array(a);\n}\nfn xs64<const N: usize>(i: usize) Simd<f64, N> {\n    return Simd::splat(x64(i));\n}\nfn xs32<const N: usize>(i: usize) Simd<f32, N> {\n    return Simd::splat(x32(i));\n}\nfn ys64<const N: usize>(i: usize) Simd<f64, N> {\n    return Simd::splat(y64(i));\n}\nfn ys32<const N: usize>(i: usize) Simd<f32, N> {\n    return Simd::splat(y32(i));\n}\nfn ns<const N: usize>(i: usize) Simd<i32, N> {\n    return Simd::splat(ni(i));\n}\nfn report(name: str, m: str, h: u64, d: u64) {\n    unsafe ALL = mix(unsafe ALL, h);\n    print(\"{} {} {}\\n\", m, name, h);\n    if d != 0 {\n        print(\"LANES DIFFER {} {}\\n\", m, name);\n    }\n}\n";
+const HASH_SRC: str<'static> = "import std::simd::math as mp;\nimport std::simd::math::balanced as mb;\nimport std::simd::math::fast as mf;\nimport std::simd::math::lane as ln;\nimport std::float as fl;\nconst INPUTS: usize = 100000;\nconst LANE_CHECK: usize = 10000;\nstatic mut ALL: u64 = 0xcbf29ce484222325;\nfn mix(h: u64, b: u64) u64 {\n    return (h ^ b).wrapping_mul(0x100000001b3);\n}\nfn bits64(v: f64) u64 {\n    return if v != v { 0x7FF8000000000000 } else { fl::f64_bits(v) };\n}\nfn bits32(v: f32) u64 {\n    return if v != v { 0x7FC00000 } else { fl::f32_bits(v) as u64 };\n}\nfn input(i: usize) u64 {\n    let mut z = (i as u64).wrapping_add(0x9E3779B97F4A7C15).wrapping_mul(0xBF58476D1CE4E5B9);\n    z = (z ^ z >> 31).wrapping_mul(0x94D049BB133111EB);\n    return z ^ z >> 29;\n}\nfn x64(i: usize) f64 {\n    let r = input(i);\n    if r % 3 == 0 {\n        return fl::f64_from_bits(r);\n    }\n    let e = (r >> 8) % 120;\n    let m = 1.0 + ((r >> 12) % 4503599627370496) as f64 * 0x1p-52;\n    let v = m * fl::f64_from_bits((1023 + e - 60) << 52);\n    return if (r >> 7 & 1) == 0 { v } else { -v };\n}\nfn x32(i: usize) f32 {\n    let r = input(i);\n    if r % 3 == 0 {\n        return fl::f32_from_bits((r >> 32) as u32);\n    }\n    return x64(i) as f32;\n}\nfn y64(i: usize) f64 {\n    return x64(i + 7777777);\n}\nfn y32(i: usize) f32 {\n    return x32(i + 7777777);\n}\nfn ni(i: usize) i32 {\n    return (input(i) >> 40) as i32 % 300;\n}\nfn xv64<const N: usize>(i: usize) Simd<f64, N> {\n    let mut a: [f64; N] = [0.0; N];\n    for k in 0usize..N {\n        unsafe a[k] = x64(i + k);\n    }\n    return Simd::from_array(a);\n}\nfn xv32<const N: usize>(i: usize) Simd<f32, N> {\n    let mut a: [f32; N] = [0.0; N];\n    for k in 0usize..N {\n        unsafe a[k] = x32(i + k);\n    }\n    return Simd::from_array(a);\n}\nfn yv64<const N: usize>(i: usize) Simd<f64, N> {\n    return xv64::<N>(i + 7777777);\n}\nfn yv32<const N: usize>(i: usize) Simd<f32, N> {\n    return xv32::<N>(i + 7777777);\n}\nfn nv<const N: usize>(i: usize) Simd<i32, N> {\n    let mut a: [i32; N] = [0; N];\n    for k in 0usize..N {\n        unsafe a[k] = ni(i + k);\n    }\n    return Simd::from_array(a);\n}\nfn xs64<const N: usize>(i: usize) Simd<f64, N> {\n    return Simd::splat(x64(i));\n}\nfn xs32<const N: usize>(i: usize) Simd<f32, N> {\n    return Simd::splat(x32(i));\n}\nfn ys64<const N: usize>(i: usize) Simd<f64, N> {\n    return Simd::splat(y64(i));\n}\nfn ys32<const N: usize>(i: usize) Simd<f32, N> {\n    return Simd::splat(y32(i));\n}\nfn ns<const N: usize>(i: usize) Simd<i32, N> {\n    return Simd::splat(ni(i));\n}\nfn report(name: str, m: str, h: u64, d: u64) {\n    unsafe ALL = mix(unsafe ALL, h);\n    print(\"{} {} {}\\n\", m, name, h);\n    if d != 0 {\n        print(\"LANES DIFFER {} {}\\n\", m, name);\n    }\n}\n";
 
 // The functions the hash program runs beyond those of `ONE`: their argument kinds ("x": the float
 // inputs, "y": a second float input, "n": powi's integers).
@@ -299,17 +299,17 @@ fn hash_program(m: str, t: str) String {
             sc,
             m,
             if sc == "s" {
-                "(v, _)";
+                "(v, _)"
             } else {
-                "(_, v)";
+                "(_, v)"
             },
             m,
         );
     }
     let (n1, n2) = if t == "32" {
-        (4usize, 8usize);
+        (4usize, 8usize)
     } else {
-        (2usize, 4usize);
+        (2usize, 4usize)
     };
     let mut fs = Vector::<[str<'static>; 2]>::new();
     for f in ONE {
@@ -393,8 +393,8 @@ fn simd_math_lowerings_fast_f64() {
 // The hash program of class `m` and lane type `t` gives `all` under the native and the scalar lowering.
 fn lowerings_agree(m: str, t: str, all: str) {
     let src = hash_program(m, t);
-    let a = h::diff_build(src.as_str(), ["--jobs=1"]);
-    let b = h::diff_build(src.as_str(), ["--jobs=1", "SC_SIMD_SCALAR=1"]);
+    let a = h::diff_build(&src, ["--jobs=1"]);
+    let b = h::diff_build(&src, ["--jobs=1", "SC_SIMD_SCALAR=1"]);
     if !a.built || !b.built {
         eprintln("{}{}", a.diag.as_str(), b.diag.as_str());
     }

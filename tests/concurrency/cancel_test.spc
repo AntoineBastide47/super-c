@@ -353,7 +353,7 @@ fn returned_switch(rx: &chan::Receiver<i64>) i64 {
         Some(x) => x,
         _ => {
             after_mark();
-            -1;
+            -1
         },
     };
 }
@@ -383,7 +383,7 @@ fn position_edge(fx: &mut Base, form: i32) {
                 _ => {
                     after_mark();
                 },
-            };
+            }
         } else if form == 1 {
             let v = switch rx.recv() {
                 Some(x) => x,
@@ -556,7 +556,7 @@ fn lock_c_switch_unwinds_before_its_arms(fx: &mut Base) {
             _ => {
                 after_mark();
             },
-        };
+        }
         after_mark();
     };
     let key = krx.recv().unwrap();
@@ -577,7 +577,7 @@ fn lock_c_switch_unwinds_before_its_arms(fx: &mut Base) {
 // Returns a REAL guard after accepting a cancellation: the acceptance sits in an argument, where
 // no edge follows it, so the check after this call sees a real value (probe 2).
 fn keep_guard(g: sync::MutexGuard<i64>, _accepted: bool) Option<sync::MutexGuard<i64>> {
-    return Option::<sync::MutexGuard<i64>>::Some(g);
+    return Some(g);
 }
 
 fn lock_accepted(m: &sync::Mutex<i64>) Option<sync::MutexGuard<i64>> {
@@ -616,7 +616,7 @@ fn an_accepted_real_scrutinee_is_freed_before_the_arms(fx: &mut Base) {
             _ => {
                 after_mark();
             },
-        };
+        }
         after_mark();
     };
     let key = krx.recv().unwrap();
@@ -771,7 +771,7 @@ fn channel_send_cancel_keeps_payload_ownership(fx: &mut Base) {
             Rejected(_v) => {
                 assert(false, "the first send fits the buffer");
             },
-        };
+        }
         // Parks: buffer full; cancelled while blocked. The channel hands the unsent payload back
         // and the compiled edge frees it exactly once through the spill, then unwinds.
         let _second = tx.send(Payload { n: 2 });
@@ -788,7 +788,7 @@ fn channel_send_cancel_keeps_payload_ownership(fx: &mut Base) {
         None => {
             assert(false, "the delivered payload is still readable");
         },
-    };
+    }
     rt::shutdown();
     assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
@@ -827,7 +827,7 @@ fn channel_recv_cancel_takes_nothing(fx: &mut Base) {
         Rejected(_v) => {
             assert(false, "the channel is still open");
         },
-    };
+    }
     assert_eq(frees(), 0);
     rt::shutdown();
     assert_eq(cancelled(fx), 1);
@@ -1004,7 +1004,7 @@ fn hand_back<T>(v: T) Option<T> {
     }
     rt::cancel_mask_exit();
     let _ = rt::cancel_after_wait(true);
-    return Option::<T>::Some(v);
+    return Some(v);
 }
 
 @test
@@ -1103,7 +1103,7 @@ fn io_read_cancel_settles_interest(fx: &mut Base) {
             Err(_) => {
                 assert(false, "accept succeeds");
             },
-        };
+        }
     };
     let peer = net::TcpStream::connect("127.0.0.1", port).unwrap();
     let key = krx.recv().unwrap();

@@ -56,9 +56,9 @@ fn render_fn_sig_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, t
     let dn = unsafe (*ma).at_const(ty.as_data.decl);
     // A closure that lists no return and returns its body's value: the body's type is the return type.
     let bt = if dn.kind == NodeKind::NODE_CLOSURE && closure_body_ret(unsafe &*ma, ty.as_data.decl) && rs.len == 0 {
-        unsafe (*ma).type_of(unsafe (*ma).ext(ty.as_data.decl).closure.body);
+        unsafe (*ma).type_of(unsafe (*ma).ext(ty.as_data.decl).closure.body)
     } else {
-        TYPE_NONE;
+        TYPE_NONE
     };
     if rs.len == 1 {
         out.push_str(" ");
@@ -118,7 +118,7 @@ fn render_sig_lts(
         } else if c >= LC_OUTER && c != LC_TOO_MANY {
             let g = (c - LC_OUTER) as usize;
             if g < outer.len() {
-                nm.push_str(outer[g].as_str());
+                nm.push_str(&outer[g]);
             } else {
                 nm.push_byte(b'\'');
                 nm.push_u64(g as u64 + 1);
@@ -204,9 +204,9 @@ fn render_lt_type(
     next: &mut u8,
 ) {
     let n = if depth > 16 {
-        0;
+        0
     } else {
-        rt_lt_count(pkg, a, t);
+        rt_lt_count(pkg, a, t)
     };
     let mut named = false;
     for k in *pos..(*pos + n).min(names.len() as u32) {
@@ -215,9 +215,9 @@ fn render_lt_type(
     let y = *unsafe (*a).type_at(t);
     let k = y.kind;
     let dsig = if k == TypeKind::TYPE_DYN {
-        unsafe (*a).dyn_fn_sig(&y);
+        unsafe (*a).dyn_fn_sig(&y)
     } else {
-        TYPE_NONE;
+        TYPE_NONE
     };
     if !named && !y.fn_sig() && dsig == TYPE_NONE {
         render_type_str(pkg, a, cur_src, t, out);
@@ -227,9 +227,9 @@ fn render_lt_type(
     if k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
         out.push_str(
             if k == TypeKind::TYPE_SLICE {
-                "[]";
+                "[]"
             } else {
-                "&";
+                "&"
             },
         );
         render_lt_name(names, pos, out, false);
@@ -240,11 +240,11 @@ fn render_lt_type(
     } else if k == TypeKind::TYPE_POINTER {
         out.push_str(
             if y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-                "*mut ";
+                "*mut "
             } else if y.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
-                "*const ";
+                "*const "
             } else {
-                "*";
+                "*"
             },
         );
         render_lt_type(pkg, a, cur_src, y.as_data.elem, names, pos, out, depth + 1, next);
@@ -307,9 +307,9 @@ fn render_lt_type(
             }
         }
         let nm = if k == TypeKind::TYPE_DYN {
-            unsafe (*ma).at_const(unsafe (*ma).ext_name(it.decl)).as_data.name.text;
+            unsafe (*ma).at_const(unsafe (*ma).ext_name(it.decl)).as_data.name.text
         } else {
-            unsafe (*ma).at_const(unsafe (*ma).ext_name(it.decl)).as_data.name.text;
+            unsafe (*ma).at_const(unsafe (*ma).ext_name(it.decl)).as_data.name.text
         };
         out.push_str(rt_src(pkg, a, cur_src, it.module).slice(nm.start as usize, nm.end as usize));
         let nlt = unsafe (*pkg).decl_nlt(unsafe &*a, it.module, it.decl);
@@ -356,7 +356,7 @@ fn render_lt_fn(
     for _ in 0..vs.len() {
         let mut nm = String::new();
         if (*pos) as usize < names.len() && names[(*pos) as usize].len() != 0 {
-            nm.push_str(names[(*pos) as usize].as_str());
+            nm.push_str(&names[(*pos) as usize]);
         } else {
             lt_letter(&mut nm, *next);
             *next = *next + 1;
@@ -378,7 +378,7 @@ fn render_lt_name(names: &Vector<String>, pos: &mut u32, out: &mut String, whole
         }
         return;
     }
-    out.push_str(names[p].as_str());
+    out.push_str(&names[p]);
     if !whole {
         out.push_byte(b' ');
     }
@@ -621,11 +621,11 @@ fn render_ty(pkg: *const loader::Package, a: *const Ast, cur_src: str, elide: bo
     } else if ty.kind == TypeKind::TYPE_DYN {
         out.push_str(
             if ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-                "&mut dyn ";
+                "&mut dyn "
             } else if ty.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
-                "&dyn ";
+                "&dyn "
             } else {
-                "Box<dyn ";
+                "Box<dyn "
             },
         );
         rt_dyn_str(pkg, a, cur_src, &ty, out);
@@ -679,7 +679,7 @@ fn render_ty(pkg: *const loader::Package, a: *const Ast, cur_src: str, elide: bo
             t.format_into("{}", l.div_of());
         }
         t.push_str("}");
-        out.push_str(t.as_str());
+        out.push_str(&t);
     } else if ty.kind == TypeKind::TYPE_FIELD_PROJECTION {
         // The symbolic per-field type of a reflection loop: name it by what it projects, a field or
         // (a `variants` or `payloads` loop's) a payload.

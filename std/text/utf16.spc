@@ -29,7 +29,7 @@ pub fn encode<A: Allocator>(s: str, out: &mut Vector<u16, A>) Result<Unit, Encod
         let (c, n) = scalar_at(s, i);
         if n == 0 {
             out.truncate(start);
-            return Result::<Unit, EncodeError>::Err(EncodeError::InvalidUtf8(i));
+            return Err(InvalidUtf8(i));
         }
         if c < 0x10000 {
             out.push(c as u16);
@@ -39,7 +39,7 @@ pub fn encode<A: Allocator>(s: str, out: &mut Vector<u16, A>) Result<Unit, Encod
         }
         i += n;
     }
-    return Result::<Unit, EncodeError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 
 /// Write the UTF-16 code units of `s` to the start of `out`: the count written. `out.len() >= s.len()`
@@ -51,17 +51,17 @@ pub const fn encode_into(s: str, out: []mut u16) Result<usize, EncodeError> {
     while i < s.len() {
         let (c, n) = scalar_at(s, i);
         if n == 0 {
-            return Result::<usize, EncodeError>::Err(EncodeError::InvalidUtf8(i));
+            return Err(InvalidUtf8(i));
         }
         if c < 0x10000 {
             if k == out.len() {
-                return Result::<usize, EncodeError>::Err(EncodeError::BufferTooSmall);
+                return Err(BufferTooSmall);
             }
             out[k] = c as u16;
             k += 1;
         } else {
             if out.len() - k < 2 {
-                return Result::<usize, EncodeError>::Err(EncodeError::BufferTooSmall);
+                return Err(BufferTooSmall);
             }
             out[k] = high_surrogate(c);
             out[k + 1] = low_surrogate(c);
@@ -69,7 +69,7 @@ pub const fn encode_into(s: str, out: []mut u16) Result<usize, EncodeError> {
         }
         i += n;
     }
-    return Result::<usize, EncodeError>::Ok(k);
+    return Ok(k);
 }
 
 /// Append the UTF-8 form of the UTF-16 code units `units` to `out`. On error `out` keeps its previous
@@ -94,12 +94,12 @@ pub fn decode<A: Allocator>(units: []u16, out: &mut String<A>) Result<Unit, Deco
         let paired = u <= 0xDBFF && i + 1 < units.len() && units[i + 1] >= 0xDC00 && units[i + 1] <= 0xDFFF;
         if !paired {
             out.truncate(start);
-            return Result::<Unit, DecodeError>::Err(DecodeError { offset: i });
+            return Err(DecodeError { offset: i });
         }
         out.push(0x10000 + (u - 0xD800 << 10 | units[i + 1] as u32 - 0xDC00));
         i += 2;
     }
-    return Result::<Unit, DecodeError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 
 // The scalar value whose UTF-8 sequence starts at byte `i` of `s`, and the sequence's length: 0 when the
@@ -109,7 +109,7 @@ pub fn decode<A: Allocator>(units: []u16, out: &mut String<A>) Result<Unit, Deco
 const fn scalar_at(s: str, i: usize) (u32, usize) {
     let b = s.byte_at(i) as u32;
     if b < 0x80 {
-        return b, 1;
+        return (b, 1);
     }
     let mut n: usize = 0;
     let mut lo: u32 = 0x80;
@@ -135,24 +135,24 @@ const fn scalar_at(s: str, i: usize) (u32, usize) {
             hi = 0x8F;
         }
     } else {
-        return 0, 0;
+        return (0, 0);
     }
     if n > s.len() - i {
-        return 0, 0;
+        return (0, 0);
     }
     let b1 = s.byte_at(i + 1) as u32;
     if b1 < lo || b1 > hi {
-        return 0, 0;
+        return (0, 0);
     }
     c = c << 6 | b1 & 0x3F;
     for k in 2..n {
         let bk = s.byte_at(i + k) as u32;
         if (bk & 0xC0) != 0x80 {
-            return 0, 0;
+            return (0, 0);
         }
         c = c << 6 | bk & 0x3F;
     }
-    return c, n;
+    return (c, n);
 }
 
 const fn high_surrogate(c: u32) u16 {

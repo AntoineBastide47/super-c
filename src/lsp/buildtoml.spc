@@ -171,7 +171,7 @@ pub(package) fn completions(src: str, at: usize) Vector<Item> {
     let ks: []Key = KEYS;
     for i in 0..ks.len() {
         let k = ks.at(i);
-        if sec_matches(k.sec, sec.as_str()) {
+        if sec_matches(k.sec, &sec) {
             out.push(Item { label: String::from_str(k.name), doc: String::from_str(k.doc) });
         }
     }
@@ -200,7 +200,7 @@ pub(package) fn hover(src: str, at: usize) String {
     let ks: []Key = KEYS;
     for i in 0..ks.len() {
         let k = ks.at(i);
-        if k.name == w && sec_matches(k.sec, sec.as_str()) {
+        if k.name == w && sec_matches(k.sec, &sec) {
             doc.clear();
             doc.push_str(k.doc);
         }

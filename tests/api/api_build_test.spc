@@ -60,9 +60,9 @@ fn main() i32 {
 // The step tool's file name.
 fn gen_exe() str<'static> {
     return if PLATFORM == Platform::Windows {
-        "tools/gen.exe";
+        "tools/gen.exe"
     } else {
-        "tools/gen";
+        "tools/gen"
     };
 }
 
@@ -185,7 +185,7 @@ fn steps_run_when_their_inputs_change(fx: &mut Fx) {
     assert(!r4.ok, "the step tool rejects a fourth argument");
     let mut toml = step_manifest("", "");
     toml.push_str("env = [\"SC_NONE\"]\n");
-    fx.proj.mkfile("build.toml", toml.as_str());
+    fx.proj.mkfile("build.toml", &toml);
     let r5 = build(fx).unwrap();
     assert(r5.ok && r5.targets[0].emitted, "a changed step re-emits");
 }
@@ -253,7 +253,7 @@ extend Probe as bld::Hook {
         unsafe (*self.log).push_str("A;");
         assert_eq(b.profile.as_str(), "debug");
         out.warning("probing");
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     pub fn before_emission(
@@ -271,8 +271,8 @@ extend Probe as bld::Hook {
             }
         }
         unsafe (*self.log).format_into("E{};", n);
-        out.artifact("modules.txt", bytes(list.as_str()));
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        out.artifact("modules.txt", bytes(&list));
+        return Ok(Unit {});
     }
 
     pub fn after_ir(self: &mut Self, b: &bld::BuildInfo, prog: &alir::Program, out: &mut bld::HookOutput) Result<
@@ -285,12 +285,12 @@ extend Probe as bld::Hook {
             user_main = user_main || fs[i].as_str() == "__sc_user_main";
         }
         let mark = if user_main {
-            "+";
+            "+"
         } else {
-            "-";
+            "-"
         };
         unsafe (*self.log).format_into("I{}{};", fs.len(), mark);
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     pub fn after_artifacts(self: &mut Self, b: &bld::BuildInfo, artifacts: Slice<String>, out: &mut bld::HookOutput) Result<
@@ -301,7 +301,7 @@ extend Probe as bld::Hook {
         if self.fail {
             out.error("the probe fails");
         }
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 
@@ -337,7 +337,7 @@ fn tuc_key() u64 {
     ).unwrap();
     let mut buf = Vector::<u8>::new();
     buf.resize_default(16);
-    let n = f.read(buf.as_mut_slice()).unwrap();
+    let n = f.read(&mut buf).unwrap();
     assert_eq(n, 16usize);
     let mut k: u64 = 0;
     for i in 0..8usize {
@@ -367,7 +367,7 @@ fn hooks_run_at_every_stage(fx: &mut Fx) {
     assert_eq(mods.as_str(), "main\nutil\n");
     assert_eq(r.hook_artifacts.len(), 2usize);
     let n = be::NativeBackend {};
-    if n.supports(p.os.as_str(), p.isa.as_str()) {
+    if n.supports(&p.os, &p.isa) {
         assert(exists("build/debug/hooks/test.native/program.o"), "the backend's object");
     }
     // A body edit: the IR hook still sees every function, the unchanged module's included.

@@ -235,26 +235,26 @@ extend Verifier {
             return self.fail_at(name, b, i, "a system operation takes its operands and no other");
         }
         let res = if s == SYS_CYCLES || s == SYS_GSLOAD || s == SYS_XGETBV || s == SYS_SVL {
-            T_I64;
+            T_I64
         } else {
-            T_NONE;
+            T_NONE
         };
         let ok = if s == SYS_FPSAVE {
-            ta == T_PTR;
+            ta == T_PTR
         } else if s == SYS_GSLOAD {
-            ta == T_I64;
+            ta == T_I64
         } else if s == SYS_GSSTORE {
-            ta == T_I64 && tb == T_I64;
+            ta == T_I64 && tb == T_I64
         } else if s == SYS_CPUID {
-            ta == T_PTR && tb == T_I32 && tc == T_I32;
+            ta == T_PTR && tb == T_I32 && tc == T_I32
         } else if s == SYS_XGETBV {
-            ta == T_I32;
+            ta == T_I32
         } else if s == SYS_CTXSWAP {
-            ta == T_PTR && tb == T_PTR && b.naked;
+            ta == T_PTR && tb == T_PTR && b.naked
         } else if s == SYS_CTXENTRY {
-            b.naked;
+            b.naked
         } else {
-            true;
+            true
         };
         return self.need(
             name,
@@ -486,9 +486,9 @@ extend Verifier {
         }
         if op == O_MEMCPY || op == O_MEMSET {
             let src_ok = if op == O_MEMCPY {
-                tb == T_PTR;
+                tb == T_PTR
             } else {
-                tb == T_I8;
+                tb == T_I8
             };
             return self.need(
                 name,
@@ -621,9 +621,9 @@ extend Verifier {
         }
         if op == O_PANIC {
             let tb = if t.b == VNONE {
-                T_I64;
+                T_I64
             } else {
-                b.type_of(t.b);
+                b.type_of(t.b)
             };
             return self.need(name, b, i, t.a as usize < b.msgs.len(), "a message of the body") && self.need(
                 name,
@@ -717,9 +717,9 @@ extend Verifier {
         for k in 0..n {
             let at = self.vty(b, b.pool[(t.c + k) as usize]);
             let want = if k < np {
-                carrier(b.pool[(t.b + 3 + k) as usize]);
+                carrier(b.pool[(t.b + 3 + k) as usize])
             } else {
-                T_PTR;
+                T_PTR
             };
             if at == T_NONE || at != want {
                 return self.fail_at(name, b, i, "an argument of its parameter's type");
@@ -754,9 +754,9 @@ extend Verifier {
             let cvar = (cflags & SIG_VARIADIC) != 0;
             let mut ok = same_type(cb, cb.pool[cs + 2], b, b.pool[ks + 2]);
             ok = ok && if cvar {
-                kfixed == cn;
+                kfixed == cn
             } else {
-                kn == cn;
+                kn == cn
             };
             for k in 0..cn {
                 ok = ok && k < kn && same_type(cb, cb.pool[cs + 3 + k as usize], b, b.pool[ks + 3 + k as usize]);
@@ -904,9 +904,9 @@ extend Verifier {
                         continue;
                     }
                     nd = if nd == NONE {
-                        pb;
+                        pb
                     } else {
-                        self.intersect(pb, nd);
+                        self.intersect(pb, nd)
                     };
                 }
                 if nd != self.idom[blk as usize] {
@@ -1027,11 +1027,11 @@ extend Verifier {
             }
             for k in 0..n {
                 let e = if f == F_JMP {
-                    t.a;
+                    t.a
                 } else if f == F_BR {
-                    ast::pick(k == 0, t.b, t.c);
+                    ast::pick(k == 0, t.b, t.c)
                 } else {
-                    b.switch_edge(t, k);
+                    b.switch_edge(t, k)
                 };
                 for x in 0..b.edge_nargs(e) {
                     if !self.use_ok(blk, i, b.edge_arg(e, x), true) {
@@ -1243,9 +1243,9 @@ fn derived(d: &Vector<bool>, ni: usize, v: Value) bool {
         return false;
     }
     return if (v & VPARAM) != 0 {
-        d[ni + (v & ~VPARAM) as usize];
+        d[ni + (v & ~VPARAM) as usize]
     } else {
-        d[v as usize];
+        d[v as usize]
     };
 }
 
@@ -1288,9 +1288,9 @@ const fn sig_valid(b: &Body, s: u32, ptr: u32) bool {
     }
     for k in 0..np + 1 {
         let pt = if k == np {
-            b.pool[s as usize + 2];
+            b.pool[s as usize + 2]
         } else {
-            b.pool[(s + 3 + k) as usize];
+            b.pool[(s + 3 + k) as usize]
         };
         if (pt & AGG) != 0 {
             let l = pt & ~AGG;

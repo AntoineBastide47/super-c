@@ -146,7 +146,7 @@ extend<T: SimdElement, const N: usize> Simd<T, N> {
     /// `cast::<U>()` and the mask of the lanes whose value the conversion changed or that held a NaN.
     pub const fn cast_checked<U: SimdElement>(self: Self) (Simd<U, N>, Mask<N>) {
         let r = self.cast::<U>();
-        return r, self.cast_changed::<U>(r);
+        return (r, self.cast_changed::<U>(r));
     }
 
     @intrinsic("simd.cast_changed")
@@ -214,17 +214,17 @@ extend<T: SimdInt, const N: usize> Simd<T, N> {
 
     /// `wrapping_add` and the mask of the lanes where `self + other` overflowed.
     pub const fn checked_add(self: Self, other: Self) (Self, Mask<N>) {
-        return self.wrapping_add(other), self.overflow_add(other);
+        return (self.wrapping_add(other), self.overflow_add(other));
     }
 
     /// `wrapping_sub` and the mask of the lanes where `self - other` overflowed.
     pub const fn checked_sub(self: Self, other: Self) (Self, Mask<N>) {
-        return self.wrapping_sub(other), self.overflow_sub(other);
+        return (self.wrapping_sub(other), self.overflow_sub(other));
     }
 
     /// `wrapping_mul` and the mask of the lanes where `self * other` overflowed.
     pub const fn checked_mul(self: Self, other: Self) (Self, Mask<N>) {
-        return self.wrapping_mul(other), self.overflow_mul(other);
+        return (self.wrapping_mul(other), self.overflow_mul(other));
     }
 
     @intrinsic("simd.overflow_add")
@@ -739,17 +739,17 @@ pub const fn swap_bytes<T: SimdInt, const N: usize>(a: Simd<T, N>) Simd<T, N>;
 
 /// `a.checked_add(b)`.
 pub const fn checked_add<T: SimdInt, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Mask<N>) {
-    return a.wrapping_add(b), a.overflow_add(b);
+    return (a.wrapping_add(b), a.overflow_add(b));
 }
 
 /// `a.checked_sub(b)`.
 pub const fn checked_sub<T: SimdInt, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Mask<N>) {
-    return a.wrapping_sub(b), a.overflow_sub(b);
+    return (a.wrapping_sub(b), a.overflow_sub(b));
 }
 
 /// `a.checked_mul(b)`.
 pub const fn checked_mul<T: SimdInt, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Mask<N>) {
-    return a.wrapping_mul(b), a.overflow_mul(b);
+    return (a.wrapping_mul(b), a.overflow_mul(b));
 }
 
 /// `a.abs_diff(b)`.
@@ -916,7 +916,7 @@ pub const fn swizzle_checked<T: SimdElement, U: SimdInt, const N: usize, const M
     Mask<M>
 ) {
     static_assert(type_info::<U>().kind == type_info::<u8>().kind, "swizzle_checked: the indexes must be unsigned");
-    return swizzle_zero(v, idx), swizzle_oob(v, idx);
+    return (swizzle_zero(v, idx), swizzle_oob(v, idx));
 }
 
 @intrinsic("simd.swizzle_or_zero")
@@ -966,12 +966,12 @@ pub const fn deinterleave_odd<T: SimdElement, const N: usize>(a: Simd<T, N>, b: 
 
 /// `(interleave_low(a, b), interleave_high(a, b))`.
 pub const fn zip<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
-    return shuffle(a, b, lane_list::<N>(0, 2, 0, 0)), shuffle(a, b, lane_list::<N>(N / 2, 2, 0, 0));
+    return (shuffle(a, b, lane_list::<N>(0, 2, 0, 0)), shuffle(a, b, lane_list::<N>(N / 2, 2, 0, 0)));
 }
 
 /// `(deinterleave_even(a, b), deinterleave_odd(a, b))`.
 pub const fn unzip<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
-    return shuffle(a, b, lane_list::<N>(0, 3, 0, 0)), shuffle(a, b, lane_list::<N>(1, 3, 0, 0));
+    return (shuffle(a, b, lane_list::<N>(0, 3, 0, 0)), shuffle(a, b, lane_list::<N>(1, 3, 0, 0)));
 }
 
 // The index list of `N` lanes from `base`: kind 0 counts down by `down` per lane (`reverse`), 1 counts
@@ -981,13 +981,13 @@ const fn lane_list<const N: usize>(base: usize, kind: u8, down: usize, up: usize
     let mut a = [0usize; N];
     for i in 0..N {
         unsafe a[i] = if kind == 0 {
-            base - i * down;
+            base - i * down
         } else if kind == 1 {
-            (base + i * up) % N;
+            (base + i * up) % N
         } else if kind == 2 {
-            base + i / 2 + i % 2 * N;
+            base + i / 2 + i % 2 * N
         } else {
-            base + 2 * i;
+            base + 2 * i
         };
     }
     return a;
@@ -1017,17 +1017,17 @@ pub const fn reduce_mul<T: SimdInt, const N: usize>(v: Simd<T, N>) T;
 /// The lanes' sum, or None when the exact sum does not fit `T`.
 pub const fn reduce_add_checked<T: SimdInt, const N: usize>(v: Simd<T, N>) Option<T> {
     if reduce_add_overflows(v) {
-        return Option::<T>::None;
+        return None;
     }
-    return Option::<T>::Some(reduce_add(v));
+    return Some(reduce_add(v));
 }
 
 /// The lanes' product, or None when the exact product does not fit `T`.
 pub const fn reduce_mul_checked<T: SimdInt, const N: usize>(v: Simd<T, N>) Option<T> {
     if reduce_mul_overflows(v) {
-        return Option::<T>::None;
+        return None;
     }
-    return Option::<T>::Some(reduce_mul(v));
+    return Some(reduce_mul(v));
 }
 
 @intrinsic("simd.reduce_add_overflows")
@@ -1101,9 +1101,9 @@ pub const fn arg_max<T: SimdInt, const N: usize>(v: Simd<T, N>) usize;
 pub const fn arg_min_num<T: SimdFloat, const N: usize>(v: Simd<T, N>) Option<usize> {
     let i = arg_min_lane(v);
     if i == N {
-        return Option::<usize>::None;
+        return None;
     }
-    return Option::<usize>::Some(i);
+    return Some(i);
 }
 
 /// The lowest lane holding the largest non-NaN value (`+0.0` above `-0.0`), or None when every lane
@@ -1111,9 +1111,9 @@ pub const fn arg_min_num<T: SimdFloat, const N: usize>(v: Simd<T, N>) Option<usi
 pub const fn arg_max_num<T: SimdFloat, const N: usize>(v: Simd<T, N>) Option<usize> {
     let i = arg_max_lane(v);
     if i == N {
-        return Option::<usize>::None;
+        return None;
     }
-    return Option::<usize>::Some(i);
+    return Some(i);
 }
 
 @intrinsic("simd.arg_min_num")
@@ -1285,9 +1285,9 @@ extend<const N: usize> Mask<N> {
         let bit = 1u64 << i as u64;
         let bits = (*self) as u64;
         let nb = if b {
-            bits | bit;
+            bits | bit
         } else {
-            bits & ~bit;
+            bits & ~bit
         };
         *self = nb as Self;
     }
@@ -1316,18 +1316,18 @@ extend<const N: usize> Mask<N> {
     pub const fn first_set(self: Self) Option<usize> {
         let bits = self as u64;
         if bits == 0 {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::<usize>::Some(bits.trailing_zeros());
+        return Some(bits.trailing_zeros());
     }
 
     /// The highest set lane, or None when no lane is set.
     pub const fn last_set(self: Self) Option<usize> {
         let bits = self as u64;
         if bits == 0 {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::<usize>::Some(63 - bits.leading_zeros());
+        return Some(63 - bits.leading_zeros());
     }
 
     /// The lanes as bits: lane `i` is bit `i`, and the bits from `N` up are zero.
@@ -1347,9 +1347,9 @@ extend<const N: usize> Mask<N> {
     /// The mask whose lane `i` is bit `i` of `b`, or None when a bit from `N` up is set.
     pub const fn from_bits(b: u64) Option<Mask<N>> {
         if (b & ~(~0u64 >> (64 - N) as u64)) != 0 {
-            return Option::<Mask<N>>::None;
+            return None;
         }
-        return Option::<Mask<N>>::Some(b as Self);
+        return Some(b as Self);
     }
 }
 

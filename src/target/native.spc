@@ -146,11 +146,11 @@ pub(package) fn object(
     let mut gx = xgen::Gen::new(p, &mut o, win);
     let mut g = Backend { a: &mut ga, x: &mut gx, x64: x64 };
     let fmt = if apple {
-        asmr::FMT_MACHO;
+        asmr::FMT_MACHO
     } else if win {
-        asmr::FMT_COFF;
+        asmr::FMT_COFF
     } else {
-        asmr::FMT_ELF;
+        asmr::FMT_ELF
     };
     // The context switch and its entry are their target's assembly (`target::ctxswitch`), after the
     // module-level assembly, as the runtime held them.
@@ -185,7 +185,7 @@ pub(package) fn object(
             continue;
         }
         let nm = String::from_str(o.name_of(k as u32 - 1));
-        let s = p.find_symbol(nm.as_str());
+        let s = p.find_symbol(&nm);
         if s == NONE || nm.as_str().starts_with("__sc_zst_") {
             continue;
         }
@@ -206,25 +206,25 @@ pub(package) fn object(
     if all.len() != 0 {
         let mut asr = asmr::Asm::new(
             if x64 {
-                asmr::ISA_X64;
+                asmr::ISA_X64
             } else {
-                asmr::ISA_A64;
+                asmr::ISA_A64
             },
             fmt,
         );
-        if !asr.module(&mut o, all.as_str()) {
+        if !asr.module(&mut o, &all) {
             err.format_into("module-level assembly: {}", asr.err.as_str());
             return false;
         }
     }
     if p.debug && o.funcs.len() != 0 {
-        let d = dw::Dwarf::of_obj(&o, p, p.comp_dir.as_str(), p.ptr_bytes);
+        let d = dw::Dwarf::of_obj(&o, p, &p.comp_dir, p.ptr_bytes);
         let fmt = if apple {
-            dw::F_MACHO;
+            dw::F_MACHO
         } else if win {
-            dw::F_COFF;
+            dw::F_COFF
         } else {
-            dw::F_ELF;
+            dw::F_ELF
         };
         dw::attach(&mut o, &d, fmt, ast_pick(x64, x::R_ABS64, a::R_ABS64));
     }
@@ -240,7 +240,7 @@ pub(package) fn object(
     for k in ob::S_COUNT as usize..o.secs.len() {
         let mut sect: str = "";
         let mut seg: str = "";
-        if mo::named_flags(o.secs[k].name.as_str(), o.secs[k].code, &mut sect, &mut seg) == mo::NONE32 {
+        if mo::named_flags(&o.secs[k].name, o.secs[k].code, &mut sect, &mut seg) == mo::NONE32 {
             err.format_into("the section '{}' is not a Mach-O section this backend writes", o.secs[k].name.as_str());
             return false;
         }
@@ -251,9 +251,9 @@ pub(package) fn object(
 
 const fn ast_pick(c: bool, t: u8, f: u8) u8 {
     return if c {
-        t;
+        t
     } else {
-        f;
+        f
     };
 }
 
@@ -321,7 +321,7 @@ fn wasm_object(p: &Package, funcs: []u32, datas: []u32, text: str, out: &mut Vec
             continue;
         }
         let nm = String::from_str(o.name_of(k as u32 - 1));
-        let s = p.find_symbol(nm.as_str());
+        let s = p.find_symbol(&nm);
         if s == NONE || nm.as_str().starts_with("__sc_zst_") {
             continue;
         }
@@ -330,9 +330,9 @@ fn wasm_object(p: &Package, funcs: []u32, datas: []u32, text: str, out: &mut Vec
             continue;
         }
         let ok = if ps.kind == SK_FUNC {
-            g.func(s, true);
+            g.func(s, true)
         } else {
-            g.data(s, true);
+            g.data(s, true)
         };
         if !ok {
             err.format_into("{}: {}", nm.as_str(), g.err.as_str());

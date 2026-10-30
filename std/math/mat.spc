@@ -229,9 +229,9 @@ extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> {
     pub fn from_mat<const C2: usize, const R2: usize>(m: Mat<T, C2, R2>) Mat<T, C, R> {
         let mut r = Mat::<T, C, R>::identity();
         let cols = if C == 4 && R == 4 && C2 == 4 && R2 == 2 {
-            2;
+            2
         } else {
-            C;
+            C
         };
         for i in 0..cols {
             for j in 0..R {
@@ -415,14 +415,14 @@ extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> as IndexMut<Vec<T
 // The half-open bounds of `r` within `[0, n)` of a value of type `name`; a range outside traps.
 const fn col_range(r: Range<usize>, n: usize, name: str) (usize, usize) {
     let hi = if r.inclusive {
-        r.end + 1;
+        r.end + 1
     } else {
-        r.end;
+        r.end
     };
     if r.start > hi || hi > n {
         panic_parts(name, "[a..b]: range out of bounds");
     }
-    return r.start, hi;
+    return (r.start, hi);
 }
 
 // `==`: every column equal.
@@ -430,7 +430,7 @@ extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> as Eq {
     pub fn eq(self: &Mat<T, C, R>, other: &Mat<T, C, R>) bool {
         for i in 0..C {
             if unsafe {
-                self.c[i] != other.c[i];
+                self.c[i] != other.c[i]
             } {
                 return false;
             }
@@ -775,7 +775,7 @@ pub const fn determinant<T: Scalar, const N: usize>(m: Mat<T, N, N>) T {
     }
     if N == 3 {
         return unsafe {
-            m.c[0].e[0] * (m.c[1].e[1] * m.c[2].e[2] - m.c[2].e[1] * m.c[1].e[2]) - m.c[1].e[0] * (m.c[0].e[1] * m.c[2].e[2] - m.c[2].e[1] * m.c[0].e[2]) + m.c[2].e[0] * (m.c[0].e[1] * m.c[1].e[2] - m.c[1].e[1] * m.c[0].e[2]);
+            m.c[0].e[0] * (m.c[1].e[1] * m.c[2].e[2] - m.c[2].e[1] * m.c[1].e[2]) - m.c[1].e[0] * (m.c[0].e[1] * m.c[2].e[2] - m.c[2].e[1] * m.c[0].e[2]) + m.c[2].e[0] * (m.c[0].e[1] * m.c[1].e[2] - m.c[1].e[1] * m.c[0].e[2])
         };
     }
     unsafe {

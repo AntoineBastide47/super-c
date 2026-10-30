@@ -23,7 +23,7 @@ pub struct Error {
 /// leaf error conforms with an empty extend (`@derive(ErrorSource)`).
 pub interface ErrorSource: Format {
     fn source(self: &Self) Option<&Error> {
-        return Option::<&Error>::None;
+        return None;
     }
 
     /// The chain below `self`: `source()`, then its source, until one has none. `self` is not part of it.
@@ -40,22 +40,18 @@ pub struct ErrorSources<'a> {
 extend Error {
     /// Copies `message`'s bytes into an owned String the Error frees.
     pub fn new(code: i32, message: str) Error {
-        return Error { code: code, message: String::from_str(message), source: Option::<Box<Error>>::None };
+        return Error { code: code, message: String::from_str(message), source: None };
     }
 
     /// Takes ownership of `message` (no byte copy).
     pub const fn from_string(code: i32, message: String) Error {
-        return Error { code: code, message: message, source: Option::<Box<Error>>::None };
+        return Error { code: code, message: message, source: None };
     }
 
     /// An Error that wraps `source`: copies `message`, and takes ownership of `source` (one allocation for
     /// its box).
     pub fn with_source(code: i32, message: str, source: Error) Error {
-        return Error {
-            code: code,
-            message: String::from_str(message),
-            source: Option::<Box<Error>>::Some(Box::new(source)),
-        };
+        return Error { code: code, message: String::from_str(message), source: Some(Box::new(source)) };
     }
 
     /// The message text.
@@ -84,7 +80,7 @@ extend Error as Format {
 extend Error as ErrorSource {
     pub fn source(self: &Error) Option<&Error> {
         return switch &self.source {
-            Some(b) => Option::<&Error>::Some(b),
+            Some(b) => Some(b),
             None => Option::<&Error>::None,
         };
     }

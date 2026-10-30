@@ -75,9 +75,9 @@ fn wname(o: &mut Vector<u8>, s: str) {
     for i in 0..16usize {
         o.push(
             if i < s.len() {
-                s.byte_at(i);
+                s.byte_at(i)
             } else {
-                0;
+                0
             },
         );
     }
@@ -147,7 +147,7 @@ pub(package) fn named_flags<'a>(spec: str<'a>, code: bool, sect: &mut str<'a>, s
 fn sec_names<'a>(o: &'a ob::Obj, k: u8, sect: &mut str<'a>, seg: &mut str<'a>) u32 {
     if k >= ob::S_COUNT && k != TV {
         let s = &o.secs[k as usize];
-        return named_flags(s.name.as_str(), s.code, sect, seg);
+        return named_flags(&s.name, s.code, sect, seg);
     }
     *seg = "__DATA";
     if k == ob::S_TEXT {
@@ -208,7 +208,7 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
             ob::w32(&mut e, fr.compact);
             ob::w64(&mut e, 0);
             ob::w64(&mut e, 0);
-            o.put(cu, e.as_slice());
+            o.put(cu, &e);
             o.reloc(cu, a::R_ABS64, at, fr.sym, fr.off);
         }
     }
@@ -228,7 +228,7 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         }
         let mut init = String::from_str(o.name_of(k as u32));
         init.push_str("$tlv$init");
-        let ik = o.sym(init.as_str());
+        let ik = o.sym(&init);
         let iy = o.syms.index_mut(ik as usize);
         iy.sec = y.sec;
         iy.off = y.off;
@@ -345,11 +345,11 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         for k in 0..o.syms.len() {
             let y = o.syms[k];
             let grp = if y.sec == ob::NOSEC {
-                2;
+                2
             } else if (y.flags & ob::SF_GLOBAL) != 0 {
-                1;
+                1
             } else {
-                0;
+                0
             };
             if grp == pass {
                 order.push(k as u32);
@@ -419,22 +419,22 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
             let si = secno[y.sec as usize];
             nl.push(
                 N_SECT | if (y.flags & ob::SF_GLOBAL) != 0 {
-                    N_EXT;
+                    N_EXT
                 } else {
-                    0;
+                    0
                 } | if (y.flags & ob::SF_HIDDEN) != 0 {
-                    N_PEXT;
+                    N_PEXT
                 } else {
-                    0;
+                    0
                 },
             );
             nl.push(si);
             ob::w16(
                 &mut nl,
                 if (y.flags & ob::SF_USED) != 0 {
-                    N_NO_DEAD_STRIP;
+                    N_NO_DEAD_STRIP
                 } else {
-                    0;
+                    0
                 },
             );
             ob::w64(&mut nl, addr[(si - 1) as usize] + y.off);
@@ -481,9 +481,9 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         ob::w32(
             out,
             if rel_n[i] != 0 {
-                rel_off[i];
+                rel_off[i]
             } else {
-                0;
+                0
             },
         );
         ob::w32(out, rel_n[i]);
@@ -554,7 +554,7 @@ fn zerofill(o: &ob::Obj, k: u8) bool {
     if k >= ob::S_COUNT && k != TV {
         let mut sect: str = "";
         let mut seg: str = "";
-        let fl = named_flags(o.secs[k as usize].name.as_str(), false, &mut sect, &mut seg);
+        let fl = named_flags(&o.secs[k as usize].name, false, &mut sect, &mut seg);
         return fl != NONE32 && (fl & 0xFF) == S_ZEROFILL;
     }
     return k == ob::S_BSS || k == ob::S_TBSS;
@@ -563,10 +563,10 @@ fn zerofill(o: &ob::Obj, k: u8) bool {
 // The size and alignment of section kind `k` (`tv` the descriptors).
 const fn sec_size(o: &ob::Obj, tv: &Vector<u8>, k: u8) (u64, u8) {
     if k == TV {
-        return tv.len() as u64, 3;
+        return (tv.len() as u64, 3);
     }
     let s = &o.secs[k as usize];
-    return s.size, s.align_log2;
+    return (s.size, s.align_log2);
 }
 
 // One relocation entry (two for an addend) of `r`, its symbol numbered by `symix`.

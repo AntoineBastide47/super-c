@@ -99,7 +99,7 @@ fn expm1_r<T: Lane, const P: Poly, const N: usize>(r: Simd<T, N>) Simd<T, N> {
 fn reduce_ln2<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let kc = T::kc();
     let k = (x * kc.log2e_hi).round_even();
-    return (-k).fma(Simd::splat(kc.ln2_lo), (-k).fma(Simd::splat(kc.ln2_hi), x)), k;
+    return ((-k).fma(Simd::splat(kc.ln2_lo), (-k).fma(Simd::splat(kc.ln2_hi), x)), k);
 }
 
 /// e^x.
@@ -134,7 +134,7 @@ fn expm1_k<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>, Simd
     let q = expm1_r::<T, {Poly::ExpP}, N>(r);
     let y = sp::<T, N>(1.0) + q;
     let t = T::pow2i(at_most(k, Simd::splat(kc.sub_bits)));
-    return choose(k.greater_than(Simd::splat(kc.sub_bits)), scale(y, k), t.fma(q, t - T::c(1.0))), y, k;
+    return (choose(k.greater_than(Simd::splat(kc.sub_bits)), scale(y, k), t.fma(q, t - T::c(1.0))), y, k);
 }
 
 /// e^x - 1, accurate near 0.
@@ -175,7 +175,7 @@ fn log1p_v<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let c = x - (u - T::c(1.0));
     let (e, v, im) = T::log_b(u);
     let cu = c * im * T::pow2i(at_most(at_least(-e, Simd::splat(kc.emin)), Simd::splat(kc.emax)));
-    return e.fma(Simd::splat(kc.ln2_hi), v + e.fma(Simd::splat(kc.ln2_lo), cu)), u;
+    return (e.fma(Simd::splat(kc.ln2_hi), v + e.fma(Simd::splat(kc.ln2_lo), cu)), u);
 }
 
 /// log(1 + x), accurate near 0.
@@ -226,9 +226,9 @@ pub fn hypot<T: Lane, const N: usize>(x: Simd<T, N>, y: Simd<T, N>) Simd<T, N> {
     let r = if far {
         let hs = scale(hi, -e);
         let ls = scale(lo, -e);
-        scale(ls.fma(ls, hs * hs).sqrt(), e);
+        scale(ls.fma(ls, hs * hs).sqrt(), e)
     } else {
-        lo.fma(lo, hi * hi).sqrt();
+        lo.fma(lo, hi * hi).sqrt()
     };
     return hypot_finish(x, y, r);
 }
@@ -244,10 +244,10 @@ fn reduce_pio2<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>) 
         let fin = x.is_finite();
         let (bq, bh, bl) = T::rem_pio2_big(choose(big & fin, x, Simd::splat(kc.cw_max)));
         let q = k - (k * T::c(0.25)).floor() * T::c(4.0);
-        return choose(big, bq, q), choose(big, choose(fin, bh + bl, x - x), sub_pio2(x, k));
+        return (choose(big, bq, q), choose(big, choose(fin, bh + bl, x - x), sub_pio2(x, k)));
     }
     let k = (x * kc.two_over_pi).round_even();
-    return k - (k * T::c(0.25)).floor() * T::c(4.0), sub_pio2(x, k);
+    return (k - (k * T::c(0.25)).floor() * T::c(4.0), sub_pio2(x, k));
 }
 
 fn sin_r<T: Lane, const N: usize>(r: Simd<T, N>) Simd<T, N> {
@@ -288,7 +288,7 @@ pub fn sincos<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let c1 = choose(odd, s0, c0);
     let s = choose(q.greater_equal(sp(2.0)), -s1, s1);
     let c = choose(q.equal(sp(1.0)) | q.equal(sp(2.0)), -c1, c1);
-    return choose(x.equal(sp(0.0)), x, s), c;
+    return (choose(x.equal(sp(0.0)), x, s), c);
 }
 
 /// The tangent.
@@ -425,7 +425,7 @@ fn erfc_k<T: Lane, const N: usize>(a: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let (g, _) = T::erfc_g(b, (e + T::c(1.0)) * T::c(8.0) + ((m - T::c(1.0)) * T::c(8.0)).floor());
     let (sh, sl) = two_prod(b, b);
     let (r, k) = reduce_ln2(-sh);
-    return (sp::<T, N>(1.0) + expm1_r::<T, {Poly::ExpB}, N>(r - sl)) * g, k;
+    return ((sp::<T, N>(1.0) + expm1_r::<T, {Poly::ExpB}, N>(r - sl)) * g, k);
 }
 
 /// The complementary error function, 1 - erf x, accurate where erf x is near 1.
@@ -433,16 +433,16 @@ pub fn erfc<T: Lane, const N: usize>(x: Simd<T, N>) Simd<T, N> {
     let a = x.abs();
     let lo = a.less_than(sp(0.5));
     let s = if lo.any() {
-        sp::<T, N>(1.0) - erf_b(x);
+        sp::<T, N>(1.0) - erf_b(x)
     } else {
-        x;
+        x
     };
     let b = if (!lo).any() {
         let (y, k) = erfc_k(a);
         let c = scale(y, k);
-        choose(x.less_than(sp(0.0)), sp::<T, N>(2.0) - c, c);
+        choose(x.less_than(sp(0.0)), sp::<T, N>(2.0) - c, c)
     } else {
-        x;
+        x
     };
     return choose(lo, s, choose(x.is_nan(), x, b));
 }

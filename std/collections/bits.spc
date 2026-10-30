@@ -289,17 +289,17 @@ const fn words_toggle(d: []mut u64, i: usize) {
 const fn words_next_one(w: []u64, from: usize) Option<usize> {
     let mut i = from / 64;
     if i >= w.len {
-        return Option::<usize>::None;
+        return None;
     }
     let mut bits = unsafe w.ptr[i] & u64::MAX << (from % 64) as u64;
     while bits == 0 {
         i += 1;
         if i == w.len {
-            return Option::<usize>::None;
+            return None;
         }
         bits = unsafe w.ptr[i];
     }
-    return Option::<usize>::Some(i * 64 + bits.trailing_zeros());
+    return Some(i * 64 + bits.trailing_zeros());
 }
 
 const fn words_last_one(w: []u64) Option<usize> {
@@ -308,10 +308,10 @@ const fn words_last_one(w: []u64) Option<usize> {
         i -= 1;
         let bits = unsafe w.ptr[i];
         if bits != 0 {
-            return Option::<usize>::Some(i * 64 + 63 - bits.leading_zeros());
+            return Some(i * 64 + 63 - bits.leading_zeros());
         }
     }
-    return Option::<usize>::None;
+    return None;
 }
 
 // Bits r of a container of `nbits` bits, bit r.start at bit 0. Panics outside 0..nbits or above 64 bits.
@@ -320,9 +320,9 @@ const fn words_range(w: []u64, nbits: usize, r: Range<usize>) u64 {
         panic("bits[a..b]: range out of bounds");
     }
     let hi = if r.inclusive {
-        r.end + 1;
+        r.end + 1
     } else {
-        r.end;
+        r.end
     };
     if r.start > hi || hi > nbits || hi - r.start > 64 {
         panic("bits[a..b]: range out of bounds or wider than 64 bits");
@@ -381,13 +381,13 @@ extend<const N: usize> BitSet<N> {
     pub fn from_u64(v: u64) Option<BitSet<N>> {
         static_assert(N <= 64, "BitSet::from_u64 needs N <= 64");
         if N < 64 && v >> N as u64 != 0 {
-            return Option::<BitSet<N>>::None;
+            return None;
         }
         let mut s = unsafe zeroed::<BitSet<N>>();
         if N > 0 {
             unsafe s.words[0] = v;
         }
-        return Option::<BitSet<N>>::Some(s);
+        return Some(s);
     }
 
     /// The bits as an integer, bit i at bit i; never loses a bit. Fails the build for N above 64.
@@ -536,17 +536,17 @@ extend<const N: usize> BitSet<N> {
     pub fn parse(text: str) Result<BitSet<N>, ParseBitsError> {
         let n = text.len();
         if n > N {
-            return Result::<BitSet<N>, ParseBitsError>::Err(ParseBitsError::TooLong);
+            return Err(TooLong);
         }
         let mut s = unsafe zeroed::<BitSet<N>>();
         for k in 0..n {
             let c = text.byte_at(k);
             if c != b'0' && c != b'1' {
-                return Result::<BitSet<N>, ParseBitsError>::Err(ParseBitsError::InvalidDigit(k));
+                return Err(InvalidDigit(k));
             }
             words_set(s.words, n - 1 - k, c == b'1');
         }
-        return Result::<BitSet<N>, ParseBitsError>::Ok(s);
+        return Ok(s);
     }
 }
 
@@ -617,9 +617,9 @@ extend<A: Allocator> BitVec<A> {
         let b = (self.len % 64) as u64;
         // A word becomes used at its bit 0, so its old contents do not count.
         let old = if b == 0 {
-            0u64;
+            0u64
         } else {
-            unsafe self.words[i];
+            unsafe self.words[i]
         };
         unsafe self.words[i] = old | value as u64 << b;
         self.len += 1;
@@ -628,14 +628,14 @@ extend<A: Allocator> BitVec<A> {
     /// Removes and returns the last bit; `None` when empty.
     pub const fn pop(self: &mut BitVec<A>) Option<bool> {
         if self.len == 0 {
-            return Option::<bool>::None;
+            return None;
         }
         self.len -= 1;
         let i = self.len / 64;
         let b = (self.len % 64) as u64;
         let w = unsafe self.words[i];
         unsafe self.words[i] = w & ~(1u64 << b);
-        return Option::<bool>::Some((w >> b & 1) != 0);
+        return Some((w >> b & 1) != 0);
     }
 
     /// Whether bit i is set. Panics when i >= len.
@@ -845,9 +845,9 @@ extend Ones {
             return Ones { words: w.ptr, front: 0, back: 0, front_bits: 0, back_bits: 0 };
         }
         let back_bits = if w.len > 1 {
-            unsafe w.ptr[w.len - 1];
+            unsafe w.ptr[w.len - 1]
         } else {
-            0u64;
+            0u64
         };
         return Ones { words: w.ptr, front: 0, back: w.len - 1, front_bits: unsafe w.ptr[0], back_bits: back_bits };
     }
@@ -858,7 +858,7 @@ extend Ones as Iterator<usize> {
         // Each pass moves `front` one word toward `back`.
         while self.front_bits == 0 {
             if self.front == self.back {
-                return Option::<usize>::None;
+                return None;
             }
             self.front += 1;
             if self.front == self.back {
@@ -870,18 +870,18 @@ extend Ones as Iterator<usize> {
         }
         let t = self.front_bits.trailing_zeros();
         self.front_bits = self.front_bits & self.front_bits - 1;
-        return Option::<usize>::Some(self.front * 64 + t);
+        return Some(self.front * 64 + t);
     }
 
     /// Exact for the words already loaded; each word between the ends adds up to 64 to the upper bound.
     pub fn size_hint(self: &Ones) (usize, Option<usize>) {
         let known = self.front_bits.count_ones() + self.back_bits.count_ones();
         let between = if self.back > self.front + 1 {
-            self.back - self.front - 1;
+            self.back - self.front - 1
         } else {
-            0;
+            0
         };
-        return known, Option::<usize>::Some(known + between * 64);
+        return (known, Option::<usize>::Some(known + between * 64));
     }
 }
 
@@ -892,7 +892,7 @@ extend Ones as DoubleEndedIterator<usize> {
             if self.back_bits != 0 {
                 let t = 63 - self.back_bits.leading_zeros();
                 self.back_bits = self.back_bits ^ 1u64 << t as u64;
-                return Option::<usize>::Some(self.back * 64 + t);
+                return Some(self.back * 64 + t);
             }
             self.back -= 1;
             if self.back != self.front {
@@ -900,11 +900,11 @@ extend Ones as DoubleEndedIterator<usize> {
             }
         }
         if self.front_bits == 0 {
-            return Option::<usize>::None;
+            return None;
         }
         let t = 63 - self.front_bits.leading_zeros();
         self.front_bits = self.front_bits ^ 1u64 << t as u64;
-        return Option::<usize>::Some(self.front * 64 + t);
+        return Some(self.front * 64 + t);
     }
 }
 

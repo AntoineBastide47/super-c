@@ -93,16 +93,16 @@ fn weak_upgrades_in_a_task_until_the_last_strong_drop() {
     launch move (|| {
         // While the value lives, an upgrade sees it; the upgraded handle drops inside the arm.
         let seen = if let Some(a) = w.upgrade() {
-            a.get().v;
+            a.get().v
         } else {
-            -1;
+            -1
         };
         let _ = reply.send(seen);
         let _ = go.recv();
         let after = if w.upgrade().is_none() {
-            1;
+            1
         } else {
-            0;
+            0
         };
         let _ = reply.send(after);
     });

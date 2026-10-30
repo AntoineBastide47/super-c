@@ -108,9 +108,9 @@ fn div2by1(u1: u64, u0: u64, v: u64, r: *mut u64) u64 {
     let vn1 = vn >> 32;
     let vn0 = vn & 0xFFFFFFFFu64;
     let un32 = if s == 0 {
-        u1;
+        u1
     } else {
-        u1 << s | u0 >> 64 - s;
+        u1 << s | u0 >> 64 - s
     };
     let un10 = u0 << s;
     let un1 = un10 >> 32;
@@ -394,9 +394,9 @@ extend<const BITS: usize> IntBits<BITS> {
             // Row i: the limbs of b that land below the top, then the carry into the limb past them,
             // which no earlier row has written.
             let m = if nb < n - i {
-                nb;
+                nb
             } else {
-                n - i;
+                n - i
             };
             let mut carry: u64 = 0;
             for j in 0..m {
@@ -696,17 +696,17 @@ extend<const BITS: usize> IntBits<BITS> {
         let mut un: [u64; (BITS + 63) / 64 + 1] = [0; (BITS + 63) / 64 + 1];
         for i in 0..n {
             let lo = if s == 0 || i == 0 {
-                0u64;
+                0u64
             } else {
-                divisor.get(i - 1) >> 64 - s;
+                divisor.get(i - 1) >> 64 - s
             };
             unsafe vn[i] = divisor.get(i) << s | lo;
         }
         for i in 0..m + 1 {
             let lo = if s == 0 || i == 0 {
-                0u64;
+                0u64
             } else {
-                self.get(i - 1) >> 64 - s;
+                self.get(i - 1) >> 64 - s
             };
             unsafe un[i] = self.get(i) << s | lo;
         }
@@ -791,9 +791,9 @@ extend<const BITS: usize> IntBits<BITS> {
         // The remainder: the low n limbs, shifted back.
         for i in 0..n {
             let hi = if s == 0 {
-                0u64;
+                0u64
             } else {
-                unsafe un[i + 1] << 64 - s;
+                unsafe un[i + 1] << 64 - s
             };
             r.set(i, unsafe un[i] >> s | hi);
         }
@@ -814,9 +814,9 @@ extend<const BITS: usize> IntBits<BITS> {
         }
         // The shifted dividend's limb past the top: below 2^s, so below dn.
         let mut rem = if s == 0 {
-            0u64;
+            0u64
         } else {
-            unsafe self.limbs[n - 1] >> 64 - s;
+            unsafe self.limbs[n - 1] >> 64 - s
         };
         let mut i = n;
         while i > 0 {
@@ -839,18 +839,18 @@ extend<const BITS: usize> IntBits<BITS> {
         for i in 0..n {
             let v = unsafe self.limbs[i];
             unsafe r.limbs[n - 1 - i] = if bits {
-                rev64(v);
+                rev64(v)
             } else {
-                bswap64(v);
+                bswap64(v)
             };
         }
         let a = (n * 64 - BITS) as u64;
         if a != 0 {
             for i in 0..n {
                 let hi = if i + 1 < n {
-                    unsafe r.limbs[i + 1] << 64 - a;
+                    unsafe r.limbs[i + 1] << 64 - a
                 } else {
-                    0u64;
+                    0u64
                 };
                 unsafe r.limbs[i] = unsafe r.limbs[i] >> a | hi;
             }
@@ -1026,22 +1026,22 @@ extend<const BITS: usize> UInt<BITS> {
             None => {
                 panic("arithmetic overflow");
             },
-        };
+        }
     }
 
     /// The smallest power of two not below `self`; None when it does not fit.
     pub fn checked_next_power_of_two(self: &UInt<BITS>) Option<UInt<BITS>> {
         let one = UInt::<BITS>::one();
         if self.cmp(&one) <= 0 {
-            return Option::<UInt<BITS>>::Some(one);
+            return Some(one);
         }
         // For a value above one, the answer is 1 << bit_length(value - 1): exactly the value when it
         // already is a power of two, the next one otherwise.
         let n = self.wrapping_sub(&one).bit_length();
         if n >= BITS {
-            return Option::<UInt<BITS>>::None;
+            return None;
         }
-        return Option::<UInt<BITS>>::Some(one.shl(n));
+        return Some(one.shl(n));
     }
 
     /// Addition modulo 2^BITS.
@@ -1217,9 +1217,9 @@ extend<const BITS: usize> UInt<BITS> {
     /// Sign-extend or truncate an Int<M> into this width.
     pub const fn cast_signed<const M: usize>(v: &Int<M>) UInt<BITS> {
         let fill = if v.is_negative() {
-            0xFFFFFFFFFFFFFFFFu64;
+            0xFFFFFFFFFFFFFFFFu64
         } else {
-            0u64;
+            0u64
         };
         let mut r = UInt::<BITS>::zero();
         for i in 0..UInt::<BITS>::limbs() {
@@ -1250,9 +1250,9 @@ extend<const BITS: usize> UInt<BITS> {
         let mut c: u64 = 0;
         let r = UInt::<BITS> { bits: self.bits.add_carry(&other.bits, &mut c) };
         if c != 0 {
-            return Option::<UInt<BITS>>::None;
+            return None;
         }
-        return Option::<UInt<BITS>>::Some(r);
+        return Some(r);
     }
 
     /// The difference, or None on overflow.
@@ -1260,9 +1260,9 @@ extend<const BITS: usize> UInt<BITS> {
         let mut b: u64 = 0;
         let r = UInt::<BITS> { bits: self.bits.sub_borrow(&other.bits, &mut b) };
         if b != 0 {
-            return Option::<UInt<BITS>>::None;
+            return None;
         }
-        return Option::<UInt<BITS>>::Some(r);
+        return Some(r);
     }
 
     /// The product, or None on overflow.
@@ -1270,9 +1270,9 @@ extend<const BITS: usize> UInt<BITS> {
         let mut o = false;
         let r = UInt::<BITS> { bits: self.bits.mul_wrap(&other.bits, &mut o) };
         if o {
-            return Option::<UInt<BITS>>::None;
+            return None;
         }
-        return Option::<UInt<BITS>>::Some(r);
+        return Some(r);
     }
 
     /// The sum, clamped to the range.
@@ -1284,7 +1284,7 @@ extend<const BITS: usize> UInt<BITS> {
             None => {
                 return UInt::<BITS>::max();
             },
-        };
+        }
     }
 
     /// The difference, clamped to the range.
@@ -1296,7 +1296,7 @@ extend<const BITS: usize> UInt<BITS> {
             None => {
                 return UInt::<BITS>::zero();
             },
-        };
+        }
     }
 
     /// The product, clamped to the range.
@@ -1308,28 +1308,28 @@ extend<const BITS: usize> UInt<BITS> {
             None => {
                 return UInt::<BITS>::max();
             },
-        };
+        }
     }
 
     /// The wrapped sum and whether it overflowed.
     pub fn overflowing_add(self: &UInt<BITS>, other: &UInt<BITS>) (UInt<BITS>, bool) {
         let mut c: u64 = 0;
         let r = UInt::<BITS> { bits: self.bits.add_carry(&other.bits, &mut c) };
-        return r, c != 0;
+        return (r, c != 0);
     }
 
     /// The wrapped difference and whether it overflowed.
     pub fn overflowing_sub(self: &UInt<BITS>, other: &UInt<BITS>) (UInt<BITS>, bool) {
         let mut b: u64 = 0;
         let r = UInt::<BITS> { bits: self.bits.sub_borrow(&other.bits, &mut b) };
-        return r, b != 0;
+        return (r, b != 0);
     }
 
     /// The wrapped product and whether it overflowed.
     pub fn overflowing_mul(self: &UInt<BITS>, other: &UInt<BITS>) (UInt<BITS>, bool) {
         let mut o = false;
         let r = UInt::<BITS> { bits: self.bits.mul_wrap(&other.bits, &mut o) };
-        return r, o;
+        return (r, o);
     }
 
     /// Exponentiation by squaring. Overflow traps or wraps like the operators; `checked_pow` reports it
@@ -1343,7 +1343,7 @@ extend<const BITS: usize> UInt<BITS> {
                 unsafe sc_int_overflow("attempt to multiply with overflow".ptr());
                 return self.wrapping_pow(exp);
             },
-        };
+        }
     }
 
     /// Exponentiation by squaring modulo 2^BITS.
@@ -1375,7 +1375,7 @@ extend<const BITS: usize> UInt<BITS> {
                     None => {
                         return Option::<UInt<BITS>>::None;
                     },
-                };
+                }
             }
             e = e >> 1;
             if e == 0 {
@@ -1389,9 +1389,9 @@ extend<const BITS: usize> UInt<BITS> {
                 None => {
                     return Option::<UInt<BITS>>::None;
                 },
-            };
+            }
         }
-        return Option::<UInt<BITS>>::Some(acc);
+        return Some(acc);
     }
 
     /// |self - other|: the smaller subtracted from the larger, which wrapping arithmetic makes exact.
@@ -1415,20 +1415,20 @@ extend<const BITS: usize> UInt<BITS> {
     /// The quotient, or None for a zero divisor.
     pub fn checked_div(self: &UInt<BITS>, other: &UInt<BITS>) Option<UInt<BITS>> {
         if other.is_zero() {
-            return Option::<UInt<BITS>>::None;
+            return None;
         }
         let mut r = UInt::<BITS>::zero();
-        return Option::<UInt<BITS>>::Some(self.divmod(other, &mut r));
+        return Some(self.divmod(other, &mut r));
     }
 
     /// The remainder, or None for a zero divisor.
     pub fn checked_rem(self: &UInt<BITS>, other: &UInt<BITS>) Option<UInt<BITS>> {
         if other.is_zero() {
-            return Option::<UInt<BITS>>::None;
+            return None;
         }
         let mut r = UInt::<BITS>::zero();
         let _ = self.divmod(other, &mut r);
-        return Option::<UInt<BITS>>::Some(r);
+        return Some(r);
     }
 
     // Serialization at the value's own width: bytes() = (BITS + 7) / 8 bytes, a partial top byte
@@ -1573,7 +1573,7 @@ extend<const BITS: usize> UInt<BITS> {
     /// outside the radix, a radix outside the range, or a value too wide to represent.
     pub fn from_str_radix(s: str, radix: u32) Option<UInt<BITS>> {
         if radix < 2 || radix > 36 || s.len() == 0 {
-            return Option::<UInt<BITS>>::None;
+            return None;
         }
         // Digits gather in a u64 `c`, `m` the radix to their count, and fold into the wide value once m
         // could not take another digit, or at the end: one pass over the limbs per limb of digits. The value
@@ -1593,7 +1593,7 @@ extend<const BITS: usize> UInt<BITS> {
                 d = ch - b'A' + 10;
             }
             if d >= radix {
-                return Option::<UInt<BITS>>::None;
+                return None;
             }
             c = c * r + d as u64;
             m = m * r;
@@ -1601,13 +1601,13 @@ extend<const BITS: usize> UInt<BITS> {
                 let mut over = false;
                 acc = acc.mul_limb_add(m, c, &mut over);
                 if over {
-                    return Option::<UInt<BITS>>::None;
+                    return None;
                 }
                 c = 0;
                 m = 1;
             }
         }
-        return Option::<UInt<BITS>>::Some(UInt::<BITS> { bits: acc });
+        return Some(UInt::<BITS> { bits: acc });
     }
 }
 
@@ -1935,9 +1935,9 @@ extend<const BITS: usize> Int<BITS> {
         static_assert(M <= BITS, "widen: the target must be at least as wide as the source");
         let mut r = Int::<BITS>::zero();
         let fill = if v.is_negative() {
-            0xFFFFFFFFFFFFFFFFu64;
+            0xFFFFFFFFFFFFFFFFu64
         } else {
-            0u64;
+            0u64
         };
         for i in 0..Int::<BITS>::limbs() {
             if i < (M + 63) / 64 {
@@ -1995,9 +1995,9 @@ extend<const BITS: usize> Int<BITS> {
     /// distinct symbols; not applied implicitly.
     pub const fn cast_signed<const M: usize>(v: &Int<M>) Int<BITS> {
         let fill = if v.is_negative() {
-            0xFFFFFFFFFFFFFFFFu64;
+            0xFFFFFFFFFFFFFFFFu64
         } else {
-            0u64;
+            0u64
         };
         let mut r = Int::<BITS>::zero();
         for i in 0..Int::<BITS>::limbs() {
@@ -2065,9 +2065,9 @@ extend<const BITS: usize> Int<BITS> {
         let sa = self.is_negative();
         let sb = other.is_negative();
         if sa == sb && r.is_negative() != sa {
-            return Option::<Int<BITS>>::None;
+            return None;
         }
-        return Option::<Int<BITS>>::Some(r);
+        return Some(r);
     }
 
     /// And subtraction exactly when the operands' signs differ and the result does not match the first.
@@ -2076,9 +2076,9 @@ extend<const BITS: usize> Int<BITS> {
         let sa = self.is_negative();
         let sb = other.is_negative();
         if sa != sb && r.is_negative() != sa {
-            return Option::<Int<BITS>>::None;
+            return None;
         }
-        return Option::<Int<BITS>>::Some(r);
+        return Some(r);
     }
 
     /// The negation, or None for MIN.
@@ -2086,9 +2086,9 @@ extend<const BITS: usize> Int<BITS> {
         let mn = Int::<BITS>::min();
         if self.eq(&mn) {
             // MIN has no positive counterpart.
-            return Option::<Int<BITS>>::None;
+            return None;
         }
-        return Option::<Int<BITS>>::Some(self.wrapping_neg());
+        return Some(self.wrapping_neg());
     }
 
     /// The product, or None on overflow.
@@ -2096,9 +2096,9 @@ extend<const BITS: usize> Int<BITS> {
         let mut over = false;
         let r = self.mul_over(other, &mut over);
         if over {
-            return Option::<Int<BITS>>::None;
+            return None;
         }
-        return Option::<Int<BITS>>::Some(r);
+        return Some(r);
     }
 
     // The wrapped product and whether it overflowed, from one multiplication of the magnitudes: their
@@ -2109,14 +2109,14 @@ extend<const BITS: usize> Int<BITS> {
         let neg = self.is_negative() != other.is_negative();
         // Two's-complement magnitudes: MIN's is 2^(BITS-1), which the unsigned reading holds exactly.
         let ma = if self.is_negative() {
-            self.wrapping_neg();
+            self.wrapping_neg()
         } else {
-            *self;
+            *self
         };
         let mb = if other.is_negative() {
-            other.wrapping_neg();
+            other.wrapping_neg()
         } else {
-            *other;
+            *other
         };
         let mut over = false;
         let mut r = Int::<BITS> { bits: ma.bits.mul_wrap(&mb.bits, &mut over) };
@@ -2139,7 +2139,7 @@ extend<const BITS: usize> Int<BITS> {
                 }
                 return Int::<BITS>::max();
             },
-        };
+        }
     }
 
     /// The difference, clamped to the range.
@@ -2154,7 +2154,7 @@ extend<const BITS: usize> Int<BITS> {
                 }
                 return Int::<BITS>::max();
             },
-        };
+        }
     }
 
     /// The product, clamped to the range.
@@ -2169,28 +2169,28 @@ extend<const BITS: usize> Int<BITS> {
                 }
                 return Int::<BITS>::max();
             },
-        };
+        }
     }
 
     /// The wrapped sum and whether it overflowed.
     pub fn overflowing_add(self: &Int<BITS>, other: &Int<BITS>) (Int<BITS>, bool) {
         let r = self.wrapping_add(other);
         let sa = self.is_negative();
-        return r, sa == other.is_negative() && r.is_negative() != sa;
+        return (r, sa == other.is_negative() && r.is_negative() != sa);
     }
 
     /// The wrapped difference and whether it overflowed.
     pub fn overflowing_sub(self: &Int<BITS>, other: &Int<BITS>) (Int<BITS>, bool) {
         let r = self.wrapping_sub(other);
         let sa = self.is_negative();
-        return r, sa != other.is_negative() && r.is_negative() != sa;
+        return (r, sa != other.is_negative() && r.is_negative() != sa);
     }
 
     /// The wrapped product and whether it overflowed.
     pub fn overflowing_mul(self: &Int<BITS>, other: &Int<BITS>) (Int<BITS>, bool) {
         let mut over = false;
         let r = self.mul_over(other, &mut over);
-        return r, over;
+        return (r, over);
     }
 
     /// Exponentiation by squaring. Overflow traps or wraps like the signed operators; `checked_pow`
@@ -2206,7 +2206,7 @@ extend<const BITS: usize> Int<BITS> {
                 let u = self.to_unsigned().wrapping_pow(exp);
                 return Int::<BITS>::from_unsigned(&u);
             },
-        };
+        }
     }
 
     /// `self` to the power `exp`, or None on overflow.
@@ -2223,7 +2223,7 @@ extend<const BITS: usize> Int<BITS> {
                     None => {
                         return Option::<Int<BITS>>::None;
                     },
-                };
+                }
             }
             e = e >> 1;
             if e == 0 {
@@ -2237,9 +2237,9 @@ extend<const BITS: usize> Int<BITS> {
                 None => {
                     return Option::<Int<BITS>>::None;
                 },
-            };
+            }
         }
-        return Option::<Int<BITS>>::Some(acc);
+        return Some(acc);
     }
 
     /// Magnitude. MIN, whose magnitude is one past the top of the range, overflows as `-MIN` does: a trap
@@ -2256,7 +2256,7 @@ extend<const BITS: usize> Int<BITS> {
                 unsafe sc_int_overflow("attempt to negate with overflow".ptr());
                 return *self;
             },
-        };
+        }
     }
 
     /// Truncating division, with the remainder taking the DIVIDEND's sign: C's rule, and the built-in
@@ -2271,14 +2271,14 @@ extend<const BITS: usize> Int<BITS> {
         let neg_a = self.is_negative();
         let neg_b = other.is_negative();
         let ua = if neg_a {
-            self.wrapping_neg().to_unsigned();
+            self.wrapping_neg().to_unsigned()
         } else {
-            self.to_unsigned();
+            self.to_unsigned()
         };
         let ub = if neg_b {
-            other.wrapping_neg().to_unsigned();
+            other.wrapping_neg().to_unsigned()
         } else {
-            other.to_unsigned();
+            other.to_unsigned()
         };
         let mut ur = UInt::<BITS>::zero();
         let uq = ua.divmod(&ub, &mut ur);
@@ -2314,20 +2314,20 @@ extend<const BITS: usize> Int<BITS> {
     /// The quotient (toward zero), or None for a zero divisor or MIN / -1.
     pub fn checked_div(self: &Int<BITS>, other: &Int<BITS>) Option<Int<BITS>> {
         if other.is_zero() || self.is_min_by_neg1(other) {
-            return Option::<Int<BITS>>::None;
+            return None;
         }
         let mut r = Int::<BITS>::zero();
-        return Option::<Int<BITS>>::Some(self.divmod(other, &mut r));
+        return Some(self.divmod(other, &mut r));
     }
 
     /// The remainder (sign of the dividend), or None for a zero divisor or MIN / -1.
     pub fn checked_rem(self: &Int<BITS>, other: &Int<BITS>) Option<Int<BITS>> {
         if other.is_zero() || self.is_min_by_neg1(other) {
-            return Option::<Int<BITS>>::None;
+            return None;
         }
         let mut r = Int::<BITS>::zero();
         let _ = self.divmod(other, &mut r);
-        return Option::<Int<BITS>>::Some(r);
+        return Some(r);
     }
 
     /// Euclidean division: the remainder is always in [0, |divisor|), so the quotient rounds toward
@@ -2394,13 +2394,13 @@ extend<const BITS: usize> Int<BITS> {
     /// Parse an optionally signed decimal. `None` on anything else, or on a value out of range.
     pub fn from_str(s: str) Option<Int<BITS>> {
         if s.len() == 0 {
-            return Option::<Int<BITS>>::None;
+            return None;
         }
         let neg = s.byte_at(0) == b'-';
         let body = if neg || s.byte_at(0) == b'+' {
-            s.slice(1, s.len());
+            s.slice(1, s.len())
         } else {
-            s;
+            s
         };
         switch UInt::<BITS>::from_str(body) {
             Some(u) => {
@@ -2409,20 +2409,20 @@ extend<const BITS: usize> Int<BITS> {
                     // A magnitude of exactly MIN's is the one negative value with no positive form.
                     let mn = Int::<BITS>::min();
                     if v.is_negative() && !v.eq(&mn) {
-                        return Option::<Int<BITS>>::None;
+                        return None;
                     }
-                    return Option::<Int<BITS>>::Some(v.wrapping_neg());
+                    return Some(v.wrapping_neg());
                 }
                 if v.is_negative() {
                     // The magnitude overflowed into the sign bit.
-                    return Option::<Int<BITS>>::None;
+                    return None;
                 }
-                return Option::<Int<BITS>>::Some(v);
+                return Some(v);
             },
             None => {
                 return Option::<Int<BITS>>::None;
             },
-        };
+        }
     }
 
     /// The magnitude's digits in any radix from 2 to 36, `-`-prefixed when negative.
@@ -2443,13 +2443,13 @@ extend<const BITS: usize> Int<BITS> {
     /// Parse an optionally signed value in any radix from 2 to 36; the same range rules as `from_str`.
     pub fn from_str_radix(s: str, radix: u32) Option<Int<BITS>> {
         if s.len() == 0 {
-            return Option::<Int<BITS>>::None;
+            return None;
         }
         let neg = s.byte_at(0) == b'-';
         let body = if neg || s.byte_at(0) == b'+' {
-            s.slice(1, s.len());
+            s.slice(1, s.len())
         } else {
-            s;
+            s
         };
         switch UInt::<BITS>::from_str_radix(body, radix) {
             Some(u) => {
@@ -2457,20 +2457,20 @@ extend<const BITS: usize> Int<BITS> {
                 if neg {
                     let mn = Int::<BITS>::min();
                     if v.is_negative() && !v.eq(&mn) {
-                        return Option::<Int<BITS>>::None;
+                        return None;
                     }
-                    return Option::<Int<BITS>>::Some(v.wrapping_neg());
+                    return Some(v.wrapping_neg());
                 }
                 if v.is_negative() {
                     // The magnitude overflowed into the sign bit.
-                    return Option::<Int<BITS>>::None;
+                    return None;
                 }
-                return Option::<Int<BITS>>::Some(v);
+                return Some(v);
             },
             None => {
                 return Option::<Int<BITS>>::None;
             },
-        };
+        }
     }
 }
 
@@ -2488,7 +2488,7 @@ extend<const BITS: usize> Int<BITS> as Add {
                 unsafe sc_int_overflow("attempt to add with overflow".ptr());
                 return self.wrapping_add(other);
             },
-        };
+        }
     }
 }
 
@@ -2504,7 +2504,7 @@ extend<const BITS: usize> Int<BITS> as Sub {
                 unsafe sc_int_overflow("attempt to subtract with overflow".ptr());
                 return self.wrapping_sub(other);
             },
-        };
+        }
     }
 }
 

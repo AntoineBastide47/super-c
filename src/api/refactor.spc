@@ -55,19 +55,11 @@ pub fn prepare<R: Refactoring>(r: &mut R, s: &mut ses::Session, selection: Selec
 > {
     let sel = &selection;
     if !s.checked() {
-        return Result::<Offer, ApiError>::Err(
-            ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"),
-        );
+        return Err(ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"));
     }
     if !r.applies(s, sel) {
-        return Result::<Offer, ApiError>::Err(
-            ApiError::at(
-                Code::InvalidArgument,
-                "the refactoring does not apply here",
-                sel.file.as_str(),
-                sel.start,
-                sel.end,
-            ),
+        return Err(
+            ApiError::at(Code::InvalidArgument, "the refactoring does not apply here", &sel.file, sel.start, sel.end),
         );
     }
     let e = r.edit(s, sel, params)?;
@@ -85,21 +77,19 @@ pub fn prepare<R: Refactoring>(r: &mut R, s: &mut ses::Session, selection: Selec
             paths.push(files[i].file.clone());
             texts.push(files[i].text.clone());
         }
-        let after = s.errors_with(paths.as_slice(), texts.as_slice())?;
+        let after = s.errors_with(&paths, &texts)?;
         if after > before {
-            return Result::<Offer, ApiError>::Err(ApiError::new(Code::VerificationFailed, "the edit adds errors"));
+            return Err(ApiError::new(Code::VerificationFailed, "the edit adds errors"));
         }
     }
-    return Result::<Offer, ApiError>::Ok(Offer { edit: e, files: files });
+    return Ok(Offer { edit: e, files: files });
 }
 
 // The module index of `file`; `InvalidArgument` when the analysis has none.
 fn module_of(s: &ses::Session, file: str) Result<usize, ApiError> {
     return switch s.module_of(file) {
-        Some(m) => Result::<usize, ApiError>::Ok(m.index() as usize),
-        None => Result::<usize, ApiError>::Err(
-            ApiError::at(Code::InvalidArgument, "the file is not part of the analysis", file, 0, 0),
-        ),
+        Some(m) => Ok(m.index() as usize),
+        None => Err(ApiError::at(Code::InvalidArgument, "the file is not part of the analysis", file, 0, 0)),
     };
 }
 
@@ -140,14 +130,14 @@ extend OrganizeImports as Refactoring {
     }
 
     pub fn applies(self: &mut Self, s: &mut ses::Session, sel: &Selection) bool {
-        return s.module_of(sel.file.as_str()).is_some();
+        return s.module_of(&sel.file).is_some();
     }
 
     pub fn edit(self: &mut Self, s: &mut ses::Session, sel: &Selection, _params: str) Result<
         syn::WorkspaceEdit,
         ApiError
     > {
-        let m = module_of(s, sel.file.as_str())?;
+        let m = module_of(s, &sel.file)?;
         let mut unused = Vector::<NodeId>::new();
         emit::unused_imports(s.package_mut(), m, &mut unused);
         let p = s.package();
@@ -168,9 +158,9 @@ extend OrganizeImports as Refactoring {
             }
         }
         let mut we = syn::WorkspaceEdit::new();
-        we.expect(sel.file.as_str(), s.version(sel.file.as_str()));
+        we.expect(&sel.file, s.version(&sel.file));
         if spans.len() == 0 {
-            return Result::<syn::WorkspaceEdit, ApiError>::Ok(we);
+            return Ok(we);
         }
         // One block: only whitespace between consecutive imports.
         let mut block = true;
@@ -181,10 +171,10 @@ extend OrganizeImports as Refactoring {
             kept.sort();
             let mut text = String::new();
             for k in 0..kept.len() {
-                text.push_str(kept[k].as_str());
+                text.push_str(&kept[k]);
                 text.push_byte(b'\n');
             }
-            we.replace(sel.file.as_str(), spans[0].0, spans[spans.len() - 1].1, text.as_str());
+            we.replace(&sel.file, spans[0].0, spans[spans.len() - 1].1, &text);
         } else {
             for k in 0..spans.len() {
                 let line = src.slice(spans[k].0 as usize, spans[k].1 as usize);
@@ -193,11 +183,11 @@ extend OrganizeImports as Refactoring {
                     drop = drop && line.trim() != kept[j].as_str();
                 }
                 if drop {
-                    we.replace(sel.file.as_str(), spans[k].0, spans[k].1, "");
+                    we.replace(&sel.file, spans[k].0, spans[k].1, "");
                 }
             }
         }
-        return Result::<syn::WorkspaceEdit, ApiError>::Ok(we);
+        return Ok(we);
     }
 }
 
@@ -230,7 +220,7 @@ extend AddImport as Refactoring {
     }
 
     pub fn applies(self: &mut Self, s: &mut ses::Session, sel: &Selection) bool {
-        let m = switch s.module_of(sel.file.as_str()) {
+        let m = switch s.module_of(&sel.file) {
             Some(md) => md.index() as usize,
             None => {
                 return false;
@@ -244,7 +234,7 @@ extend AddImport as Refactoring {
         syn::WorkspaceEdit,
         ApiError
     > {
-        let m = module_of(s, sel.file.as_str())?;
+        let m = module_of(s, &sel.file)?;
         let name = word_at(src_of(s, m), sel.start);
         let cands = feat::import_candidates(s.package(), m, name);
         let mut path = String::new();
@@ -254,11 +244,11 @@ extend AddImport as Refactoring {
             }
         }
         if path.len() == 0 {
-            return Result::<syn::WorkspaceEdit, ApiError>::Err(
+            return Err(
                 ApiError::at(
                     Code::InvalidArgument,
                     "no module to import declares the name",
-                    sel.file.as_str(),
+                    &sel.file,
                     sel.start,
                     sel.end,
                 ),
@@ -266,9 +256,9 @@ extend AddImport as Refactoring {
         }
         let at = feat::import_insert_at(s.package(), m);
         let mut we = syn::WorkspaceEdit::new();
-        we.expect(sel.file.as_str(), s.version(sel.file.as_str()));
-        we.replace(sel.file.as_str(), at, at, format("import {};\n", path.as_str()).as_str());
-        return Result::<syn::WorkspaceEdit, ApiError>::Ok(we);
+        we.expect(&sel.file, s.version(&sel.file));
+        we.replace(&sel.file, at, at, format("import {};\n", path.as_str()).as_str());
+        return Ok(we);
     }
 }
 
@@ -287,7 +277,7 @@ fn extract_site(t: &syn::SyntaxTree, sel: &Selection) Option<(syn::TextRange, sy
     for _ in 0..1024 {
         let r = n.range();
         if r.start == sel.start && r.end == sel.end {
-            found = Option::<syn::Node>::Some(n);
+            found = Some(n);
         }
         if r.start < sel.start || r.end > sel.end {
             break;
@@ -299,22 +289,22 @@ fn extract_site(t: &syn::SyntaxTree, sel: &Selection) Option<(syn::TextRange, sy
             None => {
                 break;
             },
-        };
+        }
     }
     let e = found?;
     let k = e.kind();
     if k == syn::SyntaxKind::Block || k == syn::SyntaxKind::Let || k == syn::SyntaxKind::Return || k == syn::SyntaxKind::ExpressionStatement || k == syn::SyntaxKind::Function {
-        return Option::<(syn::TextRange, syn::TextRange)>::None;
+        return None;
     }
     let mut st = e;
     for _ in 0..1024 {
         let q = st.parent()?;
         if q.kind() == syn::SyntaxKind::Block {
-            return Option::<(syn::TextRange, syn::TextRange)>::Some((e.range(), st.range()));
+            return Some((e.range(), st.range()));
         }
         st = q;
     }
-    return Option::<(syn::TextRange, syn::TextRange)>::None;
+    return None;
 }
 
 extend ExtractLocal as Refactoring {
@@ -323,7 +313,7 @@ extend ExtractLocal as Refactoring {
     }
 
     pub fn applies(self: &mut Self, s: &mut ses::Session, sel: &Selection) bool {
-        let t = switch syn::tree_of(s, sel.file.as_str()) {
+        let t = switch syn::tree_of(s, &sel.file) {
             Ok(t) => t,
             Err(_) => {
                 return false;
@@ -337,19 +327,19 @@ extend ExtractLocal as Refactoring {
         ApiError
     > {
         let name = if params.len() == 0 {
-            "value";
+            "value"
         } else {
-            params;
+            params
         };
-        let t = syn::tree_of(s, sel.file.as_str())?;
+        let t = syn::tree_of(s, &sel.file)?;
         let (er, sr) = switch extract_site(&t, sel) {
             Some(x) => x,
             None => {
-                return Result::<syn::WorkspaceEdit, ApiError>::Err(
+                return Err(
                     ApiError::at(
                         Code::InvalidArgument,
                         "the selection names no expression inside a block",
-                        sel.file.as_str(),
+                        &sel.file,
                         sel.start,
                         sel.end,
                     ),
@@ -362,10 +352,10 @@ extend ExtractLocal as Refactoring {
         let mut ins = String::new();
         ins.format_into("let {} = {};\n{}", name, text.slice(er.start as usize, er.end as usize), indent);
         let mut we = syn::WorkspaceEdit::new();
-        we.expect(sel.file.as_str(), s.version(sel.file.as_str()));
-        we.replace(sel.file.as_str(), sr.start, sr.start, ins.as_str());
-        we.replace(sel.file.as_str(), er.start, er.end, name);
-        return Result::<syn::WorkspaceEdit, ApiError>::Ok(we);
+        we.expect(&sel.file, s.version(&sel.file));
+        we.replace(&sel.file, sr.start, sr.start, &ins);
+        we.replace(&sel.file, er.start, er.end, name);
+        return Ok(we);
     }
 }
 
@@ -384,20 +374,20 @@ fn parse_order(params: str, n: usize) Option<Vector<usize>> {
     for part in params.split(",") {
         let v = part.trim().parse_u64()?;
         if v as usize >= n || seen[v as usize] {
-            return Option::<Vector<usize>>::None;
+            return None;
         }
         seen[v as usize] = true;
         out.push(v as usize);
     }
     if out.len() != n {
-        return Option::<Vector<usize>>::None;
+        return None;
     }
-    return Option::<Vector<usize>>::Some(out);
+    return Some(out);
 }
 
 // The function declaration `sel` names, or NODE_NONE.
 fn fn_at(s: &ses::Session, sel: &Selection) DefId {
-    let m = switch s.module_of(sel.file.as_str()) {
+    let m = switch s.module_of(&sel.file) {
         Some(md) => md.index() as usize,
         None => {
             return DefId { module: 0, node: NODE_NONE };
@@ -417,13 +407,13 @@ fn joined(texts: &Vector<String>, order: &Vector<usize>, skip: usize) String {
         if k != 0 {
             out.push_str(", ");
         }
-        out.push_str(texts[k].as_str());
+        out.push_str(&texts[k]);
     }
     for k in 0..order.len() {
         if skip + k != 0 {
             out.push_str(", ");
         }
-        out.push_str(texts[skip + order[k]].as_str());
+        out.push_str(&texts[skip + order[k]]);
     }
     return out;
 }
@@ -443,9 +433,7 @@ extend ChangeSignature as Refactoring {
     > {
         let d = fn_at(s, sel);
         if d.node == NODE_NONE {
-            return Result::<syn::WorkspaceEdit, ApiError>::Err(
-                ApiError::at(Code::InvalidArgument, "no function is named here", sel.file.as_str(), sel.start, sel.end),
-            );
+            return Err(ApiError::at(Code::InvalidArgument, "no function is named here", &sel.file, sel.start, sel.end));
         }
         let dfile = s.package().modules[d.module as usize].file.clone();
         // The declaration's parameter texts; a `self` parameter stays first.
@@ -469,14 +457,14 @@ extend ChangeSignature as Refactoring {
             }
         }
         let skip: usize = if has_self {
-            1;
+            1
         } else {
-            0;
+            0
         };
         let order = switch parse_order(params, ptexts.len() - skip) {
             Some(o) => o,
             None => {
-                return Result::<syn::WorkspaceEdit, ApiError>::Err(
+                return Err(
                     ApiError::new(
                         Code::InvalidArgument,
                         "the parameters are no permutation of the function's parameters",
@@ -486,7 +474,7 @@ extend ChangeSignature as Refactoring {
         };
         let mut we = syn::WorkspaceEdit::new();
         if ptexts.len() != 0 {
-            we.replace(dfile.as_str(), prange.start, prange.end, joined(&ptexts, &order, skip).as_str());
+            we.replace(&dfile, prange.start, prange.end, joined(&ptexts, &order, skip).as_str());
         }
         an::hydrate_refs(s.package_mut(), d);
         let refs = feat::references_of_def(s.package(), d, false);
@@ -502,7 +490,7 @@ extend ChangeSignature as Refactoring {
             }
             if ti == tree_of.len() {
                 let md = &s.package().modules[rm as usize];
-                trees.push(syn::SyntaxTree::parse(md.file.as_str(), md.source.as_str()));
+                trees.push(syn::SyntaxTree::parse(&md.file, &md.source));
                 tree_of.push(rm);
             }
             let t = &trees[ti];
@@ -513,7 +501,7 @@ extend ChangeSignature as Refactoring {
                 if let Some(c) = n.as_call() {
                     if let Some(cl) = c.callee() {
                         if cl.range().start <= refs[i].start && refs[i].end <= cl.range().end {
-                            call = Option::<syn::Node>::Some(n);
+                            call = Some(n);
                         }
                     }
                     break;
@@ -525,7 +513,7 @@ extend ChangeSignature as Refactoring {
                     None => {
                         break;
                     },
-                };
+                }
             }
             let cn = switch call {
                 Some(c) => c,
@@ -547,12 +535,12 @@ extend ChangeSignature as Refactoring {
             let callee = cv.callee().unwrap();
             let through = has_self && callee.kind() == syn::SyntaxKind::Member && atexts.len() + 1 == ptexts.len();
             let askip = if has_self && !through {
-                1 as usize;
+                1 as usize
             } else {
-                0 as usize;
+                0 as usize
             };
             if atexts.len() != order.len() + askip {
-                return Result::<syn::WorkspaceEdit, ApiError>::Err(
+                return Err(
                     ApiError::at(
                         Code::InvalidArgument,
                         "a call passes another argument count",
@@ -566,7 +554,7 @@ extend ChangeSignature as Refactoring {
                 we.replace(t.path(), ar.start, ar.end, joined(&atexts, &order, askip).as_str());
             }
         }
-        return Result::<syn::WorkspaceEdit, ApiError>::Ok(we);
+        return Ok(we);
     }
 }
 
@@ -591,17 +579,17 @@ fn conformance_at(p: &loader::Package, m: usize, off: u32) (NodeId, DefId) {
         }
     }
     if ext == NODE_NONE {
-        return NODE_NONE, DefId { module: 0, node: NODE_NONE };
+        return (NODE_NONE, DefId { module: 0, node: NODE_NONE });
     }
     let it = a.ext(ext).extend_def.interface_type;
     if it == NODE_NONE || !a.valid(it) {
-        return NODE_NONE, DefId { module: 0, node: NODE_NONE };
+        return (NODE_NONE, DefId { module: 0, node: NODE_NONE });
     }
     let idf = a.resolution_def(it);
     if idf.node == NODE_NONE || p.modules[idf.module as usize].ast.at_const(idf.node).kind != NodeKind::NODE_INTERFACE {
-        return NODE_NONE, DefId { module: 0, node: NODE_NONE };
+        return (NODE_NONE, DefId { module: 0, node: NODE_NONE });
     }
-    return ext, idf;
+    return (ext, idf);
 }
 
 // The names of the methods interface `idf` requires that extend `ext` of module `m` does not define.
@@ -641,7 +629,7 @@ extend ImplementMembers as Refactoring {
     }
 
     pub fn applies(self: &mut Self, s: &mut ses::Session, sel: &Selection) bool {
-        let m = switch s.module_of(sel.file.as_str()) {
+        let m = switch s.module_of(&sel.file) {
             Some(md) => md.index() as usize,
             None => {
                 return false;
@@ -655,29 +643,27 @@ extend ImplementMembers as Refactoring {
         syn::WorkspaceEdit,
         ApiError
     > {
-        let m = module_of(s, sel.file.as_str())?;
+        let m = module_of(s, &sel.file)?;
         let p = s.package();
         let (ext, idf) = conformance_at(p, m, sel.start);
         if ext == NODE_NONE {
-            return Result::<syn::WorkspaceEdit, ApiError>::Err(
-                ApiError::at(Code::InvalidArgument, "no conformance is here", sel.file.as_str(), sel.start, sel.end),
-            );
+            return Err(ApiError::at(Code::InvalidArgument, "no conformance is here", &sel.file, sel.start, sel.end));
         }
         let names = missing_methods(p, m, ext, idf);
         let mut text = String::new();
         let mut at: u32 = 0;
         for i in 0..names.len() {
-            if let Some(st) = feat::iface_stub(p, m, sel.start, names[i].as_str()) {
+            if let Some(st) = feat::iface_stub(p, m, sel.start, &names[i]) {
                 at = st.at;
                 text.push_string(&st.text);
             }
         }
         let mut we = syn::WorkspaceEdit::new();
-        we.expect(sel.file.as_str(), s.version(sel.file.as_str()));
+        we.expect(&sel.file, s.version(&sel.file));
         if text.len() != 0 {
-            we.replace(sel.file.as_str(), at, at, text.as_str());
+            we.replace(&sel.file, at, at, &text);
         }
-        return Result::<syn::WorkspaceEdit, ApiError>::Ok(we);
+        return Ok(we);
     }
 }
 
@@ -725,7 +711,7 @@ fn item_bytes(p: &loader::Package, m: usize, node: NodeId) (u32, u32) {
         }
         start = pl;
     }
-    return start, line_end(src, sp.end);
+    return (start, line_end(src, sp.end));
 }
 
 // Whether module `m` imports module path `path` (an import line names it).
@@ -782,7 +768,7 @@ extend MoveItem as Refactoring {
     }
 
     pub fn applies(self: &mut Self, s: &mut ses::Session, sel: &Selection) bool {
-        return switch s.module_of(sel.file.as_str()) {
+        return switch s.module_of(&sel.file) {
             Some(md) => item_at(s.package(), md.index() as usize, sel.start) != NODE_NONE,
             None => false,
         };
@@ -792,15 +778,15 @@ extend MoveItem as Refactoring {
         syn::WorkspaceEdit,
         ApiError
     > {
-        let ma = module_of(s, sel.file.as_str())?;
+        let ma = module_of(s, &sel.file)?;
         let mb = module_of(s, params)?;
         let node = item_at(s.package(), ma, sel.start);
         if node == NODE_NONE || ma == mb {
-            return Result::<syn::WorkspaceEdit, ApiError>::Err(
+            return Err(
                 ApiError::at(
                     Code::InvalidArgument,
                     "no top-level declaration to move is named here",
-                    sel.file.as_str(),
+                    &sel.file,
                     sel.start,
                     sel.end,
                 ),
@@ -853,15 +839,15 @@ extend MoveItem as Refactoring {
                 if qs != sp.start {
                     continue;
                 }
-                let mut q = String::from_str(last_segment(apath.as_str()));
+                let mut q = String::from_str(last_segment(&apath));
                 q.push_str("::");
                 inner.push(Edit { start: sp.start - istart, end: sp.start - istart, text: q });
                 needs_a = true;
             }
         }
         let mut moved = String::new();
-        apply_edits(asrc.slice(istart as usize, iend as usize), inner.as_slice(), &mut moved)?;
-        we.replace(afile.as_str(), istart, iend, "");
+        apply_edits(asrc.slice(istart as usize, iend as usize), &inner, &mut moved)?;
+        we.replace(&afile, istart, iend, "");
         let bsrc = p.modules[mb].source.as_str();
         let mut tail = String::new();
         if bsrc.len() != 0 && !bsrc.ends_with("\n") {
@@ -869,10 +855,10 @@ extend MoveItem as Refactoring {
         }
         tail.push_byte(b'\n');
         tail.push_string(&moved);
-        we.replace(bfile.as_str(), bsrc.len() as u32, bsrc.len() as u32, tail.as_str());
-        if needs_a && !imports_path(p, mb, apath.as_str()) {
+        we.replace(&bfile, bsrc.len() as u32, bsrc.len() as u32, &tail);
+        if needs_a && !imports_path(p, mb, &apath) {
             let at = feat::import_insert_at(p, mb);
-            we.replace(bfile.as_str(), at, at, format("import {};\n", apath.as_str()).as_str());
+            we.replace(&bfile, at, at, format("import {};\n", apath.as_str()).as_str());
         }
         // The uses outside the declaration.
         let refs = feat::references_of_def(p, d, false);
@@ -893,7 +879,7 @@ extend MoveItem as Refactoring {
                 continue;
             }
             if qs == r.start && rm != ma {
-                return Result::<syn::WorkspaceEdit, ApiError>::Err(
+                return Err(
                     ApiError::at(
                         Code::InvalidArgument,
                         "a use names the declaration through a glob import",
@@ -904,7 +890,7 @@ extend MoveItem as Refactoring {
                 );
             }
             if !public {
-                return Result::<syn::WorkspaceEdit, ApiError>::Err(
+                return Err(
                     ApiError::at(
                         Code::InvalidArgument,
                         "the declaration is not 'pub' and is used outside itself",
@@ -914,16 +900,16 @@ extend MoveItem as Refactoring {
                     ),
                 );
             }
-            let mut q = String::from_str(last_segment(bpath.as_str()));
+            let mut q = String::from_str(last_segment(&bpath));
             q.push_str("::");
-            we.replace(rfile, qs, r.start, q.as_str());
-            if !imports_path(p, rm, bpath.as_str()) && !importers.contains(&(rm as u32)) {
+            we.replace(rfile, qs, r.start, &q);
+            if !imports_path(p, rm, &bpath) && !importers.contains(&(rm as u32)) {
                 importers.push(rm as u32);
                 let at = feat::import_insert_at(p, rm);
                 we.replace(rfile, at, at, format("import {};\n", bpath.as_str()).as_str());
             }
         }
-        return Result::<syn::WorkspaceEdit, ApiError>::Ok(we);
+        return Ok(we);
     }
 }
 
@@ -932,8 +918,8 @@ extend MoveItem as Refactoring {
 /// What one match found: the matched node and the nodes it bound, by name, as node identities of the tree
 /// (`syn::Node::id`), so a match holds no borrow.
 pub struct Match {
-    pub(module) names: Vector<String>,
-    pub(module) ids: Vector<u32>,
+    names: Vector<String>,
+    ids: Vector<u32>,
 }
 
 extend Match {
@@ -956,7 +942,7 @@ extend Match {
                 return t.node(self.ids[i]);
             }
         }
-        return Option::<syn::Node<'t>>::None;
+        return None;
     }
 }
 
@@ -1029,7 +1015,7 @@ pub fn inside(n: syn::Node, k: syn::SyntaxKind) bool {
             None => {
                 return false;
             },
-        };
+        }
     }
     return false;
 }

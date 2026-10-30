@@ -71,9 +71,9 @@ pub fn faceforward<T: Float, G: Gen<T> + Dot<T>>(n: G, i: G, nref: G) G {
         r.put(
             k,
             if G::len() >= 3 {
-                T::zero() - n.at(k);
+                T::zero() - n.at(k)
             } else {
-                -n.at(k);
+                -n.at(k)
             },
         );
     }
@@ -347,9 +347,9 @@ extend<T: Float> T as Refract<T> {
         let d = n * self;
         let k = T::one() - eta * eta * (T::one() - d * d);
         let keep = if k.greater_equal(T::zero()) {
-            T::one();
+            T::one()
         } else {
-            T::zero();
+            T::zero()
         };
         return (eta * self - (eta * d + k.sqrt()) * n) * keep;
     }

@@ -175,7 +175,7 @@ the header of the type it collides with.
   (`push_c_asm_str` re-escapes a matchertext template); `module_has_asm` keeps such a module
   emitted (`keep_mod`) and gives it a unit.
 - A result list `(A, B)` is one result, the tuple's `TupleN` struct (the parser makes the list a
-  tuple type and `return a, b` a tuple). A result C cannot return as it is (one fixed array)
+  tuple type). A result C cannot return as it is (one fixed array)
   returns in a carrier struct shared by every function and function value with that result
   (`Mangler::ret_pack`: `__sc_ret<n>__<types>`, `__sc_reta__<array>`), defined in its own
   definition header; a function's `<name>_ret` typedef aliases it in the module's prototype

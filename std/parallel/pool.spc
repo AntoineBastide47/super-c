@@ -20,7 +20,7 @@ pub struct SyncPool<A = Global> {
 @no_const
 @derive(Copy)
 pub struct SyncPoolAlloc<'a, A = Global> {
-    pub(module) pool: &'a sync::Mutex<apool::Pool<A>>,
+    pool: &'a sync::Mutex<apool::Pool<A>>,
 }
 
 extend<A: Allocator> SyncPool<A> {

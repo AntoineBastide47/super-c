@@ -356,7 +356,7 @@ fn text_round_trips_at_every_width() {
         None => {
             assert(false);
         },
-    };
+    }
     // A value one past the width does not parse.
     assert(u128::from_str("340282366920938463463374607431768211456").is_none());
     assert(u128::from_str("340282366920938463463374607431768211455").is_some());
@@ -388,7 +388,7 @@ fn conformances() {
         None => {
             assert(false);
         },
-    };
+    }
 }
 
 @test(should_panic)
@@ -583,9 +583,9 @@ fn signed_tail_and_euclid() {
             let a = i128::from_i64(unsafe vals[i]);
             let b = i128::from_i64(
                 if unsafe vals[j] > 0 {
-                    3i64;
+                    3i64
                 } else {
-                    -3i64;
+                    -3i64
                 },
             );
             let q = a.div_euclid(&b);
@@ -1791,15 +1791,15 @@ fn check_division<const W: usize>(seed: u64, n: usize) {
                 s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
                 let pick = s >> 60;
                 let l = if pick == 0 {
-                    0u64;
+                    0u64
                 } else if pick == 1 {
-                    0xFFFFFFFFFFFFFFFF;
+                    0xFFFFFFFFFFFFFFFF
                 } else if pick == 2 {
-                    0x8000000000000000;
+                    0x8000000000000000
                 } else if pick == 3 {
-                    1u64;
+                    1u64
                 } else {
-                    s ^ s << 17;
+                    s ^ s << 17
                 };
                 unsafe v[k].set_limb(i, l);
             }
@@ -1817,10 +1817,10 @@ fn check_division<const W: usize>(seed: u64, n: usize) {
                 switch qb.checked_add(&r) {
                     Some(t) => assert(t == a, "q b + r is the dividend"),
                     None => assert(false, "q b + r overflows"),
-                };
+                }
             },
             None => assert(false, "q b overflows"),
-        };
+        }
     }
 }
 
@@ -1920,15 +1920,15 @@ const fn rand_uint<const W: usize>(s: &mut u64) UInt<W> {
         *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         let pick = *s >> 60;
         let l = if pick == 0 {
-            0u64;
+            0u64
         } else if pick == 1 {
-            0xFFFFFFFFFFFFFFFF;
+            0xFFFFFFFFFFFFFFFF
         } else if pick == 2 {
-            0x8000000000000000;
+            0x8000000000000000
         } else if pick == 3 {
-            1u64;
+            1u64
         } else {
-            *s ^ *s << 17;
+            *s ^ *s << 17
         };
         v.set_limb(i, l);
     }
@@ -2030,23 +2030,23 @@ fn check_text<const W: usize>(seed: u64, n: usize) {
             want.push_byte(rev[rev.len() - 1 - i]);
         }
         assert(t.as_str() == want.as_str(), "the digits are the remainders of repeated division");
-        switch UInt::<W>::from_str_radix(t.as_str(), radix) {
+        switch UInt::<W>::from_str_radix(&t, radix) {
             Some(back) => assert(back == v, "the digits parse back to the value"),
             None => assert(false, "the digits parse"),
-        };
+        }
         let iv = Int::<W>::from_unsigned(&v);
         let it = iv.to_string_radix(radix);
-        switch Int::<W>::from_str_radix(it.as_str(), radix) {
+        switch Int::<W>::from_str_radix(&it, radix) {
             Some(back) => assert(back == iv, "the signed digits parse back to the value"),
             None => assert(false, "the signed digits parse"),
-        };
+        }
     }
     // The ends of the range: max parses, one more digit overflows.
     let m = UInt::<W>::max().to_string();
-    assert(UInt::<W>::from_str(m.as_str()).unwrap() == UInt::<W>::max(), "max parses");
-    let mut over = String::from_str(m.as_str());
+    assert(UInt::<W>::from_str(&m).unwrap() == UInt::<W>::max(), "max parses");
+    let mut over = String::from_str(&m);
     over.push_byte(b'0');
-    assert(UInt::<W>::from_str(over.as_str()).is_none(), "ten times max overflows");
+    assert(UInt::<W>::from_str(&over).is_none(), "ten times max overflows");
 }
 
 @test

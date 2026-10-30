@@ -40,9 +40,9 @@ pub(package) fn statements(text: str, hash_comment: bool, out: &mut Vector<Stmt>
     let mut in_str = false;
     while i <= n {
         let c: u8 = if i < n {
-            text.byte_at(i);
+            text.byte_at(i)
         } else {
-            b'\n';
+            b'\n'
         };
         if in_str {
             cur.push_byte(c);
@@ -82,7 +82,7 @@ pub(package) fn statements(text: str, hash_comment: bool, out: &mut Vector<Stmt>
             continue;
         }
         if c == b'\n' || c == b';' {
-            push_stmt(cur.as_str(), start_line, out);
+            push_stmt(&cur, start_line, out);
             cur.clear();
             if c == b'\n' {
                 line += 1;
@@ -250,9 +250,9 @@ extend Asm {
                 continue;
             }
             let ok = if body.byte_at(0) == b'.' {
-                self.directive(o, body);
+                self.directive(o, body)
             } else {
-                self.inst(o, body);
+                self.inst(o, body)
             };
             if !ok {
                 return false;
@@ -300,13 +300,13 @@ extend Asm {
                         format("the global symbol '{}' has no '_': Mach-O spells a C name with one", g.as_str()).as_str(),
                     );
                 }
-                let k = o.sym(self.c_name(g.as_str()));
+                let k = o.sym(self.c_name(&g));
                 let l = &self.labels[j];
                 let mut fl = ob::SF_GLOBAL;
-                if o.secs[l.sec as usize].code || l.sec == ob::S_TEXT || Asm::listed(&self.funcs, g.as_str()) {
+                if o.secs[l.sec as usize].code || l.sec == ob::S_TEXT || Asm::listed(&self.funcs, &g) {
                     fl |= ob::SF_FUNC;
                 }
-                if Asm::listed(&self.hidden, g.as_str()) {
+                if Asm::listed(&self.hidden, &g) {
                     fl |= ob::SF_HIDDEN;
                 }
                 let y = o.syms.index_mut(k as usize);
@@ -318,7 +318,7 @@ extend Asm {
             }
             if !found {
                 // A `.globl` of a symbol defined elsewhere names it, as GNU as does.
-                let _ = o.sym(self.c_name(g.as_str()));
+                let _ = o.sym(self.c_name(&g));
             }
         }
         return true;
@@ -367,7 +367,7 @@ extend Asm {
                 line: self.refs[i].line,
             };
             self.line = r.line;
-            let li = self.find(r.name.as_str(), r.stmt);
+            let li = self.find(&r.name, r.stmt);
             if li >= 0 && self.labels[li as usize].sec == r.sec && self.local_kind(r.kind) {
                 let off = self.labels[li as usize].off as i64 + r.addend - r.off as i64;
                 if !self.patch(o, r.sec, r.off, r.kind, off) {
@@ -380,18 +380,18 @@ extend Asm {
                     format("'{}' is not a label of this section: the instruction reaches only those", r.name.as_str()).as_str(),
                 );
             }
-            let k = if li >= 0 && !Asm::listed(&self.globals, r.name.as_str()) {
+            let k = if li >= 0 && !Asm::listed(&self.globals, &r.name) {
                 // A local label: a local symbol of its own name.
                 let l = &self.labels[li as usize];
                 let nm = format(".Lsc_asm{}", li);
-                let s = o.sym(nm.as_str());
+                let s = o.sym(&nm);
                 let y = o.syms.index_mut(s as usize);
                 y.sec = l.sec;
                 y.off = l.off;
                 y.flags = 0;
-                s;
+                s
             } else {
-                o.sym(self.c_name(r.name.as_str()));
+                o.sym(self.c_name(&r.name))
             };
             o.reloc(r.sec, r.kind, r.off, k, r.addend);
         }
@@ -455,7 +455,7 @@ extend Asm {
         let mut fx = aa::Fix::new();
         let mut e = String::new();
         if !aa::assemble(body, &mut w, &mut fx, &mut e) {
-            return self.fail(e.as_str());
+            return self.fail(&e);
         }
         let off = o.secs[self.sec as usize].size as u32;
         if fx.kind != aa::FX_NONE {
@@ -484,19 +484,19 @@ extend Asm {
         let mut fx = xa::Fix::new();
         let mut e = String::new();
         if !xa::assemble(body, xa::NOTGT, &mut b, &mut fx, &mut e) {
-            return self.fail(e.as_str());
+            return self.fail(&e);
         }
         if fx.kind == x::R_PLT32 {
             // A branch to a label behind in this section: its distance picks the form.
-            let li = self.find(fx.name.as_str(), self.stmt);
+            let li = self.find(&fx.name, self.stmt);
             if li >= 0 && self.labels[li as usize].sec == self.sec && self.labels[li as usize].stmt <= self.stmt && !Asm::listed(
                 &self.globals,
-                fx.name.as_str(),
+                &fx.name,
             ) {
                 b.truncate(0);
                 let tgt = self.labels[li as usize].off as i64 - off as i64;
                 if !xa::assemble(body, tgt, &mut b, &mut fx, &mut e) {
-                    return self.fail(e.as_str());
+                    return self.fail(&e);
                 }
                 o.put(self.sec, b[0..b.len()]);
                 return true;
@@ -605,9 +605,9 @@ extend Asm {
                 let rest2 = rest.slice(c as usize + 1, rest.len());
                 let c2 = rest2.find_byte(b',');
                 let sect = if c2 >= 0 {
-                    rest2.slice(0, c2 as usize).trim();
+                    rest2.slice(0, c2 as usize).trim()
                 } else {
-                    rest2.trim();
+                    rest2.trim()
                 };
                 let seg = rest.slice(0, c as usize).trim();
                 name = rest.trim();
@@ -688,23 +688,23 @@ extend Asm {
         let t = s.trim();
         let neg = t.starts_with("-");
         let u = if neg {
-            t.slice(1, t.len()).trim();
+            t.slice(1, t.len()).trim()
         } else {
-            t;
+            t
         };
         let v = if u.starts_with("0x") || u.starts_with("0X") {
-            u.slice(2, u.len()).parse_u64_radix(16);
+            u.slice(2, u.len()).parse_u64_radix(16)
         } else {
-            u.parse_u64();
+            u.parse_u64()
         };
         return switch v {
             Some(x) => {
                 *out = if neg {
-                    (x as i64).wrapping_neg();
+                    (x as i64).wrapping_neg()
                 } else {
-                    x as i64;
+                    x as i64
                 };
-                true;
+                true
             },
             None => false,
         };
@@ -714,9 +714,9 @@ extend Asm {
     fn align(self: &mut Self, o: &mut ob::Obj, d: str, rest: str) bool {
         let c = rest.find_byte(b',');
         let first = if c >= 0 {
-            rest.slice(0, c as usize);
+            rest.slice(0, c as usize)
         } else {
-            rest;
+            rest
         };
         let mut n: i64 = 0;
         if !Asm::num(first, &mut n) || n < 0 {
@@ -756,9 +756,9 @@ extend Asm {
             let mut p = start as usize;
             while p < at as usize {
                 let n = if at as usize - p < 10 {
-                    at as usize - p;
+                    at as usize - p
                 } else {
-                    10usize;
+                    10usize
                 };
                 let nops: []u8 = NOPS;
                 for q in 0..n {
@@ -773,13 +773,13 @@ extend Asm {
     // `.byte`, `.short`, `.word` (4 bytes on arm64), `.quad`, `.inst`: numbers, or symbols for 8-byte ones.
     fn data(self: &mut Self, o: &mut ob::Obj, d: str, rest: str) bool {
         let size: u32 = if d == ".byte" {
-            1;
+            1
         } else if d == ".hword" || d == ".short" || d == ".2byte" || d == ".word" && self.isa == ISA_X64 {
-            2;
+            2
         } else if d == ".quad" || d == ".xword" || d == ".8byte" {
-            8;
+            8
         } else {
-            4;
+            4
         };
         if self.sec == ob::S_BSS {
             return self.fail("data in '.bss'");
@@ -815,9 +815,9 @@ extend Asm {
                 }
                 let off = o.secs[self.sec as usize].size as u32;
                 let kind = if self.isa == ISA_X64 {
-                    x::R_ABS64;
+                    x::R_ABS64
                 } else {
-                    a::R_ABS64;
+                    a::R_ABS64
                 };
                 self.refs.push(
                     Ref {
@@ -893,9 +893,9 @@ extend Asm {
         let mut fill: i64 = 0;
         if !Asm::num(
             if c >= 0 {
-                rest.slice(0, c as usize);
+                rest.slice(0, c as usize)
             } else {
-                rest;
+                rest
             },
             &mut n,
         ) || n < 0 || c >= 0 && !Asm::num(rest.slice(c as usize + 1, rest.len()), &mut fill) {
@@ -922,9 +922,9 @@ extend Asm {
         if self.isa == ISA_X64 {
             return x64_dwarf(
                 if r.starts_with("%") {
-                    r.slice(1, r.len());
+                    r.slice(1, r.len())
                 } else {
-                    r;
+                    r
                 },
             );
         }
@@ -961,9 +961,9 @@ extend Asm {
     fn cfi_advance(self: &mut Self, o: &mut ob::Obj) {
         let here = o.secs[self.cfi.sec as usize].size;
         let factor: u64 = if self.isa == ISA_A64 {
-            4;
+            4
         } else {
-            1;
+            1
         };
         let d = (here - self.cfi.last) / factor;
         if d == 0 {
@@ -989,16 +989,16 @@ extend Asm {
     fn frame_sym(self: &Self, o: &mut ob::Obj, sec: u8, off: u64) u32 {
         for i in 0..self.labels.len() {
             let l = &self.labels[i];
-            if l.sec != sec || l.off != off || numeric(l.name.as_str()) {
+            if l.sec != sec || l.off != off || numeric(&l.name) {
                 continue;
             }
-            let global = Asm::listed(&self.globals, l.name.as_str());
+            let global = Asm::listed(&self.globals, &l.name);
             let nm = if global {
-                String::from_str(self.c_name(l.name.as_str()));
+                String::from_str(self.c_name(&l.name))
             } else {
-                format(".Lsc_asm{}", i);
+                format(".Lsc_asm{}", i)
             };
-            let sym = o.sym(nm.as_str());
+            let sym = o.sym(&nm);
             if !global {
                 let y = o.syms.index_mut(sym as usize);
                 y.sec = l.sec;
@@ -1055,9 +1055,9 @@ extend Asm {
         }
         let r = x64_reg_number(
             if a0.starts_with("%") {
-                a0.slice(1, a0.len());
+                a0.slice(1, a0.len())
             } else {
-                a0;
+                a0
             },
         );
         if d == ".seh_endprologue" {
@@ -1091,9 +1091,9 @@ extend Asm {
                 g -= 1;
                 let st = self.seh.groups[g] as usize;
                 let en = if g + 1 < self.seh.groups.len() {
-                    self.seh.groups[g + 1] as usize;
+                    self.seh.groups[g + 1] as usize
                 } else {
-                    self.seh.codes.len();
+                    self.seh.codes.len()
                 };
                 for q in st..en {
                     o.cfi.push(self.seh.codes[q]);
@@ -1195,9 +1195,9 @@ extend Asm {
                 return self.fail("a CFA offset is a number");
             }
             self.cfi.cfa = if d == ".cfi_adjust_cfa_offset" {
-                self.cfi.cfa + n;
+                self.cfi.cfa + n
             } else {
-                n;
+                n
             };
             o.cfi.push(0x0E);
             uleb(&mut o.cfi, self.cfi.cfa as u64);
@@ -1246,9 +1246,9 @@ extend Asm {
         if d == ".cfi_undefined" || d == ".cfi_same_value" {
             o.cfi.push(
                 if d == ".cfi_undefined" {
-                    0x07u8;
+                    0x07u8
                 } else {
-                    0x08u8;
+                    0x08u8
                 },
             );
             uleb(&mut o.cfi, r as u64);
@@ -1325,9 +1325,9 @@ extend Asm {
         let mut a0 = Asm::new(
             ISA_A64,
             if apple {
-                FMT_MACHO;
+                FMT_MACHO
             } else {
-                FMT_ELF;
+                FMT_ELF
             },
         );
         let base = words.len();
@@ -1383,7 +1383,7 @@ extend Asm {
         for i in 0..refs.len() {
             let at = refs[i].at;
             let kind = refs[i].kind;
-            let li = a0.find(refs[i].name.as_str(), refs[i].stmt);
+            let li = a0.find(&refs[i].name, refs[i].stmt);
             if li >= 0 && a0.local_kind(kind) {
                 let d = a0.labels[li as usize].off as i64 + refs[i].addend - at as i64 * 4;
                 let w = words[base + at as usize];
@@ -1411,7 +1411,7 @@ extend Asm {
                 InlRel {
                     at: base as u32 + at,
                     kind: kind,
-                    name: String::from_str(a0.c_name(refs[i].name.as_str())),
+                    name: String::from_str(a0.c_name(&refs[i].name)),
                     addend: refs[i].addend,
                 },
             );
@@ -1472,7 +1472,7 @@ extend Asm {
             if fx.kind == xa::FX_NONE {
                 continue;
             }
-            let li = a0.find(fx.name.as_str(), k as u32);
+            let li = a0.find(&fx.name, k as u32);
             if li >= 0 && fx.kind == x::R_PLT32 && a0.labels[li as usize].stmt <= k as u32 {
                 code.truncate(at);
                 let tgt = a0.labels[li as usize].off as i64 - here as i64;
@@ -1493,7 +1493,7 @@ extend Asm {
             );
         }
         for i in 0..refs.len() {
-            let li = a0.find(refs[i].name.as_str(), refs[i].stmt);
+            let li = a0.find(&refs[i].name, refs[i].stmt);
             if li >= 0 {
                 if !a0.local_kind(refs[i].kind) {
                     err.format_into(
@@ -1609,9 +1609,9 @@ const fn x64_reg_number(r: str) i64 {
     if r.starts_with("xmm") && r.len() > 3 && r.len() <= 5 {
         return switch r.slice(3, r.len()).parse_u64() {
             Some(n) => if n < 16 {
-                16 + n as i64;
+                16 + n as i64
             } else {
-                -1i64;
+                -1i64
             },
             None => -1i64,
         };
@@ -1824,9 +1824,9 @@ pub(package) fn wasm_module(o: &mut wo::WObj, text: str, err: &mut String) bool 
                 after(
                     body,
                     if modl {
-                        14usize;
+                        14usize
                     } else {
-                        12usize;
+                        12usize
                     },
                 ),
                 &mut a,
@@ -1848,9 +1848,9 @@ pub(package) fn wasm_module(o: &mut wo::WObj, text: str, err: &mut String) bool 
                 after(
                     body,
                     if body.starts_with(".globl") || body.starts_with(".hidden") {
-                        7usize;
+                        7usize
                     } else {
-                        8usize;
+                        8usize
                     },
                 ),
             );
@@ -1985,13 +1985,13 @@ pub(package) fn wasm_module(o: &mut wo::WObj, text: str, err: &mut String) bool 
         }
         for j in 0..imods.len() {
             if imods[j].0.as_str() == nm.as_str() {
-                let id = o.names.intern(imods[j].1.as_str());
+                let id = o.names.intern(&imods[j].1);
                 o.syms.index_mut(k).imod = id;
             }
         }
         for j in 0..inames.len() {
             if inames[j].0.as_str() == nm.as_str() {
-                let id = o.names.intern(inames[j].1.as_str());
+                let id = o.names.intern(&inames[j].1);
                 o.syms.index_mut(k).iname = id;
             }
         }

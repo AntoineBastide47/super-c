@@ -87,9 +87,9 @@ extend<T, A: Allocator> Rc<T, A> {
     /// A mutable borrow of the value when this is the only handle of either kind, else `None`.
     pub fn get_mut(self: &mut Rc<T, A>) Option<&mut T> {
         if unsafe (*self.ptr).strong != 1 || unsafe (*self.ptr).weak != 1 {
-            return Option::<&mut T>::None;
+            return None;
         }
-        return Option::<&mut T>::Some(&mut unsafe (*self.ptr).value);
+        return Some(&mut unsafe (*self.ptr).value);
     }
 
     /// The value, when this is the only strong handle; else this handle back as `Err`. `Weak` handles
@@ -97,7 +97,7 @@ extend<T, A: Allocator> Rc<T, A> {
     pub fn try_unwrap(self: Rc<T, A>) Result<T, Rc<T, A>> {
         let p = self.ptr;
         if unsafe (*p).strong != 1 {
-            return Result::<T, Rc<T, A>>::Err(self);
+            return Err(self);
         }
         let alloc = self.alloc;
         forget(self);
@@ -105,7 +105,7 @@ extend<T, A: Allocator> Rc<T, A> {
         let value = unsafe (*p).value;
         // Releases the strong handles' weak reference: frees the block when no `Weak` remains.
         let _collective = Weak::<T, A>::from_block(p, alloc);
-        return Result::<T, Rc<T, A>>::Ok(value);
+        return Ok(value);
     }
 
     /// The value, when this is the only strong handle; else `None`, and this handle is dropped.
@@ -164,10 +164,10 @@ extend<T, A: Allocator> Weak<T, A> {
     /// A new strong handle while the value lives, else `None`.
     pub fn upgrade(self: &Weak<T, A>) Option<Rc<T, A>> {
         if self.ptr == null || unsafe (*self.ptr).strong == 0 {
-            return Option::<Rc<T, A>>::None;
+            return None;
         }
         unsafe count_inc(&mut (*self.ptr).strong);
-        return Option::<Rc<T, A>>::Some(Rc::<T, A>::from_block(self.ptr, self.alloc));
+        return Some(Rc::<T, A>::from_block(self.ptr, self.alloc));
     }
 
     /// The number of strong handles: 0 once the value is freed, and for `Weak::new`.

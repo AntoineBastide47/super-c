@@ -102,7 +102,7 @@ fn control() {
     h::expect_c("switch literal test", CONTROL, " == ");
     let mut run = String::from_str(CONTROL);
     run.push_str("fn main() i32 { return classify(0) * 100 + classify(7) * 10 + sum([1, 2, 3]) - 126; }\n");
-    h::expect_exit("the switch picks its arm and the for sums every element", run.as_str(), 0);
+    h::expect_exit("the switch picks its arm and the for sums every element", &run, 0);
 }
 
 @test
@@ -120,9 +120,9 @@ fn switch_ranges(b: &mut h::ExitBatch) {
     // Each arm takes exactly its range: both ends of the exclusive and inclusive arms, the open ends.
     let mut run = String::from_str(SWITCH_RANGES);
     run.push_str(
-        "fn main() i32 {\n  let ins = classify(10) == 1 && classify(19) == 1 && classify(20) == 2 && classify(30) == 2 && classify(4) == 3 && classify(99) == 4;\n  let outs = classify(9) == 0 && classify(31) == 0 && classify(5) == 0 && classify(98) == 0;\n  return if ins && outs { 0; } else { 1; };\n}\n",
+        "fn main() i32 {\n  let ins = classify(10) == 1 && classify(19) == 1 && classify(20) == 2 && classify(30) == 2 && classify(4) == 3 && classify(99) == 4;\n  let outs = classify(9) == 0 && classify(31) == 0 && classify(5) == 0 && classify(98) == 0;\n  return if ins && outs { 0 } else { 1 };\n}\n",
     );
-    b.add("every arm covers its range and nothing else", run.as_str(), 0);
+    b.add("every arm covers its range and nothing else", &run, 0);
 }
 
 fn pointer_arith(b: &mut h::ExitBatch) {
@@ -268,27 +268,27 @@ const KNOWN_VARIANT: str = "enum S { Dot, Circle(i32), Rect { w: i32, h: i32 }, 
 // Values whose variant a write through `&mut` changes before the match (a call, an inlined call, a
 // reference, a field, a payload binding, a `let mut` pattern, a loop): each match takes the arm of
 // the value it reads, not of the variant the value was built with.
-const KNOWN_REWRITE: str = "enum S { Dot, Circle(i32), Rect { w: i32, h: i32 }, }\nstruct P { pub s: S, }\nfn area(s: S) i32 { return switch s { Dot => 1, Circle(r) => r, Rect { w: w, h: h } => w * h, }; }\nfn flip(s: &mut S) { *s = S::Rect { w: 2, h: 3 }; }\n@noinline\nfn flip_call(s: &mut S) { *s = S::Dot; }\nfn main() i32 {\n  let mut a = S::Circle(1);\n  flip(&mut a);\n  let ka = switch a { Circle(r) => r, Rect { w: w, h: h } => w * h, Dot => 0, };\n  let mut b = S::Circle(1);\n  flip_call(&mut b);\n  let kb = switch b { Circle(r) => r, Dot => 10, _ => 0, };\n  let mut c = S::Circle(1);\n  let r = &mut c;\n  *r = S::Rect { w: 4, h: 5 };\n  let kc = area(c);\n  let mut p = P { s: S::Circle(1) };\n  flip(&mut p.s);\n  let kp = switch p.s { Circle(r) => r, Rect { w: w, h: h } => w + h, Dot => 0, };\n  let mut q = P { s: S::Circle(1) };\n  let qs = &mut q.s;\n  *qs = S::Dot;\n  let kq = switch q.s { Circle(r) => r, Dot => 7, _ => 0, };\n  let mut o = Option::<S>::Some(S::Circle(1));\n  switch &mut o { Some(x) => { *x = S::Rect { w: 1, h: 9 }; }, None => {}, };\n  let ko = switch o { Some(Circle(r)) => r, Some(Rect { w: w, h: h }) => w * h, _ => 0, };\n  let mut (m, n) = (S::Circle(1), 2);\n  flip(&mut m);\n  let km = switch m { Circle(r) => r, _ => 11, } + n;\n  let mut t = S::Circle(1);\n  let mut kt = 0;\n  for i in 0..3 {\n    kt += switch t { Circle(r) => r, Dot => 100, Rect { w: w, h: h } => w * h * 1000, };\n    if i == 0 { t = S::Dot; } else { flip(&mut t); }\n  }\n  let ok = ka == 6 && kb == 10 && kc == 20 && kp == 5 && kq == 7 && ko == 9 && km == 13 && kt == 6101;\n  return if ok { 0; } else { 1; };\n}\n";
+const KNOWN_REWRITE: str = "enum S { Dot, Circle(i32), Rect { w: i32, h: i32 }, }\nstruct P { pub s: S, }\nfn area(s: S) i32 { return switch s { Dot => 1, Circle(r) => r, Rect { w: w, h: h } => w * h, }; }\nfn flip(s: &mut S) { *s = S::Rect { w: 2, h: 3 }; }\n@noinline\nfn flip_call(s: &mut S) { *s = S::Dot; }\nfn main() i32 {\n  let mut a = S::Circle(1);\n  flip(&mut a);\n  let ka = switch a { Circle(r) => r, Rect { w: w, h: h } => w * h, Dot => 0, };\n  let mut b = S::Circle(1);\n  flip_call(&mut b);\n  let kb = switch b { Circle(r) => r, Dot => 10, _ => 0, };\n  let mut c = S::Circle(1);\n  let r = &mut c;\n  *r = S::Rect { w: 4, h: 5 };\n  let kc = area(c);\n  let mut p = P { s: S::Circle(1) };\n  flip(&mut p.s);\n  let kp = switch p.s { Circle(r) => r, Rect { w: w, h: h } => w + h, Dot => 0, };\n  let mut q = P { s: S::Circle(1) };\n  let qs = &mut q.s;\n  *qs = S::Dot;\n  let kq = switch q.s { Circle(r) => r, Dot => 7, _ => 0, };\n  let mut o = Option::<S>::Some(S::Circle(1));\n  switch &mut o { Some(x) => { *x = S::Rect { w: 1, h: 9 }; }, None => {}, }\n  let ko = switch o { Some(Circle(r)) => r, Some(Rect { w: w, h: h }) => w * h, _ => 0, };\n  let mut (m, n) = (S::Circle(1), 2);\n  flip(&mut m);\n  let km = switch m { Circle(r) => r, _ => 11, } + n;\n  let mut t = S::Circle(1);\n  let mut kt = 0;\n  for i in 0..3 {\n    kt += switch t { Circle(r) => r, Dot => 100, Rect { w: w, h: h } => w * h * 1000, };\n    if i == 0 { t = S::Dot; } else { flip(&mut t); }\n  }\n  let ok = ka == 6 && kb == 10 && kc == 20 && kp == 5 && kq == 7 && ko == 9 && km == 13 && kt == 6101;\n  return if ok { 0 } else { 1 };\n}\n";
 
 fn enums(b: &mut h::ExitBatch) {
     b.add("each known variant takes its arm", KNOWN_VARIANT, 0);
     b.add("a value rewritten through &mut takes its new arm", KNOWN_REWRITE, 0);
     b.add(
         "plain and tagged enums: construction, matching, explicit discriminants",
-        "enum Color { Red, Green, Blue, }\nenum Shape { Dot, Circle(i32), }\nenum Code { Ok = 0, Bad = 404, }\nfn col(c: Color) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }\nfn area(s: Shape) i32 { return switch s { Dot => 0, Circle(r) => r * r, }; }\nfn main() i32 {\n  let ok = col(Color::Green) == 2 && area(Shape::Circle(3)) == 9 && area(Shape::Dot) == 0 && Code::Bad as i32 == 404 && Code::Ok as i32 == 0;\n  return if ok { 0; } else { 1; };\n}\n",
+        "enum Color { Red, Green, Blue, }\nenum Shape { Dot, Circle(i32), }\nenum Code { Ok = 0, Bad = 404, }\nfn col(c: Color) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }\nfn area(s: Shape) i32 { return switch s { Dot => 0, Circle(r) => r * r, }; }\nfn main() i32 {\n  let ok = col(Color::Green) == 2 && area(Shape::Circle(3)) == 9 && area(Shape::Dot) == 0 && Code::Bad as i32 == 404 && Code::Ok as i32 == 0;\n  return if ok { 0 } else { 1 };\n}\n",
         0,
     );
 }
 
 @test
 fn if_expression() {
-    let SRC: str = "fn f(n: i32) i32 { let x: i32 = if n > 0 { 1; } else { 2; }; return x; }\n";
+    let SRC: str = "fn f(n: i32) i32 { let x: i32 = if n > 0 { 1 } else { 2 }; return x; }\n";
     h::expect_c("then arm assigns the result temp", SRC, "= 1LL;");
     h::expect_c("else arm assigns the result temp", SRC, "= 2LL;");
     h::expect_c("the chain branches structurally", SRC, "if (");
     let mut run = String::from_str(SRC);
     run.push_str("fn main() i32 { return f(5) * 10 + f(-5) - 12; }\n");
-    h::expect_exit("each arm gives its own value", run.as_str(), 0);
+    h::expect_exit("each arm gives its own value", &run, 0);
 }
 
 @test
@@ -298,7 +298,7 @@ fn array_literals() {
     // element once, a call included; a literal argument reaches the callee by value.
     h::expect_exit(
         "array literals",
-        "static mut G: i32 = 0;\nfn tick() u8 {\n  unsafe G += 1;\n  return 3;\n}\nfn probe(n: i32) u32 {\n  let mut s: u32 = 0;\n  for i in 0..n {\n    if i == 0 {\n      continue;\n    }\n    let mut fp: [u32; 4] = [[0] = 1];\n    s += fp[3] + fp[2];\n    fp[3] = 50;\n  }\n  return s;\n}\nfn g(a: [i32; 3]) i32 { return a[0] + a[2]; }\nfn rep(k: u8) u8 { let a = [k * 3; 4]; return a[0] + a[3]; }\nfn main() i32 {\n  let a: [i32; 3] = [1, 2, 3];\n  let t = [tick(); 4];\n  let ok = a[0] + a[1] + a[2] == 6 && probe(4) == 0 && rep(2) == 12 && t[0] + t[3] == 6 && unsafe G == 1 && g([1, 2, 3]) == 4;\n  return if ok { 0; } else { 1; };\n}\n",
+        "static mut G: i32 = 0;\nfn tick() u8 {\n  unsafe G += 1;\n  return 3;\n}\nfn probe(n: i32) u32 {\n  let mut s: u32 = 0;\n  for i in 0..n {\n    if i == 0 {\n      continue;\n    }\n    let mut fp: [u32; 4] = [[0] = 1];\n    s += fp[3] + fp[2];\n    fp[3] = 50;\n  }\n  return s;\n}\nfn g(a: [i32; 3]) i32 { return a[0] + a[2]; }\nfn rep(k: u8) u8 { let a = [k * 3; 4]; return a[0] + a[3]; }\nfn main() i32 {\n  let a: [i32; 3] = [1, 2, 3];\n  let t = [tick(); 4];\n  let ok = a[0] + a[1] + a[2] == 6 && probe(4) == 0 && rep(2) == 12 && t[0] + t[3] == 6 && unsafe G == 1 && g([1, 2, 3]) == 4;\n  return if ok { 0 } else { 1 };\n}\n",
         0,
     );
     // An emission property, not behavior: a repeat computes a pure element once and copies it.
@@ -313,7 +313,7 @@ fn multi_return(b: &mut h::ExitBatch) {
     // A multi-value return destructures in order, called and inlined.
     b.add(
         "multi-return",
-        "@noinline\nfn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\nfn di(a: i32, b: i32) (i32, i32) { return a * b, a / b; }\nfn main() i32 {\n  let (x, y) = dm(3, 1);\n  let (p, q) = di(6, 2);\n  return if x == 4 && y == 2 && p == 12 && q == 3 { 0; } else { 1; };\n}\n",
+        "@noinline\nfn dm(a: i32, b: i32) (i32, i32) { return (a + b, a - b); }\nfn di(a: i32, b: i32) (i32, i32) { return (a * b, a / b); }\nfn main() i32 {\n  let (x, y) = dm(3, 1);\n  let (p, q) = di(6, 2);\n  return if x == 4 && y == 2 && p == 12 && q == 3 { 0 } else { 1 };\n}\n",
         0,
     );
 }
@@ -325,10 +325,10 @@ fn const_generic_callee_inlines() {
     let FILL: str = "fn fill<const N: usize>(v: i32) [i32; N] {\n    static_assert(N > 1, \"two lanes\");\n    return [v; N];\n}\n";
     let mut ok = String::from_str(FILL);
     ok.push_str("fn f() i32 {\n    let a = fill::<4>(2);\n    return a[3];\n}\n");
-    h::expect_c_absent("the call is inlined", ok.as_str(), "fill__4(2");
+    h::expect_c_absent("the call is inlined", &ok, "fill__4(2");
     let mut bad = String::from_str(FILL);
     bad.push_str("fn main() i32 {\n    let a = fill::<1>(2);\n    return a[0];\n}\n");
-    let r = h::diff_build(bad.as_str(), []);
+    let r = h::diff_build(&bad, []);
     assert(!r.built && r.diag.as_str().contains("two lanes"), "the static_assert of the inlined instance runs");
 }
 
@@ -349,7 +349,7 @@ fn slices_and_arrays(b: &mut h::ExitBatch) {
     // array argument coerces to a view of its whole length.
     b.add(
         "slices and arrays",
-        "fn first(s: []i32) i32 { return s[0]; }\nfn set0(s: []mut i32) { s[0] = 7; }\nfn g(a: [i32; 3]) i32 { return a[2]; }\nfn len(s: []i32) usize { return s.len(); }\nfn main() i32 {\n  let mut a: [i32; 3] = [4, 5, 6];\n  set0(a);\n  return if first(a) == 7 && g(a) == 6 && len(a) == 3 { 0; } else { 1; };\n}\n",
+        "fn first(s: []i32) i32 { return s[0]; }\nfn set0(s: []mut i32) { s[0] = 7; }\nfn g(a: [i32; 3]) i32 { return a[2]; }\nfn len(s: []i32) usize { return s.len(); }\nfn main() i32 {\n  let mut a: [i32; 3] = [4, 5, 6];\n  set0(a);\n  return if first(a) == 7 && g(a) == 6 && len(a) == 3 { 0 } else { 1 };\n}\n",
         0,
     );
 }
@@ -358,7 +358,7 @@ fn errors(b: &mut h::ExitBatch) {
     // A defer runs at scope exit, after the body; a designated initializer fills its slots in order.
     b.add(
         "defer and designated initializers",
-        "static mut G: i32 = 0;\nfn cleanup() { unsafe G = unsafe G * 10 + 2; }\nfn run() { defer cleanup(); unsafe G = unsafe G * 10 + 1; }\nfn m(k: i32) i32 { let t: [i32; 4] = [[2] = 9, k]; return t[2] * 10 + t[3]; }\nfn main() i32 {\n  run();\n  return if unsafe G == 12 && m(5) == 95 { 0; } else { 1; };\n}\n",
+        "static mut G: i32 = 0;\nfn cleanup() { unsafe G = unsafe G * 10 + 2; }\nfn run() { defer cleanup(); unsafe G = unsafe G * 10 + 1; }\nfn m(k: i32) i32 { let t: [i32; 4] = [[2] = 9, k]; return t[2] * 10 + t[3]; }\nfn main() i32 {\n  run();\n  return if unsafe G == 12 && m(5) == 95 { 0 } else { 1 };\n}\n",
         0,
     );
     b.add(
@@ -495,7 +495,7 @@ fn generics(b: &mut h::ExitBatch) {
     // enum used at two types: each instance exists once and behaves.
     b.add(
         "generic instances",
-        "fn id<T>(x: T) T { return x; }\nfn h<T>(x: T) T { return x; }\nfn g<T>(x: T) T { return h(x); }\nfn f<T>(x: T) T { return g(x); }\nenum Opt<T> { Some(T), None }\nfn main() i32 {\n  let a: i32 = id::<i32>(5);\n  let b: bool = id::<bool>(true);\n  let o: Opt<i32> = Opt::<i32>::Some(1);\n  let n: Opt<bool> = Opt::<bool>::None;\n  let s = switch o { Some(v) => v, None => 0, } + switch n { Some(_) => 1, None => 0, };\n  return if a == 5 && b && f(41) == 41 && s == 1 { 0; } else { 1; };\n}\n",
+        "fn id<T>(x: T) T { return x; }\nfn h<T>(x: T) T { return x; }\nfn g<T>(x: T) T { return h(x); }\nfn f<T>(x: T) T { return g(x); }\nenum Opt<T> { Some(T), None }\nfn main() i32 {\n  let a: i32 = id::<i32>(5);\n  let b: bool = id::<bool>(true);\n  let o: Opt<i32> = Opt::<i32>::Some(1);\n  let n: Opt<bool> = Opt::<bool>::None;\n  let s = switch o { Some(v) => v, None => 0, } + switch n { Some(_) => 1, None => 0, };\n  return if a == 5 && b && f(41) == 41 && s == 1 { 0 } else { 1 };\n}\n",
         0,
     );
 }
@@ -503,7 +503,7 @@ fn generics(b: &mut h::ExitBatch) {
 fn literals(b: &mut h::ExitBatch) {
     b.add(
         "binary literals, digit separators, C-keyword identifiers",
-        "fn main() i32 {\n  let a: i32 = 0b101;\n  let b: i32 = 1_000;\n  let register: i32 = 1;\n  return if a == 5 && b == 1000 && register == 1 { 0; } else { 1; };\n}\n",
+        "fn main() i32 {\n  let a: i32 = 0b101;\n  let b: i32 = 1_000;\n  let register: i32 = 1;\n  return if a == 5 && b == 1000 && register == 1 { 0 } else { 1 };\n}\n",
         0,
     );
 }
@@ -514,9 +514,9 @@ fn const_generics(b: &mut h::ExitBatch) {
         "struct Buff<T, const N: usize> { pub b: [T; N] }\nextend<T, const N: usize> Buff<T, N> { fn cap(self: &Self) usize { return N; } }\n",
     );
     run.push_str(
-        "fn main() i32 {\n  let a = Buff::<i32, 4> { b: [1, 2, 3, 4] };\n  let c = Buff::<u8, 2> { b: [1u8, 2u8] };\n  return if a.cap() == 4 && c.cap() == 2 && sizeof(Buff<i32, 4>) == 16 && sizeof(Buff<u8, 2>) == 2 && unsafe a.b[3] == 4 { 0; } else { 1; };\n}\n",
+        "fn main() i32 {\n  let a = Buff::<i32, 4> { b: [1, 2, 3, 4] };\n  let c = Buff::<u8, 2> { b: [1u8, 2u8] };\n  return if a.cap() == 4 && c.cap() == 2 && sizeof(Buff<i32, 4>) == 16 && sizeof(Buff<u8, 2>) == 2 && unsafe a.b[3] == 4 { 0 } else { 1 };\n}\n",
     );
-    b.add("const generics", run.as_str(), 0);
+    b.add("const generics", &run, 0);
 }
 
 // Lifetimes are ERASED before monomorphization: they are checked, then dropped. They must never
@@ -666,7 +666,7 @@ fn main() i32 {
         }
     }
     let ok = sw_u32(0xFFFFFFFF) == 1 && sw_u32(0x80000000) == 2 && sw_u32(7) == 3 && sw_u32(0x7FFFFFFF) == 0 && sw_u32(8) == 0;
-    return if ok { 0; } else { 1; };
+    return if ok { 0 } else { 1 };
 }
 )",
         0,
@@ -695,7 +695,7 @@ fn count(s: str) i32 {
             _ => {
                 n += 1;
             },
-        };
+        }
         n += 100;
     }
     return n;
@@ -713,13 +713,13 @@ fn kind(k: K) i32 {
             D => {
                 t += 5;
             },
-        };
+        }
     }
     return t;
 }
 fn main() i32 {
     let ok = count("a 1b2. zz") == 422 && kind(K::A) == 3 && kind(K::C) == 3 && kind(K::B) == 0 && kind(K::D) == 15;
-    return if ok { 0; } else { 1; };
+    return if ok { 0 } else { 1 };
 }
 )",
         0,

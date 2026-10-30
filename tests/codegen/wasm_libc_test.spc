@@ -145,7 +145,7 @@ fn gd(i: i32) f64 {
     return switch i % 5 {
         0 => {
             let b = B64 { u: r };
-            b.f;
+            b.f
         },
         1 => u * 20.0 - 10.0,
         2 => u * 2000.0 - 1000.0,
@@ -160,7 +160,7 @@ fn gf(i: i32) f32 {
     return switch i % 5 {
         0 => {
             let b = B32 { u: (r >> 32) as u32 };
-            b.f;
+            b.f
         },
         1 => u * 20.0f32 - 10.0f32,
         2 => u * 200.0f32 - 100.0f32,
@@ -447,13 +447,13 @@ fn main() i32 {
             }
             let n = if k == 14 {
                 let p = if i % 2 == 0 {
-                    0usize;
+                    0usize
                 } else {
-                    x as u32 as usize;
+                    x as u32 as usize
                 };
-                unsafe snprintf(&mut buf[0], 512, cs(unsafe FI[k]), p as *const void);
+                unsafe snprintf(&mut buf[0], 512, cs(unsafe FI[k]), p as *const void)
             } else {
-                unsafe snprintf(&mut buf[0], 512, cs(unsafe FI[k]), x);
+                unsafe snprintf(&mut buf[0], 512, cs(unsafe FI[k]), x)
             };
             unsafe printf(cs("i%d %d %d %s\n"), k, i, n, &buf[0]);
         }
@@ -715,7 +715,7 @@ int main(void) {
 @platform(macos | linux)
 fn run(argv: []str, dir: str, out: str, input: str) bool {
     let mut c = process::Command::new(argv);
-    c.cwd = Option::<str>::Some(dir);
+    c.cwd = Some(dir);
     if input.len() != 0 {
         c.stdin = process::Redirect::Path(input);
     }
@@ -748,24 +748,24 @@ fn compare(program: str, reference: str, cflags: []str, wasmtime: []str, input: 
     ph::write_text(s.at("ref.c").as_str(), reference);
     ph::write_text(s.at("build.toml").as_str(), "bin = \"prog\"\nroot = \"main.spc\"\n");
     let named = env::get("SUPERC").unwrap().unwrap_or(String::from_str("./super-c"));
-    let superc = fs::realpath(named.as_str()).unwrap();
+    let superc = fs::realpath(&named).unwrap();
     let mut transpiler = String::from_str("--transpiler=");
     transpiler.push_string(&superc);
     let mut argv = Vector::<str>::new();
-    argv.push(superc.as_str());
+    argv.push(&superc);
     argv.push("build");
     argv.push("--target=wasm");
     // On the wasm lane SUPERC is the wasm compiler's wrapper: the build engine runs natively and hands
     // the transpile step to it.
     if superc.contains("wasm") {
-        argv.push(transpiler.as_str());
+        argv.push(&transpiler);
     }
     argv.push("-o");
     argv.push("prog");
-    assert(run(argv[0..argv.len()], s.dir.as_str(), s.at("build.log").as_str(), ""), "the program builds");
+    assert(run(argv[0..argv.len()], &s.dir, s.at("build.log").as_str(), ""), "the program builds");
     let clang = format("{}/bin/clang", sdk.as_str());
     let mut cc = Vector::<str>::new();
-    cc.push(clang.as_str());
+    cc.push(&clang);
     cc.push("--target=wasm32-wasip1");
     cc.push("-O1");
     for f in cflags {
@@ -775,14 +775,14 @@ fn compare(program: str, reference: str, cflags: []str, wasmtime: []str, input: 
     cc.push("-o");
     cc.push("ref.wasm");
     cc.push("-lm");
-    assert(run(cc[0..cc.len()], s.dir.as_str(), s.at("cc.log").as_str(), ""), "the reference builds");
+    assert(run(cc[0..cc.len()], &s.dir, s.at("cc.log").as_str(), ""), "the reference builds");
     let inp = if input.len() == 0 {
-        String::new();
+        String::new()
     } else {
-        s.at("in.txt");
+        s.at("in.txt")
     };
     if input.len() != 0 {
-        ph::write_text(inp.as_str(), input);
+        ph::write_text(&inp, input);
     }
     for m in ["prog", "ref.wasm"] {
         let mut w = Vector::<str>::new();
@@ -792,12 +792,12 @@ fn compare(program: str, reference: str, cflags: []str, wasmtime: []str, input: 
         }
         w.push(m);
         let out = format("{}.out", m);
-        assert(run(w[0..w.len()], s.dir.as_str(), s.at(out.as_str()).as_str(), inp.as_str()), "the module runs");
+        assert(run(w[0..w.len()], &s.dir, s.at(&out).as_str(), &inp), "the module runs");
     }
     let got = ph::read_text(s.at("prog.out").as_str());
     let want = ph::read_text(s.at("ref.wasm.out").as_str());
     assert(got.len() > min, "the program prints every line");
-    if !got.eq_str(want.as_str()) {
+    if !got.eq_str(&want) {
         // The first line that differs, with its number.
         let mut gl = got.as_str().lines();
         let mut wl = want.as_str().lines();
@@ -810,7 +810,7 @@ fn compare(program: str, reference: str, cflags: []str, wasmtime: []str, input: 
             }
         }
     }
-    assert(got.eq_str(want.as_str()), "the outputs match");
+    assert(got.eq_str(&want), "the outputs match");
     return s;
 }
 
@@ -1069,9 +1069,9 @@ fn ps(k: str, s: *const char) {
         cs("%s %s\n"),
         cs(k),
         if s == null {
-            cs("(null)");
+            cs("(null)")
         } else {
-            s;
+            s
         },
     );
 }
@@ -1268,14 +1268,14 @@ fn scans() {
         cs("S19 %d %s %s\n"),
         r,
         if p1 != null {
-            p1 as *const char;
+            p1 as *const char
         } else {
-            cs("-");
+            cs("-")
         },
         if p2 != null {
-            p2 as *const char;
+            p2 as *const char
         } else {
-            cs("-");
+            cs("-")
         },
     );
     unsafe free(p1);
@@ -1510,9 +1510,9 @@ fn files() {
             cs("%d%c"),
             i * 37 - 999,
             if i % 13 == 0 {
-                10;
+                10
             } else {
-                32;
+                32
             },
         );
     }
@@ -1885,7 +1885,7 @@ fn every_c_symbol_a_wasm_build_binds_is_defined() {
             if path.as_str() == "std/rt/libc.spc" || path.as_str() == "std/rt/libm.spc" {
                 continue;
             }
-            let sc = sscan::scan(sfiles::read_file(path.as_str()).unwrap().as_str());
+            let sc = sscan::scan(sfiles::read_file(&path).unwrap().as_str());
             if !sc.error.is_empty() {
                 missing.format_into("{}:{}: {}\n", path.as_str(), sc.error_line, sc.error.as_str());
                 continue;

@@ -48,9 +48,9 @@ extend<T> Slice<T> {
     /// Bounds-checked borrow: `Some(&elem)` when `i < len`, else `None`.
     pub const fn get_checked(self: &Slice<T>, i: usize) Option<&T> {
         if i >= self.len {
-            return Option::<&T>::None;
+            return None;
         }
-        return Option::<&T>::Some(&unsafe self.ptr[i]);
+        return Some(&unsafe self.ptr[i]);
     }
 
     /// Borrows the first element; panics when the slice is empty.
@@ -117,9 +117,9 @@ extend<T> SliceMut<T> {
     /// Bounds-checked shared borrow: `Some(&elem)` when `i < len`, else `None`.
     pub const fn get_checked(self: &SliceMut<T>, i: usize) Option<&T> {
         if i >= self.len {
-            return Option::<&T>::None;
+            return None;
         }
-        return Option::<&T>::Some(&unsafe self.ptr[i]);
+        return Some(&unsafe self.ptr[i]);
     }
 
     /// Overwrite the element at `i`, freeing the replaced one: panics when `i >= len`. Takes the view by
@@ -181,9 +181,9 @@ extend<T> Slice<T> as Index<T, []T> {
             if r.end >= self.len {
                 panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
             }
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         if hi > self.len {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
@@ -210,9 +210,9 @@ extend<T> SliceMut<T> as Index<T, []T> {
             if r.end >= self.len {
                 panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
             }
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         if hi > self.len {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
@@ -239,9 +239,9 @@ extend<T> SliceMut<T> as IndexMut<T, []mut T> {
             if r.end >= self.len {
                 panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
             }
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         if hi > self.len {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
@@ -652,7 +652,7 @@ fn sort_choose_pivot<T, L: SortLess<T>>(v: *mut T, n: usize, less: L) (usize, us
         }
         sort_order3(v, &mut a, &mut b, &mut c, &mut swaps, less);
     }
-    return b, swaps;
+    return (b, swaps);
 }
 
 // Swap three elements at pseudo-random positions around the middle: after an unbalanced partition this
@@ -797,7 +797,7 @@ fn sort_partition_by<T, L: SortLess<T>>(v: *mut T, n: usize, pi: usize, less: L,
         }
     }
     sort_swap(v, unsafe (v + mid));
-    return mid, l >= r;
+    return (mid, l >= r);
 }
 
 // Partition `v[0..n)` around the pivot at `pi` known to equal every element not greater than it (the
@@ -888,9 +888,9 @@ fn stable_parity_merge<T, L: SortLess<T>>(a: *const T, b: *const T, m: usize, d:
         for _ in 0..m {
             let take_b = less.lt(&b[r], &a[l]);
             let src = if take_b {
-                b + r;
+                b + r
             } else {
-                a + l;
+                a + l
             };
             memcpy(d + out, src, sizeof(T));
             r += take_b as usize;
@@ -898,9 +898,9 @@ fn stable_parity_merge<T, L: SortLess<T>>(a: *const T, b: *const T, m: usize, d:
             out += 1;
             let take_a = less.lt(&b[tr as usize], &a[tl as usize]);
             let tsrc = if take_a {
-                a + tl as usize;
+                a + tl as usize
             } else {
-                b + tr as usize;
+                b + tr as usize
             };
             memcpy(d + tout, tsrc, sizeof(T));
             tl -= take_a as isize;
@@ -920,9 +920,9 @@ fn stable_merge_into<T, L: SortLess<T>>(a: *const T, la: usize, b: *const T, lb:
         while l < la && r < lb {
             let take_b = less.lt(&b[r], &a[l]);
             let src = if take_b {
-                b + r;
+                b + r
             } else {
-                a + l;
+                a + l
             };
             memcpy(d + out, src, sizeof(T));
             r += take_b as usize;
@@ -947,9 +947,9 @@ fn stable_merge<T, L: SortLess<T>>(v: *mut T, n: usize, mid: usize, buf: *mut T,
             while l < mid && r < n {
                 let take_r = less.lt(&v[r], &buf[l]);
                 let src = if take_r {
-                    v + r;
+                    v + r
                 } else {
-                    buf + l;
+                    buf + l
                 };
                 memcpy(v + out, src, sizeof(T));
                 r += take_r as usize;
@@ -966,9 +966,9 @@ fn stable_merge<T, L: SortLess<T>>(v: *mut T, n: usize, mid: usize, buf: *mut T,
             while l > 0 && r > 0 {
                 let take_l = less.lt(&buf[r - 1], &v[l - 1]);
                 let src = if take_l {
-                    v + (l - 1);
+                    v + (l - 1)
                 } else {
-                    buf + (r - 1);
+                    buf + (r - 1)
                 };
                 out -= 1;
                 memcpy(v + out, src, sizeof(T));
@@ -1062,9 +1062,9 @@ fn sort_radix<T>(v: *mut T, buf: *mut T, n: usize, signed: bool) {
         const SZ: usize = sizeof(T);
         let mut counts: [usize; 2048] = [0; 2048];
         let flip: u64 = if signed {
-            1u64 << (SZ * 8 - 1) as u32;
+            1u64 << (SZ * 8 - 1) as u32
         } else {
-            0;
+            0
         };
         unsafe {
             for i in 0..n {
@@ -1424,9 +1424,9 @@ fn sort_stable_in_place_impl<T, L: SortLess<T>>(v: *mut T, n: usize, less: L) {
     let buf = ((&mut stack[0]) as *mut u64) as *mut T;
     // The buffer holds whole elements of an alignment it meets, else none.
     let room: usize = if alignof(T) <= 8 {
-        STABLE_STACK_BYTES / sizeof(T);
+        STABLE_STACK_BYTES / sizeof(T)
     } else {
-        0;
+        0
     };
     if sizeof(T) <= 64 && room >= 64 && n > STABLE_QUICK_MIN {
         let depth = 2 * (64 - (n as u64).leading_zeros() as u32);
@@ -1551,7 +1551,7 @@ const fn seq_rotate_left<T>(v: *mut T, n: usize, mid: usize) {
 // bisection keeps no early exit, so each halving is one comparison and a conditional move.
 fn seq_bisect<T, P: SortProbe<T>>(v: *const T, n: usize, cmp: P) Result<usize, usize> {
     if n == 0 {
-        return Result::<usize, usize>::Err(0);
+        return Err(0);
     }
     let mut base: usize = 0;
     let mut size = n;
@@ -1565,9 +1565,9 @@ fn seq_bisect<T, P: SortProbe<T>>(v: *const T, n: usize, cmp: P) Result<usize, u
     }
     let c = cmp.probe(&unsafe v[base]);
     if c == 0 {
-        return Result::<usize, usize>::Ok(base);
+        return Ok(base);
     }
-    return Result::<usize, usize>::Err(base + (c < 0) as usize);
+    return Err(base + (c < 0) as usize);
 }
 
 extern "C" {
@@ -1594,10 +1594,10 @@ extend<T> Slice<T> {
         if mid > self.len {
             panic("Slice::split_at: index out of bounds");
         }
-        return unsafe Slice::<T> { ptr: self.ptr, len: mid }, unsafe Slice::<T> {
-            ptr: self.ptr + mid,
-            len: self.len - mid,
-        };
+        return (
+            unsafe Slice::<T> { ptr: self.ptr, len: mid },
+            unsafe Slice::<T> { ptr: self.ptr + mid, len: self.len - mid }
+        );
     }
 
     /// Binary search of a sequence ordered by `cmp(element)` (negative: the element comes before the
@@ -1808,34 +1808,34 @@ extend<T: Format> Slice<T> as Format {
 /// A borrowing iterator over the elements of a `[]mut T`, yielding `&mut T` in order. Double-ended,
 /// with an exact size.
 pub struct SliceIterMut<'a, T> {
-    pub(module) data: *mut T,
-    pub(module) idx: usize,
-    pub(module) stop: usize,
+    data: *mut T,
+    idx: usize,
+    stop: usize,
 }
 
 extend<'a, T> SliceIterMut<'a, T> as Iterator<&'a mut T> {
     pub const fn next(self: &mut SliceIterMut<'a, T>) Option<&'a mut T> {
         if self.idx >= self.stop {
-            return Option::<&'a mut T>::None;
+            return None;
         }
         let r = unsafe &mut *(self.data + self.idx);
         self.idx += 1;
-        return Option::<&'a mut T>::Some(r);
+        return Some(r);
     }
 
     pub const fn size_hint(self: &SliceIterMut<'a, T>) (usize, Option<usize>) {
         let n = self.stop - self.idx;
-        return n, Option::<usize>::Some(n);
+        return (n, Option::<usize>::Some(n));
     }
 }
 
 extend<'a, T> SliceIterMut<'a, T> as DoubleEndedIterator<&'a mut T> {
     pub const fn next_back(self: &mut SliceIterMut<'a, T>) Option<&'a mut T> {
         if self.idx >= self.stop {
-            return Option::<&'a mut T>::None;
+            return None;
         }
         self.stop -= 1;
-        return Option::<&'a mut T>::Some(unsafe &mut *(self.data + self.stop));
+        return Some(unsafe &mut *(self.data + self.stop));
     }
 }
 
@@ -1857,10 +1857,10 @@ extend<T> SliceMut<T> {
         if mid > self.len {
             panic("SliceMut::split_at_mut: index out of bounds");
         }
-        return unsafe SliceMut::<T> { ptr: self.ptr, len: mid }, unsafe SliceMut::<T> {
-            ptr: self.ptr + mid,
-            len: self.len - mid,
-        };
+        return (
+            unsafe SliceMut::<T> { ptr: self.ptr, len: mid },
+            unsafe SliceMut::<T> { ptr: self.ptr + mid, len: self.len - mid }
+        );
     }
 
     /// Exchange the elements at `i` and `j`; panics when either is out of bounds.

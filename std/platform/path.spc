@@ -53,13 +53,13 @@ pub const fn is_absolute(p: str) bool {
 /// well-formed UTF-8; `op` names the operation in the error.
 pub fn native(p: str, op: IoOp) Result<NativePath, IoError> {
     if p.find_byte(0) >= 0 {
-        return Result::<NativePath, IoError>::Err(IoError::new(IoErrorKind::InvalidInput, op));
+        return Err(IoError::new(IoErrorKind::InvalidInput, op));
     }
     let mut np = NativePath::empty();
     if !np.fill(p) {
-        return Result::<NativePath, IoError>::Err(IoError::new(IoErrorKind::InvalidInput, op));
+        return Err(IoError::new(IoErrorKind::InvalidInput, op));
     }
-    return Result::<NativePath, IoError>::Ok(np);
+    return Ok(np);
 }
 
 /// Append the UTF-8 form of the UTF-16 units `units` to `out`, '\' written as '/' when `slashes`: an
@@ -68,7 +68,7 @@ pub fn native(p: str, op: IoOp) Result<NativePath, IoError> {
 pub fn push_wide(out: &mut String, units: []u16, slashes: bool, op: IoOp) Result<Unit, IoError> {
     let start = out.len();
     if utf16::decode(units, out).is_err() {
-        return Result::<Unit, IoError>::Err(IoError::new(IoErrorKind::InvalidData, op));
+        return Err(IoError::new(IoErrorKind::InvalidData, op));
     }
     if slashes {
         for i in start..out.len() {
@@ -77,7 +77,7 @@ pub fn push_wide(out: &mut String, units: []u16, slashes: bool, op: IoOp) Result
             }
         }
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 
 /// The units of the NUL-terminated wide string at `p`, without the NUL.

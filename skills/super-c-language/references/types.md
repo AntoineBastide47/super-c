@@ -327,7 +327,7 @@ is not 'V'"). Indexing an aggregate calls its `Index`/`IndexMut` methods, std's 
 containers included (`[]T`, `[]mut T`, `str`, `String`, `Vector`, `Array`): `obj[i]` reads through
 `index`, a written element (`obj[i] = v`, `obj[i] += v`, `&mut obj[i]`) goes through `index_mut`.
 The index method's parameter types the index expression, as a parameter types an argument (a view
-takes `usize`: `s[if c { 1; } else { 0; }]`; a float or `i32` index is "mismatched types"). A shared
+takes `usize`: `s[if c { 1 } else { 0 }]`; a float or `i32` index is "mismatched types"). A shared
 view's element and sub-view borrow what the view borrows (`Slice::index<'a>(self: &Slice<'a, T>, i)
 &'a T`), so `fn first(a: []u8) &u8 { return &a[0]; }` is valid; a `[]mut T` element borrows the view.
 `obj[lo..hi]`, in every range form, calls `index_range` with the bounds checked as `usize` and
@@ -585,7 +585,7 @@ enum Result<T, E> {
 
 First-class values, 2 to 8 elements ("a tuple has at most 8 elements: use a struct"). Lower to the
 prelude `Tuple2`..`Tuple8`, which the compiler builds (the module `__std::tuple`; `std/tuple.spc`
-serves only releases that predate it), and which conform to `Eq`, `Ord` (lexicographic), `Hash`,
+only places it), and which conform to `Eq`, `Ord` (lexicographic), `Hash`,
 `Clone`, `Default` and `Format` when every element does, field by field, so a tuple is a map key and
 sorts. Diagnostics write a tuple type as `(A, B)`.
 

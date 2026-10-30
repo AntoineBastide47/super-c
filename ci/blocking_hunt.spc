@@ -191,13 +191,13 @@ fn shutdown_storm(rounds: i64) {
                             time::sleep(time::Duration::from_millis(2));
                             return want;
                         },
-                    );
+                    )
                 } else {
                     blocking::call_c(
                         fn() i64 {
                             return want;
                         },
-                    ).unwrap_or(want);
+                    ).unwrap_or(want)
                 };
                 if got == want {
                     let _ = o.get().fetch_add(1, atomics::MemoryOrder::Relaxed);

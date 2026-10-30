@@ -121,7 +121,7 @@ extend tc::TypeChecker {
                 }
             },
             _ => {},
-        };
+        }
     }
 
     // A lifetime of extend `id` that an associated type names must appear in the target or in the
@@ -963,7 +963,7 @@ extend tc::TypeChecker {
                 return *v;
             },
             _ => {},
-        };
+        }
         return 0;
     }
 
@@ -1226,7 +1226,7 @@ extend tc::TypeChecker {
                             return *v;
                         },
                         _ => {},
-                    };
+                    }
                 }
             }
         }
@@ -1919,7 +1919,7 @@ extend tc::TypeChecker {
             _ => {
                 return NODE_NONE;
             },
-        };
+        }
     }
 
     /// Region diagnostics insert in source order after err_wm (the per-function error watermark bc_fn sets).
@@ -2006,7 +2006,7 @@ extend tc::TypeChecker {
                 _ => {
                     break;
                 },
-            };
+            }
         }
         self.bc_flow_reset(NODE_NONE);
     }
@@ -2172,9 +2172,9 @@ extend tc::TypeChecker {
                 self.loop_depth = self.loop_depth + 1;
                 let nk9 = unsafe (*a).at_const(node).kind;
                 let lbl = if nk9 == NodeKind::NODE_WHILE {
-                    unsafe (*a).at_const(node).as_data.while_stmt.label;
+                    unsafe (*a).at_const(node).as_data.while_stmt.label
                 } else {
-                    unsafe (*a).ext(node).for_stmt.label;
+                    unsafe (*a).ext(node).for_stmt.label
                 };
                 st.les.push(self.tc_loop_push(lbl, node, false));
             } else if k == ir::TP_LOOP_POP {
@@ -2238,9 +2238,9 @@ extend tc::TypeChecker {
                 }
                 let sp = unsafe (*a).at_const(vid).span;
                 let w = if esc == 2 {
-                    "function parameter";
+                    "function parameter"
                 } else {
-                    "local variable";
+                    "local variable"
                 };
                 self.errors.emit_span(
                     dc::RETURNING_POINTER_REFERENCE_WHICH_DOES_NOT,
@@ -2584,7 +2584,7 @@ extend tc::TypeChecker {
                         return false;
                     }
                 }
-                true;
+                true
             },
             NODE_BLOCK => self.tc_scan_list_attributable(m, n.as_data.block.statements, d),
             NODE_IF => self.tc_scan_returns_attributable(m, n.as_data.if_stmt.condition, d) && self.tc_scan_returns_attributable(
@@ -2606,7 +2606,7 @@ extend tc::TypeChecker {
                 if !self.tc_scan_returns_attributable(m, n.as_data.match_expr.value, d) {
                     return false;
                 }
-                self.tc_scan_list_attributable(m, n.as_data.match_expr.arms, d);
+                self.tc_scan_list_attributable(m, n.as_data.match_expr.arms, d)
             },
             NODE_MATCH_ARM => self.tc_scan_returns_attributable(m, n.as_data.match_arm.guard, d) && self.tc_scan_returns_attributable(
                 m,

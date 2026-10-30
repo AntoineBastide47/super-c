@@ -29,7 +29,7 @@ fn codes<E: ErrorSource>(e: &E) Vector<i32> {
 }
 
 fn depth3() Error {
-    let io = IoError { kind: IoErrorKind::NotFound, code: 2, op: IoOp::Open };
+    let io = IoError { kind: NotFound, code: 2, op: Open };
     let read = Error::with_source(10, "read config", Error::from_string(io.code, io.fmt()));
     return Error::with_source(20, "start service", read);
 }
@@ -45,7 +45,7 @@ extend Load as Format {
 
 extend Load as ErrorSource {
     pub fn source(self: &Load) Option<&Error> {
-        return Option::<&Error>::Some(&self.cause);
+        return Some(&self.cause);
     }
 }
 

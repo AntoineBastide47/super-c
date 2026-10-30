@@ -37,25 +37,25 @@ const CHUNK_SIZE_INITIAL: usize = 4096;
 const CHUNK_SIZE_GROWTH_MAX: usize = 1 << 26;
 
 // The header at the start of each upstream chunk. Its size keeps the data after it at `CHUNK_ALIGN`.
-pub(module) struct ArenaChunk {
-    pub(module) next: *mut ArenaChunk, // older chunk in the same list
-    pub(module) size: usize, // bytes requested upstream, header included
+struct ArenaChunk {
+    next: *mut ArenaChunk, // older chunk in the same list
+    size: usize, // bytes requested upstream, header included
 }
 
 static_assert(sizeof(ArenaChunk) == CHUNK_ALIGN, "the chunk header keeps the data at CHUNK_ALIGN");
 
 // The bump state. `cur <= end` always; `cur` and `end` are never null, so a null pointer with a zero size
 // (an empty container's buffer) never ends at the cursor.
-pub(module) struct ArenaState<A> {
+struct ArenaState<A> {
     cur: *mut u8, // next free byte of the current region
     end: *mut u8, // one past the current region
     base: *mut u8, // start of the current region
     used_closed: usize, // bytes used in the regions before the current one
-    pub(module) chunks: *mut ArenaChunk, // chunks in use, newest first
-    pub(module) spare: *mut ArenaChunk, // the chunk `reset` kept, not in use; null when none
+    chunks: *mut ArenaChunk, // chunks in use, newest first
+    spare: *mut ArenaChunk, // the chunk `reset` kept, not in use; null when none
     buf: *mut u8, // the caller buffer
-    pub(module) buf_len: usize, // its length; 0 when there is none
-    pub(module) reserved: usize, // bytes of the chunks held, `spare` included
+    buf_len: usize, // its length; 0 when there is none
+    reserved: usize, // bytes of the chunks held, `spare` included
     next_size: usize, // size of the next chunk requested upstream
     upstream: A,
 }
@@ -69,7 +69,7 @@ pub struct Arena<'b, A = Global> {
 /// The `Allocator` handle of an `Arena`: one pointer, `Copy`, valid while the arena is borrowed for `'a`.
 @derive(Copy)
 pub struct ArenaAlloc<'a, A = Global> {
-    pub(module) state: *mut ArenaState<A>,
+    state: *mut ArenaState<A>,
 }
 
 // The address of an empty region: non-null and aligned, never dereferenced.

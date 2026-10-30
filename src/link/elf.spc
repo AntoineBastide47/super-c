@@ -369,9 +369,9 @@ pub(package) fn link(o: &Opts, err: &mut String) bool {
     let mut l = L {
         a64: o.a64,
         page: if o.a64 {
-            0x10000u64;
+            0x10000u64
         } else {
-            0x1000u64;
+            0x1000u64
         },
         files: Vector::<IFile>::new(),
         paths: Vector::<String>::new(),
@@ -465,7 +465,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     }
     write_synthetic(l, b, &mut img);
     finish(l, o, b, &mut img);
-    if !lu::write(o.out.as_str(), img.as_slice(), 0o755) {
+    if !lu::write(&o.out, &img, 0o755) {
         l.err.format_into("cannot write '{}'", o.out.as_str());
         return false;
     }
@@ -517,9 +517,9 @@ fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
 fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
     let b = blob.as_slice();
     let mach: u32 = if l.a64 {
-        183;
+        183
     } else {
-        62;
+        62
     };
     if b.len() - at < 64 || lu::r32(b, at) != 0x464C457F || b[at + 4] != 2 || lu::r16(b, at + 16) != 1 || lu::r16(
         b,
@@ -694,7 +694,7 @@ fn resolve_objects(l: &mut L, from: usize) bool {
 // The shared libraries `lib_files` found, in order; each one's exports bind the globals still undefined.
 fn load_libraries(l: &mut L, sos: &Vector<String>) bool {
     for i in 0..sos.len() {
-        if !load_so(l, sos[i].as_str()) {
+        if !load_so(l, &sos[i]) {
             return false;
         }
     }
@@ -713,13 +713,13 @@ fn lib_files(l: &mut L, o: &Opts, sos: &mut Vector<String>, ars: &mut ar::Archiv
     let mut files = Vector::<String>::new();
     for i in 0..names.len() {
         let mut path = String::new();
-        let kind = find(o, names[i].as_str(), &mut path);
+        let kind = find(o, &names[i], &mut path);
         if kind == LIB_NONE {
             l.err.format_into("library not found: -l{}", names[i].as_str());
             return false;
         }
         files.truncate(0);
-        if kind == LIB_SHARED && !script_files(o, path.as_str(), &mut files) {
+        if kind == LIB_SHARED && !script_files(o, &path, &mut files) {
             files.push(path);
         } else if kind == LIB_ARCHIVE {
             files.push(path);
@@ -748,9 +748,9 @@ pub(package) const LIB_ARCHIVE: u8 = 2;
 /// path into `path`.
 pub(package) fn find(o: &Opts, name: str, path: &mut String) u8 {
     let sys: []str = if o.a64 {
-        DIRS_A64;
+        DIRS_A64
     } else {
-        DIRS_X64;
+        DIRS_X64
     };
     let mut dirs = Vector::<String>::new();
     for i in 0..o.dirs.len() {
@@ -761,19 +761,19 @@ pub(package) fn find(o: &Opts, name: str, path: &mut String) u8 {
     }
     for d in 0..dirs.len() {
         let so = format("{}/lib{}.so", dirs[d].as_str(), name);
-        if is_file(so.as_str()) {
+        if is_file(&so) {
             path.clear();
             path.push_string(&so);
             return LIB_SHARED;
         }
-        let v = newest_version(dirs[d].as_str(), name);
+        let v = newest_version(&dirs[d], name);
         if v.len() != 0 {
             path.clear();
             path.push_string(&v);
             return LIB_SHARED;
         }
         let a = format("{}/lib{}.a", dirs[d].as_str(), name);
-        if is_file(a.as_str()) {
+        if is_file(&a) {
             path.clear();
             path.push_string(&a);
             return LIB_ARCHIVE;
@@ -799,7 +799,7 @@ fn newest_version(dir: str, name: str) String {
     let mut rd = opened.unwrap();
     // Bounded by the directory's entries.
     while let Some(Ok(e)) = rd.next() {
-        if !e.name.starts_with(pre.as_str()) {
+        if !e.name.starts_with(&pre) {
             continue;
         }
         let rest = e.name.slice(pre.len(), e.name.len());
@@ -830,13 +830,13 @@ fn script_files(o: &Opts, path: str, out: &mut Vector<String>) bool {
         return false;
     }
     let d = data.unwrap();
-    if d.len() >= 4 && lu::r32(d.as_slice(), 0) == 0x464C457F {
+    if d.len() >= 4 && lu::r32(&d, 0) == 0x464C457F {
         return false;
     }
-    let root = if o.sysroot.len() != 0 && path.starts_with(o.sysroot.as_str()) {
-        o.sysroot.as_str();
+    let root = if o.sysroot.len() != 0 && path.starts_with(&o.sysroot) {
+        o.sysroot.as_str()
     } else {
-        "";
+        ""
     };
     let t = unsafe str::from_raw(d.as_ptr(), d.len());
     let mut i: usize = 0;
@@ -852,7 +852,7 @@ fn script_files(o: &Opts, path: str, out: &mut Vector<String>) bool {
         let w = t.slice(s, i);
         if w.starts_with("/") && (w.ends_with(".so") || w.contains(".so.") || w.ends_with(".a")) {
             let f = format("{}{}", root, w);
-            if root.len() != 0 && !is_file(f.as_str()) {
+            if root.len() != 0 && !is_file(&f) {
                 out.push(String::from_str(w));
             } else {
                 out.push(f);
@@ -943,9 +943,9 @@ fn load_so(l: &mut L, path: str) bool {
     let so = lu::r64(b, dynsym + 24) as usize;
     let n = lu::r64(b, dynsym + 32) as usize / 24;
     let vs = if versym != 0 {
-        lu::r64(b, versym + 24) as usize;
+        lu::r64(b, versym + 24) as usize
     } else {
-        0usize;
+        0usize
     };
     for k in 1..n {
         let e = so + 24 * k;
@@ -1145,14 +1145,14 @@ fn collect(l: &mut L, b: []u8, main: u32) {
             }
         }
         for i in 0..ehs.len() {
-            eh_reach(l, b, ehs[i], ix[i].as_slice(), &mut work);
+            eh_reach(l, b, ehs[i], &ix[i], &mut work);
         }
         if work.len() == 0 {
             break;
         }
     }
     for i in 0..ehs.len() {
-        eh_records(l, b, ehs[i], ix[i].as_slice());
+        eh_records(l, b, ehs[i], &ix[i]);
     }
 }
 
@@ -1320,9 +1320,9 @@ fn eh_records(l: &mut L, b: []u8, e: u32, ix: []u64) {
                 old: p as u32,
                 len: (4 + len) as u32,
                 new: if keep {
-                    0u32;
+                    0u32
                 } else {
-                    NONE32;
+                    NONE32
                 },
                 cie: cie,
             },
@@ -1374,9 +1374,9 @@ fn eh_find(l: &L, first: u32, last: u32, off: u32) u32 {
     }
     let r = l.eh[lo as usize];
     return if off < r.old + r.len {
-        lo;
+        lo
     } else {
-        NONE32;
+        NONE32
     };
 }
 
@@ -1485,9 +1485,9 @@ fn scan(l: &mut L, b: []u8, lsm: u32) bool {
                 continue;
             }
             let op = if r.off >= 2 {
-                b[sc.off + r.off as usize - 2] as u16 << 8 | b[sc.off + r.off as usize - 1] as u16;
+                b[sc.off + r.off as usize - 2] as u16 << 8 | b[sc.off + r.off as usize - 1] as u16
             } else {
-                0u16;
+                0u16
             };
             if call_relaxes(l, g, r, op) {
                 if g != NONE {
@@ -1663,9 +1663,9 @@ const fn out_name<'a>(l: &'a L, s: ISec, rank: &mut u32) str<'a> {
     if (s.flags & SHF_EXECINSTR) != 0 {
         *rank = 300;
         return if n.starts_with(".text") {
-            ".text";
+            ".text"
         } else {
-            n;
+            n
         };
     }
     if s.ty == SHT_INIT_ARRAY || n.starts_with(".init_array") {
@@ -1687,9 +1687,9 @@ const fn out_name<'a>(l: &'a L, s: ISec, rank: &mut u32) str<'a> {
     if (s.flags & SHF_WRITE) == 0 {
         *rank = 100;
         return if n.starts_with(".rodata") {
-            ".rodata";
+            ".rodata"
         } else {
-            n;
+            n
         };
     }
     if n.starts_with(".data.rel.ro") {
@@ -1699,16 +1699,16 @@ const fn out_name<'a>(l: &'a L, s: ISec, rank: &mut u32) str<'a> {
     if s.ty == SHT_NOBITS {
         *rank = 600;
         return if n.starts_with(".bss") {
-            ".bss";
+            ".bss"
         } else {
-            n;
+            n
         };
     }
     *rank = 500;
     return if n.starts_with(".data") {
-        ".data";
+        ".data"
     } else {
-        n;
+        n
     };
 }
 
@@ -1751,9 +1751,9 @@ fn layout(l: &mut L, o: &Opts, b: []u8) {
     // `_start` leads the code.
     let text = l.o[O_TEXT] as usize;
     l.osecs.index_mut(text).size = if l.shared {
-        0u64;
+        0u64
     } else {
-        start_size(l.a64);
+        start_size(l.a64)
     };
     l.osecs.index_mut(text).align = 16;
     let mut has_eh = false;
@@ -1765,11 +1765,11 @@ fn layout(l: &mut L, o: &Opts, b: []u8) {
         let mut rank: u32 = 0;
         let name = String::from_str(out_name(l, sc, &mut rank));
         let ty = if sc.ty == SHT_X86_64_UNWIND {
-            SHT_PROGBITS;
+            SHT_PROGBITS
         } else {
-            sc.ty;
+            sc.ty
         };
-        let o = out_section(l, name.as_str(), ty, sc.flags & (SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR | SHF_TLS), rank);
+        let o = out_section(l, &name, ty, sc.flags & (SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR | SHF_TLS), rank);
         has_eh = has_eh || name.as_str() == ".eh_frame";
         let os = l.osecs.index_mut(o as usize);
         os.align = os.align.max(sc.align);
@@ -2246,17 +2246,17 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
             // initial-exec: mov %fs:0, %rax; add slot(%rip), %rax.
             let st = p - 4;
             let seq: [u8; 12] = if l.shared {
-                [0x64, 0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0, 0x48, 0x03, 0x05];
+                [0x64, 0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0, 0x48, 0x03, 0x05]
             } else {
-                [0x64, 0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0, 0x48, 0x8D, 0x80];
+                [0x64, 0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0, 0x48, 0x8D, 0x80]
             };
             for j in 0..12usize {
                 img[st + j] = unsafe seq[j];
             }
             let v = if l.shared {
-                tls_got_addr(l, k).wrapping_sub(pa - 4 + 16);
+                tls_got_addr(l, k).wrapping_sub(pa - 4 + 16)
             } else {
-                tpoff(l, sv) as u64;
+                tpoff(l, sv) as u64
             };
             lu::p32(img, st + 12, v as u32);
             let _ = s;
@@ -2321,9 +2321,9 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
     }
     if r.ty == A_ADR_PREL_PG_HI21 || r.ty == A_ADR_GOT_PAGE {
         let t = if r.ty == A_ADR_GOT_PAGE {
-            slot_addr(l, g, k);
+            slot_addr(l, g, k)
         } else {
-            sa;
+            sa
         };
         let d = (t & ~0xFFFu64).wrapping_sub(pa & ~0xFFFu64) as i64 >> 12;
         if !fits(d, 21) {
@@ -2336,20 +2336,20 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
     }
     if r.ty == A_ADD_ABS_LO12_NC || r.ty == A_LDST8_ABS_LO12_NC || r.ty == A_LDST16_ABS_LO12_NC || r.ty == A_LDST32_ABS_LO12_NC || r.ty == A_LDST64_ABS_LO12_NC || r.ty == A_LDST128_ABS_LO12_NC || r.ty == A_LD64_GOT_LO12_NC {
         let t = if r.ty == A_LD64_GOT_LO12_NC {
-            slot_addr(l, g, k);
+            slot_addr(l, g, k)
         } else {
-            sa;
+            sa
         };
         let sh: u32 = if r.ty == A_LDST16_ABS_LO12_NC {
-            1;
+            1
         } else if r.ty == A_LDST32_ABS_LO12_NC {
-            2;
+            2
         } else if r.ty == A_LDST64_ABS_LO12_NC || r.ty == A_LD64_GOT_LO12_NC {
-            3;
+            3
         } else if r.ty == A_LDST128_ABS_LO12_NC {
-            4;
+            4
         } else {
-            0;
+            0
         };
         let lo = (t & 0xFFF) as u32;
         lu::p32(img, p, insn & 0xFFC003FF | lo >> sh << 10);
@@ -2425,11 +2425,11 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
     if r.ty >= A_TLSLE_MOVW_TPREL_G2 && r.ty <= A_TLSLE_MOVW_TPREL_G0_NC {
         // G2, G1, G1_NC, G0, G0_NC: the 16 bits at 32, 16, 16, 0, 0.
         let sh: u64 = if r.ty == A_TLSLE_MOVW_TPREL_G2 {
-            32;
+            32
         } else if r.ty < A_TLSLE_MOVW_TPREL_G0_NC - 1 {
-            16;
+            16
         } else {
-            0;
+            0
         };
         lu::p32(img, p, insn & 0xFFE0001F | (tp >> sh & 0xFFFF) as u32 << 5);
         return true;
@@ -2445,9 +2445,9 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
     if le {
         // LDST8, 16, 32, 64 (each with its NC form), then LDST128: the low 12 bits scaled by the access.
         let sh: u32 = if r.ty >= A_TLSLE_LDST128_TPREL_LO12 {
-            4;
+            4
         } else {
-            (r.ty - A_TLSLE_LDST8_TPREL_LO12) / 2;
+            (r.ty - A_TLSLE_LDST8_TPREL_LO12) / 2
         };
         lu::p32(img, p, insn & 0xFFC003FF | (tp & 0xFFF) as u32 >> sh << 10);
         return true;
@@ -2658,16 +2658,16 @@ fn write_synthetic(l: &mut L, b: []u8, img: &mut Vector<u8>) {
         let a = gos.addr + 8 * i as u64;
         if l.gs[g as usize].kind == G_SHARED {
             let ty = if l.a64 {
-                A_GLOB_DAT;
+                A_GLOB_DAT
             } else {
-                X_GLOB_DAT;
+                X_GLOB_DAT
             };
             dyn_rel(l, a, ty, l.gs[g as usize].dynix, 0);
         } else {
             let ty = if l.a64 {
-                A_RELATIVE;
+                A_RELATIVE
             } else {
-                X_RELATIVE;
+                X_RELATIVE
             };
             dyn_rel(l, a, ty, 0, g_addr(l, g) as i64);
         }
@@ -2676,9 +2676,9 @@ fn write_synthetic(l: &mut L, b: []u8, img: &mut Vector<u8>) {
     for i in 0..l.lgot.len() {
         let a = gos.addr + 8 * (l.got.len() + i) as u64;
         let ty = if l.a64 {
-            A_RELATIVE;
+            A_RELATIVE
         } else {
-            X_RELATIVE;
+            X_RELATIVE
         };
         dyn_rel(l, a, ty, 0, sym_addr(l, l.lgot[i]) as i64);
     }
@@ -2688,14 +2688,14 @@ fn write_synthetic(l: &mut L, b: []u8, img: &mut Vector<u8>) {
         let key = l.tls_keys[i];
         let a = gos.addr + 8 * (l.got.len() + l.lgot.len() + i) as u64;
         let va = if key >> 63 != 0 {
-            g_addr(l, (key & 0xFFFFFFFF) as u32);
+            g_addr(l, (key & 0xFFFFFFFF) as u32)
         } else {
-            sym_addr(l, key as u32);
+            sym_addr(l, key as u32)
         };
         let ty = if l.a64 {
-            A_TLS_TPREL64;
+            A_TLS_TPREL64
         } else {
-            X_TPOFF64;
+            X_TPOFF64
         };
         dyn_rel(l, a, ty, 0, (va - l.tls_start) as i64);
     }
@@ -2731,17 +2731,17 @@ fn write_eh_hdr(l: &L, b: []u8, img: &mut Vector<u8>) {
             let cie = p + 4 - id as usize;
             let ce = cie_enc.get(&((cie - base) as u64));
             let e = if ce.is_some() {
-                *ce.unwrap();
+                *ce.unwrap()
             } else {
-                enc;
+                enc
             };
             let field = p + 8;
             let fa = eh.addr + (field - base) as u64;
             let v = lu::r32(img.as_slice(), field);
             let start = if (e & 0x70) == 0x10 {
-                fa.wrapping_add(((v as i32) as i64) as u64);
+                fa.wrapping_add(((v as i32) as i64) as u64)
             } else {
-                v as u64;
+                v as u64
             };
             ent.push(start);
             fdes.push(eh.addr + (p - base) as u64);
@@ -2837,9 +2837,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     let mut ds = Vector::<u8>::new();
     ds.push(0);
     let soname = if l.shared {
-        lu::put_str(&mut ds, o.soname.as_str());
+        lu::put_str(&mut ds, &o.soname)
     } else {
-        0u32;
+        0u32
     };
     let mut sym_name = Vector::<u32>::new();
     for i in 0..l.dyns.len() {
@@ -2849,9 +2849,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     for i in 0..l.libs.len() {
         lib_name.push(
             if l.libs[i].used {
-                lu::put_str(&mut ds, l.libs[i].soname.as_str());
+                lu::put_str(&mut ds, &l.libs[i].soname)
             } else {
-                0u32;
+                0u32
             },
         );
     }
@@ -2859,9 +2859,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     for v in 0..l.vers.len() {
         ver_name.push(
             if l.vers[v].index != 0 {
-                lu::put_str(&mut ds, l.vers[v].name.as_str());
+                lu::put_str(&mut ds, &l.vers[v].name)
             } else {
-                0u32;
+                0u32
             },
         );
     }
@@ -2879,11 +2879,11 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         if gy.kind == G_DEF || gy.kind == G_COMMON {
             // An export: its address and size in its output section.
             let (info, shndx, size) = if gy.kind == G_COMMON {
-                (STB_GLOBAL << 4 | STT_OBJECT, l.o[O_BSS] + 1, gy.size);
+                (STB_GLOBAL << 4 | STT_OBJECT, l.o[O_BSS] + 1, gy.size)
             } else {
                 let y = l.syms[gy.sym as usize];
                 let f = l.files[y.file as usize];
-                (y.info, l.secs[(f.sec0 + y.shndx) as usize].out + 1, y.size);
+                (y.info, l.secs[(f.sec0 + y.shndx) as usize].out + 1, y.size)
             };
             img[e + 4] = info;
             lu::p16(img, e + 6, shndx);
@@ -2894,21 +2894,21 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         }
         // An import; one no library defines binds weakly (a shared library's).
         img[e + 4] = if gy.lib == NONE {
-            STB_WEAK;
+            STB_WEAK
         } else {
-            STB_GLOBAL;
+            STB_GLOBAL
         } << 4 | if gy.func {
-            STT_FUNC;
+            STT_FUNC
         } else {
-            STT_OBJECT;
+            STT_OBJECT
         };
         lu::p16(
             img,
             ovs.off as usize + 2 * (i + 1),
             if gy.ver != NONE {
-                l.vers[gy.ver as usize].index;
+                l.vers[gy.ver as usize].index
             } else {
-                1u32;
+                1u32
             },
         );
     }
@@ -2959,7 +2959,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
                 continue;
             }
             k += 1;
-            lu::p32(img, q, elf_hash(l.vers[v].name.as_str()));
+            lu::p32(img, q, elf_hash(&l.vers[v].name));
             lu::p16(img, q + 4, 0);
             lu::p16(img, q + 6, l.vers[v].index);
             lu::p32(img, q + 8, ver_name[v]);
@@ -2967,9 +2967,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
                 img,
                 q + 12,
                 if k < cnt {
-                    16u32;
+                    16u32
                 } else {
-                    0u32;
+                    0u32
                 },
             );
             q += 16;
@@ -3032,9 +3032,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         DT_VERSYM,
         ovs.addr,
         if l.shared {
-            DT_SONAME;
+            DT_SONAME
         } else {
-            DT_DEBUG;
+            DT_DEBUG
         },
         soname,
     ];
@@ -3071,17 +3071,17 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     dv.push(DT_FLAGS);
     dv.push(
         DF_BIND_NOW | if l.tls_keys.len() != 0 {
-            DF_STATIC_TLS;
+            DF_STATIC_TLS
         } else {
-            0u64;
+            0u64
         },
     );
     dv.push(DT_FLAGS_1);
     dv.push(
         DF_1_NOW | if l.shared {
-            0u64;
+            0u64
         } else {
-            DF_1_PIE;
+            DF_1_PIE
         },
     );
     dv.push(DT_NULL);
@@ -3176,9 +3176,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
                     continue; // in a section garbage collection dropped
                 }
                 let sh = if y.shndx == SHN_ABS {
-                    SHN_ABS;
+                    SHN_ABS
                 } else {
-                    l.secs[(f.sec0 + y.shndx) as usize].out + 1;
+                    l.secs[(f.sec0 + y.shndx) as usize].out + 1
                 };
                 put_sym(
                     &mut syms,
@@ -3193,9 +3193,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
                     &mut syms,
                     lu::put_str(&mut st, l.names.spell(gy.name)),
                     STB_GLOBAL << 4 | if gy.func {
-                        STT_FUNC;
+                        STT_FUNC
                     } else {
-                        STT_NOTYPE;
+                        STT_NOTYPE
                     },
                     0,
                     0,
@@ -3211,11 +3211,11 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         img.push(0);
     }
     let symtab_off = img.len() as u64;
-    img.extend_from_slice(syms.as_slice());
+    img.extend_from_slice(&syms);
     let strtab_off = img.len() as u64;
-    img.extend_from_slice(st.as_slice());
+    img.extend_from_slice(&st);
     let shstr_off = img.len() as u64;
-    img.extend_from_slice(shstr.as_slice());
+    img.extend_from_slice(&shstr);
     while img.len() % 8 != 0 {
         img.push(0);
     }
@@ -3235,20 +3235,20 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             continue;
         }
         let (link, info) = if i as u32 == l.o[O_DYNSYM] {
-            (dynstr_ix, 1u32);
+            (dynstr_ix, 1u32)
         } else if i as u32 == l.o[O_HASH] || i as u32 == l.o[O_VERSYM] || i as u32 == l.o[O_RELA] {
-            (dynsym_ix, 0u32);
+            (dynsym_ix, 0u32)
         } else if i as u32 == l.o[O_VERNEED] {
-            (dynstr_ix, nvlib);
+            (dynstr_ix, nvlib)
         } else if i as u32 == l.o[O_DYNAMIC] {
-            (dynstr_ix, 0u32);
+            (dynstr_ix, 0u32)
         } else {
-            (0u32, 0u32);
+            (0u32, 0u32)
         };
         let size = if i as u32 == l.o[O_RELA] {
-            rela_size;
+            rela_size
         } else {
-            os.size;
+            os.size
         };
         put_shdr(
             img,
@@ -3256,9 +3256,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             os.ty,
             os.flags,
             if loaded {
-                os.addr;
+                os.addr
             } else {
-                0u64;
+                0u64
             },
             os.off,
             size,
@@ -3317,9 +3317,9 @@ fn write_headers(l: &L, img: &mut Vector<u8>, shoff: u64, nsh: u32) {
     lu::w16(
         &mut h,
         if l.a64 {
-            183u32;
+            183u32
         } else {
-            62u32;
+            62u32
         },
     );
     lu::w32(&mut h, 1);
@@ -3368,11 +3368,11 @@ fn write_headers(l: &L, img: &mut Vector<u8>, shoff: u64, nsh: u32) {
             flo = 0;
         }
         let flags: u32 = if seg == 0 {
-            4;
+            4
         } else if seg == 1 {
-            5;
+            5
         } else {
-            6;
+            6
         };
         if !any && seg != 0 {
             continue;

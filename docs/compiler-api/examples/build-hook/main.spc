@@ -34,7 +34,7 @@ extend ModuleList as bld::Hook {
             text.push(b'\n');
         }
         out.artifact("modules.txt", text);
-        return Result::<Unit, er::ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 

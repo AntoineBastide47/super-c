@@ -74,7 +74,7 @@ pub fn dualquat_cast<T: Float, const C: usize>(x: Mat<T, C, 4>) DualQuat<T> {
             DualQuat::<T>::new(
                 Quat::<T>::new(x.c[0].e[3], x.c[0].e[0], x.c[0].e[1], x.c[0].e[2]),
                 Quat::<T>::new(x.c[1].e[3], x.c[1].e[0], x.c[1].e[1], x.c[1].e[2]),
-            );
+            )
         };
     }
     return unsafe dualquat_of_affine(x.c[0], x.c[1], x.c[2]);
@@ -180,9 +180,9 @@ extend<T: Float> DualQuat<T> as Index<Quat<T>, []Quat<T>> {
     }
     pub fn index_range(self: &DualQuat<T>, r: Range<usize>) []Quat<T> {
         let hi = if r.inclusive {
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         if r.start > hi || hi > 2 {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
@@ -201,9 +201,9 @@ extend<T: Float> DualQuat<T> as IndexMut<Quat<T>, []mut Quat<T>> {
     }
     pub fn index_range_mut(self: &mut DualQuat<T>, r: Range<usize>) []mut Quat<T> {
         let hi = if r.inclusive {
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         if r.start > hi || hi > 2 {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
@@ -321,9 +321,9 @@ extend<T: Float> DualQuat<T> as Lerp<T> {
     pub fn lerp(self: DualQuat<T>, y: DualQuat<T>, a: T) DualQuat<T> {
         assert(a.greater_equal(T::zero()) && a.less_equal(T::one()), "lerp: the interpolant is outside [0, 1]");
         let k = if dot(self.real, y.real).less(T::zero()) {
-            -a;
+            -a
         } else {
-            a;
+            a
         };
         return self * (T::one() - a) + y * k;
     }

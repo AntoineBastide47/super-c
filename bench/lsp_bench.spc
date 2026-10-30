@@ -189,7 +189,7 @@ fn request(d: &mut Drv, rpc: str, method: str, params: str, idk: &mut String) St
 // `{"textDocument":{"uri":...}` without its closing brace.
 fn doc_params(d: &Drv) String {
     let mut p = String::from_str("{\"textDocument\":{\"uri\":\"");
-    p.push_str(d.uri.as_str());
+    p.push_str(&d.uri);
     p.push_str("\"}");
     return p;
 }
@@ -203,14 +203,14 @@ fn at_request(d: &mut Drv, method: str, text: str, at: usize, extra: str, idk: &
     }
     p.push_str(extra);
     p.push_byte(b'}');
-    return request(d, "2.0", method, p.as_str(), idk);
+    return request(d, "2.0", method, &p, idk);
 }
 
 // A didChange notification applying `e` to `text` (the document before the edit).
 fn change(d: &mut Drv, text: str, e: &Edit) String {
     d.ver += 1;
     let mut p = String::from_str("{\"textDocument\":{\"uri\":\"");
-    p.push_str(d.uri.as_str());
+    p.push_str(&d.uri);
     p.push_str("\",\"version\":");
     p.push_i64(d.ver);
     p.push_str("},\"contentChanges\":[{\"range\":{\"start\":");
@@ -223,7 +223,7 @@ fn change(d: &mut Drv, text: str, e: &Edit) String {
     if !ok || !ok2 {
         return String::new();
     }
-    return notification("textDocument/didChange", p.as_str());
+    return notification("textDocument/didChange", &p);
 }
 
 const HEX: str = "0123456789abcdef";
@@ -391,7 +391,7 @@ fn query(d: &mut Drv, k: usize, t: str, sp: &Spots, idk: &mut String) String {
     }
     let mut p = doc_params(d);
     p.push_byte(b'}');
-    return request(d, "2.0", "textDocument/diagnostic", p.as_str(), idk);
+    return request(d, "2.0", "textDocument/diagnostic", &p, idk);
 }
 
 // The scripted session. False when a reply did not arrive or a position could not be expressed.
@@ -417,17 +417,17 @@ fn drive(d: &mut Drv, root: &String, text: &String) bool {
     let mut init = String::from_str("{\"processId\":null,\"rootUri\":\"file://");
     init.push_str(root.as_str());
     init.push_str("\",\"capabilities\":{}}");
-    let mut msgs = request(d, "2.0", "initialize", init.as_str(), &mut idk);
+    let mut msgs = request(d, "2.0", "initialize", &init, &mut idk);
     msgs.push_str(notification("initialized", "{}").as_str());
     if !update(d, S_COLD, msgs) {
         return false;
     }
     let mut open = String::from_str("{\"textDocument\":{\"uri\":\"");
-    open.push_str(d.uri.as_str());
+    open.push_str(&d.uri);
     open.push_str("\",\"languageId\":\"super-c\",\"version\":0,\"text\":");
     open.push_str(json_str(t).as_str());
     open.push_str("}}");
-    if !update(d, S_OPEN, notification("textDocument/didOpen", open.as_str())) {
+    if !update(d, S_OPEN, notification("textDocument/didOpen", &open)) {
         return false;
     }
 
@@ -448,23 +448,23 @@ fn drive(d: &mut Drv, root: &String, text: &String) bool {
 
     let mut m = String::new();
     for _ in 0..EDIT_ROUNDS {
-        let ok = update(d, S_BODY, change(d, t, &body)) && update(d, S_BODY_REV, change(d, t_body.as_str(), &body_rev)) && update(
+        let ok = update(d, S_BODY, change(d, t, &body)) && update(d, S_BODY_REV, change(d, &t_body, &body_rev)) && update(
             d,
             S_SIG,
             change(d, t, &sig_e),
-        ) && update(d, S_SIG_REV, change(d, t_sig.as_str(), &sig_rev));
+        ) && update(d, S_SIG_REV, change(d, &t_sig, &sig_rev));
         if !ok {
             return false;
         }
         // A hover sent right behind an edit waits for the edit's analysis; the revert after it is not measured.
         m = change(d, t, &body);
         m.push_str(at_request(d, "textDocument/hover", t, hover_at as usize, "", &mut idk).as_str());
-        if !step(d, S_HOVER_BODY, &m, &idk) || !update(d, S_N, change(d, t_body.as_str(), &body_rev)) {
+        if !step(d, S_HOVER_BODY, &m, &idk) || !update(d, S_N, change(d, &t_body, &body_rev)) {
             return false;
         }
         m = change(d, t, &sig_e);
         m.push_str(at_request(d, "textDocument/hover", t, hover_at as usize, "", &mut idk).as_str());
-        if !step(d, S_HOVER_SIG, &m, &idk) || !update(d, S_N, change(d, t_sig.as_str(), &sig_rev)) {
+        if !step(d, S_HOVER_SIG, &m, &idk) || !update(d, S_N, change(d, &t_sig, &sig_rev)) {
             return false;
         }
     }
@@ -576,7 +576,7 @@ fn session() bool {
     }
     let text = to.unwrap();
     let mut uri = String::from_str("file://");
-    uri.push_str(root.as_str());
+    uri.push_str(&root);
     uri.push_byte(b'/');
     uri.push_str(DOC);
     let mut std_dir = root.clone();
@@ -622,7 +622,7 @@ fn session() bool {
             return replace(&mut d.out, Vector::<Vector<Sample>>::new());
         },
     );
-    let rc = server::run(std_dir.as_str(), unsafe shim::sc_host_platform());
+    let rc = server::run(&std_dir, unsafe shim::sc_host_platform());
     restore(&saved);
     let out = h.join();
     if rc != 0 || out.len() != S_N {
@@ -728,19 +728,19 @@ fn reuse() bool {
     let mut abs = root.clone();
     abs.push_byte(b'/');
     abs.push_str(DOC);
-    let doc = an::canon_path(abs.as_str());
+    let doc = an::canon_path(&abs);
     let target = unsafe shim::sc_host_platform();
     let mut diags = Vector::<an::DiagRec>::new();
     let t0 = platform::now_ns();
     let mut p = an::compile(
-        root_file.as_str(),
-        root_dir.as_str(),
+        &root_file,
+        &root_dir,
         "",
-        std_dir.as_str(),
+        &std_dir,
         target,
         Vector::<String>::new(),
         Vector::<String>::new(),
-        root.as_str(),
+        &root,
         &mut diags,
     );
     let none = Vector::<str>::new();
@@ -771,11 +771,11 @@ fn reuse() bool {
     for k in 0..texts.len() {
         let mut ovf = Vector::<str>::new();
         let mut ovt = Vector::<str>::new();
-        ovf.push(doc.as_str());
-        ovt.push(texts[k].as_str());
+        ovf.push(&doc);
+        ovt.push(&texts[k]);
         let mut st = an::RecompileStats {};
         let t1 = platform::now_ns();
-        if !an::recompile(&mut p, target, root_file.as_str(), root.as_str(), &ovf, &ovt, &mut diags, &mut st) {
+        if !an::recompile(&mut p, target, &root_file, &root, &ovf, &ovt, &mut diags, &mut st) {
             eprintln("lsp bench: {} left the incremental path", unsafe REUSE_STEPS[k]);
             return false;
         }

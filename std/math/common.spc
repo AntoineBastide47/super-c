@@ -88,14 +88,14 @@ pub fn sign<T: Scalar, G: Gen<T>>(x: G) G {
     for i in 0..G::len() {
         let v = x.at(i);
         let p = if T::zero().less(v) {
-            T::one();
+            T::one()
         } else {
-            T::zero();
+            T::zero()
         };
         let n = if v.less(T::zero()) {
-            T::one();
+            T::one()
         } else {
-            T::zero();
+            T::zero()
         };
         r.put(i, p - n);
     }
@@ -149,13 +149,13 @@ pub fn round_even<T: Float, G: Gen<T>>(x: G) G {
         let fractional = fract_of(v);
         let half = T::from_f64(0.5);
         let rounded = if fractional.greater(half) || fractional.less(half) {
-            v.round();
+            v.round()
         } else if integer % 2 == 0 {
-            integer_part;
+            integer_part
         } else if v.less_equal(T::zero()) {
-            integer_part - T::one();
+            integer_part - T::one()
         } else {
-            integer_part + T::one();
+            integer_part + T::one()
         };
         r.put(i, rounded);
     }
@@ -190,7 +190,7 @@ pub fn modf<T: Float, G: Gen<T>>(x: G) (G, G) {
         f.put(i, a);
         n.put(i, b);
     }
-    return f, n;
+    return (f, n);
 }
 
 /// `(y < x) ? y : x`, component by component; `y` is a `G` or a scalar.
@@ -350,9 +350,9 @@ pub fn step<T: Scalar, G: Gen<T>, B: Arg<G>>(edge: B, x: G) G {
     let mut r = x;
     for i in 0..G::len() {
         let v = if x.at(i).less(e.at(i)) {
-            T::zero();
+            T::zero()
         } else {
-            T::one();
+            T::one()
         };
         r.put(i, v);
     }
@@ -570,7 +570,7 @@ pub interface IntShaped: Copy {
 /// infinity or NaN itself with exponent 0.
 pub fn frexp<G: IntShaped>(x: G) (G, G::Ints) {
     let (m, e) = x.frexp();
-    return m, e;
+    return (m, e);
 }
 
 /// `x * 2^exp` for each component.
@@ -603,7 +603,7 @@ extend<T: Float> T as IntShaped {
     type UInts = u32;
     pub fn frexp(self: T) (T, i32) {
         let (m, e) = Float::frexp(self);
-        return m, e;
+        return (m, e);
     }
     pub fn ldexp(self: T, exp: i32) T {
         return Float::ldexp(self, exp);
@@ -629,7 +629,7 @@ extend<T: Float, const N: usize> Vec<T, N> as IntShaped {
                 e.e[i] = b;
             }
         }
-        return m, e;
+        return (m, e);
     }
     pub fn ldexp(self: Vec<T, N>, exp: Vec<i32, N>) Vec<T, N> {
         let mut r = self;
@@ -857,9 +857,9 @@ pub fn mirror_repeat<T: Float, G: Gen<T>>(x: G) G {
         let rest = a - floored;
         let mirror = clamped + rest;
         let v = if mirror.greater_equal(T::one()) {
-            T::one() - rest;
+            T::one() - rest
         } else {
-            rest;
+            rest
         };
         r.put(i, v);
     }

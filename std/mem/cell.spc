@@ -142,10 +142,10 @@ extend<T> RefCell<T> {
         // instead of overflowing into the exclusive state.
         let n = self.state.get().wrapping_add(1);
         if n <= 0 {
-            return Option::<Ref<T>>::None;
+            return None;
         }
         self.state.set(n);
-        return Option::<Ref<T>>::Some(Ref::<T>::hold(self));
+        return Some(Ref::<T>::hold(self));
     }
 
     /// The exclusive borrow of the value. Panics: the value is borrowed.
@@ -159,10 +159,10 @@ extend<T> RefCell<T> {
     /// The exclusive borrow of the value, or `None` when it is borrowed.
     pub const fn try_borrow_mut(self: &RefCell<T>) Option<RefMut<T>> {
         if self.state.get() != 0 {
-            return Option::<RefMut<T>>::None;
+            return None;
         }
         self.state.set(-1);
-        return Option::<RefMut<T>>::Some(RefMut::<T>::hold(self));
+        return Some(RefMut::<T>::hold(self));
     }
 
     /// Store `value` and return the previous value. Panics: the value is borrowed.
@@ -236,7 +236,7 @@ extend<T> OnceCell<T> {
     /// A shared borrow of the value, or `None` while the cell is empty.
     pub const fn get(self: &OnceCell<T>) Option<&T> {
         return switch unsafe &*self.value.get() {
-            Some(v) => Option::<&T>::Some(v),
+            Some(v) => Some(v),
             None => Option::<&T>::None,
         };
     }
@@ -244,7 +244,7 @@ extend<T> OnceCell<T> {
     /// A mutable borrow of the value, or `None` while the cell is empty.
     pub const fn get_mut(self: &mut OnceCell<T>) Option<&mut T> {
         return switch &mut unsafe *self.value.get() {
-            Some(v) => Option::<&mut T>::Some(v),
+            Some(v) => Some(v),
             None => Option::<&mut T>::None,
         };
     }
@@ -252,10 +252,10 @@ extend<T> OnceCell<T> {
     /// Store `value` when the cell is empty; else hand `value` back as `Err`.
     pub const fn set(self: &OnceCell<T>, value: T) Result<Unit, T> {
         if self.get().is_some() {
-            return Result::<Unit, T>::Err(value);
+            return Err(value);
         }
-        unsafe *self.value.get() = Option::<T>::Some(value);
-        return Result::<Unit, T>::Ok(Unit {});
+        unsafe *self.value.get() = Some(value);
+        return Ok(Unit {});
     }
 
     /// The value, storing `f()` first when the cell is empty. Panics: `f` itself initializes the cell.
@@ -267,7 +267,7 @@ extend<T> OnceCell<T> {
             if self.get().is_some() {
                 panic("OnceCell: reentrant initialization");
             }
-            unsafe *self.value.get() = Option::<T>::Some(v);
+            unsafe *self.value.get() = Some(v);
         }
         return self.get().unwrap();
     }

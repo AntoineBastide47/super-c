@@ -56,9 +56,9 @@ extend<T, const N: usize> Array<T, N> {
     /// Bounds-checked element access: borrows the element (`&T`) so the Array keeps sole ownership.
     pub const fn get(self: &Array<T, N>, index: usize) Option<&T> {
         if index >= N {
-            return Option::<&T>::None;
+            return None;
         }
-        return Option::<&T>::Some(&unsafe self.data[index]);
+        return Some(&unsafe self.data[index]);
     }
 
     /// Panics when `index >= N`. Frees the replaced element, then takes ownership of `value`.
@@ -77,9 +77,9 @@ extend<T, const N: usize> Array<T, N> {
     /// The last element, None for an empty array.
     pub const fn last(self: &Array<T, N>) Option<&T> {
         if N == 0 {
-            return Option::<&T>::None;
+            return None;
         }
-        return Option::<&T>::Some(&unsafe self.data[N - 1]);
+        return Some(&unsafe self.data[N - 1]);
     }
 
     /// Raw pointer to the inline elements; invalidated when the Array is moved.
@@ -126,10 +126,10 @@ extend<T, const N: usize> Array<T, N> {
     pub const fn find<F: fn(&T) bool>(self: &Array<T, N>, pred: F) Option<&T> {
         for i in 0..N {
             if pred(self.at(i)) {
-                return Option::<&T>::Some(&unsafe self.data[i]);
+                return Some(&unsafe self.data[i]);
             }
         }
-        return Option::<&T>::None;
+        return None;
     }
 
     /// A by-reference iterator over the elements in order.
@@ -198,10 +198,10 @@ extend<T: Eq, const N: usize> Array<T, N> {
     pub const fn position(self: &Array<T, N>, x: &T) Option<usize> {
         for i in 0..N {
             if unsafe self.data[i] == *x {
-                return Option::<usize>::Some(i);
+                return Some(i);
             }
         }
-        return Option::<usize>::None;
+        return None;
     }
 }
 
@@ -266,9 +266,9 @@ extend<T, const N: usize> Array<T, N> as Index<T, []T> {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         if r.start > hi || hi > N {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
@@ -292,9 +292,9 @@ extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         let p = (&mut unsafe self.data[0]) as *mut T;
         if r.start > hi || hi > N {

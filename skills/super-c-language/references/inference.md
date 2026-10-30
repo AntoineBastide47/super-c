@@ -50,7 +50,7 @@ Never inferred (the signature barrier):
   operands win over defaults, and the default applies only after all other
   information is exhausted. A value `if`, `switch` or block beside a typed numeric operand of a
   binary operator (not a shift count) is such a context for its literal branches, on either side
-  (`x < if c { 0.5; } else { 2.0; }` and its mirror compare in `x`'s type). A nested array literal
+  (`x < if c { 0.5 } else { 2.0 }` and its mirror compare in `x`'s type). A nested array literal
   is checked against its slot type, in the repeat form too (`[[0.0; 2]; 3]` for `[[f64; 2]; 3]`).
 - A literal under `&` or `&mut` (at any depth: `&1`, `&&1`) adapts to the expected
   pointee type: `map.get(&1)` with `Map<u64, V>` passes a `&u64`. A typed value under
@@ -102,7 +102,7 @@ generic argument convert.
   unsuffixed literal branch takes the other branches' numeric type); a `null` branch or arm,
   in any position, takes the other branches' pointer type.
 - A block that ends in `return`, `break`, `continue` or a diverging call has type `Never`.
-- There is no implicit least-upper-bound: `if c { 1i32; } else { 2i64; }` without an
+- There is no implicit least-upper-bound: `if c { 1i32 } else { 2i64 }` without an
   expected type is an error.
 - `break value` joins under the same rule: all break values of one loop must agree
   or coerce to the loop's expected type.

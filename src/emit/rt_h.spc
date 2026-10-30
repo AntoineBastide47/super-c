@@ -9,7 +9,7 @@ pub(package) fn rt_has_header(h: str) bool {
     let mut line = String::from_str("#include <");
     line.push_str(h);
     line.push_str(">\n");
-    return super_rt_h().contains(line.as_str());
+    return super_rt_h().contains(&line);
 }
 
 /// Whether `super_rt.h` defines function `name` itself (a helper std binds without a header, as

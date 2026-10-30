@@ -199,7 +199,7 @@ extend KeyedHash {
 
     /// The key's two halves.
     pub const fn key(self: &KeyedHash) (u64, u64) {
-        return self.k0, self.k1;
+        return (self.k0, self.k1);
     }
 }
 

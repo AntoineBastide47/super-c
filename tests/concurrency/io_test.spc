@@ -453,9 +453,9 @@ fn an_unregisterable_descriptor_reports_not_ready_at_once() {
     launch || {
         // No deadline: the refused registration alone ends the wait.
         let v: i64 = if io::wait_until(fd, false, 0) {
-            2;
+            2
         } else {
-            1;
+            1
         };
         r.get().store(v, atomics::MemoryOrder::Release);
     };
@@ -523,9 +523,9 @@ fn shutdown_settles_a_pending_wait() {
     let r = result.clone();
     launch || {
         let v: i64 = if io::wait_until(fd, false, 0) {
-            2;
+            2
         } else {
-            1;
+            1
         };
         r.get().store(v, atomics::MemoryOrder::Release);
     };

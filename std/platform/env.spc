@@ -68,9 +68,9 @@ pub fn get(name: str) Result<Option<String>, IoError> {
     let np = check_name(name, IoOp::GetEnv)?;
     let v = unsafe c_getenv(np.ptr());
     if v == null {
-        return Result::<Option<String>, IoError>::Ok(Option::<String>::None);
+        return Ok(None);
     }
-    return Result::<Option<String>, IoError>::Ok(Option::<String>::Some(unsafe String::from_cstr(v)));
+    return Ok(Some(unsafe String::from_cstr(v)));
 }
 /// The value of variable `name`, or None when it is not set. InvalidInput for an empty name or one with
 /// '=' or NUL; InvalidData on Windows for a value that is not valid UTF-16.
@@ -88,23 +88,23 @@ pub fn get(name: str) Result<Option<String>, IoError> {
         if n == 0 {
             let e = unsafe GetLastError();
             if e == ERROR_ENVVAR_NOT_FOUND {
-                return Result::<Option<String>, IoError>::Ok(Option::<String>::None);
+                return Ok(None);
             }
             if e != 0 {
-                return Result::<Option<String>, IoError>::Err(error::code_error(e as i32, IoOp::GetEnv));
+                return Err(error::code_error(e as i32, IoOp::GetEnv));
             }
         }
         if n < cap {
             let mut out = String::new();
             path::push_wide(&mut out, unsafe Slice::<u16> { ptr: buf, len: n as usize }, false, IoOp::GetEnv)?;
-            return Result::<Option<String>, IoError>::Ok(Option::<String>::Some(out));
+            return Ok(Some(out));
         }
         big.clear();
         big.resize_default(n as usize);
         cap = n;
         buf = big.index_range_mut(0..n as usize).as_mut_ptr();
     }
-    return Result::<Option<String>, IoError>::Err(IoError::new(IoErrorKind::Other, IoOp::GetEnv));
+    return Err(IoError::new(IoErrorKind::Other, IoOp::GetEnv));
 }
 
 /// Set variable `name` to `value`, replacing any value. InvalidInput for an empty name or one with '=',
@@ -115,9 +115,9 @@ pub unsafe fn set(name: str, value: str) Result<Unit, IoError> {
     let n = check_name(name, IoOp::SetEnv)?;
     let v = path::native(value, IoOp::SetEnv)?;
     if unsafe setenv(n.ptr(), v.ptr(), 1) != 0 {
-        return Result::<Unit, IoError>::Err(error::last_error(IoOp::SetEnv));
+        return Err(error::last_error(IoOp::SetEnv));
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 /// Set variable `name` to `value`, replacing any value. InvalidInput for an empty name or one with '=',
 /// or a NUL in either. On Windows an empty value removes the variable, as the C runtime does.
@@ -136,9 +136,9 @@ pub unsafe fn set(name: str, value: str) Result<Unit, IoError> {
 pub unsafe fn unset(name: str) Result<Unit, IoError> {
     let n = check_name(name, IoOp::UnsetEnv)?;
     if unsafe unsetenv(n.ptr()) != 0 {
-        return Result::<Unit, IoError>::Err(error::last_error(IoOp::UnsetEnv));
+        return Err(error::last_error(IoOp::UnsetEnv));
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 /// Remove variable `name`; removing an unset variable succeeds. InvalidInput for an empty name or one with
 /// '=' or NUL.
@@ -162,14 +162,14 @@ pub fn vars() Result<Vars, IoError> {
         text.push_byte(0);
         p = unsafe (p + 1);
     }
-    return Result::<Vars, IoError>::Ok(Vars::adopt(text));
+    return Ok(Vars::adopt(text));
 }
 /// A copy of every variable: one allocation that grows geometrically, none per variable.
 @platform(windows)
 pub fn vars() Result<Vars, IoError> {
     let block = unsafe GetEnvironmentStringsW();
     if block == null {
-        return Result::<Vars, IoError>::Err(error::last_error(IoOp::GetEnv));
+        return Err(error::last_error(IoOp::GetEnv));
     }
     let mut text = String::new();
     let mut p: *const u16 = block;
@@ -183,9 +183,9 @@ pub fn vars() Result<Vars, IoError> {
     }
     unsafe FreeEnvironmentStringsW(block);
     if bad {
-        return Result::<Vars, IoError>::Err(IoError::new(IoErrorKind::InvalidData, IoOp::GetEnv));
+        return Err(IoError::new(IoErrorKind::InvalidData, IoOp::GetEnv));
     }
-    return Result::<Vars, IoError>::Ok(Vars::adopt(text));
+    return Ok(Vars::adopt(text));
 }
 
 /// The C library's environment array, ended by a null entry: what a spawned child inherits.
@@ -210,7 +210,7 @@ pub unsafe fn environ() *const *mut char {
 // The native form of variable name `name`: InvalidInput when it is empty or holds '=' or NUL.
 fn check_name(name: str, op: IoOp) Result<path::NativePath, IoError> {
     if name.len() == 0 || name.find_byte(b'=') >= 0 {
-        return Result::<path::NativePath, IoError>::Err(IoError::new(IoErrorKind::InvalidInput, op));
+        return Err(IoError::new(IoErrorKind::InvalidInput, op));
     }
     return path::native(name, op);
 }
@@ -220,14 +220,14 @@ fn check_name(name: str, op: IoOp) Result<path::NativePath, IoError> {
 @platform(windows)
 fn crt_result(rc: i32, op: IoOp) Result<Unit, IoError> {
     if rc == 0 {
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
     let kind = if rc == 22 {
-        IoErrorKind::InvalidInput;
+        IoErrorKind::InvalidInput
     } else {
-        IoErrorKind::OutOfMemory;
+        IoErrorKind::OutOfMemory
     };
-    return Result::<Unit, IoError>::Err(IoError { kind: kind, code: rc, op: op });
+    return Err(IoError { kind: kind, code: rc, op: op });
 }
 
 extend Vars {
@@ -236,7 +236,7 @@ extend Vars {
     }
     /// The entries, as (name, value) views into the snapshot.
     pub const fn iter(self: &Vars) VarIter {
-        return VarIter::start(self.text.as_str());
+        return VarIter::start(&self.text);
     }
 }
 
@@ -249,7 +249,7 @@ extend<'a> VarIter<'a> {
     /// empty value.
     pub const fn next(self: &mut VarIter<'a>) Option<(str<'a>, str<'a>)> {
         if self.pos >= self.text.len() {
-            return Option::<(str<'a>, str<'a>)>::None;
+            return None;
         }
         let start = self.pos;
         let mut end = start;
@@ -264,10 +264,10 @@ extend<'a> VarIter<'a> {
         }
         let name = self.text.slice(start, eq.min(end));
         let value = if eq < end {
-            self.text.slice(eq + 1, end);
+            self.text.slice(eq + 1, end)
         } else {
-            "";
+            ""
         };
-        return Option::<(str<'a>, str<'a>)>::Some((name, value));
+        return Some((name, value));
     }
 }

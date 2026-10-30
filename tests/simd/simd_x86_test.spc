@@ -23,7 +23,7 @@ fn fn_body<'a>(c: str<'a>, name: str) str<'a> {
     let mut at: usize = 0;
     // Each match moves `at` forward: at most one pass over `c`.
     while at < c.len() {
-        let k = c.slice(at, c.len()).find(head.as_str());
+        let k = c.slice(at, c.len()).find(&head);
         if k < 0 {
             return "";
         }
@@ -111,16 +111,16 @@ fn immintrin_memory_bindings_state_their_range() {
             // (`loadl`/`storel`: the low 8).
             let lanes = l.contains("mask") || l.contains("gather") || l.contains("scatter");
             let bytes = if l.contains("loadl") || l.contains("storel") {
-                8;
+                8
             } else if l.starts_with("pub fn _mm512") {
-                64;
+                64
             } else if l.starts_with("pub fn _mm256") {
-                32;
+                32
             } else {
-                16;
+                16
             };
             let want = format("@{}(p, {})", pick(l.contains("load"), "reads", "writes"), bytes);
-            let ok = pick(lanes, prev.as_str().contains("@lane_access"), prev.as_str().contains(want.as_str()));
+            let ok = pick(lanes, prev.as_str().contains("@lane_access"), prev.as_str().contains(&want));
             if !ok {
                 eprintln("no memory annotation: {}", l);
             }
@@ -275,7 +275,7 @@ extend Kernels {
             self.decls.as_str(),
         );
         let ops: []str = RELEASE;
-        let b = h::diff_build(src.as_str(), ops);
+        let b = h::diff_build(&src, ops);
         if !b.built {
             eprintln("{}", b.diag.as_str());
         }
@@ -291,14 +291,14 @@ extend Kernels {
             }
             let label = self.labels.at(i).as_str();
             for w in 0..self.want.at(i).len() {
-                let d = h::asm_match(code.as_str(), fname.as_str(), [self.want.at(i).at(w).as_str()], []);
+                let d = h::asm_match(&code, &fname, [self.want.at(i).at(w).as_str()], []);
                 if d.len() != 0 {
                     eprintln("{}: {}", label, d.as_str());
                     failed = true;
                 }
             }
             for a in 0..self.avoid.at(i).len() {
-                let d = h::asm_match(code.as_str(), fname.as_str(), [], [self.avoid.at(i).at(a).as_str()]);
+                let d = h::asm_match(&code, &fname, [], [self.avoid.at(i).at(a).as_str()]);
                 if d.len() != 0 {
                     eprintln("{}: {}", label, d.as_str());
                     failed = true;
@@ -351,9 +351,9 @@ fn operations_lower_to_their_instructions() {
     // Under run features with AVX-512BW (an `x86-64-v4` run) the comparison gives a mask register.
     let src = format("{}fn k(a: u8x32, b: u8x32) u64 {{\n    return a.equal(b).to_bits();\n}}\n", v3);
     if cf::has(se::run_features(true), cf::find_variant("Avx512bw") as usize) {
-        ks.add("u8x32 compare to a mask", src.as_str(), ["vpcmpeqb", "%k", "kmov"], ["vpmovmskb"]);
+        ks.add("u8x32 compare to a mask", &src, ["vpcmpeqb", "%k", "kmov"], ["vpmovmskb"]);
     } else {
-        ks.add("u8x32 compare to a mask", src.as_str(), ["vpcmpeqb", "vpmovmskb"], []);
+        ks.add("u8x32 compare to a mask", &src, ["vpcmpeqb", "vpmovmskb"], []);
     }
     ks.add(
         "gather",

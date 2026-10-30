@@ -66,9 +66,9 @@ extend Compiled {
 const fn copy_msg(dst: *mut char, s: &String) {
     let n = s.len();
     let k = if n < 511 {
-        n;
+        n
     } else {
-        511 as usize;
+        511 as usize
     };
     if k > 0 {
         unsafe cstring::memcpy(dst, s.as_ptr(), k);
@@ -112,7 +112,7 @@ fn compile_in(src: str, stop: i32, as_std: bool, arch: i32, bootstrap: bool) Com
     }
     let vectors = lx.vectors;
     let toks = lx.take_tokens();
-    let mut ps = par::Parser::new(toks, s.as_str(), "");
+    let mut ps = par::Parser::new(toks, &s, "");
     ps.build_ast();
     if ps.has_errors() {
         r.errors = ps.errors.errors.len();
@@ -138,9 +138,9 @@ fn compile_in(src: str, stop: i32, as_std: bool, arch: i32, bootstrap: bool) Com
         "std",
         unsafe shim::sc_host_platform(),
         if arch >= 0 {
-            arch;
+            arch
         } else {
-            unsafe shim::sc_host_arch();
+            unsafe shim::sc_host_arch()
         },
     );
     p.bootstrap = bootstrap;
@@ -159,7 +159,7 @@ fn check_from(p: &mut loader::Package, from: usize, stop: i32, as_std: bool, r: 
     let uidx = n - 1; // the user module is loaded last, after the prelude
     if as_std {
         p.modules[uidx].path = String::from_str("std::harness");
-        p.modules[uidx].file = loader::join2(p.std_root.as_str(), "std/harness.spc");
+        p.modules[uidx].file = loader::join2(&p.std_root, "std/harness.spc");
     }
     // Resolve every module (prelude first, user last); snapshot the user module's diagnostics.
     for i in from..n {
@@ -232,7 +232,7 @@ fn parse_ast_opt(src: str, expand_derive: bool) ParsedAst {
         return r;
     }
     let toks = lx.take_tokens();
-    let mut ps = par::Parser::new(toks, s.as_str(), "");
+    let mut ps = par::Parser::new(toks, &s, "");
     ps.expand_derive = expand_derive;
     ps.build_ast();
     if ps.has_errors() {
@@ -252,7 +252,7 @@ pub(package) fn parse_has_error(src: str) bool {
         return true;
     }
     let toks = lx.take_tokens();
-    let mut ps = par::Parser::new(toks, s.as_str(), "");
+    let mut ps = par::Parser::new(toks, &s, "");
     ps.build_ast();
     let e = ps.has_errors();
     return e;
@@ -568,12 +568,12 @@ fn compile_and_run_in(src: str, c: bool, env: str) RunResult {
         return r;
     }
     let bin = prog_path(d);
-    if !build_script(d, bin.as_str(), c) {
+    if !build_script(d, &bin, c) {
         rm_dir(d);
         return r;
     } // did not build
     r.built = true;
-    let mut run = prog_cmd(d, bin.as_str(), "");
+    let mut run = prog_cmd(d, &bin, "");
     let mut outp = format("{}/out", d);
     r.exit = cli::run_with(run.cstr(), null, outp.cstr(), null, env);
     r.out = slurp(outp.cstr());
@@ -592,8 +592,8 @@ fn scratch_dir() String {
         unsafe R_SEQ,
         dutil::ticks_ms() as u64,
     );
-    rm_dir(dir.as_str()); // a directory an aborted test left under a reused pid
-    if fs::mkdir_all(dir.as_str()).is_err() {
+    rm_dir(&dir); // a directory an aborted test left under a reused pid
+    if fs::mkdir_all(&dir).is_err() {
         return String::new();
     }
     return dir;
@@ -637,9 +637,9 @@ fn build_script(dir: str, bin: str, c: bool) bool {
         "\"{}\" build{} \"{}/main.spc\"",
         cli::superc_path(),
         if target_lane() {
-            " --target=wasm";
+            " --target=wasm"
         } else {
-            "";
+            ""
         },
         dir,
     );
@@ -700,29 +700,29 @@ pub(package) struct ExitBatch {
 const fn case_main_of(s: str) (isize, usize, bool) {
     let at = s.find("fn main(");
     if at < 0 {
-        return -1, 0, false;
+        return (-1, 0, false);
     }
     let open = at as usize + 8;
     let rest = s.slice(open, s.len());
     let close = rest.find(")");
     if close < 0 || rest.find("fn main(") >= 0 {
-        return -1, 0, false;
+        return (-1, 0, false);
     }
     let params = rest.slice(0, close as usize);
     if params.len() == 0 {
-        return at, open + close as usize, false;
+        return (at, open + close as usize, false);
     }
     let colon = params.find(": Vector<str>");
     if colon <= 0 || colon as usize + 13 != params.len() {
-        return -1, 0, false;
+        return (-1, 0, false);
     }
     for i in 0..colon as usize {
         let c = params.byte_at(i);
         if !(c == b'_' || c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9') {
-            return -1, 0, false;
+            return (-1, 0, false);
         }
     }
-    return at, open + close as usize, true;
+    return (at, open + close as usize, true);
 }
 
 extend ExitBatch {
@@ -754,9 +754,9 @@ extend ExitBatch {
     // Case `k` built as its own program.
     fn alone(self: &Self, k: usize) {
         if self.traps[k].len() == 0 {
-            expect_exit(self.labels[k].as_str(), self.srcs[k].as_str(), self.codes[k]);
+            expect_exit(&self.labels[k], &self.srcs[k], self.codes[k]);
         } else {
-            expect_trap(self.labels[k].as_str(), self.srcs[k].as_str(), self.traps[k].as_str());
+            expect_trap(&self.labels[k], &self.srcs[k], &self.traps[k]);
         }
     }
 
@@ -765,7 +765,7 @@ extend ExitBatch {
         let mut root = String::new();
         let mut batched = Vector::<usize>::new();
         for k in 0..self.srcs.len() {
-            let (at, _, _) = case_main_of(self.srcs[k].as_str());
+            let (at, _, _) = case_main_of(&self.srcs[k]);
             if at < 0 {
                 self.alone(k);
             } else {
@@ -796,12 +796,12 @@ extend ExitBatch {
             }
             m.push_str("fn case_main(");
             m.push_str(s.slice(at as usize + 8, s.len()));
-            assert(write_text(format("{}/c{}.spc", d, i).as_str(), m.as_str()), "harness: cannot write a batch case");
+            assert(write_text(format("{}/c{}.spc", d, i).as_str(), &m), "harness: cannot write a batch case");
             root.format_into("import c{};\n", i);
             let args = if takes {
-                "a";
+                "a"
             } else {
-                "";
+                ""
             };
             body.format_into("    if k == {} {{\n", i);
             if !takes {
@@ -821,10 +821,10 @@ extend ExitBatch {
         }
         body.push_str("    return 255;\n}\n");
         root.push_string(&body);
-        assert(write_text(format("{}/main.spc", d).as_str(), root.as_str()), "harness: cannot write the batch root");
+        assert(write_text(format("{}/main.spc", d).as_str(), &root), "harness: cannot write the batch root");
         let bin = prog_path(d);
-        if !build_script(d, bin.as_str(), false) {
-            rm_dir(dir.as_str());
+        if !build_script(d, &bin, false) {
+            rm_dir(&dir);
             for i in 0..batched.len() {
                 self.alone(batched[i]);
             }
@@ -834,18 +834,18 @@ extend ExitBatch {
         let mut exits = Vector::<i32>::new();
         let mut outs = Vector::<String>::new();
         for i in 0..batched.len() {
-            let mut run = prog_cmd(d, bin.as_str(), format("{}", i).as_str());
+            let mut run = prog_cmd(d, &bin, format("{}", i).as_str());
             exits.push(cli::run_with(run.cstr(), null, outp.cstr(), null, ""));
-            outs.push(cli::read_text(outp.as_str()));
+            outs.push(cli::read_text(&outp));
         }
-        rm_dir(dir.as_str());
+        rm_dir(&dir);
         for i in 0..batched.len() {
             let k = batched[i];
             let msg = self.traps[k].as_str();
             let ok = if msg.len() == 0 {
-                exits[i] == self.codes[k];
+                exits[i] == self.codes[k]
             } else {
-                exits[i] != 0 && outs[i].contains(msg);
+                exits[i] != 0 && outs[i].contains(msg)
             };
             if !ok && msg.len() == 0 {
                 eprintln(
@@ -1030,9 +1030,9 @@ pub(package) fn diff_build_in(p: cli::Proj, opts: []str) DiffBuild {
     // The engine reads build.toml from its working directory.
     let mut rc = -1;
     if process::set_current_dir(p.dir()).is_ok() {
-        rc = cli::run_with(cmd.cstr(), null, outp.cstr(), null, env.as_str());
+        rc = cli::run_with(cmd.cstr(), null, outp.cstr(), null, &env);
     }
-    return DiffBuild { proj: p, built: rc == 0, diag: cli::read_text(outp.as_str()), wasm: wasm };
+    return DiffBuild { proj: p, built: rc == 0, diag: cli::read_text(&outp), wasm: wasm };
 }
 
 /// Assert that the build of `src` fails with a diagnostic containing `needle`, before its C compile.
@@ -1057,11 +1057,11 @@ pub(package) fn expect_build_errs(mut b: cli::Batch) {
         let r = diff_build_in(p, []);
         b.take(
             if r.built {
-                0;
+                0
             } else {
-                1;
+                1
             },
-            r.diag.as_str(),
+            &r.diag,
         );
     }
 }
@@ -1086,9 +1086,9 @@ pub(package) fn expect_runs(label: str, src: str, args: []str, msgs: []str) {
         let r = diff_run(&b, args[i]);
         let msg = msgs[i];
         let ok = if msg.len() == 0 {
-            r.exit == 0;
+            r.exit == 0
         } else {
-            r.exit != 0 && r.err.contains(msg);
+            r.exit != 0 && r.err.contains(msg)
         };
         if !ok {
             eprintln("{} (argument {}): exit {}: {}{}", label, args[i], r.exit, r.out.as_str(), r.err.as_str());
@@ -1100,15 +1100,15 @@ pub(package) fn expect_runs(label: str, src: str, args: []str, msgs: []str) {
     let neon = !simd_lane() && unsafe shim::sc_host_arch() == 1;
     if simd_lane() || neon {
         let scalar: [str; 1] = if neon {
-            ["SC_SIMD_SCALAR=1"];
+            ["SC_SIMD_SCALAR=1"]
         } else {
-            ["--target-feature=-simd128"];
+            ["--target-feature=-simd128"]
         };
         let a = diff_build(src, scalar);
         let d = if a.built {
-            same_runs(&a, &b, args);
+            same_runs(&a, &b, args)
         } else {
-            format("the program does not build with options A:\n{}", a.diag.as_str());
+            format("the program does not build with options A:\n{}", a.diag.as_str())
         };
         if d.len() != 0 {
             eprintln("{}: scalar and vector entries: {}", label, d.as_str());
@@ -1132,7 +1132,7 @@ pub(package) fn diff_run(b: &DiffBuild, args: str) DiffRun {
     let mut errp = String::new();
     errp.format_into("{}/.err", root);
     let exit = cli::run_with(cmd.cstr(), null, outp.cstr(), errp.cstr(), "");
-    return DiffRun { exit: exit, out: cli::read_text(outp.as_str()), err: cli::read_text(errp.as_str()) };
+    return DiffRun { exit: exit, out: cli::read_text(&outp), err: cli::read_text(&errp) };
 }
 
 /// The trap lines of a run's stderr: the runtime's `super-c: ...` and std's `panic: ...` messages.
@@ -1173,8 +1173,8 @@ pub(package) fn same_runs(a: &DiffBuild, b: &DiffBuild, runs: []str) String {
     for args in runs {
         let ra = diff_run(a, args);
         let rb = diff_run(b, args);
-        let ta = trap_text(ra.err.as_str());
-        let tb = trap_text(rb.err.as_str());
+        let ta = trap_text(&ra.err);
+        let tb = trap_text(&rb.err);
         if ra.exit != rb.exit || !ra.out.equals(&rb.out) || !ta.equals(&tb) {
             r.format_into(
                 "run '{}' differs\nA: exit {}, stdout:\n{}A trap: {}\nB: exit {}, stdout:\n{}B trap: {}\n",
@@ -1295,7 +1295,7 @@ fn parity_source(decls: str, exprs: []str, tys: []str, omit: &Vector<bool>, firs
     }
     // Argument -1 runs every case in order, each after a line `= k`.
     s.format_into(
-        "fn main(args: Vector<str>) i32 {{\n    let a = args.at(1).parse_i64().unwrap();\n    let mut k = if a < 0 {{\n        0;\n    }} else {{\n        a;\n    }};\n    let end = if a < 0 {{\n        {};\n    }} else {{\n        a + 1;\n    }};\n    while k < end {{\n    if a < 0 {{\n        println(\"= {{}}\", k);\n    }}\n",
+        "fn main(args: Vector<str>) i32 {{\n    let a = args.at(1).parse_i64().unwrap();\n    let mut k = if a < 0 {{\n        0\n    }} else {{\n        a\n    }};\n    let end = if a < 0 {{\n        {}\n    }} else {{\n        a + 1\n    }};\n    while k < end {{\n    if a < 0 {{\n        println(\"= {{}}\", k);\n    }}\n",
         exprs.len(),
     );
     for k in 0..exprs.len() {
@@ -1338,9 +1338,9 @@ fn parity_attribute(diag: str, first: usize, ct: &mut Vector<String>, omit: &mut
         let ln = rest.slice(
             0,
             if colon < 0 {
-                rest.len();
+                rest.len()
             } else {
-                colon as usize;
+                colon as usize
             },
         ).parse_usize();
         let class = const_trap_class(msg);
@@ -1400,7 +1400,7 @@ pub(package) fn const_runtime_parity(decls: str, exprs: []str, tys: []str, opts_
     let mut r = String::new();
     let mut b = diff_build(parity_source(decls, exprs, tys, &omit, &mut first).as_str(), opts);
     if !b.built {
-        if !parity_attribute(b.diag.as_str(), first, &mut ct, &mut omit) {
+        if !parity_attribute(&b.diag, first, &mut ct, &mut omit) {
             r.format_into("the parity program does not build:\n{}", b.diag.as_str());
             return r;
         }
@@ -1413,29 +1413,29 @@ pub(package) fn const_runtime_parity(decls: str, exprs: []str, tys: []str, opts_
     // One run computes every case, each after a line `= k`; a case after a trap or a crash runs alone,
     // so its trap is its own.
     let all = diff_run(&b, "-1");
-    let segs = parity_segments(all.out.as_str());
+    let segs = parity_segments(&all.out);
     for k in 0..n {
         let done = k < segs.len() && (k + 1 < segs.len() || all.exit == 0);
         let run = if done {
-            DiffRun { exit: 0, out: segs.at(k).clone(), err: String::new() };
+            DiffRun { exit: 0, out: segs.at(k).clone(), err: String::new() }
         } else {
             let mut arg = String::new();
             arg.push_u64(k as u64);
-            diff_run(&b, arg.as_str());
+            diff_run(&b, &arg)
         };
-        let trap = trap_text(run.err.as_str());
+        let trap = trap_text(&run.err);
         let mut want = String::new();
         if omit[k] {
             want.format_into("trap: {}", ct.at(k).as_str());
         } else {
-            want.format_into("value {}", parity_value(run.out.as_str(), "c"));
+            want.format_into("value {}", parity_value(&run.out, "c"));
         }
         let mut got = String::new();
         if run.exit == 0 {
-            got.format_into("value {}", parity_value(run.out.as_str(), "r"));
+            got.format_into("value {}", parity_value(&run.out, "r"));
         } else {
-            got.format_into("trap: {}", runtime_trap_class(trap.as_str()));
-            if runtime_trap_class(trap.as_str()).len() == 0 {
+            got.format_into("trap: {}", runtime_trap_class(&trap));
+            if runtime_trap_class(&trap).len() == 0 {
                 got.format_into("(exit {}) {}", run.exit, run.err.as_str());
             }
         }
@@ -1497,7 +1497,7 @@ fn c_defines(path: str, function: str) bool {
     head.push_str(function);
     head.push_str("(");
     for line in text.as_str().lines() {
-        if line.contains(head.as_str()) && line.trim().ends_with("{") {
+        if line.contains(&head) && line.trim().ends_with("{") {
             return true;
         }
     }
@@ -1547,9 +1547,9 @@ pub(package) fn asm_instructions(text: str, function: str, whole: bool) Vector<S
             names.push(
                 String::from_str(
                     if whole {
-                        line;
+                        line
                     } else {
-                        word;
+                        word
                     },
                 ),
             );
@@ -1578,7 +1578,7 @@ pub(package) fn asm_check(src: str, opts: []str, function: str, contains: []str,
     if r.len() != 0 {
         return r;
     }
-    return asm_match(code.as_str(), function, contains, absent);
+    return asm_match(&code, function, contains, absent);
 }
 
 /// The assembly of the translation unit of the C tree of build `b` (built with `opts` and `--emit-c`)
@@ -1616,10 +1616,10 @@ pub(package) fn asm_text(b: &DiffBuild, opts: []str, function: str, out: &mut St
     let mut outp = format("{}/.asm", root);
     let rc = cli::run_with(cmd.cstr(), null, outp.cstr(), null, "");
     if rc != 0 {
-        r.format_into("'{}' failed:\n{}", cmd.as_str(), cli::read_text(outp.as_str()).as_str());
+        r.format_into("'{}' failed:\n{}", cmd.as_str(), cli::read_text(&outp).as_str());
         return r;
     }
-    *out = cli::read_text(asmp.as_str());
+    *out = cli::read_text(&asmp);
     return r;
 }
 
@@ -1639,9 +1639,9 @@ pub(package) fn asm_match(code: str, function: str, contains: []str, absent: []s
         let mut found = false;
         for i in 0..names.len() {
             let hay = if want.starts_with("%") {
-                whole.at(i);
+                whole.at(i)
             } else {
-                names.at(i);
+                names.at(i)
             };
             for alt in want.split("|") {
                 found = found || hay.contains(alt);
@@ -1655,9 +1655,9 @@ pub(package) fn asm_match(code: str, function: str, contains: []str, absent: []s
         for i in 0..names.len() {
             // `=name`: that mnemonic exactly (`=bl`, a call, is not `tbl`).
             let hit = if bad.starts_with("=") {
-                names.at(i).as_str() == bad.slice(1, bad.len());
+                names.at(i).as_str() == bad.slice(1, bad.len())
             } else {
-                bad.starts_with("%") && whole.at(i).contains(bad) || !bad.starts_with("%") && names.at(i).contains(bad);
+                bad.starts_with("%") && whole.at(i).contains(bad) || !bad.starts_with("%") && names.at(i).contains(bad)
             };
             if hit {
                 r.format_into("instruction '{}' of '{}' contains '{}'\n", names.at(i).as_str(), function, bad);
@@ -1829,9 +1829,9 @@ fn reopen_items(p: &mut loader::Package, from: usize) {
 // prelude (another instruction set, `--bootstrap-tags`).
 fn snap_index(vectors: bool, arch: i32, bootstrap: bool) i64 {
     let k: usize = if vectors {
-        1;
+        1
     } else {
-        0;
+        0
     };
     if bootstrap || arch >= 0 && arch != unsafe shim::sc_host_arch() || unsafe SNAPS[k] == null {
         return -1;

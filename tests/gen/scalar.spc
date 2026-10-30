@@ -130,9 +130,9 @@ fn int_literal(rng: &mut Rng, t: u8) String {
     } else if r == 2 {
         s.push_str(
             if is_signed(t) {
-                "-1";
+                "-1"
             } else {
-                "2";
+                "2"
             },
         );
     } else if r == 3 {
@@ -362,9 +362,9 @@ extend ScalarModel {
         if n.op == OP_NEG || n.op == OP_NOT {
             out.push_str(
                 if n.op == OP_NEG {
-                    "(-";
+                    "(-"
                 } else {
-                    "(~";
+                    "(~"
                 },
             );
             self.render_node(n.a, wrapping, out);
@@ -444,7 +444,7 @@ extend ScalarModel {
             let p = plain.at(k).replace("opq::", "opr::");
             let w = wrapping.at(k).replace("opq::", "opr::");
             s.format_into("@noinline\nfn case{}() {} {{\n    return if PROFILE == \"release\" {{\n", k, *tys.at(k));
-            s.format_into("        {};\n    }} else {{\n        {};\n    }};\n}}\n", p.as_str(), w.as_str());
+            s.format_into("        {}\n    }} else {{\n        {}\n    }};\n}}\n", p.as_str(), w.as_str());
         }
         s.push_str("fn main(args: Vector<str>) i32 {\n    let k = args.at(1).parse_i64().unwrap();\n");
         for k in 0..plain.len() {
@@ -517,7 +517,7 @@ extend ScalarModel as Model {
         }
         let dbg = self.opts_with("--profile=debug");
         let rel = self.opts_with("--profile=release");
-        return h::same_output(src.as_str(), dbg[0..dbg.len()], rel[0..rel.len()], rv[0..rv.len()]);
+        return h::same_output(&src, dbg[0..dbg.len()], rel[0..rel.len()], rv[0..rv.len()]);
     }
 
     pub fn render(self: &Self, k: usize) String {
@@ -564,9 +564,9 @@ extend ScalarModel as Model {
                 return false;
             }
             let one = if is_float(n.ty) {
-                "1.0";
+                "1.0"
             } else {
-                "1";
+                "1"
             };
             self.nodes[at] = leaf(n.ty, String::from_str(one));
             return true;
@@ -575,9 +575,9 @@ extend ScalarModel as Model {
             return false;
         }
         let c = if form == 0 {
-            n.a;
+            n.a
         } else {
-            n.b;
+            n.b
         };
         let child = self.nodes.at(c as usize).clone();
         if child.ty != n.ty {

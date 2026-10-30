@@ -13,9 +13,9 @@ fn expect_tokens(src: str, expected: []TokenType) {
     let toks = lx.take_tokens();
     assert_eq(toks.len(), expected.len());
     let n = if toks.len() < expected.len() {
-        toks.len();
+        toks.len()
     } else {
-        expected.len();
+        expected.len()
     };
     for i in 0..n {
         assert(toks[i].kind() == expected[i], "token type mismatch");
@@ -177,14 +177,14 @@ fn keyword_boundaries() {
         );
         for affix in 0..3 {
             let n = if affix == 0 {
-                format("{}_", w);
+                format("{}_", w)
             } else if affix == 1 {
-                format("_{}", w);
+                format("_{}", w)
             } else {
-                format("{}0", w);
+                format("{}0", w)
             };
-            assert(!is_keyword(n.as_str()), "is_keyword accepts a longer word");
-            assert_eq(kinds_of(n.as_str()), format("0 {} ", TokenType::Eof as u8));
+            assert(!is_keyword(&n), "is_keyword accepts a longer word");
+            assert_eq(kinds_of(&n), format("0 {} ", TokenType::Eof as u8));
         }
     }
     let misses: [str<'static>; 8] = ["", "a", "_", "continuo", "va_star", "Static", "interfac", "static_asser"];
@@ -279,11 +279,11 @@ fn line_comment_bytes() {
         let tail = "yyyyyyyyyyyyyyyyyy";
         let eof = TokenType::Eof as u8;
         let ok = format("//{}\xC3\xA9{}\nab", head.as_str(), tail);
-        assert_eq(lex_summary(ok.as_str(), false), format("0:{}+2 {}:{}+0 ", ok.len() - 2, eof, ok.len()));
+        assert_eq(lex_summary(&ok, false), format("0:{}+2 {}:{}+0 ", ok.len() - 2, eof, ok.len()));
         let bad = format("//{}\xFF{}\nab", head.as_str(), tail);
-        assert_eq(lex_summary(bad.as_str(), false), format("0:{}+2 {}:{}+0 @{} ", bad.len() - 2, eof, bad.len(), k + 2));
+        assert_eq(lex_summary(&bad, false), format("0:{}+2 {}:{}+0 @{} ", bad.len() - 2, eof, bad.len(), k + 2));
         let nul = format("//{}\x00{}\nab", head.as_str(), tail);
-        assert_eq(lex_summary(nul.as_str(), false), format("0:{}+2 {}:{}+0 @{} ", nul.len() - 2, eof, nul.len(), k + 2));
+        assert_eq(lex_summary(&nul, false), format("0:{}+2 {}:{}+0 @{} ", nul.len() - 2, eof, nul.len(), k + 2));
     }
 }
 
@@ -369,7 +369,7 @@ fn token_length_limit() {
         s.push_str("a");
     }
     s.push_str("\"");
-    expect_error(s.as_str());
+    expect_error(&s);
 }
 
 @test
@@ -459,7 +459,7 @@ fn matchertext_errors() {
         d.push_str(")");
     }
     d.push_str("\"(x)\"");
-    expect_error(d.as_str());
+    expect_error(&d);
 }
 
 // Every lexer diagnostic, by message: the harness stops at the lex stage and reports the first one.

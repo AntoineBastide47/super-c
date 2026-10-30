@@ -36,7 +36,7 @@ fn many_variant_enum_is_exhaustive() {
         src.push_str(format("V{} => {}, ", i, i).as_str());
     }
     src.push_str("}; }\nfn main() i32 { return f(E::V299) - 299; }\n");
-    h::expect_ok("300-variant switch listing every variant", src.as_str());
+    h::expect_ok("300-variant switch listing every variant", &src);
 }
 
 @test
@@ -58,7 +58,7 @@ fn matrix_still_rejects_partial_covers() {
 fn literal_patterns_test_the_referent(b: &mut h::ExitBatch) {
     b.add(
         "literal and range patterns under references",
-        "enum E { B(bool), Iv(i32), P(i32, bool), N }\nstruct S { pub x: i32, pub on: bool }\nfn by_enum(e: &E) i32 {\n    return switch e {\n        B(true) => 1,\n        B(false) => 2,\n        Iv(7) => 3,\n        Iv(0..=5) => 4,\n        Iv(_) => 5,\n        P(1, true) => 6,\n        P(_, _) => 7,\n        N => 8,\n    };\n}\nfn by_int(x: &i32) i32 {\n    return switch x {\n        7 => 1,\n        10..20 => 2,\n        _ => 3,\n    };\n}\nfn by_struct(s: &S) i32 {\n    return switch s {\n        S { x: 3, on: true } => 1,\n        S { x, on: false } => *x,\n        _ => 0,\n    };\n}\nfn nested(o: Option<&E>) i32 {\n    if let Some(B(true)) = o {\n        return 1;\n    }\n    if let Some(Iv(n)) = o {\n        return *n;\n    }\n    return 0;\n}\nfn bump(e: &mut E) {\n    switch e {\n        Iv(n) => {\n            *n += 1;\n        },\n        _ => {},\n    };\n}\nfn main() i32 {\n    let bt = E::B(true);\n    let bf = E::B(false);\n    let i7 = E::Iv(7);\n    let i4 = E::Iv(4);\n    let i9 = E::Iv(9);\n    let p1 = E::P(1, true);\n    let p2 = E::P(1, false);\n    let n = E::N;\n    if by_enum(&bt) != 1 || by_enum(&bf) != 2 || by_enum(&i7) != 3 || by_enum(&i4) != 4 {\n        return 1;\n    }\n    if by_enum(&i9) != 5 || by_enum(&p1) != 6 || by_enum(&p2) != 7 || by_enum(&n) != 8 {\n        return 2;\n    }\n    let seven = 7;\n    let fifteen = 15;\n    let other = 30;\n    if by_int(&seven) != 1 || by_int(&fifteen) != 2 || by_int(&other) != 3 {\n        return 3;\n    }\n    let s1 = S { x: 3, on: true };\n    let s2 = S { x: 9, on: false };\n    let s3 = S { x: 4, on: true };\n    if by_struct(&s1) != 1 || by_struct(&s2) != 9 || by_struct(&s3) != 0 {\n        return 4;\n    }\n    let k = E::Iv(42);\n    if nested(Option::<&E>::Some(&bt)) != 1 || nested(Option::<&E>::Some(&bf)) != 0 || nested(Option::<&E>::Some(&k)) != 42 {\n        return 5;\n    }\n    let mut m = E::Iv(1);\n    bump(&mut m);\n    if by_enum(&m) != 4 {\n        return 6;\n    }\n    return 0;\n}\n",
+        "enum E { B(bool), Iv(i32), P(i32, bool), N }\nstruct S { pub x: i32, pub on: bool }\nfn by_enum(e: &E) i32 {\n    return switch e {\n        B(true) => 1,\n        B(false) => 2,\n        Iv(7) => 3,\n        Iv(0..=5) => 4,\n        Iv(_) => 5,\n        P(1, true) => 6,\n        P(_, _) => 7,\n        N => 8,\n    };\n}\nfn by_int(x: &i32) i32 {\n    return switch x {\n        7 => 1,\n        10..20 => 2,\n        _ => 3,\n    };\n}\nfn by_struct(s: &S) i32 {\n    return switch s {\n        S { x: 3, on: true } => 1,\n        S { x, on: false } => *x,\n        _ => 0,\n    };\n}\nfn nested(o: Option<&E>) i32 {\n    if let Some(B(true)) = o {\n        return 1;\n    }\n    if let Some(Iv(n)) = o {\n        return *n;\n    }\n    return 0;\n}\nfn bump(e: &mut E) {\n    switch e {\n        Iv(n) => {\n            *n += 1;\n        },\n        _ => {},\n    }\n}\nfn main() i32 {\n    let bt = E::B(true);\n    let bf = E::B(false);\n    let i7 = E::Iv(7);\n    let i4 = E::Iv(4);\n    let i9 = E::Iv(9);\n    let p1 = E::P(1, true);\n    let p2 = E::P(1, false);\n    let n = E::N;\n    if by_enum(&bt) != 1 || by_enum(&bf) != 2 || by_enum(&i7) != 3 || by_enum(&i4) != 4 {\n        return 1;\n    }\n    if by_enum(&i9) != 5 || by_enum(&p1) != 6 || by_enum(&p2) != 7 || by_enum(&n) != 8 {\n        return 2;\n    }\n    let seven = 7;\n    let fifteen = 15;\n    let other = 30;\n    if by_int(&seven) != 1 || by_int(&fifteen) != 2 || by_int(&other) != 3 {\n        return 3;\n    }\n    let s1 = S { x: 3, on: true };\n    let s2 = S { x: 9, on: false };\n    let s3 = S { x: 4, on: true };\n    if by_struct(&s1) != 1 || by_struct(&s2) != 9 || by_struct(&s3) != 0 {\n        return 4;\n    }\n    let k = E::Iv(42);\n    if nested(Option::<&E>::Some(&bt)) != 1 || nested(Option::<&E>::Some(&bf)) != 0 || nested(Option::<&E>::Some(&k)) != 42 {\n        return 5;\n    }\n    let mut m = E::Iv(1);\n    bump(&mut m);\n    if by_enum(&m) != 4 {\n        return 6;\n    }\n    return 0;\n}\n",
         0,
     );
 }
@@ -345,7 +345,7 @@ fn main() i32 {
         (4, (false, _)) => 1,
         (x, (true, mut y)) => {
             y += x;
-            y;
+            y
         },
         (_, (false, _)) => 3,
     };

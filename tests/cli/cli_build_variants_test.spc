@@ -54,7 +54,7 @@ fn manifest_test_shards_by_duration() {
     fp.push_str("/tests/durations.tsv");
     let rf = cli::superc_env_in(root, E, "1", "test --quiet --test-record-durations --filter=t::a");
     assert(rf.ok(), "a filtered recording run succeeds");
-    let ff = cli::read_text(fp.as_str());
+    let ff = cli::read_text(&fp);
     assert(ff.as_str().contains("\n2.00\ttests::u::e\n"), "a filtered run keeps the line of a file it did not build");
     assert(
         ff.as_str().contains("\n1.00\ttests::t::b\n") && !ff.as_str().contains("\n10.00\ttests::t::a\n"),
@@ -62,7 +62,7 @@ fn manifest_test_shards_by_duration() {
     );
     let r = cli::superc_env_in(root, E, "1", "test --quiet --test-record-durations");
     assert(r.ok(), "a recording run succeeds");
-    let f = cli::read_text(fp.as_str());
+    let f = cli::read_text(&fp);
     assert(f.as_str().starts_with("# super-c test --test-record-durations"), "the header names the writer");
     assert(
         f.as_str().contains("\ttests::t::a\n") && f.as_str().contains("\ttests::t::d\n") && f.as_str().contains(
@@ -86,10 +86,10 @@ fn manifest_test_shards_by_duration() {
     assert(l.ok(), "a lane shard runs");
     let mut sp = String::from_str(root);
     sp.push_str("/shard1.tsv");
-    let sf = cli::read_text(sp.as_str());
+    let sf = cli::read_text(&sp);
     assert(sf.as_str().contains("\ttests::t::b\n"), "the shard records its test");
     assert(!sf.as_str().contains("tests::t::a") && !sf.as_str().contains("tests::u::e"), "and no other");
-    assert(cli::read_text(fp.as_str()).as_str() == f.as_str(), "the suite's file is unchanged");
+    assert(cli::read_text(&fp).as_str() == f.as_str(), "the suite's file is unchanged");
 }
 
 // A library whose public function nothing in it calls, beside a private function nothing calls.
@@ -101,11 +101,11 @@ const LIB: str = "pub fn util() i32 {\n    return 42;\n}\n\nfn helper() i32 {\n 
 fn library_build(stat: bool, shared: bool) {
     let p = cli::proj_new();
     let types = if stat && shared {
-        "\"static\", \"shared\"";
+        "\"static\", \"shared\""
     } else if stat {
-        "\"static\"";
+        "\"static\""
     } else {
-        "\"shared\"";
+        "\"shared\""
     };
     p.mkfile("build.toml", format("[lib]\nname = \"mylib\"\nroot = \"src/lib.spc\"\ntype = [{}]\n", types).as_str());
     p.mkfile("src/lib.spc", LIB);
@@ -115,9 +115,9 @@ fn library_build(stat: bool, shared: bool) {
     let host = unsafe shim::sc_host_platform();
     for kind in 0..2 {
         let want = if kind == 0 {
-            stat;
+            stat
         } else {
-            shared;
+            shared
         };
         let leaf = bsys::lib_file("mylib", kind == 1, host);
         let rel = format("build/debug-lib/{}", leaf.as_str());
@@ -181,20 +181,20 @@ fn rewritten_object_relinks_under_a_later_binary() {
         );
         let root = p.dir();
         let args = if lane == 0 {
-            String::from_str("build -o app");
+            String::from_str("build -o app")
         } else if lane == 1 {
-            format("build \"--transpiler={}\" -o app", cli::superc_path());
+            format("build \"--transpiler={}\" -o app", cli::superc_path())
         } else {
-            String::from_str("build \"--transpiler=sh tr.sh\" -o app");
+            String::from_str("build \"--transpiler=sh tr.sh\" -o app")
         };
         let app = format("{}/app", root);
-        assert(cli::superc_in(root, args.as_str()).ok(), "the first build");
-        assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 3);
+        assert(cli::superc_in(root, &args).ok(), "the first build");
+        assert_eq(cli::exe_env_in(&app, root, E, "1", "").exit, 3);
         let mut later = format("touch -t 203001010000 \"{}\"", app.as_str());
         assert_eq(cli::run_quiet(later.cstr()), 0);
         p.mkfile("src/lib.spc", "@noinline\npub fn v() i32 {\n    return 4;\n}\n");
-        assert(cli::superc_in(root, args.as_str()).ok(), "the build after the edit");
-        assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 4);
+        assert(cli::superc_in(root, &args).ok(), "the build after the edit");
+        assert_eq(cli::exe_env_in(&app, root, E, "1", "").exit, 4);
         if lane == 1 {
             let rec = cli::read_text(format("{}/build/debug/.emit_rewritten", root).as_str());
             assert(rec.contains("lib.o\n") && !rec.contains("main.o"), "the record names the rewritten object alone");
@@ -212,19 +212,19 @@ fn failed_emission_keeps_the_tree() {
     let root = p.dir();
     assert(cli::superc_env_in(root, E, "1", "build").ok(), "the first build");
     let c = format("{}/build/debug/raw/main.o", root);
-    let before = cli::read_text(c.as_str());
+    let before = cli::read_text(&c);
     // The link flags, which the emission writes before any unit, cannot be written: a directory sits at
     // their path.
     let blocked = format("{}/build/debug/raw/__ldflags", root);
-    let _ = fs::unlink(blocked.as_str());
-    assert(fs::mkdir_all(blocked.as_str()).is_ok(), "the block is in place");
+    let _ = fs::unlink(&blocked);
+    assert(fs::mkdir_all(&blocked).is_ok(), "the block is in place");
     p.mkfile(
         "src/main.spc",
         "@link(\"m\")\nextern \"C\" {\n    fn abs(x: i32) i32;\n}\n\nfn main() i32 {\n    return unsafe abs(-3);\n}\n",
     );
     let bad = cli::superc_env_in(root, E, "1", "build");
     assert(!bad.ok() && bad.out_has("__ldflags"), "unwritable link flags fail the emission");
-    assert(cli::read_text(c.as_str()).as_str() == before.as_str(), "the failed emission wrote no object");
+    assert(cli::read_text(&c).as_str() == before.as_str(), "the failed emission wrote no object");
 }
 
 // How many C files module `main` emits into `dir`: `main.c` and its parts `main__p<k>.c`.
@@ -261,19 +261,19 @@ fn shard_counts_follow_emitted_size() {
         src.push_str("    return s;\n}\n");
     }
     src.push_str("fn main() i32 {\n    return f0(1) + f1499(2) - f0(1) - f1499(2);\n}\n");
-    p.mkfile("src/main.spc", src.as_str());
+    p.mkfile("src/main.spc", &src);
     let root = p.dir();
     let r = cli::superc_env_in(root, E, "1", "build --emit-c");
     assert(r.ok(), "the build succeeds");
     let mut gen = String::from_str(root);
     gen.push_str("/build/debug/raw");
-    let parts = shard_parts(gen.as_str());
+    let parts = shard_parts(&gen);
     assert(parts >= 2, "the large module has more than one shard");
     let again = cli::superc_env_in(root, E, "1", "build --emit-c");
     assert(again.ok(), "the rebuild succeeds");
-    assert_eq(shard_parts(gen.as_str()), parts);
+    assert_eq(shard_parts(&gen), parts);
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n[shards]\n\"main\" = 1\n");
     let over = cli::superc_env_in(root, E, "1", "build --emit-c");
     assert(over.ok(), "the override builds");
-    assert_eq(shard_parts(gen.as_str()), 1);
+    assert_eq(shard_parts(&gen), 1);
 }

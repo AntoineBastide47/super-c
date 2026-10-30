@@ -162,9 +162,9 @@ const fn rel_type(k: u8) u32 {
 const fn rel_type_a64(k: u8, insn: u32) u32 {
     if k == a::R_BRANCH26 {
         return if insn >> 31 != 0 {
-            R_AARCH64_CALL26;
+            R_AARCH64_CALL26
         } else {
-            R_AARCH64_JUMP26;
+            R_AARCH64_JUMP26
         };
     }
     if k == a::R_PAGE21 {
@@ -181,13 +181,13 @@ const fn rel_type_a64(k: u8, insn: u32) u32 {
             return R_AARCH64_LDST128_ABS_LO12_NC;
         }
         return if size == 0 {
-            R_AARCH64_LDST8_ABS_LO12_NC;
+            R_AARCH64_LDST8_ABS_LO12_NC
         } else if size == 1 {
-            R_AARCH64_LDST16_ABS_LO12_NC;
+            R_AARCH64_LDST16_ABS_LO12_NC
         } else if size == 2 {
-            R_AARCH64_LDST32_ABS_LO12_NC;
+            R_AARCH64_LDST32_ABS_LO12_NC
         } else {
-            R_AARCH64_LDST64_ABS_LO12_NC;
+            R_AARCH64_LDST64_ABS_LO12_NC
         };
     }
     if k == a::R_GOT_PAGE21 {
@@ -264,9 +264,9 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         let mut name: str = "";
         let mut ty: u32 = 0;
         let fl = sec_info(o, pt.k, &mut name, &mut ty) | if retain[q] {
-            SHF_GNU_RETAIN;
+            SHF_GNU_RETAIN
         } else {
-            0u64;
+            0u64
         };
         let al = 1u64 << s.align_log2 as u64;
         let mut off: u64 = 0;
@@ -287,7 +287,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         parts.index_mut(q).hdr = hdrs.len() as u32;
         hdrs.push(
             Shdr {
-                name: add_str(&mut shstr, full.as_str()),
+                name: add_str(&mut shstr, &full),
                 ty: ty,
                 flags: fl,
                 off: off,
@@ -296,11 +296,11 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
                 info: 0,
                 align: al,
                 entsize: if ty == SHT_INIT_ARRAY || ty == SHT_FINI_ARRAY || ty == SHT_PREINIT_ARRAY {
-                    8;
+                    8
                 } else if (fl & SHF_MERGE) != 0 {
-                    1;
+                    1
                 } else {
-                    0;
+                    0
                 },
             },
         );
@@ -329,9 +329,9 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         }
         let start = body.len();
         let cie: []u8 = if a64 {
-            CIE_A64;
+            CIE_A64
         } else {
-            CIE;
+            CIE
         };
         for j in 0..cie.len() {
             body.push(cie[j]);
@@ -361,9 +361,9 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             Shdr {
                 name: add_str(&mut shstr, ".eh_frame"),
                 ty: if a64 {
-                    SHT_PROGBITS;
+                    SHT_PROGBITS
                 } else {
-                    SHT_X86_64_UNWIND;
+                    SHT_X86_64_UNWIND
                 },
                 flags: SHF_ALLOC,
                 off: start as u64,
@@ -418,31 +418,31 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             nsym += 1;
             ob::w32(&mut syms, add_str(&mut strtab, o.name_of(k as u32)));
             let ty = if (y.flags & ob::SF_TLS) != 0 {
-                STT_TLS;
+                STT_TLS
             } else if y.sec == ob::NOSEC {
-                STT_NOTYPE;
+                STT_NOTYPE
             } else if (y.flags & ob::SF_FUNC) != 0 {
-                STT_FUNC;
+                STT_FUNC
             } else {
-                STT_OBJECT;
+                STT_OBJECT
             };
             let bind = if global {
-                STB_GLOBAL;
+                STB_GLOBAL
             } else {
-                STB_LOCAL;
+                STB_LOCAL
             };
             syms.push((bind << 4 | ty) as u8);
             syms.push(
                 if (y.flags & ob::SF_HIDDEN) != 0 {
-                    STV_HIDDEN;
+                    STV_HIDDEN
                 } else {
-                    0u8;
+                    0u8
                 },
             );
             let q = if y.sec == ob::NOSEC {
-                ob::NONE32;
+                ob::NONE32
             } else {
-                ob::part_at(&parts, &first, y.sec, y.off);
+                ob::part_at(&parts, &first, y.sec, y.off)
             };
             if q == ob::NONE32 {
                 ob::w16(&mut syms, 0);
@@ -494,16 +494,16 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         for j in pfirst[q]..pfirst[q + 1] {
             let x = o.rels[byp[j as usize] as usize];
             let abs32 = if a64 {
-                R_AARCH64_ABS32;
+                R_AARCH64_ABS32
             } else {
-                R_X86_64_32;
+                R_X86_64_32
             };
             let ty = if x.kind == ob::R_SECOFF32 {
-                abs32;
+                abs32
             } else if a64 {
-                rel_type_a64(x.kind, word_at(o, x.sec, x.off));
+                rel_type_a64(x.kind, word_at(o, x.sec, x.off))
             } else {
-                rel_type(x.kind);
+                rel_type(x.kind)
             };
             ob::w64(&mut body, x.off as u64 - pt.lo);
             ob::w64(&mut body, symix[x.sym as usize] as u64 << 32 | ty as u64);
@@ -524,7 +524,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         }
         hdrs.push(
             Shdr {
-                name: add_str(&mut shstr, nm.as_str()),
+                name: add_str(&mut shstr, &nm),
                 ty: SHT_RELA,
                 flags: SHF_INFO_LINK,
                 off: start as u64,
@@ -546,9 +546,9 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             let y = o.syms[x.sym as usize];
             ob::w64(&mut body, x.off);
             let pc32 = if a64 {
-                R_AARCH64_PREL32;
+                R_AARCH64_PREL32
             } else {
-                R_X86_64_PC32;
+                R_X86_64_PC32
             };
             let q = ob::part_at(&parts, &first, y.sec, y.off) as usize;
             ob::w64(&mut body, secsym[q] as u64 << 32 | pc32 as u64);
@@ -635,9 +635,9 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     ob::w16(
         out,
         if a64 {
-            183;
+            183
         } else {
-            62;
+            62
         },
     );
     ob::w32(out, 1);
@@ -663,9 +663,9 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         ob::w64(
             out,
             if i == 0 {
-                0;
+                0
             } else {
-                64 + h.off;
+                64 + h.off
             },
         );
         ob::w64(out, h.size);

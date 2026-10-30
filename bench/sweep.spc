@@ -106,7 +106,7 @@ pub fn row(name: str, label: i64, p: &Point, base: f64) {
     js.push_str(",\"cpu_ms_per_round\":");
     js.push_f64_prec(p.cpu_ms, 3);
     js.push_byte(b'}');
-    bench::log_line(js.as_str());
+    bench::log_line(&js);
 }
 
 /// Run `body` at each worker count and print a row per point. `body` must leave no task running: the pool

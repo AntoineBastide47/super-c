@@ -29,11 +29,11 @@ fn example(name: str) (cli::Proj, String, String) {
     }
     assert(r.ok(), name);
     let exe = if PLATFORM == Platform::Windows {
-        format("{}/build/debug/{}.exe", proj.dir(), name);
+        format("{}/build/debug/{}.exe", proj.dir(), name)
     } else {
-        format("{}/build/debug/{}", proj.dir(), name);
+        format("{}/build/debug/{}", proj.dir(), name)
     };
-    return proj, exe, std_dir;
+    return (proj, exe, std_dir);
 }
 
 @test(timeout = 900)
@@ -41,7 +41,7 @@ fn the_diagnostics_example_reports_an_error() {
     let (proj, exe, std_dir) = example("diagnostics");
     proj.mkfile("sample/build.toml", "bin = \"sample\"\nroot = \"main.spc\"\n");
     proj.mkfile("sample/main.spc", SAMPLE);
-    let r = cli::exe_env_in(exe.as_str(), proj.dir(), "SC_NONE", "", format("sample \"{}\"", std_dir.as_str()).as_str());
+    let r = cli::exe_env_in(&exe, proj.dir(), "SC_NONE", "", format("sample \"{}\"", std_dir.as_str()).as_str());
     assert_eq(r.exit, 1);
     assert(r.out_has("main.spc:") && r.out_has(": error ["), "a located error with its code");
 }
@@ -51,7 +51,7 @@ fn the_rename_example_prints_the_edits() {
     let (proj, exe, std_dir) = example("rename");
     proj.mkfile("sample.spc", SAMPLE);
     let r = cli::exe_env_in(
-        exe.as_str(),
+        &exe,
         proj.dir(),
         "SC_NONE",
         "",
@@ -64,7 +64,7 @@ fn the_rename_example_prints_the_edits() {
 @test(timeout = 900)
 fn the_lir_example_evaluates_and_compiles() {
     let (proj, exe, std_dir) = example("lir");
-    let r = cli::exe_env_in(exe.as_str(), proj.dir(), "SC_NONE", "", "");
+    let r = cli::exe_env_in(&exe, proj.dir(), "SC_NONE", "", "");
     assert_eq(r.exit, 0);
     assert(r.out_has("add3(4, 5) = 12") && r.out_has("object: "), "the result and the object");
 }
@@ -76,7 +76,7 @@ fn the_build_hook_example_builds_with_its_hook() {
     proj.mkfile("sample/main.spc", "import util;\n\nfn main() i32 {\n    return util::zero();\n}\n");
     proj.mkfile("sample/util.spc", "pub fn zero() i32 {\n    return 0;\n}\n");
     let sample = format("{}/sample", proj.dir());
-    let r = cli::exe_env_in(exe.as_str(), sample.as_str(), "SC_NONE", "", format("\"{}\"", std_dir.as_str()).as_str());
+    let r = cli::exe_env_in(&exe, &sample, "SC_NONE", "", format("\"{}\"", std_dir.as_str()).as_str());
     if r.exit != 0 {
         r.show();
     }

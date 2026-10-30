@@ -143,11 +143,11 @@ extend<K, V, F: fn(&K) bool> KeyKeep<F> as MapKeep<K, V> {
 /// An open-addressing hash map from K to V through allocator A, hashed by S. Iteration order is slot
 /// order, not insertion order.
 pub struct Map<K, V, A = Global, S = DefaultHash> {
-    pub(module) keys: *mut K, // parallel arrays, slot i valid when used[i] == 1 (private)
-    pub(module) vals: *mut V,
-    pub(module) used: *mut u8, // 0 = empty, 1 = occupied
-    pub(module) len: usize, // occupied slots
-    pub(module) cap: usize, // total slots; ALWAYS a power of two (grow doubles from 8) so slot() can mask
+    keys: *mut K, // parallel arrays, slot i valid when used[i] == 1 (private)
+    vals: *mut V,
+    used: *mut u8, // 0 = empty, 1 = occupied
+    len: usize, // occupied slots
+    cap: usize, // total slots; ALWAYS a power of two (grow doubles from 8) so slot() can mask
     alloc: A, // the allocator the arrays were obtained through (private; zero-sized for Global)
     hasher: S, // the hash builder (private; zero-sized for DefaultHash)
 }
@@ -354,38 +354,38 @@ extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
     @always_inline
     pub const fn get(self: &Map<K, V, A, S>, key: &K) Option<&V> {
         if self.cap == 0 {
-            return Option::<&V>::None;
+            return None;
         }
         let i = self.slot(key);
         if unsafe self.used[i] == 0 {
-            return Option::<&V>::None;
+            return None;
         }
-        return Option::<&V>::Some(&unsafe self.vals[i]);
+        return Some(&unsafe self.vals[i]);
     }
 
     /// The stored key and its value for `key`, or `None`.
     pub const fn get_key_value(self: &Map<K, V, A, S>, key: &K) Option<(&K, &V)> {
         if self.cap == 0 {
-            return Option::<(&K, &V)>::None;
+            return None;
         }
         let i = self.slot(key);
         if unsafe self.used[i] == 0 {
-            return Option::<(&K, &V)>::None;
+            return None;
         }
-        return Option::<(&K, &V)>::Some((&unsafe self.keys[i], &unsafe self.vals[i]));
+        return Some((&unsafe self.keys[i], &unsafe self.vals[i]));
     }
 
     /// A MUTABLE borrow of the value for `key`, or `None`. Holds the Map borrowed for as long as the
     /// result lives, so the entry cannot be rehashed out from under it.
     pub const fn get_mut(self: &mut Map<K, V, A, S>, key: &K) Option<&mut V> {
         if self.cap == 0 {
-            return Option::<&mut V>::None;
+            return None;
         }
         let i = self.slot(key);
         if unsafe self.used[i] == 0 {
-            return Option::<&mut V>::None;
+            return None;
         }
-        return Option::<&mut V>::Some(&mut unsafe self.vals[i]);
+        return Some(&mut unsafe self.vals[i]);
     }
 
     /// True when `key` has an entry.
@@ -421,32 +421,32 @@ extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
     /// Remove `key`, returning its value (`None` if absent); the stored key is freed.
     pub const fn remove(self: &mut Map<K, V, A, S>, key: &K) Option<V> {
         if self.cap == 0 {
-            return Option::<V>::None;
+            return None;
         }
         let i = self.slot(key);
         if unsafe self.used[i] == 0 {
-            return Option::<V>::None;
+            return None;
         }
         let removed = unsafe self.vals[i];
         // The stored key is not handed out, so it is freed here (no-op if K isn't Free).
         unsafe self.keys[i].free();
         self.vacate(i);
-        return Option::<V>::Some(removed);
+        return Some(removed);
     }
 
     /// Remove `key`, returning the stored key and its value (`None` if absent).
     pub const fn remove_entry(self: &mut Map<K, V, A, S>, key: &K) Option<(K, V)> {
         if self.cap == 0 {
-            return Option::<(K, V)>::None;
+            return None;
         }
         let i = self.slot(key);
         if unsafe self.used[i] == 0 {
-            return Option::<(K, V)>::None;
+            return None;
         }
         let k = unsafe self.keys[i];
         let v = unsafe self.vals[i];
         self.vacate(i);
-        return Option::<(K, V)>::Some((k, v));
+        return Some((k, v));
     }
 
     /// Keep only the entries for which `keep(key, value)` holds; the others are freed. `keep` runs once
@@ -484,15 +484,15 @@ extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
         if self.cap != 0 {
             let i = self.slot(&key);
             if unsafe self.used[i] != 0 {
-                return Entry::<K, V, A, S>::Occupied(OccupiedEntry::<K, V, A, S> { map: self, slot: i });
+                return Occupied(OccupiedEntry::<K, V, A, S> { map: self, slot: i });
             }
             if !self.needs_grow() {
-                return Entry::<K, V, A, S>::Vacant(VacantEntry::<K, V, A, S> { map: self, key: key, slot: i });
+                return Vacant(VacantEntry::<K, V, A, S> { map: self, key: key, slot: i });
             }
         }
         self.grow();
         let i = self.slot(&key);
-        return Entry::<K, V, A, S>::Vacant(VacantEntry::<K, V, A, S> { map: self, key: key, slot: i });
+        return Vacant(VacantEntry::<K, V, A, S> { map: self, key: key, slot: i });
     }
 
     /// Move every entry out, leaving the map empty with its storage kept. The entries the iterator does
@@ -612,7 +612,7 @@ extend<K: Hash + Eq, V: Eq, A: Allocator, S: BuildHasher> Map<K, V, A, S> as Eq 
                     None => {
                         return false;
                     },
-                };
+                }
             }
         }
         return true;
@@ -650,15 +650,15 @@ pub enum Entry<'a, K, V, A, S> {
 
 /// A present key's entry; it borrows the map.
 pub struct OccupiedEntry<'a, K, V, A, S> {
-    pub(module) map: &'a mut Map<K, V, A, S>,
-    pub(module) slot: usize,
+    map: &'a mut Map<K, V, A, S>,
+    slot: usize,
 }
 
 /// An absent key's entry: the key and the empty slot it takes; it borrows the map.
 pub struct VacantEntry<'a, K, V, A, S> {
-    pub(module) map: &'a mut Map<K, V, A, S>,
-    pub(module) key: K,
-    pub(module) slot: usize,
+    map: &'a mut Map<K, V, A, S>,
+    key: K,
+    slot: usize,
 }
 
 extend<'a, K: Hash + Eq, V, A: Allocator, S: BuildHasher> Entry<'a, K, V, A, S> {
@@ -683,9 +683,9 @@ extend<'a, K: Hash + Eq, V, A: Allocator, S: BuildHasher> Entry<'a, K, V, A, S> 
         return switch self {
             Occupied(o) => {
                 f(&mut unsafe o.map.vals[o.slot]);
-                Entry::<K, V, A, S>::Occupied(o);
+                Occupied(o)
             },
-            Vacant(v) => Entry::<K, V, A, S>::Vacant(v),
+            Vacant(v) => Vacant(v),
         };
     }
 
@@ -745,7 +745,7 @@ extend<'a, K: Hash + Eq, V, A: Allocator, S: BuildHasher> OccupiedEntry<'a, K, V
                 let v = unsafe map.vals[slot];
                 unsafe map.keys[slot].free();
                 map.vacate(slot);
-                v;
+                v
             },
         };
     }
@@ -757,9 +757,9 @@ extend<'a, K: Hash + Eq, V, A: Allocator, S: BuildHasher> OccupiedEntry<'a, K, V
                 let k = unsafe map.keys[slot];
                 let v = unsafe map.vals[slot];
                 map.vacate(slot);
-                return k, v;
+                return (k, v);
             },
-        };
+        }
     }
 }
 
@@ -785,7 +785,7 @@ extend<'a, K: Hash + Eq, V, A: Allocator, S: BuildHasher> VacantEntry<'a, K, V, 
                 unsafe map.vals[slot] = value;
                 unsafe map.used[slot] = 1;
                 map.len = map.len + 1;
-                &mut unsafe map.vals[slot];
+                &mut unsafe map.vals[slot]
             },
         };
     }
@@ -798,7 +798,7 @@ pub struct MapKeys<'a, K> {
     pub used: *const u8,
     pub idx: usize, // the next slot from the front
     pub cap: usize, // one past the next slot from the back
-    pub(module) left: usize, // entries not yet yielded
+    left: usize, // entries not yet yielded
 }
 
 /// Iterator over a map's values in slot order; borrows the map.
@@ -807,43 +807,43 @@ pub struct MapValues<'a, V> {
     pub used: *const u8,
     pub idx: usize,
     pub cap: usize,
-    pub(module) left: usize,
+    left: usize,
 }
 
 /// Iterator over a map's values, writable, in slot order; borrows the map mutably.
 pub struct MapValuesMut<'a, V> {
-    pub(module) vals: *mut V,
-    pub(module) used: *const u8,
-    pub(module) idx: usize,
-    pub(module) cap: usize,
-    pub(module) left: usize,
+    vals: *mut V,
+    used: *const u8,
+    idx: usize,
+    cap: usize,
+    left: usize,
 }
 
 /// Iterator over a map's `(key, value)` pairs in slot order; borrows the map.
 pub struct MapIter<'a, K, V> {
-    pub(module) keys: *const K,
-    pub(module) vals: *const V,
-    pub(module) used: *const u8,
-    pub(module) idx: usize,
-    pub(module) cap: usize,
-    pub(module) left: usize,
+    keys: *const K,
+    vals: *const V,
+    used: *const u8,
+    idx: usize,
+    cap: usize,
+    left: usize,
 }
 
 /// Iterator over a map's `(key, writable value)` pairs in slot order; borrows the map mutably.
 pub struct MapIterMut<'a, K, V> {
-    pub(module) keys: *const K,
-    pub(module) vals: *mut V,
-    pub(module) used: *const u8,
-    pub(module) idx: usize,
-    pub(module) cap: usize,
-    pub(module) left: usize,
+    keys: *const K,
+    vals: *mut V,
+    used: *const u8,
+    idx: usize,
+    cap: usize,
+    left: usize,
 }
 
 /// The entries of a map moved out one by one (`Map::drain`); dropping it frees the rest and leaves the
 /// map empty.
 pub struct MapDrain<'a, K, V, A, S> {
-    pub(module) map: &'a mut Map<K, V, A, S>,
-    pub(module) idx: usize,
+    map: &'a mut Map<K, V, A, S>,
+    idx: usize,
 }
 
 extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
@@ -893,20 +893,20 @@ const fn map_step_front(used: *const u8, idx: &mut usize, cap: usize) Option<usi
         let i = *idx;
         *idx = i + 1;
         if unsafe used[i] != 0 {
-            return Option::<usize>::Some(i);
+            return Some(i);
         }
     }
-    return Option::<usize>::None;
+    return None;
 }
 
 const fn map_step_back(used: *const u8, idx: usize, cap: &mut usize) Option<usize> {
     while *cap > idx {
         *cap = *cap - 1;
         if unsafe used[*cap] != 0 {
-            return Option::<usize>::Some(*cap);
+            return Some(*cap);
         }
     }
-    return Option::<usize>::None;
+    return None;
 }
 
 extend<'a, K> MapKeys<'a, K> as Iterator<&'a K> {
@@ -914,14 +914,14 @@ extend<'a, K> MapKeys<'a, K> as Iterator<&'a K> {
         return switch map_step_front(self.used, &mut self.idx, self.cap) {
             Some(i) => {
                 self.left = self.left - 1;
-                Option::<&'a K>::Some(unsafe &*(self.keys + i));
+                Some(unsafe &*(self.keys + i))
             },
             None => Option::<&'a K>::None,
         };
     }
 
     pub const fn size_hint(self: &MapKeys<'a, K>) (usize, Option<usize>) {
-        return self.left, Option::<usize>::Some(self.left);
+        return (self.left, Option::<usize>::Some(self.left));
     }
 }
 
@@ -930,7 +930,7 @@ extend<'a, K> MapKeys<'a, K> as DoubleEndedIterator<&'a K> {
         return switch map_step_back(self.used, self.idx, &mut self.cap) {
             Some(i) => {
                 self.left = self.left - 1;
-                Option::<&'a K>::Some(unsafe &*(self.keys + i));
+                Some(unsafe &*(self.keys + i))
             },
             None => Option::<&'a K>::None,
         };
@@ -942,14 +942,14 @@ extend<'a, V> MapValues<'a, V> as Iterator<&'a V> {
         return switch map_step_front(self.used, &mut self.idx, self.cap) {
             Some(i) => {
                 self.left = self.left - 1;
-                Option::<&'a V>::Some(unsafe &*(self.vals + i));
+                Some(unsafe &*(self.vals + i))
             },
             None => Option::<&'a V>::None,
         };
     }
 
     pub const fn size_hint(self: &MapValues<'a, V>) (usize, Option<usize>) {
-        return self.left, Option::<usize>::Some(self.left);
+        return (self.left, Option::<usize>::Some(self.left));
     }
 }
 
@@ -958,7 +958,7 @@ extend<'a, V> MapValues<'a, V> as DoubleEndedIterator<&'a V> {
         return switch map_step_back(self.used, self.idx, &mut self.cap) {
             Some(i) => {
                 self.left = self.left - 1;
-                Option::<&'a V>::Some(unsafe &*(self.vals + i));
+                Some(unsafe &*(self.vals + i))
             },
             None => Option::<&'a V>::None,
         };
@@ -970,14 +970,14 @@ extend<'a, V> MapValuesMut<'a, V> as Iterator<&'a mut V> {
         return switch map_step_front(self.used, &mut self.idx, self.cap) {
             Some(i) => {
                 self.left = self.left - 1;
-                Option::<&'a mut V>::Some(unsafe &mut *(self.vals + i));
+                Some(unsafe &mut *(self.vals + i))
             },
             None => Option::<&'a mut V>::None,
         };
     }
 
     pub fn size_hint(self: &MapValuesMut<'a, V>) (usize, Option<usize>) {
-        return self.left, Option::<usize>::Some(self.left);
+        return (self.left, Option::<usize>::Some(self.left));
     }
 }
 
@@ -986,7 +986,7 @@ extend<'a, V> MapValuesMut<'a, V> as DoubleEndedIterator<&'a mut V> {
         return switch map_step_back(self.used, self.idx, &mut self.cap) {
             Some(i) => {
                 self.left = self.left - 1;
-                Option::<&'a mut V>::Some(unsafe &mut *(self.vals + i));
+                Some(unsafe &mut *(self.vals + i))
             },
             None => Option::<&'a mut V>::None,
         };
@@ -998,14 +998,14 @@ extend<'a, K, V> MapIter<'a, K, V> as Iterator<(&'a K, &'a V)> {
         return switch map_step_front(self.used, &mut self.idx, self.cap) {
             Some(i) => {
                 self.left = self.left - 1;
-                Option::<(&'a K, &'a V)>::Some((unsafe &*(self.keys + i), unsafe &*(self.vals + i)));
+                Some((unsafe &*(self.keys + i), unsafe &*(self.vals + i)))
             },
             None => Option::<(&'a K, &'a V)>::None,
         };
     }
 
     pub const fn size_hint(self: &MapIter<'a, K, V>) (usize, Option<usize>) {
-        return self.left, Option::<usize>::Some(self.left);
+        return (self.left, Option::<usize>::Some(self.left));
     }
 }
 
@@ -1014,7 +1014,7 @@ extend<'a, K, V> MapIter<'a, K, V> as DoubleEndedIterator<(&'a K, &'a V)> {
         return switch map_step_back(self.used, self.idx, &mut self.cap) {
             Some(i) => {
                 self.left = self.left - 1;
-                Option::<(&'a K, &'a V)>::Some((unsafe &*(self.keys + i), unsafe &*(self.vals + i)));
+                Some((unsafe &*(self.keys + i), unsafe &*(self.vals + i)))
             },
             None => Option::<(&'a K, &'a V)>::None,
         };
@@ -1026,14 +1026,14 @@ extend<'a, K, V> MapIterMut<'a, K, V> as Iterator<(&'a K, &'a mut V)> {
         return switch map_step_front(self.used, &mut self.idx, self.cap) {
             Some(i) => {
                 self.left = self.left - 1;
-                Option::<(&'a K, &'a mut V)>::Some((unsafe &*(self.keys + i), unsafe &mut *(self.vals + i)));
+                Some((unsafe &*(self.keys + i), unsafe &mut *(self.vals + i)))
             },
             None => Option::<(&'a K, &'a mut V)>::None,
         };
     }
 
     pub fn size_hint(self: &MapIterMut<'a, K, V>) (usize, Option<usize>) {
-        return self.left, Option::<usize>::Some(self.left);
+        return (self.left, Option::<usize>::Some(self.left));
     }
 }
 
@@ -1042,7 +1042,7 @@ extend<'a, K, V> MapIterMut<'a, K, V> as DoubleEndedIterator<(&'a K, &'a mut V)>
         return switch map_step_back(self.used, self.idx, &mut self.cap) {
             Some(i) => {
                 self.left = self.left - 1;
-                Option::<(&'a K, &'a mut V)>::Some((unsafe &*(self.keys + i), unsafe &mut *(self.vals + i)));
+                Some((unsafe &*(self.keys + i), unsafe &mut *(self.vals + i)))
             },
             None => Option::<(&'a K, &'a mut V)>::None,
         };
@@ -1055,14 +1055,14 @@ extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> MapDrain<K, V, A, S> as It
             Some(i) => {
                 unsafe self.map.used[i] = 0;
                 self.map.len = self.map.len - 1;
-                Option::<(K, V)>::Some((unsafe self.map.keys[i], unsafe self.map.vals[i]));
+                Some((unsafe self.map.keys[i], unsafe self.map.vals[i]))
             },
             None => Option::<(K, V)>::None,
         };
     }
 
     pub fn size_hint(self: &MapDrain<K, V, A, S>) (usize, Option<usize>) {
-        return self.map.len, Option::<usize>::Some(self.map.len);
+        return (self.map.len, Option::<usize>::Some(self.map.len));
     }
 }
 

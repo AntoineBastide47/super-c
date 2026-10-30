@@ -30,27 +30,27 @@ pub(package) enum JSON {
 extend JSON {
     /// An integer, stored as f64 (exact below 2^53).
     pub(package) const fn integer(value: i64) JSON {
-        return JSON::Num(value as f64);
+        return Num(value as f64);
     }
 
     /// A string value; `value` is copied.
     pub(package) fn str(value: str) JSON {
-        return JSON::Str(String::from_str(value));
+        return Str(String::from_str(value));
     }
 
     /// Takes ownership of `value` (no copy): the JSON(std::string&&) constructor.
     pub(package) const fn string(value: String) JSON {
-        return JSON::Str(value);
+        return Str(value);
     }
 
     /// An empty array.
     pub(package) fn array() JSON {
-        return JSON::Arr(Vector::<JSON>::new());
+        return Arr(Vector::<JSON>::new());
     }
 
     /// An empty object.
     pub(package) fn object() JSON {
-        return JSON::Obj(Vector::<JSONPair>::new());
+        return Obj(Vector::<JSONPair>::new());
     }
 
     /// Kind test.
@@ -147,11 +147,11 @@ extend JSON {
         if let Obj(o) = self {
             for i in 0..o.len() {
                 if o.at(i).key.as_str() == key {
-                    return Option::<&JSON>::Some(&o.at(i).value);
+                    return Some(&o.at(i).value);
                 }
             }
         }
-        return Option::<&JSON>::None;
+        return None;
     }
 
     /// True when this object has member `key` (false for non-objects).
@@ -231,7 +231,7 @@ extend JSON {
             Arr(a) => a.reserve(size),
             Obj(o) => o.reserve(size),
             _ => panic("JSON::reserve called on non-array and non-object type"),
-        };
+        }
     }
 
     // The array elements. Panics: not an array.
@@ -290,13 +290,13 @@ extend JSON {
                     if i > 0 {
                         out.push_byte(b',');
                     }
-                    dump_escaped(o.at(i).key.as_str(), out);
+                    dump_escaped(&o.at(i).key, out);
                     out.push_byte(b':');
                     o.at(i).value.dump_into(out);
                 }
                 out.push_byte(b'}');
             },
-        };
+        }
     }
 }
 
@@ -304,11 +304,11 @@ extend JSON as Clone {
     /// Deep copy
     pub fn clone(self: &Self) JSON {
         return switch self {
-            Arr(a) => JSON::Arr(a.clone()),
-            Obj(o) => JSON::Obj(o.clone()),
-            Str(s) => JSON::Str(s.clone()),
-            Num(n) => JSON::Num(*n),
-            Bool(b) => JSON::Bool(*b),
+            Arr(a) => Arr(a.clone()),
+            Obj(o) => Obj(o.clone()),
+            Str(s) => Str(s.clone()),
+            Num(n) => Num(*n),
+            Bool(b) => Bool(*b),
             Null => JSON::Null,
         };
     }
@@ -317,7 +317,7 @@ extend JSON as Clone {
 extend JSON as Default {
     /// A JSON null
     pub fn default() JSON {
-        return JSON::Null;
+        return Null;
     }
 }
 
@@ -755,7 +755,7 @@ extend JSONParser {
                     if n / 512 > cap {
                         cap = n / 512;
                     }
-                    unsafe *t = JSON::Arr(Vector::<JSON>::with_capacity(cap));
+                    unsafe *t = Arr(Vector::<JSON>::with_capacity(cap));
                 }
                 self.found_data = true;
             } else if c == b']' {
@@ -894,7 +894,7 @@ extend JSONParser {
                 if unsafe (*t).is_object() || unsafe (*t).is_array() {
                     let _ = self.add_value(JSON::Num(num));
                 } else if self.stack.len() == 1 {
-                    unsafe *t = JSON::Num(num);
+                    unsafe *t = Num(num);
                     self.stack.pop();
                     return q;
                 }
@@ -923,9 +923,9 @@ extend JSONParser {
                 }
                 let mut val = JSON::default();
                 if c == b't' {
-                    val = JSON::Bool(true);
+                    val = Bool(true);
                 } else if c == b'f' {
-                    val = JSON::Bool(false);
+                    val = Bool(false);
                 }
                 self.found_data = true;
                 if unsafe (*t).is_object() || unsafe (*t).is_array() {
@@ -963,18 +963,18 @@ pub(package) fn parse(src: str) Result<JSON, String> {
     p.stack.push(((&mut root) as *mut JSON) as usize);
     let consumed = p.parse_buffer();
     if p.err.len() != 0 {
-        return Result::<JSON, String>::Err(p.take_err());
+        return Err(p.take_err());
     }
     if !p.found_data {
-        return Result::<JSON, String>::Err(String::from_str("Empty input is not valid JSON"));
+        return Err(String::from_str("Empty input is not valid JSON"));
     }
     if p.stack.len() != 0 {
         let t = p.top() as *mut JSON;
         if unsafe (*t).is_object() {
-            return Result::<JSON, String>::Err(String::from_str("Missing closing '}' for object"));
+            return Err(String::from_str("Missing closing '}' for object"));
         }
         if unsafe (*t).is_array() {
-            return Result::<JSON, String>::Err(String::from_str("Missing closing ']' for array"));
+            return Err(String::from_str("Missing closing ']' for array"));
         }
     }
     let mut tail = consumed;
@@ -983,7 +983,7 @@ pub(package) fn parse(src: str) Result<JSON, String> {
     }
     if tail < src.len() {
         p.eof_junk(src[tail]);
-        return Result::<JSON, String>::Err(p.take_err());
+        return Err(p.take_err());
     }
-    return Result::<JSON, String>::Ok(root);
+    return Ok(root);
 }

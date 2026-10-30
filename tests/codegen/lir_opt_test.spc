@@ -61,7 +61,7 @@ fn optimized_split(text: str, fm: u8, fma: bool, inl: il::Budget, bu: lu::Budget
             );
         }
     }
-    return before, after;
+    return (before, after);
 }
 
 // The text of function `name` of `p`.
@@ -69,7 +69,7 @@ fn text_of(p: &Package, name: str) String {
     let mut all = String::new();
     lprint::print_package(p, &mut all);
     let head = format("fn @{}\n", name);
-    let at = all.as_str().find(head.as_str());
+    let at = all.as_str().find(&head);
     assert(at >= 0, head.as_str());
     let rest = all.as_str().slice(at as usize + head.len(), all.len());
     let mut end = rest.len();
@@ -93,9 +93,9 @@ fn block_at(t: str, at: usize) str {
     }
     let n = t.slice(at, t.len()).find("\nb");
     let to = if n >= 0 {
-        at + n as usize;
+        at + n as usize
     } else {
-        t.len();
+        t.len()
     };
     return t.slice(from, to);
 }
@@ -130,9 +130,9 @@ fn the_evaluator_converts_binary16_as_std_does() {
         }
         let lo = x.to_f32();
         let hi = if (h & 0x7FFF) == 0x7BFF {
-            65536.0f32;
+            65536.0f32
         } else {
-            f16::from_raw(UInt::<16>::from_u64(h as u64 + 1)).to_f32();
+            f16::from_raw(UInt::<16>::from_u64(h as u64 + 1)).to_f32()
         };
         let mid = (lo + hi) / 2.0;
         let probes: []f32 = [
@@ -2405,8 +2405,8 @@ fn quotients_by_constants_give_the_division() {
     body.push_str(
         "fn @minus\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 -1\n  v2 = sdiv.i64 v0, v1\n  ret v2\n",
     );
-    src.push_str(body.as_str());
-    let (_, a) = optimized(src.as_str());
+    src.push_str(&body);
+    let (_, a) = optimized(&src);
     assert(text_of(&a, "zero").contains("udiv") && text_of(&a, "minus").contains("sdiv"), "0 and -1 stay");
     // Those two alone divide.
     let mut all = String::new();
@@ -2436,9 +2436,9 @@ fn quotients_by_constants_give_the_division() {
             xs.push(unsafe edges[q]);
         }
         let ad = if d < 0 && d != lo {
-            -d;
+            -d
         } else {
-            d;
+            d
         };
         if ad > 0 && w != 8 {
             let m = hi - hi % ad;
@@ -2451,15 +2451,15 @@ fn quotients_by_constants_give_the_division() {
             }
         }
         let mask = if w == 64 {
-            ~0u64;
+            ~0u64
         } else {
-            (1u64 << w as u64) - 1;
+            (1u64 << w as u64) - 1
         };
         for q in 0..xs.len() {
             let x = xs[q];
             // The evaluator's values are their bits under the width.
             args[0] = x as u64 & mask;
-            let o = e.run(a.find_symbol(name.as_str()), args);
+            let o = e.run(a.find_symbol(&name), args);
             assert(o.kind == leval::EV_OK, o.msg.as_str());
             let want = divided(op, x, d, mask);
             if ((o.value ^ want) & mask) != 0 {
@@ -2472,7 +2472,7 @@ fn quotients_by_constants_give_the_division() {
                     o.value & mask,
                     want & mask,
                 );
-                assert(false, text_of(&a, name.as_str()).as_str());
+                assert(false, text_of(&a, &name).as_str());
             }
         }
     }
@@ -2490,9 +2490,9 @@ fn divided(op: u32, x: i64, d: i64, mask: u64) u64 {
     let ux = x as u64 & mask;
     let ud = d as u64 & mask;
     return if op == 2 {
-        ux / ud;
+        ux / ud
     } else {
-        ux % ud;
+        ux % ud
     };
 }
 
@@ -4218,11 +4218,11 @@ b0(v0: i64):
     let m = text_of(&a, "mix");
     let mul = m.as_str().find("mul.i64");
     assert(mul >= 0 && m.as_str().find("load.i64 v0") >= 0, m.as_str());
-    let body = block_at(m.as_str(), mul as usize);
+    let body = block_at(&m, mul as usize);
     assert(!body.contains(", v0 ") && !body.contains("load.i64 v0"), m.as_str());
     let n = text_of(&a, "mixany");
     let nmul = n.as_str().find("mul.i64");
-    assert(nmul >= 0 && block_at(n.as_str(), nmul as usize).contains("load.i64 v0"), n.as_str());
+    assert(nmul >= 0 && block_at(&n, nmul as usize).contains("load.i64 v0"), n.as_str());
     // mix: x = ((x * 31 + 2) * 31 + 3) * 31 + 5; mixany: the same again, each element set to the running
     // value, the last of which it returns beside x.
     let x: []u64 = [1];

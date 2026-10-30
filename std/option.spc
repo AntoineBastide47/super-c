@@ -26,12 +26,12 @@ pub struct OptionIter<'a, T> {
 extend<T> Option<T> {
     /// `Some(value)`.
     pub const fn some(value: T) Option<T> {
-        return Option::<T>::Some(value);
+        return Some(value);
     }
 
     /// `None`.
     pub const fn none() Option<T> {
-        return Option::<T>::None;
+        return None;
     }
 
     /// True for `Some`.
@@ -96,7 +96,7 @@ extend<T> Option<T> {
     /// Map the contained value through `f`, producing `Option<U>` (`None` stays `None`). Consumes `self`.
     pub const fn map<U, F: fn(T) U>(self: Option<T>, f: F) Option<U> {
         return switch self {
-            Some(v) => Option::<U>::Some(f(v)),
+            Some(v) => Some(f(v)),
             None => Option::<U>::None,
         };
     }
@@ -129,14 +129,14 @@ extend<T> Option<T> {
         if keep {
             return self;
         }
-        return Option::<T>::None;
+        return None;
     }
 
     /// `self` when it holds a value, otherwise `other`. Consumes both; the unused alternative is freed by
     /// scope-exit auto-`Free`.
     pub const fn or(self: Option<T>, other: Option<T>) Option<T> {
         return switch self {
-            Some(v) => Option::<T>::Some(v),
+            Some(v) => Some(v),
             None => other,
         };
     }
@@ -146,7 +146,7 @@ extend<T> Option<T> {
     pub const fn and<U>(self: Option<T>, other: Option<U>) Option<U> {
         return switch self {
             Some(v) => {
-                other;
+                other
             },
             None => Option::<U>::None,
         };
@@ -171,7 +171,7 @@ extend<T> Option<T> {
     /// A borrow of the payload, as an `Option<&T>`.
     pub const fn as_ref(self: &Option<T>) Option<&T> {
         return switch self {
-            Some(v) => Option::<&T>::Some(v),
+            Some(v) => Some(v),
             None => Option::<&T>::None,
         };
     }
@@ -179,7 +179,7 @@ extend<T> Option<T> {
     /// A mutable borrow of the payload, as an `Option<&mut T>`.
     pub const fn as_mut(self: &mut Option<T>) Option<&mut T> {
         return switch self {
-            Some(v) => Option::<&mut T>::Some(v),
+            Some(v) => Some(v),
             None => Option::<&mut T>::None,
         };
     }
@@ -187,16 +187,16 @@ extend<T> Option<T> {
     /// `Ok(v)` for `Some(v)`, `Err(err)` for `None`. Consumes both; the unused `err` is freed.
     pub const fn ok_or<E>(self: Option<T>, err: E) Result<T, E> {
         return switch self {
-            Some(v) => Result::<T, E>::Ok(v),
-            None => Result::<T, E>::Err(err),
+            Some(v) => Ok(v),
+            None => Err(err),
         };
     }
 
     /// `Ok(v)` for `Some(v)`, `Err(f())` for `None`; `f` runs only when empty. Consumes `self`.
     pub const fn ok_or_else<E, F: fn() E>(self: Option<T>, f: F) Result<T, E> {
         return switch self {
-            Some(v) => Result::<T, E>::Ok(v),
-            None => Result::<T, E>::Err(f()),
+            Some(v) => Ok(v),
+            None => Err(f()),
         };
     }
 
@@ -211,7 +211,7 @@ extend<T> Option<T> {
     /// `self` when it holds a value, otherwise `f()`; `f` runs only when empty. Consumes `self`.
     pub const fn or_else<F: fn() Option<T>>(self: Option<T>, f: F) Option<T> {
         return switch self {
-            Some(v) => Option::<T>::Some(v),
+            Some(v) => Some(v),
             None => f(),
         };
     }
@@ -221,8 +221,8 @@ extend<T> Option<T> {
     pub const fn xor(self: Option<T>, other: Option<T>) Option<T> {
         return switch self {
             Some(v) => switch other {
-                Some(_) => Option::<T>::None,
-                None => Option::<T>::Some(v),
+                Some(_) => None,
+                None => Some(v),
             },
             None => other,
         };
@@ -232,7 +232,7 @@ extend<T> Option<T> {
     pub const fn zip<U>(self: Option<T>, other: Option<U>) Option<(T, U)> {
         return switch self {
             Some(a) => switch other {
-                Some(b) => Option::<(T, U)>::Some((a, b)),
+                Some(b) => Some((a, b)),
                 None => Option::<(T, U)>::None,
             },
             None => Option::<(T, U)>::None,
@@ -244,12 +244,12 @@ extend<T> Option<T> {
     pub const fn unzip<B>(o: Option<(T, B)>) (Option<T>, Option<B>) {
         switch o {
             Some((a, b)) => {
-                return Option::<T>::Some(a), Option::<B>::Some(b);
+                return (Option::<T>::Some(a), Option::<B>::Some(b));
             },
             None => {
-                return Option::<T>::None, Option::<B>::None;
+                return (Option::<T>::None, Option::<B>::None);
             },
-        };
+        }
     }
 
     /// The inner Option of `Some(inner)`, and `None` for `None` (`Option::flatten(o)`).
@@ -265,17 +265,17 @@ extend<T> Option<T> {
     pub const fn transpose<E>(o: Option<Result<T, E>>) Result<Option<T>, E> {
         return switch o {
             Some(r) => switch r {
-                Ok(v) => Result::<Option<T>, E>::Ok(Option::<T>::Some(v)),
-                Err(e) => Result::<Option<T>, E>::Err(e),
+                Ok(v) => Ok(Option::<T>::Some(v)),
+                Err(e) => Err(e),
             },
-            None => Result::<Option<T>, E>::Ok(Option::<T>::None),
+            None => Ok(Option::<T>::None),
         };
     }
 
     /// The payload, after storing `value` when empty; the unused `value` is freed.
     pub const fn get_or_insert(self: &mut Option<T>, value: T) &mut T {
         if self.is_none() {
-            *self = Option::<T>::Some(value);
+            *self = Some(value);
         }
         return self.payload_mut();
     }
@@ -283,14 +283,14 @@ extend<T> Option<T> {
     /// The payload, after storing `f()` when empty; `f` runs only when empty.
     pub fn get_or_insert_with<F: fn() T>(self: &mut Option<T>, f: F) &mut T {
         if self.is_none() {
-            *self = Option::<T>::Some(f());
+            *self = Some(f());
         }
         return self.payload_mut();
     }
 
     /// Stores `value`, freeing the old payload, and returns a borrow of the new one.
     pub const fn insert(self: &mut Option<T>, value: T) &mut T {
-        *self = Option::<T>::Some(value);
+        *self = Some(value);
         return self.payload_mut();
     }
 
@@ -304,7 +304,7 @@ extend<T> Option<T> {
         if hit {
             return self.take();
         }
-        return Option::<T>::None;
+        return None;
     }
 
     /// Runs `f` on the payload when there is one, then returns `self`. `f` borrows the payload.
@@ -312,7 +312,7 @@ extend<T> Option<T> {
         switch &self {
             Some(v) => f(v),
             None => {},
-        };
+        }
         return self;
     }
 
@@ -347,7 +347,7 @@ extend<T: Copy> Option<T> {
     /// `Some(*r)` for `Some(r)` (`Option::copied(o)`).
     pub const fn copied(o: Option<&T>) Option<T> {
         return switch o {
-            Some(r) => Option::<T>::Some(*r),
+            Some(r) => Some(*r),
             None => Option::<T>::None,
         };
     }
@@ -357,7 +357,7 @@ extend<T: Clone> Option<T> {
     /// `Some(r.clone())` for `Some(r)` (`Option::cloned(o)`).
     pub const fn cloned(o: Option<&T>) Option<T> {
         return switch o {
-            Some(r) => Option::<T>::Some(r.clone()),
+            Some(r) => Some(r.clone()),
             None => Option::<T>::None,
         };
     }
@@ -377,7 +377,7 @@ extend<T: Free> Option<T> as Free {
         switch self {
             Some(v) => v.free(),
             None => {},
-        };
+        }
     }
 }
 
@@ -386,7 +386,7 @@ extend<T: Free> Option<T> as Free {
 extend<T: Clone> Option<T> as Clone {
     pub const fn clone(self: &Option<T>) Option<T> {
         return switch self {
-            Some(v) => Option::<T>::Some(v.clone()),
+            Some(v) => Some(v.clone()),
             None => Option::<T>::None,
         };
     }
@@ -429,7 +429,7 @@ extend<T: Hash> Option<T> as Hash {
                 v.hash_into(h);
             },
             None => h.write_u8(0),
-        };
+        }
     }
 }
 
@@ -457,11 +457,11 @@ extend<T> OptionIter<T> as Iterator<&T> {
 
     pub const fn size_hint(self: &OptionIter<T>) (usize, Option<usize>) {
         let n: usize = if self.item.is_some() {
-            1;
+            1
         } else {
-            0;
+            0
         };
-        return n, Option::<usize>::Some(n);
+        return (n, Option::<usize>::Some(n));
     }
 }
 

@@ -259,7 +259,7 @@ fn fov_scale<T: Float>(fov: T, width: T, height: T) (T, T) {
     assert(fov.greater(T::zero()), "perspective_fov: fov must be greater than 0");
     let h = (T::from_f64(0.5) * fov).cos() / (T::from_f64(0.5) * fov).sin();
     let w = h * height / width;
-    return w, h;
+    return (w, h);
 }
 
 /// The right-handed perspective projection of field of view `fov` radians on a `width` x `height`
@@ -345,7 +345,7 @@ fn infinite_scale<T: Float>(fovy: T, aspect: T, z_near: T) (T, T) {
     let right = range * aspect;
     let bottom = -range;
     let top = range;
-    return T::from_i64(2) * z_near / (right - left), T::from_i64(2) * z_near / (top - bottom);
+    return (T::from_i64(2) * z_near / (right - left), T::from_i64(2) * z_near / (top - bottom));
 }
 
 /// The right-handed perspective projection with the far plane at infinity, depth -1..1.

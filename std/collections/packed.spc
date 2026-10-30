@@ -127,7 +127,7 @@ extend<E, A: Allocator> PackedEnums<E, A> {
         let n = (self.used - off).min(sizeof(E));
         unsafe memcpy((&mut v) as *mut E, self.ptr as *const u8 + off, n);
         let k = packed_size(&v);
-        return v, k;
+        return (v, k);
     }
 
     // Make room for `n` more bytes: at least double the block.
@@ -170,24 +170,24 @@ extend<E: Copy, A: Allocator> PackedEnums<E, A> {
 
 /// An iterator over the values of a `PackedEnums` of a `Copy` enum, in order; exact size.
 pub struct PackedIter<'a, E, A> {
-    pub(module) s: &'a PackedEnums<E, A>,
-    pub(module) off: usize, // the byte of the next value
-    pub(module) rem: usize, // the values left
+    s: &'a PackedEnums<E, A>,
+    off: usize, // the byte of the next value
+    rem: usize, // the values left
 }
 
 extend<'a, E: Copy, A: Allocator> PackedIter<'a, E, A> as Iterator<E> {
     pub fn next(self: &mut PackedIter<'a, E, A>) Option<E> {
         if self.rem == 0 {
-            return Option::<E>::None;
+            return None;
         }
         let (v, n) = unsafe self.s.read_at(self.off);
         self.off += n;
         self.rem -= 1;
-        return Option::<E>::Some(v);
+        return Some(v);
     }
 
     pub const fn size_hint(self: &PackedIter<'a, E, A>) (usize, Option<usize>) {
-        return self.rem, Option::<usize>::Some(self.rem);
+        return (self.rem, Option::<usize>::Some(self.rem));
     }
 }
 

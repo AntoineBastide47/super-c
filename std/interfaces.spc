@@ -309,9 +309,9 @@ extend Global as Allocator {
     @always_inline
     pub unsafe const fn alloc(self: &mut Global, size: usize, align: usize) *mut void {
         let p = if align > MALLOC_ALIGN {
-            unsafe sc_lk_aligned_alloc(size, align);
+            unsafe sc_lk_aligned_alloc(size, align)
         } else {
-            unsafe malloc(size);
+            unsafe malloc(size)
         };
         if p == null {
             unsafe abort();
@@ -325,9 +325,9 @@ extend Global as Allocator {
             let p = unsafe self.alloc(new_size, align);
             if ptr != null {
                 let n = if old_size < new_size {
-                    old_size;
+                    old_size
                 } else {
-                    new_size;
+                    new_size
                 };
                 unsafe memcpy(p, ptr, n);
                 unsafe sc_lk_aligned_free(ptr);
@@ -387,7 +387,7 @@ pub interface Iterator<T> {
     /// unknown). Equal bounds are an exact size. A wrong hint is a defect of the iterator, never a
     /// memory error: consumers use it only to reserve.
     fn size_hint(self: &Self) (usize, Option<usize>) {
-        return 0, Option::<usize>::None;
+        return (0, Option::<usize>::None);
     }
 }
 

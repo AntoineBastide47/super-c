@@ -156,17 +156,17 @@ pub fn expm1<T: Lane, const N: usize>(x: Simd<T, N>) Simd<T, N> {
         // x + x^2/2 + x^3 P(x), x^2/2 exact as a double word and added to x exactly.
         let (qh, ql) = two_prod(x, x);
         let (a, b) = fast_two_sum(x, qh * T::c(0.5));
-        a + (b + (ql * T::c(0.5) + x * qh * T::poly::<{Poly::ExpP}>(x)));
+        a + (b + (ql * T::c(0.5) + x * qh * T::poly::<{Poly::ExpP}>(x)))
     } else {
-        x;
+        x
     };
     let b = if (!small).any() {
         let (h, l, k) = T::expk(x, sp(0.0));
         // Past 2^(p + 1) the 1 is below a quarter ULP: e^x itself (2^k h alone could overflow there).
         let (s, e) = two_sum(scale(h, k), sp(-1.0));
-        choose(k.greater_than(Simd::<T, N>::splat(kc.sub_bits) + T::c(1.0)), scale(h + l, k), s + (e + scale(l, k)));
+        choose(k.greater_than(Simd::<T, N>::splat(kc.sub_bits) + T::c(1.0)), scale(h + l, k), s + (e + scale(l, k)))
     } else {
-        x;
+        x
     };
     return choose(x.equal(sp(0.0)), x, exp_range(x, kc.exp_max, kc.expm1_min, -1.0, choose(small, t, b)));
 }
@@ -254,9 +254,9 @@ pub fn hypot<T: Lane, const N: usize>(x: Simd<T, N>, y: Simd<T, N>) Simd<T, N> {
     let lo = x.abs().min_num(y.abs());
     let (e, far) = hypot_e(hi);
     let r = if far {
-        scale(hypot_dw(scale(hi, -e), scale(lo, -e)), e);
+        scale(hypot_dw(scale(hi, -e), scale(lo, -e)), e)
     } else {
-        hypot_dw(hi, lo);
+        hypot_dw(hi, lo)
     };
     return hypot_finish(x, y, r);
 }
@@ -293,7 +293,7 @@ pub fn sincos<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let s = choose(q.greater_equal(sp(2.0)), -s1, s1);
     let c = choose(q.equal(sp(1.0)) | q.equal(sp(2.0)), -c1, c1);
     // A NaN or infinite x reduces to a NaN: so are both results.
-    return choose(x.equal(sp(0.0)), x, s), c;
+    return (choose(x.equal(sp(0.0)), x, s), c);
 }
 
 /// The tangent.
@@ -380,7 +380,7 @@ fn atan_dw<T: Lane, const N: usize>(n: Simd<T, N>, d: Simd<T, N>) (Simd<T, N>, S
     let t = (z * qh).fma(T::poly::<{Poly::AtanP}>(z), ql);
     let m: Simd<T, N> = choose(far, sp(1.0), choose(mid, sp(0.5), sp(0.0))); // pi/2, pi/4 or 0
     let (h, l) = two_sum(m * kc.pio2_hi, qh);
-    return h, l + (m * kc.pio2_lo + t);
+    return (h, l + (m * kc.pio2_lo + t));
 }
 
 /// The angle of (x, y) from the positive x axis, in [-pi, pi] (Annex F signed zeros and infinities).
@@ -431,14 +431,14 @@ pub fn sinh<T: Lane, const N: usize>(x: Simd<T, N>) Simd<T, N> {
     // hyp_big; each only when a lane needs it.
     let s = if small.any() {
         let z = a * a;
-        (a * z).fma(T::poly::<{Poly::SinhP}>(z), a);
+        (a * z).fma(T::poly::<{Poly::SinhP}>(z), a)
     } else {
-        a;
+        a
     };
     let b = if (!small).any() {
-        hyp_sum(a, T::c(-1.0));
+        hyp_sum(a, T::c(-1.0))
     } else {
-        a;
+        a
     };
     let r = choose(small, s, b);
     return choose(
@@ -479,9 +479,9 @@ pub fn tanh<T: Lane, const N: usize>(x: Simd<T, N>) Simd<T, N> {
     // tanh_one. Each only when a lane needs it.
     let s = if small.any() {
         let z = a * a;
-        (a * z).fma(T::poly::<{Poly::TanhP}>(z), a);
+        (a * z).fma(T::poly::<{Poly::TanhP}>(z), a)
     } else {
-        a;
+        a
     };
     let b = if (!small).any() {
         let (h, l, k) = T::expk(choose(a.greater_than(Simd::splat(kc.tanh_one)), sp(0.0), a + a), sp(0.0));
@@ -490,9 +490,9 @@ pub fn tanh<T: Lane, const N: usize>(x: Simd<T, N>) Simd<T, N> {
         let (dh, dl) = fast_two_sum(dh0, d0 + l * p);
         let (qh, ql) = dw_div(sp(2.0), sp(0.0), dh, dl);
         let (oh, ol) = fast_two_sum(sp(1.0), -qh);
-        oh + (ol - ql);
+        oh + (ol - ql)
     } else {
-        a;
+        a
     };
     let r = choose(small, s, choose(a.greater_than(Simd::splat(kc.tanh_one)), sp(1.0), b));
     return choose(a.less_than(Simd::splat(kc.tiny)) | x.is_nan(), x, r.copysign(x));
@@ -550,16 +550,16 @@ pub fn erf<T: Lane, const N: usize>(x: Simd<T, N>) Simd<T, N> {
     let lo = a.less_than(sp(0.5)) | x.is_nan();
     let s = if lo.any() {
         let (sh, sl) = erf_small(x);
-        sh + sl;
+        sh + sl
     } else {
-        x;
+        x
     };
     let b = if (!lo).any() {
         let (h, l, k) = erfc_dw(a);
         let (oh, ol) = fast_two_sum(sp(1.0), -scale(h, k));
-        oh + (ol - scale(l, k));
+        oh + (ol - scale(l, k))
     } else {
-        x;
+        x
     };
     return choose(lo, s, b).copysign(x);
 }
@@ -571,17 +571,17 @@ pub fn erfc<T: Lane, const N: usize>(x: Simd<T, N>) Simd<T, N> {
     let s = if lo.any() {
         let (sh, sl) = erf_small(x);
         let (oh, ol) = fast_two_sum(sp(1.0), -sh);
-        oh + (ol - sl);
+        oh + (ol - sl)
     } else {
-        x;
+        x
     };
     // Below -1/2: 2 - erfc |x|.
     let b = if (!lo).any() {
         let (h, l, k) = erfc_dw(a);
         let (nh, nl) = fast_two_sum(sp(2.0), -scale(h, k));
-        choose(x.less_than(sp(0.0)), nh + (nl - scale(l, k)), scale(h + l, k));
+        choose(x.less_than(sp(0.0)), nh + (nl - scale(l, k)), scale(h + l, k))
     } else {
-        x;
+        x
     };
     return choose(lo, s, choose(x.is_nan(), x, b));
 }
@@ -650,7 +650,7 @@ extend<T: Lane, const N: usize> Simd<T, N> {
 
     pub fn sincos(self: Self) (Self, Self) {
         let (s, c) = sincos(self);
-        return s, c;
+        return (s, c);
     }
 
     pub fn asin(self: Self) Self {

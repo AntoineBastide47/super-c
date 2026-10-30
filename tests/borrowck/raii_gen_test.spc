@@ -143,14 +143,14 @@ fn sw(b: *mut char, at: i32, cap: i32, sh: *const char, p: i32, var: *const char
     unsafe stdio::snprintf(&mut nv.b[0], 64, "%s_%d".ptr() as *const char, var, p);
     let nvp = (&nv.b[0]) as *const char;
     let pfx = if mode == 2 && top != 0 {
-        "&".ptr() as *const char;
+        "&".ptr() as *const char
     } else {
-        "".ptr() as *const char;
+        "".ptr() as *const char
     };
     let dead = if mode == 0 {
-        "Tr { id: 0 }".ptr() as *const char;
+        "Tr { id: 0 }".ptr() as *const char
     } else {
-        "0".ptr() as *const char;
+        "0".ptr() as *const char
     };
     let mut hdr = Buf256 {};
     if c == 'O' {
@@ -188,9 +188,9 @@ fn frees_each_once(out: *const char, exp: &Vector<i32>) bool {
         let c = text.byte_at(i);
         if c >= b'0' && c <= b'9' {
             n = if n < 0 {
-                0;
+                0
             } else {
-                n * 10;
+                n * 10
             } + (c - b'0') as i32;
             if n > ID_CAP {
                 return false;

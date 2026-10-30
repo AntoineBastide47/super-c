@@ -388,11 +388,11 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
         // either acquires, loses to an acquirer, or reaches the queue, so the episode ends in acquisition,
         // in a park, or in a cancellation, never in waiting for its own sake.
         let budget = if losses >= MUTEX_LOSSES {
-            0;
+            0
         } else if (c & 2) != 0 {
-            MUTEX_SPIN_QUEUED;
+            MUTEX_SPIN_QUEUED
         } else {
-            MUTEX_SPIN;
+            MUTEX_SPIN
         };
         if spins < budget {
             spins = spins + 1;
@@ -529,9 +529,9 @@ fn raw_mutex_unlock_slow(m: *mut RawMutex) {
             // popped waiter's frame and task block, and those only under the bucket lock, because a
             // cancelled waiter may otherwise unlink and die at any moment.
             let next_word = if more {
-                2;
+                2
             } else {
-                0;
+                0
             };
             unsafe atomic::store_i32(&mut unsafe (*m).locked, next_word, 2);
             released = true;
@@ -618,9 +618,9 @@ extend<T> Mutex<T> {
     /// Try to acquire without waiting; `None` if it is already held.
     pub fn try_lock(self: &Mutex<T>) Option<MutexGuard<T>> {
         if unsafe raw_mutex_try_lock(self.raw.get()) {
-            return Option::<MutexGuard<T>>::Some(MutexGuard::<T>::hold(self));
+            return Some(MutexGuard::<T>::hold(self));
         }
-        return Option::<MutexGuard<T>>::None;
+        return None;
     }
     /// `lock`, but the wait is a cancellation point: `None` means the wait was cancelled; no guard
     /// exists, the lock is not held, and the cancellation is accepted. The cancellable form of `lock` for
@@ -631,9 +631,9 @@ extend<T> Mutex<T> {
     /// reaches the edge as a guard is freed there, so the lock is released.
     pub fn lock_c(self: &Mutex<T>) Option<MutexGuard<T>> {
         if !unsafe raw_mutex_lock_c(self.raw.get()) {
-            return Option::<MutexGuard<T>>::None;
+            return None;
         }
-        return Option::<MutexGuard<T>>::Some(MutexGuard::<T>::hold(self));
+        return Some(MutexGuard::<T>::hold(self));
     }
     /// Direct `&mut` access when the mutex is owned uniquely (`&mut self`): no locking needed.
     pub fn get_mut(self: &mut Mutex<T>) &mut T {
@@ -802,12 +802,12 @@ extend<T> RwLock<T> {
             if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
                 let _ = runtime::cancel_after_wait(true);
                 // Cancelled: reader count untouched.
-                return Option::<RwLockReadGuard<T>>::None;
+                return None;
             }
         }
         let s = g.get_mut();
         s.readers = s.readers + 1;
-        return Option::<RwLockReadGuard<T>>::Some(RwLockReadGuard::<T>::hold(self));
+        return Some(RwLockReadGuard::<T>::hold(self));
     }
     /// Wait for exclusive write access.
     pub fn write(self: &RwLock<T>) RwLockWriteGuard<T> {
@@ -859,13 +859,13 @@ extend<T> RwLock<T> {
                     self.cv.notify_all();
                 }
                 let _ = runtime::cancel_after_wait(true);
-                return Option::<RwLockWriteGuard<T>>::None;
+                return None;
             }
         }
         let s = g.get_mut();
         s.waiting_writers = s.waiting_writers - 1;
         s.writer = true;
-        return Option::<RwLockWriteGuard<T>>::Some(RwLockWriteGuard::<T>::hold(self));
+        return Some(RwLockWriteGuard::<T>::hold(self));
     }
     /// Take shared read access only if it is free right now; `None` if a writer holds or wants the lock.
     pub fn try_read(self: &RwLock<T>) Option<RwLockReadGuard<T>> {
@@ -876,11 +876,11 @@ extend<T> RwLock<T> {
             ready = !s.writer && s.waiting_writers == 0;
         }
         if !ready {
-            return Option::<RwLockReadGuard<T>>::None;
+            return None;
         }
         let s = g.get_mut();
         s.readers = s.readers + 1;
-        return Option::<RwLockReadGuard<T>>::Some(RwLockReadGuard::<T>::hold(self));
+        return Some(RwLockReadGuard::<T>::hold(self));
     }
     /// Take exclusive write access only if the lock is completely free; `None` otherwise.
     pub fn try_write(self: &RwLock<T>) Option<RwLockWriteGuard<T>> {
@@ -891,11 +891,11 @@ extend<T> RwLock<T> {
             ready = !s.writer && s.readers == 0;
         }
         if !ready {
-            return Option::<RwLockWriteGuard<T>>::None;
+            return None;
         }
         let s = g.get_mut();
         s.writer = true;
-        return Option::<RwLockWriteGuard<T>>::Some(RwLockWriteGuard::<T>::hold(self));
+        return Some(RwLockWriteGuard::<T>::hold(self));
     }
     /// Direct `&mut` when owned uniquely (`&mut self`): no locking.
     pub fn get_mut(self: &mut RwLock<T>) &mut T {

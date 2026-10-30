@@ -233,7 +233,7 @@ pub(package) const XOPS: [XOp; 49] = [
         C_ALL,
         U_NONE,
         "return $E(simd::shuffle(x, y, $X));",
-        "let l: [usize; $M] = $X; let mut r = [0 as $T; $M]; for i in 0..$Musize { r[i] = if l[i] < $Nusize { a[l[i]]; } else { b[l[i] - $Nusize]; }; } hr = $E(Simd::<$T, $M>::from_array(r));",
+        "let l: [usize; $M] = $X; let mut r = [0 as $T; $M]; for i in 0..$Musize { r[i] = if l[i] < $Nusize { a[l[i]] } else { b[l[i] - $Nusize] }; } hr = $E(Simd::<$T, $M>::from_array(r));",
     ),
     xop(
         "swizzle_or_zero",
@@ -275,42 +275,42 @@ pub(package) const XOPS: [XOp; 49] = [
         C_ALL,
         U_NONE,
         "return $E(simd::interleave_low(x, y));",
-        "let mut r = a; for i in 0..$Nusize { r[i] = if i % 2 == 0 { a[i / 2]; } else { b[i / 2]; }; } $V",
+        "let mut r = a; for i in 0..$Nusize { r[i] = if i % 2 == 0 { a[i / 2] } else { b[i / 2] }; } $V",
     ),
     xop(
         "interleave_high",
         C_ALL,
         U_NONE,
         "return $E(simd::interleave_high(x, y));",
-        "let mut r = a; for i in 0..$Nusize { r[i] = if i % 2 == 0 { a[$Nusize / 2 + i / 2]; } else { b[$Nusize / 2 + i / 2]; }; } $V",
+        "let mut r = a; for i in 0..$Nusize { r[i] = if i % 2 == 0 { a[$Nusize / 2 + i / 2] } else { b[$Nusize / 2 + i / 2] }; } $V",
     ),
     xop(
         "deinterleave_even",
         C_ALL,
         U_NONE,
         "return $E(simd::deinterleave_even(x, y));",
-        "let mut r = a; for i in 0..$Nusize { r[i] = if i < $Nusize / 2 { a[2 * i]; } else { b[2 * i - $Nusize]; }; } $V",
+        "let mut r = a; for i in 0..$Nusize { r[i] = if i < $Nusize / 2 { a[2 * i] } else { b[2 * i - $Nusize] }; } $V",
     ),
     xop(
         "deinterleave_odd",
         C_ALL,
         U_NONE,
         "return $E(simd::deinterleave_odd(x, y));",
-        "let mut r = a; for i in 0..$Nusize { r[i] = if i < $Nusize / 2 { a[2 * i + 1]; } else { b[2 * i + 1 - $Nusize]; }; } $V",
+        "let mut r = a; for i in 0..$Nusize { r[i] = if i < $Nusize / 2 { a[2 * i + 1] } else { b[2 * i + 1 - $Nusize] }; } $V",
     ),
     xop(
         "zip",
         C_ALL,
         U_NONE,
         "let (p, q) = simd::zip(x, y); return hmix($E(p), $E(q));",
-        "let mut r = a; let mut q = a; for i in 0..$Nusize { r[i] = if i % 2 == 0 { a[i / 2]; } else { b[i / 2]; }; q[i] = if i % 2 == 0 { a[$Nusize / 2 + i / 2]; } else { b[$Nusize / 2 + i / 2]; }; } hr = hmix($E(Simd::<$T, $N>::from_array(r)), $E(Simd::<$T, $N>::from_array(q)));",
+        "let mut r = a; let mut q = a; for i in 0..$Nusize { r[i] = if i % 2 == 0 { a[i / 2] } else { b[i / 2] }; q[i] = if i % 2 == 0 { a[$Nusize / 2 + i / 2] } else { b[$Nusize / 2 + i / 2] }; } hr = hmix($E(Simd::<$T, $N>::from_array(r)), $E(Simd::<$T, $N>::from_array(q)));",
     ),
     xop(
         "unzip",
         C_ALL,
         U_NONE,
         "let (p, q) = simd::unzip(x, y); return hmix($E(p), $E(q));",
-        "let mut r = a; let mut q = a; for i in 0..$Nusize { r[i] = if i < $Nusize / 2 { a[2 * i]; } else { b[2 * i - $Nusize]; }; q[i] = if i < $Nusize / 2 { a[2 * i + 1]; } else { b[2 * i + 1 - $Nusize]; }; } hr = hmix($E(Simd::<$T, $N>::from_array(r)), $E(Simd::<$T, $N>::from_array(q)));",
+        "let mut r = a; let mut q = a; for i in 0..$Nusize { r[i] = if i < $Nusize / 2 { a[2 * i] } else { b[2 * i - $Nusize] }; q[i] = if i < $Nusize / 2 { a[2 * i + 1] } else { b[2 * i + 1 - $Nusize] }; } hr = hmix($E(Simd::<$T, $N>::from_array(r)), $E(Simd::<$T, $N>::from_array(q)));",
     ),
     xop(
         "compress",
@@ -347,14 +347,14 @@ pub(package) const XOPS: [XOp; 49] = [
         C_SINT,
         U_NONE,
         "let o = simd::reduce_add_checked(x); return hmix(o.is_some() as u64, $H(Simd::<$T, 2>::splat(o.unwrap_or(0 as $T))));",
-        "let mut used = [false; $N]; let mut r = 0 as $T; let mut ok = true; for _k in 0..$Nusize { let neg = r >= 0; let mut j = $Nusize; for i in 0..$Nusize { if !used[i] && (j == $Nusize || (a[i] < 0) == neg && (a[j] < 0) != neg) { j = i; } } used[j] = true; let (v, o) = r.overflowing_add(a[j]); r = v; ok = ok && !o; } hr = hmix(ok as u64, $H(Simd::<$T, 2>::splat(if ok { r; } else { 0 as $T; })));",
+        "let mut used = [false; $N]; let mut r = 0 as $T; let mut ok = true; for _k in 0..$Nusize { let neg = r >= 0; let mut j = $Nusize; for i in 0..$Nusize { if !used[i] && (j == $Nusize || (a[i] < 0) == neg && (a[j] < 0) != neg) { j = i; } } used[j] = true; let (v, o) = r.overflowing_add(a[j]); r = v; ok = ok && !o; } hr = hmix(ok as u64, $H(Simd::<$T, 2>::splat(if ok { r } else { 0 as $T })));",
     ),
     xop(
         "reduce_add_checked_u",
         C_UINT,
         U_NONE,
         "let o = simd::reduce_add_checked(x); return hmix(o.is_some() as u64, $H(Simd::<$T, 2>::splat(o.unwrap_or(0 as $T))));",
-        "let mut r = 0 as $T; let mut ok = true; for i in 0..$Nusize { let (v, o) = r.overflowing_add(a[i]); r = v; ok = ok && !o; } hr = hmix(ok as u64, $H(Simd::<$T, 2>::splat(if ok { r; } else { 0 as $T; })));",
+        "let mut r = 0 as $T; let mut ok = true; for i in 0..$Nusize { let (v, o) = r.overflowing_add(a[i]); r = v; ok = ok && !o; } hr = hmix(ok as u64, $H(Simd::<$T, 2>::splat(if ok { r } else { 0 as $T })));",
     ),
     // The exact product fits when a lane is 0, or its magnitude (which only grows) fits the sign.
     xop(
@@ -362,14 +362,14 @@ pub(package) const XOPS: [XOp; 49] = [
         C_SINT,
         U_NONE,
         "let o = simd::reduce_mul_checked(x); return hmix(o.is_some() as u64, $H(Simd::<$T, 2>::splat(o.unwrap_or(0 as $T))));",
-        "let mut z = false; let mut over = false; let mut neg = false; let mut p: u64 = 1; let mut r = a[0]; for i in 0..$Nusize { let w = a[i] as i64; let g = if w < 0 { (w as u64).wrapping_neg(); } else { w as u64; }; z = z || g == 0; neg = neg != (w < 0); let (q, o) = p.overflowing_mul(g); p = q; over = over || o; if i != 0 { r = r.wrapping_mul(a[i]); } } let lim = 1u64 << ($Wu64 - 1); let ok = z || !over && (p < lim || neg && p == lim); hr = hmix(ok as u64, $H(Simd::<$T, 2>::splat(if ok { r; } else { 0 as $T; })));",
+        "let mut z = false; let mut over = false; let mut neg = false; let mut p: u64 = 1; let mut r = a[0]; for i in 0..$Nusize { let w = a[i] as i64; let g = if w < 0 { (w as u64).wrapping_neg() } else { w as u64 }; z = z || g == 0; neg = neg != (w < 0); let (q, o) = p.overflowing_mul(g); p = q; over = over || o; if i != 0 { r = r.wrapping_mul(a[i]); } } let lim = 1u64 << ($Wu64 - 1); let ok = z || !over && (p < lim || neg && p == lim); hr = hmix(ok as u64, $H(Simd::<$T, 2>::splat(if ok { r } else { 0 as $T })));",
     ),
     xop(
         "reduce_mul_checked_u",
         C_UINT,
         U_NONE,
         "let o = simd::reduce_mul_checked(x); return hmix(o.is_some() as u64, $H(Simd::<$T, 2>::splat(o.unwrap_or(0 as $T))));",
-        "let mut z = false; let mut over = false; let mut p: u64 = 1; let mut r = a[0]; for i in 0..$Nusize { let g = a[i] as u64; z = z || g == 0; let (q, o) = p.overflowing_mul(g); p = q; over = over || o; if i != 0 { r = r.wrapping_mul(a[i]); } } let ok = z || !over && p <= $T::MAX as u64; hr = hmix(ok as u64, $H(Simd::<$T, 2>::splat(if ok { r; } else { 0 as $T; })));",
+        "let mut z = false; let mut over = false; let mut p: u64 = 1; let mut r = a[0]; for i in 0..$Nusize { let g = a[i] as u64; z = z || g == 0; let (q, o) = p.overflowing_mul(g); p = q; over = over || o; if i != 0 { r = r.wrapping_mul(a[i]); } } let ok = z || !over && p <= $T::MAX as u64; hr = hmix(ok as u64, $H(Simd::<$T, 2>::splat(if ok { r } else { 0 as $T })));",
     ),
     xop(
         "reduce_add_ordered",
@@ -559,7 +559,7 @@ pub(package) const XOPS: [XOp; 49] = [
         C_ALL,
         U_NARROWER,
         "let p = x.cast::<$U>(); let q = y.cast::<$U>(); return $A(x.less_than(y).choose(p, q));",
-        "let mut r = [0 as $U; $N]; for i in 0..$Nusize { r[i] = if a[i] < b[i] { a[i] as $U; } else { b[i] as $U; }; } hr = $A(Simd::<$U, $N>::from_array(r));",
+        "let mut r = [0 as $U; $N]; for i in 0..$Nusize { r[i] = if a[i] < b[i] { a[i] as $U } else { b[i] as $U }; } hr = $A(Simd::<$U, $N>::from_array(r));",
     ),
     // `gather` without the check: a lane whose index is past the end is inactive.
     xop(
@@ -884,9 +884,9 @@ pub(package) fn draw_case(rng: &mut Rng, op: u8, t: u8, n: u64, u: i32, c: &mut 
     }
     let ops: []VOp = VOPS;
     let name = if op as u64 < 72 {
-        ops[op as usize].name;
+        ops[op as usize].name
     } else {
-        "";
+        ""
     };
     if op as u64 < 72 && ops[op as usize].tgt != U_NONE {
         let k = ops[op as usize].tgt;
@@ -914,18 +914,18 @@ pub(package) fn draw_case(rng: &mut Rng, op: u8, t: u8, n: u64, u: i32, c: &mut 
     if (name == "clamp" || name == "clamp_float") && !rng.one_in(6) {
         // Ordered bounds, so most cases clamp; random bounds (one case in six) mostly trap.
         let lo = if t == 8 {
-            "0xbfc00000";
+            "0xbfc00000"
         } else if t == 9 {
-            "0xbff8000000000000";
+            "0xbff8000000000000"
         } else {
-            ast::pick(is_signed(t), "-3", "1");
+            ast::pick(is_signed(t), "-3", "1")
         };
         let hi = if t == 8 {
-            "0x40200000";
+            "0x40200000"
         } else if t == 9 {
-            "0x4004000000000000";
+            "0x4004000000000000"
         } else {
-            "5";
+            "5"
         };
         for i in 0..n {
             c.b[i as usize] = String::from_str(lo);
@@ -955,9 +955,9 @@ fn draw_start(rng: &mut Rng, n: u64) String {
         // The target's largest: wasm32's in the vector conformance lane.
         s.push_str(
             if h::simd_lane() {
-                "4294967295";
+                "4294967295"
             } else {
-                "18446744073709551615";
+                "18446744073709551615"
             },
         );
     } else {
@@ -1104,7 +1104,7 @@ fn expand(tpl: str, cs: &VCase, a: str, b: str, c: str, i: str) String {
                 ).as_str(),
             ),
             _ => out.push_byte(p),
-        };
+        }
     }
     return out;
 }
@@ -1256,7 +1256,7 @@ pub(package) fn helpers() String {
         "fn rrot(x: u64, k: u64, w: u64, left: bool) u64 {\n    let n = k % w;\n    if n == 0 {\n        return x;\n    }\n",
     );
     s.push_str(
-        "    let m = if w == 64 {\n        0xFFFFFFFFFFFFFFFFu64;\n    } else {\n        (1u64 << w) - 1;\n    };\n",
+        "    let m = if w == 64 {\n        0xFFFFFFFFFFFFFFFFu64\n    } else {\n        (1u64 << w) - 1\n    };\n",
     );
     s.push_str("    let r = pick(left, x << n | x >> (w - n), x >> n | x << (w - n));\n    return r & m;\n}\n");
     s.push_str("fn rperm(x: u64, w: u64, step: u64) u64 {\n    let mut r: u64 = 0;\n    let mut j: u64 = 0;\n");
@@ -1332,11 +1332,11 @@ pub(package) fn case_vec(cs: &VCase, k: usize, out: &mut String) {
         );
     } else {
         let ht = if o.res == R_VEC {
-            t;
+            t
         } else if o.name == "abs_diff" {
-            4 + wi(t);
+            4 + wi(t)
         } else {
-            cs.u;
+            cs.u
         };
         out.format_into("    return {}({});\n}}\n", hash_fn(ht, o.exact).as_str(), e.as_str());
     }
@@ -1385,11 +1385,11 @@ pub(package) fn case_ref(cs: &VCase, k: usize, out: &mut String) {
             return;
         }
         let rn = if l == L_LOW || l == L_HIGH {
-            n / 2;
+            n / 2
         } else if l == L_CONCAT {
-            n * 2;
+            n * 2
         } else {
-            n;
+            n
         };
         out.format_into("    let mut r = [0 as {}; {}];\n    for i in 0..{}usize {{\n", tn, rn, rn);
         let forms: []str = ["a[i]", "a[i + $N / 2]", "pick(i < $N, a[i % $N], b[i % $N])", "i as $T"];
@@ -1410,11 +1410,11 @@ pub(package) fn case_ref(cs: &VCase, k: usize, out: &mut String) {
         return;
     }
     let rt = if o.res == R_VEC || o.res == R_PAIR {
-        tn;
+        tn
     } else if o.name == "abs_diff" {
-        lane_name(4 + wi(t));
+        lane_name(4 + wi(t))
     } else {
-        un;
+        un
     };
     if o.res == R_MASK {
         out.push_str("    let mut bits: u64 = 0;\n");
@@ -1456,11 +1456,11 @@ pub(package) fn case_ref(cs: &VCase, k: usize, out: &mut String) {
         );
     } else {
         let ht = if o.res == R_VEC {
-            t;
+            t
         } else if o.name == "abs_diff" {
-            4 + wi(t);
+            4 + wi(t)
         } else {
-            cs.u;
+            cs.u
         };
         out.format_into("    return {}(Simd::<{}, {}>::from_array(r));\n}}\n", hash_fn(ht, o.exact).as_str(), rt, n);
     }
@@ -1570,7 +1570,7 @@ pub(package) fn run_all(b: &h::DiffBuild, n: usize, mode: str, out: &mut Vector<
     while from < n {
         let mut args = String::new();
         args.format_into("{} {}", from, mode);
-        let r = h::diff_run(b, args.as_str());
+        let r = h::diff_run(b, &args);
         let mut last = from;
         for line in r.err.as_str().lines() {
             if line.starts_with("R ") {
@@ -1638,9 +1638,9 @@ pub(package) fn check_cases(cases: &Vector<VCase>) String {
             omit[k] = true;
             ctrap[k] = String::from_str(
                 if stack >= 0 {
-                    d.slice(0, stack as usize);
+                    d.slice(0, stack as usize)
                 } else {
-                    d;
+                    d
                 },
             );
         }
@@ -1654,9 +1654,9 @@ pub(package) fn check_cases(cases: &Vector<VCase>) String {
     run_all(&b, n, "r", &mut sout);
     for k in 0..n {
         let c = if omit[k] {
-            ctrap[k].clone();
+            ctrap[k].clone()
         } else {
-            value_of(&vout[k], "C ", true);
+            value_of(&vout[k], "C ", true)
         };
         let x = value_of(&vout[k], "V ", true);
         let xcore = value_of(&vout[k], "V ", false);

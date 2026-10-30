@@ -31,19 +31,19 @@ pub struct Dw {
 const fn two_sum(a: f64, b: f64) (f64, f64) {
     let s = a + b;
     let bb = s - a;
-    return s, a - (s - bb) + (b - bb);
+    return (s, a - (s - bb) + (b - bb));
 }
 
 // Exact sum for `|a| >= |b|` (Dekker).
 const fn fast_two_sum(a: f64, b: f64) (f64, f64) {
     let s = a + b;
-    return s, b - (s - a);
+    return (s, b - (s - a));
 }
 
 // Exact product: `p + e == a * b`.
 const fn two_prod(a: f64, b: f64) (f64, f64) {
     let p = a * b;
-    return p, a.mul_add(b, -p);
+    return (p, a.mul_add(b, -p));
 }
 
 extend Dw {
@@ -111,9 +111,9 @@ extend Dw as Real {
     pub fn near(self: &Dw) f64 {
         // hi + 0 would turn a -0 into +0.
         return if self.lo == 0.0 {
-            self.hi;
+            self.hi
         } else {
-            self.hi + self.lo;
+            self.hi + self.lo
         };
     }
 
@@ -134,11 +134,11 @@ extend Dw as Real {
         let mut j = k;
         for _ in 0..8 {
             let s: i64 = if j > 512 {
-                512;
+                512
             } else if j < -512 {
-                -512;
+                -512
             } else {
-                j;
+                j
             };
             let f = fl::f64_from_bits((1023 + s) as u64 << 52);
             v = Dw { hi: v.hi * f, lo: v.lo * f };

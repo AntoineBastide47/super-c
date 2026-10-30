@@ -14,19 +14,19 @@ fn s(text: str) String {
 }
 
 fn some(text: str) Option<String> {
-    return Option::<String>::Some(s(text));
+    return Some(s(text));
 }
 
 const fn none() Option<String> {
-    return Option::<String>::None;
+    return None;
 }
 
 fn ok(text: str) Result<String, String> {
-    return Result::<String, String>::Ok(s(text));
+    return Ok(s(text));
 }
 
 fn err(text: str) Result<String, String> {
-    return Result::<String, String>::Err(s(text));
+    return Err(s(text));
 }
 
 fn tape_of<T: Hash>(v: T) Vector<u8> {

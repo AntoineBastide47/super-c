@@ -353,7 +353,7 @@ fn many_loans_scale() {
         src.push_str(";\n");
     }
     src.push_str("return acc; }\n");
-    let p = typed_package(src.as_str());
+    let p = typed_package(&src);
     let o = analyze(&p, "main");
     assert(clean(&o), "dense loan set accepted");
 }
@@ -390,7 +390,7 @@ fn rows_agree(p: &loader::Package, name: str) (usize, bool) {
     dn.build_rows(&lw.body, &bfacts, &cfg, &lv, false);
     sp.assert_agrees(&mut dn);
     let dflt = bln::solve(&lw.body, &bfacts, &cfg, &lv);
-    return sp.errs.len(), dflt.sparse;
+    return (sp.errs.len(), dflt.sparse);
 }
 
 @test
@@ -412,7 +412,7 @@ fn sparse_rows_agree_with_dense() {
         src.push_str(format("let r{} = &a; if c {{ s += 1; }} a = a + 1; s = s + *r{};\n", k, k).as_str());
     }
     src.push_str("return s; }\n");
-    let q = typed_package(src.as_str());
+    let q = typed_package(&src);
     let (le, lsparse) = rows_agree(&q, "main");
     assert(lsparse, "the long body takes the sparse rows");
     assert(le == 400, "every write under a live borrow is rejected");
@@ -436,7 +436,7 @@ fn out_of_order_accesses_solve_in_point_order() {
     src.push_str(
         "fn main() i32 { let mut a = Vector::<D>::new(); let mut b = Vector::<D>::new(); f(&mut a, &mut b); g(&mut b); return 0; }\n",
     );
-    let p = typed_package(src.as_str());
+    let p = typed_package(&src);
     let node = find_fn(&p, "f");
     let u = (p.modules.len() - 1) as ModuleId;
     let mut lw = irl::Lowerer::new(&p, u, node);

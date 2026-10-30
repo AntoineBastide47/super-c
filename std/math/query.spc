@@ -64,11 +64,11 @@ pub fn is_identity<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>, e
         for j in 0..R {
             let x = unsafe m.c[i].e[j];
             let within = if i != j {
-                abs(x).less_equal(epsilon);
+                abs(x).less_equal(epsilon)
             } else if !T::is_float() && sizeof(T) <= 2 {
-                abs(x.cast::<i64>() - 1) <= epsilon.cast::<i64>();
+                abs(x.cast::<i64>() - 1) <= epsilon.cast::<i64>()
             } else {
-                abs(x - T::one()).less_equal(epsilon);
+                abs(x - T::one()).less_equal(epsilon)
             };
             if !within {
                 return false;
@@ -87,9 +87,9 @@ pub fn is_orthogonal<T: Float, const N: usize>(m: Mat<T, N, N>, epsilon: T) bool
 // The vec3 `are_collinear` crosses: x, y and z, with z = 0 for a vec2.
 fn xyz_of<T: Float, const N: usize>(v: Vec<T, N>) Vec<T, 3> {
     let z = if N == 2 {
-        T::zero();
+        T::zero()
     } else {
-        unsafe v.e[2];
+        unsafe v.e[2]
     };
     return Vec::<T, 3>::new(v.e[0], v.e[1], z);
 }

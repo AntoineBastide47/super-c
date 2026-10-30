@@ -17,12 +17,12 @@ pub const TABLE_V1: u32 = 1;
 
 /// `superc_session`: a session and the message of its last failed call.
 pub struct Handle {
-    pub(module) s: ses::Session,
-    pub(module) err: String,
+    s: ses::Session,
+    err: String,
 }
 
 // One item of a result: a location, a severity and code for a diagnostic, and a text.
-pub(module) struct ResItem {
+struct ResItem {
     pub file: String,
     pub start: u32,
     pub end: u32,
@@ -33,8 +33,8 @@ pub(module) struct ResItem {
 
 /// `superc_result`: a text and items.
 pub struct Res {
-    pub(module) text: String,
-    pub(module) items: Vector<ResItem>,
+    text: String,
+    items: Vector<ResItem>,
 }
 
 /// `superc_item`: what `superc_result_item` writes. The caller sets `size` to the size it was compiled with;
@@ -119,7 +119,7 @@ pub fn session_open_file(path: *const u8, path_len: usize, std_dir: *const u8, s
     return switch ses::Session::open_file(view(path, path_len), ses::Config::host(view(std_dir, std_len))) {
         Ok(s) => {
             unsafe *out = to_heap(Handle { s: s, err: String::new() });
-            0;
+            0
         },
         Err(e) => status(e.code),
     };
@@ -134,7 +134,7 @@ pub fn session_open_project(dir: *const u8, dir_len: usize, std_dir: *const u8, 
     return switch ses::Session::open_project(view(dir, dir_len), ses::Config::host(view(std_dir, std_len))) {
         Ok(s) => {
             unsafe *out = to_heap(Handle { s: s, err: String::new() });
-            0;
+            0
         },
         Err(e) => status(e.code),
     };
@@ -224,7 +224,7 @@ pub fn session_diagnostics(h: *mut Handle, gen: u64, out: *mut *mut Res) i32 {
         Err(e) => {
             return fail(h, e);
         },
-    };
+    }
     return give(out, String::new(), items);
 }
 
@@ -259,7 +259,7 @@ pub fn session_symbol_at(h: *mut Handle, gen: u64, file: *const u8, file_len: us
         Err(e) => {
             return fail(h, e);
         },
-    };
+    }
     return give(out, sig, items);
 }
 
@@ -282,7 +282,7 @@ pub fn session_references(h: *mut Handle, gen: u64, file: *const u8, file_len: u
         Err(e) => {
             return fail(h, e);
         },
-    };
+    }
     return give(out, String::new(), items);
 }
 
@@ -355,9 +355,9 @@ pub fn code_name(code: u32, ptr: *mut *const u8, len: *mut usize) {
         return;
     }
     let n = if code <= 0xFFFF {
-        dc::name(code as u16);
+        dc::name(code as u16)
     } else {
-        "";
+        ""
     };
     unsafe *ptr = n.ptr();
     unsafe *len = n.len();

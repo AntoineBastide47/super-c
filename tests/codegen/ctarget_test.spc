@@ -68,10 +68,10 @@ fn find_oracle() Oracle {
     for i in 0..cands.len() {
         let mut out = String::new();
         let cmd = format("{} {} -dM -E -x c /dev/null", cands[i].as_str(), ORACLE_FLAGS);
-        if run(cmd.as_str(), work.as_str(), &mut out) != 0 || !out.as_str().contains("#define __clang__ 1") {
+        if run(&cmd, &work, &mut out) != 0 || !out.as_str().contains("#define __clang__ 1") {
             continue;
         }
-        let pinned = out.as_str().contains(want.as_str());
+        let pinned = out.as_str().contains(&want);
         if o.clang.len() == 0 || pinned {
             o.clang = cands[i].clone();
             o.pinned = pinned;
@@ -81,10 +81,10 @@ fn find_oracle() Oracle {
         }
     }
     let mut ver = String::new();
-    if o.clang.len() != 0 && run(format("{} --version", o.clang.as_str()).as_str(), work.as_str(), &mut ver) == 0 {
+    if o.clang.len() != 0 && run(format("{} --version", o.clang.as_str()).as_str(), &work, &mut ver) == 0 {
         o.debian = ver.as_str().contains("Debian clang") || ver.as_str().contains("Ubuntu clang");
     }
-    let _ = fs::unlink(work.as_str());
+    let _ = fs::unlink(&work);
     return o;
 }
 
@@ -139,11 +139,11 @@ fn diff_defines(label: str, ours: str, theirs: str) usize {
     let mut n: usize = 0;
     while i < a.len() || j < b.len() {
         let c = if i == a.len() {
-            1;
+            1
         } else if j == b.len() {
-            -1;
+            -1
         } else {
-            a[i].cmp(&b[j]);
+            a[i].cmp(&b[j])
         };
         if c == 0 {
             i += 1;
@@ -208,7 +208,7 @@ fn fake_root(p: &cli::Proj, ri: usize) String {
 fn dirs_of(t: &ct::CTarget) String {
     let mut s = String::new();
     for i in 0..t.sys_dirs.len() {
-        s.push_str(t.sys_dirs[i].as_str());
+        s.push_str(&t.sys_dirs[i]);
         s.push_byte(b'\n');
     }
     return s;
@@ -220,7 +220,7 @@ fn table_of(target: i32, arch: i32, t: &mut ct::CTarget) {
     let ri = tgt::find(target, arch);
     assert(ri >= 0, "the pair has a row");
     let root = fake_root(&tmp, ri as usize);
-    assert(ct::c_target(target, arch, root.as_str(), t), row_at(ri as usize).triple);
+    assert(ct::c_target(target, arch, &root, t), row_at(ri as usize).triple);
 }
 
 @test
@@ -454,7 +454,7 @@ fn c_flags_equal_the_reference_compiler() {
             let mut t = ct::CTarget::new();
             t.predefs = base.predefs.clone();
             let flags = format("-std={} {}", stds[k], BUILD_FLAGS);
-            assert(ct::apply_c_flags(flags.as_str(), &mut t), stds[k]);
+            assert(ct::apply_c_flags(&flags, &mut t), stds[k]);
             let cmd = format(
                 "{} {} --target={}{} {} -dM -E -x c /dev/null",
                 o.clang.as_str(),
@@ -464,9 +464,9 @@ fn c_flags_equal_the_reference_compiler() {
                 flags.as_str(),
             );
             let mut theirs = String::new();
-            assert_eq(run(cmd.as_str(), work.as_str(), &mut theirs), 0);
+            assert_eq(run(&cmd, &work, &mut theirs), 0);
             let label = format("{} {}", rows[i].triple, stds[k]);
-            fails += diff_defines(label.as_str(), t.predefs.as_str(), theirs.as_str());
+            fails += diff_defines(&label, &t.predefs, &theirs);
         }
     }
     assert_eq(fails, 0usize);
@@ -506,8 +506,8 @@ fn predefined_macros_equal_the_reference_compiler() {
             rows[i].triple,
             rows[i].flags,
         );
-        assert_eq(run(cmd.as_str(), work.as_str(), &mut theirs), 0);
-        fails += diff_defines(rows[i].triple, t.predefs.as_str(), theirs.as_str());
+        assert_eq(run(&cmd, &work, &mut theirs), 0);
+        fails += diff_defines(rows[i].triple, &t.predefs, &theirs);
     }
     assert_eq(fails, 0usize);
 }
@@ -547,9 +547,9 @@ fn has_source(names: &Vector<String>) String {
         let n = names[i].as_str();
         let c = n.find_byte(b':') as usize;
         let op = if n.starts_with("target_") {
-            "__is_";
+            "__is_"
         } else {
-            "__has_";
+            "__has_"
         };
         src.format_into("#if {}{}({})\n@@\"{}\"\n#endif\n", op, n.slice(0, c), n.slice(c + 1, n.len()), n);
     }
@@ -615,8 +615,8 @@ fn has_answers_equal_the_reference_compiler() {
             src.as_str(),
         );
         let mut out = String::new();
-        assert_eq(run(cmd.as_str(), work.as_str(), &mut out), 0);
-        let truth = answers(out.as_str());
+        assert_eq(run(&cmd, &work, &mut out), 0);
+        let truth = answers(&out);
         let mut mine = ct::CTarget::new();
         table_of(target_at(i).os, target_at(i).isa, &mut mine);
         let mut have = Map::<String, bool>::new();
@@ -653,13 +653,13 @@ fn scan_has(dir: str, depth: usize, out: &mut Vector<String>) {
     for i in 0..names.len() {
         let n = names[i].as_str();
         let child = format("{}/{}", dir, n);
-        if dutil::is_dir(child.as_str()) {
+        if dutil::is_dir(&child) {
             if n != "c++" {
-                scan_has(child.as_str(), depth + 1, out);
+                scan_has(&child, depth + 1, out);
             }
         } else if n.ends_with(".h") {
-            if let Some(text) = loader::read_file(child.as_str()) {
-                scan_text(text.as_str(), out);
+            if let Some(text) = loader::read_file(&child) {
+                scan_text(&text, out);
             }
         }
     }
@@ -735,12 +735,12 @@ fn sysroot_discovery_finds_the_host_headers() {
     for i in 0..t.sys_dirs.len() {
         if t.sys_dirs[i].as_str() != ct::BUILTIN_DIR {
             let d = t.sys_dirs[i].clone();
-            assert(dutil::is_dir(d.as_str()), d.as_str());
+            assert(dutil::is_dir(&d), d.as_str());
         }
     }
     for i in 0..t.frameworks.len() {
         let d = t.frameworks[i].clone();
-        assert(dutil::is_dir(d.as_str()), d.as_str());
+        assert(dutil::is_dir(&d), d.as_str());
     }
 }
 
@@ -756,11 +756,11 @@ fn host_headers_use_only_known_has_names() {
     let mut keys = Vector::<String>::new();
     for i in 0..t.sys_dirs.len() {
         if t.sys_dirs[i].as_str() != ct::BUILTIN_DIR {
-            scan_has(t.sys_dirs[i].as_str(), 0, &mut keys);
+            scan_has(&t.sys_dirs[i], 0, &mut keys);
         }
     }
     for i in 0..t.frameworks.len() {
-        scan_has(t.frameworks[i].as_str(), 0, &mut keys);
+        scan_has(&t.frameworks[i], 0, &mut keys);
     }
     keys.sort();
     keys.dedup();
@@ -769,14 +769,10 @@ fn host_headers_use_only_known_has_names() {
     let work = format("{}/out.txt", tmp.dir());
     let mut out = String::new();
     assert_eq(
-        run(
-            format("{} {} -E -P -x c {}/has.c", o.clang.as_str(), ORACLE_FLAGS, tmp.dir()).as_str(),
-            work.as_str(),
-            &mut out,
-        ),
+        run(format("{} {} -E -P -x c {}/has.c", o.clang.as_str(), ORACLE_FLAGS, tmp.dir()).as_str(), &work, &mut out),
         0,
     );
-    let truth = answers(out.as_str());
+    let truth = answers(&out);
     let mut mine = Map::<String, bool>::new();
     for i in 0..t.has.len() {
         mine.insert(String::from_str(t.has[i]), true);
@@ -846,21 +842,21 @@ fn builtin_headers_parse_as_c() {
                 src.format_into("#include <{}>\n", t.headers[i]);
             }
         }
-        p.mkfile(format("all{}.c", hosted as i32).as_str(), src.as_str());
+        p.mkfile(format("all{}.c", hosted as i32).as_str(), &src);
         let files = format(" {}/all{}.c", p.dir(), hosted as i32);
         let cmd = format(
             "{} {}{} -fsyntax-only -Wall -Werror -Wno-missing-sysroot{}",
             o.clang.as_str(),
             flags.as_str(),
             if hosted {
-                "";
+                ""
             } else {
-                " -ffreestanding";
+                " -ffreestanding"
             },
             files.as_str(),
         );
         let mut out = String::new();
-        let rc = run(cmd.as_str(), format("{}/parse.txt", p.dir()).as_str(), &mut out);
+        let rc = run(&cmd, format("{}/parse.txt", p.dir()).as_str(), &mut out);
         if rc != 0 {
             eprintln("{}", out.as_str());
         }
@@ -883,7 +879,7 @@ fn builtin_headers_parse_for_windows() {
     for i in 0..t.headers.len() {
         src.format_into("#include <{}>\n", t.headers[i]);
     }
-    p.mkfile("windows.c", src.as_str());
+    p.mkfile("windows.c", &src);
     let files = format(" {}/windows.c", p.dir());
     let cmd = format(
         "{} --no-default-config --target=x86_64-w64-mingw32 {} -fsyntax-only -Wno-missing-sysroot{}",
@@ -892,7 +888,7 @@ fn builtin_headers_parse_for_windows() {
         files.as_str(),
     );
     let mut out = String::new();
-    let rc = run(cmd.as_str(), format("{}/parse.txt", p.dir()).as_str(), &mut out);
+    let rc = run(&cmd, format("{}/parse.txt", p.dir()).as_str(), &mut out);
     if rc != 0 {
         eprintln("{}", out.as_str());
     }
@@ -915,9 +911,9 @@ fn stdarg_accepts_the_c23_va_start() {
     let flags = isystem_flags(&p, &t, false);
     let mut out = String::new();
     let c23 = format("{} {} -std=c23 -ffreestanding -fsyntax-only {}/va.c", o.clang.as_str(), flags.as_str(), p.dir());
-    assert_eq(run(c23.as_str(), format("{}/va.txt", p.dir()).as_str(), &mut out), 0);
+    assert_eq(run(&c23, format("{}/va.txt", p.dir()).as_str(), &mut out), 0);
     let c17 = format("{} {} -std=c17 -ffreestanding -fsyntax-only {}/va.c", o.clang.as_str(), flags.as_str(), p.dir());
-    assert(run(c17.as_str(), format("{}/va.txt", p.dir()).as_str(), &mut out) != 0, "C17 refuses it");
+    assert(run(&c17, format("{}/va.txt", p.dir()).as_str(), &mut out) != 0, "C17 refuses it");
 }
 
 // The values the headers give, printed one per line.
@@ -983,9 +979,9 @@ fn builtin_headers_give_the_compilers_values() {
     let work = format("{}/run.txt", p.dir());
     for hosted in [false, true] {
         let mode = if hosted {
-            "";
+            ""
         } else {
-            " -ffreestanding";
+            " -ffreestanding"
         };
         let cflags = format("{}{}", mode, sdk_flag(&t));
         let ours_flags = isystem_flags(&p, &t, hosted);
@@ -994,7 +990,7 @@ fn builtin_headers_give_the_compilers_values() {
         let mut out = String::new();
         let rc = run(
             format("{}{} -Wno-missing-sysroot -o {} {}", o.clang.as_str(), cflags.as_str(), sys.as_str(), prog.as_str()).as_str(),
-            work.as_str(),
+            &work,
             &mut out,
         );
         if rc != 0 {
@@ -1010,7 +1006,7 @@ fn builtin_headers_give_the_compilers_values() {
                 our.as_str(),
                 prog.as_str(),
             ).as_str(),
-            work.as_str(),
+            &work,
             &mut out,
         );
         if rc2 != 0 {
@@ -1019,8 +1015,8 @@ fn builtin_headers_give_the_compilers_values() {
         assert_eq(rc2, 0);
         let mut want = String::new();
         let mut got = String::new();
-        assert_eq(run(sys.as_str(), work.as_str(), &mut want), 0);
-        assert_eq(run(our.as_str(), work.as_str(), &mut got), 0);
+        assert_eq(run(&sys, &work, &mut want), 0);
+        assert_eq(run(&our, &work, &mut got), 0);
         assert(want.len() > 1000, "the program printed its table");
         let mut wi = want.as_str().lines();
         let mut gi = got.as_str().lines();

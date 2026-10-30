@@ -96,9 +96,9 @@ pub fn summarize(samples: &mut Vector<f64>) Summary {
         median: median_of(samples),
         p95: samples[(n * 95 + 99) / 100 - 1],
         p99: if n >= P99_MIN_SAMPLES {
-            samples[(n * 99 + 99) / 100 - 1];
+            samples[(n * 99 + 99) / 100 - 1]
         } else {
-            NO_P99;
+            NO_P99
         },
         mean: mean,
         sd: math::sqrt(var / n as f64),
@@ -359,13 +359,13 @@ extend Bencher {
             return;
         }
         if self.tallied && self.ok != self.work {
-            let mut what = String::from_str(self.name.as_str());
+            let mut what = String::from_str(&self.name);
             what.push_str(": validated ");
             what.push_i64(self.ok);
             what.push_str(" of ");
             what.push_i64(self.work);
             what.push_str(" work units");
-            fail(what.as_str());
+            fail(&what);
         }
         let sm = summarize(&mut self.samples);
         // One labeled row per measure under the name; every row states its units.
@@ -391,8 +391,8 @@ extend Bencher {
         }
         if self.units > 0 {
             let mut per = String::from_str("per ");
-            per.push_str(self.unit_name.as_str());
-            print_label(per.as_str());
+            per.push_str(&self.unit_name);
+            print_label(&per);
             unsafe stdio::printf("%.1f ns\n".ptr() as *const char, sm.median * 1000000000.0 / self.units as f64);
         }
 
@@ -437,9 +437,9 @@ extend Bencher {
             // Mean figures over the diagnostic rounds: a fraction of a call keeps its digits, so the
             // calls agree with the bytes they requested (one 64 B call in 3 rounds: 0.33 calls, 21 B).
             let cfmt = if (calls_pr as i64) as f64 == calls_pr {
-                "%.0f calls, ";
+                "%.0f calls, "
             } else {
-                "%.2f calls, ";
+                "%.2f calls, "
             };
             unsafe stdio::printf(cfmt.ptr() as *const char, calls_pr);
             print_bytes(bytes_pr);
@@ -495,14 +495,14 @@ extend Bencher {
         // The record.
         let mut js = String::with_capacity(1024);
         js.push_str("{\"v\":1,\"name\":");
-        json_str(&mut js, self.name.as_str());
+        json_str(&mut js, &self.name);
         json_identity(&mut js);
         js.push_str(",\"rounds\":");
         js.push_u64(n as u64);
         js.push_str(",\"warmup\":");
         js.push_i64(self.warmup);
         js.push_str(",\"unit\":");
-        json_str(&mut js, self.unit_name.as_str());
+        json_str(&mut js, &self.unit_name);
         js.push_str(",\"units\":");
         js.push_i64(self.units);
         js.push_str(",\"cold_ms\":");
@@ -511,9 +511,9 @@ extend Bencher {
         js.push_str(",\"ns_per_unit\":");
         js.push_f64_prec(
             if self.units > 0 {
-                sm.median * 1000000000.0 / self.units as f64;
+                sm.median * 1000000000.0 / self.units as f64
             } else {
-                UNAVAILABLE;
+                UNAVAILABLE
             },
             1,
         );
@@ -536,9 +536,9 @@ extend Bencher {
         js.push_str(",\"rss_peak_independent\":");
         js.push_str(
             if unsafe G_FRESH {
-                "true";
+                "true"
             } else {
-                "false";
+                "false"
             },
         );
         js.push_str(",\"rss_now_bytes\":");
@@ -554,9 +554,9 @@ extend Bencher {
         js.push_str(",\"ok\":");
         js.push_i64(self.ok);
         js.push_str(",\"note\":");
-        json_str(&mut js, self.extra.as_str());
+        json_str(&mut js, &self.extra);
         js.push_byte(b'}');
-        log_line(js.as_str());
+        log_line(&js);
     }
 }
 
@@ -655,7 +655,7 @@ pub fn json_identity(js: &mut String) {
         cpu[0] = 0 as char;
     }
     js.push_str(",\"cpu\":");
-    json_str(js, str::from_cbuf(cpu.as_slice()));
+    json_str(js, str::from_cbuf(&cpu));
     js.push_str(",\"ncpu\":");
     js.push_u64(platform::ncpu() as u64);
     js.push_str(",\"workers\":");
@@ -665,9 +665,9 @@ pub fn json_identity(js: &mut String) {
     js.push_str(",\"fresh_process\":");
     js.push_str(
         if unsafe G_FRESH {
-            "true";
+            "true"
         } else {
-            "false";
+            "false"
         },
     );
 }
@@ -684,7 +684,7 @@ pub fn log_line(line: str) {
     if f == null {
         let mut what = String::from_str("cannot append to SC_BENCH_LOG=");
         what.push_str(path);
-        fail(what.as_str());
+        fail(&what);
         return;
     }
     unsafe stdio::fwrite(line.ptr(), 1, line.len(), f);
@@ -792,9 +792,9 @@ pub fn begin(build_id: str<'static>, flags: str<'static>) {
         blocking::MAX_THREADS,
         cycles_scope_name().ptr() as *const char,
         if unsafe sys::sc_bs_alloc_supported() != 0 {
-            "counted in extra rounds".ptr() as *const char;
+            "counted in extra rounds".ptr() as *const char
         } else {
-            "unavailable on this platform".ptr() as *const char;
+            "unavailable on this platform".ptr() as *const char
         },
         unsafe G_BURN_NS,
     );
@@ -846,7 +846,7 @@ extend Run {
     /// only it), unless `--in-process` is given or the platform has no fork: the parent waits for the child
     /// here and gets false.
     pub fn wants(self: &mut Self, name: str) bool {
-        if !selected(name, self.filter.as_str()) {
+        if !selected(name, &self.filter) {
             return false;
         }
         self.ran = self.ran + 1;
@@ -878,7 +878,7 @@ extend Run {
                 what.push_str(" exited with code ");
                 what.push_i64(code);
             }
-            fail(what.as_str());
+            fail(&what);
         }
         return false;
     }
@@ -894,9 +894,9 @@ extend Run {
         }
         shutdown_pools();
         return if unsafe G_FAILED {
-            1;
+            1
         } else {
-            0;
+            0
         };
     }
 

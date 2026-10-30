@@ -221,7 +221,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
         }
     }
     for i in 0..o.libs.len() {
-        if !ars.add(nat::OBJ_WASM, o.libs[i].as_str(), &mut l.err) {
+        if !ars.add(nat::OBJ_WASM, &o.libs[i], &mut l.err) {
             return false;
         }
     }
@@ -240,7 +240,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     if !write_module(l, o, b, &mut m) {
         return false;
     }
-    if !lu::write(o.out.as_str(), m.as_slice(), 0o755) {
+    if !lu::write(&o.out, &m, 0o755) {
         l.err.format_into("cannot write '{}'", o.out.as_str());
         return false;
     }
@@ -335,7 +335,7 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
         let mut name: u32 = 0;
         if id == 0 {
             let n = String::from_str(rd_name(b, &mut q));
-            name = l.names.intern(n.as_str());
+            name = l.names.intern(&n);
             if n.as_str() == "linking" {
                 linking = q;
                 linking_end = p + len;
@@ -366,14 +366,14 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
                     let ty = lu::read_uleb(b, &mut q) as u32;
                     l.fimps.push(
                         IImp {
-                            module: l.names.intern(module.as_str()),
-                            field: l.names.intern(field.as_str()),
+                            module: l.names.intern(&module),
+                            field: l.names.intern(&field),
                             ty: l.ftypes[(f.type0 + ty) as usize],
                         },
                     );
                     f.nimp += 1;
                 } else if kind == 1 {
-                    l.timps.push(l.names.intern(field.as_str()));
+                    l.timps.push(l.names.intern(&field));
                     q += 1;
                     let fl = lu::read_uleb(b, &mut q);
                     let _ = lu::read_uleb(b, &mut q);
@@ -387,7 +387,7 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
                         let _ = lu::read_uleb(b, &mut q);
                     }
                 } else {
-                    l.gimps.push(l.names.intern(field.as_str()));
+                    l.gimps.push(l.names.intern(&field));
                     q += 2;
                 }
             }
@@ -777,17 +777,17 @@ fn collect(l: &mut L, b: []u8) {
                     let _ = sleb(b, &mut q);
                 }
                 let to = if ty == w::R_TYPE_INDEX_LEB {
-                    NONE;
+                    NONE
                 } else {
-                    item_of(l, f.sym0 + k);
+                    item_of(l, f.sym0 + k)
                 };
                 if to == NONE {
                     continue;
                 }
                 let from = if ts.id == 10 {
-                    func_at(l, src) as u32;
+                    func_at(l, src) as u32
                 } else {
-                    nf + seg_of(l, src) as u32;
+                    nf + seg_of(l, src) as u32
                 };
                 edges.push(from as u64 << 32 | to as u64);
             }
@@ -903,9 +903,9 @@ const fn seg_rank(n: str) u32 {
 // global base 1024, each segment on its alignment; the heap after both, on 16 bytes.
 fn layout_memory(l: &mut L, o: &Opts) {
     let stack = if o.stack != 0 {
-        o.stack as u32;
+        o.stack as u32
     } else {
-        65536u32;
+        65536u32
     };
     let mut at: u32 = 1024;
     if o.stack_first {
@@ -1019,9 +1019,9 @@ fn apply_rels(l: &mut L, f: IFile, b: []u8, sc: ISec, out: &mut Vector<u8>, mode
         let off = lu::read_uleb(b, &mut q) as usize;
         let k = lu::read_uleb(b, &mut q) as u32;
         let addend = if w::has_addend(ty) {
-            sleb(b, &mut q);
+            sleb(b, &mut q)
         } else {
-            0i64;
+            0i64
         };
         let src = tsec.at + off;
         let p = rel_pos(l, mode, base, tsec.at, src);
@@ -1036,9 +1036,9 @@ fn apply_rels(l: &mut L, f: IFile, b: []u8, sc: ISec, out: &mut Vector<u8>, mode
                 out,
                 p,
                 if dn == ".debug_ranges" || dn == ".debug_loc" {
-                    0xFFFFFFFEu32;
+                    0xFFFFFFFEu32
                 } else {
-                    0xFFFFFFFFu32;
+                    0xFFFFFFFFu32
                 },
             );
             continue;
@@ -1064,9 +1064,9 @@ fn apply_rels(l: &mut L, f: IFile, b: []u8, sc: ISec, out: &mut Vector<u8>, mode
                 return false;
             }
             let gx: u32 = if gn == "__tls_base" {
-                1;
+                1
             } else {
-                0;
+                0
             };
             if ty == w::R_GLOBAL_INDEX_LEB {
                 put_uleb5(out, p, gx);
@@ -1197,7 +1197,7 @@ fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
     }
     cb.push(w::END);
     w::uleb(&mut code, cb.len() as u64);
-    code.extend_from_slice(cb.as_slice());
+    code.extend_from_slice(&cb);
     // The memory image of the data.
     let mut mem = Vector::<u8>::new();
     mem.resize_default((l.data_end - l.data_lo) as usize);
@@ -1331,9 +1331,9 @@ fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
     w::uleb(
         &mut s,
         if tls {
-            2u64;
+            2u64
         } else {
-            1u64;
+            1u64
         },
     );
     s.push(w::I32);
@@ -1446,11 +1446,11 @@ fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
             cnt += 1;
         }
         w::uleb(&mut sub, cnt);
-        sub.extend_from_slice(body.as_slice());
+        sub.extend_from_slice(&body);
         let mut nsec = Vector::<u8>::new();
         nsec.push(1);
         w::uleb(&mut nsec, sub.len() as u64);
-        nsec.extend_from_slice(sub.as_slice());
+        nsec.extend_from_slice(&sub);
         custom(m, "name", &nsec);
         for d in 0..dnames.len() {
             custom(m, l.names.spell(dnames[d]), dbg.at(d));

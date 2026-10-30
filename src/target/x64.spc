@@ -194,9 +194,9 @@ extend Code {
         for _ in 0..nj + 1 {
             for k in 0..nj {
                 cut[k + 1] = cut[k] + if short[k] {
-                    save[k];
+                    save[k]
                 } else {
-                    0;
+                    0
                 };
             }
             let mut changed = false;
@@ -216,9 +216,9 @@ extend Code {
         }
         for k in 0..nj {
             cut[k + 1] = cut[k] + if short[k] {
-                save[k];
+                save[k]
             } else {
-                0;
+                0
             };
         }
         let mut nb = Vector::<u8>::with_capacity(self.b.len() - cut[nj] as usize);
@@ -229,18 +229,18 @@ extend Code {
             }
             let jcc = save[k] == 4;
             let cc = if jcc {
-                self.b[op[k] as usize + 1] as u32 & 15;
+                self.b[op[k] as usize + 1] as u32 & 15
             } else {
-                0;
+                0
             };
             let here = nb.len() as i64;
             let tgt = moved(&op, &cut, to[k]) as i64;
             if short[k] {
                 nb.push(
                     if jcc {
-                        (0x70 + cc) as u8;
+                        (0x70 + cc) as u8
                     } else {
-                        0xEB;
+                        0xEB
                     },
                 );
                 nb.push((tgt - (here + 2)) as u8);
@@ -316,14 +316,14 @@ extend Code {
     // REX for a memory form.
     fn rex_m(self: &mut Self, w: bool, reg: u8, m: Mem, byte: bool) {
         let x = if m.index != NOREG {
-            m.index as u32 >> 3 & 1;
+            m.index as u32 >> 3 & 1
         } else {
-            0u32;
+            0u32
         };
         let b = if m.base != RIP && m.base != NOREG {
-            m.base as u32 >> 3 & 1;
+            m.base as u32 >> 3 & 1
         } else {
-            0u32;
+            0u32
         };
         let r = w as u32 << 3 | (reg as u32 >> 3 & 1) << 2 | x << 1 | b;
         if r != 0 || byte && reg >= 4 && reg < 8 {
@@ -368,9 +368,9 @@ extend Code {
         if m.base == IN {
             // rsp with a SIB byte and a 32-bit displacement, which `rebase` adjusts.
             let idx = if m.index == NOREG {
-                4u32;
+                4u32
             } else {
-                m.index as u32 & 7;
+                m.index as u32 & 7
             };
             self.byte(2 << 6 | rg | 4);
             self.byte(m.scale as u32 << 6 | idx << 3 | 4);
@@ -382,20 +382,20 @@ extend Code {
         let d8 = m.disp % n8 == 0 && m.disp / n8 >= -128 && m.disp / n8 < 128;
         // rbp and r13 as a base take a displacement even when it is 0.
         let md: u32 = if m.disp == 0 && base != 5 {
-            0;
+            0
         } else if d8 {
-            1;
+            1
         } else {
-            2;
+            2
         };
         if m.index == NOREG && base != 4 {
             self.byte(md << 6 | rg | base);
         } else {
             // A SIB byte: an index, or rsp and r12 as a base (index 100: none).
             let idx = if m.index == NOREG {
-                4u32;
+                4u32
             } else {
-                m.index as u32 & 7;
+                m.index as u32 & 7
             };
             self.byte(md << 6 | rg | 4);
             self.byte(m.scale as u32 << 6 | idx << 3 | base);
@@ -467,9 +467,9 @@ extend Code {
             self.rm(
                 0,
                 if sx {
-                    0x0FBE;
+                    0x0FBE
                 } else {
-                    0x0FB6;
+                    0x0FB6
                 },
                 sx,
                 dst,
@@ -480,9 +480,9 @@ extend Code {
             self.rm(
                 0,
                 if sx {
-                    0x0FBF;
+                    0x0FBF
                 } else {
-                    0x0FB7;
+                    0x0FB7
                 },
                 sx,
                 dst,
@@ -502,9 +502,9 @@ extend Code {
         self.rm(
             0,
             if sz == 1 {
-                0x88u32;
+                0x88u32
             } else {
-                0x89u32;
+                0x89u32
             },
             sz == 8,
             src,
@@ -519,9 +519,9 @@ extend Code {
         self.rm(
             0,
             if sz == 1 {
-                0xC6u32;
+                0xC6u32
             } else {
-                0xC7u32;
+                0xC7u32
             },
             sz == 8,
             0,
@@ -554,13 +554,13 @@ extend Code {
             return;
         }
         let op = if from == 1 && sx {
-            0x0FBEu32;
+            0x0FBEu32
         } else if from == 1 {
-            0x0FB6u32;
+            0x0FB6u32
         } else if sx {
-            0x0FBFu32;
+            0x0FBFu32
         } else {
-            0x0FB7u32;
+            0x0FB7u32
         };
         self.rr(0, op, sx && to == 8, dst, src, from == 1);
     }
@@ -572,9 +572,9 @@ extend Code {
         self.osize(sz);
         self.rr_both(
             (op << 3) + if sz == 1 {
-                0u32;
+                0u32
             } else {
-                1u32;
+                1u32
             },
             sz,
             src,
@@ -596,9 +596,9 @@ extend Code {
         self.rm(
             0,
             (op << 3) + if sz == 1 {
-                2u32;
+                2u32
             } else {
-                3u32;
+                3u32
             },
             sz == 8,
             dst,
@@ -664,9 +664,9 @@ extend Code {
         self.rm(
             0,
             (op << 3) + if sz == 1 {
-                0u32;
+                0u32
             } else {
-                1u32;
+                1u32
             },
             sz == 8,
             src,
@@ -702,9 +702,9 @@ extend Code {
         self.osize(sz);
         self.rr_both(
             if sz == 1 {
-                0x84u32;
+                0x84u32
             } else {
-                0x85u32;
+                0x85u32
             },
             sz,
             b,
@@ -741,9 +741,9 @@ extend Code {
         self.rr(
             0,
             if sz == 1 {
-                0xF6u32;
+                0xF6u32
             } else {
-                0xF7u32;
+                0xF7u32
             },
             sz == 8,
             op as u8,
@@ -775,9 +775,9 @@ extend Code {
         self.rr(
             0,
             if sz == 1 {
-                0xD2u32;
+                0xD2u32
             } else {
-                0xD3u32;
+                0xD3u32
             },
             sz == 8,
             op as u8,
@@ -791,16 +791,16 @@ extend Code {
         self.osize(sz);
         // A shift by 1 has a form without the immediate.
         let one: u32 = if k == 1 {
-            0x10;
+            0x10
         } else {
-            0;
+            0
         };
         self.rr(
             0,
             if sz == 1 {
-                0xC0u32 + one;
+                0xC0u32 + one
             } else {
-                0xC1u32 + one;
+                0xC1u32 + one
             },
             sz == 8,
             op as u8,
@@ -817,9 +817,9 @@ extend Code {
         self.rr(
             0,
             if left {
-                0x0FA5u32;
+                0x0FA5u32
             } else {
-                0x0FADu32;
+                0x0FADu32
             },
             true,
             src,
@@ -851,9 +851,9 @@ extend Code {
         self.rr(
             0,
             if rev {
-                0x0FBDu32;
+                0x0FBDu32
             } else {
-                0x0FBCu32;
+                0x0FBCu32
             },
             sz == 8,
             dst,
@@ -881,9 +881,9 @@ extend Code {
         self.rm(
             0,
             if sz == 1 {
-                0x86u32;
+                0x86u32
             } else {
-                0x87u32;
+                0x87u32
             },
             sz == 8,
             r,
@@ -899,9 +899,9 @@ extend Code {
         self.rm(
             0,
             if sz == 1 {
-                0x0FC0u32;
+                0x0FC0u32
             } else {
-                0x0FC1u32;
+                0x0FC1u32
             },
             sz == 8,
             r,
@@ -917,9 +917,9 @@ extend Code {
         self.rm(
             0,
             if sz == 1 {
-                0x0FB0u32;
+                0x0FB0u32
             } else {
-                0x0FB1u32;
+                0x0FB1u32
             },
             sz == 8,
             r,
@@ -1112,9 +1112,9 @@ extend Code {
     pub(package) fn cvtsi2f(self: &mut Self, d: bool, sz: u32, dst: u8, src: u8) {
         self.rr(
             if d {
-                0xF2u32;
+                0xF2u32
             } else {
-                0xF3u32;
+                0xF3u32
             },
             0x0F2A,
             sz == 8,
@@ -1129,9 +1129,9 @@ extend Code {
     pub(package) fn cvtf2si(self: &mut Self, d: bool, sz: u32, dst: u8, src: u8) {
         self.rr(
             if d {
-                0xF2u32;
+                0xF2u32
             } else {
-                0xF3u32;
+                0xF3u32
             },
             0x0F2C,
             sz == 8,
@@ -1147,9 +1147,9 @@ extend Code {
         self.byte((~(dst as u32) >> 3 & 1) << 7 | 1u32 << 6 | (~(b as u32) >> 3 & 1) << 5 | 2);
         self.byte(
             if d {
-                0x80u32;
+                0x80u32
             } else {
-                0u32;
+                0u32
             } | (~(a as u32) & 15) << 3 | 1,
         );
         self.byte(0xB9);
@@ -1163,14 +1163,14 @@ extend Code {
         // Map 0F, prefix F3, L = 1: the two-byte form unless the index or the base needs its REX bit.
         let rb = (~(r as u32) >> 3 & 1) << 7;
         let xb = if m.index != NOREG {
-            (~(m.index as u32) >> 3 & 1) << 6;
+            (~(m.index as u32) >> 3 & 1) << 6
         } else {
-            1u32 << 6;
+            1u32 << 6
         };
         let bb = if m.base != RIP && m.base != NOREG {
-            (~(m.base as u32) >> 3 & 1) << 5;
+            (~(m.base as u32) >> 3 & 1) << 5
         } else {
-            1u32 << 5;
+            1u32 << 5
         };
         if (xb | bb) == 0x60 {
             self.byte(0xC5);
@@ -1182,9 +1182,9 @@ extend Code {
         }
         self.byte(
             if load {
-                0x6Fu32;
+                0x6Fu32
             } else {
-                0x7Fu32;
+                0x7Fu32
             },
         );
         self.modrm_m(r, m);
@@ -1195,14 +1195,14 @@ extend Code {
     pub(package) fn zmov(self: &mut Self, load: bool, r: u8, m: Mem) {
         let rr = (~(r as u32) >> 3 & 1) << 7;
         let xx = if m.index != NOREG {
-            (~(m.index as u32) >> 3 & 1) << 6;
+            (~(m.index as u32) >> 3 & 1) << 6
         } else {
-            1u32 << 6;
+            1u32 << 6
         };
         let bb = if m.base != RIP && m.base != NOREG {
-            (~(m.base as u32) >> 3 & 1) << 5;
+            (~(m.base as u32) >> 3 & 1) << 5
         } else {
-            1u32 << 5;
+            1u32 << 5
         };
         self.byte(0x62);
         // P0: R X B R' 0 0 m m (map 0F); R' set (inverted) for registers below 16.
@@ -1213,9 +1213,9 @@ extend Code {
         self.byte(2u32 << 5 | 1u32 << 3);
         self.byte(
             if load {
-                0x6Fu32;
+                0x6Fu32
             } else {
-                0x7Fu32;
+                0x7Fu32
             },
         );
         self.modrm_n(r, m, 64);
@@ -1225,13 +1225,13 @@ extend Code {
 // The VEX and EVEX `pp` field of legacy prefix `pfx` (0, 0x66, 0xF3 or 0xF2).
 const fn pp_of(pfx: u32) u32 {
     return if pfx == 0x66 {
-        1;
+        1
     } else if pfx == 0xF3 {
-        2;
+        2
     } else if pfx == 0xF2 {
-        3;
+        3
     } else {
-        0;
+        0
     };
 }
 

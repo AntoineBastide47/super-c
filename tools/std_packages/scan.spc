@@ -132,9 +132,9 @@ const fn raw_mt_end(src: str, i: usize, line: &mut u32) usize {
             depth -= 1;
             if depth == 0 {
                 return if at(src, j + 1) == b'"' {
-                    j + 2;
+                    j + 2
                 } else {
-                    0;
+                    0
                 };
             }
         } else if c == b'\n' {
@@ -158,9 +158,9 @@ const fn string_end(src: str, i: usize) usize {
             return 0;
         }
         j += if b == b'\\' {
-            2;
+            2
         } else {
-            1;
+            1
         };
     }
     return 0;
@@ -308,9 +308,9 @@ const fn is_word(src: str, toks: &Vector<Tok>, k: usize, w: str) bool {
 // `|` that holds `wasm` (`wasm32` for an arch), or `!` and another name. `*end` is set past its `)`.
 const fn keeps_wasm(src: str, toks: &Vector<Tok>, k: usize, arch: bool, end: &mut usize) bool {
     let want = if arch {
-        "wasm32";
+        "wasm32"
     } else {
-        "wasm";
+        "wasm"
     };
     let mut j = k + 1;
     let neg = is_punct(src, toks, j, "!");
@@ -412,9 +412,9 @@ fn read_items(src: str, toks: &Vector<Tok>, s: &mut Scan) {
             }
             if (data || is_word(src, toks, k, "fn")) && is_kind(toks, n, TOK_IDENT) {
                 let name = if pin.is_empty() {
-                    String::from_str(text(src, toks, n));
+                    String::from_str(text(src, toks, n))
                 } else {
-                    pin.clone();
+                    pin.clone()
                 };
                 s.externs.push(ExternFn { name: name, line: line, data: data, wasm: block_wasm && wasm });
                 pin.clear();

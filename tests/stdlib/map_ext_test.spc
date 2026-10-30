@@ -102,7 +102,7 @@ fn entry_api_inserts_once_and_modifies_in_place() {
             assert_eq(o.remove(), 3);
         },
         Vacant(_) => assert(false, "a is present"),
-    };
+    }
     assert(!m.contains_key(&ka));
     switch m.entry(String::from_str("z")) {
         Occupied(_) => assert(false, "z is absent"),
@@ -110,7 +110,7 @@ fn entry_api_inserts_once_and_modifies_in_place() {
             let back = v.into_key();
             assert(back.as_str() == "z");
         },
-    };
+    }
     assert(!m.contains_key(&kz));
     switch m.entry(String::from_str("b")) {
         Occupied(mut o) => {
@@ -120,7 +120,7 @@ fn entry_api_inserts_once_and_modifies_in_place() {
             assert_eq(val, 7);
         },
         Vacant(_) => assert(false, "b is present"),
-    };
+    }
     assert_eq(m.len(), 3);
     assert(k.as_str() == "c");
 }
@@ -150,14 +150,14 @@ fn iterators_visit_every_entry_once_from_either_end() {
                 n += 1;
             },
             None => {},
-        };
+        }
         switch b {
             Some((k, _)) => {
                 sum += *k;
                 n += 1;
             },
             None => {},
-        };
+        }
     }
     assert_eq(n, 50);
     assert_eq(sum, 49 * 50 / 2);

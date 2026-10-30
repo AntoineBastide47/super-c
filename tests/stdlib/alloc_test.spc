@@ -127,9 +127,9 @@ fn random_sequence<H: Allocator>(mut h: H, seed: u64) {
             let p = unsafe h.realloc(old.addr as *mut void, old.size, size, old.align);
             let b = Live { addr: p as usize, size: size, align: old.align, tag: tag };
             let kept = if size < old.size {
-                size;
+                size
             } else {
-                old.size;
+                old.size
             };
             let moved = Live { addr: b.addr, size: kept, align: old.align, tag: old.tag };
             assert(intact(&moved, kept), "realloc keeps the common prefix");

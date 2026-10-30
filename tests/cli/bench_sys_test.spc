@@ -68,7 +68,7 @@ fn concurrent_allocation_counts_are_exact() {
             _ => {
                 break;
             },
-        };
+        }
     }
     assert_eq(total, THREADS * EACH);
     // Exact, but for the leak tracker's own tables: under SC_LEAK_CHECK it allocates a few blocks of
@@ -144,7 +144,7 @@ fn cycles_cover_every_thread() {
             _ => {
                 break;
             },
-        };
+        }
     }
     let dc = (unsafe sys::sc_bs_cycles() - c0) as f64;
     let dp = (unsafe sys::sc_bs_cpu_ns() - p0) as f64;

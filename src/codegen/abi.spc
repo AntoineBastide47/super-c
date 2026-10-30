@@ -115,9 +115,9 @@ pub(package) fn intrinsic_layout(b: &Body, sig: u32, ptr: u32, gp: []u8, ret_gp:
             let t = pt as u8;
             let v = is_vec(t) || is_float(t);
             let r = if v {
-                nv as u8;
+                nv as u8
             } else {
-                gp[ng as usize];
+                gp[ng as usize]
             };
             out.parts.push(Part { reg: r, v: v, size: type_bytes(t, ptr) as u8, off: 0 });
             if v {
@@ -154,9 +154,9 @@ pub(package) fn intrinsic_layout(b: &Body, sig: u32, ptr: u32, gp: []u8, ret_gp:
         out.parts.push(
             Part {
                 reg: if v {
-                    0;
+                    0
                 } else {
-                    ret_gp;
+                    ret_gp
                 },
                 v: v,
                 size: type_bytes(t, ptr) as u8,

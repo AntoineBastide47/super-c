@@ -63,7 +63,7 @@ pub(package) fn run_script(
     p.bootstrap = bootstrap_tags;
     let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
     let cdir = ocache::object_cache_dir("");
-    if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, ce_steps, ce_mem, cdir.as_str()) {
+    if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, ce_steps, ce_mem, &cdir) {
         p.load_user(path, std_dir, target);
     }
     if stdlib::getenv("SC_CEMIT_STATS") != null {
@@ -102,7 +102,7 @@ pub(package) fn run_script(
         p.cir = &mut cirv;
         // One process builds a tree at a time, as in a manifest build.
         default_gen_root(&mut p);
-        let lk = bsys::tree_lock(loader::dirname_of(p.gen_root.as_str()));
+        let lk = bsys::tree_lock(loader::dirname_of(&p.gen_root));
         if lk.held() {
             p.lir_out = lir_out;
             rc = run_package(&mut p, topts, out_bin, target, lint, null);

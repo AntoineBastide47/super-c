@@ -77,7 +77,7 @@ pub(package) fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool,
         wasm_stack: 0,
         stack_first: false,
         gc: false,
-        exports: Option::<Set<String>>::None,
+        exports: None,
     };
     let r = parse(args, &mut c, why);
     if r != LINKED {
@@ -107,9 +107,9 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
         let a = args[i].as_str();
         i += 1;
         let next = if i < n {
-            args[i].as_str();
+            args[i].as_str()
         } else {
-            "";
+            ""
         };
         if !a.starts_with("-") && a.ends_with(".def") {
             if !read_exports(a, 2, c, why) {
@@ -249,7 +249,7 @@ fn read_exports(path: str, form: u8, c: &mut Cmd, why: &mut String) bool {
         why.format_into("export list '{}'", path);
         return false;
     }
-    c.exports = Option::<Set<String>>::Some(names);
+    c.exports = Some(names);
     return true;
 }
 
@@ -257,9 +257,9 @@ fn macho(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
     let mut o = lm::Opts {
         out: replace(&mut c.out, String::new()),
         kind: if c.shared {
-            lm::K_DYLIB;
+            lm::K_DYLIB
         } else {
-            lm::K_EXE;
+            lm::K_EXE
         },
         install: replace(&mut c.install, String::new()),
         objs: replace(&mut c.objs, Vector::<String>::new()),
@@ -308,9 +308,9 @@ fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
     let o = le::Opts {
         out: replace(&mut c.out, String::new()),
         kind: if c.shared {
-            le::K_SHARED;
+            le::K_SHARED
         } else {
-            le::K_EXE;
+            le::K_EXE
         },
         soname: soname,
         objs: replace(&mut c.objs, Vector::<String>::new()),
@@ -352,7 +352,7 @@ fn wasm(c: &mut Cmd, why: &mut String) i32 {
         let mut found = false;
         for d in 0..c.dirs.len() {
             let p = format("{}/lib{}.a", c.dirs[d].as_str(), c.libs[i].as_str());
-            if !found && fs::stat(p.as_str()).is_ok() {
+            if !found && fs::stat(&p).is_ok() {
                 libs.push(p);
                 found = true;
             }
@@ -380,7 +380,7 @@ fn wasm(c: &mut Cmd, why: &mut String) i32 {
 fn coff(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
     // After the `-L` directories, the mingw-w64 tree's (winpthreads' `libpthread.a`), as its driver
     // searches them.
-    let _ = ct::mingw_lib_dirs(os, isa, c.sysroot.as_str(), &mut c.dirs);
+    let _ = ct::mingw_lib_dirs(os, isa, &c.sysroot, &mut c.dirs);
     let o = pe::Opts {
         out: replace(&mut c.out, String::new()),
         shared: c.shared,

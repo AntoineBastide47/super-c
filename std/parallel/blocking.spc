@@ -915,7 +915,7 @@ fn call_ext<F: fn move() T + Send + 'static, T: Send>(f: F) T {
     }
     let _ = unsafe atomic::sub_usize(&mut unsafe G_EXT, 1, 4);
     let v = unsafe {
-        (*rp).value;
+        (*rp).value
     };
     return v;
 }
@@ -947,7 +947,7 @@ pub fn call<F: fn move() T + Send + 'static, T: Send>(f: F) T {
         panic("a non-cancellable blocking park has exactly one waker");
     }
     let v = unsafe {
-        (*rp).value;
+        (*rp).value
     };
     unsafe runtime::park_done(co);
     runtime::wait_clear();
@@ -1068,9 +1068,9 @@ fn cache_alloc(p: *mut Pool, bytes: usize) *mut void {
     let mut g = Global {};
     return unsafe g.alloc(
         if c < CLASSES {
-            CACHE_MIN << c;
+            CACHE_MIN << c
         } else {
-            bytes;
+            bytes
         },
         16,
     );
@@ -1145,7 +1145,7 @@ pub fn call_c<F: fn move() T + Send + 'static, T: Send>(f: F) Option<T> {
     let co = runtime::current();
     if co == null {
         // A plain thread has no task to cancel.
-        return Option::<T>::Some(call_ext::<F, T>(f));
+        return Some(call_ext::<F, T>(f));
     }
     runtime::wait_note(runtime::WK_BLOCKING, 0);
     let mut cancelled = false;
@@ -1154,9 +1154,9 @@ pub fn call_c<F: fn move() T + Send + 'static, T: Send>(f: F) Option<T> {
         runtime::wait_clear();
         if cancelled {
             let _ = runtime::cancel_after_wait(true);
-            return Option::<T>::None;
+            return None;
         }
-        return Option::<T>::Some(f());
+        return Some(f());
     }
     let bytes = sizeof(CCall<F, T>);
     let rp = cache_alloc(p, bytes) as *mut CCall<F, T>;
@@ -1176,15 +1176,15 @@ pub fn call_c<F: fn move() T + Send + 'static, T: Send>(f: F) Option<T> {
         crec_drop::<F, T>(rp);
         unsafe runtime::park_done(co);
         runtime::wait_clear();
-        return Option::<T>::None;
+        return None;
     }
     let v = unsafe {
-        (*rp).value;
+        (*rp).value
     };
     crec_drop::<F, T>(rp);
     unsafe runtime::park_done(co);
     runtime::wait_clear();
-    return Option::<T>::Some(v);
+    return Some(v);
 }
 
 // --- diagnostics and shutdown -------------------------------------------------------------------------.

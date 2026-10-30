@@ -123,7 +123,7 @@ const fn trim_slashes(path: str) str {
 
 fn push_dir(prefix: str, suffix: str, out: &mut Vector<String>) {
     let p = format("{}{}", prefix, suffix);
-    if is_dir(p.as_str()) {
+    if is_dir(&p) {
         out.push(p);
     }
 }
@@ -140,7 +140,7 @@ pub(package) fn apple_sdk(t: &tgt::Target, out: &mut String) bool {
     // `xcrun --sdk` honors $SDKROOT only for the system it runs on, so does this; "/" counts as unset.
     if tgt::os(t.os).sdk == tgt::SDK_NONE {
         let env = stdlib::get_env("SDKROOT").unwrap_or(String::new());
-        let root = trim_slashes(env.as_str());
+        let root = trim_slashes(&env);
         if root.len() != 0 && is_dir(root) {
             out.push_str(root);
             return true;
@@ -162,7 +162,7 @@ pub(package) fn apple_sdk(t: &tgt::Target, out: &mut String) bool {
         let xcode = format("{}/Platforms/{}.platform/Developer/SDKs/{}.sdk", d.as_str(), platform, platform);
         let tools = format("{}/SDKs/{}.sdk", d.as_str(), platform);
         for c in [xcode, tools] {
-            if is_dir(c.as_str()) {
+            if is_dir(&c) {
                 out.push_string(&c);
                 return true;
             }
@@ -193,7 +193,7 @@ fn elf_dirs(root: str, dir: str, out: &mut Vector<String>) {
     out.push(String::from_str(BUILTIN_DIR));
     push_dir(root, "/usr/local/include", out);
     let multiarch = format("/usr/include/{}", dir);
-    push_dir(root, multiarch.as_str(), out);
+    push_dir(root, &multiarch, out);
     push_dir(root, "/include", out);
     push_dir(root, "/usr/include", out);
 }
@@ -204,7 +204,7 @@ fn linux_dirs(t: &tgt::Target, row: &data::Row, sysroot: str, out: &mut CTarget)
         // on Linux, only through a multiarch directory that holds the target's headers.
         let multiarch = format("/usr/include/{}", row.dir);
         let native = unsafe shim::sc_host_platform() == t.os as i32 && unsafe shim::sc_host_arch() == t.isa as i32;
-        let ok = is_dir("/usr/include") && (native || is_dir(multiarch.as_str()));
+        let ok = is_dir("/usr/include") && (native || is_dir(&multiarch));
         if !ok {
             return no_sysroot(row, "pass the sysroot");
         }
@@ -221,7 +221,7 @@ fn android_dirs(row: &data::Row, sysroot: str, out: &mut CTarget) bool {
         }
         root.push_str("/sysroot");
     }
-    elf_dirs(root.as_str(), row.dir, &mut out.sys_dirs);
+    elf_dirs(&root, row.dir, &mut out.sys_dirs);
     return true;
 }
 
@@ -240,15 +240,15 @@ fn mingw_root(dir: str, out: &mut String) bool {
     }
     for i in 0..names.len() {
         let mut found = String::new();
-        if oc::which_path(names[i].as_str(), &mut found) == 0 {
+        if oc::which_path(&names[i], &mut found) == 0 {
             continue;
         }
-        let resolved = fs::realpath(found.as_str());
+        let resolved = fs::realpath(&found);
         if resolved.is_err() {
             continue;
         }
         let real = resolved.unwrap();
-        let bin = loader::dirname_of(real.as_str());
+        let bin = loader::dirname_of(&real);
         let root = loader::dirname_of(bin);
         if is_mingw_tree(root, dir) {
             out.push_str(root);
@@ -264,7 +264,7 @@ fn is_mingw_tree(root: str, dir: str) bool {
     let base = trim_slashes(root);
     for c in [format("{}/{}/include", base, dir), format("{}/include", base)] {
         let marker = format("{}/_mingw.h", c.as_str());
-        if file_mtime(marker.as_str()) != 0 {
+        if file_mtime(&marker) != 0 {
             return true;
         }
     }
@@ -282,12 +282,12 @@ pub(package) fn mingw_lib_dirs(target: i32, arch: i32, sysroot: str, out: &mut V
     let rows: []data::Row = data::ROWS;
     let row = &rows[to.unwrap().cenv as usize];
     let mut root = String::from_str(sysroot);
-    if sysroot.len() == 0 && !mingw_root(row.dir, &mut root) || !is_mingw_tree(root.as_str(), row.dir) {
+    if sysroot.len() == 0 && !mingw_root(row.dir, &mut root) || !is_mingw_tree(&root, row.dir) {
         return false;
     }
-    let base = trim_slashes(root.as_str());
+    let base = trim_slashes(&root);
     for d in [format("{}/{}/lib", base, row.dir), format("{}/lib", base)] {
-        if is_dir(d.as_str()) {
+        if is_dir(&d) {
             out.push(d);
         }
     }
@@ -299,17 +299,17 @@ fn windows_dirs(row: &data::Row, sysroot: str, out: &mut CTarget) bool {
     if sysroot.len() == 0 && !mingw_root(row.dir, &mut root) {
         return no_sysroot(row, "put a mingw-w64 toolchain in PATH or pass its root");
     }
-    if !is_mingw_tree(root.as_str(), row.dir) {
+    if !is_mingw_tree(&root, row.dir) {
         eprintln("super-c: '{}' holds no mingw-w64 headers for {}", root.as_str(), row.triple);
         return false;
     }
     // Clang searches the three directories a mingw-w64 tree may hold, in this order.
-    let base = trim_slashes(root.as_str());
+    let base = trim_slashes(&root);
     out.sys_dirs.push(String::from_str(BUILTIN_DIR));
     let triple_inc = format("/{}/include", row.dir);
     let triple_usr = format("/{}/usr/include", row.dir);
-    push_dir(base, triple_inc.as_str(), &mut out.sys_dirs);
-    push_dir(base, triple_usr.as_str(), &mut out.sys_dirs);
+    push_dir(base, &triple_inc, &mut out.sys_dirs);
+    push_dir(base, &triple_usr, &mut out.sys_dirs);
     push_dir(base, "/include", &mut out.sys_dirs);
     return true;
 }
@@ -321,8 +321,8 @@ fn wasm_dirs(row: &data::Row, sysroot: str, out: &mut CTarget) bool {
     }
     out.sys_dirs.push(String::from_str(BUILTIN_DIR));
     let multiarch = format("/include/{}", row.dir);
-    push_dir(root.as_str(), multiarch.as_str(), &mut out.sys_dirs);
-    push_dir(root.as_str(), "/include", &mut out.sys_dirs);
+    push_dir(&root, &multiarch, &mut out.sys_dirs);
+    push_dir(&root, "/include", &mut out.sys_dirs);
     return true;
 }
 
@@ -348,15 +348,15 @@ pub(package) fn c_target(target: i32, arch: i32, sysroot: str, out: &mut CTarget
     *out = CTarget::new();
     let sr = tgt::os(target).sysroot;
     let ok = if sr == tgt::SYSROOT_APPLE {
-        apple_dirs(t, row, sysroot, out);
+        apple_dirs(t, row, sysroot, out)
     } else if sr == tgt::SYSROOT_LINUX {
-        linux_dirs(t, row, sysroot, out);
+        linux_dirs(t, row, sysroot, out)
     } else if sr == tgt::SYSROOT_ANDROID {
-        android_dirs(row, sysroot, out);
+        android_dirs(row, sysroot, out)
     } else if sr == tgt::SYSROOT_MINGW {
-        windows_dirs(row, sysroot, out);
+        windows_dirs(row, sysroot, out)
     } else {
-        wasm_dirs(row, sysroot, out);
+        wasm_dirs(row, sysroot, out)
     };
     if !ok {
         return false;
@@ -421,17 +421,17 @@ fn apply_std(predefs: &mut String, std: str) bool {
     }
     // 0: no __STDC_VERSION__ (C89), else the value; C23 and later add the binary format and char8_t macros.
     let version = if name == "89" || name == "90" {
-        "";
+        ""
     } else if name == "99" {
-        "199901L";
+        "199901L"
     } else if name == "11" {
-        "201112L";
+        "201112L"
     } else if name == "17" || name == "18" {
-        "201710L";
+        "201710L"
     } else if name == "23" || name == "2x" {
-        "202311L";
+        "202311L"
     } else if name == "2y" {
-        "202400L";
+        "202400L"
     } else {
         return false;
     };

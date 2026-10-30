@@ -430,9 +430,9 @@ fn randomized_offsets_against_reference() {
             let hi = lo + rng.next_u32() as usize % (e - lo + 1);
             let sub = v.slice_dim(d, lo, hi);
             let base = if sub.is_empty() {
-                0;
+                0
             } else {
-                lo * unsafe strides[d];
+                lo * unsafe strides[d]
             };
             check_view(sub, base, strides);
             let f = v.fix(d, i);
@@ -447,9 +447,9 @@ fn randomized_offsets_against_reference() {
                 }
             }
             let fbase = if f.is_empty() {
-                0;
+                0
             } else {
-                i * unsafe strides[d];
+                i * unsafe strides[d]
             };
             check_view(f, fbase, fs);
         }
@@ -471,9 +471,9 @@ fn randomized_rank_4_iteration() {
         // Mix in dense layouts, which fuse into longer runs.
         if rng.next_u32() % 2 == 0 {
             strides = if rng.next_u32() % 2 == 0 {
-                row_strides(extents);
+                row_strides(extents)
             } else {
-                col_strides(extents);
+                col_strides(extents)
             };
         }
         let data = offsets(span_of(extents, strides));

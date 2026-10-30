@@ -154,18 +154,18 @@ extend Selector {
             let hit = self.ready_now();
             switch hit {
                 Ready(i) => {
-                    return Selected::Ready(i);
+                    return Ready(i);
                 },
                 TimedOut => {},
-            };
+            }
             if deadline != 0 && time::remaining_ns(deadline) == 0 {
-                return Selected::TimedOut;
+                return TimedOut;
             }
             let r = self.block(deadline);
             if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
                 // Cancelled: every arm was unregistered (in the stable lock order) before the acceptance
                 // inside `block`, so no queue holds a pointer into this frame. No arm is reported ready.
-                return Selected::TimedOut;
+                return TimedOut;
             }
         }
     }
@@ -181,7 +181,7 @@ extend Selector {
         let hint = self.woken;
         self.woken = -1;
         if hint >= 0 && hint < self.n as i32 && self.arm_ready(hint as usize) {
-            return Selected::Ready(hint as usize);
+            return Ready(hint as usize);
         }
         let mut ready: [usize; MAX_ARMS] = [0usize; MAX_ARMS];
         let mut c: usize = 0;
@@ -192,12 +192,12 @@ extend Selector {
             }
         }
         if c == 0 {
-            return Selected::TimedOut;
+            return TimedOut;
         }
         let pick = (self.next_rand() % c as u64) as usize;
-        return Selected::Ready(
+        return Ready(
             unsafe {
-                ready[pick];
+                ready[pick]
             },
         );
     }

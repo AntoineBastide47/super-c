@@ -226,11 +226,11 @@ const fn unsigned(s: str, i: &mut usize, out: &mut i64) bool {
     while j < s.len() {
         let c = lower(s.byte_at(j));
         let d: u64 = if c >= b'0' && c <= b'9' {
-            c - b'0';
+            c - b'0'
         } else if c >= b'a' && c <= b'f' {
-            c - b'a' + 10;
+            c - b'a' + 10
         } else {
-            99u64;
+            99u64
         };
         if d >= radix {
             break;
@@ -315,9 +315,9 @@ const fn reg_name(w: str, o: &mut Opd) bool {
                 o.cls = C::GP;
                 o.size = size;
                 o.r = if i >= 16 {
-                    t::AH + (i - 16) as u8;
+                    t::AH + (i - 16) as u8
                 } else {
-                    i as u8;
+                    i as u8
                 };
                 return true;
             }
@@ -331,13 +331,13 @@ const fn reg_name(w: str, o: &mut Opd) bool {
         return true;
     }
     let c = if w.starts_with("xmm") {
-        C::X;
+        C::X
     } else if w.starts_with("ymm") {
-        C::Y;
+        C::Y
     } else if w.starts_with("zmm") {
-        C::Z;
+        C::Z
     } else {
-        0u8;
+        0u8
     };
     if c == 0 || w.len() < 4 || w.len() > 5 {
         return false;
@@ -428,9 +428,9 @@ fn expr(s: str, i: &mut usize, o: &mut Opd, fx: &mut Fix, spec: &mut String) boo
                     return false;
                 }
                 v = if neg {
-                    v.wrapping_sub(n);
+                    v.wrapping_sub(n)
                 } else {
-                    v.wrapping_add(n);
+                    v.wrapping_add(n)
                 };
             }
         } else if first && !neg && c == b'.' && (j + 1 >= s.len() || !is_ident(s.byte_at(j + 1), false)) {
@@ -473,11 +473,11 @@ fn operand(s: str, i: &mut usize, o: &mut Opd, fx: &mut Fix, spec: &mut String) 
     }
     let save = *i;
     if percent_name(s, i, &mut nm) {
-        let sg = seg_of(nm.as_str());
+        let sg = seg_of(&nm);
         if sg != 0 && eat(s, i, b':') {
             o.seg = sg;
         } else {
-            return reg_name(nm.as_str(), o);
+            return reg_name(&nm, o);
         }
     } else {
         *i = save;
@@ -507,14 +507,14 @@ fn operand(s: str, i: &mut usize, o: &mut Opd, fx: &mut Fix, spec: &mut String) 
     if percent_name(s, &mut j, &mut nm) {
         if nm.eq_str("rip") {
             o.m.base = x::RIP;
-        } else if !reg_name(nm.as_str(), &mut r) || r.cls != C::GP || r.size != 8 {
+        } else if !reg_name(&nm, &mut r) || r.cls != C::GP || r.size != 8 {
             return false;
         } else {
             o.m.base = r.r;
         }
     }
     if eat(s, &mut j, b',') {
-        if !percent_name(s, &mut j, &mut nm) || !reg_name(nm.as_str(), &mut r) || o.m.base == x::RIP {
+        if !percent_name(s, &mut j, &mut nm) || !reg_name(&nm, &mut r) || o.m.base == x::RIP {
             return false;
         }
         // A general index, or a vector one (VSIB).
@@ -651,17 +651,17 @@ const fn sized(s: u8, sz: &mut u8) bool {
 fn reloc_kind(rel: bool, spec: str, rex: bool) u8 {
     if rel {
         return if spec.len() == 0 || spec == "plt" {
-            x::R_PLT32;
+            x::R_PLT32
         } else {
-            0xFFu8;
+            0xFFu8
         };
     }
     return switch spec {
         "" => x::R_PC32,
         "gotpcrel" => if rex {
-            x::R_REX_GOTPCRELX;
+            x::R_REX_GOTPCRELX
         } else {
-            x::R_GOTPCRELX;
+            x::R_GOTPCRELX
         },
         "tlsgd" => x::R_TLSGD,
         _ => 0xFFu8,
@@ -691,9 +691,9 @@ pub(package) fn assemble(text: str, tgt: i64, out: &mut Vector<u8>, fx: &mut Fix
             let pf = text.slice(
                 st,
                 if i < text.len() {
-                    i + 1;
+                    i + 1
                 } else {
-                    i;
+                    i
                 },
             );
             i += 1;
@@ -763,7 +763,7 @@ pub(package) fn assemble(text: str, tgt: i64, out: &mut Vector<u8>, fx: &mut Fix
         while eat(text, &mut i, b'{') {
             let mut d = String::new();
             let mut ko = Opd::new();
-            if percent_name(text, &mut i, &mut d) && reg_name(d.as_str(), &mut ko) && ko.cls == C::K && ko.r != 0 && kmask == 0 {
+            if percent_name(text, &mut i, &mut d) && reg_name(&d, &mut ko) && ko.cls == C::K && ko.r != 0 && kmask == 0 {
                 kmask = ko.r;
             } else if eat(text, &mut i, b'z') && !zero {
                 zero = true;
@@ -791,7 +791,7 @@ pub(package) fn assemble(text: str, tgt: i64, out: &mut Vector<u8>, fx: &mut Fix
         let r = rows[ri];
         let mut sfx: u8 = 0;
         let mut cc: u8 = 0;
-        if !spells(r, mn.as_str(), &mut sfx, &mut cc) {
+        if !spells(r, &mn, &mut sfx, &mut cc) {
             continue;
         }
         seen = true;
@@ -877,7 +877,7 @@ pub(package) fn assemble(text: str, tgt: i64, out: &mut Vector<u8>, fx: &mut Fix
         if nsym && !(rel && tgt != NOTGT) {
             // The symbol's field: a branch offset or a RIP displacement.
             let rex = n.sz == 8 && (r.fl & t::F_D64) == 0 || n.rexw || buf.len() > 0 && (buf[0] & 0xF0) == 0x40;
-            let kind = reloc_kind(rel, spec.as_str(), rex);
+            let kind = reloc_kind(rel, &spec, rex);
             if kind == 0xFF || e.field == t::NOFIELD || !rel && n.m.base != x::RIP {
                 err.format_into("a symbol where '{}' takes none", text);
                 return false;
@@ -888,9 +888,9 @@ pub(package) fn assemble(text: str, tgt: i64, out: &mut Vector<u8>, fx: &mut Fix
             fx.kind = kind;
             fx.at = e.field;
             let user = if rel {
-                ops[0].v;
+                ops[0].v
             } else {
-                n.m.disp as i64;
+                n.m.disp as i64
             };
             fx.addend = user + e.field as i64 - e.len as i64;
         }
@@ -915,9 +915,9 @@ const fn gp_name(i: usize, size: u8) str<'static> {
     let n64: []str<'static> = R64;
     if size == 1 {
         return if i < n8.len() {
-            n8[i];
+            n8[i]
         } else {
-            "";
+            ""
         };
     }
     if i >= 16 {
@@ -936,9 +936,9 @@ fn gp_text(o: &mut String, g: u8, size: u8) {
     o.push_str(
         gp_name(
             if g >= t::AH {
-                (g - t::AH + 16) as usize;
+                (g - t::AH + 16) as usize
             } else {
-                g as usize;
+                g as usize
             },
             size,
         ),
@@ -1051,9 +1051,9 @@ pub(package) fn print_ins(n: &t::Ins, o: &mut String) {
         let kd = t::kind_at(r.ops, k);
         o.push_str(
             if first {
-                " ";
+                " "
             } else {
-                ", ";
+                ", "
             },
         );
         first = false;
@@ -1066,9 +1066,9 @@ pub(package) fn print_ins(n: &t::Ins, o: &mut String) {
                 n.m,
                 n.seg,
                 if t::is_vsib(kd) {
-                    t::vec_size(kd);
+                    t::vec_size(kd)
                 } else {
-                    0u32;
+                    0u32
                 },
             );
             continue;
@@ -1092,16 +1092,16 @@ pub(package) fn print_ins(n: &t::Ins, o: &mut String) {
         } else if kd == t::K::REL8 || kd == t::K::REL32 {
             o.push_str(
                 if n.imm < 0 {
-                    ".-";
+                    ".-"
                 } else {
-                    ".+";
+                    ".+"
                 },
             );
             o.push_u64(
                 if n.imm < 0 {
-                    (n.imm as u64).wrapping_neg();
+                    (n.imm as u64).wrapping_neg()
                 } else {
-                    n.imm as u64;
+                    n.imm as u64
                 },
             );
         } else {

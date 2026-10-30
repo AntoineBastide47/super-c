@@ -70,9 +70,9 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, apple: bool, vregs: u32, 
                 nsaa = align_up(
                     nsaa,
                     if al > 8 {
-                        al;
+                        al
                     } else {
-                        8;
+                        8
                     },
                 );
                 loc.kind = L_STACK;
@@ -123,15 +123,15 @@ pub(package) fn va_place(b: &Body, t: u8, ptr: u32, vregs: u32) (bool, u32, u32,
     let mut parts = Vector::<Part>::new();
     place(b, t, ptr, false, vregs, &mut g, &mut s, &mut a, &mut loc, &mut parts);
     if loc.kind == L_REF_REG {
-        return false, 1, 8, true;
+        return (false, 1, 8, true);
     }
     let p = parts[0];
     let es: u32 = if p.v {
-        p.size;
+        p.size
     } else {
-        8;
+        8
     };
-    return p.v, loc.n, es, false;
+    return (p.v, loc.n, es, false);
 }
 
 // The fixed-parameter count of a signature's second word.
@@ -146,10 +146,10 @@ const fn ast_nfixed(fixed: u32, np: u32) u32 {
 fn size_align(b: &Body, pt: u32, ptr: u32) (u32, u32) {
     if (pt & AGG) != 0 {
         let l = (pt & ~AGG) as usize;
-        return b.pool[l], 1u32 << b.pool[l + 1];
+        return (b.pool[l], 1u32 << b.pool[l + 1]);
     }
     let t = pt as u8;
-    return type_bytes(t, ptr), type_align(t, ptr);
+    return (type_bytes(t, ptr), type_align(t, ptr));
 }
 
 // Place one fixed argument (or the result) of signature type `pt`.
@@ -196,20 +196,20 @@ fn place(
         *nsrn = 8;
         // On the stack at the element's alignment; Apple packs it, AAPCS64 rounds it to 8 bytes.
         let a = if apple {
-            al;
+            al
         } else if al > 8 {
-            al;
+            al
         } else {
-            8;
+            8
         };
         *nsaa = align_up(*nsaa, a);
         loc.kind = L_STACK;
         loc.off = *nsaa;
         loc.size = size;
         *nsaa += if apple {
-            size;
+            size
         } else {
-            align_up(size, 8);
+            align_up(size, 8)
         };
         return;
     }
@@ -238,18 +238,18 @@ fn place(
         loc.n = n as u8;
         for k in 0..n {
             let s = if size - 8 * k < 8 {
-                size - 8 * k;
+                size - 8 * k
             } else {
-                8;
+                8
             };
             parts.push(Part { reg: (*ngrn + k) as u8, v: false, size: s as u8, off: 8 * k });
         }
         *ngrn += n;
         if !agg && !is_vec(t) && size < 4 {
             loc.ext = if (pt & SIG_SEXT) != 0 {
-                2;
+                2
             } else {
-                1;
+                1
             };
         }
         return;
@@ -257,17 +257,17 @@ fn place(
     *ngrn = 8;
     // A scalar packs at its own size under Apple; an aggregate rounds up to 8 bytes.
     let a = if (agg || !apple) && al < 8 {
-        8;
+        8
     } else {
-        al;
+        al
     };
     *nsaa = align_up(*nsaa, a);
     loc.kind = L_STACK;
     loc.off = *nsaa;
     loc.size = size;
     *nsaa += if agg || !apple {
-        align_up(size, 8);
+        align_up(size, 8)
     } else {
-        size;
+        size
     };
 }

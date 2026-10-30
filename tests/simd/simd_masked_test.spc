@@ -96,7 +96,7 @@ fn inactive_lanes_never_touch_a_guard_page() {
 }
 )",
     );
-    h::expect_run("guard page", src.as_str(), "", "");
+    h::expect_run("guard page", &src, "", "");
 }
 
 // A store whose active lanes include one out of bounds traps before any write: the SIGABRT handler
@@ -290,7 +290,7 @@ fn masked_stores_borrow_their_slice() {
     for c in calls {
         let mut src = String::from_str(pre);
         src.format_into("{}\n    return *r;\n}}\n", c);
-        h::expect_err_msg(c, src.as_str(), "borrow");
+        h::expect_err_msg(c, &src, "borrow");
     }
 }
 
@@ -316,9 +316,9 @@ static mut A: [i32; 8] = [0; 8];
 fn half(hi: bool) {
     let s = unsafe SliceMut::<i32> { ptr: &mut A[0], len: 8 };
     let m = Mask::<8>::from_bits_truncate(if hi {
-        0xF0u64;
+        0xF0u64
     } else {
-        0x0Fu64;
+        0x0Fu64
     });
     for r in 0..200 {
         let v = Simd::<i32, 8>::splat(r);
@@ -346,9 +346,9 @@ static mut A: [i32; 8] = [0; 8];
 fn half(hi: bool) {
     let s = unsafe SliceMut::<i32> { ptr: &mut A[0], len: 8 };
     let m = Mask::<8>::from_bits_truncate(if hi {
-        0xF0u64;
+        0xF0u64
     } else {
-        0x0Fu64;
+        0x0Fu64
     });
     for r in 0..200 {
         let v = Simd::<i32, 8>::splat(r);

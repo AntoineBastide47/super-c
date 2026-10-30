@@ -81,9 +81,9 @@ pub(package) fn classify(b: &Body, sig: u32, vregs: u32, out: &mut WSig) {
     }
     let rt = b.pool[sig as usize + 2];
     out.ret = if rt == T_NONE as u32 {
-        Pass { kind: P_SKIP, ty: T_NONE, leaf: false, sext: false };
+        Pass { kind: P_SKIP, ty: T_NONE, leaf: false, sext: false }
     } else {
-        pass(b, rt, vregs, &mut out.unknown);
+        pass(b, rt, vregs, &mut out.unknown)
     };
     // A result that is not one wasm value returns through memory.
     if out.ret.kind == P_I128 || out.ret.kind == P_DIRECT && out.ret.leaf && out.ret.ty == T_I128 {
@@ -123,9 +123,9 @@ fn pass(b: &Body, pt: u32, vregs: u32, unknown: &mut bool) Pass {
         let t = b.pool[l + 4] as u8;
         if off == 0 && !is_vec(t) && type_bytes(t, 4) == size && 1u32 << al <= type_align(t, 4) {
             let k = if t == T_I128 {
-                P_I128;
+                P_I128
             } else {
-                P_DIRECT;
+                P_DIRECT
             };
             return Pass { kind: k, ty: t, leaf: true, sext: false };
         }
@@ -177,12 +177,12 @@ pub(package) fn va_slot(b: &Body, pt: u32, vregs: u32) (u32, u32) {
     if p.kind == P_DIRECT || p.kind == P_I128 {
         let n = type_bytes(p.ty, 4);
         let a = type_align(p.ty, 4);
-        return ast_max(n, 4), ast_max(a, 4);
+        return (ast_max(n, 4), ast_max(a, 4));
     }
     if p.kind == P_V128 {
-        return 16, 16;
+        return (16, 16);
     }
-    return 4, 4;
+    return (4, 4);
 }
 
 const fn ast_max(a: u32, b: u32) u32 {

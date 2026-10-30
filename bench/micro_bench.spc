@@ -91,9 +91,9 @@ pub fn spawn_to_completion(b: &mut bench::Bencher) {
         b.tally(
             SPAWNS,
             if retired {
-                SPAWNS;
+                SPAWNS
             } else {
-                0i64;
+                0i64
             },
         );
         if !retired {
@@ -139,7 +139,7 @@ pub fn spawn_latency(b: &mut bench::Bencher) {
     note.push_str(" ns (");
     note.push_u64(sm.n as u64);
     note.push_str(" spawns)");
-    b.note(note.as_str());
+    b.note(&note);
 }
 
 // --- park / unpark ----------------------------------------------------------------------------------.
@@ -178,7 +178,7 @@ pub fn park_unpark_roundtrip(b: &mut bench::Bencher) {
                     None => {
                         break;
                     },
-                };
+                }
             }
             w1.done();
         };
@@ -195,7 +195,7 @@ pub fn park_unpark_roundtrip(b: &mut bench::Bencher) {
                     None => {
                         break;
                     },
-                };
+                }
             }
             tx.close();
             c.get().store(got, atomics::MemoryOrder::Release);
@@ -242,7 +242,7 @@ fn lat_merge(sink: &LatSink, lat: &Vector<f64>) {
 fn lat_note(b: &mut bench::Bencher, sink: &LatSink, name: str) {
     let mut g = sink.get().lock();
     let t = bench::dist_text(name, "us", g.get_mut());
-    b.note_more(t.as_str());
+    b.note_more(&t);
 }
 
 /// A blocking-call ROUND TRIP: one task hands an empty closure to the blocking pool and parks until the
@@ -325,7 +325,7 @@ fn sched_note(b: &mut bench::Bencher, s0: &rt::SchedStats, units: i64, rounds: i
     note.push_str(" (");
     note.push_i64(rounds);
     note.push_str(" rounds)");
-    b.note_more(note.as_str());
+    b.note_more(&note);
 }
 
 // The coordination the primitives themselves did, per work unit: how often a wait actually blocked, how
@@ -352,7 +352,7 @@ fn sync_note(b: &mut bench::Bencher, s0: &sync::SyncStats, units: i64, rounds: i
     note.push_f64_prec((s1.notifies_idle - s0.notifies_idle) as f64 / per, 3);
     note.push_str(", contended locks ");
     note.push_f64_prec((s1.lock_slow - s0.lock_slow) as f64 / per, 3);
-    b.note_more(note.as_str());
+    b.note_more(&note);
 }
 
 // --- mutex ------------------------------------------------------------------------------------------.
@@ -384,9 +384,9 @@ pub fn mutex_uncontended(b: &mut bench::Bencher) {
         b.tally(
             OPS,
             if *g.get() == expect {
-                OPS;
+                OPS
             } else {
-                0i64;
+                0i64
             },
         );
     }
@@ -420,9 +420,9 @@ pub fn mutex_contended(b: &mut bench::Bencher) {
         b.tally(
             total,
             if *g.get() == total {
-                total;
+                total
             } else {
-                0i64;
+                0i64
             },
         );
     }
@@ -463,7 +463,7 @@ fn channel_lane(b: &mut bench::Bencher, cap: usize) {
                     None => {
                         break;
                     },
-                };
+                }
             }
             c.get().store(got, atomics::MemoryOrder::Release);
             w.done();
@@ -538,9 +538,9 @@ pub fn channel_batch64(b: &mut bench::Bencher) {
             // The last batch is short whenever MSGS is not a multiple of 64: the message COUNT has to match
             // `channel_cap64`'s exactly, or the two per-message figures are not comparable.
             let take = if MSGS - i < 64 {
-                MSGS - i;
+                MSGS - i
             } else {
-                64i64;
+                64i64
             };
             for j in 0..take {
                 out.push(i + j);
@@ -572,13 +572,13 @@ pub fn channel_construct(b: &mut bench::Bencher) {
             switch tx.try_send(1) {
                 Sent => {},
                 Rejected(_v) => {},
-            };
+            }
             switch rx.try_recv() {
                 Some(v) => {
                     ok = ok + v;
                 },
                 None => {},
-            };
+            }
         }
         b.tally(CHANNELS, ok);
     }
@@ -622,7 +622,7 @@ pub fn channel_mpmc(b: &mut bench::Bencher) {
                         None => {
                             break;
                         },
-                    };
+                    }
                 }
                 let _ = s.get().fetch_add(got, atomics::MemoryOrder::AcqRel);
                 w.done();
@@ -642,7 +642,7 @@ pub fn channel_mpmc(b: &mut bench::Bencher) {
                 _ => {
                     break;
                 },
-            };
+            }
         }
         wg.wait();
         b.tally(total, seen.get().load(atomics::MemoryOrder::Acquire));
@@ -685,7 +685,7 @@ pub fn channel_latency(b: &mut bench::Bencher) {
                     None => {
                         break;
                     },
-                };
+                }
             }
             lat_merge(&s, &lat);
             c.get().store(got, atomics::MemoryOrder::Release);
@@ -770,9 +770,9 @@ fn select_drain(arx: &chan::Receiver<i64>, crx: &chan::Receiver<i64>) i64 {
             Ready(i) => {
                 let from_a = a_open && i == ia;
                 let r = if from_a {
-                    arx.try_recv();
+                    arx.try_recv()
                 } else {
-                    crx.try_recv();
+                    crx.try_recv()
                 };
                 switch r {
                     Some(_v) => {
@@ -792,10 +792,10 @@ fn select_drain(arx: &chan::Receiver<i64>, crx: &chan::Receiver<i64>) i64 {
                             }
                         }
                     },
-                };
+                }
             },
             TimedOut => {},
-        };
+        }
     }
     let _ = ic;
     return got;
@@ -894,7 +894,7 @@ pub fn park_collisions(b: &mut bench::Bencher) {
             _ => {
                 break;
             },
-        };
+        }
     }
     if served != expected {
         bench::fail("park_collisions: a thread was not woken for every unpark");
@@ -904,7 +904,7 @@ pub fn park_collisions(b: &mut bench::Bencher) {
     note.push_str(" (");
     note.push_i64(PARK_THREADS);
     note.push_str(" threads parked at once)");
-    b.note(note.as_str());
+    b.note(&note);
 }
 
 // --- fan-in -----------------------------------------------------------------------------------------.
@@ -1019,7 +1019,7 @@ pub fn parallel_range_uneven(b: &mut bench::Bencher) {
     note.push_str(" ns/dispatch, dynamic ");
     note.push_f64_prec(sd.median * 1000000.0 / DISPATCHES as f64, 1);
     note.push_str(" ns/dispatch (medians)");
-    b.note(note.as_str());
+    b.note(&note);
 }
 
 // --- deep stacks ------------------------------------------------------------------------------------.
@@ -1059,9 +1059,9 @@ pub fn deep_stack(b: &mut bench::Bencher) {
         b.tally(
             DEEP_TASKS,
             if retired {
-                DEEP_TASKS;
+                DEEP_TASKS
             } else {
-                0i64;
+                0i64
             },
         );
         if !retired {

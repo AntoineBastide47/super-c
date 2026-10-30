@@ -198,7 +198,7 @@ fn leaf_ok(leaf: u32) bool {
 @arch(x86_64)
 fn cpuid(leaf: u32, sub: u32) (u32, u32, u32, u32) {
     if !leaf_ok(leaf) {
-        return 0, 0, 0, 0;
+        return (0, 0, 0, 0);
     }
     return cpuid_raw(leaf, sub);
 }
@@ -214,7 +214,7 @@ extern "C" {
 fn cpuid_raw(leaf: u32, sub: u32) (u32, u32, u32, u32) {
     let mut r: [u32; 4] = [0, 0, 0, 0];
     unsafe sc_sys_cpuid(&mut r[0], leaf, sub);
-    return r[0], r[1], r[2], r[3];
+    return (r[0], r[1], r[2], r[3]);
 }
 
 @platform(macos | ios)

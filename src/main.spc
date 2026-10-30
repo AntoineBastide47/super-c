@@ -29,6 +29,7 @@ import api::server as tsrv;
 import driver::taskctl as tctl;
 import driver::script as script;
 import ir::cpu_features as cf;
+import typechecker::render as rnd;
 
 // Parse the one-based K/N used by --test-shard. Both numbers must consume the full argument.
 fn parse_test_shard(s: *const char, topts: &mut TestOpts) bool {
@@ -95,9 +96,9 @@ fn exe_std_dir(argv0: *const char) String {
     }
     let exe = exe_path();
     let path = if exe.len() != 0 {
-        exe.as_str();
+        exe.as_str()
     } else {
-        unsafe str::from_cstr(argv0);
+        unsafe str::from_cstr(argv0)
     };
     // Last path separator, '/' or '\\' (Windows), whichever occurs later.
     let mut slash = path.len();
@@ -117,7 +118,7 @@ fn exe_std_dir(argv0: *const char) String {
         let mut probe = String::with_capacity(cut + 4);
         probe.push_str(unsafe str::from_raw(base.as_str().ptr(), cut));
         probe.push_str("/std");
-        if is_dir(probe.as_str()) {
+        if is_dir(&probe) {
             return probe;
         }
         let mut k = cut;
@@ -161,7 +162,7 @@ fn dir_entries(dir: str) Option<Vector<String>> {
     }
     let mut names = lo.unwrap();
     names.sort();
-    return Option::<Vector<String>>::Some(names);
+    return Some(names);
 }
 
 // `fmt`/`lint` with no path: every top-level entry of the project, minus the build output (it holds the
@@ -195,7 +196,7 @@ fn project_paths() Vector<String> {
         }
         probe.clear();
         probe.push_str(n);
-        if is_dir(probe.as_str()) || n.ends_with(".spc") {
+        if is_dir(&probe) || n.ends_with(".spc") {
             out.push(String::from_str(n));
         }
     }
@@ -219,9 +220,9 @@ fn lint_project(
     let mut lf = cpu_set;
     let mut lerr = String::new();
     let lm = if has_manifest(".") {
-        bman::load("build.toml", false);
+        bman::load("build.toml", false)
     } else {
-        Option::<bman::Manifest>::None;
+        Option::<bman::Manifest>::None
     };
     if !lm.is_none() {
         let mut man = lm.unwrap();
@@ -230,11 +231,11 @@ fn lint_project(
         if co.target_cpu.len() != 0 {
             man.target_cpu = co.target_cpu.clone();
         }
-        if !bsys::check_features(&man, co.target_features.as_str()) {
+        if !bsys::check_features(&man, &co.target_features) {
             return 1;
         }
-        lf = bsys::features_for(&man, bo.profile, co.target_features.as_str());
-    } else if !cf::apply(co.target_features.as_str(), co.target, co.arch, true, &mut lf, &mut lerr) {
+        lf = bsys::features_for(&man, bo.profile, &co.target_features);
+    } else if !cf::apply(&co.target_features, co.target, co.arch, true, &mut lf, &mut lerr) {
         eprintln("error: {}", lerr.as_str());
         return 1;
     }
@@ -298,7 +299,7 @@ fn lint_project(
             let f = files.at(k).as_str();
             let mut tool = false;
             for t in 0..tool_files.len() {
-                tool = tool || same_file(f, tool_files[t].as_str());
+                tool = tool || same_file(f, &tool_files[t]);
             }
             if tool {
                 tools.push(String::from_str(f));
@@ -384,7 +385,7 @@ fn lint_project(
     let home = canon_cwd();
     for k in 0..nested.len() {
         let nd = nested.at(k).clone();
-        if process::set_current_dir(nd.as_str()).is_err() {
+        if process::set_current_dir(&nd).is_err() {
             eprintln("lint: cannot enter '{}'", nd.as_str());
             rc = 1;
             continue;
@@ -394,18 +395,18 @@ fn lint_project(
             eprintln("lint: the findings above are in the project '{}'", nd.as_str());
             rc = 1;
         }
-        assert(process::set_current_dir(home.as_str()).is_ok(), "lint: cannot return to the working directory");
+        assert(process::set_current_dir(&home).is_ok(), "lint: cannot return to the working directory");
     }
     return rc;
 }
 
 // Format every .spc under `dir` (spc_collect order). Returns 1 if a directory could not be read, a
 // file failed, or (--check) a file needs formatting, else 0.
-fn fmt_dir(dir: str, write: bool, check: bool, migrate: bool) i32 {
+fn fmt_dir(dir: str, write: bool, check: bool) i32 {
     let mut files = Vector::<String>::new();
     let mut rc = spc_collect(dir, "fmt", &mut files);
     for i in 0..files.len() {
-        if fmt_one(files.at(i).as_str(), false, write, check, migrate) != 0 {
+        if fmt_one(files.at(i).as_str(), false, write, check) != 0 {
             rc = 1;
         }
     }
@@ -549,9 +550,9 @@ fn lint_pass(
         if mf.len() == 0 {
             continue;
         }
-        let out = apply_lint_fixes(p.modules[m].source.as_str(), &mut mf, &ftexts);
-        if write_source(p.modules[m].file.as_str(), out.as_str()) {
-            fmt_one(p.modules[m].file.as_str(), false, true, false, false);
+        let out = apply_lint_fixes(&p.modules[m].source, &mut mf, &ftexts);
+        if write_source(&p.modules[m].file, &out) {
+            fmt_one(&p.modules[m].file, false, true, false);
             written = true;
         } else {
             eprintln("lint: cannot write '{}'", p.modules[m].file.as_str());
@@ -569,6 +570,20 @@ fn lint_pass(
 }
 
 fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
+    if unsafe FMT_SIMPLIFY {
+        let mut one = Vector::<String>::new();
+        one.push(String::from_str(path));
+        return simplify_batch(
+            &one,
+            pick(root.len() != 0, root, loader::dirname_of(path)),
+            "",
+            std_dir,
+            ce_steps,
+            ce_mem,
+            target,
+            false,
+        );
+    }
     // A std/ffi file must keep its prelude identity (module path, builtin seeding, load order):
     // loading it as a root would invent errors. Load an empty root (the prelude comes along as
     // always) and if the requested file IS one of those modules, lint it in place.
@@ -582,7 +597,7 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
         let mut lint_mod = p.modules.len(); // the appended empty root; replaced below
         let mut found = false;
         for m in 0..p.modules.len() {
-            if p.modules[m].has_ast && same_file(path, p.modules[m].file.as_str()) {
+            if p.modules[m].has_ast && same_file(path, &p.modules[m].file) {
                 lint_mod = m;
                 found = true;
                 break;
@@ -590,9 +605,9 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
         }
         if !found {
             p = if root.len() != 0 {
-                loader::package_load_rooted(path, root, lint_alt(), std_dir, false, target);
+                loader::package_load_rooted(path, root, lint_alt(), std_dir, false, target)
             } else {
-                loader::package_load(path, std_dir, false, target);
+                loader::package_load(path, std_dir, false, target)
             };
             lint_mod = 0;
         }
@@ -621,7 +636,7 @@ fn spc_collect(dir: str, cmd: str, files: &mut Vector<String>) i32 {
 fn has_manifest(dir: str) bool {
     let mut man = String::from_str(dir);
     man.push_str("/build.toml");
-    return fs::stat(man.as_str()).map(|m: fs::Metadata| m.kind != fs::FileKind::Dir).unwrap_or(false);
+    return fs::stat(&man).map(|m: fs::Metadata| m.kind != fs::FileKind::Dir).unwrap_or(false);
 }
 
 // Whether `path` (project-relative, `./` allowed) is directory `dirs[k]` or lies under it, for some `k`.
@@ -656,10 +671,10 @@ fn spc_collect_in(dir: str, cmd: str, files: &mut Vector<String>, nested: *mut V
         let mut p = String::from_str(dir);
         p.push_byte(b'/');
         p.push_string(names.at(i));
-        if is_dir(p.as_str()) {
-            if nested != null && has_manifest(p.as_str()) {
+        if is_dir(&p) {
+            if nested != null && has_manifest(&p) {
                 unsafe (*nested).push(p);
-            } else if spc_collect_in(p.as_str(), cmd, files, nested) != 0 {
+            } else if spc_collect_in(&p, cmd, files, nested) != 0 {
                 rc = 1;
             }
         } else if names.at(i).as_str().ends_with(".spc") {
@@ -672,7 +687,8 @@ fn spc_collect_in(dir: str, cmd: str, files: &mut Vector<String>, nested: *mut V
 // One-package load for the batch: prelude first (so std/ffi files keep their prelude identity), then
 // each listed file joins the closure once, marked in lint_set.
 fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, target: i32, test_build: bool) loader::Package {
-    let mut p = loader::package_load_prelude_as(
+    return lint_load_over(
+        files,
         root,
         alt,
         std_dir,
@@ -681,6 +697,20 @@ fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, ta
         Vector::<String>::new(),
         Vector::<String>::new(),
     );
+}
+
+// `lint_load_batch` with the source overlays `overlay_files` and `overlay_texts` (`Package.overlay_files`).
+fn lint_load_over(
+    files: &Vector<String>,
+    root: str,
+    alt: str,
+    std_dir: str,
+    target: i32,
+    test_build: bool,
+    overlay_files: Vector<String>,
+    overlay_texts: Vector<String>,
+) loader::Package {
+    let mut p = loader::package_load_prelude_as(root, alt, std_dir, target, test_build, overlay_files, overlay_texts);
     let mut mids = Vector::<i32>::new();
     for k in 0..files.len() {
         let fc = files.at(k).as_str();
@@ -689,9 +719,9 @@ fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, ta
         // compare needs no syscall, so the file-identity check runs only on the rare collisions.
         let mut mid: i32 = -1;
         for m in 0..p.modules.len() {
-            if p.modules[m].has_ast && loader::basename_of(p.modules[m].file.as_str()) == base && same_file(
+            if p.modules[m].has_ast && loader::basename_of(&p.modules[m].file) == base && same_file(
                 fc,
-                p.modules[m].file.as_str(),
+                &p.modules[m].file,
             ) {
                 mid = m as i32;
                 break;
@@ -699,7 +729,7 @@ fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, ta
         }
         if mid < 0 {
             let mp = loader::batch_mod_path(files.at(k).as_str(), root, alt);
-            mid = p.load_module(mp.as_str(), files.at(k).as_str(), false, target);
+            mid = p.load_module(&mp, files.at(k).as_str(), false, target);
         }
         mids.push(mid);
     }
@@ -737,12 +767,15 @@ fn lint_batch(
     let cwd = canon_cwd();
     for k in 0..files.len() {
         let f = files.at(k).as_str();
-        let rel = if f.starts_with(cwd.as_str()) && f.len() > cwd.len() && f.byte_at(cwd.len()) == b'/' {
-            f.slice(cwd.len() + 1, f.len());
+        let rel = if f.starts_with(&cwd) && f.len() > cwd.len() && f.byte_at(cwd.len()) == b'/' {
+            f.slice(cwd.len() + 1, f.len())
         } else {
-            f;
+            f
         };
-        test_build = test_build || in_dir(rel, td.as_str());
+        test_build = test_build || in_dir(rel, &td);
+    }
+    if unsafe FMT_SIMPLIFY {
+        return simplify_batch(files, root, alt, std_dir, ce_steps, ce_mem, target, test_build);
     }
     let mut pass = 0;
     loop {
@@ -764,31 +797,520 @@ fn lint_batch(
     return lint_batch(files, root, alt, std_dir, ce_steps, ce_mem, target, false, sc, lint_pub);
 }
 
+/// `fmt -s` (`--simplify`): the lint batches remove the turbofish lists and `let` annotations their
+/// bodies do not need instead of linting (`simplify_batch`).
+static mut FMT_SIMPLIFY: bool = false;
+
+const fn simp_cand_cmp(a: &SimpCand, b: &SimpCand) i32 {
+    return pick(a.start < b.start, -1, pick(a.start > b.start, 1, 0));
+}
+
+// The end of the turbofish list `::<..>` at offset `at` of `src`, or 0 when none starts there.
+fn simp_targs_end(src: str, at: u32) u32 {
+    let mut i = at as usize;
+    if !src.slice(i, src.len()).starts_with("::<") {
+        return 0;
+    }
+    i += 3;
+    let mut depth: u32 = 1;
+    while i < src.len() {
+        let c = src.byte_at(i);
+        if c == b'<' {
+            depth += 1;
+        } else if c == b'>' {
+            depth -= 1;
+            if depth == 0 {
+                return (i + 1) as u32;
+            }
+        } else if c == b';' || c == b'{' || c == b'}' {
+            return 0;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// The offset of the `=` that ends the annotation starting at `at` of `src`, or 0.
+fn simp_ann_end(src: str, at: u32) u32 {
+    let mut i = at as usize;
+    while i < src.len() {
+        let c = src.byte_at(i);
+        if c == b'=' {
+            return i as u32;
+        }
+        if c == b';' || c == b'{' || c == b'}' {
+            return 0;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// Whether the annotation `ty` of a `let` whose initializer is `v` gives an unsuffixed number literal a
+// type other than its default (`let x: u8 = 3;`): without it the literal is an `i32` or `f64`.
+fn simp_lit_typed(a: &Ast, src: str, ty: NodeId, v: NodeId) bool {
+    let n = a.at_const(v);
+    if n.kind != NODE_LITERAL {
+        return false;
+    }
+    let raw = n.as_data.literal.raw;
+    let mut sfx: u32 = 0;
+    if ast_numeric_suffix(src, raw.start, raw.end, &mut sfx) != BuiltinType::BT_COUNT {
+        return false;
+    }
+    let tk = n.as_data.literal.token_type;
+    let ts = a.at_const(ty).span;
+    let t = src.slice(ts.start as usize, ts.end as usize);
+    return tk == IntegerLiteral && t != "i32" || tk == FloatLiteral && t != "f64";
+}
+
+// The candidates of module `a` (source `src`) for `fmt -s`, sorted and disjoint: every annotation of a
+// `let` with an initializer and every turbofish list of a path's object, a callee or a member. The
+// checker tries the ones in function bodies.
+fn simp_cands(a: &Ast, src: str) Vector<SimpCand> {
+    let nb = a.nodes.len();
+    let mut all = Vector::<SimpCand>::new();
+    for k in 1..a.nnodes() {
+        let id = Ast::nth_id_n(nb, k);
+        let n = a.at_const(id);
+        let mut kind = SIMP_LET;
+        let mut start: u32 = 0;
+        let mut end: u32 = 0;
+        if n.kind == NODE_LET && n.as_data.let_stmt.ty != NODE_NONE && n.as_data.let_stmt.value != NODE_NONE && !simp_lit_typed(
+            a,
+            src,
+            n.as_data.let_stmt.ty,
+            n.as_data.let_stmt.value,
+        ) {
+            start = a.at_const(n.as_data.let_stmt.name).span.end;
+            end = simp_ann_end(src, a.at_const(n.as_data.let_stmt.ty).span.start);
+        } else if n.kind == NODE_MEMBER && a.at_const(n.as_data.member.object).kind == NODE_GENERIC_SPECIALIZATION {
+            kind = SIMP_OBJECT;
+            start = a.at_const(a.at_const(n.as_data.member.object).as_data.specialization.expression).span.end;
+            end = simp_targs_end(src, start);
+        } else if n.kind == NODE_CALL && a.at_const(n.as_data.call.callee).kind == NODE_GENERIC_SPECIALIZATION {
+            kind = SIMP_CALLEE;
+            start = a.at_const(a.at_const(n.as_data.call.callee).as_data.specialization.expression).span.end;
+            end = simp_targs_end(src, start);
+        } else if n.kind == NODE_MEMBER && n.as_data.member.targs.len != 0 {
+            kind = SIMP_TARGS;
+            start = a.at_const(n.as_data.member.member).span.end;
+            end = simp_targs_end(src, start);
+        }
+        if end > start {
+            all.push(SimpCand { kind: kind, node: id, start: start, end: end, old: 0, ok: false });
+        }
+    }
+    all.sort_by(simp_cand_cmp);
+    let mut out = Vector::<SimpCand>::new();
+    let mut last: u32 = 0;
+    for i in 0..all.len() {
+        if all[i].start >= last {
+            out.push(all[i]);
+            last = all[i].end;
+        }
+    }
+    return out;
+}
+
+// `src` without the candidates of `cs` the checker found unneeded.
+fn simp_apply(src: str, cs: &Vector<SimpCand>) String {
+    let mut out = String::with_capacity(src.len());
+    let mut pos: usize = 0;
+    for i in 0..cs.len() {
+        if cs[i].ok {
+            out.push_str(src.slice(pos, cs[i].start as usize));
+            pos = cs[i].end as usize;
+        }
+    }
+    out.push_str(src.slice(pos, src.len()));
+    return out;
+}
+
+/// `fmt -s`: a typed node of a function body: its function's start (`f`), its start in the original
+/// source and its kind (`key`), and the hash of its type's text (`ty`).
+@derive(Copy)
+struct SimpRec {
+    f: u32,
+    key: u64,
+    ty: u64,
+}
+
+/// `fmt -s`: a module of the batch with removals: its file, original source, candidates and each
+/// one's function start (`cfn`), the starts of the functions with removals, and the probes' types of
+/// those functions' nodes.
+struct SimpMod {
+    file: String,
+    src: String,
+    cands: Vector<SimpCand>,
+    cfn: Vector<u32>,
+    fns: Vector<u32>,
+    recs: Vector<SimpRec>,
+}
+
+const fn simp_rec_cmp(a: &SimpRec, b: &SimpRec) i32 {
+    if a.f != b.f {
+        return pick(a.f < b.f, -1, 1);
+    }
+    if a.key != b.key {
+        return pick(a.key < b.key, -1, 1);
+    }
+    return pick(a.ty < b.ty, -1, pick(a.ty > b.ty, 1, 0));
+}
+
+// The spans (`start << 32 | end`) of `a`'s functions with a body, sorted.
+fn simp_fn_spans(a: &Ast) Vector<u64> {
+    let mut out = Vector::<u64>::new();
+    let nb = a.nodes.len();
+    for k in 1..a.nnodes() {
+        let id = Ast::nth_id_n(nb, k);
+        let n = a.at_const(id);
+        if n.kind == NODE_FUNCTION && a.ext(id).function.body != NODE_NONE {
+            out.push(n.span.start as u64 << 32 | n.span.end as u64);
+        }
+    }
+    out.sort();
+    return out;
+}
+
+// The start of the function of `spans` that holds offset `at`, or 0xFFFFFFFF.
+fn simp_fn_at(spans: &Vector<u64>, at: u32) u32 {
+    let mut lo: usize = 0;
+    let mut hi = spans.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if (spans[mid] >> 32) as u32 <= at {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 || at >= spans[lo - 1] as u32 {
+        return 0xFFFFFFFF;
+    }
+    return (spans[lo - 1] >> 32) as u32;
+}
+
+// Offset `q` of the source with `cs`'s removals made, in the original source (`edited`), else `q`.
+fn simp_orig(cs: &Vector<SimpCand>, q: u32, edited: bool) u32 {
+    if !edited {
+        return q;
+    }
+    let mut shift: u32 = 0;
+    for i in 0..cs.len() {
+        if !cs[i].ok {
+            continue;
+        }
+        if cs[i].start - shift > q {
+            break;
+        }
+        shift += cs[i].end - cs[i].start;
+    }
+    return q + shift;
+}
+
+// Whether original offset `at` lies inside a removed candidate of `cs`.
+fn simp_in_removed(cs: &Vector<SimpCand>, at: u32) bool {
+    let mut lo: usize = 0;
+    let mut hi = cs.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if cs[mid].start <= at {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo != 0 && cs[lo - 1].ok && at < cs[lo - 1].end;
+}
+
+// The typed nodes of module `m` of `p` in the functions `fns` (original starts), sorted: the source is
+// the original one with `cs`'s removals made when `edited`. A turbofish, a hole, an identifier naming a
+// type (`Vector` of `Vector::new()`, typed by its path's inference) and a node of removed text do not
+// count.
+fn simp_records(
+    p: &loader::Package,
+    m: usize,
+    cs: &Vector<SimpCand>,
+    edited: bool,
+    fns: &Vector<u32>,
+    out: &mut Vector<SimpRec>,
+) {
+    let a = p.module_ast_const(m as ModuleId);
+    let src = p.modules[m].source.as_str();
+    let spans = simp_fn_spans(unsafe &*a);
+    let mut hashes = Map::<u32, u64>::new();
+    let nb = unsafe (*a).nodes.len();
+    for k in 1..unsafe (*a).nnodes() {
+        let id = Ast::nth_id_n(nb, k);
+        let n = unsafe (*a).at_const(id);
+        let t = unsafe (*a).type_of(id);
+        if t == TYPE_NONE || n.kind == NODE_GENERIC_SPECIALIZATION || n.kind == NODE_GENERIC_PARAM {
+            continue;
+        }
+        let fq = simp_fn_at(&spans, n.span.start);
+        if fq == 0xFFFFFFFF {
+            continue;
+        }
+        let f = simp_orig(cs, fq, edited);
+        let at = simp_orig(cs, n.span.start, edited);
+        if fns.binary_search(&f).is_err() || simp_in_removed(cs, at) || simp_type_name(p, a, id) {
+            continue;
+        }
+        let mut h: u64 = 0;
+        let known = hashes.get(&t);
+        if known.is_some() {
+            h = *known.unwrap();
+        } else {
+            let mut txt = String::new();
+            rnd::render_type_str(p, a, src, t, &mut txt);
+            h = str_id(&txt);
+            hashes.insert(t, h);
+        }
+        out.push(SimpRec { f: f, key: at as u64 << 16 | n.kind as u64, ty: h });
+    }
+    out.sort_by(simp_rec_cmp);
+}
+
+// Whether node `id` of `a` is an identifier that names a type.
+fn simp_type_name(p: &loader::Package, a: *const Ast, id: NodeId) bool {
+    if unsafe (*a).at_const(id).kind != NODE_IDENTIFIER {
+        return false;
+    }
+    let d = unsafe (*a).resolution_def(id);
+    if d.node == NODE_NONE {
+        return false;
+    }
+    let k = unsafe (*p.module_ast_const(d.module)).at_const(d.node).kind;
+    return k == NODE_STRUCT || k == NODE_ENUM || k == NODE_INTERFACE || k == NODE_TYPE_ALIAS;
+}
+
+// Whether `now` holds exactly the records of `want` for function `f` (both sorted).
+fn simp_same(want: &Vector<SimpRec>, now: &Vector<SimpRec>, f: u32) bool {
+    let mut i: usize = 0;
+    let mut j: usize = 0;
+    while i < want.len() && want[i].f < f {
+        i += 1;
+    }
+    while j < now.len() && now[j].f < f {
+        j += 1;
+    }
+    while i < want.len() && want[i].f == f {
+        if j >= now.len() || now[j].f != f || now[j].key != want[i].key || now[j].ty != want[i].ty {
+            return false;
+        }
+        i += 1;
+        j += 1;
+    }
+    return j == now.len() || now[j].f != f;
+}
+
+// Resolve and type-check `p` as a lint pass does, nothing after: whether it found no error.
+fn simp_check(p: &mut loader::Package, target: i32, ce_steps: u32, ce_mem: u64) bool {
+    p.jobs = p.analysis_jobs(bsys::cpu_count());
+    if p.jobs == 1 {
+        prt::shutdown();
+    }
+    lint_settings(p);
+    let mut cirv = iri::interp_master(p as *mut loader::Package, ce_steps, ce_mem);
+    p.cir = &mut cirv;
+    let ok = check_package(p, target);
+    p.cir = null;
+    return ok;
+}
+
+// The probes of `fmt -s` over one lint batch: one check in which each body of a listed file is
+// checked again without the candidates it may not need (`tc::SIMPLIFY`). Per module with removals:
+// its candidates, functions and those functions' types after the probes. 1 when the batch does not
+// load or reports an error.
+fn simp_probe(
+    files: &Vector<String>,
+    root: str,
+    alt: str,
+    std_dir: str,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    test_build: bool,
+    mods: &mut Vector<SimpMod>,
+) i32 {
+    let mut p = lint_load_batch(files, root, alt, std_dir, target, test_build);
+    if !p.ok {
+        return 1;
+    }
+    let mut any = false;
+    for m in 0..p.modules.len() {
+        if p.modules[m].has_ast && m < p.lint_set.len() && p.lint_set[m] {
+            let a = p.module_ast_const(m as ModuleId) as *mut Ast;
+            unsafe (*a).simp_cands = simp_cands(unsafe &*a, &p.modules[m].source);
+            any = any || unsafe (*a).simp_cands.len() != 0;
+        }
+    }
+    if !any {
+        return 0;
+    }
+    unsafe tc::SIMPLIFY = true;
+    let ok = simp_check(&mut p, target, ce_steps, ce_mem);
+    unsafe tc::SIMPLIFY = false;
+    if !ok {
+        eprintln("fmt: '-s' needs a program without errors (above)");
+        return 1;
+    }
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast || m >= p.lint_set.len() || !p.lint_set[m] {
+            continue;
+        }
+        let a = p.module_ast_const(m as ModuleId) as *mut Ast;
+        let cs = replace(unsafe &mut (*a).simp_cands, Vector::<SimpCand>::new());
+        let spans = simp_fn_spans(unsafe &*a);
+        let mut fns = Vector::<u32>::new();
+        let mut cfn = Vector::<u32>::new();
+        for i in 0..cs.len() {
+            let f = simp_fn_at(&spans, cs[i].start);
+            cfn.push(f);
+            if cs[i].ok && f != 0xFFFFFFFF && (fns.len() == 0 || fns[fns.len() - 1] != f) {
+                fns.push(f);
+            }
+        }
+        if fns.len() == 0 {
+            continue;
+        }
+        let mut recs = Vector::<SimpRec>::new();
+        simp_records(&p, m, &cs, false, &fns, &mut recs);
+        mods.push(
+            SimpMod {
+                file: p.modules[m].file.clone(),
+                src: p.modules[m].source.clone(),
+                cands: cs,
+                cfn: cfn,
+                fns: fns,
+                recs: recs,
+            },
+        );
+    }
+    return 0;
+}
+
+// `fmt -s` over one lint batch. The probes (`simp_probe`) find the candidates each body checks
+// without; a check of the edited batch from its text confirms them: a function that reports an error
+// or types a node otherwise gets its candidates back, and the batch is checked again. Writes the files
+// without the confirmed candidates (unformatted: `fmt` formats them after).
+fn simplify_batch(
+    files: &Vector<String>,
+    root: str,
+    alt: str,
+    std_dir: str,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    test_build: bool,
+) i32 {
+    let mut mods = Vector::<SimpMod>::new();
+    if simp_probe(files, root, alt, std_dir, ce_steps, ce_mem, target, test_build, &mut mods) != 0 {
+        return 1;
+    }
+    let mut left: usize = 0;
+    for i in 0..mods.len() {
+        left += mods[i].fns.len();
+    }
+    // Each round that fails gives at least one function its candidates back.
+    for _round in 0..left + 1 {
+        let mut ovf = Vector::<String>::new();
+        let mut ovt = Vector::<String>::new();
+        for i in 0..mods.len() {
+            if mods[i].fns.len() != 0 {
+                ovf.push(mods[i].file.clone());
+                ovt.push(simp_apply(&mods[i].src, &mods[i].cands));
+            }
+        }
+        if ovf.len() == 0 {
+            break;
+        }
+        unsafe diag::SILENT = true;
+        unsafe tc::SIMP_CONFIRM = true;
+        let mut q = lint_load_over(files, root, alt, std_dir, target, test_build, ovf, ovt);
+        let ok = q.ok && simp_check(&mut q, target, ce_steps, ce_mem);
+        unsafe tc::SIMP_CONFIRM = false;
+        unsafe diag::SILENT = false;
+        // A batch that fails outside every function gives every candidate back.
+        let mut nerr: usize = 0;
+        for m in 0..q.modules.len() {
+            if q.modules[m].has_ast {
+                nerr += unsafe (*q.module_ast_const(m as ModuleId)).simp_errs.len();
+            }
+        }
+        let all = !ok && nerr == 0;
+        let mut failed = false;
+        for i in 0..mods.len() {
+            if mods[i].fns.len() == 0 {
+                continue;
+            }
+            let mut now = Vector::<SimpRec>::new();
+            let mut errs = Vector::<u32>::new();
+            for m in 0..q.modules.len() {
+                if q.modules[m].has_ast && q.modules[m].file.as_str() == mods[i].file.as_str() {
+                    simp_records(&q, m, &mods[i].cands, true, &mods[i].fns, &mut now);
+                    let ea = q.module_ast_const(m as ModuleId);
+                    for k in 0..unsafe (*ea).simp_errs.len() {
+                        errs.push(simp_orig(&mods[i].cands, unsafe (*ea).simp_errs[k], true));
+                    }
+                }
+            }
+            let mut keep = Vector::<u32>::new();
+            for k in 0..mods[i].fns.len() {
+                let f = mods[i].fns[k];
+                if !all && !errs.contains(&f) && simp_same(&mods[i].recs, &now, f) {
+                    keep.push(f);
+                    continue;
+                }
+                failed = true;
+                for c in 0..mods[i].cands.len() {
+                    if mods[i].cfn[c] == f {
+                        mods[i].cands[c].ok = false;
+                    }
+                }
+            }
+            mods[i].fns = keep;
+        }
+        if !failed {
+            break;
+        }
+    }
+    let mut rc = 0;
+    for i in 0..mods.len() {
+        if mods[i].fns.len() != 0 && !write_source(&mods[i].file, simp_apply(&mods[i].src, &mods[i].cands).as_str()) {
+            eprintln("fmt: cannot write '{}'", mods[i].file.as_str());
+            rc = 1;
+        }
+    }
+    return rc;
+}
+
 // `super-c fmt [<path>...]`: canonical formatting. Rewrites files in place by default (only when they
 // changed); --check writes nothing, prints the path, and exits 1 when a file is not already formatted.
 // `-` reads stdin and formats to stdout. A directory recurses over its .spc files. A file the compiler
 // cannot lex or parse is never rewritten: diagnostics are printed and the exit code is 1.
-fn run_fmt(path: str, check: bool, migrate: bool) i32 {
+fn run_fmt(path: str, check: bool) i32 {
     let is_stdin = path == "-";
     if is_stdin {
-        return fmt_one(path, true, false, check, migrate);
+        return fmt_one(path, true, false, check);
     }
     if is_dir(path) {
-        return fmt_dir(path, !check, check, migrate);
+        return fmt_dir(path, !check, check);
     }
-    return fmt_one(path, false, !check, check, migrate);
+    return fmt_one(path, false, !check, check);
 }
 
 // Replace a source file through a temp file and a rename, so a failed write leaves it intact. The link
 // target is replaced when `path` is a symlink, never the link itself.
 fn write_source(path: str, body: str) bool {
     if let Ok(abs) = fs::realpath(path) {
-        return write_file_atomic(abs.as_str(), body);
+        return write_file_atomic(&abs, body);
     }
     return write_file_atomic(path, body);
 }
 
-fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool, migrate: bool) i32 {
+fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
     let mut src = String::new();
     if is_stdin {
         src = read_stdin();
@@ -802,7 +1324,7 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool, migrate: bool) i
     }
 
     let mut out = String::new();
-    if !format_source(&src, path, 120, migrate, &mut out) {
+    if !format_source(&src, path, 120, &mut out) {
         return 1;
     }
     let src_view = src.as_str();
@@ -814,7 +1336,7 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool, migrate: bool) i
             rc = 1;
         }
     } else if write {
-        if !same && !write_source(path, out.as_str()) {
+        if !same && !write_source(path, &out) {
             eprintln("fmt: cannot write '{}'", path);
             rc = 1;
         }
@@ -993,7 +1515,7 @@ fn canon_cwd() String {
 // chdir to the nearest directory that has one. A miss changes nothing: the caller reports it.
 fn chdir_to_manifest() {
     if let Some(dir) = nearest_manifest() {
-        let _ = process::set_current_dir(dir.as_str());
+        let _ = process::set_current_dir(&dir);
     }
 }
 
@@ -1002,7 +1524,7 @@ fn nearest_manifest() Option<String> {
     let probe = stdio::fopen("build.toml", "rb");
     if probe != null {
         unsafe stdio::fclose(probe);
-        return Option::<String>::Some(String::from_str("."));
+        return Some(String::from_str("."));
     }
     let cwd = canon_cwd();
     let mut end = cwd.len();
@@ -1018,13 +1540,13 @@ fn nearest_manifest() Option<String> {
         let dir = String::from_str(cwd.as_str().slice(0, end));
         let mut man = dir.clone();
         man.push_str("/build.toml");
-        let f = stdio::fopen(man.as_str(), "rb");
+        let f = stdio::fopen(&man, "rb");
         if f != null {
             unsafe stdio::fclose(f);
-            return Option::<String>::Some(dir);
+            return Some(dir);
         }
     }
-    return Option::<String>::None;
+    return None;
 }
 
 // The command-line usage, written to `out`.
@@ -1089,8 +1611,8 @@ OPTIONS:
     --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
     --no-lint              disable the on-by-default lints during a build
     --check                fmt: report unformatted files, write nothing
-    --migrate              fmt: write the newer syntax (`switch` and value blocks without `;`,
-                           `return (a, b);`); lint: report and fix the uses that now read shorter
+    -s, --simplify         fmt: first remove the turbofish lists and `let` annotations a body does
+                           not need (checked: every expression keeps its type)
     --fix                  lint: apply machine-applicable fixes and re-lint
     --const                lint: also flag functions that could be 'const fn'
     --no-run               bench: build the bench binary but do not run it
@@ -1154,12 +1676,12 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
     let mut emit_id: u64 = 0; // transpile form: --emit-id=N, the identity its emit stamp records
 
     let mode = if argc > 1 {
-        subcommand(argv[1]);
+        subcommand(argv[1])
     } else {
-        Mode::MODE_DEFAULT;
+        Mode::MODE_DEFAULT
     };
     let mut fmt_check = false; // fmt --check: report unformatted files, write nothing
-    let mut migrate = false; // fmt --migrate, lint --migrate: the rewrites to the forms the language now reads
+    let mut fmt_simplify = false; // fmt -s: remove the turbofish lists and annotations bodies do not need
     let mut lint_fix = false; // lint --fix: apply machine fixes, re-lint to fixpoint
     let mut lint_sc = false; // lint --const: warn on functions the deep CTFE scan proves always evaluable
     let mut bench_norun = false; // bench --no-run: build the bench binary only
@@ -1191,9 +1713,9 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
     let mut bo = BuildOpts { profile: "", out_dir: "", sysroot: "", jobs: 0, bin_sel: "", lib_sel: false };
 
     let mut i: usize = if mode == Mode::MODE_DEFAULT {
-        1usize;
+        1usize
     } else {
-        2usize;
+        2usize
     };
     switch mode {
         MODE_DEFAULT => {
@@ -1267,8 +1789,8 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
                 let arg = argv[i];
                 if arg == "--check" {
                     fmt_check = true;
-                } else if arg == "--migrate" {
-                    migrate = true;
+                } else if arg == "-s" || arg == "--simplify" {
+                    fmt_simplify = true;
                 } else if arg.starts_with("--") {
                     co.reject(arg);
                 } else if file.len() == 0 {
@@ -1283,9 +1805,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
         MODE_LINT => {
             while i < argc {
                 let arg = argv[i];
-                if co.common_flag(arg) {} else if arg == "--migrate" {
-                    unsafe tc::LINT_MIGRATE = true;
-                } else if arg == "--fix" {
+                if co.common_flag(arg) {} else if arg == "--fix" {
                     lint_fix = true;
                 } else if arg == "--const" {
                     lint_sc = true;
@@ -1451,14 +1971,14 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
                             ts.max_frame = n as usize;
                         },
                         _ => co.reject(arg),
-                    };
+                    }
                 } else if arg.starts_with("--max-workspaces=") {
                     switch arg[17..].parse_u64() {
                         Some(n) if n > 0 && n <= 1024 => {
                             ts.max_workspaces = n as usize;
                         },
                         _ => co.reject(arg),
-                    };
+                    }
                 } else {
                     co.reject(arg);
                 }
@@ -1507,7 +2027,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
                 co.bad = true;
             }
         },
-    };
+    }
     if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null || topts.shards != 0 || topts.durations != null || topts.record) {
         co.bad = true;
     }
@@ -1568,9 +2088,9 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
     // resolve "0 = core count" HERE: the p.jobs != 1 frontier gates need a real number, and a
     // single-threaded host (wasm) must resolve to the serial path.
     let jobs_wanted = if bo.jobs != 0 {
-        bo.jobs;
+        bo.jobs
     } else {
-        bsys::cpu_count();
+        bsys::cpu_count()
     };
     // Waiting test parents transfer their slots to nested compilers. One process-tree slot per core keeps
     // independent tests parallel while nested compilers run serially instead of competing for the same cores.
@@ -1628,29 +2148,41 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
     }
     if mode == Mode::MODE_INIT {
         let cwd = canon_cwd();
-        return bsys::scaffold_project(".", loader::basename_of(cwd.as_str()));
-    }
-    if mode == Mode::MODE_FMT {
-        let mut rc = 0;
-        for k in 0..paths.len() {
-            if run_fmt(paths.at(k).as_str(), fmt_check, migrate) != 0 {
-                rc = 1;
-            }
-        }
-        return rc;
+        return bsys::scaffold_project(".", loader::basename_of(&cwd));
     }
     let arg0: *const char = if argc > 0 {
-        argv[0].ptr() as *const char;
+        argv[0].ptr() as *const char
     } else {
-        "super-c".ptr() as *const char;
+        "super-c".ptr() as *const char
     };
     let std_dir = exe_std_dir(arg0);
     // `--target-cpu` names a level of the build's instruction set.
     let mut cerr = String::new();
     let mut cpu_set = tgt::baseline(co.target, co.arch);
-    if !cf::level(co.target_cpu.as_str(), co.arch, true, &mut cpu_set, &mut cerr) {
+    if !cf::level(&co.target_cpu, co.arch, true, &mut cpu_set, &mut cerr) {
         eprintln("error: {}", cerr.as_str());
         return 1;
+    }
+    if mode == Mode::MODE_FMT {
+        if fmt_simplify {
+            if fmt_check {
+                eprintln("fmt: '--check' and '-s' do not combine");
+                return 1;
+            }
+            unsafe FMT_SIMPLIFY = true;
+            let src = lint_project(&paths, file.len() == 0, &co, &bo, cpu_set, &std_dir, false, false);
+            unsafe FMT_SIMPLIFY = false;
+            if src != 0 {
+                return 1;
+            }
+        }
+        let mut rc = 0;
+        for k in 0..paths.len() {
+            if run_fmt(paths.at(k).as_str(), fmt_check) != 0 {
+                rc = 1;
+            }
+        }
+        return rc;
     }
     if mode == Mode::MODE_LINT {
         let whole = file.len() == 0;
@@ -1662,14 +2194,14 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
                         jobs: jobs,
                         std_dir: std_dir.as_str(),
                         ce_steps: if co.ce_steps != 0 {
-                            co.ce_steps;
+                            co.ce_steps
                         } else {
-                            tm.ce_steps;
+                            tm.ce_steps
                         },
                         ce_mem: if co.ce_mem != 0 {
-                            co.ce_mem;
+                            co.ce_mem
                         } else {
-                            tm.ce_mem;
+                            tm.ce_mem
                         },
                         target: co.target,
                         bootstrap_tags: co.bootstrap_tags,
@@ -1679,11 +2211,11 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
                         simd_width: co.simd_width,
                         simd_dispatch: co.simd_dispatch.as_str(),
                     };
-                    return bsys::manifest_tools(&tm, argv.as_slice(), &tcx);
+                    return bsys::manifest_tools(&tm, &argv, &tcx);
                 }
             }
         }
-        let rc = lint_project(&paths, whole, &co, &bo, cpu_set, std_dir.as_str(), lint_fix, lint_sc);
+        let rc = lint_project(&paths, whole, &co, &bo, cpu_set, &std_dir, lint_fix, lint_sc);
         if whole {
             if let Some(t) = tools {
                 let tr = t(std_dir.as_str());
@@ -1713,7 +2245,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
         if co.target_cpu.len() != 0 {
             man.target_cpu = co.target_cpu.clone();
         }
-        if !bsys::check_features(&man, co.target_features.as_str()) {
+        if !bsys::check_features(&man, &co.target_features) {
             return 1;
         }
         if bo.out_dir.len() != 0 {
@@ -1723,14 +2255,14 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
             jobs: jobs,
             std_dir: std_dir.as_str(),
             ce_steps: if co.ce_steps != 0 {
-                co.ce_steps;
+                co.ce_steps
             } else {
-                man.ce_steps;
+                man.ce_steps
             },
             ce_mem: if co.ce_mem != 0 {
-                co.ce_mem;
+                co.ce_mem
             } else {
-                man.ce_mem;
+                man.ce_mem
             },
             target: co.target,
             bootstrap_tags: co.bootstrap_tags,
@@ -1764,7 +2296,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
                 return 0;
             }
         }
-        let rc = lsp_srv::run(std_dir.as_str(), co.target);
+        let rc = lsp_srv::run(&std_dir, co.target);
         return rc;
     }
     if manifest_mode {
@@ -1779,7 +2311,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
             if co.target_cpu.len() != 0 {
                 man.target_cpu = co.target_cpu.clone();
             }
-            if !bsys::check_features(&man, co.target_features.as_str()) {
+            if !bsys::check_features(&man, &co.target_features) {
                 return 1;
             }
             let cx = bsys::BuildCtx {
@@ -1787,14 +2319,14 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
                 std_dir: std_dir.as_str(),
                 // CLI --const-eval-* wins; else the manifest's value; else (0) the engine default.
                 ce_steps: if co.ce_steps != 0 {
-                    co.ce_steps;
+                    co.ce_steps
                 } else {
-                    man.ce_steps;
+                    man.ce_steps
                 },
                 ce_mem: if co.ce_mem != 0 {
-                    co.ce_mem;
+                    co.ce_mem
                 } else {
-                    man.ce_mem;
+                    man.ce_mem
                 },
                 target: co.target,
                 bootstrap_tags: co.bootstrap_tags,
@@ -1811,7 +2343,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
             let hooked = mode == Mode::MODE_BUILD || mode == Mode::MODE_RELEASE || mode == Mode::MODE_RUN;
             if hooked && man.hooks.len() != 0 && stdlib::getenv("SC_TOOLS_RUN") == null {
                 // A project with hooks builds through its tool compiler, which runs them.
-                rc = bsys::manifest_tools(&man, argv.as_slice(), &cx);
+                rc = bsys::manifest_tools(&man, &argv, &cx);
             } else if mode == Mode::MODE_CLEAN {
                 rc = bsys::manifest_clean(&man, clean_full);
             } else if mode == Mode::MODE_TEST {
@@ -1842,7 +2374,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
     // A script build has no manifest: the baseline of the instruction set and the command line's list.
     let mut feats = cpu_set;
     let mut ferr = String::new();
-    if !cf::apply(co.target_features.as_str(), co.target, co.arch, true, &mut feats, &mut ferr) {
+    if !cf::apply(&co.target_features, co.target, co.arch, true, &mut feats, &mut ferr) {
         eprintln("error: {}", ferr.as_str());
         return 1;
     }
@@ -1853,7 +2385,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
     }
     let rc = script::run_script(
         file,
-        std_dir.as_str(),
+        &std_dir,
         co.ce_steps,
         co.ce_mem,
         &topts,
@@ -1862,7 +2394,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
         co.arch,
         cf::close(feats),
         co.simd_width,
-        co.simd_dispatch.as_str(),
+        &co.simd_dispatch,
         co.bootstrap_tags,
         co.lint,
         jobs,

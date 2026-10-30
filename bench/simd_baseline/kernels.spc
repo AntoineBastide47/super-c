@@ -147,23 +147,23 @@ pub fn simd_baseline(_b: &mut bench::Bencher) {
     let tables = implementations();
     let bad = first_mismatch();
     if bad.len() != 0 {
-        bench::fail(bad.as_str());
+        bench::fail(&bad);
         return;
     }
     for bytes in SIZES {
         let mut input = Input::new(bytes, 0);
         let bad_here = input.mismatch(&tables);
         if bad_here.len() != 0 {
-            bench::fail(bad_here.as_str());
+            bench::fail(&bad_here);
             return;
         }
         let reps = SIZES[2] / bytes; // every round processes 4 MiB
         // The hand-written table of the portable build's level (x86_64).
         let lv = level();
         let tier = if lv.len() > 9 {
-            lv.slice(9, lv.len());
+            lv.slice(9, lv.len())
         } else {
-            "sse2";
+            "sse2"
         };
         for k in 0..KERNELS {
             let elements = reps * input.elements(k);
@@ -181,9 +181,9 @@ pub fn simd_baseline(_b: &mut bench::Bencher) {
                 let mut s = b.samples().clone();
                 let ns = bench::summarize(&mut s).median * 1e9 / elements as f64;
                 let isa = if t == 1 {
-                    level();
+                    level()
                 } else {
-                    unsafe str::from_cstr(table.name);
+                    unsafe str::from_cstr(table.name)
                 };
                 println("simd\t{}\t{}\t{}\t{}", names()[k], isa, bytes, ns);
                 if t == 1 {
@@ -282,9 +282,9 @@ const fn plus2(x: u64) u64 {
 @noinline
 fn chosen(d: *mut detect::Dispatch) fn(u64) u64 {
     let off = if ARCH == Arch::X86_64 {
-        cpu::Feature::Neon;
+        cpu::Feature::Neon
     } else {
-        cpu::Feature::Avx2;
+        cpu::Feature::Avx2
     };
     return unsafe detect::dispatch::<fn(u64) u64, 2>(d, [(off, plus2), (cpu::Feature::Simd128, plus2)], plus1);
 }
@@ -524,9 +524,9 @@ const fn mix_width(xp: *const f32, t: f32, pp: *const u8, qp: *const u8, outp: *
     let out = view_mut(outp, n);
     for i in 0..n {
         out[i] = if x[i] > t {
-            p[i];
+            p[i]
         } else {
-            q[i];
+            q[i]
         };
     }
 }
@@ -537,9 +537,9 @@ const fn abs_diff_u8(ap: *const u8, bp: *const u8, outp: *mut u8, n: usize) {
     let out = view_mut(outp, n);
     for i in 0..n {
         out[i] = if a[i] > b[i] {
-            a[i] - b[i];
+            a[i] - b[i]
         } else {
-            b[i] - a[i];
+            b[i] - a[i]
         };
     }
 }
@@ -775,9 +775,9 @@ const fn mix_width_v(xp: *const f32, t: f32, pp: *const u8, qp: *const u8, outp:
     }
     while i < n {
         out[i] = if x[i] > t {
-            p[i];
+            p[i]
         } else {
-            q[i];
+            q[i]
         };
         i += 1;
     }
@@ -795,9 +795,9 @@ const fn abs_diff_u8_v(ap: *const u8, bp: *const u8, outp: *mut u8, n: usize) {
     }
     while i < n {
         out[i] = if a[i] > b[i] {
-            a[i] - b[i];
+            a[i] - b[i]
         } else {
-            b[i] - a[i];
+            b[i] - a[i]
         };
         i += 1;
     }
@@ -850,17 +850,17 @@ extend Input {
             let k = next(&mut r);
             v.mixed.push(
                 if mode == 0 && k % 8 != 0 {
-                    unit(&mut r);
+                    unit(&mut r)
                 } else if mode == 0 {
-                    specials[((k >> 8) % 8) as usize];
+                    specials[((k >> 8) % 8) as usize]
                 } else if mode == 1 {
-                    specials[((k >> 8) % 6) as usize];
+                    specials[((k >> 8) % 6) as usize]
                 } else if mode == 4 || k % 4 == 0 {
-                    specials[((k >> 8) % 3) as usize];
+                    specials[((k >> 8) % 3) as usize]
                 } else if i < floats / 2 == (mode == 2) {
-                    -0.0;
+                    -0.0
                 } else {
-                    0.0;
+                    0.0
                 },
             );
             v.ints.push(next(&mut r) as i32);
@@ -869,9 +869,9 @@ extend Input {
         for _ in 0..bytes {
             v.bytes_p.push(
                 if mode == 0 {
-                    next(&mut r) as u8;
+                    next(&mut r) as u8
                 } else {
-                    3;
+                    3
                 },
             );
             v.bytes_q.push(next(&mut r) as u8);
@@ -914,7 +914,7 @@ extend Input {
         return switch k {
             0 => {
                 table.saxpy_f32(1.5, self.mixed.as_ptr(), self.saxpy_y.as_ptr() as *mut f32, n);
-                0;
+                0
             },
             1 => bits(table.dot_f32_ordered(self.finite_a.as_ptr(), self.finite_b.as_ptr(), n)),
             2 => bits(table.dot_f32_tree(self.finite_a.as_ptr(), self.finite_b.as_ptr(), n)),
@@ -922,21 +922,21 @@ extend Input {
             4 => table.sum_i32(self.ints.as_ptr(), n) as u32,
             5 => {
                 table.min_max_f32(self.mixed.as_ptr(), n, out);
-                0;
+                0
             },
             6 => table.filter_gt_f32(self.mixed.as_ptr(), n, 0.25, out) as u64,
             7 => bits(table.gather_sum_f32(self.finite_a.as_ptr(), self.indexes.as_ptr(), n)),
             8 => {
                 table.tail_load_f32(1.5, self.mixed.as_ptr(), out, n / ROW);
-                0;
+                0
             },
             9 => {
                 table.mix_width(self.mixed.as_ptr(), 0.0, self.bytes_p.as_ptr(), self.bytes_q.as_ptr(), out_u8, n);
-                0;
+                0
             },
             10 => {
                 table.abs_diff_u8(self.bytes_p.as_ptr(), self.bytes_q.as_ptr(), out_u8, n_bytes);
-                0;
+                0
             },
             _ => 0,
         };

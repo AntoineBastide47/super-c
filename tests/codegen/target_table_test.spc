@@ -15,9 +15,9 @@ import tests::cli_harness as cli;
 const fn axis_matches(is_isa: bool) bool {
     let vs = tgt::axis_variants(is_isa);
     let ti = if is_isa {
-        type_info::<stdt::Arch>();
+        type_info::<stdt::Arch>()
     } else {
-        type_info::<stdt::Platform>();
+        type_info::<stdt::Platform>()
     };
     if ti.variants.len != vs.len() {
         return false;
@@ -79,26 +79,26 @@ fn rows_match_their_c_environments() {
         let p = cli::proj_new();
         let root = any_root(&p, rows[i]);
         let mut env = ct::CTarget::new();
-        assert(ct::c_target(t.os, t.isa, root.as_str(), &mut env), t.triple);
+        assert(ct::c_target(t.os, t.isa, &root, &mut env), t.triple);
         let pd = env.predefs.as_str();
         assert_eq(macro_value(pd, "__SIZEOF_POINTER__"), format("{}", tgt::isa(t.isa).ptr_bytes).as_str());
         assert_eq(macro_value(pd, "__SIZEOF_LONG__"), format("{}", t.long_bytes).as_str());
         let mant = macro_value(pd, "__LDBL_MANT_DIG__");
         let ld: u8 = if mant == "53" {
-            64;
+            64
         } else if mant == "64" {
-            80;
+            80
         } else {
-            128;
+            128
         };
         assert(mant == "53" || mant == "64" || mant == "113", t.triple);
         assert_eq(t.long_double_bits, ld);
         assert_eq(
             macro_value(pd, "__BYTE_ORDER__"),
             if t.big_endian {
-                "__ORDER_BIG_ENDIAN__";
+                "__ORDER_BIG_ENDIAN__"
             } else {
-                "__ORDER_LITTLE_ENDIAN__";
+                "__ORDER_LITTLE_ENDIAN__"
             },
         );
     }
@@ -167,17 +167,17 @@ fn target_names_under(dir: str, out: &mut String) {
         let path = format("{}/{}", dir, e.name);
         if e.name.ends_with(".spc") {
             let mut mt: i64 = 0;
-            let src = loader::read_file_mt(path.as_str(), &mut mt).unwrap();
-            if names_a_target(src.as_str()) {
-                out.push_str(path.as_str());
+            let src = loader::read_file_mt(&path, &mut mt).unwrap();
+            if names_a_target(&src) {
+                out.push_str(&path);
                 out.push_byte(b'\n');
             }
-        } else if e.name != "." && e.name != ".." && path.as_str() != "src/target" && dutil::is_dir(path.as_str()) {
+        } else if e.name != "." && e.name != ".." && path.as_str() != "src/target" && dutil::is_dir(&path) {
             subdirs.push(path);
         }
     }
     for i in 0..subdirs.len() {
-        target_names_under(subdirs[i].as_str(), out);
+        target_names_under(&subdirs[i], out);
     }
 }
 

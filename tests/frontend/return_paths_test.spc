@@ -30,7 +30,7 @@ fn arms(x: i64) i64 {
             return 11;
         },
         _ => panic("no value"),
-    };
+    }
 }
 fn spin(x: i64) i64 {
     let mut i = x;
@@ -105,7 +105,7 @@ fn a_reachable_end_is_an_error() {
     );
     h::expect_err_msg(
         "one switch arm completes",
-        "fn f(x: i64) i64 {\n    switch x {\n        0 => {\n            return 1;\n        },\n        _ => {},\n    };\n}\nfn main() i32 { return f(1) as i32; }\n",
+        "fn f(x: i64) i64 {\n    switch x {\n        0 => {\n            return 1;\n        },\n        _ => {},\n    }\n}\nfn main() i32 { return f(1) as i32; }\n",
         END,
     );
     h::expect_err_msg(

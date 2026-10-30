@@ -151,13 +151,13 @@ pub(package) fn parse(t: []u8, want: []str, docs: &mut Vector<Doc>) bool {
             continue;
         }
         let kind = if key == "objc-classes" {
-            E_OBJC_CLASS;
+            E_OBJC_CLASS
         } else if key == "objc-eh-types" {
-            E_OBJC_EH;
+            E_OBJC_EH
         } else if key == "objc-ivars" {
-            E_OBJC_IVAR;
+            E_OBJC_IVAR
         } else if key == "symbols" || key == "weak-symbols" || key == "thread-local-symbols" {
-            E_PLAIN;
+            E_PLAIN
         } else {
             continue;
         };
@@ -209,9 +209,9 @@ const fn scalar(t: []u8, p: &mut usize) Span {
             e += 1;
         }
         *p = if e < n {
-            e + 1;
+            e + 1
         } else {
-            e;
+            e
         };
         return Span { at: s as u32, len: (e - s) as u32, kind: 0 };
     }

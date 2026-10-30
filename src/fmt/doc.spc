@@ -253,7 +253,7 @@ extend<'a> DocPool<'a> {
                     r.col = r.col + t.len() as i32;
                 }
             },
-        };
+        }
     }
 
     /// Render `root` into `out` at the given width. The result always ends with exactly one newline.

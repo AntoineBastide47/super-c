@@ -20,12 +20,12 @@ pub enum Result<T, E> {
 extend<T, E> Result<T, E> {
     /// `Ok(value)`.
     pub const fn ok(value: T) Result<T, E> {
-        return Result::<T, E>::Ok(value);
+        return Ok(value);
     }
 
     /// `Err(error)`.
     pub const fn err(error: E) Result<T, E> {
-        return Result::<T, E>::Err(error);
+        return Err(error);
     }
 
     /// True for `Ok`.
@@ -75,7 +75,7 @@ extend<T, E> Result<T, E> {
         return switch self {
             Ok(v) => v,
             Err(e) => {
-                default;
+                default
             },
         };
     }
@@ -84,7 +84,7 @@ extend<T, E> Result<T, E> {
     pub const fn err_or(self: Result<T, E>, default: E) E {
         return switch self {
             Ok(v) => {
-                default;
+                default
             },
             Err(e) => e,
         };
@@ -101,16 +101,16 @@ extend<T, E> Result<T, E> {
     /// Map the success value through `f`, leaving an error untouched. Consumes `self`.
     pub const fn map<U, F: fn(T) U>(self: Result<T, E>, f: F) Result<U, E> {
         return switch self {
-            Ok(v) => Result::<U, E>::Ok(f(v)),
-            Err(e) => Result::<U, E>::Err(e),
+            Ok(v) => Ok(f(v)),
+            Err(e) => Err(e),
         };
     }
 
     /// Map the error value through `f`, leaving a success untouched. Consumes `self`.
     pub const fn map_err<F, M: fn(E) F>(self: Result<T, E>, f: M) Result<T, F> {
         return switch self {
-            Ok(v) => Result::<T, F>::Ok(v),
-            Err(e) => Result::<T, F>::Err(f(e)),
+            Ok(v) => Ok(v),
+            Err(e) => Err(f(e)),
         };
     }
 
@@ -118,7 +118,7 @@ extend<T, E> Result<T, E> {
     pub const fn and_then<U, F: fn(T) Result<U, E>>(self: Result<T, E>, f: F) Result<U, E> {
         return switch self {
             Ok(v) => f(v),
-            Err(e) => Result::<U, E>::Err(e),
+            Err(e) => Err(e),
         };
     }
 
@@ -126,9 +126,9 @@ extend<T, E> Result<T, E> {
     /// the unused `other` (on the `Ok` path) is freed by auto-`Free`.
     pub const fn or(self: Result<T, E>, other: Result<T, E>) Result<T, E> {
         return switch self {
-            Ok(v) => Result::<T, E>::Ok(v),
+            Ok(v) => Ok(v),
             Err(e) => {
-                other;
+                other
             },
         };
     }
@@ -137,9 +137,9 @@ extend<T, E> Result<T, E> {
     /// is freed.
     pub const fn get_ok(self: Result<T, E>) Option<T> {
         return switch self {
-            Ok(v) => Option::<T>::Some(v),
+            Ok(v) => Some(v),
             Err(e) => {
-                Option::<T>::None;
+                None
             },
         };
     }
@@ -149,9 +149,9 @@ extend<T, E> Result<T, E> {
     pub const fn get_err(self: Result<T, E>) Option<E> {
         return switch self {
             Ok(v) => {
-                Option::<E>::None;
+                None
             },
-            Err(e) => Option::<E>::Some(e),
+            Err(e) => Some(e),
         };
     }
 
@@ -174,16 +174,16 @@ extend<T, E> Result<T, E> {
     /// A borrow of either payload, as a `Result<&T, &E>`.
     pub const fn as_ref(self: &Result<T, E>) Result<&T, &E> {
         return switch self {
-            Ok(v) => Result::<&T, &E>::Ok(v),
-            Err(e) => Result::<&T, &E>::Err(e),
+            Ok(v) => Ok(v),
+            Err(e) => Err(e),
         };
     }
 
     /// A mutable borrow of either payload, as a `Result<&mut T, &mut E>`.
     pub const fn as_mut(self: &mut Result<T, E>) Result<&mut T, &mut E> {
         return switch self {
-            Ok(v) => Result::<&mut T, &mut E>::Ok(v),
-            Err(e) => Result::<&mut T, &mut E>::Err(e),
+            Ok(v) => Ok(v),
+            Err(e) => Err(e),
         };
     }
 
@@ -193,7 +193,7 @@ extend<T, E> Result<T, E> {
         return switch self {
             Ok(v) => f(v),
             Err(e) => {
-                default;
+                default
             },
         };
     }
@@ -209,7 +209,7 @@ extend<T, E> Result<T, E> {
     /// `self` when it is `Ok`, otherwise `op(error)`; `op` runs only on the error. Consumes `self`.
     pub const fn or_else<G, O: fn(E) Result<T, G>>(self: Result<T, E>, op: O) Result<T, G> {
         return switch self {
-            Ok(v) => Result::<T, G>::Ok(v),
+            Ok(v) => Ok(v),
             Err(e) => op(e),
         };
     }
@@ -219,9 +219,9 @@ extend<T, E> Result<T, E> {
     pub const fn and<U>(self: Result<T, E>, other: Result<U, E>) Result<U, E> {
         return switch self {
             Ok(v) => {
-                other;
+                other
             },
-            Err(e) => Result::<U, E>::Err(e),
+            Err(e) => Err(e),
         };
     }
 
@@ -238,7 +238,7 @@ extend<T, E> Result<T, E> {
         switch &self {
             Ok(v) => f(v),
             Err(_) => {},
-        };
+        }
         return self;
     }
 
@@ -247,7 +247,7 @@ extend<T, E> Result<T, E> {
         switch &self {
             Ok(_) => {},
             Err(e) => f(e),
-        };
+        }
         return self;
     }
 
@@ -264,7 +264,7 @@ extend<T, E> Result<T, E> {
     pub const fn flatten(r: Result<Result<T, E>, E>) Result<T, E> {
         return switch r {
             Ok(inner) => inner,
-            Err(e) => Result::<T, E>::Err(e),
+            Err(e) => Err(e),
         };
     }
 
@@ -273,10 +273,10 @@ extend<T, E> Result<T, E> {
     pub const fn transpose(r: Result<Option<T>, E>) Option<Result<T, E>> {
         return switch r {
             Ok(o) => switch o {
-                Some(v) => Option::<Result<T, E>>::Some(Result::<T, E>::Ok(v)),
+                Some(v) => Some(Result::<T, E>::Ok(v)),
                 None => Option::<Result<T, E>>::None,
             },
-            Err(e) => Option::<Result<T, E>>::Some(Result::<T, E>::Err(e)),
+            Err(e) => Some(Result::<T, E>::Err(e)),
         };
     }
 }
@@ -287,7 +287,7 @@ extend<T: Default, E> Result<T, E> {
         return switch self {
             Ok(v) => v,
             Err(e) => {
-                T::default();
+                T::default()
             },
         };
     }
@@ -297,8 +297,8 @@ extend<T: Copy, E> Result<T, E> {
     /// `Ok(*r)` for `Ok(r)`, the error unchanged (`Result::copied(r)`).
     pub const fn copied(r: Result<&T, E>) Result<T, E> {
         return switch r {
-            Ok(v) => Result::<T, E>::Ok(*v),
-            Err(e) => Result::<T, E>::Err(e),
+            Ok(v) => Ok(*v),
+            Err(e) => Err(e),
         };
     }
 }
@@ -307,8 +307,8 @@ extend<T: Clone, E> Result<T, E> {
     /// `Ok(r.clone())` for `Ok(r)`, the error unchanged (`Result::cloned(r)`).
     pub const fn cloned(r: Result<&T, E>) Result<T, E> {
         return switch r {
-            Ok(v) => Result::<T, E>::Ok(v.clone()),
-            Err(e) => Result::<T, E>::Err(e),
+            Ok(v) => Ok(v.clone()),
+            Err(e) => Err(e),
         };
     }
 }
@@ -318,8 +318,8 @@ extend<T: Clone, E> Result<T, E> {
 extend<T: Clone, E: Clone> Result<T, E> as Clone {
     pub const fn clone(self: &Result<T, E>) Result<T, E> {
         return switch self {
-            Ok(v) => Result::<T, E>::Ok(v.clone()),
-            Err(e) => Result::<T, E>::Err(e.clone()),
+            Ok(v) => Ok(v.clone()),
+            Err(e) => Err(e.clone()),
         };
     }
 }
@@ -367,7 +367,7 @@ extend<T: Hash, E: Hash> Result<T, E> as Hash {
                 h.write_u8(1);
                 e.hash_into(h);
             },
-        };
+        }
     }
 }
 

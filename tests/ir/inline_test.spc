@@ -600,7 +600,7 @@ const PANIC_OPERANDS: str = M"(fn main(args: Vector<str>) i32 {
 const PANIC_SLOTS: str = M"(@noinline
 fn pair(n: i32, z: i32) (i32, i32) {
     let a = n * 2147483647;
-    return a * 2, n / z;
+    return (a * 2, n / z);
 }
 fn main(args: Vector<str>) i32 {
     let n = args.len() as i32;

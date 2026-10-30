@@ -1015,9 +1015,9 @@ pub(package) const fn qbits(qk: u8, q: u32) u32 {
         Q::VB | Q::B30 => q << 30,
         Q::S22 => 1 - q << 22,
         Q::FLS => if q == 4 {
-            1u32 << 23;
+            1u32 << 23
         } else {
-            q << 30;
+            q << 30
         },
         Q::FP => q << 30,
         _ => 0,
@@ -1047,9 +1047,9 @@ const fn qof(r: Row, w: u32) u32 {
     let q = switch qk {
         Q::SF => w >> 31,
         Q::SFN => if w >> 31 == (w >> 22 & 1) {
-            w >> 31;
+            w >> 31
         } else {
-            0xFFu32;
+            0xFFu32
         },
         Q::FT | Q::Z => w >> 22 & 3,
         Q::CVT => w >> 31 | (w >> 22 & 3) << 1,
@@ -1058,11 +1058,11 @@ const fn qof(r: Row, w: u32) u32 {
         Q::VB | Q::B30 => w >> 30 & 1,
         Q::S22 => 1 - (w >> 22 & 1),
         Q::FLS => if (w >> 23 & 1) == 0 {
-            w >> 30;
+            w >> 30
         } else if w >> 30 == 0 {
-            4u32;
+            4u32
         } else {
-            0xFFu32;
+            0xFFu32
         },
         Q::FP => w >> 30,
         Q::ZE => (r.qok as u32).trailing_zeros() as u32,
@@ -1095,9 +1095,9 @@ pub(package) const fn is64(qk: u8, q: u32) bool {
 /// 4 q.
 pub(package) const fn fsize(qk: u8, q: u32) u32 {
     let ft = if qk == Q::CVT {
-        q >> 1;
+        q >> 1
     } else {
-        q;
+        q
     };
     return switch qk {
         Q::FT | Q::CVT => switch ft {
@@ -1293,11 +1293,11 @@ pub(package) const fn bitmask_value(nrs: u32, x: bool) Option<u64> {
     let immr = nrs >> 6 & 0x3F;
     let imms = nrs & 0x3F;
     if !x && n != 0 {
-        return Option::None;
+        return None;
     }
     let combined = n << 6 | ~imms & 0x3F;
     if combined < 2 {
-        return Option::None;
+        return None;
     }
     let len = 31 - combined.leading_zeros() as u32;
     let esize = 1u32 << len;
@@ -1305,22 +1305,22 @@ pub(package) const fn bitmask_value(nrs: u32, x: bool) Option<u64> {
     let s = imms & levels;
     let rr = immr & levels;
     if s == levels {
-        return Option::None;
+        return None;
     }
     let ones = (1u64 << (s + 1) as u64) - 1;
     let emask = if esize == 64 {
-        0xFFFFFFFFFFFFFFFFu64;
+        0xFFFFFFFFFFFFFFFFu64
     } else {
-        (1u64 << esize as u64) - 1;
+        (1u64 << esize as u64) - 1
     };
     let mut e = ones;
     if rr != 0 {
         e = (ones >> rr as u64 | ones << (esize - rr) as u64) & emask;
     }
     let width: u32 = if x {
-        64;
+        64
     } else {
-        32;
+        32
     };
     let mut v: u64 = 0;
     let mut at: u32 = 0;
@@ -1328,7 +1328,7 @@ pub(package) const fn bitmask_value(nrs: u32, x: bool) Option<u64> {
         v |= e << at as u64;
         at += esize;
     }
-    return Option::Some(v);
+    return Some(v);
 }
 
 /// The bits of a 64-bit (`x`) or 32-bit register.
@@ -1343,9 +1343,9 @@ pub(package) const fn wmask(x: bool) u64 {
 /// none.
 pub(package) const fn wide_chunk(u: u64, x: bool) u32 {
     let n: u32 = if x {
-        4;
+        4
     } else {
-        2;
+        2
     };
     for hw in 0..n {
         let sh = (hw * 16) as u64;
@@ -1376,9 +1376,9 @@ pub(package) const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
     }
     let x = is64(r.q, q);
     let wbits: i64 = if x {
-        64;
+        64
     } else {
-        32;
+        32
     };
     let mut w = r.bits | qbits(r.q, q);
     let mut at: usize = 0;
@@ -1389,9 +1389,9 @@ pub(package) const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
         }
         let a = v[at];
         let b = if at + 1 < NV {
-            v[at + 1];
+            v[at + 1]
         } else {
-            0i64;
+            0i64
         };
         if is_reg(k) {
             if !within(a, 0, 31) {
@@ -1675,7 +1675,7 @@ pub(package) const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
             _ => {
                 ok = false;
             },
-        };
+        }
         if !ok {
             return false;
         }
@@ -1699,9 +1699,9 @@ pub(package) const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) boo
     }
     let x = is64(r.q, q);
     let wbits: i64 = if x {
-        64;
+        64
     } else {
-        32;
+        32
     };
     let immr = (w >> 16 & 0x3F) as i64;
     let imms = (w >> 10 & 0x3F) as i64;
@@ -1743,9 +1743,9 @@ pub(package) const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) boo
                     u = ~u & wmask(x);
                 }
                 v[at] = if x {
-                    u as i64;
+                    u as i64
                 } else {
-                    (u as u32) as i32;
+                    (u as u32) as i32
                 };
                 ok = (imm != 0 || hw == 0) && (x || hw < 2) && (k == K::MOVZV || x || imm != 0xFFFF);
             },
@@ -1965,7 +1965,7 @@ pub(package) const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) boo
             _ => {
                 ok = false;
             },
-        };
+        }
         if !ok {
             return false;
         }

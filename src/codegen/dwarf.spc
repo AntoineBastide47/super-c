@@ -189,15 +189,7 @@ extend Dwarf {
             globals.push((o.syms[y as usize].flags & ob::SF_GLOBAL) != 0);
         }
         let files = file_names(p);
-        return Dwarf::build(
-            o.funcs.as_slice(),
-            o.lines.as_slice(),
-            names.as_slice(),
-            globals.as_slice(),
-            files.as_slice(),
-            comp_dir,
-            ptr,
-        );
+        return Dwarf::build(&o.funcs, &o.lines, &names, &globals, &files, comp_dir, ptr);
     }
 
     /// The debug information of functions `funcs` (the symbol of each is the address fixups' symbol),
@@ -234,9 +226,9 @@ extend Dwarf {
         let line = line_program(funcs, lines, files, &used, &fidx, ptr, &mut fx);
         // The unit, then a subprogram and an address range per function.
         let name = if used.len() != 0 {
-            files[used[0] as usize];
+            files[used[0] as usize]
         } else {
-            "";
+            ""
         };
         let mut info = Vector::<u8>::new();
         let mut ranges = Vector::<u8>::new();
@@ -259,13 +251,13 @@ extend Dwarf {
             uleb(
                 &mut info,
                 if globals[k] {
-                    AB_SUB_EXT;
+                    AB_SUB_EXT
                 } else {
-                    AB_SUB;
+                    AB_SUB
                 } + if f.n == 0 {
-                    2u8;
+                    2u8
                 } else {
-                    0u8;
+                    0u8
                 },
             );
             fix(&mut info, &mut fx, D_INFO, FX_ADDR, f.sym, ptr);
@@ -360,9 +352,9 @@ fn line_program(
             row_op(&mut l, row, fidx[row.file as usize], &mut at, &mut file, &mut line, &mut col, false);
             // The body starts past the prologue: a row there ends the prologue.
             let next = if r + 1 < f.n {
-                lines[(f.start + r + 1) as usize].off;
+                lines[(f.start + r + 1) as usize].off
             } else {
-                f.size;
+                f.size
             };
             if r == 0 && f.body < next {
                 let mut b = row;
@@ -461,11 +453,11 @@ pub(package) fn rows(
         let w = (rows[k] >> 32) as u32;
         let l = b.lines[(rows[k] & 0xFFFFFFFF) as usize];
         let off = if k == 0 {
-            0;
+            0
         } else if w < nbody {
-            body + w * unit;
+            body + w * unit
         } else {
-            body + nbody * unit;
+            body + nbody * unit
         };
         o.lines.push(ob::OLine { off: off, file: l.file, line: l.line, col: l.col });
     }
@@ -487,11 +479,11 @@ pub(package) fn attach(o: &mut ob::Obj, d: &Dwarf, fmt: u8, abs: u8) {
     let mut start = Vector::<u32>::new();
     for k in 0..D_COUNT as usize {
         let spec = if fmt == F_MACHO {
-            format("__DWARF,__{},regular,debug", names[k].slice(1, names[k].len()));
+            format("__DWARF,__{},regular,debug", names[k].slice(1, names[k].len()))
         } else {
-            String::from_str(names[k]);
+            String::from_str(names[k])
         };
-        let s = o.own_section(spec.as_str());
+        let s = o.own_section(&spec);
         sec.push(s);
         let mut y = NONE32;
         if fmt != F_MACHO {
@@ -499,7 +491,7 @@ pub(package) fn attach(o: &mut ob::Obj, d: &Dwarf, fmt: u8, abs: u8) {
             let _ = o.define(y, s, 0, d.secs[k].len() as u64, 0);
         }
         start.push(y);
-        o.put(s, d.secs[k].as_slice());
+        o.put(s, &d.secs[k]);
     }
     for k in 0..d.fixes.len() {
         let x = d.fixes[k];

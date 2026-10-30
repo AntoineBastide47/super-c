@@ -136,7 +136,7 @@ extend Parser {
             let b = self.peek();
             if b == b'"' {
                 self.i = self.i + 1;
-                return Option::<String>::Some(out);
+                return Some(out);
             }
             if b == b'\n' {
                 break;
@@ -154,7 +154,7 @@ extend Parser {
                     out.push_byte(e);
                 } else {
                     self.err(self.i, format("unknown escape in string"));
-                    return Option::<String>::None;
+                    return None;
                 }
                 self.i = self.i + 1;
             } else {
@@ -163,7 +163,7 @@ extend Parser {
             }
         }
         self.err(q, format("unterminated string"));
-        return Option::<String>::None;
+        return None;
     }
 
     fn parse_value(self: &mut Self) Option<TomlVal> {
@@ -172,11 +172,11 @@ extend Parser {
         if b == b'"' {
             let s = self.parse_string();
             if s.is_none() {
-                return Option::<TomlVal>::None;
+                return None;
             }
             let mut v = TomlVal::empty(TV_STR);
             v.s = s.unwrap();
-            return Option::<TomlVal>::Some(v);
+            return Some(v);
         }
         if b == b'[' {
             self.i = self.i + 1;
@@ -185,15 +185,15 @@ extend Parser {
                 self.skip_ws(true);
                 if self.peek() == b']' {
                     self.i = self.i + 1;
-                    return Option::<TomlVal>::Some(v);
+                    return Some(v);
                 }
                 if self.peek() != b'"' {
                     self.err(self.i, format("arrays may only contain strings"));
-                    return Option::<TomlVal>::None;
+                    return None;
                 }
                 let s = self.parse_string();
                 if s.is_none() {
-                    return Option::<TomlVal>::None;
+                    return None;
                 }
                 v.arr.push(s.unwrap());
                 self.skip_ws(true);
@@ -201,7 +201,7 @@ extend Parser {
                     self.i = self.i + 1;
                 } else if self.peek() != b']' {
                     self.err(self.i, format("expected ',' or ']' in array"));
-                    return Option::<TomlVal>::None;
+                    return None;
                 }
             }
         }
@@ -212,27 +212,27 @@ extend Parser {
                 self.skip_ws(false);
                 if self.peek() == b'}' {
                     self.i = self.i + 1;
-                    return Option::<TomlVal>::Some(v);
+                    return Some(v);
                 }
                 let k = self.parse_key();
                 if k.len() == 0 {
                     self.err(self.i, format("expected key in inline table"));
-                    return Option::<TomlVal>::None;
+                    return None;
                 }
                 self.skip_ws(false);
                 if self.peek() != b'=' {
                     self.err(self.i, format("expected '=' in inline table"));
-                    return Option::<TomlVal>::None;
+                    return None;
                 }
                 self.i = self.i + 1;
                 self.skip_ws(false);
                 if self.peek() != b'"' {
                     self.err(self.i, format("inline tables may only contain string values"));
-                    return Option::<TomlVal>::None;
+                    return None;
                 }
                 let s = self.parse_string();
                 if s.is_none() {
-                    return Option::<TomlVal>::None;
+                    return None;
                 }
                 v.tbl.push(TomlPair { k: k, v: s.unwrap() });
                 self.skip_ws(false);
@@ -240,7 +240,7 @@ extend Parser {
                     self.i = self.i + 1;
                 } else if self.peek() != b'}' {
                     self.err(self.i, format("expected ',' or '}}' in inline table"));
-                    return Option::<TomlVal>::None;
+                    return None;
                 }
             }
         }
@@ -251,10 +251,10 @@ extend Parser {
             if ok {
                 let mut v = TomlVal::empty(TV_BOOL);
                 v.b = is_true;
-                return Option::<TomlVal>::Some(v);
+                return Some(v);
             }
             self.err(self.i, format("expected value"));
-            return Option::<TomlVal>::None;
+            return None;
         }
         if b == b'-' || b >= b'0' && b <= b'9' {
             let neg = b == b'-';
@@ -267,25 +267,25 @@ extend Parser {
                 let d = (self.peek() - b'0') as i64;
                 if n > (I64_MAX - d) / 10 {
                     self.err(ds, format("integer out of range"));
-                    return Option::<TomlVal>::None;
+                    return None;
                 }
                 n = n * 10 + d;
                 self.i = self.i + 1;
             }
             if self.i == ds {
                 self.err(self.i, format("expected digits"));
-                return Option::<TomlVal>::None;
+                return None;
             }
             let mut v = TomlVal::empty(TV_INT);
             v.i = if neg {
-                -n;
+                -n
             } else {
-                n;
+                n
             };
-            return Option::<TomlVal>::Some(v);
+            return Some(v);
         }
         self.err(self.i, format("expected value"));
-        return Option::<TomlVal>::None;
+        return None;
     }
 
     fn parse_line(self: &mut Self) {
@@ -359,7 +359,7 @@ pub(package) fn parse_into(src: str, errs: &mut diag::Errors) Option<Vector<Toml
     let bad = p.errors.has_errors();
     errs.append(&mut p.errors);
     if bad {
-        return Option::<Vector<TomlItem>>::None;
+        return None;
     }
-    return Option::<Vector<TomlItem>>::Some(replace(&mut p.items, Vector::<TomlItem>::new()));
+    return Some(replace(&mut p.items, Vector::<TomlItem>::new()));
 }

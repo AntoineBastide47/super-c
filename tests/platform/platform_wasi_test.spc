@@ -131,40 +131,40 @@ fn unsupported_facilities_report_unsupported_on_wasi() {
     ph::write_text(s.at("main.spc").as_str(), PROGRAM);
     ph::write_text(s.at("build.toml").as_str(), "bin = \"prog\"\nroot = \"main.spc\"\n");
     let named = env::get("SUPERC").unwrap().unwrap_or(String::from_str("./super-c"));
-    let superc = fs::realpath(named.as_str()).unwrap();
+    let superc = fs::realpath(&named).unwrap();
     let mut transpiler = String::from_str("--transpiler=");
     transpiler.push_string(&superc);
     let log = s.at("build.log");
     let mut argv = Vector::<str>::new();
-    argv.push(superc.as_str());
+    argv.push(&superc);
     argv.push("build");
     argv.push("--target=wasm");
     // On the wasm lane SUPERC is the wasm compiler's wrapper: the build engine runs natively and hands
     // the transpile step to it, as the differential harness does.
     if superc.contains("wasm") {
-        argv.push(transpiler.as_str());
+        argv.push(&transpiler);
     }
     argv.push("-o");
     argv.push("prog");
     let mut build = process::Command::new(argv[0..argv.len()]);
-    build.cwd = Option::<str>::Some(s.dir.as_str());
+    build.cwd = Some(s.dir.as_str());
     build.stdout = process::Redirect::Path(log.as_str());
     build.stderr = process::Redirect::Stdout;
     let mut builder = process::spawn(build).unwrap();
     let built = builder.wait().unwrap();
     if built != process::ExitStatus::Code(0) {
-        eprintln("{}", ph::read_text(log.as_str()).as_str());
+        eprintln("{}", ph::read_text(&log).as_str());
     }
     assert(built == process::ExitStatus::Code(0));
     let out = s.at("run.out");
     let run_argv: [str; 4] = ["wasmtime", "run", "--dir=.", "prog"];
     let mut run = process::Command::new(run_argv);
-    run.cwd = Option::<str>::Some(s.dir.as_str());
+    run.cwd = Some(s.dir.as_str());
     run.stdout = process::Redirect::Path(out.as_str());
     run.stderr = process::Redirect::Stdout;
     let mut runner = process::spawn(run).unwrap();
     let ran = runner.wait().unwrap();
-    let text = ph::read_text(out.as_str());
+    let text = ph::read_text(&out);
     if ran != process::ExitStatus::Code(0) || !text.eq_str("done\n") {
         eprintln("{}", text.as_str());
     }

@@ -52,27 +52,27 @@ static_assert(1 << CLASS_SHIFT_MIN == POOL_BLOCK_SIZE_MIN, "the class index is l
 
 // The record of one chunk, in a block of class 0 (for a class-0 chunk, its own first block). The chunk's
 // size follows from its class and its position in the list (`chunk_blocks`).
-pub(module) struct PoolChunk {
-    pub(module) next: *mut PoolChunk, // older chunk of the same class
-    pub(module) base: *mut u8, // the chunk's address
+struct PoolChunk {
+    next: *mut PoolChunk, // older chunk of the same class
+    base: *mut u8, // the chunk's address
 }
 
 static_assert(sizeof(PoolChunk) <= POOL_BLOCK_SIZE_MIN, "a chunk descriptor fits the smallest block");
 
 // One size class. `cur <= end`; both null until the first chunk.
-pub(module) struct PoolClass {
-    pub(module) free: *mut u8, // free-list head; null when empty
-    pub(module) cur: *mut u8, // next uncarved block of the newest chunk
-    pub(module) end: *mut u8, // one past the newest chunk
-    pub(module) chunks: *mut PoolChunk, // descriptors, newest first
-    pub(module) chunk_count: usize,
+struct PoolClass {
+    free: *mut u8, // free-list head; null when empty
+    cur: *mut u8, // next uncarved block of the newest chunk
+    end: *mut u8, // one past the newest chunk
+    chunks: *mut PoolChunk, // descriptors, newest first
+    chunk_count: usize,
 }
 
-pub(module) struct PoolState<A> {
-    pub(module) classes: [PoolClass; CLASS_COUNT],
-    pub(module) reserved: usize, // bytes of the chunks held
-    pub(module) unpooled: usize, // bytes of the live unpooled blocks
-    pub(module) upstream: A,
+struct PoolState<A> {
+    classes: [PoolClass; CLASS_COUNT],
+    reserved: usize, // bytes of the chunks held
+    unpooled: usize, // bytes of the live unpooled blocks
+    upstream: A,
 }
 
 /// A size-class allocator over chunks from `A`, with O(1) pooled `alloc` and `dealloc`. Owns its chunks
@@ -84,7 +84,7 @@ pub struct Pool<A = Global> {
 /// The `Allocator` handle of a `Pool`: one pointer, `Copy`, valid while the pool is borrowed for `'a`.
 @derive(Copy)
 pub struct PoolAlloc<'a, A = Global> {
-    pub(module) state: *mut PoolState<A>,
+    state: *mut PoolState<A>,
 }
 
 // The class of a request: log2 of the smallest power of two that is at least 16, `size` and `align`, minus
@@ -93,9 +93,9 @@ pub struct PoolAlloc<'a, A = Global> {
 @always_inline
 const fn class_index(size: usize, align: usize) usize {
     let n = if size > align {
-        size;
+        size
     } else {
-        align;
+        align
     };
     return USIZE_BITS - (n - 1 | POOL_BLOCK_SIZE_MIN - 1).leading_zeros() - CLASS_SHIFT_MIN;
 }
@@ -206,9 +206,9 @@ extend<A: Allocator> PoolState<A> {
         }
         let p = unsafe self.alloc(new_size, align);
         let n = if old_size < new_size {
-            old_size;
+            old_size
         } else {
-            new_size;
+            new_size
         };
         if n != 0 {
             unsafe memcpy(p, ptr, n);

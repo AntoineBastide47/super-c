@@ -95,7 +95,7 @@ extend TypedFacts {
     /// ((fmod << 40 | fdecl << 8 | skip) -- the record borrowck replays), or None.
     pub(package) const fn call_info(self: &Self, n: NodeId) Option<u64> {
         if self.unchecked_view {
-            return Option::<u64>::None;
+            return None;
         }
         return self.a().call_info_of(n);
     }
@@ -108,10 +108,10 @@ extend TypedFacts {
 
     pub(package) const fn op_method(self: &Self, n: NodeId) Option<u64> {
         if self.unchecked_view {
-            return Option::<u64>::None;
+            return None;
         }
         return switch self.a().op_method.get(&n) {
-            Some(v) => Option::<u64>::Some(*v),
+            Some(v) => Some(*v),
             None => Option::<u64>::None,
         };
     }
@@ -120,10 +120,10 @@ extend TypedFacts {
     /// matched type, as two's complement bits, or None.
     pub(package) const fn pat_value(self: &Self, n: NodeId) Option<u64> {
         if self.unchecked_view {
-            return Option::<u64>::None;
+            return None;
         }
         return switch self.a().pat_vals.get(&n) {
-            Some(v) => Option::<u64>::Some(*v),
+            Some(v) => Some(*v),
             None => Option::<u64>::None,
         };
     }
@@ -272,13 +272,13 @@ pub(package) fn watermark_check(a: &Ast, w: &FactsWatermark, mid: u32, after_che
         let was = unsafe w.n[k];
         let cur = unsafe now.n[k];
         let r = if k == WM_MONO {
-            a.mono_rel;
+            a.mono_rel
         } else if k == WM_METHOD_REFS {
-            a.method_refs_rel;
+            a.method_refs_rel
         } else if k == WM_CALL_INFO {
-            a.call_info_rel;
+            a.call_info_rel
         } else {
-            Released { on: false, pre: 0, post: 0 };
+            Released { on: false, pre: 0, post: 0 }
         };
         if r.on {
             d += wm_diff(mid, k, was, r.pre as usize, " up to its release");
@@ -310,7 +310,7 @@ fn wm_diff(mid: u32, k: usize, was: usize, cur: usize, when: str) u32 {
     s.push_str(" -> ");
     s.push_u64(cur as u64);
     s.push_str(when);
-    wm_report(mid, s.as_str());
+    wm_report(mid, &s);
     return 1;
 }
 

@@ -135,9 +135,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
                 p = p * z;
             }
             let s = if i % 2 == 0 {
-                R::of(1.0);
+                R::of(1.0)
             } else {
-                R::of(-1.0);
+                R::of(-1.0)
             };
             a.push(s / self.w[refs[i]]);
             a.push(self.g[refs[i]]);

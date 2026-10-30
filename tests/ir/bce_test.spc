@@ -116,7 +116,7 @@ fn case_root(n: usize) String {
         arms.format_into("    if k == {} {{\n        return case_{}::case_main(argv);\n    }}\n", k, k);
     }
     root.format_into(
-        "fn main(argv: Vector<str>) i32 {{\n    let e = stdlib::getenv(\"BATCH_CASE\");\n    let k = if e == null {{\n        -1;\n    }} else {{\n        unsafe str::from_cstr(e).parse_i64().unwrap_or(-1);\n    }};\n{}    return 99;\n}}\n",
+        "fn main(argv: Vector<str>) i32 {{\n    let e = stdlib::getenv(\"BATCH_CASE\");\n    let k = if e == null {{\n        -1\n    }} else {{\n        unsafe str::from_cstr(e).parse_i64().unwrap_or(-1)\n    }};\n{}    return 99;\n}}\n",
         arms.as_str(),
     );
     return root;
@@ -392,8 +392,8 @@ fn guard_widening_groups_any_container() {
     // Three guards over one root and one length, with pure code between: one group test at the first,
     // and the member guards fold, for std's Vector and for the program's own container alike.
     let tri_user = format("{}fn tri(b: &Buf, j: usize) i32 {{\n    return b[j] + b[j + 1] + b[j + 2];\n}}\n", BUF);
-    expect_in_fn("a user container's guards widen", tri_user.as_str(), "int32_t tri(", "__sc_bounds_group(", true);
-    expect_in_fn("no member guard of a user container", tri_user.as_str(), "int32_t tri(", "__sc_bounds(", false);
+    expect_in_fn("a user container's guards widen", &tri_user, "int32_t tri(", "__sc_bounds_group(", true);
+    expect_in_fn("no member guard of a user container", &tri_user, "int32_t tri(", "__sc_bounds(", false);
     let tri_vec = "fn tri(v: &Vector<i32>, j: usize) i32 {\n    return v[j] + v[j + 1] + v[j + 2];\n}\n";
     expect_c_user_present("a Vector's guards widen", tri_vec, "__sc_bounds_group(");
     expect_c_user_absent("no member guard of a Vector", tri_vec, "__sc_bounds(");
@@ -402,7 +402,7 @@ fn guard_widening_groups_any_container() {
         "{}fn sum(b: &Buf) i32 {{\n    let mut s = 0;\n    for i in 0..b.n {{\n        s += b[i];\n    }}\n    return s;\n}}\n",
         BUF,
     );
-    expect_in_fn("a user container's loop guard folds", sum_user.as_str(), "int32_t sum(", "__sc_bounds(", false);
+    expect_in_fn("a user container's loop guard folds", &sum_user, "int32_t sum(", "__sc_bounds(", false);
 }
 
 @test
@@ -412,9 +412,9 @@ fn guard_widening_keeps_its_panic() {
         "{}fn tri(b: &Buf, j: usize) i32 {{\n    return b[j] + b[j + 1] + b[j + 2];\n}}\nfn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {{\n        v.push(i);\n    }}\n    let b = Buf {{ ptr: v.as_ptr(), n: v.len() }};\n    return tri(&b, argv.len() + 60) - 186;\n}}\n",
         BUF,
     );
-    h::expect_exit("the last member in range", SRC.as_str(), 0);
+    h::expect_exit("the last member in range", &SRC, 0);
     let BAD = SRC.replace("argv.len() + 60", "argv.len() + 61");
-    h::expect_trap("the last member out of range", BAD.as_str(), "panic: Buf[i]: index out of bounds");
+    h::expect_trap("the last member out of range", &BAD, "panic: Buf[i]: index out of bounds");
 }
 
 @test
@@ -424,8 +424,8 @@ fn guard_widening_stops_at_effects_and_other_panics() {
         "{}fn f(b: &Buf, j: usize, out: &mut i32) i32 {{\n    let x = b[j];\n    *out = x;\n    return x + b[j + 1];\n}}\n",
         BUF,
     );
-    expect_in_fn("no group across a store", store.as_str(), "int32_t f(", "__sc_bounds_group(", false);
-    expect_in_fn("each guard stays across a store", store.as_str(), "int32_t f(", "__sc_bounds(", true);
+    expect_in_fn("no group across a store", &store, "int32_t f(", "__sc_bounds_group(", false);
+    expect_in_fn("each guard stays across a store", &store, "int32_t f(", "__sc_bounds(", true);
     // Guards written by hand widen when they panic alike, and not when the panics differ.
     let same = "fn g(s: []i32, j: usize) i32 {\n    if j >= s.len() {\n        panic(\"out\");\n    }\n    if j + 1 >= s.len() {\n        panic(\"out\");\n    }\n    return 0;\n}\n";
     expect_c_user_present("one panic: the guards widen", same, "__sc_fits(");
@@ -765,7 +765,7 @@ fn interval_facts_remove_strided_checks(b: &mut h::ExitBatch) {
 
 fn interval_join_keeps_the_hull(b: &mut h::ExitBatch) {
     // `k` is 2 or 5 after the join and the length is at least 8 past the guard.
-    let SRC: str = "fn hull(s: []i32, c: bool) i32 {\n    if s.len() < 8 {\n        return 0;\n    }\n    let k: usize = if c {\n        2;\n    } else {\n        5;\n    };\n    return s[k];\n}\nfn masked(s: []i32, k: usize) i32 {\n    if s.len() >= 8 {\n        return s[k & 7] + s[k % 8];\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..8 {\n        v.push(k);\n    }\n    let s: []i32 = v[0..8];\n    return hull(s, argv.len() == 1) + masked(s, argv.len() + 8) - 4;\n}\n";
+    let SRC: str = "fn hull(s: []i32, c: bool) i32 {\n    if s.len() < 8 {\n        return 0;\n    }\n    let k: usize = if c {\n        2\n    } else {\n        5\n    };\n    return s[k];\n}\nfn masked(s: []i32, k: usize) i32 {\n    if s.len() >= 8 {\n        return s[k & 7] + s[k % 8];\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..8 {\n        v.push(k);\n    }\n    let s: []i32 = v[0..8];\n    return hull(s, argv.len() == 1) + masked(s, argv.len() + 8) - 4;\n}\n";
     expect_c_user_absent("hull and mask bounds prove the accesses", SRC, "__sc_bounds(");
     b.add("hull behavior", SRC, 0);
 }
@@ -791,9 +791,9 @@ fn vec_check(label: str, src: str, present: bool, trap: str) {
     assert(b.built, label);
     let r = h::diff_run(&b, "");
     let ok = if trap.len() == 0 {
-        r.exit == 0;
+        r.exit == 0
     } else {
-        r.exit != 0 && r.err.contains(trap);
+        r.exit != 0 && r.err.contains(trap)
     };
     if !ok {
         eprintln("{}: exit {}: {}", label, r.exit, r.err.as_str());
@@ -845,8 +845,8 @@ extend VecProgs {
         let q = h::diff_proj();
         for k in 0..self.srcs.len() {
             let m = case_module(self.srcs.at(k).as_str());
-            p.mkfile(format("case_{}.spc", k).as_str(), m.as_str());
-            q.mkfile(format("case_{}.spc", k).as_str(), m.as_str());
+            p.mkfile(format("case_{}.spc", k).as_str(), &m);
+            q.mkfile(format("case_{}.spc", k).as_str(), &m);
         }
         p.mkfile("main.spc", case_root(self.srcs.len()).as_str());
         q.mkfile("main.spc", case_root(self.srcs.len()).as_str());
@@ -868,12 +868,12 @@ extend VecProgs {
             let mut cmd = format("\"{}/prog{}\"", root, unsafe str::from_cstr(cli::binext()));
             let mut errp = format("{}/.err", root);
             let exit = cli::run_with(cmd.cstr(), null, null, errp.cstr(), format("BATCH_CASE={}", k).as_str());
-            let err = cli::read_text(errp.as_str());
+            let err = cli::read_text(&errp);
             let trap = self.traps.at(k).as_str();
             let ok = if trap.len() == 0 {
-                exit == 0;
+                exit == 0
             } else {
-                exit != 0 && err.contains(trap);
+                exit != 0 && err.contains(trap)
             };
             if !ok {
                 eprintln("{}: exit {}: {}", label, exit, err.as_str());
@@ -983,7 +983,7 @@ fn main(argv: Vector<str>) i32 {
         return 0;
     }
     let y = x[1..1];
-    return x[0][switch 0 { _ => { x = y; 0; } }];
+    return x[0][switch 0 { _ => { x = y; 0 } }];
 }
 fn main(argv: Vector<str>) i32 {
     let a0: []u32 = [7];
@@ -1240,9 +1240,9 @@ pub fn bridges(xs: []i32, a: &mut Array<u32, 8>, i: usize, g: i32) i32 {
         }
     }
     let hi = if i > xs.len() {
-        xs.len();
+        xs.len()
     } else {
-        i;
+        i
     };
     for k in 0..hi {
         t += xs[k];
@@ -1363,32 +1363,32 @@ fn rule_programs(b: &mut h::ExitBatch) {
         "{}fn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 23 {{\n        v.push(k as i32);\n    }}\n    let xs = v.as_slice();\n    let mut a = Array::<i32, 8>::new();\n    let mut a4 = Array::<i32, 4>::new();\n    for k in 0..8usize {{\n        a[k] = k as i32;\n    }}\n    for k in 0..4usize {{\n        a4[k] = k as i32 + 1;\n    }}\n    let i = argv.len() + 2;\n    let mut t = join_access(xs) + eq_len(xs, xs) + last_nonempty(xs) + assert_guard(xs, i) + array_const(&a, i);\n    t += derived_index(xs, i) + sub_views(xs, i) + min_len(xs, xs[..5]) + or_return(xs, i, i + 1) + pairs(xs);\n    t += loops(xs, i) + switches(xs, &a4, i) + casts_and_bridges(xs, i, 99);\n    return t - 7025;\n}}\n",
         RULES,
     );
-    b.add("the proved accesses keep their values", sums.as_str(), 0);
+    b.add("the proved accesses keep their values", &sums, 0);
     let counted = format(
         "{}fn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 23 {{\n        v.push(k as i32);\n    }}\n    let xs = v.as_slice();\n    let mut a = Array::<u32, 8>::new();\n    let i = argv.len() + 2;\n    let t = counters(xs) + bridges(xs, &mut a, i, 11) + bridges(xs, &mut a, 40, 3);\n    return t % 200 - 47;\n}}\n",
         RULES,
     );
-    b.add("the counters, bridges and cast pairs keep their values", counted.as_str(), 0);
+    b.add("the counters, bridges and cast pairs keep their values", &counted, 0);
     let closure = format(
         "{}fn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    return keep_closure(v.as_slice(), argv.len());\n}}\n",
         RULES,
     );
-    b.add_trap("a closure's write to a captured index", closure.as_str(), "index out of bounds");
+    b.add_trap("a closure's write to a captured index", &closure, "index out of bounds");
     let alias = format(
         "{}fn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    v.push(5);\n    let c = UnsafeCell::<Vector<i32>>::new(v);\n    return keep_raw_alias(&c, argv.len() - 1);\n}}\n",
         RULES,
     );
-    b.add_trap("a pop through an aliasing pointer", alias.as_str(), "index out of bounds");
+    b.add_trap("a pop through an aliasing pointer", &alias, "index out of bounds");
     let pop = format(
         "{}fn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 3 {{\n        v.push(k as i32);\n    }}\n    return keep_pop_loop(&mut v);\n}}\n",
         RULES,
     );
-    b.add_trap("a loop that shrinks its vector", pop.as_str(), "index out of bounds");
+    b.add_trap("a loop that shrinks its vector", &pop, "index out of bounds");
     let cur = format(
         "{}fn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<u8>::new();\n    v.push(1);\n    let mut c = Cur {{ buf: v, pos: argv.len() - 1 }};\n    return keep_bumped_cursor(&mut c) as i32;\n}}\n",
         RULES,
     );
-    b.add_trap("a cursor a call bumps", cur.as_str(), "index out of bounds");
+    b.add_trap("a cursor a call bumps", &cur, "index out of bounds");
 }
 
 @test

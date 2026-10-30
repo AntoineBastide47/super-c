@@ -27,9 +27,9 @@ pub enum FloatFamily {
 }
 
 /// The FloatFamily with infinities and NaNs (IEEE 754 encoding).
-pub const IEEE: FloatFamily = FloatFamily::FF_IEEE;
+pub const IEEE: FloatFamily = FF_IEEE;
 /// The FloatFamily whose all-ones exponent still encodes finite values (no inf/NaN; e.g. e4m3fn).
-pub const FINITE_ONLY: FloatFamily = FloatFamily::FF_FINITE_ONLY;
+pub const FINITE_ONLY: FloatFamily = FF_FINITE_ONLY;
 
 /// How a value classifies, from its encoding alone.
 pub enum FpClass {
@@ -142,9 +142,9 @@ extend<const W: usize> UInt<W> {
         let mut j = levels;
         while j > 0 {
             let kn = if j == 1 {
-                0;
+                0
             } else {
-                unsafe ks[j - 2];
+                unsafe ks[j - 2]
             };
             if bl0 - 2 * kn > 128 {
                 break;
@@ -160,9 +160,9 @@ extend<const W: usize> UInt<W> {
         while j > 0 {
             j = j - 1;
             let kn = if j == 0 {
-                0;
+                0
             } else {
-                unsafe ks[j - 1];
+                unsafe ks[j - 1]
             };
             let b = self.shr(2 * kn);
             x.sqrt_step(&mut rm, &b, unsafe ks[j] - kn);
@@ -410,23 +410,23 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         let fz = self.frac_field().is_zero();
         if eb == 0 {
             if fz {
-                return FpClass::FP_ZERO;
+                return FP_ZERO;
             }
-            return FpClass::FP_SUBNORMAL;
+            return FP_SUBNORMAL;
         }
         if FAMILY == FloatFamily::FF_FINITE_ONLY {
             if self.is_nan() {
-                return FpClass::FP_NAN;
+                return FP_NAN;
             }
-            return FpClass::FP_NORMAL;
+            return FP_NORMAL;
         }
         if eb == Float::<E, F, FAMILY>::exp_field_max() {
             if fz {
-                return FpClass::FP_INFINITE;
+                return FP_INFINITE;
             }
-            return FpClass::FP_NAN;
+            return FP_NAN;
         }
-        return FpClass::FP_NORMAL;
+        return FP_NORMAL;
     }
 
     /// True for any NaN; for FINITE_ONLY, the family's single NaN encoding.
@@ -861,9 +861,9 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         let _ = w.decode_sig3(&mut eb);
         let mut d10 = eb * 30103 / 100000;
         let mag = if d10 < 0 {
-            (0 - d10) as u64;
+            (0 - d10) as u64
         } else {
-            d10 as u64;
+            d10 as u64
         };
         let scale = Float::<{E + 2}, {F + 96}, IEEE>::pow10_wide(mag);
         if d10 >= 0 {
@@ -953,10 +953,10 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         }
         if n - i == 3 {
             if s[i] == b'n' && s[i + 1] == b'a' && s[i + 2] == b'n' {
-                return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::nan());
+                return Some(Float::<E, F, FAMILY>::nan());
             }
             if s[i] == b'i' && s[i + 1] == b'n' && s[i + 2] == b'f' {
-                return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::overflow_result(negv));
+                return Some(Float::<E, F, FAMILY>::overflow_result(negv));
             }
         }
         // The tracked digits gather as an integer: up to 19 in a u64 (`chunk`, `scale` 10 to their count),
@@ -974,7 +974,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             let ch = s[i];
             if ch == b'.' {
                 if seen_dot {
-                    return Option::<Float<E, F, FAMILY>>::None;
+                    return None;
                 }
                 seen_dot = true;
                 i = i + 1;
@@ -1007,7 +1007,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         }
         digs = Float::<E, F, FAMILY>::fold_digits(&digs, scale, chunk);
         if !any {
-            return Option::<Float<E, F, FAMILY>>::None;
+            return None;
         }
         let mut e10: i64 = 0;
         if i < n && (s[i] == b'e' || s[i] == b'E') {
@@ -1018,12 +1018,12 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
                 i = i + 1;
             }
             if i >= n {
-                return Option::<Float<E, F, FAMILY>>::None;
+                return None;
             }
             while i < n {
                 let ch = s[i];
                 if ch < b'0' || ch > b'9' {
-                    return Option::<Float<E, F, FAMILY>>::None;
+                    return None;
                 }
                 if e10 < 100000000 {
                     e10 = e10 * 10 + (ch - b'0') as i64;
@@ -1035,20 +1035,20 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             }
         }
         if i != n {
-            return Option::<Float<E, F, FAMILY>>::None;
+            return None;
         }
         if digs.is_zero() {
             // Zero at any scale; scaling could meet an infinite power of ten, and 0 * inf is NaN.
             if negv {
-                return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::neg_zero());
+                return Some(Float::<E, F, FAMILY>::neg_zero());
             }
-            return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::zero());
+            return Some(Float::<E, F, FAMILY>::zero());
         }
         let total = e10 + exp_adj;
         let mag = if total < 0 {
-            (0 - total) as u64;
+            (0 - total) as u64
         } else {
-            total as u64;
+            total as u64
         };
         let p10 = Float::<{E + 2}, {F + 96}, IEEE>::pow10_wide(mag);
         let mut acc = Float::<{E + 2}, {F + 96}, IEEE>::from_uint(&digs);
@@ -1061,7 +1061,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         if negv {
             r = r.neg();
         }
-        return Option::<Float<E, F, FAMILY>>::Some(r);
+        return Some(r);
     }
 
     // digs * scale + chunk: `from_str` folding a u64 of digits into the wide integer.
@@ -1251,9 +1251,9 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     // significand always fits one limb, so the rounding runs in plain u64 arithmetic.
     const fn to_scalar_bits(self: &Float<E, F, FAMILY>, de: usize, df: usize) u64 {
         let sbit = if self.sign() {
-            1u64 << (de + df) as u64;
+            1u64 << (de + df) as u64
         } else {
-            0u64;
+            0u64
         };
         let emax_dst = (1u64 << de as u64) - 1;
         if self.is_nan() {
@@ -1610,7 +1610,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     /// Sign, biased exponent field, and stored fraction: the raw fields, not the mathematical
     /// significand (the implicit bit is not included).
     pub const fn to_parts(self: &Float<E, F, FAMILY>) (bool, u64, UInt<{1 + E + F}>) {
-        return self.sign(), self.exp_field(), self.frac_field();
+        return (self.sign(), self.exp_field(), self.frac_field());
     }
 
     /// The inverse of to_parts; the exponent and fraction are masked to their fields.

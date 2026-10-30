@@ -113,9 +113,9 @@ pub(package) const fn plan(
     while c >= 1 {
         let ce = find(tab, fs, op, t, r, c, bits);
         let ke = if cop == ir::OP_COUNT {
-            0i64;
+            0i64
         } else {
-            find(tab, fs, cop, t, t, c, bits);
+            find(tab, fs, cop, t, t, c, bits)
         };
         if ce >= 0 && ke >= 0 {
             p.form = PF_SPLIT;
@@ -129,9 +129,9 @@ pub(package) const fn plan(
     }
     // No split: an entry wider than the preferred width beats the lane loop (a 512-bit `compress`).
     let w = if bits < 512 {
-        find(tab, fs, op, t, r, lanes, 512);
+        find(tab, fs, op, t, r, lanes, 512)
     } else {
-        -1;
+        -1
     };
     if w >= 0 {
         p.form = PF_NATIVE;
@@ -160,25 +160,25 @@ const fn combine_op(op: u32) u32 {
     }
     let c = (op - ir::OP_SIMD) as u8;
     let k = if c == ir::SIMD_REDUCE_ADD_TREE {
-        ir::OP_ADD;
+        ir::OP_ADD
     } else if c == ir::SIMD_REDUCE_MUL_TREE {
-        ir::OP_MUL;
+        ir::OP_MUL
     } else if c == ir::SIMD_REDUCE_ADD {
-        ir::OP_SIMD + ir::SIMD_WRAP_ADD as u32;
+        ir::OP_SIMD + ir::SIMD_WRAP_ADD as u32
     } else if c == ir::SIMD_REDUCE_MUL {
-        ir::OP_SIMD + ir::SIMD_WRAP_MUL as u32;
+        ir::OP_SIMD + ir::SIMD_WRAP_MUL as u32
     } else if c == ir::SIMD_REDUCE_MIN {
-        ir::OP_SIMD + ir::SIMD_MIN as u32;
+        ir::OP_SIMD + ir::SIMD_MIN as u32
     } else if c == ir::SIMD_REDUCE_MAX {
-        ir::OP_SIMD + ir::SIMD_MAX as u32;
+        ir::OP_SIMD + ir::SIMD_MAX as u32
     } else if c == ir::SIMD_REDUCE_AND {
-        ir::OP_AND;
+        ir::OP_AND
     } else if c == ir::SIMD_REDUCE_OR {
-        ir::OP_OR;
+        ir::OP_OR
     } else if c == ir::SIMD_REDUCE_XOR {
-        ir::OP_XOR;
+        ir::OP_XOR
     } else {
-        ir::OP_COUNT;
+        ir::OP_COUNT
     };
     return k;
 }

@@ -361,7 +361,7 @@ extend InstGraph {
                 return *v;
             },
             None => {},
-        };
+        }
         let id = self.unit_key.len() as u32;
         self.unit_key.push(key);
         self.unit_ix.insert(key, id);
@@ -498,9 +498,9 @@ extend InstGraph {
                 self.origin.push(self.cur_org);
                 self.flags.push(
                     if self.in_spec {
-                        RF_SPEC;
+                        RF_SPEC
                     } else {
-                        0;
+                        0
                     },
                 );
                 let id = self.recs.len() as u32 - 1;
@@ -557,7 +557,7 @@ extend InstGraph {
                 return (*v) as u32;
             },
             None => {},
-        };
+        }
         let y = *a.type_at(t);
         let mut d: u32 = 0;
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE {
@@ -610,23 +610,23 @@ extend InstGraph {
                 if y.kind == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
                     nt.qualifier = TypeQualifier::TYPE_QUAL_NONE as u8;
                 }
-                g.intern_g(nt);
+                g.intern_g(nt)
             },
             TYPE_ARRAY | TYPE_SIMD | TYPE_MASK => {
                 let e = self.subst_intern(a, y.as_data.arr.elem, frame, depth + 1);
                 let r9 = if y.arr_sym() {
-                    g.intern_array_g(y.kind, e, self.subst_intern(a, y.as_data.arr.len, frame, depth + 1));
+                    g.intern_array_g(y.kind, e, self.subst_intern(a, y.as_data.arr.len, frame, depth + 1))
                 } else {
                     let mut nt = y;
                     nt.as_data.arr.elem = e;
-                    g.intern_g(nt);
+                    g.intern_g(nt)
                 };
-                r9;
+                r9
             },
             TYPE_FIELD_PROJECTION => {
                 let mut nt = y;
                 nt.as_data.proj.owner = self.subst_intern(a, y.as_data.proj.owner, frame, depth + 1);
-                g.intern_g(nt);
+                g.intern_g(nt)
             },
             TYPE_ASSOC => {
                 let mut it = *a.instance(y.as_data.inst);
@@ -634,11 +634,11 @@ extend InstGraph {
                     unsafe it.args[i as usize] = self.subst_intern(a, unsafe it.args[i as usize], frame, depth + 1);
                 }
                 let r9 = if a.type_concrete(it.args[0]) {
-                    self.assoc_norm_g(&it, depth + 1);
+                    self.assoc_norm_g(&it, depth + 1)
                 } else {
-                    TYPE_NONE;
+                    TYPE_NONE
                 };
-                pick(r9 != TYPE_NONE, r9, g.intern_assoc_g(it.module, it.decl, &it.args[0], it.n));
+                pick(r9 != TYPE_NONE, r9, g.intern_assoc_g(it.module, it.decl, &it.args[0], it.n))
             },
             TYPE_INSTANCE | TYPE_DYN => {
                 let it = *a.instance(y.as_data.inst);
@@ -647,11 +647,11 @@ extend InstGraph {
                     unsafe na[i as usize] = self.subst_intern(a, unsafe it.args[i as usize], frame, depth + 1);
                 }
                 let r9 = if y.kind == TypeKind::TYPE_DYN {
-                    g.intern_dyn_g(it.module, it.decl, &na[0], it.n, y.qualifier);
+                    g.intern_dyn_g(it.module, it.decl, &na[0], it.n, y.qualifier)
                 } else {
-                    g.intern_instance_g(it.module, it.decl, &na[0], it.n);
+                    g.intern_instance_g(it.module, it.decl, &na[0], it.n)
                 };
-                r9;
+                r9
             },
             TYPE_FUNCTION => {
                 let r9 = if y.fn_sig() {
@@ -659,21 +659,21 @@ extend InstGraph {
                     for i in 0..it.n {
                         unsafe it.args[i as usize] = self.subst_intern(a, unsafe it.args[i as usize], frame, depth + 1);
                     }
-                    g.intern_sig_g(&it, y.qualifier);
+                    g.intern_sig_g(&it, y.qualifier)
                 } else if (t & TYPE_PROV) == 0 {
-                    t;
+                    t
                 } else {
-                    g.intern_g(y);
+                    g.intern_g(y)
                 };
-                r9;
+                r9
             },
             _ => {
                 let r9 = if (t & TYPE_PROV) == 0 {
-                    t;
+                    t
                 } else {
-                    g.intern_g(y);
+                    g.intern_g(y)
                 };
-                r9;
+                r9
             },
         };
     }
@@ -828,7 +828,7 @@ extend InstGraph {
             *v = l.floor_of(sum);
             return true;
         }
-        let mut k = ArgKey { ty: TYPE_NONE, val: 0, has_val: false, bt: BuiltinType::BT_COUNT };
+        let mut k = ArgKey { ty: TYPE_NONE, val: 0, has_val: false, bt: BT_COUNT };
         if !self.cval_key(a, lt, frame, &mut k) {
             return false;
         }
@@ -865,16 +865,16 @@ extend InstGraph {
                     y.as_data.arr.len,
                     frame,
                 ));
-                bad || self.ty_bad(a, y.as_data.arr.elem, frame, depth + 1);
+                bad || self.ty_bad(a, y.as_data.arr.elem, frame, depth + 1)
             },
             TYPE_SIMD | TYPE_MASK => self.cexpr_ovf(a, y.as_data.arr.len, frame) || self.vec_fault(a, &y, frame).len() != 0,
             TYPE_INSTANCE | TYPE_DYN | TYPE_FUNCTION => {
                 let mut bad = false;
                 let r = y.rec();
                 let it = if r != NO_REC {
-                    *a.instance(r);
+                    *a.instance(r)
                 } else {
-                    TyInstance { module: 0, decl: NODE_NONE, n: 0 };
+                    TyInstance { module: 0, decl: NODE_NONE, n: 0 }
                 };
                 for i in 0..it.n {
                     bad = bad || self.cexpr_ovf(a, unsafe it.args[i as usize], frame) || self.ty_bad(
@@ -884,7 +884,7 @@ extend InstGraph {
                         depth + 1,
                     );
                 }
-                bad;
+                bad
             },
             _ => false,
         };
@@ -958,9 +958,9 @@ extend InstGraph {
                 if frame.at(f).pmod == pd.module && frame.at(f).pdecl == pd.node {
                     binds.push_str(
                         if binds.len() == 0 {
-                            " for ";
+                            " for "
                         } else {
-                            ", ";
+                            ", "
                         },
                     );
                     binds.push_str(name);
@@ -1209,7 +1209,7 @@ extend InstGraph {
             if da.ext(gp).generic_param.is_lifetime || ai >= it.n as u32 {
                 continue;
             }
-            let mut key = ArgKey { ty: TYPE_NONE, val: 0, has_val: false, bt: BuiltinType::BT_COUNT };
+            let mut key = ArgKey { ty: TYPE_NONE, val: 0, has_val: false, bt: BT_COUNT };
             key.has_val = self.cval_key(a, unsafe it.args[ai as usize], frame, &mut key);
             inner.push(Subst { pmod: it.module, pdecl: gp, key: key });
             ai += 1;
@@ -1464,7 +1464,7 @@ extend InstGraph {
     // EVALUATES when every param has a bound value, keying exactly as the emitter's folded TYPE_CONST
     // does. ty TYPE_NONE = unbound, or a value outside the form's types.
     fn const_expr_bound(self: &Self, a: &Ast, y: &Ty, frame: &Vector<Subst>) ArgKey {
-        let none = ArgKey { ty: TYPE_NONE, val: 0, has_val: false, bt: BuiltinType::BT_COUNT };
+        let none = ArgKey { ty: TYPE_NONE, val: 0, has_val: false, bt: BT_COUNT };
         let l = a.const_lin_at(y.as_data.inst);
         let hit = lin_identity(l);
         if hit >= 0 {
@@ -1539,7 +1539,7 @@ extend InstGraph {
                 }
             }
         }
-        return ArgKey { ty: self.subst_intern(a, t, frame, 0), val: 0, has_val: false, bt: BuiltinType::BT_COUNT };
+        return ArgKey { ty: self.subst_intern(a, t, frame, 0), val: 0, has_val: false, bt: BT_COUNT };
     }
 
     // Is `t` concrete once the frame applies? (Every symbolic leaf must be bound.)
@@ -1577,7 +1577,7 @@ extend InstGraph {
                         }
                     }
                 }
-                ok;
+                ok
             },
             _ => true,
         };
@@ -1600,9 +1600,9 @@ extend InstGraph {
             return;
         }
         let prev = if memo {
-            self.enter(U_TN | t as u64);
+            self.enter(U_TN | t as u64)
         } else {
-            self.cur_unit;
+            self.cur_unit
         };
         self.note_type_walk(a, t, frame, depth);
         self.cur_unit = prev;
@@ -1625,9 +1625,9 @@ extend InstGraph {
             // propagation records that instance, so the graph must too.
             let p2 = unsafe &*self.pkg;
             let hit = if y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-                p2.prelude_lookup("SliceMut", true);
+                p2.prelude_lookup("SliceMut", true)
             } else {
-                p2.prelude_lookup("Slice", true);
+                p2.prelude_lookup("Slice", true)
             };
             if hit.node != NODE_NONE && self.concrete_subst(a, y.as_data.elem, frame, depth + 1) {
                 let k0 = self.argkey_subst(a, y.as_data.elem, frame);
@@ -2204,7 +2204,7 @@ extend InstGraph {
                 None => {
                     gk.insert(key, groups.len() as u64);
                     groups.push(Vector::<u32>::new());
-                    groups.len() as u64 - 1;
+                    groups.len() as u64 - 1
                 },
             };
             groups[gi as usize].push(r as u32);
@@ -2739,7 +2739,7 @@ extend InstGraph {
             for j in 0..sh.np {
                 let ty = unsafe pi.args[j as usize];
                 let x = xarg_of(a, ty, a, a.module, gens);
-                let mut sl = XSlot { x: x, ty: ty, gid: NODE_NONE, bt: BuiltinType::BT_COUNT };
+                let mut sl = XSlot { x: x, ty: ty, gid: NODE_NONE, bt: BT_COUNT };
                 if x.kind == XA_PARAM || x.kind == XA_FORM {
                     sl.gid = unsafe a.list(gens)[x.par as usize];
                 }
@@ -3150,9 +3150,9 @@ extend InstGraph {
         if ki < 0 {
             self.low.retarget(m);
             let ok = if closure {
-                self.low.lower_closure_body(node);
+                self.low.lower_closure_body(node)
             } else {
-                self.low.lower_fn(node);
+                self.low.lower_fn(node)
             };
             if !ok {
                 self.kept_ix.insert(key, ki as u64);
@@ -3476,11 +3476,11 @@ extend InstGraph {
     fn note_binop(self: &mut Self, a: &Ast, rv: &ir::Rvalue, b: &ir::CoreBody, frame: &Vector<Subst>) {
         let t = rv.c as tt::TokenType;
         let name = if t == tt::TokenType::EqualEqual || t == tt::TokenType::BangEqual {
-            "eq";
+            "eq"
         } else if t == tt::TokenType::LessThan || t == tt::TokenType::LessThanEqual || t == tt::TokenType::GreaterThan || t == tt::TokenType::GreaterThanEqual {
-            "cmp";
+            "cmp"
         } else {
-            t.op_method();
+            t.op_method()
         };
         if name.len() == 0 || rv.a as usize >= b.operands.len() {
             return;
@@ -3630,7 +3630,7 @@ extend InstGraph {
                     }
                 },
                 None => {},
-            };
+            }
             for i in 0..lazy.len() {
                 if !seen.contains(&lazy[i]) {
                     seen.insert(lazy[i]);
@@ -3892,7 +3892,7 @@ fn ty_names(a: &Ast, t: TypeId, d: DefId, depth: i32) bool {
             for i in 0..it.n {
                 hit = hit || ty_names(a, unsafe it.args[i as usize], d, depth + 1);
             }
-            hit;
+            hit
         },
         _ => false,
     };
@@ -3938,7 +3938,7 @@ fn folds_const(a: &Ast, t: TypeId, depth: i32) bool {
                     hit = hit || folds_const(a, unsafe it.args[i], depth + 1);
                 }
             }
-            hit;
+            hit
         },
         _ => false,
     };

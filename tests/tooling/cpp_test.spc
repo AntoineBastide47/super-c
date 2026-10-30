@@ -146,9 +146,9 @@ fn scan_with(text: str, drop_pragmas: bool) Scan {
             let three = text.slice(
                 i,
                 if i + 3 <= n {
-                    i + 3;
+                    i + 3
                 } else {
-                    n;
+                    n
                 },
             );
             if three == "..." || three == "<<=" || three == ">>=" {
@@ -157,9 +157,9 @@ fn scan_with(text: str, drop_pragmas: bool) Scan {
                 let two = text.slice(
                     i,
                     if i + 2 <= n {
-                        i + 2;
+                        i + 2
                     } else {
-                        n;
+                        n
                     },
                 );
                 let pairs: []str = [
@@ -191,9 +191,9 @@ fn scan_with(text: str, drop_pragmas: bool) Scan {
                     }
                 }
                 i += if hit {
-                    2;
+                    2
                 } else {
-                    1;
+                    1
                 };
             }
         }
@@ -237,7 +237,7 @@ fn run(text: str, predefs: str) String {
     let mut pp = one(text, predefs);
     let mut out = String::new();
     assert(pp.preprocess("main.c", &mut out), "the text preprocesses");
-    let toks = tokens_of(out.as_str());
+    let toks = tokens_of(&out);
     return joined(&toks);
 }
 
@@ -315,10 +315,10 @@ fn host_clang(p: &cli::Proj) String {
         let rc = cc_run(
             c,
             format("-E -P -x c {}/which.c", p.dir()).as_str(),
-            out.as_str(),
+            &out,
             format("{}/which.err", p.dir()).as_str(),
         );
-        if rc == 0 && cli::read_text(out.as_str()).as_str().trim() == "1" {
+        if rc == 0 && cli::read_text(&out).as_str().trim() == "1" {
             return String::from_str(c);
         }
     }
@@ -341,7 +341,7 @@ fn host_info(p: &cli::Proj) Host {
     p.mkfile("empty.c", "");
     let dir = p.dir();
     let rc = cc_run(
-        cc.as_str(),
+        &cc,
         format("-E -v -x c {}/empty.c", dir).as_str(),
         format("{}/v.out", dir).as_str(),
         format("{}/v.err", dir).as_str(),
@@ -364,7 +364,7 @@ fn host_info(p: &cli::Proj) Host {
         }
     }
     let rc2 = cc_run(
-        cc.as_str(),
+        &cc,
         format("-E -dM -x c {}/empty.c", dir).as_str(),
         format("{}/d.out", dir).as_str(),
         format("{}/d.err", dir).as_str(),
@@ -408,7 +408,7 @@ fn run_host(host: &Host, dir: str, extra: str, has: &Vector<String>) Run {
     for i in 0..host.frameworks.len() {
         config.frameworks.push(host.frameworks[i].clone());
     }
-    config.predefs.push_str(host.predefs.as_str());
+    config.predefs.push_str(&host.predefs);
     config.predefs.push_str(extra);
     for i in 0..has.len() {
         config.has.push(has[i].clone());
@@ -416,7 +416,7 @@ fn run_host(host: &Host, dir: str, extra: str, has: &Vector<String>) Run {
     let mut pp = Pp::new(config);
     let mut out = String::new();
     let ok = pp.preprocess(under(dir, "main.c").as_str(), &mut out);
-    let mut scan = scan_with(out.as_str(), true);
+    let mut scan = scan_with(&out, true);
     return Run {
         ok: ok,
         tokens: replace(&mut scan.tokens, Vector::<String>::new()),
@@ -458,20 +458,20 @@ fn key_macro(key: str) String {
 fn probe_keys(p: &cli::Proj, host: &Host, keys: &Vector<String>, has: &mut Vector<String>) {
     let mut src = String::new();
     for i in 0..keys.len() {
-        let m = key_macro(keys[i].as_str());
+        let m = key_macro(&keys[i]);
         src.format_into("#if {}\nK{} 1\n#else\nK{} 0\n#endif\n", m.as_str(), i, i);
     }
-    p.mkfile("probe.c", src.as_str());
+    p.mkfile("probe.c", &src);
     let dir = p.dir();
     let rc = cc_run(
-        host.cc.as_str(),
+        &host.cc,
         format("-E -w -x c {}/probe.c", dir).as_str(),
         format("{}/probe.out", dir).as_str(),
         format("{}/probe.err", dir).as_str(),
     );
     assert_eq(rc, 0);
     let out = cli::read_text(format("{}/probe.out", dir).as_str());
-    let toks = tokens_of(out.as_str());
+    let toks = tokens_of(&out);
     let mut i: usize = 0;
     while i + 1 < toks.len() {
         if toks[i].as_str().starts_with("K") && toks[i + 1].as_str() == "1" {
@@ -488,10 +488,10 @@ fn undef_missing(p: &cli::Proj, host: &Host) String {
     for i in 0..HAS_NAMES.len() {
         src.format_into("#ifdef {}\nD{} 1\n#else\nD{} 0\n#endif\n", HAS_NAMES[i], i, i);
     }
-    p.mkfile("defd.c", src.as_str());
+    p.mkfile("defd.c", &src);
     let dir = p.dir();
     let rc = cc_run(
-        host.cc.as_str(),
+        &host.cc,
         format("-E -w -x c {}/defd.c", dir).as_str(),
         format("{}/defd.out", dir).as_str(),
         format("{}/defd.err", dir).as_str(),
@@ -522,9 +522,9 @@ fn expect_host_equal_at(p: &cli::Proj, host: &Host, undefs: &String, label: str,
     p.mkfile("main.c", src);
     let root = p.dir();
     let dir = if relative {
-        "";
+        ""
     } else {
-        root;
+        root
     };
     if relative {
         assert_eq(unsafe unistd::chdir(p.rootp()), 0);
@@ -560,20 +560,15 @@ fn expect_host_equal_at(p: &cli::Proj, host: &Host, undefs: &String, label: str,
         under(dir, "main.c").as_str(),
     );
     host.search_flags(&mut args);
-    let rc = cc_run(
-        host.cc.as_str(),
-        args.as_str(),
-        format("{}/cc.out", root).as_str(),
-        format("{}/cc.err", root).as_str(),
-    );
+    let rc = cc_run(&host.cc, &args, format("{}/cc.out", root).as_str(), format("{}/cc.err", root).as_str());
     assert_eq(rc, 0);
     let cc_out = cli::read_text(format("{}/cc.out", root).as_str());
-    let mut scan = scan_with(cc_out.as_str(), true);
+    let mut scan = scan_with(&cc_out, true);
     let want = replace(&mut scan.tokens, Vector::<String>::new());
     let n = if r.tokens.len() < want.len() {
-        r.tokens.len();
+        r.tokens.len()
     } else {
-        want.len();
+        want.len()
     };
     let mut at = n;
     for i in 0..n {
@@ -584,21 +579,21 @@ fn expect_host_equal_at(p: &cli::Proj, host: &Host, undefs: &String, label: str,
     }
     if at != n || r.tokens.len() != want.len() {
         let lo = if at > 12 {
-            at - 12;
+            at - 12
         } else {
-            0;
+            0
         };
         let mut a = String::new();
         let mut b = String::new();
         let hi_a = if at + 12 < r.tokens.len() {
-            at + 12;
+            at + 12
         } else {
-            r.tokens.len();
+            r.tokens.len()
         };
         let hi_b = if at + 12 < want.len() {
-            at + 12;
+            at + 12
         } else {
-            want.len();
+            want.len()
         };
         for i in lo..hi_a {
             a.format_into("{} ", r.tokens[i].as_str());
@@ -625,17 +620,9 @@ fn expect_host_equal_at(p: &cli::Proj, host: &Host, undefs: &String, label: str,
         under(dir, "main.c").as_str(),
     );
     host.search_flags(&mut dm_args);
-    assert_eq(
-        cc_run(
-            host.cc.as_str(),
-            dm_args.as_str(),
-            format("{}/cc.dm", root).as_str(),
-            format("{}/cc.dmerr", root).as_str(),
-        ),
-        0,
-    );
+    assert_eq(cc_run(&host.cc, &dm_args, format("{}/cc.dm", root).as_str(), format("{}/cc.dmerr", root).as_str()), 0);
     let want_macros = sorted_lines(cli::read_text(format("{}/cc.dm", root).as_str()).as_str());
-    let our_macros = sorted_lines(r.dump.as_str());
+    let our_macros = sorted_lines(&r.dump);
     let mut m: usize = 0;
     while m < our_macros.len() && m < want_macros.len() && our_macros[m] == want_macros[m] {
         m += 1;
@@ -698,16 +685,11 @@ fn host_headers(p: &cli::Proj, host: &Host, names: []str) Vector<String> {
     for i in 0..names.len() {
         src.format_into("#if __has_include(<{}>)\nH{} 1\n#endif\n", names[i], i);
     }
-    p.mkfile("probe_h.c", src.as_str());
+    p.mkfile("probe_h.c", &src);
     let mut args = format("-E -w -nostdinc -x c {}/probe_h.c", dir);
     host.search_flags(&mut args);
     assert_eq(
-        cc_run(
-            host.cc.as_str(),
-            args.as_str(),
-            format("{}/probe_h.out", dir).as_str(),
-            format("{}/probe_h.err", dir).as_str(),
-        ),
+        cc_run(&host.cc, &args, format("{}/probe_h.out", dir).as_str(), format("{}/probe_h.err", dir).as_str()),
         0,
     );
     let toks = tokens_of(cli::read_text(format("{}/probe_h.out", dir).as_str()).as_str());
@@ -735,7 +717,7 @@ fn host_system_headers() {
     let core: []str = ["stdio.h", "stdlib.h", "string.h", "pthread.h", "signal.h", "unistd.h"];
     for i in 0..core.len() {
         let src = format("#include <{}>\n", core[i]);
-        expect_host_equal(&p, &host, &undefs, core[i], src.as_str());
+        expect_host_equal(&p, &host, &undefs, core[i], &src);
     }
 }
 
@@ -855,7 +837,7 @@ fn host_more_system_headers() {
         src.format_into("#include <{}>\n", neon[i].as_str());
     }
     src.push_str("#endif\n");
-    expect_host_equal(&p, &host, &undefs, "system headers", src.as_str());
+    expect_host_equal(&p, &host, &undefs, "system headers", &src);
 }
 
 fn lines(l: []str) String {
@@ -1342,7 +1324,7 @@ fn standard_example_4() {
         ],
     );
     let want = "printf(\"x\" \"1\" \"= %d, x\" \"2\" \"= %s\", x1, x2);\nfputs(\"strncmp(\\\"abc\\\\0d\\\", \\\"abc\\\", '\\\\4') == 0\" \": @\\n\", s);\nincluded_vers2\n\"hello\";\n\"hello\" \", world\"\n";
-    assert_eq(norm(out.as_str()).as_str(), norm(want).as_str());
+    assert_eq(norm(&out).as_str(), norm(want).as_str());
 }
 
 @test
@@ -1392,10 +1374,7 @@ fn builtin_macros() {
     let a = output(["main.c", text, "h.h", "__INCLUDE_LEVEL__ __FILE__ __BASE_FILE__ __LINE__\n"]);
     let b = output(["main.c", text, "h.h", "__INCLUDE_LEVEL__ __FILE__ __BASE_FILE__ __LINE__\n"]);
     assert_eq(a.as_str(), b.as_str());
-    assert_eq(
-        norm(a.as_str()).as_str(),
-        "1 \"main.c\" \"main.c\" 0 0 1 \"Jan  1 1970\" \"00:00:00\" 1 \"h.h\" \"main.c\" 1",
-    );
+    assert_eq(norm(&a).as_str(), "1 \"main.c\" \"main.c\" 0 0 1 \"Jan  1 1970\" \"00:00:00\" 1 \"h.h\" \"main.c\" 1");
 }
 
 // clang's `__FLT_EVAL_METHOD__` is a built-in, which glibc tests with `#ifdef`.
@@ -1448,7 +1427,7 @@ fn include_search_order() {
     let mut out = String::new();
     assert(!pp.preprocess("src/main.c", &mut out), "<q_only.h> is not in an angle directory");
     assert(pp.err.contains("'q_only.h' file not found"), "the message names the header");
-    assert_eq(norm(out.as_str()).as_str(), "SRC_OWN Q_X D_X S1_Y NEXT_Y S2_Y INNER_A INNER_B");
+    assert_eq(norm(&out).as_str(), "SRC_OWN Q_X D_X S1_Y NEXT_Y S2_Y INNER_A INNER_B");
 }
 
 // A framework directory serves `Name/Header.h` from `Name.framework/Headers`, then `PrivateHeaders`, after every
@@ -1482,7 +1461,7 @@ fn framework_search() {
     let mut pp = Pp::new(config);
     let mut out = String::new();
     assert(pp.preprocess("main.c", &mut out), "the framework headers resolve");
-    assert_eq(norm(out.as_str()).as_str(), "FOO SUB_BAR PRIV DIR_PLAIN");
+    assert_eq(norm(&out).as_str(), "FOO SUB_BAR PRIV DIR_PLAIN");
 }
 
 @test
@@ -1499,7 +1478,7 @@ fn include_next_and_once() {
             "IMPORTED\n",
         ],
     );
-    assert_eq(norm(out.as_str()).as_str(), "ONCE GUARD IMPORTED");
+    assert_eq(norm(&out).as_str(), "ONCE GUARD IMPORTED");
 }
 
 @test
@@ -1514,7 +1493,7 @@ fn guard_with_code_outside_is_not_a_guard() {
             "#ifndef H_H\n#define H_H\nH1\n#else\nH2\n#endif\n",
         ],
     );
-    assert_eq(norm(out.as_str()).as_str(), "GUARD GUARD H1 H2");
+    assert_eq(norm(&out).as_str(), "GUARD GUARD H1 H2");
 }
 
 fn expect_failure(label: str, text: str, needle: str) {
@@ -1597,7 +1576,7 @@ fn conditional_nesting_is_bounded() {
     for _ in 0..1030 {
         deep.push_str("#if 1\n");
     }
-    expect_failure("deep conditionals", deep.as_str(), "nest too deeply");
+    expect_failure("deep conditionals", &deep, "nest too deeply");
     let mut ok = String::new();
     for _ in 0..100 {
         ok.push_str("#if 1\n");
@@ -1606,7 +1585,7 @@ fn conditional_nesting_is_bounded() {
     for _ in 0..100 {
         ok.push_str("#endif\n");
     }
-    assert_eq(run(ok.as_str(), "").as_str(), "x");
+    assert_eq(run(&ok, "").as_str(), "x");
 }
 
 @test
@@ -1620,7 +1599,7 @@ fn expression_and_argument_nesting_are_bounded() {
         parens.push_byte(b')');
     }
     parens.push_str("\n#endif\n");
-    expect_failure("deep parens", parens.as_str(), "nests too deeply");
+    expect_failure("deep parens", &parens, "nests too deeply");
     let mut args = String::from_str("#define f(a) a\n");
     for _ in 0..300 {
         args.push_str("f(");
@@ -1630,7 +1609,7 @@ fn expression_and_argument_nesting_are_bounded() {
         args.push_byte(b')');
     }
     args.push_byte(b'\n');
-    expect_failure("deep arguments", args.as_str(), "nest too deeply");
+    expect_failure("deep arguments", &args, "nest too deeply");
     let mut shallow = String::from_str("#define f(a) a\n");
     for _ in 0..100 {
         shallow.push_str("f(");
@@ -1640,7 +1619,7 @@ fn expression_and_argument_nesting_are_bounded() {
         shallow.push_byte(b')');
     }
     shallow.push_byte(b'\n');
-    assert_eq(run(shallow.as_str(), "").as_str(), "x");
+    assert_eq(run(&shallow, "").as_str(), "x");
 }
 
 @test(timeout = 60)
@@ -1650,7 +1629,7 @@ fn expansion_work_is_bounded() {
         text.format_into("#define A{} A{} A{}\n", i, i - 1, i - 1);
     }
     text.push_str("A29\n");
-    expect_failure("exponential", text.as_str(), "work limit");
+    expect_failure("exponential", &text, "work limit");
 }
 
 @test
@@ -1690,7 +1669,7 @@ fn run_config(text: str, predefs: str, cmdline: str, has: []str) String {
     let mut pp = config_pp(text, predefs, cmdline, has);
     let mut out = String::new();
     assert(pp.preprocess("main.c", &mut out), "the text preprocesses");
-    return norm(out.as_str());
+    return norm(&out);
 }
 
 @test
@@ -1833,7 +1812,7 @@ fn pragma_operator_runs_the_directive_forms() {
             "_Pragma(\"once\") ONCE\n",
         ],
     );
-    assert_eq(norm(out.as_str()).as_str(), "ONCE # pragma push_macro ( \"M\" ) 2 # pragma pop_macro ( \"M\" ) 1");
+    assert_eq(norm(&out).as_str(), "ONCE # pragma push_macro ( \"M\" ) 2 # pragma pop_macro ( \"M\" ) 1");
 }
 
 @test
@@ -1869,7 +1848,7 @@ fn ternary_nesting_is_bounded() {
         deep.push_str("1?");
     }
     deep.push_str("1\n#endif\n");
-    expect_failure("deep ternary", deep.as_str(), "nests too deeply");
+    expect_failure("deep ternary", &deep, "nests too deeply");
 }
 
 @test(timeout = 60)
@@ -1894,7 +1873,7 @@ fn oracle_relative_main_and_spellings() {
             "const char *m = __FILE__;",
         ],
     );
-    expect_host_equal_at(&p, &host, &undefs, "relative main", src.as_str(), true);
+    expect_host_equal_at(&p, &host, &undefs, "relative main", &src, true);
 }
 
 @test

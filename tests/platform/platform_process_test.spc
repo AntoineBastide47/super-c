@@ -32,8 +32,8 @@ fn run_to(argv: []str, out: str) process::ExitStatus {
 fn arguments_reach_the_child_byte_for_byte(fx: &mut Fx) {
     let out = fx.s.at("out");
     let argv: [str; 9] = ["printf", "[%s]", "a b", "\"q\" 'r'", "$HOME", "\xC3\xA9", "", "back\\slash", "*"];
-    assert(run_to(argv, out.as_str()) == process::ExitStatus::Code(0));
-    assert(ph::read_text(out.as_str()).eq_str("[a b][\"q\" 'r'][$HOME][\xC3\xA9][][back\\slash][*]"));
+    assert(run_to(argv, &out) == process::ExitStatus::Code(0));
+    assert(ph::read_text(&out).eq_str("[a b][\"q\" 'r'][$HOME][\xC3\xA9][][back\\slash][*]"));
 }
 
 @platform(macos | linux)
@@ -41,12 +41,12 @@ fn arguments_reach_the_child_byte_for_byte(fx: &mut Fx) {
 fn redirects_cwd_and_environment_apply_to_the_child(fx: &mut Fx) {
     let out = fx.s.at("out");
     let input = fx.s.at("in");
-    ph::write_text(input.as_str(), "from stdin\n");
+    ph::write_text(&input, "from stdin\n");
     let argv: [str; 3] = ["/bin/sh", "-c", "pwd; echo \"$SC_PLAT_X\"; cat; echo err >&2; exit 4"];
     let env: [str; 2] = ["SC_PLAT_X=one two", "PATH=/usr/bin:/bin"];
     let mut cmd = process::Command::new(argv);
-    cmd.env = Option::<Slice<str>>::Some(env);
-    cmd.cwd = Option::<str>::Some(fx.s.dir.as_str());
+    cmd.env = Some(env);
+    cmd.cwd = Some(fx.s.dir.as_str());
     cmd.stdin = process::Redirect::Path(input.as_str());
     cmd.stdout = process::Redirect::Path(out.as_str());
     cmd.stderr = process::Redirect::Stdout;
@@ -54,14 +54,14 @@ fn redirects_cwd_and_environment_apply_to_the_child(fx: &mut Fx) {
     assert(c.wait().unwrap() == process::ExitStatus::Code(4));
     // A second wait returns the recorded status.
     assert(c.wait().unwrap() == process::ExitStatus::Code(4));
-    let mut want = fs::realpath(fx.s.dir.as_str()).unwrap();
+    let mut want = fs::realpath(&fx.s.dir).unwrap();
     want.push_str("\none two\nfrom stdin\nerr\n");
-    assert(ph::read_text(out.as_str()).equals(&want));
+    assert(ph::read_text(&out).equals(&want));
     // The parent's environment is untouched, and its own output file starts empty each time.
     assert(std::platform::env::get("SC_PLAT_X").unwrap().is_none());
     let quiet: [str; 3] = ["/bin/sh", "-c", "exit 0"];
-    assert(run_to(quiet, out.as_str()) == process::ExitStatus::Code(0));
-    assert_eq(fs::stat(out.as_str()).unwrap().size, 0);
+    assert(run_to(quiet, &out) == process::ExitStatus::Code(0));
+    assert_eq(fs::stat(&out).unwrap().size, 0);
 }
 
 @platform(macos | linux)
@@ -69,7 +69,7 @@ fn redirects_cwd_and_environment_apply_to_the_child(fx: &mut Fx) {
 fn exit_codes_and_signals_come_back(fx: &mut Fx) {
     let out = fx.s.at("out");
     let seven: [str; 3] = ["sh", "-c", "exit 7"];
-    assert(run_to(seven, out.as_str()) == process::ExitStatus::Code(7));
+    assert(run_to(seven, &out) == process::ExitStatus::Code(7));
     let slow: [str; 2] = ["sleep", "30"];
     let mut c = process::spawn(process::Command::new(slow)).unwrap();
     assert(c.try_wait().unwrap().is_none());
@@ -118,10 +118,10 @@ fn wait_any_returns_each_child_once() {
 fn windows_children_report_exit_codes_and_output(fx: &mut Fx) {
     let out = fx.s.at("out");
     let seven: [str; 3] = ["cmd", "/c", "exit 7"];
-    assert(run_to(seven, out.as_str()) == process::ExitStatus::Code(7));
+    assert(run_to(seven, &out) == process::ExitStatus::Code(7));
     let echo: [str; 3] = ["cmd", "/c", "echo hi"];
-    assert(run_to(echo, out.as_str()) == process::ExitStatus::Code(0));
-    assert(ph::read_text(out.as_str()).eq_str("hi\r\n"));
+    assert(run_to(echo, &out) == process::ExitStatus::Code(0));
+    assert(ph::read_text(&out).eq_str("hi\r\n"));
     let slow: [str; 3] = ["cmd", "/c", "ping -n 30 127.0.0.1 >NUL"];
     let mut kids: [process::Child; 1] = [process::spawn(process::Command::new(slow)).unwrap()];
     assert(process::try_wait_any(kids).unwrap().is_none());
@@ -149,7 +149,7 @@ fn bad_commands_are_rejected() {
 @test
 fn a_pipe_carries_a_child_output_to_its_end(fx: &mut Fx) {
     let input = fx.s.at("in");
-    ph::write_text(input.as_str(), "through the pipe");
+    ph::write_text(&input, "through the pipe");
     let (mut r, w) = process::pipe().unwrap();
     let argv: [str; 1] = ["cat"];
     let mut cmd = process::Command::new(argv);
@@ -180,14 +180,14 @@ fn the_running_process_answers_its_queries(fx: &mut Fx) {
     assert(process::is_alive(me).unwrap());
     assert(process::is_alive(0).unwrap_err().kind == IoErrorKind::InvalidInput);
     let exe = process::exe_path().unwrap();
-    assert(path::is_absolute(exe.as_str()));
-    assert(fs::stat(exe.as_str()).unwrap().kind == fs::FileKind::File);
+    assert(path::is_absolute(&exe));
+    assert(fs::stat(&exe).unwrap().kind == fs::FileKind::File);
     let cwd = process::current_dir().unwrap();
-    process::set_current_dir(fx.s.dir.as_str()).unwrap();
+    process::set_current_dir(&fx.s.dir).unwrap();
     let here = process::current_dir().unwrap();
-    let real = fs::realpath(fx.s.dir.as_str()).unwrap();
+    let real = fs::realpath(&fx.s.dir).unwrap();
     assert(here.equals(&real));
-    process::set_current_dir(cwd.as_str()).unwrap();
+    process::set_current_dir(&cwd).unwrap();
     assert(process::set_current_dir(fx.s.at("missing").as_str()).unwrap_err().kind == IoErrorKind::NotFound);
     assert(process::peak_rss().unwrap() > 0);
     process::raise_open_file_limit(64).unwrap();

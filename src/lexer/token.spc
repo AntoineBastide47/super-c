@@ -84,7 +84,7 @@ extend Token {
 /// already reported it).
 pub(package) const fn char_literal_value(src: str, sp: Span) Option<i64> {
     if sp.end < sp.start + 3 || sp.end as usize > src.len() {
-        return Option::<i64>::None;
+        return None;
     }
     let mut i = sp.start as usize + 1;
     if src[sp.start as usize] == b'b' {
@@ -92,7 +92,7 @@ pub(package) const fn char_literal_value(src: str, sp: Span) Option<i64> {
     }
     let end = sp.end as usize - 1; // the closing quote
     if i >= end {
-        return Option::<i64>::None;
+        return None;
     }
     let b = src[i];
     if b != b'\\' {
@@ -109,49 +109,49 @@ pub(package) const fn char_literal_value(src: str, sp: Span) Option<i64> {
             v = b & 0x0Fu8;
         }
         if i + n != end {
-            return Option::<i64>::None;
+            return None;
         }
         for k in i + 1..end {
             v = v << 6 | (src[k] & 0x3Fu8) as i64;
         }
-        return Option::<i64>::Some(v);
+        return Some(v);
     }
     if i + 1 >= end {
-        return Option::<i64>::None;
+        return None;
     }
     let e = src[i + 1];
     let mut from = i + 2;
     let mut to = end;
     if e == b'x' {
         if to != from + 2 {
-            return Option::<i64>::None;
+            return None;
         }
     } else if e == b'u' {
         if to < from + 3 || src[from] != b'{' || src[to - 1] != b'}' {
-            return Option::<i64>::None;
+            return None;
         }
         from += 1;
         to -= 1;
     } else {
         if from != end {
-            return Option::<i64>::None;
+            return None;
         }
         if e == b'n' {
-            return Option::<i64>::Some(10);
+            return Some(10);
         }
         if e == b'r' {
-            return Option::<i64>::Some(13);
+            return Some(13);
         }
         if e == b't' {
-            return Option::<i64>::Some(9);
+            return Some(9);
         }
         if e == b'0' {
-            return Option::<i64>::Some(0);
+            return Some(0);
         }
         if e == b'\\' || e == b'\'' || e == b'"' {
-            return Option::<i64>::Some(e);
+            return Some(e);
         }
-        return Option::<i64>::None;
+        return None;
     }
     let mut v: i64 = 0;
     for k in from..to {
@@ -165,11 +165,11 @@ pub(package) const fn char_literal_value(src: str, sp: Span) Option<i64> {
             d = (c - b'A') as i64 + 10;
         }
         if d == 16 {
-            return Option::<i64>::None;
+            return None;
         }
         v = v << 4 | d;
     }
-    return Option::<i64>::Some(v);
+    return Some(v);
 }
 
 const fn hexv(b: u8) u32 {

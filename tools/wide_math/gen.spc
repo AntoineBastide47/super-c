@@ -146,9 +146,9 @@ fn reciprocal(v: &Vector<u64>, n: usize) Vector<u64> {
     let mut nd: usize = 3;
     for _ in 0..64 {
         nd = if 2 * nd > n {
-            n;
+            n
         } else {
-            2 * nd;
+            2 * nd
         };
         let t = mul(v, &y, nd);
         let mut two = zeros(nd);
@@ -189,9 +189,9 @@ fn emit(out: &mut String, name: str, doc: str, v: &Vector<u64>, limbs: usize) {
             let d = w >> s as u64 & 15;
             out.push_byte(
                 if d < 10 {
-                    (48 + d) as u8;
+                    (48 + d) as u8
                 } else {
-                    (87 + d) as u8;
+                    (87 + d) as u8
                 },
             );
             s -= 4;
@@ -244,6 +244,6 @@ fn main(args: Vector<str>) i32 {
     emit(&mut out, "TWO_OVER_PI_BITS", "2/pi", &two_over_pi, TOP_LIMBS);
     let mut path = String::from_str(dir);
     path.push_str("/wide_consts.spc");
-    write(path.as_str(), &out);
+    write(&path, &out);
     return 0;
 }

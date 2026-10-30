@@ -11,7 +11,7 @@ fn read(root: str, rel: str) String {
     let mut p = String::from_str(root);
     p.push_byte(b'/');
     p.push_str(rel);
-    return loader::read_file(p.as_str()).unwrap();
+    return loader::read_file(&p).unwrap();
 }
 
 @test
@@ -22,7 +22,7 @@ fn fmt_check_reports_unformatted() {
     let mut args = String::from_str("fmt --check \"");
     args.push_str(root);
     args.push_str("/a.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     // --check writes nothing, prints the offending path, and exits 1.
     assert_eq(r.exit, 1);
     assert(r.out_has("a.spc"), "the unformatted path is named");
@@ -38,14 +38,14 @@ fn fmt_rewrites_in_place() {
     let mut args = String::from_str("fmt \"");
     args.push_str(root);
     args.push_str("/a.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.ok(), "fmt rewrites and exits 0");
     // The rewrite is canonical, and a second --check now passes.
     assert(read(root, "a.spc").as_str() == CLEAN, "the file is now canonical");
     let mut cargs = String::from_str("fmt --check \"");
     cargs.push_str(root);
     cargs.push_str("/a.spc\"");
-    assert(p.run_raw(cargs.as_str()).ok(), "the rewritten file is stable");
+    assert(p.run_raw(&cargs).ok(), "the rewritten file is stable");
 }
 
 @test
@@ -57,7 +57,7 @@ fn fmt_recurses_a_directory() {
     let mut args = String::from_str("fmt \"");
     args.push_str(root);
     args.push_str("/src\"");
-    assert(p.run_raw(args.as_str()).ok(), "fmt on a directory succeeds");
+    assert(p.run_raw(&args).ok(), "fmt on a directory succeeds");
     assert(read(root, "src/a.spc").as_str() == CLEAN, "top-level file formatted");
     assert(read(root, "src/sub/b.spc").as_str() == CLEAN, "nested file formatted");
 }
@@ -87,7 +87,7 @@ fn fmt_missing_file_errors() {
     let mut args = String::from_str("fmt \"");
     args.push_str(root);
     args.push_str("/nope.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert_eq(r.exit, 1);
     assert(r.out_has("cannot read"), "a missing path is reported");
 }
@@ -101,7 +101,7 @@ fn fmt_unparseable_file_is_not_rewritten() {
     let mut args = String::from_str("fmt \"");
     args.push_str(root);
     args.push_str("/bad.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     // A file the compiler cannot parse: diagnostics, exit 1, and the bytes are left as they were.
     assert_eq(r.exit, 1);
     assert(read(root, "bad.spc").as_str() == BAD, "an unparseable file is never rewritten");
@@ -123,7 +123,7 @@ fn fmt_rewrites_through_a_symlink() {
     let mut args = String::from_str("fmt \"");
     args.push_str(root);
     args.push_str("/link.spc\"");
-    assert_eq(p.run_raw(args.as_str()).exit, 0);
+    assert_eq(p.run_raw(&args).exit, 0);
     assert(read(root, "real/a.spc").as_str() == CLEAN, "the link target is formatted");
     let mut chk = String::new();
     chk.format_into("test -L \"{}/link.spc\"", root);
@@ -132,5 +132,5 @@ fn fmt_rewrites_through_a_symlink() {
     assert_eq(cli::dir_count_suffix(root, ".tmp"), 0);
     let mut real = String::from_str(root);
     real.push_str("/real");
-    assert_eq(cli::dir_count_suffix(real.as_str(), ".tmp"), 0);
+    assert_eq(cli::dir_count_suffix(&real, ".tmp"), 0);
 }

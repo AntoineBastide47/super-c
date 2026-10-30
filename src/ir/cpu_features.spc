@@ -567,13 +567,13 @@ pub(package) fn push_c_flags(s: CpuFeatureSet, target: i32, arch: i32, out: &mut
     }
     out.push_str(
         if mac {
-            "";
+            ""
         } else if (need & L_NEED82) != 0 {
-            " -march=armv8.2-a";
+            " -march=armv8.2-a"
         } else if v81 {
-            " -march=armv8.1-a";
+            " -march=armv8.1-a"
         } else {
-            " -march=armv8-a";
+            " -march=armv8-a"
         },
     );
     for i in 0..FEATURE_COUNT {
@@ -633,9 +633,9 @@ pub(package) fn push_target_attr(s: CpuFeatureSet, build: CpuFeatureSet, target:
             names.as_str(),
             g.as_str().slice(3, g.len()),
             if g13.len() == 0 {
-                "arch=armv8-a";
+                "arch=armv8-a"
             } else {
-                g13.as_str().slice(3, g13.len());
+                g13.as_str().slice(3, g13.len())
             },
         );
         return;

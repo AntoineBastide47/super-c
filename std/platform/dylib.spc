@@ -39,9 +39,9 @@ pub unsafe fn open(path: str) Result<Library, IoError> {
     let np = path::native(path, IoOp::LoadLibrary)?;
     let h = unsafe dlfcn::dlopen(np.ptr(), dlfcn::RTLD_NOW | dlfcn::RTLD_LOCAL);
     if h == null {
-        return Result::<Library, IoError>::Err(IoError::new(IoErrorKind::Other, IoOp::LoadLibrary));
+        return Err(IoError::new(IoErrorKind::Other, IoOp::LoadLibrary));
     }
-    return Result::<Library, IoError>::Ok(Library::adopt(h));
+    return Ok(Library::adopt(h));
 }
 /// Load the library at `path` (its name alone searches the system's library path), resolving every
 /// symbol now, its symbols local to it. Other: the loader refused, with no error number on POSIX.
@@ -51,9 +51,9 @@ pub unsafe fn open(path: str) Result<Library, IoError> {
     let np = path::native(path, IoOp::LoadLibrary)?;
     let h = unsafe LoadLibraryW(np.ptr());
     if h == null {
-        return Result::<Library, IoError>::Err(error::last_error(IoOp::LoadLibrary));
+        return Err(error::last_error(IoOp::LoadLibrary));
     }
-    return Result::<Library, IoError>::Ok(Library::adopt(h));
+    return Ok(Library::adopt(h));
 }
 /// Load a library. Unsupported: WASI cannot load code.
 /// Safety: the library's initializers run in this process.
@@ -76,9 +76,9 @@ extend Library {
         let n = path::native(name, IoOp::Symbol)?;
         let p = unsafe dlfcn::dlsym(self.handle, n.ptr());
         if p == null {
-            return Result::<*mut void, IoError>::Err(IoError::new(IoErrorKind::NotFound, IoOp::Symbol));
+            return Err(IoError::new(IoErrorKind::NotFound, IoOp::Symbol));
         }
-        return Result::<*mut void, IoError>::Ok(p);
+        return Ok(p);
     }
     /// The address of symbol `name`; NotFound when the library does not define it.
     /// Safety: the caller uses the address as the type the library gives the symbol, only while the
@@ -88,13 +88,13 @@ extend Library {
         // GetProcAddress takes the symbol's bytes, not UTF-16.
         let mut n = String::from_str(name);
         if name.find_byte(0) >= 0 {
-            return Result::<*mut void, IoError>::Err(IoError::new(IoErrorKind::InvalidInput, IoOp::Symbol));
+            return Err(IoError::new(IoErrorKind::InvalidInput, IoOp::Symbol));
         }
         let p = ProcBits { h: unsafe GetProcAddress(self.handle, n.cstr()) }.p;
         if p == null {
-            return Result::<*mut void, IoError>::Err(error::last_error(IoOp::Symbol));
+            return Err(error::last_error(IoOp::Symbol));
         }
-        return Result::<*mut void, IoError>::Ok(p);
+        return Ok(p);
     }
     /// The address of symbol `name`. Unsupported on WASI, where no library loads.
     /// Safety: as on the other targets.
@@ -113,9 +113,9 @@ extend Library {
         let h = self.handle;
         forget(self);
         if unsafe dlfcn::dlclose(h) != 0 {
-            return Result::<Unit, IoError>::Err(IoError::new(IoErrorKind::Other, IoOp::Close));
+            return Err(IoError::new(IoErrorKind::Other, IoOp::Close));
         }
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
     /// Unload the library and report a refusal (Other on POSIX, which gives no error number), which
     /// dropping it ignores.
@@ -125,9 +125,9 @@ extend Library {
         let h = self.handle;
         forget(self);
         if unsafe FreeLibrary(h) == 0 {
-            return Result::<Unit, IoError>::Err(error::last_error(IoOp::Close));
+            return Err(error::last_error(IoOp::Close));
         }
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
     /// Unload the library. Unsupported on WASI, where no library loads.
     /// Safety: as on the other targets.

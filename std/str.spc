@@ -323,9 +323,9 @@ extend str as Index<u8, str> {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         if r.start > hi || hi > self.len() {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
@@ -407,7 +407,7 @@ extend str {
     /// digit, or overflow.
     pub const fn parse_i64_radix(self: &str, radix: u32) Option<i64> {
         if self.len == 0 {
-            return Option::<i64>::None;
+            return None;
         }
         let b0 = self.byte_at(0);
         let neg = b0 == b'-';
@@ -419,12 +419,12 @@ extend str {
             Some(v) => switch neg {
                 // |i64::MIN| = 2^63 is spellable only with the sign; a wrapping negate avoids overflow.
                 true => switch v <= 0x8000_0000_0000_0000u64 {
-                    true => Option::<i64>::Some(v.wrapping_neg() as i64),
-                    false => Option::<i64>::None,
+                    true => Some(v.wrapping_neg() as i64),
+                    false => None,
                 },
                 false => switch v <= 0x7FFF_FFFF_FFFF_FFFFu64 {
-                    true => Option::<i64>::Some(v as i64),
-                    false => Option::<i64>::None,
+                    true => Some(v as i64),
+                    false => None,
                 },
             },
             None => Option::<i64>::None,
@@ -442,14 +442,14 @@ extend str {
     /// Decimal parse into usize; None on overflow for the target width.
     pub const fn parse_usize(self: &str) Option<usize> {
         return switch self.parse_u64() {
-            Some(v) => Option::<usize>::Some(v as usize),
+            Some(v) => Some(v as usize),
             None => Option::<usize>::None,
         };
     }
     /// Decimal parse into isize; None on overflow for the target width.
     pub const fn parse_isize(self: &str) Option<isize> {
         return switch self.parse_i64() {
-            Some(v) => Option::<isize>::Some(v as isize),
+            Some(v) => Some(v as isize),
             None => Option::<isize>::None,
         };
     }
@@ -457,8 +457,8 @@ extend str {
     pub const fn parse_u32(self: &str) Option<u32> {
         return switch self.parse_u64() {
             Some(v) => switch v <= 0xFFFF_FFFFu64 {
-                true => Option::<u32>::Some(v as u32),
-                false => Option::<u32>::None,
+                true => Some(v as u32),
+                false => None,
             },
             None => Option::<u32>::None,
         };
@@ -467,8 +467,8 @@ extend str {
     pub const fn parse_u16(self: &str) Option<u16> {
         return switch self.parse_u64() {
             Some(v) => switch v <= 65535 {
-                true => Option::<u16>::Some(v as u16),
-                false => Option::<u16>::None,
+                true => Some(v as u16),
+                false => None,
             },
             None => Option::<u16>::None,
         };
@@ -477,8 +477,8 @@ extend str {
     pub const fn parse_u8(self: &str) Option<u8> {
         return switch self.parse_u64() {
             Some(v) => switch v <= 255 {
-                true => Option::<u8>::Some(v as u8),
-                false => Option::<u8>::None,
+                true => Some(v as u8),
+                false => None,
             },
             None => Option::<u8>::None,
         };
@@ -487,8 +487,8 @@ extend str {
     pub const fn parse_i32(self: &str) Option<i32> {
         return switch self.parse_i64() {
             Some(v) => switch v >= -2_147_483_648 && v <= 2_147_483_647 {
-                true => Option::<i32>::Some(v as i32),
-                false => Option::<i32>::None,
+                true => Some(v as i32),
+                false => None,
             },
             None => Option::<i32>::None,
         };
@@ -497,8 +497,8 @@ extend str {
     pub const fn parse_i16(self: &str) Option<i16> {
         return switch self.parse_i64() {
             Some(v) => switch v >= -32_768 && v <= 32_767 {
-                true => Option::<i16>::Some(v as i16),
-                false => Option::<i16>::None,
+                true => Some(v as i16),
+                false => None,
             },
             None => Option::<i16>::None,
         };
@@ -507,8 +507,8 @@ extend str {
     pub const fn parse_i8(self: &str) Option<i8> {
         return switch self.parse_i64() {
             Some(v) => switch v >= -128 && v <= 127 {
-                true => Option::<i8>::Some(v as i8),
-                false => Option::<i8>::None,
+                true => Some(v as i8),
+                false => None,
             },
             None => Option::<i8>::None,
         };
@@ -522,7 +522,7 @@ extend str {
         let mut dec = DecDigits { d: Array::<u8, 800>::new(), nd: 0, dp: 0, trunc: false };
         let mut neg = false;
         if !self.parse_decimal(&mut dec, &mut neg) {
-            return Option::<f64>::None;
+            return None;
         }
         let mut v: f64 = 0.0;
         let mut exact = false;
@@ -542,9 +542,9 @@ extend str {
                     k += 1;
                 }
                 v = if e10 < 0 {
-                    mant as f64 / p;
+                    mant as f64 / p
                 } else {
-                    mant as f64 * p;
+                    mant as f64 * p
                 };
                 exact = true;
             }
@@ -555,7 +555,7 @@ extend str {
         if neg {
             v = -v;
         }
-        return Option::<f64>::Some(v);
+        return Some(v);
     }
 
     /// The f32 twin of `parse_f64`, rounded once from the decimal text (a detour through f64 would
@@ -564,7 +564,7 @@ extend str {
         let mut dec = DecDigits { d: Array::<u8, 800>::new(), nd: 0, dp: 0, trunc: false };
         let mut neg = false;
         if !self.parse_decimal(&mut dec, &mut neg) {
-            return Option::<f32>::None;
+            return None;
         }
         let mut v: f32 = 0.0;
         let mut exact = false;
@@ -583,9 +583,9 @@ extend str {
                     k += 1;
                 }
                 v = if e10 < 0 {
-                    mant as f32 / p;
+                    mant as f32 / p
                 } else {
-                    mant as f32 * p;
+                    mant as f32 * p
                 };
                 exact = true;
             }
@@ -596,7 +596,7 @@ extend str {
         if neg {
             v = -v;
         }
-        return Option::<f32>::Some(v);
+        return Some(v);
     }
 
     // The float grammar of `parse_f64` read into `dec` (trailing zeros trimmed) and `neg`; false when the
@@ -868,18 +868,18 @@ extend DecDigits {
         let mut exp: i64 = 0;
         while self.dp > 0 {
             let n: i64 = if self.dp >= 9 {
-                27;
+                27
             } else {
-                unsafe DEC_POW2[self.dp as usize];
+                unsafe DEC_POW2[self.dp as usize]
             };
             self.shift(0 - n);
             exp += n;
         }
         while self.dp < 0 || self.dp == 0 && self.d[0] < 5 {
             let n: i64 = if 0 - self.dp >= 9 {
-                27;
+                27
             } else {
-                unsafe DEC_POW2[(0 - self.dp) as usize];
+                unsafe DEC_POW2[(0 - self.dp) as usize]
             };
             self.shift(n);
             exp -= n;
@@ -917,7 +917,7 @@ extend DecDigits {
 // `None` on radix outside 2..=36, empty digit run, an invalid digit, or u64 overflow.
 const fn __str_digits_u64(s: &str, radix: u32, start: usize) Option<u64> {
     if radix < 2 || radix > 36 || start >= s.len() {
-        return Option::<u64>::None;
+        return None;
     }
     let r = radix as u64;
     let mut acc: u64 = 0;
@@ -933,34 +933,34 @@ const fn __str_digits_u64(s: &str, radix: u32, start: usize) Option<u64> {
             d = (b - b'A') as u32 + 10;
         }
         if d >= radix {
-            return Option::<u64>::None;
+            return None;
         }
         let dv = d as u64;
         if acc > (0xFFFF_FFFF_FFFF_FFFFu64 - dv) / r {
             // Would overflow u64.
-            return Option::<u64>::None;
+            return None;
         }
         acc = acc * r + dv;
         i += 1;
     }
-    return Option::<u64>::Some(acc);
+    return Some(acc);
 }
 
 extend Bytes as Iterator<u8> {
     pub const fn next(self: &mut Bytes) Option<u8> {
         if self.i >= self.s.len() {
-            return Option::<u8>::None;
+            return None;
         }
         let b = self.s.byte_at(self.i);
         self.i = self.i + 1;
-        return Option::<u8>::Some(b);
+        return Some(b);
     }
 }
 
 extend Chars as Iterator<u32> {
     pub const fn next(self: &mut Chars) Option<u32> {
         if self.i >= self.s.len() {
-            return Option::<u32>::None;
+            return None;
         }
         let b0 = self.s.byte_at(self.i);
         let mut cp: u32 = 0;
@@ -980,12 +980,12 @@ extend Chars as Iterator<u32> {
         } else {
             self.i = self.i + 1;
             // A continuation byte or 5+ byte leader: not a valid start.
-            return Option::<u32>::Some(0xFFFD);
+            return Some(0xFFFD);
         }
         if self.i + n > self.s.len() {
             // Truncated sequence at the end of the view.
             self.i = self.i + 1;
-            return Option::<u32>::Some(0xFFFD);
+            return Some(0xFFFD);
         }
         let mut k: usize = 1;
         while k < n {
@@ -993,44 +993,44 @@ extend Chars as Iterator<u32> {
             if (cb & 0xC0) != 0x80 {
                 // A non-continuation byte where one is required: malformed.
                 self.i = self.i + 1;
-                return Option::<u32>::Some(0xFFFD);
+                return Some(0xFFFD);
             }
             cp = cp << 6 | (cb & 0x3F) as u32;
             k = k + 1;
         }
         self.i = self.i + n;
-        return Option::<u32>::Some(cp);
+        return Some(cp);
     }
 }
 
 extend Split as Iterator<str> {
     pub const fn next<'a>(self: &mut Split<'a>) Option<str<'a>> {
         if self.i > self.s.len() {
-            return Option::<str>::None;
+            return None;
         }
         if self.sep.len() == 0 {
             let whole = self.s.slice(self.i, self.s.len());
             self.i = self.s.len() + 1;
-            return Option::<str>::Some(whole);
+            return Some(whole);
         }
         let rest = self.s.slice(self.i, self.s.len());
         let pos = rest.find(self.sep);
         if pos < 0 {
             let tail = self.s.slice(self.i, self.s.len());
             self.i = self.s.len() + 1;
-            return Option::<str>::Some(tail);
+            return Some(tail);
         }
         let j = self.i + pos as usize;
         let piece = self.s.slice(self.i, j);
         self.i = j + self.sep.len();
-        return Option::<str>::Some(piece);
+        return Some(piece);
     }
 }
 
 extend Lines as Iterator<str> {
     pub const fn next<'a>(self: &mut Lines<'a>) Option<str<'a>> {
         if self.i >= self.s.len() {
-            return Option::<str>::None;
+            return None;
         }
         let start = self.i;
         let mut j = self.i;
@@ -1043,7 +1043,7 @@ extend Lines as Iterator<str> {
         }
         let piece = self.s.slice(start, end);
         self.i = j + 1;
-        return Option::<str>::Some(piece);
+        return Some(piece);
     }
 }
 

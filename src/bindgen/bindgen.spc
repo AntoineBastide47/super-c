@@ -294,10 +294,10 @@ fn ctype_new() CType {
 extend CType {
     fn clone(self: &CType) CType {
         return CType {
-            base: String::from_str(self.base.as_str()),
+            base: String::from_str(&self.base),
             ptr: self.ptr,
             qual: self.qual,
-            fnsig: String::from_str(self.fnsig.as_str()),
+            fnsig: String::from_str(&self.fnsig),
             ok: self.ok,
         };
     }
@@ -311,7 +311,7 @@ extend CType {
     // about the pointee, which is why only the pointee's qualifier survives here.
     fn render(self: &CType, out: &mut String) {
         if self.fnsig.len() != 0 {
-            out.push_str(self.fnsig.as_str());
+            out.push_str(&self.fnsig);
             return;
         }
         let mut i = self.ptr;
@@ -323,7 +323,7 @@ extend CType {
             }
             i = i - 1;
         }
-        out.push_str(self.base.as_str());
+        out.push_str(&self.base);
     }
 }
 
@@ -363,9 +363,9 @@ struct Widths {
 
 fn int_name(bytes: i32, signed: bool, out: &mut String) {
     let n = if signed {
-        "i";
+        "i"
     } else {
-        "u";
+        "u"
     };
     out.push_str(n);
     if bytes == 1 {
@@ -603,10 +603,10 @@ extend EnumDef {
     const fn val_of(self: &Self, name: str) Option<i64> {
         for i in 0..self.vals.len() {
             if self.vals[i].name.as_str() == name {
-                return Option::<i64>::Some(self.vals[i].value);
+                return Some(self.vals[i].value);
             }
         }
-        return Option::<i64>::None;
+        return None;
     }
 }
 
@@ -622,7 +622,7 @@ fn same_origin(a: str, want: str, extra: &Vector<String>) bool {
         return true;
     }
     for i in 0..extra.len() {
-        if extra[i].len() != 0 && a.contains(extra[i].as_str()) {
+        if extra[i].len() != 0 && a.contains(&extra[i]) {
             return true;
         }
     }
@@ -764,13 +764,13 @@ pub(package) fn header_facts(
         proto_ix: Map::<String, u32>::new(),
         objs: Map::<String, String>::new(),
     };
-    c.index_macros(dump.as_str());
-    c.widths = read_widths(&c, dump.as_str());
+    c.index_macros(&dump);
+    c.widths = read_widths(&c, &dump);
     let win = String::from_str("_WIN32");
     c.ms_bitfields = c.macros.contains_key(&win);
     c.all_protos = true;
-    let mut lx = Lexer::new(text.as_str());
-    lx.parse_unit(&mut c, path, &none, dump.as_str());
+    let mut lx = Lexer::new(&text);
+    lx.parse_unit(&mut c, path, &none, &dump);
     let mut ex = String::new();
     for k in 0..names.len() {
         // The name's expansion: up to the next separator, its line markers dropped.
@@ -781,9 +781,9 @@ pub(package) fn header_facts(
         tail = tail.slice(at as usize + HF_SEP.len(), tail.len());
         let end = tail.find(HF_SEP);
         let seg = if end < 0 {
-            tail;
+            tail
         } else {
-            tail.slice(0, end as usize);
+            tail.slice(0, end as usize)
         };
         ex.clear();
         let mut a: usize = 0;
@@ -798,20 +798,20 @@ pub(package) fn header_facts(
             }
         }
         // The value's 64 bits: an unsigned 64-bit constant past i64 keeps its bits.
-        let v = ce_cv(ex.as_str().trim(), &c, null, dump.as_str(), 0);
+        let v = ce_cv(ex.as_str().trim(), &c, null, &dump, 0);
         oks.push(v.is_some());
         vals.push(
             if v.is_some() {
-                cv_pat(v.unwrap()) as i64;
+                cv_pat(v.unwrap()) as i64
             } else {
-                0;
+                0
             },
         );
         let mut obj = String::from_str(ex.as_str().trim());
         if v.is_none() && c.objs.contains_key(&obj) {
             let ot = c.objs.get(&obj).unwrap().clone();
             obj.push_byte(b' ');
-            c_shape(&c, ot.as_str(), &mut obj);
+            c_shape(&c, &ot, &mut obj);
         } else {
             obj.clear();
         }
@@ -824,10 +824,10 @@ pub(package) fn header_facts(
         if let Some(i) = c.proto_ix.get(&key) {
             let f = &c.protos[(*i) as usize];
             sg.push_str(pick(f.variadic, "v ", "f "));
-            c_shape(&c, f.ret.as_str(), &mut sg);
+            c_shape(&c, &f.ret, &mut sg);
             for q in 0..f.params.len() {
                 sg.push_byte(b' ');
-                c_shape(&c, f.params[q].ty.as_str(), &mut sg);
+                c_shape(&c, &f.params[q].ty, &mut sg);
             }
         }
         sigs.push(sg);
@@ -851,15 +851,15 @@ pub(package) fn header_facts(
         lv.truncate(0);
         sizes.push(
             if c_layout(&c, types[k], 0, true, &mut lv, &mut size, &mut align) {
-                size as u64 << 32 | align as u64;
+                size as u64 << 32 | align as u64
             } else {
-                0;
+                0
             },
         );
     }
     for k in 0..aggs.len() {
         let mut f = String::new();
-        agg_facts(&c, dump.as_str(), aggs[k], &mut f);
+        agg_facts(&c, &dump, aggs[k], &mut f);
         afacts.push(f);
     }
     for k in 0..shape_of.len() {
@@ -879,15 +879,15 @@ pub(package) fn header_facts(
 fn agg_facts(c: &Collected, dump: str, query: str, out: &mut String) {
     let bar = query.find_byte(b'|');
     let cty = if bar < 0 {
-        query;
+        query
     } else {
-        query.slice(0, bar as usize);
+        query.slice(0, bar as usize)
     };
     let tagged = cty.starts_with("struct ") || cty.starts_with("union ") || cty.starts_with("enum ");
     let name = if tagged {
-        cty.slice(cty.find_byte(b' ') as usize + 1, cty.len());
+        cty.slice(cty.find_byte(b' ') as usize + 1, cty.len())
     } else {
-        cty;
+        cty
     };
     let mut ri: i32 = -1;
     let mut ei: i32 = -1;
@@ -943,15 +943,15 @@ fn agg_facts(c: &Collected, dump: str, query: str, out: &mut String) {
     let mut align: u32 = 0;
     let mut lv = Vector::<(u32, u8)>::new();
     let r = &c.records[ri as usize];
-    if !r.ok || r.attr || !c_layout(c, r.tag.as_str(), 0, true, &mut lv, &mut size, &mut align) {
+    if !r.ok || r.attr || !c_layout(c, &r.tag, 0, true, &mut lv, &mut size, &mut align) {
         out.push_str("?");
         return;
     }
     out.format_into("R {} {}", size, align);
     let mut rest = if bar < 0 {
-        "";
+        ""
     } else {
-        query.slice(bar as usize + 1, query.len());
+        query.slice(bar as usize + 1, query.len())
     };
     let mut sh = String::new();
     for _ in 0..query.len() {
@@ -960,14 +960,14 @@ fn agg_facts(c: &Collected, dump: str, query: str, out: &mut String) {
         }
         let e = rest.find_byte(b'|');
         let m = if e < 0 {
-            rest;
+            rest
         } else {
-            rest.slice(0, e as usize);
+            rest.slice(0, e as usize)
         };
         rest = if e < 0 {
-            "";
+            ""
         } else {
-            rest.slice(e as usize + 1, rest.len());
+            rest.slice(e as usize + 1, rest.len())
         };
         sh.clear();
         let mut off: u32 = 0;
@@ -1007,10 +1007,10 @@ fn member_at(c: &Collected, dump: str, ri: i32, name: str, off: &mut u32, shape:
         at += o;
         if i == p.len() {
             *off = at;
-            c_shape(c, ty.as_str(), shape);
+            c_shape(c, &ty, shape);
             return true;
         }
-        rec = record_of_type(c, ty.as_str());
+        rec = record_of_type(c, &ty);
     }
     return false;
 }
@@ -1034,7 +1034,7 @@ fn find_member(c: &Collected, ri: i32, name: str, depth: u32, off: &mut u32, ty:
         if r.fields[k].name.len() != 0 || r.fields[k].bits >= 0 {
             continue;
         }
-        let sub = c.record_of(r.fields[k].ty.as_str());
+        let sub = c.record_of(&r.fields[k].ty);
         let mut o: u32 = 0;
         if sub >= 0 && find_member(c, sub, name, depth + 1, &mut o, ty) {
             *off = offs[k] + o;
@@ -1083,7 +1083,7 @@ fn rec_layout(
         fl.truncate(0);
         let mut fs: u32 = 0;
         let mut fa: u32 = 0;
-        if !c_layout(c, r.fields[k].ty.as_str(), depth + 1, vec, &mut fl, &mut fs, &mut fa) {
+        if !c_layout(c, &r.fields[k].ty, depth + 1, vec, &mut fl, &mut fs, &mut fa) {
             return false;
         }
         if r.packed {
@@ -1149,9 +1149,9 @@ fn rec_layout(
         }
         unit = 0;
         let o = if r.is_union {
-            0u32;
+            0u32
         } else {
-            at + fa - 1 & ~(fa - 1);
+            at + fa - 1 & ~(fa - 1)
         };
         for q in 0..fl.len() {
             if out.len() <= 16 {
@@ -1160,9 +1160,9 @@ fn rec_layout(
         }
         offs.push(o);
         at = if r.is_union {
-            ast_max(at, fs);
+            ast_max(at, fs)
         } else {
-            o + fs;
+            o + fs
         };
         bits = at * 8;
         al = ast_max(al, fa);
@@ -1181,7 +1181,7 @@ fn pack_moves(c: &Collected, r: &Record) bool {
         lv.truncate(0);
         let mut fs: u32 = 0;
         let mut fa: u32 = 0;
-        if !c_layout(c, r.fields[k].ty.as_str(), 0, true, &mut lv, &mut fs, &mut fa) || fa > r.pack {
+        if !c_layout(c, &r.fields[k].ty, 0, true, &mut lv, &mut fs, &mut fa) || fa > r.pack {
             return true;
         }
     }
@@ -1376,9 +1376,9 @@ fn c_layout(c: &Collected, ty: str, depth: u32, vec: bool, out: &mut Vector<(u32
         "isize" | "usize" => (
             pb,
             if pb == 8 {
-                b'q';
+                b'q'
             } else {
-                b'w';
+                b'w'
             }
         ),
         "f32" => (4u32, b'f'),
@@ -1428,14 +1428,14 @@ fn c_layout(c: &Collected, ty: str, depth: u32, vec: bool, out: &mut Vector<(u32
     if !al.ok || al.sub.len() == 0 || al.sub.as_str() == ty {
         return false;
     }
-    return c_layout(c, al.sub.as_str(), depth + 1, vec, out, size, align);
+    return c_layout(c, &al.sub, depth + 1, vec, out, size, align);
 }
 
 const fn ast_max(a: u32, b: u32) u32 {
     return if a > b {
-        a;
+        a
     } else {
-        b;
+        b
     };
 }
 
@@ -1480,9 +1480,9 @@ fn vec_bytes(c: &Collected, name: str) u32 {
                 _ => 0,
             };
             return if lanes > 0 {
-                (lanes * eb) as u32;
+                (lanes * eb) as u32
             } else {
-                0;
+                0
             };
         }
         let ai = c.alias_of(n);
@@ -1599,7 +1599,7 @@ fn size_macro(c: &Collected, dump: str, name: str, dflt: i32) i32 {
     if !c.macro_value(dump, name, &mut v) {
         return dflt;
     }
-    let b = macro_int(v.as_str());
+    let b = macro_int(&v);
     if b <= 0 {
         return dflt;
     }
@@ -1732,7 +1732,7 @@ const fn lit_cv(t: str, w: &Widths) Option<CV> {
             break;
         }
         if d >= base || v > (U64_MAX - d) / base {
-            return Option::<CV>::None;
+            return None;
         }
         v = v * base + d;
         any = true;
@@ -1748,31 +1748,31 @@ const fn lit_cv(t: str, w: &Widths) Option<CV> {
         } else if ch == b'l' || ch == b'L' {
             ls += 1;
         } else {
-            return Option::<CV>::None;
+            return None;
         }
         i += 1;
     }
     if !any || us > 1 || ls > 2 {
-        return Option::<CV>::None;
+        return None;
     }
     // C's list: int, long and long long from the suffix's length on, each signed unless `u`, and, for
     // a hex, octal or binary literal, followed by its unsigned type.
     for k in ls..3 {
         let wb = if k == 0 {
-            w.int_b;
+            w.int_b
         } else if k == 1 {
-            w.long_b;
+            w.long_b
         } else {
-            w.llong_b;
+            w.llong_b
         } as u32 * 8;
         if us == 0 && v <= mask(wb) >> 1 {
-            return Option::<CV>::Some(CV { v: v, bits: wb, uns: false });
+            return Some(CV { v: v, bits: wb, uns: false });
         }
         if (us == 1 || base != 10) && v <= mask(wb) {
-            return Option::<CV>::Some(CV { v: v, bits: wb, uns: true });
+            return Some(CV { v: v, bits: wb, uns: true });
         }
     }
-    return Option::<CV>::None;
+    return None;
 }
 
 extend CExpr {
@@ -1837,17 +1837,17 @@ extend CExpr {
     // type, which an unsigned result wraps into and a signed one must fit.
     const fn arith(self: &mut Self, a: CV, b: CV, op: u8) CV {
         let mut bits = if a.bits > b.bits {
-            a.bits;
+            a.bits
         } else {
-            b.bits;
+            b.bits
         };
         let mut uns = a.uns;
         if a.uns != b.uns {
             // The unsigned type when it is at least as wide, else the wider signed one, which holds it.
             let (ub, sb) = if a.uns {
-                (a.bits, b.bits);
+                (a.bits, b.bits)
             } else {
-                (b.bits, a.bits);
+                (b.bits, a.bits)
             };
             uns = ub >= sb;
             if !uns {
@@ -1960,11 +1960,11 @@ extend CExpr {
         ok = ok && words != 0 && self.lx.at_punct(b')');
         let mut pr = String::new();
         let pb = if c.macro_value(dump, "__SIZEOF_POINTER__", &mut pr) {
-            int_literal(pr.as_str()) as u32 * 8;
+            int_literal(&pr) as u32 * 8
         } else {
-            0;
+            0
         };
-        let ai = c.alias_of(named.as_str());
+        let ai = c.alias_of(&named);
         let ptr_alias = ai >= 0 && c.aliases.at(ai as usize).ok && (c.aliases.at(ai as usize).sub.as_str().starts_with(
             "*",
         ) || c.aliases.at(ai as usize).sub.as_str().starts_with("fn("));
@@ -1975,26 +1975,26 @@ extend CExpr {
         } else if ok && named.len() != 0 {
             // A typedef alone: a fixed-width name, or one the header maps to an integer.
             let mut sub = String::new();
-            if !wellknown(named.as_str(), &mut sub) {
+            if !wellknown(&named, &mut sub) {
                 if ai >= 0 && !c.aliases.at(ai as usize).opaque && c.aliases.at(ai as usize).ok {
                     sub.push_string(&c.aliases.at(ai as usize).sub);
                 }
             }
-            ok = longs + shorts + chars + sign == 0 && int_ty(sub.as_str(), pb, bits, uns);
+            ok = longs + shorts + chars + sign == 0 && int_ty(&sub, pb, bits, uns);
         } else if ok {
             // Plain `char` has the target's signedness: only an explicit sign is modelled.
             ok = chars == 0 || sign != 0 && chars == 1 && longs + shorts == 0;
             *uns = sign == 2;
             *bits = if chars != 0 {
-                8u32;
+                8u32
             } else if shorts != 0 {
-                c.widths.short_b as u32 * 8;
+                c.widths.short_b as u32 * 8
             } else if longs == 1 {
-                c.widths.long_b as u32 * 8;
+                c.widths.long_b as u32 * 8
             } else if longs > 1 {
-                c.widths.llong_b as u32 * 8;
+                c.widths.llong_b as u32 * 8
             } else {
-                c.widths.int_b as u32 * 8;
+                c.widths.int_b as u32 * 8
             };
         }
         if ok {
@@ -2021,10 +2021,10 @@ extend CExpr {
         }
         for i in 0..c.consts.len() {
             if c.consts[i].name.as_str() == name {
-                let lit = int_literal(c.consts[i].value.as_str());
+                let lit = int_literal(&c.consts[i].value);
                 let mut bits: u32 = 0;
                 let mut uns = false;
-                if lit >= 0 && int_ty(c.consts[i].ty.as_str(), 64, &mut bits, &mut uns) {
+                if lit >= 0 && int_ty(&c.consts[i].ty, 64, &mut bits, &mut uns) {
                     return self.cast(CV { v: lit as u64, bits: 64, uns: false }, bits, uns);
                 }
             }
@@ -2039,7 +2039,7 @@ extend CExpr {
             let mut raw = String::new();
             let got = c.macro_value(dump, name, &mut raw);
             if got && raw.len() != 0 {
-                let v = ce_cv(raw.as_str(), c, e, dump, depth + 1);
+                let v = ce_cv(&raw, c, e, dump, depth + 1);
                 if v.is_some() {
                     return v.unwrap();
                 }
@@ -2102,7 +2102,7 @@ extend CExpr {
             self.lx.advance();
             // A call reaches here as an identifier followed by something unexpected; the caller refuses it
             // when the expression does not end cleanly.
-            return self.ex_ident(c, e, dump, depth, nm.as_str());
+            return self.ex_ident(c, e, dump, depth, &nm);
         }
         self.ok = false;
         return cv_int(0);
@@ -2129,11 +2129,11 @@ extend CExpr {
             return 0;
         }
         self.lx.advance();
-        let ai = c.alias_of(name.as_str());
+        let ai = c.alias_of(&name);
         let ty = if ai >= 0 && c.aliases.at(ai as usize).ok && !c.aliases.at(ai as usize).opaque {
-            c.aliases.at(ai as usize).sub.as_str();
+            c.aliases.at(ai as usize).sub.as_str()
         } else {
-            name.as_str();
+            name.as_str()
         };
         let mut lv = Vector::<(u32, u8)>::new();
         let mut size: u32 = 0;
@@ -2150,9 +2150,9 @@ extend CExpr {
             self.lx.advance();
             let n = if self.lx.at_punct(b'(') {
                 self.lx.advance();
-                self.sizeof_type(c, dump);
+                self.sizeof_type(c, dump)
             } else {
-                0;
+                0
             };
             if n == 0 {
                 self.ok = false;
@@ -2268,24 +2268,24 @@ extend CExpr {
 // subset. `e` (may be null) is an enum under construction, whose earlier enumerators are in scope.
 fn ce_cv(text: str, c: &Collected, e: *const EnumDef, dump: str, depth: i32) Option<CV> {
     if text.len() == 0 || depth > CE_DEPTH {
-        return Option::<CV>::None;
+        return None;
     }
     let mut x = CExpr::<'_> { lx: Lexer::new(text), ok: true };
     let v = x.ex_or(c, e, dump, depth);
     // Trailing tokens mean the text was never a constant expression: a call, a comma.
     if x.ok && x.lx.kind == TK_EOF {
-        return Option::<CV>::Some(v);
+        return Some(v);
     }
-    return Option::<CV>::None;
+    return None;
 }
 
 // `ce_cv`'s value when an i64 holds it.
 fn ce_eval(text: str, c: &Collected, e: *const EnumDef, dump: str, depth: i32) Option<i64> {
     let r = ce_cv(text, c, e, dump, depth);
     if r.is_some() && cv_fits(r.unwrap(), 64, false) {
-        return Option::<i64>::Some(cv_pat(r.unwrap()) as i64);
+        return Some(cv_pat(r.unwrap()) as i64);
     }
-    return Option::<i64>::None;
+    return None;
 }
 
 // Which names the TARGET header defines. `-dM` gives every macro in scope: thousands of them, from the
@@ -2423,13 +2423,13 @@ fn macro_const(name: str, raw: str, c: &Collected, dump: str, out: &mut ConstDef
     // Unsigned only when C says so; the width is the smallest that holds the value.
     out.ty.push_str(
         if x.uns && iv > 0xFFFFFFFF {
-            "u64";
+            "u64"
         } else if x.uns {
-            "u32";
+            "u32"
         } else if cv_fits(x, 32, false) {
-            "i32";
+            "i32"
         } else {
-            "i64";
+            "i64"
         },
     );
     out.value.format_into("{}", iv);
@@ -2504,21 +2504,21 @@ fn run_one(
     let mut text = String::new();
     let mut mdump = String::new();
     let mut read = Vector::<String>::new();
-    if !preprocess(env, hdr.as_str(), incs, Vector::<cpp::VFile>::new(), &mut text, &mut mdump, &mut read, false) {
+    if !preprocess(env, &hdr, incs, Vector::<cpp::VFile>::new(), &mut text, &mut mdump, &mut read, false) {
         eprintln("super-c: the preprocessor failed on '{}'", header);
         return 1;
     }
-    c.index_macros(mdump.as_str());
-    c.widths = read_widths(&c, mdump.as_str());
+    c.index_macros(&mdump);
+    c.widths = read_widths(&c, &mdump);
     let win = String::from_str("_WIN32");
     c.ms_bitfields = c.macros.contains_key(&win);
-    let mut lx = Lexer::new(text.as_str());
-    lx.parse_unit(&mut c, hdr.as_str(), froms, mdump.as_str());
-    c.collect_consts(hdr.as_str(), mdump.as_str());
+    let mut lx = Lexer::new(&text);
+    lx.parse_unit(&mut c, &hdr, froms, &mdump);
+    c.collect_consts(&hdr, &mdump);
     c.demote_opaque_holders();
     let mut out = String::new();
-    c.emit(spelling.as_str(), link, &mut out);
-    return write_out(out.as_str(), out_path, c.fns.len(), c.skipped);
+    c.emit(&spelling, link, &mut out);
+    return write_out(&out, out_path, c.fns.len(), c.skipped);
 }
 
 fn write_out(text: str, out_path: str, nfns: usize, skipped: usize) i32 {
@@ -2625,18 +2625,18 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) bool {
     names.sort();
     let mut ok = true;
     for i in 0..names.len() {
-        let child = join_path(dir, names[i].as_str());
-        let crel = join_path(rel, names[i].as_str());
-        if is_dir(child.as_str()) {
-            if !walk_headers(child.as_str(), crel.as_str(), out_dir, jobs) {
+        let child = join_path(dir, &names[i]);
+        let crel = join_path(rel, &names[i]);
+        if is_dir(&child) {
+            if !walk_headers(&child, &crel, out_dir, jobs) {
                 ok = false;
             }
         } else if names[i].as_str().ends_with(".h") {
-            let o = join_path(out_dir, dir_part(crel.as_str()));
+            let o = join_path(out_dir, dir_part(&crel));
             let mut leaf = String::new();
-            module_stem(crel.as_str(), &mut leaf);
+            module_stem(&crel, &mut leaf);
             leaf.push_str(".spc");
-            let full = join_path(o.as_str(), leaf.as_str());
+            let full = join_path(&o, &leaf);
             jobs.push(Job { path: child, spelling: crel, out: full });
             continue;
         }
@@ -2672,14 +2672,14 @@ pub(package) fn run(
         flags.push_string(&cflags[i]);
         flags.push_byte(b' ');
     }
-    if !ct::apply_c_flags(flags.as_str(), &mut env) {
+    if !ct::apply_c_flags(&flags, &mut env) {
         return 1;
     }
     let out_is_file = out_path.ends_with(".spc");
     let out_dir = if out_is_file {
-        "";
+        ""
     } else {
-        out_path;
+        out_path
     };
     let mut jobs = Vector::<Job>::new();
     let mut rc: i32 = 0;
@@ -2711,7 +2711,7 @@ pub(package) fn run(
             let mut leaf = String::new();
             module_stem(p, &mut leaf);
             leaf.push_str(".spc");
-            let full = join_path(out_dir, leaf.as_str());
+            let full = join_path(out_dir, &leaf);
             o.push_string(&full);
         }
         jobs.push(Job { path: String::from_str(p), spelling: sp, out: o });
@@ -2731,11 +2731,11 @@ pub(package) fn run(
     } else {
         for i in 0..jobs.len() {
             // Each header is its own module, so one that cannot be read or preprocessed fails alone.
-            let od = dir_part(jobs[i].out.as_str());
+            let od = dir_part(&jobs[i].out);
             if od.len() != 0 {
                 let _ = fs::mkdir_all(od);
             }
-            if run_one(jobs[i].path.as_str(), jobs[i].out.as_str(), link, jobs[i].spelling.as_str(), incs, froms, &env) != 0 {
+            if run_one(&jobs[i].path, &jobs[i].out, link, &jobs[i].spelling, incs, froms, &env) != 0 {
                 rc = 1;
             }
         }
@@ -2808,9 +2808,9 @@ extend Lexer {
                     }
                     self.advance();
                     let n = if self.kind == TK_NUM {
-                        int_literal(self.text());
+                        int_literal(self.text())
                     } else {
-                        -1i64;
+                        -1i64
                     };
                     if n <= 0 {
                         self.a_unknown = true;
@@ -2831,9 +2831,9 @@ extend Lexer {
                             let n = int_literal(self.text());
                             if n > 0 {
                                 self.vec = if bytes {
-                                    n;
+                                    n
                                 } else {
-                                    -n;
+                                    -n
                                 };
                             }
                         }
@@ -2996,9 +2996,9 @@ extend Lexer {
                     r.bitf = true;
                     self.advance();
                     let w = if self.kind == TK_NUM {
-                        int_literal(self.text());
+                        int_literal(self.text())
                     } else {
-                        -1i64;
+                        -1i64
                     };
                     if self.kind == TK_NUM {
                         self.advance();
@@ -3006,9 +3006,7 @@ extend Lexer {
                     if w < 0 || w > 64 || isfn || !ty.ok || adim != -1 || ty.ptr != 0 {
                         r.ok = false;
                     } else {
-                        r.fields.push(
-                            Field { name: String::from_str(nm.as_str()), ty: ty.base.clone(), bits: w as i32 },
-                        );
+                        r.fields.push(Field { name: String::from_str(&nm), ty: ty.base.clone(), bits: w as i32 });
                     }
                 } else if nm.len() == 0 && !isfn && ty.ok && adim == -1 && ty.ptr == 0 && ty.base.as_str().starts_with(
                     "__sc_anon_",
@@ -3029,7 +3027,7 @@ extend Lexer {
                     } else {
                         ty.render(&mut rt);
                     }
-                    r.fields.push(Field { name: String::from_str(nm.as_str()), ty: rt, bits: -1 });
+                    r.fields.push(Field { name: String::from_str(&nm), ty: rt, bits: -1 });
                 }
                 self.skip_noise();
                 if self.at_punct(b',') {
@@ -3055,11 +3053,11 @@ extend Lexer {
         r.attr = self.lay_attr || self.pack_unknown;
         if self.pack.len() != 0 {
             // A power of two up to 16, as GCC and clang take it; else the layout does not follow.
-            let v = ce_cv(self.pack.as_str(), c, null, dump, 0);
+            let v = ce_cv(&self.pack, c, null, dump, 0);
             let n = if v.is_some() {
-                cv_pat(v.unwrap());
+                cv_pat(v.unwrap())
             } else {
-                0u64;
+                0u64
             };
             if n == 0 || n > 16 || (n & n - 1) != 0 {
                 r.attr = true;
@@ -3170,9 +3168,9 @@ extend Lexer {
                         self.anon_n += 1;
                     }
                     if is_enum {
-                        self.parse_enum_body(c, tag.as_str(), dump);
+                        self.parse_enum_body(c, &tag, dump);
                     } else {
-                        self.parse_record_body(c, tag.as_str(), is_union, dump);
+                        self.parse_record_body(c, &tag, is_union, dump);
                         // And the attributes after it (`} __attribute__((packed));`).
                         self.a_packed = lead.0;
                         self.a_align = lead.1;
@@ -3199,14 +3197,14 @@ extend Lexer {
                         c.pending_agg = c.enums.len() as i32 - 1;
                         c.pending_is_enum = true;
                         ty.ok = false;
-                    } else if tag.len() != 0 && c.enum_emitted(tag.as_str()) {
+                    } else if tag.len() != 0 && c.enum_emitted(&tag) {
                         ty.base.push_string(&tag);
                     } else {
                         ty.base.push_str("i32");
                     }
                 } else if tag.len() != 0 {
                     ty.base.push_string(&tag);
-                    c.note_opaque(tag.as_str());
+                    c.note_opaque(&tag);
                 } else if defined {
                     c.pending_agg = c.records.len() as i32 - 1;
                     c.pending_is_enum = false;
@@ -3238,13 +3236,13 @@ extend Lexer {
                 let mut sub = String::new();
                 let opaque = c.aliases.at(ai as usize).opaque;
                 if opaque {
-                    sub.push_str(c.aliases.at(ai as usize).name.as_str());
+                    sub.push_str(&c.aliases.at(ai as usize).name);
                 } else {
-                    sub.push_str(c.aliases.at(ai as usize).sub.as_str());
+                    sub.push_str(&c.aliases.at(ai as usize).sub);
                 }
                 ty.base.push_string(&sub);
                 if opaque {
-                    c.note_opaque(sub.as_str());
+                    c.note_opaque(&sub);
                 }
                 if !c.aliases.at(ai as usize).ok {
                     ty.ok = false;
@@ -3427,16 +3425,16 @@ extend Lexer {
                 self.advance();
             }
             let v = if self.kind == TK_EOF {
-                -1i64;
+                -1i64
             } else if self.start == s0 {
-                -3i64;
+                -3i64
             } else {
-                ce_eval(self.src.slice(s0, self.start), c, null, dump, 0).unwrap_or(-1);
+                ce_eval(self.src.slice(s0, self.start), c, null, dump, 0).unwrap_or(-1)
             };
             let n = if v < 0 && v != -3 {
-                -2i64;
+                -2i64
             } else {
-                v;
+                v
             };
             if self.at_punct(b']') {
                 self.advance();
@@ -3488,7 +3486,7 @@ extend Lexer {
                 ty.render(&mut rendered);
                 let mut pname = String::new();
                 if nm.len() != 0 {
-                    safe_name(nm.as_str(), &mut pname);
+                    safe_name(&nm, &mut pname);
                 } else {
                     pname.format_into("a{}", idx);
                 }
@@ -3539,8 +3537,8 @@ extend Lexer {
             }
             if here.as_str() != self.file.as_str() {
                 here.clear();
-                here.push_str(self.file.as_str());
-                mine = same_origin(here.as_str(), want, extra);
+                here.push_str(&self.file);
+                mine = same_origin(&here, want, extra);
             }
             // Published for parse_specs: a struct or enum BODY is parsed from inside the specifier, which is
             // where its origin has to be known: only the target header's own records are emitted.
@@ -3579,12 +3577,12 @@ extend Lexer {
                     }
                 }
                 if nm.len() != 0 && td && self.vec != 0 && ty.ptr == 0 && !isfn {
-                    c.record_vector(nm.as_str(), &ty, self.vec);
+                    c.record_vector(&nm, &ty, self.vec);
                 } else if nm.len() != 0 && td {
-                    c.record_typedef(nm.as_str(), &ty, isfn);
+                    c.record_typedef(&nm, &ty, isfn);
                 }
                 if nm.len() != 0 && isfn && st {
-                    c.statics.insert(String::from_str(nm.as_str()));
+                    c.statics.insert(String::from_str(&nm));
                 }
                 // `extern int errno;` and friends: a global the library exports. Bound by what C itself
                 // declares: a const-qualified binding becomes an extern `const` (readable), anything else a
@@ -3593,11 +3591,9 @@ extend Lexer {
                     let mut vt = String::new();
                     ty.render(&mut vt);
                     let wr = ty.fnsig.len() != 0 || !ty.qual_at(ty.ptr);
-                    c.globals.push(
-                        ConstDef { name: String::from_str(nm.as_str()), ty: vt, value: String::new(), mutable: wr },
-                    );
+                    c.globals.push(ConstDef { name: String::from_str(&nm), ty: vt, value: String::new(), mutable: wr });
                 }
-                let key = String::from_str(nm.as_str());
+                let key = String::from_str(&nm);
                 if c.all_protos && !isfn && !td && !st && c.saw_extern && nm.len() != 0 && !c.objs.contains_key(&key) {
                     let mut ot = String::new();
                     if ty.ok && adim == -1 {
@@ -3620,12 +3616,12 @@ extend Lexer {
                         tys.push(Param { name: String::new(), ty: ps[q].ty.clone() });
                     }
                     c.proto_ix.insert(key, c.protos.len() as u32);
-                    c.protos.push(FnDecl { name: String::from_str(nm.as_str()), params: tys, ret: ret, variadic: va });
+                    c.protos.push(FnDecl { name: String::from_str(&nm), params: tys, ret: ret, variadic: va });
                 }
                 if keep {
                     let mut ret = String::new();
                     ty.render(&mut ret);
-                    c.fns.push(FnDecl { name: String::from_str(nm.as_str()), params: ps, ret: ret, variadic: va });
+                    c.fns.push(FnDecl { name: String::from_str(&nm), params: ps, ret: ret, variadic: va });
                 } else {
                     if isfn && mine && !td && !st && nm.len() != 0 {
                         c.skipped = c.skipped + 1;
@@ -3704,7 +3700,7 @@ extend Collected {
         return switch self.macros.get(&key) {
             Some(v) => {
                 out.push_str(dump.slice((*v >> 32) as usize, (*v & 0xFFFFFFFFu64) as usize));
-                true;
+                true
             },
             None => false,
         };
@@ -3739,16 +3735,16 @@ extend Collected {
         ty.render(&mut el);
         // Each step follows one typedef; a chain is shorter than the alias table.
         for _ in 0..self.aliases.len() + 1 {
-            let ai = self.alias_of(el.as_str());
+            let ai = self.alias_of(&el);
             if ai < 0 || self.aliases[ai as usize].opaque {
                 break;
             }
             el = self.aliases[ai as usize].sub.clone();
         }
         let e = if el.as_str() == "c_char" {
-            "i8";
+            "i8"
         } else {
-            el.as_str();
+            el.as_str()
         };
         let eb: i64 = switch e {
             "i8" | "u8" => 1,
@@ -3758,15 +3754,15 @@ extend Collected {
             _ => 0,
         };
         let lanes = if vec > 0 && eb != 0 {
-            vec / eb;
+            vec / eb
         } else {
-            -vec;
+            -vec
         };
         let ok = eb != 0 && lanes >= 1 && (lanes & lanes - 1) == 0;
         let sub = if ok {
-            format("{}x{}", e, lanes);
+            format("{}x{}", e, lanes)
         } else {
-            String::from_str("?");
+            String::from_str("?")
         };
         self.push_alias(Alias { name: String::from_str(name), sub: sub, opaque: false, ok: ok });
     }
@@ -3811,11 +3807,11 @@ extend Collected {
     const fn opaque_used(self: &Self, name: str) bool {
         for i in 0..self.fns.len() {
             let f = self.fns.at(i);
-            if type_mentions(f.ret.as_str(), name) {
+            if type_mentions(&f.ret, name) {
                 return true;
             }
             for j in 0..f.params.len() {
-                if type_mentions(f.params[j].ty.as_str(), name) {
+                if type_mentions(&f.params[j].ty, name) {
                     return true;
                 }
             }
@@ -3826,13 +3822,13 @@ extend Collected {
                 continue;
             }
             for j in 0..r.fields.len() {
-                if type_mentions(r.fields[j].ty.as_str(), name) {
+                if type_mentions(&r.fields[j].ty, name) {
                     return true;
                 }
             }
         }
         for i in 0..self.globals.len() {
-            if type_mentions(self.globals[i].ty.as_str(), name) {
+            if type_mentions(&self.globals[i].ty, name) {
                 return true;
             }
         }
@@ -3895,24 +3891,24 @@ extend Collected {
             }
             for j in 0..self.enums[i].vals.len() {
                 let mut cd = ConstDef { name: String::new(), ty: String::from_str("i32"), value: String::new() };
-                cd.name.push_str(self.enums[i].vals[j].name.as_str());
+                cd.name.push_str(&self.enums[i].vals[j].name);
                 cd.value.format_into("{}", self.enums[i].vals[j].value);
-                if !self.name_taken(self.consts.len(), cd.name.as_str()) {
+                if !self.name_taken(self.consts.len(), &cd.name) {
                     self.consts.push(cd);
                 }
             }
         }
         let mut names = Vector::<String>::new();
         if let Some(src) = loader::read_file(header) {
-            header_macro_names(src.as_str(), &mut names);
+            header_macro_names(&src, &mut names);
         }
         for i in 0..names.len() {
             let mut raw = String::new();
-            if self.macro_value(dump, names[i].as_str(), &mut raw) {
+            if self.macro_value(dump, &names[i], &mut raw) {
                 let mut cd = ConstDef { name: String::new(), ty: String::new(), value: String::new() };
-                let ok = macro_const(names[i].as_str(), raw.as_str(), self, dump, &mut cd) && !self.name_taken(
+                let ok = macro_const(&names[i], &raw, self, dump, &mut cd) && !self.name_taken(
                     self.consts.len(),
-                    names[i].as_str(),
+                    &names[i],
                 );
                 if ok {
                     self.consts.push(cd);
@@ -3931,9 +3927,9 @@ extend Collected {
         let mut i = self.fns.len();
         while i > 0 {
             i -= 1;
-            let mut bad = self.opaque_value(self.fns[i].ret.as_str());
+            let mut bad = self.opaque_value(&self.fns[i].ret);
             for j in 0..self.fns[i].params.len() {
-                bad = bad || self.opaque_value(self.fns[i].params[j].ty.as_str());
+                bad = bad || self.opaque_value(&self.fns[i].params[j].ty);
             }
             if bad {
                 let _ = self.fns.remove(i);
@@ -3943,7 +3939,7 @@ extend Collected {
         i = self.globals.len();
         while i > 0 {
             i -= 1;
-            if self.opaque_value(self.globals[i].ty.as_str()) {
+            if self.opaque_value(&self.globals[i].ty) {
                 let _ = self.globals.remove(i);
             }
         }
@@ -3977,7 +3973,7 @@ extend Collected {
                 }
                 let mut holds = false;
                 for j in 0..r.fields.len() {
-                    if self.opaque_value(r.fields[j].ty.as_str()) {
+                    if self.opaque_value(&r.fields[j].ty) {
                         holds = true;
                         break;
                     }
@@ -4020,7 +4016,7 @@ extend Collected {
                 continue;
             }
             out.push_str("pub const ");
-            safe_name(cd.name.as_str(), out);
+            safe_name(&cd.name, out);
             out.format_into(": {} = {};\n", cd.ty.as_str(), cd.value.as_str());
             loose = true;
         }
@@ -4037,9 +4033,9 @@ extend Collected {
             if !int_const(cd) {
                 continue;
             }
-            pin_keyword(cd.name.as_str(), out);
+            pin_keyword(&cd.name, out);
             out.push_str("    pub const ");
-            safe_name(cd.name.as_str(), out);
+            safe_name(&cd.name, out);
             out.format_into(": {} = {};\n", cd.ty.as_str(), cd.value.as_str());
             first = false;
         }
@@ -4075,7 +4071,7 @@ extend Collected {
             out.format_into("    pub enum {} {{\n", e.tag.as_str());
             for j in 0..e.vals.len() {
                 out.push_str("        ");
-                safe_name(e.vals[j].name.as_str(), out);
+                safe_name(&e.vals[j].name, out);
                 out.format_into(" = {},\n", e.vals[j].value);
             }
             out.push_str("    }\n\n");
@@ -4089,9 +4085,9 @@ extend Collected {
                 continue;
             }
             let kw = if r.is_union {
-                "union";
+                "union"
             } else {
-                "struct";
+                "struct"
             };
             if r.tagless {
                 out.format_into("    @import(\"{}\")\n", r.tag.as_str());
@@ -4111,15 +4107,15 @@ extend Collected {
         }
         for i in 0..self.globals.len() {
             let g = self.globals.at(i);
-            pin_keyword(g.name.as_str(), out);
+            pin_keyword(&g.name, out);
             out.push_str(
                 if g.mutable {
-                    "    pub static mut ";
+                    "    pub static mut "
                 } else {
-                    "    pub const ";
+                    "    pub const "
                 },
             );
-            safe_name(g.name.as_str(), out);
+            safe_name(&g.name, out);
             out.format_into(": {};\n", g.ty.as_str());
         }
         if self.globals.len() != 0 {
@@ -4127,9 +4123,9 @@ extend Collected {
         }
         for i in 0..self.fns.len() {
             let f = self.fns.at(i);
-            pin_keyword(f.name.as_str(), out);
+            pin_keyword(&f.name, out);
             out.push_str("    pub fn ");
-            safe_name(f.name.as_str(), out);
+            safe_name(&f.name, out);
             out.push_byte(b'(');
             for j in 0..f.params.len() {
                 if j != 0 {

@@ -79,7 +79,7 @@ fn read_loop(fd: i32, max: usize, tx: &ch::Sender<String>, st: &arc::Arc<sync::M
     let mut rd = transport::Reader::new(f);
     // Bounded by the frames of the input.
     while let Some(msg) = transport::read_message_max(&mut rd, max) {
-        let t = cancel_target(msg.as_str());
+        let t = cancel_target(&msg);
         if t >= 0 {
             let mut g = st.get().lock();
             let cs = g.get_mut();
@@ -107,9 +107,7 @@ fn read_loop(fd: i32, max: usize, tx: &ch::Sender<String>, st: &arc::Arc<sync::M
 // Serve one client: frames from descriptor `in_fd` (-1: stdin), answers to `out`, until the input ends.
 fn serve(cfg: pr::Launch, in_fd: i32, out: *mut stdio::FILE) {
     let st = arc::Arc::<sync::Mutex<CancelState>>::new(
-        sync::Mutex::<CancelState>::new(
-            CancelState { active: -1, source: Option::<ptask::CancelSource>::None, early: Vector::<i64>::new() },
-        ),
+        sync::Mutex::<CancelState>::new(CancelState { active: -1, source: None, early: Vector::<i64>::new() }),
     );
     let chan = ch::Channel::<String>::bounded(QUEUE_MAX);
     let tx = chan.sender();
@@ -120,14 +118,14 @@ fn serve(cfg: pr::Launch, in_fd: i32, out: *mut stdio::FILE) {
     let mut sv = pr::Server::new(cfg);
     // Bounded by the frames the reader passes on.
     while let Some(msg) = rx.recv() {
-        let req = switch json::parse(msg.as_str()) {
+        let req = switch json::parse(&msg) {
             Ok(v) => v,
             Err(e) => {
                 let r = pr::error_reply(
                     -1,
                     ApiError::new(Code::ProtocolFailed, format("malformed JSON: {}", e.as_str()).as_str()),
                 );
-                transport::write_message(out, r.as_str());
+                transport::write_message(out, &r);
                 continue;
             },
         };
@@ -138,9 +136,9 @@ fn serve(cfg: pr::Launch, in_fd: i32, out: *mut stdio::FILE) {
             switch req.value("params") {
                 Some(p) => p.value_i64("target", -1),
                 None => -1,
-            };
+            }
         } else {
-            id;
+            id
         };
         let (src, tok) = ptask::CancelSource::new();
         let mut early = false;
@@ -155,27 +153,20 @@ fn serve(cfg: pr::Launch, in_fd: i32, out: *mut stdio::FILE) {
                 }
             }
             cs.active = id;
-            cs.source = Option::<ptask::CancelSource>::Some(src);
+            cs.source = Some(src);
         }
         let reply = if early {
-            pr::error_reply(id, ApiError::new(Code::Cancelled, "the request was cancelled before it ran"));
+            pr::error_reply(id, ApiError::new(Code::Cancelled, "the request was cancelled before it ran"))
         } else {
-            sv.handle_json(
-                &req,
-                &ses::RequestOptions {
-                    cancel: Option::<ptask::CancelToken>::Some(tok),
-                    deadline_ns: 0,
-                    result_limit: 0,
-                },
-            );
+            sv.handle_json(&req, &ses::RequestOptions { cancel: Some(tok), deadline_ns: 0, result_limit: 0 })
         };
         {
             let mut g = st.get().lock();
             let cs = g.get_mut();
             cs.active = -1;
-            cs.source = Option::<ptask::CancelSource>::None;
+            cs.source = None;
         }
-        transport::write_message(out, reply.as_str());
+        transport::write_message(out, &reply);
         let p = sv.take_payload();
         if p.len() != 0 {
             write_bytes(out, &p);
@@ -208,9 +199,9 @@ pub fn run_socket(cfg: pr::Launch, path: str) i32 {
         cut -= 1;
     }
     let dir = if cut <= 1 {
-        "/";
+        "/"
     } else {
-        path.slice(0, cut - 1);
+        path.slice(0, cut - 1)
     };
     switch fs::stat(dir) {
         Ok(m) => {
@@ -225,7 +216,7 @@ pub fn run_socket(cfg: pr::Launch, path: str) i32 {
                 return 1;
             }
         },
-    };
+    }
     let l = switch sk::unix_listen(path, 4) {
         Ok(fd) => fd,
         Err(e) => {

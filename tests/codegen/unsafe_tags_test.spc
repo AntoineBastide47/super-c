@@ -74,18 +74,18 @@ fn link_section_places_symbols() {
     let plat = unsafe shim::sc_host_platform();
     let bin = format("{}/bin{}", p.dir(), unsafe str::from_cstr(cli::binext()));
     let mut cmd = if plat == 1 {
-        format("nm -m \"{}\"", bin.as_str());
+        format("nm -m \"{}\"", bin.as_str())
     } else if plat == 0 {
-        format("objdump -h \"{}\"", bin.as_str());
+        format("objdump -h \"{}\"", bin.as_str())
     } else {
-        format("objdump -t \"{}\"", bin.as_str());
+        format("objdump -t \"{}\"", bin.as_str())
     };
     let mut outp = format("{}/.tool", p.dir());
     if cli::run_with(cmd.cstr(), null, outp.cstr(), null, "") != 0 {
         eprintln("skipped the section half: `{}` failed (no object tool on this host)", cmd.as_str());
         return;
     }
-    let out = cli::read_text(outp.as_str());
+    let out = cli::read_text(&outp);
     if plat == 1 {
         assert(out.as_str().find("(__DATA,__sctag) external _TAGGED") >= 0, "TAGGED is in its section");
         assert(out.as_str().find("(__DATA,__scunref) external _UNREF") >= 0, "UNREF is in its section");
@@ -96,9 +96,9 @@ fn link_section_places_symbols() {
         assert(out.as_str().find(" .scunref ") >= 0, "the image has the unnamed static's section");
         assert(out.as_str().find(" .schot ") >= 0, "the image has the code section");
     } else {
-        assert(line_has(out.as_str(), " .sctag\t", " TAGGED"), "TAGGED is in its section");
-        assert(line_has(out.as_str(), " .scunref\t", " UNREF"), "UNREF is in its section");
-        assert(line_has(out.as_str(), " .schot\t", " hot"), "hot is in its section");
+        assert(line_has(&out, " .sctag\t", " TAGGED"), "TAGGED is in its section");
+        assert(line_has(&out, " .scunref\t", " UNREF"), "UNREF is in its section");
+        assert(line_has(&out, " .schot\t", " hot"), "hot is in its section");
     }
 }
 

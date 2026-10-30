@@ -54,9 +54,9 @@ extend Table {
             return own;
         }
         return if timeout > 0 {
-            timeout as u32;
+            timeout as u32
         } else {
-            0;
+            0
         };
     }
 }
@@ -214,9 +214,9 @@ pub fn test_main(
     d.sort_names(&t);
     let sel = choose(&t, &o, &mut d);
     let s = if sel.len() == 1 {
-        "";
+        ""
     } else {
-        "s";
+        "s"
     };
     if o.shards > 1 {
         println("running {} test{} (shard {}/{})", sel.len(), s, o.shard, o.shards);
@@ -236,9 +236,9 @@ pub fn test_main(
         slow_n: 0,
     };
     let rc = if o.no_fork {
-        run_in_process(&t, &o, &sel, genv, &mut r);
+        run_in_process(&t, &o, &sel, genv, &mut r)
     } else {
-        run_pool(&t, &o, &sel, genv, &mut r, &mut d);
+        run_pool(&t, &o, &sel, genv, &mut r, &mut d)
     };
     if rc != 0 {
         return rc;
@@ -259,9 +259,9 @@ pub fn test_main(
         println("\n{} passed, {} failed", r.passed, r.fails.len());
     }
     return if r.fails.len() > 100 {
-        100;
+        100
     } else {
-        r.fails.len() as i32;
+        r.fails.len() as i32
     };
 }
 
@@ -289,13 +289,13 @@ fn parse_arg(a: str<'static>, o: &mut Opts) bool {
         let ok = k > 0 && (switch v.slice(0, k as usize).parse_i32() {
             Some(x) => {
                 o.shard = x;
-                true;
+                true
             },
             None => false,
         }) && (switch v.slice(k as usize + 1, v.len()).parse_i32() {
             Some(x) => {
                 o.shards = x;
-                true;
+                true
             },
             None => false,
         });
@@ -419,9 +419,9 @@ extend Durations {
         let mut lines = Vector::<Line>::new();
         for i in 0..t.n {
             let s = if self.dur[i] >= 0.0 {
-                self.dur[i];
+                self.dur[i]
             } else {
-                self.known[i];
+                self.known[i]
             };
             if s >= 0.0 {
                 lines.push(Line { name: String::from_str(t.name(i)), secs: s });
@@ -439,11 +439,11 @@ extend Durations {
                                 }
                             },
                             None => {},
-                        };
+                        }
                     }
                 },
                 None => {},
-            };
+            }
         }
         lines.sort_by(line_cmp);
         let mut body = String::from_str(
@@ -456,7 +456,7 @@ extend Durations {
             body.push_byte(b'\n');
         }
         let mut tmp = format("{}.tmp", path);
-        if !write_file(tmp.as_str(), body.as_str()) {
+        if !write_file(&tmp, &body) {
             unsafe stdio::perror(tmp.cstr());
             let _ = unsafe stdio::remove(tmp.cstr());
             return;
@@ -484,11 +484,11 @@ const fn line_cmp(a: &Line, b: &Line) i32 {
 // The seconds and the name of one `<seconds>\t<name>` line; None for a comment or a line without a tab.
 fn duration_line<'a>(line: str<'a>) Option<(f64, str<'a>)> {
     if line.starts_with("#") {
-        return Option::<(f64, str<'a>)>::None;
+        return None;
     }
     let tab = line.find_byte(b'\t');
     if tab < 0 {
-        return Option::<(f64, str<'a>)>::None;
+        return None;
     }
     let mut name = line.slice(tab as usize + 1, line.len());
     let mut e: usize = 0;
@@ -496,7 +496,7 @@ fn duration_line<'a>(line: str<'a>) Option<(f64, str<'a>)> {
         e += 1;
     }
     name = name.slice(0, e);
-    return Option::<(f64, str<'a>)>::Some((leading_f64(line.slice(0, tab as usize)), name));
+    return Some((leading_f64(line.slice(0, tab as usize)), name));
 }
 
 // The decimal number `s` starts with, 0 without one (as C's atof on the files this runner writes).
@@ -583,25 +583,25 @@ struct Weighted {
 const fn weighted_cmp(a: &Weighted, b: &Weighted) i32 {
     if a.secs != b.secs {
         return if a.secs < b.secs {
-            1;
+            1
         } else {
-            -1;
+            -1
         };
     }
     return if a.i < b.i {
-        -1;
+        -1
     } else {
-        1;
+        1
     };
 }
 
 const fn f64_cmp(a: &f64, b: &f64) i32 {
     return if *a < *b {
-        -1;
+        -1
     } else if *a > *b {
-        1;
+        1
     } else {
-        0;
+        0
     };
 }
 
@@ -671,9 +671,9 @@ extend Run {
     fn pass(self: &mut Run, t: &Table, o: &Opts, ti: usize) {
         if !o.quiet {
             let how = if t.should_panic(ti) {
-                " (panicked as expected)";
+                " (panicked as expected)"
             } else {
-                "";
+                ""
             };
             println("test {} ... ok{}", t.name(ti), how);
         }
@@ -778,9 +778,9 @@ fn env_restore(snap: &Vector<String>) {
         let entry = unsafe str::from_cstr(p);
         let eq = entry.find_byte(b'=');
         let name = if eq < 0 {
-            entry;
+            entry
         } else {
-            entry.slice(0, eq as usize);
+            entry.slice(0, eq as usize)
         };
         let mut keep = false;
         for k in 0..snap.len() {
@@ -805,7 +805,7 @@ fn env_restore(snap: &Vector<String>) {
         }
         let mut n = String::from_str(s.slice(0, eq as usize));
         let v = s.slice(eq as usize + 1, s.len());
-        let cur = stdlib::get_env(n.as_str());
+        let cur = stdlib::get_env(&n);
         if cur.is_none() || cur.unwrap().as_str() != v {
             let mut vv = String::from_str(v);
             env_set(&mut n, &mut vv);
@@ -823,7 +823,7 @@ fn read_file(path: str) Option<String> {
         Some(mut f) => {
             let s = f.read_all();
             f.close();
-            Option::<String>::Some(s);
+            Some(s)
         },
         None => Option::<String>::None,
     };
@@ -861,11 +861,11 @@ fn js_init(capacity: i32) bool {
         return true;
     }
     let n = if capacity < 1 {
-        0;
+        0
     } else if capacity - 1 > JS_MAX {
-        JS_MAX;
+        JS_MAX
     } else {
-        capacity - 1;
+        capacity - 1
     };
     return js_make(n);
 }
@@ -920,7 +920,7 @@ fn js_give_back() {
 const fn js_parse(v: str<'static>) Option<(i32, str<'static>)> {
     let c = v.find_byte(b',');
     if c <= 0 {
-        return Option::<(i32, str<'static>)>::None;
+        return None;
     }
     let n = switch v.slice(0, c as usize).parse_i32() {
         Some(x) => x,
@@ -929,9 +929,9 @@ const fn js_parse(v: str<'static>) Option<(i32, str<'static>)> {
         },
     };
     if n < 0 || n > JS_MAX {
-        return Option::<(i32, str<'static>)>::None;
+        return None;
     }
-    return Option::<(i32, str<'static>)>::Some((n, v.slice(c as usize + 1, v.len())));
+    return Some((n, v.slice(c as usize + 1, v.len())));
 }
 
 @platform(!wasm)
@@ -957,9 +957,9 @@ extend Tokens {
             return 0;
         }
         return if js_try_acquire() {
-            1;
+            1
         } else {
-            -1;
+            -1
         };
     }
 
@@ -1174,9 +1174,9 @@ fn js_active() bool {
 fn js_lock(i: i32, lock: bool) i32 {
     let mut fl = unsafe zeroed::<flock>();
     fl.l_type = if lock {
-        F_WRLCK as i16;
+        F_WRLCK as i16
     } else {
-        F_UNLCK as i16;
+        F_UNLCK as i16
     };
     fl.l_whence = SEEK_SET as i16;
     fl.l_start = i;
@@ -1190,9 +1190,9 @@ fn js_lock(i: i32, lock: bool) i32 {
             continue;
         }
         return if lock && (e == EACCES || e == EAGAIN) {
-            0;
+            0
         } else {
-            -1;
+            -1
         };
     }
 }
@@ -1347,7 +1347,7 @@ fn kernel_view(tr: &Vector<i32>, path: str) {
     let mut o = String::new();
     for k in 0..tr.len() {
         let comm = slurp(format("/proc/{}/comm", tr[k]).as_str());
-        let cn = first_line(comm.as_str());
+        let cn = first_line(&comm);
         o.format_into("--- kernel: process {} ({}), thread state and wait channel\n", tr[k], cn);
         let mut tp = format("/proc/{}/task", tr[k]);
         let d = unsafe filesystem::opendir(tp.cstr());
@@ -1365,29 +1365,29 @@ fn kernel_view(tr: &Vector<i32>, path: str) {
             }
             let st = slurp(format("/proc/{}/task/{}/stat", tr[k], tid).as_str());
             let wc = slurp(format("/proc/{}/task/{}/wchan", tr[k], tid).as_str());
-            let s = first_line(st.as_str());
+            let s = first_line(&st);
             let rp = last_byte(s, b')');
             // The last close paren, as in `tree`.
             let state = if rp >= 0 && rp as usize + 2 < s.len() && s.byte_at(rp as usize + 1) == b' ' {
-                s.slice(rp as usize + 2, rp as usize + 3);
+                s.slice(rp as usize + 2, rp as usize + 3)
             } else {
-                "?";
+                "?"
             };
-            let w = first_line(wc.as_str());
+            let w = first_line(&wc);
             o.format_into(
                 "  {} {} {}\n",
                 tid,
                 state,
                 if w.len() != 0 {
-                    w;
+                    w
                 } else {
-                    "-";
+                    "-"
                 },
             );
         }
         let _ = unsafe filesystem::closedir(d);
     }
-    append_file(path, o.as_str());
+    append_file(path, &o);
 }
 
 @platform(linux | android)
@@ -1408,9 +1408,9 @@ fn last_byte(s: str, b: u8) isize {
 fn first_line(s: str) str {
     let n = s.find_byte(b'\n');
     return if n < 0 {
-        s;
+        s
     } else {
-        s.slice(0, n as usize);
+        s.slice(0, n as usize)
     };
 }
 
@@ -1471,9 +1471,9 @@ fn why_posix(st: i32, should_panic: bool) String {
     }
     return String::from_str(
         if should_panic {
-            "did not panic as expected";
+            "did not panic as expected"
         } else {
-            "exited with code 0";
+            "exited with code 0"
         },
     );
 }
@@ -1576,7 +1576,7 @@ fn run_pool(t: &Table, o: &Opts, sel: &Vector<usize>, genv: *mut void, r: &mut R
                 continue;
             }
             if c.diag == 0.0 && tn - c.start >= c.limit as f64 {
-                diag_request(c.pid, c.path.as_str(), c.limit);
+                diag_request(c.pid, &c.path, c.limit);
                 c.diag = now();
             } else if c.diag > 0.0 && tn - c.diag >= DIAG_GRACE {
                 kill_tree(c.pid);
@@ -1611,24 +1611,24 @@ fn run_pool(t: &Table, o: &Opts, sel: &Vector<usize>, genv: *mut void, r: &mut R
         // A panic aborts (SIGABRT) and the stack-overflow report exits 134. Any other end of a should_panic
         // test, a SIGSEGV or a leak report's exit 23 included, fails it.
         let as_declared = if t.should_panic(ti) {
-            signaled(st) && (st & 0x7f) == signal::SIGABRT || exited(st) && exit_code(st) == 134;
+            signaled(st) && (st & 0x7f) == signal::SIGABRT || exited(st) && exit_code(st) == 134
         } else {
-            exited(st) && exit_code(st) == 0;
+            exited(st) && exit_code(st) == 0
         };
         // Past its deadline, killed or not.
         if c.diag != 0.0 {
             println("test {} ... FAILED (timed out)", t.name(ti));
-            r.fail(ti, slurp(c.path.as_str()), timed_out_why(c.limit));
+            r.fail(ti, slurp(&c.path), timed_out_why(c.limit));
         } else if as_declared {
             r.pass(t, o, ti);
         } else {
             let how = if t.should_panic(ti) {
-                " (expected a panic)";
+                " (expected a panic)"
             } else {
-                "";
+                ""
             };
             println("test {} ... FAILED{}", t.name(ti), how);
-            r.fail(ti, slurp(c.path.as_str()), why_posix(st, t.should_panic(ti)));
+            r.fail(ti, slurp(&c.path), why_posix(st, t.should_panic(ti)));
         }
         let mut cp = c.path.clone();
         let _ = unsafe stdio::remove(cp.cstr());
@@ -1807,18 +1807,18 @@ fn js_lock(i: i32, lock: bool) i32 {
     let p = ((&mut ov[0]) as *mut u32) as *mut void;
     if !lock {
         return if unsafe UnlockFileEx(unsafe JS_H, 0, 1, 0, p) != 0 {
-            1;
+            1
         } else {
-            -1;
+            -1
         };
     }
     if unsafe LockFileEx(unsafe JS_H, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, p) != 0 {
         return 1;
     }
     return if unsafe GetLastError() == ERROR_LOCK_VIOLATION {
-        0;
+        0
     } else {
-        -1;
+        -1
     };
 }
 
@@ -1828,9 +1828,9 @@ fn temp_dir() Option<String> {
     let mut b = [0u8; 300];
     let n = unsafe GetTempPathA(MAX_PATH, ((&mut b[0]) as *mut u8) as *mut char);
     if n == 0 || n >= MAX_PATH {
-        return Option::<String>::None;
+        return None;
     }
-    return Option::<String>::Some(String::from_str(unsafe str::from_raw(&b[0], n as usize)));
+    return Some(String::from_str(unsafe str::from_raw(&b[0], n as usize)));
 }
 
 // A jobserver of `n` slots, made by this runner: a temp file deleted when its last handle closes.
@@ -1920,9 +1920,9 @@ fn why_win(code: u32, should_panic: bool) String {
     }
     return String::from_str(
         if should_panic {
-            "did not panic as expected";
+            "did not panic as expected"
         } else {
-            "exited with code 0";
+            "exited with code 0"
         },
     );
 }
@@ -2010,9 +2010,9 @@ fn run_pool(t: &Table, o: &Opts, sel: &Vector<usize>, _genv: *mut void, r: &mut 
             &handles[0],
             0,
             if limited {
-                1000;
+                1000
             } else {
-                INFINITE;
+                INFINITE
             },
         );
         if w == WAIT_TIMEOUT {
@@ -2043,28 +2043,28 @@ fn run_pool(t: &Table, o: &Opts, sel: &Vector<usize>, _genv: *mut void, r: &mut 
         // A panic aborts: exit code 3, or 0xC0000409 when the CRT fails fast; the stack-overflow report
         // exits 134. Any other code fails a should_panic test.
         let as_declared = if t.should_panic(ti) {
-            code == 3 || code == 134 || code == 0xC0000409;
+            code == 3 || code == 134 || code == 0xC0000409
         } else {
-            code == 0;
+            code == 0
         };
         let mut cp = cap_path(&tmp, ti);
         if !c.late && as_declared {
             r.pass(t, o, ti);
         } else {
             let how = if c.late {
-                " (timed out)";
+                " (timed out)"
             } else if t.should_panic(ti) {
-                " (expected a panic)";
+                " (expected a panic)"
             } else {
-                "";
+                ""
             };
             println("test {} ... FAILED{}", t.name(ti), how);
             let why = if c.late {
-                timed_out_why(c.limit);
+                timed_out_why(c.limit)
             } else {
-                why_win(code, t.should_panic(ti));
+                why_win(code, t.should_panic(ti))
             };
-            r.fail(ti, slurp(cp.as_str()), why);
+            r.fail(ti, slurp(&cp), why);
         }
         let _ = unsafe stdio::remove(cp.cstr());
         unsafe stdio::fflush(stdio::stdout());

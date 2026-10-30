@@ -26,7 +26,7 @@ pub fn scratch() Scratch {
     for b in r {
         dir.push_hex(b, false);
     }
-    fs::mkdir(dir.as_str()).unwrap();
+    fs::mkdir(&dir).unwrap();
     return Scratch { dir: dir };
 }
 
@@ -58,7 +58,7 @@ extend Scratch {
 
 extend Scratch as Free {
     pub fn free(self: &mut Scratch) {
-        let _ = fs::remove_all(self.dir.as_str());
+        let _ = fs::remove_all(&self.dir);
         self.dir.free(); // a written `free` replaces the derived one, which would free the path
     }
 }

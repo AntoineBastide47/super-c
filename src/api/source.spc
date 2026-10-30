@@ -23,15 +23,15 @@ extend DiskFiles as FileProvider {
             Ok(f) => f,
             Err(e) => {
                 return if e.kind == IoErrorKind::NotFound {
-                    Result::<bool, IoError>::Ok(false);
+                    Ok(false)
                 } else {
-                    Result::<bool, IoError>::Err(e);
+                    Err(e)
                 };
             },
         };
         let m = f.metadata()?;
         if m.kind != fs::FileKind::File {
-            return Result::<bool, IoError>::Ok(false);
+            return Ok(false);
         }
         let sz = m.size as usize;
         out.clear();
@@ -39,7 +39,7 @@ extend DiskFiles as FileProvider {
         let n = f.read_full(unsafe SliceMut::<u8> { ptr: out.spare_mut(sz), len: sz })?;
         out.advance_len(n);
         f.close()?;
-        return Result::<bool, IoError>::Ok(true);
+        return Ok(true);
     }
 
     pub fn list(self: &mut Self, dir: str, out: &mut Vector<String>) Result<bool, IoError> {
@@ -47,9 +47,9 @@ extend DiskFiles as FileProvider {
             Ok(d) => d,
             Err(e) => {
                 return if e.kind == IoErrorKind::NotFound {
-                    Result::<bool, IoError>::Ok(false);
+                    Ok(false)
                 } else {
-                    Result::<bool, IoError>::Err(e);
+                    Err(e)
                 };
             },
         };
@@ -57,7 +57,7 @@ extend DiskFiles as FileProvider {
         while let Some(r) = d.next() {
             out.push(String::from_str(r?.name));
         }
-        return Result::<bool, IoError>::Ok(true);
+        return Ok(true);
     }
 }
 
@@ -86,9 +86,9 @@ extend MemoryFiles {
     pub fn over_disk_within(roots: Slice<String>) Result<MemoryFiles, IoError> {
         let mut m = MemoryFiles::over_disk();
         for i in 0..roots.len() {
-            m.roots.push(fs::realpath(roots[i].as_str())?);
+            m.roots.push(fs::realpath(&roots[i])?);
         }
-        return Result::<MemoryFiles, IoError>::Ok(m);
+        return Ok(m);
     }
 
     // Whether the host's file `path` may be read: no roots, or its real path lies in one.
@@ -142,15 +142,15 @@ extend MemoryFiles as FileProvider {
         for i in 0..self.names.len() {
             if self.names[i].as_str() == path {
                 out.clear();
-                out.push_str(self.texts[i].as_str());
-                return Result::<bool, IoError>::Ok(true);
+                out.push_str(&self.texts[i]);
+                return Ok(true);
             }
         }
         if self.disk && self.reachable(path) {
             let mut d = DiskFiles {};
             return d.read(path, out);
         }
-        return Result::<bool, IoError>::Ok(false);
+        return Ok(false);
     }
 
     pub fn list(self: &mut Self, dir: str, out: &mut Vector<String>) Result<bool, IoError> {
@@ -165,9 +165,9 @@ extend MemoryFiles as FileProvider {
             let rest = n.slice(dir.len() + 1, n.len());
             let cut = rest.find("/");
             let entry = if cut < 0 {
-                rest;
+                rest
             } else {
-                rest.slice(0, cut as usize);
+                rest.slice(0, cut as usize)
             };
             let mut seen = false;
             for k in base..out.len() {
@@ -198,7 +198,7 @@ extend MemoryFiles as FileProvider {
                 }
             }
         }
-        return Result::<bool, IoError>::Ok(found);
+        return Ok(found);
     }
 }
 
@@ -217,9 +217,7 @@ pub fn apply_edits(text: str, edits: Slice<Edit>, out: &mut String) Result<Unit,
     for i in 0..edits.len() {
         let e = &edits[i];
         if e.start > e.end || e.end as usize > text.len() || !boundary(text, e.start) || !boundary(text, e.end) {
-            return Result::<Unit, ApiError>::Err(
-                ApiError::new(Code::InvalidArgument, "an edit range is outside the text or splits a character"),
-            );
+            return Err(ApiError::new(Code::InvalidArgument, "an edit range is outside the text or splits a character"));
         }
         order.push(i as u32);
     }
@@ -227,7 +225,7 @@ pub fn apply_edits(text: str, edits: Slice<Edit>, out: &mut String) Result<Unit,
     order.sort_stable_by_key(|i: &u32| edits[(*i) as usize].start as u64 << 32 | edits[(*i) as usize].end as u64);
     for k in 1..order.len() {
         if edits[order[k] as usize].start < edits[order[k - 1] as usize].end {
-            return Result::<Unit, ApiError>::Err(ApiError::new(Code::InvalidArgument, "two edits overlap"));
+            return Err(ApiError::new(Code::InvalidArgument, "two edits overlap"));
         }
     }
     let mut r = String::with_capacity(text.len());
@@ -235,12 +233,12 @@ pub fn apply_edits(text: str, edits: Slice<Edit>, out: &mut String) Result<Unit,
     for k in 0..order.len() {
         let e = &edits[order[k] as usize];
         r.push_str(text.slice(at, e.start as usize));
-        r.push_str(e.text.as_str());
+        r.push_str(&e.text);
         at = e.end as usize;
     }
     r.push_str(text.slice(at, text.len()));
     *out = r;
-    return Result::<Unit, ApiError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 
 // Whether byte offset `at` of `text` starts a character or ends the text.

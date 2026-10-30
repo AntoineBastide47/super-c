@@ -308,9 +308,9 @@ fn target_feature_calls_need_the_build_features() {
         let rest = o.slice(at as usize + 1, o.len());
         let nx = rest.find("needs `+relaxed-simd`");
         at = if nx < 0 {
-            -1;
+            -1
         } else {
-            at + 1 + nx;
+            at + 1 + nx
         };
     }
     assert(errs == 2, "one error per use");
@@ -326,7 +326,7 @@ fn register_types_have_a_layout_and_no_storage() {
     ok.push_str(
         "static_assert(sizeof(reg_t) == 32 && alignof(reg_t) == 16, \"layout\");\nfn pass(r: reg_t) reg_t {\n    let a = r;\n    let b = r;\n    return a;\n}\nfn main() i32 {\n    return 0;\n}\n",
     );
-    h::expect_ok("a local, a parameter, a result, copied", ok.as_str());
+    h::expect_ok("a local, a parameter, a result, copied", &ok);
     let bad: [str; 6] = [
         "struct S {\n    r: reg_t,\n}\n",
         "fn f(a: [reg_t; 2]) {}\n",
@@ -339,7 +339,7 @@ fn register_types_have_a_layout_and_no_storage() {
         let mut s = String::from_str(decl);
         s.push_str(b);
         s.push_str("fn main() i32 {\n    return 0;\n}\n");
-        h::expect_err_msg(b, s.as_str(), "`reg_t` is a register type; store it through `Simd<T, N>`");
+        h::expect_err_msg(b, &s, "`reg_t` is a register type; store it through `Simd<T, N>`");
     }
     h::expect_err_msg(
         "an alignment that does not divide the size",
@@ -372,11 +372,11 @@ fn memory_annotations_are_checked() {
         s.push_str(c[0]);
         s.push_str("}\nfn main() i32 {\n    return 0;\n}\n");
         if c[1].starts_with("attribute") {
-            assert(h::parse_has_error(s.as_str()), c[1]);
+            assert(h::parse_has_error(&s), c[1]);
         } else if c[1].starts_with("cannot") {
-            h::expect_resolve_err_msg(c[1], s.as_str(), c[1]);
+            h::expect_resolve_err_msg(c[1], &s, c[1]);
         } else {
-            h::expect_err_msg(c[1], s.as_str(), c[1]);
+            h::expect_err_msg(c[1], &s, c[1]);
         }
     }
     h::expect_ok(
@@ -446,7 +446,7 @@ fn simd_impl_entries_are_checked() {
             c[0],
             c[1],
         );
-        let r = h::compile_std(s.as_str(), -1, h::STAGE_TYPECHECK);
+        let r = h::compile_std(&s, -1, h::STAGE_TYPECHECK);
         assert(!r.ok() && r.msg_has(c[2]), c[2]);
     }
     let gated = "@arch(x86_64 | aarch64)\n@simd_impl(Op::Add, [Feature::Simd128])\nfn e(a: f32x4, b: f32x4) f32x4 {\n    return a;\n}\nfn main() i32 {\n    return 0;\n}\n";
@@ -566,7 +566,7 @@ fn simd_impl_operations_results_and_lanes() {
             c[1],
             c[2],
         );
-        let r = h::compile_std(s.as_str(), -1, h::STAGE_TYPECHECK);
+        let r = h::compile_std(&s, -1, h::STAGE_TYPECHECK);
         if !r.msg_has(c[3]) {
             eprintln("{}: {}", c[3], str::from_cbuf(r.first));
         }
@@ -589,7 +589,7 @@ fn memory_annotation_counts() {
         s.push_str("}\nfn main() i32 {\n    return 0;\n}\n");
         h::expect_err_msg(
             c,
-            s.as_str(),
+            &s,
             "the byte count is a 'usize' constant or an expression over the function's other 'usize' parameters",
         );
     }
@@ -617,15 +617,15 @@ fn register_types_in_inferred_storage() {
     for b in bodies {
         let mut s = String::from_str(decl);
         s.format_into("pub fn f(x: reg_t) {{\n    {}\n}}\nfn main() i32 {{\n    return 0;\n}}\n", b);
-        h::expect_err_msg(b, s.as_str(), "`reg_t` is a register type; store it through `Simd<T, N>`");
+        h::expect_err_msg(b, &s, "`reg_t` is a register type; store it through `Simd<T, N>`");
     }
     let mut e = String::from_str(decl);
     e.push_str("enum E {\n    A(reg_t),\n}\nfn main() i32 {\n    return 0;\n}\n");
-    h::expect_err_msg("an enum payload", e.as_str(), "`reg_t` is a register type");
+    h::expect_err_msg("an enum payload", &e, "`reg_t` is a register type");
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "extern \"C\" \"stdint.h\" {\n    @value(8, 8)\n    pub type int64_t;\n}\nextern \"C\" \"math.h\" {\n    @value(8, 8)\n    pub type double_t;\n}\n@noinline\nfn two(a: int64_t) (int64_t, int64_t) {\n    return a, a;\n}\n@noinline\nfn twod(a: double_t) (double_t, double_t) {\n    return a, a;\n}\n@used\npub fn use_both(a: int64_t, d: double_t) {\n    let (x, _y) = two(a);\n    let (u, _v) = twod(d);\n    let _ = x;\n    let _ = u;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "extern \"C\" \"stdint.h\" {\n    @value(8, 8)\n    pub type int64_t;\n}\nextern \"C\" \"math.h\" {\n    @value(8, 8)\n    pub type double_t;\n}\n@noinline\nfn two(a: int64_t) (int64_t, int64_t) {\n    return (a, a);\n}\n@noinline\nfn twod(a: double_t) (double_t, double_t) {\n    return (a, a);\n}\n@used\npub fn use_both(a: int64_t, d: double_t) {\n    let (x, _y) = two(a);\n    let (u, _v) = twod(d);\n    let _ = x;\n    let _ = u;\n}\nfn main() i32 {\n    return 0;\n}\n",
     );
     // Several results are a tuple, which a register type cannot be an element of.
     let r = p.compile("main.spc");

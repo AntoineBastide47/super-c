@@ -23,9 +23,9 @@ fn main(args: Vector<str>) i32 {
     let mut ds = s.diagnostics().unwrap();
     while let Some(d) = ds.next() {
         let sev = if d.severity() == SEV_ERROR {
-            "error";
+            "error"
         } else {
-            "warning";
+            "warning"
         };
         println("{}:{}-{}: {} [{}]: {}", d.file(), d.start(), d.end(), sev, d.code_name(), d.message());
         if d.severity() == SEV_ERROR {

@@ -217,15 +217,24 @@ modules.
 super-c fmt                  # format all .spc files in-place (the default; Wadler, width 120)
 super-c fmt --check          # exit non-zero if any file would change (CI gate)
 super-c fmt path/file.spc    # format specific paths; `fmt -` reads stdin
-super-c fmt --migrate        # also write the newer syntax (below)
+super-c fmt -s               # first remove what bodies do not need (`--simplify`, below)
 ```
 
-`@fmt.skip` on an item exempts it from formatting. fmt keeps the `;` after a statement `switch` and
-after a value block's last expression, and `return a, b;`, as written. `--migrate` writes the newer
-forms instead: `switch x { .. }` with no `;`, a value block's last expression with no `;` (`if c {
-1 } else { 2 }`; value position is read from the syntax, so it needs no types), and
-`return (a, b);`. The compiler's own sources keep the older forms until a release reads the newer
-ones.
+`@fmt.skip` on an item exempts it from formatting. fmt keeps a block's last `;` as written: it
+decides whether the block is a value (`{ x }`) or a statement block (`{ x; }`). It keeps
+`return a, b;` and `return (a, b);` as written.
+
+`fmt -s` (`--simplify`) removes the turbofish lists (`Vector::<u8>::new()`, `id::<u8>(x)`,
+`x.f::<T>()`) and `let` annotations (`let n: usize = v.len();`) that function bodies do not need,
+then formats. It loads the paths as `lint` does and checks them once: after a body checks, the
+checker takes its candidates out of the syntax and checks that body again (`tc_simplify`); a group
+that changes a node's type or reports an error goes back and splits in two. A check of the edited
+batch from its text then confirms the removals: a function whose nodes type otherwise or that
+reports an error keeps all its candidates, and the batch is checked again. The cost is about two
+`lint` runs. An annotation that gives an unsuffixed literal another type than its default
+(`let x: u8 = 3;`) is not a candidate. The program must check before ("'-s' needs a program without
+errors"); `--check` does not combine with `-s`. A removed turbofish can leave a qualified variant
+(`Option::None`), which the default lint then shortens.
 
 ### Linting
 
@@ -234,14 +243,14 @@ super-c lint                 # default-on lints (errors on missing-free)
 super-c lint --fix           # apply machine fixes, re-lint to fixpoint
 super-c lint --const         # flag functions provably const-evaluable
 super-c lint --fix --const   # make those functions const, save compile time
-super-c lint --migrate       # also the uses the newer forms write shorter (below)
 super-c lint --target=linux --arch=x86_64 --target-cpu=x86-64-v3   # another target's items and features
 ```
 
-`lint --migrate` warns, with fixes, where a qualified variant value resolves bare (`Option::Some(x)`
-to `Some(x)` through the expected type or as a prelude variant; a qualifier with type arguments only
-where the expected type gives them) and where a call argument `x.as_str()` (`as_slice`,
-`as_mut_slice`) converts as `&x` (`&mut x`). `lint --migrate --fix` applies them.
+Two default lints write the shorter forms, with fixes: a qualified variant value that resolves bare
+(`Option::Some(x)` to `Some(x)` through the expected type or as a prelude variant; a qualifier with
+type arguments only where the expected type gives them; none where another binding in scope takes
+the bare name), and a call argument `x.as_str()` (`as_slice`, `as_mut_slice`) on a place that
+converts as `&x` (`&mut x`).
 
 `lint` applies build.toml's `target-cpu` and `target-features` when the file exists, then the
 command line's, as a build does. In a project with `src/`, a subdirectory with its own

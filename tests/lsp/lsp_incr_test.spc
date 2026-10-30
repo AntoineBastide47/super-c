@@ -65,7 +65,7 @@ fn ws_new() Ws {
     proj.mkfile("c.spc", C0);
     proj.mkfile("d.spc", D0);
     let dir = String::from_str(proj.dir());
-    let mut root = String::from_str(dir.as_str());
+    let mut root = String::from_str(&dir);
     root.push_str("/a.spc");
     return Ws { proj: proj, root: root, dir: dir };
 }
@@ -85,7 +85,7 @@ fn ws_of(a: str, b: str, c: str, d: str) Ws {
     proj.mkfile("c.spc", c);
     proj.mkfile("d.spc", d);
     let dir = String::from_str(proj.dir());
-    let mut root = String::from_str(dir.as_str());
+    let mut root = String::from_str(&dir);
     root.push_str("/a.spc");
     return Ws { proj: proj, root: root, dir: dir };
 }
@@ -106,7 +106,7 @@ fn recompile_ov(
         fv.push(ovf.at(i).as_str());
         tv.push(ovt.at(i).as_str());
     }
-    let ok = an::recompile(p, unsafe shim::sc_host_platform(), ws.root.as_str(), "", &fv, &tv, diags, st);
+    let ok = an::recompile(p, unsafe shim::sc_host_platform(), &ws.root, "", &fv, &tv, diags, st);
     if ok {
         settle(p, ovf, diags);
     }
@@ -158,7 +158,7 @@ const fn errors_in(p: &loader::Package, diags: &Vector<an::DiagRec>, name: str) 
 }
 
 fn ov(ws: &Ws, name: str, text: str, ovf: &mut Vector<String>, ovt: &mut Vector<String>) {
-    let mut f = String::from_str(ws.dir.as_str());
+    let mut f = String::from_str(&ws.dir);
     f.push_str("/");
     f.push_str(name);
     ovf.push(f);
@@ -172,17 +172,7 @@ fn fresh(ws: &Ws, ovf: &Vector<String>, ovt: &Vector<String>, diags: &mut Vector
         f2.push(ovf.at(i).clone());
         t2.push(ovt.at(i).clone());
     }
-    let mut p = an::compile(
-        ws.root.as_str(),
-        ws.dir.as_str(),
-        "",
-        "std",
-        unsafe shim::sc_host_platform(),
-        f2,
-        t2,
-        "",
-        diags,
-    );
+    let mut p = an::compile(&ws.root, &ws.dir, "", "std", unsafe shim::sc_host_platform(), f2, t2, "", diags);
     settle(&mut p, ovf, diags);
     return p;
 }
@@ -490,9 +480,9 @@ fn incr_body_edit_keeps_sibling_desugars() {
 
 fn parse(s: str) Result<i32, String> {
     if s.len() == 0 {
-        return Result::<i32, String>::Err(format("empty"));
+        return Err(format("empty"));
     }
-    return Result::<i32, String>::Ok(s.len() as i32);
+    return Ok(s.len() as i32);
 }
 
 pub fn other(s: str) i32 {
@@ -1149,7 +1139,7 @@ fn release_engine_demand_parses_back_and_reruns() {
     proj.mkfile("c.spc", E_C);
     proj.mkfile("d.spc", E_D);
     let dir = String::from_str(proj.dir());
-    let mut root = String::from_str(dir.as_str());
+    let mut root = String::from_str(&dir);
     root.push_str("/a.spc");
     let ws = Ws { proj: proj, root: root, dir: dir };
     let mut ovf = Vector::<String>::new();
@@ -1208,9 +1198,9 @@ fn state_lines(p: &loader::Package, m: usize, bodies: bool) Vector<String> {
     let src = p.modules.at(m).source.as_str();
     let mut out = Vector::<String>::new();
     let nn = if bodies {
-        a.nnodes();
+        a.nnodes()
     } else {
-        a.nodes.len();
+        a.nodes.len()
     };
     for k in 0..nn {
         let id = a.nth_id(k);
@@ -1395,7 +1385,7 @@ fn reach_equal(p: &mut loader::Package, q: &mut loader::Package) bool {
                 _ => {
                     break;
                 },
-            };
+            }
         }
     }
     if !same {
@@ -1448,7 +1438,7 @@ fn incr_state_equals_fresh_over_edit_series() {
     ovt.set(1, String::from_str(B0));
     round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "signature revert");
     let c1 = edited(C0, "return 2;", "return 5;");
-    ov(&ws, "c.spc", c1.as_str(), &mut ovf, &mut ovt);
+    ov(&ws, "c.spc", &c1, &mut ovf, &mut ovt);
     round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "const fn body");
     ovt.set(
         0,
@@ -1476,7 +1466,7 @@ fn incr_plain_body_reaches_const_fn_folder() {
     proj.mkfile("c.spc", E_C);
     proj.mkfile("d.spc", E_D);
     let dir = String::from_str(proj.dir());
-    let mut root = String::from_str(dir.as_str());
+    let mut root = String::from_str(&dir);
     root.push_str("/a.spc");
     let ws = Ws { proj: proj, root: root, dir: dir };
     let mut ovf = Vector::<String>::new();
@@ -1515,7 +1505,7 @@ fn budget_records(manifest: str, diags: &mut Vector<an::DiagRec>) {
     proj.mkfile("build.toml", manifest);
     proj.mkfile("a.spc", CE_SRC);
     let dir = String::from_str(proj.dir());
-    let mut root = String::from_str(dir.as_str());
+    let mut root = String::from_str(&dir);
     root.push_str("/a.spc");
     let ws = Ws { proj: proj, root: root, dir: dir };
     let ovf = Vector::<String>::new();
@@ -1702,8 +1692,8 @@ fn borrow_round_progresses_under_requests() {
     let ws = ws_new();
     let mut diags = Vector::<an::DiagRec>::new();
     let mut p = an::compile(
-        ws.root.as_str(),
-        ws.dir.as_str(),
+        &ws.root,
+        &ws.dir,
         "",
         "std",
         unsafe shim::sc_host_platform(),
@@ -1745,11 +1735,11 @@ fn borrow_round_stops_and_resumes() {
         "let w = v + 1;\n    return w;",
         "let mut w = v + 1;\n    let r = &w;\n    w += 1;\n    return *r;",
     );
-    let ws = ws_of(A0, B0, C0, d1.as_str());
+    let ws = ws_of(A0, B0, C0, &d1);
     let mut diags = Vector::<an::DiagRec>::new();
     let mut p = an::compile(
-        ws.root.as_str(),
-        ws.dir.as_str(),
+        &ws.root,
+        &ws.dir,
         "",
         "std",
         unsafe shim::sc_host_platform(),
@@ -1828,7 +1818,7 @@ pub fn bee() i32 {
     tv.push(ovt.at(0).as_str());
     let mut st = an::RecompileStats {};
     assert(
-        an::recompile(&mut p, unsafe shim::sc_host_platform(), ws.root.as_str(), "", &fv, &tv, &mut diags, &mut st),
+        an::recompile(&mut p, unsafe shim::sc_host_platform(), &ws.root, "", &fv, &tv, &mut diags, &mut st),
         "body edit round",
     );
     assert(st.body_only == 1, "the edit is body-only");
@@ -1908,7 +1898,7 @@ pub fn bee() i32 {
 }
 )");
     let dir = String::from_str(proj.dir());
-    let mut root = String::from_str(dir.as_str());
+    let mut root = String::from_str(&dir);
     root.push_str("/a.spc");
     let ws = Ws { proj: proj, root: root, dir: dir };
     let ovf = Vector::<String>::new();

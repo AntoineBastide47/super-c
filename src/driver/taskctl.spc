@@ -52,14 +52,14 @@ pub(package) const fn parse_size(s: str) Option<u64> {
     while i < s.len() && s.byte_at(i) >= b'0' && s.byte_at(i) <= b'9' {
         let d = (s.byte_at(i) - b'0') as u64;
         if v > (0xFFFFFFFFFFFFFFFFu64 - d) / 10 {
-            return Option::<u64>::None;
+            return None;
         }
         v = v * 10 + d;
         i += 1;
     }
     let mut scale: u64 = 1;
     if i == 0 {
-        return Option::<u64>::None;
+        return None;
     }
     if i + 1 == s.len() {
         let c = s.byte_at(i) | 0x20u8;
@@ -70,15 +70,15 @@ pub(package) const fn parse_size(s: str) Option<u64> {
         } else if c == b'g' {
             scale = 1024u64 * 1024 * 1024;
         } else {
-            return Option::<u64>::None;
+            return None;
         }
     } else if i != s.len() {
-        return Option::<u64>::None;
+        return None;
     }
     if v > 0xFFFFFFFFFFFFFFFFu64 / scale {
-        return Option::<u64>::None;
+        return None;
     }
-    return Option::<u64>::Some(v * scale);
+    return Some(v * scale);
 }
 
 /// The build memory budget: `SC_BUILD_MEM_BUDGET` in bytes with an optional K/M/G suffix; unset or
@@ -88,7 +88,7 @@ pub(package) fn budget_from_env() u64 {
     if e.len() == 0 {
         return 0;
     }
-    let v = parse_size(e.as_str());
+    let v = parse_size(&e);
     if v.is_none() {
         eprintln("error: SC_BUILD_MEM_BUDGET must be a whole byte count with an optional K, M or G suffix");
         unsafe stdlib::exit(1);

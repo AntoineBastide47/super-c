@@ -178,7 +178,7 @@ fn tree_bytes(dir: &mut String, ext: str) usize {
 // failed or skipped a boundary.
 fn round(lane: &Lane, m: &mf::Manifest, cx: &bsys::BuildCtx, pdir: &mut String, bin: str, mk: &mut Marks) bool {
     if lane.native {
-        let _ = fs::remove_all(m.out_dir.as_str());
+        let _ = fs::remove_all(&m.out_dir);
     } else {
         let _ = fs::remove_all(pdir.as_str());
     }
@@ -189,9 +189,9 @@ fn round(lane: &Lane, m: &mf::Manifest, cx: &bsys::BuildCtx, pdir: &mut String, 
     let rc = if lane.native {
         // The record keeps the link's boundary, which the engine stamps when it finishes.
         bst::arm();
-        bsys::manifest_build(m, BUILD_PROFILE, bin, "", cx);
+        bsys::manifest_build(m, BUILD_PROFILE, bin, "", cx)
     } else {
-        bsys::root_transpile(m, BUILD_PROFILE, cx, null);
+        bsys::root_transpile(m, BUILD_PROFILE, cx, null)
     };
     bst::set_hook(null);
     bst::release();
@@ -332,7 +332,7 @@ const fn build_ms(g: &bst::BuildStats, from: usize, to: usize) f64 {
 fn real_build(js: &mut String) bool {
     let mut dir = fs::temp_dir().unwrap_or(String::from_str("."));
     dir.push_str("/sc_bench_build");
-    let _ = fs::remove_all(dir.as_str());
+    let _ = fs::remove_all(&dir);
     let m0 = mf::load("build.toml", false);
     if m0.is_none() {
         eprintln("bench: cannot load build.toml (run from the repo root)");
@@ -358,7 +358,7 @@ fn real_build(js: &mut String) bool {
         lint: true,
         transpiler: "",
     };
-    let rc = bsys::manifest_build(&m, BUILD_PROFILE, bin.as_str(), "", &cx);
+    let rc = bsys::manifest_build(&m, BUILD_PROFILE, &bin, "", &cx);
     let gp = bst::last();
     if gp == null {
         eprintln("bench: the build produced no statistics record");
@@ -400,7 +400,7 @@ fn real_build(js: &mut String) bool {
         eprintln("bench: the real build failed (exit {}); its outputs are kept under {}", rc, dir.as_str());
         return false;
     }
-    let _ = fs::remove_all(dir.as_str());
+    let _ = fs::remove_all(&dir);
     return true;
 }
 
@@ -451,18 +451,18 @@ pub fn self_compile(b: &mut bench::Bencher) {
 // The name of phase `k` of `lane`.
 fn phase_name(lane: &Lane, k: usize) str<'static> {
     return if lane.native {
-        unsafe C_NAMES[k];
+        unsafe C_NAMES[k]
     } else {
-        unsafe T_NAMES[k];
+        unsafe T_NAMES[k]
     };
 }
 
 // The job counts `lane` runs its rounds with, in order: one, and for a native build one per core too.
 const fn modes_of(lane: &Lane) usize {
     return if lane.native {
-        2;
+        2
     } else {
-        1;
+        1
     };
 }
 
@@ -525,13 +525,13 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
     let mut dir = fs::temp_dir().unwrap_or(String::from_str("."));
     dir.push_str(
         if lane.native {
-            "/sc_bench_compile";
+            "/sc_bench_compile"
         } else {
-            "/sc_bench_transpile";
+            "/sc_bench_transpile"
         },
     );
     m.out_dir = dir.clone();
-    let mut pdir = loader::join2(dir.as_str(), BUILD_PROFILE);
+    let mut pdir = loader::join2(&dir, BUILD_PROFILE);
     let mut bin = dir.clone();
     bin.push_str("/super-c");
     let mut modes = Vector::<Mode>::with_capacity(modes_of(lane));
@@ -565,7 +565,7 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
         mk.slot[lane.ends[k]] = k + 1;
     }
     // Warm-up: warms the caches and measures what a round writes: the C, or the objects and the binary.
-    if !round(lane, &m, &cx, &mut pdir, bin.as_str(), &mut mk) {
+    if !round(lane, &m, &cx, &mut pdir, &bin, &mut mk) {
         unsafe stdio::fprintf(
             stdio::stderr(),
             "transpile-bench: failed to build %s (run from the repo root)\n".ptr() as *const char,
@@ -577,7 +577,7 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
     let mut bin_bytes: usize = 0;
     if lane.native {
         out_bytes = tree_bytes(&mut dir, ".o");
-        bin_bytes = fs::stat(bin.as_str()).map(
+        bin_bytes = fs::stat(&bin).map(
             fn(md: fs::Metadata) usize {
                 return md.size as usize;
             },
@@ -631,9 +631,9 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
         bid.cstr(),
         lane.rounds,
         if lane.native {
-            "a whole native build, cold".ptr();
+            "a whole native build, cold".ptr()
         } else {
-            "the build's transpile step".ptr();
+            "the build's transpile step".ptr()
         } as *const char,
         BUILD_PROFILE.ptr() as *const char,
     );
@@ -644,7 +644,7 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
         let md = modes.index_mut(r / per);
         r += 1;
         cx.jobs = md.jobs;
-        if !round(lane, &m, &cx, &mut pdir, bin.as_str(), &mut mk) {
+        if !round(lane, &m, &cx, &mut pdir, &bin, &mut mk) {
             eprintln("bench: a round failed");
             ok = false;
             continue;
@@ -683,7 +683,7 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
             unsafe sys::sc_bs_alloc_bytes() - yl0,
         );
     }
-    let _ = fs::remove_all(dir.as_str());
+    let _ = fs::remove_all(&dir);
     if !ok {
         return false;
     }
@@ -693,9 +693,9 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
     js.push_str("{\"v\":3,\"lane\":");
     bench::json_str(&mut js, lane.name);
     js.push_str(",\"build_id\":");
-    bench::json_str(&mut js, bid.as_str());
+    bench::json_str(&mut js, &bid);
     js.push_str(",\"cpu\":");
-    bench::json_str(&mut js, str::from_cbuf(cpu.as_slice()));
+    bench::json_str(&mut js, str::from_cbuf(&cpu));
     js.push_str(",\"profile\":");
     bench::json_str(&mut js, BUILD_PROFILE);
     js.push_str(",\"corpus\":{\"modules\":");
@@ -712,9 +712,9 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
     js.push_u64(src_bytes as u64);
     js.push_str(
         if lane.native {
-            ",\"obj_bytes\":";
+            ",\"obj_bytes\":"
         } else {
-            ",\"c_bytes\":";
+            ",\"c_bytes\":"
         },
     );
     js.push_u64(out_bytes as u64);
@@ -753,9 +753,9 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
     js.push_str(",\"ok\":");
     js.push_str(
         if built {
-            "true";
+            "true"
         } else {
-            "false";
+            "false"
         },
     );
     js.push_str("}\n");

@@ -245,9 +245,9 @@ extend Live {
                 self.pfold[i] = bits >= 32 || m != u64::MAX && m >> bits as u64 == 0;
             }
             let p = if t.op == O_SUB || t.op == O_ADD && int_const(b, t.a) == u64::MAX && int_const(b, t.b) == u64::MAX {
-                t.b;
+                t.b
             } else {
-                VNONE;
+                VNONE
             };
             if (self.fold_ops & FOLD_MADD) != 0 && p != VNONE && (p & (VPARAM | VFLAG)) == 0 && b.insts[p as usize].op == O_MUL && self.work[p as usize] == 1 && int_const(
                 b,
@@ -268,9 +268,9 @@ extend Live {
                     let mut own = VNONE;
                     for q in 0..2u32 {
                         let sh = if q == 0 {
-                            t.a;
+                            t.a
                         } else {
-                            t.b;
+                            t.b
                         };
                         let s = b.insts[sh as usize].b;
                         let ext = amount_of(b, s) != s;
@@ -293,9 +293,9 @@ extend Live {
                         // takes its amount modulo the width).
                         let sa = amount_of(b, b.insts[t.a as usize].b);
                         let mut v = if sa == amt {
-                            amount_of(b, b.insts[t.b as usize].b);
+                            amount_of(b, b.insts[t.b as usize].b)
                         } else {
-                            sa;
+                            sa
                         };
                         for _ in 0..2 {
                             if !open || !is_inst(v) || self.work[v as usize] != 1 {
@@ -307,9 +307,9 @@ extend Live {
                             }
                             self.pfold[v as usize] = true;
                             v = if o == O_SUB {
-                                b.insts[v as usize].b;
+                                b.insts[v as usize].b
                             } else {
-                                b.insts[v as usize].a;
+                                b.insts[v as usize].a
                             };
                         }
                         if v == amt {
@@ -331,15 +331,15 @@ extend Live {
             if (self.fold_ops & FOLD_LEA) != 0 && (t.op == O_ADD || t.op == O_SUB) {
                 // The shift an index takes, then the inner sum whose operands the address takes.
                 let nq: u32 = if t.op == O_ADD {
-                    2;
+                    2
                 } else {
-                    0;
+                    0
                 };
                 for q in 0..nq {
                     let v = if q == 0 {
-                        t.b;
+                        t.b
                     } else {
-                        t.a;
+                        t.a
                     };
                     if lea_shift(b, v) == 0 || self.pfold[v as usize] || self.work[v as usize] != 1 {
                         continue;
@@ -352,9 +352,9 @@ extend Live {
                 }
                 for q in 0..2u32 {
                     let v = if q == 0 {
-                        t.a;
+                        t.a
                     } else {
-                        t.b;
+                        t.b
                     };
                     if q == 1 && t.op == O_SUB || !is_inst(v) || self.pfold[v as usize] || self.work[v as usize] != 1 || b.insts[v as usize].op != O_ADD || b.insts[v as usize].ty != t.ty {
                         continue;
@@ -370,9 +370,9 @@ extend Live {
                 let s = b.insts[t.a as usize];
                 let m = int_const(b, t.b);
                 let k = if s.op == O_LSHR {
-                    int_const(b, s.b);
+                    int_const(b, s.b)
                 } else {
-                    u64::MAX;
+                    u64::MAX
                 };
                 // A mask of the low `w` bits under a shift by `k`, both within the width.
                 if self.work[t.a as usize] == 1 && m != u64::MAX && m != 0 && (m & m + 1) == 0 && k < bits as u64 {
@@ -391,9 +391,9 @@ extend Live {
             }
             let p = b.insts[t.a as usize];
             let ty = if t.op == O_LOAD {
-                t.ty;
+                t.ty
             } else {
-                b.type_of(t.b);
+                b.type_of(t.b)
             };
             let n = type_bytes(ty, 8); // the targets that fold have 8-byte pointers
             let sc = p.aux as u32;
@@ -419,11 +419,11 @@ extend Live {
     /// header, which defines it again (`reads_before`).
     pub(package) fn back_param(self: &Self, b: &Body, t: Inst, v: Value, pos: u32) u32 {
         let ne: u32 = if t.op == O_JMP {
-            1;
+            1
         } else if t.op == O_BR {
-            2;
+            2
         } else {
-            0;
+            0
         };
         for e in 0..ne {
             let x = edge_of(b, t, e);
@@ -756,9 +756,9 @@ extend Live {
             let l = (lists[top] >> 32) as u32;
             let i = lists[top] as u32;
             let n = if l == NONE {
-                self.keys.len() as u32;
+                self.keys.len() as u32
             } else {
-                mlen[l as usize];
+                mlen[l as usize]
             };
             if i == n {
                 let _ = lists.pop();
@@ -766,9 +766,9 @@ extend Live {
             }
             lists[top] = lists[top] + 1;
             let k = if l == NONE {
-                self.keys[i as usize] as u32;
+                self.keys[i as usize] as u32
             } else {
-                mlist[(mstart[l as usize] + i) as usize];
+                mlist[(mstart[l as usize] + i) as usize]
             };
             if placed[k as usize] {
                 continue;
@@ -1023,9 +1023,9 @@ extend Live {
                 h = self.parent[h as usize];
             }
             self.freq[k] = if self.rare[k] {
-                f / 8;
+                f / 8
             } else {
-                f;
+                f
             };
         }
         fill(&mut self.start, n, NONE);
@@ -1077,9 +1077,9 @@ extend Live {
             let e = self.end[x] as usize;
             let l = self.last[x];
             self.stop[x] = if x < ni && self.au[x] != 0 && self.uses[x] == self.au[x] && self.pos[self.def_blk[l as usize] as usize] == e as u32 {
-                self.base[e] + l - b.blocks[self.def_blk[l as usize] as usize].start;
+                self.base[e] + l - b.blocks[self.def_blk[l as usize] as usize].start
             } else {
-                self.base[e + 1] - 1;
+                self.base[e + 1] - 1
             };
         }
         self.cand.truncate(0);
@@ -1162,9 +1162,9 @@ extend Live {
             }
         }
         let (cc, sc, jc) = if vf {
-            (caps.vc, caps.vs, caps.vj);
+            (caps.vc, caps.vs, caps.vj)
         } else {
-            (caps.xc, caps.xs, caps.xj);
+            (caps.xc, caps.xs, caps.xj)
         };
         if c + s >= jc {
             return HOME_NONE;
@@ -1236,15 +1236,15 @@ extend Live {
             for i in 0..np {
                 let a = sp[(j - 1) * np + i];
                 let c = if i + h < np {
-                    sp[(j - 1) * np + i + h];
+                    sp[(j - 1) * np + i + h]
                 } else {
-                    0u32;
+                    0u32
                 };
                 sp.push(
                     if a > c {
-                        a;
+                        a
                     } else {
-                        c;
+                        c
                     },
                 );
             }
@@ -1269,9 +1269,9 @@ extend Live {
                 let a = sp[j * np + lo];
                 let c = sp[j * np + hi + 1 - (1usize << j)];
                 let e = if a > c {
-                    a;
+                    a
                 } else {
-                    c;
+                    c
                 };
                 // 0: no rare block's edge (the entry, at 0, is not rare).
                 if e < self.end[x] || e == 0 {
@@ -1342,13 +1342,13 @@ pub(package) fn each_use(b: &Body, t: Inst, out: &mut Vector<Value>) {
         out.push(VPARAM | b.blocks[0].param_start + b.pool[b.sig as usize]);
     }
     let ne: u32 = if t.op == O_JMP {
-        1;
+        1
     } else if t.op == O_BR {
-        2;
+        2
     } else if t.op == O_SWITCH {
-        t.aux as u32 + 1;
+        t.aux as u32 + 1
     } else {
-        0;
+        0
     };
     for k in 0..ne {
         let e = edge_of(b, t, k);
@@ -1448,9 +1448,9 @@ pub(package) const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
     }
     if t.op == O_BR {
         return if k == 0 {
-            t.b;
+            t.b
         } else {
-            t.c;
+            t.c
         };
     }
     return b.switch_edge(t, k);
@@ -1499,9 +1499,9 @@ pub(package) fn rotate_of(b: &Body, i: u32) Rotation {
     let p = b.insts[t.a as usize];
     let q = b.insts[t.b as usize];
     let (l, r) = if p.op == O_SHL && q.op == O_LSHR {
-        (p, q);
+        (p, q)
     } else if p.op == O_LSHR && q.op == O_SHL {
-        (q, p);
+        (q, p)
     } else {
         return none;
     };
@@ -1569,11 +1569,11 @@ fn negated(b: &Body, v: Value, s: Value, w: u64, masks: bool) bool {
     let p = b.insts[u as usize];
     let c = int_const(b, p.a);
     let n = if p.op == O_SUB && c != u64::MAX && (masked && c % w == 0 || c == w) {
-        p.b;
+        p.b
     } else if p.op == O_NEG && masked {
-        p.a;
+        p.a
     } else {
-        VNONE;
+        VNONE
     };
     if n == VNONE {
         return false;
@@ -1594,9 +1594,9 @@ pub(package) fn lea_shift(b: &Body, v: Value) u32 {
     }
     let k = int_const(b, b.insts[v as usize].b);
     return if k >= 1 && k <= 3 {
-        k as u32;
+        k as u32
     } else {
-        0u32;
+        0u32
     };
 }
 
@@ -1627,9 +1627,9 @@ pub(package) fn lea_of(b: &Body, folded: &Vector<bool>, i: u32) Lea {
     let bits = type_bits(t.ty, 8);
     for q in 0..2u32 {
         let v = if q == 0 {
-            t.a;
+            t.a
         } else {
-            t.b;
+            t.b
         };
         let neg = q == 1 && t.op == O_SUB;
         // A folded inner sum's operands in its place.
@@ -1654,9 +1654,9 @@ fn lea_term(b: &Body, folded: &Vector<bool>, v: Value, neg: bool, bits: u32, f: 
     if k != u64::MAX {
         let s = sext_bits(k, bits);
         f.disp = if neg {
-            f.disp - s;
+            f.disp - s
         } else {
-            f.disp + s;
+            f.disp + s
         };
         return;
     }

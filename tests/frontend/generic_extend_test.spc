@@ -128,7 +128,7 @@ fn declarations_are_checked() {
     for c in cases {
         let mut src = String::from_str(c[0]);
         src.push_str("fn main() i32 {\n    return 0;\n}\n");
-        h::expect_err_msg(c[1], src.as_str(), c[1]);
+        h::expect_err_msg(c[1], &src, c[1]);
     }
     // Two generic conformances of one interface whose arguments meet for a type, and a type the
     // bounds do not admit.
@@ -188,14 +188,14 @@ fn instances_through_bounds_and_dyn_are_checked() {
     );
     // The build checks an instance when it lowers it.
     let mut b = cli::Batch::new("", "");
-    b.add("through a bound", bound.as_str(), "array length N - 2 is negative (-1) for N = 1");
-    b.add("the bound call demands it", bound.as_str(), "demanded here");
+    b.add("through a bound", &bound, "array length N - 2 is negative (-1) for N = 1");
+    b.add("the bound call demands it", &bound, "demanded here");
     let mut dyn_ = String::from_str(decl);
     dyn_.push_str(
         "fn main() i32 {\n    let x = 1.0f32;\n    let d: &dyn Take<[f32; 1]> = &x;\n    return d.take(&[1.0]) as i32;\n}\n",
     );
-    b.add("through dyn", dyn_.as_str(), "array length N - 2 is negative (-1) for N = 1");
-    b.add("the dyn call demands it", dyn_.as_str(), "demanded here");
+    b.add("through dyn", &dyn_, "array length N - 2 is negative (-1) for N = 1");
+    b.add("the dyn call demands it", &dyn_, "demanded here");
     h::expect_build_errs(b);
 }
 

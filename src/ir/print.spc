@@ -115,11 +115,11 @@ fn p_rvalue(out: &mut String, b: &ir::CoreBody, rid: ir::RvalueId) {
     } else if r.kind == ir::RV_CAST {
         out.push_str(
             if r.b == ir::CAST_SIMD_ARRAY {
-                "cast.simd ";
+                "cast.simd "
             } else if r.b == ir::CAST_MASK_BITS {
-                "cast.mask ";
+                "cast.mask "
             } else {
-                "cast ";
+                "cast "
             },
         );
         p_operand(out, b, r.a);

@@ -564,9 +564,9 @@ const fn add_bits(a: &IFact, b: &IFact, neg: bool, w: u32) IFact {
     }
     let m = wmask(t);
     let v = if neg {
-        a.ko.wrapping_sub(b.ko);
+        a.ko.wrapping_sub(b.ko)
     } else {
-        a.ko.wrapping_add(b.ko);
+        a.ko.wrapping_add(b.ko)
     } & m;
     r.kz = ~v & m;
     r.ko = v;
@@ -587,9 +587,9 @@ const fn add_stride(r: &mut IFact, a: &IFact, b: &IFact, neg: bool) {
     let pb = sres(b, g);
     r.st = g;
     r.ph = if neg {
-        (pa + g - pb) % g;
+        (pa + g - pb) % g
     } else {
-        (pa + pb) % g;
+        (pa + pb) % g
     };
 }
 
@@ -597,14 +597,14 @@ const fn add_stride(r: &mut IFact, a: &IFact, b: &IFact, neg: bool) {
 const fn ijoin(a: &IFact, b: &IFact) IFact {
     let mut r = *a;
     let lo = if zlt(flo(b), flo(a)) {
-        flo(b);
+        flo(b)
     } else {
-        flo(a);
+        flo(a)
     };
     let hi = if zlt(fhi(a), fhi(b)) {
-        fhi(b);
+        fhi(b)
     } else {
-        fhi(a);
+        fhi(a)
     };
     let _ = iset(&mut r, lo, hi);
     r.kz = a.kz & b.kz;
@@ -619,9 +619,9 @@ const fn ijoin(a: &IFact, b: &IFact) IFact {
         let mut ok = true;
         let d = zadd(flo(a), zneg(flo(b)), &mut ok);
         m = if ok {
-            d.m;
+            d.m
         } else {
-            1;
+            1
         };
     } else {
         let g = gcd(istride(a), istride(b));
@@ -631,9 +631,9 @@ const fn ijoin(a: &IFact, b: &IFact) IFact {
             let pa = sres(a, g);
             let pb = sres(b, g);
             let d = if pa > pb {
-                pa - pb;
+                pa - pb
             } else {
-                pb - pa;
+                pb - pa
             };
             m = gcd(g, d);
         }
@@ -1129,9 +1129,9 @@ extend Facts {
                         continue;
                     }
                     nd = if nd == ir::IR_NONE {
-                        p;
+                        p
                     } else {
-                        self.intersect(p, nd);
+                        self.intersect(p, nd)
                     };
                 }
                 if nd != self.idom[blk] {
@@ -1280,9 +1280,9 @@ extend Facts {
                 }
                 let p = *b.places.at(s.place as usize);
                 let d = if p.proj_len == 0 {
-                    p.base;
+                    p.base
                 } else {
-                    ir::IR_NONE;
+                    ir::IR_NONE
                 };
                 if d != ir::IR_NONE {
                     let n = self.ndef[d as usize];
@@ -1319,9 +1319,9 @@ extend Facts {
                         self.bufexp.set(b.places.at(op.data as usize).base as usize, true); // an array's view
                     }
                     let src = if op.kind == ir::OP_CONST {
-                        ir::IR_NONE;
+                        ir::IR_NONE
                     } else {
-                        self.whole_local(b, op.data);
+                        self.whole_local(b, op.data)
                     };
                     if src != ir::IR_NONE && d != ir::IR_NONE && b.locals.at(d as usize).storage != ir::LS_RET {
                         self.stack.push(d as u64 << 32 | src as u64);
@@ -1433,9 +1433,9 @@ extend Facts {
                     // the BORROWED storage escapes, not the reference
                     let cl = self.whole_local(b, b.operands.at(rv.a as usize).data);
                     let r = if cl == ir::IR_NONE {
-                        ir::IR_NONE;
+                        ir::IR_NONE
                     } else {
-                        self.def_src(b, cl);
+                        self.def_src(b, cl)
                     };
                     if r == ir::IR_NONE {
                         self.escall = true;
@@ -1857,9 +1857,9 @@ extend Facts {
                 continue;
             }
             let parent = if i == 0 {
-                b.locals.at(p.base as usize).ty;
+                b.locals.at(p.base as usize).ty
             } else {
-                b.projections.at((p.proj_start + i - 1) as usize).ty;
+                b.projections.at((p.proj_start + i - 1) as usize).ty
             };
             if self.is_prelude_field(b, parent, x.sub, "ptr") {
                 return true;
@@ -2058,9 +2058,9 @@ extend Facts {
         if self.rpo.len() != 0 && blk != self.rpo[0] {
             let d = self.idom[blk as usize];
             let from = if d == ir::IR_NONE {
-                0;
+                0
             } else {
-                self.clk_end[d as usize];
+                self.clk_end[d as usize]
             };
             if d != ir::IR_NONE && self.npred[blk as usize] == 1 {
                 let mut k = self.wlog.len();
@@ -2892,9 +2892,9 @@ extend Facts {
                 if ka.is_local && kb.is_const {
                     srcl = ka.l;
                     c0 = ka.off + if rv.c == tt::TokenType::Plus as u8 {
-                        kb.c;
+                        kb.c
                     } else {
-                        0 - kb.c;
+                        0 - kb.c
                     };
                 } else if kb.is_local && ka.is_const && rv.c == tt::TokenType::Plus as u8 {
                     srcl = kb.l;
@@ -2903,9 +2903,9 @@ extend Facts {
                 self.write_place(b, s.place);
                 // the source's version as read before the write (in place, `x = x + c`, the old one)
                 let srcv = if ka.is_local && kb.is_const {
-                    ka.v;
+                    ka.v
                 } else {
-                    kb.v;
+                    kb.v
                 };
                 if srcl != ir::IR_NONE && c0 > 0 - 1048576 && c0 < 1048576 {
                     self.affof.set(
@@ -3092,18 +3092,18 @@ extend Facts {
                 return itop(*w, *sg);
             }
             let m = if c.item.node != NODE_NONE {
-                c.item.module;
+                c.item.module
             } else {
-                b.module;
+                b.module
             };
             let mut v: i64 = 0;
             if !c.int_value(unsafe (&*self.pkg).modules.at(m as usize).source.as_str(), &mut v) {
                 return itop(*w, *sg);
             }
             let z = if *sg && v < 0 {
-                zk((v as u64).wrapping_neg(), true);
+                zk((v as u64).wrapping_neg(), true)
             } else {
-                zk(v as u64 & wmask(*w), false);
+                zk(v as u64 & wmask(*w), false)
             };
             if !zle(tmin(*w, *sg), z) || !zle(z, tmax(*w, *sg)) {
                 return itop(*w, *sg);
@@ -3219,9 +3219,9 @@ extend Facts {
             if rv.kind == ir::RV_INTRINSIC {
                 // A fixed array's length, or a constant one (a vector's lane count).
                 let lop = b.oper_pool[(rv.a + if rv.c == ir::IN_BOUNDS_GROUP || rv.c == ir::IN_BOUNDS_GROUP_PROVEN {
-                    1;
+                    1
                 } else {
-                    rv.b - 1;
+                    rv.b - 1
                 }) as usize];
                 if self.fixed_len(b, lop) || self.const_ge2(b, lop) {
                     return true;
@@ -3516,9 +3516,9 @@ extend Facts {
             return false;
         }
         let m = if c.item.node != NODE_NONE {
-            c.item.module;
+            c.item.module
         } else {
-            b.module;
+            b.module
         };
         let mut v: i64 = 0;
         return c.int_value(unsafe (&*self.pkg).modules.at(m as usize).source.as_str(), &mut v) && v >= 2;
@@ -3806,9 +3806,9 @@ extend Facts {
                 // switch: target i == 0 is the edge where the condition equals tval; t0 the other.
                 // assert: t0 is the edge where the condition holds.
                 let holds = if t.kind == ir::TM_ASSERT {
-                    true;
+                    true
                 } else {
-                    i == 0 == (tval == 1);
+                    i == 0 == (tval == 1)
                 };
                 if !self.refine(b, self.cmps[cmp as usize], holds) {
                     continue; // the edge cannot run
@@ -3844,14 +3844,14 @@ extend Facts {
                 return true; // a != b refines nothing
             }
             let lo = if zlt(flo(&fa), flo(&fb)) {
-                flo(&fb);
+                flo(&fb)
             } else {
-                flo(&fa);
+                flo(&fa)
             };
             let hi = if zlt(fhi(&fa), fhi(&fb)) {
-                fhi(&fa);
+                fhi(&fa)
             } else {
-                fhi(&fb);
+                fhi(&fb)
             };
             if !iset(&mut fa, lo, hi) || !iset(&mut fb, lo, hi) {
                 return false;
@@ -3873,9 +3873,9 @@ extend Facts {
             }
             let mut ok = true;
             let d = if strict {
-                zk(1, false);
+                zk(1, false)
             } else {
-                zk(0, false);
+                zk(0, false)
             };
             let xhi = zadd(fhi(&y), zneg(d), &mut ok);
             let ylo = zadd(flo(&x), d, &mut ok);
@@ -4006,9 +4006,9 @@ extend Facts {
         let mut j: usize = 0;
         while i < n0 && j < self.ebuf.len() {
             let x = if nar {
-                self.nar[s0 + i];
+                self.nar[s0 + i]
             } else {
-                self.ent[s0 + i];
+                self.ent[s0 + i]
             };
             let y = self.ebuf[j];
             if x.l < y.l {
@@ -4142,14 +4142,14 @@ const fn ibinary(op: u8, a: &IFact, b: &IFact, aw: u32, w: u32, sg: bool) IFact 
     if t == tt::TokenType::Plus || t == tt::TokenType::Minus {
         let neg = t == tt::TokenType::Minus;
         let lo = if neg {
-            zadd(flo(a), zneg(fhi(b)), &mut ok);
+            zadd(flo(a), zneg(fhi(b)), &mut ok)
         } else {
-            zadd(flo(a), flo(b), &mut ok);
+            zadd(flo(a), flo(b), &mut ok)
         };
         let hi = if neg {
-            zadd(fhi(a), zneg(flo(b)), &mut ok);
+            zadd(fhi(a), zneg(flo(b)), &mut ok)
         } else {
-            zadd(fhi(a), fhi(b), &mut ok);
+            zadd(fhi(a), fhi(b), &mut ok)
         };
         let kb = add_bits(a, b, neg, w);
         r.kz = kb.kz;

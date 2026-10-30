@@ -296,9 +296,9 @@ pub(package) fn link(o: &Opts, err: &mut String) bool {
         kind: o.kind,
         install: o.install.clone(),
         base: if o.kind == K_EXE {
-            EXE_BASE;
+            EXE_BASE
         } else {
-            0u64;
+            0u64
         },
         files: Vector::<IFile>::new(),
         paths: Vector::<String>::new(),
@@ -347,11 +347,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     }
     for i in 0..o.libs.len() {
         let mut path = String::new();
-        if find_lib(o, o.libs[i].as_str(), &mut path) == LIB_ARCHIVE && !ars.add(
-            nat::OBJ_MACHO,
-            path.as_str(),
-            &mut l.err,
-        ) {
+        if find_lib(o, &o.libs[i], &mut path) == LIB_ARCHIVE && !ars.add(nat::OBJ_MACHO, &path, &mut l.err) {
             return false;
         }
     }
@@ -388,7 +384,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
         return false;
     }
     finish(l, o, b, &mut img);
-    if !lu::write(o.out.as_str(), img.as_slice(), 0o755) {
+    if !lu::write(&o.out, &img, 0o755) {
         l.err.format_into("cannot write '{}'", o.out.as_str());
         return false;
     }
@@ -611,7 +607,7 @@ const WANT: [str; 2] = ["arm64-macos", "arm64e-macos"];
 // undefined globals not yet resolved.
 fn load_libraries(l: &mut L, o: &Opts) bool {
     let sys = format("{}/usr/lib/libSystem.tbd", o.sdk.as_str());
-    if !load_file(l, o, sys.as_str()) {
+    if !load_file(l, o, &sys) {
         return false;
     }
     for i in 0..o.libs.len() {
@@ -625,7 +621,7 @@ fn load_libraries(l: &mut L, o: &Opts) bool {
             l.err.format_into("library not found: -l{}", name);
             return false;
         }
-        if !load_file(l, o, found.as_str()) {
+        if !load_file(l, o, &found) {
             return false;
         }
     }
@@ -634,13 +630,13 @@ fn load_libraries(l: &mut L, o: &Opts) bool {
         let mut found = String::new();
         for d in 0..o.fdirs.len() + 1 {
             let dir = if d < o.fdirs.len() {
-                o.fdirs[d].clone();
+                o.fdirs[d].clone()
             } else {
-                format("{}/System/Library/Frameworks", o.sdk.as_str());
+                format("{}/System/Library/Frameworks", o.sdk.as_str())
             };
             for ext in [".tbd", ""] {
                 let c = format("{}/{}.framework/{}{}", dir.as_str(), name, name, ext);
-                if found.len() == 0 && is_file(c.as_str()) {
+                if found.len() == 0 && is_file(&c) {
                     found = c;
                 }
             }
@@ -649,7 +645,7 @@ fn load_libraries(l: &mut L, o: &Opts) bool {
             l.err.format_into("framework not found: {}", name);
             return false;
         }
-        if !load_file(l, o, found.as_str()) {
+        if !load_file(l, o, &found) {
             return false;
         }
     }
@@ -666,26 +662,26 @@ pub(package) const LIB_ARCHIVE: u8 = 2;
 pub(package) fn find_lib(o: &Opts, name: str, path: &mut String) u8 {
     for d in 0..o.dirs.len() + 1 {
         let dir = if d < o.dirs.len() {
-            o.dirs[d].clone();
+            o.dirs[d].clone()
         } else {
-            format("{}/usr/lib", o.sdk.as_str());
+            format("{}/usr/lib", o.sdk.as_str())
         };
         for k in 0..3usize {
             let ext = if k == 0 {
-                ".tbd";
+                ".tbd"
             } else if k == 1 {
-                ".dylib";
+                ".dylib"
             } else {
-                ".a";
+                ".a"
             };
             let c = format("{}/lib{}{}", dir.as_str(), name, ext);
-            if is_file(c.as_str()) {
+            if is_file(&c) {
                 path.clear();
                 path.push_string(&c);
                 return if k == 2 {
-                    LIB_ARCHIVE;
+                    LIB_ARCHIVE
                 } else {
-                    LIB_SHARED;
+                    LIB_SHARED
                 };
             }
         }
@@ -739,7 +735,7 @@ fn load_file(l: &mut L, o: &Opts, path: str) bool {
                     }
                 }
             }
-            if !hit && !reexport_file(l, o, name.as_str(), ord, &mut todo) {
+            if !hit && !reexport_file(l, o, &name, ord, &mut todo) {
                 return false;
             }
             done.push(name);
@@ -799,7 +795,7 @@ fn reexport_file(l: &mut L, o: &Opts, install: str, ord: u32, todo: &mut Vector<
         stem = String::from_str(install.slice(0, install.len() - 6));
     }
     let path = format("{}{}.tbd", o.sdk.as_str(), stem.as_str());
-    let data = lu::read(path.as_str());
+    let data = lu::read(&path);
     if data.is_none() {
         l.err.format_into("cannot find the stub of re-exported library '{}'", install);
         return false;
@@ -907,7 +903,7 @@ fn load_dylib(l: &mut L, o: &Opts, d: []u8, path: str, ord0: u32) bool {
             let child = lu::read_uleb(t, &mut p) as usize;
             // The child's name: this node's, then the edge; kept past the stack's other entries.
             let mut full = Vector::<u8>::new();
-            full.extend_from_slice(name.as_slice());
+            full.extend_from_slice(&name);
             full.extend_from_slice(edge);
             let sub = name.len();
             name.extend_from_slice(edge);
@@ -919,12 +915,12 @@ fn load_dylib(l: &mut L, o: &Opts, d: []u8, path: str, ord0: u32) bool {
     for i in 0..reexp.len() {
         let r = reexp[i].as_str();
         let p = format("{}{}", o.sdk.as_str(), r);
-        let rd = lu::read(p.as_str());
+        let rd = lu::read(&p);
         if rd.is_none() {
             continue;
         }
         let rb = rd.unwrap();
-        if !load_dylib(l, o, rb.as_slice(), p.as_str(), ord) {
+        if !load_dylib(l, o, &rb, &p, ord) {
             return false;
         }
     }
@@ -1200,9 +1196,9 @@ fn split_sections(l: &mut L, blob: &mut Vector<u8>) {
             for i in 0..np {
                 let lo = cuts[i];
                 let hi = if i + 1 < np {
-                    cuts[i + 1];
+                    cuts[i + 1]
                 } else {
-                    sc.addr + sc.size;
+                    sc.addr + sc.size
                 };
                 let mut pc = sc;
                 pc.addr = lo;
@@ -1278,9 +1274,9 @@ fn mark_live(l: &mut L, b: []u8) {
                 let c = f.sec0 + num - 1;
                 let at = sc.off + w0 as usize;
                 let v = if (w1 >> 25 & 3) == 3 {
-                    lu::r64(b, at);
+                    lu::r64(b, at)
                 } else {
-                    lu::r32(b, at) as u64;
+                    lu::r32(b, at) as u64
                 };
                 reach(l, part(l, c, v), &mut work);
             }
@@ -1319,13 +1315,13 @@ fn out_section(l: &mut L, segname: str, sect: str, flags: u32) u32 {
         }
     }
     let seg = if segname == "__TEXT" {
-        SEG_TEXT;
+        SEG_TEXT
     } else if segname == "__DATA_CONST" {
-        SEG_DCONST;
+        SEG_DCONST
     } else if segname == "__DATA" {
-        SEG_DATA;
+        SEG_DATA
     } else {
-        3 + l.osecs.len() as u32;
+        3 + l.osecs.len() as u32
     };
     l.osecs.push(
         OSec {
@@ -1417,7 +1413,7 @@ fn layout(l: &mut L, b: []u8) bool {
         if seg.as_str() == "__DATA" && (sect.as_str() == "__const" || (sc.flags & S_TYPE) == S_MOD_INIT_FUNC_POINTERS) {
             seg = String::from_str("__DATA_CONST");
         }
-        let o = out_section(l, seg.as_str(), sect.as_str(), sc.flags);
+        let o = out_section(l, &seg, &sect, sc.flags);
         let os = l.osecs.index_mut(o as usize);
         if sc.align > os.align {
             os.align = sc.align;
@@ -1520,14 +1516,14 @@ fn layout(l: &mut L, b: []u8) bool {
         }
         let name = String::from_str(l.sn.spell(l.osecs[first].segname));
         let prot = if name.as_str() == "__TEXT" {
-            5u32;
+            5u32
         } else {
-            3u32;
+            3u32
         };
         let flags = if name.as_str() == "__DATA_CONST" {
-            SG_READ_ONLY;
+            SG_READ_ONLY
         } else {
-            0u32;
+            0u32
         };
         l.segs.push(
             OSeg {
@@ -1570,9 +1566,9 @@ fn layout(l: &mut L, b: []u8) bool {
         let seg_va = va;
         let seg_fo = fo;
         let mut at: u64 = if k == 0 || l.segs[k - 1].name.as_str() == "__PAGEZERO" {
-            hdr;
+            hdr
         } else {
-            0u64;
+            0u64
         };
         let mut fend: u64 = at;
         for q in first..first + cnt {
@@ -1580,9 +1576,9 @@ fn layout(l: &mut L, b: []u8) bool {
             at = lu::align_up(at, 1u64 << os.align as u64);
             os.addr = l.base + seg_va + at;
             os.off = if zerofill(os.flags) {
-                0u64;
+                0u64
             } else {
-                seg_fo + at;
+                seg_fo + at
             };
             at += os.size;
             if !zerofill(os.flags) {
@@ -1774,17 +1770,17 @@ fn apply_relocations(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
             }
             if ty == R_UNSIGNED {
                 let stored = if len == 3 {
-                    lu::r64(img.as_slice(), p);
+                    lu::r64(img.as_slice(), p)
                 } else {
-                    lu::r32(img.as_slice(), p) as u64;
+                    lu::r32(img.as_slice(), p) as u64
                 };
                 if !ext {
                     target = section_relative(l, f, symnum, stored);
                 }
                 let v = if ext {
-                    target.wrapping_add(stored);
+                    target.wrapping_add(stored)
                 } else {
-                    target;
+                    target
                 };
                 if has_sub {
                     has_sub = false;
@@ -1828,9 +1824,9 @@ fn apply_relocations(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
             let insn = lu::r32(img.as_slice(), p);
             if ty == R_BRANCH26 {
                 let t = if g != NONE {
-                    l.osecs[l.o_stubs as usize].addr + 12 * l.gs[g as usize].stub as u64;
+                    l.osecs[l.o_stubs as usize].addr + 12 * l.gs[g as usize].stub as u64
                 } else {
-                    target;
+                    target
                 }.wrapping_add(addend as u64);
                 let d = t.wrapping_sub(p_addr) as i64;
                 if d < -(1i64 << 27) || d >= 1i64 << 27 {
@@ -1840,9 +1836,9 @@ fn apply_relocations(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
                 lu::p32(img, p, insn & 0xFC000000 | (d >> 2) as u32 & 0x3FFFFFF);
             } else if ty == R_PAGE21 || ty == R_GOT_LOAD_PAGE21 || ty == R_TLVP_LOAD_PAGE21 {
                 let t = if ty == R_GOT_LOAD_PAGE21 {
-                    got_addr(l, f, symnum);
+                    got_addr(l, f, symnum)
                 } else {
-                    target.wrapping_add(addend as u64);
+                    target.wrapping_add(addend as u64)
                 };
                 let d = (t & ~0xFFFu64).wrapping_sub(p_addr & ~0xFFFu64) as i64 >> 12;
                 if d < -(1i64 << 20) || d >= 1i64 << 20 {
@@ -1853,9 +1849,9 @@ fn apply_relocations(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
                 lu::p32(img, p, insn & 0x9F00001F | (imm & 3) << 29 | (imm >> 2 & 0x7FFFF) << 5);
             } else if ty == R_PAGEOFF12 || ty == R_GOT_LOAD_PAGEOFF12 {
                 let t = if ty == R_GOT_LOAD_PAGEOFF12 {
-                    got_addr(l, f, symnum);
+                    got_addr(l, f, symnum)
                 } else {
-                    target.wrapping_add(addend as u64);
+                    target.wrapping_add(addend as u64)
                 };
                 let lo = (t & 0xFFF) as u32;
                 let mut sh: u32 = 0;
@@ -2094,10 +2090,10 @@ fn write_unwind(l: &mut L, img: &mut Vector<u8>) bool {
     for i in 0..n {
         let u = l.unw[i];
         let a = if u.sec == NONE {
-            l.osecs[l.o_stubs as usize].addr;
+            l.osecs[l.o_stubs as usize].addr
         } else {
             let sc = l.secs[u.sec as usize];
-            l.osecs[sc.out as usize].addr + sc.at + u.v - sc.addr;
+            l.osecs[sc.out as usize].addr + sc.at + u.v - sc.addr
         } - l.base;
         keyed.push(a << 24 | i as u64);
     }
@@ -2115,9 +2111,9 @@ fn write_unwind(l: &mut L, img: &mut Vector<u8>) bool {
     let pp = per_page(l);
     let npages = (n + pp - 1) / pp;
     let nc = if comp {
-        l.unw_enc.len();
+        l.unw_enc.len()
     } else {
-        0usize;
+        0usize
     };
     let mut o = Vector::<u8>::with_capacity(os.size as usize);
     let idx = 28 + 4 * nc;
@@ -2141,9 +2137,9 @@ fn write_unwind(l: &mut L, img: &mut Vector<u8>) bool {
         lu::w32(&mut o, lsda as u32);
         let cnt = (n - pg * pp).min(pp);
         page_at += if comp {
-            12 + 4 * cnt;
+            12 + 4 * cnt
         } else {
-            8 + 8 * cnt;
+            8 + 8 * cnt
         };
     }
     lu::w32(&mut o, end as u32);
@@ -2278,9 +2274,9 @@ fn chained_fixups(l: &mut L, img: &mut Vector<u8>) Vector<u8> {
                 }
             }
             let v = if fx.imp != NONE {
-                fx.imp as u64 | next << 51 | 1u64 << 63;
+                fx.imp as u64 | next << 51 | 1u64 << 63
             } else {
-                fx.target | next << 51;
+                fx.target | next << 51
             };
             let fo = file_off(l, at);
             lu::p64(img, fo as usize, v);
@@ -2297,9 +2293,9 @@ fn chained_fixups(l: &mut L, img: &mut Vector<u8>) Vector<u8> {
         lu::w32(
             &mut o,
             ord & 0xFF | if im.weak {
-                1u32;
+                1u32
             } else {
-                0u32;
+                0u32
             } << 8 | syms.len() as u32 << 9,
         );
         lu::w32(&mut o, im.addend as u32);
@@ -2310,7 +2306,7 @@ fn chained_fixups(l: &mut L, img: &mut Vector<u8>) Vector<u8> {
         syms.push(0);
     }
     let symbols = o.len();
-    o.extend_from_slice(syms.as_slice());
+    o.extend_from_slice(&syms);
     while o.len() % 8 != 0 {
         o.push(0);
     }
@@ -2625,9 +2621,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
                 OSym {
                     name: lu::put_str(&mut st, s),
                     ty: N_SECT | if (y.ty & N_EXT) != 0 && private {
-                        N_PEXT;
+                        N_PEXT
                     } else {
-                        0;
+                        0
                     },
                     sect: out_sect(l, k as u32),
                     desc: 0,
@@ -2659,37 +2655,37 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         let a = g_addr(l, g);
         let abs = gy.kind == G_DEF && (l.syms[gy.sym as usize].ty & N_TYPE) == N_ABS;
         let (sect, desc) = if gy.kind == G_HEADER {
-            (1u8, 0x10u16);
+            (1u8, 0x10u16)
         } else if abs {
-            (0u8, 0u16);
+            (0u8, 0u16)
         } else if gy.kind == G_COMMON {
-            ((l.o_common + 1) as u8, 0u16);
+            ((l.o_common + 1) as u8, 0u16)
         } else {
             (
                 out_sect(l, gy.sym),
                 if gy.weak {
-                    N_WEAK_DEF;
+                    N_WEAK_DEF
                 } else {
-                    0u16;
+                    0u16
                 }
-            );
+            )
         };
         let ty = if abs {
-            N_ABS | N_EXT;
+            N_ABS | N_EXT
         } else {
-            N_SECT | N_EXT;
+            N_SECT | N_EXT
         };
         exts.push(OSym { name: lu::put_str(&mut st, l.names.spell(gy.name)), ty: ty, sect: sect, desc: desc, value: a });
         enames.push(gy.name);
         eflags.push(
             if gy.tlv {
-                1u64;
+                1u64
             } else {
-                0u64;
+                0u64
             } | if gy.weak {
-                4u64;
+                4u64
             } else {
-                0u64;
+                0u64
             },
         );
         eaddrs.push(a - l.base);
@@ -2727,9 +2723,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     starts.sort();
     let mut fstarts = Vector::<u8>::new();
     let text0 = l.segs[if l.kind == K_EXE {
-        1usize;
+        1usize
     } else {
-        0usize;
+        0usize
     }].addr;
     let mut prev = text0;
     for i in 0..starts.len() {
@@ -2753,9 +2749,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         lu::w32(
             &mut ind,
             if l.gs[g as usize].kind == G_DYLIB {
-                undix[g as usize];
+                undix[g as usize]
             } else {
-                0x80000000u32;
+                0x80000000u32
             },
         );
     }
@@ -2773,21 +2769,21 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     let ind_off = sym_off + 16 * nsyms as u64;
     let str_off = lu::align_up(ind_off + ind.len() as u64, 8);
     let sig_off = lu::align_up(str_off + st.len() as u64, 16);
-    let ident = basename(o.out.as_str());
+    let ident = basename(&o.out);
     let npages = (sig_off + 4095) / 4096;
     let sig_size = 20 + 88 + ident.len() as u64 + 1 + 32 * npages;
     let le_size = sig_off + sig_size - le_off;
-    img.extend_from_slice(fixups.as_slice());
-    img.extend_from_slice(trie.as_slice());
-    img.extend_from_slice(fstarts.as_slice());
+    img.extend_from_slice(&fixups);
+    img.extend_from_slice(&trie);
+    img.extend_from_slice(&fstarts);
     let mut tab = Vector::<u8>::with_capacity(16 * nsyms);
     for grp in 0..3 {
         let v = if grp == 0 {
-            &locs;
+            &locs
         } else if grp == 1 {
-            &exts;
+            &exts
         } else {
-            &unds;
+            &unds
         };
         for i in 0..v.len() {
             let e = v[i];
@@ -2798,12 +2794,12 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             lu::w64(&mut tab, e.value);
         }
     }
-    img.extend_from_slice(tab.as_slice());
-    img.extend_from_slice(ind.as_slice());
+    img.extend_from_slice(&tab);
+    img.extend_from_slice(&ind);
     while img.len() as u64 < str_off {
         img.push(0);
     }
-    img.extend_from_slice(st.as_slice());
+    img.extend_from_slice(&st);
     while img.len() as u64 < sig_off {
         img.push(0);
     }
@@ -2819,9 +2815,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     lu::w32(
         &mut h,
         if l.kind == K_EXE {
-            MH_EXECUTE;
+            MH_EXECUTE
         } else {
-            MH_DYLIB;
+            MH_DYLIB
         },
     );
     lu::w32(&mut h, 0);
@@ -2842,7 +2838,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         let sg = &l.segs[k];
         lu::w32(&mut h, LC_SEGMENT_64);
         lu::w32(&mut h, 72 + 80 * sg.n);
-        name16(&mut h, sg.name.as_str());
+        name16(&mut h, &sg.name);
         lu::w64(&mut h, sg.addr);
         lu::w64(&mut h, sg.vmsize);
         lu::w64(&mut h, sg.off);
@@ -2850,9 +2846,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         lu::w32(
             &mut h,
             if sg.name.as_str() == "__PAGEZERO" {
-                0u32;
+                0u32
             } else {
-                sg.prot;
+                sg.prot
             },
         );
         lu::w32(&mut h, sg.prot);
@@ -2870,11 +2866,11 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             lu::w32(&mut h, 0);
             lu::w32(&mut h, os.flags);
             let (r1, r2) = if q == l.o_stubs {
-                (0u32, 12u32);
+                (0u32, 12u32)
             } else if q == l.o_got {
-                (l.stubs.len() as u32, 0u32);
+                (l.stubs.len() as u32, 0u32)
             } else {
-                (0u32, 0u32);
+                (0u32, 0u32)
             };
             lu::w32(&mut h, r1);
             lu::w32(&mut h, r2);
@@ -2913,7 +2909,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         lu::w32(&mut h, 12);
         put_padded(&mut h, "/usr/lib/dyld", 20);
     } else {
-        dylib_cmd(&mut h, LC_ID_DYLIB, l.install.as_str(), 0x10000, 0x10000);
+        dylib_cmd(&mut h, LC_ID_DYLIB, &l.install, 0x10000, 0x10000);
     }
     ncmds += 1;
     let uuid_at = h.len() + 8;
@@ -2942,7 +2938,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         ncmds += 1;
     }
     for i in 0..l.libs.len() {
-        dylib_cmd(&mut h, LC_LOAD_DYLIB, l.libs[i].install.as_str(), l.libs[i].cur, l.libs[i].compat);
+        dylib_cmd(&mut h, LC_LOAD_DYLIB, &l.libs[i].install, l.libs[i].cur, l.libs[i].compat);
         ncmds += 1;
     }
     linkedit_cmd(&mut h, LC_FUNCTION_STARTS, fs_off, fstarts.len() as u64);
@@ -2998,15 +2994,15 @@ fn debug_map(l: &L, b: []u8, f: IFile, st: &mut Vector<u8>, locs: &mut Vector<OS
     let mut name: str = "";
     cu_names(l, b, f, &mut dir, &mut name);
     if name.len() == 0 {
-        name = basename(l.paths[f.path as usize].as_str());
+        name = basename(&l.paths[f.path as usize]);
     }
     let mut d = String::from_str(dir);
     if d.len() != 0 && !d.as_str().ends_with("/") {
         d.push_byte(b'/');
     }
-    locs.push(OSym { name: lu::put_str(st, d.as_str()), ty: N_SO, sect: 0, desc: 0, value: 0 });
+    locs.push(OSym { name: lu::put_str(st, &d), ty: N_SO, sect: 0, desc: 0, value: 0 });
     locs.push(OSym { name: lu::put_str(st, name), ty: N_SO, sect: 0, desc: 0, value: 0 });
-    locs.push(OSym { name: lu::put_str(st, l.paths[f.path as usize].as_str()), ty: N_OSO, sect: 0, desc: 1, value: 0 });
+    locs.push(OSym { name: lu::put_str(st, &l.paths[f.path as usize]), ty: N_OSO, sect: 0, desc: 1, value: 0 });
     // The functions sorted by address; each one's size reaches the next one or its section's end.
     let mut fk = Vector::<u64>::new();
     for k in f.sym0..f.sym0 + f.nsym {
@@ -3054,9 +3050,9 @@ fn name16(h: &mut Vector<u8>, s: str) {
     for i in 0..16usize {
         h.push(
             if i < s.len() {
-                s.byte_at(i);
+                s.byte_at(i)
             } else {
-                0u8;
+                0u8
             },
         );
     }
@@ -3066,9 +3062,9 @@ fn put_padded(h: &mut Vector<u8>, s: str, n: usize) {
     for i in 0..n {
         h.push(
             if i < s.len() {
-                s.byte_at(i);
+                s.byte_at(i)
             } else {
-                0u8;
+                0u8
             },
         );
     }
@@ -3126,18 +3122,18 @@ fn sign(l: &L, img: &mut Vector<u8>, ident: str, sig_off: u64, uuid_at: usize, j
     bw64(&mut s, 0);
     // The executable segment: __TEXT.
     let text = &l.segs[if l.kind == K_EXE {
-        1usize;
+        1usize
     } else {
-        0usize;
+        0usize
     }];
     bw64(&mut s, text.off);
     bw64(&mut s, text.filesize);
     bw64(
         &mut s,
         if l.kind == K_EXE {
-            1u64;
+            1u64
         } else {
-            0u64;
+            0u64
         },
     );
     for i in 0..ident.len() {
@@ -3148,7 +3144,7 @@ fn sign(l: &L, img: &mut Vector<u8>, ident: str, sig_off: u64, uuid_at: usize, j
     let mut hashes = Vector::<u8>::new();
     page_hashes(img, end, jobs, &mut hashes);
     let mut dg = [0u8; 32];
-    sha::digest(hashes.as_slice(), &mut dg);
+    sha::digest(&hashes, &mut dg);
     for i in 0..16usize {
         img[uuid_at + i] = unsafe dg[i];
     }
@@ -3161,6 +3157,6 @@ fn sign(l: &L, img: &mut Vector<u8>, ident: str, sig_off: u64, uuid_at: usize, j
             hashes[32 * q + i] = unsafe dg[i];
         }
     }
-    s.extend_from_slice(hashes.as_slice());
-    img.extend_from_slice(s.as_slice());
+    s.extend_from_slice(&hashes);
+    img.extend_from_slice(&s);
 }

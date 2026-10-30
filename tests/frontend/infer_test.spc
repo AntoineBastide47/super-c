@@ -288,11 +288,11 @@ fn expected_result_flow() {
     let mut b = h::ExitBatch::new();
     h::expect_ok(
         "branches coerce to the expected type independently",
-        "fn main() i32 { let c = true; let x: i64 = if c { 1i32; } else { 2i64; }; return x as i32 - 1; }\n",
+        "fn main() i32 { let c = true; let x: i64 = if c { 1i32 } else { 2i64 }; return x as i32 - 1; }\n",
     );
     h::expect_err_msg(
         "branch mismatch without an expected type",
-        "fn main() i32 { let c = true; let x = if c { 1i32; } else { 2i64; }; return 0; }\n",
+        "fn main() i32 { let c = true; let x = if c { 1i32 } else { 2i64 }; return 0; }\n",
         "mismatched types",
     );
     h::expect_ok(
@@ -486,7 +486,7 @@ fn candidate_selection() {
         adv.format_into("extend V as C{} {{ pub fn m(self: &V, x: A{}) i32 {{ return {}; }} }}\n", i, i, i);
     }
     adv.push_str("fn main() i32 { let v = V {}; return v.m(A3 {}) - 3; }\n");
-    h::expect_err_msg("candidate budget stops adversarial overload sets", adv.as_str(), "candidate limit");
+    h::expect_err_msg("candidate budget stops adversarial overload sets", &adv, "candidate limit");
     b.run();
 }
 
@@ -765,12 +765,12 @@ fn generic_alias_literals() {
 fn null_branches_take_the_pointer_type() {
     h::expect_exit(
         "null first and last",
-        "fn f(c: bool, p: *mut i32) *mut i32 {\n    let q = if c {\n        null;\n    } else {\n        p;\n    };\n    return q;\n}\nfn g(c: bool, p: *mut i32) *mut i32 {\n    let q = if c {\n        p;\n    } else {\n        null;\n    };\n    return q;\n}\nfn h(c: u8, p: *mut i32) *mut i32 {\n    let q = switch c {\n        0 => null,\n        1 => null,\n        _ => p,\n    };\n    return q;\n}\nfn main() i32 {\n    let mut x = 1;\n    return (f(true, &mut x) != null || g(false, &mut x) != null || h(0, &mut x) != null || h(2, &mut x) == null) as i32;\n}\n",
+        "fn f(c: bool, p: *mut i32) *mut i32 {\n    let q = if c {\n        null\n    } else {\n        p\n    };\n    return q;\n}\nfn g(c: bool, p: *mut i32) *mut i32 {\n    let q = if c {\n        p\n    } else {\n        null\n    };\n    return q;\n}\nfn h(c: u8, p: *mut i32) *mut i32 {\n    let q = switch c {\n        0 => null,\n        1 => null,\n        _ => p,\n    };\n    return q;\n}\nfn main() i32 {\n    let mut x = 1;\n    return (f(true, &mut x) != null || g(false, &mut x) != null || h(0, &mut x) != null || h(2, &mut x) == null) as i32;\n}\n",
         0,
     );
     h::expect_err_msg(
         "null against a number",
-        "fn main() i32 {\n    let q = if true {\n        null;\n    } else {\n        1;\n    };\n    return q;\n}\n",
+        "fn main() i32 {\n    let q = if true {\n        null\n    } else {\n        1\n    };\n    return q;\n}\n",
         "mismatched types",
     );
 }
@@ -826,32 +826,32 @@ fn if_operand_literals_take_other_operand_type(b: &mut h::ExitBatch) {
         "if operand literals",
         M"(fn right(x: f64, t: i32) bool {
     return x.abs() < if t == 0 {
-        0x1p-1030;
+        0x1p-1030
     } else {
-        2.0;
+        2.0
     };
 }
 fn left(x: f64, t: i32) bool {
     return if t == 0 {
-        0x1p-1030;
+        0x1p-1030
     } else {
-        2.0;
+        2.0
     } > x.abs();
 }
 fn scaled(b: f64, c: i32) f64 {
     return 0.25 * if c == 2 {
-        b;
+        b
     } else {
-        1.0;
+        1.0
     };
 }
 fn left_switch(x: f64, t: i32) bool {
     return switch t {
         0 => {
-            0x1p-1030;
+            0x1p-1030
         },
         _ => {
-            2.0;
+            2.0
         },
     } > x.abs();
 }

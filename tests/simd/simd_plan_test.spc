@@ -9,8 +9,8 @@ import emit::simd_plan as sp;
 const SIMD: cf::CpuFeatureSet = cf::CpuFeatureSet { w: [1, 0] };
 const RELAXED: cf::CpuFeatureSet = cf::CpuFeatureSet { w: [3, 0] };
 const NONE: cf::CpuFeatureSet = cf::CpuFeatureSet { w: [0, 0] };
-const F: BuiltinType = BuiltinType::BT_F32;
-const I: BuiltinType = BuiltinType::BT_I32;
+const F: BuiltinType = BT_F32;
+const I: BuiltinType = BT_I32;
 
 // One entry of the synthetic table: an operation over `n` lanes of `t`, result `r`.
 struct Row {

@@ -53,9 +53,9 @@ fn component_hash<T: Scalar>(v: T) u64 {
             // select 2 lanes wide.
             let x = v.cast::<f32>();
             let bits = if x == 0.0 {
-                0u32;
+                0u32
             } else {
-                f32_bits(x);
+                f32_bits(x)
             };
             return bits;
         }
@@ -105,9 +105,9 @@ extend<const N: usize> Vec<bool, N> as Format {
             }
             s.push_str(
                 if unsafe self.e[i] {
-                    "true";
+                    "true"
                 } else {
-                    "false";
+                    "false"
                 },
             );
         }

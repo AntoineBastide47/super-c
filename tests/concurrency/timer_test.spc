@@ -37,9 +37,9 @@ fn sleeps_never_end_early() {
             let dl = base + ms * 1000000;
             let start = platform::now_ns();
             let left = if dl > start {
-                dl - start;
+                dl - start
             } else {
-                0u64;
+                0u64
             };
             rt::sleep_ns(left as i64);
             let now = platform::now_ns();

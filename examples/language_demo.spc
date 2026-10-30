@@ -162,9 +162,9 @@ extend Percent as TryFrom<i32> {
     type Error = i32;
     pub const fn try_from(value: i32) Result<Percent, i32> {
         if value < 0 || value > 100 {
-            return Result::<Percent, i32>::Err(value);
+            return Err(value);
         }
-        return Result::<Percent, i32>::Ok(Percent { value: value as u8 });
+        return Ok(Percent { value: value as u8 });
     }
 }
 
@@ -285,7 +285,7 @@ const fn sum3<T: Add<Output = T> + Copy>(a: T, b: T, c: T) T {
 }
 
 const fn divmod(divisor: i32, value: i32) (i32, i32) {
-    return value / divisor, value % divisor;
+    return (value / divisor, value % divisor);
 }
 
 const fn bounds(values: []i32) Bounds {
@@ -372,14 +372,14 @@ fn make_adder(step: i32) Box<dyn fn(i32) i32> {
 
 const fn checked(value: i32) Result<i32, i32> {
     if value < 0 {
-        return Result::<i32, i32>::Err(value);
+        return Err(value);
     }
-    return Result::<i32, i32>::Ok(value + 1);
+    return Ok(value + 1);
 }
 
 const fn checked_twice(value: i32) Result<i32, i32> {
     let next = checked(value)?;
-    return Result::<i32, i32>::Ok(next * 2);
+    return Ok(next * 2);
 }
 
 const fn sum_slice(values: []i32) i32 {
@@ -488,7 +488,7 @@ fn ownership_and_containers() i32 {
             popped = value;
         },
         _ => {},
-    };
+    }
 
     let mut mapped = 0;
     loop {
@@ -499,7 +499,7 @@ fn ownership_and_containers() i32 {
             _ => {
                 break;
             },
-        };
+        }
     }
     return text.len() as i32 + popped + mapped;
 }

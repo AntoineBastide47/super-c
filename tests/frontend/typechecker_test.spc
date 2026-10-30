@@ -258,12 +258,12 @@ fn errors() {
     h::expect_err_msg("assign immutable", "fn main() i32 { let x: i32 = 1; x = 2; }\n", "cannot assign");
     h::expect_err_msg(
         "assign immutable match binding",
-        "enum Opt { None, Some(i32), }\nfn main() i32 { let o = Opt::Some(1); return switch o { Some(x) => { x = 2; x; }, None => { 0; }, }; }\n",
+        "enum Opt { None, Some(i32), }\nfn main() i32 { let o = Opt::Some(1); return switch o { Some(x) => { x = 2; x }, None => { 0 }, }; }\n",
         "cannot assign",
     );
     h::expect_ok(
         "mut match binding is assignable",
-        "enum Opt { None, Some(i32), }\nfn main() i32 { let o = Opt::Some(1); return switch o { Some(mut x) => { x = 2; x; }, None => { 0; }, }; }\n",
+        "enum Opt { None, Some(i32), }\nfn main() i32 { let o = Opt::Some(1); return switch o { Some(mut x) => { x = 2; x }, None => { 0 }, }; }\n",
     );
     h::expect_err_msg(
         "owning-type let still not reassignable",
@@ -1313,7 +1313,7 @@ fn never_type() {
     );
     h::expect_ok(
         "panicking else branch unifies",
-        "fn f(n: i32) i32 { let d = if n > 0 { n; } else { panic(\"neg\"); }; return d; }\n",
+        "fn f(n: i32) i32 { let d = if n > 0 { n } else { panic(\"neg\") }; return d; }\n",
     );
     h::expect_ok("return panic fits any return type", "fn f() i32 { return panic(\"boom\"); }\n");
     h::expect_ok(
@@ -1368,25 +1368,25 @@ fn tuples() {
     );
     h::expect_err_msg(
         "an annotation does not widen a call's tuple",
-        "fn two() (i16, i16) { return 1, 2; }\nfn f() i32 { let (c, d): (i32, i16) = two(); return c; }\n",
+        "fn two() (i16, i16) { return (1, 2); }\nfn f() i32 { let (c, d): (i32, i16) = two(); return c; }\n",
         "mismatched types: expected '(i32, i16)', found '(i16, i16)'",
     );
     h::expect_ok(
         "annotated multi-value binding with its types",
-        "fn two() (i16, i16) { return 1, 2; }\nfn f() i16 { let (c, d): (i16, i16) = two(); return c + d; }\n",
+        "fn two() (i16, i16) { return (1, 2); }\nfn f() i16 { let (c, d): (i16, i16) = two(); return c + d; }\n",
     );
     // Several results are not a value: they bind by destructuring, forward by `return`, or drop.
     h::expect_ok(
         "several results bind, forward and drop",
-        "fn two() (i16, i16) { return 1, 2; }\nfn fwd() (i16, i16) { return two(); }\nfn f() i16 { two(); defer two(); let (c, d) = unsafe two(); return c + d; }\n",
+        "fn two() (i16, i16) { return (1, 2); }\nfn fwd() (i16, i16) { return two(); }\nfn f() i16 { two(); defer two(); let (c, d) = unsafe two(); return c + d; }\n",
     );
     h::expect_ok(
         "a tuple result bound to one name",
-        "fn two() (i16, i16) { return 1, 2; }\nfn f() i16 { let x = two(); return x.0; }\n",
+        "fn two() (i16, i16) { return (1, 2); }\nfn f() i16 { let x = two(); return x.0; }\n",
     );
     h::expect_ok(
         "a tuple result as a branch value",
-        "fn two() (i16, i16) { return 1, 2; }\nfn f(c: bool) i16 { let (a, b) = if c { two(); } else { (1i16, 2i16); }; return a + b; }\n",
+        "fn two() (i16, i16) { return (1, 2); }\nfn f(c: bool) i16 { let (a, b) = if c { two() } else { (1i16, 2i16) }; return a + b; }\n",
     );
 }
 
@@ -2550,11 +2550,11 @@ fn expected_type_reaches_branches() {
     // Literals in if/switch value branches adapt to the context type (no suffixes, no casts).
     h::expect_ok(
         "if-value literals adapt",
-        "fn main() i32 { let f = true; let i: usize = if f { 1; } else { 2; }; return i as i32 - 1; }\n",
+        "fn main() i32 { let f = true; let i: usize = if f { 1 } else { 2 }; return i as i32 - 1; }\n",
     );
     h::expect_ok(
         "else-if chain adapts",
-        "fn main() i32 { let f = true; let k: u16 = if f { 10; } else if !f { 20; } else { 30; }; return k as i32 - 10; }\n",
+        "fn main() i32 { let f = true; let k: u16 = if f { 10 } else if !f { 20 } else { 30 }; return k as i32 - 10; }\n",
     );
     h::expect_ok(
         "switch arms adapt (incl. negatives)",
@@ -2562,18 +2562,18 @@ fn expected_type_reaches_branches() {
     );
     h::expect_ok(
         "string literal branches reach *const char",
-        "fn main() i32 { let f = true; let p: *const char = if f { \"a\"; } else { \"b\"; }; return (p as usize * 0) as i32; }\n",
+        "fn main() i32 { let f = true; let p: *const char = if f { \"a\" } else { \"b\" }; return (p as usize * 0) as i32; }\n",
     );
     // Range checking still applies at the adapted literal.
     h::expect_err_msg(
         "branch literal out of range",
-        "fn main() i32 { let f = true; let x: u8 = if f { 300; } else { 1; }; return x as i32; }\n",
+        "fn main() i32 { let f = true; let x: u8 = if f { 300 } else { 1 }; return x as i32; }\n",
         "integer literal is out of range for 'u8'",
     );
     // Pinned (suffixed) literals never adapt.
     h::expect_err_msg(
         "pinned branch literal stays pinned",
-        "fn main() i32 { let f = true; let i: usize = if f { 1i32; } else { 2i32; }; return i as i32; }\n",
+        "fn main() i32 { let f = true; let i: usize = if f { 1i32 } else { 2i32 }; return i as i32; }\n",
         "mismatched types",
     );
 }
@@ -2905,7 +2905,7 @@ fn one_call_arguments_do_not_alias_mutably() {
         );
         src.push_str(c.1);
         src.push_str("\n}\n");
-        h::expect_err_msg(c.0, src.as_str(), c.2);
+        h::expect_err_msg(c.0, &src, c.2);
     }
     let mut oks = Vector::<(str, str)>::new();
     oks.push(("two &mut fields", "let s = S { a: &mut v, b: &mut w }; return h(s.a, s.b) - 1;"));
@@ -2920,7 +2920,7 @@ fn one_call_arguments_do_not_alias_mutably() {
         );
         src.push_str(c.1);
         src.push_str("\n}\n");
-        h::expect_ok(c.0, src.as_str());
+        h::expect_ok(c.0, &src);
     }
 }
 
@@ -3001,7 +3001,7 @@ fn mut_views_and_refs_stay_exclusive() {
         src.push_str(head);
         src.push_str(c.1);
         src.push_str("\n}\n");
-        h::expect_err_msg(c.0, src.as_str(), c.2);
+        h::expect_err_msg(c.0, &src, c.2);
     }
     let mut oks = Vector::<(str, str)>::new();
     oks.push(("a []mut view passed twice in turn", "let s: []mut i32 = x; g(s); g(s); return x[0] - 7;"));
@@ -3031,7 +3031,7 @@ fn mut_views_and_refs_stay_exclusive() {
         src.push_str(head);
         src.push_str(c.1);
         src.push_str("\n}\n");
-        h::expect_ok(c.0, src.as_str());
+        h::expect_ok(c.0, &src);
     }
 }
 
@@ -3048,11 +3048,11 @@ fn raw_pointer_constructors_need_unsafe() {
         let mut src = String::from_str(head);
         src.push_str(errs[i].1);
         src.push_str("\n}\n");
-        h::expect_err_msg(errs[i].0, src.as_str(), "calling an unsafe function requires an 'unsafe' block");
+        h::expect_err_msg(errs[i].0, &src, "calling an unsafe function requires an 'unsafe' block");
     }
     let mut ok = String::from_str(head);
     ok.push_str("let s = unsafe str::from_raw(p, 2);\n    return s.len() as i32 - 2;\n}\n");
-    h::expect_ok("an unsafe str::from_raw", ok.as_str());
+    h::expect_ok("an unsafe str::from_raw", &ok);
 }
 
 // Two-phase borrows: a method call's `&mut self` receiver does not conflict with a shared borrow
@@ -3328,19 +3328,19 @@ fn only_explicit_free_observes_stored_borrows() {
 // once the binding is dead, even when blocks after the arm are numbered past the claim.
 @test
 fn switch_arm_borrows_end_at_last_use() {
-    let decl = "@derive(Copy)\nstruct V { pub k: i32 }\nstruct H { pub m: Map<u64, V>, pub n: i32 }\nextend H {\n    fn use_v(self: &mut Self, v: V) i32 { self.n = v.k; return self.n; }\n    fn go(self: &mut Self) i32 {\n        switch self.m.get(&1u64) {\n            Some(v) => {\n                let c = self.use_v(*v);\n                if c != 0 || self.n == 1 {\n                    return c;\n                }\n            },\n            None => {},\n        };\n        return 0;\n    }\n}\n";
+    let decl = "@derive(Copy)\nstruct V { pub k: i32 }\nstruct H { pub m: Map<u64, V>, pub n: i32 }\nextend H {\n    fn use_v(self: &mut Self, v: V) i32 { self.n = v.k; return self.n; }\n    fn go(self: &mut Self) i32 {\n        switch self.m.get(&1u64) {\n            Some(v) => {\n                let c = self.use_v(*v);\n                if c != 0 || self.n == 1 {\n                    return c;\n                }\n            },\n            None => {},\n        }\n        return 0;\n    }\n}\n";
     h::expect_ok("through &mut self", format("{}fn main() i32 {{ return 0; }}\n", decl).as_str());
     h::expect_ok(
         "on a local owner",
         format(
-            "{}fn main() i32 {{\n    let mut h = H {{ m: Map::<u64, V>::new(), n: 0 }};\n    h.m.insert(1, V {{ k: 3 }});\n    switch h.m.get(&1u64) {{\n        Some(v) => {{\n            let c = h.use_v(*v);\n            if c != 0 || h.n == 1 {{\n                return c - 3;\n            }}\n        }},\n        None => {{}},\n    }};\n    return 1;\n}}\n",
+            "{}fn main() i32 {{\n    let mut h = H {{ m: Map::<u64, V>::new(), n: 0 }};\n    h.m.insert(1, V {{ k: 3 }});\n    switch h.m.get(&1u64) {{\n        Some(v) => {{\n            let c = h.use_v(*v);\n            if c != 0 || h.n == 1 {{\n                return c - 3;\n            }}\n        }},\n        None => {{}},\n    }}\n    return 1;\n}}\n",
             decl,
         ).as_str(),
     );
     h::expect_err_msg(
         "a binding used after the claim is rejected",
         format(
-            "{}fn main() i32 {{\n    let mut h = H {{ m: Map::<u64, V>::new(), n: 0 }};\n    h.m.insert(1, V {{ k: 3 }});\n    switch h.m.get(&1u64) {{\n        Some(v) => {{\n            let c = h.use_v(*v);\n            if c != v.k || h.n == 1 {{\n                return c - 3;\n            }}\n        }},\n        None => {{}},\n    }};\n    return 1;\n}}\n",
+            "{}fn main() i32 {{\n    let mut h = H {{ m: Map::<u64, V>::new(), n: 0 }};\n    h.m.insert(1, V {{ k: 3 }});\n    switch h.m.get(&1u64) {{\n        Some(v) => {{\n            let c = h.use_v(*v);\n            if c != v.k || h.n == 1 {{\n                return c - 3;\n            }}\n        }},\n        None => {{}},\n    }}\n    return 1;\n}}\n",
             decl,
         ).as_str(),
         "cannot borrow this value as mutable while it is already borrowed as immutable",
@@ -3732,7 +3732,7 @@ fn carrier_rebind_regions() {
     // does not. This is the shape the LSP JSON walker uses everywhere.
     h::expect_ok(
         "a view obtained through a reference to caller-owned data outlives that reference",
-        "struct J { pub s: String }\nextend J {\n    pub fn value_str(self: &Self, key: str) str { return self.s.as_str(); }\n    pub fn value(self: &Self, key: str) Option<&J> { return Option::<&J>::None; }\n}\nfn f(req: &J) i32 {\n    let mut uri = \"\";\n    switch req.value(\"params\") {\n        Some(td) => {\n            uri = td.value_str(\"uri\");\n        },\n        None => {},\n    };\n    return uri.len() as i32;\n}\n",
+        "struct J { pub s: String }\nextend J {\n    pub fn value_str(self: &Self, key: str) str { return self.s.as_str(); }\n    pub fn value(self: &Self, key: str) Option<&J> { return Option::<&J>::None; }\n}\nfn f(req: &J) i32 {\n    let mut uri = \"\";\n    switch req.value(\"params\") {\n        Some(td) => {\n            uri = td.value_str(\"uri\");\n        },\n        None => {},\n    }\n    return uri.len() as i32;\n}\n",
     );
     h::expect_ok(
         "re-assigning with a borrow that outlives the local is fine",
@@ -3860,7 +3860,7 @@ fn results_are_tuples() {
     // A parenthesized result list is one result, a tuple: a call is a value with members.
     h::expect_exit(
         "members of a call's tuple",
-        "fn two() (i32, i32) { return 1, 2; }\nfn dup<T: Copy>(a: T) (T, T) { return (a, a); }\nfn main() i32 { return two().1 + dup(3).0 - 5; }\n",
+        "fn two() (i32, i32) { return (1, 2); }\nfn dup<T: Copy>(a: T) (T, T) { return (a, a); }\nfn main() i32 { return two().1 + dup(3).0 - 5; }\n",
         0,
     );
 }
@@ -3879,12 +3879,12 @@ fn unsupported_const_fn_operation_is_named() {
 // single binding and an `assert_eq`, and binds, forwards and stands as a statement.
 @test
 fn results_are_values() {
-    const PRE: str = "fn two() (usize, usize) { return 1, 2; }\nfn one(t: (usize, usize)) usize { return t.0; }\n";
+    const PRE: str = "fn two() (usize, usize) { return (1, 2); }\nfn one(t: (usize, usize)) usize { return t.0; }\n";
     let mut src = String::from_str(PRE);
     src.push_str(
-        "fn fwd() (usize, usize) { return two(); }\nfn main() i32 {\n    assert_eq(two(), (1usize, 2usize));\n    let x = two();\n    let y: (usize, usize) = if true { two(); } else { (0, 0); };\n    two();\n    unsafe two();\n    let (a, b) = fwd();\n    return (a + b + one(two()) + x.1 + y.0 + (two() == (1usize, 2usize)) as usize) as i32 - 8;\n}\n",
+        "fn fwd() (usize, usize) { return two(); }\nfn main() i32 {\n    assert_eq(two(), (1usize, 2usize));\n    let x = two();\n    let y: (usize, usize) = if true { two() } else { (0, 0) };\n    two();\n    unsafe two();\n    let (a, b) = fwd();\n    return (a + b + one(two()) + x.1 + y.0 + (two() == (1usize, 2usize)) as usize) as i32 - 8;\n}\n",
     );
-    h::expect_exit("results bound, passed, compared, forwarded and discarded", src.as_str(), 0);
+    h::expect_exit("results bound, passed, compared, forwarded and discarded", &src, 0);
 }
 
 // Every method of a conformance block is a member of its interface (a superinterface's methods are its
@@ -3961,12 +3961,12 @@ fn reference_arguments_bind_pointer_parameters() {
 fn fn_types_compare_every_result() {
     h::expect_err_msg(
         "a dyn fn with other results",
-        "fn two(x: i32) (i32, i32) { return x, x; }\nfn main() i32 { let d: &dyn fn(i32) (bool, bool) = two; return 0; }\n",
+        "fn two(x: i32) (i32, i32) { return (x, x); }\nfn main() i32 { let d: &dyn fn(i32) (bool, bool) = two; return 0; }\n",
         "mismatched types: expected '&dyn fn(i32) (bool, bool)', found 'fn(i32) (i32, i32)'",
     );
     h::expect_err_msg(
         "a dyn fn with no result",
-        "fn two(x: i32) (i32, i32) { return x, x; }\nfn main() i32 { let d: &dyn fn(i32) = two; return 0; }\n",
+        "fn two(x: i32) (i32, i32) { return (x, x); }\nfn main() i32 { let d: &dyn fn(i32) = two; return 0; }\n",
         "mismatched types: expected '&dyn fn(i32)', found 'fn(i32) (i32, i32)'",
     );
     h::expect_err_msg(
@@ -3976,7 +3976,7 @@ fn fn_types_compare_every_result() {
     );
     h::expect_err_msg(
         "a fn pointer with other results",
-        "fn two(x: i32) (i32, i32) { return x, x; }\nfn main() i32 { let f: fn(i32) (bool, bool) = two; return 0; }\n",
+        "fn two(x: i32) (i32, i32) { return (x, x); }\nfn main() i32 { let f: fn(i32) (bool, bool) = two; return 0; }\n",
         "mismatched types: expected 'fn(i32) (bool, bool)', found 'fn(i32) (i32, i32)'",
     );
     h::expect_err_msg(
@@ -4583,21 +4583,21 @@ const ARM_VIEWS: str = M"(fn total(xs: []usize) usize {
 fn main(args: Vector<str>) i32 {
     let k = args.len();
     let a = total(if k > 5 {
-        [k, k + 1];
+        [k, k + 1]
     } else {
-        [k + 2, k + 3];
+        [k + 2, k + 3]
     });
     let s: []usize = if k > 5 {
-        [k];
+        [k]
     } else {
-        [k + 4, k + 5, k + 6];
+        [k + 4, k + 5, k + 6]
     };
     let t: []usize = switch k {
         0 => {
-            [k];
+            [k]
         },
         _ => {
-            [k * 10, k * 20];
+            [k * 10, k * 20]
         },
     };
     return (a != 2 * k + 5 || total(s) != 3 * k + 15 || total(t) != 30 * k) as i32;
@@ -4646,17 +4646,17 @@ fn name_len(r: &Named) usize {
 
 fn early(k: usize) usize {
     let s: []String = if k == 1 {
-        [String::from("abc"), String::from("de")];
+        [String::from("abc"), String::from("de")]
     } else {
         if k == 2 {
             return 100;
         }
-        [String::from("x")];
+        [String::from("x")]
     };
     let r = name_len(if k == 1 {
-        &Named { s: String::from("four") };
+        &Named { s: String::from("four") }
     } else {
-        &Named { s: String::from("fivee") };
+        &Named { s: String::from("fivee") }
     });
     return lens(s) + r;
 }
@@ -4666,9 +4666,9 @@ fn main(args: Vector<str>) i32 {
     let q = Sq { s: k + 2 };
     let w = Sq { s: k };
     let d: &dyn Shape = if k > 5 {
-        &w;
+        &w
     } else {
-        &q;
+        &q
     };
     let t = total(switch k {
         0 => [k],
@@ -4721,7 +4721,7 @@ fn expect_arm_storage(label: str, code: str, def: str, arrays: usize, lit: str, 
 fn arm_values_borrow_temporaries() {
     h::expect_err_msg(
         "a view of an arm's local",
-        "fn first(xs: []u8) u8 { return xs[0]; }\nfn main() i32 {\n    let k = 1;\n    return first(if k > 0 {\n        let a = [7u8];\n        a;\n    } else {\n        [8u8];\n    }) as i32;\n}\n",
+        "fn first(xs: []u8) u8 { return xs[0]; }\nfn main() i32 {\n    let k = 1;\n    return first(if k > 0 {\n        let a = [7u8];\n        a\n    } else {\n        [8u8]\n    }) as i32;\n}\n",
         "error: borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored\n--> <harness>:6:9",
     );
     let v = h::compile_c_user(ARM_VIEWS);
@@ -5539,13 +5539,13 @@ fn array_repeat_requirements() {
 fn arm_binding_rebinds_each_iteration() {
     h::expect_ok(
         "an arm binding moved into a closure is fine on the next iteration",
-        "fn apply<F: fn move() i64>(f: F) i64 { return f(); }\nfn main() i32 {\n    let mut total: i64 = 0;\n    for _i in 0..3 {\n        let mut v = Vector::<i64>::new();\n        v.push(7);\n        switch Option::<Vector<i64>>::Some(v) {\n            Some(got) => { total = total + apply(fn() i64 { return *got.at(0); }); },\n            None => {},\n        };\n    }\n    return (total - 21) as i32;\n}\n",
+        "fn apply<F: fn move() i64>(f: F) i64 { return f(); }\nfn main() i32 {\n    let mut total: i64 = 0;\n    for _i in 0..3 {\n        let mut v = Vector::<i64>::new();\n        v.push(7);\n        switch Option::<Vector<i64>>::Some(v) {\n            Some(got) => { total = total + apply(fn() i64 { return *got.at(0); }); },\n            None => {},\n        }\n    }\n    return (total - 21) as i32;\n}\n",
     );
     // The reset is per BINDING, not a licence to use one twice: a second capture in the same arm is still
     // a use after move.
     h::expect_err_msg(
         "capturing the same arm binding twice is still rejected",
-        "fn apply<F: fn move() i64>(f: F) i64 { return f(); }\nfn main() i32 {\n    let mut total: i64 = 0;\n    for _i in 0..2 {\n        let mut v = Vector::<i64>::new();\n        v.push(1);\n        switch Option::<Vector<i64>>::Some(v) {\n            Some(got) => {\n                total = total + apply(fn() i64 { return *got.at(0); });\n                total = total + apply(fn() i64 { return *got.at(0); });\n            },\n            None => {},\n        };\n    }\n    return total as i32;\n}\n",
+        "fn apply<F: fn move() i64>(f: F) i64 { return f(); }\nfn main() i32 {\n    let mut total: i64 = 0;\n    for _i in 0..2 {\n        let mut v = Vector::<i64>::new();\n        v.push(1);\n        switch Option::<Vector<i64>>::Some(v) {\n            Some(got) => {\n                total = total + apply(fn() i64 { return *got.at(0); });\n                total = total + apply(fn() i64 { return *got.at(0); });\n            },\n            None => {},\n        }\n    }\n    return total as i32;\n}\n",
         "use of moved value",
     );
 }
@@ -5944,9 +5944,9 @@ fn owning_constants() {
 fn arch_gate(b: &mut h::ExitBatch) {
     // The programs' instruction set (loader codes: 0 x86_64, 1 aarch64, 2 wasm32): wasm32 on the target lane.
     let host = if h::target_lane() {
-        2;
+        2
     } else {
-        unsafe shim::sc_host_arch();
+        unsafe shim::sc_host_arch()
     };
     let names: []str = ["x86_64", "aarch64", "wasm32"];
     b.add(
@@ -5961,7 +5961,7 @@ fn arch_gate(b: &mut h::ExitBatch) {
         names[((host + 2) % 3) as usize],
         names[host as usize],
     );
-    b.add("a list gates on any of its architectures", src.as_str(), 0);
+    b.add("a list gates on any of its architectures", &src, 0);
 }
 
 // An unknown architecture names no target of the compiler: its item is never compiled, so a new target's
@@ -5993,9 +5993,9 @@ fn platform_gate_values(b: &mut h::ExitBatch) {
         "negation covers the platforms it does not name",
         "@platform(!windows)\nfn which() i32 { return 1; }\n@platform(windows)\nfn which() i32 { return 2; }\nfn main() i32 { return which(); }\n",
         if unsafe shim::sc_host_platform() == 0 {
-            2;
+            2
         } else {
-            1;
+            1
         },
     );
 }
@@ -6025,9 +6025,9 @@ fn gated_static_assert() {
     // `wasm` on both axes: no host the suite runs on is ever wasm, so these two stay gated away wherever
     // the test itself is built; the target lane's programs are wasm32, where Windows and x86_64 do.
     let (os, isa) = if h::target_lane() {
-        ("windows", "x86_64");
+        ("windows", "x86_64")
     } else {
-        ("wasm", "wasm32");
+        ("wasm", "wasm32")
     };
     b.add(
         "an assert for another platform does not fire here",
@@ -6532,17 +6532,17 @@ fn branch_types_unify_literals_and_divergence() {
     let mut b = h::ExitBatch::new();
     b.add(
         "switch literal arms adopt the typed arm",
-        "fn f(k: i32, n: usize) usize { let a = switch k { 0 => 0, 1 => n, 2 => { 7; }, _ => { return 9; }, }; let b = switch k { 1 => n, _ => 0, }; static_assert(sizeof(a) == sizeof(usize), \"usize\"); return a + b; }\nfn main() i32 { return (f(1, 3) + f(0, 3) + f(2, 3) + f(5, 3)) as i32 - 22; }\n",
+        "fn f(k: i32, n: usize) usize { let a = switch k { 0 => 0, 1 => n, 2 => { 7 }, _ => { return 9; }, }; let b = switch k { 1 => n, _ => 0, }; static_assert(sizeof(a) == sizeof(usize), \"usize\"); return a + b; }\nfn main() i32 { return (f(1, 3) + f(0, 3) + f(2, 3) + f(5, 3)) as i32 - 22; }\n",
         0,
     );
     b.add(
         "if literal branch adopts the other branch",
-        "fn f(k: i32, n: u64) u64 { let d = if k == 1 { 1; } else { n; }; let e = if k == 1 { n; } else { 2; }; return d + e; }\nfn main() i32 { return (f(1, 5) + f(0, 5)) as i32 - 13; }\n",
+        "fn f(k: i32, n: u64) u64 { let d = if k == 1 { 1 } else { n }; let e = if k == 1 { n } else { 2 }; return d + e; }\nfn main() i32 { return (f(1, 5) + f(0, 5)) as i32 - 13; }\n",
         0,
     );
     b.add(
         "diverging block branch unifies with a value",
-        "fn f(k: i32, n: usize) usize { let a: usize = switch k { 1 => n, _ => { return 9; }, }; let b = if k == 1 { n; } else { return 3; }; return a + b; }\nfn main() i32 { return (f(1, 3) + f(0, 3)) as i32 - 15; }\n",
+        "fn f(k: i32, n: usize) usize { let a: usize = switch k { 1 => n, _ => { return 9; }, }; let b = if k == 1 { n } else { return 3; }; return a + b; }\nfn main() i32 { return (f(1, 3) + f(0, 3)) as i32 - 15; }\n",
         0,
     );
     h::expect_err_msg(
@@ -7257,10 +7257,10 @@ fn dyn_generic_superinterface_rules() {
 fn expect_dup(label: str, src: str, at: str, first: str) {
     let c = h::compile(src, h::STAGE_TYPECHECK);
     let note = format("= note: the first definition is here\n--> <harness>:{}", first);
-    if c.errors != 1 || !c.msg_has(at) || !c.msg_has(note.as_str()) {
+    if c.errors != 1 || !c.msg_has(at) || !c.msg_has(&note) {
         eprintln("{}: {} error(s), first: {}", label, c.errors, str::from_cbuf(c.first));
     }
-    assert(c.errors == 1 && c.msg_has(at) && c.msg_has(note.as_str()), label);
+    assert(c.errors == 1 && c.msg_has(at) && c.msg_has(&note), label);
 }
 
 // A method or constant of a plain extend is defined once for any one instance of its type: a second
@@ -7974,7 +7974,7 @@ fn raw_pointer_writes_fold(b: &mut h::ExitBatch) {
 fn index_parameter_types_the_index(b: &mut h::ExitBatch) {
     b.add(
         "branchy index expressions",
-        "fn pick(v: &Vector<u32>, s: []u32, c: bool) u32 {\n    let a = (*v)[if c { 1; } else { 0; }];\n    let x = s[switch 0 { _ => { 1; } }];\n    return a + x;\n}\nfn main() i32 {\n    let mut v = Vector::<u32>::new();\n    v.push(1);\n    v.push(2);\n    let s: []u32 = v[0..2];\n    return pick(&v, s, true) as i32 - 4;\n}\n",
+        "fn pick(v: &Vector<u32>, s: []u32, c: bool) u32 {\n    let a = (*v)[if c { 1 } else { 0 }];\n    let x = s[switch 0 { _ => { 1 } }];\n    return a + x;\n}\nfn main() i32 {\n    let mut v = Vector::<u32>::new();\n    v.push(1);\n    v.push(2);\n    let s: []u32 = v[0..2];\n    return pick(&v, s, true) as i32 - 4;\n}\n",
         0,
     );
 }
@@ -7996,7 +7996,7 @@ fn mut_borrow_requires_init() {
     );
     h::expect_err_msg(
         "an index operand moves the indexed vector",
-        "fn main() i32 {\n    let mut row = Vector::<i32>::new();\n    row.push(42);\n    let mut arr = Vector::<Vector<i32>>::new();\n    arr.push(row);\n    let alias = &mut arr[0][switch 0 { _ => { let moved = arr; 0usize; } }];\n    return *alias;\n}\n",
+        "fn main() i32 {\n    let mut row = Vector::<i32>::new();\n    row.push(42);\n    let mut arr = Vector::<Vector<i32>>::new();\n    arr.push(row);\n    let alias = &mut arr[0][switch 0 { _ => { let moved = arr; 0usize } }];\n    return *alias;\n}\n",
         "cannot move this value while it is borrowed",
     );
 }
@@ -8104,17 +8104,17 @@ fn interface_call_stores() {
     s1.push_str(
         "fn main() i32 {\n    let mut h = H { r: &K };\n    {\n        let d: &mut dyn Put = &mut h;\n        let b = Box::<i32>::new(52);\n        d.put(&*b);\n    }\n    return h.get();\n}\n",
     );
-    h::expect_err_msg("a store through `&mut dyn`", s1.as_str(), "destroyed at the end of this block");
+    h::expect_err_msg("a store through `&mut dyn`", &s1, "destroyed at the end of this block");
     let mut s2 = String::from_str(decls);
     s2.push_str(
         "fn call<'a, T: Put<'a>>(t: &mut T, x: &'a i32) { t.put(x); }\nfn main() i32 {\n    let mut h = H { r: &K };\n    {\n        let b = Box::<i32>::new(52);\n        call(&mut h, &*b);\n    }\n    return h.get();\n}\n",
     );
-    h::expect_err_msg("a store through a generic bound", s2.as_str(), "destroyed at the end of this block");
+    h::expect_err_msg("a store through a generic bound", &s2, "destroyed at the end of this block");
     let mut s3 = String::from_str(decls);
     s3.push_str(
         "fn call<'a, T: Put<'a>>(t: &mut T, x: &'a i32) { t.put(x); }\nfn main() i32 {\n    let b = Box::<i32>::new(52);\n    let mut h = H { r: &K };\n    call(&mut h, &*b);\n    let d: &mut dyn Put = &mut h;\n    d.put(&*b);\n    return h.get() - 52;\n}\n",
     );
-    h::expect_exit("stores of long enough borrows", s3.as_str(), 0);
+    h::expect_exit("stores of long enough borrows", &s3, 0);
     h::expect_err_msg(
         "a store through `&mut dyn Put<&i32>`",
         "interface Put<X> { fn put(self: &mut Self, x: X); fn get(self: &Self) i32; }\nstruct H<'a> { pub r: &'a i32 }\nextend<'a> H<'a> as Put<&'a i32> {\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) i32 { return *self.r; }\n}\nconst K: i32 = 0;\nfn main() i32 {\n    let mut h = H { r: &K };\n    {\n        let d: &mut dyn Put<&i32> = &mut h;\n        let b = Box::<i32>::new(52);\n        d.put(&*b);\n    }\n    return h.get();\n}\n",
@@ -8288,17 +8288,17 @@ fn interior_mutable_constants() {
 fn pattern_moves_from_user_free() {
     h::expect_err_msg(
         "a struct with a user free destructured by value",
-        "struct H { pub name: String, pub n: i32 }\nextend H as Free { fn free(self: &mut Self) { let _ = self; } }\nfn drop_it(s: String) { let _ = s; }\nfn main() i32 {\n    let h = H { name: String::from_str(\"abc\"), n: 1 };\n    switch h {\n        H { name, n } => { drop_it(name); return n - 1; },\n    };\n    return 0;\n}\n",
+        "struct H { pub name: String, pub n: i32 }\nextend H as Free { fn free(self: &mut Self) { let _ = self; } }\nfn drop_it(s: String) { let _ = s; }\nfn main() i32 {\n    let h = H { name: String::from_str(\"abc\"), n: 1 };\n    switch h {\n        H { name, n } => { drop_it(name); return n - 1; },\n    }\n    return 0;\n}\n",
         "cannot move a part out of a value whose type implements Free",
     );
     h::expect_err_msg(
         "an enum with a user free destructured by value",
-        "enum E { S(String), N }\nextend E as Free { fn free(self: &mut Self) { let _ = self; } }\nfn drop_it(s: String) { let _ = s; }\nfn main() i32 {\n    let e = E::S(String::from_str(\"abc\"));\n    switch e {\n        S(s) => drop_it(s),\n        N => {},\n    };\n    return 0;\n}\n",
+        "enum E { S(String), N }\nextend E as Free { fn free(self: &mut Self) { let _ = self; } }\nfn drop_it(s: String) { let _ = s; }\nfn main() i32 {\n    let e = E::S(String::from_str(\"abc\"));\n    switch e {\n        S(s) => drop_it(s),\n        N => {},\n    }\n    return 0;\n}\n",
         "cannot move a part out of a value whose type implements Free",
     );
     h::expect_ok(
         "a struct without a user free destructured by value",
-        "struct H { pub name: String, pub n: i32 }\nfn drop_it(s: String) { let _ = s; }\nfn main() i32 {\n    let h = H { name: String::from_str(\"abc\"), n: 1 };\n    switch h {\n        H { name, n } => { drop_it(name); return n - 1; },\n    };\n    return 0;\n}\n",
+        "struct H { pub name: String, pub n: i32 }\nfn drop_it(s: String) { let _ = s; }\nfn main() i32 {\n    let h = H { name: String::from_str(\"abc\"), n: 1 };\n    switch h {\n        H { name, n } => { drop_it(name); return n - 1; },\n    }\n    return 0;\n}\n",
     );
 }
 
@@ -8404,7 +8404,7 @@ fn a_field_assigned_through_a_deref_is_no_member_of_the_receiver() {
     src.push_str(
         "struct S {\n    pub v: i32,\n}\n\nfn set(s: &mut Box<S>) {\n    s.v = 5;\n}\n\nfn main() i32 {\n    let mut b = Box::new(S { v: 1 });\n    set(&mut b);\n    return b.v - 5;\n}\n",
     );
-    h::expect_ok("a field assigned through a Box", src.as_str());
+    h::expect_ok("a field assigned through a Box", &src);
 }
 
 // The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
@@ -8540,7 +8540,7 @@ fn reflection_bounds_of_method_instances() {
     e.add(
         "a field type that overrides hash_into",
         format(
-            "{}pub struct NoH {{\n    pub x: i32,\n}}\npub struct In {{\n    pub n: NoH,\n}}\nextend In as Hash {{\n    fn hash_into<H: Hasher>(self: &Self, h: &mut H) {{\n        h.write_u64(1);\n    }}\n}}\npub struct Out {{\n    pub i: In,\n    pub k: i32,\n}}\nextend Out as Hash {{}}\nfn main() i32 {{\n    let o = Out {{ i: In {{ n: NoH {{ x: 1 }} }}, k: 2 }};\n    return if feed(&o) != 0 {{\n        0;\n    }} else {{\n        1;\n    }};\n}}\n",
+            "{}pub struct NoH {{\n    pub x: i32,\n}}\npub struct In {{\n    pub n: NoH,\n}}\nextend In as Hash {{\n    fn hash_into<H: Hasher>(self: &Self, h: &mut H) {{\n        h.write_u64(1);\n    }}\n}}\npub struct Out {{\n    pub i: In,\n    pub k: i32,\n}}\nextend Out as Hash {{}}\nfn main() i32 {{\n    let o = Out {{ i: In {{ n: NoH {{ x: 1 }} }}, k: 2 }};\n    return if feed(&o) != 0 {{\n        0\n    }} else {{\n        1\n    }};\n}}\n",
             RB_FNV,
         ).as_str(),
         0,
@@ -8919,7 +8919,7 @@ fn core_value_regressions() {
     );
     b.add(
         "type info of a type parameter in a local constant",
-        "struct A { pub x: i32, pub y: u8 }\nextend A {\n    fn hello(self: &A) i32 { return 1; }\n}\nfn f<T>() usize {\n    const C: usize = type_info::<T>().size;\n    const M: bool = type_info::<T>().method(\"hello\").is_some();\n    const K: usize = type_info::<T>().fields.len;\n    return C + (if M { 100usize; } else { 0usize; }) + K * 1000;\n}\nfn main() i32 {\n    return (f::<A>() - 2108 + f::<i32>() - 4) as i32;\n}\n",
+        "struct A { pub x: i32, pub y: u8 }\nextend A {\n    fn hello(self: &A) i32 { return 1; }\n}\nfn f<T>() usize {\n    const C: usize = type_info::<T>().size;\n    const M: bool = type_info::<T>().method(\"hello\").is_some();\n    const K: usize = type_info::<T>().fields.len;\n    return C + (if M { 100usize } else { 0usize }) + K * 1000;\n}\nfn main() i32 {\n    return (f::<A>() - 2108 + f::<i32>() - 4) as i32;\n}\n",
         0,
     );
     b.add(
@@ -8939,7 +8939,7 @@ fn core_value_regressions() {
     );
     b.add(
         "two functions of one signature join",
-        "fn apply<F: fn(i64) i64>(x: i64, f: F) i64 {\n    return f(x);\n}\nfn f1(x: i64) i64 { return x + 1; }\nfn f2(x: i64) i64 { return x * 100; }\nfn main() i32 {\n    let r: i64 = 3;\n    let h = if r > 0 { f2; } else { f1; };\n    let k = if r < 0 { f2; } else { f1; };\n    return (h(5) + apply(5, k) - 506) as i32;\n}\n",
+        "fn apply<F: fn(i64) i64>(x: i64, f: F) i64 {\n    return f(x);\n}\nfn f1(x: i64) i64 { return x + 1; }\nfn f2(x: i64) i64 { return x * 100; }\nfn main() i32 {\n    let r: i64 = 3;\n    let h = if r > 0 { f2 } else { f1 };\n    let k = if r < 0 { f2 } else { f1 };\n    return (h(5) + apply(5, k) - 506) as i32;\n}\n",
         0,
     );
     b.add(

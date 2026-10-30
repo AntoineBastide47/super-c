@@ -305,9 +305,9 @@ fn rec_for(r: *mut Reactor, fd: i32) *mut FdRec {
 fn reg_enter(r: *mut Reactor) *mut i32 {
     let wi = sc_runtime::sc_rt_widx_get();
     let slot = if wi < 0 {
-        0usize;
+        0usize
     } else {
-        1 + wi as usize % REG_SLOTS;
+        1 + wi as usize % REG_SLOTS
     };
     let f = unsafe ((*r).regs + slot * (R_ALIGN / 4));
     loop {
@@ -420,9 +420,9 @@ fn do_arm(r: *mut Reactor, n: *mut IoWait, b: &mut Batch) {
         settle_node(
             n,
             if unsafe (*n).rc > 0 {
-                runtime::WR_IO;
+                runtime::WR_IO
             } else {
-                runtime::WR_TIMEOUT;
+                runtime::WR_TIMEOUT
             },
             b,
         );
@@ -571,13 +571,13 @@ fn process_events(r: *mut Reactor, evs: &mut EvBuf, n: i32, b: &mut Batch) {
         // A direction is stale only when the backend dropped an interest there that no waiter had:
         // an end-of-file sets both ready bits, but consumes only the filter that fired.
         let unowned = dropped & ~(if unsafe (*rec).rd != null {
-            RD;
+            RD
         } else {
-            0;
+            0
         } | if unsafe (*rec).wr != null {
-            WR;
+            WR
         } else {
-            0;
+            0
         });
         if unowned != 0 {
             unsafe (*rec).stale = (unsafe (*rec).stale | unowned) as u8;
@@ -676,9 +676,9 @@ fn reactor_main(arg: *mut void) *mut void {
             &mut evs.e[0],
             sc_io::EV_MAX,
             if settled || unsafe (*r).deferred > 0 {
-                1;
+                1
             } else {
-                -1;
+                -1
             },
         );
         unsafe atomic::store_i32(&mut unsafe (*r).sleeping, 0, 4);
@@ -861,9 +861,9 @@ fn io_diag() {
     l.put(" commands queued ");
     l.num(
         if unsafe atomic::load_usize(&mut unsafe (*r).cmds, 0) != 0 {
-            1u64;
+            1u64
         } else {
-            0u64;
+            0u64
         },
     );
     l.put(" deferred acks ");
@@ -1004,9 +1004,9 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
         // Not a coroutine: nothing to park, so wait on the one descriptor. A poll(2) rather than a
         // poller of its own: that meant building and tearing down a kqueue per call.
         let w = if write {
-            1;
+            1
         } else {
-            0;
+            0
         };
         // poll(2) takes its timeout as an `int` of milliseconds, so a longer wait is several polls, each
         // ending early only by readiness or an error. Bounded by the deadline.
@@ -1015,9 +1015,9 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
             if deadline != 0 {
                 let left = time::remaining_ns(deadline) / 1000000;
                 ms = if left >= 2147483647 {
-                    2147483647;
+                    2147483647
                 } else {
-                    left as i32 + 1;
+                    left as i32 + 1
                 };
             }
             let rc = unsafe sc_io::sc_io_wait_fd(fd, w, ms);
@@ -1047,9 +1047,9 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
         ack: 0,
         fd: fd,
         dir: if write {
-            WR;
+            WR
         } else {
-            RD;
+            RD
         },
         state: NS_NEW,
         rc: 0,

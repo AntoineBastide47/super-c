@@ -518,9 +518,9 @@ pub fn sc_io_would_block() i32 {
 pub unsafe fn sc_io_set_nonblocking(fd: i32) i32 {
     let mut on: u32 = 1;
     return if unsafe ioctlsocket(sock_of(fd), FIONBIO as i32, &mut on) == 0 {
-        0;
+        0
     } else {
-        -1;
+        -1
     };
 }
 
@@ -729,9 +729,9 @@ pub unsafe fn sc_io_set(ptr: *mut void, fd: i32, want: i32, _known: i32) i32 {
         return 0;
     }
     return if unsafe kevent_call(p.q, &ch[0], n as i32, null, 0, null) < 0 {
-        -1;
+        -1
     } else {
-        0;
+        0
     };
 }
 
@@ -779,9 +779,9 @@ pub unsafe fn sc_io_set(ptr: *mut void, fd: i32, want: i32, known: i32) i32 {
             rc = 0;
         } else if errno::errno() == EEXIST {
             rc = if unsafe epoll_ctl(p.q, EPOLL_CTL_MOD, fd, &mut ev) == 0 {
-                0;
+                0
             } else {
-                -1;
+                -1
             };
         } else {
             rc = unwatchable_or_failed();
@@ -799,9 +799,9 @@ pub unsafe fn sc_io_set(ptr: *mut void, fd: i32, want: i32, known: i32) i32 {
 @platform(linux | android)
 fn unwatchable_or_failed() i32 {
     return if errno::errno() == EPERM {
-        1;
+        1
     } else {
-        -1;
+        -1
     };
 }
 
@@ -825,23 +825,23 @@ pub unsafe fn sc_io_wake(ptr: *mut void) {
 pub unsafe fn sc_io_wait(ptr: *mut void, out: *mut i32, max: i32, timeout_ms: i32) i32 {
     let p = unsafe *(ptr as *const Poller);
     let lim = if max > EV_MAX {
-        EV_MAX;
+        EV_MAX
     } else {
-        max;
+        max
     };
     let mut evs = unsafe zeroed::<[kevent; EV_MAX as usize]>();
     let ts = timespec { tv_sec: timeout_ms / 1000, tv_nsec: (timeout_ms % 1000) as i64 * 1000000 };
     let tp: *const timespec = if timeout_ms >= 0 {
-        &ts;
+        &ts
     } else {
-        null;
+        null
     };
     let n = unsafe kevent_call(p.q, null, 0, &mut evs[0], lim, tp);
     if n < 0 {
         return if errno::errno() == EINTR {
-            0;
+            0
         } else {
-            -1;
+            -1
         };
     }
     let mut k: usize = 0;
@@ -853,9 +853,9 @@ pub unsafe fn sc_io_wait(ptr: *mut void, out: *mut i32, max: i32, timeout_ms: i3
             continue;
         }
         let mut ready = if e.filter == EVFILT_WRITE {
-            WR;
+            WR
         } else {
-            RD;
+            RD
         };
         let dropped = ready;
         if (e.flags & (EV_EOF | EV_ERROR)) != 0 {
@@ -878,17 +878,17 @@ pub unsafe fn sc_io_wait(ptr: *mut void, out: *mut i32, max: i32, timeout_ms: i3
 pub unsafe fn sc_io_wait(ptr: *mut void, out: *mut i32, max: i32, timeout_ms: i32) i32 {
     let p = unsafe *(ptr as *const Poller);
     let lim = if max > EV_MAX {
-        EV_MAX;
+        EV_MAX
     } else {
-        max;
+        max
     };
     let mut evs = unsafe zeroed::<[epoll_event; EV_MAX as usize]>();
     let n = unsafe epoll_wait(p.q, &mut evs[0], lim, timeout_ms);
     if n < 0 {
         return if errno::errno() == EINTR {
-            0;
+            0
         } else {
-            -1;
+            -1
         };
     }
     let mut k: usize = 0;
@@ -936,9 +936,9 @@ pub unsafe fn sc_io_wait_fd(fd: i32, write: i32, timeout_ms: i32) i32 {
     let mut p = pollfd {
         fd: fd,
         events: if write != 0 {
-            POLLOUT;
+            POLLOUT
         } else {
-            POLLIN;
+            POLLIN
         },
         revents: 0,
     };
@@ -953,9 +953,9 @@ pub unsafe fn sc_io_wait_fd(fd: i32, write: i32, timeout_ms: i32) i32 {
         if timeout_ms > 0 {
             let ms = (sc_runtime::sc_rt_now_ns() - t0) / 1000000;
             left = if ms >= timeout_ms as u64 {
-                0;
+                0
             } else {
-                timeout_ms - ms as i32;
+                timeout_ms - ms as i32
             };
         }
     }
@@ -1133,35 +1133,35 @@ fn wake_pair() (bool, usize, usize) {
     unsafe {
         let l = open_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if l == INVALID_SOCKET {
-            return false, 0, 0;
+            return (false, 0, 0);
         }
         let mut a = sockaddr_in { sin_family: AF_INET as i16, sin_addr: in_addr { s_addr: htonl(INADDR_LOOPBACK) } };
         let ap = ((&mut a) as *mut sockaddr_in) as *mut sockaddr;
         let mut alen = sizeof(sockaddr_in) as socklen_t;
         if bind(l, ap, alen) != 0 || listen(l, 1) != 0 || getsockname(l, ap, &mut alen) != 0 {
             closesocket(l);
-            return false, 0, 0;
+            return (false, 0, 0);
         }
         let c = open_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if c == INVALID_SOCKET {
             closesocket(l);
-            return false, 0, 0;
+            return (false, 0, 0);
         }
         if connect(c, ap, alen) != 0 {
             closesocket(l);
             closesocket(c);
-            return false, 0, 0;
+            return (false, 0, 0);
         }
         let s = accept_socket(l);
         closesocket(l);
         if s == INVALID_SOCKET {
             closesocket(c);
-            return false, 0, 0;
+            return (false, 0, 0);
         }
         sc_io_set_nonblocking(fd_of(s));
         sc_io_set_nonblocking(fd_of(c));
         no_delay(c);
-        return true, s, c;
+        return (true, s, c);
     }
 }
 
@@ -1332,18 +1332,18 @@ pub unsafe fn sc_io_wait(ptr: *mut void, out: *mut i32, max: i32, timeout_ms: i3
         LeaveCriticalSection(&mut (*p).lock);
         let tv = timeval { tv_sec: timeout_ms / 1000, tv_usec: timeout_ms % 1000 * 1000 };
         let tp: *const timeval = if timeout_ms >= 0 {
-            &tv;
+            &tv
         } else {
-            null;
+            null
         };
         // The first argument is ignored on Windows.
         let r = select_sockets(0, rd as *mut fd_set, wr as *mut fd_set, ex as *mut fd_set, tp);
         if r == SOCKET_ERROR {
             // 0 keeps the reactor looping: either dead registrations were reaped, or this was transient.
             return if WSAGetLastError() == WSAENOTSOCK {
-                reap_dead(p, out, max);
+                reap_dead(p, out, max)
             } else {
-                0;
+                0
             };
         }
         if r == 0 {
@@ -1361,9 +1361,9 @@ pub unsafe fn sc_io_wait(ptr: *mut void, out: *mut i32, max: i32, timeout_ms: i3
         while i < (*p).n && k < max as usize {
             let g = (*p).regs[i];
             let ready = if g.dir == WR {
-                set_has(wr, g.s) || set_has(ex, g.s);
+                set_has(wr, g.s) || set_has(ex, g.s)
             } else {
-                set_has(rd, g.s);
+                set_has(rd, g.s)
             };
             if !ready {
                 i = i + 1;
@@ -1373,9 +1373,9 @@ pub unsafe fn sc_io_wait(ptr: *mut void, out: *mut i32, max: i32, timeout_ms: i3
             // A socket closed while select() was blocked comes back flagged: report it dropped, not ready,
             // so the reactor's next registration fails and its waits settle as not ready (see reap_dead).
             out[3 * k + 1] = if sock_alive(g.s) {
-                g.dir;
+                g.dir
             } else {
-                0;
+                0
             };
             out[3 * k + 2] = g.dir;
             k = k + 1;
@@ -1398,21 +1398,21 @@ pub unsafe fn sc_io_wait_fd(fd: i32, write: i32, timeout_ms: i32) i32 {
     let mut ex = OneSock { count: 1, sock: s }; // a connect that was refused shows up only here
     let tv = timeval { tv_sec: timeout_ms / 1000, tv_usec: timeout_ms % 1000 * 1000 };
     let tp: *const timeval = if timeout_ms >= 0 {
-        &tv;
+        &tv
     } else {
-        null;
+        null
     };
     let op = ((&mut one) as *mut OneSock) as *mut fd_set;
     let ep = ((&mut ex) as *mut OneSock) as *mut fd_set;
     let r = if write != 0 {
-        unsafe select_sockets(0, null, op, ep, tp);
+        unsafe select_sockets(0, null, op, ep, tp)
     } else {
-        unsafe select_sockets(0, op, null, ep, tp);
+        unsafe select_sockets(0, op, null, ep, tp)
     };
     return if r == SOCKET_ERROR {
-        -1;
+        -1
     } else {
-        r;
+        r
     };
 }
 
@@ -1568,9 +1568,9 @@ const fn port_text(port: i32) [char; 12] {
     let mut digits: [u8; 10] = [0u8; 10];
     let mut n: usize = 0;
     let mut v: u32 = if port < 0 {
-        (0 - port as i64) as u32;
+        (0 - port as i64) as u32
     } else {
-        port as u32;
+        port as u32
     };
     loop {
         unsafe digits[n] = b'0' + (v % 10) as u8;
@@ -1603,17 +1603,17 @@ unsafe fn resolve_local(host: *const char, port: i32, kind: i32) *mut addrinfo {
     let svc = port_text(port);
     let hints = addrinfo {
         ai_flags: if any {
-            AI_PASSIVE;
+            AI_PASSIVE
         } else {
-            0;
+            0
         },
         ai_family: AF_UNSPEC, // IPv4 or IPv6, whichever the name resolves to
         ai_socktype: kind,
     };
     let node: *const char = if any {
-        null;
+        null
     } else {
-        host;
+        host
     };
     return unsafe resolve(node, &svc[0], &hints);
 }

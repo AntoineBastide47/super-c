@@ -59,7 +59,7 @@ fn long_statement_else_if_chain_builds() {
         src.push_str(" { y = 2; }");
     }
     src.push_str("\n    return y;\n}\nfn g(x: i32) i32 { return x * 3; }\nfn main() i32 { return f(0) - 1; }\n");
-    p.mkfile("main.spc", src.as_str());
+    p.mkfile("main.spc", &src);
     assert(p.compile("main.spc").ok());
     assert(p.cc_build("").ok());
     assert_eq(p.run_bin(), 0);

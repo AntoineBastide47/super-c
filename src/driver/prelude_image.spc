@@ -26,17 +26,17 @@ const IMAGE_VER: u64 = 5;
 pub(package) fn key(p: &loader::Package, std_dir: str, target: i32, steps: u32, mem: u64) u64 {
     let mut h = skey_mix(FNV_BASIS, IMAGE_VER);
     h = mix_str(h, std_dir);
-    h = mix_str(h, p.std_root.as_str());
+    h = mix_str(h, &p.std_root);
     h = skey_mix(h, target as u64);
     h = skey_mix(h, p.arch as u64);
     h = skey_mix(h, p.features.w[0]);
     h = skey_mix(h, p.features.w[1]);
     h = skey_mix(h, p.simd_width);
-    h = mix_str(h, p.simd_dispatch.as_str());
+    h = mix_str(h, &p.simd_dispatch);
     h = skey_mix(h, p.build_cfg);
     h = skey_mix(h, p.test_build as u64);
     h = skey_mix(h, p.bootstrap as u64);
-    h = mix_str(h, p.profile.as_str());
+    h = mix_str(h, &p.profile);
     h = skey_mix(h, p.profiles.len() as u64);
     for i in 0..p.profiles.len() {
         h = mix_str(h, p.profiles.at(i).as_str());
@@ -266,27 +266,27 @@ pub(package) fn write(cache: str, key: u64, cid: u64, q: &loader::Package, std_d
     let mut w = header(key, cid, img);
     deps_of(q, std_dir, std_id).save(&mut w);
     w.align();
-    mkdir_p(loader::dirname_of(path.as_str()));
-    let _ = write_file_atomic_parts(path.as_str(), w.buf.as_str(), img.as_str());
+    mkdir_p(loader::dirname_of(&path));
+    let _ = write_file_atomic_parts(&path, &w.buf, img.as_str());
 }
 
 /// The image file in cache root `cache` for `key` that compiler `cid` wrote and whose std files are
 /// current, and the offset of its payload (16-byte aligned, as `load` reads it); None when there is none.
 pub(package) fn read(cache: str, key: u64, cid: u64, at: &mut usize) Option<String> {
     let path = image_path(cache, key, cid);
-    let body = loader::read_file(path.as_str());
+    let body = loader::read_file(&path);
     if body.is_none() {
-        return Option::<String>::None;
+        return None;
     }
     let b = body.unwrap();
     let mut d = Deps {};
     let mut ids = Ids::new();
-    if !parse(b.as_str(), b.len(), key, cid, &mut d, at) || !deps_current(&d, &mut ids) {
-        return Option::<String>::None;
+    if !parse(&b, b.len(), key, cid, &mut d, at) || !deps_current(&d, &mut ids) {
+        return None;
     }
     // A use: the sweep deletes an image idle for its period.
-    let _ = fs::set_times(path.as_str(), fs::FileTime::Now, fs::FileTime::Now);
-    return Option::<String>::Some(b);
+    let _ = fs::set_times(&path, fs::FileTime::Now, fs::FileTime::Now);
+    return Some(b);
 }
 
 // The dependencies that the head `h` of an image file of `size` bytes records into `d`, and its payload's
@@ -335,28 +335,28 @@ const fn kept_newer(a: &Kept, b: &Kept) i32 {
 /// (`HEAD_READ`), not its payload. A copy of a compiler that moved checks the prelude once more.
 pub(package) fn sweep(root: str, now: i64) {
     let dir = loader::join2(root, "prelude");
-    let names = list_dir(dir.as_str(), false).unwrap_or(Vector::<String>::new());
+    let names = list_dir(&dir, false).unwrap_or(Vector::<String>::new());
     let mut ids = Ids::new();
     let mut kept = Vector::<Kept>::new();
     for i in 0..names.len() {
         let n = names.at(i).as_str();
-        let p = loader::join2(dir.as_str(), n);
+        let p = loader::join2(&dir, n);
         let mut mt: i64 = 0;
         if n.ends_with(".tmp") {
-            if now - file_mtime(p.as_str()) >= ocache::TMP_IDLE {
-                let _ = fs::unlink(p.as_str());
+            if now - file_mtime(&p) >= ocache::TMP_IDLE {
+                let _ = fs::unlink(&p);
             }
-        } else if live(p.as_str(), n, &mut ids, &mut mt) {
+        } else if live(&p, n, &mut ids, &mut mt) {
             kept.push(Kept { name: String::from_str(n), mt: mt });
         } else {
-            let _ = fs::unlink(p.as_str());
+            let _ = fs::unlink(&p);
         }
     }
     kept.sort_by(kept_newer);
     for i in IMAGE_KEEP..kept.len() {
         if now - kept[i].mt >= IMAGE_IDLE {
-            let p = loader::join2(dir.as_str(), kept.at(i).name.as_str());
-            let _ = fs::unlink(p.as_str());
+            let p = loader::join2(&dir, &kept.at(i).name);
+            let _ = fs::unlink(&p);
         }
     }
 }
@@ -395,14 +395,14 @@ fn live(path: str, name: str, ids: &mut Ids, mt: &mut i64) bool {
     }
     let mut d = Deps {};
     let mut at: usize = 0;
-    if !parse(h.as_str(), size as usize, key, cid, &mut d, &mut at) {
+    if !parse(&h, size as usize, key, cid, &mut d, &mut at) {
         if want == size as usize {
             return false;
         }
         // A head longer than HEAD_READ: read the whole file.
         let b = loader::read_file(path).unwrap_or(String::new());
         d = Deps {};
-        if !parse(b.as_str(), b.len(), key, cid, &mut d, &mut at) {
+        if !parse(&b, b.len(), key, cid, &mut d, &mut at) {
             return false;
         }
     }

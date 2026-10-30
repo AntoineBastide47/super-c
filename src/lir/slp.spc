@@ -203,14 +203,14 @@ extend Slp {
                 gain += (pk.n - 1) as u64 * w[self.iblk[l0 as usize] as usize];
             } else if pk.kind == PK_SPLAT || pk.kind == PK_GATHER {
                 let k = if pk.kind == PK_GATHER {
-                    pk.blk;
+                    pk.blk
                 } else {
-                    self.def_block(l0);
+                    self.def_block(l0)
                 };
                 cost += if self.consts(b, pk) || pk.kind == PK_SPLAT {
-                    1u64;
+                    1u64
                 } else {
-                    pk.n as u64 + 1 + GATHER_COST;
+                    pk.n as u64 + 1 + GATHER_COST
                 } * w[k as usize];
             }
         }
@@ -285,9 +285,9 @@ extend Slp {
     // The lanes of the widest pack of `ty` (32- and 64-bit lanes only), 0 for another type.
     const fn lane_count(self: &Self, ty: u8) u32 {
         return if ty == T_I32 || ty == T_F32 || ty == T_I64 || ty == T_F64 {
-            self.vb / type_bytes(ty, 8);
+            self.vb / type_bytes(ty, 8)
         } else {
-            0u32;
+            0u32
         };
     }
 
@@ -497,9 +497,9 @@ extend Slp {
             }
             let m = fit(got, n, size as u32);
             let vp = if m != 0 {
-                self.build(b, at as u32, m, ty, k, self.stores[sat + m as usize - 1], 0);
+                self.build(b, at as u32, m, ty, k, self.stores[sat + m as usize - 1], 0)
             } else {
-                NONE;
+                NONE
             };
             self.tmp.truncate(at);
             if vp == NONE || self.packs[vp as usize].kind == PK_SPLAT || self.packs[vp as usize].kind == PK_GATHER {
@@ -534,9 +534,9 @@ extend Slp {
         let o = self.owner(l0);
         if o != NONE {
             return if self.same_lanes(o, at, n) {
-                o;
+                o
             } else {
-                self.add(PK_GATHER, ty, at, n, ublk, uat);
+                self.add(PK_GATHER, ty, at, n, ublk, uat)
             };
         }
         let top = self.tmp.len();
@@ -672,9 +672,9 @@ extend Slp {
             let t = b.insts[v as usize];
             // A load's alignment may differ: the vector takes the first lane's.
             let flags = if t0.op == O_LOAD {
-                0xFFF0u16;
+                0xFFF0u16
             } else {
-                0xFFFFu16;
+                0xFFFFu16
             };
             if t.op != t0.op || t.ty != ty || (t.aux & flags) != (t0.aux & flags) || self.iblk[v as usize] != self.iblk[l0 as usize] {
                 return 0;
@@ -706,9 +706,9 @@ extend Slp {
         ) < 8;
         let float_op = op >= O_FADD && op <= O_FNEG || op == O_FSQRT;
         return if is_int(ty) && int_op || is_float(ty) && float_op {
-            PK_OP;
+            PK_OP
         } else {
-            0u8;
+            0u8
         };
     }
 
@@ -725,9 +725,9 @@ extend Slp {
     // The block that defines value `v`.
     const fn def_block(self: &Self, v: Value) u32 {
         return if (v & VPARAM) != 0 {
-            self.pblk[(v & ~VPARAM) as usize];
+            self.pblk[(v & ~VPARAM) as usize]
         } else {
-            self.iblk[v as usize];
+            self.iblk[v as usize]
         };
     }
 
@@ -738,9 +738,9 @@ extend Slp {
     fn make(self: &mut Self, b: &mut Body, t: Inst, k: u32, at: u32, fixed: bool) Value {
         let v = b.insts.len() as u32;
         let src = if at == NONE {
-            b.blocks[k as usize].start + b.blocks[k as usize].len - 1;
+            b.blocks[k as usize].start + b.blocks[k as usize].len - 1
         } else {
-            at;
+            at
         };
         b.insts.push(t);
         b.locs.push(b.locs[src as usize]);
@@ -763,14 +763,14 @@ extend Slp {
         let k = self.def_block(v);
         let bk = b.blocks[k as usize];
         let next = if (v & VPARAM) != 0 {
-            bk.start;
+            bk.start
         } else {
-            v + 1;
+            v + 1
         };
         if next == bk.start + bk.len - 1 {
-            return k, NONE;
+            return (k, NONE);
         }
-        return k, next;
+        return (k, next);
     }
 
     // PK_PARAM pack `p`: its first lane's parameter becomes the vector, the lanes come out of it through
@@ -814,9 +814,9 @@ extend Slp {
         if pk.kind == PK_OP {
             let va = self.vector(b, pk.a);
             let vb = if pk.b == NONE {
-                VNONE;
+                VNONE
             } else {
-                self.vector(b, pk.b);
+                self.vector(b, pk.b)
             };
             let mut last = l0;
             for q in 1..pk.n {
@@ -959,9 +959,9 @@ const fn fit(got: u32, n: u32, size: u32) u32 {
         m = m / 2;
     }
     return if m <= got && m * size >= VBYTES {
-        m;
+        m
     } else {
-        0u32;
+        0u32
     };
 }
 
@@ -994,16 +994,16 @@ const fn address(b: &Body, t: Inst) (Value, i64) {
         off += x.c as i32;
         base = x.a;
     }
-    return base, off;
+    return (base, off);
 }
 
 // The bits of constant `v` (an integer's or a float's), if it is one.
 fn const_bits(b: &Body, v: Value) Option<u64> {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST && b.insts[v as usize].op != O_FCONST {
-        return Option::<u64>::None;
+        return None;
     }
     let t = b.insts[v as usize];
-    return Option::<u64>::Some(t.b as u64 << 32 | t.a as u64);
+    return Some(t.b as u64 << 32 | t.a as u64);
 }
 
 // Whether `t` may read or write memory.

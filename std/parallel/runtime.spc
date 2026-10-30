@@ -570,9 +570,9 @@ pub fn tracing() bool {
     if t == 0 {
         let e = stdlib::getenv("SC_TASK_TRACE");
         t = if e != null && unsafe *e != 0 as char && unsafe *e != '0' {
-            2;
+            2
         } else {
-            1;
+            1
         };
         unsafe atomic::store_i32(p, t, 0);
     }
@@ -592,9 +592,9 @@ const fn commit_nop(_p: *mut void) {}
 fn next_task_id() u64 {
     let s = unsafe G_SCHED;
     let w = if s != null {
-        my_worker(s);
+        my_worker(s)
     } else {
-        null;
+        null
     };
     if w == null {
         let _ = unsafe atomic::add_u64(&mut unsafe G_SPAWNED_EXT, 1, 0);
@@ -1323,9 +1323,9 @@ fn timer_reserve(s: *mut Scheduler, len: usize) {
         panic("scheduler: the timer heap is full (one armed timer per registrable task)");
     }
     let mut ncap = if unsafe (*s).timer_cap == 0 {
-        TIMER_INIT_CAP;
+        TIMER_INIT_CAP
     } else {
-        unsafe (*s).timer_cap * 2;
+        unsafe (*s).timer_cap * 2
     };
     if ncap > TIMER_MAX {
         ncap = TIMER_MAX;
@@ -1620,9 +1620,9 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         // The spinner waits long enough to cover a wake-up it is there to avoid; anyone else gives up almost
         // at once, since a second spinner buys nothing.
         let budget = if spinning {
-            unsafe atomic::load_i32(&mut unsafe (*s).spin_budget, 0);
+            unsafe atomic::load_i32(&mut unsafe (*s).spin_budget, 0)
         } else {
-            SPIN_IDLE;
+            SPIN_IDLE
         };
         if spins < budget {
             spins = spins + 1;
@@ -1734,9 +1734,9 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
             if timed {
                 let now = platform::now_ns();
                 let rel = if dl > now {
-                    (dl - now) as i64;
+                    (dl - now) as i64
                 } else {
-                    0i64;
+                    0i64
                 };
                 let _ = unsafe sc_runtime::sc_rt_cond_timedwait_ns((*pk).cv, (*pk).mtx, rel);
                 // A deadline to service: go round and promote it.
@@ -2117,9 +2117,9 @@ fn worker_main(arg: *mut void) *mut void {
     let mut sched_mem = Array::<u64, 2>::new();
     let ctx_inline = sc_runtime::sc_rt_ctx_inline_size() != 0;
     let sched_ctx = if ctx_inline {
-        ((&mut sched_mem[0]) as *mut u64) as *mut void;
+        ((&mut sched_mem[0]) as *mut u64) as *mut void
     } else {
-        unsafe sc_runtime::sc_rt_ctx_alloc();
+        unsafe sc_runtime::sc_rt_ctx_alloc()
     };
     if sched_ctx == null {
         // A worker without a context cannot resume anything: nothing it owns is reachable yet, so stop.
@@ -2304,9 +2304,9 @@ fn release_unstarted(s: *mut Scheduler, built: usize) {
 fn stash_cap(nw: usize) i32 {
     let per = unsafe G_POOL_BUDGET / block_bytes() / (nw + 1);
     return if per < STASH_MAX as usize {
-        per as i32;
+        per as i32
     } else {
-        STASH_MAX;
+        STASH_MAX
     };
 }
 
@@ -2335,9 +2335,9 @@ fn build_scheduler() *mut Scheduler {
         unsafe G_NWORKERS = 1;
     }
     let nw = if unsafe G_NWORKERS > 0 {
-        unsafe G_NWORKERS;
+        unsafe G_NWORKERS
     } else {
-        platform::ncpu();
+        platform::ncpu()
     };
     // Line-aligned for real: the allocator only promises malloc alignment, so the array sits inside an
     // over-sized block (`deques_base` is what gets freed); see Worker.pad for why the alignment matters.
@@ -2386,9 +2386,9 @@ fn build_scheduler() *mut Scheduler {
     for i in 0..nw {
         let mtx = unsafe sc_runtime::sc_rt_mutex_new();
         let cv = if mtx != null {
-            unsafe sc_runtime::sc_rt_cond_new();
+            unsafe sc_runtime::sc_rt_cond_new()
         } else {
-            null;
+            null
         };
         if cv == null {
             if mtx != null {
@@ -2485,7 +2485,7 @@ pub fn ensure_started() *mut Scheduler {
 pub unsafe fn job_entry<F: fn move()>(env: *mut void) {
     let pp = env as *mut F;
     let f = unsafe {
-        pp[0];
+        pp[0]
     };
     let mut g = Global {};
     unsafe g.dealloc(env, sizeof(F), alignof(F));
@@ -2497,7 +2497,7 @@ pub unsafe fn job_entry<F: fn move()>(env: *mut void) {
 pub unsafe fn job_entry_inline<F: fn move()>(env: *mut void) {
     let pp = env as *mut F;
     let f = unsafe {
-        pp[0];
+        pp[0]
     };
     f();
 }
@@ -2765,9 +2765,9 @@ pub unsafe fn park_timed(token: u32, deadline: u64, commit: fn(*mut void) void, 
     if tracing() {
         trace(
             if deadline != 0 {
-                "park (timed)";
+                "park (timed)"
             } else {
-                "park";
+                "park"
             },
             unsafe (*co).run.id,
         );
@@ -2776,9 +2776,9 @@ pub unsafe fn park_timed(token: u32, deadline: u64, commit: fn(*mut void) void, 
     unsafe atomic::store_i32(
         &mut unsafe (*co).park_cancellable,
         if c {
-            1;
+            1
         } else {
-            0;
+            0
         },
         2,
     );
@@ -3313,9 +3313,9 @@ pub fn set_pool_budget(bytes: usize) {
         return;
     }
     unsafe G_POOL_BUDGET = if bytes == 0 {
-        POOL_BUDGET_DEFAULT;
+        POOL_BUDGET_DEFAULT
     } else {
-        bytes;
+        bytes
     };
 }
 
@@ -3537,13 +3537,13 @@ fn report_unresponsive(tasks: &mut Vector<TaskInfo>) {
     for i in 0..tasks.len() {
         let t = tasks.at(i);
         let why = if t.cancel == CS_ACCEPTED {
-            "cleaning";
+            "cleaning"
         } else if t.masked {
-            "wait is not cancellable";
+            "wait is not cancellable"
         } else if t.cancel == CS_REQUESTED {
-            "cancellation not yet accepted";
+            "cancellation not yet accepted"
         } else {
-            "running";
+            "running"
         };
         // State and phase say WHERE it is stuck: a body that returned (done) with hand-off tails still
         // counted is a completion waiting on another worker's park tail; a parked phase with no wait kind

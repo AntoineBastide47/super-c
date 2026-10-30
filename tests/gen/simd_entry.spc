@@ -100,16 +100,16 @@ pub(package) fn entries(text: str) Vector<Entry> {
         let mut last = params;
         for i in 0..params.len() + 1 {
             let ch = if i < params.len() {
-                params.byte_at(i);
+                params.byte_at(i)
             } else {
-                b',';
+                b','
             };
             depth = if ch == b'<' {
-                depth + 1;
+                depth + 1
             } else if ch == b'>' {
-                depth - 1;
+                depth - 1
             } else {
-                depth;
+                depth
             };
             if ch != b',' || depth != 0 {
                 continue;
@@ -237,14 +237,14 @@ pub(package) fn cases(es: &Vector<Entry>, ks: []usize, per: u64) Vector<vec::VCa
         // A choice, or an operation on a mask, has the result's lane type and count.
         let res = e.t == 255 || e.op.as_str() == "ChooseLanes";
         let t = if res {
-            e.u;
+            e.u
         } else {
-            e.t;
+            e.t
         };
         let n = if res {
-            e.m;
+            e.m
         } else {
-            e.n;
+            e.n
         };
         for j in 0..ops.len() {
             let name = ops.at(j).as_str();
@@ -252,15 +252,15 @@ pub(package) fn cases(es: &Vector<Entry>, ks: []usize, per: u64) Vector<vec::VCa
             assert(op != 255, name);
             // a conversion's target is the result's lane type; an index vector is u8
             let u: i32 = if name == "choose_narrower" {
-                -1; // any narrower integer lanes
+                -1 // any narrower integer lanes
             } else if name == "gather" || name == "scatter" {
-                e.u; // the entry's index lanes, which may be its element type
+                e.u // the entry's index lanes, which may be its element type
             } else if vec::converts(op) && e.u != t {
-                e.u;
+                e.u
             } else if vec::converts(op) {
-                4;
+                4
             } else {
-                -1;
+                -1
             };
             let mut rng = gen::Rng::new(k as u64 * 7919 + j as u64 + 1);
             let most = vec::max_lanes(t);
@@ -448,7 +448,7 @@ fn c_text(dir: str) String {
         if nm.ends_with(".c") || nm.ends_with(".h") {
             let mut p = String::from_str(dir);
             p.format_into("/{}", nm);
-            all.push_str(cli::read_text(p.as_str()).as_str());
+            all.push_str(cli::read_text(&p).as_str());
         }
     }
     return all;
@@ -459,9 +459,9 @@ fn emitted_c(b: &h::DiffBuild, prof: str) String {
     let root = b.proj.dir();
     let mut d = String::new();
     d.format_into("{}/build/{}/raw", root, prof);
-    let mut s = c_text(d.as_str());
+    let mut s = c_text(&d);
     d.push_str("/__sc_t");
-    s.push_str(c_text(d.as_str()).as_str());
+    s.push_str(c_text(&d).as_str());
     return s;
 }
 
@@ -496,13 +496,13 @@ fn mask_form_instead(es: &Vector<Entry>, e: &Entry, seen: &String) bool {
         // the lanes of the comparison, whatever their type: the width and the count
         let same_width = mask_cmp && e.t != 255 && o.n == e.n && vec::lane_bytes(o.t) == vec::lane_bytes(e.t);
         let hit = if cmp {
-            oo == op.slice(0, op.len() - 5) && o.t == e.t && o.n == e.n;
+            oo == op.slice(0, op.len() - 5) && o.t == e.t && o.n == e.n
         } else if op == "ChooseLanes" {
-            oo == "Choose" && o.u == e.u && o.m == e.m;
+            oo == "Choose" && o.u == e.u && o.m == e.m
         } else if op == "MaskToLanes" {
-            oo == "Choose" && o.m == e.m && vec::lane_bytes(o.u) == vec::lane_bytes(e.u);
+            oo == "Choose" && o.m == e.m && vec::lane_bytes(o.u) == vec::lane_bytes(e.u)
         } else {
-            (op == "LanesToMask" || op == "AnyLanes" || op == "AllLanes") && same_width;
+            (op == "LanesToMask" || op == "AnyLanes" || op == "AllLanes") && same_width
         };
         if hit && calls(seen, o) {
             return true;
@@ -560,7 +560,7 @@ const fn required(e: &Entry, run: cf::CpuFeatureSet, wide: bool) bool {
 fn calls(c: &String, e: &Entry) bool {
     let mut call = String::new();
     call.format_into("__{}(", e.name.as_str());
-    return c.contains(call.as_str());
+    return c.contains(&call);
 }
 
 /// The oracle over part `k` of `parts` of the entries of backend file `text` the run's features reach
@@ -605,10 +605,10 @@ pub(package) fn check(text: str, k: usize, parts: usize, per: u64) String {
         }
         let n = part.len();
         let src = vec::program(&part, &omit);
-        let a = h::diff_build(src.as_str(), []);
-        let b = h::diff_build(src.as_str(), ["SC_SIMD_SCALAR=1"]);
-        let ac = h::diff_build(src.as_str(), ["--emit-c"]);
-        let bc = h::diff_build(src.as_str(), ["--emit-c", "SC_SIMD_SCALAR=1"]);
+        let a = h::diff_build(&src, []);
+        let b = h::diff_build(&src, ["SC_SIMD_SCALAR=1"]);
+        let ac = h::diff_build(&src, ["--emit-c"]);
+        let bc = h::diff_build(&src, ["--emit-c", "SC_SIMD_SCALAR=1"]);
         if !a.built || !b.built || !ac.built || !bc.built {
             r.format_into(
                 "the program does not build:\n{}{}{}{}",
@@ -656,13 +656,13 @@ pub(package) fn check(text: str, k: usize, parts: usize, per: u64) String {
 /// one program, the same output planned and with lane loops, and a call of each entry.
 pub(package) fn check_memory(text: str) String {
     let src = memory_program();
-    let m = h::diff_build(src.as_str(), []);
-    let s = h::diff_build(src.as_str(), ["SC_SIMD_SCALAR=1"]);
-    let mc = h::diff_build(src.as_str(), ["--emit-c"]);
+    let m = h::diff_build(&src, []);
+    let s = h::diff_build(&src, ["SC_SIMD_SCALAR=1"]);
+    let mc = h::diff_build(&src, ["--emit-c"]);
     let mut r = if m.built && s.built && mc.built {
-        h::same_runs(&m, &s, ["", "x"]);
+        h::same_runs(&m, &s, ["", "x"])
     } else {
-        format("the program does not build:\n{}{}{}", m.diag.as_str(), s.diag.as_str(), mc.diag.as_str());
+        format("the program does not build:\n{}{}{}", m.diag.as_str(), s.diag.as_str(), mc.diag.as_str())
     };
     let c = emitted_c(&mc, "debug");
     let es = entries(text);

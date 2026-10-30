@@ -55,7 +55,7 @@ pub struct Mapping {
 
 /// The size of a page, in bytes: the unit of every range of this module (65536 on WASI).
 pub fn page_size() Result<usize, IoError> {
-    return Result::<usize, IoError>::Ok(sc_runtime::sc_rt_page_size());
+    return Ok(sc_runtime::sc_rt_page_size());
 }
 
 /// Reserve `len` bytes of address space (rounded up to whole pages) with no access and no memory
@@ -63,14 +63,14 @@ pub fn page_size() Result<usize, IoError> {
 pub fn reserve(len: usize) Result<Mapping, IoError> {
     let page = sc_runtime::sc_rt_page_size();
     if len == 0 || len > usize::MAX - page {
-        return Result::<Mapping, IoError>::Err(IoError::new(IoErrorKind::InvalidInput, IoOp::Reserve));
+        return Err(IoError::new(IoErrorKind::InvalidInput, IoOp::Reserve));
     }
     let size = (len + page - 1) / page * page;
     let p = os_reserve(size);
     if p == null {
-        return Result::<Mapping, IoError>::Err(reserve_error());
+        return Err(reserve_error());
     }
-    return Result::<Mapping, IoError>::Ok(Mapping::adopt(p as *mut u8, size));
+    return Ok(Mapping::adopt(p as *mut u8, size));
 }
 
 @platform(macos | ios | linux | android)
@@ -138,9 +138,9 @@ extend Mapping {
     @platform(windows)
     fn os_commit(self: &mut Mapping, offset: usize, len: usize) Result<Unit, IoError> {
         if unsafe VirtualAlloc(unsafe (self.ptr + offset), len, MEM_COMMIT, PAGE_READWRITE) == null {
-            return Result::<Unit, IoError>::Err(error::last_error(IoOp::Commit));
+            return Err(error::last_error(IoOp::Commit));
         }
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
     @platform(wasm)
     fn os_commit(self: &mut Mapping, _offset: usize, _len: usize) Result<Unit, IoError> {
@@ -155,9 +155,9 @@ extend Mapping {
             ReadWrite => PROT_READ | PROT_WRITE,
         };
         if unsafe mprotect(unsafe (self.ptr + offset), len, p) != 0 {
-            return Result::<Unit, IoError>::Err(error::last_error(IoOp::Protect));
+            return Err(error::last_error(IoOp::Protect));
         }
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
     @platform(windows)
     fn os_protect(self: &mut Mapping, offset: usize, len: usize, prot: Protection) Result<Unit, IoError> {
@@ -168,9 +168,9 @@ extend Mapping {
         };
         let mut old: u32 = 0;
         if unsafe VirtualProtect(unsafe (self.ptr + offset), len, p, &mut old) == 0 {
-            return Result::<Unit, IoError>::Err(error::last_error(IoOp::Protect));
+            return Err(error::last_error(IoOp::Protect));
         }
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
     @platform(wasm)
     fn os_protect(self: &mut Mapping, _offset: usize, _len: usize, _prot: Protection) Result<Unit, IoError> {

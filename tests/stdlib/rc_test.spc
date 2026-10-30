@@ -214,7 +214,7 @@ fn a_parent_child_cycle_through_weak_frees_everything() {
         assert_eq(parent.weak_count(), 3);
         {
             let kids = parent.get().children.borrow();
-            kept = Option::<Rc<Child>>::Some(kids.at(1).clone());
+            kept = Some(kids.at(1).clone());
         }
         {
             let kids = parent.get().children.borrow();

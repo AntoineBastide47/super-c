@@ -103,9 +103,9 @@ fn built(p: &cli::Proj, flags: str, dir: str) (String, String) {
     let b = cli::superc_env_in(root, E, "1", format("build {} main.spc -o {}/prog", flags, dir).as_str());
     assert(b.ok(), flags);
     let exe = format("{}/{}/prog{}", root, dir, unsafe str::from_cstr(cli::binext()));
-    let r = cli::exe_env_in(exe.as_str(), root, E, "1", "");
+    let r = cli::exe_env_in(&exe, root, E, "1", "");
     assert(r.ok(), flags);
-    return ph::read_text(exe.as_str()), String::from_str(unsafe str::from_cstr(r.out));
+    return (ph::read_text(&exe), String::from_str(unsafe str::from_cstr(r.out)));
 }
 
 // Each level builds its own binary; each one prints the same. The levels and flags reach a build without
@@ -200,9 +200,9 @@ fn main() i32 {
     let b = cli::superc_env_in(root, E, "1", "build -O2 -fstack-protector-strong main.spc -o guarded");
     assert(b.ok(), "build");
     let exe = format("{}/guarded{}", root, unsafe str::from_cstr(cli::binext()));
-    let fine = cli::exe_env_in(exe.as_str(), root, "N", "8", "");
+    let fine = cli::exe_env_in(&exe, root, "N", "8", "");
     assert(fine.ok() && fine.out_has("65"), "no overflow");
-    let smashed = cli::exe_env_in(exe.as_str(), root, "N", "64", "");
+    let smashed = cli::exe_env_in(&exe, root, "N", "64", "");
     assert(smashed.exit != 0, "the overflow stops");
 }
 

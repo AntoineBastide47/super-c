@@ -49,7 +49,7 @@ extend NativeBackend as Backend {
     > {
         let bytes = prog.object(os, isa)?;
         out.push(Artifact { name: String::from_str("program.o"), bytes: bytes });
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 
@@ -59,7 +59,7 @@ extend NativeBackend as Backend {
 /// directory, or repeats.
 pub fn run(b: &mut dyn Backend, prog: &lir::Program, os: str, isa: str) Result<Vector<Artifact>, ApiError> {
     if b.api_version() != BACKEND_API {
-        return Result::<Vector<Artifact>, ApiError>::Err(
+        return Err(
             ApiError::new(
                 Code::VersionMismatch,
                 format("the backend implements interface {}, the compiler runs {}", b.api_version(), BACKEND_API).as_str(),
@@ -67,7 +67,7 @@ pub fn run(b: &mut dyn Backend, prog: &lir::Program, os: str, isa: str) Result<V
         );
     }
     if !b.supports(os, isa) {
-        return Result::<Vector<Artifact>, ApiError>::Err(
+        return Err(
             ApiError::new(
                 Code::UnsupportedCapability,
                 format("the backend does not generate code for {} {}", os, isa).as_str(),
@@ -78,7 +78,7 @@ pub fn run(b: &mut dyn Backend, prog: &lir::Program, os: str, isa: str) Result<V
     let mut out = Vector::<Artifact>::new();
     b.emit(prog, os, isa, &mut out)?;
     sort_artifacts(&mut out)?;
-    return Result::<Vector<Artifact>, ApiError>::Ok(out);
+    return Ok(out);
 }
 
 /// Sort `out` by name; `VerificationFailed` for a name that is empty, holds a directory, or repeats.
@@ -92,10 +92,8 @@ pub fn sort_artifacts(out: &mut Vector<Artifact>) Result<Unit, ApiError> {
     for i in 0..out.len() {
         let n = out[i].name.as_str();
         if n.len() == 0 || n == "." || n == ".." || n.find("/") >= 0 || n.find("\\") >= 0 || i > 0 && out[i - 1].name.as_str() == n {
-            return Result::<Unit, ApiError>::Err(
-                ApiError::new(Code::VerificationFailed, format("an artifact is named '{}'", n).as_str()),
-            );
+            return Err(ApiError::new(Code::VerificationFailed, format("an artifact is named '{}'", n).as_str()));
         }
     }
-    return Result::<Unit, ApiError>::Ok(Unit {});
+    return Ok(Unit {});
 }

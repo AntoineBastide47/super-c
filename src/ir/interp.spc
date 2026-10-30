@@ -1801,7 +1801,7 @@ extend Interp {
                     _ => {
                         break;
                     },
-                };
+                }
             }
             for i in 0..keys.len() {
                 let v = *self.item_objs.get(&keys[i]).unwrap();
@@ -2160,11 +2160,11 @@ extend Interp {
                 return self.p().assoc_norm(dm, &it, out, depth + 1);
             }
             *out = if y.fn_sig() {
-                unsafe (*da).intern_sig_rec(&it, y.qualifier);
+                unsafe (*da).intern_sig_rec(&it, y.qualifier)
             } else if y.kind == TypeKind::TYPE_DYN {
-                unsafe (*da).intern_dyn(it.module, it.decl, &it.args[0], it.n, y.qualifier);
+                unsafe (*da).intern_dyn(it.module, it.decl, &it.args[0], it.n, y.qualifier)
             } else {
-                unsafe (*da).intern_instance(it.module, it.decl, &it.args[0], it.n);
+                unsafe (*da).intern_instance(it.module, it.decl, &it.args[0], it.n)
             };
             return true;
         }
@@ -2292,9 +2292,9 @@ extend Interp {
             }
             if bound && !s.holds(sum, ptr32) {
                 r = if s.idx {
-                    3u32;
+                    3u32
                 } else {
-                    pick(s.div.is_zero(), 1u32, 2u32);
+                    pick(s.div.is_zero(), 1u32, 2u32)
                 };
                 break;
             }
@@ -2991,9 +2991,9 @@ extend Interp {
                 // aggregate handle is the reference, so cloning would sever the aliasing
                 let lty = b.locals.at(li).ty;
                 let mut av = if self.ref_like(b.module, lty) {
-                    *args.at(i);
+                    *args.at(i)
                 } else {
-                    self.obj_clone(*args.at(i), 0);
+                    self.obj_clone(*args.at(i), 0)
                 };
                 av = self.maybe_slice_wrap(b.module, lty, av);
                 unsafe (*self.obj_ptr(env)).slots.set(li, av);
@@ -3163,9 +3163,9 @@ extend Interp {
         }
         {
             let bn = if closure {
-                fnode;
+                fnode
             } else {
-                unsafe (&*self.p().module_ast_const(m)).ext(fnode).function.body;
+                unsafe (&*self.p().module_ast_const(m)).ext(fnode).function.body
             };
             if !self.body_avail(m, bn) {
                 return -1;
@@ -3184,9 +3184,9 @@ extend Interp {
             lw.env.push(irl::LSub { pm: sb.pmod, pnode: sb.pnode, am: sb.am, at: sb.at });
         }
         let ok = if closure {
-            lw.lower_closure_body(fnode);
+            lw.lower_closure_body(fnode)
         } else {
-            lw.lower_fn(fnode);
+            lw.lower_fn(fnode)
         };
         if lw.user_err != NODE_NONE {
             // The instance's index list is the program's error: the evaluation traps with it.
@@ -3222,7 +3222,7 @@ extend Interp {
             None => {
                 return -1;
             },
-        };
+        }
         let k = self.body_def[si];
         if k.def != (m as u64 << 32 | fnode as u64) || k.bn as usize != binds.len() {
             return -1;
@@ -3268,9 +3268,9 @@ extend Interp {
         }
         let mut cont = NODE_NONE;
         let item9 = if self.container_of(m, fnode, &mut cont) == 0 {
-            fnode;
+            fnode
         } else {
-            cont;
+            cont
         };
         self.note_dyn_edge(m, item9);
     }
@@ -3488,9 +3488,9 @@ extend Interp {
         let mut w = mark.slots;
         let mut nb = mark.boxes;
         let mut wb = if mark.slots < self.body_def.len() {
-            self.body_def[mark.slots].b0 as usize;
+            self.body_def[mark.slots].b0 as usize
         } else {
-            self.body_binds.len();
+            self.body_binds.len()
         };
         for i in mark.slots..self.body_slot.len() {
             let sl = self.body_slot[i];
@@ -3531,7 +3531,7 @@ extend Interp {
                 args = v;
             },
             None => {},
-        };
+        }
         args.clear();
         let ok = self.call_in(b, env, t, &mut args);
         self.argpool.push(args);
@@ -3608,7 +3608,7 @@ extend Interp {
         }
         let m = self.unsup_m;
         if !self.line_tabs.contains_key(&m) {
-            let starts = diag::line_starts_of(self.p().modules.at(m as usize).source.as_str());
+            let starts = diag::line_starts_of(&self.p().modules.at(m as usize).source);
             self.line_tabs.insert(m, starts);
         }
         let line = diag::line_in(self.line_tabs.get(&m).unwrap(), self.unsup_span.start);
@@ -3695,9 +3695,9 @@ extend Interp {
                 // `x: &u32`): the call reads the referent, as the emitted C does.
                 let pn0 = fa.at_const(unsafe fa.list(ps)[0]);
                 let pt0 = if pn0.kind == NodeKind::NODE_PARAMETER && pn0.as_data.parameter.ty != NODE_NONE {
-                    self.tof(fm, fa, pn0.as_data.parameter.ty);
+                    self.tof(fm, fa, pn0.as_data.parameter.ty)
                 } else {
-                    TYPE_NONE;
+                    TYPE_NONE
                 };
                 let ot = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
                 if pt0 != TYPE_NONE && fa.type_at(pt0).kind == TypeKind::TYPE_BUILTIN && ot != TYPE_NONE && (unsafe &*self.p().module_ast_const(
@@ -3954,7 +3954,7 @@ extend Interp {
                             gi += 1;
                         }
                     }
-                    own;
+                    own
                 } else {
                     let m0 = self.iface_method(
                         rdm,
@@ -3983,11 +3983,11 @@ extend Interp {
                         return false;
                     }
                     let mk = if kext.node != NODE_NONE {
-                        self.ext_own_method(kext, fm, mnm);
+                        self.ext_own_method(kext, fm, mnm)
                     } else {
-                        m0;
+                        m0
                     };
-                    mk;
+                    mk
                 };
                 if md.node != NODE_NONE && kext.node != NODE_NONE && ext_keyed(
                     unsafe &*self.p().module_ast_const(kext.module),
@@ -4211,9 +4211,9 @@ extend Interp {
                 break;
             }
             let dv = if di == 0 {
-                r;
+                r
             } else {
-                *self.rets.at(di as usize);
+                *self.rets.at(di as usize)
             };
             let dp = b.dest_pool[(t.dests_start + di) as usize];
             self.write_place(b, env, dp, dv);
@@ -4341,9 +4341,9 @@ extend Interp {
         }
         let mut out = none();
         let rt = if t.dests_len >= 1 {
-            b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
+            b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty
         } else {
-            TYPE_NONE;
+            TYPE_NONE
         };
         if self.span_is(fm, nm, "malloc") {
             if nargs != 1 || args.at(0).kind != IV_INT || args.at(0).i < 0 {
@@ -4467,17 +4467,17 @@ extend Interp {
                 out = iv_bool(b.module, rt, o);
             } else {
                 let r = if self.span_is(fm, nm, "sc_wadd64") {
-                    x.wrapping_add(y);
+                    x.wrapping_add(y)
                 } else if self.span_is(fm, nm, "sc_wsub64") {
-                    x.wrapping_sub(y);
+                    x.wrapping_sub(y)
                 } else if self.span_is(fm, nm, "sc_wmul64") {
-                    x.wrapping_mul(y);
+                    x.wrapping_mul(y)
                 } else if self.span_is(fm, nm, "sc_wshl64") {
-                    x.wrapping_shl(y as u32);
+                    x.wrapping_shl(y as u32)
                 } else if self.span_is(fm, nm, "sc_wshr64") {
-                    (x as u64).wrapping_shr(y as u32) as i64;
+                    (x as u64).wrapping_shr(y as u32) as i64
                 } else {
-                    x.wrapping_shr(y as u32);
+                    x.wrapping_shr(y as u32)
                 };
                 out = iv_int(b.module, rt, r);
             }
@@ -4488,11 +4488,11 @@ extend Interp {
             }
             let x = args.at(0).i as u64;
             let r = if self.span_is(fm, nm, "sc_ctz64") {
-                x.trailing_zeros();
+                x.trailing_zeros()
             } else if self.span_is(fm, nm, "sc_clz64") {
-                x.leading_zeros();
+                x.leading_zeros()
             } else {
-                x.count_ones();
+                x.count_ones()
             };
             out = iv_int(b.module, rt, r as i64);
         } else {
@@ -4513,25 +4513,25 @@ extend Interp {
             let mut okm = false;
             if nargs == 1 {
                 let r = if f32suf {
-                    libm1f(name, inv[0] as f32);
+                    libm1f(name, inv[0] as f32)
                 } else {
-                    libm1(name, inv[0]);
+                    libm1(name, inv[0])
                 };
                 okm = r.ok;
                 v = r.v;
             } else if nargs == 2 {
                 let r = if f32suf {
-                    libm2f(name, inv[0] as f32, inv[1] as f32);
+                    libm2f(name, inv[0] as f32, inv[1] as f32)
                 } else {
-                    libm2(name, inv[0], inv[1]);
+                    libm2(name, inv[0], inv[1])
                 };
                 okm = r.ok;
                 v = r.v;
             } else if name == "fma" {
                 v = if f32suf {
-                    math::fmaf(inv[0] as f32, inv[1] as f32, inv[2] as f32);
+                    math::fmaf(inv[0] as f32, inv[1] as f32, inv[2] as f32)
                 } else {
-                    math::fma(inv[0], inv[1], inv[2]);
+                    math::fma(inv[0], inv[1], inv[2])
                 };
                 okm = true;
             }
@@ -4688,9 +4688,9 @@ extend Interp {
         let down = mv && did == sid && doff > soff;
         for k in 0..count {
             let i = if down {
-                count - 1 - k;
+                count - 1 - k
             } else {
-                k;
+                k
             };
             let sv = unsafe (*self.obj_ptr(sid)).slots[(soff + i) as usize];
             if sv.kind == IV_NONE {
@@ -4839,7 +4839,7 @@ extend Interp {
                 return *v;
             },
             None => {},
-        };
+        }
         let mut dv = DeclView { p: -1, l: -1, fp: -1, fl: -1, kind: 0 };
         let k = (unsafe &*self.p().module_ast_const(dm)).at_const(dn).kind;
         if k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM {
@@ -4880,14 +4880,14 @@ extend Interp {
                 return *v;
             },
             None => {},
-        };
+        }
         switch self.item_aggs.get(&key) {
             Some(v) => {
                 let fz = *v;
                 return self.obj_thaw(fz);
             },
             None => {},
-        };
+        }
         let a = unsafe &*self.p().module_ast_const(m);
         if a.at_const(cnode).kind == NodeKind::NODE_FUNCTION {
             return IVal { kind: IV_FN, tm: m, ty: TYPE_NONE, i: m as i64 << 32 | cnode as i64, f: 0.0 };
@@ -4938,7 +4938,7 @@ extend Interp {
                     return self.item_replay(f2, false);
                 },
                 None => {},
-            };
+            }
         }
         if self.item_objs.len() != 0 {
             switch self.item_objs.get(&key) {
@@ -4950,7 +4950,7 @@ extend Interp {
                     }
                 },
                 None => {},
-            };
+            }
         }
         switch self.item_dead.get(&key) {
             Some(f) => {
@@ -4958,7 +4958,7 @@ extend Interp {
                 return self.item_replay(f2, true);
             },
             None => {},
-        };
+        }
         for i in 0..self.item_active.len() {
             if self.item_active[i] == key {
                 self.it_trap(IT_TRAP_CYCLE, "cyclic constant dependency");
@@ -4982,7 +4982,7 @@ extend Interp {
                 }
             },
             None => {},
-        };
+        }
         if self.defer_base < 0 {
             return self.item_defer(m, cnode, key, spec);
         }
@@ -5313,7 +5313,7 @@ extend Interp {
                 }
             },
             None => {},
-        };
+        }
         let mut v = none();
         if !is_static {
             v = self.item_value(it.module, it.node);
@@ -5435,9 +5435,9 @@ extend Interp {
     // was isolated (`iso_enter`), so the trap's step count is its own.
     fn item_fail_of(self: &mut Self, own: bool, dead: bool) ItemFail {
         let frames = if dead {
-            &mut self.item_dead_frames;
+            &mut self.item_dead_frames
         } else {
-            &mut self.item_fail_frames;
+            &mut self.item_fail_frames
         };
         let fstart = frames.len() as u32;
         let mut dsteps: u32 = 0;
@@ -5472,9 +5472,9 @@ extend Interp {
                 unsafe self.trap_stack[i as usize] = unsafe self.fstack[i as usize];
             }
             let frames = if dead {
-                &self.item_dead_frames;
+                &self.item_dead_frames
             } else {
-                &self.item_fail_frames;
+                &self.item_fail_frames
             };
             for i in 0..f.flen {
                 if n < IT_MAX_FRAMES {
@@ -5557,7 +5557,7 @@ extend Interp {
         if raw {
             dec.push_string(&text);
         } else {
-            tok::str_decode(text.as_str(), &mut dec);
+            tok::str_decode(&text, &mut dec);
         }
         let mut bytes = Vector::<u8>::with_capacity(dec.len());
         for k in 0..dec.len() {
@@ -5727,14 +5727,14 @@ extend Interp {
         }
         unsafe (*self.obj_ptr(so)).nargs = 1;
         unsafe (*self.obj_ptr(so)).am[0] = if it.n > 0 {
-            rm;
+            rm
         } else {
-            0;
+            0
         };
         unsafe (*self.obj_ptr(so)).at[0] = if it.n > 0 {
-            it.args[0];
+            it.args[0]
         } else {
-            TYPE_NONE;
+            TYPE_NONE
         };
         unsafe (*self.obj_ptr(so)).slots.set(ptr_i as usize, iv_ptr(0, TYPE_NONE, obj, off));
         unsafe (*self.obj_ptr(so)).slots.set(len_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), n));
@@ -6497,9 +6497,9 @@ extend Interp {
                 let t = math::trunc(v.f);
                 let half = (1u64 << (bt_bits(tb, self.pw()) - 1) as u64) as f64;
                 let fits = if bt_unsigned(tb) {
-                    t >= 0.0 && t < 2.0 * half;
+                    t >= 0.0 && t < 2.0 * half
                 } else {
-                    t >= 0.0 - half && t < half;
+                    t >= 0.0 - half && t < half
                 };
                 if !fits {
                     self.it_trap(
@@ -7265,9 +7265,9 @@ extend Interp {
     // The type of operand `k` of vector rvalue `rv` in body `b`.
     const fn vop_ty(b: &ir::CoreBody, rv: &ir::Rvalue, k: u32) TypeId {
         let op = if rv.kind == ir::RV_SIMD {
-            b.oper_pool[(rv.a + k) as usize];
+            b.oper_pool[(rv.a + k) as usize]
         } else {
-            pick(k == 0, rv.a, rv.b);
+            pick(k == 0, rv.a, rv.b)
         };
         return b.operands.at(op as usize).ty;
     }
@@ -7324,11 +7324,11 @@ extend Interp {
             let mut v: i64 = 0;
             if sg {
                 let r = if t == TokenType::Plus {
-                    add_ovf(a, c);
+                    add_ovf(a, c)
                 } else if t == TokenType::Minus {
-                    sub_ovf(a, c);
+                    sub_ovf(a, c)
                 } else {
-                    mul_ovf(a, c);
+                    mul_ovf(a, c)
                 };
                 o = r.ovf;
                 v = r.v;
@@ -7367,11 +7367,11 @@ extend Interp {
         return wrap_to(
             bt,
             if t == TokenType::Ampersand {
-                a & c;
+                a & c
             } else if t == TokenType::Pipe {
-                a | c;
+                a | c
             } else {
-                a ^ c;
+                a ^ c
             },
             pw,
         );
@@ -7461,11 +7461,11 @@ extend Interp {
         let sb = pick(bt == BuiltinType::BT_F32, 1u64 << 31, 1u64 << 63);
         let x = Interp::lane_bits(a, bt, pw);
         let r = if op == 0 {
-            x & ~sb;
+            x & ~sb
         } else if op == 1 {
-            x ^ sb;
+            x ^ sb
         } else {
-            x & ~sb | Interp::lane_bits(s, bt, pw) & sb;
+            x & ~sb | Interp::lane_bits(s, bt, pw) & sb
         };
         return Interp::bits_lane(r, bt, m, t, pw);
     }
@@ -7623,11 +7623,11 @@ extend Interp {
             // Lane `i` of operand 0 and of operand 1 (a scalar shift count is the same in every lane).
             let second = c == ir::SIMD_CONCAT && i >= n;
             let li = if c == ir::SIMD_HIGH_HALF {
-                i + rn;
+                i + rn
             } else if second {
-                i - n;
+                i - n
             } else {
-                i;
+                i
             };
             let a = self.vlane(pick(second, x1, v0), li, em, et);
             let cv = pick(x1.kind == IV_OBJ, self.vlane(x1, i, em, et), x1);
@@ -7636,9 +7636,9 @@ extend Interp {
                 r = self.cast(a, rem, ret);
             } else if c == 255u8 && fl {
                 r = if rv.kind == ir::RV_UNARY {
-                    Interp::fsign_lane(1, a, a, bt, rem, ret, pw);
+                    Interp::fsign_lane(1, a, a, bt, rem, ret, pw)
                 } else {
-                    self.float_op(a.f, cv.f, rv.c, bt, rem, ret);
+                    self.float_op(a.f, cv.f, rv.c, bt, rem, ret)
                 };
             } else if c == 255u8 {
                 r = iv_int(
@@ -7759,20 +7759,20 @@ extend Interp {
             }
             for i in 0..cnt {
                 let k = if op.rule == ir::SR_INDEX {
-                    ir::aux_lane(b, rv.item.node, i) as u64;
+                    ir::aux_lane(b, rv.item.node, i) as u64
                 } else {
-                    self.vlane(x[1], i, tm, TYPE_NONE).i as u64;
+                    self.vlane(x[1], i, tm, TYPE_NONE).i as u64
                 };
                 if c == ir::SIMD_SWIZZLE_OOB {
                     bits = bits | pick(k >= n, 1u64, 0u64) << i;
                     continue;
                 }
                 let l = if k < n {
-                    self.vlane(x[0], k, em, et);
+                    self.vlane(x[0], k, em, et)
                 } else if c == ir::SIMD_SHUFFLE {
-                    self.vlane(x[1], k - n, em, et);
+                    self.vlane(x[1], k - n, em, et)
                 } else {
-                    pick(fl, iv_float(em, et, 0.0), iv_int(em, et, 0));
+                    pick(fl, iv_float(em, et, 0.0), iv_int(em, et, 0))
                 };
                 unsafe (*self.obj_ptr(id)).slots.set(i as usize, l);
             }
@@ -7970,9 +7970,9 @@ extend Interp {
                 let beats = if fl {
                     l.f != o.f && l.f < o.f == min || l.f == o.f && Interp::fsign(l.f) != Interp::fsign(o.f) && Interp::fsign(
                         l.f,
-                    ) == min;
+                    ) == min
                 } else {
-                    l.i != o.i && pick(bt_unsigned(bt), l.i as u64 < o.i as u64, l.i < o.i) == min;
+                    l.i != o.i && pick(bt_unsigned(bt), l.i as u64 < o.i as u64, l.i < o.i) == min
                 };
                 if beats {
                     best = i;
@@ -7992,9 +7992,9 @@ extend Interp {
                 let p = self.cast(a, tm, tt);
                 let q = self.cast(self.vlane(x[1], i, em, et), tm, tt);
                 a = if fl {
-                    self.float_op(p.f, q.f, TokenType::Star as u32, abt, tm, tt);
+                    self.float_op(p.f, q.f, TokenType::Star as u32, abt, tm, tt)
                 } else {
-                    self.lane_simd_int(ir::SIMD_WRAP_MUL, p.i, q.i, abt, abt, i, tm, tt);
+                    self.lane_simd_int(ir::SIMD_WRAP_MUL, p.i, q.i, abt, abt, i, tm, tt)
                 };
             }
             l.push(a);
@@ -8023,11 +8023,11 @@ extend Interp {
             return l[0];
         }
         let mut acc = if fl && (add || mul) {
-            iv_float(tm, tt, pick(add, -0.0, 1.0));
+            iv_float(tm, tt, pick(add, -0.0, 1.0))
         } else if c == ir::SIMD_DOT {
-            iv_int(tm, tt, 0);
+            iv_int(tm, tt, 0)
         } else {
-            l[0];
+            l[0]
         };
         let from = pick(fl && (add || mul) || c == ir::SIMD_DOT, 0u64, 1u64);
         for i in from..n {
@@ -8040,19 +8040,19 @@ extend Interp {
                 acc = pick(Interp::fminmax(acc.f, a.f, lo, c >= ir::SIMD_REDUCE_MINIMUM), acc, a);
             } else if c == ir::SIMD_REDUCE_AND || c == ir::SIMD_REDUCE_OR || c == ir::SIMD_REDUCE_XOR {
                 acc.i = if c == ir::SIMD_REDUCE_AND {
-                    acc.i & a.i;
+                    acc.i & a.i
                 } else if c == ir::SIMD_REDUCE_OR {
-                    acc.i | a.i;
+                    acc.i | a.i
                 } else {
-                    acc.i ^ a.i;
+                    acc.i ^ a.i
                 };
             } else {
                 let lc = if add {
-                    ir::SIMD_WRAP_ADD;
+                    ir::SIMD_WRAP_ADD
                 } else if mul {
-                    ir::SIMD_WRAP_MUL;
+                    ir::SIMD_WRAP_MUL
                 } else {
-                    pick(c == ir::SIMD_REDUCE_MIN, ir::SIMD_MIN, ir::SIMD_MAX);
+                    pick(c == ir::SIMD_REDUCE_MIN, ir::SIMD_MIN, ir::SIMD_MAX)
                 };
                 acc = self.lane_simd_int(lc, acc.i, a.i, abt, abt, i, tm, tt);
             }
@@ -8168,21 +8168,21 @@ extend Interp {
         let lt = pick(sg, a < c2, a as u64 < c2 as u64);
         if c >= ir::SIMD_WRAP_ADD && c <= ir::SIMD_WRAP_MUL || c >= ir::SIMD_OVF_ADD && c <= ir::SIMD_SAT_SUB {
             let op = if c == ir::SIMD_WRAP_ADD || c == ir::SIMD_OVF_ADD || c == ir::SIMD_SAT_ADD {
-                TokenType::Plus;
+                TokenType::Plus
             } else if c == ir::SIMD_WRAP_SUB || c == ir::SIMD_OVF_SUB || c == ir::SIMD_SAT_SUB {
-                TokenType::Minus;
+                TokenType::Minus
             } else {
-                TokenType::Star;
+                TokenType::Star
             };
             let mut o = false;
             let mut v: i64 = 0;
             if sg {
                 let r = if op == TokenType::Plus {
-                    add_ovf(a, c2);
+                    add_ovf(a, c2)
                 } else if op == TokenType::Minus {
-                    sub_ovf(a, c2);
+                    sub_ovf(a, c2)
                 } else {
-                    mul_ovf(a, c2);
+                    mul_ovf(a, c2)
                 };
                 o = r.ovf || !fits(bt, r.v, pw);
                 v = r.v;
@@ -8365,11 +8365,11 @@ extend Interp {
         if v != v {
             // The first NaN operand quieted, else the positive quiet NaN (`lir::eval::float_op`).
             v = if a != a {
-                f64_from_bits(f64_bits(a) | 0x8000000000000);
+                f64_from_bits(f64_bits(a) | 0x8000000000000)
             } else if c != c {
-                f64_from_bits(f64_bits(c) | 0x8000000000000);
+                f64_from_bits(f64_bits(c) | 0x8000000000000)
             } else {
-                f64_from_bits(0x7FF8000000000000);
+                f64_from_bits(0x7FF8000000000000)
             };
         }
         if tb == BuiltinType::BT_F32 {
@@ -8409,9 +8409,9 @@ extend Interp {
         // A shift and a comparison compute at the left operand's type; every other operator at the result's,
         // which the checker widened a narrower operand to (`u8 + u64`), as the emitted C does.
         let ob = if t != TokenType::LeftShift && t != TokenType::RightShift && (bt_signed(rb) || bt_unsigned(rb)) {
-            rb;
+            rb
         } else {
-            lb;
+            lb
         };
         let uns = ob != BuiltinType::BT_COUNT && bt_unsigned(ob);
         let mut bits = 64;
@@ -8490,9 +8490,9 @@ extend Interp {
                     u = ul << c as u64;
                 } else {
                     let mask = if bits == 64 {
-                        0xFFFFFFFFFFFFFFFFu64;
+                        0xFFFFFFFFFFFFFFFFu64
                     } else {
-                        (1u64 << bits as u64) - 1u64;
+                        (1u64 << bits as u64) - 1u64
                     };
                     u = (ul & mask) >> c as u64;
                 }
@@ -8508,11 +8508,11 @@ extend Interp {
         let mut v: i64 = 0;
         if t == TokenType::Plus || t == TokenType::Minus || t == TokenType::Star {
             let o = if t == TokenType::Plus {
-                add_ovf(a, c);
+                add_ovf(a, c)
             } else if t == TokenType::Minus {
-                sub_ovf(a, c);
+                sub_ovf(a, c)
             } else {
-                mul_ovf(a, c);
+                mul_ovf(a, c)
             };
             if o.ovf {
                 self.it_trap(IT_TRAP_UB_OVERFLOW, "arithmetic overflow");
@@ -8596,7 +8596,7 @@ extend Interp {
         if t == TokenType::Tilde {
             let mut bb = tb;
             if bb == BuiltinType::BT_COUNT {
-                bb = BuiltinType::BT_I64;
+                bb = BT_I64;
             }
             return iv_int(m, target, wrap_to(bb, ~v.i, self.pw()));
         }
@@ -8786,9 +8786,9 @@ extend Interp {
         }
         if a.arr_like() {
             let same_len = if a.arr_sym() {
-                self.teq(ma, a.as_data.arr.len, mb, b.as_data.arr.len);
+                self.teq(ma, a.as_data.arr.len, mb, b.as_data.arr.len)
             } else {
-                a.as_data.arr.len == b.as_data.arr.len;
+                a.as_data.arr.len == b.as_data.arr.len
             };
             return a.qualifier == b.qualifier && same_len && self.teq(ma, a.as_data.arr.elem, mb, b.as_data.arr.elem);
         }
@@ -9291,9 +9291,9 @@ extend Interp {
         iface: DefId,
     ) DefId {
         let mid = if rdn == NODE_NONE {
-            rb as u64;
+            rb as u64
         } else {
-            rdm as u64;
+            rdm as u64
         };
         let key = MKey { callee: iface.module as u64 << 32 | iface.node as u64, recv: mid << 32 | rdn as u64 };
         // The candidates sit in `conf_pool` from `start`, `n` of them: memoized once every module is
@@ -9304,7 +9304,7 @@ extend Interp {
             Some(v) => {
                 start = (*v >> 32) as usize;
                 n = (*v & 0xFFFFFFFFu64) as usize;
-                true;
+                true
             },
             None => false,
         };
@@ -9472,16 +9472,16 @@ extend Interp {
                 return (*v >> 32) as i32;
             },
             None => {},
-        };
+        }
         let a = unsafe &*self.p().module_ast_const(fm);
         let iid = a.container_of(fnode);
         let mut kd: u64 = 0;
         if iid != NODE_NONE {
             *out = iid;
             kd = if a.at_const(iid).kind == NodeKind::NODE_EXTEND {
-                1u64;
+                1u64
             } else {
-                2u64;
+                2u64
             };
         }
         self.cont_memo.insert(ckey, kd << 32 | iid as u64);
@@ -9505,9 +9505,9 @@ extend Interp {
         name: tok::Span,
     ) DefId {
         let mid = if rdn == NODE_NONE {
-            rb as u64;
+            rb as u64
         } else {
-            rdm as u64;
+            rdm as u64
         };
         let key = MKey { callee: nm as u64 << 32 | callee as u64, recv: scope as u64 << 48 | mid << 32 | rdn as u64 };
         if self.all_typed {
@@ -9516,7 +9516,7 @@ extend Interp {
                     return DefId { module: (*v >> 32) as ModuleId, node: (*v & 0xFFFFFFFFu64) as NodeId };
                 },
                 None => {},
-            };
+            }
         }
         let found = self.find_method_scan(rdm, rdn, rb, scope, nm, name);
         if self.all_typed {
@@ -9654,7 +9654,7 @@ extend Interp {
                 return *p;
             },
             None => {},
-        };
+        }
         let cell = self.obj_new(1);
         if cell != 0 {
             unsafe (*self.obj_ptr(cell)).slots.set(0, t);
@@ -10162,9 +10162,9 @@ extend Interp {
     // arena's closures (a closure's tagged id indexes the second row by its arena index).
     const fn fx_slot(self: &Self, m: ModuleId, id: NodeId, deep: bool) u8 {
         let tbl = if deep {
-            &self.fxd;
+            &self.fxd
         } else {
-            &self.fx;
+            &self.fx
         };
         let row = fx_row(m, id);
         if row >= tbl.len() {
@@ -10180,9 +10180,9 @@ extend Interp {
 
     fn fx_set(self: &mut Self, m: ModuleId, id: NodeId, v: u8, deep: bool) {
         let tbl = if deep {
-            &mut self.fxd;
+            &mut self.fxd
         } else {
-            &mut self.fx;
+            &mut self.fx
         };
         let row = fx_row(m, id);
         while tbl.len() <= row {
@@ -10254,7 +10254,7 @@ extend Interp {
                 return r;
             },
             None => {},
-        };
+        }
         return null;
     }
 
@@ -10376,7 +10376,7 @@ extend Interp {
                         return FX_MAYBE; // a Range value or another sequence: unmodeled
                     }
                 },
-            };
+            }
         }
         return fx_meet(acc, self.fx_scan_body(m, owner, d.body, depth + 1));
     }
@@ -10477,7 +10477,7 @@ extend Interp {
                 return FX_YES;
             },
             _ => {},
-        };
+        }
         return FX_MAYBE;
     }
 
@@ -10621,7 +10621,7 @@ extend Interp {
                 }
             },
             _ => {},
-        };
+        }
         return FX_MAYBE; // if/match/closures and anything unmodeled: conditional or unknown
     }
 
@@ -10918,9 +10918,9 @@ extend Interp {
         }
         let pm = self.pkg as *mut loader::Package;
         let own = if unsafe (*pm).wl_on {
-            unsafe (*pm).wl_eng_begin();
+            unsafe (*pm).wl_eng_begin()
         } else {
-            -1;
+            -1
         };
         self.elock_sem.acquire_masked();
         unsafe atomic::store_usize(&mut self.elock_owner, tok, 0);
@@ -11009,7 +11009,7 @@ extend Interp {
                 return ok;
             },
             None => {},
-        };
+        }
         self.eval_reset();
         self.ev_depth += 1;
         self.ndepth += 1;
@@ -11055,9 +11055,9 @@ extend Interp {
             // f64 quiet bit's place.
             let b = if v.f != v.f && v.i >> 32 == 1 {
                 let w = v.i as u64 & 0xFFFFFFFF;
-                w >> 31 << 63 | 0x7FFu64 << 52 | (w & 0x7FFFFF) << 29;
+                w >> 31 << 63 | 0x7FFu64 << 52 | (w & 0x7FFFFF) << 29
             } else {
-                v.f.to_bits();
+                v.f.to_bits()
             };
             r.leaves.push(Leaf { kind: LF_FLOAT, v: b as i64 });
             return true;
@@ -11099,9 +11099,9 @@ extend Interp {
         let mut lw = self.lowerer(m, id);
         lw.f.unchecked_view = !self.visible_node(m, id); // an item the reader cannot see is unchecked to it
         let ok = if (unsafe &*self.p().module_ast_const(m)).at_const(id).kind == NodeKind::NODE_CONST {
-            lw.lower_const(id);
+            lw.lower_const(id)
         } else {
-            lw.lower_expr_root(id);
+            lw.lower_expr_root(id)
         };
         if !ok {
             self.lower_refused(&lw);
@@ -11126,7 +11126,7 @@ extend Interp {
                 memo_v = *v;
             },
             None => {},
-        };
+        }
         if memo_hit {
             if memo_kind == EV_EVALUATING {
                 self.it_trap(IT_TRAP_CYCLE, "cyclic constant dependency");
@@ -11181,7 +11181,7 @@ extend Interp {
         // a fold a lowering asks for inside a run evaluates as it does alone (`iso_enter`)
         let mut iso = Option::<Iso>::None;
         if !top {
-            iso = Option::<Iso>::Some(self.iso_enter());
+            iso = Some(self.iso_enter());
         }
         self.ev_depth += 1;
         self.ndepth += 1;
@@ -11193,7 +11193,7 @@ extend Interp {
                 self.iso_leave(s, false, true);
             },
             None => {},
-        };
+        }
         if top && self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
             self.record_fold_err(m, id);
         }
@@ -11286,7 +11286,7 @@ extend Interp {
                 }
             },
             None => {},
-        };
+        }
         let row = self.lane_rows.len() as u32;
         self.lane_rows.push(
             LaneRow { m: m, id: id, e0: self.lane_envs.len() as u32, en: env.len() as u32, v0: 0, vn: 0, ok: false },
@@ -11310,7 +11310,7 @@ extend Interp {
                 return *st;
             },
             None => {},
-        };
+        }
         if self.defer_base >= 0 {
             if self.defer_deep(DT_LANES, key, m, id) {
                 return 1;
@@ -11393,7 +11393,7 @@ extend Interp {
         // a list a lowering asks for inside a run evaluates as it does alone (`iso_enter`)
         let mut iso = Option::<Iso>::None;
         if !top {
-            iso = Option::<Iso>::Some(self.iso_enter());
+            iso = Some(self.iso_enter());
         }
         if lw.lower_expr_root(id) {
             let args = Vector::<IVal>::new();
@@ -11418,7 +11418,7 @@ extend Interp {
                 self.iso_leave(s, false, true);
             },
             None => {},
-        };
+        }
         self.ev_depth -= 1;
         self.sub_base = prev_base;
         self.subst.truncate(sb0);
@@ -11536,7 +11536,7 @@ extend Interp {
                 _ => {
                     return 0 - 1;
                 },
-            };
+            }
         }
         if y.kind == TypeKind::TYPE_POINTER {
             return 6;
@@ -11749,7 +11749,7 @@ extend Interp {
                 return StaticRes { ok: true, root: (*v - 1) as u32 };
             },
             None => {},
-        };
+        }
         switch self.ememo.get(&key) {
             Some(v) => {
                 if v.kind != EV_AGG_OK {
@@ -11757,7 +11757,7 @@ extend Interp {
                 }
             },
             None => {},
-        };
+        }
         self.eval_reset();
         self.ememo.insert(key, IVal { kind: EV_EVALUATING, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
         self.ev_depth += 1;
@@ -12053,9 +12053,9 @@ extend Interp {
         let src = self.src_of(dm);
         let da = unsafe &*self.p().module_ast_const(dm);
         let nmetas = if own != NODE_NONE {
-            da.metas.len();
+            da.metas.len()
         } else {
-            0 as usize;
+            0 as usize
         };
         for i in 0..nmetas {
             let ma = *da.metas.at(i);
@@ -12074,9 +12074,9 @@ extend Interp {
                 src.slice(ma.key.start as usize, ma.key.end as usize),
             );
             let sbytes = if ma.vkind == 2 {
-                src.slice(ma.vspan.start as usize, ma.vspan.end as usize);
+                src.slice(ma.vspan.start as usize, ma.vspan.end as usize)
             } else {
-                "";
+                ""
             };
             let sv = self.ti_str(cx.strm, cx.strn, cx.tim, cx.sty, sbytes);
             if nmv.kind != IV_OBJ || sv.kind != IV_OBJ {
@@ -12572,7 +12572,7 @@ extend Interp {
         if i_qual >= 0 {
             let mut qn = String::new();
             rnd::render_qualified_name(self.p(), self.p().module_ast_const(tm), tt, &mut qn);
-            let qv = self.ti_str(strm, strn, tim, sty, qn.as_str());
+            let qv = self.ti_str(strm, strn, tim, sty, &qn);
             if qv.kind != IV_OBJ {
                 return none();
             }
@@ -12655,7 +12655,7 @@ extend CallMemo {
             None => {
                 return false;
             },
-        };
+        }
         let row = *self.rows.at(ri as usize);
         if row.fm != fm || row.fnode != fnode || row.n as usize != args.len() {
             return false;

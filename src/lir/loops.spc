@@ -724,9 +724,9 @@ extend LoopOpt {
         }
         let t = term(b, eb);
         let out = if self.inl[b.edge_target(t.b) as usize] {
-            t.c;
+            t.c
         } else {
-            t.b;
+            t.b
         };
         self.cf_resolve(b, ptr);
         // The values that leave as polynomials in their types' bits, of degrees up to CF_DEG (`cf_poly`):
@@ -794,9 +794,9 @@ extend LoopOpt {
             for j in 0..np {
                 if self.cf_need[j] {
                     self.cf_pv[k as usize * np + j] = if k == 0 {
-                        self.cf_init[j];
+                        self.cf_init[j]
                     } else {
-                        self.cf_of(b, self.cf_next[j], k - 1);
+                        self.cf_of(b, self.cf_next[j], k - 1)
                     };
                 }
             }
@@ -823,17 +823,17 @@ extend LoopOpt {
         for q in 0..na {
             let v = b.edge_arg(out, q);
             let r = if self.cf_poly[q as usize] {
-                self.cf_value(b, ptr, v, count);
+                self.cf_value(b, ptr, v, count)
             } else if self.defined_in(v) {
                 kept += 1;
-                VPARAM | ps + kept - 1;
+                VPARAM | ps + kept - 1
             } else {
-                v;
+                v
             };
             self.args.push(r);
         }
         let target = b.edge_target(out);
-        let e = b.edge(target, self.args.as_slice());
+        let e = b.edge(target, &self.args);
         let _ = cf_put(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: e, b: 0, c: 0 }, at);
         let pb = b.blocks[p as usize];
         b.blocks.push(
@@ -853,7 +853,7 @@ extend LoopOpt {
                     self.args.push(v);
                 }
             }
-            let ex = b.edge(xb, self.args.as_slice());
+            let ex = b.edge(xb, &self.args);
             let ti = (b.blocks[eb as usize].start + b.blocks[eb as usize].len - 1) as usize;
             let mut tt = b.insts[ti];
             if tt.b == out {
@@ -877,9 +877,9 @@ extend LoopOpt {
             let ty = value_type(b, self.cf_bound);
             let lim = cf_put(b, iconst_of(ty, self.cf_limit), at);
             let cond = if self.cf_up {
-                pick_c(self.cf_signed, C_SLE, C_ULE);
+                pick_c(self.cf_signed, C_SLE, C_ULE)
             } else {
-                pick_c(self.cf_signed, C_SGE, C_UGE);
+                pick_c(self.cf_signed, C_SGE, C_UGE)
             };
             let g = cf_put(b, Inst { op: O_ICMP, ty: T_I8, aux: cond, a: self.cf_bound, b: lim, c: VNONE }, at);
             let ex = b.edge(xb, []);
@@ -931,16 +931,16 @@ extend LoopOpt {
         }
         let ci = b.insts[t.a as usize];
         let (x, bound, pred) = if self.defined_in(ci.a) && !self.defined_in(ci.b) {
-            (ci.a, ci.b, ci.aux);
+            (ci.a, ci.b, ci.aux)
         } else if self.defined_in(ci.b) && !self.defined_in(ci.a) {
-            (ci.b, ci.a, mirror(ci.aux));
+            (ci.b, ci.a, mirror(ci.aux))
         } else {
             return false;
         };
         let stay = if self.inl[b.edge_target(t.b) as usize] {
-            pred;
+            pred
         } else {
-            opposite(pred);
+            opposite(pred)
         };
         // The counter: `x` itself or `x` less an invariant.
         let mut q = x;
@@ -949,11 +949,11 @@ extend LoopOpt {
             q = if xi.op == O_ADD && self.header_param(xi.a) && !self.defined_in(xi.b) || xi.op == O_SUB && self.header_param(
                 xi.a,
             ) && !self.defined_in(xi.b) {
-                xi.a;
+                xi.a
             } else if xi.op == O_ADD && self.header_param(xi.b) && !self.defined_in(xi.a) {
-                xi.b;
+                xi.b
             } else {
-                VNONE;
+                VNONE
             };
         }
         if !self.header_param(q) {
@@ -986,9 +986,9 @@ extend LoopOpt {
         }
         let up = s > 0;
         let c = if up {
-            s;
+            s
         } else {
-            -s;
+            -s
         };
         let signed = stay == C_SLT || stay == C_SLE || stay == C_SGT || stay == C_SGE;
         let ns = stay == C_SLE || stay == C_ULE || stay == C_SGE || stay == C_UGE;
@@ -1012,20 +1012,20 @@ extend LoopOpt {
         // The counter steps past the last value the test lets through without wrapping when the bound is at
         // most `limit` (counting up) or at least it (counting down).
         let ns1: u64 = if ns {
-            1;
+            1
         } else {
-            0;
+            0
         };
         let lim = if up {
-            type_max(w, signed).wrapping_sub(c as u64).wrapping_add(1).wrapping_sub(ns1);
+            type_max(w, signed).wrapping_sub(c as u64).wrapping_add(1).wrapping_sub(ns1)
         } else {
-            type_min(w, signed).wrapping_add(c as u64).wrapping_sub(1).wrapping_add(ns1);
+            type_min(w, signed).wrapping_add(c as u64).wrapping_sub(1).wrapping_add(ns1)
         };
         self.cf_limit = lim & mask_of(w);
         let cond = if up {
-            pick_c(signed, C_SLE, C_ULE);
+            pick_c(signed, C_SLE, C_ULE)
         } else {
-            pick_c(signed, C_SGE, C_UGE);
+            pick_c(signed, C_SGE, C_UGE)
         };
         if is_const(b, bound) {
             return le::icmp(cond, ty, ptr, raw_const(b, bound), self.cf_limit);
@@ -1035,9 +1035,9 @@ extend LoopOpt {
             return true;
         }
         self.cf_guard = self.cf_limit != (if up {
-            type_max(w, signed);
+            type_max(w, signed)
         } else {
-            type_min(w, signed);
+            type_min(w, signed)
         } & mask_of(w));
         return true;
     }
@@ -1082,9 +1082,9 @@ extend LoopOpt {
                 if l.rest.st == PS_YES && l.coef == 1 {
                     let zero = l.rest.rng && l.rest.lo == 0 && l.rest.hi == 0;
                     let deg = if zero {
-                        0;
+                        0
                     } else {
-                        l.rest.deg as u32 + 1;
+                        l.rest.deg as u32 + 1
                     };
                     if deg <= CF_DEG {
                         f = Poly {
@@ -1135,45 +1135,45 @@ extend LoopOpt {
         }
         let c = self.cf_c as i64;
         let ns: i64 = if self.cf_ns {
-            1;
+            1
         } else {
-            0;
+            0
         };
         let (tmin, tmax) = if self.cf_signed {
-            (smin(w), smax(w));
+            (smin(w), smax(w))
         } else {
-            (0i64, umax(w));
+            (0i64, umax(w))
         };
         let start = if is_const(b, x0) {
-            int_value(raw_const(b, x0), w, self.cf_signed);
+            int_value(raw_const(b, x0), w, self.cf_signed)
         } else if self.cf_up {
-            tmin;
+            tmin
         } else {
-            tmax;
+            tmax
         };
         let mut far = if self.cf_up {
-            tmax;
+            tmax
         } else {
-            tmin;
+            tmin
         };
         if is_const(b, self.cf_bound) {
             let bv = int_value(raw_const(b, self.cf_bound), w, self.cf_signed);
             far = if self.cf_up {
-                bv + ns + c - 1;
+                bv + ns + c - 1
             } else {
-                bv - ns - c + 1;
+                bv - ns - c + 1
             };
         }
         f.rng = true;
         f.lo = if self.cf_up {
-            start;
+            start
         } else {
-            far.min(start);
+            far.min(start)
         };
         f.hi = if self.cf_up {
-            far.max(start);
+            far.max(start)
         } else {
-            start;
+            start
         };
         f.m = w as u8;
     }
@@ -1202,32 +1202,32 @@ extend LoopOpt {
         let w = type_bits(t.ty, ptr);
         let f = op_info(t.op).form;
         let fa = if lv::operand_a(f) {
-            self.fact(b, ptr, t.a);
+            self.fact(b, ptr, t.a)
         } else {
-            p_inv(w);
+            p_inv(w)
         };
         let fb = if lv::operand_b(f) && t.b != VNONE {
-            self.fact(b, ptr, t.b);
+            self.fact(b, ptr, t.b)
         } else {
-            p_inv(w);
+            p_inv(w)
         };
         let fc = if lv::operand_c(f) {
-            self.fact(b, ptr, t.c);
+            self.fact(b, ptr, t.c)
         } else {
-            p_inv(w);
+            p_inv(w)
         };
         let mut r = p_of(PS_NO);
         if t.op == O_SELECT && (fa.st != PS_YES || fa.deg != 0) {
             // A condition the intervals decide picks its side.
             let d = self.decide(b, ptr, t.a);
             r = if d == 1 {
-                fb;
+                fb
             } else if d == 0 {
-                fc;
+                fc
             } else if fa.st == PS_UNKNOWN {
-                p_of(PS_UNKNOWN);
+                p_of(PS_UNKNOWN)
             } else {
-                p_of(PS_NO);
+                p_of(PS_NO)
             };
         } else {
             let st = p_st(p_st(fa.st, fb.st), fc.st);
@@ -1274,11 +1274,11 @@ extend LoopOpt {
         let yes = c == C_SLT && lt_all || c == C_ULT && lt_all || c == C_SLE && le_all || c == C_ULE && le_all || c == C_SGT && gt_all || c == C_UGT && gt_all || c == C_SGE && ge_all || c == C_UGE && ge_all || c == C_NE && (lt_all || gt_all) || c == C_EQ && x.lo == x.hi && y.lo == y.hi && x.lo == y.lo;
         let no = (c == C_SLT || c == C_ULT) && ge_all || (c == C_SLE || c == C_ULE) && gt_all || (c == C_SGT || c == C_UGT) && le_all || (c == C_SGE || c == C_UGE) && lt_all || c == C_EQ && (lt_all || gt_all) || c == C_NE && x.lo == x.hi && y.lo == y.hi && x.lo == y.lo;
         return if yes {
-            1;
+            1
         } else if no {
-            0;
+            0
         } else {
-            2;
+            2
         };
     }
 
@@ -1302,17 +1302,17 @@ extend LoopOpt {
             let y = self.lin(b, ptr, t.b, q);
             let mut ok = true;
             let coef = if t.op == O_ADD {
-                ck(x.coef.checked_add(y.coef), &mut ok);
+                ck(x.coef.checked_add(y.coef), &mut ok)
             } else if t.op == O_SUB {
-                ck(x.coef.checked_sub(y.coef), &mut ok);
+                ck(x.coef.checked_sub(y.coef), &mut ok)
             } else if x.coef == 0 && y.coef == 0 {
-                0i64;
+                0i64
             } else if x.coef == 0 && is_const(b, t.a) {
-                ck(sext_of(raw_const(b, t.a), w).checked_mul(y.coef), &mut ok);
+                ck(sext_of(raw_const(b, t.a), w).checked_mul(y.coef), &mut ok)
             } else if y.coef == 0 && is_const(b, t.b) {
-                ck(sext_of(raw_const(b, t.b), w).checked_mul(x.coef), &mut ok);
+                ck(sext_of(raw_const(b, t.b), w).checked_mul(x.coef), &mut ok)
             } else {
-                ck(Option::<i64>::None, &mut ok);
+                ck(Option::<i64>::None, &mut ok)
             };
             if ok {
                 r = Lin { coef: coef, rest: arith_fact(t.op, x.rest, y.rest, w) };
@@ -1360,9 +1360,9 @@ extend LoopOpt {
         } else if t.op == O_PTRADD {
             let x = self.lin(b, ptr, t.a, q);
             let y = if t.b == VNONE {
-                Lin { coef: 0, rest: p_zero(w) };
+                Lin { coef: 0, rest: p_zero(w) }
             } else {
-                self.lin(b, ptr, t.b, q);
+                self.lin(b, ptr, t.b, q)
             };
             if y.coef == 0 {
                 r = Lin { coef: x.coef, rest: arith_fact(O_ADD, x.rest, scaled(y.rest, w), w) };
@@ -1434,9 +1434,9 @@ extend LoopOpt {
         let bound = self.cf_bound;
         if self.cf_ne {
             return if self.cf_up {
-                cf_put(b, bin(O_SUB, ty, bound, x0), at);
+                cf_put(b, bin(O_SUB, ty, bound, x0), at)
             } else {
-                cf_put(b, bin(O_SUB, ty, x0, bound), at);
+                cf_put(b, bin(O_SUB, ty, x0, bound), at)
             };
         }
         let mut far = bound;
@@ -1446,15 +1446,15 @@ extend LoopOpt {
         }
         // A start past the bound runs no iteration; at the bound the difference is 0.
         let past = if self.cf_up {
-            pick_c(self.cf_signed, pick_c(self.cf_c == 1, C_SGT, C_SGE), pick_c(self.cf_c == 1, C_UGT, C_UGE));
+            pick_c(self.cf_signed, pick_c(self.cf_c == 1, C_SGT, C_SGE), pick_c(self.cf_c == 1, C_UGT, C_UGE))
         } else {
-            pick_c(self.cf_signed, pick_c(self.cf_c == 1, C_SLT, C_SLE), pick_c(self.cf_c == 1, C_ULT, C_ULE));
+            pick_c(self.cf_signed, pick_c(self.cf_c == 1, C_SLT, C_SLE), pick_c(self.cf_c == 1, C_ULT, C_ULE))
         };
         let cond = cf_put(b, Inst { op: O_ICMP, ty: T_I8, aux: past, a: x0, b: far, c: VNONE }, at);
         let mut diff = if self.cf_up {
-            cf_put(b, bin(O_SUB, ty, far, x0), at);
+            cf_put(b, bin(O_SUB, ty, far, x0), at)
         } else {
-            cf_put(b, bin(O_SUB, ty, x0, far), at);
+            cf_put(b, bin(O_SUB, ty, x0, far), at)
         };
         if self.cf_c != 1 {
             let one = cf_put(b, iconst_of(ty, 1), at);
@@ -1480,9 +1480,9 @@ extend LoopOpt {
         }
         let vt = value_type(b, v);
         let ty = if vt == T_PTR {
-            pick_op(ptr == 8, T_I64, T_I32);
+            pick_op(ptr == 8, T_I64, T_I32)
         } else {
-            vt;
+            vt
         };
         let w = type_bits(ty, ptr);
         let mut s = Vector::<Value>::new();
@@ -1490,9 +1490,9 @@ extend LoopOpt {
             let x = self.cf_of(b, v, k);
             s.push(
                 if vt == T_PTR {
-                    cf_put(b, Inst { op: O_PTRTOINT, ty: ty, aux: 0, a: x, b: VNONE, c: VNONE }, at);
+                    cf_put(b, Inst { op: O_PTRTOINT, ty: ty, aux: 0, a: x, b: VNONE, c: VNONE }, at)
                 } else {
-                    x;
+                    x
                 },
             );
         }
@@ -1506,22 +1506,22 @@ extend LoopOpt {
         }
         let cw = type_bits(value_type(b, count), ptr);
         let mut total = if vt == T_PTR {
-            cf_put(b, iconst_of(ty, 0), at);
+            cf_put(b, iconst_of(ty, 0), at)
         } else {
-            s[0];
+            s[0]
         };
         // The binomials in a type of the value's or the count's bits and the shifts their factorials
         // take out, at most 128.
         let shift = factorial_twos(d);
         let wide = if w.max(cw) + shift <= 64 {
-            T_I64;
+            T_I64
         } else {
-            T_I128;
+            T_I128
         };
         let kw = if d >= 2 {
-            cf_conv(b, count, cw, wide, ptr, at);
+            cf_conv(b, count, cw, wide, ptr, at)
         } else {
-            VNONE;
+            VNONE
         };
         let mut prod = kw;
         for j in 1..d + 1 {
@@ -1616,11 +1616,11 @@ extend LoopOpt {
             if pv == q {
                 // By 1, or forward by a power of 2 up to 16.
                 let kq = if at.op == O_ADD && at.a == q && is_const(b, at.b) {
-                    raw_const(b, at.b);
+                    raw_const(b, at.b)
                 } else if at.op == O_ADD && at.b == q && is_const(b, at.a) {
-                    raw_const(b, at.a);
+                    raw_const(b, at.a)
                 } else {
-                    0u64;
+                    0u64
                 };
                 if !self.vrev && (kq == 0 || kq > 16 || (kq & kq - 1) != 0 || kq > 1 && (one || self.vexit)) {
                     return self.no("its counter does not step by 1", at.op);
@@ -1635,9 +1635,9 @@ extend LoopOpt {
                 // A float one with signed zeros: its lanes' extremes, run again in order on a zero (`vzr`;
                 // ordered when the loop stores).
                 let rz = if rel == NONE16 && is_float(ty) {
-                    self.minmax(b, ptr, fmath | FM_NSZ, u, pv, a);
+                    self.minmax(b, ptr, fmath | FM_NSZ, u, pv, a)
                 } else {
-                    NONE16;
+                    NONE16
                 };
                 if rel == NONE16 && rz == NONE16 {
                     return self.no("a value it carries is no reduction it widens", at.op);
@@ -1692,13 +1692,13 @@ extend LoopOpt {
             }
             if self.vk[x] == VK_RED {
                 let o = if t.op == O_SELECT && contains(&self.vred, t.b) {
-                    t.c;
+                    t.c
                 } else if t.op == O_SELECT {
-                    t.b;
+                    t.b
                 } else if contains(&self.vred, t.a) {
-                    t.b;
+                    t.b
                 } else {
-                    t.a;
+                    t.a
                 };
                 if self.kind(b, u, o) != VK_LANE && self.kind(b, u, o) != VK_INV {
                     return self.no("a reduction takes no lane value", t.op);
@@ -1708,9 +1708,9 @@ extend LoopOpt {
             let k = if !one && self.vqk == 1 && t.op == O_TRUNC && t.a == q && is_int(t.ty) && self.lane_size(t.ty, ptr) {
                 // The counter truncated: the lanes count on from it (`vector_ind`).
                 self.vind.push(i);
-                VK_LANE;
+                VK_LANE
             } else {
-                self.vclass(b, ptr, u, t);
+                self.vclass(b, ptr, u, t)
             };
             if k == 0 {
                 return self.no("an instruction it does not widen", t.op);
@@ -1822,9 +1822,9 @@ extend LoopOpt {
             for x in 0..self.vacc.len() {
                 let t = b.insts[self.vacc[x] as usize];
                 let ty = if t.op == O_STORE {
-                    value_type(b, t.b);
+                    value_type(b, t.b)
                 } else {
-                    t.ty;
+                    t.ty
                 };
                 if self.stride(b, t.a) != type_bytes(ty, ptr) {
                     return self.no("a loop counting down reads its counter or a stride per lane", 0);
@@ -1853,9 +1853,9 @@ extend LoopOpt {
             return self.no("its vector iterations cost more than its scalar ones", 0);
         }
         self.vlanes = if one {
-            1;
+            1
         } else {
-            self.plan_lanes();
+            self.plan_lanes()
         };
         return self.vchecks(b, cl);
     }
@@ -1885,9 +1885,9 @@ extend LoopOpt {
             }
             s += 1;
             let ty = if t.op == O_STORE {
-                value_type(b, t.b);
+                value_type(b, t.b)
             } else {
-                t.ty;
+                t.ty
             };
             if t.op == O_LOAD && contains_u32(&self.vgat, i) {
                 v += 2 * lanes;
@@ -1983,9 +1983,9 @@ extend LoopOpt {
         let in_taken = b.edge_target(t.b) == e;
         if ci.op != O_ICMP || b.edge_nargs(
             if in_taken {
-                t.b;
+                t.b
             } else {
-                t.c;
+                t.c
             },
         ) != 0 {
             return false;
@@ -2020,17 +2020,17 @@ extend LoopOpt {
         let ne = in_taken && ci.aux == C_NE || !in_taken && ci.aux == C_EQ;
         self.vne = ne;
         let (q, n, cond) = if ne && pa {
-            (ci.a, ci.b, C_ULT);
+            (ci.a, ci.b, C_ULT)
         } else if ne {
-            (ci.b, ci.a, C_ULT);
+            (ci.b, ci.a, C_ULT)
         } else if in_taken && (ci.aux == C_ULT || ci.aux == C_SLT) {
-            (ci.a, ci.b, ci.aux);
+            (ci.a, ci.b, ci.aux)
         } else if in_taken && (ci.aux == C_UGT || ci.aux == C_SGT) {
-            (ci.b, ci.a, ci.aux - C_SGT + C_SLT);
+            (ci.b, ci.a, ci.aux - C_SGT + C_SLT)
         } else if !in_taken && (ci.aux == C_UGE || ci.aux == C_SGE) {
-            (ci.a, ci.b, ci.aux - C_SGE + C_SLT);
+            (ci.a, ci.b, ci.aux - C_SGE + C_SLT)
         } else if !in_taken && (ci.aux == C_ULE || ci.aux == C_SLE) {
-            (ci.b, ci.a, ci.aux - C_SLE + C_SLT);
+            (ci.b, ci.a, ci.aux - C_SLE + C_SLT)
         } else {
             return self.no("its test is no `i < n`", ci.op);
         };
@@ -2074,11 +2074,11 @@ extend LoopOpt {
                 return 0;
             }
             return if t.b == self.viv && t.aux != 0 {
-                VK_ADDR;
+                VK_ADDR
             } else if self.kind(b, u, t.b) == VK_LANE && is_int(value_type(b, t.b)) {
-                VK_GADDR;
+                VK_GADDR
             } else {
-                0;
+                0
             };
         }
         if self.vone && (op == O_SEXT || op == O_ZEXT || op == O_TRUNC) && is_int(t.ty) && t.ty != T_I128 && self.lane_size(
@@ -2099,16 +2099,16 @@ extend LoopOpt {
             t.a,
         ) && (t.aux & MEM_VOLATILE) == 0 && is_float(t.ty) {
             return if self.lane_size(t.ty, ptr) {
-                VK_INV;
+                VK_INV
             } else {
-                0;
+                0
             };
         }
         if op == O_LOAD || op == O_STORE {
             let ty = if op == O_LOAD {
-                t.ty;
+                t.ty
             } else {
-                value_type(b, t.b);
+                value_type(b, t.b)
             };
             // Through `base + i * size`, or scalar copies through any step and a gathered address; a vector
             // load through every 2nd or 4th element (`vunzip`).
@@ -2133,9 +2133,9 @@ extend LoopOpt {
                 return VK_LANE;
             }
             return if self.kind(b, u, t.b) == VK_LANE || self.kind(b, u, t.b) == VK_INV || !self.defined_in(t.b) {
-                VK_STORE;
+                VK_STORE
             } else {
-                0;
+                0
             };
         }
         if op == O_ICMP || op == O_FCMP {
@@ -2167,9 +2167,9 @@ extend LoopOpt {
             let os = ks == VK_LANE || ks == VK_INV || !self.defined_in(t.b);
             let ot = kt == VK_LANE || kt == VK_INV || !self.defined_in(t.c);
             return if (kc == VK_MASK || ks == VK_LANE || kt == VK_LANE) && os && ot {
-                VK_LANE;
+                VK_LANE
             } else {
-                0;
+                0
             };
         }
         // A shift's amounts are lanes too (each below the width, as the scalar shift's).
@@ -2192,20 +2192,20 @@ extend LoopOpt {
     fn lane_operands(self: &Self, b: &Body, u: u32, t: Inst, unary: bool) u8 {
         let ka = self.kind(b, u, t.a);
         let kb = if unary {
-            0u8;
+            0u8
         } else {
-            self.kind(b, u, t.b);
+            self.kind(b, u, t.b)
         };
         let la = ka == VK_LANE;
         let lb = kb == VK_LANE;
         let oa = la || ka == VK_INV || !self.defined_in(t.a);
         let ob = unary || lb || kb == VK_INV || !self.defined_in(t.b);
         return if !((la || lb) && oa && ob) {
-            0;
+            0
         } else if t.op == O_ICMP || t.op == O_FCMP {
-            VK_MASK;
+            VK_MASK
         } else {
-            VK_LANE;
+            VK_LANE
         };
     }
 
@@ -2437,9 +2437,9 @@ extend LoopOpt {
         let r = cl.root[c as usize];
         let o = self.orig(i);
         let m = if o as usize < cl.member.len() {
-            cl.member[o as usize];
+            cl.member[o as usize]
         } else {
-            0u64;
+            0u64
         };
         return r != NONE && !self.inl[r as usize] && (m >> c as u64 & 1) != 0;
     }
@@ -2473,9 +2473,9 @@ extend LoopOpt {
                 op: O_ICMP,
                 ty: T_I8,
                 aux: if self.vsigned {
-                    C_SLT;
+                    C_SLT
                 } else {
-                    C_ULT;
+                    C_ULT
                 },
                 a: i0,
                 b: self.vn,
@@ -2484,9 +2484,9 @@ extend LoopOpt {
             l0,
         );
         let mut d = if self.vrev {
-            i0;
+            i0
         } else {
-            self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: i0, c: 0 }, l0);
+            self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: i0, c: 0 }, l0)
         };
         let ks = self.vqk.trailing_zeros();
         if self.vqk > 1 {
@@ -2506,9 +2506,9 @@ extend LoopOpt {
         let z = self.vconst(b, qt, 0, l0);
         // Counting down from `i0`, the loop runs `i0` iterations.
         let trips = if self.vrev {
-            d;
+            d
         } else {
-            self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: d, c: z }, l0);
+            self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: d, c: z }, l0)
         };
         let mk = self.vconst(b, qt, ~((step - 1) as u64), l0);
         let cnt = self.vi(b, Inst { op: O_AND, ty: qt, aux: 0, a: trips, b: mk, c: 0 }, l0);
@@ -2525,7 +2525,7 @@ extend LoopOpt {
         for q in 0..hb.param_len as u32 {
             self.args.push(VPARAM | gps + q);
         }
-        let to_sp = b.edge(sp, self.args.as_slice());
+        let to_sp = b.edge(sp, &self.args);
         let none: []Value = [];
         let to_vp = b.edge(vp, none);
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: ok, b: to_vp, c: to_sp }, l0);
@@ -2535,9 +2535,9 @@ extend LoopOpt {
         // The counter's end: the iterations times its step.
         let cu = if self.vqk > 1 {
             let sh = self.vconst(b, qt, ks as u64, l0);
-            self.vi(b, Inst { op: O_SHL, ty: qt, aux: 0, a: cnt, b: sh, c: 0 }, l0);
+            self.vi(b, Inst { op: O_SHL, ty: qt, aux: 0, a: cnt, b: sh, c: 0 }, l0)
         } else {
-            cnt;
+            cnt
         };
         let iend = self.vi(b, Inst { op: ast::pick(self.vrev, O_SUB, O_ADD), ty: qt, aux: 0, a: i0, b: cu, c: 0 }, l0);
         self.vinv.truncate(0);
@@ -2584,19 +2584,19 @@ extend LoopOpt {
             // An ordered one starts from the start value; a min or max starts each lane at it, which it may
             // take again.
             let id = if self.vord[r as usize] {
-                VPARAM | gps + (self.vred[r as usize] & ~VPARAM) - hb.param_start;
+                VPARAM | gps + (self.vred[r as usize] & ~VPARAM) - hb.param_start
             } else if self.vrel[r as usize] != 0 {
                 let r0 = VPARAM | gps + (self.vred[r as usize] & ~VPARAM) - hb.param_start;
-                self.vi(b, Inst { op: O_SPLAT, ty: vt, aux: 0, a: r0, b: VNONE, c: VNONE }, l0);
+                self.vi(b, Inst { op: O_SPLAT, ty: vt, aux: 0, a: r0, b: VNONE, c: VNONE }, l0)
             } else {
                 let idv = self.identity(b, b.insts[self.vrup[r as usize] as usize].op, rt);
-                self.vsplat_const(b, vt, idv, l0);
+                self.vsplat_const(b, vt, idv, l0)
             };
             for _ in 0..nv {
                 self.args.push(id);
             }
         }
-        let to_vl = b.edge(vl, self.args.as_slice());
+        let to_vl = b.edge(vl, &self.args);
         let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_vl, b: 0, c: 0 }, l0);
         self.vblock(b, vp, pstart, b.params.len() as u32, 0, hb.flags, g);
         // The vector loop: the counter, the accumulators; `nv` copies of the body's lanes, each instruction's
@@ -2629,17 +2629,17 @@ extend LoopOpt {
                     self.vmap[at] = if c == 0 {
                         let ix = if self.vrev {
                             let sk1 = self.vconst(b, qt, step - 1, l0);
-                            self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: vi, b: sk1, c: 0 }, l0);
+                            self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: vi, b: sk1, c: 0 }, l0)
                         } else {
-                            vi;
+                            vi
                         };
                         self.vi(
                             b,
                             Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux, a: t.a, b: ix, c: t.c },
                             b.locs[i as usize],
-                        );
+                        )
                     } else {
-                        self.vmap[x as usize];
+                        self.vmap[x as usize]
                     };
                 } else if !self.vone && k == VK_GADDR {
                     // A gathered address: each lane's at its access (`vgather`).
@@ -2702,9 +2702,9 @@ extend LoopOpt {
                         }
                     }
                     let cs = if t.op == O_STORE {
-                        self.cond_store(i);
+                        self.cond_store(i)
                     } else {
-                        NONE;
+                        NONE
                     };
                     if cs != NONE {
                         // The lanes the condition picks: a lane mask of the comparison, its complement for
@@ -2763,15 +2763,15 @@ extend LoopOpt {
                     // In order: copy c's lanes after copy c - 1's, each through the update.
                     let r = self.red_of(i);
                     let mut acc = if c == 0 {
-                        VPARAM | vps + 1 + r * nv;
+                        VPARAM | vps + 1 + r * nv
                     } else {
-                        self.vmap[((c - 1) * ub.len + x) as usize];
+                        self.vmap[((c - 1) * ub.len + x) as usize]
                     };
                     let pv = self.vred[r as usize];
                     let lx = if t.op == O_SELECT {
-                        ast::pick(t.b == pv, t.c, t.b);
+                        ast::pick(t.b == pv, t.c, t.b)
                     } else {
-                        ast::pick(t.a == pv, t.b, t.a);
+                        ast::pick(t.a == pv, t.b, t.a)
                     };
                     let xv = self.vval(b, u, c, lx);
                     let l = b.locs[i as usize];
@@ -2780,9 +2780,9 @@ extend LoopOpt {
                         // Counting down, the highest lane is the first iteration.
                         let j = ast::pick(self.vrev, nl - 1 - j0, j0);
                         let e = if self.vone {
-                            xv;
+                            xv
                         } else {
-                            self.vi(b, Inst { op: O_VEXTRACT, ty: t.ty, aux: j as u16, a: xv, b: VNONE, c: VNONE }, l);
+                            self.vi(b, Inst { op: O_VEXTRACT, ty: t.ty, aux: j as u16, a: xv, b: VNONE, c: VNONE }, l)
                         };
                         let mut nt = t;
                         if t.op == O_SELECT {
@@ -2803,9 +2803,9 @@ extend LoopOpt {
                     let r = self.red_of(i);
                     let acc = VPARAM | vps + 1 + r * nv + c;
                     let x = if t.b == self.vred[r as usize] {
-                        t.c;
+                        t.c
                     } else {
-                        t.b;
+                        t.b
                     };
                     let xv = self.vval(b, u, c, x);
                     self.vmap[at] = self.vbeat(b, self.vrel[r as usize], xv, acc, b.locs[i as usize]);
@@ -2813,9 +2813,9 @@ extend LoopOpt {
                     let r = self.red_of(i);
                     let acc = VPARAM | vps + 1 + r * nv + c;
                     let o = if t.a == self.vred[r as usize] {
-                        t.b;
+                        t.b
                     } else {
-                        t.a;
+                        t.a
                     };
                     let mut nt = t;
                     nt.ty = self.lane_ty(t.ty);
@@ -2833,18 +2833,18 @@ extend LoopOpt {
         // An overlapping last iteration: on while below `n - k`, then the tail block (`sp + 1`) runs the
         // iteration at `n - k` once when elements are left; the counter's chain stays an add.
         let last = if self.vtail {
-            self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: sk, c: 0 }, l0);
+            self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: sk, c: 0 }, l0)
         } else {
-            VNONE;
+            VNONE
         };
         let more = if self.vtail {
-            self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: vnext, b: last, c: 0 }, l0);
+            self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: vnext, b: last, c: 0 }, l0)
         } else {
             self.vi(
                 b,
                 Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(self.vrev, C_UGT, C_ULT), a: vnext, b: iend, c: 0 },
                 l0,
-            );
+            )
         };
         self.args.truncate(0);
         self.args.push(vnext);
@@ -2856,10 +2856,10 @@ extend LoopOpt {
                 self.args.push(self.vmap[(cc * ub.len + x) as usize]);
             }
         }
-        let back = b.edge(vl, self.args.as_slice());
+        let back = b.edge(vl, &self.args);
         // Out of the loop the counter is the vectors' end; past the overlapping iteration's tail block, `n`.
         self.args[0] = ast::pick(self.vtail, vnext, iend);
-        let out = b.edge(ast::pick(self.vtail, sp + 1, vx), self.args.as_slice());
+        let out = b.edge(ast::pick(self.vtail, sp + 1, vx), &self.args);
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: more, b: back, c: out }, l0);
         if self.vexit {
             self.vblock(b, lb, ls, b.params.len() as u32, 0, hb.flags, vl);
@@ -2898,26 +2898,26 @@ extend LoopOpt {
             let mut acc = VPARAM | xps + r * nv;
             for c in 1..nv {
                 acc = if rel != 0 {
-                    self.vbeat(b, rel, VPARAM | xps + r * nv + c, acc, l0);
+                    self.vbeat(b, rel, VPARAM | xps + r * nv + c, acc, l0)
                 } else {
-                    self.vi(b, Inst { op: op, ty: vt, aux: 0, a: acc, b: VPARAM | xps + r * nv + c, c: 0 }, l0);
+                    self.vi(b, Inst { op: op, ty: vt, aux: 0, a: acc, b: VPARAM | xps + r * nv + c, c: 0 }, l0)
                 };
             }
             if rel != 0 {
                 // The extreme lane; the start value is in every lane already.
                 let lo = rel == C_SLT || rel == C_ULT || rel == C_OLT;
                 let code = (core::OP_SIMD + if is_float(rt) && lo {
-                    core::SIMD_REDUCE_MIN_NUM;
+                    core::SIMD_REDUCE_MIN_NUM
                 } else if is_float(rt) {
-                    core::SIMD_REDUCE_MAX_NUM;
+                    core::SIMD_REDUCE_MAX_NUM
                 } else if lo {
-                    core::SIMD_REDUCE_MIN;
+                    core::SIMD_REDUCE_MIN
                 } else {
-                    core::SIMD_REDUCE_MAX;
+                    core::SIMD_REDUCE_MAX
                 } as u32) as u16 | if rel == C_SLT || rel == C_SGT {
-                    VOP_SIGNED;
+                    VOP_SIGNED
                 } else {
-                    0;
+                    0
                 };
                 let one = [acc];
                 let at = b.pool_list(one[0..1]);
@@ -2930,15 +2930,15 @@ extend LoopOpt {
                 continue;
             }
             let code = (core::OP_SIMD + if op == O_AND {
-                core::SIMD_REDUCE_AND;
+                core::SIMD_REDUCE_AND
             } else if op == O_OR {
-                core::SIMD_REDUCE_OR;
+                core::SIMD_REDUCE_OR
             } else if op == O_XOR {
-                core::SIMD_REDUCE_XOR;
+                core::SIMD_REDUCE_XOR
             } else if op == O_MUL || op == O_FMUL {
-                core::SIMD_REDUCE_MUL;
+                core::SIMD_REDUCE_MUL
             } else {
-                core::SIMD_REDUCE_ADD;
+                core::SIMD_REDUCE_ADD
             } as u32) as u16;
             let one = [acc];
             let at = b.pool_list(one[0..1]);
@@ -2946,7 +2946,7 @@ extend LoopOpt {
             let sum = self.vi(b, Inst { op: op, ty: rt, aux: 0, a: r0, b: red, c: 0 }, l0);
             self.args.push(sum);
         }
-        let to_sp2 = b.edge(sp, self.args.as_slice());
+        let to_sp2 = b.edge(sp, &self.args);
         // A float min or max of zero: the loop again from the start (`vzr`).
         let mut again = VNONE;
         for q in 0..hb.param_len as u32 {
@@ -2958,9 +2958,9 @@ extend LoopOpt {
             let z = self.vi(b, Inst { op: O_FCONST, ty: rt, aux: 0, a: 0, b: 0, c: VNONE }, l0);
             let e = self.vi(b, Inst { op: O_FCMP, ty: T_I8, aux: C_OEQ, a: self.args[q as usize], b: z, c: 0 }, l0);
             again = if again == VNONE {
-                e;
+                e
             } else {
-                self.vi(b, Inst { op: O_OR, ty: T_I8, aux: 0, a: again, b: e, c: 0 }, l0);
+                self.vi(b, Inst { op: O_OR, ty: T_I8, aux: 0, a: again, b: e, c: 0 }, l0)
             };
         }
         if again == VNONE {
@@ -2970,7 +2970,7 @@ extend LoopOpt {
             for q in 0..hb.param_len as u32 {
                 self.args.push(VPARAM | gps + q);
             }
-            let from0 = b.edge(sp, self.args.as_slice());
+            let from0 = b.edge(sp, &self.args);
             let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: again, b: from0, c: to_sp2 }, l0);
         }
         self.vblock(b, vx, xstart, xq, (1 + nred * nv) as u16, hb.flags, vl);
@@ -2981,7 +2981,7 @@ extend LoopOpt {
         for q in 0..hb.param_len as u32 {
             self.args.push(VPARAM | sps + q);
         }
-        let to_h = b.edge(h, self.args.as_slice());
+        let to_h = b.edge(h, &self.args);
         let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_h, b: 0, c: 0 }, l0);
         self.vblock(b, sp, sstart, sps, hb.param_len, hb.flags, g);
         if self.vtail {
@@ -3026,9 +3026,9 @@ extend LoopOpt {
             }
         }
         return if self.reads(b, u, hb.start) == 0 {
-            k;
+            k
         } else {
-            0;
+            0
         };
     }
 
@@ -3070,8 +3070,8 @@ extend LoopOpt {
             }
         }
         let more = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: self.vmap[qx as usize], b: iend, c: 0 }, l0);
-        let back = b.edge(ul, self.args.as_slice());
-        let out = b.edge(sp, self.args.as_slice());
+        let back = b.edge(ul, &self.args);
+        let out = b.edge(sp, &self.args);
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: more, b: back, c: out }, l0);
         self.vblock(b, ul, lstart, lps, hb.param_len, hb.flags, g);
         self.unroll_exit(b, h, p, sp, g);
@@ -3097,9 +3097,9 @@ extend LoopOpt {
                 op: O_ICMP,
                 ty: T_I8,
                 aux: if self.vsigned {
-                    C_SLT;
+                    C_SLT
                 } else {
-                    C_ULT;
+                    C_ULT
                 },
                 a: i0,
                 b: self.vn,
@@ -3118,8 +3118,8 @@ extend LoopOpt {
         for q in 0..np {
             self.args.push(VPARAM | gps + q);
         }
-        let to_ul = b.edge(ul, self.args.as_slice());
-        let to_sp = b.edge(sp, self.args.as_slice());
+        let to_ul = b.edge(ul, &self.args);
+        let to_sp = b.edge(sp, &self.args);
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: ok, b: to_ul, c: to_sp }, l0);
         self.vblock(b, g, gstart, gps, hb.param_len, hb.flags, p);
         return iend;
@@ -3138,7 +3138,7 @@ extend LoopOpt {
         for q in 0..np {
             self.args.push(VPARAM | sps + q);
         }
-        let to_h = b.edge(h, self.args.as_slice());
+        let to_h = b.edge(h, &self.args);
         let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_h, b: 0, c: 0 }, l0);
         self.vblock(b, sp, sstart, sps, hb.param_len, hb.flags, g);
         let pe = term(b, p).a;
@@ -3202,14 +3202,14 @@ extend LoopOpt {
         let to = term(b, ho);
         let th = term(b, h);
         let ex = if b.edge_target(th.b) == u {
-            th.c;
+            th.c
         } else {
-            th.b;
+            th.b
         };
         let a = if b.edge_target(to.b) as usize < inner.len() && inner[b.edge_target(to.b) as usize] == ho {
-            b.edge_target(to.b);
+            b.edge_target(to.b)
         } else {
-            b.edge_target(to.c);
+            b.edge_target(to.c)
         };
         self.jblk.truncate(0);
         if !self.jam_chain(b, a, h) {
@@ -3268,9 +3268,9 @@ extend LoopOpt {
         let mut size: u32 = 0;
         for x in 0..nj + 1 {
             let k = if x == nj {
-                u;
+                u
             } else {
-                self.jblk[x];
+                self.jblk[x]
             };
             let late = x >= na && x < nj;
             let bk = b.blocks[k as usize];
@@ -3305,9 +3305,9 @@ extend LoopOpt {
                 }
                 for y in 0..na + 1 {
                     let k = if y == na {
-                        u;
+                        u
                     } else {
-                        self.jblk[y];
+                        self.jblk[y]
                     };
                     let bk = b.blocks[k as usize];
                     for j in bk.start..bk.start + bk.len - 1 {
@@ -3392,9 +3392,9 @@ extend LoopOpt {
         let ivx = (self.jiv & ~VPARAM) - ib.param_start;
         let th = term(b, h);
         let ex = if b.edge_target(th.b) == u {
-            th.c;
+            th.c
         } else {
-            th.b;
+            th.b
         };
         // The block numbers: guard, first chain's copies, inner header, its body, second chain's copies,
         // the outer loop's new preheader.
@@ -3420,10 +3420,10 @@ extend LoopOpt {
         let q0 = VPARAM | lps + qx;
         for j in 0..k {
             let qj = if j == 0 {
-                q0;
+                q0
             } else {
                 let cj = self.vconst(b, qt, j, l0);
-                self.vi(b, Inst { op: O_ADD, ty: qt, aux: 0, a: q0, b: cj, c: 0 }, l0);
+                self.vi(b, Inst { op: O_ADD, ty: qt, aux: 0, a: q0, b: cj, c: 0 }, l0)
             };
             self.jq.push(qj);
             self.vmap[qx as usize] = qj;
@@ -3433,7 +3433,7 @@ extend LoopOpt {
                 self.args.push(self.um(b, ho, b.edge_arg(te, x)));
             }
         }
-        let to_fh = b.edge(fh, self.args.as_slice());
+        let to_fh = b.edge(fh, &self.args);
         let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_fh, b: 0, c: 0 }, l0);
         self.vblock(b, ua, ustart, lps, hb.param_len, hb.flags, g);
         // The inner header: copy `j`'s parameter `x` is `fps + j * ni + x`; its test copy 0's.
@@ -3449,12 +3449,12 @@ extend LoopOpt {
         let cv = self.copy_unrolled(b, ib.start, ho);
         self.imap[ib.start as usize] = cv;
         self.args.truncate(0);
-        let to_fb = b.edge(fb, self.args.as_slice());
-        let to_fc = b.edge(fc, self.args.as_slice());
+        let to_fb = b.edge(fb, &self.args);
+        let to_fc = b.edge(fc, &self.args);
         let (eb, ec) = if b.edge_target(th.b) == u {
-            (to_fb, to_fc);
+            (to_fb, to_fc)
         } else {
-            (to_fc, to_fb);
+            (to_fc, to_fb)
         };
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: cv, b: eb, c: ec }, l0);
         self.vblock(b, fh, fstart, fps, (k * ni) as u16, ib.flags | BLOCK_NOVEC, g);
@@ -3475,7 +3475,7 @@ extend LoopOpt {
         for j in 1..k {
             self.jargs[(j * ni + ivx) as usize] = self.jargs[ivx as usize];
         }
-        let back = b.edge(fh, self.jargs.as_slice());
+        let back = b.edge(fh, &self.jargs);
         let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: back, b: 0, c: 0 }, l0);
         self.vblock(b, fb, bstart, b.params.len() as u32, 0, ub.flags, g);
         // The second chain's copies in order, the outer header's values passed from one to the next.
@@ -3496,8 +3496,8 @@ extend LoopOpt {
             }
         }
         let more = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: self.vmap[qx as usize], b: iend, c: 0 }, l0);
-        let again = b.edge(ua, self.args.as_slice());
-        let out = b.edge(sp, self.args.as_slice());
+        let again = b.edge(ua, &self.args);
+        let out = b.edge(sp, &self.args);
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: more, b: again, c: out }, l0);
         self.vblock(b, fc, cstart, b.params.len() as u32, 0, b.blocks[self.jblk[nj - 1] as usize].flags, g);
         self.unroll_exit(b, ho, p, sp, g);
@@ -3552,9 +3552,9 @@ extend LoopOpt {
         let ps = b.blocks[h as usize].param_start;
         for x in 0..ni {
             self.pmap[(ps + x) as usize] = VPARAM | fps + if x == ivx {
-                0u32;
+                0u32
             } else {
-                j * ni;
+                j * ni
             } + x;
         }
     }
@@ -3570,18 +3570,18 @@ extend LoopOpt {
         if (v & VPARAM) != 0 {
             let x = v & ~VPARAM;
             return if x >= hb.param_start && x < hb.param_start + hb.param_len as u32 {
-                self.vmap[(x - hb.param_start) as usize];
+                self.vmap[(x - hb.param_start) as usize]
             } else if x as usize < self.pmap.len() && self.pmap[x as usize] != NONE {
-                self.pmap[x as usize];
+                self.pmap[x as usize]
             } else {
-                v;
+                v
             };
         }
         let x = v & ~VFLAG;
         return if x as usize < self.imap.len() && self.imap[x as usize] != NONE {
-            self.imap[x as usize] | v & VFLAG;
+            self.imap[x as usize] | v & VFLAG
         } else {
-            v;
+            v
         };
     }
 
@@ -3628,9 +3628,9 @@ extend LoopOpt {
             return NONE;
         }
         let ein = if self.inl[b.edge_target(th.b) as usize] {
-            th.b;
+            th.b
         } else {
-            th.c;
+            th.c
         };
         let e = b.edge_target(ein);
         let te = term(b, e);
@@ -3749,7 +3749,7 @@ extend LoopOpt {
         for q in 0..b.edge_nargs(tu) {
             self.args.push(self.um(b, h, b.edge_arg(tu, q)));
         }
-        let back = b.edge(h, self.args.as_slice());
+        let back = b.edge(h, &self.args);
         let _ = self.vi(
             b,
             Inst { op: O_JMP, ty: T_NONE, aux: 0, a: back, b: 0, c: 0 },
@@ -3781,9 +3781,9 @@ extend LoopOpt {
             return NONE;
         }
         let (es, xs) = if out_b {
-            (te.b, te.c);
+            (te.b, te.c)
         } else {
-            (te.c, te.b);
+            (te.c, te.b)
         };
         let (ex, ax) = self.lin_side(b, xs, e, u);
         if ex == NONE || self.lblocks.len() != 3 + (ax != NONE) as usize {
@@ -3867,19 +3867,19 @@ extend LoopOpt {
         for q in 0..b.edge_nargs(es) {
             self.args.push(self.um(b, h, b.edge_arg(es, q)));
         }
-        let leave = b.edge(b.edge_target(es), self.args.as_slice());
+        let leave = b.edge(b.edge_target(es), &self.args);
         self.args.truncate(0);
         let tu = term(b, u).a;
         for q in 0..b.edge_nargs(tu) {
             self.args.push(self.um(b, h, b.edge_arg(tu, q)));
         }
-        let back = b.edge(h, self.args.as_slice());
+        let back = b.edge(h, &self.args);
         let c = self.um(b, h, te.a);
         let l = b.locs[(ub.start + ub.len - 1) as usize];
         let _ = if out_b {
-            self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: c, b: leave, c: back }, l);
+            self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: c, b: leave, c: back }, l)
         } else {
-            self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: c, b: back, c: leave }, l);
+            self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: c, b: back, c: leave }, l)
         };
         self.lorig.push(NONE);
         self.vblock(b, nb, start, b.params.len() as u32, 0, ub.flags, e);
@@ -3902,15 +3902,15 @@ extend LoopOpt {
     fn lin_side(self: &Self, b: &Body, s: u32, e: u32, u: u32) (u32, u32) {
         let a = b.edge_target(s);
         if a == u {
-            return s, NONE;
+            return (s, NONE);
         }
         let t = term(b, a);
         if a == e || !self.inl[a as usize] || b.blocks[a as usize].param_len != 0 || b.edge_nargs(s) != 0 || t.op != O_JMP || b.edge_target(
             t.a,
         ) != u {
-            return NONE, NONE;
+            return (NONE, NONE);
         }
-        return t.a, a;
+        return (t.a, a);
     }
 
     // Whether the loop (body blocks `e` then `u`) reads or writes in every iteration the element load `t`
@@ -3923,11 +3923,11 @@ extend LoopOpt {
             for i in bk.start..bk.start + bk.len - 1 {
                 let s = b.insts[i as usize];
                 let sz = if s.op == O_LOAD {
-                    type_bytes(s.ty, 8);
+                    type_bytes(s.ty, 8)
                 } else if s.op == O_STORE {
-                    type_bytes(value_type(b, s.b), 8);
+                    type_bytes(value_type(b, s.b), 8)
                 } else {
-                    0u32;
+                    0u32
                 };
                 if sz == n && s.c == t.c && same_address(b, s.a, t.a) {
                     return true;
@@ -4000,9 +4000,9 @@ extend LoopOpt {
         if (v & VPARAM) != 0 {
             let x = v & ~VPARAM;
             return if x as usize < self.pmap.len() && self.pmap[x as usize] != NONE {
-                self.pmap[x as usize];
+                self.pmap[x as usize]
             } else {
-                v;
+                v
             };
         }
         let x = v & ~VFLAG;
@@ -4045,9 +4045,9 @@ extend LoopOpt {
     fn orig(self: &Self, i: u32) u32 {
         let base = self.lsave[0];
         return if base != 0 && i >= base && (i - base) as usize < self.lorig.len() && self.lorig[(i - base) as usize] != NONE {
-            self.lorig[(i - base) as usize];
+            self.lorig[(i - base) as usize]
         } else {
-            i;
+            i
         };
     }
 
@@ -4105,11 +4105,11 @@ extend LoopOpt {
             let o1 = (((off as i32) as i64 + a.aux as i64) as i32) as u32;
             let lo = self.vi(b, Inst { op: O_PTRADD, ty: T_PTR, aux: 0, a: a.a, b: VNONE, c: o1 }, l);
             let hi = self.vi(b, Inst { op: O_PTRADD, ty: T_PTR, aux: a.aux, a: a.a, b: i0, c: o1 }, l);
-            return lo, hi;
+            return (lo, hi);
         }
         let lo = self.vi(b, Inst { op: O_PTRADD, ty: T_PTR, aux: a.aux, a: a.a, b: i0, c: off }, l);
         let hi = self.vi(b, Inst { op: O_PTRADD, ty: T_PTR, aux: a.aux, a: a.a, b: self.vn, c: off }, l);
-        return lo, hi;
+        return (lo, hi);
     }
 
     // Copy `c` of strided store `i` of body `u` (`store_groups`): at the group's last store, its stores' lane
@@ -4226,7 +4226,7 @@ extend LoopOpt {
                 self.args.push(VPARAM | vps + 1 + r2 * nv + c);
             }
         }
-        let leave = b.edge(vx, self.args.as_slice());
+        let leave = b.edge(vx, &self.args);
         let none2: []Value = [];
         let on = b.edge(lb, none2);
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: stay, b: on, c: leave }, l0);
@@ -4243,14 +4243,14 @@ extend LoopOpt {
         let iv = self.vval(b, u, c, ga.b);
         let it = value_type(b, ga.b);
         let xv = if t.op == O_STORE {
-            self.vval(b, u, c, t.b);
+            self.vval(b, u, c, t.b)
         } else {
-            VNONE;
+            VNONE
         };
         let st = if t.op == O_STORE {
-            value_type(b, t.b);
+            value_type(b, t.b)
         } else {
-            t.ty;
+            t.ty
         };
         let vt = vec_type(st, self.vlanes);
         let mut v = VNONE;
@@ -4264,9 +4264,9 @@ extend LoopOpt {
             }
             let xk = self.vi(b, Inst { op: O_LOAD, ty: t.ty, aux: t.aux, a: ak, b: VNONE, c: t.c }, l);
             v = if k == 0 {
-                self.vi(b, Inst { op: O_SPLAT, ty: vt, aux: 0, a: xk, b: VNONE, c: VNONE }, l);
+                self.vi(b, Inst { op: O_SPLAT, ty: vt, aux: 0, a: xk, b: VNONE, c: VNONE }, l)
             } else {
-                self.vi(b, Inst { op: O_VINSERT, ty: vt, aux: k as u16, a: v, b: xk, c: VNONE }, l);
+                self.vi(b, Inst { op: O_VINSERT, ty: vt, aux: k as u16, a: v, b: xk, c: VNONE }, l)
             };
         }
         return v;
@@ -4336,9 +4336,9 @@ extend LoopOpt {
             return m;
         }
         let op = if type_bytes(lane_type(want), 8) > type_bytes(lane_type(mt), 8) {
-            O_SEXT;
+            O_SEXT
         } else {
-            O_TRUNC;
+            O_TRUNC
         };
         return self.vi(b, Inst { op: op, ty: want, aux: 0, a: m, b: VNONE, c: VNONE }, l);
     }
@@ -4377,9 +4377,9 @@ extend LoopOpt {
     // The type of a copy of a value of scalar type `t`: its vector, or itself for scalar copies.
     const fn lane_ty(self: &Self, t: u8) u8 {
         return if self.vone {
-            t;
+            t
         } else {
-            vec_type(t, self.vlanes);
+            vec_type(t, self.vlanes)
         };
     }
 
@@ -4388,14 +4388,14 @@ extend LoopOpt {
     fn vsplat_const(self: &mut Self, b: &mut Body, vt: u8, x: u64, l: u32) Value {
         if !is_vec(vt) {
             let op = if is_float(vt) {
-                O_FCONST;
+                O_FCONST
             } else {
-                O_ICONST;
+                O_ICONST
             };
             let v = x & if type_bits(vt, 8) >= 64 {
-                ~0u64;
+                ~0u64
             } else {
-                (1u64 << type_bits(vt, 8) as u64) - 1;
+                (1u64 << type_bits(vt, 8) as u64) - 1
             };
             return self.vi(b, Inst { op: op, ty: vt, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE }, l);
         }
@@ -4427,9 +4427,9 @@ extend LoopOpt {
         if op == O_FADD {
             // -0.0: x + -0.0 is x for every x, -0.0 included.
             return if ty == T_F32 {
-                0x80000000u64;
+                0x80000000u64
             } else {
-                0x8000000000000000u64;
+                0x8000000000000000u64
             };
         }
         if op == O_MUL {
@@ -4437,9 +4437,9 @@ extend LoopOpt {
         }
         if op == O_FMUL {
             return if ty == T_F32 {
-                0x3F800000u64;
+                0x3F800000u64
             } else {
-                0x3FF0000000000000u64;
+                0x3FF0000000000000u64
             };
         }
         return 0;
@@ -4499,9 +4499,9 @@ extend LoopOpt {
         }
         let c = b.insts[s.a as usize];
         let x = if s.b == pv {
-            s.c;
+            s.c
         } else {
-            s.b;
+            s.b
         };
         if s.b != pv && s.c != pv || x == pv || c.op != O_ICMP && c.op != O_FCMP || !(c.a == x && c.b == pv || c.a == pv && c.b == x) {
             return NONE16;
@@ -4530,19 +4530,19 @@ extend LoopOpt {
         }
         // Strict: an equal value replaces nothing.
         return if rel == C_SLE {
-            C_SLT;
+            C_SLT
         } else if rel == C_ULE {
-            C_ULT;
+            C_ULT
         } else if rel == C_OLE {
-            C_OLT;
+            C_OLT
         } else if rel == C_SGE {
-            C_SGT;
+            C_SGT
         } else if rel == C_UGE {
-            C_UGT;
+            C_UGT
         } else if rel == C_OGE {
-            C_OGT;
+            C_OGT
         } else {
-            rel;
+            rel
         };
     }
 
@@ -4574,9 +4574,9 @@ extend LoopOpt {
             return NONE;
         }
         let body = if self.inl[x as usize] {
-            x;
+            x
         } else {
-            y;
+            y
         };
         if body == h {
             return NONE;
@@ -4590,9 +4590,9 @@ extend LoopOpt {
             }
         }
         return if n == 1 {
-            body;
+            body
         } else {
-            NONE;
+            NONE
         };
     }
 
@@ -4833,7 +4833,7 @@ extend LoopOpt {
             let v = self.rn(b, h, b.edge_arg(e, q));
             self.args.push(v);
         }
-        return b.edge(b.edge_target(e), self.args.as_slice());
+        return b.edge(b.edge_target(e), &self.args);
     }
 
     // Instruction `t0` of header `h` for its copy (`copy`: its values the copy's) or for the header itself;
@@ -4880,9 +4880,9 @@ extend LoopOpt {
             let v = b.edge_arg(e, q);
             self.args.push(
                 if copy {
-                    self.hc(b, h, v);
+                    self.hc(b, h, v)
                 } else {
-                    v;
+                    v
                 },
             );
         }
@@ -4891,14 +4891,14 @@ extend LoopOpt {
                 let v = self.hvals[j];
                 self.args.push(
                     if copy {
-                        self.hc(b, h, v);
+                        self.hc(b, h, v)
                     } else {
-                        v;
+                        v
                     },
                 );
             }
         }
-        return b.edge(tg, self.args.as_slice());
+        return b.edge(tg, &self.args);
     }
 
     // The instruction count of loop `h` when it qualifies, else 0; sets `inl` and `lblocks` to its blocks
@@ -4933,9 +4933,9 @@ extend LoopOpt {
             }
         }
         return if backs == 1 {
-            size;
+            size
         } else {
-            0;
+            0
         };
     }
 
@@ -5048,7 +5048,7 @@ extend LoopOpt {
             for j in 0..tb.param_len as u32 {
                 self.args.push(VPARAM | ps + j);
             }
-            let e = b.edge(tg, self.args.as_slice());
+            let e = b.edge(tg, &self.args);
             let start = b.insts.len() as u32;
             b.insts.push(Inst { op: O_JMP, ty: T_NONE, aux: 0, a: e, b: 0, c: 0 });
             let l0 = b.locs[tb.start as usize];
@@ -5132,30 +5132,30 @@ extend LoopOpt {
         let za = is_const(b, ci.a) && raw_const(b, ci.a) == 0;
         let zb = is_const(b, ci.b) && raw_const(b, ci.b) == 0;
         let qd = if pa && zb && (in_taken && (ci.aux == C_NE || ci.aux == C_UGT) || !in_taken && (ci.aux == C_EQ || ci.aux == C_ULE)) {
-            ci.a;
+            ci.a
         } else if pb && za && (in_taken && (ci.aux == C_NE || ci.aux == C_ULT) || !in_taken && (ci.aux == C_EQ || ci.aux == C_UGE)) {
-            ci.b;
+            ci.b
         } else {
-            VNONE;
+            VNONE
         };
         self.grev = qd != VNONE && self.steps_down(b, h, u, qd, (qd & ~VPARAM) - hb0.param_start);
         if self.grev {
             self.gq = (qd & ~VPARAM) - hb0.param_start;
         }
         let (q, n, cond) = if self.grev {
-            (qd, VNONE, C_ULT);
+            (qd, VNONE, C_ULT)
         } else if ne && pa {
-            (ci.a, ci.b, C_ULT);
+            (ci.a, ci.b, C_ULT)
         } else if ne {
-            (ci.b, ci.a, C_ULT);
+            (ci.b, ci.a, C_ULT)
         } else if in_taken && (ci.aux == C_ULT || ci.aux == C_SLT) {
-            (ci.a, ci.b, ci.aux);
+            (ci.a, ci.b, ci.aux)
         } else if in_taken && (ci.aux == C_UGT || ci.aux == C_SGT) {
-            (ci.b, ci.a, ci.aux - C_SGT + C_SLT);
+            (ci.b, ci.a, ci.aux - C_SGT + C_SLT)
         } else if !in_taken && (ci.aux == C_UGE || ci.aux == C_SGE) {
-            (ci.a, ci.b, ci.aux - C_SGE + C_SLT);
+            (ci.a, ci.b, ci.aux - C_SGE + C_SLT)
         } else if !in_taken && (ci.aux == C_ULE || ci.aux == C_SLE) {
-            (ci.b, ci.a, ci.aux - C_SLE + C_SLT);
+            (ci.b, ci.a, ci.aux - C_SLE + C_SLT)
         } else {
             return false;
         };
@@ -5215,14 +5215,14 @@ extend LoopOpt {
             }
             let on_a = sa != 0xFF && (bc.aux == C_ULT || bc.aux == C_UGE);
             let len = if on_a {
-                bc.b;
+                bc.b
             } else {
-                bc.a;
+                bc.a
             };
             let (sh, off) = if on_a {
-                (sa, oa);
+                (sa, oa)
             } else {
-                (sb, ob);
+                (sb, ob)
             };
             if len == VNONE || self.defined_in(len) || value_type(b, len) != value_type(b, ast::pick(self.grev, q, n)) {
                 continue;
@@ -5233,9 +5233,9 @@ extend LoopOpt {
             self.fixes.push(k);
             self.fside.push(
                 if cold_c {
-                    0u8;
+                    0u8
                 } else {
-                    1u8;
+                    1u8
                 },
             );
             let mut seen = false;
@@ -5256,34 +5256,34 @@ extend LoopOpt {
     // `x` as `q << s + c` (`checks`): (s, c), (0xFF, 0) when it is not of that form.
     fn affine(self: &Self, b: &Body, ptr: u32, x: Value, q: Value) (u8, u64) {
         if x == q {
-            return 0u8, 0u64;
+            return (0u8, 0u64);
         }
         if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || !self.defined_in(x) {
-            return 0xFFu8, 0u64;
+            return (0xFFu8, 0u64);
         }
         let t = b.insts[x as usize];
         let bits = type_bits(t.ty, ptr);
         let k = if (t.b & (VPARAM | VFLAG)) == 0 && t.b != VNONE && t.b < b.insts.len() as u32 && b.insts[t.b as usize].op == O_ICONST {
-            b.insts[t.b as usize].a as u64 | b.insts[t.b as usize].b as u64 << 32;
+            b.insts[t.b as usize].a as u64 | b.insts[t.b as usize].b as u64 << 32
         } else {
-            u64::MAX;
+            u64::MAX
         };
         if k == u64::MAX {
-            return 0xFFu8, 0u64;
+            return (0xFFu8, 0u64);
         }
         if t.a == q && t.op == O_SHL && k >= 1 && k < 16 {
-            return k as u8, 0u64;
+            return (k as u8, 0u64);
         }
         if t.a == q && t.op == O_MUL && k >= 2 && k <= 0x8000 && (k & k - 1) == 0 {
-            return k.trailing_zeros() as u8, 0u64;
+            return (k.trailing_zeros() as u8, 0u64);
         }
         if (t.op == O_ADD || t.op == O_OR) && k < 0x80000000 && bits == type_bits(value_type(b, q), ptr) {
             let (s, c) = self.affine(b, ptr, t.a, q);
             if s != 0xFF && c == 0 && (t.op == O_ADD || k < 1u64 << s as u64) {
-                return s, k;
+                return (s, k);
             }
         }
-        return 0xFFu8, 0u64;
+        return (0xFFu8, 0u64);
     }
 
     // Whether a branch on the guard `version` would make (`gx`, `gy`, `gcond`) already enters preheader
@@ -5434,9 +5434,9 @@ extend LoopOpt {
                 let c = b.insts.len() as u32;
                 // Counting down from `i0`, the checks read `i0 - 1` at most: `i0 <= len`.
                 let x = if self.grev {
-                    VPARAM | ps + self.gq;
+                    VPARAM | ps + self.gq
                 } else {
-                    self.gx[k];
+                    self.gx[k]
                 };
                 b.insts.push(Inst { op: O_ICMP, ty: T_I8, aux: self.gcond, a: x, b: y, c: 0 });
                 b.locs.push(l0);
@@ -5464,8 +5464,8 @@ extend LoopOpt {
             self.args.push(VPARAM | ps + q);
         }
         // The two preheaders follow the guard block.
-        let ein = b.edge(gb + 1, self.args.as_slice());
-        let eout = b.edge(gb + 2, self.args.as_slice());
+        let ein = b.edge(gb + 1, &self.args);
+        let eout = b.edge(gb + 2, &self.args);
         b.insts.push(Inst { op: O_BR, ty: T_NONE, aux: 0, a: gv, b: ein, c: eout });
         b.locs.push(l0);
         let n = b.insts.len() as u32 - start;
@@ -5506,7 +5506,7 @@ extend LoopOpt {
             b.params.push(pt);
             self.args.push(VPARAM | ps + q);
         }
-        let e = b.edge(to, self.args.as_slice());
+        let e = b.edge(to, &self.args);
         let start = b.insts.len() as u32;
         b.insts.push(Inst { op: O_JMP, ty: T_NONE, aux: 0, a: e, b: 0, c: 0 });
         let l0 = b.locs[hb.start as usize];
@@ -5570,7 +5570,7 @@ extend LoopOpt {
         for q in 0..self.lout.len() {
             self.args.push(self.lout[q]);
         }
-        return b.edge(land, self.args.as_slice());
+        return b.edge(land, &self.args);
     }
 
     // Instruction `t` outside the loop with each value that leaves the loop the landing block's parameter
@@ -5651,7 +5651,7 @@ extend LoopOpt {
         for q in 0..b.edge_nargs(e) {
             self.args.push(self.landed(b.edge_arg(e, q), base));
         }
-        return b.edge(b.edge_target(e), self.args.as_slice());
+        return b.edge(b.edge_target(e), &self.args);
     }
 
     // Whether value `v` is defined in the loop at hand.
@@ -5685,9 +5685,9 @@ extend LoopOpt {
         }
         // The comparison's counted side `x` and constant side; `swap` when the constant comes first.
         let (x, kv, swap) = if is_const(b, ci.b) {
-            (ci.a, ci.b, false);
+            (ci.a, ci.b, false)
         } else if is_const(b, ci.a) {
-            (ci.b, ci.a, true);
+            (ci.b, ci.a, true)
         } else {
             return 0;
         };
@@ -5748,9 +5748,9 @@ extend LoopOpt {
                 return 0;
             }
             let holds = if swap {
-                le::icmp(ci.aux, ty, ptr, k, xv);
+                le::icmp(ci.aux, ty, ptr, k, xv)
             } else {
-                le::icmp(ci.aux, ty, ptr, xv, k);
+                le::icmp(ci.aux, ty, ptr, xv, k)
             };
             if holds == out_taken {
                 self.ctr = q;
@@ -5837,9 +5837,9 @@ extend LoopOpt {
                 self.bmap[self.lblocks[x as usize] as usize] = base + x;
             }
             let next_h = if j == n {
-                h;
+                h
             } else {
-                base + nl + self.lpos(h);
+                base + nl + self.lpos(h)
             };
             self.copy(b, h, next_h);
         }
@@ -5981,17 +5981,17 @@ extend LoopOpt {
     fn copy_edge(self: &mut Self, b: &mut Body, e: u32, h: u32, next_h: u32) u32 {
         let tg = b.edge_target(e);
         let nt = if tg == h {
-            next_h;
+            next_h
         } else if self.inl[tg as usize] {
-            self.bmap[tg as usize];
+            self.bmap[tg as usize]
         } else {
-            tg;
+            tg
         };
         self.args.truncate(0);
         for q in 0..b.edge_nargs(e) {
             self.args.push(self.cv(b.edge_arg(e, q)));
         }
-        return b.edge(nt, self.args.as_slice());
+        return b.edge(nt, &self.args);
     }
 }
 
@@ -6019,17 +6019,17 @@ fn cmp_code(t: Inst) u16 {
     }
     let c = t.aux;
     let (k, sg) = if c == C_EQ || c == C_OEQ && t.op == O_FCMP {
-        (core::SIMD_CMP_EQ, false);
+        (core::SIMD_CMP_EQ, false)
     } else if c == C_NE && t.op == O_ICMP || c == C_UNE && t.op == O_FCMP {
-        (core::SIMD_CMP_NE, false);
+        (core::SIMD_CMP_NE, false)
     } else if c == C_SLT || c == C_ULT || c == C_OLT && t.op == O_FCMP {
-        (core::SIMD_CMP_LT, c == C_SLT);
+        (core::SIMD_CMP_LT, c == C_SLT)
     } else if c == C_SLE || c == C_ULE || c == C_OLE && t.op == O_FCMP {
-        (core::SIMD_CMP_LE, c == C_SLE);
+        (core::SIMD_CMP_LE, c == C_SLE)
     } else if c == C_SGT || c == C_UGT || c == C_OGT && t.op == O_FCMP {
-        (core::SIMD_CMP_GT, c == C_SGT);
+        (core::SIMD_CMP_GT, c == C_SGT)
     } else if c == C_SGE || c == C_UGE || c == C_OGE && t.op == O_FCMP {
-        (core::SIMD_CMP_GE, c == C_SGE);
+        (core::SIMD_CMP_GE, c == C_SGE)
     } else {
         return NONE16;
     };
@@ -6061,9 +6061,9 @@ fn fix_branch(b: &mut Body, k: u32, side: u8) {
     let i = (bk.start + bk.len - 1) as usize;
     let t = b.insts[i];
     let e = if side == 0 {
-        t.b;
+        t.b
     } else {
-        t.c;
+        t.c
     };
     b.insts[i] = Inst { op: O_JMP, ty: T_NONE, aux: 0, a: e, b: 0, c: 0 };
 }
@@ -6103,13 +6103,13 @@ fn slice_len(b: &Body, pl: Inst, v: Value, ptr: u32) bool {
 // The integer type of `n` bytes (1, 2, 4 or 8).
 const fn int_of_bytes(n: u32) u8 {
     return if n == 1 {
-        T_I8;
+        T_I8
     } else if n == 2 {
-        T_I16;
+        T_I16
     } else if n == 4 {
-        T_I32;
+        T_I32
     } else {
-        T_I64;
+        T_I64
     };
 }
 
@@ -6171,17 +6171,17 @@ fn fill_u8(v: &mut Vector<u8>, n: usize, x: u8) {
 // The access class of instruction `i` (`Classes.acc`); CL_MANY for one made since.
 const fn class_at(cl: Classes, i: u32) u8 {
     return if i as usize < cl.acc.len() {
-        cl.acc[i as usize];
+        cl.acc[i as usize]
     } else {
-        CL_MANY;
+        CL_MANY
     };
 }
 
 const fn obj_at(cl: Classes, i: u32) u32 {
     return if i as usize < cl.obj.len() {
-        cl.obj[i as usize];
+        cl.obj[i as usize]
     } else {
-        NONE;
+        NONE
     };
 }
 
@@ -6201,9 +6201,9 @@ const fn step_op(op: u8) bool {
 // The unchecked operation of step `op`.
 const fn base_op(op: u8) u8 {
     return if op == O_ADD || op == O_ADDO {
-        O_ADD;
+        O_ADD
     } else {
-        O_SUB;
+        O_SUB
     };
 }
 
@@ -6254,11 +6254,11 @@ const PS_YES: u8 = 2;
 // The status of a value of two operands of statuses `a` and `b`.
 const fn p_st(a: u8, b: u8) u8 {
     return if a == PS_NO || b == PS_NO {
-        PS_NO;
+        PS_NO
     } else if a == PS_UNKNOWN || b == PS_UNKNOWN {
-        PS_UNKNOWN;
+        PS_UNKNOWN
     } else {
-        PS_YES;
+        PS_YES
     };
 }
 
@@ -6299,9 +6299,9 @@ const fn either(x: Poly, y: Poly, w: u32) Poly {
         st: PS_YES,
         deg: x.deg.max(y.deg),
         m: if rng {
-            w as u8;
+            w as u8
         } else {
-            (x.m as u32).min(y.m).min(w) as u8;
+            (x.m as u32).min(y.m).min(w) as u8
         },
         rng: rng,
         lo: x.lo.min(y.lo),
@@ -6312,9 +6312,9 @@ const fn either(x: Poly, y: Poly, w: u32) Poly {
 // `f` (`w` bits) times a constant: its degree and bits, no interval.
 const fn scaled(f: Poly, w: u32) Poly {
     return if f.st != PS_YES {
-        f;
+        f
     } else {
-        Poly { st: PS_YES, deg: f.deg, m: (f.m as u32).min(w) as u8, rng: false, lo: 0, hi: 0 };
+        Poly { st: PS_YES, deg: f.deg, m: (f.m as u32).min(w) as u8, rng: false, lo: 0, hi: 0 }
     };
 }
 
@@ -6325,9 +6325,9 @@ fn arith_fact(op: u8, x: Poly, y: Poly, w: u32) Poly {
         return p_of(st);
     }
     let deg = if op == O_MUL {
-        x.deg as u32 + y.deg as u32;
+        x.deg as u32 + y.deg as u32
     } else {
-        (x.deg as u32).max(y.deg);
+        (x.deg as u32).max(y.deg)
     };
     if deg > CF_DEG {
         return p_of(PS_NO);
@@ -6376,7 +6376,7 @@ fn products(x: Poly, y: Poly, ok: &mut bool) (i64, i64) {
     let b = ck(x.lo.checked_mul(y.hi), ok);
     let c = ck(x.hi.checked_mul(y.lo), ok);
     let d = ck(x.hi.checked_mul(y.hi), ok);
-    return a.min(b).min(c).min(d), a.max(b).max(c).max(d);
+    return (a.min(b).min(c).min(d), a.max(b).max(c).max(d));
 }
 
 // The facts of instruction `t` (`w` bits) from its operands' (`fa`, `fb`, each PS_YES, not all of
@@ -6401,17 +6401,17 @@ fn op_fact(b: &Body, ptr: u32, t: Inst, fa: Poly, fb: Poly, w: u32) Poly {
         }
         let m = (fa.m as u32).min(w);
         return if m <= s {
-            p_of(PS_NO);
+            p_of(PS_NO)
         } else {
-            Poly { st: PS_YES, deg: fa.deg, m: (m - s) as u8, rng: false, lo: 0, hi: 0 };
+            Poly { st: PS_YES, deg: fa.deg, m: (m - s) as u8, rng: false, lo: 0, hi: 0 }
         };
     }
     let fw = type_bits(value_type(b, t.a), ptr);
     if op == O_ZEXT || op == O_SEXT {
         let exact = if op == O_ZEXT {
-            fa.rng && fa.lo >= 0 && fa.hi <= umax(fw);
+            fa.rng && fa.lo >= 0 && fa.hi <= umax(fw)
         } else {
-            fa.rng && fa.lo >= smin(fw) && fa.hi <= smax(fw);
+            fa.rng && fa.lo >= smin(fw) && fa.hi <= smax(fw)
         };
         if exact {
             return Poly { st: PS_YES, deg: fa.deg, m: w as u8, rng: true, lo: fa.lo, hi: fa.hi };
@@ -6484,9 +6484,9 @@ fn cf_conv(b: &mut Body, v: Value, from: u32, ty: u8, ptr: u32, at: u32) Value {
         b,
         Inst {
             op: if to > from {
-                O_ZEXT;
+                O_ZEXT
             } else {
-                O_TRUNC;
+                O_TRUNC
             },
             ty: ty,
             aux: 0,
@@ -6543,9 +6543,9 @@ fn raw_const(b: &Body, v: Value) u64 {
 // The low `w` bits.
 const fn mask_of(w: u32) u64 {
     return if w >= 64 {
-        ~0u64;
+        ~0u64
     } else {
-        (1u64 << w) - 1;
+        (1u64 << w) - 1
     };
 }
 
@@ -6579,60 +6579,60 @@ const fn top_of(b: &Body, v: Value, w: u32, depth: u32) u64 {
 // `x`'s low `w` bits sign-extended.
 const fn sext_of(x: u64, w: u32) i64 {
     return if w >= 64 {
-        x as i64;
+        x as i64
     } else {
-        (x << 64 - w) as i64 >> 64 - w;
+        (x << 64 - w) as i64 >> 64 - w
     };
 }
 
 // `x`'s low `w` bits as a signed or an unsigned integer (`w` below 64 when unsigned).
 const fn int_value(x: u64, w: u32, signed: bool) i64 {
     return if signed {
-        sext_of(x, w);
+        sext_of(x, w)
     } else {
-        (x & mask_of(w)) as i64;
+        (x & mask_of(w)) as i64
     };
 }
 
 // The least and greatest signed values of `w` bits, and the greatest unsigned one, within i64.
 const fn smin(w: u32) i64 {
     return if w >= 64 {
-        i64::MIN;
+        i64::MIN
     } else {
-        -(1i64 << w - 1);
+        -(1i64 << w - 1)
     };
 }
 
 const fn smax(w: u32) i64 {
     return if w >= 64 {
-        i64::MAX;
+        i64::MAX
     } else {
-        (1i64 << w - 1) - 1;
+        (1i64 << w - 1) - 1
     };
 }
 
 const fn umax(w: u32) i64 {
     return if w >= 63 {
-        i64::MAX;
+        i64::MAX
     } else {
-        (1i64 << w) - 1;
+        (1i64 << w) - 1
     };
 }
 
 // The greatest and least values of `w` bits, signed or not, as stored.
 const fn type_max(w: u32, signed: bool) u64 {
     return if signed {
-        mask_of(w) >> 1;
+        mask_of(w) >> 1
     } else {
-        mask_of(w);
+        mask_of(w)
     };
 }
 
 const fn type_min(w: u32, signed: bool) u64 {
     return if signed {
-        (mask_of(w) >> 1) + 1;
+        (mask_of(w) >> 1) + 1
     } else {
-        0;
+        0
     };
 }
 
@@ -6665,17 +6665,17 @@ const fn inverse_of(x: u64) u64 {
 
 const fn pick_c(c: bool, a: u16, b: u16) u16 {
     return if c {
-        a;
+        a
     } else {
-        b;
+        b
     };
 }
 
 const fn pick_op(c: bool, a: u8, b: u8) u8 {
     return if c {
-        a;
+        a
     } else {
-        b;
+        b
     };
 }
 

@@ -334,9 +334,7 @@ extend Parser {
         let n = self.mk(
             NodeKind::NODE_LITERAL,
             Span::new(from, to),
-            NodeAs {
-                literal: LiteralData { raw: Span::new(from, to), token_type: TokenType::MatchertextLiteral, seg: true },
-            },
+            NodeAs { literal: LiteralData { raw: Span::new(from, to), token_type: MatchertextLiteral, seg: true } },
         );
         self.ast.push(n);
     }
@@ -412,18 +410,18 @@ extend Parser {
             // expression is not decidable from one token here -- `A<B * 2>` cannot be told from a type
             // until well past the `<` -- and the grammar stays LL(1) by asking for them.
             let arg = if self.check(TokenType::Label) {
-                self.parse_lifetime();
+                self.parse_lifetime()
             } else if self.check(TokenType::IntegerLiteral) {
-                self.literal();
+                self.literal()
             } else if self.check(TokenType::LeftBrace) {
                 self.advance();
                 let e = self.parse_expression();
                 self.expect(TokenType::RightBrace, "'}'");
-                e;
+                e
             } else if Parser::is_identifier_token(self.peek_type()) || self.check(TokenType::SelfUpper) {
-                self.parse_type_arg_path();
+                self.parse_type_arg_path()
             } else {
-                self.parse_type();
+                self.parse_type()
             };
             // `Name = Type` after the arguments: an associated type binding (`Add<i32, Output = T>`),
             // decided at the `=` a type never continues with.
@@ -536,9 +534,9 @@ extend Parser {
         let parts = self.ast.commit(mark);
         let b0 = self.bind_buf.len();
         let args = if self.check(TokenType::LessThan) {
-            self.parse_type_args();
+            self.parse_type_args()
         } else {
-            NodeList { start: 0, len: 0 };
+            NodeList { start: 0, len: 0 }
         };
         let bindings = self.take_bindings(b0);
         let id = self.fin(
@@ -578,12 +576,12 @@ extend Parser {
 
     pub(package) const fn parse_qualifier(self: &mut Self) TypeQualifier {
         if self.match(TokenType::Const) {
-            return TypeQualifier::TYPE_QUAL_CONST;
+            return TYPE_QUAL_CONST;
         }
         if self.match(TokenType::Mut) {
-            return TypeQualifier::TYPE_QUAL_MUT;
+            return TYPE_QUAL_MUT;
         }
-        return TypeQualifier::TYPE_QUAL_NONE;
+        return TYPE_QUAL_NONE;
     }
 
     // The type after `dyn`. A `dyn fn` signature node is the identity of its type (every equal
@@ -619,9 +617,9 @@ extend Parser {
         if opener == TokenType::Star {
             qualifier = self.parse_qualifier();
         } else if self.match(TokenType::Mut) {
-            qualifier = TypeQualifier::TYPE_QUAL_MUT;
+            qualifier = TYPE_QUAL_MUT;
         } else {
-            qualifier = TypeQualifier::TYPE_QUAL_NONE;
+            qualifier = TYPE_QUAL_NONE;
             if self.check(TokenType::Const) {
                 self.error_here("references use '&T' or '&mut T', not '&const T'");
                 self.advance();
@@ -636,9 +634,9 @@ extend Parser {
                     indirect_type: IndirectTypeData {
                         ty: inner,
                         qualifier: if qualifier == TypeQualifier::TYPE_QUAL_MUT {
-                            TypeQualifier::TYPE_QUAL_MUT;
+                            TYPE_QUAL_MUT
                         } else {
-                            TypeQualifier::TYPE_QUAL_CONST;
+                            TYPE_QUAL_CONST
                         },
                         lifetime: life,
                     },
@@ -648,9 +646,9 @@ extend Parser {
         let ty = self.parse_type();
         return self.mk(
             if opener == TokenType::Star {
-                NodeKind::NODE_POINTER_TYPE;
+                NODE_POINTER_TYPE
             } else {
-                NodeKind::NODE_REFERENCE_TYPE;
+                NODE_REFERENCE_TYPE
             },
             Span::new(start, self.node_span(ty).end),
             NodeAs { indirect_type: IndirectTypeData { ty: ty, qualifier: qualifier, lifetime: life } },
@@ -665,13 +663,7 @@ extend Parser {
             return self.mk(
                 NodeKind::NODE_REFERENCE_TYPE,
                 Span::new(start, self.node_span(inner).end),
-                NodeAs {
-                    indirect_type: IndirectTypeData {
-                        ty: inner,
-                        qualifier: TypeQualifier::TYPE_QUAL_NONE,
-                        lifetime: NODE_NONE,
-                    },
-                },
+                NodeAs { indirect_type: IndirectTypeData { ty: inner, qualifier: TYPE_QUAL_NONE, lifetime: NODE_NONE } },
             );
         }
         if self.match(TokenType::Star) || self.match(TokenType::Ampersand) {
@@ -685,9 +677,9 @@ extend Parser {
                     life = self.parse_lifetime();
                 }
                 let qualifier = if self.match(TokenType::Mut) {
-                    TypeQualifier::TYPE_QUAL_MUT;
+                    TypeQualifier::TYPE_QUAL_MUT
                 } else {
-                    TypeQualifier::TYPE_QUAL_NONE;
+                    TypeQualifier::TYPE_QUAL_NONE
                 };
                 let element = self.parse_type();
                 return self.mk(
@@ -750,7 +742,7 @@ extend Parser {
             return self.mk(
                 NodeKind::NODE_DYN_TYPE,
                 Span::new(start, self.node_span(inner).end),
-                NodeAs { indirect_type: IndirectTypeData { ty: inner, qualifier: TypeQualifier::TYPE_QUAL_NONE } },
+                NodeAs { indirect_type: IndirectTypeData { ty: inner, qualifier: TYPE_QUAL_NONE } },
             );
         }
         if Parser::is_identifier_token(self.peek_type()) || self.check(TokenType::SelfUpper) {
@@ -882,9 +874,9 @@ extend Parser {
             // A const parameter's default is written as a value, but every value that can default one --
             // a literal, a named constant -- parses as a type, so one parse serves both kinds.
             let default_type = if self.match(TokenType::Equal) {
-                self.parse_type();
+                self.parse_type()
             } else {
-                NODE_NONE;
+                NODE_NONE
             };
             self.ast.push(
                 self.fin_ext(
@@ -919,15 +911,15 @@ extend Parser {
             // `where 'a: 'b` -- a lifetime on the LHS; bounds are then lifetimes only.
             let lhs_is_lifetime = self.check(TokenType::Label);
             let ty = if lhs_is_lifetime {
-                self.parse_lifetime();
+                self.parse_lifetime()
             } else {
-                self.parse_type();
+                self.parse_type()
             };
             self.expect(TokenType::Colon, "':'");
             let bounds = if lhs_is_lifetime {
-                self.parse_lifetime_bounds();
+                self.parse_lifetime_bounds()
             } else {
-                self.parse_bounds();
+                self.parse_bounds()
             };
             self.ast.push(
                 self.fin(
@@ -1122,9 +1114,9 @@ extend Parser {
             Span::new(
                 start,
                 if body != NODE_NONE {
-                    self.node_span(body).end;
+                    self.node_span(body).end
                 } else {
-                    self.previous_end();
+                    self.previous_end()
                 },
             ),
             NodeExt {
@@ -1460,7 +1452,7 @@ extend Parser {
         return self.fin(
             NodeKind::NODE_STATIC_ASSERT,
             start,
-            NodeAs { binary: BinaryData { op: TokenType::Equal, left: cond, right: msg } },
+            NodeAs { binary: BinaryData { op: Equal, left: cond, right: msg } },
         );
     }
 
@@ -1471,9 +1463,9 @@ extend Parser {
         let mut lifetimes = NodeList { start: 0, len: 0 };
         let generics = self.parse_generics_split(&mut lifetimes);
         let bounds = if self.match(TokenType::Colon) {
-            self.parse_bounds();
+            self.parse_bounds()
         } else {
-            NodeList { start: 0, len: 0 };
+            NodeList { start: 0, len: 0 }
         };
         self.expect(TokenType::LeftBrace, "'{'");
         let mark = self.ast.mark();
@@ -1550,9 +1542,9 @@ extend Parser {
         let generics = self.parse_generics_split(&mut lifetimes);
         let target = self.parse_type();
         let interface_type = if self.match(TokenType::As) {
-            self.parse_type();
+            self.parse_type()
         } else {
-            NODE_NONE;
+            NODE_NONE
         };
         self.expect(TokenType::LeftBrace, "'{'");
         let mark = self.ast.mark();
@@ -1594,9 +1586,9 @@ extend Parser {
             } else {
                 self.error_here(
                     if vis != VIS_PRIVATE {
-                        "'pub' may only be applied to a function or const here";
+                        "'pub' may only be applied to a function or const here"
                     } else {
-                        "expected extension item";
+                        "expected extension item"
                     },
                 );
                 self.advance();
@@ -1637,9 +1629,9 @@ extend Parser {
                 format(
                     "{} of an 'extern \"C\"' block is checked against its C header: the block needs that header",
                     what,
-                );
+                )
             } else {
-                format("{} of an 'extern \"C\"' block is its C header's type: the block needs that header", what);
+                format("{} of an 'extern \"C\"' block is its C header's type: the block needs that header", what)
             },
         );
         self.errors.note(format("write 'extern \"C\" \"<header>.h\" {{ .. }}' with the header that defines it"));
@@ -1649,17 +1641,17 @@ extend Parser {
         let start = self.raw_peek().start();
         self.advance();
         let abi = if self.check(TokenType::StringLiteral) {
-            self.literal();
+            self.literal()
         } else {
-            NODE_NONE;
+            NODE_NONE
         };
         if abi == NODE_NONE {
             self.error_here("expected ABI string");
         }
         let header = if self.check(TokenType::StringLiteral) {
-            self.literal();
+            self.literal()
         } else {
-            NODE_NONE;
+            NODE_NONE
         };
         self.expect(TokenType::LeftBrace, "'{'");
         let mark = self.ast.mark();
@@ -1793,9 +1785,9 @@ extend Parser {
             } else {
                 self.error_here(
                     if vis != VIS_PRIVATE {
-                        "'pub' may only be applied to an extern function, type, struct, union, enum, const, or static";
+                        "'pub' may only be applied to an extern function, type, struct, union, enum, const, or static"
                     } else {
-                        "expected extern item";
+                        "expected extern item"
                     },
                 );
                 self.advance();
@@ -1923,7 +1915,7 @@ extend Parser {
                 self.match(TokenType::Semicolon);
                 return NODE_NONE;
             },
-        };
+        }
         self.pending_metas = saved_metas;
         self.derive_ifaces = saved_derives;
         self.derive_start = saved_dstart;
@@ -2104,15 +2096,15 @@ extend Parser {
             self.match(TokenType::Case);
             let pattern = self.parse_pattern_alts(arm_start);
             let guard = if self.match(TokenType::If) {
-                self.parse_expression();
+                self.parse_expression()
             } else {
-                NODE_NONE;
+                NODE_NONE
             };
             self.expect(TokenType::FatArrow, "'=>'");
             let body = if self.check(TokenType::LeftBrace) {
-                self.parse_block();
+                self.parse_block()
             } else {
-                self.parse_expression();
+                self.parse_expression()
             };
             self.ast.push(
                 self.mk(
@@ -2259,11 +2251,11 @@ extend Parser {
             if i != 0 {
                 msg.push_str(
                     if i + 1 != vs.len() {
-                        ", ";
+                        ", "
                     } else if vs.len() == 2 {
-                        " or ";
+                        " or "
                     } else {
-                        ", or ";
+                        ", or "
                     },
                 );
             }
@@ -2282,9 +2274,7 @@ extend Parser {
             let neg = self.mk(
                 NodeKind::NODE_UNARY,
                 Span::new(start, self.node_span(value).end),
-                NodeAs {
-                    unary: UnaryData { op: TokenType::Minus, operand: value, qualifier: TypeQualifier::TYPE_QUAL_NONE },
-                },
+                NodeAs { unary: UnaryData { op: Minus, operand: value, qualifier: TYPE_QUAL_NONE } },
             );
             return self.mk(
                 NodeKind::NODE_PATTERN_LITERAL,
@@ -2317,7 +2307,7 @@ extend Parser {
         }
         if self.check(TokenType::Underscore) {
             let token = self.advance();
-            return self.ast.add(Node { kind: NodeKind::NODE_PATTERN_WILDCARD, span: token.span() });
+            return self.ast.add(Node { kind: NODE_PATTERN_WILDCARD, span: token.span() });
         }
         if self.check(TokenType::Mut) || Parser::is_identifier_token(self.peek_type()) {
             let is_mut = self.match(TokenType::Mut);
@@ -2371,7 +2361,7 @@ extend Parser {
             while !self.check(TokenType::RightParen) && !self.at_end() {
                 if self.check(TokenType::Range) {
                     let rt = self.advance();
-                    self.ast.push(self.ast.add(Node { kind: NodeKind::NODE_PATTERN_WILDCARD, span: rt.span() }));
+                    self.ast.push(self.ast.add(Node { kind: NODE_PATTERN_WILDCARD, span: rt.span() }));
                     break;
                 }
                 self.ast.push(self.parse_pattern());
@@ -2500,9 +2490,9 @@ extend Parser {
         if self.match(TokenType::Equal) {
             let elements = self.ast.at_const(group).as_data.array_literal.elements;
             let mut index = if elements.len == 1 {
-                unsafe self.ast.list(elements)[0];
+                unsafe self.ast.list(elements)[0]
             } else {
-                NODE_NONE;
+                NODE_NONE
             };
             if index != NODE_NONE && self.ast.at_const(index).kind == NodeKind::NODE_FIELD_INITIALIZER {
                 index = NODE_NONE;
@@ -2570,11 +2560,11 @@ extend Parser {
         }
         if kind == TokenType::VaStart || kind == TokenType::VaArg || kind == TokenType::VaEnd {
             let va = if kind == TokenType::VaStart {
-                VA_START;
+                VA_START
             } else if kind == TokenType::VaArg {
-                VA_ARG;
+                VA_ARG
             } else {
-                VA_END;
+                VA_END
             };
             let value = self.identifier();
             if !self.match(TokenType::LeftParen) {
@@ -2652,9 +2642,9 @@ extend Parser {
             self.expect(TokenType::RightParen, "')'");
             return self.fin(
                 if is_align {
-                    NodeKind::NODE_ALIGNOF;
+                    NODE_ALIGNOF
                 } else {
-                    NodeKind::NODE_SIZEOF;
+                    NODE_SIZEOF
                 },
                 start,
                 NodeAs { single: SingleData { value: ty } },
@@ -2709,9 +2699,9 @@ extend Parser {
             let params = self.ast.commit(mark);
             let is_block = self.check(TokenType::LeftBrace);
             let body = if is_block {
-                self.parse_closure_block();
+                self.parse_closure_block()
             } else {
-                self.parse_expression();
+                self.parse_expression()
             };
             return self.fin_ext(
                 NodeKind::NODE_CLOSURE,
@@ -2787,13 +2777,13 @@ extend Parser {
                 }
                 let member = if self.check(TokenType::IntegerLiteral) {
                     let tok = self.advance();
-                    self.make_name(tok.span());
+                    self.make_name(tok.span())
                 } else if self.check(TokenType::FloatLiteral) {
                     self.error_here("nested tuple access needs parentheses: write '(t.0).1'");
                     self.advance();
-                    NODE_NONE;
+                    NODE_NONE
                 } else {
-                    self.callable_name();
+                    self.callable_name()
                 };
                 expr = self.mk(
                     NodeKind::NODE_MEMBER,
@@ -2866,13 +2856,7 @@ extend Parser {
                 expr = self.fin(
                     NodeKind::NODE_UNARY,
                     start,
-                    NodeAs {
-                        unary: UnaryData {
-                            op: TokenType::Question,
-                            operand: expr,
-                            qualifier: TypeQualifier::TYPE_QUAL_NONE,
-                        },
-                    },
+                    NodeAs { unary: UnaryData { op: Question, operand: expr, qualifier: TYPE_QUAL_NONE } },
                 );
             } else {
                 break;
@@ -2891,47 +2875,41 @@ extend Parser {
             // `&&x` lexes as one token: it is `&(&x)`, and the inner `&` takes any `mut`.
             let op = self.advance();
             let qualifier = if self.match(TokenType::Mut) {
-                TypeQualifier::TYPE_QUAL_MUT;
+                TypeQualifier::TYPE_QUAL_MUT
             } else {
-                TypeQualifier::TYPE_QUAL_NONE;
+                TypeQualifier::TYPE_QUAL_NONE
             };
             let operand = self.parse_unary_mode(grammar);
             let end = self.outer(operand).end;
             let inner = self.mk(
                 NodeKind::NODE_UNARY,
                 Span::new(op.start() + 1, end),
-                NodeAs { unary: UnaryData { op: TokenType::Ampersand, operand: operand, qualifier: qualifier } },
+                NodeAs { unary: UnaryData { op: Ampersand, operand: operand, qualifier: qualifier } },
             );
             self.mk(
                 NodeKind::NODE_UNARY,
                 Span::new(op.start(), end),
-                NodeAs {
-                    unary: UnaryData {
-                        op: TokenType::Ampersand,
-                        operand: inner,
-                        qualifier: TypeQualifier::TYPE_QUAL_NONE,
-                    },
-                },
-            );
+                NodeAs { unary: UnaryData { op: Ampersand, operand: inner, qualifier: TYPE_QUAL_NONE } },
+            )
         } else if !Parser::unary_operator(self.peek_type()) {
-            self.parse_postfix_after_mode(self.parse_primary_mode(grammar), grammar);
+            self.parse_postfix_after_mode(self.parse_primary_mode(grammar), grammar)
         } else {
             let op = self.advance();
             let qualifier = if op.kind() == TokenType::Ampersand && self.match(TokenType::Mut) {
-                TypeQualifier::TYPE_QUAL_MUT;
+                TypeQualifier::TYPE_QUAL_MUT
             } else {
-                TypeQualifier::TYPE_QUAL_NONE;
+                TypeQualifier::TYPE_QUAL_NONE
             };
             let operand = if op.kind() == TokenType::Unsafe && self.check(TokenType::LeftBrace) {
-                self.parse_block();
+                self.parse_block()
             } else {
-                self.parse_unary_mode(grammar);
+                self.parse_unary_mode(grammar)
             };
             self.mk(
                 NodeKind::NODE_UNARY,
                 Span::new(op.start(), self.outer(operand).end),
                 NodeAs { unary: UnaryData { op: op.kind(), operand: operand, qualifier: qualifier } },
-            );
+            )
         };
         self.depth = self.depth - 1;
         return result;
@@ -2974,15 +2952,15 @@ extend Parser {
         }
         let k1 = self.tokens[self.current + 1].kind();
         if k1 == TokenType::Equal {
-            return TokenType::GreaterThanEqual;
+            return GreaterThanEqual;
         }
         if k1 != TokenType::GreaterThan {
             return k;
         }
         if self.glued(2) && self.tokens[self.current + 2].kind() == TokenType::Equal {
-            return TokenType::RightShiftEqual;
+            return RightShiftEqual;
         }
-        return TokenType::RightShift;
+        return RightShift;
     }
 
     // The number of tokens `binary_op` glued into `op`.
@@ -3088,9 +3066,9 @@ extend Parser {
     fn parse_range_mode(self: &mut Self, context: RangeContext, grammar: ExpressionGrammar) NodeId {
         let open_start = self.check(TokenType::Range) || self.check(TokenType::RangeInclusive);
         let start_node = if open_start {
-            NODE_NONE;
+            NODE_NONE
         } else {
-            self.parse_range_bound_mode(context, grammar);
+            self.parse_range_bound_mode(context, grammar)
         };
         if !self.check(TokenType::Range) && !self.check(TokenType::RangeInclusive) {
             return start_node;
@@ -3098,9 +3076,9 @@ extend Parser {
         let op_start = self.raw_peek().start();
         let inclusive = self.advance().kind() == TokenType::RangeInclusive;
         let end = if self.starts_range_bound(context) {
-            self.parse_range_bound_mode(context, grammar);
+            self.parse_range_bound_mode(context, grammar)
         } else {
-            NODE_NONE;
+            NODE_NONE
         };
         if context != RangeContext::RANGE_PATTERN {
             return self.finish_range(NodeKind::NODE_RANGE, start_node, op_start, inclusive, end);
@@ -3122,7 +3100,7 @@ extend Parser {
         }
         let pd = n.as_data.pattern;
         if n.kind == NodeKind::NODE_PATTERN_NAME && pd.children.len == 0 && !self.ast.at_const(pd.name).as_data.name.is_mutable {
-            self.ast.at(b).kind = NodeKind::NODE_PATTERN_LITERAL;
+            self.ast.at(b).kind = NODE_PATTERN_LITERAL;
             self.ast.at(b).as_data = NodeAs { single: SingleData { value: pd.name } };
             return;
         }
@@ -3137,14 +3115,14 @@ extend Parser {
             self.error_here("an inclusive range '..=' needs an end");
         }
         let lo = if start_node != NODE_NONE {
-            self.outer(start_node).start;
+            self.outer(start_node).start
         } else {
-            op_start;
+            op_start
         };
         let hi = if end != NODE_NONE {
-            self.outer(end).end;
+            self.outer(end).end
         } else {
-            self.previous_end();
+            self.previous_end()
         };
         return self.mk(
             kind,
@@ -3161,9 +3139,9 @@ extend Parser {
         let op_start = self.raw_peek().start();
         let inclusive = self.advance().kind() == TokenType::RangeInclusive;
         let end = if self.starts_range_bound(RangeContext::RANGE_EXPR) {
-            self.parse_binary_level_mode(1, grammar);
+            self.parse_binary_level_mode(1, grammar)
         } else {
-            NODE_NONE;
+            NODE_NONE
         };
         return self.finish_range(NodeKind::NODE_RANGE, start_node, op_start, inclusive, end);
     }
@@ -3184,9 +3162,9 @@ extend Parser {
             }
             let children = self.ast.commit(mark);
             self.expect(TokenType::RightParen, "')'");
-            self.fin(NodeKind::NODE_PATTERN_TUPLE, tstart, NodeAs { pattern: PatternData { children: children } });
+            self.fin(NodeKind::NODE_PATTERN_TUPLE, tstart, NodeAs { pattern: PatternData { children: children } })
         } else {
-            self.identifier();
+            self.identifier()
         };
         let mut ty = NODE_NONE;
         let mut value = NODE_NONE;
@@ -3224,7 +3202,7 @@ extend Parser {
                 NodeAs { block: BlockData { statements: NodeList { start: 0, len: 0 } } },
             );
         }
-        let wild = self.ast.add(Node { kind: NodeKind::NODE_PATTERN_WILDCARD, span: Span::new(start, start) });
+        let wild = self.ast.add(Node { kind: NODE_PATTERN_WILDCARD, span: Span::new(start, start) });
         let mark = self.ast.mark();
         self.ast.push(
             self.mk(
@@ -3283,9 +3261,9 @@ extend Parser {
                 start,
                 self.node_span(
                     if else_branch != NODE_NONE {
-                        else_branch;
+                        else_branch
                     } else {
-                        then_branch;
+                        then_branch
                     },
                 ).end,
             ),
@@ -3311,7 +3289,7 @@ extend Parser {
                     let value = self.parse_condition_expression();
                     let body = self.parse_block();
                     let end = self.previous_end();
-                    let brk = self.ast.add(Node { kind: NodeKind::NODE_BREAK, span: Span::new(end, end) });
+                    let brk = self.ast.add(Node { kind: NODE_BREAK, span: Span::new(end, end) });
                     let bmark = self.ast.mark();
                     self.ast.push(brk);
                     let brk_block = self.mk(
@@ -3362,9 +3340,9 @@ extend Parser {
             For | InlineFor | ParallelFor => {
                 let mut kind = NodeKind::NODE_FOR;
                 if self.check(TokenType::InlineFor) {
-                    kind = NodeKind::NODE_INLINE_FOR;
+                    kind = NODE_INLINE_FOR;
                 } else if self.check(TokenType::ParallelFor) {
-                    kind = NodeKind::NODE_PARALLEL_FOR;
+                    kind = NODE_PARALLEL_FOR;
                     self.ast.sugar_marks |= SUGAR_PARFOR;
                 }
                 self.advance();
@@ -3374,9 +3352,9 @@ extend Parser {
                     self.expect(TokenType::For, "'for'");
                 }
                 let binding = if kind == NodeKind::NODE_FOR {
-                    self.parse_for_binding();
+                    self.parse_for_binding()
                 } else {
-                    self.identifier();
+                    self.identifier()
                 };
                 self.expect(TokenType::In, "'in'");
                 let iterable = self.parse_range_mode(RangeContext::RANGE_FOR, ExpressionGrammar::EXPR_CONDITION);
@@ -3414,7 +3392,7 @@ extend Parser {
                     NodeAs { while_stmt: WhileData { body: body, label: label } },
                 );
             },
-        };
+        }
         return result;
     }
 
@@ -3471,7 +3449,7 @@ extend Parser {
                 }
                 let mut values = self.ast.commit(mark);
                 if values.len > 1 {
-                    // `return a, b;` returns the tuple `(a, b)`.
+                    // `return a, b;` and a bare `return;` of named results return the tuple `(a, b)`.
                     let tuple = self.mk(
                         NodeKind::NODE_TUPLE,
                         Span::new(
@@ -3489,9 +3467,9 @@ extend Parser {
             },
             Break | Continue => {
                 let kind = if self.check(TokenType::Break) {
-                    NodeKind::NODE_BREAK;
+                    NodeKind::NODE_BREAK
                 } else {
-                    NodeKind::NODE_CONTINUE;
+                    NodeKind::NODE_CONTINUE
                 };
                 self.advance();
                 let mut label = Span::empty();
@@ -3511,9 +3489,9 @@ extend Parser {
                 self.advance();
                 let is_block = self.check(TokenType::LeftBrace);
                 let value = if is_block {
-                    self.parse_block();
+                    self.parse_block()
                 } else {
-                    self.parse_expression();
+                    self.parse_expression()
                 };
                 if !is_block {
                     self.expect(TokenType::Semicolon, "';'");
@@ -3548,10 +3526,12 @@ extend Parser {
                 result = self.parse_select();
             },
             Switch => {
-                // A statement `switch` ends at its `}`, as `if` and `loop` do. The `;` the earlier rule
-                // required after it is still accepted.
+                // A statement `switch` ends at its `}`, as `if` and `loop` do.
                 let s = self.parse_switch();
-                let _ = self.match(TokenType::Semicolon);
+                if self.check(TokenType::Semicolon) {
+                    self.error_here("a 'switch' statement ends at its '}': remove the ';'");
+                    self.advance();
+                }
                 result = self.fin(
                     NodeKind::NODE_EXPRESSION_STATEMENT,
                     start,
@@ -3591,43 +3571,43 @@ extend Parser {
                 let op = self.advance();
                 let is_block = self.check(TokenType::LeftBrace);
                 let operand = if is_block {
-                    self.parse_block();
+                    self.parse_block()
                 } else {
-                    self.parse_unary_mode(ExpressionGrammar::EXPR_FULL);
+                    self.parse_unary_mode(ExpressionGrammar::EXPR_FULL)
                 };
                 let unary = self.mk(
                     NodeKind::NODE_UNARY,
                     Span::new(start, self.outer(operand).end),
-                    NodeAs {
-                        unary: UnaryData { op: op.kind(), operand: operand, qualifier: TypeQualifier::TYPE_QUAL_NONE },
-                    },
+                    NodeAs { unary: UnaryData { op: op.kind(), operand: operand, qualifier: TYPE_QUAL_NONE } },
                 );
                 let cast = self.parse_cast_after(unary);
                 let expression = self.parse_expression_from_mode(cast, ExpressionGrammar::EXPR_FULL);
                 // a bare 'unsafe { ... }' statement needs no ';'; if the block turned out to be only
                 // the prefix of a larger expression, the statement does, unless it ends its block
-                if (!is_block || expression != unary) && !self.check(TokenType::RightBrace) {
+                let semi = (!is_block || expression != unary) && !self.check(TokenType::RightBrace);
+                if semi {
                     self.expect(TokenType::Semicolon, "';'");
                 }
                 result = self.fin(
                     NodeKind::NODE_EXPRESSION_STATEMENT,
                     start,
-                    NodeAs { single: SingleData { value: expression } },
+                    NodeAs { single: SingleData { value: expression, semi: semi } },
                 );
             },
             _ => {
                 let expression = self.parse_expression();
-                // The last expression of a block may omit its `;`.
-                if !self.check(TokenType::RightBrace) {
+                // The last expression of a block may omit its `;`: then it is the block's value.
+                let semi = !self.check(TokenType::RightBrace);
+                if semi {
                     self.expect(TokenType::Semicolon, "';'");
                 }
                 result = self.fin(
                     NodeKind::NODE_EXPRESSION_STATEMENT,
                     start,
-                    NodeAs { single: SingleData { value: expression } },
+                    NodeAs { single: SingleData { value: expression, semi: semi } },
                 );
             },
-        };
+        }
         return result;
     }
 
@@ -3713,22 +3693,22 @@ extend Parser {
         let mut op = NODE_NONE;
         let mut value = NODE_NONE;
         let ek = if expr == NODE_NONE {
-            NodeKind::NODE_NONE_KIND;
+            NodeKind::NODE_NONE_KIND
         } else {
-            self.ast.at_const(expr).kind;
+            self.ast.at_const(expr).kind
         };
         if ek == NodeKind::NODE_IDENTIFIER && self.span_text_is(self.ast.at_const(expr).as_data.name.text, "default") {
-            kind = SelectArmKind::SELECT_DEFAULT;
+            kind = SELECT_DEFAULT;
         } else if ek == NodeKind::NODE_CALL {
             let cd = self.ast.at_const(expr).as_data.call;
             let ck = self.ast.at_const(cd.callee).kind;
             let cn = if ck == NodeKind::NODE_IDENTIFIER {
-                self.ast.at_const(cd.callee).as_data.name.text;
+                self.ast.at_const(cd.callee).as_data.name.text
             } else {
-                Span::empty();
+                Span::empty()
             };
             if ck == NodeKind::NODE_IDENTIFIER && self.span_text_is(cn, "timeout") {
-                kind = SelectArmKind::SELECT_TIMEOUT;
+                kind = SELECT_TIMEOUT;
                 if cd.args.len != 1 {
                     self.error_here("'timeout' takes one duration");
                     bad = true;
@@ -3739,10 +3719,10 @@ extend Parser {
                 let md = self.ast.at_const(cd.callee).as_data.member;
                 let mname = self.ast.at_const(md.member).as_data.name.text;
                 if self.span_text_is(mname, "recv") && cd.args.len == 0 {
-                    kind = SelectArmKind::SELECT_RECV;
+                    kind = SELECT_RECV;
                     op = md.object;
                 } else if self.span_text_is(mname, "send") && cd.args.len == 1 {
-                    kind = SelectArmKind::SELECT_SEND;
+                    kind = SELECT_SEND;
                     op = md.object;
                     value = unsafe self.ast.list(cd.args)[0];
                 } else {
@@ -3854,15 +3834,15 @@ extend Parser {
             let mut ws = false;
             let mut wi = false;
             let k = if parts == 1 && self.text_is(namespace, "target_feature") {
-                AttrKind::ATTR_TARGET_FEATURE as i32;
+                AttrKind::ATTR_TARGET_FEATURE as i32
             } else if parts == 1 && self.text_is(namespace, "simd_impl") {
-                AttrKind::ATTR_SIMD_IMPL as i32;
+                AttrKind::ATTR_SIMD_IMPL as i32
             } else if parts == 1 && self.text_is(namespace, "layout") {
-                AttrKind::ATTR_LAYOUT as i32;
+                AttrKind::ATTR_LAYOUT as i32
             } else if parts == 1 {
-                self.attr_kind_of(namespace, &mut ws, &mut wi);
+                self.attr_kind_of(namespace, &mut ws, &mut wi)
             } else {
-                -1;
+                -1
             };
             if k >= 0 && attr_expr_args(k as u8) != 0 {
                 expr = self.parse_attr_expr(k == AttrKind::ATTR_ALIGN as i32);
@@ -3984,9 +3964,9 @@ extend Parser {
             let ch = self.source[i as usize];
             if ch != b'_' {
                 let d = if ch <= b'9' {
-                    ch - b'0';
+                    ch - b'0'
                 } else {
-                    (ch | 0x20u8) - b'a' + 10u8;
+                    (ch | 0x20u8) - b'a' + 10u8
                 };
                 v = v * base + d as u64;
                 if v > 0xFFFFFFFF {
@@ -4054,11 +4034,11 @@ extend Parser {
             let msg = if is_arch {
                 String::from_str(
                     "attribute '@arch' requires an architecture list, e.g. '@arch(x86_64)' or '@arch(x86_64 | aarch64)'",
-                );
+                )
             } else {
                 String::from_str(
                     "attribute '@platform' requires a platform list, e.g. '@platform(windows)' or '@platform(linux | macos)'",
-                );
+                )
             };
             self.errors.emit_span(dc::INVALID_PLATFORM_ATTRIBUTE, syntax.namespace.span(), msg);
             return;
@@ -4089,9 +4069,9 @@ extend Parser {
             // `!x` is every OTHER platform: the complement over the whole set, which grows with it.
             let all = (1u32 << names.len() as u32) - 1;
             mask = mask | if neg {
-                bit ^ all;
+                bit ^ all
             } else {
-                bit;
+                bit
             };
             i = i + 1;
             if i < count {
@@ -4104,9 +4084,9 @@ extend Parser {
         }
         if !valid {
             let t = if i < count {
-                self.attr_arg(syntax, i);
+                self.attr_arg(syntax, i)
             } else {
-                syntax.name;
+                syntax.name
             };
             if is_arch {
                 self.errors.emit_span(
@@ -4138,9 +4118,9 @@ extend Parser {
             return;
         }
         let t = if i < count {
-            self.attr_arg(syntax, i);
+            self.attr_arg(syntax, i)
         } else {
-            syntax.name;
+            syntax.name
         };
         self.errors.emit_span(
             dc::WHEN_TAKES_CONDITION_OVER_TEST_THREAD_SANITIZER,
@@ -4309,23 +4289,23 @@ extend Parser {
         let argc = Parser::attr_arg_count(&syntax);
         // The flag attributes: no arguments.
         let flag = if syntax.parts != 1 {
-            -1;
+            -1
         } else if self.text_is(ns, "emit_macro") {
-            AttrKind::ATTR_EMIT_MACRO as i32;
+            AttrKind::ATTR_EMIT_MACRO as i32
         } else if self.text_is(ns, "blocking") {
-            AttrKind::ATTR_BLOCKING as i32;
+            AttrKind::ATTR_BLOCKING as i32
         } else if self.text_is(ns, "no_const") {
-            AttrKind::ATTR_NO_CONST as i32;
+            AttrKind::ATTR_NO_CONST as i32
         } else if self.text_is(ns, "tail_recurse") {
-            AttrKind::ATTR_TAIL_RECURSE as i32;
+            AttrKind::ATTR_TAIL_RECURSE as i32
         } else if self.text_is(ns, "thread_local") {
-            AttrKind::ATTR_THREAD_LOCAL as i32;
+            AttrKind::ATTR_THREAD_LOCAL as i32
         } else if self.text_is(ns, "ordered") {
-            AttrKind::ATTR_ORDERED as i32;
+            AttrKind::ATTR_ORDERED as i32
         } else if self.text_is(ns, "owned") {
-            AttrKind::ATTR_OWNED as i32;
+            AttrKind::ATTR_OWNED as i32
         } else {
-            -1;
+            -1
         };
         if flag >= 0 {
             *out = Attr { kind: flag as u8, str_span: Span::empty() };
@@ -4363,15 +4343,15 @@ extend Parser {
             while ok && i < argc {
                 let arg = self.attr_arg(&syntax, i);
                 let bit = if arg.kind() == TokenType::Const {
-                    UNSAFE_CONST;
+                    UNSAFE_CONST
                 } else if arg.kind() == TokenType::Identifier && self.text_is(arg, "safe") {
-                    UNSAFE_SAFE;
+                    UNSAFE_SAFE
                 } else if arg.kind() == TokenType::Identifier && self.text_is(arg, "naked") {
-                    UNSAFE_NAKED;
+                    UNSAFE_NAKED
                 } else if arg.kind() == TokenType::Identifier && self.text_is(arg, "link_section") {
-                    UNSAFE_LINK_SECTION;
+                    UNSAFE_LINK_SECTION
                 } else {
-                    0u32;
+                    0u32
                 };
                 if bit == 0 {
                     ok = false;
@@ -4450,13 +4430,13 @@ extend Parser {
             return true;
         }
         let test_kind = if self.text_is(ns, "test") {
-            AttrKind::ATTR_TEST as i32;
+            AttrKind::ATTR_TEST as i32
         } else if self.text_is(ns, "test_init") {
-            AttrKind::ATTR_TEST_INIT as i32;
+            AttrKind::ATTR_TEST_INIT as i32
         } else if self.text_is(ns, "test_free") {
-            AttrKind::ATTR_TEST_FREE as i32;
+            AttrKind::ATTR_TEST_FREE as i32
         } else {
-            -1;
+            -1
         };
         if syntax.parts == 1 && test_kind >= 0 {
             *out = Attr { kind: test_kind as u8, str_span: Span::empty() };
@@ -4570,9 +4550,9 @@ extend Parser {
                     }
                     if !vok {
                         let at = if i < count {
-                            self.attr_arg(&syntax, i);
+                            self.attr_arg(&syntax, i)
                         } else {
-                            syntax.name;
+                            syntax.name
                         };
                         self.errors.emit_span(
                             dc::REFLECT_VALUE_INTEGER_STRING_TRUE_FALSE,
@@ -4645,9 +4625,9 @@ extend Parser {
         let mut wants_str = false;
         let mut wants_int = false;
         let kind = if syntax.parts == 1 {
-            self.attr_kind_of(ns, &mut wants_str, &mut wants_int);
+            self.attr_kind_of(ns, &mut wants_str, &mut wants_int)
         } else {
-            -1;
+            -1
         };
         if kind < 0 {
             if !self.bootstrap_tags {
@@ -4686,18 +4666,18 @@ extend Parser {
                 0,
             ).kind() != TokenType::StringLiteral {
                 let t = if argc != 0 {
-                    self.attr_arg(&syntax, 0);
+                    self.attr_arg(&syntax, 0)
                 } else {
-                    syntax.name;
+                    syntax.name
                 };
                 self.errors.emit_span(
                     dc::EXPECTED_INTEGER_ARGUMENT,
                     t.span(),
                     String::from_str(
                         if wants_int {
-                            "expected an integer argument";
+                            "expected an integer argument"
                         } else {
-                            "expected a string argument";
+                            "expected a string argument"
                         },
                     ),
                 );
@@ -4729,11 +4709,11 @@ extend Parser {
         let want = attr_arity(attr_expr_args(out.kind));
         let e = syntax.expr;
         let n: u32 = if e == NODE_NONE {
-            0;
+            0
         } else if self.ast.at_const(e).kind == NodeKind::NODE_TUPLE && self.ast.at_const(e).span.start == self.tokens[syntax.arg_start - 1].start() {
-            self.ast.at_const(e).as_data.array_literal.elements.len;
+            self.ast.at_const(e).as_data.array_literal.elements.len
         } else {
-            1;
+            1
         };
         if n != want {
             self.errors.emit_span(
@@ -4744,9 +4724,9 @@ extend Parser {
                     diag::span_str(self.source, syntax.namespace.start(), syntax.name.end()),
                     want,
                     if want == 1 {
-                        "argument";
+                        "argument"
                     } else {
-                        "arguments";
+                        "arguments"
                     },
                 ),
             );
@@ -4848,19 +4828,19 @@ extend Parser {
                     owner,
                 ).as_data.const_def.is_extern;
                 let why = if (attr.arg & (UNSAFE_SAFE | UNSAFE_CONST)) != 0 && !in_extern {
-                    "'@unsafe(safe)' and '@unsafe(const)' may only be applied to a function in an 'extern \"C\"' block";
+                    "'@unsafe(safe)' and '@unsafe(const)' may only be applied to a function in an 'extern \"C\"' block"
                 } else if (attr.arg & UNSAFE_NAKED) != 0 && !def {
-                    "'@unsafe(naked)' may only be applied to a function with a body outside an 'extern \"C\"' block";
+                    "'@unsafe(naked)' may only be applied to a function with a body outside an 'extern \"C\"' block"
                 } else if (attr.arg & UNSAFE_LINK_SECTION) != 0 && !def && !stat {
-                    "'@unsafe(link_section = ...)' may only be applied to a function with a body outside an 'extern \"C\"' block, or to a 'static mut' outside one";
+                    "'@unsafe(link_section = ...)' may only be applied to a function with a body outside an 'extern \"C\"' block, or to a 'static mut' outside one"
                 } else {
-                    "";
+                    ""
                 };
                 if why.len() != 0 {
                     let sp = if ok {
-                        self.node_span(owner);
+                        self.node_span(owner)
                     } else {
-                        self.raw_peek().span();
+                        self.raw_peek().span()
                     };
                     self.errors.emit_span(dc::MISPLACED_UNSAFE_ATTRIBUTE, sp, format("{}", why));
                     continue;
@@ -4875,13 +4855,13 @@ extend Parser {
                 );
             }
             let place = if attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8 {
-                pick(fnk, "", "may only be applied to a function");
+                pick(fnk, "", "may only be applied to a function")
             } else if attr.kind == AttrKind::ATTR_TAIL_RECURSE as u8 {
                 pick(
                     fnk && self.ast.ext(owner).function.body != NODE_NONE,
                     "",
                     "may only be applied to a function with a body",
-                );
+                )
             } else if attr.kind == AttrKind::ATTR_THREAD_LOCAL as u8 {
                 pick(
                     owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_CONST && self.ast.at_const(
@@ -4889,7 +4869,7 @@ extend Parser {
                     ).as_data.const_def.is_static_mut,
                     "",
                     "may only be applied to a 'static mut'",
-                );
+                )
             } else if attr.kind == AttrKind::ATTR_ORDERED as u8 {
                 pick(
                     owner != NODE_NONE && (self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT || self.ast.at_const(
@@ -4897,13 +4877,13 @@ extend Parser {
                     ).kind == NodeKind::NODE_FIELD),
                     "",
                     "may only be applied to a struct or a field",
-                );
+                )
             } else if attr.kind == AttrKind::ATTR_OWNED as u8 {
                 pick(
                     owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_FIELD,
                     "",
                     "may only be applied to a field",
-                );
+                )
             } else if attr.kind == AttrKind::ATTR_LAYOUT as u8 {
                 pick(
                     self.in_extern && owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_TYPE_ALIAS && self.ast.at_const(
@@ -4911,7 +4891,7 @@ extend Parser {
                     ).as_data.type_alias.ty == NODE_NONE,
                     "",
                     "may only be applied to an opaque type ('type T;') in an 'extern \"C\"' block",
-                );
+                )
             } else if attr.kind == AttrKind::ATTR_C_VALUE as u8 {
                 self.ast.has_c_value = true;
                 pick(
@@ -4920,13 +4900,13 @@ extend Parser {
                     ).as_data.type_alias.ty == NODE_NONE,
                     "",
                     "may only be applied to an opaque type ('type T;') in an 'extern \"C\"' block",
-                );
+                )
             } else if attr.kind == AttrKind::ATTR_C_READS as u8 || attr.kind == AttrKind::ATTR_C_WRITES as u8 || attr.kind == AttrKind::ATTR_C_LANE_ACCESS as u8 {
                 pick(
                     fnk && (self.ast.ext(owner).function.is_extern() || self.ast.ext(owner).function.is_intrinsic()),
                     "",
                     "may only be applied to a function in an 'extern \"C\"' block or an '@intrinsic' function",
-                );
+                )
             } else if attr.kind == AttrKind::ATTR_ALIGN as u8 {
                 // The layout of a struct and the C object of a static read it; on any other owner it
                 // would change nothing. An extern static's object is its C header's.
@@ -4939,21 +4919,21 @@ extend Parser {
                     ok,
                     "",
                     "may only be applied to a struct, a union, or a 'static mut' outside an 'extern \"C\"' block",
-                );
+                )
             } else if attr.kind == AttrKind::ATTR_PACKED as u8 {
                 pick(
                     owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT,
                     "",
                     "may only be applied to a struct or a union",
-                );
+                )
             } else {
-                "";
+                ""
             };
             if place.len() != 0 {
                 let sp = if owner != NODE_NONE {
-                    self.node_span(owner);
+                    self.node_span(owner)
                 } else {
-                    self.raw_peek().span();
+                    self.raw_peek().span()
                 };
                 let mut c = String::new();
                 known_attr_name(attr.kind, &mut c);
@@ -5014,9 +4994,9 @@ extend Parser {
             if k == AttrKind::ATTR_SIMD_IMPL {
                 let es = self.ast.at_const(list).as_data.array_literal.elements;
                 list = if self.ast.at_const(list).kind == NodeKind::NODE_TUPLE && es.len == 2 {
-                    unsafe self.ast.list(es)[1];
+                    unsafe self.ast.list(es)[1]
                 } else {
-                    NODE_NONE;
+                    NODE_NONE
                 };
             }
             if list == NODE_NONE || self.ast.at_const(list).kind != NodeKind::NODE_ARRAY_LITERAL {

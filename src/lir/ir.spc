@@ -41,11 +41,11 @@ pub(package) const ELEM_F64: u8 = 5;
 /// a float).
 pub(package) const fn vec_type(t: u8, lanes: u32) u8 {
     let e = if t == T_F32 {
-        ELEM_F32;
+        ELEM_F32
     } else if t == T_F64 {
-        ELEM_F64;
+        ELEM_F64
     } else {
-        t - T_I8;
+        t - T_I8
     };
     return T_VEC | e << 3 | lanes.trailing_zeros() as u8;
 }
@@ -358,9 +358,9 @@ pub(package) const fn mask_type(t: u8) u8 {
 /// one vector instruction makes (`C_OEQ` .. `C_OGE`, `C_UNE`).
 pub(package) const fn vcmp_ok(c: u16, lt: u8) bool {
     return if is_float(lt) {
-        c == C_OEQ || c >= C_OLT && c <= C_OGE || c == C_UNE;
+        c == C_OEQ || c >= C_OLT && c <= C_OGE || c == C_UNE
     } else {
-        c <= C_UGE;
+        c <= C_UGE
     };
 }
 
@@ -476,14 +476,14 @@ pub(package) const TBAA_TAGS: usize = 16;
 /// The type tag of an access of type `ty`: its lane's scalar type, 0 for bytes (which may view any object).
 pub(package) const fn tbaa_of(ty: u8) u16 {
     let t = if is_vec(ty) {
-        lane_type(ty);
+        lane_type(ty)
     } else {
-        ty;
+        ty
     };
     return if t == T_I8 {
-        0u16;
+        0u16
     } else {
-        t;
+        t
     };
 }
 
@@ -523,9 +523,9 @@ pub(package) const fn mirror(c: u16) u16 {
         return c;
     }
     return if (c - C_SLT) % 4 < 2 {
-        c + 2;
+        c + 2
     } else {
-        c - 2;
+        c - 2
     };
 }
 
@@ -533,11 +533,11 @@ pub(package) const fn mirror(c: u16) u16 {
 // `>`, signed and unsigned.
 pub(package) const fn opposite(c: u16) u16 {
     return if c <= C_NE {
-        c ^ 1;
+        c ^ 1
     } else if c <= C_SGE {
-        C_SLT + C_SGE - c;
+        C_SLT + C_SGE - c
     } else {
-        C_ULT + C_UGE - c;
+        C_ULT + C_UGE - c
     };
 }
 
@@ -746,9 +746,9 @@ pub(package) const ALLOC_FREE: u8 = 2;
 /// The `Sym.alloc` of the function named `name0` (`__sc_x_<c name>` is a C library name's alias).
 pub(package) const fn alloc_of(name0: str) u8 {
     let name = if name0.starts_with("__sc_x_") {
-        name0.slice(7, name0.len());
+        name0.slice(7, name0.len())
     } else {
-        name0;
+        name0
     };
     if name == "malloc" || name == "calloc" || name == "realloc" || name == "aligned_alloc" || name == "_aligned_malloc" || name == "sc_lk_malloc" || name == "sc_lk_calloc" || name == "sc_lk_realloc" || name == "sc_lk_aligned_alloc" {
         return ALLOC_FRESH;
@@ -1371,9 +1371,9 @@ extend Package {
                 fx: FX_READ | FX_WRITE,
                 esc: ~0u64,
                 alloc: if kind == SK_FUNC {
-                    alloc_of(name);
+                    alloc_of(name)
                 } else {
-                    ALLOC_NONE;
+                    ALLOC_NONE
                 },
                 own: false,
                 ext: false,

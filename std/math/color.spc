@@ -43,9 +43,9 @@ fn linear_to_srgb<T: Float, const N: usize>(color: Vec<T, N>, g: T) Vec<T, N> {
                 c = T::one();
             }
             let v = if c.less(T::from_f64(0.0031308)) {
-                c * T::from_f64(12.92);
+                c * T::from_f64(12.92)
             } else {
-                c.pow(g) * T::from_f64(1.055) - T::from_f64(0.055);
+                c.pow(g) * T::from_f64(1.055) - T::from_f64(0.055)
             };
             unsafe {
                 r.e[i] = v;
@@ -65,12 +65,12 @@ fn srgb_to_linear<T: Float, const N: usize>(color: Vec<T, N>, g: T) Vec<T, N> {
                 c * T::from_decimal(
                     0.07739938080495356037151702786378,
                     "0.077399380804953560371517027863777089783281733746130030959752321981424148606811146",
-                );
+                )
             } else {
                 ((c + T::from_f64(0.055)) * T::from_decimal(
                     0.94786729857819905213270142180095,
                     "0.94786729857819905213270142180094786729857819905213270142180094786729857819905213",
-                )).pow(g);
+                )).pow(g)
             };
             unsafe {
                 r.e[i] = v;
@@ -129,17 +129,17 @@ pub fn hsv_color<T: Float>(rgb_color: Vec<T, 3>) Vec<T, 3> {
     let saturation = delta / hi;
     // Each branch gives the hue `offset + 60 * difference / delta`; the branches only choose the operands.
     let (offset, difference) = if within_epsilon(r, hi) {
-        (T::zero(), g - b);
+        (T::zero(), g - b)
     } else if within_epsilon(g, hi) {
-        (T::from_i64(120), b - r);
+        (T::from_i64(120), b - r)
     } else {
-        (T::from_i64(240), r - g);
+        (T::from_i64(240), r - g)
     };
     let h = offset + T::from_i64(60) * difference / delta;
     let hue = if h.less(T::zero()) {
-        h + T::from_i64(360);
+        h + T::from_i64(360)
     } else {
-        h;
+        h
     };
     return Vec::<T, 3>::new(hue, saturation, hi);
 }
@@ -204,9 +204,9 @@ pub fn rgb_to_ycocg<T: Scalar>(rgb_color: Vec<T, 3>) Vec<T, 3> {
     // negation of `r` in 32 bits, where it cannot wrap. A 32- or 64-bit integer negates `r` in `T`, so an
     // unsigned `r` wraps before the division.
     let cg_head = if T::is_float() || sizeof(T) < 4 {
-        g / two - r / four;
+        g / two - r / four
     } else {
-        -r / four + g / two;
+        -r / four + g / two
     };
     let y = r / four + g / two + b / four;
     let co = r / two + g * T::zero() - b / two;

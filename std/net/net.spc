@@ -52,7 +52,7 @@ extend TcpListener {
     /// An error if the address cannot be bound.
     pub fn bind(host: str, port: i32) Result<TcpListener, IoError> {
         let fd = socket::tcp_listen(host, port, 128)?;
-        return Result::<TcpListener, IoError>::Ok(TcpListener { fd: fd });
+        return Ok(TcpListener { fd: fd });
     }
     /// The port bound: the one to connect to after binding port 0.
     pub fn port(self: &TcpListener) i32 {
@@ -64,14 +64,14 @@ extend TcpListener {
         loop {
             let r = socket::tcp_accept(self.fd);
             if r.is_ok() {
-                return Result::<TcpStream, IoError>::Ok(TcpStream { fd: r.unwrap() });
+                return Ok(TcpStream { fd: r.unwrap() });
             }
             let e = r.unwrap_err();
             if e.kind != IoErrorKind::WouldBlock {
-                return Result::<TcpStream, IoError>::Err(e);
+                return Err(e);
             }
             if !io::wait_readable(self.fd) {
-                return Result::<TcpStream, IoError>::Err(wait_failed(IoOp::Accept));
+                return Err(wait_failed(IoOp::Accept));
             }
         }
     }
@@ -81,14 +81,14 @@ extend TcpListener {
         loop {
             let r = socket::tcp_accept(self.fd);
             if r.is_ok() {
-                return Result::<TcpStream, IoError>::Ok(TcpStream { fd: r.unwrap() });
+                return Ok(TcpStream { fd: r.unwrap() });
             }
             let e = r.unwrap_err();
             if e.kind != IoErrorKind::WouldBlock {
-                return Result::<TcpStream, IoError>::Err(e);
+                return Err(e);
             }
             if !io::wait_until(self.fd, false, deadline) {
-                return Result::<TcpStream, IoError>::Err(wait_failed(IoOp::Accept));
+                return Err(wait_failed(IoOp::Accept));
             }
         }
     }
@@ -112,13 +112,13 @@ extend TcpStream {
         // writability leaves the connect unresolved, so it is a failure, never a connection.
         if !io::wait_writable(fd) {
             let _ = io::close(fd);
-            return Result::<TcpStream, IoError>::Err(wait_failed(IoOp::Connect));
+            return Err(wait_failed(IoOp::Connect));
         }
         if let Err(e) = socket::connect_result(fd) {
             let _ = io::close(fd);
-            return Result::<TcpStream, IoError>::Err(e);
+            return Err(e);
         }
-        return Result::<TcpStream, IoError>::Ok(TcpStream { fd: fd });
+        return Ok(TcpStream { fd: fd });
     }
     /// Read into `buf`, parking until there is something to read. `0` means the peer closed; negative is a
     /// real error.
@@ -158,7 +158,7 @@ extend UdpSocket {
     /// Bind to `host:port`; port 0 lets the OS choose (ask `port()` which).
     pub fn bind(host: str, port: i32) Result<UdpSocket, IoError> {
         let fd = socket::udp_bind(host, port)?;
-        return Result::<UdpSocket, IoError>::Ok(UdpSocket { fd: fd });
+        return Ok(UdpSocket { fd: fd });
     }
     /// The port bound.
     pub fn port(self: &UdpSocket) i32 {
@@ -173,10 +173,10 @@ extend UdpSocket {
             }
             let e = r.unwrap_err();
             if e.kind != IoErrorKind::WouldBlock {
-                return Result::<usize, IoError>::Err(e);
+                return Err(e);
             }
             if !io::wait_writable(self.fd) {
-                return Result::<usize, IoError>::Err(wait_failed(IoOp::Send));
+                return Err(wait_failed(IoOp::Send));
             }
         }
     }
@@ -190,10 +190,10 @@ extend UdpSocket {
             }
             let e = r.unwrap_err();
             if e.kind != IoErrorKind::WouldBlock {
-                return Result::<usize, IoError>::Err(e);
+                return Err(e);
             }
             if !io::wait_readable(self.fd) {
-                return Result::<usize, IoError>::Err(wait_failed(IoOp::Recv));
+                return Err(wait_failed(IoOp::Recv));
             }
         }
     }

@@ -86,7 +86,7 @@ fn lock_note(b: &mut bench::Bencher, s0: &sync::SyncStats, acquisitions: i64, ro
     note.push_f64_prec((s1.lock_buckets - s0.lock_buckets) as f64 / per, 4);
     note.push_str(", nodes walked ");
     note.push_f64_prec((s1.lock_scan - s0.lock_scan) as f64 / per, 3);
-    b.note_more(note.as_str());
+    b.note_more(&note);
 }
 
 // --- one caller -------------------------------------------------------------------------------------.
@@ -111,16 +111,16 @@ pub fn mutex_trylock_uncontended(b: &mut bench::Bencher) {
                     took = took + 1;
                 },
                 None => {},
-            };
+            }
         }
         expect = expect + OPS;
         let g = m.lock();
         b.tally(
             OPS,
             if *g.get() == expect && took == OPS {
-                OPS;
+                OPS
             } else {
-                0i64;
+                0i64
             },
         );
     }
@@ -162,9 +162,9 @@ pub fn mutex_handoff(b: &mut bench::Bencher) {
         b.tally(
             total,
             if *g.get() == total {
-                total;
+                total
             } else {
-                0i64;
+                0i64
             },
         );
     }
@@ -314,9 +314,9 @@ fn oversubscribed(b: &mut bench::Bencher, workers: usize, tasks: i64) {
         b.tally(
             total,
             if *g.get() >= total {
-                total;
+                total
             } else {
-                0i64;
+                0i64
             },
         );
     }
@@ -405,16 +405,16 @@ fn caller_classes(b: &mut bench::Bencher, tasks: i64, threads: i64) {
                 _ => {
                     break;
                 },
-            };
+            }
         }
         wg.wait();
         let g = m.get().lock();
         b.tally(
             total,
             if *g.get() >= total {
-                total;
+                total
             } else {
-                0i64;
+                0i64
             },
         );
     }
@@ -424,7 +424,7 @@ fn caller_classes(b: &mut bench::Bencher, tasks: i64, threads: i64) {
         note.push_f64_prec(count(&by_task) as f64 / tasks as f64, 0);
         note.push_str(", thread ");
         note.push_f64_prec(count(&by_thread) as f64 / threads as f64, 0);
-        b.note_more(note.as_str());
+        b.note_more(&note);
     }
 }
 
@@ -523,9 +523,9 @@ pub fn mutex_starvation(b: &mut bench::Bencher) {
         b.tally(
             1,
             if g.get().fewest > 0 {
-                1i64;
+                1i64
             } else {
-                0i64;
+                0i64
             },
         );
     }
@@ -535,12 +535,12 @@ pub fn mutex_starvation(b: &mut bench::Bencher) {
         bench::fail("mutex_starvation: a waiter never acquired the lock");
     }
     let t = bench::dist_text("waiter wait", "us", &mut v.samples);
-    b.note(t.as_str());
+    b.note(&t);
     let mut note = String::from_str("acquisitions across waiters: fewest ");
     note.push_i64(v.fewest);
     note.push_str(", most ");
     note.push_i64(v.most);
-    b.note_more(note.as_str());
+    b.note_more(&note);
 }
 
 // --- queue buckets ----------------------------------------------------------------------------------.
@@ -572,9 +572,9 @@ fn address_lane(b: &mut bench::Bencher, collide: bool) {
     let mut i: usize = 0;
     while i < pool.len() && kept.len() < ADDR_LOCKS {
         let take = if collide {
-            bucket_of(&pool[i]) == target;
+            bucket_of(&pool[i]) == target
         } else {
-            i % 64 == 0;
+            i % 64 == 0
         };
         if take {
             kept.push(pool[i].clone());
@@ -617,9 +617,9 @@ fn address_lane(b: &mut bench::Bencher, collide: bool) {
         b.tally(
             total,
             if sum == expect {
-                total;
+                total
             } else {
-                0i64;
+                0i64
             },
         );
     }
@@ -629,7 +629,7 @@ fn address_lane(b: &mut bench::Bencher, collide: bool) {
     note.push_str(" over ");
     note.push_u64(distinct_buckets(&kept) as u64);
     note.push_str(" queue buckets");
-    b.note_more(note.as_str());
+    b.note_more(&note);
 }
 
 // The queue bucket a lock's waiters would use: a function of its address, so the only honest way to
@@ -706,9 +706,9 @@ pub fn mutex_owner_parks(b: &mut bench::Bencher) {
         b.tally(
             total,
             if *g.get() >= total {
-                total;
+                total
             } else {
-                0i64;
+                0i64
             },
         );
     }
@@ -794,7 +794,7 @@ pub fn mutex_large_payload(b: &mut bench::Bencher) {
     note.push_u64(sizeof(sync::RawMutex) as u64);
     note.push_str(" B lock word; first word ");
     note.push_i64(g.get().w[0]);
-    b.note(note.as_str());
+    b.note(&note);
 }
 
 // --- layout -----------------------------------------------------------------------------------------.
@@ -822,9 +822,9 @@ fn dense_lane(b: &mut bench::Bencher, spaced: bool) {
     b.each(total);
     b.unit("lock");
     let stride = if spaced {
-        8usize;
+        8usize
     } else {
-        1usize;
+        1usize
     };
     while b.running() {
         let mut array = Vector::<sync::Mutex<i64>>::new();
@@ -860,5 +860,5 @@ fn dense_lane(b: &mut bench::Bencher, spaced: bool) {
     note.push_u64(sizeof(sync::Mutex<i64>) as u64);
     note.push_str(" B; the array holds ");
     note.push_u64(DENSE as u64);
-    b.note(note.as_str());
+    b.note(&note);
 }

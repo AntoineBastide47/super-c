@@ -98,9 +98,9 @@ pub(package) const fn movw(sf: bool, opc: u32, rd: u32, imm16: u32, hw: u32) u32
 /// SBFM, BFM, UBFM: `opc` 0, 1, 2.
 pub(package) const fn bitfield(sf: bool, opc: u32, rd: u32, rn: u32, immr: u32, imms: u32) u32 {
     let n = if sf {
-        0x00400000u32;
+        0x00400000u32
     } else {
-        0u32;
+        0u32
     };
     return sfb(sf) | opc << 29 | 0x13000000 | n | immr << 16 | imms << 10 | rn << 5 | rd;
 }
@@ -108,9 +108,9 @@ pub(package) const fn bitfield(sf: bool, opc: u32, rd: u32, rn: u32, immr: u32, 
 /// LSL (immediate) by `s`, below the width.
 pub(package) const fn lsl_imm(sf: bool, rd: u32, rn: u32, s: u32) u32 {
     let w: u32 = if sf {
-        64u32;
+        64u32
     } else {
-        32u32;
+        32u32
     };
     return bitfield(sf, 2, rd, rn, (w - s) % w, w - 1 - s);
 }
@@ -129,9 +129,9 @@ pub(package) const fn lsr_imm(sf: bool, rd: u32, rn: u32, s: u32) u32 {
         rn,
         s,
         if sf {
-            63u32;
+            63u32
         } else {
-            31u32;
+            31u32
         },
     );
 }
@@ -145,9 +145,9 @@ pub(package) const fn asr_imm(sf: bool, rd: u32, rn: u32, s: u32) u32 {
         rn,
         s,
         if sf {
-            63u32;
+            63u32
         } else {
-            31u32;
+            31u32
         },
     );
 }
@@ -166,9 +166,9 @@ pub(package) const fn uxt(rd: u32, rn: u32, bits: u32) u32 {
 pub(package) const fn adr(page: bool, rd: u32, imm21: i32) u32 {
     let u = imm21 as u32;
     let op = if page {
-        0x90000000u32;
+        0x90000000u32
     } else {
-        0x10000000u32;
+        0x10000000u32
     };
     return op | (u & 3) << 29 | (u >> 2 & 0x7FFFF) << 5 | rd;
 }
@@ -179,9 +179,9 @@ pub(package) const fn adr(page: bool, rd: u32, imm21: i32) u32 {
 /// BICS); `shift` 0 LSL, 1 LSR, 2 ASR, 3 ROR.
 pub(package) const fn logic_reg(sf: bool, opc: u32, n: bool, rd: u32, rn: u32, rm: u32, shift: u32, amt: u32) u32 {
     let nb = if n {
-        0x00200000u32;
+        0x00200000u32
     } else {
-        0u32;
+        0u32
     };
     return sfb(sf) | opc << 29 | 0x0A000000 | shift << 22 | nb | rm << 16 | amt << 10 | rn << 5 | rd;
 }
@@ -248,9 +248,9 @@ pub(package) const DP1_CLZ: u32 = 4;
 /// MADD (`sub` false) or MSUB: `rd` = ra +- rn * rm.
 pub(package) const fn madd(sf: bool, sub: bool, rd: u32, rn: u32, rm: u32, ra: u32) u32 {
     let o = if sub {
-        0x8000u32;
+        0x8000u32
     } else {
-        0u32;
+        0u32
     };
     return sfb(sf) | 0x1B000000 | rm << 16 | o | ra << 10 | rn << 5 | rd;
 }
@@ -262,9 +262,9 @@ pub(package) const fn mul(sf: bool, rd: u32, rn: u32, rm: u32) u32 {
 /// SMULL (`signed`) or UMULL: the 64-bit product of two 32-bit registers.
 pub(package) const fn mull(signed: bool, rd: u32, rn: u32, rm: u32) u32 {
     let b = if signed {
-        0x9B200000u32;
+        0x9B200000u32
     } else {
-        0x9BA00000u32;
+        0x9BA00000u32
     };
     return b | rm << 16 | ZR << 10 | rn << 5 | rd;
 }
@@ -272,9 +272,9 @@ pub(package) const fn mull(signed: bool, rd: u32, rn: u32, rm: u32) u32 {
 /// SMULH (`signed`) or UMULH: the high 64 bits of the 128-bit product.
 pub(package) const fn mulh(signed: bool, rd: u32, rn: u32, rm: u32) u32 {
     let b = if signed {
-        0x9B400000u32;
+        0x9B400000u32
     } else {
-        0x9BC00000u32;
+        0x9BC00000u32
     };
     return b | rm << 16 | ZR << 10 | rn << 5 | rd;
 }
@@ -315,9 +315,9 @@ pub(package) const fn msize(m: u32) u32 {
 // The opcode bits of access `m` (`load`), with size, V and opc, for the unscaled form.
 const fn mbits(m: u32, load: bool) u32 {
     let ld = if load {
-        1u32;
+        1u32
     } else {
-        0u32;
+        0u32
     };
     if m <= M_X {
         return m << 30 | 0x38000000 | ld << 22;
@@ -345,9 +345,9 @@ pub(package) const fn ldst_unscaled(m: u32, load: bool, rt: u32, rn: u32, off: i
 /// LDR/STR (register): the address is rn + rm (64-bit), shifted by the size when `scaled`.
 pub(package) const fn ldst_reg(m: u32, load: bool, rt: u32, rn: u32, rm: u32, scaled: bool) u32 {
     let s = if scaled {
-        0x1000u32;
+        0x1000u32
     } else {
-        0u32;
+        0u32
     };
     return mbits(m, load) | 0x00200800 | rm << 16 | 3u32 << 13 | s | rn << 5 | rt;
 }
@@ -362,20 +362,20 @@ pub(package) const fn uimm_fits(m: u32, off: i64) bool {
 /// bytes, a multiple of the size within 7 signed bits of it.
 pub(package) const fn ldstp(m: u32, load: bool, mode: u32, rt: u32, rt2: u32, rn: u32, off: i32) u32 {
     let ld = if load {
-        0x00400000u32;
+        0x00400000u32
     } else {
-        0u32;
+        0u32
     };
     let base = if m == M_W {
-        0x28000000u32;
+        0x28000000u32
     } else if m == M_X {
-        0xA8000000u32;
+        0xA8000000u32
     } else if m == M_VS {
-        0x2C000000u32;
+        0x2C000000u32
     } else if m == M_VD {
-        0x6C000000u32;
+        0x6C000000u32
     } else {
-        0xAC000000u32;
+        0xAC000000u32
     };
     let imm = (off >> msize(m) as i32) as u32 & 0x7F;
     return base | mode << 23 | ld | imm << 15 | rt2 << 10 | rn << 5 | rt;
@@ -398,9 +398,9 @@ pub(package) const fn bcond(cond: u32, off: i32) u32 {
 /// CBZ (`nz` false) or CBNZ.
 pub(package) const fn cbz(sf: bool, nz: bool, rt: u32, off: i32) u32 {
     let o = if nz {
-        0x35000000u32;
+        0x35000000u32
     } else {
-        0x34000000u32;
+        0x34000000u32
     };
     return sfb(sf) | o | ((off >> 2) as u32 & 0x7FFFF) << 5 | rt;
 }
@@ -408,9 +408,9 @@ pub(package) const fn cbz(sf: bool, nz: bool, rt: u32, off: i32) u32 {
 /// TBZ (`nz` false) or TBNZ on bit `bit`.
 pub(package) const fn tbz(nz: bool, rt: u32, bit: u32, off: i32) u32 {
     let o = if nz {
-        0x37000000u32;
+        0x37000000u32
     } else {
-        0x36000000u32;
+        0x36000000u32
     };
     return bit >> 5 << 31 | o | (bit & 31) << 19 | ((off >> 2) as u32 & 0x3FFF) << 5 | rt;
 }
@@ -477,9 +477,9 @@ pub(package) const fn reaches(w: u32, off: i64) bool {
 // `d` selects double precision.
 const fn ftype(d: bool) u32 {
     return if d {
-        0x00400000u32;
+        0x00400000u32
     } else {
-        0u32;
+        0u32
     };
 }
 
@@ -491,14 +491,14 @@ pub(package) const fn fmov(d: bool, rd: u32, rn: u32) u32 {
 /// FMOV between an x or w register and a v register: `to_v` moves into the v register.
 pub(package) const fn fmov_gv(d: bool, to_v: bool, rd: u32, rn: u32) u32 {
     let base = if d {
-        0x9E660000u32;
+        0x9E660000u32
     } else {
-        0x1E260000u32;
+        0x1E260000u32
     };
     let t = if to_v {
-        0x10000u32;
+        0x10000u32
     } else {
-        0u32;
+        0u32
     };
     return base | t | rn << 5 | rd;
 }
@@ -542,18 +542,18 @@ pub(package) const FP_RINTX: u32 = 14;
 /// FCVT between binary16 and single: half to single (`to_s`), or single to half (rounding to nearest even).
 pub(package) const fn fcvt_h(to_s: bool, rd: u32, rn: u32) u32 {
     return if to_s {
-        0x1EE24000 | rn << 5 | rd;
+        0x1EE24000 | rn << 5 | rd
     } else {
-        0x1E23C000 | rn << 5 | rd;
+        0x1E23C000 | rn << 5 | rd
     };
 }
 
 /// FCVT: single to double (`to_d`) or double to single.
 pub(package) const fn fcvt(to_d: bool, rd: u32, rn: u32) u32 {
     return if to_d {
-        0x1E22C000 | rn << 5 | rd;
+        0x1E22C000 | rn << 5 | rd
     } else {
-        0x1E624000 | rn << 5 | rd;
+        0x1E624000 | rn << 5 | rd
     };
 }
 
@@ -570,9 +570,9 @@ pub(package) const fn fcsel(d: bool, rd: u32, rn: u32, rm: u32, cond: u32) u32 {
 /// FMADD (`sub` false) or FMSUB: `rd` = ra +- rn * rm.
 pub(package) const fn fmadd(d: bool, sub: bool, rd: u32, rn: u32, rm: u32, ra: u32) u32 {
     let o = if sub {
-        0x8000u32;
+        0x8000u32
     } else {
-        0u32;
+        0u32
     };
     return 0x1F000000 | ftype(d) | rm << 16 | o | ra << 10 | rn << 5 | rd;
 }
@@ -580,9 +580,9 @@ pub(package) const fn fmadd(d: bool, sub: bool, rd: u32, rn: u32, rm: u32, ra: u
 /// SCVTF (`signed`) or UCVTF: integer register `rn` (64-bit when `sf`) to float `rd`.
 pub(package) const fn cvtf(sf: bool, d: bool, signed: bool, rd: u32, rn: u32) u32 {
     let o = if signed {
-        0x1E220000u32;
+        0x1E220000u32
     } else {
-        0x1E230000u32;
+        0x1E230000u32
     };
     return sfb(sf) | o | ftype(d) | rn << 5 | rd;
 }
@@ -591,9 +591,9 @@ pub(package) const fn cvtf(sf: bool, d: bool, signed: bool, rd: u32, rn: u32) u3
 /// NaN to 0.
 pub(package) const fn fcvtz(sf: bool, d: bool, signed: bool, rd: u32, rn: u32) u32 {
     let o = if signed {
-        0x1E380000u32;
+        0x1E380000u32
     } else {
-        0x1E390000u32;
+        0x1E390000u32
     };
     return sfb(sf) | o | ftype(d) | rn << 5 | rd;
 }
@@ -663,9 +663,9 @@ pub(package) const fn addv8b(rd: u32, rn: u32) u32 {
 /// LDAR (`load`) or STLR of access size `size` (0 to 3).
 pub(package) const fn ldar(size: u32, load: bool, rt: u32, rn: u32) u32 {
     let b = if load {
-        0x08DFFC00u32;
+        0x08DFFC00u32
     } else {
-        0x089FFC00u32;
+        0x089FFC00u32
     };
     return size << 30 | b | rn << 5 | rt;
 }
@@ -674,14 +674,14 @@ pub(package) const fn ldar(size: u32, load: bool, rt: u32, rn: u32) u32 {
 /// `r` release.
 pub(package) const fn lse(size: u32, opc: u32, a: bool, r: bool, rs: u32, rt: u32, rn: u32) u32 {
     let ab = if a {
-        0x00800000u32;
+        0x00800000u32
     } else {
-        0u32;
+        0u32
     };
     let rb = if r {
-        0x00400000u32;
+        0x00400000u32
     } else {
-        0u32;
+        0u32
     };
     return size << 30 | 0x38200000 | ab | rb | rs << 16 | opc >> 3 << 15 | (opc & 7) << 12 | rn << 5 | rt;
 }
@@ -695,14 +695,14 @@ pub(package) const LSE_SWP: u32 = 8;
 /// CAS: compare `rs` with memory at `rn`, store `rt` when equal; `rs` receives the old value.
 pub(package) const fn cas(size: u32, a: bool, r: bool, rs: u32, rt: u32, rn: u32) u32 {
     let ab = if a {
-        0x00400000u32;
+        0x00400000u32
     } else {
-        0u32;
+        0u32
     };
     let rb = if r {
-        0x8000u32;
+        0x8000u32
     } else {
-        0u32;
+        0u32
     };
     return size << 30 | 0x08A07C00 | ab | rb | rs << 16 | rn << 5 | rt;
 }
@@ -731,9 +731,9 @@ pub(package) const fn logical_imm(v0: u64, sf: bool) u32 {
         size = half;
     }
     let mask = if size == 64 {
-        0xFFFFFFFFFFFFFFFFu64;
+        0xFFFFFFFFFFFFFFFFu64
     } else {
-        (1u64 << size) - 1;
+        (1u64 << size) - 1
     };
     let e = v & mask;
     // A run of `ones` ones rotated right by `rot` within the element.

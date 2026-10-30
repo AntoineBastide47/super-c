@@ -11,7 +11,7 @@ fn bare_and_qualified_variants() {
     let mut b = h::ExitBatch::new();
     b.add(
         "bare variants through every expected type",
-        "enum Shape { Circle(i32), Rect { w: i32, h: i32 }, Unit }\nstruct H { pub s: Shape }\nfn mk(n: i32) Option<i32> { if n > 3 { return None; } return Some(n); }\nfn take(s: Shape) i32 { return switch s { Circle(r) => r, Shape::Rect { w, h } => w * h, Shape::Unit => 7, }; }\nfn main() i32 {\n    let a = Some(1);\n    let e: Result<i32, i32> = Err(4);\n    let h = H { s: Circle(2) };\n    let arr: [Shape; 2] = [Unit, Circle(3)];\n    let mut s: Shape = Unit;\n    s = Circle(4);\n    let eq = mk(1) == Some(1);\n    let q = switch a { Option::Some(x) => x, Option::None => 0, };\n    let r = switch e { Ok(x) => x, Result::Err(x) => x * 10, };\n    let t = take(s) + take(h.s) + take(Unit);\n    return q + r + t + (eq as i32) - 55;\n}\n",
+        "enum Shape { Circle(i32), Rect { w: i32, h: i32 }, Unit }\nstruct H { pub s: Shape }\nfn mk(n: i32) Option<i32> { if n > 3 { return None; } return Some(n); }\nfn take(s: Shape) i32 { return switch s { Circle(r) => r, Shape::Rect { w, h } => w * h, Shape::Unit => 7, }; }\nfn main() i32 {\n    let a = Some(1);\n    let e: Result<i32, i32> = Err(4);\n    let h = H { s: Circle(2) };\n    let arr: [Shape; 2] = [Unit, Circle(3)];\n    let mut s: Shape = Unit;\n    s = Circle(4);\n    let eq = mk(1) == Some(1);\n    let q = switch a { Option::Some(x) => x, Option::None => 0, };\n    let r = switch e { Ok(x) => x, Result::Err(x) => x * 10, };\n    let t = take(s) + take(h.s) + take(Unit);\n    let u: Option<i32> = switch mk(9) { Some(x) => Some(x), None => None, };\n    let z = switch mk(1) { Some(x) => x, None => { return 1; }, };\n    return q + r + t + (eq as i32) + u.unwrap_or(0) + z - 56;\n}\n",
         0,
     );
     b.run();
@@ -37,16 +37,17 @@ fn bare_and_qualified_variants() {
     );
 }
 
-// A block is a value when its last expression has no `;` (and, as before, when it ends in an
-// expression with one). A statement `switch` ends at its `}`, and its arms are statements, so arms
-// of different types do not join. A value block's last `if` with an `else` and its last `switch` are
-// its value. A function or closure body gives its result with `return`.
+// A block is a value when its last expression has no `;`; with one, it is a statement block, and where
+// a value is expected the `;` is an error. A statement `switch` ends at its `}` (a `;` after it is an
+// error), and its arms are statements, so arms of different types do not join. A value block's last
+// `if` with an `else` and its last `switch` are its value. A function or closure body gives its result
+// with `return`.
 @test
 fn value_blocks_and_statement_switches() {
     let mut b = h::ExitBatch::new();
     b.add(
         "value blocks and statement switches",
-        "enum E { A, B }\nfn g(e: E) i32 {\n    switch e {\n        A => { return 1; },\n        B => { return 2; },\n    }\n}\nfn main() i32 {\n    let e = E::A;\n    let o: Option<usize> = None;\n    let mut n: usize = 0;\n    switch o {\n        Some(x) => { n + x; },\n        None => { n = 1; },\n    }\n    switch e { A => { n = n + 2; }, B => {}, };\n    let a = { 5 };\n    let c = unsafe { 6 };\n    let s = { let x = 2; let t = String::from_str(\"abc\"); x + t.len() as i32 };\n    let v = if true { let k = 5; if false { k } else { 2 } } else { 3 };\n    let w = { n = n + 1; switch e { A => 10, B => 20, } };\n    return a + c + s + v + w + g(e) + n as i32 - 33;\n}\n",
+        "enum E { A, B }\nfn g(e: E) i32 {\n    switch e {\n        A => { return 1; },\n        B => { return 2; },\n    }\n}\nfn main() i32 {\n    let e = E::A;\n    let o: Option<usize> = None;\n    let mut n: usize = 0;\n    switch o {\n        Some(x) => { n + x; },\n        None => { n = 1; },\n    }\n    switch e { A => { n = n + 2; }, B => {}, }\n    let a = { 5 };\n    let c = unsafe { 6 };\n    let s = { let x = 2; let t = String::from_str(\"abc\"); x + t.len() as i32 };\n    let v = if true { let k = 5; if false { k } else { 2 } } else { 3 };\n    let w = { n = n + 1; switch e { A => 10, B => 20, } };\n    return a + c + s + v + w + g(e) + n as i32 - 33;\n}\n",
         0,
     );
     b.run();
@@ -59,6 +60,20 @@ fn value_blocks_and_statement_switches() {
         "a closure body's last expression is no result",
         "fn main() i32 { let c = |x: i32| { x + 1 }; return c(1); }\n",
         "a closure body gives its result with 'return': write 'return x + 1;'",
+    );
+    let semi = "this block ends in ';', so it has no value: remove the ';'";
+    h::expect_err_msg("a value block whose last expression ends in ';'", "fn f() i32 { return { 1; }; }\n", semi);
+    h::expect_err_msg("a let of such a block", "fn g() i32 { return 1; }\nfn f() { let x = { g(); }; }\n", semi);
+    h::expect_err_msg("one branch of a value if", "fn f(c: bool) { let x = if c { 1; } else { 2 }; }\n", semi);
+    h::expect_err_msg(
+        "one arm of a value switch",
+        "fn f(n: i32) { let x = switch n { 1 => { 2; }, _ => 3, }; }\n",
+        semi,
+    );
+    h::expect_err_msg(
+        "a ';' after a statement switch",
+        "fn f(n: i32) { switch n { _ => {}, }; }\n",
+        "a 'switch' statement ends at its '}': remove the ';'",
     );
 }
 
@@ -98,6 +113,13 @@ fn deferred_inference() {
         "fn pair<A, B>(a: A, b: B) B { return b; }\nfn main() i32 {\n    let mut v = Vector::new();\n    let x: u8 = 3;\n    v.push(1);\n    v.push(x);\n    let c = |a| a + 1;\n    let n = c(2);\n    let mut w = Vector::new();\n    w.push(String::from_str(\"ab\"));\n    let mut o = None;\n    if o.is_none() { o = Some(3u8); }\n    let mut r = Ok(1);\n    r = Err(String::from_str(\"e\"));\n    let mut z: Vector<_> = Vector::new();\n    z.push(7u16);\n    let m = pair::<_, u8>(1, 2);\n    return v.len() as i32 + v[1] as i32 + n + w[0].len() as i32 + o.unwrap() as i32 + r.is_err() as i32 + z[0] as i32 + m as i32 - 23;\n}\n",
         0,
     );
+    // The first check's records of a body with a hole (an instance, a conversion) give way to the second
+    // check's: a const generic argument and a struct element both come out whole.
+    b.add(
+        "records of the second check",
+        "struct F {\n    pub owner: u32,\n    pub next: usize,\n    pub paths: Vector<String>,\n}\nfn walk() u32 {\n    let mut stack = Vector::new();\n    let mut ps = Vector::<String>::new();\n    ps.push(String::from_str(\"ab\"));\n    stack.push(F { owner: 1, next: 0, paths: ps });\n    let mut sum: u32 = 0;\n    loop {\n        if stack.len() == 0 {\n            break;\n        }\n        let top = stack.len() - 1;\n        let k = stack.at(top).next;\n        if k == stack.at(top).paths.len() {\n            let _ = stack.pop();\n            continue;\n        }\n        stack.index_mut(top).next = k + 1;\n        let cp = replace(stack.index_mut(top).paths.index_mut(k), String::new());\n        sum += stack.at(top).owner + cp.len() as u32;\n    }\n    return sum;\n}\nfn wide(a: Int<256>) Int<256> {\n    let mut t0 = Int::zero();\n    t0 = t0 + Int::<256>::one() + a;\n    return t0;\n}\nfn main() i32 {\n    let two = Int::<256>::one() + Int::<256>::one();\n    return walk() as i32 - 3 + (wide(Int::<256>::one()) != two) as i32;\n}\n",
+        0,
+    );
     b.run();
     h::expect_err_msg(
         "two typed uses that disagree",
@@ -117,7 +139,7 @@ fn deferred_inference() {
 }
 
 // A tuple of up to 8 elements is `Eq`, `Ord`, `Hash`, `Clone`, `Default` and `Format` when every
-// element is: a result list returns one.
+// element is: a result list names one, and `return a, b;` returns the tuple `(a, b)`.
 @test
 fn tuple_conformances_at_every_arity() {
     let mut b = h::ExitBatch::new();

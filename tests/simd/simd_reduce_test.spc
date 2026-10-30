@@ -143,6 +143,6 @@ fn main(args: Vector<str>) i32 {
             c[1],
             c[0],
         );
-        h::expect_build_err(c[0], s.as_str(), "dot: A must be a type of the same kind as T, at least as wide");
+        h::expect_build_err(c[0], &s, "dot: A must be a type of the same kind as T, at least as wide");
     }
 }

@@ -268,9 +268,9 @@ fn task_id(name: &[char; 256]) i64 {
         i += 1;
     }
     return if i == 0 {
-        -1;
+        -1
     } else {
-        v;
+        v
     };
 }
 
@@ -657,9 +657,9 @@ fn note(n: usize) {
     if a == null {
         let i = unsafe atomic::add_u32(&mut LINE_N, 1, RELAXED);
         a = if i < ACCT_THREADS {
-            unsafe &mut LINES[i as usize];
+            unsafe &mut LINES[i as usize]
         } else {
-            over;
+            over
         };
         unsafe MINE = a;
     }
@@ -918,9 +918,9 @@ fn decimal_at(s: []u8, n: usize, at: &mut usize) i64 {
         *at += 1;
     }
     return if *at == start {
-        -1;
+        -1
     } else {
-        v;
+        v
     };
 }
 
@@ -941,9 +941,9 @@ pub unsafe fn sc_bs_cpu_model(buf: *mut char, cap: usize) i32 {
         &mut len,
     );
     return if rc == ERROR_SUCCESS {
-        0;
+        0
     } else {
-        -1;
+        -1
     };
 }
 
@@ -1007,9 +1007,9 @@ pub unsafe fn sc_bs_cpu_model(buf: *mut char, cap: usize) i32 {
     }
     unsafe unistd::close(fd);
     return if rc == 0 {
-        0;
+        0
     } else {
-        -1;
+        -1
     };
 }
 

@@ -56,9 +56,9 @@ const fn a64_sample(r: at::Row, q: u32, k: u8, v: &mut at::Vals, i: usize) {
         },
         at::K::MOVNV => {
             v[i] = if x {
-                ~0x12340000i64;
+                ~0x12340000i64
             } else {
-                (~0x12340000u32) as i32;
+                (~0x12340000u32) as i32
             };
         },
         at::K::IMMR => {
@@ -177,9 +177,9 @@ const fn a64_sample(r: at::Row, q: u32, k: u8, v: &mut at::Vals, i: usize) {
         at::K::ZASL => {
             let e = at::fixed_q(r, q);
             v[i] = if e == 0 {
-                0i64;
+                0i64
             } else {
-                1i64;
+                1i64
             };
             v[i + 1] = 1;
             v[i + 2] = 1;
@@ -212,7 +212,7 @@ const fn a64_sample(r: at::Row, q: u32, k: u8, v: &mut at::Vals, i: usize) {
         _ => {
             v[i] = 0;
         },
-    };
+    }
 }
 
 // The sample text of every arm64 row and variant, one per line, and the words it encodes.
@@ -253,7 +253,7 @@ fn a64_samples(text: &mut String, words: &mut Vector<u32>) {
             let mut w3: u32 = 0;
             let mut fx = aa::Fix::new();
             let mut err = String::new();
-            if !aa::assemble(s.as_str(), &mut w3, &mut fx, &mut err) || w3 != w {
+            if !aa::assemble(&s, &mut w3, &mut fx, &mut err) || w3 != w {
                 eprint(
                     "row {} '{}' variant {}: 0x{} prints '{}', which assembles to 0x{} ({})\n",
                     ri,
@@ -372,9 +372,9 @@ fn coff_section(o: &Vector<u8>, name: str) Vector<u8> {
         let mut same = true;
         for j in 0..8usize {
             let c = if j < name.len() {
-                name.byte_at(j);
+                name.byte_at(j)
             } else {
-                0u8;
+                0u8
             };
             same = same && o[sh + j] == c;
         }
@@ -404,11 +404,11 @@ fn llvm_cc() String {
     let mut cmd = String::from_str("clang --version");
     let mut outp = out.clone();
     let ok = cli::run_with(cmd.cstr(), null, outp.cstr(), null, "") == 0;
-    let _ = fs::unlink(out.as_str());
+    let _ = fs::unlink(&out);
     return if ok {
-        String::from_str("clang");
+        String::from_str("clang")
     } else {
-        String::new();
+        String::new()
     };
 }
 
@@ -426,20 +426,20 @@ fn cc_assemble_xdata(src: str, flags: str, xdata: &mut Vector<u8>) Vector<u8> {
         return Vector::<u8>::new();
     }
     let dir = format("{}/asm_test_{}", cli::tmp_dir().as_str(), process::pid().unwrap_or(1));
-    let _ = fs::mkdir_all(dir.as_str());
+    let _ = fs::mkdir_all(&dir);
     let sp = format("{}/t.s", dir.as_str());
     let op = format("{}/t.o", dir.as_str());
-    let f = stdio::fopen(sp.as_str(), "wb");
+    let f = stdio::fopen(&sp, "wb");
     unsafe stdio::fwrite(src.ptr(), 1, src.len(), f);
     unsafe stdio::fclose(f);
     let mut cmd = format("\"{}\" -c {} \"{}\" -o \"{}\"", cc.as_str(), flags, sp.as_str(), op.as_str());
     let mut out = Vector::<u8>::new();
     if cli::run_with(cmd.cstr(), null, null, null, "") == 0 {
-        let o = read_bytes(op.as_str());
+        let o = read_bytes(&op);
         out = text_section(&o);
         *xdata = coff_section(&o, ".xdata");
     }
-    let _ = fs::remove_all(dir.as_str());
+    let _ = fs::remove_all(&dir);
     return out;
 }
 
@@ -447,7 +447,7 @@ fn cc_assemble_xdata(src: str, flags: str, xdata: &mut Vector<u8>) Vector<u8> {
 fn a64_oracle(text: &String, words: &Vector<u32>) {
     let mut src = String::from_str(".text\n");
     src.push_string(text);
-    let got = cc_assemble(src.as_str(), "-march=armv9-a+sme2+sme-f64f64+aes+sha2+sha3+crc+rdm+dotprod+i8mm");
+    let got = cc_assemble(&src, "-march=armv9-a+sme2+sme-f64f64+aes+sha2+sha3+crc+rdm+dotprod+i8mm");
     if got.len() == 0 {
         println("skipped: no clang assembles arm64 with SME2");
         return;
@@ -537,7 +537,7 @@ fn a64_generated() {
     let mut words: u64 = 0;
     let mut bad: u32 = 0;
     for i in 0..objs.len() {
-        let o = read_bytes(objs[i].as_str());
+        let o = read_bytes(&objs[i]);
         let t = text_section(&o);
         let mut k: usize = 0;
         while k + 4 <= t.len() {
@@ -548,7 +548,7 @@ fn a64_generated() {
             let mut w2: u32 = 0;
             let mut fx = aa::Fix::new();
             let mut err = String::new();
-            if !aa::disassemble(w, &mut s) || !aa::assemble(s.as_str(), &mut w2, &mut fx, &mut err) || w2 != w {
+            if !aa::disassemble(w, &mut s) || !aa::assemble(&s, &mut w2, &mut fx, &mut err) || w2 != w {
                 if bad < 20 {
                     eprint("{}: 0x{} '{}' ({})\n", objs[i].as_str(), hex(w), s.as_str(), err.as_str());
                 }
@@ -566,7 +566,7 @@ fn obj_files(dir: str, out: &mut Vector<String>) {
     while let Some(Ok(e)) = d.next() {
         let path = format("{}/{}", dir, e.name);
         if e.kind == Option::<fs::FileKind>::Some(fs::FileKind::Dir) {
-            obj_files(path.as_str(), out);
+            obj_files(&path, out);
         } else if e.name.ends_with(".o") {
             out.push(path);
         }
@@ -657,11 +657,11 @@ const fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
                 n.set_reg(
                     i,
                     if alt {
-                        9u8;
+                        9u8
                     } else if sz == 1 {
-                        6u8;
+                        6u8
                     } else {
-                        2u8;
+                        2u8
                     },
                 );
             },
@@ -669,9 +669,9 @@ const fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
                 n.set_reg(
                     i,
                     if alt {
-                        3u8;
+                        3u8
                     } else {
-                        12u8;
+                        12u8
                     },
                 );
             },
@@ -679,9 +679,9 @@ const fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
                 n.set_reg(
                     i,
                     if alt {
-                        12u8;
+                        12u8
                     } else {
-                        3u8;
+                        3u8
                     },
                 );
             },
@@ -695,9 +695,9 @@ const fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
                 n.set_reg(
                     i,
                     if alt {
-                        6u8;
+                        6u8
                     } else {
-                        2u8;
+                        2u8
                     },
                 );
             },
@@ -712,9 +712,9 @@ const fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
             },
             xt::K::IZ => {
                 n.imm = if sz == 2 {
-                    0x1234i64;
+                    0x1234i64
                 } else {
-                    -300i64;
+                    -300i64
                 };
             },
             xt::K::I64 => {
@@ -730,7 +730,7 @@ const fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
                 n.imm = 0x1000;
             },
             _ => {},
-        };
+        }
     }
     if (r.vx & xt::MR) != 0 || (r.vx & xt::MK) != 0 && var % 2 == 1 {
         n.kmask = 1 + (var % 7) as u8;
@@ -748,9 +748,9 @@ fn x64_samples(text: &mut String, bytes: &mut Vector<u8>, ends: &mut Vector<u32>
         let r = rows[ri];
         for si in 0..5u32 {
             let sz: u8 = if si == 0 {
-                0u8;
+                0u8
             } else {
-                (1u32 << si - 1) as u8;
+                (1u32 << si - 1) as u8
             };
             if r.sz == 0 && sz != 0 || r.sz != 0 && (sz & r.sz) == 0 {
                 continue;
@@ -783,7 +783,7 @@ fn x64_samples(text: &mut String, bytes: &mut Vector<u8>, ends: &mut Vector<u32>
                         assert(false, "every row encodes its samples");
                     }
                     let mut d = xt::Ins::new(0);
-                    let l0 = xt::decode(b0.as_slice(), 0, &mut d);
+                    let l0 = xt::decode(&b0, 0, &mut d);
                     let mut b2 = Vector::<u8>::new();
                     if l0 as usize != b0.len() || !xt::encode(&d, &mut b2, &mut e) || b2.as_slice() != b0.as_slice() {
                         eprint(
@@ -801,13 +801,13 @@ fn x64_samples(text: &mut String, bytes: &mut Vector<u8>, ends: &mut Vector<u32>
                     let mut b1 = Vector::<u8>::new();
                     let mut fx = xa::Fix::new();
                     let mut err = String::new();
-                    if !xa::assemble(s.as_str(), xa::NOTGT, &mut b1, &mut fx, &mut err) {
+                    if !xa::assemble(&s, xa::NOTGT, &mut b1, &mut fx, &mut err) {
                         eprint("row {} '{}': '{}' does not assemble: {}\n", ri, r.mn, s.as_str(), err.as_str());
                         assert(false, "every sample assembles");
                     }
                     // Another row may take the same operands first: the bytes differ only then.
                     let mut d1 = xt::Ins::new(0);
-                    let l1 = xt::decode(b1.as_slice(), 0, &mut d1);
+                    let l1 = xt::decode(&b1, 0, &mut d1);
                     if l1 as usize != b1.len() || b1.as_slice() != b0.as_slice() && d1.row == ri as u32 {
                         eprint(
                             "row {} '{}': '{}' assembles to {}, the row gives {}\n",
@@ -822,7 +822,7 @@ fn x64_samples(text: &mut String, bytes: &mut Vector<u8>, ends: &mut Vector<u32>
                     let mut s1 = String::new();
                     xa::print_ins(&d1, &mut s1);
                     let mut b3 = Vector::<u8>::new();
-                    if !xa::assemble(s1.as_str(), xa::NOTGT, &mut b3, &mut fx, &mut err) || b3.as_slice() != b1.as_slice() {
+                    if !xa::assemble(&s1, xa::NOTGT, &mut b3, &mut fx, &mut err) || b3.as_slice() != b1.as_slice() {
                         eprint("'{}' disassembles to '{}', which does not assemble to it\n", s.as_str(), s1.as_str());
                         assert(false, "the disassembly assembles to the bytes");
                     }
@@ -857,11 +857,11 @@ fn x64_oracle(text: &String, bytes: &Vector<u8>, ends: &Vector<u32>) {
     let mut src = String::from_str(".text\n");
     src.push_string(text);
     let flags = if tgt::isa(tgt::host_isa()).name == "x86_64" {
-        "";
+        ""
     } else {
-        "--target=x86_64-linux-gnu";
+        "--target=x86_64-linux-gnu"
     };
-    let got = cc_assemble(src.as_str(), flags);
+    let got = cc_assemble(&src, flags);
     if got.len() == 0 {
         println("skipped: no clang assembles x86-64");
         return;
@@ -886,14 +886,14 @@ fn x64_oracle(text: &String, bytes: &Vector<u8>, ends: &Vector<u32>) {
             }
             let mut d = xt::Ins::new(0);
             let l = if at < got.len() {
-                xt::decode(got.as_slice(), at, &mut d) as usize;
+                xt::decode(&got, at, &mut d) as usize
             } else {
-                0usize;
+                0usize
             };
             for k in at..at + if l == 0 {
-                n;
+                n
             } else {
-                l;
+                l
             } {
                 if k < got.len() {
                     theirs.push(got[k]);
@@ -931,19 +931,19 @@ fn x64_generated(os: str) {
     let mut insts: u64 = 0;
     let mut bad: u32 = 0;
     for i in 0..objs.len() {
-        let o = read_bytes(objs[i].as_str());
+        let o = read_bytes(&objs[i]);
         let t = text_section(&o);
         let mut k: usize = 0;
         while k < t.len() {
             let mut s = String::new();
-            let n = xa::disassemble(t.as_slice(), k, &mut s);
+            let n = xa::disassemble(&t, k, &mut s);
             insts += 1;
             if n == 0 {
                 let mut b = Vector::<u8>::new();
                 let e = if k + 8 < t.len() {
-                    k + 8;
+                    k + 8
                 } else {
-                    t.len();
+                    t.len()
                 };
                 for j in k..e {
                     b.push(t[j]);
@@ -955,7 +955,7 @@ fn x64_generated(os: str) {
             let mut b1 = Vector::<u8>::new();
             let mut fx = xa::Fix::new();
             let mut err = String::new();
-            let mut same = xa::assemble(s.as_str(), xa::NOTGT, &mut b1, &mut fx, &mut err) && b1.len() == n as usize;
+            let mut same = xa::assemble(&s, xa::NOTGT, &mut b1, &mut fx, &mut err) && b1.len() == n as usize;
             for j in 0..b1.len() {
                 same = same && j < n as usize && b1[j] == t[k + j];
             }
@@ -997,9 +997,9 @@ fn x64_zmm_code_round_trips() {
     for k in 0..names.len() {
         let fl = lty[k] == "f32" || lty[k] == "f64";
         let ops = if fl {
-            fops;
+            fops
         } else {
-            iops;
+            iops
         };
         for o in 0..ops.len() {
             lir.format_into(
@@ -1018,9 +1018,9 @@ fn x64_zmm_code_round_trips() {
             nf += 1;
         }
         let conds = if fl {
-            fconds;
+            fconds
         } else {
-            iconds;
+            iconds
         };
         for c in 0..conds.len() {
             lir.format_into(
@@ -1046,9 +1046,9 @@ fn x64_zmm_code_round_trips() {
             names[k],
             names[k],
             if fl {
-                "fadd";
+                "fadd"
             } else {
-                "add";
+                "add"
             },
             names[k],
         );
@@ -1070,7 +1070,7 @@ fn x64_zmm_code_round_trips() {
         nf += 1;
     }
     let mut err = String::new();
-    let q = lparse::parse(lir.as_str(), &mut err);
+    let q = lparse::parse(&lir, &mut err);
     assert(q.is_some(), err.as_str());
     let mut pk = q.unwrap();
     pk.vector = 64;
@@ -1102,13 +1102,13 @@ fn x64_zmm_code_round_trips() {
         let mut bad: u32 = 0;
         while k < code.len() {
             let mut s = String::new();
-            let n = xa::disassemble(code.as_slice(), k, &mut s);
+            let n = xa::disassemble(&code, k, &mut s);
             if n == 0 {
                 let mut b = Vector::<u8>::new();
                 let e = if k + 12 < code.len() {
-                    k + 12;
+                    k + 12
                 } else {
-                    code.len();
+                    code.len()
                 };
                 for j in k..e {
                     b.push(code[j]);
@@ -1118,7 +1118,7 @@ fn x64_zmm_code_round_trips() {
             }
             let mut b1 = Vector::<u8>::new();
             let mut fx = xa::Fix::new();
-            let mut same = xa::assemble(s.as_str(), xa::NOTGT, &mut b1, &mut fx, &mut err) && b1.len() == n as usize;
+            let mut same = xa::assemble(&s, xa::NOTGT, &mut b1, &mut fx, &mut err) && b1.len() == n as usize;
             for j in 0..b1.len() {
                 same = same && j < n as usize && b1[j] == code[k + j];
             }
@@ -1126,7 +1126,7 @@ fn x64_zmm_code_round_trips() {
                 eprint("{} at 0x{}: '{}' assembles to {}\n", os, hex(k as u32), s.as_str(), bhex(&b1).as_str());
                 bad += 1;
             }
-            all.push_str(s.as_str());
+            all.push_str(&s);
             all.push_str("\n");
             k += n as usize;
         }
@@ -1195,12 +1195,12 @@ fn x64_word_immediates_to_memory_round_trip() {
     let mut insts: u32 = 0;
     while k < c.b.len() {
         let mut s = String::new();
-        let n = xa::disassemble(c.b.as_slice(), k, &mut s);
+        let n = xa::disassemble(&c.b, k, &mut s);
         assert(n != 0, "each instruction decodes to a row");
         let mut b1 = Vector::<u8>::new();
         let mut fx = xa::Fix::new();
         let mut err = String::new();
-        assert(xa::assemble(s.as_str(), xa::NOTGT, &mut b1, &mut fx, &mut err) && b1.len() == n as usize, s.as_str());
+        assert(xa::assemble(&s, xa::NOTGT, &mut b1, &mut fx, &mut err) && b1.len() == n as usize, s.as_str());
         for j in 0..b1.len() {
             assert(b1[j] == c.b[k + j], s.as_str());
         }
@@ -1292,22 +1292,22 @@ fn module_blocks(path: str) u32 {
         // The attributes on the lines before it.
         let head = s.slice(
             if st > 200 {
-                st - 200;
+                st - 200
             } else {
-                0usize;
+                0usize
             },
             st,
         );
         let x64 = head.contains("@arch(x86_64)");
         let isa = if x64 {
-            asmr::ISA_X64;
+            asmr::ISA_X64
         } else {
-            asmr::ISA_A64;
+            asmr::ISA_A64
         };
         let cpu = if x64 {
-            "x86_64";
+            "x86_64"
         } else {
-            "aarch64";
+            "aarch64"
         };
         // The last `@platform` before the block: each step moves past one.
         let mut pl = head;
@@ -1316,9 +1316,9 @@ fn module_blocks(path: str) u32 {
             if q < 0 || pl.slice(q as usize + 1, pl.len()).find("@platform(") < 0 {
                 pl = pl.slice(
                     if q < 0 {
-                        0usize;
+                        0usize
                     } else {
-                        q as usize;
+                        q as usize
                     },
                     pl.len(),
                 );
@@ -1328,20 +1328,20 @@ fn module_blocks(path: str) u32 {
         }
         let what = format("{} block at byte {}", path, st);
         if pl.contains("macos") && !module_block(
-            what.as_str(),
+            &what,
             body,
             isa,
             asmr::FMT_MACHO,
             if x64 {
-                "x86_64-apple-macos11";
+                "x86_64-apple-macos11"
             } else {
-                "arm64-apple-macos11 -march=armv9-a+sme2+sme-f64f64";
+                "arm64-apple-macos11 -march=armv9-a+sme2+sme-f64f64"
             },
         ) {
             bad += 1;
         }
         if pl.contains("linux") && !module_block(
-            what.as_str(),
+            &what,
             body,
             isa,
             asmr::FMT_ELF,
@@ -1349,16 +1349,16 @@ fn module_blocks(path: str) u32 {
                 "{}-linux-gnu{}",
                 cpu,
                 if x64 {
-                    "";
+                    ""
                 } else {
-                    " -march=armv9-a+sme2+sme-f64f64";
+                    " -march=armv9-a+sme2+sme-f64f64"
                 },
             ).as_str(),
         ) {
             bad += 1;
         }
         if pl.contains("windows") && !module_block(
-            what.as_str(),
+            &what,
             body,
             isa,
             asmr::FMT_COFF,
@@ -1390,9 +1390,9 @@ fn ctx_blocks() u32 {
                 op,
                 tgt::axis_index(
                     if t.0 {
-                        "x86_64";
+                        "x86_64"
                     } else {
-                        "aarch64";
+                        "aarch64"
                     },
                     true,
                 ),
@@ -1402,12 +1402,12 @@ fn ctx_blocks() u32 {
             );
             let what = format("{} of {}", lir_ir::sys_name(op), t.2);
             if !module_block(
-                what.as_str(),
-                text.as_str(),
+                &what,
+                &text,
                 if t.0 {
-                    asmr::ISA_X64;
+                    asmr::ISA_X64
                 } else {
-                    asmr::ISA_A64;
+                    asmr::ISA_A64
                 },
                 t.1,
                 t.2,
@@ -1499,9 +1499,9 @@ fn wasm_imports(o: &Vector<u8>) String {
                     q += l;
                     s.push_byte(
                         if part == 0 {
-                            b'.';
+                            b'.'
                         } else {
-                            b'\n';
+                            b'\n'
                         },
                     );
                 }
@@ -1564,9 +1564,9 @@ fn wasm_sample(r: wt::Row, n: &mut wt::Ins, sym_text: &mut String) {
         },
         wt::K::MEM | wt::K::MEMLANE => {
             n.a = if r.al > 0 {
-                r.al as i64 - 1;
+                r.al as i64 - 1
             } else {
-                0i64;
+                0i64
             };
             n.b = 300;
             n.lo = 1;
@@ -1595,7 +1595,7 @@ fn wasm_sample(r: wt::Row, n: &mut wt::Ins, sym_text: &mut String) {
             n.a = 1;
         },
         _ => {},
-    };
+    }
 }
 
 // The sample text of every wasm row, one per line, as one function `f` of a module (the control rows
@@ -1622,7 +1622,7 @@ fn wasm_samples(text: &mut String) u32 {
             assert(false, "every row encodes its sample");
         }
         let mut d = wt::Ins::new(0);
-        let l0 = wt::decode(b0.as_slice(), 0, b0.len(), &mut d);
+        let l0 = wt::decode(&b0, 0, b0.len(), &mut d);
         let mut b2 = Vector::<u8>::new();
         if l0 as usize != b0.len() || !wt::encode(&d, &mut b2, &mut f, &mut f2) || b2.as_slice() != b0.as_slice() {
             eprint("row {} '{}': {} does not decode to itself\n", ri, r.mn, bhex(&b0).as_str());
@@ -1636,7 +1636,7 @@ fn wasm_samples(text: &mut String) u32 {
         let mut b1 = Vector::<u8>::new();
         let mut fx = Vector::<wa::Fix>::new();
         let mut err = String::new();
-        if !wa::assemble(s.as_str(), &mut b1, &mut fx, &mut err) || b1.as_slice() != b0.as_slice() {
+        if !wa::assemble(&s, &mut b1, &mut fx, &mut err) || b1.as_slice() != b0.as_slice() {
             eprint(
                 "row {} '{}': '{}' assembles to {} ({}), the row gives {}\n",
                 ri,
@@ -1653,11 +1653,11 @@ fn wasm_samples(text: &mut String) u32 {
         if r.imm == wt::K::BT {
             text.push_str(
                 if r.mn == "block" {
-                    "end_block\n";
+                    "end_block\n"
                 } else if r.mn == "loop" {
-                    "end_loop\n";
+                    "end_loop\n"
                 } else {
-                    "end_if\n";
+                    "end_if\n"
                 },
             );
         }
@@ -1679,7 +1679,7 @@ fn wasm_rows_round_trip() {
     assert(wasm_samples(&mut text) > 400, "the table's rows");
     let mut o = wo::WObj::new();
     let mut err = String::new();
-    if !asmr::wasm_module(&mut o, text.as_str(), &mut err) {
+    if !asmr::wasm_module(&mut o, &text, &mut err) {
         eprint("ours does not assemble the samples: {}\n", err.as_str());
         assert(false, "the samples assemble");
     }
@@ -1690,17 +1690,17 @@ fn wasm_rows_round_trip() {
         println("skipped: no WASI_SDK_PATH");
         return;
     }
-    wasm_compare("the samples", &ours, text.as_str(), sdk.as_str());
+    wasm_compare("the samples", &ours, &text, &sdk);
 }
 
 // Assemble `text` with the wasi-sdk's clang and compare its function bodies and imports with object
 // `ours`.
 fn wasm_compare(what: str, ours: &Vector<u8>, text: str, sdk: str) {
     let dir = format("{}/asm_wasm_{}", cli::tmp_dir().as_str(), process::pid().unwrap_or(1));
-    let _ = fs::mkdir_all(dir.as_str());
+    let _ = fs::mkdir_all(&dir);
     let sp = format("{}/t.s", dir.as_str());
     let op = format("{}/t.o", dir.as_str());
-    let f = stdio::fopen(sp.as_str(), "wb");
+    let f = stdio::fopen(&sp, "wb");
     unsafe stdio::fwrite(text.ptr(), 1, text.len(), f);
     unsafe stdio::fclose(f);
     let mut cmd = format(
@@ -1713,8 +1713,8 @@ fn wasm_compare(what: str, ours: &Vector<u8>, text: str, sdk: str) {
         eprint("{}: the wasi-sdk's clang does not assemble {}\n", what, sp.as_str());
         assert(false, "the wasi-sdk's clang assembles it");
     }
-    let theirs = read_bytes(op.as_str());
-    let _ = fs::remove_all(dir.as_str());
+    let theirs = read_bytes(&op);
+    let _ = fs::remove_all(&dir);
     let mut ba = Vector::<(usize, usize)>::new();
     let mut bb = Vector::<(usize, usize)>::new();
     assert(wasm_bodies(ours, &mut ba) && wasm_bodies(&theirs, &mut bb), "both are wasm modules");
@@ -1730,7 +1730,7 @@ fn wasm_compare(what: str, ours: &Vector<u8>, text: str, sdk: str) {
             let mut sa = String::new();
             let mut sb = String::new();
             let la = wa::disassemble(ours.as_slice(), p, a1, &mut sa) as usize;
-            let lb = wa::disassemble(theirs.as_slice(), q, b1, &mut sb) as usize;
+            let lb = wa::disassemble(&theirs, q, b1, &mut sb) as usize;
             let mut same = la != 0 && la == lb;
             for j in 0..la {
                 same = same && ours[p + j] == theirs[q + j];
@@ -1791,8 +1791,8 @@ fn wasm_module_assembly_matches_the_c_compiler() {
     if sdk.len() == 0 || cli::on_wasm() {
         return;
     }
-    wasm_blocks("std/rt/libc.spc", sdk.as_str());
-    wasm_blocks("std/rt/libm.spc", sdk.as_str());
+    wasm_blocks("std/rt/libc.spc", &sdk);
+    wasm_blocks("std/rt/libm.spc", &sdk);
 }
 
 // The code the wasm generator emits for `CORPUS` and std: every instruction decodes to a table row and
@@ -1811,7 +1811,7 @@ fn wasm_generated_code_round_trips() {
     let mut insts: u64 = 0;
     let mut bad: u32 = 0;
     for i in 0..objs.len() {
-        let o = read_bytes(objs[i].as_str());
+        let o = read_bytes(&objs[i]);
         let mut bodies = Vector::<(usize, usize)>::new();
         if !wasm_bodies(&o, &mut bodies) {
             continue;
@@ -1821,7 +1821,7 @@ fn wasm_generated_code_round_trips() {
             let mut p2 = a0;
             while p2 < a1 {
                 let mut n = wt::Ins::new(0);
-                let l = wt::decode(o.as_slice(), p2, a1, &mut n) as usize;
+                let l = wt::decode(&o, p2, a1, &mut n) as usize;
                 insts += 1;
                 if l == 0 {
                     eprint("{} body {} at {}: 0x{} decodes to no row\n", objs[i].as_str(), k, p2 - a0, hex(o[p2]));
@@ -1853,7 +1853,7 @@ fn a64_intrinsics_match_the_c_compiler() {
         let mut rels = Vector::<asmr::InlRel>::new();
         let mut e = String::new();
         let n0 = words.len();
-        if !asmr::Asm::inline_a64(t.as_str(), false, &mut words, &mut rels, &mut e) {
+        if !asmr::Asm::inline_a64(&t, false, &mut words, &mut rels, &mut e) {
             eprint("{}: '{}': {}\n", rows[i].0, t.as_str(), e.as_str());
             bad += 1;
             words.truncate(n0);
@@ -1892,7 +1892,7 @@ fn wasm_intrinsics_match_the_c_compiler() {
     }
     let mut o = wo::WObj::new();
     let mut err = String::new();
-    if !asmr::wasm_module(&mut o, text.as_str(), &mut err) {
+    if !asmr::wasm_module(&mut o, &text, &mut err) {
         eprint("ours does not assemble the intrinsics: {}\n", err.as_str());
         assert(false, "the intrinsics assemble");
     }
@@ -1903,7 +1903,7 @@ fn wasm_intrinsics_match_the_c_compiler() {
         println("skipped: no WASI_SDK_PATH");
         return;
     }
-    wasm_compare("the intrinsics", &ours, text.as_str(), sdk.as_str());
+    wasm_compare("the intrinsics", &ours, &text, &sdk);
 }
 
 // Every x86-64 intrinsic row, its constant arguments 1, assembles to the C compiler's bytes.

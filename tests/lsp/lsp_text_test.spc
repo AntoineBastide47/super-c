@@ -60,6 +60,6 @@ fn text_uri_conversion() {
     let u = text::path_to_uri("/Users/a b/x.spc");
     assert_eq(u.as_str(), "file:///Users/a%20b/x.spc");
     // Roundtrip through both directions.
-    let rt = text::uri_to_path(u.as_str());
+    let rt = text::uri_to_path(&u);
     assert_eq(rt.as_str(), "/Users/a b/x.spc");
 }

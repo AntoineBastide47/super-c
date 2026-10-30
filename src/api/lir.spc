@@ -44,8 +44,8 @@ extend Program {
     pub fn parse(text: str) Result<Program, ApiError> {
         let mut err = String::new();
         return switch lparse::parse(text, &mut err) {
-            Some(p) => Result::<Program, ApiError>::Ok(Program { p: p }),
-            None => Result::<Program, ApiError>::Err(ApiError::new(Code::ParseFailed, err.as_str())),
+            Some(p) => Ok(Program { p: p }),
+            None => Err(ApiError::new(Code::ParseFailed, &err)),
         };
     }
 
@@ -72,11 +72,11 @@ extend Program {
     pub fn function_text(self: &Self, name: str) Option<String> {
         let s = self.p.find_symbol(name);
         if s == lir::NONE || self.p.syms[s as usize].kind != lir::SK_FUNC || self.p.syms[s as usize].def == lir::NONE {
-            return Option::<String>::None;
+            return None;
         }
         let mut out = String::new();
         lprint::print_body(&self.p, name, &self.p.bodies[self.p.syms[s as usize].def as usize], &mut out);
-        return Option::<String>::Some(out);
+        return Some(out);
     }
 
     /// Check every function body: SSA form, types, block parameters, and every call against its callee's
@@ -91,21 +91,19 @@ extend Program {
             let name = self.p.spell(y.name);
             let b = &self.p.bodies[y.def as usize];
             if !v.check(&self.p, name, b) || !v.check_calls(&self.p, name, b) {
-                return Result::<Unit, ApiError>::Err(ApiError::new(Code::VerificationFailed, v.err.as_str()));
+                return Err(ApiError::new(Code::VerificationFailed, &v.err));
             }
         }
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     /// Move every symbol, data definition and body of `other` into this program; a name both define keeps
     /// this program's definition. `InvalidArgument` when the data models differ.
     pub fn absorb(self: &mut Self, other: &Program) Result<Unit, ApiError> {
         if !self.p.absorb(&other.p) {
-            return Result::<Unit, ApiError>::Err(
-                ApiError::new(Code::InvalidArgument, "the programs have different pointer sizes"),
-            );
+            return Err(ApiError::new(Code::InvalidArgument, "the programs have different pointer sizes"));
         }
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     // The program of package `p`, which it takes; `take_package` gives it back and leaves the program empty.
@@ -135,9 +133,7 @@ extend Program {
     pub fn evaluate(self: &Self, name: str, args: Slice<u64>) Result<Evaluation, ApiError> {
         let s = self.p.find_symbol(name);
         if s == lir::NONE || self.p.syms[s as usize].def == lir::NONE {
-            return Result::<Evaluation, ApiError>::Err(
-                ApiError::new(Code::InvalidArgument, "the program defines no such function"),
-            );
+            return Err(ApiError::new(Code::InvalidArgument, "the program defines no such function"));
         }
         let mut e = leval::Eval::new(&self.p);
         let o = e.run(s, args);
@@ -145,9 +141,7 @@ extend Program {
         if o.kind != leval::EV_OK {
             leval::outcome_text(&self.p, &o, &mut msg);
         }
-        return Result::<Evaluation, ApiError>::Ok(
-            Evaluation { value: o.value, trapped: o.kind != leval::EV_OK, message: msg },
-        );
+        return Ok(Evaluation { value: o.value, trapped: o.kind != leval::EV_OK, message: msg });
     }
 
     /// The object file of every function and data definition for operating system `os` (`macos`, `linux`,
@@ -159,14 +153,10 @@ extend Program {
         let o = tgt::axis_index(os, false);
         let i = tgt::axis_index(isa, true);
         if o < 0 || i < 0 || !native::supported(o, i) {
-            return Result::<Vector<u8>, ApiError>::Err(
-                ApiError::new(Code::UnsupportedCapability, "no native backend compiles for this target"),
-            );
+            return Err(ApiError::new(Code::UnsupportedCapability, "no native backend compiles for this target"));
         }
         if self.p.ptr_bytes != tgt::isa(i).ptr_bytes as u32 {
-            return Result::<Vector<u8>, ApiError>::Err(
-                ApiError::new(Code::InvalidArgument, "the program's pointer size is not the target's"),
-            );
+            return Err(ApiError::new(Code::InvalidArgument, "the program's pointer size is not the target's"));
         }
         return self.object_for(o, i);
     }
@@ -187,10 +177,10 @@ extend Program {
         }
         let mut out = Vector::<u8>::new();
         let mut err = String::new();
-        if !native::object(&self.p, os, isa, funcs.as_slice(), datas.as_slice(), "", &mut out, &mut err) {
-            return Result::<Vector<u8>, ApiError>::Err(ApiError::new(Code::VerificationFailed, err.as_str()));
+        if !native::object(&self.p, os, isa, &funcs, &datas, "", &mut out, &mut err) {
+            return Err(ApiError::new(Code::VerificationFailed, &err));
         }
-        return Result::<Vector<u8>, ApiError>::Ok(out);
+        return Ok(out);
     }
 
     /// Compile the program for the host, link it into a shared library with the compiler's own linker and load
@@ -201,21 +191,21 @@ extend Program {
         let base = switch fs::temp_dir() {
             Ok(t) => t,
             Err(e) => {
-                return Result::<Library, ApiError>::Err(ApiError::io(e, ""));
+                return Err(ApiError::io(e, ""));
             },
         };
         // One directory per load: the process id and a counter name it.
         unsafe LOADS = unsafe LOADS + 1;
         let dir = format("{}/superc_lir_{}_{}", base.as_str(), process::pid().unwrap_or(0), unsafe LOADS);
-        let _ = fs::remove_all(dir.as_str());
-        if let Err(e) = fs::mkdir_all(dir.as_str()) {
-            return Result::<Library, ApiError>::Err(ApiError::io(e, dir.as_str()));
+        let _ = fs::remove_all(&dir);
+        if let Err(e) = fs::mkdir_all(&dir) {
+            return Err(ApiError::io(e, &dir));
         }
         let op = format("{}/program.o", dir.as_str());
         let lib = format("{}/{}", dir.as_str(), shared_name());
-        if let Err(e) = write_bytes(op.as_str(), obj.as_slice()) {
-            let _ = fs::remove_all(dir.as_str());
-            return Result::<Library, ApiError>::Err(ApiError::io(e, op.as_str()));
+        if let Err(e) = write_bytes(&op, &obj) {
+            let _ = fs::remove_all(&dir);
+            return Err(ApiError::io(e, &op));
         }
         let mut args = Vector::<String>::new();
         args.push(String::from_str("-shared"));
@@ -224,16 +214,16 @@ extend Program {
         args.push(op);
         let mut why = String::new();
         if lk::link_args(tgt::host_os(), tgt::host_isa(), &args, false, 1, &mut why) != lk::LINKED {
-            let _ = fs::remove_all(dir.as_str());
-            return Result::<Library, ApiError>::Err(
+            let _ = fs::remove_all(&dir);
+            return Err(
                 ApiError::new(Code::VerificationFailed, format("the program does not link: {}", why.as_str()).as_str()),
             );
         }
-        return switch unsafe dylib::open(lib.as_str()) {
-            Ok(l) => Result::<Library, ApiError>::Ok(Library { lib: Option::<dylib::Library>::Some(l), dir: dir }),
+        return switch unsafe dylib::open(&lib) {
+            Ok(l) => Ok(Library { lib: Some(l), dir: dir }),
             Err(e) => {
-                let _ = fs::remove_all(dir.as_str());
-                Result::<Library, ApiError>::Err(ApiError::io(e, lib.as_str()));
+                let _ = fs::remove_all(&dir);
+                Err(ApiError::io(e, &lib))
             },
         };
     }
@@ -247,7 +237,7 @@ pub fn of_program(path: str, std_dir: str) Result<Program, ApiError> {
     let base = switch fs::temp_dir() {
         Ok(t) => t,
         Err(e) => {
-            return Result::<Program, ApiError>::Err(ApiError::io(e, ""));
+            return Err(ApiError::io(e, ""));
         },
     };
     unsafe LOADS = unsafe LOADS + 1;
@@ -271,7 +261,7 @@ pub fn of_program(path: str, std_dir: str) Result<Program, ApiError> {
         false,
         false,
         1,
-        out_dir.as_str(),
+        &out_dir,
         "",
         "debug",
         bman::OPT_NONE,
@@ -279,13 +269,11 @@ pub fn of_program(path: str, std_dir: str) Result<Program, ApiError> {
         0,
         &mut text,
     );
-    let _ = fs::remove_all(out_dir.as_str());
+    let _ = fs::remove_all(&out_dir);
     if rc != 0 || text.len() == 0 {
-        return Result::<Program, ApiError>::Err(
-            ApiError::at(Code::SemanticFailed, "the program does not compile", path, 0, 0),
-        );
+        return Err(ApiError::at(Code::SemanticFailed, "the program does not compile", path, 0, 0));
     }
-    return Program::parse(text.as_str());
+    return Program::parse(&text);
 }
 
 // Write `bytes` to a new file `path`.
@@ -310,8 +298,8 @@ fn shared_name() str<'static> {
 /// A loaded program. Dropping it unloads it and removes its files: every function pointer taken from it
 /// dangles after.
 pub struct Library {
-    pub(module) lib: Option<dylib::Library>,
-    pub(module) dir: String,
+    lib: Option<dylib::Library>,
+    dir: String,
 }
 
 extend Library {
@@ -319,10 +307,10 @@ extend Library {
     pub unsafe fn symbol(self: &Self, name: str) Result<*mut void, ApiError> {
         return switch &self.lib {
             Some(l) => switch unsafe l.symbol(name) {
-                Ok(a) => Result::<*mut void, ApiError>::Ok(a),
-                Err(e) => Result::<*mut void, ApiError>::Err(ApiError::io(e, name)),
+                Ok(a) => Ok(a),
+                Err(e) => Err(ApiError::io(e, name)),
             },
-            None => Result::<*mut void, ApiError>::Err(ApiError::new(Code::Internal, "the library is not loaded")),
+            None => Err(ApiError::new(Code::Internal, "the library is not loaded")),
         };
     }
 }
@@ -332,7 +320,7 @@ extend Library as Free {
         if let Some(l) = replace(&mut self.lib, Option::<dylib::Library>::None) {
             let _ = unsafe l.close();
         }
-        let _ = fs::remove_all(self.dir.as_str());
+        let _ = fs::remove_all(&self.dir);
         self.dir.free();
     }
 }

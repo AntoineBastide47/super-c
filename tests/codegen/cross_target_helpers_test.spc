@@ -36,7 +36,7 @@ fn wasi_sysroot_is_one_unquoted_argument() {
     let mut fl = String::new();
     util::push_sdk_flags(&mut fl, 3, 2, tgt::baseline(3, 2));
     let mut args = Vector::<String>::new();
-    util::split_args(&mut args, fl.as_str());
+    util::split_args(&mut args, &fl);
     let mut found = false;
     for i in 0..args.len() {
         assert(!args[i].as_str().contains("\""), "no argument carries a quote");

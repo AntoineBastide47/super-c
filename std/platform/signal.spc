@@ -157,9 +157,9 @@ fn install(s: Signal, h: *mut void) Result<Unit, IoError> {
     sa.sa_flags = SA_RESTART;
     unsafe sigemptyset(&mut sa.sa_mask);
     if unsafe c_sigaction(number(s), &sa, null) != 0 {
-        return Result::<Unit, IoError>::Err(error::last_error(IoOp::Signal));
+        return Err(error::last_error(IoOp::Signal));
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 @platform(wasm)
 fn install(_s: Signal, _h: *mut void) Result<Unit, IoError> {
@@ -191,19 +191,19 @@ pub fn ignore_ctrl_c(on: bool) Result<Unit, IoError> {
 @platform(windows)
 pub fn console_event(code: u32) Option<ConsoleEvent> {
     return switch code {
-        0 => Option::<ConsoleEvent>::Some(ConsoleEvent::CtrlC),
-        1 => Option::<ConsoleEvent>::Some(ConsoleEvent::CtrlBreak),
-        2 => Option::<ConsoleEvent>::Some(ConsoleEvent::Close),
-        5 => Option::<ConsoleEvent>::Some(ConsoleEvent::Logoff),
-        6 => Option::<ConsoleEvent>::Some(ConsoleEvent::Shutdown),
-        _ => Option::<ConsoleEvent>::None,
+        0 => Some(CtrlC),
+        1 => Some(CtrlBreak),
+        2 => Some(Close),
+        5 => Some(Logoff),
+        6 => Some(Shutdown),
+        _ => None,
     };
 }
 
 @platform(windows)
 fn console_handler(p: *mut void, add: i32) Result<Unit, IoError> {
     if unsafe SetConsoleCtrlHandler(ConsoleHandler { p: p }.h, add) == 0 {
-        return Result::<Unit, IoError>::Err(error::last_error(IoOp::Signal));
+        return Err(error::last_error(IoOp::Signal));
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }

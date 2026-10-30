@@ -65,18 +65,18 @@ pub fn read_be<T: EndianScalar>(b: []u8, off: usize) T {
 /// `off`.
 pub fn try_read_le<T: EndianScalar>(b: []u8, off: usize) Option<T> {
     if !fits(b.len(), off, sizeof(T)) {
-        return Option::<T>::None;
+        return None;
     }
-    return Option::<T>::Some(to_le(unsafe ptr::read_unaligned::<T>(b.as_ptr() + off)));
+    return Some(to_le(unsafe ptr::read_unaligned::<T>(b.as_ptr() + off)));
 }
 
 /// The big-endian `T` at byte offset `off` of `b`, or `None` when fewer than `sizeof(T)` bytes follow
 /// `off`.
 pub fn try_read_be<T: EndianScalar>(b: []u8, off: usize) Option<T> {
     if !fits(b.len(), off, sizeof(T)) {
-        return Option::<T>::None;
+        return None;
     }
-    return Option::<T>::Some(to_be(unsafe ptr::read_unaligned::<T>(b.as_ptr() + off)));
+    return Some(to_be(unsafe ptr::read_unaligned::<T>(b.as_ptr() + off)));
 }
 
 /// Store `v` little-endian at byte offset `off` of `b`. Panics: fewer than `sizeof(T)` bytes from `off`.

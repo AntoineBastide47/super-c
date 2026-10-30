@@ -11,7 +11,7 @@ pub(package) fn archive(fmt: u8, out: str, objs: &Vector<String>, err: &mut Stri
     let mut data = Vector::<Vector<u8>>::new();
     let mut syms = Vector::<(String, u32)>::new(); // (name, member)
     for i in 0..objs.len() {
-        let d = lu::read(objs[i].as_str());
+        let d = lu::read(&objs[i]);
         if d.is_none() {
             err.format_into("cannot read '{}'", objs[i].as_str());
             return false;
@@ -19,7 +19,7 @@ pub(package) fn archive(fmt: u8, out: str, objs: &Vector<String>, err: &mut Stri
         let bytes = d.unwrap();
         {
             let mut names = Vector::<str>::new();
-            if !defined(fmt, bytes.as_slice(), &mut names) {
+            if !defined(fmt, &bytes, &mut names) {
                 err.format_into("'{}' is not an object of the target's format", objs[i].as_str());
                 return false;
             }
@@ -35,7 +35,7 @@ pub(package) fn archive(fmt: u8, out: str, objs: &Vector<String>, err: &mut Stri
     } else {
         sysv(objs, &data, &syms, &mut a);
     }
-    if !lu::write(out, a.as_slice(), 0o644) {
+    if !lu::write(out, &a, 0o644) {
         err.format_into("cannot write '{}'", out);
         return false;
     }
@@ -66,9 +66,9 @@ pub(package) fn read<'a>(
     if b.len() < 8 || lu::cstr(b[0..8], 0) != "!<arch>\n" {
         err.push_str(
             if b.len() >= 8 && lu::cstr(b[0..8], 0) == "!<thin>\n" {
-                "a thin archive";
+                "a thin archive"
             } else {
-                "not an archive";
+                "not an archive"
             },
         );
         return false;
@@ -215,7 +215,7 @@ extend Archives {
             let mut syms = Vector::<(str, u32)>::new();
             let mut why = String::new();
             let mut imports = false;
-            if !read(fmt, bytes.as_slice(), &mut ms, &mut syms, &mut imports, &mut why) {
+            if !read(fmt, &bytes, &mut ms, &mut syms, &mut imports, &mut why) {
                 err.format_into("'{}': {}", path, why.as_str());
                 return false;
             }
@@ -243,13 +243,13 @@ extend Archives {
     pub(package) const fn find(self: &Self, name: str) Option<u64> {
         let id = self.names.find(name);
         if id < 0 || id as usize >= self.defs.len() || self.defs[id as usize] == 0 {
-            return Option::<u64>::None;
+            return None;
         }
         let am = self.defs[id as usize] - 1;
         if self.taken[(am >> 32) as usize][(am & 0xFFFFFFFF) as usize] {
-            return Option::<u64>::None;
+            return None;
         }
-        return Option::<u64>::Some(am);
+        return Some(am);
     }
 
     /// Mark member `am` (`find`'s value) taken.
@@ -322,9 +322,9 @@ fn field(a: &mut Vector<u8>, s: str, n: usize) {
     for i in 0..n {
         a.push(
             if i < s.len() {
-                s.byte_at(i);
+                s.byte_at(i)
             } else {
-                b' ';
+                b' '
             },
         );
     }
@@ -351,7 +351,7 @@ fn sysv(objs: &Vector<String>, data: &Vector<Vector<u8>>, syms: &Vector<(String,
     let mut longs = Vector::<u8>::new();
     let mut names = Vector::<String>::new();
     for i in 0..objs.len() {
-        let b = base(objs[i].as_str());
+        let b = base(&objs[i]);
         if b.len() < 16 {
             names.push(format("{}/", b));
         } else {
@@ -384,20 +384,20 @@ fn sysv(objs: &Vector<String>, data: &Vector<Vector<u8>>, syms: &Vector<(String,
         put_be32(a, offs[syms[k].1 as usize]);
     }
     for k in 0..syms.len() {
-        let _ = lu::put_str(a, syms[k].0.as_str());
+        let _ = lu::put_str(a, &syms[k].0);
     }
     if a.len() % 2 != 0 {
         a.push(b'\n');
     }
     if longs.len() != 0 {
         header(a, "//", longs.len() as u64);
-        a.extend_from_slice(longs.as_slice());
+        a.extend_from_slice(&longs);
         if a.len() % 2 != 0 {
             a.push(b'\n');
         }
     }
     for i in 0..data.len() {
-        header(a, names[i].as_str(), data.at(i).len() as u64);
+        header(a, &names[i], data.at(i).len() as u64);
         a.extend_from_slice(data.at(i).as_slice());
         if a.len() % 2 != 0 {
             a.push(b'\n');
@@ -418,7 +418,7 @@ fn bsd(objs: &Vector<String>, data: &Vector<Vector<u8>>, syms: &mut Vector<(Stri
     let mut strs = Vector::<u8>::new();
     let mut strx = Vector::<u32>::new();
     for k in 0..syms.len() {
-        strx.push(lu::put_str(&mut strs, syms[k].0.as_str()));
+        strx.push(lu::put_str(&mut strs, &syms[k].0));
     }
     while strs.len() % 8 != 0 {
         strs.push(0);
@@ -430,7 +430,7 @@ fn bsd(objs: &Vector<String>, data: &Vector<Vector<u8>>, syms: &mut Vector<(Stri
     let mut offs = Vector::<u32>::new();
     let mut nls = Vector::<u64>::new();
     for i in 0..data.len() {
-        let nl = bsd_name_len(at, base(objs[i].as_str()));
+        let nl = bsd_name_len(at, base(&objs[i]));
         offs.push(at as u32);
         nls.push(nl);
         at += 60 + nl + lu::align_up(data.at(i).len() as u64, 8);
@@ -444,11 +444,11 @@ fn bsd(objs: &Vector<String>, data: &Vector<Vector<u8>>, syms: &mut Vector<(Stri
         lu::w32(a, offs[syms[k].1 as usize]);
     }
     lu::w32(a, strs.len() as u32);
-    a.extend_from_slice(strs.as_slice());
+    a.extend_from_slice(&strs);
     for i in 0..data.len() {
         let len = lu::align_up(data.at(i).len() as u64, 8);
         header(a, format("#1/{}", nls[i]).as_str(), nls[i] + len);
-        name_field(a, base(objs[i].as_str()), nls[i]);
+        name_field(a, base(&objs[i]), nls[i]);
         a.extend_from_slice(data.at(i).as_slice());
         while a.len() % 8 != 0 {
             a.push(b'\n');
@@ -460,9 +460,9 @@ fn name_field(a: &mut Vector<u8>, name: str, n: u64) {
     for i in 0..n as usize {
         a.push(
             if i < name.len() {
-                name.byte_at(i);
+                name.byte_at(i)
             } else {
-                0u8;
+                0u8
             },
         );
     }

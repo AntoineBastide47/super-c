@@ -53,9 +53,9 @@ fn atan_inv_big(k: i32) Big {
         }
         let t = p / Big::from_f64((2 * n + 1) as f64);
         s = if n % 2 == 1 {
-            s - t;
+            s - t
         } else {
-            s + t;
+            s + t
         };
         n += 1;
     }
@@ -108,9 +108,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
             }
             let t = p / R::of((2 * n + 1) as f64);
             s = if n % 2 == 1 {
-                s - t;
+                s - t
             } else {
-                s + t;
+                s + t
             };
             n += 1;
         }
@@ -232,9 +232,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
         for _ in 0..200 {
             p = p * z / R::of((2 * n * (2 * n + 1)) as f64);
             sum = if n % 2 == 1 {
-                sum - p;
+                sum - p
             } else {
-                sum + p;
+                sum + p
             };
             if !(Ref::<R>::tiny() * Ref::<R>::abs(sum)).lt(Ref::<R>::abs(p)) {
                 return sum;
@@ -252,9 +252,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
         for _ in 0..200 {
             p = p * z / R::of(((2 * n - 1) * (2 * n)) as f64);
             sum = if n % 2 == 1 {
-                sum - p;
+                sum - p
             } else {
-                sum + p;
+                sum + p
             };
             if p.lt(Ref::<R>::tiny()) {
                 return sum;
@@ -269,7 +269,7 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
     pub fn rem_pio2(self: &Ref<R>, x: f64) (i64, R) {
         let a = x.abs();
         if a <= 0.78 {
-            return 0, R::of(x);
+            return (0, R::of(x));
         }
         let b = fl::f64_bits(a);
         let mant = b & 0xFFFFFFFFFFFFF | 1u64 << 52; // a = mant * 2^e
@@ -321,9 +321,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
         }
         let r = f * self.pio2;
         if x < 0.0 {
-            return (4 - quad % 4) % 4, Ref::<R>::neg(r);
+            return ((4 - quad % 4) % 4, Ref::<R>::neg(r));
         }
-        return quad % 4, r;
+        return (quad % 4, r);
     }
 
     // Bit `i` (weight 2^-i, i >= 1) of 2/pi and the 31 bits after it, as one word.
@@ -332,9 +332,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
         let o = (i - 1) % 32;
         let hi = (unsafe self.two_pi_words[w as usize]) as u64;
         let lo = if (w + 1) as usize < PIO2_WORDS {
-            (unsafe self.two_pi_words[(w + 1) as usize]) as u64;
+            (unsafe self.two_pi_words[(w + 1) as usize]) as u64
         } else {
-            0;
+            0
         };
         return ((hi << 32 | lo) >> (32 - o) as u64) as u32;
     }
@@ -407,9 +407,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
             p = p * z;
             let t = p / R::of((2 * n + 1) as f64);
             sum = if n % 2 == 1 {
-                sum - t;
+                sum - t
             } else {
-                sum + t;
+                sum + t
             };
             if !(Ref::<R>::tiny() * Ref::<R>::abs(sum)).lt(Ref::<R>::abs(t)) {
                 return sum.scale(halvings);
@@ -423,9 +423,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
     pub fn asin(self: &Ref<R>, x: f64) R {
         if x.abs() == 1.0 {
             return if x < 0.0 {
-                Ref::<R>::neg(self.pio2);
+                Ref::<R>::neg(self.pio2)
             } else {
-                self.pio2;
+                self.pio2
             };
         }
         let v = R::of(x);
@@ -445,29 +445,29 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
     pub fn atan2(self: &Ref<R>, y: f64, x: f64) R {
         if x == 0.0 {
             return if y < 0.0 {
-                Ref::<R>::neg(self.pio2);
+                Ref::<R>::neg(self.pio2)
             } else {
-                self.pio2;
+                self.pio2
             };
         }
         // The ratio of the two scaled to one binade: no overflow or underflow in `R`.
         let ex = exponent(x.abs());
         let ey = if y == 0.0 {
-            ex;
+            ex
         } else {
-            exponent(y.abs());
+            exponent(y.abs())
         };
         // |y| > |x|: +-pi/2 - atan(x / y), so that the ratio stays at most 1 (an overflow would be NaN).
         let q = R::of(y).scale(-(ey as i64)) / R::of(x).scale(-(ex as i64));
         let s = if y < 0.0 == x < 0.0 {
-            self.pio2;
+            self.pio2
         } else {
-            Ref::<R>::neg(self.pio2);
+            Ref::<R>::neg(self.pio2)
         };
         let t = if ey > ex + 1 {
-            s - self.atan(R::of(1.0) / q * R::of(1.0).scale(ex - ey));
+            s - self.atan(R::of(1.0) / q * R::of(1.0).scale(ex - ey))
         } else {
-            self.atan(q * R::of(1.0).scale(ey - ex));
+            self.atan(q * R::of(1.0).scale(ey - ex))
         };
         if x > 0.0 {
             return t;
@@ -483,9 +483,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
         // x = m 2^(3j), m in [1, 8): Newton on m (its cube never overflows), the root times 2^j.
         let e = exponent(x.near()) as i64;
         let j = if e >= 0 {
-            e / 3;
+            e / 3
         } else {
-            -((2 - e) / 3);
+            -((2 - e) / 3)
         }; // floor(e / 3)
         let m = x.scale(-3 * j);
         let mut y = self.exp(self.log(m) / R::of(3.0));
@@ -508,9 +508,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
         let a = x.abs();
         let s = if a < 20.0 {
             let t = self.expm1(R::of(a));
-            (t + t / (t + R::of(1.0))).scale(-1);
+            (t + t / (t + R::of(1.0))).scale(-1)
         } else {
-            self.exp(R::of(a) - self.ln2) - self.exp(R::of(-a) - self.ln2);
+            self.exp(R::of(a) - self.ln2) - self.exp(R::of(-a) - self.ln2)
         };
         if x < 0.0 {
             return Ref::<R>::neg(s);
@@ -528,10 +528,10 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
     pub fn tanh(self: &Ref<R>, x: f64) R {
         // Past 40, 1 - 2 / (e^2|x| + 1) without the overflow of e^2|x|.
         let r = if x.abs() > 40.0 {
-            R::of(1.0) - self.exp(R::of(-2.0 * x.abs())).scale(1);
+            R::of(1.0) - self.exp(R::of(-2.0 * x.abs())).scale(1)
         } else {
             let t = self.expm1(R::of(2.0 * x.abs()));
-            t / (t + R::of(2.0));
+            t / (t + R::of(2.0))
         };
         if x < 0.0 {
             return Ref::<R>::neg(r);
@@ -543,10 +543,10 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
     pub fn asinh(self: &Ref<R>, x: f64) R {
         let a = x.abs();
         let r = if a > 1e30 {
-            self.log(R::of(a)) + self.ln2;
+            self.log(R::of(a)) + self.ln2
         } else {
             let v = R::of(a);
-            self.log1p(v + v * v / (R::of(1.0) + (R::of(1.0) + v * v).root()));
+            self.log1p(v + v * v / (R::of(1.0) + (R::of(1.0) + v * v).root()))
         };
         if x < 0.0 {
             return Ref::<R>::neg(r);
@@ -573,9 +573,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
     pub fn erf(self: &Ref<R>, x: f64) R {
         let a = x.abs();
         let r = if a < 3.0 {
-            self.erf_series(a);
+            self.erf_series(a)
         } else {
-            R::of(1.0) - self.erfc_cf(a);
+            R::of(1.0) - self.erfc_cf(a)
         };
         if x < 0.0 {
             return Ref::<R>::neg(r);
@@ -605,9 +605,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
             p = p * z / R::of(n as f64);
             let t = p / R::of((2 * n + 1) as f64);
             sum = if n % 2 == 1 {
-                sum - t;
+                sum - t
             } else {
-                sum + t;
+                sum + t
             };
             if !(Ref::<R>::tiny() * Ref::<R>::abs(sum).scale(-8)).lt(t) {
                 return sum * self.two_sqrtpi;

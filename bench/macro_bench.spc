@@ -41,7 +41,7 @@ fn check(name: str, got: i64, want: i64) {
         what.push_i64(got);
         what.push_str(" of ");
         what.push_i64(want);
-        bench::fail(what.as_str());
+        bench::fail(&what);
     }
 }
 
@@ -69,7 +69,7 @@ fn pipeline_once() {
                     None => {
                         break;
                     },
-                };
+                }
             }
             w.done();
         };
@@ -91,7 +91,7 @@ fn pipeline_once() {
                 None => {
                     break;
                 },
-            };
+            }
         }
         bench::black_box(acc);
         dc.get().store(n, atomics::MemoryOrder::Release);
@@ -180,9 +180,9 @@ fn pipeline_batched_once() {
     while i < ITEMS {
         // Short final batch: the ITEM COUNT must equal `pipeline`'s exactly or the curves are not comparable.
         let take = if ITEMS - i < BATCH as i64 {
-            ITEMS - i;
+            ITEMS - i
         } else {
-            BATCH as i64;
+            BATCH as i64
         };
         for j in 0..take {
             out.push(i + j);
@@ -252,9 +252,9 @@ fn breakeven(name: str, body: fn() void) {
             rt::shutdown();
             rt::set_worker_count(
                 if side == 0 {
-                    1usize;
+                    1usize
                 } else {
-                    ncpu;
+                    ncpu
                 },
             );
             let p = sweep::measure(body, BREAKEVEN_ROUNDS);
@@ -270,9 +270,9 @@ fn breakeven(name: str, body: fn() void) {
             js.push_str(",\"point_workers\":");
             js.push_u64(
                 if side == 0 {
-                    1u64;
+                    1u64
                 } else {
-                    ncpu as u64;
+                    ncpu as u64
                 },
             );
             bench::json_dist(&mut js, "ms", &p.ms, 1.0);
@@ -281,7 +281,7 @@ fn breakeven(name: str, body: fn() void) {
             js.push_str(",\"cpu_ms_per_round\":");
             js.push_f64_prec(p.cpu_ms, 3);
             js.push_byte(b'}');
-            bench::log_line(js.as_str());
+            bench::log_line(&js);
         }
         unsafe stdio::printf(
             "    %-9lld %12.3f %12.3f %9.2fx %12.2f %12.2f\n".ptr() as *const char,
@@ -368,7 +368,7 @@ fn mixed_once() {
                 None => {
                     break;
                 },
-            };
+            }
         }
         dc.get().store(n, atomics::MemoryOrder::Release);
         d.done();

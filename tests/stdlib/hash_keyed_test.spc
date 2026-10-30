@@ -181,7 +181,7 @@ fn any_split_of_a_stream_gives_one_digest() {
         msg.push(rng.next_u32() as u8);
     }
     let mut whole = keyed::SipHasher13::new(1, 2);
-    whole.write(msg.as_slice());
+    whole.write(&msg);
     let want = whole.finish();
     for _ in 0..50 {
         let mut h = keyed::SipHasher13::new(1, 2);

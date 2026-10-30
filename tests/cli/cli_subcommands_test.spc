@@ -19,7 +19,7 @@ fn new_scaffolds_and_runs() {
     let mut app = String::from_str(root);
     app.push_str("/myapp");
     // The scaffolded project builds and runs, printing its greeting.
-    let r = cli::superc_env_in(app.as_str(), E, "1", "run");
+    let r = cli::superc_env_in(&app, E, "1", "run");
     assert(r.ok(), "the scaffolded project runs");
     assert(r.out_has("Hello from myapp!"), "the scaffold's main runs");
 }
@@ -41,10 +41,10 @@ fn init_scaffolds_in_place() {
     // A directory of a fixed name: the project takes it, and with it its cache root.
     p.mkfile("initapp/.keep", "");
     let root = format("{}/initapp", p.dir());
-    let r = cli::superc_env_in(root.as_str(), E, "1", "init");
+    let r = cli::superc_env_in(&root, E, "1", "init");
     assert(r.ok(), "init scaffolds the current directory");
     // The scaffolded project runs from its own root.
-    let run = cli::superc_env_in(root.as_str(), E, "1", "run");
+    let run = cli::superc_env_in(&root, E, "1", "run");
     assert(run.ok(), "the initialized project runs");
     assert(run.out_has("Hello from"), "greeting printed");
 }
@@ -93,15 +93,15 @@ fn clean_full_removes_build_outputs() {
     let root = p.dir();
     // A cache of the test's own: `--full` removes the cache root.
     let env = format("1 SC_CACHE_DIR={}/ocache", root);
-    assert(cli::superc_env_in(root, E, env.as_str(), "build").ok(), "build first");
+    assert(cli::superc_env_in(root, E, &env, "build").ok(), "build first");
     let mut bdir = String::from_str(root);
     bdir.push_str("/build");
-    assert(cli::dir_count_suffix(bdir.as_str(), "") > 0, "the build wrote its out-dir");
+    assert(cli::dir_count_suffix(&bdir, "") > 0, "the build wrote its out-dir");
     // clean --full removes the out-dir; a rebuild afterwards still works.
-    assert(cli::superc_env_in(root, E, env.as_str(), "clean --full").ok(), "clean succeeds");
-    assert_eq(cli::dir_count_suffix(bdir.as_str(), ""), 0);
-    assert(cli::superc_env_in(root, E, env.as_str(), "build").ok(), "rebuild after clean works");
-    assert(cli::dir_count_suffix(bdir.as_str(), "") > 0, "the rebuild wrote its out-dir again");
+    assert(cli::superc_env_in(root, E, &env, "clean --full").ok(), "clean succeeds");
+    assert_eq(cli::dir_count_suffix(&bdir, ""), 0);
+    assert(cli::superc_env_in(root, E, &env, "build").ok(), "rebuild after clean works");
+    assert(cli::dir_count_suffix(&bdir, "") > 0, "the rebuild wrote its out-dir again");
 }
 
 // `clean --full` removes the out-dir and the tree a bare build emits beside the sources; a directory the
@@ -120,17 +120,17 @@ fn clean_keeps_a_user_build_directory() {
     p.mkfile("src/build/release/raw/super_rt.h", "stale\n");
     let root = p.dir();
     let env = format("1 SC_CACHE_DIR={}/ocache", root);
-    assert(cli::superc_env_in(root, E, env.as_str(), "build").ok(), "build first");
-    assert(cli::superc_env_in(root, E, env.as_str(), "clean --full").ok(), "clean succeeds");
+    assert(cli::superc_env_in(root, E, &env, "build").ok(), "build first");
+    assert(cli::superc_env_in(root, E, &env, "clean --full").ok(), "clean succeeds");
     let mut keep = String::from_str(root);
     keep.push_str("/build");
-    assert_eq(cli::dir_count_suffix(keep.as_str(), "keep.txt"), 1);
+    assert_eq(cli::dir_count_suffix(&keep, "keep.txt"), 1);
     let mut out = String::from_str(root);
     out.push_str("/out");
-    assert_eq(cli::dir_count_suffix(out.as_str(), ""), 0);
+    assert_eq(cli::dir_count_suffix(&out, ""), 0);
     let mut src = String::from_str(root);
     src.push_str("/src");
-    assert_eq(cli::dir_count_suffix(src.as_str(), "build"), 0);
+    assert_eq(cli::dir_count_suffix(&src, "build"), 0);
 }
 
 // Deleting a tree never follows a symlink out of it: the link goes, its target stays.
@@ -148,11 +148,11 @@ fn rm_rf_does_not_follow_symlinks() {
     assert_eq(cli::run_quiet(ln.cstr()), 0);
     let mut tree = String::from_str(root);
     tree.push_str("/tree");
-    bsys::rm_rf(tree.as_str());
-    assert_eq(cli::dir_count_suffix(tree.as_str(), ""), 0);
+    bsys::rm_rf(&tree);
+    assert_eq(cli::dir_count_suffix(&tree, ""), 0);
     let mut outside = String::from_str(root);
     outside.push_str("/outside");
-    assert_eq(cli::dir_count_suffix(outside.as_str(), "keep.txt"), 1);
+    assert_eq(cli::dir_count_suffix(&outside, "keep.txt"), 1);
 }
 
 // `new` names the project after the path's last component.
@@ -163,7 +163,7 @@ fn new_names_the_project_after_the_last_path_component() {
     assert(cli::superc_env_in(root, E, "1", "new apps/demo").ok(), "new succeeds");
     let mut man = String::from_str(root);
     man.push_str("/apps/demo/build.toml");
-    let text = cli::read_text(man.as_str());
+    let text = cli::read_text(&man);
     assert(text.as_str().contains("bin = \"demo\""), "the binary is named after the last component");
 }
 
@@ -244,10 +244,10 @@ fn emit_stamp_keys_on_the_compiler_content() {
     for i in 0..cmds.len() {
         assert_eq(cli::run_quiet(cmds.index_mut(i).cstr()), 0);
     }
-    let first = cli::exe_env_in(exe.as_str(), root, "SC_CEMIT_STATS", "1", "run");
+    let first = cli::exe_env_in(&exe, root, "SC_CEMIT_STATS", "1", "run");
     assert_eq(first.exit, 3);
     assert(first.out_has("phase load"), "the first build transpiles");
-    let same = cli::exe_env_in(exe.as_str(), root, "SC_CEMIT_STATS", "1", "run");
+    let same = cli::exe_env_in(&exe, root, "SC_CEMIT_STATS", "1", "run");
     assert_eq(same.exit, 3);
     assert(!same.out_has("phase load"), "the same compiler skips the transpile");
     // Another compiler at the same path and mtime: appended bytes change the content, not the behavior.
@@ -256,16 +256,16 @@ fn emit_stamp_keys_on_the_compiler_content() {
     let next = format("{}.next", exe.as_str());
     let mut cp = format("cp {} {}", exe.as_str(), next.as_str());
     assert_eq(cli::run_quiet(cp.cstr()), 0);
-    let f = stdio::fopen(next.as_str(), "ab");
+    let f = stdio::fopen(&next, "ab");
     assert(f != null, "the new copy opens for append");
     let _ = unsafe stdio::fwrite("x".ptr(), 1, 1, f);
     unsafe stdio::fclose(f);
     let mut mv = format("mv {} {} && touch -r {}/tc/ref {}", next.as_str(), exe.as_str(), root, exe.as_str());
     assert_eq(cli::run_quiet(mv.cstr()), 0);
-    let other = cli::exe_env_in(exe.as_str(), root, "SC_CEMIT_STATS", "1", "run");
+    let other = cli::exe_env_in(&exe, root, "SC_CEMIT_STATS", "1", "run");
     assert_eq(other.exit, 3);
     assert(other.out_has("phase load"), "a different compiler transpiles again");
-    let again = cli::exe_env_in(exe.as_str(), root, "SC_CEMIT_STATS", "1", "run");
+    let again = cli::exe_env_in(&exe, root, "SC_CEMIT_STATS", "1", "run");
     assert_eq(again.exit, 3);
     assert(!again.out_has("phase load"), "the new compiler's own tree is reused");
 }
@@ -283,12 +283,12 @@ fn external_transpiler_builds_and_keys_the_emit_stamp() {
     p.mkfile("src/lib.spc", "@noinline\npub fn v() i32 {\n    return 3;\n}\n");
     let root = p.dir();
     let ext = format("build --out-dir=ext \"--transpiler={}\" -o app", cli::superc_path());
-    let first = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", ext.as_str());
+    let first = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", &ext);
     assert(first.ok(), "the build through the transpiler succeeds");
     assert(first.out_has("phase load"), "the first build transpiles");
     let app = format("{}/app{}", root, unsafe str::from_cstr(cli::binext()));
-    assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 3);
-    let same = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", ext.as_str());
+    assert_eq(cli::exe_env_in(&app, root, E, "1", "").exit, 3);
+    let same = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", &ext);
     assert(same.ok() && !same.out_has("phase load"), "the same transpiler skips the transpile");
     // The engine's own frontend emits the same tree, and it is another emitter for the stamp.
     assert(cli::superc_env_in(root, E, "1", "build --out-dir=int -o app").ok(), "the frontend build");
@@ -297,11 +297,11 @@ fn external_transpiler_builds_and_keys_the_emit_stamp() {
     assert(own.as_str() == cli::read_text(format("{}/ext/debug/raw/lib.o", root).as_str()).as_str(), "same tree");
     let back = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build --out-dir=ext -o app");
     assert(back.ok() && back.out_has("phase load"), "the frontend does not reuse the transpiler's tree");
-    let again = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", ext.as_str());
+    let again = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", &ext);
     assert(again.ok() && again.out_has("phase load"), "the transpiler does not reuse the frontend's tree");
     // A transpiler error fails the build and shows the transpiler's diagnostics.
     p.mkfile("src/lib.spc", "pub fn v() i32 {\n    return missing;\n}\n");
-    let bad = cli::superc_env_in(root, E, "1", ext.as_str());
+    let bad = cli::superc_env_in(root, E, "1", &ext);
     assert(!bad.ok(), "a failing transpiler fails the build");
     assert(bad.out_has("cannot find value 'missing'"), "the transpiler's diagnostic reaches the output");
     assert(bad.out_has("build: transpiler failed"), "the engine names the failed step");
@@ -361,6 +361,6 @@ fn manifest_profile_is_a_build_constant() {
     assert(r.ok(), "the fast profile takes the fast branch");
     let mut raw = String::from_str(root);
     raw.push_str("/out/fast/raw");
-    assert_eq(cli::dir_count_suffix(raw.as_str(), "main.o"), 1);
+    assert_eq(cli::dir_count_suffix(&raw, "main.o"), 1);
     assert_eq(cli::superc_env_in(root, E, "1", "run").exit, 1);
 }

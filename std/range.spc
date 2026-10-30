@@ -27,9 +27,9 @@ interface Step: Copy + Ord {
 fn step_count<T: Step>(lo: T, hi: T) Option<usize> {
     let d = hi.bits().wrapping_sub(lo.bits());
     if d > usize::MAX as u64 {
-        return Option::<usize>::None;
+        return None;
     }
-    return Option::<usize>::Some(d as usize);
+    return Some(d as usize);
 }
 
 extend<T: Step> Range<T> as Iterator<T> {
@@ -37,13 +37,13 @@ extend<T: Step> Range<T> as Iterator<T> {
         let v = self.start;
         if v < self.end {
             self.start = v.up();
-            return Option::<T>::Some(v);
+            return Some(v);
         }
         if self.inclusive && v == self.end {
             self.inclusive = false;
-            return Option::<T>::Some(v);
+            return Some(v);
         }
-        return Option::<T>::None;
+        return None;
     }
 
     /// Exact, except `(usize::MAX, None)` when the count exceeds `usize::MAX`.
@@ -51,18 +51,18 @@ extend<T: Step> Range<T> as Iterator<T> {
         if self.start < self.end {
             if let Some(n) = step_count(self.start, self.end) {
                 if !self.inclusive {
-                    return n, Option::<usize>::Some(n);
+                    return (n, Option::<usize>::Some(n));
                 }
                 if n < usize::MAX {
-                    return n + 1, Option::<usize>::Some(n + 1);
+                    return (n + 1, Option::<usize>::Some(n + 1));
                 }
             }
-            return usize::MAX, Option::<usize>::None;
+            return (usize::MAX, Option::<usize>::None);
         }
         if self.inclusive && self.start == self.end {
-            return 1, Option::<usize>::Some(1);
+            return (1, Option::<usize>::Some(1));
         }
-        return 0, Option::<usize>::Some(0);
+        return (0, Option::<usize>::Some(0));
     }
 }
 
@@ -73,15 +73,15 @@ extend<T: Step> Range<T> as DoubleEndedIterator<T> {
             let w = v.down();
             self.end = w;
             if self.inclusive {
-                return Option::<T>::Some(v);
+                return Some(v);
             }
-            return Option::<T>::Some(w);
+            return Some(w);
         }
         if self.inclusive && self.start == v {
             self.inclusive = false;
-            return Option::<T>::Some(v);
+            return Some(v);
         }
-        return Option::<T>::None;
+        return None;
     }
 }
 

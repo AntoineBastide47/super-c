@@ -40,16 +40,16 @@ pub enum MdSpanError {
 // Extents and strides of a view. Invariant, set by `checked_span`: the element count and every offset of an
 // in-range index tuple fit `usize`.
 @derive(Copy)
-pub(module) struct Shape<const R: usize> {
-    pub(module) extents: [usize; R],
-    pub(module) strides: [usize; R],
+struct Shape<const R: usize> {
+    extents: [usize; R],
+    strides: [usize; R],
 }
 
 /// A read-only view of a slice with R dimensions. See the module comment for the layout rules.
 @derive(Copy)
 pub struct MdSpan<'a, T, const R: usize> {
-    pub(module) data: Slice<'a, T>, // starts at the element of index (0, .., 0); len is the required span size
-    pub(module) shape: Shape<R>,
+    data: Slice<'a, T>, // starts at the element of index (0, .., 0); len is the required span size
+    shape: Shape<R>,
 }
 
 /// A writable view of a slice with R dimensions; exclusive like `[]mut T`.
@@ -60,20 +60,20 @@ pub struct MdSpanMut<'a, T, const R: usize> {
 
 /// The elements of an `MdSpan` in row-major index order (the last index fastest); double-ended, exact size.
 pub struct MdIter<'a, T, const R: usize> {
-    pub(module) ptr: *const T,
-    pub(module) shape: Shape<R>,
+    ptr: *const T,
+    shape: Shape<R>,
     // A run is a sequence of elements one `step` apart: the last dimensions, fused while each stride is the
     // run's reach. `outer` dimensions remain, and their indices are the digits below.
-    pub(module) step: usize,
-    pub(module) run_len: usize,
-    pub(module) outer: usize,
-    pub(module) front: [usize; R], // indices of the outer dimensions at the front
-    pub(module) front_offset: usize, // offset of the next element from the front
-    pub(module) front_run: usize, // elements left in the front run
-    pub(module) back: [usize; R], // indices of the outer dimensions at the back
-    pub(module) back_offset: usize, // offset of the next element from the back
-    pub(module) back_run: usize, // elements left in the back run
-    pub(module) left: usize, // elements not yet yielded from either end
+    step: usize,
+    run_len: usize,
+    outer: usize,
+    front: [usize; R], // indices of the outer dimensions at the front
+    front_offset: usize, // offset of the next element from the front
+    front_run: usize, // elements left in the front run
+    back: [usize; R], // indices of the outer dimensions at the back
+    back_offset: usize, // offset of the next element from the back
+    back_run: usize, // elements left in the back run
+    left: usize, // elements not yet yielded from either end
 }
 
 // The strides of a dense layout: `last_fastest` gives `layout_right`, else `layout_left`.
@@ -82,9 +82,9 @@ const fn dense_shape<const R: usize>(extents: [usize; R], last_fastest: bool) Re
     let mut step: usize = 1;
     for k in 0..R {
         let d = if last_fastest {
-            R - 1 - k;
+            R - 1 - k
         } else {
-            k;
+            k
         };
         unsafe {
             strides[d] = step;
@@ -92,19 +92,19 @@ const fn dense_shape<const R: usize>(extents: [usize; R], last_fastest: bool) Re
         if k + 1 < R {
             let (next, overflow) = step.overflowing_mul(unsafe extents[d]);
             if overflow {
-                return Result::<Shape<R>, MdSpanError>::Err(MdSpanError::Overflow);
+                return Err(Overflow);
             }
             step = next;
         }
     }
-    return Result::<Shape<R>, MdSpanError>::Ok(Shape::<R> { extents: extents, strides: strides });
+    return Ok(Shape::<R> { extents: extents, strides: strides });
 }
 
 // The required span size of `shape` over a slice of `len` elements, or why the shape does not fit it.
 const fn checked_span<const R: usize>(shape: &Shape<R>, len: usize) Result<usize, MdSpanError> {
     if shape.is_empty() {
         // No index tuple exists: nothing is read, so neither the strides nor the slice matter.
-        return Result::<usize, MdSpanError>::Ok(0);
+        return Ok(0);
     }
     let mut count: usize = 1;
     let mut last: usize = 0;
@@ -114,18 +114,18 @@ const fn checked_span<const R: usize>(shape: &Shape<R>, len: usize) Result<usize
         let (term, term_overflow) = (extent - 1).overflowing_mul(unsafe shape.strides[k]);
         let (l, last_overflow) = last.overflowing_add(term);
         if count_overflow || term_overflow || last_overflow {
-            return Result::<usize, MdSpanError>::Err(MdSpanError::Overflow);
+            return Err(Overflow);
         }
         count = c;
         last = l;
     }
     if last == usize::MAX {
-        return Result::<usize, MdSpanError>::Err(MdSpanError::Overflow);
+        return Err(Overflow);
     }
     if last >= len {
-        return Result::<usize, MdSpanError>::Err(MdSpanError::TooShort { required: last + 1, len: len });
+        return Err(MdSpanError::TooShort { required: last + 1, len: len });
     }
-    return Result::<usize, MdSpanError>::Ok(last + 1);
+    return Ok(last + 1);
 }
 
 // The dimensions of extent above 1 that move the offset (stride above 0), sorted by stride: (strides,
@@ -152,7 +152,7 @@ const fn moving_dims<const R: usize>(shape: &Shape<R>) ([usize; R], [usize; R], 
             n += 1;
         }
     }
-    return strides, extents, n;
+    return (strides, extents, n);
 }
 
 extend<const R: usize> Shape<R> {
@@ -210,11 +210,11 @@ extend<const R: usize> Shape<R> {
         for k in 0..R {
             let i = unsafe idx[k];
             if i >= unsafe self.extents[k] {
-                return Option::<usize>::None;
+                return None;
             }
             offset += i * unsafe self.strides[k];
         }
-        return Option::<usize>::Some(offset);
+        return Some(offset);
     }
 
     // Offset of `idx` without bounds checks: the caller proves every index is below its extent.
@@ -275,9 +275,9 @@ extend<const R: usize> Shape<R> {
             out.extents[d] = hi - lo;
         }
         if out.is_empty() {
-            return out, 0;
+            return (out, 0);
         }
-        return out, lo * unsafe self.strides[d];
+        return (out, lo * unsafe self.strides[d]);
     }
 
     // `self` without dimension `d`, at index `i` of it, and the offset of that hyperplane (0 when empty).
@@ -300,9 +300,9 @@ extend<const R: usize> Shape<R> {
             }
         }
         if out.is_empty() {
-            return out, 0;
+            return (out, 0);
         }
-        return out, i * unsafe self.strides[d];
+        return (out, i * unsafe self.strides[d]);
     }
 
     // The required span size: 0 without elements, else the largest offset plus one. Fits `usize` by the
@@ -347,7 +347,7 @@ extend<'a, T, const R: usize> MdSpan<'a, T, R> {
     const fn checked(data: []'a T, shape: Shape<R>) Result<MdSpan<'a, T, R>, MdSpanError> {
         let span = checked_span(&shape, data.len)?;
         let view = unsafe Slice::<'a, T> { ptr: data.ptr, len: span };
-        return Result::<MdSpan<'a, T, R>, MdSpanError>::Ok(MdSpan::<'a, T, R> { data: view, shape: shape });
+        return Ok(MdSpan::<'a, T, R> { data: view, shape: shape });
     }
 
     // The view of `shape` whose first element is at `offset`; the caller proves it is a sub-view of `self`.
@@ -419,9 +419,9 @@ extend<'a, T, const R: usize> MdSpan<'a, T, R> {
     /// index order only for a row-major layout.
     pub const fn as_slice(self: &MdSpan<'a, T, R>) Option<[]'a T> {
         if !self.is_contiguous() {
-            return Option::<[]'a T>::None;
+            return None;
         }
-        return Option::<[]'a T>::Some(self.data);
+        return Some(self.data);
     }
 
     /// The element at `idx`. Panics: an index is not below its extent.
@@ -433,9 +433,9 @@ extend<'a, T, const R: usize> MdSpan<'a, T, R> {
     /// The element at `idx`, or None when an index is not below its extent.
     pub const fn get_checked(self: &MdSpan<'a, T, R>, idx: [usize; R]) Option<&'a T> {
         if let Some(offset) = self.shape.offset_checked(idx) {
-            return Option::<&'a T>::Some(unsafe &*(self.data.ptr + offset));
+            return Some(unsafe &*(self.data.ptr + offset));
         }
-        return Option::<&'a T>::None;
+        return None;
     }
 
     /// The element at `idx` without bounds checks. Safety: every index is below its extent.
@@ -492,9 +492,9 @@ extend<'a, T, const R: usize> MdSpan<'a, T, R> {
             front_run: run_len,
             back: back,
             back_offset: if left > 0 {
-                self.data.len - 1;
+                self.data.len - 1
             } else {
-                0;
+                0
             },
             back_run: run_len,
             left: left,
@@ -535,7 +535,7 @@ extend<'a, T, const R: usize> MdSpanMut<'a, T, R> {
     const fn checked(data: []'a mut T, shape: Shape<R>) Result<MdSpanMut<'a, T, R>, MdSpanError> {
         let span = checked_span(&shape, data.len)?;
         let view = unsafe SliceMut::<'a, T> { ptr: data.ptr, len: span };
-        return Result::<MdSpanMut<'a, T, R>, MdSpanError>::Ok(MdSpanMut::<'a, T, R> { data: view, shape: shape });
+        return Ok(MdSpanMut::<'a, T, R> { data: view, shape: shape });
     }
 
     // The view of `shape` whose first element is at `offset`; the caller proves it is a sub-view of `self`.
@@ -593,9 +593,9 @@ extend<'a, T, const R: usize> MdSpanMut<'a, T, R> {
     /// The elements in memory order when the view is contiguous (see `MdSpan::is_contiguous`), else None.
     pub const fn as_mut_slice<'s>(self: &'s mut MdSpanMut<'a, T, R>) Option<[]'s mut T> {
         if !(self.shape.is_unique() && self.shape.is_exhaustive()) {
-            return Option::<[]'s mut T>::None;
+            return None;
         }
-        return Option::<[]'s mut T>::Some(unsafe SliceMut::<'s, T> { ptr: self.data.ptr, len: self.data.len });
+        return Some(unsafe SliceMut::<'s, T> { ptr: self.data.ptr, len: self.data.len });
     }
 
     /// The element at `idx`. Panics: an index is not below its extent.
@@ -613,9 +613,9 @@ extend<'a, T, const R: usize> MdSpanMut<'a, T, R> {
     /// The element at `idx`, writable, or None when an index is not below its extent.
     pub const fn get_checked_mut(self: &mut MdSpanMut<'a, T, R>, idx: [usize; R]) Option<&mut T> {
         if let Some(offset) = self.shape.offset_checked(idx) {
-            return Option::<&mut T>::Some(&mut unsafe self.data.ptr[offset]);
+            return Some(&mut unsafe self.data.ptr[offset]);
         }
-        return Option::<&mut T>::None;
+        return None;
     }
 
     /// The element at `idx`, writable, without bounds checks. Safety: every index is below its extent.
@@ -654,7 +654,7 @@ extend<'a, T> MdSpanMut<'a, T, 2> {
 extend<'a, T, const R: usize> MdIter<'a, T, R> as Iterator<&'a T> {
     pub fn next(self: &mut MdIter<'a, T, R>) Option<&'a T> {
         if self.left == 0 {
-            return Option::<&'a T>::None;
+            return None;
         }
         self.left -= 1;
         if unlikely(self.front_run == 0) {
@@ -682,18 +682,18 @@ extend<'a, T, const R: usize> MdIter<'a, T, R> as Iterator<&'a T> {
         self.front_run -= 1;
         let element = unsafe &*(self.ptr + self.front_offset);
         self.front_offset = self.front_offset.wrapping_add(self.step);
-        return Option::<&'a T>::Some(element);
+        return Some(element);
     }
 
     pub fn size_hint(self: &MdIter<'a, T, R>) (usize, Option<usize>) {
-        return self.left, Option::<usize>::Some(self.left);
+        return (self.left, Option::<usize>::Some(self.left));
     }
 }
 
 extend<'a, T, const R: usize> MdIter<'a, T, R> as DoubleEndedIterator<&'a T> {
     pub fn next_back(self: &mut MdIter<'a, T, R>) Option<&'a T> {
         if self.left == 0 {
-            return Option::<&'a T>::None;
+            return None;
         }
         self.left -= 1;
         if unlikely(self.back_run == 0) {
@@ -721,7 +721,7 @@ extend<'a, T, const R: usize> MdIter<'a, T, R> as DoubleEndedIterator<&'a T> {
         self.back_run -= 1;
         let element = unsafe &*(self.ptr + self.back_offset);
         self.back_offset = self.back_offset.wrapping_sub(self.step);
-        return Option::<&'a T>::Some(element);
+        return Some(element);
     }
 }
 
@@ -761,9 +761,9 @@ extend<'a, T: Format, const R: usize> MdSpan<'a, T, R> as Format {
         let mut out = String::new();
         // An empty view may hold any strides; with zero strides the walk computes no offset.
         let strides: [usize; R] = if self.data.len == 0 {
-            [0; R];
+            [0; R]
         } else {
-            self.shape.strides;
+            self.shape.strides
         };
         fmt_dim(&mut out, self.data.ptr, self.shape.extents, strides, 0, 0);
         return out;

@@ -92,7 +92,7 @@ fn derived_enum_feeds_tag_then_payload() {
 
 @test
 fn options_and_vectors_mark_presence_and_length() {
-    let none: Option<u8> = Option::<u8>::None;
+    let none: Option<u8> = None;
     assert_eq(tape_of(&none).len(), 1);
     let some = Option::<u8>::Some(3);
     assert_eq(tape_of(&some).len(), 9);

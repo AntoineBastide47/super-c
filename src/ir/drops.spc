@@ -690,9 +690,9 @@ pub(package) fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp
             // The current part keeps [run_start, cut] (the marker stays; the drop follows it);
             // an OVERWRITE drop splits BEFORE its assignment instead.
             let keep = if over {
-                cut - run_start;
+                cut - run_start
             } else {
-                cut + 1 - run_start;
+                cut + 1 - run_start
             };
             let l = da.local;
             if kind == DK_FIELD {
@@ -711,9 +711,9 @@ pub(package) fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp
                 b.places.push(ir::Place { base: l, proj_start: 0, proj_len: 0, ty: b.locals.at(l as usize).ty });
             }
             let pl = if over {
-                da.path;
+                da.path
             } else {
-                b.places.len() as u32 - 1;
+                b.places.len() as u32 - 1
             };
             let next = b.add_block();
             let sp = b.statements.at(cut as usize).span;
@@ -729,9 +729,9 @@ pub(package) fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp
             b.blocks[cur as usize].term = t;
             b.blocks[cur as usize].sealed = true;
             run_start = if over {
-                cut;
+                cut
             } else {
-                cut + 1;
+                cut + 1
             };
             cur = next;
         }

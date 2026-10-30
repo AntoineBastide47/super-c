@@ -42,20 +42,20 @@ pub interface Analyzer {
 
 /// What one analyzer sees of one module, and where it reports.
 pub struct Pass<'p> {
-    pub(module) s: &'p ses::Session,
-    pub(module) tree: &'p syn::SyntaxTree,
-    pub(module) module: u32,
-    pub(module) id: str<'p>,
-    pub(module) config: str<'p>,
-    pub(module) reads: Slice<'p, u32>, // the analyzers whose facts it reads (`Runner.list` indexes)
-    pub(module) run: &'p mut Run,
-    pub(module) out: Vector<Finding>,
-    pub(module) facts: Vector<Fact>,
-    pub(module) fact_bytes: usize,
+    s: &'p ses::Session,
+    tree: &'p syn::SyntaxTree,
+    module: u32,
+    id: str<'p>,
+    config: str<'p>,
+    reads: Slice<'p, u32>, // the analyzers whose facts it reads (`Runner.list` indexes)
+    run: &'p mut Run,
+    out: Vector<Finding>,
+    facts: Vector<Fact>,
+    fact_bytes: usize,
 }
 
 // One fact: an analyzer, a module, a key, and its bytes.
-pub(module) struct Fact {
+struct Fact {
     pub analyzer: u32,
     pub module: String,
     pub key: String,
@@ -139,15 +139,15 @@ extend<'p> Pass<'p> {
             }
         }
         if ai == NONE || !self.run.reaches(self.module, module) {
-            return Option::<Slice<u8>>::None;
+            return None;
         }
         for i in 0..self.run.facts.len() {
             let f = &self.run.facts[i];
             if f.analyzer == ai && f.module.as_str() == module && f.key.as_str() == key {
-                return Option::<Slice<u8>>::Some(f.bytes.as_slice());
+                return Some(f.bytes.as_slice());
             }
         }
-        return Option::<Slice<u8>>::None;
+        return None;
     }
 }
 
@@ -174,7 +174,7 @@ pub struct Budget {
 }
 
 // The state the passes of one run share.
-pub(module) struct Run {
+struct Run {
     pub ids: Vector<String>,
     pub facts: Vector<Fact>,
     pub closure: Vector<Vector<bool>>, // per module: the modules it imports, directly or not
@@ -223,15 +223,11 @@ extend Runner {
         for i in 0..n {
             let id = list[i].id();
             if id.len() == 0 {
-                return Result::<Runner, ApiError>::Err(
-                    ApiError::new(Code::InvalidArgument, "an analyzer has an empty id"),
-                );
+                return Err(ApiError::new(Code::InvalidArgument, "an analyzer has an empty id"));
             }
             for k in 0..ids.len() {
                 if ids[k].as_str() == id {
-                    return Result::<Runner, ApiError>::Err(
-                        ApiError::new(Code::InvalidArgument, "two analyzers share an id"),
-                    );
+                    return Err(ApiError::new(Code::InvalidArgument, "two analyzers share an id"));
                 }
             }
             ids.push(String::from_str(id));
@@ -247,7 +243,7 @@ extend Runner {
                     k += 1;
                 }
                 if k == n {
-                    return Result::<Runner, ApiError>::Err(
+                    return Err(
                         ApiError::new(Code::InvalidArgument, "an analyzer requires one the runner does not have"),
                     );
                 }
@@ -261,9 +257,7 @@ extend Runner {
         state.resize_default(n);
         for i in 0..n {
             if !visit(&deps, i as u32, &mut state, &mut order) {
-                return Result::<Runner, ApiError>::Err(
-                    ApiError::new(Code::InvalidArgument, "the analyzers' requirements form a cycle"),
-                );
+                return Err(ApiError::new(Code::InvalidArgument, "the analyzers' requirements form a cycle"));
             }
         }
         let mut reads = Vector::<Vector<u32>>::with_capacity(n);
@@ -289,9 +283,7 @@ extend Runner {
         }
         let mut config = Vector::<String>::with_capacity(n);
         config.resize_default(n);
-        return Result::<Runner, ApiError>::Ok(
-            Runner { list: list, order: order, reads: reads, config: config, budget: Budget {} },
-        );
+        return Ok(Runner { list: list, order: order, reads: reads, config: config, budget: Budget {} });
     }
 
     /// Give analyzer `id` the configuration text `text`; false when no analyzer has that id.
@@ -315,9 +307,7 @@ extend Runner {
     /// before a check; `Cancelled` or `Deadline` when `opts` stops the run between two passes.
     pub fn run(self: &mut Self, s: &ses::Session, opts: &ses::RequestOptions) Result<Results, ApiError> {
         if !s.checked() {
-            return Result::<Results, ApiError>::Err(
-                ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"),
-            );
+            return Err(ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"));
         }
         let p = s.package();
         let nm = p.modules.len();
@@ -341,14 +331,14 @@ extend Runner {
             if md.pkg == loader::PKG_STD || md.pkg == loader::PKG_FFI || md.file.len() == 0 || !md.has_ast {
                 continue;
             }
-            let tree = syn::SyntaxTree::parse(md.file.as_str(), md.source.as_str());
+            let tree = syn::SyntaxTree::parse(&md.file, &md.source);
             for oi in 0..self.order.len() {
                 if let Some(e) = stopped(opts) {
-                    return Result::<Results, ApiError>::Err(e);
+                    return Err(e);
                 }
                 let a = self.order[oi];
                 let key = self.cache_key(&run, m, a, md.src_id);
-                let ci = self.cached(a, md.path.as_str(), key);
+                let ci = self.cached(a, &md.path, key);
                 if ci >= 0 {
                     let c = &self.cache[ci as usize];
                     for k in 0..c.findings.len() {
@@ -383,10 +373,10 @@ extend Runner {
                     Err(e) => Option::<ApiError>::Some(e),
                 };
                 if err.is_none() && self.budget.time_ns != 0 && spent > self.budget.time_ns {
-                    err = Option::<ApiError>::Some(ApiError::new(Code::Limit, "the analyzer passed its time budget"));
+                    err = Some(ApiError::new(Code::Limit, "the analyzer passed its time budget"));
                 }
                 if err.is_none() && self.budget.fact_bytes != 0 && fb > self.budget.fact_bytes {
-                    err = Option::<ApiError>::Some(ApiError::new(Code::Limit, "the analyzer passed its fact budget"));
+                    err = Some(ApiError::new(Code::Limit, "the analyzer passed its fact budget"));
                 }
                 if let Some(e) = err {
                     res.failures.push(
@@ -404,7 +394,7 @@ extend Runner {
                 for k in 0..facts.len() {
                     run.facts.push(facts[k].clone());
                 }
-                self.store(a, md.path.as_str(), key, out, facts);
+                self.store(a, &md.path, key, out, facts);
             }
         }
         res.findings.sort_by(|x: &Finding, y: &Finding| finding_cmp(x, y));
@@ -417,26 +407,26 @@ extend Runner {
                 return x.file.cmp(&y.file);
             },
         );
-        return Result::<Results, ApiError>::Ok(res);
+        return Ok(res);
     }
 
     // The key of analyzer `a`'s result on module `m` whose text has identity `src`: the analyzer's id,
     // version and configuration, the text, and every fact it can read (its own and its prerequisites',
     // of the modules `m` imports).
     fn cache_key(self: &Self, run: &Run, m: u32, a: u32, src: u64) u64 {
-        let mut h = fnv_str(0xcbf29ce484222325, run.ids[a as usize].as_str());
+        let mut h = fnv_str(0xcbf29ce484222325, &run.ids[a as usize]);
         h = fnv_u64(h, self.list[a as usize].version());
-        h = fnv_str(h, self.config[a as usize].as_str());
+        h = fnv_str(h, &self.config[a as usize]);
         h = fnv_u64(h, src);
         for i in 0..run.facts.len() {
             let f = &run.facts[i];
-            if !self.reads[a as usize].contains(&f.analyzer) || !run.reaches(m, f.module.as_str()) {
+            if !self.reads[a as usize].contains(&f.analyzer) || !run.reaches(m, &f.module) {
                 continue;
             }
             h = fnv_u64(h, f.analyzer);
-            h = fnv_str(h, f.module.as_str());
-            h = fnv_str(h, f.key.as_str());
-            h = fnv_bytes(h, f.bytes.as_slice());
+            h = fnv_str(h, &f.module);
+            h = fnv_str(h, &f.key);
+            h = fnv_bytes(h, &f.bytes);
         }
         return h;
     }
@@ -475,13 +465,13 @@ extend Runner {
 fn stopped(opts: &ses::RequestOptions) Option<ApiError> {
     if let Some(t) = &opts.cancel {
         if t.is_cancelled() {
-            return Option::<ApiError>::Some(ApiError::new(Code::Cancelled, "the request was cancelled"));
+            return Some(ApiError::new(Code::Cancelled, "the request was cancelled"));
         }
     }
     if opts.deadline_ns != 0 && clock::monotonic_ns() >= opts.deadline_ns {
-        return Option::<ApiError>::Some(ApiError::new(Code::Deadline, "the request passed its deadline"));
+        return Some(ApiError::new(Code::Deadline, "the request passed its deadline"));
     }
-    return Option::<ApiError>::None;
+    return None;
 }
 
 // Depth-first post-order of the requirement graph `deps` from `i`: false on a cycle. `state`: 0 new, 1 on
@@ -654,10 +644,10 @@ pub fn main_with(args: Slice<str>, analyzers: Vector<Box<dyn Analyzer>>) i32 {
     }
     let std_dir = stdlib_env("SC_STD_DIR", "std");
     let manifest = loader::join2(target, "build.toml");
-    let opened = if dutil::file_mtime(manifest.as_str()) != 0 {
-        ses::Session::open_project(target, ses::Config::host(std_dir.as_str()));
+    let opened = if dutil::file_mtime(&manifest) != 0 {
+        ses::Session::open_project(target, ses::Config::host(&std_dir))
     } else {
-        ses::Session::open_file(target, ses::Config::host(std_dir.as_str()));
+        ses::Session::open_file(target, ses::Config::host(&std_dir))
     };
     let mut s = switch opened {
         Ok(s) => s,
@@ -693,24 +683,24 @@ fn run_and_print(s: &mut ses::Session, analyzers: Vector<Box<dyn Analyzer>>, fix
     let mut edits = syn::WorkspaceEdit::new();
     for i in 0..res.findings.len() {
         let f = &res.findings[i];
-        let text = s.text(f.file.as_str()).unwrap_or(Option::<String>::None).unwrap_or(String::new());
-        let (line, col) = line_col(text.as_str(), f.start);
+        let text = s.text(&f.file).unwrap_or(Option::<String>::None).unwrap_or(String::new());
+        let (line, col) = line_col(&text, f.start);
         println(
             "{}:{}:{}: {}: {} [{}/{}]",
             f.file.as_str(),
             line,
             col,
             if f.severity == ses::SEV_ERROR {
-                "error";
+                "error"
             } else {
-                "warning";
+                "warning"
             },
             f.message.as_str(),
             f.analyzer.as_str(),
             f.rule.as_str(),
         );
         for k in 0..f.fix.len() {
-            edits.replace(f.file.as_str(), f.fix[k].start, f.fix[k].end, f.fix[k].text.as_str());
+            edits.replace(&f.file, f.fix[k].start, f.fix[k].end, &f.fix[k].text);
         }
     }
     for i in 0..res.failures.len() {
@@ -721,7 +711,7 @@ fn run_and_print(s: &mut ses::Session, analyzers: Vector<Box<dyn Analyzer>>, fix
         switch edits.preview(s) {
             Ok(files) => {
                 for i in 0..files.len() {
-                    if !dutil::write_file_atomic(files[i].file.as_str(), files[i].text.as_str()) {
+                    if !dutil::write_file_atomic(&files[i].file, &files[i].text) {
                         eprintln("error: cannot write '{}'", files[i].file.as_str());
                         return 2;
                     }
@@ -731,12 +721,12 @@ fn run_and_print(s: &mut ses::Session, analyzers: Vector<Box<dyn Analyzer>>, fix
                 eprintln("error: the fixes do not apply: {}", e.message.as_str());
                 return 2;
             },
-        };
+        }
     }
     return if res.findings.len() != 0 || res.failures.len() != 0 {
-        1;
+        1
     } else {
-        0;
+        0
     };
 }
 
@@ -760,7 +750,7 @@ fn line_col(text: str, off: u32) (u32, u32) {
             ls = i + 1;
         }
     }
-    return line, (end - ls) as u32 + 1;
+    return (line, (end - ls) as u32 + 1);
 }
 
 /// The analyzers of a project's tool compiler (`api::cli::LintTools`): `analyzers` over the project in directory

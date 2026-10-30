@@ -26,15 +26,12 @@ pub struct RequestOptions {
 extend RequestOptions {
     /// No cancellation, no deadline, no result limit.
     pub fn none() RequestOptions {
-        return RequestOptions { cancel: Option::<ptask::CancelToken>::None };
+        return RequestOptions { cancel: None };
     }
 
     /// A request that ends `ms` milliseconds from now.
     pub fn within_ms(ms: u64) RequestOptions {
-        return RequestOptions {
-            cancel: Option::<ptask::CancelToken>::None,
-            deadline_ns: clock::monotonic_ns() + ms * 1000000,
-        };
+        return RequestOptions { cancel: None, deadline_ns: clock::monotonic_ns() + ms * 1000000 };
     }
 }
 
@@ -54,16 +51,12 @@ pub struct Config {
 extend Config {
     /// The host's files and target, and the std directory `std_dir`.
     pub fn host(std_dir: str) Config {
-        return Config { std_dir: String::from_str(std_dir), target: -1, files: Option::<Box<dyn FileProvider>>::None };
+        return Config { std_dir: String::from_str(std_dir), target: -1, files: None };
     }
 
     /// The files of `files`, the host's target, and the std directory `std_dir`.
     pub fn with_files(std_dir: str, files: Box<dyn FileProvider>) Config {
-        return Config {
-            std_dir: String::from_str(std_dir),
-            target: -1,
-            files: Option::<Box<dyn FileProvider>>::Some(files),
-        };
+        return Config { std_dir: String::from_str(std_dir), target: -1, files: Some(files) };
     }
 }
 
@@ -100,8 +93,8 @@ pub struct Session {
     alt_dir: String,
     lint_dir: String, // the project directory whose files report lints; "" for a lone file
     bufs: Vector<Buffer>,
-    pub(module) pkg: loader::Package,
-    pub(module) diags: Vector<an::DiagRec>,
+    pkg: loader::Package,
+    diags: Vector<an::DiagRec>,
     state: u8,
     revision: u64,
 }
@@ -119,7 +112,7 @@ fn source_read(ctx: *mut void, path: str, out: &mut String) bool {
         Ok(b) => b,
         Err(e) => {
             c.note(e, path);
-            false;
+            false
         },
     };
 }
@@ -130,7 +123,7 @@ fn source_list(ctx: *mut void, dir: str, out: &mut Vector<String>) bool {
         Ok(b) => b,
         Err(e) => {
             c.note(e, dir);
-            false;
+            false
         },
     };
 }
@@ -139,7 +132,7 @@ extend SourceCtx {
     // Keep the first failure: what the session reports.
     fn note(self: &mut Self, e: IoError, path: str) {
         if self.err.is_none() {
-            self.err = Option::<IoError>::Some(e);
+            self.err = Some(e);
             self.err_path = String::from_str(path);
         }
     }
@@ -174,32 +167,28 @@ extend Session {
         let mp = loader::join2(dir, "build.toml");
         let mut root = String::new();
         let mut text = String::new();
-        let read = s.read_file(mp.as_str(), &mut text)?;
+        let read = s.read_file(&mp, &mut text)?;
         if !read {
-            return Result::<Session, ApiError>::Err(
-                ApiError::new(Code::InvalidArgument, "the directory holds no build.toml"),
-            );
+            return Err(ApiError::new(Code::InvalidArgument, "the directory holds no build.toml"));
         }
-        let (mo, errs) = bman::parse_check(text.as_str(), "", false);
+        let (mo, errs) = bman::parse_check(&text, "", false);
         if mo.is_none() || errs.has_errors() {
-            return Result::<Session, ApiError>::Err(
-                ApiError::at(Code::ParseFailed, "build.toml does not load", mp.as_str(), 0, 0),
-            );
+            return Err(ApiError::at(Code::ParseFailed, "build.toml does not load", &mp, 0, 0));
         }
         let m = mo.unwrap();
-        root = loader::join2(dir, m.root.as_str());
+        root = loader::join2(dir, &m.root);
         s.lint_dir = s.canon(dir);
-        s.root_file = s.canon(root.as_str());
-        s.root_dir = String::from_str(loader::dirname_of(s.root_file.as_str()));
-        return Result::<Session, ApiError>::Ok(s);
+        s.root_file = s.canon(&root);
+        s.root_dir = String::from_str(loader::dirname_of(&s.root_file));
+        return Ok(s);
     }
 
     /// A session over the lone file `path`: its directory is its import root.
     pub fn open_file(path: str, cfg: Config) Result<Session, ApiError> {
         let mut s = Session::make(cfg);
         s.root_file = s.canon(path);
-        s.root_dir = String::from_str(loader::dirname_of(s.root_file.as_str()));
-        return Result::<Session, ApiError>::Ok(s);
+        s.root_dir = String::from_str(loader::dirname_of(&s.root_file));
+        return Ok(s);
     }
 
     fn make(cfg: Config) Session {
@@ -208,9 +197,9 @@ extend Session {
             files: replace(&mut c.files, Option::<Box<dyn FileProvider>>::None),
             std_dir: replace(&mut c.std_dir, String::new()),
             target: if c.target < 0 {
-                unsafe shim::sc_host_platform();
+                unsafe shim::sc_host_platform()
             } else {
-                c.target;
+                c.target
             },
             memory_limit: c.memory_limit,
             pkg: loader::Package::new(),
@@ -234,8 +223,8 @@ extend Session {
             None => disk.read(path, out),
         };
         return switch r {
-            Ok(b) => Result::<bool, ApiError>::Ok(b),
-            Err(e) => Result::<bool, ApiError>::Err(ApiError::io(e, path)),
+            Ok(b) => Ok(b),
+            Err(e) => Err(ApiError::io(e, path)),
         };
     }
 
@@ -273,22 +262,22 @@ extend Session {
     /// The text of file `path`: its buffer, else the provider's, else None.
     pub fn text(self: &mut Self, path: str) Result<Option<String>, ApiError> {
         let cp = self.canon(path);
-        let b = self.buffer(cp.as_str());
+        let b = self.buffer(&cp);
         if b >= 0 {
-            return Result::<Option<String>, ApiError>::Ok(Option::<String>::Some(self.bufs[b as usize].text.clone()));
+            return Ok(Some(self.bufs[b as usize].text.clone()));
         }
         let mut t = String::new();
-        if self.read_file(cp.as_str(), &mut t)? {
-            return Result::<Option<String>, ApiError>::Ok(Option::<String>::Some(t));
+        if self.read_file(&cp, &mut t)? {
+            return Ok(Some(t));
         }
-        return Result::<Option<String>, ApiError>::Ok(Option::<String>::None);
+        return Ok(None);
     }
 
     /// Give file `path` the text `text` (an editor buffer or generated text), version 0 when new. Returns
     /// the new version.
     pub fn set_text(self: &mut Self, path: str, text: str) i64 {
         let cp = self.canon(path);
-        let b = self.buffer(cp.as_str());
+        let b = self.buffer(&cp);
         self.changed();
         if b < 0 {
             self.bufs.push(Buffer { path: cp, text: String::from_str(text), version: 0 });
@@ -304,23 +293,23 @@ extend Session {
     /// between checks, as it keeps every buffer's. Returns its version.
     pub fn open(self: &mut Self, path: str) Result<i64, ApiError> {
         let cp = self.canon(path);
-        let b = self.buffer(cp.as_str());
+        let b = self.buffer(&cp);
         if b >= 0 {
-            return Result::<i64, ApiError>::Ok(self.bufs[b as usize].version);
+            return Ok(self.bufs[b as usize].version);
         }
         let mut t = String::new();
-        if !self.read_file(cp.as_str(), &mut t)? {
-            return Result::<i64, ApiError>::Err(ApiError::at(Code::InvalidArgument, "no such file", cp.as_str(), 0, 0));
+        if !self.read_file(&cp, &mut t)? {
+            return Err(ApiError::at(Code::InvalidArgument, "no such file", &cp, 0, 0));
         }
         self.changed();
         self.bufs.push(Buffer { path: cp, text: t, version: 0 });
-        return Result::<i64, ApiError>::Ok(0);
+        return Ok(0);
     }
 
     /// Drop the buffer of `path`: the provider's text applies again. False when it has none.
     pub fn close(self: &mut Self, path: str) bool {
         let cp = self.canon(path);
-        let b = self.buffer(cp.as_str());
+        let b = self.buffer(&cp);
         if b < 0 {
             return false;
         }
@@ -329,7 +318,7 @@ extend Session {
         // The analysis updates in place only from buffers: a module whose text goes back to the
         // provider's is analyzed again from scratch.
         let mut t = String::new();
-        let same = switch self.read_file(cp.as_str(), &mut t) {
+        let same = switch self.read_file(&cp, &mut t) {
             Ok(b) => b && t.as_str() == gone.text.as_str(),
             Err(_) => false,
         };
@@ -354,44 +343,38 @@ extend Session {
         let mut paths = Vector::<String>::with_capacity(changes.len());
         for i in 0..changes.len() {
             let c = &changes[i];
-            let cp = self.canon(c.path.as_str());
+            let cp = self.canon(&c.path);
             for k in 0..paths.len() {
                 if paths[k].as_str() == cp.as_str() {
-                    return Result::<u64, ApiError>::Err(
-                        ApiError::at(Code::InvalidArgument, "two changes name one file", cp.as_str(), 0, 0),
-                    );
+                    return Err(ApiError::at(Code::InvalidArgument, "two changes name one file", &cp, 0, 0));
                 }
             }
-            if c.expected_version >= 0 && self.version(cp.as_str()) != c.expected_version {
-                return Result::<u64, ApiError>::Err(
-                    ApiError::at(Code::InvalidArgument, "the file is not at the expected version", cp.as_str(), 0, 0),
-                );
+            if c.expected_version >= 0 && self.version(&cp) != c.expected_version {
+                return Err(ApiError::at(Code::InvalidArgument, "the file is not at the expected version", &cp, 0, 0));
             }
             if c.edits.len() == 0 && c.replace {
                 texts.push(c.text.clone());
             } else {
-                let cur = switch self.text(cp.as_str())? {
+                let cur = switch self.text(&cp)? {
                     Some(t) => t,
                     None => {
-                        return Result::<u64, ApiError>::Err(
-                            ApiError::at(Code::InvalidArgument, "no such file", cp.as_str(), 0, 0),
-                        );
+                        return Err(ApiError::at(Code::InvalidArgument, "no such file", &cp, 0, 0));
                     },
                 };
                 let mut out = String::new();
-                if let Err(e) = apply_edits(cur.as_str(), c.edits.as_slice(), &mut out) {
+                if let Err(e) = apply_edits(&cur, &c.edits, &mut out) {
                     let mut ee = e;
                     ee.file = cp.clone();
-                    return Result::<u64, ApiError>::Err(ee);
+                    return Err(ee);
                 }
                 texts.push(out);
             }
             paths.push(cp);
         }
         for i in 0..paths.len() {
-            let _ = self.set_text(paths[i].as_str(), texts[i].as_str());
+            let _ = self.set_text(&paths[i], &texts[i]);
         }
-        return Result::<u64, ApiError>::Ok(self.revision);
+        return Ok(self.revision);
     }
 
     fn changed(self: &mut Self) {
@@ -419,7 +402,7 @@ extend Session {
     /// `check` under the cancellation, deadline and limits of `opts`.
     pub fn check_with(self: &mut Self, opts: &RequestOptions) Result<Unit, ApiError> {
         if self.state == S_CHECKED {
-            return Result::<Unit, ApiError>::Ok(Unit {});
+            return Ok(Unit {});
         }
         let mut req = loader::StopReq {
             tok: switch &opts.cancel {
@@ -429,7 +412,7 @@ extend Session {
             deadline: opts.deadline_ns,
             stopped: false,
         };
-        let mut sc = SourceCtx { files: null, err: Option::<IoError>::None };
+        let mut sc = SourceCtx { files: null, err: None };
         let fsrc = loader::FileSource { ctx: &mut sc, read: source_read, list: source_list };
         if let Some(f) = &mut self.files {
             sc.files = f;
@@ -446,34 +429,30 @@ extend Session {
         if req.stopped || sc.err.is_some() {
             self.drop_analysis();
             if let Some(e) = sc.err {
-                return Result::<Unit, ApiError>::Err(ApiError::io(e, sc.err_path.as_str()));
+                return Err(ApiError::io(e, &sc.err_path));
             }
             let cancelled = switch &opts.cancel {
                 Some(t) => t.is_cancelled(),
                 None => false,
             };
-            return Result::<Unit, ApiError>::Err(
+            return Err(
                 if cancelled {
-                    ApiError::new(Code::Cancelled, "the request was cancelled");
+                    ApiError::new(Code::Cancelled, "the request was cancelled")
                 } else {
-                    ApiError::new(Code::Deadline, "the request passed its deadline");
+                    ApiError::new(Code::Deadline, "the request passed its deadline")
                 },
             );
         }
         if log.len() != 0 && !self.root_loaded() {
             self.drop_analysis();
-            return Result::<Unit, ApiError>::Err(
-                ApiError::at(Code::InvalidArgument, "the root file does not read", self.root_file.as_str(), 0, 0),
-            );
+            return Err(ApiError::at(Code::InvalidArgument, "the root file does not read", &self.root_file, 0, 0));
         }
         if self.memory_limit != 0 && self.pkg.retained_bytes() > self.memory_limit {
             self.drop_analysis();
-            return Result::<Unit, ApiError>::Err(
-                ApiError::new(Code::Limit, "the analysis retains more than the session's memory limit"),
-            );
+            return Err(ApiError::new(Code::Limit, "the analysis retains more than the session's memory limit"));
         }
         self.state = S_CHECKED;
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     // Whether the analysis holds the root file's module.
@@ -498,8 +477,8 @@ extend Session {
         let mut ovf = Vector::<str>::with_capacity(self.bufs.len());
         let mut ovt = Vector::<str>::with_capacity(self.bufs.len());
         for i in 0..self.bufs.len() {
-            ovf.push(self.bufs[i].path.as_str());
-            ovt.push(self.bufs[i].text.as_str());
+            ovf.push(&self.bufs[i].path);
+            ovt.push(&self.bufs[i].text);
         }
         let mut done = false;
         if self.state == S_STALE && self.pkg.modules.len() != 0 {
@@ -508,8 +487,8 @@ extend Session {
             done = an::recompile(
                 &mut self.pkg,
                 self.target,
-                self.root_file.as_str(),
-                self.lint_dir.as_str(),
+                &self.root_file,
+                &self.lint_dir,
                 &ovf,
                 &ovt,
                 &mut d,
@@ -531,14 +510,14 @@ extend Session {
             self.pkg = loader::Package::new();
             self.diags = Vector::<an::DiagRec>::new();
             self.pkg = an::compile_keeping(
-                self.root_file.as_str(),
-                self.root_dir.as_str(),
-                self.alt_dir.as_str(),
-                self.std_dir.as_str(),
+                &self.root_file,
+                &self.root_dir,
+                &self.alt_dir,
+                &self.std_dir,
                 self.target,
                 of,
                 ot,
-                self.lint_dir.as_str(),
+                &self.lint_dir,
                 true,
                 &mut self.diags,
             );
@@ -575,10 +554,10 @@ extend Session {
             state: S_NONE,
         };
         for i in 0..self.bufs.len() {
-            let _ = scratch.set_text(self.bufs[i].path.as_str(), self.bufs[i].text.as_str());
+            let _ = scratch.set_text(&self.bufs[i].path, &self.bufs[i].text);
         }
         for i in 0..paths.len() {
-            let _ = scratch.set_text(paths[i].as_str(), texts[i].as_str());
+            let _ = scratch.set_text(&paths[i], &texts[i]);
         }
         scratch.check()?;
         let mut n: usize = 0;
@@ -587,7 +566,7 @@ extend Session {
                 n += 1;
             }
         }
-        return Result::<usize, ApiError>::Ok(n);
+        return Ok(n);
     }
 
     /// The bytes the analysis retains.
@@ -598,16 +577,14 @@ extend Session {
     /// The diagnostics of the last `check`, by file then position; `NotChecked` before one.
     pub fn diagnostics(self: &Self) Result<Diagnostics, ApiError> {
         if self.state != S_CHECKED {
-            return Result::<Diagnostics, ApiError>::Err(
-                ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"),
-            );
+            return Err(ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"));
         }
         let mut order = Vector::<u32>::with_capacity(self.diags.len());
         for i in 0..self.diags.len() {
             order.push(i as u32);
         }
         order.sort_stable_by(|a: &u32, b: &u32| self.diag_cmp(*a, *b));
-        return Result::<Diagnostics, ApiError>::Ok(Diagnostics { s: self, order: order, at: 0 });
+        return Ok(Diagnostics { s: self, order: order, at: 0 });
     }
 
     // Diagnostic order: file path, start, end, severity, then message bytes.
@@ -620,16 +597,16 @@ extend Session {
         }
         if x.start != y.start {
             return if x.start < y.start {
-                -1;
+                -1
             } else {
-                1;
+                1
             };
         }
         if x.len != y.len {
             return if x.len < y.len {
-                -1;
+                -1
             } else {
-                1;
+                1
             };
         }
         if x.severity != y.severity {
@@ -641,25 +618,23 @@ extend Session {
     /// The analyzed modules, in load order; `NotChecked` before a `check`.
     pub fn modules(self: &Self) Result<Modules, ApiError> {
         if self.state != S_CHECKED {
-            return Result::<Modules, ApiError>::Err(
-                ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"),
-            );
+            return Err(ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"));
         }
-        return Result::<Modules, ApiError>::Ok(Modules { s: self, at: 0 });
+        return Ok(Modules { s: self, at: 0 });
     }
 
     /// The analyzed module of file `path`, or None.
     pub fn module_of(self: &Self, path: str) Option<Module> {
         if self.state != S_CHECKED {
-            return Option::<Module>::None;
+            return None;
         }
         let cp = self.canon(path);
         for i in 0..self.pkg.modules.len() {
             if self.pkg.modules[i].file.as_str() == cp.as_str() {
-                return Option::<Module>::Some(Module { s: self, i: i as u32 });
+                return Some(Module { s: self, i: i as u32 });
             }
         }
-        return Option::<Module>::None;
+        return None;
     }
 
     /// The analysis, for the facade modules that read it. Not part of the API.
@@ -679,8 +654,8 @@ pub const SEV_WARNING: u8 = 2;
 
 /// A diagnostic of a checked session.
 pub struct Diag<'s> {
-    pub(module) s: &'s Session,
-    pub(module) i: u32,
+    s: &'s Session,
+    i: u32,
 }
 
 extend<'s> Diag<'s> {
@@ -726,7 +701,7 @@ extend<'s> Diag<'s> {
     pub fn fix(self: &Self) Option<Edit> {
         let r = self.rec();
         if r.fix_kind < 0 {
-            return Option::<Edit>::None;
+            return None;
         }
         let text = switch r.fix_kind {
             1 => String::from_str("_"),
@@ -735,40 +710,40 @@ extend<'s> Diag<'s> {
             _ => String::new(),
         };
         let end = if r.fix_kind == 1 || r.fix_kind == 2 {
-            r.fix_start;
+            r.fix_start
         } else {
-            r.fix_end;
+            r.fix_end
         };
-        return Option::<Edit>::Some(Edit { start: r.fix_start, end: end, text: text });
+        return Some(Edit { start: r.fix_start, end: end, text: text });
     }
 }
 
 /// The diagnostics of a checked session, in order.
 pub struct Diagnostics<'s> {
-    pub(module) s: &'s Session,
-    pub(module) order: Vector<u32>,
-    pub(module) at: usize,
+    s: &'s Session,
+    order: Vector<u32>,
+    at: usize,
 }
 
 extend<'s> Diagnostics<'s> as Iterator<Diag<'s>> {
     pub fn next(self: &mut Self) Option<Diag<'s>> {
         if self.at >= self.order.len() {
-            return Option::<Diag<'s>>::None;
+            return None;
         }
         self.at += 1;
-        return Option::<Diag<'s>>::Some(Diag { s: self.s, i: self.order[self.at - 1] });
+        return Some(Diag { s: self.s, i: self.order[self.at - 1] });
     }
 
     pub fn size_hint(self: &Self) (usize, Option<usize>) {
         let n = self.order.len() - self.at;
-        return n, Option::<usize>::Some(n);
+        return (n, Option::<usize>::Some(n));
     }
 }
 
 /// A module of a checked session.
 pub struct Module<'s> {
-    pub(module) s: &'s Session,
-    pub(module) i: u32,
+    s: &'s Session,
+    i: u32,
 }
 
 extend<'s> Module<'s> {
@@ -800,21 +775,21 @@ extend<'s> Module<'s> {
 
 /// The modules of a checked session, in load order.
 pub struct Modules<'s> {
-    pub(module) s: &'s Session,
-    pub(module) at: u32,
+    s: &'s Session,
+    at: u32,
 }
 
 extend<'s> Modules<'s> as Iterator<Module<'s>> {
     pub fn next(self: &mut Self) Option<Module<'s>> {
         if self.at as usize >= self.s.pkg.modules.len() {
-            return Option::<Module<'s>>::None;
+            return None;
         }
         self.at += 1;
-        return Option::<Module<'s>>::Some(Module { s: self.s, i: self.at - 1 });
+        return Some(Module { s: self.s, i: self.at - 1 });
     }
 
     pub fn size_hint(self: &Self) (usize, Option<usize>) {
         let n = self.s.pkg.modules.len() - self.at as usize;
-        return n, Option::<usize>::Some(n);
+        return (n, Option::<usize>::Some(n));
     }
 }

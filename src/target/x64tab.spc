@@ -1431,9 +1431,9 @@ fn modrm_mem(out: &mut Vector<u8>, rg: u32, m: x::Mem, n8: i32, disp: u8, vsib: 
         return true;
     }
     let idx = if m.index == NOREG {
-        4u32;
+        4u32
     } else {
-        m.index as u32 & 7;
+        m.index as u32 & 7
     };
     if m.base == NOREG {
         if disp == 8 {
@@ -1447,18 +1447,18 @@ fn modrm_mem(out: &mut Vector<u8>, rg: u32, m: x::Mem, n8: i32, disp: u8, vsib: 
     let base = m.base as u32 & 7;
     let fits8 = m.disp % n8 == 0 && m.disp / n8 >= -128 && m.disp / n8 < 128;
     let md: u32 = if disp == 32 {
-        2;
+        2
     } else if disp == 8 {
         if !fits8 {
             return false;
         }
-        1;
+        1
     } else if m.disp == 0 && base != 5 {
-        0;
+        0
     } else if fits8 {
-        1;
+        1
     } else {
-        2;
+        2
     };
     if m.index == NOREG && base != 4 {
         out.push((md << 6 | r3 | base) as u8);
@@ -1656,9 +1656,9 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
             out.push(fixed_modrm(r.dig));
         } else {
             let rg: u32 = if r.dig == D_REG {
-                regf as u32 & 7;
+                regf as u32 & 7
             } else {
-                r.dig;
+                r.dig
             };
             if mem {
                 if !modrm_mem(out, rg, n.m, n8, n.disp, vsib, st, e) {
@@ -1694,9 +1694,9 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
             out,
             v as u64,
             if n.sz == 2 {
-                2u32;
+                2u32
             } else {
-                4u32;
+                4u32
             },
         );
     } else if immk == K::I64 {
@@ -1743,9 +1743,9 @@ const fn get(b: []u8, at: usize, n: u32, signed: bool) i64 {
 /// form the assembler gives them.
 pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
     let end = if b.len() < at + 15 {
-        b.len();
+        b.len()
     } else {
-        at + 15;
+        at + 15
     };
     let mut p = at;
     let mut lock = false;
@@ -1876,11 +1876,11 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
             continue;
         }
         let mask: u32 = if (r.fl & F_OR) != 0 {
-            ~7u32;
+            ~7u32
         } else if (r.fl & F_CC) != 0 {
-            ~15u32;
+            ~15u32
         } else {
-            ~0u32;
+            ~0u32
         };
         if (op & mask) != r.op {
             continue;
@@ -2012,15 +2012,15 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
                 q += 1;
                 let ix = sib >> 3 & 7 | (rex >> 1 & 1) << 3;
                 m.index = if ix == 4 && !vsib {
-                    NOREG;
+                    NOREG
                 } else {
-                    ix as u8;
+                    ix as u8
                 };
                 m.scale = (sib >> 6) as u8;
                 m.base = if (sib & 7) == 5 && md == 0 {
-                    NOREG;
+                    NOREG
                 } else {
-                    (sib & 7 | (rex & 1) << 3) as u8;
+                    (sib & 7 | (rex & 1) << 3) as u8
                 };
             } else if rm == 5 && md == 0 {
                 m.base = x::RIP;
@@ -2028,11 +2028,11 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
                 m.base = (rm | (rex & 1) << 3) as u8;
             }
             let dn: usize = if md == 1 {
-                1;
+                1
             } else if md == 2 || m.base == x::RIP || m.base == NOREG {
-                4;
+                4
             } else {
-                0;
+                0
             };
             if q + dn > end {
                 continue;
@@ -2049,24 +2049,24 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
         let isz: usize = switch immk {
             K::I8 | K::IS8 => 1usize,
             K::IZ => if sz == 2 {
-                2usize;
+                2usize
             } else {
-                4usize;
+                4usize
             },
             K::I64 => 8usize,
             _ => 0usize,
         };
         let rsz: usize = if relk == K::REL8 {
-            1;
+            1
         } else if relk == K::REL32 {
-            4;
+            4
         } else {
-            0;
+            0
         };
         let i4: usize = if is4 >= 0 {
-            1;
+            1
         } else {
-            0;
+            0
         };
         if q + isz + i4 + rsz > end {
             continue;

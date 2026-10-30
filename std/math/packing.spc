@@ -313,14 +313,14 @@ pub fn pack_f3x9_e1x5(v: Vec<f32, 3>) u32 {
     let max_shared = (max_color / 2.0f32.powf(exp_shared_p - 15.0 - 9.0) + 0.5).floor();
     let d = max_shared - 2.0f32.powf(9.0);
     let near = if d >= 0.0 {
-        d;
+        d
     } else {
-        -d;
+        -d
     };
     let exp_shared = if near <= f32::epsilon() {
-        exp_shared_p + 1.0;
+        exp_shared_p + 1.0
     } else {
-        exp_shared_p;
+        exp_shared_p
     };
     let scale = 2.0f32.powf(exp_shared - 15.0 - 9.0);
     let cx = (x / scale + 0.5).floor() as u32;
@@ -640,14 +640,14 @@ fn clamp_f<T: Float>(x: T, lo: T, hi: T) T {
 // tested first, so a NaN takes it: every result fits, and NaN gives 0 as a saturating `as` does.
 const fn unorm(x: f32, scale: f32) u32 {
     let lo = if 0.0 < x {
-        x;
+        x
     } else {
-        0.0;
+        0.0
     };
     let c = if 1.0 < lo {
-        1.0;
+        1.0
     } else {
-        lo;
+        lo
     };
     return unsafe (c * scale).round().to_int_unchecked::<u32>();
 }
@@ -655,16 +655,16 @@ const fn unorm(x: f32, scale: f32) u32 {
 // `round(clamp(x, -1, 1) * scale)` as an integer, as `unorm` (NaN gives 0).
 const fn snorm(x: f32, scale: f32) i32 {
     let lo = if -1.0 < x {
-        x;
+        x
     } else if x == x {
-        -1.0;
+        -1.0
     } else {
-        0.0;
+        0.0
     };
     let c = if 1.0 < lo {
-        1.0;
+        1.0
     } else {
-        lo;
+        lo
     };
     return unsafe (c * scale).round().to_int_unchecked::<i32>();
 }

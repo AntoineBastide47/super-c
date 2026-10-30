@@ -72,9 +72,9 @@ fn main(args: Vector<str>) i32 {
     for i in 0..32usize {
         let j = i % 16;
         if wide[i] != b[if j % 2 == 0 {
-            15 - j / 2;
+            15 - j / 2
         } else {
-            j / 2;
+            j / 2
         }] {
             return 13;
         }
@@ -107,7 +107,7 @@ fn index_list_rules_are_diagnosed() {
     for c in cases {
         let mut src = String::from_str(pre);
         src.format_into("{}\n}}\nfn main() i32 {{\n    return 0;\n}}\n", c[0]);
-        h::expect_err_msg(c[1], src.as_str(), c[1]);
+        h::expect_err_msg(c[1], &src, c[1]);
     }
     h::expect_err_msg(
         "a constant list of no lanes",
@@ -156,9 +156,9 @@ fn run<U: SimdInt, const M: usize>(idx: Simd<U, M>, top: u64) i32 {
     for i in 0..M {
         let k = idx[i] as u64;
         let want = if k < 8 {
-            v[k as usize];
+            v[k as usize]
         } else {
-            0;
+            0
         };
         if r[i] != want || oob.get(i) != (k >= 8) || k > top {
             return 2;

@@ -14,18 +14,18 @@ fn redundant_coalescing_cast_lint_and_fix() {
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.out_has("unnecessary cast: '&mut i32' converts to '*mut i32' implicitly here"));
 
     let mut fargs = String::from_str("lint --fix \"");
     fargs.push_str(root);
     fargs.push_str("/main.spc\"");
-    let fr = p.run_raw(fargs.as_str());
+    let fr = p.run_raw(&fargs);
     // Clean after the fix.
     assert(fr.ok());
     let mut mp = String::from_str(root);
     mp.push_str("/main.spc");
-    let fixed = loader::read_file(mp.as_str()).unwrap();
+    let fixed = loader::read_file(&mp).unwrap();
     assert(fixed.as_str().contains("return take(&mut x) - 1;"));
     assert(!fixed.as_str().contains("as *mut i32"));
 }
@@ -58,7 +58,7 @@ fn redundant_cast_lint_covers_all_implicits() {
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.out_has("'&mut i32' converts to '&i32' implicitly here"));
     assert(r.out_has("'u8' converts to 'i64' implicitly here"));
     assert(r.out_has("'i32' converts to 'i64' implicitly here"));
@@ -83,7 +83,7 @@ fn const_suggestion_lint() {
     let mut args = String::from_str("lint --const \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     // Warnings exit 1, compiler-warning semantics.
     assert(r.exit != 0);
     assert(r.out_has("function 'norm' can be declared 'const fn'"));
@@ -102,7 +102,7 @@ fn const_suggestion_lint() {
     let mut dargs = String::from_str("lint \"");
     dargs.push_str(root);
     dargs.push_str("/main.spc\"");
-    let d = p.run_raw(dargs.as_str());
+    let d = p.run_raw(&dargs);
     assert_eq(d.exit, 0);
     assert(!d.out_has("can be declared 'const fn'"));
 
@@ -110,11 +110,11 @@ fn const_suggestion_lint() {
     let mut fargs = String::from_str("lint --fix --const \"");
     fargs.push_str(root);
     fargs.push_str("/main.spc\"");
-    let fx = p.run_raw(fargs.as_str());
+    let fx = p.run_raw(&fargs);
     assert_eq(fx.exit, 0);
     let mut mp = String::from_str(root);
     mp.push_str("/main.spc");
-    let fixed = loader::read_file(mp.as_str()).unwrap();
+    let fixed = loader::read_file(&mp).unwrap();
     assert(fixed.as_str().contains("const fn branchy"));
     assert(fixed.as_str().contains("const fn use_method"));
     // Extend member.
@@ -142,7 +142,7 @@ fn union_free_lint() {
     let mut dargs = String::from_str("lint \"");
     dargs.push_str(root);
     dargs.push_str("/main.spc\"");
-    let d = p.run_raw(dargs.as_str());
+    let d = p.run_raw(&dargs);
     assert(d.exit != 0);
     assert(d.out_has("union 'Bad' has owning fields ('s') but no 'free'"));
     // Structs derive: never flagged.
@@ -164,7 +164,7 @@ fn union_free_lint_nested_instance() {
     let mut dargs = String::from_str("lint \"");
     dargs.push_str(root);
     dargs.push_str("/main.spc\"");
-    let d = p.run_raw(dargs.as_str());
+    let d = p.run_raw(&dargs);
     assert(d.out_has("union 'Deep' has owning fields ('a') but no 'free'"));
     assert(d.out_has("union 'Flat' has owning fields ('a') but no 'free'"));
 }
@@ -178,13 +178,13 @@ fn local_analysis_lints() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "enum E {\n    A(i32),\n    B,\n}\n\nfn muts(a: i32) i32 {\n    let mut kept = a;\n    kept = kept + 1;\n    let mut extra = a;\n    return kept + extra;\n}\n\nfn stores(a: i32) i32 {\n    let mut v = a;\n    v = 7;\n    return v;\n}\n\nfn labeled(n: i32) i32 {\n    let mut s = 0;\n    'outer: for i in 0..n {\n        s = s + i;\n    }\n    'used: for i in 0..n {\n        if i == 1 {\n            break 'used;\n        }\n        s = s + i;\n    }\n    return s;\n}\n\nfn unreach(a: i32) i32 {\n    let mut s = a;\n    if a > 0 {\n        return s;\n        s = 0;\n    }\n    return -s;\n}\n\nfn arms(e: E) i32 {\n    return switch e {\n        _ => {\n            0;\n        },\n        B => {\n            1;\n        },\n    };\n}\n\nfn derefs(a: i32) i32 {\n    let r = &a;\n    let b = *&a;\n    let c = &*r;\n    return b + *c;\n}\n\nfn aliased(a: i32) i32 {\n    let mut w = a;\n    w = 2;\n    let r = &w;\n    let mut z = a;\n    z = 4;\n    let f = |q: i32, y: i32| q + z;\n    let mut s = 0;\n    'w: while s < 100 {\n        s = s + 1;\n        'inner: while s < 50 {\n            continue 'w;\n        }\n    }\n    return *r + f(1, 2) + s;\n}\n\nfn main() i32 {\n    let e = E::A(2);\n    return muts(1) + stores(2) + labeled(3) + unreach(4) + arms(e) + derefs(5) + aliased(1) - 30;\n}\n",
+        "enum E {\n    A(i32),\n    B,\n}\n\nfn muts(a: i32) i32 {\n    let mut kept = a;\n    kept = kept + 1;\n    let mut extra = a;\n    return kept + extra;\n}\n\nfn stores(a: i32) i32 {\n    let mut v = a;\n    v = 7;\n    return v;\n}\n\nfn labeled(n: i32) i32 {\n    let mut s = 0;\n    'outer: for i in 0..n {\n        s = s + i;\n    }\n    'used: for i in 0..n {\n        if i == 1 {\n            break 'used;\n        }\n        s = s + i;\n    }\n    return s;\n}\n\nfn unreach(a: i32) i32 {\n    let mut s = a;\n    if a > 0 {\n        return s;\n        s = 0;\n    }\n    return -s;\n}\n\nfn arms(e: E) i32 {\n    return switch e {\n        _ => {\n            0\n        },\n        B => {\n            1\n        },\n    };\n}\n\nfn derefs(a: i32) i32 {\n    let r = &a;\n    let b = *&a;\n    let c = &*r;\n    return b + *c;\n}\n\nfn aliased(a: i32) i32 {\n    let mut w = a;\n    w = 2;\n    let r = &w;\n    let mut z = a;\n    z = 4;\n    let f = |q: i32, y: i32| q + z;\n    let mut s = 0;\n    'w: while s < 100 {\n        s = s + 1;\n        'inner: while s < 50 {\n            continue 'w;\n        }\n    }\n    return *r + f(1, 2) + s;\n}\n\nfn main() i32 {\n    let e = E::A(2);\n    return muts(1) + stores(2) + labeled(3) + unreach(4) + arms(e) + derefs(5) + aliased(1) - 30;\n}\n",
     );
     let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.exit != 0);
     assert(r.out_has("'extra' does not need to be mutable"));
     assert(!r.out_has("'kept' does not need"));
@@ -208,10 +208,10 @@ fn local_analysis_lints() {
     fargs.push_str(root);
     fargs.push_str("/main.spc\"");
     // Report-only findings remain, so the final pass still exits 1.
-    p.run_raw(fargs.as_str());
+    p.run_raw(&fargs);
     let mut mp = String::from_str(root);
     mp.push_str("/main.spc");
-    let fixed = loader::read_file(mp.as_str()).unwrap();
+    let fixed = loader::read_file(&mp).unwrap();
     // Mut dropped.
     assert(fixed.as_str().contains("let extra = a;"));
     // Mut kept.
@@ -241,7 +241,7 @@ fn lint_reports_cross_module_duplicate_conformance() {
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", args.as_str());
+    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", &args);
     assert(r.out_shows("duplicate conformance"));
     assert(r.exit != 0, "the lint fails");
 }
@@ -262,7 +262,7 @@ fn lint_resolves_a_standalone_program_beside_itself() {
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/tools/t/main.spc\"");
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", args.as_str());
+    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", &args);
     assert(!r.out_shows("cannot open module"), "the listed file resolves `lib` beside it");
     assert_eq(r.exit, 0);
     let rd = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
@@ -282,7 +282,7 @@ fn non_ascii_char_ranges_are_disjoint() {
     let mut args = String::from_str("lint \"");
     args.push_str(p.dir());
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(!r.out_has("unreachable arm"));
     assert_eq(r.exit, 0);
 }
@@ -297,7 +297,7 @@ fn glob_imports_re_export() {
     let mut args = String::from_str("lint \"");
     args.push_str(p.dir());
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.out_has("unused import 'extra'") && r.out_has("main.spc:2:1"));
     assert(!r.out_has("lib.spc"));
 }
@@ -309,13 +309,13 @@ fn driver_lints() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "import stdio;\nimport string as cstring;\n\nstruct S {\n    pub used_field: i32,\n    ghost: i32,\n}\n\nenum T {\n    Used(i32),\n    Ghost(i32),\n}\n\nextend S {\n    pub fn new(v: i32) S {\n        return S { used_field: v, ghost: v + 1 };\n    }\n}\n\nfn pure_add(a: i32, b: i32) i32 {\n    return a + b;\n}\n\nfn len_of(s: str) i32 {\n    return (unsafe cstring::strlen(s.ptr() as *const char)) as i32;\n}\n\nfn main() i32 {\n    let s = S::new(1);\n    let t = T::Used(3);\n    let x = switch t {\n        Used(v) => {\n            v;\n        },\n        _ => {\n            0;\n        },\n    };\n    pure_add(1, 2);\n    let y = pure_add(s.used_field, x);\n    return y + len_of(\"ab\") - 6;\n}\n",
+        "import stdio;\nimport string as cstring;\n\nstruct S {\n    pub used_field: i32,\n    ghost: i32,\n}\n\nenum T {\n    Used(i32),\n    Ghost(i32),\n}\n\nextend S {\n    pub fn new(v: i32) S {\n        return S { used_field: v, ghost: v + 1 };\n    }\n}\n\nfn pure_add(a: i32, b: i32) i32 {\n    return a + b;\n}\n\nfn len_of(s: str) i32 {\n    return (unsafe cstring::strlen(s.ptr() as *const char)) as i32;\n}\n\nfn main() i32 {\n    let s = S::new(1);\n    let t = T::Used(3);\n    let x = switch t {\n        Used(v) => {\n            v\n        },\n        _ => {\n            0\n        },\n    };\n    pure_add(1, 2);\n    let y = pure_add(s.used_field, x);\n    return y + len_of(\"ab\") - 6;\n}\n",
     );
     let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.exit != 0);
     assert(r.out_has("unused import 'stdio'"));
     assert(!r.out_has("unused import 'string'"));
@@ -328,10 +328,10 @@ fn driver_lints() {
     let mut fargs = String::from_str("lint --fix \"");
     fargs.push_str(root);
     fargs.push_str("/main.spc\"");
-    p.run_raw(fargs.as_str());
+    p.run_raw(&fargs);
     let mut mp = String::from_str(root);
     mp.push_str("/main.spc");
-    let fixed = loader::read_file(mp.as_str()).unwrap();
+    let fixed = loader::read_file(&mp).unwrap();
     // Unused import deleted.
     assert(!fixed.as_str().contains("import stdio;"));
     assert(fixed.as_str().contains("import string as cstring;"));
@@ -361,7 +361,7 @@ fn always_panics_lint() {
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.exit != 0, "the lint fails on a provable panic");
     assert(r.out_has("error: this statement always panics at runtime"), "and names it");
 
@@ -370,7 +370,7 @@ fn always_panics_lint() {
     let mut uargs = String::from_str("lint \"");
     uargs.push_str(root);
     uargs.push_str("/ub.spc\"");
-    let u = p.run_raw(uargs.as_str());
+    let u = p.run_raw(&uargs);
     assert(u.exit != 0, "the lint fails on a provable division by zero");
     assert(u.out_has("error: this statement is undefined behavior when executed: division by zero"), "and names it");
 
@@ -382,7 +382,7 @@ fn always_panics_lint() {
     let mut qargs = String::from_str("lint \"");
     qargs.push_str(root);
     qargs.push_str("/quiet.spc\"");
-    let q = p.run_raw(qargs.as_str());
+    let q = p.run_raw(&qargs);
     assert_eq(q.exit, 0);
     assert(!q.out_has("always panics"), "intent, run-time indexes and folded guards are silent");
 }
@@ -427,7 +427,7 @@ fn main() i32 {
     );
     let mut env = String::new();
     env.format_into("{}/cache SC_STD_DIR={}/sc/std", root, root);
-    let r = cli::superc_env_in(root, "SC_CACHE_DIR", env.as_str(), "build main.spc");
+    let r = cli::superc_env_in(root, "SC_CACHE_DIR", &env, "build main.spc");
     assert(r.exit != 0, "the project module's findings fail the build");
     assert(r.out_has("error: this statement always panics at runtime"), "a project panic is reported");
     assert(r.out_shows("error: function 'zz_own_spins' cannot return without calling itself"), "and its recursion");
@@ -715,11 +715,11 @@ fn leading_turbofish_call_marks_a_generic_function_used() {
     for m in mains {
         let mut src = String::from_str(g);
         src.push_str(m);
-        p.mkfile("main.spc", src.as_str());
+        p.mkfile("main.spc", &src);
         let mut args = String::from_str("lint \"");
         args.push_str(root);
         args.push_str("/main.spc\"");
-        let r = p.run_raw(args.as_str());
+        let r = p.run_raw(&args);
         assert(!r.out_has("unused function 'g'"), "a leading turbofish call uses the generic function");
         assert_eq(r.exit, 0);
     }
@@ -760,7 +760,7 @@ fn standalone_file_lint_and_fix() {
     assert(fr.ok(), "the fix run succeeds");
     let mut sp = String::from_str(root);
     sp.push_str("/solo.spc");
-    let fixed = loader::read_file(sp.as_str()).unwrap();
+    let fixed = loader::read_file(&sp).unwrap();
     assert(fixed.as_str().contains("return take(&mut x) - 1;"), "the cast was removed");
     assert(!fixed.as_str().contains("as *mut i32"), "no cast remains");
 }
@@ -826,7 +826,7 @@ fn main() i32 {
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.out_has("condition is always true"), "the const condition and `while true` fold to true");
     assert(r.out_has("condition is always false"), "`while false` folds to false");
     assert(r.out_has("unreachable branch"), "the else branch of the true condition never runs");
@@ -834,11 +834,11 @@ fn main() i32 {
     let mut fargs = String::from_str("lint --fix \"");
     fargs.push_str(root);
     fargs.push_str("/main.spc\"");
-    let fr = p.run_raw(fargs.as_str());
+    let fr = p.run_raw(&fargs);
     assert(fr.ok(), "the folded program lints clean");
     let mut mp = String::from_str(root);
     mp.push_str("/main.spc");
-    let fixed = loader::read_file(mp.as_str()).unwrap();
+    let fixed = loader::read_file(&mp).unwrap();
     let t = fixed.as_str();
     assert(t.contains("return x + 1;"), "the live branch stays");
     assert(!t.contains("return x - 1;"), "the dead branch is folded away");
@@ -890,7 +890,7 @@ fn main() i32 {
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.out_has("main.spc:7:5"), "the statement after the diverging `if` is reported");
     assert(r.out_has("main.spc:13:5"), "the statement after the endless `loop` is reported");
     assert(!r.out_has("main.spc:23:5"), "the statement after a loop with a `break` is not");
@@ -902,13 +902,13 @@ fn tuple_let_element_mut_lint() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "fn f() (i32, i32) {\n    return 1, 2;\n}\n\nfn main() i32 {\n    let (mut a, mut b) = f();\n    a += 1;\n    return a + b - 4;\n}\n",
+        "fn f() (i32, i32) {\n    return (1, 2);\n}\n\nfn main() i32 {\n    let (mut a, mut b) = f();\n    a += 1;\n    return a + b - 4;\n}\n",
     );
     let root = p.dir();
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.exit != 0);
     assert(r.out_has("'b' does not need to be mutable"));
     assert(!r.out_has("'a' does not need"));
@@ -925,7 +925,7 @@ fn format_argument_warnings_report_once() {
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     let out = unsafe str::from_cstr(r.out);
     let needle = "unnecessary 'unsafe'";
     let first = out.find(needle);
@@ -935,10 +935,10 @@ fn format_argument_warnings_report_once() {
     let mut fargs = String::from_str("lint --fix \"");
     fargs.push_str(root);
     fargs.push_str("/main.spc\"");
-    p.run_raw(fargs.as_str());
+    p.run_raw(&fargs);
     let mut mp = String::from_str(root);
     mp.push_str("/main.spc");
-    let fixed = loader::read_file(mp.as_str()).unwrap();
+    let fixed = loader::read_file(&mp).unwrap();
     assert(fixed.as_str().contains("print(\"{}\\n\", g[1]);"));
 }
 
@@ -1012,15 +1012,15 @@ fn build_constant_removed_code_suppresses_only_its_names() {
         args.format_into(
             "lint{} \"{}/main.spc\"",
             if t == 0 {
-                "";
+                ""
             } else if t == 1 {
-                " --target=windows";
+                " --target=windows"
             } else {
-                " --target=linux";
+                " --target=linux"
             },
             root,
         );
-        let r = p.run_raw(args.as_str());
+        let r = p.run_raw(&args);
         assert(r.out_has("unused variable 'w'"));
         assert(r.out_has("unused function 'never'"));
         assert(r.out_has("'m' does not need to be mutable"));
@@ -1042,15 +1042,15 @@ fn build_constant_conditions_lint_quietly() {
         args.format_into(
             "lint{} \"{}/main.spc\"",
             if t == 0 {
-                "";
+                ""
             } else if t == 1 {
-                " --target=windows";
+                " --target=windows"
             } else {
-                " --target=linux";
+                " --target=linux"
             },
             root,
         );
-        let r = p.run_raw(args.as_str());
+        let r = p.run_raw(&args);
         assert(r.ok(), "the build-constant conditions lint clean on every target");
         assert(!r.out_has("warning"));
     }
@@ -1068,7 +1068,7 @@ fn lint_explicit_prelude_import_is_the_prelude_module() {
     let mut args = String::from_str("lint \"");
     args.push_str(p.dir());
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(!r.out_has("mismatched types"));
     assert_eq(r.exit, 0);
 }
@@ -1085,7 +1085,7 @@ fn arch_gated_uses_keep_imports() {
     let mut args = String::from_str("lint \"");
     args.push_str(p.dir());
     args.push_str("/main.spc\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(!r.out_has("unused import"), "the gated item uses it");
     assert_eq(r.exit, 0);
 }
@@ -1122,7 +1122,7 @@ fn conformances_use_their_interfaces() {
     );
     let mut args = String::new();
     args.format_into("lint \"{}/main.spc\"", p.dir());
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(!r.out_has("unused interface 'Lane'") && !r.out_has("unused interface 'Twice'"), "conformed interfaces");
     assert(r.out_has("unused interface 'Never'") && r.out_has("unused struct 'Lonely'"), "unused items");
 }
@@ -1140,7 +1140,7 @@ fn const_eval_operator_reads_foreign_provisional_types() {
     );
     let mut args = String::new();
     args.format_into("lint \"{}/main.spc\"", p.dir());
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.ok(), "lint evaluates the constant");
 }
 
@@ -1166,36 +1166,36 @@ fn lint_sets_test_for_the_test_suite() {
     assert_eq(r.exit, 0);
 }
 
-// `lint --migrate`: a qualified variant the bare name resolves and a view method call a `&` argument
-// replaces are warnings whose fixes write the shorter forms; the fixed program means the same.
+// A qualified variant the bare name resolves and a view method call a `&` argument replaces are
+// warnings whose fixes write the shorter forms; the fixed program means the same. A variant whose bare
+// name another binding takes (`Dot`) and a temporary's view (`format(..)`) stay as written.
 @test
-fn migrate_lints_and_fixes() {
+fn shorter_form_lints_and_fixes() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "enum Shape {\n    Circle(i32),\n    Unit,\n}\nfn count(s: str) usize {\n    return s.len();\n}\nfn sh() Shape {\n    return Shape::Circle(2);\n}\nfn main() i32 {\n    let s = String::from_str(\"ab\");\n    let o: Option<i32> = Option::Some(3);\n    return count(s.as_str()) as i32 + o.unwrap() + switch sh() {\n        Circle(c) => c,\n        Unit => 0,\n    } - 7;\n}\n",
+        "enum Shape {\n    Circle(i32),\n    Unit,\n    Dot,\n}\nconst Dot: i32 = 1;\nfn count(s: str) usize {\n    return s.len();\n}\nfn sh() Shape {\n    return Shape::Circle(2);\n}\nfn dot() Shape {\n    return Shape::Dot;\n}\nfn main() i32 {\n    let s = String::from_str(\"ab\");\n    let o: Option<i32> = Option::Some(3);\n    let n = count(format(\"{}\", Dot).as_str());\n    let d = switch dot() {\n        Shape::Dot => 0,\n        _ => 1,\n    };\n    return count(s.as_str()) as i32 + o.unwrap() + n as i32 + d + switch sh() {\n        Circle(c) => c,\n        Unit => 0,\n        Shape::Dot => 1,\n    } - 8;\n}\n",
     );
     let mut mp = String::from_str(p.dir());
     mp.push_str("/main.spc");
-    let mut args = String::from_str("lint --migrate \"");
-    args.push_str(mp.as_str());
+    let mut args = String::from_str("lint \"");
+    args.push_str(&mp);
     args.push_str("\"");
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.out_has("write 'Circle': the variant resolves without its enum here"));
     assert(r.out_has("write 'Some': the variant resolves without its enum here"));
     assert(r.out_has("write '&s': the argument converts to the view it needs"));
-    // Without `--migrate` the forms stay as written.
-    let mut pargs = String::from_str("lint \"");
-    pargs.push_str(mp.as_str());
-    pargs.push_str("\"");
-    assert(!p.run_raw(pargs.as_str()).out_has("resolves without its enum"));
-    let mut fargs = String::from_str("lint --migrate --fix \"");
-    fargs.push_str(mp.as_str());
+    assert(!r.out_has("write 'Dot'"));
+    assert(!r.out_has("write '&format("));
+    let mut fargs = String::from_str("lint --fix \"");
+    fargs.push_str(&mp);
     fargs.push_str("\"");
-    assert(p.run_raw(fargs.as_str()).ok());
-    let fixed = loader::read_file(mp.as_str()).unwrap();
+    assert(p.run_raw(&fargs).ok());
+    let fixed = loader::read_file(&mp).unwrap();
     assert(fixed.as_str().contains("return Circle(2);"));
     assert(fixed.as_str().contains("let o: Option<i32> = Some(3);"));
     assert(fixed.as_str().contains("count(&s)"));
+    assert(fixed.as_str().contains("return Shape::Dot;"));
+    assert(fixed.as_str().contains("count(format(\"{}\", Dot).as_str())"));
     assert(p.compile("main.spc").ok());
 }

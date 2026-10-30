@@ -20,7 +20,7 @@ fn link_record_names_fit_and_differ() {
         deep.push_str("dir/");
     }
     deep.push_str("app");
-    let rec = bsys::link_record("out", deep.as_str());
+    let rec = bsys::link_record("out", &deep);
     assert(rec.as_str().starts_with("out/__link-"), "the record lies in the out-dir");
     assert(rec.len() - 4 < 255, "a 400-byte path gives a name under NAME_MAX");
     let a = bsys::link_record("out", "a/b_c");
@@ -98,7 +98,7 @@ fn a_c_static_library_links_with_the_own_linker() {
     assert(p.c_lib("demo", "a.c b.c"), "the C compiler builds the library");
     let mut m = format("@link(\"-L{} -ldemo\")\n", p.dir());
     m.push_str(AR_MAIN);
-    p.mkfile("main.spc", m.as_str());
+    p.mkfile("main.spc", &m);
     let r = cli::superc_in(p.dir(), "build main.spc -o bin");
     assert(r.ok(), "the own linker links the library");
     assert_eq(p.run_bin(), 0);
@@ -123,7 +123,7 @@ fn a_c_static_library_links_with_the_own_linker() {
         );
         assert(cli::run_with(cmd.cstr(), null, null, null, "") == 0, "clang compiles the member for wasm32");
     }
-    dutil::mkdir_p(w.as_str());
+    dutil::mkdir_p(&w);
     let mut arc = format(
         "\"{}/bin/llvm-ar\" rcs \"{}/libdemo.a\" \"{}/a.o\" \"{}/b.o\"",
         sdk.as_str(),
@@ -134,7 +134,7 @@ fn a_c_static_library_links_with_the_own_linker() {
     assert(cli::run_with(arc.cstr(), null, null, null, "") == 0, "llvm-ar archives them");
     let mut wm = format("@link(\"-L{} -ldemo\")\n", w.as_str());
     wm.push_str(AR_MAIN);
-    p.mkfile("main.spc", wm.as_str());
+    p.mkfile("main.spc", &wm);
     let rw = cli::superc_in(p.dir(), "build main.spc --target=wasm -o bin.wasm");
     assert(rw.ok(), "the own linker links the wasm32 library");
     let mut run = format("wasmtime run \"{}/bin.wasm\"", p.dir());
@@ -204,8 +204,8 @@ fn an_archive_with_imports_stands_for_its_dll() {
     let dir = p.dir();
     let lib_a = ar_of([("helper.o", obj.clone()), ("f.o", imp)]);
     let lib_b = ar_of([("helper.o", obj)]);
-    assert(fs::publish(format("{}/libx.a", dir).as_str(), lib_a.as_slice()).is_ok(), "the import library");
-    assert(fs::publish(format("{}/liby.a", dir).as_str(), lib_b.as_slice()).is_ok(), "the static library");
+    assert(fs::publish(format("{}/libx.a", dir).as_str(), &lib_a).is_ok(), "the import library");
+    assert(fs::publish(format("{}/liby.a", dir).as_str(), &lib_b).is_ok(), "the static library");
     let mut dirs = Vector::<String>::new();
     dirs.push(String::from_str(dir));
     let opts = pe::Opts {
@@ -216,7 +216,7 @@ fn an_archive_with_imports_stands_for_its_dll() {
         dirs: dirs,
         strip: false,
         stack: 0,
-        exports: Option::<Set<String>>::None,
+        exports: None,
     };
     let mut path = String::new();
     assert(!pe::static_lib(&opts, "x", &mut path), "an archive with an import is an import library");
@@ -261,16 +261,16 @@ fn section_garbage_collection_drops_what_nothing_reaches() {
     let full = format("{}/full{}", p.dir(), unsafe str::from_cstr(cli::binext()));
     let gc = format("{}/gc{}", p.dir(), unsafe str::from_cstr(cli::binext()));
     let a = format("build main.spc -O2 -fno-function-sections -fno-data-sections -o \"{}\"", full.as_str());
-    assert(cli::superc_in(p.dir(), a.as_str()).ok(), "the plain build");
+    assert(cli::superc_in(p.dir(), &a).ok(), "the plain build");
     let b = format("build main.spc -O2 -o \"{}\"", gc.as_str());
-    assert(cli::superc_in(p.dir(), b.as_str()).ok(), "the collected build");
-    let fb = loader::read_file(full.as_str()).unwrap();
-    let gb = loader::read_file(gc.as_str()).unwrap();
-    assert(has(fb.as_str(), "gc_inlined_marker"), "the plain build keeps the inlined function's body");
-    assert(!has(gb.as_str(), "gc_inlined_marker"), "the collected build drops it");
-    assert(has(gb.as_str(), "gc_exported_marker"), "an exported function stays");
-    assert(has(gb.as_str(), "gc_used_marker"), "an '@used' variable stays");
-    assert(has(gb.as_str(), "gc_through_table"), "a function a kept table points to stays");
+    assert(cli::superc_in(p.dir(), &b).ok(), "the collected build");
+    let fb = loader::read_file(&full).unwrap();
+    let gb = loader::read_file(&gc).unwrap();
+    assert(has(&fb, "gc_inlined_marker"), "the plain build keeps the inlined function's body");
+    assert(!has(&gb, "gc_inlined_marker"), "the collected build drops it");
+    assert(has(&gb, "gc_exported_marker"), "an exported function stays");
+    assert(has(&gb, "gc_used_marker"), "an '@used' variable stays");
+    assert(has(&gb, "gc_through_table"), "a function a kept table points to stays");
     assert(gb.len() < fb.len(), "the collected build is smaller");
     let mut run = format("\"{}\"", gc.as_str());
     assert_eq(cli::run_with(run.cstr(), null, null, null, ""), 0);
@@ -282,17 +282,17 @@ fn section_garbage_collection_drops_what_nothing_reaches() {
         "build main.spc -O2 -fno-function-sections -fno-data-sections --target=wasm -o \"{}/full.wasm\"",
         p.dir(),
     );
-    assert(cli::superc_in(p.dir(), wa.as_str()).ok(), "the plain wasm build");
+    assert(cli::superc_in(p.dir(), &wa).ok(), "the plain wasm build");
     let wb = format("build main.spc -O2 --target=wasm -o \"{}/gc.wasm\"", p.dir());
-    assert(cli::superc_in(p.dir(), wb.as_str()).ok(), "the collected wasm build");
+    assert(cli::superc_in(p.dir(), &wb).ok(), "the collected wasm build");
     let wfp = format("{}/full.wasm", p.dir());
     let wgp = format("{}/gc.wasm", p.dir());
-    let wf = loader::read_file(wfp.as_str()).unwrap();
-    let wg = loader::read_file(wgp.as_str()).unwrap();
-    assert(has(wf.as_str(), "gc_inlined_marker"), "the plain wasm build keeps the inlined function's body");
-    assert(!has(wg.as_str(), "gc_inlined_marker"), "the collected wasm build drops it");
-    assert(has(wg.as_str(), "gc_exported_marker"), "an exported function stays in wasm");
-    assert(has(wg.as_str(), "gc_through_table"), "a function a kept table points to stays in wasm");
+    let wf = loader::read_file(&wfp).unwrap();
+    let wg = loader::read_file(&wgp).unwrap();
+    assert(has(&wf, "gc_inlined_marker"), "the plain wasm build keeps the inlined function's body");
+    assert(!has(&wg, "gc_inlined_marker"), "the collected wasm build drops it");
+    assert(has(&wg, "gc_exported_marker"), "an exported function stays in wasm");
+    assert(has(&wg, "gc_through_table"), "a function a kept table points to stays in wasm");
     assert(wg.len() < wf.len(), "the collected wasm build is smaller");
     let mut wrun = format("wasmtime run \"{}\"", wgp.as_str());
     assert_eq(cli::run_with(wrun.cstr(), null, null, null, ""), 0);
@@ -320,7 +320,7 @@ fn has(b: str, s: str) bool {
 // program that loads it.
 fn lib_defines(dir: str, name: str) bool {
     let lib = format("{}/build/debug-lib/{}", dir, bsys::lib_file("x", true, tgt::host_os()).as_str());
-    let l = (unsafe dylib::open(lib.as_str())).unwrap();
+    let l = (unsafe dylib::open(&lib)).unwrap();
     return (unsafe l.symbol(name)).is_ok();
 }
 

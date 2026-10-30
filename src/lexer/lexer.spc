@@ -153,50 +153,50 @@ struct Keyword {
 
 const KEYWORD_COUNT: usize = 44;
 const SHORT_KEYWORDS: [Keyword; KEYWORD_COUNT] = [
-    Keyword { text: "as", kind: TokenType::As },
-    Keyword { text: "do", kind: TokenType::Do },
-    Keyword { text: "fn", kind: TokenType::Fn },
-    Keyword { text: "if", kind: TokenType::If },
-    Keyword { text: "in", kind: TokenType::In },
-    Keyword { text: "asm", kind: TokenType::Asm },
-    Keyword { text: "dyn", kind: TokenType::Dyn },
-    Keyword { text: "for", kind: TokenType::For },
-    Keyword { text: "let", kind: TokenType::Let },
-    Keyword { text: "mut", kind: TokenType::Mut },
-    Keyword { text: "pub", kind: TokenType::Pub },
-    Keyword { text: "case", kind: TokenType::Case },
-    Keyword { text: "else", kind: TokenType::Else },
-    Keyword { text: "enum", kind: TokenType::Enum },
-    Keyword { text: "loop", kind: TokenType::Loop },
-    Keyword { text: "move", kind: TokenType::Move },
-    Keyword { text: "null", kind: TokenType::Null },
-    Keyword { text: "self", kind: TokenType::SelfLower },
-    Keyword { text: "Self", kind: TokenType::SelfUpper },
-    Keyword { text: "true", kind: TokenType::True },
-    Keyword { text: "type", kind: TokenType::Type },
-    Keyword { text: "break", kind: TokenType::Break },
-    Keyword { text: "const", kind: TokenType::Const },
-    Keyword { text: "defer", kind: TokenType::Defer },
-    Keyword { text: "false", kind: TokenType::False },
-    Keyword { text: "union", kind: TokenType::Union },
-    Keyword { text: "where", kind: TokenType::Where },
-    Keyword { text: "while", kind: TokenType::While },
-    Keyword { text: "extend", kind: TokenType::Extend },
-    Keyword { text: "extern", kind: TokenType::Extern },
-    Keyword { text: "import", kind: TokenType::Import },
-    Keyword { text: "launch", kind: TokenType::Launch },
-    Keyword { text: "return", kind: TokenType::Return },
-    Keyword { text: "select", kind: TokenType::Select },
-    Keyword { text: "struct", kind: TokenType::Struct },
-    Keyword { text: "static", kind: TokenType::Static },
-    Keyword { text: "switch", kind: TokenType::Switch },
-    Keyword { text: "sizeof", kind: TokenType::Sizeof },
-    Keyword { text: "unsafe", kind: TokenType::Unsafe },
-    Keyword { text: "va_arg", kind: TokenType::VaArg },
-    Keyword { text: "va_end", kind: TokenType::VaEnd },
-    Keyword { text: "alignof", kind: TokenType::Alignof },
-    Keyword { text: "continue", kind: TokenType::Continue },
-    Keyword { text: "va_start", kind: TokenType::VaStart },
+    Keyword { text: "as", kind: As },
+    Keyword { text: "do", kind: Do },
+    Keyword { text: "fn", kind: Fn },
+    Keyword { text: "if", kind: If },
+    Keyword { text: "in", kind: In },
+    Keyword { text: "asm", kind: Asm },
+    Keyword { text: "dyn", kind: Dyn },
+    Keyword { text: "for", kind: For },
+    Keyword { text: "let", kind: Let },
+    Keyword { text: "mut", kind: Mut },
+    Keyword { text: "pub", kind: Pub },
+    Keyword { text: "case", kind: Case },
+    Keyword { text: "else", kind: Else },
+    Keyword { text: "enum", kind: Enum },
+    Keyword { text: "loop", kind: Loop },
+    Keyword { text: "move", kind: Move },
+    Keyword { text: "null", kind: Null },
+    Keyword { text: "self", kind: SelfLower },
+    Keyword { text: "Self", kind: SelfUpper },
+    Keyword { text: "true", kind: True },
+    Keyword { text: "type", kind: Type },
+    Keyword { text: "break", kind: Break },
+    Keyword { text: "const", kind: Const },
+    Keyword { text: "defer", kind: Defer },
+    Keyword { text: "false", kind: False },
+    Keyword { text: "union", kind: Union },
+    Keyword { text: "where", kind: Where },
+    Keyword { text: "while", kind: While },
+    Keyword { text: "extend", kind: Extend },
+    Keyword { text: "extern", kind: Extern },
+    Keyword { text: "import", kind: Import },
+    Keyword { text: "launch", kind: Launch },
+    Keyword { text: "return", kind: Return },
+    Keyword { text: "select", kind: Select },
+    Keyword { text: "struct", kind: Struct },
+    Keyword { text: "static", kind: Static },
+    Keyword { text: "switch", kind: Switch },
+    Keyword { text: "sizeof", kind: Sizeof },
+    Keyword { text: "unsafe", kind: Unsafe },
+    Keyword { text: "va_arg", kind: VaArg },
+    Keyword { text: "va_end", kind: VaEnd },
+    Keyword { text: "alignof", kind: Alignof },
+    Keyword { text: "continue", kind: Continue },
+    Keyword { text: "va_start", kind: VaStart },
 ];
 
 // SHORT_KEYWORDS by a multiply-shift hash of the keyword's word (`word_of`) into 128 slots, so a
@@ -243,7 +243,7 @@ const fn short_keyword(w: u64) TokenType {
     if unsafe KEYWORDS.word[h] == w {
         return unsafe KEYWORDS.kind[h];
     }
-    return TokenType::Identifier;
+    return Identifier;
 }
 
 const fn keywords_collision_free() bool {
@@ -261,12 +261,12 @@ static_assert(keywords_collision_free(), "KW_MUL must map SHORT_KEYWORDS to dist
 // The keyword of `p[..len]` for `len` above 8, or Identifier. Safety: `p` points at `len` bytes.
 const fn long_keyword(p: *const u8, len: usize) TokenType {
     if len == 9 && memeq(p, "interface") {
-        return TokenType::Interface;
+        return Interface;
     }
     if len == 13 && memeq(p, "static_assert") {
-        return TokenType::StaticAssert;
+        return StaticAssert;
     }
-    return TokenType::Identifier;
+    return Identifier;
 }
 
 /// True when `s` is a reserved word: the lexer never scans it as an identifier.
@@ -363,9 +363,9 @@ extend Lexer {
 
     fn add_match(self: &mut Self, expected: u8, matched: TokenType, unmatched: TokenType) {
         let kind = if self.match_byte(expected) {
-            matched;
+            matched
         } else {
-            unmatched;
+            unmatched
         };
         self.add_token(kind);
     }
@@ -495,9 +495,9 @@ extend Lexer {
                 let p = unsafe (self.bytes.ptr() + j);
                 if memeq(p, "for") && (self.class[self.at(j + 3) as usize] & CC_ID_PART) == 0u8 {
                     kind = if inl {
-                        TokenType::InlineFor;
+                        InlineFor
                     } else {
-                        TokenType::ParallelFor;
+                        ParallelFor
                     };
                 }
             }
@@ -823,15 +823,15 @@ extend Lexer {
                 return false;
             }
             let idx = if close {
-                dn - 1 - k;
+                dn - 1 - k
             } else {
-                k;
+                k
             };
             let d = self.at(dpos + idx);
             let want = if close {
-                mt_closer(d);
+                mt_closer(d)
             } else {
-                d;
+                d
             };
             if self.at(at + k) != want {
                 return false;
@@ -863,9 +863,9 @@ extend Lexer {
                     self.current = i + dn;
                     self.add_token(
                         if first {
-                            TokenType::MatchertextBegin;
+                            MatchertextBegin
                         } else {
-                            TokenType::MatchertextMid;
+                            MatchertextMid
                         },
                     );
                     self.mt[fi].hole_depth = 0;
@@ -884,9 +884,9 @@ extend Lexer {
                         }
                         self.add_token(
                             if first {
-                                TokenType::MatchertextLiteral;
+                                MatchertextLiteral
                             } else {
-                                TokenType::MatchertextEnd;
+                                MatchertextEnd
                             },
                         );
                         let _ = self.mt_stack.pop();
@@ -1494,7 +1494,7 @@ extend Lexer {
                     );
                 }
             },
-        };
+        }
     }
 
     /// Scans the whole source into `tokens`, ending with an Eof token spanning (len, 0). Recovers

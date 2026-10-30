@@ -174,9 +174,9 @@ extend Shape {
                         continue;
                     }
                     d = if d == NONE {
-                        p;
+                        p
                     } else {
-                        self.common(d, p);
+                        self.common(d, p)
                     };
                 }
                 if d != self.idom[k] {

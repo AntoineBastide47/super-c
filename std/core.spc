@@ -835,77 +835,77 @@ extend i8 {
     /// The wrapped sum and whether `self + rhs` overflows.
     pub const fn overflowing_add(self: i8, rhs: i8) (i8, bool) {
         let r = self.wrapping_add(rhs);
-        return r, ((self ^ r) & (rhs ^ r)) < 0;
+        return (r, ((self ^ r) & (rhs ^ r)) < 0);
     }
     /// The wrapped difference and whether `self - rhs` overflows.
     pub const fn overflowing_sub(self: i8, rhs: i8) (i8, bool) {
         let r = self.wrapping_sub(rhs);
-        return r, ((self ^ rhs) & (self ^ r)) < 0;
+        return (r, ((self ^ rhs) & (self ^ r)) < 0);
     }
     /// The wrapped product and whether `self * rhs` overflows.
     pub const fn overflowing_mul(self: i8, rhs: i8) (i8, bool) {
         let p = (unsafe sc_wmul64(self as u64, rhs as u64)) as i64; // exact: the operands are narrow
         let r = p as i8;
-        return r, r as i64 != p;
+        return (r, r as i64 != p);
     }
     /// `self + rhs`, or None when it overflows.
     pub const fn checked_add(self: i8, rhs: i8) Option<i8> {
         let (r, o) = self.overflowing_add(rhs);
         if o {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some(r);
+        return Some(r);
     }
     /// `self - rhs`, or None when it overflows.
     pub const fn checked_sub(self: i8, rhs: i8) Option<i8> {
         let (r, o) = self.overflowing_sub(rhs);
         if o {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some(r);
+        return Some(r);
     }
     /// `self * rhs`, or None when it overflows.
     pub const fn checked_mul(self: i8, rhs: i8) Option<i8> {
         let (r, o) = self.overflowing_mul(rhs);
         if o {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`, or None for a zero divisor or MIN / -1.
     pub const fn checked_div(self: i8, rhs: i8) Option<i8> {
         if rhs == 0 || self == -128 && rhs == -1 {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some(self / rhs);
+        return Some(self / rhs);
     }
     /// `self % rhs`, or None for a zero divisor or MIN % -1.
     pub const fn checked_rem(self: i8, rhs: i8) Option<i8> {
         if rhs == 0 || self == -128 && rhs == -1 {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some(self % rhs);
+        return Some(self % rhs);
     }
     /// `-self`, or None for MIN.
     pub const fn checked_neg(self: i8) Option<i8> {
         if self == -128 {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some(self.wrapping_neg());
+        return Some(self.wrapping_neg());
     }
     /// `self << n`, or None when `n` is at least the width.
     pub const fn checked_shl(self: i8, n: u32) Option<i8> {
         if n >= 8 {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some(self.wrapping_shl(n));
+        return Some(self.wrapping_shl(n));
     }
     /// `self >> n`, or None when `n` is at least the width.
     pub const fn checked_shr(self: i8, n: u32) Option<i8> {
         if n >= 8 {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some(self.wrapping_shr(n));
+        return Some(self.wrapping_shr(n));
     }
     /// `self + rhs`, clamped to [MIN, MAX].
     pub const fn saturating_add(self: i8, rhs: i8) i8 {
@@ -1141,52 +1141,52 @@ extend i8 {
     }
     /// `-self` modulo 2^N and whether `self` is MIN.
     pub const fn overflowing_neg(self: i8) (i8, bool) {
-        return self.wrapping_neg(), self == -128;
+        return (self.wrapping_neg(), self == -128);
     }
     /// `self.wrapping_shl(n)` and whether `n` is at least the width.
     pub const fn overflowing_shl(self: i8, n: u32) (i8, bool) {
-        return self.wrapping_shl(n), n >= 8;
+        return (self.wrapping_shl(n), n >= 8);
     }
     /// `self.wrapping_shr(n)` and whether `n` is at least the width.
     pub const fn overflowing_shr(self: i8, n: u32) (i8, bool) {
-        return self.wrapping_shr(n), n >= 8;
+        return (self.wrapping_shr(n), n >= 8);
     }
     /// `self.wrapping_div(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
     pub const fn overflowing_div(self: i8, rhs: i8) (i8, bool) {
         if self == -128 && rhs == -1 {
-            return self, true;
+            return (self, true);
         }
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self.wrapping_rem(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
     pub const fn overflowing_rem(self: i8, rhs: i8) (i8, bool) {
         if rhs == -1 {
-            return 0, self == -128;
+            return (0, self == -128);
         }
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self.wrapping_div_euclid(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
     pub const fn overflowing_div_euclid(self: i8, rhs: i8) (i8, bool) {
         if self == -128 && rhs == -1 {
-            return self, true;
+            return (self, true);
         }
-        return self.div_euclid(rhs), false;
+        return (self.div_euclid(rhs), false);
     }
     /// `self.wrapping_rem_euclid(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
     pub const fn overflowing_rem_euclid(self: i8, rhs: i8) (i8, bool) {
         if rhs == -1 {
-            return 0, self == -128;
+            return (0, self == -128);
         }
-        return self.rem_euclid(rhs), false;
+        return (self.rem_euclid(rhs), false);
     }
     /// `self.wrapping_abs()` and whether `self` is MIN.
     pub const fn overflowing_abs(self: i8) (i8, bool) {
-        return self.wrapping_abs(), self == -128;
+        return (self.wrapping_abs(), self == -128);
     }
     /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
     pub const fn overflowing_pow(self: i8, exp: u32) (i8, bool) {
         if exp == 0 {
-            return 1, false;
+            return (1, false);
         }
         let mut base = self;
         let mut acc: i8 = 1;
@@ -1204,65 +1204,65 @@ extend i8 {
             o = o || so;
         }
         let (r, ro) = acc.overflowing_mul(base);
-        return r, o || ro;
+        return (r, o || ro);
     }
     /// `|self|`, or None for MIN.
     pub const fn checked_abs(self: i8) Option<i8> {
         if self == -128 {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some(self.wrapping_abs());
+        return Some(self.wrapping_abs());
     }
     /// `self` raised to `exp`, or None when it overflows.
     pub const fn checked_pow(self: i8, exp: u32) Option<i8> {
         let (r, o) = self.overflowing_pow(exp);
         if o {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some(r);
+        return Some(r);
     }
     /// The floor of the square root, or None when `self` is negative.
     pub const fn checked_isqrt(self: i8) Option<i8> {
         if self < 0 {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some((self as u8).isqrt() as i8);
+        return Some((self as u8).isqrt() as i8);
     }
     /// The floor of log2(self), or None when `self` is not positive.
     pub const fn checked_ilog2(self: i8) Option<u32> {
         if self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some((self as u8).ilog2());
+        return Some((self as u8).ilog2());
     }
     /// The floor of log10(self), or None when `self` is not positive.
     pub const fn checked_ilog10(self: i8) Option<u32> {
         if self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog10_u64(self as u64));
+        return Some(ilog10_u64(self as u64));
     }
     /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is not
     /// positive.
     pub const fn checked_ilog(self: i8, base: i8) Option<u32> {
         if base < 2 || self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog_u64(self as u64, base as u64));
+        return Some(ilog_u64(self as u64, base as u64));
     }
     /// `self.div_euclid(rhs)`, or None for a zero divisor or MIN / -1.
     pub const fn checked_div_euclid(self: i8, rhs: i8) Option<i8> {
         if rhs == 0 || self == -128 && rhs == -1 {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some(self.div_euclid(rhs));
+        return Some(self.div_euclid(rhs));
     }
     /// `self.rem_euclid(rhs)`, or None for a zero divisor or MIN % -1.
     pub const fn checked_rem_euclid(self: i8, rhs: i8) Option<i8> {
         if rhs == 0 || self == -128 && rhs == -1 {
-            return Option::<i8>::None;
+            return None;
         }
-        return Option::<i8>::Some(self.rem_euclid(rhs));
+        return Some(self.rem_euclid(rhs));
     }
     /// `-self`, with MIN giving MAX.
     pub const fn saturating_neg(self: i8) i8 {
@@ -1393,77 +1393,77 @@ extend i16 {
     /// The wrapped sum and whether `self + rhs` overflows.
     pub const fn overflowing_add(self: i16, rhs: i16) (i16, bool) {
         let r = self.wrapping_add(rhs);
-        return r, ((self ^ r) & (rhs ^ r)) < 0;
+        return (r, ((self ^ r) & (rhs ^ r)) < 0);
     }
     /// The wrapped difference and whether `self - rhs` overflows.
     pub const fn overflowing_sub(self: i16, rhs: i16) (i16, bool) {
         let r = self.wrapping_sub(rhs);
-        return r, ((self ^ rhs) & (self ^ r)) < 0;
+        return (r, ((self ^ rhs) & (self ^ r)) < 0);
     }
     /// The wrapped product and whether `self * rhs` overflows.
     pub const fn overflowing_mul(self: i16, rhs: i16) (i16, bool) {
         let p = (unsafe sc_wmul64(self as u64, rhs as u64)) as i64; // exact: the operands are narrow
         let r = p as i16;
-        return r, r as i64 != p;
+        return (r, r as i64 != p);
     }
     /// `self + rhs`, or None when it overflows.
     pub const fn checked_add(self: i16, rhs: i16) Option<i16> {
         let (r, o) = self.overflowing_add(rhs);
         if o {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some(r);
+        return Some(r);
     }
     /// `self - rhs`, or None when it overflows.
     pub const fn checked_sub(self: i16, rhs: i16) Option<i16> {
         let (r, o) = self.overflowing_sub(rhs);
         if o {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some(r);
+        return Some(r);
     }
     /// `self * rhs`, or None when it overflows.
     pub const fn checked_mul(self: i16, rhs: i16) Option<i16> {
         let (r, o) = self.overflowing_mul(rhs);
         if o {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`, or None for a zero divisor or MIN / -1.
     pub const fn checked_div(self: i16, rhs: i16) Option<i16> {
         if rhs == 0 || self == -32768 && rhs == -1 {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some(self / rhs);
+        return Some(self / rhs);
     }
     /// `self % rhs`, or None for a zero divisor or MIN % -1.
     pub const fn checked_rem(self: i16, rhs: i16) Option<i16> {
         if rhs == 0 || self == -32768 && rhs == -1 {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some(self % rhs);
+        return Some(self % rhs);
     }
     /// `-self`, or None for MIN.
     pub const fn checked_neg(self: i16) Option<i16> {
         if self == -32768 {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some(self.wrapping_neg());
+        return Some(self.wrapping_neg());
     }
     /// `self << n`, or None when `n` is at least the width.
     pub const fn checked_shl(self: i16, n: u32) Option<i16> {
         if n >= 16 {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some(self.wrapping_shl(n));
+        return Some(self.wrapping_shl(n));
     }
     /// `self >> n`, or None when `n` is at least the width.
     pub const fn checked_shr(self: i16, n: u32) Option<i16> {
         if n >= 16 {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some(self.wrapping_shr(n));
+        return Some(self.wrapping_shr(n));
     }
     /// `self + rhs`, clamped to [MIN, MAX].
     pub const fn saturating_add(self: i16, rhs: i16) i16 {
@@ -1699,52 +1699,52 @@ extend i16 {
     }
     /// `-self` modulo 2^N and whether `self` is MIN.
     pub const fn overflowing_neg(self: i16) (i16, bool) {
-        return self.wrapping_neg(), self == -32768;
+        return (self.wrapping_neg(), self == -32768);
     }
     /// `self.wrapping_shl(n)` and whether `n` is at least the width.
     pub const fn overflowing_shl(self: i16, n: u32) (i16, bool) {
-        return self.wrapping_shl(n), n >= 16;
+        return (self.wrapping_shl(n), n >= 16);
     }
     /// `self.wrapping_shr(n)` and whether `n` is at least the width.
     pub const fn overflowing_shr(self: i16, n: u32) (i16, bool) {
-        return self.wrapping_shr(n), n >= 16;
+        return (self.wrapping_shr(n), n >= 16);
     }
     /// `self.wrapping_div(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
     pub const fn overflowing_div(self: i16, rhs: i16) (i16, bool) {
         if self == -32768 && rhs == -1 {
-            return self, true;
+            return (self, true);
         }
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self.wrapping_rem(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
     pub const fn overflowing_rem(self: i16, rhs: i16) (i16, bool) {
         if rhs == -1 {
-            return 0, self == -32768;
+            return (0, self == -32768);
         }
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self.wrapping_div_euclid(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
     pub const fn overflowing_div_euclid(self: i16, rhs: i16) (i16, bool) {
         if self == -32768 && rhs == -1 {
-            return self, true;
+            return (self, true);
         }
-        return self.div_euclid(rhs), false;
+        return (self.div_euclid(rhs), false);
     }
     /// `self.wrapping_rem_euclid(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
     pub const fn overflowing_rem_euclid(self: i16, rhs: i16) (i16, bool) {
         if rhs == -1 {
-            return 0, self == -32768;
+            return (0, self == -32768);
         }
-        return self.rem_euclid(rhs), false;
+        return (self.rem_euclid(rhs), false);
     }
     /// `self.wrapping_abs()` and whether `self` is MIN.
     pub const fn overflowing_abs(self: i16) (i16, bool) {
-        return self.wrapping_abs(), self == -32768;
+        return (self.wrapping_abs(), self == -32768);
     }
     /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
     pub const fn overflowing_pow(self: i16, exp: u32) (i16, bool) {
         if exp == 0 {
-            return 1, false;
+            return (1, false);
         }
         let mut base = self;
         let mut acc: i16 = 1;
@@ -1762,65 +1762,65 @@ extend i16 {
             o = o || so;
         }
         let (r, ro) = acc.overflowing_mul(base);
-        return r, o || ro;
+        return (r, o || ro);
     }
     /// `|self|`, or None for MIN.
     pub const fn checked_abs(self: i16) Option<i16> {
         if self == -32768 {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some(self.wrapping_abs());
+        return Some(self.wrapping_abs());
     }
     /// `self` raised to `exp`, or None when it overflows.
     pub const fn checked_pow(self: i16, exp: u32) Option<i16> {
         let (r, o) = self.overflowing_pow(exp);
         if o {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some(r);
+        return Some(r);
     }
     /// The floor of the square root, or None when `self` is negative.
     pub const fn checked_isqrt(self: i16) Option<i16> {
         if self < 0 {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some((self as u16).isqrt() as i16);
+        return Some((self as u16).isqrt() as i16);
     }
     /// The floor of log2(self), or None when `self` is not positive.
     pub const fn checked_ilog2(self: i16) Option<u32> {
         if self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some((self as u16).ilog2());
+        return Some((self as u16).ilog2());
     }
     /// The floor of log10(self), or None when `self` is not positive.
     pub const fn checked_ilog10(self: i16) Option<u32> {
         if self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog10_u64(self as u64));
+        return Some(ilog10_u64(self as u64));
     }
     /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is not
     /// positive.
     pub const fn checked_ilog(self: i16, base: i16) Option<u32> {
         if base < 2 || self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog_u64(self as u64, base as u64));
+        return Some(ilog_u64(self as u64, base as u64));
     }
     /// `self.div_euclid(rhs)`, or None for a zero divisor or MIN / -1.
     pub const fn checked_div_euclid(self: i16, rhs: i16) Option<i16> {
         if rhs == 0 || self == -32768 && rhs == -1 {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some(self.div_euclid(rhs));
+        return Some(self.div_euclid(rhs));
     }
     /// `self.rem_euclid(rhs)`, or None for a zero divisor or MIN % -1.
     pub const fn checked_rem_euclid(self: i16, rhs: i16) Option<i16> {
         if rhs == 0 || self == -32768 && rhs == -1 {
-            return Option::<i16>::None;
+            return None;
         }
-        return Option::<i16>::Some(self.rem_euclid(rhs));
+        return Some(self.rem_euclid(rhs));
     }
     /// `-self`, with MIN giving MAX.
     pub const fn saturating_neg(self: i16) i16 {
@@ -1951,77 +1951,77 @@ extend i32 {
     /// The wrapped sum and whether `self + rhs` overflows.
     pub const fn overflowing_add(self: i32, rhs: i32) (i32, bool) {
         let r = self.wrapping_add(rhs);
-        return r, ((self ^ r) & (rhs ^ r)) < 0;
+        return (r, ((self ^ r) & (rhs ^ r)) < 0);
     }
     /// The wrapped difference and whether `self - rhs` overflows.
     pub const fn overflowing_sub(self: i32, rhs: i32) (i32, bool) {
         let r = self.wrapping_sub(rhs);
-        return r, ((self ^ rhs) & (self ^ r)) < 0;
+        return (r, ((self ^ rhs) & (self ^ r)) < 0);
     }
     /// The wrapped product and whether `self * rhs` overflows.
     pub const fn overflowing_mul(self: i32, rhs: i32) (i32, bool) {
         let p = (unsafe sc_wmul64(self as u64, rhs as u64)) as i64; // exact: the operands are narrow
         let r = p as i32;
-        return r, r as i64 != p;
+        return (r, r as i64 != p);
     }
     /// `self + rhs`, or None when it overflows.
     pub const fn checked_add(self: i32, rhs: i32) Option<i32> {
         let (r, o) = self.overflowing_add(rhs);
         if o {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(r);
+        return Some(r);
     }
     /// `self - rhs`, or None when it overflows.
     pub const fn checked_sub(self: i32, rhs: i32) Option<i32> {
         let (r, o) = self.overflowing_sub(rhs);
         if o {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(r);
+        return Some(r);
     }
     /// `self * rhs`, or None when it overflows.
     pub const fn checked_mul(self: i32, rhs: i32) Option<i32> {
         let (r, o) = self.overflowing_mul(rhs);
         if o {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`, or None for a zero divisor or MIN / -1.
     pub const fn checked_div(self: i32, rhs: i32) Option<i32> {
         if rhs == 0 || self == -2147483648 && rhs == -1 {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(self / rhs);
+        return Some(self / rhs);
     }
     /// `self % rhs`, or None for a zero divisor or MIN % -1.
     pub const fn checked_rem(self: i32, rhs: i32) Option<i32> {
         if rhs == 0 || self == -2147483648 && rhs == -1 {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(self % rhs);
+        return Some(self % rhs);
     }
     /// `-self`, or None for MIN.
     pub const fn checked_neg(self: i32) Option<i32> {
         if self == -2147483648 {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(self.wrapping_neg());
+        return Some(self.wrapping_neg());
     }
     /// `self << n`, or None when `n` is at least the width.
     pub const fn checked_shl(self: i32, n: u32) Option<i32> {
         if n >= 32 {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(self.wrapping_shl(n));
+        return Some(self.wrapping_shl(n));
     }
     /// `self >> n`, or None when `n` is at least the width.
     pub const fn checked_shr(self: i32, n: u32) Option<i32> {
         if n >= 32 {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(self.wrapping_shr(n));
+        return Some(self.wrapping_shr(n));
     }
     /// `self + rhs`, clamped to [MIN, MAX].
     pub const fn saturating_add(self: i32, rhs: i32) i32 {
@@ -2257,52 +2257,52 @@ extend i32 {
     }
     /// `-self` modulo 2^N and whether `self` is MIN.
     pub const fn overflowing_neg(self: i32) (i32, bool) {
-        return self.wrapping_neg(), self == -2147483648;
+        return (self.wrapping_neg(), self == -2147483648);
     }
     /// `self.wrapping_shl(n)` and whether `n` is at least the width.
     pub const fn overflowing_shl(self: i32, n: u32) (i32, bool) {
-        return self.wrapping_shl(n), n >= 32;
+        return (self.wrapping_shl(n), n >= 32);
     }
     /// `self.wrapping_shr(n)` and whether `n` is at least the width.
     pub const fn overflowing_shr(self: i32, n: u32) (i32, bool) {
-        return self.wrapping_shr(n), n >= 32;
+        return (self.wrapping_shr(n), n >= 32);
     }
     /// `self.wrapping_div(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
     pub const fn overflowing_div(self: i32, rhs: i32) (i32, bool) {
         if self == -2147483648 && rhs == -1 {
-            return self, true;
+            return (self, true);
         }
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self.wrapping_rem(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
     pub const fn overflowing_rem(self: i32, rhs: i32) (i32, bool) {
         if rhs == -1 {
-            return 0, self == -2147483648;
+            return (0, self == -2147483648);
         }
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self.wrapping_div_euclid(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
     pub const fn overflowing_div_euclid(self: i32, rhs: i32) (i32, bool) {
         if self == -2147483648 && rhs == -1 {
-            return self, true;
+            return (self, true);
         }
-        return self.div_euclid(rhs), false;
+        return (self.div_euclid(rhs), false);
     }
     /// `self.wrapping_rem_euclid(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
     pub const fn overflowing_rem_euclid(self: i32, rhs: i32) (i32, bool) {
         if rhs == -1 {
-            return 0, self == -2147483648;
+            return (0, self == -2147483648);
         }
-        return self.rem_euclid(rhs), false;
+        return (self.rem_euclid(rhs), false);
     }
     /// `self.wrapping_abs()` and whether `self` is MIN.
     pub const fn overflowing_abs(self: i32) (i32, bool) {
-        return self.wrapping_abs(), self == -2147483648;
+        return (self.wrapping_abs(), self == -2147483648);
     }
     /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
     pub const fn overflowing_pow(self: i32, exp: u32) (i32, bool) {
         if exp == 0 {
-            return 1, false;
+            return (1, false);
         }
         let mut base = self;
         let mut acc: i32 = 1;
@@ -2320,65 +2320,65 @@ extend i32 {
             o = o || so;
         }
         let (r, ro) = acc.overflowing_mul(base);
-        return r, o || ro;
+        return (r, o || ro);
     }
     /// `|self|`, or None for MIN.
     pub const fn checked_abs(self: i32) Option<i32> {
         if self == -2147483648 {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(self.wrapping_abs());
+        return Some(self.wrapping_abs());
     }
     /// `self` raised to `exp`, or None when it overflows.
     pub const fn checked_pow(self: i32, exp: u32) Option<i32> {
         let (r, o) = self.overflowing_pow(exp);
         if o {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(r);
+        return Some(r);
     }
     /// The floor of the square root, or None when `self` is negative.
     pub const fn checked_isqrt(self: i32) Option<i32> {
         if self < 0 {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some((self as u32).isqrt() as i32);
+        return Some((self as u32).isqrt() as i32);
     }
     /// The floor of log2(self), or None when `self` is not positive.
     pub const fn checked_ilog2(self: i32) Option<u32> {
         if self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some((self as u32).ilog2());
+        return Some((self as u32).ilog2());
     }
     /// The floor of log10(self), or None when `self` is not positive.
     pub const fn checked_ilog10(self: i32) Option<u32> {
         if self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog10_u64(self as u64));
+        return Some(ilog10_u64(self as u64));
     }
     /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is not
     /// positive.
     pub const fn checked_ilog(self: i32, base: i32) Option<u32> {
         if base < 2 || self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog_u64(self as u64, base as u64));
+        return Some(ilog_u64(self as u64, base as u64));
     }
     /// `self.div_euclid(rhs)`, or None for a zero divisor or MIN / -1.
     pub const fn checked_div_euclid(self: i32, rhs: i32) Option<i32> {
         if rhs == 0 || self == -2147483648 && rhs == -1 {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(self.div_euclid(rhs));
+        return Some(self.div_euclid(rhs));
     }
     /// `self.rem_euclid(rhs)`, or None for a zero divisor or MIN % -1.
     pub const fn checked_rem_euclid(self: i32, rhs: i32) Option<i32> {
         if rhs == 0 || self == -2147483648 && rhs == -1 {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(self.rem_euclid(rhs));
+        return Some(self.rem_euclid(rhs));
     }
     /// `-self`, with MIN giving MAX.
     pub const fn saturating_neg(self: i32) i32 {
@@ -2509,75 +2509,75 @@ extend i64 {
     /// The wrapped sum and whether `self + rhs` overflows.
     pub const fn overflowing_add(self: i64, rhs: i64) (i64, bool) {
         let r = self.wrapping_add(rhs);
-        return r, ((self ^ r) & (rhs ^ r)) < 0;
+        return (r, ((self ^ r) & (rhs ^ r)) < 0);
     }
     /// The wrapped difference and whether `self - rhs` overflows.
     pub const fn overflowing_sub(self: i64, rhs: i64) (i64, bool) {
         let r = self.wrapping_sub(rhs);
-        return r, ((self ^ rhs) & (self ^ r)) < 0;
+        return (r, ((self ^ rhs) & (self ^ r)) < 0);
     }
     /// The wrapped product and whether `self * rhs` overflows.
     pub const fn overflowing_mul(self: i64, rhs: i64) (i64, bool) {
-        return self.wrapping_mul(rhs), unsafe sc_mulo_i64(self, rhs);
+        return (self.wrapping_mul(rhs), unsafe sc_mulo_i64(self, rhs));
     }
     /// `self + rhs`, or None when it overflows.
     pub const fn checked_add(self: i64, rhs: i64) Option<i64> {
         let (r, o) = self.overflowing_add(rhs);
         if o {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some(r);
+        return Some(r);
     }
     /// `self - rhs`, or None when it overflows.
     pub const fn checked_sub(self: i64, rhs: i64) Option<i64> {
         let (r, o) = self.overflowing_sub(rhs);
         if o {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some(r);
+        return Some(r);
     }
     /// `self * rhs`, or None when it overflows.
     pub const fn checked_mul(self: i64, rhs: i64) Option<i64> {
         let (r, o) = self.overflowing_mul(rhs);
         if o {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`, or None for a zero divisor or MIN / -1.
     pub const fn checked_div(self: i64, rhs: i64) Option<i64> {
         if rhs == 0 || self == -9223372036854775807 - 1 && rhs == -1 {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some(self / rhs);
+        return Some(self / rhs);
     }
     /// `self % rhs`, or None for a zero divisor or MIN % -1.
     pub const fn checked_rem(self: i64, rhs: i64) Option<i64> {
         if rhs == 0 || self == -9223372036854775807 - 1 && rhs == -1 {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some(self % rhs);
+        return Some(self % rhs);
     }
     /// `-self`, or None for MIN.
     pub const fn checked_neg(self: i64) Option<i64> {
         if self == -9223372036854775807 - 1 {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some(self.wrapping_neg());
+        return Some(self.wrapping_neg());
     }
     /// `self << n`, or None when `n` is at least the width.
     pub const fn checked_shl(self: i64, n: u32) Option<i64> {
         if n >= 64 {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some(self.wrapping_shl(n));
+        return Some(self.wrapping_shl(n));
     }
     /// `self >> n`, or None when `n` is at least the width.
     pub const fn checked_shr(self: i64, n: u32) Option<i64> {
         if n >= 64 {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some(self.wrapping_shr(n));
+        return Some(self.wrapping_shr(n));
     }
     /// `self + rhs`, clamped to [MIN, MAX].
     pub const fn saturating_add(self: i64, rhs: i64) i64 {
@@ -2813,52 +2813,52 @@ extend i64 {
     }
     /// `-self` modulo 2^N and whether `self` is MIN.
     pub const fn overflowing_neg(self: i64) (i64, bool) {
-        return self.wrapping_neg(), self == -9223372036854775807 - 1;
+        return (self.wrapping_neg(), self == -9223372036854775807 - 1);
     }
     /// `self.wrapping_shl(n)` and whether `n` is at least the width.
     pub const fn overflowing_shl(self: i64, n: u32) (i64, bool) {
-        return self.wrapping_shl(n), n >= 64;
+        return (self.wrapping_shl(n), n >= 64);
     }
     /// `self.wrapping_shr(n)` and whether `n` is at least the width.
     pub const fn overflowing_shr(self: i64, n: u32) (i64, bool) {
-        return self.wrapping_shr(n), n >= 64;
+        return (self.wrapping_shr(n), n >= 64);
     }
     /// `self.wrapping_div(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
     pub const fn overflowing_div(self: i64, rhs: i64) (i64, bool) {
         if self == -9223372036854775807 - 1 && rhs == -1 {
-            return self, true;
+            return (self, true);
         }
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self.wrapping_rem(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
     pub const fn overflowing_rem(self: i64, rhs: i64) (i64, bool) {
         if rhs == -1 {
-            return 0, self == -9223372036854775807 - 1;
+            return (0, self == -9223372036854775807 - 1);
         }
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self.wrapping_div_euclid(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
     pub const fn overflowing_div_euclid(self: i64, rhs: i64) (i64, bool) {
         if self == -9223372036854775807 - 1 && rhs == -1 {
-            return self, true;
+            return (self, true);
         }
-        return self.div_euclid(rhs), false;
+        return (self.div_euclid(rhs), false);
     }
     /// `self.wrapping_rem_euclid(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
     pub const fn overflowing_rem_euclid(self: i64, rhs: i64) (i64, bool) {
         if rhs == -1 {
-            return 0, self == -9223372036854775807 - 1;
+            return (0, self == -9223372036854775807 - 1);
         }
-        return self.rem_euclid(rhs), false;
+        return (self.rem_euclid(rhs), false);
     }
     /// `self.wrapping_abs()` and whether `self` is MIN.
     pub const fn overflowing_abs(self: i64) (i64, bool) {
-        return self.wrapping_abs(), self == -9223372036854775807 - 1;
+        return (self.wrapping_abs(), self == -9223372036854775807 - 1);
     }
     /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
     pub const fn overflowing_pow(self: i64, exp: u32) (i64, bool) {
         if exp == 0 {
-            return 1, false;
+            return (1, false);
         }
         let mut base = self;
         let mut acc: i64 = 1;
@@ -2876,65 +2876,65 @@ extend i64 {
             o = o || so;
         }
         let (r, ro) = acc.overflowing_mul(base);
-        return r, o || ro;
+        return (r, o || ro);
     }
     /// `|self|`, or None for MIN.
     pub const fn checked_abs(self: i64) Option<i64> {
         if self == -9223372036854775807 - 1 {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some(self.wrapping_abs());
+        return Some(self.wrapping_abs());
     }
     /// `self` raised to `exp`, or None when it overflows.
     pub const fn checked_pow(self: i64, exp: u32) Option<i64> {
         let (r, o) = self.overflowing_pow(exp);
         if o {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some(r);
+        return Some(r);
     }
     /// The floor of the square root, or None when `self` is negative.
     pub const fn checked_isqrt(self: i64) Option<i64> {
         if self < 0 {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some((self as u64).isqrt() as i64);
+        return Some((self as u64).isqrt() as i64);
     }
     /// The floor of log2(self), or None when `self` is not positive.
     pub const fn checked_ilog2(self: i64) Option<u32> {
         if self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some((self as u64).ilog2());
+        return Some((self as u64).ilog2());
     }
     /// The floor of log10(self), or None when `self` is not positive.
     pub const fn checked_ilog10(self: i64) Option<u32> {
         if self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog10_u64(self as u64));
+        return Some(ilog10_u64(self as u64));
     }
     /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is not
     /// positive.
     pub const fn checked_ilog(self: i64, base: i64) Option<u32> {
         if base < 2 || self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog_u64(self as u64, base as u64));
+        return Some(ilog_u64(self as u64, base as u64));
     }
     /// `self.div_euclid(rhs)`, or None for a zero divisor or MIN / -1.
     pub const fn checked_div_euclid(self: i64, rhs: i64) Option<i64> {
         if rhs == 0 || self == -9223372036854775807 - 1 && rhs == -1 {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some(self.div_euclid(rhs));
+        return Some(self.div_euclid(rhs));
     }
     /// `self.rem_euclid(rhs)`, or None for a zero divisor or MIN % -1.
     pub const fn checked_rem_euclid(self: i64, rhs: i64) Option<i64> {
         if rhs == 0 || self == -9223372036854775807 - 1 && rhs == -1 {
-            return Option::<i64>::None;
+            return None;
         }
-        return Option::<i64>::Some(self.rem_euclid(rhs));
+        return Some(self.rem_euclid(rhs));
     }
     /// `-self`, with MIN giving MAX.
     pub const fn saturating_neg(self: i64) i64 {
@@ -3065,77 +3065,77 @@ extend isize {
     /// The wrapped sum and whether `self + rhs` overflows.
     pub const fn overflowing_add(self: isize, rhs: isize) (isize, bool) {
         let r = self.wrapping_add(rhs);
-        return r, ((self ^ r) & (rhs ^ r)) < 0;
+        return (r, ((self ^ r) & (rhs ^ r)) < 0);
     }
     /// The wrapped difference and whether `self - rhs` overflows.
     pub const fn overflowing_sub(self: isize, rhs: isize) (isize, bool) {
         let r = self.wrapping_sub(rhs);
-        return r, ((self ^ rhs) & (self ^ r)) < 0;
+        return (r, ((self ^ rhs) & (self ^ r)) < 0);
     }
     /// The wrapped product and whether `self * rhs` overflows.
     pub const fn overflowing_mul(self: isize, rhs: isize) (isize, bool) {
         let p = (unsafe sc_wmul64(self as u64, rhs as u64)) as i64;
         let r = p as isize;
-        return r, unsafe sc_mulo_i64(self as i64, rhs as i64) || r as i64 != p;
+        return (r, unsafe sc_mulo_i64(self as i64, rhs as i64) || r as i64 != p);
     }
     /// `self + rhs`, or None when it overflows.
     pub const fn checked_add(self: isize, rhs: isize) Option<isize> {
         let (r, o) = self.overflowing_add(rhs);
         if o {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some(r);
+        return Some(r);
     }
     /// `self - rhs`, or None when it overflows.
     pub const fn checked_sub(self: isize, rhs: isize) Option<isize> {
         let (r, o) = self.overflowing_sub(rhs);
         if o {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some(r);
+        return Some(r);
     }
     /// `self * rhs`, or None when it overflows.
     pub const fn checked_mul(self: isize, rhs: isize) Option<isize> {
         let (r, o) = self.overflowing_mul(rhs);
         if o {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`, or None for a zero divisor or MIN / -1.
     pub const fn checked_div(self: isize, rhs: isize) Option<isize> {
         if rhs == 0 || self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some(self / rhs);
+        return Some(self / rhs);
     }
     /// `self % rhs`, or None for a zero divisor or MIN % -1.
     pub const fn checked_rem(self: isize, rhs: isize) Option<isize> {
         if rhs == 0 || self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some(self % rhs);
+        return Some(self % rhs);
     }
     /// `-self`, or None for MIN.
     pub const fn checked_neg(self: isize) Option<isize> {
         if self == -((~0usize >> 1) as isize) - 1 {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some(self.wrapping_neg());
+        return Some(self.wrapping_neg());
     }
     /// `self << n`, or None when `n` is at least the width.
     pub const fn checked_shl(self: isize, n: u32) Option<isize> {
         if n >= sizeof(isize) as u32 * 8 {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some(self.wrapping_shl(n));
+        return Some(self.wrapping_shl(n));
     }
     /// `self >> n`, or None when `n` is at least the width.
     pub const fn checked_shr(self: isize, n: u32) Option<isize> {
         if n >= sizeof(isize) as u32 * 8 {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some(self.wrapping_shr(n));
+        return Some(self.wrapping_shr(n));
     }
     /// `self + rhs`, clamped to [MIN, MAX].
     pub const fn saturating_add(self: isize, rhs: isize) isize {
@@ -3395,52 +3395,52 @@ extend isize {
     }
     /// `-self` modulo 2^N and whether `self` is MIN.
     pub const fn overflowing_neg(self: isize) (isize, bool) {
-        return self.wrapping_neg(), self == -((~0usize >> 1) as isize) - 1;
+        return (self.wrapping_neg(), self == -((~0usize >> 1) as isize) - 1);
     }
     /// `self.wrapping_shl(n)` and whether `n` is at least the width.
     pub const fn overflowing_shl(self: isize, n: u32) (isize, bool) {
-        return self.wrapping_shl(n), n >= sizeof(usize) as u32 * 8;
+        return (self.wrapping_shl(n), n >= sizeof(usize) as u32 * 8);
     }
     /// `self.wrapping_shr(n)` and whether `n` is at least the width.
     pub const fn overflowing_shr(self: isize, n: u32) (isize, bool) {
-        return self.wrapping_shr(n), n >= sizeof(usize) as u32 * 8;
+        return (self.wrapping_shr(n), n >= sizeof(usize) as u32 * 8);
     }
     /// `self.wrapping_div(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
     pub const fn overflowing_div(self: isize, rhs: isize) (isize, bool) {
         if self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
-            return self, true;
+            return (self, true);
         }
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self.wrapping_rem(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
     pub const fn overflowing_rem(self: isize, rhs: isize) (isize, bool) {
         if rhs == -1 {
-            return 0, self == -((~0usize >> 1) as isize) - 1;
+            return (0, self == -((~0usize >> 1) as isize) - 1);
         }
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self.wrapping_div_euclid(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
     pub const fn overflowing_div_euclid(self: isize, rhs: isize) (isize, bool) {
         if self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
-            return self, true;
+            return (self, true);
         }
-        return self.div_euclid(rhs), false;
+        return (self.div_euclid(rhs), false);
     }
     /// `self.wrapping_rem_euclid(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
     pub const fn overflowing_rem_euclid(self: isize, rhs: isize) (isize, bool) {
         if rhs == -1 {
-            return 0, self == -((~0usize >> 1) as isize) - 1;
+            return (0, self == -((~0usize >> 1) as isize) - 1);
         }
-        return self.rem_euclid(rhs), false;
+        return (self.rem_euclid(rhs), false);
     }
     /// `self.wrapping_abs()` and whether `self` is MIN.
     pub const fn overflowing_abs(self: isize) (isize, bool) {
-        return self.wrapping_abs(), self == -((~0usize >> 1) as isize) - 1;
+        return (self.wrapping_abs(), self == -((~0usize >> 1) as isize) - 1);
     }
     /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
     pub const fn overflowing_pow(self: isize, exp: u32) (isize, bool) {
         if exp == 0 {
-            return 1, false;
+            return (1, false);
         }
         let mut base = self;
         let mut acc: isize = 1;
@@ -3458,65 +3458,65 @@ extend isize {
             o = o || so;
         }
         let (r, ro) = acc.overflowing_mul(base);
-        return r, o || ro;
+        return (r, o || ro);
     }
     /// `|self|`, or None for MIN.
     pub const fn checked_abs(self: isize) Option<isize> {
         if self == -((~0usize >> 1) as isize) - 1 {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some(self.wrapping_abs());
+        return Some(self.wrapping_abs());
     }
     /// `self` raised to `exp`, or None when it overflows.
     pub const fn checked_pow(self: isize, exp: u32) Option<isize> {
         let (r, o) = self.overflowing_pow(exp);
         if o {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some(r);
+        return Some(r);
     }
     /// The floor of the square root, or None when `self` is negative.
     pub const fn checked_isqrt(self: isize) Option<isize> {
         if self < 0 {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some((self as usize).isqrt() as isize);
+        return Some((self as usize).isqrt() as isize);
     }
     /// The floor of log2(self), or None when `self` is not positive.
     pub const fn checked_ilog2(self: isize) Option<u32> {
         if self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some((self as usize).ilog2());
+        return Some((self as usize).ilog2());
     }
     /// The floor of log10(self), or None when `self` is not positive.
     pub const fn checked_ilog10(self: isize) Option<u32> {
         if self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog10_u64(self as u64));
+        return Some(ilog10_u64(self as u64));
     }
     /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is not
     /// positive.
     pub const fn checked_ilog(self: isize, base: isize) Option<u32> {
         if base < 2 || self <= 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog_u64(self as u64, base as u64));
+        return Some(ilog_u64(self as u64, base as u64));
     }
     /// `self.div_euclid(rhs)`, or None for a zero divisor or MIN / -1.
     pub const fn checked_div_euclid(self: isize, rhs: isize) Option<isize> {
         if rhs == 0 || self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some(self.div_euclid(rhs));
+        return Some(self.div_euclid(rhs));
     }
     /// `self.rem_euclid(rhs)`, or None for a zero divisor or MIN % -1.
     pub const fn checked_rem_euclid(self: isize, rhs: isize) Option<isize> {
         if rhs == 0 || self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
-            return Option::<isize>::None;
+            return None;
         }
-        return Option::<isize>::Some(self.rem_euclid(rhs));
+        return Some(self.rem_euclid(rhs));
     }
     /// `-self`, with MIN giving MAX.
     pub const fn saturating_neg(self: isize) isize {
@@ -3626,75 +3626,75 @@ extend u8 {
     /// The wrapped sum and whether `self + rhs` overflows.
     pub const fn overflowing_add(self: u8, rhs: u8) (u8, bool) {
         let r = self.wrapping_add(rhs);
-        return r, r < self;
+        return (r, r < self);
     }
     /// The wrapped difference and whether `self - rhs` overflows.
     pub const fn overflowing_sub(self: u8, rhs: u8) (u8, bool) {
-        return self.wrapping_sub(rhs), rhs > self;
+        return (self.wrapping_sub(rhs), rhs > self);
     }
     /// The wrapped product and whether `self * rhs` overflows.
     pub const fn overflowing_mul(self: u8, rhs: u8) (u8, bool) {
         let p = unsafe sc_wmul64(self, rhs); // exact: the operands are narrow
-        return p as u8, p > 255;
+        return (p as u8, p > 255);
     }
     /// `self + rhs`, or None when it overflows.
     pub const fn checked_add(self: u8, rhs: u8) Option<u8> {
         let (r, o) = self.overflowing_add(rhs);
         if o {
-            return Option::<u8>::None;
+            return None;
         }
-        return Option::<u8>::Some(r);
+        return Some(r);
     }
     /// `self - rhs`, or None when it overflows.
     pub const fn checked_sub(self: u8, rhs: u8) Option<u8> {
         let (r, o) = self.overflowing_sub(rhs);
         if o {
-            return Option::<u8>::None;
+            return None;
         }
-        return Option::<u8>::Some(r);
+        return Some(r);
     }
     /// `self * rhs`, or None when it overflows.
     pub const fn checked_mul(self: u8, rhs: u8) Option<u8> {
         let (r, o) = self.overflowing_mul(rhs);
         if o {
-            return Option::<u8>::None;
+            return None;
         }
-        return Option::<u8>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`, or None for a zero divisor.
     pub const fn checked_div(self: u8, rhs: u8) Option<u8> {
         if rhs == 0 {
-            return Option::<u8>::None;
+            return None;
         }
-        return Option::<u8>::Some(self / rhs);
+        return Some(self / rhs);
     }
     /// `self % rhs`, or None for a zero divisor.
     pub const fn checked_rem(self: u8, rhs: u8) Option<u8> {
         if rhs == 0 {
-            return Option::<u8>::None;
+            return None;
         }
-        return Option::<u8>::Some(self % rhs);
+        return Some(self % rhs);
     }
     /// `-self`, or None unless `self` is 0.
     pub const fn checked_neg(self: u8) Option<u8> {
         if self != 0 {
-            return Option::<u8>::None;
+            return None;
         }
-        return Option::<u8>::Some(0);
+        return Some(0);
     }
     /// `self << n`, or None when `n` is at least the width.
     pub const fn checked_shl(self: u8, n: u32) Option<u8> {
         if n >= 8 {
-            return Option::<u8>::None;
+            return None;
         }
-        return Option::<u8>::Some(self.wrapping_shl(n));
+        return Some(self.wrapping_shl(n));
     }
     /// `self >> n`, or None when `n` is at least the width.
     pub const fn checked_shr(self: u8, n: u32) Option<u8> {
         if n >= 8 {
-            return Option::<u8>::None;
+            return None;
         }
-        return Option::<u8>::Some(self.wrapping_shr(n));
+        return Some(self.wrapping_shr(n));
     }
     /// `self + rhs`, clamped to MAX.
     pub const fn saturating_add(self: u8, rhs: u8) u8 {
@@ -3818,7 +3818,7 @@ extend u8 {
     /// The smallest power of two not below `self` (1 for 0), or None when it does not fit.
     pub const fn checked_next_power_of_two(self: u8) Option<u8> {
         if self <= 1 {
-            return Option::<u8>::Some(1);
+            return Some(1);
         }
         return (255u8 >> (self - 1).leading_zeros() as u8).checked_add(1);
     }
@@ -3898,11 +3898,11 @@ extend u8 {
     /// The smallest multiple of `rhs` not below `self`, or None for a zero `rhs` or on overflow.
     pub const fn checked_next_multiple_of(self: u8, rhs: u8) Option<u8> {
         if rhs == 0 {
-            return Option::<u8>::None;
+            return None;
         }
         let r = self % rhs;
         if r == 0 {
-            return Option::<u8>::Some(self);
+            return Some(self);
         }
         return self.checked_add(rhs - r);
     }
@@ -3964,36 +3964,36 @@ extend u8 {
     }
     /// `0 - self` modulo 2^N and whether `self` is nonzero.
     pub const fn overflowing_neg(self: u8) (u8, bool) {
-        return self.wrapping_neg(), self != 0;
+        return (self.wrapping_neg(), self != 0);
     }
     /// `self.wrapping_shl(n)` and whether `n` is at least the width.
     pub const fn overflowing_shl(self: u8, n: u32) (u8, bool) {
-        return self.wrapping_shl(n), n >= 8;
+        return (self.wrapping_shl(n), n >= 8);
     }
     /// `self.wrapping_shr(n)` and whether `n` is at least the width.
     pub const fn overflowing_shr(self: u8, n: u32) (u8, bool) {
-        return self.wrapping_shr(n), n >= 8;
+        return (self.wrapping_shr(n), n >= 8);
     }
     /// `self / rhs` and false: unsigned division never overflows. Traps on a zero divisor.
     pub const fn overflowing_div(self: u8, rhs: u8) (u8, bool) {
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self % rhs` and false: unsigned remainder never overflows. Traps on a zero divisor.
     pub const fn overflowing_rem(self: u8, rhs: u8) (u8, bool) {
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self / rhs` and false. Traps on a zero divisor.
     pub const fn overflowing_div_euclid(self: u8, rhs: u8) (u8, bool) {
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self % rhs` and false. Traps on a zero divisor.
     pub const fn overflowing_rem_euclid(self: u8, rhs: u8) (u8, bool) {
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
     pub const fn overflowing_pow(self: u8, exp: u32) (u8, bool) {
         if exp == 0 {
-            return 1, false;
+            return (1, false);
         }
         let mut base = self;
         let mut acc: u8 = 1;
@@ -4011,41 +4011,41 @@ extend u8 {
             o = o || so;
         }
         let (r, ro) = acc.overflowing_mul(base);
-        return r, o || ro;
+        return (r, o || ro);
     }
     /// `self + rhs` modulo 2^N for a signed `rhs`, and whether the exact sum leaves [0, MAX].
     pub const fn overflowing_add_signed(self: u8, rhs: i8) (u8, bool) {
         let (r, o) = self.overflowing_add(rhs as u8);
-        return r, o != rhs < 0;
+        return (r, o != rhs < 0);
     }
     /// `self` raised to `exp`, or None when it overflows.
     pub const fn checked_pow(self: u8, exp: u32) Option<u8> {
         let (r, o) = self.overflowing_pow(exp);
         if o {
-            return Option::<u8>::None;
+            return None;
         }
-        return Option::<u8>::Some(r);
+        return Some(r);
     }
     /// The floor of log2(self), or None for 0.
     pub const fn checked_ilog2(self: u8) Option<u32> {
         if self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(self.ilog2());
+        return Some(self.ilog2());
     }
     /// The floor of log10(self), or None for 0.
     pub const fn checked_ilog10(self: u8) Option<u32> {
         if self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog10_u64(self));
+        return Some(ilog10_u64(self));
     }
     /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is 0.
     pub const fn checked_ilog(self: u8, base: u8) Option<u32> {
         if base < 2 || self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog_u64(self, base));
+        return Some(ilog_u64(self, base));
     }
     /// `self / rhs`, or None for a zero divisor.
     pub const fn checked_div_euclid(self: u8, rhs: u8) Option<u8> {
@@ -4059,9 +4059,9 @@ extend u8 {
     pub const fn checked_add_signed(self: u8, rhs: i8) Option<u8> {
         let (r, o) = self.overflowing_add_signed(rhs);
         if o {
-            return Option::<u8>::None;
+            return None;
         }
-        return Option::<u8>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`: unsigned division never saturates. Traps on a zero divisor.
     pub const fn saturating_div(self: u8, rhs: u8) u8 {
@@ -4219,75 +4219,75 @@ extend u16 {
     /// The wrapped sum and whether `self + rhs` overflows.
     pub const fn overflowing_add(self: u16, rhs: u16) (u16, bool) {
         let r = self.wrapping_add(rhs);
-        return r, r < self;
+        return (r, r < self);
     }
     /// The wrapped difference and whether `self - rhs` overflows.
     pub const fn overflowing_sub(self: u16, rhs: u16) (u16, bool) {
-        return self.wrapping_sub(rhs), rhs > self;
+        return (self.wrapping_sub(rhs), rhs > self);
     }
     /// The wrapped product and whether `self * rhs` overflows.
     pub const fn overflowing_mul(self: u16, rhs: u16) (u16, bool) {
         let p = unsafe sc_wmul64(self, rhs); // exact: the operands are narrow
-        return p as u16, p > 65535;
+        return (p as u16, p > 65535);
     }
     /// `self + rhs`, or None when it overflows.
     pub const fn checked_add(self: u16, rhs: u16) Option<u16> {
         let (r, o) = self.overflowing_add(rhs);
         if o {
-            return Option::<u16>::None;
+            return None;
         }
-        return Option::<u16>::Some(r);
+        return Some(r);
     }
     /// `self - rhs`, or None when it overflows.
     pub const fn checked_sub(self: u16, rhs: u16) Option<u16> {
         let (r, o) = self.overflowing_sub(rhs);
         if o {
-            return Option::<u16>::None;
+            return None;
         }
-        return Option::<u16>::Some(r);
+        return Some(r);
     }
     /// `self * rhs`, or None when it overflows.
     pub const fn checked_mul(self: u16, rhs: u16) Option<u16> {
         let (r, o) = self.overflowing_mul(rhs);
         if o {
-            return Option::<u16>::None;
+            return None;
         }
-        return Option::<u16>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`, or None for a zero divisor.
     pub const fn checked_div(self: u16, rhs: u16) Option<u16> {
         if rhs == 0 {
-            return Option::<u16>::None;
+            return None;
         }
-        return Option::<u16>::Some(self / rhs);
+        return Some(self / rhs);
     }
     /// `self % rhs`, or None for a zero divisor.
     pub const fn checked_rem(self: u16, rhs: u16) Option<u16> {
         if rhs == 0 {
-            return Option::<u16>::None;
+            return None;
         }
-        return Option::<u16>::Some(self % rhs);
+        return Some(self % rhs);
     }
     /// `-self`, or None unless `self` is 0.
     pub const fn checked_neg(self: u16) Option<u16> {
         if self != 0 {
-            return Option::<u16>::None;
+            return None;
         }
-        return Option::<u16>::Some(0);
+        return Some(0);
     }
     /// `self << n`, or None when `n` is at least the width.
     pub const fn checked_shl(self: u16, n: u32) Option<u16> {
         if n >= 16 {
-            return Option::<u16>::None;
+            return None;
         }
-        return Option::<u16>::Some(self.wrapping_shl(n));
+        return Some(self.wrapping_shl(n));
     }
     /// `self >> n`, or None when `n` is at least the width.
     pub const fn checked_shr(self: u16, n: u32) Option<u16> {
         if n >= 16 {
-            return Option::<u16>::None;
+            return None;
         }
-        return Option::<u16>::Some(self.wrapping_shr(n));
+        return Some(self.wrapping_shr(n));
     }
     /// `self + rhs`, clamped to MAX.
     pub const fn saturating_add(self: u16, rhs: u16) u16 {
@@ -4412,7 +4412,7 @@ extend u16 {
     /// The smallest power of two not below `self` (1 for 0), or None when it does not fit.
     pub const fn checked_next_power_of_two(self: u16) Option<u16> {
         if self <= 1 {
-            return Option::<u16>::Some(1);
+            return Some(1);
         }
         return (65535u16 >> (self - 1).leading_zeros() as u16).checked_add(1);
     }
@@ -4492,11 +4492,11 @@ extend u16 {
     /// The smallest multiple of `rhs` not below `self`, or None for a zero `rhs` or on overflow.
     pub const fn checked_next_multiple_of(self: u16, rhs: u16) Option<u16> {
         if rhs == 0 {
-            return Option::<u16>::None;
+            return None;
         }
         let r = self % rhs;
         if r == 0 {
-            return Option::<u16>::Some(self);
+            return Some(self);
         }
         return self.checked_add(rhs - r);
     }
@@ -4558,36 +4558,36 @@ extend u16 {
     }
     /// `0 - self` modulo 2^N and whether `self` is nonzero.
     pub const fn overflowing_neg(self: u16) (u16, bool) {
-        return self.wrapping_neg(), self != 0;
+        return (self.wrapping_neg(), self != 0);
     }
     /// `self.wrapping_shl(n)` and whether `n` is at least the width.
     pub const fn overflowing_shl(self: u16, n: u32) (u16, bool) {
-        return self.wrapping_shl(n), n >= 16;
+        return (self.wrapping_shl(n), n >= 16);
     }
     /// `self.wrapping_shr(n)` and whether `n` is at least the width.
     pub const fn overflowing_shr(self: u16, n: u32) (u16, bool) {
-        return self.wrapping_shr(n), n >= 16;
+        return (self.wrapping_shr(n), n >= 16);
     }
     /// `self / rhs` and false: unsigned division never overflows. Traps on a zero divisor.
     pub const fn overflowing_div(self: u16, rhs: u16) (u16, bool) {
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self % rhs` and false: unsigned remainder never overflows. Traps on a zero divisor.
     pub const fn overflowing_rem(self: u16, rhs: u16) (u16, bool) {
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self / rhs` and false. Traps on a zero divisor.
     pub const fn overflowing_div_euclid(self: u16, rhs: u16) (u16, bool) {
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self % rhs` and false. Traps on a zero divisor.
     pub const fn overflowing_rem_euclid(self: u16, rhs: u16) (u16, bool) {
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
     pub const fn overflowing_pow(self: u16, exp: u32) (u16, bool) {
         if exp == 0 {
-            return 1, false;
+            return (1, false);
         }
         let mut base = self;
         let mut acc: u16 = 1;
@@ -4605,41 +4605,41 @@ extend u16 {
             o = o || so;
         }
         let (r, ro) = acc.overflowing_mul(base);
-        return r, o || ro;
+        return (r, o || ro);
     }
     /// `self + rhs` modulo 2^N for a signed `rhs`, and whether the exact sum leaves [0, MAX].
     pub const fn overflowing_add_signed(self: u16, rhs: i16) (u16, bool) {
         let (r, o) = self.overflowing_add(rhs as u16);
-        return r, o != rhs < 0;
+        return (r, o != rhs < 0);
     }
     /// `self` raised to `exp`, or None when it overflows.
     pub const fn checked_pow(self: u16, exp: u32) Option<u16> {
         let (r, o) = self.overflowing_pow(exp);
         if o {
-            return Option::<u16>::None;
+            return None;
         }
-        return Option::<u16>::Some(r);
+        return Some(r);
     }
     /// The floor of log2(self), or None for 0.
     pub const fn checked_ilog2(self: u16) Option<u32> {
         if self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(self.ilog2());
+        return Some(self.ilog2());
     }
     /// The floor of log10(self), or None for 0.
     pub const fn checked_ilog10(self: u16) Option<u32> {
         if self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog10_u64(self));
+        return Some(ilog10_u64(self));
     }
     /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is 0.
     pub const fn checked_ilog(self: u16, base: u16) Option<u32> {
         if base < 2 || self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog_u64(self, base));
+        return Some(ilog_u64(self, base));
     }
     /// `self / rhs`, or None for a zero divisor.
     pub const fn checked_div_euclid(self: u16, rhs: u16) Option<u16> {
@@ -4653,9 +4653,9 @@ extend u16 {
     pub const fn checked_add_signed(self: u16, rhs: i16) Option<u16> {
         let (r, o) = self.overflowing_add_signed(rhs);
         if o {
-            return Option::<u16>::None;
+            return None;
         }
-        return Option::<u16>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`: unsigned division never saturates. Traps on a zero divisor.
     pub const fn saturating_div(self: u16, rhs: u16) u16 {
@@ -4756,75 +4756,75 @@ extend u32 {
     /// The wrapped sum and whether `self + rhs` overflows.
     pub const fn overflowing_add(self: u32, rhs: u32) (u32, bool) {
         let r = self.wrapping_add(rhs);
-        return r, r < self;
+        return (r, r < self);
     }
     /// The wrapped difference and whether `self - rhs` overflows.
     pub const fn overflowing_sub(self: u32, rhs: u32) (u32, bool) {
-        return self.wrapping_sub(rhs), rhs > self;
+        return (self.wrapping_sub(rhs), rhs > self);
     }
     /// The wrapped product and whether `self * rhs` overflows.
     pub const fn overflowing_mul(self: u32, rhs: u32) (u32, bool) {
         let p = unsafe sc_wmul64(self, rhs); // exact: the operands are narrow
-        return p as u32, p > 4294967295;
+        return (p as u32, p > 4294967295);
     }
     /// `self + rhs`, or None when it overflows.
     pub const fn checked_add(self: u32, rhs: u32) Option<u32> {
         let (r, o) = self.overflowing_add(rhs);
         if o {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(r);
+        return Some(r);
     }
     /// `self - rhs`, or None when it overflows.
     pub const fn checked_sub(self: u32, rhs: u32) Option<u32> {
         let (r, o) = self.overflowing_sub(rhs);
         if o {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(r);
+        return Some(r);
     }
     /// `self * rhs`, or None when it overflows.
     pub const fn checked_mul(self: u32, rhs: u32) Option<u32> {
         let (r, o) = self.overflowing_mul(rhs);
         if o {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`, or None for a zero divisor.
     pub const fn checked_div(self: u32, rhs: u32) Option<u32> {
         if rhs == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(self / rhs);
+        return Some(self / rhs);
     }
     /// `self % rhs`, or None for a zero divisor.
     pub const fn checked_rem(self: u32, rhs: u32) Option<u32> {
         if rhs == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(self % rhs);
+        return Some(self % rhs);
     }
     /// `-self`, or None unless `self` is 0.
     pub const fn checked_neg(self: u32) Option<u32> {
         if self != 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(0);
+        return Some(0);
     }
     /// `self << n`, or None when `n` is at least the width.
     pub const fn checked_shl(self: u32, n: u32) Option<u32> {
         if n >= 32 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(self.wrapping_shl(n));
+        return Some(self.wrapping_shl(n));
     }
     /// `self >> n`, or None when `n` is at least the width.
     pub const fn checked_shr(self: u32, n: u32) Option<u32> {
         if n >= 32 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(self.wrapping_shr(n));
+        return Some(self.wrapping_shr(n));
     }
     /// `self + rhs`, clamped to MAX.
     pub const fn saturating_add(self: u32, rhs: u32) u32 {
@@ -4950,7 +4950,7 @@ extend u32 {
     /// The smallest power of two not below `self` (1 for 0), or None when it does not fit.
     pub const fn checked_next_power_of_two(self: u32) Option<u32> {
         if self <= 1 {
-            return Option::<u32>::Some(1);
+            return Some(1);
         }
         return (4294967295u32 >> (self - 1).leading_zeros() as u32).checked_add(1);
     }
@@ -5031,11 +5031,11 @@ extend u32 {
     /// The smallest multiple of `rhs` not below `self`, or None for a zero `rhs` or on overflow.
     pub const fn checked_next_multiple_of(self: u32, rhs: u32) Option<u32> {
         if rhs == 0 {
-            return Option::<u32>::None;
+            return None;
         }
         let r = self % rhs;
         if r == 0 {
-            return Option::<u32>::Some(self);
+            return Some(self);
         }
         return self.checked_add(rhs - r);
     }
@@ -5097,36 +5097,36 @@ extend u32 {
     }
     /// `0 - self` modulo 2^N and whether `self` is nonzero.
     pub const fn overflowing_neg(self: u32) (u32, bool) {
-        return self.wrapping_neg(), self != 0;
+        return (self.wrapping_neg(), self != 0);
     }
     /// `self.wrapping_shl(n)` and whether `n` is at least the width.
     pub const fn overflowing_shl(self: u32, n: u32) (u32, bool) {
-        return self.wrapping_shl(n), n >= 32;
+        return (self.wrapping_shl(n), n >= 32);
     }
     /// `self.wrapping_shr(n)` and whether `n` is at least the width.
     pub const fn overflowing_shr(self: u32, n: u32) (u32, bool) {
-        return self.wrapping_shr(n), n >= 32;
+        return (self.wrapping_shr(n), n >= 32);
     }
     /// `self / rhs` and false: unsigned division never overflows. Traps on a zero divisor.
     pub const fn overflowing_div(self: u32, rhs: u32) (u32, bool) {
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self % rhs` and false: unsigned remainder never overflows. Traps on a zero divisor.
     pub const fn overflowing_rem(self: u32, rhs: u32) (u32, bool) {
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self / rhs` and false. Traps on a zero divisor.
     pub const fn overflowing_div_euclid(self: u32, rhs: u32) (u32, bool) {
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self % rhs` and false. Traps on a zero divisor.
     pub const fn overflowing_rem_euclid(self: u32, rhs: u32) (u32, bool) {
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
     pub const fn overflowing_pow(self: u32, exp: u32) (u32, bool) {
         if exp == 0 {
-            return 1, false;
+            return (1, false);
         }
         let mut base = self;
         let mut acc: u32 = 1;
@@ -5144,41 +5144,41 @@ extend u32 {
             o = o || so;
         }
         let (r, ro) = acc.overflowing_mul(base);
-        return r, o || ro;
+        return (r, o || ro);
     }
     /// `self + rhs` modulo 2^N for a signed `rhs`, and whether the exact sum leaves [0, MAX].
     pub const fn overflowing_add_signed(self: u32, rhs: i32) (u32, bool) {
         let (r, o) = self.overflowing_add(rhs as u32);
-        return r, o != rhs < 0;
+        return (r, o != rhs < 0);
     }
     /// `self` raised to `exp`, or None when it overflows.
     pub const fn checked_pow(self: u32, exp: u32) Option<u32> {
         let (r, o) = self.overflowing_pow(exp);
         if o {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(r);
+        return Some(r);
     }
     /// The floor of log2(self), or None for 0.
     pub const fn checked_ilog2(self: u32) Option<u32> {
         if self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(self.ilog2());
+        return Some(self.ilog2());
     }
     /// The floor of log10(self), or None for 0.
     pub const fn checked_ilog10(self: u32) Option<u32> {
         if self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog10_u64(self));
+        return Some(ilog10_u64(self));
     }
     /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is 0.
     pub const fn checked_ilog(self: u32, base: u32) Option<u32> {
         if base < 2 || self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog_u64(self, base));
+        return Some(ilog_u64(self, base));
     }
     /// `self / rhs`, or None for a zero divisor.
     pub const fn checked_div_euclid(self: u32, rhs: u32) Option<u32> {
@@ -5192,9 +5192,9 @@ extend u32 {
     pub const fn checked_add_signed(self: u32, rhs: i32) Option<u32> {
         let (r, o) = self.overflowing_add_signed(rhs);
         if o {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`: unsigned division never saturates. Traps on a zero divisor.
     pub const fn saturating_div(self: u32, rhs: u32) u32 {
@@ -5295,74 +5295,74 @@ extend u64 {
     /// The wrapped sum and whether `self + rhs` overflows.
     pub const fn overflowing_add(self: u64, rhs: u64) (u64, bool) {
         let r = self.wrapping_add(rhs);
-        return r, r < self;
+        return (r, r < self);
     }
     /// The wrapped difference and whether `self - rhs` overflows.
     pub const fn overflowing_sub(self: u64, rhs: u64) (u64, bool) {
-        return self.wrapping_sub(rhs), rhs > self;
+        return (self.wrapping_sub(rhs), rhs > self);
     }
     /// The wrapped product and whether `self * rhs` overflows.
     pub const fn overflowing_mul(self: u64, rhs: u64) (u64, bool) {
-        return self.wrapping_mul(rhs), unsafe sc_mulo_u64(self, rhs);
+        return (self.wrapping_mul(rhs), unsafe sc_mulo_u64(self, rhs));
     }
     /// `self + rhs`, or None when it overflows.
     pub const fn checked_add(self: u64, rhs: u64) Option<u64> {
         let (r, o) = self.overflowing_add(rhs);
         if o {
-            return Option::<u64>::None;
+            return None;
         }
-        return Option::<u64>::Some(r);
+        return Some(r);
     }
     /// `self - rhs`, or None when it overflows.
     pub const fn checked_sub(self: u64, rhs: u64) Option<u64> {
         let (r, o) = self.overflowing_sub(rhs);
         if o {
-            return Option::<u64>::None;
+            return None;
         }
-        return Option::<u64>::Some(r);
+        return Some(r);
     }
     /// `self * rhs`, or None when it overflows.
     pub const fn checked_mul(self: u64, rhs: u64) Option<u64> {
         let (r, o) = self.overflowing_mul(rhs);
         if o {
-            return Option::<u64>::None;
+            return None;
         }
-        return Option::<u64>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`, or None for a zero divisor.
     pub const fn checked_div(self: u64, rhs: u64) Option<u64> {
         if rhs == 0 {
-            return Option::<u64>::None;
+            return None;
         }
-        return Option::<u64>::Some(self / rhs);
+        return Some(self / rhs);
     }
     /// `self % rhs`, or None for a zero divisor.
     pub const fn checked_rem(self: u64, rhs: u64) Option<u64> {
         if rhs == 0 {
-            return Option::<u64>::None;
+            return None;
         }
-        return Option::<u64>::Some(self % rhs);
+        return Some(self % rhs);
     }
     /// `-self`, or None unless `self` is 0.
     pub const fn checked_neg(self: u64) Option<u64> {
         if self != 0 {
-            return Option::<u64>::None;
+            return None;
         }
-        return Option::<u64>::Some(0);
+        return Some(0);
     }
     /// `self << n`, or None when `n` is at least the width.
     pub const fn checked_shl(self: u64, n: u32) Option<u64> {
         if n >= 64 {
-            return Option::<u64>::None;
+            return None;
         }
-        return Option::<u64>::Some(self.wrapping_shl(n));
+        return Some(self.wrapping_shl(n));
     }
     /// `self >> n`, or None when `n` is at least the width.
     pub const fn checked_shr(self: u64, n: u32) Option<u64> {
         if n >= 64 {
-            return Option::<u64>::None;
+            return None;
         }
-        return Option::<u64>::Some(self.wrapping_shr(n));
+        return Some(self.wrapping_shr(n));
     }
     /// `self + rhs`, clamped to MAX.
     pub const fn saturating_add(self: u64, rhs: u64) u64 {
@@ -5507,7 +5507,7 @@ extend u64 {
     /// The smallest power of two not below `self` (1 for 0), or None when it does not fit.
     pub const fn checked_next_power_of_two(self: u64) Option<u64> {
         if self <= 1 {
-            return Option::<u64>::Some(1);
+            return Some(1);
         }
         return (18446744073709551615u64 >> (self - 1).leading_zeros() as u64).checked_add(1);
     }
@@ -5597,11 +5597,11 @@ extend u64 {
     /// The smallest multiple of `rhs` not below `self`, or None for a zero `rhs` or on overflow.
     pub const fn checked_next_multiple_of(self: u64, rhs: u64) Option<u64> {
         if rhs == 0 {
-            return Option::<u64>::None;
+            return None;
         }
         let r = self % rhs;
         if r == 0 {
-            return Option::<u64>::Some(self);
+            return Some(self);
         }
         return self.checked_add(rhs - r);
     }
@@ -5663,36 +5663,36 @@ extend u64 {
     }
     /// `0 - self` modulo 2^N and whether `self` is nonzero.
     pub const fn overflowing_neg(self: u64) (u64, bool) {
-        return self.wrapping_neg(), self != 0;
+        return (self.wrapping_neg(), self != 0);
     }
     /// `self.wrapping_shl(n)` and whether `n` is at least the width.
     pub const fn overflowing_shl(self: u64, n: u32) (u64, bool) {
-        return self.wrapping_shl(n), n >= 64;
+        return (self.wrapping_shl(n), n >= 64);
     }
     /// `self.wrapping_shr(n)` and whether `n` is at least the width.
     pub const fn overflowing_shr(self: u64, n: u32) (u64, bool) {
-        return self.wrapping_shr(n), n >= 64;
+        return (self.wrapping_shr(n), n >= 64);
     }
     /// `self / rhs` and false: unsigned division never overflows. Traps on a zero divisor.
     pub const fn overflowing_div(self: u64, rhs: u64) (u64, bool) {
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self % rhs` and false: unsigned remainder never overflows. Traps on a zero divisor.
     pub const fn overflowing_rem(self: u64, rhs: u64) (u64, bool) {
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self / rhs` and false. Traps on a zero divisor.
     pub const fn overflowing_div_euclid(self: u64, rhs: u64) (u64, bool) {
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self % rhs` and false. Traps on a zero divisor.
     pub const fn overflowing_rem_euclid(self: u64, rhs: u64) (u64, bool) {
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
     pub const fn overflowing_pow(self: u64, exp: u32) (u64, bool) {
         if exp == 0 {
-            return 1, false;
+            return (1, false);
         }
         let mut base = self;
         let mut acc: u64 = 1;
@@ -5710,41 +5710,41 @@ extend u64 {
             o = o || so;
         }
         let (r, ro) = acc.overflowing_mul(base);
-        return r, o || ro;
+        return (r, o || ro);
     }
     /// `self + rhs` modulo 2^N for a signed `rhs`, and whether the exact sum leaves [0, MAX].
     pub const fn overflowing_add_signed(self: u64, rhs: i64) (u64, bool) {
         let (r, o) = self.overflowing_add(rhs as u64);
-        return r, o != rhs < 0;
+        return (r, o != rhs < 0);
     }
     /// `self` raised to `exp`, or None when it overflows.
     pub const fn checked_pow(self: u64, exp: u32) Option<u64> {
         let (r, o) = self.overflowing_pow(exp);
         if o {
-            return Option::<u64>::None;
+            return None;
         }
-        return Option::<u64>::Some(r);
+        return Some(r);
     }
     /// The floor of log2(self), or None for 0.
     pub const fn checked_ilog2(self: u64) Option<u32> {
         if self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(self.ilog2());
+        return Some(self.ilog2());
     }
     /// The floor of log10(self), or None for 0.
     pub const fn checked_ilog10(self: u64) Option<u32> {
         if self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog10_u64(self));
+        return Some(ilog10_u64(self));
     }
     /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is 0.
     pub const fn checked_ilog(self: u64, base: u64) Option<u32> {
         if base < 2 || self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog_u64(self, base));
+        return Some(ilog_u64(self, base));
     }
     /// `self / rhs`, or None for a zero divisor.
     pub const fn checked_div_euclid(self: u64, rhs: u64) Option<u64> {
@@ -5758,9 +5758,9 @@ extend u64 {
     pub const fn checked_add_signed(self: u64, rhs: i64) Option<u64> {
         let (r, o) = self.overflowing_add_signed(rhs);
         if o {
-            return Option::<u64>::None;
+            return None;
         }
-        return Option::<u64>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`: unsigned division never saturates. Traps on a zero divisor.
     pub const fn saturating_div(self: u64, rhs: u64) u64 {
@@ -5862,75 +5862,75 @@ extend usize {
     /// The wrapped sum and whether `self + rhs` overflows.
     pub const fn overflowing_add(self: usize, rhs: usize) (usize, bool) {
         let r = self.wrapping_add(rhs);
-        return r, r < self;
+        return (r, r < self);
     }
     /// The wrapped difference and whether `self - rhs` overflows.
     pub const fn overflowing_sub(self: usize, rhs: usize) (usize, bool) {
-        return self.wrapping_sub(rhs), rhs > self;
+        return (self.wrapping_sub(rhs), rhs > self);
     }
     /// The wrapped product and whether `self * rhs` overflows.
     pub const fn overflowing_mul(self: usize, rhs: usize) (usize, bool) {
         let p = unsafe sc_wmul64(self as u64, rhs as u64);
-        return p as usize, unsafe sc_mulo_u64(self as u64, rhs as u64) || p > (~0usize) as u64;
+        return (p as usize, unsafe sc_mulo_u64(self as u64, rhs as u64) || p > (~0usize) as u64);
     }
     /// `self + rhs`, or None when it overflows.
     pub const fn checked_add(self: usize, rhs: usize) Option<usize> {
         let (r, o) = self.overflowing_add(rhs);
         if o {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::<usize>::Some(r);
+        return Some(r);
     }
     /// `self - rhs`, or None when it overflows.
     pub const fn checked_sub(self: usize, rhs: usize) Option<usize> {
         let (r, o) = self.overflowing_sub(rhs);
         if o {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::<usize>::Some(r);
+        return Some(r);
     }
     /// `self * rhs`, or None when it overflows.
     pub const fn checked_mul(self: usize, rhs: usize) Option<usize> {
         let (r, o) = self.overflowing_mul(rhs);
         if o {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::<usize>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`, or None for a zero divisor.
     pub const fn checked_div(self: usize, rhs: usize) Option<usize> {
         if rhs == 0 {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::<usize>::Some(self / rhs);
+        return Some(self / rhs);
     }
     /// `self % rhs`, or None for a zero divisor.
     pub const fn checked_rem(self: usize, rhs: usize) Option<usize> {
         if rhs == 0 {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::<usize>::Some(self % rhs);
+        return Some(self % rhs);
     }
     /// `-self`, or None unless `self` is 0.
     pub const fn checked_neg(self: usize) Option<usize> {
         if self != 0 {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::<usize>::Some(0);
+        return Some(0);
     }
     /// `self << n`, or None when `n` is at least the width.
     pub const fn checked_shl(self: usize, n: u32) Option<usize> {
         if n >= sizeof(usize) as u32 * 8 {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::<usize>::Some(self.wrapping_shl(n));
+        return Some(self.wrapping_shl(n));
     }
     /// `self >> n`, or None when `n` is at least the width.
     pub const fn checked_shr(self: usize, n: u32) Option<usize> {
         if n >= sizeof(usize) as u32 * 8 {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::<usize>::Some(self.wrapping_shr(n));
+        return Some(self.wrapping_shr(n));
     }
     /// `self + rhs`, clamped to MAX.
     pub const fn saturating_add(self: usize, rhs: usize) usize {
@@ -6068,7 +6068,7 @@ extend usize {
     /// The smallest power of two not below `self` (1 for 0), or None when it does not fit.
     pub const fn checked_next_power_of_two(self: usize) Option<usize> {
         if self <= 1 {
-            return Option::<usize>::Some(1);
+            return Some(1);
         }
         return (~0usize >> (self - 1).leading_zeros()).checked_add(1);
     }
@@ -6148,11 +6148,11 @@ extend usize {
     /// The smallest multiple of `rhs` not below `self`, or None for a zero `rhs` or on overflow.
     pub const fn checked_next_multiple_of(self: usize, rhs: usize) Option<usize> {
         if rhs == 0 {
-            return Option::<usize>::None;
+            return None;
         }
         let r = self % rhs;
         if r == 0 {
-            return Option::<usize>::Some(self);
+            return Some(self);
         }
         return self.checked_add(rhs - r);
     }
@@ -6214,36 +6214,36 @@ extend usize {
     }
     /// `0 - self` modulo 2^N and whether `self` is nonzero.
     pub const fn overflowing_neg(self: usize) (usize, bool) {
-        return self.wrapping_neg(), self != 0;
+        return (self.wrapping_neg(), self != 0);
     }
     /// `self.wrapping_shl(n)` and whether `n` is at least the width.
     pub const fn overflowing_shl(self: usize, n: u32) (usize, bool) {
-        return self.wrapping_shl(n), n >= sizeof(usize) as u32 * 8;
+        return (self.wrapping_shl(n), n >= sizeof(usize) as u32 * 8);
     }
     /// `self.wrapping_shr(n)` and whether `n` is at least the width.
     pub const fn overflowing_shr(self: usize, n: u32) (usize, bool) {
-        return self.wrapping_shr(n), n >= sizeof(usize) as u32 * 8;
+        return (self.wrapping_shr(n), n >= sizeof(usize) as u32 * 8);
     }
     /// `self / rhs` and false: unsigned division never overflows. Traps on a zero divisor.
     pub const fn overflowing_div(self: usize, rhs: usize) (usize, bool) {
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self % rhs` and false: unsigned remainder never overflows. Traps on a zero divisor.
     pub const fn overflowing_rem(self: usize, rhs: usize) (usize, bool) {
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self / rhs` and false. Traps on a zero divisor.
     pub const fn overflowing_div_euclid(self: usize, rhs: usize) (usize, bool) {
-        return self / rhs, false;
+        return (self / rhs, false);
     }
     /// `self % rhs` and false. Traps on a zero divisor.
     pub const fn overflowing_rem_euclid(self: usize, rhs: usize) (usize, bool) {
-        return self % rhs, false;
+        return (self % rhs, false);
     }
     /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
     pub const fn overflowing_pow(self: usize, exp: u32) (usize, bool) {
         if exp == 0 {
-            return 1, false;
+            return (1, false);
         }
         let mut base = self;
         let mut acc: usize = 1;
@@ -6261,41 +6261,41 @@ extend usize {
             o = o || so;
         }
         let (r, ro) = acc.overflowing_mul(base);
-        return r, o || ro;
+        return (r, o || ro);
     }
     /// `self + rhs` modulo 2^N for a signed `rhs`, and whether the exact sum leaves [0, MAX].
     pub const fn overflowing_add_signed(self: usize, rhs: isize) (usize, bool) {
         let (r, o) = self.overflowing_add(rhs as usize);
-        return r, o != rhs < 0;
+        return (r, o != rhs < 0);
     }
     /// `self` raised to `exp`, or None when it overflows.
     pub const fn checked_pow(self: usize, exp: u32) Option<usize> {
         let (r, o) = self.overflowing_pow(exp);
         if o {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::<usize>::Some(r);
+        return Some(r);
     }
     /// The floor of log2(self), or None for 0.
     pub const fn checked_ilog2(self: usize) Option<u32> {
         if self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(self.ilog2());
+        return Some(self.ilog2());
     }
     /// The floor of log10(self), or None for 0.
     pub const fn checked_ilog10(self: usize) Option<u32> {
         if self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog10_u64(self as u64));
+        return Some(ilog10_u64(self as u64));
     }
     /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is 0.
     pub const fn checked_ilog(self: usize, base: usize) Option<u32> {
         if base < 2 || self == 0 {
-            return Option::<u32>::None;
+            return None;
         }
-        return Option::<u32>::Some(ilog_u64(self as u64, base as u64));
+        return Some(ilog_u64(self as u64, base as u64));
     }
     /// `self / rhs`, or None for a zero divisor.
     pub const fn checked_div_euclid(self: usize, rhs: usize) Option<usize> {
@@ -6309,9 +6309,9 @@ extend usize {
     pub const fn checked_add_signed(self: usize, rhs: isize) Option<usize> {
         let (r, o) = self.overflowing_add_signed(rhs);
         if o {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::<usize>::Some(r);
+        return Some(r);
     }
     /// `self / rhs`: unsigned division never saturates. Traps on a zero divisor.
     pub const fn saturating_div(self: usize, rhs: usize) usize {
@@ -6526,7 +6526,7 @@ extend f32 {
     }
     /// (sin, cos) of an angle in radians.
     pub const fn sin_cos(self: f32) (f32, f32) {
-        return unsafe sinf(self), unsafe cosf(self);
+        return (unsafe sinf(self), unsafe cosf(self));
     }
     /// Hyperbolic sine.
     pub const fn sinh(self: f32) f32 {
@@ -6614,17 +6614,17 @@ extend f32 {
         let m = v & 0x7F_FFFF;
         if e == 0 {
             if m == 0 {
-                return FpClass::FP_ZERO;
+                return FP_ZERO;
             }
-            return FpClass::FP_SUBNORMAL;
+            return FP_SUBNORMAL;
         }
         if e == 0xFF {
             if m == 0 {
-                return FpClass::FP_INFINITE;
+                return FP_INFINITE;
             }
-            return FpClass::FP_NAN;
+            return FP_NAN;
         }
-        return FpClass::FP_NORMAL;
+        return FP_NORMAL;
     }
     /// True when `self` is neither zero, subnormal, infinite nor NaN.
     pub const fn is_normal(self: f32) bool {
@@ -6916,7 +6916,7 @@ extend f64 {
     }
     /// (sin, cos) of an angle in radians.
     pub const fn sin_cos(self: f64) (f64, f64) {
-        return unsafe sin(self), unsafe cos(self);
+        return (unsafe sin(self), unsafe cos(self));
     }
     /// IEEE-754 totalOrder: negative / zero / positive; NaN sorts above +inf (and -NaN below -inf).
     pub const fn total_cmp(self: f64, other: f64) i32 {
@@ -7004,17 +7004,17 @@ extend f64 {
         let m = v & 0x000F_FFFF_FFFF_FFFF;
         if e == 0 {
             if m == 0 {
-                return FpClass::FP_ZERO;
+                return FP_ZERO;
             }
-            return FpClass::FP_SUBNORMAL;
+            return FP_SUBNORMAL;
         }
         if e == 0x7FF {
             if m == 0 {
-                return FpClass::FP_INFINITE;
+                return FP_INFINITE;
             }
-            return FpClass::FP_NAN;
+            return FP_NAN;
         }
-        return FpClass::FP_NORMAL;
+        return FP_NORMAL;
     }
     /// True when `self` is neither zero, subnormal, infinite nor NaN.
     pub const fn is_normal(self: f64) bool {
@@ -7134,16 +7134,16 @@ extend bool {
     /// `Some(f())` when `self` is true, else None; `f` runs only when `self` is true.
     pub const fn then<T, F: fn() T>(self: bool, f: F) Option<T> {
         if self {
-            return Option::<T>::Some(f());
+            return Some(f());
         }
-        return Option::<T>::None;
+        return None;
     }
     /// `Some(v)` when `self` is true, else None. `v` is evaluated either way and dropped when false.
     pub const fn then_some<T>(self: bool, v: T) Option<T> {
         if self {
-            return Option::<T>::Some(v);
+            return Some(v);
         }
-        return Option::<T>::None;
+        return None;
     }
 }
 
@@ -7219,9 +7219,9 @@ extend char {
             d = (c | 0x20) - 87;
         }
         if d < radix {
-            return Option::<u32>::Some(d);
+            return Some(d);
         }
-        return Option::<u32>::None;
+        return None;
     }
     /// The character of digit `num` in `radix`: `0` to `9`, then `a` to `z`; None when `num` is not below
     /// `radix`. Panics when `radix` is outside 2 to 36.
@@ -7230,12 +7230,12 @@ extend char {
             panic("from_digit: radix must be in 2 to 36");
         }
         if num >= radix {
-            return Option::<char>::None;
+            return None;
         }
         if num < 10 {
-            return Option::<char>::Some((48 + num) as char);
+            return Some((48 + num) as char);
         }
-        return Option::<char>::Some((87 + num) as char);
+        return Some((87 + num) as char);
     }
 }
 
@@ -7383,10 +7383,10 @@ extend FieldInfo {
         for i in 0..self.meta.len {
             let m = self.meta.get(i);
             if m.name == name {
-                return Option::<MetaInfo>::Some(*m);
+                return Some(*m);
             }
         }
-        return Option::<MetaInfo>::None;
+        return None;
     }
 
     /// True when a `@reflect` entry named `name` is attached.
@@ -7415,10 +7415,10 @@ extend VariantInfo {
         for i in 0..self.meta.len {
             let m = self.meta.get(i);
             if m.name == name {
-                return Option::<MetaInfo>::Some(*m);
+                return Some(*m);
             }
         }
-        return Option::<MetaInfo>::None;
+        return None;
     }
 
     /// True when a `@reflect` entry named `name` is attached.
@@ -7455,10 +7455,10 @@ extend MethodInfo {
         for i in 0..self.meta.len {
             let m = self.meta.get(i);
             if m.name == name {
-                return Option::<MetaInfo>::Some(*m);
+                return Some(*m);
             }
         }
-        return Option::<MetaInfo>::None;
+        return None;
     }
 
     /// True when a `@reflect` entry named `name` is attached.
@@ -7510,10 +7510,10 @@ extend TypeInfo {
         for i in 0..self.fields.len {
             let f = self.fields.get(i);
             if f.name == name {
-                return Option::<FieldInfo>::Some(*f);
+                return Some(*f);
             }
         }
-        return Option::<FieldInfo>::None;
+        return None;
     }
 
     /// The first `@reflect` entry named `name` on the TYPE declaration itself, or None.
@@ -7521,10 +7521,10 @@ extend TypeInfo {
         for i in 0..self.meta.len {
             let m = self.meta.get(i);
             if m.name == name {
-                return Option::<MetaInfo>::Some(*m);
+                return Some(*m);
             }
         }
-        return Option::<MetaInfo>::None;
+        return None;
     }
 
     /// True when a `@reflect` entry named `name` is attached.
@@ -7537,10 +7537,10 @@ extend TypeInfo {
         for i in 0..self.variants.len {
             let v = self.variants.get(i);
             if v.name == name {
-                return Option::<VariantInfo>::Some(*v);
+                return Some(*v);
             }
         }
-        return Option::<VariantInfo>::None;
+        return None;
     }
 
     /// The first method named `name`, or None (conformances can declare the same name more than
@@ -7549,10 +7549,10 @@ extend TypeInfo {
         for i in 0..self.methods.len {
             let m = self.methods.get(i);
             if m.name == name {
-                return Option::<MethodInfo>::Some(*m);
+                return Some(*m);
             }
         }
-        return Option::<MethodInfo>::None;
+        return None;
     }
 
     /// The variant whose runtime value is `tag`, or None: the reverse lookup a `Display` for a
@@ -7561,10 +7561,10 @@ extend TypeInfo {
         for i in 0..self.variants.len {
             let v = self.variants.get(i);
             if v.tag == tag {
-                return Option::<VariantInfo>::Some(*v);
+                return Some(*v);
             }
         }
-        return Option::<VariantInfo>::None;
+        return None;
     }
 }
 

@@ -426,9 +426,9 @@ extend Solver {
                 }
                 if !freed && ac.local != bf::BF_NONE && f.observed[ac.local as usize] {
                     let l = if f.drop_slot[ac.local as usize] != bf::BF_NONE {
-                        f.drop_slot[ac.local as usize];
+                        f.drop_slot[ac.local as usize]
                     } else {
-                        ac.local;
+                        ac.local
                     };
                     if (self.s_omask[(l / 64) as usize] >> (l & 63) as u64 & 1u64) != 0 {
                         uses.push(ac.point as u64 << 32 | l as u64);
@@ -725,11 +725,11 @@ extend Solver {
                 for i in wlo..wpos {
                     let l = (uses[i] & 0xFFFFFFFFu64) as usize;
                     let bit: u8 = if uses[i] >> 63 != 0 {
-                        1;
+                        1
                     } else if (uses[i] >> 62 & 1u64) != 0 {
-                        4;
+                        4
                     } else {
-                        2;
+                        2
                     };
                     if flags[l] == 0 {
                         touched.push(l as u32);
@@ -745,9 +745,9 @@ extend Solver {
                     // the entry point only.
                     if open[l] == 0 {
                         let top = if (fl & 3) != 0 {
-                            hi2;
+                            hi2
                         } else {
-                            lo2;
+                            lo2
                         };
                         open.set(l, top + 1);
                         opos.set(l, members.len() as u32);
@@ -1072,14 +1072,14 @@ extend Solver {
         let ke = self.kill_start[bi as usize + 1];
         while i < ie || k < ke {
             let ip: u32 = if i < ie {
-                f.loans.at(self.issues_blk[i as usize] as usize).issued_at;
+                f.loans.at(self.issues_blk[i as usize] as usize).issued_at
             } else {
-                bf::BF_NONE;
+                bf::BF_NONE
             };
             let kp: u32 = if k < ke {
-                (self.kills_blk[k as usize] >> 32) as u32;
+                (self.kills_blk[k as usize] >> 32) as u32
             } else {
-                bf::BF_NONE;
+                bf::BF_NONE
             };
             if kp != bf::BF_NONE && (ip == bf::BF_NONE || kp <= ip) {
                 if kp >= before {
@@ -1189,9 +1189,9 @@ extend Solver {
             }
         }
         let row = if self.sparse {
-            li as usize;
+            li as usize
         } else {
-            (li * self.pwords) as usize;
+            (li * self.pwords) as usize
         };
         if self.req_have[li as usize] {
             return row;
@@ -1405,18 +1405,18 @@ extend Solver {
             let mut scoped = false;
             if bucketed {
                 let base = if ac.place == bf::BF_NONE {
-                    ac.local as usize;
+                    ac.local as usize
                 } else {
-                    self.body().places.at(ac.place as usize).base as usize;
+                    self.body().places.at(ac.place as usize).base as usize
                 };
                 it0 = self.s_lb_start[base] as usize;
                 it1 = self.s_lb_start[base + 1] as usize;
             }
             for it in it0..it1 {
                 let li = if bucketed {
-                    self.s_lb_flat[it] as usize;
+                    self.s_lb_flat[it] as usize
                 } else {
-                    it;
+                    it
                 };
                 let lo = *f.loans.at(li);
                 if ac.place == bf::BF_NONE {
@@ -1637,9 +1637,9 @@ extend Solver {
         for a in 0..f.accesses.len() {
             let ac = *f.accesses.at(a);
             let base = if ac.place == bf::BF_NONE {
-                ac.local as usize;
+                ac.local as usize
             } else {
-                bd.places.at(ac.place as usize).base as usize;
+                bd.places.at(ac.place as usize).base as usize
             };
             d.transfer_block(d.point_block[ac.point as usize], ac.point, &mut row);
             for it in start[base]..start[base + 1] {

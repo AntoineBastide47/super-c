@@ -20,9 +20,9 @@ fn pattern(kind: u32, n: usize, seed: u64) Vector<i64> {
             3 => 5,
             4 => (rng.next_u32() % 4) as i64,
             5 => if i < n / 2 {
-                i as i64;
+                i as i64
             } else {
-                (n - i) as i64;
+                (n - i) as i64
             },
             6 => (i % 17) as i64,
             _ => i as i64,
@@ -433,7 +433,7 @@ fn searches_find_matches_and_insertion_points() {
         switch r.as_slice().binary_search(&x) {
             Ok(i) => assert_eq(*r.at(i), x),
             Err(i) => assert_eq(i, lin),
-        };
+        }
     }
 }
 
@@ -488,7 +488,7 @@ fn partition_dedup_and_rearrangement() {
             back = *x;
         },
         None => {},
-    };
+    }
     assert_eq(back, 6);
     let (lo, hi) = it.size_hint();
     assert_eq(lo, 4);

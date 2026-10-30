@@ -138,12 +138,12 @@ pub fn read_manifest(src: str) Result<Manifest, String> {
         return r.fail("no [ffi] table");
     }
     if ffi_keys != 3 {
-        return Result::<Manifest, String>::Err(format("{}: [ffi] needs 'modules' and 'functions'", ffi_line));
+        return Err(format("{}: [ffi] needs 'modules' and 'functions'", ffi_line));
     }
     for p in m.packages.iter() {
         p.validate()?;
     }
-    return Result::<Manifest, String>::Ok(m);
+    return Ok(m);
 }
 
 // The index of `key` in `keys`, -1 when absent.
@@ -195,20 +195,16 @@ extend Package {
             while (missing >> k as u32 & 1) == 0 {
                 k += 1;
             }
-            return Result::<Unit, String>::Err(
-                format("{}: [package.{}] has no '{}'", self.line, self.name.as_str(), PKG_KEYS[k]),
-            );
+            return Err(format("{}: [package.{}] has no '{}'", self.line, self.name.as_str(), PKG_KEYS[k]));
         }
         for t in 0..TARGETS.len() {
             if self.status[t] == 0 {
-                return Result::<Unit, String>::Err(
-                    format("{}: [package.{}] has no status for '{}'", self.line, self.name.as_str(), TARGETS[t]),
-                );
+                return Err(format("{}: [package.{}] has no status for '{}'", self.line, self.name.as_str(), TARGETS[t]));
             }
         }
         let has_limits = (self.keys >> KEY_LIMITS as u32 & 1) != 0;
         if has_limits == self.all_full() {
-            return Result::<Unit, String>::Err(
+            return Err(
                 format(
                     "{}: [package.{}] needs 'limits' exactly when a target is not 'full'",
                     self.line,
@@ -217,11 +213,9 @@ extend Package {
             );
         }
         if has_limits && self.limits.is_empty() || self.allocator.is_empty() || self.thread_safety.is_empty() || self.blocking.is_empty() || self.errors.is_empty() {
-            return Result::<Unit, String>::Err(
-                format("{}: [package.{}] has an empty value", self.line, self.name.as_str()),
-            );
+            return Err(format("{}: [package.{}] has an empty value", self.line, self.name.as_str()));
         }
-        return Result::<Unit, String>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 
@@ -234,7 +228,7 @@ extend<'a> Reader<'a> {
     }
 
     fn fail<T>(self: &Self, msg: str) Result<T, String> {
-        return Result::<T, String>::Err(format("{}: {}", self.line, msg));
+        return Err(format("{}: {}", self.line, msg));
     }
 
     // Skip spaces, tabs, carriage returns and comments; newlines too when `lines`.
@@ -261,21 +255,21 @@ extend<'a> Reader<'a> {
             let mut msg = String::from_str("'");
             msg.push_byte(b);
             msg.push_str("' expected");
-            return self.fail(msg.as_str());
+            return self.fail(&msg);
         }
         self.i += 1;
-        return Result::<Unit, String>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     // The rest of the line holds only spaces and a comment.
     fn end_of_line(self: &mut Self) Result<Unit, String> {
         self.skip_space(false);
         if self.i >= self.src.len() {
-            return Result::<Unit, String>::Ok(Unit {});
+            return Ok(Unit {});
         }
         self.expect(b'\n')?;
         self.line += 1;
-        return Result::<Unit, String>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     // A bare key (`A-Z a-z 0-9 _ -`), and `.` too when `dotted`; empty when none starts here.
@@ -301,7 +295,7 @@ extend<'a> Reader<'a> {
             }
             self.i += 1;
             if b == b'"' {
-                return Result::<String, String>::Ok(out);
+                return Ok(out);
             }
             if b != b'\\' {
                 out.push_byte(b);
@@ -330,7 +324,7 @@ extend<'a> Reader<'a> {
         if v.is_none() {
             return self.fail("an integer expected");
         }
-        return Result::<i64, String>::Ok(v.unwrap());
+        return Ok(v.unwrap());
     }
 
     // `[ "a", "b", ]`, over any number of lines.
@@ -351,7 +345,7 @@ extend<'a> Reader<'a> {
             }
         }
         self.i += 1;
-        return Result::<Vector<String>, String>::Ok(out);
+        return Ok(out);
     }
 
     // `{ key = "value", .. }` on one line.
@@ -379,7 +373,7 @@ extend<'a> Reader<'a> {
             }
         }
         self.i += 1;
-        return Result::<Vector<Pair>, String>::Ok(out);
+        return Ok(out);
     }
 
     // The value of `key` in package row `p`.
@@ -404,14 +398,14 @@ extend<'a> Reader<'a> {
             "targets" => {
                 let pairs = self.table()?;
                 for pair in pairs.iter() {
-                    let t = key_index(TARGETS, pair.key.as_str());
+                    let t = key_index(TARGETS, &pair.key);
                     if t < 0 {
                         return self.fail("an unknown target");
                     }
                     if p.status[t as usize] != 0 {
                         return self.fail("a repeated target");
                     }
-                    let s = key_index(STATUS, pair.value.as_str());
+                    let s = key_index(STATUS, &pair.value);
                     if s < 0 {
                         return self.fail("a status other than full, reduced and unavailable");
                     }
@@ -445,7 +439,7 @@ extend<'a> Reader<'a> {
             _ => {
                 p.c_functions = self.list()?; // the last of PKG_KEYS
             },
-        };
-        return Result::<Unit, String>::Ok(Unit {});
+        }
+        return Ok(Unit {});
     }
 }

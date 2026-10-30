@@ -42,7 +42,7 @@ fn eps_dq(a: dualquat, b: dualquat, eps: f32) bool {
 }
 
 const fn copies<T: Copy>(x: T) (T, T) {
-    return x, x;
+    return (x, x);
 }
 
 const DQ_ID: dualquat = DualQuat::<f32>::identity();

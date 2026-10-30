@@ -134,11 +134,11 @@ fn check_site(b: &ir::CoreBody, ow: &mut bfx::Owner, tn: &Taint, bi: u32) TailMi
         }
         // The frame local the parameter's new value may borrow.
         let src = if ak == AK_REF {
-            place_root(b, tn, o.data);
+            place_root(b, tn, o.data)
         } else if ow.carries(b.module, pt) {
-            operand_taint(b, tn, oi);
+            operand_taint(b, tn, oi)
         } else {
-            ir::IR_NONE;
+            ir::IR_NONE
         };
         if src != ir::IR_NONE {
             m.reason = TR_BORROW;
@@ -166,9 +166,9 @@ fn same_instance(p: &loader::Package, b: &ir::CoreBody, t: &ir::Terminator) bool
     let own = a.ext(b.owner.node).function.generics;
     let ext = a.container_of(b.owner.node);
     let eg = if ext != NODE_NONE {
-        a.ext(ext).extend_def.generics;
+        a.ext(ext).extend_def.generics
     } else {
-        NodeList { start: 0, len: 0 };
+        NodeList { start: 0, len: 0 }
     };
     if t.targs_len == own.len {
         if eg.len != 0 && !has_receiver(a, b) {
@@ -426,9 +426,9 @@ fn path_after(
                 continue;
             }
             m.reason = if to_ret || held || reads_any(b, &rv, &whole) || reads_any(b, &rv, &mem_l) {
-                TR_NOT_TAIL;
+                TR_NOT_TAIL
             } else {
-                TR_AFTER;
+                TR_AFTER
             };
             m.at = st.span;
             return;
@@ -440,9 +440,9 @@ fn path_after(
         }
         if tm.kind == ir::TM_RETURN {
             let all = if b.returns == 64 {
-                0xFFFFFFFFFFFFFFFFu64;
+                0xFFFFFFFFFFFFFFFFu64
             } else {
-                (1u64 << b.returns as u64) - 1;
+                (1u64 << b.returns as u64) - 1
             };
             if tm.args_len == ir::RET_CANCEL || done != all {
                 m.reason = TR_NOT_TAIL;
@@ -473,9 +473,9 @@ fn path_after(
             reads = reads || term_reads(b, &tm, mem_l[i]);
         }
         m.reason = if reads {
-            TR_NOT_TAIL;
+            TR_NOT_TAIL
         } else {
-            TR_AFTER;
+            TR_AFTER
         };
         m.at = tm.span;
         return;
@@ -684,9 +684,9 @@ fn taint(b: &ir::CoreBody, ow: &mut bfx::Owner) Taint {
             let viewed = rv.kind == ir::RV_SLICE && ow.ast_of(b.module).type_at(b.places.at(rv.a as usize).ty).kind != TypeKind::TYPE_ARRAY;
             if !viewed && (rv.kind == ir::RV_REF || rv.kind == ir::RV_SLICE || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_USE && rv.b != 0) {
                 let pl = if rv.kind == ir::RV_USE {
-                    b.operands.at(rv.a as usize).data;
+                    b.operands.at(rv.a as usize).data
                 } else {
-                    rv.a;
+                    rv.a
                 };
                 src = place_root(b, &tn, pl);
                 if src != ir::IR_NONE && src != LOCAL_UNKNOWN && !tn.addr[src as usize] {
@@ -917,9 +917,9 @@ fn node_names_lt(ow: &bfx::Owner, m: ModuleId, tn: NodeId, tk: u64, depth: i32) 
         return node_names_lt(ow, m, n.as_data.array_type.element, tk, depth + 1);
     }
     let args = if n.kind == NodeKind::NODE_TYPE_PATH {
-        a.at_const(tn).as_data.type_path.args;
+        a.at_const(tn).as_data.type_path.args
     } else if n.kind == NodeKind::NODE_TUPLE_TYPE {
-        n.as_data.array_literal.elements;
+        n.as_data.array_literal.elements
     } else {
         return n.kind != NodeKind::NODE_POINTER_TYPE;
     };
@@ -1183,7 +1183,7 @@ const fn identity(b: &ir::CoreBody, rv: &ir::Rvalue, l: u32) bool {
 // overlapping object undefined), or reads through a reference that may point into the frame.
 fn needs_copy(b: &ir::CoreBody, tn: &Taint, rv: &ir::Rvalue, k: u32) bool {
     let pl = if rv.kind == ir::RV_REF {
-        rv.a;
+        rv.a
     } else {
         let op = *b.operands.at(rv.a as usize);
         if op.kind == ir::OP_CONST {
@@ -1192,7 +1192,7 @@ fn needs_copy(b: &ir::CoreBody, tn: &Taint, rv: &ir::Rvalue, k: u32) bool {
         if b.place_has_deref(op.data) && tn.on[b.places.at(op.data as usize).base as usize] {
             return true;
         }
-        op.data;
+        op.data
     };
     for j in 0..k + 1 {
         if place_reads(b, pl, b.returns + j) {

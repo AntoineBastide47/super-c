@@ -10,6 +10,9 @@ import lexer::token as tok;
 /// Per-category cap on recorded diagnostics; emit/warn silently drop rows past it.
 pub(package) const ERRORS_MAX: usize = 256;
 
+/// `fmt -s` confirms its removals with a check of the edited program: `log` prints nothing meanwhile.
+pub(package) static mut SILENT: bool = false;
+
 /// Empty note-chain link (note indexes are dense u32s into Errors.note_pool).
 pub(package) const NOTE_NONE: u32 = 0xFFFFFFFF;
 
@@ -64,9 +67,9 @@ const fn diagnostic(code: u16, at: u32, len: u32, msg: String) Diagnostic {
 // A note link of an appended container, shifted by the `nb` notes already in the pool.
 const fn note_rebase(link: u32, nb: u32) u32 {
     return if link == NOTE_NONE {
-        NOTE_NONE;
+        NOTE_NONE
     } else {
-        link + nb;
+        link + nb
     };
 }
 
@@ -225,9 +228,9 @@ extend Errors {
         }
         let n = self.errors.len();
         let mut k = if from < n {
-            from;
+            from
         } else {
-            n;
+            n
         };
         while k < n && self.errors[k].start <= at {
             k = k + 1;
@@ -339,6 +342,9 @@ extend Errors {
     /// when `finalize` has not run.
     @cold
     pub(package) fn log(self: &Self) {
+        if unsafe SILENT {
+            return;
+        }
         if self.rendered_warns.len() == self.warns.len() && self.rendered_errors.len() == self.errors.len() {
             for i in 0..self.rendered_warns.len() {
                 self.rendered_warns[i].eprintln();

@@ -22,13 +22,13 @@ pub(package) const fn has(isa: str, name: str) bool {
 // The row of intrinsic `name` of `isa`: whether there is one, and its instructions.
 const fn row(isa: str, name: str) (bool, str<'static>) {
     let rows: [](str<'static>, str<'static>) = if isa == "aarch64" {
-        a64i::ROWS;
+        a64i::ROWS
     } else if isa == "x86_64" {
-        x64i::ROWS;
+        x64i::ROWS
     } else if isa == "wasm32" {
-        wasmi::ROWS;
+        wasmi::ROWS
     } else {
-        return false, "";
+        return (false, "");
     };
     let mut lo: usize = 0;
     let mut hi = rows.len();
@@ -36,7 +36,7 @@ const fn row(isa: str, name: str) (bool, str<'static>) {
         let mid = lo + (hi - lo) / 2;
         let k = rows[mid].0;
         if k == name {
-            return true, rows[mid].1;
+            return (true, rows[mid].1);
         }
         if k < name {
             lo = mid + 1;
@@ -44,7 +44,7 @@ const fn row(isa: str, name: str) (bool, str<'static>) {
             hi = mid;
         }
     }
-    return false, "";
+    return (false, "");
 }
 
 /// Row text `text` with each `@k` and `@(k*a+b)` replaced by constant argument `k` (`imm[k]`, `known[k]`) or that
@@ -95,9 +95,9 @@ pub(package) fn expand(text: str, imm: []i64, known: []bool, out: &mut String) b
             });
             let bt = rest.slice(s - 1, rest.len());
             b = (switch if bt.starts_with("+") {
-                bt.slice(1, bt.len());
+                bt.slice(1, bt.len())
             } else {
-                bt;
+                bt
             }.parse_i64() {
                 Some(v) => v,
                 None => {
@@ -129,19 +129,19 @@ pub(package) const fn vreg_at(a64: bool, text: str, i: usize) (u32, usize) {
     if a64 {
         let c = text.byte_at(i);
         if c != b'v' && c != b'q' && c != b'd' && c != b's' && c != b'h' && c != b'b' {
-            return 99, 0;
+            return (99, 0);
         }
         if i > 0 && word_byte(text.byte_at(i - 1)) {
-            return 99, 0;
+            return (99, 0);
         }
         j += 1;
     } else {
         if i + 4 > n || text.byte_at(i) != b'%' || text.byte_at(i + 2) != b'm' || text.byte_at(i + 3) != b'm' {
-            return 99, 0;
+            return (99, 0);
         }
         let c = text.byte_at(i + 1);
         if c != b'x' && c != b'y' && c != b'z' {
-            return 99, 0;
+            return (99, 0);
         }
         j += 4;
     }
@@ -153,9 +153,9 @@ pub(package) const fn vreg_at(a64: bool, text: str, i: usize) (u32, usize) {
         j += 1;
     }
     if j == d0 || r > 31 || j < n && word_byte(text.byte_at(j)) {
-        return 99, 0;
+        return (99, 0);
     }
-    return r, j - i;
+    return (r, j - i);
 }
 
 /// Whether template `text` names vector register `r` (`vreg_at`).
@@ -213,9 +213,9 @@ pub(package) const fn vwrites(a64: bool, text: str, r: u32) bool {
         }
         let mn = ins.slice(ms, m);
         let all = if a64 {
-            mn.starts_with("ld") || mn.starts_with("swp") || mn.starts_with("cas");
+            mn.starts_with("ld") || mn.starts_with("swp") || mn.starts_with("cas")
         } else {
-            mn.contains("xchg") || mn.contains("xadd") || mn.contains("gather");
+            mn.contains("xchg") || mn.contains("xadd") || mn.contains("gather")
         };
         // The written operand's bytes: the first or the last at bracket depth 0.
         let mut ws = m;
@@ -274,9 +274,9 @@ pub(package) fn vrename(a64: bool, text: str, from: []u32, to: []u32, out: &mut 
         }
         // The spelling's letters, then the new number.
         let letters = if a64 {
-            1usize;
+            1usize
         } else {
-            4usize;
+            4usize
         };
         out.push_str(text.slice(i, i + letters));
         out.push_u64(to[q]);
@@ -352,9 +352,9 @@ pub(package) const fn mem_form(name: str) u8 {
             for j in 0..lanes.len() {
                 if rest == lanes[j] {
                     return if k < 2 {
-                        MF_LOAD;
+                        MF_LOAD
                     } else {
-                        MF_STORE;
+                        MF_STORE
                     };
                 }
             }
@@ -378,9 +378,9 @@ pub(package) const fn mem_form(name: str) u8 {
             // The integer type names the width: si128 with `_mm`, si256 with `_mm256`, si512 with `_mm512`.
             if r2 == "ps" || r2 == "pd" || r2 == tys[p + 2] {
                 return if o < 3 {
-                    MF_LOAD;
+                    MF_LOAD
                 } else {
-                    MF_STORE;
+                    MF_STORE
                 };
             }
         }

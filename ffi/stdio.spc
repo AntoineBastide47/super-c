@@ -126,9 +126,9 @@ extend File {
     pub fn open(path: &mut String, mode: &mut String) Option<File> {
         let h = unsafe c_fopen(path.cstr(), mode.cstr());
         if h == null {
-            return Option::<File>::None;
+            return None;
         }
-        return Option::<File>::Some(File { handle: h });
+        return Some(File { handle: h });
     }
 
     /// Append `text`'s bytes to the file; returns the number of bytes written.
@@ -172,11 +172,9 @@ extend File as Writer {
     fn write(self: &mut File, bytes: []u8) Result<usize, IoError> {
         let n = unsafe fwrite(bytes.as_ptr(), 1, bytes.len(), self.handle);
         if n == 0 && bytes.len() != 0 {
-            return Result::<usize, IoError>::Err(
-                IoError { kind: IoErrorKind::Other, code: errno::errno(), op: IoOp::Write },
-            );
+            return Err(IoError { kind: Other, code: errno::errno(), op: Write });
         }
-        return Result::<usize, IoError>::Ok(n);
+        return Ok(n);
     }
 }
 

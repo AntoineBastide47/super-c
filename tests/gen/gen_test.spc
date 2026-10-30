@@ -111,9 +111,9 @@ fn gen_random_run() {
     let base = env_u64("SC_GEN_SEED", dutil::ticks_ms() as u64);
     let only = stdlib::getenv("SC_GEN_MODEL");
     let model = if only == null {
-        "";
+        ""
     } else {
-        unsafe str::from_cstr(only);
+        unsafe str::from_cstr(only)
     };
     eprintln("gen: {} runs from seed {}", runs, base);
     let mut failures: u64 = 0;

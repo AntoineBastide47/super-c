@@ -85,7 +85,7 @@ fn exp_q<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let kc = T::kc();
     let k = (x * kc.log2e_hi).round_even();
     let r = (-k).fma(Simd::splat(kc.ln2_hi), x);
-    return (r * r).fma(T::poly::<{Poly::ExpF}>(r), r), k;
+    return ((r * r).fma(T::poly::<{Poly::ExpF}>(r), r), k);
 }
 
 // y 2^k for integer-valued k: past emax in two factors (so that it overflows), below emin 0.
@@ -149,7 +149,7 @@ pub fn expm1<T: Lane, const N: usize>(x: Simd<T, N>) Simd<T, N> {
 fn log_ev<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let (m0, e0) = T::frexp(x);
     let (f, e) = log_split_m(m0, e0);
-    return e, log1p_s(f);
+    return (e, log1p_s(f));
 }
 
 // log(1 + f) for 1 + f in [sqrt(1/2), sqrt(2)]: 2s + s z P(z), s = f / (2 + f), z = s^2.
@@ -191,7 +191,7 @@ fn log1p_v<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let u = sp::<T, N>(1.0) + x;
     let (e, v) = log_ev(u);
     let v0 = log1p_s(x);
-    return choose(e.equal(sp(0.0)), v0, e.fma(Simd::splat(T::kc().ln2_hi), v)), u;
+    return (choose(e.equal(sp(0.0)), v0, e.fma(Simd::splat(T::kc().ln2_hi), v)), u);
 }
 
 /// log(1 + x), relatively accurate near 0.
@@ -256,7 +256,7 @@ pub fn cos<T: Lane, const N: usize>(x: Simd<T, N>) Simd<T, N> {
 
 /// `(sin x, cos x)`, for |x| up to 2^13 (f32) or 2^24 (f64).
 pub fn sincos<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
-    return sin(x), cos(x);
+    return (sin(x), cos(x));
 }
 
 /// The tangent, for |x| up to 2^13 (f32) or 2^24 (f64).
@@ -328,7 +328,7 @@ fn expm1_k<T: Lane, const N: usize>(a: Simd<T, N>) (Simd<T, N>, Simd<T, N>, Simd
     let kc = T::kc();
     let (q, k) = exp_q(a);
     let t = T::pow2i(at_most(k, Simd::splat(kc.sub_bits)));
-    return t.fma(q, t - T::c(1.0)), sp::<T, N>(1.0) + q, k;
+    return (t.fma(q, t - T::c(1.0)), sp::<T, N>(1.0) + q, k);
 }
 
 /// The hyperbolic sine.

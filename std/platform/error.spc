@@ -83,54 +83,54 @@ pub fn interrupted() bool {
 @platform(!windows)
 pub const fn kind_of(e: i32) IoErrorKind {
     if e == ENOENT || e == ENOTDIR || e == ESRCH {
-        return IoErrorKind::NotFound;
+        return NotFound;
     }
     if e == EPERM || e == EACCES || e == EROFS {
-        return IoErrorKind::PermissionDenied;
+        return PermissionDenied;
     }
     if e == EEXIST {
-        return IoErrorKind::AlreadyExists;
+        return AlreadyExists;
     }
     if e == EINVAL || e == ENAMETOOLONG || e == ELOOP || e == EISDIR || e == EBADF || e == EXDEV || e == ECHILD {
-        return IoErrorKind::InvalidInput;
+        return InvalidInput;
     }
     if e == EAGAIN || e == EWOULDBLOCK || e == EINPROGRESS {
-        return IoErrorKind::WouldBlock;
+        return WouldBlock;
     }
     if e == EINTR {
-        return IoErrorKind::Interrupted;
+        return Interrupted;
     }
     if e == ETIMEDOUT {
-        return IoErrorKind::TimedOut;
+        return TimedOut;
     }
     if e == ENOMEM {
-        return IoErrorKind::OutOfMemory;
+        return OutOfMemory;
     }
     if e == EMFILE || e == ENFILE || e == ENOSPC || e == EFBIG || e == E2BIG || e == EMLINK {
-        return IoErrorKind::LimitExceeded;
+        return LimitExceeded;
     }
     if e == ENOSYS || e == ENOTSUP || e == EOPNOTSUPP || e == EAFNOSUPPORT {
-        return IoErrorKind::Unsupported;
+        return Unsupported;
     }
     if e == ECONNREFUSED {
-        return IoErrorKind::Refused;
+        return Refused;
     }
     if e == ECONNRESET || e == ECONNABORTED {
-        return IoErrorKind::Reset;
+        return Reset;
     }
     if e == EADDRINUSE || e == EADDRNOTAVAIL {
-        return IoErrorKind::AddressInUse;
+        return AddressInUse;
     }
     if e == ENETUNREACH || e == EHOSTUNREACH {
-        return IoErrorKind::Unreachable;
+        return Unreachable;
     }
     if e == EPIPE || e == ENOTCONN {
-        return IoErrorKind::Closed;
+        return Closed;
     }
     if e == ECANCELED {
-        return IoErrorKind::Cancelled;
+        return Cancelled;
     }
-    return IoErrorKind::Other;
+    return Other;
 }
 
 // The Win32 codes of winerror.h, WSAE* included: one number space, so no code of one family is read in
@@ -139,22 +139,22 @@ pub const fn kind_of(e: i32) IoErrorKind {
 @platform(windows)
 pub fn kind_of(e: i32) IoErrorKind {
     return switch e {
-        2 | 3 | 15 | 53 | 67 | 126 | 127 | 161 | 267 => IoErrorKind::NotFound, // FILE_NOT_FOUND, PATH_NOT_FOUND, INVALID_DRIVE, BAD_NETPATH, BAD_NET_NAME, MOD_NOT_FOUND, PROC_NOT_FOUND, BAD_PATHNAME, DIRECTORY (a file where a directory is named: POSIX ENOTDIR)
-        5 | 19 | 32 | 33 | 1314 | 10013 => IoErrorKind::PermissionDenied, // ACCESS_DENIED, WRITE_PROTECT, SHARING_VIOLATION, LOCK_VIOLATION, PRIVILEGE_NOT_HELD, WSAEACCES
-        80 | 183 => IoErrorKind::AlreadyExists, // FILE_EXISTS, ALREADY_EXISTS
-        6 | 17 | 87 | 123 | 206 | 4390 | 10022 => IoErrorKind::InvalidInput, // INVALID_HANDLE, NOT_SAME_DEVICE, INVALID_PARAMETER, INVALID_NAME, FILENAME_EXCED_RANGE, NOT_A_REPARSE_POINT, WSAEINVAL
-        8 | 14 => IoErrorKind::OutOfMemory, // NOT_ENOUGH_MEMORY, OUTOFMEMORY
-        4 | 112 | 1450 | 10024 | 10055 => IoErrorKind::LimitExceeded, // TOO_MANY_OPEN_FILES, DISK_FULL, NO_SYSTEM_RESOURCES, WSAEMFILE, WSAENOBUFS
-        50 | 120 | 10043 | 10045 | 10047 => IoErrorKind::Unsupported, // NOT_SUPPORTED, CALL_NOT_IMPLEMENTED, WSAEPROTONOSUPPORT, WSAEOPNOTSUPP, WSAEAFNOSUPPORT
-        258 | 1460 | 10060 => IoErrorKind::TimedOut, // WAIT_TIMEOUT, TIMEOUT, WSAETIMEDOUT
-        995 | 1223 => IoErrorKind::Cancelled, // OPERATION_ABORTED, CANCELLED
-        10004 => IoErrorKind::Interrupted, // WSAEINTR
-        232 | 10035 | 10036 => IoErrorKind::WouldBlock, // NO_DATA (a pipe in no-wait mode), WSAEWOULDBLOCK, WSAEINPROGRESS
-        10061 => IoErrorKind::Refused, // WSAECONNREFUSED
-        10053 | 10054 => IoErrorKind::Reset, // WSAECONNABORTED, WSAECONNRESET
-        10048 | 10049 => IoErrorKind::AddressInUse, // WSAEADDRINUSE, WSAEADDRNOTAVAIL
-        10051 | 10065 | 11001 => IoErrorKind::Unreachable, // WSAENETUNREACH, WSAEHOSTUNREACH, WSAHOST_NOT_FOUND
-        109 | 10057 | 10058 => IoErrorKind::Closed, // BROKEN_PIPE, WSAENOTCONN, WSAESHUTDOWN
-        _ => IoErrorKind::Other,
+        2 | 3 | 15 | 53 | 67 | 126 | 127 | 161 | 267 => NotFound, // FILE_NOT_FOUND, PATH_NOT_FOUND, INVALID_DRIVE, BAD_NETPATH, BAD_NET_NAME, MOD_NOT_FOUND, PROC_NOT_FOUND, BAD_PATHNAME, DIRECTORY (a file where a directory is named: POSIX ENOTDIR)
+        5 | 19 | 32 | 33 | 1314 | 10013 => PermissionDenied, // ACCESS_DENIED, WRITE_PROTECT, SHARING_VIOLATION, LOCK_VIOLATION, PRIVILEGE_NOT_HELD, WSAEACCES
+        80 | 183 => AlreadyExists, // FILE_EXISTS, ALREADY_EXISTS
+        6 | 17 | 87 | 123 | 206 | 4390 | 10022 => InvalidInput, // INVALID_HANDLE, NOT_SAME_DEVICE, INVALID_PARAMETER, INVALID_NAME, FILENAME_EXCED_RANGE, NOT_A_REPARSE_POINT, WSAEINVAL
+        8 | 14 => OutOfMemory, // NOT_ENOUGH_MEMORY, OUTOFMEMORY
+        4 | 112 | 1450 | 10024 | 10055 => LimitExceeded, // TOO_MANY_OPEN_FILES, DISK_FULL, NO_SYSTEM_RESOURCES, WSAEMFILE, WSAENOBUFS
+        50 | 120 | 10043 | 10045 | 10047 => Unsupported, // NOT_SUPPORTED, CALL_NOT_IMPLEMENTED, WSAEPROTONOSUPPORT, WSAEOPNOTSUPP, WSAEAFNOSUPPORT
+        258 | 1460 | 10060 => TimedOut, // WAIT_TIMEOUT, TIMEOUT, WSAETIMEDOUT
+        995 | 1223 => Cancelled, // OPERATION_ABORTED, CANCELLED
+        10004 => Interrupted, // WSAEINTR
+        232 | 10035 | 10036 => WouldBlock, // NO_DATA (a pipe in no-wait mode), WSAEWOULDBLOCK, WSAEINPROGRESS
+        10061 => Refused, // WSAECONNREFUSED
+        10053 | 10054 => Reset, // WSAECONNABORTED, WSAECONNRESET
+        10048 | 10049 => AddressInUse, // WSAEADDRINUSE, WSAEADDRNOTAVAIL
+        10051 | 10065 | 11001 => Unreachable, // WSAENETUNREACH, WSAEHOSTUNREACH, WSAHOST_NOT_FOUND
+        109 | 10057 | 10058 => Closed, // BROKEN_PIPE, WSAENOTCONN, WSAESHUTDOWN
+        _ => Other,
     };
 }

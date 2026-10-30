@@ -113,7 +113,7 @@ fn write_tree(p: &cli::Proj, name: str) {
 // The checker `exe` on `<p>/<name>/std`, with `args` first.
 fn run(p: &cli::Proj, exe: &String, name: str, args: str) cli::CliResult {
     let dir = format("{}/{}", p.dir(), name);
-    return cli::exe_env_in(exe.as_str(), dir.as_str(), "SC_LEAK_CHECK", "fatal", format("{} std", args).as_str());
+    return cli::exe_env_in(exe.as_str(), &dir, "SC_LEAK_CHECK", "fatal", format("{} std", args).as_str());
 }
 
 // The clean tree with `text` written at `rel`: the checker exits with `exit` and prints `want`.
@@ -133,11 +133,11 @@ fn checker_cases() {
     let p = cli::proj_new();
     for f in ["build.toml", "main.spc", "files.spc", "scan.spc", "manifest.spc"] {
         let src = format("tools/std_packages/{}", f);
-        assert(p.copyfile(format("tool/{}", f).as_str(), src.as_str()), "the checker's source copies");
+        assert(p.copyfile(format("tool/{}", f).as_str(), &src), "the checker's source copies");
     }
     let exe = format("{}/std-packages{}", p.dir(), unsafe str::from_cstr(cli::binext()));
     let tool = format("{}/tool", p.dir());
-    let b = cli::superc_in(tool.as_str(), format("build -o \"{}\"", exe.as_str()).as_str());
+    let b = cli::superc_in(&tool, format("build -o \"{}\"", exe.as_str()).as_str());
     assert(b.ok(), "the checker builds");
 
     write_tree(&p, "clean");

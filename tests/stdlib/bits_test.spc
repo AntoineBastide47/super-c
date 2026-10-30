@@ -88,11 +88,11 @@ fn random_set<const N: usize>(rng: &mut Pcg32, r: &mut Vector<bool>) BitSet<N> {
     for i in 0..N {
         let x = rng.next_u32() % 8;
         let b = if density == 0 {
-            x < 4;
+            x < 4
         } else if density == 1 {
-            x == 0;
+            x == 0
         } else {
-            x != 0;
+            x != 0
         };
         r.push(b);
         s.set(i, b);
@@ -112,9 +112,9 @@ fn check_set<const N: usize>(s: &BitSet<N>, r: &Vector<bool>) {
         if *r.at(i) {
             count += 1;
             if first.is_none() {
-                first = Option::<usize>::Some(i);
+                first = Some(i);
             }
-            last = Option::<usize>::Some(i);
+            last = Some(i);
         }
     }
     assert_eq(s.count_ones(), count);
@@ -170,9 +170,9 @@ fn shifted(r: &Vector<bool>, k: usize, left: bool) Vector<bool> {
     let n = r.len();
     for i in 0..n {
         let b = if left {
-            i >= k && *r.at(i - k);
+            i >= k && *r.at(i - k)
         } else {
-            k < n && i < n - k && *r.at(i + k);
+            k < n && i < n - k && *r.at(i + k)
         };
         out.push(b);
     }
@@ -297,9 +297,9 @@ fn exercise_set<const N: usize>(seed: u64) {
             let k = below(&mut rng, N + 70);
             let left = coin(&mut rng);
             s = if left {
-                s << k;
+                s << k
             } else {
-                s >> k;
+                s >> k
             };
             let next = shifted(&r, k, left);
             r = next;
@@ -385,22 +385,22 @@ fn bitset_next_one_scans_words() {
     s.insert(64);
     s.insert(65);
     s.insert(299);
-    assert_eq(s.next_one(0), Option::<usize>::Some(0));
-    assert_eq(s.next_one(1), Option::<usize>::Some(64));
-    assert_eq(s.next_one(65), Option::<usize>::Some(65));
-    assert_eq(s.next_one(66), Option::<usize>::Some(299));
-    assert_eq(s.next_one(299), Option::<usize>::Some(299));
-    assert_eq(s.next_one(300), Option::<usize>::None);
-    assert_eq(s.next_one(usize::MAX), Option::<usize>::None);
+    assert_eq(s.next_one(0), Some(0));
+    assert_eq(s.next_one(1), Some(64));
+    assert_eq(s.next_one(65), Some(65));
+    assert_eq(s.next_one(66), Some(299));
+    assert_eq(s.next_one(299), Some(299));
+    assert_eq(s.next_one(300), None);
+    assert_eq(s.next_one(usize::MAX), None);
     s.remove(299);
-    assert_eq(s.next_one(66), Option::<usize>::None);
-    assert_eq(s.last_one(), Option::<usize>::Some(65));
+    assert_eq(s.next_one(66), None);
+    assert_eq(s.last_one(), Some(65));
     let e = BitSet::<300>::new();
-    assert_eq(e.first_one(), Option::<usize>::None);
-    assert_eq(e.last_one(), Option::<usize>::None);
+    assert_eq(e.first_one(), None);
+    assert_eq(e.last_one(), None);
     let z = BitSet::<0>::new();
-    assert_eq(z.next_one(0), Option::<usize>::None);
-    assert_eq(z.first_one(), Option::<usize>::None);
+    assert_eq(z.next_one(0), None);
+    assert_eq(z.first_one(), None);
 }
 
 // Both ends of one iterator meet without losing or repeating an index.
@@ -425,9 +425,9 @@ fn ones_from_both_ends<const N: usize>(seed: u64) {
             assert(lo <= left);
             assert(hi.unwrap() >= left);
             let x = if coin(&mut rng) {
-                it.next();
+                it.next()
             } else {
-                it.next_back();
+                it.next_back()
             };
             if let Some(i) = x {
                 if front.len() + back.len() < want.len() && front.len() < want.len() && *want.at(front.len()) == i {
@@ -514,7 +514,7 @@ fn bitset_string_round_trip() {
         assert_eq(text.len(), 1000);
         assert_eq(text.byte(0) == b'1', *r.at(999));
         assert_eq(text.byte(999) == b'1', *r.at(0));
-        assert(BitSet::<1000>::parse(text.as_str()).unwrap() == t);
+        assert(BitSet::<1000>::parse(&text).unwrap() == t);
     }
 }
 
@@ -672,13 +672,13 @@ fn bitvec_differential_with_counting_allocator() {
                     let a = *r.at(i);
                     let b = *ro.at(i);
                     let x = if k == 0 {
-                        a || b;
+                        a || b
                     } else if k == 1 {
-                        a && b;
+                        a && b
                     } else if k == 2 {
-                        a && !b;
+                        a && !b
                     } else {
-                        a != b;
+                        a != b
                     };
                     r.set(i, x);
                 }
@@ -737,8 +737,8 @@ fn bitvec_empty_allocates_nothing() {
         assert_eq(v.count_ones(), 0);
         assert(v.all());
         assert(!v.any());
-        assert_eq(v.first_one(), Option::<usize>::None);
-        assert_eq(v.ones().next(), Option::<usize>::None);
+        assert_eq(v.first_one(), None);
+        assert_eq(v.ones().next(), None);
         assert(v.fmt().eq_str("{}"));
     }
     assert_eq(counts.allocs, 0);
@@ -774,9 +774,9 @@ fn exercise_vec_len(n: usize) {
         v.push(true);
         r.push(true);
         check_vec(&v, &r);
-        assert_eq(v.last_one(), Option::<usize>::Some(n + 1));
-        assert_eq(v.pop(), Option::<bool>::Some(true));
-        assert_eq(v.pop(), Option::<bool>::Some(false));
+        assert_eq(v.last_one(), Some(n + 1));
+        assert_eq(v.pop(), Some(true));
+        assert_eq(v.pop(), Some(false));
         let _ = r.pop();
         let _ = r.pop();
         check_vec(&v, &r);
@@ -807,15 +807,15 @@ fn bitvec_from_bools_words_and_index() {
     assert_eq(v[0..4], 0b1101u64);
     assert_eq(v[1..=2], 0b10u64);
     assert(v.fmt().eq_str("{0, 2, 3}"));
-    assert_eq(v.next_one(1), Option::<usize>::Some(2));
-    assert_eq(v.next_one(4), Option::<usize>::None);
+    assert_eq(v.next_one(1), Some(2));
+    assert_eq(v.next_one(4), None);
     let mut w = BitVec::<Global>::with_len(130, false);
     let ww = w.words_mut();
     ww[1] = 0xF0;
     ww[2] = 1;
     assert_eq(w.count_ones(), 5);
-    assert_eq(w.first_one(), Option::<usize>::Some(68));
-    assert_eq(w.last_one(), Option::<usize>::Some(128));
+    assert_eq(w.first_one(), Some(68));
+    assert_eq(w.last_one(), Some(128));
     assert_eq(w[64..128], 0xF0u64);
     assert_eq(w[100..130], 1u64 << 28);
     let d = BitVec::<Global>::default();

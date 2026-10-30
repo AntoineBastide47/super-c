@@ -454,7 +454,7 @@ extend<K: Persist + Hash + Eq, V: Persist> Map<K, V> as Persist {
                 None => {
                     break;
                 },
-            };
+            }
         }
     }
 
@@ -485,7 +485,7 @@ extend<T: Persist + Hash + Eq> Set<T> as Persist {
                 None => {
                     break;
                 },
-            };
+            }
         }
     }
 

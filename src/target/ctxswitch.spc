@@ -228,22 +228,22 @@ fn lines(op: u16, x64: bool, win: bool) str<'static> {
     let swap = op == ir::SYS_CTXSWAP;
     if win && x64 {
         return if swap {
-            WIN_SWAP;
+            WIN_SWAP
         } else {
-            WIN_ENTRY;
+            WIN_ENTRY
         };
     }
     if x64 {
         return if swap {
-            SYSV_SWAP;
+            SYSV_SWAP
         } else {
-            SYSV_ENTRY;
+            SYSV_ENTRY
         };
     }
     return if swap {
-        A64_SWAP;
+        A64_SWAP
     } else {
-        A64_ENTRY;
+        A64_ENTRY
     };
 }
 
@@ -254,9 +254,9 @@ fn lines(op: u16, x64: bool, win: bool) str<'static> {
 pub(package) fn text(op: u16, isa: i32, fmt: u8, name: str, out: &mut String) {
     let x64 = tgt::isa(isa).name == "x86_64";
     let lab = if fmt == asmr::FMT_MACHO {
-        format("_{}", name);
+        format("_{}", name)
     } else {
-        String::from_str(name);
+        String::from_str(name)
     };
     out.push_str(".text\n");
     let win = fmt == asmr::FMT_COFF;

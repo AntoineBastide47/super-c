@@ -361,9 +361,9 @@ fn wraparound_and_growth_at_every_head_slot() {
             d.push_back(cap as i64);
             want.push(cap as i64);
             let new_cap = if cap * 2 < 8 {
-                8;
+                8
             } else {
-                cap * 2;
+                cap * 2
             };
             assert_eq(d.capacity(), new_cap);
             expect_seq(&d, &want);
@@ -482,9 +482,9 @@ fn rotations_at_every_count_and_head() {
     for full in [true, false] {
         for head in 0 as usize..16 {
             let n: usize = if full {
-                16;
+                16
             } else {
-                11;
+                11
             };
             for k in 0..n + 1 {
                 let mut d = ring_at(16, head, n);
@@ -905,9 +905,9 @@ fn random_operations_match_a_vector() {
             7 => {
                 let a = d.pop_front();
                 let b = if n == 0 {
-                    Option::<i64>::None;
+                    Option::<i64>::None
                 } else {
-                    want.remove(0);
+                    want.remove(0)
                 };
                 assert(a == b);
             },
@@ -998,7 +998,7 @@ fn random_operations_match_a_vector() {
                     want.clear();
                 }
             },
-        };
+        }
         expect_seq(&d, &want);
     }
 }
@@ -1165,9 +1165,9 @@ fn ring_buffer_random_operations_match_a_vector() {
             },
             4 => {
                 let b = if want.is_empty() {
-                    Option::<i64>::None;
+                    Option::<i64>::None
                 } else {
-                    want.remove(0);
+                    want.remove(0)
                 };
                 assert(r.pop_front() == b);
             },
@@ -1177,7 +1177,7 @@ fn ring_buffer_random_operations_match_a_vector() {
                     want.clear();
                 }
             },
-        };
+        }
         assert_eq(r.len(), want.len());
         let mut i: usize = 0;
         for x in r.iter() {

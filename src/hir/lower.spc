@@ -66,7 +66,7 @@ fn lower_to_core_call(ast: &mut Ast, def: DefId, id: NodeId) {
     let inner = ast.at_const(id).as_data.single.value;
     let callee = ast.at_const(inner).as_data.call.callee;
     ast.seed_resolution(callee, def);
-    ast.at(id).kind = NodeKind::NODE_EXPRESSION_STATEMENT;
+    ast.at(id).kind = NODE_EXPRESSION_STATEMENT;
 }
 
 // `select { v = jobs.recv() => B0  out.send(x) => B1  timeout(d) => B2 }` becomes
@@ -110,7 +110,7 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
     let letsel = add_node(
         ast,
         Node {
-            kind: NodeKind::NODE_LET,
+            kind: NODE_LET,
             span: kw,
             as_data: NodeAs { let_stmt: LetData { name: selname, ty: NODE_NONE, value: selinit, is_mutable: true } },
         },
@@ -133,9 +133,9 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
             has_default = true;
         } else {
             let f = if ad.kind == SelectArmKind::SELECT_RECV {
-                f_arm_recv;
+                f_arm_recv
             } else {
-                f_arm_send;
+                f_arm_send
             };
             let call = call_shim(ast, f, asp, sel_ref(ast, kw, letsel), ref_of(ast, ad.op, false));
             ast.push(expr_stmt(ast, call, asp));
@@ -143,11 +143,11 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
     }
     // The wait itself: bounded by a deadline, not at all, or not a wait (a `default` arm means never block).
     let waitcall = if has_default {
-        call_shim(ast, f_poll, kw, sel_ref(ast, kw, letsel), NODE_NONE);
+        call_shim(ast, f_poll, kw, sel_ref(ast, kw, letsel), NODE_NONE)
     } else if timeout_dur != NODE_NONE {
-        call_shim(ast, f_wait_to, kw, sel_ref(ast, kw, letsel), timeout_dur);
+        call_shim(ast, f_wait_to, kw, sel_ref(ast, kw, letsel), timeout_dur)
     } else {
-        call_shim(ast, f_wait, kw, sel_ref(ast, kw, letsel), NODE_NONE);
+        call_shim(ast, f_wait, kw, sel_ref(ast, kw, letsel), NODE_NONE)
     };
     ast.push(expr_stmt(ast, waitcall, kw));
 
@@ -165,16 +165,16 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
         // The operation runs only in the branch that won it: a `Some`/`Sent` result means it went through,
         // and the value of a lost race comes back in the binding rather than vanishing.
         let takef = if ad.kind == SelectArmKind::SELECT_RECV {
-            f_recv;
+            f_recv
         } else {
-            f_send;
+            f_send
         };
         let take = call_shim(ast, takef, asp, ref_of(ast, clone_place(ast, ad.op), false), ad.value);
         let stmt = if ad.binding != NODE_NONE {
             ast.at(ad.binding).as_data.let_stmt.value = take;
-            ad.binding;
+            ad.binding
         } else {
-            expr_stmt(ast, take, asp);
+            expr_stmt(ast, take, asp)
         };
         let bmark = ast.mark();
         ast.push(stmt);
@@ -183,7 +183,7 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
         chain = add_node(
             ast,
             Node {
-                kind: NodeKind::NODE_IF,
+                kind: NODE_IF,
                 span: asp,
                 as_data: NodeAs {
                     if_stmt: IfData {
@@ -199,7 +199,7 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
         ast.push(chain);
     }
     let stmts = ast.commit(mark);
-    ast.at(id).kind = NodeKind::NODE_BLOCK;
+    ast.at(id).kind = NODE_BLOCK;
     ast.at(id).as_data.block.statements = stmts;
 }
 
@@ -216,7 +216,7 @@ fn lower_parallel_for(ast: &mut Ast, package: *const loader::Package, id: NodeId
     let span = ast.at_const(id).span;
     let kw = tok::Span::new(span.start, span.start + 8); // the `parallel` keyword's own text
     let call = call_shim(ast, f, kw, fr.iterable, fr.body);
-    ast.at(id).kind = NodeKind::NODE_EXPRESSION_STATEMENT;
+    ast.at(id).kind = NODE_EXPRESSION_STATEMENT;
     ast.at(id).as_data = NodeAs { single: SingleData { value: call } };
 }
 
@@ -230,7 +230,7 @@ fn add_node(ast: &mut Ast, n: Node) NodeId {
 
 const fn ident_node(span: tok::Span) Node {
     return Node {
-        kind: NodeKind::NODE_IDENTIFIER,
+        kind: NODE_IDENTIFIER,
         span: span,
         as_data: NodeAs { name: NameData { text: span, is_mutable: false } },
     };
@@ -247,16 +247,16 @@ fn ref_of(ast: &mut Ast, operand: NodeId, mutable: bool) NodeId {
     return add_node(
         ast,
         Node {
-            kind: NodeKind::NODE_UNARY,
+            kind: NODE_UNARY,
             span: ast.at_const(operand).span,
             as_data: NodeAs {
                 unary: UnaryData {
                     op: tt::TokenType::Ampersand,
                     operand: operand,
                     qualifier: if mutable {
-                        TypeQualifier::TYPE_QUAL_MUT;
+                        TYPE_QUAL_MUT
                     } else {
-                        TypeQualifier::TYPE_QUAL_NONE;
+                        TYPE_QUAL_NONE
                     },
                 },
             },
@@ -279,29 +279,21 @@ fn call_shim(ast: &mut Ast, def: DefId, span: tok::Span, a0: NodeId, a1: NodeId)
     let args = ast.commit(mark);
     return add_node(
         ast,
-        Node {
-            kind: NodeKind::NODE_CALL,
-            span: span,
-            as_data: NodeAs { call: CallData { callee: callee, args: args } },
-        },
+        Node { kind: NODE_CALL, span: span, as_data: NodeAs { call: CallData { callee: callee, args: args } } },
     );
 }
 
 fn expr_stmt(ast: &mut Ast, value: NodeId, span: tok::Span) NodeId {
     return add_node(
         ast,
-        Node {
-            kind: NodeKind::NODE_EXPRESSION_STATEMENT,
-            span: span,
-            as_data: NodeAs { single: SingleData { value: value } },
-        },
+        Node { kind: NODE_EXPRESSION_STATEMENT, span: span, as_data: NodeAs { single: SingleData { value: value } } },
     );
 }
 
 fn block_of(ast: &mut Ast, statements: NodeList, span: tok::Span) NodeId {
     return add_node(
         ast,
-        Node { kind: NodeKind::NODE_BLOCK, span: span, as_data: NodeAs { block: BlockData { statements: statements } } },
+        Node { kind: NODE_BLOCK, span: span, as_data: NodeAs { block: BlockData { statements: statements } } },
     );
 }
 
@@ -316,13 +308,13 @@ fn clone_place(ast: &mut Ast, id: NodeId) NodeId {
         add_node(
             ast,
             Node {
-                kind: NodeKind::NODE_MEMBER,
+                kind: NODE_MEMBER,
                 span: n.span,
                 as_data: NodeAs { member: MemberData { object: obj, member: md.member, path: md.path } },
             },
-        );
+        )
     } else {
-        add_node(ast, n);
+        add_node(ast, n)
     };
     ast.seed_resolution(copy, ast.resolution_def(id));
     return copy;

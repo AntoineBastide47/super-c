@@ -135,9 +135,9 @@ fn cg_bit(name: str) u64 {
 // group off, and clearing one clears the group.
 fn cg_put(b: u64, set: bool, on: &mut u64, off: &mut u64) {
     let g = if (b & CG_PROTECTS) != 0 {
-        CG_PROTECTS;
+        CG_PROTECTS
     } else {
-        b;
+        b
     };
     if set {
         *on = *on & ~g | b;
@@ -162,9 +162,9 @@ pub(package) fn cg_flag(arg: str, on: &mut u64, off: &mut u64) bool {
     let b = cg_bit(
         arg.slice(
             if neg {
-                5;
+                5
             } else {
-                2;
+                2
             },
             arg.len(),
         ),
@@ -194,11 +194,11 @@ pub(package) fn opt_flag(arg: str) i32 {
         return c - b'0';
     }
     return if c == b's' {
-        OPT_S;
+        OPT_S
     } else if c == b'z' {
-        OPT_Z;
+        OPT_Z
     } else {
-        OPT_NONE;
+        OPT_NONE
     };
 }
 
@@ -216,9 +216,9 @@ pub(package) fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
     for k in 0..names.len() {
         let b = names[k].1;
         let (set, clear) = if negated(b) {
-            ((off & b) == b, (on & b) == b);
+            ((off & b) == b, (on & b) == b)
         } else {
-            ((on & b) == b, (off & b) == b && (b & CG_PROTECTS) == 0);
+            ((on & b) == b, (off & b) == b && (b & CG_PROTECTS) == 0)
         };
         if b == CG_FP_CONTRACT && clear {
             out.push_str(" -ffp-contract=off");
@@ -270,9 +270,9 @@ pub(package) fn link_gc(cg: u64, macho: bool) str<'static> {
         return "";
     }
     return if macho {
-        "-Wl,-dead_strip";
+        "-Wl,-dead_strip"
     } else {
-        "-Wl,--gc-sections";
+        "-Wl,--gc-sections"
     };
 }
 
@@ -465,9 +465,9 @@ fn check_steps(steps: &Vector<Step>, errs: &mut diag::Errors) {
         }
         for k in 0..st.inputs.len() + st.outputs.len() {
             let f = if k < st.inputs.len() {
-                st.inputs[k].as_str();
+                st.inputs[k].as_str()
             } else {
-                st.outputs[k - st.inputs.len()].as_str();
+                st.outputs[k - st.inputs.len()].as_str()
             };
             if !project_path(f) {
                 errs.emit(dc::MANIFEST_ERROR, 0, 1, format("[step.{}]: '{}' is not a path inside the project", nm, f));
@@ -639,17 +639,17 @@ pub(package) fn load(path: str, bootstrap: bool) Option<Manifest> {
     let src_opt = loader::read_file_mt(path, &mut mt);
     if src_opt.is_none() {
         eprintln("build: cannot read '{}'", path);
-        return Option::<Manifest>::None;
+        return None;
     }
     let src = src_opt.unwrap();
-    let (mo, errs) = parse_check(src.as_str(), path, bootstrap);
+    let (mo, errs) = parse_check(&src, path, bootstrap);
     if mo.is_none() {
         return mo;
     }
     let mut m = mo.unwrap();
-    m.src_id = dutil::str_id(src.as_str());
+    m.src_id = dutil::str_id(&src);
     m.mtime = mt;
-    return Option::<Manifest>::Some(m);
+    return Some(m);
 }
 
 /// Parse and VALIDATE a manifest, returning the diagnostics alongside it. A non-empty `file` renders and
@@ -663,7 +663,7 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
             errs.finalize(src, file);
             errs.log();
         }
-        return Option::<Manifest>::None, errs;
+        return (Option::<Manifest>::None, errs);
     }
 
     let mut m = Manifest::new();
@@ -749,7 +749,7 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
             } else if key == "simd-dispatch" {
                 set_str(it, &mut errs, &mut m.simd_dispatch);
                 let mut e9 = String::new();
-                if !cf::dispatch_ok(m.simd_dispatch.as_str(), &mut e9) {
+                if !cf::dispatch_ok(&m.simd_dispatch, &mut e9) {
                     errs.emit(dc::MANIFEST_ERROR, it.at, key.len() as u32, e9);
                 }
             } else {
@@ -1084,7 +1084,7 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
         }
     }
     check_steps(&m.steps, &mut errs);
-    if m.profile_index(m.default_profile.as_str()) < 0 {
+    if m.profile_index(&m.default_profile) < 0 {
         errs.emit(
             dc::DEFAULT_PROFILE_NOT_DEFINED,
             0,
@@ -1097,9 +1097,9 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
             errs.finalize(src, file);
             errs.log();
         }
-        return Option::<Manifest>::None, errs;
+        return (Option::<Manifest>::None, errs);
     }
-    return Option::<Manifest>::Some(m), errs;
+    return (Option::<Manifest>::Some(m), errs);
 }
 
 extend Manifest {

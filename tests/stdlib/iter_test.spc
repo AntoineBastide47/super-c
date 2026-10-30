@@ -129,31 +129,31 @@ const fn long_name(s: &String) bool {
 extend Gen as Iterator<String> {
     pub fn next(self: &mut Gen) Option<String> {
         if self.lo >= self.hi {
-            return Option::<String>::None;
+            return None;
         }
         unsafe *self.made += 1;
         self.lo += 1;
-        return Option::<String>::Some(name(self.lo - 1));
+        return Some(name(self.lo - 1));
     }
 
     pub fn size_hint(self: &Gen) (usize, Option<usize>) {
         let n: usize = if self.lo < self.hi {
-            (self.hi - self.lo) as usize;
+            (self.hi - self.lo) as usize
         } else {
-            0;
+            0
         };
-        return n, Option::<usize>::Some(n);
+        return (n, Option::<usize>::Some(n));
     }
 }
 
 extend Gen as DoubleEndedIterator<String> {
     pub fn next_back(self: &mut Gen) Option<String> {
         if self.lo >= self.hi {
-            return Option::<String>::None;
+            return None;
         }
         unsafe *self.made += 1;
         self.hi -= 1;
-        return Option::<String>::Some(name(self.hi));
+        return Some(name(self.hi));
     }
 }
 
@@ -172,21 +172,21 @@ extend Vague as DoubleEndedIterator<String> {
 extend Bag as Iterator<String> {
     pub fn next(self: &mut Bag) Option<String> {
         if self.lo >= self.hi {
-            return Option::<String>::None;
+            return None;
         }
         self.lo += 1;
         return self.v[self.lo - 1].take();
     }
 
     pub fn size_hint(self: &Bag) (usize, Option<usize>) {
-        return self.hi - self.lo, Option::<usize>::Some(self.hi - self.lo);
+        return (self.hi - self.lo, Option::<usize>::Some(self.hi - self.lo));
     }
 }
 
 extend Bag as DoubleEndedIterator<String> {
     pub fn next_back(self: &mut Bag) Option<String> {
         if self.lo >= self.hi {
-            return Option::<String>::None;
+            return None;
         }
         self.hi -= 1;
         return self.v[self.hi].take();
@@ -197,9 +197,9 @@ extend Blink as Iterator<i32> {
     pub fn next(self: &mut Blink) Option<i32> {
         self.k += 1;
         if self.k % 2 == 0 {
-            return Option::<i32>::None;
+            return None;
         }
-        return Option::<i32>::Some(self.k);
+        return Some(self.k);
     }
 }
 
@@ -436,9 +436,9 @@ fn take_while_skip_while_map_while() {
             map_while(
                 0..10,
                 |x: i32| if x < 3 {
-                    Option::<i32>::Some(x * 2);
+                    Option::<i32>::Some(x * 2)
                 } else {
-                    Option::<i32>::None;
+                    Option::<i32>::None
                 },
             ),
         ),
@@ -450,9 +450,9 @@ fn take_while_skip_while_map_while() {
             map_while(
                 bag(4),
                 |s: String| if s.len() < 2 {
-                    Option::<String>::Some(s);
+                    Option::<String>::Some(s)
                 } else {
-                    Option::<String>::None;
+                    Option::<String>::None
                 },
             ),
         ),
@@ -571,7 +571,7 @@ fn scan_threads_a_state() {
                 0,
                 fn(acc: &mut i32, x: i32) Option<i32> {
                     *acc += x;
-                    return Option::<i32>::Some(*acc);
+                    return Some(*acc);
                 },
             ),
         ),
@@ -583,10 +583,10 @@ fn scan_threads_a_state() {
         String::new(),
         fn(acc: &mut String, x: String) Option<String> {
             if acc.len() >= 4 {
-                return Option::<String>::None;
+                return None;
             }
             acc.push_string(&x);
-            return Option::<String>::Some(acc.clone());
+            return Some(acc.clone());
         },
     );
     hint_is(&s, 0, Option::<usize>::Some(9));
@@ -644,9 +644,9 @@ fn fold_reduce_for_each_count() {
         reduce(
             bag(3),
             |a: String, x: String| if a.len() >= x.len() {
-                a;
+                a
             } else {
-                x;
+                x
             },
         ).unwrap(),
         "s0",
@@ -684,9 +684,9 @@ fn collect_reserves_the_lower_hint() {
 const fn parse_digit(s: String) Result<i32, String> {
     let b = s.as_str().byte_at(1);
     if b >= b'0' && b <= b'4' {
-        return Result::<i32, String>::Ok(b - b'0');
+        return Ok(b - b'0');
     }
-    return Result::<i32, String>::Err(s);
+    return Err(s);
 }
 
 @test
@@ -702,9 +702,9 @@ fn try_collect_stops_at_the_first_failure() {
         map(
             bag(8),
             |s: String| if s.as_str() != "s5" {
-                Result::<String, i32>::Ok(s);
+                Result::<String, i32>::Ok(s)
             } else {
-                Result::<String, i32>::Err(7);
+                Result::<String, i32>::Err(7)
             },
         ),
     );
@@ -717,9 +717,9 @@ fn try_collect_stops_at_the_first_failure() {
         map(
             bag(6),
             |s: String| if s.as_str() != "s3" {
-                Option::<String>::Some(s);
+                Option::<String>::Some(s)
             } else {
-                Option::<String>::None;
+                Option::<String>::None
             },
         ),
     );
@@ -760,9 +760,9 @@ fn short_circuit_consumers_stop_and_drop_the_rest() {
     let fm = find_map(
         gen(0, 100, &mut made),
         |s: String| if s.as_str() == "s2" {
-            Option::<String>::Some(s);
+            Option::<String>::Some(s)
         } else {
-            Option::<String>::None;
+            Option::<String>::None
         },
     );
     check(fm.unwrap(), "s2");
@@ -928,9 +928,9 @@ fn randomized_double_ended_pipelines_match_index_arithmetic() {
         } else {
             let split = (rng.next_u32() % 20) as i32;
             let mid = if split < n {
-                split;
+                split
             } else {
-                n;
+                n
             };
             let joined = chain(map(0..mid, |x: i32| x * 3), map(mid..n, |x: i32| x * 3));
             let mut it = peekable(fuse(step_by(take(skip(joined, skip_n), take_n), step)));

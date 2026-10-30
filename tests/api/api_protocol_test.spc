@@ -59,7 +59,7 @@ fn q(s: str) String {
 fn call(sv: &mut pr::Server, text: str) json::JSON {
     let none = ses::RequestOptions::none();
     let r = sv.handle(text, &none);
-    return json::parse(r.as_str()).unwrap();
+    return json::parse(&r).unwrap();
 }
 
 // Member `key` of the result of reply `r`; -1 when absent.
@@ -113,7 +113,7 @@ fn query(sv: &mut pr::Server, cap: str, method: str, args: str, extra: str) json
         args,
         extra,
     );
-    return call(sv, text.as_str());
+    return call(sv, &text);
 }
 
 @test
@@ -154,7 +154,7 @@ fn requests_check_revisions_and_page_results() {
     assert_eq(items.at(1).value_str("code"), "mismatched_types_expected_found");
     let at = SRC.find("twice(2) -") as i64;
     let args = format("{{\"file\":{},\"offset\":{},\"include_declaration\":true}}", q(APP).as_str(), at);
-    let all = query(&mut sv, "navigation", "references", args.as_str(), "");
+    let all = query(&mut sv, "navigation", "references", &args, "");
     assert_eq(all.at_key("result").at_key("items").size(), 3);
     assert_eq(all.at_key("result").value_i64("next_cursor", 0), -1);
     // A one-byte limit pages one item at a time.
@@ -165,7 +165,7 @@ fn requests_check_revisions_and_page_results() {
             &mut sv,
             "navigation",
             "references",
-            args.as_str(),
+            &args,
             format(",\"limit\":1,\"cursor\":{}", cursor).as_str(),
         );
         seen += pg.at_key("result").at_key("items").size();
@@ -188,12 +188,12 @@ fn requests_check_revisions_and_page_results() {
         "{{\"id\":12,\"method\":\"query\",\"params\":{{\"workspace\":1,\"revision\":{},\"capability\":\"session\",\"method\":\"diagnostics\"}}}}",
         r2 - 1,
     );
-    assert_eq(code_of(call(&mut sv, stale.as_str())).as_str(), "stale_handle");
+    assert_eq(code_of(call(&mut sv, &stale)).as_str(), "stale_handle");
     let unchecked = format(
         "{{\"id\":13,\"method\":\"query\",\"params\":{{\"workspace\":1,\"revision\":{},\"capability\":\"session\",\"method\":\"diagnostics\"}}}}",
         r2,
     );
-    assert_eq(code_of(call(&mut sv, unchecked.as_str())).as_str(), "not_checked");
+    assert_eq(code_of(call(&mut sv, &unchecked)).as_str(), "not_checked");
     let bs = SRC.find("bool");
     let edits = format(
         "{{\"workspace\":1,\"file\":{},\"edits\":[{{\"start\":{},\"end\":{},\"text\":\"i32\"}}]}}",
@@ -201,7 +201,7 @@ fn requests_check_revisions_and_page_results() {
         bs,
         bs + 4,
     );
-    let er = call(&mut sv, req(14, "apply_edits", json::parse(edits.as_str()).unwrap()).as_str());
+    let er = call(&mut sv, req(14, "apply_edits", json::parse(&edits).unwrap()).as_str());
     assert_eq(code_of(er).as_str(), "");
     let clean = query(&mut sv, "session", "diagnostics", "{}", "");
     assert_eq(clean.at_key("result").at_key("items").size(), 1); // the unused binding alone
@@ -210,7 +210,7 @@ fn requests_check_revisions_and_page_results() {
         q(APP).as_str(),
     );
     assert_eq(
-        code_of(call(&mut sv, req(15, "apply_edits", json::parse(bad.as_str()).unwrap()).as_str())).as_str(),
+        code_of(call(&mut sv, req(15, "apply_edits", json::parse(&bad).unwrap()).as_str())).as_str(),
         "invalid_argument",
     );
     assert_eq(code_of(call(&mut sv, req(16, "close_workspace", obj(["workspace", "1"])).as_str())).as_str(), "");
@@ -228,10 +228,10 @@ fn every_query_answers() {
     let nodes = query(&mut sv, "syntax", "nodes", format("{{\"file\":{}}}", f.as_str()).as_str(), "");
     assert(nodes.at_key("result").at_key("items").size() > 10, "the syntax nodes");
     assert_eq(nodes.at_key("result").at_key("items").at(0).value_str("kind"), "Function");
-    let sym = query(&mut sv, "navigation", "symbol_at", fa.as_str(), "");
+    let sym = query(&mut sv, "navigation", "symbol_at", &fa, "");
     assert_eq(sym.at_key("result").at_key("symbol").value_str("name"), "twice");
     assert_eq(sym.at_key("result").at_key("symbol").value_str("kind"), "Function");
-    let hov = query(&mut sv, "navigation", "hover", fa.as_str(), "");
+    let hov = query(&mut sv, "navigation", "hover", &fa, "");
     assert(hov.at_key("result").value_str("text").contains("twice"), "the hover text");
     let none = query(&mut sv, "navigation", "hover", format("{{\"file\":{},\"offset\":0}}", f.as_str()).as_str(), "");
     assert(
@@ -251,7 +251,7 @@ fn every_query_answers() {
     );
     assert_eq(rn.at_key("result").at_key("items").size(), 3);
     assert_eq(rn.at_key("result").at_key("items").at(0).value_str("text"), "double");
-    let cf = query(&mut sv, "ir_views", "core_function", fa.as_str(), "");
+    let cf = query(&mut sv, "ir_views", "core_function", &fa, "");
     assert(cf.at_key("result").value_i64("blocks", 0) >= 1, "the Core IR blocks");
     let hn = query(
         &mut sv,
@@ -279,7 +279,7 @@ fn protocol_results_equal_native_results() {
     let mut native = sem::references_at(&mut s, APP, at, true, &none).unwrap();
     native.sort_by(|a: &sem::Location, b: &sem::Location| a.start.cmp(&b.start));
     let args = format("{{\"file\":{},\"offset\":{},\"include_declaration\":true}}", q(APP).as_str(), at);
-    let items = query(&mut sv, "navigation", "references", args.as_str(), "");
+    let items = query(&mut sv, "navigation", "references", &args, "");
     let it = items.at_key("result").at_key("items");
     assert_eq(it.size(), native.len());
     for i in 0..native.len() {
@@ -313,7 +313,7 @@ fn reads(sv: &mut pr::Server, path: str) bool {
         w,
         result_int(c, "revision"),
     );
-    let d = call(sv, t.as_str());
+    let d = call(sv, &t);
     let items = d.at_key("result").at_key("items");
     for i in 0..items.size() {
         if items.at(i).value_i64("severity", 0) == 1 {
@@ -336,12 +336,12 @@ fn workspaces_are_isolated_and_confined() {
     let _ = hello(&mut sv, "[\"session\"]");
     let inside = format("{}/inside/main.spc", proj.dir());
     let outside = format("{}/outside/main.spc", proj.dir());
-    assert(reads(&mut sv, inside.as_str()), "a file inside a root reads");
-    assert(!reads(&mut sv, outside.as_str()), "a file outside the roots does not read");
+    assert(reads(&mut sv, &inside), "a file inside a root reads");
+    assert(!reads(&mut sv, &outside), "a file outside the roots does not read");
     // A symbolic link inside a root that points outside it does not read either.
     let link = format("{}/inside/link.spc", proj.dir());
-    assert(fs::symlink(outside.as_str(), link.as_str()).is_ok(), "the link is made");
-    assert(!reads(&mut sv, link.as_str()), "a link out of the roots does not read");
+    assert(fs::symlink(&outside, &link).is_ok(), "the link is made");
+    assert(!reads(&mut sv, &link), "a link out of the roots does not read");
     // Two memory workspaces of one path keep their own texts.
     let mut two = pr::Server::new(limits());
     let _ = hello(&mut two, "[\"session\"]");
@@ -351,9 +351,9 @@ fn workspaces_are_isolated_and_confined() {
             APP,
             json::JSON::str(
                 if k == 0 {
-                    SRC;
+                    SRC
                 } else {
-                    "fn main() i32 {\n    return 0;\n}\n";
+                    "fn main() i32 {\n    return 0;\n}\n"
                 },
             ),
         );
@@ -372,14 +372,14 @@ fn workspaces_are_isolated_and_confined() {
             w,
             rev,
         );
-        let r = call(&mut two, t.as_str());
+        let r = call(&mut two, &t);
         let n = r.at_key("result").at_key("items").size();
         assert_eq(
             n,
             if w == 1 {
-                2usize;
+                2usize
             } else {
-                0usize;
+                0usize
             },
         );
     }
@@ -437,8 +437,8 @@ fn malformed_requests_get_errors() {
         }
         m = t;
         let none = ses::RequestOptions::none();
-        let r = sv.handle(m.as_str(), &none);
-        let v = json::parse(r.as_str()).unwrap();
+        let r = sv.handle(&m, &none);
+        let v = json::parse(&r).unwrap();
         assert(v.contains_key("id") && (v.contains_key("result") || v.contains_key("error")), r.as_str());
     }
 }
@@ -484,13 +484,13 @@ fn a_large_reference_list_comes_as_a_binary_batch() {
     let mut sv = pr::Server::new(limits());
     let _ = hello(&mut sv, "[\"session\",\"navigation\"]");
     let mut files = json::JSON::object();
-    files.emplace(APP, json::JSON::str(src.as_str()));
+    files.emplace(APP, json::JSON::str(&src));
     let mut p = obj(["kind", "\"file\"", "path", q(APP).as_str()]);
     p.emplace("files", files);
     let _ = call(&mut sv, req(2, "open_workspace", p).as_str());
     let rev = result_int(call(&mut sv, req(3, "commit", obj(["workspace", "1"])).as_str()), "revision");
     let mut mem = MemoryFiles::over_disk();
-    mem.set(APP, src.as_str());
+    mem.set(APP, &src);
     let mut s = ses::Session::open_file(APP, ses::Config::with_files("std", Box::new(mem))).unwrap();
     s.check().unwrap();
     let at = src.as_str().find("one()") as u32;
@@ -503,9 +503,9 @@ fn a_large_reference_list_comes_as_a_binary_batch() {
     let none = ses::RequestOptions::none();
     let ls = sem::references_at(&mut s, APP, at, true, &none).unwrap();
     assert_eq(ls.len(), 10001usize);
-    let r = sv.handle(text.as_str(), &none);
+    let r = sv.handle(&text, &none);
     let batch = sv.take_payload();
-    let reply = json::parse(r.as_str()).unwrap();
+    let reply = json::parse(&r).unwrap();
     let got = decode(&reply, &batch);
     assert_eq(got.len(), 10001usize);
     for i in 0..got.len() {
@@ -524,15 +524,15 @@ fn the_stdio_server_answers_frames() {
     frame(&mut input, req(2, "close_workspace", obj(["workspace", "9"])).as_str());
     input.push_str("Content-Length: 99999999\r\n\r\n");
     frame(&mut input, req(3, "close_workspace", obj(["workspace", "9"])).as_str());
-    proj.mkfile("in.bin", input.as_str());
+    proj.mkfile("in.bin", &input);
     let mut cmd = format("{} tool-server --stdio --max-frame=4096", cli::superc_path());
     let mut ip = format("{}/in.bin", proj.dir());
     let mut op = format("{}/out.bin", proj.dir());
     let mut ep = format("{}/err.txt", proj.dir());
     let rc = cli::run_io(cmd.cstr(), ip.cstr(), op.cstr(), ep.cstr());
     assert_eq(rc, 0);
-    let out = cli::read_text(op.as_str());
-    let f = stdio::fopen(op.as_str(), "rb");
+    let out = cli::read_text(&op);
+    let f = stdio::fopen(&op, "rb");
     let mut rd = transport::Reader::new(f);
     let mut replies = Vector::<String>::new();
     while let Some(m) = transport::read_message(&mut rd) {
@@ -554,17 +554,17 @@ fn a_cancel_stops_a_running_commit() {
     let cwd = process::current_dir().unwrap();
     let mut input = String::new();
     frame(&mut input, req(1, "hello", obj(["protocol_versions", "[1]", "required", "[\"session\"]"])).as_str());
-    frame(&mut input, req(2, "open_workspace", obj(["kind", "\"project\"", "path", q(cwd.as_str()).as_str()])).as_str());
+    frame(&mut input, req(2, "open_workspace", obj(["kind", "\"project\"", "path", q(&cwd).as_str()])).as_str());
     frame(&mut input, req(3, "commit", obj(["workspace", "1"])).as_str());
     frame(&mut input, req(4, "cancel", obj(["target", "3"])).as_str());
-    proj.mkfile("in.bin", input.as_str());
+    proj.mkfile("in.bin", &input);
     let mut cmd = format("{} tool-server --stdio --root={}", cli::superc_path(), cwd.as_str());
     let mut ip = format("{}/in.bin", proj.dir());
     let mut op = format("{}/out.bin", proj.dir());
     let mut ep = format("{}/err.txt", proj.dir());
     let rc = cli::run_io(cmd.cstr(), ip.cstr(), op.cstr(), ep.cstr());
     assert_eq(rc, 0);
-    let out = cli::read_text(op.as_str());
+    let out = cli::read_text(&op);
     assert(out.as_str().contains("{\"id\":2,\"result\":{\"workspace\":1"), out.as_str());
     assert(out.as_str().contains("{\"id\":3,\"error\":{\"code\":\"cancelled\""), out.as_str());
     assert(out.as_str().contains("{\"id\":4,\"result\":{}}"), out.as_str());
@@ -582,10 +582,10 @@ fn the_socket_server_serves_its_user() {
     let mut child = process::spawn(
         process::Command {
             argv: args,
-            program: Option::<str>::None,
-            env: Option::<Slice<str>>::None,
-            cwd: Option::<str>::None,
-            command_line: Option::<str>::None,
+            program: None,
+            env: None,
+            cwd: None,
+            command_line: None,
             stdin: process::Redirect::Null,
             stdout: process::Redirect::Null,
             stderr: process::Redirect::Inherit,
@@ -593,15 +593,15 @@ fn the_socket_server_serves_its_user() {
     ).unwrap();
     let mut fd: i32 = -1;
     for _ in 0..500 {
-        if let Ok(c) = sk::unix_connect(path.as_str()) {
+        if let Ok(c) = sk::unix_connect(&path) {
             fd = c;
             break;
         }
         let _ = sk::wait_fd(-1, false, 10);
     }
     assert(fd >= 0, "the server listens");
-    assert_eq(fs::stat(dir.as_str()).unwrap().permissions & 0o777, 0o700u32);
-    assert_eq(fs::stat(path.as_str()).unwrap().permissions & 0o777, 0o600u32);
+    assert_eq(fs::stat(&dir).unwrap().permissions & 0o777, 0o700u32);
+    assert_eq(fs::stat(&path).unwrap().permissions & 0o777, 0o600u32);
     let body = req(1, "hello", obj(["protocol_versions", "[1]"]));
     let mut msg = format("Content-Length: {}\r\n\r\n", body.len());
     msg.push_string(&body);

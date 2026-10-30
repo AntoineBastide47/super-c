@@ -359,9 +359,9 @@ extend<'a> PatCx<'a> {
         if k == NodeKind::NODE_PATTERN_TUPLE {
             let pd = self.f.node(pid).as_data.pattern;
             let vd = if pd.name != NODE_NONE {
-                self.f.res(pd.name);
+                self.f.res(pd.name)
             } else {
-                DefId { module: 0, node: NODE_NONE };
+                DefId { module: 0, node: NODE_NONE }
             };
             if vd.node != NODE_NONE && self.decl_kind(vd) == NodeKind::NODE_VARIANT {
                 self.norm_variant(pid, vd, pd.children, false, out);
@@ -388,9 +388,9 @@ extend<'a> PatCx<'a> {
         if k == NodeKind::NODE_PATTERN_STRUCT {
             let pd = self.f.node(pid).as_data.pattern;
             let vd = if pd.name != NODE_NONE {
-                self.f.res(pd.name);
+                self.f.res(pd.name)
             } else {
-                DefId { module: 0, node: NODE_NONE };
+                DefId { module: 0, node: NODE_NONE }
             };
             if vd.node != NODE_NONE && self.decl_kind(vd) == NodeKind::NODE_VARIANT {
                 self.norm_variant(pid, vd, pd.children, true, out);
@@ -405,7 +405,7 @@ extend<'a> PatCx<'a> {
 
     const fn decl_kind(self: &Self, d: DefId) NodeKind {
         if d.node == NODE_NONE {
-            return NodeKind::NODE_NONE_KIND;
+            return NODE_NONE_KIND;
         }
         let a = unsafe &*(&*self.pkg).module_ast_const(d.module);
         return a.at_const(d.node).kind;
@@ -415,9 +415,9 @@ extend<'a> PatCx<'a> {
     // matched type's order and width, from the type checker's record; false when it has none.
     fn int_val(self: &Self, b: NodeId, v: &mut i64, uns: &mut bool, bits: &mut u8) bool {
         let e = if self.f.node(b).kind == NodeKind::NODE_PATTERN_LITERAL {
-            self.f.node(b).as_data.single.value;
+            self.f.node(b).as_data.single.value
         } else {
-            b;
+            b
         };
         let t = self.f.node_type(b);
         if t == TYPE_NONE || self.f.ty(t).kind != TypeKind::TYPE_BUILTIN {
@@ -436,7 +436,7 @@ extend<'a> PatCx<'a> {
         return switch self.f.pat_value(e) {
             Some(x) => {
                 *v = x as i64;
-                true;
+                true
             },
             None => false,
         };
@@ -494,9 +494,9 @@ extend<'a> PatCx<'a> {
             let ld = self.f.node(v).as_data.literal;
             if ld.token_type == tt::TokenType::True || ld.token_type == tt::TokenType::False {
                 let bv: i64 = if ld.token_type == tt::TokenType::True {
-                    1;
+                    1
                 } else {
-                    0;
+                    0
                 };
                 out.push(self.leaf(PC_BOOL, bv, pid));
                 return;
@@ -894,9 +894,9 @@ extend<'a> PatCx<'a> {
             // An integer query, or a wildcard over integer heads: the interval it takes (the whole
             // domain for a wildcard; none for an empty range) splits at the heads' bounds.
             let h0 = if q0k != PC_WILD {
-                q0p;
+                q0p
             } else {
-                *self.pats.at(self.seen[wm_s] as usize);
+                *self.pats.at(self.seen[wm_s] as usize)
             };
             let mut lo = dom_min(h0.uns, h0.bits);
             let mut hi = dom_max(h0.uns, h0.bits);
@@ -991,9 +991,9 @@ extend<'a> PatCx<'a> {
             let h = self.mcells[rstart];
             let hp = *self.pats.at(h as usize);
             let cov = if from_query {
-                self.head_covers(h, c);
+                self.head_covers(h, c)
             } else {
-                hp.kind == PC_WILD || self.same_ctor(h, c);
+                hp.kind == PC_WILD || self.same_ctor(h, c)
             };
             if !cov {
                 continue;
@@ -1019,9 +1019,9 @@ extend<'a> PatCx<'a> {
         let nqs = self.mcells.len();
         for k in 0..arity {
             let cell = if from_query {
-                self.subs[(cp.sub_start + k as u32) as usize];
+                self.subs[(cp.sub_start + k as u32) as usize]
             } else {
-                self.wild(qn);
+                self.wild(qn)
             };
             self.mcells.push(cell);
         }
@@ -1217,9 +1217,9 @@ extend<'a> PatCx<'a> {
             let sp0 = t.paths.len() as u32;
             for f in 0..arity {
                 let dc: i64 = if repp.kind == PC_VARIANT {
-                    repp.val;
+                    repp.val
                 } else {
-                    -1;
+                    -1
                 };
                 t.paths.push(
                     DtPath {

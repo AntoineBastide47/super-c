@@ -1225,7 +1225,7 @@ extend<A: Allocator> String<A> as Writer {
     /// Append the bytes: always `Ok(bytes.len())`, the buffer grows on demand.
     pub fn write(self: &mut String<A>, bytes: []u8) Result<usize, IoError> {
         self.push_bytes(bytes);
-        return Result::<usize, IoError>::Ok(bytes.len());
+        return Ok(bytes.len());
     }
 }
 
@@ -1245,9 +1245,9 @@ extend<A: Allocator> String<A> as Index<u8, str> {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         if r.start > hi || hi > self.len() {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
@@ -1326,11 +1326,11 @@ pub fn sugar_mt_splice(mut s: String, piece: String) String {
             st.push(b);
         } else if b == b')' || b == b']' || b == b'}' {
             let need = if b == b')' {
-                b'(';
+                b'('
             } else if b == b']' {
-                b'[';
+                b'['
             } else {
-                b'{';
+                b'{'
             };
             if st.len() == 0 || st.pop().unwrap() != need {
                 ok = false;

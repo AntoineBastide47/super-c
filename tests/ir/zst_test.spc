@@ -17,7 +17,7 @@ fn zst_sizes_and_layout(b: &mut h::ExitBatch) {
 fn zst_vector_lifecycle(b: &mut h::ExitBatch) {
     b.add(
         "vector of ZST",
-        "static mut FREED: i64 = 0;\nstruct Z {}\nextend Z as Free { fn free(self: &mut Z) { unsafe { FREED = FREED + 1; } } }\nfn main() i32 {\n    {\n        let mut v = Vector::<Z>::new();\n        v.push(Z {});\n        v.push(Z {});\n        v.push(Z {});\n        if v.len() != 3 { return 1; }\n        let got = switch v.pop() { Some(z) => { 1; }, None => { 0; }, };\n        if got != 1 { return 2; }\n        if v.len() != 2 { return 3; }\n    }\n    if unsafe FREED != 3 { return 4; }\n    return 0;\n}\n",
+        "static mut FREED: i64 = 0;\nstruct Z {}\nextend Z as Free { fn free(self: &mut Z) { unsafe { FREED = FREED + 1; } } }\nfn main() i32 {\n    {\n        let mut v = Vector::<Z>::new();\n        v.push(Z {});\n        v.push(Z {});\n        v.push(Z {});\n        if v.len() != 3 { return 1; }\n        let got = switch v.pop() { Some(z) => { 1 }, None => { 0 }, };\n        if got != 1 { return 2; }\n        if v.len() != 2 { return 3; }\n    }\n    if unsafe FREED != 3 { return 4; }\n    return 0;\n}\n",
         0,
     );
 }
@@ -33,7 +33,7 @@ fn zst_vector_iteration_counts(b: &mut h::ExitBatch) {
 fn zst_box_and_map_and_set(b: &mut h::ExitBatch) {
     b.add(
         "Box/Map/Set with ZSTs",
-        "static mut FREED: i64 = 0;\n@derive(Hash, Eq)\nstruct Z {}\nextend Z as Free { fn free(self: &mut Z) { unsafe { FREED = FREED + 1; } } }\nfn main() i32 {\n    {\n        let b = Box::<Z>::new(Z {});\n        let _ = b.get();\n    }\n    if unsafe FREED != 1 { return 1; }\n    let mut m = Map::<u32, Z>::new();\n    m.insert(1, Z {});\n    m.insert(2, Z {});\n    if m.len() != 2 { return 2; }\n    let k: u32 = 1;\n    let got = switch m.get(&k) { Some(z) => { 1; }, None => { 0; }, };\n    if got != 1 { return 3; }\n    m.free();\n    if unsafe FREED != 3 { return 4; }\n    return 0;\n}\n",
+        "static mut FREED: i64 = 0;\n@derive(Hash, Eq)\nstruct Z {}\nextend Z as Free { fn free(self: &mut Z) { unsafe { FREED = FREED + 1; } } }\nfn main() i32 {\n    {\n        let b = Box::<Z>::new(Z {});\n        let _ = b.get();\n    }\n    if unsafe FREED != 1 { return 1; }\n    let mut m = Map::<u32, Z>::new();\n    m.insert(1, Z {});\n    m.insert(2, Z {});\n    if m.len() != 2 { return 2; }\n    let k: u32 = 1;\n    let got = switch m.get(&k) { Some(z) => { 1 }, None => { 0 }, };\n    if got != 1 { return 3; }\n    m.free();\n    if unsafe FREED != 3 { return 4; }\n    return 0;\n}\n",
         0,
     );
 }
@@ -59,7 +59,7 @@ fn zst_references_and_pointer_rules(b: &mut h::ExitBatch) {
 fn zst_in_tuples_and_generics(b: &mut h::ExitBatch) {
     b.add(
         "tuples and dual instantiation",
-        "struct Z {}\nstruct H<T> { pub v: T, pub tag: u32 }\nfn pair() (Z, i32) {\n    return Z {}, 9;\n}\nfn main() i32 {\n    let (z0, n0) = pair();\n    let _ = &z0;\n    if n0 != 9 { return 1; }\n    let t = (Z {}, 7);\n    if t.1 != 7 { return 6; }\n    let hz = H::<Z> { v: Z {}, tag: 5 };\n    let hu = H::<u64> { v: 8, tag: 6 };\n    if sizeof(H<Z>) != 4 { return 2; }\n    if sizeof(H<u64>) != 16 { return 3; }\n    if hz.tag + hu.tag != 11 { return 4; }\n    if hu.v != 8 { return 5; }\n    return 0;\n}\n",
+        "struct Z {}\nstruct H<T> { pub v: T, pub tag: u32 }\nfn pair() (Z, i32) {\n    return (Z {}, 9);\n}\nfn main() i32 {\n    let (z0, n0) = pair();\n    let _ = &z0;\n    if n0 != 9 { return 1; }\n    let t = (Z {}, 7);\n    if t.1 != 7 { return 6; }\n    let hz = H::<Z> { v: Z {}, tag: 5 };\n    let hu = H::<u64> { v: 8, tag: 6 };\n    if sizeof(H<Z>) != 4 { return 2; }\n    if sizeof(H<u64>) != 16 { return 3; }\n    if hz.tag + hu.tag != 11 { return 4; }\n    if hu.v != 8 { return 5; }\n    return 0;\n}\n",
         0,
     );
 }

@@ -507,7 +507,7 @@ extend Svc {
                     return *v;
                 },
                 None => {},
-            };
+            }
         }
         let mut t0: u64 = 0;
         if unsafe TS_ON && depth == 0 {
@@ -582,9 +582,9 @@ extend Svc {
                 return Layout { ok: false };
             }
             let k = if self.attr(y.module, y.as_data.decl, AttrKind::ATTR_C_VALUE) != null {
-                AttrKind::ATTR_C_VALUE;
+                AttrKind::ATTR_C_VALUE
             } else {
-                AttrKind::ATTR_LAYOUT;
+                AttrKind::ATTR_LAYOUT
             };
             if self.attr(y.module, y.as_data.decl, k) == null {
                 return Layout { ok: false };
@@ -628,13 +628,13 @@ extend Svc {
             }
             if y.kind == TypeKind::TYPE_MASK {
                 let w: u64 = if n <= 8 {
-                    1;
+                    1
                 } else if n <= 16 {
-                    2;
+                    2
                 } else if n <= 32 {
-                    4;
+                    4
                 } else {
-                    8;
+                    8
                 };
                 return Layout { ok: true, size: w, align: w };
             }
@@ -664,9 +664,9 @@ extend Svc {
             if self.defaults {
                 let dft = self.a(y.module).ext(y.as_data.decl).generic_param.default_type;
                 let d = if dft == NODE_NONE {
-                    DefId { module: 0, node: NODE_NONE };
+                    DefId { module: 0, node: NODE_NONE }
                 } else {
-                    self.a(y.module).resolution_def(dft);
+                    self.a(y.module).resolution_def(dft)
                 };
                 if d.node != NODE_NONE && self.has_ast(d.module) {
                     let k = self.a(d.module).at_const(d.node).kind;
@@ -919,9 +919,9 @@ extend Svc {
             }
         }
         let tag: u64 = if ast.enum_tag_is_byte(dn) {
-            1;
+            1
         } else {
-            4;
+            4
         };
         let poff = round_up(tag, un.align);
         let ssize = poff + un.size;
@@ -1106,9 +1106,9 @@ extend Svc {
             return el.size as i64;
         }
         let tag: i64 = if ast.enum_tag_is_byte(dn) {
-            1;
+            1
         } else {
-            4;
+            4
         };
         let pl = ast.at_const(vdecl).as_data.variant.payload;
         let mut vs = LayoutAcc {};

@@ -213,9 +213,9 @@ pub(package) const fn bc_is_bool(k: i32) bool {
 /// follow in `BC_*` order.
 pub(package) const fn when_var(k: i32) u32 {
     return if k == BC_TEST {
-        0u32;
+        0u32
     } else {
-        (k - BC_LOCKDEP + 1) as u32;
+        (k - BC_LOCKDEP + 1) as u32
     };
 }
 
@@ -570,13 +570,13 @@ pub(package) const fn node_vis(a: &Ast, id: NodeId) u8 {
 /// The modifier that spells visibility `vis`, with its trailing space; empty for none.
 pub(package) const fn vis_text(vis: u8) str<'static> {
     return if vis == VIS_PUB {
-        "pub ";
+        "pub "
     } else if vis == VIS_PACKAGE {
-        "pub(package) ";
+        "pub(package) "
     } else if vis == VIS_MODULE {
-        "pub(module) ";
+        "pub(module) "
     } else {
-        "";
+        ""
     };
 }
 
@@ -796,6 +796,8 @@ pub(package) struct LetData {
 }
 pub(package) struct SingleData {
     pub(package) value: NodeId,
+    /// NODE_EXPRESSION_STATEMENT: it ends in a written `;`, so it is no block's value.
+    pub(package) semi: bool,
 }
 pub(package) struct VaOpData {
     pub(package) op: u8,
@@ -1021,16 +1023,36 @@ pub(package) const fn intrinsic_value_name(name: str) bool {
 }
 
 /// The value a block whose last statement is `n` (node `id`) yields in value position: the
-/// expression of an expression statement, a block, or an `if` with an `else`; NODE_NONE for any other.
+/// expression of an expression statement without `;`, a block, or an `if` with an `else`; NODE_NONE
+/// for any other.
 pub(package) const fn tail_value(n: &Node, id: NodeId) NodeId {
     if n.kind == NodeKind::NODE_EXPRESSION_STATEMENT {
-        return n.as_data.single.value;
+        return pick(n.as_data.single.semi, NODE_NONE, n.as_data.single.value);
     }
     if n.kind == NodeKind::NODE_BLOCK || n.kind == NodeKind::NODE_IF && n.as_data.if_stmt.else_branch != NODE_NONE {
         return id;
     }
     return NODE_NONE;
 }
+
+/// `fmt -s`: a text of a function body: a `let` annotation (`SIMP_LET`, `node` the let), or a turbofish
+/// list on a path's object (`SIMP_OBJECT`, `node` the member), on a callee (`SIMP_CALLEE`, `node` the
+/// call) or on a member (`SIMP_TARGS`, `node` the member); [start, end) in the source. `old` holds the
+/// field a check without the text replaced; `ok` is set when the body checks with every node typed as
+/// before without it.
+@derive(Copy, Persist)
+pub(package) struct SimpCand {
+    pub(package) kind: u8,
+    pub(package) node: NodeId,
+    pub(package) start: u32,
+    pub(package) end: u32,
+    pub(package) old: u32,
+    pub(package) ok: bool,
+}
+pub(package) const SIMP_LET: u8 = 0;
+pub(package) const SIMP_OBJECT: u8 = 1;
+pub(package) const SIMP_CALLEE: u8 = 2;
+pub(package) const SIMP_TARGS: u8 = 3;
 
 /// Whether a node of kind `k` keeps its payload outside itself (`NodeExt`).
 @always_inline
@@ -1393,9 +1415,9 @@ pub(package) fn vec_err(mask: bool, bt: BuiltinType, tname: str, n: u64) String 
         return format("`{}` cannot be a SIMD lane type{}", tname, help);
     }
     let ty = if mask {
-        format("Mask<{}>", n);
+        format("Mask<{}>", n)
     } else {
-        format("Simd<{}, {}>", tname, n);
+        format("Simd<{}, {}>", tname, n)
     };
     if !pow2 {
         return format("`{}` needs a power-of-two lane count (2, 4, 8, 16, 32, or 64)", ty.as_str());
@@ -1444,9 +1466,9 @@ pub(package) const fn bt_range(bt: BuiltinType, ptr32: bool, lo: &mut i128, hi: 
         return;
     }
     let top = if w == 64 {
-        0x7FFFFFFFFFFFFFFFi64;
+        0x7FFFFFFFFFFFFFFFi64
     } else {
-        (1i64 << (w - 1) as i64) - 1;
+        (1i64 << (w - 1) as i64) - 1
     };
     *lo = i128::from_i64(-top - 1);
     *hi = i128::from_i64(top);
@@ -2361,12 +2383,9 @@ pub(package) const fn array_ty(k: TypeKind, elem: TypeId, lt: TypeId, ly: &Ty) T
         return Ty { kind: k, qualifier: ARR_SYM, as_data: TyAs { arr: TyArr { elem: elem, len: lt } } };
     }
     if ly.kind == TypeKind::TYPE_CONST && ly.as_data.value >= 0 && ly.as_data.value <= 0xFFFFFFFFi64 {
-        return Ty {
-            kind: TypeKind::TYPE_ARRAY,
-            as_data: TyAs { arr: TyArr { elem: elem, len: ly.as_data.value as u32 } },
-        };
+        return Ty { kind: TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: ly.as_data.value as u32 } } };
     }
-    return Ty { kind: TypeKind::TYPE_ARRAY, qualifier: ARR_SYM, as_data: TyAs { arr: TyArr { elem: elem, len: lt } } };
+    return Ty { kind: TYPE_ARRAY, qualifier: ARR_SYM, as_data: TyAs { arr: TyArr { elem: elem, len: lt } } };
 }
 
 /// The largest tuple arity: a tuple is the prelude instance `TupleN<..>`, and an instance records
@@ -3004,9 +3023,7 @@ extend TypePool {
         let _ = self.insert_ty(Ast::ty_canon(&Ty { kind: TypeKind::TYPE_ERROR, concrete: true }));
         for b in 0..BuiltinType::BT_COUNT as u8 {
             let _ = self.insert_ty(
-                Ast::ty_canon(
-                    &Ty { kind: TypeKind::TYPE_BUILTIN, concrete: true, as_data: TyAs { builtin: b as BuiltinType } },
-                ),
+                Ast::ty_canon(&Ty { kind: TYPE_BUILTIN, concrete: true, as_data: TyAs { builtin: b as BuiltinType } }),
             );
         }
         let e = self.insert_ty(Ast::ty_canon(&Ty { kind: TypeKind::TYPE_ERROR, qualifier: 1, concrete: true }));
@@ -3143,7 +3160,7 @@ extend TypePool {
                         }
                     }
                 }
-                ok;
+                ok
             },
             _ => true,
         };
@@ -3171,7 +3188,7 @@ extend TypePool {
             return self.intern_g(v);
         }
         let idx = self.insert_inst(&it);
-        return self.intern_g(Ty { kind: TypeKind::TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
+        return self.intern_g(Ty { kind: TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
     }
 
     pub(package) fn intern_dyn_g(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
@@ -3182,15 +3199,11 @@ extend TypePool {
                 unsafe it.args[j] = unsafe args[j];
             }
             let di = self.insert_inst(&it);
-            return self.intern_g(
-                Ty { kind: TypeKind::TYPE_DYN, qualifier: qual, module: module, as_data: TyAs { inst: di } },
-            );
+            return self.intern_g(Ty { kind: TYPE_DYN, qualifier: qual, module: module, as_data: TyAs { inst: di } });
         }
         let ii = self.intern_instance_g(module, decl, args, n);
         let idx = self.at(ii as usize).as_data.inst;
-        return self.intern_g(
-            Ty { kind: TypeKind::TYPE_DYN, qualifier: qual, module: module, as_data: TyAs { inst: idx } },
-        );
+        return self.intern_g(Ty { kind: TYPE_DYN, qualifier: qual, module: module, as_data: TyAs { inst: idx } });
     }
 
     /// `Ast::intern_assoc` for this table.
@@ -3200,7 +3213,7 @@ extend TypePool {
             unsafe it.args[j] = unsafe args[j];
         }
         let idx = self.insert_inst(&it);
-        return self.intern_g(Ty { kind: TypeKind::TYPE_ASSOC, module: module, as_data: TyAs { inst: idx } });
+        return self.intern_g(Ty { kind: TYPE_ASSOC, module: module, as_data: TyAs { inst: idx } });
     }
 
     /// The function-pointer type `qual` of signature record `it` (children already this table's),
@@ -3222,11 +3235,7 @@ extend TypePool {
         }
         let idx = self.insert_inst(it);
         return self.intern_g(
-            Ty {
-                kind: TypeKind::TYPE_FUNCTION,
-                qualifier: qual,
-                as_data: TyAs { fnp: TyFn { decl: NODE_NONE, sig: idx } },
-            },
+            Ty { kind: TYPE_FUNCTION, qualifier: qual, as_data: TyAs { fnp: TyFn { decl: NODE_NONE, sig: idx } } },
         );
     }
 
@@ -3257,14 +3266,12 @@ extend TypePool {
 
     /// `Ast::const_value` for this table.
     pub(package) fn const_value_g(self: &mut Self, bits: i64, bt: BuiltinType) TypeId {
-        return self.intern_g(
-            Ty { kind: TypeKind::TYPE_CONST, qualifier: bt as u8, module: 0, as_data: TyAs { value: bits } },
-        );
+        return self.intern_g(Ty { kind: TYPE_CONST, qualifier: bt as u8, module: 0, as_data: TyAs { value: bits } });
     }
 
     pub(package) fn intern_clin_g(self: &mut Self, l: &ConstLin) TypeId {
         let ci = self.insert_clin(l);
-        return self.intern_g(Ty { kind: TypeKind::TYPE_CONST_EXPR, module: 0, as_data: TyAs { inst: ci } });
+        return self.intern_g(Ty { kind: TYPE_CONST_EXPR, module: 0, as_data: TyAs { inst: ci } });
     }
 }
 
@@ -3436,6 +3443,17 @@ pub(package) struct Ast {
     /// The `[T; N]` index nodes outside `unsafe` whose index is not a constant: lowering checks the
     /// index at run time, and an index out of bounds panics, as a view's does.
     pub(package) checked_index: Set<u32>,
+    /// The `E::V` value paths whose bare `V` names another binding in scope (a local, an item, an
+    /// import): the lint that writes `V` for `E::V` skips them.
+    pub(package) bare_taken: Set<u32>,
+    /// While set, `set_type` logs each write in `tlog` as `node << 32 | its type before`: a second
+    /// check of one body reads the nodes it typed (deferred inference, `fmt -s`).
+    pub(package) tlog_on: bool,
+    pub(package) tlog: Vector<u64>,
+    /// `fmt -s`: the texts of function bodies the checker tries without (`SimpCand`), by start.
+    pub(package) simp_cands: Vector<SimpCand>,
+    /// `fmt -s` (`tc::SIMP_CONFIRM`): the span start of each function whose body check reported an error.
+    pub(package) simp_errs: Vector<u32>,
     /// Per integer constant pattern (a literal-pattern value or a range bound): its value in the
     /// matched type, as two's complement bits. The pattern matrix reads values here, so a named or
     /// associated constant, a limit and every literal spelling take part in coverage.
@@ -3553,6 +3571,10 @@ extend Ast as Free {
         self.call_lt_at.free();
         self.op_method.free();
         self.checked_index.free();
+        self.bare_taken.free();
+        self.tlog.free();
+        self.simp_cands.free();
+        self.simp_errs.free();
         self.pat_vals.free();
         self.seeds.free();
         self.closure_facts.free();
@@ -3589,9 +3611,9 @@ extend Ast {
     pub(package) fn settle_dead(self: &mut Self) {
         self.bc_dead.sort_by(
             |x: &tok::Span, y: &tok::Span| if x.start != y.start {
-                x.start.cmp(&y.start);
+                x.start.cmp(&y.start)
             } else {
-                y.end.cmp(&x.end);
+                y.end.cmp(&x.end)
             },
         );
         let mut w: usize = 0;
@@ -3637,7 +3659,7 @@ extend Ast {
         a.b.nodes.reserve(token_count - token_count * 7 / 32);
         a.children.reserve(token_count / 8);
         a.b.children.reserve(token_count / 4);
-        a.nodes.push(Node { kind: NodeKind::NODE_NONE_KIND });
+        a.nodes.push(Node { kind: NODE_NONE_KIND });
         return a;
     }
 
@@ -3656,9 +3678,9 @@ extend Ast {
     /// `add` writes to.
     pub(package) fn add_ext(self: &mut Self, kind: NodeKind, span: tok::Span, data: NodeExt) NodeId {
         let sv = if self.sink_body {
-            &mut self.b.ext;
+            &mut self.b.ext
         } else {
-            &mut self.ext;
+            &mut self.ext
         };
         let x = sv.len() as u32;
         let name = switch kind {
@@ -3846,7 +3868,7 @@ extend Ast {
     pub(package) fn call_info_of(self: &Self, n: NodeId) Option<u64> {
         assert(!self.call_info_rel.on || !Ast::in_body(n), "call_info of a released body node");
         return switch self.call_info.get(&n) {
-            Some(v) => Option::<u64>::Some(*v),
+            Some(v) => Some(*v),
             None => Option::<u64>::None,
         };
     }
@@ -3884,13 +3906,13 @@ extend Ast {
             for i in mark as usize..self.scratch.len() {
                 self.b.children.push(self.scratch[i]);
             }
-            NodeList { start: start as u32 | NODE_BODY, len: need as u32 };
+            NodeList { start: start as u32 | NODE_BODY, len: need as u32 }
         } else {
             let start = self.children.run_start(need, 0);
             for i in mark as usize..self.scratch.len() {
                 self.children.push(self.scratch[i]);
             }
-            NodeList { start: start as u32, len: need as u32 };
+            NodeList { start: start as u32, len: need as u32 }
         };
         self.scratch.truncate(mark as usize);
         return list;
@@ -4242,7 +4264,7 @@ extend Ast {
                 ci = self.pool.insert_clin(l) | TYPE_PROV;
             }
         }
-        return self.intern_type(Ty { kind: TypeKind::TYPE_CONST_EXPR, module: 0, as_data: TyAs { inst: ci } });
+        return self.intern_type(Ty { kind: TYPE_CONST_EXPR, module: 0, as_data: TyAs { inst: ci } });
     }
 
     pub(package) const fn const_lin_at(self: &Self, i: u32) &ConstLin {
@@ -4284,7 +4306,7 @@ extend Ast {
             ts_add(TS_INST, 1);
         }
         let idx = self.intern_rec(&it);
-        return self.intern_type(Ty { kind: TypeKind::TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
+        return self.intern_type(Ty { kind: TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
     }
 
     // The index of instance-table record `it`: the package table's when it holds it (or is open),
@@ -4309,9 +4331,9 @@ extend Ast {
     /// (`lts_encode`). Safety: `slots` must point at `nret + np + lts_slots(lts)` readable TypeIds.
     pub(package) fn intern_fn_sig(self: &mut Self, slots: *const TypeId, nret: u32, np: u32, is_move: bool, lts: u64) TypeId {
         let q = if is_move {
-            FN_SIG | FN_MOVE;
+            FN_SIG | FN_MOVE
         } else {
-            FN_SIG;
+            FN_SIG
         };
         self.ilock_enter();
         let r = self.intern_sig_i(slots, nret, np, q, lts);
@@ -4357,11 +4379,7 @@ extend Ast {
         self.ilock_enter();
         let idx = self.intern_rec(it);
         let r = self.intern_type(
-            Ty {
-                kind: TypeKind::TYPE_FUNCTION,
-                qualifier: q,
-                as_data: TyAs { fnp: TyFn { decl: NODE_NONE, sig: idx } },
-            },
+            Ty { kind: TYPE_FUNCTION, qualifier: q, as_data: TyAs { fnp: TyFn { decl: NODE_NONE, sig: idx } } },
         );
         self.ilock_leave();
         return r;
@@ -4376,7 +4394,7 @@ extend Ast {
         let mut it = TyInstance { module: 0, decl: NODE_NONE, n: 1 };
         it.args[0] = sig;
         let idx = self.intern_rec(&it);
-        let r = self.intern_type(Ty { kind: TypeKind::TYPE_DYN, qualifier: qual, as_data: TyAs { inst: idx } });
+        let r = self.intern_type(Ty { kind: TYPE_DYN, qualifier: qual, as_data: TyAs { inst: idx } });
         self.ilock_leave();
         return r;
     }
@@ -4491,9 +4509,7 @@ extend Ast {
             return TYPE_ERROR;
         }
         let idx = self.type_at(ii).as_data.inst;
-        return self.intern_type(
-            Ty { kind: TypeKind::TYPE_DYN, qualifier: qual, module: module, as_data: TyAs { inst: idx } },
-        );
+        return self.intern_type(Ty { kind: TYPE_DYN, qualifier: qual, module: module, as_data: TyAs { inst: idx } });
     }
 
     /// The associated type `decl` (an interface's `type Name;`, module `module`) of `args[0]` under the
@@ -4508,7 +4524,7 @@ extend Ast {
         }
         self.ilock_enter();
         let idx = self.intern_rec(&it);
-        let r = self.intern_type(Ty { kind: TypeKind::TYPE_ASSOC, module: module, as_data: TyAs { inst: idx } });
+        let r = self.intern_type(Ty { kind: TYPE_ASSOC, module: module, as_data: TyAs { inst: idx } });
         self.ilock_leave();
         return r;
     }
@@ -4729,9 +4745,7 @@ extend Ast {
     /// A const-generic argument value of integer type `bt` (two's complement `bits`), interned as a
     /// module-independent TYPE_CONST.
     pub(package) fn const_value(self: &mut Self, bits: i64, bt: BuiltinType) TypeId {
-        return self.intern_type(
-            Ty { kind: TypeKind::TYPE_CONST, qualifier: bt as u8, module: 0, as_data: TyAs { value: bits } },
-        );
+        return self.intern_type(Ty { kind: TYPE_CONST, qualifier: bt as u8, module: 0, as_data: TyAs { value: bits } });
     }
 
     /// `[elem; lt]` for length type `lt` of this pool: a TYPE_CONST in the u32 range is a count,
@@ -4754,9 +4768,9 @@ extend Ast {
         }
         let simd = y.kind == TypeKind::TYPE_SIMD;
         let d = if self.gt.p == null {
-            DefId {};
+            DefId {}
         } else {
-            pick(simd, unsafe (*self.gt.p).simd, unsafe (*self.gt.p).mask);
+            pick(simd, unsafe (*self.gt.p).simd, unsafe (*self.gt.p).mask)
         };
         *out = TyInstance { module: d.module, decl: d.node, n: pick(simd, 2, 1) as u8 };
         out.args[0] = pick(simd, y.as_data.arr.elem, y.as_data.arr.len);
@@ -4873,7 +4887,7 @@ extend Ast {
                         }
                     }
                 }
-                true;
+                true
             },
             _ => true,
         };
@@ -4902,7 +4916,7 @@ extend Ast {
                 if ty.arr_sym() {
                     nt.as_data.arr.len = self.reintern(src, ty.as_data.arr.len);
                 }
-                self.intern_type(nt);
+                self.intern_type(nt)
             },
             TYPE_INSTANCE => {
                 let inst = *src.instance(ty.as_data.inst);
@@ -4910,12 +4924,12 @@ extend Ast {
                 for i in 0..inst.n {
                     unsafe na[i] = self.reintern(src, unsafe inst.args[i]);
                 }
-                self.intern_instance(inst.module, inst.decl, &na[0], inst.n);
+                self.intern_instance(inst.module, inst.decl, &na[0], inst.n)
             },
             TYPE_FIELD_PROJECTION => {
                 let mut nt = ty;
                 nt.as_data.proj.owner = self.reintern(src, ty.as_data.proj.owner);
-                self.intern_type(nt);
+                self.intern_type(nt)
             },
             TYPE_ASSOC => {
                 let inst = *src.instance(ty.as_data.inst);
@@ -4923,7 +4937,7 @@ extend Ast {
                 for i in 0..inst.n {
                     unsafe na[i] = self.reintern(src, unsafe inst.args[i]);
                 }
-                self.intern_assoc(inst.module, inst.decl, &na[0], inst.n);
+                self.intern_assoc(inst.module, inst.decl, &na[0], inst.n)
             },
             TYPE_DYN => {
                 // dyn payload is an instance index (interface + optional type args): remap it
@@ -4934,14 +4948,14 @@ extend Ast {
                     unsafe na[i] = self.reintern(src, unsafe inst.args[i]);
                 }
                 let r9 = if inst.decl == NODE_NONE {
-                    self.intern_dyn_fn(na[0], ty.qualifier);
+                    self.intern_dyn_fn(na[0], ty.qualifier)
                 } else {
                     let ii = self.intern_instance(inst.module, inst.decl, &na[0], inst.n);
                     let mut nd = ty;
                     nd.as_data.inst = self.type_at(ii).as_data.inst;
-                    self.intern_type(nd);
+                    self.intern_type(nd)
                 };
-                r9;
+                r9
             },
             TYPE_FUNCTION => {
                 let mut it = TyInstance { module: 0, decl: NODE_NONE, n: 0 };
@@ -4952,11 +4966,11 @@ extend Ast {
                     }
                 }
                 let r9 = if ty.fn_sig() {
-                    self.intern_sig_rec(&it, ty.qualifier);
+                    self.intern_sig_rec(&it, ty.qualifier)
                 } else {
-                    self.intern_type(ty);
+                    self.intern_type(ty)
                 };
-                r9;
+                r9
             },
             _ => self.intern_type(ty),
         };
@@ -5007,6 +5021,37 @@ extend Ast {
             return null;
         }
         return self.mono.at((idx - 1) as usize);
+    }
+
+    /// Drop what a check recorded for node `n` (its conversion, bound call, `dyn` and deref uses, operator
+    /// method, call info, index check, pattern value, and its instance's arguments) before a second check
+    /// of its body: a record the second check does not make again must not stay.
+    pub(package) fn forget_facts(self: &mut Self, n: NodeId) {
+        let mi = slot_of(&self.mono_at, &self.b.mono_at, n);
+        if mi != 0 {
+            self.mono.index_mut(mi as usize - 1).n = 0;
+        }
+        let k = (n & NODE_BODY_MASK) as usize;
+        let (ma, da, ya) = if (n & NODE_BODY) != 0 {
+            (&mut self.b.mono_at, &mut self.b.deref_at, &mut self.b.dyn_at)
+        } else {
+            (&mut self.mono_at, &mut self.deref_at, &mut self.dyn_at)
+        };
+        if k < ma.len() {
+            ma.set(k, 0);
+        }
+        if k < da.len() {
+            da.set(k, 0);
+        }
+        if k < ya.len() {
+            ya.set(k, 0);
+        }
+        let _ = self.coerce_at.remove(&n);
+        let _ = self.bound_call_at.remove(&n);
+        let _ = self.op_method.remove(&n);
+        let _ = self.call_info.remove(&n);
+        let _ = self.checked_index.remove(&n);
+        let _ = self.pat_vals.remove(&n);
     }
 
     /// Record the conversion `node` needs. Last writer wins: a node re-checked against a new expected
@@ -5100,18 +5145,18 @@ extend Ast {
     @always_inline
     pub(package) const fn at(self: &mut Self, id: NodeId) &mut Node {
         let sv = if (id & NODE_BODY) != 0 {
-            &mut self.b.nodes;
+            &mut self.b.nodes
         } else {
-            &mut self.nodes;
+            &mut self.nodes
         };
         return sv.index_mut((id & NODE_BODY_MASK) as usize);
     }
     @always_inline
     pub(package) const fn at_const(self: &Self, id: NodeId) &Node {
         let sv = if (id & NODE_BODY) != 0 {
-            &self.b.nodes;
+            &self.b.nodes
         } else {
-            &self.nodes;
+            &self.nodes
         };
         return sv.at((id & NODE_BODY_MASK) as usize);
     }
@@ -5165,18 +5210,18 @@ extend Ast {
         }
         let x = self.at_const(id).as_data.ext.at as usize;
         let sv = if (id & NODE_BODY) != 0 {
-            &mut self.b.ext;
+            &mut self.b.ext
         } else {
-            &mut self.ext;
+            &mut self.ext
         };
         return sv.index_mut(x);
     }
     @always_inline
     pub(package) const fn list(self: &Self, list: NodeList) *const NodeId {
         let sv = if (list.start & NODE_BODY) != 0 {
-            &self.b.children;
+            &self.b.children
         } else {
-            &self.children;
+            &self.children
         };
         return sv.ptr_at((list.start & NODE_BODY_MASK) as usize);
     }
@@ -5242,9 +5287,9 @@ extend Ast {
     pub(package) const fn resolution_def(self: &Self, ref_id: NodeId) DefId {
         // synthesized nodes (post-resolve desugars) have no slot: unresolved, not an abort
         let sv = if (ref_id & NODE_BODY) != 0 {
-            &self.b.resolutions;
+            &self.b.resolutions
         } else {
-            &self.resolutions;
+            &self.resolutions
         };
         let k = (ref_id & NODE_BODY_MASK) as usize;
         if k >= sv.len() {
@@ -5255,9 +5300,9 @@ extend Ast {
     @always_inline
     pub(package) const fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) {
         let sv = if (ref_id & NODE_BODY) != 0 {
-            &mut self.b.resolutions;
+            &mut self.b.resolutions
         } else {
-            &mut self.resolutions;
+            &mut self.resolutions
         };
         sv.set((ref_id & NODE_BODY_MASK) as usize, decl);
     }
@@ -5307,7 +5352,7 @@ extend Ast {
                 self.closure_at.insert(node, self.closure_facts.len() as u32);
                 self.closure_facts.push(f);
             },
-        };
+        }
         self.ilock_leave();
     }
 
@@ -5374,7 +5419,7 @@ extend Ast {
             None => {
                 return null;
             },
-        };
+        }
     }
     pub(package) fn closure_fact_mut(self: &mut Self, node: NodeId) *mut ClosureFact {
         switch self.closure_at.get(&node) {
@@ -5385,7 +5430,7 @@ extend Ast {
             None => {
                 return null;
             },
-        };
+        }
     }
     /// The capture facts of closure `f`, from its first capture.
     pub(package) const fn caps_of(self: &Self, f: *const ClosureFact) *const CapFact {
@@ -5499,9 +5544,9 @@ extend Ast {
     pub(package) const fn unsafe_claims(self: &Self, owner: NodeId) u32 {
         let at = self.attr_of(owner, AttrKind::ATTR_UNSAFE);
         return if at == null {
-            0u32;
+            0u32
         } else {
-            unsafe (*at).arg;
+            unsafe (*at).arg
         };
     }
 
@@ -5525,9 +5570,9 @@ extend Ast {
             return n.as_data.field.ty;
         }
         return if is_tuple {
-            mid;
+            mid
         } else {
-            NODE_NONE;
+            NODE_NONE
         };
     }
 
@@ -5608,10 +5653,13 @@ extend Ast {
     }
     @always_inline
     pub(package) const fn set_type(self: &mut Self, n: NodeId, t: TypeId) {
+        if self.tlog_on {
+            self.tlog.push(n as u64 << 32 | self.type_of(n) as u64);
+        }
         let tv = if (n & NODE_BODY) != 0 {
-            &mut self.b.types;
+            &mut self.b.types
         } else {
-            &mut self.types;
+            &mut self.types
         };
         tv.set((n & NODE_BODY_MASK) as usize, t);
     }
@@ -5621,9 +5669,9 @@ extend Ast {
         // constant engine reads through partially-typed modules and must see "untyped", not a
         // bounds abort
         let tv = if (n & NODE_BODY) != 0 {
-            &self.b.types;
+            &self.b.types
         } else {
-            &self.types;
+            &self.types
         };
         let k = (n & NODE_BODY_MASK) as usize;
         if k >= tv.len() {
@@ -5677,9 +5725,9 @@ extend Ast {
                 }
             } else if k == NodeKind::NODE_EXTEND || k == NodeKind::NODE_INTERFACE {
                 let members = if k == NodeKind::NODE_EXTEND {
-                    self.ext(id).extend_def.items;
+                    self.ext(id).extend_def.items
                 } else {
-                    self.ext(id).interface_def.items;
+                    self.ext(id).interface_def.items
                 };
                 for j in 0..members.len {
                     let m = unsafe self.list(members)[j as usize];
@@ -5711,9 +5759,9 @@ pub(package) struct SyntaxStats {
 @always_inline
 const fn slot_of(v: &Vector<u32>, vb: &Vector<u32>, node: NodeId) u32 {
     let tv = if (node & NODE_BODY) != 0 {
-        vb;
+        vb
     } else {
-        v;
+        v
     };
     let k = (node & NODE_BODY_MASK) as usize;
     if k >= tv.len() {
@@ -5753,7 +5801,7 @@ pub(package) const fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_sta
             return k as BuiltinType;
         }
     }
-    return BuiltinType::BT_COUNT;
+    return BT_COUNT;
 }
 
 /// The value of float literal text `raw`, decimal or hex (`0x1.8p3`), with `_` separators and an
@@ -5777,7 +5825,7 @@ pub(package) fn float_literal_value(src: str, raw: tok::Span, single: bool) Opti
     }
     if single {
         return switch txt.parse_f32() {
-            Some(v) => Option::<f64>::Some(v),
+            Some(v) => Some(v),
             None => Option::<f64>::None,
         };
     }
@@ -5802,11 +5850,11 @@ const fn hex_float_value(t: str, single: bool) Option<f64> {
         }
         let lc = c | 0x20u8;
         let d: u64 = if c >= b'0' && c <= b'9' {
-            c - b'0';
+            c - b'0'
         } else if lc >= b'a' && lc <= b'f' {
-            (lc - b'a') as u64 + 10;
+            (lc - b'a') as u64 + 10
         } else {
-            return Option::<f64>::None;
+            return None;
         };
         any = true;
         if mant < 1u64 << 60 {
@@ -5823,7 +5871,7 @@ const fn hex_float_value(t: str, single: bool) Option<f64> {
         }
     }
     if !any || i + 1 >= t.len() {
-        return Option::<f64>::None;
+        return None;
     }
     i += 1;
     let neg = t[i] == b'-';
@@ -5831,12 +5879,12 @@ const fn hex_float_value(t: str, single: bool) Option<f64> {
         i += 1;
     }
     if i >= t.len() {
-        return Option::<f64>::None;
+        return None;
     }
     let mut pe: i64 = 0;
     while i < t.len() {
         if t[i] < b'0' || t[i] > b'9' {
-            return Option::<f64>::None;
+            return None;
         }
         // Past 100000 the value is zero or infinite in every float format.
         if pe < 100000 {
@@ -5845,12 +5893,12 @@ const fn hex_float_value(t: str, single: bool) Option<f64> {
         i += 1;
     }
     e += if neg {
-        0 - pe;
+        0 - pe
     } else {
-        pe;
+        pe
     };
     if mant == 0 {
-        return Option::<f64>::Some(0.0);
+        return Some(0.0);
     }
     if sticky {
         mant |= 1; // mant has 61 or more bits: bit 0 lies below every rounding point
@@ -5866,18 +5914,18 @@ const fn hex_float_value(t: str, single: bool) Option<f64> {
     }
     let drop = bits - keep;
     if drop > 64 {
-        return Option::<f64>::Some(0.0);
+        return Some(0.0);
     }
     if drop > 0 {
         let q = if drop == 64 {
-            0u64;
+            0u64
         } else {
-            mant >> drop as u64;
+            mant >> drop as u64
         };
         let rem = mant - if drop == 64 {
-            0u64;
+            0u64
         } else {
-            q << drop as u64;
+            q << drop as u64
         };
         let half = 1u64 << (drop - 1) as u64;
         mant = q;
@@ -5887,10 +5935,10 @@ const fn hex_float_value(t: str, single: bool) Option<f64> {
         e += drop;
     }
     if mant == 0 {
-        return Option::<f64>::Some(0.0);
+        return Some(0.0);
     }
     if e + (64 - mant.leading_zeros() as i64) - 1 > emax {
-        return Option::<f64>::Some(1.0 as f64 / 0.0 as f64);
+        return Some(1.0 as f64 / 0.0 as f64);
     }
     // mant * 2^e is a value of the format, so every scaling step below is exact.
     let mut v = mant as f64;
@@ -5907,7 +5955,7 @@ const fn hex_float_value(t: str, single: bool) Option<f64> {
     } else {
         v = v * (1u64 << e as u64) as f64;
     }
-    return Option::<f64>::Some(v);
+    return Some(v);
 }
 
 /// The value of a decimal integer literal (`_` separators and an integer suffix allowed), -1 for

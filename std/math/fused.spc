@@ -114,9 +114,9 @@ fn dot_lanes<T: MatKernel>(a: []T, b: []T) T {
 // (measured on an M3 Max and on an M5 Pro); the kernel otherwise.
 fn product_lanes<T: MatKernel>(c: []mut T, a: []T, b: []T, m: usize, k: usize, n: usize) {
     let lanes = if n == 1 {
-        m < 64 || m * k > 1048576;
+        m < 64 || m * k > 1048576
     } else {
-        m * k * n <= 1024;
+        m * k * n <= 1024
     };
     if !lanes {
         // Column-major storage read row-major is the transpose: c^T = b^T * a^T.
@@ -470,9 +470,9 @@ extend<T: LargeElem> LargeVec<T> {
         for i in 0..self.len() {
             e.push(
                 if sub {
-                    self.e[i] - b.e[i];
+                    self.e[i] - b.e[i]
                 } else {
-                    self.e[i] + b.e[i];
+                    self.e[i] + b.e[i]
                 },
             );
         }

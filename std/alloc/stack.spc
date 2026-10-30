@@ -114,10 +114,10 @@ const FREED: usize = 1;
 // A region's state, at the start of its own address range.
 @platform(!wasm)
 struct Region {
-    pub(module) len: usize, // the bytes of the range: first, where `sc_rt_stk_release` reads it
-    pub(module) top: usize, // the end of the top block: the next free byte
-    pub(module) last: usize, // the start of the top block; 0 when the region holds none
-    pub(module) commit: usize, // the end of the committed bytes
+    len: usize, // the bytes of the range: first, where `sc_rt_stk_release` reads it
+    top: usize, // the end of the top block: the next free byte
+    last: usize, // the start of the top block; 0 when the region holds none
+    commit: usize, // the end of the committed bytes
 }
 
 // The current region, made at the first use.
@@ -259,9 +259,9 @@ extend Region {
         let page = sc_runtime::sc_rt_page_size();
         let have = self.commit - base;
         let mut want = if have > self.len / 2 {
-            self.len;
+            self.len
         } else {
-            have * 2;
+            have * 2
         };
         if want < end - base {
             want = (end - base + page - 1) / page * page;

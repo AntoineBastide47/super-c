@@ -158,7 +158,7 @@ fn filled(n: usize) (Hive<i64>, Vector<HiveHandle<i64>>) {
     for i in 0..n {
         hs.push(h.insert(i as i64));
     }
-    return h, hs;
+    return (h, hs);
 }
 
 @test
@@ -277,14 +277,14 @@ fn iteration_skips_every_removed_range() {
                         0 => a + j,
                         1 => b - 1 - j,
                         2 => if j < (k + 1) / 2 {
-                            a + 2 * j;
+                            a + 2 * j
                         } else {
-                            a + 2 * (j - (k + 1) / 2) + 1;
+                            a + 2 * (j - (k + 1) / 2) + 1
                         },
                         _ => if j % 2 == 0 {
-                            a + j / 2;
+                            a + j / 2
                         } else {
-                            b - 1 - j / 2;
+                            b - 1 - j / 2
                         },
                     };
                     assert_eq(unsafe h.remove(*hs.at(i)), i as i64);

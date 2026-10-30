@@ -385,18 +385,18 @@ fn main() i32 {
     let a = chosen()(0);
     t.join();
     let want = if detect::has(HI) {
-        2;
+        2
     } else if detect::has(LO) {
-        1;
+        1
     } else {
-        0;
+        0
     };
     print("{}", a);
     // One detection, by the constructor; the same choice on each call and thread.
     return if a == want && unsafe A == a && chosen()(0) == a && sc_cpu::sc_cpu_query_count() == 1 {
-        0;
+        0
     } else {
-        1;
+        1
     };
 }
 )";
@@ -411,7 +411,7 @@ fn dispatch_build(flags: str) (cli::Proj, bool) {
         b.show();
     }
     let built = b.exit == 0;
-    return p, built;
+    return (p, built);
 }
 
 // A run of the build `p` of `dispatch_build` (`built` when it built) with environment `env`: its
@@ -425,12 +425,12 @@ fn dispatch_exec(p: &cli::Proj, built: bool, env: str) String {
     let mut out = format("{}/.out", root);
     let mut err = format("{}/.err", root);
     let rc = cli::run_with(cmd.cstr(), null, out.cstr(), err.cstr(), env);
-    let e = cli::read_text(err.as_str());
+    let e = cli::read_text(&err);
     if rc != 0 {
         eprintln("[{}]: exit {}: {}", env, rc, e.as_str());
         return String::from_str("fail");
     }
-    return cli::read_text(out.as_str());
+    return cli::read_text(&out);
 }
 
 // Build `DISPATCH` with `flags` and run it once: its output, "fail" when it fails.

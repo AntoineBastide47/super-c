@@ -11,14 +11,14 @@ fn simd_baseline_kernels_match_the_scalar_loops() {
         return; // the C compiler builds it
     }
     let arch = if ARCH == Arch::AArch64 {
-        "aarch64";
+        "aarch64"
     } else {
-        "x86_64";
+        "x86_64"
     };
     let srcs: []str = if ARCH == Arch::AArch64 {
-        ["neon"];
+        ["neon"]
     } else {
-        ["sse2", "avx2", "avx512"];
+        ["sse2", "avx2", "avx512"]
     };
     let dir = fs::realpath("bench/simd_baseline").unwrap();
     let p = cli::proj_new();
@@ -32,12 +32,12 @@ fn simd_baseline_kernels_match_the_scalar_loops() {
         "import kernels;\n\nfn main() i32 {\n    let m = kernels::first_mismatch();\n    if m.len() != 0 {\n        eprintln(\"{}\", m.as_str());\n        return 1;\n    }\n    return 0;\n}\n",
     );
     let out = format("{}/build/simd_baseline/{}", root, arch);
-    assert(fs::mkdir_all(out.as_str()).is_ok(), "the library directory");
+    assert(fs::mkdir_all(&out).is_ok(), "the library directory");
     let ar_env = stdlib::getenv("AR");
     let ar = if ar_env != null && unsafe *ar_env != 0 as char {
-        unsafe str::from_cstr(ar_env);
+        unsafe str::from_cstr(ar_env)
     } else {
-        "ar";
+        "ar"
     };
     let mut arc = format("{} rcs \"{}/libsimd_baseline.a\"", ar, out.as_str());
     for s in srcs {

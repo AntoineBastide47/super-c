@@ -4,19 +4,16 @@
 import fmt::builder as fbld;
 import ast::ast as *;
 import tests::harness as h;
+import tests::cli_harness as cli;
+import module::loader as loader;
 import string as cstring;
 
 // Parse + format at `width`. Asserts the source parses (goldens are full programs).
 fn fmt_of(src: str, width: i32) String {
-    return fmt_mode(src, width, false);
-}
-
-// `fmt_of`, with the `--migrate` rewrites when `migrate`.
-fn fmt_mode(src: str, width: i32, migrate: bool) String {
     let pa = h::parse_ast_for_fmt(src);
     assert(pa.errors == 0, "golden source does not parse");
     let mut out = String::new();
-    fbld::format_program(&pa.ast, src, width, migrate, &mut out);
+    fbld::format_program(&pa.ast, src, width, &mut out);
     return out;
 }
 
@@ -154,8 +151,8 @@ fn golden_struct_literal_postfix_and_conditions() {
         "fn f() i32 {\n    let a = G::<i32> { v: 1 }.v;\n    let b = m::H { a: [1, 2] }.a[1];\n    let c = G::<i32> { v: 2 }.get();\n    return a + b + c;\n}\n",
     );
     expect_fmt(
-        "fn f(){if (G::<i32>{v:2}).v==2&&g([S{a:1}][0].a){}while (S{a:1}).a>0{}for i in 0..(S{a:2}).a{}switch (S{a:1}).a{_=>{},};if let Some(x)=(S{a:1}).o{}}",
-        "fn f() {\n    if (G::<i32> { v: 2 }).v == 2 && g([S { a: 1 }][0].a) {}\n    while (S { a: 1 }).a > 0 {}\n    for i in 0..(S { a: 2 }).a {}\n    switch (S { a: 1 }).a {\n        _ => {},\n    };\n    if let Some(x) = (S { a: 1 }).o {}\n}\n",
+        "fn f(){if (G::<i32>{v:2}).v==2&&g([S{a:1}][0].a){}while (S{a:1}).a>0{}for i in 0..(S{a:2}).a{}switch (S{a:1}).a{_=>{},}if let Some(x)=(S{a:1}).o{}}",
+        "fn f() {\n    if (G::<i32> { v: 2 }).v == 2 && g([S { a: 1 }][0].a) {}\n    while (S { a: 1 }).a > 0 {}\n    for i in 0..(S { a: 2 }).a {}\n    switch (S { a: 1 }).a {\n        _ => {},\n    }\n    if let Some(x) = (S { a: 1 }).o {}\n}\n",
     );
 }
 
@@ -327,7 +324,7 @@ fn golden_fmt_skip() {
     expect_fmt(src, src);
     let pa = h::parse_ast_for_fmt(src);
     let mut out = String::new();
-    assert_eq(fbld::format_program(&pa.ast, src, 120, false, &mut out), 3);
+    assert_eq(fbld::format_program(&pa.ast, src, 120, &mut out), 3);
 }
 
 @test
@@ -335,7 +332,7 @@ fn emitted_c_identical() {
     let ugly = "struct Pair{pub a:i32,pub b:i32}\nextend Pair{fn sum(self:&Self)i32{return self.a+self.b;}}\nfn main()i32{\nlet p=Pair{a:1,b:2,};\nlet mut t=0;\nfor i in 0..10{t=t+p.sum()*i;}\nreturn t&0;\n}";
     let f = fmt_of(ugly, 120);
     let c1 = h::compile_c(ugly);
-    let c2 = h::compile_c(f.as_str());
+    let c2 = h::compile_c(&f);
     assert(c1.ok(), "ugly variant does not compile");
     assert(c2.ok(), "formatted variant does not compile");
     assert(unsafe cstring::strcmp(c1.code, c2.code) == 0, "emitted C differs between ugly and formatted variants");
@@ -401,8 +398,8 @@ fn golden_dyn_reference() {
 @test
 fn golden_pattern_mut_binding() {
     expect_fmt(
-        "fn f(o: i32) i32 { switch o { 1 => { return 1; }, _ => { return 0; }, }; }\nenum O { N, S(i32), }\nfn g(o: O) i32 { return switch o { S(mut x) => { x = x + 1; x; }, N => { 0; }, }; }",
-        "fn f(o: i32) i32 {\n    switch o {\n        1 => {\n            return 1;\n        },\n        _ => {\n            return 0;\n        },\n    };\n}\nenum O {\n    N,\n    S(i32),\n}\nfn g(o: O) i32 {\n    return switch o {\n        S(mut x) => {\n            x = x + 1;\n            x;\n        },\n        N => {\n            0;\n        },\n    };\n}\n",
+        "fn f(o: i32) i32 { switch o { 1 => { return 1; }, _ => { return 0; }, } }\nenum O { N, S(i32), }\nfn g(o: O) i32 { return switch o { S(mut x) => { x = x + 1; x }, N => { 0 }, }; }",
+        "fn f(o: i32) i32 {\n    switch o {\n        1 => {\n            return 1;\n        },\n        _ => {\n            return 0;\n        },\n    }\n}\nenum O {\n    N,\n    S(i32),\n}\nfn g(o: O) i32 {\n    return switch o {\n        S(mut x) => {\n            x = x + 1;\n            x\n        },\n        N => {\n            0\n        },\n    };\n}\n",
     );
 }
 
@@ -421,8 +418,8 @@ fn asm_statement_formatting() {
 @test
 fn golden_if_let_while_let() {
     expect_fmt(
-        "fn f(o:Option<i32>){'a: while   let Some(x)=g(){ // n\nh(x);}\nwhile let Some(y) = g() { h(y); }\nif let Some(y)=o{h(y);}else if let None=o{h(0);}else{h(1);}\nlet w=if let Some(q)=o{q;}else{0;};\nif c(){h(2);}else if let Some(z)=o{h(z);}\n}",
-        "fn f(o: Option<i32>) {\n    'a: while let Some(x) = g() {\n        // n\n        h(x);\n    }\n    while let Some(y) = g() {\n        h(y);\n    }\n    if let Some(y) = o {\n        h(y);\n    } else if let None = o {\n        h(0);\n    } else {\n        h(1);\n    }\n    let w = if let Some(q) = o {\n        q;\n    } else {\n        0;\n    };\n    if c() {\n        h(2);\n    } else if let Some(z) = o {\n        h(z);\n    }\n}\n",
+        "fn f(o:Option<i32>){'a: while   let Some(x)=g(){ // n\nh(x);}\nwhile let Some(y) = g() { h(y); }\nif let Some(y)=o{h(y);}else if let None=o{h(0);}else{h(1);}\nlet w=if let Some(q)=o{q}else{0};\nif c(){h(2);}else if let Some(z)=o{h(z);}\n}",
+        "fn f(o: Option<i32>) {\n    'a: while let Some(x) = g() {\n        // n\n        h(x);\n    }\n    while let Some(y) = g() {\n        h(y);\n    }\n    if let Some(y) = o {\n        h(y);\n    } else if let None = o {\n        h(0);\n    } else {\n        h(1);\n    }\n    let w = if let Some(q) = o {\n        q\n    } else {\n        0\n    };\n    if c() {\n        h(2);\n    } else if let Some(z) = o {\n        h(z);\n    }\n}\n",
     );
 }
 
@@ -439,8 +436,8 @@ fn golden_vectors() {
 fn golden_if_expression_as_range_bound() {
     // The parentheses stay: `a..if c { x } else { y }` would read as a range ending at `if` with a body.
     expect_fmt(
-        "fn f(a:usize,b:usize){for i in a..(if b>2{b;}else{2;}){g(i);}let x=(if b>2{b;}else{2;})..a;}",
-        "fn f(a: usize, b: usize) {\n    for i in a..(if b > 2 {\n        b;\n    } else {\n        2;\n    }) {\n        g(i);\n    }\n    let x = (if b > 2 {\n        b;\n    } else {\n        2;\n    })..a;\n}\n",
+        "fn f(a:usize,b:usize){for i in a..(if b>2{b}else{2}){g(i);}let x=(if b>2{b}else{2})..a;}",
+        "fn f(a: usize, b: usize) {\n    for i in a..(if b > 2 {\n        b\n    } else {\n        2\n    }) {\n        g(i);\n    }\n    let x = (if b > 2 {\n        b\n    } else {\n        2\n    })..a;\n}\n",
     );
 }
 
@@ -457,25 +454,43 @@ fn golden_range_bounds_the_parser_refuses() {
 fn golden_range_bound_starting_with_an_if() {
     // The bound is parenthesized as a whole when its first token is the `if`: a call or an operator after it.
     expect_fmt(
-        "fn f(a:usize,b:usize){let r=a..(if b>2{b;}else{2;}).len();let s=a..(if b>2{b;}else{2;})+1;}",
-        "fn f(a: usize, b: usize) {\n    let r = a..(if b > 2 {\n        b;\n    } else {\n        2;\n    }.len());\n    let s = a..(if b > 2 {\n        b;\n    } else {\n        2;\n    } + 1);\n}\n",
+        "fn f(a:usize,b:usize){let r=a..(if b>2{b}else{2}).len();let s=a..(if b>2{b}else{2})+1;}",
+        "fn f(a: usize, b: usize) {\n    let r = a..(if b > 2 {\n        b\n    } else {\n        2\n    }.len());\n    let s = a..(if b > 2 {\n        b\n    } else {\n        2\n    } + 1);\n}\n",
     );
 }
 
-// The newer forms: fmt keeps the `;` of a statement `switch`, of a value block's last expression and
-// the list of `return a, b;` as written; `--migrate` writes them without `;` and as `return (a, b);`.
-// A statement arm block keeps its `;`. Both outputs are idempotent under their mode.
+// The newer forms print as written: a statement `switch` without `;`, a value block's last expression
+// without `;` (its value), `return (a, b);` and `return a, b;`, and a statement block's last expression
+// with its `;`. A file of comments only prints them from its first column.
 @test
-fn golden_newer_forms_and_migrate() {
-    let src = "enum E { A, B }\nfn f(e: E) (i32, i32) {\n    let v = if true { 1; } else { 2; };\n    switch e { A => { v; }, B => {}, };\n    let k = { let q = 3; q; };\n    return v, k;\n}\n";
+fn golden_newer_forms() {
     expect_fmt(
-        src,
-        "enum E {\n    A,\n    B,\n}\nfn f(e: E) (i32, i32) {\n    let v = if true {\n        1;\n    } else {\n        2;\n    };\n    switch e {\n        A => {\n            v;\n        },\n        B => {},\n    };\n    let k = {\n        let q = 3;\n        q;\n    };\n    return v, k;\n}\n",
+        "enum E { A, B }\nfn f(e: E) (i32, i32) {\n    let v = if true { 1 } else { 2 };\n    switch e { A => { v; }, B => {}, }\n    let k = { let q = 3; q };\n    if v > k { return v,k; }\n    return (v, k);\n}\n",
+        "enum E {\n    A,\n    B,\n}\nfn f(e: E) (i32, i32) {\n    let v = if true {\n        1\n    } else {\n        2\n    };\n    switch e {\n        A => {\n            v;\n        },\n        B => {},\n    }\n    let k = {\n        let q = 3;\n        q\n    };\n    if v > k {\n        return v, k;\n    }\n    return (v, k);\n}\n",
     );
-    let want = "enum E {\n    A,\n    B,\n}\nfn f(e: E) (i32, i32) {\n    let v = if true {\n        1\n    } else {\n        2\n    };\n    switch e {\n        A => {\n            v;\n        },\n        B => {},\n    }\n    let k = {\n        let q = 3;\n        q\n    };\n    return (v, k);\n}\n";
-    let out = fmt_mode(src, 120, true);
-    assert(out.as_str() == want, "migrated output mismatch");
-    let again = fmt_mode(want, 120, true);
-    assert(again.as_str() == want, "migration is not idempotent");
-    expect_fmt(want, want);
+    expect_fmt("// a\n\n// b\n", "// a\n\n// b\n");
+}
+
+// `fmt -s` removes the turbofish lists and `let` annotations a body does not need, and keeps each one
+// whose removal changes a type: the annotation that types a literal, the turbofish of a literal
+// argument. The program means the same after it.
+@test
+fn simplify_removes_what_bodies_do_not_need() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "fn id<T>(x: T) T {\n    return x;\n}\nfn main() i32 {\n    let mut v: Vector<u8> = Vector::<u8>::new();\n    let x: u8 = 3;\n    v.push(x);\n    let n: usize = v.len();\n    let s = id::<u8>(x);\n    let t = id::<u16>(5);\n    let o: Option<i32> = Option::<i32>::None;\n    let q: i32 = 9;\n    return n as i32 + s as i32 + t as i32 + o.unwrap_or(0) + q - 18;\n}\n",
+    );
+    let mut mp = String::from_str(p.dir());
+    mp.push_str("/main.spc");
+    let mut args = String::from_str("fmt -s \"");
+    args.push_str(&mp);
+    args.push_str("\"");
+    assert(p.run_raw(&args).ok());
+    let got = loader::read_file(&mp).unwrap();
+    assert(
+        got.as_str() == "fn id<T>(x: T) T {\n    return x;\n}\nfn main() i32 {\n    let mut v = Vector::new();\n    let x: u8 = 3;\n    v.push(x);\n    let n = v.len();\n    let s = id(x);\n    let t = id::<u16>(5);\n    let o = Option::None;\n    let q = 9;\n    return n as i32 + s as i32 + t as i32 + o.unwrap_or(0) + q - 18;\n}\n",
+        "fmt -s keeps exactly what fixes a type",
+    );
+    assert(p.compile("main.spc").ok());
 }

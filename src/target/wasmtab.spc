@@ -656,9 +656,9 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, f: &mut Field, f2: &mut Fi
         K::V128 | K::SHUF => {
             for k in 0..16u32 {
                 let v = if k < 8 {
-                    n.lo >> 8 * k;
+                    n.lo >> 8 * k
                 } else {
-                    n.hi >> 8 * (k - 8);
+                    n.hi >> 8 * (k - 8)
                 };
                 if r.imm == K::SHUF && (v & 0xFF) >= 32 {
                     return false;
@@ -681,7 +681,7 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, f: &mut Field, f2: &mut Fi
         _ => {
             return false;
         },
-    };
+    }
     return true;
 }
 
@@ -770,9 +770,9 @@ pub(package) fn decode(b: []u8, at: usize, end: usize, n: &mut Ins) u32 {
     for ri in 0..rows.len() {
         let r = rows[ri];
         let rp: u8 = if pfx == 0xFC || pfx == 0xFD {
-            pfx;
+            pfx
         } else {
-            0u8;
+            0u8
         };
         if r.pfx != rp || r.code as u64 != code {
             continue;
@@ -849,9 +849,9 @@ pub(package) fn decode(b: []u8, at: usize, end: usize, n: &mut Ins) u32 {
             },
             K::F32 | K::F64 => {
                 let nb: usize = if r.imm == K::F32 {
-                    4;
+                    4
                 } else {
-                    8;
+                    8
                 };
                 ok = q + nb <= end;
                 if ok {
@@ -890,7 +890,7 @@ pub(package) fn decode(b: []u8, at: usize, end: usize, n: &mut Ins) u32 {
             _ => {
                 ok = false;
             },
-        };
+        }
         if !ok {
             return 0;
         }

@@ -84,14 +84,14 @@ extend Model {
             Ok(i) => {
                 let old = *self.vals.at(i);
                 self.vals.set(i, v);
-                return Option::<u64>::Some(old);
+                return Some(old);
             },
             Err(i) => {
                 self.keys.insert(i, k);
                 self.vals.insert(i, v);
             },
-        };
-        return Option::<u64>::None;
+        }
+        return None;
     }
 
     fn remove(self: &mut Model, k: u64) Option<u64> {
@@ -101,18 +101,18 @@ extend Model {
                 return self.vals.remove(i);
             },
             Err(_) => {},
-        };
-        return Option::<u64>::None;
+        }
+        return None;
     }
 
     fn get(self: &Model, k: u64) Option<u64> {
         switch self.keys.binary_search(&k) {
             Ok(i) => {
-                return Option::<u64>::Some(*self.vals.at(i));
+                return Some(*self.vals.at(i));
             },
             Err(_) => {},
-        };
-        return Option::<u64>::None;
+        }
+        return None;
     }
 
     // The keys that `lo` and `hi` admit, in order.
@@ -140,9 +140,9 @@ extend Model {
 
 const fn copied(o: Option<&u64>) Option<u64> {
     if let Some(x) = o {
-        return Option::<u64>::Some(*x);
+        return Some(*x);
     }
-    return Option::<u64>::None;
+    return None;
 }
 
 fn key_str(i: u64) String {
@@ -171,12 +171,12 @@ fn keys_of<A: Allocator>(m: &BTreeMap<u64, u64, A>) Vector<u64> {
 
 const fn bound_of(kind: u32, k: &u64) Bound<&u64> {
     if kind == 0 {
-        return Bound::<&u64>::Included(k);
+        return Included(k);
     }
     if kind == 1 {
-        return Bound::<&u64>::Excluded(k);
+        return Excluded(k);
     }
-    return Bound::<&u64>::Unbounded;
+    return Unbounded;
 }
 
 // Insert, remove, get, range and end operations on random keys below `universe`, checked against the
@@ -198,9 +198,9 @@ fn differential(seed: u64, universe: u32, ops: u64) {
         } else if op < 94 {
             let k2 = (rng.next_u32() % universe) as u64;
             let (a, b) = if k <= k2 {
-                (k, k2);
+                (k, k2)
             } else {
-                (k2, k);
+                (k2, k)
             };
             let lk = rng.next_u32() % 3;
             let mut hk = rng.next_u32() % 3;
@@ -425,13 +425,13 @@ fn drain_in_order(order: u32) {
         let mut live = c.live;
         for j in 0..n {
             let k = if order == 0 {
-                j;
+                j
             } else if order == 1 {
-                n - 1 - j;
+                n - 1 - j
             } else if j % 2 == 0 {
-                n / 2 + j / 2;
+                n / 2 + j / 2
             } else {
-                n / 2 - 1 - j / 2;
+                n / 2 - 1 - j / 2
             };
             assert(m.remove(&k).is_some());
             m.check_invariants();
@@ -563,7 +563,7 @@ fn entry_api() {
         Vacant(_) => {
             assert(false, "key 5 is present");
         },
-    };
+    }
     assert(!m.contains_key(&5));
     switch m.entry(5) {
         Occupied(_) => {
@@ -573,7 +573,7 @@ fn entry_api() {
             assert_eq(*e.key(), 5);
             *e.insert(500) += 1;
         },
-    };
+    }
     assert_eq(*m.get(&5).unwrap(), 501);
     switch m.entry(6) {
         Occupied(e) => {
@@ -582,7 +582,7 @@ fn entry_api() {
         Vacant(_) => {
             assert(false, "key 6 is present");
         },
-    };
+    }
     assert_eq(*m.get(&6).unwrap(), 600);
     m.check_invariants();
 }
@@ -620,9 +620,9 @@ fn iterators_both_ends_and_size_hint() {
     // Alternate the ends until they meet in the middle.
     loop {
         let r = if seen % 3 == 0 {
-            it.next_back();
+            it.next_back()
         } else {
-            it.next();
+            it.next()
         };
         if r.is_none() {
             break;
@@ -846,10 +846,10 @@ struct PairIter {
 extend PairIter as Iterator<(u64, u64)> {
     pub fn next(self: &mut PairIter) Option<(u64, u64)> {
         if self.i >= self.v.len() {
-            return Option::<(u64, u64)>::None;
+            return None;
         }
         self.i += 1;
-        return Option::<(u64, u64)>::Some(*self.v.at(self.i - 1));
+        return Some(*self.v.at(self.i - 1));
     }
 }
 
@@ -1079,11 +1079,11 @@ fn comparison_bound(order: u32) {
     let mut keys = Vector::<u64>::with_capacity(n as usize);
     for i in 0..n {
         let k = if order == 0 {
-            i;
+            i
         } else if order == 1 {
-            n - 1 - i;
+            n - 1 - i
         } else {
-            i.wrapping_mul(0x9E3779B97F4A7C15u64) % (n * 8);
+            i.wrapping_mul(0x9E3779B97F4A7C15u64) % (n * 8)
         };
         keys.push(k);
     }

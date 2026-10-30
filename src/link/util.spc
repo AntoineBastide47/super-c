@@ -5,9 +5,9 @@ import std::platform::fs;
 pub(package) fn read(path: str) Option<Vector<u8>> {
     let mut b = Vector::<u8>::new();
     if !read_append(path, &mut b) {
-        return Option::<Vector<u8>>::None;
+        return None;
     }
-    return Option::<Vector<u8>>::Some(b);
+    return Some(b);
 }
 
 /// Append the bytes of file `path` to `out`; false when it cannot be read.
@@ -174,7 +174,7 @@ pub(package) fn listed(exports: &Option<Set<String>>, name: str) bool {
     return switch exports {
         Some(s) => {
             let k = String::from_str(name);
-            s.contains(&k);
+            s.contains(&k)
         },
         None => true,
     };

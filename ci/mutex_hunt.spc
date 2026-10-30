@@ -418,7 +418,7 @@ fn hunt_mixed_callers() i64 {
                 _ => {
                     break;
                 },
-            };
+            }
         }
         finish("mixed callers", &wg);
         let g = m.get().lock();

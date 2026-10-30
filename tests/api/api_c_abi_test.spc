@@ -75,14 +75,14 @@ int main(int argc, char **argv) {
 @platform(macos | linux)
 fn exports_only_the_c_abi(libdir: str) {
     let lib = if PLATFORM == Platform::MacOS {
-        format("{}/libsuperc.dylib", libdir);
+        format("{}/libsuperc.dylib", libdir)
     } else {
-        format("{}/libsuperc.so", libdir);
+        format("{}/libsuperc.so", libdir)
     };
     let flags = if PLATFORM == Platform::MacOS {
-        "-gU";
+        "-gU"
     } else {
-        "-D --defined-only";
+        "-D --defined-only"
     };
     let mut cmd = format("nm {} {}", flags, lib.as_str());
     let mut op = format("{}/.nm", libdir);
@@ -125,7 +125,7 @@ fn a_c_client_uses_libsuperc() {
     }
     assert(r.ok(), "libsuperc builds");
     let libdir = format("{}/build/debug-lib", proj.dir());
-    exports_only_the_c_abi(libdir.as_str());
+    exports_only_the_c_abi(&libdir);
     if !cli::has_cc() {
         return;
     }
@@ -173,7 +173,7 @@ fn the_exported_functions_follow_their_contract() {
     assert_eq(abi::session_diagnostics(h, gen, &mut r), 0);
     assert_eq(abi::result_count(r), 0);
     abi::result_free(r);
-    let src = cli::read_text(path.as_str());
+    let src = cli::read_text(&path);
     let at = src.as_str().find("twice(2)") as u32;
     assert_eq(abi::session_symbol_at(h, gen, path.as_ptr(), path.len(), at, &mut r), 0);
     let mut it = abi::CItem { size: sizeof(abi::CItem) as u32 };

@@ -203,7 +203,7 @@ fn tuple_partial_move_field_drops() {
 fn match_arm_payload() {
     // A by-value payload binding consumed in one arm drops there and nowhere else.
     let p = typed_package(
-        "fn mk(c: bool) Option<String> { if c { return Option::<String>::Some(String::new()); } return Option::<String>::None; }\nfn main() i32 { switch mk(true) { Some(s) => { let n = s.len(); let _ = n; }, None => {} }; return 0; }",
+        "fn mk(c: bool) Option<String> { if c { return Option::<String>::Some(String::new()); } return Option::<String>::None; }\nfn main() i32 { switch mk(true) { Some(s) => { let n = s.len(); let _ = n; }, None => {} } return 0; }",
     );
     let c = schedule(&p, "main");
     // One drop per path: `s` at the end of the `Some` arm, whose scrutinee is then only dead (its

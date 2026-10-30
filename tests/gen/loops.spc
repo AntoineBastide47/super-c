@@ -121,9 +121,9 @@ extend Stmt {
         render_index("i", self.mul, self.off, &mut idx);
         if self.kind == S_FOR || self.kind == S_FOR_INCL {
             let dots = if self.kind == S_FOR {
-                "..";
+                ".."
             } else {
-                "..=";
+                "..="
             };
             out.format_into("    for i in {}{}{} {{\n", lo.as_str(), dots, hi.as_str());
             out.format_into("        acc = acc.wrapping_add({}[{}]);\n    }}\n", x, idx.as_str());
@@ -139,9 +139,9 @@ extend Stmt {
             let mut read = String::new();
             render_index("k", 1, self.off + self.lo as i64, &mut read);
             let cmp = if self.le {
-                "<=";
+                "<="
             } else {
-                "<";
+                "<"
             };
             out.format_into("    {{\n        let k = opr::<usize>({});\n", self.hi);
             out.format_into("        if k + {} {} {}.len() {{\n", self.lo, cmp, x);
@@ -208,7 +208,7 @@ extend LoopModel as Model {
     pub fn check(self: &Self, k: usize) String {
         assert(k == 0);
         let src = self.program();
-        return h::same_output(src.as_str(), [], ["SC_BCE=0"], [""]);
+        return h::same_output(&src, [], ["SC_BCE=0"], [""]);
     }
 
     pub fn render(self: &Self, k: usize) String {

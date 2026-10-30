@@ -109,9 +109,9 @@ extend<T> Arc<T> {
     /// A mutable borrow of the value when this is the only handle of either kind, else `None`.
     pub fn get_mut(self: &mut Arc<T>) Option<&mut T> {
         if !self.is_unique() {
-            return Option::<&mut T>::None;
+            return None;
         }
-        return Option::<&mut T>::Some(&mut unsafe (*self.ptr).value);
+        return Some(&mut unsafe (*self.ptr).value);
     }
     /// The value, when this is the only strong handle; else this handle back as `Err`. `Weak` handles do
     /// not prevent it: they fail to upgrade afterwards.
@@ -127,14 +127,14 @@ extend<T> Arc<T> {
             atomics::MemoryOrder::Acquire as i32,
             atomics::MemoryOrder::Relaxed as i32,
         ) {
-            return Result::<T, Arc<T>>::Err(self);
+            return Err(self);
         }
         let p = self.ptr;
         forget(self);
         let value = unsafe (*p).value;
         // Releases the strong handles' weak reference: frees the block when no `Weak` remains.
         let _collective = Weak::<T>::from_block(p);
-        return Result::<T, Arc<T>>::Ok(value);
+        return Ok(value);
     }
     /// True when both handles point at the same block.
     pub fn ptr_eq(self: &Arc<T>, other: &Arc<T>) bool {
@@ -191,14 +191,14 @@ extend<T> Weak<T> {
     /// nonzero again, so a freed value stays freed. Panics: the count passes `isize::MAX`.
     pub fn upgrade(self: &Weak<T>) Option<Arc<T>> {
         if self.ptr == null {
-            return Option::<Arc<T>>::None;
+            return None;
         }
         let s = (unsafe &mut (*self.ptr).strong) as *mut usize;
         let mut n = unsafe atomic::load_usize(s, atomics::MemoryOrder::Relaxed as i32);
         // Lock-free: a failed exchange means another thread changed the count.
         loop {
             if n == 0 {
-                return Option::<Arc<T>>::None;
+                return None;
             }
             if n > MAX_REFCOUNT {
                 panic("Arc: reference count overflow");
@@ -213,7 +213,7 @@ extend<T> Weak<T> {
                 atomics::MemoryOrder::Acquire as i32,
                 atomics::MemoryOrder::Relaxed as i32,
             ) {
-                return Option::<Arc<T>>::Some(Arc::<T>::from_block(self.ptr));
+                return Some(Arc::<T>::from_block(self.ptr));
             }
             n = unsafe atomic::load_usize(s, atomics::MemoryOrder::Relaxed as i32);
         }

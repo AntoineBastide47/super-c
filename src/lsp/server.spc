@@ -133,13 +133,13 @@ const Q_REQUEST: u8 = 2;
 fn msg_kind(msg: str) u8 {
     return switch json::parse(msg) {
         Ok(v) => if v.value_str("jsonrpc") != "2.0" || !v.contains_key("method") {
-            Q_OTHER;
+            Q_OTHER
         } else if v.contains_key("id") {
-            Q_REQUEST;
+            Q_REQUEST
         } else if v.value_str("method") == "textDocument/didChange" {
-            Q_EDIT;
+            Q_EDIT
         } else {
-            Q_OTHER;
+            Q_OTHER
         },
         Err(_) => Q_OTHER,
     };
@@ -168,7 +168,7 @@ fn bc_stop(ctx: *mut void, between: bool) bool {
             break;
         }
         let msg = mo.unwrap();
-        kd.push(msg_kind(msg.as_str()));
+        kd.push(msg_kind(&msg));
         q.push(msg);
     }
     for k in 0..kd.len() {
@@ -188,7 +188,7 @@ fn respond(f: *mut stdio::FILE, id: &json::JSON, result: &json::JSON) {
     body.push_str(",\"result\":");
     result.dump_into(&mut body);
     body.push_byte(b'}');
-    transport::write_message(f, body.as_str());
+    transport::write_message(f, &body);
 }
 
 // As `respond`, with the result as pre-rendered JSON text (for static payloads like the capabilities).
@@ -199,7 +199,7 @@ fn respond_raw(f: *mut stdio::FILE, id: &json::JSON, result: str) {
     body.push_str(",\"result\":");
     body.push_str(result);
     body.push_byte(b'}');
-    transport::write_message(f, body.as_str());
+    transport::write_message(f, &body);
 }
 
 // An LSP Diagnostic object.
@@ -235,7 +235,7 @@ fn send_error(f: *mut stdio::FILE, id: &json::JSON, code: i64, msg: str) {
     body.push_str(",\"message\":");
     json::dump_escaped(msg, &mut body);
     body.push_str("}}");
-    transport::write_message(f, body.as_str());
+    transport::write_message(f, &body);
 }
 
 // Server-to-client request registering the **/*.spc and **/build.toml watchers dynamically. The
@@ -254,7 +254,7 @@ fn notify(f: *mut stdio::FILE, method: str, params: &json::JSON) {
     body.push_str(",\"params\":");
     params.dump_into(&mut body);
     body.push_byte(b'}');
-    transport::write_message(f, body.as_str());
+    transport::write_message(f, &body);
 }
 
 // Diagnostics: rebuild every root and republish.
@@ -363,7 +363,7 @@ pub(package) fn capabilities_with(pull: bool, delta: bool, resolve: bool) String
 // A doc's canonical path from its URI (realpath when the file exists on disk).
 fn uri_doc_path(uri: str) String {
     let raw = text::uri_to_path(uri);
-    return analysis::canon_path(raw.as_str());
+    return analysis::canon_path(&raw);
 }
 
 // The `params.textDocument.uri` of a request; empty when absent.
@@ -452,11 +452,11 @@ pub(package) fn run(std_dir: str, target: i32) i32 {
     loop {
         let msgo = if sv.queue.len() != 0 {
             let _ = sv.queue_kind.remove(0);
-            sv.queue.remove(0);
+            sv.queue.remove(0)
         } else if sv.input_end {
-            Option::<String>::None;
+            Option::<String>::None
         } else {
-            transport::read_message(&mut rd);
+            transport::read_message(&mut rd)
         };
         if msgo.is_none() {
             // EOF: the client vanished without exit.
@@ -465,7 +465,7 @@ pub(package) fn run(std_dir: str, target: i32) i32 {
         let msg = msgo.unwrap();
         let mut req = json::JSON::default();
         let mut bad = true;
-        switch json::parse(msg.as_str()) {
+        switch json::parse(&msg) {
             Ok(v) => {
                 req = v;
                 bad = false;
@@ -473,9 +473,9 @@ pub(package) fn run(std_dir: str, target: i32) i32 {
             Err(e) => {
                 let nullid = json::JSON::default();
                 let em = e;
-                send_error(fout, &nullid, -32700, em.as_str());
+                send_error(fout, &nullid, -32700, &em);
             },
-        };
+        }
         if bad {
             continue;
         }
@@ -790,19 +790,19 @@ extend Server {
         // Each step drops one path component and stops at the folder; `sub` is the directory the
         // step left, so at the end the top directory under the project that holds the file.
         for _ in 0..SWEEP_MAX_DEPTH + 1 {
-            if proj.len() <= fo.len() || Server::has_manifest_file(proj.as_str()) {
+            if proj.len() <= fo.len() || Server::has_manifest_file(&proj) {
                 break;
             }
             sub = proj;
-            proj = String::from_str(loader::dirname_of(sub.as_str()));
+            proj = String::from_str(loader::dirname_of(&sub));
         }
-        let src = Server::abs_under(proj.as_str(), "src");
-        let alt = if dutil::is_dir(src.as_str()) {
-            src.as_str();
+        let src = Server::abs_under(&proj, "src");
+        let alt = if dutil::is_dir(&src) {
+            src.as_str()
         } else {
-            "";
+            ""
         };
-        Server::roots_of(path, dir, proj.as_str(), alt, sub.as_str(), self.std_dir.as_str(), rd, ad);
+        Server::roots_of(path, dir, &proj, alt, &sub, &self.std_dir, rd, ad);
     }
 
     // The import roots (`rd`, `ad`) the workspace lint gives file `path` in directory `dir` of the
@@ -824,7 +824,7 @@ extend Server {
     // Directory `dir` holds a build.toml file.
     fn has_manifest_file(dir: str) bool {
         let man = Server::abs_under(dir, "build.toml");
-        return fs::stat(man.as_str()).map(|m: fs::Metadata| m.kind != fs::FileKind::Dir).unwrap_or(false);
+        return fs::stat(&man).map(|m: fs::Metadata| m.kind != fs::FileKind::Dir).unwrap_or(false);
     }
 
     // The workspace sweep: every .spc under the build.toml folder that no other package owns joins
@@ -848,7 +848,7 @@ extend Server {
                 continue;
             }
             let folder = self.folders.at(fi).clone();
-            self.ensure_folder_sweep(folder.as_str());
+            self.ensure_folder_sweep(&folder);
         }
     }
 
@@ -861,7 +861,7 @@ extend Server {
         }
         let osk = String::from_str(self.out_skip_of(folder));
         let mut files = Vector::<SweptFile>::new();
-        Server::walk_project(folder, 0, osk.as_str(), self.std_dir.as_str(), &mut files);
+        Server::walk_project(folder, 0, &osk, &self.std_dir, &mut files);
         files.sort_by(|x: &SweptFile, y: &SweptFile| x.path.cmp(&y.path));
         self.swept.push(SweptDir { folder: String::from_str(folder), files: files });
         return self.swept.len() - 1;
@@ -878,7 +878,7 @@ extend Server {
         let mut cand = Vector::<Vector<String>>::new();
         for k in 0..self.swept.at(si).files.len() {
             let sf = self.swept.at(si).files.at(k);
-            let own = self.owning_root(sf.canon.as_str());
+            let own = self.owning_root(&sf.canon);
             let mut have = own >= 0 && !self.is_batch(own as usize);
             for r in 0..self.roots.len() {
                 if self.roots.at(r).origin.as_str() == sf.canon.as_str() {
@@ -979,12 +979,12 @@ extend Server {
     // skipped.
     fn walk_project(proj: str, depth: u32, osk: str, std_dir: str, out: &mut Vector<SweptFile>) {
         let src = Server::abs_under(proj, "src");
-        let alt = if dutil::is_dir(src.as_str()) {
-            src;
+        let alt = if dutil::is_dir(&src) {
+            src
         } else {
-            String::new();
+            String::new()
         };
-        Server::walk_dir(proj, proj, alt.as_str(), "", depth, osk, std_dir, out);
+        Server::walk_dir(proj, proj, &alt, "", depth, osk, std_dir, out);
     }
 
     // Append every .spc file under `dir` (`depth` levels below its workspace folder) of the project
@@ -1021,34 +1021,34 @@ extend Server {
             p.push_byte(b'/');
             p.push_string(names.at(i));
             // A real directory descends; a link to one (a POSIX symlink, a Windows link or junction) never does.
-            let lk = fs::lstat(p.as_str());
+            let lk = fs::lstat(&p);
             if lk.is_err() {
                 continue;
             }
             let kind = lk.unwrap().kind;
             let real_dir = kind == fs::FileKind::Dir;
-            if real_dir && Server::has_manifest_file(p.as_str()) {
+            if real_dir && Server::has_manifest_file(&p) {
                 // The out-dir of a manifest that does not load is the default one.
                 let mut nosk = String::from_str("build");
-                let mp = Server::abs_under(p.as_str(), "build.toml");
-                if let Some(m) = bman::load(mp.as_str(), false) {
+                let mp = Server::abs_under(&p, "build.toml");
+                if let Some(m) = bman::load(&mp, false) {
                     nosk = m.out_dir.clone();
                 }
-                Server::walk_project(p.as_str(), depth + 1, nosk.as_str(), std_dir, out);
+                Server::walk_project(&p, depth + 1, &nosk, std_dir, out);
             } else if real_dir {
                 let ns = if top {
-                    p.as_str();
+                    p.as_str()
                 } else {
-                    sub;
+                    sub
                 };
-                Server::walk_dir(p.as_str(), proj, alt, ns, depth + 1, "", std_dir, out);
-            } else if kind != fs::FileKind::DirSymlink && p.as_str().ends_with(".spc") && fs::stat(p.as_str()).map(
+                Server::walk_dir(&p, proj, alt, ns, depth + 1, "", std_dir, out);
+            } else if kind != fs::FileKind::DirSymlink && p.as_str().ends_with(".spc") && fs::stat(&p).map(
                 |m: fs::Metadata| m.kind != fs::FileKind::Dir,
             ).unwrap_or(false) {
-                let cp = analysis::canon_path(p.as_str());
+                let cp = analysis::canon_path(&p);
                 let mut rd = String::new();
                 let mut ad = String::new();
-                Server::roots_of(p.as_str(), dir, proj, alt, sub, std_dir, &mut rd, &mut ad);
+                Server::roots_of(&p, dir, proj, alt, sub, std_dir, &mut rd, &mut ad);
                 out.push(SweptFile { path: p, canon: cp, root_dir: rd, alt_dir: ad });
             }
         }
@@ -1095,22 +1095,22 @@ extend Server {
             let mut ovf = Vector::<str>::new();
             let mut ovt = Vector::<str>::new();
             for i in 0..self.docs.len() {
-                ovf.push(self.docs.at(i).path.as_str());
-                ovt.push(self.docs.at(i).txt.as_str());
+                ovf.push(&self.docs.at(i).path);
+                ovt.push(&self.docs.at(i).txt);
             }
             let rf9 = self.roots.at(r).root_file.clone();
             let ld9 = if self.roots.at(r).origin.len() == 0 && !self.roots.at(r).sweep {
-                self.roots.at(r).ws.clone();
+                self.roots.at(r).ws.clone()
             } else {
-                String::new();
+                String::new()
             };
             let mut st = analysis::RecompileStats {};
             let mut old_diags = replace(&mut self.roots[r].diags, Vector::<analysis::DiagRec>::new());
             let ok = analysis::recompile(
                 &mut self.roots[r].pkg,
                 self.target,
-                rf9.as_str(),
-                ld9.as_str(),
+                &rf9,
+                &ld9,
                 &ovf,
                 &ovt,
                 &mut old_diags,
@@ -1145,39 +1145,29 @@ extend Server {
         // A manifest root lints every workspace file it owns (incl. an in-repo std/); other roots
         // lint only their own root file, so each file's lint warnings come from exactly one root.
         let ld = if self.roots.at(r).origin.len() == 0 && !self.roots.at(r).sweep {
-            self.roots.at(r).ws.clone();
+            self.roots.at(r).ws.clone()
         } else {
-            String::new();
+            String::new()
         };
         let pkg = if self.is_batch(r) {
             analysis::compile_batch(
                 &self.roots.at(r).members,
-                rd.as_str(),
-                ad.as_str(),
-                self.std_dir.as_str(),
+                &rd,
+                &ad,
+                &self.std_dir,
                 self.target,
                 ovf,
                 ovt,
                 &mut diags,
-            );
+            )
         } else {
-            analysis::compile(
-                rf.as_str(),
-                rd.as_str(),
-                ad.as_str(),
-                self.std_dir.as_str(),
-                self.target,
-                ovf,
-                ovt,
-                ld.as_str(),
-                &mut diags,
-            );
+            analysis::compile(&rf, &rd, &ad, &self.std_dir, self.target, ovf, ovt, &ld, &mut diags)
         };
         self.roots[r].pkg = pkg;
         self.roots[r].files = Vector::<String>::new();
         let nmods = self.roots.at(r).pkg.modules.len();
         for m in 0..nmods {
-            let fp = analysis::canon_path(self.roots.at(r).pkg.modules.at(m).file.as_str());
+            let fp = analysis::canon_path(&self.roots.at(r).pkg.modules.at(m).file);
             self.roots[r].files.push(fp);
         }
         self.roots[r].built = true;
@@ -1252,13 +1242,13 @@ extend Server {
                 continue;
             }
             let range = if evicted {
-                range_json_pos(root.pos[4 * k], root.pos[4 * k + 1], root.pos[4 * k + 2], root.pos[4 * k + 3]);
+                range_json_pos(root.pos[4 * k], root.pos[4 * k + 1], root.pos[4 * k + 2], root.pos[4 * k + 3])
             } else {
                 let src = root.pkg.modules.at(m).source.as_str();
                 lm.update(r, d.module, src);
-                range_json(src, &lm.ls, d.start, d.len);
+                range_json(src, &lm.ls, d.start, d.len)
             };
-            let dj = diag_json(range, d.severity, d.code, "super-c", d.msg.as_str());
+            let dj = diag_json(range, d.severity, d.code, "super-c", &d.msg);
             ps.arrs[slots[m] as usize].push_back(dj);
         }
         if evicted {
@@ -1266,7 +1256,7 @@ extend Server {
         }
         // The code the build settings remove from each open document: a hint the client fades.
         for i in 0..self.docs.len() {
-            let mi = self.root_module(r, self.docs.at(i).path.as_str());
+            let mi = self.root_module(r, &self.docs.at(i).path);
             if mi < 0 || root.pkg.modules.at(mi as usize).ast.bc_dead.len() == 0 {
                 continue;
             }
@@ -1343,7 +1333,7 @@ extend Server {
     fn publish_manifest_diags(self: &Self, ps: &mut PubSet) {
         for d in 0..self.docs.len() {
             let doc = self.docs.at(d);
-            if !is_manifest_path(doc.path.as_str()) {
+            if !is_manifest_path(&doc.path) {
                 continue;
             }
             let src = doc.txt.as_str();
@@ -1352,7 +1342,7 @@ extend Server {
             let mut any = json::JSON::array();
             for i in 0..diags.len() {
                 let dg = diags.at(i);
-                let dj = diag_json(range_json(src, &ls, dg.start, dg.len), 1, dg.code, "build.toml", dg.msg.as_str());
+                let dj = diag_json(range_json(src, &ls, dg.start, dg.len), 1, dg.code, "build.toml", &dg.msg);
                 any.push_back(dj);
             }
             ps.push_all(doc.uri.clone(), any);
@@ -1380,9 +1370,7 @@ extend Server {
         for r in 0..self.roots.len() {
             // A built sweep root for a closed file republishes its cached diagnostics: rebuilding
             // every workspace file on each keystroke would be unusable.
-            let cached = self.roots.at(r).sweep && self.roots.at(r).built && !self.doc_open(
-                self.roots.at(r).origin.as_str(),
-            );
+            let cached = self.roots.at(r).sweep && self.roots.at(r).built && !self.doc_open(&self.roots.at(r).origin);
             if cached || r < seeded.len() && seeded[r] {
                 self.publish_root_diags(r, &mut ps, "");
             } else {
@@ -1473,7 +1461,7 @@ extend Server {
             {
                 let mut ovf = Vector::<str>::new();
                 for i in 0..self.docs.len() {
-                    ovf.push(self.docs.at(i).path.as_str());
+                    ovf.push(&self.docs.at(i).path);
                 }
                 res = analysis::borrowck_pending(&mut self.roots[r].pkg, &mut diags, &ovf, bc_stop, sp);
             }
@@ -1524,7 +1512,7 @@ extend Server {
                 if self.roots.at(r).pkg.modules.len() == 0 {
                     continue;
                 }
-                let closed_pf = self.roots.at(r).origin.len() != 0 && !self.doc_open(self.roots.at(r).origin.as_str());
+                let closed_pf = self.roots.at(r).origin.len() != 0 && !self.doc_open(&self.roots.at(r).origin);
                 if (self.is_batch(r) || closed_pf) && self.roots.at(r).last_used < oldest {
                     oldest = self.roots.at(r).last_used;
                     pick = r as i64;
@@ -1557,9 +1545,9 @@ extend Server {
     // server a manifest server.
     fn add_folder_root(self: &mut Self, folder: str, primary: bool) {
         let at = if primary {
-            0;
+            0
         } else {
-            -1;
+            -1
         };
         if self.add_manifest_root(folder, at) && primary {
             self.has_manifest = true;
@@ -1570,20 +1558,20 @@ extend Server {
     // Returns true when a manifest was found. No process chdir: every path stays absolute.
     fn add_manifest_root(self: &mut Self, folder: str, at: i32) bool {
         let mp = Server::abs_under(folder, "build.toml");
-        let mano = bman::load(mp.as_str(), false);
+        let mano = bman::load(&mp, false);
         if mano.is_none() {
             return false;
         }
         let man = mano.unwrap();
-        let rf = Server::abs_under(folder, man.root.as_str());
-        let rd = String::from_str(loader::dirname_of(rf.as_str()));
+        let rf = Server::abs_under(folder, &man.root);
+        let rd = String::from_str(loader::dirname_of(&rf));
         let r = Root { ws: String::from_str(folder), root_file: rf, root_dir: rd, pkg: loader::Package::new() };
         if at >= 0 {
             self.roots.insert(at as usize, r);
         } else {
             self.roots.push(r);
         }
-        self.set_out_skip(folder, man.out_dir.as_str());
+        self.set_out_skip(folder, &man.out_dir);
         return true;
     }
 
@@ -1595,7 +1583,7 @@ extend Server {
                         let u = wfs.at(i).value_str("uri");
                         if u.len() != 0 {
                             let p = text::uri_to_path(u);
-                            self.folders.push(analysis::canon_path(p.as_str()));
+                            self.folders.push(analysis::canon_path(&p));
                         }
                     }
                 }
@@ -1604,7 +1592,7 @@ extend Server {
                 let ru = params.value_str("rootUri");
                 if ru.len() != 0 {
                     let p = text::uri_to_path(ru);
-                    self.folders.push(analysis::canon_path(p.as_str()));
+                    self.folders.push(analysis::canon_path(&p));
                 } else {
                     let rp = params.value_str("rootPath");
                     if rp.len() != 0 {
@@ -1667,11 +1655,11 @@ extend Server {
         // One manifest root per folder that carries a build.toml; the primary folder's sits first.
         for i in 0..self.folders.len() {
             let folder = self.folders.at(i).clone();
-            self.add_folder_root(folder.as_str(), i == 0);
+            self.add_folder_root(&folder, i == 0);
         }
         self.initialized = true;
         let caps = capabilities_with(self.cap_pull_diags, self.cap_delta_tokens, self.cap_action_resolve);
-        respond_raw(f, req.at_key("id"), caps.as_str());
+        respond_raw(f, req.at_key("id"), &caps);
     }
 
     fn on_did_open(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
@@ -1809,20 +1797,20 @@ extend Server {
                     break;
                 }
                 msg = msgo.unwrap();
-                let kd = msg_kind(msg.as_str());
+                let kd = msg_kind(&msg);
                 if kd != Q_EDIT {
                     self.queue.push(msg);
                     self.queue_kind.push(kd);
                     break;
                 }
             }
-            switch json::parse(msg.as_str()) {
+            switch json::parse(&msg) {
                 Ok(v) => {
                     self.revision += 1;
                     let _ = self.apply_did_change(&v);
                 },
                 Err(_) => {},
-            };
+            }
         }
         // An edit changes no file on disk: the sweep reuses its last directory walk.
         self.rebuild_all(f, true, false);
@@ -1850,7 +1838,7 @@ extend Server {
     // the client never opened lands on a module whose bodies an analysis round released: they
     // come back for the request.
     fn locate(self: &mut Self, req: &json::JSON) Hit {
-        let mut pos: Option<&json::JSON> = Option::<&json::JSON>::None;
+        let mut pos: Option<&json::JSON> = None;
         if let Some(params) = req.value("params") {
             pos = params.value("position");
         }
@@ -1871,7 +1859,7 @@ extend Server {
     // As `locate`, for requests carrying a `range` instead of a `position` (codeAction).
     fn locate_range(self: &mut Self, req: &json::JSON) Hit {
         let mut h = self.doc_hit(doc_uri(req));
-        let mut ro: Option<&json::JSON> = Option::<&json::JSON>::None;
+        let mut ro: Option<&json::JSON> = None;
         if let Some(params) = req.value("params") {
             ro = params.value("range");
         }
@@ -1901,11 +1889,11 @@ extend Server {
             return Hit {};
         }
         let path = uri_doc_path(uri);
-        let r = self.owning_root(path.as_str());
+        let r = self.owning_root(&path);
         if r < 0 {
             return Hit {};
         }
-        let m = self.root_module(r as usize, path.as_str());
+        let m = self.root_module(r as usize, &path);
         if m < 0 {
             return Hit {};
         }
@@ -1937,7 +1925,7 @@ extend Server {
         }
         let uri = tdo.unwrap().value_str("uri");
         let di = self.find_doc(uri);
-        if di < 0 || !is_manifest_path(self.docs.at(di as usize).path.as_str()) {
+        if di < 0 || !is_manifest_path(&self.docs.at(di as usize).path) {
             return -1;
         }
         let pos = params.value("position");
@@ -1955,7 +1943,7 @@ extend Server {
         let mut moff: usize = 0;
         let mdi = self.manifest_hit(req, &mut moff);
         if mdi >= 0 {
-            let doc = btoml::hover(self.docs.at(mdi as usize).txt.as_str(), moff);
+            let doc = btoml::hover(&self.docs.at(mdi as usize).txt, moff);
             if doc.len() == 0 {
                 respond_null(f, req);
                 return;
@@ -1985,7 +1973,7 @@ extend Server {
             None => {
                 respond_null(f, req);
             },
-        };
+        }
     }
 
     // Definition (or, when `of_type`, type definition) of the symbol at the request's position.
@@ -1997,9 +1985,9 @@ extend Server {
         }
         let pkg = &self.roots.at(h.r).pkg;
         let lo = if of_type {
-            feat::type_definition(pkg, h.m, h.off);
+            feat::type_definition(pkg, h.m, h.off)
         } else {
-            feat::definition(pkg, h.m, h.off);
+            feat::definition(pkg, h.m, h.off)
         };
         switch lo {
             Some(l) => {
@@ -2010,7 +1998,7 @@ extend Server {
             None => {
                 respond_null(f, req);
             },
-        };
+        }
     }
 
     // Reference sites for definition `d` (resolved in root `r0`) across EVERY built root, deduped
@@ -2027,16 +2015,16 @@ extend Server {
             return;
         }
         let key = keyo.unwrap();
-        let kfile = analysis::canon_path(key.file.as_str());
+        let kfile = analysis::canon_path(&key.file);
         for r2 in 0..self.roots.len() {
             if r2 == r0 || !self.roots.at(r2).built || self.roots.at(r2).pkg.modules.len() == 0 {
                 continue;
             }
-            let m2 = self.root_module(r2, kfile.as_str());
+            let m2 = self.root_module(r2, &kfile);
             if m2 < 0 {
                 continue;
             }
-            let dn = feat::find_decl_by_key(&self.roots.at(r2).pkg, m2 as usize, key.kind, key.name.as_str());
+            let dn = feat::find_decl_by_key(&self.roots.at(r2).pkg, m2 as usize, key.kind, &key.name);
             if dn == astn::NODE_NONE {
                 continue;
             }
@@ -2175,7 +2163,7 @@ extend Server {
         for i in 0..related.len() {
             let conflict = feat::rename_conflict(pkg, *related.at(i), new_name);
             if conflict.len() != 0 {
-                send_error(f, req.at_key("id"), -32803, conflict.as_str());
+                send_error(f, req.at_key("id"), -32803, &conflict);
                 return;
             }
             let rf = self.self_def_file(h.r, related.at(i).module as usize);
@@ -2248,8 +2236,8 @@ extend Server {
             }
             if self.cap_doc_changes {
                 let mut td = json::JSON::object();
-                td.emplace("uri", json::JSON::str(uri.as_str()));
-                let di = self.find_doc(uri.as_str());
+                td.emplace("uri", json::JSON::str(&uri));
+                let di = self.find_doc(&uri);
                 if di >= 0 {
                     td.emplace("version", json::JSON::integer(self.docs.at(di as usize).version));
                 } else {
@@ -2260,7 +2248,7 @@ extend Server {
                 de.emplace("edits", edits);
                 doc_changes.push_back(de);
             } else {
-                changes.emplace(uri.as_str(), edits);
+                changes.emplace(&uri, edits);
             }
         }
         let mut we = json::JSON::object();
@@ -2282,7 +2270,7 @@ extend Server {
         }
         let doc = self.docs.at(di as usize);
         let mut formatted = String::new();
-        if !dutil::format_source(&doc.txt, doc.path.as_str(), 120, false, &mut formatted) {
+        if !dutil::format_source(&doc.txt, &doc.path, 120, &mut formatted) {
             // Unparseable or comment-check tripped: never destructive.
             respond_null(f, req);
             return;
@@ -2502,7 +2490,7 @@ extend Server {
         if lx.has_errors() {
             return false;
         }
-        let mut ps = par::Parser::new(lx.take_tokens(), ns.as_str(), file);
+        let mut ps = par::Parser::new(lx.take_tokens(), &ns, file);
         ps.build_ast();
         return !ps.has_errors();
     }
@@ -2540,9 +2528,9 @@ extend Server {
         }
         let rf = self.roots.at(ru).root_file.clone();
         let ld = if self.roots.at(ru).origin.len() == 0 && !self.roots.at(ru).sweep {
-            self.roots.at(ru).ws.clone();
+            self.roots.at(ru).ws.clone()
         } else {
-            String::new();
+            String::new()
         };
         let mut out = Vector::<feat::CompItem>::new();
         let mut ok = false;
@@ -2553,40 +2541,31 @@ extend Server {
             let mut ovf = Vector::<str>::new();
             let mut ovt = Vector::<str>::new();
             for i in 0..self.docs.len() {
-                ovf.push(self.docs.at(i).path.as_str());
-                ovt.push(self.docs.at(i).txt.as_str());
+                ovf.push(&self.docs.at(i).path);
+                ovt.push(&self.docs.at(i).txt);
             }
-            ovt.set(slot, synth.as_str());
+            ovt.set(slot, &synth);
             let mut scratch = Vector::<analysis::DiagRec>::new();
             let mut st = analysis::RecompileStats {};
-            ok = analysis::recompile(
-                &mut self.roots[ru].pkg,
-                self.target,
-                rf.as_str(),
-                ld.as_str(),
-                &ovf,
-                &ovt,
-                &mut scratch,
-                &mut st,
-            );
+            ok = analysis::recompile(&mut self.roots[ru].pkg, self.target, &rf, &ld, &ovf, &ovt, &mut scratch, &mut st);
             if ok {
                 let m = self.root_module(ru, path);
                 if m >= 0 && self.roots.at(ru).pkg.modules.at(m as usize).has_ast {
                     out = if member {
-                        feat::complete_member(&self.roots.at(ru).pkg, m as usize, off);
+                        feat::complete_member(&self.roots.at(ru).pkg, m as usize, off)
                     } else {
-                        feat::complete_general(&self.roots.at(ru).pkg, m as usize, off);
+                        feat::complete_general(&self.roots.at(ru).pkg, m as usize, off)
                     };
                 }
                 // The real buffers back (the round records nothing: the root's diagnostics stand).
-                ovt.set(slot, self.docs.at(slot).txt.as_str());
+                ovt.set(slot, &self.docs.at(slot).txt);
                 scratch.clear();
                 let mut st2 = analysis::RecompileStats {};
                 ok = analysis::recompile(
                     &mut self.roots[ru].pkg,
                     self.target,
-                    rf.as_str(),
-                    ld.as_str(),
+                    &rf,
+                    &ld,
                     &ovf,
                     &ovt,
                     &mut scratch,
@@ -2643,20 +2622,10 @@ extend Server {
                 self.file_roots(path, &mut rd, &mut ad);
             }
             let mut diags = Vector::<analysis::DiagRec>::new();
-            let pkg = analysis::compile(
-                rf.as_str(),
-                rd.as_str(),
-                ad.as_str(),
-                self.std_dir.as_str(),
-                self.target,
-                ovf,
-                ovt,
-                "",
-                &mut diags,
-            );
+            let pkg = analysis::compile(&rf, &rd, &ad, &self.std_dir, self.target, ovf, ovt, "", &mut diags);
             let mut parsed = false;
             for m in 0..pkg.modules.len() {
-                let c = analysis::canon_path(pkg.modules.at(m).file.as_str());
+                let c = analysis::canon_path(&pkg.modules.at(m).file);
                 let hit = c.as_str() == path;
                 if hit {
                     parsed = pkg.modules.at(m).has_ast;
@@ -2718,13 +2687,13 @@ extend Server {
             }
             let it = items.at(i);
             let mut o = json::JSON::object();
-            o.emplace("label", json::JSON::str(it.label.as_str()));
+            o.emplace("label", json::JSON::str(&it.label));
             o.emplace("kind", json::JSON::integer(it.kind));
             if it.detail.len() != 0 {
-                o.emplace("detail", json::JSON::str(it.detail.as_str()));
+                o.emplace("detail", json::JSON::str(&it.detail));
             }
             let mut st = String::from_str(Server::sort_prefix(it.kind));
-            st.push_str(it.label.as_str());
+            st.push_str(&it.label);
             o.emplace("sortText", json::JSON::string(st));
             arr.push_back(o);
         }
@@ -2774,13 +2743,13 @@ extend Server {
         let mdi = self.manifest_hit(req, &mut moff);
         if mdi >= 0 {
             let mut arr = json::JSON::array();
-            let items = btoml::completions(self.docs.at(mdi as usize).txt.as_str(), moff);
+            let items = btoml::completions(&self.docs.at(mdi as usize).txt, moff);
             for i in 0..items.len() {
                 let mut it = json::JSON::object();
-                it.emplace("label", json::JSON::str(items.at(i).label.as_str()));
+                it.emplace("label", json::JSON::str(&items.at(i).label));
                 // Keyword.
                 it.emplace("kind", json::JSON::integer(14));
-                it.emplace("detail", json::JSON::str(items.at(i).doc.as_str()));
+                it.emplace("detail", json::JSON::str(&items.at(i).doc));
                 arr.push_back(it);
             }
             let mut list = json::JSON::object();
@@ -2817,9 +2786,9 @@ extend Server {
             ws -= 1;
         }
         let prev = if ws > 0 {
-            txt[ws - 1];
+            txt[ws - 1]
         } else {
-            0u8;
+            0u8
         };
         // An attribute path may continue with '.': "@fmt.sk<cursor>" walks back over "fmt."
         let mut attr_ws = ws;
@@ -2869,7 +2838,7 @@ extend Server {
                 if dot || path2 {
                     let path9 = String::from_str(path);
                     let txt9 = String::from_str(txt);
-                    items = self.complete_via_probe(path9.as_str(), txt9.as_str(), off, true);
+                    items = self.complete_via_probe(&path9, &txt9, off, true);
                 } else if have_ast && feat::item_at(&self.roots.at(r as usize).pkg, m as usize, off) {
                     items = feat::complete_general(&self.roots.at(r as usize).pkg, m as usize, off);
                 } else {
@@ -2877,7 +2846,7 @@ extend Server {
                     // build; the last analysis, or keywords alone, if even that fails.
                     let path9 = String::from_str(path);
                     let txt9 = String::from_str(txt);
-                    items = self.complete_via_probe(path9.as_str(), txt9.as_str(), off, false);
+                    items = self.complete_via_probe(&path9, &txt9, off, false);
                     if items.len() == 0 && have_ast {
                         items = feat::complete_general(&self.roots.at(r as usize).pkg, m as usize, off);
                     } else if items.len() == 0 {
@@ -2903,7 +2872,7 @@ extend Server {
         } else if d.fix_kind == 2 {
             te.emplace("newText", json::JSON::str("const "));
         } else if d.fix_kind == 4 {
-            te.emplace("newText", json::JSON::str(d.fix_text.as_str()));
+            te.emplace("newText", json::JSON::str(&d.fix_text));
         } else {
             te.emplace("newText", json::JSON::str(""));
         }
@@ -2914,7 +2883,7 @@ extend Server {
     fn workspace_edit(self: &Self, r: usize, m: usize, edits: json::JSON) json::JSON {
         let uri = text::path_to_uri(self.roots.at(r).files.at(m).as_str());
         let mut changes = json::JSON::object();
-        changes.emplace(uri.as_str(), edits);
+        changes.emplace(&uri, edits);
         let mut we = json::JSON::object();
         we.emplace("changes", changes);
         return we;
@@ -2955,9 +2924,9 @@ extend Server {
         for i in 0..ks.len() {
             let d = diags.at((*ks.at(i)) as usize);
             let fe = if d.fix_kind == 1 || d.fix_kind == 2 {
-                d.fix_start;
+                d.fix_start
             } else {
-                d.fix_end;
+                d.fix_end
             };
             if low >= 0 && fe as i64 > low {
                 // Overlaps the fix kept before it: drop it.
@@ -2973,7 +2942,7 @@ extend Server {
     fn diag_echo(self: &Self, r: usize, m: usize, k: usize, ls: &Vector<u32>) json::JSON {
         let src = self.roots.at(r).pkg.modules.at(m).source.as_str();
         let d = self.roots.at(r).diags.at(k);
-        let dj = diag_json(range_json(src, ls, d.start, d.len), d.severity, d.code, "super-c", d.msg.as_str());
+        let dj = diag_json(range_json(src, ls, d.start, d.len), d.severity, d.code, "super-c", &d.msg);
         let mut dl = json::JSON::array();
         dl.push_back(dj);
         return dl;
@@ -3077,7 +3046,7 @@ extend Server {
                 act.emplace("diagnostics", self.diag_echo(h.r, h.m, k, &ls));
                 if self.cap_action_resolve {
                     let mut data = json::JSON::object();
-                    data.emplace("uri", json::JSON::str(uri.as_str()));
+                    data.emplace("uri", json::JSON::str(&uri));
                     data.emplace("rev", json::JSON::integer(self.revision as i64));
                     data.emplace("diag", json::JSON::integer(k as i64));
                     act.emplace("data", data);
@@ -3088,7 +3057,7 @@ extend Server {
             }
             // Semantic quick fixes from error diagnostics (always eager: the edits are cheap).
             if want_quickfix && d.severity == 1 {
-                let nm = Server::quoted_name(d.msg.as_str());
+                let nm = Server::quoted_name(&d.msg);
                 if nm.len() != 0 && d.msg.as_str().starts_with("cannot find") {
                     // Candidates come from EVERY built root: an unimported module is by definition
                     // outside this package's closure, so it usually lives in the workspace batch.
@@ -3124,7 +3093,7 @@ extend Server {
                         let mut edits = json::JSON::array();
                         edits.push_back(te);
                         let mut changes = json::JSON::object();
-                        changes.emplace(uri.as_str(), edits);
+                        changes.emplace(&uri, edits);
                         let mut we = json::JSON::object();
                         we.emplace("changes", changes);
                         let mut title = String::from_str("Import ");
@@ -3141,11 +3110,11 @@ extend Server {
                     if let Some(stub) = feat::iface_stub(&self.roots.at(h.r).pkg, h.m, d.start, nm) {
                         let mut te = json::JSON::object();
                         te.emplace("range", range_json(src, &ls, stub.at, 0));
-                        te.emplace("newText", json::JSON::str(stub.text.as_str()));
+                        te.emplace("newText", json::JSON::str(&stub.text));
                         let mut edits = json::JSON::array();
                         edits.push_back(te);
                         let mut changes = json::JSON::object();
-                        changes.emplace(uri.as_str(), edits);
+                        changes.emplace(&uri, edits);
                         let mut we = json::JSON::object();
                         we.emplace("changes", changes);
                         let mut title = String::from_str("Implement '");
@@ -3167,7 +3136,7 @@ extend Server {
             act.emplace("kind", json::JSON::str("source.fixAll"));
             if self.cap_action_resolve {
                 let mut data = json::JSON::object();
-                data.emplace("uri", json::JSON::str(uri.as_str()));
+                data.emplace("uri", json::JSON::str(&uri));
                 data.emplace("rev", json::JSON::integer(self.revision as i64));
                 data.emplace("fixall", json::JSON::Bool(true));
                 act.emplace("data", data);
@@ -3209,7 +3178,7 @@ extend Server {
         let r = h.r;
         let m = h.m;
         let mut out = action.clone();
-        let ls = text::line_starts(self.roots.at(r).pkg.modules.at(m).source.as_str());
+        let ls = text::line_starts(&self.roots.at(r).pkg.modules.at(m).source);
         let fixall = data.value("fixall").is_some();
         if fixall {
             out.emplace("edit", self.fixall_edit_json(r, m, &ls));
@@ -3243,12 +3212,12 @@ extend Server {
                         }
                         let p = uri_doc_path(u);
                         any = true;
-                        if is_manifest_path(p.as_str()) {
-                            self.reload_manifest_for(p.as_str());
+                        if is_manifest_path(&p) {
+                            self.reload_manifest_for(&p);
                         } else if p.as_str().ends_with(".spc") {
                             // The owning packages are stale: force their rebuild.
                             for r in 0..self.roots.len() {
-                                if self.root_module(r, p.as_str()) >= 0 {
+                                if self.root_module(r, &p) >= 0 {
                                     self.roots[r].built = false;
                                 }
                             }
@@ -3272,27 +3241,27 @@ extend Server {
         if !self.folders.contains(&folder) && self.folder_of(manifest_path).len() != 0 {
             for r in 0..self.roots.len() {
                 let rd = self.roots.at(r).root_dir.as_str();
-                if self.is_batch(r) && rd.starts_with(folder.as_str()) && (rd.len() == folder.len() || rd[folder.len()] == b'/') {
+                if self.is_batch(r) && rd.starts_with(&folder) && (rd.len() == folder.len() || rd[folder.len()] == b'/') {
                     self.roots[r].built = false;
                 }
             }
             return;
         }
-        let mp = Server::abs_under(folder.as_str(), "build.toml");
-        let mano = bman::load(mp.as_str(), false);
+        let mp = Server::abs_under(&folder, "build.toml");
+        let mano = bman::load(&mp, false);
         if mano.is_none() {
             // Invalid: keep the last valid model.
             return;
         }
         let man = mano.unwrap();
-        let rf = Server::abs_under(folder.as_str(), man.root.as_str());
+        let rf = Server::abs_under(&folder, &man.root);
         let mut found = false;
         for r in 0..self.roots.len() {
             if self.roots.at(r).origin.len() == 0 && !self.roots.at(r).sweep && self.roots.at(r).ws.as_str() == folder.as_str() {
                 found = true;
                 if self.roots.at(r).root_file.as_str() != rf.as_str() {
                     self.roots[r].root_file = rf.clone();
-                    self.roots[r].root_dir = String::from_str(loader::dirname_of(rf.as_str()));
+                    self.roots[r].root_dir = String::from_str(loader::dirname_of(&rf));
                 }
                 self.roots[r].built = false;
             }
@@ -3300,9 +3269,9 @@ extend Server {
         if !found {
             // A manifest appeared in a folder that had none.
             let primary = folder.as_str() == self.ws_root.as_str();
-            self.add_folder_root(folder.as_str(), primary);
+            self.add_folder_root(&folder, primary);
         }
-        self.set_out_skip(folder.as_str(), man.out_dir.as_str());
+        self.set_out_skip(&folder, &man.out_dir);
     }
 
     // Folder add/remove: added folders gain manifest/sweep roots on the next round; removed folders
@@ -3316,11 +3285,11 @@ extend Server {
                             let u = ad.at(i).value_str("uri");
                             if u.len() != 0 {
                                 let p = text::uri_to_path(u);
-                                let c = analysis::canon_path(p.as_str());
+                                let c = analysis::canon_path(&p);
                                 if !self.folders.contains(&c) {
                                     let cf = c.clone();
                                     self.folders.push(c);
-                                    let _ = self.add_manifest_root(cf.as_str(), -1);
+                                    let _ = self.add_manifest_root(&cf, -1);
                                 }
                             }
                         }
@@ -3334,7 +3303,7 @@ extend Server {
                                 continue;
                             }
                             let p = text::uri_to_path(u);
-                            let c = analysis::canon_path(p.as_str());
+                            let c = analysis::canon_path(&p);
                             let cs = c.as_str();
                             self.folders.retain(|x: &String| x.as_str() != cs);
                             self.roots.retain(|x: &Root| x.ws.as_str() != cs);
@@ -3402,7 +3371,7 @@ extend Server {
                     params.push_back(po);
                 }
                 let mut sig = json::JSON::object();
-                sig.emplace("label", json::JSON::str(si.label.as_str()));
+                sig.emplace("label", json::JSON::str(&si.label));
                 sig.emplace("parameters", params);
                 let mut sigs = json::JSON::array();
                 sigs.push_back(sig);
@@ -3415,7 +3384,7 @@ extend Server {
             None => {
                 respond_null(f, req);
             },
-        };
+        }
     }
 
     // Hierarchical DocumentSymbol trees when the client negotiated them, flat SymbolInformation
@@ -3441,9 +3410,9 @@ extend Server {
                 }
                 let s = syms.at(i);
                 let mut o = json::JSON::object();
-                o.emplace("name", json::JSON::str(s.name.as_str()));
+                o.emplace("name", json::JSON::str(&s.name));
                 if s.detail.len() != 0 {
-                    o.emplace("detail", json::JSON::str(s.detail.as_str()));
+                    o.emplace("detail", json::JSON::str(&s.detail));
                 }
                 o.emplace("kind", json::JSON::integer(s.kind));
                 o.emplace("range", range_json(src, &ls, s.start, s.end - s.start));
@@ -3455,7 +3424,7 @@ extend Server {
                     }
                     let c = syms.at(k);
                     let mut co = json::JSON::object();
-                    co.emplace("name", json::JSON::str(c.name.as_str()));
+                    co.emplace("name", json::JSON::str(&c.name));
                     co.emplace("kind", json::JSON::integer(c.kind));
                     co.emplace("range", range_json(src, &ls, c.start, c.end - c.start));
                     co.emplace("selectionRange", range_json(src, &ls, c.sel_start, c.sel_end - c.sel_start));
@@ -3474,7 +3443,7 @@ extend Server {
             loc.emplace("uri", json::JSON::str(uri));
             loc.emplace("range", range_json(src, &ls, s.sel_start, s.sel_end - s.sel_start));
             let mut o = json::JSON::object();
-            o.emplace("name", json::JSON::str(s.name.as_str()));
+            o.emplace("name", json::JSON::str(&s.name));
             o.emplace("kind", json::JSON::integer(s.kind));
             o.emplace("location", loc);
             arr.push_back(o);
@@ -3511,7 +3480,7 @@ extend Server {
                     _ => {
                         break;
                     },
-                };
+                }
             }
         }
         // The same file appears in several packages: sort by (file, start), keep one per site.
@@ -3528,7 +3497,7 @@ extend Server {
             let ks = keyed.at(i);
             let l = feat::Loc { module: ks.sym.module, start: ks.sym.start, end: ks.sym.end };
             let mut o = json::JSON::object();
-            o.emplace("name", json::JSON::str(ks.sym.name.as_str()));
+            o.emplace("name", json::JSON::str(&ks.sym.name));
             o.emplace("kind", json::JSON::integer(ks.sym.kind));
             o.emplace("location", self.loc_json(ks.r as usize, &l, &mut ls));
             arr.push_back(o);
@@ -3631,7 +3600,7 @@ extend Server {
             po.emplace("character", json::JSON::integer(pos.character));
             let mut o = json::JSON::object();
             o.emplace("position", po);
-            o.emplace("label", json::JSON::str(hh.label.as_str()));
+            o.emplace("label", json::JSON::str(&hh.label));
             // Type.
             o.emplace("kind", json::JSON::integer(1));
             arr.push_back(o);
@@ -3649,11 +3618,11 @@ extend Server {
         let mut ps = PubSet { uris: Vector::<String>::new(), arrs: Vector::<json::JSON>::new() };
         for r in 0..self.roots.len() {
             if self.roots.at(r).built {
-                self.publish_root_diags(r, &mut ps, path.as_str());
+                self.publish_root_diags(r, &mut ps, &path);
             }
         }
         self.publish_manifest_diags(&mut ps);
-        let want = text::path_to_uri(path.as_str());
+        let want = text::path_to_uri(&path);
         for i in 0..ps.uris.len() {
             if ps.uris.at(i).as_str() == want.as_str() || ps.uris.at(i).as_str() == uri {
                 return replace(ps.arrs.index_mut(i), json::JSON::default());
@@ -3702,9 +3671,9 @@ extend Server {
         let nm = feat::decl_name(a, d.node);
         let full = unsafe (&*a).at_const(d.node).span;
         let nsp = if nm != astn::NODE_NONE {
-            unsafe (&*a).at_const(nm).span;
+            unsafe (&*a).at_const(nm).span
         } else {
-            full;
+            full
         };
         let src = pkg.modules.at(d.module as usize).source.as_str();
         let ls = text::line_starts(src);
@@ -3712,7 +3681,7 @@ extend Server {
         o.emplace("name", json::JSON::str(src.slice(nsp.start as usize, nsp.end as usize)));
         o.emplace("kind", json::JSON::integer(kind));
         let uri = text::path_to_uri(self.roots.at(r).files.at(d.module as usize).as_str());
-        o.emplace("uri", json::JSON::str(uri.as_str()));
+        o.emplace("uri", json::JSON::str(&uri));
         o.emplace("range", range_json(src, &ls, full.start, full.end - full.start));
         o.emplace("selectionRange", range_json(src, &ls, nsp.start, nsp.end - nsp.start));
         let mut data = json::JSON::object();

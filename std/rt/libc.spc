@@ -643,9 +643,9 @@ pub fn sig_err(_sig: i32) {
 @export("strsignal")
 pub const fn strsignal(sig: i32) *mut char {
     let i = if (sig as u32).wrapping_sub(1) >= (NSIG - 1) as u32 {
-        0usize;
+        0usize
     } else {
-        sig as usize;
+        sig as usize
     };
     return (unsafe SIG_NAMES[i].ptr()) as *mut char;
 }
@@ -677,9 +677,9 @@ pub fn raise(sig: i32) i32 {
         return 0;
     }
     let kind = if sig < 32 {
-        unsafe SIG_DEFAULT[sig as usize];
+        unsafe SIG_DEFAULT[sig as usize]
     } else {
-        4u8;
+        4u8
     };
     if kind == 0 {
         return 0;
@@ -688,11 +688,11 @@ pub fn raise(sig: i32) i32 {
         unsafe sc_wasm_trap();
     }
     let what = if kind == 1 {
-        "Program received fatal signal: ";
+        "Program received fatal signal: "
     } else if kind == 2 {
-        "Program received termination signal: ";
+        "Program received termination signal: "
     } else {
-        "Program received stop signal: ";
+        "Program received stop signal: "
     };
     let e = stdio_stream(2);
     let _ = fputs(what.ptr() as *const char, e);
@@ -907,9 +907,9 @@ fn grow(size: usize) bool {
     let pages = (need + PAGE - 1) / PAGE;
     // At least 1 MiB at a time: a page per call would cost a `memory.grow` per allocation.
     let ask = if pages < 16 {
-        16usize;
+        16usize
     } else {
-        pages;
+        pages
     };
     let mut old = unsafe sc_wasm_memory_grow(ask);
     if old < 0 && ask != pages {
@@ -955,9 +955,9 @@ fn extend_heap(end: usize) {
 const fn block_size(n: usize) usize {
     let s = n + HDR + ALIGN - 1 & ~(ALIGN - 1);
     return if s < MIN_BLOCK {
-        MIN_BLOCK;
+        MIN_BLOCK
     } else {
-        s;
+        s
     };
 }
 
@@ -1095,9 +1095,9 @@ pub fn realloc(p: *mut void, n: usize) *mut void {
         q as *mut u8,
         p as *const u8,
         if have < n {
-            have;
+            have
         } else {
-            n;
+            n
         },
     );
     heap_free(p);
@@ -1709,9 +1709,9 @@ extend Scan {
             if f.rpos == f.rend && !fill_input(
                 f,
                 if f.rpos < 8 {
-                    f.rpos;
+                    f.rpos
                 } else {
-                    8usize;
+                    8usize
                 },
             ) {
                 self.end = true;
@@ -1751,9 +1751,9 @@ extend Scan {
     // The bytes the conversion consumed.
     const fn used(self: &Scan) usize {
         return if self.bad {
-            0usize;
+            0usize
         } else {
-            self.pos;
+            self.pos
         };
     }
 }
@@ -1905,9 +1905,9 @@ const fn ato(s: *const char) i64 {
         i += 1;
     }
     return if neg {
-        n;
+        n
     } else {
-        n.wrapping_neg();
+        n.wrapping_neg()
     };
 }
 
@@ -1934,9 +1934,9 @@ pub const fn atoll(s: *const char) i64 {
 @export("abs")
 pub const fn abs(x: i32) i32 {
     return if x < 0 {
-        x.wrapping_neg();
+        x.wrapping_neg()
     } else {
-        x;
+        x
     };
 }
 
@@ -1944,9 +1944,9 @@ pub const fn abs(x: i32) i32 {
 @export("labs")
 pub const fn labs(x: isize) isize {
     return if x < 0 {
-        x.wrapping_neg();
+        x.wrapping_neg()
     } else {
-        x;
+        x
     };
 }
 
@@ -1954,9 +1954,9 @@ pub const fn labs(x: isize) isize {
 @export("llabs")
 pub const fn llabs(x: i64) i64 {
     return if x < 0 {
-        x.wrapping_neg();
+        x.wrapping_neg()
     } else {
-        x;
+        x
     };
 }
 
@@ -2120,9 +2120,9 @@ pub fn nanosleep(req: *const timespec, _rem: *mut timespec) i32 {
         return -1;
     }
     let total = if s as u64 > 18446744072 {
-        ~0u64;
+        ~0u64
     } else {
-        s as u64 * 1000000000 + ns as u64;
+        s as u64 * 1000000000 + ns as u64
     };
     if sleep_ns(total) != 0 {
         set_errno(ENOTSUP);
@@ -2460,9 +2460,9 @@ fn strftime_one(s: &mut [u8; 100], l: &mut usize, f: u8, t: &tm, pad: u8) *const
         number = false;
         if t.tm_wday as u32 <= 6 {
             text = if f == 97 {
-                unsafe ABDAY_NAMES[t.tm_wday as usize].ptr();
+                unsafe ABDAY_NAMES[t.tm_wday as usize].ptr()
             } else {
-                unsafe DAY_NAMES[t.tm_wday as usize].ptr();
+                unsafe DAY_NAMES[t.tm_wday as usize].ptr()
             };
         }
     } else if f == 104 || f == 98 || f == 66 {
@@ -2470,9 +2470,9 @@ fn strftime_one(s: &mut [u8; 100], l: &mut usize, f: u8, t: &tm, pad: u8) *const
         number = false;
         if t.tm_mon as u32 <= 11 {
             text = if f == 66 {
-                unsafe MONTH_NAMES[t.tm_mon as usize].ptr();
+                unsafe MONTH_NAMES[t.tm_mon as usize].ptr()
             } else {
-                unsafe ABMON_NAMES[t.tm_mon as usize].ptr();
+                unsafe ABMON_NAMES[t.tm_mon as usize].ptr()
             };
         }
     } else if f == 99 {
@@ -2522,9 +2522,9 @@ fn strftime_one(s: &mut [u8; 100], l: &mut usize, f: u8, t: &tm, pad: u8) *const
     } else if f == 112 {
         number = false;
         text = if t.tm_hour >= 12 {
-            "PM".ptr();
+            "PM".ptr()
         } else {
-            "AM".ptr();
+            "AM".ptr()
         };
     } else if f == 114 {
         nested = "%I:%M:%S %p".ptr();
@@ -2542,9 +2542,9 @@ fn strftime_one(s: &mut [u8; 100], l: &mut usize, f: u8, t: &tm, pad: u8) *const
         nested = "%H:%M:%S".ptr();
     } else if f == 117 {
         val = if t.tm_wday != 0 {
-            t.tm_wday;
+            t.tm_wday
         } else {
-            7i64;
+            7i64
         };
         width = 1;
     } else if f == 85 {
@@ -2606,16 +2606,16 @@ fn strftime_one(s: &mut [u8; 100], l: &mut usize, f: u8, t: &tm, pad: u8) *const
     }
     let b = ((&mut s[0]) as *mut u8) as *mut char;
     let p = if pad != 0 {
-        pad;
+        pad
     } else {
-        def_pad;
+        def_pad
     };
     let r = if p == 45 {
-        snprintf(b, 100, "%lld".ptr() as *const char, val);
+        snprintf(b, 100, "%lld".ptr() as *const char, val)
     } else if p == 95 {
-        snprintf(b, 100, "%*lld".ptr() as *const char, width, val);
+        snprintf(b, 100, "%*lld".ptr() as *const char, width, val)
     } else {
-        snprintf(b, 100, "%0*lld".ptr() as *const char, width, val);
+        snprintf(b, 100, "%0*lld".ptr() as *const char, width, val)
     };
     *l = r as usize;
     return &s[0];
@@ -2687,9 +2687,9 @@ fn strftime_into(s: *mut u8, n: usize, f0: *const u8, t: &tm) usize {
                 d += 1;
             }
             let lim: usize = if pc == 67 {
-                3;
+                3
             } else {
-                5;
+                5
             };
             if t.tm_year < -1900 {
                 unsafe s[l] = 45;
@@ -2794,9 +2794,9 @@ fn preopens_init() {
             }
             if unsafe PRE_LEN == cap {
                 let ncap = if cap == 0 {
-                    4usize;
+                    4usize
                 } else {
-                    cap * 2;
+                    cap * 2
                 };
                 let np = heap_alloc(ncap * sizeof(Preopen)) as *mut Preopen;
                 if np == null {
@@ -2841,9 +2841,9 @@ fn make_absolute(path: *const u8) *const u8 {
         return path;
     }
     let cwd = if unsafe CWD == null {
-        "/".ptr();
+        "/".ptr()
     } else {
-        (unsafe CWD) as *const u8;
+        (unsafe CWD) as *const u8
     };
     let mut p = path;
     if unsafe p[0] == 0 || unsafe p[0] == 46 && unsafe p[1] == 0 || unsafe p[0] == 46 && unsafe p[1] == 47 && unsafe p[2] == 0 {
@@ -2855,16 +2855,16 @@ fn make_absolute(path: *const u8) *const u8 {
     let cl = strlen(cwd as *const char);
     let pl = strlen(p as *const char);
     let slash = if unsafe cwd[cl - 1] == 47 {
-        0usize;
+        0usize
     } else {
-        1usize;
+        1usize
     };
     let need = cl + slash + pl + 1;
     if need > unsafe ABS_CAP {
         let mut cap = if unsafe ABS_CAP == 0 {
-            256usize;
+            256usize
         } else {
-            unsafe ABS_CAP;
+            unsafe ABS_CAP
         };
         while cap < need {
             cap *= 2;
@@ -2953,9 +2953,9 @@ fn dup_path(p: *const u8) *mut u8 {
 @export("getcwd")
 pub fn getcwd(buf: *mut char, size: usize) *mut char {
     let cwd = if unsafe CWD == null {
-        "/".ptr();
+        "/".ptr()
     } else {
-        (unsafe CWD) as *const u8;
+        (unsafe CWD) as *const u8
     };
     if buf == null {
         let d = strdup(cwd as *const char);
@@ -3001,9 +3001,9 @@ pub fn chdir(path: *const char) i32 {
     let copy_rel = !(unsafe rel[0] == 46 && unsafe rel[1] == 0);
     let mid = copy_rel && pl != 0;
     let rl = if copy_rel {
-        strlen(rel as *const char);
+        strlen(rel as *const char)
     } else {
-        0usize;
+        0usize
     };
     let n = 1 + pl + mid as usize + rl;
     let c = heap_alloc(n + 1) as *mut u8;
@@ -3083,19 +3083,19 @@ const fn ts_of(t: u64) timespec {
 // cloudlibc's `to_public_stat`.
 const fn put_stat(fs: &FileStat, out: *mut stat) {
     let mode = if fs.filetype == 1 {
-        S_IFBLK;
+        S_IFBLK
     } else if fs.filetype == 2 {
-        S_IFCHR;
+        S_IFCHR
     } else if fs.filetype == 3 {
-        S_IFDIR;
+        S_IFDIR
     } else if fs.filetype == 4 {
-        S_IFREG;
+        S_IFREG
     } else if fs.filetype == 5 || fs.filetype == 6 {
-        S_IFSOCK;
+        S_IFSOCK
     } else if fs.filetype == 7 {
-        S_IFLNK;
+        S_IFLNK
     } else {
-        0u32;
+        0u32
     };
     unsafe *out = stat {
         st_dev: fs.dev,
@@ -3137,9 +3137,9 @@ fn open_at(dirfd: i32, path: *const u8, oflag: i32) i32 {
         return fail(e);
     }
     let lookup = if (oflag & O_NOFOLLOW) == 0 {
-        LOOKUP_SYMLINK_FOLLOW;
+        LOOKUP_SYMLINK_FOLLOW
     } else {
-        0u32;
+        0u32
     };
     let mut fd: i32 = -1;
     let e2 = unsafe sc_wasi_path_open(
@@ -3196,9 +3196,9 @@ pub fn read(fd: i32, buf: *mut void, n: usize) isize {
     if e != 0 {
         set_errno(
             if e == ENOTCAPABLE as u16 {
-                EBADF;
+                EBADF
             } else {
-                e;
+                e
             },
         );
         return -1;
@@ -3215,9 +3215,9 @@ pub fn write(fd: i32, buf: *const void, n: usize) isize {
     if e != 0 {
         set_errno(
             if e == ENOTCAPABLE as u16 {
-                EBADF;
+                EBADF
             } else {
-                e;
+                e
             },
         );
         return -1;
@@ -3245,9 +3245,9 @@ fn seek(fd: i32, offset: i64, whence: i32) i64 {
     if e != 0 {
         set_errno(
             if e == ENOTCAPABLE as u16 {
-                ESPIPE;
+                ESPIPE
             } else {
-                e;
+                e
             },
         );
         return -1;
@@ -3262,9 +3262,9 @@ pub fn fsync(fd: i32) i32 {
     if e != 0 {
         set_errno(
             if e == ENOTCAPABLE as u16 {
-                EINVAL;
+                EINVAL
             } else {
-                e;
+                e
             },
         );
         return -1;
@@ -3307,9 +3307,9 @@ pub fn fcntl(fd: i32, cmd: i32, ...) i32 {
         let mut fl = st.flags as i32;
         if (st.rights_base & (RIGHTS_FD_READ | RIGHTS_FD_READDIR)) != 0 {
             fl |= if (st.rights_base & RIGHTS_FD_WRITE) != 0 {
-                O_RDWR;
+                O_RDWR
             } else {
-                O_RDONLY;
+                O_RDONLY
             };
         } else if (st.rights_base & RIGHTS_FD_WRITE) != 0 {
             fl |= O_WRONLY;
@@ -3344,9 +3344,9 @@ fn stat_at(path: *const char, out: *mut stat, follow: bool) i32 {
     let e = unsafe sc_wasi_path_filestat_get(
         dirfd,
         if follow {
-            LOOKUP_SYMLINK_FOLLOW;
+            LOOKUP_SYMLINK_FOLLOW
         } else {
-            0u32;
+            0u32
         },
         rel as *const char,
         strlen(rel as *const char),
@@ -3448,9 +3448,9 @@ pub fn remove(path: *const char) i32 {
     if e2 != 0 {
         return fail(
             if e2 == ENOTDIR as u16 {
-                ENOENT as u16;
+                ENOENT as u16
             } else {
-                e2;
+                e2
             },
         );
     }
@@ -3589,18 +3589,18 @@ const fn utime_args(times: *const timespec, at: &mut u64, mt: &mut u64, fl: &mut
         let mut v: u64 = 0;
         if t.tv_nsec == -1 {
             *fl |= if k == 0 {
-                2u16;
+                2u16
             } else {
-                8u16;
+                8u16
             };
         } else if t.tv_nsec != -2 {
             if t.tv_sec < 0 || t.tv_nsec < 0 || t.tv_nsec >= 1000000000 || t.tv_sec as u64 > 18446744072 {
                 return false;
             }
             *fl |= if k == 0 {
-                1u16;
+                1u16
             } else {
-                4u16;
+                4u16
             };
             v = t.tv_sec as u64 * 1000000000 + t.tv_nsec as u64;
         }
@@ -3629,9 +3629,9 @@ pub fn utimensat(_dirfd: i32, path: *const char, times: *const timespec, flag: i
         return -1;
     }
     let lookup = if (flag & AT_SYMLINK_NOFOLLOW) == 0 {
-        LOOKUP_SYMLINK_FOLLOW;
+        LOOKUP_SYMLINK_FOLLOW
     } else {
-        0u32;
+        0u32
     };
     let e = unsafe sc_wasi_path_filestat_set_times(
         dirfd,
@@ -3952,19 +3952,19 @@ const fn rd_u32(p: *const u8) u32 {
 const fn dt_of(m: u32) u8 {
     let t = m & S_IFMT;
     return if t == S_IFBLK {
-        1u8;
+        1u8
     } else if t == S_IFCHR {
-        2u8;
+        2u8
     } else if t == S_IFDIR {
-        3u8;
+        3u8
     } else if t == S_IFREG {
-        4u8;
+        4u8
     } else if t == S_IFSOCK {
-        20u8;
+        20u8
     } else if t == S_IFLNK {
-        7u8;
+        7u8
     } else {
-        0u8;
+        0u8
     };
 }
 
@@ -4135,17 +4135,17 @@ pub fn poll(fds: *mut pollfd, nfds: usize, timeout: i32) i32 {
         let mut made = false;
         for k in 0..2 {
             let bit = if k == 0 {
-                POLLRDNORM;
+                POLLRDNORM
             } else {
-                POLLWRNORM;
+                POLLWRNORM
             };
             if (pf.events & bit) != 0 {
                 unsafe subs[n] = Subscription {
                     userdata: ((pf as *mut pollfd) as usize) as u64,
                     tag: if k == 0 {
-                        EVENTTYPE_FD_READ;
+                        EVENTTYPE_FD_READ
                     } else {
-                        EVENTTYPE_FD_WRITE;
+                        EVENTTYPE_FD_WRITE
                     },
                     pad: [0u8; 7],
                     id: pf.fd as u32,
@@ -4183,9 +4183,9 @@ pub fn poll(fds: *mut pollfd, nfds: usize, timeout: i32) i32 {
         heap_free(evs);
         set_errno(
             if n == 0 {
-                ENOTSUP;
+                ENOTSUP
             } else {
-                e;
+                e
             },
         );
         return -1;
@@ -4205,9 +4205,9 @@ pub fn poll(fds: *mut pollfd, nfds: usize, timeout: i32) i32 {
                 unsafe (*pf).revents |= POLLERR;
             } else {
                 unsafe (*pf).revents |= if ev.kind == EVENTTYPE_FD_READ {
-                    POLLRDNORM;
+                    POLLRDNORM
                 } else {
-                    POLLWRNORM;
+                    POLLWRNORM
                 };
                 if (ev.rwflags & EVENT_HANGUP) != 0 {
                     unsafe (*pf).revents |= POLLHUP;
@@ -4381,9 +4381,9 @@ fn put_bytes(f: &mut Stream, p: *const u8, n: usize) usize {
     settle(f);
     if (f.flags & F_NOBUF) != 0 {
         return if write_all(f, p, n) {
-            n;
+            n
         } else {
-            0usize;
+            0usize
         };
     }
     if f.wlen + n > f.cap {
@@ -4392,9 +4392,9 @@ fn put_bytes(f: &mut Stream, p: *const u8, n: usize) usize {
         }
         if n >= f.cap {
             return if write_all(f, p, n) {
-                n;
+                n
             } else {
-                0usize;
+                0usize
             };
         }
     }
@@ -4438,17 +4438,17 @@ fn fill_input(f: &mut Stream, keep: usize) bool {
         let _ = memmove(f.buf, unsafe (f.buf + (f.rpos - keep)), keep);
     }
     let want = if (f.flags & F_NOBUF) != 0 {
-        1usize;
+        1usize
     } else {
-        f.cap - keep;
+        f.cap - keep
     };
     let r = read(f.fd, unsafe (f.buf + keep), want);
     f.rpos = keep;
     if r <= 0 {
         f.flags |= if r == 0 {
-            F_EOF;
+            F_EOF
         } else {
-            F_ERR;
+            F_ERR
         };
         f.rend = keep;
         return false;
@@ -4477,11 +4477,11 @@ fn mode_flags(mode: *const char) i32 {
     }
     let plus = unsafe *chrnul(m, 43) != 0;
     let mut fl = if plus {
-        O_RDWR;
+        O_RDWR
     } else if c == 114 {
-        O_RDONLY;
+        O_RDONLY
     } else {
-        O_WRONLY;
+        O_WRONLY
     };
     if unsafe *chrnul(m, 120) != 0 {
         fl |= O_EXCL;
@@ -4558,9 +4558,9 @@ pub fn freopen(path: *const char, mode: *const char, f: *mut FILE) *mut FILE {
     }
     let fl = mode_flags(mode);
     let fd = if fl < 0 {
-        -1;
+        -1
     } else {
-        open(path, fl);
+        open(path, fl)
     };
     if fd < 0 {
         let _ = fclose(f);
@@ -4572,13 +4572,13 @@ pub fn freopen(path: *const char, mode: *const char, f: *mut FILE) *mut FILE {
         return null;
     }
     s.flags = s.flags & (F_STD | F_NOBUF | F_LINE | F_SET) | if (fl & O_RDONLY) != 0 {
-        F_READ;
+        F_READ
     } else {
-        0u32;
+        0u32
     } | if (fl & O_WRONLY) != 0 {
-        F_WRITE;
+        F_WRITE
     } else {
-        0u32;
+        0u32
     };
     s.rpos = 0;
     s.rend = 0;
@@ -4634,9 +4634,9 @@ fn flush_all() bool {
 pub fn fflush(f: *mut FILE) i32 {
     if f == null {
         return if flush_all() {
-            0;
+            0
         } else {
-            EOF;
+            EOF
         };
     }
     let s = st(f);
@@ -4681,9 +4681,9 @@ pub fn fread(p: *mut void, size: usize, count: usize, f: *mut FILE) usize {
     while got < total {
         if s.rpos < s.rend {
             let n = if s.rend - s.rpos < total - got {
-                s.rend - s.rpos;
+                s.rend - s.rpos
             } else {
-                total - got;
+                total - got
             };
             copy(unsafe (d + got), unsafe (s.buf + s.rpos), n);
             s.rpos += n;
@@ -4702,9 +4702,9 @@ pub fn fread(p: *mut void, size: usize, count: usize, f: *mut FILE) usize {
             let r = read(s.fd, unsafe (d + got), total - got);
             if r <= 0 {
                 s.flags |= if r == 0 {
-                    F_EOF;
+                    F_EOF
                 } else {
-                    F_ERR;
+                    F_ERR
                 };
                 break;
             }
@@ -4727,9 +4727,9 @@ pub fn fwrite(p: *const void, size: usize, count: usize, f: *mut FILE) usize {
     }
     let n = put_bytes(st(f), p as *const u8, total);
     return if n == total {
-        count;
+        count
     } else {
-        n / size;
+        n / size
     };
 }
 
@@ -4997,9 +4997,9 @@ fn utf8_ctype() bool {
 @export("__ctype_get_mb_cur_max")
 pub fn ctype_get_mb_cur_max() usize {
     return if utf8_ctype() {
-        4usize;
+        4usize
     } else {
-        1usize;
+        1usize
     };
 }
 
@@ -5034,9 +5034,9 @@ fn get_locale(cat: i32, val0: *const u8) *const u8 {
     }
     if strcmp(c, C_UTF8.ptr() as *const char) == 0 {
         return if cat == LC_CTYPE {
-            C_UTF8.ptr();
+            C_UTF8.ptr()
         } else {
-            null;
+            null
         };
     }
     let mut p = unsafe LOC_NAMES;
@@ -5049,9 +5049,9 @@ fn get_locale(cat: i32, val0: *const u8) *const u8 {
     let l = heap_alloc(sizeof(LocName)) as *mut LocName;
     if l == null {
         return if cat == LC_CTYPE {
-            C_UTF8.ptr();
+            C_UTF8.ptr()
         } else {
-            null;
+            null
         };
     }
     copy(unsafe &mut (*l).name[0], val, n);
@@ -5063,9 +5063,9 @@ fn get_locale(cat: i32, val0: *const u8) *const u8 {
 
 const fn loc_name(l: *const u8) *const u8 {
     return if l == null {
-        "C".ptr();
+        "C".ptr()
     } else {
-        l;
+        l
     };
 }
 
@@ -5120,9 +5120,9 @@ pub fn setlocale(cat: i32, name: *const char) *mut char {
     }
     unsafe LOC_ALL[k - 1] = 0;
     return if same == 6 {
-        last as *mut char;
+        last as *mut char
     } else {
-        ((unsafe &mut LOC_ALL[0]) as *mut u8) as *mut char;
+        ((unsafe &mut LOC_ALL[0]) as *mut u8) as *mut char
     };
 }
 
@@ -5248,9 +5248,9 @@ const ERR_MSG: [str<'static>; 77] = [
 @export("strerror")
 pub const fn strerror(code: i32) *mut char {
     let i = if code < 0 || code >= 77 {
-        0usize;
+        0usize
     } else {
-        code as usize;
+        code as usize
     };
     return (unsafe ERR_MSG[i].ptr()) as *mut char;
 }
@@ -5276,9 +5276,9 @@ fn out(o: &mut Out, s: *const u8, l: usize) {
     }
     if o.len < o.cap {
         let n = if l < o.cap - o.len {
-            l;
+            l
         } else {
-            o.cap - o.len;
+            o.cap - o.len
         };
         copy(unsafe (o.buf + o.len), s, n);
     }
@@ -5308,9 +5308,9 @@ fn pad(o: &mut Out, c: u8, w: i32, l: i32, fl: u32) {
         &mut b[0],
         c,
         if n > 256 {
-            256usize;
+            256usize
         } else {
-            n;
+            n
         },
     );
     while n >= 256 {
@@ -5358,17 +5358,17 @@ const fn fmt_u(x0: u64, s0: *mut u8) *mut u8 {
 
 const fn imax(a: i32, b: i32) i32 {
     return if a > b {
-        a;
+        a
     } else {
-        b;
+        b
     };
 }
 
 const fn imin(a: i32, b: i32) i32 {
     return if a < b {
-        a;
+        a
     } else {
-        b;
+        b
     };
 }
 
@@ -5412,15 +5412,15 @@ fn fmt_fp(o: &mut Out, y0: f64, w: i32, p0: i32, fl: u32, t0: i32) i32 {
     if ex == 0x7ff {
         let lower = (t & 32) != 0;
         let mut s = if lower {
-            "inf";
+            "inf"
         } else {
-            "INF";
+            "INF"
         };
         if fr != 0 {
             s = if lower {
-                "nan";
+                "nan"
             } else {
-                "NAN";
+                "NAN"
             };
         }
         pad(o, 32, w, 3 + pl, fl & ~ZERO_PAD);
@@ -5466,9 +5466,9 @@ fn fmt_fp(o: &mut Out, y0: f64, w: i32, p0: i32, fl: u32, t0: i32) i32 {
         }
         let mut estr = fmt_u(
             if e2 < 0 {
-                (0 - e2) as u64;
+                (0 - e2) as u64
             } else {
-                e2 as u64;
+                e2 as u64
             },
             ebuf,
         );
@@ -5478,9 +5478,9 @@ fn fmt_fp(o: &mut Out, y0: f64, w: i32, p0: i32, fl: u32, t0: i32) i32 {
         }
         estr = unsafe (estr - 1);
         unsafe *estr = if e2 < 0 {
-            45u8;
+            45u8
         } else {
-            43u8;
+            43u8
         };
         estr = unsafe (estr - 1);
         unsafe *estr = (t + 15) as u8;
@@ -5504,9 +5504,9 @@ fn fmt_fp(o: &mut Out, y0: f64, w: i32, p0: i32, fl: u32, t0: i32) i32 {
             return -1;
         }
         let l = if p != 0 && slen - 2 < p {
-            p + 2 + elen;
+            p + 2 + elen
         } else {
-            slen + elen;
+            slen + elen
         };
         pad(o, 32, w, pl + l, fl);
         out(o, unsafe (prefixes + prefix), pl as usize);
@@ -5585,9 +5585,9 @@ fn fmt_fp(o: &mut Out, y0: f64, w: i32, p0: i32, fl: u32, t0: i32) i32 {
             z += 1;
         }
         let b = if (t | 32) == 102 {
-            r;
+            r
         } else {
-            a;
+            a
         };
         if z - b > need {
             z = b + need;
@@ -5624,11 +5624,11 @@ fn fmt_fp(o: &mut Out, y0: f64, w: i32, p0: i32, fl: u32, t0: i32) i32 {
             // wasm fixes to nearest-even: up when past half, or at an exact half with an odd kept digit.
             let odd = (unsafe big[d] / i & 1) != 0 || i == 1000000000 && d > a && (unsafe big[d - 1] & 1) != 0;
             let up = if x < i / 2 {
-                false;
+                false
             } else if x == i / 2 && d + 1 == z {
-                odd;
+                odd
             } else {
-                true;
+                true
             };
             unsafe big[d] -= x;
             if up {
@@ -5704,9 +5704,9 @@ fn fmt_fp(o: &mut Out, y0: f64, w: i32, p0: i32, fl: u32, t0: i32) i32 {
     } else {
         estr = fmt_u(
             if e < 0 {
-                (0 - e) as u64;
+                (0 - e) as u64
             } else {
-                e as u64;
+                e as u64
             },
             ebuf,
         );
@@ -5716,9 +5716,9 @@ fn fmt_fp(o: &mut Out, y0: f64, w: i32, p0: i32, fl: u32, t0: i32) i32 {
         }
         estr = unsafe (estr - 1);
         unsafe *estr = if e < 0 {
-            45u8;
+            45u8
         } else {
-            43u8;
+            43u8
         };
         estr = unsafe (estr - 1);
         unsafe *estr = t as u8;
@@ -6435,10 +6435,10 @@ fn printf_core(o0: *mut Out, fmt: *const char, ap: &mut va_list, nl_arg: *mut Ar
             l10n = true;
             let v = (unsafe s[1] - 48) as i32;
             s = unsafe (s + 3);
-            v;
+            v
         } else {
             s = unsafe (s + 1);
-            -1;
+            -1
         };
         // Modifier flags.
         let mut fl: u32 = 0;
@@ -6457,9 +6457,9 @@ fn printf_core(o0: *mut Out, fmt: *const char, ap: &mut va_list, nl_arg: *mut Ar
                 s = unsafe (s + 3);
             } else if !l10n {
                 w = if o0 != null {
-                    unsafe va_arg(*ap, i32);
+                    unsafe va_arg(*ap, i32)
                 } else {
-                    0;
+                    0
                 };
                 s = unsafe (s + 1);
             } else {
@@ -6488,9 +6488,9 @@ fn printf_core(o0: *mut Out, fmt: *const char, ap: &mut va_list, nl_arg: *mut Ar
                 s = unsafe (s + 4);
             } else if !l10n {
                 p = if o0 != null {
-                    unsafe va_arg(*ap, i32);
+                    unsafe va_arg(*ap, i32)
                 } else {
-                    0;
+                    0
                 };
                 s = unsafe (s + 2);
             } else {
@@ -6622,16 +6622,16 @@ fn printf_core(o0: *mut Out, fmt: *const char, ap: &mut va_list, nl_arg: *mut Ar
             fl &= ~ZERO_PAD;
         } else if t == 109 || t == 115 {
             a = if t == 109 {
-                strerror(unsafe ERRNO) as *const u8;
+                strerror(unsafe ERRNO) as *const u8
             } else if arg.i != 0 {
-                (arg.i as usize) as *const u8;
+                (arg.i as usize) as *const u8
             } else {
-                "(null)".ptr();
+                "(null)".ptr()
             };
             let lim = if p < 0 {
-                INT_MAX as usize;
+                INT_MAX as usize
             } else {
-                p as usize;
+                p as usize
             };
             zz = unsafe (a + strnlen(a as *const char, lim));
             if p < 0 && unsafe zz[0] != 0 {
@@ -6837,18 +6837,18 @@ pub fn vsnprintf(buf: *mut char, n: usize, fmt: *const char, ap: va_list) i32 {
         f: null,
         buf: buf as *mut u8,
         cap: if n == 0 {
-            0usize;
+            0usize
         } else {
-            n - 1;
+            n - 1
         },
         len: 0,
     };
     let r = vformat(&mut o, fmt, ap);
     if n != 0 {
         let end = if o.len < o.cap {
-            o.len;
+            o.len
         } else {
-            o.cap;
+            o.cap
         };
         unsafe buf[end] = 0 as char;
     }
@@ -7057,9 +7057,9 @@ fn vscan(f: &mut Scan, fmt: *const char, ap0: va_list) i32 {
             if c != (unsafe p[0]) as i32 {
                 f.unget();
                 failed = if c < 0 {
-                    1;
+                    1
                 } else {
-                    2;
+                    2
                 };
                 break;
             }
@@ -7201,9 +7201,9 @@ fn vscan(f: &mut Scan, fmt: *const char, ap0: va_list) i32 {
             s = null;
             let mut i: usize = 0;
             let mut k: usize = if t == 99 {
-                width as usize + 1;
+                width as usize + 1
             } else {
-                31usize;
+                31usize
             };
             if size == SIZE_L {
                 if alloc {
@@ -7327,13 +7327,13 @@ fn vscan(f: &mut Scan, fmt: *const char, ap0: va_list) i32 {
             }
         } else if t < 128 && unsafe *chrnul("pXxoudi".ptr(), t as u8) != 0 {
             let base: u32 = if t == 112 || t == 88 || t == 120 {
-                16;
+                16
             } else if t == 111 {
-                8;
+                8
             } else if t == 100 || t == 117 {
-                10;
+                10
             } else {
-                0;
+                0
             };
             let x = intscan(f, base, ~0u64, false);
             if scnt(f) == 0 {
@@ -7461,9 +7461,9 @@ fn scanexp(f: &mut Scan, pok: bool) i64 {
     }
     f.unget();
     return if neg {
-        0 - y;
+        0 - y
     } else {
-        y;
+        y
     };
 }
 
@@ -7606,9 +7606,9 @@ fn decfloat(f: &mut Scan, c0: i32, bits0: i32, emin: i32, sign: i32, pok: bool) 
     // Align the radix point to a word boundary.
     if rp % 9 != 0 {
         let rpm9 = if rp >= 0 {
-            rp % 9;
+            rp % 9
         } else {
-            rp % 9 + 9;
+            rp % 9 + 9
         };
         let p10 = unsafe P10S[(8 - rpm9) as usize];
         let mut carry: u32 = 0;
@@ -7808,9 +7808,9 @@ fn hexfloat(f: &mut Scan, bits0: i32, emin: i32, sign: i32, pok: bool) f64 {
         } else {
             gotdig = true;
             let d = if c > 57 {
-                (c | 32) + 10 - 97;
+                (c | 32) + 10 - 97
             } else {
-                c - 48;
+                c - 48
             };
             if dc < 8 {
                 x = x * 16 + d as u32;
@@ -7904,14 +7904,14 @@ fn hexfloat(f: &mut Scan, bits0: i32, emin: i32, sign: i32, pok: bool) f64 {
 // musl's `__floatscan`: `prec` 0 for float (24 bits), 1 for double (53).
 fn floatscan(f: &mut Scan, prec: i32, pok: bool) f64 {
     let bits = if prec == 0 {
-        24;
+        24
     } else {
-        53;
+        53
     };
     let emin = if prec == 0 {
-        -125 - bits;
+        -125 - bits
     } else {
-        -1021 - bits;
+        -1021 - bits
     };
     let mut sign: i32 = 1;
     let mut c = f.get();
@@ -8033,9 +8033,9 @@ pub fn atof(s: *const char) f64 {
 // wasm's `i32.ctz`: 32 for zero, as musl's `__builtin_ctz` compiles there.
 const fn ctz32(x: usize) u32 {
     return if x == 0 {
-        32u32;
+        32u32
     } else {
-        x.trailing_zeros() as u32;
+        x.trailing_zeros() as u32
     };
 }
 
@@ -8086,9 +8086,9 @@ const fn cycle(width: usize, ar: &mut [*mut u8; 57], n: usize) {
     let mut off: usize = 0;
     while w != 0 {
         let l = if w < 256 {
-            w;
+            w
         } else {
-            256usize;
+            256usize
         };
         copy(&mut tmp[0], unsafe (ar[0] + off), l);
         for i in 0..n - 1 {

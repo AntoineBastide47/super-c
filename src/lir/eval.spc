@@ -135,9 +135,9 @@ extend Eval {
         for i in 0..pkg.syms.len() {
             e.icode.push(
                 if pkg.syms[i].kind == SK_FUNC {
-                    icode_of(pkg.spell(pkg.syms[i].name));
+                    icode_of(pkg.spell(pkg.syms[i].name))
                 } else {
-                    IC_NONE;
+                    IC_NONE
                 },
             );
         }
@@ -229,9 +229,9 @@ extend Eval {
         let f = self.frames[fi];
         let b = &(unsafe &*self.pkg).bodies[f.body as usize];
         let i = if f.pc != 0 {
-            f.pc - 1;
+            f.pc - 1
         } else {
-            0u32;
+            0u32
         };
         if i as usize < b.inl.len() && b.inl[i as usize] != 0 {
             return b.lines[b.inl[i as usize] as usize];
@@ -399,9 +399,9 @@ extend Eval {
         self.frames.index_mut(fi).pc = f.pc + 1;
         let ptr = (unsafe &*self.pkg).ptr_bytes;
         let dst = if t.ty != T_NONE {
-            self.word(&f, b, f.pc);
+            self.word(&f, b, f.pc)
         } else {
-            NONE;
+            NONE
         };
         let op = t.op;
         if op == O_ICONST || op == O_FCONST {
@@ -438,9 +438,9 @@ extend Eval {
                 t.ty,
                 self.val(&f, b, t.a),
                 if t.b != VNONE && op != O_NEG && op != O_NOT {
-                    self.val(&f, b, t.b);
+                    self.val(&f, b, t.b)
                 } else {
-                    0;
+                    0
                 },
                 dst,
             );
@@ -463,9 +463,9 @@ extend Eval {
                 let x = get_lane(&self.vals, wa, k, lb);
                 let y = get_lane(&self.vals, wb, k, lb);
                 let holds = if is_float(lt) {
-                    fcmp(t.aux, to_f64(lt, x), to_f64(lt, y));
+                    fcmp(t.aux, to_f64(lt, x), to_f64(lt, y))
                 } else {
-                    icmp(t.aux, lt, ptr, x, y);
+                    icmp(t.aux, lt, ptr, x, y)
                 };
                 set_lane(&mut self.vals, dst, k, lb, ast::pick(holds, ~0u64, 0u64));
             }
@@ -492,9 +492,9 @@ extend Eval {
             let wa = self.word(&f, b, t.a);
             let wb = self.word(&f, b, t.b);
             let h = if op == O_VZIPHI {
-                n / 2;
+                n / 2
             } else {
-                0;
+                0
             };
             for k in 0..n / 2 {
                 let x = get_lane(&self.vals, wa, h + k, lb);
@@ -512,9 +512,9 @@ extend Eval {
             for k in 0..n {
                 let j = 2 * k;
                 let x = if j < n {
-                    get_lane(&self.vals, wa, j, lb);
+                    get_lane(&self.vals, wa, j, lb)
                 } else {
-                    get_lane(&self.vals, wb, j - n, lb);
+                    get_lane(&self.vals, wb, j - n, lb)
                 };
                 set_lane(&mut self.vals, dst, k, lb, x);
             }
@@ -556,13 +556,13 @@ extend Eval {
             let bits = type_bits(t.ty, ptr);
             let x = trunc_bits(self.val(&f, b, t.a), bits);
             self.vals[dst as usize] = if op == O_POPCNT {
-                x.count_ones() as u64;
+                x.count_ones() as u64
             } else if x == 0 {
-                bits;
+                bits
             } else if op == O_CLZ {
-                (x.leading_zeros() - (64 - bits as usize)) as u64;
+                (x.leading_zeros() - (64 - bits as usize)) as u64
             } else {
-                x.trailing_zeros() as u64;
+                x.trailing_zeros() as u64
             };
             return true;
         }
@@ -603,9 +603,9 @@ extend Eval {
                 t.ty,
                 self.val(&f, b, t.a),
                 if op != O_FNEG && op != O_FSQRT {
-                    self.val(&f, b, t.b);
+                    self.val(&f, b, t.b)
                 } else {
-                    0;
+                    0
                 },
             );
             return true;
@@ -641,17 +641,17 @@ extend Eval {
             let v = self.val(&f, b, t.b);
             let r = t.aux >> 4;
             let nv = if r == RMW_XCHG {
-                v;
+                v
             } else if r == RMW_ADD {
-                old.wrapping_add(v);
+                old.wrapping_add(v)
             } else if r == RMW_SUB {
-                old.wrapping_sub(v);
+                old.wrapping_sub(v)
             } else if r == RMW_AND {
-                old & v;
+                old & v
             } else if r == RMW_OR {
-                old | v;
+                old | v
             } else {
-                old ^ v;
+                old ^ v
             };
             self.tmp.truncate(0);
             self.tmp.push(trunc_bits(nv, type_bits(t.ty, ptr)));
@@ -694,17 +694,17 @@ extend Eval {
             self.vals[dst as usize] = if t.ty == T_F32 {
                 fl::f32_bits(
                     math::fmaf(fl::f32_from_bits(x as u32), fl::f32_from_bits(y as u32), fl::f32_from_bits(z as u32)),
-                );
+                )
             } else {
-                fl::f64_bits(math::fma(fl::f64_from_bits(x), fl::f64_from_bits(y), fl::f64_from_bits(z)));
+                fl::f64_bits(math::fma(fl::f64_from_bits(x), fl::f64_from_bits(y), fl::f64_from_bits(z)))
             };
             return true;
         }
         if op == O_SELECT {
             let src = if self.val(&f, b, t.a) != 0 {
-                t.b;
+                t.b
             } else {
-                t.c;
+                t.c
             };
             let sw = self.word(&f, b, src);
             for k in 0..value_words(t.ty, ptr) {
@@ -898,9 +898,9 @@ extend Eval {
             // The low word extended to 64 bits, the high word its sign or 0.
             let fb = type_bits(from, ptr);
             let lo = if t.op == O_SEXT {
-                sign_ext(x, fb) as u64;
+                sign_ext(x, fb) as u64
             } else {
-                trunc_bits(x, fb);
+                trunc_bits(x, fb)
             };
             self.vals[dst as usize] = lo;
             self.vals[dst as usize + 1] = pick_u64(t.op == O_SEXT && lo >> 63 != 0, 0xFFFFFFFFFFFFFFFF, 0);
@@ -969,9 +969,9 @@ extend Eval {
             while j > lo {
                 j -= 1;
                 let byte = if heap {
-                    self.heap[(base + j) as usize];
+                    self.heap[(base + j) as usize]
                 } else {
-                    self.stack[(base + j) as usize];
+                    self.stack[(base + j) as usize]
                 };
                 w = w << 8 | byte as u64;
             }
@@ -1016,9 +1016,9 @@ extend Eval {
             return false;
         }
         *out = if heap {
-            self.heap[base as usize];
+            self.heap[base as usize]
         } else {
-            self.stack[base as usize];
+            self.stack[base as usize]
         };
         return true;
     }
@@ -1040,14 +1040,14 @@ extend Eval {
         let back = sh == dh && db > sb;
         for k in 0..n {
             let j = if back {
-                n - 1 - k;
+                n - 1 - k
             } else {
-                k;
+                k
             };
             let c = if sh {
-                self.heap[(sb + j) as usize];
+                self.heap[(sb + j) as usize]
             } else {
-                self.stack[(sb + j) as usize];
+                self.stack[(sb + j) as usize]
             };
             if dh {
                 self.heap[(db + j) as usize] = c;
@@ -1300,11 +1300,11 @@ extend Eval {
                 return false;
             }
             let r: i32 = if x.as_str() < y.as_str() {
-                -1;
+                -1
             } else if x.as_str() == y.as_str() {
-                0;
+                0
             } else {
-                1;
+                1
             };
             self.put(dst, r as u32);
             return true;
@@ -1317,7 +1317,7 @@ extend Eval {
             if !self.cstring(args[0], &mut m) {
                 return false;
             }
-            return self.stop(iri::IT_TRAP_PANIC, m.as_str());
+            return self.stop(iri::IT_TRAP_PANIC, &m);
         }
         if ic == IC_PANIC_STR {
             let mut m = String::new();
@@ -1328,7 +1328,7 @@ extend Eval {
                 }
                 m.push_byte(c);
             }
-            return self.stop(iri::IT_TRAP_PANIC, m.as_str());
+            return self.stop(iri::IT_TRAP_PANIC, &m);
         }
         if ic == IC_ASSERT {
             return self.stop(iri::IT_TRAP_PANIC, "assertion failed");
@@ -1338,11 +1338,11 @@ extend Eval {
         }
         if ic == IC_INDEX_BOUNDS {
             let m = format("index out of bounds: the index is {} but the length is {}", args[0], args[1]);
-            return self.stop(iri::IT_TRAP_UB_OOB, m.as_str());
+            return self.stop(iri::IT_TRAP_UB_OOB, &m);
         }
         if ic == IC_VEC_BOUNDS {
             let m = format("index out of bounds: {} lanes from {} but the length is {}", args[0], args[1], args[2]);
-            return self.stop(iri::IT_TRAP_UB_OOB, m.as_str());
+            return self.stop(iri::IT_TRAP_UB_OOB, &m);
         }
         if ic == IC_LANE_BOUNDS {
             let mut m = format("lane {}: index out of bounds: the index is {}", args[0], args[1]);
@@ -1350,7 +1350,7 @@ extend Eval {
                 m.format_into(" + {}", args[0]);
             }
             m.format_into(" but the length is {}", args[2]);
-            return self.stop(iri::IT_TRAP_UB_OOB, m.as_str());
+            return self.stop(iri::IT_TRAP_UB_OOB, &m);
         }
         if ic == IC_LANE_PANIC {
             let mut t = String::new();
@@ -1358,7 +1358,7 @@ extend Eval {
                 return false;
             }
             let m = format("lane {}: {}", args[0], t.as_str());
-            return self.stop(iri::IT_TRAP_PANIC, m.as_str());
+            return self.stop(iri::IT_TRAP_PANIC, &m);
         }
         if ic == IC_ZST_DIFF {
             return self.stop(iri::IT_TRAP_PANIC, "pointer distance on a zero-sized element type");
@@ -1381,21 +1381,21 @@ extend Eval {
             let x = args[0];
             let y = args[1];
             let rv = if name == "sc_mulo_u64" {
-                ov64(O_MULO, false, x, y) as u64;
+                ov64(O_MULO, false, x, y) as u64
             } else if name == "sc_mulo_i64" {
-                ov64(O_MULO, true, x, y) as u64;
+                ov64(O_MULO, true, x, y) as u64
             } else if name == "sc_wadd64" {
-                x.wrapping_add(y);
+                x.wrapping_add(y)
             } else if name == "sc_wsub64" {
-                x.wrapping_sub(y);
+                x.wrapping_sub(y)
             } else if name == "sc_wmul64" {
-                x.wrapping_mul(y);
+                x.wrapping_mul(y)
             } else if name == "sc_wshl64" {
-                x.wrapping_shl(y as u32);
+                x.wrapping_shl(y as u32)
             } else if name == "sc_wshr64" {
-                x.wrapping_shr(y as u32);
+                x.wrapping_shr(y as u32)
             } else {
-                (x as i64).wrapping_shr(y as u32) as u64;
+                (x as i64).wrapping_shr(y as u32) as u64
             };
             self.put(dst, rv);
             return true;
@@ -1403,11 +1403,11 @@ extend Eval {
         if ic == IC_BITS {
             let x = args[0];
             let rv = if name == "sc_ctz64" {
-                x.trailing_zeros();
+                x.trailing_zeros()
             } else if name == "sc_clz64" {
-                x.leading_zeros();
+                x.leading_zeros()
             } else {
-                x.count_ones();
+                x.count_ones()
             } as u64;
             self.put(dst, rv);
             return true;
@@ -1415,47 +1415,47 @@ extend Eval {
         // libm: a trailing `f` selects the f32 function.
         let f32suf = name.len() > 1 && name.ends_with("f") && rt == T_F32;
         let base = if f32suf {
-            name.slice(0, name.len() - 1);
+            name.slice(0, name.len() - 1)
         } else {
-            name;
+            name
         };
         if (rt == T_F32 || rt == T_F64) && n >= 1 && n <= 3 {
             let mut x: [f64; 3] = [0.0, 0.0, 0.0];
             for k in 0..n {
                 unsafe x[k] = if f32suf {
-                    fl::f32_from_bits((unsafe args[k]) as u32);
+                    fl::f32_from_bits((unsafe args[k]) as u32)
                 } else {
-                    fl::f64_from_bits(unsafe args[k]);
+                    fl::f64_from_bits(unsafe args[k])
                 };
             }
             let mut r = iri::DblRes { ok: false, v: 0.0 };
             if n == 1 {
                 r = if f32suf {
-                    iri::libm1f(base, x[0] as f32);
+                    iri::libm1f(base, x[0] as f32)
                 } else {
-                    iri::libm1(base, x[0]);
+                    iri::libm1(base, x[0])
                 };
             } else if n == 2 {
                 r = if f32suf {
-                    iri::libm2f(base, x[0] as f32, x[1] as f32);
+                    iri::libm2f(base, x[0] as f32, x[1] as f32)
                 } else {
-                    iri::libm2(base, x[0], x[1]);
+                    iri::libm2(base, x[0], x[1])
                 };
             } else if base == "fma" {
                 r = iri::DblRes {
                     ok: true,
                     v: if f32suf {
-                        math::fmaf(x[0] as f32, x[1] as f32, x[2] as f32);
+                        math::fmaf(x[0] as f32, x[1] as f32, x[2] as f32)
                     } else {
-                        math::fma(x[0], x[1], x[2]);
+                        math::fma(x[0], x[1], x[2])
                     },
                 };
             }
             if r.ok {
                 let rv = if f32suf {
-                    fl::f32_bits(r.v as f32) as u64;
+                    fl::f32_bits(r.v as f32) as u64
                 } else {
-                    fl::f64_bits(r.v);
+                    fl::f64_bits(r.v)
                 };
                 self.put(dst, rv);
                 return true;
@@ -1489,18 +1489,18 @@ extend Eval {
         let lb = type_bits(lt, ptr);
         let wa = self.word(f, b, t.a);
         let wb = if t.b != VNONE && t.op != O_NEG && t.op != O_NOT {
-            self.word(f, b, t.b);
+            self.word(f, b, t.b)
         } else {
-            NONE;
+            NONE
         };
         let w0 = self.vals.len() as u32;
         self.vals.push(0);
         for k in 0..n {
             let x = get_lane(&self.vals, wa, k, lb);
             let y = if wb != NONE {
-                get_lane(&self.vals, wb, k, lb);
+                get_lane(&self.vals, wb, k, lb)
             } else {
-                0;
+                0
             };
             if !self.int_op(t.op, lt, x, y, w0) {
                 return false;
@@ -1518,16 +1518,16 @@ extend Eval {
         let lb = type_bits(lt, 8);
         let wa = self.word(f, b, t.a);
         let wb = if t.op != O_FNEG && t.op != O_FSQRT {
-            self.word(f, b, t.b);
+            self.word(f, b, t.b)
         } else {
-            NONE;
+            NONE
         };
         for k in 0..n {
             let x = get_lane(&self.vals, wa, k, lb);
             let y = if wb != NONE {
-                get_lane(&self.vals, wb, k, lb);
+                get_lane(&self.vals, wb, k, lb)
             } else {
-                0;
+                0
             };
             set_lane(&mut self.vals, dst, k, lb, float_op(t.op, lt, x, y));
         }
@@ -1577,9 +1577,9 @@ extend Eval {
                 let x = to_f64(lt, get_lane(&self.vals, w[0], i, lb));
                 let y = to_f64(lt, get_lane(&self.vals, w[1], i, lb));
                 let r = if lt == T_F32 {
-                    iri::libm2f("fmodf", x as f32, y as f32).v;
+                    iri::libm2f("fmodf", x as f32, y as f32).v
                 } else {
-                    iri::libm2("fmod", x, y).v;
+                    iri::libm2("fmod", x, y).v
                 };
                 set_lane(&mut self.vals, dst, i, lb, from_f64(lt, r));
             }
@@ -1592,11 +1592,11 @@ extend Eval {
             for i in 0..lanes(ty[0]) {
                 let x = get_lane(&self.vals, w[0], i, lb);
                 let r = if code == core::OP_SHL_SCALAR {
-                    x << k;
+                    x << k
                 } else if sg {
-                    (sign_ext(x, lb) >> k as i64) as u64;
+                    (sign_ext(x, lb) >> k as i64) as u64
                 } else {
-                    x >> k;
+                    x >> k
                 };
                 set_lane(&mut self.vals, dst, i, lb, r);
             }
@@ -1632,15 +1632,15 @@ extend Eval {
         let fb = type_bits(fl, 8);
         let tb = type_bits(tl, 8);
         let op = if is_float(fl) && is_float(tl) {
-            pick_u8(fb < tb, O_FPEXT, pick_u8(fb > tb, O_FPTRUNC, O_ZEXT));
+            pick_u8(fb < tb, O_FPEXT, pick_u8(fb > tb, O_FPTRUNC, O_ZEXT))
         } else if is_float(fl) {
-            pick_u8(ts, O_FPTOSI, O_FPTOUI);
+            pick_u8(ts, O_FPTOSI, O_FPTOUI)
         } else if is_float(tl) {
-            pick_u8(fs, O_SITOFP, O_UITOFP);
+            pick_u8(fs, O_SITOFP, O_UITOFP)
         } else if fb < tb && fs {
-            O_SEXT;
+            O_SEXT
         } else {
-            O_ZEXT;
+            O_ZEXT
         };
         for i in 0..lanes(from) {
             let mut r: u64 = 0;
@@ -1698,18 +1698,18 @@ pub(package) const fn int_fold(op: u8, ty: u8, ptr: u32, x: u64, y: u64, out: &m
             return FOLD_OVERFLOW;
         }
         r = if op == O_SDIV {
-            (sx / sy) as u64;
+            (sx / sy) as u64
         } else {
-            (sx % sy) as u64;
+            (sx % sy) as u64
         };
     } else if op == O_UDIV || op == O_UREM {
         if y == 0 {
             return FOLD_DIV_ZERO;
         }
         r = if op == O_UDIV {
-            x / y;
+            x / y
         } else {
-            x % y;
+            x % y
         };
     } else if op == O_AND {
         r = x & y;
@@ -1803,9 +1803,9 @@ pub(package) const fn f32_bits_to_half(x: u32) u32 {
     // The binary16 exponent field; at 0 or below, the result is subnormal and keeps fewer bits.
     let he = e - 127 + 15;
     let sh = if he >= 1 {
-        13i32;
+        13i32
     } else {
-        14 - he;
+        14 - he
     };
     if sh > 24 {
         return s;
@@ -1858,13 +1858,13 @@ pub(package) const fn int128_fold(op: u8, xl: u64, xh: u64, yl: u64, yh: u64) (u
         rh = ph.wrapping_add(xl.wrapping_mul(yh)).wrapping_add(xh.wrapping_mul(yl));
     } else if op >= O_SDIV && op <= O_UREM {
         if yl == 0 && yh == 0 {
-            return FOLD_DIV_ZERO, 0, 0;
+            return (FOLD_DIV_ZERO, 0, 0);
         }
         let signed = op == O_SDIV || op == O_SREM;
         let xn = signed && xh >> 63 != 0;
         let yn = signed && yh >> 63 != 0;
         if signed && xh == 0x8000000000000000 && xl == 0 && yl == 0xFFFFFFFFFFFFFFFF && yh == 0xFFFFFFFFFFFFFFFF {
-            return FOLD_OVERFLOW, 0, 0;
+            return (FOLD_OVERFLOW, 0, 0);
         }
         // Magnitudes divided; the quotient negative when the signs differ, the remainder with the dividend's.
         let (al, ah) = neg_if(xn, xl, xh);
@@ -1890,7 +1890,7 @@ pub(package) const fn int128_fold(op: u8, xl: u64, xh: u64, yl: u64, yh: u64) (u
         rh = xh ^ yh;
     } else if op == O_SHL || op == O_LSHR || op == O_ASHR {
         if yh != 0 || yl >= 128 {
-            return FOLD_SHIFT, 0, 0;
+            return (FOLD_SHIFT, 0, 0);
         }
         let (u, v) = shift128(op, xl, xh, yl as u32);
         rl = u;
@@ -1903,7 +1903,7 @@ pub(package) const fn int128_fold(op: u8, xl: u64, xh: u64, yl: u64, yh: u64) (u
         rl = ~xl;
         rh = ~xh;
     }
-    return FOLD_OK, rl, rh;
+    return (FOLD_OK, rl, rh);
 }
 
 const fn mul64(x: u64, y: u64) (u64, u64) {
@@ -1913,45 +1913,45 @@ const fn mul64(x: u64, y: u64) (u64, u64) {
     let p01 = x0 * y1;
     let p10 = x1 * y0;
     let mid = (p00 >> 32) + (p01 & 0xFFFFFFFF) + (p10 & 0xFFFFFFFF);
-    return mid << 32 | p00 & 0xFFFFFFFF, x1 * y1 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    return (mid << 32 | p00 & 0xFFFFFFFF, x1 * y1 + (p01 >> 32) + (p10 >> 32) + (mid >> 32));
 }
 
 // The 128-bit value `(l, h)`, negated when `neg`.
 const fn neg_if(neg: bool, l: u64, h: u64) (u64, u64) {
     if !neg {
-        return l, h;
+        return (l, h);
     }
-    return 0u64.wrapping_sub(l), (~h).wrapping_add((l == 0) as u64);
+    return (0u64.wrapping_sub(l), (~h).wrapping_add((l == 0) as u64));
 }
 
 // `(l, h)` shifted by `n` (below 128) by shift operation `op`.
 const fn shift128(op: u8, l: u64, h: u64, n: u32) (u64, u64) {
     if n == 0 {
-        return l, h;
+        return (l, h);
     }
     let fill = pick_u64(op == O_ASHR && h >> 63 != 0, 0xFFFFFFFFFFFFFFFF, 0);
     if n >= 64 {
         let k = (n - 64) as u64;
         if op == O_SHL {
-            return 0, l << k;
+            return (0, l << k);
         }
         let hi = if op == O_ASHR {
-            (h as i64 >> k as i64) as u64;
+            (h as i64 >> k as i64) as u64
         } else {
-            h >> k;
+            h >> k
         };
-        return hi, fill;
+        return (hi, fill);
     }
     let k = n as u64;
     if op == O_SHL {
-        return l << k, h << k | l >> 64 - k;
+        return (l << k, h << k | l >> 64 - k);
     }
     let hi = if op == O_ASHR {
-        (h as i64 >> k as i64) as u64;
+        (h as i64 >> k as i64) as u64
     } else {
-        h >> k;
+        h >> k
     };
-    return l >> k | h << 64 - k, hi;
+    return (l >> k | h << 64 - k, hi);
 }
 
 // The unsigned quotient and remainder of `(al, ah)` by `(bl, bh)` (not 0), one bit per step.
@@ -1965,9 +1965,9 @@ const fn divmod128(al: u64, ah: u64, bl: u64, bh: u64) (u64, u64, u64, u64) {
         // r = r << 1 | bit i of a.
         rh = rh << 1 | rl >> 63;
         let bit = if i >= 64 {
-            ah >> (i - 64) as u64;
+            ah >> (i - 64) as u64
         } else {
-            al >> i as u64;
+            al >> i as u64
         };
         rl = rl << 1 | bit & 1;
         if rh > bh || rh == bh && rl >= bl {
@@ -1981,7 +1981,7 @@ const fn divmod128(al: u64, ah: u64, bl: u64, bh: u64) (u64, u64, u64, u64) {
             }
         }
     }
-    return ql, qh, rl, rh;
+    return (ql, qh, rl, rh);
 }
 
 // Condition `c` between the 128-bit values `(xl, xh)` and `(yl, yh)`.
@@ -2033,11 +2033,11 @@ pub(package) const fn overflows(op: u8, ty: u8, ptr: u32, signed: bool, x: u64, 
             return ov64(op, true, x, y);
         }
         let r = if op == O_ADDO {
-            a + c;
+            a + c
         } else if op == O_SUBO {
-            a - c;
+            a - c
         } else {
-            a * c;
+            a * c
         };
         return r != sign_ext(r as u64, bits);
     }
@@ -2048,9 +2048,9 @@ pub(package) const fn overflows(op: u8, ty: u8, ptr: u32, signed: bool, x: u64, 
         return y > x;
     }
     let r = if op == O_ADDO {
-        x + y;
+        x + y
     } else {
-        x * y;
+        x * y
     };
     return r != trunc_bits(r, bits);
 }
@@ -2163,17 +2163,17 @@ pub(package) const fn float_op(op: u8, ty: u8, x: u64, y: u64) u64 {
         let a = fl::f32_from_bits(x as u32);
         let c = fl::f32_from_bits(y as u32);
         let r = if op == O_FADD {
-            a + c;
+            a + c
         } else if op == O_FSUB {
-            a - c;
+            a - c
         } else if op == O_FMUL {
-            a * c;
+            a * c
         } else if op == O_FDIV {
-            a / c;
+            a / c
         } else if op == O_FSQRT {
-            a.sqrt();
+            a.sqrt()
         } else {
-            -a;
+            -a
         };
         if r == r || op == O_FNEG {
             return fl::f32_bits(r);
@@ -2189,17 +2189,17 @@ pub(package) const fn float_op(op: u8, ty: u8, x: u64, y: u64) u64 {
     let a = fl::f64_from_bits(x);
     let c = fl::f64_from_bits(y);
     let r = if op == O_FADD {
-        a + c;
+        a + c
     } else if op == O_FSUB {
-        a - c;
+        a - c
     } else if op == O_FMUL {
-        a * c;
+        a * c
     } else if op == O_FDIV {
-        a / c;
+        a / c
     } else if op == O_FSQRT {
-        a.sqrt();
+        a.sqrt()
     } else {
-        -a;
+        -a
     };
     if r == r || op == O_FNEG {
         return fl::f64_bits(r);
@@ -2235,16 +2235,16 @@ pub(package) const fn scalar_convert(op: u8, aux: u16, from: u8, to: u8, ptr: u3
     }
     if op == O_SITOFP || op == O_UITOFP {
         let v: f64 = if op == O_SITOFP {
-            sign_ext(x, fb) as f64;
+            sign_ext(x, fb) as f64
         } else {
-            x as f64;
+            x as f64
         };
         // A 64-bit integer converts with one rounding, straight to f32 when that is the result.
         if to == T_F32 {
             let r: f32 = if op == O_SITOFP {
-                sign_ext(x, fb) as f32;
+                sign_ext(x, fb) as f32
             } else {
-                x as f32;
+                x as f32
             };
             *out = fl::f32_bits(r);
         } else {
@@ -2256,14 +2256,14 @@ pub(package) const fn scalar_convert(op: u8, aux: u16, from: u8, to: u8, ptr: u3
     let v = to_f64(from, x);
     let signed = op == O_FPTOSI;
     let lo: f64 = if signed {
-        -2.0f64.powi((tb - 1) as i32);
+        -2.0f64.powi((tb - 1) as i32)
     } else {
-        0.0;
+        0.0
     };
     let hi: f64 = if signed {
-        2.0f64.powi((tb - 1) as i32);
+        2.0f64.powi((tb - 1) as i32)
     } else {
-        2.0f64.powi(tb as i32);
+        2.0f64.powi(tb as i32)
     };
     if v != v || v <= lo - 1.0 || v >= hi {
         if aux == CV_UNCHECKED {
@@ -2332,9 +2332,9 @@ pub(package) const fn modeled(name: str) bool {
 // The routine function symbol `name` names (`__sc_x_<c name>` is a C library name's alias).
 const fn icode_of(name0: str) u8 {
     let name = if name0.starts_with("__sc_x_") {
-        name0.slice(7, name0.len());
+        name0.slice(7, name0.len())
     } else {
-        name0;
+        name0
     };
     if name == "malloc" || name == "sc_lk_malloc" {
         return IC_MALLOC;
@@ -2426,9 +2426,9 @@ const fn icode_of(name0: str) u8 {
         return IC_BITS;
     }
     let base = if name.len() > 1 && name.ends_with("f") {
-        name.slice(0, name.len() - 1);
+        name.slice(0, name.len() - 1)
     } else {
-        name;
+        name
     };
     if iri::libm1(name, 1.0).ok || iri::libm2(name, 1.0, 1.0).ok || iri::libm1(base, 1.0).ok || iri::libm2(
         base,
@@ -2451,11 +2451,11 @@ extend Eval {
         let rule = core::simd_op(c).rule;
         // The vector the lanes come from: the choice's first, else operand 0, else the result.
         let vt = if rule == core::SR_CHOOSE {
-            ty[1];
+            ty[1]
         } else if rule == core::SR_ANY {
-            t.ty;
+            t.ty
         } else {
-            ty[0];
+            ty[0]
         };
         let lt = lane_type(vt);
         let lb = type_bits(lt, 8);
@@ -2472,11 +2472,11 @@ extend Eval {
             let rn = lanes(t.ty);
             for i in 0..rn {
                 let x = if rule == core::SR_CONCAT && i >= n {
-                    get_lane(&self.vals, w[1], i - n, lb);
+                    get_lane(&self.vals, w[1], i - n, lb)
                 } else if c == core::SIMD_HIGH_HALF {
-                    get_lane(&self.vals, w[0], i + rn, lb);
+                    get_lane(&self.vals, w[0], i + rn, lb)
                 } else {
-                    get_lane(&self.vals, w[0], i, lb);
+                    get_lane(&self.vals, w[0], i, lb)
                 };
                 set_lane(&mut self.vals, dst, i, lb, x);
             }
@@ -2484,42 +2484,42 @@ extend Eval {
         }
         let mask = rule == core::SR_MASK || rule == core::SR_CHANGED;
         let rlt = if mask || !is_vec(t.ty) {
-            lt;
+            lt
         } else {
-            lane_type(t.ty);
+            lane_type(t.ty)
         };
         let rlb = type_bits(rlt, 8);
         let mut bits: u64 = 0;
         for i in 0..n {
             let a = if rule == core::SR_CHOOSE {
-                get_lane(&self.vals, w[1], i, lb);
+                get_lane(&self.vals, w[1], i, lb)
             } else if rule == core::SR_ANY {
-                0;
+                0
             } else {
-                get_lane(&self.vals, w[0], i, lb);
+                get_lane(&self.vals, w[0], i, lb)
             };
             // Operand 1: a lane, or one scalar for every lane (a count).
             let c2 = if rule == core::SR_CHOOSE {
-                get_lane(&self.vals, w[2], i, lb);
+                get_lane(&self.vals, w[2], i, lb)
             } else if ty[1] != T_NONE && is_vec(ty[1]) {
-                get_lane(&self.vals, w[1], i, type_bits(lane_type(ty[1]), 8));
+                get_lane(&self.vals, w[1], i, type_bits(lane_type(ty[1]), 8))
             } else if ty[1] != T_NONE {
-                self.vals[w[1] as usize];
+                self.vals[w[1] as usize]
             } else {
-                0;
+                0
             };
             let c3 = if ty[2] != T_NONE && is_vec(ty[2]) {
-                get_lane(&self.vals, w[2], i, lb);
+                get_lane(&self.vals, w[2], i, lb)
             } else {
-                0;
+                0
             };
             let mut bit = false;
             let mut r: u64 = 0;
             if c == core::SIMD_IOTA {
                 r = if fl {
-                    from_f64(lt, i as f64);
+                    from_f64(lt, i as f64)
                 } else {
-                    i;
+                    i
                 };
             } else if c >= core::SIMD_CMP_EQ && c <= core::SIMD_CMP_GE {
                 bit = lane_cmp(c, a, c2, lt, sg);
@@ -2573,20 +2573,20 @@ extend Eval {
         let c2 = lane_val(c20, w, sg);
         let u = trunc_bits(a0, w);
         let min = if sg {
-            (1u64 << (w - 1) as u64).wrapping_neg() as i64;
+            (1u64 << (w - 1) as u64).wrapping_neg() as i64
         } else {
-            0;
+            0
         };
         let max = if sg {
-            ((1u64 << (w - 1) as u64) - 1) as i64;
+            ((1u64 << (w - 1) as u64) - 1) as i64
         } else {
-            trunc_bits(0xFFFFFFFFFFFFFFFFu64, w) as i64;
+            trunc_bits(0xFFFFFFFFFFFFFFFFu64, w) as i64
         };
         let k = c20 & w as u64 - 1;
         let lt_ = if sg {
-            a < c2;
+            a < c2
         } else {
-            a as u64 < c2 as u64;
+            a as u64 < c2 as u64
         };
         if c >= core::SIMD_WRAP_ADD && c <= core::SIMD_WRAP_MUL || c >= core::SIMD_OVF_ADD && c <= core::SIMD_SAT_SUB {
             let add = c == core::SIMD_WRAP_ADD || c == core::SIMD_OVF_ADD || c == core::SIMD_SAT_ADD;
@@ -2595,16 +2595,16 @@ extend Eval {
             let ua = a as u64;
             let uc = c2 as u64;
             let mut v = if add {
-                ua.wrapping_add(uc);
+                ua.wrapping_add(uc)
             } else if sub {
-                ua.wrapping_sub(uc);
+                ua.wrapping_sub(uc)
             } else {
-                ua.wrapping_mul(uc);
+                ua.wrapping_mul(uc)
             } as i64;
             let o = ov64(oc, sg, ua, uc) || w < 64 && if sg {
-                sign_ext(trunc_bits(v as u64, w), w) != v;
+                sign_ext(trunc_bits(v as u64, w), w) != v
             } else {
-                v as u64 >> w as u64 != 0;
+                v as u64 >> w as u64 != 0
             };
             if c >= core::SIMD_OVF_ADD && c <= core::SIMD_OVF_MUL {
                 *bit = o;
@@ -2624,11 +2624,11 @@ extend Eval {
         if c == core::SIMD_NARROW_CHECKED {
             let rw = type_bits(rlt, 8);
             let fits = if !sg && a < 0 {
-                !rsg && rw == 64;
+                !rsg && rw == 64
             } else if !rsg && rw == 64 {
-                a >= 0 || !sg;
+                a >= 0 || !sg
             } else {
-                lane_fits(a, rw, rsg);
+                lane_fits(a, rw, rsg)
             };
             if !fits {
                 return self.stop(iri::IT_TRAP_UB_OVERFLOW, core::lane_trap_msg(core::RV_SIMD, c, false));
@@ -2660,17 +2660,17 @@ extend Eval {
             return true;
         }
         let v: i64 = if c == core::SIMD_WRAP_NEG {
-            a.wrapping_neg();
+            a.wrapping_neg()
         } else if c == core::SIMD_WRAP_SHL {
-            (u << k) as i64;
+            (u << k) as i64
         } else if c == core::SIMD_WRAP_SHR {
-            pick_i64(sg, a >> k as i64, (u >> k) as i64);
+            pick_i64(sg, a >> k as i64, (u >> k) as i64)
         } else if c == core::SIMD_MIN {
-            pick_i64(lt_, a, c2);
+            pick_i64(lt_, a, c2)
         } else if c == core::SIMD_MAX {
-            pick_i64(lt_, c2, a);
+            pick_i64(lt_, c2, a)
         } else if c == core::SIMD_ABS || c == core::SIMD_WRAP_ABS {
-            pick_i64(sg && a < 0, a.wrapping_neg(), a);
+            pick_i64(sg && a < 0, a.wrapping_neg(), a)
         } else if c == core::SIMD_ABS_DIFF {
             let d = pick_u64(
                 pick_bool(sg, a > c2, a as u64 > c2 as u64),
@@ -2680,15 +2680,15 @@ extend Eval {
             *r = trunc_bits(d, type_bits(rlt, 8));
             return true;
         } else if c == core::SIMD_CLZ {
-            (u.leading_zeros() as u64 - (64 - w as u64)) as i64;
+            (u.leading_zeros() as u64 - (64 - w as u64)) as i64
         } else if c == core::SIMD_CTZ {
-            pick_u64(u == 0, w, u.trailing_zeros() as u64) as i64;
+            pick_u64(u == 0, w, u.trailing_zeros() as u64) as i64
         } else if c == core::SIMD_POPCNT {
-            u.count_ones() as i64;
+            u.count_ones() as i64
         } else if c == core::SIMD_ROTL {
-            (u << k | u >> (w as u64 - k & w as u64 - 1)) as i64;
+            (u << k | u >> (w as u64 - k & w as u64 - 1)) as i64
         } else if c == core::SIMD_ROTR {
-            (u >> k | u << (w as u64 - k & w as u64 - 1)) as i64;
+            (u >> k | u << (w as u64 - k & w as u64 - 1)) as i64
         } else {
             return self.stop(EV_ERROR, "an integer vector operation the evaluator does not model");
         };
@@ -2722,17 +2722,17 @@ const fn lane_cmp(c: u8, a: u64, b: u64, lt: u8, sg: bool) bool {
         let x = to_f64(lt, a);
         let y = to_f64(lt, b);
         return if c == core::SIMD_CMP_EQ {
-            x == y;
+            x == y
         } else if c == core::SIMD_CMP_NE {
-            x != y;
+            x != y
         } else if c == core::SIMD_CMP_LT {
-            x < y;
+            x < y
         } else if c == core::SIMD_CMP_LE {
-            x <= y;
+            x <= y
         } else if c == core::SIMD_CMP_GT {
-            x > y;
+            x > y
         } else {
-            x >= y;
+            x >= y
         };
     }
     let w = type_bits(lt, 8);
@@ -2740,17 +2740,17 @@ const fn lane_cmp(c: u8, a: u64, b: u64, lt: u8, sg: bool) bool {
     let y = lane_val(b, w, sg);
     let less = pick_bool(sg, x < y, x as u64 < y as u64);
     return if c == core::SIMD_CMP_EQ {
-        x == y;
+        x == y
     } else if c == core::SIMD_CMP_NE {
-        x != y;
+        x != y
     } else if c == core::SIMD_CMP_LT {
-        less;
+        less
     } else if c == core::SIMD_CMP_LE {
-        less || x == y;
+        less || x == y
     } else if c == core::SIMD_CMP_GT {
-        !less && x != y;
+        !less && x != y
     } else {
-        !less;
+        !less
     };
 }
 
@@ -2769,9 +2769,9 @@ fn lane_changed(a: u64, bt: u8, bs: bool, d: u64, rt: u8, rs: bool) bool {
     let iw = type_bits(ib, 8) as i32 - pick_i32(isg, 1, 0);
     let hi = math::ldexp(1.0, iw);
     let lo = if isg {
-        0.0 - hi;
+        0.0 - hi
     } else {
-        0.0;
+        0.0
     };
     if ff {
         let x = to_f64(bt, a);
@@ -2781,9 +2781,9 @@ fn lane_changed(a: u64, bt: u8, bs: bool, d: u64, rt: u8, rs: bool) bool {
     if tf {
         let y = to_f64(rt, d);
         let back = if bs {
-            y as i64;
+            y as i64
         } else {
-            (y as u64) as i64;
+            (y as u64) as i64
         };
         return !(y >= lo && y < hi && back == av);
     }
@@ -2825,17 +2825,17 @@ fn lane_float(c: u8, a0: u64, c20: u64, c30: u64, lt: u8, bit: &mut bool) u64 {
     let ab = math::fabs(a);
     if c >= core::SIMD_IS_NAN && c <= core::SIMD_IS_SIGN_NEG {
         *bit = if c == core::SIMD_IS_NAN {
-            a != a;
+            a != a
         } else if c == core::SIMD_IS_INF {
-            ab > maxf;
+            ab > maxf
         } else if c == core::SIMD_IS_FINITE {
-            ab <= maxf;
+            ab <= maxf
         } else if c == core::SIMD_IS_NORMAL {
-            ab >= minn && ab <= maxf;
+            ab >= minn && ab <= maxf
         } else if c == core::SIMD_IS_SUBNORMAL {
-            ab != 0.0 && ab < minn;
+            ab != 0.0 && ab < minn
         } else {
-            (a0 & sb) != 0;
+            (a0 & sb) != 0
         };
         return 0;
     }
@@ -2849,26 +2849,26 @@ fn lane_float(c: u8, a0: u64, c20: u64, c30: u64, lt: u8, bit: &mut bool) u64 {
         let sbits = fl::f64_bits(s);
         let fin = s == s && math::fabs(s) <= 1.7976931348623157e308;
         let r = if e != 0.0 && fin && (sbits & 1) == 0 {
-            fl::f64_from_bits(pick_u64(e > 0.0 == s > 0.0, sbits + 1, sbits - 1));
+            fl::f64_from_bits(pick_u64(e > 0.0 == s > 0.0, sbits + 1, sbits - 1))
         } else {
-            s;
+            s
         };
         return from_f64(lt, r);
     }
     let r = if c == core::SIMD_SQRT {
-        math::sqrt(a);
+        math::sqrt(a)
     } else if c == core::SIMD_CEIL {
-        math::ceil(a);
+        math::ceil(a)
     } else if c == core::SIMD_FLOOR {
-        math::floor(a);
+        math::floor(a)
     } else if c == core::SIMD_TRUNC {
-        math::trunc(a);
+        math::trunc(a)
     } else if c == core::SIMD_ROUND_EVEN {
-        math::nearbyint(a);
+        math::nearbyint(a)
     } else if c == core::SIMD_FMA {
-        math::fma(a, c2, c3);
+        math::fma(a, c2, c3)
     } else {
-        0.0;
+        0.0
     };
     return from_f64(lt, r);
 }
@@ -2922,10 +2922,10 @@ extend Eval {
         let w0 = self.vals.len() as u32;
         self.vals.push(0);
         let ok = if load {
-            self.load(at, lt, w0);
+            self.load(at, lt, w0)
         } else {
             self.vals[w0 as usize] = get_lane(&self.vals, vw, i, lb);
-            self.store(at, lt, w0);
+            self.store(at, lt, w0)
         };
         if ok && load {
             let x = self.vals[w0 as usize];
@@ -2956,14 +2956,14 @@ extend Eval {
             start = trunc_bits(self.vals[w[1] as usize], ptr * 8);
         }
         let vt = if load {
-            t.ty;
+            t.ty
         } else {
-            unsafe ty[pick_usize(raw, 1, 2)];
+            unsafe ty[pick_usize(raw, 1, 2)]
         };
         let vw = if load {
-            dst;
+            dst
         } else {
-            unsafe w[pick_usize(raw, 1, 2)];
+            unsafe w[pick_usize(raw, 1, 2)]
         };
         for i in 0..lanes(vt) {
             if !self.lane_mem(p, start + i as u64, lane_type(vt), vw, i, load) {
@@ -2996,9 +2996,9 @@ extend Eval {
             let ok = self.load(p, T_PTR, w0) && self.load(
                 p + ptr as u64,
                 if ptr == 8 {
-                    T_I64;
+                    T_I64
                 } else {
-                    T_I32;
+                    T_I32
                 },
                 w0 + 1,
             );
@@ -3010,21 +3010,21 @@ extend Eval {
             }
         }
         let start = if sl && !gat {
-            trunc_bits(self.vals[w[1] as usize], ptr * 8);
+            trunc_bits(self.vals[w[1] as usize], ptr * 8)
         } else {
-            0;
+            0
         };
         // The index vector of a gather or scatter.
         let iw = w[1];
         let ib = if gat {
-            type_bits(lane_type(ty[1]), 8);
+            type_bits(lane_type(ty[1]), 8)
         } else {
-            0;
+            0
         };
         let mut act: u64 = if c == core::SIMD_LOAD_OR {
-            0;
+            0
         } else {
-            self.vals[(unsafe w[ar - 2]) as usize];
+            self.vals[(unsafe w[ar - 2]) as usize]
         };
         if c == core::SIMD_LOAD_OR {
             for i in 0..n {
@@ -3040,19 +3040,19 @@ extend Eval {
         if c == core::SIMD_COMPRESS_STORE && (start > len || count > len - start) {
             let mut m = String::new();
             m.format_into("index out of bounds: {} lanes from {} but the length is {}", count, start, len);
-            return self.stop(iri::IT_TRAP_UB_OOB, m.as_str());
+            return self.stop(iri::IT_TRAP_UB_OOB, &m);
         }
         if sl && c != core::SIMD_COMPRESS_STORE {
             for i in 0..n {
                 let ix = if gat {
-                    get_lane(&self.vals, iw, i, ib);
+                    get_lane(&self.vals, iw, i, ib)
                 } else {
-                    start;
+                    start
                 };
                 let bad = if gat {
-                    ix >= len;
+                    ix >= len
                 } else {
-                    start > len || i as u64 >= len - start;
+                    start > len || i as u64 >= len - start
                 };
                 if (act >> i as u64 & 1) != 0 && bad {
                     let mut m = String::new();
@@ -3067,7 +3067,7 @@ extend Eval {
                             len,
                         );
                     }
-                    return self.stop(iri::IT_TRAP_UB_OOB, m.as_str());
+                    return self.stop(iri::IT_TRAP_UB_OOB, &m);
                 }
             }
         }
@@ -3078,9 +3078,9 @@ extend Eval {
             }
         }
         let vw = if store {
-            vw0;
+            vw0
         } else {
-            dst;
+            dst
         };
         let mut k: u64 = 0;
         for i in 0..n {
@@ -3098,20 +3098,20 @@ extend Eval {
                 if !ok {
                     return false;
                 }
-                0;
+                0
             } else if gat {
-                get_lane(&self.vals, iw, i, ib);
+                get_lane(&self.vals, iw, i, ib)
             } else if c == core::SIMD_COMPRESS_STORE {
-                start + k;
+                start + k
             } else {
-                start + i as u64;
+                start + i as u64
             };
             k += 1;
             let ok = if c == core::SIMD_COMPRESS_STORE {
                 // Lane i goes to the next packed position.
-                self.lane_mem(base, at, lt, vw, i, false);
+                self.lane_mem(base, at, lt, vw, i, false)
             } else {
-                self.lane_mem(base, at, lt, vw, i, !store);
+                self.lane_mem(base, at, lt, vw, i, !store)
             };
             if !ok {
                 return false;
@@ -3157,11 +3157,11 @@ extend Eval {
                     let y = to_f64(lt, o);
                     let xs = l >> (lb - 1) as u64 != 0;
                     let ys = o >> (lb - 1) as u64 != 0;
-                    x != y && x < y == min || x == y && xs != ys && xs == min;
+                    x != y && x < y == min || x == y && xs != ys && xs == min
                 } else {
                     let x = lane_val(l, lb, sg);
                     let y = lane_val(o, lb, sg);
-                    x != y && pick_bool(sg, x < y, x as u64 < y as u64) == min;
+                    x != y && pick_bool(sg, x < y, x as u64 < y as u64) == min
                 };
                 if beats {
                     best = i;
@@ -3211,11 +3211,11 @@ extend Eval {
         }
         let ffold = fl && (add || mul);
         let mut acc = if ffold {
-            from_f64(at, pick_f64(add, -0.0, 1.0));
+            from_f64(at, pick_f64(add, -0.0, 1.0))
         } else if c == core::SIMD_DOT {
-            0;
+            0
         } else {
-            self.vals[w0 as usize];
+            self.vals[w0 as usize]
         };
         let from = pick_u32(ffold || c == core::SIMD_DOT, 0, 1);
         for i in from..n {
@@ -3268,9 +3268,9 @@ extend Eval {
             for i in 0..n {
                 if (m >> i as u64 & 1) != 0 {
                     let (to, from) = if c == core::SIMD_COMPRESS {
-                        (k, i);
+                        (k, i)
                     } else {
-                        (i, k);
+                        (i, k)
                     };
                     let x = get_lane(&self.vals, w[1], from, lb);
                     set_lane(&mut self.vals, dst, to, lb, x);
@@ -3280,32 +3280,32 @@ extend Eval {
             return true;
         }
         let cnt = if rule == core::SR_INDEX {
-            b.pool[t.c as usize];
+            b.pool[t.c as usize]
         } else {
-            lanes(ty[1]);
+            lanes(ty[1])
         };
         let ib = if rule == core::SR_RT_INDEX {
-            type_bits(lane_type(ty[1]), 8);
+            type_bits(lane_type(ty[1]), 8)
         } else {
-            0;
+            0
         };
         let mut bits: u64 = 0;
         for i in 0..cnt {
             let k = if rule == core::SR_INDEX {
-                b.pool[(t.c + 1 + i) as usize] as u64;
+                b.pool[(t.c + 1 + i) as usize] as u64
             } else {
-                get_lane(&self.vals, w[1], i, ib);
+                get_lane(&self.vals, w[1], i, ib)
             };
             if c == core::SIMD_SWIZZLE_OOB {
                 bits = bits | pick_u64(k >= n as u64, 1, 0) << i as u64;
                 continue;
             }
             let x = if k < n as u64 {
-                get_lane(&self.vals, w[0], k as u32, lb);
+                get_lane(&self.vals, w[0], k as u32, lb)
             } else if c == core::SIMD_SHUFFLE {
-                get_lane(&self.vals, w[1], (k - n as u64) as u32, lb);
+                get_lane(&self.vals, w[1], (k - n as u64) as u32, lb)
             } else {
-                0;
+                0
             };
             set_lane(&mut self.vals, dst, i, lb, x);
         }

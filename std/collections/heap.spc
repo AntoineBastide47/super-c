@@ -18,7 +18,7 @@
 
 /// A max-heap of T through allocator A.
 pub struct BinaryHeap<T, A = Global> {
-    pub(module) data: Vector<T, A>,
+    data: Vector<T, A>,
 }
 
 /// `T` in the reverse order: a `BinaryHeap<Reverse<T>>` pops the smallest element first.
@@ -35,7 +35,7 @@ extend<T: Ord> Reverse<T> as Ord {
 
 /// A writable borrow of a heap's top (`BinaryHeap::peek_mut`); dropping it restores the heap order.
 pub struct PeekMut<'a, T, A> {
-    pub(module) heap: &'a mut BinaryHeap<T, A>,
+    heap: &'a mut BinaryHeap<T, A>,
 }
 
 extend<T: Ord, A: Allocator> BinaryHeap<T, A> {
@@ -97,9 +97,9 @@ extend<T: Ord, A: Allocator> BinaryHeap<T, A> {
     /// guard drops (O(log n)).
     pub const fn peek_mut(self: &mut BinaryHeap<T, A>) Option<PeekMut<T, A>> {
         if self.data.is_empty() {
-            return Option::<PeekMut<T, A>>::None;
+            return None;
         }
-        return Option::<PeekMut<T, A>>::Some(PeekMut::<T, A> { heap: self });
+        return Some(PeekMut::<T, A> { heap: self });
     }
 
     /// Move every element of `other` in, leaving it empty. O(m log(n + m)).
@@ -182,7 +182,7 @@ extend<'a, T: Ord, A: Allocator> PeekMut<'a, T, A> as DerefMut<T> {
 
 extend<'a, T: Ord, A: Allocator> PeekMut<'a, T, A> as Free {
     pub fn free(self: &mut PeekMut<'a, T, A>) {
-        heap_restore_top(self.heap.data.as_mut_slice());
+        heap_restore_top(&mut self.heap.data);
     }
 }
 

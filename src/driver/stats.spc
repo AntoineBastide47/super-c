@@ -300,9 +300,9 @@ pub(package) fn json(g: &BuildStats, out: &mut String) {
     out.push_str("{\"v\":2,\"ok\":");
     push_bool(out, g.rc == 0);
     out.push_str(",\"profile\":");
-    ljson::dump_escaped(g.profile.as_str(), out);
+    ljson::dump_escaped(&g.profile, out);
     out.push_str(",\"bin\":");
-    ljson::dump_escaped(g.bin.as_str(), out);
+    ljson::dump_escaped(&g.bin, out);
     out.push_str(",\"jobs\":");
     out.push_u64(g.jobs);
     out.push_str(",\"skip_emit\":");

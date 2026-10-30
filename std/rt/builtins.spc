@@ -124,16 +124,16 @@ const fn mul64(a: u64, b: u64) Pair {
 fn udivmod(a: Pair, b: Pair, rem: bool) Pair {
     if a.hi == 0 && b.hi == 0 {
         return if rem {
-            Pair { lo: a.lo % b.lo, hi: 0 };
+            Pair { lo: a.lo % b.lo, hi: 0 }
         } else {
-            Pair { lo: a.lo / b.lo, hi: 0 };
+            Pair { lo: a.lo / b.lo, hi: 0 }
         };
     }
     if b.hi > a.hi || b.hi == a.hi && b.lo > a.lo {
         return if rem {
-            a;
+            a
         } else {
-            Pair { lo: 0, hi: 0 };
+            Pair { lo: 0, hi: 0 }
         };
     }
     let s = clz(b.lo, b.hi) - clz(a.lo, a.hi);
@@ -151,9 +151,9 @@ fn udivmod(a: Pair, b: Pair, rem: bool) Pair {
         d = shr(d.lo, d.hi, 1);
     }
     return if rem {
-        r;
+        r
     } else {
-        q;
+        q
     };
 }
 
@@ -161,9 +161,9 @@ fn udivmod(a: Pair, b: Pair, rem: bool) Pair {
 @platform(linux | android | windows | wasm)
 fn magnitude(x: Pair) (Pair, bool) {
     if x.hi >> 63 == 0 {
-        return x, false;
+        return (x, false);
     }
-    return neg(x), true;
+    return (neg(x), true);
 }
 
 @platform(linux | android | windows | wasm)
@@ -183,9 +183,9 @@ fn sdivmod(a: Pair, b: Pair, rem: bool) Pair {
     return signed(
         r,
         if rem {
-            na;
+            na
         } else {
-            na != nb;
+            na != nb
         },
     );
 }
@@ -281,9 +281,9 @@ fn to_int(b: u64, fbits: u32, ebits: u32, sgn: bool) Pair {
     }
     if sgn && e >= 127 {
         return if negative {
-            MIN;
+            MIN
         } else {
-            MAX;
+            MAX
         };
     }
     let m = b & (1u64 << fbits as u64) - 1 | 1u64 << fbits as u64;
@@ -608,9 +608,9 @@ fn ucrt_snprintf(buf: *mut char, n: usize, fmt: *const char, ...) i32 {
     let r = unsafe __stdio_common_vsprintf(STANDARD_SNPRINTF, buf, n, fmt, null, ap);
     va_end(ap);
     return if r < 0 {
-        -1;
+        -1
     } else {
-        r;
+        r
     };
 }
 

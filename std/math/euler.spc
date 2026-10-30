@@ -430,7 +430,7 @@ pub fn extract_euler_angle_xyz<T: Float>(m: Mat<T, 4, 4>) (T, T, T) {
     let s1 = t1.sin();
     let c1 = t1.cos();
     let t3 = (s1 * a[2] - c1 * a[1]).atan2(c1 * b[1] - s1 * b[2]);
-    return -t1, -t2, -t3;
+    return (-t1, -t2, -t3);
 }
 
 /// The angles (t1, t2, t3) of `euler_angle_yxz`.
@@ -442,7 +442,7 @@ pub fn extract_euler_angle_yxz<T: Float>(m: Mat<T, 4, 4>) (T, T, T) {
     let s1 = t1.sin();
     let c1 = t1.cos();
     let t3 = (s1 * b[2] - c1 * b[0]).atan2(c1 * a[0] - s1 * a[2]);
-    return t1, t2, t3;
+    return (t1, t2, t3);
 }
 
 /// The angles (t1, t2, t3) of `euler_angle_xzx`, t2 in [0, pi].
@@ -454,7 +454,7 @@ pub fn extract_euler_angle_xzx<T: Float>(m: Mat<T, 4, 4>) (T, T, T) {
     let s1 = t1.sin();
     let c1 = t1.cos();
     let t3 = (c1 * b[2] - s1 * b[1]).atan2(c1 * c[2] - s1 * c[1]);
-    return t1, t2, t3;
+    return (t1, t2, t3);
 }
 
 /// The angles (t1, t2, t3) of `euler_angle_xyx`, t2 in [0, pi].
@@ -466,7 +466,7 @@ pub fn extract_euler_angle_xyx<T: Float>(m: Mat<T, 4, 4>) (T, T, T) {
     let s1 = t1.sin();
     let c1 = t1.cos();
     let t3 = (-c1 * c[1] - s1 * c[2]).atan2(c1 * b[1] + s1 * b[2]);
-    return t1, t2, t3;
+    return (t1, t2, t3);
 }
 
 /// The angles (t1, t2, t3) of `euler_angle_yxy`, t2 in [0, pi].
@@ -478,7 +478,7 @@ pub fn extract_euler_angle_yxy<T: Float>(m: Mat<T, 4, 4>) (T, T, T) {
     let s1 = t1.sin();
     let c1 = t1.cos();
     let t3 = (c1 * c[0] - s1 * c[2]).atan2(c1 * a[0] - s1 * a[2]);
-    return t1, t2, t3;
+    return (t1, t2, t3);
 }
 
 /// The angles (t1, t2, t3) of `euler_angle_yzy`, t2 in [0, pi].
@@ -490,7 +490,7 @@ pub fn extract_euler_angle_yzy<T: Float>(m: Mat<T, 4, 4>) (T, T, T) {
     let s1 = t1.sin();
     let c1 = t1.cos();
     let t3 = (-s1 * a[0] - c1 * a[2]).atan2(s1 * c[0] + c1 * c[2]);
-    return t1, t2, t3;
+    return (t1, t2, t3);
 }
 
 /// The angles (t1, t2, t3) of `euler_angle_zyz`, t2 in [0, pi].
@@ -502,7 +502,7 @@ pub fn extract_euler_angle_zyz<T: Float>(m: Mat<T, 4, 4>) (T, T, T) {
     let s1 = t1.sin();
     let c1 = t1.cos();
     let t3 = (c1 * a[1] - s1 * a[0]).atan2(c1 * b[1] - s1 * b[0]);
-    return t1, t2, t3;
+    return (t1, t2, t3);
 }
 
 /// The angles (t1, t2, t3) of `euler_angle_zxz`, t2 in [0, pi].
@@ -514,7 +514,7 @@ pub fn extract_euler_angle_zxz<T: Float>(m: Mat<T, 4, 4>) (T, T, T) {
     let s1 = t1.sin();
     let c1 = t1.cos();
     let t3 = (-c1 * b[0] - s1 * b[1]).atan2(c1 * a[0] + s1 * a[1]);
-    return t1, t2, t3;
+    return (t1, t2, t3);
 }
 
 /// The angles (t1, t2, t3) of `euler_angle_xzy`, t2 in [-pi/2, pi/2].
@@ -526,7 +526,7 @@ pub fn extract_euler_angle_xzy<T: Float>(m: Mat<T, 4, 4>) (T, T, T) {
     let s1 = t1.sin();
     let c1 = t1.cos();
     let t3 = (s1 * a[1] - c1 * a[2]).atan2(c1 * c[2] - s1 * c[1]);
-    return t1, t2, t3;
+    return (t1, t2, t3);
 }
 
 /// The angles (t1, t2, t3) of `euler_angle_yzx`, t2 in [-pi/2, pi/2].
@@ -538,7 +538,7 @@ pub fn extract_euler_angle_yzx<T: Float>(m: Mat<T, 4, 4>) (T, T, T) {
     let s1 = t1.sin();
     let c1 = t1.cos();
     let t3 = (s1 * b[0] + c1 * b[2]).atan2(s1 * c[0] + c1 * c[2]);
-    return t1, t2, t3;
+    return (t1, t2, t3);
 }
 
 /// The angles (t1, t2, t3) of `euler_angle_zyx`, t2 in [-pi/2, pi/2].
@@ -550,7 +550,7 @@ pub fn extract_euler_angle_zyx<T: Float>(m: Mat<T, 4, 4>) (T, T, T) {
     let s1 = t1.sin();
     let c1 = t1.cos();
     let t3 = (s1 * c[0] - c1 * c[1]).atan2(c1 * b[1] - s1 * b[0]);
-    return t1, t2, t3;
+    return (t1, t2, t3);
 }
 
 /// The angles (t1, t2, t3) of `euler_angle_zxy`, t2 in [-pi/2, pi/2].
@@ -562,11 +562,11 @@ pub fn extract_euler_angle_zxy<T: Float>(m: Mat<T, 4, 4>) (T, T, T) {
     let s1 = t1.sin();
     let c1 = t1.cos();
     let t3 = (c1 * c[0] + s1 * c[1]).atan2(c1 * a[0] + s1 * a[1]);
-    return t1, t2, t3;
+    return (t1, t2, t3);
 }
 
 fn cos_sin3<T: Float>(t1: T, t2: T, t3: T) (T, T, T, T, T, T) {
-    return t1.cos(), t1.sin(), t2.cos(), t2.sin(), t3.cos(), t3.sin();
+    return (t1.cos(), t1.sin(), t2.cos(), t2.sin(), t3.cos(), t3.sin());
 }
 
 extend<T: Float> T as Orientate3<T> {

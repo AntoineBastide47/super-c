@@ -22,8 +22,8 @@ fn emitted(src: str, flags: str) String {
     m.format_into("{}/build/debug/raw/__sc_manifest", root);
     let mut c = String::new();
     c.format_into("{}/build/debug/raw/main.c", root);
-    let mut t = cli::read_text(m.as_str());
-    t.push_str(cli::read_text(c.as_str()).as_str());
+    let mut t = cli::read_text(&m);
+    t.push_str(cli::read_text(&c).as_str());
     return t;
 }
 
@@ -180,9 +180,9 @@ fn same(x: f64, y: f64) bool {
 }
 fn fused(r: f64, x: f64, y: f64, z: f64, n: bool) bool {
     let p = if n {
-        -x;
+        -x
     } else {
-        x;
+        x
     };
     return same(r, p.mul_add(y, z)) || same(r, (p * y) as f64 + z);
 }

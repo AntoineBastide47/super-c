@@ -79,9 +79,9 @@ fn unit(id: i64) i64 {
     let d = durable(fd);
     let c = unsafe unistd::close(fd);
     return if w == PAYLOAD as isize && d == 0 && c == 0 {
-        1i64;
+        1i64
     } else {
-        0i64;
+        0i64
     };
 }
 
@@ -92,9 +92,9 @@ fn env_int(name: str, def: i64) i64 {
     }
     let got = (unsafe stdlib::atoi(v)) as i64;
     return if got > 0 {
-        got;
+        got
     } else {
-        def;
+        def
     };
 }
 
@@ -117,9 +117,9 @@ fn main() i32 {
     }
     // The effective limit of the direct lane is also the worker count: a unit holds its worker.
     let effective = if direct && rt::worker_count() as i64 < limit {
-        rt::worker_count() as i64;
+        rt::worker_count() as i64
     } else {
-        limit;
+        limit
     };
     let sem = sync::Semaphore::new(limit);
     let ok = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
@@ -136,13 +136,13 @@ fn main() i32 {
             launch || {
                 s.acquire();
                 let r = if direct {
-                    unit(id); // on the worker: this task holds it for the whole syscall
+                    unit(id) // on the worker: this task holds it for the whole syscall
                 } else {
                     blocking::call(
                         fn() i64 {
                             return unit(id);
                         },
-                    );
+                    )
                 };
                 s.release();
                 let _ = o.get().fetch_add(r, atomics::MemoryOrder::Relaxed);
@@ -159,9 +159,9 @@ fn main() i32 {
     let cold = samples[0];
     let mut rest = Vector::<f64>::new();
     let from = if samples.len() > 1 {
-        1usize;
+        1usize
     } else {
-        0usize;
+        0usize
     };
     for i in from..samples.len() {
         rest.push(samples[i]);
@@ -179,8 +179,8 @@ fn main() i32 {
         effective,
     );
     return if done == iters * tasks {
-        0;
+        0
     } else {
-        1;
+        1
     };
 }

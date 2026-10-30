@@ -41,7 +41,7 @@ fn run(op: i32, v: &mut Vector<u64>) {
             v.as_mut_slice().heapify();
             v.as_mut_slice().sort_heap();
         },
-    };
+    }
 }
 
 fn lane(op: i32, kind_name: str, kind: i32, n: usize, reps: i32) {
@@ -51,7 +51,7 @@ fn lane(op: i32, kind_name: str, kind: i32, n: usize, reps: i32) {
     let input = make(kind, n);
     let mut v = input.clone();
     for _ in 0..reps {
-        v.as_mut_slice().copy_from_slice(input.as_slice());
+        v.as_mut_slice().copy_from_slice(&input);
         let t0 = clock::monotonic_ns();
         run(op, &mut v);
         let t1 = clock::monotonic_ns();
@@ -81,11 +81,11 @@ fn main() i32 {
     let sizes: [usize; 3] = [1000, 100000, 1000000];
     for n in sizes {
         let reps = if n == 1000 {
-            2000;
+            2000
         } else if n == 100000 {
-            40;
+            40
         } else {
-            8;
+            8
         };
         for k in 0..5 {
             for op in 0..6 {

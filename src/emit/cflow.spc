@@ -89,9 +89,9 @@ const fn raw_succ(b: &ir::CoreBody, x: u32, k: u32) u32 {
     if t.kind == ir::TM_SWITCH {
         let ce = const_switch_edge(b, x);
         let sk = if ce == NONE {
-            k;
+            k
         } else {
-            ce;
+            ce
         };
         if sk < t.sw_len {
             return (b.switch_pool[(t.sw_start + sk) as usize] & 0xFFFFFFFFu64) as u32;
@@ -202,9 +202,9 @@ extend CFlow {
                 c = b.blocks.at(c as usize).term.t0;
             }
             let target = if *self.s_state.at(c as usize) == 2 {
-                *self.thread.at(c as usize);
+                *self.thread.at(c as usize)
             } else {
-                c;
+                c
             };
             for i in 0..self.s_stack.len() {
                 let p = *self.s_stack.at(i);
@@ -277,9 +277,9 @@ extend CFlow {
                     for i in 0..m {
                         let x = *self.order.at(i);
                         let nx = if i + 1 < m {
-                            *self.order.at(i + 1);
+                            *self.order.at(i + 1)
                         } else {
-                            n;
+                            n
                         };
                         self.ipdom.set(x as usize, nx);
                     }
@@ -764,9 +764,9 @@ extend CFlow {
                         continue;
                     }
                     m = if m == NONE {
-                        s;
+                        s
                     } else {
-                        self.pintersect(m, s);
+                        self.pintersect(m, s)
                     };
                 }
             }

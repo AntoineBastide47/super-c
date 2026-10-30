@@ -121,7 +121,7 @@ pub(package) fn backends_of(pk: &loader::Package) Vector<u8> {
     let all = native_on(pk);
     let sel = stdlib::get_env("SC_LIR").unwrap_or(String::new());
     for i in 0..n {
-        let on = all || pk.lir_out != null || ext::reads_ir() || in_list(sel.as_str(), pk.modules.at(i).path.as_str());
+        let on = all || pk.lir_out != null || ext::reads_ir() || in_list(&sel, &pk.modules.at(i).path);
         out.push(ast::pick(all, 0u8, BK_C) | ast::pick(on, BK_LIR, 0u8));
     }
     return out;
@@ -146,9 +146,9 @@ pub(package) const fn in_list(sel: str, path: str) bool {
         }
         let c = rest.find_byte(b',');
         let item = if c < 0 {
-            rest;
+            rest
         } else {
-            rest.slice(0, c as usize);
+            rest.slice(0, c as usize)
         };
         if item == path {
             return true;
@@ -603,11 +603,11 @@ extend CEmit {
                 pk,
                 "avx512vl",
             ) {
-                64u32;
+                64u32
             } else if feature(pk, "avx2") {
-                32u32;
+                32u32
             } else {
-                tgt::isa(pk.arch).vector_bytes;
+                tgt::isa(pk.arch).vector_bytes
             };
             l.pkg.mul_high = tgt::isa(pk.arch).mul_high;
             l.pkg.vops = tgt::isa(pk.arch).vector_ops;
@@ -616,11 +616,11 @@ extend CEmit {
             let h16 = cf::find("fp16", pk.arch);
             let hc = cf::find("f16c", pk.arch);
             l.pkg.half = if h16 >= 0 && cf::has(pk.features, h16 as usize) {
-                lir_ir::HALF_ARITH;
+                lir_ir::HALF_ARITH
             } else if tgt::isa(pk.arch).half_cvt || hc >= 0 && cf::has(pk.features, hc as usize) {
-                lir_ir::HALF_CVT;
+                lir_ir::HALF_CVT
             } else {
-                lir_ir::HALF_NONE;
+                lir_ir::HALF_NONE
             };
             l.pkg.pairs = tgt::isa(pk.arch).pairs;
             l.pkg.split = pick((pk.cg & bman::CG_FUNCTION_SECTIONS) != 0, cob::SPLIT_FUNCS, 0u8) | pick(
@@ -629,22 +629,22 @@ extend CEmit {
                 0u8,
             );
             l.pkg.protect = if (pk.cg & bman::CG_PROTECT_ALL) != 0 {
-                lir_ir::PROTECT_ALL;
+                lir_ir::PROTECT_ALL
             } else if (pk.cg & bman::CG_PROTECT_STRONG) != 0 {
-                lir_ir::PROTECT_SLOTS;
+                lir_ir::PROTECT_SLOTS
             } else if (pk.cg & bman::CG_PROTECT) != 0 {
-                lir_ir::PROTECT_LARGE;
+                lir_ir::PROTECT_LARGE
             } else {
-                lir_ir::PROTECT_NONE;
+                lir_ir::PROTECT_NONE
             };
             // Debug information as the profile asks, relative to this process's directory.
             l.pkg.debug = pk.debug_info;
             if l.pkg.debug {
                 l.pkg.comp_dir = process::current_dir().unwrap_or(String::new());
             }
-            Option::<Box<lw::Lower>>::Some(l);
+            Option::<Box<lw::Lower>>::Some(l)
         } else {
-            Option::<Box<lw::Lower>>::None;
+            Option::<Box<lw::Lower>>::None
         };
         return CEmit {
             pkg: pkg,
@@ -871,7 +871,7 @@ extend CEmit {
             if okc {
                 // The tail of the per-type pool serves as scratch: this env's spelling is not cached.
                 let h0 = self.tid_pool.len();
-                collect_ident_hashes(cs.as_str(), &mut self.tid_pool);
+                collect_ident_hashes(&cs, &mut self.tid_pool);
                 for k in h0..self.tid_pool.len() {
                     self.sx_reserved.insert(*self.tid_pool.at(k), 1);
                 }
@@ -902,7 +902,7 @@ extend CEmit {
         self.mg.no_edges = false;
         if okc {
             let h0 = self.tid_pool.len();
-            collect_ident_hashes(cs.as_str(), &mut self.tid_pool);
+            collect_ident_hashes(&cs, &mut self.tid_pool);
             for k in h0..self.tid_pool.len() {
                 self.sx_reserved.insert(*self.tid_pool.at(k), 1);
             }
@@ -1024,9 +1024,9 @@ extend CEmit {
     ) {
         let mut em = conf.module;
         let ext = if conf.node != NODE_NONE {
-            conf.node;
+            conf.node
         } else {
-            self.mg.conform_ext(rm, rt, iface, &mut em);
+            self.mg.conform_ext(rm, rt, iface, &mut em)
         };
         if ext == NODE_NONE {
             return;
@@ -1265,9 +1265,9 @@ extend CEmit {
             return 0 - 1;
         }
         let prev = if pl.proj_len >= 2 {
-            b.projections.at((pl.proj_start + pl.proj_len - 2) as usize).ty;
+            b.projections.at((pl.proj_start + pl.proj_len - 2) as usize).ty
         } else {
-            b.locals.at(pl.base as usize).ty;
+            b.locals.at(pl.base as usize).ty
         };
         let mut rm = b.module;
         let mut rt = prev;
@@ -1280,7 +1280,7 @@ extend CEmit {
             if unsafe (*da).at_const(pj.sub).kind != NodeKind::NODE_FIELD {
                 return 0 - 1;
             }
-            unsafe (*da).at_const(pj.sub).as_data.field.ty;
+            unsafe (*da).at_const(pj.sub).as_data.field.ty
         } else {
             let decl = self.agg_decl_res(rm, rt);
             if decl == NODE_NONE {
@@ -1290,7 +1290,7 @@ extend CEmit {
             if pj.data >= ms.len {
                 return 0 - 1;
             }
-            unsafe (*da).list(ms)[pj.data as usize];
+            unsafe (*da).list(ms)[pj.data as usize]
         };
         let ftl = unsafe (*da).type_of(ftn);
         if ftl == TYPE_NONE {
@@ -1403,7 +1403,7 @@ extend CEmit {
     fn param_decl_kind(self: &Self, d: DefId, i: u32) TypeKind {
         let pty = self.param_decl_ty(d, i);
         if pty == TYPE_NONE {
-            return TypeKind::TYPE_NEVER;
+            return TYPE_NEVER;
         }
         return unsafe (*self.p().module_ast_const(d.module)).type_at(pty).kind;
     }
@@ -1926,8 +1926,8 @@ extend CEmit {
         let mut a = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
         let mut o = replace(&mut other.lir, Option::<Box<lw::Lower>>::None).unwrap();
         a.deref_mut().absorb(o.deref_mut());
-        self.lir = Option::<Box<lw::Lower>>::Some(a);
-        other.lir = Option::<Box<lw::Lower>>::Some(o);
+        self.lir = Some(a);
+        other.lir = Some(o);
     }
 
     // Keep a rendered body (counted) or drop its partial output and report the refusal.
@@ -1957,9 +1957,9 @@ extend CEmit {
     fn refuse(self: &mut Self, b: &ir::CoreBody) {
         let mut m = b.module;
         let mut sp = if b.locals.len() != 0 {
-            b.locals.at(0).span;
+            b.locals.at(0).span
         } else {
-            b.blocks.at(b.entry as usize).term.span;
+            b.blocks.at(b.entry as usize).term.span
         };
         if self.err == inst_depth_why() && self.is_std(m) {
             // A growing chain refused inside std is the user's error: report it at the outermost
@@ -1994,7 +1994,7 @@ extend CEmit {
         let mut d = self.sget();
         d.push_str(o.as_str().slice(decl, o.len()));
         o.truncate(mark);
-        let ok = self.mg.ctype(m, t, d.as_str(), o);
+        let ok = self.mg.ctype(m, t, &d, o);
         self.sput(d);
         return ok;
     }
@@ -2049,7 +2049,7 @@ extend CEmit {
             if rmat == 0 {
                 ret_void = true;
                 self.out.push_str("void ");
-                self.out.push_str(fname.as_str());
+                self.out.push_str(&fname);
                 self.out.push_str("(");
             } else {
                 // `<name>_ret` names the result pack every function and function pointer with
@@ -2066,9 +2066,9 @@ extend CEmit {
                 }
                 self.aux.push_str("typedef struct ");
                 self.aux.push_string(&pk);
-                self.hdr_dep(b.module, pk.as_str());
+                self.hdr_dep(b.module, &pk);
                 self.sput(pk);
-                self.close_ret_typedef(b.module, name, fname.as_str());
+                self.close_ret_typedef(b.module, name, &fname);
                 self.mret.truncate(0);
                 self.mret.push_str(name);
                 self.mret.push_str("_ret");
@@ -2093,9 +2093,9 @@ extend CEmit {
                 }
                 self.aux.push_str("typedef struct ");
                 self.aux.push_string(&pk);
-                self.hdr_dep(b.module, pk.as_str());
+                self.hdr_dep(b.module, &pk);
                 self.sput(pk);
-                self.close_ret_typedef(b.module, name, fname.as_str());
+                self.close_ret_typedef(b.module, name, &fname);
                 self.mret.truncate(0);
                 self.mret.push_str(name);
                 self.mret.push_str("_ret");
@@ -2114,7 +2114,7 @@ extend CEmit {
                 self.out = out;
                 self.out.push_str(" ");
                 hdecl = self.out.len();
-                self.out.push_str(fname.as_str());
+                self.out.push_str(&fname);
                 self.out.push_str("(");
                 hty = rty;
             }
@@ -2180,7 +2180,7 @@ extend CEmit {
             }
             pnames.push_str(nm.as_str().slice(pick(nm.as_str().starts_with("restrict "), 9usize, 0), nm.len()));
             let mut out = replace(&mut self.out, String::new());
-            let ok = self.param_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut out);
+            let ok = self.param_c(b.module, b.locals.at(l).ty, &nm, &mut out);
             self.out = out;
             self.sput(nm);
             if !ok {
@@ -2208,14 +2208,14 @@ extend CEmit {
                 return false;
             }
         }
-        if split && !self.split_entry(b, name, fname.as_str(), ret_void, hstart, hhead) {
+        if split && !self.split_entry(b, name, &fname, ret_void, hstart, hhead) {
             return false;
         }
         self.out.push_str(" {\n");
         if (unsafe (*self.p().module_ast_const(b.owner.module)).unsafe_claims(b.owner.node) & UNSAFE_NAKED) != 0 {
-            return self.emit_naked_body(b, fname.as_str(), hstart, hhead);
+            return self.emit_naked_body(b, &fname, hstart, hhead);
         }
-        self.dispatch_prologue(b, name, split, ret_void, pnames.as_str());
+        self.dispatch_prologue(b, name, split, ret_void, &pnames);
         for k in 0..views.len() {
             // The body reads the view through its usual local.
             let l = views[k];
@@ -2223,7 +2223,7 @@ extend CEmit {
             self.lspell(l, &mut nm3);
             self.out.push_str("  ");
             let mut out = replace(&mut self.out, String::new());
-            let ok = self.ty_c(b.module, b.locals.at(l as usize).ty, nm3.as_str(), &mut out);
+            let ok = self.ty_c(b.module, b.locals.at(l as usize).ty, &nm3, &mut out);
             self.out = out;
             self.sput(nm3);
             if !ok {
@@ -2249,7 +2249,7 @@ extend CEmit {
             let mut nm2 = String::new();
             self.lspell(l, &mut nm2);
             let mut ts2 = String::new();
-            if !self.ty_c(b.module, b.locals.at(l as usize).ty, nm2.as_str(), &mut ts2) {
+            if !self.ty_c(b.module, b.locals.at(l as usize).ty, &nm2, &mut ts2) {
                 return false;
             }
             self.out.push_str("  ");
@@ -2312,11 +2312,11 @@ extend CEmit {
             for k in 0..3u8 {
                 self.out.push_str(
                     if k == 0 {
-                        "#if defined(__APPLE__)\n";
+                        "#if defined(__APPLE__)\n"
                     } else if k == 1 {
-                        "#elif defined(_WIN32)\n";
+                        "#elif defined(_WIN32)\n"
                     } else {
-                        "#else\n";
+                        "#else\n"
                     },
                 );
                 text.truncate(0);
@@ -2324,17 +2324,17 @@ extend CEmit {
                     op,
                     self.p().arch,
                     if k == 0 {
-                        asmr::FMT_MACHO;
+                        asmr::FMT_MACHO
                     } else if k == 1 {
-                        asmr::FMT_COFF;
+                        asmr::FMT_COFF
                     } else {
-                        asmr::FMT_ELF;
+                        asmr::FMT_ELF
                     },
                     fname,
                     &mut text,
                 );
                 self.out.push_str("__asm__(");
-                push_c_asm_str(text.as_str(), &mut self.out);
+                push_c_asm_str(&text, &mut self.out);
                 self.out.push_str(");\n");
             }
             self.out.push_str("#endif\n");
@@ -2445,7 +2445,7 @@ extend CEmit {
         d.push_str(mbe::if_s(restrict_ok, "restrict ", ""));
         d.push_str("__sc_sp");
         d.push_u64(l);
-        let ok = self.mg.ctype(it.module, fty, d.as_str(), o);
+        let ok = self.mg.ctype(it.module, fty, &d, o);
         self.sput(d);
         self.mg.pop_subs(nb);
         o.push_str(", size_t __sc_sn");
@@ -2516,7 +2516,7 @@ extend CEmit {
             an.push_str("__sc_a");
             an.push_u64(np);
             np += 1;
-            if !self.param_c(b.module, ty, an.as_str(), &mut pre) {
+            if !self.param_c(b.module, ty, &an, &mut pre) {
                 self.sput(an);
                 self.sput(args);
                 self.sput(hdr);
@@ -2544,7 +2544,7 @@ extend CEmit {
         pre.push_str("(");
         pre.push_string(&args);
         pre.push_str(");\n}\n");
-        self.out.insert_str(hstart, pre.as_str());
+        self.out.insert_str(hstart, &pre);
         self.sput(args);
         self.sput(hdr);
         self.sput(pre);
@@ -2734,7 +2734,7 @@ extend CEmit {
         let sp = unsafe (*a).at_const(nn).as_data.name.text;
         let mut s = self.sget();
         self.mg.ident(m, sp, &mut s);
-        self.sx_reserved.insert(fnv(s.as_str()), 1);
+        self.sx_reserved.insert(fnv(&s), 1);
         self.sput(s);
     }
 
@@ -3096,7 +3096,7 @@ extend CEmit {
                     let am = self.agg_module(b, rv.target);
                     let mut tag = self.sget();
                     self.mg.enum_tag(am, edecl, rv.item.node, &mut tag);
-                    self.sx_reserved.insert(fnv(tag.as_str()), 1);
+                    self.sx_reserved.insert(fnv(&tag), 1);
                     self.sput(tag);
                 }
             }
@@ -3116,9 +3116,9 @@ extend CEmit {
                 // Reserve the EXACT emitted call symbol: the mangled name a generic/method/interface
                 // /cross-module call spells (e.g. `id__i32`), which a source name alone misses.
                 let mh = if t.targs_len == 0 {
-                    self.sym_memo_hash(t.callee);
+                    self.sym_memo_hash(t.callee)
                 } else {
-                    0u64;
+                    0u64
                 };
                 if mh != 0 {
                     self.sx_reserved.insert(mh, 1);
@@ -3134,7 +3134,7 @@ extend CEmit {
                 self.collect_demand = saved;
                 self.err = err0;
                 if ok {
-                    self.sx_reserved.insert(fnv(sym.as_str()), 1);
+                    self.sx_reserved.insert(fnv(&sym), 1);
                 }
                 self.sput(sym);
             }
@@ -3561,9 +3561,9 @@ extend CEmit {
         let st = b.locals.at(pl.base as usize).storage;
         let r = (*self.sx_coal.at(pl.base as usize)) as usize;
         let most = if st == ir::LS_ARG {
-            0u32;
+            0u32
         } else {
-            1u32;
+            1u32
         };
         return (st == ir::LS_TEMP || st == ir::LS_INL || st == ir::LS_ARG) && writes[r] <= most && !bad[r];
     }
@@ -3870,9 +3870,9 @@ extend CEmit {
                 let pl = *b.places.at(p as usize);
                 let x = pl.base as usize;
                 let folds = if x < cand as usize {
-                    *self.sx_inline.at(x) != ir::IR_NONE;
+                    *self.sx_inline.at(x) != ir::IR_NONE
                 } else {
-                    !blocked[x] && ndef[x] == 1;
+                    !blocked[x] && ndef[x] == 1
                 };
                 if pl.proj_len == 0 && folds && def_rvs[x] != ir::IR_NONE {
                     work.push(def_rvs[x]);
@@ -4131,9 +4131,9 @@ extend CEmit {
         let first: u32 = if t.callee.node != NODE_NONE && unsafe (*self.p().module_ast_const(t.callee.module)).at_const(
             t.callee.node,
         ).kind == NodeKind::NODE_FUNCTION && !self.self_first(t.callee) {
-            0;
+            0
         } else {
-            1;
+            1
         };
         for i in first..t.args_len {
             let o = b.oper_pool[(t.args_start + i) as usize];
@@ -4790,7 +4790,7 @@ extend CEmit {
             b,
             b.oper_pool[(lr.a + 1) as usize],
             &mut st,
-        ) && plain_spelling(sl.as_str()) && (plain_spelling(st.as_str()) || int_literal(st.as_str())) {
+        ) && plain_spelling(&sl) && (plain_spelling(&st) || int_literal(&st)) {
             out.format_into("{}.ptr[{} + __sc_i]", sl.as_str(), st.as_str());
         }
         return out;
@@ -4810,9 +4810,9 @@ extend CEmit {
             let _ = self.vec_ty(b, b.operands.at(rv.a as usize).ty, &mut n, &mut bt);
             let _ = self.vec_ty(b, rv.target, &mut n, &mut rbt);
             let t = if rv.kind == ir::RV_CAST {
-                vec_cast_tpl(bt, rbt);
+                vec_cast_tpl(bt, rbt)
             } else {
-                vec_op_tpl(rv.kind == ir::RV_UNARY, pick(rv.kind == ir::RV_UNARY, rv.b as u8, rv.c), bt);
+                vec_op_tpl(rv.kind == ir::RV_UNARY, pick(rv.kind == ir::RV_UNARY, rv.b as u8, rv.c), bt)
             };
             return t.len() != 0 && !(def && t.contains("__sc_f"));
         }
@@ -4836,13 +4836,13 @@ extend CEmit {
     // Whether rvalue `rv` reads local `l` whole or in part.
     const fn rv_reads(b: &ir::CoreBody, rv: &ir::Rvalue, l: u32) bool {
         let (st, len) = if ir::has_op_range(rv) {
-            (rv.a, rv.b);
+            (rv.a, rv.b)
         } else if rv.kind == ir::RV_INTRINSIC {
             return false; // a type or nothing, not operands
         } else if rv.kind == ir::RV_BINARY {
-            (0u32, 2u32);
+            (0u32, 2u32)
         } else if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST || rv.kind == ir::RV_REPEAT {
-            (0u32, 1u32);
+            (0u32, 1u32)
         } else {
             return rv.kind != ir::RV_LEN && rv.kind != ir::RV_DISCRIMINANT && rv.kind != ir::RV_REF && rv.kind != ir::RV_ADDR && rv.kind != ir::RV_SLICE || b.places.at(
                 rv.a as usize,
@@ -4850,11 +4850,11 @@ extend CEmit {
         };
         for i in 0..len {
             let o = if rv.kind == ir::RV_BINARY {
-                pick(i == 0, rv.a, rv.b);
+                pick(i == 0, rv.a, rv.b)
             } else if ir::has_op_range(rv) {
-                b.oper_pool[(st + i) as usize];
+                b.oper_pool[(st + i) as usize]
             } else {
-                rv.a;
+                rv.a
             };
             let x = *b.operands.at(o as usize);
             if x.kind != ir::OP_CONST && b.places.at(x.data as usize).base == l {
@@ -4884,11 +4884,11 @@ extend CEmit {
     fn fused_lanes(self: &mut Self, b: &ir::CoreBody, p: u32, pre: &mut String) bool {
         let rv = *b.rvalues.at((*self.sx_inline.at(p as usize)) as usize);
         let nops = if rv.kind == ir::RV_SIMD {
-            rv.b;
+            rv.b
         } else if rv.kind == ir::RV_BINARY {
-            2u32;
+            2u32
         } else {
-            1u32;
+            1u32
         };
         let mut ok = true;
         let mut a: [String; 3] = [String::new(), String::new(), String::new()];
@@ -4898,9 +4898,9 @@ extend CEmit {
         let _ = self.vec_ty(b, rv.target, &mut n, &mut rbt);
         for i in 0..nops {
             let opid = if rv.kind == ir::RV_SIMD {
-                b.oper_pool[(rv.a + i) as usize];
+                b.oper_pool[(rv.a + i) as usize]
             } else {
-                pick(i == 0, rv.a, rv.b);
+                pick(i == 0, rv.a, rv.b)
             };
             let q = self.fused_local(b, opid);
             let mut on: i64 = 0;
@@ -4936,13 +4936,13 @@ extend CEmit {
             let _ = self.vec_ty(b, b.operands.at(b.oper_pool[(rv.a + 1) as usize] as usize).ty, &mut cn, &mut bt);
         }
         let t = if rv.kind == ir::RV_SIMD && rv.c == ir::SIMD_CHOOSE && self.fused_local(b, b.oper_pool[rv.a as usize]) != ir::IR_NONE {
-            "$d = $a ? $b : $c;"; // a merged comparison gives the lane's truth, not its bit
+            "$d = $a ? $b : $c;" // a merged comparison gives the lane's truth, not its bit
         } else if rv.kind == ir::RV_SIMD {
-            vec_simd_tpl(rv.c, bt, rbt);
+            vec_simd_tpl(rv.c, bt, rbt)
         } else if rv.kind == ir::RV_CAST {
-            vec_cast_tpl(bt, rbt);
+            vec_cast_tpl(bt, rbt)
         } else {
-            vec_op_tpl(rv.kind == ir::RV_UNARY, pick(rv.kind == ir::RV_UNARY, rv.b as u8, rv.c), bt);
+            vec_op_tpl(rv.kind == ir::RV_UNARY, pick(rv.kind == ir::RV_UNARY, rv.b as u8, rv.c), bt)
         };
         // A template that only assigns `$d` declares the lane at its value.
         let one = t.starts_with("$d = ") && t.find(";") == t.len() as isize - 1;
@@ -4953,7 +4953,7 @@ extend CEmit {
         } else {
             pre.format_into("{}; ", dx.as_str());
         }
-        self.tpl_expand(pre, pick(one, t.slice(2, t.len()), t), dx.as_str(), &a, bt, rbt);
+        self.tpl_expand(pre, pick(one, t.slice(2, t.len()), t), &dx, &a, bt, rbt);
         pre.push_byte(b' ');
         return ok;
     }
@@ -5879,9 +5879,9 @@ extend CEmit {
         let rv = *b.rvalues.at(s.rvalue as usize);
         if rv.kind == ir::RV_BINARY {
             let other = if self.op_is_call_use(b, rv.a, root) {
-                rv.b;
+                rv.b
             } else {
-                rv.a;
+                rv.a
             };
             if !self.fwd_value_kept(b, other, esc) {
                 return false;
@@ -6073,9 +6073,9 @@ extend CEmit {
             } else {
                 let ml = if self.simd_on && b.locals.at(l).ty != TYPE_NONE && self.rty_y(b, b.locals.at(l).ty).kind == TypeKind::TYPE_MASK {
                     self.lane_only(b, l as u32);
-                    self.ml_root(l as u32);
+                    self.ml_root(l as u32)
                 } else {
-                    ir::IR_NONE;
+                    ir::IR_NONE
                 };
                 let mut to = BuiltinType::BT_VOID;
                 if ml != ir::IR_NONE && self.ml_lanes(b, ml, &mut to) {
@@ -6121,7 +6121,7 @@ extend CEmit {
                     let mut nm3 = String::from_str("_");
                     nm3.push_u64(l as u64);
                     o.push_str("  ");
-                    let ok3 = self.ty_c(b.module, rt0, nm3.as_str(), o);
+                    let ok3 = self.ty_c(b.module, rt0, &nm3, o);
                     o.push_str(";\n");
 
                     if !ok3 {
@@ -6155,7 +6155,7 @@ extend CEmit {
                             "x",
                             &mut tx,
                         ) {
-                            let mut probe = String::from_str(t0.as_str());
+                            let mut probe = String::from_str(&t0);
                             probe.push_str("x");
                             if tx.as_str() == probe.as_str() {
                                 md0 = 1;
@@ -6171,7 +6171,7 @@ extend CEmit {
                         self.decl_txt.push(t0);
                         self.decl_mode.push(md0);
                         self.decl_memo.insert(dk, ix);
-                        ix;
+                        ix
                     },
                 });
                 md = self.decl_mode[slot as usize];
@@ -6204,7 +6204,7 @@ extend CEmit {
                 o.push_str(";\n");
             } else {
                 let mut ts = self.sget();
-                ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut ts);
+                ok = self.ty_c(b.module, b.locals.at(l).ty, &nm, &mut ts);
                 if ok {
                     o.push_str("  ");
                     o.push_string(&ts);
@@ -6229,7 +6229,7 @@ extend CEmit {
         }
         if self.lit_decls.len() != 0 {
             // The long string constants the statements spell, declared ahead of them.
-            o.insert_str(lit_at, self.lit_decls.as_str());
+            o.insert_str(lit_at, &self.lit_decls);
         }
         if b.returns == 1 && self.erased(b, b.locals.at(0).ty) && o.as_str().ends_with("  return;\n") {
             o.truncate(o.len() - 10);
@@ -6318,9 +6318,9 @@ extend CEmit {
                 ni += 1;
             }
             let next = if ni < m {
-                *cf.order.at(ni);
+                *cf.order.at(ni)
             } else {
-                cfl::NONE;
+                cfl::NONE
             };
             let t = b.blocks.at(x as usize).term;
             if t.kind == ir::TM_SWITCH {
@@ -6365,9 +6365,9 @@ extend CEmit {
                 ni += 1;
             }
             let next = if ni < m {
-                *cf.order.at(ni);
+                *cf.order.at(ni)
             } else {
-                cfl::NONE;
+                cfl::NONE
             };
             if *need.at(x as usize) {
                 o.push_str("bb_");
@@ -7075,9 +7075,9 @@ extend CEmit {
         tail: &mut u32,
     ) bool {
         let arm_stop = if f != cfl::NONE {
-            f;
+            f
         } else {
-            rstop;
+            rstop
         };
         let t = b.blocks.at(x as usize).term;
         if !dry && !self.emit_operand(b, t.a, d) {
@@ -7486,7 +7486,7 @@ extend CEmit {
         }
         let mut name = self.sget();
         self.lspell(index, &mut name);
-        let okd = self.ty_c(b.module, local.ty, name.as_str(), init);
+        let okd = self.ty_c(b.module, local.ty, &name, init);
         self.sput(name);
         if !okd {
             return false;
@@ -7839,7 +7839,7 @@ extend CEmit {
         if ncaps != 0 {
             let mut enm = String::from_str(sym);
             enm.push_str("_env");
-            let eh = fnv(enm.as_str());
+            let eh = fnv(&enm);
             env_pre = self.env_skip.contains_key(&eh);
             if !env_pre {
                 // A closure can emit more than once (seed + drained instances): one env only.
@@ -7903,9 +7903,9 @@ extend CEmit {
             self.mret.truncate(0);
             let okp = self.mg.ret_pack(b.module, &tys, &mut self.mret);
             out.push_string(&self.mret);
-            okp;
+            okp
         } else {
-            self.ty_c(b.module, rty, "", &mut out);
+            self.ty_c(b.module, rty, "", &mut out)
         };
         self.out = out;
         let hdecl = self.out.len() + 1;
@@ -7953,7 +7953,7 @@ extend CEmit {
                 arrcp.push(l as u32);
             }
             let mut out = replace(&mut self.out, String::new());
-            let ok = self.param_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut out);
+            let ok = self.param_c(b.module, b.locals.at(l).ty, &nm, &mut out);
             self.out = out;
             self.sput(nm);
             if !ok {
@@ -8421,7 +8421,7 @@ extend CEmit {
         let mut name = self.sget();
         self.lspell(root, &mut name);
         o.push_str("  ");
-        let okd = self.ty_c(b.module, b.locals.at(root as usize).ty, name.as_str(), o);
+        let okd = self.ty_c(b.module, b.locals.at(root as usize).ty, &name, o);
         self.sput(name);
         if !okd {
             return false;
@@ -8466,9 +8466,9 @@ extend CEmit {
             }
             let sb = b.places.at(s.place as usize).base as usize;
             let lf = if self.ml_lf.len() != 0 && b.places.at(s.place as usize).proj_len == 0 {
-                self.ml_lf[sb].state;
+                self.ml_lf[sb].state
             } else {
-                LF_NONE;
+                LF_NONE
             };
             if lf != LF_NONE && (rv0.kind == ir::RV_BINARY || rv0.kind == ir::RV_UNARY) {
                 return self.emit_lf_op(o, b, s, &rv0);
@@ -8584,7 +8584,7 @@ extend CEmit {
                                 root9 as usize,
                             );
                             if fuse9 {
-                                ok9 = self.ty_c(b.module, b.locals.at(root9 as usize).ty, lhs9.as_str(), o);
+                                ok9 = self.ty_c(b.module, b.locals.at(root9 as usize).ty, &lhs9, o);
                                 if ok9 {
                                     self.sx_declared.set(root9 as usize, true);
                                 }
@@ -8768,7 +8768,7 @@ extend CEmit {
             o.push_str("  ");
             self.sx_declared.set(root0 as usize, true);
             let mut decl = self.sget();
-            if !self.ty_c(b.module, b.locals.at(root0 as usize).ty, lhs.as_str(), &mut decl) {
+            if !self.ty_c(b.module, b.locals.at(root0 as usize).ty, &lhs, &mut decl) {
                 return false;
             }
             o.push_string(&decl);
@@ -9075,9 +9075,9 @@ extend CEmit {
         }
         // The result's lanes: of the cast result for the changed-lane mask.
         let rt = if c == ir::SIMD_CAST_CHANGED {
-            b.operands.at(ops[1] as usize).ty;
+            b.operands.at(ops[1] as usize).ty
         } else {
-            rv.target;
+            rv.target
         };
         let _ = self.vec_ty(b, rt, &mut rn, &mut rbt);
         if c == ir::SIMD_IOTA {
@@ -9119,7 +9119,7 @@ extend CEmit {
                 if !ld {
                     psp[1].push_string(unsafe &sp[vi]);
                 }
-                let pok = self.emit_planned(o, &vp, &psp, pick(ld, 1u32, 2u32), d.as_str());
+                let pok = self.emit_planned(o, &vp, &psp, pick(ld, 1u32, 2u32), &d);
                 self.sput(d);
                 return pok;
             }
@@ -9206,7 +9206,7 @@ extend CEmit {
                 sp[1].as_str(),
             );
         } else {
-            ok = self.emit_vec_lanes(o, b, s.place, rv, c, &ops, &d, &sp, &lanes, n, bt, rbt, pre.as_str(), &fz);
+            ok = self.emit_vec_lanes(o, b, s.place, rv, c, &ops, &d, &sp, &lanes, n, bt, rbt, &pre, &fz);
         }
         self.sput(d);
         return ok;
@@ -9246,7 +9246,7 @@ extend CEmit {
             self.sput(d);
             return false;
         }
-        if self.simd_on && self.emit_vec_ops_planned(o, b, rv, &sp, n, bt, rn, rbt, d.as_str()) {
+        if self.simd_on && self.emit_vec_ops_planned(o, b, rv, &sp, n, bt, rn, rbt, &d) {
             self.sput(d);
             return true;
         }
@@ -9261,13 +9261,13 @@ extend CEmit {
                 let mut nm = String::new();
                 nm.format_into("__sc_o{}", i);
                 o.push_str("  ");
-                ok = ok && self.ty_c(b.module, ot, nm.as_str(), o);
+                ok = ok && self.ty_c(b.module, ot, &nm, o);
                 o.format_into(" = {};\n", unsafe sp[i as usize].as_str());
                 unsafe sp[i as usize] = nm;
             }
         }
         let raw = self.vec_addr_taken(b, s.place, rv);
-        if self.simd_on && self.emit_vec_mem_planned(o, c, &sp, n, bt, d.as_str(), raw) {
+        if self.simd_on && self.emit_vec_mem_planned(o, c, &sp, n, bt, &d, raw) {
             o.push_str("  }\n");
             self.sput(d);
             return ok;
@@ -9362,7 +9362,7 @@ extend CEmit {
                 }
             },
             ir::SR_REDUCE | ir::SR_DOT => {
-                ok = ok && self.emit_vec_reduce(o, c, &sp, n, bt, rbt, d.as_str());
+                ok = ok && self.emit_vec_reduce(o, c, &sp, n, bt, rbt, &d);
                 o.push_str("  }\n");
                 self.sput(d);
                 return ok;
@@ -9382,7 +9382,7 @@ extend CEmit {
                     );
                     let m = unsafe sp[(op.arity - 2) as usize].as_str();
                     let unchecked = c == ir::SIMD_GATHER_UNCHECKED;
-                    checked = unchecked || self.index_check_planned(o, sp[0].as_str(), sp[1].as_str(), m, n, ib);
+                    checked = unchecked || self.index_check_planned(o, &sp[0], &sp[1], m, n, ib);
                     let ge = self.ventry_whole(
                         ir::OP_SIMD + pick(unchecked, ir::SIMD_GATHER, c) as u32,
                         bt,
@@ -9391,7 +9391,7 @@ extend CEmit {
                     );
                     if ge >= 0 {
                         if !checked {
-                            index_bits(o, n, m, sp[1].as_str(), sp[0].as_str());
+                            index_bits(o, n, m, &sp[1], &sp[0]);
                         }
                         let mut call = String::new();
                         self.entry_name(ge as u32, &mut call);
@@ -9416,10 +9416,10 @@ extend CEmit {
                 }
                 if cs != 2 {
                     let xl = self.gather_index_lane(b, s.rvalue);
-                    self.emit_vec_mem(o, c, &sp, n, cs == 1 || checked, xl.as_str());
+                    self.emit_vec_mem(o, c, &sp, n, cs == 1 || checked, &xl);
                 }
             },
-        };
+        }
         if op.rule != ir::SR_MSTORE || c == ir::SIMD_COMPRESS_STORE {
             o.format_into("  {} = {};\n", d.as_str(), mbe::if_s(c == ir::SIMD_COMPRESS_STORE, "__sc_c", "__sc_r"));
         }
@@ -9591,13 +9591,13 @@ extend CEmit {
         } else if fl {
             // The lane rule on (accumulator, lane): the kept operand itself.
             let lc = if c == ir::SIMD_REDUCE_MIN_NUM {
-                ir::SIMD_MIN;
+                ir::SIMD_MIN
             } else if c == ir::SIMD_REDUCE_MAX_NUM {
-                ir::SIMD_MAX;
+                ir::SIMD_MAX
             } else if c == ir::SIMD_REDUCE_MINIMUM {
-                ir::SIMD_MINIMUM;
+                ir::SIMD_MINIMUM
             } else {
-                ir::SIMD_MAXIMUM;
+                ir::SIMD_MAXIMUM
             };
             let st = String::from_str(vec_simd_tpl(lc, bt, bt)).replace("$d", "__sc_x").replace("$a", "__sc_x").replace(
                 "$b",
@@ -9629,15 +9629,15 @@ extend CEmit {
             return true;
         } else {
             let e = if c == ir::SIMD_REDUCE_MIN {
-                "__sc_y < __sc_x ? __sc_y : __sc_x";
+                "__sc_y < __sc_x ? __sc_y : __sc_x"
             } else if c == ir::SIMD_REDUCE_MAX {
-                "__sc_y > __sc_x ? __sc_y : __sc_x";
+                "__sc_y > __sc_x ? __sc_y : __sc_x"
             } else if c == ir::SIMD_REDUCE_AND {
-                "__sc_x & __sc_y";
+                "__sc_x & __sc_y"
             } else if c == ir::SIMD_REDUCE_OR {
-                "__sc_x | __sc_y";
+                "__sc_x | __sc_y"
             } else {
-                "__sc_x ^ __sc_y";
+                "__sc_x ^ __sc_y"
             };
             o.format_into(
                 "  {} __sc_x = {}.l[0];\n{}1; __sc_i < {}; __sc_i++) {{ {} __sc_y = {}.l[__sc_i]; __sc_x = ({})({}); }}\n",
@@ -9988,11 +9988,11 @@ extend CEmit {
     ) bool {
         assert(n > 0);
         let t = if rv.kind == ir::RV_SIMD {
-            mbe::if_s(c == ir::SIMD_CAST_CHANGED, vec_changed_tpl(bt, rbt), vec_simd_tpl(c, bt, rbt));
+            mbe::if_s(c == ir::SIMD_CAST_CHANGED, vec_changed_tpl(bt, rbt), vec_simd_tpl(c, bt, rbt))
         } else if rv.kind == ir::RV_CAST {
-            vec_cast_tpl(bt, rbt);
+            vec_cast_tpl(bt, rbt)
         } else {
-            vec_op_tpl(rv.kind == ir::RV_UNARY, pick(rv.kind == ir::RV_UNARY, rv.b as u8, rv.c), bt);
+            vec_op_tpl(rv.kind == ir::RV_UNARY, pick(rv.kind == ir::RV_UNARY, rv.b as u8, rv.c), bt)
         };
         if t.len() == 0 {
             return self.fail("vector operation");
@@ -10009,11 +10009,11 @@ extend CEmit {
         let mut psp: [String; 3] = [sp[0].clone(), sp[1].clone(), sp[2].clone()];
         let mut pd = d.clone();
         let na: u32 = if rv.kind == ir::RV_SIMD {
-            ir::simd_op(c).arity;
+            ir::simd_op(c).arity
         } else if rv.kind == ir::RV_BINARY {
-            2;
+            2
         } else {
-            1;
+            1
         };
         if planned && vp.res == VR_LANES {
             pd.clear();
@@ -10024,10 +10024,10 @@ extend CEmit {
             psp[0].format_into("__sc_ml{}", self.ml_src(b.places.at(b.operands.at(ops[0] as usize).data as usize).base));
         }
         if planned && !traps {
-            let pok = self.emit_planned(o, &vp, &psp, na, pd.as_str());
+            let pok = self.emit_planned(o, &vp, &psp, na, &pd);
             return pok && (!vp.top || self.lf_bits(o, b, place));
         }
-        if planned && rv.kind == ir::RV_BINARY && self.vec_checks_planned(o, &vp, &psp, rv, n, bt, pd.as_str()) {
+        if planned && rv.kind == ir::RV_BINARY && self.vec_checks_planned(o, &vp, &psp, rv, n, bt, &pd) {
             return true;
         }
         o.push_str("  {\n");
@@ -10040,7 +10040,7 @@ extend CEmit {
         ).proj_len == 0 && self.count_kind(b, b.places.at(place as usize).base) == CK_SUM;
         if sum {
             let st = String::from_str(t).replace("|= (uint64_t)", "+= (uint64_t)").replace(" << __sc_i", "");
-            self.vec_loop(o, st.as_str(), d.as_str(), sp, lanes, n, bt, rbt, c, mask, pre, fz);
+            self.vec_loop(o, &st, d.as_str(), sp, lanes, n, bt, rbt, c, mask, pre, fz);
             o.format_into("  {} = __sc_m;\n  }}\n", d.as_str());
             return true;
         }
@@ -10058,7 +10058,7 @@ extend CEmit {
             mbe::if_s(two, " __sc_r;\n  uint32_t __sc_f0 = 0, __sc_f1 = 0;\n", " __sc_r;\n  uint32_t __sc_f0 = 0;\n"),
         );
         let fast = String::from_str(t).replace("|= (uint64_t)", "|= ").replace(" << __sc_i", "");
-        self.vec_loop(o, fast.as_str(), "__sc_r", sp, lanes, n, bt, rbt, c, mask, pre, fz);
+        self.vec_loop(o, &fast, "__sc_r", sp, lanes, n, bt, rbt, c, mask, pre, fz);
         // `+ - *`, negation and `abs` trap where the build checks overflow (`__sc_lane_ovf`).
         let simd = rv.kind == ir::RV_SIMD;
         let ovf = simd && c == ir::SIMD_ABS || !simd && (tok == tt::TokenType::Plus as u8 || tok == tt::TokenType::Minus as u8 || tok == tt::TokenType::Star as u8);
@@ -10071,7 +10071,7 @@ extend CEmit {
         );
         o.push_str("  uint64_t __sc_g0 = 0, __sc_g1 = 0;\n");
         let cold = String::from_str(t).replace("__sc_f", "__sc_g");
-        self.vec_loop(o, cold.as_str(), "__sc_r", sp, lanes, n, bt, rbt, c, mask, pre, fz);
+        self.vec_loop(o, &cold, "__sc_r", sp, lanes, n, bt, rbt, c, mask, pre, fz);
         o.format_into(
             "  __sc_panic_lane(__sc_g0, __sc_g1, \"{}\", ",
             ir::lane_trap_msg(rv.kind, pick(simd, c, tok), false),
@@ -10083,7 +10083,7 @@ extend CEmit {
         }
         if planned {
             // The checks passed: the entry of the wrapping twin computes the lanes.
-            let pok = self.emit_planned(o, &vp, &psp, na, pd.as_str());
+            let pok = self.emit_planned(o, &vp, &psp, na, &pd);
             o.push_str("  }\n");
             return ok && pok;
         }
@@ -10127,9 +10127,9 @@ extend CEmit {
     const fn ventry_whole(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: u64) i64 {
         let e = self.ventry(op, t, r, n);
         return if e >= 0 {
-            e;
+            e
         } else {
-            sp::find(&self.p().simd_table, self.fs, op, t, r, n, 512);
+            sp::find(&self.p().simd_table, self.fs, op, t, r, n, 512)
         };
     }
 
@@ -10235,9 +10235,9 @@ extend CEmit {
         let a = unsafe &*self.p().module_ast_const(en.module);
         let f = a.ext(en.node).function;
         let tn = if i == VP_RET {
-            a.slot_type_node(unsafe a.list(f.returns)[0]);
+            a.slot_type_node(unsafe a.list(f.returns)[0])
         } else {
-            a.at_const(unsafe a.list(f.params)[i as usize]).as_data.parameter.ty;
+            a.at_const(unsafe a.list(f.params)[i as usize]).as_data.parameter.ty
         };
         let lo = self.mg.layout_sub(en.module, a.type_of(tn));
         return pick(lo.ok, lo.size, 0);
@@ -10249,9 +10249,9 @@ extend CEmit {
         let a = unsafe &*self.p().module_ast_const(en.module);
         let f = a.ext(en.node).function;
         let tn = if i == VP_RET {
-            a.slot_type_node(unsafe a.list(f.returns)[0]);
+            a.slot_type_node(unsafe a.list(f.returns)[0])
         } else {
-            a.at_const(unsafe a.list(f.params)[i as usize]).as_data.parameter.ty;
+            a.at_const(unsafe a.list(f.params)[i as usize]).as_data.parameter.ty
         };
         return self.ty_c(en.module, a.type_of(tn), name, o);
     }
@@ -10324,9 +10324,9 @@ extend CEmit {
         let pl = vp.pl;
         let split = pl.form == sp::PF_SPLIT;
         let re = if vp.wres >= 0 {
-            vp.wres as u32;
+            vp.wres as u32
         } else {
-            pl.entry;
+            pl.entry
         };
         let mut ok = true;
         // In place: a vector operand or result that names its 16-byte chunks, outside a raw form.
@@ -10549,11 +10549,11 @@ extend CEmit {
             let k = tok_op(rv.c as tt::TokenType);
             if !lanes[1] {
                 op = if k == ir::OP_SHL {
-                    ir::OP_SHL_SCALAR;
+                    ir::OP_SHL_SCALAR
                 } else if k == ir::OP_SHR {
-                    ir::OP_SHR_SCALAR;
+                    ir::OP_SHR_SCALAR
                 } else {
-                    ir::OP_COUNT;
+                    ir::OP_COUNT
                 };
             } else if fl {
                 op = pick(k <= ir::OP_DIV, k, ir::OP_COUNT);
@@ -10566,11 +10566,11 @@ extend CEmit {
             }
         } else if rv.kind == ir::RV_UNARY {
             op = if rv.b != tt::TokenType::Minus as u32 {
-                ir::OP_NOT;
+                ir::OP_NOT
             } else if fl {
-                ir::OP_NEG;
+                ir::OP_NEG
             } else {
-                ir::OP_SIMD + ir::SIMD_WRAP_NEG as u32;
+                ir::OP_SIMD + ir::SIMD_WRAP_NEG as u32
             };
         } else if rv.kind == ir::RV_CAST {
             op = ir::OP_CAST;
@@ -10648,7 +10648,7 @@ extend CEmit {
             op = ir::OP_SIMD + pick(c == ir::SIMD_ABS && !fl, ir::SIMD_WRAP_ABS, c) as u32;
             let rule = ir::simd_op(c).rule;
             if rule == ir::SR_MASK || rule == ir::SR_CHANGED {
-                r = BuiltinType::BT_BOOL;
+                r = BT_BOOL;
                 vp.res = VR_MASK;
                 if rule == ir::SR_CHANGED {
                     // The key names the cast result's lanes (`tc_simd_shape`).
@@ -10665,9 +10665,9 @@ extend CEmit {
             if self.simd_trace {
                 // No entry form: integer `/` and `%`, a trapping shift by a vector count.
                 let k = if rv.kind == ir::RV_SIMD {
-                    ir::OP_SIMD + c as u32;
+                    ir::OP_SIMD + c as u32
                 } else {
-                    tok_op(rv.c as tt::TokenType);
+                    tok_op(rv.c as tt::TokenType)
                 };
                 eprintln(
                     "simd: no entry form for {} on {}x{}: the lane loop",
@@ -10765,7 +10765,7 @@ extend CEmit {
             while 1u64 << levels < pl.chunks && levels < 6 {
                 levels += 1;
             }
-            reduce_tree(&mut call, cn.as_str(), sp[0].as_str(), pl.chunks, levels, 0);
+            reduce_tree(&mut call, &cn, &sp[0], pl.chunks, levels, 0);
             call.push_byte(b')');
         } else {
             // The chunks, then the upper half of them onto the lower half until one is left.
@@ -11707,7 +11707,7 @@ extend CEmit {
         let dx = format("{}{}", d, pick(mask, "", ".l[__sc_i]"));
         // A `choose` of a merged comparison reads the lane's truth, not its bit.
         let ct = pick(c == ir::SIMD_CHOOSE && fz[0], "$d = $a ? $b : $c;", t);
-        self.tpl_expand(o, ct, dx.as_str(), &a, bt, rbt);
+        self.tpl_expand(o, ct, &dx, &a, bt, rbt);
         o.push_str(" }\n");
     }
 
@@ -11737,13 +11737,13 @@ extend CEmit {
             } else if k == b'U' || k == b'P' {
                 o.push_str(
                     if w == 8 && k == b'U' {
-                        "uint8_t";
+                        "uint8_t"
                     } else if w == 16 && k == b'U' {
-                        "uint16_t";
+                        "uint16_t"
                     } else if w <= 32 {
-                        "uint32_t";
+                        "uint32_t"
                     } else {
-                        "uint64_t";
+                        "uint64_t"
                     },
                 );
             } else if k == b'W' {
@@ -11804,9 +11804,9 @@ extend CEmit {
         let _ = self.vec_ty(b, pick(to_vec, rv.target, x.ty), &mut n, &mut bt);
         let mut a = self.sget();
         let mut ok = if x.kind == ir::OP_COPY || x.kind == ir::OP_MOVE {
-            self.emit_place(b, x.data, &mut a);
+            self.emit_place(b, x.data, &mut a)
         } else {
-            self.emit_operand(b, rv.a, &mut a);
+            self.emit_operand(b, rv.a, &mut a)
         };
         o.format_into("  for (uint32_t __sc_i = 0; __sc_i < {}; __sc_i++) ", n);
         ok = ok && self.emit_place(b, s.place, o);
@@ -11868,9 +11868,9 @@ extend CEmit {
         let eop = *b.operands.at(rv.a as usize);
         if (eop.kind == ir::OP_COPY || eop.kind == ir::OP_MOVE) && self.arr_n(b, b.places.at(eop.data as usize).ty) > 0 {
             let lim = if cv <= 16 {
-                cv;
+                cv
             } else {
-                1;
+                1
             };
             if cv > 16 {
                 o.push_str("  for (size_t __ri = 0; __ri < ");
@@ -12045,7 +12045,7 @@ extend CEmit {
                             let mut symb = self.sget();
                             symb.push_str(dst.as_str().slice(d0, dst.len()));
                             let mut sd = String::new();
-                            if !self.tls_accessor(b.module, b.locals.at(base as usize).ty, symb.as_str(), &mut sd) {
+                            if !self.tls_accessor(b.module, b.locals.at(base as usize).ty, &symb, &mut sd) {
                                 self.sput(symb);
                                 return self.fail("tls-accessor");
                             }
@@ -12071,12 +12071,12 @@ extend CEmit {
                             symb.push_str(dst.as_str().slice(d0, dst.len()));
                             let mut sd = String::from_str("extern ");
                             self.stat_specs(item, b.module, b.locals.at(base as usize).ty, &mut sd);
-                            if self.ty_c(b.module, b.locals.at(base as usize).ty, symb.as_str(), &mut sd) {
+                            if self.ty_c(b.module, b.locals.at(base as usize).ty, &symb, &mut sd) {
                                 sd.push_str(";\n");
                                 if self.is_tls(item) && !self.tls_accessor(
                                     b.module,
                                     b.locals.at(base as usize).ty,
-                                    symb.as_str(),
+                                    &symb,
                                     &mut sd,
                                 ) {
                                     self.sput(symb);
@@ -12164,9 +12164,9 @@ extend CEmit {
                 // `(*p).f` reads worse than `p->f`: when this deref feeds directly into a member
                 // access, defer it so the field/downcast spells the arrow instead of wrapping `(*..)`.
                 let nxt = if i + 1 < lim {
-                    b.projections.at((pl.proj_start + i + 1) as usize).kind;
+                    b.projections.at((pl.proj_start + i + 1) as usize).kind
                 } else {
-                    0 as u8;
+                    0 as u8
                 };
                 if nxt == ir::PJ_FIELD || nxt == ir::PJ_DOWNCAST {
                     pend_arrow = true;
@@ -12294,7 +12294,7 @@ extend CEmit {
                     let mut pre = String::from_str("((");
                     ok = self.ty_c(b.module, pj.ty, "*", &mut pre);
                     pre.push_str(")&");
-                    dst.insert_str(mk, pre.as_str());
+                    dst.insert_str(mk, &pre);
                     dst.push_str(")");
                 }
                 dst.push_str("[");
@@ -12460,18 +12460,18 @@ extend CEmit {
             return false;
         }
         let w = if bt == BuiltinType::BT_CHAR {
-            8;
+            8
         } else {
-            self.int_bits(bt);
+            self.int_bits(bt)
         };
         s.uns = uns;
         s.konst = false;
         if uns {
             s.lo = 0;
             s.hi = if w == 64 {
-                0 - 1;
+                0 - 1
             } else {
-                (1i64 << w) - 1;
+                (1i64 << w) - 1
             };
         } else if w == 64 {
             // Spelled without i64::MIN/MAX: the released compiler that bootstraps this source has no
@@ -12484,9 +12484,9 @@ extend CEmit {
         }
         s.c_uns = uns && w >= 32;
         s.c_w = if w < 32 {
-            32u32;
+            32u32
         } else {
-            w as u32;
+            w as u32
         };
         return true;
     }
@@ -12520,9 +12520,9 @@ extend CEmit {
             s.uns = uns;
             s.c_uns = sfx != "LL";
             s.c_w = if sfx == "U" || bt == BuiltinType::BT_CHAR && v > 127 {
-                32u32;
+                32u32
             } else {
-                64u32;
+                64u32
             };
             return true;
         }
@@ -12541,9 +12541,9 @@ extend CEmit {
                     let spelled = int_signed(ub) || bt_is_unsigned(ub) && self.int_bits(ub) >= 32;
                     if spelled && self.cmp_side(b, rv.a, s) && s.konst {
                         s.lo = if s.uns && self.int_bits(ub) == 32 {
-                            ~s.lo & 0xFFFFFFFFi64;
+                            ~s.lo & 0xFFFFFFFFi64
                         } else {
-                            ~s.lo;
+                            ~s.lo
                         };
                         s.hi = s.lo;
                         return true;
@@ -12569,9 +12569,9 @@ extend CEmit {
                         // C converts a constant to the target type: its value modulo 2^width, read
                         // in the target's signedness.
                         let w = if tb == BuiltinType::BT_CHAR {
-                            8;
+                            8
                         } else {
-                            self.int_bits(tb);
+                            self.int_bits(tb)
                         };
                         s.set_val(wrap_to(src.lo, w, s.uns));
                     } else if exact_cmp(s.lo, s.uns, src.lo, src.uns) <= 0 && exact_cmp(src.hi, src.uns, s.hi, s.uns) <= 0 {
@@ -12658,11 +12658,11 @@ extend CEmit {
             });
         }
         let common_uns = if xs.c_uns == cs.c_uns {
-            xs.c_uns;
+            xs.c_uns
         } else if xs.c_uns {
-            xs.c_w >= cs.c_w;
+            xs.c_w >= cs.c_w
         } else {
-            cs.c_w >= xs.c_w;
+            cs.c_w >= xs.c_w
         };
         if common_uns && (!xs.uns && xs.lo < 0 || !cs.uns && cs.lo < 0) {
             return -1;
@@ -12715,9 +12715,9 @@ extend CEmit {
     // the body's module.
     const fn const_src<'a>(self: &Self, b: &ir::CoreBody, c: &ir::Constant) str<'a> {
         let m = if c.item.node != NODE_NONE {
-            c.item.module;
+            c.item.module
         } else {
-            b.module;
+            b.module
         };
         return self.p().modules.at(m as usize).source.as_str();
     }
@@ -12837,10 +12837,10 @@ extend CEmit {
         }
         let mut ok = true;
         if bytes.len() > STR_LIT_MAX {
-            ok = self.long_lit(cid, bytes.as_str(), lit);
+            ok = self.long_lit(cid, &bytes, lit);
         } else {
             lit.push_str("\"");
-            push_c_escaped(bytes.as_str(), lit);
+            push_c_escaped(&bytes, lit);
             lit.push_str("\"");
         }
         self.sput(bytes);
@@ -13048,11 +13048,11 @@ extend CEmit {
     // The builtin behind integer type `t`; BT_VOID when `t` is absent or not a builtin.
     fn int_builtin(self: &Self, b: &ir::CoreBody, t: TypeId) BuiltinType {
         if t == TYPE_NONE {
-            return BuiltinType::BT_VOID;
+            return BT_VOID;
         }
         let y = self.rty_y(b, t);
         if y.kind != TypeKind::TYPE_BUILTIN {
-            return BuiltinType::BT_VOID;
+            return BT_VOID;
         }
         return y.as_data.builtin;
     }
@@ -13173,7 +13173,7 @@ extend CEmit {
                 ev.a as ModuleId,
                 DefId { module: ev.b as ModuleId, node: ev.c },
                 ev.d,
-                ev.s1.as_str(),
+                &ev.s1,
                 &ev.subs,
             );
             return;
@@ -13209,7 +13209,7 @@ extend CEmit {
             }
             let mut sym = String::from_str("__sc_ti__");
             sym.push_string(&mg9);
-            let h = fnv(sym.as_str());
+            let h = fnv(&sym);
             let hit = self.ti_seen.contains(&h);
             if hit {
                 return;
@@ -13294,12 +13294,12 @@ extend CEmit {
         let od9 = self.mg.owner_dep(rm, rt);
         self.mg.mark_used(
             if od9 >= 0 {
-                od9 as ModuleId;
+                od9 as ModuleId
             } else {
-                self.p().core_module;
+                self.p().core_module
             },
         );
-        let h = fnv(sym.as_str());
+        let h = fnv(&sym);
         let fresh = !self.ti_seen.contains(&h);
         if self.mg.rec_on && self.mg.rec_dup_once(h ^ 12) {
             let mut ev = mbe::RecEv::blank(mbe::RK_TI);
@@ -13412,7 +13412,7 @@ extend CEmit {
         let mut d = String::from_str("(*");
         d.push_str(sym);
         d.push_str("__tls(void))");
-        if !self.ty_c(em, ty, d.as_str(), out) {
+        if !self.ty_c(em, ty, &d, out) {
             return false;
         }
         out.format_into(" {\n  __asm__ volatile(\"\" ::: \"memory\");\n  return &{};\n}\n#endif\n", sym);
@@ -13483,9 +13483,9 @@ extend CEmit {
         }
         let ta = self.p().module_ast_const(tgt.module);
         let tg = if tgt.node != NODE_NONE {
-            unsafe (*ta).ext(tgt.node).aggregate.generics;
+            unsafe (*ta).ext(tgt.node).aggregate.generics
         } else {
-            NodeList { start: 0, len: 0 };
+            NodeList { start: 0, len: 0 }
         };
         let mut rit = TyInstance { module: tgt.module, decl: tgt.node, n: n as u8 };
         let mut args = Vector::<mbe::MSub>::new();
@@ -13535,7 +13535,7 @@ extend CEmit {
         }
         let mut sym = self.sget();
         sym.push_str(dst.as_str().slice(d0, dst.len()));
-        let h = self.stat_key(fnv(sym.as_str()), c.item);
+        let h = self.stat_key(fnv(&sym), c.item);
         if self.mg.rec_on && self.mg.rec_dup_once(h ^ 8) {
             let mut ev = mbe::RecEv::blank(mbe::RK_STAT);
             ev.h = h;
@@ -13547,7 +13547,7 @@ extend CEmit {
             ev.subs = mbe::subs_copy(&args);
             self.mg.rec.push(ev);
         }
-        let ok = self.stat_demand(h, tm, c.item, tt, sym.as_str(), &args);
+        let ok = self.stat_demand(h, tm, c.item, tt, &sym, &args);
         self.sput(sym);
         return ok || self.fail("static-sym");
     }
@@ -13565,7 +13565,7 @@ extend CEmit {
         let mut sym = String::new();
         let _ = self.mg.const_sym(item.module, item.node, &mut sym);
         let none = Vector::<mbe::MSub>::new();
-        return self.stat_demand(self.stat_key(fnv(sym.as_str()), item), item.module, item, ty, sym.as_str(), &none);
+        return self.stat_demand(self.stat_key(fnv(&sym), item), item.module, item, ty, &sym, &none);
     }
 
     // Demand the generic-extend impl method `method_by_name` resolved last (its `last_method_def`).
@@ -13677,9 +13677,9 @@ extend CEmit {
         let mut s = self.sget();
         let ok = if self.mg.method_by_name(rm, rt, mn, &mut s) {
             self.demand_impl(rm, rt, &s);
-            true;
+            true
         } else {
-            self.conf_default_sym(rm, rt, mn, &mut s);
+            self.conf_default_sym(rm, rt, mn, &mut s)
         };
         if ok {
             dst.push_string(&s);
@@ -13692,17 +13692,17 @@ extend CEmit {
     fn emit_ref_args(self: &mut Self, b: &ir::CoreBody, rv: &ir::Rvalue, aref: bool, bref: bool, dst: &mut String) bool {
         dst.push_str(
             if aref {
-                "(";
+                "("
             } else {
-                "(&";
+                "(&"
             },
         );
         let mut ok = self.emit_operand(b, rv.a, dst);
         dst.push_str(
             if bref {
-                ", ";
+                ", "
             } else {
-                ", &";
+                ", &"
             },
         );
         if ok {
@@ -14204,9 +14204,9 @@ extend CEmit {
                 }
             }
             let found = if ce8 != NODE_NONE {
-                self.mg.method_in_ext(rm6, rt6, cm8, ce8, mname8, sym);
+                self.mg.method_in_ext(rm6, rt6, cm8, ce8, mname8, sym)
             } else {
-                self.mg.method_by_name(rm6, rt6, mname8, sym);
+                self.mg.method_by_name(rm6, rt6, mname8, sym)
             };
             if found && (mname8 != "free" || self.user_free_covers(rm6, rt6)) {
                 if tg.n != 0 {
@@ -14395,7 +14395,7 @@ extend CEmit {
             self.sput(stem);
             return self.fail("dyn-stem");
         }
-        let h = fnv(stem.as_str());
+        let h = fnv(&stem);
         if self.dyn_def_seen.contains(&h) {
             self.sput(stem);
             return true;
@@ -14524,7 +14524,7 @@ extend CEmit {
                 1,
                 tys,
                 rtys,
-            ) && self.dyn_sig(it.module, tys, rtys, nm.as_str(), o);
+            ) && self.dyn_sig(it.module, tys, rtys, &nm, o);
             o.push_str(";\n");
         }
         self.mg.pop_subs(nb);
@@ -14681,9 +14681,9 @@ extend CEmit {
         let da = self.p().module_ast_const(it.module);
         // With several conformances to a generic interface, the one with the dyn type's arguments.
         let conf = if it.n != 0 {
-            self.conf_for_args(srm, srt, pm, it);
+            self.conf_for_args(srm, srt, pm, it)
         } else {
-            DefId { module: 0, node: NODE_NONE };
+            DefId { module: 0, node: NODE_NONE }
         };
         let nb = self.mg.push_generics(it.module, unsafe (*da).ext(it.decl).interface_def.generics, pm, it);
         let ms = unsafe (*da).ext(it.decl).interface_def.items;
@@ -14712,7 +14712,7 @@ extend CEmit {
                 tys,
                 rtys,
                 1,
-                nm.as_str(),
+                &nm,
                 pair.as_str(),
                 srcc.as_str(),
                 srm,
@@ -14756,9 +14756,9 @@ extend CEmit {
             ev.c = srm;
             ev.d = srt;
             ev.h = if own {
-                1u64;
+                1u64
             } else {
-                0;
+                0
             };
             if at != TYPE_NONE {
                 ev.subs.push(mbe::MSub { pnode: NODE_NONE, at: at, lim: 0, pm: 0, am: am });
@@ -14797,9 +14797,9 @@ extend CEmit {
                 // receiver has no owner module): spell its thunks under that context.
                 let od9 = self.mg.owner_dep(srm, srt);
                 let own9 = if od9 >= 0 {
-                    od9 as ModuleId;
+                    od9 as ModuleId
                 } else {
-                    unsafe (*self.p().module_ast_const(pm)).instance(y.as_data.inst).module;
+                    unsafe (*self.p().module_ast_const(pm)).instance(y.as_data.inst).module
                 };
                 if self.lir.is_none() && !self.mg.macro_on && (self.backends[own9 as usize] & BK_LIR) != 0 {
                     // A body's LIR lowering demands it: its LIR waits for the lowering (`lir_put`).
@@ -14894,7 +14894,7 @@ extend CEmit {
                     0,
                     "call",
                     pair.as_str(),
-                    srcc.as_str(),
+                    &srcc,
                     srm,
                     srt,
                     DefId { module: 0, node: NODE_NONE },
@@ -15011,7 +15011,7 @@ extend CEmit {
             }
             if ok && self.dyl.ok {
                 let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
-                self.dyl.ok = l.deref_mut().dyn_free(self, srm, srt, am, at, fslot.as_str(), own9);
+                self.dyl.ok = l.deref_mut().dyn_free(self, srm, srt, am, at, &fslot, own9);
                 self.lir_put(l);
             }
         }
@@ -15039,20 +15039,12 @@ extend CEmit {
             if self.dyl.ok {
                 let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
                 let fs = if own {
-                    fslot.as_str();
+                    fslot.as_str()
                 } else {
-                    "";
+                    ""
                 };
                 let named = unsafe (*self.p().module_ast_const(pm)).instance(y.as_data.inst).decl != NODE_NONE;
-                let _ = l.deref_mut().dyn_table(
-                    vt.as_str(),
-                    fs,
-                    named,
-                    src.as_str(),
-                    &self.dyl.slots,
-                    &self.dyl.data,
-                    own9,
-                );
+                let _ = l.deref_mut().dyn_table(&vt, fs, named, src.as_str(), &self.dyl.slots, &self.dyl.data, own9);
                 self.lir_put(l);
             }
             self.dyt_sym.push(vt);
@@ -15296,7 +15288,7 @@ extend CEmit {
                 head.push_str(", ");
                 let mut an = String::from_str("_a");
                 an.push_u64(start as u64 + i as u64);
-                ok = self.mg.param_ctype(dm, ps[i], an.as_str(), &mut head);
+                ok = self.mg.param_ctype(dm, ps[i], &an, &mut head);
             }
         }
         let sy = *unsafe (*self.p().module_ast_const(srm)).type_at(srt);
@@ -15368,7 +15360,7 @@ extend CEmit {
                 ts.push_str(name);
                 let tg = String::from_str(head.as_str().slice(t0, t1));
                 let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
-                self.dyl.ok = l.deref_mut().dyn_thunk(self, dm, ps, rs, ts.as_str(), tg.as_str(), env, self.dyl.unit);
+                self.dyl.ok = l.deref_mut().dyn_thunk(self, dm, ps, rs, &ts, &tg, env, self.dyl.unit);
                 self.lir_put(l);
                 self.dyl.slots.push(ts);
                 self.dyl.data.push(false);
@@ -15793,13 +15785,13 @@ extend CEmit {
         o.push_str("  __sc_assert_");
         o.push_str(
             if kind == 1 {
-                "i64";
+                "i64"
             } else if kind == 2 {
-                "u64";
+                "u64"
             } else if kind == 3 {
-                "f64";
+                "f64"
             } else {
-                "bool";
+                "bool"
             },
         );
         o.push_str("(");
@@ -15820,7 +15812,7 @@ extend CEmit {
         o.push_str(mbe::if_s(t.sw_len == 2, " == ", " != "));
         push_assert_src(src.slice(rsp.raw.start as usize, rsp.raw.end as usize), ESC_C, o);
         o.push_str("\", \"");
-        push_c_escaped(self.p().modules.at(b.module as usize).file.as_str(), o);
+        push_c_escaped(&self.p().modules.at(b.module as usize).file, o);
         o.push_str("\", ");
         o.push_u64(line);
         o.push_str(");\n");
@@ -15960,7 +15952,7 @@ extend CEmit {
             return false;
         }
         if m as usize < self.p().modules.len() {
-            return !loader::runtime_path(self.p().modules.at(m as usize).path.as_str());
+            return !loader::runtime_path(&self.p().modules.at(m as usize).path);
         }
         return true;
     }
@@ -16077,16 +16069,16 @@ extend CEmit {
         self.mg.mark_ctx = ctx0;
         let blocking = self.blocking_callee(d);
         let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
-        if !l.deref_mut().blk_wrapper(self, d, full.as_str(), nm.as_str(), blocking) {
+        if !l.deref_mut().blk_wrapper(self, d, &full, &nm, blocking) {
             l.conly.push(d.module);
             l.conly_why.push(format("the wrapper `{}` has no LIR", full.as_str()));
         }
-        self.lir = Option::<Box<lw::Lower>>::Some(l);
+        self.lir = Some(l);
     }
 
     // Give the LIR back after a lowering, then lower the wrappers that lowering spelled (`blk_due`).
     pub(package) fn lir_put(self: &mut Self, l: Box<lw::Lower>) {
-        self.lir = Option::<Box<lw::Lower>>::Some(l);
+        self.lir = Some(l);
         let mut i: usize = 0;
         // A wrapper's lowering may spell another wrapper: each is spelled once (`blk_seen`).
         while i < self.blk_due.len() {
@@ -16132,9 +16124,9 @@ extend CEmit {
             let c = path[i];
             out.push_byte(
                 if c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' {
-                    c;
+                    c
                 } else {
-                    b'_';
+                    b'_'
                 },
             );
         }
@@ -16174,14 +16166,14 @@ extend CEmit {
             let pt = unsafe (*a).type_of(unsafe (*a).at_const(pid).as_data.parameter.ty);
             let mut an = String::from_str("a");
             an.push_u64(k);
-            if !self.mg.ctype(d.module, pt, an.as_str(), &mut env) {
+            if !self.mg.ctype(d.module, pt, &an, &mut env) {
                 return false;
             }
             env.push_str("; ");
             if k != 0 {
                 wrap_params.push_str(", ");
             }
-            if !self.mg.param_ctype(d.module, pt, an.as_str(), &mut wrap_params) {
+            if !self.mg.param_ctype(d.module, pt, &an, &mut wrap_params) {
                 return false;
             }
         }
@@ -16278,7 +16270,7 @@ extend CEmit {
                 self.blk_defs.push_str("return __v.r; ");
             }
             self.blk_defs.push_str("}\n");
-        } else if !self.copy_thunk_def(d, &wn, nm.as_str(), &rty, &wrap_params, rt, is_void) {
+        } else if !self.copy_thunk_def(d, &wn, &nm, &rty, &wrap_params, rt, is_void) {
             return false;
         }
         if self.lir_on(d.module) {
@@ -16362,7 +16354,7 @@ extend CEmit {
             }
             let mut cn = String::from_str("c");
             cn.push_u64(k);
-            if !self.mg.ctype(d.module, pt, cn.as_str(), &mut self.blk_defs) {
+            if !self.mg.ctype(d.module, pt, &cn, &mut self.blk_defs) {
                 return false;
             }
             self.blk_defs.push_str("; memcpy(c");
@@ -16559,7 +16551,7 @@ extend CEmit {
             let mut sym = String::from_str(name);
             sym.push_string(&sfx);
             if self.collect_demand {
-                let dk = def_fp(d) ^ fnv(sym.as_str());
+                let dk = def_fp(d) ^ fnv(&sym);
                 let fresh = !self.demand_seen.contains(&dk);
                 if fresh || self.mg.rec_on {
                     if fresh {
@@ -16725,7 +16717,7 @@ extend CEmit {
                 let off = self.sym_off[slot] as usize;
                 let ln = self.sym_len[slot] as usize;
                 dst.push_str(self.sym_pool.as_str().slice(off, off + ln));
-                1u8 + (*s >> 63) as u8;
+                1u8 + (*s >> 63) as u8
             },
             None => 0u8,
         };
@@ -16810,9 +16802,9 @@ extend CEmit {
             let own = unsafe (*self.p().module_ast_const(callee.module)).ext(callee.node).function.generics.len;
             let tn = pick(own < targs_len, own, targs_len);
             let tat: *const TypeId = if tn != 0 {
-                &b.targ_pool[(targs_start + targs_len - tn) as usize];
+                &b.targ_pool[(targs_start + targs_len - tn) as usize]
             } else {
-                null;
+                null
             };
             let tg = IfTargs { m: b.module, at: tat, n: tn };
             if iface == TYPE_NONE {
@@ -16838,7 +16830,7 @@ extend CEmit {
             if !ok6 {
                 ok6 = self.fail("dyn-stem");
             } else {
-                ok6 = self.iface_target_sym(rm6, rt6, callee, conf, csfx.as_str(), tg, b.module, &iit, dst);
+                ok6 = self.iface_target_sym(rm6, rt6, callee, conf, &csfx, tg, b.module, &iit, dst);
             }
             self.sput(csfx);
             return ok6;
@@ -17010,7 +17002,7 @@ extend CEmit {
         }
         if memo9 {
             let dk0 = self.call_fp(
-                def_fp(callee) ^ fnv(csfx9.as_str()),
+                def_fp(callee) ^ fnv(&csfx9),
                 b,
                 rpm,
                 &rit,
@@ -17213,9 +17205,9 @@ extend CEmit {
         }
         let n = self.arr_n(b, opP.ty);
         let alen = if n >= 0 {
-            n;
+            n
         } else {
-            self.place_c_arr_len(b, opP.data);
+            self.place_c_arr_len(b, opP.data)
         };
         if alen < 0 {
             return false;
@@ -17376,9 +17368,9 @@ extend CEmit {
                     let lastj = rpl9.proj_start as usize + rpl9.proj_len as usize;
                     if !void9 && rpl9.proj_len != 0 && b.projections.at(lastj - 1).kind == ir::PJ_FIELD {
                         let ownt = if rpl9.proj_len > 1 {
-                            b.projections.at(lastj - 2).ty;
+                            b.projections.at(lastj - 2).ty
                         } else {
-                            b.locals.at(rpl9.base as usize).ty;
+                            b.locals.at(rpl9.base as usize).ty
                         };
                         let mut om = b.module;
                         let mut ot = ownt;
@@ -17457,9 +17449,9 @@ extend CEmit {
                     rv.item.node,
                 ).function.generics.len != 0;
                 let mut ok = if has_own {
-                    self.conv_sym(b, rv.item, cvr, rv.target, dst);
+                    self.conv_sym(b, rv.item, cvr, rv.target, dst)
                 } else {
-                    self.callee_sym(b, rv.item, 0, 0, cvr, rv.target, TYPE_NONE, TYPE_NONE, dst);
+                    self.callee_sym(b, rv.item, 0, 0, cvr, rv.target, TYPE_NONE, TYPE_NONE, dst)
                 };
                 if ok {
                     dst.push_str("(");
@@ -17504,11 +17496,11 @@ extend CEmit {
             // Signed negation overflows at MIN (the checker rejects unsigned negation); a narrow unsigned
             // `~` truncates to its width.
             let hop = if t == tt::TokenType::Minus && int_signed(ub) {
-                "neg";
+                "neg"
             } else if t == tt::TokenType::Tilde && (ub == BuiltinType::BT_U8 || ub == BuiltinType::BT_U16) {
-                "not";
+                "not"
             } else {
-                "";
+                ""
             };
             if hop.len() != 0 {
                 dst.push_str("__sc_");
@@ -17565,9 +17557,9 @@ extend CEmit {
                     self.mg.need_ty(em4, et4);
                     if self.mg.is_zst(em4, et4) {
                         let yb4k = if bt4 != TYPE_NONE {
-                            unsafe (*self.p().module_ast_const(bm4)).type_at(bt4).kind;
+                            unsafe (*self.p().module_ast_const(bm4)).type_at(bt4).kind
                         } else {
-                            TypeKind::TYPE_ERROR;
+                            TypeKind::TYPE_ERROR
                         };
                         if t == tt::TokenType::Minus && yb4k == TypeKind::TYPE_POINTER {
                             dst.push_str("(__sc_zst_ptrdiff(), (intptr_t)0)");
@@ -17773,7 +17765,7 @@ extend CEmit {
                         v.push_str(")");
                     }
                     if ok {
-                        self.mg.niche_discr(am, decl, ns, nn, nk, v.as_str(), false, dst);
+                        self.mg.niche_discr(am, decl, ns, nn, nk, &v, false, dst);
                     }
                     self.sput(v);
                     return ok;
@@ -17791,9 +17783,9 @@ extend CEmit {
             }
             let arrow = payload && derefs >= 1;
             let outer = if arrow {
-                derefs - 1;
+                derefs - 1
             } else {
-                derefs;
+                derefs
             };
             for _d in 0..outer {
                 dst.push_str("(*");
@@ -17858,12 +17850,12 @@ extend CEmit {
                 rnd::render_qualified_name(self.p(), self.p().module_ast_const(rm), rt, &mut nm);
                 let mut lit = self.sget();
                 lit.push_str("\"");
-                push_c_escaped(nm.as_str(), &mut lit);
+                push_c_escaped(&nm, &mut lit);
                 lit.push_str("\"");
                 dst.push_str("(");
                 let ok = self.ty_c(b.module, rv.target, "", dst);
                 dst.push_str(")");
-                push_c_str_view(lit.as_str(), dst);
+                push_c_str_view(&lit, dst);
                 self.sput(lit);
                 self.sput(nm);
                 return ok;
@@ -18216,9 +18208,9 @@ extend CEmit {
             // holds a pointer to their wrapper struct (`Mangler::ptr_wraps`): convert the value.
             let ty9 = *unsafe (*self.p().module_ast_const(b.module)).type_at(rv.target);
             let elem9 = if ty9.kind == TypeKind::TYPE_INSTANCE {
-                unsafe (*self.p().module_ast_const(b.module)).instance(ty9.as_data.inst).args[0];
+                unsafe (*self.p().module_ast_const(b.module)).instance(ty9.as_data.inst).args[0]
             } else {
-                TYPE_NONE;
+                TYPE_NONE
             };
             // Zero-sized elements take no bytes: the view starts where its base does, and an array
             // of them has no storage, so the view points at the aligned sentinel.
@@ -18616,7 +18608,7 @@ extend CEmit {
         }
         let mut sym = String::new();
         if !self.mg.fn_sym(callee.module, callee.node, DefId { module: 0, node: NODE_NONE }, &mut sym) || self.mg.c_lib_declared(
-            sym.as_str(),
+            &sym,
         ) && !sym.as_str().ends_with("_np") || sym.as_str().starts_with("__sc_") {
             // A header the emitted C includes declares it: a C library name, or an entry point of the
             // runtime (`__sc_panic_str`), which `super_rt.h` or the runtime module's prototypes declare.
@@ -18625,12 +18617,12 @@ extend CEmit {
             // build's strict POSIX level hides.
             return;
         }
-        let h = fnv(sym.as_str());
+        let h = fnv(&sym);
         if self.extern_seen.contains(&(h ^ RT_DEFINED_KEY)) {
             return;
         }
         let fresh = !self.extern_seen.contains(&h);
-        if fresh && sym.as_str().starts_with("sc_") && rth::rt_defines(sym.as_str()) {
+        if fresh && sym.as_str().starts_with("sc_") && rth::rt_defines(&sym) {
             // `super_rt.h` defines it inline: a second declaration would make each unit's copy external.
             self.extern_seen.insert(h ^ RT_DEFINED_KEY);
             return;
@@ -18645,9 +18637,9 @@ extend CEmit {
         let mut pr = String::from_str("extern ");
         let rets = unsafe (*ca).ext(callee.node).function.returns;
         let rty = if rets.len == 0 {
-            Ast::builtin(BuiltinType::BT_VOID);
+            Ast::builtin(BuiltinType::BT_VOID)
         } else {
-            unsafe (*ca).type_of(unsafe (*ca).list(rets)[0]);
+            unsafe (*ca).type_of(unsafe (*ca).list(rets)[0])
         };
         let mut pok = rets.len <= 1 && rty != TYPE_NONE && self.ty_c(cm, rty, "", &mut pr);
         let rdecl = pr.len() + 1;
@@ -18834,16 +18826,16 @@ extend CEmit {
                     return *v != 0;
                 },
                 None => {},
-            };
+            }
         }
         let r = self.is_destructible_raw(rm, rt, &y);
         if memo {
             self.destr_memo.insert(
                 key,
                 if r {
-                    1u64;
+                    1u64
                 } else {
-                    0u64;
+                    0u64
                 },
             );
         }
@@ -18914,9 +18906,9 @@ extend CEmit {
             let fk = unsafe (*da).at_const(fid).kind;
             if fk == NodeKind::NODE_FIELD || is_tuple {
                 let type_node = if is_tuple {
-                    fid;
+                    fid
                 } else {
-                    unsafe (*da).at_const(fid).as_data.field.ty;
+                    unsafe (*da).at_const(fid).as_data.field.ty
                 };
                 let fty = unsafe (*da).type_of(type_node);
                 if fty != TYPE_NONE {
@@ -19057,7 +19049,7 @@ extend CEmit {
             let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
             let sym = self.glue.at(idx).sym.clone();
             let none: []NodeId = [];
-            let _ = l.deref_mut().glue(self, self.glue.at(idx).em, self.glue.at(idx).ty, sym.as_str(), "", none);
+            let _ = l.deref_mut().glue(self, self.glue.at(idx).em, self.glue.at(idx).ty, &sym, "", none);
             self.lir_put(l);
         }
         self.mg.pop_subs(gn0);
@@ -19186,9 +19178,9 @@ extend CEmit {
                     continue;
                 }
                 let type_node = if is_tuple {
-                    fid;
+                    fid
                 } else {
-                    unsafe (*da).at_const(fid).as_data.field.ty;
+                    unsafe (*da).at_const(fid).as_data.field.ty
                 };
                 let fty = unsafe (*da).type_of(type_node);
                 if fty == TYPE_NONE {
@@ -19424,15 +19416,15 @@ extend CEmit {
                     return self.fail("drop");
                 }
                 if self.collect_demand {
-                    self.note_free(rm, rt, fs.as_str());
+                    self.note_free(rm, rt, &fs);
                 }
                 let mut pv = self.sget();
                 let zdrop = self.mg.is_zst(rm, rt);
                 let ok = if zdrop {
                     // No storage exists for the dropped value: its destructor runs on the sentinel.
-                    self.zst_sentinel_ref(rm, rt, &mut pv);
+                    self.zst_sentinel_ref(rm, rt, &mut pv)
                 } else {
-                    self.emit_place(b, t.a, &mut pv);
+                    self.emit_place(b, t.a, &mut pv)
                 };
                 if ok {
                     CEmit::open_drop_guard(o, t);
@@ -19733,9 +19725,9 @@ extend CEmit {
             let mut ok = true;
             {
                 let sink: &mut String = if plain {
-                    &mut *o;
+                    &mut *o
                 } else {
-                    &mut line;
+                    &mut line
                 };
                 if plain {
                     sink.push_str("  ");
@@ -19758,7 +19750,7 @@ extend CEmit {
                                         decl.push_string(&lhs);
                                     }
                                 } else {
-                                    ok = self.ty_c(b.module, lty, lhs.as_str(), &mut decl);
+                                    ok = self.ty_c(b.module, lty, &lhs, &mut decl);
                                 }
                                 if ok {
                                     self.sx_declared.set(droot as usize, true);
@@ -19956,7 +19948,7 @@ fn split_views(s: &mut String, views: &Vector<usize>) {
             t.push_str(")");
         }
         t.push_str(".len");
-        s.insert_str(a1, t.as_str());
+        s.insert_str(a1, &t);
         if !plain {
             s.insert_str(a0, "(");
         }
@@ -20022,7 +20014,7 @@ pub(package) fn push_c_str_data(bytes: str, dst: &mut String) {
     let mut lit = String::from_str("\"");
     push_c_escaped(bytes, &mut lit);
     lit.push_str("\"");
-    push_c_str_view(lit.as_str(), dst);
+    push_c_str_view(&lit, dst);
 }
 
 /// `bytes` and a terminating 0 as a C initializer list: 32 decimal values per line, each line on a
@@ -20098,28 +20090,28 @@ const fn mt_pair(o: u8, c: u8) bool {
 /// literal, or the builtins of an infinity and a NaN (its payload kept).
 pub(package) fn push_c_float_bits(v: u64, single: bool, dst: &mut String) {
     let mb: u32 = if single {
-        23;
+        23
     } else {
-        52;
+        52
     };
     let eb: u32 = if single {
-        8;
+        8
     } else {
-        11;
+        11
     };
     let sfx = if single {
-        "f";
+        "f"
     } else {
-        "";
+        ""
     };
     let neg = (v >> mb + eb & 1) != 0;
     let ef = (v >> mb & (1u64 << eb) - 1) as i64;
     let m = v & (1u64 << mb) - 1;
     dst.push_str(
         if neg {
-            "(-";
+            "(-"
         } else {
-            "(";
+            "("
         },
     );
     if ef == (1i64 << eb) - 1 {
@@ -20136,9 +20128,9 @@ pub(package) fn push_c_float_bits(v: u64, single: bool, dst: &mut String) {
         let digits = (mb + 3) / 4;
         dst.push_str(
             if ef == 0 {
-                "0x0.";
+                "0x0."
             } else {
-                "0x1.";
+                "0x1."
             },
         );
         let f = m << digits * 4 - mb;
@@ -20148,9 +20140,9 @@ pub(package) fn push_c_float_bits(v: u64, single: bool, dst: &mut String) {
             let d = (f >> 4 * k & 0xF) as u8;
             dst.push_byte(
                 if d < 10 {
-                    b'0' + d;
+                    b'0' + d
                 } else {
-                    b'a' + d - 10;
+                    b'a' + d - 10
                 },
             );
         }
@@ -20158,9 +20150,9 @@ pub(package) fn push_c_float_bits(v: u64, single: bool, dst: &mut String) {
         dst.format_into(
             "p{}{}",
             if ef == 0 {
-                1 - bias;
+                1 - bias
             } else {
-                ef - bias;
+                ef - bias
             },
             sfx,
         );
@@ -20194,9 +20186,9 @@ pub(package) fn push_c_number(txt: str, dst: &mut String) {
     // checker guarantees it fits u64).
     if n > 2 && txt.byte_at(0) == 48 && (txt.byte_at(1) == 111 || txt.byte_at(1) == 98) {
         let shift: u64 = if txt.byte_at(1) == 111 {
-            3u64;
+            3u64
         } else {
-            1u64;
+            1u64
         };
         let mut v: u64 = 0;
         let mut i: usize = 2;
@@ -20287,24 +20279,24 @@ fn push_fmt_escaped(txt: str, pct: bool, dst: &mut String) {
 /// or a matchertext literal) as a C string literal.
 pub(package) fn push_c_asm_str(raw: str, dst: &mut String) {
     let tk = if raw.len() != 0 && raw.byte_at(0) == b'M' {
-        tt::TokenType::MatchertextLiteral;
+        tt::TokenType::MatchertextLiteral
     } else {
-        tt::TokenType::StringLiteral;
+        tt::TokenType::StringLiteral
     };
     let mut tmp = String::new();
     let mut bytes = String::new();
     str_const_bytes(raw, tk as i64, &mut tmp, &mut bytes);
     dst.push_str("\"");
-    push_c_escaped(bytes.as_str(), dst);
+    push_c_escaped(&bytes, dst);
     dst.push_str("\"");
 }
 
 /// The bytes of asm template literal `raw` (a string or a matchertext literal), appended to `dst`.
 pub(package) fn asm_bytes(raw: str, dst: &mut String) {
     let tk = if raw.len() != 0 && raw.byte_at(0) == b'M' {
-        tt::TokenType::MatchertextLiteral;
+        tt::TokenType::MatchertextLiteral
     } else {
-        tt::TokenType::StringLiteral;
+        tt::TokenType::StringLiteral
     };
     let mut tmp = String::new();
     str_const_bytes(raw, tk as i64, &mut tmp, dst);
@@ -20433,11 +20425,11 @@ const fn vec_op_tpl(unary: bool, op: u8, bt: BuiltinType) str<'static> {
             "$d = ($T)($a - $b); __sc_f0 |= (uint64_t)($a < $b) << __sc_i;",
         ),
         Star => if wide {
-            "{ $T __sc_w; __sc_f0 |= (uint64_t)__builtin_mul_overflow($a, $b, &__sc_w) << __sc_i; $d = __sc_w; }";
+            "{ $T __sc_w; __sc_f0 |= (uint64_t)__builtin_mul_overflow($a, $b, &__sc_w) << __sc_i; $d = __sc_w; }"
         } else if sg {
-            "{ int64_t __sc_s = (int64_t)$a * $b; $d = ($T)__sc_s; __sc_f0 |= (uint64_t)(__sc_s < $X || __sc_s > $Y) << __sc_i; }";
+            "{ int64_t __sc_s = (int64_t)$a * $b; $d = ($T)__sc_s; __sc_f0 |= (uint64_t)(__sc_s < $X || __sc_s > $Y) << __sc_i; }"
         } else {
-            "{ uint64_t __sc_s = (uint64_t)$a * $b; $d = ($T)__sc_s; __sc_f0 |= (uint64_t)(__sc_s > $Y) << __sc_i; }";
+            "{ uint64_t __sc_s = (uint64_t)$a * $b; $d = ($T)__sc_s; __sc_f0 |= (uint64_t)(__sc_s > $Y) << __sc_i; }"
         },
         Slash => mbe::if_s(
             sg,
@@ -20627,9 +20619,9 @@ const fn exact_cmp(a: i64, au: bool, b: i64, bu: bool) i32 {
     let bn = !bu && b < 0;
     if an != bn {
         return if an {
-            -1;
+            -1
         } else {
-            1;
+            1
         };
     }
     if a == b {
@@ -20637,14 +20629,14 @@ const fn exact_cmp(a: i64, au: bool, b: i64, bu: bool) i32 {
     }
     // Both negative compare signed, both non-negative compare as unsigned patterns.
     let less = if an {
-        a < b;
+        a < b
     } else {
-        a as u64 < b as u64;
+        a as u64 < b as u64
     };
     return if less {
-        -1;
+        -1
     } else {
-        1;
+        1
     };
 }
 
@@ -20678,16 +20670,16 @@ const fn pv_find(root: &Vector<u32>, l: u32) u32 {
 const fn c_const_op(t: tt::TokenType, l: &CmpSide, r: &CmpSide, s: &mut CmpSide) bool {
     let shift = t == tt::TokenType::LeftShift || t == tt::TokenType::RightShift;
     let uns = if shift || l.c_uns == r.c_uns {
-        l.c_uns;
+        l.c_uns
     } else if l.c_uns {
-        l.c_w >= r.c_w;
+        l.c_w >= r.c_w
     } else {
-        r.c_w >= l.c_w;
+        r.c_w >= l.c_w
     };
     let w = if shift || l.c_w >= r.c_w {
-        l.c_w;
+        l.c_w
     } else {
-        r.c_w;
+        r.c_w
     };
     // Each operand's value in the operation type: a bit pattern of width `w` when it is unsigned.
     let a = wrap_to(l.lo, w, uns);
@@ -20699,9 +20691,9 @@ const fn c_const_op(t: tt::TokenType, l: &CmpSide, r: &CmpSide, s: &mut CmpSide)
         }
         if t == tt::TokenType::RightShift {
             v = if uns {
-                (a as u64 >> r.lo as u64) as i64;
+                (a as u64 >> r.lo as u64) as i64
             } else {
-                a >> r.lo;
+                a >> r.lo
             };
         } else if uns {
             v = (a as u64 << r.lo as u64) as i64;
@@ -20721,15 +20713,15 @@ const fn c_const_op(t: tt::TokenType, l: &CmpSide, r: &CmpSide, s: &mut CmpSide)
         }
         if uns {
             v = if t == tt::TokenType::Slash {
-                (a as u64 / bv as u64) as i64;
+                (a as u64 / bv as u64) as i64
             } else {
-                (a as u64 % bv as u64) as i64;
+                (a as u64 % bv as u64) as i64
             };
         } else {
             v = if t == tt::TokenType::Slash {
-                a / bv;
+                a / bv
             } else {
-                a % bv;
+                a % bv
             };
         }
     } else {
@@ -20772,9 +20764,9 @@ extend CmpSide {
         self.uns = uns;
         self.c_uns = uns && v < 0;
         self.c_w = if v >= 0 - 2147483648i64 && v <= 2147483647 && !self.c_uns {
-            32u32;
+            32u32
         } else {
-            64u32;
+            64u32
         };
     }
 }
@@ -20818,7 +20810,7 @@ struct LfMask {
 
 // No lane-mask form.
 const fn lf_none() LfMask {
-    return LfMask { state: LF_NONE, u: BuiltinType::BT_VOID, n: 0, pl: sp::Plan { form: sp::PF_SCALAR } };
+    return LfMask { state: LF_NONE, u: BT_VOID, n: 0, pl: sp::Plan { form: sp::PF_SCALAR } };
 }
 
 const LF_NONE: u8 = 0;
@@ -20916,10 +20908,10 @@ const fn lf_local(b: &ir::CoreBody, x: u32) u32 {
 // The lane type of a lane mask of lanes `bt`: the unsigned integer of its width.
 const fn lane_mask_bt(bt: BuiltinType) BuiltinType {
     return switch bt {
-        BT_I8 | BT_U8 => BuiltinType::BT_U8,
-        BT_I16 | BT_U16 => BuiltinType::BT_U16,
-        BT_I32 | BT_U32 | BT_F32 => BuiltinType::BT_U32,
-        _ => BuiltinType::BT_U64,
+        BT_I8 | BT_U8 => BT_U8,
+        BT_I16 | BT_U16 => BT_U16,
+        BT_I32 | BT_U32 | BT_F32 => BT_U32,
+        _ => BT_U64,
     };
 }
 
@@ -21004,10 +20996,10 @@ const fn plain_spelling(s: str) bool {
 // The unsigned lane type of `w` bytes.
 const fn mask_bt_of(w: u64) BuiltinType {
     return switch w {
-        1 => BuiltinType::BT_U8,
-        2 => BuiltinType::BT_U16,
-        4 => BuiltinType::BT_U32,
-        _ => BuiltinType::BT_U64,
+        1 => BT_U8,
+        2 => BT_U16,
+        4 => BT_U32,
+        _ => BT_U64,
     };
 }
 

@@ -37,10 +37,10 @@ fn split_vec_refuses_a_second_pin() {
 @test
 fn scratch_lists() {
     let mut a = Ast::new(8);
-    let id0 = a.add(Node { kind: NodeKind::NODE_NONE_KIND });
-    let id1 = a.add(Node { kind: NodeKind::NODE_NONE_KIND });
-    let id2 = a.add(Node { kind: NodeKind::NODE_NONE_KIND });
-    let id3 = a.add(Node { kind: NodeKind::NODE_NONE_KIND });
+    let id0 = a.add(Node { kind: NODE_NONE_KIND });
+    let id1 = a.add(Node { kind: NODE_NONE_KIND });
+    let id2 = a.add(Node { kind: NODE_NONE_KIND });
+    let id3 = a.add(Node { kind: NODE_NONE_KIND });
     // Nested mark/commit: an inner list completes while the outer is still being built.
     let outer = a.mark();
     a.push(id0);
@@ -61,7 +61,7 @@ fn scratch_lists() {
 @test
 fn interner() {
     let mut a = Ast::new(8);
-    let _ = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
+    let _ = a.add(Node { kind: NODE_IDENTIFIER });
     a.init_types();
     // The concreteness cache occupies padding, not a larger Ty.
     assert_eq(sizeof(Ty), 16);
@@ -69,13 +69,13 @@ fn interner() {
     assert_eq(Ast::builtin(BuiltinType::BT_I32), BuiltinType::BT_I32 as TypeId + 1);
     assert(a.type_at(Ast::builtin(BuiltinType::BT_I32)).kind == TypeKind::TYPE_BUILTIN, "builtin slot kind");
     let pc = Ty {
-        kind: TypeKind::TYPE_POINTER,
+        kind: TYPE_POINTER,
         qualifier: TypeQualifier::TYPE_QUAL_CONST as u8,
         module: 0,
         as_data: TyAs { elem: Ast::builtin(BuiltinType::BT_I32) },
     };
     let pm = Ty {
-        kind: TypeKind::TYPE_POINTER,
+        kind: TYPE_POINTER,
         qualifier: TypeQualifier::TYPE_QUAL_MUT as u8,
         module: 0,
         as_data: TyAs { elem: Ast::builtin(BuiltinType::BT_I32) },
@@ -83,8 +83,8 @@ fn interner() {
     let a1 = a.intern_type(pc);
     let a2 = a.intern_type(pc);
     let b1 = a.intern_type(pm);
-    let g = a.intern_type(Ty { kind: TypeKind::TYPE_GENERIC, module: 0, as_data: TyAs { decl: 1 } });
-    let pg = a.intern_type(Ty { kind: TypeKind::TYPE_POINTER, as_data: TyAs { elem: g } });
+    let g = a.intern_type(Ty { kind: TYPE_GENERIC, module: 0, as_data: TyAs { decl: 1 } });
+    let pg = a.intern_type(Ty { kind: TYPE_POINTER, as_data: TyAs { elem: g } });
     assert(a1 == a2, "identical Ty interns to one id");
     assert(a1 != b1, "differing qualifier interns distinctly");
     assert(a.type_concrete(a1) && !a.type_concrete(g) && !a.type_concrete(pg), "concreteness is cached recursively");
@@ -95,12 +95,12 @@ fn interner() {
 @test
 fn node_side_tables_grow_to_the_node_count() {
     let mut a = Ast::new(8);
-    let first = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
+    let first = a.add(Node { kind: NODE_IDENTIFIER });
     let t = Ast::builtin(BuiltinType::BT_I32);
     let grow: [u32; 3] = [1000, 1000, 1];
     for g in grow {
         for _ in 0..g {
-            let _ = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
+            let _ = a.add(Node { kind: NODE_IDENTIFIER });
         }
         a.set_type_args(first, &t, 1);
         a.add_dyn_use(first, t, t);
@@ -126,15 +126,13 @@ fn interner_index_rebuilds_geometrically() {
     unsafe TS_ON = true;
     let before = ts_get(TS_INTERN_REBUILD);
     let mut a = Ast::new(8);
-    let _ = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
+    let _ = a.add(Node { kind: NODE_IDENTIFIER });
     a.init_types();
     let mut last = Ast::builtin(BuiltinType::BT_I32);
     for _ in 0..3000 {
-        last = a.intern_type(Ty { kind: TypeKind::TYPE_POINTER, as_data: TyAs { elem: last } });
+        last = a.intern_type(Ty { kind: TYPE_POINTER, as_data: TyAs { elem: last } });
         // A hit right after every insert: the boundary case that used to thrash.
-        let again = a.intern_type(
-            Ty { kind: TypeKind::TYPE_POINTER, as_data: TyAs { elem: a.type_at(last).as_data.elem } },
-        );
+        let again = a.intern_type(Ty { kind: TYPE_POINTER, as_data: TyAs { elem: a.type_at(last).as_data.elem } });
         assert(again == last, "a repeated Ty is a hit");
     }
     let rebuilds = ts_get(TS_INTERN_REBUILD) - before;
@@ -149,19 +147,19 @@ fn interner_survives_full_collisions() {
     let was = unsafe TS_COLLIDE;
     unsafe TS_COLLIDE = true;
     let mut a = Ast::new(8);
-    let _ = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
+    let _ = a.add(Node { kind: NODE_IDENTIFIER });
     a.init_types();
     let seeds = a.pool.len();
     let n: usize = 200;
     let mut ids = Vector::<TypeId>::new();
     let mut last = Ast::builtin(BuiltinType::BT_I32);
     for _ in 0..n {
-        last = a.intern_type(Ty { kind: TypeKind::TYPE_POINTER, as_data: TyAs { elem: last } });
+        last = a.intern_type(Ty { kind: TYPE_POINTER, as_data: TyAs { elem: last } });
         ids.push(last);
     }
     let mut again = Ast::builtin(BuiltinType::BT_I32);
     for i in 0..n {
-        again = a.intern_type(Ty { kind: TypeKind::TYPE_POINTER, as_data: TyAs { elem: again } });
+        again = a.intern_type(Ty { kind: TYPE_POINTER, as_data: TyAs { elem: again } });
         assert(again == ids[i], "a repeated Ty is a hit under full collisions");
     }
     unsafe TS_COLLIDE = was;
@@ -171,7 +169,7 @@ fn interner_survives_full_collisions() {
 // A module with one module-arena and one body-arena call record and one method reference.
 fn facts_fixture() Ast {
     let mut a = Ast::new(8);
-    let id = a.add(Node { kind: NodeKind::NODE_NONE_KIND });
+    let id = a.add(Node { kind: NODE_NONE_KIND });
     a.set_call_info(id, 5);
     a.set_call_info(NODE_BODY | 2, 6);
     a.push_method_ref(MethodRef { owner: id, recv: TYPE_NONE, callee: DefId { module: 0, node: id } });

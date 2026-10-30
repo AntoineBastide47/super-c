@@ -153,9 +153,9 @@ fn vec_types(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue) str<'static> {
         let shift = t == tt::TokenType::LeftShift || t == tt::TokenType::RightShift;
         let int_only = shift || t == tt::TokenType::Percent || t == tt::TokenType::Ampersand || t == tt::TokenType::Pipe || t == tt::TokenType::Caret || t == tt::TokenType::Tilde;
         let rhs = if r.kind == ir::RV_BINARY {
-            b.operands.at(r.b as usize).ty;
+            b.operands.at(r.b as usize).ty
         } else {
-            r.target;
+            r.target
         };
         if r.target != b.operands.at(r.a as usize).ty || rhs != r.target && !(shift && rhs == a.as_data.arr.elem) {
             return "vector-operand-types";
@@ -176,11 +176,11 @@ fn vec_types(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue) str<'static> {
     // The vector operand: the stored one, the last of the masked forms, the choice's first, else
     // operand 0 (the result for `iota` and the loads).
     let vt = if op.rule == ir::SR_ANY || op.rule == ir::SR_LOAD {
-        r.target;
+        r.target
     } else if op.rule == ir::SR_STORE || op.rule == ir::SR_MASKED || op.rule >= ir::SR_MLOAD {
-        unsafe tys[(op.arity - 1) as usize];
+        unsafe tys[(op.arity - 1) as usize]
     } else {
-        unsafe tys[pick(op.rule == ir::SR_CHOOSE, 1usize, 0usize)];
+        unsafe tys[pick(op.rule == ir::SR_CHOOSE, 1usize, 0usize)]
     };
     let v = *da.type_at(vt);
     if v.kind != TypeKind::TYPE_SIMD {
@@ -234,7 +234,7 @@ fn vec_types(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue) str<'static> {
                     pe = it.args[0];
                 }
             }
-            pe == v.as_data.arr.elem && (op.rule == ir::SR_LOAD || res.kind == TypeKind::TYPE_BUILTIN);
+            pe == v.as_data.arr.elem && (op.rule == ir::SR_LOAD || res.kind == TypeKind::TYPE_BUILTIN)
         },
         _ => true,
     };
@@ -293,11 +293,11 @@ fn lane_rules(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue, tys: &[TypeId; 4], v: 
         },
         ir::SR_REDUCE => {
             let want = if r.c == ir::SIMD_REDUCE_ADD_OVF || r.c == ir::SIMD_REDUCE_MUL_OVF {
-                Ast::builtin(BuiltinType::BT_BOOL);
+                Ast::builtin(BuiltinType::BT_BOOL)
             } else if r.c >= ir::SIMD_ARG_MIN && r.c <= ir::SIMD_ARG_MAX_NUM {
-                usz;
+                usz
             } else {
-                v.as_data.arr.elem;
+                v.as_data.arr.elem
             };
             return r.target == want;
         },
@@ -335,15 +335,15 @@ fn lane_rules(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue, tys: &[TypeId; 4], v: 
             ) == 0 || lane_bits(da, &t1) >= 32 && lane_class(da, &t1) == 2) || !gat && (raw || tys[1] == usz);
             let m = r.c == ir::SIMD_LOAD_OR || mask_of(da, unsafe tys[(op.arity - 2) as usize], v);
             let out = if op.rule == ir::SR_MLOAD {
-                r.target == vt;
+                r.target == vt
             } else if r.c == ir::SIMD_COMPRESS_STORE {
-                r.target == usz;
+                r.target == usz
             } else {
-                scalar;
+                scalar
             };
             return pe == v.as_data.arr.elem && ix && m && out;
         },
-    };
+    }
 }
 
 /// First violated rule as a static string, or "" when the body verifies.
@@ -607,9 +607,9 @@ pub(package) fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::
                 let v = pick(s0.is_vec(), s0, t0);
                 let o = pick(s0.is_vec(), t0, s0);
                 let ok = if r.b == ir::CAST_SIMD_ARRAY {
-                    v.kind == TypeKind::TYPE_SIMD && o.kind == TypeKind::TYPE_ARRAY && o.as_data.arr.elem == v.as_data.arr.elem;
+                    v.kind == TypeKind::TYPE_SIMD && o.kind == TypeKind::TYPE_ARRAY && o.as_data.arr.elem == v.as_data.arr.elem
                 } else {
-                    v.kind == TypeKind::TYPE_MASK && o.kind == TypeKind::TYPE_BUILTIN && o.as_data.builtin == BuiltinType::BT_U64;
+                    v.kind == TypeKind::TYPE_MASK && o.kind == TypeKind::TYPE_BUILTIN && o.as_data.builtin == BuiltinType::BT_U64
                 };
                 if !ok {
                     fail = "cast-types";

@@ -91,7 +91,7 @@ extend Wide {
                     self.types.push(t);
                 }
             }
-            let nk = out.add_block(self.types.as_slice()) as usize;
+            let nk = out.add_block(&self.types) as usize;
             out.blocks.index_mut(nk).flags = bk.flags;
             let mut p = out.blocks[nk].param_start;
             for q in bk.param_start..bk.param_start + bk.param_len as u32 {
@@ -261,7 +261,7 @@ extend Wide {
                 vs.push(self.whole(b, out, i, a));
             }
         }
-        return out.edge(tk, vs.as_slice());
+        return out.edge(tk, &vs);
     }
 
     // The new pool list of the `n` values at `at` of `b`, each whole.
@@ -270,7 +270,7 @@ extend Wide {
         for q in 0..n {
             vs.push(self.whole(b, out, i, b.pool[(at + q) as usize]));
         }
-        return out.pool_list(vs.as_slice());
+        return out.pool_list(&vs);
     }
 
     // Conversion `t` by parts: of a vector and a result of one width part by part; an integer of a
@@ -356,7 +356,7 @@ extend Wide {
             for q in 0..t.aux as u32 + 1 {
                 es.push(self.edge(b, out, i, b.switch_edge(t, q)));
             }
-            u.c = out.pool_list(es.as_slice());
+            u.c = out.pool_list(&es);
         }
         self.val[i as usize] = self.put(b, out, i, u);
     }
@@ -424,9 +424,9 @@ extend Wide {
         }
         let t0 = b.type_of(b.pool[t.a as usize]);
         let rule = if code >= core::OP_SIMD && code < core::OP_CMP_LANES {
-            core::simd_op((code - core::OP_SIMD) as u8).rule;
+            core::simd_op((code - core::OP_SIMD) as u8).rule
         } else {
-            NONE as u8;
+            NONE as u8
         };
         let shift = (code == core::OP_SHL_SCALAR || code == core::OP_SHR_SCALAR) && k == 2 && t0 == t.ty && !is_vec(
             b.type_of(b.pool[(t.a + 1) as usize]),
@@ -454,9 +454,9 @@ extend Wide {
             b.type_of(b.pool[(t.a + 2) as usize]),
         ) && b.type_of(b.pool[(t.a + 3) as usize]) == t.ty;
         let wt = if cmp {
-            t0;
+            t0
         } else {
-            t.ty;
+            t.ty
         };
         if !(shift || vec || cmp || choose || cast || gather) || !self.splits(wt) {
             return false;
@@ -464,9 +464,9 @@ extend Wide {
         let n = self.count(wt);
         let l = lanes(wt) / n;
         let pt = if cmp {
-            mask_int(l);
+            mask_int(l)
         } else {
-            self.part_type(t.ty);
+            self.part_type(t.ty)
         };
         // Operand q's part j at q * n + j.
         let mut ops = Vector::<Value>::with_capacity((k * n) as usize);
@@ -485,7 +485,7 @@ extend Wide {
             for q in 0..k as usize {
                 vs.push(ops[q * n as usize + j]);
             }
-            let list = out.pool_list(vs.as_slice());
+            let list = out.pool_list(&vs);
             let p = self.put(b, out, i, Inst { op: O_VOP, ty: pt, aux: t.aux, a: list, b: k, c: VNONE });
             self.parts.push(p);
         }
@@ -518,9 +518,9 @@ extend Wide {
         let pt = self.part_type(vt);
         let full = (1u64 << l as u64) - 1;
         let km = if (m & VPARAM) == 0 && b.insts[m as usize].op == O_ICONST {
-            Option::<u64>::Some(b.insts[m as usize].b as u64 << 32 | b.insts[m as usize].a as u64);
+            Option::<u64>::Some(b.insts[m as usize].b as u64 << 32 | b.insts[m as usize].a as u64)
         } else {
-            Option::<u64>::None;
+            Option::<u64>::None
         };
         let base = self.whole(b, out, i, pv);
         let mut mp = Vector::<Value>::with_capacity(n as usize);
@@ -532,14 +532,14 @@ extend Wide {
         let first = self.parts.len() as u32;
         for j in 0..n {
             let bits = if km.is_some() {
-                km.unwrap() >> (j * l) as u64 & full;
+                km.unwrap() >> (j * l) as u64 & full
             } else {
-                1u64;
+                1u64
             };
             let a = if j == 0 {
-                base;
+                base
             } else {
-                self.put(b, out, i, Inst { op: O_PTRADD, ty: T_PTR, aux: 0, a: base, b: VNONE, c: j * self.rb });
+                self.put(b, out, i, Inst { op: O_PTRADD, ty: T_PTR, aux: 0, a: base, b: VNONE, c: j * self.rb })
             };
             let mut part = vp[j as usize];
             if km.is_some() && bits == full {
@@ -550,9 +550,9 @@ extend Wide {
                 }
             } else if km.is_none() || bits != 0 {
                 let mk = if km.is_some() {
-                    self.put(b, out, i, Inst { op: O_ICONST, ty: mask_int(l), aux: 0, a: bits as u32, b: 0, c: VNONE });
+                    self.put(b, out, i, Inst { op: O_ICONST, ty: mask_int(l), aux: 0, a: bits as u32, b: 0, c: VNONE })
                 } else {
-                    mp[j as usize];
+                    mp[j as usize]
                 };
                 let list = out.pool_list([a, mk, part]);
                 let r = self.put(
@@ -739,9 +739,9 @@ extend Wide {
             for j in 0..n as usize {
                 let mut u = t;
                 u.ty = if op == O_VCMP {
-                    mask_type(self.part_type(b.type_of(t.a)));
+                    mask_type(self.part_type(b.type_of(t.a)))
                 } else {
-                    pt;
+                    pt
                 };
                 if oa.len() != 0 {
                     u.a = oa[j];

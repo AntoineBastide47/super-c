@@ -125,12 +125,12 @@ fn superc() *const char {
     }
     let sc = stdlib::getenv("SUPERC");
     let want = if sc == null || unsafe *sc == 0 as char {
-        format("./super-c{}", unsafe str::from_cstr(binext()));
+        format("./super-c{}", unsafe str::from_cstr(binext()))
     } else {
-        unsafe String::from_cstr(sc);
+        unsafe String::from_cstr(sc)
     };
     let slot = ((&mut unsafe SUPERC_RESOLVED) as *mut PathMax) as *mut char;
-    let real = fs::realpath(want.as_str()).unwrap_or(want);
+    let real = fs::realpath(&want).unwrap_or(want);
     assert(real.len() < 4096, "the compiler path fits");
     unsafe cstring::memcpy(slot, real.as_ptr(), real.len());
     unsafe slot[real.len()] = 0 as char;
@@ -201,8 +201,8 @@ pub fn cc_is_clang() bool {
     let mut cmd = format("\"{}\" --version", unsafe str::from_cstr(cc_name()));
     let mut outp = out.clone();
     let ok = run_with(cmd.cstr(), null, outp.cstr(), null, "") == 0;
-    let t = read_text(out.as_str());
-    let _ = fs::unlink(out.as_str());
+    let t = read_text(&out);
+    let _ = fs::unlink(&out);
     return ok && t.contains("clang");
 }
 
@@ -282,7 +282,7 @@ pub fn run_with(cmd: *const char, in_path: *const char, out_path: *const char, e
     }
     e.push_str(env);
     let mut sets = Vector::<String>::new();
-    if !env_parse(e.as_str(), &mut sets) {
+    if !env_parse(&e, &mut sets) {
         return -1;
     }
     // The child's whole environment: this process's, each assigned name replaced by its last assignment.
@@ -311,17 +311,17 @@ pub fn run_with(cmd: *const char, in_path: *const char, out_path: *const char, e
     let sh: [str; 3] = ["sh", "-c", line];
     let none: [str; 0] = [];
     let mut c = if on_windows() {
-        process::Command::new(none);
+        process::Command::new(none)
     } else {
-        process::Command::new(sh);
+        process::Command::new(sh)
     };
     // POSIX runs the line through /bin/sh; Windows hands it to CreateProcess as written, with no shell.
     if on_windows() {
-        c.command_line = Option::<str>::Some(line);
+        c.command_line = Some(line);
     } else {
-        c.program = Option::<str>::Some("/bin/sh");
+        c.program = Some("/bin/sh");
     }
-    c.env = Option::<Slice<str>>::Some(all[0..all.len()]);
+    c.env = Some(all[0..all.len()]);
     c.stdin = redirect_of(in_path, process::Redirect::Null);
     c.stdout = redirect_of(out_path, process::Redirect::Null);
     c.stderr = redirect_of(err_path, process::Redirect::Stdout);
@@ -489,8 +489,8 @@ extend Proj {
         );
         assert(root.len() < 256, "the scratch path fits");
         unsafe p.root.copy_from(root.as_ptr(), root.len());
-        let _ = fs::remove_all(root.as_str());
-        let _ = fs::mkdir_all(root.as_str());
+        let _ = fs::remove_all(&root);
+        let _ = fs::mkdir_all(&root);
         return p;
     }
 
@@ -501,7 +501,7 @@ extend Proj {
 
     /// The project root.
     pub const fn dir(self: &Proj) str {
-        return str::from_cbuf(self.root.as_slice());
+        return str::from_cbuf(&self.root);
     }
 
     // Write <root>/rel (creating parent dirs); rel may contain a subdirectory (e.g. "lib/lib.spc").
@@ -518,17 +518,17 @@ extend Proj {
         }
         if cut > 0 {
             let dir = String::from_str(path.as_str().slice(0, cut));
-            let _ = fs::mkdir_all(dir.as_str()); // a failure shows as the open's below
+            let _ = fs::mkdir_all(&dir); // a failure shows as the open's below
         }
-        let f = stdio::fopen(path.as_str(), "wb"); // binary: no Windows CRLF in emitted test files
+        let f = stdio::fopen(&path, "wb"); // binary: no Windows CRLF in emitted test files
         if f == null {
             eprintln("--- cannot open {} for writing", path.as_str());
         }
         assert(f != null, "mkfile opens its file");
         let wrote = if content.len() == 0 {
-            0;
+            0
         } else {
-            unsafe stdio::fwrite(content.ptr(), 1, content.len(), f);
+            unsafe stdio::fwrite(content.ptr(), 1, content.len(), f)
         };
         let closed = unsafe stdio::fclose(f);
         assert(wrote == content.len() && closed == 0, "mkfile writes its file");
@@ -594,7 +594,7 @@ extend Proj {
     pub fn native_build(self: &Proj, flags: str, mainrel: str) CliResult {
         let back = process::current_dir().unwrap();
         let r = superc_in(self.dir(), format("build {} --out-dir=native {} -o bin", flags, mainrel).as_str());
-        assert(process::set_current_dir(back.as_str()).is_ok(), "the test's working directory stays");
+        assert(process::set_current_dir(&back).is_ok(), "the test's working directory stays");
         return r;
     }
     // `cc_tree_with` without C files of the test's own.
@@ -634,10 +634,7 @@ extend Proj {
         }
         let raw = format("{}/build/debug/raw", root);
         let bin = format("{}/bin{}", root, unsafe str::from_cstr(binext()));
-        return CliResult {
-            exit: cc_tree_link(raw.as_str(), bin.as_str(), more.as_str(), format("{}/.ccout", root).as_str()),
-            out: null,
-        };
+        return CliResult { exit: cc_tree_link(&raw, &bin, &more, format("{}/.ccout", root).as_str()), out: null };
     }
 
     /// Compile every generated C file with the harness flags and link `bin`; the C compiler's result.
@@ -658,9 +655,9 @@ extend Proj {
         let root = self.dir();
         let a = stdlib::getenv("AR");
         let ar = if a != null && unsafe *a != 0 as char {
-            unsafe str::from_cstr(a);
+            unsafe str::from_cstr(a)
         } else {
-            "ar";
+            "ar"
         };
         let mut arc = format("{} rcs \"{}/lib{}.a\"", ar, root, name);
         let mut cs = Vector::<String>::new();
@@ -696,11 +693,11 @@ extend Proj {
             if run_io(cmd.cstr(), null, at.cstr(), null) != 0 {
                 continue;
             }
-            let path = read_text(at.as_str());
+            let path = read_text(&at);
             // A runtime the compiler does not have prints its bare name.
             if let Some(lib) = loader::read_file(path.as_str().trim()) {
                 let to = format("{}/lib{}.a", dir, name);
-                if fs::publish(to.as_str(), unsafe Slice::<u8> { ptr: lib.as_ptr(), len: lib.len() }).is_ok() {
+                if fs::publish(&to, unsafe Slice::<u8> { ptr: lib.as_ptr(), len: lib.len() }).is_ok() {
                     flags.format_into(" -l{}", name);
                 }
             }
@@ -760,7 +757,7 @@ extend Proj {
             }
             rel.push_u64(k as u64);
             rel.push_str(".h");
-            let mut path = self.raw_path(rel.as_str());
+            let mut path = self.raw_path(&rel);
             let buf = slurp(path.cstr());
             if buf == null {
                 return false;
@@ -797,7 +794,7 @@ extend Proj {
         // A prototype ends its line with `;`, the definition with `{`.
         let mut at: usize = 0;
         while at < text.len() {
-            let i = text.slice(at, text.len()).find(head.as_str());
+            let i = text.slice(at, text.len()).find(&head);
             if i < 0 {
                 break;
             }
@@ -831,7 +828,7 @@ extend Proj {
     /// Number of entries under build/debug/raw whose name starts with `prefix`.
     pub fn gen_count(self: &Proj, prefix: str) i32 {
         let raw = format("{}/build/debug/raw", self.dir());
-        let names = dutil::list_dir(raw.as_str(), true).unwrap_or(Vector::<String>::new());
+        let names = dutil::list_dir(&raw, true).unwrap_or(Vector::<String>::new());
         let mut n: i32 = 0;
         for i in 0..names.len() {
             if names.at(i).starts_with(prefix) {
@@ -863,7 +860,7 @@ extend Proj {
     /// Check every case of `b` (see `Batch`) through `compile_flags` with `b.flags`.
     pub fn expect_batch(self: &Proj, mut b: Batch) {
         while b.next() {
-            let r = self.compile_flags(b.flags.as_str(), b.write(self, "case_root.spc"));
+            let r = self.compile_flags(&b.flags, b.write(self, "case_root.spc"));
             b.take(r.exit, r.text());
         }
     }
@@ -903,9 +900,9 @@ extend EnvGuard {
 extend EnvGuard as Free {
     pub fn free(self: &mut Self) {
         let rc = if self.had {
-            unsafe penv::set(self.name.as_str(), self.old.as_str());
+            unsafe penv::set(&self.name, &self.old)
         } else {
-            unsafe penv::unset(self.name.as_str());
+            unsafe penv::unset(&self.name)
         };
         assert(rc.is_ok(), "the variable is restored");
         self.name.free();
@@ -919,12 +916,12 @@ pub fn copy_std(root: str) {
     let std_dir = stdlib::get_env("SC_STD_DIR").unwrap();
     let mut d = String::new();
     d.format_into("{}/sc/std", root);
-    copy_tree(std_dir.as_str(), d.as_str());
+    copy_tree(&std_dir, &d);
     d.clear();
     d.format_into("{}/sc/ffi", root);
     let mut ffi = String::new();
     ffi.format_into("{}/../ffi", std_dir.as_str());
-    copy_tree(ffi.as_str(), d.as_str());
+    copy_tree(&ffi, &d);
 }
 
 /// Copy the files and directories under `src` to `dst`.
@@ -936,10 +933,10 @@ pub fn copy_tree(src: str, dst: str) {
         s.format_into("{}/{}", src, names.at(i).as_str());
         let mut d = String::new();
         d.format_into("{}/{}", dst, names.at(i).as_str());
-        if dutil::is_dir(s.as_str()) {
-            copy_tree(s.as_str(), d.as_str());
+        if dutil::is_dir(&s) {
+            copy_tree(&s, &d);
         } else {
-            assert(dutil::copy_file(s.as_str(), d.as_str()), "the file copies");
+            assert(dutil::copy_file(&s, &d), "the file copies");
         }
     }
 }
@@ -957,7 +954,7 @@ pub fn superc_env_in(dir: str, key: str, val: str, args: str) CliResult {
 pub fn exe_env_in(exe: str, dir: str, key: str, val: str, args: str) CliResult {
     let mut kv = String::new();
     kv.format_into("{}={}", key, val);
-    return exe_in(exe, dir, kv.as_str(), args);
+    return exe_in(exe, dir, &kv, args);
 }
 
 /// Run the compiler under test FROM `dir` with the suite's environment: its builds share the suite's
@@ -1044,9 +1041,9 @@ fn diags_of(out: str) Vector<Diag> {
     while at < out.len() {
         let nl = out.slice(at, out.len()).find("\n");
         let end = if nl < 0 {
-            out.len();
+            out.len()
         } else {
-            at + nl as usize + 1;
+            at + nl as usize + 1
         };
         let line = out.slice(at, end);
         if line.starts_with("error: ") || line.starts_with("warning: ") {
@@ -1179,7 +1176,7 @@ extend Batch {
     /// case's file and the root `root` that imports them, else the case's program as `file`.
     pub fn write<'a>(self: &'a Batch, p: &Proj, root: str<'a>) str<'a> {
         if self.alone >= 0 {
-            p.mkfile(self.file.as_str(), self.program(self.alone as usize).as_str());
+            p.mkfile(&self.file, self.program(self.alone as usize).as_str());
             return self.file.as_str();
         }
         let mut main = String::new();
@@ -1190,7 +1187,7 @@ extend Batch {
             }
         }
         main.push_str("fn main() i32 {\n    return 0;\n}\n");
-        p.mkfile(root, main.as_str());
+        p.mkfile(root, &main);
         return root;
     }
 

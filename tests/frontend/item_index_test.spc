@@ -175,7 +175,7 @@ fn ws_new(a: str, b: str, c: str) Ws {
     proj.mkfile("b.spc", b);
     proj.mkfile("c.spc", c);
     let dir = String::from_str(proj.dir());
-    let mut root = String::from_str(dir.as_str());
+    let mut root = String::from_str(&dir);
     root.push_str("/a.spc");
     return Ws { proj: proj, root: root, dir: dir };
 }
@@ -195,24 +195,14 @@ fn indexed(ws: &Ws, a: str, b: str, c: str, with_edges: bool) loader::Package {
     let names = ["a.spc", "b.spc", "c.spc"];
     let texts = [a, b, c];
     for i in 0..3 {
-        let mut f = String::from_str(ws.dir.as_str());
+        let mut f = String::from_str(&ws.dir);
         f.push_str("/");
         f.push_str(unsafe names[i]);
         ovf.push(f);
         ovt.push(String::from_str(unsafe texts[i]));
     }
     let mut diags = Vector::<an::DiagRec>::new();
-    let mut p = an::compile(
-        ws.root.as_str(),
-        ws.dir.as_str(),
-        "",
-        "std",
-        unsafe shim::sc_host_platform(),
-        ovf,
-        ovt,
-        "",
-        &mut diags,
-    );
+    let mut p = an::compile(&ws.root, &ws.dir, "", "std", unsafe shim::sc_host_platform(), ovf, ovt, "", &mut diags);
     for i in 0..diags.len() {
         eprintln("diag m{} @{}: {}", diags.at(i).module, diags.at(i).start, diags.at(i).msg.as_str());
     }
@@ -312,7 +302,7 @@ fn index_edges_cover_reference_kinds() {
 // add what the checker resolved).
 fn driver_order(ws: &Ws) loader::Package {
     let host = unsafe shim::sc_host_platform();
-    let mut p = loader::package_load(ws.root.as_str(), "std", false, host);
+    let mut p = loader::package_load(&ws.root, "std", false, host);
     assert(p.ok, "the workspace loads");
     p.platform_filter(host);
     let pkg = (&mut p) as *mut loader::Package;

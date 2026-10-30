@@ -260,9 +260,9 @@ fn main() i32 {
     let mut okb = bs.len() == 4200;
     for i in 0..bs.len() {
         okb = okb && bs[i] == if i % 2 == 0 {
-            b'q';
+            b'q'
         } else {
-            0xff;
+            0xff
         };
     }
     let okp = unsafe cstring::strlen(cp as *const char) == 4800 && unsafe *(cp + 3) == 0xc3;
@@ -301,12 +301,12 @@ fn long_string_constants_emit_valid_c() {
     rep(&mut bigf, "{{a}}", 1400);
     let mut a4095 = String::new();
     rep(&mut a4095, "a", 4095);
-    let src = String::from_str(LONG_STRS).replace("@P@", big.as_str()).replace("@M@", bigm.as_str()).replace(
-        "@B@",
-        bytes.as_str(),
-    ).replace("@F@", bigf.as_str()).replace("@A@", a4095.as_str());
+    let src = String::from_str(LONG_STRS).replace("@P@", &big).replace("@M@", &bigm).replace("@B@", &bytes).replace(
+        "@F@",
+        &bigf,
+    ).replace("@A@", &a4095);
     let p = cli::proj_new();
-    p.mkfile("main.spc", src.as_str());
+    p.mkfile("main.spc", &src);
     assert(p.compile("main.spc").ok());
     assert(p.gen_has("main.c", "sizeof(\"aaa") && p.gen_has("main.c", "static const uint8_t __sc_lit"));
     assert(p.cc_build("-pedantic-errors ").ok());
@@ -314,7 +314,7 @@ fn long_string_constants_emit_valid_c() {
     let mut out = String::from_str("true true true true true true true true true true true 14600 4095 4096\n");
     rep(&mut out, "{a}", 1400);
     out.push_str("|y\n");
-    assert(r.ok() && r.out_shows(out.as_str()));
+    assert(r.ok() && r.out_shows(&out));
 }
 
 // Append `unit` to `dst` `n` times.
@@ -815,7 +815,7 @@ pub fn w18<T>(v: &T, n: i32) i64 { if n > 0 { return m1::w1(v, n - 1); } let mut
             k + 1,
             k + 1,
         );
-        p.mkfile(name.as_str(), text.as_str());
+        p.mkfile(&name, &text);
     }
     p.mkfile(
         "main.spc",
@@ -1198,7 +1198,7 @@ const fn cmeta() bool {
   switch ti.fields.get(0).meta("label") {
     Some(m) => { return m.kind == MetaKind::Str && m.s == "Speed"; },
     None => { return false; },
-  };
+  }
 }
 static_assert(cmeta(), "descriptor metadata folds in CTFE");
 extern "C" {
@@ -1211,13 +1211,13 @@ fn main() i32 {
   switch ti.fields.get(0).meta("max") {
     Some(m) => { if m.kind != MetaKind::Int || m.i != 100 { return 2; } },
     None => { return 3; },
-  };
+  }
   if ti.fields.get(1).has_meta("render") { return 4; }
   let tm = type_info::<Mode>();
   switch tm.variant("On") {
     Some(v) => { if !v.has_meta("hidden") { return 5; } },
     None => { return 6; },
-  };
+  }
   let mut n: usize = 0;
   let arr = unsafe __sc_reflect_types(&mut n);
   if n != 2 { return 7; }
@@ -1292,7 +1292,7 @@ fn main() i32 {
   switch m.get(&hit) {
     Some(v) => { if *v != 10 { return 10; } },
     None => { return 11; },
-  };
+  }
   if m.get(&miss).is_some() { return 12; }
   print("{}\n", hit);
   print("ok\n");
@@ -1545,15 +1545,15 @@ fn main() i32 {
   switch TI.field("x") {
     Some(f) => { if f.kind != TypeTag::Int { return 9; } },
     None => { return 10; },
-  };
+  }
   switch type_info::<Shape>().variant("Line") {
     Some(v) => { if v.payload != 2 { return 11; } },
     None => { return 12; },
-  };
+  }
   switch ci.variant_by_tag(7) {
     Some(v) => { print("tag7={}\n", v.name); },
     None => { return 13; },
-  };
+  }
   let ai = type_info::<[u16; 4]>();
   if ai.len != 4 || ai.elem != TypeTag::Uint { return 14; }
   return 0;
@@ -1579,7 +1579,7 @@ enum Shape { Dot, Line(i32, i32), }
 // (nested calls and a method of a literal too); a call whose evaluation fails stays a run-time call,
 // and a folded call still may not move an owning constant.
 const CONST_FOLD: str = M"(const fn square(x: i64) i64 { return x * x; }
-const fn greet(n: u32) str<'static> { return if n > 1 { "many\t\u{e9}"; } else { "one"; }; }
+const fn greet(n: u32) str<'static> { return if n > 1 { "many\t\u{e9}" } else { "one" }; }
 const fn half(x: f64) f64 { return x / 2.0; }
 const fn third(x: f32) f32 { return x / 3.0; }
 const fn tri(n: u64) u64 { let mut s: u64 = 0; for i in 0..n + 1 { s += i; } return s; }
@@ -1592,7 +1592,7 @@ enum Color { Red = 3, Green = 7, Blue }
 struct Wrap<T> { pub v: T, pub n: [u16; 3] }
 const fn make(k: i32) P { return P { x: k * 2, y: 0.5, name: "pt" }; }
 const fn pair() Pair { return Pair(9, true); }
-const fn color(n: i32) Color { return if n > 0 { Color::Green; } else { Color::Blue; }; }
+const fn color(n: i32) Color { return if n > 0 { Color::Green } else { Color::Blue }; }
 const fn table() [u32; 4] { let mut t: [u32; 4] = [0; 4]; for i in 0..4 { unsafe t[i] = (i * i) as u32; } return t; }
 const fn wrap() Wrap<i64> { return Wrap::<i64> { v: -5, n: [1, 2, 3] }; }
 fn main(argv: Vector<str>) i32 {
@@ -1939,7 +1939,7 @@ fn heap() i32 {
 }
 static_assert(heap() == 42, "the abstract heap folds");
 fn opt(k: i32) i32 {
-  let o = if k > 0 { Option::<i32>::Some(k); } else { Option::<i32>::None; };
+  let o = if k > 0 { Option::<i32>::Some(k) } else { Option::<i32>::None };
   return switch o { Some(v) => v + 1, None => -1, };
 }
 static_assert(opt(4) == 5 && opt(-4) == -1, "payload enums fold");
@@ -2357,7 +2357,7 @@ fn leak_sites_name_the_allocating_function() {
     for prof in ["debug", "release"] {
         let mut args = String::new();
         args.format_into("build --profile={}", prof);
-        assert(cli::superc_in(root, args.as_str()).ok(), "the program builds");
+        assert(cli::superc_in(root, &args).ok(), "the program builds");
         let lk = p.run_bin_env("SC_LEAK_CHECK=1 ");
         assert(lk.ok(), "the program runs");
         assert(lk.out_has(" leak_site + "), "the raw block names its function");
@@ -2625,7 +2625,7 @@ fn test_timeout_dumps_child_processes() {
     );
     main.push_str(root);
     main.push_str("/sleeper\");\n}\nfn main() i32 { return 0; }\n");
-    p.mkfile("main.spc", main.as_str());
+    p.mkfile("main.spc", &main);
     let r = p.test_file("--quiet", "main.spc", "");
     assert(r.out_has("test main::runs_a_hung_child ... FAILED (timed out)"), "the test times out");
     assert(r.out_shows(" sleeper: the stack of every thread"), "the child program prints its stacks");
@@ -2741,7 +2741,7 @@ fn main() i32 { return 0; }
     // running the whole suite.
     let mut runner = String::new();
     runner.format_into("{}/build/debug/raw/__tests{}", p.dir(), unsafe str::from_cstr(cli::binext()));
-    let ua = cli::exe_env_in(runner.as_str(), p.dir(), "SC_UNUSED", "1", "--test-jobs=2");
+    let ua = cli::exe_env_in(&runner, p.dir(), "SC_UNUSED", "1", "--test-jobs=2");
     assert_eq(ua.exit, 2);
     assert(ua.out_has("unknown test runner argument '--test-jobs=2'"), "the runner names the argument");
     assert(!ua.out_has("running"), "the runner runs nothing");
@@ -2766,7 +2766,7 @@ fn a_runner_run_directly_makes_its_own_jobserver() {
     let mut runner = String::new();
     runner.format_into("{}/build/debug/raw/__tests{}", p.dir(), unsafe str::from_cstr(cli::binext()));
     // An empty SC_JOBSERVER names no jobserver, as an unset one does. `--no-fork` shows the test's output.
-    let r = cli::exe_env_in(runner.as_str(), p.dir(), "SC_JOBSERVER", "", "--jobs=3 --no-fork");
+    let r = cli::exe_env_in(&runner, p.dir(), "SC_JOBSERVER", "", "--jobs=3 --no-fork");
     assert(r.ok(), "the runner passes");
     assert(r.out_shows("jobserver 2,"), "the runner's jobserver has two slots beside the implicit one");
 }
@@ -3138,7 +3138,7 @@ fn thread_send_rejects_raw_pointer() {
 fn main() i32 {
     let mut x: i32 = 5;
     let ptr = &mut x as *mut i32;
-    let h = thread::spawn(fn() i32 { return unsafe { ptr[0]; }; });
+    let h = thread::spawn(fn() i32 { return unsafe { ptr[0] }; });
     return h.join();
 }
 )",
@@ -3480,7 +3480,7 @@ fn objects_of(dir: str, rel: str, out: &mut Vector<(String, String)>) {
     while let Some(Ok(e)) = d.next() {
         let r = format("{}/{}", rel, e.name);
         if e.kind == Option::<fs::FileKind>::Some(fs::FileKind::Dir) {
-            objects_of(dir, r.as_str(), out);
+            objects_of(dir, &r, out);
         } else if e.name.ends_with(".o") {
             out.push((r.clone(), loader::read_file(format("{}{}", dir, r).as_str()).unwrap()));
         }
@@ -3505,11 +3505,11 @@ fn a_replayed_module_inlines_as_a_clean_build_does() {
     assert(cli::superc_in(p.dir(), args).ok(), "the build after an edit of main");
     let raw = format("{}/build/release/raw", p.dir());
     let mut kept = Vector::<(String, String)>::new();
-    objects_of(raw.as_str(), "", &mut kept);
+    objects_of(&raw, "", &mut kept);
     assert(fs::remove_all(format("{}/build", p.dir()).as_str()).is_ok(), "the tree goes");
     assert(cli::superc_in(p.dir(), args).ok(), "the clean build");
     let mut clean = Vector::<(String, String)>::new();
-    objects_of(raw.as_str(), "", &mut clean);
+    objects_of(&raw, "", &mut clean);
     kept.sort();
     clean.sort();
     assert_eq(kept.len(), clean.len());
@@ -4870,7 +4870,7 @@ fn main() i32 {
                 let _ = gs.get().fetch_add(n as i64, atom::MemoryOrder::Relaxed);
             },
             Err(_) => {},
-        };
+        }
         ws.done();
     };
 
@@ -4885,10 +4885,10 @@ fn main() i32 {
                         let _ = gc.get().fetch_add(100 * n as i64, atom::MemoryOrder::Relaxed);
                     },
                     Err(_) => {},
-                };
+                }
             },
             Err(_) => {},
-        };
+        }
         wc.done();
     };
 
@@ -4928,12 +4928,12 @@ fn main() i32 {
                     score = score + 1;
                 },
                 _ => {},
-            };
+            }
             if e.code == 0 {
                 score = score - 10;
             }
         },
-    };
+    }
     // Binding a port twice: the second one is in use.
     let a = net::TcpListener::bind("127.0.0.1", 0).unwrap();
     let p = a.port();
@@ -4947,9 +4947,9 @@ fn main() i32 {
                     score = score + 1;
                 },
                 _ => {},
-            };
+            }
         },
-    };
+    }
     a.free();
     io::shutdown();
     rt::shutdown();
@@ -5015,7 +5015,7 @@ fn main() i32 {
                     };
                 },
                 Err(_) => {},
-            };
+            }
         }
         inner.wait();
         lw.done();
@@ -5042,7 +5042,7 @@ fn main() i32 {
                     }
                 },
                 Err(_) => {},
-            };
+            }
             cw.done();
         };
     }
@@ -5476,9 +5476,9 @@ fn main() i32 {
     assert(r.ok());
     for s in 0..2 {
         let env = if s == 0 {
-            "SC_SCHED_SEED=7 ";
+            "SC_SCHED_SEED=7 "
         } else {
-            "SC_SCHED_SEED=1234567 ";
+            "SC_SCHED_SEED=1234567 "
         };
         let a = p.run_bin_env(env);
         assert(a.ok());
@@ -5653,7 +5653,7 @@ fn main() i32 {
                     None => {
                         break;
                     },
-                };
+                }
             }
             w.done();
         };
@@ -5865,7 +5865,7 @@ fn main() i32 {
             Rejected(_) => {
                 return 1;
             },
-        };
+        }
     }
     for _i in 0..100 {
         switch rx.recv() {
@@ -5875,7 +5875,7 @@ fn main() i32 {
             None => {
                 return 2;
             },
-        };
+        }
     }
 
     let t0 = platform::now_ns();
@@ -5884,7 +5884,7 @@ fn main() i32 {
             return 3;
         },
         None => {},
-    };
+    }
     if platform::now_ns() - t0 < 9000000 {
         return 4;
     }
@@ -5896,7 +5896,7 @@ fn main() i32 {
         None => {
             return 5;
         },
-    };
+    }
 
     let b = chan::Channel::<i64>::bounded(1);
     let brx = b.receiver();
@@ -5909,7 +5909,7 @@ fn main() i32 {
         Rejected(v) => {
             sum = sum + v;
         },
-    };
+    }
     rt::shutdown();
     return (sum - 4993) as i32;
 }
@@ -5980,7 +5980,7 @@ fn main() i32 {
             None => {
                 break;
             },
-        };
+        }
     }
     rt::shutdown();
     return (locked - 1000) as i32;
@@ -6037,9 +6037,9 @@ fn main() i32 {
                 switch s.wait_timeout(time::Duration::from_secs(60)) {
                     Ready(i) => {
                         let v = if i == i1 {
-                            rx1.try_recv();
+                            rx1.try_recv()
                         } else {
-                            rx2.try_recv();
+                            rx2.try_recv()
                         };
                         switch v {
                             Some(x) => {
@@ -6047,12 +6047,12 @@ fn main() i32 {
                                 n = n + 1;
                             },
                             None => {},
-                        };
+                        }
                     },
                     TimedOut => {
                         n = 1000; // give up: the wait must not time out
                     },
-                };
+                }
             }
             {
                 let mut g = acc.get().lock();
@@ -6119,7 +6119,7 @@ fn main() i32 {
                 TimedOut => {
                     r = -5;
                 },
-            };
+            }
             {
                 let mut g = out.get().lock();
                 let p = g.get_mut();
@@ -6203,7 +6203,7 @@ fn main() i32 {
         TimedOut => {
             return 2;
         },
-    };
+    }
     if platform::now_ns() - t0 < 50000000 {
         return 3; // it must have waited for the drain
     }
@@ -6224,12 +6224,12 @@ fn main() i32 {
                     return 5;
                 },
                 None => {},
-            };
+            }
         },
         TimedOut => {
             return 6; // a closed channel is ready, not a timeout
         },
-    };
+    }
 
     let d = chan::Channel::<i64>::unbounded();
     let drx = d.receiver();
@@ -6260,7 +6260,7 @@ fn main() i32 {
             TimedOut => {
                 return 7;
             },
-        };
+        }
     }
     if hits_d == 0 || hits_e == 0 {
         return 8; // one arm never won: the pick is not fair
@@ -6271,7 +6271,7 @@ fn main() i32 {
             None => {
                 break;
             },
-        };
+        }
     }
     loop {
         switch erx.try_recv() {
@@ -6279,7 +6279,7 @@ fn main() i32 {
             None => {
                 break;
             },
-        };
+        }
     }
     rt::shutdown();
     return 0;
@@ -6376,7 +6376,7 @@ fn main() i32 {
         None => {
             return 4;
         },
-    };
+    }
 
     // A `default` arm: nothing is ready, so it fires at once instead of waiting.
     select {
@@ -6766,9 +6766,9 @@ fn main() i32 {
     });
     rt::shutdown();
     return if ok.load(atom::MemoryOrder::SeqCst) == 2 {
-        0;
+        0
     } else {
-        9;
+        9
     };
 }
 )",
@@ -6813,7 +6813,7 @@ fn interior_mutability_via_unsafe_cell() {
     let bad = cli::proj_new();
     bad.mkfile(
         "main.spc",
-        "fn main() i32 {\n    let x: i32 = 5;\n    let q = (&x) as *mut i32;\n    return unsafe {\n        q[0];\n    };\n}\n",
+        "fn main() i32 {\n    let x: i32 = 5;\n    let q = (&x) as *mut i32;\n    return unsafe {\n        q[0]\n    };\n}\n",
     );
     let rb = bad.compile("main.spc");
     assert(rb.exit != 0, "casting an immutable &T to *mut T is rejected");
@@ -6822,7 +6822,7 @@ fn interior_mutability_via_unsafe_cell() {
     let ok = cli::proj_new();
     ok.mkfile(
         "main.spc",
-        "fn main() i32 {\n    let cell = UnsafeCell::<i32>::new(7);\n    unsafe {\n        cell.get()[0] = 42;\n    }\n    return unsafe {\n        cell.get()[0];\n    } - 42;\n}\n",
+        "fn main() i32 {\n    let cell = UnsafeCell::<i32>::new(7);\n    unsafe {\n        cell.get()[0] = 42;\n    }\n    return unsafe {\n        cell.get()[0]\n    } - 42;\n}\n",
     );
     let ro = ok.native_build("", "main.spc");
     assert(ro.ok());
@@ -7330,22 +7330,22 @@ fn external_c_sources() {
     // driver seeds by itself, or phase two below cannot tell the block's flag from the prelude's: libm is
     // seeded on POSIX only, libc exists on POSIX only, so the two swap roles by target.
     let lib = if cli::on_windows() {
-        "m";
+        "m"
     } else {
-        "c";
+        "c"
     };
     let mut src = String::from_str("extern \"C\" \"helper.h\" {\n  fn helper_add(a: i32, b: i32) i32;\n}\n@link(\"");
     src.push_str(lib);
     src.push_str(
         "\")\nextern \"C\" \"extra.h\" {\n  fn extra_mul(a: i32, b: i32) i32;\n}\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); return 0; }\n",
     );
-    p.mkfile("main.spc", src.as_str());
+    p.mkfile("main.spc", &src);
     let mut flag = String::from_str("-l");
     flag.push_str(lib);
     let r = p.compile("main.spc");
     assert(r.ok(), "the program compiles");
     assert_eq(p.gen_count("__ext"), 0);
-    assert(p.gen_has("__ldflags", flag.as_str()), "@link lands in build/__ldflags");
+    assert(p.gen_has("__ldflags", &flag), "@link lands in build/__ldflags");
     let cc = p.cc_build_with("", "helper.c extra.c");
     assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 48);
@@ -7355,7 +7355,7 @@ fn external_c_sources() {
     p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); return 0; }\n");
     let r2 = p.compile("main.spc");
     assert(r2.ok(), "the program compiles");
-    assert(!p.gen_has("__ldflags", flag.as_str()), "a dropped extern block takes its link flag with it");
+    assert(!p.gen_has("__ldflags", &flag), "a dropped extern block takes its link flag with it");
     if !cli::on_windows() {
         assert(p.gen_has("__ldflags", "-lm"), "the prelude's own libm flag stays: every program emits float methods");
     }
@@ -7678,7 +7678,7 @@ fn g8<const N: u8>() u8 { return N; }
 // exactly one error, `want`, at main.spc:`at`.
 fn qual_fails(b: &mut cli::Batch, body: str, want: str, at: str) {
     let src = format("fn main() i32 {{\n    {}\n    return 0;\n}}\n", body);
-    b.add_at(body, src.as_str(), format("error: {}\n--> ", want).as_str(), at);
+    b.add_at(body, &src, format("error: {}\n--> ", want).as_str(), at);
 }
 
 // A constant a module qualifies is a const argument exactly as its unqualified spelling: a public
@@ -7790,7 +7790,7 @@ fn help_flag() {
         let mut op = out.clone();
         let mut ep = err.clone();
         assert_eq(cli::run_with(cmd.cstr(), null, op.cstr(), ep.cstr(), ""), 0);
-        let text = cli::read_text(out.as_str());
+        let text = cli::read_text(&out);
         assert(text.as_str().contains("USAGE:"), "the usage is on stdout");
         assert(text.as_str().contains("the compiler's own threads"), "--jobs names every worker it sets");
         assert(
@@ -7805,7 +7805,7 @@ fn help_flag() {
         let mut op = out.clone();
         let mut ep = err.clone();
         assert_eq(cli::run_with(cmd.cstr(), null, op.cstr(), ep.cstr(), ""), 1);
-        let text = cli::read_text(err.as_str());
+        let text = cli::read_text(&err);
         assert(
             text.as_str().starts_with(format("error: unexpected argument '{}'\n", a).as_str()),
             "the argument is named",
@@ -7938,7 +7938,7 @@ fn deep_constant_chain_failures() {
         cyc.push_str(format("const C{}: i32 = C{} + 1;\n", i, (i + 1) % 5000).as_str());
     }
     cyc.push_str("static_assert(C0 == 0);\nfn main() i32 { return 0; }\n");
-    h::expect_err_msg("a 5000-constant cycle", cyc.as_str(), "cyclic constant dependency");
+    h::expect_err_msg("a 5000-constant cycle", &cyc, "cyclic constant dependency");
 
     let mut ub = String::from_str("const C0: i32 = 1 / 0;\n");
     for i in 1..5000 {
@@ -7947,7 +7947,7 @@ fn deep_constant_chain_failures() {
     ub.push_str("fn main() i32 { return C4999; }\n");
     h::expect_err_msg(
         "a trap at the far end of a 5000-constant chain",
-        ub.as_str(),
+        &ub,
         "error: constant 'C0' cannot be evaluated at compile time: division by zero",
     );
 }
@@ -7982,7 +7982,7 @@ fn deep_aggregate_constant_chain() {
     }
     src.push_str("fn main() i32 { return (S2999.x % 256) as i32; }\n");
     let p = cli::proj_new();
-    p.mkfile("agg.spc", src.as_str());
+    p.mkfile("agg.spc", &src);
     let r = p.native_build("", "agg.spc");
     assert(r.ok());
     assert_eq(p.run_bin(), 2999 % 256);
@@ -8572,18 +8572,18 @@ fn bindgen_generates_callable_bindings() {
     let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
-    let gen = p.run_raw(args.as_str());
+    let gen = p.run_raw(&args);
     assert(gen.ok(), "bindgen succeeds");
 
     let mut path = String::new();
     path.format_into("{}/lib.spc", root);
     let mut spc = String::new();
-    switch loader::read_file(path.as_str()) {
+    switch loader::read_file(&path) {
         Some(t) => {
             spc.push_string(&t);
         },
         None => {},
-    };
+    }
     // The shapes the mapper has to get right, and the one it must leave out.
     assert(spc.as_str().contains("pub type lib_ctx;"));
     assert(spc.as_str().contains("pub fn lib_open(seed: i32) *mut lib_ctx;"));
@@ -8626,17 +8626,17 @@ fn bindgen_generates_records_enums_and_consts() {
     let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
-    assert_eq(p.run_raw(args.as_str()).exit, 0);
+    assert_eq(p.run_raw(&args).exit, 0);
 
     let mut path = String::new();
     path.format_into("{}/lib.spc", root);
     let mut spc = String::new();
-    switch loader::read_file(path.as_str()) {
+    switch loader::read_file(&path) {
         Some(t) => {
             spc.push_string(&t);
         },
         None => {},
-    };
+    }
     // An integer constant sits in the extern block, whose C compile checks it; the others do not.
     assert(spc.as_str().contains("    pub const LIB_VERSION: i32 = 7;"));
     assert(spc.as_str().contains("\npub const LIB_NAME: str<'static> = \"lib\";"));
@@ -8692,29 +8692,29 @@ fn bindgen_walks_paths_recursively() {
 
     let mut args = String::new();
     args.format_into("bindgen \"{}/inc\" \"{}/other/z-lib.h\" -o \"{}/gen\"", root, root, root);
-    assert_eq(p.run_raw(args.as_str()).exit, 0);
+    assert_eq(p.run_raw(&args).exit, 0);
 
     let mut hp = String::new();
     hp.format_into("{}/gen/net/http/http.spc", root);
     let mut got = String::new();
-    switch loader::read_file(hp.as_str()) {
+    switch loader::read_file(&hp) {
         Some(t) => {
             got.push_string(&t);
         },
         None => {},
-    };
+    }
     assert(got.as_str().contains("extern \"C\" \"net/http/http.h\""));
     assert(got.as_str().contains("pub fn http_get(url: *const char) i32;"));
 
     let mut ap = String::new();
     ap.format_into("{}/gen/a.spc", root);
     let mut top = String::new();
-    switch loader::read_file(ap.as_str()) {
+    switch loader::read_file(&ap) {
         Some(t) => {
             top.push_string(&t);
         },
         None => {},
-    };
+    }
     assert(top.as_str().contains("extern \"C\" \"a.h\""));
 
     // A file name that is not an identifier cannot be imported, so the module is renamed (the `#include`
@@ -8722,18 +8722,18 @@ fn bindgen_walks_paths_recursively() {
     let mut zp = String::new();
     zp.format_into("{}/gen/z_lib.spc", root);
     let mut z = String::new();
-    switch loader::read_file(zp.as_str()) {
+    switch loader::read_file(&zp) {
         Some(t) => {
             z.push_string(&t);
         },
         None => {},
-    };
+    }
     assert(z.as_str().contains("pub fn z_run() i32;"));
 
     // A directory has many outputs, so it needs somewhere to put them.
     let mut bad = String::new();
     bad.format_into("bindgen \"{}/inc\"", root);
-    let r = p.run_raw(bad.as_str());
+    let r = p.run_raw(&bad);
     assert_eq(r.exit, 1);
     assert(r.out_has("needs '-o <dir>'"));
 }
@@ -8751,17 +8751,17 @@ fn bindgen_overflow_fnptr_params_and_field_opaques() {
     let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
-    assert_eq(p.run_raw(args.as_str()).exit, 0);
+    assert_eq(p.run_raw(&args).exit, 0);
 
     let mut path = String::new();
     path.format_into("{}/lib.spc", root);
     let mut spc = String::new();
-    switch loader::read_file(path.as_str()) {
+    switch loader::read_file(&path) {
         Some(t) => {
             spc.push_string(&t);
         },
         None => {},
-    };
+    }
     assert(!spc.as_str().contains("LIB_ALL"));
     assert(!spc.as_str().contains("LIB_TOP"));
     assert(!spc.as_str().contains("LIB_WIDE"));
@@ -8791,7 +8791,7 @@ fn bindgen_constants_follow_c_types() {
     let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
-    assert_eq(p.run_raw(args.as_str()).exit, 0);
+    assert_eq(p.run_raw(&args).exit, 0);
     let spc = loader::read_file(format("{}/lib.spc", root).as_str()).unwrap();
     let t = spc.as_str();
     assert(t.contains("pub const LIB_CAST: u32 = 4294967295;"));
@@ -8836,17 +8836,17 @@ fn bindgen_expressions_anonymous_types_and_globals() {
     let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
-    assert_eq(p.run_raw(args.as_str()).exit, 0);
+    assert_eq(p.run_raw(&args).exit, 0);
 
     let mut path = String::new();
     path.format_into("{}/lib.spc", root);
     let mut spc = String::new();
-    switch loader::read_file(path.as_str()) {
+    switch loader::read_file(&path) {
         Some(t) => {
             spc.push_string(&t);
         },
         None => {},
-    };
+    }
     assert(spc.as_str().contains("pub const LIB_SHIFT: i32 = 8;"));
     // One macro in terms of others.
     assert(spc.as_str().contains("pub const LIB_SUM: i32 = 12;"));
@@ -8887,22 +8887,22 @@ fn vendor_copies_and_imports_resolve() {
     let root = p.dir();
     let mut args = String::new();
     args.format_into("vendor \"{}/dep\" --dir=\"{}\"", root, root);
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.ok());
     assert(r.out_has("import vendor::dep::"), "the success line teaches the import spelling");
     let mut nested = String::new();
     nested.format_into("{}/vendor/dep/util/more.spc", root);
-    assert(loader::read_file(nested.as_str()).is_some(), "nested files arrive");
+    assert(loader::read_file(&nested).is_some(), "nested files arrive");
     nested.free();
     // The same name again is refused, not overwritten.
-    let r2 = p.run_raw(args.as_str());
+    let r2 = p.run_raw(&args);
     assert(r2.exit != 0);
     assert(r2.out_has("already exists"));
     args.free();
     // A missing source is an error, not an empty vendor directory.
     let mut bad = String::new();
     bad.format_into("vendor \"{}/nope\" --dir=\"{}\"", root, root);
-    let rb = p.run_raw(bad.as_str());
+    let rb = p.run_raw(&bad);
     assert(rb.exit != 0);
     assert(rb.out_has("not a directory"));
     bad.free();
@@ -8963,12 +8963,12 @@ fn vendor_clones_git_and_strips_the_repository() {
     // Pinned to the tag: the vendored tree is the FIRST state, not the tip.
     let mut args = String::new();
     args.format_into("vendor \"{}/dep.git\" mylib --ref=v1 --dir=\"{}\"", root, root);
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     args.free();
     assert(r.ok());
     let mut lib = String::new();
     lib.format_into("{}/vendor/mylib/lib.spc", root);
-    switch loader::read_file(lib.as_str()) {
+    switch loader::read_file(&lib) {
         Some(mut t) => {
             assert(cli::contains_str(t.cstr(), "return 7"), "--ref=v1 vendors the tagged state");
             t.free();
@@ -8976,15 +8976,15 @@ fn vendor_clones_git_and_strips_the_repository() {
         None => {
             assert(false, "the clone arrived under the given name");
         },
-    };
+    }
     let mut head = String::new();
     head.format_into("{}/vendor/mylib/.git/HEAD", root);
-    assert(loader::read_file(head.as_str()).is_none(), "no .git survives vendoring");
+    assert(loader::read_file(&head).is_none(), "no .git survives vendoring");
     head.free();
     // provenance: the stamp names the source and the exact commit the repository cannot answer for.
     let mut st = String::new();
     st.format_into("{}/vendor/mylib/.vendor", root);
-    switch loader::read_file(st.as_str()) {
+    switch loader::read_file(&st) {
         Some(mut t) => {
             assert(cli::contains_str(t.cstr(), "source = "), "the stamp names the source");
             assert(cli::contains_str(t.cstr(), "commit = "), "and the commit");
@@ -8993,14 +8993,14 @@ fn vendor_clones_git_and_strips_the_repository() {
         None => {
             assert(false, "a git vendor writes a .vendor stamp");
         },
-    };
+    }
     st.free();
     // --force re-vendors in place; without a ref that lands the tip, proving the replace really happened.
     let mut fargs = String::new();
     fargs.format_into("vendor \"{}/dep.git\" mylib --force --dir=\"{}\"", root, root);
-    assert_eq(p.run_raw(fargs.as_str()).exit, 0);
+    assert_eq(p.run_raw(&fargs).exit, 0);
     fargs.free();
-    switch loader::read_file(lib.as_str()) {
+    switch loader::read_file(&lib) {
         Some(mut t) => {
             assert(cli::contains_str(t.cstr(), "return 8"), "--force replaced the pinned state with the tip");
             t.free();
@@ -9008,16 +9008,16 @@ fn vendor_clones_git_and_strips_the_repository() {
         None => {
             assert(false, "the re-vendor arrived");
         },
-    };
+    }
     lib.free();
     // A ref the repository does not have is an error, and leaves nothing behind.
     let mut bargs = String::new();
     bargs.format_into("vendor \"{}/dep.git\" other --ref=nope --dir=\"{}\"", root, root);
-    assert(p.run_raw(bargs.as_str()).exit != 0);
+    assert(p.run_raw(&bargs).exit != 0);
     bargs.free();
     let mut op = String::new();
     op.format_into("{}/vendor/other/lib.spc", root);
-    assert(loader::read_file(op.as_str()).is_none(), "a failed ref checkout is cleaned up");
+    assert(loader::read_file(&op).is_none(), "a failed ref checkout is cleaned up");
     op.free();
     p.mkfile("main.spc", "import vendor::mylib::lib;\nfn main() i32 { return lib::seven() - 8; }\n");
     let c = p.native_build("", "main.spc");
@@ -9042,21 +9042,21 @@ fn vendor_strips_submodule_git_and_follows_the_ref() {
     assert_eq(git_ok(root, "subrepo", "add s.spc"), 0);
     let mut c1 = String::new();
     c1.format_into("{} commit -q -m a", gc);
-    assert_eq(git_ok(root, "subrepo", c1.as_str()), 0);
+    assert_eq(git_ok(root, "subrepo", &c1), 0);
     assert_eq(git_ok(root, "srcrepo", "init -q"), 0);
     let mut sa = String::new();
     sa.format_into("{} submodule add -q \"{}/subrepo\" sub", gc, root);
-    assert_eq(git_ok(root, "srcrepo", sa.as_str()), 0);
+    assert_eq(git_ok(root, "srcrepo", &sa), 0);
     assert_eq(git_ok(root, "srcrepo", "add lib.spc"), 0);
-    assert_eq(git_ok(root, "srcrepo", c1.as_str()), 0);
+    assert_eq(git_ok(root, "srcrepo", &c1), 0);
     assert_eq(git_ok(root, "srcrepo", "tag v1"), 0);
     // Move the submodule past the tag and record it in the superproject.
     p.mkfile("subrepo/s.spc", "pub fn s() i32 { return 2; }\n");
     let mut c2 = String::new();
     c2.format_into("{} commit -q -am b", gc);
-    assert_eq(git_ok(root, "subrepo", c2.as_str()), 0);
+    assert_eq(git_ok(root, "subrepo", &c2), 0);
     assert_eq(git_ok(root, "srcrepo/sub", "pull -q"), 0);
-    assert_eq(git_ok(root, "srcrepo", c2.as_str()), 0);
+    assert_eq(git_ok(root, "srcrepo", &c2), 0);
     let mut gb = String::new();
     gb.format_into("git clone -q --bare \"{}/srcrepo\" \"{}/dep.git\"", root, root);
     assert_eq(cli::run_quiet(gb.cstr()), 0);
@@ -9066,12 +9066,12 @@ fn vendor_strips_submodule_git_and_follows_the_ref() {
         root,
         "GIT_CONFIG_COUNT",
         "1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always",
-        args.as_str(),
+        &args,
     );
     assert(r.ok(), "the vendor succeeds");
     let mut s = String::new();
     s.format_into("{}/vendor/mylib/sub/s.spc", root);
-    switch loader::read_file(s.as_str()) {
+    switch loader::read_file(&s) {
         Some(mut t) => {
             assert(cli::contains_str(t.cstr(), "return 1"), "the submodule holds the tag's commit");
             t.free();
@@ -9079,13 +9079,13 @@ fn vendor_strips_submodule_git_and_follows_the_ref() {
         None => {
             assert(false, "the submodule arrived");
         },
-    };
+    }
     let mut sg = String::new();
     sg.format_into("{}/vendor/mylib/sub/.git", root);
-    assert(du::file_mtime(sg.as_str()) == 0, "no submodule .git survives");
+    assert(du::file_mtime(&sg) == 0, "no submodule .git survives");
     let mut tg = String::new();
     tg.format_into("{}/vendor/mylib/.git", root);
-    assert(du::file_mtime(tg.as_str()) == 0, "no top .git survives");
+    assert(du::file_mtime(&tg) == 0, "no top .git survives");
 }
 
 // `git -C <root>/<dir> <args>`, its exit status.
@@ -9174,11 +9174,11 @@ fn bindgen_globals_and_cflag() {
     let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
-    assert_eq(p.run_raw(args.as_str()).exit, 0);
+    assert_eq(p.run_raw(&args).exit, 0);
     args.free();
     let mut gp = String::new();
     gp.format_into("{}/lib.spc", root);
-    switch loader::read_file(gp.as_str()) {
+    switch loader::read_file(&gp) {
         Some(mut t) => {
             assert(cli::contains_str(t.cstr(), "pub static mut counter: i32;"), "a writable global binds as static mut");
             assert(cli::contains_str(t.cstr(), "pub const limit: i32;"), "a const-qualified one stays const");
@@ -9188,13 +9188,13 @@ fn bindgen_globals_and_cflag() {
         None => {
             assert(false, "bindgen wrote the module");
         },
-    };
+    }
     // --cflag reaches the preprocessor: the gate opens.
     let mut args2 = String::new();
     args2.format_into("bindgen \"{}/lib.h\" --header=lib.h --cflag=-DFEATURE_ON -o \"{}/lib.spc\"", root, root);
-    assert_eq(p.run_raw(args2.as_str()).exit, 0);
+    assert_eq(p.run_raw(&args2).exit, 0);
     args2.free();
-    switch loader::read_file(gp.as_str()) {
+    switch loader::read_file(&gp) {
         Some(mut t) => {
             assert(cli::contains_str(t.cstr(), "pub fn gated_fn(x: i32) i32;"), "--cflag turned the declaration on");
             t.free();
@@ -9202,7 +9202,7 @@ fn bindgen_globals_and_cflag() {
         None => {
             assert(false, "bindgen wrote the module again");
         },
-    };
+    }
     gp.free();
     // The generated module works: read the const, mutate the global directly and through the library.
     p.mkfile(
@@ -9235,10 +9235,10 @@ fn bindgen_escapes_keyword_names() {
     let root = p.dir();
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
-    assert_eq(p.run_raw(args.as_str()).exit, 0);
+    assert_eq(p.run_raw(&args).exit, 0);
     let mut gp = String::new();
     gp.format_into("{}/lib.spc", root);
-    let spc = loader::read_file(gp.as_str()).unwrap();
+    let spc = loader::read_file(&gp).unwrap();
     // A record member is the C member it pins: the escaped field reads `select` through C.
     assert(spc.as_str().contains("@import(\"select\")\n        pub select_: i32,"));
     assert(spc.as_str().contains("@import(\"select\")\n    pub fn select_(a: i32, b: i32) i32;"));
@@ -9276,7 +9276,7 @@ fn bindgen_follows_the_target() {
         root,
         root,
     );
-    assert(p.run_raw(args.as_str()).ok(), "bindgen for linux");
+    assert(p.run_raw(&args).ok(), "bindgen for linux");
     let l = loader::read_file(format("{}/l.spc", root).as_str()).unwrap();
     assert(l.as_str().contains("pub fn lw(x: i64) i64;"), "linux long is 8 bytes");
     assert(l.as_str().contains("pub fn sz(n: usize) usize;"), "size_t from the built-in stddef.h");
@@ -9288,7 +9288,7 @@ fn bindgen_follows_the_target() {
         root,
         root,
     );
-    assert(p.run_raw(args.as_str()).ok(), "bindgen for windows");
+    assert(p.run_raw(&args).ok(), "bindgen for windows");
     let w = loader::read_file(format("{}/w.spc", root).as_str()).unwrap();
     assert(w.as_str().contains("pub fn lw(x: i32) i32;"), "windows long is 4 bytes");
     assert(w.as_str().contains("pub fn sz(n: usize) usize;"), "size_t from the built-in stddef.h");
@@ -9303,7 +9303,7 @@ fn bindgen_follows_the_target() {
         root,
         root,
     );
-    let r = p.run_raw(args.as_str());
+    let r = p.run_raw(&args);
     assert(r.exit != 0 && r.out_shows("the C flag '-O2' is not modelled"), "an unmodelled C flag fails");
 }
 
@@ -9324,7 +9324,7 @@ fn cache_version(p: &cli::Proj, v: i32) {
         v,
         v,
     );
-    p.mkfile("src/main.spc", src.as_str());
+    p.mkfile("src/main.spc", &src);
 }
 
 // The project sweep (every 30 minutes, after a successful build): an out-dir entry with nothing written
@@ -9347,23 +9347,23 @@ fn project_sweep_removes_idle_outputs() {
     let old = format("{}/build/old", root);
     let rec = format("{}/build/__link-gone.cmd", root);
     let locked = format("{}/build/locked", root);
-    age_tree(old.as_str());
-    age_tree(rec.as_str());
-    age_tree(locked.as_str());
+    age_tree(&old);
+    age_tree(&rec);
+    age_tree(&locked);
     let lk = format("{}/bench/.lock", locked.as_str());
-    let h = bsys::lock_file(lk.as_str(), 0);
+    let h = bsys::lock_file(&lk, 0);
     assert(h.held(), "the test holds the nested tree's lock");
     assert(cli::superc_in(root, "build").ok(), "a build under a fresh stamp");
     let oldf = format("{}/raw/x.o", old.as_str());
-    assert(du::file_mtime(oldf.as_str()) != 0, "a fresh stamp skips the sweep");
+    assert(du::file_mtime(&oldf) != 0, "a fresh stamp skips the sweep");
     age_tree(format("{}/build/.sweep", root).as_str());
     assert(cli::superc_in(root, "build").ok(), "a build under an old stamp");
     drop_lock(h);
     let own = format("{}/build/debug/raw/main.o", root);
-    assert(du::file_mtime(old.as_str()) == 0, "the idle tree goes");
-    assert(du::file_mtime(rec.as_str()) == 0, "the idle link record goes");
-    assert(du::file_mtime(locked.as_str()) != 0, "a tree whose lock a build holds stays");
-    assert(du::file_mtime(own.as_str()) != 0, "the build's own tree stays");
+    assert(du::file_mtime(&old) == 0, "the idle tree goes");
+    assert(du::file_mtime(&rec) == 0, "the idle link record goes");
+    assert(du::file_mtime(&locked) != 0, "a tree whose lock a build holds stays");
+    assert(du::file_mtime(&own) != 0, "the build's own tree stays");
 }
 
 // A root beside the manifest (`root = "main.spc"`) puts the default out-dir where that root's bare build
@@ -9385,8 +9385,8 @@ fn project_sweep_keeps_the_tree_of_a_root_beside_the_manifest() {
     assert(r.ok() && r.out_has("\"skip_emit\":true"), "a build under a fresh emit stamp and an old sweep stamp");
     let rt = format("{}/build/debug/raw/super_rt.h", root);
     let obj = format("{}/build/debug/raw/main.o", root);
-    assert(du::file_mtime(rt.as_str()) != 0, "the sweep keeps the engine's tree");
-    assert(du::file_mtime(obj.as_str()) != 0, "and its objects");
+    assert(du::file_mtime(&rt) != 0, "the sweep keeps the engine's tree");
+    assert(du::file_mtime(&obj) != 0, "and its objects");
 }
 
 // `super-c clean` runs the project sweep now, whatever its stamp: the idle out-dir entries go, the fresh
@@ -9403,11 +9403,11 @@ fn clean_sweeps_and_full_removes() {
     assert(cli::superc_in(root, "build").ok(), "the build");
     p.mkfile("build/old/raw/x.o", "x");
     let old = format("{}/build/old", root);
-    age_tree(old.as_str());
+    age_tree(&old);
     assert(cli::superc_in(root, "clean").ok(), "clean sweeps");
     let own = format("{}/build/debug/raw/main.o", root);
-    assert(du::file_mtime(old.as_str()) == 0, "clean removes the idle tree");
-    assert(du::file_mtime(own.as_str()) != 0, "the fresh tree stays");
+    assert(du::file_mtime(&old) == 0, "clean removes the idle tree");
+    assert(du::file_mtime(&own) != 0, "the fresh tree stays");
     assert(cli::superc_in(root, "clean --cache").exit != 0, "--cache is rejected");
     assert(cli::superc_in(root, "clean --full").ok(), "clean --full");
     assert(du::file_mtime(format("{}/build", root).as_str()) == 0, "--full removes the out-dir");
@@ -9831,27 +9831,27 @@ fn p13_mtime(path: str) i64 {
 fn build_paths_with_spaces() {
     let p = cli::proj_new();
     let sub = if cli::on_windows() {
-        "sp ace";
+        "sp ace"
     } else {
-        "sp ace-ä";
+        "sp ace-ä"
     };
     let mut toml = String::new();
     toml.format_into("{}/build.toml", sub);
     let mut mainf = String::new();
     mainf.format_into("{}/src/main.spc", sub);
-    p.mkfile(toml.as_str(), "bin = \"my app\"\nroot = \"src/main.spc\"\n");
-    p.mkfile(mainf.as_str(), "fn main() i32 {\n    println(\"weird ok\");\n    return 0;\n}\n");
+    p.mkfile(&toml, "bin = \"my app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(&mainf, "fn main() i32 {\n    println(\"weird ok\");\n    return 0;\n}\n");
     let root = p.dir();
     let mut dir = String::new();
     dir.format_into("{}/{}", root, sub);
-    let r = cli::superc_in(dir.as_str(), "build");
+    let r = cli::superc_in(&dir, "build");
     assert(r.ok(), "a project under a directory with spaces builds without shell escaping errors");
     let mut bin = String::new();
     bin.format_into("{}/my app{}", dir.as_str(), unsafe str::from_cstr(cli::binext()));
-    assert(p13_mtime(bin.as_str()) != 0, "the space-named binary linked");
+    assert(p13_mtime(&bin) != 0, "the space-named binary linked");
     let mut run = String::new();
     run.format_into("\"{}\"", bin.as_str());
-    let mut rc = String::from_str(run.as_str());
+    let mut rc = String::from_str(&run);
     assert(cli::run_quiet(rc.cstr()) == 0, "the space-named binary runs");
 }
 
@@ -9877,26 +9877,26 @@ fn build_staleness_gates() {
     objo.format_into("{}/build/debug/raw/main.o", root);
     let mut bin = String::new();
     bin.format_into("{}/app{}", root, unsafe str::from_cstr(cli::binext()));
-    let o1 = p13_mtime(objo.as_str());
-    let b1 = p13_mtime(bin.as_str());
+    let o1 = p13_mtime(&objo);
+    let b1 = p13_mtime(&bin);
     assert(o1 != 0 && b1 != 0, "the build produced an object and a binary");
     assert(cli::superc_in(root, "build").ok(), "no-change build");
-    assert(p13_mtime(objo.as_str()) == o1, "a no-change build does not rewrite objects");
-    assert(p13_mtime(bin.as_str()) == b1, "a no-change build does not relink");
+    assert(p13_mtime(&objo) == o1, "a no-change build does not rewrite objects");
+    assert(p13_mtime(&bin) == b1, "a no-change build does not relink");
     // Rename the struct field: main spells no util type, so main.o stays.
     p.mkfile(
         "src/util.spc",
         "pub struct S {\n    pub b: i32,\n}\n\n@noinline\npub fn v(x: i32) i32 {\n    let s = S { b: x };\n    return s.b;\n}\n",
     );
     assert(cli::superc_in(root, "build").ok(), "layout-change build");
-    assert(p13_mtime(objo.as_str()) == o1, "a layout edit main never embeds rebuilds no dependent object");
+    assert(p13_mtime(&objo) == o1, "a layout edit main never embeds rebuilds no dependent object");
     // Add a public function: main, which calls only `v`, does not change.
     p.mkfile(
         "src/util.spc",
         "pub struct S {\n    pub b: i32,\n}\n\n@noinline\npub fn v(x: i32) i32 {\n    let s = S { b: x };\n    return s.b;\n}\n\npub fn w() i32 {\n    return 1;\n}\n",
     );
     assert(cli::superc_in(root, "build").ok(), "header-change build");
-    assert(p13_mtime(objo.as_str()) == o1, "a function main does not call rebuilds nothing of it");
+    assert(p13_mtime(&objo) == o1, "a function main does not call rebuilds nothing of it");
 }
 
 // Forward declarations follow use: adding a struct, an enum or renaming a type in one module
@@ -9921,7 +9921,7 @@ fn build_type_edit_stays_local() {
     assert(cli::superc_in(root, "build --emit-c").ok(), "initial build");
     let mut fwd = String::new();
     fwd.format_into("{}/build/debug/raw/__sc_fwd.h", root);
-    let fwd_text = loader::read_file(fwd.as_str()).unwrap();
+    let fwd_text = loader::read_file(&fwd).unwrap();
     assert(fwd_text.as_str().find("util__S") < 0, "the forward header declares no type");
     let mut paths = Vector::<String>::new();
     for rel in "raw/__sc_fwd.h raw/other.c raw/main.c".split(" ") {
@@ -9931,7 +9931,7 @@ fn build_type_edit_stays_local() {
     }
     let mut t0 = Vector::<i64>::new();
     for i in 0..paths.len() {
-        t0.push(p13_mtime(paths[i].as_str()));
+        t0.push(p13_mtime(&paths[i]));
         assert(t0[i] != 0, "the build wrote every recorded file");
     }
     let mut edits = Vector::<str>::new();
@@ -9942,13 +9942,10 @@ fn build_type_edit_stays_local() {
         let mut src = String::from_str(util0);
         src.push_str("\n");
         src.push_str(edits[k]);
-        p.mkfile("src/util.spc", src.as_str());
+        p.mkfile("src/util.spc", &src);
         assert(cli::superc_in(root, "build --emit-c").ok(), "type-edit build");
         for i in 0..paths.len() {
-            assert(
-                p13_mtime(paths[i].as_str()) == t0[i],
-                "a type edit in util leaves units without util types untouched",
-            );
+            assert(p13_mtime(&paths[i]) == t0[i], "a type edit in util leaves units without util types untouched");
         }
     }
 }
@@ -9978,7 +9975,7 @@ fn build_new_type_rewrites_no_user() {
     }
     let mut t0 = Vector::<i64>::new();
     for i in 0..paths.len() {
-        t0.push(p13_mtime(paths[i].as_str()));
+        t0.push(p13_mtime(&paths[i]));
         assert(t0[i] != 0, "the build wrote every recorded file");
     }
     let mut hdr = String::new();
@@ -9987,20 +9984,20 @@ fn build_new_type_rewrites_no_user() {
     man.format_into("{}/build/debug/raw/__sc_manifest", root);
     let mut src = String::from_str(util0);
     src.push_str("\npub struct Added {\n    pub z: i64,\n}\n");
-    p.mkfile("src/util.spc", src.as_str());
+    p.mkfile("src/util.spc", &src);
     assert(cli::superc_in(root, "build --emit-c").ok(), "added-type build");
     for i in 0..paths.len() {
-        assert(p13_mtime(paths[i].as_str()) == t0[i], "a new type leaves every unit untouched");
+        assert(p13_mtime(&paths[i]) == t0[i], "a new type leaves every unit untouched");
     }
-    assert(p13_mtime(hdr.as_str()) != 0, "the new type has its own definition header");
+    assert(p13_mtime(&hdr) != 0, "the new type has its own definition header");
     assert(
-        loader::read_file(man.as_str()).unwrap().as_str().find("__sc_t/util__Added.h") >= 0,
+        loader::read_file(&man).unwrap().as_str().find("__sc_t/util__Added.h") >= 0,
         "the manifest lists the new definition header",
     );
     p.mkfile("src/util.spc", util0);
     assert(cli::superc_in(root, "build --emit-c").ok(), "removed-type build");
-    assert(p13_mtime(hdr.as_str()) == 0, "the definition header of a removed type is pruned");
-    assert(loader::read_file(man.as_str()).unwrap().as_str().find("util__Added") < 0, "the manifest no longer lists it");
+    assert(p13_mtime(&hdr) == 0, "the definition header of a removed type is pruned");
+    assert(loader::read_file(&man).unwrap().as_str().find("util__Added") < 0, "the manifest no longer lists it");
 }
 
 // C needs the element of every array declarator complete, also below a pointer and in a
@@ -10050,16 +10047,16 @@ fn build_symbol_segment_includes_no_type() {
     assert(cli::superc_in(root, "build --emit-c").ok(), "initial build");
     let mut genc = String::new();
     genc.format_into("{}/build/debug/raw/main.c", root);
-    let text = loader::read_file(genc.as_str()).unwrap();
+    let text = loader::read_file(&genc).unwrap();
     assert(text.as_str().find("gen__size__util__K") >= 0, "main.c spells the type in the instance symbol");
     assert(text.as_str().find("__sc_t/util__K.h") < 0, "main.c does not include the type's header");
-    let g0 = p13_mtime(genc.as_str());
+    let g0 = p13_mtime(&genc);
     assert(g0 != 0, "the build wrote main.c");
     let mut src = String::from_str(util0);
     src.push_str("\npub struct Added {}\n");
-    p.mkfile("src/util.spc", src.as_str());
+    p.mkfile("src/util.spc", &src);
     assert(cli::superc_in(root, "build --emit-c").ok(), "type-edit build");
-    assert(p13_mtime(genc.as_str()) == g0, "main.c is byte-identical");
+    assert(p13_mtime(&genc) == g0, "main.c is byte-identical");
 }
 
 // The build record carries the instance re-lowering counts by reason: a zero-size element type re-lowers
@@ -10100,12 +10097,12 @@ fn build_link_failure_keeps_artifact() {
         format("build/debug/app{}", unsafe str::from_cstr(cli::binext())).as_str(),
     );
     cmdp.push_str(".cmd");
-    let b1 = p13_mtime(bin.as_str());
-    let l1 = switch loader::read_file(cmdp.as_str()) {
+    let b1 = p13_mtime(&bin);
+    let l1 = switch loader::read_file(&cmdp) {
         Some(v) => v,
         None => {
             r0.show();
-            panic("the initial build left no link record");
+            panic("the initial build left no link record")
         },
     };
     // A source edit recompiles its object, then the link fails: nothing is published.
@@ -10113,18 +10110,18 @@ fn build_link_failure_keeps_artifact() {
     p.mkfile("src/main.spc", "fn main() i32 {\n    let x = 1;\n    return x - 1;\n}\n");
     let r = cli::superc_in(root, "build");
     assert(!r.ok() && r.out_has("link failed"), "the link fails");
-    assert(p13_mtime(bin.as_str()) == b1, "the previous binary stays in place");
-    let l2 = switch loader::read_file(cmdp.as_str()) {
+    assert(p13_mtime(&bin) == b1, "the previous binary stays in place");
+    let l2 = switch loader::read_file(&cmdp) {
         Some(v) => v,
         None => {
             r.show();
-            panic("the failed link removed the link record");
+            panic("the failed link removed the link record")
         },
     };
     assert(l2.as_str() == l1.as_str(), "the previous link record stays");
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     assert(cli::superc_in(root, "build").ok(), "the next build succeeds");
-    assert(p13_mtime(bin.as_str()) > b1, "and links the newer object over the stale binary");
+    assert(p13_mtime(&bin) > b1, "and links the newer object over the stale binary");
 }
 
 // A failed link is redone by the next build even when the binary, the objects and the generated tree
@@ -10148,10 +10145,10 @@ fn build_relinks_after_failed_link_in_same_second() {
     assert_eq(cli::run_quiet(same.cstr()), 0);
     let mut bin = String::new();
     bin.format_into("{}/build/debug/app", root);
-    let b1 = p13_mtime(bin.as_str());
+    let b1 = p13_mtime(&bin);
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     assert(cli::superc_in(root, "build").ok(), "the next build succeeds");
-    assert(p13_mtime(bin.as_str()) != b1, "and relinks over the binary the failed link left");
+    assert(p13_mtime(&bin) != b1, "and relinks over the binary the failed link left");
 }
 
 // A generated file that cannot be published fails the build at the publication boundary: the previous
@@ -10166,17 +10163,17 @@ fn build_publication_failure_keeps_artifact() {
     assert_eq(cli::superc_in(root, "run").exit, 3);
     let mut bin = String::new();
     bin.format_into("{}/build/debug/app{}", root, unsafe str::from_cstr(cli::binext()));
-    let b1 = p13_mtime(bin.as_str());
+    let b1 = p13_mtime(&bin);
     // A directory where the generated file goes refuses the write for every user (root ignores a
     // read-only mode).
     let mut gen = String::new();
     gen.format_into("{}/build/debug/raw/main.o", root);
-    assert(fs::remove_all(gen.as_str()).is_ok() && fs::mkdir_all(gen.as_str()).is_ok(), "the lock is in place");
+    assert(fs::remove_all(&gen).is_ok() && fs::mkdir_all(&gen).is_ok(), "the lock is in place");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 4;\n}\n");
     let r = cli::superc_in(root, "build");
     assert(!r.ok() && r.out_has("raw/main.o: "), "the publication failure fails the build and names the file");
-    assert(p13_mtime(bin.as_str()) == b1, "the previous binary stays in place");
-    assert(fs::remove_all(gen.as_str()).is_ok(), "the lock is gone");
+    assert(p13_mtime(&bin) == b1, "the previous binary stays in place");
+    assert(fs::remove_all(&gen).is_ok(), "the lock is gone");
     assert_eq(cli::superc_in(root, "run").exit, 4);
 }
 
@@ -10259,9 +10256,9 @@ fn tt_build(root: str, tag: str, env: str, flags: str) String {
     val.format_into("{} SC_NO_EMIT_CACHE=1 {}", path.as_str(), env);
     let mut args = String::new();
     args.format_into("build {} --out-dir={}/o{} -o {}/o{}/app", flags, root, tag, root, tag);
-    let r = cli::superc_env_in(root, "SC_TYPE_TABLE", val.as_str(), args.as_str());
+    let r = cli::superc_env_in(root, "SC_TYPE_TABLE", &val, &args);
     assert(r.ok(), "the build succeeds");
-    let t = cli::read_text(path.as_str());
+    let t = cli::read_text(&path);
     assert(t.len() > 0, "the type table was written");
     return t;
 }
@@ -10314,7 +10311,7 @@ fn type_table_is_deterministic() {
     edited.push_str(
         "pub fn tail(xs: [u16; 4]) u16 {\n    let deeper: *const *const *const *const u8 = null;\n    let _ = deeper;\n    return xs[3];\n}\n",
     );
-    p.mkfile("src/shapes.spc", edited.as_str());
+    p.mkfile("src/shapes.spc", &edited);
     let t4 = tt_build(root, "4", "SC_TYPE_VALIDATE=1", "--jobs=1");
     assert(!t1.equals(&t4), "the edit adds body records");
     let sig4 = tt_class(&t4, "0");
@@ -10379,7 +10376,7 @@ fn item_jobs_fold_across_an_import_cycle() {
 fn jobs_build(root: str, tag: str, jobs: str) {
     let mut args = String::new();
     args.format_into("build --jobs={} --out-dir=o{} --emit-c", jobs, tag);
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1 SC_NO_TU_CACHE=1", args.as_str());
+    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1 SC_NO_TU_CACHE=1", &args);
     assert(r.ok(), "the build succeeds");
 }
 
@@ -10387,7 +10384,7 @@ fn jobs_build(root: str, tag: str, jobs: str) {
 fn jobs_file(root: str, tag: str, rel: str) String {
     let mut path = String::new();
     path.format_into("{}/o{}/debug/raw/{}", root, tag, rel);
-    return cli::read_text(path.as_str());
+    return cli::read_text(&path);
 }
 
 // The emitted tree does not depend on the worker count. A query that only asks whether a type has
@@ -10455,11 +10452,11 @@ fn replayed_unit_inlines_as_a_rendered_one() {
     assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the build that replays `b` succeeds");
     assert_eq(p.run_bin(), 0);
     let obj = format("{}/build/release/raw/main.o", root);
-    let warm = loader::read_file(obj.as_str()).unwrap_or(String::new());
+    let warm = loader::read_file(&obj).unwrap_or(String::new());
     assert(warm.len() > 0, "the build writes main's object");
     let r = cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build --profile=release -o bin");
     assert(r.ok(), "the build without the cache succeeds");
-    let cold = loader::read_file(obj.as_str()).unwrap_or(String::new());
+    let cold = loader::read_file(&obj).unwrap_or(String::new());
     assert(warm.equals(&cold), "main's object does not depend on the cache");
 }
 
@@ -10485,11 +10482,11 @@ fn replayed_unit_keeps_its_effects() {
     assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the build that replays `b` succeeds");
     assert_eq(p.run_bin(), 0);
     let obj = format("{}/build/release/raw/main.o", root);
-    let warm = loader::read_file(obj.as_str()).unwrap_or(String::new());
+    let warm = loader::read_file(&obj).unwrap_or(String::new());
     assert(warm.len() > 0, "the build writes main's object");
     let r = cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build --profile=release -o bin");
     assert(r.ok(), "the build without the cache succeeds");
-    let cold = loader::read_file(obj.as_str()).unwrap_or(String::new());
+    let cold = loader::read_file(&obj).unwrap_or(String::new());
     assert(warm.equals(&cold), "main's object does not depend on the cache");
 }
 
@@ -10510,11 +10507,11 @@ fn replayed_unit_keeps_its_cold_mark() {
     assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the build that replays `b` succeeds");
     assert_eq(p.run_bin(), 0);
     let obj = format("{}/build/release/raw/main.o", root);
-    let warm = loader::read_file(obj.as_str()).unwrap_or(String::new());
+    let warm = loader::read_file(&obj).unwrap_or(String::new());
     assert(warm.len() > 0, "the build writes main's object");
     let r = cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build --profile=release -o bin");
     assert(r.ok(), "the build without the cache succeeds");
-    let cold = loader::read_file(obj.as_str()).unwrap_or(String::new());
+    let cold = loader::read_file(&obj).unwrap_or(String::new());
     assert(warm.equals(&cold), "main's object does not depend on the cache");
 }
 
@@ -10566,9 +10563,9 @@ fn rm_rf_does_not_follow_a_directory_link() {
     let mut keep = root.to_string();
     keep.push_str("/target/keep.txt");
     assert_eq(unsafe symlink(target.cstr(), link.cstr()), 0);
-    assert(fs::remove_all(tree.as_str()).is_ok());
-    assert(fs::lstat(tree.as_str()).unwrap_err().kind == IoErrorKind::NotFound);
-    assert(fs::lstat(keep.as_str()).unwrap().kind == fs::FileKind::File);
+    assert(fs::remove_all(&tree).is_ok());
+    assert(fs::lstat(&tree).unwrap_err().kind == IoErrorKind::NotFound);
+    assert(fs::lstat(&keep).unwrap().kind == fs::FileKind::File);
 }
 
 // A left-associative chain at the parser's limit (4096 operands) nests as deep on its left operand.
@@ -10591,7 +10588,7 @@ fn operator_chain_at_the_parser_limit_compiles() {
     src.push_str(
         ";\n    if c {\n        return s - 4090;\n    }\n    return 0;\n}\n\nfn main() i32 {\n    return f(1, true);\n}\n",
     );
-    p.mkfile("main.spc", src.as_str());
+    p.mkfile("main.spc", &src);
     let r = p.compile("main.spc");
     assert(r.ok());
     let cc = p.cc_build("");
@@ -10600,7 +10597,7 @@ fn operator_chain_at_the_parser_limit_compiles() {
     let mut args = String::from_str("fmt --check \"");
     args.push_str(p.dir());
     args.push_str("/main.spc\"");
-    let fr = p.run_raw(args.as_str());
+    let fr = p.run_raw(&args);
     assert(fr.ok());
 }
 
@@ -10663,16 +10660,16 @@ fn build_constants_prune_other_platforms() {
     assert(p.native_build("", "main.spc").ok());
     let hp = unsafe shim::sc_host_platform();
     let want = if hp == 0 {
-        10;
+        10
     } else if hp == 2 {
-        20;
+        20
     } else {
-        30;
+        30
     };
     let wa = if unsafe shim::sc_host_arch() == 0 {
-        1;
+        1
     } else {
-        2;
+        2
     };
     assert_eq(p.run_bin(), want + wa);
 }
@@ -10721,9 +10718,9 @@ fn build_constants_follow_the_target() {
 
 fn order() i32 {
     return if ENDIAN == Endian::Little {
-        1111;
+        1111
     } else {
-        2222;
+        2222
     };
 }
 
@@ -10771,7 +10768,7 @@ fn build_constant_profile_selects_the_branch() {
     if !cli::on_wasm() {
         for (prof, code) in [("debug", 11), ("release", 33)] {
             let args = format("build --profile={} \"{}/main.spc\" -o \"{}/bin\"", prof, root, root);
-            assert(p.run_raw(args.as_str()).ok());
+            assert(p.run_raw(&args).ok());
             assert_eq(p.run_bin(), code);
         }
     }
@@ -10781,7 +10778,7 @@ fn build_constant_profile_selects_the_branch() {
     assert(p.run_raw(format("build --profile=release \"{}/main.spc\" --emit-c", root).as_str()).ok());
     let mut rel = String::from_str(root);
     rel.push_str("/build/release/raw/main.c");
-    let rc = cli::read_text(rel.as_str());
+    let rc = cli::read_text(&rel);
     assert(rc.as_str().contains("7003") && rc.as_str().contains("7130"));
     assert(!rc.as_str().contains("7001") && !rc.as_str().contains("7110") && !rc.as_str().contains("7150"));
     // The debug tree is untouched by the release build.
@@ -11039,14 +11036,14 @@ fn runtime_arithmetic_follows_the_profile() {
         args.format_into(
             "build {}\"{}/main.spc\" -o \"{}/bin\"",
             if release {
-                "--profile=release ";
+                "--profile=release "
             } else {
-                "";
+                ""
             },
             root,
             root,
         );
-        assert(p.run_raw(args.as_str()).ok(), args.as_str());
+        assert(p.run_raw(&args).ok(), args.as_str());
         let r0 = p.run_bin_env("CASE=0 ");
         assert(r0.ok(), "case 0 runs");
         assert(r0.out_shows("32767 0 32767 64 127 127"), "case 0's output");
@@ -11058,13 +11055,13 @@ fn runtime_arithmetic_follows_the_profile() {
         for c in 1usize..23 {
             let mut env = String::new();
             env.format_into("CASE={} ", c);
-            let r = p.run_bin_env(env.as_str());
+            let r = p.run_bin_env(&env);
             let mut want = String::new();
             // Cases 16 to 22 follow 1 to 8 in the tables.
             let k = if c >= 16 {
-                c - 7;
+                c - 7
             } else {
-                c;
+                c
             };
             if (c < 9 || c >= 16) && release {
                 want.push_str(wrapped[k]);
@@ -11076,7 +11073,7 @@ fn runtime_arithmetic_follows_the_profile() {
                 want.format_into("attempt to {}", always[c - 9]);
                 assert(r.exit != 0, env.as_str());
             }
-            assert(r.out_shows(want.as_str()), env.as_str());
+            assert(r.out_shows(&want), env.as_str());
         }
     }
 }
@@ -11096,7 +11093,7 @@ fn release_float_has_no_contraction() {
     let root = p.dir();
     let mut args = String::new();
     args.format_into("build --profile=release \"{}/main.spc\" -o \"{}/bin\"", root, root);
-    assert(p.run_raw(args.as_str()).ok());
+    assert(p.run_raw(&args).ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -11256,14 +11253,14 @@ fn library_int_overflow_follows_the_profile() {
         args.format_into(
             "build {}\"{}/main.spc\" -o \"{}/bin\"",
             if release {
-                "--profile=release ";
+                "--profile=release "
             } else {
-                "";
+                ""
             },
             root,
             root,
         );
-        assert(p.run_raw(args.as_str()).ok(), args.as_str());
+        assert(p.run_raw(&args).ok(), args.as_str());
         // Division traps in every profile, with the built-in messages.
         let traps: []str = [
             "attempt to divide with overflow",
@@ -11277,12 +11274,12 @@ fn library_int_overflow_follows_the_profile() {
         for c in 1usize..17 {
             let mut env = String::new();
             env.format_into("CASE={} ", c);
-            let r = p.run_bin_env(env.as_str());
+            let r = p.run_bin_env(&env);
             let mut want = String::new();
             let k = if c >= 11 {
-                c - 4;
+                c - 4
             } else {
-                c;
+                c
             };
             if c >= 7 && c < 11 {
                 want.push_str(traps[c - 7]);
@@ -11294,7 +11291,7 @@ fn library_int_overflow_follows_the_profile() {
                 want.format_into("attempt to {} with overflow", checked[k]);
                 assert(r.exit != 0, env.as_str());
             }
-            assert(r.out_shows(want.as_str()), env.as_str());
+            assert(r.out_shows(&want), env.as_str());
         }
     }
 }
@@ -11348,7 +11345,7 @@ fn literal_arithmetic_is_computed_in_its_type() {
         let root = p.dir();
         let mut args = String::new();
         args.format_into("build \"{}/main.spc\" -o \"{}/bin\"", root, root);
-        assert(p.run_raw(args.as_str()).ok(), "the program builds");
+        assert(p.run_raw(&args).ok(), "the program builds");
         let r = p.run_bin_env("");
         assert(r.ok(), "the program runs");
         assert(
@@ -11448,7 +11445,7 @@ fn main() i32 {
     let root = p.dir();
     let mut wargs = String::new();
     wargs.format_into("build --emit-c \"{}/wasm.spc\" --target=wasm", root);
-    assert(p.run_raw(wargs.as_str()).ok(), "the wasm32 limits check");
+    assert(p.run_raw(&wargs).ok(), "the wasm32 limits check");
     // A declared type rejects the widened value.
     h::expect_err_msg(
         "a declared type rejects the widened value",
@@ -11460,7 +11457,7 @@ fn main() i32 {
     }
     let mut args = String::new();
     args.format_into("build \"{}/main.spc\" -o \"{}/bin\"", root, root);
-    assert(p.run_raw(args.as_str()).ok(), "the program builds");
+    assert(p.run_raw(&args).ok(), "the program builds");
     let r = p.run_bin_env("");
     assert(r.ok(), "the program runs");
     assert(r.out_shows("2147483648 255 2147483647 -2147483648 18446744073709551615 -32768"), "the limits print");
@@ -11606,7 +11603,7 @@ fn const_generic_steps_follow_the_written_expression() {
     bad = bad.replace("return (f.good() - 18446744073709551615)", "return (use_bad() - f.good())");
     b.add_at(
         "a called method's own instantiation",
-        bad.as_str(),
+        &bad,
         "error: const expression {N * 2} overflows u64 for N = 18446744073709551615\n--> ",
         "11:22",
     );
@@ -11788,10 +11785,10 @@ fn script_build_same_file_names() {
     let root = p.dir();
     let ta = format("{}/a", root);
     let tb = format("{}/b", root);
-    assert(script_build(ta.as_str(), 1), "the serial build");
-    assert_eq(script_run(ta.as_str()), 5);
-    assert(script_build(tb.as_str(), 4), "the parallel build");
-    assert_eq(script_run(tb.as_str()), 5);
+    assert(script_build(&ta, 1), "the serial build");
+    assert_eq(script_run(&ta), 5);
+    assert(script_build(&tb, 4), "the parallel build");
+    assert_eq(script_run(&tb), 5);
 }
 
 import std::time as ptime;
@@ -11803,7 +11800,7 @@ import std::time as ptime;
 @platform(!wasm)
 fn spawn_logged(argv: []str, log: str, dir: str) process::Child {
     let mut cmd = process::Command::new(argv);
-    cmd.cwd = Option::<str>::Some(dir);
+    cmd.cwd = Some(dir);
     cmd.stdout = process::Redirect::Path(log);
     cmd.stderr = process::Redirect::Stdout;
     return process::spawn(cmd).unwrap();
@@ -11824,14 +11821,14 @@ fn a_build_waits_for_the_holder_of_its_tree() {
     assert(p.compile("main.spc").ok());
     let root = p.dir();
     let lock = format("{}/build/debug/.lock", root);
-    let h = bsys::lock_file(lock.as_str(), 0);
+    let h = bsys::lock_file(&lock, 0);
     assert(h.held(), "the test takes the tree's lock");
     let log = format("{}/second.log", root);
     let argv: [str; 4] = [cli::superc_path(), "build", "--emit-c", "main.spc"];
-    let mut child = spawn_logged(argv, log.as_str(), root);
+    let mut child = spawn_logged(argv, &log, root);
     let mut told = false;
     for _ in 0..600 {
-        if cli::read_text(log.as_str()).as_str().find("waiting for another build") >= 0 {
+        if cli::read_text(&log).as_str().find("waiting for another build") >= 0 {
             told = true;
             break;
         }
@@ -11866,14 +11863,14 @@ fn a_killed_build_gives_its_jobserver_slots_back() {
     let root = p.dir();
     assert(cli::superc_env_in(root, "SC_LEAK_CHECK", "fatal", "build").ok(), "the tree builds");
     let lock = format("{}/build/debug/.lock", root);
-    let h = bsys::lock_file(lock.as_str(), 0);
+    let h = bsys::lock_file(&lock, 0);
     assert(h.held(), "the test takes the tree's lock");
     let log = format("{}/build.log", root);
     let argv: [str; 3] = [cli::superc_path(), "build", "--jobs=4"];
-    let mut child = spawn_logged(argv, log.as_str(), root);
+    let mut child = spawn_logged(argv, &log, root);
     let mut told = false;
     for _ in 0..600 {
-        if cli::read_text(log.as_str()).as_str().find("waiting for another build") >= 0 {
+        if cli::read_text(&log).as_str().find("waiting for another build") >= 0 {
             told = true;
             break;
         }

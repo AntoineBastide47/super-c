@@ -119,9 +119,9 @@ fn g_logt(_r: &Ref<Q>, z: Q) Q {
         fn(n: i32, a: Q) Q {
             let m = q(1.0) / q((n + 3) as f64);
             return if a.lt(q(0.0)) {
-                m;
+                m
             } else {
-                q(0.0) - m;
+                q(0.0) - m
             };
         },
     );
@@ -184,9 +184,9 @@ fn g_atan(_r: &Ref<Q>, z: Q) Q {
         fn(n: i32, a: Q) Q {
             let m = q(1.0) / q((2 * n + 3) as f64);
             return if a.lt(q(0.0)) {
-                m;
+                m
             } else {
-                q(0.0) - m;
+                q(0.0) - m
             };
         },
     );
@@ -603,7 +603,7 @@ fn fit_grid(g: &Grid<Q>, dense: &Grid<Q>, dw0: bool, bits: i32, target: f64) (Ve
     for n in 2usize..40 {
         let (cf, lg) = fit_n(g, dense, dw0, n, bits);
         if lg >= target {
-            return cf, lg;
+            return (cf, lg);
         }
         if prev_lg >= 0.0 && lg < prev_lg + 0.25 {
             eprintln("gen: {} coefficients reach 2^-{}, the target is 2^-{}", n, lg, target);
@@ -639,7 +639,7 @@ fn fit_n(g: &Grid<Q>, dense: &Grid<Q>, dw0: bool, n: usize, bits: i32) (Vector<f
         }
     }
     assert(emax.is_finite() && !emax.is_zero(), "fit: the Remez solution is not finite");
-    return cf, -log2(emax.to_f64());
+    return (cf, -log2(emax.to_f64()));
 }
 
 // `v` rounded to the lane type of `bits` significand bits, as an f64.
@@ -655,9 +655,9 @@ fn report(name: str, bits: i32, deg: usize, lg: f64) {
         "gen: {} f{}: degree {}, weighted error 2^-{}",
         name,
         if bits == 24 {
-            32;
+            32
         } else {
-            64;
+            64
         },
         deg,
         lg,
@@ -698,9 +698,9 @@ pub fn hex(v: f64, out: &mut String) {
     if v == 0.0 {
         out.push_str(
             if v.is_sign_negative() {
-                "-0.0";
+                "-0.0"
             } else {
-                "0.0";
+                "0.0"
             },
         );
         return;
@@ -749,7 +749,7 @@ const fn rnd(x: Z, bits: i32) f64 {
 // `x` split into `hi` (rounded) and `lo` (the rest, rounded).
 fn split(x: Z, bits: i32) (f64, f64) {
     let hi = rnd(x, bits);
-    return hi, rnd(x - Z::of(hi), bits);
+    return (hi, rnd(x - Z::of(hi), bits));
 }
 
 // `x` truncated to `n` significant bits, |x| in [1, 2) times a power of two.
@@ -781,17 +781,17 @@ const fn step(v: f64, bits: i32, up: bool) f64 {
     if bits == 24 {
         let b = fl::f32_bits(v as f32);
         let n = if v > 0.0 == up {
-            b + 1;
+            b + 1
         } else {
-            b - 1;
+            b - 1
         };
         return fl::f32_from_bits(n);
     }
     let b = fl::f64_bits(v);
     let n = if v > 0.0 == up {
-        b + 1;
+        b + 1
     } else {
-        b - 1;
+        b - 1
     };
     return fl::f64_from_bits(n);
 }
@@ -832,25 +832,25 @@ fn field(out: &mut String, name: str, v: f64) {
 fn konsts(r: &Ref<Z>, rq: &Ref<Q>, bits: i32, out: &mut String) {
     let p = bits as i64;
     let emax: i64 = if bits == 24 {
-        127;
+        127
     } else {
-        1023;
+        1023
     };
     let emin = 1 - emax;
     let ty = if bits == 24 {
-        "f32";
+        "f32"
     } else {
-        "f64";
+        "f64"
     };
     let sub_bits: i64 = if bits == 24 {
-        24;
+        24
     } else {
-        54;
+        54
     };
     let cw_bits: i32 = if bits == 24 {
-        8;
+        8
     } else {
-        19;
+        19
     };
     let ln2 = r.ln2;
     let ln10 = r.ln10;
@@ -972,15 +972,15 @@ fn f64_tables(r: &Ref<Z>, out: &mut String) {
         let zlo = fl::f64_from_bits(0x3fe6000000000000u64 + (i as u64 << 45));
         let zhi = fl::f64_from_bits(0x3fe6000000000000u64 + (i as u64 + 1 << 45) - 1); // the last z of the cell
         let invc = if zlo >= 1.0 - 0x1p-8 && zhi <= 1.0 + 0x1p-7 {
-            1.0;
+            1.0
         } else {
             let ic = 2.0 / (zlo + zhi);
             let g = if ic >= 1.0 {
-                128.0;
+                128.0
             } else {
-                256.0;
+                256.0
             };
-            (ic * g).round() / g;
+            (ic * g).round() / g
         };
         let rmax = (zlo * invc - 1.0).abs().max((zhi * invc - 1.0).abs());
         assert(rmax < 0x1p-7, "gen: a log table cell's r reaches 2^-7");
@@ -1009,9 +1009,9 @@ fn two_over_pi(out: &mut String) {
         for b in 0..w {
             let j = (k * w + b) as i64 - pad as i64;
             let bit: u64 = if j < 0 {
-                0;
+                0
             } else {
-                (unsafe words[(j / 32) as usize]) as u64 >> (31 - j % 32) as u64 & 1;
+                (unsafe words[(j / 32) as usize]) as u64 >> (31 - j % 32) as u64 & 1
             };
             v = v << 1 | bit;
         }
@@ -1061,21 +1061,21 @@ fn spec_grids(i: usize) (Grid<Q>, Grid<Q>) {
     let r = unsafe &*COS_REF;
     let sp = specs();
     let s = sp.at(i);
-    return grid(r, s, M_FIT), grid(r, s, 4 * M_FIT);
+    return (grid(r, s, M_FIT), grid(r, s, 4 * M_FIT));
 }
 
 // The erfc pieces' grids: the fit's and one twice as dense.
 fn piece_grids(i: usize) (Grid<Q>, Grid<Q>) {
     let r = unsafe &*COS_REF;
     let (lo, hi) = piece(i);
-    return piece_grid(r, lo, hi, M_PIECE), piece_grid(r, lo, hi, 2 * M_PIECE);
+    return (piece_grid(r, lo, hi, M_PIECE), piece_grid(r, lo, hi, 2 * M_PIECE));
 }
 
 fn polys(sp: &Vector<Spec>, fits: &mut Vector<Slot>, bits: i32, out: &mut String) {
     let ty = if bits == 24 {
-        "f32";
+        "f32"
     } else {
-        "f64";
+        "f64"
     };
     parallel::chunks_mut_with(
         fits.index_range_mut(0..sp.len()),
@@ -1084,9 +1084,9 @@ fn polys(sp: &Vector<Spec>, fits: &mut Vector<Slot>, bits: i32, out: &mut String
         |slot: []mut Slot| {
             let s = sp.at(slot[0].i);
             let target = if bits == 24 {
-                s.err32;
+                s.err32
             } else {
-                s.err64;
+                s.err64
             };
             let (c, lg) = fit_grid(&slot[0].g, &slot[0].dense, false, bits, target);
             slot[0].c = c;
@@ -1107,9 +1107,9 @@ fn polys(sp: &Vector<Spec>, fits: &mut Vector<Slot>, bits: i32, out: &mut String
             }
             up.push_byte(
                 if ch >= b'a' && ch <= b'z' {
-                    ch - 32;
+                    ch - 32
                 } else {
-                    ch;
+                    ch
                 },
             );
         }
@@ -1133,7 +1133,7 @@ fn polys(sp: &Vector<Spec>, fits: &mut Vector<Slot>, bits: i32, out: &mut String
         out.format_into("], degree {}, weighted error 2^-{}.\n", c.len() - 1, (lg * 10.0).floor() / 10.0);
         let mut head = String::new();
         head.format_into("const {}: [{}; {}] = ", up.as_str(), ty, c.len());
-        array(head.as_str(), c, out);
+        array(&head, c, out);
         sw.format_into("        {} => horner(z, &{}),\n", s.name, up.as_str());
         names.push(up);
     }
@@ -1154,9 +1154,9 @@ const ONE_EACH: parallel::Options = parallel::Options { schedule: parallel::Sche
 fn erfc_max(r: &Ref<Q>, bits: i32) f64 {
     let tiny = q(1.0).scale(
         if bits == 24 {
-            -152;
+            -152
         } else {
-            -1077;
+            -1077
         },
     );
     let mut lo = 1.0;
@@ -1188,7 +1188,7 @@ fn erfc_pieces(r: &Ref<Q>, bits: i32) usize {
 // Piece i: [lo, hi) = 2^(i/8 - 1) [1 + (i%8)/8, 1 + (i%8 + 1)/8).
 const fn piece(i: usize) (f64, f64) {
     let e = fl::f64_from_bits((1022 + i / 8) as u64 << 52);
-    return e * (1.0 + (i % 8) as f64 * 0.125), e * (1.0 + (i % 8 + 1) as f64 * 0.125);
+    return (e * (1.0 + (i % 8) as f64 * 0.125), e * (1.0 + (i % 8 + 1) as f64 * 0.125));
 }
 
 // g(x) = erfc(x) e^(x^2) on a grid of [lo, hi), weighted relative to g, the abscissa u = x - mid.
@@ -1210,9 +1210,9 @@ fn piece_grid(r: &Ref<Q>, lo: f64, hi: f64, m: usize) Grid<Q> {
 // the constant term as hi and lo; one degree for all pieces, the smallest that meets the target in each.
 fn erfc_table(ps: &mut Vector<Slot>, np: usize, bits: i32, out: &mut String) {
     let ty = if bits == 24 {
-        "f32";
+        "f32"
     } else {
-        "f64";
+        "f64"
     };
     // 2^-(p + 4): a sixteenth of an ULP at most.
     let target = (bits + 4) as f64;
@@ -1276,7 +1276,7 @@ fn erfc_table(ps: &mut Vector<Slot>, np: usize, bits: i32, out: &mut String) {
     );
     out.push_string(&body);
     out.format_into(
-        "];\n\n/// erfc(a) e^(a^2) as a double word from piece `i` of `ERFC_TAB`.\npub fn erfc_g<const N: usize>(a: Simd<{}, N>, i: Simd<{}, N>) (Simd<{}, N>, Simd<{}, N>) {{\n    let (h, l) = table_poly::<{}, N, {}>(a, i, ERFC_TAB);\n    return h, l;\n}}\n",
+        "];\n\n/// erfc(a) e^(a^2) as a double word from piece `i` of `ERFC_TAB`.\npub fn erfc_g<const N: usize>(a: Simd<{}, N>, i: Simd<{}, N>) (Simd<{}, N>, Simd<{}, N>) {{\n    let (h, l) = table_poly::<{}, N, {}>(a, i, ERFC_TAB);\n    return (h, l);\n}}\n",
         ty,
         ty,
         ty,
@@ -1320,14 +1320,14 @@ fn main(args: Vector<str>) i32 {
         out.format_into(
             "// Generated by tools/simd_math/gen.spc: the {} constants{} and the minimax polynomials of the math\n// kernels (`lane.spc`). Do not edit; rerun the generator.\nimport std::simd::math::lane as *;\n\n",
             if bits == 24 {
-                "f32";
+                "f32"
             } else {
-                "f64";
+                "f64"
             },
             if bits == 24 {
-                "";
+                ""
             } else {
-                ", the bits of 2/pi";
+                ", the bits of 2/pi"
             },
         );
         konsts(&rz, &r, bits, &mut out);
@@ -1340,12 +1340,12 @@ fn main(args: Vector<str>) i32 {
         let mut path = String::from_str(dir);
         path.push_str(
             if bits == 24 {
-                "/coeffs_f32.spc";
+                "/coeffs_f32.spc"
             } else {
-                "/coeffs_f64.spc";
+                "/coeffs_f64.spc"
             },
         );
-        write(path.as_str(), &out);
+        write(&path, &out);
     }
     return 0;
 }

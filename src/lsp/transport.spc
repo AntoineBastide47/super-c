@@ -87,20 +87,20 @@ extend Reader {
                 e += 1;
             }
             if e - self.pos > HDR_MAX {
-                return Option::<str>::None;
+                return None;
             }
             if e < self.buf.len() {
                 break;
             }
             let d = e - self.pos;
             if !self.fill() {
-                return Option::<str>::None;
+                return None;
             }
             e = self.pos + d;
         }
         let l = unsafe str::from_raw(self.buf.as_ptr() + self.pos, e - self.pos);
         self.pos = e + 1;
-        return Option::<str>::Some(l);
+        return Some(l);
     }
 
     // The next `n` bytes as a body, or None at the end of the stream. The buffered bytes are copied
@@ -116,18 +116,18 @@ extend Reader {
         // Each read adds at least one byte, so the loop runs at most n - have times.
         while body.len() < n {
             if self.eof {
-                return Option::<String>::None;
+                return None;
             }
             let want = n - body.len();
             let dst = body.spare_mut(want);
             let r = read_raw(self.f, dst, want);
             if r <= 0 {
                 self.eof = true;
-                return Option::<String>::None;
+                return None;
             }
             body.advance_len(r as usize);
         }
-        return Option::<String>::Some(body);
+        return Some(body);
     }
 }
 
@@ -193,7 +193,7 @@ pub(package) fn read_message_max(rd: &mut Reader, max: usize) Option<String> {
     loop {
         let lo = rd.line();
         if lo.is_none() {
-            return Option::<String>::None;
+            return None;
         }
         let l = lo.unwrap().trim();
         if l.len() == 0 {
@@ -201,27 +201,27 @@ pub(package) fn read_message_max(rd: &mut Reader, max: usize) Option<String> {
         }
         headers += 1;
         if headers > 32 {
-            return Option::<String>::None;
+            return None;
         }
         if header_is(l, "content-length:") {
             if clen >= 0 {
-                return Option::<String>::None;
+                return None;
             }
             clen = (switch l.slice(15, l.len()).trim().parse_i64() {
                 Some(n) => n,
                 None => -1,
             });
             if clen < 0 {
-                return Option::<String>::None;
+                return None;
             }
         } else if header_is(l, "content-type:") {
             if !charset_ok(l.slice(13, l.len())) {
-                return Option::<String>::None;
+                return None;
             }
         }
     }
     if clen < 0 || clen as u64 > max as u64 {
-        return Option::<String>::None;
+        return None;
     }
     return rd.body(clen as usize);
 }

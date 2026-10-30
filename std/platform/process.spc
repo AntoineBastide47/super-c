@@ -362,7 +362,7 @@ type ChildRaw = *mut void;
 @platform(macos | ios | linux | android)
 pub fn spawn(cmd: Command) Result<Child, IoError> {
     if cmd.command_line.is_some() {
-        return Result::<Child, IoError>::Err(error::unsupported(IoOp::Spawn));
+        return Err(error::unsupported(IoOp::Spawn));
     }
     if cmd.argv.len() == 0 || stdout_misused(&cmd) {
         return invalid::<Child>(IoOp::Spawn);
@@ -392,9 +392,9 @@ pub fn spawn(cmd: Command) Result<Child, IoError> {
     ptrs.push(null);
     let argv = ptrs.as_ptr();
     let envp: *const *mut char = if cmd.env.is_some() {
-        unsafe (argv + nargs + 1);
+        unsafe (argv + nargs + 1)
     } else {
-        unsafe env::environ();
+        unsafe env::environ()
     };
     let mut fa = unsafe zeroed::<posix_spawn_file_actions_t>();
     unsafe posix_spawn_file_actions_init(&mut fa);
@@ -420,7 +420,7 @@ pub fn spawn(cmd: Command) Result<Child, IoError> {
             win_quote_into(&mut line, cmd.argv[i]);
         }
     }
-    let wline = path::native(line.as_str(), IoOp::Spawn)?;
+    let wline = path::native(&line, IoOp::Spawn)?;
     let mut block = Vector::<u16>::new();
     let mut flags: u32 = 0;
     if let Some(env) = cmd.env {
@@ -437,14 +437,14 @@ pub fn spawn(cmd: Command) Result<Child, IoError> {
         block.push(0);
     }
     let program = if let Some(p) = cmd.program {
-        Option::<path::NativePath>::Some(path::native(p, IoOp::Spawn)?);
+        Option::<path::NativePath>::Some(path::native(p, IoOp::Spawn)?)
     } else {
-        Option::<path::NativePath>::None;
+        Option::<path::NativePath>::None
     };
     let cwd = if let Some(d) = cmd.cwd {
-        Option::<path::NativePath>::Some(path::native(d, IoOp::Spawn)?);
+        Option::<path::NativePath>::Some(path::native(d, IoOp::Spawn)?)
     } else {
-        Option::<path::NativePath>::None;
+        Option::<path::NativePath>::None
     };
     let mut si = unsafe zeroed::<STARTUPINFOW>();
     si.cb = sizeof(STARTUPINFOW) as u32;
@@ -455,25 +455,25 @@ pub fn spawn(cmd: Command) Result<Child, IoError> {
         si.hStdInput = owned.take(child_handle(&cmd.stdin, STD_INPUT_HANDLE, false)?);
         si.hStdOutput = owned.take(child_handle(&cmd.stdout, STD_OUTPUT_HANDLE, true)?);
         si.hStdError = if cmd.stderr.is_stdout() {
-            si.hStdOutput;
+            si.hStdOutput
         } else {
-            owned.take(child_handle(&cmd.stderr, STD_ERROR_HANDLE, true)?);
+            owned.take(child_handle(&cmd.stderr, STD_ERROR_HANDLE, true)?)
         };
     }
     let app: *const u16 = if let Some(p) = &program {
-        p.ptr();
+        p.ptr()
     } else {
-        null;
+        null
     };
     let dir: *const u16 = if let Some(d) = &cwd {
-        d.ptr();
+        d.ptr()
     } else {
-        null;
+        null
     };
     let envp: *mut void = if cmd.env.is_some() {
-        block.index_range_mut(0..block.len()).as_mut_ptr();
+        block.index_range_mut(0..block.len()).as_mut_ptr()
     } else {
-        null;
+        null
     };
     let mut pi = unsafe zeroed::<PROCESS_INFORMATION>();
     let ok = unsafe CreateProcessW(app, wline.ptr() as *mut u16, null, null, 1, flags, envp, dir, &mut si, &mut pi) != 0;
@@ -481,7 +481,7 @@ pub fn spawn(cmd: Command) Result<Child, IoError> {
         return fail::<Child>(IoOp::Spawn);
     }
     unsafe CloseHandle(pi.hThread);
-    return Result::<Child, IoError>::Ok(Child::adopt(pi.hProcess, pi.dwProcessId));
+    return Ok(Child::adopt(pi.hProcess, pi.dwProcessId));
 }
 /// Start `cmd`. Unsupported: WASI has no processes.
 @platform(wasm)
@@ -522,7 +522,7 @@ fn spawn_with(cmd: &Command, fa: &mut posix_spawn_file_actions_t, argv: *const *
     if let Some(d) = cmd.cwd {
         let nd = path::native(d, IoOp::Spawn)?;
         add_chdir(fa, nd.ptr())?;
-        dir = Option::<path::NativePath>::Some(nd);
+        dir = Some(nd);
     }
     let mut pid: i32 = 0;
     // posix_spawnp makes a whole spawn attempt per PATH entry: a program found once starts by its path.
@@ -537,9 +537,9 @@ fn spawn_with(cmd: &Command, fa: &mut posix_spawn_file_actions_t, argv: *const *
     }
     let _ = (p0, p1, p2, dir);
     if rc != 0 {
-        return Result::<Child, IoError>::Err(error::code_error(rc, IoOp::Spawn));
+        return Err(error::code_error(rc, IoOp::Spawn));
     }
-    return Result::<Child, IoError>::Ok(Child::adopt(pid, pid as u32));
+    return Ok(Child::adopt(pid, pid as u32));
 }
 
 // Add the file action of redirect `r` for descriptor `fd`: the native path it opens, which must live until
@@ -552,32 +552,32 @@ fn add_redirect(fa: &mut posix_spawn_file_actions_t, r: &Redirect, fd: i32) Resu
         Inherit => 0,
         Null => {
             let flags = if fd == 0 {
-                fcntl::O_RDONLY;
+                fcntl::O_RDONLY
             } else {
-                fcntl::O_WRONLY;
+                fcntl::O_WRONLY
             };
-            unsafe posix_spawn_file_actions_addopen(fa, fd, "/dev/null".ptr() as *const char, flags, 0);
+            unsafe posix_spawn_file_actions_addopen(fa, fd, "/dev/null".ptr() as *const char, flags, 0)
         },
         Path(p) => {
             let np = path::native(p, IoOp::Spawn)?;
             let flags = if fd == 0 {
-                fcntl::O_RDONLY;
+                fcntl::O_RDONLY
             } else {
-                wflags;
+                wflags
             };
             let rc = unsafe posix_spawn_file_actions_addopen(fa, fd, np.ptr(), flags, 0o644);
             if rc != 0 {
-                return Result::<Option<path::NativePath>, IoError>::Err(error::code_error(rc, IoOp::Spawn));
+                return Err(error::code_error(rc, IoOp::Spawn));
             }
-            return Result::<Option<path::NativePath>, IoError>::Ok(Option::<path::NativePath>::Some(np));
+            return Ok(Some(np));
         },
         Handle(f) => unsafe posix_spawn_file_actions_adddup2(fa, f.raw(), fd),
         Stdout => unsafe posix_spawn_file_actions_adddup2(fa, 1, 2),
     };
     if rc != 0 {
-        return Result::<Option<path::NativePath>, IoError>::Err(error::code_error(rc, IoOp::Spawn));
+        return Err(error::code_error(rc, IoOp::Spawn));
     }
-    return Result::<Option<path::NativePath>, IoError>::Ok(none);
+    return Ok(none);
 }
 
 // Add the working directory `cwd` to the spawn actions: Unsupported where the C library has no such
@@ -586,9 +586,9 @@ fn add_redirect(fa: &mut posix_spawn_file_actions_t, r: &Redirect, fd: i32) Resu
 fn add_chdir(fa: &mut posix_spawn_file_actions_t, cwd: *const char) Result<Unit, IoError> {
     let rc = unsafe posix_spawn_file_actions_addchdir_np(fa, cwd);
     if rc != 0 {
-        return Result::<Unit, IoError>::Err(error::code_error(rc, IoOp::Spawn));
+        return Err(error::code_error(rc, IoOp::Spawn));
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 @platform(ios | android)
 fn add_chdir(_fa: &mut posix_spawn_file_actions_t, _cwd: *const char) Result<Unit, IoError> {
@@ -640,7 +640,7 @@ fn child_handle(r: &Redirect, which: u32, write: bool) Result<(*mut void, bool),
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
     switch *r {
         Inherit => {
-            return Result::<(*mut void, bool), IoError>::Ok((unsafe GetStdHandle(which), false));
+            return Ok((unsafe GetStdHandle(which), false));
         },
         Handle(f) => {
             let me = unsafe GetCurrentProcess();
@@ -648,17 +648,17 @@ fn child_handle(r: &Redirect, which: u32, write: bool) Result<(*mut void, bool),
             if unsafe DuplicateHandle(me, f.raw(), me, &mut h, 0, 1, DUPLICATE_SAME_ACCESS) == 0 {
                 return fail::<(*mut void, bool)>(IoOp::Spawn);
             }
-            return Result::<(*mut void, bool), IoError>::Ok((h, true));
+            return Ok((h, true));
         },
         Stdout => {
             return invalid::<(*mut void, bool)>(IoOp::Spawn);
         },
         _ => {},
-    };
+    }
     let name = if let Path(p) = *r {
-        p;
+        p
     } else {
-        "NUL";
+        "NUL"
     };
     let np = path::native(name, IoOp::Spawn)?;
     let mut h = INVALID_HANDLE_VALUE;
@@ -676,7 +676,7 @@ fn child_handle(r: &Redirect, which: u32, write: bool) Result<(*mut void, bool),
     if h == INVALID_HANDLE_VALUE {
         return fail::<(*mut void, bool)>(IoOp::Spawn);
     }
-    return Result::<(*mut void, bool), IoError>::Ok((h, true));
+    return Ok((h, true));
 }
 
 // Append argument `a` to a CreateProcess command line as the C runtime's parser reads it back: quoted
@@ -741,7 +741,7 @@ pub fn wait_any(children: []mut Child) Result<(usize, ExitStatus), IoError> {
         }
         for i in 0..children.len() {
             if let Some(s) = children[i].reap_if(p, st) {
-                return Result::<(usize, ExitStatus), IoError>::Ok((i, s));
+                return Ok((i, s));
             }
         }
     }
@@ -758,22 +758,22 @@ pub fn wait_any(children: []mut Child) Result<(usize, ExitStatus), IoError> {
     // the first group between rounds. Ends when one child ends.
     loop {
         let first_ms = if children.len() <= 64 {
-            INFINITE;
+            INFINITE
         } else {
-            0;
+            0
         };
         if let Some(r) = wait_group(children, 0, first_ms)? {
-            return Result::<(usize, ExitStatus), IoError>::Ok(r);
+            return Ok(r);
         }
         let mut from: usize = 64;
         while from < children.len() {
             if let Some(r) = wait_group(children, from, 0)? {
-                return Result::<(usize, ExitStatus), IoError>::Ok(r);
+                return Ok(r);
             }
             from += 64;
         }
         if let Some(r) = wait_group(children, 0, 10)? {
-            return Result::<(usize, ExitStatus), IoError>::Ok(r);
+            return Ok(r);
         }
     }
 }
@@ -791,10 +791,10 @@ pub fn try_wait_any(children: []mut Child) Result<Option<(usize, ExitStatus)>, I
             continue;
         }
         if let Some(s) = children[i].try_wait()? {
-            return Result::<Option<(usize, ExitStatus)>, IoError>::Ok(Option::<(usize, ExitStatus)>::Some((i, s)));
+            return Ok(Some((i, s)));
         }
     }
-    return Result::<Option<(usize, ExitStatus)>, IoError>::Ok(Option::<(usize, ExitStatus)>::None);
+    return Ok(None);
 }
 
 @platform(!wasm)
@@ -822,18 +822,18 @@ fn wait_group(children: []mut Child, from: usize, ms: u32) Result<Option<(usize,
         }
     }
     if n == 0 {
-        return Result::<Option<(usize, ExitStatus)>, IoError>::Ok(Option::<(usize, ExitStatus)>::None);
+        return Ok(None);
     }
     let w = unsafe WaitForMultipleObjects(n as u32, &hs[0], 0, ms);
     if w == WAIT_TIMEOUT {
-        return Result::<Option<(usize, ExitStatus)>, IoError>::Ok(Option::<(usize, ExitStatus)>::None);
+        return Ok(None);
     }
     if w >= n as u32 {
         return fail::<Option<(usize, ExitStatus)>>(IoOp::Wait);
     }
     let i = unsafe at[w as usize];
     let s = children[i].exit_code()?;
-    return Result::<Option<(usize, ExitStatus)>, IoError>::Ok(Option::<(usize, ExitStatus)>::Some((i, s)));
+    return Ok(Some((i, s)));
 }
 
 // The status `waitpid` reported as `st`: the low 7 bits are the signal that ended the child (0: it
@@ -841,9 +841,9 @@ fn wait_group(children: []mut Child, from: usize, ms: u32) Result<Option<(usize,
 @platform(macos | ios | linux | android)
 const fn status_of(st: i32) ExitStatus {
     if (st & 0x7f) == 0 {
-        return ExitStatus::Code(st >> 8 & 0xff);
+        return Code(st >> 8 & 0xff);
     }
-    return ExitStatus::Signal(st & 0x7f);
+    return Signal(st & 0x7f);
 }
 
 // ---- The running process ----------------------------------------------------------------------------
@@ -851,7 +851,7 @@ const fn status_of(st: i32) ExitStatus {
 /// This process's id. Unsupported on WASI, which has no process ids.
 @platform(!wasm)
 pub fn pid() Result<u32, IoError> {
-    return Result::<u32, IoError>::Ok(os_pid());
+    return Ok(os_pid());
 }
 /// This process's id. Unsupported on WASI, which has no process ids.
 @platform(wasm)
@@ -876,14 +876,14 @@ pub fn is_alive(pid: u32) Result<bool, IoError> {
         return invalid::<bool>(IoOp::Signal);
     }
     if unsafe c_kill(pid as i32, 0) == 0 {
-        return Result::<bool, IoError>::Ok(true);
+        return Ok(true);
     }
     let e = errno::errno();
     if e == EPERM {
-        return Result::<bool, IoError>::Ok(true); // it exists, owned by another user
+        return Ok(true); // it exists, owned by another user
     }
     if e == ESRCH {
-        return Result::<bool, IoError>::Ok(false);
+        return Ok(false);
     }
     return fail::<bool>(IoOp::Signal);
 }
@@ -898,12 +898,12 @@ pub fn is_alive(pid: u32) Result<bool, IoError> {
     if h == null {
         let e = unsafe GetLastError();
         if e == ERROR_INVALID_PARAMETER {
-            return Result::<bool, IoError>::Ok(false);
+            return Ok(false);
         }
         if e == ERROR_ACCESS_DENIED {
-            return Result::<bool, IoError>::Ok(true);
+            return Ok(true);
         }
-        return Result::<bool, IoError>::Err(error::code_error(e as i32, IoOp::Signal));
+        return Err(error::code_error(e as i32, IoOp::Signal));
     }
     let mut code: u32 = 0;
     let ok = unsafe GetExitCodeProcess(h, &mut code) != 0;
@@ -911,7 +911,7 @@ pub fn is_alive(pid: u32) Result<bool, IoError> {
     if !ok {
         return fail::<bool>(IoOp::Signal);
     }
-    return Result::<bool, IoError>::Ok(code == STILL_ACTIVE);
+    return Ok(code == STILL_ACTIVE);
 }
 /// Whether process `pid` exists. Unsupported: WASI has no processes.
 @platform(wasm)
@@ -930,11 +930,11 @@ pub fn exe_path() Result<String, IoError> {
         let mut sz = size;
         if unsafe _NSGetExecutablePath(out.spare_mut(size as usize) as *mut char, &mut sz) == 0 {
             out.advance_len(unsafe cstring::strlen(out.as_ptr() as *const char));
-            return Result::<String, IoError>::Ok(out);
+            return Ok(out);
         }
         size = sz;
     }
-    return Result::<String, IoError>::Err(IoError::new(IoErrorKind::Other, IoOp::ExePath));
+    return Err(IoError::new(IoErrorKind::Other, IoOp::ExePath));
 }
 /// The path of the running executable ('/' separators on Windows). Unsupported on WASI, where a module
 /// has no path of its own.
@@ -959,11 +959,11 @@ pub fn exe_path() Result<String, IoError> {
         if n < cap {
             let mut out = String::new();
             path::push_wide(&mut out, buf[0..n as usize], true, IoOp::ExePath)?;
-            return Result::<String, IoError>::Ok(out);
+            return Ok(out);
         }
         cap = cap * 2;
     }
-    return Result::<String, IoError>::Err(IoError::new(IoErrorKind::LimitExceeded, IoOp::ExePath));
+    return Err(IoError::new(IoErrorKind::LimitExceeded, IoOp::ExePath));
 }
 /// The path of the running executable. Unsupported on WASI, where a module has no path of its own.
 @platform(wasm)
@@ -980,14 +980,14 @@ pub fn current_dir() Result<String, IoError> {
         let mut out = String::with_capacity(cap);
         if unsafe unistd::getcwd(out.spare_mut(cap) as *mut char, cap) != null {
             out.advance_len(unsafe cstring::strlen(out.as_ptr() as *const char));
-            return Result::<String, IoError>::Ok(out);
+            return Ok(out);
         }
         if errno::errno() != ERANGE {
             return fail::<String>(IoOp::CurrentDir);
         }
         cap = cap * 2;
     }
-    return Result::<String, IoError>::Err(IoError::new(IoErrorKind::LimitExceeded, IoOp::CurrentDir));
+    return Err(IoError::new(IoErrorKind::LimitExceeded, IoOp::CurrentDir));
 }
 /// The working directory ('/' separators on Windows).
 @platform(windows)
@@ -1005,11 +1005,11 @@ pub fn current_dir() Result<String, IoError> {
         if n < cap {
             let mut out = String::new();
             path::push_wide(&mut out, buf[0..n as usize], true, IoOp::CurrentDir)?;
-            return Result::<String, IoError>::Ok(out);
+            return Ok(out);
         }
         cap = n;
     }
-    return Result::<String, IoError>::Err(IoError::new(IoErrorKind::Other, IoOp::CurrentDir));
+    return Err(IoError::new(IoErrorKind::Other, IoOp::CurrentDir));
 }
 
 /// Make `path` the working directory of the whole process (every thread).
@@ -1019,7 +1019,7 @@ pub fn set_current_dir(path: str) Result<Unit, IoError> {
     if unsafe unistd::chdir(np.ptr()) != 0 {
         return fail::<Unit>(IoOp::SetCurrentDir);
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 /// Make `path` the working directory of the whole process (every thread).
 @platform(windows)
@@ -1028,7 +1028,7 @@ pub fn set_current_dir(path: str) Result<Unit, IoError> {
     if unsafe SetCurrentDirectoryW(np.ptr()) == 0 {
         return fail::<Unit>(IoOp::SetCurrentDir);
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 
 /// A new pipe: its read end and its write end. Bytes written to the second come out of the first;
@@ -1039,9 +1039,7 @@ pub fn pipe() Result<(fs::File, fs::File), IoError> {
     if unsafe pipe2(&mut fds[0], fcntl::O_CLOEXEC) != 0 {
         return fail::<(fs::File, fs::File)>(IoOp::Pipe);
     }
-    return Result::<(fs::File, fs::File), IoError>::Ok(
-        (unsafe fs::File::from_raw(fds[0]), unsafe fs::File::from_raw(fds[1])),
-    );
+    return Ok((unsafe fs::File::from_raw(fds[0]), unsafe fs::File::from_raw(fds[1])));
 }
 /// A new pipe: its read end and its write end. Bytes written to the second come out of the first;
 /// neither end is inherited by children unless passed as a `Redirect::Handle`. Unsupported on WASI.
@@ -1058,7 +1056,7 @@ pub fn pipe() Result<(fs::File, fs::File), IoError> {
             return fail::<(fs::File, fs::File)>(IoOp::Pipe);
         }
     }
-    return Result::<(fs::File, fs::File), IoError>::Ok(p);
+    return Ok(p);
 }
 /// A new pipe: its read end and its write end. Bytes written to the second come out of the first;
 /// neither end is inherited by children unless passed as a `Redirect::Handle`. Unsupported on WASI.
@@ -1069,7 +1067,7 @@ pub fn pipe() Result<(fs::File, fs::File), IoError> {
     if unsafe CreatePipe(&mut r, &mut w, null, 0) == 0 {
         return fail::<(fs::File, fs::File)>(IoOp::Pipe);
     }
-    return Result::<(fs::File, fs::File), IoError>::Ok((unsafe fs::File::from_raw(r), unsafe fs::File::from_raw(w)));
+    return Ok((unsafe fs::File::from_raw(r), unsafe fs::File::from_raw(w)));
 }
 /// A new pipe: its read end and its write end. Unsupported: WASI has no pipes.
 @platform(wasm)
@@ -1084,7 +1082,7 @@ pub fn peak_rss() Result<u64, IoError> {
     if unsafe getrusage(RUSAGE_SELF, &mut ru) != 0 {
         return fail::<u64>(IoOp::ResourceUsage);
     }
-    return Result::<u64, IoError>::Ok(ru.ru_opaque[0] as u64); // ru_maxrss, in bytes
+    return Ok(ru.ru_opaque[0] as u64); // ru_maxrss, in bytes
 }
 /// The largest resident set this process has had, in bytes. Unsupported on WASI.
 @platform(linux | android)
@@ -1093,7 +1091,7 @@ pub fn peak_rss() Result<u64, IoError> {
     if unsafe getrusage(RUSAGE_SELF, &mut ru) != 0 {
         return fail::<u64>(IoOp::ResourceUsage);
     }
-    return Result::<u64, IoError>::Ok(ru.ru_maxrss as u64 * 1024); // KiB
+    return Ok(ru.ru_maxrss as u64 * 1024); // KiB
 }
 /// The largest resident set this process has had, in bytes. Unsupported on WASI.
 @platform(windows)
@@ -1102,7 +1100,7 @@ pub fn peak_rss() Result<u64, IoError> {
     if unsafe K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, sizeof(PROCESS_MEMORY_COUNTERS) as u32) == 0 {
         return fail::<u64>(IoOp::ResourceUsage);
     }
-    return Result::<u64, IoError>::Ok(pmc.PeakWorkingSetSize as u64);
+    return Ok(pmc.PeakWorkingSetSize as u64);
 }
 /// The largest resident set this process has had, in bytes. Unsupported on WASI.
 @platform(wasm)
@@ -1121,21 +1119,21 @@ pub fn raise_open_file_limit(need: u64) Result<Unit, IoError> {
     }
     if r.rlim_cur != RLIM_INFINITY && r.rlim_cur < need {
         if r.rlim_max != RLIM_INFINITY && r.rlim_max < need {
-            return Result::<Unit, IoError>::Err(IoError::new(IoErrorKind::LimitExceeded, IoOp::SetLimit));
+            return Err(IoError::new(IoErrorKind::LimitExceeded, IoOp::SetLimit));
         }
         r.rlim_cur = need;
         if unsafe setrlimit(RLIMIT_NOFILE, &r) != 0 {
             return fail::<Unit>(IoOp::SetLimit);
         }
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 /// Raise this process's limit of open descriptors to at least `need`, within the hard limit:
 /// LimitExceeded when the hard limit is lower. Windows has no such limit on handles: it succeeds there.
 /// Unsupported on WASI.
 @platform(windows)
 pub fn raise_open_file_limit(_need: u64) Result<Unit, IoError> {
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 /// Raise this process's limit of open descriptors. Unsupported on WASI, which sets no such limit a module
 /// can change.
@@ -1147,12 +1145,12 @@ pub fn raise_open_file_limit(_need: u64) Result<Unit, IoError> {
 // ---- Helpers ----------------------------------------------------------------------------------------
 
 fn fail<T>(op: IoOp) Result<T, IoError> {
-    return Result::<T, IoError>::Err(error::last_error(op));
+    return Err(error::last_error(op));
 }
 
 @platform(!wasm)
 const fn invalid<T>(op: IoOp) Result<T, IoError> {
-    return Result::<T, IoError>::Err(IoError::new(IoErrorKind::InvalidInput, op));
+    return Err(IoError::new(IoErrorKind::InvalidInput, op));
 }
 
 extend<'a> Redirect<'a> {
@@ -1177,13 +1175,13 @@ extend<'a> Command<'a> {
     pub const fn new(argv: Slice<'a, str<'a>>) Command<'a> {
         return Command::<'a> {
             argv: argv,
-            program: Option::<str<'a>>::None,
-            env: Option::<Slice<'a, str<'a>>>::None,
-            cwd: Option::<str<'a>>::None,
-            command_line: Option::<str<'a>>::None,
-            stdin: Redirect::<'a>::Inherit,
-            stdout: Redirect::<'a>::Inherit,
-            stderr: Redirect::<'a>::Inherit,
+            program: None,
+            env: None,
+            cwd: None,
+            command_line: None,
+            stdin: Inherit,
+            stdout: Inherit,
+            stderr: Inherit,
         };
     }
 }
@@ -1191,7 +1189,7 @@ extend<'a> Command<'a> {
 extend Child {
     @platform(!wasm)
     fn adopt(raw: ChildRaw, pid: u32) Child {
-        return Child { raw: raw, pid: pid, status: Option::<ExitStatus>::None };
+        return Child { raw: raw, pid: pid, status: None };
     }
 
     /// The child's process id.
@@ -1207,9 +1205,9 @@ extend Child {
     @platform(macos | ios | linux | android)
     fn reap_if(self: &mut Child, pid: i32, st: i32) Option<ExitStatus> {
         if self.status.is_some() || self.raw != pid {
-            return Option::<ExitStatus>::None;
+            return None;
         }
-        self.status = Option::<ExitStatus>::Some(status_of(st));
+        self.status = Some(status_of(st));
         return self.status;
     }
 
@@ -1217,7 +1215,7 @@ extend Child {
     @platform(macos | ios | linux | android)
     pub fn wait(self: &mut Child) Result<ExitStatus, IoError> {
         if let Some(s) = self.status {
-            return Result::<ExitStatus, IoError>::Ok(s);
+            return Ok(s);
         }
         let mut st: i32 = 0;
         // Bounded by the signals that interrupt the wait.
@@ -1227,14 +1225,14 @@ extend Child {
             }
         }
         let s = status_of(st);
-        self.status = Option::<ExitStatus>::Some(s);
-        return Result::<ExitStatus, IoError>::Ok(s);
+        self.status = Some(s);
+        return Ok(s);
     }
     /// Block until the child ends: its status. A second wait returns the same status.
     @platform(windows)
     pub fn wait(self: &mut Child) Result<ExitStatus, IoError> {
         if let Some(s) = self.status {
-            return Result::<ExitStatus, IoError>::Ok(s);
+            return Ok(s);
         }
         if unsafe WaitForSingleObject(self.raw, INFINITE) != WAIT_OBJECT_0 {
             return fail::<ExitStatus>(IoOp::Wait);
@@ -1251,18 +1249,18 @@ extend Child {
     @platform(macos | ios | linux | android)
     pub fn try_wait(self: &mut Child) Result<Option<ExitStatus>, IoError> {
         if self.status.is_some() {
-            return Result::<Option<ExitStatus>, IoError>::Ok(self.status);
+            return Ok(self.status);
         }
         let mut st: i32 = 0;
         // Bounded by the signals that interrupt the wait.
         loop {
             let r = unsafe waitpid(self.raw, &mut st, WNOHANG);
             if r == self.raw {
-                self.status = Option::<ExitStatus>::Some(status_of(st));
-                return Result::<Option<ExitStatus>, IoError>::Ok(self.status);
+                self.status = Some(status_of(st));
+                return Ok(self.status);
             }
             if r == 0 {
-                return Result::<Option<ExitStatus>, IoError>::Ok(Option::<ExitStatus>::None);
+                return Ok(None);
             }
             if !error::interrupted() {
                 return fail::<Option<ExitStatus>>(IoOp::Wait);
@@ -1273,17 +1271,17 @@ extend Child {
     @platform(windows)
     pub fn try_wait(self: &mut Child) Result<Option<ExitStatus>, IoError> {
         if self.status.is_some() {
-            return Result::<Option<ExitStatus>, IoError>::Ok(self.status);
+            return Ok(self.status);
         }
         let w = unsafe WaitForSingleObject(self.raw, 0);
         if w == WAIT_TIMEOUT {
-            return Result::<Option<ExitStatus>, IoError>::Ok(Option::<ExitStatus>::None);
+            return Ok(None);
         }
         if w != WAIT_OBJECT_0 {
             return fail::<Option<ExitStatus>>(IoOp::Wait);
         }
         let s = self.exit_code()?;
-        return Result::<Option<ExitStatus>, IoError>::Ok(Option::<ExitStatus>::Some(s));
+        return Ok(Some(s));
     }
     /// The child's status when it has ended. Unsupported: WASI has no processes.
     @platform(wasm)
@@ -1304,8 +1302,8 @@ extend Child {
             return fail::<ExitStatus>(IoOp::Wait);
         }
         let s = ExitStatus::Code(code as i32);
-        self.status = Option::<ExitStatus>::Some(s);
-        return Result::<ExitStatus, IoError>::Ok(s);
+        self.status = Some(s);
+        return Ok(s);
     }
 
     /// End the child at once (SIGKILL; TerminateProcess with exit code 137 on Windows). It must still be
@@ -1315,7 +1313,7 @@ extend Child {
         if self.status.is_none() && unsafe c_kill(self.raw, SIGKILL) != 0 {
             return fail::<Unit>(IoOp::Kill);
         }
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
     /// End the child at once (SIGKILL; TerminateProcess with exit code 137 on Windows). It must still be
     /// waited for. Succeeds without effect once the child was reaped.
@@ -1327,7 +1325,7 @@ extend Child {
                 return fail::<Unit>(IoOp::Kill);
             }
         }
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
     /// End the child at once. Unsupported: WASI has no processes.
     @platform(wasm)

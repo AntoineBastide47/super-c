@@ -66,9 +66,9 @@ fn io_short_unit() i64 {
     let w = unsafe unistd::write(dst, &buf[0], 10);
     let c2 = unsafe unistd::close(dst);
     return if n == 10 && w == 10 && c1 == 0 && c2 == 0 {
-        1i64;
+        1i64
     } else {
-        0i64;
+        0i64
     };
 }
 
@@ -126,10 +126,10 @@ fn dir_setup(name: str) bool {
     d.push_str(name);
     d.push_byte(b'-');
     d.push_i64(process::pid().unwrap_or(1));
-    if d.len() >= 1024 || fs::mkdir_all(d.as_str()).is_err() {
+    if d.len() >= 1024 || fs::mkdir_all(&d).is_err() {
         let mut what = String::from_str("cannot create ");
         what.push_string(&d);
-        bench::fail(what.as_str());
+        bench::fail(&what);
         return false;
     }
     unsafe {
@@ -142,7 +142,7 @@ fn dir_setup(name: str) bool {
 @platform(macos | linux)
 fn dir_teardown() {
     let d = String::from_str(unsafe G_DIR);
-    let _ = fs::remove_all(d.as_str());
+    let _ = fs::remove_all(&d);
 }
 
 // One durable unit, identical in every compared lane: create a file, write PAYLOAD zero bytes, make it
@@ -161,9 +161,9 @@ fn io_durable_unit(id: i64) i64 {
     let d = durable(fd);
     let c = unsafe unistd::close(fd);
     return if w == PAYLOAD as isize && d == 0 && c == 0 {
-        1i64;
+        1i64
     } else {
-        0i64;
+        0i64
     };
 }
 
@@ -185,11 +185,11 @@ fn one_round(tasks: i64, io_share: i64, durable_lane: bool, lat: &LatSink) i64 {
                     fn() i64 {
                         return io_durable_unit(id);
                     },
-                );
+                )
             } else if does_io {
-                io_short_task(&k);
+                io_short_task(&k)
             } else {
-                compute_task(YIELDS);
+                compute_task(YIELDS)
             };
             let _ = o.get().fetch_add(ok, atomics::MemoryOrder::Relaxed);
             w.done();
@@ -218,10 +218,10 @@ fn pool_note(b: &mut bench::Bencher, lat: &LatSink) {
     note.push_str(" admission waits, ");
     note.push_u64(st.cache_bytes as u64);
     note.push_str(" B of records retained");
-    b.note(note.as_str());
+    b.note(&note);
     let mut g = lat.get().lock();
     let t = bench::dist_text("call latency", "us", g.get_mut());
-    b.note_more(t.as_str());
+    b.note_more(&t);
 }
 
 fn run_lane(b: &mut bench::Bencher, io_share: i64) {
@@ -272,7 +272,7 @@ pub fn io_durable(b: &mut bench::Bencher) {
     let mut note = String::from_str("concurrency limit ");
     note.push_u64(blocking::MAX_THREADS as u64);
     note.push_str(" blocking threads");
-    b.note(note.as_str());
+    b.note(&note);
     let lat = lat_sink(0);
     while b.running() {
         let ok = one_round(DURABLE_TASKS, 4, true, &lat);

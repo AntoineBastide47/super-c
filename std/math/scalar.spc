@@ -359,12 +359,12 @@ extend f32 as Float {
     pub fn modf(self: f32) (f32, f32) {
         let mut i: f32 = 0.0;
         let f = unsafe modff(self, &mut i);
-        return f, i;
+        return (f, i);
     }
     pub fn frexp(self: f32) (f32, i32) {
         let mut e: i32 = 0;
         let m = unsafe frexpf(self, &mut e);
-        return m, e;
+        return (m, e);
     }
     pub fn ldexp(self: f32, e: i32) f32 {
         return unsafe ldexpf(self, e);
@@ -403,9 +403,9 @@ extend f32 as Float {
             return u64::MAX;
         }
         return if a > b {
-            a - b;
+            a - b
         } else {
-            b - a;
+            b - a
         };
     }
     pub fn epsilon() f32 {
@@ -599,12 +599,12 @@ extend f64 as Float {
     pub fn modf(self: f64) (f64, f64) {
         let mut i: f64 = 0.0;
         let f = unsafe modf(self, &mut i);
-        return f, i;
+        return (f, i);
     }
     pub fn frexp(self: f64) (f64, i32) {
         let mut e: i32 = 0;
         let m = unsafe frexp(self, &mut e);
-        return m, e;
+        return (m, e);
     }
     pub fn ldexp(self: f64, e: i32) f64 {
         return unsafe ldexp(self, e);
@@ -643,9 +643,9 @@ extend f64 as Float {
             return u64::MAX;
         }
         return if a > b {
-            a - b;
+            a - b
         } else {
-            b - a;
+            b - a
         };
     }
     pub fn epsilon() f64 {
@@ -2518,23 +2518,23 @@ extend<const E: usize, const F: usize, const FAM: sf::FloatFamily> sf::Float<E, 
     }
     pub fn modf(self: sf::Float<E, F, FAM>) (sf::Float<E, F, FAM>, sf::Float<E, F, FAM>) {
         if self.is_infinite() {
-            return sf::Float::<E, F, FAM>::zero().copysign(&self), self;
+            return (sf::Float::<E, F, FAM>::zero().copysign(&self), self);
         }
-        return self.fract().copysign(&self), self.trunc();
+        return (self.fract().copysign(&self), self.trunc());
     }
     pub fn frexp(self: sf::Float<E, F, FAM>) (sf::Float<E, F, FAM>, i32) {
         if self.is_nan() || self.is_infinite() || self.is_zero() {
-            return self, 0;
+            return (self, 0);
         }
         // The exponent of the leading bit, plus one.
         let (_, eb, fr) = self.to_parts();
         let bias = (1i64 << (E - 1) as i64) - 1;
         let e = if eb == 0 {
-            1 - bias - F as i64 + fr.bit_length() as i64;
+            1 - bias - F as i64 + fr.bit_length() as i64
         } else {
-            eb as i64 - bias + 1;
+            eb as i64 - bias + 1
         };
-        return self.scalbn(-e), e as i32;
+        return (self.scalbn(-e), e as i32);
     }
     pub fn ldexp(self: sf::Float<E, F, FAM>, e: i32) sf::Float<E, F, FAM> {
         return self.scalbn(e);
@@ -2585,9 +2585,9 @@ extend<const E: usize, const F: usize, const FAM: sf::FloatFamily> sf::Float<E, 
         let a = self.to_raw();
         let b = other.to_raw();
         let d = if a > b {
-            a - b;
+            a - b
         } else {
-            b - a;
+            b - a
         };
         if d.bit_length() > 64 {
             return u64::MAX;

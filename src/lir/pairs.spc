@@ -80,7 +80,7 @@ extend Pairs {
                     self.types.push(t);
                 }
             }
-            let nk = out.add_block(self.types.as_slice()) as usize;
+            let nk = out.add_block(&self.types) as usize;
             out.blocks.index_mut(nk).flags = bk.flags;
             let mut p = out.blocks[nk].param_start;
             for q in bk.param_start..bk.param_start + bk.param_len as u32 {
@@ -234,7 +234,7 @@ extend Pairs {
                 vs.push(self.arg(b, out, i, a));
             }
         }
-        return out.edge(tk, vs.as_slice());
+        return out.edge(tk, &vs);
     }
 
     // The new pool list of the `n` values at `at` of `b` (a call's arguments, a vector operation's or an
@@ -244,7 +244,7 @@ extend Pairs {
         for q in 0..n {
             vs.push(self.arg(b, out, i, b.pool[(at + q) as usize]));
         }
-        return out.pool_list(vs.as_slice());
+        return out.pool_list(&vs);
     }
 
     // Instruction `i` of `b` into `out`.
@@ -279,7 +279,7 @@ extend Pairs {
             for q in 0..t.aux as u32 + 1 {
                 es.push(self.edge(b, out, i, b.switch_edge(t, q)));
             }
-            u.c = out.pool_list(es.as_slice());
+            u.c = out.pool_list(&es);
         }
         let v = self.put(b, out, i, u);
         self.lo[x] = v;
@@ -299,9 +299,9 @@ extend Pairs {
         if op == O_TRUNC && b.type_of(t.a) == T_I128 {
             let l = self.lo[self.ix(t.a)];
             self.lo[x] = if t.ty == T_I64 {
-                l;
+                l
             } else {
-                self.un(b, out, i, O_TRUNC, t.ty, l);
+                self.un(b, out, i, O_TRUNC, t.ty, l)
             };
             return true;
         }
@@ -323,9 +323,9 @@ extend Pairs {
             }
             // The low words compare unsigned whatever the order's sign.
             let uc = if t.aux >= C_SLT && t.aux <= C_SGE {
-                t.aux + 4;
+                t.aux + 4
             } else {
-                t.aux;
+                t.aux
             };
             let he = self.cmp(b, out, i, C_EQ, ah, bh);
             let lc = self.cmp(b, out, i, uc, al, bl);
@@ -368,14 +368,14 @@ extend Pairs {
         } else if op == O_ZEXT || op == O_SEXT {
             let a = self.val(t.a);
             l = if b.type_of(t.a) == T_I64 {
-                a;
+                a
             } else {
-                self.un(b, out, i, op, T_I64, a);
+                self.un(b, out, i, op, T_I64, a)
             };
             h = if op == O_ZEXT {
-                self.k64(b, out, i, 0);
+                self.k64(b, out, i, 0)
             } else {
-                self.bin(b, out, i, O_ASHR, T_I64, l, self.k64(b, out, i, 63));
+                self.bin(b, out, i, O_ASHR, T_I64, l, self.k64(b, out, i, 63))
             };
         } else if op == O_SELECT {
             let c = self.val(t.a);
@@ -447,17 +447,17 @@ extend Pairs {
             let cross = self.bin(b, out, i, O_LSHR, T_I64, self.bin(b, out, i, O_LSHR, T_I64, l, one), r);
             let hw = self.bin(b, out, i, O_OR, T_I64, self.bin(b, out, i, O_SHL, T_I64, h, s), cross);
             let z = self.k64(b, out, i, 0);
-            return self.sel(b, out, i, T_I64, big, z, lw), self.sel(b, out, i, T_I64, big, lw, hw);
+            return (self.sel(b, out, i, T_I64, big, z, lw), self.sel(b, out, i, T_I64, big, lw, hw));
         }
         let hw = self.bin(b, out, i, op, T_I64, h, s);
         let cross = self.bin(b, out, i, O_SHL, T_I64, self.bin(b, out, i, O_SHL, T_I64, h, one), r);
         let lw = self.bin(b, out, i, O_OR, T_I64, self.bin(b, out, i, O_LSHR, T_I64, l, s), cross);
         let fill = if op == O_ASHR {
-            self.bin(b, out, i, O_ASHR, T_I64, h, self.k64(b, out, i, 63));
+            self.bin(b, out, i, O_ASHR, T_I64, h, self.k64(b, out, i, 63))
         } else {
-            self.k64(b, out, i, 0);
+            self.k64(b, out, i, 0)
         };
-        return self.sel(b, out, i, T_I64, big, hw, lw), self.sel(b, out, i, T_I64, big, fill, hw);
+        return (self.sel(b, out, i, T_I64, big, hw, lw), self.sel(b, out, i, T_I64, big, fill, hw));
     }
 }
 

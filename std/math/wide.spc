@@ -46,9 +46,9 @@ const fn wfrom_u64<const W: usize>(v: u64) Wf<W> {
 
 const fn wfrom_i64<const W: usize>(v: i64) Wf<W> {
     let mag = if v < 0 {
-        0u64.wrapping_sub(v as u64);
+        0u64.wrapping_sub(v as u64)
     } else {
-        v as u64;
+        v as u64
     };
     let a = wfrom_u64::<W>(mag);
     return Wf::<W> { neg: v < 0 && !a.m.is_zero(), e: a.e, m: a.m };
@@ -78,18 +78,18 @@ const fn wscale<const W: usize>(a: Wf<W>, k: i64) Wf<W> {
 const fn wcmp_abs<const W: usize>(a: Wf<W>, b: Wf<W>) i32 {
     if a.m.is_zero() || b.m.is_zero() {
         return if a.m.is_zero() && b.m.is_zero() {
-            0;
+            0
         } else if a.m.is_zero() {
-            -1;
+            -1
         } else {
-            1;
+            1
         };
     }
     if a.e != b.e {
         return if a.e < b.e {
-            -1;
+            -1
         } else {
-            1;
+            1
         };
     }
     return a.m.cmp(&b.m);
@@ -122,14 +122,14 @@ const fn wadd<const W: usize>(a: Wf<W>, b: Wf<W>) Wf<W> {
     }
     let swap = wcmp_abs(a, b) < 0;
     let x = if swap {
-        b;
+        b
     } else {
-        a;
+        a
     };
     let y = if swap {
-        a;
+        a
     } else {
-        b;
+        b
     };
     let d = (x.e - y.e) as u64;
     let xs = UInt::<{2 * W + 2}>::cast_unsigned(&x.m) << W;
@@ -138,9 +138,9 @@ const fn wadd<const W: usize>(a: Wf<W>, b: Wf<W>) Wf<W> {
         ys = UInt::<{2 * W + 2}>::cast_unsigned(&y.m) << W >> d as usize;
     }
     let s = if x.neg == y.neg {
-        xs + ys;
+        xs + ys
     } else {
-        xs - ys;
+        xs - ys
     };
     return wnorm::<W, {2 * W + 2}>(x.neg, x.e - W as i64, s);
 }
@@ -191,9 +191,9 @@ const fn wsqrt<const W: usize>(a: Wf<W>) Wf<W> {
         return a;
     }
     let s: usize = if (a.e - W as i64) % 2 == 0 {
-        W;
+        W
     } else {
-        W - 1;
+        W - 1
     };
     let mm = UInt::<{2 * W}>::cast_unsigned(&a.m) << s;
     // Newton's iteration from above: x0 >= sqrt(mm) decreases to floor(sqrt(mm)).
@@ -221,9 +221,9 @@ const fn wround_i64<const W: usize>(a: Wf<W>) i64 {
         v = (a.m >> sh).to_u64() + a.m.bit(sh - 1) as u64;
     }
     return if a.neg {
-        -(v as i64);
+        -(v as i64)
     } else {
-        v as i64;
+        v as i64
     };
 }
 
@@ -363,16 +363,16 @@ fn cos_w<const W: usize>(r: Wf<W>) Wf<W> {
 // truncation of r.
 fn reduce_pio2<const W: usize>(x: Wf<W>) (u64, Wf<W>) {
     if wcmp_abs(x, wpi4::<W>()) <= 0 {
-        return 0, x;
+        return (0, x);
     }
     let tz = x.m.trailing_zeros();
     let low = x.m >> tz;
     let mi = UInt::<{3 * W}>::cast_unsigned(&low);
     let ex = x.e + tz as i64;
     let i0: i64 = if ex - 1 > 1 {
-        ex - 1;
+        ex - 1
     } else {
-        1;
+        1
     };
     let c = two_over_pi_bits::<{3 * W}>(i0 as u64);
     let mut hi = UInt::<{3 * W}>::zero();
@@ -387,7 +387,7 @@ fn reduce_pio2<const W: usize>(x: Wf<W>) (u64, Wf<W>) {
         f = wsub(f, wone::<W>());
         q += 1;
     }
-    return q & 3, wmul(f, wscale(wpi4::<W>(), 1));
+    return (q & 3, wmul(f, wscale(wpi4::<W>(), 1)));
 }
 
 // atan(x) for x >= 0: past 1, pi/2 - atan(1/x); then 8 halvings atan(t) = 2 atan(t / (1 + sqrt(1 + t^2)))
@@ -396,9 +396,9 @@ fn atan_w<const W: usize>(x: Wf<W>) Wf<W> {
     let one = wone::<W>();
     let inv = wcmp_abs(x, one) > 0;
     let mut t = if inv {
-        wdiv(one, x);
+        wdiv(one, x)
     } else {
-        x;
+        x
     };
     for _ in 0..8 {
         t = wdiv(t, wadd(one, wsqrt(wadd(one, wmul(t, t)))));
@@ -442,9 +442,9 @@ fn acos_w<const W: usize>(x: Wf<W>) Wf<W> {
     if wbelow(x, -1) {
         let a = asin_core(wabs(x));
         return if x.neg {
-            wadd(pi2, a);
+            wadd(pi2, a)
         } else {
-            wsub(pi2, a);
+            wsub(pi2, a)
         };
     }
     let one = wone::<W>();
@@ -460,17 +460,17 @@ fn atan2_w<const W: usize>(y: Wf<W>, x: Wf<W>) Wf<W> {
     let ay = wabs(y);
     let ax = wabs(x);
     let mut a = if wcmp_abs(ay, ax) <= 0 {
-        atan_w(wdiv(ay, ax));
+        atan_w(wdiv(ay, ax))
     } else {
-        wsub(wscale(wpi4::<W>(), 1), atan_w(wdiv(ax, ay)));
+        wsub(wscale(wpi4::<W>(), 1), atan_w(wdiv(ax, ay)))
     };
     if x.neg {
         a = wsub(wscale(wpi4::<W>(), 2), a);
     }
     return if y.neg {
-        wneg(a);
+        wneg(a)
     } else {
-        a;
+        a
     };
 }
 
@@ -645,9 +645,9 @@ pub fn wide_exp<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>(x
     }
     if x.is_infinite() {
         return if x.is_negative() {
-            Float::<E, F, FAMILY>::zero();
+            Float::<E, F, FAMILY>::zero()
         } else {
-            x;
+            x
         };
     }
     return exp_of::<E, F, FAMILY>(to_w(x), false);
@@ -666,9 +666,9 @@ pub fn wide_exp2<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>(
     }
     if x.is_infinite() {
         return if x.is_negative() {
-            Float::<E, F, FAMILY>::zero();
+            Float::<E, F, FAMILY>::zero()
         } else {
-            x;
+            x
         };
     }
     return exp_of::<E, F, FAMILY>(wmul(to_w(x), wln2::<{F + 66}>()), false);
@@ -786,9 +786,9 @@ fn trig<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>(x: Float<
     if which == 0 {
         // sin: odd in x.
         v = if q % 2 == 0 {
-            sin_w(r);
+            sin_w(r)
         } else {
-            cos_w(r);
+            cos_w(r)
         };
         if q >= 2 {
             v = wneg(v);
@@ -799,9 +799,9 @@ fn trig<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>(x: Float<
     } else if which == 1 {
         // cos: even in x.
         v = if q % 2 == 0 {
-            cos_w(r);
+            cos_w(r)
         } else {
-            sin_w(r);
+            sin_w(r)
         };
         if q == 1 || q == 2 {
             v = wneg(v);
@@ -809,9 +809,9 @@ fn trig<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>(x: Float<
     } else {
         // tan: odd in x, of period pi.
         v = if q % 2 == 0 {
-            wdiv(sin_w(r), cos_w(r));
+            wdiv(sin_w(r), cos_w(r))
         } else {
-            wneg(wdiv(cos_w(r), sin_w(r)));
+            wneg(wdiv(cos_w(r), sin_w(r)))
         };
         if w.neg {
             v = wneg(v);
@@ -1022,9 +1022,9 @@ pub fn wide_tanh<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>(
     // Past F + 8, 1 - tanh |x| < 2^-(F + 2): the nearest value is 1.
     if x.is_infinite() || wcmp_abs(a, wfrom_u64::<{F + 66}>(F as u64 + 8)) > 0 {
         return if w.neg {
-            one.neg();
+            one.neg()
         } else {
-            one;
+            one
         };
     }
     let v = tanh_w(a);

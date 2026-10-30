@@ -169,7 +169,7 @@ fn build_of_a_directory_builds_its_project() {
     assert(r.ok(), "the project of the directory builds");
     // Windows names an executable `<o>.exe` (`exe_name`).
     let out = format("{}/out-app{}", root, unsafe str::from_cstr(cli::binext()));
-    assert(cli::read_text(out.as_str()).len() > 0, "-o names a path from the caller");
+    assert(cli::read_text(&out).len() > 0, "-o names a path from the caller");
     // A directory given as a file to test is no source file (Linux opens one: it must not be read).
     let s = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "test app");
     assert(s.exit != 0 && s.out_has("cannot open module"), "a directory script is reported, not read");
@@ -240,7 +240,7 @@ fn std_dir_env_names_the_std_tree() {
     let mut missing = String::new();
     missing.format_into("{}/missing", root);
     // The emit stamp records the tree: the same out-dir does not reuse the first build.
-    let bad = cli::superc_env_in(root, "SC_STD_DIR", missing.as_str(), "build");
+    let bad = cli::superc_env_in(root, "SC_STD_DIR", &missing, "build");
     assert(bad.exit == 1, "a missing tree fails the build");
     assert(bad.out_has("cannot find the standard library"), "the build names the missing tree");
 }
@@ -253,17 +253,17 @@ fn a_missing_std_dir_is_one_error() {
     let root = p.dir();
     let mut missing = String::new();
     missing.format_into("{}/missing", root);
-    let r = cli::superc_env_in(root, "SC_STD_DIR", missing.as_str(), "build main.spc");
+    let r = cli::superc_env_in(root, "SC_STD_DIR", &missing, "build main.spc");
     let msg = format(
         "error: cannot find the standard library: '{}' is not a directory\n  = note: std is looked up beside the compiler and in its two parent directories; SC_STD_DIR names another one\n",
         missing.as_str(),
     );
     let out = r.text();
-    if r.exit != 1 || out.find(msg.as_str()) < 0 {
+    if r.exit != 1 || out.find(&msg) < 0 {
         r.show();
     }
     assert(r.exit == 1, "the build exits 1");
-    assert(out.find(msg.as_str()) >= 0, "the error names the directory and where std is looked up");
+    assert(out.find(&msg) >= 0, "the error names the directory and where std is looked up");
     let first = out.find("cannot find the standard library");
     let rest = out.slice(first as usize + 1, out.len());
     assert(rest.find("cannot find the standard library") < 0, "the error appears once");

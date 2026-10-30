@@ -149,9 +149,9 @@ fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId
     let sp = unsafe (*a).at_const(pnode).span;
     let tnode = unsafe (*a).at_const(pnode).as_data.parameter.ty;
     let tk = if tnode != NODE_NONE {
-        unsafe (*a).at_const(tnode).kind;
+        unsafe (*a).at_const(tnode).kind
     } else {
-        NodeKind::NODE_NONE_KIND;
+        NodeKind::NODE_NONE_KIND
     };
     if tnode == NODE_NONE || tk != NodeKind::NODE_REFERENCE_TYPE {
         test_err(p, m, sp, "a '@test' parameter must be a reference to the module fixture or the global env");
@@ -364,14 +364,14 @@ pub(package) fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
             let sp = unsafe (*p.module_ast_const(m as ModuleId)).at_const(at.owner).span;
             let global = at.arg != 0;
             let want = if global {
-                plan.genv_type;
+                plan.genv_type
             } else {
-                plan.fx_type[m];
+                plan.fx_type[m]
             };
             let has_init = if global {
-                plan.genv_init;
+                plan.genv_init
             } else {
-                plan.fx_init[m];
+                plan.fx_init[m]
             };
             if has_init == NODE_NONE || global && plan.genv_mod != m as ModuleId {
                 test_err(
@@ -379,9 +379,9 @@ pub(package) fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                     m as ModuleId,
                     sp,
                     if global {
-                        "'@test_free(global)' has no matching '@test_init(global)' in this module";
+                        "'@test_free(global)' has no matching '@test_init(global)' in this module"
                     } else {
-                        "'@test_free' has no matching '@test_init' in this module";
+                        "'@test_free' has no matching '@test_init' in this module"
                     },
                 );
                 continue;
@@ -392,9 +392,9 @@ pub(package) fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                     m as ModuleId,
                     sp,
                     if global {
-                        "'@test_free(global)' must be 'fn(&mut <fixture>)' returning nothing";
+                        "'@test_free(global)' must be 'fn(&mut <fixture>)' returning nothing"
                     } else {
-                        "'@test_free' must be 'fn(&mut <fixture>)' returning nothing";
+                        "'@test_free' must be 'fn(&mut <fixture>)' returning nothing"
                     },
                 );
                 continue;
@@ -471,14 +471,14 @@ pub(package) fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 continue;
             }
             let fx = if ext != NODE_NONE {
-                suite;
+                suite
             } else {
-                plan.fx_type[m];
+                plan.fx_type[m]
             };
             let genv_ty = if plan.genv_init != NODE_NONE {
-                plan.genv_type;
+                plan.genv_type
             } else {
-                DefId { module: 0, node: NODE_NONE };
+                DefId { module: 0, node: NODE_NONE }
             };
             let mut wants: u8 = 0;
             let mut bad = false;
@@ -518,9 +518,9 @@ pub(package) fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 suite_free = plan.suites[si2 as usize].fre;
             }
             let case_suite = if ext != NODE_NONE && (wants & 1) != 0 {
-                suite;
+                suite
             } else {
-                DefId { module: 0, node: NODE_NONE };
+                DefId { module: 0, node: NODE_NONE }
             };
             plan.cases.push(
                 TestCase {
@@ -603,9 +603,9 @@ pub(package) fn test_main_lir(p: &loader::Package, plan: &TestPlan, ptr: u32, ou
         out.push_str("00\n");
     }
     let al = if ptr == 4 {
-        2;
+        2
     } else {
-        3;
+        3
     };
     out.format_into("data @SC_NAMES size {} align {} ro", n as u32 * ptr, al);
     for ci in 0..n {
@@ -641,7 +641,7 @@ fn test_case_name(p: &loader::Package, tc: TestCase, out: &mut String) {
     let a = p.module_ast_const(tc.mod);
     let nmnode = unsafe (*a).ext_name(tc.func);
     let nm = unsafe (*a).at_const(nmnode).as_data.name.text;
-    out.push_str(p.modules[tc.mod as usize].path.as_str());
+    out.push_str(&p.modules[tc.mod as usize].path);
     out.push_str("::");
     if tc.suite.node != NODE_NONE {
         let sa = p.module_ast_const(tc.suite.module);
@@ -683,9 +683,9 @@ pub(package) fn native_link_and_run(
 ) i32 {
     let root = p.gen_root.as_str();
     let what = if out_bin.len() != 0 {
-        "build";
+        "build"
     } else {
-        "test build";
+        "test build"
     };
     let mut outp = String::new();
     if out_bin.len() != 0 {
@@ -711,7 +711,7 @@ pub(package) fn native_link_and_run(
     }
     push_ldflags(&mut args, build_out_path(root, "__ldflags", "").as_str());
     let mut why = String::new();
-    let lr = lk::link_args(target, p.arch, &args, bsys::profile_strip(p.profile.as_str()), p.jobs, &mut why);
+    let lr = lk::link_args(target, p.arch, &args, bsys::profile_strip(&p.profile), p.jobs, &mut why);
     if p.jobs != 1 {
         prt::shutdown(); // the link may have started the pool
     }
@@ -723,7 +723,7 @@ pub(package) fn native_link_and_run(
     if out_bin.len() != 0 {
         return 0;
     }
-    return test_run_runner(topts, outp.as_str());
+    return test_run_runner(topts, &outp);
 }
 
 /// Run the linked test runner `bin` with the pool, fork, filter, quiet and shard options in `topts`.
@@ -735,7 +735,7 @@ pub(package) fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
     if unsafe (*topts).jobs > 0 {
         let mut jb = Buf64 {};
         unsafe stdio::snprintf(&mut jb[0], 64, "--jobs=%d".ptr() as *const char, unsafe (*topts).jobs);
-        run.push(String::from_str(str::from_cbuf(jb.as_slice())));
+        run.push(String::from_str(str::from_cbuf(&jb)));
     }
     if unsafe (*topts).no_fork {
         run.push(String::from_str("--no-fork"));
@@ -750,12 +750,12 @@ pub(package) fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
     }
     let mut tb = Buf64 {};
     let tsec = if unsafe (*topts).timeout < 0 {
-        DEFAULT_TEST_TIMEOUT;
+        DEFAULT_TEST_TIMEOUT
     } else {
-        unsafe (*topts).timeout;
+        unsafe (*topts).timeout
     };
     unsafe stdio::snprintf(&mut tb[0], 64, "--timeout=%d".ptr() as *const char, tsec);
-    run.push(String::from_str(str::from_cbuf(tb.as_slice())));
+    run.push(String::from_str(str::from_cbuf(&tb)));
     let dur = unsafe (*topts).durations;
     // The shards balance by the recorded durations when the file exists.
     if dur != null && file_mtime(unsafe str::from_cstr(dur)) != 0 {
@@ -765,9 +765,9 @@ pub(package) fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
     }
     // A recording run merges its times into its own file when given one, else into the durations file.
     let rec = if unsafe (*topts).record_to != null {
-        unsafe (*topts).record_to;
+        unsafe (*topts).record_to
     } else {
-        dur;
+        dur
     };
     if unsafe (*topts).record && rec != null {
         let mut r = String::from_str("--record=");
@@ -783,7 +783,7 @@ pub(package) fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
             unsafe (*topts).shard,
             unsafe (*topts).shards,
         );
-        run.push(String::from_str(str::from_cbuf(sb.as_slice())));
+        run.push(String::from_str(str::from_cbuf(&sb)));
     }
     unsafe shim::sc_jobserver_release_claim();
     // The LIR check covers the bundle this build lowered; a compile a test runs is a build of its own.
@@ -812,9 +812,9 @@ extend TestPlan {
             ok: true,
         };
         let m = if count != 0 {
-            count;
+            count
         } else {
-            1 as usize;
+            1 as usize
         };
         for i in 0..m {
             pl.fx_init.push(NODE_NONE);

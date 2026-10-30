@@ -225,7 +225,7 @@ extend CancelSource {
     pub fn new() (CancelSource, CancelToken) {
         let sh = new_shared();
         let tok = CancelToken::wrap(sh.clone());
-        return CancelSource { shared: sh }, tok;
+        return (CancelSource { shared: sh }, tok);
     }
     /// Another handle to the same source.
     pub fn clone(self: &CancelSource) CancelSource {
@@ -332,9 +332,9 @@ extend CancelToken {
         let mut g = Global {};
         m = if unsafe (*mb).head == null {
             unsafe (*mb).hook = membership_release;
-            inl;
+            inl
         } else {
-            (unsafe g.alloc(sizeof(Member), alignof(Member))) as *mut Member;
+            (unsafe g.alloc(sizeof(Member), alignof(Member))) as *mut Member
         };
         unsafe m[0] = Member {
             src: self.shared.clone(),

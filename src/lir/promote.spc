@@ -529,9 +529,9 @@ extend Promoter {
                 } else if t.op == O_PTRADD && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE && self.dslot[t.a as usize] != NONE {
                     // A constant index is a constant offset (the optimizer keeps a slot address's index).
                     let ix = if t.b == VNONE {
-                        0i64;
+                        0i64
                     } else {
-                        const_int(b, t.b);
+                        const_int(b, t.b)
                     };
                     if ix >= 0 {
                         self.dslot[i] = self.dslot[t.a as usize];
@@ -597,14 +597,14 @@ extend Promoter {
             let n = const_int(b, t.c);
             let d = self.slot_of(t.a);
             let sv = if op == O_MEMCPY {
-                self.slot_of(t.b);
+                self.slot_of(t.b)
             } else {
-                NONE;
+                NONE
             };
             let byte = if op == O_MEMSET {
-                const_int(b, t.b);
+                const_int(b, t.b)
             } else {
-                0i64;
+                0i64
             };
             if n <= 0 || n > 4096 || !reached || d != NONE && d == sv || op == O_MEMSET && byte < 0 {
                 self.reject(t.a);
@@ -616,15 +616,15 @@ extend Promoter {
                     inst: i,
                     dslot: d,
                     doff: if d != NONE {
-                        self.doff[t.a as usize];
+                        self.doff[t.a as usize]
                     } else {
-                        0i64;
+                        0i64
                     },
                     sslot: sv,
                     soff: if sv != NONE {
-                        self.doff[t.b as usize];
+                        self.doff[t.b as usize]
                     } else {
-                        0i64;
+                        0i64
                     },
                     size: n,
                     byte: byte as u64,
@@ -699,9 +699,9 @@ extend Promoter {
                 let cp = self.copies[c];
                 for side in 0..2 {
                     let (cs, co) = if side == 0 {
-                        (cp.dslot, cp.doff);
+                        (cp.dslot, cp.doff)
                     } else {
-                        (cp.sslot, cp.soff);
+                        (cp.sslot, cp.soff)
                     };
                     if cs == NONE || !self.cand[cs as usize] {
                         continue;
@@ -749,9 +749,9 @@ extend Promoter {
                 let s = self.slot_of(t.a);
                 if self.cand[s as usize] {
                     let ty = if t.op == O_LOAD {
-                        t.ty;
+                        t.ty
                     } else {
-                        b.type_of(t.b);
+                        b.type_of(t.b)
                     };
                     let off = self.doff[t.a as usize] + (t.c as i32) as i64;
                     self.fid[i] = self.field_at(s, off, ty);
@@ -886,9 +886,9 @@ extend Promoter {
             let cp = self.copies[c];
             for side in 0..2 {
                 let (cs, co) = if side == 0 {
-                    (cp.dslot, cp.doff);
+                    (cp.dslot, cp.doff)
                 } else {
-                    (cp.sslot, cp.soff);
+                    (cp.sslot, cp.soff)
                 };
                 if cs != s {
                     continue;
@@ -920,13 +920,13 @@ extend Promoter {
                         w /= 2;
                     }
                     let ty = if w == 8 {
-                        T_I64;
+                        T_I64
                     } else if w == 4 {
-                        T_I32;
+                        T_I32
                     } else if w == 2 {
-                        T_I16;
+                        T_I16
                     } else {
-                        T_I8;
+                        T_I8
                     };
                     self.gap.push(Fld { off: p, ty: ty });
                     p += w;
@@ -952,10 +952,10 @@ extend Promoter {
         for f in self.fat[s as usize]..self.fat[s as usize + 1] {
             let fl = self.flds[f as usize];
             if is_lane(fl, Fld { off: off, ty: ty }) {
-                return f, ((off - fl.off) / size_of(ty, self.ptr)) as u32;
+                return (f, ((off - fl.off) / size_of(ty, self.ptr)) as u32);
             }
         }
-        return NONE, NONE;
+        return (NONE, NONE);
     }
 
     const fn field_at(self: &Self, s: u32, off: i64, ty: u8) u32 {
@@ -1171,9 +1171,9 @@ extend Promoter {
             }
         }
         return if lo < self.copies.len() && self.copies[lo].inst == i {
-            lo as u32;
+            lo as u32
         } else {
-            NONE;
+            NONE
         };
     }
 
@@ -1276,9 +1276,9 @@ extend Promoter {
             for _ in 0..nw {
                 self.xwords.push(0);
             }
-            Inst { op: O_WCONST, ty: ty, aux: 0, a: at as u32, b: nw, c: VNONE };
+            Inst { op: O_WCONST, ty: ty, aux: 0, a: at as u32, b: nw, c: VNONE }
         } else {
-            fill_const(ty, 0, self.ptr);
+            fill_const(ty, 0, self.ptr)
         };
         let v = (b.insts.len() + self.xins.len()) as u32;
         self.xins.push((b.blocks[0].start, k));
@@ -1670,9 +1670,9 @@ const fn const_int(b: &Body, v: Value) i64 {
     let t = b.insts[v as usize];
     let x = t.b as u64 << 32 | t.a as u64;
     return if x > 0x7FFFFFFFFFFFFFFF {
-        -1i64;
+        -1i64
     } else {
-        x as i64;
+        x as i64
     };
 }
 

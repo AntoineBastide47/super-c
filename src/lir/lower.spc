@@ -356,7 +356,7 @@ extend Lower {
                 return true;
             },
             None => {},
-        };
+        }
         if !self.ty_raw(c, m, t, out) {
             return false;
         }
@@ -380,17 +380,17 @@ extend Lower {
         if y.kind == TypeKind::TYPE_BUILTIN {
             let bt = y.as_data.builtin;
             *out = if bt == BuiltinType::BT_VOID {
-                TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 };
+                TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 }
             } else if bt == BuiltinType::BT_C32 {
-                TyI { cls: VC_MEM, mty: T_NONE, size: 8, align: 4 };
+                TyI { cls: VC_MEM, mty: T_NONE, size: 8, align: 4 }
             } else if bt == BuiltinType::BT_C64 {
-                TyI { cls: VC_MEM, mty: T_NONE, size: 16, align: 8 };
+                TyI { cls: VC_MEM, mty: T_NONE, size: 16, align: 8 }
             } else if bt == BuiltinType::BT_VALIST {
                 let vb = tgt::callconv_of(Lower::p(c).build_target, Lower::p(c).arch).va_list_bytes as u32;
-                TyI { cls: VC_MEM, mty: T_NONE, size: vb, align: pb };
+                TyI { cls: VC_MEM, mty: T_NONE, size: vb, align: pb }
             } else {
                 let mt = self.builtin_mty(bt);
-                TyI { cls: VC_SCALAR, mty: mt, size: type_bytes(mt, pb), align: type_bytes(mt, pb) };
+                TyI { cls: VC_SCALAR, mty: mt, size: type_bytes(mt, pb), align: type_bytes(mt, pb) }
             };
             return true;
         }
@@ -422,13 +422,13 @@ extend Lower {
             }
             if y.kind == TypeKind::TYPE_MASK {
                 let mt = if n <= 8 {
-                    T_I8;
+                    T_I8
                 } else if n <= 16 {
-                    T_I16;
+                    T_I16
                 } else if n <= 32 {
-                    T_I32;
+                    T_I32
                 } else {
-                    T_I64;
+                    T_I64
                 };
                 *out = TyI { cls: VC_SCALAR, mty: mt, size: type_bytes(mt, pb), align: type_bytes(mt, pb) };
                 return true;
@@ -466,9 +466,9 @@ extend Lower {
             }
             let k = Lower::p(c).opaque_cls.get(&(y.module as u64 << 32 | y.as_data.decl as u64));
             let cl = if k.is_some() {
-                *k.unwrap();
+                *k.unwrap()
             } else {
-                bg::SC_NONE;
+                bg::SC_NONE
             };
             let n = out.size;
             // A vector (`arm_neon.h`'s `int8x16_t`, `immintrin.h`'s `__m256`) of 2 or more lanes.
@@ -483,15 +483,15 @@ extend Lower {
             };
             let eb = ast::pick(el == T_NONE, 0u32, type_bytes(el, pb));
             let mt = if cl == bg::SC_INT && n <= 8 && (n & n - 1) == 0 {
-                ast::pick(n == 8, T_I64, ast::pick(n == 4, T_I32, ast::pick(n == 2, T_I16, T_I8)));
+                ast::pick(n == 8, T_I64, ast::pick(n == 4, T_I32, ast::pick(n == 2, T_I16, T_I8)))
             } else if cl == bg::SC_F32 && n == 4 {
-                T_F32;
+                T_F32
             } else if cl == bg::SC_F64 && n == 8 {
-                T_F64;
+                T_F64
             } else if eb != 0 && n >= 2 * eb && n / eb <= 64 && (n & n - 1) == 0 {
-                vec_type(el, n / eb);
+                vec_type(el, n / eb)
             } else {
-                T_NONE;
+                T_NONE
             };
             if mt != T_NONE && is_vec(mt) {
                 // A register type's own alignment (`@value`): a vector lives in memory between uses.
@@ -591,13 +591,13 @@ extend Lower {
     // The builtin of `(m, t)`, BT_VOID for another kind.
     fn builtin(c: &cbe::CEmit, m: ModuleId, t: TypeId) BuiltinType {
         if t == TYPE_NONE {
-            return BuiltinType::BT_VOID;
+            return BT_VOID;
         }
         let mut rm = m;
         let mut rt = t;
         let y = Lower::resolved(c, m, t, &mut rm, &mut rt);
         if y.kind != TypeKind::TYPE_BUILTIN {
-            return BuiltinType::BT_VOID;
+            return BT_VOID;
         }
         return y.as_data.builtin;
     }
@@ -706,9 +706,9 @@ extend Lower {
             }
         }
         let ret = if ok {
-            self.rets_code(c, m, &rts);
+            self.rets_code(c, m, &rts)
         } else {
-            NONE;
+            NONE
         };
         if ret != NONE {
             self.b.sig = self.b.signature(ptys[0..ptys.len()], ptys.len() as u32, variadic, ret);
@@ -1235,11 +1235,11 @@ extend Lower {
                 continue;
             }
             let hit = if pj.sub != NODE_NONE && pj.data != irc::PJ_UNION_FIELD {
-                f.node == pj.sub || f.node == NODE_NONE && f.idx == pj.data;
+                f.node == pj.sub || f.node == NODE_NONE && f.idx == pj.data
             } else if pj.data == irc::PJ_UNION_FIELD {
-                f.node == pj.sub;
+                f.node == pj.sub
             } else {
-                f.idx == pj.data;
+                f.idx == pj.data
             };
             if hit {
                 *out = f;
@@ -1370,9 +1370,9 @@ extend Lower {
     fn iconst(self: &mut Self, ty: u8, v: u64) Value {
         let bits = type_bits(ty, self.pkg.ptr_bytes);
         let u = if bits >= 64 {
-            v;
+            v
         } else {
-            v & (1u64 << bits as u64) - 1;
+            v & (1u64 << bits as u64) - 1
         };
         return self.inst(O_ICONST, ty, 0, u as u32, (u >> 32) as u32, VNONE);
     }
@@ -1413,13 +1413,13 @@ extend Lower {
     // the two offsets' sum when it fits.
     const fn fold_addr(self: &Self, addr: Value, off: u32) (Value, u32) {
         if (addr & (VPARAM | VFLAG)) != 0 || addr == VNONE {
-            return addr, off;
+            return (addr, off);
         }
         let d = self.b.insts[addr as usize];
         if d.op != O_PTRADD || d.b != VNONE || d.c > 0xFFFFFFFF - off {
-            return addr, off;
+            return (addr, off);
         }
-        return d.a, d.c + off;
+        return (d.a, d.c + off);
     }
 
     fn ptradd(self: &mut Self, base0: Value, ix: Value, scale: u32, off0: u32) Value {
@@ -1489,7 +1489,7 @@ extend Lower {
         if d.template.end > d.template.start {
             cbe::asm_bytes(src.slice(d.template.start as usize, d.template.end as usize), &mut t);
         }
-        let tm = self.b.ref_msg(self.pkg.add_message(t.as_str()));
+        let tm = self.b.ref_msg(self.pkg.add_message(&t));
         self.b.pool.push(tm);
         self.b.pool.push(d.nout);
         self.b.pool.push(d.nin);
@@ -1498,7 +1498,7 @@ extend Lower {
             let cs = b.asm_spans[(d.cons + k) as usize];
             let mut s = String::new();
             cbe::asm_bytes(src.slice(cs.start as usize, cs.end as usize), &mut s);
-            let m = self.b.ref_msg(self.pkg.add_message(s.as_str()));
+            let m = self.b.ref_msg(self.pkg.add_message(&s));
             if k == d.nout {
                 // The output types come after the output constraints: their slots, filled below.
                 for _ in 0..d.nout {
@@ -1669,9 +1669,9 @@ extend Lower {
         let eo = self.edge(other, NONE, NONE);
         let en = self.edge(next, NONE, NONE);
         let _ = if taken {
-            self.inst(O_BR, T_NONE, 0, cond, eo, en);
+            self.inst(O_BR, T_NONE, 0, cond, eo, en)
         } else {
-            self.inst(O_BR, T_NONE, 0, cond, en, eo);
+            self.inst(O_BR, T_NONE, 0, cond, en, eo)
         };
         self.b.begin(next);
     }
@@ -1691,7 +1691,7 @@ extend Lower {
                 return *k;
             },
             None => {},
-        };
+        }
         let k = self.block();
         self.b.blocks.index_mut(k as usize).flags = BLOCK_COLD;
         self.panics.insert(key, k);
@@ -1713,7 +1713,7 @@ extend Lower {
                 return *k;
             },
             None => {},
-        };
+        }
         self.b.syms.push(s);
         let k = self.b.syms.len() as u32 - 1;
         self.sym_map.insert(s, k);
@@ -1747,7 +1747,7 @@ extend Lower {
                 return *v;
             },
             None => {},
-        };
+        }
         return self.zero_here(ty);
     }
 
@@ -1818,7 +1818,7 @@ extend Lower {
                     break;
                 },
                 None => {},
-            };
+            }
             if k == self.virt {
                 v = self.zero(self.var_ty[var as usize]);
                 break;
@@ -1977,7 +1977,7 @@ extend Lower {
         self.bm = b.module;
         self.noret = noret;
         let pk = Lower::p(c);
-        self.file = self.pkg.add_file(pk.modules.at(b.module as usize).file.as_str());
+        self.file = self.pkg.add_file(&pk.modules.at(b.module as usize).file);
         let oa = Lower::ast(c, b.owner.module);
         // A naked function's code is its assembly: the generators read its `O_ASM`s alone.
         self.b.naked = cnode == NODE_NONE && b.owner.node != NODE_NONE && (oa.unsafe_claims(b.owner.node) & UNSAFE_NAKED) != 0;
@@ -2282,9 +2282,9 @@ extend Lower {
                     let p = self.preds[q as usize];
                     if self.idom[p as usize] != NONE {
                         d = if d == NONE {
-                            p;
+                            p
                         } else {
-                            self.common_dom(p, d);
+                            self.common_dom(p, d)
                         };
                     }
                 }
@@ -2365,11 +2365,11 @@ extend Lower {
         let mt = y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
         let fixed = !b.locals[l as usize].is_mutable;
         return ei.size | if mt && fixed {
-            REF_NOALIAS;
+            REF_NOALIAS
         } else if !mt && fixed && self.frozen(c, rm, y.as_data.elem, FROZEN_DEPTH) {
-            REF_READONLY;
+            REF_READONLY
         } else {
-            0u32;
+            0u32
         };
     }
 
@@ -2403,10 +2403,10 @@ extend Lower {
         let mut rt = t;
         let y = Lower::resolved(c, m, t, &mut rm, &mut rt);
         let (dm, dn) = if y.kind == TypeKind::TYPE_STRUCT {
-            (y.module, y.as_data.decl);
+            (y.module, y.as_data.decl)
         } else if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *Lower::ast(c, rm).instance(y.as_data.inst);
-            (it.module, it.decl);
+            (it.module, it.decl)
         } else {
             return;
         };
@@ -2464,9 +2464,9 @@ extend Lower {
         }
         let d = if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *Lower::ast(c, rm).instance(y.as_data.inst);
-            DefId { module: it.module, node: it.decl };
+            DefId { module: it.module, node: it.decl }
         } else {
-            DefId { module: y.module, node: y.as_data.decl };
+            DefId { module: y.module, node: y.as_data.decl }
         };
         if Lower::p(c).is_prelude_item(d, "UnsafeCell") {
             return false;
@@ -2533,9 +2533,9 @@ extend Lower {
         let mut pt = f.t;
         let py = Lower::resolved(c, f.m, f.t, &mut pm, &mut pt);
         return if py.kind == TypeKind::TYPE_POINTER && self.frozen(c, pm, py.as_data.elem, FROZEN_DEPTH) {
-            REF_INNER | REF_READONLY;
+            REF_INNER | REF_READONLY
         } else {
-            0u32;
+            0u32
         };
     }
 
@@ -2624,11 +2624,11 @@ extend Lower {
         // One zero per variable type, for a read before any write.
         for v in 0..self.var_ty.len() + 2 {
             let t = if v < self.var_ty.len() {
-                self.var_ty[v];
+                self.var_ty[v]
             } else if v == self.var_ty.len() {
-                T_I32;
+                T_I32
             } else {
-                self.ptr_int();
+                self.ptr_int()
             };
             if self.zeros.contains_key(&(t as u32)) {
                 continue;
@@ -2639,11 +2639,11 @@ extend Lower {
                 for _ in 0..nw {
                     self.b.words.push(0);
                 }
-                self.inst(O_WCONST, t, 0, w, nw, VNONE);
+                self.inst(O_WCONST, t, 0, w, nw, VNONE)
             } else if is_float(t) {
-                self.fconst(t, 0);
+                self.fconst(t, 0)
             } else {
-                self.iconst(t, 0);
+                self.iconst(t, 0)
             };
             self.zeros.insert(t, z);
         }
@@ -2679,11 +2679,11 @@ extend Lower {
                 continue;
             }
             let a = if l as u32 < b.returns && b.returns == 1 {
-                self.ret_ptr;
+                self.ret_ptr
             } else if l as u32 < b.returns {
-                self.ptradd(self.ret_ptr, VNONE, 0, self.ret_off[l]);
+                self.ptradd(self.ret_ptr, VNONE, 0, self.ret_off[l])
             } else {
-                self.new_slot(info.ti);
+                self.new_slot(info.ti)
             };
             self.li.index_mut(l).addr = a;
         }
@@ -2892,9 +2892,9 @@ extend Lower {
             }
             if pj.kind == irc::PJ_DEREF {
                 cur.addr = if ptr_val != VNONE {
-                    ptr_val;
+                    ptr_val
                 } else {
-                    self.load_tagged(T_PTR, cur.addr, 0, cur.packed, self.tag_of(T_PTR, cur.in_union));
+                    self.load_tagged(T_PTR, cur.addr, 0, cur.packed, self.tag_of(T_PTR, cur.in_union))
                 };
                 ptr_val = VNONE;
                 cur.packed = false;
@@ -2910,9 +2910,9 @@ extend Lower {
                         break;
                     }
                     cur.addr = if ptr_val != VNONE {
-                        ptr_val;
+                        ptr_val
                     } else {
-                        self.load_tagged(T_PTR, cur.addr, 0, cur.packed, self.tag_of(T_PTR, cur.in_union));
+                        self.load_tagged(T_PTR, cur.addr, 0, cur.packed, self.tag_of(T_PTR, cur.in_union))
                     };
                     ptr_val = VNONE;
                     cur.packed = false;
@@ -2977,9 +2977,9 @@ extend Lower {
                         break;
                     }
                     cur.addr = if ptr_val != VNONE {
-                        ptr_val;
+                        ptr_val
                     } else {
-                        self.load_tagged(T_PTR, cur.addr, 0, cur.packed, self.tag_of(T_PTR, cur.in_union));
+                        self.load_tagged(T_PTR, cur.addr, 0, cur.packed, self.tag_of(T_PTR, cur.in_union))
                     };
                     ptr_val = VNONE;
                     cur.packed = false;
@@ -2991,9 +2991,9 @@ extend Lower {
                 let mut base = VNONE;
                 if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
                     base = if ptr_val != VNONE {
-                        ptr_val;
+                        ptr_val
                     } else {
-                        self.load_tagged(T_PTR, cur.addr, 0, cur.packed, self.tag_of(T_PTR, cur.in_union));
+                        self.load_tagged(T_PTR, cur.addr, 0, cur.packed, self.tag_of(T_PTR, cur.in_union))
                     };
                     cur.in_union = false;
                 } else if ptr_val != VNONE {
@@ -3029,10 +3029,10 @@ extend Lower {
                     return false;
                 }
                 let ix = if pj.kind == irc::PJ_INDEX_CONST {
-                    self.iconst(self.ptr_int(), pj.data);
+                    self.iconst(self.ptr_int(), pj.data)
                 } else {
                     let v = self.operand(c, b, pj.data);
-                    self.int_to(v, self.ptr_int(), false);
+                    self.int_to(v, self.ptr_int(), false)
                 };
                 cur.addr = self.ptradd(base, ix, eti.size, 0);
                 cur.packed = false;
@@ -3074,9 +3074,9 @@ extend Lower {
             return false;
         }
         let ownt = if pl.proj_len > 1 {
-            b.projections[(pl.proj_start + pl.proj_len - 2) as usize].ty;
+            b.projections[(pl.proj_start + pl.proj_len - 2) as usize].ty
         } else {
-            b.locals[pl.base as usize].ty;
+            b.locals[pl.base as usize].ty
         };
         let mut om = b.module;
         let mut ot = ownt;
@@ -3167,7 +3167,7 @@ extend Lower {
         self.sbuf.clear();
         self.sbuf.push_str("__sc_zst_");
         self.sbuf.push_u64(al);
-        let s = self.pkg.symbol(self.sbuf.as_str(), SK_DATA);
+        let s = self.pkg.symbol(&self.sbuf, SK_DATA);
         if self.pkg.syms[s as usize].def == NONE {
             let none: []u8 = [];
             let nr: []Reloc = [];
@@ -3215,17 +3215,17 @@ extend Lower {
             self.pend_name = sym.clone();
         }
         // Its storage, which C may not have needed.
-        if !c.lir_stat_need(b.module, item, d.ty, sym.as_str()) {
+        if !c.lir_stat_need(b.module, item, d.ty, &sym) {
             return self.fail("static-type");
         }
         if c.is_tls(item) {
-            let k = self.sym(sym.as_str(), SK_TLS);
+            let k = self.sym(&sym, SK_TLS);
             *addr = self.inst(O_SYMADDR, T_PTR, 0, k, 0, VNONE);
             return true;
         }
-        *addr = self.symaddr(sym.as_str(), SK_DATA);
+        *addr = self.symaddr(&sym, SK_DATA);
         if ia.kind == NodeKind::NODE_CONST && ia.as_data.const_def.is_extern {
-            self.mark_ext(sym.as_str());
+            self.mark_ext(&sym);
         }
         return true;
     }
@@ -3438,14 +3438,14 @@ extend Lower {
             ) {
                 return self.fail_v("item-sym");
             }
-            let v = self.symaddr(s.as_str(), SK_FUNC);
+            let v = self.symaddr(&s, SK_FUNC);
             let fnn = ia.at_const(k.item.node);
             if fnn.kind == NodeKind::NODE_FUNCTION && ia.ext(k.item.node).function.is_extern() {
-                self.mark_ext(s.as_str());
+                self.mark_ext(&s);
             }
             if fnn.kind == NodeKind::NODE_FUNCTION && k.targ_len() == 0 && !self.ref_sig(
                 c,
-                self.pkg.find_symbol(s.as_str()),
+                self.pkg.find_symbol(&s),
                 k.item.module,
                 k.item.node,
             ) {
@@ -3462,7 +3462,7 @@ extend Lower {
         if !c.assoc_const_ref(b, k, &mut s) {
             return self.fail_v("assoc-const");
         }
-        return self.symaddr(s.as_str(), SK_DATA);
+        return self.symaddr(&s, SK_DATA);
     }
 
     // The read-only data holding string constant `k`'s bytes and a terminating 0: its address.
@@ -3495,7 +3495,7 @@ extend Lower {
         self.sbuf.push_hex(nm::hash_bytes(bytes.as_ptr(), bytes.len()), false);
         self.sbuf.push_byte(b'.');
         self.sbuf.push_u64(bytes.len() as u64);
-        let s = self.pkg.symbol(self.sbuf.as_str(), SK_DATA);
+        let s = self.pkg.symbol(&self.sbuf, SK_DATA);
         if self.pkg.syms[s as usize].def == NONE {
             let nr: []Reloc = [];
             let _ = self.pkg.add_data(
@@ -3555,9 +3555,9 @@ extend Lower {
             let w = *Lower::ast(c, b.module).wide_lits.at(k.val as usize);
             for i in 0..ti.size / 8 {
                 let lw = if i < 16 {
-                    unsafe w.limbs[i as usize];
+                    unsafe w.limbs[i as usize]
                 } else {
-                    0u64;
+                    0u64
                 };
                 let v = self.iconst(T_I64, lw);
                 self.store(v, dst, i * 8, false);
@@ -3617,7 +3617,7 @@ extend Lower {
         if rv.kind == irc::RV_CLOSURE && rv.b == 0 {
             let mut s = String::new();
             c.mg.closure_sym(rv.item.module, rv.item.node, &mut s);
-            return self.symaddr(s.as_str(), SK_FUNC);
+            return self.symaddr(&s, SK_FUNC);
         }
         if rv.kind == irc::RV_SIMD {
             return self.simd(c, b, rv, ti, VNONE);
@@ -3823,9 +3823,9 @@ extend Lower {
     // `m0` holds that lane, else `msg1`, as C's `__sc_panic_lane` does.
     fn lane_checks(self: &mut Self, m0: Value, msg0: str, m1: Value, msg1: str) {
         let f = if m1 == VNONE {
-            m0;
+            m0
         } else {
-            self.arith(O_OR, m0, m1);
+            self.arith(O_OR, m0, m1)
         };
         let z = self.zero(self.vty(f));
         let fail = self.icmp(C_NE, f, z);
@@ -4084,9 +4084,9 @@ extend Lower {
                 }
             }
             let op = if div {
-                ast::pick(signed, O_SDIV, O_UDIV);
+                ast::pick(signed, O_SDIV, O_UDIV)
             } else {
-                ast::pick(signed, O_SREM, O_UREM);
+                ast::pick(signed, O_SREM, O_UREM)
             };
             return self.arith(op, x, y);
         }
@@ -4248,9 +4248,9 @@ extend Lower {
             let y = Lower::resolved(c, b.module, Lower::op_ty(b, opid), &mut rm, &mut rt);
             let ti = TyI { cls: VC_MEM, mty: T_NONE, size: 2 * self.pkg.ptr_bytes, align: self.pkg.ptr_bytes };
             let v = if y.kind == TypeKind::TYPE_REFERENCE {
-                self.operand(c, b, opid);
+                self.operand(c, b, opid)
             } else {
-                self.operand_addr(c, b, opid, ti);
+                self.operand_addr(c, b, opid, ti)
             };
             if v == VNONE {
                 return VNONE;
@@ -4290,11 +4290,11 @@ extend Lower {
         let eq = t == tt::TokenType::EqualEqual || t == tt::TokenType::BangEqual;
         let ord = !eq && (t == tt::TokenType::LessThan || t == tt::TokenType::LessThanEqual || t == tt::TokenType::GreaterThan || t == tt::TokenType::GreaterThanEqual);
         let mn = if eq {
-            "eq";
+            "eq"
         } else if ord {
-            "cmp";
+            "cmp"
         } else {
-            t.op_method();
+            t.op_method()
         };
         let mut s = String::new();
         if !c.agg_op_sym(am, at, mn, &mut s) {
@@ -4316,18 +4316,18 @@ extend Lower {
             // The left operand and an aggregate or compared right one by address; a scalar right
             // operand of an arithmetic operator by value.
             let v = if isref && (k == 0 || eq || ord || agg) {
-                self.operand(c, b, opid);
+                self.operand(c, b, opid)
             } else if k == 0 || eq || ord || agg {
-                self.operand_addr(c, b, opid, oi);
+                self.operand_addr(c, b, opid, oi)
             } else if isref {
                 let p = self.operand(c, b, opid);
                 let mut ei = TyI { cls: 0 };
                 if !self.ty(c, rm, y.as_data.elem, &mut ei) {
                     return VNONE;
                 }
-                self.load(ei.mty, p, 0, false);
+                self.load(ei.mty, p, 0, false)
             } else {
-                self.operand(c, b, opid);
+                self.operand(c, b, opid)
             };
             if v == VNONE {
                 return self.fail_v("agg-op-operand");
@@ -4336,7 +4336,7 @@ extend Lower {
             unsafe tys[k] = self.vty(v);
         }
         if eq {
-            let r = self.call_sym(s.as_str(), args, tys, T_I8);
+            let r = self.call_sym(&s, args, tys, T_I8);
             if t == tt::TokenType::EqualEqual {
                 return r;
             }
@@ -4344,19 +4344,19 @@ extend Lower {
             return self.arith(O_XOR, r, one);
         }
         if ord {
-            let r = self.call_sym(s.as_str(), args, tys, T_I32);
+            let r = self.call_sym(&s, args, tys, T_I32);
             let z = self.zero(T_I32);
             return self.compare(t, r, z, true, true);
         }
         if ti.cls == VC_SCALAR {
-            return self.call_sym(s.as_str(), args, tys, ti.mty);
+            return self.call_sym(&s, args, tys, ti.mty);
         }
         let lt = self.layout_of(c, b.module, rv.target, ti);
         let all: []Value = [args[0], args[1], dst];
         let atys: []u32 = [tys[0], tys[1], T_PTR as u32];
         let sg = self.b.signature(atys[0..2], 2, false, AGG | lt);
         let ap = self.b.pool_list(all);
-        let k = self.sym(s.as_str(), SK_FUNC);
+        let k = self.sym(&s, SK_FUNC);
         let _ = self.inst(O_CALL, T_NONE, 3, k, sg, ap);
         return dst;
     }
@@ -4491,9 +4491,9 @@ extend Lower {
                 self.lane_check(m, zmsg);
             }
             let op = if div {
-                ast::pick(signed, O_SDIV, O_UDIV);
+                ast::pick(signed, O_SDIV, O_UDIV)
             } else {
-                ast::pick(signed, O_SREM, O_UREM);
+                ast::pick(signed, O_SREM, O_UREM)
             };
             return self.arith(op, x, y);
         }
@@ -4613,9 +4613,9 @@ extend Lower {
                 break;
             }
             addr = if val {
-                v;
+                v
             } else {
-                self.load(T_PTR, addr, 0, false);
+                self.load(T_PTR, addr, 0, false)
             };
             val = false;
             y = Lower::resolved(c, rm, y.as_data.elem, &mut rm, &mut rt);
@@ -4626,9 +4626,9 @@ extend Lower {
         }
         if ei.cls == VC_SCALAR {
             let x = if val {
-                v;
+                v
             } else {
-                self.load(ei.mty, addr, 0, false);
+                self.load(ei.mty, addr, 0, false)
             };
             return self.int_to(x, ti.mty, true);
         }
@@ -4663,9 +4663,9 @@ extend Lower {
                 return VNONE;
             }
             let v = if k == irc::IN_SIZEOF {
-                x.size;
+                x.size
             } else {
-                ast::pick(x.align == 0, 1u32, x.align);
+                ast::pick(x.align == 0, 1u32, x.align)
             };
             return self.iconst(ti.mty, v);
         }
@@ -4736,7 +4736,7 @@ extend Lower {
             }
             let vt = self.load(T_PTR, fa, self.pkg.ptr_bytes, false);
             let tid = self.load(T_PTR, vt, self.pkg.ptr_bytes, false);
-            let lit = self.cstr(sp.as_str());
+            let lit = self.cstr(&sp);
             let args: []Value = [tid, lit];
             let tys: []u32 = [T_PTR as u32, T_PTR as u32];
             let r = self.call_sym("strcmp", args, tys, T_I32);
@@ -4753,9 +4753,9 @@ extend Lower {
                 return self.fail_v("intrinsic-operand");
             }
             unsafe v[i as usize] = if k == irc::IN_LIKELY || k == irc::IN_UNLIKELY {
-                x;
+                x
             } else {
-                self.int_to(x, self.ptr_int(), sg);
+                self.int_to(x, self.ptr_int(), sg)
             };
         }
         if k == irc::IN_BOUNDS {
@@ -4908,9 +4908,9 @@ extend Lower {
             mem_arg = mem_arg || oi.cls == VC_MEM;
             last_mem = oi.cls == VC_MEM;
             let v = if oi.cls == VC_MEM {
-                self.operand_addr(c, b, opid, oi);
+                self.operand_addr(c, b, opid, oi)
             } else {
-                self.operand(c, b, opid);
+                self.operand(c, b, opid)
             };
             if v == VNONE {
                 return self.fail_v("simd-operand");
@@ -4933,9 +4933,9 @@ extend Lower {
         }
         // The second lane type: the result's, or for `cast_changed` its cast result operand's.
         let wt = if rv.c == irc::SIMD_CAST_CHANGED && rv.b > 1 {
-            Lower::op_ty(b, b.oper_pool[(rv.a + 1) as usize]);
+            Lower::op_ty(b, b.oper_pool[(rv.a + 1) as usize])
         } else {
-            rv.target;
+            rv.target
         };
         let dsg = wt != TYPE_NONE && Lower::signed(c, b.module, wt);
         let code = (irc::OP_SIMD + rv.c as u32) as u16 | ast::pick(signed, VOP_SIGNED, 0) | ast::pick(
@@ -4966,11 +4966,11 @@ extend Lower {
             let lt = ti.mty;
             let add = rv.c == irc::SIMD_REDUCE_ADD_ORD;
             let bits: u64 = if add {
-                1u64 << (type_bits(lt, 8) - 1) as u64;
+                1u64 << (type_bits(lt, 8) - 1) as u64
             } else if lt == T_F32 {
-                0x3F800000;
+                0x3F800000
             } else {
-                0x3FF0000000000000;
+                0x3FF0000000000000
             };
             let mut acc = self.fconst(lt, bits);
             // `lanes` names the index list here: the lane count from the sizes.
@@ -4988,7 +4988,7 @@ extend Lower {
             for i in 0..args.len() {
                 tys.push(self.vty(args[i]));
             }
-            return self.call_sym(ename.as_str(), args[0..args.len()], tys[0..tys.len()], ti.mty);
+            return self.call_sym(&ename, args[0..args.len()], tys[0..tys.len()], ti.mty);
         }
         if ti.cls == VC_MEM {
             args.push(dst);
@@ -5102,7 +5102,7 @@ extend Lower {
             let mut nm = String::new();
             rnd::render_qualified_name(c.pkg, Lower::p(c).module_ast_const(rm), rt, &mut nm);
             let n = self.iconst(self.ptr_int(), nm.len() as u64);
-            let s = self.cstr(nm.as_str());
+            let s = self.cstr(&nm);
             self.store(s, dst, 0, false);
             self.store(n, dst, self.pkg.ptr_bytes, false);
             return true;
@@ -5178,11 +5178,11 @@ extend Lower {
             let view = py.kind == TypeKind::TYPE_INSTANCE && (pn == "Slice" || pn == "SliceMut");
             let mut ei = TyI { cls: 0 };
             let et = if view {
-                Lower::ast(c, pm).instance(py.as_data.inst).args[0];
+                Lower::ast(c, pm).instance(py.as_data.inst).args[0]
             } else if ty.kind == TypeKind::TYPE_ARRAY {
-                ty.as_data.arr.elem;
+                ty.as_data.arr.elem
             } else {
-                TYPE_NONE;
+                TYPE_NONE
             };
             let em = ast::pick(view, pm, rm);
             if et == TYPE_NONE || !self.ty(c, em, et, &mut ei) {
@@ -5195,9 +5195,9 @@ extend Lower {
                     size: ast::pick(ei.size * rv.b == 0, 1u32, ei.size * rv.b),
                     align: ei.align,
                 };
-                self.new_slot(at);
+                self.new_slot(at)
             } else {
-                dst;
+                dst
             };
             let mut holes = false;
             for i in 0..rv.b {
@@ -5588,7 +5588,7 @@ extend Lower {
             }
             let d = self.operand(c, b, rv.a);
             pair.push_str("__vtbl");
-            let vt = self.symaddr(pair.as_str(), SK_DATA);
+            let vt = self.symaddr(&pair, SK_DATA);
             self.store(d, dst, 0, false);
             self.store(vt, dst, pb, false);
             return true;
@@ -5609,7 +5609,7 @@ extend Lower {
                 return false;
             }
             pair.push_str("__vtbl");
-            let vt = self.symaddr(pair.as_str(), SK_DATA);
+            let vt = self.symaddr(&pair, SK_DATA);
             self.store(p, dst, 0, false);
             self.store(vt, dst, pb, false);
             return true;
@@ -5651,7 +5651,7 @@ extend Lower {
             }
             let d = self.load(T_PTR, ba, f.off, false);
             pair.push_str("__vtbl");
-            let vt = self.symaddr(pair.as_str(), SK_DATA);
+            let vt = self.symaddr(&pair, SK_DATA);
             self.store(d, dst, 0, false);
             self.store(vt, dst, pb, false);
             return true;
@@ -5672,9 +5672,9 @@ extend Lower {
         let own = ga.at_const(rv.item.node).kind == NodeKind::NODE_FUNCTION && ga.ext(rv.item.node).function.generics.len != 0;
         let mut s = String::new();
         let ok = if own {
-            c.conv_sym(b, rv.item, cvr, rv.target, &mut s);
+            c.conv_sym(b, rv.item, cvr, rv.target, &mut s)
         } else {
-            c.callee_sym(b, rv.item, 0, 0, cvr, rv.target, TYPE_NONE, TYPE_NONE, &mut s);
+            c.callee_sym(b, rv.item, 0, 0, cvr, rv.target, TYPE_NONE, TYPE_NONE, &mut s)
         };
         if !ok {
             return self.fail_v("coerce-sym");
@@ -5684,7 +5684,7 @@ extend Lower {
         if !self.call_arg(c, b, rv.item, rv.item, 0, rv.a, &mut args, &mut tys) {
             return VNONE;
         }
-        return self.emit_call(s.as_str(), VNONE, &args, &tys, tys.len() as u32, false, ti, c, b.module, rv.target, dst);
+        return self.emit_call(&s, VNONE, &args, &tys, tys.len() as u32, false, ti, c, b.module, rv.target, dst);
     }
 }
 
@@ -5916,9 +5916,9 @@ extend Lower {
             let ba = if am == AM_BOXREF {
                 let p = self.operand(c, b, opid);
                 y = Lower::resolved(c, rm, y.as_data.elem, &mut rm, &mut rt);
-                p;
+                p
             } else {
-                self.operand_addr(c, b, opid, ti);
+                self.operand_addr(c, b, opid, ti)
             };
             let mut f = FieldAt {
                 m: 0,
@@ -5990,9 +5990,9 @@ extend Lower {
                 // A copy the callee owns; a moved local's own memory when its address never escapes.
                 let op = b.operands[opid as usize];
                 let pl = if op.kind == irc::OP_CONST {
-                    irc::Place { base: 0, proj_start: 0, proj_len: 1, ty: TYPE_NONE };
+                    irc::Place { base: 0, proj_start: 0, proj_len: 1, ty: TYPE_NONE }
                 } else {
-                    b.places[op.data as usize];
+                    b.places[op.data as usize]
                 };
                 if op.kind == irc::OP_MOVE && pl.proj_len == 0 && self.li[pl.base as usize].kind == LK_MEM && !self.escaped[pl.base as usize] && pl.base >= b.returns + b.args {
                     v = self.li[pl.base as usize].addr;
@@ -6051,10 +6051,10 @@ extend Lower {
         let at = self.b.pool_list(all[0..all.len()]);
         let rty = ast::pick(ti.cls == VC_SCALAR, ti.mty, T_NONE);
         let r = if fv != VNONE {
-            self.inst(O_CALLIND, rty, all.len() as u16, fv, sg, at);
+            self.inst(O_CALLIND, rty, all.len() as u16, fv, sg, at)
         } else {
             let k = self.sym(name, SK_FUNC);
-            self.inst(O_CALL, rty, all.len() as u16, k, sg, at);
+            self.inst(O_CALL, rty, all.len() as u16, k, sg, at)
         };
         return ast::pick(ti.cls == VC_SCALAR, r, out);
     }
@@ -6162,9 +6162,9 @@ extend Lower {
             }
             // C's implicit conversion at the assignment.
             let st = if rv.kind == irc::RV_USE {
-                Lower::op_ty(b, rv.a);
+                Lower::op_ty(b, rv.a)
             } else {
-                rv.target;
+                rv.target
             };
             v = self.fit(v, ti.mty, st != TYPE_NONE && Lower::signed(c, b.module, st));
             let mut p = PlaceRef { kind: 0 };
@@ -6334,16 +6334,16 @@ extend Lower {
             let ed = self.edge(self.lblk[t.t0 as usize], self.cur, t.t0);
             // A hinted condition: the side it makes rare is unlikely, when the branch alone enters it.
             let (yes, no) = if pr >> 32 == 0 {
-                (t.t0, to);
+                (t.t0, to)
             } else {
-                (to, t.t0);
+                (to, t.t0)
             };
             for q in 0..self.hints.len() {
                 if (self.hints[q] >> 1) as u32 == v {
                     let rare = if (self.hints[q] & 1) != 0 {
-                        no;
+                        no
                     } else {
-                        yes;
+                        yes
                     };
                     if self.npred[rare as usize + 1] - self.npred[rare as usize] == 1 && self.lblk[rare as usize] != NONE {
                         self.b.blocks.index_mut(self.lblk[rare as usize] as usize).flags |= BLOCK_UNLIKELY;
@@ -6407,9 +6407,9 @@ extend Lower {
         }
         let info = self.li[0];
         let v = if info.kind == LK_VAR {
-            self.read_var(info.var, self.cur);
+            self.read_var(info.var, self.cur)
         } else {
-            self.load(info.ti.mty, info.addr, 0, false);
+            self.load(info.ti.mty, info.addr, 0, false)
         };
         let _ = c;
         let _ = self.inst(O_RET, T_NONE, 0, v, VNONE, VNONE);
@@ -6443,14 +6443,14 @@ extend Lower {
         }
         head.push_str(ast::pick(msg, "`: ", "`"));
         let mut tail = String::from_str("\n  at ");
-        tail.push_str(pk.modules.at(b.module as usize).file.as_str());
+        tail.push_str(&pk.modules.at(b.module as usize).file);
         tail.push_str(":");
         tail.push_u64(self.b.lines[self.loc as usize].line);
         tail.push_str("\n");
         if t.args_len == 4 {
             // `assert_eq`/`assert_ne`: the operands, as C prints them (`__sc_assert_vals`).
             head.push_str("\n");
-            let hv = self.cstr(head.as_str());
+            let hv = self.cstr(&head);
             let tv = self.cstr(tail.as_str().slice(1, tail.len()));
             let mut kind: u64 = 0;
             let mut w: [Value; 4] = [VNONE, VNONE, VNONE, VNONE];
@@ -6511,8 +6511,8 @@ extend Lower {
             let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
             return true;
         }
-        let hp = self.cstr(head.as_str());
-        let tp = self.cstr(tail.as_str());
+        let hp = self.cstr(&head);
+        let tp = self.cstr(&tail);
         let mut mp = self.iconst(T_PTR, 0);
         let mut ml = self.zero(self.ptr_int());
         if msg {
@@ -6567,9 +6567,9 @@ extend Lower {
             // A drop guarded by its move flag.
             let fl = self.li[t.args_start as usize];
             let f = if fl.kind == LK_VAR {
-                self.read_var(fl.var, self.cur);
+                self.read_var(fl.var, self.cur)
             } else {
-                self.load(T_I8, fl.addr, 0, false);
+                self.load(T_I8, fl.addr, 0, false)
             };
             let body = self.block();
             join = self.block();
@@ -6673,16 +6673,16 @@ extend Lower {
             return self.fail("drop-target");
         }
         if c.collect_demand {
-            c.note_free(rm, rt, fs.as_str());
+            c.note_free(rm, rt, &fs);
         }
         let a = if c.mg.is_zst(rm, rt) {
-            self.sentinel(c, rm, rt);
+            self.sentinel(c, rm, rt)
         } else {
-            addr;
+            addr
         };
         let args: []Value = [a];
         let tys: []u32 = [T_PTR as u32];
-        let _ = self.call_sym(fs.as_str(), args, tys, T_NONE);
+        let _ = self.call_sym(&fs, args, tys, T_NONE);
         return true;
     }
 }
@@ -6798,8 +6798,8 @@ extend Lower {
                 let isa = tgt::isa(Lower::p(c).arch).name;
                 if Lower::p(c).c_fns.contains(&(t.callee.module as u64 << 32 | t.callee.node as u64)) && !intrin::has(
                     isa,
-                    name.as_str(),
-                ) && intrin::lane_form(isa, name.as_str()) == 0 {
+                    &name,
+                ) && intrin::lane_form(isa, &name) == 0 {
                     // Named as the extern block declares it.
                     let ca = Lower::ast(c, t.callee.module);
                     let nm = ca.at_const(ca.ext_name(t.callee.node)).as_data.name.text;
@@ -6873,10 +6873,10 @@ extend Lower {
                 }
                 let at = self.b.pool_list(args[0..args.len()]);
                 let _ = if fv != VNONE {
-                    self.inst(O_CALLIND, T_NONE, args.len() as u16, fv, sg, at);
+                    self.inst(O_CALLIND, T_NONE, args.len() as u16, fv, sg, at)
                 } else {
-                    let k = self.sym(name.as_str(), SK_FUNC);
-                    self.inst(O_CALL, T_NONE, args.len() as u16, k, sg, at);
+                    let k = self.sym(&name, SK_FUNC);
+                    self.inst(O_CALL, T_NONE, args.len() as u16, k, sg, at)
                 };
                 self.after_call(c, t);
                 return true;
@@ -6926,10 +6926,10 @@ extend Lower {
                 let sg = self.b.signature(tys[0..tys.len()], nfixed, variadic, AGG | lt);
                 let at = self.b.pool_list(args[0..args.len()]);
                 let _ = if fv != VNONE {
-                    self.inst(O_CALLIND, T_NONE, args.len() as u16, fv, sg, at);
+                    self.inst(O_CALLIND, T_NONE, args.len() as u16, fv, sg, at)
                 } else {
-                    let k = self.sym(name.as_str(), SK_FUNC);
-                    self.inst(O_CALL, T_NONE, args.len() as u16, k, sg, at);
+                    let k = self.sym(&name, SK_FUNC);
+                    self.inst(O_CALL, T_NONE, args.len() as u16, k, sg, at)
                 };
                 for r in 0..t.dests_len {
                     let dp = b.dest_pool[(t.dests_start + r) as usize];
@@ -7113,39 +7113,39 @@ extend Lower {
     fn sys_prim(self: &mut Self, name: str, a: &Vector<Value>, out: &mut Value) bool {
         let s = name.slice(7, name.len());
         let code = if s == "spin" {
-            SYS_SPIN;
+            SYS_SPIN
         } else if s == "barrier" {
-            SYS_BARRIER;
+            SYS_BARRIER
         } else if s == "keep" {
-            SYS_KEEP;
+            SYS_KEEP
         } else if s == "cycles" {
-            SYS_CYCLES;
+            SYS_CYCLES
         } else if s == "fp_save" {
-            SYS_FPSAVE;
+            SYS_FPSAVE
         } else if s == "gs_load" {
-            SYS_GSLOAD;
+            SYS_GSLOAD
         } else if s == "gs_store" {
-            SYS_GSSTORE;
+            SYS_GSSTORE
         } else if s == "cpuid" {
-            SYS_CPUID;
+            SYS_CPUID
         } else if s == "xgetbv" {
-            SYS_XGETBV;
+            SYS_XGETBV
         } else if s == "svl" {
-            SYS_SVL;
+            SYS_SVL
         } else if s == "ctx_swap" {
-            SYS_CTXSWAP;
+            SYS_CTXSWAP
         } else if s == "ctx_entry" {
-            SYS_CTXENTRY;
+            SYS_CTXENTRY
         } else {
-            SYS_COUNT;
+            SYS_COUNT
         };
         if code == SYS_COUNT || a.len() != sys_arity(code) as usize {
             return false;
         }
         let ty = if code == SYS_CYCLES || code == SYS_GSLOAD || code == SYS_XGETBV || code == SYS_SVL {
-            T_I64;
+            T_I64
         } else {
-            T_NONE;
+            T_NONE
         };
         let mut ops: [Value; 3] = [VNONE, VNONE, VNONE];
         for k in 0..a.len() {
@@ -7284,16 +7284,16 @@ extend Lower {
                 let k = self.sym("abort", SK_FUNC);
                 let _ = self.inst(O_CALL, T_NONE, 0, k, sg, at);
                 *out = if to_f {
-                    self.fconst(T_F32, 0);
+                    self.fconst(T_F32, 0)
                 } else {
-                    self.iconst(T_I16, 0);
+                    self.iconst(T_I16, 0)
                 };
                 return true;
             }
             *out = if to_f {
-                self.inst(O_HTOF, T_F32, 0, a[0], VNONE, VNONE);
+                self.inst(O_HTOF, T_F32, 0, a[0], VNONE, VNONE)
             } else {
-                self.inst(O_FTOH, T_I16, 0, a[0], VNONE, VNONE);
+                self.inst(O_FTOH, T_I16, 0, a[0], VNONE, VNONE)
             };
             return true;
         }
@@ -7526,11 +7526,11 @@ extend Lower {
     ) bool {
         let k = t.intr;
         let valid = if k == irc::CI_ATOMIC_LOAD {
-            so == 0 || so == 1 || so == 4;
+            so == 0 || so == 1 || so == 4
         } else if k == irc::CI_ATOMIC_STORE {
-            so == 0 || so == 2 || so == 4;
+            so == 0 || so == 2 || so == 4
         } else {
-            so >= 0 && so <= 4 && (fo == 0 || fo == 1 || fo == 4);
+            so >= 0 && so <= 4 && (fo == 0 || fo == 1 || fo == 4)
         };
         if !valid {
             // The runtime traps an order the operation cannot take.
@@ -7552,17 +7552,17 @@ extend Lower {
             let _ = c.term_callee_sym(b, &t, false, &mut s);
             let nm = s.as_str();
             let op = if nm.contains("_swap_") {
-                RMW_XCHG;
+                RMW_XCHG
             } else if nm.contains("_add_") {
-                RMW_ADD;
+                RMW_ADD
             } else if nm.contains("_sub_") {
-                RMW_SUB;
+                RMW_SUB
             } else if nm.contains("_and_") {
-                RMW_AND;
+                RMW_AND
             } else if nm.contains("_or_") {
-                RMW_OR;
+                RMW_OR
             } else {
-                RMW_XOR;
+                RMW_XOR
             };
             r = self.inst(O_ARMW, self.vty(v[1]), o | op << 4, v[0], v[1], 0);
         } else {
@@ -7939,7 +7939,7 @@ extend Lower {
         if let Some(rn) = stdlib::get_env("SC_LIR_RUN") {
             // A debugging aid: one function run in the evaluator.
             let mut ev = le::Eval::new(&self.pkg);
-            let o = ev.run(self.pkg.find_symbol(rn.as_str()), []);
+            let o = ev.run(self.pkg.find_symbol(&rn), []);
             let mut lt = String::new();
             le::outcome_text(&self.pkg, &o, &mut lt);
             eprint("lir: run {}: {} value {}\n", rn.as_str(), lt.as_str(), o.value);
@@ -8097,9 +8097,9 @@ extend Lower {
                 let item = y.kind == TypeKind::TYPE_FUNCTION && !y.fn_sig();
                 let da = Lower::ast(c, y.module);
                 let cf = if item {
-                    da.closure_fact(y.as_data.decl);
+                    da.closure_fact(y.as_data.decl)
                 } else {
-                    null;
+                    null
                 };
                 if cf != null {
                     // A closure: the result types its facts record after the captures and parameters.
@@ -8193,13 +8193,13 @@ extend Lower {
     // keeps its meaning after they are popped; itself when it names no parameter or cannot ground.
     fn grounded(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId) (ModuleId, TypeId) {
         if Lower::ast(c, m).type_concrete(t) {
-            return m, t;
+            return (m, t);
         }
         let mut g = TYPE_NONE;
         if c.mg.ground(m, t, self.bm, &mut g) {
-            return self.bm, g;
+            return (self.bm, g);
         }
-        return m, t;
+        return (m, t);
     }
 }
 
@@ -8210,7 +8210,7 @@ extend Lower {
         if !c.ti_need(rm, rt, &mut s) {
             return self.fail_v("type-info");
         }
-        return self.symaddr(s.as_str(), SK_DATA);
+        return self.symaddr(&s, SK_DATA);
     }
 }
 
@@ -8320,17 +8320,17 @@ extend Lower {
                 test_of.push(NONE);
             } else {
                 test_of.push(*ti.unwrap());
-                syms.push(self.pkg.find_symbol(self.tests[(*ti.unwrap()) as usize].sym.as_str()));
+                syms.push(self.pkg.find_symbol(&self.tests[(*ti.unwrap()) as usize].sym));
             }
         }
         let nr = syms.len();
         let jobs = (unsafe (*pk).jobs) as usize;
         let nw = if jobs < 2 || nr < 2 {
-            1usize;
+            1usize
         } else if jobs < nr {
-            jobs;
+            jobs
         } else {
-            nr;
+            nr
         };
         // Worker w runs w, w + nw, ...: long tests cluster by file.
         let mut outs = Vector::<Vector<le::Outcome>>::with_capacity(nw);
@@ -8390,9 +8390,9 @@ extend Lower {
             // CTFE's run is the oracle; where CTFE does not run a test that makes no FFI call, the test's
             // own expectation is: it passes, or with `should_panic` it traps.
             let same = if ctfe_ran {
-                lk == k && (k == iri::IT_TRAP_NONE || o.top.line == r.line && o.top.col == r.col);
+                lk == k && (k == iri::IT_TRAP_NONE || o.top.line == r.line && o.top.col == r.col)
             } else {
-                lk == iri::IT_TRAP_NONE != r.panics;
+                lk == iri::IT_TRAP_NONE != r.panics
             };
             if ctfe_ran {
                 ran += 1;
@@ -8512,9 +8512,9 @@ const fn line_col(src: str, pos: u32, line: &mut u32, col: &mut u32) {
     let mut l: u32 = 1;
     let mut st: usize = 0;
     let end = if pos as usize > src.len() {
-        src.len();
+        src.len()
     } else {
-        pos as usize;
+        pos as usize
     };
     for k in 0..end {
         if src.byte_at(k) == b'\n' {
@@ -8575,9 +8575,9 @@ extend Lower {
             put_le(&mut d.bytes, 0, v.i as u64, ti.size);
         } else if v.kind == iri::IV_FLOAT {
             let bits = if ti.mty == T_F32 {
-                fl::f32_bits(v.f as f32) as u64;
+                fl::f32_bits(v.f as f32) as u64
             } else {
-                fl::f64_bits(v.f);
+                fl::f64_bits(v.f)
             };
             put_le(&mut d.bytes, 0, bits, ti.size);
         } else if v.kind == iri::IV_STR {
@@ -8661,14 +8661,7 @@ extend Lower {
             if gi != root {
                 sn.format_into("__ct{}", unsafe (*g).ord - 1);
             }
-            self.data_define(
-                sn.as_str(),
-                ti,
-                gi != root || ro,
-                gi == root && tls,
-                ast::pick(gi == root, align, 1u64),
-                &d,
-            );
+            self.data_define(&sn, ti, gi != root || ro, gi == root && tls, ast::pick(gi == root, align, 1u64), &d);
         }
     }
 
@@ -8955,9 +8948,9 @@ extend Lower {
             return self.fail("static-slot");
         }
         let bits = if sl.kind == iri::SK_FLOAT && ti.mty == T_F32 {
-            fl::f32_bits(sl.f() as f32) as u64;
+            fl::f32_bits(sl.f() as f32) as u64
         } else {
-            sl.i as u64;
+            sl.i as u64
         };
         put_le(&mut d.bytes, off, bits, ti.size);
         return true;
@@ -8980,7 +8973,7 @@ extend Lower {
             if !c.mg.fn_sym(r.fm, r.fnode, tgt, &mut sn) {
                 return self.fail("static-fn");
             }
-            let k = self.pkg.symbol(sn.as_str(), SK_FUNC);
+            let k = self.pkg.symbol(&sn, SK_FUNC);
             d.relocs.push(Reloc { offset: off, sym: k, addend: 0 });
             return self.ref_sig(c, k, r.fm, r.fnode);
         }
@@ -9030,7 +9023,7 @@ extend Lower {
                 sn.format_into("__ct{}", unsafe (*og).ord - 1);
             }
         }
-        d.relocs.push(Reloc { offset: off, sym: self.pkg.symbol(sn.as_str(), SK_DATA), addend: add });
+        d.relocs.push(Reloc { offset: off, sym: self.pkg.symbol(&sn, SK_DATA), addend: add });
         return true;
     }
 
@@ -9170,19 +9163,19 @@ extend Lower {
         let mut v = DataBuf { bytes: Vector::<u8>::new(), relocs: Vector::<Reloc>::new() };
         v.bytes.resize_default(ti.size as usize);
         let ds = if els.len == 0 {
-            self.sentinel_sym(c, ast::pick(ei.align > 1, ei.align, 1u64));
+            self.sentinel_sym(c, ast::pick(ei.align > 1, ei.align, 1u64))
         } else {
             let mut dn = String::from_str(name);
             dn.push_str("__data");
             self.data_define(
-                dn.as_str(),
+                &dn,
                 TyI { cls: VC_MEM, mty: T_NONE, size: ei.size * els.len, align: ei.align },
                 true,
                 false,
                 0,
                 &d,
             );
-            self.pkg.symbol(dn.as_str(), SK_DATA);
+            self.pkg.symbol(&dn, SK_DATA)
         };
         v.relocs.push(Reloc { offset: 0, sym: ds, addend: 0 });
         put_le(&mut v.bytes, self.pkg.ptr_bytes, els.len, self.pkg.ptr_bytes);
@@ -9271,11 +9264,11 @@ extend Lower {
             return self.fail("static-literal");
         }
         let bits = if v.kind == iri::IV_FLOAT && ti.mty == T_F32 {
-            fl::f32_bits(v.f as f32) as u64;
+            fl::f32_bits(v.f as f32) as u64
         } else if v.kind == iri::IV_FLOAT {
-            fl::f64_bits(v.f);
+            fl::f64_bits(v.f)
         } else if v.kind == iri::IV_INT || v.kind == iri::IV_BOOL {
-            v.i as u64;
+            v.i as u64
         } else {
             return self.fail("static-literal");
         };
@@ -9887,9 +9880,9 @@ extend Lower {
         // `fwd`: the block merged after each, read before renumbering rewrites the edges.
         for k in 0..nb {
             self.td.fwd[k] = if self.td.bmap[k] != NONE || self.td.jp[k] != NONE {
-                self.chain_next(k as u32);
+                self.chain_next(k as u32)
             } else {
-                NONE;
+                NONE
             };
         }
         let mut n: u32 = 0;
@@ -9974,15 +9967,15 @@ extend Lower {
             }
             let v = x.b as u64 << 32 | x.a as u64;
             let u = if t.op == O_SEXT {
-                lp::sign_extend(v, type_bits(x.ty, ptr)) as u64;
+                lp::sign_extend(v, type_bits(x.ty, ptr)) as u64
             } else {
-                v;
+                v
             };
             let tb = type_bits(t.ty, ptr);
             let r = if tb >= 64 {
-                u;
+                u
             } else {
-                u & (1u64 << tb as u64) - 1;
+                u & (1u64 << tb as u64) - 1
             };
             let ins = self.b.insts.index_mut(i);
             ins.op = O_ICONST;
@@ -10155,8 +10148,8 @@ extend Lower {
         self.reset(m);
         self.bm = m;
         self.noret = false;
-        self.file = self.pkg.add_file(Lower::p(c).modules.at(m as usize).file.as_str());
-        return cd, ro;
+        self.file = self.pkg.add_file(&Lower::p(c).modules.at(m as usize).file);
+        return (cd, ro);
     }
 
     // End the body `synth_begin` began: when `ok`, finished as function `sym`; else a refusal.
@@ -10189,12 +10182,12 @@ extend Lower {
     ) bool {
         let mut name = String::new();
         name.format_into("__sc_test_w_{}_{}", tm, func);
-        if self.pkg.find_symbol(name.as_str()) != NONE && self.pkg.syms[self.pkg.find_symbol(name.as_str()) as usize].def != NONE {
+        if self.pkg.find_symbol(&name) != NONE && self.pkg.syms[self.pkg.find_symbol(&name) as usize].def != NONE {
             return true;
         }
         let (cd, ro) = self.synth_begin(c, tm);
         let ok = self.test_wrapper_i(c, tm, func, wants, fx_init, fx_free);
-        return self.synth_end(c, cd, ro, name.as_str(), ok);
+        return self.synth_end(c, cd, ro, &name, ok);
     }
 
     fn test_wrapper_i(
@@ -10260,7 +10253,7 @@ extend Lower {
         if !c.mg.fn_sym(m, f, c.mg.method_target(m, f), &mut s) {
             return self.fail_v("test-sym");
         }
-        let k = self.sym(s.as_str(), SK_FUNC);
+        let k = self.sym(&s, SK_FUNC);
         let none: []u32 = [];
         let nv: []Value = [];
         if ti.cls == VC_ZST {
@@ -10342,7 +10335,7 @@ extend Lower {
         let mut run = String::from_str(wn);
         run.push_str("_run");
         let (cd, ro) = self.synth_begin(c, m);
-        let ok1 = self.blk_outer(c, m, &pts, &tis, &offs, rt, ri, roff, env, run.as_str(), callee, blocking);
+        let ok1 = self.blk_outer(c, m, &pts, &tis, &offs, rt, ri, roff, env, &run, callee, blocking);
         if !self.synth_end(c, cd, ro, wn, ok1) {
             return false;
         }
@@ -10352,7 +10345,7 @@ extend Lower {
         }
         let (cd2, ro2) = self.synth_begin(c, m);
         let ok2 = self.blk_run(c, m, &pts, &tis, &offs, rt, ri, roff, callee);
-        if !self.synth_end(c, cd2, ro2, run.as_str(), ok2) {
+        if !self.synth_end(c, cd2, ro2, &run, ok2) {
             return false;
         }
         self.own_last(m);
@@ -10425,9 +10418,9 @@ extend Lower {
             ps.push(self.b.param(b0, k as u32));
         }
         let rmem = if ri.cls == VC_MEM {
-            ps[ps.len() - 1];
+            ps[ps.len() - 1]
         } else {
-            VNONE;
+            VNONE
         };
         if !blocking {
             let k = self.sym(callee, SK_FUNC);
@@ -10609,9 +10602,9 @@ extend Lower {
         // A callee without an env takes the arguments only.
         let skip = ast::pick(env, 0u32, 1u32);
         let csig = if env {
-            self.b.sig;
+            self.b.sig
         } else {
-            self.b.signature(ptys[1..ptys.len()], n - 1, false, ret);
+            self.b.signature(ptys[1..ptys.len()], n - 1, false, ret)
         };
         let b0 = self.b.add_block(etys[0..etys.len()]);
         self.b.begin(b0);
@@ -10695,19 +10688,19 @@ extend Lower {
             let nt: []u32 = [];
             let mut a = VNONE;
             if ai.cls == VC_ZST {
-                let _ = self.call_sym(ds.as_str(), none, nt, T_NONE);
+                let _ = self.call_sym(&ds, none, nt, T_NONE);
                 a = self.sentinel(c, am, at);
             } else if ai.cls == VC_SCALAR {
-                let v = self.call_sym(ds.as_str(), none, nt, sig_code(ai.mty, Lower::signed(c, am, at)));
+                let v = self.call_sym(&ds, none, nt, sig_code(ai.mty, Lower::signed(c, am, at)));
                 a = self.temp(ai);
                 self.store(v, a, 0, false);
             } else {
                 a = self.temp(ai);
                 let sr: []Value = [a];
-                let _ = self.call_sym(ds.as_str(), sr, nt, AGG | self.layout_of(c, am, at, ai));
+                let _ = self.call_sym(&ds, sr, nt, AGG | self.layout_of(c, am, at, ai));
             }
             let args: []Value = [a, p, sz, al];
-            let _ = self.call_sym(dd.as_str(), args, dt, T_NONE);
+            let _ = self.call_sym(&dd, args, dt, T_NONE);
         }
         let _ = self.inst(O_RET, T_NONE, 0, VNONE, VNONE, VNONE);
         return true;
@@ -10761,7 +10754,7 @@ extend Lower {
         if !c.mg.fn_sym(m, f, c.mg.method_target(m, f), &mut s) {
             return self.fail("test-sym");
         }
-        let k = self.sym(s.as_str(), SK_FUNC);
+        let k = self.sym(&s, SK_FUNC);
         let mut pt = Vector::<u32>::new();
         for _ in 0..args.len() {
             pt.push(T_PTR);
@@ -10951,16 +10944,16 @@ extend Lower {
         let mut fl = Vector::<FieldAt>::new();
         let y = *Lower::ast(c, rm).type_at(rt);
         let decl = if y.kind == TypeKind::TYPE_ENUM {
-            y.as_data.decl;
+            y.as_data.decl
         } else if y.kind == TypeKind::TYPE_INSTANCE {
-            Lower::ast(c, rm).instance(y.as_data.inst).decl;
+            Lower::ast(c, rm).instance(y.as_data.inst).decl
         } else {
-            NODE_NONE;
+            NODE_NONE
         };
         let dm = if y.kind == TypeKind::TYPE_INSTANCE {
-            Lower::ast(c, rm).instance(y.as_data.inst).module;
+            Lower::ast(c, rm).instance(y.as_data.inst).module
         } else {
-            y.module;
+            y.module
         };
         let is_enum = decl != NODE_NONE && Lower::ast(c, dm).at_const(decl).kind == NodeKind::NODE_ENUM;
         if is_enum && !Lower::ast(c, dm).enum_has_payload(decl) || y.kind != TypeKind::TYPE_FUNCTION && y.kind != TypeKind::TYPE_STRUCT && y.kind != TypeKind::TYPE_ENUM && y.kind != TypeKind::TYPE_INSTANCE {

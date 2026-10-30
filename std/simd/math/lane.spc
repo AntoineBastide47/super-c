@@ -213,16 +213,16 @@ pub fn table_poly<T: Lane, const N: usize, const S: usize>(a: Simd<T, N>, i: Sim
     let n = S - 3;
     let u2 = u * u;
     let mut r = if n % 2 == 1 {
-        col::<T, N>(t, &b, 2 + n);
+        col::<T, N>(t, &b, 2 + n)
     } else {
-        col::<T, N>(t, &b, 2 + n).fma(u, col::<T, N>(t, &b, 1 + n));
+        col::<T, N>(t, &b, 2 + n).fma(u, col::<T, N>(t, &b, 1 + n))
     };
     for jj in 1..(n + 1) / 2 {
         let j = (n + 1) / 2 - 1 - jj;
         r = r.fma(u2, col::<T, N>(t, &b, 4 + 2 * j).fma(u, col::<T, N>(t, &b, 3 + 2 * j)));
     }
     let (h, l) = fast_two_sum(col::<T, N>(t, &b, 1), u.fma(r, col::<T, N>(t, &b, 2)));
-    return h, l;
+    return (h, l);
 }
 
 // Value `k` of each lane's row: lane j's from t[b[j] + k].
@@ -239,19 +239,19 @@ fn col<T: Lane, const N: usize>(t: []T, b: &[u32; N], k: usize) Simd<T, N> {
 pub const fn two_sum<T: Lane, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let s = a + b;
     let bb = s - a;
-    return s, a - (s - bb) + (b - bb);
+    return (s, a - (s - bb) + (b - bb));
 }
 
 /// `two_sum` when |a| >= |b| or a = 0 in every lane (Dekker).
 pub const fn fast_two_sum<T: Lane, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let s = a + b;
-    return s, b - (s - a);
+    return (s, b - (s - a));
 }
 
 /// `(p, e)` with p + e = a b exactly.
 pub const fn two_prod<T: Lane, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let p = a * b;
-    return p, a.fma(b, -p);
+    return (p, a.fma(b, -p));
 }
 
 /// `(h + l) / (dh + dl)` as a double word, about 2^-2p relative error: one division, q = h (1/dh), and
@@ -263,13 +263,13 @@ pub fn dw_div<T: Lane, const N: usize>(h: Simd<T, N>, l: Simd<T, N>, dh: Simd<T,
     let r = sp::<T, N>(1.0) / dh;
     let q = h * r;
     let (zh, zl) = fast_two_sum(q, (-q).fma(dl, (-q).fma(dh, h) + l) * r);
-    return zh, zl;
+    return (zh, zl);
 }
 
 /// `sqrt(h + l)` as a double word, for h + l >= 0.
 pub fn dw_sqrt<T: Lane, const N: usize>(h: Simd<T, N>, l: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let s = h.sqrt();
-    return s, choose(h.equal(sp(0.0)), h, ((-s).fma(s, h) + l) / (s + s));
+    return (s, choose(h.equal(sp(0.0)), h, ((-s).fma(s, h) + l) / (s + s)));
 }
 
 /// NaN in every lane (as `inf`, from the encoding).
@@ -282,7 +282,7 @@ pub fn frexp_any<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>
     let kc = T::kc();
     let sub = x.less_than(Simd::splat(kc.min_normal));
     let (m, e) = T::frexp(choose(sub, x * kc.sub_scale, x));
-    return m, e - choose(sub, Simd::splat(kc.sub_bits), sp::<T, N>(0.0));
+    return (m, e - choose(sub, Simd::splat(kc.sub_bits), sp::<T, N>(0.0)));
 }
 
 /// y 2^k for integer-valued k: one product where 2^k is normal, else two (the first exact for y in
@@ -333,7 +333,7 @@ pub fn exp_core<T: Lane, const N: usize>(r: Simd<T, N>, rl: Simd<T, N>) (Simd<T,
     let (h2, l2) = fast_two_sum(h, r2h * T::c(0.5));
     let lo = l2 + (l + (r2h * r).fma(T::poly::<{Poly::ExpP}>(r), r2l * T::c(0.5)));
     // e^(r + rl) = e^r (1 + rl), e^r = h2 + lo.
-    return h2, rl.fma(h2 + lo, lo);
+    return (h2, rl.fma(h2 + lo, lo));
 }
 
 /// e^(r + rl) rounded once, for |r| <= ln2/2 and a small rl (below 2^-(p/2)): 1 + r exact, e^r - 1 - r
@@ -352,7 +352,7 @@ pub fn expk_p<T: Lane, const N: usize>(xh: Simd<T, N>, xl: Simd<T, N>) (Simd<T, 
     let t = k * kc.ln2_lo;
     let (r, e) = two_sum(r1, -t);
     let (h, l) = exp_core(r, e + xl - k.fma(Simd::splat(kc.ln2_lo), -t));
-    return h, l, k;
+    return (h, l, k);
 }
 
 /// The Annex F results of a logarithm of x around its value `y`: -inf at 0, NaN below 0 and for NaN,
@@ -366,13 +366,13 @@ pub fn log_special<T: Lane, const N: usize>(x: Simd<T, N>, y: Simd<T, N>) Simd<T
 pub fn log_split<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let (m0, e0) = frexp_any(x);
     let (f, e) = log_split_m(m0, e0);
-    return f, e;
+    return (f, e);
 }
 
 /// `log_split` from x = m0 2^e0, m0 in [1, 2).
 pub fn log_split_m<T: Lane, const N: usize>(m0: Simd<T, N>, e0: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let big = m0.greater_than(Simd::splat(T::kc().sqrt2));
-    return choose(big, m0 * T::c(0.5), m0) - T::c(1.0), choose(big, e0 + T::c(1.0), e0);
+    return (choose(big, m0 * T::c(0.5), m0) - T::c(1.0), choose(big, e0 + T::c(1.0), e0));
 }
 
 /// `Lane::log_parts` by a polynomial: x = (1 + f) 2^e, 1 + f in [sqrt(1/2), sqrt(2)), log(1 + f) =
@@ -385,7 +385,7 @@ pub fn log_parts_p<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, 
     let (qh, ql) = two_prod(f * T::c(0.5), f); // f^2 / 2, exact
     let t = s * (qh + z * T::poly::<{Poly::LogP}>(z));
     let (a, b) = two_sum(f, -qh);
-    return e, a, b - ql + t, (-(s + s) * (sp::<T, N>(1.0) - s)).fma(s.fma(s, sp(1.0)), sp(1.0));
+    return (e, a, b - ql + t, (-(s + s) * (sp::<T, N>(1.0) - s)).fma(s.fma(s, sp(1.0)), sp(1.0)));
 }
 
 /// `(v, im)`: log(1 + f) = v for 1 + f in [sqrt(1/2), sqrt(2)] (fdlibm: s = f / (2 + f), f - f^2/2 +
@@ -394,9 +394,9 @@ pub fn log1p_f<T: Lane, const N: usize>(f: Simd<T, N>) (Simd<T, N>, Simd<T, N>) 
     let s = f / (sp::<T, N>(2.0) + f);
     let z = s * s;
     let hf = f * f * T::c(0.5);
-    return f - (hf - s * z.fma(T::poly::<{Poly::LogP}>(z), hf)), (-(s + s) * (sp::<T, N>(1.0) - s)).fma(
-        s.fma(s, sp(1.0)),
-        sp(1.0),
+    return (
+        f - (hf - s * z.fma(T::poly::<{Poly::LogP}>(z), hf)),
+        (-(s + s) * (sp::<T, N>(1.0) - s)).fma(s.fma(s, sp(1.0)), sp(1.0))
     );
 }
 
@@ -439,7 +439,7 @@ pub fn logk_p<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let (hh, hl) = two_sum(eh, bh);
     let lo = hl + (bl + al + (sl + sl) + ul + wl + tail + e.fma(Simd::splat(kc.ln2_lo), el));
     let (rh, rl) = fast_two_sum(hh, lo);
-    return rh, rl;
+    return (rh, rl);
 }
 
 /// erf x as a double word for |x| < 1/2: 2/sqrt(pi) x + x z P(z), z = x^2, the first product exact.
@@ -448,7 +448,7 @@ pub fn erf_small<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>
     let z = x * x;
     let (ph, p0) = two_prod(x, Simd::splat(kc.two_sqrtpi_hi));
     let (h, l) = fast_two_sum(ph, p0 + x.fma(Simd::splat(kc.two_sqrtpi_lo), x * z * T::poly::<{Poly::ErfP}>(z)));
-    return h, l;
+    return (h, l);
 }
 
 /// erfc a = (h + l) 2^k for a >= 1/2 (NaN as 1/2): e^-a^2 from `expk` of the exact -a^2, times
@@ -460,7 +460,7 @@ pub fn erfc_dw<T: Lane, const N: usize>(a: Simd<T, N>) (Simd<T, N>, Simd<T, N>, 
     let (sh, sl) = two_prod(b, b);
     let (eh, el, k) = T::expk(-sh, -sl);
     let (ph, p0) = two_prod(eh, gh);
-    return ph, p0 + eh.fma(gl, el * gh), k;
+    return (ph, p0 + eh.fma(gl, el * gh), k);
 }
 
 /// x^y from m0 = e^z, z = y log|x| (zh its high part), for x^y = +-m0: overflow and underflow past
@@ -533,10 +533,10 @@ pub fn rem_pio2<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>,
         let (q, rh, rl) = rem_pio2_cw(x, choose(big, sp::<T, N>(0.0), (x * kc.two_over_pi).round_even()));
         let fin = x.is_finite();
         let (bq, bh, bl) = T::rem_pio2_big(choose(big & fin, x, Simd::splat(kc.cw_max)));
-        return choose(big, bq, q), choose(big, choose(fin, bh, x - x), rh), choose(big, bl, rl);
+        return (choose(big, bq, q), choose(big, choose(fin, bh, x - x), rh), choose(big, bl, rl));
     }
     let (q, rh, rl) = rem_pio2_cw(x, (x * kc.two_over_pi).round_even());
-    return q, rh, rl;
+    return (q, rh, rl);
 }
 
 // `rem_pio2` below `cw_max` for x near k pi/2.
@@ -546,7 +546,7 @@ fn rem_pio2_cw<T: Lane, const N: usize>(x: Simd<T, N>, k: Simd<T, N>) (Simd<T, N
     let (ph, pl) = two_prod(k, Simd::splat(kc.pio2_2f));
     let (s, e) = two_sum(r1, -ph);
     let (rh, rl) = fast_two_sum(s, (-k).fma(Simd::splat(kc.pio2_3f), e - pl));
-    return k - (k * T::c(0.25)).floor() * T::c(4.0), rh, rl;
+    return (k - (k * T::c(0.25)).floor() * T::c(4.0), rh, rl);
 }
 
 /// `(c, y, q)` of the cube root of positive a = m 2^e: e = 3q + r, r in {-1, 0, 1}, c = m 2^r, and
@@ -559,7 +559,7 @@ pub fn cbrt_start<T: Lane, const P: Poly, const N: usize>(a: Simd<T, N>) (Simd<T
     let dn = r.equal(sp(-1.0));
     let s: Simd<T, N> = choose(up, sp(1.2599210498948731648), choose(dn, sp(0.79370052598409973738), sp(1.0)));
     let p2: Simd<T, N> = choose(up, sp(2.0), choose(dn, sp(0.5), sp(1.0)));
-    return m * p2, T::poly::<P>(m) * s, q;
+    return (m * p2, T::poly::<P>(m) * s, q);
 }
 
 /// cbrt x from y = cbrt(c) (`cbrt_start`): y 2^q with x's sign; +-0, +-inf and NaN as x.
@@ -575,7 +575,7 @@ pub fn hypot_e<T: Lane, const N: usize>(hi: Simd<T, N>) (Simd<T, N>, bool) {
     let kc = T::kc();
     let far = hi.greater_than(Simd::splat(kc.hyp_hi)) | hi.less_than(Simd::splat(kc.hyp_lo)) & hi.not_equal(sp(0.0));
     let (_, e) = frexp_any(choose(far, hi, sp(1.0)));
-    return e, far.any();
+    return (e, far.any());
 }
 
 /// hypot from its root `r` of the unscaled squares: +inf for an infinite argument (NaN included), NaN
@@ -591,7 +591,7 @@ pub fn atan2_nd<T: Lane, const N: usize>(y: Simd<T, N>, x: Simd<T, N>) (Simd<T, 
     let yi = y.abs().equal(inf());
     let n = choose(yi, sp(1.0), choose(xi, sp(0.0), y.abs()));
     let d = choose(xi, sp(1.0), choose(yi, sp(0.0), x.abs()));
-    return n, d, n.greater_than(d);
+    return (n, d, n.greater_than(d));
 }
 
 /// atan2 from v = atan of the octant's quotient (`atan2_nd`): base +- v, the base pi/2 (`swap`), pi
@@ -608,7 +608,7 @@ pub fn atan2_finish<T: Lane, const N: usize>(y: Simd<T, N>, x: Simd<T, N>, swap:
 pub fn pow_parity<T: Lane, const N: usize>(y: Simd<T, N>) (Mask<N>, Mask<N>) {
     let yi = y.trunc().equal(y);
     let half = y * T::c(0.5);
-    return yi, yi & half.trunc().not_equal(half);
+    return (yi, yi & half.trunc().not_equal(half));
 }
 
 /// The argument of log1p whose result is asinh a for a >= 0: |x| <= 2, a + a^2 / (1 + w); else 2a - 1 +
@@ -688,9 +688,9 @@ const fn i2f<const N: usize>(i: Simd<i64, N>) Simd<f64, N> {
 fn log_cell<const N: usize>(x: Simd<f64, N>) (Simd<f64, N>, Simd<f64, N>, Simd<f64, N>, Simd<f64, N>, Simd<f64, N>) {
     let sub = x.less_than(Simd::splat(0x1p-1022)) & x.greater_than(Simd::splat(0.0));
     let (xs, ds) = if unlikely(sub.any()) {
-        (choose(sub, x * 0x1p54, x), choose(sub, Simd::<f64, N>::splat(-54.0), Simd::splat(0.0)));
+        (choose(sub, x * 0x1p54, x), choose(sub, Simd::<f64, N>::splat(-54.0), Simd::splat(0.0)))
     } else {
-        (x, Simd::<f64, N>::splat(0.0));
+        (x, Simd::<f64, N>::splat(0.0))
     };
     let ix = xs.to_bits();
     let tmp = ix.wrapping_sub(Simd::splat(0x3fe6000000000000u64));
@@ -699,7 +699,13 @@ fn log_cell<const N: usize>(x: Simd<f64, N>) (Simd<f64, N>, Simd<f64, N>, Simd<f
     let z = Simd::<f64, N>::from_bits(ix.wrapping_sub(tmp & 0xfff0000000000000u64));
     let invc = col::<f64, N>(c64::LOG_TAB, &b, 0);
     let kf = i2f(tmp.bitcast::<i64, N>() >> 52) + ds;
-    return kf, z.fma(invc, Simd::splat(-1.0)), col::<f64, N>(c64::LOG_TAB, &b, 1), col::<f64, N>(c64::LOG_TAB, &b, 2), invc;
+    return (
+        kf,
+        z.fma(invc, Simd::splat(-1.0)),
+        col::<f64, N>(c64::LOG_TAB, &b, 1),
+        col::<f64, N>(c64::LOG_TAB, &b, 2),
+        invc
+    );
 }
 
 extend f32 as Lane {
@@ -722,7 +728,10 @@ extend f32 as Lane {
 
     pub fn frexp<const N: usize>(x: Simd<f32, N>) (Simd<f32, N>, Simd<f32, N>) {
         let b = x.to_bits();
-        return Simd::<f32, N>::from_bits(b & 0x007FFFFF | 0x3F800000), ((b >> 23).bitcast::<i32, N>() - 127).cast::<f32>();
+        return (
+            Simd::<f32, N>::from_bits(b & 0x007FFFFF | 0x3F800000),
+            ((b >> 23).bitcast::<i32, N>() - 127).cast::<f32>()
+        );
     }
 
     pub fn rem_pio2_big<const N: usize>(x: Simd<f32, N>) (Simd<f32, N>, Simd<f32, N>, Simd<f32, N>) {
@@ -730,7 +739,7 @@ extend f32 as Lane {
         // leaves r far more accurate than f32 needs.
         let (q, h, l) = rem_pio2(x.cast::<f64>());
         let rh = h.cast::<f32>();
-        return q.cast::<f32>(), rh, (h - rh.cast::<f64>() + l).cast::<f32>();
+        return (q.cast::<f32>(), rh, (h - rh.cast::<f64>() + l).cast::<f32>());
     }
 
     pub fn add_exp<const N: usize>(y: Simd<f32, N>, k: Simd<f32, N>) Simd<f32, N> {
@@ -741,22 +750,22 @@ extend f32 as Lane {
 
     pub fn erfc_g<const N: usize>(a: Simd<f32, N>, i: Simd<f32, N>) (Simd<f32, N>, Simd<f32, N>) {
         let (h, l) = c32::erfc_g(a, i);
-        return h, l;
+        return (h, l);
     }
 
     pub fn expk<const N: usize>(xh: Simd<f32, N>, xl: Simd<f32, N>) (Simd<f32, N>, Simd<f32, N>, Simd<f32, N>) {
         let (h, l, k) = expk_p(xh, xl);
-        return h, l, k;
+        return (h, l, k);
     }
 
     pub fn log_parts<const N: usize>(x: Simd<f32, N>) (Simd<f32, N>, Simd<f32, N>, Simd<f32, N>, Simd<f32, N>) {
         let (e, a, b, im) = log_parts_p(x);
-        return e, a, b, im;
+        return (e, a, b, im);
     }
 
     pub fn logk<const N: usize>(x: Simd<f32, N>) (Simd<f32, N>, Simd<f32, N>) {
         let (h, l) = logk_p(x);
-        return h, l;
+        return (h, l);
     }
 
     pub fn index<const N: usize>(k: Simd<f32, N>) Simd<u32, N> {
@@ -774,13 +783,13 @@ extend f32 as Lane {
     pub fn log_b<const N: usize>(x: Simd<f32, N>) (Simd<f32, N>, Simd<f32, N>, Simd<f32, N>) {
         let (f, e) = log_split(x);
         let (v, im) = log1p_f(f);
-        return e, v, im;
+        return (e, v, im);
     }
 
     pub fn of_i32<const N: usize>(n: Simd<i32, N>) (Simd<f32, N>, Simd<f32, N>) {
         // The top 24 bits and the low 8 are exact in f32; their sum, exact as a double word.
         let (h, l) = two_sum((n >> 8 << 8).cast::<f32>(), (n & 0xFF).cast::<f32>());
-        return h, l;
+        return (h, l);
     }
 }
 
@@ -804,8 +813,9 @@ extend f64 as Lane {
 
     pub fn frexp<const N: usize>(x: Simd<f64, N>) (Simd<f64, N>, Simd<f64, N>) {
         let b = x.to_bits();
-        return Simd::<f64, N>::from_bits(b & 0x000FFFFFFFFFFFFF | 0x3FF0000000000000), i2f(
-            (b >> 52).bitcast::<i64, N>() - 1023,
+        return (
+            Simd::<f64, N>::from_bits(b & 0x000FFFFFFFFFFFFF | 0x3FF0000000000000),
+            i2f((b >> 52).bitcast::<i64, N>() - 1023)
         );
     }
 
@@ -863,7 +873,7 @@ extend f64 as Lane {
         let (rh, rl) = fast_two_sum(p, h.fma(Simd::splat(kc.pio2_lo), (l + fl).fma(Simd::splat(kc.pio2_hi), p0)));
         let neg = x.less_than(Simd::splat(0.0));
         let qn = choose(q.equal(Simd::splat(0.0)), q, 4.0 - q);
-        return choose(neg, qn, q), choose(neg, -rh, rh), choose(neg, -rl, rl);
+        return (choose(neg, qn, q), choose(neg, -rh, rh), choose(neg, -rl, rl));
     }
 
     pub fn add_exp<const N: usize>(y: Simd<f64, N>, k: Simd<f64, N>) Simd<f64, N> {
@@ -873,7 +883,7 @@ extend f64 as Lane {
 
     pub fn erfc_g<const N: usize>(a: Simd<f64, N>, i: Simd<f64, N>) (Simd<f64, N>, Simd<f64, N>) {
         let (h, l) = c64::erfc_g(a, i);
-        return h, l;
+        return (h, l);
     }
 
     pub fn expk<const N: usize>(xh: Simd<f64, N>, xl: Simd<f64, N>) (Simd<f64, N>, Simd<f64, N>, Simd<f64, N>) {
@@ -887,14 +897,14 @@ extend f64 as Lane {
         let b = ((ki & 127) << 1).cast::<u32>().to_array();
         let th = col::<f64, N>(c64::EXP_TAB, &b, 0);
         let tmp = col::<f64, N>(c64::EXP_TAB, &b, 1) + r + r * r * c64::poly::<{Poly::ExpT}, N>(r);
-        return th, th * tmp, i2f(ki >> 7);
+        return (th, th * tmp, i2f(ki >> 7));
     }
 
     pub fn log_parts<const N: usize>(x: Simd<f64, N>) (Simd<f64, N>, Simd<f64, N>, Simd<f64, N>, Simd<f64, N>) {
         let (kf, r, lch, lcl, invc) = log_cell(x);
         // log z = log(1/invc) + log1p(r), log1p(r) = r - r^2/2 + r^3 P(r): (a, b) from the exact sum.
         let (a, a0) = two_sum(lch, r);
-        return kf, a, a0 + (lcl + r * r * r.fma(c64::poly::<{Poly::LogT}, N>(r), Simd::splat(-0.5))), invc * (1.0 - r);
+        return (kf, a, a0 + (lcl + r * r * r.fma(c64::poly::<{Poly::LogT}, N>(r), Simd::splat(-0.5))), invc * (1.0 - r));
     }
 
     pub fn logk<const N: usize>(x: Simd<f64, N>) (Simd<f64, N>, Simd<f64, N>) {
@@ -911,7 +921,7 @@ extend f64 as Lane {
             N
         >(r);
         let (h, l) = fast_two_sum(s3, lo);
-        return h, l;
+        return (h, l);
     }
 
     pub fn index<const N: usize>(k: Simd<f64, N>) Simd<u32, N> {
@@ -928,10 +938,14 @@ extend f64 as Lane {
 
     pub fn log_b<const N: usize>(x: Simd<f64, N>) (Simd<f64, N>, Simd<f64, N>, Simd<f64, N>) {
         let (kf, r, lch, lcl, invc) = log_cell(x);
-        return kf, lch + (r + (lcl + r * r * r.fma(c64::poly::<{Poly::LogT}, N>(r), Simd::splat(-0.5)))), invc * (1.0 - r);
+        return (
+            kf,
+            lch + (r + (lcl + r * r * r.fma(c64::poly::<{Poly::LogT}, N>(r), Simd::splat(-0.5)))),
+            invc * (1.0 - r)
+        );
     }
 
     pub fn of_i32<const N: usize>(n: Simd<i32, N>) (Simd<f64, N>, Simd<f64, N>) {
-        return i2f(n.cast::<i64>()), Simd::<f64, N>::splat(0.0);
+        return (i2f(n.cast::<i64>()), Simd::<f64, N>::splat(0.0));
     }
 }

@@ -197,7 +197,7 @@ fn operator_misuse_is_diagnosed() {
     for c in cases {
         let mut src = String::from_str(c[0]);
         src.push_str(main);
-        h::expect_err_msg(c[1], src.as_str(), c[1]);
+        h::expect_err_msg(c[1], &src, c[1]);
     }
     // The reserved attribute is the first error of the check; the build reports the unknown name too.
     h::expect_build_err(
@@ -236,9 +236,9 @@ fn unknown_intrinsic_under_bootstrap_tags() {
         "@intrinsic(\"simd.nope\")\npub const fn nope<T: SimdElement, const N: usize>(a: Simd<T, N>) Simd<T, N>;\n",
     );
     src.push_str("pub fn twice(a: f32x4) f32x4 {\n    return nope(a) + a;\n}\n");
-    let r = h::compile_std(src.as_str(), -1, h::STAGE_BORROWCK);
+    let r = h::compile_std(&src, -1, h::STAGE_BORROWCK);
     assert(!r.ok() && r.msg_has("unknown intrinsic 'simd.nope'"), "rejected without the flag");
-    assert(h::compile_std_bootstrap(src.as_str(), h::STAGE_BORROWCK).ok(), "accepted under --bootstrap-tags");
+    assert(h::compile_std_bootstrap(&src, h::STAGE_BORROWCK).ok(), "accepted under --bootstrap-tags");
 }
 
 // A lane scalar beside an operator is the scalar in every lane: a variable, a literal and literal-only
@@ -391,9 +391,9 @@ fn main(args: Vector<str>) i32 {
 )";
     // The largest start of the target: wasm32 in the vector conformance lane.
     let max = if h::simd_lane() {
-        "4294967295";
+        "4294967295"
     } else {
-        "18446744073709551615";
+        "18446744073709551615"
     };
     let past = format("index out of bounds: 4 lanes from {} but the length is 10", max);
     h::expect_runs(

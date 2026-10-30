@@ -53,7 +53,7 @@ fn a_tool_built_body_verifies_and_reads_back() {
     let mut t1 = String::new();
     lprint::print_package(&p, &mut t1);
     let mut err = String::new();
-    let q = lparse::parse(t1.as_str(), &mut err);
+    let q = lparse::parse(&t1, &mut err);
     assert(q.is_some(), err.as_str());
     let p2 = q.unwrap();
     let mut v = verify::Verifier::new();

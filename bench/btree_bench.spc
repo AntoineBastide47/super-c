@@ -46,7 +46,7 @@ const fn flat_find(v: &Vector<(u64, u64)>, k: u64) (bool, usize) {
             hi = mid;
         }
     }
-    return lo < v.len() && unsafe p[lo]._0 == k, lo;
+    return (lo < v.len() && unsafe p[lo]._0 == k, lo);
 }
 
 fn flat_insert(v: &mut Vector<(u64, u64)>, k: u64, val: u64) {
@@ -119,9 +119,9 @@ fn btree_lookup(b: &mut bench::Bencher, n: usize, hit: bool) {
     let ks = keys(n);
     let m = tree_of(&ks);
     let delta: u64 = if hit {
-        0;
+        0
     } else {
-        1;
+        1
     };
     while b.running() {
         let mut found: i64 = 0;
@@ -133,16 +133,16 @@ fn btree_lookup(b: &mut bench::Bencher, n: usize, hit: bool) {
             }
         }
         let want = if hit {
-            WORK as i64;
+            WORK as i64
         } else {
-            0;
+            0
         };
         b.tally(
             WORK as i64,
             if found == want {
-                WORK as i64;
+                WORK as i64
             } else {
-                0;
+                0
             },
         );
     }
@@ -153,9 +153,9 @@ fn flat_lookup(b: &mut bench::Bencher, n: usize, hit: bool) {
     let ks = keys(n);
     let v = flat_of(&ks);
     let delta: u64 = if hit {
-        0;
+        0
     } else {
-        1;
+        1
     };
     while b.running() {
         let mut found: i64 = 0;
@@ -168,16 +168,16 @@ fn flat_lookup(b: &mut bench::Bencher, n: usize, hit: bool) {
             }
         }
         let want = if hit {
-            WORK as i64;
+            WORK as i64
         } else {
-            0;
+            0
         };
         b.tally(
             WORK as i64,
             if found == want {
-                WORK as i64;
+                WORK as i64
             } else {
-                0;
+                0
             },
         );
     }

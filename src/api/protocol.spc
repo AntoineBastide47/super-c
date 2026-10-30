@@ -130,7 +130,7 @@ pub struct Server {
 
 // A failed request.
 fn err<T>(code: Code, msg: str) Result<T, ApiError> {
-    return Result::<T, ApiError>::Err(ApiError::new(code, msg));
+    return Err(ApiError::new(code, msg));
 }
 
 // Member `key` of `v` as an integer; `InvalidArgument` when absent or not an integer.
@@ -139,7 +139,7 @@ fn int_of(v: &json::JSON, key: str) Result<i64, ApiError> {
         if x.is_number() {
             let n = x.get_number();
             if n == n && n >= -9007199254740992.0 && n <= 9007199254740992.0 && n == (n as i64) as f64 {
-                return Result::<i64, ApiError>::Ok(n as i64);
+                return Ok(n as i64);
             }
         }
     }
@@ -152,14 +152,14 @@ fn u32_of(v: &json::JSON, key: str) Result<u32, ApiError> {
     if n < 0 || n > 0xFFFFFFFF {
         return err::<u32>(Code::InvalidArgument, format("'{}' is out of range", key).as_str());
     }
-    return Result::<u32, ApiError>::Ok(n as u32);
+    return Ok(n as u32);
 }
 
 // Member `key` of `v` as a string; `InvalidArgument` when absent or not a string.
 fn str_of<'a>(v: &'a json::JSON, key: str) Result<str<'a>, ApiError> {
     if let Some(x) = v.value(key) {
         if x.is_string() {
-            return Result::<str<'a>, ApiError>::Ok(x.get_str());
+            return Ok(x.get_str());
         }
     }
     return err::<str<'a>>(Code::InvalidArgument, format("'{}' must be a string", key).as_str());
@@ -168,7 +168,7 @@ fn str_of<'a>(v: &'a json::JSON, key: str) Result<str<'a>, ApiError> {
 // Member `key` of `v` as an integer, `dflt` when absent.
 fn int_or(v: &json::JSON, key: str, dflt: i64) Result<i64, ApiError> {
     if !v.contains_key(key) {
-        return Result::<i64, ApiError>::Ok(dflt);
+        return Ok(dflt);
     }
     return int_of(v, key);
 }
@@ -211,9 +211,9 @@ pub fn error_reply(id: i64, e: ApiError) String {
     }
     out.push_str(",\"error\":{");
     field_str(&mut out, "code", code_name(e.code));
-    field_str(&mut out, "message", e.message.as_str());
+    field_str(&mut out, "message", &e.message);
     if e.file.len() != 0 {
-        field_str(&mut out, "file", e.file.as_str());
+        field_str(&mut out, "file", &e.file);
         field_int(&mut out, "start", e.start);
         field_int(&mut out, "end", e.end);
     }
@@ -239,7 +239,7 @@ extend Page {
         }
         let mut p = Page { out: String::with_capacity(256), cursor: cursor as usize, limit: limit as usize, next: -1 };
         p.out.push_str("{\"items\":[");
-        return Result::<Page, ApiError>::Ok(p);
+        return Ok(p);
     }
 
     // Whether the next item is to be written; it then starts in `out`.
@@ -342,7 +342,7 @@ extend Server {
         if method == "cancel" {
             let _ = int_of(params, "target")?;
             out.push_str("{}");
-            return Result::<Unit, ApiError>::Ok(Unit {});
+            return Ok(Unit {});
         }
         if method == "query" {
             return self.query(params, opts, out);
@@ -357,7 +357,7 @@ extend Server {
         if method == "close_workspace" {
             let _ = self.workspaces.remove(w);
             out.push_str("{}");
-            return Result::<Unit, ApiError>::Ok(Unit {});
+            return Ok(Unit {});
         }
         let s = &mut self.workspaces[w].s;
         if method == "set_file_text" || method == "apply_edits" {
@@ -393,14 +393,14 @@ extend Server {
             field_int(out, "revision", rev as i64);
             field_int(out, "version", s.version(file));
             close_obj(out);
-            return Result::<Unit, ApiError>::Ok(Unit {});
+            return Ok(Unit {});
         }
         if method == "commit" {
             s.check_with(opts)?;
             out.push_byte(b'{');
             field_int(out, "revision", s.revision() as i64);
             close_obj(out);
-            return Result::<Unit, ApiError>::Ok(Unit {});
+            return Ok(Unit {});
         }
         return err::<Unit>(Code::ProtocolFailed, format("unknown method '{}'", method).as_str());
     }
@@ -425,9 +425,9 @@ extend Server {
         for side in 0..2 {
             let names = switch params.value(
                 if side == 0 {
-                    "required";
+                    "required"
                 } else {
-                    "optional";
+                    "optional"
                 },
             ) {
                 Some(a) if a.is_array() => a,
@@ -479,7 +479,7 @@ extend Server {
         field_int(out, "max_workspaces", self.limits.max_workspaces as i64);
         close_obj(out);
         out.push_byte(b'}');
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     // The index of the workspace `params.workspace` names.
@@ -487,7 +487,7 @@ extend Server {
         let id = int_of(params, "workspace")?;
         for i in 0..self.workspaces.len() {
             if self.workspaces[i].id == id {
-                return Result::<usize, ApiError>::Ok(i);
+                return Ok(i);
             }
         }
         return err::<usize>(Code::WrongWorkspace, "no open workspace has this id");
@@ -501,10 +501,10 @@ extend Server {
         let path = str_of(params, "path")?;
         let mut roots = self.limits.roots.clone();
         roots.push(self.limits.std_dir.clone());
-        let mut mem = switch MemoryFiles::over_disk_within(roots.as_slice()) {
+        let mut mem = switch MemoryFiles::over_disk_within(&roots) {
             Ok(m) => m,
             Err(e) => {
-                return Result::<Unit, ApiError>::Err(ApiError::io(e, ""));
+                return Err(ApiError::io(e, ""));
             },
         };
         if let Some(fs) = params.value("files") {
@@ -515,19 +515,19 @@ extend Server {
                         if !m.value.is_string() {
                             return err::<Unit>(Code::InvalidArgument, "a file's text is a string");
                         }
-                        mem.set(m.key.as_str(), m.value.get_str());
+                        mem.set(&m.key, m.value.get_str());
                     }
                 },
                 _ => {
                     return err::<Unit>(Code::InvalidArgument, "'files' must be an object");
                 },
-            };
+            }
         }
-        let cfg = ses::Config::with_files(self.limits.std_dir.as_str(), Box::new(mem));
+        let cfg = ses::Config::with_files(&self.limits.std_dir, Box::new(mem));
         let s = if kind == "file" {
-            ses::Session::open_file(path, cfg)?;
+            ses::Session::open_file(path, cfg)?
         } else if kind == "project" {
-            ses::Session::open_project(path, cfg)?;
+            ses::Session::open_project(path, cfg)?
         } else {
             return err::<Unit>(Code::InvalidArgument, "'kind' is \"file\" or \"project\"");
         };
@@ -538,7 +538,7 @@ extend Server {
         field_int(out, "revision", s.revision() as i64);
         close_obj(out);
         self.workspaces.push(Workspace { id: id, s: s });
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     fn query(self: &mut Self, params: &json::JSON, opts: &ses::RequestOptions, out: &mut String) Result<Unit, ApiError> {
@@ -577,15 +577,15 @@ extend Server {
         } else if ms == "syntax.format" {
             let file = str_of(args, "file")?;
             let text = file_text(s, file)?;
-            let t = syn::format_file(file, text.as_str(), 120)?;
+            let t = syn::format_file(file, &text, 120)?;
             out.push_byte(b'{');
-            field_str(out, "text", t.as_str());
+            field_str(out, "text", &t);
             close_obj(out);
-            return Result::<Unit, ApiError>::Ok(Unit {});
+            return Ok(Unit {});
         } else if ms == "syntax.nodes" {
             let file = str_of(args, "file")?;
             let text = file_text(s, file)?;
-            let tree = syn::SyntaxTree::parse(file, text.as_str());
+            let tree = syn::SyntaxTree::parse(file, &text);
             let root = tree.root();
             let mut it = root.descendants();
             // Bounded by the tree's nodes.
@@ -617,7 +617,7 @@ extend Server {
                     field_str(out, "kind", format("{}", sym.kind()).as_str());
                     field_str(out, "signature", sym.signature().as_str());
                     if let Some(l) = sym.location() {
-                        field_str(out, "file", l.file.as_str());
+                        field_str(out, "file", &l.file);
                         field_int(out, "start", l.start);
                         field_int(out, "end", l.end);
                     }
@@ -626,18 +626,18 @@ extend Server {
                 None => {
                     out.push_str("null");
                 },
-            };
+            }
             out.push_byte(b'}');
-            return Result::<Unit, ApiError>::Ok(Unit {});
+            return Ok(Unit {});
         } else if ms == "navigation.hover" {
             let h = sem::hover(s, str_of(args, "file")?, u32_of(args, "offset")?)?;
             out.push_str("{\"text\":");
             switch h {
-                Some(t) => json::dump_escaped(t.as_str(), out),
+                Some(t) => json::dump_escaped(&t, out),
                 None => out.push_str("null"),
-            };
+            }
             out.push_byte(b'}');
-            return Result::<Unit, ApiError>::Ok(Unit {});
+            return Ok(Unit {});
         } else if ms == "navigation.references" {
             let incl = args.value_bool("include_declaration");
             let mut ls = sem::references_at(s, str_of(args, "file")?, u32_of(args, "offset")?, incl, opts)?;
@@ -651,9 +651,9 @@ extend Server {
             for i in 0..es.len() {
                 if pg.want() {
                     let e = &es[i];
-                    field_str(&mut pg.out, "name", e.name.as_str());
+                    field_str(&mut pg.out, "name", &e.name);
                     field_str(&mut pg.out, "kind", format("{}", e.kind).as_str());
-                    field_str(&mut pg.out, "detail", e.detail.as_str());
+                    field_str(&mut pg.out, "detail", &e.detail);
                     field_int(&mut pg.out, "start", e.range.start);
                     field_int(&mut pg.out, "end", e.range.end);
                     field_int(&mut pg.out, "name_start", e.name_range.start);
@@ -687,29 +687,29 @@ extend Server {
             for i in 0..we.edits.len() {
                 if pg.want() {
                     let e = &we.edits[i];
-                    field_str(&mut pg.out, "file", e.file.as_str());
+                    field_str(&mut pg.out, "file", &e.file);
                     field_int(&mut pg.out, "start", e.start);
                     field_int(&mut pg.out, "end", e.end);
-                    field_str(&mut pg.out, "text", e.text.as_str());
+                    field_str(&mut pg.out, "text", &e.text);
                     close_obj(&mut pg.out);
                 }
             }
         } else if ms == "ir_views.core_function" {
             let f = ir::core_function(s, str_of(args, "file")?, u32_of(args, "offset")?)?;
             out.push_byte(b'{');
-            field_str(out, "text", f.text.as_str());
+            field_str(out, "text", &f.text);
             key(out, "generic");
             out.push_str(
                 if f.generic {
-                    "true,";
+                    "true,"
                 } else {
-                    "false,";
+                    "false,"
                 },
             );
             field_int(out, "locals", f.locals.len() as i64);
             field_int(out, "blocks", f.blocks.len() as i64);
             close_obj(out);
-            return Result::<Unit, ApiError>::Ok(Unit {});
+            return Ok(Unit {});
         } else if ms == "ir_views.hir_nodes" {
             let ns = ir::hir_nodes(s, str_of(args, "file")?, u32_of(args, "start")?, u32_of(args, "end")?)?;
             for i in 0..ns.len() {
@@ -721,12 +721,12 @@ extend Server {
                     key(&mut pg.out, "lowered");
                     pg.out.push_str(
                         if n.lowered {
-                            "true,";
+                            "true,"
                         } else {
-                            "false,";
+                            "false,"
                         },
                     );
-                    field_str(&mut pg.out, "type", n.ty.as_str());
+                    field_str(&mut pg.out, "type", &n.ty);
                     close_obj(&mut pg.out);
                 }
             }
@@ -735,15 +735,15 @@ extend Server {
         }
         let t = pg.finish();
         out.push_string(&t);
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 
 // The current text of workspace file `file`.
 fn file_text(s: &mut ses::Session, file: str) Result<String, ApiError> {
     return switch s.text(file)? {
-        Some(t) => Result::<String, ApiError>::Ok(t),
-        None => Result::<String, ApiError>::Err(ApiError::at(Code::InvalidArgument, "no such file", file, 0, 0)),
+        Some(t) => Ok(t),
+        None => Err(ApiError::at(Code::InvalidArgument, "no such file", file, 0, 0)),
     };
 }
 
@@ -777,7 +777,7 @@ fn sort_locations(ls: &mut Vector<sem::Location>) {
 fn locations(ls: &Vector<sem::Location>, pg: &mut Page) {
     for i in 0..ls.len() {
         if pg.want() {
-            field_str(&mut pg.out, "file", ls[i].file.as_str());
+            field_str(&mut pg.out, "file", &ls[i].file);
             field_int(&mut pg.out, "start", ls[i].start);
             field_int(&mut pg.out, "end", ls[i].end);
             close_obj(&mut pg.out);
@@ -842,10 +842,10 @@ fn location_batch(ls: &Vector<sem::Location>, pg: &Page, out: &mut String, paylo
         if k != 0 {
             out.push_byte(b',');
         }
-        json::dump_escaped(ls[files[k] as usize].file.as_str(), out);
+        json::dump_escaped(&ls[files[k] as usize].file, out);
     }
     out.format_into("],\"next_cursor\":{}}}", next);
-    return Result::<Unit, ApiError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 
 // One diagnostic of `diagnostics`, owned for sorting.
@@ -894,14 +894,14 @@ fn diagnostics(s: &ses::Session, pg: &mut Page) Result<Unit, ApiError> {
     for i in 0..v.len() {
         if pg.want() {
             let d = &v[i];
-            field_str(&mut pg.out, "file", d.file.as_str());
+            field_str(&mut pg.out, "file", &d.file);
             field_int(&mut pg.out, "start", d.start);
             field_int(&mut pg.out, "end", d.end);
             field_int(&mut pg.out, "severity", d.severity);
             field_str(&mut pg.out, "code", dc::name(d.code));
-            field_str(&mut pg.out, "message", d.message.as_str());
+            field_str(&mut pg.out, "message", &d.message);
             close_obj(&mut pg.out);
         }
     }
-    return Result::<Unit, ApiError>::Ok(Unit {});
+    return Ok(Unit {});
 }

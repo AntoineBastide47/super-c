@@ -101,9 +101,9 @@ pub const fn bit_cast<U: Copy, T: Copy>(v: T) U {
 // function pointer has invalid patterns. A nested array is refused, as its element is not described.
 const fn every_pattern_valid(info: TypeInfo) bool {
     let tag = if info.kind == TypeTag::Array {
-        info.elem;
+        info.elem
     } else {
-        info.kind;
+        info.kind
     };
     return tag == TypeTag::Int || tag == TypeTag::Uint || tag == TypeTag::Float || tag == TypeTag::Complex || tag == TypeTag::Pointer || tag == TypeTag::Simd;
 }

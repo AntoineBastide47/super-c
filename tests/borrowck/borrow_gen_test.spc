@@ -61,7 +61,7 @@ fn check_rejected_by_type_check(label: str, src: str, needle: str) {
 // `snprintf(PREFIX ...)` in the fixed-case families).
 fn case_pre(pre: str, body: str, label: str, ok: bool) {
     let src = format("{}{}", pre, body);
-    check_case(label, src.as_str(), ok);
+    check_case(label, &src, ok);
 }
 
 // Family A: aliasing: two borrows of p, both kept live. Reject iff their places overlap and at least
@@ -85,7 +85,7 @@ fn aliasing() {
                         use_ref("b2", p2).as_str(),
                     );
                     let want = !(overlap(p1, p2) && (k1 != 0 || k2 != 0));
-                    check_case("aliasing", src.as_str(), want);
+                    check_case("aliasing", &src, want);
                 }
             }
         }
@@ -110,7 +110,7 @@ fn use_while_borrowed() {
                     use_ref("r", p1).as_str(),
                 );
                 let want = !(overlap(p1, p2) && k != 0);
-                check_case("use while borrowed", src.as_str(), want);
+                check_case("use while borrowed", &src, want);
             }
         }
     }
@@ -132,7 +132,7 @@ fn nll() {
                     use_ref("r", p1).as_str(),
                     places[p2],
                 );
-                check_case("nll", src.as_str(), true);
+                check_case("nll", &src, true);
             }
         }
     }
@@ -306,17 +306,17 @@ fn closed_gaps() {
     );
     check_case(
         "assign arg while tuple-destructured ref live",
-        "fn split<'a>(a: &'a mut i32, b: &'a mut i32) (&'a i32, &'a i32) { return a, b; }\nfn main() i32 { let mut x = 5; let mut y = 6; let (r, s) = split(&mut x, &mut y); x = 9; return *r + *s; }\n",
+        "fn split<'a>(a: &'a mut i32, b: &'a mut i32) (&'a i32, &'a i32) { return (a, b); }\nfn main() i32 { let mut x = 5; let mut y = 6; let (r, s) = split(&mut x, &mut y); x = 9; return *r + *s; }\n",
         false,
     );
     check_case(
         "tuple refs scoped, then assign arg",
-        "fn split<'a>(a: &'a mut i32, b: &'a mut i32) (&'a i32, &'a i32) { return a, b; }\nfn main() i32 { let mut x = 5; let mut y = 6; { let (r, s) = split(&mut x, &mut y); let v = *r + *s; } x = 9; return x; }\n",
+        "fn split<'a>(a: &'a mut i32, b: &'a mut i32) (&'a i32, &'a i32) { return (a, b); }\nfn main() i32 { let mut x = 5; let mut y = 6; { let (r, s) = split(&mut x, &mut y); let v = *r + *s; } x = 9; return x; }\n",
         true,
     );
     check_case(
         "non-reference tuple destructure",
-        "fn dm(a: i32, b: i32) (i32, i32) { return a / b, a % b; }\nfn main() i32 { let mut x = 5; let (q, r) = dm(17, 5); x = 9; return q + r + x; }\n",
+        "fn dm(a: i32, b: i32) (i32, i32) { return (a / b, a % b); }\nfn main() i32 { let mut x = 5; let (q, r) = dm(17, 5); x = 9; return q + r + x; }\n",
         true,
     );
 }
@@ -517,12 +517,12 @@ fn third_audit() {
     );
     check_case(
         "K10 tuple element double &mut",
-        "fn two() (i32, i32) { return 1, 2; }\nfn main() i32 { let mut (a, b) = two(); let r = &a; let m = &mut a; *m = 9; return *r + b; }\n",
+        "fn two() (i32, i32) { return (1, 2); }\nfn main() i32 { let mut (a, b) = two(); let r = &a; let m = &mut a; *m = 9; return *r + b; }\n",
         false,
     );
     check_case(
         "K10 tuple element sequential borrows",
-        "fn two() (i32, i32) { return 1, 2; }\nfn main() i32 { let mut (a, b) = two(); let r = &a; let v = *r; let m = &mut a; *m = 9; return v + b; }\n",
+        "fn two() (i32, i32) { return (1, 2); }\nfn main() i32 { let mut (a, b) = two(); let r = &a; let v = *r; let m = &mut a; *m = 9; return v + b; }\n",
         true,
     );
     case_pre(
@@ -547,11 +547,7 @@ fn third_audit() {
         "{}fn make() P {{ return P {{ a: 1, b: 2 }}; }}\nfn main() i32 {{ let r = &make(); return r.a; }}\n",
         PRE,
     );
-    check_rejected_by_type_check(
-        "K12 address of call result",
-        k12.as_str(),
-        "cannot take the address of a temporary value",
-    );
+    check_rejected_by_type_check("K12 address of call result", &k12, "cannot take the address of a temporary value");
     case_pre(PRE, "fn main() i32 { let r = &P { a: 1, b: 2 }; return r.a; }\n", "K12 address of struct literal", true);
     case_pre(
         OWN,
@@ -625,7 +621,7 @@ fn aliasing3() {
                         p2,
                         p3,
                     ) && (k2 != 0 || k3 != 0);
-                    check_case("aliasing3", src.as_str(), !bad);
+                    check_case("aliasing3", &src, !bad);
                 }
             }
         }
@@ -688,7 +684,7 @@ fn bundle(idx: *const i32, n: i32, label: str) {
         calls.push_str("0");
     }
     src.format_into("fn main() i32 {{ return {}; }}\n", calls.as_str());
-    check_case(label, src.as_str(), ok);
+    check_case(label, &src, ok);
 }
 
 // Family I: composition: independent scenarios must not interfere, an invalid one must not be masked by
@@ -759,7 +755,7 @@ fn split_init() {
     check_case("split decl use before init", "fn main() i32 { let x: i32; return x; }\n", false);
     check_case(
         "split init switch arms",
-        "fn f(v: i32) i32 { let x: i32; switch v { 1 => { x = 10; }, _ => { x = 20; } }; return x; }\nfn main() i32 { return f(1); }\n",
+        "fn f(v: i32) i32 { let x: i32; switch v { 1 => { x = 10; }, _ => { x = 20; } } return x; }\nfn main() i32 { return f(1); }\n",
         true,
     );
     check_rejected_by_type_check(
@@ -840,9 +836,9 @@ fn many_borrows_src(n: i32) String {
 @test
 fn many_live_borrows_across_a_branch() {
     let ok = many_borrows_src(100);
-    h::expect_ok("100 live borrows across an if", ok.as_str());
+    h::expect_ok("100 live borrows across an if", &ok);
     let over = many_borrows_src(300);
-    h::expect_err_msg("300 live borrows", over.as_str(), "exceeds the borrow checker's limit of 256 live borrows");
+    h::expect_err_msg("300 live borrows", &over, "exceeds the borrow checker's limit of 256 live borrows");
 }
 
 // Ownership derived through nested generic instances: `W<W<String>>`, and `S<String>` whose member
@@ -854,17 +850,17 @@ fn nested_generic_instances_own_their_members() {
     twice.push_str(
         "fn take(w: W<W<String>>) i32 { return w.a.a.len() as i32; }\nfn main() i32 { let x = W::<W<String>> { a: W::<String> { a: String::from_str(\"abc\") } }; let n = take(x); return n + take(x); }\n",
     );
-    h::expect_err_msg("W<W<String>> moved twice", twice.as_str(), "use of moved value");
+    h::expect_err_msg("W<W<String>> moved twice", &twice, "use of moved value");
     let mut twice_s = String::from_str(wdecl);
     twice_s.push_str(
         "fn take(w: S<String>) i32 { return w.a.a.len() as i32; }\nfn main() i32 { let x = S::<String> { a: W::<String> { a: String::from_str(\"abc\") } }; let n = take(x); return n + take(x); }\n",
     );
-    h::expect_err_msg("S<String> moved twice", twice_s.as_str(), "use of moved value");
+    h::expect_err_msg("S<String> moved twice", &twice_s, "use of moved value");
     let mut once = String::from_str(wdecl);
     once.push_str(
         "fn take(w: S<String>) i32 { return w.a.a.len() as i32; }\nfn main() i32 { let x = S::<String> { a: W::<String> { a: String::from_str(\"a string long enough to live on the heap\") } }; let y = W::<W<String>> { a: W::<String> { a: String::from_str(\"another string long enough for the heap\") } }; return take(x) + y.a.a.len() as i32; }\n",
     );
-    let r = h::compile_and_run_env(once.as_str(), "SC_LEAK_CHECK=fatal");
+    let r = h::compile_and_run_env(&once, "SC_LEAK_CHECK=fatal");
     assert(r.built, "nested generic owners build");
     assert_eq(r.exit, 79);
 }
@@ -1035,7 +1031,7 @@ fn reference_levels_inside_by_value_arguments() {
     );
     h::expect_ok(
         "a store of K out of an Option<&K> holds no loan of the Option's reference",
-        "fn put<K: Copy>(v: &mut Vector<K>, x: Option<&K>) { switch x { Some(k) => { v.push(*k); }, None => {}, }; }\nfn main() i32 { let a = 1; let b = 2; let mut v = Vector::<&i32>::new(); let mut k = &a; put(&mut v, Option::<&&i32>::Some(&k)); k = &b; let _ = *k; return *v[0] - 1; }\n",
+        "fn put<K: Copy>(v: &mut Vector<K>, x: Option<&K>) { switch x { Some(k) => { v.push(*k); }, None => {}, } }\nfn main() i32 { let a = 1; let b = 2; let mut v = Vector::<&i32>::new(); let mut k = &a; put(&mut v, Option::<&&i32>::Some(&k)); k = &b; let _ = *k; return *v[0] - 1; }\n",
     );
     h::expect_err_msg(
         "a returned Option's own 'a is not 'b",
@@ -1345,7 +1341,7 @@ fn carriers_emptied_member_by_member_observe_nothing() {
 fn pruned_arm_values_keep_their_temporaries() {
     h::expect_ok(
         "a build-constant if whose arm value views an arm literal",
-        "fn pick() usize { let s: []str = if ARCH == Arch::AArch64 { [\"a\"]; } else { [\"b\", \"c\"]; }; let mut n: usize = 0; for x in s { n += x.len(); } return n; }\nfn main() i32 { return pick() as i32 - pick() as i32; }\n",
+        "fn pick() usize { let s: []str = if ARCH == Arch::AArch64 { [\"a\"] } else { [\"b\", \"c\"] }; let mut n: usize = 0; for x in s { n += x.len(); } return n; }\nfn main() i32 { return pick() as i32 - pick() as i32; }\n",
     );
     h::expect_ok(
         "a build-constant switch whose arm value views an arm literal",
@@ -1353,11 +1349,11 @@ fn pruned_arm_values_keep_their_temporaries() {
     );
     h::expect_ok(
         "a build-constant if whose arm value views owned arm temporaries",
-        "fn pick() usize { let s: []String = if ARCH == Arch::AArch64 { [String::from_str(\"a\")]; } else { [String::from_str(\"bb\"), String::from_str(\"c\")]; }; let mut n: usize = 0; for i in 0..s.len { n += s[i].len(); } return n; }\nfn main() i32 { return pick() as i32 - pick() as i32; }\n",
+        "fn pick() usize { let s: []String = if ARCH == Arch::AArch64 { [String::from_str(\"a\")] } else { [String::from_str(\"bb\"), String::from_str(\"c\")] }; let mut n: usize = 0; for i in 0..s.len { n += s[i].len(); } return n; }\nfn main() i32 { return pick() as i32 - pick() as i32; }\n",
     );
     h::expect_err_msg(
         "the extension ends with the block around a build-constant if",
-        "fn pick() usize { let s: []str; { s = if ARCH == Arch::AArch64 { [\"a\"]; } else { [\"b\", \"c\"]; }; } return s.len; }\nfn main() i32 { return pick() as i32; }\n",
+        "fn pick() usize { let s: []str; { s = if ARCH == Arch::AArch64 { [\"a\"] } else { [\"b\", \"c\"] }; } return s.len; }\nfn main() i32 { return pick() as i32; }\n",
         "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored",
     );
 }

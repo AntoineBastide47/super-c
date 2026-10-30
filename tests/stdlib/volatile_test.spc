@@ -66,9 +66,9 @@ fn zeroize_raw_clears_its_range_at_every_alignment() {
             unsafe vol::zeroize_raw(unsafe (b.as_ptr() as *mut u8 + start), n);
             for k in 0usize..32 {
                 let want: u8 = if k >= start && k < start + n {
-                    0;
+                    0
                 } else {
-                    1;
+                    1
                 };
                 assert_eq(*b.at(k), want);
             }

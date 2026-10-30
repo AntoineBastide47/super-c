@@ -132,7 +132,7 @@ fn a_bounded_channel_is_one_allocation() {
                     _ => {
                         break;
                     },
-                };
+                }
             }
             assert_eq(sum, 2016);
         },
@@ -247,7 +247,7 @@ fn a_zero_sized_payload_has_no_ring() {
                     _ => {
                         break;
                     },
-                };
+                }
             }
             assert_eq(got, 100);
         },
@@ -270,7 +270,7 @@ fn a_timed_out_send_hands_the_value_back(fx: &mut Base) {
         Rejected(_v) => {
             assert(false, "the first send fits");
         },
-    };
+    }
     // Full: the timed send waits (on this plain thread's queue node) and gives up.
     let t0 = platform::now_ns();
     switch tx.send_timeout(Payload { n: 2 }, short()) {
@@ -281,7 +281,7 @@ fn a_timed_out_send_hands_the_value_back(fx: &mut Base) {
             assert_eq(v.n, 2);
             assert_eq(frees(), 0);
         },
-    };
+    }
     assert(platform::now_ns() - t0 >= 20000000, "the deadline was waited out");
     // The handed-back value was freed at the arm's end; the buffered one is still owned by the channel.
     assert_eq(frees(), 1);
@@ -312,7 +312,7 @@ fn close_frees_buffered_payloads_once_on_the_last_handle(fx: &mut Base) {
             Rejected(v) => {
                 assert_eq(v.n, 9);
             },
-        };
+        }
         assert_eq(frees(), 1); // the rejected one
         // Closed but not drained: the first buffered item is still readable.
         {
@@ -361,7 +361,7 @@ fn last_handle_drop_closes_each_side(fx: &mut Base) {
         Rejected(v) => {
             assert_eq(v.n, 2);
         },
-    };
+    }
     assert_eq(frees(), 2);
     let _ = fx;
 }
@@ -432,7 +432,7 @@ fn a_full_and_empty_ring_wakes_a_thread_and_a_task_in_turn(fx: &mut Base) {
                 _ => {
                     break;
                 },
-            };
+            }
         }
         btx.close();
         w.done();
@@ -479,7 +479,7 @@ fn many_senders_and_receivers_deliver_each_item_once(fx: &mut Base) {
                     _ => {
                         break;
                     },
-                };
+                }
             }
             w.done();
         };
@@ -498,7 +498,7 @@ fn many_senders_and_receivers_deliver_each_item_once(fx: &mut Base) {
             _ => {
                 break;
             },
-        };
+        }
     }
     wg.wait();
     rt::shutdown();
@@ -533,7 +533,7 @@ fn a_receive_cancelled_as_a_send_lands_loses_nothing(fx: &mut Base) {
                 let _ = t.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
             },
             None => {},
-        };
+        }
     };
     let key = krx.recv().unwrap();
     assert(ph::wait_parked(key), "the receiver parks");
@@ -544,9 +544,9 @@ fn a_receive_cancelled_as_a_send_lands_loses_nothing(fx: &mut Base) {
     {
         let left = rx2.try_recv();
         buffered = if left.is_some() {
-            1i64;
+            1i64
         } else {
-            0i64;
+            0i64
         };
     }
     rt::shutdown();
@@ -575,7 +575,7 @@ fn select_may_name_one_channel_twice(fx: &mut Base) {
         TimedOut => {
             assert(false, "the send arm is ready");
         },
-    };
+    }
     let _ = tx.try_send(7);
     // Full: only the receive arms; either duplicate may win.
     switch s.wait_timeout(short()) {
@@ -586,7 +586,7 @@ fn select_may_name_one_channel_twice(fx: &mut Base) {
         TimedOut => {
             assert(false, "a receive arm is ready");
         },
-    };
+    }
     // Empty again, and a task sends once this thread sleeps: the parked wait ends on a receive arm.
     let wg = sync::WaitGroup::new();
     wg.add(1);
@@ -608,7 +608,7 @@ fn select_may_name_one_channel_twice(fx: &mut Base) {
         TimedOut => {
             assert(false, "the value arrives within the deadline");
         },
-    };
+    }
     wg.wait();
     rt::shutdown();
     let _ = fx;
@@ -647,7 +647,7 @@ fn a_cancel_after_a_select_wake_keeps_the_wake(fx: &mut Base) {
                     }
                 },
                 TimedOut => {},
-            };
+            }
         };
     }
     let key = krx.recv().unwrap();
@@ -727,7 +727,7 @@ fn a_plain_thread_select_wakes_on_the_arm_that_moves(fx: &mut Base) {
         TimedOut => {
             assert(false, "the send on b ends the wait");
         },
-    };
+    }
     let _ = ia;
     // Nothing moves: the deadline ends the wait, and the wake word's timeout claim leaves no node behind.
     let t1 = platform::now_ns();
@@ -736,7 +736,7 @@ fn a_plain_thread_select_wakes_on_the_arm_that_moves(fx: &mut Base) {
             assert(false, "nothing is ready");
         },
         TimedOut => {},
-    };
+    }
     assert(platform::now_ns() - t1 >= 20000000, "the deadline was waited out");
     wg.wait();
     rt::shutdown();
@@ -809,7 +809,7 @@ fn a_notify_wakes_one_plain_thread_and_no_other() {
             _ => {
                 break;
             },
-        };
+        }
     }
     assert_eq(total, WAITERS);
     assert_eq(count(&strays), 0);
@@ -907,7 +907,7 @@ fn an_unpark_reaches_only_the_thread_parked_on_that_word() {
             _ => {
                 break;
             },
-        };
+        }
     }
     assert_eq(served, expected);
     if ph::parks_are_counted() {
@@ -967,7 +967,7 @@ fn unpark_all_wakes_every_thread_on_the_word_and_no_other() {
             _ => {
                 break;
             },
-        };
+        }
     }
     assert_eq(n, 6);
     if ph::parks_are_counted() {
@@ -1057,7 +1057,7 @@ fn a_cancelled_recv_batch_takes_nothing(fx: &mut Base) {
         Rejected(_v) => {
             assert(false, "the channel is still open");
         },
-    };
+    }
     {
         let got = _rx_keep.recv().unwrap();
         assert_eq(got.n, 7);

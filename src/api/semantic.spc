@@ -56,8 +56,8 @@ pub struct SymbolKey {
 
 /// A declaration of a checked session.
 pub struct Symbol<'s> {
-    pub(module) s: &'s ses::Session,
-    pub(module) d: DefId,
+    s: &'s ses::Session,
+    d: DefId,
 }
 
 extend<'s> Symbol<'s> as Copy {}
@@ -65,15 +65,11 @@ extend<'s> Symbol<'s> as Copy {}
 // The module index of file `file` in the session's analysis.
 fn module_index(s: &ses::Session, file: str) Result<usize, ApiError> {
     if !s.checked() {
-        return Result::<usize, ApiError>::Err(
-            ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"),
-        );
+        return Err(ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"));
     }
     return switch s.module_of(file) {
-        Some(m) => Result::<usize, ApiError>::Ok(m.index() as usize),
-        None => Result::<usize, ApiError>::Err(
-            ApiError::at(Code::InvalidArgument, "the file is not part of the analysis", file, 0, 0),
-        ),
+        Some(m) => Ok(m.index() as usize),
+        None => Err(ApiError::at(Code::InvalidArgument, "the file is not part of the analysis", file, 0, 0)),
     };
 }
 
@@ -131,30 +127,30 @@ extend<'s> Symbol<'s> {
         let method = it == loader::ITEM_NONE || p.idx().items[it as usize].kind == loader::ItemKind::IK_METHOD as u8;
         return switch n.kind {
             NODE_FUNCTION => if method {
-                SymbolKind::Method;
+                Method
             } else {
-                SymbolKind::Function;
+                Function
             },
             NODE_STRUCT => if self.node_ext().aggregate.is_union {
-                SymbolKind::Union;
+                Union
             } else {
-                SymbolKind::Struct;
+                Struct
             },
-            NODE_ENUM => SymbolKind::Enum,
-            NODE_VARIANT => SymbolKind::Variant,
-            NODE_FIELD => SymbolKind::Field,
-            NODE_INTERFACE => SymbolKind::Interface,
-            NODE_TYPE_ALIAS => SymbolKind::TypeAlias,
+            NODE_ENUM => Enum,
+            NODE_VARIANT => Variant,
+            NODE_FIELD => Field,
+            NODE_INTERFACE => Interface,
+            NODE_TYPE_ALIAS => TypeAlias,
             NODE_CONST => if n.as_data.const_def.is_static_mut {
-                SymbolKind::Static;
+                Static
             } else {
-                SymbolKind::Const;
+                Const
             },
-            NODE_PARAMETER => SymbolKind::Param,
-            NODE_GENERIC_PARAM => SymbolKind::GenericParam,
-            NODE_IMPORT => SymbolKind::Module,
-            NODE_LET | NODE_PATTERN_NAME | NODE_IDENTIFIER => SymbolKind::Local,
-            _ => SymbolKind::Other,
+            NODE_PARAMETER => Param,
+            NODE_GENERIC_PARAM => GenericParam,
+            NODE_IMPORT => Module,
+            NODE_LET | NODE_PATTERN_NAME | NODE_IDENTIFIER => Local,
+            _ => Other,
         };
     }
 
@@ -168,20 +164,18 @@ extend<'s> Symbol<'s> {
     pub fn location(self: &Self) Option<Location> {
         let p = self.p();
         if p.modules[self.d.module as usize].file.len() == 0 {
-            return Option::<Location>::None;
+            return None;
         }
         let a = ast_of(p, self.d.module);
         let nm = feat::decl_name(a, self.d.node);
         let sp = a.at_const(
             if nm != NODE_NONE {
-                nm;
+                nm
             } else {
-                self.d.node;
+                self.d.node
             },
         ).span;
-        return Option::<Location>::Some(
-            Location { file: p.modules[self.d.module as usize].file.clone(), start: sp.start, end: sp.end },
-        );
+        return Some(Location { file: p.modules[self.d.module as usize].file.clone(), start: sp.start, end: sp.end });
     }
 
     /// Its declaration's head as written: a function up to its body, a type up to its generic parameters.
@@ -198,7 +192,7 @@ extend<'s> Symbol<'s> {
     pub fn key(self: &Self) Option<SymbolKey> {
         let k = self.kind();
         if k == SymbolKind::Local || k == SymbolKind::Param || k == SymbolKind::GenericParam || k == SymbolKind::Module || k == SymbolKind::Extend || k == SymbolKind::Other {
-            return Option::<SymbolKey>::None;
+            return None;
         }
         let p = self.p();
         let owner = owner_text(p, self.d);
@@ -214,7 +208,7 @@ extend<'s> Symbol<'s> {
                 }
             }
         }
-        return Option::<SymbolKey>::Some(
+        return Some(
             SymbolKey {
                 module: String::from_str(self.module_path()),
                 owner: owner,
@@ -280,12 +274,12 @@ pub(package) fn key_of(s: &ses::Session, d: DefId) Option<SymbolKey> {
 /// The declaration `key` names in the session's analysis, or None.
 pub fn resolve<'s>(s: &'s ses::Session, key: &SymbolKey) Option<Symbol<'s>> {
     if !s.checked() {
-        return Option::<Symbol>::None;
+        return None;
     }
     let p = s.package();
-    let m = p.find(key.module.as_str());
+    let m = p.find(&key.module);
     if m < 0 {
-        return Option::<Symbol>::None;
+        return None;
     }
     let lo = p.idx().mod_items[m as usize];
     let hi = p.idx().mod_items[m as usize + 1];
@@ -301,7 +295,7 @@ pub fn resolve<'s>(s: &'s ses::Session, key: &SymbolKey) Option<Symbol<'s>> {
                 for i in 0..ms.len {
                     let md = Symbol { s: s, d: DefId { module: m as ModuleId, node: unsafe a.list(ms)[i as usize] } };
                     if md.kind() == key.kind && md.name() == key.name.as_str() {
-                        return Option::<Symbol>::Some(md);
+                        return Some(md);
                     }
                 }
             }
@@ -314,11 +308,11 @@ pub fn resolve<'s>(s: &'s ses::Session, key: &SymbolKey) Option<Symbol<'s>> {
         if k.is_some() {
             let kk = k.unwrap();
             if kk.owner.as_str() == key.owner.as_str() && kk.ordinal == key.ordinal {
-                return Option::<Symbol>::Some(sy);
+                return Some(sy);
             }
         }
     }
-    return Option::<Symbol>::None;
+    return None;
 }
 
 /// The declaration the name at `off` of `file` refers to, or the declaration whose name is there (an
@@ -327,16 +321,16 @@ pub fn symbol_at<'s>(s: &'s ses::Session, file: str, off: u32) Result<Option<Sym
     let m = module_index(s, file)?;
     let d = feat::target_at(s.package(), m, off);
     if d.node == NODE_NONE {
-        return Result::<Option<Symbol>, ApiError>::Ok(Option::<Symbol>::None);
+        return Ok(None);
     }
-    return Result::<Option<Symbol>, ApiError>::Ok(Option::<Symbol>::Some(Symbol { s: s, d: d }));
+    return Ok(Some(Symbol { s: s, d: d }));
 }
 
 /// A type of a checked session.
 pub struct TypeView<'s> {
-    pub(module) s: &'s ses::Session,
-    pub(module) m: u32,
-    pub(module) t: TypeId,
+    s: &'s ses::Session,
+    m: u32,
+    t: TypeId,
 }
 
 extend<'s> TypeView<'s> {
@@ -344,7 +338,7 @@ extend<'s> TypeView<'s> {
     pub fn display(self: &Self) String {
         let p = self.s.package();
         let mut out = String::new();
-        rnd::render_type_str(p, ast_of(p, self.m), p.modules[self.m as usize].source.as_str(), self.t, &mut out);
+        rnd::render_type_str(p, ast_of(p, self.m), &p.modules[self.m as usize].source, self.t, &mut out);
         return out;
     }
 
@@ -354,9 +348,9 @@ extend<'s> TypeView<'s> {
         let mut svc = lay::Svc::new(self.s.package());
         let l = svc.layout(self.m as ModuleId, self.t);
         if !l.ok {
-            return Option::<(u64, u64)>::None;
+            return None;
         }
-        return Option::<(u64, u64)>::Some((l.size, l.align));
+        return Some((l.size, l.align));
     }
 }
 
@@ -394,9 +388,9 @@ pub fn type_at<'s>(s: &'s ses::Session, file: str, off: u32) Result<Option<TypeV
         }
     }
     if t == TYPE_NONE {
-        return Result::<Option<TypeView>, ApiError>::Ok(Option::<TypeView>::None);
+        return Ok(None);
     }
-    return Result::<Option<TypeView>, ApiError>::Ok(Option::<TypeView>::Some(TypeView { s: s, m: m as u32, t: t }));
+    return Ok(Some(TypeView { s: s, m: m as u32, t: t }));
 }
 
 /// The type of the expression whose range in `file` is exactly `[start, end)` (a syntax node's range); None
@@ -409,19 +403,17 @@ pub fn type_of_range<'s>(s: &'s ses::Session, file: str, start: u32, end: u32) R
         let i = a.nth_id(i0);
         let sp = a.at_const(i).span;
         if sp.start == start && sp.end == end && a.valid(i) && a.type_of(i) != TYPE_NONE {
-            return Result::<Option<TypeView>, ApiError>::Ok(
-                Option::<TypeView>::Some(TypeView { s: s, m: m as u32, t: a.type_of(i) }),
-            );
+            return Ok(Some(TypeView { s: s, m: m as u32, t: a.type_of(i) }));
         }
     }
-    return Result::<Option<TypeView>, ApiError>::Ok(Option::<TypeView>::None);
+    return Ok(None);
 }
 
 /// The text an editor shows for `off` of `file` (Markdown: the type, the declaration's head, its
 /// documentation); None where there is none.
 pub fn hover(s: &ses::Session, file: str, off: u32) Result<Option<String>, ApiError> {
     let m = module_index(s, file)?;
-    return Result::<Option<String>, ApiError>::Ok(feat::hover(s.package(), m, off));
+    return Ok(feat::hover(s.package(), m, off));
 }
 
 /// Every reference to the declaration at `off` of `file`, by file then position; `include_decl` adds the
@@ -446,9 +438,7 @@ pub fn references_to(s: &mut ses::Session, key: &SymbolKey, include_decl: bool, 
         d = y.d;
     }
     if d.node == NODE_NONE {
-        return Result::<Vector<Location>, ApiError>::Err(
-            ApiError::new(Code::InvalidArgument, "the key names no declaration of the analysis"),
-        );
+        return Err(ApiError::new(Code::InvalidArgument, "the key names no declaration of the analysis"));
     }
     return refs_of(s, d, include_decl, opts);
 }
@@ -458,12 +448,10 @@ fn refs_of(s: &mut ses::Session, d: DefId, include_decl: bool, opts: &ses::Reque
     ApiError
 > {
     if !s.checked() {
-        return Result::<Vector<Location>, ApiError>::Err(
-            ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"),
-        );
+        return Err(ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"));
     }
     if d.node == NODE_NONE {
-        return Result::<Vector<Location>, ApiError>::Ok(Vector::<Location>::new());
+        return Ok(Vector::<Location>::new());
     }
     an::hydrate_refs(s.package_mut(), d);
     let ls = feat::references_of_def(s.package(), d, include_decl);
@@ -474,11 +462,9 @@ fn refs_of(s: &mut ses::Session, d: DefId, include_decl: bool, opts: &ses::Reque
         bytes += sizeof(Location) + out[i].file.len();
     }
     if opts.result_limit != 0 && bytes > opts.result_limit {
-        return Result::<Vector<Location>, ApiError>::Err(
-            ApiError::new(Code::Limit, "the references pass the request's result limit"),
-        );
+        return Err(ApiError::new(Code::Limit, "the references pass the request's result limit"));
     }
-    return Result::<Vector<Location>, ApiError>::Ok(out);
+    return Ok(out);
 }
 
 fn loc_cmp(x: &Location, y: &Location) i32 {
@@ -506,20 +492,20 @@ pub struct OutlineEntry {
 // The symbol kind of an LSP SymbolKind number.
 fn lsp_kind(k: i32) SymbolKind {
     return switch k {
-        2 => SymbolKind::Module,
-        3 => SymbolKind::Extend,
-        5 => SymbolKind::TypeAlias,
-        6 => SymbolKind::Method,
-        8 => SymbolKind::Field,
-        10 => SymbolKind::Enum,
-        11 => SymbolKind::Interface,
-        12 => SymbolKind::Function,
-        13 => SymbolKind::Local,
-        14 => SymbolKind::Const,
-        22 => SymbolKind::Variant,
-        23 => SymbolKind::Struct,
-        26 => SymbolKind::GenericParam,
-        _ => SymbolKind::Other,
+        2 => Module,
+        3 => Extend,
+        5 => TypeAlias,
+        6 => Method,
+        8 => Field,
+        10 => Enum,
+        11 => Interface,
+        12 => Function,
+        13 => Local,
+        14 => Const,
+        22 => Variant,
+        23 => Struct,
+        26 => GenericParam,
+        _ => Other,
     };
 }
 
@@ -541,16 +527,14 @@ pub fn outline(s: &ses::Session, file: str) Result<Vector<OutlineEntry>, ApiErro
             },
         );
     }
-    return Result::<Vector<OutlineEntry>, ApiError>::Ok(out);
+    return Ok(out);
 }
 
 /// The declarations of every analyzed module outside std whose name holds the letters of `query` in order
 /// (empty: all), at most `limit`.
 pub fn find_symbols(s: &ses::Session, query: str, limit: usize) Result<Vector<Location>, ApiError> {
     if !s.checked() {
-        return Result::<Vector<Location>, ApiError>::Err(
-            ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"),
-        );
+        return Err(ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"));
     }
     let p = s.package();
     let mut searched = Vector::<bool>::with_capacity(p.modules.len());
@@ -565,7 +549,7 @@ pub fn find_symbols(s: &ses::Session, query: str, limit: usize) Result<Vector<Lo
             Location { file: p.modules[hits[i].module as usize].file.clone(), start: hits[i].start, end: hits[i].end },
         );
     }
-    return Result::<Vector<Location>, ApiError>::Ok(out);
+    return Ok(out);
 }
 
 /// The implementations of the interface, interface method or type at `off` of `file`: the conformances of an
@@ -573,7 +557,7 @@ pub fn find_symbols(s: &ses::Session, query: str, limit: usize) Result<Vector<Lo
 pub fn implementations(s: &ses::Session, file: str, off: u32) Result<Vector<Location>, ApiError> {
     let m = module_index(s, file)?;
     let ls = feat::implementations(s.package(), m, off);
-    return Result::<Vector<Location>, ApiError>::Ok(locs_of(s.package(), &ls));
+    return Ok(locs_of(s.package(), &ls));
 }
 
 /// The interfaces `sym` (a type) conforms to with `up`, or the types that conform to `sym` (an interface)
@@ -596,7 +580,7 @@ pub fn calls_from<'s>(s: &'s ses::Session, file: str, off: u32) Result<Vector<Ca
     let mut out = Vector::<Call>::new();
     let f = feat::enclosing_function(p, m, off);
     if f == NODE_NONE {
-        return Result::<Vector<Call>, ApiError>::Ok(out);
+        return Ok(out);
     }
     let cs = feat::calls_in(p, m, f);
     for i in 0..cs.len() {
@@ -607,7 +591,7 @@ pub fn calls_from<'s>(s: &'s ses::Session, file: str, off: u32) Result<Vector<Ca
             },
         );
     }
-    return Result::<Vector<Call>, ApiError>::Ok(out);
+    return Ok(out);
 }
 
 /// The names visible at `off` of `file`: locals, parameters, items of the module and of its imports, and the
@@ -619,7 +603,7 @@ pub fn visible_names(s: &ses::Session, file: str, off: u32) Result<Vector<String
     for i in 0..items.len() {
         out.push(items[i].label.clone());
     }
-    return Result::<Vector<String>, ApiError>::Ok(out);
+    return Ok(out);
 }
 
 /// The edit that renames the declaration at `off` of `file`, its interface relations (an interface method
@@ -629,28 +613,22 @@ pub fn visible_names(s: &ses::Session, file: str, off: u32) Result<Vector<String
 pub fn rename(s: &mut ses::Session, file: str, off: u32, new_name: str) Result<syn::WorkspaceEdit, ApiError> {
     let m = module_index(s, file)?;
     if !feat::valid_ident(new_name) {
-        return Result::<syn::WorkspaceEdit, ApiError>::Err(
-            ApiError::new(Code::InvalidArgument, "the new name is not an identifier"),
-        );
+        return Err(ApiError::new(Code::InvalidArgument, "the new name is not an identifier"));
     }
     let d = feat::def_at(s.package(), m, off);
     if d.node == NODE_NONE {
-        return Result::<syn::WorkspaceEdit, ApiError>::Err(
-            ApiError::at(Code::InvalidArgument, "nothing to rename here", file, off, off),
-        );
+        return Err(ApiError::at(Code::InvalidArgument, "nothing to rename here", file, off, off));
     }
     let mut related = Vector::<DefId>::new();
     feat::related_decls(s.package(), d, &mut related);
     for i in 0..related.len() {
         let rm = &s.package().modules[related[i].module as usize];
         if rm.pkg == loader::PKG_STD || rm.pkg == loader::PKG_FFI || rm.file.len() == 0 {
-            return Result::<syn::WorkspaceEdit, ApiError>::Err(
-                ApiError::new(Code::InvalidArgument, "a declaration to rename is outside the project"),
-            );
+            return Err(ApiError::new(Code::InvalidArgument, "a declaration to rename is outside the project"));
         }
         let c = feat::rename_conflict(s.package(), related[i], new_name);
         if c.len() != 0 {
-            return Result::<syn::WorkspaceEdit, ApiError>::Err(ApiError::new(Code::SemanticFailed, c.as_str()));
+            return Err(ApiError::new(Code::SemanticFailed, &c));
         }
     }
     let mut sites = Vector::<Location>::new();
@@ -667,10 +645,10 @@ pub fn rename(s: &mut ses::Session, file: str, off: u32, new_name: str) Result<s
         if i > 0 && loc_cmp(&sites[i - 1], &sites[i]) == 0 {
             continue;
         }
-        we.replace(sites[i].file.as_str(), sites[i].start, sites[i].end, new_name);
+        we.replace(&sites[i].file, sites[i].start, sites[i].end, new_name);
         if i == 0 || sites[i - 1].file.as_str() != sites[i].file.as_str() {
-            we.expect(sites[i].file.as_str(), s.version(sites[i].file.as_str()));
+            we.expect(&sites[i].file, s.version(&sites[i].file));
         }
     }
-    return Result::<syn::WorkspaceEdit, ApiError>::Ok(we);
+    return Ok(we);
 }

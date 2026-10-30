@@ -28,9 +28,9 @@ extern "C" {
 const ELEMS: usize = 4096; // in L1: the kernels, not memory, are measured
 // The lanes of one hardware register: 16 bytes on aarch64 (Neon), 32 elsewhere (AVX2).
 const N32: usize = if ARCH == Arch::AArch64 {
-    4;
+    4
 } else {
-    8;
+    8
 };
 const N64: usize = N32 / 2;
 const ROUNDS: usize = 100;
@@ -370,9 +370,9 @@ const fn draw(g: &mut Rng, d: &Dist) f64 {
     let e = g.next(d.lo, d.hi).floor() as i64;
     let v = g.next(1.0, 2.0) * Simd::<f64, 2>::from_bits(Simd::<u64, 2>::splat((1023 + e) as u64 << 52))[0];
     return d.off + if d.sign && g.next(0.0, 1.0) < 0.5 {
-        -v;
+        -v
     } else {
-        v;
+        v
     };
 }
 
@@ -400,7 +400,7 @@ fn args(g: &mut Rng, d: &Dist) (Vector<Simd<f32, N32>>, Vector<f32>, Vector<Simd
         }
         v64.push(Simd::<f64, N64>::from_array(a));
     }
-    return v32, s32, v64, s64;
+    return (v32, s32, v64, s64);
 }
 
 static mut FAILED: usize = 0;
@@ -420,11 +420,11 @@ fn line(name: str, t: i32, lib: f64, cls: &[f64; 3]) {
     s.format_into("{} f{}: libm {}", name, t, lib);
     // erf is precise only, erfc precise and balanced.
     let nc = if name == "erf" {
-        1usize;
+        1usize
     } else if name == "erfc" {
-        2;
+        2
     } else {
-        CLASSES;
+        CLASSES
     };
     for c in 0..nc {
         s.format_into(", {} {} ({}x libm", unsafe CLASS_NAMES[c], unsafe cls[c], lib / unsafe cls[c]);
@@ -436,9 +436,9 @@ fn line(name: str, t: i32, lib: f64, cls: &[f64; 3]) {
     println("{}", s.as_str());
     let main4 = name == "exp" || name == "log" || name == "sin" || name == "cos";
     let need = if main4 {
-        1.2;
+        1.2
     } else {
-        1.0;
+        1.0
     };
     gate(name, t, "precise vs libm", lib / cls[0], 1.0);
     for c in 1..nc {
@@ -515,8 +515,8 @@ fn main(argv: Vector<str>) i32 {
     bench::<{Fun::Sincos}>("sincos", only, &mut g, uni(-100.0, 100.0), one);
     println("gates failed: {}", unsafe FAILED);
     return if unsafe SINK == 0.123 || unsafe FAILED != 0 {
-        1;
+        1
     } else {
-        0;
+        0
     };
 }

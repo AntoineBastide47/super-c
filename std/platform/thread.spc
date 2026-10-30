@@ -63,9 +63,9 @@ pub unsafe fn spawn(entry: fn(*mut void) *mut void, arg: *mut void) Result<Threa
     let mut h: *mut void = null;
     let rc = unsafe sc_runtime::sc_rt_thread_create(&mut h, entry, arg);
     if rc != 0 {
-        return Result::<Thread, IoError>::Err(thread_error(rc, IoOp::ThreadCreate));
+        return Err(thread_error(rc, IoOp::ThreadCreate));
     }
-    return Result::<Thread, IoError>::Ok(Thread::adopt(h));
+    return Ok(Thread::adopt(h));
 }
 /// Start an OS thread that runs `entry(arg)`. Unsupported on WASI.
 /// Safety: `arg` stays valid, and is safe to use from the new thread, for as long as `entry` uses it.
@@ -122,9 +122,9 @@ extend Thread {
         if rc != 0 {
             // The substrate keeps a handle whose join failed: the thread may still run, so it is detached.
             let _ = unsafe sc_runtime::sc_rt_thread_detach(h);
-            return Result::<Unit, IoError>::Err(thread_error(rc, IoOp::ThreadJoin));
+            return Err(thread_error(rc, IoOp::ThreadJoin));
         }
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 
@@ -143,18 +143,18 @@ extend TlsKey {
         let mut k = unsafe zeroed::<pthread_key_t>();
         let rc = unsafe pthread_key_create(&mut k, KeyDestructor { p: null }.f);
         if rc != 0 {
-            return Result::<TlsKey, IoError>::Err(error::code_error(rc, IoOp::ThreadLocal));
+            return Err(error::code_error(rc, IoOp::ThreadLocal));
         }
-        return Result::<TlsKey, IoError>::Ok(TlsKey { slot: k });
+        return Ok(TlsKey { slot: k });
     }
     /// A new slot, null on every thread. LimitExceeded when the system has no free key.
     @platform(windows)
     pub fn new() Result<TlsKey, IoError> {
         let i = unsafe TlsAlloc();
         if i == TLS_OUT_OF_INDEXES {
-            return Result::<TlsKey, IoError>::Err(IoError::new(IoErrorKind::LimitExceeded, IoOp::ThreadLocal));
+            return Err(IoError::new(IoErrorKind::LimitExceeded, IoOp::ThreadLocal));
         }
-        return Result::<TlsKey, IoError>::Ok(TlsKey { slot: i });
+        return Ok(TlsKey { slot: i });
     }
     /// A new slot, null on every thread. LimitExceeded when the system has no free key.
     @platform(wasm)
@@ -183,17 +183,17 @@ extend TlsKey {
     pub fn set(self: &mut TlsKey, value: *mut void) Result<Unit, IoError> {
         let rc = unsafe pthread_setspecific(self.slot, value);
         if rc != 0 {
-            return Result::<Unit, IoError>::Err(error::code_error(rc, IoOp::ThreadLocal));
+            return Err(error::code_error(rc, IoOp::ThreadLocal));
         }
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
     /// Set this thread's value of the slot. OutOfMemory when the system cannot store it.
     @platform(windows)
     pub fn set(self: &mut TlsKey, value: *mut void) Result<Unit, IoError> {
         if unsafe TlsSetValue(self.slot, value) == 0 {
-            return Result::<Unit, IoError>::Err(error::last_error(IoOp::ThreadLocal));
+            return Err(error::last_error(IoOp::ThreadLocal));
         }
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
     /// Set this thread's value of the slot. OutOfMemory when the system cannot store it.
     @platform(wasm)

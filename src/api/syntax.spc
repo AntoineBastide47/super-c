@@ -125,24 +125,24 @@ const NONE: u32 = 0xFFFFFFFF;
 /// One file's parse.
 pub struct SyntaxTree {
     path: String,
-    pub(module) text: String, // padded with lexer::SOURCE_PAD NULs past its length
-    pub(module) tokens: Vector<tok::Token>, // every token, comments included, in order; no end-of-file token
-    pub(module) ast: Ast,
-    pub(module) nodes: Vector<NodeId>, // in preorder: a node, then its subtree
-    pub(module) ends: Vector<u32>, // per preorder index: one past its last descendant
-    pub(module) parents: Vector<u32>, // per preorder index: its parent's, NONE for the root
+    text: String, // padded with lexer::SOURCE_PAD NULs past its length
+    tokens: Vector<tok::Token>, // every token, comments included, in order; no end-of-file token
+    ast: Ast,
+    nodes: Vector<NodeId>, // in preorder: a node, then its subtree
+    ends: Vector<u32>, // per preorder index: one past its last descendant
+    parents: Vector<u32>, // per preorder index: its parent's, NONE for the root
     pos: Vector<u32>, // per dense AST index (`Ast::dense`): its preorder index
-    pub(module) errors: Vector<SyntaxError>,
+    errors: Vector<SyntaxError>,
 }
 
 // Copy the records of `e` into `out` as syntax errors: the message and its first note line.
 fn take_errors(e: &diag::Errors, out: &mut Vector<SyntaxError>) {
     for k in 0..e.errors.len() {
         let d = e.errors.at(k);
-        let mut m = String::from_str(d.msg.as_str());
+        let mut m = String::from_str(&d.msg);
         if d.note_head != diag::NOTE_NONE {
             m.push_str("\n= note: ");
-            m.push_str(e.note_pool.at(d.note_head as usize).text.as_str());
+            m.push_str(&e.note_pool.at(d.note_head as usize).text);
         }
         out.push(SyntaxError { range: TextRange { start: d.start, end: d.start + d.len }, message: m });
     }
@@ -178,7 +178,7 @@ extend SyntaxTree {
                 toks.push(t);
             }
         }
-        let mut ps = par::Parser::new(sig, src.as_str(), path);
+        let mut ps = par::Parser::new(sig, &src, path);
         // The tree holds what the text says: no extend the parser would synthesize for `@derive`.
         ps.expand_derive = false;
         ps.build_ast();
@@ -218,9 +218,9 @@ extend SyntaxTree {
             }
             self.parents.push(
                 if stack.len() == 0 {
-                    NONE;
+                    NONE
                 } else {
-                    stack[stack.len() - 1];
+                    stack[stack.len() - 1]
                 },
             );
             stack.push(i as u32);
@@ -250,9 +250,9 @@ extend SyntaxTree {
     /// The node of identity `id` (`Node::id`), or None.
     pub fn node(self: &Self, id: u32) Option<Node> {
         if id as usize >= self.nodes.len() {
-            return Option::<Node>::None;
+            return None;
         }
-        return Option::<Node>::Some(Node { t: self, i: id });
+        return Some(Node { t: self, i: id });
     }
 
     /// The lexer and parser errors, in the order they were found.
@@ -274,9 +274,9 @@ extend SyntaxTree {
     pub fn token_at(self: &Self, off: u32) Option<Token> {
         let k = self.first_token_from(off);
         if k < self.tokens.len() && self.tokens[k].start() <= off && off < self.tokens[k].end() {
-            return Option::<Token>::Some(Token { t: self, i: k as u32 });
+            return Some(Token { t: self, i: k as u32 });
         }
-        return Option::<Token>::None;
+        return None;
     }
 
     // The first token that ends after `off`.
@@ -324,9 +324,9 @@ extend SyntaxTree {
     // The view of AST node `id`, or None for NODE_NONE.
     fn view(self: &Self, id: NodeId) Option<Node> {
         if id == NODE_NONE {
-            return Option::<Node>::None;
+            return None;
         }
-        return Option::<Node>::Some(Node { t: self, i: self.pos[self.ast.dense(id)] });
+        return Some(Node { t: self, i: self.pos[self.ast.dense(id)] });
     }
 }
 
@@ -347,40 +347,40 @@ fn node_order(a: &Ast, len: u32, x: NodeId, y: NodeId) i32 {
     let ry = node_range(a, len, y);
     if rx.start != ry.start {
         return if rx.start < ry.start {
-            -1;
+            -1
         } else {
-            1;
+            1
         };
     }
     if rx.end != ry.end {
         return if rx.end > ry.end {
-            -1;
+            -1
         } else {
-            1;
+            1
         };
     }
     let bx = Ast::in_body(x);
     let by = Ast::in_body(y);
     if bx != by {
         return if by {
-            -1;
+            -1
         } else {
-            1;
+            1
         };
     }
     return if x > y {
-        -1;
+        -1
     } else if x < y {
-        1;
+        1
     } else {
-        0;
+        0
     };
 }
 
 /// A node of a tree.
 pub struct Node<'t> {
-    pub(module) t: &'t SyntaxTree,
-    pub(module) i: u32,
+    t: &'t SyntaxTree,
+    i: u32,
 }
 
 extend<'t> Node<'t> as Copy {}
@@ -415,9 +415,9 @@ extend<'t> Node<'t> {
     pub fn parent(self: &Self) Option<Node<'t>> {
         let p = self.t.parents[self.i as usize];
         if p == NONE {
-            return Option::<Node<'t>>::None;
+            return None;
         }
-        return Option::<Node<'t>>::Some(Node { t: self.t, i: p });
+        return Some(Node { t: self.t, i: p });
     }
 
     /// Its direct children, in text order.
@@ -470,42 +470,42 @@ extend<'t> Node<'t> {
     /// The function view of a `Function` node.
     pub fn as_fn(self: &Self) Option<FnSyntax<'t>> {
         if self.ast_node().kind != NodeKind::NODE_FUNCTION {
-            return Option::<FnSyntax<'t>>::None;
+            return None;
         }
-        return Option::<FnSyntax<'t>>::Some(FnSyntax { n: *self });
+        return Some(FnSyntax { n: *self });
     }
 
     /// The aggregate view of a `Struct` or `Enum` node.
     pub fn as_aggregate(self: &Self) Option<AggregateSyntax<'t>> {
         let k = self.ast_node().kind;
         if k != NodeKind::NODE_STRUCT && k != NodeKind::NODE_ENUM {
-            return Option::<AggregateSyntax<'t>>::None;
+            return None;
         }
-        return Option::<AggregateSyntax<'t>>::Some(AggregateSyntax { n: *self });
+        return Some(AggregateSyntax { n: *self });
     }
 
     /// The import view of an `Import` node.
     pub fn as_import(self: &Self) Option<ImportSyntax<'t>> {
         if self.ast_node().kind != NodeKind::NODE_IMPORT {
-            return Option::<ImportSyntax<'t>>::None;
+            return None;
         }
-        return Option::<ImportSyntax<'t>>::Some(ImportSyntax { n: *self });
+        return Some(ImportSyntax { n: *self });
     }
 
     /// The call view of a `Call` node.
     pub fn as_call(self: &Self) Option<CallSyntax<'t>> {
         if self.ast_node().kind != NodeKind::NODE_CALL {
-            return Option::<CallSyntax<'t>>::None;
+            return None;
         }
-        return Option::<CallSyntax<'t>>::Some(CallSyntax { n: *self });
+        return Some(CallSyntax { n: *self });
     }
 
     /// The `let` view of a `Let` node.
     pub fn as_let(self: &Self) Option<LetSyntax<'t>> {
         if self.ast_node().kind != NodeKind::NODE_LET {
-            return Option::<LetSyntax<'t>>::None;
+            return None;
         }
-        return Option::<LetSyntax<'t>>::Some(LetSyntax { n: *self });
+        return Some(LetSyntax { n: *self });
     }
 
     fn list(self: &Self, l: NodeList) NodeIter<'t> {
@@ -515,7 +515,7 @@ extend<'t> Node<'t> {
 
 /// A function: `fn name<generics>(params) returns where .. { body }`.
 pub struct FnSyntax<'t> {
-    pub(module) n: Node<'t>,
+    n: Node<'t>,
 }
 
 extend<'t> FnSyntax<'t> {
@@ -564,7 +564,7 @@ extend<'t> Node<'t> {
 
 /// A struct, union or enum.
 pub struct AggregateSyntax<'t> {
-    pub(module) n: Node<'t>,
+    n: Node<'t>,
 }
 
 extend<'t> AggregateSyntax<'t> {
@@ -588,7 +588,7 @@ extend<'t> AggregateSyntax<'t> {
 
 /// An import: `import a::b as c;` or `import a::b as *;`.
 pub struct ImportSyntax<'t> {
-    pub(module) n: Node<'t>,
+    n: Node<'t>,
 }
 
 extend<'t> ImportSyntax<'t> {
@@ -613,7 +613,7 @@ extend<'t> ImportSyntax<'t> {
 
 /// A call: `callee(args)`.
 pub struct CallSyntax<'t> {
-    pub(module) n: Node<'t>,
+    n: Node<'t>,
 }
 
 extend<'t> CallSyntax<'t> {
@@ -632,7 +632,7 @@ extend<'t> CallSyntax<'t> {
 
 /// A `let` statement.
 pub struct LetSyntax<'t> {
-    pub(module) n: Node<'t>,
+    n: Node<'t>,
 }
 
 extend<'t> LetSyntax<'t> {
@@ -661,10 +661,10 @@ extend<'t> LetSyntax<'t> {
 /// The nodes of a list a typed view reads (parameters, members, arguments), in order. A list entry the
 /// parser left empty is skipped.
 pub struct NodeIter<'t> {
-    pub(module) t: &'t SyntaxTree,
-    pub(module) ids: *const NodeId,
-    pub(module) at: u32,
-    pub(module) len: u32,
+    t: &'t SyntaxTree,
+    ids: *const NodeId,
+    at: u32,
+    len: u32,
 }
 
 extend<'t> NodeIter<'t> as Iterator<Node<'t>> {
@@ -676,58 +676,58 @@ extend<'t> NodeIter<'t> as Iterator<Node<'t>> {
                 return self.t.view(id);
             }
         }
-        return Option::<Node<'t>>::None;
+        return None;
     }
 
     pub fn size_hint(self: &Self) (usize, Option<usize>) {
-        return 0, Option::<usize>::Some((self.len - self.at) as usize);
+        return (0, Option::<usize>::Some((self.len - self.at) as usize));
     }
 }
 
 /// The children of a node.
 pub struct Children<'t> {
-    pub(module) t: &'t SyntaxTree,
-    pub(module) at: u32,
-    pub(module) end: u32,
+    t: &'t SyntaxTree,
+    at: u32,
+    end: u32,
 }
 
 extend<'t> Children<'t> as Iterator<Node<'t>> {
     pub fn next(self: &mut Self) Option<Node<'t>> {
         if self.at >= self.end {
-            return Option::<Node<'t>>::None;
+            return None;
         }
         let i = self.at;
         self.at = self.t.ends[i as usize];
-        return Option::<Node<'t>>::Some(Node { t: self.t, i: i });
+        return Some(Node { t: self.t, i: i });
     }
 }
 
 /// The nodes inside a node, in preorder.
 pub struct Descendants<'t> {
-    pub(module) t: &'t SyntaxTree,
-    pub(module) at: u32,
-    pub(module) end: u32,
+    t: &'t SyntaxTree,
+    at: u32,
+    end: u32,
 }
 
 extend<'t> Descendants<'t> as Iterator<Node<'t>> {
     pub fn next(self: &mut Self) Option<Node<'t>> {
         if self.at >= self.end {
-            return Option::<Node<'t>>::None;
+            return None;
         }
         self.at += 1;
-        return Option::<Node<'t>>::Some(Node { t: self.t, i: self.at - 1 });
+        return Some(Node { t: self.t, i: self.at - 1 });
     }
 
     pub fn size_hint(self: &Self) (usize, Option<usize>) {
         let n = (self.end - self.at) as usize;
-        return n, Option::<usize>::Some(n);
+        return (n, Option::<usize>::Some(n));
     }
 }
 
 /// A token of a tree.
 pub struct Token<'t> {
-    pub(module) t: &'t SyntaxTree,
-    pub(module) i: u32,
+    t: &'t SyntaxTree,
+    i: u32,
 }
 
 extend<'t> Token<'t> as Copy {}
@@ -755,116 +755,116 @@ extend<'t> Token<'t> {
 
 /// Consecutive tokens of a tree.
 pub struct Tokens<'t> {
-    pub(module) t: &'t SyntaxTree,
-    pub(module) at: u32,
-    pub(module) end: u32,
+    t: &'t SyntaxTree,
+    at: u32,
+    end: u32,
 }
 
 extend<'t> Tokens<'t> as Iterator<Token<'t>> {
     pub fn next(self: &mut Self) Option<Token<'t>> {
         if self.at >= self.end {
-            return Option::<Token<'t>>::None;
+            return None;
         }
         self.at += 1;
-        return Option::<Token<'t>>::Some(Token { t: self.t, i: self.at - 1 });
+        return Some(Token { t: self.t, i: self.at - 1 });
     }
 
     pub fn size_hint(self: &Self) (usize, Option<usize>) {
         let n = (self.end - self.at) as usize;
-        return n, Option::<usize>::Some(n);
+        return (n, Option::<usize>::Some(n));
     }
 }
 
 /// The syntax kind of AST node kind `k`. Not part of the API.
 pub(package) fn kind_of(k: NodeKind) SyntaxKind {
     return switch k {
-        NODE_NONE_KIND => SyntaxKind::Error,
-        NODE_PROGRAM => SyntaxKind::Program,
-        NODE_IDENTIFIER => SyntaxKind::Identifier,
-        NODE_LITERAL => SyntaxKind::Literal,
-        NODE_FUNCTION => SyntaxKind::Function,
-        NODE_PARAMETER => SyntaxKind::Parameter,
-        NODE_STRUCT => SyntaxKind::Struct,
-        NODE_FIELD => SyntaxKind::Field,
-        NODE_ENUM => SyntaxKind::Enum,
-        NODE_VARIANT => SyntaxKind::Variant,
-        NODE_INTERFACE => SyntaxKind::Interface,
-        NODE_EXTEND => SyntaxKind::Extend,
-        NODE_TYPE_ALIAS => SyntaxKind::TypeAlias,
-        NODE_CONST => SyntaxKind::Const,
-        NODE_STATIC_ASSERT => SyntaxKind::StaticAssert,
-        NODE_EXTERN_BLOCK => SyntaxKind::ExternBlock,
-        NODE_IMPORT => SyntaxKind::Import,
-        NODE_GENERIC_PARAM => SyntaxKind::GenericParam,
-        NODE_WHERE_PREDICATE => SyntaxKind::WherePredicate,
-        NODE_TYPE_PATH => SyntaxKind::TypePath,
-        NODE_POINTER_TYPE => SyntaxKind::PointerType,
-        NODE_REFERENCE_TYPE => SyntaxKind::ReferenceType,
-        NODE_SLICE_TYPE => SyntaxKind::SliceType,
-        NODE_ARRAY_TYPE => SyntaxKind::ArrayType,
-        NODE_FUNCTION_TYPE => SyntaxKind::FunctionType,
-        NODE_DYN_TYPE => SyntaxKind::DynType,
-        NODE_BLOCK => SyntaxKind::Block,
-        NODE_LET => SyntaxKind::Let,
-        NODE_RETURN => SyntaxKind::Return,
-        NODE_BREAK => SyntaxKind::Break,
-        NODE_CONTINUE => SyntaxKind::Continue,
-        NODE_DEFER => SyntaxKind::Defer,
-        NODE_ASM => SyntaxKind::Asm,
-        NODE_IF => SyntaxKind::If,
-        NODE_WHILE => SyntaxKind::While,
-        NODE_FOR => SyntaxKind::For,
-        NODE_EXPRESSION_STATEMENT => SyntaxKind::ExpressionStatement,
-        NODE_UNARY => SyntaxKind::Unary,
-        NODE_BINARY => SyntaxKind::Binary,
-        NODE_ASSIGNMENT => SyntaxKind::Assignment,
-        NODE_CALL => SyntaxKind::Call,
-        NODE_CLOSURE => SyntaxKind::Closure,
-        NODE_INDEX => SyntaxKind::Index,
-        NODE_MEMBER => SyntaxKind::Member,
-        NODE_CAST => SyntaxKind::Cast,
-        NODE_GENERIC_SPECIALIZATION => SyntaxKind::GenericSpecialization,
-        NODE_MATCH => SyntaxKind::Match,
-        NODE_MATCH_ARM => SyntaxKind::MatchArm,
-        NODE_SIZEOF => SyntaxKind::Sizeof,
-        NODE_ALIGNOF => SyntaxKind::Alignof,
-        NODE_VA_EXPR => SyntaxKind::VaExpr,
-        NODE_ARRAY_LITERAL => SyntaxKind::ArrayLiteral,
-        NODE_STRUCT_INITIALIZER => SyntaxKind::StructInitializer,
-        NODE_FIELD_INITIALIZER => SyntaxKind::FieldInitializer,
-        NODE_PATTERN_WILDCARD => SyntaxKind::PatternWildcard,
-        NODE_PATTERN_LITERAL => SyntaxKind::PatternLiteral,
-        NODE_PATTERN_NAME => SyntaxKind::PatternName,
-        NODE_PATTERN_TUPLE => SyntaxKind::PatternTuple,
-        NODE_PATTERN_STRUCT => SyntaxKind::PatternStruct,
-        NODE_PATTERN_FIELD => SyntaxKind::PatternField,
-        NODE_PATTERN_RANGE => SyntaxKind::PatternRange,
-        NODE_PATTERN_OR => SyntaxKind::PatternOr,
-        NODE_RANGE => SyntaxKind::Range,
-        NODE_TUPLE => SyntaxKind::Tuple,
-        NODE_TUPLE_TYPE => SyntaxKind::TupleType,
-        NODE_LIFETIME => SyntaxKind::Lifetime,
-        NODE_LAUNCH => SyntaxKind::Launch,
-        NODE_SELECT => SyntaxKind::Select,
-        NODE_SELECT_ARM => SyntaxKind::SelectArm,
-        NODE_INLINE_FOR => SyntaxKind::InlineFor,
-        NODE_PARALLEL_FOR => SyntaxKind::ParallelFor,
-        NODE_INTERP => SyntaxKind::Interpolation,
+        NODE_NONE_KIND => Error,
+        NODE_PROGRAM => Program,
+        NODE_IDENTIFIER => Identifier,
+        NODE_LITERAL => Literal,
+        NODE_FUNCTION => Function,
+        NODE_PARAMETER => Parameter,
+        NODE_STRUCT => Struct,
+        NODE_FIELD => Field,
+        NODE_ENUM => Enum,
+        NODE_VARIANT => Variant,
+        NODE_INTERFACE => Interface,
+        NODE_EXTEND => Extend,
+        NODE_TYPE_ALIAS => TypeAlias,
+        NODE_CONST => Const,
+        NODE_STATIC_ASSERT => StaticAssert,
+        NODE_EXTERN_BLOCK => ExternBlock,
+        NODE_IMPORT => Import,
+        NODE_GENERIC_PARAM => GenericParam,
+        NODE_WHERE_PREDICATE => WherePredicate,
+        NODE_TYPE_PATH => TypePath,
+        NODE_POINTER_TYPE => PointerType,
+        NODE_REFERENCE_TYPE => ReferenceType,
+        NODE_SLICE_TYPE => SliceType,
+        NODE_ARRAY_TYPE => ArrayType,
+        NODE_FUNCTION_TYPE => FunctionType,
+        NODE_DYN_TYPE => DynType,
+        NODE_BLOCK => Block,
+        NODE_LET => Let,
+        NODE_RETURN => Return,
+        NODE_BREAK => Break,
+        NODE_CONTINUE => Continue,
+        NODE_DEFER => Defer,
+        NODE_ASM => Asm,
+        NODE_IF => If,
+        NODE_WHILE => While,
+        NODE_FOR => For,
+        NODE_EXPRESSION_STATEMENT => ExpressionStatement,
+        NODE_UNARY => Unary,
+        NODE_BINARY => Binary,
+        NODE_ASSIGNMENT => Assignment,
+        NODE_CALL => Call,
+        NODE_CLOSURE => Closure,
+        NODE_INDEX => Index,
+        NODE_MEMBER => Member,
+        NODE_CAST => Cast,
+        NODE_GENERIC_SPECIALIZATION => GenericSpecialization,
+        NODE_MATCH => Match,
+        NODE_MATCH_ARM => MatchArm,
+        NODE_SIZEOF => Sizeof,
+        NODE_ALIGNOF => Alignof,
+        NODE_VA_EXPR => VaExpr,
+        NODE_ARRAY_LITERAL => ArrayLiteral,
+        NODE_STRUCT_INITIALIZER => StructInitializer,
+        NODE_FIELD_INITIALIZER => FieldInitializer,
+        NODE_PATTERN_WILDCARD => PatternWildcard,
+        NODE_PATTERN_LITERAL => PatternLiteral,
+        NODE_PATTERN_NAME => PatternName,
+        NODE_PATTERN_TUPLE => PatternTuple,
+        NODE_PATTERN_STRUCT => PatternStruct,
+        NODE_PATTERN_FIELD => PatternField,
+        NODE_PATTERN_RANGE => PatternRange,
+        NODE_PATTERN_OR => PatternOr,
+        NODE_RANGE => Range,
+        NODE_TUPLE => Tuple,
+        NODE_TUPLE_TYPE => TupleType,
+        NODE_LIFETIME => Lifetime,
+        NODE_LAUNCH => Launch,
+        NODE_SELECT => Select,
+        NODE_SELECT_ARM => SelectArm,
+        NODE_INLINE_FOR => InlineFor,
+        NODE_PARALLEL_FOR => ParallelFor,
+        NODE_INTERP => Interpolation,
     };
 }
 
 fn token_kind(k: tt::TokenType) TokenKind {
     return switch k {
-        Identifier => TokenKind::Ident,
+        Identifier => Ident,
         Label => TokenKind::Label,
-        IntegerLiteral => TokenKind::Int,
-        FloatLiteral => TokenKind::Float,
-        CharacterLiteral | ByteCharacterLiteral => TokenKind::Char,
-        StringLiteral | RawStringLiteral | ByteStringLiteral | MatchertextLiteral | MatchertextBegin | MatchertextMid | MatchertextEnd => TokenKind::String,
-        LineComment | BlockComment => TokenKind::Comment,
-        DocLineComment | DocBlockComment => TokenKind::DocComment,
-        As | Import | Break | Case | Const | Continue | Defer | Asm | Do | Dyn | Else | Enum | Extern | False | Fn | For | If | Extend | In | Let | Loop | Switch | Move | Mut | Null | Pub | Sizeof | Alignof | Return | SelfLower | SelfUpper | Struct | Interface | True | Type | Union | Unsafe | Where | While | Underscore | Static | StaticAssert | VaStart | VaArg | VaEnd | Launch | Select | InlineFor | ParallelFor => TokenKind::Keyword,
-        _ => TokenKind::Punct,
+        IntegerLiteral => Int,
+        FloatLiteral => Float,
+        CharacterLiteral | ByteCharacterLiteral => Char,
+        StringLiteral | RawStringLiteral | ByteStringLiteral | MatchertextLiteral | MatchertextBegin | MatchertextMid | MatchertextEnd => String,
+        LineComment | BlockComment => Comment,
+        DocLineComment | DocBlockComment => DocComment,
+        As | Import | Break | Case | Const | Continue | Defer | Asm | Do | Dyn | Else | Enum | Extern | False | Fn | For | If | Extend | In | Let | Loop | Switch | Move | Mut | Null | Pub | Sizeof | Alignof | Return | SelfLower | SelfUpper | Struct | Interface | True | Type | Union | Unsafe | Where | While | Underscore | Static | StaticAssert | VaStart | VaArg | VaEnd | Launch | Select | InlineFor | ParallelFor => Keyword,
+        _ => Punct,
     };
 }
 
@@ -872,9 +872,9 @@ fn token_kind(k: tt::TokenType) TokenKind {
 pub fn tree_of(s: &mut ses::Session, path: str) Result<SyntaxTree, ApiError> {
     let t = s.text(path)?;
     if t.is_none() {
-        return Result::<SyntaxTree, ApiError>::Err(ApiError::at(Code::InvalidArgument, "no such file", path, 0, 0));
+        return Err(ApiError::at(Code::InvalidArgument, "no such file", path, 0, 0));
     }
-    return Result::<SyntaxTree, ApiError>::Ok(SyntaxTree::parse(path, t.unwrap().as_str()));
+    return Ok(SyntaxTree::parse(path, t.unwrap().as_str()));
 }
 
 /// `text`, the contents of file `path`, in the canonical format at line width `width` (120 for `super-c
@@ -883,7 +883,7 @@ pub fn format_file(path: str, text: str, width: u32) Result<String, ApiError> {
     let src = String::from_str(text);
     let mut out = String::new();
     let mut errs = diag::Errors::new();
-    if !dutil::format_quiet(&src, path, width as i32, false, &mut out, &mut errs) {
+    if !dutil::format_quiet(&src, path, width as i32, &mut out, &mut errs) {
         let mut e = ApiError::at(Code::ParseFailed, "the text does not format", path, 0, 0);
         if errs.errors.len() != 0 {
             let d = errs.errors.at(0);
@@ -891,9 +891,9 @@ pub fn format_file(path: str, text: str, width: u32) Result<String, ApiError> {
             e.start = d.start;
             e.end = d.start + d.len;
         }
-        return Result::<String, ApiError>::Err(e);
+        return Err(e);
     }
-    return Result::<String, ApiError>::Ok(out);
+    return Ok(out);
 }
 
 /// One replacement in a file: bytes `[start, end)` of its current text become `text`.
@@ -961,12 +961,10 @@ extend WorkspaceEdit {
         for j in 0..self.versions.len() {
             let f = self.versions[j].file.as_str();
             if s.version(f) != self.versions[j].version {
-                return Result::<Vector<ses::Change>, ApiError>::Err(
-                    ApiError::at(Code::InvalidArgument, "the file is not at the expected version", f, 0, 0),
-                );
+                return Err(ApiError::at(Code::InvalidArgument, "the file is not at the expected version", f, 0, 0));
             }
         }
-        return Result::<Vector<ses::Change>, ApiError>::Ok(out);
+        return Ok(out);
     }
 
     /// The texts the edit gives each file it changes, in first-edit order, without applying it: edits sorted
@@ -980,27 +978,23 @@ extend WorkspaceEdit {
             let cur = switch s.text(path)? {
                 Some(t) => t,
                 None => {
-                    return Result::<Vector<EditedFile>, ApiError>::Err(
-                        ApiError::at(Code::InvalidArgument, "no such file", path, 0, 0),
-                    );
+                    return Err(ApiError::at(Code::InvalidArgument, "no such file", path, 0, 0));
                 },
             };
             let mut next = String::new();
-            if let Err(e) = apply_edits(cur.as_str(), cs[i].edits.as_slice(), &mut next) {
+            if let Err(e) = apply_edits(&cur, &cs[i].edits, &mut next) {
                 let mut ee = e;
                 ee.file = String::from_str(path);
-                return Result::<Vector<EditedFile>, ApiError>::Err(ee);
+                return Err(ee);
             }
-            let after = SyntaxTree::parse(path, next.as_str());
-            if !after.is_valid() && SyntaxTree::parse(path, cur.as_str()).is_valid() {
+            let after = SyntaxTree::parse(path, &next);
+            if !after.is_valid() && SyntaxTree::parse(path, &cur).is_valid() {
                 let r = after.errors[0].range;
-                return Result::<Vector<EditedFile>, ApiError>::Err(
-                    ApiError::at(Code::VerificationFailed, after.errors[0].message.as_str(), path, r.start, r.end),
-                );
+                return Err(ApiError::at(Code::VerificationFailed, &after.errors[0].message, path, r.start, r.end));
             }
             out.push(EditedFile { file: String::from_str(path), text: next });
         }
-        return Result::<Vector<EditedFile>, ApiError>::Ok(out);
+        return Ok(out);
     }
 
     /// Check the edit as `preview` does, then apply it to the session as one change. Returns the session's
@@ -1025,7 +1019,7 @@ extend WorkspaceEdit {
                 },
             );
         }
-        return s.apply(cs.as_slice());
+        return s.apply(&cs);
     }
 }
 
@@ -1077,8 +1071,8 @@ extend Builder {
     /// error) when it does not parse, or when a block is still open.
     pub fn finish(self: &Self) Result<String, ApiError> {
         if self.depth != 0 {
-            return Result::<String, ApiError>::Err(ApiError::new(Code::ParseFailed, "a block is still open"));
+            return Err(ApiError::new(Code::ParseFailed, "a block is still open"));
         }
-        return format_file("<generated>", self.out.as_str(), 120);
+        return format_file("<generated>", &self.out, 120);
     }
 }

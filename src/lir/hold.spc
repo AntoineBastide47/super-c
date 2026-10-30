@@ -273,17 +273,17 @@ pub(package) fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut
             let mut f = HFunc {
                 name: sv.name(pk, sy.name),
                 flags: if r.shape_of(k) {
-                    HELD_SHAPE;
+                    HELD_SHAPE
                 } else {
-                    0u8;
+                    0u8
                 } | if ok {
-                    HELD_OK;
+                    HELD_OK
                 } else {
-                    0u8;
+                    0u8
                 } | if sy.cold {
-                    HELD_COLD;
+                    HELD_COLD
                 } else {
-                    0u8;
+                    0u8
                 },
                 fx: sy.fx,
                 wargs: r.wargs_of(k),
@@ -353,9 +353,9 @@ pub(package) fn read(img: str, ptr_bytes: u32) Option<Rec> {
     let mut r = Reader::new(img.ptr(), img.len());
     let rec = load_new::<Rec>(&mut r);
     if !r.ok || r.left() != 0 || !valid(&rec, ptr_bytes) {
-        return Option::<Rec>::None;
+        return None;
     }
-    return Option::<Rec>::Some(rec);
+    return Some(rec);
 }
 
 // Whether every index of `rec` is in its table and every data definition holds its bytes and relocations.
@@ -422,7 +422,7 @@ fn define(pk: &mut Package, rec: &Rec, d: &HData) u32 {
             Reloc { offset: h.offset, sym: pk.symbol(rec.names.at(h.sym as usize).as_str(), h.kind), addend: h.addend },
         );
     }
-    let added = pk.add_data(s, d.size, d.align_log2, d.readonly, d.bytes.as_slice(), rs[0..rs.len()]);
+    let added = pk.add_data(s, d.size, d.align_log2, d.readonly, &d.bytes, rs[0..rs.len()]);
     assert(added, "lir: a data definition `read` checked does not add");
     return s;
 }

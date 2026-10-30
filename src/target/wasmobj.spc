@@ -240,17 +240,17 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
             w::name(
                 &mut sec,
                 if s.imod != NONE {
-                    o.names.spell(s.imod);
+                    o.names.spell(s.imod)
                 } else {
-                    "env";
+                    "env"
                 },
             );
             w::name(
                 &mut sec,
                 if s.iname != NONE {
-                    o.names.spell(s.iname);
+                    o.names.spell(s.iname)
                 } else {
-                    o.name_of(k as u32);
+                    o.name_of(k as u32)
                 },
             );
             sec.push(0);
@@ -354,9 +354,9 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
             let b = d.secs.index_mut(f.sec as usize);
             // The field holds the object's own value: a function's entry offset, or the section offset.
             let (kind, sym, v) = if f.kind == dw::FX_ADDR {
-                (w::R_FUNCTION_OFFSET_I32, f.sym, entry[o.syms[f.sym as usize].def as usize] as i64 + f.addend);
+                (w::R_FUNCTION_OFFSET_I32, f.sym, entry[o.syms[f.sym as usize].def as usize] as i64 + f.addend)
             } else {
-                (w::R_SECTION_OFFSET_I32, o.syms.len() as u32 + f.sym, f.addend);
+                (w::R_SECTION_OFFSET_I32, o.syms.len() as u32 + f.sym, f.addend)
             };
             for j in 0..4u32 {
                 b[(f.off + j) as usize] = (v as u64 >> (8 * j) as u64 & 0xFF) as u8;
@@ -380,9 +380,9 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
         w::uleb(
             &mut sub,
             if explicit {
-                s.flags | F_EXPLICIT_NAME;
+                s.flags | F_EXPLICIT_NAME
             } else {
-                s.flags;
+                s.flags
             },
         );
         if s.kind == K_DATA {
@@ -395,9 +395,9 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
             continue;
         }
         let idx = if s.kind == K_FUNC {
-            sp.fidx[k];
+            sp.fidx[k]
         } else {
-            0u32;
+            0u32
         };
         w::uleb(&mut sub, idx);
         if s.def != NONE || explicit {
@@ -417,7 +417,7 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
         w::uleb(&mut sub, o.segs.len() as u64);
         for i in 0..o.segs.len() {
             let g = o.segs.at(i);
-            w::name(&mut sub, g.name.as_str());
+            w::name(&mut sub, &g.name);
             w::uleb(&mut sub, g.align_log2);
             w::uleb(&mut sub, ast_pick32(g.retain, SEG_RETAIN, 0));
         }
@@ -494,15 +494,7 @@ fn debug_info(o: &WObj, inst_at: &Vector<u32>, body_size: &Vector<u32>) dw::Dwar
     for k in 0..o.files.len() {
         files.push(o.files.at(k).as_str());
     }
-    return dw::Dwarf::build(
-        funcs.as_slice(),
-        lines.as_slice(),
-        names.as_slice(),
-        globals.as_slice(),
-        files.as_slice(),
-        o.comp_dir.as_str(),
-        4,
-    );
+    return dw::Dwarf::build(&funcs, &lines, &names, &globals, &files, &o.comp_dir, 4);
 }
 
 const fn ast_pick32(c: bool, a: u32, b: u32) u32 {

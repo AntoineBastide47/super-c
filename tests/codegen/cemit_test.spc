@@ -105,7 +105,7 @@ fn emit_tu(p: &loader::Package, names: *const str, n: usize, em: &mut cb::CEmit)
         let mut sym = String::new();
         let tgt = em.mg.method_target(u, node);
         assert(em.mg.fn_sym(u, node, tgt, &mut sym), "symbol renders");
-        let ok = em.emit_fn(&bodies.at(i).body, sym.as_str());
+        let ok = em.emit_fn(&bodies.at(i).body, &sym);
         assert(ok, "body emits");
     }
 }
@@ -115,7 +115,7 @@ fn emit_tu(p: &loader::Package, names: *const str, n: usize, em: &mut cb::CEmit)
 fn compile_run(em: &cb::CEmit, main_body: str) i32 {
     let p = cli::proj_new();
     let root = p.dir();
-    let mut src = String::from_str(em.out.as_str());
+    let mut src = String::from_str(&em.out);
     // The probe is the whole program: it holds the external definitions of super_rt.h's inline helpers.
     src.push_str("SC_RT_EXTERNS\n");
     // The runtime traps the inline helpers of super_rt.h call (std/rt/base.spc in a program).
@@ -123,10 +123,10 @@ fn compile_run(em: &cb::CEmit, main_body: str) i32 {
         "_Noreturn void __sc_panic(const char *__m) { fputs(__m, stderr); abort(); }\n_Noreturn void __sc_panic_str(const uint8_t *__p, size_t __n) { fwrite(__p, 1, __n, stderr); abort(); }\n_Noreturn void __sc_trap_order(void) { abort(); }\n",
     );
     src.push_str(main_body);
-    p.mkfile("probe.c", src.as_str());
+    p.mkfile("probe.c", &src);
     // The runtime header the emitted code includes (arithmetic helpers, the traps' prototypes).
     let rt = format("{}/rt", root);
-    assert(dutil::write_super_rt(rt.as_str()) >= 0, "runtime header written");
+    assert(dutil::write_super_rt(&rt) >= 0, "runtime header written");
     // -pedantic-errors: the emitted output is portable C11, no GNU extensions (ZST storage is
     // elided, so even zero-sized types spell portably).
     let mut cmd = format(
@@ -158,7 +158,7 @@ fn arithmetic_and_branches_behave() {
     m1.push_str("  if (collatz_steps(27ULL) != 111ULL) return 1;\n");
     m1.push_str("  int32_t acc = 45 * 3 - 17; acc = acc ^ (17 << 2); if (acc < 0) acc = -acc;\n");
     m1.push_str("  if (mix(45, 17) != acc % 251) return 2;\n  return 0;\n}\n");
-    let rc = compile_run(&em, m1.as_str());
+    let rc = compile_run(&em, &m1);
     assert(rc == 0, "emitted C behaves");
 }
 
@@ -177,7 +177,7 @@ fn calls_and_recursion_behave() {
     m1.push_str(
         "int main(void) {\n  if (gcd(1071ULL, 462ULL) != 21ULL) return 1;\n  if (lcm(21ULL, 6ULL) != 42ULL) return 2;\n  return 0;\n}\n",
     );
-    let rc = compile_run(&em, m1.as_str());
+    let rc = compile_run(&em, &m1);
     assert(rc == 0, "emitted calls behave");
 }
 
@@ -213,7 +213,7 @@ fn structured_shape_isolated() {
     assert(!e1.out.contains("bb_"), "straight-line body has no basic-block label");
     assert(!e1.out.contains("abort()"), "no dead abort sentinel");
     assert(!e1.out.contains("_0 ="), "no return-slot copy");
-    assert_eq(count_returns(e1.out.as_str()), 1);
+    assert_eq(count_returns(&e1.out), 1);
 
     // An if / early return followed by a tail return: structured if, exactly two returns, no goto.
     let p2 = typed_package(
@@ -226,7 +226,7 @@ fn structured_shape_isolated() {
     assert(e2.out.contains("return 100"), "the early arm forwards its value");
     assert(!e2.out.contains("goto "), "no goto in a reducible branch");
     assert(!e2.out.contains("abort()"), "no dead abort");
-    assert_eq(count_returns(e2.out.as_str()), 2);
+    assert_eq(count_returns(&e2.out), 2);
 
     // A discriminant match is a native C switch, not a goto chain.
     let p3 = typed_package(
@@ -275,12 +275,12 @@ fn far_read_stays_declared() {
         src.push_str(", ");
     }
     src.push_str("}; return w.f0 + w.f299; }\nfn main() i32 { return 0; }");
-    let p = typed_package(src.as_str());
+    let p = typed_package(&src);
     let mut em = cb::CEmit::new(&p);
     let names: [str; 1] = ["wide"];
     emit_tu(&p, &names[0], 1, &mut em);
-    assert(is_temp(em.out.as_str(), ".f0 = "), "the far-read field value stays a declared temporary");
-    assert(!is_temp(em.out.as_str(), ".f299 = "), "the near-read field value folds");
+    assert(is_temp(&em.out, ".f0 = "), "the far-read field value stays a declared temporary");
+    assert(!is_temp(&em.out, ".f299 = "), "the near-read field value folds");
 }
 
 // The emitted assert location counts the line ends the diagnostics count: `\n`, `\r\n`, and a lone `\r`.

@@ -296,9 +296,9 @@ fn assert_val(label: *const char, kind: u32, v: u64, n: u64) {
     } else if kind == ASSERT_BOOL {
         put(
             if v != 0 {
-                "true";
+                "true"
             } else {
-                "false";
+                "false"
             },
         );
     } else {
@@ -700,9 +700,9 @@ fn stk_text(b: &mut [u8; 256], task: bool, main: bool, size: u64) usize {
             b,
             n,
             if main {
-                " in the main thread";
+                " in the main thread"
             } else {
-                " in a thread";
+                " in a thread"
             },
         );
         if size != 0 {
@@ -770,26 +770,26 @@ extern "C" "sys/auxv.h" {
 fn stk_bounds(_main: bool) (usize, usize) {
     let t = unsafe pthread_self();
     let hi = (unsafe pthread_get_stackaddr_np(t)) as usize;
-    return hi - unsafe pthread_get_stacksize_np(t), hi;
+    return (hi - unsafe pthread_get_stacksize_np(t), hi);
 }
 // The main thread's on Linux, from its size limit and its top, where the kernel copies the program's path
 // (AT_EXECFN): pthread_getattr_np would read /proc/self/maps.
 @platform(linux | android)
 fn stk_bounds(main: bool) (usize, usize) {
     if !main {
-        return 0, 0;
+        return (0, 0);
     }
     let top = unsafe getauxval(AT_EXECFN);
     let mut rl = rlimit { rlim_cur: 0, rlim_max: 0 };
     if top == 0 || unsafe getrlimit(RLIMIT_STACK, &mut rl) != 0 || rl.rlim_cur == ~0u64 {
-        return 0, 0;
+        return (0, 0);
     }
     let pg = (unsafe c_sysconf(SC_PAGESIZE)) as usize;
     let hi = top + unsafe c_strlen(top as *const char) + pg & ~(pg - 1);
     if rl.rlim_cur as usize >= hi {
-        return 0, 0;
+        return (0, 0);
     }
-    return hi - rl.rlim_cur as usize, hi;
+    return (hi - rl.rlim_cur as usize, hi);
 }
 
 // The stack pointer at the fault, from the signal context; 0 on an instruction set with no table entry (a
@@ -842,9 +842,9 @@ fn stk_fault(sig: i32, si: *mut void, uc: *mut void) {
     }
     let code = unsafe *((si as usize + SI_CODE_AT) as *const i32);
     let fault = if sig == SIGSEGV {
-        code == SEGV_MAPERR || code == SEGV_ACCERR;
+        code == SEGV_MAPERR || code == SEGV_ACCERR
     } else {
-        code == BUS_ADRALN || code == BUS_ADRERR || code == BUS_OBJERR;
+        code == BUS_ADRALN || code == BUS_ADRERR || code == BUS_OBJERR
     };
     if r != null && fault {
         let lo = unsafe (*r).lo;
@@ -852,23 +852,23 @@ fn stk_fault(sig: i32, si: *mut void, uc: *mut void) {
         let a = unsafe *((si as usize + SI_ADDR_AT) as *const usize);
         let sp = stk_sp(uc);
         let near = sp != 0 && if a > sp {
-            a - sp;
+            a - sp
         } else {
-            sp - a;
+            sp - a
         } < STK_NEAR;
         let floor = if lo > STK_SLACK {
-            lo - STK_SLACK;
+            lo - STK_SLACK
         } else {
-            0;
+            0
         };
         let own = lo != 0 && sp >= floor && sp < hi;
         let guard = lo != 0 && a >= floor && a < lo + STK_SLACK;
         // On its own stack, the thread overflowed when the fault is at the guard, or near the stack pointer
         // below the top (the Linux main thread grows until another mapping stops it).
         let overflow = if own || sp == 0 {
-            guard || own && near && a >= floor && a < hi;
+            guard || own && near && a >= floor && a < hi
         } else {
-            near;
+            near
         };
         if overflow {
             let mut b = [0u8; 256];
@@ -879,9 +879,9 @@ fn stk_fault(sig: i32, si: *mut void, uc: *mut void) {
                 task,
                 unsafe (*r).main != 0,
                 if own {
-                    (hi - lo) as u64;
+                    (hi - lo) as u64
                 } else {
-                    0;
+                    0
                 },
             );
             unsafe c_write(2, &b[0], n);
@@ -889,9 +889,9 @@ fn stk_fault(sig: i32, si: *mut void, uc: *mut void) {
         }
     }
     let prev = if sig == SIGSEGV {
-        (unsafe &STK_PREV_SEGV) as *const sigaction;
+        (unsafe &STK_PREV_SEGV) as *const sigaction
     } else {
-        (unsafe &STK_PREV_BUS) as *const sigaction;
+        (unsafe &STK_PREV_BUS) as *const sigaction
     };
     stk_chain(sig, prev, si, uc);
 }
@@ -1197,9 +1197,9 @@ extern "C" "malloc.h" {
 fn lk_table_new(n: usize) *mut void {
     let p = unsafe mmap(null, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     return if p as isize == -1 {
-        null;
+        null
     } else {
-        p;
+        p
     };
 }
 @platform(windows | wasm)
@@ -1336,9 +1336,9 @@ fn lk_grow(s: *mut LkShard) bool {
     // A power of two: lk_slot and the probes mask with cap - 1. 128 entries fill one 4 KiB page on a
     // 64-bit host.
     let ncap = if cap != 0 {
-        cap * 2;
+        cap * 2
     } else {
-        128usize;
+        128usize
     };
     if ncap > ~0usize / sizeof(LkEnt) {
         return false;
@@ -1389,9 +1389,9 @@ fn lk_remember_free(s: *mut LkShard, entry: LkEnt, site: *const void) {
         }
         let mut freed = entry;
         freed.site = if LK_BT_OFF == 0 {
-            site;
+            site
         } else {
-            null;
+            null
         };
         (*s).freed[(*s).freed_next] = freed;
         (*s).freed_next = ((*s).freed_next + 1) % LK_FREED_HISTORY;
@@ -1430,9 +1430,9 @@ fn lk_capture(p: *mut void, n: usize, site: *const void) LkEnt {
     return LkEnt {
         ptr: p,
         site: if unsafe LK_BT_OFF == 0 {
-            site;
+            site
         } else {
-            null;
+            null
         },
         size: n,
         epoch: unsafe atomic_load_u32(&mut LK_EPOCH, RELAXED),
@@ -1514,16 +1514,16 @@ const fn lk_group_cmp(va: *const void, vb: *const void) i32 {
     let b = unsafe *(vb as *const LkEnt);
     if a.site != b.site {
         return if a.site as usize < b.site as usize {
-            -1;
+            -1
         } else {
-            1;
+            1
         };
     }
     if a.size != b.size {
         return if a.size < b.size {
-            -1;
+            -1
         } else {
-            1;
+            1
         };
     }
     return 0;
@@ -1629,9 +1629,9 @@ fn lk_on() bool {
         let mut st: i32 = 1;
         if e != null && (unsafe e[0]) as u8 != 0 && (unsafe e[0]) as u8 != b'0' {
             st = if (unsafe e[0]) as u8 == b'f' || (unsafe e[0]) as u8 == b'F' {
-                3;
+                3
             } else {
-                2;
+                2
             };
         }
         if st >= 2 && !lk_made() {
@@ -1725,9 +1725,9 @@ unsafe fn lk_stats(out: *mut u64) {
             let e = unsafe *(tab + i);
             if e.ptr != null {
                 let k = if e.epoch as usize < LK_EPOCHS {
-                    e.epoch as usize;
+                    e.epoch as usize
                 } else {
-                    LK_EPOCHS - 1;
+                    LK_EPOCHS - 1
                 };
                 w[2 + 2 * k] += 1;
                 w[3 + 2 * k] += e.size as u64;
@@ -1845,9 +1845,9 @@ unsafe fn lk_realloc(p: *mut void, n: usize) *mut void {
     if p != null && track && lk_get() >= 2 {
         old = lk_find(held, p);
         let freed = if old == null {
-            lk_find_freed(held, p);
+            lk_find_freed(held, p)
         } else {
-            null;
+            null
         };
         if freed != null {
             let snap = unsafe *freed;
@@ -1868,9 +1868,9 @@ unsafe fn lk_realloc(p: *mut void, n: usize) *mut void {
                     fresh,
                     p,
                     if snap.size < n {
-                        snap.size;
+                        snap.size
                     } else {
-                        n;
+                        n
                     },
                 );
             }
@@ -1886,15 +1886,15 @@ unsafe fn lk_realloc(p: *mut void, n: usize) *mut void {
                 fresh,
                 p,
                 if osz < n {
-                    osz;
+                    osz
                 } else {
-                    n;
+                    n
                 },
             );
         }
-        fresh;
+        fresh
     } else {
-        unsafe c_realloc(p, n);
+        unsafe c_realloc(p, n)
     };
     if q != null && track && lk_get() >= 2 {
         let e = lk_capture(q, n, site);

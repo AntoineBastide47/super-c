@@ -167,19 +167,19 @@ extend Summarizer {
             let t = &b.blocks.at(k).term;
             self.next.set(k, t.t0);
             let r = if t.kind == ir::TM_RETURN || t.kind == ir::TM_ASSERT || t.kind == ir::TM_UNREACHABLE {
-                PK_END;
+                PK_END
             } else if t.kind == ir::TM_SWITCH {
-                PK_BRANCH;
+                PK_BRANCH
             } else if t.kind != ir::TM_CALL {
-                R_PASS; // goto, drop
+                R_PASS // goto, drop
             } else if lbegin.node != NODE_NONE && t.callee.node == lbegin.node && t.callee.module == lbegin.module {
-                R_DEAD;
+                R_DEAD
             } else if call_ends(p, t) {
-                PK_END;
+                PK_END
             } else if t.callee.node != NODE_NONE && (t.callee.node & NODE_BODY) == 0 && rmods[t.callee.module as usize] {
-                PK_CALL;
+                PK_CALL
             } else {
-                R_PASS;
+                R_PASS
             };
             self.role.set(k, r);
         }
@@ -361,7 +361,7 @@ pub(package) fn check_kept(p: &loader::Package, keep: &irl::Keep, reported: &Vec
                     g.add_member(k, m as u32, (*v) as u32, it.node);
                 },
                 None => {},
-            };
+            }
         }
     }
     g.link_kept(keep, reported);
@@ -785,7 +785,7 @@ extend Recur {
                 );
             }
             if errs.errors.len() != 0 {
-                errs.finalize(p.modules.at(m as usize).source.as_str(), p.modules.at(m as usize).file.as_str());
+                errs.finalize(&p.modules.at(m as usize).source, &p.modules.at(m as usize).file);
                 out.push(Report { module: m, errs: errs });
             }
         }

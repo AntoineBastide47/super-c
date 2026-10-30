@@ -71,7 +71,7 @@ fn check(s: &mut Session) {
 
 @test
 fn checks_a_project_and_reports_its_errors(fx: &mut Fx) {
-    let mut s = Session::open_file(fx.main.as_str(), Config::host("std")).unwrap();
+    let mut s = Session::open_file(&fx.main, Config::host("std")).unwrap();
     assert(s.diagnostics().is_err(), "no diagnostics before a check");
     check(&mut s);
     assert(s.checked(), "checked");
@@ -85,7 +85,7 @@ fn checks_a_project_and_reports_its_errors(fx: &mut Fx) {
         }
     }
     assert(found, "the import is a module of the session");
-    let v = s.set_text(fx.util.as_str(), UTIL_BAD);
+    let v = s.set_text(&fx.util, UTIL_BAD);
     assert_eq(v, 0);
     assert(!s.checked(), "a change makes the analysis stale");
     check(&mut s);
@@ -95,15 +95,15 @@ fn checks_a_project_and_reports_its_errors(fx: &mut Fx) {
             assert_eq(d.code_name(), "mismatched_types_expected_found");
         }
     }
-    assert(s.close(fx.util.as_str()), "the buffer closes");
+    assert(s.close(&fx.util), "the buffer closes");
     check(&mut s);
     assert_eq(errors_of(&s), 0);
 }
 
 @test
 fn applies_edits_together_or_not_at_all(fx: &mut Fx) {
-    let mut s = Session::open_file(fx.main.as_str(), Config::host("std")).unwrap();
-    assert_eq(s.open(fx.util.as_str()).unwrap(), 0);
+    let mut s = Session::open_file(&fx.main, Config::host("std")).unwrap();
+    assert_eq(s.open(&fx.util).unwrap(), 0);
     let rev = s.revision();
     let at = UTIL.find("x + x") as u32;
     let mut good = Vector::<Edit>::new();
@@ -114,22 +114,22 @@ fn applies_edits_together_or_not_at_all(fx: &mut Fx) {
     let mut cs = Vector::<Change>::new();
     cs.push(Change { path: fx.util.clone(), edits: good, expected_version: 0 });
     cs.push(Change { path: fx.main.clone(), edits: bad, expected_version: -1 });
-    let r = s.apply(cs.as_slice());
+    let r = s.apply(&cs);
     assert(r.is_err(), "overlapping edits reject");
     assert(r.unwrap_err().code == Code::InvalidArgument, "as an invalid argument");
     assert_eq(s.revision(), rev);
-    assert_eq(s.version(fx.util.as_str()), 0);
-    assert_eq(s.text(fx.util.as_str()).unwrap().unwrap().as_str(), UTIL);
+    assert_eq(s.version(&fx.util), 0);
+    assert_eq(s.text(&fx.util).unwrap().unwrap().as_str(), UTIL);
     let mut stale = Vector::<Change>::new();
     stale.push(Change { path: fx.util.clone(), replace: true, text: String::from_str(UTIL), expected_version: 7 });
-    assert(s.apply(stale.as_slice()).unwrap_err().code == Code::InvalidArgument, "a stale version rejects");
+    assert(s.apply(&stale).unwrap_err().code == Code::InvalidArgument, "a stale version rejects");
     let mut ok = Vector::<Change>::new();
     let mut e = Vector::<Edit>::new();
     e.push(Edit { start: at, end: at + 5, text: String::from_str("x * 2") });
     ok.push(Change { path: fx.util.clone(), edits: e, expected_version: 0 });
-    assert_eq(s.apply(ok.as_slice()).unwrap(), rev + 1);
-    assert_eq(s.version(fx.util.as_str()), 1);
-    assert(s.text(fx.util.as_str()).unwrap().unwrap().as_str().find("x * 2") >= 0, "the edit applied");
+    assert_eq(s.apply(&ok).unwrap(), rev + 1);
+    assert_eq(s.version(&fx.util), 1);
+    assert(s.text(&fx.util).unwrap().unwrap().as_str().find("x * 2") >= 0, "the edit applied");
     check(&mut s);
     assert_eq(errors_of(&s), 0);
 }
@@ -141,11 +141,11 @@ fn edits_apply_by_byte_offset() {
     es.push(Edit { start: 4, end: 4, text: String::from_str("!") });
     es.push(Edit { start: 0, end: 1, text: String::from_str("A") });
     es.push(Edit { start: 4, end: 5, text: String::from_str("X") });
-    assert(apply_edits("abcdef", es.as_slice(), &mut out).is_ok(), "applies");
+    assert(apply_edits("abcdef", &es, &mut out).is_ok(), "applies");
     assert_eq(out.as_str(), "Abcd!Xf");
     let mut split = Vector::<Edit>::new();
     split.push(Edit { start: 1, end: 1, text: String::from_str("x") });
-    assert(apply_edits("é", split.as_slice(), &mut out).is_err(), "an offset inside a character rejects");
+    assert(apply_edits("é", &split, &mut out).is_err(), "an offset inside a character rejects");
     assert_eq(out.as_str(), "Abcd!Xf");
 }
 
@@ -171,9 +171,7 @@ struct Failing {
 extend Failing as FileProvider {
     pub fn read(self: &mut Self, path: str, out: &mut String) Result<bool, IoError> {
         if path == self.fail.as_str() {
-            return Result::<bool, IoError>::Err(
-                IoError { kind: IoErrorKind::PermissionDenied, code: 13, op: IoOp::Open },
-            );
+            return Err(IoError { kind: PermissionDenied, code: 13, op: Open });
         }
         return self.inner.read(path, out);
     }
@@ -223,17 +221,13 @@ fn reports_files_that_do_not_load() {
 
 @test
 fn stops_a_cancelled_or_late_check(fx: &mut Fx) {
-    let mut s = Session::open_file(fx.main.as_str(), Config::host("std")).unwrap();
+    let mut s = Session::open_file(&fx.main, Config::host("std")).unwrap();
     let (src, tok) = ptask::CancelSource::new();
     src.cancel(1);
-    let r = s.check_with(
-        &RequestOptions { cancel: Option::<ptask::CancelToken>::Some(tok), deadline_ns: 0, result_limit: 0 },
-    );
+    let r = s.check_with(&RequestOptions { cancel: Some(tok), deadline_ns: 0, result_limit: 0 });
     assert(r.unwrap_err().code == Code::Cancelled, "a cancelled token stops the check");
     assert(!s.checked(), "unchecked");
-    let late = s.check_with(
-        &RequestOptions { cancel: Option::<ptask::CancelToken>::None, deadline_ns: 1, result_limit: 0 },
-    );
+    let late = s.check_with(&RequestOptions { cancel: None, deadline_ns: 1, result_limit: 0 });
     assert(late.unwrap_err().code == Code::Deadline, "a past deadline stops the check");
     check(&mut s);
     assert_eq(errors_of(&s), 0);
@@ -243,7 +237,7 @@ fn stops_a_cancelled_or_late_check(fx: &mut Fx) {
 fn drops_an_analysis_over_its_memory_limit(fx: &mut Fx) {
     let mut c = Config::host("std");
     c.memory_limit = 1024;
-    let mut s = Session::open_file(fx.main.as_str(), c).unwrap();
+    let mut s = Session::open_file(&fx.main, c).unwrap();
     assert(s.check().unwrap_err().code == Code::Limit, "over the limit");
     assert(!s.checked(), "dropped");
 }
@@ -307,7 +301,7 @@ fn resolves_a_vendored_package_against_its_own_roots() {
     proj.mkfile("vendor/lib/src/core/calc.spc", VENDOR_CALC);
     proj.mkfile("main.spc", CLIENT);
     let main = format("{}/main.spc", proj.dir());
-    let mut s = Session::open_file(main.as_str(), Config::host("std")).unwrap();
+    let mut s = Session::open_file(&main, Config::host("std")).unwrap();
     check(&mut s);
     assert_eq(errors_of(&s), 0);
     let mut paths = Vector::<String>::new();
@@ -320,10 +314,10 @@ fn resolves_a_vendored_package_against_its_own_roots() {
     assert_eq(paths.len(), 2);
     assert_eq(paths[0].as_str(), "vendor::lib::src::api::entry");
     assert_eq(paths[1].as_str(), "vendor::lib::src::core::calc");
-    let _ = s.set_text(main.as_str(), CLIENT_HIDDEN);
+    let _ = s.set_text(&main, CLIENT_HIDDEN);
     check(&mut s);
     assert(has_message(&s, "/main.spc", "hidden"), "the client cannot name the package's pub(package) item");
-    let _ = s.set_text(main.as_str(), CLIENT_INTERNALS);
+    let _ = s.set_text(&main, CLIENT_INTERNALS);
     check(&mut s);
     assert(has_message(&s, "/main.spc", "heap_restore_top"), "the vendored key does not reach the client");
     let r = proj.compile("main.spc");
@@ -488,9 +482,7 @@ fn a_cancel_stops_the_check() {
                 }
             }),
         );
-        let r = s.check_with(
-            &RequestOptions { cancel: Option::<ptask::CancelToken>::Some(tok), deadline_ns: 0, result_limit: 0 },
-        );
+        let r = s.check_with(&RequestOptions { cancel: Some(tok), deadline_ns: 0, result_limit: 0 });
         canceller.join();
         if r.is_ok() {
             assert(delay_ms != 0, "a cancel before the check stops it");
@@ -498,7 +490,7 @@ fn a_cancel_stops_the_check() {
         }
         assert(r.unwrap_err().code == Code::Cancelled, "the check stops");
         assert(!s.checked(), "a stopped check leaves the session unchecked");
-        stopped = Option::<Session>::Some(s);
+        stopped = Some(s);
     }
     let mut s = stopped.unwrap();
     assert(s.check().is_ok() && s.checked(), "the next check rebuilds the session");
@@ -506,8 +498,8 @@ fn a_cancel_stops_the_check() {
 
 @test
 fn reports_fixes_texts_and_retained_bytes(fx: &mut Fx) {
-    let mut s = Session::open_file(fx.main.as_str(), Config::host("std")).unwrap();
-    let _ = s.set_text(fx.util.as_str(), "pub fn twice(x: i32) i32 {\n    let unused = 1;\n    return x + x;\n}\n");
+    let mut s = Session::open_file(&fx.main, Config::host("std")).unwrap();
+    let _ = s.set_text(&fx.util, "pub fn twice(x: i32) i32 {\n    let unused = 1;\n    return x + x;\n}\n");
     check(&mut s);
     assert(s.retained_bytes() > 0, "an analysis retains its package");
     let mut fixed = false;
@@ -518,9 +510,9 @@ fn reports_fixes_texts_and_retained_bytes(fx: &mut Fx) {
         }
     }
     assert(fixed, "a warning carries its fix");
-    let m = s.module_of(fx.util.as_str()).unwrap();
+    let m = s.module_of(&fx.util).unwrap();
     assert(m.text().find("let unused") >= 0, "a module's analyzed text is its buffer");
     let late = RequestOptions::within_ms(0);
-    let _ = s.set_text(fx.util.as_str(), UTIL);
+    let _ = s.set_text(&fx.util, UTIL);
     assert(s.check_with(&late).unwrap_err().code == Code::Deadline, "a request within 0 ms passes its deadline");
 }

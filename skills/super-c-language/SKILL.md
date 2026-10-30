@@ -86,15 +86,17 @@ named `main`, is an ordinary function of any signature.
 
 A parenthesized return list (`fn f() (A, B)`) returns the tuple `(A, B)`: a call is an ordinary
 value (`let t = f();`, `assert_eq(pair(), (1, 2))`, `f().0`), and `let (a, b) = f();` destructures
-it. `return (a, b);` and `return a, b;` return the tuple. Named results (`(a: i64, b: i64)`) bind
+it. `return (a, b);` returns the tuple, and so does its sugar `return a, b;`. Named results (`(a: i64, b: i64)`) bind
 `a` and `b` in the body, and a bare `return;` returns their tuple. A register type (`@value`) is no
 tuple element, so it is never one of several results.
 
 A block in value position (an `if` or `else` branch, a `switch` arm block, `{ .. }`, `unsafe { ..
-}`) is a value block: its value is its last expression, written without `;` (`{ x + 1 }`) or, as
-before, with one (`{ x + 1; }`); an assignment there is no value. A value block's last `if` with an
-`else`, `switch` or block is its value too (`{ prep(); if c { 1 } else { 2 } }`). A block whose last
-statement is no expression is `void`.
+}`) is a value block: its value is its last expression, written without `;` (`{ x + 1 }`); an
+assignment there is no value. A value block's last `if` with an `else`, `switch` or block is its
+value too (`{ prep(); if c { 1 } else { 2 } }`). A block whose last statement is no such expression
+(`{ x + 1; }`) is `void`. Where a value is expected (a context type, a `let` initializer, a branch or
+arm the others give a value) such a last `;` is "this block ends in ';', so it has no value: remove
+the ';'".
 
 A function or closure body gives its results with `return`: a last expression without `;`
 (`fn k() i32 { x + 1 }`) is "a function body gives its result with 'return': write 'return x +
@@ -107,7 +109,7 @@ generic arguments), when an argument may hold a borrow of a local of the call, o
 function takes a raw address of a local. `@tail_recurse` on the function makes each such call
 an error that names the reason; a call to the function from one of its closures and a function
 that never calls itself are errors too. A function returning a tuple converts when it returns the
-call's tuple, also rebuilt from its elements in order (`let (a, b) = f(..); return a, b;`).
+call's tuple, also rebuilt from its elements in order (`let (a, b) = f(..); return (a, b);`).
 
 A function or closure with results cannot reach the end of its body ("function 'f' can reach the
 end of its body without returning a value"): every path ends in a `return`, a call of a `!` or
@@ -177,7 +179,8 @@ fn area(s: Shape) i32 {
 ```
 
 `switch` is exhaustive and usable as an expression. A `switch` that starts a statement ends at its
-`}`, as `if` and `loop` do (a `;` after it is still accepted): its arms are statements, so arm values
+`}`, as `if` and `loop` do (a `;` after it is "a 'switch' statement ends at its '}': remove the
+';'"): its arms are statements, so arm values
 of different types do not join, and `switch x { .. }.len()` there does not continue as an
 expression. Arms combine alternatives with `|`.
 
@@ -189,7 +192,9 @@ another enum is "cannot find value". A local or an item that a bare variant in s
 an error that names both ("'Unit' names both a local and the variant 'Shape::Unit': rename one"). A
 pattern's bare variant resolves through the matched type; a qualified one must name a variant of
 the matched type ("pattern 'F::A' does not name a variant of the matched type 'E'"). A variant has
-priority over an associated constant of the same name. A qualified path without a payload that
+priority over an associated constant of the same name. A qualified variant value whose bare name
+resolves to it is a lint warning with a fix ("write 'Some': the variant resolves without its enum
+here"); a unit-variant pattern (`None =>`) binds no local, so `None => None` is the variant. A qualified path without a payload that
 names no variant is a constant pattern: a builtin limit (`i64::MAX`) takes
 the matched type like a literal, and an associated constant (`Lim::HI`) keeps its type, which must be
 the matched type or widen to it; a range bound may name a constant (`0..=LIMIT`). Integer values and
@@ -425,7 +430,7 @@ the next iteration. A range loop evaluates its bounds once: a loop over a workli
 it runs must be `while i < v.len()`, with the increment before any `continue`.
 
 ```superc
-fn twice<T: Copy>(x: T) (T, T) { return x, x; }
+fn twice<T: Copy>(x: T) (T, T) { return (x, x); }
 fn keep<T>(slot: &mut T, v: T) T { return replace(slot, v); }  // move out through a reference
 ```
 
@@ -624,7 +629,8 @@ A call or method argument `&x` passes as the view the prelude view interface of 
 conforming. The view borrows `x` as `x.as_str()` does, a `[]T` parameter infers `T` through the
 conformance, and the coercion ranks with the array-to-slice one in overload selection. A `let`'s
 annotation, an operand and a `return` keep the explicit method, and an argument `x` without `&`
-stays an error whose note names the borrow (passing `x` would move it).
+stays an error whose note names the borrow (passing `x` would move it). An argument `x.as_str()`
+(`as_slice`, `as_mut_slice`) on a place is a lint warning with a fix to `&x` (`&mut x`).
 `[T; N]` is a distinct type and a value: assignment, an argument, a struct field, a variant payload, a tuple
 element, a closure capture and a return copy it. An array literal has its own length; against
 an expected `[T; n]` it must have exactly `n` elements (a designated literal may have fewer and

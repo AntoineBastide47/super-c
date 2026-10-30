@@ -276,16 +276,16 @@ extend Gen {
         // `main` takes argc and argv (`cemit_main_wrapper`), which a wasm C compiler names
         // `__main_argc_argv`: the name the entry point of `std::rt::libc` calls.
         let nm = if y.def == NONE && nm0.starts_with("__sc_x_") {
-            nm0.slice(7, nm0.len());
+            nm0.slice(7, nm0.len())
         } else if y.kind == SK_FUNC && nm0 == "main" {
-            "__main_argc_argv";
+            "__main_argc_argv"
         } else {
-            nm0;
+            nm0
         };
         let kind = if y.kind == SK_FUNC {
-            wo::K_FUNC;
+            wo::K_FUNC
         } else {
-            wo::K_DATA;
+            wo::K_DATA
         };
         return self.obj().sym(nm, kind);
     }
@@ -302,9 +302,9 @@ extend Gen {
         }
         self.c.op(
             if set {
-                w::GLOBAL_SET;
+                w::GLOBAL_SET
             } else {
-                w::GLOBAL_GET;
+                w::GLOBAL_GET
             },
         );
         self.reloc(w::R_GLOBAL_INDEX_LEB, self.sp_sym, 0);
@@ -340,7 +340,7 @@ extend Gen {
         let name = format("__sc_msg.{}", self.cstr_n);
         self.cstr_n += 1;
         let o = self.obj();
-        let k = o.sym(name.as_str(), wo::K_DATA);
+        let k = o.sym(&name, wo::K_DATA);
         let mut g = wo::WSeg {
             name: format(".rodata.{}", name.as_str()),
             align_log2: 0,
@@ -905,9 +905,9 @@ extend Gen {
         let e0 = b.blocks[0].param_start;
         let np = b.pool[b.sig as usize];
         let mut wp: u32 = if self.me.sret() {
-            1u32;
+            1u32
         } else {
-            0u32;
+            0u32
         };
         for k in 0..np {
             let pa = self.me.params[k as usize];
@@ -1024,9 +1024,9 @@ extend Gen {
         wa::encode(&self.me, &mut self.enc);
         let ty = o.type_index(&self.enc);
         let mut fl = if ps.linkage == SL_GLOBAL && !self.local {
-            wo::F_HIDDEN;
+            wo::F_HIDDEN
         } else {
-            wo::F_LOCAL;
+            wo::F_LOCAL
         };
         if ps.used {
             fl |= wo::F_NO_STRIP;
@@ -1043,9 +1043,9 @@ extend Gen {
         for q in 0..self.rows.len() {
             let l = self.b().lines[(self.rows[q] & 0xFFFFFFFF) as usize];
             let off = if q == 0 {
-                0u32;
+                0u32
             } else {
-                (self.rows[q] >> 32) as u32;
+                (self.rows[q] >> 32) as u32
             };
             f.lines.push(ob::OLine { off: off, file: l.file, line: l.line, col: l.col });
         }
@@ -1068,9 +1068,9 @@ extend Gen {
         }
         let x = self.vx(v);
         let l = if x == NONE {
-            NONE;
+            NONE
         } else {
-            self.local_of[x as usize];
+            self.local_of[x as usize]
         };
         if l == NONE {
             let _ = self.refuse("internal: a value without a local");
@@ -1184,9 +1184,9 @@ extend Gen {
     fn mhome(self: &mut Self, v: Value) u32 {
         let x = self.vx(v);
         let h = if x == NONE {
-            NONE;
+            NONE
         } else {
-            self.home[x as usize];
+            self.home[x as usize]
         };
         if h == NONE {
             let _ = self.refuse("internal: a memory value without a home");
@@ -1218,24 +1218,24 @@ extend Gen {
     // A load whose alignment claims at most 2^`al` bytes.
     fn load_al(self: &mut Self, t: u8, off: u32, al: u32) {
         let (op, nat) = if t == T_I8 {
-            (w::I32_LOAD8_U, 0u32);
+            (w::I32_LOAD8_U, 0u32)
         } else if t == T_I16 {
-            (w::I32_LOAD16_U, 1u32);
+            (w::I32_LOAD16_U, 1u32)
         } else if t == T_I64 {
-            (w::I64_LOAD, 3u32);
+            (w::I64_LOAD, 3u32)
         } else if t == T_F32 {
-            (w::F32_LOAD, 2u32);
+            (w::F32_LOAD, 2u32)
         } else if t == T_F64 {
-            (w::F64_LOAD, 3u32);
+            (w::F64_LOAD, 3u32)
         } else {
-            (w::I32_LOAD, 2u32);
+            (w::I32_LOAD, 2u32)
         };
         self.c.op(op);
         self.c.memarg(
             if al < nat {
-                al;
+                al
             } else {
-                nat;
+                nat
             },
             off,
         );
@@ -1248,24 +1248,24 @@ extend Gen {
 
     fn store_al(self: &mut Self, t: u8, off: u32, al: u32) {
         let (op, nat) = if t == T_I8 {
-            (w::I32_STORE8, 0u32);
+            (w::I32_STORE8, 0u32)
         } else if t == T_I16 {
-            (w::I32_STORE16, 1u32);
+            (w::I32_STORE16, 1u32)
         } else if t == T_I64 {
-            (w::I64_STORE, 3u32);
+            (w::I64_STORE, 3u32)
         } else if t == T_F32 {
-            (w::F32_STORE, 2u32);
+            (w::F32_STORE, 2u32)
         } else if t == T_F64 {
-            (w::F64_STORE, 3u32);
+            (w::F64_STORE, 3u32)
         } else {
-            (w::I32_STORE, 2u32);
+            (w::I32_STORE, 2u32)
         };
         self.c.op(op);
         self.c.memarg(
             if al < nat {
-                al;
+                al
             } else {
-                nat;
+                nat
             },
             off,
         );
@@ -1401,9 +1401,9 @@ extend Gen {
                 self.get(t.a);
                 self.c.op(
                     if d {
-                        w::F64_NEG;
+                        w::F64_NEG
                     } else {
-                        w::F32_NEG;
+                        w::F32_NEG
                     },
                 );
             } else if op == O_FSQRT {
@@ -1413,9 +1413,9 @@ extend Gen {
                 self.get(t.a);
                 self.get(t.b);
                 let base = if d {
-                    w::F64_ADD;
+                    w::F64_ADD
                 } else {
-                    w::F32_ADD;
+                    w::F32_ADD
                 };
                 self.c.op(base + (op - O_FADD));
             }
@@ -1477,11 +1477,11 @@ extend Gen {
                 self.c.op(w::I32_WRAP_I64);
             }
             let name = if op == O_MEMSET {
-                "memset";
+                "memset"
             } else if t.aux == MEM_OVERLAP {
-                "memmove";
+                "memmove"
             } else {
-                "memcpy";
+                "memcpy"
             };
             self.call_rt(name, [w::I32, w::I32, w::I32], [w::I32]);
             self.c.op(w::DROP);
@@ -1523,9 +1523,9 @@ extend Gen {
             self.get(t.a);
             self.c.op(
                 if wide {
-                    w::I64_SUB;
+                    w::I64_SUB
                 } else {
-                    w::I32_SUB;
+                    w::I32_SUB
                 },
             );
         } else if op == O_NOT {
@@ -1564,9 +1564,9 @@ extend Gen {
             let o32 = ops[k as usize];
             self.c.op(
                 if wide {
-                    o32 + (w::I64_ADD - w::I32_ADD);
+                    o32 + (w::I64_ADD - w::I32_ADD)
                 } else {
-                    o32;
+                    o32
                 },
             );
         }
@@ -1587,9 +1587,9 @@ extend Gen {
         if t.ty != T_I64 {
             let bits = type_bits(t.ty, 4);
             let ext = if sgn {
-                w::I64_EXTEND_I32_S;
+                w::I64_EXTEND_I32_S
             } else {
-                w::I64_EXTEND_I32_U;
+                w::I64_EXTEND_I32_U
             };
             self.get_ext(t.a, sgn);
             self.c.op(ext);
@@ -1599,9 +1599,9 @@ extend Gen {
             self.c.i64_const(bits);
             self.c.op(
                 if sgn {
-                    w::I64_SHR_S;
+                    w::I64_SHR_S
                 } else {
-                    w::I64_SHR_U;
+                    w::I64_SHR_U
                 },
             );
             self.c.op(w::I32_WRAP_I64);
@@ -1652,9 +1652,9 @@ extend Gen {
         if sgn {
             for k in 0..2u32 {
                 let (x, y) = if k == 0 {
-                    (t.a, t.b);
+                    (t.a, t.b)
                 } else {
-                    (t.b, t.a);
+                    (t.b, t.a)
                 };
                 self.get(x);
                 self.c.i64_const(63);
@@ -1719,9 +1719,9 @@ extend Gen {
             None => NONE,
         };
         let fl = if fx == NONE {
-            NONE;
+            NONE
         } else {
-            self.local_of[fx as usize];
+            self.local_of[fx as usize]
         };
         if ty == T_I64 && op == O_MULO {
             return self.mulo64(i, t, signed, fl);
@@ -1731,9 +1731,9 @@ extend Gen {
         // An i32 product is exact in 64 bits.
         let big = op == O_MULO && bits == 32;
         let wt = if wide || big {
-            w::I64;
+            w::I64
         } else {
-            w::I32;
+            w::I32
         };
         let ra = self.tmp(wt);
         let rb = self.tmp(wt);
@@ -1742,26 +1742,26 @@ extend Gen {
             // In 32 bits (a narrow type) or 64 (an i32 product): exact, then compared with its truncation.
             for q in 0..2 {
                 let v = if q == 0 {
-                    t.a;
+                    t.a
                 } else {
-                    t.b;
+                    t.b
                 };
                 self.get_ext(v, signed);
                 if big {
                     self.c.op(
                         if signed {
-                            w::I64_EXTEND_I32_S;
+                            w::I64_EXTEND_I32_S
                         } else {
-                            w::I64_EXTEND_I32_U;
+                            w::I64_EXTEND_I32_U
                         },
                     );
                 }
                 self.c.local(
                     w::LOCAL_SET,
                     if q == 0 {
-                        ra;
+                        ra
                     } else {
-                        rb;
+                        rb
                     },
                 );
             }
@@ -1770,17 +1770,17 @@ extend Gen {
             self.c.local(w::LOCAL_GET, ra);
             self.c.local(w::LOCAL_GET, rb);
             let o = if op == O_ADDO {
-                w::I32_ADD;
+                w::I32_ADD
             } else if op == O_SUBO {
-                w::I32_SUB;
+                w::I32_SUB
             } else {
-                w::I32_MUL;
+                w::I32_MUL
             };
             self.c.op(
                 if big_r {
-                    o + (w::I64_ADD - w::I32_ADD);
+                    o + (w::I64_ADD - w::I32_ADD)
                 } else {
-                    o;
+                    o
                 },
             );
             self.c.local(w::LOCAL_SET, x);
@@ -1792,9 +1792,9 @@ extend Gen {
                     self.c.op(w::I32_WRAP_I64);
                     self.c.op(
                         if signed {
-                            w::I64_EXTEND_I32_S;
+                            w::I64_EXTEND_I32_S
                         } else {
-                            w::I64_EXTEND_I32_U;
+                            w::I64_EXTEND_I32_U
                         },
                     );
                     self.c.op(w::I64_NE);
@@ -1826,14 +1826,14 @@ extend Gen {
         self.c.local(w::LOCAL_TEE, rb);
         let add = op == O_ADDO;
         let o = if add {
-            w::I32_ADD;
+            w::I32_ADD
         } else {
-            w::I32_SUB;
+            w::I32_SUB
         };
         let d = if wide {
-            w::I64_ADD - w::I32_ADD;
+            w::I64_ADD - w::I32_ADD
         } else {
-            0u8;
+            0u8
         };
         self.c.op(o + d);
         self.c.local(w::LOCAL_SET, r);
@@ -1844,18 +1844,18 @@ extend Gen {
                 self.c.local(
                     w::LOCAL_GET,
                     if add {
-                        r;
+                        r
                     } else {
-                        rb;
+                        rb
                     },
                 );
                 self.c.op(w::I32_XOR + d);
                 self.c.local(
                     w::LOCAL_GET,
                     if add {
-                        rb;
+                        rb
                     } else {
-                        ra;
+                        ra
                     },
                 );
                 self.c.local(w::LOCAL_GET, r);
@@ -1873,9 +1873,9 @@ extend Gen {
                 self.c.local(w::LOCAL_GET, ra);
                 self.c.op(
                     if wide {
-                        w::I64_LT_U;
+                        w::I64_LT_U
                     } else {
-                        w::I32_LT_U;
+                        w::I32_LT_U
                     },
                 );
             } else {
@@ -1883,9 +1883,9 @@ extend Gen {
                 self.c.local(w::LOCAL_GET, rb);
                 self.c.op(
                     if wide {
-                        w::I64_LT_U;
+                        w::I64_LT_U
                     } else {
-                        w::I32_LT_U;
+                        w::I32_LT_U
                     },
                 );
             }
@@ -2028,9 +2028,9 @@ extend Gen {
         let o = ops[c as usize];
         self.c.op(
             if ty == T_I64 {
-                o + (w::I64_EQ - w::I32_EQ);
+                o + (w::I64_EQ - w::I32_EQ)
             } else {
-                o;
+                o
             },
         );
         self.put(i);
@@ -2039,9 +2039,9 @@ extend Gen {
 
     fn fcmp(self: &mut Self, i: u32, t: Inst) bool {
         let d = if self.vt(t.a) == T_F64 {
-            w::F64_EQ - w::F32_EQ;
+            w::F64_EQ - w::F32_EQ
         } else {
-            0u8;
+            0u8
         };
         let c = t.aux;
         if c == C_UNO {
@@ -2067,17 +2067,17 @@ extend Gen {
             self.get(t.a);
             self.get(t.b);
             let o = if c == C_OEQ {
-                w::F32_EQ;
+                w::F32_EQ
             } else if c == C_UNE {
-                w::F32_NE;
+                w::F32_NE
             } else if c == C_OLT {
-                w::F32_LT;
+                w::F32_LT
             } else if c == C_OLE {
-                w::F32_LE;
+                w::F32_LE
             } else if c == C_OGT {
-                w::F32_GT;
+                w::F32_GT
             } else {
-                w::F32_GE;
+                w::F32_GE
             };
             self.c.op(o + d);
         }
@@ -2106,9 +2106,9 @@ extend Gen {
             if !fw && tw {
                 self.c.op(
                     if op == O_SEXT {
-                        w::I64_EXTEND_I32_S;
+                        w::I64_EXTEND_I32_S
                     } else {
-                        w::I64_EXTEND_I32_U;
+                        w::I64_EXTEND_I32_U
                     },
                 );
             } else if fw && !tw {
@@ -2124,9 +2124,9 @@ extend Gen {
             self.get(t.a);
             self.c.op(
                 if op == O_FPEXT {
-                    w::F64_PROMOTE_F32;
+                    w::F64_PROMOTE_F32
                 } else {
-                    w::F32_DEMOTE_F64;
+                    w::F32_DEMOTE_F64
                 },
             );
             self.put(i);
@@ -2136,9 +2136,9 @@ extend Gen {
             let s = op == O_SITOFP;
             self.get_ext(t.a, s);
             let base = if to == T_F32 {
-                w::F32_CONVERT_I32_S;
+                w::F32_CONVERT_I32_S
             } else {
-                w::F64_CONVERT_I32_S;
+                w::F64_CONVERT_I32_S
             };
             // _i32_s, _i32_u, _i64_s, _i64_u in order.
             let k = pick8(from == T_I64, 2, 0) + pick8(s, 0, 1);
@@ -2167,9 +2167,9 @@ extend Gen {
         let wide = to == T_I64;
         // The truncation: to i32 (signed for a narrow type, which fits either way) or i64.
         let tr = if wide {
-            pick8(fd, w::I64_TRUNC_F64_S, w::I64_TRUNC_F32_S) + pick8(signed, 0, 1);
+            pick8(fd, w::I64_TRUNC_F64_S, w::I64_TRUNC_F32_S) + pick8(signed, 0, 1)
         } else {
-            pick8(fd, w::I32_TRUNC_F64_S, w::I32_TRUNC_F32_S) + pick8(signed || tb < 32, 0, 1);
+            pick8(fd, w::I32_TRUNC_F64_S, w::I32_TRUNC_F32_S) + pick8(signed || tb < 32, 0, 1)
         };
         if unchecked {
             self.c.local(w::LOCAL_GET, x);
@@ -2181,24 +2181,24 @@ extend Gen {
         }
         let rt = pick8(wide, w::I64, w::I32);
         let lo: f64 = if signed {
-            -fpow2(tb - 1);
+            -fpow2(tb - 1)
         } else {
-            0.0;
+            0.0
         };
         let hi: f64 = if signed {
-            fpow2(tb - 1);
+            fpow2(tb - 1)
         } else {
-            fpow2(tb);
+            fpow2(tb)
         };
         let mn: u64 = if signed {
-            (1u64 << (tb - 1) as u64).wrapping_neg();
+            (1u64 << (tb - 1) as u64).wrapping_neg()
         } else {
-            0;
+            0
         };
         let mx: u64 = if signed {
-            (1u64 << (tb - 1) as u64) - 1;
+            (1u64 << (tb - 1) as u64) - 1
         } else {
-            trunc_to(~0u64, tb);
+            trunc_to(~0u64, tb)
         };
         // NaN: 0.
         self.c.local(w::LOCAL_GET, x);
@@ -2310,9 +2310,9 @@ extend Gen {
                 }
                 self.c.op(
                     if op == O_SEXT {
-                        w::I64_EXTEND_I32_S;
+                        w::I64_EXTEND_I32_S
                     } else {
-                        w::I64_EXTEND_I32_U;
+                        w::I64_EXTEND_I32_U
                     },
                 );
             }
@@ -2344,33 +2344,33 @@ extend Gen {
         let fd = from == T_F64;
         if op == O_SITOFP || op == O_UITOFP {
             let name = if op == O_SITOFP && d {
-                "__floattidf";
+                "__floattidf"
             } else if op == O_SITOFP {
-                "__floattisf";
+                "__floattisf"
             } else if d {
-                "__floatuntidf";
+                "__floatuntidf"
             } else {
-                "__floatuntisf";
+                "__floatuntisf"
             };
             self.mword(t.a, 0);
             self.mword(t.a, 1);
             let rt = if d {
-                w::F64;
+                w::F64
             } else {
-                w::F32;
+                w::F32
             };
             self.call_rt(name, [w::I64, w::I64], [rt]);
             self.put(i);
             return true;
         }
         let name = if op == O_FPTOSI && fd {
-            "__fixdfti";
+            "__fixdfti"
         } else if op == O_FPTOSI {
-            "__fixsfti";
+            "__fixsfti"
         } else if fd {
-            "__fixunsdfti";
+            "__fixunsdfti"
         } else {
-            "__fixunssfti";
+            "__fixunssfti"
         };
         let h = self.home[i as usize];
         self.c.local(w::LOCAL_GET, self.fp);
@@ -2380,9 +2380,9 @@ extend Gen {
         }
         self.get(t.a);
         let ft = if fd {
-            w::F64;
+            w::F64
         } else {
-            w::F32;
+            w::F32
         };
         self.call_rt(name, [w::I32, ft], []);
         return true;
@@ -2397,15 +2397,15 @@ extend Gen {
         }
         if op == O_MUL || op >= O_SDIV && op <= O_UREM {
             let name = if op == O_MUL {
-                "__multi3";
+                "__multi3"
             } else if op == O_SDIV {
-                "__divti3";
+                "__divti3"
             } else if op == O_UDIV {
-                "__udivti3";
+                "__udivti3"
             } else if op == O_SREM {
-                "__modti3";
+                "__modti3"
             } else {
-                "__umodti3";
+                "__umodti3"
             };
             self.c.local(w::LOCAL_GET, self.fp);
             self.c.i32_const(h as i32);
@@ -2441,9 +2441,9 @@ extend Gen {
             self.c.local(w::LOCAL_GET, bl);
             self.c.op(
                 if add {
-                    w::I64_ADD;
+                    w::I64_ADD
                 } else {
-                    w::I64_SUB;
+                    w::I64_SUB
                 },
             );
             self.c.local(w::LOCAL_SET, rl);
@@ -2451,9 +2451,9 @@ extend Gen {
             self.c.local(w::LOCAL_GET, bh);
             self.c.op(
                 if add {
-                    w::I64_ADD;
+                    w::I64_ADD
                 } else {
-                    w::I64_SUB;
+                    w::I64_SUB
                 },
             );
             // The carry (rl < al) or the borrow (al < bl).
@@ -2468,19 +2468,19 @@ extend Gen {
             self.c.op(w::I64_EXTEND_I32_U);
             self.c.op(
                 if add {
-                    w::I64_ADD;
+                    w::I64_ADD
                 } else {
-                    w::I64_SUB;
+                    w::I64_SUB
                 },
             );
             self.c.local(w::LOCAL_SET, rh);
         } else if op == O_AND || op == O_OR || op == O_XOR {
             let o = if op == O_AND {
-                w::I64_AND;
+                w::I64_AND
             } else if op == O_OR {
-                w::I64_OR;
+                w::I64_OR
             } else {
-                w::I64_XOR;
+                w::I64_XOR
             };
             self.c.local(w::LOCAL_GET, al);
             self.c.local(w::LOCAL_GET, bl);
@@ -2530,9 +2530,9 @@ extend Gen {
     fn shift128(self: &mut Self, op: u8, al: u32, ah: u32, n: u32, rl: u32, rh: u32) {
         let left = op == O_SHL;
         let sh_hi = if op == O_ASHR {
-            w::I64_SHR_S;
+            w::I64_SHR_S
         } else {
-            w::I64_SHR_U;
+            w::I64_SHR_U
         };
         if left {
             self.c.local(w::LOCAL_GET, al);
@@ -2602,9 +2602,9 @@ extend Gen {
     fn load(self: &mut Self, i: u32, t: Inst) bool {
         let off = t.c as i32;
         let al = if t.op == O_LOAD {
-            (t.aux & 15) as u32;
+            (t.aux & 15) as u32
         } else {
-            15u32;
+            15u32
         };
         if in_mem(t.ty) {
             if self.home[i as usize] == NONE {
@@ -2642,9 +2642,9 @@ extend Gen {
         let off = t.c as i32;
         let vt = self.vt(t.b);
         let al = if t.op == O_STORE {
-            (t.aux & 15) as u32;
+            (t.aux & 15) as u32
         } else {
-            15u32;
+            15u32
         };
         if in_mem(vt) {
             let a = self.tmp(w::I32);
@@ -2669,20 +2669,20 @@ extend Gen {
     // O_ARMW and O_ACAS: plain memory operations (no threads).
     fn atomic(self: &mut Self, i: u32, t: Inst) bool {
         let ty = if t.op == O_ACAS {
-            self.vt(t.b);
+            self.vt(t.b)
         } else {
-            t.ty;
+            t.ty
         };
         let wide = ty == T_I64;
         let wt = if wide {
-            w::I64;
+            w::I64
         } else {
-            w::I32;
+            w::I32
         };
         let off = if t.op == O_ARMW {
-            t.c as i32;
+            t.c as i32
         } else {
-            0;
+            0
         };
         let a = self.tmp(w::I32);
         self.addr_into(t.a, off, a);
@@ -2696,9 +2696,9 @@ extend Gen {
             self.get(t.b);
             self.c.op(
                 if wide {
-                    w::I64_EQ;
+                    w::I64_EQ
                 } else {
-                    w::I32_EQ;
+                    w::I32_EQ
                 },
             );
             self.c.local(w::LOCAL_TEE, hit);
@@ -2720,21 +2720,21 @@ extend Gen {
             self.c.local(w::LOCAL_GET, old);
             self.get(t.b);
             let o = if r == RMW_ADD {
-                w::I32_ADD;
+                w::I32_ADD
             } else if r == RMW_SUB {
-                w::I32_SUB;
+                w::I32_SUB
             } else if r == RMW_AND {
-                w::I32_AND;
+                w::I32_AND
             } else if r == RMW_OR {
-                w::I32_OR;
+                w::I32_OR
             } else {
-                w::I32_XOR;
+                w::I32_XOR
             };
             self.c.op(
                 if wide {
-                    o + (w::I64_ADD - w::I32_ADD);
+                    o + (w::I64_ADD - w::I32_ADD)
                 } else {
-                    o;
+                    o
                 },
             );
         }
@@ -2777,9 +2777,9 @@ extend Gen {
     fn va_arg(self: &mut Self, i: u32, t: Inst) bool {
         let ty = t.ty;
         let (sz, al) = if ty == T_I128 {
-            (16u32, 16u32);
+            (16u32, 16u32)
         } else {
-            (ast_max(type_bytes(ty, 4), 4), ast_max(type_align(ty, 4), 4));
+            (ast_max(type_bytes(ty, 4), 4), ast_max(type_align(ty, 4), 4))
         };
         let la = self.tmp(w::I32);
         let pa = self.tmp(w::I32);
@@ -2839,9 +2839,9 @@ extend Gen {
     // The `br` depth of the label a branch to block `t` takes (`back`: the loop it heads).
     fn depth(self: &mut Self, t: u32, back: bool) u32 {
         let kind = if back {
-            LB_LOOP;
+            LB_LOOP
         } else {
-            LB_BLOCK;
+            LB_BLOCK
         };
         let n = self.labels.len();
         for q in 0..n {
@@ -3113,9 +3113,9 @@ extend Gen {
             self.int_const(wide, cv);
             self.c.op(
                 if wide {
-                    w::I64_EQ;
+                    w::I64_EQ
                 } else {
-                    w::I32_EQ;
+                    w::I32_EQ
                 },
             );
             if self.brable(x, tg) && b.edge_nargs(e) == 0 {
@@ -3139,7 +3139,7 @@ extend Gen {
         let b = self.b();
         let n = t.aux as u32;
         if n < 4 {
-            return 0, 0;
+            return (0, 0);
         }
         let bits = type_bits(self.vt(t.a), 4);
         let mut lo = 0xFFFFFFFFFFFFFFFFu64;
@@ -3154,9 +3154,9 @@ extend Gen {
             }
         }
         if hi - lo >= 4 * n as u64 {
-            return 0, 0;
+            return (0, 0);
         }
-        return lo, (hi - lo) as u32 + 1;
+        return (lo, (hi - lo) as u32 + 1);
     }
 
     // Switch instruction `i` of block `x` through one `br_table` indexed by its value less `lo` (the
@@ -3211,15 +3211,15 @@ extend Gen {
         self.c.uleb(span);
         for q in 0..span + 1 {
             let c = if q < span {
-                self.sw_tab[q as usize];
+                self.sw_tab[q as usize]
             } else {
-                n;
+                n
             };
             let d = if self.sw_blk[c as usize] != NONE {
-                self.sw_blk[c as usize];
+                self.sw_blk[c as usize]
             } else {
                 let tg = b.edge_target(b.switch_edge(t, c));
-                self.depth(tg, self.sh.back(x, tg));
+                self.depth(tg, self.sh.back(x, tg))
             };
             self.c.uleb(d);
         }
@@ -3281,9 +3281,9 @@ extend Gen {
         return intrin::find(
             "wasm32",
             if nm.starts_with("__sc_x_") {
-                nm.slice(7, nm.len());
+                nm.slice(7, nm.len())
             } else {
-                nm;
+                nm
             },
         );
     }
@@ -3326,7 +3326,7 @@ extend Gen {
                 None => {
                     break;
                 },
-            };
+            }
         }
         // The arguments on the stack: those the instructions read.
         let mut args = Vector::<u32>::new();
@@ -3358,9 +3358,9 @@ extend Gen {
                 let pa = self.cs.params[k as usize];
                 tmps[k as usize] = self.tmp(
                     if pa.kind == wa::P_V128 {
-                        w::V128;
+                        w::V128
                     } else {
-                        wa::wtype(pa.ty);
+                        wa::wtype(pa.ty)
                     },
                 );
             }
@@ -3385,25 +3385,25 @@ extend Gen {
             }
         }
         self.obj().simd = true;
-        return self.asm_text(body.as_str());
+        return self.asm_text(&body);
     }
 
     fn call(self: &mut Self, i: u32, t: Inst) bool {
         let b = self.b();
         let sig = t.b;
         let tpl = if t.op == O_CALL {
-            self.intrinsic(t.a);
+            self.intrinsic(t.a)
         } else {
-            "";
+            ""
         };
         // An intrinsic takes its vectors as v128 values.
         wa::classify(
             b,
             sig,
             if tpl.len() != 0 {
-                16u32;
+                16u32
             } else {
-                self.vregs;
+                self.vregs
             },
             &mut self.cs,
         );
@@ -3457,9 +3457,9 @@ extend Gen {
                         if pa.sext {
                             self.sx(pa.ty);
                         }
-                        T_I32;
+                        T_I32
                     } else {
-                        pa.ty;
+                        pa.ty
                     };
                     self.store_op(st, o);
                 } else if pa.kind == wa::P_DIRECT {
@@ -3627,13 +3627,13 @@ extend Gen {
         let nm = p.spell(ps.name);
         // Thread-locals are plain data: no threads.
         let name = if ps.sect != NONE {
-            String::from_str(p.spell(ps.sect));
+            String::from_str(p.spell(ps.sect))
         } else if zero && !d.readonly {
-            format(".bss.{}", nm);
+            format(".bss.{}", nm)
         } else if d.readonly && d.nrelocs == 0 {
-            format(".rodata.{}", nm);
+            format(".rodata.{}", nm)
         } else {
-            format(".data.{}", nm);
+            format(".data.{}", nm)
         };
         let mut g = wo::WSeg {
             name: name,
@@ -3671,9 +3671,9 @@ extend Gen {
             return self.refuse("data defined twice in one object");
         }
         let mut fl = if ps.linkage == SL_GLOBAL && !local {
-            wo::F_HIDDEN;
+            wo::F_HIDDEN
         } else {
-            wo::F_LOCAL;
+            wo::F_LOCAL
         };
         if ps.used {
             fl |= wo::F_NO_STRIP;
@@ -3717,15 +3717,15 @@ extend Gen {
         let eb = type_bytes(lt, 4);
         let al = log2u(eb);
         let op = if is_float(lt) && !raw {
-            pick8(lt == T_F64, w::F64_LOAD, w::F32_LOAD);
+            pick8(lt == T_F64, w::F64_LOAD, w::F32_LOAD)
         } else if eb == 1 {
-            pick8(sg, w::I64_LOAD8_S, w::I64_LOAD8_U);
+            pick8(sg, w::I64_LOAD8_S, w::I64_LOAD8_U)
         } else if eb == 2 {
-            pick8(sg, w::I64_LOAD16_S, w::I64_LOAD16_U);
+            pick8(sg, w::I64_LOAD16_S, w::I64_LOAD16_U)
         } else if eb == 4 {
-            pick8(sg, w::I64_LOAD32_S, w::I64_LOAD32_U);
+            pick8(sg, w::I64_LOAD32_S, w::I64_LOAD32_U)
         } else {
-            w::I64_LOAD;
+            w::I64_LOAD
         };
         self.c.op(op);
         self.c.memarg(al, off);
@@ -3748,15 +3748,15 @@ extend Gen {
     fn lane_store(self: &mut Self, lt: u8, raw: bool, off: u32) {
         let eb = type_bytes(lt, 4);
         let op = if is_float(lt) && !raw {
-            pick8(lt == T_F64, w::F64_STORE, w::F32_STORE);
+            pick8(lt == T_F64, w::F64_STORE, w::F32_STORE)
         } else if eb == 1 {
-            w::I64_STORE8;
+            w::I64_STORE8
         } else if eb == 2 {
-            w::I64_STORE16;
+            w::I64_STORE16
         } else if eb == 4 {
-            w::I64_STORE32;
+            w::I64_STORE32
         } else {
-            w::I64_STORE;
+            w::I64_STORE
         };
         self.c.op(op);
         self.c.memarg(log2u(eb), off);
@@ -3836,10 +3836,10 @@ extend Gen {
             let d = self.vdef(i);
             let l = if is_float(lt) {
                 self.get(t.a);
-                self.tmp(pick8(lt == T_F64, w::F64, w::F32));
+                self.tmp(pick8(lt == T_F64, w::F64, w::F32))
             } else {
                 self.get64(t.a);
-                self.tmp(w::I64);
+                self.tmp(w::I64)
             };
             self.c.local(w::LOCAL_SET, l);
             for k in 0..lanes(t.ty) {
@@ -3867,10 +3867,10 @@ extend Gen {
             }
             let l = if is_float(lt) {
                 self.get(t.b);
-                self.tmp(pick8(lt == T_F64, w::F64, w::F32));
+                self.tmp(pick8(lt == T_F64, w::F64, w::F32))
             } else {
                 self.get64(t.b);
-                x;
+                x
             };
             self.c.local(w::LOCAL_SET, l);
             self.st_lane(l, d, t.aux, lt, false);
@@ -3881,9 +3881,9 @@ extend Gen {
             let lt = lane_type(t.ty);
             let n = lanes(t.ty);
             let h = if op == O_VZIPHI {
-                n / 2;
+                n / 2
             } else {
-                0;
+                0
             };
             let d = self.vdef(i);
             let x = self.tmp(w::I64);
@@ -3965,17 +3965,17 @@ extend Gen {
         ];
         let fd = pick8(lt == T_F64, w::F64_EQ - w::F32_EQ, 0);
         let fo = if c == C_OEQ {
-            w::F32_EQ;
+            w::F32_EQ
         } else if c == C_UNE {
-            w::F32_NE;
+            w::F32_NE
         } else if c == C_OLT {
-            w::F32_LT;
+            w::F32_LT
         } else if c == C_OLE {
-            w::F32_LE;
+            w::F32_LE
         } else if c == C_OGT {
-            w::F32_GT;
+            w::F32_GT
         } else {
-            w::F32_GE;
+            w::F32_GE
         };
         let sg = c >= C_SLT && c <= C_SGE;
         for k in 0..lanes(vt) {
@@ -4064,14 +4064,14 @@ extend Gen {
         let d = self.vdef(i);
         let x = self.tmp(w::I64);
         let fa = if is_float(fl) {
-            self.tmp(pick8(fl == T_F64, w::F64, w::F32));
+            self.tmp(pick8(fl == T_F64, w::F64, w::F32))
         } else {
-            NONE;
+            NONE
         };
         let fr = if is_float(tl) {
-            self.tmp(pick8(tl == T_F64, w::F64, w::F32));
+            self.tmp(pick8(tl == T_F64, w::F64, w::F32))
         } else {
-            NONE;
+            NONE
         };
         for k in 0..n {
             if is_float(fl) && is_float(tl) {
@@ -4110,9 +4110,9 @@ extend Gen {
         let mut ops: [Value; 4] = [VNONE, VNONE, VNONE, VNONE];
         let mut tys: [u8; 4] = [T_NONE, T_NONE, T_NONE, T_NONE];
         let na = if t.b < 4 {
-            t.b;
+            t.b
         } else {
-            4u32;
+            4u32
         };
         for k in 0..na {
             let v = self.b().pool[(t.a + k) as usize];
@@ -4142,9 +4142,9 @@ extend Gen {
             self.c.op(w::I64_AND);
             self.c.local(w::LOCAL_SET, cnt);
             let sop = if code == core::OP_SHL_SCALAR {
-                w::I64_SHL;
+                w::I64_SHL
             } else {
-                pick8(sg, w::I64_SHR_S, w::I64_SHR_U);
+                pick8(sg, w::I64_SHR_S, w::I64_SHR_U)
             };
             for k in 0..lanes(tys[0]) {
                 self.ld_lane(ops[0], k, lt, sg, false);
@@ -4203,11 +4203,11 @@ extend Gen {
     fn vlanes(self: &mut Self, i: u32, t: Inst, c: u8, sg: bool, dsg: bool, ops: &[Value; 4], tys: &[u8; 4]) {
         let rule = core::simd_op(c).rule;
         let vt = if rule == core::SR_CHOOSE {
-            tys[1];
+            tys[1]
         } else if rule == core::SR_ANY {
-            t.ty;
+            t.ty
         } else {
-            tys[0];
+            tys[0]
         };
         let lt = lane_type(vt);
         let eb = type_bytes(lt, 4);
@@ -4239,9 +4239,9 @@ extend Gen {
             return;
         }
         let rlt = if mask || !is_vec(t.ty) {
-            lt;
+            lt
         } else {
-            lane_type(t.ty);
+            lane_type(t.ty)
         };
         let mut mk = NONE;
         let mut d: u32 = 0;
@@ -4267,9 +4267,9 @@ extend Gen {
             }
         }
         let cm = if rule == core::SR_CHOOSE {
-            self.tmp(w::I64);
+            self.tmp(w::I64)
         } else {
-            NONE;
+            NONE
         };
         if cm != NONE {
             self.get64(ops[0]);
@@ -4281,9 +4281,9 @@ extend Gen {
         let bitop = c >= core::SIMD_CLZ && c <= core::SIMD_BSWAP;
         let ft = pick8(lt == T_F64, w::F64, w::F32);
         let (fa, fb, fc) = if fl {
-            (self.tmp(ft), self.tmp(ft), self.tmp(ft));
+            (self.tmp(ft), self.tmp(ft), self.tmp(ft))
         } else {
-            (NONE, NONE, NONE);
+            (NONE, NONE, NONE)
         };
         for k in 0..n {
             if c == core::SIMD_IOTA {
@@ -4368,11 +4368,11 @@ extend Gen {
         self.c.local(w::LOCAL_GET, y);
         self.c.op(
             if add {
-                w::I64_ADD;
+                w::I64_ADD
             } else if sub {
-                w::I64_SUB;
+                w::I64_SUB
             } else {
-                w::I64_MUL;
+                w::I64_MUL
             },
         );
         self.c.local(w::LOCAL_SET, z);
@@ -4383,18 +4383,18 @@ extend Gen {
                 self.c.local(
                     w::LOCAL_GET,
                     if add {
-                        z;
+                        z
                     } else {
-                        y;
+                        y
                     },
                 );
                 self.c.op(w::I64_XOR);
                 self.c.local(
                     w::LOCAL_GET,
                     if add {
-                        y;
+                        y
                     } else {
-                        x;
+                        x
                     },
                 );
                 self.c.local(w::LOCAL_GET, z);
@@ -4467,11 +4467,11 @@ extend Gen {
             self.c.local(w::LOCAL_GET, y);
             self.c.op(
                 if c == core::SIMD_WRAP_ADD {
-                    w::I64_ADD;
+                    w::I64_ADD
                 } else if c == core::SIMD_WRAP_SUB {
-                    w::I64_SUB;
+                    w::I64_SUB
                 } else {
-                    w::I64_MUL;
+                    w::I64_MUL
                 },
             );
             self.c.local(w::LOCAL_SET, x);
@@ -4487,9 +4487,9 @@ extend Gen {
             self.c.op(w::I64_AND);
             self.c.op(
                 if c == core::SIMD_WRAP_SHL {
-                    w::I64_SHL;
+                    w::I64_SHL
                 } else {
-                    pick8(sg, w::I64_SHR_S, w::I64_SHR_U);
+                    pick8(sg, w::I64_SHR_S, w::I64_SHR_U)
                 },
             );
             self.c.local(w::LOCAL_SET, x);
@@ -4497,14 +4497,14 @@ extend Gen {
             let add = c == core::SIMD_SAT_ADD;
             // The limit: a signed overflow goes the way of the operand's sign, an unsigned one up for a sum.
             let max = if sg {
-                (1u64 << (lb - 1) as u64) - 1;
+                (1u64 << (lb - 1) as u64) - 1
             } else {
-                trunc_to(~0u64, lb);
+                trunc_to(~0u64, lb)
             };
             let min = if sg {
-                (1u64 << (lb - 1) as u64).wrapping_neg();
+                (1u64 << (lb - 1) as u64).wrapping_neg()
             } else {
-                0u64;
+                0u64
             };
             let ov = self.tmp(w::I32);
             self.ovf_lane(c, lb, sg, x, y, z);
@@ -4594,9 +4594,9 @@ extend Gen {
             self.c.op(w::I64_AND);
             self.c.local(w::LOCAL_SET, z);
             let (s0, s1) = if c == core::SIMD_ROTL {
-                (w::I64_SHL, w::I64_SHR_U);
+                (w::I64_SHL, w::I64_SHR_U)
             } else {
-                (w::I64_SHR_U, w::I64_SHL);
+                (w::I64_SHR_U, w::I64_SHL)
             };
             self.c.local(w::LOCAL_GET, x);
             self.c.local(w::LOCAL_GET, y);
@@ -4680,14 +4680,14 @@ extend Gen {
     // kept when it fits and failing `fr` when not.
     fn narrow_lane(self: &mut Self, sat: bool, lb: u32, sg: bool, rw: u32, rsg: bool, x: u32, z: u32, fr: u32) {
         let rmax = if rsg {
-            (1u64 << (rw - 1) as u64) - 1;
+            (1u64 << (rw - 1) as u64) - 1
         } else {
-            trunc_to(~0u64, rw);
+            trunc_to(~0u64, rw)
         };
         let rmin = if rsg {
-            (1u64 << (rw - 1) as u64).wrapping_neg();
+            (1u64 << (rw - 1) as u64).wrapping_neg()
         } else {
-            0u64;
+            0u64
         };
         // `x` above 2^63 only for an unsigned 64-bit lane: its top bit, taken as a value, is positive.
         let huge_u = !sg && lb == 64;
@@ -4804,17 +4804,17 @@ extend Gen {
             self.c.local(w::LOCAL_GET, fa);
             self.c.local(w::LOCAL_GET, fb);
             let o = if c == core::SIMD_CMP_EQ {
-                w::F32_EQ;
+                w::F32_EQ
             } else if c == core::SIMD_CMP_NE {
-                w::F32_NE;
+                w::F32_NE
             } else if c == core::SIMD_CMP_LT {
-                w::F32_LT;
+                w::F32_LT
             } else if c == core::SIMD_CMP_LE {
-                w::F32_LE;
+                w::F32_LE
             } else if c == core::SIMD_CMP_GT {
-                w::F32_GT;
+                w::F32_GT
             } else {
-                w::F32_GE;
+                w::F32_GE
             };
             self.c.op(o + cd);
             self.mask_bit(mk, k);
@@ -4879,19 +4879,19 @@ extend Gen {
             self.fminmax(dd, lo, c >= core::SIMD_MINIMUM, true, fa, fa, fb, fc);
         } else {
             let o = if c == core::SIMD_ABS {
-                w::F32_ABS;
+                w::F32_ABS
             } else if c == core::SIMD_SQRT {
-                w::F32_SQRT;
+                w::F32_SQRT
             } else if c == core::SIMD_CEIL {
-                w::F32_CEIL;
+                w::F32_CEIL
             } else if c == core::SIMD_FLOOR {
-                w::F32_FLOOR;
+                w::F32_FLOOR
             } else if c == core::SIMD_TRUNC {
-                w::F32_TRUNC;
+                w::F32_TRUNC
             } else if c == core::SIMD_ROUND_EVEN {
-                w::F32_NEAREST;
+                w::F32_NEAREST
             } else {
-                w::F32_NEG;
+                w::F32_NEG
             };
             self.c.local(w::LOCAL_GET, fa);
             self.c.op(o + ud);
@@ -4954,18 +4954,18 @@ extend Gen {
         self.c.local(
             w::LOCAL_GET,
             if nan {
-                nb;
+                nb
             } else {
-                na;
+                na
             },
         );
         self.c.op(w::SELECT);
         self.c.local(
             w::LOCAL_GET,
             if nan {
-                na;
+                na
             } else {
-                nb;
+                nb
             },
         );
         self.c.op(w::SELECT);
@@ -5046,16 +5046,16 @@ extend Gen {
         // A float and an integer: the integer side's range [lo, hi) as f64 bounds.
         let ib = pick8(ff, rt, bt);
         let isg = if ff {
-            rs;
+            rs
         } else {
-            bs;
+            bs
         };
         let iw = type_bits(ib, 4) - isg as u32;
         let hi = 1023u64 + iw as u64 << 52;
         let lo = if isg {
-            hi | 1u64 << 63;
+            hi | 1u64 << 63
         } else {
-            0u64;
+            0u64
         };
         let va = self.tmp(w::F64);
         if ff {
@@ -5125,11 +5125,11 @@ extend Gen {
         let raw = c == core::SIMD_LOAD_RAW || c == core::SIMD_STORE_RAW;
         let load = c == core::SIMD_LOAD || c == core::SIMD_LOAD_RAW;
         let vt = if load {
-            t.ty;
+            t.ty
         } else if raw {
-            tys[1];
+            tys[1]
         } else {
-            tys[2];
+            tys[2]
         };
         let eb = type_bytes(lane_type(vt), 4);
         let nb = type_bytes(vt, 4);
@@ -5151,9 +5151,9 @@ extend Gen {
         } else {
             let h = self.mhome(
                 if raw {
-                    ops[1];
+                    ops[1]
                 } else {
-                    ops[2];
+                    ops[2]
                 },
             );
             self.copy_mem(p, 0, self.fp, h, nb);
@@ -5405,9 +5405,9 @@ extend Gen {
             self.ld_lane_to(acc, ops[0], 0, lt, sg, false);
         }
         let from: u32 = if dot {
-            0;
+            0
         } else {
-            1;
+            1
         };
         for k in from..n {
             self.ld_lane_to(x, ops[0], k, lt, sg, false);
@@ -5503,9 +5503,9 @@ extend Gen {
             self.ld_lane_to(acc, ops[0], 0, lt, false, false);
         }
         let from: u32 = if fold {
-            0;
+            0
         } else {
-            1;
+            1
         };
         let fa = self.tmp(aty);
         let fb = self.tmp(aty);
@@ -5655,9 +5655,9 @@ extend Gen {
         }
         // Not fitting: past 64 bits, or the magnitude past the limit (the negative limit one more).
         let lim = if sg {
-            1u64 << (lb - 1) as u64;
+            1u64 << (lb - 1) as u64
         } else {
-            trunc_to(~0u64, lb);
+            trunc_to(~0u64, lb)
         };
         self.c.local(w::LOCAL_GET, lo);
         self.c.i64_const(lim as i64);
@@ -5696,9 +5696,9 @@ extend Gen {
             let x = self.tmp(w::I64);
             let y = self.tmp(w::I64);
             let c = if min {
-                pick8(sg, w::I64_LT_S, w::I64_LT_U);
+                pick8(sg, w::I64_LT_S, w::I64_LT_U)
             } else {
-                pick8(sg, w::I64_GT_S, w::I64_GT_U);
+                pick8(sg, w::I64_GT_S, w::I64_GT_U)
             };
             let take = self.tmp(w::I32);
             self.c.i64_const(0);
@@ -5800,9 +5800,9 @@ extend Gen {
     fn vrearrange(self: &mut Self, i: u32, t: Inst, c: u8, ops: &[Value; 4], tys: &[u8; 4]) {
         let rule = core::simd_op(c).rule;
         let vt = if rule == core::SR_MASKED {
-            tys[1];
+            tys[1]
         } else {
-            tys[0];
+            tys[0]
         };
         let lt = lane_type(vt);
         let eb = type_bytes(lt, 4);
@@ -5823,9 +5823,9 @@ extend Gen {
             self.c.local(w::LOCAL_SET, ix);
             // The packed side's frame offset: the result for compress, v for expand.
             let base = if c == core::SIMD_COMPRESS {
-                d;
+                d
             } else {
-                self.mhome(ops[1]);
+                self.mhome(ops[1])
             };
             for k in 0..n {
                 self.lane_active(m, k);
@@ -5860,9 +5860,9 @@ extend Gen {
             return;
         }
         let cnt = if rule == core::SR_INDEX {
-            self.b().pool[t.c as usize];
+            self.b().pool[t.c as usize]
         } else {
-            lanes(tys[1]);
+            lanes(tys[1])
         };
         if c == core::SIMD_SWIZZLE_OOB {
             // The mask of the lanes whose index is past the lanes.
@@ -5944,7 +5944,7 @@ extend Gen {
             return self.refuse("inline assembly with operands on wasm");
         }
         let tpl = String::from_str(self.msg_text(asm_template(b, t.c)));
-        return self.asm_text(tpl.as_str());
+        return self.asm_text(&tpl);
     }
 
     // Assemble template `text` onto the code, its symbols as relocations.
@@ -5991,7 +5991,7 @@ extend Gen {
                 continue;
             }
             let tpl = String::from_str(self.msg_text(asm_template(b, b.insts[i].c)));
-            if !self.asm_text(tpl.as_str()) {
+            if !self.asm_text(&tpl) {
                 return false;
             }
         }

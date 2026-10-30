@@ -137,7 +137,7 @@ fn threads_and_coroutines_never_overlap() {
             _ => {
                 break;
             },
-        };
+        }
     }
     wg.wait();
     let g = m.get().lock();

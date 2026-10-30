@@ -38,14 +38,14 @@ extend TextBackend as be::Backend {
         for i in 0..self.names.len() {
             let mut b = Vector::<u8>::new();
             let t = if i == 0 {
-                format("{} {}\n{}", os, isa, prog.text().as_str());
+                format("{} {}\n{}", os, isa, prog.text().as_str())
             } else {
-                format("{}\n", prog.functions().len());
+                format("{}\n", prog.functions().len())
             };
             b.extend_from_slice(unsafe Slice::<u8> { ptr: t.as_ptr(), len: t.len() });
             out.push(be::Artifact { name: self.names[i].clone(), bytes: b });
         }
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 

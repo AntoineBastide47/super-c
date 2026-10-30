@@ -44,11 +44,11 @@ pub fn fill(buf: []mut u8) Result<Unit, IoError> {
             if error::interrupted() {
                 continue;
             }
-            return Result::<Unit, IoError>::Err(error::last_error(IoOp::Entropy));
+            return Err(error::last_error(IoOp::Entropy));
         }
         off += r as usize;
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 /// Fill all of `buf` with bytes of the operating system's cryptographic generator: `getrandom` (Linux,
 /// Android), `arc4random_buf` (macOS, iOS), `BCryptGenRandom` (Windows) or WASI `random_get`. On error the
@@ -57,7 +57,7 @@ pub fn fill(buf: []mut u8) Result<Unit, IoError> {
 pub fn fill(buf: []mut u8) Result<Unit, IoError> {
     // arc4random_buf cannot fail: the kernel seeds it.
     unsafe arc4random_buf(buf.as_mut_ptr(), buf.len());
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 /// Fill all of `buf` with bytes of the operating system's cryptographic generator: `getrandom` (Linux,
 /// Android), `arc4random_buf` (macOS, iOS), `BCryptGenRandom` (Windows) or WASI `random_get`. On error the
@@ -75,11 +75,11 @@ pub fn fill(buf: []mut u8) Result<Unit, IoError> {
             BCRYPT_USE_SYSTEM_PREFERRED_RNG,
         );
         if st != 0 {
-            return Result::<Unit, IoError>::Err(IoError { kind: IoErrorKind::Other, code: st, op: IoOp::Entropy });
+            return Err(IoError { kind: Other, code: st, op: Entropy });
         }
         off += n;
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }
 /// Fill all of `buf` with bytes of the operating system's cryptographic generator: `getrandom` (Linux,
 /// Android), `arc4random_buf` (macOS, iOS), `BCryptGenRandom` (Windows) or WASI `random_get`. On error the

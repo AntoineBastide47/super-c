@@ -167,9 +167,9 @@ fn win_unwind(
     out.push(n as u8);
     out.push(
         if fp != NOREG {
-            fp;
+            fp
         } else {
-            0u8;
+            0u8
         },
     );
     for q in 0..codes.len() {
@@ -377,49 +377,49 @@ extend Gen {
             yblk: Vector::<bool>::new(),
             yvals: Vector::<u32>::new(),
             xalloc: if win {
-                XALLOC_WIN;
+                XALLOC_WIN
             } else {
-                XALLOC_SYSV;
+                XALLOC_SYSV
             },
             xfix: if win {
-                XFIX_WIN;
+                XFIX_WIN
             } else {
-                XFIX_SYSV;
+                XFIX_SYSV
             },
             valloc: if win {
-                VALLOC_WIN;
+                VALLOC_WIN
             } else {
-                VALLOC_SYSV;
+                VALLOC_SYSV
             },
             xscr: if win {
-                XSCR_WIN;
+                XSCR_WIN
             } else {
-                XSCR_SYSV;
+                XSCR_SYSV
             },
             xscr_cap: if win {
-                1;
+                1
             } else {
-                2;
+                2
             },
             vscr: if win {
-                0;
+                0
             } else {
-                VSCR_SYSV;
+                VSCR_SYSV
             },
             vfix: if win {
-                0xFF000000;
+                0xFF000000
             } else {
-                0;
+                0
             },
             vs0: if win {
-                V0 + 4;
+                V0 + 4
             } else {
-                V0 + 14;
+                V0 + 14
             },
             vs1: if win {
-                V0 + 5;
+                V0 + 5
             } else {
-                V0 + 15;
+                V0 + 15
             },
             bp: null,
             lv: lv::Live::new(),
@@ -586,9 +586,9 @@ extend Gen {
     // A free register of file `vreg`, evicting another value's when none is.
     fn alloc(self: &mut Self, vreg: bool) u8 {
         let set = if vreg {
-            self.valloc;
+            self.valloc
         } else {
-            self.xalloc;
+            self.xalloc
         };
         let open = set & ~(self.lock | self.tmps | self.fixed_busy) & 0xFFFFFFFFu64;
         // A vector value takes xmm8 and up first under System V: no argument and no intrinsic's template
@@ -606,9 +606,9 @@ extend Gen {
         if busy != 0 {
             let s = self.rr % 32;
             let r = if busy >> s as u64 != 0 {
-                s + (busy >> s as u64).trailing_zeros() as u32;
+                s + (busy >> s as u64).trailing_zeros() as u32
             } else {
-                busy.trailing_zeros() as u32;
+                busy.trailing_zeros() as u32
             };
             self.rr = r + 1;
             self.evict(r as u8);
@@ -843,9 +843,9 @@ extend Gen {
     // -2^s. Whether it did.
     fn mul_const(self: &mut Self, i: u32, a: Value, sz: u32, ra: u8, k: i64) bool {
         let tz = if k > 0 {
-            k.trailing_zeros() as u32;
+            k.trailing_zeros() as u32
         } else {
-            0u32;
+            0u32
         };
         let odd = k >> tz as i64;
         if k > 0 && lea_factor(odd) {
@@ -859,11 +859,11 @@ extend Gen {
         if k > 0 {
             for q in 0..3u32 {
                 let c: i64 = if q == 0 {
-                    3;
+                    3
                 } else if q == 1 {
-                    5;
+                    5
                 } else {
-                    9;
+                    9
                 };
                 let sc = (c - 1).trailing_zeros() as u8;
                 if k % c == 0 && lea_factor(k / c) {
@@ -877,9 +877,9 @@ extend Gen {
                         // c times the operand in the result's register, unless that is the operand's.
                         let rd = self.def(i);
                         let s = if rd == ra {
-                            self.tmp(false);
+                            self.tmp(false)
                         } else {
-                            rd;
+                            rd
                         };
                         self.lea_to(sz, s, x::ix(ra, ra, sc, 0));
                         self.lea_to(sz, rd, x::ix(ra, s, j, 0));
@@ -892,23 +892,23 @@ extend Gen {
         let plus = k > 9 && (k - 1 & k - 2) == 0;
         if plus || k >= 7 && (k & k + 1) == 0 {
             let sh = if plus {
-                (k - 1).trailing_zeros() as u32;
+                (k - 1).trailing_zeros() as u32
             } else {
-                (k + 1).trailing_zeros() as u32;
+                (k + 1).trailing_zeros() as u32
             };
             let op = if plus {
-                x::ADD;
+                x::ADD
             } else {
-                x::SUB;
+                x::SUB
             };
             let rd = self.def(i);
             let src = if rd == ra {
                 let s = self.tmp(false);
                 self.c.mov_rr(sz, s, ra);
-                s;
+                s
             } else {
                 self.c.mov_rr(sz, rd, ra);
-                ra;
+                ra
             };
             self.c.shift_ri(x::SHL, sz, rd, sh);
             self.c.alu_rr(op, sz, rd, src);
@@ -946,25 +946,25 @@ extend Gen {
     // Sum `i` as one `lea` of address `f` (`lv::lea_of`; an index alone shifted by at most 1).
     fn lea_sum(self: &mut Self, i: u32, sz: u32, f: lv::Lea) {
         let rb = if f.base == VNONE {
-            NOREG;
+            NOREG
         } else {
-            self.reg(f.base);
+            self.reg(f.base)
         };
         let ri = if f.index == VNONE {
-            NOREG;
+            NOREG
         } else {
-            self.reg(f.index);
+            self.reg(f.index)
         };
         let rd = self.def(i);
         let d = f.disp as i32;
         let m = if ri == NOREG {
-            x::at(rb, d);
+            x::at(rb, d)
         } else if rb == NOREG && f.sh == 0 {
-            x::at(ri, d);
+            x::at(ri, d)
         } else if rb == NOREG {
-            x::ix(ri, ri, 0, d);
+            x::ix(ri, ri, 0, d)
         } else {
-            x::ix(rb, ri, f.sh as u8, d);
+            x::ix(rb, ri, f.sh as u8, d)
         };
         self.lea_to(sz, rd, m);
     }
@@ -1029,9 +1029,9 @@ extend Gen {
     fn def_pass(self: &mut Self, v: Value, a: Value) u8 {
         let r = self.def_shared(v, a);
         return if r == NOREG {
-            self.def(v);
+            self.def(v)
         } else {
-            r;
+            r
         };
     }
 
@@ -1269,9 +1269,9 @@ extend Gen {
         self.want.truncate(0);
         // An xmm home: Microsoft x64's callee-saved ones, System V's caller-saved ones.
         let vw = lv::WANT_V | if self.win {
-            lv::WANT_CALLEE;
+            lv::WANT_CALLEE
         } else {
-            lv::WANT_SCRATCH;
+            lv::WANT_SCRATCH
         };
         for x in 0..n {
             let t = self.xty(x as u32);
@@ -1324,25 +1324,25 @@ extend Gen {
             ));
         }
         let xs = if leaf {
-            self.xscr.count_ones() as u32;
+            self.xscr.count_ones() as u32
         } else {
-            self.xscr_cap;
+            self.xscr_cap
         };
         // Six of Microsoft x64's callee-saved xmm homes (xmm0..xmm3, xmm6, xmm7 and two of xmm8..xmm13 stay
         // for temporaries), or four of System V's caller-saved ones.
         let (vc, vs) = if self.win {
-            (6u32, 0u32);
+            (6u32, 0u32)
         } else {
-            (0u32, 4u32);
+            (0u32, 4u32)
         };
         self.lv.plan(
             b,
             &self.want,
             lv::Caps {
                 xc: if self.shrink {
-                    0;
+                    0
                 } else {
-                    self.xfix.count_ones() as u32;
+                    self.xfix.count_ones() as u32
                 },
                 xs: xs,
                 xj: most,
@@ -1454,14 +1454,14 @@ extend Gen {
     // of its range after its own.
     const fn crosses_call(self: &Self, x: u32, v: bool) bool {
         let pre = if v {
-            &self.vpre;
+            &self.vpre
         } else {
-            &self.cpre;
+            &self.cpre
         };
         let pos = if v {
-            &self.vpos;
+            &self.vpos
         } else {
-            &self.cpos;
+            &self.cpos
         };
         let b = self.b();
         let ni = b.insts.len() as u32;
@@ -1470,9 +1470,9 @@ extend Gen {
         let e = self.lv.end[x as usize];
         let bk = b.blocks[d as usize];
         let from = if x < ni {
-            x + 1;
+            x + 1
         } else {
-            bk.start;
+            bk.start
         };
         if e <= dp {
             return pre[self.lv.last[x as usize] as usize] > pre[from as usize];
@@ -1484,9 +1484,9 @@ extend Gen {
     // linker lays out together (COFF: after `.text`, grouped by the name past `$`).
     const fn cold_text(self: &Self) str<'static> {
         return if self.win {
-            ".text$u";
+            ".text$u"
         } else {
-            ".text.unlikely";
+            ".text.unlikely"
         };
     }
 
@@ -1606,19 +1606,19 @@ extend Gen {
     // instruction does not use; NOREG when none is.
     fn take_scratch(self: &mut Self, x: u32, vr: bool, prefer: u8) u8 {
         let set = if vr {
-            self.vscr;
+            self.vscr
         } else {
-            self.xscr;
+            self.xscr
         } & ~self.fixed_busy;
         let open = set & ~(self.lock | self.tmps);
         let r = if prefer != NOREG && (set & bit(prefer)) != 0 {
-            prefer;
+            prefer
         } else if (open & ~self.held) != 0 {
-            (open & ~self.held).trailing_zeros() as u8;
+            (open & ~self.held).trailing_zeros() as u8
         } else if open != 0 {
-            open.trailing_zeros() as u8;
+            open.trailing_zeros() as u8
         } else {
-            NOREG;
+            NOREG
         };
         if r == NOREG {
             return NOREG;
@@ -1713,9 +1713,9 @@ extend Gen {
                 r,
                 x::at(
                     if va.home == H_SPADDR {
-                        x::RSP;
+                        x::RSP
                     } else {
-                        self.fb;
+                        self.fb
                     },
                     va.off,
                 ),
@@ -1732,9 +1732,9 @@ extend Gen {
                 r,
                 x::at(
                     if va.home == H_SLOT {
-                        x::RSP;
+                        x::RSP
                     } else {
-                        self.fb;
+                        self.fb
                     },
                     va.off,
                 ),
@@ -1763,9 +1763,9 @@ extend Gen {
             self.mov_imm(
                 r,
                 if neg {
-                    lo | 0xFFFFFFFF << bits as u64 & 0xFFFFFFFF;
+                    lo | 0xFFFFFFFF << bits as u64 & 0xFFFFFFFF
                 } else {
-                    lo;
+                    lo
                 },
                 4,
             );
@@ -1896,9 +1896,9 @@ extend Gen {
         }
         if va.home == H_SLOT && !self.is_shared(x) {
             let n = if Gen::in_mem(self.xty(x)) {
-                type_bytes(self.xty(x), self.ptr);
+                type_bytes(self.xty(x), self.ptr)
             } else {
-                8;
+                8
             };
             self.free_slots.push(n as u64 << 32 | (va.off as u32) as u64);
         }
@@ -1923,16 +1923,16 @@ extend Gen {
     // A stack slot of `size` bytes aligned to `al` (memory values and spills); its rsp offset.
     const fn slot_alloc(self: &mut Self, size0: u32, al0: u32) u32 {
         let size = if size0 < 8 {
-            8u32;
+            8u32
         } else {
-            size0;
+            size0
         };
         let al = if al0 < 8 {
-            8u32;
+            8u32
         } else if al0 > 16 {
-            16u32;
+            16u32
         } else {
-            al0;
+            al0
         };
         for k in 0..self.free_slots.len() {
             let e = self.free_slots[k];
@@ -1952,9 +1952,9 @@ extend Gen {
     // `keep_flags` is set (a pending condition is read after).
     fn mov_imm(self: &mut Self, rd: u8, v: u64, n: u32) {
         let k = if n < 8 {
-            v & 0xFFFFFFFF;
+            v & 0xFFFFFFFF
         } else {
-            v;
+            v
         };
         if k == 0 && !self.keep_flags {
             self.c.alu_rr(x::XOR, 4, rd, rd);
@@ -1972,9 +1972,9 @@ extend Gen {
         self.c.mov_ri(S1, bits);
         self.c.movd_to_x(
             if d {
-                8u32;
+                8u32
             } else {
-                4u32;
+                4u32
             },
             r - V0,
             S1,
@@ -2022,7 +2022,7 @@ extend Gen {
     fn refptr(self: &mut Self, os: u32) u32 {
         let o = self.obj();
         let nm = format(".refptr.{}", o.name_of(os));
-        let k = o.sym(nm.as_str());
+        let k = o.sym(&nm);
         if o.syms[k as usize].sec == ob::NOSEC {
             let at = o.define(k, ob::S_RELRO, 3, 8, 0);
             o.pad_to(ob::S_RELRO, at + 8);
@@ -2087,9 +2087,9 @@ extend Gen {
             return;
         }
         let t = if r == S1 {
-            S0;
+            S0
         } else {
-            S1;
+            S1
         };
         self.c.mov_ri(t, k as u64);
         self.c.lea(r, x::ix(r, t, 0, 0));
@@ -2179,9 +2179,9 @@ extend Gen {
             let nm0 = p.spell(ps.name);
             // `__sc_x_<name>` is a C library name's alias (a macro of a scoped extern header).
             let nm = if ps.def == NONE && nm0.starts_with("__sc_x_") {
-                nm0.slice(7, nm0.len());
+                nm0.slice(7, nm0.len())
             } else {
-                nm0;
+                nm0
             };
             let k = self.obj().sym(nm);
             self.osym[s as usize] = k;
@@ -2233,9 +2233,9 @@ fn fill32(v: &mut Vector<u32>, n: usize, x: u32) {
 fn sig_size(b: &Body, pt: u32, ptr: u32) (u32, u32) {
     if (pt & AGG) != 0 {
         let l = (pt & ~AGG) as usize;
-        return b.pool[l], 1u32 << b.pool[l + 1];
+        return (b.pool[l], 1u32 << b.pool[l + 1]);
     }
-    return type_bytes(pt as u8, ptr), type_align(pt as u8, ptr);
+    return (type_bytes(pt as u8, ptr), type_align(pt as u8, ptr));
 }
 
 // ---- Functions ----
@@ -2344,13 +2344,13 @@ extend Gen {
         self.tail_ok = p.tail && self.canary < 0 && !va && !lver::frame_escapes(b);
         self.fb = ast_pick(omit, x::IN, x::RBP);
         self.xfix = if self.win {
-            XFIX_WIN;
+            XFIX_WIN
         } else {
-            XFIX_SYSV;
+            XFIX_SYSV
         } | if omit {
-            bit(x::RBP);
+            bit(x::RBP)
         } else {
-            0;
+            0
         };
         self.bucket_ends();
         self.call_tables();
@@ -2592,9 +2592,9 @@ extend Gen {
             if loc.kind == ab::L_STACK {
                 // An aggregate's address, or the value (a memory value in place) in the caller's memory.
                 let home = if agg {
-                    H_FPADDR;
+                    H_FPADDR
                 } else {
-                    H_ARG;
+                    H_ARG
                 };
                 self.va.index_mut(x as usize).home = home;
                 self.va.index_mut(x as usize).off = (16 + loc.off) as i32;
@@ -2631,9 +2631,9 @@ extend Gen {
                     self.store_part(pa, x::RSP, off as i64 + pa.off as i64);
                 }
                 self.va.index_mut(x as usize).home = if agg {
-                    H_SPADDR;
+                    H_SPADDR
                 } else {
-                    H_SLOT;
+                    H_SLOT
                 };
                 self.va.index_mut(x as usize).off = off as i32;
             } else {
@@ -2641,9 +2641,9 @@ extend Gen {
                 self.entry_reg(
                     x,
                     pa.reg + if pa.v {
-                        V0;
+                        V0
                     } else {
-                        0;
+                        0
                     },
                 );
             }
@@ -2721,9 +2721,9 @@ extend Gen {
             self.entry_reg(
                 i,
                 pa.reg + if pa.v {
-                    V0;
+                    V0
                 } else {
-                    0;
+                    0
                 },
             );
         }
@@ -2877,13 +2877,13 @@ extend Gen {
         let b = self.b();
         let ni = b.insts.len() as u32;
         let ne: u32 = if t.op == O_JMP {
-            1;
+            1
         } else if t.op == O_BR {
-            2;
+            2
         } else if t.op == O_SWITCH {
-            t.aux as u32 + 1;
+            t.aux as u32 + 1
         } else {
-            0;
+            0
         };
         for e in 0..ne {
             let ed = lv::edge_of(b, t, e);
@@ -2894,9 +2894,9 @@ extend Gen {
                 self.param_home(
                     x,
                     if r != NOREG {
-                        r;
+                        r
                     } else {
-                        self.dying_reg(b.edge_arg(ed, q));
+                        self.dying_reg(b.edge_arg(ed, q))
                     },
                 );
             }
@@ -2928,9 +2928,9 @@ extend Gen {
         }
         let va = self.va[x as usize];
         return if va.reg != NOREG && va.home != H_FIXED && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos {
-            va.reg;
+            va.reg
         } else {
-            NOREG;
+            NOREG
         };
     }
 
@@ -3056,9 +3056,9 @@ extend Gen {
             let t = self.xty(px);
             let pva = self.va[px as usize];
             let dst = if pva.home == H_FIXED {
-                Lc { kind: LC_REG, reg: pva.reg, off: 0, val: px };
+                Lc { kind: LC_REG, reg: pva.reg, off: 0, val: px }
             } else {
-                Lc { kind: LC_MEM, reg: x::RSP, off: pva.off, val: px };
+                Lc { kind: LC_MEM, reg: x::RSP, off: pva.off, val: px }
             };
             // A home the argument shares (`back_share`) already holds it.
             let src = self.loc_of(ax);
@@ -3147,17 +3147,17 @@ extend Gen {
         }
         // A vector register's 16 bytes move as an i128's.
         let t = if v && bytes == 4 {
-            T_F32;
+            T_F32
         } else if v && bytes == 8 {
-            T_F64;
+            T_F64
         } else if v && bytes == 16 {
-            T_I128;
+            T_I128
         } else if v && bytes == 32 {
-            vec_type(T_I64, 4);
+            vec_type(T_I64, 4)
         } else if v && bytes == 64 {
-            vec_type(T_I64, 8);
+            vec_type(T_I64, 8)
         } else {
-            int_type(bytes);
+            int_type(bytes)
         };
         if dst.kind == LC_REG {
             if src.kind == LC_REG {
@@ -3177,15 +3177,15 @@ extend Gen {
         }
         // Into memory through a scratch register.
         let s = if v {
-            self.vs0;
+            self.vs0
         } else {
-            S0;
+            S0
         };
         let r = if src.kind == LC_REG {
-            src.reg;
+            src.reg
         } else {
             self.materialize(self.xval(src.val), s);
-            s;
+            s
         };
         self.st(t, r, x::at(dst.reg, dst.off));
     }
@@ -3206,9 +3206,9 @@ extend Gen {
             // Past 128 bytes a loop over 16-byte chunks, its index in a scratch register counting up to 0,
             // then the rest.
             let ix = if db == S1 || sb == S1 {
-                S0;
+                S0
             } else {
-                S1;
+                S1
             };
             assert(ix != db && ix != sb, "x64gen: a copy between the two scratch registers");
             at = n & ~15u32;
@@ -3223,15 +3223,15 @@ extend Gen {
         while at < n {
             let left = n - at;
             let step = if left >= 16 {
-                16u32;
+                16u32
             } else if left >= 8 {
-                8u32;
+                8u32
             } else if left >= 4 {
-                4u32;
+                4u32
             } else if left >= 2 {
-                2u32;
+                2u32
             } else {
-                1u32;
+                1u32
             };
             let sm = x::at(sb, (so0 + at as i64) as i32);
             let dm = x::at(db, (do0 + at as i64) as i32);
@@ -3301,11 +3301,11 @@ extend Gen {
                 break;
             }
             let step = if left >= 4 {
-                4u32;
+                4u32
             } else if left >= 2 {
-                2u32;
+                2u32
             } else {
-                1u32;
+                1u32
             };
             self.c.store(step, src, x::at(base, (off + at as i64) as i32));
             at += step;
@@ -3333,11 +3333,11 @@ extend Gen {
                 break;
             }
             let step = if left >= 4 {
-                4u32;
+                4u32
             } else if left >= 2 {
-                2u32;
+                2u32
             } else {
-                1u32;
+                1u32
             };
             if at == 0 {
                 self.c.load(step, false, r, x::at(base, off as i32));
@@ -3522,9 +3522,9 @@ extend Gen {
             // The product commutes: a constant operand second.
             let mut kv: u64 = 0;
             let (va, vb) = if self.const_of(t.a, &mut kv) {
-                (t.b, t.a);
+                (t.b, t.a)
             } else {
-                (t.a, t.b);
+                (t.a, t.b)
             };
             if bits == 64 {
                 // MUL or IMUL: rdx:rax = rax * the operand, the second operand put in rax.
@@ -3534,9 +3534,9 @@ extend Gen {
                 self.materialize(vb, x::RAX);
                 self.c.unary(
                     if sgn {
-                        x::IMUL1;
+                        x::IMUL1
                     } else {
-                        x::MUL;
+                        x::MUL
                     },
                     8,
                     ra,
@@ -3549,9 +3549,9 @@ extend Gen {
             let ra = self.reg(va);
             let kc = self.const_of(vb, &mut kv);
             let k = if sgn {
-                lp_sext(kv, bits) as u64;
+                lp_sext(kv, bits) as u64
             } else {
-                kv & (1u64 << bits as u64) - 1;
+                kv & (1u64 << bits as u64) - 1
             };
             let imm = kc && k as i64 >= -2147483648 && k as i64 <= 2147483647;
             let mut s: u8 = 0;
@@ -3573,9 +3573,9 @@ extend Gen {
             }
             self.c.shift_ri(
                 if sgn {
-                    x::SAR;
+                    x::SAR
                 } else {
-                    x::SHR;
+                    x::SHR
                 },
                 8,
                 rd,
@@ -3703,19 +3703,19 @@ extend Gen {
         self.spill(self.vx(v));
         let va = self.va[self.vx(v) as usize];
         if va.home == H_ARG {
-            return self.fb, va.off;
+            return (self.fb, va.off);
         }
         assert(va.home == H_SLOT, "x64gen: a memory value without a slot");
-        return x::RSP, va.off;
+        return (x::RSP, va.off);
     }
 
     // The address `v` + `off` as a base register and an offset: a slot or frame address folds in.
     fn addr(self: &mut Self, v: Value, off: i64) (u8, i64) {
         let (fr, base, at) = self.frame_addr(v);
         if fr {
-            return base, at + off;
+            return (base, at + off);
         }
-        return self.reg(v), off;
+        return (self.reg(v), off);
     }
 
     // Whether address `v` is a slot or frame address no register holds (`addr`'s folds), with the frame's
@@ -3723,18 +3723,18 @@ extend Gen {
     const fn frame_addr(self: &Self, v: Value) (bool, u8, i64) {
         let va = self.va[self.vx(v) as usize];
         if va.home == H_SPADDR {
-            return true, x::RSP, va.off;
+            return (true, x::RSP, va.off);
         }
         if va.home == H_FPADDR {
-            return true, self.fb, va.off;
+            return (true, self.fb, va.off);
         }
         if va.home == H_REMAT && va.reg == NOREG && (v & (VPARAM | VFLAG)) == 0 {
             let it = self.b().insts[v as usize];
             if it.op == O_SLOTADDR {
-                return true, x::RSP, self.slot_off[it.a as usize];
+                return (true, x::RSP, self.slot_off[it.a as usize]);
             }
         }
-        return false, S1, 0;
+        return (false, S1, 0);
     }
 
     // The memory operand of a `bytes`-byte access at `v` + `off`: RIP-relative for a defined data
@@ -3820,9 +3820,9 @@ extend Gen {
             self.c.setcc(cc2, S1);
             self.c.alu_rr(
                 if and2 {
-                    x::AND;
+                    x::AND
                 } else {
-                    x::OR;
+                    x::OR
                 },
                 1,
                 rd,
@@ -3872,16 +3872,16 @@ extend Gen {
             let n = self.b().insts[t.a as usize];
             let ra = self.reg(n.a);
             let tz = if bits < 32 {
-                4u32;
+                4u32
             } else {
-                sz;
+                sz
             };
             let mut k: i32 = 0;
             let imm = self.imm32_of(n.b, bits.max(32), &mut k);
             let rb = if imm {
-                NOREG;
+                NOREG
             } else {
-                self.reg(n.b);
+                self.reg(n.b)
             };
             let s0 = self.c.len();
             if imm {
@@ -3896,9 +3896,9 @@ extend Gen {
         let mut k: i32 = 0;
         let imm = self.imm32_of(t.b, bits, &mut k);
         let rb = if imm {
-            NOREG;
+            NOREG
         } else {
-            self.reg(t.b);
+            self.reg(t.b)
         };
         // The `add`, `sub`, `and`, `or` or `xor` just emitted set ZF from this register.
         let z = self.zf;
@@ -3948,15 +3948,15 @@ extend Gen {
         let c = t.aux;
         let swap = c == C_OLT || c == C_OLE;
         let (p, q) = if swap {
-            (rb, ra);
+            (rb, ra)
         } else {
-            (ra, rb);
+            (ra, rb)
         };
         self.c.sse_rr(
             if d {
-                0x66u32;
+                0x66u32
             } else {
-                0u32;
+                0u32
             },
             0x0F2E,
             p - V0,
@@ -4003,13 +4003,13 @@ extend Gen {
             self.c.alu_rm(x::SBB, 8, hi_a, x::at(bb, bo as i32 + 8));
         }
         let cc = if c == C_SLT || c == C_SGT {
-            x::CC_L;
+            x::CC_L
         } else if c == C_SGE || c == C_SLE {
-            x::CC_GE;
+            x::CC_GE
         } else if c == C_ULT || c == C_UGT {
-            x::CC_B;
+            x::CC_B
         } else {
-            x::CC_AE;
+            x::CC_AE
         };
         self.cond_value(i, cc, NONE, false);
         return true;
@@ -4022,7 +4022,7 @@ extend Gen {
         let (base, off) = self.mloc(v);
         self.c.load(8, false, lo, x::at(base, off as i32));
         self.c.load(8, false, hi, x::at(base, off as i32 + 8));
-        return lo, hi;
+        return (lo, hi);
     }
 
     // Store two words as i128 instruction `i`'s value.
@@ -4038,9 +4038,9 @@ extend Gen {
         let bits = type_bits(t.ty, self.ptr);
         let sz = wsz(bits);
         let r = if bits < 32 {
-            self.ext(t.a, false, bits);
+            self.ext(t.a, false, bits)
         } else {
-            self.reg(t.a);
+            self.reg(t.a)
         };
         let rd = self.def(i);
         if t.op == O_POPCNT {
@@ -4063,9 +4063,9 @@ extend Gen {
         }
         // clz = (width - 1) - bsr, with bsr taken as -1 for 0.
         let w = if bits < 32 {
-            32u32;
+            32u32
         } else {
-            bits;
+            bits
         };
         self.c.bsx(true, sz, rd, r);
         self.c.mov_ri(S1, 0xFFFFFFFFFFFFFFFF);
@@ -4118,9 +4118,9 @@ extend Gen {
             let rd = self.def_from(i, t.a, ra);
             self.c.unary(
                 if op == O_NEG {
-                    x::NEG;
+                    x::NEG
                 } else {
-                    x::NOT;
+                    x::NOT
                 },
                 sz,
                 rd,
@@ -4130,9 +4130,9 @@ extend Gen {
         // A rotation whose shifts fold into it (`lv::FOLD_ROT`): ROL or ROR by an immediate or by cl, at the
         // type's own width (a narrow rotation reads the low bits alone).
         let rot = if self.folds_both(t) {
-            lv::rotate_of(self.b(), i);
+            lv::rotate_of(self.b(), i)
         } else {
-            lv::Rotation { x: VNONE, amt: VNONE, src: VNONE, k: 0, right: false };
+            lv::Rotation { x: VNONE, amt: VNONE, src: VNONE, k: 0, right: false }
         };
         if rot.x != VNONE {
             let xv = rot.x;
@@ -4153,9 +4153,9 @@ extend Gen {
             let rd = self.def_from(i, xv, ra);
             self.c.shift_cl(
                 if right {
-                    x::ROR;
+                    x::ROR
                 } else {
-                    x::ROL;
+                    x::ROL
                 },
                 bits / 8,
                 rd,
@@ -4185,9 +4185,9 @@ extend Gen {
                         x::at(
                             ra,
                             if op == O_SUB {
-                                -k;
+                                -k
                             } else {
-                                k;
+                                k
                             },
                         ),
                     );
@@ -4230,11 +4230,11 @@ extend Gen {
         }
         if op == O_SHL || op == O_LSHR || op == O_ASHR {
             let sop = if op == O_SHL {
-                x::SHL;
+                x::SHL
             } else if op == O_LSHR {
-                x::SHR;
+                x::SHR
             } else {
-                x::SAR;
+                x::SAR
             };
             let mut kk: u64 = 0;
             if self.const_of(t.b, &mut kk) && kk < bits as u64 {
@@ -4242,9 +4242,9 @@ extend Gen {
                 let rd = if small && op != O_SHL {
                     let r = self.def(i);
                     self.c.ext(bits / 8, 4, op == O_ASHR, r, ra);
-                    r;
+                    r
                 } else {
-                    self.def_from(i, t.a, ra);
+                    self.def_from(i, t.a, ra)
                 };
                 self.c.shift_ri(sop, sz, rd, kk as u32);
                 return true;
@@ -4256,9 +4256,9 @@ extend Gen {
             let rd = if small && op != O_SHL {
                 let r = self.def(i);
                 self.c.ext(bits / 8, 4, op == O_ASHR, r, ra);
-                r;
+                r
             } else {
-                self.def_from(i, t.a, ra);
+                self.def_from(i, t.a, ra)
             };
             self.c.shift_cl(sop, sz, rd);
             return true;
@@ -4284,9 +4284,9 @@ extend Gen {
         }
         self.c.unary(
             if sgn {
-                x::IDIV;
+                x::IDIV
             } else {
-                x::DIV;
+                x::DIV
             },
             sz,
             rb,
@@ -4294,9 +4294,9 @@ extend Gen {
         self.result_in(
             i,
             if op == O_SDIV || op == O_UDIV {
-                x::RAX;
+                x::RAX
             } else {
-                x::RDX;
+                x::RDX
             },
         );
         return true;
@@ -4307,13 +4307,13 @@ extend Gen {
         let op = t.op;
         if op >= O_SDIV && op <= O_UREM {
             let name = if op == O_SDIV {
-                "__divti3";
+                "__divti3"
             } else if op == O_UDIV {
-                "__udivti3";
+                "__udivti3"
             } else if op == O_SREM {
-                "__modti3";
+                "__modti3"
             } else {
-                "__umodti3";
+                "__umodti3"
             };
             return self.rt_call128(i, name, t.a, t.b);
         }
@@ -4360,12 +4360,12 @@ extend Gen {
         }
         let (bb, bo) = self.mloc(t.b);
         let (lo_op, hi_op) = if op == O_ADD {
-            (x::ADD, x::ADC);
+            (x::ADD, x::ADC)
         } else if op == O_SUB {
-            (x::SUB, x::SBB);
+            (x::SUB, x::SBB)
         } else {
             let a = alu_of(op);
-            (a, a);
+            (a, a)
         };
         self.c.alu_rm(lo_op, 8, al, x::at(bb, bo as i32));
         self.c.alu_rm(hi_op, 8, ah, x::at(bb, bo as i32 + 8));
@@ -4390,9 +4390,9 @@ extend Gen {
         self.c.shd_cl(false, lo, hi);
         self.c.shift_cl(
             if op == O_ASHR {
-                x::SAR;
+                x::SAR
             } else {
-                x::SHR;
+                x::SHR
             },
             8,
             hi,
@@ -4458,9 +4458,9 @@ extend Gen {
             let mut k: i32 = 0;
             let imm = op != O_MULO && self.imm32_of(t.b, bits, &mut k);
             let rb = if imm {
-                NOREG;
+                NOREG
             } else {
-                self.reg(t.b);
+                self.reg(t.b)
             };
             let rd = self.def_from(i, t.a, ra);
             if op == O_MULO {
@@ -4468,9 +4468,9 @@ extend Gen {
                 cc = x::CC_O;
             } else {
                 let a = if op == O_ADDO {
-                    x::ADD;
+                    x::ADD
                 } else {
-                    x::SUB;
+                    x::SUB
                 };
                 if imm {
                     self.c.alu_ri(a, sz, rd, k);
@@ -4478,9 +4478,9 @@ extend Gen {
                     self.c.alu_rr(a, sz, rd, rb);
                 }
                 cc = if signed {
-                    x::CC_O;
+                    x::CC_O
                 } else {
-                    x::CC_B;
+                    x::CC_B
                 };
             }
         }
@@ -4509,23 +4509,23 @@ extend Gen {
     // `r` (an xmm register) with its sign bit cleared (`abs`) or flipped, through r11 and xmm15.
     fn fsign(self: &mut Self, d: bool, abs: bool, r: u8) {
         let sb = if d {
-            0x8000000000000000u64;
+            0x8000000000000000u64
         } else {
-            0x80000000u64;
+            0x80000000u64
         };
         self.c.mov_ri(
             S1,
             if abs {
-                ~sb & ast_mask(d);
+                ~sb & ast_mask(d)
             } else {
-                sb;
+                sb
             },
         );
         self.c.movd_to_x(
             if d {
-                8u32;
+                8u32
             } else {
-                4u32;
+                4u32
             },
             self.vs1 - V0,
             S1,
@@ -4533,9 +4533,9 @@ extend Gen {
         self.c.sse_rr(
             0,
             if abs {
-                0x0F54u32;
+                0x0F54u32
             } else {
-                0x0F57u32;
+                0x0F57u32
             },
             r - V0,
             self.vs1 - V0,
@@ -4621,9 +4621,9 @@ extend Gen {
             let rd = self.def(i);
             self.c.sse_rr(
                 if op == O_FPEXT {
-                    0xF3u32;
+                    0xF3u32
                 } else {
-                    0xF2u32;
+                    0xF2u32
                 },
                 0x0F5A,
                 rd - V0,
@@ -4648,9 +4648,9 @@ extend Gen {
                 // Zero-extended to 64 bits, it converts exactly as a signed value.
                 self.c.ext(
                     if fb == 32 {
-                        4u32;
+                        4u32
                     } else {
-                        fb / 8;
+                        fb / 8
                     },
                     4,
                     false,
@@ -4705,9 +4705,9 @@ extend Gen {
             }
             self.saturate_indefinite(d, 8, rd, ra);
             let (lo, hi) = if signed {
-                ((1u64 << (tb - 1) as u64).wrapping_neg(), (1u64 << (tb - 1) as u64) - 1);
+                ((1u64 << (tb - 1) as u64).wrapping_neg(), (1u64 << (tb - 1) as u64) - 1)
             } else {
-                (0u64, trunc64(~0u64, tb));
+                (0u64, trunc64(~0u64, tb))
             };
             self.c.mov_ri(S1, hi);
             self.c.alu_rr(x::CMP, 8, rd, S1);
@@ -4719,16 +4719,16 @@ extend Gen {
         }
         // To u64: below 2^63 directly; at and above it, 2^63 less, then the top bit set.
         let two63 = if d {
-            0x43E0000000000000u64;
+            0x43E0000000000000u64
         } else {
-            0x5F000000u64;
+            0x5F000000u64
         };
         self.fconst(self.vs1, d, two63);
         self.c.sse_rr(
             if d {
-                0x66u32;
+                0x66u32
             } else {
-                0u32;
+                0u32
             },
             0x0F2E,
             ra - V0,
@@ -4772,9 +4772,9 @@ extend Gen {
         let ok = self.c.jcc32(x::CC_NO);
         self.c.sse_rr(
             if d {
-                0x66u32;
+                0x66u32
             } else {
-                0u32;
+                0u32
             },
             0x0F2E,
             ra - V0,
@@ -4784,9 +4784,9 @@ extend Gen {
         // The sign of the float: negative keeps the lowest value, positive takes the highest.
         self.c.rr(
             if d {
-                0x66u32;
+                0x66u32
             } else {
-                0u32;
+                0u32
             },
             0x0F50,
             false,
@@ -4849,21 +4849,21 @@ extend Gen {
         let d = to == T_F64;
         let fd = from == T_F64;
         let name = if op == O_SITOFP && d {
-            "__floattidf";
+            "__floattidf"
         } else if op == O_SITOFP {
-            "__floattisf";
+            "__floattisf"
         } else if op == O_UITOFP && d {
-            "__floatuntidf";
+            "__floatuntidf"
         } else if op == O_UITOFP {
-            "__floatuntisf";
+            "__floatuntisf"
         } else if op == O_FPTOSI && fd {
-            "__fixdfti";
+            "__fixdfti"
         } else if op == O_FPTOSI {
-            "__fixsfti";
+            "__fixsfti"
         } else if fd {
-            "__fixunsdfti";
+            "__fixunsdfti"
         } else {
-            "__fixunssfti";
+            "__fixunssfti"
         };
         return self.rt_call128(i, name, t.a, VNONE);
     }
@@ -4946,9 +4946,9 @@ extend Gen {
         }
         let m = self.mem_at(t.a, t.c as i32, &mut rs, &mut radd);
         let rd = if self.in_reg(ty) {
-            self.vec_def(i);
+            self.vec_def(i)
         } else {
-            self.def_pass(i, t.a);
+            self.def_pass(i, t.a)
         };
         self.ld(ty, rd, m);
         self.mem_rel(rs, radd);
@@ -5039,9 +5039,9 @@ extend Gen {
             seen |= 1u32 << q;
             let pa = self.self_lay.parts[(rl.p0 + q) as usize];
             let r = pa.reg + if pa.v {
-                V0;
+                V0
             } else {
-                0;
+                0
             };
             let v = b.insts[j as usize].b;
             let src = self.loc_of(self.vx(v));
@@ -5079,9 +5079,9 @@ extend Gen {
         let alu = o.op == O_ADD || o.op == O_SUB || o.op == O_AND || o.op == O_OR || o.op == O_XOR;
         let swap = o.op != O_SUB && o.b == i && o.a != i;
         let k = if swap {
-            o.a;
+            o.a
         } else {
-            o.b;
+            o.b
         };
         // An operand folded into the operation (`lv::FOLD_LEA`, `lv::FOLD_ROT`) has no register.
         if !alu || o.ty != t.ty || !swap && (o.a != i || o.b == i) || self.lv.pfold[i as usize + 1] || self.folded(k) {
@@ -5097,9 +5097,9 @@ extend Gen {
         let mut imm: i32 = 0;
         let kc = self.imm32_of(k, type_bits(t.ty, self.ptr), &mut imm);
         let rk = if kc {
-            NOREG;
+            NOREG
         } else {
-            self.reg(k);
+            self.reg(k)
         };
         let mut rs: u32 = NONE;
         let mut radd: i64 = 0;
@@ -5165,9 +5165,9 @@ extend Gen {
         let known = self.const_of(t.c, &mut n);
         let overlap = t.op == O_MEMCPY && t.aux == MEM_OVERLAP;
         let lim: u64 = if overlap {
-            64;
+            64
         } else {
-            128;
+            128
         };
         if known && n == 0 {
             return true; // no byte to write
@@ -5190,13 +5190,13 @@ extend Gen {
                 while at as u64 < n {
                     let left = n as u32 - at;
                     let step = if left >= 8 {
-                        8u32;
+                        8u32
                     } else if left >= 4 {
-                        4u32;
+                        4u32
                     } else if left >= 2 {
-                        2u32;
+                        2u32
                     } else {
-                        1u32;
+                        1u32
                     };
                     self.c.store(step, S1, x::at(db, (doff + at as i64) as i32));
                     at += step;
@@ -5237,11 +5237,11 @@ extend Gen {
             return true;
         }
         let name = if t.op == O_MEMSET {
-            "memset";
+            "memset"
         } else if overlap {
-            "memmove";
+            "memmove"
         } else {
-            "memcpy";
+            "memcpy"
         };
         let vs: [Value; 3] = [t.a, t.b, t.c];
         self.rt_call(name, vs);
@@ -5354,9 +5354,9 @@ extend Gen {
         let mut out: u32 = NONE;
         if regs {
             let (field, lim, step) = if ngp != 0 {
-                (0i32, 48 - 8 * ngp as i32, 8 * ngp as i32);
+                (0i32, 48 - 8 * ngp as i32, 8 * ngp as i32)
             } else {
-                (4i32, 176 - 16 * nvr as i32, 16 * nvr as i32);
+                (4i32, 176 - 16 * nvr as i32, 16 * nvr as i32)
             };
             self.c.load(4, false, S1, x::at(ra, field));
             self.c.alu_ri(x::CMP, 4, S1, lim);
@@ -5400,9 +5400,9 @@ extend Gen {
             return true;
         }
         let ty = if op == O_ALOAD || op == O_ARMW {
-            t.ty;
+            t.ty
         } else {
-            self.vt(t.b);
+            self.vt(t.b)
         };
         assert(!Gen::in_mem(ty) && !Gen::is_v(ty), "x64gen: an atomic access of a type the verifier rejects");
         let sz = type_bytes(ty, self.ptr);
@@ -5414,9 +5414,9 @@ extend Gen {
         let (base, off) = self.addr(
             t.a,
             if op == O_ACAS {
-                0;
+                0
             } else {
-                t.c as i32;
+                t.c as i32
             },
         );
         let m = x::at(base, off as i32);
@@ -5458,11 +5458,11 @@ extend Gen {
             self.c.mov_rr(8, S1, x::RAX);
             self.c.alu_rr(
                 if r == RMW_AND {
-                    x::AND;
+                    x::AND
                 } else if r == RMW_OR {
-                    x::OR;
+                    x::OR
                 } else {
-                    x::XOR;
+                    x::XOR
                 },
                 8,
                 S1,
@@ -5764,9 +5764,9 @@ extend Gen {
             any = true;
             let pa = self.lay.parts[(loc.p0 + self.arg_part(loc, st)) as usize];
             let r = pa.reg + if pa.v {
-                V0;
+                V0
             } else {
-                0;
+                0
             };
             let src = self.loc_of(self.vx(st.b));
             if src.kind == LC_VAL {
@@ -5808,9 +5808,9 @@ extend Gen {
         return intrin::find(
             "x86_64",
             if nm.starts_with("__sc_x_") {
-                nm.slice(7, nm.len());
+                nm.slice(7, nm.len())
             } else {
-                nm;
+                nm
             },
         );
     }
@@ -5854,9 +5854,9 @@ extend Gen {
         let np = b.pool[sig as usize];
         let rt = b.pool[sig as usize + 2];
         let tpl = if t.op == O_CALL {
-            self.intrinsic(t.a);
+            self.intrinsic(t.a)
         } else {
-            "";
+            ""
         };
         self.call_layout(t);
         self.clob = ~0u64;
@@ -5883,9 +5883,9 @@ extend Gen {
                 let pa = self.lay.parts[q];
                 self.clob |= bit(
                     pa.reg + if pa.v {
-                        V0;
+                        V0
                     } else {
-                        0;
+                        0
                     },
                 );
             }
@@ -5930,9 +5930,9 @@ extend Gen {
                 ok = ok && to[j] != (vr - V0) as u32;
             }
             let pr = if ok {
-                self.lay.parts[loc.p0 as usize].reg as u32;
+                self.lay.parts[loc.p0 as usize].reg as u32
             } else {
-                0u32;
+                0u32
             };
             if ok && intrin::vwrites(false, tx, pr) {
                 let rl = self.lay.ret;
@@ -6032,9 +6032,9 @@ extend Gen {
         let mut saved = Vector::<(u8, i64)>::new();
         if tpl.len() != 0 {
             let na = if self.lay.ret.kind == ab::L_REG {
-                self.lay.ret.p0 as usize;
+                self.lay.ret.p0 as usize
             } else {
-                self.lay.parts.len();
+                self.lay.parts.len()
             };
             let mut args: u64 = 0;
             let mut vec = false;
@@ -6085,9 +6085,9 @@ extend Gen {
                 self.copy_mem(x::RSP, loc.off, base, off, loc.size);
             } else {
                 let r = if Gen::is_v(vty) {
-                    self.vs0;
+                    self.vs0
                 } else {
-                    S0;
+                    S0
                 };
                 self.materialize(v, r);
                 self.st(vty, r, x::at(x::RSP, loc.off as i32));
@@ -6121,11 +6121,11 @@ extend Gen {
             }
             let pa = self.lay.parts[loc.p0 as usize];
             let r = if pa.v && pa.reg as u32 == rmov {
-                rres;
+                rres
             } else if pa.v {
-                pa.reg + V0;
+                pa.reg + V0
             } else {
-                pa.reg;
+                pa.reg
             };
             self.mv.push(
                 Mv {
@@ -6221,11 +6221,11 @@ extend Gen {
             } else {
                 let pa = self.lay.parts[loc.p0 as usize];
                 let r = if pa.v && pa.reg as u32 == rmov {
-                    rres;
+                    rres
                 } else if pa.v {
-                    pa.reg + V0;
+                    pa.reg + V0
                 } else {
-                    pa.reg;
+                    pa.reg
                 };
                 if loc.ext != 0 {
                     self.materialize_ext(v, r, loc.ext == 2, type_bits(vty, self.ptr));
@@ -6253,7 +6253,7 @@ extend Gen {
             // An intrinsic: its instructions in place of the call, over the same registers.
             let mut rels = Vector::<asmr::InlRel>::new();
             let mut e = String::new();
-            if !asmr::Asm::inline_x64(text.as_str(), &mut self.c.b, &mut rels, &mut e) {
+            if !asmr::Asm::inline_x64(&text, &mut self.c.b, &mut rels, &mut e) {
                 self.err.format_into("intrinsic: {}", e.as_str());
                 return false;
             }
@@ -6267,9 +6267,9 @@ extend Gen {
             // Through a copy of the epilogue (`finish`): a jump to the callee, or to the address in r11.
             let at = self.c.jmp32();
             let os = if t.op == O_CALL {
-                self.osym_of(t.a);
+                self.osym_of(t.a)
             } else {
-                NONE;
+                NONE
             };
             self.tails.push(at as u64 << 32 | os as u64);
             return true;
@@ -6306,9 +6306,9 @@ extend Gen {
             self.result_in(
                 i,
                 if rres != NOREG {
-                    rres;
+                    rres
                 } else {
-                    self.lay.parts[rl.p0 as usize].reg + V0;
+                    self.lay.parts[rl.p0 as usize].reg + V0
                 },
             );
             return true;
@@ -6325,9 +6325,9 @@ extend Gen {
         self.result_in(
             i,
             pa.reg + if pa.v {
-                V0;
+                V0
             } else {
-                0;
+                0
             },
         );
         return true;
@@ -6452,9 +6452,9 @@ extend Gen {
         let mut rs = Vector::<u8>::with_capacity(2);
         for k in 0..2 {
             let v = if k == 0 {
-                xa;
+                xa
             } else {
-                ya;
+                ya
             };
             if v == VNONE {
                 continue;
@@ -6466,9 +6466,9 @@ extend Gen {
                 vs.push(v);
                 rs.push(
                     if Gen::is_v(ty) {
-                        V0;
+                        V0
                     } else {
-                        cc::gp_arg(gr as u32);
+                        cc::gp_arg(gr as u32)
                     },
                 );
                 gr += (!Gen::is_v(ty)) as usize;
@@ -6478,9 +6478,9 @@ extend Gen {
         gr = 0;
         for k in 0..2 {
             let v = if k == 0 {
-                xa;
+                xa
             } else {
-                ya;
+                ya
             };
             if v == VNONE {
                 continue;
@@ -6505,9 +6505,9 @@ extend Gen {
             self.result_in(
                 i,
                 if Gen::is_v(ty) {
-                    V0;
+                    V0
                 } else {
-                    x::RAX;
+                    x::RAX
                 },
             );
         }
@@ -6521,15 +6521,15 @@ extend Gen {
     fn rt_call128_win(self: &mut Self, i: u32, name: str, xa: Value, ya: Value) bool {
         let wide = self.b().insts[i as usize].ty == T_I128;
         let mut k: u32 = if wide {
-            1;
+            1
         } else {
-            0;
+            0
         };
         for q in 0..2 {
             let v = if q == 0 {
-                xa;
+                xa
             } else {
-                ya;
+                ya
             };
             if v == VNONE {
                 continue;
@@ -6557,9 +6557,9 @@ extend Gen {
             self.result_in(
                 i,
                 if Gen::is_v(ty) {
-                    V0;
+                    V0
                 } else {
-                    x::RAX;
+                    x::RAX
                 },
             );
         }
@@ -6629,9 +6629,9 @@ extend Gen {
         let tf = b.edge_target(ef);
         let q = self.pos as usize + 1;
         let next = if q < self.lv.order.len() && !self.crosses(self.lv.order[q]) {
-            self.lv.order[q];
+            self.lv.order[q]
         } else {
-            NONE;
+            NONE
         };
         if !mt && !mf {
             if tt == next {
@@ -6805,9 +6805,9 @@ extend Gen {
             } else {
                 let pa = self.self_lay.parts[rl.p0 as usize];
                 let r = pa.reg + if pa.v {
-                    V0;
+                    V0
                 } else {
-                    0;
+                    0
                 };
                 let ty = self.vt(t.a);
                 if ty == T_I8 || ty == T_I16 {
@@ -6839,7 +6839,7 @@ extend Gen {
         let name = format("__sc_msg.{}", self.cstr_n);
         self.cstr_n += 1;
         let o = self.obj();
-        let k = o.sym(name.as_str());
+        let k = o.sym(&name);
         let _ = o.define(k, ob::S_CSTR, 0, text.len() as u64 + 1, 0);
         for j in 0..text.len() {
             let one: [u8; 1] = [text.byte_at(j)];
@@ -6924,9 +6924,9 @@ extend Gen {
     fn finish(self: &mut Self, s: u32) bool {
         let sw = self.shrink;
         let ra = if sw {
-            self.rare_at();
+            self.rare_at()
         } else {
-            0;
+            0
         };
         // A last jump to the epilogue falls through instead, and so does the one before it when the block
         // between held only that jump: one step per jump.
@@ -7001,9 +7001,9 @@ extend Gen {
             leaf = leaf && b.insts[k].op != O_ASM;
         }
         let mut local = if leaf {
-            self.spill_base + self.spill_top + 7 & ~7u32;
+            self.spill_base + self.spill_top + 7 & ~7u32
         } else {
-            self.spill_base + self.spill_top + 15 & ~15u32;
+            self.spill_base + self.spill_top + 15 & ~15u32
         };
         let xsave = local;
         local += 16 * xregs.len() as u32;
@@ -7065,9 +7065,9 @@ extend Gen {
         }
         // The bytes before the body: the prologue, none when shrink-wrapped.
         let lead = if sw {
-            0;
+            0
         } else {
-            pl;
+            pl
         };
         let body_n = self.c.len();
         // Before the epilogue proper, which Microsoft x64's unwinder reads instruction by instruction; not
@@ -7144,11 +7144,11 @@ extend Gen {
                 let n = core_at - body_n;
                 for k in 0..5u32 {
                     self.c.b[(at - 1 + k) as usize] = if k < n {
-                        self.c.b[(body_n + k) as usize];
+                        self.c.b[(body_n + k) as usize]
                     } else if k == n {
-                        0xC3;
+                        0xC3
                     } else {
-                        0xCC;
+                        0xCC
                     };
                 }
                 self.drop_jump(at);
@@ -7189,9 +7189,9 @@ extend Gen {
                 if q < self.epi.len() && self.epi[q] == at {
                     for k in 0..5u32 {
                         self.c.b[(at - 1 + k) as usize] = if k < en {
-                            self.c.b[(body_n + k) as usize];
+                            self.c.b[(body_n + k) as usize]
                         } else {
-                            0xCC;
+                            0xCC
                         };
                     }
                     q += 1;
@@ -7234,7 +7234,7 @@ extend Gen {
                     None => {
                         break;
                     },
-                };
+                }
             }
             // A block past the end held only branches to the epilogue, which the start of `finish` dropped:
             // the epilogue.
@@ -7265,7 +7265,7 @@ extend Gen {
                         enter.insert(to, e);
                         stubs.push(e);
                         stubs.push(self.c.len());
-                        e;
+                        e
                     },
                 });
             } else if sw && at >= ra && to < ra {
@@ -7281,7 +7281,7 @@ extend Gen {
                         let j = self.c.jmp32();
                         self.c.land(j, to);
                         leave.insert(to, e);
-                        e;
+                        e
                     },
                 });
             }
@@ -7327,19 +7327,19 @@ extend Gen {
         let k2 = o.sym(p.spell(ps.name));
         let size = lead + self.c.len();
         let sec = if ps.sect != NONE {
-            o.named(p.spell(ps.sect), true);
+            o.named(p.spell(ps.sect), true)
         } else if ps.cold {
-            o.named(self.cold_text(), true);
+            o.named(self.cold_text(), true)
         } else {
-            ob::S_TEXT;
+            ob::S_TEXT
         };
         if sec == ob::NOSEC {
             return self.refuse("too many sections");
         }
         let mut fl = ob::SF_FUNC | if ps.linkage == SL_GLOBAL && !self.local {
-            ob::SF_GLOBAL;
+            ob::SF_GLOBAL
         } else {
-            0;
+            0
         };
         if ps.used {
             fl |= ob::SF_USED;
@@ -7481,26 +7481,26 @@ extend Gen {
         zero = zero && !(tls && self.win);
         let sec = if ps.sect != NONE {
             // Its own section: every byte written.
-            self.obj().named(p.spell(ps.sect), false);
+            self.obj().named(p.spell(ps.sect), false)
         } else if tls && zero {
-            ob::S_TBSS;
+            ob::S_TBSS
         } else if tls {
-            ob::S_TDATA;
+            ob::S_TDATA
         } else if zero && !d.readonly {
-            ob::S_BSS;
+            ob::S_BSS
         } else if d.readonly && d.nrelocs == 0 {
-            ob::S_RODATA;
+            ob::S_RODATA
         } else if d.readonly {
-            ob::S_RELRO;
+            ob::S_RELRO
         } else {
-            ob::S_DATA;
+            ob::S_DATA
         };
         let o = self.obj();
         let k = o.sym(p.spell(ps.name));
         let mut fl = if ps.linkage == SL_GLOBAL && !local {
-            ob::SF_GLOBAL;
+            ob::SF_GLOBAL
         } else {
-            0;
+            0
         };
         if tls {
             fl |= ob::SF_TLS;
@@ -7541,9 +7541,9 @@ const fn sse_of_op(op: u8, lt: u8, un: &mut bool) u32 {
     let eb = type_bytes(lt, 8);
     let f = is_float(lt);
     let pd: u32 = if lt == T_F64 {
-        0x660000;
+        0x660000
     } else {
-        0;
+        0
     };
     *un = op == O_NOT || op == O_NEG || op == O_FNEG || op == O_FSQRT;
     if op == O_FADD {
@@ -7596,11 +7596,11 @@ const fn simd_cond(c: u8, sg: bool, fl: bool) u16 {
     let s: [u16; 6] = [C_EQ, C_NE, C_SLT, C_SLE, C_SGT, C_SGE];
     let u: [u16; 6] = [C_EQ, C_NE, C_ULT, C_ULE, C_UGT, C_UGE];
     return if fl {
-        unsafe f[k];
+        unsafe f[k]
     } else if sg {
-        unsafe s[k];
+        unsafe s[k]
     } else {
-        unsafe u[k];
+        unsafe u[k]
     };
 }
 
@@ -7620,43 +7620,43 @@ fn ymm_parts(lay: &ab::CallLayout) bool {
 const fn avx_of_op(op: u8, lt: u8) u32 {
     let eb = type_bytes(lt, 8);
     let pd: u32 = if lt == T_F64 {
-        0x660000;
+        0x660000
     } else {
-        0;
+        0
     };
     if is_float(lt) {
         return if op == O_FADD {
-            pd | 0x158;
+            pd | 0x158
         } else if op == O_FSUB {
-            pd | 0x15C;
+            pd | 0x15C
         } else if op == O_FMUL {
-            pd | 0x159;
+            pd | 0x159
         } else if op == O_FDIV {
-            pd | 0x15E;
+            pd | 0x15E
         } else if op == O_FNEG {
-            pd | 0x157;
+            pd | 0x157
         } else if op == O_FSQRT {
-            pd | 0x151;
+            pd | 0x151
         } else {
-            NONE;
+            NONE
         };
     }
     return if op == O_ADD {
-        0x660100 | padd(eb) & 0xFF;
+        0x660100 | padd(eb) & 0xFF
     } else if op == O_SUB || op == O_NEG {
-        0x660100 | psub(eb) & 0xFF;
+        0x660100 | psub(eb) & 0xFF
     } else if op == O_MUL && eb == 2 {
-        0x6601D5;
+        0x6601D5
     } else if op == O_MUL && eb == 4 {
-        0x660240;
+        0x660240
     } else if op == O_AND {
-        0x6601DB;
+        0x6601DB
     } else if op == O_OR {
-        0x6601EB;
+        0x6601EB
     } else if op == O_XOR || op == O_NOT {
-        0x6601EF;
+        0x6601EF
     } else {
-        NONE;
+        NONE
     };
 }
 
@@ -7667,49 +7667,49 @@ const fn evex_of_op(op: u8, lt: u8) u32 {
     let eb = type_bytes(lt, 8);
     if is_float(lt) {
         let pd: u32 = if lt == T_F64 {
-            0x1660000;
+            0x1660000
         } else {
-            0;
+            0
         };
         return if op == O_FADD {
-            pd | 0x158;
+            pd | 0x158
         } else if op == O_FSUB {
-            pd | 0x15C;
+            pd | 0x15C
         } else if op == O_FMUL {
-            pd | 0x159;
+            pd | 0x159
         } else if op == O_FDIV {
-            pd | 0x15E;
+            pd | 0x15E
         } else if op == O_FNEG {
-            pd | 0x157;
+            pd | 0x157
         } else if op == O_FSQRT {
-            pd | 0x151;
+            pd | 0x151
         } else {
-            NONE;
+            NONE
         };
     }
     let w: u32 = if eb == 8 {
-        0x1000000;
+        0x1000000
     } else {
-        0;
+        0
     };
     return if op == O_ADD {
-        w | 0x660100 | padd(eb) & 0xFF;
+        w | 0x660100 | padd(eb) & 0xFF
     } else if op == O_SUB || op == O_NEG {
-        w | 0x660100 | psub(eb) & 0xFF;
+        w | 0x660100 | psub(eb) & 0xFF
     } else if op == O_MUL && eb == 2 {
-        0x6601D5;
+        0x6601D5
     } else if op == O_MUL && eb >= 4 {
-        w | 0x660240;
+        w | 0x660240
     } else if op == O_AND {
-        0x6601DB;
+        0x6601DB
     } else if op == O_OR {
-        0x6601EB;
+        0x6601EB
     } else if op == O_XOR {
-        0x6601EF;
+        0x6601EF
     } else if op == O_NOT {
-        0x660325;
+        0x660325
     } else {
-        NONE;
+        NONE
     };
 }
 
@@ -7794,29 +7794,29 @@ const fn int_cond(c: u8, sg: bool) u32 {
     }
     if c == core::SIMD_CMP_LT {
         return if sg {
-            x::CC_L;
+            x::CC_L
         } else {
-            x::CC_B;
+            x::CC_B
         };
     }
     if c == core::SIMD_CMP_LE {
         return if sg {
-            x::CC_LE;
+            x::CC_LE
         } else {
-            x::CC_BE;
+            x::CC_BE
         };
     }
     if c == core::SIMD_CMP_GT {
         return if sg {
-            x::CC_G;
+            x::CC_G
         } else {
-            x::CC_A;
+            x::CC_A
         };
     }
     return if sg {
-        x::CC_GE;
+        x::CC_GE
     } else {
-        x::CC_AE;
+        x::CC_AE
     };
 }
 
@@ -7876,9 +7876,9 @@ extend Gen {
     // operand: `neg` subtracts from 0, `not` and `fneg` xor a constant) into the slot at rsp + `d`.
     fn sse(self: &mut Self, w: u32, op: u8, lt: u8, d: i64, xv: Value, yv: Value, nb: u32) {
         let step: u32 = if nb >= 16 {
-            16;
+            16
         } else {
-            8;
+            8
         };
         let pfx = w >> 16;
         let opc = w & 0xFFFF;
@@ -7932,9 +7932,9 @@ extend Gen {
                 self.ymm_splat64(
                     s,
                     if lt == T_F64 {
-                        0x8000000000000000u64;
+                        0x8000000000000000u64
                     } else {
-                        0x8000000080000000u64;
+                        0x8000000080000000u64
                     },
                 );
                 self.c.vex_rr(pfx, mm, opc, false, true, rd, rx, s);
@@ -7979,9 +7979,9 @@ extend Gen {
                 self.zmm_splat64(
                     s,
                     if lt == T_F64 {
-                        0x8000000000000000u64;
+                        0x8000000000000000u64
                     } else {
-                        0x8000000080000000u64;
+                        0x8000000080000000u64
                     },
                 );
                 self.c.evex_rr(pfx, mm, opc, ew, rd, rx, s);
@@ -8046,9 +8046,9 @@ extend Gen {
                     0x66,
                     1,
                     if zero {
-                        0xEFu32;
+                        0xEFu32
                     } else {
-                        0x76u32;
+                        0x76u32
                     },
                     false,
                     true,
@@ -8072,9 +8072,9 @@ extend Gen {
             self.c.sse_rr(
                 0x66,
                 if zero {
-                    0x0FEFu32;
+                    0x0FEFu32
                 } else {
-                    0x0F76u32;
+                    0x0F76u32
                 },
                 rd,
                 rd,
@@ -8123,9 +8123,9 @@ extend Gen {
         }
         let rx = self.vec_use(xv, self.vs0);
         let ry = if yv != VNONE {
-            self.vec_use(yv, self.vs1);
+            self.vec_use(yv, self.vs1)
         } else {
-            NOREG;
+            NOREG
         };
         let rd = self.def_pass(i, xv);
         self.c.vmov(rd - V0, rx - V0);
@@ -8231,9 +8231,9 @@ extend Gen {
         }
         self.c.movd_to_x(
             if eb == 8 {
-                8u32;
+                8u32
             } else {
-                4u32;
+                4u32
             },
             x,
             rs,
@@ -8288,13 +8288,13 @@ extend Gen {
         let fl = is_float(lt);
         let fswap = c == C_OGT || c == C_OGE;
         let imm: u32 = if c == C_OEQ {
-            0;
+            0
         } else if c == C_OLT || c == C_OGT {
-            1;
+            1
         } else if c == C_OLE || c == C_OGE {
-            2;
+            2
         } else {
-            4;
+            4
         };
         if self.in_reg(vt) && type_bytes(vt, 8) == 64 {
             self.zmm_cmp(i, t, vt);
@@ -8316,9 +8316,9 @@ extend Gen {
             let fa = self.tmp(true);
             let fb = self.tmp(true);
             let (xv, yv) = if fswap {
-                (t.b, t.a);
+                (t.b, t.a)
             } else {
-                (t.a, t.b);
+                (t.a, t.b)
             };
             for k in 0..n {
                 self.ld_lane(fa, xv, k, lt, false, false);
@@ -8355,30 +8355,30 @@ extend Gen {
         let fl = is_float(lt);
         let fswap = c == C_OGT || c == C_OGE;
         let imm: u32 = if c == C_OEQ {
-            0;
+            0
         } else if c == C_OLT || c == C_OGT {
-            1;
+            1
         } else if c == C_OLE || c == C_OGE {
-            2;
+            2
         } else {
-            4;
+            4
         };
         let swap = if fl {
-            fswap;
+            fswap
         } else {
-            c == C_SLT || c == C_SGE || c == C_ULT || c == C_UGE;
+            c == C_SLT || c == C_SGE || c == C_ULT || c == C_UGE
         };
         let (xv, yv) = if swap {
-            (b, a);
+            (b, a)
         } else {
-            (a, b);
+            (a, b)
         };
         let rx = self.vec_use(xv, self.vs0);
         let ry = self.vec_use(yv, self.vs1);
         let rd = if i == NONE {
-            self.tmp(true);
+            self.tmp(true)
         } else {
-            self.vec_def(i);
+            self.vec_def(i)
         };
         if fl {
             self.c.vmov(rd - V0, rx - V0);
@@ -8392,11 +8392,11 @@ extend Gen {
             // The sign bits flipped: an unsigned order is the signed one.
             let s = self.tmp(true);
             let sb = if eb == 1 {
-                0x8080808080808080u64;
+                0x8080808080808080u64
             } else if eb == 2 {
-                0x8000800080008000u64;
+                0x8000800080008000u64
             } else {
-                0x8000000080000000u64;
+                0x8000000080000000u64
             };
             self.c.mov_ri(S1, sb);
             self.c.movd_to_x(8, s - V0, S1);
@@ -8426,9 +8426,9 @@ extend Gen {
         let fl = is_float(lt);
         let pd = (lt == T_F64) as u32 * 0x66;
         let m = if c >= core::SIMD_CMP_EQ && c <= core::SIMD_CMP_GE {
-            self.sse_mask(NONE, simd_cond(c, sg, fl), ops[0], ops[1]);
+            self.sse_mask(NONE, simd_cond(c, sg, fl), ops[0], ops[1])
         } else if c == core::SIMD_IS_SIGN_NEG {
-            self.vec_use(ops[0], self.vs0);
+            self.vec_use(ops[0], self.vs0)
         } else {
             let rx = self.vec_use(ops[0], self.vs0);
             let m = self.tmp(true);
@@ -8442,9 +8442,9 @@ extend Gen {
                 // `cmpeqps` for infinite.
                 let s = self.vs1;
                 let (ab, ib) = if pd != 0 {
-                    (0x7FFFFFFFFFFFFFFFu64, 0x7FF0000000000000u64);
+                    (0x7FFFFFFFFFFFFFFFu64, 0x7FF0000000000000u64)
                 } else {
-                    (0x7FFFFFFF7FFFFFFFu64, 0x7F8000007F800000u64);
+                    (0x7FFFFFFF7FFFFFFFu64, 0x7F8000007F800000u64)
                 };
                 self.c.mov_ri(S1, ab);
                 self.c.movd_to_x(8, s - V0, S1);
@@ -8456,13 +8456,13 @@ extend Gen {
                 self.c.sse_rr(pd, 0x0FC2, m - V0, s - V0);
                 self.c.byte(
                     if c == core::SIMD_IS_FINITE {
-                        1u32;
+                        1u32
                     } else {
-                        0u32;
+                        0u32
                     },
                 );
             }
-            m;
+            m
         };
         let rd = self.def(i);
         if eb == 2 {
@@ -8476,9 +8476,9 @@ extend Gen {
         } else {
             self.c.rr(
                 if eb == 8 {
-                    0x66u32;
+                    0x66u32
                 } else {
-                    0u32;
+                    0u32
                 },
                 0x0F50,
                 false,
@@ -8489,9 +8489,9 @@ extend Gen {
         }
         let n = nb / eb;
         let all = if eb == 2 {
-            8u32;
+            8u32
         } else {
-            16 / eb;
+            16 / eb
         };
         if n < all {
             self.c.alu_ri(x::AND, 4, rd, ((1u32 << n) - 1) as i32);
@@ -8529,13 +8529,13 @@ extend Gen {
             self.c.byte(0);
         }
         let (w0, w1) = if eb == 8 {
-            (1u64, 2u64);
+            (1u64, 2u64)
         } else if eb == 4 {
-            (0x0000000200000001u64, 0x0000000800000004u64);
+            (0x0000000200000001u64, 0x0000000800000004u64)
         } else if eb == 2 {
-            (0x0008000400020001u64, 0x0080004000200010u64);
+            (0x0008000400020001u64, 0x0080004000200010u64)
         } else {
-            (0x8040201008040201u64, 0x8040201008040201u64);
+            (0x8040201008040201u64, 0x8040201008040201u64)
         };
         // Each lane's bit: w0 low, w1 high (punpcklqdq of the two).
         self.c.mov_ri(S1, w0);
@@ -8547,9 +8547,9 @@ extend Gen {
         // pand, then pcmpeqb/w/d (8-byte lanes: pcmpeqd, then each low dword's result to its high one).
         self.c.sse_rr(0x66, 0x0FDB, mv, wv);
         let k = if eb == 8 {
-            2u32;
+            2u32
         } else {
-            eb.trailing_zeros() as u32;
+            eb.trailing_zeros() as u32
         };
         self.c.sse_rr(0x66, 0x0F74 + k, mv, wv);
         if eb == 8 {
@@ -8583,9 +8583,9 @@ extend Gen {
         }
         if hi {
             opc += if eb == 8 {
-                1u32;
+                1u32
             } else {
-                8u32;
+                8u32
             };
         }
         if nb == 32 && self.in_reg(t.ty) {
@@ -8614,9 +8614,9 @@ extend Gen {
         let d = self.mdef(i);
         let n = lanes(t.ty);
         let h = if hi {
-            n / 2;
+            n / 2
         } else {
-            0;
+            0
         };
         let x = self.tmp(false);
         for k in 0..n / 2 {
@@ -8661,9 +8661,9 @@ extend Gen {
             }
             // pshufd: lane k (of 4 bytes, or the two of an 8-byte lane) to lane 0.
             let imm = if eb == 8 {
-                2 * k | 2 * k + 1 << 2;
+                2 * k | 2 * k + 1 << 2
             } else {
-                k;
+                k
             };
             if is_float(lt) {
                 let rd = self.def(i) - V0;
@@ -8735,9 +8735,9 @@ extend Gen {
             } else {
                 let s = self.tmp(true) - V0;
                 let sh: u32 = if eb == 1 {
-                    0x71;
+                    0x71
                 } else {
-                    0x72;
+                    0x72
                 };
                 for (r, a) in [(rd, rx), (s, ry)] {
                     self.c.evex_rr(0x66, 1, sh, false, 6, r, a);
@@ -8749,9 +8749,9 @@ extend Gen {
                     0x66,
                     1,
                     if eb == 1 {
-                        0x63u32;
+                        0x63u32
                     } else {
-                        0x6Bu32;
+                        0x6Bu32
                     },
                     false,
                     rd,
@@ -8779,9 +8779,9 @@ extend Gen {
             } else {
                 let s = self.tmp(true) - V0;
                 let sh: u32 = if eb == 1 {
-                    0x71;
+                    0x71
                 } else {
-                    0x72;
+                    0x72
                 };
                 self.c.vex_rr(0x66, 1, sh, false, true, 6, rd, rx);
                 self.c.byte(eb * 8);
@@ -8795,9 +8795,9 @@ extend Gen {
                     0x66,
                     1,
                     if eb == 1 {
-                        0x63u32;
+                        0x63u32
                     } else {
-                        0x6Bu32;
+                        0x6Bu32
                     },
                     false,
                     true,
@@ -8826,9 +8826,9 @@ extend Gen {
             // psllw/pslld and psraw/psrad by the lane's bits (66 0F 71/72 /6 and /4 ib), then the pack.
             let s = self.tmp(true);
             let sh: u32 = if eb == 1 {
-                0x0F71;
+                0x0F71
             } else {
-                0x0F72;
+                0x0F72
             };
             self.c.vmov(rd - V0, rx - V0);
             self.c.vmov(s - V0, ry - V0);
@@ -8841,9 +8841,9 @@ extend Gen {
             self.c.sse_rr(
                 0x66,
                 if eb == 1 {
-                    0x0F63u32;
+                    0x0F63u32
                 } else {
-                    0x0F6Bu32;
+                    0x0F6Bu32
                 },
                 rd - V0,
                 s - V0,
@@ -8876,17 +8876,17 @@ extend Gen {
         if is_float(lt) {
             // EQ_OQ, LT_OS, LE_OS, GT_OS, GE_OS, NEQ_UQ.
             let imm: u32 = if c == C_OEQ {
-                0;
+                0
             } else if c == C_OLT {
-                1;
+                1
             } else if c == C_OLE {
-                2;
+                2
             } else if c == C_OGT {
-                0x0E;
+                0x0E
             } else if c == C_OGE {
-                0x0D;
+                0x0D
             } else {
-                4;
+                4
             };
             let d = lt == T_F64;
             self.c.evex_rr(d as u32 * 0x66, 1, 0xC2, d, 1, rx, ry);
@@ -8894,30 +8894,30 @@ extend Gen {
         } else {
             // EQ, LT, LE, NE, NLT, NLE.
             let imm: u32 = if c == C_EQ {
-                0;
+                0
             } else if c == C_NE {
-                4;
+                4
             } else if c == C_SLT || c == C_ULT {
-                1;
+                1
             } else if c == C_SLE || c == C_ULE {
-                2;
+                2
             } else if c == C_SGE || c == C_UGE {
-                5;
+                5
             } else {
-                6;
+                6
             };
             let opc = if eb <= 2 {
-                0x3Fu32;
+                0x3Fu32
             } else {
-                0x1Fu32;
+                0x1Fu32
             } - (c >= C_ULT) as u32;
             self.c.evex_rr(0x66, 3, opc, eb == 2 || eb == 8, 1, rx, ry);
             self.c.byte(imm);
         }
         let m = if eb <= 2 {
-            0x28u32;
+            0x28u32
         } else {
-            0x38u32;
+            0x38u32
         };
         self.c.evex_rr(0xF3, 2, m, eb == 2 || eb == 8, rd, 0, 1);
     }
@@ -8930,27 +8930,27 @@ extend Gen {
         let c = t.aux;
         let fl = is_float(lt);
         let swap = if fl {
-            c == C_OGT || c == C_OGE;
+            c == C_OGT || c == C_OGE
         } else {
-            c == C_SLT || c == C_SGE || c == C_ULT || c == C_UGE;
+            c == C_SLT || c == C_SGE || c == C_ULT || c == C_UGE
         };
         let (xv, yv) = if swap {
-            (t.b, t.a);
+            (t.b, t.a)
         } else {
-            (t.a, t.b);
+            (t.a, t.b)
         };
         let rx = self.vec_use(xv, self.vs0) - V0;
         let ry = self.vec_use(yv, self.vs1) - V0;
         let rd = self.vec_def(i) - V0;
         if fl {
             let imm: u32 = if c == C_OEQ {
-                0;
+                0
             } else if c == C_OLT || c == C_OGT {
-                1;
+                1
             } else if c == C_OLE || c == C_OGE {
-                2;
+                2
             } else {
-                4;
+                4
             };
             self.c.vex_rr((lt == T_F64) as u32 * 0x66, 1, 0xC2, false, l, rd, rx, ry);
             self.c.byte(imm);
@@ -8961,32 +8961,32 @@ extend Gen {
             (
                 2u32,
                 if eq {
-                    0x29u32;
+                    0x29u32
                 } else {
-                    0x37u32;
+                    0x37u32
                 }
-            );
+            )
         } else {
             (
                 1u32,
                 if eq {
-                    0x74u32;
+                    0x74u32
                 } else {
-                    0x64u32;
+                    0x64u32
                 } + eb.trailing_zeros() as u32
-            );
+            )
         };
         if c >= C_ULT {
             // The sign bits flipped: an unsigned order is the signed one.
             let s = self.tmp(true) - V0;
             let sb = if eb == 1 {
-                0x8080808080808080u64;
+                0x8080808080808080u64
             } else if eb == 2 {
-                0x8000800080008000u64;
+                0x8000800080008000u64
             } else if eb == 4 {
-                0x8000000080000000u64;
+                0x8000000080000000u64
             } else {
-                0x8000000000000000u64;
+                0x8000000000000000u64
             };
             self.ymm_splat64(s, sb);
             self.c.vex_rr(0x66, 1, 0xEF, false, l, rd, s, rx);
@@ -9067,9 +9067,9 @@ extend Gen {
             return;
         }
         let sb = if lt == T_F64 {
-            0x8000000000000000u64;
+            0x8000000000000000u64
         } else {
-            0x8000000080000000u64;
+            0x8000000080000000u64
         };
         self.c.mov_ri(S1, sb);
         self.c.movd_to_x(8, r, S1);
@@ -9102,9 +9102,9 @@ extend Gen {
         let mut un = false;
         let w = sse_of_op(op, lt, &mut un);
         let y = if un {
-            VNONE;
+            VNONE
         } else {
-            t.b;
+            t.b
         };
         let div = op >= O_SDIV && op <= O_UREM;
         let sh = op == O_SHL || op == O_LSHR || op == O_ASHR;
@@ -9118,11 +9118,11 @@ extend Gen {
             let ry = self.vec_use(t.b, self.vs1) - V0;
             let rd = self.vec_def(i) - V0;
             let opc: u32 = if op == O_SHL {
-                0x47;
+                0x47
             } else if op == O_LSHR {
-                0x45;
+                0x45
             } else {
-                0x46;
+                0x46
             };
             self.c.vex_rr(0x66, 2, opc, type_bytes(lt, 8) == 8, nb == 32, rd, rx, ry);
             return true;
@@ -9172,9 +9172,9 @@ extend Gen {
         let sg = op == O_ASHR || op == O_SDIV || op == O_SREM;
         let xr = self.tmp(false);
         let yr = if sh {
-            x::RCX;
+            x::RCX
         } else {
-            self.tmp(false);
+            self.tmp(false)
         };
         for k in 0..n {
             self.ld_lane(xr, t.a, k, lt, sg, false);
@@ -9204,9 +9204,9 @@ extend Gen {
             }
             self.c.unary(
                 if sgn {
-                    x::IDIV;
+                    x::IDIV
                 } else {
-                    x::DIV;
+                    x::DIV
                 },
                 8,
                 yr,
@@ -9215,20 +9215,20 @@ extend Gen {
                 8,
                 xr,
                 if op == O_SDIV || op == O_UDIV {
-                    x::RAX;
+                    x::RAX
                 } else {
-                    x::RDX;
+                    x::RDX
                 },
             );
         } else if op == O_SHL || op == O_LSHR || op == O_ASHR {
             assert(yr == x::RCX, "x64gen: a lane shift count outside rcx");
             self.c.shift_cl(
                 if op == O_SHL {
-                    x::SHL;
+                    x::SHL
                 } else if op == O_LSHR {
-                    x::SHR;
+                    x::SHR
                 } else {
-                    x::SAR;
+                    x::SAR
                 },
                 8,
                 xr,
@@ -9258,9 +9258,9 @@ extend Gen {
                 if fl != tl {
                     self.c.sse_rr(
                         if fl == T_F32 {
-                            0xF3u32;
+                            0xF3u32
                         } else {
-                            0xF2u32;
+                            0xF2u32
                         },
                         0x0F5A,
                         fa - V0,
@@ -9347,9 +9347,9 @@ extend Gen {
             self.c.byte(0x08);
         } else if op == O_TRUNC {
             let sh: u32 = if fb == 2 {
-                0x0F71;
+                0x0F71
             } else {
-                0x0F72;
+                0x0F72
             };
             self.c.vmov(rd, rx);
             self.c.sse_rr(0x66, sh, 6, rd);
@@ -9359,9 +9359,9 @@ extend Gen {
             self.c.sse_rr(
                 0x66,
                 if fb == 2 {
-                    0x0F63u32;
+                    0x0F63u32
                 } else {
-                    0x0F6Bu32;
+                    0x0F6Bu32
                 },
                 rd,
                 rd,
@@ -9399,17 +9399,17 @@ extend Gen {
         let op = t.op;
         if op == O_SEXT || op == O_ZEXT {
             let z: u32 = if op == O_ZEXT {
-                0x10;
+                0x10
             } else {
-                0;
+                0
             };
             // bw, wd, dq: 20, 23, 25.
             let w: u32 = if fb == 1 {
-                0x20;
+                0x20
             } else if fb == 2 {
-                0x23;
+                0x23
             } else {
-                0x25;
+                0x25
             };
             self.c.vex_rr(0x66, 2, w + z, false, true, rd, 0, rx);
         } else if op == O_TRUNC {
@@ -9418,9 +9418,9 @@ extend Gen {
                 self.c.byte(0x08);
             } else {
                 let sh: u32 = if fb == 2 {
-                    0x71;
+                    0x71
                 } else {
-                    0x72;
+                    0x72
                 };
                 self.c.vex_rr(0x66, 1, sh, false, true, 6, rd, rx);
                 self.c.byte(tb * 8);
@@ -9430,9 +9430,9 @@ extend Gen {
                     0x66,
                     1,
                     if fb == 2 {
-                        0x63u32;
+                        0x63u32
                     } else {
-                        0x6Bu32;
+                        0x6Bu32
                     },
                     false,
                     true,
@@ -9491,9 +9491,9 @@ extend Gen {
         // `vlanes` and `vmem` sync their operands past their register forms; every other form here first.
         let simd = code >= core::OP_SIMD && code < core::OP_CMP_LANES;
         let rule = if simd {
-            core::simd_op((code - core::OP_SIMD) as u8).rule;
+            core::simd_op((code - core::OP_SIMD) as u8).rule
         } else {
-            0u8;
+            0u8
         };
         if !simd || rule == core::SR_MLOAD || rule == core::SR_MSTORE || rule == core::SR_REDUCE || rule == core::SR_DOT || rule == core::SR_INDEX || rule == core::SR_RT_INDEX || rule == core::SR_MASKED {
             self.sync_ops(&ops);
@@ -9523,11 +9523,11 @@ extend Gen {
             let xr = self.tmp(false);
             let d = self.mdef(i);
             let sop = if code == core::OP_SHL_SCALAR {
-                x::SHL;
+                x::SHL
             } else if sg {
-                x::SAR;
+                x::SAR
             } else {
-                x::SHR;
+                x::SHR
             };
             for k in 0..n {
                 self.ld_lane(xr, ops[0], k, lt, sg, false);
@@ -9570,9 +9570,9 @@ extend Gen {
         let d = self.mdef(i);
         self.spill_for_call();
         let fname = if lt == T_F32 {
-            format("{}f", name);
+            format("{}f", name)
         } else {
-            String::from_str(name);
+            String::from_str(name)
         };
         for k in 0..n {
             self.ld_lane(V0, xv, k, lt, false, false);
@@ -9580,7 +9580,7 @@ extend Gen {
             if zv != VNONE {
                 self.ld_lane(V0 + 2, zv, k, lt, false, false);
             }
-            self.call_sym(fname.as_str());
+            self.call_sym(&fname);
             self.st_lane(V0, d, k, lt, false);
         }
     }
@@ -9590,11 +9590,11 @@ extend Gen {
     fn vlanes(self: &mut Self, i: u32, t: Inst, c: u8, sg: bool, dsg: bool, ops: &[Value; 4], tys: &[u8; 4]) {
         let rule = core::simd_op(c).rule;
         let vt = if rule == core::SR_CHOOSE {
-            tys[1];
+            tys[1]
         } else if rule == core::SR_ANY {
-            t.ty;
+            t.ty
         } else {
-            tys[0];
+            tys[0]
         };
         let lt = lane_type(vt);
         let eb = type_bytes(lt, 8);
@@ -9630,21 +9630,21 @@ extend Gen {
         let mask = rule == core::SR_MASK || rule == core::SR_CHANGED;
         let mut un = false;
         let w = if mask || rule != core::SR_VEC || nb < 8 {
-            NONE;
+            NONE
         } else {
-            sse_of_simd(c, lt, sg, &mut un);
+            sse_of_simd(c, lt, sg, &mut un)
         };
         let o = if un && c == core::SIMD_WRAP_NEG {
-            O_NEG;
+            O_NEG
         } else if un {
-            O_FADD;
+            O_FADD
         } else {
-            O_ADD;
+            O_ADD
         };
         let y = if un {
-            VNONE;
+            VNONE
         } else {
-            ops[1];
+            ops[1]
         };
         if w != NONE && Gen::in_vreg(t.ty) {
             self.sse_reg(w, o, lt, i, ops[0], y);
@@ -9664,9 +9664,9 @@ extend Gen {
             return;
         }
         let rlt = if mask || !is_vec(t.ty) {
-            lt;
+            lt
         } else {
-            lane_type(t.ty);
+            lane_type(t.ty)
         };
         // The rules that need a fixed register: a shift or rotate count in cl, a 64-bit unsigned product's
         // high half in rdx.
@@ -9691,37 +9691,37 @@ extend Gen {
         // Operand 1 as one scalar for every lane: a register read once.
         let scalar1 = rule != core::SR_CHOOSE && tys[1] != T_NONE && !is_vec(tys[1]);
         let s1 = if scalar1 {
-            self.reg(ops[1]);
+            self.reg(ops[1])
         } else {
-            NOREG;
+            NOREG
         };
         let cm = if rule == core::SR_CHOOSE {
-            self.reg(ops[0]);
+            self.reg(ops[0])
         } else {
-            NOREG;
+            NOREG
         };
         let xr = self.tmp(false);
         let yr = if shifts {
-            x::RCX;
+            x::RCX
         } else {
-            self.tmp(false);
+            self.tmp(false)
         };
         let traps = !fl && sg && c == core::SIMD_ABS || c == core::SIMD_NARROW_CHECKED;
         // The bit rules read a lane's own bits: zero-extended whatever its sign.
         let xsg = sg && c != core::SIMD_CLZ && c != core::SIMD_POPCNT && c != core::SIMD_ROTL && c != core::SIMD_ROTR;
         let fr = if traps {
-            self.tmp(false);
+            self.tmp(false)
         } else {
-            NOREG;
+            NOREG
         };
         if traps {
             self.c.alu_rr(x::XOR, 4, fr, fr);
         }
         let mut fails = Vector::<u64>::new();
         let (fa, fb, fc) = if fl || c == core::SIMD_CAST_CHANGED {
-            (self.tmp(true), self.tmp(true), self.tmp(true));
+            (self.tmp(true), self.tmp(true), self.tmp(true))
         } else {
-            (NOREG, NOREG, NOREG);
+            (NOREG, NOREG, NOREG)
         };
         for k in 0..n {
             if c == core::SIMD_IOTA {
@@ -9801,9 +9801,9 @@ extend Gen {
             if add || sub {
                 self.c.alu_rr(
                     if add {
-                        x::ADD;
+                        x::ADD
                     } else {
-                        x::SUB;
+                        x::SUB
                     },
                     8,
                     xr,
@@ -9847,11 +9847,11 @@ extend Gen {
     fn int_rule(self: &mut Self, c: u8, lb: u32, sg: bool, rlt: u8, rsg: bool, xr: u8, yr: u8, fr: u8) {
         if c == core::SIMD_WRAP_ADD || c == core::SIMD_WRAP_SUB || c == core::SIMD_WRAP_MUL {
             let op = if c == core::SIMD_WRAP_ADD {
-                O_ADD;
+                O_ADD
             } else if c == core::SIMD_WRAP_SUB {
-                O_SUB;
+                O_SUB
             } else {
-                O_MUL;
+                O_MUL
             };
             self.int_lane(op, xr, yr);
         } else if c == core::SIMD_WRAP_NEG {
@@ -9860,11 +9860,11 @@ extend Gen {
             self.c.alu_ri(x::AND, 4, x::RCX, (lb - 1) as i32);
             self.c.shift_cl(
                 if c == core::SIMD_WRAP_SHL {
-                    x::SHL;
+                    x::SHL
                 } else if sg {
-                    x::SAR;
+                    x::SAR
                 } else {
-                    x::SHR;
+                    x::SHR
                 },
                 8,
                 xr,
@@ -9874,9 +9874,9 @@ extend Gen {
             // The limit in r10, before the operation: a signed overflow goes the way of the operand's sign
             // (MAX ^ (y >> 63) for a sum, its complement for a difference), an unsigned one up for a sum.
             let max = if sg {
-                (1u64 << (lb - 1) as u64) - 1;
+                (1u64 << (lb - 1) as u64) - 1
             } else {
-                trunc64(~0u64, lb);
+                trunc64(~0u64, lb)
             };
             if sg {
                 self.c.mov_rr(8, S0, yr);
@@ -9884,9 +9884,9 @@ extend Gen {
                 self.c.mov_ri(
                     S1,
                     if add {
-                        max;
+                        max
                     } else {
-                        ~max;
+                        ~max
                     },
                 );
                 self.c.alu_rr(x::XOR, 8, S0, S1);
@@ -9894,9 +9894,9 @@ extend Gen {
                 self.mov_imm(
                     S0,
                     if add {
-                        max;
+                        max
                     } else {
-                        0;
+                        0
                     },
                     8,
                 );
@@ -9906,15 +9906,15 @@ extend Gen {
         } else if c == core::SIMD_MIN || c == core::SIMD_MAX {
             self.c.alu_rr(x::CMP, 8, xr, yr);
             let lt_c = if sg {
-                x::CC_L;
+                x::CC_L
             } else {
-                x::CC_B;
+                x::CC_B
             };
             self.c.cmov(
                 if c == core::SIMD_MIN {
-                    x::invert(lt_c);
+                    x::invert(lt_c)
                 } else {
-                    lt_c;
+                    lt_c
                 },
                 8,
                 xr,
@@ -9939,9 +9939,9 @@ extend Gen {
             self.c.mov_rr(8, xr, S1);
             self.c.cmov(
                 if sg {
-                    x::CC_G;
+                    x::CC_G
                 } else {
-                    x::CC_A;
+                    x::CC_A
                 },
                 8,
                 xr,
@@ -9971,9 +9971,9 @@ extend Gen {
             if lb == 64 {
                 self.c.shift_cl(
                     if c == core::SIMD_ROTL {
-                        x::ROL;
+                        x::ROL
                     } else {
-                        x::ROR;
+                        x::ROR
                     },
                     8,
                     xr,
@@ -9981,9 +9981,9 @@ extend Gen {
             } else {
                 // (u << k | u >> (lb - k) % lb), or the reverse: the store keeps the lane's bits.
                 let (s0, s1) = if c == core::SIMD_ROTL {
-                    (x::SHL, x::SHR);
+                    (x::SHL, x::SHR)
                 } else {
-                    (x::SHR, x::SHL);
+                    (x::SHR, x::SHL)
                 };
                 self.c.alu_ri(x::AND, 4, x::RCX, (lb - 1) as i32);
                 self.c.mov_rr(8, S0, xr);
@@ -10029,14 +10029,14 @@ extend Gen {
     // kept when it fits and failing `fr` when not. r10 and r11 are spent.
     fn narrow_lane(self: &mut Self, sat: bool, lb: u32, sg: bool, rw: u32, rsg: bool, xr: u8, fr: u8) {
         let rmax = if rsg {
-            (1u64 << (rw - 1) as u64) - 1;
+            (1u64 << (rw - 1) as u64) - 1
         } else {
-            trunc64(~0u64, rw);
+            trunc64(~0u64, rw)
         };
         let rmin = if rsg {
-            (1u64 << (rw - 1) as u64).wrapping_neg();
+            (1u64 << (rw - 1) as u64).wrapping_neg()
         } else {
-            0u64;
+            0u64
         };
         // `xr` above 2^63 only for an unsigned 64-bit lane: its top bit, taken as a value, is positive.
         let huge_u = !sg && lb == 64;
@@ -10075,9 +10075,9 @@ extend Gen {
         self.c.alu_rr(x::CMP, 8, xr, S0);
         self.c.cmov(
             if sg {
-                x::CC_G;
+                x::CC_G
             } else {
-                x::CC_A;
+                x::CC_A
             },
             8,
             xr,
@@ -10110,9 +10110,9 @@ extend Gen {
         let lb = type_bits(lt, 8);
         let sb = 1u64 << (lb - 1) as u64;
         let ucom = if dd {
-            0x66u32;
+            0x66u32
         } else {
-            0u32;
+            0u32
         };
         if c == core::SIMD_COPYSIGN || c == core::SIMD_IS_SIGN_NEG {
             self.ld_lane(xr, ops[0], k, lt, false, true);
@@ -10136,9 +10136,9 @@ extend Gen {
             self.ld_lane(fb, ops[1], k, lt, false, false);
             let swap = c == core::SIMD_CMP_LT || c == core::SIMD_CMP_LE;
             let (p, q) = if swap {
-                (fb, fa);
+                (fb, fa)
             } else {
-                (fa, fb);
+                (fa, fb)
             };
             self.c.sse_rr(ucom, 0x0F2E, p - V0, q - V0);
             if c == core::SIMD_CMP_EQ {
@@ -10152,9 +10152,9 @@ extend Gen {
             } else {
                 self.c.setcc(
                     if c == core::SIMD_CMP_LT || c == core::SIMD_CMP_GT {
-                        x::CC_A;
+                        x::CC_A
                     } else {
-                        x::CC_AE;
+                        x::CC_AE
                     },
                     S1,
                 );
@@ -10168,14 +10168,14 @@ extend Gen {
         }
         if c >= core::SIMD_IS_NAN && c <= core::SIMD_IS_SUBNORMAL {
             let minn = if dd {
-                0x0010000000000000u64;
+                0x0010000000000000u64
             } else {
-                0x00800000u64;
+                0x00800000u64
             };
             let maxf = if dd {
-                0x7FEFFFFFFFFFFFFFu64;
+                0x7FEFFFFFFFFFFFFFu64
             } else {
-                0x7F7FFFFFu64;
+                0x7F7FFFFFu64
             };
             if c == core::SIMD_IS_NAN {
                 self.c.sse_rr(ucom, 0x0F2E, fa - V0, fa - V0);
@@ -10246,19 +10246,19 @@ extend Gen {
     // A NaN goes through the arithmetic and comes out quiet. Through r11, xmm14 and xmm15.
     fn round_lane(self: &mut Self, c: u8, dd: bool, r: u8) {
         let big = if dd {
-            0x4330000000000000u64;
+            0x4330000000000000u64
         } else {
-            0x4B000000u64;
+            0x4B000000u64
         };
         let one = if dd {
-            0x3FF0000000000000u64;
+            0x3FF0000000000000u64
         } else {
-            0x3F800000u64;
+            0x3F800000u64
         };
         let ucom = if dd {
-            0x66u32;
+            0x66u32
         } else {
-            0u32;
+            0u32
         };
         let a = self.vs0 - V0;
         let t = self.vs1 - V0;
@@ -10276,16 +10276,16 @@ extend Gen {
             self.c.mov_ri(
                 S1,
                 if dd {
-                    0x7FFFFFFFFFFFFFFFu64;
+                    0x7FFFFFFFFFFFFFFFu64
                 } else {
-                    0x7FFFFFFFu64;
+                    0x7FFFFFFFu64
                 },
             );
             self.c.movd_to_x(
                 if dd {
-                    8u32;
+                    8u32
                 } else {
-                    4u32;
+                    4u32
                 },
                 t,
                 S1,
@@ -10299,16 +10299,16 @@ extend Gen {
         }
         // The sign back: a | (r & sign).
         let sb = if dd {
-            0x8000000000000000u64;
+            0x8000000000000000u64
         } else {
-            0x80000000u64;
+            0x80000000u64
         };
         self.c.mov_ri(S1, sb);
         self.c.movd_to_x(
             if dd {
-                8u32;
+                8u32
             } else {
-                4u32;
+                4u32
             },
             t,
             S1,
@@ -10327,9 +10327,9 @@ extend Gen {
             self.c.sse_rr(
                 fpfx(dd),
                 if c == core::SIMD_FLOOR {
-                    0x0F5Cu32;
+                    0x0F5Cu32
                 } else {
-                    0x0F58u32;
+                    0x0F58u32
                 },
                 a,
                 t,
@@ -10345,9 +10345,9 @@ extend Gen {
     // else a NaN gives the other operand, and two give `a`, quieted when `quiet`. Through r11 and xmm15.
     fn fminmax(self: &mut Self, dd: bool, lo: bool, nan: bool, quiet: bool, d: u8, a: u8, b: u8) {
         let ucom = if dd {
-            0x66u32;
+            0x66u32
         } else {
-            0u32;
+            0u32
         };
         let (av, bv) = (a - V0, b - V0);
         let mut to_a = Vector::<u32>::new();
@@ -10362,9 +10362,9 @@ extend Gen {
         to_a.push(
             self.c.jcc32(
                 if lo {
-                    x::CC_NE;
+                    x::CC_NE
                 } else {
-                    x::CC_E;
+                    x::CC_E
                 },
             ),
         );
@@ -10373,9 +10373,9 @@ extend Gen {
         to_a.push(
             self.c.jcc32(
                 if lo {
-                    x::CC_B;
+                    x::CC_B
                 } else {
-                    x::CC_A;
+                    x::CC_A
                 },
             ),
         );
@@ -10395,16 +10395,16 @@ extend Gen {
             if quiet {
                 self.c.vmov(d - V0, av);
                 let qb = if dd {
-                    0x0008000000000000u64;
+                    0x0008000000000000u64
                 } else {
-                    0x00400000u64;
+                    0x00400000u64
                 };
                 self.c.mov_ri(S1, qb);
                 self.c.movd_to_x(
                     if dd {
-                        8u32;
+                        8u32
                     } else {
-                        4u32;
+                        4u32
                     },
                     self.vs1 - V0,
                     S1,
@@ -10483,21 +10483,21 @@ extend Gen {
         }
         // A float and an integer: the integer side's range [lo, hi) as f64 bounds.
         let ib = if ff {
-            rt;
+            rt
         } else {
-            bt;
+            bt
         };
         let isg = if ff {
-            rs;
+            rs
         } else {
-            bs;
+            bs
         };
         let iw = type_bits(ib, 8) - isg as u32;
         let hi = 1023u64 + iw as u64 << 52;
         let lo = if isg {
-            hi | 1u64 << 63;
+            hi | 1u64 << 63
         } else {
-            0u64;
+            0u64
         };
         if ff {
             self.ld_lane(fa, ops[0], k, bt, false, false);
@@ -10553,11 +10553,11 @@ extend Gen {
         let raw = c == core::SIMD_LOAD_RAW || c == core::SIMD_STORE_RAW;
         let load = c == core::SIMD_LOAD || c == core::SIMD_LOAD_RAW;
         let vt = if load {
-            t.ty;
+            t.ty
         } else if raw {
-            tys[1];
+            tys[1]
         } else {
-            tys[2];
+            tys[2]
         };
         let eb = type_bytes(lane_type(vt), 8);
         let nb = type_bytes(vt, 8);
@@ -10575,9 +10575,9 @@ extend Gen {
             self.c.lea(p, x::ix(p, st, eb.trailing_zeros() as u8, 0));
         }
         let vv = if raw {
-            ops[1];
+            ops[1]
         } else {
-            ops[2];
+            ops[2]
         };
         if load && Gen::in_vreg(vt) {
             let rd = self.vec_def(i);
@@ -10623,9 +10623,9 @@ extend Gen {
             self.c.mov_rr(8, p, r0);
         }
         let st = if sl && !gat {
-            self.reg(ops[1]);
+            self.reg(ops[1])
         } else {
-            NOREG;
+            NOREG
         };
         let all = trunc64(~0u64, n);
         if c == core::SIMD_LOAD_OR {
@@ -10710,7 +10710,7 @@ extend Gen {
             // The element's address: p + ix * eb, or for the pointer forms lane k's pointer.
             let m = if ptrs {
                 self.c.load(8, false, ix, x::at(p, 8 * k as i32));
-                x::at(ix, 0);
+                x::at(ix, 0)
             } else {
                 if gat {
                     self.ld_lane(ix, ops[1], k, lane_type(tys[1]), false, false);
@@ -10721,7 +10721,7 @@ extend Gen {
                         self.c.mov_ri(ix, k);
                     }
                 }
-                x::ix(p, ix, s, 0);
+                x::ix(p, ix, s, 0)
             };
             if store {
                 self.ld_lane(xr, vv, k, lt, false, true);
@@ -10788,14 +10788,14 @@ extend Gen {
             self.ld_lane(acc, ops[0], 0, lt, sg, false);
         }
         let from: u32 = if dot {
-            0;
+            0
         } else {
-            1;
+            1
         };
         let lt_c = if sg {
-            x::CC_L;
+            x::CC_L
         } else {
-            x::CC_B;
+            x::CC_B
         };
         for k in from..n {
             self.ld_lane(xr, ops[0], k, lt, sg, false);
@@ -10806,11 +10806,11 @@ extend Gen {
             } else if c == core::SIMD_REDUCE_AND || c == core::SIMD_REDUCE_OR || c == core::SIMD_REDUCE_XOR {
                 self.c.alu_rr(
                     if c == core::SIMD_REDUCE_AND {
-                        x::AND;
+                        x::AND
                     } else if c == core::SIMD_REDUCE_OR {
-                        x::OR;
+                        x::OR
                     } else {
-                        x::XOR;
+                        x::XOR
                     },
                     8,
                     acc,
@@ -10825,9 +10825,9 @@ extend Gen {
                 self.c.alu_rr(x::CMP, 8, xr, acc);
                 self.c.cmov(
                     if c == core::SIMD_REDUCE_MIN {
-                        lt_c;
+                        lt_c
                     } else {
-                        x::invert(lt_c);
+                        x::invert(lt_c)
                     },
                     8,
                     acc,
@@ -10858,9 +10858,9 @@ extend Gen {
         let fa = self.tmp(true);
         let fb = self.tmp(true);
         let fo = if add {
-            O_FADD;
+            O_FADD
         } else {
-            O_FMUL;
+            O_FMUL
         };
         if c == core::SIMD_REDUCE_ADD_TREE || c == core::SIMD_REDUCE_MUL_TREE {
             // Halves in a scratch copy: lane j of the lower half with lane j of the upper, to one lane.
@@ -10886,27 +10886,27 @@ extend Gen {
         // A sum folds from -0.0, a product from 1.0; the extremes from lane 0.
         let fold = add || mul;
         let neg0 = if dd {
-            0x8000000000000000u64;
+            0x8000000000000000u64
         } else {
-            0x80000000u64;
+            0x80000000u64
         };
         if fold {
             self.fconst(
                 acc,
                 dd,
                 if add {
-                    neg0;
+                    neg0
                 } else {
-                    float_bits(at, 1);
+                    float_bits(at, 1)
                 },
             );
         } else {
             self.ld_lane(acc, ops[0], 0, lt, false, false);
         }
         let from: u32 = if fold {
-            0;
+            0
         } else {
-            1;
+            1
         };
         let lo = c == core::SIMD_REDUCE_MIN_NUM || c == core::SIMD_REDUCE_MINIMUM;
         for k in from..n {
@@ -11016,9 +11016,9 @@ extend Gen {
         let rd = self.def(i);
         // Not fitting: past 64 bits, or the magnitude past the limit (the negative limit one more).
         let lim = if sg {
-            1u64 << (lb - 1) as u64;
+            1u64 << (lb - 1) as u64
         } else {
-            trunc64(~0u64, lb);
+            trunc64(~0u64, lb)
         };
         self.c.mov_ri(S0, lim);
         self.c.alu_rr(x::CMP, 8, x::RAX, S0);
@@ -11053,13 +11053,13 @@ extend Gen {
         if !is_float(lt) {
             // The best value in `yr`; a strictly better lane takes over.
             let cc = if min && sg {
-                x::CC_L;
+                x::CC_L
             } else if min {
-                x::CC_B;
+                x::CC_B
             } else if sg {
-                x::CC_G;
+                x::CC_G
             } else {
-                x::CC_A;
+                x::CC_A
             };
             self.c.alu_rr(x::XOR, 4, rd, rd);
             self.ld_lane(yr, v, 0, lt, sg, false);
@@ -11074,9 +11074,9 @@ extend Gen {
         }
         let dd = lt == T_F64;
         let ucom = if dd {
-            0x66u32;
+            0x66u32
         } else {
-            0u32;
+            0u32
         };
         let fa = self.tmp(true);
         let fb = self.tmp(true);
@@ -11111,9 +11111,9 @@ extend Gen {
                 skips.push(
                     self.c.jcc32(
                         if min {
-                            x::CC_AE;
+                            x::CC_AE
                         } else {
-                            x::CC_B;
+                            x::CC_B
                         },
                     ),
                 );
@@ -11134,9 +11134,9 @@ extend Gen {
     fn vrearrange(self: &mut Self, i: u32, t: Inst, c: u8, ops: &[Value; 4], tys: &[u8; 4]) {
         let rule = core::simd_op(c).rule;
         let vt = if rule == core::SR_MASKED {
-            tys[1];
+            tys[1]
         } else {
-            tys[0];
+            tys[0]
         };
         let lt = lane_type(vt);
         let eb = type_bytes(lt, 8);
@@ -11176,9 +11176,9 @@ extend Gen {
             return;
         }
         let cnt = if rule == core::SR_INDEX {
-            self.b().pool[t.c as usize];
+            self.b().pool[t.c as usize]
         } else {
-            lanes(tys[1]);
+            lanes(tys[1])
         };
         if c == core::SIMD_SWIZZLE_OOB {
             // The mask of the lanes whose index is past the lanes.
@@ -11240,7 +11240,7 @@ extend Gen {
             return false;
         }
         for k in 0..rels.len() {
-            let s = self.obj().sym(rels[k].name.as_str());
+            let s = self.obj().sym(&rels[k].name);
             self.rels.push(CRel { at: rels[k].at, kind: rels[k].kind, sym: s, addend: rels[k].addend });
         }
         return true;
@@ -11356,15 +11356,15 @@ extend Gen {
         // The named registers first.
         for k in 0..n {
             let con = if k < no {
-                self.msg_text(asm_out_con(b, r, k));
+                self.msg_text(asm_out_con(b, r, k))
             } else {
-                self.msg_text(asm_in_con(b, r, k - no));
+                self.msg_text(asm_in_con(b, r, k - no))
             };
             let v = b.pool[(t.a + k) as usize];
             let ty = if k < no {
-                asm_out_ty(b, r, k);
+                asm_out_ty(b, r, k)
             } else {
-                self.vt(v);
+                self.vt(v)
             };
             let mut c: u8 = 0xFF;
             let mut rg: u8 = NOREG;
@@ -11458,9 +11458,9 @@ extend Gen {
                 continue;
             }
             let free = if c == AK_FP {
-                fp_pool;
+                fp_pool
             } else {
-                gp_pool;
+                gp_pool
             } & ~taken;
             if free == 0 {
                 return self.refuse("an asm with more register operands than the free registers");
@@ -11514,9 +11514,9 @@ extend Gen {
                 if c == AK_MEM {
                     let off = self.slot_alloc(16, 16) as i64;
                     let tr = if is_float(tys[k as usize]) {
-                        self.vs0;
+                        self.vs0
                     } else {
-                        S0;
+                        S0
                     };
                     self.materialize(v, tr);
                     self.st(tys[k as usize], tr, x::at(x::RSP, off as i32));
@@ -11575,7 +11575,7 @@ extend Gen {
                 return self.refuse("an asm operand modifier this generator does not take");
             }
         }
-        if !self.asm_text(text.as_str()) {
+        if !self.asm_text(&text) {
             return false;
         }
         for k in 0..mem_slots.len() {
@@ -11636,9 +11636,9 @@ extend Gen {
     // The vector registers the ABI saves.
     const fn vsave(self: &Self) u64 {
         return if self.win {
-            VSAVE_WIN;
+            VSAVE_WIN
         } else {
-            0u64;
+            0u64
         };
     }
 
@@ -11650,7 +11650,7 @@ extend Gen {
                 continue;
             }
             let tpl = String::from_str(self.msg_text(asm_template(b, b.insts[i].c)));
-            if !self.asm_text(tpl.as_str()) {
+            if !self.asm_text(&tpl) {
                 return false;
             }
         }
@@ -11659,19 +11659,19 @@ extend Gen {
         let o = self.obj();
         let k2 = o.sym(p.spell(ps.name));
         let sec = if ps.sect != NONE {
-            o.named(p.spell(ps.sect), true);
+            o.named(p.spell(ps.sect), true)
         } else if ps.cold {
-            o.named(self.cold_text(), true);
+            o.named(self.cold_text(), true)
         } else {
-            ob::S_TEXT;
+            ob::S_TEXT
         };
         if sec == ob::NOSEC {
             return self.refuse("too many sections");
         }
         let mut fl = ob::SF_FUNC | if ps.linkage == SL_GLOBAL && !self.local {
-            ob::SF_GLOBAL;
+            ob::SF_GLOBAL
         } else {
-            0;
+            0
         };
         if ps.used {
             fl |= ob::SF_USED;
@@ -11812,23 +11812,23 @@ fn gp_name(o: &mut String, r: u8, size: u32) {
         _ => {
             o.push_str(base);
         },
-    };
+    }
 }
 
 // The register a clobber names (`rax`, `eax`, `ax`, `al`, `r12`, `r12d`, `xmm6`), NOREG for none
 // (`memory`, `cc`, `dirflag`, `fpsr`, `flags`).
 fn x64_clobber(s0: str) u8 {
     let s = if s0.starts_with("%") {
-        s0.slice(1, s0.len());
+        s0.slice(1, s0.len())
     } else {
-        s0;
+        s0
     };
     if s.starts_with("xmm") || s.starts_with("ymm") || s.starts_with("zmm") {
         return switch s.slice(3, s.len()).parse_u32() {
             Some(n) => if n < 16 {
-                V0 + n as u8;
+                V0 + n as u8
             } else {
-                NOREG;
+                NOREG
             },
             None => NOREG,
         };

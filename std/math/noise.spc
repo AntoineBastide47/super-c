@@ -190,29 +190,29 @@ fn perlin2<T: Float>(pi: Vec<T, 4>, pf: Vec<T, 4>) T {
 // periodic one divides by `T(7)`; keep both forms, as they can differ in the last bit.
 fn grad3_layer<T: Float>(ixy: Vec<T, 4>, periodic: bool) (Vec<T, 4>, Vec<T, 4>, Vec<T, 4>) {
     let mut gx = if periodic {
-        ixy / T::from_i64(7);
+        ixy / T::from_i64(7)
     } else {
         ixy * T::from_decimal(
             1.0 / 7.0,
             "0.14285714285714285714285714285714285714285714285714285714285714285714285714285714",
-        );
+        )
     };
     let mut gy = if periodic {
-        fract(floor(gx) / T::from_i64(7)) - T::from_f64(0.5);
+        fract(floor(gx) / T::from_i64(7)) - T::from_f64(0.5)
     } else {
         fract(
             floor(gx) * T::from_decimal(
                 1.0 / 7.0,
                 "0.14285714285714285714285714285714285714285714285714285714285714285714285714285714",
             ),
-        ) - T::from_f64(0.5);
+        ) - T::from_f64(0.5)
     };
     gx = fract(gx);
     let gz = Vec::<T, 4>::splat(T::from_f64(0.5)) - abs(gx) - abs(gy);
     let sz = step(gz, Vec::<T, 4>::zero());
     gx = gx - sz * (step(T::zero(), gx) - T::from_f64(0.5));
     gy = gy - sz * (step(T::zero(), gy) - T::from_f64(0.5));
-    return gx, gy, gz;
+    return (gx, gy, gz);
 }
 
 // The 3D Perlin noise after the lattice corners `pi0`, `pi1` (reduced modulo 289) and the offset `pf0`
@@ -279,7 +279,7 @@ fn grad4_layer<T: Float>(ixy: Vec<T, 4>) (Vec<T, 4>, Vec<T, 4>, Vec<T, 4>, Vec<T
     let sw = step(gw, Vec::<T, 4>::zero());
     gx = gx - sw * (step(T::zero(), gx) - T::from_f64(0.5));
     gy = gy - sw * (step(T::zero(), gy) - T::from_f64(0.5));
-    return gx, gy, gz, gw;
+    return (gx, gy, gz, gw);
 }
 
 // The 4D Perlin noise after the lattice corners `pi0`, `pi1` and the offset `pf0` to `pi0` are known.
@@ -400,9 +400,9 @@ fn simplex2<T: Float>(v: Vec<T, 2>) T {
     let x0 = v - i + dot(i, Vec::<T, 2>::splat(c.e[0]));
 
     let i1 = if x0.e[0].greater(x0.e[1]) {
-        Vec::<T, 2>::new(T::one(), T::zero());
+        Vec::<T, 2>::new(T::one(), T::zero())
     } else {
-        Vec::<T, 2>::new(T::zero(), T::one());
+        Vec::<T, 2>::new(T::zero(), T::one())
     };
     let mut x12 = Vec::<T, 4>::new(x0.e[0], x0.e[1], x0.e[0], x0.e[1]) + Vec::<T, 4>::new(
         c.e[0],
@@ -525,9 +525,9 @@ fn grad4<T: Float>(j: T, ip: Vec<T, 4>) Vec<T, 4> {
     for k in 0..4 {
         unsafe {
             s.e[k] = if s.e[k].less(T::zero()) {
-                T::one();
+                T::one()
             } else {
-                T::zero();
+                T::zero()
             };
         }
     }

@@ -12,14 +12,14 @@ const PRE: str = "extern \"C\" { @noreturn fn exit(code: i32) void; fn putchar(c
 fn run_exit(label: str, body: str, code: i32) {
     let mut src = String::from_str(PRE);
     src.push_str(body);
-    h::expect_exit(label, src.as_str(), code);
+    h::expect_exit(label, &src, code);
 }
 
 // `run_exit` as a case of batch `b`.
 fn exit_case(b: &mut h::ExitBatch, label: str, body: str, code: i32) {
     let mut src = String::from_str(PRE);
     src.push_str(body);
-    b.add(label, src.as_str(), code);
+    b.add(label, &src, code);
 }
 
 fn operator_overload_lowering(b: &mut h::ExitBatch) {
@@ -133,7 +133,7 @@ fn main() i32 { let n: i32 = 3; return steps(1.0f32, n) + steps(W::<f32> { v: 1.
 extend f32 as Fl { pub fn lerp(a: f32, b: f32, t: f32) f32 { return a + (b - a) * t; } }
 interface Mix<A>: Copy { fn mix(self: Self, y: Self, a: A) Self; }
 extend<U: Fl> f32 as Mix<U> { pub fn mix(self: f32, y: f32, a: U) f32 { let _ = a; return self + y; } }
-extend f32 as Mix<bool> { pub fn mix(self: f32, y: f32, a: bool) f32 { return if a { y; } else { self; }; } }
+extend f32 as Mix<bool> { pub fn mix(self: f32, y: f32, a: bool) f32 { return if a { y } else { self }; } }
 fn mix<G: Mix<A>, A>(x: G, y: G, a: A) G { return x.mix(y, a); }
 fn gen<T: Fl>(x: f32, t: T) f32 { return mix(x, 2.0, t); }
 fn main() i32 { return (mix(1.0f32, 6.0f32, true) + gen(1.0, 0.5f32)) as i32; }
@@ -698,7 +698,7 @@ fn main() i32 { return f(N::A) + f(N::B) * 4 + f(N::C) * 16 + N::B as i32 + 2; }
 fn non_ascii_char_literals() {
     run_exit(
         "non-ASCII char literals",
-        "const K: u8 = '\\u{e9}' as u8;\nfn main() i32 { let c: char = 'é'; let d: char = '\\u{e9}'; let e: char = '\\xe9'; unsafe exit(if c as u8 == K && d as u8 == K && e as u8 == K { K as i32 - 200; } else { 1; }); }\n",
+        "const K: u8 = '\\u{e9}' as u8;\nfn main() i32 { let c: char = 'é'; let d: char = '\\u{e9}'; let e: char = '\\xe9'; unsafe exit(if c as u8 == K && d as u8 == K && e as u8 == K { K as i32 - 200 } else { 1 }); }\n",
         33,
     );
 }
@@ -790,7 +790,7 @@ fn main() i32 {
 fn mut_match_binding() {
     run_exit(
         "mut binding: &mut self method + reassign",
-        "struct C { pub n: i32 }\nextend C { fn bump(self: &mut C) { self.n = self.n + 1; } fn get(self: &C) i32 { return self.n; } }\nenum Opt { None, Some(C), }\nfn main() i32 {\n  let o = Opt::Some(C { n: 5 });\n  unsafe exit(switch o { Some(mut c) => { c.bump(); c.bump(); c = C { n: c.get() + 1 }; c.get(); }, None => { 0; }, });\n}\n",
+        "struct C { pub n: i32 }\nextend C { fn bump(self: &mut C) { self.n = self.n + 1; } fn get(self: &C) i32 { return self.n; } }\nenum Opt { None, Some(C), }\nfn main() i32 {\n  let o = Opt::Some(C { n: 5 });\n  unsafe exit(switch o { Some(mut c) => { c.bump(); c.bump(); c = C { n: c.get() + 1 }; c.get() }, None => { 0 }, });\n}\n",
         8,
     );
 }
@@ -910,7 +910,7 @@ fn array_field_coerces_to_slice() {
 fn array_coerces_to_slice_everywhere() {
     run_exit(
         "array into slice-typed aggregate members, field assignment and projections",
-        "struct A<'a> { pub s: []'a u8 }\nstruct P<'a> { pub k: i32, pub a: A<'a> }\nstruct T<'a>([]'a u8, i32);\nstruct W { pub arr: [u8; 2] }\nstruct G<T> { pub v: T }\nenum E<'a> { V([]'a u8), N }\nfn chk(s: []u8, a: u8, b: u8) i32 { if s.len() == 2 && s[0] == a && s[1] == b { return 0; } return 1; }\nfn main() i32 {\n  let x: [u8; 2] = [7, 9];\n  let w = W { arr: [5, 6] };\n  let r = &w;\n  let aa: [[u8; 2]; 2] = [[1u8, 2u8], [3u8, 4u8]];\n  let mut bad = chk(A { s: x }.s, 7, 9);\n  bad += chk(P { k: 1, a: A { s: x } }.a.s, 7, 9);\n  let t = T(x, 3);\n  bad += chk(t.0, 7, 9);\n  let tu: ([]u8, i32) = (x, 4);\n  bad += chk(tu.0, 7, 9);\n  let e = E::V(x);\n  switch e { V(s) => { bad += chk(s, 7, 9); }, N => { bad += 100; } };\n  let o: Option<[]u8> = Option::<[]u8>::Some(x);\n  bad += chk(o.unwrap(), 7, 9);\n  let l: [[]u8; 2] = [x, w.arr];\n  bad += chk(l[0], 7, 9) + chk(l[1], 5, 6);\n  let rp: [[]u8; 2] = [x; 2];\n  bad += chk(rp[1], 7, 9);\n  let mut m = A { s: w.arr };\n  bad += chk(m.s, 5, 6);\n  m.s = x;\n  bad += chk(m.s, 7, 9);\n  bad += chk(A { s: r.arr }.s, 5, 6) + chk(A { s: aa[1] }.s, 3, 4);\n  let g = G::<[]u8> { v: w.arr };\n  bad += chk(g.v, 5, 6);\n  unsafe exit(42 + bad);\n}\n",
+        "struct A<'a> { pub s: []'a u8 }\nstruct P<'a> { pub k: i32, pub a: A<'a> }\nstruct T<'a>([]'a u8, i32);\nstruct W { pub arr: [u8; 2] }\nstruct G<T> { pub v: T }\nenum E<'a> { V([]'a u8), N }\nfn chk(s: []u8, a: u8, b: u8) i32 { if s.len() == 2 && s[0] == a && s[1] == b { return 0; } return 1; }\nfn main() i32 {\n  let x: [u8; 2] = [7, 9];\n  let w = W { arr: [5, 6] };\n  let r = &w;\n  let aa: [[u8; 2]; 2] = [[1u8, 2u8], [3u8, 4u8]];\n  let mut bad = chk(A { s: x }.s, 7, 9);\n  bad += chk(P { k: 1, a: A { s: x } }.a.s, 7, 9);\n  let t = T(x, 3);\n  bad += chk(t.0, 7, 9);\n  let tu: ([]u8, i32) = (x, 4);\n  bad += chk(tu.0, 7, 9);\n  let e = E::V(x);\n  switch e { V(s) => { bad += chk(s, 7, 9); }, N => { bad += 100; } }\n  let o: Option<[]u8> = Option::<[]u8>::Some(x);\n  bad += chk(o.unwrap(), 7, 9);\n  let l: [[]u8; 2] = [x, w.arr];\n  bad += chk(l[0], 7, 9) + chk(l[1], 5, 6);\n  let rp: [[]u8; 2] = [x; 2];\n  bad += chk(rp[1], 7, 9);\n  let mut m = A { s: w.arr };\n  bad += chk(m.s, 5, 6);\n  m.s = x;\n  bad += chk(m.s, 7, 9);\n  bad += chk(A { s: r.arr }.s, 5, 6) + chk(A { s: aa[1] }.s, 3, 4);\n  let g = G::<[]u8> { v: w.arr };\n  bad += chk(g.v, 5, 6);\n  unsafe exit(42 + bad);\n}\n",
         42,
     );
     run_exit(
@@ -977,7 +977,7 @@ fn closure_captures_every_binding_kind() {
     // compile). All five kinds are captured here, so the emitted C proves each field is named.
     run_exit(
         "closure captures for / iterator / if-let / switch-arm / struct-shorthand bindings",
-        "fn apply<F: fn() i64>(f: F) i64 { return f(); }\nstruct P { pub a: i64, pub b: i64 }\nenum E { N, V(i64), }\nfn main() i32 {\n  let mut t: i64 = 0;\n  for i in 0..3 { t = t + apply(fn() i64 { return i; }); }\n  let mut v = Vector::<i64>::new();\n  v.push(4);\n  v.push(5);\n  for x in v.iter() { t = t + apply(fn() i64 { return *x; }); }\n  v.free();\n  let e = E::V(10);\n  if let V(n) = e { t = t + apply(fn() i64 { return n; }); }\n  switch e { V(n2) => { t = t + apply(fn() i64 { return n2; }); }, N => {}, };\n  let p = P { a: 6, b: 7 };\n  switch p { P { a, b } => { t = t + apply(fn() i64 { return a + b; }); }, };\n  unsafe exit(t as i32);\n}\n",
+        "fn apply<F: fn() i64>(f: F) i64 { return f(); }\nstruct P { pub a: i64, pub b: i64 }\nenum E { N, V(i64), }\nfn main() i32 {\n  let mut t: i64 = 0;\n  for i in 0..3 { t = t + apply(fn() i64 { return i; }); }\n  let mut v = Vector::<i64>::new();\n  v.push(4);\n  v.push(5);\n  for x in v.iter() { t = t + apply(fn() i64 { return *x; }); }\n  v.free();\n  let e = E::V(10);\n  if let V(n) = e { t = t + apply(fn() i64 { return n; }); }\n  switch e { V(n2) => { t = t + apply(fn() i64 { return n2; }); }, N => {}, }\n  let p = P { a: 6, b: 7 };\n  switch p { P { a, b } => { t = t + apply(fn() i64 { return a + b; }); }, }\n  unsafe exit(t as i32);\n}\n",
         45,
     );
 }
@@ -1400,7 +1400,7 @@ fn box_reaches_a_generic_reference_param_unchanged() {
 @test
 fn derive_takes_lifetime_parameters() {
     let r = h::compile_and_run(
-        "@derive(Eq, Copy)\nstruct Tag<'a, T: Copy> {\n    pub name: str<'a>,\n    pub v: T,\n}\nfn twice<C: Copy>(c: C) (C, C) {\n    return c, c;\n}\nfn main() i32 {\n    let s = String::from_str(\"ab\");\n    let a = Tag::<i32> { name: s.as_str(), v: 1 };\n    let (b, c) = twice(Tag::<i32> { name: \"ab\", v: 1 });\n    return (a == b) as i32 + (b == c) as i32 + (a != Tag::<i32> { name: \"ab\", v: 2 }) as i32 - 3;\n}\n",
+        "@derive(Eq, Copy)\nstruct Tag<'a, T: Copy> {\n    pub name: str<'a>,\n    pub v: T,\n}\nfn twice<C: Copy>(c: C) (C, C) {\n    return (c, c);\n}\nfn main() i32 {\n    let s = String::from_str(\"ab\");\n    let a = Tag::<i32> { name: s.as_str(), v: 1 };\n    let (b, c) = twice(Tag::<i32> { name: \"ab\", v: 1 });\n    return (a == b) as i32 + (b == c) as i32 + (a != Tag::<i32> { name: \"ab\", v: 2 }) as i32 - 3;\n}\n",
     );
     assert(r.built, "a derived conformance of a lifetime-parameterized type builds");
     assert_eq(r.exit, 0);
@@ -2094,7 +2094,7 @@ extend<T: Free, E> X<T, E> as Free {
             A(v) => v.free(),
             B(e) => e.free(),
             C => {},
-        };
+        }
     }
 }
 fn heap(tag: str) String {
@@ -2215,7 +2215,7 @@ fn early(k: i32) usize {
             }
         },
         _ => {},
-    };
+    }
     return 0;
 }
 fn main() i32 {
@@ -3253,7 +3253,7 @@ fn main() i32 {
 fn multi_value_unsafe_call_binds(b: &mut h::ExitBatch) {
     b.add(
         "let (a, b) = unsafe f();",
-        M"(unsafe fn two(x: i32) (String, i32) { let mut s = String::new(); s.push_str("ab"); return s, x + 1; }
+        M"(unsafe fn two(x: i32) (String, i32) { let mut s = String::new(); s.push_str("ab"); return (s, x + 1); }
 fn main() i32 {
     let (s, n) = unsafe two(3);
     let (t, m) = (unsafe two(5));
@@ -3271,11 +3271,11 @@ fn multi_value_call_forwarded_by_return() {
     let mut b = h::ExitBatch::new();
     b.add(
         "return pair();",
-        M"(fn pair(n: i32) (String, i32) { let mut s = String::new(); s.push_str("abc"); return s, n; }
+        M"(fn pair(n: i32) (String, i32) { let mut s = String::new(); s.push_str("abc"); return (s, n); }
 fn forward(n: i32) (String, i32) { if n > 10 { return pair(1); } return pair(n); }
-fn gen<T: Copy>(t: T) (T, T) { return t, t; }
+fn gen<T: Copy>(t: T) (T, T) { return (t, t); }
 fn gfwd<T: Copy>(t: T) (T, T) { return gen(t); }
-const fn cp() (i32, i32) { return 3, 4; }
+const fn cp() (i32, i32) { return (3, 4); }
 const fn cf() (i32, i32) { return cp(); }
 const fn sum() i32 { let (a, b) = cf(); return a + b; }
 const S: i32 = sum();
@@ -3290,7 +3290,7 @@ fn main() i32 {
     // Array results fill the carrier by copy, also when forwarded.
     b.add(
         "array results",
-        M"(fn pair(k: u32) ([u32; 2], i64, [String; 1]) { let v: [u32; 2] = [1, k]; return v, 7, [String::from_str("xy")]; }
+        M"(fn pair(k: u32) ([u32; 2], i64, [String; 1]) { let v: [u32; 2] = [1, k]; return (v, 7, [String::from_str("xy")]); }
 fn fwd() ([u32; 2], i64, [String; 1]) { return pair(4); }
 fn main() i32 {
     let (v, n, s) = fwd();
@@ -3301,7 +3301,7 @@ fn main() i32 {
     );
     h::expect_err_msg(
         "a forwarded result of another type",
-        "fn pair() (i32, i64) { return 1, 2; }\nfn forward() (i32, i32) { return pair(); }\nfn main() i32 { let (a, b) = forward(); return a + b; }\n",
+        "fn pair() (i32, i64) { return (1, 2); }\nfn forward() (i32, i32) { return pair(); }\nfn main() i32 { let (a, b) = forward(); return a + b; }\n",
         "mismatched types: expected '(i32, i32)', found '(i32, i64)'",
     );
     b.run();
@@ -3593,7 +3593,7 @@ fn assert_fails_out_of_line() {
 }
 fn main(args: Vector<str>) i32 {
     let m = args.len() > 1 && args[1] == "m";
-    let a: f32 = if m { -1.0; } else if args.len() > 1 { 2.0; } else { 0.5; };
+    let a: f32 = if m { -1.0 } else if args.len() > 1 { 2.0 } else { 0.5 };
     check(a, m);
     return 0;
 }
@@ -3646,7 +3646,7 @@ fn main() i32 {
     }
     (*m)[3][7] = 2.5;
     let ok2 = (*m)[3][7] == 2.5 && (*m)[255][255] == 1.0 && (*m)[1][0] == 0.0;
-    return if ok1 && ok2 && (*b)[2] == 7 { 0; } else { 1; };
+    return if ok1 && ok2 && (*b)[2] == 7 { 0 } else { 1 };
 }
 )",
         0,
@@ -3722,7 +3722,7 @@ fn main() i32 {
     let b = W::<bool> { e: true };
     let d: &dyn Key = &b;
     let ok = through(&a) == 7 && through(&b) == 11 && b.key() == 11 && d.key() == 11 && b.twice() == 22 && a.twice() == 14;
-    return if ok { 0; } else { 1; };
+    return if ok { 0 } else { 1 };
 }
 )";
     b.add("the generic conformance first", format("{}{}{}{}", head, generic, concrete, tail).as_str(), 0);
@@ -3983,7 +3983,7 @@ fn g<U: Conv<i32> + Conv<bool>>(u: &U) i32 {
     let b: bool = u.conv();
     let c: i32 = U::mk();
     let d: bool = U::conv(u);
-    return a + c + if b && d { 100; } else { 0; };
+    return a + c + if b && d { 100 } else { 0 };
 }
 fn h(d: &dyn Conv<bool>) bool { return d.conv(); }
 fn main() i32 {
@@ -4101,16 +4101,16 @@ fn main() i32 {
 fn several_result_fn_values(b: &mut h::ExitBatch) {
     b.add(
         "fn pointers and dyn fn values with several results",
-        M"(fn two(x: i32) (i32, i32) { return x, x + 1; }
-fn swap(x: i32) (i32, i32) { return x + 1, x; }
+        M"(fn two(x: i32) (i32, i32) { return (x, x + 1); }
+fn swap(x: i32) (i32, i32) { return (x + 1, x); }
 fn named(n: i32) (String, i32) {
     let mut s = String::new();
     for _ in 0..n { s.push_str("ab"); }
-    return s, n;
+    return (s, n);
 }
-fn gen<T: Copy>(x: T) (T, T) { return x, x; }
+fn gen<T: Copy>(x: T) (T, T) { return (x, x); }
 struct Z {}
-fn unit(x: i32) (i32, Z, i32) { return x, Z {}, x * 2; }
+fn unit(x: i32) (i32, Z, i32) { return (x, Z {}, x * 2); }
 struct H { pub f: fn(i32) (i32, i32) }
 fn apply(f: fn(i32) (i32, i32), x: i32) i32 {
     let (a, b) = f(x);
@@ -4149,10 +4149,10 @@ fn main() i32 {
         s = s * 100 + x * 10 + y;
     }
     if s != 2332 { return 3; }
-    let cl: fn(i32) (i32, i32) = fn(x: i32) (i32, i32) { return x * 2, x * 3; };
+    let cl: fn(i32) (i32, i32) = fn(x: i32) (i32, i32) { return (x * 2, x * 3); };
     if apply(cl, 2) != 46 { return 4; }
     let k = 7;
-    let bx: Box<dyn fn(i32) (i32, i32)> = Box::new(fn(x: i32) (i32, i32) { return x + k, x - k; });
+    let bx: Box<dyn fn(i32) (i32, i32)> = Box::new(fn(x: i32) (i32, i32) { return (x + k, x - k); });
     let (p, q) = bx(10);
     if p * 100 + q != 1703 || call_dyn(&two, 4) != 45 { return 5; }
     let r: &dyn fn(i32) (i32, i32) = &swap;
@@ -4164,14 +4164,14 @@ fn main() i32 {
     let (g1, g2) = gf(8);
     if g1 + g2 != 16 { return 8; }
     let owned = String::from_str("owned capture that is long enough to live on the heap");
-    let bo: Box<dyn fn(i32) (String, i32)> = Box::new(move fn(x: i32) (String, i32) { return owned.clone(), x; });
+    let bo: Box<dyn fn(i32) (String, i32)> = Box::new(move fn(x: i32) (String, i32) { return (owned.clone(), x); });
     let (os, on) = bo(1);
     if os.len() as i32 + on != 54 { return 9; }
-    let c2 = fn(x: i32) (i32, i32) { return x + k, k; };
+    let c2 = fn(x: i32) (i32, i32) { return (x + k, k); };
     let (e1, e2) = c2(1);
     if e1 != 8 || e2 != 7 || ap(two) != 23 || ap(c2) != 97 { return 10; }
     let big = String::from_str("a heap string longer than twenty-three bytes");
-    if ap_move(move fn(x: i32) (String, i32) { return big.clone(), x; }) != 46 { return 11; }
+    if ap_move(move fn(x: i32) (String, i32) { return (big.clone(), x); }) != 46 { return 11; }
     let uf: fn(i32) (i32, Z, i32) = unit;
     let (u1, _, u2) = uf(4);
     if u1 + u2 != 12 { return 12; }
@@ -4471,7 +4471,7 @@ fn dyn_methods_with_several_results(b: &mut h::ExitBatch) {
         let (w, n) = self.dims();
         let mut s = String::from_str("shape:");
         s.push_string(&n);
-        return s, w * 10;
+        return (s, w * 10);
     }
     fn pair(self: &Self) [String; 2] {
         return [String::from_str("a"), String::from_str("b")];
@@ -4479,24 +4479,24 @@ fn dyn_methods_with_several_results(b: &mut h::ExitBatch) {
 }
 struct Rect { pub w: i32, pub h: i32 }
 extend Rect as Shape {
-    pub fn dims(self: &Self) (i32, String) { return self.w * self.h, String::from_str("rect"); }
+    pub fn dims(self: &Self) (i32, String) { return (self.w * self.h, String::from_str("rect")); }
     pub fn corners(self: &Self) [i32; 2] { return [self.w, self.h]; }
     pub fn grow(self: &mut Self, by: i32) (i32, i32) {
         self.w += by;
         self.h += by;
-        return self.w, self.h;
+        return (self.w, self.h);
     }
     pub fn pair(self: &Self) [String; 2] { return [String::from_str("r"), String::from_str("q")]; }
 }
 struct Dot { pub r: i32 }
 extend Dot as Shape {
-    pub fn dims(self: &Self) (i32, String) { return self.r, String::from_str("dot"); }
+    pub fn dims(self: &Self) (i32, String) { return (self.r, String::from_str("dot")); }
     pub fn corners(self: &Self) [i32; 2] { return [0, 0]; }
     pub fn grow(self: &mut Self, by: i32) (i32, i32) {
         self.r += by;
-        return self.r, 0;
+        return (self.r, 0);
     }
-    pub fn label(self: &Self) (String, i32) { return String::from_str("dot!"), 1; }
+    pub fn label(self: &Self) (String, i32) { return (String::from_str("dot!"), 1); }
 }
 interface Src<A> {
     fn get(self: &Self) (A, String);
@@ -4508,10 +4508,10 @@ interface Src<A> {
 }
 struct K { pub v: i32 }
 extend K as Src<i32> {
-    pub fn get(self: &Self) (i32, String) { return self.v, String::from_str("k"); }
+    pub fn get(self: &Self) (i32, String) { return (self.v, String::from_str("k")); }
 }
 extend K as Src<bool> {
-    pub fn get(self: &Self) (bool, String) { return self.v > 0, String::from_str("kb"); }
+    pub fn get(self: &Self) (bool, String) { return (self.v > 0, String::from_str("kb")); }
 }
 fn show(s: &dyn Shape) i32 {
     let (a, n) = s.dims();
@@ -4670,12 +4670,12 @@ extend K as Make<i32> {
 }
 extend K as Make<bool> {
     pub fn make(self: &Self, a: bool) String {
-        return String::from_str(if a { "t"; } else { "f"; });
+        return String::from_str(if a { "t" } else { "f" });
     }
 }
 const fn tf(t: bool) i32 {
     let k = K { base: 1 };
-    return if k.sum(t, !t).as_str() == "tf" { 1; } else { 2; };
+    return if k.sum(t, !t).as_str() == "tf" { 1 } else { 2 };
 }
 const C: i32 = tf(true);
 fn via<T: Make<bool>>(t: &T) String { return t.sum(false, true); }
@@ -4712,7 +4712,7 @@ fn self_path_names_the_implementing_type(b: &mut h::ExitBatch) {
         M"(interface Cnt {
     fn count() i32;
     fn twice() i32 { return Self::count() * 2; }
-    fn pair(v: i32) (i32, i32) { return v + Self::count(), v; }
+    fn pair(v: i32) (i32, i32) { return (v + Self::count(), v); }
 }
 struct P { pub v: i32 }
 extend P {
@@ -4765,7 +4765,7 @@ fn dyn_generic_superinterface(b: &mut h::ExitBatch) {
         "dyn with a generic superinterface",
         M"(interface A<T> {
     fn get(self: &Self) T;
-    fn pair(self: &Self) (T, T) { return self.get(), self.get(); }
+    fn pair(self: &Self) (T, T) { return (self.get(), self.get()); }
     fn twice(self: &Self) i32 { return 2; }
 }
 interface B<T>: A<T> {
@@ -5019,7 +5019,7 @@ fn atomic_memory_orders_are_checked() {
     let root = p.dir();
     let mut args = String::new();
     args.format_into("build \"{}/main.spc\" -o \"{}/bin\"", root, root);
-    assert(p.run_raw(args.as_str()).ok());
+    assert(p.run_raw(&args).ok());
     // Per operation, its valid codes, then (OP=7) each failure order stronger than its success order:
     // Relaxed + Acquire, Release + Acquire, and each weaker success with SeqCst.
     let valid: []str = [
@@ -5132,7 +5132,7 @@ fn a_reference_to_an_array_parameter_reads_it(b: &mut h::ExitBatch) {
 fn a_generic_method_value_is_its_instance(b: &mut h::ExitBatch) {
     b.add(
         "generic method values",
-        "struct W<T> {\n    pub v: T,\n}\n\nextend<T: Copy> W<T> {\n    pub fn make(v: T) Self {\n        return W::<T> { v: v };\n    }\n\n    pub fn get(self: &Self) T {\n        return self.v;\n    }\n\n    pub fn pair(self: Self, o: Self) (T, T) {\n        return self.v, o.v;\n    }\n}\n\nfn main() i32 {\n    let mk = W::<i64>::make;\n    let g = W::<i64>::get;\n    let sq = Simd::<f32, 4>::sqrt;\n    let ad = Simd::<i8, 4>::abs_diff;\n    let w = mk(5);\n    let (x, y) = w.pair(mk(2));\n    let r = sq(Simd::<f32, 4>::splat(16.0));\n    let d = ad(Simd::<i8, 4>::splat(-100), Simd::<i8, 4>::splat(100));\n    return (g(&w) + x + y) as i32 + r[0] as i32 + d[0] as i32 - 216;\n}\n",
+        "struct W<T> {\n    pub v: T,\n}\n\nextend<T: Copy> W<T> {\n    pub fn make(v: T) Self {\n        return W::<T> { v: v };\n    }\n\n    pub fn get(self: &Self) T {\n        return self.v;\n    }\n\n    pub fn pair(self: Self, o: Self) (T, T) {\n        return (self.v, o.v);\n    }\n}\n\nfn main() i32 {\n    let mk = W::<i64>::make;\n    let g = W::<i64>::get;\n    let sq = Simd::<f32, 4>::sqrt;\n    let ad = Simd::<i8, 4>::abs_diff;\n    let w = mk(5);\n    let (x, y) = w.pair(mk(2));\n    let r = sq(Simd::<f32, 4>::splat(16.0));\n    let d = ad(Simd::<i8, 4>::splat(-100), Simd::<i8, 4>::splat(100));\n    return (g(&w) + x + y) as i32 + r[0] as i32 + d[0] as i32 - 216;\n}\n",
         0,
     );
 }
@@ -5286,7 +5286,7 @@ fn enum_payloads_rebuilt(b: &mut h::ExitBatch) {
     exit_case(
         b,
         "enum rebuilt from its payload",
-        "enum E { A(u64, u64), B(u64), C }\n@noinline\nfn flip(e: E) E {\n    return switch e {\n        A(x, y) => E::B(x + y),\n        B(x) => E::A(x, x + 1),\n        C => E::C,\n    };\n}\nfn main() i32 {\n    let mut e = E::A(5, 6);\n    e = switch e {\n        A(x, y) => E::B(x + y),\n        B(x) => E::A(x, x),\n        C => E::C,\n    };\n    e = switch e {\n        A(x, y) => E::B(x * y),\n        B(x) => E::A(x, x + 1),\n        C => E::C,\n    };\n    e = flip(flip(e));\n    let mut sum: u64 = 0;\n    for i in 0..10u64 {\n        let o = if i % 3 == 0 {\n            Option::<u64>::None;\n        } else {\n            Option::<u64>::Some(i);\n        };\n        if let Some(v) = o {\n            sum += v;\n        }\n    }\n    return switch e {\n        A(x, y) => (x + y + sum) as i32,\n        _ => 1,\n    };\n}\n",
+        "enum E { A(u64, u64), B(u64), C }\n@noinline\nfn flip(e: E) E {\n    return switch e {\n        A(x, y) => E::B(x + y),\n        B(x) => E::A(x, x + 1),\n        C => E::C,\n    };\n}\nfn main() i32 {\n    let mut e = E::A(5, 6);\n    e = switch e {\n        A(x, y) => E::B(x + y),\n        B(x) => E::A(x, x),\n        C => E::C,\n    };\n    e = switch e {\n        A(x, y) => E::B(x * y),\n        B(x) => E::A(x, x + 1),\n        C => E::C,\n    };\n    e = flip(flip(e));\n    let mut sum: u64 = 0;\n    for i in 0..10u64 {\n        let o = if i % 3 == 0 {\n            Option::<u64>::None\n        } else {\n            Option::<u64>::Some(i)\n        };\n        if let Some(v) = o {\n            sum += v;\n        }\n    }\n    return switch e {\n        A(x, y) => (x + y + sum) as i32,\n        _ => 1,\n    };\n}\n",
         74,
     );
 }
@@ -5559,7 +5559,7 @@ fn f(t: (i64, u8)) i64 { return t.0 + t.1 as i64; }
         src.push_str("fn main() i32 { ");
         src.push_str(bodies[i].1);
         src.push_str(" }\n");
-        b.add(bodies[i].0, src.as_str(), 0);
+        b.add(bodies[i].0, &src, 0);
     }
 }
 
@@ -5645,16 +5645,16 @@ fn assert_eq_prints_its_operands() {
             break;
         }
         let w = if c {
-            h::compile_and_run_c(WIDE);
+            h::compile_and_run_c(WIDE)
         } else {
-            h::compile_and_run(WIDE);
+            h::compile_and_run(WIDE)
         };
         assert(w.built && w.exit != 0, "the wide assertion fails");
         assert(cli::contains_str(w.out, "  left:  9223372036854775808\n  right: 3\n"), "the wide operands");
         let f = if c {
-            h::compile_and_run_c(FLOAT);
+            h::compile_and_run_c(FLOAT)
         } else {
-            h::compile_and_run(FLOAT);
+            h::compile_and_run(FLOAT)
         };
         assert(f.built && f.exit != 0, "the float assertion fails");
         assert(cli::contains_str(f.out, "`x != 1.5`\n  left:  1.5\n  right: 1.5\n"), "the float operands");
@@ -5752,9 +5752,9 @@ extend Zst as Copy {}
 struct H<A> { pub a: A }
 extend<A: Copy> H<A> {
     @noinline
-    fn two(self: &H<A>) (A, A) { return self.a, self.a; }
+    fn two(self: &H<A>) (A, A) { return (self.a, self.a); }
 }
-fn both<A, B>(a: A, b: B) (A, B) { return a, b; }
+fn both<A, B>(a: A, b: B) (A, B) { return (a, b); }
 @noinline
 fn keep<A, B>(a: A, b: B) (A, B) {
     let mut x = a;
@@ -5764,13 +5764,13 @@ fn keep<A, B>(a: A, b: B) (A, B) {
         x = p;
         y = q;
     }
-    return x, y;
+    return (x, y);
 }
 @noinline
 fn fwd<A, B>(a: A, b: B) (A, B) { return keep(a, b); }
 interface Two { fn two(self: &Self) (Zst, Zst); }
 struct T2 { pub k: i32 }
-extend T2 as Two { fn two(self: &Self) (Zst, Zst) { return Zst {}, Zst {}; } }
+extend T2 as Two { fn two(self: &Self) (Zst, Zst) { return (Zst {}, Zst {}); } }
 fn main() i32 {
     let (x, y) = keep(Zst {}, Zst {});
     let (p, q) = fwd(Zst {}, 3);
@@ -5865,7 +5865,7 @@ fn map_entry_api_folds(b: &mut h::ExitBatch) {
             r = *o.get();
         },
         Vacant(_) => {},
-    };
+    }
     *m.entry(4).or_insert(0) += 10;
     *m.entry(7).or_insert(5) += 1;
     m.entry(7).and_modify(fn(v: &mut i64) { *v *= 2; });
@@ -5876,20 +5876,20 @@ fn map_entry_api_folds(b: &mut h::ExitBatch) {
             *o.get_mut() += 1;
         },
         Vacant(_) => {},
-    };
+    }
     switch m.entry(11) {
         Occupied(_) => {},
         Vacant(v) => {
             r += *v.key();
             let _ = v.insert(2);
         },
-    };
+    }
     switch m.entry(4) {
         Occupied(o) => {
             r += o.remove();
         },
         Vacant(_) => {},
-    };
+    }
     return r * 1000 + *m.get(&7).unwrap() * 100 + *m.get(&9).unwrap() + m.len() as i64;
 }
 const A: i64 = f();
@@ -6010,20 +6010,20 @@ fn f(t: (i64, u8)) i64 { return t.0 + t.1 as i64; }
     src.push_str("fn main() i32 { return f((1, 300)) as i32; }\n");
     h::expect_err_msg(
         "a tuple literal out of range for its parameter",
-        src.as_str(),
+        &src,
         "integer literal is out of range for 'u8'",
     );
     src = String::from_str(PRE);
     src.push_str("fn main() i32 { let r = Row { w: 1 }; return tk((&r, 1, 2)); }\n");
-    h::expect_err_msg("a tuple of the wrong arity", src.as_str(), "mismatched types");
+    h::expect_err_msg("a tuple of the wrong arity", &src, "mismatched types");
     src = String::from_str(PRE);
     src.push_str("fn main() i32 { return tk((1, 2)); }\n");
-    h::expect_err_msg("a tuple element of the wrong type", src.as_str(), "mismatched types");
+    h::expect_err_msg("a tuple element of the wrong type", &src, "mismatched types");
     src = String::from_str(PRE);
     src.push_str(
         "fn main() i32 { let r = Row { w: 1 }; let r2 = Row { w: 2 }; let a = [&r, &r2]; let s = a as []&dyn Sh; return s[0].area(); }\n",
     );
-    h::expect_err_msg("an array cast to a slice of dyn", src.as_str(), "invalid cast from '[&Row; 2]'");
+    h::expect_err_msg("an array cast to a slice of dyn", &src, "invalid cast from '[&Row; 2]'");
     h::expect_err_msg(
         "an array cast to a slice",
         "fn main() i32 { let a = [1, 2]; let s = a as []i32; return s[1]; }\n",

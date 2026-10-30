@@ -20,7 +20,7 @@ fn all_scalars() String {
 fn round_trips_every_scalar_value() {
     let text = all_scalars();
     let mut units = Vector::<u16>::new();
-    assert(utf16::encode(text.as_str(), &mut units).is_ok());
+    assert(utf16::encode(&text, &mut units).is_ok());
     // The unit stream is the RFC 2781 form of the same sequence.
     let mut k: usize = 0;
     for c in 0u32..0x110000u32 {
@@ -44,7 +44,7 @@ fn round_trips_every_scalar_value() {
     let mut buf = Vector::<u16>::new();
     buf.resize_default(text.len());
     let cap = buf.len();
-    let n = utf16::encode_into(text.as_str(), buf.index_range_mut(0..cap)).unwrap();
+    let n = utf16::encode_into(&text, buf.index_range_mut(0..cap)).unwrap();
     assert_eq(n, units.len());
     for i in 0..n {
         assert_eq(*buf.at(i), *units.at(i));
@@ -76,30 +76,21 @@ fn rejects_ill_formed_utf8_at_its_offset() {
         assert(utf16::encode(s, &mut units).unwrap_err() == utf16::EncodeError::InvalidUtf8(at));
         assert_eq(units.len(), 1);
         let mut buf: [u16; 8] = [0; 8];
-        assert_eq(
-            utf16::encode_into(s, buf),
-            Result::<usize, utf16::EncodeError>::Err(utf16::EncodeError::InvalidUtf8(at)),
-        );
+        assert_eq(utf16::encode_into(s, buf), Err(utf16::EncodeError::InvalidUtf8(at)));
     }
 }
 
 @test
 fn encode_into_reports_a_short_buffer() {
     let mut two: [u16; 2] = [0; 2];
-    assert_eq(
-        utf16::encode_into("abc", two),
-        Result::<usize, utf16::EncodeError>::Err(utf16::EncodeError::BufferTooSmall),
-    );
+    assert_eq(utf16::encode_into("abc", two), Err(utf16::EncodeError::BufferTooSmall));
     // A pair never splits across the end of the buffer.
-    assert_eq(
-        utf16::encode_into("a\xF0\x9F\x98\x80", two),
-        Result::<usize, utf16::EncodeError>::Err(utf16::EncodeError::BufferTooSmall),
-    );
-    assert_eq(utf16::encode_into("\xF0\x9F\x98\x80", two), Result::<usize, utf16::EncodeError>::Ok(2));
+    assert_eq(utf16::encode_into("a\xF0\x9F\x98\x80", two), Err(utf16::EncodeError::BufferTooSmall));
+    assert_eq(utf16::encode_into("\xF0\x9F\x98\x80", two), Ok(2));
     assert_eq(two[0], 0xD83D);
     assert_eq(two[1], 0xDE00);
     let mut none: [u16; 0] = [];
-    assert_eq(utf16::encode_into("", none), Result::<usize, utf16::EncodeError>::Ok(0));
+    assert_eq(utf16::encode_into("", none), Ok(0));
 }
 
 @test

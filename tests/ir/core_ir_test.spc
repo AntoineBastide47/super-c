@@ -133,7 +133,7 @@ const fn has(s: &String, needle: str) bool {
 @test
 fn if_else_value_and_short_circuit() {
     let p = typed_package(
-        "const fn g(a: i32) i32 { let v = if a != 0 && 10 / a > 1 { a; } else { 0; }; return v; }\nstatic_assert(g(3) == 3 && g(0) == 0 && g(6) == 0 && g(-1) == 0);\nfn main() i32 { let _ = g(3); return 0; }",
+        "const fn g(a: i32) i32 { let v = if a != 0 && 10 / a > 1 { a } else { 0 }; return v; }\nstatic_assert(g(3) == 3 && g(0) == 0 && g(6) == 0 && g(-1) == 0);\nfn main() i32 { let _ = g(3); return 0; }",
     );
     // The constant evaluator runs this lowering: `g(0)` divides by zero unless `&&` skips its right side.
     let out = lowered(&p, "g");
@@ -319,7 +319,7 @@ fn question_error_path_frees_owned_locals() {
     // by-value argument are freed there as on every other exit.
     run_leak_checked(
         "question error path frees",
-        "fn half(n: i32) Result<i32, i32> { if n % 2 == 0 { return Result::<i32, i32>::Ok(n / 2); } return Result::<i32, i32>::Err(n); }\nfn f(n: i32, arg: String) Result<i32, i32> { let s = String::from_str(\"0123456789012345678901234567890123456789\"); let v = half(n)?; return Result::<i32, i32>::Ok(v + s.len() as i32 + arg.len() as i32); }\nfn main() i32 { let a = f(3, String::from_str(\"abcdefghijklmnopqrstuvwxyz0123456789\")); let b = f(4, String::from_str(\"abcdefghijklmnopqrstuvwxyz0123456789\")); let mut r = 0; switch a { Ok(_) => { r = 1; }, Err(e) => { r = e - 3; } }; switch b { Ok(v) => { r = r + v - 78; }, Err(_) => { r = 1; } }; return r; }\n",
+        "fn half(n: i32) Result<i32, i32> { if n % 2 == 0 { return Result::<i32, i32>::Ok(n / 2); } return Result::<i32, i32>::Err(n); }\nfn f(n: i32, arg: String) Result<i32, i32> { let s = String::from_str(\"0123456789012345678901234567890123456789\"); let v = half(n)?; return Result::<i32, i32>::Ok(v + s.len() as i32 + arg.len() as i32); }\nfn main() i32 { let a = f(3, String::from_str(\"abcdefghijklmnopqrstuvwxyz0123456789\")); let b = f(4, String::from_str(\"abcdefghijklmnopqrstuvwxyz0123456789\")); let mut r = 0; switch a { Ok(_) => { r = 1; }, Err(e) => { r = e - 3; } } switch b { Ok(v) => { r = r + v - 78; }, Err(_) => { r = 1; } } return r; }\n",
         0,
     );
 }
@@ -341,7 +341,7 @@ fn temporary_receivers_and_places_are_freed() {
     // literal) and is then used as a method receiver or a place owns that value: it is freed once.
     run_leak_checked(
         "temporary receivers freed",
-        "struct P { pub s: String }\nextend P { fn eat(self: P) usize { return self.s.len(); } }\nfn mk() String { return String::from_str(\"0123456789012345678901234567890123456789\"); }\nfn main() i32 { let mut t: usize = 0; let mut s = String::new(); for i in 0..2 { t += format(\"0123456789012345678901234567890123456789{}\", i).len(); s.push_str(format(\"0123456789012345678901234567890123456789{}\", i).as_str()); t += (if i > 0 { mk(); } else { mk(); }).len(); t += (switch i { 0 => mk(), _ => mk() }).len(); t += (if i > 0 { P { s: mk() }; } else { P { s: mk() }; }).s.len(); t += (if i > 0 { P { s: mk() }; } else { P { s: mk() }; }).eat(); let r = &P { s: mk() }; t += r.s.len(); } return (t + s.len()) as i32 - 564; }\n",
+        "struct P { pub s: String }\nextend P { fn eat(self: P) usize { return self.s.len(); } }\nfn mk() String { return String::from_str(\"0123456789012345678901234567890123456789\"); }\nfn main() i32 { let mut t: usize = 0; let mut s = String::new(); for i in 0..2 { t += format(\"0123456789012345678901234567890123456789{}\", i).len(); s.push_str(format(\"0123456789012345678901234567890123456789{}\", i).as_str()); t += (if i > 0 { mk() } else { mk() }).len(); t += (switch i { 0 => mk(), _ => mk() }).len(); t += (if i > 0 { P { s: mk() } } else { P { s: mk() } }).s.len(); t += (if i > 0 { P { s: mk() } } else { P { s: mk() } }).eat(); let r = &P { s: mk() }; t += r.s.len(); } return (t + s.len()) as i32 - 564; }\n",
         0,
     );
 }
@@ -368,7 +368,7 @@ fn deeply_nested_owner_frees() {
         src.push_str(" }");
     }
     src.push_str("; return v.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.s.len() as i32 - 40; }\n");
-    run_leak_checked("nested owner freed", src.as_str(), 0);
+    run_leak_checked("nested owner freed", &src, 0);
 }
 
 @test
@@ -386,8 +386,8 @@ fn wide_shared_member_type_compiles() {
         src.push_str(" }\n");
     }
     src.push_str("struct Top { pub w: L29, pub s: String }\n");
-    src.push_str("fn main() i32 { let o = Option::<Top>::None; return if o.is_none() { 0; } else { 1; }; }\n");
-    run_leak_checked("wide shared member type", src.as_str(), 0);
+    src.push_str("fn main() i32 { let o = Option::<Top>::None; return if o.is_none() { 0 } else { 1 }; }\n");
+    run_leak_checked("wide shared member type", &src, 0);
 }
 
 @test
@@ -425,7 +425,7 @@ fn long_else_if_chains_compile() {
     src.push_str(
         "fn main() i32 {\n    if fall(999) != 1998 || fall(1000) != -1 { return 1; }\n    if ret(999) != 999 || ret(1000) != -1 { return 2; }\n    return inloop(1002) - 1004;\n}\n",
     );
-    let r = h::compile_and_run(src.as_str());
+    let r = h::compile_and_run(&src);
     assert(r.built, "the 1000-arm chains build");
     assert_eq(r.exit, 0);
 }
@@ -438,7 +438,7 @@ fn long_sum_compiles() {
         src.push_str(" + x");
     }
     src.push_str("; }\nfn main() i32 { return f(1) - 300; }\n");
-    let r = h::compile_and_run(src.as_str());
+    let r = h::compile_and_run(&src);
     assert(r.built, "the 300-term sum builds");
     assert_eq(r.exit, 0);
 }
@@ -450,7 +450,7 @@ fn comparison_operands_are_read_not_moved() {
     // by `assert_eq` stays a named temporary (the comparison takes its address).
     run_leak_checked(
         "comparison operands freed",
-        "struct P { pub x: i32 }\nextend P as Eq { pub fn eq(self: &P, o: &P) bool { return self.x == o.x; } }\n@noinline\nfn mp(x: i32) P { return P { x: x }; }\nfn mk() String { return String::from_str(\"0123456789012345678901234567890123456789\"); }\nfn main() i32 { assert_eq(mp(1), mp(1)); let a = mk(); let b = mk(); let e1 = a == b; let e2 = mk() == mk(); let e3 = format(\"{}0123456789012345678901234567890123456789\", 1) != mk(); assert_eq(mk(), mk()); assert(mk() == b); let c = a; return if e1 && e2 && e3 && c.len() == 40 { 0; } else { 1; }; }\n",
+        "struct P { pub x: i32 }\nextend P as Eq { pub fn eq(self: &P, o: &P) bool { return self.x == o.x; } }\n@noinline\nfn mp(x: i32) P { return P { x: x }; }\nfn mk() String { return String::from_str(\"0123456789012345678901234567890123456789\"); }\nfn main() i32 { assert_eq(mp(1), mp(1)); let a = mk(); let b = mk(); let e1 = a == b; let e2 = mk() == mk(); let e3 = format(\"{}0123456789012345678901234567890123456789\", 1) != mk(); assert_eq(mk(), mk()); assert(mk() == b); let c = a; return if e1 && e2 && e3 && c.len() == 40 { 0 } else { 1 }; }\n",
         0,
     );
 }
@@ -767,7 +767,7 @@ fn masked_memory_codes_have_their_effects() {
     assert(has(&out, "simd.swizzle[") && has(&out, "][3, 1]") && has(&out, "][3, 0, 2, 1]"), "the index lists print");
     let mut seen: u32 = 0;
     let fs: [DefId; 3] = [
-        find_in(&p, p.modules.at(p.modules.len() - 1).path.as_str(), "f"),
+        find_in(&p, &p.modules.at(p.modules.len() - 1).path, "f"),
         find_in(&p, "simd", "gather"),
         find_in(&p, "simd", "scatter"),
     ];
@@ -1007,9 +1007,9 @@ fn ident<T>(x: T, n: i64) T {
 fn pick(e: E, n: i64) i64 {
     return switch e {
         A(k) => if n == 0 {
-            k;
+            k
         } else {
-            pick(E::A(k + 1), n - 1);
+            pick(E::A(k + 1), n - 1)
         },
         B => 0,
     };
@@ -1048,10 +1048,10 @@ fn views(a: []mut i64, b: []mut i64, n: i64) {
 @tail_recurse
 fn two(n: i64, a: i64) (i64, i64) {
     if n == 0 {
-        return a, a + 1;
+        return (a, a + 1);
     }
     let (x, y) = two(n - 1, a + 1);
-    return x, y;
+    return (x, y);
 }
 @tail_recurse
 fn sum(s: []i64, acc: i64) i64 {
@@ -1092,9 +1092,9 @@ fn main() i32 {
     let (ta, tb) = two(big, 0);
     let ok = ta == big && tb == big + 1 && count(big, 0) == big && swap(1, 2, big + 1) == 21 && c.c == big && v.len() as i64 == big && s.len() as i64 == big && t.as_str() == "b" && ident(7i64, big) == 7 && pick(E::A(0), big) == big && x == big / 2 + 1 && y == big / 2 && arr(a, big + 1) == 231 && a[0] == 1 && P { x: 4 }.walk(big) == 4 && widen(1, big) == 5 && p[0] == big / 2 + 1 && q[0] == big / 2 && iter(inc, 0, big) == big && sum(w[0..w.len()], 0) == 999999;
     return pick(E::B, 0) as i32 + if ok {
-        0;
+        0
     } else {
-        1;
+        1
     };
 }
 )";
@@ -1136,7 +1136,7 @@ fn tail_recurse_rejects_a_call_not_in_tail_position() {
 fn tail_recurse_rejects_results_returned_in_another_order() {
     h::expect_err_msg(
         "swapped results",
-        "@tail_recurse\nfn f(n: i64, a: i64) (i64, i64) {\n    if n == 0 {\n        return a, 0;\n    }\n    let (x, y) = f(n - 1, a);\n    return y, x;\n}\nfn main() i32 {\n    let (a, b) = f(3, 1);\n    return (a + b) as i32;\n}\n",
+        "@tail_recurse\nfn f(n: i64, a: i64) (i64, i64) {\n    if n == 0 {\n        return (a, 0);\n    }\n    let (x, y) = f(n - 1, a);\n    return (y, x);\n}\nfn main() i32 {\n    let (a, b) = f(3, 1);\n    return (a + b) as i32;\n}\n",
         "cannot become a jump: it is not in tail position",
     );
 }
@@ -1345,7 +1345,7 @@ fn a_never_value_builds_in_every_position() {
     let mut args = String::new();
     for i in 0..forms.len() {
         args.push_str(" x");
-        let r = h::diff_run(&b, args.as_str());
+        let r = h::diff_run(&b, &args);
         let ok = r.exit != 0 && r.err.contains("panic: stop");
         if !ok {
             eprintln("{}: exit {}: {}", forms[i], r.exit, r.err.as_str());

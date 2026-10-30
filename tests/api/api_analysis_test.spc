@@ -52,7 +52,7 @@ extend NoTodo as Analyzer {
             fix.push(Edit { start: hits[i].start, end: hits[i].end, text: String::from_str("// done") });
             pass.report_fix(hits[i].start, hits[i].end, ses::SEV_WARNING, "todo", "a TODO is left", fix);
         }
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 
@@ -80,7 +80,7 @@ extend PubCount as Analyzer {
         }
         let b: [u8; 1] = [n];
         pass.put_fact("pub_fns", b);
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 
@@ -103,9 +103,9 @@ extend ImportsCount as Analyzer {
     pub fn run(self: &mut Self, pass: &mut Pass) Result<Unit, ApiError> {
         if let Some(b) = pass.fact("test.pub-count", "util", "pub_fns") {
             let msg = format("util has {} pub functions", b[0]);
-            pass.report(0, 0, ses::SEV_WARNING, "count", msg.as_str());
+            pass.report(0, 0, ses::SEV_WARNING, "count", &msg);
         }
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 
@@ -123,7 +123,7 @@ extend Broken as Analyzer {
 
     pub fn run(self: &mut Self, pass: &mut Pass) Result<Unit, ApiError> {
         pass.report(0, 0, ses::SEV_ERROR, "never", "dropped with the failure");
-        return Result::<Unit, ApiError>::Err(ApiError::new(Code::PluginFailed, "broken"));
+        return Err(ApiError::new(Code::PluginFailed, "broken"));
     }
 }
 
@@ -146,7 +146,7 @@ extend CycleA as Analyzer {
     }
 
     pub fn run(self: &mut Self, pass: &mut Pass) Result<Unit, ApiError> {
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 
@@ -164,7 +164,7 @@ extend CycleB as Analyzer {
     }
 
     pub fn run(self: &mut Self, pass: &mut Pass) Result<Unit, ApiError> {
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 
@@ -180,7 +180,7 @@ fn fx() Fx {
     proj.mkfile("main.spc", MAIN);
     proj.mkfile("util.spc", UTIL);
     let main = format("{}/main.spc", proj.dir());
-    let mut s = ses::Session::open_file(main.as_str(), ses::Config::host("std")).unwrap();
+    let mut s = ses::Session::open_file(&main, ses::Config::host("std")).unwrap();
     assert(s.check().is_ok(), "checks");
     let real = String::from_str(s.root_file());
     return Fx { proj: proj, main: real, s: s };
@@ -240,7 +240,7 @@ fn reuses_results_until_an_input_changes(fx: &mut Fx) {
     let a = r.run(&fx.s, &opts).unwrap();
     let b = r.run(&fx.s, &opts).unwrap();
     assert_eq(a.findings.len(), b.findings.len());
-    let _ = fx.s.set_text(fx.main.as_str(), "fn main() i32 {\n    return 0;\n}\n");
+    let _ = fx.s.set_text(&fx.main, "fn main() i32 {\n    return 0;\n}\n");
     assert(fx.s.check().is_ok(), "checks");
     let c = r.run(&fx.s, &opts).unwrap();
     assert_eq(c.findings.len(), 0);
@@ -264,9 +264,9 @@ fn serves_as_a_command(fx: &mut Fx) {
     let mut args = Vector::<str>::new();
     args.push("tool");
     args.push("--fix");
-    args.push(fx.main.as_str());
-    assert_eq(main_with(args.as_slice(), list), 1);
-    assert(cli::read_text(fx.main.as_str()).as_str().find("// done") >= 0, "the fix is written");
+    args.push(&fx.main);
+    assert_eq(main_with(&args, list), 1);
+    assert(cli::read_text(&fx.main).as_str().find("// done") >= 0, "the fix is written");
 }
 
 // Reports its configuration text, read through the pass, and the root file of the session it sees.
@@ -284,9 +284,9 @@ extend Configured as Analyzer {
     pub fn run(self: &mut Self, pass: &mut Pass) Result<Unit, ApiError> {
         if pass.file() == pass.session().root_file() {
             let msg = format("config {}", pass.config());
-            pass.report(0, 0, ses::SEV_WARNING, "config", msg.as_str());
+            pass.report(0, 0, ses::SEV_WARNING, "config", &msg);
         }
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 

@@ -95,9 +95,9 @@ pub(package) const fn sd_then(a: u8, b: u8) u8 {
     for d in 0..2u32 {
         let x = sd_level(a, d);
         let y = if x == SD_DROP as u32 {
-            SD_DROP as u32;
+            SD_DROP as u32
         } else {
-            sd_level(b, x);
+            sd_level(b, x)
         };
         r = r | y as u8 << (2 * d) as u8;
     }
@@ -133,11 +133,11 @@ pub(package) const fn sd_unlift(e: u8, k: u32) u8 {
     for d in 0..2u32 {
         let x = sd_level(e, d);
         let y = if x == SD_DROP as u32 || x == 2 {
-            x;
+            x
         } else if x >= k {
-            x - k;
+            x - k
         } else {
-            0u32;
+            0u32
         };
         r = r | y as u8 << (2 * d) as u8;
     }
@@ -742,9 +742,9 @@ extend Gen {
             binders.push(tyn);
             for i in 0..n.as_data.function_type.params.len + n.as_data.function_type.returns.len {
                 let sl = if i < n.as_data.function_type.params.len {
-                    unsafe a.list(n.as_data.function_type.params)[i as usize];
+                    unsafe a.list(n.as_data.function_type.params)[i as usize]
                 } else {
-                    unsafe a.list(n.as_data.function_type.returns)[(i - n.as_data.function_type.params.len) as usize];
+                    unsafe a.list(n.as_data.function_type.returns)[(i - n.as_data.function_type.params.len) as usize]
                 };
                 self.fn_type_names(m, a.slot_type_node(sl), binders, out, depth + 1);
             }
@@ -776,9 +776,9 @@ extend Gen {
             self.fn_type_names(m, n.as_data.array_type.element, binders, out, depth + 1);
         } else if n.kind == NodeKind::NODE_TUPLE_TYPE || n.kind == NodeKind::NODE_TYPE_PATH {
             let es = if n.kind == NodeKind::NODE_TUPLE_TYPE {
-                n.as_data.array_literal.elements;
+                n.as_data.array_literal.elements
             } else {
-                a.at_const(tyn).as_data.type_path.args;
+                a.at_const(tyn).as_data.type_path.args
             };
             for i in 0..es.len {
                 self.fn_type_names(m, unsafe a.list(es)[i as usize], binders, out, depth + 1);
@@ -984,7 +984,7 @@ extend Gen {
     const fn ref_kind(self: &Self, m: ModuleId, ty: TypeId) TypeKind {
         let y = self.owner().ast_of(m).type_at(ty);
         if y.kind == TypeKind::TYPE_DYN && y.qualifier != TypeQualifier::TYPE_QUAL_NONE as u8 {
-            return TypeKind::TYPE_REFERENCE;
+            return TYPE_REFERENCE;
         }
         return y.kind;
     }
@@ -1236,9 +1236,9 @@ extend Gen {
             self.f.subsets.push(
                 SubsetAt {
                     from: if df != BF_NONE {
-                        df;
+                        df
                     } else {
-                        from;
+                        from
                     },
                     to: dt,
                     point: point,
@@ -1448,9 +1448,9 @@ extend Gen {
         }
         for i in 0..len {
             let oi = if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_CLOSURE {
-                self.body().oper_pool[(start + i) as usize];
+                self.body().oper_pool[(start + i) as usize]
             } else {
-                start;
+                start
             };
             if oi == ir::IR_NONE {
                 continue;
@@ -1533,9 +1533,9 @@ extend Gen {
                 var = pj.sub;
             } else if pj.kind == ir::PJ_FIELD {
                 let d = if var != NODE_NONE {
-                    enm;
+                    enm
                 } else {
-                    self.agg_decl(prev);
+                    self.agg_decl(prev)
                 };
                 let ftn = self.member_type_node(d, var, pj.data, pj.sub);
                 if ftn != NODE_NONE {
@@ -1719,11 +1719,11 @@ extend Gen {
                     let a = (self.ties[k] >> 32) as u32;
                     let b = (self.ties[k] & 0xFFFFFFFFu64) as u32;
                     let y = if a == x {
-                        b;
+                        b
                     } else if b == x {
-                        a;
+                        a
                     } else {
-                        BF_NONE;
+                        BF_NONE
                     };
                     if y != BF_NONE && !seen[y as usize] {
                         seen.set(y as usize, true);
@@ -1973,10 +1973,10 @@ extend Gen {
                     ak = ACC_CAP;
                 }
                 let ek = if mpath == path {
-                    EV_MOVE;
+                    EV_MOVE
                 } else {
                     // Through-a-reference: invisible to the checker, real to drops.
-                    EV_MOVE_CUT;
+                    EV_MOVE_CUT
                 };
                 self.push_ev(ek, mpath, point, sp);
                 self.access(op.data, BF_NONE, ak, point, sp);
@@ -2060,7 +2060,7 @@ extend Gen {
                     sig = *v;
                 },
                 None => {},
-            };
+            }
             if self.owner().gen_cls.contains_key(&key) {
                 *ckey = key;
             }
@@ -2110,9 +2110,9 @@ extend Gen {
                 }
             }
             let to = if sub == static_tok() {
-                LC_STATIC;
+                LC_STATIC
             } else {
-                fresh.min(LC_OUTER - 1);
+                fresh.min(LC_OUTER - 1)
             };
             for k in 0..cls.len() {
                 if lt_class_hit(cls, k, sup) || sub >> 62 == 1 && lt_class_hit(cls, k, sub) {
@@ -2150,7 +2150,7 @@ extend Gen {
                 }
             },
             None => {},
-        };
+        }
         self.call_lt_classes(t.span, &mut cls);
         let np = self.owner().ast_of(bm).sig_len(&sy, false).min(t.args_len);
         // Parameter `i`'s positions are `at[i]..at[i + 1]`.
@@ -2209,9 +2209,9 @@ extend Gen {
             }
             if st {
                 let e = if whole {
-                    SD_KEEP;
+                    SD_KEEP
                 } else {
-                    SD_DEREF;
+                    SD_DEREF
                 };
                 self.subset_d(self.origin_of_place(oi.data), 0, entry, sd_then(self.place_edge(oi.data), e));
             }
@@ -2221,18 +2221,18 @@ extend Gen {
         // (`Owner::cap_reach`; every capture before its body is checked), or the caller storage a
         // parameter's type names.
         let cop = if t.a != ir::IR_NONE {
-            *self.body().operands.at(t.a as usize);
+            *self.body().operands.at(t.a as usize)
         } else {
-            ir::Operand { kind: ir::OP_CONST, data: 0, ty: TYPE_NONE };
+            ir::Operand { kind: ir::OP_CONST, data: 0, ty: TYPE_NONE }
         };
         let reach = switch self.owner().cap_reach.get(&ckey) {
             Some(r) => *r,
             None => 0u64,
         };
         let cnode = if reach != 0 {
-            (ckey & 0xFFFFFFFFu64) as NodeId;
+            (ckey & 0xFFFFFFFFu64) as NodeId
         } else {
-            NODE_NONE;
+            NODE_NONE
         };
         if (cop.kind == ir::OP_COPY || cop.kind == ir::OP_MOVE) && !self.behind_raw(cop.data) {
             let tor = self.origin_of_place(cop.data);
@@ -2263,9 +2263,9 @@ extend Gen {
                     continue;
                 }
                 let caps = if i < (reach & 0xFFFF) as u32 {
-                    self.owner().cap_reach_pool[(reach >> 16) as usize + i as usize];
+                    self.owner().cap_reach_pool[(reach >> 16) as usize + i as usize]
                 } else {
-                    0u64;
+                    0u64
                 };
                 if caps == 0 {
                     continue;
@@ -2394,9 +2394,9 @@ extend Gen {
         let c = (ckey & 0xFFFFFFFFu64) as NodeId;
         let cf = self.owner().ast_of(m).closure_fact(c);
         let by_ptr = if cf != null {
-            unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
+            unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps
         } else {
-            0u64;
+            0u64
         };
         let caps = self.owner().ast_of(m).ext(c).closure.captures;
         let mut r: u64 = 0;
@@ -2489,7 +2489,7 @@ extend Gen {
                 range = *v;
             },
             _ => {},
-        };
+        }
         if hit {
             let kst = (range >> 16) as usize;
             let kl = (range & 0xFFFF) as u32;
@@ -2584,7 +2584,7 @@ extend Gen {
                 range = *v;
             },
             _ => {},
-        };
+        }
         if hit {
             let tst = (range >> 16) as usize;
             for i in 0..range & 0xFFFF {
@@ -2634,16 +2634,16 @@ extend Gen {
         let ft = self.owner().ast_of(m).at_const(fnn).as_data.function_type;
         let mark = out.len();
         let first = if params {
-            0u32;
+            0u32
         } else {
-            ft.params.len;
+            ft.params.len
         };
         for i in first..ft.params.len + ft.returns.len {
             let a = self.owner().ast_of(m);
             let sl = if i < ft.params.len {
-                unsafe a.list(ft.params)[i as usize];
+                unsafe a.list(ft.params)[i as usize]
             } else {
-                unsafe a.list(ft.returns)[(i - ft.params.len) as usize];
+                unsafe a.list(ft.returns)[(i - ft.params.len) as usize]
             };
             let tn = a.slot_type_node(sl);
             self.lt_tokens(m, tn, out, depth + 1);
@@ -2711,9 +2711,9 @@ extend Gen {
             // its bounds' arguments ride in it: `T: Put<'a>` can hold an `'a` borrow.
             let d = self.owner().ast_of(m).path_def(tyn);
             let dk = if d.node != NODE_NONE {
-                self.owner().ast_of(d.module).at_const(d.node).kind;
+                self.owner().ast_of(d.module).at_const(d.node).kind
             } else {
-                NodeKind::NODE_NONE_KIND;
+                NodeKind::NODE_NONE_KIND
             };
             if dk == NodeKind::NODE_GENERIC_PARAM {
                 out.push(d.module as u64 << 32 | d.node as u64);
@@ -2763,7 +2763,7 @@ extend Gen {
                 return *v;
             },
             _ => {},
-        };
+        }
         let mut pool = replace(&mut self.owner().tok_pool, Vector::<u64>::new());
         let start = pool.len();
         if ret {
@@ -2882,7 +2882,7 @@ extend Gen {
                 return *v;
             },
             _ => {},
-        };
+        }
         // The walk reads `lt_tokens`, which appends to tok_pool: collect apart, then copy.
         let mut own = Vector::<u64>::new();
         self.own_walk(m, tyn, &mut own, 0, refs);
@@ -2911,9 +2911,9 @@ extend Gen {
             let tk = self.lt_token(m, n.as_data.indirect_type.lifetime);
             out.push(
                 if tk == 0 {
-                    ELIDED_TOK;
+                    ELIDED_TOK
                 } else {
-                    tk;
+                    tk
                 },
             );
             if refs != 0 {
@@ -3071,17 +3071,17 @@ extend Gen {
             // A reference parameter: the edge of the reference the callee receives (an alias spells
             // no pointee to read depths from).
             let mut r = if self.ref_deep(cm, ptyn, rbeh, i) {
-                SD_SAT;
+                SD_SAT
             } else {
-                SD_KEEP;
+                SD_KEEP
             };
             if !lvl && !pn.is_ref_type() {
                 r = sd_then(SD_DEREF, self.tie_lift(cm, ptn, rbeh, picked, 1));
             } else if !lvl {
                 let d = if by_tok {
-                    self.tie_depth(cm, pn.as_data.indirect_type.ty, rtok, picked && relided);
+                    self.tie_depth(cm, pn.as_data.indirect_type.ty, rtok, picked && relided)
                 } else {
-                    0u32;
+                    0u32
                 };
                 r = sd_then(sd_sink(1 + d), self.tie_lift(cm, pn.as_data.indirect_type.ty, rbeh, picked, d));
             }
@@ -3098,9 +3098,9 @@ extend Gen {
             return e;
         }
         let mut d = if by_tok && k == 0 {
-            self.tie_depth(cm, ptn, rtok, picked && relided);
+            self.tie_depth(cm, ptn, rtok, picked && relided)
         } else {
-            0u32;
+            0u32
         };
         if d == 0 && by_tok && k == 0 && self.closure_result_tie(cm, ptn, rtok, ty) {
             d = 1;
@@ -3270,9 +3270,9 @@ extend Gen {
         for j in 0..d + 2 {
             if self.own_ties(cm, ptn, &toks, elided, j) {
                 r = if j <= d {
-                    SD_SAT;
+                    SD_SAT
                 } else {
-                    SD_KEEP_SAT;
+                    SD_KEEP_SAT
                 };
                 break;
             }
@@ -3300,9 +3300,9 @@ extend Gen {
         }
         let tk = self.lt_token(cm, pn.as_data.indirect_type.lifetime);
         let r = if tk != 0 && jtok.contains(&tk) {
-            SD_KEEP;
+            SD_KEEP
         } else {
-            sd_sink(1 + self.tie_depth(cm, pn.as_data.indirect_type.ty, jtok, false));
+            sd_sink(1 + self.tie_depth(cm, pn.as_data.indirect_type.ty, jtok, false))
         };
         if yk == TypeKind::TYPE_REFERENCE {
             return sd_then(e, r);
@@ -3495,7 +3495,7 @@ extend Gen {
                 return *v;
             },
             _ => {},
-        };
+        }
         let ext0 = self.ext;
         let em0 = self.ext_mod;
         self.enter_callee(callee);
@@ -3776,9 +3776,9 @@ extend Gen {
                     e = sd_then(
                         e,
                         if deep {
-                            SD_SAT;
+                            SD_SAT
                         } else {
-                            SD_REF;
+                            SD_REF
                         },
                     );
                 }
@@ -3786,17 +3786,17 @@ extend Gen {
             }
             if tie {
                 let lk = if k == 2 && mutres {
-                    LK_MUT;
+                    LK_MUT
                 } else {
-                    LK_SHARED;
+                    LK_SHARED
                 };
                 self.push_loan(
                     true,
                     false,
                     if deep {
-                        2u8;
+                        2u8
                     } else {
-                        sd_level(dsd, 0) as u8;
+                        sd_level(dsd, 0) as u8
                     },
                     pid,
                     lk,
@@ -3894,9 +3894,9 @@ extend Gen {
                 for k in 0..ps.len {
                     let pn = unsafe a.list(ps)[k as usize];
                     let tn = if a.at_const(pn).kind == NodeKind::NODE_FIELD {
-                        a.at_const(pn).as_data.field.ty;
+                        a.at_const(pn).as_data.field.ty
                     } else {
-                        pn;
+                        pn
                     };
                     if self.node_holds_mut(d.module, tn, depth) {
                         return true;
@@ -3990,9 +3990,9 @@ extend Gen {
                             // still hold a value (`BodyFacts::drop_use`).
                             if self.f.observed[s.a as usize] {
                                 let slot = if self.f.drop_slot[s.a as usize] != BF_NONE {
-                                    self.f.drop_slot[s.a as usize];
+                                    self.f.drop_slot[s.a as usize]
                                 } else {
-                                    s.a;
+                                    s.a
                                 };
                                 self.f.drop_uses.push(
                                     DropUse {
@@ -4027,9 +4027,9 @@ extend Gen {
                 // A signature relating two lifetimes (`'b: 'a`) ties them as one name would; so do
                 // the function values the call passes (`Ast::call_lts`).
                 self.rel = if self.loans {
-                    cs.rel;
+                    cs.rel
                 } else {
-                    0u64;
+                    0u64
                 };
                 let mut cext = Vector::<u64>::new();
                 if self.loans && t.callee.node != NODE_NONE {
@@ -4140,9 +4140,9 @@ extend Gen {
                         let mut lt = kinds[i3 as usize] == 1 || kinds[i3 as usize] == 2;
                         if !lt && i3 as usize < ptyn.len() {
                             lt = if i3 < 64 {
-                                (cs.lts >> i3 as u64 & 1u64) != 0;
+                                (cs.lts >> i3 as u64 & 1u64) != 0
                             } else {
-                                self.sig_lt(t.callee.module, ptyn[i3 as usize]);
+                                self.sig_lt(t.callee.module, ptyn[i3 as usize])
                             };
                         }
                         if lt {
@@ -4228,9 +4228,9 @@ extend Gen {
                 // autoref'd place is the pointee itself: `'static` holds its contents at their own
                 // level, and a `&'static` parameter's implicit borrow of the place.
                 let mut sfl = if self.loans && t.callee.node != NODE_NONE {
-                    cs.fl >> 8;
+                    cs.fl >> 8
                 } else {
-                    0u64;
+                    0u64
                 };
                 if cext.len() != 0 {
                     let mut stat = replace(&mut self.owner().sc_stat, Vector::<u64>::new());
@@ -4248,9 +4248,9 @@ extend Gen {
                         if sk != 0 && (oi.kind == ir::OP_COPY || oi.kind == ir::OP_MOVE) {
                             let auto = (autoref >> i as u64 & 1u64) != 0;
                             let e = if sk == 1 || auto {
-                                SD_KEEP;
+                                SD_KEEP
                             } else {
-                                SD_DEREF;
+                                SD_DEREF
                             };
                             self.subset_d(self.origin_of_place(oi.data), 0, entry, sd_then(self.place_edge(oi.data), e));
                             if auto && sk == 1 && !self.behind_raw(oi.data) {
@@ -4440,9 +4440,9 @@ extend Gen {
                                             t.callee.module,
                                             self.pointee_node(t.callee.module, ptyn[0]),
                                             &itok3,
-                                        );
+                                        )
                                     } else {
-                                        0u8;
+                                        0u8
                                     };
                                     self.store(aor, tor, owned0, entry, e, te, through0, more);
                                 }
@@ -4506,9 +4506,9 @@ extend Gen {
                                 let aor = self.origin_of_place(op.data);
                                 if aor != BF_NONE {
                                     let picked = if ref_self {
-                                        i == 0;
+                                        i == 0
                                     } else {
-                                        nborrowing == 1 && i == bidx;
+                                        nborrowing == 1 && i == bidx
                                     };
                                     let e = self.tie_edge(
                                         t.callee.module,
@@ -4554,14 +4554,14 @@ extend Gen {
                             let kd = kinds[i as usize];
                             if (kd == 1 || kd == 2 || t.callee.node == NODE_NONE) && self.mut_ref_place(op.data) && lvl {
                                 let level = if self.ref_deep(t.callee.module, &ptyn, rbeh, i) {
-                                    2u8;
+                                    2u8
                                 } else {
-                                    self.store_level(dp);
+                                    self.store_level(dp)
                                 };
                                 let lk = if kd != 1 && self.grants_write(dty, 0) {
-                                    LK_MUT;
+                                    LK_MUT
                                 } else {
-                                    LK_SHARED;
+                                    LK_SHARED
                                 };
                                 self.push_loan(false, true, level, op.data, lk, dor, exit, t.span);
                             }
@@ -4891,9 +4891,9 @@ extend Gen {
             // `[]mut T`, for as long as the sub-view lives.
             if dor != BF_NONE && self.loans && self.mut_view_place(rv.a) && !self.behind_raw(rv.a) {
                 let lk = if sub_mut {
-                    LK_MUT;
+                    LK_MUT
                 } else {
-                    LK_SHARED;
+                    LK_SHARED
                 };
                 self.push_loan(false, true, self.store_level(s.place), rv.a, lk, dor, exit, s.span);
             }
@@ -4963,9 +4963,9 @@ extend Gen {
             for a in 0..na {
                 let site = *self.assign_sites.at(a);
                 let base = if site.local != BF_NONE {
-                    site.local as usize;
+                    site.local as usize
                 } else {
-                    self.place_of(site.place).base as usize;
+                    self.place_of(site.place).base as usize
                 };
                 for li in lb_start[base]..lb_start[base + 1] {
                     let l = lb_flat[li as usize];
@@ -5261,7 +5261,7 @@ extend Owner {
                 return *v;
             },
             _ => {},
-        };
+        }
         let mut pool = replace(&mut self.rel_pool, Vector::<u64>::new());
         let start = pool.len();
         self.rel_fn(callee, &mut pool);
@@ -5278,7 +5278,7 @@ extend Owner {
                 return *v;
             },
             _ => {},
-        };
+        }
         let mut pool = replace(&mut self.rel_pool, Vector::<u64>::new());
         let start = pool.len();
         self.rel_lts(d.module, self.ast_of(d.module).lifetimes_of(d.node), &mut pool);
@@ -5531,7 +5531,7 @@ extend Owner {
                 None => {
                     self.free_ext.insert(key, vals[i]);
                 },
-            };
+            }
         }
     }
 
@@ -5541,7 +5541,7 @@ extend Owner {
         return switch self.free_ext.get(&key) {
             Some(v) => {
                 let e = *v - 1u64;
-                DefId { module: (e >> 32) as ModuleId, node: (e & 0xFFFFFFFFu64) as NodeId };
+                DefId { module: (e >> 32) as ModuleId, node: (e & 0xFFFFFFFFu64) as NodeId }
             },
             None => DefId { module: 0, node: NODE_NONE },
         };
@@ -5655,9 +5655,9 @@ extend Owner {
             return r;
         }
         let at = if self.at.module == m {
-            self.at.node;
+            self.at.node
         } else {
-            NODE_NONE;
+            NODE_NONE
         };
         for w in 0..a.where_bounds.len() {
             let sc = a.where_scope(w, gp, at);
@@ -6013,9 +6013,9 @@ extend Owner {
             // never reads one it holds by reference.
             let cf = self.ast_of(y.module).closure_fact(y.as_data.decl);
             let by_ptr = if cf != null {
-                unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
+                unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps
             } else {
-                0u64;
+                0u64
             };
             let caps = self.ast_of(y.module).ext(y.as_data.decl).closure.captures;
             for k in 0..caps.len {
@@ -6099,11 +6099,11 @@ extend Owner {
             for i in 0..ms.len {
                 let m = unsafe self.ast_of(om).list(ms)[i as usize];
                 let c = if self.ast_of(om).ext(od).aggregate.is_tuple {
-                    forest.tuple_child(p as u32, i);
+                    forest.tuple_child(p as u32, i)
                 } else if self.ast_of(om).at_const(m).kind == NodeKind::NODE_FIELD {
-                    forest.field_child(p as u32, m);
+                    forest.field_child(p as u32, m)
                 } else {
-                    0u32; // not a field: nothing to track
+                    0u32 // not a field: nothing to track
                 };
                 if c == mp::MP_NONE {
                     all = false;
@@ -6132,7 +6132,7 @@ extend Owner {
                 return *v & ~INTERIOR_BUSY;
             },
             None => {},
-        };
+        }
         let dn = *self.ast_of(m).at_const(decl);
         if dn.kind != NodeKind::NODE_STRUCT {
             return 0;
@@ -6166,7 +6166,7 @@ extend Owner {
                 return *v;
             },
             None => {},
-        };
+        }
         let dn = *self.ast_of(m).at_const(decl);
         if dn.kind != NodeKind::NODE_STRUCT && dn.kind != NodeKind::NODE_ENUM {
             return false;
@@ -6184,9 +6184,9 @@ extend Owner {
                 for k in 0..ps.len {
                     let pn = unsafe self.ast_of(m).list(ps)[k as usize];
                     let tn = if self.ast_of(m).at_const(pn).kind == NodeKind::NODE_FIELD {
-                        self.ast_of(m).at_const(pn).as_data.field.ty;
+                        self.ast_of(m).at_const(pn).as_data.field.ty
                     } else {
-                        pn;
+                        pn
                     };
                     r = r || self.node_has_cell(m, tn, depth);
                 }
@@ -6261,9 +6261,9 @@ extend Owner {
         }
         let d2 = self.ast_of(m).path_def(tyn);
         let m2 = if d2.node != NODE_NONE {
-            self.interior_mask(d2.module, d2.node, depth + 1);
+            self.interior_mask(d2.module, d2.node, depth + 1)
         } else {
-            0u64;
+            0u64
         };
         let args = self.ast_of(m).at_const(tyn).as_data.type_path.args;
         let mut k: u64 = 0;

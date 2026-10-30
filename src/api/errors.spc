@@ -41,7 +41,7 @@ pub struct ApiError {
 extend ApiError {
     /// An error of `code` with `message` and no location.
     pub fn new(code: Code, message: str) ApiError {
-        return ApiError { code: code, message: String::from_str(message), io: Option::<IoError>::None };
+        return ApiError { code: code, message: String::from_str(message), io: None };
     }
 
     /// An error of `code` with `message` at bytes `[start, end)` of `file`.
@@ -52,17 +52,17 @@ extend ApiError {
             file: String::from_str(file),
             start: start,
             end: end,
-            io: Option::<IoError>::None,
+            io: None,
         };
     }
 
     /// The `Io` error of `cause` on `file`.
     pub fn io(cause: IoError, file: str) ApiError {
         return ApiError {
-            code: Code::Io,
+            code: Io,
             message: String::from_str("the file provider failed"),
             file: String::from_str(file),
-            io: Option::<IoError>::Some(cause),
+            io: Some(cause),
         };
     }
 }

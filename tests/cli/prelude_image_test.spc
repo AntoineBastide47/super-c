@@ -19,10 +19,10 @@ fn copy_tree(src: str, dst: str) {
         s.format_into("{}/{}", src, names.at(i).as_str());
         let mut d = String::new();
         d.format_into("{}/{}", dst, names.at(i).as_str());
-        if du::is_dir(s.as_str()) {
-            copy_tree(s.as_str(), d.as_str());
+        if du::is_dir(&s) {
+            copy_tree(&s, &d);
         } else {
-            assert(du::copy_file(s.as_str(), d.as_str()), "the file copies");
+            assert(du::copy_file(&s, &d), "the file copies");
         }
     }
 }
@@ -34,18 +34,18 @@ fn build(root: str, tag: str) String {
     env.format_into("{}/cache SC_STD_DIR={}/sc/std SC_TYPE_TABLE={}/tt{}.txt", root, root, root, tag);
     let mut args = String::new();
     args.format_into("build main.spc -o {}/o{}/app --out-dir={}/o{}", root, tag, root, tag);
-    let r = cli::superc_env_in(root, "SC_CACHE_DIR", env.as_str(), args.as_str());
+    let r = cli::superc_env_in(root, "SC_CACHE_DIR", &env, &args);
     assert(r.ok(), "the build succeeds");
     let mut tp = String::new();
     tp.format_into("{}/tt{}.txt", root, tag);
-    return cli::read_text(tp.as_str());
+    return cli::read_text(&tp);
 }
 
 // The exit code of the program build `tag` made.
 fn run(root: str, tag: str) i32 {
     let mut exe = String::new();
     exe.format_into("{}/o{}/app{}", root, tag, unsafe str::from_cstr(cli::binext()));
-    return cli::exe_env_in(exe.as_str(), root, "SC_NONE", "1", "").exit;
+    return cli::exe_env_in(&exe, root, "SC_NONE", "1", "").exit;
 }
 
 @test
@@ -74,9 +74,9 @@ fn prelude_image_matches_a_checked_prelude_and_follows_std_edits() {
     p.mkfile("main.spc", "import zz_bind;\n\nfn main() i32 {\n    return zz_bind::zz_one();\n}\n");
     let mut env = String::new();
     env.format_into("{}/cache SC_STD_DIR={}/sc/std", root, root);
-    let r = cli::superc_env_in(root, "SC_CACHE_DIR", env.as_str(), "build main.spc");
+    let r = cli::superc_env_in(root, "SC_CACHE_DIR", &env, "build main.spc");
     assert(!r.ok() && r.out_has("names module 'zz_bind', which the std prelude loads from"), "a project file clashes");
-    let r2 = cli::superc_env_in(root, "SC_CACHE_DIR", env.as_str(), "build zz_bind.spc");
+    let r2 = cli::superc_env_in(root, "SC_CACHE_DIR", &env, "build zz_bind.spc");
     assert(!r2.ok() && r2.out_has("the root file 'zz_bind.spc' names module 'zz_bind'"), "a root file clashes");
 }
 
@@ -84,10 +84,10 @@ fn prelude_image_matches_a_checked_prelude_and_follows_std_edits() {
 fn copy_std_ffi(root: str) String {
     let std_dir = stdlib::get_env("SC_STD_DIR").unwrap();
     let sd = format("{}/std", root);
-    copy_tree(std_dir.as_str(), sd.as_str());
+    copy_tree(&std_dir, &sd);
     let fd = format("{}/ffi", root);
     let ffi = format("{}/../ffi", std_dir.as_str());
-    copy_tree(ffi.as_str(), fd.as_str());
+    copy_tree(&ffi, &fd);
     return sd;
 }
 
@@ -107,18 +107,18 @@ fn prelude_image_records_the_std_text_it_checked() {
     let root = p.dir();
     let sd = copy_std_ffi(root);
     let cache = format("{}/cache", root);
-    let q = load_prelude(root, sd.as_str());
+    let q = load_prelude(root, &sd);
     let img = String::from_str("image");
-    pimg::write(cache.as_str(), 1, 2, &q, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
+    pimg::write(&cache, 1, 2, &q, &sd, pimg::dir_id(&sd), &img);
     let mut at: usize = 0;
-    assert(pimg::read(cache.as_str(), 1, 2, &mut at).is_some(), "an unchanged std tree reads the image");
+    assert(pimg::read(&cache, 1, 2, &mut at).is_some(), "an unchanged std tree reads the image");
     let mut f = String::new();
     f.format_into("{}/option.spc", sd.as_str());
-    let mut text = cli::read_text(f.as_str());
+    let mut text = cli::read_text(&f);
     text.push_str("\n");
-    p.mkfile("std/option.spc", text.as_str());
-    pimg::write(cache.as_str(), 1, 2, &q, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
-    assert(pimg::read(cache.as_str(), 1, 2, &mut at).is_none(), "a std file edited after the load rejects the image");
+    p.mkfile("std/option.spc", &text);
+    pimg::write(&cache, 1, 2, &q, &sd, pimg::dir_id(&sd), &img);
+    assert(pimg::read(&cache, 1, 2, &mut at).is_none(), "a std file edited after the load rejects the image");
 }
 
 // The files in directory `dir`.
@@ -140,15 +140,15 @@ fn sweep_deletes_stale_prelude_images() {
     let croot = format("{}/app", cache.as_str());
     let me = du::compiler_id();
     let img = String::from_str("image");
-    let q = load_prelude(root, sd.as_str());
-    pimg::write(croot.as_str(), 3, me, &q, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
+    let q = load_prelude(root, &sd);
+    pimg::write(&croot, 3, me, &q, &sd, pimg::dir_id(&sd), &img);
     let f = format("{}/option.spc", sd.as_str());
-    let mut text = cli::read_text(f.as_str());
+    let mut text = cli::read_text(&f);
     text.push_str("\n");
-    p.mkfile("std/option.spc", text.as_str());
-    let q2 = load_prelude(root, sd.as_str());
-    pimg::write(croot.as_str(), 1, me, &q2, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
-    pimg::write(croot.as_str(), 2, me ^ 1, &q2, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
+    p.mkfile("std/option.spc", &text);
+    let q2 = load_prelude(root, &sd);
+    pimg::write(&croot, 1, me, &q2, &sd, pimg::dir_id(&sd), &img);
+    pimg::write(&croot, 2, me ^ 1, &q2, &sd, pimg::dir_id(&sd), &img);
     let mut old = per::Writer::new();
     old.u64(2);
     old.u64(4);
@@ -157,21 +157,21 @@ fn sweep_deletes_stale_prelude_images() {
     let mut oname = String::new();
     ocache::hex64(4, &mut oname);
     ocache::hex64(me, &mut oname);
-    p.mkfile(format("cache/app/prelude/{}.img", oname.as_str()).as_str(), old.buf.as_str());
+    p.mkfile(format("cache/app/prelude/{}.img", oname.as_str()).as_str(), &old.buf);
     p.mkfile("cache/app/prelude/09bf53786c101f5a.img", "an image of an older layout");
     let dir = format("{}/prelude", croot.as_str());
-    assert(file_count(dir.as_str()) == 5, "five images");
-    assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "clean").ok(), "clean succeeds");
-    assert(file_count(dir.as_str()) == 1, "clean deletes the stale images");
+    assert(file_count(&dir) == 5, "five images");
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", &cache, "clean").ok(), "clean succeeds");
+    assert(file_count(&dir) == 1, "clean deletes the stale images");
     let mut at: usize = 0;
-    assert(pimg::read(croot.as_str(), 1, me, &mut at).is_some(), "the live image stays");
+    assert(pimg::read(&croot, 1, me, &mut at).is_some(), "the live image stays");
     for k in 10..16u64 {
-        pimg::write(croot.as_str(), k, me, &q2, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
+        pimg::write(&croot, k, me, &q2, &sd, pimg::dir_id(&sd), &img);
     }
-    pimg::sweep(croot.as_str(), time::now());
-    assert(file_count(dir.as_str()) == 7, "the images used within a day stay");
-    pimg::sweep(croot.as_str(), time::now() + 2 * 86400);
-    assert(file_count(dir.as_str()) == 5, "the five most recently used idle images stay");
+    pimg::sweep(&croot, time::now());
+    assert(file_count(&dir) == 7, "the images used within a day stay");
+    pimg::sweep(&croot, time::now() + 2 * 86400);
+    assert(file_count(&dir) == 5, "the five most recently used idle images stay");
 }
 
 // A conformance in another module whose bounds the receiver does not meet gives no method, not even

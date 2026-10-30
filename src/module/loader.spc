@@ -747,7 +747,7 @@ extend SymTab {
                 while s != SYM_NONE && !self.names[s as usize].eq_str(name) {
                     s = self.chain[s as usize];
                 }
-                s;
+                s
             },
             None => SYM_NONE,
         };
@@ -836,7 +836,7 @@ fn pin_callee(a: &Ast, ni: NodeId, callee: NodeId) DefId {
             }
         },
         _ => {},
-    };
+    }
     let t = a.resolution_def(callee);
     if t.node == NODE_NONE && a.at_const(callee).kind == NodeKind::NODE_MEMBER {
         return a.resolution_def(a.at_const(callee).as_data.member.member);
@@ -900,9 +900,9 @@ fn named_decl(a: &Ast, n: NodeId) DefId {
 fn param_index(a: &Ast, d: NodeId, p: NodeId) i64 {
     let dn = a.at_const(d);
     let ps = if dn.kind == NodeKind::NODE_FUNCTION {
-        a.ext(d).function.params;
+        a.ext(d).function.params
     } else {
-        a.ext(d).closure.params;
+        a.ext(d).closure.params
     };
     for i in 0..ps.len {
         if unsafe a.list(ps)[i as usize] == p {
@@ -1379,24 +1379,24 @@ pub(package) fn read_file_mt(path: str, mt: &mut i64) Option<String> {
     if fsrc != null {
         let mut t = String::new();
         if !unsafe (*fsrc).read((*fsrc).ctx, path, &mut t) {
-            return Option::<String>::None;
+            return None;
         }
         *mt = 0;
         t.pad_nul(lexer::SOURCE_PAD);
-        return Option::<String>::Some(t);
+        return Some(t);
     }
     let opened = fs::open(path, fs::OpenOptions { read: true });
     if opened.is_err() {
-        return Option::<String>::None;
+        return None;
     }
     let mut f = opened.unwrap();
     let md = f.metadata();
     if md.is_err() {
-        return Option::<String>::None;
+        return None;
     }
     let m = md.unwrap();
     if m.kind != fs::FileKind::File {
-        return Option::<String>::None;
+        return None;
     }
     *mt = dutil::mtime_s(m.modified_ns);
     // Read straight into the result, pre-sized to content + read-ahead padding so pad_nul does not
@@ -1406,11 +1406,11 @@ pub(package) fn read_file_mt(path: str, mt: &mut i64) Option<String> {
     let mut out = String::with_capacity(sz + lexer::SOURCE_PAD);
     let n = f.read_full(unsafe SliceMut::<u8> { ptr: out.spare_mut(sz), len: sz });
     if n.is_err() || f.close().is_err() {
-        return Option::<String>::None;
+        return None;
     }
     out.advance_len(n.unwrap());
     out.pad_nul(lexer::SOURCE_PAD);
-    return Option::<String>::Some(out);
+    return Some(out);
 }
 
 /// The source of module `path` read from `file`: the file's text (`read_file_mt`), or for an implicit
@@ -1420,13 +1420,13 @@ pub(package) fn read_file_mt(path: str, mt: &mut i64) Option<String> {
 pub(package) fn read_module(path: str, file: str, mt: &mut i64, id: &mut u64) Option<String> {
     if path == "__std::tuple" {
         // The tuple structs and their conformances, built by the compiler for every arity: the file
-        // serves only releases that predate the module.
+        // only places the module, and its text is what a cache records.
         let disk = read_file_mt(file, mt);
         if disk.is_none() {
             return disk;
         }
         *id = dutil::str_id(disk.unwrap().as_str());
-        return Option::<String>::Some(tuple_module_source());
+        return Some(tuple_module_source());
     }
     if path == "__std::target" {
         // The target table is the source of the build-setting enums: the file serves only releases that
@@ -1436,7 +1436,7 @@ pub(package) fn read_module(path: str, file: str, mt: &mut i64, id: &mut u64) Op
             return disk;
         }
         *id = dutil::str_id(disk.unwrap().as_str());
-        return Option::<String>::Some(target_module_source());
+        return Some(target_module_source());
     }
     if !file.ends_with("/") {
         let t = read_file_mt(file, mt);
@@ -1447,7 +1447,7 @@ pub(package) fn read_module(path: str, file: str, mt: &mut i64, id: &mut u64) Op
     }
     let mut names = Vector::<String>::new();
     if dir_listing(file.slice(0, file.len() - 1), &mut names) != DIR_LISTED {
-        return Option::<String>::None;
+        return None;
     }
     let mut out = String::new();
     for i in 0..names.len() {
@@ -1461,9 +1461,9 @@ pub(package) fn read_module(path: str, file: str, mt: &mut i64, id: &mut u64) Op
         out.push_str(n.slice(0, n.len() - 4));
         out.push_str(" as *;\n");
     }
-    *id = dutil::str_id(out.as_str());
+    *id = dutil::str_id(&out);
     out.pad_nul(lexer::SOURCE_PAD);
-    return Option::<String>::Some(out);
+    return Some(out);
 }
 
 // The source of std's `target` module: `Platform` and `Arch` with one variant per name of the target
@@ -1599,9 +1599,9 @@ fn stem_of(path: str) String {
         k -= 1;
     }
     let end = if k == 0 {
-        b.len();
+        b.len()
     } else {
-        k - 1;
+        k - 1
     };
     return String::from_str(b.slice(0, end));
 }
@@ -1627,7 +1627,7 @@ fn module_file_path(root_dir: str, ast: &Ast, src: str, parts: NodeList) String 
     let rel = join_parts(ast, src, parts, "/");
     let mut out = String::from_str(root_dir);
     out.push_str("/");
-    out.push_str(rel.as_str());
+    out.push_str(&rel);
     out.push_str(".spc");
     return out;
 }
@@ -1640,9 +1640,9 @@ fn module_index_path(root_dir: str, ast: &Ast, src: str, parts: NodeList) String
     let last = join_parts(ast, src, NodeList { start: parts.start + parts.len - 1, len: 1 }, "/");
     let mut out = String::from_str(root_dir);
     out.push_str("/");
-    out.push_str(rel.as_str());
+    out.push_str(&rel);
     out.push_str("/");
-    out.push_str(last.as_str());
+    out.push_str(&last);
     out.push_str(".spc");
     return out;
 }
@@ -1691,7 +1691,7 @@ extend DirCache {
         let mut d = DirCache {};
         for j in 0..n {
             let i = ix[j] as usize;
-            let h = fnv(self.dirs[i].as_str());
+            let h = fnv(&self.dirs[i]);
             d.next.push(
                 switch d.heads.get(&h) {
                     Some(v) => *v,
@@ -1806,33 +1806,33 @@ pub(package) fn dir_listing(dir: str, names: &mut Vector<String>) u8 {
 /// file and the module path prefix `vendor::<name>::`; both empty for a module outside `vendor/`.
 pub(package) fn vendor_root(path: str, file: str) (String, String) {
     if !path.starts_with("vendor::") {
-        return String::new(), String::new();
+        return (String::new(), String::new());
     }
     let rest = path.slice(8, path.len());
     let f = rest.find("::");
     if f <= 0 {
-        return String::new(), String::new();
+        return (String::new(), String::new());
     }
     let name = rest.slice(0, f as usize);
     let mut key = String::from_str("vendor/");
     key.push_str(name);
     key.push_byte(b'/');
     let mut base = String::new();
-    if file.starts_with(key.as_str()) {
+    if file.starts_with(&key) {
         base.push_str(key.as_str().slice(0, key.len() - 1));
     } else {
         let mut sk = String::from_str("/");
-        sk.push_str(key.as_str());
-        let at = file.find(sk.as_str());
+        sk.push_str(&key);
+        let at = file.find(&sk);
         if at < 0 {
-            return String::new(), String::new();
+            return (String::new(), String::new());
         }
         base.push_str(file.slice(0, at as usize + sk.len() - 1));
     }
     let mut prefix = String::from_str("vendor::");
     prefix.push_str(name);
     prefix.push_str("::");
-    return base, prefix;
+    return (base, prefix);
 }
 
 // Whether the `build.toml` of vendored package directory `vbase` sets `std_internals = true`. Read as a
@@ -1843,12 +1843,12 @@ fn vendor_std_internals(vbase: str) bool {
     }
     let mp = join2(vbase, "build.toml");
     let mut mt: i64 = 0;
-    let t = read_file_mt(mp.as_str(), &mut mt);
+    let t = read_file_mt(&mp, &mut mt);
     if t.is_none() {
         return false;
     }
     let src = t.unwrap();
-    let (m, _) = bman::parse_check(src.as_str(), "", true);
+    let (m, _) = bman::parse_check(&src, "", true);
     return m.is_some() && m.unwrap().std_internals;
 }
 
@@ -1876,9 +1876,9 @@ fn vendor_import(
         let f = module_file_path(base, ast, src, parts);
         let i = module_index_path(base, ast, src, parts);
         let mut d = String::new();
-        if dc.exists(f.as_str()) {
+        if dc.exists(&f) {
             *file = f;
-        } else if dc.exists(i.as_str()) {
+        } else if dc.exists(&i) {
             *file = i;
         } else if dc.listed(f.as_str().slice(0, f.len() - 4)) {
             d.push_str(f.as_str().slice(0, f.len() - 4));
@@ -1889,7 +1889,7 @@ fn vendor_import(
         }
         let mut mp = String::from_str(vprefix);
         mp.push_str(pre);
-        mp.push_str(cp.as_str());
+        mp.push_str(&cp);
         *path = mp;
         return true;
     }
@@ -1909,18 +1909,18 @@ fn resolve_import_file(
     parts: NodeList,
 ) String {
     let root_rel = module_file_path(root_dir, ast, src, parts);
-    if dc.exists(root_rel.as_str()) {
+    if dc.exists(&root_rel) {
         return root_rel;
     }
     let root_idx = module_index_path(root_dir, ast, src, parts);
-    if dc.exists(root_idx.as_str()) {
+    if dc.exists(&root_idx) {
         return root_idx;
     }
     // Manifest convention fallback: tests/ and bench/ live beside src/, so a project-root-rooted
     // load still resolves the compiler's own modules (and vice versa) through the src/ alt root.
     if !alt_root.is_empty() {
         let alt_rel = module_file_path(alt_root, ast, src, parts);
-        if dc.exists(alt_rel.as_str()) {
+        if dc.exists(&alt_rel) {
             return alt_rel;
         }
     }
@@ -1928,16 +1928,16 @@ fn resolve_import_file(
         return root_rel;
     }
     let std_rel = module_file_path(std_root, ast, src, parts);
-    if dc.exists(std_rel.as_str()) {
+    if dc.exists(&std_rel) {
         return std_rel;
     }
     let std_idx = module_index_path(std_root, ast, src, parts);
-    if dc.exists(std_idx.as_str()) {
+    if dc.exists(&std_idx) {
         return std_idx;
     }
     let ffi_base = join2(std_root, "ffi");
-    let ffi_rel = module_file_path(ffi_base.as_str(), ast, src, parts);
-    if dc.exists(ffi_rel.as_str()) {
+    let ffi_rel = module_file_path(&ffi_base, ast, src, parts);
+    if dc.exists(&ffi_rel) {
         return ffi_rel;
     }
     // Last, a directory without an index file: an implicit index (`read_module`), named by the directory
@@ -1981,10 +1981,10 @@ pub(package) fn imports_resolve(path: str, root_dir: str, alt_root: str, std_dir
                 alt_root,
                 dirname_of(std_dir),
                 a,
-                src.as_str(),
+                &src,
                 n.as_data.import_decl.path,
             );
-            if !f.as_str().ends_with("/") && !dc.exists(f.as_str()) {
+            if !f.as_str().ends_with("/") && !dc.exists(&f) {
                 return false;
             }
         }
@@ -2212,7 +2212,7 @@ fn par_parse_task(t: PParse) {
 
 fn par_parse_one(t: PParse) {
     let u = unsafe &mut *t.u;
-    switch read_module(u.path.as_str(), u.file.as_str(), &mut u.mtime, &mut u.src_id) {
+    switch read_module(&u.path, &u.file, &mut u.mtime, &mut u.src_id) {
         Some(sx) => {
             u.source = sx;
         },
@@ -2220,8 +2220,8 @@ fn par_parse_one(t: PParse) {
             u.ok = false;
             return;
         },
-    };
-    let mut parsed = parse_source_q(&mut u.source, u.file.as_str(), t.tags, Vector::<tok::Token>::new(), true);
+    }
+    let mut parsed = parse_source_q(&mut u.source, &u.file, t.tags, Vector::<tok::Token>::new(), true);
     if !parsed.ok {
         u.ok = false;
         return;
@@ -2366,7 +2366,7 @@ pub(package) fn batch_mod_path(file: str, root: str, alt: str) String {
     if !from_alt && ls >= 0 && rel.slice(ls as usize + 1, end) == rel.slice((pv + 1) as usize, ls as usize) {
         let mut sib = String::from_str(file.slice(0, file.len() - rel.len() + ls as usize));
         sib.push_str(".spc");
-        let sf = stdio::fopen(sib.as_str(), "rb");
+        let sf = stdio::fopen(&sib, "rb");
         if sf == null {
             end = ls as usize;
         } else {
@@ -2478,9 +2478,9 @@ const fn pub_key_cmp(a: &PubKey, b: &PubKey) i32 {
         let y = unsafe b.w[i];
         if x != y {
             return if x < y {
-                -1;
+                -1
             } else {
-                1;
+                1
             };
         }
     }
@@ -2788,9 +2788,9 @@ extend Package {
                 out.push(V_BIVARIANT);
             }
             let mut d = if k as u32 < nres {
-                V_COVARIANT;
+                V_COVARIANT
             } else {
-                V_CONTRAVARIANT;
+                V_CONTRAVARIANT
             };
             if (fl[k] & LTF_INV) != 0 {
                 d = V_INVARIANT;
@@ -3031,7 +3031,7 @@ extend Package {
     /// starts when loading is serial or the root names a loaded module.
     pub(package) fn spec_user(self: &Self, q: &Package, root_file: str, target: i32) Box<UserSpec> {
         let rp = stem_of(root_file);
-        if unsafe G_LOAD_JOBS == 1 || self.overlay_files.len() != 0 || files_set() || q.find(rp.as_str()) >= 0 {
+        if unsafe G_LOAD_JOBS == 1 || self.overlay_files.len() != 0 || files_set() || q.find(&rp) >= 0 {
             return UserSpec::new();
         }
         let mut s = Box::<UserSpec>::new(
@@ -3049,7 +3049,7 @@ extend Package {
             v.alias_id.push(q.alias_id[i]);
         }
         v.root_module = q.modules.len() as u32;
-        s.units.push(rp.as_str(), root_file, false);
+        s.units.push(&rp, root_file, false);
         s.wg.add(1);
         let t = SpecTask { s: s.deref_mut(), target: target };
         let wgc = s.wg.clone();
@@ -3087,7 +3087,7 @@ extend Package {
         self.root_module = self.modules.len() as u32;
         let rp = stem_of(root_file);
         let rf = String::from_str(root_file);
-        let m = self.find(rp.as_str());
+        let m = self.find(&rp);
         if m >= 0 {
             eprint(
                 "error: the root file '{}' names module '{}', which the std prelude loads from '{}': rename the root file\n",
@@ -3102,7 +3102,7 @@ extend Package {
             let mut us = replace(&mut self.spec, PUnits {});
             self.root = self.par_replay(&mut us, 0, self.bootstrap, target);
         } else {
-            self.root = self.load_module(rp.as_str(), rf.as_str(), self.bootstrap, target);
+            self.root = self.load_module(&rp, &rf, self.bootstrap, target);
         }
         self.load_backend(std_dir, target, false);
     }
@@ -3116,7 +3116,7 @@ extend Package {
         }
         let rp = stem_of(root_file);
         let rf = String::from_str(root_file);
-        self.root = self.load_module(rp.as_str(), rf.as_str(), bootstrap_tags, target);
+        self.root = self.load_module(&rp, &rf, bootstrap_tags, target);
         self.load_prelude(std_dir, target, false);
         self.seed_core();
         self.bind_types();
@@ -3137,9 +3137,9 @@ extend Package {
         src.push_str(";\n/// True in a `--test` build.\npub const TEST: bool = ");
         src.push_str(
             if self.test_build {
-                "true";
+                "true"
             } else {
-                "false";
+                "false"
             },
         );
         src.push_str(
@@ -3175,7 +3175,7 @@ extend Package {
         }
         let mut parsed = parse_source(&mut src, "", false, Vector::<tok::Token>::new());
         assert(parsed.ok, "the build-constant module parses");
-        let sid = dutil::str_id(src.as_str());
+        let sid = dutil::str_id(&src);
         let id = self.add_module(
             String::from_str("__std::build"),
             String::new(),
@@ -3219,7 +3219,7 @@ extend Package {
     /// Whether module `m` is std's `target.spc`, the declarer of the build-constant enums.
     pub(package) const fn is_target_module(self: &Self, m: ModuleId) bool {
         return m as usize < self.modules.len() && self.modules[m as usize].prelude && basename_of(
-            self.modules[m as usize].file.as_str(),
+            &self.modules[m as usize].file,
         ) == "target.spc";
     }
 
@@ -3250,18 +3250,18 @@ extend Package {
         }
         if k == BC_POINTER_WIDTH {
             return if self.arch < 0 {
-                -1;
+                -1
             } else {
-                tgt::isa(self.arch).ptr_bytes as i64 * 8;
+                tgt::isa(self.arch).ptr_bytes as i64 * 8
             };
         }
         return if k == BC_ENDIAN {
             switch tgt::target_of(self.build_target, self.arch) {
                 Some(t) => t.big_endian as i64,
                 None => 0,
-            };
+            }
         } else {
-            -1;
+            -1
         };
     }
 
@@ -3309,8 +3309,8 @@ extend Package {
                 ks = self.modules[mi].ast.at_const(take).span.start;
                 ke = self.modules[mi].ast.at_const(take).span.end;
             }
-            bc_scan_names(self.modules[mi].source.as_str(), n.span.start, ks, &mut names);
-            bc_scan_names(self.modules[mi].source.as_str(), ke, n.span.end, &mut names);
+            bc_scan_names(&self.modules[mi].source, n.span.start, ks, &mut names);
+            bc_scan_names(&self.modules[mi].source, ke, n.span.end, &mut names);
             let ast = &mut self.modules[mi].ast;
             // The branches not taken, as written (an inner site decided first keeps its span in its cut).
             if n.kind == NodeKind::NODE_IF {
@@ -3331,7 +3331,7 @@ extend Package {
             ast.bc_cuts.push(BcCut { node: id, span: n.span });
             if take == NODE_NONE {
                 *ast.at(id) = Node {
-                    kind: NodeKind::NODE_BLOCK,
+                    kind: NODE_BLOCK,
                     span: n.span,
                     as_data: NodeAs { block: BlockData { statements: NodeList { start: 0, len: 0 } } },
                 };
@@ -3344,7 +3344,7 @@ extend Package {
                 ast.sink_body = Ast::in_body(id);
                 let es = ast.add(
                     Node {
-                        kind: NodeKind::NODE_EXPRESSION_STATEMENT,
+                        kind: NODE_EXPRESSION_STATEMENT,
                         span: tsp,
                         as_data: NodeAs { single: SingleData { value: take } },
                     },
@@ -3354,7 +3354,7 @@ extend Package {
                 let stmts = ast.commit(mark);
                 ast.sink_body = false;
                 *ast.at(id) = Node {
-                    kind: NodeKind::NODE_BLOCK,
+                    kind: NODE_BLOCK,
                     span: n.span,
                     as_data: NodeAs { block: BlockData { statements: stmts } },
                 };
@@ -3376,17 +3376,17 @@ extend Package {
         if n.kind == NodeKind::NODE_IDENTIFIER {
             let k = self.bc_const(mi, id);
             return if bc_is_bool(k) {
-                self.bc_value(k) as i32;
+                self.bc_value(k) as i32
             } else {
-                -1;
+                -1
             };
         }
         if n.kind == NodeKind::NODE_UNARY {
             let v = self.bc_eval(mi, n.as_data.unary.operand);
             return if v < 0 {
-                -1;
+                -1
             } else {
-                1 - v;
+                1 - v
             };
         }
         if n.kind != NodeKind::NODE_BINARY {
@@ -3400,9 +3400,9 @@ extend Package {
                 return -1;
             }
             return if b.op == tt::TokenType::AmpersandAmpersand {
-                l & r;
+                l & r
             } else {
-                l | r;
+                l | r
             };
         }
         let mut e = self.bc_eq(mi, b.left, b.right);
@@ -3413,9 +3413,9 @@ extend Package {
             return -1;
         }
         return if b.op == tt::TokenType::EqualEqual {
-            e;
+            e
         } else {
-            1 - e;
+            1 - e
         };
     }
 
@@ -3438,18 +3438,18 @@ extend Package {
             }
             let t = xn.as_data.literal.token_type;
             let v = if t == tt::TokenType::True {
-                1;
+                1
             } else if t == tt::TokenType::False {
-                0;
+                0
             } else if k == BC_POINTER_WIDTH && t == tt::TokenType::IntegerLiteral {
-                bc_decimal(src, xn.as_data.literal.raw);
+                bc_decimal(src, xn.as_data.literal.raw)
             } else {
-                -1;
+                -1
             };
             return if v < 0 {
-                -1;
+                -1
             } else {
-                (v == cur) as i32;
+                (v == cur) as i32
             };
         }
         if xn.kind != NodeKind::NODE_MEMBER || !xn.as_data.member.path {
@@ -3551,9 +3551,9 @@ extend Package {
                 let is_ext = n.kind == NodeKind::NODE_EXTEND;
                 if is_ext || n.kind == NodeKind::NODE_EXTERN_BLOCK {
                     let its = if is_ext {
-                        m.ast.ext(id).extend_def.items;
+                        m.ast.ext(id).extend_def.items
                     } else {
-                        n.as_data.extern_block.items;
+                        n.as_data.extern_block.items
                     };
                     let mut kept: u32 = 0;
                     for k in 0..its.len {
@@ -3563,7 +3563,7 @@ extend Package {
                             kept = kept + 1;
                         } else {
                             let _ = m.ast.member_of.remove(&mid);
-                            let msp = item_span(m.source.as_str(), &m.ast, mid);
+                            let msp = item_span(&m.source, &m.ast, mid);
                             m.ast.bc_dead.push(msp);
                         }
                     }
@@ -3576,7 +3576,7 @@ extend Package {
             } else {
                 // A dropped container's members no longer have one.
                 let n = *m.ast.at_const(id);
-                m.ast.bc_dead.push(item_span(m.source.as_str(), &m.ast, id));
+                m.ast.bc_dead.push(item_span(&m.source, &m.ast, id));
                 if n.kind == NodeKind::NODE_EXTEND {
                     m.ast.set_members(NODE_NONE, m.ast.ext(id).extend_def.items);
                 } else if n.kind == NodeKind::NODE_INTERFACE {
@@ -3599,12 +3599,12 @@ extend Package {
         for i in 0..self.modules.len() {
             if self.modules[i].has_ast {
                 self.modules[i].ast.gt.p = gp;
-                if self.modules[i].prelude && basename_of(self.modules[i].file.as_str()) == "simd.spc" {
+                if self.modules[i].prelude && basename_of(&self.modules[i].file) == "simd.spc" {
                     self.tt.deref_mut().simd = self.top_struct(i as ModuleId, "Simd", NodeKind::NODE_STRUCT);
                     self.tt.deref_mut().mask = self.top_struct(i as ModuleId, "Mask", NodeKind::NODE_STRUCT);
                     self.tt.deref_mut().simd_op = self.top_struct(i as ModuleId, "Op", NodeKind::NODE_ENUM);
                 }
-                if self.modules[i].prelude && basename_of(self.modules[i].file.as_str()) == "cpu.spc" {
+                if self.modules[i].prelude && basename_of(&self.modules[i].file) == "cpu.spc" {
                     self.tt.deref_mut().cpu_feature = self.top_struct(i as ModuleId, "Feature", NodeKind::NODE_ENUM);
                 }
             }
@@ -3803,9 +3803,9 @@ extend Package {
                 let fd = a.ext(it.node).function;
                 for pi in 0..fd.params.len + fd.returns.len {
                     let nd = if pi < fd.params.len {
-                        unsafe a.list(fd.params)[pi as usize];
+                        unsafe a.list(fd.params)[pi as usize]
                     } else {
-                        unsafe a.list(fd.returns)[(pi - fd.params.len) as usize];
+                        unsafe a.list(fd.returns)[(pi - fd.params.len) as usize]
                     };
                     let t = a.type_of(nd);
                     if (t & TYPE_PROV) != 0 {
@@ -3845,9 +3845,9 @@ extend Package {
         groups.resize_default(ngroups);
         for b in 0..nb {
             let cls: usize = if sig[b] {
-                0;
+                0
             } else {
-                1;
+                1
             };
             groups.index_mut(cls * (maxd as usize + 1) + depth[b] as usize).push(b as u32);
         }
@@ -3872,9 +3872,9 @@ extend Package {
                             self.tt_class.push(3);
                         }
                         self.tt_class[id as usize] = if self.publications == 0 {
-                            cls as u8;
+                            cls as u8
                         } else {
-                            2;
+                            2
                         };
                     }
                 }
@@ -3917,9 +3917,9 @@ extend Package {
         for t in 0..g.len() {
             let y = g.at(t);
             let cls: u8 = if t < self.tt_class.len() {
-                self.tt_class[t];
+                self.tt_class[t]
             } else {
-                3;
+                3
             };
             out.push_u64(t as u64);
             out.push_byte(b' ');
@@ -3985,14 +3985,14 @@ extend Package {
             clo_lists: UnsafeCell::<Vector<Vector<ModuleId>>>::new(Vector::<Vector<ModuleId>>::new()),
             clo_built: UnsafeCell::<Vector<bool>>::new(Vector::<bool>::new()),
             arch: if unsafe G_ARCH < 0 {
-                unsafe shim::sc_host_arch();
+                unsafe shim::sc_host_arch()
             } else {
-                unsafe G_ARCH;
+                unsafe G_ARCH
             },
             features: if unsafe G_ARCH < 0 {
-                tgt::baseline(unsafe shim::sc_host_platform(), unsafe shim::sc_host_arch());
+                tgt::baseline(unsafe shim::sc_host_platform(), unsafe shim::sc_host_arch())
             } else {
-                unsafe G_FEATURES;
+                unsafe G_FEATURES
             },
             build_module: -1,
             rt_module: -1,
@@ -4285,9 +4285,9 @@ extend Package {
                         }
                         let arg = site_arg(a, ni, cx.ent_p[e]);
                         let an = if arg != NODE_NONE {
-                            named_node(a, arg);
+                            named_node(a, arg)
                         } else {
-                            NODE_NONE;
+                            NODE_NONE
                         };
                         if an != NODE_NONE && a.at_const(an).kind == NodeKind::NODE_CLOSURE {
                             s.seeds.push(def_key(DefId { module: m as ModuleId, node: an }));
@@ -4320,7 +4320,7 @@ extend Package {
                         }
                     },
                     _ => {},
-                };
+                }
             } else {
                 // A function named as a value (not called here) has a function type; a `?`
                 // conversion names one too. Not in callee position (tested above): a function, not
@@ -4357,7 +4357,7 @@ extend Package {
                     _ => {
                         break;
                     },
-                };
+                }
             }
             opn.sort();
             for i in 0..opn.len() {
@@ -4598,9 +4598,9 @@ extend Package {
                 let pa = sc.d_parent[x];
                 g.parent.push(
                     if pa == CO_NONE {
-                        CO_NONE;
+                        CO_NONE
                     } else {
-                        base + pa;
+                        base + pa
                     },
                 );
                 g.lim.push(base + sc.d_span.len() as u32);
@@ -4610,9 +4610,9 @@ extend Package {
                 g.closure.push(sc.d_clo[x]);
                 g.need.push(sc.d_need[x]);
                 let k = if (dn & NODE_BODY) != 0 {
-                    sc.nb as usize + (dn & NODE_BODY_MASK) as usize;
+                    sc.nb as usize + (dn & NODE_BODY_MASK) as usize
                 } else {
-                    dn as usize;
+                    dn as usize
                 };
                 g.ix.set(ix0 + k, base + x as u32 + 1);
             }
@@ -4698,9 +4698,9 @@ extend Package {
                 r_tgt.push(td);
                 r_site.push(
                     if sc.r_site[i] == CO_NONE {
-                        CO_NO_SITE;
+                        CO_NO_SITE
                     } else {
-                        m as u64 << 32 | sc.r_site[i] as u64;
+                        m as u64 << 32 | sc.r_site[i] as u64
                     },
                 );
                 r_chk.push(sc.r_chk[i]);
@@ -4708,9 +4708,9 @@ extend Package {
             for i in 0..sc.seeds.len() {
                 let k = sc.seeds[i];
                 let sd = if k == CO_TGT_ESC {
-                    CO_NONE;
+                    CO_NONE
                 } else {
-                    g.decl_of((k >> 32) as ModuleId, (k & 0xFFFFFFFFu64) as NodeId);
+                    g.decl_of((k >> 32) as ModuleId, (k & 0xFFFFFFFFu64) as NodeId)
                 };
                 if sd != CO_NONE {
                     seeds.push(sd);
@@ -4962,9 +4962,9 @@ extend Package {
                 }
                 let site = r_site[i];
                 let sp = if site != CO_NO_SITE {
-                    scans.at((site >> 32) as usize).s_par[(site & 0xFFFFFFFFu64) as usize];
+                    scans.at((site >> 32) as usize).s_par[(site & 0xFFFFFFFFu64) as usize]
                 } else {
-                    0u8;
+                    0u8
                 };
                 if g.need[t as usize] != 0 && !g.escaped {
                     if r_chk[i] == 0 {
@@ -5351,9 +5351,9 @@ extend Package {
         unsafe atomic::store_u8(
             unsafe (self.sched.ret_attr.as_ptr() as *mut u8 + it as usize),
             if v {
-                1u8;
+                1u8
             } else {
-                0u8;
+                0u8
             },
             2,
         );
@@ -5467,7 +5467,7 @@ extend Package {
             vp.push_str("::");
             vp.push_str(pre);
             vp.push_str(path);
-            let m = self.find(vp.as_str());
+            let m = self.find(&vp);
             if m >= 0 {
                 return m;
             }
@@ -5482,9 +5482,9 @@ extend Package {
             return ex;
         }
         for i in 0..self.modules.len() {
-            if self.modules[i].prelude && basename_of(self.modules[i].file.as_str()) == basename_of(file) && dutil::same_file(
+            if self.modules[i].prelude && basename_of(&self.modules[i].file) == basename_of(file) && dutil::same_file(
                 file,
-                self.modules[i].file.as_str(),
+                &self.modules[i].file,
             ) {
                 self.alias_path.push(String::from_str(path));
                 self.alias_id.push(i as u32);
@@ -5501,7 +5501,7 @@ extend Package {
         let mut source = String::from_str(src);
         let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
         let ok = parsed.ok;
-        let sid = dutil::str_id(source.as_str());
+        let sid = dutil::str_id(&source);
         let id = self.add_module(
             String::from_str("main"),
             String::from_str("<harness>"),
@@ -5533,7 +5533,7 @@ extend Package {
         has_ast: bool,
     ) i32 {
         let id = self.modules.len() as i32;
-        let h = fnv(path.as_str());
+        let h = fnv(&path);
         self.mod_chain.push(
             switch self.mod_index.get(&h) {
                 Some(v) => *v,
@@ -5541,7 +5541,7 @@ extend Package {
             },
         );
         self.mod_index.insert(h, id as u32);
-        let (pkg, scope) = self.module_place(path.as_str(), file.as_str());
+        let (pkg, scope) = self.module_place(&path, &file);
         self.modules.push(
             Module {
                 path: path,
@@ -5569,9 +5569,9 @@ extend Package {
     // The prelude's `__std::` paths are std's.
     fn module_place(self: &mut Self, path: str, file: str) (u16, String) {
         let p = if path.starts_with("__std::") {
-            path.slice(2, path.len());
+            path.slice(2, path.len())
         } else {
-            path;
+            path
         };
         let mut pkg = PKG_PROJECT;
         if p.starts_with("std::") {
@@ -5582,9 +5582,9 @@ extend Package {
             let name = rest.slice(
                 0,
                 if f < 0 {
-                    rest.len();
+                    rest.len()
                 } else {
-                    f as usize;
+                    f as usize
                 },
             );
             let mut k: usize = 0;
@@ -5594,10 +5594,10 @@ extend Package {
             if k == self.vendors.len() {
                 self.vendors.push(String::from_str(name));
                 let (vb, _) = vendor_root(path, file);
-                self.vendor_std.push(vendor_std_internals(vb.as_str()));
+                self.vendor_std.push(vendor_std_internals(&vb));
             }
             pkg = PKG_VENDOR + k as u16;
-        } else if !self.std_root.is_empty() && file.starts_with(self.std_root.as_str()) && file.slice(
+        } else if !self.std_root.is_empty() && file.starts_with(&self.std_root) && file.slice(
             self.std_root.len(),
             file.len(),
         ).starts_with("/ffi/") {
@@ -5623,12 +5623,12 @@ extend Package {
         tail.push_byte(b'/');
         tail.push_str(p.slice(last, p.len()));
         tail.push_str(".spc");
-        if file.ends_with("/") || file.ends_with(tail.as_str()) && file.len() > tail.len() && file.byte_at(
+        if file.ends_with("/") || file.ends_with(&tail) && file.len() > tail.len() && file.byte_at(
             file.len() - tail.len() - 1,
         ) == b'/' {
-            return pkg, String::from_str(p);
+            return (pkg, String::from_str(p));
         }
-        return pkg, String::from_str(p.slice(0, cut));
+        return (pkg, String::from_str(p.slice(0, cut)));
     }
 
     /// Whether module `from` (`FROM_ANY`: the compiler itself) sees an item of module `owner` declared with
@@ -5641,9 +5641,9 @@ extend Package {
         let o = self.modules.at(owner as usize);
         let fm = from as usize < self.modules.len();
         let fpkg = if fm {
-            self.modules[from as usize].pkg;
+            self.modules[from as usize].pkg
         } else {
-            PKG_PROJECT;
+            PKG_PROJECT
         };
         if vis == VIS_PACKAGE {
             return fpkg == o.pkg || o.pkg == PKG_STD && (fpkg == PKG_PROJECT && self.std_internals || fpkg >= PKG_VENDOR && self.vendor_std[(fpkg - PKG_VENDOR) as usize]);
@@ -5656,14 +5656,14 @@ extend Package {
             return true;
         }
         let fp = if fm {
-            self.modules[from as usize].path.as_str();
+            self.modules[from as usize].path.as_str()
         } else {
-            "";
+            ""
         };
         let f = if fp.starts_with("__std::") {
-            fp.slice(2, fp.len());
+            fp.slice(2, fp.len())
         } else {
-            fp;
+            fp
         };
         return f.starts_with(d) && (f.len() == d.len() || f.slice(d.len(), f.len()).starts_with("::"));
     }
@@ -5687,11 +5687,11 @@ extend Package {
             return d.is_empty();
         }
         let x = if iv == VIS_MODULE {
-            a.scope.as_str();
+            a.scope.as_str()
         } else if a.path.as_str().starts_with("__std::") {
-            a.path.as_str().slice(2, a.path.len());
+            a.path.as_str().slice(2, a.path.len())
         } else {
-            a.path.as_str();
+            a.path.as_str()
         };
         return x.starts_with(d) && (x.len() == d.len() || x.slice(d.len(), x.len()).starts_with("::"));
     }
@@ -5705,9 +5705,9 @@ extend Package {
         }
         let real = real_path_of(path);
         let key = if real.len() != 0 {
-            real.as_str();
+            real.as_str()
         } else {
-            path;
+            path
         };
         for i in 0..self.overlay_files.len() {
             let f = self.overlay_files.at(i).as_str();
@@ -5722,21 +5722,21 @@ extend Package {
     // prelude stage loaded module `m` for that path from another file (the import would get the std
     // module), append the error to `log`.
     fn std_shadowed(self: &Self, dc: &mut DirCache, a: &Ast, src: str, parts: NodeList, m: usize, log: &mut String) {
-        let mut f = module_file_path(self.root_dir.as_str(), a, src, parts);
-        if !dc.exists(f.as_str()) {
-            f = module_index_path(self.root_dir.as_str(), a, src, parts);
-            if !dc.exists(f.as_str()) {
+        let mut f = module_file_path(&self.root_dir, a, src, parts);
+        if !dc.exists(&f) {
+            f = module_index_path(&self.root_dir, a, src, parts);
+            if !dc.exists(&f) {
                 if self.alt_root.is_empty() {
                     return;
                 }
-                f = module_file_path(self.alt_root.as_str(), a, src, parts);
-                if !dc.exists(f.as_str()) {
+                f = module_file_path(&self.alt_root, a, src, parts);
+                if !dc.exists(&f) {
                     return;
                 }
             }
         }
         let sf = self.modules.at(m).file.clone();
-        if dutil::same_file(f.as_str(), sf.as_str()) {
+        if dutil::same_file(&f, &sf) {
             return;
         }
         let path = self.modules.at(m).path.as_str();
@@ -5789,9 +5789,9 @@ extend Package {
             load_error(log);
             for line in log.as_str().lines() {
                 let msg = if line.starts_with("error: ") {
-                    line.slice(7, line.len());
+                    line.slice(7, line.len())
                 } else {
-                    line;
+                    line
                 };
                 self.load_errors.push(LoadError { module: id, off: IMPORT_OFF_NONE, msg: String::from_str(msg) });
             }
@@ -5848,18 +5848,18 @@ extend Package {
                 let mut vfile = String::new();
                 if !vbase.is_empty() {
                     let mut vp = String::new();
-                    if vendor_import(dc, vbase.as_str(), vprefix.as_str(), a, src, parts, &mut vp, &mut vfile) {
+                    if vendor_import(dc, &vbase, &vprefix, a, src, parts, &mut vp, &mut vfile) {
                         cp = vp;
                     }
                 }
-                let found = self.find(cp.as_str());
+                let found = self.find(&cp);
                 if found >= 0 {
                     if found as u32 < self.root_module && vfile.is_empty() {
                         self.std_shadowed(dc, a, src, parts, found as usize, log);
                     }
                     continue;
                 }
-                let u = queued.find(cp.as_str());
+                let u = queued.find(&cp);
                 if !vfile.is_empty() {
                     child_files.push(vfile);
                 } else if u < queued.units.len() && queued.units.at(u).resolved {
@@ -6016,15 +6016,15 @@ extend Package {
                 us.units.index_mut(k).log = log;
                 for c in 0..all_paths.len() {
                     let cp = all_paths[c].as_str();
-                    if self.find_file(cp, all_files[c].as_str()) >= 0 {
+                    if self.find_file(cp, &all_files[c]) >= 0 {
                         continue;
                     }
                     let seen = us.find(cp) < us.units.len();
                     us.units.index_mut(k).child_paths.push(String::from_str(cp));
-                    us.units.index_mut(k).child_files.push(String::from_str(all_files[c].as_str()));
+                    us.units.index_mut(k).child_files.push(String::from_str(&all_files[c]));
                     us.units.index_mut(k).child_offs.push(all_offs[c]);
                     if !seen {
-                        us.push(cp, all_files[c].as_str(), true);
+                        us.push(cp, &all_files[c], true);
                     }
                 }
             }
@@ -6093,14 +6093,14 @@ extend Package {
         expand: &mut bool,
     ) i32 {
         *expand = false;
-        let ex = self.find_file(us.units.at(ui).path.as_str(), us.units.at(ui).file.as_str());
+        let ex = self.find_file(&us.units.at(ui).path, &us.units.at(ui).file);
         if ex >= 0 {
             return ex;
         }
         if !us.units.at(ui).ok {
-            let pth = String::from_str(us.units.at(ui).path.as_str());
-            let fl = String::from_str(us.units.at(ui).file.as_str());
-            return self.load_module_serial(pth.as_str(), fl.as_str(), from, off, bootstrap_tags, target);
+            let pth = String::from_str(&us.units.at(ui).path);
+            let fl = String::from_str(&us.units.at(ui).file);
+            return self.load_module_serial(&pth, &fl, from, off, bootstrap_tags, target);
         }
         let u = us.units.index_mut(ui).deref_mut();
         let id = self.add_module(
@@ -6159,16 +6159,16 @@ extend Package {
             let cf = replace(stack.index_mut(top).files.index_mut(k), String::new());
             let from = stack.at(top).owner;
             let off = stack.at(top).offs[k];
-            if self.find_file(cp.as_str(), cf.as_str()) >= 0 {
+            if self.find_file(&cp, &cf) >= 0 {
                 continue;
             }
             if unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 && !files_set() {
                 // A unit the parallel replay handed back (it failed to parse): its imports return to the
                 // parallel loader, as load_module routes them.
-                let _ = self.load_module_par(cp.as_str(), cf.as_str(), bootstrap_tags, target);
+                let _ = self.load_module_par(&cp, &cf, bootstrap_tags, target);
                 continue;
             }
-            let id = self.parse_module(cp.as_str(), cf.as_str(), from, off, bootstrap_tags);
+            let id = self.parse_module(&cp, &cf, from, off, bootstrap_tags);
             if id >= 0 && self.modules[id as usize].has_ast {
                 stack.push(self.import_frame(id, target));
             }
@@ -6190,7 +6190,7 @@ extend Package {
             let mut s = String::with_capacity(t.len() + lexer::SOURCE_PAD);
             s.push_str(t.as_str());
             s.pad_nul(lexer::SOURCE_PAD);
-            sid = dutil::str_id(s.as_str());
+            sid = dutil::str_id(&s);
             source = s;
         } else {
             switch read_module(mod_path, file_path, &mut mt, &mut sid) {
@@ -6203,7 +6203,7 @@ extend Package {
                         let m = self.modules.at(from as usize);
                         msg.push_string(&m.file);
                         if off != IMPORT_OFF_NONE {
-                            msg.format_into(":{}", errs::line_of(m.source.as_str(), off));
+                            msg.format_into(":{}", errs::line_of(&m.source, off));
                         }
                         msg.push_str(": ");
                     }
@@ -6219,7 +6219,7 @@ extend Package {
                     self.ok = false;
                     return -1;
                 },
-            };
+            }
         }
 
         let mut tsc = replace(&mut self.tok_scratch, Vector::<tok::Token>::new());
@@ -6255,9 +6255,7 @@ extend Package {
     pub(package) fn seed_core(self: &mut Self) {
         self.core_seeded = false;
         for i in 0..self.modules.len() {
-            let is_core = self.modules[i].has_ast && self.modules[i].prelude && basename_of(
-                self.modules[i].file.as_str(),
-            ) == "core.spc";
+            let is_core = self.modules[i].has_ast && self.modules[i].prelude && basename_of(&self.modules[i].file) == "core.spc";
             if is_core {
                 for b in 0..BT_COUNT_N {
                     let id = self.modules[i].ast.add_ext(
@@ -6350,7 +6348,7 @@ extend Package {
                     hi = (*v & 0xFFFFFFFFu64) as usize;
                 },
                 None => {},
-            };
+            }
         } else {
             for m in 0..self.modules.len() {
                 for k in self.idx().mod_exts[m] as usize..self.idx().mod_exts[m + 1] as usize {
@@ -6364,9 +6362,9 @@ extend Package {
             hi = scan.len();
         }
         let rows = if self.idx().sigs_built {
-            &self.idx().confs;
+            &self.idx().confs
         } else {
-            &scan;
+            &scan
         };
         for pass in 0..2 {
             for x in lo..hi {
@@ -6835,11 +6833,11 @@ extend Package {
                 return self.assoc_norm(dm, &it, out, depth + 1);
             }
             *out = if y.fn_sig() {
-                unsafe (*da).intern_sig_rec(&it, y.qualifier);
+                unsafe (*da).intern_sig_rec(&it, y.qualifier)
             } else if y.kind == TypeKind::TYPE_DYN {
-                unsafe (*da).intern_dyn(it.module, it.decl, &it.args[0], it.n, y.qualifier);
+                unsafe (*da).intern_dyn(it.module, it.decl, &it.args[0], it.n, y.qualifier)
             } else {
-                unsafe (*da).intern_instance(it.module, it.decl, &it.args[0], it.n);
+                unsafe (*da).intern_instance(it.module, it.decl, &it.args[0], it.n)
             };
             return true;
         }
@@ -6860,13 +6858,13 @@ extend Package {
                 // A builtin type name resolves to nothing: it is known by its spelling.
                 let n = unsafe (*a).at_const(tn);
                 let sp = if n.kind == NodeKind::NODE_TYPE_PATH && unsafe (*a).at_const(tn).as_data.type_path.parts.len == 1 {
-                    unsafe (*a).at_const(unsafe (*a).list(unsafe (*a).at_const(tn).as_data.type_path.parts)[0]).as_data.name.text;
+                    unsafe (*a).at_const(unsafe (*a).list(unsafe (*a).at_const(tn).as_data.type_path.parts)[0]).as_data.name.text
                 } else if n.kind == NodeKind::NODE_IDENTIFIER {
-                    n.as_data.name.text;
+                    n.as_data.name.text
                 } else {
                     break;
                 };
-                let b = bt_of_name(self.modules[tm as usize].source.as_str(), sp);
+                let b = bt_of_name(&self.modules[tm as usize].source, sp);
                 if b >= 0 {
                     return b as BuiltinType;
                 }
@@ -6880,7 +6878,7 @@ extend Package {
             a = self.module_ast_const(d.module);
             let dn = unsafe (*a).at_const(d.node);
             if dn.kind == NodeKind::NODE_ENUM {
-                return BuiltinType::BT_I32;
+                return BT_I32;
             }
             if dn.kind != NodeKind::NODE_TYPE_ALIAS {
                 break;
@@ -6888,7 +6886,7 @@ extend Package {
             tn = dn.as_data.type_alias.ty;
             hops += 1;
         }
-        return BuiltinType::BT_COUNT;
+        return BT_COUNT;
     }
 
     /// The enum type node `tn` of module `m` names, through type aliases; node NODE_NONE for any
@@ -7011,9 +7009,9 @@ extend Package {
                     continue;
                 }
                 let key = im.name as u64 * 2u64 + if im.is_type {
-                    1u64;
+                    1u64
                 } else {
-                    0u64;
+                    0u64
                 };
                 if idx.pl_map.get(&key).is_none() {
                     idx.pl_map.insert(key, im.node as u64 << 32 | m as u64);
@@ -7242,7 +7240,7 @@ extend Package {
                 name_node = ast.ext_name(node);
                 vis = ast.ext(node).aggregate.vis;
                 if n.kind == NodeKind::NODE_ENUM {
-                    kind = ItemKind::IK_ENUM;
+                    kind = IK_ENUM;
                     let ms = ast.ext(node).aggregate.members;
                     for i in 0..ms.len {
                         let vsp = ast.at_const(ast.at_const(unsafe ast.list(ms)[i as usize]).as_data.variant.name).as_data.name.text;
@@ -7256,21 +7254,21 @@ extend Package {
             NODE_TYPE_ALIAS => {
                 name_node = n.as_data.type_alias.name;
                 vis = n.as_data.type_alias.vis;
-                kind = ItemKind::IK_TYPE_ALIAS;
+                kind = IK_TYPE_ALIAS;
             },
             NODE_INTERFACE => {
                 name_node = ast.ext_name(node);
                 vis = ast.ext(node).interface_def.vis;
-                kind = ItemKind::IK_INTERFACE;
+                kind = IK_INTERFACE;
             },
             NODE_FUNCTION => {
                 name_node = ast.ext_name(node);
                 vis = ast.ext(node).function.vis;
                 is_type = false;
                 kind = if owner == ITEM_NONE {
-                    ItemKind::IK_FUNCTION;
+                    IK_FUNCTION
                 } else {
-                    ItemKind::IK_METHOD;
+                    IK_METHOD
                 };
             },
             NODE_CONST => {
@@ -7278,13 +7276,13 @@ extend Package {
                 vis = n.as_data.const_def.vis;
                 is_type = false;
                 kind = if owner == ITEM_NONE {
-                    ItemKind::IK_CONST;
+                    IK_CONST
                 } else {
-                    ItemKind::IK_ASSOC_CONST;
+                    IK_ASSOC_CONST
                 };
             },
             _ => {},
-        };
+        }
         if name_node == NODE_NONE {
             return;
         }
@@ -7308,13 +7306,13 @@ extend Package {
         );
         if owner == ITEM_NONE {
             let key = sym as u64 * 4u64 + if is_type {
-                2u64;
+                2u64
             } else {
-                0u64;
+                0u64
             } + if vis_exported(vis) {
-                1u64;
+                1u64
             } else {
-                0u64;
+                0u64
             };
             let nm = &mut idx.name_maps[mid as usize];
             if nm.get(&key).is_none() {
@@ -7376,7 +7374,7 @@ extend Package {
             let n = ast.at_const(nid);
             if n.kind == NodeKind::NODE_IMPORT {
                 let path = join_parts(ast, src, n.as_data.import_decl.path, "::");
-                let c = self.find_in(mid, path.as_str());
+                let c = self.find_in(mid, &path);
                 if c >= 0 {
                     let mut dup = false;
                     let from = idx.mod_imports[m];
@@ -7466,9 +7464,9 @@ extend Package {
     @always_inline
     pub(package) fn lookup_sym(self: &Self, from: u32, mid: ModuleId, s: SymbolId, want_type: bool) NodeId {
         let key = s as u64 * 4u64 + if want_type {
-            2u64;
+            2u64
         } else {
-            0u64;
+            0u64
         } + 1u64;
         let it = self.idx().name_maps[mid as usize].get(&key);
         if it.is_none() {
@@ -7537,9 +7535,9 @@ extend Package {
             return LookupHit { node: NODE_NONE, mid: 0 };
         }
         let lk = s as u64 * 2u64 + if want_type {
-            1u64;
+            1u64
         } else {
-            0u64;
+            0u64
         };
         return switch self.idx().pl_map.get(&lk) {
             Some(v) => LookupHit { node: (*v >> 32) as NodeId, mid: (*v & 0xFFFFFFFFu64) as ModuleId },
@@ -7762,9 +7760,9 @@ extend Package {
             let ck = unsafe (*aa).at_const(callee_id).kind;
             let fd = if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
                 let e = unsafe (*aa).at_const(callee_id).as_data.specialization.expression;
-                unsafe (*aa).resolution_def(e);
+                unsafe (*aa).resolution_def(e)
             } else {
-                unsafe (*aa).resolution_def(callee_id);
+                unsafe (*aa).resolution_def(callee_id)
             };
             let bi = fd.module as usize;
             if fd.node == NODE_NONE || bi >= n || bi == a || dep.contains(&fd.module) {
@@ -7869,7 +7867,7 @@ extend Package {
     pub(package) const fn names_vectors(self: &Self) bool {
         for i in 0..self.modules.len() {
             let md = &self.modules[i];
-            if md.has_ast && md.ast.names_vectors && !(md.prelude && basename_of(md.file.as_str()) == "simd.spc") {
+            if md.has_ast && md.ast.names_vectors && !(md.prelude && basename_of(&md.file) == "simd.spc") {
                 return true;
             }
         }
@@ -7883,9 +7881,9 @@ extend Package {
             return;
         }
         let spec = if self.simd_dispatch.len() == 0 {
-            "x86-64-v3";
+            "x86-64-v3"
         } else {
-            self.simd_dispatch.as_str();
+            self.simd_dispatch.as_str()
         };
         let build = cf::close(self.features);
         let mut at: usize = 0;
@@ -7961,9 +7959,9 @@ extend Package {
             // Skip subdirectories named "*.spc" straight from the listing's kind; only an unknown kind
             // needs a stat.
             let dir = if let Some(k) = e.kind {
-                k == fs::FileKind::Dir;
+                k == fs::FileKind::Dir
             } else {
-                dutil::is_dir(join2(std_dir, e.name).as_str());
+                dutil::is_dir(join2(std_dir, e.name).as_str())
             };
             if !dir {
                 names.push(String::from_str(e.name));
@@ -7983,26 +7981,26 @@ extend Package {
         let par = unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 && !files_set();
         let mut us = PUnits {};
         for k in 0..names.len() {
-            let file = join2(std_dir, names[k].as_str());
+            let file = join2(std_dir, &names[k]);
             let mut dup = false;
             for i2 in 0..m0 {
-                if basename_of(self.modules[i2].file.as_str()) != names[k].as_str() {
+                if basename_of(&self.modules[i2].file) != names[k].as_str() {
                     continue;
                 }
-                if dutil::same_file(file.as_str(), self.modules[i2].file.as_str()) {
+                if dutil::same_file(&file, &self.modules[i2].file) {
                     self.modules[i2].prelude = true;
                     dup = true;
                     break;
                 }
             }
             if !dup {
-                let stem = stem_of(names[k].as_str());
+                let stem = stem_of(&names[k]);
                 let mut modpath = String::from_str("__std::");
-                modpath.push_str(stem.as_str());
+                modpath.push_str(&stem);
                 if par {
-                    us.push(modpath.as_str(), file.as_str(), false);
+                    us.push(&modpath, &file, false);
                 } else {
-                    let id = self.load_module(modpath.as_str(), file.as_str(), self.bootstrap, target);
+                    let id = self.load_module(&modpath, &file, self.bootstrap, target);
                     if id >= 0 {
                         self.modules[id as usize].prelude = true;
                     }
@@ -8032,44 +8030,39 @@ extend Package {
         }
         // The runtime the emitted code calls (traps, allocation tracking, the stack-overflow report).
         let rf = join2(std_dir, "rt/base.spc");
-        if self.rt_module < 0 && dutil::file_mtime(rf.as_str()) != 0 {
-            self.rt_module = self.load_module("std::rt::base", rf.as_str(), self.bootstrap, target);
+        if self.rt_module < 0 && dutil::file_mtime(&rf) != 0 {
+            self.rt_module = self.load_module("std::rt::base", &rf, self.bootstrap, target);
         }
         // The runner the generated `main` of a test build calls (`sc_test_main`).
         let tf = join2(std_dir, "rt/test.spc");
-        if self.test_build && self.rt_test < 0 && dutil::file_mtime(tf.as_str()) != 0 {
-            self.rt_test = self.load_module("std::rt::test", tf.as_str(), self.bootstrap, target);
+        if self.test_build && self.rt_test < 0 && dutil::file_mtime(&tf) != 0 {
+            self.rt_test = self.load_module("std::rt::test", &tf, self.bootstrap, target);
         }
         // The 128-bit routines the native code calls, where only the C toolchain's archives hold them.
         let bf0 = join2(std_dir, "rt/builtins.spc");
-        if !tgt::os(target).darwin && self.rt_builtins < 0 && dutil::file_mtime(bf0.as_str()) != 0 {
-            self.rt_builtins = self.load_module("std::rt::builtins", bf0.as_str(), self.bootstrap, target);
+        if !tgt::os(target).darwin && self.rt_builtins < 0 && dutil::file_mtime(&bf0) != 0 {
+            self.rt_builtins = self.load_module("std::rt::builtins", &bf0, self.bootstrap, target);
         }
         // wasm has no system C library: these implement the subset the program uses, over WASI.
         if tgt::os(target).own_libc && self.rt_libc < 0 {
             let cf = join2(std_dir, "rt/libc.spc");
             let mf = join2(std_dir, "rt/libm.spc");
-            if dutil::file_mtime(cf.as_str()) != 0 && dutil::file_mtime(mf.as_str()) != 0 {
-                self.rt_libc = self.load_module("std::rt::libc", cf.as_str(), self.bootstrap, target);
-                self.rt_libm = self.load_module("std::rt::libm", mf.as_str(), self.bootstrap, target);
+            if dutil::file_mtime(&cf) != 0 && dutil::file_mtime(&mf) != 0 {
+                self.rt_libc = self.load_module("std::rt::libc", &cf, self.bootstrap, target);
+                self.rt_libm = self.load_module("std::rt::libm", &mf, self.bootstrap, target);
             }
         }
         let vectors = user_vectors || self.names_vectors();
         // The traps the native backends' vector code calls.
         let lf = join2(std_dir, "rt/lanes.spc");
-        if vectors && self.rt_lanes < 0 && dutil::file_mtime(lf.as_str()) != 0 {
-            self.rt_lanes = self.load_module("std::rt::lanes", lf.as_str(), self.bootstrap, target);
+        if vectors && self.rt_lanes < 0 && dutil::file_mtime(&lf) != 0 {
+            self.rt_lanes = self.load_module("std::rt::lanes", &lf, self.bootstrap, target);
         }
         let bn = tgt::isa(self.arch).simd_backend;
         if bn.len() != 0 && !cf::is_empty(self.features) && vectors {
             let bf = join2(std_dir, format("simd/backend/{}.spc", bn).as_str());
-            if dutil::file_mtime(bf.as_str()) != 0 {
-                let id = self.load_module(
-                    format("std::simd::backend::{}", bn).as_str(),
-                    bf.as_str(),
-                    self.bootstrap,
-                    target,
-                );
+            if dutil::file_mtime(&bf) != 0 {
+                let id = self.load_module(format("std::simd::backend::{}", bn).as_str(), &bf, self.bootstrap, target);
                 if id >= 0 {
                     self.modules[id as usize].backend = true;
                 }
@@ -8077,8 +8070,8 @@ extend Package {
             // The run-time choice of the copies reads the CPU detector (`sc_cpu_words`).
             if self.simd_levels.len() != 0 {
                 let cf9 = join2(dirname_of(std_dir), "ffi/sc_cpu.spc");
-                if dutil::file_mtime(cf9.as_str()) != 0 {
-                    let _ = self.load_module("sc_cpu", cf9.as_str(), self.bootstrap, target);
+                if dutil::file_mtime(&cf9) != 0 {
+                    let _ = self.load_module("sc_cpu", &cf9, self.bootstrap, target);
                 }
             }
         }

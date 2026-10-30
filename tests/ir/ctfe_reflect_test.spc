@@ -113,7 +113,7 @@ fn tuple_field_binder_names_each_element(b: &mut h::ExitBatch) {
     // .., std/reflect.spc).
     b.add(
         "each element is bound under its position's name",
-        "fn main() i32 {\n    let t = (10, true, 'x');\n    let mut s = String::new();\n    inline for f in fields(&t) { s.push_str(f.name); }\n    return if s.as_str() == \"_0_1_2\" { 0; } else { 1; };\n}\n",
+        "fn main() i32 {\n    let t = (10, true, 'x');\n    let mut s = String::new();\n    inline for f in fields(&t) { s.push_str(f.name); }\n    return if s.as_str() == \"_0_1_2\" { 0 } else { 1 };\n}\n",
         0,
     );
 }
@@ -129,9 +129,9 @@ fn hidden_chain(n: i32, down: bool) String {
     s.push_str("const fn h(i: u64) u64 {\n    if i == 0 {\n        return 1;\n    }\n    return table(i - 1) + 1;\n}\n");
     for k in 0..n {
         let i = if down {
-            n - 1 - k;
+            n - 1 - k
         } else {
-            k;
+            k
         };
         s.push_str(format("const C{}: u64 = h({});\n", i, i).as_str());
     }
@@ -143,9 +143,9 @@ fn a_deep_hidden_constant_chain_folds_in_either_order(b: &mut h::ExitBatch) {
     // The constants reach each other through function bodies, so they nest: 100 levels fold
     // whichever constant evaluates first.
     let up = hidden_chain(100, false);
-    b.add("a 100-deep chain declared upward", up.as_str(), 100);
+    b.add("a 100-deep chain declared upward", &up, 100);
     let down = hidden_chain(100, true);
-    b.add("a 100-deep chain declared downward", down.as_str(), 100);
+    b.add("a 100-deep chain declared downward", &down, 100);
 }
 
 // A generic function's index list folds when its instance `rot::<k>` first lowers: `A` lowers it
@@ -187,11 +187,11 @@ fn nest(n: usize, v: Simd<i32, 4>) i32 {
 fn a_lowering_fold_deep_in_a_call_stack_folds_in_either_order(b: &mut h::ExitBatch) {
     // The fold has its own call depth: 31 calls fit whatever lowers the instance first.
     let alone = deep_lowering_fold(30, 0);
-    b.add("the deep constant alone", alone.as_str(), 3);
+    b.add("the deep constant alone", &alone, 3);
     let af = deep_lowering_fold(30, 1);
-    b.add("the deep constant first", af.as_str(), 6);
+    b.add("the deep constant first", &af, 6);
     let bf = deep_lowering_fold(30, 2);
-    b.add("the shallow constant first", bf.as_str(), 6);
+    b.add("the shallow constant first", &bf, 6);
 }
 
 @test
@@ -199,10 +199,10 @@ fn a_lowering_fold_past_the_call_limit_fails_in_either_order() {
     // 61 calls exceed the limit itself: `A` fails the same way in both orders.
     let why = "constant 'A' cannot be evaluated at compile time: the index list cannot be evaluated: it traps";
     let af = deep_lowering_fold(60, 1);
-    h::expect_err_msg("the deep constant first", af.as_str(), why);
+    h::expect_err_msg("the deep constant first", &af, why);
     // `B` traps first there: the build reports `A` after it.
     let bf = deep_lowering_fold(60, 2);
-    h::expect_build_err("the shallow constant first", bf.as_str(), why);
+    h::expect_build_err("the shallow constant first", &bf, why);
 }
 
 @test
@@ -302,7 +302,7 @@ fn deep_constant_chain_evaluates_without_nesting(b: &mut h::ExitBatch) {
     // Each constant reads the previous one: evaluating the last must not nest 20000 evaluations
     // on the native stack. C19999 = 19999 % 7 + 1 = 1.
     let src = const_chain(20000, "static_assert(C19999 == 1);\nfn main() i32 { return C19999; }\n");
-    b.add("a 20000-constant chain folds", src.as_str(), 1);
+    b.add("a 20000-constant chain folds", &src, 1);
 }
 
 fn deep_aggregate_constant_chain_evaluates_without_nesting(b: &mut h::ExitBatch) {
@@ -312,7 +312,7 @@ fn deep_aggregate_constant_chain_evaluates_without_nesting(b: &mut h::ExitBatch)
         s.push_str(format("const P{}: P = P {{ x: P{}.y % 7 + 1, y: P{}.x }};\n", i, i - 1, i - 1).as_str());
     }
     s.push_str("fn main() i32 { return P299.x * 10 + P299.y; }\n");
-    b.add("a 300-aggregate chain folds", s.as_str(), 53);
+    b.add("a 300-aggregate chain folds", &s, 53);
 }
 
 // A constant of a generic aggregate keeps every instance argument, up to the language's limit of

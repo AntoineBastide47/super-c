@@ -114,9 +114,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
     fn cbrt_x(self: &Ref<R>, x: f64) R {
         let c = self.cbrt(R::of(x.abs()));
         return if x < 0.0 {
-            R::of(0.0) - c;
+            R::of(0.0) - c
         } else {
-            c;
+            c
         };
     }
 
@@ -129,9 +129,9 @@ extend<R: Real + Add<Output = R> + Sub<Output = R> + Mul<Output = R> + Div<Outpu
         let m = self.exp(R::of(y) * self.log(R::of(x.abs())));
         // Times -1, not 0 - m: an underflow to 0 keeps its sign.
         return if x < 0.0 && (y * 0.5).trunc() != y * 0.5 {
-            R::of(-1.0) * m;
+            R::of(-1.0) * m
         } else {
-            m;
+            m
         };
     }
 }
@@ -183,9 +183,9 @@ const fn fast_pair(kind: u8, x: f64, y: f64, f64_lanes: bool) bool {
     }
     let hi = x.abs().max(y.abs());
     return hi == 0.0 || !hi.is_finite() || if f64_lanes {
-        hi >= c64::K.hyp_lo && hi <= c64::K.hyp_hi;
+        hi >= c64::K.hyp_lo && hi <= c64::K.hyp_hi
     } else {
-        hi >= c32::K.hyp_lo as f64 && hi <= c32::K.hyp_hi as f64;
+        hi >= c32::K.hyp_lo as f64 && hi <= c32::K.hyp_hi as f64
     };
 }
 
@@ -272,9 +272,9 @@ fn pair(kind: u8, g: &mut Rng, emax: i32, p: i32, f32_lanes: bool) (f64, f64) {
     let pick = g.next() % 4;
     if pick == 0 && kind != S_POWI {
         if f32_lanes {
-            return fl::f32_from_bits(g.next() as u32), fl::f32_from_bits((g.next() >> 32) as u32);
+            return (fl::f32_from_bits(g.next() as u32), fl::f32_from_bits((g.next() >> 32) as u32));
         }
-        return fl::f64_from_bits(g.next()), fl::f64_from_bits(g.next());
+        return (fl::f64_from_bits(g.next()), fl::f64_from_bits(g.next()));
     }
     let emin = 2 - emax - p;
     if kind == S_POW {
@@ -283,62 +283,65 @@ fn pair(kind: u8, g: &mut Rng, emax: i32, p: i32, f32_lanes: bool) (f64, f64) {
             let x = binade(g, emin, emax);
             let l2 = (exponent(x) as f64).max(-1e9) + 0.5;
             let t = emin as f64 - 2.0 + g.unit() * ((emax - emin) as f64 + 4.0);
-            return x, t / if l2.abs() < 0.25 {
-                1.0;
-            } else {
-                l2;
-            };
+            return (
+                x,
+                t / if l2.abs() < 0.25 {
+                    1.0
+                } else {
+                    l2
+                }
+            );
         }
         if pick == 2 {
             // A negative x and an integer y.
             let x = -binade(g, -40, 40);
-            return x, (g.next() % 161) as f64 - 80.0;
+            return (x, (g.next() % 161) as f64 - 80.0);
         }
         // Near 1, a large y.
         let x = 1.0 + (g.unit() - 0.5) * binade(g, -p, -1);
-        return x, (g.unit() - 0.5) * binade(g, 0, p);
+        return (x, (g.unit() - 0.5) * binade(g, 0, p));
     }
     if kind == S_POWI {
         let x = if g.next() % 2 == 0 {
-            binade(g, -8, 8);
+            binade(g, -8, 8)
         } else {
-            -binade(g, emin, emax);
+            -binade(g, emin, emax)
         };
         let n = if pick < 2 {
-            (g.next() % 257) as f64 - 128.0;
+            (g.next() % 257) as f64 - 128.0
         } else if pick == 2 {
-            ((g.next() >> 33) as i64 - (1i64 << 30)) as f64;
+            ((g.next() >> 33) as i64 - (1i64 << 30)) as f64
         } else {
-            (g.next() % 4097) as f64 - 2048.0;
+            (g.next() % 4097) as f64 - 2048.0
         };
-        return x, n;
+        return (x, n);
     }
     if kind == S_ATAN2 {
         let y = binade(g, emin, emax);
         let x = if pick == 1 {
-            y * (0.5 + g.unit());
+            y * (0.5 + g.unit())
         } else {
-            binade(g, emin, emax);
+            binade(g, emin, emax)
         };
         let sy = if g.next() % 2 == 0 {
-            1.0;
+            1.0
         } else {
-            -1.0;
+            -1.0
         };
         let sx = if g.next() % 2 == 0 {
-            1.0;
+            1.0
         } else {
-            -1.0;
+            -1.0
         };
-        return sy * y, sx * x;
+        return (sy * y, sx * x);
     }
     let x = binade(g, emin, emax);
     let y = if pick == 1 {
-        x * (0.25 + g.unit());
+        x * (0.25 + g.unit())
     } else {
-        binade(g, emin, emax);
+        binade(g, emin, emax)
     };
-    return x, y;
+    return (x, y);
 }
 
 // 8 pairs of `f` in f32 lanes against the f64 C library into `st`, a result near the bound again
@@ -400,14 +403,14 @@ fn run32_2(f: &F2, n: u64, rq: &Ref<Q>) Stat {
                 for ey in -149..128 {
                     for q in 0..4 {
                         unsafe xa[m] = (binade(&mut g, ex, ex) * if q % 2 == 0 {
-                            1.0;
+                            1.0
                         } else {
-                            -1.0;
+                            -1.0
                         }) as f32;
                         unsafe ya[m] = (binade(&mut g, ey, ey) * if q < 2 {
-                            1.0;
+                            1.0
                         } else {
-                            -1.0;
+                            -1.0
                         }) as f32;
                         m += 1;
                         if m == 8 {
@@ -481,9 +484,9 @@ fn run64_2(f: &F2, n: u64, rd: &Ref<Dw>, rq: &Ref<Q>) Stat {
                         }
                         let kind = unsafe kinds[k];
                         let mut e = if kind == 2 {
-                            b + 1.0;
+                            b + 1.0
                         } else {
-                            err64(c, r[k], unsafe refs[k]);
+                            err64(c, r[k], unsafe refs[k])
                         };
                         if kind != 1 && near_bound(c, e, b) || kind == 2 {
                             if !unsafe qd[k] {
@@ -946,9 +949,9 @@ const fn bound(class: usize, f64_lanes: bool) f64 {
         return 3.5;
     }
     return if f64_lanes {
-        0x1p-22;
+        0x1p-22
     } else {
-        0x1p-11;
+        0x1p-11
     };
 }
 
@@ -983,32 +986,32 @@ fn err32(class: usize, y: f32, r: f64) f64 {
     }
     if r.is_nan() || y.is_nan() {
         return if r.is_nan() && y.is_nan() {
-            0.0;
+            0.0
         } else {
-            1e300;
+            1e300
         };
     }
     let rr = r as f32; // the correctly rounded result
     if y.is_infinite() || rr.is_infinite() {
         return if y == rr {
-            0.0;
+            0.0
         } else if y.is_infinite() && class == 2 && y == r.signum() * (1.0 / 0.0) && r.abs() * (1.0 + 0x1p-11) >= 3.4028234663852886e38 {
-            0.0; // fast may overflow within its bound of the largest finite value
+            0.0 // fast may overflow within its bound of the largest finite value
         } else if y.is_infinite() && class == 2 {
-            1e300;
+            1e300
         } else if class == 2 {
-            (y as f64 - r).abs() / r.abs();
+            (y as f64 - r).abs() / r.abs()
         } else {
-            (y as f64 - r).abs() / ulp32(r);
+            (y as f64 - r).abs() / ulp32(r)
         };
     }
     if class == 2 {
         if r.abs() < 0x1p-126 {
             // Fast may flush: a result within the smallest normal of a subnormal reference is exact.
             return if (y as f64 - r).abs() <= 0x1p-126 {
-                0.0;
+                0.0
             } else {
-                1e300;
+                1e300
             };
         }
         return (y as f64 - r).abs() / r.abs();
@@ -1023,31 +1026,31 @@ fn err64(class: usize, y: f64, r: Dw) f64 {
     }
     if rn.is_nan() || y.is_nan() {
         return if rn.is_nan() && y.is_nan() {
-            0.0;
+            0.0
         } else {
-            1e300;
+            1e300
         };
     }
     if y.is_infinite() || rn.is_infinite() {
         return if y == rn {
-            0.0;
+            0.0
         } else if y.is_infinite() && class == 2 && y == rn.signum() * (1.0 / 0.0) && rn.abs() * (1.0 + 0x1p-22) >= 1.7976931348623157e308 {
-            0.0; // fast may overflow within its bound of the largest finite value
+            0.0 // fast may overflow within its bound of the largest finite value
         } else if y.is_infinite() {
-            1e300;
+            1e300
         } else if class == 2 {
-            (Dw::of(y) - r).near().abs() / r.near().abs();
+            (Dw::of(y) - r).near().abs() / r.near().abs()
         } else {
-            (Dw::of(y) - r).near().abs() / ulp64(rn);
+            (Dw::of(y) - r).near().abs() / ulp64(rn)
         };
     }
     let d = (Dw::of(y) - r).near().abs();
     if class == 2 {
         if rn.abs() < 0x1p-1022 {
             return if d <= 0x1p-1022 {
-                0.0;
+                0.0
             } else {
-                1e300;
+                1e300
             };
         }
         return d / rn.abs();
@@ -1065,15 +1068,15 @@ fn err32q(class: usize, y: f32, r: Q) f64 {
     }
     if class == 2 && rn.abs() < 0x1p-126 {
         return if (Q::of(y) - r).to_f64().abs() <= 0x1p-126 {
-            0.0;
+            0.0
         } else {
-            1e300;
+            1e300
         };
     }
     let u = if class == 2 {
-        Q::of(rn.abs());
+        Q::of(rn.abs())
     } else {
-        Q::of(ulp32(rn));
+        Q::of(ulp32(rn))
     };
     return ((Q::of(y) - r) / u).to_f64().abs();
 }
@@ -1087,15 +1090,15 @@ fn err64q(class: usize, y: f64, r: Q) f64 {
     }
     if class == 2 && rn.abs() < 0x1p-1022 {
         return if (Q::of(y) - r).to_f64().abs() <= 0x1p-1022 {
-            0.0;
+            0.0
         } else {
-            1e300;
+            1e300
         };
     }
     let u = if class == 2 {
-        Q::of(rn.abs());
+        Q::of(rn.abs())
     } else {
-        Q::of(ulp64(rn));
+        Q::of(ulp64(rn))
     };
     return ((Q::of(y) - r) / u).to_f64().abs();
 }
@@ -1156,9 +1159,9 @@ fn run32(f: &F1, sample: u64, rq: &Ref<Q>) Stat {
         chunks.push(Stat::new(c));
     }
     let per = if sample == 0 {
-        1u64 << 20;
+        1u64 << 20
     } else {
-        (sample + 4095) / 4096 + 7 & ~7u64;
+        (sample + 4095) / 4096 + 7 & ~7u64
     };
     parallel::chunks_mut(
         chunks.index_range_mut(0..4096),
@@ -1173,9 +1176,9 @@ fn run32(f: &F1, sample: u64, rq: &Ref<Q>) Stat {
                 for k in 0..8 {
                     unsafe xa[k] = fl::f32_from_bits(
                         if sample == 0 {
-                            (base + i + k as u64) as u32;
+                            (base + i + k as u64) as u32
                         } else {
-                            (g.next() >> 32) as u32;
+                            (g.next() >> 32) as u32
                         },
                     );
                 }
@@ -1218,9 +1221,9 @@ fn run32(f: &F1, sample: u64, rq: &Ref<Q>) Stat {
 // decides it.
 const fn near_bound(c: usize, e: f64, b: f64) bool {
     return (e - b).abs() <= 0.01 * if c == 2 {
-        b;
+        b
     } else {
-        1.0;
+        1.0
     };
 }
 
@@ -1253,9 +1256,9 @@ fn binade_of(g: &mut Rng, hi: f64, pos: bool) f64 {
         v = v * fl::f64_from_bits((e + 1022 + 1023) as u64 << 52);
     }
     return if !pos && g.next() % 2 == 0 {
-        -v;
+        -v
     } else {
-        v;
+        v
     };
 }
 
@@ -1265,11 +1268,11 @@ const fn neighbor(g: &mut Rng, p: f64, d: i64, neg: bool) f64 {
     let b = (fl::f64_bits(p.abs()) as i64 + (g.next() % (2 * d as u64 + 1)) as i64 - d).max(0).min(0x7FEFFFFFFFFFFFFF);
     let v = fl::f64_from_bits(b as u64);
     return if neg && g.next() % 2 == 0 {
-        -v;
+        -v
     } else if p < 0.0 {
-        -v;
+        -v
     } else {
-        v;
+        v
     };
 }
 
@@ -1382,9 +1385,9 @@ fn run64(f: &F1, n: u64, rd: &Ref<Dw>, rq: &Ref<Q>) Stat {
                         }
                         let kind = unsafe kinds[k];
                         let mut e = if kind == 2 {
-                            b + 1.0;
+                            b + 1.0
                         } else {
-                            err64(c, y[k], unsafe refs[k]);
+                            err64(c, y[k], unsafe refs[k])
                         };
                         if kind != 1 && near_bound(c, e, b) || kind == 2 {
                             if !unsafe qd[k] {
@@ -1566,22 +1569,22 @@ fn special1(f: &F1, t: i32, rd: &Ref<Dw>, rq: &Ref<Q>) [u64; CLASSES] {
         for i in 0..s32.len() {
             v.push(s32[i]);
         }
-        v;
+        v
     } else {
-        specials64();
+        specials64()
     };
     for i in 0..xs.len() {
         let x = xs[i];
         let lib = f.lib(x);
         let fmax = if t == 0 {
-            f.fmax32;
+            f.fmax32
         } else {
-            f.fmax64;
+            f.fmax64
         };
         let min_normal: f64 = if t == 0 {
-            0x1p-126;
+            0x1p-126
         } else {
-            0x1p-1022;
+            0x1p-1022
         };
         let subnormal = x != 0.0 && x.abs() < min_normal;
         // Outside the fast class's range: past its trigonometric range, a subnormal it takes as 0.
@@ -1593,9 +1596,9 @@ fn special1(f: &F1, t: i32, rd: &Ref<Dw>, rq: &Ref<Q>) [u64; CLASSES] {
             // A special result is the C library's (Annex F); a subnormal one f128's (a double word
             // rounds its high part alone onto the subnormal grid).
             let lt = if t == 0 {
-                (lib as f32) as f64;
+                (lib as f32) as f64
             } else {
-                lib;
+                lib
             };
             let special = lt.is_nan() || lt.is_infinite() || lt == 0.0;
             let (y, r, e) = if t == 0 {
@@ -1604,29 +1607,29 @@ fn special1(f: &F1, t: i32, rd: &Ref<Dw>, rq: &Ref<Q>) [u64; CLASSES] {
                     y as f64,
                     (lib as f32) as f64,
                     if special {
-                        err32(c, y, lib);
+                        err32(c, y, lib)
                     } else {
-                        err32q(c, y, f.q(rq, x));
+                        err32q(c, y, f.q(rq, x))
                     }
-                );
+                )
             } else {
                 let y = (unsafe f.v64[c])(V64::splat(x))[0];
                 (
                     y,
                     lib,
                     if special {
-                        err64(c, y, Dw::of(lib));
+                        err64(c, y, Dw::of(lib))
                     } else if lib.abs() < 0x1p-1000 {
-                        err64q(c, y, f.q(rq, x));
+                        err64q(c, y, f.q(rq, x))
                     } else {
-                        err64(c, y, f.dw(rd, x));
+                        err64(c, y, f.dw(rd, x))
                     }
-                );
+                )
             };
             let ok = if special_arg(x) {
-                special_ok(c, y, r, t == 1);
+                special_ok(c, y, r, t == 1)
             } else {
-                e <= bound(c, t == 1) && !(y == 0.0 && r == 0.0 && y.is_sign_negative() != r.is_sign_negative());
+                e <= bound(c, t == 1) && !(y == 0.0 && r == 0.0 && y.is_sign_negative() != r.is_sign_negative())
             };
             if !ok {
                 unsafe bad[c] += 1;
@@ -1635,9 +1638,9 @@ fn special1(f: &F1, t: i32, rd: &Ref<Dw>, rq: &Ref<Q>) [u64; CLASSES] {
                     unsafe CLASS_NAMES[c],
                     f.name,
                     if t == 0 {
-                        32;
+                        32
                     } else {
-                        64;
+                        64
                     },
                     x,
                     y,
@@ -1672,31 +1675,31 @@ fn special2(f: &F2, t: i32, rq: &Ref<Q>) [u64; CLASSES] {
     ];
     let ints: [f64; 10] = [0.0, 1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 127.0, -1074.0, 2147483647.0];
     let nj: usize = if f.kind == S_POWI {
-        10;
+        10
     } else {
-        16;
+        16
     };
     for i in 0..16 {
         for j in 0..nj {
             let mut x = unsafe vals[i];
             let mut y = if f.kind == S_POWI {
-                unsafe ints[j];
+                unsafe ints[j]
             } else {
-                unsafe vals[j];
+                unsafe vals[j]
             };
             if t == 0 {
                 x = x as f32;
                 y = if f.kind == S_POWI {
-                    y;
+                    y
                 } else {
-                    y as f32;
+                    y as f32
                 };
             }
             let lib = f.lib(x, y);
             let r = if t == 0 {
-                (lib as f32) as f64;
+                (lib as f32) as f64
             } else {
-                lib;
+                lib
             };
             // Exact: a special argument, x = 1 or y = 0 (pow), or a special result.
             let exact = special_arg(x) || special_arg(y) || f.kind <= S_POWI && (x == 1.0 || y == 0.0) || !r.is_finite();
@@ -1705,17 +1708,17 @@ fn special2(f: &F2, t: i32, rq: &Ref<Q>) [u64; CLASSES] {
                     continue;
                 }
                 let v = if t == 0 {
-                    (unsafe f.v32[c])(V32::splat(x as f32), V32::splat(y as f32))[0] as f64;
+                    (unsafe f.v32[c])(V32::splat(x as f32), V32::splat(y as f32))[0] as f64
                 } else {
-                    (unsafe f.v64[c])(V64::splat(x), V64::splat(y))[0];
+                    (unsafe f.v64[c])(V64::splat(x), V64::splat(y))[0]
                 };
                 // Any other result against the f128 reference, at the class bound.
                 let ok = if exact {
-                    special_ok(c, v, r, t == 1);
+                    special_ok(c, v, r, t == 1)
                 } else if t == 0 {
-                    err32q(c, v as f32, f.q(rq, x, y)) <= bound(c, false);
+                    err32q(c, v as f32, f.q(rq, x, y)) <= bound(c, false)
                 } else {
-                    err64q(c, v, f.q(rq, x, y)) <= bound(c, true);
+                    err64q(c, v, f.q(rq, x, y)) <= bound(c, true)
                 };
                 if !ok {
                     unsafe bad[c] += 1;
@@ -1724,9 +1727,9 @@ fn special2(f: &F2, t: i32, rq: &Ref<Q>) [u64; CLASSES] {
                         unsafe CLASS_NAMES[c],
                         f.name,
                         if t == 0 {
-                            32;
+                            32
                         } else {
-                            64;
+                            64
                         },
                         x,
                         y,
@@ -1771,9 +1774,9 @@ fn table(c: usize, rows: &Vector<Row>, n: u64) String {
             line.format_into(
                 "//   {}",
                 if k == 0 {
-                    r.name;
+                    r.name
                 } else {
-                    "";
+                    ""
                 },
             );
             for _ in line.len()..17 {
@@ -1782,9 +1785,9 @@ fn table(c: usize, rows: &Vector<Row>, n: u64) String {
             line.format_into(
                 "f{} ",
                 if k == 0 {
-                    32;
+                    32
                 } else {
-                    64;
+                    64
                 },
             );
             if c == 2 {
@@ -1820,9 +1823,9 @@ fn hex_arg(x: f64, out: &mut String) {
     out.format_into(
         "0x{}.",
         if e == 0 {
-            0;
+            0
         } else {
-            1;
+            1
         },
     );
     let mut m = String::new();
@@ -1834,9 +1837,9 @@ fn hex_arg(x: f64, out: &mut String) {
     out.format_into(
         "p{}",
         if e == 0 {
-            -1022;
+            -1022
         } else {
-            e - 1023;
+            e - 1023
         },
     );
 }
@@ -1893,9 +1896,9 @@ fn report(name: str, t: i32, st: &Stat, has: u32, two: bool) bool {
             unsafe CLASS_NAMES[c],
             name,
             if t == 0 {
-                32;
+                32
             } else {
-                64;
+                64
             },
             unsafe st.max[c],
         );
@@ -1983,9 +1986,9 @@ fn main(args: Vector<str>) i32 {
             }
             let sb = special1(f, t, &rd, &rq);
             let st = if t == 0 {
-                run32(f, sample32, &rq);
+                run32(f, sample32, &rq)
             } else {
-                run64(f, n, &rd, &rq);
+                run64(f, n, &rd, &rq)
             };
             for c in 0..CLASSES {
                 unsafe rws[c].err[t as usize] = unsafe st.max[c];
@@ -2017,15 +2020,15 @@ fn main(args: Vector<str>) i32 {
                     f,
                     n.min(
                         if sample32 == 0 {
-                            n;
+                            n
                         } else {
-                            sample32;
+                            sample32
                         },
                     ),
                     &rq,
-                );
+                )
             } else {
-                run64_2(f, n, &rd, &rq);
+                run64_2(f, n, &rd, &rq)
             };
             for c in 0..CLASSES {
                 unsafe rws[c].err[t as usize] = unsafe st.max[c];
@@ -2047,8 +2050,8 @@ fn main(args: Vector<str>) i32 {
         }
     }
     return if bad {
-        1;
+        1
     } else {
-        0;
+        0
     };
 }

@@ -56,7 +56,7 @@ extend<T: Hash + Eq, A: Allocator, S: BuildHasher> Set<T, A, S> {
     /// The stored element equal to `value`, or `None`.
     pub const fn get(self: &Set<T, A, S>, value: &T) Option<&T> {
         return switch self.m.get_key_value(value) {
-            Some(kv) => Option::<&T>::Some(kv._0),
+            Some(kv) => Some(kv._0),
             None => Option::<&T>::None,
         };
     }
@@ -70,7 +70,7 @@ extend<T: Hash + Eq, A: Allocator, S: BuildHasher> Set<T, A, S> {
     /// Remove `value` and hand the stored element back, or `None`.
     pub fn take(self: &mut Set<T, A, S>, value: &T) Option<T> {
         return switch self.m.remove_entry(value) {
-            Some((k, _)) => Option::<T>::Some(k),
+            Some((k, _)) => Some(k),
             None => Option::<T>::None,
         };
     }
@@ -225,26 +225,26 @@ extend<T: Hash + Eq + Clone, A: Allocator + Default, S: BuildHasher + Default> S
 
 /// The elements of one set that another lacks (`Set::difference`); borrows both.
 pub struct SetDifference<'b, T, A, S> {
-    pub(module) it: MapKeys<'b, T>,
-    pub(module) other: &'b Set<T, A, S>,
+    it: MapKeys<'b, T>,
+    other: &'b Set<T, A, S>,
 }
 
 /// The elements two sets share (`Set::intersection`); borrows both.
 pub struct SetIntersection<'b, T, A, S> {
-    pub(module) it: MapKeys<'b, T>,
-    pub(module) other: &'b Set<T, A, S>,
+    it: MapKeys<'b, T>,
+    other: &'b Set<T, A, S>,
 }
 
 /// Every element of either set once (`Set::set_union`); borrows both.
 pub struct SetUnion<'b, T, A, S> {
-    pub(module) first: MapKeys<'b, T>,
-    pub(module) rest: SetDifference<'b, T, A, S>,
+    first: MapKeys<'b, T>,
+    rest: SetDifference<'b, T, A, S>,
 }
 
 /// The elements in exactly one of two sets (`Set::symmetric_difference`); borrows both.
 pub struct SetSymmetricDifference<'b, T, A, S> {
-    pub(module) first: SetDifference<'b, T, A, S>,
-    pub(module) rest: SetDifference<'b, T, A, S>,
+    first: SetDifference<'b, T, A, S>,
+    rest: SetDifference<'b, T, A, S>,
 }
 
 extend<'b, T: Hash + Eq, A: Allocator, S: BuildHasher> SetDifference<'b, T, A, S> as Iterator<&'b T> {
@@ -253,19 +253,19 @@ extend<'b, T: Hash + Eq, A: Allocator, S: BuildHasher> SetDifference<'b, T, A, S
             switch self.it.next() {
                 Some(x) => {
                     if !self.other.contains(x) {
-                        return Option::<&'b T>::Some(x);
+                        return Some(x);
                     }
                 },
                 None => {
                     return Option::<&'b T>::None;
                 },
-            };
+            }
         }
     }
 
     pub fn size_hint(self: &SetDifference<'b, T, A, S>) (usize, Option<usize>) {
         let (_, hi) = self.it.size_hint();
-        return 0, hi;
+        return (0, hi);
     }
 }
 
@@ -275,19 +275,19 @@ extend<'b, T: Hash + Eq, A: Allocator, S: BuildHasher> SetIntersection<'b, T, A,
             switch self.it.next() {
                 Some(x) => {
                     if self.other.contains(x) {
-                        return Option::<&'b T>::Some(x);
+                        return Some(x);
                     }
                 },
                 None => {
                     return Option::<&'b T>::None;
                 },
-            };
+            }
         }
     }
 
     pub fn size_hint(self: &SetIntersection<'b, T, A, S>) (usize, Option<usize>) {
         let (_, hi) = self.it.size_hint();
-        return 0, hi;
+        return (0, hi);
     }
 }
 
@@ -295,10 +295,10 @@ extend<'b, T: Hash + Eq, A: Allocator, S: BuildHasher> SetUnion<'b, T, A, S> as 
     pub fn next(self: &mut SetUnion<'b, T, A, S>) Option<&'b T> {
         switch self.first.next() {
             Some(x) => {
-                return Option::<&'b T>::Some(x);
+                return Some(x);
             },
             None => {},
-        };
+        }
         return self.rest.next();
     }
 }
@@ -307,10 +307,10 @@ extend<'b, T: Hash + Eq, A: Allocator, S: BuildHasher> SetSymmetricDifference<'b
     pub fn next(self: &mut SetSymmetricDifference<'b, T, A, S>) Option<&'b T> {
         switch self.first.next() {
             Some(x) => {
-                return Option::<&'b T>::Some(x);
+                return Some(x);
             },
             None => {},
-        };
+        }
         return self.rest.next();
     }
 }

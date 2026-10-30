@@ -333,9 +333,9 @@ fn wrap(b: Box<dyn Prov>) Option<Box<dyn Prov>> {
 fn main() i32 {
     let mut h = Holder { p: wrap(Box::new(Disk {})), n: 1 };
     let v = if h.p.is_some() {
-        h.p.as_mut().unwrap().get();
+        h.p.as_mut().unwrap().get()
     } else {
-        0;
+        0
     };
     let t = thread::spawn(|| {});
     t.join();

@@ -137,9 +137,9 @@ pub(package) fn def_at(p: &loader::Package, mi: usize, off: u32) DefId {
     // its name (a variant without payload) is itself the smallest node there.
     let id = node_at_or_before(a, off);
     let nm = if id == NODE_NONE {
-        NODE_NONE;
+        NODE_NONE
     } else {
-        decl_name(a, id);
+        decl_name(a, id)
     };
     if nm != NODE_NONE && nm != id && unsafe (*a).at_const(nm).span.start == unsafe (*a).at_const(id).span.start && unsafe (*a).at_const(
         nm,
@@ -171,7 +171,7 @@ pub(package) fn target_at(p: &loader::Package, mi: usize, off: u32) DefId {
                 return DefId { module: (*v >> 32) as ModuleId, node: (*v & 0xFFFFFFFFu64) as NodeId };
             },
             None => {},
-        };
+        }
     }
     return def_at(p, mi, off);
 }
@@ -627,7 +627,7 @@ pub(package) fn reflect_hover(p: &loader::Package, mi: usize, off: u32) Option<S
     let src = p.modules.at(mi).source.as_str();
     let id = node_at_or_before(a, off);
     if id == NODE_NONE || unsafe (*a).at_const(id).kind != NodeKind::NODE_IDENTIFIER {
-        return Option::<String>::None;
+        return None;
     }
     let sp = unsafe (*a).at_const(id).as_data.name.text;
     let name = src.slice(sp.start as usize, sp.end as usize);
@@ -641,11 +641,11 @@ pub(package) fn reflect_hover(p: &loader::Package, mi: usize, off: u32) Option<S
         }
         let ob = mn.as_data.member.object;
         if unsafe (*a).at_const(ob).kind != NodeKind::NODE_IDENTIFIER {
-            return Option::<String>::None;
+            return None;
         }
         let blid = unsafe (*a).resolution(ob);
         if blid == NODE_NONE || unsafe (*a).at_const(blid).kind != NodeKind::NODE_INLINE_FOR {
-            return Option::<String>::None;
+            return None;
         }
         let it = unsafe (*a).ext(blid).for_stmt.iterable;
         let mut vmode = false;
@@ -657,27 +657,27 @@ pub(package) fn reflect_hover(p: &loader::Package, mi: usize, off: u32) Option<S
             }
         }
         let docs: []ReflectDoc = if vmode {
-            VARIANT_BINDER_DOCS;
+            VARIANT_BINDER_DOCS
         } else {
-            FIELD_BINDER_DOCS;
+            FIELD_BINDER_DOCS
         };
         for k in 0..docs.len() {
             if docs.at(k).name == name {
-                return Option::<String>::Some(reflect_doc_md(docs.at(k)));
+                return Some(reflect_doc_md(docs.at(k)));
             }
         }
-        return Option::<String>::None;
+        return None;
     }
     if unsafe (*a).resolution_def(id).node != NODE_NONE {
-        return Option::<String>::None;
+        return None;
     }
     let ins: []ReflectDoc = REFLECT_INTRINSICS;
     for k in 0..ins.len() {
         if ins.at(k).name == name {
-            return Option::<String>::Some(reflect_doc_md(ins.at(k)));
+            return Some(reflect_doc_md(ins.at(k)));
         }
     }
-    return Option::<String>::None;
+    return None;
 }
 
 /// Markdown hover for the attribute name at `off` (the '@' or a byte of the name), None when `off`
@@ -691,7 +691,7 @@ pub(package) fn attribute_hover(src: str, off: u32) Option<String> {
         s -= 1;
     }
     if s == 0 || src[s - 1] != b'@' {
-        return Option::<String>::None;
+        return None;
     }
     let mut e = s;
     while e < src.len() && (ltext::ident_byte(src[e]) || src[e] == b'.') {
@@ -706,23 +706,23 @@ pub(package) fn attribute_hover(src: str, off: u32) Option<String> {
             out.push_str(d.sig);
             out.push_str("\n```\n\n");
             out.push_str(d.doc);
-            return Option::<String>::Some(out);
+            return Some(out);
         }
     }
-    return Option::<String>::None;
+    return None;
 }
 
 /// Markdown hover for the position: the attribute's documentation, else the expression's rendered
 /// type, then the resolved declaration's head. None when the position carries none of them.
 pub(package) fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
-    let ah = attribute_hover(p.modules.at(mi).source.as_str(), off);
+    let ah = attribute_hover(&p.modules.at(mi).source, off);
     if ah.is_some() {
         return ah;
     }
     let a = mod_ast(p, mi);
     let id = node_at_or_before(a, off);
     if id == NODE_NONE {
-        return Option::<String>::None;
+        return None;
     }
     let mut out = String::new();
     let mut t: TypeId = TYPE_NONE;
@@ -744,7 +744,7 @@ pub(package) fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
             rnd::render_type_str(p, a, src, t, &mut buf);
         }
         out.push_str("```super-c\n");
-        out.push_str(buf.as_str());
+        out.push_str(&buf);
         out.push_str("\n```");
     }
     if d.node == NODE_NONE {
@@ -780,9 +780,9 @@ pub(package) fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
         }
     }
     if out.len() == 0 {
-        return Option::<String>::None;
+        return None;
     }
-    return Option::<String>::Some(out);
+    return Some(out);
 }
 
 // The layout block of a hover, as C++ language servers give it: a struct, union or enum's size and
@@ -837,9 +837,9 @@ fn layout_line(p: &loader::Package, mi: usize, off: u32, t: TypeId, d: DefId) St
     } else if k == NodeKind::NODE_LET || k == NodeKind::NODE_PARAMETER || k == NodeKind::NODE_CONST || k == NodeKind::NODE_IDENTIFIER {
         // A use has the type of the expression; the declaration itself, the type the checker gave it.
         l = if t != TYPE_NONE {
-            svc.layout(mi as ModuleId, t);
+            svc.layout(mi as ModuleId, t)
         } else {
-            svc.layout(d.module, unsafe (*da).type_of(d.node));
+            svc.layout(d.module, unsafe (*da).type_of(d.node))
         };
     }
     if !l.ok {
@@ -872,9 +872,9 @@ fn type_naming(a: *const Ast, off: u32, d: DefId) TypeId {
         let y = *unsafe (*a).type_at(t);
         let named = if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*a).instance(y.as_data.inst);
-            it.module == d.module && it.decl == d.node;
+            it.module == d.module && it.decl == d.node
         } else {
-            (y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM) && y.module == d.module && y.as_data.decl == d.node;
+            (y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM) && y.module == d.module && y.as_data.decl == d.node
         };
         if named {
             best = t;
@@ -933,7 +933,7 @@ fn field_owner(a: *const Ast, fid: NodeId) NodeId {
 pub(package) fn definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
     let d = target_at(p, mi, off);
     if d.node == NODE_NONE || p.modules.at(d.module as usize).file.len() == 0 {
-        return Option::<Loc>::None;
+        return None;
     }
     let da = mod_ast(p, d.module as usize);
     let mut sp = unsafe (*da).at_const(d.node).span;
@@ -941,7 +941,7 @@ pub(package) fn definition(p: &loader::Package, mi: usize, off: u32) Option<Loc>
     if nm != NODE_NONE {
         sp = unsafe (*da).at_const(nm).span;
     }
-    return Option::<Loc>::Some(Loc { module: d.module, start: sp.start, end: sp.end });
+    return Some(Loc { module: d.module, start: sp.start, end: sp.end });
 }
 
 // The span rename/references should touch for a resolved node: a path member or type path narrows to
@@ -1099,11 +1099,11 @@ fn qualifier_tokens(p: &loader::Package, a: *const Ast, mi: usize, i: NodeId, ou
             prefix.push_str("::");
         }
         prefix.push_str(name_str(p, mi, sg));
-        if unsafe (*a).resolution_def(sg).node == NODE_NONE && (p.find_in(mi as ModuleId, prefix.as_str()) >= 0 || k == 0 && import_binds(
+        if unsafe (*a).resolution_def(sg).node == NODE_NONE && (p.find_in(mi as ModuleId, &prefix) >= 0 || k == 0 && import_binds(
             p,
             a,
             mi,
-            prefix.as_str(),
+            &prefix,
         )) {
             let sp = unsafe (*a).at_const(sg).span;
             tok_push(out, sp.start, sp.end, 0, 0);
@@ -1121,9 +1121,9 @@ fn import_binds(p: &loader::Package, a: *const Ast, mi: usize, name: str) bool {
         }
         let d = im.as_data.import_decl;
         let q = if d.alias != NODE_NONE {
-            d.alias;
+            d.alias
         } else {
-            unsafe (*a).list(d.path)[(d.path.len - 1) as usize];
+            unsafe (*a).list(d.path)[(d.path.len - 1) as usize]
         };
         if name_str(p, mi, q) == name {
             return true;
@@ -1468,7 +1468,7 @@ pub(package) fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector
                     }
                     mp.push_str(name_str(p, od.module as usize, unsafe (*oa).list(parts)[i as usize]));
                 }
-                let mid = p.find_in(od.module, mp.as_str());
+                let mid = p.find_in(od.module, &mp);
                 if mid >= 0 {
                     comp_module_publics(p, mi, mid as usize, &mut out);
                 }
@@ -1774,11 +1774,11 @@ pub(package) fn complete_interfaces(p: &loader::Package, mi: usize) Vector<CompI
         }
         let path = loader::join_parts(
             unsafe &*a,
-            p.modules.at(mi).source.as_str(),
+            &p.modules.at(mi).source,
             unsafe (*a).at_const(iid).as_data.import_decl.path,
             "::",
         );
-        let target = p.find_in(mi as ModuleId, path.as_str());
+        let target = p.find_in(mi as ModuleId, &path);
         if target >= 0 {
             visible[target as usize] = true;
         }
@@ -1882,9 +1882,9 @@ fn sym_push(
         Sym {
             name: String::from_str(name),
             detail: if detail {
-                decl_signature(p, DefId { module: mi as ModuleId, node: id });
+                decl_signature(p, DefId { module: mi as ModuleId, node: id })
             } else {
-                String::new();
+                String::new()
             },
             kind: kind,
             start: sp.start,
@@ -2029,7 +2029,7 @@ pub(package) fn workspace_symbols(
                 break;
             }
             let s = syms.at(i);
-            if fuzzy_has(s.name.as_str(), query) {
+            if fuzzy_has(&s.name, query) {
                 out.push(
                     WsSym { name: s.name.clone(), kind: s.kind, module: mm as u32, start: s.sel_start, end: s.sel_end },
                 );
@@ -2090,8 +2090,8 @@ fn generic_decl_named(p: &loader::Package, mi: usize, qual: str, name: str) DefI
             if name_str(p, mi, nm) != qual {
                 continue;
             }
-            let path = loader::join_parts(unsafe &*a, p.modules.at(mi).source.as_str(), parts, "::");
-            let target = p.find_in(mi as ModuleId, path.as_str());
+            let path = loader::join_parts(unsafe &*a, &p.modules.at(mi).source, parts, "::");
+            let target = p.find_in(mi as ModuleId, &path);
             if target >= 0 {
                 mods.push(target as usize);
             }
@@ -2128,7 +2128,7 @@ const TARG_SCAN: usize = 1024;
 pub(package) fn type_args_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> {
     let src = p.modules.at(mi).source.as_str();
     if off as usize > src.len() {
-        return Option::<SigInfo>::None;
+        return None;
     }
     // The unclosed `<` before the cursor; a closer seen first nests, an unclosed `(`, `[`, `{` or a
     // `;` ends the search.
@@ -2139,9 +2139,9 @@ pub(package) fn type_args_help(p: &loader::Package, mi: usize, off: u32) Option<
     let mut lt: usize = 0;
     let mut found = false;
     let lim = if i > TARG_SCAN {
-        i - TARG_SCAN;
+        i - TARG_SCAN
     } else {
-        0;
+        0
     };
     while i > lim && !found {
         i -= 1;
@@ -2159,17 +2159,17 @@ pub(package) fn type_args_help(p: &loader::Package, mi: usize, off: u32) Option<
             nest += 1;
         } else if c == b'(' || c == b'[' || c == b'{' {
             if nest == 0 {
-                return Option::<SigInfo>::None;
+                return None;
             }
             nest -= 1;
         } else if c == b';' {
-            return Option::<SigInfo>::None;
+            return None;
         } else if c == b',' && angle == 0 && nest == 0 {
             commas += 1;
         }
     }
     if !found || lt > 0 && src[lt - 1] == b'<' {
-        return Option::<SigInfo>::None;
+        return None;
     }
     // The name before `<`, past a turbofish's `::`, and its qualifier.
     let mut e = lt;
@@ -2184,7 +2184,7 @@ pub(package) fn type_args_help(p: &loader::Package, mi: usize, off: u32) Option<
         b -= 1;
     }
     if b == e {
-        return Option::<SigInfo>::None;
+        return None;
     }
     let mut qual = "";
     if b >= 3 && src[b - 1] == b':' && src[b - 2] == b':' {
@@ -2196,7 +2196,7 @@ pub(package) fn type_args_help(p: &loader::Package, mi: usize, off: u32) Option<
     }
     let d = generic_decl_named(p, mi, qual, src.slice(b, e));
     if d.node == NODE_NONE {
-        return Option::<SigInfo>::None;
+        return None;
     }
     let da = mod_ast(p, d.module as usize);
     let dsrc = p.modules.at(d.module as usize).source.as_str();
@@ -2207,7 +2207,7 @@ pub(package) fn type_args_help(p: &loader::Package, mi: usize, off: u32) Option<
         params.push(String::from_str(dsrc.slice(sp.start as usize, sp.end as usize)));
     }
     let active = pick(commas as usize >= params.len(), params.len() as i32 - 1, commas);
-    return Option::<SigInfo>::Some(SigInfo { label: decl_signature(p, d), params: params, active: active });
+    return Some(SigInfo { label: decl_signature(p, d), params: params, active: active });
 }
 
 /// Signature help for the call enclosing byte offset `off` of module `mi`: the callee's label, its
@@ -2233,19 +2233,19 @@ pub(package) fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<
         }
     }
     if call == NODE_NONE {
-        return Option::<SigInfo>::None;
+        return None;
     }
     let callee = unsafe (*a).at_const(call).as_data.call.callee;
     if !unsafe (*a).valid(callee) {
-        return Option::<SigInfo>::None;
+        return None;
     }
     let d = unsafe (*a).resolution_def(callee);
     if d.node == NODE_NONE || d.module as usize >= p.modules.len() {
-        return Option::<SigInfo>::None;
+        return None;
     }
     let da = mod_ast(p, d.module as usize);
     if unsafe (*da).at_const(d.node).kind != NodeKind::NODE_FUNCTION {
-        return Option::<SigInfo>::None;
+        return None;
     }
     let dsrc = p.modules.at(d.module as usize).source.as_str();
     let mut params = Vector::<String>::new();
@@ -2279,7 +2279,7 @@ pub(package) fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<
     if params.len() != 0 && active as usize >= params.len() {
         active = params.len() as i32 - 1;
     }
-    return Option::<SigInfo>::Some(SigInfo { label: decl_signature(p, d), params: params, active: active });
+    return Some(SigInfo { label: decl_signature(p, d), params: params, active: active });
 }
 
 /// All same-document reference spans for the symbol under `off` (document highlights): only module
@@ -2302,7 +2302,7 @@ pub(package) fn type_definition(p: &loader::Package, mi: usize, off: u32) Option
     let a = mod_ast(p, mi);
     let id = node_at_or_before(a, off);
     if id == NODE_NONE || !unsafe (*a).valid(id) {
-        return Option::<Loc>::None;
+        return None;
     }
     let mut t = unsafe (*a).type_of(id);
     let mut guard = 0;
@@ -2324,7 +2324,7 @@ pub(package) fn type_definition(p: &loader::Package, mi: usize, off: u32) Option
             dn = it.decl;
         }
         if dn == NODE_NONE || dm >= p.modules.len() {
-            return Option::<Loc>::None;
+            return None;
         }
         let da = mod_ast(p, dm);
         let nm = decl_name(da, dn);
@@ -2332,9 +2332,9 @@ pub(package) fn type_definition(p: &loader::Package, mi: usize, off: u32) Option
         if nm != NODE_NONE {
             sp = unsafe (*da).at_const(nm).span;
         }
-        return Option::<Loc>::Some(Loc { module: dm as u32, start: sp.start, end: sp.end });
+        return Some(Loc { module: dm as u32, start: sp.start, end: sp.end });
     }
-    return Option::<Loc>::None;
+    return None;
 }
 
 // The interface declaration owning method `fnid` in module `im`, or NODE_NONE.
@@ -2403,9 +2403,9 @@ pub(package) fn implementations(p: &loader::Package, mi: usize, off: u32) Vector
             if method_name.len() == 0 {
                 let tgt = unsafe (*am).ext(iid).extend_def.target_type;
                 let sp = if tgt != NODE_NONE {
-                    unsafe (*am).at_const(tgt).span;
+                    unsafe (*am).at_const(tgt).span
                 } else {
-                    unsafe (*am).at_const(iid).span;
+                    unsafe (*am).at_const(iid).span
                 };
                 out.push(Loc { module: mm as u32, start: sp.start, end: sp.end });
             } else {
@@ -2561,7 +2561,7 @@ pub(package) fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32
         if t == TYPE_NONE {
             continue;
         }
-        let buf = rnd::type_str_of(p, a, p.modules.at(mi).source.as_str(), t);
+        let buf = rnd::type_str_of(p, a, &p.modules.at(mi).source, t);
         let rendered = buf.as_str();
         if rendered.len() == 0 || rendered.len() > 60 {
             continue;
@@ -2597,18 +2597,18 @@ extend SymKey as Free {
 /// symbol matching; None for an unresolved or out-of-range def.
 pub(package) fn sym_key(p: &loader::Package, d: DefId) Option<SymKey> {
     if d.node == NODE_NONE || d.module as usize >= p.modules.len() {
-        return Option::<SymKey>::None;
+        return None;
     }
     let da = mod_ast(p, d.module as usize);
     let nm = decl_name(da, d.node);
     if nm == NODE_NONE {
-        return Option::<SymKey>::None;
+        return None;
     }
     let name = name_str(p, d.module as usize, nm);
     if name.len() == 0 {
-        return Option::<SymKey>::None;
+        return None;
     }
-    return Option::<SymKey>::Some(
+    return Some(
         SymKey {
             file: p.modules.at(d.module as usize).file.clone(),
             kind: (unsafe (*da).at_const(d.node).kind) as u8,
@@ -2704,7 +2704,7 @@ pub(package) fn references_of_def(p: &loader::Package, d: DefId, include_decl: b
 pub(package) fn cursor_ref_span(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
     let d = def_at(p, mi, off);
     if d.node == NODE_NONE {
-        return Option::<Loc>::None;
+        return None;
     }
     let a = mod_ast(p, mi);
     // The narrowed span of the resolved node under the cursor.
@@ -2734,9 +2734,9 @@ pub(package) fn cursor_ref_span(p: &loader::Package, mi: usize, off: u32) Option
         }
     }
     if best == 0xFFFFFFFF {
-        return Option::<Loc>::None;
+        return None;
     }
-    return Option::<Loc>::Some(Loc { module: mi as u32, start: hit.start, end: hit.end });
+    return Some(Loc { module: mi as u32, start: hit.start, end: hit.end });
 }
 
 // The extend block owning method `fnid` in module `im`, or NODE_NONE.
@@ -3147,9 +3147,9 @@ pub(package) const fn import_insert_at(p: &loader::Package, mi: usize) u32 {
         }
         if src.slice(i, e).trim().starts_with("import ") {
             at = if e < src.len() {
-                next_line_start(src, e) as u32;
+                next_line_start(src, e) as u32
             } else {
-                e as u32;
+                e as u32
             };
         }
         i = next_line_start(src, e);
@@ -3231,7 +3231,7 @@ pub(package) fn iface_stub(p: &loader::Package, mi: usize, off: u32, method_name
         if esp.end == 0 {
             return none;
         }
-        return Option::<StubIns>::Some(StubIns { at: esp.end - 1, text: text });
+        return Some(StubIns { at: esp.end - 1, text: text });
     }
     return none;
 }
@@ -3258,9 +3258,9 @@ pub(package) fn extend_relations(p: &loader::Package, d: DefId, up: bool) Vector
                 continue;
             }
             let (mine, other) = if up {
-                (tgt, it);
+                (tgt, it)
             } else {
-                (it, tgt);
+                (it, tgt)
             };
             let md = unsafe (*am).resolution_def(mine);
             if md.module != d.module || md.node != d.node {
@@ -3273,11 +3273,11 @@ pub(package) fn extend_relations(p: &loader::Package, d: DefId, up: bool) Vector
             let oa = mod_ast(p, od.module as usize);
             let on = unsafe (*oa).at_const(od.node);
             let nm = if up && on.kind == NodeKind::NODE_INTERFACE {
-                unsafe (*oa).ext_name(od.node);
+                unsafe (*oa).ext_name(od.node)
             } else if !up && (on.kind == NodeKind::NODE_STRUCT || on.kind == NodeKind::NODE_ENUM) {
-                unsafe (*oa).ext_name(od.node);
+                unsafe (*oa).ext_name(od.node)
             } else {
-                NODE_NONE;
+                NODE_NONE
             };
             if nm == NODE_NONE {
                 continue;

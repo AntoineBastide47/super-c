@@ -276,7 +276,7 @@ extend Resolver {
                 head = *v;
             },
             _ => {},
-        };
+        }
         let scope_start = self.scope_starts[self.scope_starts.len() - 1];
         let mut current = head;
         while current != 0 {
@@ -323,7 +323,7 @@ extend Resolver {
                 current = *v;
             },
             _ => {},
-        };
+        }
         while current != 0 {
             let i = (current - 1) as usize;
             let sname = self.symbols[i].name;
@@ -371,7 +371,7 @@ extend Resolver {
         let pkg = unsafe &*self.package;
         let ids = self.ast.list(parts);
         let buf = self.join_segs(ids, parts.len);
-        return pkg.find_in(self.ast.module, buf.as_str());
+        return pkg.find_in(self.ast.module, &buf);
     }
 
     // Resolve every import ONCE, up front, which names denote modules as a single leading segment (the
@@ -477,9 +477,9 @@ extend Resolver {
         let head_in_scope = parts.len <= 3 && self.type_in_scope(self.name_span(unsafe ids[0]));
         let buf = self.join_segs(ids, parts.len - 1); // module = every segment but the last
         let m = if parts.len == 2 && head_in_scope {
-            -1;
+            -1
         } else {
-            pkg.find_in(self.ast.module, buf.as_str());
+            pkg.find_in(self.ast.module, &buf)
         };
         if m >= 0 {
             return ModQual { mid: m, type_node: unsafe ids[(parts.len - 1) as usize], head: parts.len - 1 };
@@ -495,9 +495,9 @@ extend Resolver {
             }
             let b2 = self.join_segs(ids, parts.len - 2);
             let m2 = if parts.len == 3 && head_in_scope {
-                -1;
+                -1
             } else {
-                pkg.find_in(self.ast.module, b2.as_str());
+                pkg.find_in(self.ast.module, &b2)
             };
             if m2 >= 0 {
                 return ModQual { mid: m2, type_node: at, head: parts.len - 2 };
@@ -691,14 +691,14 @@ extend Resolver {
         // the probe loop shrinks the viewed length instead of re-joining (and re-allocating) per try. A
         // one-segment prefix is its own source span and needs no join.
         let buf = if nn > 2 {
-            self.join_segs(&seg[0], nn - 1);
+            self.join_segs(&seg[0], nn - 1)
         } else {
-            String::new();
+            String::new()
         };
         let prefix = if nn > 2 {
-            buf.as_str().ptr();
+            buf.as_str().ptr()
         } else {
-            unsafe (self.source.ptr() + self.name_span(base).start as usize);
+            unsafe (self.source.ptr() + self.name_span(base).start as usize)
         };
         let mut lens: [usize; 32] = [[0] = 0usize];
         let mut plen: usize = 0;
@@ -822,9 +822,9 @@ extend Resolver {
             let want_type = ns == Namespace::NS_TYPE;
             let mut hit = self.glob_lookup(name, want_type);
             let dir = if hit.node == NODE_NONE {
-                -1;
+                -1
             } else {
-                self.glob_ambiguous(name, want_type);
+                self.glob_ambiguous(name, want_type)
             };
             if dir >= 0 {
                 self.ambiguous(dir as ModuleId, name);
@@ -878,7 +878,7 @@ extend Resolver {
         let pkg = unsafe &*self.package;
         let mut path = String::from_str("__std::");
         path.push_str(name);
-        let m = pkg.find(path.as_str());
+        let m = pkg.find(&path);
         return m >= 0 && pkg.modules[m as usize].prelude;
     }
 
@@ -1172,9 +1172,9 @@ extend Resolver {
                     }
                 } else {
                     let what = if tp.parts.len >= 2 {
-                        QUALIFIER;
+                        QUALIFIER
                     } else {
-                        "type";
+                        "type"
                     };
                     self.resolve_ref(id, first, Namespace::NS_TYPE, what);
                 }
@@ -1372,7 +1372,7 @@ extend Resolver {
                     self.resolve_expr(cd.value);
                 },
                 _ => {},
-            };
+            }
         }
     }
 
@@ -1494,7 +1494,7 @@ extend Resolver {
                 self.resolve_expr(left);
             },
             _ => {},
-        };
+        }
     }
 
     // statements ----------------------------------------------------------------------------------------.
@@ -1652,7 +1652,7 @@ extend Resolver {
                 self.resolve_expr(v);
             },
             _ => {}, // NODE_CONTINUE and leaves: nothing to resolve
-        };
+        }
     }
 
     // expressions ---------------------------------------------------------------------------------------.
@@ -1830,11 +1830,18 @@ extend Resolver {
                 self.resolve_expr(pr.end);
             },
             _ => {}, // NODE_LITERAL and other leaves: nothing to resolve
-        };
+        }
     }
 
     fn resolve_member(self: &mut Self, id: NodeId) {
         let mb = self.ast.at_const(id).as_data.member;
+        let ms = self.name_span(mb.member);
+        if mb.path && self.variant_name(self.source.slice(ms.start as usize, ms.end as usize)) && self.name_resolves(
+            ms,
+            Namespace::NS_VALUE,
+        ) {
+            self.ast.bare_taken.insert(id);
+        }
         // A full module-PATH qualifier is resolved against the loaded modules.
         if mb.path && self.resolve_qualified_member(id) {
             return;
@@ -2002,7 +2009,7 @@ extend Resolver {
                 self.resolve_pattern_consts(id);
             },
             _ => {}, // NODE_PATTERN_WILDCARD: nothing to bind
-        };
+        }
     }
 
     // Resolve the constants in pattern `id` (a named or qualified constant resolves as in an
@@ -2065,7 +2072,7 @@ extend Resolver {
                     self.collect_items(self.ast.at_const(id).as_data.extern_block.items);
                 },
                 _ => {}, // NODE_EXTEND has no module-scope name
-            };
+            }
         }
     }
 
@@ -2101,9 +2108,9 @@ extend Resolver {
         for i in 0..items.len {
             let cid = self.child(items, i);
             let t0 = if self.package != null && unsafe (&*self.package).icost_on {
-                std::parallel::platform::now_ns();
+                std::parallel::platform::now_ns()
             } else {
-                0u64;
+                0u64
             };
             self.resolve_item(cid);
             if t0 != 0 {
@@ -2165,9 +2172,9 @@ extend Resolver {
                     if self.ast.ext(id).extend_def.interface_type == NODE_NONE {
                         let td = self.ast.resolution_def(self.ast.ext(id).extend_def.target_type);
                         let tv = if td.node == NODE_NONE {
-                            VIS_PUB;
+                            VIS_PUB
                         } else {
-                            unsafe (*self.package).decl_vis(td.module, td.node);
+                            unsafe (*self.package).decl_vis(td.module, td.node)
                         };
                         for k in 0..self.ast.ext(id).extend_def.items.len {
                             let m = self.child(self.ast.ext(id).extend_def.items, k);
@@ -2188,7 +2195,7 @@ extend Resolver {
                 },
                 NODE_EXTERN_BLOCK => self.check_leaks(n.as_data.extern_block.items),
                 _ => {},
-            };
+            }
         }
     }
 
@@ -2254,9 +2261,9 @@ extend Resolver {
                             format(
                                 "it is {}: widen it, or narrow the item",
                                 if tv < VIS_MODULE {
-                                    "private to its file";
+                                    "private to its file"
                                 } else {
-                                    vis_text(tv).trim();
+                                    vis_text(tv).trim()
                                 },
                             ),
                         );
@@ -2278,7 +2285,7 @@ extend Resolver {
                 self.leak_list(n.as_data.function_type.returns, v);
             },
             _ => {},
-        };
+        }
     }
 
     /// True once any resolution error is recorded.
@@ -2324,9 +2331,9 @@ extend Resolver {
         // flat array: init_resolutions unfroze it.
         for arena in 0..2 {
             let sv = if arena == 1 {
-                &self.ast.b.resolutions;
+                &self.ast.b.resolutions
             } else {
-                &self.ast.resolutions;
+                &self.ast.resolutions
             };
             assert(!sv.frozen(), "resolutions are frozen during resolution");
             let base = sv.base_ptr();
@@ -2336,9 +2343,9 @@ extend Resolver {
                     continue;
                 }
                 let i = if arena == 1 {
-                    x as NodeId | NODE_BODY;
+                    x as NodeId | NODE_BODY
                 } else {
-                    x as NodeId;
+                    x as NodeId
                 };
                 if i != d.node && self.ast.valid(d.node) {
                     fl.set(self.ast.dense(d.node), L_USED);
@@ -2356,9 +2363,9 @@ extend Resolver {
                 continue;
             }
             let ms = if is_iface_ext {
-                self.ast.ext(iid).extend_def.items;
+                self.ast.ext(iid).extend_def.items
             } else {
-                self.ast.ext(iid).interface_def.items;
+                self.ast.ext(iid).interface_def.items
             };
             for j in 0..ms.len {
                 let mid = unsafe self.ast.list(ms)[j as usize];
@@ -2404,9 +2411,9 @@ extend Resolver {
                 }
             } else if nd.kind == NodeKind::NODE_WHILE || nd.kind == NodeKind::NODE_FOR {
                 let lsp = if nd.kind == NodeKind::NODE_WHILE {
-                    nd.as_data.while_stmt.label;
+                    nd.as_data.while_stmt.label
                 } else {
-                    self.ast.ext(i).for_stmt.label;
+                    self.ast.ext(i).for_stmt.label
                 };
                 if lsp.end > lsp.start {
                     loops.push(LabelFlow { label: lsp, span: nd.span });
@@ -2421,9 +2428,9 @@ extend Resolver {
             ).function.is_intrinsic() && (self.ast.unsafe_claims(i) & UNSAFE_NAKED) == 0 || nd.kind == NodeKind::NODE_CLOSURE {
                 // Not for a naked function: its assembly reads the parameters where the calling convention puts them.
                 let params = if nd.kind == NodeKind::NODE_CLOSURE {
-                    self.ast.ext(i).closure.params;
+                    self.ast.ext(i).closure.params
                 } else {
-                    self.ast.ext(i).function.params;
+                    self.ast.ext(i).function.params
                 };
                 for k in 0..params.len {
                     let pid = unsafe self.ast.list(params)[k as usize];

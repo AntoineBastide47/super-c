@@ -147,10 +147,10 @@ extend<T, A: Allocator> Vector<T, A> {
     /// Removes and returns the last element, moving ownership to the caller (`None` when empty).
     pub const fn pop(self: &mut Vector<T, A>) Option<T> {
         if self.len == 0 {
-            return Option::<T>::None;
+            return None;
         }
         self.len = self.len - 1;
-        return Option::<T>::Some(unsafe self.ptr[self.len]);
+        return Some(unsafe self.ptr[self.len]);
     }
 
     /// Bounds-checked element access: panics when `index >= len`. Borrows the element in place.
@@ -170,9 +170,9 @@ extend<T, A: Allocator> Vector<T, A> {
     /// Bounds-checked element access: borrows the element (`&T`) so the Vector keeps sole ownership.
     pub const fn get(self: &Vector<T, A>, index: usize) Option<&T> {
         if index >= self.len {
-            return Option::<&T>::None;
+            return None;
         }
-        return Option::<&T>::Some(&unsafe self.ptr[index]);
+        return Some(&unsafe self.ptr[index]);
     }
 
     /// Panics when `index >= len`. Frees the replaced element, then takes ownership of `value`.
@@ -192,9 +192,9 @@ extend<T, A: Allocator> Vector<T, A> {
     /// The last element, None when empty.
     pub const fn last(self: &Vector<T, A>) Option<&T> {
         if self.len == 0 {
-            return Option::<&T>::None;
+            return None;
         }
-        return Option::<&T>::Some(&unsafe self.ptr[self.len - 1]);
+        return Some(&unsafe self.ptr[self.len - 1]);
     }
 
     /// Frees every element; keeps the buffer for reuse (capacity unchanged).
@@ -240,7 +240,7 @@ extend<T, A: Allocator> Vector<T, A> {
     /// Remove and return the element at `index`, shifting later elements left (`None` if out of range).
     pub const fn remove(self: &mut Vector<T, A>, index: usize) Option<T> {
         if index >= self.len {
-            return Option::<T>::None;
+            return None;
         }
         let removed = unsafe self.ptr[index];
         let mut i = index;
@@ -249,7 +249,7 @@ extend<T, A: Allocator> Vector<T, A> {
             i = i + 1;
         }
         self.len = self.len - 1;
-        return Option::<T>::Some(removed);
+        return Some(removed);
     }
 
     /// Exchange the elements at `i` and `j`. Panics when either is `>= len`.
@@ -265,12 +265,12 @@ extend<T, A: Allocator> Vector<T, A> {
     /// Remove the element at `index` by swapping in the last one (O(1), reorders; `None` if out of range).
     pub const fn swap_remove(self: &mut Vector<T, A>, index: usize) Option<T> {
         if index >= self.len {
-            return Option::<T>::None;
+            return None;
         }
         let removed = unsafe self.ptr[index];
         self.len = self.len - 1;
         unsafe self.ptr[index] = unsafe self.ptr[self.len];
-        return Option::<T>::Some(removed);
+        return Some(removed);
     }
 
     /// Reverse the elements in place.
@@ -293,10 +293,10 @@ extend<T, A: Allocator> Vector<T, A> {
     pub const fn find<F: fn(&T) bool>(self: &Vector<T, A>, pred: F) Option<&T> {
         for i in 0..self.len {
             if pred(self.at(i)) {
-                return Option::<&T>::Some(&unsafe self.ptr[i]);
+                return Some(&unsafe self.ptr[i]);
             }
         }
-        return Option::<&T>::None;
+        return None;
     }
 
     /// Keep only the elements matching `pred` (in place, preserving order). `pred` borrows (`&T`); rejected
@@ -425,10 +425,10 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
     pub const fn position(self: &Vector<T, A>, x: &T) Option<usize> {
         for i in 0..self.len {
             if unsafe self.ptr[i] == *x {
-                return Option::<usize>::Some(i);
+                return Some(i);
             }
         }
-        return Option::<usize>::None;
+        return None;
     }
 
     /// Remove consecutive runs of equal elements, keeping the first of each run. The dropped duplicates
@@ -543,7 +543,7 @@ extend<'a, T> VecIter<'a, T> as Iterator<&'a T> {
 
     pub const fn size_hint(self: &VecIter<'a, T>) (usize, Option<usize>) {
         let n = self.stop - self.idx;
-        return n, Option::<usize>::Some(n);
+        return (n, Option::<usize>::Some(n));
     }
 }
 
@@ -573,9 +573,9 @@ extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         if r.start > hi || hi > self.len {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
@@ -599,9 +599,9 @@ extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
-            r.end + 1;
+            r.end + 1
         } else {
-            r.end;
+            r.end
         };
         if r.start > hi || hi > self.len {
             panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");

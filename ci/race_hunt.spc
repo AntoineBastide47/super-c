@@ -231,7 +231,7 @@ fn hunt_timers() i64 {
                         let _ = g.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
                     },
                     None => {},
-                };
+                }
             }
             w.done();
         };
@@ -276,7 +276,7 @@ fn hunt_select_contention() i64 {
                         let _ = h.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
                     },
                     TimedOut => {},
-                };
+                }
             }
             w.done();
         };
@@ -365,7 +365,7 @@ fn hunt_mixed_threads() i64 {
             _ => {
                 break;
             },
-        };
+        }
     }
     wg.wait();
     let g = m.get().lock();
@@ -399,16 +399,16 @@ fn hunt_thread_select() i64 {
                         switch s.wait_timeout(time::Duration::from_micros(200)) {
                             Ready(i) => {
                                 let got = if i == ia {
-                                    ra.try_recv();
+                                    ra.try_recv()
                                 } else {
-                                    rb.try_recv();
+                                    rb.try_recv()
                                 };
                                 if got.is_some() {
                                     let _ = h.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
                                 }
                             },
                             TimedOut => {},
-                        };
+                        }
                     }
                     return 0;
                 },
@@ -446,7 +446,7 @@ fn hunt_thread_select() i64 {
             _ => {
                 break;
             },
-        };
+        }
     }
     let out = hits.get().load(atomics::MemoryOrder::Relaxed);
     return out;
@@ -504,7 +504,7 @@ fn hunt_park_storm() i64 {
             _ => {
                 break;
             },
-        };
+        }
     }
     let out = wakes.get().load(atomics::MemoryOrder::Relaxed);
     return out;
@@ -573,7 +573,7 @@ fn hunt_thread_condvar() i64 {
             _ => {
                 break;
             },
-        };
+        }
     }
     let out = served.get().load(atomics::MemoryOrder::Relaxed);
     return out;

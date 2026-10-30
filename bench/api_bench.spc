@@ -42,9 +42,7 @@ fn cancel_points() bool {
                 return at;
             }),
         );
-        let r = s.check_with(
-            &RequestOptions { cancel: Option::<ptask::CancelToken>::Some(tok), deadline_ns: 0, result_limit: 0 },
-        );
+        let r = s.check_with(&RequestOptions { cancel: Some(tok), deadline_ns: 0, result_limit: 0 });
         let done = clock::monotonic_ns();
         let at = canceller.join();
         if r.is_ok() {
@@ -56,9 +54,9 @@ fn cancel_points() bool {
             return false;
         }
         let late = if done > at {
-            done - at;
+            done - at
         } else {
-            0;
+            0
         };
         println("  cancel at {} ms: stopped after {} us", delay_ms, late / 1000);
         worst = worst.max(late);
@@ -126,7 +124,7 @@ fn overhead() bool {
         },
     );
     let mut files = String::new();
-    json::dump_escaped(src.as_str(), &mut files);
+    json::dump_escaped(&src, &mut files);
     let mut msgs = Vector::<String>::with_capacity(3);
     msgs.push(
         String::from_str(
@@ -144,7 +142,7 @@ fn overhead() bool {
     msgs.push(String::from_str("{\"id\":3,\"method\":\"commit\",\"params\":{\"workspace\":1}}"));
     let mut rev: i64 = -1;
     for i in 0..msgs.len() {
-        let r = json::parse(sv.handle(msgs[i].as_str(), &none).as_str()).unwrap();
+        let r = json::parse(sv.handle(&msgs[i], &none).as_str()).unwrap();
         if !r.contains_key("result") {
             eprintln("api_protocol_overhead: request {} failed", i + 1);
             return false;
@@ -152,7 +150,7 @@ fn overhead() bool {
         rev = r.at_key("result").value_i64("revision", rev);
     }
     let mut mem = MemoryFiles::over_disk();
-    mem.set(APP, src.as_str());
+    mem.set(APP, &src);
     let mut s = Session::open_file(APP, Config::with_files("std", Box::new(mem))).unwrap();
     s.check().unwrap();
     let at = src.as_str().find("one()") as u32;
@@ -168,7 +166,7 @@ fn overhead() bool {
         let t0 = clock::monotonic_ns();
         let ls = sem::references_at(&mut s, APP, at, true, &none).unwrap();
         let t1 = clock::monotonic_ns();
-        let r = sv.handle(text.as_str(), &none);
+        let r = sv.handle(&text, &none);
         let p = sv.take_payload();
         let got = decode(&r, &p);
         let t2 = clock::monotonic_ns();

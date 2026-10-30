@@ -34,12 +34,12 @@ fn main(args: Vector<str>) i32 {
         return 2;
     }
     let dir = if args.len() == 2 {
-        args[1];
+        args[1]
     } else {
-        "std";
+        "std"
     };
     let toml_path = format("{}/packages.toml", dir);
-    let toml = read_file(toml_path.as_str());
+    let toml = read_file(&toml_path);
     if toml.is_none() {
         eprintln("std-packages: cannot read {}", toml_path.as_str());
         return 2;
@@ -105,7 +105,7 @@ fn main(args: Vector<str>) i32 {
             );
         }
     }
-    check_rows(toml_path.as_str(), &man, &mods, &mut diags);
+    check_rows(&toml_path, &man, &mods, &mut diags);
 
     for d in diags.iter() {
         eprintln("{}", d.as_str());
@@ -115,9 +115,9 @@ fn main(args: Vector<str>) i32 {
             "std-packages: {} {}",
             diags.len(),
             if diags.len() == 1 {
-                "violation";
+                "violation"
             } else {
-                "violations";
+                "violations"
             },
         );
         return 1;
@@ -146,7 +146,7 @@ fn check_module(
         return;
     }
     let pkg = &man.packages[md.pkg];
-    let exempt = has(&pkg.platform_ffi, "*") || has(&pkg.platform_ffi, md.name.as_str());
+    let exempt = has(&pkg.platform_ffi, "*") || has(&pkg.platform_ffi, &md.name);
     let mut targets = Vector::<usize>::new();
     for imp in md.items.imports.iter() {
         let path = imp.path.as_str();
@@ -166,7 +166,7 @@ fn check_module(
             }
         } else if !path.starts_with("__") {
             let module = String::from_str(path).replace("::", "/");
-            if !exempt && !has(&man.ffi_modules, module.as_str()) {
+            if !exempt && !has(&man.ffi_modules, &module) {
                 diags.push(
                     format(
                         "{}:{}: platform FFI outside std::platform: import of the ffi module '{}'",
@@ -258,7 +258,7 @@ fn resolve(rest: str, mods: &Vector<Module>, out: &mut Vector<usize>) {
     prefix.push_byte(b'/');
     for m in 0..mods.len() {
         let rel = mods[m].rel.as_str();
-        if rel.starts_with(prefix.as_str()) && rel.slice(prefix.len(), rel.len()).find_byte(b'/') < 0 {
+        if rel.starts_with(&prefix) && rel.slice(prefix.len(), rel.len()).find_byte(b'/') < 0 {
             out.push(m);
         }
     }
@@ -379,14 +379,14 @@ extend Module {
         let stem = rel.slice(0, rel.len() - 4); // without `.spc`
         let slash = stem.find_byte(b'/');
         let pkg_name = if slash < 0 {
-            "prelude";
+            "prelude"
         } else {
-            stem.slice(0, slash as usize);
+            stem.slice(0, slash as usize)
         };
         let name = if slash < 0 {
-            String::from_str(stem);
+            String::from_str(stem)
         } else {
-            String::from_str(stem.slice(slash as usize + 1, stem.len())).replace("/", "::");
+            String::from_str(stem.slice(slash as usize + 1, stem.len())).replace("/", "::")
         };
         let mut pkg = NO_PKG;
         for p in 0..man.packages.len() {

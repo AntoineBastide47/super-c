@@ -135,9 +135,9 @@ pub(package) const fn digest(data: []u8, out: &mut [u8; 32]) {
     }
     unsafe tail[rest] = 0x80;
     let total = if rest < 56 {
-        64usize;
+        64usize
     } else {
-        128usize;
+        128usize
     };
     let bits = n as u64 * 8;
     for i in 0..8usize {

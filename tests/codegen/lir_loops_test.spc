@@ -27,7 +27,7 @@ fn optimized(text: str, bu: lu::Budgets) (Package, Package) {
             assert(v.check(&after, after.spell(s.name), b), v.err.as_str());
         }
     }
-    return before, after;
+    return (before, after);
 }
 
 // The text of function `name` of `p`.
@@ -35,7 +35,7 @@ fn text_of(p: &Package, name: str) String {
     let mut all = String::new();
     lprint::print_package(p, &mut all);
     let head = format("fn @{}\n", name);
-    let at = all.as_str().find(head.as_str());
+    let at = all.as_str().find(&head);
     assert(at >= 0, head.as_str());
     let rest = all.as_str().slice(at as usize + head.len(), all.len());
     let f = rest.find("\nfn @");
@@ -43,9 +43,9 @@ fn text_of(p: &Package, name: str) String {
         rest.slice(
             0,
             if f >= 0 {
-                f as usize + 1;
+                f as usize + 1
             } else {
-                rest.len();
+                rest.len()
             },
         ),
     );
@@ -138,7 +138,7 @@ b3:
 @test
 fn a_counted_loop_peels_into_straight_code() {
     let src = counted(5);
-    let (b, a) = optimized(src.as_str(), PEEL);
+    let (b, a) = optimized(&src, PEEL);
     let t = text_of(&a, "tri");
     assert(!t.contains("icmp"), t.as_str());
     let x: []u64 = [3];
@@ -194,12 +194,12 @@ b5:
 @test
 fn a_loop_past_its_budget_stays() {
     let src = counted(1000);
-    let (b, a) = optimized(src.as_str(), PEEL);
+    let (b, a) = optimized(&src, PEEL);
     assert(text_of(&a, "tri").contains("icmp"), "a thousand copies pass the budget");
     let x: []u64 = [2];
     same_outcome(&b, &a, "tri", x, 999000, false);
     let small = counted(5);
-    let (b2, a2) = optimized(small.as_str(), NO_LOOPS);
+    let (b2, a2) = optimized(&small, NO_LOOPS);
     assert(text_of(&a2, "tri").contains("icmp"), "no budget, no peeling");
     same_outcome(&b2, &a2, "tri", x, 20, false);
 }
@@ -978,18 +978,18 @@ b6:
         let src = format(
             "lir ptr 8\nsym @mv fn global noinline\nsym @drive fn global\nfn @mv\n  sig (ptr, ptr, ptr, i64, i64) -> void\n{}b0(v0: ptr, v1: ptr, v2: ptr, v3: i64, v4: i64):\n{}{}",
             if excl == 1 {
-                "  ref p2 256 noalias\n";
+                "  ref p2 256 noalias\n"
             } else {
-                "";
+                ""
             },
             body,
             drive,
         );
         let mut err = String::new();
-        let q = lparse::parse(src.as_str(), &mut err);
+        let q = lparse::parse(&src, &mut err);
         assert(q.is_some(), err.as_str());
         let b = q.unwrap();
-        let mut a = lparse::parse(src.as_str(), &mut err).unwrap();
+        let mut a = lparse::parse(&src, &mut err).unwrap();
         let none = Vector::<bool>::new();
         lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: jam });
         let mut v = verify::Verifier::new();
@@ -1463,7 +1463,7 @@ fn closed(text: str, name: str) (Package, Package) {
     let (b, a) = optimized(text, FIN);
     let t = text_of(&a, name);
     assert(!t.contains("br ") && !t.contains("jmp "), t.as_str());
-    return b, a;
+    return (b, a);
 }
 
 // Sums of the counter, of its square through a second accumulator, of a nested loop's sums: each
@@ -1655,9 +1655,9 @@ b3:
             }
             let mut e = leval::Eval::new(&b);
             let o = if use_one {
-                e.run(b.find_symbol(names[f]), one);
+                e.run(b.find_symbol(names[f]), one)
             } else {
-                e.run(b.find_symbol(names[f]), x);
+                e.run(b.find_symbol(names[f]), x)
             };
             if o.kind != leval::EV_OK {
                 continue;
@@ -1667,9 +1667,9 @@ b3:
                 &a,
                 names[f],
                 if use_one {
-                    one;
+                    one
                 } else {
-                    x;
+                    x
                 },
                 o.value,
                 false,
@@ -1948,7 +1948,7 @@ fn optimized_for(text: str, bu: lu::Budgets, vector: u32, vops: u8) (Package, Pa
             assert(v.check(&after, after.spell(s.name), &after.bodies[s.def as usize]), v.err.as_str());
         }
     }
-    return before, after;
+    return (before, after);
 }
 
 // The stores of a group through one address at every element of its step (`o[2i]` and `o[2i + 1]`)
@@ -4011,7 +4011,7 @@ b3:
   ret
 )",
     );
-    let (_, a) = optimized(src.as_str(), VECTOR);
+    let (_, a) = optimized(&src, VECTOR);
     let names: [str; 2] = ["own", "shared"];
     for k in 0..2usize {
         let t = text_of(&a, unsafe names[k]);

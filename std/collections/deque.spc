@@ -106,9 +106,9 @@ const fn range_end(r: &Range<usize>, len: usize) usize {
         panic("Deque: range out of bounds");
     }
     let hi = if r.inclusive {
-        r.end + 1;
+        r.end + 1
     } else {
-        r.end;
+        r.end
     };
     if r.start > hi || hi > len {
         panic("Deque: range out of bounds");
@@ -120,7 +120,7 @@ const fn range_end(r: &Range<usize>, len: usize) usize {
 const fn ring_parts<'a, T>(data: *const T, cap: usize, head: usize, lo: usize, hi: usize) (Slice<'a, T>, Slice<'a, T>) {
     let start = head + lo & cap.wrapping_sub(1);
     let first = (hi - lo).min(cap - start);
-    return unsafe Slice::<T> { ptr: data + start, len: first }, unsafe Slice::<T> { ptr: data, len: hi - lo - first };
+    return (unsafe Slice::<T> { ptr: data + start, len: first }, unsafe Slice::<T> { ptr: data, len: hi - lo - first });
 }
 
 // The writable form of `ring_parts`.
@@ -130,10 +130,10 @@ const fn ring_parts_mut<'a, T>(data: *mut T, cap: usize, head: usize, lo: usize,
 ) {
     let start = head + lo & cap.wrapping_sub(1);
     let first = (hi - lo).min(cap - start);
-    return unsafe SliceMut::<T> { ptr: data + start, len: first }, unsafe SliceMut::<T> {
-        ptr: data,
-        len: hi - lo - first,
-    };
+    return (
+        unsafe SliceMut::<T> { ptr: data + start, len: first },
+        unsafe SliceMut::<T> { ptr: data, len: hi - lo - first }
+    );
 }
 
 // Rotate the `n` elements at `p` left by `k <= n` with three reversals: about n swaps, no allocation.
@@ -358,21 +358,21 @@ extend<T, A: Allocator> Deque<T, A> {
     /// Removes the back element and moves it to the caller; None when empty.
     pub const fn pop_back(self: &mut Deque<T, A>) Option<T> {
         if self.len == 0 {
-            return Option::<T>::None;
+            return None;
         }
         self.len -= 1;
-        return Option::<T>::Some(unsafe self.ptr[self.slot(self.len)]);
+        return Some(unsafe self.ptr[self.slot(self.len)]);
     }
 
     /// Removes the front element and moves it to the caller; None when empty.
     pub const fn pop_front(self: &mut Deque<T, A>) Option<T> {
         if self.len == 0 {
-            return Option::<T>::None;
+            return None;
         }
         let v = unsafe self.ptr[self.head];
         self.head = self.head + 1 & self.cap - 1;
         self.len -= 1;
-        return Option::<T>::Some(v);
+        return Some(v);
     }
 
     /// The front element; None when empty.
@@ -383,9 +383,9 @@ extend<T, A: Allocator> Deque<T, A> {
     /// The back element; None when empty.
     pub const fn back(self: &Deque<T, A>) Option<&T> {
         if self.len == 0 {
-            return Option::<&T>::None;
+            return None;
         }
-        return Option::<&T>::Some(&unsafe self.ptr[self.slot(self.len - 1)]);
+        return Some(&unsafe self.ptr[self.slot(self.len - 1)]);
     }
 
     /// The front element, writable; None when empty.
@@ -396,25 +396,25 @@ extend<T, A: Allocator> Deque<T, A> {
     /// The back element, writable; None when empty.
     pub const fn back_mut(self: &mut Deque<T, A>) Option<&mut T> {
         if self.len == 0 {
-            return Option::<&mut T>::None;
+            return None;
         }
-        return Option::<&mut T>::Some(&mut unsafe self.ptr[self.slot(self.len - 1)]);
+        return Some(&mut unsafe self.ptr[self.slot(self.len - 1)]);
     }
 
     /// The element at logical index `i` (0 is the front); None when `i >= len`.
     pub const fn get(self: &Deque<T, A>, i: usize) Option<&T> {
         if i >= self.len {
-            return Option::<&T>::None;
+            return None;
         }
-        return Option::<&T>::Some(&unsafe self.ptr[self.slot(i)]);
+        return Some(&unsafe self.ptr[self.slot(i)]);
     }
 
     /// The element at logical index `i`, writable; None when `i >= len`.
     pub const fn get_mut(self: &mut Deque<T, A>, i: usize) Option<&mut T> {
         if i >= self.len {
-            return Option::<&mut T>::None;
+            return None;
         }
-        return Option::<&mut T>::Some(&mut unsafe self.ptr[self.slot(i)]);
+        return Some(&mut unsafe self.ptr[self.slot(i)]);
     }
 
     /// The element at logical index `i`. Panics when `i >= len`.
@@ -463,14 +463,14 @@ extend<T, A: Allocator> Deque<T, A> {
             let mut t = dst + n & mask;
             while left > 0 {
                 let se = if s == 0 {
-                    cap;
+                    cap
                 } else {
-                    s;
+                    s
                 };
                 let te = if t == 0 {
-                    cap;
+                    cap
                 } else {
-                    t;
+                    t
                 };
                 let c = left.min(se).min(te);
                 unsafe memmove(self.ptr + (te - c), self.ptr + (se - c), c * sizeof(T));
@@ -506,7 +506,7 @@ extend<T, A: Allocator> Deque<T, A> {
     /// side: O(min(i, len - i)). None when `i >= len`.
     pub const fn remove(self: &mut Deque<T, A>, i: usize) Option<T> {
         if i >= self.len {
-            return Option::<T>::None;
+            return None;
         }
         let mask = self.cap - 1;
         let at = self.slot(i);
@@ -519,14 +519,14 @@ extend<T, A: Allocator> Deque<T, A> {
             self.copy_ring(at + 1 & mask, at, after);
         }
         self.len -= 1;
-        return Option::<T>::Some(v);
+        return Some(v);
     }
 
     /// Removes the element at logical index `i` and moves the back element into its place: O(1), changes the
     /// order. None when `i >= len`.
     pub const fn swap_remove_back(self: &mut Deque<T, A>, i: usize) Option<T> {
         if i >= self.len {
-            return Option::<T>::None;
+            return None;
         }
         let at = self.slot(i);
         let v = unsafe self.ptr[at];
@@ -534,14 +534,14 @@ extend<T, A: Allocator> Deque<T, A> {
         if i != self.len {
             unsafe self.ptr[at] = unsafe self.ptr[self.slot(self.len)];
         }
-        return Option::<T>::Some(v);
+        return Some(v);
     }
 
     /// Removes the element at logical index `i` and moves the front element into its place: O(1), changes the
     /// order. None when `i >= len`.
     pub const fn swap_remove_front(self: &mut Deque<T, A>, i: usize) Option<T> {
         if i >= self.len {
-            return Option::<T>::None;
+            return None;
         }
         let at = self.slot(i);
         let v = unsafe self.ptr[at];
@@ -550,7 +550,7 @@ extend<T, A: Allocator> Deque<T, A> {
         }
         self.head = self.head + 1 & self.cap - 1;
         self.len -= 1;
-        return Option::<T>::Some(v);
+        return Some(v);
     }
 
     /// Keeps the first `n` elements and frees the others (no change when `n >= len`). Keeps the block.
@@ -752,7 +752,7 @@ extend<T: Ord, A: Allocator> Deque<T, A> {
             let mid = lo + (hi - lo) / 2;
             let c = (&unsafe self.ptr[self.slot(mid)]).cmp(x);
             if c == 0 {
-                return Result::<usize, usize>::Ok(mid);
+                return Ok(mid);
             }
             if c < 0 {
                 lo = mid + 1;
@@ -760,7 +760,7 @@ extend<T: Ord, A: Allocator> Deque<T, A> {
                 hi = mid;
             }
         }
-        return Result::<usize, usize>::Err(lo);
+        return Err(lo);
     }
 }
 
@@ -802,12 +802,12 @@ extend<T, const N: usize> RingBuffer<T, N> {
     /// Appends `value` at the back; `Err(value)` gives it back when the ring is full.
     pub const fn push_back(self: &mut RingBuffer<T, N>, value: T) Result<Unit, T> {
         if self.len == N {
-            return Result::<Unit, T>::Err(value);
+            return Err(value);
         }
         let p = self.ptr_mut();
         unsafe p[self.head + self.len & N - 1] = value;
         self.len += 1;
-        return Result::<Unit, T>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     /// Appends `value` at the back. When the ring is full, the front element leaves to make room and moves
@@ -818,45 +818,45 @@ extend<T, const N: usize> RingBuffer<T, N> {
             let old = unsafe p[self.head];
             unsafe p[self.head] = value;
             self.head = self.head + 1 & N - 1;
-            return Option::<T>::Some(old);
+            return Some(old);
         }
         unsafe p[self.head + self.len & N - 1] = value;
         self.len += 1;
-        return Option::<T>::None;
+        return None;
     }
 
     /// Prepends `value` at the front; `Err(value)` gives it back when the ring is full.
     pub const fn push_front(self: &mut RingBuffer<T, N>, value: T) Result<Unit, T> {
         if self.len == N {
-            return Result::<Unit, T>::Err(value);
+            return Err(value);
         }
         self.head = self.head.wrapping_sub(1) & N - 1;
         let p = self.ptr_mut();
         unsafe p[self.head] = value;
         self.len += 1;
-        return Result::<Unit, T>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     /// Removes the front element and moves it to the caller; None when empty.
     pub const fn pop_front(self: &mut RingBuffer<T, N>) Option<T> {
         if self.len == 0 {
-            return Option::<T>::None;
+            return None;
         }
         let p = self.ptr_mut();
         let v = unsafe p[self.head];
         self.head = self.head + 1 & N - 1;
         self.len -= 1;
-        return Option::<T>::Some(v);
+        return Some(v);
     }
 
     /// Removes the back element and moves it to the caller; None when empty.
     pub const fn pop_back(self: &mut RingBuffer<T, N>) Option<T> {
         if self.len == 0 {
-            return Option::<T>::None;
+            return None;
         }
         self.len -= 1;
         let p = self.ptr_mut();
-        return Option::<T>::Some(unsafe p[self.head + self.len & N - 1]);
+        return Some(unsafe p[self.head + self.len & N - 1]);
     }
 
     /// The front element; None when empty.
@@ -867,7 +867,7 @@ extend<T, const N: usize> RingBuffer<T, N> {
     /// The back element; None when empty.
     pub const fn back(self: &RingBuffer<T, N>) Option<&T> {
         if self.len == 0 {
-            return Option::<&T>::None;
+            return None;
         }
         return self.get(self.len - 1);
     }
@@ -875,9 +875,9 @@ extend<T, const N: usize> RingBuffer<T, N> {
     /// The element at logical index `i` (0 is the front); None when `i >= len`.
     pub const fn get(self: &RingBuffer<T, N>, i: usize) Option<&T> {
         if i >= self.len {
-            return Option::<&T>::None;
+            return None;
         }
-        return Option::<&T>::Some(&unsafe self.ptr()[self.head + i & N - 1]);
+        return Some(&unsafe self.ptr()[self.head + i & N - 1]);
     }
 
     /// Frees every element.
@@ -905,26 +905,26 @@ extend<'a, T> RingIter<'a, T> {
 extend<'a, T> RingIter<'a, T> as Iterator<&'a T> {
     pub const fn next(self: &mut RingIter<'a, T>) Option<&'a T> {
         if self.rem == 0 {
-            return Option::<&'a T>::None;
+            return None;
         }
         let r: &'a T = unsafe &*(self.data + self.idx);
         self.idx = self.idx + 1 & self.mask;
         self.rem -= 1;
-        return Option::<&'a T>::Some(r);
+        return Some(r);
     }
 
     pub const fn size_hint(self: &RingIter<'a, T>) (usize, Option<usize>) {
-        return self.rem, Option::<usize>::Some(self.rem);
+        return (self.rem, Option::<usize>::Some(self.rem));
     }
 }
 
 extend<'a, T> RingIter<'a, T> as DoubleEndedIterator<&'a T> {
     pub const fn next_back(self: &mut RingIter<'a, T>) Option<&'a T> {
         if self.rem == 0 {
-            return Option::<&'a T>::None;
+            return None;
         }
         self.rem -= 1;
-        return Option::<&'a T>::Some(unsafe &*(self.data + (self.idx + self.rem & self.mask)));
+        return Some(unsafe &*(self.data + (self.idx + self.rem & self.mask)));
     }
 }
 
@@ -937,26 +937,26 @@ extend<'a, T> RingIterMut<'a, T> {
 extend<'a, T> RingIterMut<'a, T> as Iterator<&'a mut T> {
     pub const fn next(self: &mut RingIterMut<'a, T>) Option<&'a mut T> {
         if self.rem == 0 {
-            return Option::<&'a mut T>::None;
+            return None;
         }
         let r: &'a mut T = unsafe &mut *(self.data + self.idx);
         self.idx = self.idx + 1 & self.mask;
         self.rem -= 1;
-        return Option::<&'a mut T>::Some(r);
+        return Some(r);
     }
 
     pub const fn size_hint(self: &RingIterMut<'a, T>) (usize, Option<usize>) {
-        return self.rem, Option::<usize>::Some(self.rem);
+        return (self.rem, Option::<usize>::Some(self.rem));
     }
 }
 
 extend<'a, T> RingIterMut<'a, T> as DoubleEndedIterator<&'a mut T> {
     pub const fn next_back(self: &mut RingIterMut<'a, T>) Option<&'a mut T> {
         if self.rem == 0 {
-            return Option::<&'a mut T>::None;
+            return None;
         }
         self.rem -= 1;
-        return Option::<&'a mut T>::Some(unsafe &mut *(self.data + (self.idx + self.rem & self.mask)));
+        return Some(unsafe &mut *(self.data + (self.idx + self.rem & self.mask)));
     }
 }
 
@@ -969,26 +969,26 @@ extend<'a, T> DequeDrain<'a, T> {
 extend<T> DequeDrain<T> as Iterator<T> {
     pub const fn next(self: &mut DequeDrain<T>) Option<T> {
         if self.rem == 0 {
-            return Option::<T>::None;
+            return None;
         }
         let v = unsafe self.data[self.idx];
         self.idx = self.idx + 1 & self.mask;
         self.rem -= 1;
-        return Option::<T>::Some(v);
+        return Some(v);
     }
 
     pub const fn size_hint(self: &DequeDrain<T>) (usize, Option<usize>) {
-        return self.rem, Option::<usize>::Some(self.rem);
+        return (self.rem, Option::<usize>::Some(self.rem));
     }
 }
 
 extend<T> DequeDrain<T> as DoubleEndedIterator<T> {
     pub const fn next_back(self: &mut DequeDrain<T>) Option<T> {
         if self.rem == 0 {
-            return Option::<T>::None;
+            return None;
         }
         self.rem -= 1;
-        return Option::<T>::Some(unsafe self.data[self.idx + self.rem & self.mask]);
+        return Some(unsafe self.data[self.idx + self.rem & self.mask]);
     }
 }
 

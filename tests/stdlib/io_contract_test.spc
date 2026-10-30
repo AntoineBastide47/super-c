@@ -13,9 +13,9 @@ extend Celsius as TryFrom<i32> {
     type Error = TooCold;
     pub fn try_from(value: i32) Result<Celsius, TooCold> {
         if value < -273 {
-            return Result::<Celsius, TooCold>::Err(TooCold::Below(value));
+            return Err(Below(value));
         }
-        return Result::<Celsius, TooCold>::Ok(Celsius { v: value });
+        return Ok(Celsius { v: value });
     }
 }
 
@@ -26,7 +26,7 @@ fn try_from_returns_its_own_error() {
     let cold: Result<Celsius, TooCold> = (-300).try_into();
     switch cold.unwrap_err() {
         Below(v) => assert_eq(v, -300),
-    };
+    }
     assert(Celsius::try_from(-273).is_ok());
 }
 

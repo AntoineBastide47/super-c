@@ -259,9 +259,9 @@ pub(package) fn link(o: &Opts, err: &mut String) bool {
         entry_pdata_at: 0,
         shared: o.shared,
         base: if o.shared {
-            DLL_BASE;
+            DLL_BASE
         } else {
-            EXE_BASE;
+            EXE_BASE
         },
         onexit_at: 0,
         exports: Vector::<u32>::new(),
@@ -292,7 +292,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     }
     for i in 0..o.libs.len() {
         let mut path = String::new();
-        if static_lib(o, o.libs[i].as_str(), &mut path) && !ars.add(nat::OBJ_COFF, path.as_str(), &mut l.err) {
+        if static_lib(o, &o.libs[i], &mut path) && !ars.add(nat::OBJ_COFF, &path, &mut l.err) {
             return false;
         }
     }
@@ -318,7 +318,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     }
     write_synthetic(l, o, main, &mut img);
     finish(l, o, &mut img);
-    if !lu::write(o.out.as_str(), img.as_slice(), 0o755) {
+    if !lu::write(&o.out, &img, 0o755) {
         l.err.format_into("cannot write '{}'", o.out.as_str());
         return false;
     }
@@ -385,20 +385,20 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
                 name: l.sn.intern(name),
                 flags: flags,
                 align: if al == 0 {
-                    1u64;
+                    1u64
                 } else {
-                    1u64 << (al - 1) as u64;
+                    1u64 << (al - 1) as u64
                 },
                 size: lu::r32(b, h + 16),
                 off: if raw == 0 {
-                    0usize;
+                    0usize
                 } else {
-                    at + raw;
+                    at + raw
                 },
                 reloff: if (flags & SCN_NRELOC_OVFL) != 0 && lu::r16(b, h + 32) == 0xFFFF {
-                    reloff + 10;
+                    reloff + 10
                 } else {
-                    reloff;
+                    reloff
                 },
                 nreloc: nrel,
                 out: NONE,
@@ -414,9 +414,9 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
     while k < nsym {
         let e = symtab + 18 * k;
         let name = if lu::r32(b, e) == 0 {
-            lu::cstr(b, strtab + lu::r32(b, e + 4) as usize);
+            lu::cstr(b, strtab + lu::r32(b, e + 4) as usize)
         } else {
-            short_name(b, e);
+            short_name(b, e)
         };
         let naux = b[e + 17] as usize;
         // A COMDAT section's definition (its section symbol's auxiliary record): the selection, and an
@@ -437,9 +437,9 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
                 name: l.names.intern(name),
                 // A weak external's: its default's index (its auxiliary record's first word).
                 value: if b[e + 16] == CLASS_WEAK && naux != 0 {
-                    lu::r32(b, e + 18);
+                    lu::r32(b, e + 18)
                 } else {
-                    lu::r32(b, e + 8);
+                    lu::r32(b, e + 8)
                 },
                 sec: lu::r16(b, e + 12) as i16,
                 class: b[e + 16],
@@ -768,7 +768,7 @@ fn system_dir(out: &mut String) bool {
 pub(package) fn find_dll(o: &Opts, dll: str, path: &mut String) bool {
     for i in 0..o.dirs.len() {
         let p = format("{}/{}", o.dirs[i].as_str(), dll);
-        if is_file(p.as_str()) {
+        if is_file(&p) {
             path.push_string(&p);
             return true;
         }
@@ -776,7 +776,7 @@ pub(package) fn find_dll(o: &Opts, dll: str, path: &mut String) bool {
     let mut sys = String::new();
     if system_dir(&mut sys) {
         let p = format("{}\\{}", sys.as_str(), dll);
-        if is_file(p.as_str()) {
+        if is_file(&p) {
             path.push_string(&p);
             return true;
         }
@@ -790,7 +790,7 @@ pub(package) fn has_dlls(o: &Opts, why: &mut String) bool {
     let mut want = Vector::<String>::new();
     for i in 0..o.libs.len() {
         let mut d = String::new();
-        if dll_of(o, o.libs[i].as_str(), &mut d) {
+        if dll_of(o, &o.libs[i], &mut d) {
             want.push(d);
         }
     }
@@ -799,7 +799,7 @@ pub(package) fn has_dlls(o: &Opts, why: &mut String) bool {
     }
     for i in 0..want.len() {
         let mut p = String::new();
-        if !find_dll(o, want[i].as_str(), &mut p) {
+        if !find_dll(o, &want[i], &mut p) {
             why.format_into("no '{}'", want[i].as_str());
             return false;
         }
@@ -815,10 +815,10 @@ pub(package) fn static_lib(o: &Opts, name: str, path: &mut String) bool {
     for i in 0..o.dirs.len() {
         for f in 0..FORMS.len() {
             let p = format("{}/{}{}{}", o.dirs[i].as_str(), FORMS[f].0, name, FORMS[f].1);
-            if !is_file(p.as_str()) {
+            if !is_file(&p) {
                 continue;
             }
-            let d = lu::read(p.as_str());
+            let d = lu::read(&p);
             if d.is_none() {
                 continue;
             }
@@ -828,7 +828,7 @@ pub(package) fn static_lib(o: &Opts, name: str, path: &mut String) bool {
             let mut why = String::new();
             // mingw-w64's import libraries (`libws2_32.a`) hold objects beside their imports.
             let mut imports = false;
-            if ar::read(nat::OBJ_COFF, data.as_slice(), &mut ms, &mut syms, &mut imports, &mut why) && ms.len() != 0 && !imports {
+            if ar::read(nat::OBJ_COFF, &data, &mut ms, &mut syms, &mut imports, &mut why) && ms.len() != 0 && !imports {
                 path.push_string(&p);
                 return true;
             }
@@ -851,13 +851,13 @@ fn prepare_imports(l: &mut L) {
         let s = l.names.spell(gy.name);
         if gy.kind == G_UNDEF && s.starts_with("__imp_") {
             let base = String::from_str(s.slice(6, s.len()));
-            let t = global(l, l.names.intern(base.as_str()));
+            let t = global(l, l.names.intern(&base));
             let m = l.gs.index_mut(g);
             m.alias = t;
             m.iat = true;
         } else if gy.kind == G_UNDEF && !s.starts_with("_") {
             let old = format("_{}", s);
-            let _ = global(l, l.names.intern(old.as_str()));
+            let _ = global(l, l.names.intern(&old));
         }
     }
     for i in 0..RENAMES.len() {
@@ -898,7 +898,7 @@ fn resolve_imports(l: &mut L, o: &Opts) bool {
     let mut dlls = Vector::<String>::new();
     for i in 0..o.libs.len() {
         let mut d = String::new();
-        if dll_of(o, o.libs[i].as_str(), &mut d) {
+        if dll_of(o, &o.libs[i], &mut d) {
             dlls.push(d);
         }
     }
@@ -906,7 +906,7 @@ fn resolve_imports(l: &mut L, o: &Opts) bool {
         dlls.push(String::from_str(DEFAULT_DLLS[i]));
     }
     for i in 0..dlls.len() {
-        if !load_dll(l, o, dlls[i].as_str(), true) {
+        if !load_dll(l, o, &dlls[i], true) {
             return false;
         }
     }
@@ -974,7 +974,7 @@ fn load_dll(l: &mut L, o: &Opts, dll: str, required: bool) bool {
         }
         return true;
     }
-    let data = lu::read(path.as_str());
+    let data = lu::read(&path);
     if data.is_none() {
         l.err.format_into("cannot read '{}'", path.as_str());
         return false;
@@ -989,9 +989,9 @@ fn load_dll(l: &mut L, o: &Opts, dll: str, required: bool) bool {
     let nsec = lu::r16(b, pe + 6) as usize;
     let opt = pe + 24;
     let dd = opt + if lu::r16(b, opt) == 0x20B {
-        112usize;
+        112usize
     } else {
-        96usize;
+        96usize
     };
     let erva = lu::r32(b, dd);
     if erva == 0 {
@@ -1208,13 +1208,13 @@ fn layout(l: &mut L, o: &Opts) {
         let sc = l.secs[s as usize];
         let n = keyed[i].0.as_str();
         let on = String::from_str(out_name(n, sc.flags));
-        let mut fl = out_flags(on.as_str());
+        let mut fl = out_flags(&on);
         if on.as_str() != ".text" && on.as_str() != ".rdata" && on.as_str() != ".data" && on.as_str() != ".bss" && on.as_str() != ".tls" && on.as_str() != ".pdata" && !on.as_str().starts_with(
             ".debug_",
         ) {
             fl = sc.flags & (SCN_CODE | SCN_IDATA | SCN_UDATA | SCN_EXEC | SCN_READ | SCN_WRITE);
         }
-        let out = out_section(l, on.as_str(), fl);
+        let out = out_section(l, &on, fl);
         let at = grow(l, out, sc.size, sc.align);
         let m = l.secs.index_mut(s as usize);
         m.out = out;
@@ -1418,7 +1418,7 @@ const fn import_tables(l: &L) (u64, u64) {
         nlib += l.libs[li].used as u64;
     }
     let base = l.osecs[l.o_idata as usize].rva + 20 * (nlib + 1);
-    return base, base + 8 * (l.imports.len() as u64 + nlib);
+    return (base, base + 8 * (l.imports.len() as u64 + nlib));
 }
 
 // The relative address of global `g` (`__imp_X`: X's slot; an import: its thunk).
@@ -1532,9 +1532,9 @@ fn apply(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
             } else if ty == REL_SECREL {
                 let o = target_osec(l, k);
                 let base = if o == NONE {
-                    0u64;
+                    0u64
                 } else {
-                    l.osecs[o as usize].rva;
+                    l.osecs[o as usize].rva
                 };
                 lu::p32(img, p, lu::r32(img.as_slice(), p).wrapping_add(t.wrapping_sub(base) as u32));
             } else if ty == REL_SECTION {
@@ -1543,9 +1543,9 @@ fn apply(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
                     img,
                     p,
                     if o == NONE {
-                        0u32;
+                        0u32
                     } else {
-                        o + 1;
+                        o + 1
                     },
                 );
             } else if ty == REL_ADDR32 {
@@ -1804,11 +1804,11 @@ fn write_dll_entry(l: &mut L, img: &mut Vector<u8>) {
     let er = text.rva + l.entry_at;
     for i in 0..ENTRY_SIZE as usize {
         img[e + i] = if i < 90 {
-            unsafe DLL_ENTRY[i];
+            unsafe DLL_ENTRY[i]
         } else if i >= DLL_ATEXIT as usize && i < DLL_ATEXIT as usize + 16 {
-            unsafe DLL_ATEXIT_CODE[i - DLL_ATEXIT as usize];
+            unsafe DLL_ATEXIT_CODE[i - DLL_ATEXIT as usize]
         } else {
-            0xCC;
+            0xCC
         };
     }
     let rel = |img: &mut Vector<u8>, field: u64, target: u64| {
@@ -1847,7 +1847,7 @@ fn write_exports(l: &L, o: &Opts, img: &mut Vector<u8>) {
     let enpt = eat + 4 * n;
     let eord = enpt + 4 * n;
     let mut str_at = eord + 2 * n;
-    let leaf = base_name(o.out.as_str());
+    let leaf = base_name(&o.out);
     let name_rva = str_at;
     for i in 0..leaf.len() {
         img[d + (str_at - dr) as usize + i] = leaf.byte_at(i);
@@ -1897,9 +1897,9 @@ fn write_entry(l: &mut L, main: u32, img: &mut Vector<u8>) {
     let er = text.rva + l.entry_at;
     for i in 0..ENTRY_SIZE as usize {
         img[e + i] = if i < 114 {
-            unsafe ENTRY[i];
+            unsafe ENTRY[i]
         } else {
-            0xCC;
+            0xCC
         };
     }
     let rel = |img: &mut Vector<u8>, field: u64, target: u64| {
@@ -2057,7 +2057,7 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
     let rel_raw = lu::align_up(rb.len() as u64, FILE_ALIGN);
     let rel_vsz = lu::align_up(rb.len() as u64, SECT_ALIGN);
     let nrel_sec = (rb.len() != 0) as usize;
-    img.extend_from_slice(rb.as_slice());
+    img.extend_from_slice(&rb);
     img.resize_default((rel_off + rel_raw) as usize);
     // The string table for the long section and symbol names; unless stripped, the COFF symbol table GNU
     // ld keeps: each named symbol of a loaded section, by its output section and offset in it.
@@ -2091,9 +2091,9 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
                 for i in 0..8usize {
                     syms.push(
                         if i < n.len() {
-                            n.byte_at(i);
+                            n.byte_at(i)
                         } else {
-                            0u8;
+                            0u8
                         },
                     );
                 }
@@ -2107,9 +2107,9 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
             lu::w16(
                 &mut syms,
                 if (sc.flags & SCN_CODE) != 0 {
-                    0x20u32;
+                    0x20u32
                 } else {
-                    0u32;
+                    0u32
                 },
             );
             syms.push(y.class);
@@ -2118,15 +2118,15 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
         }
     }
     let sym_off = if strs.len() > 4 || nsyms != 0 {
-        img.len() as u64;
+        img.len() as u64
     } else {
-        0u64;
+        0u64
     };
     if sym_off != 0 {
-        img.extend_from_slice(syms.as_slice());
+        img.extend_from_slice(&syms);
         let n = strs.len() as u32;
         lu::p32(&mut strs, 0, n);
-        img.extend_from_slice(strs.as_slice());
+        img.extend_from_slice(&strs);
     }
     // The headers.
     let nsec = l.osecs.len() + nrel_sec;
@@ -2147,9 +2147,9 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
     lu::w16(
         &mut h,
         if l.shared {
-            0x2022u32;
+            0x2022u32
         } else {
-            0x0022u32;
+            0x0022u32
         },
     );
     // The optional header.
@@ -2197,9 +2197,9 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
     lu::w64(
         &mut h,
         if o.stack != 0 {
-            o.stack;
+            o.stack
         } else {
-            0x200000u64;
+            0x200000u64
         },
     );
     lu::w64(&mut h, 0x1000);
@@ -2217,19 +2217,19 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
     let pd = &l.osecs[l.o_pdata as usize];
     for d in 0..16u32 {
         let (rva, size) = if d == 0 && l.shared {
-            (l.osecs[l.o_rdata as usize].rva + l.edata_at, l.edata_size);
+            (l.osecs[l.o_rdata as usize].rva + l.edata_at, l.edata_size)
         } else if d == 1 {
-            (idt, 20 * (nlib + 1));
+            (idt, 20 * (nlib + 1))
         } else if d == 3 {
-            (pd.rva, pd.size);
+            (pd.rva, pd.size)
         } else if d == 5 && nrel_sec != 0 {
-            (rel_rva, rb.len() as u64);
+            (rel_rva, rb.len() as u64)
         } else if d == 9 && l.o_tls != NONE {
-            (l.osecs[l.o_rdata as usize].rva + l.tlsdir_at, 40u64);
+            (l.osecs[l.o_rdata as usize].rva + l.tlsdir_at, 40u64)
         } else if d == 12 {
-            (iat, 8 * (l.imports.len() as u64 + nlib));
+            (iat, 8 * (l.imports.len() as u64 + nlib))
         } else {
-            (0u64, 0u64);
+            (0u64, 0u64)
         };
         lu::w32(&mut h, rva as u32);
         lu::w32(&mut h, size as u32);
@@ -2237,7 +2237,7 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
     // The section headers, `.reloc` last.
     for k in 0..l.osecs.len() {
         let os = &l.osecs[k];
-        section_header(&mut h, hdr_names[k].as_str(), os.size, os.rva, os.raw, os.off, os.flags);
+        section_header(&mut h, &hdr_names[k], os.size, os.rva, os.raw, os.off, os.flags);
     }
     if nrel_sec != 0 {
         section_header(&mut h, ".reloc", rb.len() as u64, rel_rva, rel_raw, rel_off, out_flags(".reloc"));
@@ -2252,9 +2252,9 @@ fn section_header(h: &mut Vector<u8>, name: str, vsize: u64, rva: u64, raw: u64,
     for i in 0..8usize {
         h.push(
             if i < name.len() {
-                name.byte_at(i);
+                name.byte_at(i)
             } else {
-                0u8;
+                0u8
             },
         );
     }
@@ -2264,9 +2264,9 @@ fn section_header(h: &mut Vector<u8>, name: str, vsize: u64, rva: u64, raw: u64,
     lu::w32(
         h,
         if raw == 0 {
-            0u32;
+            0u32
         } else {
-            off as u32;
+            off as u32
         },
     );
     lu::w32(h, 0);

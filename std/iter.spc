@@ -47,7 +47,7 @@ pub const fn map<I: Iterator<T>, T, U, F: fn(T) U>(it: I, f: F) MapIter<I, T, U,
 extend<I: Iterator<T>, T, U, F: fn(T) U> MapIter<I, T, U, F> as Iterator<U> {
     pub fn next(self: &mut MapIter<I, T, U, F>) Option<U> {
         return switch self.it.next() {
-            Some(x) => Option::<U>::Some(self.f(x)),
+            Some(x) => Some(self.f(x)),
             None => Option::<U>::None,
         };
     }
@@ -60,7 +60,7 @@ extend<I: Iterator<T>, T, U, F: fn(T) U> MapIter<I, T, U, F> as Iterator<U> {
 extend<I: DoubleEndedIterator<T>, T, U, F: fn(T) U> MapIter<I, T, U, F> as DoubleEndedIterator<U> {
     pub fn next_back(self: &mut MapIter<I, T, U, F>) Option<U> {
         return switch self.it.next_back() {
-            Some(x) => Option::<U>::Some(self.f(x)),
+            Some(x) => Some(self.f(x)),
             None => Option::<U>::None,
         };
     }
@@ -83,20 +83,20 @@ extend<I: Iterator<T>, T, P: fn(&T) bool> FilterIter<I, T, P> as Iterator<T> {
             switch self.it.next() {
                 Some(x) => {
                     if self.p(&x) {
-                        return Option::<T>::Some(x);
+                        return Some(x);
                     }
                 },
                 None => {
                     return Option::<T>::None;
                 },
-            };
+            }
         }
     }
 
     /// `(0, hi)` of the source.
     pub fn size_hint(self: &FilterIter<I, T, P>) (usize, Option<usize>) {
         let (_, hi) = self.it.size_hint();
-        return 0, hi;
+        return (0, hi);
     }
 }
 
@@ -106,13 +106,13 @@ extend<I: DoubleEndedIterator<T>, T, P: fn(&T) bool> FilterIter<I, T, P> as Doub
             switch self.it.next_back() {
                 Some(x) => {
                     if self.p(&x) {
-                        return Option::<T>::Some(x);
+                        return Some(x);
                     }
                 },
                 None => {
                     return Option::<T>::None;
                 },
-            };
+            }
         }
     }
 }
@@ -134,11 +134,11 @@ extend<I: Iterator<T>, T> EnumerateIter<I, T> as Iterator<(usize, T)> {
             Some(x) => {
                 let i = self.idx;
                 self.idx = self.idx + 1;
-                return Option::<(usize, T)>::Some((i, x));
+                return Some((i, x));
             },
             None => {},
-        };
-        return Option::<(usize, T)>::None;
+        }
+        return None;
     }
 
     pub fn size_hint(self: &EnumerateIter<I, T>) (usize, Option<usize>) {
@@ -153,11 +153,11 @@ extend<I: DoubleEndedIterator<T>, T> EnumerateIter<I, T> as DoubleEndedIterator<
         let n = exact_len(&self.it, "enumerate: next_back needs an exact size_hint");
         switch self.it.next_back() {
             Some(x) => {
-                return Option::<(usize, T)>::Some((self.idx + n - 1, x));
+                return Some((self.idx + n - 1, x));
             },
             None => {},
-        };
-        return Option::<(usize, T)>::None;
+        }
+        return None;
     }
 }
 
@@ -179,14 +179,14 @@ extend<A: Iterator<TA>, B: Iterator<TB>, TA, TB> ZipIter<A, B, TA, TB> as Iterat
             Some(x) => {
                 switch self.b.next() {
                     Some(y) => {
-                        return Option::<(TA, TB)>::Some((x, y));
+                        return Some((x, y));
                     },
                     None => {},
-                };
+                }
             },
             None => {},
-        };
-        return Option::<(TA, TB)>::None;
+        }
+        return None;
     }
 
     /// The smaller of the two hints.
@@ -200,7 +200,7 @@ extend<A: Iterator<TA>, B: Iterator<TB>, TA, TB> ZipIter<A, B, TA, TB> as Iterat
             },
             None => bhi,
         };
-        return alo.min(blo), hi;
+        return (alo.min(blo), hi);
     }
 }
 
@@ -221,21 +221,21 @@ extend<A: DoubleEndedIterator<TA>, B: DoubleEndedIterator<TB>, TA, TB> ZipIter<A
             Some(x) => {
                 switch self.b.next_back() {
                     Some(y) => {
-                        return Option::<(TA, TB)>::Some((x, y));
+                        return Some((x, y));
                     },
                     None => {},
-                };
+                }
             },
             None => {},
-        };
-        return Option::<(TA, TB)>::None;
+        }
+        return None;
     }
 }
 
 /// Yields at most `n` values of the source.
 pub struct TakeIter<I, T> {
-    pub(module) it: I,
-    pub(module) n: usize, // values still allowed
+    it: I,
+    n: usize, // values still allowed
 }
 
 /// An iterator over the first `n` items of `it`; it stops pulling `it` after the `n`th.
@@ -246,7 +246,7 @@ pub const fn take<I: Iterator<T>, T>(it: I, n: usize) TakeIter<I, T> {
 extend<I: Iterator<T>, T> TakeIter<I, T> as Iterator<T> {
     pub fn next(self: &mut TakeIter<I, T>) Option<T> {
         if self.n == 0 {
-            return Option::<T>::None;
+            return None;
         }
         self.n = self.n - 1;
         return self.it.next();
@@ -254,14 +254,14 @@ extend<I: Iterator<T>, T> TakeIter<I, T> as Iterator<T> {
 
     pub fn size_hint(self: &TakeIter<I, T>) (usize, Option<usize>) {
         if self.n == 0 {
-            return 0, Option::<usize>::Some(0);
+            return (0, Option::<usize>::Some(0));
         }
         let (lo, hi) = self.it.size_hint();
         let top = switch hi {
             Some(h) => h.min(self.n),
             None => self.n,
         };
-        return lo.min(self.n), Option::<usize>::Some(top);
+        return (lo.min(self.n), Option::<usize>::Some(top));
     }
 }
 
@@ -270,7 +270,7 @@ extend<I: DoubleEndedIterator<T>, T> TakeIter<I, T> as DoubleEndedIterator<T> {
     /// `size_hint` is not exact.
     pub fn next_back(self: &mut TakeIter<I, T>) Option<T> {
         if self.n == 0 {
-            return Option::<T>::None;
+            return None;
         }
         let len = exact_len(&self.it, "take: next_back needs an exact size_hint");
         if len > self.n {
@@ -283,8 +283,8 @@ extend<I: DoubleEndedIterator<T>, T> TakeIter<I, T> as DoubleEndedIterator<T> {
 
 /// Yields the source's values after the first `n`.
 pub struct SkipIter<I, T> {
-    pub(module) it: I,
-    pub(module) n: usize, // values still to drop before the first `next`
+    it: I,
+    n: usize, // values still to drop before the first `next`
 }
 
 /// An iterator over the items of `it` after the first `n`, which the first `next` drops.
@@ -298,7 +298,7 @@ extend<I: Iterator<T>, T> SkipIter<I, T> as Iterator<T> {
             let k = self.n;
             self.n = 0;
             if !advance(&mut self.it, k) {
-                return Option::<T>::None;
+                return None;
             }
         }
         return self.it.next();
@@ -310,7 +310,7 @@ extend<I: Iterator<T>, T> SkipIter<I, T> as Iterator<T> {
             Some(h) => Option::<usize>::Some(h.saturating_sub(self.n)),
             None => Option::<usize>::None,
         };
-        return lo.saturating_sub(self.n), top;
+        return (lo.saturating_sub(self.n), top);
     }
 }
 
@@ -321,16 +321,16 @@ extend<I: DoubleEndedIterator<T>, T> SkipIter<I, T> as DoubleEndedIterator<T> {
         if exact_len(&self.it, "skip: next_back needs an exact size_hint") > self.n {
             return self.it.next_back();
         }
-        return Option::<T>::None;
+        return None;
     }
 }
 
 /// Yields every value of `a`, then every value of `b`.
 pub struct ChainIter<A, B, T> {
-    pub(module) a: A,
-    pub(module) b: B,
-    pub(module) a_done: bool, // `a` has ended: never pulled again
-    pub(module) b_done: bool,
+    a: A,
+    b: B,
+    a_done: bool, // `a` has ended: never pulled again
+    b_done: bool,
 }
 
 /// An iterator over the items of `a` followed by the items of `b`. Each input is pulled again after it ends
@@ -355,7 +355,7 @@ extend<A: Iterator<T>, B: Iterator<T>, T> ChainIter<A, B, T> as Iterator<T> {
             }
             self.b_done = true;
         }
-        return Option::<T>::None;
+        return None;
     }
 
     /// The sum of the hints of the inputs that have not ended.
@@ -382,13 +382,13 @@ extend<A: DoubleEndedIterator<T>, B: DoubleEndedIterator<T>, T> ChainIter<A, B, 
             }
             self.a_done = true;
         }
-        return Option::<T>::None;
+        return None;
     }
 }
 
 /// Yields the source's values from its far end.
 pub struct RevIter<I, T> {
-    pub(module) it: I,
+    it: I,
 }
 
 /// An iterator over the items of `it` in reverse order (its `next_back`).
@@ -414,11 +414,11 @@ extend<I: DoubleEndedIterator<T>, T> RevIter<I, T> as DoubleEndedIterator<T> {
 
 /// Yields every value of every inner iterator `f(x)` makes from the source's values, in order.
 pub struct FlatMapIter<I, T, J, U, F> {
-    pub(module) it: I,
-    pub(module) f: F,
-    pub(module) front: Option<J>, // the inner iterator `next` drains; None when it ended
-    pub(module) back: Option<J>, // the inner iterator `next_back` drains
-    pub(module) done: bool, // the source has ended: never pulled again
+    it: I,
+    f: F,
+    front: Option<J>, // the inner iterator `next` drains; None when it ended
+    back: Option<J>, // the inner iterator `next_back` drains
+    done: bool, // the source has ended: never pulled again
 }
 
 /// The iterator of `flatten`: a `FlatMapIter` whose map is the identity.
@@ -453,12 +453,12 @@ extend<I: Iterator<T>, T, J: Iterator<U>, U, F: fn(T) J> FlatMapIter<I, T, J, U,
             }
             switch self.it.next() {
                 Some(t) => {
-                    self.front = Option::<J>::Some(self.f(t));
+                    self.front = Some(self.f(t));
                 },
                 None => {
                     self.done = true;
                 },
-            };
+            }
         }
     }
 
@@ -468,13 +468,13 @@ extend<I: Iterator<T>, T, J: Iterator<U>, U, F: fn(T) J> FlatMapIter<I, T, J, U,
         let (blo, bhi) = inner_hint(&self.back);
         let (lo, hi) = hint_sum(flo, fhi, blo, bhi);
         if self.done {
-            return lo, hi;
+            return (lo, hi);
         }
         let (slo, shi) = self.it.size_hint();
         if slo == 0 && shi == Option::<usize>::Some(0) {
-            return lo, hi;
+            return (lo, hi);
         }
-        return lo, Option::<usize>::None;
+        return (lo, Option::<usize>::None);
     }
 }
 
@@ -492,21 +492,21 @@ extend<I: DoubleEndedIterator<T>, T, J: DoubleEndedIterator<U>, U, F: fn(T) J> F
             }
             switch self.it.next_back() {
                 Some(t) => {
-                    self.back = Option::<J>::Some(self.f(t));
+                    self.back = Some(self.f(t));
                 },
                 None => {
                     self.done = true;
                 },
-            };
+            }
         }
     }
 }
 
 /// Yields the source's values while the predicate holds.
 pub struct TakeWhileIter<I, T, P> {
-    pub(module) it: I,
-    pub(module) p: P,
-    pub(module) done: bool, // a value failed `p`: never pulled again
+    it: I,
+    p: P,
+    done: bool, // a value failed `p`: never pulled again
 }
 
 /// An iterator over the leading items of `it` for which `p` holds. The first item that fails `p` is
@@ -518,34 +518,34 @@ pub const fn take_while<I: Iterator<T>, T, P: fn(&T) bool>(it: I, p: P) TakeWhil
 extend<I: Iterator<T>, T, P: fn(&T) bool> TakeWhileIter<I, T, P> as Iterator<T> {
     pub fn next(self: &mut TakeWhileIter<I, T, P>) Option<T> {
         if self.done {
-            return Option::<T>::None;
+            return None;
         }
         switch self.it.next() {
             Some(x) => {
                 if self.p(&x) {
-                    return Option::<T>::Some(x);
+                    return Some(x);
                 }
                 self.done = true;
             },
             None => {},
-        };
-        return Option::<T>::None;
+        }
+        return None;
     }
 
     pub fn size_hint(self: &TakeWhileIter<I, T, P>) (usize, Option<usize>) {
         if self.done {
-            return 0, Option::<usize>::Some(0);
+            return (0, Option::<usize>::Some(0));
         }
         let (_, hi) = self.it.size_hint();
-        return 0, hi;
+        return (0, hi);
     }
 }
 
 /// Yields the source's values from the first one the predicate rejects.
 pub struct SkipWhileIter<I, T, P> {
-    pub(module) it: I,
-    pub(module) p: P,
-    pub(module) done: bool, // the leading run has been dropped
+    it: I,
+    p: P,
+    done: bool, // the leading run has been dropped
 }
 
 /// An iterator over the items of `it` after its leading run of items for which `p` holds, which the first
@@ -564,13 +564,13 @@ extend<I: Iterator<T>, T, P: fn(&T) bool> SkipWhileIter<I, T, P> as Iterator<T> 
                 Some(x) => {
                     if !self.p(&x) {
                         self.done = true;
-                        return Option::<T>::Some(x);
+                        return Some(x);
                     }
                 },
                 None => {
                     return Option::<T>::None;
                 },
-            };
+            }
         }
     }
 
@@ -579,14 +579,14 @@ extend<I: Iterator<T>, T, P: fn(&T) bool> SkipWhileIter<I, T, P> as Iterator<T> 
             return self.it.size_hint();
         }
         let (_, hi) = self.it.size_hint();
-        return 0, hi;
+        return (0, hi);
     }
 }
 
 /// Yields `v` for each `Some(v)` that `f` makes from the source's values, until the first `None`.
 pub struct MapWhileIter<I, T, U, F> {
-    pub(module) it: I,
-    pub(module) f: F,
+    it: I,
+    f: F,
 }
 
 /// An iterator over `f(x)`'s payloads for the leading items `x` of `it`, ending at the first `None`. Not
@@ -605,15 +605,15 @@ extend<I: Iterator<T>, T, U, F: fn(T) Option<U>> MapWhileIter<I, T, U, F> as Ite
 
     pub fn size_hint(self: &MapWhileIter<I, T, U, F>) (usize, Option<usize>) {
         let (_, hi) = self.it.size_hint();
-        return 0, hi;
+        return (0, hi);
     }
 }
 
 /// Yields the source's first value, then every `step`th one after it.
 pub struct StepByIter<I, T> {
-    pub(module) it: I,
-    pub(module) gap: usize, // `step - 1`: the values dropped between two results
-    pub(module) first: bool, // the first value is still to come
+    it: I,
+    gap: usize, // `step - 1`: the values dropped between two results
+    first: bool, // the first value is still to come
 }
 
 /// An iterator over the items of `it` at positions 0, `step`, `2 * step`, ... Panics when `step` is 0.
@@ -644,7 +644,7 @@ extend<I: Iterator<T>, T> StepByIter<I, T> as Iterator<T> {
             return self.it.next();
         }
         if !advance(&mut self.it, self.gap) {
-            return Option::<T>::None;
+            return None;
         }
         return self.it.next();
     }
@@ -655,7 +655,7 @@ extend<I: Iterator<T>, T> StepByIter<I, T> as Iterator<T> {
             Some(h) => Option::<usize>::Some(self.results(h)),
             None => Option::<usize>::None,
         };
-        return self.results(lo), top;
+        return (self.results(lo), top);
     }
 }
 
@@ -668,13 +668,13 @@ extend<I: DoubleEndedIterator<T>, T> StepByIter<I, T> as DoubleEndedIterator<T> 
         let mut past = rem;
         if self.first {
             past = if rem == 0 {
-                self.gap;
+                self.gap
             } else {
-                rem - 1;
+                rem - 1
             };
         }
         if !advance_back(&mut self.it, past) {
-            return Option::<T>::None;
+            return None;
         }
         return self.it.next_back();
     }
@@ -682,8 +682,8 @@ extend<I: DoubleEndedIterator<T>, T> StepByIter<I, T> as DoubleEndedIterator<T> 
 
 /// Yields the source's values and can show the next one without consuming it.
 pub struct PeekableIter<I, T> {
-    pub(module) it: I,
-    pub(module) peeked: Option<Option<T>>, // Some: the source's next result, already pulled
+    it: I,
+    peeked: Option<Option<T>>, // Some: the source's next result, already pulled
 }
 
 /// An iterator over the items of `it` with `peek` and `next_if`.
@@ -695,11 +695,11 @@ extend<I: Iterator<T>, T> PeekableIter<I, T> {
     /// A borrow of the next value, pulled from the source at most once; `None` at the end.
     pub fn peek(self: &mut PeekableIter<I, T>) Option<&T> {
         if self.peeked.is_none() {
-            self.peeked = Option::<Option<T>>::Some(self.it.next());
+            self.peeked = Some(self.it.next());
         }
         return switch &self.peeked {
-            Some(Some(v)) => Option::<&T>::Some(v),
-            _ => Option::<&T>::None,
+            Some(Some(v)) => Some(v),
+            _ => None,
         };
     }
 
@@ -712,7 +712,7 @@ extend<I: Iterator<T>, T> PeekableIter<I, T> {
         if hit {
             return self.next();
         }
-        return Option::<T>::None;
+        return None;
     }
 }
 
@@ -728,7 +728,7 @@ extend<I: Iterator<T>, T> PeekableIter<I, T> as Iterator<T> {
         let held: usize = switch &self.peeked {
             Some(Some(_)) => 1,
             Some(None) => {
-                return 0, Option::<usize>::Some(0);
+                return (0, Option::<usize>::Some(0));
             },
             None => 0,
         };
@@ -737,7 +737,7 @@ extend<I: Iterator<T>, T> PeekableIter<I, T> as Iterator<T> {
             Some(h) => h.checked_add(held),
             None => Option::<usize>::None,
         };
-        return lo.saturating_add(held), top;
+        return (lo.saturating_add(held), top);
     }
 }
 
@@ -752,7 +752,7 @@ extend<I: DoubleEndedIterator<T>, T> PeekableIter<I, T> as DoubleEndedIterator<T
             None => {
                 return self.it.next_back();
             },
-        };
+        }
         let x = self.it.next_back();
         if x.is_some() {
             return x;
@@ -766,8 +766,8 @@ extend<I: DoubleEndedIterator<T>, T> PeekableIter<I, T> as DoubleEndedIterator<T
 
 /// Yields the source's values and calls `f` on each as it passes.
 pub struct InspectIter<I, T, F> {
-    pub(module) it: I,
-    pub(module) f: F,
+    it: I,
+    f: F,
 }
 
 /// An iterator over the items of `it` that runs `f` on each one first. `f` borrows the item.
@@ -781,7 +781,7 @@ extend<I: Iterator<T>, T, F: fn(&T) void> InspectIter<I, T, F> as Iterator<T> {
         switch &x {
             Some(v) => self.f(v),
             None => {},
-        };
+        }
         return x;
     }
 
@@ -796,15 +796,15 @@ extend<I: DoubleEndedIterator<T>, T, F: fn(&T) void> InspectIter<I, T, F> as Dou
         switch &x {
             Some(v) => self.f(v),
             None => {},
-        };
+        }
         return x;
     }
 }
 
 /// Yields the source's values until its first `None`, then only `None`.
 pub struct FuseIter<I, T> {
-    pub(module) it: I,
-    pub(module) done: bool, // the source returned None: never pulled again
+    it: I,
+    done: bool, // the source returned None: never pulled again
 }
 
 /// An iterator over the items of `it` that never pulls `it` again after it ends.
@@ -815,7 +815,7 @@ pub const fn fuse<I: Iterator<T>, T>(it: I) FuseIter<I, T> {
 extend<I: Iterator<T>, T> FuseIter<I, T> as Iterator<T> {
     pub fn next(self: &mut FuseIter<I, T>) Option<T> {
         if self.done {
-            return Option::<T>::None;
+            return None;
         }
         let x = self.it.next();
         if x.is_none() {
@@ -832,7 +832,7 @@ extend<I: Iterator<T>, T> FuseIter<I, T> as Iterator<T> {
 extend<I: DoubleEndedIterator<T>, T> FuseIter<I, T> as DoubleEndedIterator<T> {
     pub fn next_back(self: &mut FuseIter<I, T>) Option<T> {
         if self.done {
-            return Option::<T>::None;
+            return None;
         }
         let x = self.it.next_back();
         if x.is_none() {
@@ -844,8 +844,8 @@ extend<I: DoubleEndedIterator<T>, T> FuseIter<I, T> as DoubleEndedIterator<T> {
 
 /// Yields the source's values over and over.
 pub struct CycleIter<I, T> {
-    pub(module) orig: I, // the source as it was built
-    pub(module) cur: I, // the pass in progress
+    orig: I, // the source as it was built
+    cur: I, // the pass in progress
 }
 
 /// An iterator that restarts a copy of `it` each time the copy ends; empty when `it` is. `it` must be
@@ -869,20 +869,20 @@ extend<I: Iterator<T> + Copy, T> CycleIter<I, T> as Iterator<T> {
     pub fn size_hint(self: &CycleIter<I, T>) (usize, Option<usize>) {
         let (lo, hi) = self.orig.size_hint();
         if lo > 0 {
-            return usize::MAX, Option::<usize>::None;
+            return (usize::MAX, Option::<usize>::None);
         }
         if hi == Option::<usize>::Some(0) {
-            return 0, hi;
+            return (0, hi);
         }
-        return 0, Option::<usize>::None;
+        return (0, Option::<usize>::None);
     }
 }
 
 /// Yields what `f` makes from a running state and each source value, until `f` returns `None`.
 pub struct ScanIter<I, T, S, U, F> {
-    pub(module) it: I,
-    pub(module) state: S,
-    pub(module) f: F,
+    it: I,
+    state: S,
+    f: F,
 }
 
 /// An iterator over the payloads of `f(&mut state, x)` for the items `x` of `it`, starting from `init`,
@@ -901,13 +901,13 @@ extend<I: Iterator<T>, T, S, U, F: fn(&mut S, T) Option<U>> ScanIter<I, T, S, U,
 
     pub fn size_hint(self: &ScanIter<I, T, S, U, F>) (usize, Option<usize>) {
         let (_, hi) = self.it.size_hint();
-        return 0, hi;
+        return (0, hi);
     }
 }
 
 /// Yields a copy of each value a borrowing source points at.
 pub struct CopiedIter<I, T> {
-    pub(module) it: I,
+    it: I,
 }
 
 /// An iterator over `*r` for the references `r` of `it` (`copied(v.iter())` yields `T`, so `T: Ord`
@@ -919,7 +919,7 @@ pub const fn copied<'a, I: Iterator<&'a T>, T: Copy>(it: I) CopiedIter<I, T> {
 extend<'a, I: Iterator<&'a T>, T: Copy> CopiedIter<I, T> as Iterator<T> {
     pub fn next(self: &mut CopiedIter<I, T>) Option<T> {
         return switch self.it.next() {
-            Some(r) => Option::<T>::Some(*r),
+            Some(r) => Some(*r),
             None => Option::<T>::None,
         };
     }
@@ -932,7 +932,7 @@ extend<'a, I: Iterator<&'a T>, T: Copy> CopiedIter<I, T> as Iterator<T> {
 extend<'a, I: DoubleEndedIterator<&'a T>, T: Copy> CopiedIter<I, T> as DoubleEndedIterator<T> {
     pub fn next_back(self: &mut CopiedIter<I, T>) Option<T> {
         return switch self.it.next_back() {
-            Some(r) => Option::<T>::Some(*r),
+            Some(r) => Some(*r),
             None => Option::<T>::None,
         };
     }
@@ -940,7 +940,7 @@ extend<'a, I: DoubleEndedIterator<&'a T>, T: Copy> CopiedIter<I, T> as DoubleEnd
 
 /// Yields a clone of each value a borrowing source points at.
 pub struct ClonedIter<I, T> {
-    pub(module) it: I,
+    it: I,
 }
 
 /// An iterator over `r.clone()` for the references `r` of `it`: one deep copy per item.
@@ -951,7 +951,7 @@ pub const fn cloned<'a, I: Iterator<&'a T>, T: Clone>(it: I) ClonedIter<I, T> {
 extend<'a, I: Iterator<&'a T>, T: Clone> ClonedIter<I, T> as Iterator<T> {
     pub fn next(self: &mut ClonedIter<I, T>) Option<T> {
         return switch self.it.next() {
-            Some(r) => Option::<T>::Some(r.clone()),
+            Some(r) => Some(r.clone()),
             None => Option::<T>::None,
         };
     }
@@ -964,7 +964,7 @@ extend<'a, I: Iterator<&'a T>, T: Clone> ClonedIter<I, T> as Iterator<T> {
 extend<'a, I: DoubleEndedIterator<&'a T>, T: Clone> ClonedIter<I, T> as DoubleEndedIterator<T> {
     pub fn next_back(self: &mut ClonedIter<I, T>) Option<T> {
         return switch self.it.next_back() {
-            Some(r) => Option::<T>::Some(r.clone()),
+            Some(r) => Some(r.clone()),
             None => Option::<T>::None,
         };
     }
@@ -984,7 +984,7 @@ pub fn fold<I: Iterator<T>, T, A, F: fn(A, T) A>(it: I, init: A, f: F) A {
             _ => {
                 break;
             },
-        };
+        }
     }
     return acc;
 }
@@ -1005,9 +1005,9 @@ pub fn reduce<I: Iterator<T>, T, F: fn(T, T) T>(it: I, f: F) Option<T> {
             None => {
                 break;
             },
-        };
+        }
     }
-    return Option::<T>::Some(acc);
+    return Some(acc);
 }
 
 /// Runs `f` on every element, for its effects.
@@ -1021,7 +1021,7 @@ pub fn for_each<I: Iterator<T>, T, F: fn(T) void>(it: I, f: F) {
             _ => {
                 break;
             },
-        };
+        }
     }
 }
 
@@ -1037,7 +1037,7 @@ pub fn count<I: Iterator<T>, T>(it: I) usize {
             _ => {
                 break;
             },
-        };
+        }
     }
     return n;
 }
@@ -1055,7 +1055,7 @@ pub fn collect<I: Iterator<T>, T>(it: I) Vector<T> {
             _ => {
                 break;
             },
-        };
+        }
     }
     return v;
 }
@@ -1074,7 +1074,7 @@ pub fn collect_in<I: Iterator<T>, T, A: Allocator>(it: I, alloc: A) Vector<T, A>
             None => {
                 break;
             },
-        };
+        }
     }
     return v;
 }
@@ -1090,14 +1090,14 @@ pub fn try_collect<I: Iterator<Result<T, E>>, T, E>(it: I) Result<Vector<T>, E> 
                 v.push(x);
             },
             Some(Err(e)) => {
-                return Result::<Vector<T>, E>::Err(e);
+                return Err(e);
             },
             None => {
                 break;
             },
-        };
+        }
     }
-    return Result::<Vector<T>, E>::Ok(v);
+    return Ok(v);
 }
 
 /// The `Some` payloads in order, or `None` at the first `None`: it stops there, and frees what it
@@ -1117,9 +1117,9 @@ pub fn try_collect_option<I: Iterator<Option<T>>, T>(it: I) Option<Vector<T>> {
             None => {
                 break;
             },
-        };
+        }
     }
-    return Option::<Vector<T>>::Some(v);
+    return Some(v);
 }
 
 /// The elements for which `p` holds, then the others, each in order. `p` borrows each element.
@@ -1139,9 +1139,9 @@ pub fn partition<I: Iterator<T>, T, P: fn(&T) bool>(it: I, p: P) (Vector<T>, Vec
             None => {
                 break;
             },
-        };
+        }
     }
-    return yes, no;
+    return (yes, no);
 }
 
 /// The first and the second elements of every pair, each in order. Reserves the lower size hint once.
@@ -1159,9 +1159,9 @@ pub fn unzip<I: Iterator<(A, B)>, A, B>(it: I) (Vector<A>, Vector<B>) {
             None => {
                 break;
             },
-        };
+        }
     }
-    return va, vb;
+    return (va, vb);
 }
 
 /// True when `p` holds for some element; stops at the first one. `p` borrows each element.
@@ -1177,7 +1177,7 @@ pub fn any<I: Iterator<T>, T, P: fn(&T) bool>(it: I, p: P) bool {
             None => {
                 return false;
             },
-        };
+        }
     }
 }
 
@@ -1195,7 +1195,7 @@ pub fn all<I: Iterator<T>, T, P: fn(&T) bool>(it: I, p: P) bool {
             None => {
                 return true;
             },
-        };
+        }
     }
 }
 
@@ -1206,13 +1206,13 @@ pub fn find<I: Iterator<T>, T, P: fn(&T) bool>(it: I, p: P) Option<T> {
         switch i.next() {
             Some(x) => {
                 if p(&x) {
-                    return Option::<T>::Some(x);
+                    return Some(x);
                 }
             },
             None => {
                 return Option::<T>::None;
             },
-        };
+        }
     }
 }
 
@@ -1230,7 +1230,7 @@ pub fn find_map<I: Iterator<T>, T, U, F: fn(T) Option<U>>(it: I, f: F) Option<U>
             None => {
                 return Option::<U>::None;
             },
-        };
+        }
     }
 }
 
@@ -1242,13 +1242,13 @@ pub fn position<I: Iterator<T>, T, P: fn(&T) bool>(it: I, p: P) Option<usize> {
         switch i.next() {
             Some(x) => {
                 if p(&x) {
-                    return Option::<usize>::Some(k);
+                    return Some(k);
                 }
             },
             None => {
                 return Option::<usize>::None;
             },
-        };
+        }
         k = k + 1;
     }
 }
@@ -1257,7 +1257,7 @@ pub fn position<I: Iterator<T>, T, P: fn(&T) bool>(it: I, p: P) Option<usize> {
 pub fn nth<I: Iterator<T>, T>(it: I, n: usize) Option<T> {
     let mut i = it;
     if !advance(&mut i, n) {
-        return Option::<T>::None;
+        return None;
     }
     return i.next();
 }
@@ -1269,12 +1269,12 @@ pub fn last<I: Iterator<T>, T>(it: I) Option<T> {
     loop {
         switch i.next() {
             Some(x) => {
-                l = Option::<T>::Some(x);
+                l = Some(x);
             },
             None => {
                 return l;
             },
-        };
+        }
     }
 }
 
@@ -1294,9 +1294,9 @@ pub fn min<I: Iterator<T>, T: Ord>(it: I) Option<T> {
                 }
             },
             None => {
-                return Option::<T>::Some(best);
+                return Some(best);
             },
-        };
+        }
     }
 }
 
@@ -1316,9 +1316,9 @@ pub fn max<I: Iterator<T>, T: Ord>(it: I) Option<T> {
                 }
             },
             None => {
-                return Option::<T>::Some(best);
+                return Some(best);
             },
-        };
+        }
     }
 }
 
@@ -1338,9 +1338,9 @@ pub fn min_by<I: Iterator<T>, T, C: fn(&T, &T) i32>(it: I, cmp: C) Option<T> {
                 }
             },
             None => {
-                return Option::<T>::Some(best);
+                return Some(best);
             },
-        };
+        }
     }
 }
 
@@ -1360,9 +1360,9 @@ pub fn max_by<I: Iterator<T>, T, C: fn(&T, &T) i32>(it: I, cmp: C) Option<T> {
                 }
             },
             None => {
-                return Option::<T>::Some(best);
+                return Some(best);
             },
-        };
+        }
     }
 }
 
@@ -1385,9 +1385,9 @@ pub fn min_by_key<I: Iterator<T>, T, K: Ord, F: fn(&T) K>(it: I, key: F) Option<
                 }
             },
             None => {
-                return Option::<T>::Some(best);
+                return Some(best);
             },
-        };
+        }
     }
 }
 
@@ -1410,9 +1410,9 @@ pub fn max_by_key<I: Iterator<T>, T, K: Ord, F: fn(&T) K>(it: I, key: F) Option<
                 }
             },
             None => {
-                return Option::<T>::Some(best);
+                return Some(best);
             },
-        };
+        }
     }
 }
 
@@ -1433,12 +1433,12 @@ pub fn eq<A: Iterator<T>, B: Iterator<T>, T: Eq>(a: A, b: B) bool {
                     None => {
                         return false;
                     },
-                };
+                }
             },
             None => {
                 return y.next().is_none();
             },
-        };
+        }
     }
 }
 
@@ -1460,7 +1460,7 @@ pub fn cmp<A: Iterator<T>, B: Iterator<T>, T: Ord>(a: A, b: B) i32 {
                     None => {
                         return 1;
                     },
-                };
+                }
             },
             None => {
                 if y.next().is_none() {
@@ -1468,7 +1468,7 @@ pub fn cmp<A: Iterator<T>, B: Iterator<T>, T: Ord>(a: A, b: B) i32 {
                 }
                 return -1;
             },
-        };
+        }
     }
 }
 
@@ -1491,7 +1491,7 @@ pub fn is_sorted<I: Iterator<T>, T: Ord>(it: I) bool {
             None => {
                 return true;
             },
-        };
+        }
     }
 }
 
@@ -1531,7 +1531,7 @@ fn advance_back<I: DoubleEndedIterator<T>, T>(it: &mut I, n: usize) bool {
 // The hint of `it`, or an empty one when it has ended.
 fn hint_unless<I: Iterator<T>, T>(it: &I, done: bool) (usize, Option<usize>) {
     if done {
-        return 0, Option::<usize>::Some(0);
+        return (0, Option::<usize>::Some(0));
     }
     return it.size_hint();
 }
@@ -1545,7 +1545,7 @@ const fn hint_sum(alo: usize, ahi: Option<usize>, blo: usize, bhi: Option<usize>
         },
         None => Option::<usize>::None,
     };
-    return alo.saturating_add(blo), hi;
+    return (alo.saturating_add(blo), hi);
 }
 
 // The next value of the inner iterator in `slot`; empties the slot when that iterator ends.
@@ -1555,7 +1555,7 @@ fn inner_next<J: Iterator<U>, U>(slot: &mut Option<J>) Option<U> {
         None => Option::<U>::None,
     };
     if x.is_none() {
-        *slot = Option::<J>::None;
+        *slot = None;
     }
     return x;
 }
@@ -1567,7 +1567,7 @@ fn inner_next_back<J: DoubleEndedIterator<U>, U>(slot: &mut Option<J>) Option<U>
         None => Option::<U>::None,
     };
     if x.is_none() {
-        *slot = Option::<J>::None;
+        *slot = None;
     }
     return x;
 }
@@ -1579,9 +1579,9 @@ fn inner_hint<J: Iterator<U>, U>(slot: &Option<J>) (usize, Option<usize>) {
             return inner.size_hint();
         },
         None => {
-            return 0, Option::<usize>::Some(0);
+            return (0, Option::<usize>::Some(0));
         },
-    };
+    }
 }
 
 const fn flatten_identity<J>(x: J) J {

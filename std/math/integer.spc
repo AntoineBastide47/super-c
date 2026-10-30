@@ -80,7 +80,7 @@ pub fn uadd_carry<G: Gen<u32>>(x: G, y: G) (G, G) {
         sum.put(i, v as u32);
         carry.put(i, (v >> 32) as u32);
     }
-    return sum, carry;
+    return (sum, carry);
 }
 
 /// `(x - y mod 2^32, borrow)`, borrow 1 when `x < y`.
@@ -92,13 +92,13 @@ pub fn usub_borrow<G: Gen<u32>>(x: G, y: G) (G, G) {
         borrow.put(
             i,
             if x.at(i) >= y.at(i) {
-                0u32;
+                0u32
             } else {
-                1u32;
+                1u32
             },
         );
     }
-    return diff, borrow;
+    return (diff, borrow);
 }
 
 /// The 64-bit product of `x` and `y` as `(msb, lsb)`.
@@ -110,7 +110,7 @@ pub fn umul_extended<G: Gen<u32>>(x: G, y: G) (G, G) {
         msb.put(i, (v >> 32) as u32);
         lsb.put(i, v as u32);
     }
-    return msb, lsb;
+    return (msb, lsb);
 }
 
 /// The 64-bit signed product of `x` and `y` as `(msb, lsb)`.
@@ -122,7 +122,7 @@ pub fn imul_extended<G: Gen<i32>>(x: G, y: G) (G, G) {
         msb.put(i, (v >> 32) as i32);
         lsb.put(i, v as i32);
     }
-    return msb, lsb;
+    return (msb, lsb);
 }
 
 /// `(value >> offset) & mask`, the mask built in `i32`: all ones for `bits` >= 32, so a 64-bit
@@ -204,9 +204,9 @@ pub fn is_power_of_two<T: Int, G: Gen<T> + GenAs<bool, O>, O>(v: G) O {
         let x = v.at(i);
         let p = if G::is_vec() {
             let a = int_abs(x);
-            (a & a - T::one()).equal(T::zero());
+            (a & a - T::one()).equal(T::zero())
         } else {
-            is_pow2(x);
+            is_pow2(x)
         };
         G::out_put(&mut r, i, p);
     }
@@ -789,9 +789,9 @@ fn round_pow2<T: Int>(v: T) T {
     let prev = T::one() << T::from_i64(msb(v));
     let next = prev << T::one();
     let nearer_next = if T::bits() < 32 {
-        next.to_i64() - v.to_i64() < v.to_i64() - prev.to_i64();
+        next.to_i64() - v.to_i64() < v.to_i64() - prev.to_i64()
     } else {
-        (next - v).less(v - prev);
+        (next - v).less(v - prev)
     };
     if nearer_next {
         return next;

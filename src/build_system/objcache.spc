@@ -50,7 +50,7 @@ pub(package) fn cache_root(project: str) String {
     if base.len() == 0 {
         return base;
     }
-    return loader::join2(base.as_str(), project_dir(project).as_str());
+    return loader::join2(&base, project_dir(project).as_str());
 }
 
 /// The directory name of project `project` below the cache base: SCRIPTS_DIR for a script build (an
@@ -136,9 +136,9 @@ pub(package) fn which_path(cmd: str, out: &mut String) i64 {
             let pv = pe.unwrap();
             let path = pv.as_str();
             let sep = if win {
-                b';';
+                b';'
             } else {
-                b':';
+                b':'
             };
             let mut a: usize = 0;
             for i in 0..path.len() + 1 {
@@ -152,7 +152,7 @@ pub(package) fn which_path(cmd: str, out: &mut String) i64 {
                             if x == 1 {
                                 cand.push_str(".exe");
                             }
-                            let mt = file_mtime(cand.as_str());
+                            let mt = file_mtime(&cand);
                             if mt != 0 {
                                 out.push_string(&cand);
                                 return mt;
@@ -170,7 +170,7 @@ pub(package) fn which_path(cmd: str, out: &mut String) i64 {
     out.push_str(name);
     cand.clear();
     cand.push_str(name);
-    return file_mtime(cand.as_str());
+    return file_mtime(&cand);
 }
 
 /// The developer directory `xcode-select` chose (the target of `/var/db/xcode_select_link`); empty when

@@ -70,13 +70,13 @@ const fn zero_lit(float: bool) str<'static> {
 fn every_vector_and_mask_has_its_size_alignment_and_lane_count() {
     let src = layout_source();
     // The host build compiles the C, whose own static assertions check the layout model.
-    let b = h::diff_build(src.as_str(), []);
+    let b = h::diff_build(&src, []);
     if !b.built {
         eprintln("{}", b.diag.as_str());
     }
     assert(b.built, "the host layout");
     let p = cli::proj_new();
-    p.mkfile("main.spc", src.as_str());
+    p.mkfile("main.spc", &src);
     assert(p.compile_flags("--target=wasm", "main.spc").ok(), "the wasm32 layout, where i64 aligns to 8");
 }
 
@@ -113,7 +113,7 @@ fn invalid_vectors_and_vector_misuse_are_diagnosed() {
     for c in cases {
         let mut src = String::from_str(c[0]);
         src.push_str("\nfn main() i32 {\n    return 0;\n}\n");
-        h::expect_err_msg(c[1], src.as_str(), c[1]);
+        h::expect_err_msg(c[1], &src, c[1]);
     }
     h::expect_err_msg(
         "a lane of the wrong type",
@@ -454,7 +454,7 @@ fn main(args: Vector<str>) i32 {
 }
 )",
     );
-    let b = h::diff_build(src.as_str(), []);
+    let b = h::diff_build(&src, []);
     assert(b.built, "the trap program");
     let wants: [str; 4] = [
         "super-c: index out of bounds: the index is 4 but the length is 4",
@@ -465,8 +465,8 @@ fn main(args: Vector<str>) i32 {
     for k in 0..4 {
         let mut arg = String::new();
         arg.push_u64(k as u64);
-        let run = h::diff_run(&b, arg.as_str());
-        let t = h::trap_text(run.err.as_str());
+        let run = h::diff_run(&b, &arg);
+        let t = h::trap_text(&run.err);
         if !t.contains(unsafe wants[k]) {
             eprintln("case {}: {}", k, run.err.as_str());
         }
@@ -474,7 +474,7 @@ fn main(args: Vector<str>) i32 {
     }
     let mut csrc = String::from_str(PARITY_DECLS);
     csrc.push_str("const X: f32 = lane(6);\nfn main() i32 {\n    return 0;\n}\n");
-    let c = h::diff_build(csrc.as_str(), []);
+    let c = h::diff_build(&csrc, []);
     assert(
         !c.built && c.diag.contains("index out of bounds: the index is 6 but the length is 4"),
         "the constant's trap",
@@ -554,9 +554,9 @@ const LP: &f32 = &L[1][3];
 const BIG: u64x2 = [18446744073709551615, 1];
 fn pick(b: bool) f32x4 {
     let v: f32x4 = if b {
-        [1.0, 2.0, 3.0, 4.0];
+        [1.0, 2.0, 3.0, 4.0]
     } else {
-        [0.0; 4];
+        [0.0; 4]
     };
     return v;
 }

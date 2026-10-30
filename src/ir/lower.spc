@@ -314,7 +314,7 @@ extend Keep {
             None => {
                 return -1;
             },
-        };
+        }
     }
 
     /// Rewrite every kept body's types through the package's last publication; returns how many
@@ -831,9 +831,9 @@ extend Lowerer {
         for j in from..args.len {
             let b = unsafe self.f.list(args)[j as usize];
             let w = if stat {
-                self.f.node(b).kind != NodeKind::NODE_LITERAL && self.f.node(b).kind != NodeKind::NODE_IDENTIFIER;
+                self.f.node(b).kind != NodeKind::NODE_LITERAL && self.f.node(b).kind != NodeKind::NODE_IDENTIFIER
             } else {
-                self.may_write(b, r, 0);
+                self.may_write(b, r, 0)
             };
             if w {
                 let t = self.copy_op(self.spill(op, self.f.node(a).span));
@@ -980,7 +980,7 @@ extend Lowerer {
             None => {
                 return false;
             },
-        };
+        }
     }
 
     const fn same_def(self: &Self, a: DefId, b: DefId) bool {
@@ -1274,9 +1274,9 @@ extend Lowerer {
                 ops.push(self.copy_op(self.place_of_local(rets.len + i)));
             }
             let rt = if rets.len == 1 {
-                self.body.locals.at(0).ty;
+                self.body.locals.at(0).ty
             } else {
-                Ast::builtin(BuiltinType::BT_VOID);
+                Ast::builtin(BuiltinType::BT_VOID)
             };
             let r = self.lower_intrinsic(DefId { module: self.module, node: fnode }, &mut ops, rt, sp);
             self.avput(ops);
@@ -1567,9 +1567,9 @@ extend Lowerer {
         self.body.asms.push(
             ir::AsmRec {
                 template: if d.template == NODE_NONE {
-                    tok::Span::empty();
+                    tok::Span::empty()
                 } else {
-                    self.f.node(d.template).as_data.literal.raw;
+                    self.f.node(d.template).as_data.literal.raw
                 },
                 cons: cons,
                 nout: d.outputs.len / 2,
@@ -1626,9 +1626,9 @@ extend Lowerer {
                 self.forget_known(km);
             }
             let tk: u8 = if nk == NodeKind::NODE_PATTERN_TUPLE {
-                ir::TP_LET_TUPLE;
+                ir::TP_LET_TUPLE
             } else {
-                ir::TP_LET;
+                ir::TP_LET
             };
             self.tp(tk, 0, id);
             return;
@@ -1965,9 +1965,9 @@ extend Lowerer {
             }
         }
         let ar9: u32 = if d.is_do || d.condition == NODE_NONE {
-            1;
+            1
         } else {
-            0;
+            0
         };
         self.loop_body(d.label, exit, head, ar9, d.body, id, sp, self.scope_locals.len(), self.defers.len(), true);
         if d.is_do {
@@ -2078,11 +2078,11 @@ extend Lowerer {
             }
             let fr = *self.proj_frames.at(fi as usize);
             let vt = if fr.mode == 0 {
-                self.proj_field_ty(fr.owner_st, fr.idx);
+                self.proj_field_ty(fr.owner_st, fr.idx)
             } else if fr.mode == 1 {
-                self.proj_payload_ty(fr.owner_st, fr.idx, 0);
+                self.proj_payload_ty(fr.owner_st, fr.idx, 0)
             } else {
-                self.proj_payload_ty(fr.owner_st, fr.vidx, fr.idx);
+                self.proj_payload_ty(fr.owner_st, fr.vidx, fr.idx)
             };
             if vt == TYPE_NONE {
                 return t;
@@ -2353,9 +2353,9 @@ extend Lowerer {
         }
         return Ast::builtin(
             if neg {
-                BuiltinType::BT_I32;
+                BT_I32
             } else {
-                BuiltinType::BT_U32;
+                BT_U32
             },
         );
     }
@@ -2396,9 +2396,9 @@ extend Lowerer {
         }
         if fr.mode != 1 && (name == "size" || name == "kind" || name == "offset") {
             let fty = if fr.mode == 0 {
-                self.proj_field_ty(fr.owner_st, fr.idx);
+                self.proj_field_ty(fr.owner_st, fr.idx)
             } else {
-                self.proj_payload_ty(fr.owner_st, fr.vidx, fr.idx);
+                self.proj_payload_ty(fr.owner_st, fr.vidx, fr.idx)
             };
             if fty == TYPE_NONE {
                 self.fail_at("binder-escape", id);
@@ -2413,9 +2413,9 @@ extend Lowerer {
             } else if name == "offset" {
                 let mut dmf: ModuleId = 0;
                 let fid = if fr.mode == 0 {
-                    self.proj_field_node(fr.owner_st, fr.idx, &mut dmf);
+                    self.proj_field_node(fr.owner_st, fr.idx, &mut dmf)
                 } else {
-                    NODE_NONE;
+                    NODE_NONE
                 };
                 if fid != NODE_NONE {
                     v = self.lay.field_offset(self.module, fr.owner_st, fid);
@@ -2481,11 +2481,11 @@ extend Lowerer {
             let dan = unsafe &*(&*self.pkg).module_ast_const(dmn);
             let nk = dan.at_const(nid2).kind;
             let span2 = if nk == NodeKind::NODE_FIELD {
-                dan.at_const(dan.at_const(nid2).as_data.field.name).as_data.name.text;
+                dan.at_const(dan.at_const(nid2).as_data.field.name).as_data.name.text
             } else if nk == NodeKind::NODE_VARIANT {
-                dan.at_const(dan.at_const(nid2).as_data.variant.name).as_data.name.text;
+                dan.at_const(dan.at_const(nid2).as_data.variant.name).as_data.name.text
             } else {
-                tok::Span { start: 0, end: 0 };
+                tok::Span { start: 0, end: 0 }
             };
             if span2.end <= span2.start {
                 // A tuple's member or a tuple variant's payload has no name: `_<index>`, from the body's
@@ -2558,27 +2558,27 @@ extend Lowerer {
                 }
                 let daf = unsafe &*(&*self.pkg).module_ast_const(dmf);
                 let fsub = if daf.at_const(fid).kind == NodeKind::NODE_FIELD {
-                    fid;
+                    fid
                 } else {
-                    NODE_NONE; // tuple member: positional `_k`
+                    NODE_NONE // tuple member: positional `_k`
                 };
                 let fdata2 = if fsub == NODE_NONE {
-                    fr.idx as u32;
+                    fr.idx as u32
                 } else {
-                    fdata;
+                    fdata
                 };
                 return self.place_project(base, ir::Projection { kind: ir::PJ_FIELD, data: fdata2, sub: fsub, ty: fty });
             }
             // variants .value (single payload) / payloads .value: downcast then the payload member
             let vk = if fr.mode == 1 {
-                fr.idx;
+                fr.idx
             } else {
-                fr.vidx;
+                fr.vidx
             };
             let pk = if fr.mode == 1 {
-                0 as i64;
+                0 as i64
             } else {
-                fr.idx;
+                fr.idx
             };
             let mut dmv: ModuleId = 0;
             let vid = self.proj_variant_node(fr.owner_st, vk, &mut dmv);
@@ -2595,9 +2595,9 @@ extend Lowerer {
             let pls = dav.at_const(vid).as_data.variant.payload;
             let pe = unsafe dav.list(pls)[pk as usize];
             let psub = if dav.at_const(pe).kind == NodeKind::NODE_FIELD {
-                pe;
+                pe
             } else {
-                NODE_NONE;
+                NODE_NONE
             };
             return self.place_project(dcast, ir::Projection { kind: ir::PJ_FIELD, data: pk as u32, sub: psub, ty: pty });
         }
@@ -2680,24 +2680,24 @@ extend Lowerer {
         }
         if is_has {
             *out = if mi >= 0 {
-                1;
+                1
             } else {
-                0;
+                0
             };
             return 0;
         }
         if is_b {
             *out = if mi >= 0 && ma.vkind == 0 && ma.ival != 0 {
-                1;
+                1
             } else {
-                0;
+                0
             };
             return 0;
         }
         *out = if mi >= 0 && ma.vkind == 1 {
-            ma.ival;
+            ma.ival
         } else {
-            0;
+            0
         };
         return 1;
     }
@@ -2732,11 +2732,11 @@ extend Lowerer {
             );
         }
         let cty = if ty != TYPE_NONE {
-            ty;
+            ty
         } else if k == 1 {
-            Ast::builtin(BuiltinType::BT_I64);
+            Ast::builtin(BuiltinType::BT_I64)
         } else {
-            Ast::builtin(BuiltinType::BT_BOOL);
+            Ast::builtin(BuiltinType::BT_BOOL)
         };
         return self.kop(ir::CK_INT, cty, v, sp);
     }
@@ -2753,9 +2753,9 @@ extend Lowerer {
             let mut mnode = NODE_NONE;
             if self.meta_call_val(cond, &mut mv, &mut mdm, &mut mnode) == 0 {
                 return if mv != 0 {
-                    1;
+                    1
                 } else {
-                    0;
+                    0
                 };
             }
             return -1;
@@ -2783,17 +2783,17 @@ extend Lowerer {
             }
             if mk2 == 0 || mk2 == 1 {
                 let mlit = if mside == b.left {
-                    b.right;
+                    b.right
                 } else {
-                    b.left;
+                    b.left
                 };
                 return self.binder_cond_cmp(cond, mmv, mlit, mside == b.left);
             }
             if mk2 == 2 && (b.op == tt::TokenType::EqualEqual || b.op == tt::TokenType::BangEqual) {
                 let mlit2 = if mside == b.left {
-                    b.right;
+                    b.right
                 } else {
-                    b.left;
+                    b.left
                 };
                 let ln = *self.f.node(mlit2);
                 if ln.kind == NodeKind::NODE_LITERAL && ln.as_data.literal.token_type == tt::TokenType::StringLiteral {
@@ -2813,9 +2813,9 @@ extend Lowerer {
                         eqv = !eqv;
                     }
                     return if eqv {
-                        1;
+                        1
                     } else {
-                        0;
+                        0
                     };
                 }
                 return -1;
@@ -2848,9 +2848,9 @@ extend Lowerer {
         let mut mv: i64 = 0;
         if mname == "index" || fr.mode == 1 && mname == "tag" {
             mv = if fr.mode == 1 && mname == "tag" {
-                self.proj_tag_val(fr.owner_st, fr.idx);
+                self.proj_tag_val(fr.owner_st, fr.idx)
             } else {
-                fr.idx;
+                fr.idx
             };
         } else if fr.mode == 1 && mname == "payload" {
             let mut dmx: ModuleId = 0;
@@ -2909,11 +2909,11 @@ extend Lowerer {
             }
             let r = self.bc_closed(n.as_data.binary.right, bm, depth + 1);
             return if r == 0 {
-                0;
+                0
             } else if l > r {
-                l;
+                l
             } else {
-                r;
+                r
             };
         }
         if n.kind != NodeKind::NODE_IDENTIFIER && (n.kind != NodeKind::NODE_MEMBER || !n.as_data.member.path) {
@@ -2931,9 +2931,9 @@ extend Lowerer {
             return 0;
         }
         return if d.module as i32 == bm {
-            2;
+            2
         } else {
-            1;
+            1
         };
     }
 
@@ -3016,14 +3016,14 @@ extend Lowerer {
             return -1;
         }
         let mn = if lm {
-            bd.left;
+            bd.left
         } else {
-            bd.right;
+            bd.right
         };
         let ln = if lm {
-            bd.right;
+            bd.right
         } else {
-            bd.left;
+            bd.left
         };
         let measured = self.nty(self.f.node(mn).as_data.single.value);
         if measured == TYPE_NONE {
@@ -3072,9 +3072,9 @@ extend Lowerer {
             }
         }
         let head = if ne != 0 {
-            frames.at(0) as *const lay::LayoutEnv;
+            frames.at(0) as *const lay::LayoutEnv
         } else {
-            null;
+            null
         };
         let lo = self.lay.layout_of(self.module, measured, head, 0);
         if !lo.ok && lo.unbound {
@@ -3087,11 +3087,11 @@ extend Lowerer {
         // variant first.
         let mk = self.f.node(mn).kind;
         let mv = if !lo.ok {
-            1i64;
+            1i64
         } else if mk == NodeKind::NODE_SIZEOF {
-            lo.size as i64;
+            lo.size as i64
         } else {
-            lo.align as i64;
+            lo.align as i64
         };
         let r = self.binder_cond_cmp(cond, mv, ln, lm);
         if r < 0 {
@@ -3113,14 +3113,14 @@ extend Lowerer {
         }
         // (a, b) in source operand order
         let a = if mem_left {
-            mv;
+            mv
         } else {
-            cv.i;
+            cv.i
         };
         let b = if mem_left {
-            cv.i;
+            cv.i
         } else {
-            mv;
+            mv
         };
         let op = self.f.node(cond).as_data.binary.op;
         let mut r = false;
@@ -3224,9 +3224,9 @@ extend Lowerer {
         loop {
             let mut dmk: ModuleId = 0;
             let nk = if mode == 1 {
-                self.proj_variant_node(owner, k, &mut dmk);
+                self.proj_variant_node(owner, k, &mut dmk)
             } else {
-                self.proj_field_node(owner, k, &mut dmk);
+                self.proj_field_node(owner, k, &mut dmk)
             };
             if nk == NODE_NONE {
                 break;
@@ -3339,9 +3339,9 @@ extend Lowerer {
         }
         let cev = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
         *out = if is_fields {
-            cev.field_count(dm, dn);
+            cev.field_count(dm, dn)
         } else {
-            cev.variant_count_of(dm, dn);
+            cev.variant_count_of(dm, dn)
         };
         return true;
     }
@@ -3361,7 +3361,7 @@ extend Lowerer {
                     resolved = ci_decl(v2) != NODE_NONE;
                 },
                 None => {},
-            };
+            }
             if !resolved && self.f.res(cd.callee).node == NODE_NONE {
                 // binder/reflect expansion lowers the body per iteration; the replay sees ONE loop:
                 // the first copy's events are the canonical iteration, later copies are muted
@@ -3404,7 +3404,7 @@ extend Lowerer {
                     return;
                 },
                 None => {},
-            };
+            }
             let ity = self.nty(d.iterable);
             let ik = self.f.ty(ity).kind;
             if ik == TypeKind::TYPE_INSTANCE && self.is_range_instance(ity) {
@@ -3463,9 +3463,9 @@ extend Lowerer {
         // `..e` counts from zero; `s..` has no bound check (exit only via break)
         self.for_open(id);
         let sop: ir::OperandId = if rd.start != NODE_NONE {
-            self.lower_expr(rd.start);
+            self.lower_expr(rd.start)
         } else {
-            self.kop(ir::CK_INT, ity, 0, sp);
+            self.kop(ir::CK_INT, ity, 0, sp)
         };
         if sop == ir::IR_NONE {
             return;
@@ -3505,9 +3505,9 @@ extend Lowerer {
             let iop = self.copy_op(ipl);
             let eop2 = self.range_end(ecst, epl);
             let cmp_op = if rd.inclusive {
-                tt::TokenType::LessThanEqual;
+                tt::TokenType::LessThanEqual
             } else {
-                tt::TokenType::LessThan;
+                tt::TokenType::LessThan
             };
             let cop = self.bool_bin(iop, eop2, cmp_op, sp);
             self.branch_bool(cop, body_b, exit, sp);
@@ -4092,9 +4092,9 @@ extend Lowerer {
             }
             // A tuple literal names no declaration: its type's does (`Tuple2`).
             let k = if pj.data != ir::IR_NONE {
-                pj.data as i64;
+                pj.data as i64
             } else {
-                self.member_pos(pick(rv.item.node != NODE_NONE, rv.item, self.nominal_of(rv.target)), pj.sub);
+                self.member_pos(pick(rv.item.node != NODE_NONE, rv.item, self.nominal_of(rv.target)), pj.sub)
             };
             if k < 0 || k >= rv.b as i64 {
                 return none;
@@ -4121,9 +4121,9 @@ extend Lowerer {
         let da = unsafe &*(&*self.pkg).module_ast_const(d.module);
         let nd = da.at_const(d.node);
         let ms = if nd.kind == NodeKind::NODE_VARIANT {
-            nd.as_data.variant.payload;
+            nd.as_data.variant.payload
         } else if nd.kind == NodeKind::NODE_STRUCT {
-            da.ext(d.node).aggregate.members;
+            da.ext(d.node).aggregate.members
         } else {
             return -1;
         };
@@ -4287,9 +4287,9 @@ extend Lowerer {
             let target = unsafe (*co).target;
             let method = unsafe (*co).method;
             let ck: u8 = if method.node != NODE_NONE {
-                ir::CAST_COERCE_FROM;
+                ir::CAST_COERCE_FROM
             } else {
-                ir::CAST_NUMERIC;
+                ir::CAST_NUMERIC
             };
             op = self.rv_out(
                 pick(dy == null, dest, ir::IR_NONE),
@@ -4343,14 +4343,12 @@ extend Lowerer {
         }
         let y = *self.f.ty(ot);
         let q = if y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-            TypeQualifier::TYPE_QUAL_MUT as u8;
+            TypeQualifier::TYPE_QUAL_MUT as u8
         } else {
-            TypeQualifier::TYPE_QUAL_CONST as u8;
+            TypeQualifier::TYPE_QUAL_CONST as u8
         };
         let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
-        let pt = sa.intern_type(
-            Ty { kind: TypeKind::TYPE_POINTER, qualifier: q, as_data: TyAs { elem: y.as_data.elem } },
-        );
+        let pt = sa.intern_type(Ty { kind: TYPE_POINTER, qualifier: q, as_data: TyAs { elem: y.as_data.elem } });
         let r = self.copy_op(self.rv_temp(ir::rv(ir::RV_CAST, op, self.cast_kind(ot, pt), 0, pt), sp));
         self.tp(ir::TP_CAST_ERASE, 0, e);
         return r;
@@ -4569,9 +4567,9 @@ extend Lowerer {
         }
         if k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF {
             let ik: u8 = if k == NodeKind::NODE_SIZEOF {
-                ir::IN_SIZEOF;
+                ir::IN_SIZEOF
             } else {
-                ir::IN_ALIGNOF;
+                ir::IN_ALIGNOF
             };
             return self.intrinsic_value(ik, self.nty(self.f.node(id).as_data.single.value), ty, sp, dest);
         }
@@ -4639,9 +4637,9 @@ extend Lowerer {
             // quoted spellings copy verbatim into C, raw (matchertext) spellings re-escape
             // byte-wise, and segments collapse their doubled braces
             let segf: i64 = if d.seg {
-                256;
+                256
             } else {
-                0;
+                0
             };
             return self.kop(ir::CK_STR, ty, t as i64 | segf, d.raw);
         }
@@ -4715,9 +4713,9 @@ extend Lowerer {
                 self.tp(ir::TP_REF, 0, id);
             }
             let mutable: u32 = if d.qualifier == TypeQualifier::TYPE_QUAL_MUT {
-                1;
+                1
             } else {
-                0;
+                0
             };
             // `&x` typed as a raw pointer (pointer-position typing) is an address, not a borrow.
             let mut rk = ir::RV_REF;
@@ -4735,13 +4733,13 @@ extend Lowerer {
             if ty != TYPE_NONE && self.f.derefs(id) != null {
                 // A view coercion (`&s` as `str`, `tc_view_arg`) targets a view, not a reference.
                 let q = if self.f.ty(ty).kind == TypeKind::TYPE_REFERENCE {
-                    self.f.ty(ty).qualifier;
+                    self.f.ty(ty).qualifier
                 } else {
-                    pick(mutable == 1, TypeQualifier::TYPE_QUAL_MUT as u8, TypeQualifier::TYPE_QUAL_NONE as u8);
+                    pick(mutable == 1, TypeQualifier::TYPE_QUAL_MUT as u8, TypeQualifier::TYPE_QUAL_NONE as u8)
                 };
                 let pty = self.body.places.at(pl as usize).ty;
                 let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
-                bty = sa.intern_type(Ty { kind: TypeKind::TYPE_REFERENCE, qualifier: q, as_data: TyAs { elem: pty } });
+                bty = sa.intern_type(Ty { kind: TYPE_REFERENCE, qualifier: q, as_data: TyAs { elem: pty } });
             }
             return self.rv_out(dest, ir::rv(rk, pl, mutable, 0, bty), sp);
         }
@@ -4810,7 +4808,7 @@ extend Lowerer {
                 );
             },
             None => {},
-        };
+        }
         return self.rv_out(dest, ir::rv(ir::RV_UNARY, op, d.op as u32, 0, ty), sp);
     }
 
@@ -5090,7 +5088,7 @@ extend Lowerer {
                 return self.rv_out(dest, ir::rv(ir::RV_BINARY, r, zero, d.op as u8, ty), sp);
             },
             None => {},
-        };
+        }
         let rop = self.lower_expr(d.right);
         if rop == ir::IR_NONE {
             return ir::IR_NONE;
@@ -5121,9 +5119,9 @@ extend Lowerer {
             argv.push(lop);
             // A vector operator: the operation over the values (`lower_intrinsic`), no call.
             let rop = if rhs != NODE_NONE {
-                self.lower_expr(rhs);
+                self.lower_expr(rhs)
             } else {
-                lop;
+                lop
             };
             if rop == ir::IR_NONE {
                 return ir::IR_NONE;
@@ -5183,13 +5181,13 @@ extend Lowerer {
             let by_val = ro.ty == TYPE_NONE || self.f.ty(ro.ty).kind != TypeKind::TYPE_REFERENCE;
             if by_val && self.param_is_ref(DefId { module: m, node: decl }, 1) {
                 let pl = if ro.kind == ir::OP_CONST {
-                    self.spill(rop, sp);
+                    self.spill(rop, sp)
                 } else {
-                    ro.data;
+                    ro.data
                 };
                 let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
                 let rty = sa.intern_type(
-                    Ty { kind: TypeKind::TYPE_REFERENCE, as_data: TyAs { elem: self.body.places.at(pl as usize).ty } },
+                    Ty { kind: TYPE_REFERENCE, as_data: TyAs { elem: self.body.places.at(pl as usize).ty } },
                 );
                 rop = self.copy_op(self.rv_temp(ir::rv(ir::RV_REF, pl, 0, 0, rty), sp));
             }
@@ -5342,9 +5340,9 @@ extend Lowerer {
         }
         let at = a.attr_of(callee.node, AttrKind::ATTR_IMPORT);
         let nsp = if at != null {
-            unsafe (*at).str_span;
+            unsafe (*at).str_span
         } else {
-            a.at_const(a.ext_name(callee.node)).as_data.name.text;
+            a.at_const(a.ext_name(callee.node)).as_data.name.text
         };
         let src = unsafe (&*self.pkg).modules.at(callee.module as usize).source.as_str();
         let k = ir::ci_of_name(src.slice(nsp.start as usize, nsp.end as usize));
@@ -5393,9 +5391,9 @@ extend Lowerer {
                     argv.push(op);
                 }
                 let agg: u8 = if is_tuple_ctor {
-                    ir::AGG_TUPLE;
+                    ir::AGG_TUPLE
                 } else {
-                    ir::AGG_VARIANT;
+                    ir::AGG_VARIANT
                 };
                 let r9 = self.finish_aggregate(agg, vd, &argv, ty, sp, dest);
                 self.avput(argv);
@@ -5414,7 +5412,7 @@ extend Lowerer {
                 }
             },
             None => {},
-        };
+        }
         // A callee IDENTIFIER bound to a local (fn-pointer LET/param) calls the VALUE, whatever
         // call_info recorded (the checker may pin the provenance decl; the pointer decides).
         if target.node != NODE_NONE && ck == NodeKind::NODE_IDENTIFIER {
@@ -5601,9 +5599,9 @@ extend Lowerer {
                         }
                         let ro = *self.body.operands.at(rop as usize);
                         let rpl = if ro.kind == ir::OP_COPY || ro.kind == ir::OP_MOVE {
-                            ro.data;
+                            ro.data
                         } else {
-                            self.spill(rop, sp);
+                            self.spill(rop, sp)
                         };
                         rop = self.copy_op(
                             self.place_project(
@@ -5748,9 +5746,7 @@ extend Lowerer {
             let od9 = self.f.res(self.f.node(pm9).as_data.member.object);
             if od9.node != NODE_NONE && (self.decl_kind(od9) == NodeKind::NODE_GENERIC_PARAM || self.decl_kind(od9) == NodeKind::NODE_INTERFACE) {
                 let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
-                impl9 = sa.intern_type(
-                    Ty { kind: TypeKind::TYPE_GENERIC, module: od9.module, as_data: TyAs { decl: od9.node } },
-                );
+                impl9 = sa.intern_type(Ty { kind: TYPE_GENERIC, module: od9.module, as_data: TyAs { decl: od9.node } });
             } else {
                 impl9 = self.nty(self.f.node(pm9).as_data.member.object);
             }
@@ -5892,9 +5888,9 @@ extend Lowerer {
         let cond = self.emit_call(probe, ir::IR_NONE, c0, 0, 0, 0, TYPE_NONE, TYPE_NONE, it, sp);
         let poison = self.poisoned(res);
         let poison_b = if poison {
-            self.open_block();
+            self.open_block()
         } else {
-            ir::IR_NONE;
+            ir::IR_NONE
         };
         let ladder_b = self.open_block();
         let cont_b = self.open_block();
@@ -5951,9 +5947,9 @@ extend Lowerer {
         let poison = self.poisoned(res);
         let real_b = self.open_block();
         let poison_b = if poison {
-            self.open_block();
+            self.open_block()
         } else {
-            ir::IR_NONE;
+            ir::IR_NONE
         };
         let ladder_b = self.open_block();
         let cont_b = self.open_block();
@@ -6283,9 +6279,9 @@ extend Lowerer {
         }
         if kind == ir::SI_BINARY || kind == ir::SI_UNARY || kind == ir::SI_CAST {
             let rv = if kind == ir::SI_BINARY {
-                ir::rv(ir::RV_BINARY, ops[0], ops[1], c, ty);
+                ir::rv(ir::RV_BINARY, ops[0], ops[1], c, ty)
             } else {
-                ir::rv(pick(kind == ir::SI_UNARY, ir::RV_UNARY, ir::RV_CAST), ops[0], c, 0, ty);
+                ir::rv(pick(kind == ir::SI_UNARY, ir::RV_UNARY, ir::RV_CAST), ops[0], c, 0, ty)
             };
             return self.copy_op(self.rv_temp(rv, sp));
         }
@@ -6293,9 +6289,9 @@ extend Lowerer {
             let s = self.op_place(ops[0], sp);
             let lop = self.copy_op(self.len_temp(s, sp));
             let vt = if c == ir::SIMD_LOAD {
-                ty;
+                ty
             } else {
-                self.body.operands.at(ops[2] as usize).ty;
+                self.body.operands.at(ops[2] as usize).ty
             };
             let wop = self.lanes_op(vt, sp);
             let start = self.body.oper_pool.len() as u32;
@@ -6469,9 +6465,9 @@ extend Lowerer {
             rsave = r;
             tsp = self.f.node(id).span;
             let tokv = if ak == 2 {
-                tt::TokenType::EqualEqual;
+                tt::TokenType::EqualEqual
             } else {
-                tt::TokenType::BangEqual;
+                tt::TokenType::BangEqual
             };
             cond = self.bool_bin(l, r, tokv, sp);
         }
@@ -6602,7 +6598,7 @@ extend Lowerer {
                 return self.unit_op(ty, sp);
             },
             None => {},
-        };
+        }
         // An immutable split-init target is uninitialized until this assign (see `chk_place_clean`).
         let split = self.chk_split_let(d.left);
         if split != ir::IR_NONE {
@@ -6673,9 +6669,9 @@ extend Lowerer {
             let da = unsafe &*(&*self.pkg).module_ast_const(sd.module);
             let dsrc = unsafe (&*self.pkg).modules.at(sd.module as usize).source.as_str();
             let members = if is_var {
-                da.at_const(sd.node).as_data.variant.payload;
+                da.at_const(sd.node).as_data.variant.payload
             } else {
-                da.ext(sd.node).aggregate.members;
+                da.ext(sd.node).aggregate.members
             };
             for _i in 0..members.len {
                 argv.push(ir::IR_NONE);
@@ -6786,7 +6782,7 @@ extend Lowerer {
             let elem = self.f.instance(self.f.ty(ty).as_data.inst).args[0];
             let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
             let aty = sa.intern_type(
-                Ty { kind: TypeKind::TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: n as u32 } } },
+                Ty { kind: TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: n as u32 } } },
             );
             return self.copy_op(self.rv_temp(ir::rv(ir::RV_REPEAT, vop, cop, 0, aty), sp));
         }
@@ -6840,9 +6836,9 @@ extend Lowerer {
             cur += 1;
         }
         let agg: u8 = if k == NodeKind::NODE_TUPLE {
-            ir::AGG_TUPLE;
+            ir::AGG_TUPLE
         } else {
-            ir::AGG_ARRAY;
+            ir::AGG_ARRAY
         };
         if designated && k == NodeKind::NODE_ARRAY_LITERAL && ty != TYPE_NONE {
             // The checker types a designated literal with at least its extent (the expected
@@ -6863,7 +6859,7 @@ extend Lowerer {
             let elem = self.f.instance(self.f.ty(ty).as_data.inst).args[0];
             let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
             aty = sa.intern_type(
-                Ty { kind: TypeKind::TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: argv.len() as u32 } } },
+                Ty { kind: TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: argv.len() as u32 } } },
             );
         }
         let ra9 = self.finish_aggregate(agg, DefId { module: 0, node: NODE_NONE }, &argv, aty, sp, dest);
@@ -6923,9 +6919,9 @@ extend Lowerer {
     // the written borrow's type (a `&mut` borrow gives a mutable address).
     fn addr_op(self: &mut Self, apl: ir::PlaceId, rt: TypeId, pty: TypeId, sp: tok::Span, dest: ir::PlaceId) ir::OperandId {
         let mu: u32 = if rt != TYPE_NONE && self.f.ty(rt).kind == TypeKind::TYPE_REFERENCE && self.f.ty(rt).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-            1;
+            1
         } else {
-            0;
+            0
         };
         return self.rv_out(dest, ir::rv(ir::RV_ADDR, apl, mu, 0, pty), sp);
     }
@@ -7229,9 +7225,9 @@ extend Lowerer {
             let n = argv.len() as u32;
             self.avput(argv);
             let ik: u8 = if d.op == VA_START {
-                ir::IN_VA_START;
+                ir::IN_VA_START
             } else {
-                ir::IN_VA_END;
+                ir::IN_VA_END
             };
             self.assign(apl, ir::rv(ir::RV_INTRINSIC, start, n, ik, TYPE_NONE), sp);
             return self.unit_op(ty, sp);
@@ -7430,7 +7426,7 @@ extend Lowerer {
 
     const fn decl_kind(self: &Self, d: DefId) NodeKind {
         if d.node == NODE_NONE {
-            return NodeKind::NODE_NONE_KIND;
+            return NODE_NONE_KIND;
         }
         let a = unsafe (&*self.pkg).module_ast_const(d.module);
         return unsafe (&*a).at_const(d.node).kind;
@@ -7697,9 +7693,7 @@ extend Lowerer {
             p0.module,
             p0.node,
         ) == bt {
-            return sa.intern_type(
-                Ty { kind: TypeKind::TYPE_GENERIC, module: p0.module, as_data: TyAs { decl: p0.node } },
-            );
+            return sa.intern_type(Ty { kind: TYPE_GENERIC, module: p0.module, as_data: TyAs { decl: p0.node } });
         }
         return sa.intern_const_lin(&s);
     }
@@ -7836,9 +7830,9 @@ extend Lowerer {
         let mut k: usize = 0;
         // The constants keep the call's position but no spelling: an empty span renders `val`.
         let op = if ok {
-            self.fold_value(ty, &leaves, at, &mut k, tok::Span { start: sp.start, end: sp.start });
+            self.fold_value(ty, &leaves, at, &mut k, tok::Span { start: sp.start, end: sp.start })
         } else {
-            ir::IR_NONE;
+            ir::IR_NONE
         };
         if op == ir::IR_NONE || k != leaves.len() {
             self.body.bytes.truncate(at);
@@ -7854,9 +7848,9 @@ extend Lowerer {
         }
         for i in 0..d.args.len {
             let pi = if recv {
-                i + 1;
+                i + 1
             } else {
-                i;
+                i
             };
             if !self.by_ref_param(target, pi as usize) {
                 self.tp(ir::TP_CONST_MOVE, 0, unsafe self.f.list(d.args)[i as usize]);
@@ -7928,9 +7922,9 @@ extend Lowerer {
             *k += 1;
             if y.kind == TypeKind::TYPE_STRUCT {
                 return if l.kind == iri::LF_BYTES {
-                    self.kop(ir::CK_BYTES, ty, l.v + (at as i64 << 32), sp);
+                    self.kop(ir::CK_BYTES, ty, l.v + (at as i64 << 32), sp)
                 } else {
-                    ir::IR_NONE;
+                    ir::IR_NONE
                 };
             }
             if y.kind == TypeKind::TYPE_ENUM {
@@ -7944,11 +7938,11 @@ extend Lowerer {
                 // An f32 NaN narrows by its bits: a conversion would quiet a signaling one.
                 let u = l.v as u64;
                 let bits = if bt != BuiltinType::BT_F32 {
-                    l.v;
+                    l.v
                 } else if (u >> 52 & 0x7FF) == 0x7FF && (u & 0xFFFFFFFFFFFFF) != 0 {
-                    (u >> 63 << 31 | 0xFFu64 << 23 | u >> 29 & 0x7FFFFF) as i64;
+                    (u >> 63 << 31 | 0xFFu64 << 23 | u >> 29 & 0x7FFFFF) as i64
                 } else {
-                    (f64::from_bits(u) as f32).to_bits() as i64;
+                    (f64::from_bits(u) as f32).to_bits() as i64
                 };
                 return self.kop(ir::CK_FBITS, ty, bits, sp);
             }
@@ -8085,7 +8079,7 @@ extend Lowerer {
                     t = DefId { module: ci_module(v), node: ci_decl(v) };
                 },
                 None => {},
-            };
+            }
             if t.node == NODE_NONE {
                 return false;
             }
@@ -8274,9 +8268,9 @@ extend Lowerer {
             n = self.f.lanes(self.f.ty(t));
         }
         let lop = if n != 0 {
-            self.kop(ir::CK_INT, Ast::builtin(BuiltinType::BT_USIZE), n as i64, sp);
+            self.kop(ir::CK_INT, Ast::builtin(BuiltinType::BT_USIZE), n as i64, sp)
         } else {
-            self.copy_op(self.len_temp(view, sp));
+            self.copy_op(self.len_temp(view, sp))
         };
         return self.bounds_check_len(iop, lop, pick(vec, ir::CHECK_LANES, NODE_NONE), sp);
     }
@@ -8418,9 +8412,7 @@ extend Lowerer {
                     }
                 }
                 let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
-                let rty = sa.intern_type(
-                    Ty { kind: TypeKind::TYPE_REFERENCE, qualifier: q, as_data: TyAs { elem: ty } },
-                );
+                let rty = sa.intern_type(Ty { kind: TYPE_REFERENCE, qualifier: q, as_data: TyAs { elem: ty } });
                 let res = self.lower_op_call_from(
                     id,
                     (m >> 32) as ModuleId,
@@ -8438,7 +8430,7 @@ extend Lowerer {
                 return self.place_project(rpl, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: ty });
             },
             None => {},
-        };
+        }
         let mut base = self.lower_place(d.object);
         if base == ir::IR_NONE {
             return ir::IR_NONE;
@@ -8632,9 +8624,9 @@ extend Lowerer {
             self.body.locals.set(own as usize, ld);
         }
         let ax9: u32 = if dest != ir::IR_NONE {
-            1;
+            1
         } else {
-            0;
+            0
         };
         self.tp(ir::TP_MATCH_PRE, ax9, id);
         // Guard-free matches lower through the shared decision tree, so no place is
@@ -8775,11 +8767,11 @@ extend Lowerer {
         let cond = if kv.node != NODE_NONE {
             // The value's variant is known (see `emit_tree`): the test is a constant.
             let hit = kv.module == vd.module && kv.node == vd.node;
-            self.kop(ir::CK_BOOL, Ast::builtin(BuiltinType::BT_BOOL), pick(hit, 1i64, 0i64), sp);
+            self.kop(ir::CK_BOOL, Ast::builtin(BuiltinType::BT_BOOL), pick(hit, 1i64, 0i64), sp)
         } else {
             let dp = self.rv_temp(ir::rv(ir::RV_DISCRIMINANT, v, 0, 0, ut), sp);
             let ord_op = self.kop(ir::CK_INT, ut, tag, sp);
-            self.eq_test(dp, ord_op, sp);
+            self.eq_test(dp, ord_op, sp)
         };
         *payload = self.place_project(
             v,
@@ -8885,9 +8877,9 @@ extend Lowerer {
                     return;
                 }
                 let rel: tt::TokenType = if rd.inclusive {
-                    tt::TokenType::LessThanEqual;
+                    tt::TokenType::LessThanEqual
                 } else {
-                    tt::TokenType::LessThan;
+                    tt::TokenType::LessThan
                 };
                 let cond = self.cmp_test(rv, hop, rel, sp);
                 self.require(cond, on_fail, sp);
@@ -8967,9 +8959,9 @@ extend Lowerer {
                 let c = unsafe self.f.list(pd.children)[i as usize];
                 let last = i == pd.children.len - 1;
                 let next_alt: ir::BlockId = if last {
-                    on_fail;
+                    on_fail
                 } else {
-                    self.open_block();
+                    self.open_block()
                 };
                 self.lower_pattern_test(c, v, next_alt);
                 if self.err.len() != 0 {
@@ -8977,9 +8969,9 @@ extend Lowerer {
                 }
                 // success falls into ok_b; the failing edge continues with the next alternative
                 let cont: ir::BlockId = if last {
-                    ok_b;
+                    ok_b
                 } else {
-                    next_alt;
+                    next_alt
                 };
                 self.seal(ir::goto_term(ok_b, sp), cont);
             }
@@ -9107,9 +9099,9 @@ extend Lowerer {
             let mut base = self.pat_deref(v);
             let by_value = base == v;
             let vd = if pd.name != NODE_NONE {
-                self.f.res(pd.name);
+                self.f.res(pd.name)
             } else {
-                DefId { module: 0, node: NODE_NONE };
+                DefId { module: 0, node: NODE_NONE }
             };
             let isv = vd.node != NODE_NONE && self.decl_kind(vd) == NodeKind::NODE_VARIANT;
             if isv {
@@ -9186,9 +9178,9 @@ extend Lowerer {
             let mut tags = self.avget();
             let mut tm9: ModuleId = 0;
             let td9 = if k0 == pat::PC_VARIANT {
-                self.proj_owner_decl(own, &mut tm9);
+                self.proj_owner_decl(own, &mut tm9)
             } else {
-                NODE_NONE;
+                NODE_NONE
             };
             let mut signed = false;
             if td9 != NODE_NONE {
@@ -9198,9 +9190,9 @@ extend Lowerer {
             if k0 == pat::PC_VARIANT {
                 let ut = Ast::builtin(
                     if signed {
-                        BuiltinType::BT_I32;
+                        BT_I32
                     } else {
-                        BuiltinType::BT_U32;
+                        BT_U32
                     },
                 );
                 let kv = self.place_variant(pl);
@@ -9211,9 +9203,9 @@ extend Lowerer {
                     let mut ord: i64 = 0;
                     let _ = unsafe (&*self.pkg).variant_enum(kv, &mut ord);
                     let tv: u64 = if td9 != NODE_NONE {
-                        tags[ord as usize];
+                        tags[ord as usize]
                     } else {
-                        ord as u64 & 0xFFFFFFFF;
+                        ord as u64 & 0xFFFFFFFF
                     };
                     sw_op = self.kop(ir::CK_INT, ut, pick(signed, (tv as u32) as i32, tv as i64), sp);
                 } else {
@@ -9228,24 +9220,24 @@ extend Lowerer {
                 blocks.push(self.open_block());
             }
             let dflt: ir::BlockId = if n.default_child != pat::P_NONE {
-                self.open_block();
+                self.open_block()
             } else {
-                blocks[(n.edge_len - 1) as usize];
+                blocks[(n.edge_len - 1) as usize]
             };
             let mut tm = ir::term0(ir::TM_SWITCH, sp);
             tm.a = sw_op;
             tm.sw_start = self.body.switch_pool.len() as u32;
             let pairs: u32 = if n.default_child != pat::P_NONE {
-                n.edge_len;
+                n.edge_len
             } else {
-                n.edge_len - 1;
+                n.edge_len - 1
             };
             for e in 0..pairs {
                 let ep = cx.pats.at(t.edges.at((n.edge_start + e) as usize).pat as usize);
                 let cv: u64 = if td9 != NODE_NONE {
-                    tags[ep.val as usize];
+                    tags[ep.val as usize]
                 } else {
-                    ep.val as u64 & 0xFFFFFFFF;
+                    ep.val as u64 & 0xFFFFFFFF
                 };
                 self.body.switch_pool.push(cv << 32 | blocks[e as usize] as u64);
             }
@@ -9255,11 +9247,11 @@ extend Lowerer {
             self.seal(tm, blocks[0]);
             for e in 0..n.edge_len {
                 let next: ir::BlockId = if e + 1 <= n.edge_len - 1 {
-                    blocks[(e + 1) as usize];
+                    blocks[(e + 1) as usize]
                 } else if n.default_child != pat::P_NONE {
-                    dflt;
+                    dflt
                 } else {
-                    cont;
+                    cont
                 };
                 self.emit_tree(t, cx, t.edges.at((n.edge_start + e) as usize).child, vpl, cache, armb, next, sp);
             }
@@ -9280,9 +9272,9 @@ extend Lowerer {
             for e in 0..n.edge_len {
                 blocks.push(
                     if sw[e as usize] == 1 {
-                        self.open_block();
+                        self.open_block()
                     } else {
-                        ir::IR_NONE;
+                        ir::IR_NONE
                     },
                 );
             }
@@ -9300,9 +9292,9 @@ extend Lowerer {
                 }
                 let ep = cx.pats.at(t.edges.at((n.edge_start + e) as usize).pat as usize);
                 let hi = if ep.kind == pat::PC_INT {
-                    ep.val;
+                    ep.val
                 } else {
-                    ep.hi;
+                    ep.hi
                 };
                 // A piece holds at most SW_PIECE_MAX values.
                 let mut v = ep.val;
@@ -9342,9 +9334,9 @@ extend Lowerer {
                 // A value pattern keeps its spelling; a split piece is its value.
                 let ity = self.body.places.at(pl as usize).ty;
                 let cop = if ep.node != NODE_NONE {
-                    self.lower_expr(self.f.node(ep.node).as_data.single.value);
+                    self.lower_expr(self.f.node(ep.node).as_data.single.value)
                 } else {
-                    self.kop(ir::CK_INT, ity, ep.val, sp);
+                    self.kop(ir::CK_INT, ity, ep.val, sp)
                 };
                 if cop == ir::IR_NONE {
                     return;
@@ -9361,9 +9353,9 @@ extend Lowerer {
                     let hop = self.kop(ir::CK_INT, ity, ep.hi, sp);
                     let c2 = self.cmp_test(pl, hop, tt::TokenType::LessThanEqual, sp);
                     cond = if cond == ir::IR_NONE {
-                        c2;
+                        c2
                     } else {
-                        self.bool_and(cond, c2, sp);
+                        self.bool_and(cond, c2, sp)
                     };
                 }
             } else if ep.kind == pat::PC_RANGE {
@@ -9385,9 +9377,9 @@ extend Lowerer {
                         return;
                     }
                     let rel: tt::TokenType = if rd.inclusive {
-                        tt::TokenType::LessThanEqual;
+                        tt::TokenType::LessThanEqual
                     } else {
-                        tt::TokenType::LessThan;
+                        tt::TokenType::LessThan
                     };
                     let c2 = self.cmp_test(pl, hop, rel, sp);
                     if cond == ir::IR_NONE {
@@ -9404,9 +9396,9 @@ extend Lowerer {
             } else {
                 // opaque literal: compare against the lowered pattern expression
                 let val = if self.f.node(ep.node).kind == NodeKind::NODE_PATTERN_LITERAL {
-                    self.f.node(ep.node).as_data.single.value;
+                    self.f.node(ep.node).as_data.single.value
                 } else {
-                    ep.node;
+                    ep.node
                 };
                 let lop = self.lower_expr(val);
                 if lop == ir::IR_NONE {
@@ -9450,9 +9442,9 @@ extend Lowerer {
             }
             sw.push(0);
             let w = if ep.kind == pat::PC_INT {
-                1;
+                1
             } else {
-                ep.hi - ep.val + 1;
+                ep.hi - ep.val + 1
             };
             if n.default_child == pat::P_NONE && w > widest {
                 widest = w;
@@ -9463,9 +9455,9 @@ extend Lowerer {
         for e in 0..n.edge_len {
             let ep = cx.pats.at(t.edges.at((n.edge_start + e) as usize).pat as usize);
             let w = if ep.kind == pat::PC_INT {
-                1;
+                1
             } else {
-                ep.hi - ep.val + 1;
+                ep.hi - ep.val + 1
             };
             if e != wi && w <= SW_PIECE_MAX && nc + w <= SW_CASES_MAX {
                 sw.set(e as usize, 1);
@@ -9688,9 +9680,9 @@ extend Lowerer {
         let bty = self.nty(p);
         let by_ref = bty != TYPE_NONE && self.ref_depth(bty) == self.ref_depth(ty) + 1;
         let lty = if by_ref {
-            bty;
+            bty
         } else {
-            ty;
+            ty
         };
         let l = self.body.add_local(self.local_decl(lty, ir::LS_USER, true, sp, p));
         self.bind(p, l);
@@ -9698,9 +9690,9 @@ extend Lowerer {
         let pl = self.place_of_local(l);
         if by_ref {
             let mb: u32 = if self.f.ty(bty).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-                1;
+                1
             } else {
-                0;
+                0
             };
             self.assign(pl, ir::rv(ir::RV_REF, v, mb, 0, bty), sp);
             return;
@@ -9835,9 +9827,9 @@ const fn lit_int_value(src: str, sp: tok::Span, out: &mut u64) bool {
         i += 2;
     }
     let base: u64 = if hex {
-        16;
+        16
     } else {
-        10;
+        10
     };
     let mut v: u64 = 0;
     let mut any = false;

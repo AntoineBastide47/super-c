@@ -56,15 +56,15 @@ pub interface LinearRand: Scalar {
 fn builtin_int_rand<T: Int, R: Rng>(rng: &mut R, lo: T, hi: T) T {
     let bits = T::bits();
     let mask = if bits == 64 {
-        u64::MAX;
+        u64::MAX
     } else {
-        (1u64 << bits as u64) - 1;
+        (1u64 << bits as u64) - 1
     };
     let first = rng.next_u32() as u64;
     let word = if bits == 64 {
-        first << 32 | rng.next_u32() as u64;
+        first << 32 | rng.next_u32() as u64
     } else {
-        first & mask;
+        first & mask
     };
     let range = (hi + T::one() - lo).to_u64() & mask;
     return T::from_u64(word % range) + lo;

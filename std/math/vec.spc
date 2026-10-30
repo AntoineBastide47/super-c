@@ -346,14 +346,14 @@ extend<T: Elem, const N: usize> Vec<T, N> as Index<T, []T> {
 // The half-open bounds of `r` within `[0, n)` of a value of type `name`; a range outside traps.
 const fn range_bounds(r: Range<usize>, n: usize, name: str) (usize, usize) {
     let hi = if r.inclusive {
-        r.end + 1;
+        r.end + 1
     } else {
-        r.end;
+        r.end
     };
     if r.start > hi || hi > n {
         panic_parts(name, "[a..b]: range out of bounds");
     }
-    return r.start, hi;
+    return (r.start, hi);
 }
 
 extend<T: Elem, const N: usize> Vec<T, N> as IndexMut<T, []mut T> {
@@ -418,9 +418,9 @@ extend<T: Scalar, const N: usize> Vec<T, N> as Neg {
         for i in 0..N {
             unsafe {
                 r.e[i] = if N >= 3 {
-                    T::zero() - self.e[i];
+                    T::zero() - self.e[i]
                 } else {
-                    -self.e[i];
+                    -self.e[i]
                 };
             }
         }

@@ -1672,5 +1672,5 @@ pub const ERFC_TAB: [f64; 644] = [
 /// erfc(a) e^(a^2) as a double word from piece `i` of `ERFC_TAB`.
 pub fn erfc_g<const N: usize>(a: Simd<f64, N>, i: Simd<f64, N>) (Simd<f64, N>, Simd<f64, N>) {
     let (h, l) = table_poly::<f64, N, 14>(a, i, ERFC_TAB);
-    return h, l;
+    return (h, l);
 }

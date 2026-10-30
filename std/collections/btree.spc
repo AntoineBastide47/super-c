@@ -78,7 +78,7 @@ static_assert(B >= 2, "a B-tree node splits into two nodes of at least one key")
 // A node. A leaf is this struct alone; an internal node is an `Internal`, whose first field is this
 // header, so a pointer to either is a `*mut Leaf`. Only the first `len` key and value slots hold
 // live values; the node never drops them itself.
-pub(module) struct Leaf<K, V> {
+struct Leaf<K, V> {
     parent: *mut Leaf<K, V>, // the internal node above, null at the root
     parent_idx: u16, // the edge of `parent` that points here
     len: u16,
@@ -89,8 +89,8 @@ pub(module) struct Leaf<K, V> {
 // An internal node: edge i leads to the keys between keys[i - 1] and keys[i]; edges 0..=len are live.
 struct Internal<K, V> {
     @ordered
-    pub(module) data: Leaf<K, V>, // first, so a `*mut Internal` is a `*mut Leaf`
-    pub(module) edges: [*mut Leaf<K, V>; CAPACITY + 1],
+    data: Leaf<K, V>, // first, so a `*mut Internal` is a `*mut Leaf`
+    edges: [*mut Leaf<K, V>; CAPACITY + 1],
 }
 
 /// One end of a range: `Included(x)` and `Excluded(x)` bound the range at `x`, `Unbounded` does not
@@ -107,7 +107,7 @@ pub struct BTreeMap<K, V, A = Global> {
     root: *mut Leaf<K, V>, // null exactly when len == 0
     height: usize, // edges from the root to every leaf
     len: usize,
-    pub(module) alloc: A,
+    alloc: A,
 }
 
 // A BTreeMap owns its keys and values, so it is Send / Sync when they and its allocator are.
@@ -118,52 +118,52 @@ unsafe extend<K: Sync, V: Sync, A: Sync> BTreeMap<K, V, A> as Sync {}
 // The two leaf positions an iterator has not passed: the gap before its next element from the front,
 // and the gap after its next element from the back. Every gap between two neighbor elements is exactly
 // one leaf position, so two positions are equal exactly when no element lies between them.
-pub(module) struct Gaps<K, V> {
-    pub(module) front: *mut Leaf<K, V>,
-    pub(module) front_idx: usize,
-    pub(module) back: *mut Leaf<K, V>,
-    pub(module) back_idx: usize,
+struct Gaps<K, V> {
+    front: *mut Leaf<K, V>,
+    front_idx: usize,
+    back: *mut Leaf<K, V>,
+    back_idx: usize,
 }
 
 // Moves every element out in key order and frees each node once it has passed the node. Dropping it
 // drops the elements it did not reach and frees the rest of the nodes.
 struct Drain<K, V, A> {
-    pub(module) front: *mut Leaf<K, V>,
-    pub(module) idx: usize,
-    pub(module) len: usize,
-    pub(module) alloc: A,
+    front: *mut Leaf<K, V>,
+    idx: usize,
+    len: usize,
+    alloc: A,
 }
 
 /// Iterator over a map's `(&K, &V)` pairs in key order; borrows the map.
 pub struct BTreeIter<'a, K, V> {
-    pub(module) gaps: Gaps<K, V>,
-    pub(module) len: usize,
+    gaps: Gaps<K, V>,
+    len: usize,
 }
 
 /// Iterator over a map's `(&K, &mut V)` pairs in key order; borrows the map mutably.
 pub struct BTreeIterMut<'a, K, V> {
-    pub(module) gaps: Gaps<K, V>,
-    pub(module) len: usize,
+    gaps: Gaps<K, V>,
+    len: usize,
 }
 
 /// Iterator over a map's keys in order.
 pub struct BTreeKeys<'a, K, V> {
-    pub(module) it: BTreeIter<'a, K, V>,
+    it: BTreeIter<'a, K, V>,
 }
 
 /// Iterator over a map's values in key order.
 pub struct BTreeValues<'a, K, V> {
-    pub(module) it: BTreeIter<'a, K, V>,
+    it: BTreeIter<'a, K, V>,
 }
 
 /// Iterator over a map's values in key order, by mutable reference.
 pub struct BTreeValuesMut<'a, K, V> {
-    pub(module) it: BTreeIterMut<'a, K, V>,
+    it: BTreeIterMut<'a, K, V>,
 }
 
 /// Iterator over the `(&K, &V)` pairs of a key range in key order; borrows the map.
 pub struct BTreeRange<'a, K, V> {
-    pub(module) gaps: Gaps<K, V>,
+    gaps: Gaps<K, V>,
 }
 
 /// The slot of one key in a map, from `BTreeMap::entry`: occupied or vacant.
@@ -174,23 +174,23 @@ pub enum BTreeEntry<'a, K, V, A> {
 
 /// An entry whose key is in the map. Holds the map borrowed mutably.
 pub struct BTreeOccupiedEntry<'a, K, V, A> {
-    pub(module) map: &'a mut BTreeMap<K, V, A>,
-    pub(module) node: *mut Leaf<K, V>,
-    pub(module) idx: usize,
-    pub(module) height: usize, // of `node`
+    map: &'a mut BTreeMap<K, V, A>,
+    node: *mut Leaf<K, V>,
+    idx: usize,
+    height: usize, // of `node`
 }
 
 /// An entry whose key is not in the map; it owns the key until `insert`. Holds the map borrowed
 /// mutably.
 pub struct BTreeVacantEntry<'a, K, V, A> {
-    pub(module) map: &'a mut BTreeMap<K, V, A>,
-    pub(module) key: K,
-    pub(module) leaf: *mut Leaf<K, V>, // where the key goes, null for an empty map
-    pub(module) idx: usize,
+    map: &'a mut BTreeMap<K, V, A>,
+    key: K,
+    leaf: *mut Leaf<K, V>, // where the key goes, null for an empty map
+    idx: usize,
 }
 
 // The zero-sized value every member of a set maps to.
-pub(module) struct Member {}
+struct Member {}
 
 /// An ordered set of T through allocator A: a BTreeMap<T, Member, A> whose value takes no space.
 pub struct BTreeSet<T, A = Global> {
@@ -199,44 +199,44 @@ pub struct BTreeSet<T, A = Global> {
 
 /// Iterator over a set's elements in order; borrows the set.
 pub struct BTreeSetIter<'a, T> {
-    pub(module) it: BTreeIter<'a, T, Member>,
+    it: BTreeIter<'a, T, Member>,
 }
 
 /// Iterator over the elements of a range of a set, in order.
 pub struct BTreeSetRange<'a, T> {
-    pub(module) it: BTreeRange<'a, T, Member>,
+    it: BTreeRange<'a, T, Member>,
 }
 
 /// The elements of either set, in order, each once.
 pub struct BTreeUnion<'a, T> {
-    pub(module) a: BTreeSetIter<'a, T>,
-    pub(module) b: BTreeSetIter<'a, T>,
-    pub(module) pa: *const T, // the next element of `a`, null at its end
-    pub(module) pb: *const T,
+    a: BTreeSetIter<'a, T>,
+    b: BTreeSetIter<'a, T>,
+    pa: *const T, // the next element of `a`, null at its end
+    pb: *const T,
 }
 
 /// The elements of both sets, in order.
 pub struct BTreeIntersection<'a, T> {
-    pub(module) a: BTreeSetIter<'a, T>,
-    pub(module) b: BTreeSetIter<'a, T>,
-    pub(module) pa: *const T,
-    pub(module) pb: *const T,
+    a: BTreeSetIter<'a, T>,
+    b: BTreeSetIter<'a, T>,
+    pa: *const T,
+    pb: *const T,
 }
 
 /// The elements of the first set that are not in the second, in order.
 pub struct BTreeDifference<'a, T> {
-    pub(module) a: BTreeSetIter<'a, T>,
-    pub(module) b: BTreeSetIter<'a, T>,
-    pub(module) pa: *const T,
-    pub(module) pb: *const T,
+    a: BTreeSetIter<'a, T>,
+    b: BTreeSetIter<'a, T>,
+    pa: *const T,
+    pb: *const T,
 }
 
 /// The elements of exactly one of the two sets, in order.
 pub struct BTreeSymmetricDifference<'a, T> {
-    pub(module) a: BTreeSetIter<'a, T>,
-    pub(module) b: BTreeSetIter<'a, T>,
-    pub(module) pa: *const T,
-    pub(module) pb: *const T,
+    a: BTreeSetIter<'a, T>,
+    b: BTreeSetIter<'a, T>,
+    pa: *const T,
+    pb: *const T,
 }
 
 // Where a full node of CAPACITY keys splits when one more key goes in at `edge_idx`: the index of the
@@ -245,15 +245,15 @@ pub struct BTreeSymmetricDifference<'a, T> {
 // ascending run of insertions keeps appending to the right half.
 const fn splitpoint(edge_idx: usize) (usize, bool, usize) {
     if edge_idx < B - 1 {
-        return B - 2, true, edge_idx;
+        return (B - 2, true, edge_idx);
     }
     if edge_idx == B - 1 {
-        return B - 1, true, edge_idx;
+        return (B - 1, true, edge_idx);
     }
     if edge_idx == B {
-        return B - 1, false, 0;
+        return (B - 1, false, 0);
     }
-    return B, false, edge_idx - (B + 1);
+    return (B, false, edge_idx - (B + 1));
 }
 
 // The index of `key` in `node`: (true, i) when keys[i] equals it, else (false, i) with i the edge
@@ -265,10 +265,10 @@ fn search_node<K: Ord, V>(node: *mut Leaf<K, V>, key: &K) (bool, usize) {
     for i in 0..n {
         let c = key.cmp(&unsafe kp[i]);
         if c <= 0 {
-            return c == 0, i;
+            return (c == 0, i);
         }
     }
-    return false, n;
+    return (false, n);
 }
 
 // The number of keys of `node` below `key` (`strict`), or at most `key`.
@@ -397,7 +397,7 @@ extend<K, V> Leaf<K, V> {
             unsafe memcpy(right.edges(), self.edges() + mid + 1, (rn + 1) * sizeof(*mut Leaf<K, V>));
             right.adopt(0, rn);
         }
-        return k, v;
+        return (k, v);
     }
 
     // The leftmost leaf below this node of height `h`.
@@ -507,7 +507,7 @@ extend<K, V> Gaps<K, V> {
             self.front = n.edge(i + 1).first_leaf(h - 1);
             self.front_idx = 0;
         }
-        return n, i;
+        return (n, i);
     }
 
     // The node and index of the next element from the back, which the caller proves exists; the back
@@ -530,7 +530,7 @@ extend<K, V> Gaps<K, V> {
             self.back = leaf;
             self.back_idx = leaf.len();
         }
-        return n, i;
+        return (n, i);
     }
 
     const fn is_empty(self: &Gaps<K, V>) bool {
@@ -559,7 +559,7 @@ extend<K, V, A: Allocator> Drain<K, V, A> {
                 leaf = false;
             }
             self.front = null;
-            return Option::<(K, V)>::None;
+            return None;
         }
         self.len -= 1;
         let mut n = self.front;
@@ -581,7 +581,7 @@ extend<K, V, A: Allocator> Drain<K, V, A> {
             self.front = n.edge(i + 1).first_leaf(h - 1);
             self.idx = 0;
         }
-        return Option::<(K, V)>::Some((k, v));
+        return Some((k, v));
     }
 }
 
@@ -655,7 +655,7 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
         while node != null {
             let (found, i) = search_node(node, key);
             if found {
-                return node, i, h;
+                return (node, i, h);
             }
             if h == 0 {
                 break;
@@ -663,34 +663,34 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
             node = node.edge(i);
             h -= 1;
         }
-        return null, 0, 0;
+        return (null, 0, 0);
     }
 
     /// A borrow of the value for `key`, or `None`.
     pub fn get(self: &BTreeMap<K, V, A>, key: &K) Option<&V> {
         let (n, i, _) = self.find(key);
         if n == null {
-            return Option::<&V>::None;
+            return None;
         }
-        return Option::<&V>::Some(&unsafe n.vals()[i]);
+        return Some(&unsafe n.vals()[i]);
     }
 
     /// A mutable borrow of the value for `key`, or `None`.
     pub fn get_mut(self: &mut BTreeMap<K, V, A>, key: &K) Option<&mut V> {
         let (n, i, _) = self.find(key);
         if n == null {
-            return Option::<&mut V>::None;
+            return None;
         }
-        return Option::<&mut V>::Some(&mut unsafe n.vals()[i]);
+        return Some(&mut unsafe n.vals()[i]);
     }
 
     /// Borrows of the stored key equal to `key` and its value, or `None`.
     pub fn get_key_value(self: &BTreeMap<K, V, A>, key: &K) Option<(&K, &V)> {
         let (n, i, _) = self.find(key);
         if n == null {
-            return Option::<(&K, &V)>::None;
+            return None;
         }
-        return Option::<(&K, &V)>::Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
+        return Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
     }
 
     /// True when `key` has an entry.
@@ -702,20 +702,20 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
     /// The entry with the smallest key, or `None` when empty.
     pub const fn first_key_value(self: &BTreeMap<K, V, A>) Option<(&K, &V)> {
         if self.root == null {
-            return Option::<(&K, &V)>::None;
+            return None;
         }
         let n = self.root.first_leaf(self.height);
-        return Option::<(&K, &V)>::Some((&unsafe n.keys()[0], &unsafe n.vals()[0]));
+        return Some((&unsafe n.keys()[0], &unsafe n.vals()[0]));
     }
 
     /// The entry with the largest key, or `None` when empty.
     pub const fn last_key_value(self: &BTreeMap<K, V, A>) Option<(&K, &V)> {
         if self.root == null {
-            return Option::<(&K, &V)>::None;
+            return None;
         }
         let n = self.root.last_leaf(self.height);
         let i = n.len() - 1;
-        return Option::<(&K, &V)>::Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
+        return Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
     }
 
     /// Insert `key` -> `value` and return the replaced value, or `None` when the key is new. On
@@ -726,17 +726,17 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
         while node != null {
             let (found, i) = search_node(node, &key);
             if found {
-                return Option::<V>::Some(replace(&mut unsafe node.vals()[i], value));
+                return Some(replace(&mut unsafe node.vals()[i], value));
             }
             if h == 0 {
                 self.insert_leaf(node, i, key, value);
-                return Option::<V>::None;
+                return None;
             }
             node = node.edge(i);
             h -= 1;
         }
         self.insert_leaf(null, 0, key, value);
-        return Option::<V>::None;
+        return None;
     }
 
     // Insert a new key at index `idx` of `leaf` (null: the map is empty), splitting full nodes up the
@@ -751,23 +751,23 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
             root.insert_fit(0, key, value);
             self.root = root;
             self.height = 0;
-            return root, 0;
+            return (root, 0);
         }
         if leaf.len() < CAPACITY {
             leaf.insert_fit(idx, key, value);
-            return leaf, idx;
+            return (leaf, idx);
         }
         let (mid, into_left, at) = splitpoint(idx);
         let right = self.new_leaf();
         let (mk, mv) = leaf.split(right, mid, false);
         let target = if into_left {
-            leaf;
+            leaf
         } else {
-            right;
+            right
         };
         target.insert_fit(at, key, value);
         self.insert_up(leaf, mk, mv, right);
-        return target, at;
+        return (target, at);
     }
 
     // Insert the key and value that a split of `left` moved up, with the new node `right` after it,
@@ -791,9 +791,9 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
             let pright = self.new_internal();
             let (mk, mv) = parent.split(pright, mid, true);
             let target = if into_left {
-                parent;
+                parent
             } else {
-                pright;
+                pright
             };
             target.insert_fit_edge(at, k, v, r);
             l = parent;
@@ -815,40 +815,40 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
     pub fn remove(self: &mut BTreeMap<K, V, A>, key: &K) Option<V> {
         let (n, i, h) = self.find(key);
         if n == null {
-            return Option::<V>::None;
+            return None;
         }
         let (_, v, _, _) = self.remove_kv(n, i, h);
-        return Option::<V>::Some(v);
+        return Some(v);
     }
 
     /// Remove `key` and return the stored key and its value, or `None` when absent.
     pub fn remove_entry(self: &mut BTreeMap<K, V, A>, key: &K) Option<(K, V)> {
         let (n, i, h) = self.find(key);
         if n == null {
-            return Option::<(K, V)>::None;
+            return None;
         }
         let (k, v, _, _) = self.remove_kv(n, i, h);
-        return Option::<(K, V)>::Some((k, v));
+        return Some((k, v));
     }
 
     /// Remove and return the entry with the smallest key, or `None` when empty.
     pub fn pop_first(self: &mut BTreeMap<K, V, A>) Option<(K, V)> {
         if self.root == null {
-            return Option::<(K, V)>::None;
+            return None;
         }
         let n = self.root.first_leaf(self.height);
         let (k, v, _, _) = self.remove_kv(n, 0, 0);
-        return Option::<(K, V)>::Some((k, v));
+        return Some((k, v));
     }
 
     /// Remove and return the entry with the largest key, or `None` when empty.
     pub fn pop_last(self: &mut BTreeMap<K, V, A>) Option<(K, V)> {
         if self.root == null {
-            return Option::<(K, V)>::None;
+            return None;
         }
         let n = self.root.last_leaf(self.height);
         let (k, v, _, _) = self.remove_kv(n, n.len() - 1, 0);
-        return Option::<(K, V)>::Some((k, v));
+        return Some((k, v));
     }
 
     // Remove the element at index `idx` of `node` (height `h`), rebalance, and return the element and
@@ -879,7 +879,7 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
         leaf.set_len(n - 1);
         self.len -= 1;
         let (g, gi) = self.rebalance(leaf, i);
-        return k, v, g, gi;
+        return (k, v, g, gi);
     }
 
     // Restore the minimum node length from `leaf` up, after a removal left a gap at `gap` in it, and
@@ -938,7 +938,7 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
             }
             node = parent;
         }
-        return gnode, gidx;
+        return (gnode, gidx);
     }
 
     /// The entry of `key`, for an in-place update or insert with one search.
@@ -948,19 +948,15 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
         while node != null {
             let (found, i) = search_node(node, &key);
             if found {
-                return BTreeEntry::<K, V, A>::Occupied(
-                    BTreeOccupiedEntry::<K, V, A> { map: self, node: node, idx: i, height: h },
-                );
+                return Occupied(BTreeOccupiedEntry::<K, V, A> { map: self, node: node, idx: i, height: h });
             }
             if h == 0 {
-                return BTreeEntry::<K, V, A>::Vacant(
-                    BTreeVacantEntry::<K, V, A> { map: self, key: key, leaf: node, idx: i },
-                );
+                return Vacant(BTreeVacantEntry::<K, V, A> { map: self, key: key, leaf: node, idx: i });
             }
             node = node.edge(i);
             h -= 1;
         }
-        return BTreeEntry::<K, V, A>::Vacant(BTreeVacantEntry::<K, V, A> { map: self, key: key, leaf: null, idx: 0 });
+        return Vacant(BTreeVacantEntry::<K, V, A> { map: self, key: key, leaf: null, idx: 0 });
     }
 
     const fn gaps_all(self: &BTreeMap<K, V, A>) Gaps<K, V> {
@@ -1000,7 +996,7 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
     // last key it admits as an upper bound.
     fn gap_of(self: &BTreeMap<K, V, A>, b: &Bound<&K>, lower: bool) (*mut Leaf<K, V>, usize) {
         if self.root == null {
-            return null, 0;
+            return (null, 0);
         }
         let mut strict = false;
         let mut key: *const K = null;
@@ -1015,17 +1011,17 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
             },
             Unbounded => {
                 if lower {
-                    return self.root.first_leaf(self.height), 0;
+                    return (self.root.first_leaf(self.height), 0);
                 }
                 let last = self.root.last_leaf(self.height);
-                return last, last.len();
+                return (last, last.len());
             },
-        };
+        }
         let mut node = self.root;
         for _ in 0..self.height {
             node = node.edge(count_below(node, &unsafe *key, strict));
         }
-        return node, count_below(node, &unsafe *key, strict);
+        return (node, count_below(node, &unsafe *key, strict));
     }
 
     /// An iterator over the entries whose keys lie between `lo` and `hi`, in key order. Panics when `lo`
@@ -1048,7 +1044,7 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
                 lk = k;
             },
             Unbounded => {},
-        };
+        }
         switch hi {
             Included(k) => {
                 hk = k;
@@ -1058,7 +1054,7 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
                 hk = k;
             },
             Unbounded => {},
-        };
+        }
         if lk != null && hk != null {
             let c = (unsafe *lk).cmp(&unsafe *hk);
             if c > 0 {
@@ -1301,14 +1297,14 @@ fn check_node<K: Ord, V>(node: *mut Leaf<K, V>, h: usize, lo: *const K, hi: *con
         assert(child.parent() == node, "BTreeMap: a child does not link to its parent");
         assert(child.parent_idx() == i, "BTreeMap: a child links to the wrong parent edge");
         let clo: *const K = if i == 0 {
-            lo;
+            lo
         } else {
-            &unsafe kp[i - 1];
+            &unsafe kp[i - 1]
         };
         let chi: *const K = if i == n {
-            hi;
+            hi
         } else {
-            &unsafe kp[i];
+            &unsafe kp[i]
         };
         count += check_node(child, h - 1, clo, chi, false);
     }
@@ -1345,12 +1341,12 @@ extend<'a, K: Ord, V, A: Allocator> BTreeEntry<'a, K, V, A> {
             Occupied(e) => {
                 let mut o = e;
                 f(o.get_mut());
-                return BTreeEntry::<K, V, A>::Occupied(o);
+                return Occupied(o);
             },
             Vacant(e) => {
-                return BTreeEntry::<K, V, A>::Vacant(e);
+                return Vacant(e);
             },
-        };
+        }
     }
 
     /// The key of the entry.
@@ -1418,157 +1414,157 @@ extend<'a, K: Ord, V, A: Allocator> BTreeVacantEntry<'a, K, V, A> {
                 let (n, i) = map.insert_leaf(leaf, idx, key, value);
                 return &mut unsafe n.vals()[i];
             },
-        };
+        }
     }
 }
 
 extend<'a, K, V> BTreeIter<'a, K, V> as Iterator<(&K, &V)> {
     pub fn next(self: &mut BTreeIter<'a, K, V>) Option<(&K, &V)> {
         if self.len == 0 {
-            return Option::<(&K, &V)>::None;
+            return None;
         }
         self.len -= 1;
         let (n, i) = self.gaps.next_kv();
-        return Option::<(&K, &V)>::Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
+        return Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
     }
 
     pub fn size_hint(self: &BTreeIter<'a, K, V>) (usize, Option<usize>) {
-        return self.len, Option::<usize>::Some(self.len);
+        return (self.len, Option::<usize>::Some(self.len));
     }
 }
 
 extend<'a, K, V> BTreeIter<'a, K, V> as DoubleEndedIterator<(&K, &V)> {
     pub fn next_back(self: &mut BTreeIter<'a, K, V>) Option<(&K, &V)> {
         if self.len == 0 {
-            return Option::<(&K, &V)>::None;
+            return None;
         }
         self.len -= 1;
         let (n, i) = self.gaps.next_back_kv();
-        return Option::<(&K, &V)>::Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
+        return Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
     }
 }
 
 extend<'a, K, V> BTreeIterMut<'a, K, V> as Iterator<(&K, &mut V)> {
     pub fn next(self: &mut BTreeIterMut<'a, K, V>) Option<(&K, &mut V)> {
         if self.len == 0 {
-            return Option::<(&K, &mut V)>::None;
+            return None;
         }
         self.len -= 1;
         let (n, i) = self.gaps.next_kv();
-        return Option::<(&K, &mut V)>::Some((&unsafe n.keys()[i], &mut unsafe n.vals()[i]));
+        return Some((&unsafe n.keys()[i], &mut unsafe n.vals()[i]));
     }
 
     pub fn size_hint(self: &BTreeIterMut<'a, K, V>) (usize, Option<usize>) {
-        return self.len, Option::<usize>::Some(self.len);
+        return (self.len, Option::<usize>::Some(self.len));
     }
 }
 
 extend<'a, K, V> BTreeIterMut<'a, K, V> as DoubleEndedIterator<(&K, &mut V)> {
     pub fn next_back(self: &mut BTreeIterMut<'a, K, V>) Option<(&K, &mut V)> {
         if self.len == 0 {
-            return Option::<(&K, &mut V)>::None;
+            return None;
         }
         self.len -= 1;
         let (n, i) = self.gaps.next_back_kv();
-        return Option::<(&K, &mut V)>::Some((&unsafe n.keys()[i], &mut unsafe n.vals()[i]));
+        return Some((&unsafe n.keys()[i], &mut unsafe n.vals()[i]));
     }
 }
 
 extend<'a, K, V> BTreeKeys<'a, K, V> as Iterator<&K> {
     pub fn next(self: &mut BTreeKeys<'a, K, V>) Option<&K> {
         if self.it.len == 0 {
-            return Option::<&K>::None;
+            return None;
         }
         self.it.len -= 1;
         let (n, i) = self.it.gaps.next_kv();
-        return Option::<&K>::Some(&unsafe n.keys()[i]);
+        return Some(&unsafe n.keys()[i]);
     }
 
     pub fn size_hint(self: &BTreeKeys<'a, K, V>) (usize, Option<usize>) {
-        return self.it.len, Option::<usize>::Some(self.it.len);
+        return (self.it.len, Option::<usize>::Some(self.it.len));
     }
 }
 
 extend<'a, K, V> BTreeKeys<'a, K, V> as DoubleEndedIterator<&K> {
     pub fn next_back(self: &mut BTreeKeys<'a, K, V>) Option<&K> {
         if self.it.len == 0 {
-            return Option::<&K>::None;
+            return None;
         }
         self.it.len -= 1;
         let (n, i) = self.it.gaps.next_back_kv();
-        return Option::<&K>::Some(&unsafe n.keys()[i]);
+        return Some(&unsafe n.keys()[i]);
     }
 }
 
 extend<'a, K, V> BTreeValues<'a, K, V> as Iterator<&V> {
     pub fn next(self: &mut BTreeValues<'a, K, V>) Option<&V> {
         if self.it.len == 0 {
-            return Option::<&V>::None;
+            return None;
         }
         self.it.len -= 1;
         let (n, i) = self.it.gaps.next_kv();
-        return Option::<&V>::Some(&unsafe n.vals()[i]);
+        return Some(&unsafe n.vals()[i]);
     }
 
     pub fn size_hint(self: &BTreeValues<'a, K, V>) (usize, Option<usize>) {
-        return self.it.len, Option::<usize>::Some(self.it.len);
+        return (self.it.len, Option::<usize>::Some(self.it.len));
     }
 }
 
 extend<'a, K, V> BTreeValues<'a, K, V> as DoubleEndedIterator<&V> {
     pub fn next_back(self: &mut BTreeValues<'a, K, V>) Option<&V> {
         if self.it.len == 0 {
-            return Option::<&V>::None;
+            return None;
         }
         self.it.len -= 1;
         let (n, i) = self.it.gaps.next_back_kv();
-        return Option::<&V>::Some(&unsafe n.vals()[i]);
+        return Some(&unsafe n.vals()[i]);
     }
 }
 
 extend<'a, K, V> BTreeValuesMut<'a, K, V> as Iterator<&mut V> {
     pub fn next(self: &mut BTreeValuesMut<'a, K, V>) Option<&mut V> {
         if self.it.len == 0 {
-            return Option::<&mut V>::None;
+            return None;
         }
         self.it.len -= 1;
         let (n, i) = self.it.gaps.next_kv();
-        return Option::<&mut V>::Some(&mut unsafe n.vals()[i]);
+        return Some(&mut unsafe n.vals()[i]);
     }
 
     pub fn size_hint(self: &BTreeValuesMut<'a, K, V>) (usize, Option<usize>) {
-        return self.it.len, Option::<usize>::Some(self.it.len);
+        return (self.it.len, Option::<usize>::Some(self.it.len));
     }
 }
 
 extend<'a, K, V> BTreeValuesMut<'a, K, V> as DoubleEndedIterator<&mut V> {
     pub fn next_back(self: &mut BTreeValuesMut<'a, K, V>) Option<&mut V> {
         if self.it.len == 0 {
-            return Option::<&mut V>::None;
+            return None;
         }
         self.it.len -= 1;
         let (n, i) = self.it.gaps.next_back_kv();
-        return Option::<&mut V>::Some(&mut unsafe n.vals()[i]);
+        return Some(&mut unsafe n.vals()[i]);
     }
 }
 
 extend<'a, K, V> BTreeRange<'a, K, V> as Iterator<(&K, &V)> {
     pub fn next(self: &mut BTreeRange<'a, K, V>) Option<(&K, &V)> {
         if self.gaps.is_empty() {
-            return Option::<(&K, &V)>::None;
+            return None;
         }
         let (n, i) = self.gaps.next_kv();
-        return Option::<(&K, &V)>::Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
+        return Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
     }
 }
 
 extend<'a, K, V> BTreeRange<'a, K, V> as DoubleEndedIterator<(&K, &V)> {
     pub fn next_back(self: &mut BTreeRange<'a, K, V>) Option<(&K, &V)> {
         if self.gaps.is_empty() {
-            return Option::<(&K, &V)>::None;
+            return None;
         }
         let (n, i) = self.gaps.next_back_kv();
-        return Option::<(&K, &V)>::Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
+        return Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
     }
 }
 
@@ -1719,33 +1715,33 @@ extend<T: Ord, A: Allocator> BTreeSet<T, A> {
     /// The smallest element, or `None` when empty.
     pub fn first(self: &BTreeSet<T, A>) Option<&T> {
         if let Some((k, _)) = self.m.first_key_value() {
-            return Option::<&T>::Some(k);
+            return Some(k);
         }
-        return Option::<&T>::None;
+        return None;
     }
 
     /// The largest element, or `None` when empty.
     pub fn last(self: &BTreeSet<T, A>) Option<&T> {
         if let Some((k, _)) = self.m.last_key_value() {
-            return Option::<&T>::Some(k);
+            return Some(k);
         }
-        return Option::<&T>::None;
+        return None;
     }
 
     /// Remove and return the smallest element, or `None` when empty.
     pub fn pop_first(self: &mut BTreeSet<T, A>) Option<T> {
         if let Some((k, _)) = self.m.pop_first() {
-            return Option::<T>::Some(k);
+            return Some(k);
         }
-        return Option::<T>::None;
+        return None;
     }
 
     /// Remove and return the largest element, or `None` when empty.
     pub fn pop_last(self: &mut BTreeSet<T, A>) Option<T> {
         if let Some((k, _)) = self.m.pop_last() {
-            return Option::<T>::Some(k);
+            return Some(k);
         }
-        return Option::<T>::None;
+        return None;
     }
 
     /// An iterator over the elements in order.
@@ -1860,46 +1856,46 @@ const fn next_ptr<'a, T>(it: &mut BTreeSetIter<'a, T>) *const T {
 extend<'a, T> BTreeSetIter<'a, T> as Iterator<&T> {
     pub fn next(self: &mut BTreeSetIter<'a, T>) Option<&T> {
         if self.it.len == 0 {
-            return Option::<&T>::None;
+            return None;
         }
         self.it.len -= 1;
         let (n, i) = self.it.gaps.next_kv();
-        return Option::<&T>::Some(&unsafe n.keys()[i]);
+        return Some(&unsafe n.keys()[i]);
     }
 
     pub fn size_hint(self: &BTreeSetIter<'a, T>) (usize, Option<usize>) {
-        return self.it.len, Option::<usize>::Some(self.it.len);
+        return (self.it.len, Option::<usize>::Some(self.it.len));
     }
 }
 
 extend<'a, T> BTreeSetIter<'a, T> as DoubleEndedIterator<&T> {
     pub fn next_back(self: &mut BTreeSetIter<'a, T>) Option<&T> {
         if self.it.len == 0 {
-            return Option::<&T>::None;
+            return None;
         }
         self.it.len -= 1;
         let (n, i) = self.it.gaps.next_back_kv();
-        return Option::<&T>::Some(&unsafe n.keys()[i]);
+        return Some(&unsafe n.keys()[i]);
     }
 }
 
 extend<'a, T> BTreeSetRange<'a, T> as Iterator<&T> {
     pub fn next(self: &mut BTreeSetRange<'a, T>) Option<&T> {
         if self.it.gaps.is_empty() {
-            return Option::<&T>::None;
+            return None;
         }
         let (n, i) = self.it.gaps.next_kv();
-        return Option::<&T>::Some(&unsafe n.keys()[i]);
+        return Some(&unsafe n.keys()[i]);
     }
 }
 
 extend<'a, T> BTreeSetRange<'a, T> as DoubleEndedIterator<&T> {
     pub fn next_back(self: &mut BTreeSetRange<'a, T>) Option<&T> {
         if self.it.gaps.is_empty() {
-            return Option::<&T>::None;
+            return None;
         }
         let (n, i) = self.it.gaps.next_back_kv();
-        return Option::<&T>::Some(&unsafe n.keys()[i]);
+        return Some(&unsafe n.keys()[i]);
     }
 }
 
@@ -1908,25 +1904,25 @@ extend<'a, T: Ord> BTreeUnion<'a, T> as Iterator<&T> {
         let r = self.pa;
         if r == null {
             if self.pb == null {
-                return Option::<&T>::None;
+                return None;
             }
             let rb = self.pb;
             self.pb = next_ptr(&mut self.b);
-            return Option::<&T>::Some(unsafe &*rb);
+            return Some(unsafe &*rb);
         }
         if self.pb != null {
             let c = (unsafe *r).cmp(&unsafe *self.pb);
             if c > 0 {
                 let rb = self.pb;
                 self.pb = next_ptr(&mut self.b);
-                return Option::<&T>::Some(unsafe &*rb);
+                return Some(unsafe &*rb);
             }
             if c == 0 {
                 self.pb = next_ptr(&mut self.b);
             }
         }
         self.pa = next_ptr(&mut self.a);
-        return Option::<&T>::Some(unsafe &*r);
+        return Some(unsafe &*r);
     }
 }
 
@@ -1942,10 +1938,10 @@ extend<'a, T: Ord> BTreeIntersection<'a, T> as Iterator<&T> {
                 let r = self.pa;
                 self.pa = next_ptr(&mut self.a);
                 self.pb = next_ptr(&mut self.b);
-                return Option::<&T>::Some(unsafe &*r);
+                return Some(unsafe &*r);
             }
         }
-        return Option::<&T>::None;
+        return None;
     }
 }
 
@@ -1955,20 +1951,20 @@ extend<'a, T: Ord> BTreeDifference<'a, T> as Iterator<&T> {
             if self.pb == null {
                 let r = self.pa;
                 self.pa = next_ptr(&mut self.a);
-                return Option::<&T>::Some(unsafe &*r);
+                return Some(unsafe &*r);
             }
             let c = (unsafe *self.pa).cmp(&unsafe *self.pb);
             if c < 0 {
                 let r = self.pa;
                 self.pa = next_ptr(&mut self.a);
-                return Option::<&T>::Some(unsafe &*r);
+                return Some(unsafe &*r);
             }
             if c == 0 {
                 self.pa = next_ptr(&mut self.a);
             }
             self.pb = next_ptr(&mut self.b);
         }
-        return Option::<&T>::None;
+        return None;
     }
 }
 
@@ -1977,27 +1973,27 @@ extend<'a, T: Ord> BTreeSymmetricDifference<'a, T> as Iterator<&T> {
         loop {
             if self.pa == null {
                 if self.pb == null {
-                    return Option::<&T>::None;
+                    return None;
                 }
                 let rb = self.pb;
                 self.pb = next_ptr(&mut self.b);
-                return Option::<&T>::Some(unsafe &*rb);
+                return Some(unsafe &*rb);
             }
             if self.pb == null {
                 let ra = self.pa;
                 self.pa = next_ptr(&mut self.a);
-                return Option::<&T>::Some(unsafe &*ra);
+                return Some(unsafe &*ra);
             }
             let c = (unsafe *self.pa).cmp(&unsafe *self.pb);
             if c < 0 {
                 let ra = self.pa;
                 self.pa = next_ptr(&mut self.a);
-                return Option::<&T>::Some(unsafe &*ra);
+                return Some(unsafe &*ra);
             }
             if c > 0 {
                 let rb = self.pb;
                 self.pb = next_ptr(&mut self.b);
-                return Option::<&T>::Some(unsafe &*rb);
+                return Some(unsafe &*rb);
             }
             self.pa = next_ptr(&mut self.a);
             self.pb = next_ptr(&mut self.b);

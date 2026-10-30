@@ -183,9 +183,9 @@ fn wide_float_vectors_and_matrices() {
     for i in 0..4usize {
         for j in 0..4usize {
             let want = if i == j {
-                q(1.0);
+                q(1.0)
             } else {
-                q(0.0);
+                q(0.0)
             };
             assert(abs(p[i][j] - want) < q(1e-32));
         }

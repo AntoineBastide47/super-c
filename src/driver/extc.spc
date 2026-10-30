@@ -74,7 +74,7 @@ pub(package) fn ext_c_collect(p: &mut loader::Package, err: &mut bool, target: i
     }
     let mut ldpath = build_out_path(root, "__ldflags", "");
     if ld.len() != 0 {
-        let f = stdio::fopen(ldpath.as_str(), "wb"); // binary: no CRLF so linker flags read back clean on Windows
+        let f = stdio::fopen(&ldpath, "wb"); // binary: no CRLF so linker flags read back clean on Windows
         let mut ok = f != null;
         if ok {
             for k in 0..ld.len() {
@@ -87,6 +87,6 @@ pub(package) fn ext_c_collect(p: &mut loader::Package, err: &mut bool, target: i
             *err = true;
         }
     } else {
-        let _ = fs::unlink(ldpath.as_str());
+        let _ = fs::unlink(&ldpath);
     }
 }

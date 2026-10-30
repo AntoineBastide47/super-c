@@ -17,9 +17,9 @@ const fn r_has(r: &cli::CliResult, msg: str, at: str) bool {
                 if loc.slice(
                     0,
                     if e < 0 {
-                        loc.len();
+                        loc.len()
                     } else {
-                        e as usize;
+                        e as usize
                     },
                 ).ends_with(at) {
                     return true;
@@ -218,10 +218,10 @@ fn std_internals_and_synthesized_calls() {
     let root = p.dir();
     cli::copy_std(root);
     let sp = format("{}/sc/std/string.spc", root);
-    let s = loader::read_file(sp.as_str()).unwrap();
+    let s = loader::read_file(&sp).unwrap();
     let narrowed = s.replace("pub fn sugar_fmt_new() String", "pub(package) fn sugar_fmt_new() String");
     assert(narrowed.as_str() != s.as_str(), "std/string.spc declares sugar_fmt_new");
-    p.mkfile("sc/std/string.spc", narrowed.as_str());
+    p.mkfile("sc/std/string.spc", &narrowed);
     p.mkfile("sc/std/zz/inner.spc", "pub(package) fn secret() i32 { return 7; }\n");
     p.mkfile(
         "src/main.spc",
@@ -229,16 +229,14 @@ fn std_internals_and_synthesized_calls() {
     );
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let sd = format("{}/sc/std", root);
-    let r = cli::superc_env_in(root, "SC_STD_DIR", sd.as_str(), "build");
+    let r = cli::superc_env_in(root, "SC_STD_DIR", &sd, "build");
     assert(r.out_has("error: no visible item 'secret' in module 'inner'"));
     assert(
         r.out_has("unstable std internals, which a project names only with 'std_internals = true' in its build.toml"),
     );
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nstd_internals = true\n");
-    assert(cli::superc_env_in(root, "SC_STD_DIR", sd.as_str(), "build").ok());
+    assert(cli::superc_env_in(root, "SC_STD_DIR", &sd, "build").ok());
     p.mkfile("src/main.spc", "fn main() i32 {\n    let s = sugar_fmt_new();\n    return s.len() as i32;\n}\n");
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    assert(
-        cli::superc_env_in(root, "SC_STD_DIR", sd.as_str(), "build").out_has("error: cannot find value 'sugar_fmt_new'"),
-    );
+    assert(cli::superc_env_in(root, "SC_STD_DIR", &sd, "build").out_has("error: cannot find value 'sugar_fmt_new'"));
 }

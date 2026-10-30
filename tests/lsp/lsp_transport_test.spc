@@ -35,7 +35,7 @@ fn expect_body(label: str, bytes: str, want: str) {
         None => {
             assert(false, label);
         },
-    };
+    }
 }
 
 fn expect_none(label: str, bytes: str) {
@@ -70,7 +70,7 @@ fn read_back_two_messages() {
         None => {
             assert(false, "first body");
         },
-    };
+    }
     assert(rd.pending(), "the second frame waits in the buffer");
     switch transport::read_message(&mut rd) {
         Some(m) => {
@@ -79,7 +79,7 @@ fn read_back_two_messages() {
         None => {
             assert(false, "second body");
         },
-    };
+    }
     unsafe stdio::fclose(f);
 }
 
@@ -105,7 +105,7 @@ fn write_message_emits_the_frame() {
         None => {
             assert(false, "round trip");
         },
-    };
+    }
     unsafe stdio::fclose(f);
 }
 
@@ -129,5 +129,5 @@ fn reject_too_many_headers() {
         s.push_str("X-H: 1\r\n");
     }
     s.push_str("Content-Length: 1\r\n\r\na");
-    expect_none("over the header-count limit", s.as_str());
+    expect_none("over the header-count limit", &s);
 }

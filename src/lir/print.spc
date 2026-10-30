@@ -31,11 +31,11 @@ pub(package) fn print_package(p: &Package, out: &mut String) {
         push_name(p.spell(s.name), out);
         out.push_str(
             if s.kind == SK_FUNC {
-                " fn";
+                " fn"
             } else if s.kind == SK_TLS {
-                " tls";
+                " tls"
             } else {
-                " data";
+                " data"
             },
         );
         out.push_str(ast::pick(s.linkage == SL_GLOBAL, " global", " local"));
@@ -260,9 +260,9 @@ extend Printer {
         let np = b.pool[s as usize];
         for k in 0..np + 1 {
             let pt = if k == np {
-                b.pool[s as usize + 2];
+                b.pool[s as usize + 2]
             } else {
-                b.pool[(s + 3 + k) as usize];
+                b.pool[(s + 3 + k) as usize]
             };
             if (pt & AGG) != 0 && self.layout_no(pt & ~AGG) == NONE {
                 self.lay.push(pt & ~AGG);
@@ -426,11 +426,11 @@ extend Printer {
                 out.push_str(ast::pick(k == 0, " ", ", "));
                 self.val(
                     if k == 0 {
-                        t.a;
+                        t.a
                     } else if k == 1 {
-                        t.b;
+                        t.b
                     } else {
-                        t.c;
+                        t.c
                     },
                     out,
                 );

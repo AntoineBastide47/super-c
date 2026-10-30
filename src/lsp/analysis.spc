@@ -106,9 +106,9 @@ fn drain_errors(e: &diag::Errors, m: u32, phase: u8, diags: &mut Vector<DiagRec>
     }
     for severity in 1u8..3u8 {
         let records = if severity == 1 {
-            &e.errors;
+            &e.errors
         } else {
-            &e.warns;
+            &e.warns
         };
         for k in 0..records.len() {
             let mut fk: i32 = -1;
@@ -149,14 +149,14 @@ fn drain_errors(e: &diag::Errors, m: u32, phase: u8, diags: &mut Vector<DiagRec>
 fn harvest_parse_errors(p: &loader::Package, i: usize, diags: &mut Vector<DiagRec>) {
     let m = p.modules.at(i);
     let mut vsrc = m.source.clone();
-    let mut lx = lex::Lexer::new(&mut vsrc, m.file.as_str());
+    let mut lx = lex::Lexer::new(&mut vsrc, &m.file);
     lx.scan_tokens();
     if lx.has_errors() {
         drain_errors(&lx.errors, i as u32, PH_ANALYSIS, diags);
         return;
     }
     let toks = lx.take_tokens();
-    let mut ps = par::Parser::new(toks, vsrc.as_str(), m.file.as_str());
+    let mut ps = par::Parser::new(toks, &vsrc, &m.file);
     ps.build_ast();
     drain_errors(&ps.errors, i as u32, PH_ANALYSIS, diags);
 }
@@ -222,12 +222,12 @@ fn lsp_build_settings(dir: str, target: i32) BuildSettings {
     let mut d = String::from_str(dir);
     // A path has fewer components than this; each step drops one.
     for _ in 0..256 {
-        let mut mp = String::from_str(d.as_str());
+        let mut mp = String::from_str(&d);
         mp.push_str("/build.toml");
-        let f = stdio::fopen(mp.as_str(), "rb");
+        let f = stdio::fopen(&mp, "rb");
         if f != null {
             unsafe stdio::fclose(f);
-            if let Some(m) = bman::load(mp.as_str(), false) {
+            if let Some(m) = bman::load(&mp, false) {
                 let mut mm = m;
                 mm.arch = arch;
                 mm.target = target;
@@ -242,7 +242,7 @@ fn lsp_build_settings(dir: str, target: i32) BuildSettings {
             }
             break;
         }
-        let up = String::from_str(loader::dirname_of(d.as_str()));
+        let up = String::from_str(loader::dirname_of(&d));
         // An absolute walk ends at its root: above a Windows drive (`C:`), `dirname_of` gives `.`, the
         // working directory.
         if up.len() == 0 || up.len() >= d.len() || abs && up.as_str() == "." {
@@ -296,13 +296,13 @@ fn lsp_lint_wanted(p: &mut loader::Package, i: usize, root_file: str, lint_dir: 
     if !p.modules[i].prelude && !p.is_rt(i as i32) {
         return true;
     }
-    if dutil::same_file(p.modules[i].file.as_str(), root_file) {
+    if dutil::same_file(&p.modules[i].file, root_file) {
         return true;
     }
     if lint_dir.len() == 0 {
         return false;
     }
-    let cf = canon_path(p.modules[i].file.as_str());
+    let cf = canon_path(&p.modules[i].file);
     return cf.len() > lint_dir.len() && cf.as_str().slice(0, lint_dir.len()) == lint_dir && cf.as_str()[lint_dir.len()] == b'/';
 }
 
@@ -391,9 +391,9 @@ pub(package) fn compile_keeping(
     let t0 = dutil::ticks_ms();
     let bs = lsp_build_settings(
         if lint_dir.len() != 0 {
-            lint_dir;
+            lint_dir
         } else {
-            root_dir;
+            root_dir
         },
         target,
     );
@@ -429,14 +429,14 @@ pub(package) fn compile_batch(
         let fc = files.at(k).as_str();
         let mut mid: i32 = -1;
         for m in 0..p.modules.len() {
-            if p.modules[m].has_ast && dutil::same_file(fc, p.modules[m].file.as_str()) {
+            if p.modules[m].has_ast && dutil::same_file(fc, &p.modules[m].file) {
                 mid = m as i32;
                 break;
             }
         }
         if mid < 0 {
             let mp = loader::batch_mod_path(files.at(k).as_str(), root_dir, alt_dir);
-            mid = p.load_module(mp.as_str(), files.at(k).as_str(), false, target);
+            mid = p.load_module(&mp, files.at(k).as_str(), false, target);
         }
         mids.push(mid);
     }
@@ -587,9 +587,9 @@ const fn slot_node(p: &loader::Package, k: u32) NodeId {
 // (lo + 1, hi): the nodes after the previous item's declaration up to its own.
 fn push_slot_range(p: &loader::Package, m: usize, k: u32, out: &mut Vector<u32>) {
     let lo = if k as usize > p.idx().mod_items[m] as usize {
-        slot_node(p, k - 1) + 1;
+        slot_node(p, k - 1) + 1
     } else {
-        0u32;
+        0u32
     };
     out.push(lo);
     out.push(slot_node(p, k));
@@ -634,25 +634,25 @@ fn record_refs(p: &mut loader::Package, i: usize) {
                     let first = cur as usize == p.idx().mod_items[i] as usize;
                     if body {
                         cur_lo = if first {
-                            0u32;
+                            0u32
                         } else {
-                            p.sched.body_hi[cur as usize - 1];
+                            p.sched.body_hi[cur as usize - 1]
                         };
                         cur_hi = p.sched.body_hi[cur as usize];
                     } else {
                         cur_lo = if first {
-                            0u32;
+                            0u32
                         } else {
-                            slot_node(p, cur - 1);
+                            slot_node(p, cur - 1)
                         };
                         cur_hi = slot_node(p, cur);
                     }
                 }
             }
             let mut owner = if cur == SLOT_NONE {
-                loader::REF_MODULE_WIDE;
+                loader::REF_MODULE_WIDE
             } else {
-                slot_node(p, cur);
+                slot_node(p, cur)
             };
             if body {
                 owner |= loader::REF_BODY_EDGE;
@@ -779,9 +779,9 @@ fn touched_items(p: &loader::Package, i: usize, ws: u32, we: u32, out: &mut Vect
             }
         }
         let ext_end = if last && open_ext == SLOT_NONE {
-            0xFFFFFFFFu32;
+            0xFFFFFFFFu32
         } else {
-            end;
+            end
         };
         if ws <= ext_end && we >= prev_end {
             out.push(k);
@@ -897,9 +897,9 @@ fn propagate_touched(
                         let mut ns = ST_FULL;
                         if plain && in_body {
                             ns = if xs == ST_FULL {
-                                ST_BODY;
+                                ST_BODY
                             } else {
-                                ST_NONE;
+                                ST_NONE
                             };
                         } else if plain && xs != ST_FULL {
                             ns = ST_BODY;
@@ -938,7 +938,7 @@ fn overlay_slots(p: &loader::Package, ov_files: &Vector<str>) Vector<i64> {
         let mut slot: i64 = -1;
         let mf = p.modules.at(i).file.as_str();
         for k in 0..fcs.len() {
-            if dutil::same_file(fcs[k].as_str(), mf) {
+            if dutil::same_file(&fcs[k], mf) {
                 slot = k as i64;
                 break;
             }
@@ -953,10 +953,10 @@ fn overlay_slots(p: &loader::Package, ov_files: &Vector<str>) Vector<i64> {
 fn pristine_parse(p: &mut loader::Package, i: usize, target: i32) Ast {
     let file = p.modules[i].file.clone();
     let mut src = p.modules[i].source.clone();
-    let mut lx = lex::Lexer::new(&mut src, file.as_str());
+    let mut lx = lex::Lexer::new(&mut src, &file);
     lx.scan_tokens();
     assert(!lx.has_errors(), "an analyzed module lexes again");
-    let mut ps = par::Parser::new(lx.take_tokens(), src.as_str(), file.as_str());
+    let mut ps = par::Parser::new(lx.take_tokens(), &src, &file);
     ps.build_ast();
     assert(!ps.has_errors(), "an analyzed module parses again");
     let mut na = ps.take_ast();
@@ -1091,9 +1091,9 @@ pub(package) fn recompile(
             let nv = ov_texts[k];
             let mut p0: usize = 0;
             let maxp = if os.len() < nv.len() {
-                os.len();
+                os.len()
             } else {
-                nv.len();
+                nv.len()
             };
             while p0 < maxp && os[p0] == nv[p0] {
                 p0 += 1;
@@ -1108,12 +1108,12 @@ pub(package) fn recompile(
         }
         let cand = body_candidate(&p.modules[i].ast, ws, we);
         let mut ns9 = String::from_str(ov_texts[k]);
-        let mut lx9 = lex::Lexer::new(&mut ns9, file.as_str());
+        let mut lx9 = lex::Lexer::new(&mut ns9, &file);
         lx9.scan_tokens();
         if lx9.has_errors() {
             return false;
         }
-        let mut ps = par::Parser::new(lx9.take_tokens(), ns9.as_str(), file.as_str());
+        let mut ps = par::Parser::new(lx9.take_tokens(), &ns9, &file);
         ps.build_ast();
         if ps.has_errors() {
             return false;
@@ -1121,15 +1121,15 @@ pub(package) fn recompile(
         let na = ps.take_ast();
         let mut osur = String::new();
         let mut nsur = String::new();
-        import_surface(&p.modules[i].ast, p.modules[i].source.as_str(), &mut osur);
-        import_surface(&na, ns9.as_str(), &mut nsur);
+        import_surface(&p.modules[i].ast, &p.modules[i].source, &mut osur);
+        import_surface(&na, &ns9, &mut nsur);
         if osur.as_str() != nsur.as_str() {
             return false;
         }
         let oldp = pristine_parse(p, i, target);
         let _ = replace(&mut p.modules[i].ast, na);
         p.modules[i].ast.module = i as ModuleId;
-        p.modules[i].src_id = dutil::str_id(ns9.as_str());
+        p.modules[i].src_id = dutil::str_id(&ns9);
         p.modules[i].mtime = 0;
         p.modules[i].source = ns9;
         p.platform_filter_module(i, target);
@@ -1340,7 +1340,7 @@ pub(package) fn recompile(
             _ => {
                 break;
             },
-        };
+        }
     }
     lsp_unused_items(p, root_file, lint_dir, diags);
     release_closed(p, &ovk);
@@ -1426,7 +1426,7 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
     {
         let mut views = Vector::<str>::new();
         for k in 0..p.overlay_files.len() {
-            views.push(p.overlay_files[k].as_str());
+            views.push(&p.overlay_files[k]);
         }
         ovk = overlay_slots(p, &views);
     }
@@ -1514,7 +1514,7 @@ fn typecheck_set(
                     emit::feature_lints(p, i, &mut errs);
                 }
                 if errs.errors.len() != 0 || errs.warns.len() != 0 {
-                    errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
+                    errs.finalize(&p.modules[i].source, &p.modules[i].file);
                     drain_errors(&errs, i as u32, PH_ANALYSIS, nd);
                 }
             }
@@ -1534,7 +1534,7 @@ fn typecheck_set(
                     let mut errs = diag::Errors::new();
                     emit::check_always_panics_module(p, i, &mut errs);
                     if errs.errors.len() != 0 {
-                        errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
+                        errs.finalize(&p.modules[i].source, &p.modules[i].file);
                         drain_errors(&errs, i as u32, PH_ANALYSIS, nd);
                     }
                     if cirv.body_miss_n != miss0 {
@@ -1618,7 +1618,7 @@ fn flush_rec(ctx: *mut void, code: u16, m: ModuleId, id: NodeId, msg: String) {
     let mm = unsafe &(*fx.p).modules[m as usize];
     let mut errs = diag::Errors::new();
     errs.emit_span(code, mm.ast.at_const(id).span, msg);
-    errs.finalize(mm.source.as_str(), mm.file.as_str());
+    errs.finalize(&mm.source, &mm.file);
     drain_errors(&errs, m, PH_ANALYSIS, unsafe &mut *fx.nd);
 }
 
@@ -1673,11 +1673,11 @@ fn dep_visit(p: &mut loader::Package, set: &Vector<bool>, seen: &mut Vector<bool
 // analysis tables are empty until the module resolves and typechecks again.
 fn reparse_bodies(p: &mut loader::Package, i: usize) {
     let file = p.modules[i].file.clone();
-    let mut lx = lex::Lexer::new(&mut p.modules[i].source, file.as_str());
+    let mut lx = lex::Lexer::new(&mut p.modules[i].source, &file);
     lx.scan_tokens();
     assert(!lx.has_errors(), "a parsed module lexes again");
     let toks = lx.take_tokens();
-    let mut ps = par::Parser::new(toks, p.modules[i].source.as_str(), file.as_str());
+    let mut ps = par::Parser::new(toks, &p.modules[i].source, &file);
     ps.build_ast();
     assert(!ps.has_errors(), "a parsed module parses again");
     let mut na = ps.take_ast();
@@ -1799,7 +1799,7 @@ fn lsp_unused_items(p: &mut loader::Package, root_file: str, lint_dir: str, diag
     }
     for m in 0..n {
         if sink[m].has_warnings() {
-            sink.index_mut(m).finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+            sink.index_mut(m).finalize(&p.modules[m].source, &p.modules[m].file);
             drain_errors(sink.at(m), m as u32, PH_UNUSED, diags);
         }
     }
@@ -1921,12 +1921,12 @@ fn bc_module(
     let mut bodies = Vector::<irl::Lowerer>::new();
     for k in 0..items.len() {
         if stop(sctx, false) {
-            return Option::<diag::Errors>::None;
+            return None;
         }
         t.bc_item(items[k], ow, ctx, &mut bodies);
     }
-    t.errors.finalize(unsafe str::from_raw(src as *const u8, len), file.as_str());
-    return Option::<diag::Errors>::Some(replace(&mut t.errors, diag::Errors::new()));
+    t.errors.finalize(unsafe str::from_raw(src as *const u8, len), &file);
+    return Some(replace(&mut t.errors, diag::Errors::new()));
 }
 
 // Parse back and analyze again every released module the engine refused a body of; true when one

@@ -212,11 +212,11 @@ const fn number(s: str, i: &mut usize, out: &mut i64) bool {
     while j < s.len() {
         let c = lower(s.byte_at(j));
         let d: u64 = if c >= b'0' && c <= b'9' {
-            c - b'0';
+            c - b'0'
         } else if c >= b'a' && c <= b'f' {
-            c - b'a' + 10;
+            c - b'a' + 10
         } else {
-            99u64;
+            99u64
         };
         if d >= radix {
             break;
@@ -228,9 +228,9 @@ const fn number(s: str, i: &mut usize, out: &mut i64) bool {
         return false;
     }
     *out = if neg {
-        (v as i64).wrapping_neg();
+        (v as i64).wrapping_neg()
     } else {
-        v as i64;
+        v as i64
     };
     *i = j;
     return true;
@@ -245,9 +245,9 @@ const fn reg_name(w: str, l: &mut u8, n: &mut i64, sp: &mut bool) {
     *sp = false;
     if eq_nocase(w, "sp") || eq_nocase(w, "wsp") {
         *l = if w.len() == 2 {
-            b'x';
+            b'x'
         } else {
-            b'w';
+            b'w'
         };
         *n = 31;
         *sp = true;
@@ -261,9 +261,9 @@ const fn reg_name(w: str, l: &mut u8, n: &mut i64, sp: &mut bool) {
     if eq_nocase(w, "fp") || eq_nocase(w, "lr") {
         *l = b'x';
         *n = if lower(w.byte_at(0)) == b'f' {
-            29i64;
+            29i64
         } else {
-            30i64;
+            30i64
         };
         return;
     }
@@ -292,20 +292,20 @@ const fn reg_name(w: str, l: &mut u8, n: &mut i64, sp: &mut bool) {
         v = v * 10 + (d - b'0') as i64;
     }
     let max: i64 = if c == b'x' || c == b'w' {
-        30;
+        30
     } else if c == b'p' && !pn {
-        15;
+        15
     } else {
-        31;
+        31
     };
     if v > max || pn && (v < 8 || v > 15) {
         return;
     }
     *l = c;
     *n = if pn {
-        32 + v;
+        32 + v
     } else {
-        v;
+        v
     };
 }
 
@@ -326,9 +326,9 @@ const fn reg(s: str, i: &mut usize, r: &mut Reg) bool {
     // `word` stops at no dot only when the token holds none: split the suffix off.
     let dot = w.find_byte(b'.');
     let name = if dot >= 0 {
-        w.slice(0, dot as usize);
+        w.slice(0, dot as usize)
     } else {
-        w;
+        w
     };
     let mut l: u8 = 0;
     let mut n: i64 = 0;
@@ -364,9 +364,9 @@ const fn reg(s: str, i: &mut usize, r: &mut Reg) bool {
         let c = lower(s.byte_at(j + 1));
         if c == b'z' || c == b'm' {
             r.pq = if c == b'z' {
-                1u8;
+                1u8
             } else {
-                2u8;
+                2u8
             };
             j += 2;
         }
@@ -419,9 +419,9 @@ const fn parse_reg(s: str, i: &mut usize, c: u8, v: &mut i64, f: &mut Facts) boo
     *v = r.n;
     let g = r.l == b'x' || r.l == b'w';
     let gx: i32 = if r.l == b'x' {
-        1;
+        1
     } else {
-        0;
+        0
     };
     return switch c {
         t::C::R => g && !r.sp && r.arr < 0 && agree(&mut f.gw, gx),
@@ -580,53 +580,53 @@ const fn reloc_kind(role: u8, spec: str) u8 {
     let none = spec.len() == 0;
     return switch role {
         Role::BRANCH => if none {
-            a::R_BRANCH26;
+            a::R_BRANCH26
         } else {
-            0xFFu8;
+            0xFFu8
         },
         Role::B19 => if none {
-            FX_B19;
+            FX_B19
         } else {
-            0xFFu8;
+            0xFFu8
         },
         Role::B14 => if none {
-            FX_B14;
+            FX_B14
         } else {
-            0xFFu8;
+            0xFFu8
         },
         Role::ADR => if none {
-            FX_ADR;
+            FX_ADR
         } else {
-            0xFFu8;
+            0xFFu8
         },
         Role::ADRP => if none || eq_nocase(spec, "page") || eq_nocase(spec, "pg_hi21") {
-            a::R_PAGE21;
+            a::R_PAGE21
         } else if eq_nocase(spec, "gotpage") || eq_nocase(spec, "got") {
-            a::R_GOT_PAGE21;
+            a::R_GOT_PAGE21
         } else if eq_nocase(spec, "tlvppage") {
-            a::R_TLV_PAGE21;
+            a::R_TLV_PAGE21
         } else if eq_nocase(spec, "tlsdesc") {
-            a::R_TLSDESC_PAGE21;
+            a::R_TLSDESC_PAGE21
         } else {
-            0xFFu8;
+            0xFFu8
         },
         Role::LO12 => if eq_nocase(spec, "pageoff") || eq_nocase(spec, "lo12") {
-            a::R_PAGEOFF12;
+            a::R_PAGEOFF12
         } else if eq_nocase(spec, "tlsdesc_lo12") {
-            a::R_TLSDESC_ADD;
+            a::R_TLSDESC_ADD
         } else {
-            0xFFu8;
+            0xFFu8
         },
         Role::LDST => if eq_nocase(spec, "pageoff") || eq_nocase(spec, "lo12") {
-            a::R_PAGEOFF12;
+            a::R_PAGEOFF12
         } else if eq_nocase(spec, "gotpageoff") || eq_nocase(spec, "got_lo12") {
-            a::R_GOT_PAGEOFF12;
+            a::R_GOT_PAGEOFF12
         } else if eq_nocase(spec, "tlvppageoff") {
-            a::R_TLV_PAGEOFF12;
+            a::R_TLV_PAGEOFF12
         } else if eq_nocase(spec, "tlsdesc_lo12") {
-            a::R_TLSDESC_LD64;
+            a::R_TLSDESC_LD64
         } else {
-            0xFFu8;
+            0xFFu8
         },
         _ => 0xFFu8,
     };
@@ -743,7 +743,7 @@ fn float_lit(s: str, i: &mut usize, out: &mut f64) bool {
         None => {
             return false;
         },
-    };
+    }
 }
 
 // Parse operand kind `k` of row `r` at `*i` into `v[at..]`.
@@ -785,9 +785,9 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
             }
             let wide = f.gw == 1;
             let u = if wide {
-                x as u64;
+                x as u64
             } else {
-                x as u64 & 0xFFFFFFFF;
+                x as u64 & 0xFFFFFFFF
             };
             if !wide && (x < -(1i64 << 31) || x >= 1i64 << 32) {
                 return false;
@@ -854,9 +854,9 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
             }
             v[at] = r0.n;
             f.rmx = if r0.l == b'x' {
-                1;
+                1
             } else {
-                0;
+                0
             };
             return true;
         },
@@ -876,9 +876,9 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
             }
             let d = f.fs == 3;
             let bits = if d {
-                fv.to_bits();
+                fv.to_bits()
             } else {
-                (fv as f32).to_bits() as u64;
+                (fv as f32).to_bits() as u64
             };
             let m = a::fp_imm8(d, bits);
             if m == 0xFFFFFFFF || (fv as f32) as f64 != fv && !d {
@@ -914,9 +914,9 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
             }
             v[at] = r0.n;
             f.rtb = if r0.l == b'x' {
-                1;
+                1
             } else {
-                0;
+                0
             };
             return true;
         },
@@ -1116,18 +1116,18 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
                 return false;
             }
             v[at] = if r0.n >= 32 {
-                r0.n - 32;
+                r0.n - 32
             } else {
-                r0.n;
+                r0.n
             };
             return agree(&mut f.ze, r0.arr - 10);
         },
         t::K::PNGZ | t::K::PNG => {
             let mut r0 = Reg { l: 0, n: 0, sp: false, arr: -1, pq: 0 };
             let want: u8 = if k == t::K::PNGZ {
-                1u8;
+                1u8
             } else {
-                0u8;
+                0u8
             };
             if !reg(s, i, &mut r0) || r0.l != b'p' || r0.n < 32 || r0.arr >= 0 || r0.pq != want {
                 return false;
@@ -1336,11 +1336,11 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
         t::K::VLX => {
             let w = word(s, i);
             v[at] = if eq_nocase(w, "vlx2") {
-                0i64;
+                0i64
             } else if eq_nocase(w, "vlx4") {
-                1i64;
+                1i64
             } else {
-                -1i64;
+                -1i64
             };
             return v[at] >= 0;
         },
@@ -1349,16 +1349,16 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
             return eq_nocase(
                 word(s, i),
                 if k == t::K::SMSM {
-                    "sm";
+                    "sm"
                 } else {
-                    "za";
+                    "za"
                 },
             );
         },
         _ => {
             return false;
         },
-    };
+    }
 }
 
 // The condition named `w` (`cs` and `cc` too), -1 when none.
@@ -1443,9 +1443,9 @@ const fn za_tile(w: str, tile: &mut i64, el: &mut i32, slice: bool) bool {
             return false;
         }
         vert = if c == b'v' {
-            1i64;
+            1i64
         } else {
-            0i64;
+            0i64
         };
         j += 1;
     }
@@ -1474,9 +1474,9 @@ const fn q_of(r: t::Row, f: &Facts) u32 {
         t::Q::SF | t::Q::SFN | t::Q::B30 | t::Q::S22 => f.gw,
         t::Q::FT => ftq,
         t::Q::CVT => if f.gw < 0 || ftq < 0 {
-            -1;
+            -1
         } else {
-            f.gw | ftq << 1;
+            f.gw | ftq << 1
         },
         t::Q::V => f.arr,
         t::Q::VF => switch f.arr {
@@ -1486,21 +1486,21 @@ const fn q_of(r: t::Row, f: &Facts) u32 {
             _ => -1,
         },
         t::Q::VB => if f.arr == 0 || f.arr == 1 {
-            f.arr;
+            f.arr
         } else {
-            -1;
+            -1
         },
         t::Q::Z => f.ze,
         t::Q::FLS => f.fs,
         t::Q::FP => if f.fs >= 2 {
-            f.fs - 2;
+            f.fs - 2
         } else {
-            -1;
+            -1
         },
         t::Q::ZE => if f.ze < 0 || f.ze == t::fixed_q(r, 0) as i32 {
-            t::fixed_q(r, 0) as i32;
+            t::fixed_q(r, 0) as i32
         } else {
-            -1;
+            -1
         },
         _ => -1,
     };
@@ -1605,9 +1605,9 @@ const fn fix_kinds(r: t::Row, q: u32, v: &mut t::Vals, f: &Facts) bool {
             // `lsl` or nothing: uxtx (uxtw for a 32-bit form), which the register's width must match.
             if v[at] == 10 {
                 v[at] = if x {
-                    3i64;
+                    3i64
                 } else {
-                    2i64;
+                    2i64
                 };
             }
             let wide = (v[at] & 3) == 3;
@@ -1623,9 +1623,9 @@ const fn fix_kinds(r: t::Row, q: u32, v: &mut t::Vals, f: &Facts) bool {
                 return false;
             }
             v[at + 3] = if amt == sc {
-                1i64;
+                1i64
             } else {
-                0i64;
+                0i64
             };
         }
         if k == t::K::TBIT && f.rtb >= 0 && f.rtb == 1 != v[at] >= 32 && f.rtb == 0 {
@@ -1666,9 +1666,9 @@ fn reg_text(o: &mut String, c: u8, n: i64, r: t::Row, q: u32) {
         t::C::V => {
             let ar: []str<'static> = ARR_NAMES;
             let arr = if r.q == t::Q::VF {
-                q + 4;
+                q + 4
             } else {
-                q;
+                q
             };
             o.format_into("v{}.{}", n, ar[arr as usize]);
         },
@@ -1686,7 +1686,7 @@ fn reg_text(o: &mut String, c: u8, n: i64, r: t::Row, q: u32) {
             let el: []str<'static> = ELEM;
             o.format_into("z{}.{}", n, el[e as usize]);
         },
-    };
+    }
 }
 
 fn gpr_text(o: &mut String, n: i64, wide: bool, sp: bool) {
@@ -1697,9 +1697,9 @@ fn gpr_text(o: &mut String, n: i64, wide: bool, sp: bool) {
     }
     o.push_byte(
         if wide {
-            b'x';
+            b'x'
         } else {
-            b'w';
+            b'w'
         },
     );
     o.push_i64(n);
@@ -1785,9 +1785,9 @@ pub(package) fn print_row(r: t::Row, q: u32, v: &t::Vals, o: &mut String) {
         }
         o.push_str(
             if first {
-                " ";
+                " "
             } else {
-                ", ";
+                ", "
             },
         );
         first = false;
@@ -1837,9 +1837,9 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
         },
         t::K::EXT => {
             let lslopt: i64 = if x {
-                3;
+                3
             } else {
-                2;
+                2
             };
             if has_sp && a == lslopt {
                 if v[at + 1] != 0 {
@@ -1895,9 +1895,9 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
             gpr_text(o, v[at + 1], (opt & 3) == 3, false);
             let sc = t::ldst_scale(r.bits | t::qbits(r.q, q));
             let amt: u32 = if v[at + 3] != 0 {
-                sc;
+                sc
             } else {
-                0u32;
+                0u32
             };
             if opt == 3 {
                 if v[at + 3] != 0 {
@@ -1991,9 +1991,9 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
                 "{{za{}{}.{}[w{}, {}]}}",
                 a,
                 if v[at + 1] != 0 {
-                    "v";
+                    "v"
                 } else {
-                    "h";
+                    "h"
                 },
                 el[t::fixed_q(r, q) as usize],
                 v[at + 2] + 12,
@@ -2069,9 +2069,9 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
         },
         t::K::VLX => o.push_str(
             if a != 0 {
-                "vlx4";
+                "vlx4"
             } else {
-                "vlx2";
+                "vlx2"
             },
         ),
         t::K::SMSM => o.push_str("sm"),
@@ -2096,9 +2096,9 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
         },
         t::K::L2B | t::K::L3B | t::K::L4B | t::K::T1B | t::K::T2B | t::K::T3B | t::K::T4B => {
             let n = if k >= t::K::T1B {
-                k - t::K::T1B + 1;
+                k - t::K::T1B + 1
             } else {
-                k - t::K::L2B + 2;
+                k - t::K::L2B + 2
             };
             o.push_str("{ ");
             for q in 0..n {
@@ -2111,7 +2111,7 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
         },
         t::K::IMM4X | t::K::SHL8 | t::K::SHL16 | t::K::SHL32 | t::K::IMM6X => o.format_into("#{}", a),
         _ => {},
-    };
+    }
 }
 
 fn hex(v: u64) String {

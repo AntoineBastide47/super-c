@@ -84,7 +84,7 @@ fn header_type_emits_layout_checks() {
     src.push_str(
         "extern \"C\" \"lib.h\" {\n    struct rec { pub a: i32, pub b: i64 }\n}\nfn main() i32 {\n    let mut r = rec { a: 3 };\n    r.b = 4;\n    let d = unsafe div(7, 2);\n    return r.a + r.b as i32 + d.rem - 8;\n}\n",
     );
-    let c = h::compile_c(src.as_str());
+    let c = h::compile_c(&src);
     assert(c.ok(), "the program compiles");
     assert(c.code_has("#include <stdlib.h>"), "the header is included");
     assert(
@@ -221,7 +221,7 @@ fn header_type_values_through_c(b: &mut h::ExitBatch) {
     src.push_str(
         "fn main() i32 {\n    let t = tm { tm_hour: 5, tm_min: 7, tm_sec: 9, tm_mday: 1 };\n    let mut buf: [char; 16] = [0 as char; 16];\n    let n = unsafe strftime(&mut buf[0], 16, \"%H:%M:%S\".ptr() as *const char, &t);\n    if n != 8 { return 1; }\n    if buf[1] as u8 != b'5' || buf[4] as u8 != b'7' || buf[7] as u8 != b'9' { return 2; }\n    return 0;\n}\n",
     );
-    b.add("header struct fields reach the C members by name", src.as_str(), 0);
+    b.add("header struct fields reach the C members by name", &src, 0);
     b.add(
         "a field pinned to its C member, returned by value",
         "extern \"C\" \"stdlib.h\" {\n    @import(\"div_t\")\n    struct div_t {\n        @import(\"quot\")\n        pub q: i32,\n        pub rem: i32,\n    }\n    fn div(n: i32, d: i32) div_t;\n}\nfn main() i32 {\n    let d = unsafe div(17, 5);\n    let mut e = d;\n    e.q = e.q + d.rem;\n    if d.q != 3 || d.rem != 2 || e.q != 5 { return 1; }\n    return 0;\n}\n",
@@ -234,7 +234,7 @@ fn header_type_layout_at_compile_time(b: &mut h::ExitBatch) {
     src.push_str(
         "const N: usize = sizeof(div_t);\nstatic_assert(N == 8 && alignof(div_t) == 4, \"div_t\");\nconst Z: usize = type_info::<div_t>().size;\nstruct W { pub d: div_t, pub k: u8 }\nfn main() i32 {\n    let b = [0u8; sizeof(div_t)];\n    let c: [u8; sizeof([div_t; 2])] = unsafe zeroed::<[u8; 16]>();\n    if sizeof(b) != 8 || sizeof(c) != 16 || Z != 8 || sizeof(W) != 12 { return 1; }\n    let d = unsafe div(7, 2);\n    let two: [div_t; 2] = [d, d];\n    return (sizeof(two) != 16) as i32;\n}\n",
     );
-    b.add("sizeof, alignof and reflection of a header struct are compile-time values", src.as_str(), 0);
+    b.add("sizeof, alignof and reflection of a header struct are compile-time values", &src, 0);
 }
 
 fn header_type_value_uses(b: &mut h::ExitBatch) {
@@ -242,7 +242,7 @@ fn header_type_value_uses(b: &mut h::ExitBatch) {
     src.push_str(
         "fn id<T>(x: T) T { return x; }\nstruct W { pub t: div_t, pub k: i32 }\nfn main() i32 {\n    let a = div_t { rem: 7 };\n    let mut b = a;\n    b.rem = 8;\n    if a.rem != 7 || a.quot != 0 { return 1; }\n    let arr: [div_t; 3] = [a, b, id(a)];\n    let s: []div_t = arr;\n    if s[1].rem != 8 || s.len() != 3 { return 2; }\n    let mut v = Vector::<div_t>::new();\n    for i in 0..s.len() { v.push(s[i]); }\n    if v.len() != 3 || v.at(2).rem != 7 { return 3; }\n    let o = Option::<div_t>::Some(b);\n    let m = switch o { Some(x) => x.rem, None => 0 };\n    if m != 8 { return 4; }\n    let w = W { t: b, k: 4 };\n    if w.t.rem + w.k != 12 { return 5; }\n    let z = unsafe zeroed::<div_t>();\n    if z.quot != 0 || z.rem != 0 { return 6; }\n    let hz = W { k: 1 };\n    if hz.t.rem != 0 { return 7; }\n    return 0;\n}\n",
     );
-    b.add("copies, arrays, slices, vectors, options, generics and holders of a header struct", src.as_str(), 0);
+    b.add("copies, arrays, slices, vectors, options, generics and holders of a header struct", &src, 0);
 }
 
 fn header_type_compile_time_values(b: &mut h::ExitBatch) {
@@ -250,7 +250,7 @@ fn header_type_compile_time_values(b: &mut h::ExitBatch) {
     src.push_str(
         "const fn mk(n: i32) div_t {\n    let mut t = div_t { quot: n };\n    t.rem = t.quot + 1;\n    return t;\n}\nconst K: div_t = mk(3);\nconst S: i32 = mk(5).rem;\nstatic mut G: div_t = div_t { rem: 9 };\nfn main() i32 {\n    let k = K;\n    let g = unsafe G;\n    if k.quot != 3 || k.rem != 4 || S != 6 { return 1; }\n    if g.rem != 9 || g.quot != 0 { return 2; }\n    return 0;\n}\n",
     );
-    b.add("constants and statics of a header struct", src.as_str(), 0);
+    b.add("constants and statics of a header struct", &src, 0);
 }
 
 // The constants span the integer range: the C check spells each value as C reads it.
@@ -473,10 +473,10 @@ fn emitted_c_errors(b: h::DiffBuild) String {
         format("{}/build/debug/raw", dir).as_str(),
         format("{}/prog{}", dir, unsafe str::from_cstr(cli::binext())).as_str(),
         "",
-        log.as_str(),
+        &log,
     );
     assert(rc != 0, "the C compile fails");
-    return cli::read_text(log.as_str());
+    return cli::read_text(&log);
 }
 
 // A header that does not define the declared type fails the build at the type, and the emitted C's compile
@@ -863,9 +863,9 @@ fn header_type_reads_stat_of_a_file() {
         let c = root.byte_at(i);
         path.push_byte(
             if c == b'\\' {
-                b'/';
+                b'/'
             } else {
-                c;
+                c
             },
         );
     }
@@ -875,7 +875,7 @@ fn header_type_reads_stat_of_a_file() {
     src.push_str(
         "/data.bin\".ptr() as *const char, &mut s) != 0 {\n        return 1;\n    }\n    let mode: u32 = s.st_mode;\n    if (mode & 0o170000) != 0o100000 {\n        return 2;\n    }\n    if s.st_size != 5 {\n        return 3;\n    }\n    return 0;\n}\n",
     );
-    p.mkfile("main.spc", src.as_str());
+    p.mkfile("main.spc", &src);
     let r = p.compile("main.spc");
     if !r.ok() {
         eprintln("{}", r.text());
@@ -939,7 +939,7 @@ fn header_type_formats_canonically() {
     let pa = h::parse_ast_for_fmt(src);
     assert(pa.errors == 0, "the input parses");
     let mut out = String::new();
-    fbld::format_program(&pa.ast, src, 120, false, &mut out);
+    fbld::format_program(&pa.ast, src, 120, &mut out);
     if out.as_str() != want {
         eprintln("{}", out.as_str());
     }
@@ -947,7 +947,7 @@ fn header_type_formats_canonically() {
     let pb = h::parse_ast_for_fmt(want);
     assert(pb.errors == 0, "the canonical form parses");
     let mut again = String::new();
-    fbld::format_program(&pb.ast, want, 120, false, &mut again);
+    fbld::format_program(&pb.ast, want, 120, &mut again);
     assert(again.as_str() == want, "the canonical form is a fixed point");
 }
 

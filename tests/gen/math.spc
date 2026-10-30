@@ -67,9 +67,9 @@ fn draw(rng: &mut Rng, t64: bool) u64 {
     let pick = rng.below(6);
     if pick == 0 {
         return if t64 {
-            rng.next();
+            rng.next()
         } else {
-            rng.next() >> 32;
+            rng.next() >> 32
         };
     }
     if pick == 1 {
@@ -77,9 +77,9 @@ fn draw(rng: &mut Rng, t64: bool) u64 {
         // either sign; or the double closest to a multiple of pi/2, 6381956970095103 2^797.
         let k = (rng.next() >> 44 + rng.below(20)) as f64;
         let x = if rng.one_in(8) {
-            0x1.6ac5b262ca1ffp849;
+            0x1.6ac5b262ca1ffp849
         } else {
-            k * 1.5707963267948966;
+            k * 1.5707963267948966
         };
         let d = rng.below(5) as i64 - 2;
         let sign = rng.below(2);
@@ -155,9 +155,9 @@ const fn bits32(v: f32) u64 {
 
 const fn lanes(t64: bool) usize {
     return if t64 {
-        2;
+        2
     } else {
-        4;
+        4
     };
 }
 
@@ -167,9 +167,9 @@ extend MathCase {
     fn arg(self: &MathCase, second: bool, op: str, out: &mut String) {
         let n = lanes(self.t64);
         let v = if second {
-            &self.ys;
+            &self.ys
         } else {
-            &self.xs;
+            &self.xs
         };
         if second && self.f == 26 {
             out.format_into("Simd::<i32, {}>::from_array([", n);
@@ -177,9 +177,9 @@ extend MathCase {
                 out.format_into(
                     "{}{}::<i32>({})",
                     if k > 0 {
-                        ", ";
+                        ", "
                     } else {
-                        "";
+                        ""
                     },
                     op,
                     (v[k] as u32) as i32,
@@ -189,18 +189,18 @@ extend MathCase {
             return;
         }
         let (ft, ut) = if self.t64 {
-            ("f64", "u64");
+            ("f64", "u64")
         } else {
-            ("f32", "u32");
+            ("f32", "u32")
         };
         out.format_into("Simd::<{}, {}>::from_bits(Simd::<{}, {}>::from_array([", ft, n, ut, n);
         for k in 0..n {
             out.format_into(
                 "{}{}::<{}>({})",
                 if k > 0 {
-                    ", ";
+                    ", "
                 } else {
-                    "";
+                    ""
                 },
                 op,
                 ut,
@@ -236,9 +236,9 @@ extend MathModel {
                 tys.push(
                     String::from_str(
                         if c.t64 {
-                            "f64";
+                            "f64"
                         } else {
-                            "f32";
+                            "f32"
                         },
                     ),
                 );
@@ -254,19 +254,19 @@ extend MathModel {
             "static mut SINK: usize = 0;\n@noinline\nfn opr<T>(x: T) T {\n    unsafe SINK += 1;\n    return x;\n}\n",
         );
         s.push_str(
-            "fn b64(v: f64) u64 {\n    return if v != v { 1; } else { Simd::<f64, 2>::splat(v).to_bits()[0]; };\n}\n",
+            "fn b64(v: f64) u64 {\n    return if v != v { 1 } else { Simd::<f64, 2>::splat(v).to_bits()[0] };\n}\n",
         );
         s.push_str(
-            "fn b32(v: f32) u64 {\n    return if v != v { 1; } else { Simd::<f32, 2>::splat(v).to_bits()[0] as u64; };\n}\n",
+            "fn b32(v: f32) u64 {\n    return if v != v { 1 } else { Simd::<f32, 2>::splat(v).to_bits()[0] as u64 };\n}\n",
         );
         s.push_str("fn main() i32 {\n");
         for i in 0..self.cases.len() {
             let c = self.cases.at(i);
             let n = lanes(c.t64);
             let b = if c.t64 {
-                "b64";
+                "b64"
             } else {
-                "b32";
+                "b32"
             };
             s.format_into("    let r{} = ", i);
             c.call("opr", &mut s);
@@ -327,9 +327,9 @@ extend MathModel as Model {
                     let ns: [u64; 6] = [0, 1, 3, 0xFFFFFFFF, 0x7FFFFFFF, 0x80000000];
                     c.ys.push(
                         if rng.one_in(2) {
-                            unsafe ns[rng.below(6) as usize];
+                            unsafe ns[rng.below(6) as usize]
                         } else {
-                            rng.below(80);
+                            rng.below(80)
                         },
                     );
                 } else {
@@ -352,14 +352,14 @@ extend MathModel as Model {
             let mut ev = Vector::<str>::new();
             let mut tv = Vector::<str>::new();
             for i in 0..exprs.len() {
-                ev.push(exprs[i].as_str());
-                tv.push(tys[i].as_str());
+                ev.push(&exprs[i]);
+                tv.push(&tys[i]);
             }
             return h::const_runtime_parity(DECLS, ev[0..ev.len()], tv[0..tv.len()], ["--jobs=1"]);
         }
         let src = self.program();
-        let a = h::diff_build(src.as_str(), ["--jobs=1"]);
-        let b = h::diff_build(src.as_str(), ["--jobs=1", "SC_SIMD_SCALAR=1"]);
+        let a = h::diff_build(&src, ["--jobs=1"]);
+        let b = h::diff_build(&src, ["--jobs=1", "SC_SIMD_SCALAR=1"]);
         if !a.built || !b.built {
             return String::from_str("the program does not build");
         }
@@ -382,8 +382,8 @@ extend MathModel as Model {
             let mut ev = Vector::<str>::new();
             let mut tv = Vector::<str>::new();
             for i in 0..exprs.len() {
-                ev.push(exprs[i].as_str());
-                tv.push(tys[i].as_str());
+                ev.push(&exprs[i]);
+                tv.push(&tys[i]);
             }
             return h::parity_program(DECLS, ev[0..ev.len()], tv[0..tv.len()]);
         }

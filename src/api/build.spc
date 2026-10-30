@@ -58,9 +58,9 @@ pub struct HookDiagnostic {
 
 /// What a hook adds at a stage.
 pub struct HookOutput {
-    pub(module) hook: String,
-    pub(module) diags: Vector<HookDiagnostic>,
-    pub(module) arts: Vector<be::Artifact>,
+    hook: String,
+    diags: Vector<HookDiagnostic>,
+    arts: Vector<be::Artifact>,
 }
 
 extend HookOutput {
@@ -114,7 +114,7 @@ pub interface Hook {
 
     /// Before the analysis.
     fn before_analysis(self: &mut Self, b: &BuildInfo, out: &mut HookOutput) Result<Unit, ApiError> {
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     /// After the analysis, before the emission: the package graph.
@@ -122,13 +122,13 @@ pub interface Hook {
         Unit,
         ApiError
     > {
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     /// After the emission: the program's LIR, verified, every concrete function (generic instances
     /// included) and data definition the build emits. Runs only when `reads_ir`.
     fn after_ir(self: &mut Self, b: &BuildInfo, prog: &alir::Program, out: &mut HookOutput) Result<Unit, ApiError> {
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 
     /// After the link: the files the build made.
@@ -136,7 +136,7 @@ pub interface Hook {
         Unit,
         ApiError
     > {
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 
@@ -168,13 +168,13 @@ extend BackendHook as Hook {
     }
 
     pub fn after_ir(self: &mut Self, b: &BuildInfo, prog: &alir::Program, out: &mut HookOutput) Result<Unit, ApiError> {
-        out.arts = be::run(&mut self.b, prog, b.os.as_str(), b.isa.as_str())?;
-        return Result::<Unit, ApiError>::Ok(Unit {});
+        out.arts = be::run(&mut self.b, prog, &b.os, &b.isa)?;
+        return Ok(Unit {});
     }
 }
 
 // The installed hooks, sorted by id, and what their stages reported.
-pub(module) struct Hooks {
+struct Hooks {
     pub list: Vector<Box<dyn Hook>>,
     pub set: ext::HookSet,
     pub diags: Vector<HookDiagnostic>,
@@ -183,7 +183,7 @@ pub(module) struct Hooks {
 
 /// Hooks installed for the builds of this process (`install`) until this value drops.
 pub struct Installed {
-    pub(module) h: Box<Hooks>,
+    h: Box<Hooks>,
 }
 
 extend Installed as Free {
@@ -211,7 +211,7 @@ fn valid_id(id: str) bool {
 /// that is not valid or repeats, or when hooks are installed already.
 pub fn install(hooks: Vector<Box<dyn Hook>>) Result<Installed, ApiError> {
     if ext::hooks() != null {
-        return Result::<Installed, ApiError>::Err(ApiError::new(Code::InvalidArgument, "hooks are installed already"));
+        return Err(ApiError::new(Code::InvalidArgument, "hooks are installed already"));
     }
     let mut list = hooks;
     list.sort_by(
@@ -225,7 +225,7 @@ pub fn install(hooks: Vector<Box<dyn Hook>>) Result<Installed, ApiError> {
     for i in 0..list.len() {
         let id = list[i].id();
         if !valid_id(id) || i > 0 && list[i - 1].id() == id {
-            return Result::<Installed, ApiError>::Err(
+            return Err(
                 ApiError::new(Code::InvalidArgument, format("'{}' is not a hook id, or it repeats", id).as_str()),
             );
         }
@@ -235,7 +235,7 @@ pub fn install(hooks: Vector<Box<dyn Hook>>) Result<Installed, ApiError> {
     let mut h = Box::new(
         Hooks {
             list: list,
-            set: ext::HookSet { ctx: null, id: dutil::str_id(ident.as_str()) | 1, reads_ir: reads, run: run_stage },
+            set: ext::HookSet { ctx: null, id: dutil::str_id(&ident) | 1, reads_ir: reads, run: run_stage },
             diags: Vector::<HookDiagnostic>::new(),
             written: Vector::<String>::new(),
         },
@@ -243,7 +243,7 @@ pub fn install(hooks: Vector<Box<dyn Hook>>) Result<Installed, ApiError> {
     let hp = h.deref_mut() as *mut Hooks;
     unsafe (*hp).set.ctx = hp;
     ext::install(unsafe &(*hp).set);
-    return Result::<Installed, ApiError>::Ok(Installed { h: h });
+    return Ok(Installed { h: h });
 }
 
 // The package graph of `p`.
@@ -280,16 +280,14 @@ fn run_stage(ctx: *mut void, d: &ext::StageData) bool {
         dir: unsafe (*d.dir).clone(),
     };
     let mods = if d.stage == ext::STAGE_BEFORE_EMISSION {
-        modules_of(unsafe &*d.pkg);
+        modules_of(unsafe &*d.pkg)
     } else {
-        Vector::<ModuleInfo>::new();
+        Vector::<ModuleInfo>::new()
     };
     let mut prog = Option::<alir::Program>::None;
     if d.stage == ext::STAGE_AFTER_IR {
         let pb = unsafe (*d.prog).ptr_bytes;
-        prog = Option::<alir::Program>::Some(
-            alir::Program::of_package(replace(unsafe &mut *d.prog, lir::Package::new(pb))),
-        );
+        prog = Some(alir::Program::of_package(replace(unsafe &mut *d.prog, lir::Package::new(pb))));
     }
     let mut ok = true;
     for i in 0..hs.list.len() {
@@ -300,26 +298,26 @@ fn run_stage(ctx: *mut void, d: &ext::StageData) bool {
             arts: Vector::<be::Artifact>::new(),
         };
         let r = if d.stage == ext::STAGE_BEFORE_ANALYSIS {
-            h.before_analysis(&b, &mut out);
+            h.before_analysis(&b, &mut out)
         } else if d.stage == ext::STAGE_BEFORE_EMISSION {
-            h.before_emission(&b, mods.as_slice(), &mut out);
+            h.before_emission(&b, &mods, &mut out)
         } else if d.stage == ext::STAGE_AFTER_IR && h.reads_ir() {
-            h.after_ir(&b, prog.as_ref().unwrap(), &mut out);
+            h.after_ir(&b, prog.as_ref().unwrap(), &mut out)
         } else if d.stage == ext::STAGE_AFTER_IR {
-            Result::<Unit, ApiError>::Ok(Unit {});
+            Result::<Unit, ApiError>::Ok(Unit {})
         } else {
-            h.after_artifacts(&b, unsafe (*d.artifacts).as_slice(), &mut out);
+            h.after_artifacts(&b, unsafe (*d.artifacts).as_slice(), &mut out)
         };
         if let Err(e) = r {
             out.error(format("the hook failed: {}", e.message.as_str()).as_str());
         }
         if let Err(e) = be::sort_artifacts(&mut out.arts) {
-            out.error(e.message.as_str());
+            out.error(&e.message);
         } else {
-            let dir = loader::join2(loader::join2(b.dir.as_str(), "hooks").as_str(), out.hook.as_str());
+            let dir = loader::join2(loader::join2(&b.dir, "hooks").as_str(), &out.hook);
             for k in 0..out.arts.len() {
-                let path = loader::join2(dir.as_str(), out.arts[k].name.as_str());
-                if !publish(dir.as_str(), path.as_str(), &out.arts[k].bytes) {
+                let path = loader::join2(&dir, &out.arts[k].name);
+                if !publish(&dir, &path, &out.arts[k].bytes) {
                     out.error(format("cannot write '{}'", path.as_str()).as_str());
                 }
                 hs.written.push(path);
@@ -328,9 +326,9 @@ fn run_stage(ctx: *mut void, d: &ext::StageData) bool {
         for k in 0..out.diags.len() {
             let dg = &out.diags[k];
             let sev = if dg.severity == SEV_ERROR {
-                "error";
+                "error"
             } else {
-                "warning";
+                "warning"
             };
             if dg.file.len() != 0 {
                 eprintln("{}: {}: hook '{}': {}", dg.file.as_str(), sev, dg.hook.as_str(), dg.message.as_str());
@@ -438,10 +436,8 @@ pub struct Report {
 // diagnostics are printed).
 fn manifest<'a>() Result<mf::Manifest<'a>, ApiError> {
     return switch mf::load("build.toml", false) {
-        Some(m) => Result::<mf::Manifest, ApiError>::Ok(m),
-        None => Result::<mf::Manifest, ApiError>::Err(
-            ApiError::new(Code::InvalidArgument, "the current directory holds no usable build.toml"),
-        ),
+        Some(m) => Ok(m),
+        None => Err(ApiError::new(Code::InvalidArgument, "the current directory holds no usable build.toml")),
     };
 }
 
@@ -466,12 +462,10 @@ fn context<'a>(m: &mf::Manifest, req: &'a Request) bsys::BuildCtx<'a> {
 /// and the sources; writes nothing and starts no process.
 pub fn plan(req: &Request) Result<Plan, ApiError> {
     let m = manifest()?;
-    let prof = bsys::resolve_profile(&m, req.profile.as_str());
+    let prof = bsys::resolve_profile(&m, &req.profile);
     let pi = m.profile_index(prof);
     if pi < 0 {
-        return Result::<Plan, ApiError>::Err(
-            ApiError::new(Code::InvalidArgument, format("unknown profile '{}'", prof).as_str()),
-        );
+        return Err(ApiError::new(Code::InvalidArgument, format("unknown profile '{}'", prof).as_str()));
     }
     let pr = m.profiles.at(pi as usize);
     let mut feats = Vector::<String>::new();
@@ -518,14 +512,7 @@ pub fn plan(req: &Request) Result<Plan, ApiError> {
             },
         );
     }
-    let p = loader::package_load_rooted(
-        m.root.as_str(),
-        loader::dirname_of(m.root.as_str()),
-        "",
-        req.std_dir.as_str(),
-        false,
-        m.target,
-    );
+    let p = loader::package_load_rooted(&m.root, loader::dirname_of(&m.root), "", &req.std_dir, false, m.target);
     p.ensure_index();
     out.modules = modules_of(&p);
     let h = ext::hooks();
@@ -535,7 +522,7 @@ pub fn plan(req: &Request) Result<Plan, ApiError> {
             out.hooks.push(String::from_str(hs.list[i].id()));
         }
     }
-    return Result::<Plan, ApiError>::Ok(out);
+    return Ok(out);
 }
 
 /// Build every target of the project in the current directory, as `super-c build` does, with the installed
@@ -544,14 +531,12 @@ pub fn plan(req: &Request) Result<Plan, ApiError> {
 pub fn build(req: &Request) Result<Report, ApiError> {
     let m = manifest()?;
     if !bsys::check_features(&m, "") {
-        return Result::<Report, ApiError>::Err(
-            ApiError::new(Code::InvalidArgument, "the manifest names a CPU feature the target does not have"),
-        );
+        return Err(ApiError::new(Code::InvalidArgument, "the manifest names a CPU feature the target does not have"));
     }
     let cx = context(&m, req);
     let mut rep = ext::Report { targets: Vector::<ext::TargetReport>::new(), processes: 0 };
     ext::set_report(&mut rep);
-    let rc = bsys::manifest_build_all(&m, req.profile.as_str(), "", false, &cx);
+    let rc = bsys::manifest_build_all(&m, &req.profile, "", false, &cx);
     ext::set_report(null);
     let mut out = Report {
         ok: rc == 0,
@@ -594,5 +579,5 @@ pub fn build(req: &Request) Result<Report, ApiError> {
         out.hook_artifacts.sort();
         out.hook_artifacts.dedup();
     }
-    return Result::<Report, ApiError>::Ok(out);
+    return Ok(out);
 }

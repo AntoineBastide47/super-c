@@ -69,7 +69,7 @@ extend<T> ChannelState<T> {
         for i in 0..self.count {
             let idx = (self.head + i) % self.cap;
             unsafe ns[i] = unsafe {
-                self.slots[idx];
+                self.slots[idx]
             };
         }
         if self.heap_ring {
@@ -97,7 +97,7 @@ extend<T> ChannelState<T> {
     /// it. The smallest heap ring is twice the inline one. `pub` for linkage.
     pub fn pop(self: &mut ChannelState<T>) T {
         let v = unsafe {
-            self.slots[self.head];
+            self.slots[self.head]
         };
         self.head = (self.head + 1) % self.cap;
         self.count = self.count - 1;
@@ -246,9 +246,9 @@ extend<T> Channel<T> {
     /// A new channel buffering up to `capacity` items (at least one). A `send` into a full buffer waits.
     pub fn bounded(capacity: usize) Channel<T> {
         let cap = if capacity == 0 {
-            1usize;
+            1usize
         } else {
-            capacity;
+            capacity
         };
         return Channel::<T> { inner: new_block::<T>(cap, false) };
     }
@@ -319,7 +319,7 @@ extend<T> Sender<T> {
             {
                 let s = g.get();
                 if s.closed || s.receivers == 0 {
-                    return SendResult::<T>::Rejected(value);
+                    return Rejected(value);
                 }
                 ready = s.count < s.cap || s.unbounded;
             }
@@ -330,19 +330,19 @@ extend<T> Sender<T> {
                 runtime::trace("channel: send blocks (full)", runtime::current_id());
             }
             if deadline != 0 && time::remaining_ns(deadline) == 0 {
-                return SendResult::<T>::Rejected(value);
+                return Rejected(value);
             }
             let r = unsafe inner.not_full.wait_raw(g.lock_handle(), deadline, true, runtime::WK_CHANNEL_SEND);
             if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
                 // Cancelled: the send wait is removed and the unsent payload is handed back, so the
                 // caller's cancellation cleanup frees it exactly once.
                 let _ = runtime::cancel_after_wait(true);
-                return SendResult::<T>::Rejected(value);
+                return Rejected(value);
             }
         }
         g.get_mut().push(value);
         inner.not_empty.notify_one();
-        return SendResult::<T>::Sent;
+        return Sent;
     }
     /// Send without waiting. Returns `Rejected(value)` if the buffer is full or the channel is closed.
     pub fn try_send(self: &Sender<T>, value: T) SendResult<T> {
@@ -351,12 +351,12 @@ extend<T> Sender<T> {
         {
             let s = g.get();
             if s.closed || s.receivers == 0 || s.count >= s.cap && !s.unbounded {
-                return SendResult::<T>::Rejected(value);
+                return Rejected(value);
             }
         }
         g.get_mut().push(value);
         inner.not_empty.notify_one();
-        return SendResult::<T>::Sent;
+        return Sent;
     }
     /// Send every item in `items`, in order, taking the lock once per run of free slots instead of once per
     /// item; returns how many were sent. `items` is left EMPTY when they all went; when the channel closes or
@@ -409,7 +409,7 @@ extend<T> Sender<T> {
                             n = n + 1;
                         },
                         None => {},
-                    };
+                    }
                 }
                 sent = sent + n;
                 // Each item delivered can admit one receiver.
@@ -487,24 +487,24 @@ extend<T> Receiver<T> {
                 break;
             }
             if done {
-                return Option::<T>::None;
+                return None;
             }
             if runtime::tracing() {
                 runtime::trace("channel: recv blocks (empty)", runtime::current_id());
             }
             if deadline != 0 && time::remaining_ns(deadline) == 0 {
-                return Option::<T>::None;
+                return None;
             }
             let r = unsafe inner.not_empty.wait_raw(g.lock_handle(), deadline, true, runtime::WK_CHANNEL_RECV);
             if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
                 let _ = runtime::cancel_after_wait(true);
                 // Cancelled: the receive wait is removed and no value is taken.
-                return Option::<T>::None;
+                return None;
             }
         }
         let v = g.get_mut().pop();
         inner.not_full.notify_one();
-        return Option::<T>::Some(v);
+        return Some(v);
     }
     /// Take an item without blocking, or `None` if the buffer is empty (also `None` if closed and empty).
     pub fn try_recv(self: &Receiver<T>) Option<T> {
@@ -513,12 +513,12 @@ extend<T> Receiver<T> {
         {
             let s = g.get();
             if s.count == 0 {
-                return Option::<T>::None;
+                return None;
             }
         }
         let v = g.get_mut().pop();
         inner.not_full.notify_one();
-        return Option::<T>::Some(v);
+        return Some(v);
     }
     /// Take up to `max` buffered items in ONE lock acquisition, appending them to `out` in order; returns how
     /// many were taken. Waits like `recv` until at least one is there, and returns 0 once the channel is
@@ -561,9 +561,9 @@ extend<T> Receiver<T> {
         }
         let sm = g.get_mut();
         let n = if max < sm.count {
-            max;
+            max
         } else {
-            sm.count;
+            sm.count
         };
         // One growth for the batch, while the lock is held for as few instructions as possible.
         out.reserve(n);

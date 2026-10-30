@@ -137,7 +137,7 @@ extend TuEmit {
             self.skipped += 1;
             return true;
         }
-        let key = fnv(nm.as_str());
+        let key = fnv(&nm);
         let st = switch self.state.get(&key) {
             Some(v) => *v,
             None => 0u64,
@@ -152,7 +152,7 @@ extend TuEmit {
         if nb < 0 {
             self.skipped += 1;
         } else {
-            self.agg_chunk(it, nm.as_str(), nb as usize);
+            self.agg_chunk(it, &nm, nb as usize);
         }
         self.state.insert(key, 2);
         return true;
@@ -166,9 +166,9 @@ extend TuEmit {
         let is_enum = unsafe (*da).at_const(it.decl).kind == NodeKind::NODE_ENUM;
         let mut body = self.bodies.pop().unwrap_or(String::new());
         let ok = if is_enum {
-            self.enum_body(it, nm, &mut body);
+            self.enum_body(it, nm, &mut body)
         } else {
-            self.struct_body(it, nm, &mut body);
+            self.struct_body(it, nm, &mut body)
         };
         self.mg.pop_subs(nb);
         if ok {
@@ -236,7 +236,7 @@ extend TuEmit {
                 let mut nm = String::new();
                 self.mg.closure_sym(y.module, y.as_data.decl, &mut nm);
                 nm.push_str("_env");
-                let key = fnv(nm.as_str());
+                let key = fnv(&nm);
                 let st = switch self.state.get(&key) {
                     Some(v) => *v,
                     None => 0u64,
@@ -247,12 +247,12 @@ extend TuEmit {
                 self.state.insert(key, 1);
                 self.env_defined.push(key);
                 self.fwd2.push_str("typedef struct ");
-                self.fwd2.push_str(nm.as_str());
+                self.fwd2.push_str(&nm);
                 self.fwd2.push_str(" ");
-                self.fwd2.push_str(nm.as_str());
+                self.fwd2.push_str(&nm);
                 self.fwd2.push_str(";\n");
                 let mut body = String::from_str("struct ");
-                body.push_str(nm.as_str());
+                body.push_str(&nm);
                 body.push_str(" { ");
                 let mut ok = true;
                 let mut cmat: usize = 0;
@@ -274,7 +274,7 @@ extend TuEmit {
                     let csp = unsafe (*ca).caps_of(cf)[k as usize].name;
                     let mut cnm = String::new();
                     self.mg.ident(y.module, csp, &mut cnm);
-                    if !self.mg.env_field(y.module, cty, cnm.as_str(), unsafe &*cf, k, &mut body) {
+                    if !self.mg.env_field(y.module, cty, &cnm, unsafe &*cf, k, &mut body) {
                         ok = false;
                         break;
                     }
@@ -288,7 +288,7 @@ extend TuEmit {
                 }
                 body.push_str("};\n");
                 if ok {
-                    self.finish_chunk(&body, nm.as_str(), y.module, false);
+                    self.finish_chunk(&body, &nm, y.module, false);
                 } else {
                     self.skipped += 1;
                     self.refused += 1;
@@ -332,9 +332,9 @@ extend TuEmit {
                 self.lay_attrs.insert(
                     k,
                     if packed {
-                        old | 1;
+                        old | 1
                     } else {
-                        al << 1 | old & 1;
+                        al << 1 | old & 1
                     },
                 );
             }
@@ -465,7 +465,7 @@ extend TuEmit {
                 body.push_u64(force_align);
                 body.push_str(") ");
             }
-            if !self.mg.ctype(it.m, fty, fnm.as_str(), body) {
+            if !self.mg.ctype(it.m, fty, &fnm, body) {
                 return false;
             }
             body.push_str(";\n");
@@ -511,9 +511,9 @@ extend TuEmit {
                 }
                 at.size = lo.size;
                 at.align = if packed {
-                    1;
+                    1
                 } else {
-                    lo.align;
+                    lo.align
                 };
             }
             v.push(at);
@@ -747,7 +747,7 @@ extend TuEmit {
                     fnm.push_str("_");
                     fnm.push_u64(k);
                 }
-                if !self.mg.ctype(it.m, pty, fnm.as_str(), body) {
+                if !self.mg.ctype(it.m, pty, &fnm, body) {
                     return false;
                 }
                 body.push_str("; ");
@@ -771,7 +771,7 @@ extend TuEmit {
         if !self.item_name(it, &mut nm) {
             return;
         }
-        self.emit_fwd_named(it.m, it.decl, nm.as_str());
+        self.emit_fwd_named(it.m, it.decl, &nm);
     }
 
     fn emit_fwd_named(self: &mut Self, m: ModuleId, decl: NodeId, nm: str) {
@@ -786,7 +786,7 @@ extend TuEmit {
                 return;
             },
             None => {},
-        };
+        }
         self.fwds.insert(fk, 1);
         if n.kind == NodeKind::NODE_ENUM {
             // Payload-less enums typedef in their own guarded block; payload enums fwd as structs.
@@ -829,7 +829,7 @@ extend TuEmit {
             self.skipped += 1;
             return true;
         }
-        let key = fnv(nm.as_str());
+        let key = fnv(&nm);
         let st = switch self.state.get(&key) {
             Some(v) => *v,
             None => 0u64,
@@ -843,10 +843,10 @@ extend TuEmit {
             return true;
         }
         self.state.insert(key, 1);
-        self.emit_fwd_named(inst.module, inst.decl, nm.as_str());
+        self.emit_fwd_named(inst.module, inst.decl, &nm);
         let nb = self.mg.push_generics(inst.module, gens, pm, inst);
         let it = AggItem { m: inst.module, decl: inst.decl, amod: pm, aty: TYPE_NONE };
-        self.agg_chunk(&it, nm.as_str(), nb);
+        self.agg_chunk(&it, &nm, nb);
         self.state.insert(key, 2);
         return true;
     }

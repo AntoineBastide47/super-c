@@ -47,7 +47,7 @@ struct CSec {
 fn sec_info(o: &ob::Obj, k: u8, name: &mut String) u32 {
     let al = o.secs[k as usize].align_log2 as u32 + 1 << 20;
     if k >= ob::S_COUNT {
-        name.push_str(o.secs[k as usize].name.as_str());
+        name.push_str(&o.secs[k as usize].name);
         if o.secs[k as usize].code {
             return SCN_CODE | SCN_EXEC | SCN_READ | al;
         }
@@ -82,9 +82,9 @@ fn sec_info(o: &ob::Obj, k: u8, name: &mut String) u32 {
 // associative to section number `assoc` unless it is 0.
 fn unwind_pair(secs: &mut Vector<CSec>, xdata: Vector<u8>, assoc: u32) {
     let (fl, sel) = if assoc != 0 {
-        (SCN_LNK_COMDAT, SEL_ASSOCIATIVE);
+        (SCN_LNK_COMDAT, SEL_ASSOCIATIVE)
     } else {
-        (0u32, 0u32);
+        (0u32, 0u32)
     };
     let n = xdata.len() as u64;
     secs.push(
@@ -139,9 +139,9 @@ fn put_sym(out: &mut Vector<u8>, strs: &mut Vector<u8>, name: str, value: u32, s
         for i in 0..8usize {
             out.push(
                 if i < name.len() {
-                    name.byte_at(i);
+                    name.byte_at(i)
                 } else {
-                    0;
+                    0
                 },
             );
         }
@@ -205,9 +205,9 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
                 rels: Vector::<u8>::new(),
                 nrel: 0,
                 sel: if comdat {
-                    SEL_NODUPLICATES;
+                    SEL_NODUPLICATES
                 } else {
-                    0u32;
+                    0u32
                 },
                 assoc: 0,
             },
@@ -241,9 +241,9 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
                 &mut secs,
                 xdata,
                 if secs[parts[q].hdr as usize - 1].sel != 0 {
-                    parts[q].hdr;
+                    parts[q].hdr
                 } else {
-                    0u32;
+                    0u32
                 },
             );
         }
@@ -260,9 +260,9 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
         let mut key: u64 = 0;
         if split != 0 {
             let q = if y.sec == ob::NOSEC {
-                ob::NONE32;
+                ob::NONE32
             } else {
-                ob::part_at(&parts, &first, y.sec, y.off);
+                ob::part_at(&parts, &first, y.sec, y.off)
             };
             let lead = q != ob::NONE32 && parts[q as usize].sym == k as u32;
             key = q as u64 << 1 | (!lead) as u64;
@@ -283,15 +283,15 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
         let at = (rl.off as u64 - parts[q].lo) as u32;
         let ty = if rl.kind == x::R_ABS64 {
             add_field(&mut secs.index_mut(s).bytes, at, 8, rl.addend as u64);
-            REL_ADDR64;
+            REL_ADDR64
         } else if rl.kind == x::R_SECREL || rl.kind == ob::R_SECOFF32 {
             add_field(&mut secs.index_mut(s).bytes, at, 4, rl.addend as u64);
-            REL_SECREL;
+            REL_SECREL
         } else {
             assert(rl.kind == x::R_PC32 || rl.kind == x::R_PLT32, "coff: a relocation kind ELF alone takes");
             // REL32 is relative to the field's end: the addend's 4 bytes back.
             add_field(&mut secs.index_mut(s).bytes, at, 4, (rl.addend + 4) as u64);
-            REL_REL32;
+            REL_REL32
         };
         put_rel(&mut secs.index_mut(s).rels, at, symix[rl.sym as usize], ty);
         secs.index_mut(s).nrel += 1;
@@ -308,9 +308,9 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
         ob::w32(
             &mut p.bytes,
             if per_fn {
-                0u32;
+                0u32
             } else {
-                xat;
+                xat
             },
         );
         put_rel(&mut p.rels, at, symix[fr.sym as usize], REL_ADDR32NB);
@@ -340,9 +340,9 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
         let ovf = secs[k].nrel > 0xFFFF;
         rat.push(
             if secs[k].nrel != 0 {
-                at;
+                at
             } else {
-                0;
+                0
             },
         );
         at += 10 * (secs[k].nrel + ovf as u32);
@@ -365,9 +365,9 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
             for i in 0..8usize {
                 out.push(
                     if i < nm.len() {
-                        nm.byte_at(i);
+                        nm.byte_at(i)
                     } else {
-                        0;
+                        0
                     },
                 );
             }
@@ -395,18 +395,18 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
         ob::w16(
             out,
             if ovf {
-                0xFFFF;
+                0xFFFF
             } else {
-                s.nrel;
+                s.nrel
             },
         );
         ob::w16(out, 0);
         ob::w32(
             out,
             s.flags | if ovf {
-                SCN_NRELOC_OVFL;
+                SCN_NRELOC_OVFL
             } else {
-                0;
+                0
             },
         );
     }
@@ -428,14 +428,14 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
     // Section symbols, each with its auxiliary entry: the length and the relocation count.
     for k in 0..nsec as usize {
         let s = &secs[k];
-        put_sym(out, &mut strs, s.name.as_str(), 0, k as u32 + 1, 0, CLASS_STATIC, 1);
+        put_sym(out, &mut strs, &s.name, 0, k as u32 + 1, 0, CLASS_STATIC, 1);
         ob::w32(out, s.size as u32);
         ob::w16(
             out,
             if s.nrel > 0xFFFF {
-                0xFFFF;
+                0xFFFF
             } else {
-                s.nrel;
+                s.nrel
             },
         );
         ob::w16(out, 0);
@@ -450,9 +450,9 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
         let k = (order[i] & 0xFFFFFFFF) as usize;
         let y = o.syms[k];
         let q = if y.sec == ob::NOSEC {
-            ob::NONE32;
+            ob::NONE32
         } else {
-            ob::part_at(&parts, &first, y.sec, y.off);
+            ob::part_at(&parts, &first, y.sec, y.off)
         };
         let global = y.sec == ob::NOSEC || (y.flags & ob::SF_GLOBAL) != 0;
         put_sym(
@@ -460,24 +460,24 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
             &mut strs,
             o.name_of(k as u32),
             if q == ob::NONE32 {
-                y.off as u32;
+                y.off as u32
             } else {
-                (y.off - parts[q as usize].lo) as u32;
+                (y.off - parts[q as usize].lo) as u32
             },
             if q == ob::NONE32 {
-                0;
+                0
             } else {
-                parts[q as usize].hdr;
+                parts[q as usize].hdr
             },
             if (y.flags & ob::SF_FUNC) != 0 {
-                0x20;
+                0x20
             } else {
-                0;
+                0
             },
             if global {
-                CLASS_EXTERNAL;
+                CLASS_EXTERNAL
             } else {
-                CLASS_STATIC;
+                CLASS_STATIC
             },
             0,
         );

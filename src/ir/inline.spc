@@ -342,11 +342,11 @@ fn unify(
             // A count binds a bare length parameter as a value of that parameter's type.
             let ly = *(unsafe &*p.module_ast_const(km)).type_at(y.as_data.arr.len);
             let zl = if z.arr_sym() {
-                z.as_data.arr.len;
+                z.as_data.arr.len
             } else if ly.kind == TypeKind::TYPE_GENERIC {
-                ca.const_value(z.as_data.arr.len, p.const_param_bt(ly.module, ly.as_data.decl));
+                ca.const_value(z.as_data.arr.len, p.const_param_bt(ly.module, ly.as_data.decl))
             } else {
-                TYPE_NONE;
+                TYPE_NONE
             };
             unify(pkg, km, y.as_data.arr.len, cm, zl, binds, depth + 1);
         }
@@ -402,7 +402,7 @@ fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bi
                     break;
                 }
             }
-            r;
+            r
         },
         TYPE_CONST_EXPR => {
             // A form over const-generic parameters (`{N / 2}`): its value under the bindings.
@@ -428,7 +428,7 @@ fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bi
             if ok && l.finish(v, lay::target_for(p.arch).ptr == 4, &mut out) {
                 r = ca.const_value(cval_bits(out), l.to);
             }
-            r;
+            r
         },
         TYPE_FIELD_PROJECTION | TYPE_ERROR => TYPE_NONE,
         TYPE_FUNCTION => {
@@ -452,7 +452,7 @@ fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bi
             } else if binds.len() == 0 {
                 r = kt;
             }
-            r;
+            r
         },
         TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY | TYPE_SIMD | TYPE_MASK => {
             let e = xty(pkg, km, y.as_data.elem, cm, binds, depth + 1);
@@ -467,7 +467,7 @@ fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bi
                 nt.as_data.elem = e;
                 r = ca.intern_type(nt);
             }
-            r;
+            r
         },
         TYPE_INSTANCE | TYPE_DYN => {
             let inst = *ka.instance(y.as_data.inst);
@@ -486,7 +486,7 @@ fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bi
             } else if ok {
                 r = ca.intern_instance(inst.module, inst.decl, &na[0], inst.n);
             }
-            r;
+            r
         },
         _ => ca.intern_type(y),
     };
@@ -647,7 +647,7 @@ extend InlineCtx {
                 return self.rl.at((*v) as usize);
             },
             None => {},
-        };
+        }
         let k = unsafe &(*ki).body;
         let mut drops = false;
         for i in 0..k.blocks.len() {
@@ -720,7 +720,7 @@ extend InlineCtx {
             None => {
                 return REJ_BASE | IJ_NOT_FN as u64;
             },
-        };
+        }
     }
 }
 
@@ -811,11 +811,11 @@ const fn const_value(p: &loader::Package, b: &ir::CoreBody, c: &ir::Constant, v:
     }
     // An inlined constant's span indexes its own module (`item` marks it).
     let m = if c.item.node != NODE_NONE {
-        c.item.module;
+        c.item.module
     } else {
-        b.module;
+        b.module
     };
-    return c.int_value(p.modules.at(m as usize).source.as_str(), v);
+    return c.int_value(&p.modules.at(m as usize).source, v);
 }
 
 // Whether a switch may read scrutinee `o` of `b` in place of its temp: a constant whose `val`, the
@@ -1676,7 +1676,7 @@ pub(package) fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineSt
                 }
             },
             _ => {},
-        };
+        }
         if cix < 0 {
             body_types(k, &mut probe);
             tymap.clear();
@@ -1716,9 +1716,9 @@ pub(package) fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineSt
             continue;
         }
         let tyr = if cix >= 0 {
-            cx.xm_tys[cx.xm_to[cix as usize] as usize..pool_end(&cx.xm_to, cx.xm_tys.len(), cix as usize)];
+            cx.xm_tys[cx.xm_to[cix as usize] as usize..pool_end(&cx.xm_to, cx.xm_tys.len(), cix as usize)]
         } else {
-            tys[0..tys.len()];
+            tys[0..tys.len()]
         };
         // ---- call-boundary shapes: exact match, or the one implicit autoref/deref adjustment ---
         // (the C call emitter applies autoref, Box hops, and array-to-slice wraps; only the
@@ -2708,9 +2708,9 @@ fn writes_stmt(b: &ir::CoreBody, st: &ir::Statement, w: &mut Writes) {
     w.rv.set(
         x,
         if pl.proj_len == 0 && w.rv[x] == 0 {
-            st.rvalue + 1;
+            st.rvalue + 1
         } else {
-            WR_MULTI;
+            WR_MULTI
         },
     );
     let rv = *b.rvalues.at(st.rvalue as usize);
@@ -2948,9 +2948,9 @@ fn splice(
         pl.proj_start += j0;
         pl.ty = mty(tymap, pl.ty);
         let sub = if x >= k.returns && x < k.returns + k.args {
-            pf[(x - k.returns) as usize] >> SUB_SHIFT;
+            pf[(x - k.returns) as usize] >> SUB_SHIFT
         } else {
-            SUB_NONE;
+            SUB_NONE
         };
         if sub == SUB_PLACE || sub == SUB_REF {
             // The argument's path, then the parameter's: past its dereference for a receiver.
@@ -3028,9 +3028,9 @@ fn splice(
         o.ty = mty(tymap, o.ty);
         let mut v: i64 = 0;
         let px = if o.kind == ir::OP_CONST {
-            ir::IR_NONE;
+            ir::IR_NONE
         } else {
-            k.places.at(o.data as usize).base;
+            k.places.at(o.data as usize).base
         };
         let mut fo = ir::IR_NONE;
         if px >= k.returns && px < k.returns + k.args && agg[(px - k.returns) as usize] != ir::IR_NONE && k.places.at(
@@ -3049,9 +3049,9 @@ fn splice(
             // A field of an argument built once from a constant or a scalar temporary: that value.
             let f = *b.operands.at(fo as usize);
             o.kind = if f.kind == ir::OP_CONST {
-                ir::OP_CONST;
+                ir::OP_CONST
             } else {
-                ir::OP_COPY;
+                ir::OP_COPY
             };
             o.data = f.data;
         } else if (o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE) && k.places.at(o.data as usize).proj_len == 0 && param_value(
@@ -3122,9 +3122,9 @@ fn splice(
         let e = k.oper_pool[i];
         b.oper_pool.push(
             if e == ir::IR_NONE {
-                e;
+                e
             } else {
-                e + o0;
+                e + o0
             },
         );
     }
@@ -3132,9 +3132,9 @@ fn splice(
         let e = k.dest_pool[i];
         b.dest_pool.push(
             if e == ir::IR_NONE {
-                e;
+                e
             } else {
-                e + p0;
+                e + p0
             },
         );
     }
@@ -3378,9 +3378,9 @@ fn known_variant(b: &ir::CoreBody, pl0: u32, s0: usize, l0: u32, bl0: usize, cb:
             return none;
         }
         let rv = if b.places.at(pl as usize).base >= l0 {
-            temp_source(b, pl, s0, l0, bl0);
+            temp_source(b, pl, s0, l0, bl0)
         } else {
-            block_source(b, pl, cb);
+            block_source(b, pl, cb)
         };
         if rv.kind == ir::RV_AGGREGATE && rv.c == ir::AGG_VARIANT {
             return rv.item;

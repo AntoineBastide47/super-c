@@ -109,7 +109,7 @@ fn push_shutdown_exit(ses: &mut String, id: i64) {
 fn read_out(root: str) String {
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
-    return loader::read_file(op.as_str()).unwrap();
+    return loader::read_file(&op).unwrap();
 }
 
 // Lifecycle, validation, cancellation.
@@ -149,7 +149,7 @@ fn lsp_lifecycle_and_cancellation() {
     b.push_str("{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"textDocument/hover\",\"params\":{}}");
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 14);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     let rc = lsp_run(root);
     assert_eq(rc, 0);
@@ -183,7 +183,7 @@ fn lsp_completion_attributes() {
     // Right after '@'.
     push_completion(&mut ses, root, "src/main.spc", 2, 0, 1);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -217,7 +217,7 @@ fn lsp_completion_attribute_args() {
     // Inside @platform(...)
     push_completion(&mut ses, root, "src/main.spc", 2, 0, 13);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -242,7 +242,7 @@ fn lsp_completion_derive_args() {
     // Inside @derive(...)
     push_completion(&mut ses, root, "src/main.spc", 2, 0, 11);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -276,7 +276,7 @@ fn lsp_completion_derive_visibility() {
     // Inside @derive(...)
     push_completion(&mut ses, root, "src/main.spc", 2, 2, 11);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -314,7 +314,7 @@ fn lsp_attribute_expression_names() {
     b.push_str("/src/main.spc\"},\"position\":{\"line\":2,\"character\":9},\"newName\":\"BREADTH\"}}");
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -341,7 +341,7 @@ fn lsp_attribute_expression_names() {
 
 // Completion: lexical scope, member privacy, labels, imports.
 
-const SCOPE_SRC: str = "fn first() i32 {\n    let alpha = 1;\n    return alpha;\n}\n\nfn second() i32 {\n    let beta = 2;\n    return beta;\n}\n\nfn third(o: Option<i32>) i32 {\n    switch o {\n        Some(inner) => {\n            return inner;\n        },\n        None => {},\n    };\n    return 0;\n}\n";
+const SCOPE_SRC: str = "fn first() i32 {\n    let alpha = 1;\n    return alpha;\n}\n\nfn second() i32 {\n    let beta = 2;\n    return beta;\n}\n\nfn third(o: Option<i32>) i32 {\n    switch o {\n        Some(inner) => {\n            return inner;\n        },\n        None => {},\n    }\n    return 0;\n}\n";
 
 @test
 fn lsp_completion_lexical_scope() {
@@ -358,7 +358,7 @@ fn lsp_completion_lexical_scope() {
     // In third(), after the switch.
     push_completion(&mut ses, root, "src/lib.spc", 3, 16, 4);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -390,7 +390,7 @@ fn lsp_completion_member_privacy() {
     // After `b.`.
     push_completion(&mut ses, root, "src/main.spc", 2, 4, 14);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -416,7 +416,7 @@ fn lsp_completion_labels() {
     // Right after the label quote.
     push_completion(&mut ses, root, "src/main.spc", 2, 2, 15);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -437,7 +437,7 @@ fn lsp_completion_import_paths() {
     // After `import `.
     push_completion(&mut ses, root, "src/main.spc", 2, 0, 7);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -477,7 +477,7 @@ fn lsp_rename_conflicts_and_prepare() {
     b.push_str("/src/main.spc\"},\"position\":{\"line\":0,\"character\":4},\"newName\":\"baz\"}}");
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -512,7 +512,7 @@ fn lsp_rename_interface_relations() {
     // Implementation navigation from the interface name.
     push_req_at(&mut ses, root, "src/main.spc", 3, "textDocument/implementation", 0, 11);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -582,7 +582,7 @@ fn lsp_navigation_features() {
     );
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 20);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -744,7 +744,7 @@ fn lsp_incremental_sync() {
     );
     push_formatting(&mut ses, root, "src/main.spc", 7);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -786,14 +786,14 @@ fn lsp_incremental_matches_full_sync() {
             let mut chg = String::from_str("[{\"text\":");
             json::dump_escaped(edited, &mut chg);
             chg.push_str("}]");
-            push_did_change_ranged(&mut ses, root, "src/main.spc", 2, chg.as_str());
+            push_did_change_ranged(&mut ses, root, "src/main.spc", 2, &chg);
         }
         push_formatting(&mut ses, root, "src/main.spc", 7);
         push_shutdown_exit(&mut ses, 9);
-        p.mkfile("session.bin", ses.as_str());
+        p.mkfile("session.bin", &ses);
         assert_eq(lsp_run(root), 0);
         let out = read_out(root);
-        outs.push(String::from_str(response_of(out.as_str(), "\"id\":7")));
+        outs.push(String::from_str(response_of(&out, "\"id\":7")));
     }
     assert(outs.at(0).as_str().contains("let t = 2;"), "the formatting edit holds the edited buffer");
     assert(outs.at(0).as_str() == outs.at(1).as_str());
@@ -818,7 +818,7 @@ fn lsp_pull_diagnostics() {
     );
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -843,10 +843,10 @@ fn lsp_pull_diagnostics() {
     );
     frame(&mut ses2, &b);
     push_shutdown_exit(&mut ses2, 9);
-    p.mkfile("session.bin", ses2.as_str());
+    p.mkfile("session.bin", &ses2);
     assert_eq(lsp_run(root), 0);
     let out2 = read_out(root);
-    let resp2 = response_of(out2.as_str(), "\"id\":3");
+    let resp2 = response_of(&out2, "\"id\":3");
     assert(resp2.contains("\"kind\":\"unchanged\""));
     assert(!resp2.contains("\"items\""));
 }
@@ -876,7 +876,7 @@ fn lsp_delta_semantic_tokens() {
     );
     chg.push_str(ins);
     chg.push_str("\"}]");
-    push_did_change_ranged(&mut ses, root, "src/main.spc", 2, chg.as_str());
+    push_did_change_ranged(&mut ses, root, "src/main.spc", 2, &chg);
     b.clear();
     b.format_into(
         "{{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/semanticTokens/full/delta\",\"params\":{{\"textDocument\":{{\"uri\":\"file://{}/src/main.spc\"}},\"previousResultId\":\"1\"}}}}",
@@ -884,7 +884,7 @@ fn lsp_delta_semantic_tokens() {
     );
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out_a = read_out(root);
 
@@ -892,7 +892,7 @@ fn lsp_delta_semantic_tokens() {
     let mut ses2 = String::new();
     push_init_caps(&mut ses2, root, caps, "");
     push_open(&mut ses2, root, "src/main.spc", src);
-    push_did_change_ranged(&mut ses2, root, "src/main.spc", 2, chg.as_str());
+    push_did_change_ranged(&mut ses2, root, "src/main.spc", 2, &chg);
     b.clear();
     b.format_into(
         "{{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"textDocument/semanticTokens/full\",\"params\":{{\"textDocument\":{{\"uri\":\"file://{}/src/main.spc\"}}}}}}",
@@ -900,14 +900,14 @@ fn lsp_delta_semantic_tokens() {
     );
     frame(&mut ses2, &b);
     push_shutdown_exit(&mut ses2, 9);
-    p.mkfile("session.bin", ses2.as_str());
+    p.mkfile("session.bin", &ses2);
     assert_eq(lsp_run(root), 0);
     let out_b = read_out(root);
 
     // Reconstruct: base data (A id 3) + splice edits (A id 4) == post-edit full data (B id 5).
-    let base = json::parse(response_of(out_a.as_str(), "\"id\":3")).unwrap();
-    let delta = json::parse(response_of(out_a.as_str(), "\"id\":4")).unwrap();
-    let full2 = json::parse(response_of(out_b.as_str(), "\"id\":5")).unwrap();
+    let base = json::parse(response_of(&out_a, "\"id\":3")).unwrap();
+    let delta = json::parse(response_of(&out_a, "\"id\":4")).unwrap();
+    let full2 = json::parse(response_of(&out_b, "\"id\":5")).unwrap();
     let bd = base.at_key("result").at_key("data");
     let fd = full2.at_key("result").at_key("data");
     let edits = delta.at_key("result").at_key("edits");
@@ -961,7 +961,7 @@ fn lsp_code_actions_eager_and_fixall() {
     );
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1009,7 +1009,7 @@ fn lsp_code_action_resolve_and_stale() {
     );
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1057,7 +1057,7 @@ fn lsp_semantic_code_actions() {
     );
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1123,7 +1123,7 @@ fn lsp_call_and_type_hierarchy() {
     );
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1182,7 +1182,7 @@ fn lsp_edit_burst_folds_and_tags_versions() {
     push_req_at(&mut ses, root, "src/main.spc", 5, "textDocument/hover", 0, 4);
     push_req_at(&mut ses, root, "src/main.spc", 6, "textDocument/hover", 0, 4);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1214,10 +1214,10 @@ fn lsp_hover_doc_with_cr_line_ends() {
     push_open(&mut ses, root, "src/main.spc", CR_DOC);
     push_req_at(&mut ses, root, "src/main.spc", 2, "textDocument/hover", 8, 12);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
-    let r = response_of(out.as_str(), "\"id\":2");
+    let r = response_of(&out, "\"id\":2");
     assert(r.contains("Doubles\\nits input."), "the doc block, one line per comment line");
 }
 
@@ -1244,10 +1244,10 @@ fn lsp_references_reach_released_bodies() {
     );
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
-    let r3 = response_of(out.as_str(), "\"id\":3");
+    let r3 = response_of(&out, "\"id\":3");
     assert(r3.contains("src/main.spc"));
     assert(r3.contains("\"line\":4"));
 }
@@ -1273,7 +1273,7 @@ fn lsp_limits_and_eviction() {
     frame(&mut ses, &b);
     push_req_at(&mut ses, root, "src/main.spc", 4, "textDocument/hover", 0, 4);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1313,7 +1313,7 @@ fn lsp_malformed_notifications_are_dropped() {
     push_open(&mut ses, root, "src/main.spc", MAIN_OK);
     push_req_at(&mut ses, root, "src/main.spc", 3, "textDocument/hover", 0, 4);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     assert(out.as_str().contains("\"id\":3"));
@@ -1335,10 +1335,10 @@ fn lsp_workspace_symbols_cap_after_filter() {
     b.push_str("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"workspace/symbol\",\"params\":{\"query\":\"len\"}}");
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
-    let r3 = response_of(out.as_str(), "\"id\":3");
+    let r3 = response_of(&out, "\"id\":3");
     assert_eq(count(r3, "\"name\""), 1);
     assert(r3.contains("\"name\":\"my_len_probe\""));
 }
@@ -1375,10 +1375,10 @@ fn lsp_token_state_dropped_on_close() {
     );
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
-    let r4 = response_of(out.as_str(), "\"id\":4");
+    let r4 = response_of(&out, "\"id\":4");
     assert(r4.contains("\"data\""));
     assert(!r4.contains("\"edits\""));
 }
@@ -1397,7 +1397,7 @@ fn lsp_evicted_batch_keeps_diagnostics() {
     push_initialized(&mut ses);
     push_open(&mut ses, root, "src/main.spc", MAIN_OK);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1433,7 +1433,7 @@ fn lsp_sweep_skips_directory_links() {
     push_init(&mut ses, root);
     push_initialized(&mut ses);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1448,28 +1448,28 @@ fn lsp_sweep_skips_directory_links() {
 fn lsp_build_constants_follow_the_target() {
     let host = unsafe shim::sc_host_platform();
     let hv = if host == 0 {
-        "Windows";
+        "Windows"
     } else if host == 1 {
-        "MacOS";
+        "MacOS"
     } else {
-        "Linux";
+        "Linux"
     };
     let ha = if host == 0 {
-        "windows";
+        "windows"
     } else if host == 1 {
-        "macos";
+        "macos"
     } else {
-        "linux";
+        "linux"
     };
     let tv = if host == 2 {
-        "Windows";
+        "Windows"
     } else {
-        "Linux";
+        "Linux"
     };
     let ta = if host == 2 {
-        "windows";
+        "windows"
     } else {
-        "linux";
+        "linux"
     };
     let mut doc = String::from_str("@platform(");
     doc.push_str(ha);
@@ -1480,23 +1480,23 @@ fn lsp_build_constants_follow_the_target() {
     doc.push_str(" {\n        return host_only();\n    }\n    return 0;\n}\n");
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    p.mkfile("src/main.spc", doc.as_str());
+    p.mkfile("src/main.spc", &doc);
     let root = p.dir();
     let mut ses = String::new();
     push_init_caps(&mut ses, root, "{}", "{}");
-    push_open(&mut ses, root, "src/main.spc", doc.as_str());
+    push_open(&mut ses, root, "src/main.spc", &doc);
     push_req_at(&mut ses, root, "src/main.spc", 5, "textDocument/hover", 6, 14);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     let mut args = String::from_str(" --target=");
     args.push_str(ta);
-    assert_eq(lsp_run_args(root, args.as_str()), 0);
+    assert_eq(lsp_run_args(root, &args), 0);
     let out = read_out(root);
     let o = out.as_str();
     assert(!o.contains("host_only"), "the removed branch names no gated-out item");
     let mut want = String::from_str("= Platform::");
     want.push_str(tv);
-    assert(response_of(o, "\"id\":5").contains(want.as_str()));
+    assert(response_of(o, "\"id\":5").contains(&want));
 }
 
 const BC_DOC: str = "fn main() i32 {\n    if PROFILE == \"debug\" {\n        return 0;\n    }\n    if TEST {\n        return missing;\n    }\n    return 1;\n}\n";
@@ -1517,7 +1517,7 @@ fn lsp_build_constants() {
     push_req_at(&mut ses, root, "src/main.spc", 6, "textDocument/definition", 1, 8);
     push_change(&mut ses, root, "src/main.spc", 2, BC_EDIT);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1564,7 +1564,7 @@ fn lsp_reflection_hover() {
     push_req_at(&mut ses, root, "src/main.spc", 16, "textDocument/hover", 25, 19);
     push_req_at(&mut ses, root, "src/main.spc", 17, "textDocument/hover", 33, 30);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
@@ -1609,7 +1609,7 @@ fn lsp_generic_headers() {
     push_req_at(&mut ses, root, "src/main.spc", 2, "textDocument/hover", 2, 44);
     push_req_at(&mut ses, root, "src/main.spc", 3, "textDocument/signatureHelp", 7, 18);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1628,7 +1628,7 @@ fn lsp_generic_headers() {
     push_req_at(&mut qs, qroot, "src/main.spc", 2, "textDocument/signatureHelp", 2, 47);
     push_completion(&mut qs, qroot, "src/main.spc", 3, 2, 47);
     push_shutdown_exit(&mut qs, 9);
-    q.mkfile("session.bin", qs.as_str());
+    q.mkfile("session.bin", &qs);
     assert_eq(lsp_run(qroot), 0);
     let qout = read_out(qroot);
     let qo = qout.as_str();
@@ -1670,7 +1670,7 @@ fn lsp_borrow_check_publishes_after_analysis() {
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", BORROW_BAD);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1693,9 +1693,9 @@ fn lsp_edit_cancels_borrow_check() {
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", BORROW_BAD);
-    push_did_change_full(&mut ses, root, "src/main.spc", 2, v2.as_str());
+    push_did_change_full(&mut ses, root, "src/main.spc", 2, &v2);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1722,7 +1722,7 @@ fn lsp_request_served_during_borrow_round() {
     push_open(&mut ses, root, "src/main.spc", main);
     push_req_at(&mut ses, root, "src/main.spc", 2, "textDocument/hover", 6, 21);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1770,7 +1770,7 @@ fn expect_published_then_cleared(bad: str, fixed: str, msg: str) {
     }
     push_did_change_full(&mut ses, root, "src/main.spc", 2, fixed);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1825,7 +1825,7 @@ fn lsp_static_assert_matches_build() {
     push_initialized(&mut ses);
     push_open(&mut ses, root, "src/main.spc", SA_MAIN);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1864,7 +1864,7 @@ fn lsp_nested_project_uses_its_roots() {
     push_initialized(&mut ses);
     push_open(&mut ses, root, "tools/gen/lib/x/deep.spc", NEST_DEEP);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
@@ -1897,7 +1897,7 @@ fn feature_session(p: &cli::Proj, man: str) String {
     push_initialized(&mut ses);
     push_open(&mut ses, root, "src/main.spc", FEAT_SRC);
     push_shutdown_exit(&mut ses, 9);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
     assert_eq(lsp_run(root), 0);
     return read_out(root);
 }
@@ -1933,7 +1933,7 @@ fn lsp_header_type_field() {
     push_req_at(&mut ses, root, "src/main.spc", 10, "textDocument/hover", 10, 15);
     push_req_at(&mut ses, root, "src/main.spc", 11, "textDocument/definition", 10, 15);
     push_shutdown_exit(&mut ses, 12);
-    p.mkfile("session.bin", ses.as_str());
+    p.mkfile("session.bin", &ses);
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);

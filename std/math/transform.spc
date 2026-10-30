@@ -260,7 +260,7 @@ pub fn decompose<T: Float>(m: Mat<T, 4, 4>) (bool, Vec<T, 3>, Quat<T>, Vec<T, 3>
     let eps = epsilon::<T>();
     let mut local = m;
     if local.c[3].e[3].abs().less(eps) {
-        return false, zero3, zero_quat, zero3, zero3, Vec::<T, 4>::zero();
+        return (false, zero3, zero_quat, zero3, zero3, Vec::<T, 4>::zero());
     }
     for i in 0..4 {
         for j in 0..4 {
@@ -275,7 +275,7 @@ pub fn decompose<T: Float>(m: Mat<T, 4, 4>) (bool, Vec<T, 3>, Quat<T>, Vec<T, 3>
     perspective_matrix.c[2].e[3] = T::zero();
     perspective_matrix.c[3].e[3] = T::one();
     if determinant(perspective_matrix).abs().less(eps) {
-        return false, zero3, zero_quat, zero3, zero3, Vec::<T, 4>::zero();
+        return (false, zero3, zero_quat, zero3, zero3, Vec::<T, 4>::zero());
     }
     let mut perspective = Vec::<T, 4>::new(T::zero(), T::zero(), T::zero(), T::one());
     if local.c[0].e[3].abs().greater_equal(eps) || local.c[1].e[3].abs().greater_equal(eps) || local.c[2].e[3].abs().greater_equal(
@@ -312,7 +312,7 @@ pub fn decompose<T: Float>(m: Mat<T, 4, 4>) (bool, Vec<T, 3>, Quat<T>, Vec<T, 3>
         row1 = row1 * minus_one;
         row2 = row2 * minus_one;
     }
-    return true, scale, decompose_orientation([row0, row1, row2]), translation, skew, perspective;
+    return (true, scale, decompose_orientation([row0, row1, row2]), translation, skew, perspective);
 }
 
 fn unit_length<T: Float>(v: Vec<T, 3>) Vec<T, 3> {
@@ -407,7 +407,7 @@ pub fn axis_angle<T: Float>(m: Mat<T, 4, 4>) (Vec<T, 3>, T) {
             3,
         )).abs().less(eps);
         if near_identity {
-            return Vec::<T, 3>::new(T::one(), T::zero(), T::zero()), T::zero();
+            return (Vec::<T, 3>::new(T::one(), T::zero(), T::zero()), T::zero());
         }
         let pi = pi::<T>();
         let half = T::from_f64(0.5);
@@ -420,33 +420,33 @@ pub fn axis_angle<T: Float>(m: Mat<T, 4, 4>) (Vec<T, 3>, T) {
         let h = T::from_f64(0.7071);
         if xx.greater(yy) && xx.greater(zz) {
             if xx.less(eps) {
-                return Vec::<T, 3>::new(T::zero(), h, h), pi;
+                return (Vec::<T, 3>::new(T::zero(), h, h), pi);
             }
             let x = xx.sqrt();
-            return Vec::<T, 3>::new(x, xy / x, xz / x), pi;
+            return (Vec::<T, 3>::new(x, xy / x, xz / x), pi);
         }
         if yy.greater(zz) {
             if yy.less(eps) {
-                return Vec::<T, 3>::new(h, T::zero(), h), pi;
+                return (Vec::<T, 3>::new(h, T::zero(), h), pi);
             }
             let y = yy.sqrt();
-            return Vec::<T, 3>::new(xy / y, y, yz / y), pi;
+            return (Vec::<T, 3>::new(xy / y, y, yz / y), pi);
         }
         if zz.less(eps) {
-            return Vec::<T, 3>::new(h, h, T::zero()), pi;
+            return (Vec::<T, 3>::new(h, h, T::zero()), pi);
         }
         let z = zz.sqrt();
-        return Vec::<T, 3>::new(xz / z, yz / z, z), pi;
+        return (Vec::<T, 3>::new(xz / z, yz / z, z), pi);
     }
     let angle_cos = (m00 + m11 + m22 - T::one()) * T::from_f64(0.5);
     let angle = if angle_cos.greater_equal(T::one()) {
-        T::zero();
+        T::zero()
     } else if angle_cos.less_equal(T::from_i64(-1)) {
-        pi::<T>();
+        pi::<T>()
     } else {
-        angle_cos.acos();
+        angle_cos.acos()
     };
-    return normalize(Vec::<T, 3>::new(m12 - m21, m20 - m02, m01 - m10)), angle;
+    return (normalize(Vec::<T, 3>::new(m12 - m21, m20 - m02, m01 - m10)), angle);
 }
 
 /// The 4x4 rotation by `angle` radians around `normalize(axis)`, element by element as

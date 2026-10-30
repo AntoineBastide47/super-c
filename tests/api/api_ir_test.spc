@@ -37,7 +37,7 @@ fn fx() Fx {
     let proj = cli::proj_new();
     proj.mkfile("main.spc", SRC);
     let main = format("{}/main.spc", proj.dir());
-    let mut s = ses::Session::open_file(main.as_str(), ses::Config::host("std")).unwrap();
+    let mut s = ses::Session::open_file(&main, ses::Config::host("std")).unwrap();
     assert(s.check().is_ok(), "checks");
     let real = String::from_str(s.root_file());
     return Fx { proj: proj, main: real, s: s };
@@ -46,7 +46,7 @@ fn fx() Fx {
 @test
 fn hir_nodes_carry_resolutions_and_types(fx: &mut Fx) {
     let at = SRC.find("take(p)") as u32;
-    let ns = hir_nodes(&fx.s, fx.main.as_str(), at, at + 7).unwrap();
+    let ns = hir_nodes(&fx.s, &fx.main, at, at + 7).unwrap();
     let mut call = false;
     let mut callee = false;
     for i in 0..ns.len() {
@@ -71,7 +71,7 @@ fn hir_nodes_carry_resolutions_and_types(fx: &mut Fx) {
 @test
 fn core_ir_shows_moves_borrows_and_drops(fx: &mut Fx) {
     let at = SRC.find("fn main") as u32 + 3;
-    let f = core_function(&mut fx.s, fx.main.as_str(), at).unwrap();
+    let f = core_function(&mut fx.s, &fx.main, at).unwrap();
     assert(f.text.len() != 0 && !f.generic, "a printed, concrete body");
     let mut named = false;
     for i in 0..f.locals.len() {
@@ -91,7 +91,7 @@ fn core_ir_shows_moves_borrows_and_drops(fx: &mut Fx) {
     assert(f.moves.len() >= 1, "'s' and 'p' move");
     assert(f.borrows.len() >= 1, "'&p.b' borrows");
     assert(f.blocks.len() >= 1 && f.blocks[f.blocks.len() - 1].successors.len() <= 2, "blocks with their successors");
-    let none = core_function(&mut fx.s, fx.main.as_str(), 0);
+    let none = core_function(&mut fx.s, &fx.main, 0);
     assert(none.unwrap_err().code == Code::InvalidArgument, "no function at a struct");
 }
 

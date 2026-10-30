@@ -15,9 +15,9 @@ fn eval_check(p: &cli::Proj, filter: str, text: bool, opt: bool) Vector<u64> {
     let mut env = String::from_str("SC_LIR=1 SC_LIR_EVAL=1 SC_LIR_STATS=1");
     env.push_str(
         if opt {
-            " SC_LIR_OPT=1";
+            " SC_LIR_OPT=1"
         } else {
-            " SC_LIR_OPT=0";
+            " SC_LIR_OPT=0"
         },
     );
     if text {
@@ -25,8 +25,8 @@ fn eval_check(p: &cli::Proj, filter: str, text: bool, opt: bool) Vector<u64> {
     }
     let mut cmd = format("\"{}\" test --quiet --filter={} --out-dir={}/out", cli::superc_path(), filter, p.dir());
     let mut log = format("{}/log", p.dir());
-    let rc = cli::run_with(cmd.cstr(), null, log.cstr(), null, env.as_str());
-    let out = cli::read_text(log.as_str());
+    let rc = cli::run_with(cmd.cstr(), null, log.cstr(), null, &env);
+    let out = cli::read_text(&log);
     assert(rc == 0, out.as_str());
     // The tally line: `lir: ctfe: <n> tests: ..` (a test's own line names it after the prefix).
     let mut line: str = "";
@@ -74,7 +74,7 @@ fn read_back(p: &cli::Proj, opt: bool) {
     let _ = eval_check(p, "tests::math::", true, opt);
     let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
     let mut err = String::new();
-    let q = lparse::parse(text.as_str(), &mut err);
+    let q = lparse::parse(&text, &mut err);
     assert(q.is_some(), err.as_str());
     let pk = q.unwrap();
     let mut v = verify::Verifier::new();
@@ -132,7 +132,7 @@ fn main() i32 {
 )",
     );
     let env = format("SC_LIR=1 SC_LIR_OPT=0 SC_NO_TU_CACHE=1 SC_NO_EMIT_CACHE=1 SC_LIR_TEXT={}/pkg.lir", p.dir());
-    let r = p.compile_flags_env("", "main.spc", env.as_str());
+    let r = p.compile_flags_env("", "main.spc", &env);
     assert(r.ok(), "the program builds and returns 0");
     let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
     assert(!text.contains("callind") && text.contains("closure_b"), text.as_str());
@@ -184,7 +184,7 @@ fn main() i32 {
 )",
     );
     let env = format("SC_LIR=1 SC_LIR_OPT=0 SC_NO_TU_CACHE=1 SC_NO_EMIT_CACHE=1 SC_LIR_TEXT={}/pkg.lir", p.dir());
-    let r = p.compile_flags_env("", "main.spc", env.as_str());
+    let r = p.compile_flags_env("", "main.spc", &env);
     assert(r.ok(), "the program builds and returns 0");
     let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
     assert(head_of(&text, "main__pair_sum").contains("ref p0 24 readonly"), text.as_str());
@@ -196,7 +196,7 @@ fn main() i32 {
 fn head_of(text: &String, name: str) String {
     let t = text.as_str();
     let h = format("fn @{}\n", name);
-    let at = t.find(h.as_str());
+    let at = t.find(&h);
     assert(at >= 0, h.as_str());
     let rest = t.slice(at as usize, t.len());
     let end = rest.find("\nb0(");
@@ -257,13 +257,13 @@ fn main() i32 {
 )",
     );
     let env = format("SC_LIR=1 SC_LIR_OPT=0 SC_NO_TU_CACHE=1 SC_NO_EMIT_CACHE=1 SC_LIR_TEXT={}/pkg.lir", p.dir());
-    let r = p.compile_flags_env("", "main.spc", env.as_str());
+    let r = p.compile_flags_env("", "main.spc", &env);
     assert(r.ok(), "the program builds and returns 0");
     let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
     let take = head_of(&text, "main__take");
     let look = head_of(&text, "main__look");
-    assert(lines_with(take.as_str(), "owned p0 ") == 2 && take.contains("noalias"), text.as_str());
-    assert(lines_with(look.as_str(), "owned p0 ") == 2 && look.contains("readonly"), text.as_str());
+    assert(lines_with(&take, "owned p0 ") == 2 && take.contains("noalias"), text.as_str());
+    assert(lines_with(&look, "owned p0 ") == 2 && look.contains("readonly"), text.as_str());
     assert(!head_of(&text, "main__cells").contains("owned"), text.as_str());
 }
 

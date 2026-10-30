@@ -450,14 +450,14 @@ extend Opt {
         self.dominators(b);
         let promoted = self.prom.run(
             b,
-            self.succ_at.as_slice(),
-            self.succs.as_slice(),
-            self.pred_at.as_slice(),
-            self.preds.as_slice(),
-            self.idom.as_slice(),
-            self.order.as_slice(),
-            self.kid_at.as_slice(),
-            self.kids.as_slice(),
+            &self.succ_at,
+            &self.succs,
+            &self.pred_at,
+            &self.preds,
+            &self.idom,
+            &self.order,
+            &self.kid_at,
+            &self.kids,
             pk.ptr_bytes,
             &mut self.pbody,
         );
@@ -517,7 +517,7 @@ extend Opt {
             return false;
         }
         let before = self.weigh(pk, b);
-        if !self.slp.plan(b, pk.ptr_bytes, pk.vector.min(64), (pk.fmath & FM_ASSOC) != 0, self.wgt.as_slice()) {
+        if !self.slp.plan(b, pk.ptr_bytes, pk.vector.min(64), (pk.fmath & FM_ASSOC) != 0, &self.wgt) {
             return false;
         }
         let saved = b.compact();
@@ -580,15 +580,15 @@ extend Opt {
                 for e in self.succ_at[k]..self.succ_at[k + 1] {
                     let f = b.blocks[self.succs[e as usize] as usize].flags;
                     all &= if (f & BLOCK_COLD) != 0 {
-                        BLOCK_RARE;
+                        BLOCK_RARE
                     } else {
-                        f & BLOCK_UNLIKELY;
+                        f & BLOCK_UNLIKELY
                     };
                 }
                 let add = if all == BLOCK_RARE {
-                    BLOCK_COLD;
+                    BLOCK_COLD
                 } else {
-                    all;
+                    all
                 };
                 if (b.blocks[k].flags | add) != b.blocks[k].flags {
                     b.blocks.index_mut(k).flags |= add;
@@ -662,9 +662,9 @@ extend Opt {
                 let t = b.insts[i as usize];
                 let gather = t.op == O_LOAD && is_vec(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_SLOTADDR;
                 sum += w * if gather {
-                    1 + GATHER_COST;
+                    1 + GATHER_COST
                 } else {
-                    1u64;
+                    1u64
                 };
             }
         }
@@ -680,15 +680,7 @@ extend Opt {
         self.graph(b);
         self.dominators(b);
         self.loops(pk, b);
-        let any = self.unr.rotate(
-            b,
-            max,
-            self.inner.as_slice(),
-            self.lparent.as_slice(),
-            self.preh.as_slice(),
-            self.dpre.as_slice(),
-            self.dpost.as_slice(),
-        );
+        let any = self.unr.rotate(b, max, &self.inner, &self.lparent, &self.preh, &self.dpre, &self.dpost);
         if !any {
             return false;
         }
@@ -718,11 +710,11 @@ extend Opt {
             pk.fmath,
             pk.vector,
             bu,
-            self.inner.as_slice(),
-            self.lparent.as_slice(),
-            self.preh.as_slice(),
-            self.dpre.as_slice(),
-            self.dpost.as_slice(),
+            &self.inner,
+            &self.lparent,
+            &self.preh,
+            &self.dpre,
+            &self.dpost,
             lu::Classes {
                 acc: self.acls.as_slice(),
                 obj: self.aobj.as_slice(),
@@ -768,9 +760,9 @@ extend Opt {
                 continue;
             }
             let e = if ib {
-                t.c;
+                t.c
             } else {
-                t.b;
+                t.b
             };
             if b.edge_nargs(e) == 0 {
                 continue;
@@ -837,13 +829,13 @@ extend Opt {
         for q in 0..e0.param_len as u32 {
             types.push(b.params[(e0.param_start + q) as usize]);
         }
-        let ne = b.add_block(types.as_slice());
+        let ne = b.add_block(&types);
         let mut args = Vector::<Value>::with_capacity(types.len());
         for q in 0..e0.param_len as u32 {
             args.push(b.param(ne, q));
         }
         b.begin(ne);
-        let _ = b.emit(jump(b.edge(ne, args.as_slice())), b.locs[e0.start as usize]);
+        let _ = b.emit(jump(b.edge(ne, &args)), b.locs[e0.start as usize]);
         if b.inl.len() != 0 {
             b.inl.push(0);
         }
@@ -859,7 +851,7 @@ extend Opt {
             for q in 0..np {
                 args.push(b.pool[(c.c + q) as usize]);
             }
-            b.insts[ci as usize] = jump(b.edge(ne, args.as_slice()));
+            b.insts[ci as usize] = jump(b.edge(ne, &args));
             b.blocks.index_mut(k).len -= 1;
         }
         return true;
@@ -872,7 +864,7 @@ extend Opt {
             return false;
         }
         self.graph(b);
-        if !self.pairs.run(b, self.order.as_slice(), self.rpo.as_slice(), &mut self.pbody) {
+        if !self.pairs.run(b, &self.order, &self.rpo, &mut self.pbody) {
             return false;
         }
         let nb = replace(&mut self.pbody, Body::new());
@@ -887,7 +879,7 @@ extend Opt {
             return false;
         }
         self.graph(b);
-        if !self.wide.run(b, pk.vector, self.order.as_slice(), self.rpo.as_slice(), &mut self.pbody) {
+        if !self.wide.run(b, pk.vector, &self.order, &self.rpo, &mut self.pbody) {
             return false;
         }
         let nb = replace(&mut self.pbody, Body::new());
@@ -1057,9 +1049,9 @@ extend Opt {
                     continue;
                 }
                 let tt = if t.op == O_LOAD {
-                    t.ty;
+                    t.ty
                 } else {
-                    b.type_of(t.b);
+                    b.type_of(t.b)
                 };
                 if t.a == s.a && t.c == s.c {
                     // The place itself, whole, in its type.
@@ -1107,11 +1099,11 @@ extend Opt {
                     ok = ok && (t.op == O_JMP || t.op == O_BR);
                     n += 1;
                     one = if t.op == O_JMP {
-                        t.a;
+                        t.a
                     } else if b.edge_target(t.b) == h {
-                        t.b;
+                        t.b
                     } else {
-                        t.c;
+                        t.c
                     };
                     // A branch with both sides into the header is two edges.
                     if t.op == O_BR && b.edge_target(t.b) == h && b.edge_target(t.c) == h {
@@ -1135,13 +1127,13 @@ extend Opt {
                 }
             }
             let loc = b.locs[hb.start as usize];
-            let x = b.add_block(types.as_slice());
+            let x = b.add_block(&types);
             for q in 0..types.len() as u32 {
                 args.push(b.param(x, q));
             }
             b.begin(x);
             self.pnew.push(true);
-            let into = b.edge(h, args.as_slice());
+            let into = b.edge(h, &args);
             let _ = b.emit(jump(into), loc);
             if b.inl.len() != 0 {
                 b.inl.push(0);
@@ -1216,7 +1208,7 @@ extend Opt {
                 args.push(b.edge_arg(e, q));
             }
         }
-        return b.edge(x, args.as_slice());
+        return b.edge(x, &args);
     }
 
     // ---- Analysis --------------------------------------------------------------------------------------
@@ -1312,9 +1304,9 @@ extend Opt {
                         continue;
                     }
                     d = if d == NONE {
-                        q;
+                        q
                     } else {
-                        self.intersect(d, q);
+                        self.intersect(d, q)
                     };
                 }
                 if d != self.idom[k] {
@@ -1469,11 +1461,11 @@ extend Opt {
             let sc = b.scopes[x];
             let r = sc.root;
             let blk = if r == VNONE {
-                NONE;
+                NONE
             } else if (r & VPARAM) != 0 {
-                self.owner[ni + (r & ~VPARAM) as usize];
+                self.owner[ni + (r & ~VPARAM) as usize]
             } else {
-                self.owner[(r & ~VFLAG) as usize];
+                self.owner[(r & ~VFLAG) as usize]
             };
             let k = entry_param(b, r);
             // The class of an earlier scope of the same site and group; none once the classes ran out.
@@ -1585,15 +1577,15 @@ extend Opt {
                     continue;
                 }
                 let n = if t.b == VNONE {
-                    Option::<u64>::Some(0);
+                    Option::<u64>::Some(0)
                 } else {
-                    const_of(b, t.b);
+                    const_of(b, t.b)
                 };
                 self.oder[i] = k;
                 self.ooffs[i] = if o == OFF_ANY || n.is_none() {
-                    OFF_ANY;
+                    OFF_ANY
                 } else {
-                    o + n.unwrap() as i64 * t.aux as i64 + (t.c as i32) as i64;
+                    o + n.unwrap() as i64 * t.aux as i64 + (t.c as i32) as i64
                 };
                 changed = true;
             }
@@ -1630,14 +1622,14 @@ extend Opt {
                     continue;
                 }
                 let ty = if t.op == O_LOAD {
-                    t.ty;
+                    t.ty
                 } else {
-                    b.type_of(t.b);
+                    b.type_of(t.b)
                 };
                 let at = if o == OFF_ANY {
-                    OFF_ANY;
+                    OFF_ANY
                 } else {
-                    o + (t.c as i32) as i64;
+                    o + (t.c as i32) as i64
                 };
                 for idx in 0..(CL_FROZEN - CL_NOALIAS) as usize {
                     if (out >> idx as u64 & 1) == 0 || self.oparam[idx] != k {
@@ -1669,20 +1661,20 @@ extend Opt {
     fn param_at(self: &Self, b: &Body, v: Value) (u32, i64) {
         let k = entry_param(b, v);
         if k != NONE {
-            return k, 0i64;
+            return (k, 0i64);
         }
         if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || v as usize >= self.oder.len() {
-            return NONE, 0i64;
+            return (NONE, 0i64);
         }
-        return self.oder[v as usize], self.ooffs[v as usize];
+        return (self.oder[v as usize], self.ooffs[v as usize]);
     }
 
     // The scope classes instruction `i` belongs to (`imem`).
     const fn member(self: &Self, i: u32) u64 {
         return if i as usize < self.imem.len() {
-            self.imem[i as usize];
+            self.imem[i as usize]
         } else {
-            0u64;
+            0u64
         };
     }
 
@@ -1700,9 +1692,9 @@ extend Opt {
     // roots the loop holds.
     const fn loop_acc(self: &Self, i: u32, h: u32) u8 {
         let c = if i as usize < self.acls.len() {
-            self.acls[i as usize];
+            self.acls[i as usize]
         } else {
-            CL_MANY;
+            CL_MANY
         };
         if c < CL_MANY && (class_bit(c) & self.sbits) != 0 && (self.croot[c as usize] == NONE || self.in_loop(
             h,
@@ -1720,18 +1712,18 @@ extend Opt {
         for i in 0..b.insts.len() {
             let op = b.insts[i].op;
             self.icls[i] = if op == O_PTRADD || op == O_SELECT {
-                CL_UNSET;
+                CL_UNSET
             } else {
-                CL_OTHER;
+                CL_OTHER
             };
         }
         fill(&mut self.pcls, b.params.len(), CL_UNSET);
         for q in e.param_start..e.param_start + e.param_len as u32 {
             let k = q - e.param_start;
             self.pcls[q as usize] = if k < 64 && (seeds >> k as u64 & 1) != 0 && !inner(b, k) {
-                CL_NOALIAS + k as u8;
+                CL_NOALIAS + k as u8
             } else {
-                CL_OTHER;
+                CL_OTHER
             };
         }
         // The scopes' roots, pinned to their classes.
@@ -1791,11 +1783,11 @@ extend Opt {
                 for i in bk.start..bk.start + bk.len {
                     let t = b.insts[i as usize];
                     let c = if t.op == O_PTRADD {
-                        self.class(t.a);
+                        self.class(t.a)
                     } else if t.op == O_SELECT {
-                        join(self.class(t.b), self.class(t.c));
+                        join(self.class(t.b), self.class(t.c))
                     } else {
-                        CL_OTHER;
+                        CL_OTHER
                     };
                     if (t.op == O_PTRADD || t.op == O_SELECT) && c != self.icls[i as usize] && !self.ipin[i as usize] {
                         self.icls[i as usize] = c;
@@ -1928,15 +1920,15 @@ extend Opt {
                 continue;
             }
             let freed = if op == O_RET || op == O_CALL && call_alloc(pk, b, t) == ALLOC_FREE {
-                fresh;
+                fresh
             } else {
-                0u64;
+                0u64
             };
             // A call's uses are its arguments.
             let kept = if op == O_CALL {
-                ~pk.syms[b.syms[t.a as usize] as usize].esc;
+                ~pk.syms[b.syms[t.a as usize] as usize].esc
             } else {
-                0u64;
+                0u64
             };
             for u in 0..nu {
                 let c = self.class(self.uses[u]);
@@ -1957,15 +1949,15 @@ extend Opt {
         if (v & VPARAM) != 0 {
             let q = (v & ~VPARAM) as usize;
             return if q < self.pcls.len() {
-                self.pcls[q];
+                self.pcls[q]
             } else {
-                CL_MANY;
+                CL_MANY
             };
         }
         return if v as usize < self.icls.len() {
-            self.icls[v as usize];
+            self.icls[v as usize]
         } else {
-            CL_MANY;
+            CL_MANY
         };
     }
 
@@ -1997,9 +1989,9 @@ extend Opt {
             return 0;
         }
         let c = if t.op == O_STORE || t.op == O_MEMCPY || t.op == O_MEMSET {
-            self.acc(i, t.a);
+            self.acc(i, t.a)
         } else {
-            CL_OTHER;
+            CL_OTHER
         };
         return class_bit(c) | self.sbits & ~self.member(i) | self.arg_bits(b, i, t);
     }
@@ -2099,9 +2091,9 @@ extend Opt {
             }
             // A volatile store, like any write but a store or a call, may touch any tag.
             out |= if t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 || t.op == O_CALL {
-                1u16 << g as u16;
+                1u16 << g as u16
             } else {
-                1u16;
+                1u16
             };
         }
         return out;
@@ -2348,9 +2340,9 @@ extend Opt {
                 let t = b.insts[i as usize];
                 if writes(pk, b, t) && !self.private(t) {
                     let g = if (t.aux & MEM_VOLATILE) != 0 && (t.op == O_LOAD || t.op == O_STORE) {
-                        0usize;
+                        0usize
                     } else {
-                        write_tag(pk, b, t);
+                        write_tag(pk, b, t)
                     };
                     if g < TBAA_TAGS {
                         self.bwrites[k] |= 1u16 << g as u16;
@@ -2377,9 +2369,9 @@ extend Opt {
             self.recent.truncate(0);
             for r in 0..RECENT_MAX {
                 let at = if k == 0 {
-                    NONE;
+                    NONE
                 } else {
-                    self.end_recent[self.idom[k] as usize * RECENT_MAX + r];
+                    self.end_recent[self.idom[k] as usize * RECENT_MAX + r]
                 };
                 if at == NONE {
                     break;
@@ -2398,9 +2390,9 @@ extend Opt {
                 let t = term(b, self.idom[k]);
                 if t.op == O_BR && b.edge_target(t.b) != b.edge_target(t.c) && const_of(b, t.a).is_none() {
                     let taken: u32 = if b.edge_target(t.b) == k as u32 {
-                        1;
+                        1
                     } else {
-                        0;
+                        0
                     };
                     self.enter(LOG_COND, t.a, taken);
                     self.order_facts(b, t.a, taken != 0);
@@ -2416,9 +2408,9 @@ extend Opt {
                 for g in 0..TBAA_TAGS {
                     let kept = w != WRITES_ALL && (w & 1) == 0 && (g == 0 && w == 0 || g != 0 && (w >> g as u32 & 1) == 0);
                     unsafe self.tstate[g] = if kept {
-                        self.end_state[d + g];
+                        self.end_state[d + g]
                     } else {
-                        states;
+                        states
                     };
                 }
             } else {
@@ -2439,11 +2431,11 @@ extend Opt {
                 // An access of a private slot's memory has states of its own: no other access touches it.
                 let private = self.private(t);
                 self.prior = if private {
-                    pbefore;
+                    pbefore
                 } else if g < TBAA_TAGS {
-                    unsafe before[g];
+                    unsafe before[g]
                 } else {
-                    before[0];
+                    before[0]
                 };
                 self.pprior = pbefore;
                 self.tprior = before[0];
@@ -2459,11 +2451,11 @@ extend Opt {
                     }
                 }
                 self.state = if private {
-                    self.pstate;
+                    self.pstate
                 } else if g < TBAA_TAGS {
-                    unsafe self.tstate[g];
+                    unsafe self.tstate[g]
                 } else {
-                    self.tstate[0];
+                    self.tstate[0]
                 };
                 // An instruction `thread` replaced is gone; one `speculate` moved stays as it is.
                 if self.moved[i as usize] {
@@ -2592,17 +2584,17 @@ extend Opt {
         while self.log.len() > to {
             let (table, key, prev) = self.log.pop().unwrap();
             let m = if table == LOG_PURE {
-                &mut self.pure;
+                &mut self.pure
             } else if table == LOG_MEM {
-                &mut self.mem;
+                &mut self.mem
             } else if table == LOG_COND {
-                &mut self.cond;
+                &mut self.cond
             } else if table == LOG_REL {
-                &mut self.rel;
+                &mut self.rel
             } else if table == LOG_EQ {
-                &mut self.eqs;
+                &mut self.eqs
             } else {
-                &mut self.ub;
+                &mut self.ub
             };
             if prev == NONE {
                 let _ = m.remove(&key);
@@ -2614,17 +2606,17 @@ extend Opt {
 
     fn enter(self: &mut Self, table: u8, key: u64, v: u32) {
         let m = if table == LOG_PURE {
-            &mut self.pure;
+            &mut self.pure
         } else if table == LOG_MEM {
-            &mut self.mem;
+            &mut self.mem
         } else if table == LOG_COND {
-            &mut self.cond;
+            &mut self.cond
         } else if table == LOG_REL {
-            &mut self.rel;
+            &mut self.rel
         } else if table == LOG_EQ {
-            &mut self.eqs;
+            &mut self.eqs
         } else {
-            &mut self.ub;
+            &mut self.ub
         };
         let prev = switch m.get(&key) {
             Some(p) => *p,
@@ -2703,7 +2695,7 @@ extend Opt {
             }
             args.push(v);
         }
-        return b.edge(j, args.as_slice());
+        return b.edge(j, &args);
     }
 
     // Side `e` of a branch ending block `k`, as `diamond` takes it: the edge out of the block without
@@ -2714,9 +2706,9 @@ extend Opt {
         let ab = b.blocks[a as usize];
         let ta = term(b, a);
         if a != k && ab.param_len == 0 && ab.len <= SPEC_MAX + 1 && ta.op == O_JMP && self.pred_at[a as usize + 1] - self.pred_at[a as usize] == 1 {
-            return ta.a, a;
+            return (ta.a, a);
         }
-        return e, k;
+        return (e, k);
     }
 
     // How many instructions but constants side `a` of block `k`'s branch (`arm`) runs that `speculate`
@@ -2737,9 +2729,9 @@ extend Opt {
                 t.a = self.val(t.a);
             }
             let ok = if t.op == O_LOAD {
-                (t.aux & MEM_VOLATILE) == 0 && !is_vec(t.ty) && self.safe_load(pk, b, t);
+                (t.aux & MEM_VOLATILE) == 0 && !is_vec(t.ty) && self.safe_load(pk, b, t)
             } else {
-                pure_op(t.op) && speculable(pk, b, t);
+                pure_op(t.op) && speculable(pk, b, t)
             };
             if !ok {
                 return SPEC_MAX + 1;
@@ -2778,25 +2770,25 @@ extend Opt {
     // when `c` is no unsigned order comparison of scalars.
     const fn as_ult(b: &Body, c: Value) (Value, Value, bool) {
         if (c & (VPARAM | VFLAG)) != 0 {
-            return VNONE, VNONE, false;
+            return (VNONE, VNONE, false);
         }
         let t = b.insts[c as usize];
         if t.op != O_ICMP || is_vec(t.ty) {
-            return VNONE, VNONE, false;
+            return (VNONE, VNONE, false);
         }
         if t.aux == C_ULT {
-            return t.a, t.b, false;
+            return (t.a, t.b, false);
         }
         if t.aux == C_UGE {
-            return t.a, t.b, true;
+            return (t.a, t.b, true);
         }
         if t.aux == C_UGT {
-            return t.b, t.a, false;
+            return (t.b, t.a, false);
         }
         if t.aux == C_ULE {
-            return t.b, t.a, true;
+            return (t.b, t.a, true);
         }
-        return VNONE, VNONE, false;
+        return (VNONE, VNONE, false);
     }
 
     // Condition `c`, `holds` on the edge into the scope: `x <u y` decided, and with it `x <u m` for each
@@ -2831,22 +2823,22 @@ extend Opt {
     // constant or a zero extension keeps, `depth` instructions deep; None when unknown.
     fn ubound(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) Option<u64> {
         if v == VNONE || (v & VFLAG) != 0 {
-            return Option::<u64>::None;
+            return None;
         }
         let k = const_of(b, v);
         if k.is_some() {
-            return Option::<u64>::Some(k.unwrap() & width_mask(b.type_of(v), pk.ptr_bytes));
+            return Some(k.unwrap() & width_mask(b.type_of(v), pk.ptr_bytes));
         }
         let mut best = Option::<u64>::None;
         if let Some(f) = self.ub.get(&(v as u64)) {
             let c = const_of(b, *f >> 1).unwrap() & width_mask(b.type_of(*f >> 1), pk.ptr_bytes);
             best = if (*f & 1) == 0 {
-                Option::<u64>::Some(c);
+                Some(c)
             } else if c == 0 {
                 // No value is below 0: the block does not run.
-                Option::<u64>::Some(0);
+                Some(0)
             } else {
-                Option::<u64>::Some(c - 1);
+                Some(c - 1)
             };
         }
         if (v & VPARAM) != 0 || depth == 0 {
@@ -2859,7 +2851,7 @@ extend Opt {
             let x = self.ubound(pk, b, t.a, depth - 1);
             let y = self.ubound(pk, b, t.b, depth - 1);
             if x.is_some() && y.is_some() {
-                r = Option::<u64>::Some(x.unwrap().min(y.unwrap()));
+                r = Some(x.unwrap().min(y.unwrap()));
             } else if x.is_some() {
                 r = x;
             } else {
@@ -2870,25 +2862,25 @@ extend Opt {
             let s = const_of(b, t.b);
             if s.is_some() && (s.unwrap() & m) < type_bits(t.ty, pk.ptr_bytes) as u64 {
                 let hi = if x.is_some() {
-                    x.unwrap();
+                    x.unwrap()
                 } else {
-                    m;
+                    m
                 };
-                r = Option::<u64>::Some(hi >> (s.unwrap() & m));
+                r = Some(hi >> (s.unwrap() & m));
             }
         } else if t.op == O_UREM || t.op == O_UDIV {
             let d = const_of(b, t.b);
             if d.is_some() && (d.unwrap() & m) != 0 {
                 let dv = d.unwrap() & m;
                 if t.op == O_UREM {
-                    r = Option::<u64>::Some(dv - 1);
+                    r = Some(dv - 1);
                 } else {
                     let x = self.ubound(pk, b, t.a, depth - 1);
-                    r = Option::<u64>::Some(
+                    r = Some(
                         if x.is_some() {
-                            x.unwrap();
+                            x.unwrap()
                         } else {
-                            m;
+                            m
                         } / dv,
                     );
                 }
@@ -2896,21 +2888,21 @@ extend Opt {
         } else if t.op == O_ZEXT {
             let x = self.ubound(pk, b, t.a, depth - 1);
             r = if x.is_some() {
-                x;
+                x
             } else {
-                Option::<u64>::Some(width_mask(b.type_of(t.a), pk.ptr_bytes));
+                Some(width_mask(b.type_of(t.a), pk.ptr_bytes))
             };
         } else if t.op == O_TRUNC {
             // The operand's bound when the narrower type holds it, else any value of that type.
             let x = self.ubound(pk, b, t.a, depth - 1);
             r = if x.is_some() && x.unwrap() <= m {
-                x;
+                x
             } else {
-                Option::<u64>::Some(m);
+                Some(m)
             };
         }
         if r.is_some() && best.is_some() {
-            return Option::<u64>::Some(r.unwrap().min(best.unwrap()));
+            return Some(r.unwrap().min(best.unwrap()));
         }
         if r.is_some() {
             return r;
@@ -2992,10 +2984,10 @@ extend Opt {
     fn order_decided(self: &Self, b: &Body, c: Value) Option<u64> {
         let (x, y, neg) = Opt::as_ult(b, c);
         if x == VNONE {
-            return Option::<u64>::None;
+            return None;
         }
         return switch self.rel.get(&rel_key(x, y)) {
-            Some(r) => Option::<u64>::Some((*r != 0 != neg) as u64),
+            Some(r) => Some((*r != 0 != neg) as u64),
             None => Option::<u64>::None,
         };
     }
@@ -3029,9 +3021,9 @@ extend Opt {
         }
         let x = (v & ~VFLAG) as usize;
         return if x < self.blk_of.len() {
-            self.blk_of[x];
+            self.blk_of[x]
         } else {
-            NONE;
+            NONE
         };
     }
 
@@ -3057,9 +3049,9 @@ extend Opt {
             // The value must dominate the block: the walk visits its definition first, so it is final. An
             // edge a folded branch left as the only one may come from a block that does not.
             let d = if one && v != VNONE {
-                self.def_blk(v);
+                self.def_blk(v)
             } else {
-                NONE;
+                NONE
             };
             if d != NONE && self.dominates(d, k) {
                 self.prepl[(bk.param_start + q) as usize] = v;
@@ -3435,28 +3427,28 @@ extend Opt {
         let m = width_mask(b.type_of(a), pk.ptr_bytes);
         let ka = const_of(b, a);
         if ka.is_some() {
-            return Option::<bool>::Some((ka.unwrap() & m) == (c & m));
+            return Some((ka.unwrap() & m) == (c & m));
         }
         let t = term(b, k);
         if t.op == O_BR && (e == t.b || e == t.c) && !same_edge(b, t.b, t.c) && (t.a & (VPARAM | VFLAG)) == 0 {
             let ci = b.insts[t.a as usize];
             if ci.op == O_ICMP && (ci.aux == C_EQ || ci.aux == C_NE) {
                 let other = if ci.a == a {
-                    ci.b;
+                    ci.b
                 } else if ci.b == a {
-                    ci.a;
+                    ci.a
                 } else {
-                    VNONE;
+                    VNONE
                 };
                 let k2 = const_of(b, other);
                 if k2.is_some() {
                     // Along the edge `a == k2` holds, or `a != k2`.
                     let same = (k2.unwrap() & m) == (c & m);
                     if ci.aux == C_EQ == (e == t.b) {
-                        return Option::<bool>::Some(same);
+                        return Some(same);
                     }
                     if same {
-                        return Option::<bool>::Some(false);
+                        return Some(false);
                     }
                 }
             }
@@ -3469,14 +3461,14 @@ extend Opt {
     // one edge into `k`, `depth` blocks back; None when the branches do not settle it.
     fn entry_fact(self: &Self, pk: &Package, b: &Body, k: u32, a: Value, c: u64, depth: u32) Option<bool> {
         if depth == 0 || self.rpo[k as usize] == NONE {
-            return Option::<bool>::None;
+            return None;
         }
         let np = self.pred_at[k as usize + 1] - self.pred_at[k as usize];
         let kb = b.blocks[k as usize];
         let p = a & ~VPARAM;
         if (a & VPARAM) != 0 && p >= kb.param_start && p < kb.param_start + kb.param_len as u32 {
             if np == 0 || np > IMPLY_FAN {
-                return Option::<bool>::None;
+                return None;
             }
             let mut r = Option::<bool>::None;
             for x in self.pred_at[k as usize]..self.pred_at[k as usize + 1] {
@@ -3492,7 +3484,7 @@ extend Opt {
                     }
                     let ri = self.implied(pk, b, src, ed, b.edge_arg(ed, p - kb.param_start), c, depth - 1);
                     if ri.is_none() || r.is_some() && r.unwrap() != ri.unwrap() {
-                        return Option::<bool>::None;
+                        return None;
                     }
                     r = ri;
                 }
@@ -3500,7 +3492,7 @@ extend Opt {
             return r;
         }
         if np != 1 {
-            return Option::<bool>::None;
+            return None;
         }
         let src = self.preds[self.pred_at[k as usize] as usize];
         let st = term(b, src);
@@ -3509,13 +3501,13 @@ extend Opt {
             let ed = edge_at(b, st, n);
             if b.edge_target(ed) == k {
                 if only != NONE {
-                    return Option::<bool>::None;
+                    return None;
                 }
                 only = ed;
             }
         }
         if only == NONE {
-            return Option::<bool>::None;
+            return None;
         }
         return self.implied(pk, b, src, only, a, c, depth - 1);
     }
@@ -3537,17 +3529,17 @@ extend Opt {
         depth: u32,
     ) Option<u64> {
         if v == cond && cond != VNONE {
-            return Option::<u64>::Some(holds);
+            return Some(holds);
         }
         if (v & VPARAM) != 0 {
             let jb = b.blocks[j as usize];
             let p = v & ~VPARAM;
             if p < jb.param_start || p >= jb.param_start + jb.param_len as u32 {
-                return Option::<u64>::None;
+                return None;
             }
             let a = b.edge_arg(e, p - jb.param_start);
             if a == cond && cond != VNONE {
-                return Option::<u64>::Some(holds);
+                return Some(holds);
             }
             return const_of(b, a);
         }
@@ -3563,7 +3555,7 @@ extend Opt {
         let t = b.insts[v as usize];
         let ptr = pk.ptr_bytes;
         if is_vec(t.ty) || t.ty == T_I128 {
-            return Option::<u64>::None;
+            return None;
         }
         if t.op == O_ICONST {
             return const_of(b, v);
@@ -3580,9 +3572,9 @@ extend Opt {
                 j,
                 e,
                 if c.unwrap() != 0 {
-                    t.b;
+                    t.b
                 } else {
-                    t.c;
+                    t.c
                 },
                 cond,
                 holds,
@@ -3590,7 +3582,7 @@ extend Opt {
             );
         }
         if t.op != O_ICMP && t.op != O_ZEXT && t.op != O_SEXT && t.op != O_TRUNC && (t.op < O_ADD || t.op > O_XOR || t.op == O_MUL || t.op >= O_SDIV && t.op <= O_UREM) {
-            return Option::<u64>::None;
+            return None;
         }
         let x = self.decide(pk, b, k, j, e, t.a, cond, holds, depth - 1);
         if x.is_none() {
@@ -3601,7 +3593,7 @@ extend Opt {
                 if y.is_some() && a != VNONE {
                     let r = self.implied(pk, b, k, e, a, y.unwrap(), THREAD_DEPTH);
                     if r.is_some() {
-                        return Option::<u64>::Some((r.unwrap() == (t.aux == C_EQ)) as u64);
+                        return Some((r.unwrap() == (t.aux == C_EQ)) as u64);
                     }
                 }
             }
@@ -3610,9 +3602,9 @@ extend Opt {
         let mut r: u64 = 0;
         if t.op == O_ZEXT || t.op == O_SEXT || t.op == O_TRUNC {
             if !le::scalar_convert(t.op, t.aux, b.type_of(t.a), t.ty, ptr, x.unwrap(), &mut r) {
-                return Option::<u64>::None;
+                return None;
             }
-            return Option::<u64>::Some(r);
+            return Some(r);
         }
         let y = self.decide(pk, b, k, j, e, t.b, cond, holds, depth - 1);
         if y.is_none() {
@@ -3621,19 +3613,19 @@ extend Opt {
                 if a != VNONE {
                     let r = self.implied(pk, b, k, e, a, x.unwrap(), THREAD_DEPTH);
                     if r.is_some() {
-                        return Option::<u64>::Some((r.unwrap() == (t.aux == C_EQ)) as u64);
+                        return Some((r.unwrap() == (t.aux == C_EQ)) as u64);
                     }
                 }
             }
             return y;
         }
         if t.op == O_ICMP {
-            return Option::<u64>::Some(le::icmp(t.aux, b.type_of(t.a), ptr, x.unwrap(), y.unwrap()) as u64);
+            return Some(le::icmp(t.aux, b.type_of(t.a), ptr, x.unwrap(), y.unwrap()) as u64);
         }
         if le::int_fold(t.op, t.ty, ptr, x.unwrap(), y.unwrap(), &mut r) != le::FOLD_OK {
-            return Option::<u64>::None;
+            return None;
         }
-        return Option::<u64>::Some(r);
+        return Some(r);
     }
 
     // The index of the parameter of block `j` that its branch tests, when `j` holds that branch alone,
@@ -3669,13 +3661,13 @@ extend Opt {
             let p = x & ~VPARAM;
             self.uses.push(
                 if (x & VPARAM) != 0 && p >= jb.param_start && p < jb.param_start + jb.param_len as u32 {
-                    b.edge_arg(e, p - jb.param_start);
+                    b.edge_arg(e, p - jb.param_start)
                 } else {
-                    x;
+                    x
                 },
             );
         }
-        return b.edge(b.edge_target(s), self.uses.as_slice());
+        return b.edge(b.edge_target(s), &self.uses);
     }
 
     // The value `v` stands for now.
@@ -3686,9 +3678,9 @@ extend Opt {
         if (v & VPARAM) != 0 {
             let r = self.prepl[(v & ~VPARAM) as usize];
             return if r == VNONE {
-                v;
+                v
             } else {
-                r;
+                r
             };
         }
         if (v & VFLAG) != 0 && self.frepl[(v & ~VFLAG) as usize] != VNONE {
@@ -3745,11 +3737,11 @@ extend Opt {
         let cb = const_of(b, t.b);
         let signed = (t.aux & OV_SIGNED) != 0;
         let base = if t.op == O_ADDO {
-            O_ADD;
+            O_ADD
         } else if t.op == O_SUBO {
-            O_SUB;
+            O_SUB
         } else {
-            O_MUL;
+            O_MUL
         };
         let mut val = VNONE;
         let mut flag: u64 = 0;
@@ -3810,13 +3802,13 @@ extend Opt {
             // A branch or a switch on a constant jumps, and so does a branch on a condition the edge into a
             // dominating block decides.
             let mut c = if t.op == O_BR || t.op == O_SWITCH {
-                const_of(b, t.a);
+                const_of(b, t.a)
             } else {
-                Option::<u64>::None;
+                Option::<u64>::None
             };
             if t.op == O_BR && c.is_none() {
                 if let Some(x) = self.cond.get(&(t.a as u64)) {
-                    c = Option::<u64>::Some(*x);
+                    c = Some(*x);
                 } else {
                     c = self.order_decided(b, t.a);
                 }
@@ -3824,9 +3816,9 @@ extend Opt {
             if t.op == O_BR && c.is_some() {
                 t = jump(
                     if c.unwrap() != 0 {
-                        t.b;
+                        t.b
                     } else {
-                        t.c;
+                        t.c
                     },
                 );
             } else if t.op == O_BR {
@@ -3852,14 +3844,14 @@ extend Opt {
         if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) {
             let kb = const_of(b, t.b);
             let a = if kb.is_some() {
-                t.a;
+                t.a
             } else {
-                t.b;
+                t.b
             };
             let kc = if kb.is_some() {
-                kb;
+                kb
             } else {
-                const_of(b, t.a);
+                const_of(b, t.a)
             };
             let local = (a & VFLAG) != 0 || (a & VPARAM) == 0 && (a as usize >= self.blk_of.len() || self.blk_of[a as usize] == k);
             if kc.is_some() && const_of(b, a).is_none() && !local {
@@ -3936,9 +3928,9 @@ extend Opt {
         b.insts[i as usize] = t;
         // A copy or a fill of no byte does nothing.
         let size = if t.op == O_MEMCPY || t.op == O_MEMSET {
-            const_of(b, t.c);
+            const_of(b, t.c)
         } else {
-            Option::<u64>::None;
+            Option::<u64>::None
         };
         if size.is_some() && size.unwrap() == 0 {
             self.repl[i as usize] = DROPPED;
@@ -3949,15 +3941,15 @@ extend Opt {
         if t.op == O_MEMCPY && size.is_some() && (t.aux & MEM_VOLATILE) == 0 {
             let n = size.unwrap();
             let ty = if n == 1 {
-                T_I8;
+                T_I8
             } else if n == 2 {
-                T_I16;
+                T_I16
             } else if n == 4 {
-                T_I32;
+                T_I32
             } else if n == 8 {
-                T_I64;
+                T_I64
             } else {
-                T_NONE;
+                T_NONE
             };
             if ty != T_NONE {
                 let v = self.before(b, k, i, Inst { op: O_LOAD, ty: ty, aux: 0, a: t.b, b: VNONE, c: 0 });
@@ -4011,16 +4003,16 @@ extend Opt {
                 if fit && (tc == pc + n as i64 || pc == tc + n as i64) {
                     let m = (1u64 << 8 * n as u64) - 1;
                     let (lo, hi, at) = if pc < tc {
-                        (kp.unwrap(), kt.unwrap(), p.c);
+                        (kp.unwrap(), kt.unwrap(), p.c)
                     } else {
-                        (kt.unwrap(), kp.unwrap(), t.c);
+                        (kt.unwrap(), kp.unwrap(), t.c)
                     };
                     let wty = if n == 1 {
-                        T_I16;
+                        T_I16
                     } else if n == 2 {
-                        T_I32;
+                        T_I32
                     } else {
-                        T_I64;
+                        T_I64
                     };
                     t.b = self.constant(b, wty, lo & m | (hi & m) << 8 * n as u64);
                     t.c = at;
@@ -4038,9 +4030,9 @@ extend Opt {
                 return true;
             }
             let sv = if p == PRIV_NONE {
-                self.private_splat(pk, b, k, i, t);
+                self.private_splat(pk, b, k, i, t)
             } else {
-                VNONE;
+                VNONE
             };
             if sv != VNONE {
                 b.insts[i as usize] = Inst { op: O_SPLAT, ty: t.ty, aux: 0, a: sv, b: VNONE, c: VNONE };
@@ -4049,9 +4041,9 @@ extend Opt {
             }
             // A load of bytes no write touches reads one value in every memory state.
             let st = if p == PRIV_KEPT {
-                KEPT_STATE;
+                KEPT_STATE
             } else {
-                self.state;
+                self.state
             };
             let seen = self.recall(t.a, t.c, t.ty, st);
             if seen != VNONE {
@@ -4083,9 +4075,9 @@ extend Opt {
             let h = mix(
                 call_hash(b, t),
                 if reads {
-                    self.tstate[0] as u64 + 1;
+                    self.tstate[0] as u64 + 1
                 } else {
-                    0u64;
+                    0u64
                 },
             );
             let found = switch self.pure.get(&h) {
@@ -4150,17 +4142,17 @@ extend Opt {
         let k = const_of(b, t.b);
         let bits = type_bits(t.ty, pk.ptr_bytes) as u64;
         if x.op != if t.op == O_LSHR {
-            O_SHL;
+            O_SHL
         } else {
-            O_LSHR;
+            O_LSHR
         } || k.is_none() || k.unwrap() == 0 || k.unwrap() >= bits || const_of(b, x.b) != k {
             return;
         }
         let ones = le::trunc_bits(0xFFFFFFFFFFFFFFFF, bits as u32);
         let m = if t.op == O_LSHR {
-            ones >> k.unwrap();
+            ones >> k.unwrap()
         } else {
-            ones << k.unwrap() & ones;
+            ones << k.unwrap() & ones
         };
         let mv = self.constant(b, t.ty, m);
         b.insts[i as usize] = Inst { op: O_AND, ty: t.ty, aux: 0, a: x.a, b: mv, c: VNONE };
@@ -4185,9 +4177,9 @@ extend Opt {
         }
         let s = self.constant(b, t.ty, y.trailing_zeros() as u64);
         let op = if t.op == O_MUL {
-            O_SHL;
+            O_SHL
         } else {
-            O_LSHR;
+            O_LSHR
         };
         b.insts[i as usize] = Inst { op: op, ty: t.ty, aux: 0, a: t.a, b: s, c: VNONE };
     }
@@ -4358,16 +4350,16 @@ extend Opt {
         }
         if d == 1 {
             self.repl[i as usize] = if quot {
-                n;
+                n
             } else {
-                self.constant(b, ty, 0);
+                self.constant(b, ty, 0)
             };
             return true;
         }
         let ad = if d < 0 {
-            0u64.wrapping_sub(d as u64);
+            0u64.wrapping_sub(d as u64)
         } else {
-            d as u64;
+            d as u64
         };
         let wm = width_mask(ty, pk.ptr_bytes);
         if (ad & ad - 1) == 0 {
@@ -4457,9 +4449,9 @@ extend Opt {
             b.insts[i as usize] = t;
         }
         let one = if t.ty == T_F64 {
-            0x3FF0000000000000u64;
+            0x3FF0000000000000u64
         } else {
-            0x3F800000u64;
+            0x3F800000u64
         };
         let cb = float_const(b, t.b);
         let finite = (fm & FM_FINITE) != 0;
@@ -4505,9 +4497,9 @@ extend Opt {
         // the product computes beside it (GCC's FMA deferring, PR 81616).
         if (op == O_FADD || op == O_FSUB) && (fm & FM_CONTRACT) != 0 && pk.fma {
             let sign = if t.ty == T_F64 {
-                1u64 << 63;
+                1u64 << 63
             } else {
-                1u64 << 31;
+                1u64 << 31
             };
             let mut m = VNONE;
             let mut x = VNONE;
@@ -4631,14 +4623,14 @@ extend Opt {
                     }
                     let o = self.base_off(v);
                     let size = if t.op == O_MEMCPY || t.op == O_MEMSET {
-                        const_of(b, t.c);
+                        const_of(b, t.c)
                     } else {
-                        Option::<u64>::None;
+                        Option::<u64>::None
                     };
                     let end = if size.is_some() && size.unwrap() < 1u64 << 40 {
-                        o + size.unwrap() as i64;
+                        o + size.unwrap() as i64
                     } else {
-                        0x7FFFFFFFFFFFFFFF;
+                        0x7FFFFFFFFFFFFFFF
                     };
                     if t.op == O_LOAD || t.op == O_MEMCPY && t.b == v && t.a != v || t.op == O_VOP && header_read(
                         b,
@@ -4693,9 +4685,9 @@ extend Opt {
         if (v & VPARAM) == 0 {
             // A select the walk made (`diamond`) takes values `slot_writes` saw escape as edge arguments.
             return if v as usize < self.sbase.len() {
-                self.sbase[v as usize];
+                self.sbase[v as usize]
             } else {
-                NONE;
+                NONE
             };
         }
         let p = v & ~VPARAM;
@@ -4787,9 +4779,9 @@ extend Opt {
             v = x;
         }
         return if seen.count_ones() as u32 == lanes(t.ty) {
-            v;
+            v
         } else {
-            VNONE;
+            VNONE
         };
     }
 
@@ -4847,9 +4839,9 @@ extend Opt {
         let s = self.pder[a as usize];
         if s != NONE {
             return s | if self.pesc[s as usize] {
-                lu::OBJ_SLOT;
+                lu::OBJ_SLOT
             } else {
-                lu::OBJ_PRIVATE;
+                lu::OBJ_PRIVATE
             };
         }
         let mut v = a;
@@ -4859,9 +4851,9 @@ extend Opt {
                 let s = b.syms[t.a as usize];
                 let y = pk.syms[s as usize];
                 return if y.kind != SK_FUNC && !y.ext {
-                    s;
+                    s
                 } else {
-                    NONE;
+                    NONE
                 };
             }
             if t.op != O_PTRADD || (t.a & (VPARAM | VFLAG)) != 0 {
@@ -4893,9 +4885,9 @@ extend Opt {
         }
         let p = self.places[found as usize];
         return if p.addr == addr && p.off == off && p.ty == ty && p.state == state {
-            p.val;
+            p.val
         } else {
-            VNONE;
+            VNONE
         };
     }
 
@@ -5129,9 +5121,9 @@ extend Opt {
             return true;
         }
         let d = if (v & VPARAM) != 0 {
-            self.pblock[(v & ~VPARAM) as usize];
+            self.pblock[(v & ~VPARAM) as usize]
         } else {
-            self.blk_of[(v & ~VFLAG) as usize];
+            self.blk_of[(v & ~VFLAG) as usize]
         };
         return !self.in_loop(h, d);
     }
@@ -5201,9 +5193,9 @@ extend Opt {
         // stores `lir::slp` made, say).
         for q in 0..self.pre.len() + self.hoisted.len() {
             let v = if q < self.pre.len() {
-                self.pre[q] as u32;
+                self.pre[q] as u32
             } else {
-                self.hoisted[q - self.pre.len()] as u32;
+                self.hoisted[q - self.pre.len()] as u32
             };
             let t = b.insts[v as usize];
             if self.bmap[self.blk_of[v as usize] as usize] != NONE && !droppable(t) && !self.dead_store(b, t) {
@@ -5219,9 +5211,9 @@ extend Opt {
                     let v = self.uses[u];
                     self.mark(
                         if (v & VPARAM) != 0 {
-                            ni as u32 + (v & ~VPARAM);
+                            ni as u32 + (v & ~VPARAM)
                         } else {
-                            v & ~VFLAG;
+                            v & ~VFLAG
                         },
                     );
                 }
@@ -5234,9 +5226,9 @@ extend Opt {
                 let v = b.edge_arg(self.ins[j as usize], q);
                 self.mark(
                     if (v & VPARAM) != 0 {
-                        ni as u32 + (v & ~VPARAM);
+                        ni as u32 + (v & ~VPARAM)
                     } else {
-                        v & ~VFLAG;
+                        v & ~VFLAG
                     },
                 );
             }
@@ -5435,9 +5427,9 @@ extend Opt {
             let sc = b.scopes[x];
             let v = self.val(sc.root);
             let live = v != VNONE && (v & VFLAG) == 0 && if (v & VPARAM) != 0 {
-                self.live[ni + (v & ~VPARAM) as usize];
+                self.live[ni + (v & ~VPARAM) as usize]
             } else {
-                self.live[v as usize];
+                self.live[v as usize]
             };
             if live {
                 b.scopes[ns] = Scope { site: sc.site, group: sc.group, root: self.renum(v) };
@@ -5705,9 +5697,9 @@ extend Run {
         let n = bodies.len();
         let hd = &p.held;
         let held = if hd.body == NONE {
-            n as u32;
+            n as u32
         } else {
-            hd.body;
+            hd.body
         };
         let mut call_at = Vector::<u32>::with_capacity(n + 1);
         let mut calls = Vector::<u32>::new();
@@ -5851,9 +5843,9 @@ extend Run {
         // copy once the copy's slots are values (`lir::promote`), which a vector access of a slot prevents.
         let bu = r.cf.loops;
         let pre = if r.inline && r.shape[j as usize] && bu.vector != 0 && !packed(b) {
-            Option::<Body>::Some(b.compact());
+            Option::<Body>::Some(b.compact())
         } else {
-            Option::<Body>::None;
+            Option::<Body>::None
         };
         // A loop a round copied is innermost again for the next one.
         sc.o.unr.wide = false;
@@ -5895,7 +5887,7 @@ extend Run {
         }
         if pre.is_some() && packed(b) {
             let fin = replace(b, pre.unwrap());
-            unsafe *(r.finals.as_ptr() as *mut Option<Body> + j as usize) = Option::<Body>::Some(fin);
+            unsafe *(r.finals.as_ptr() as *mut Option<Body> + j as usize) = Some(fin);
         }
         unsafe *(r.ok.as_ptr() as *mut bool + j as usize) = r.inline && r.shape[j as usize] && il::small(b, r.cf.inline);
         r.give(sc);
@@ -5907,9 +5899,9 @@ extend Run {
         for k in 0..rs.len() {
             let l = rs[k].0;
             let file = if l.file < p.files.len() as u32 {
-                p.spell(p.files[l.file as usize]);
+                p.spell(p.files[l.file as usize])
             } else {
-                "?";
+                "?"
             };
             eprint("{}:{}:{}: not vectorized: {}\n", file, l.line, l.col, rs[k].1.as_str());
         }
@@ -5919,7 +5911,7 @@ extend Run {
     fn print_body(self: &Self, p: &Package, j: u32, b: &Body) {
         for s in 0..p.syms.len() {
             let name = p.spell(p.syms[s].name);
-            if p.syms[s].kind == SK_FUNC && p.syms[s].def == j && name.contains(self.print.as_str()) {
+            if p.syms[s].kind == SK_FUNC && p.syms[s].def == j && name.contains(&self.print) {
                 let mut out = String::new();
                 lp::print_body(p, name, b, &mut out);
                 eprint("; body {}\n{}", j, out.as_str());
@@ -5936,7 +5928,7 @@ extend Run {
                 return x;
             },
             None => {},
-        };
+        }
         return Box::new(Scratch { il: il::Inliner::new(), o: Opt::new() });
     }
 
@@ -6015,9 +6007,9 @@ pub(package) fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
 fn effects(p: &Package, bodies: &Vector<Body>, wargs: &mut Vector<u64>, esc: &mut Vector<u64>) Vector<u8> {
     let n = bodies.len();
     let held = if p.held.body == NONE {
-        n;
+        n
     } else {
-        p.held.body as usize;
+        p.held.body as usize
     };
     let mut fx = Vector::<u8>::with_capacity(n);
     wargs.truncate(0);
@@ -6207,9 +6199,9 @@ fn param_of(b: &Body, der: &Vector<u32>, v: Value) u32 {
         let e = b.blocks[0];
         let x = v & ~VPARAM;
         return if x >= e.param_start && x - e.param_start < (e.param_len as u32).min(64) {
-            x - e.param_start;
+            x - e.param_start
         } else {
-            NONE;
+            NONE
         };
     }
     return der[v as usize];
@@ -6238,11 +6230,11 @@ fn in_frame(b: &Body, v: Value) bool {
 fn write_effect(b: &Body, v: Value, w: &mut u64) u8 {
     let r = root(b, v, w);
     return if r == ROOT_FRAME {
-        0u8;
+        0u8
     } else if r == ROOT_ARGS {
-        FX_ARG;
+        FX_ARG
     } else {
-        FX_WRITE;
+        FX_WRITE
     };
 }
 
@@ -6319,9 +6311,9 @@ fn levels(
             let ny = p.spell(p.syms[(*y) as usize].name);
             let c = p.spell(p.syms[(*x) as usize].name).cmp(&ny);
             return if c != 0 {
-                c;
+                c
             } else {
-                (p.syms[(*x) as usize].unit > p.syms[(*y) as usize].unit) as i32 - (p.syms[(*x) as usize].unit < p.syms[(*y) as usize].unit) as i32;
+                (p.syms[(*x) as usize].unit > p.syms[(*y) as usize].unit) as i32 - (p.syms[(*x) as usize].unit < p.syms[(*y) as usize].unit) as i32
             };
         },
     );
@@ -6376,9 +6368,9 @@ const fn call_target(p: &Package, b: &Body, t: Inst) u32 {
     }
     let sy = p.syms[b.syms[t.a as usize] as usize];
     return if sy.kind == SK_FUNC && sy.def != NONE {
-        sy.def;
+        sy.def
     } else {
-        NONE;
+        NONE
     };
 }
 
@@ -6392,19 +6384,19 @@ const fn droppable(t: Inst) bool {
 // The integer constant value `v` is (up to 64 bits, truncated to its type), if it is one.
 const fn const_of(b: &Body, v: Value) Option<u64> {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST || b.insts[v as usize].ty == T_I128 {
-        return Option::<u64>::None;
+        return None;
     }
     let t = b.insts[v as usize];
-    return Option::<u64>::Some(t.b as u64 << 32 | t.a as u64);
+    return Some(t.b as u64 << 32 | t.a as u64);
 }
 
 // The words of 128-bit constant `v` (low, high), if it is one.
 fn wide_of(b: &Body, v: Value) Option<(u64, u64)> {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_WCONST || b.insts[v as usize].ty != T_I128 {
-        return Option::<(u64, u64)>::None;
+        return None;
     }
     let w = b.insts[v as usize].a as usize;
-    return Option::<(u64, u64)>::Some((b.words[w], b.words[w + 1]));
+    return Some((b.words[w], b.words[w + 1]));
 }
 
 // Pure 128-bit instruction `i` of `b`, its operands final, as `simplify`: an extension of a constant and
@@ -6420,24 +6412,24 @@ fn simplify_wide(b: &mut Body, i: u32) Value {
         }
         let bits = type_bits(b.type_of(t.a), 8);
         let l = if t.op == O_SEXT {
-            le::sign_ext(x.unwrap(), bits) as u64;
+            le::sign_ext(x.unwrap(), bits) as u64
         } else {
-            x.unwrap();
+            x.unwrap()
         };
         r = (
             l,
             if t.op == O_SEXT && l >> 63 != 0 {
-                ~0u64;
+                ~0u64
             } else {
-                0u64;
+                0u64
             }
         );
     } else if t.op >= O_ADD && t.op <= O_NOT && t.op != O_SDIV && t.op != O_UDIV && t.op != O_SREM && t.op != O_UREM {
         let x = wide_of(b, t.a);
         let y = if t.op == O_NEG || t.op == O_NOT {
-            Option::<(u64, u64)>::Some((0, 0));
+            Option::<(u64, u64)>::Some((0, 0))
         } else {
-            wide_of(b, t.b);
+            wide_of(b, t.b)
         };
         if y.is_some() && x.is_none() {
             let (yl, yh) = y.unwrap();
@@ -6474,9 +6466,9 @@ const fn ext_from(b: &Body, v: Value, ty: u8) Value {
     }
     let t = b.insts[v as usize];
     return if (t.op == O_ZEXT || t.op == O_SEXT) && b.type_of(t.a) == ty {
-        t.a;
+        t.a
     } else {
-        VNONE;
+        VNONE
     };
 }
 
@@ -6535,10 +6527,10 @@ const LANE_WALK: u32 = 64;
 
 const fn float_const(b: &Body, v: Value) Option<u64> {
     if (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_FCONST {
-        return Option::<u64>::None;
+        return None;
     }
     let t = b.insts[v as usize];
-    return Option::<u64>::Some(t.b as u64 << 32 | t.a as u64);
+    return Some(t.b as u64 << 32 | t.a as u64);
 }
 
 // Pure instruction `i` of `b`, its operands final: the value it equals (VNONE: none). Else it may be
@@ -6560,9 +6552,9 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         let c = const_of(b, t.a);
         if c.is_some() {
             return if c.unwrap() != 0 {
-                t.b;
+                t.b
             } else {
-                t.c;
+                t.c
             };
         }
         // A flag (`zero_one`) chosen as 1 or 0 is the flag; as 0 or 1, the opposite comparison, or the
@@ -6581,9 +6573,9 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             let wide = type_bits(t.ty, ptr) > type_bits(ct, ptr);
             b.insts[i as usize] = Inst {
                 op: if wide {
-                    O_ZEXT;
+                    O_ZEXT
                 } else {
-                    O_TRUNC;
+                    O_TRUNC
                 },
                 ty: t.ty,
                 aux: 0,
@@ -6596,9 +6588,9 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         if f && x.unwrap() == 0 && y.unwrap() == 1 {
             let icmp = (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_ICMP;
             let ci = if icmp {
-                b.insts[t.a as usize];
+                b.insts[t.a as usize]
             } else {
-                Inst { op: O_ICMP, ty: t.ty, aux: C_NE, a: t.a, b: t.b, c: VNONE };
+                Inst { op: O_ICMP, ty: t.ty, aux: C_NE, a: t.a, b: t.b, c: VNONE }
             };
             b.insts[i as usize] = Inst { op: O_ICMP, ty: t.ty, aux: opposite(ci.aux), a: ci.a, b: ci.b, c: VNONE };
             return VNONE;
@@ -6610,17 +6602,17 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         let flag_c = zero_one(b, t.c, ZO_DEPTH) && b.type_of(t.c) == t.ty;
         if fc && x.is_some() && x.unwrap() <= 1 && flag_c {
             b.insts[i as usize] = if x.unwrap() == 0 {
-                Inst { op: O_ICMP, ty: t.ty, aux: C_UGT, a: t.c, b: t.a, c: VNONE };
+                Inst { op: O_ICMP, ty: t.ty, aux: C_UGT, a: t.c, b: t.a, c: VNONE }
             } else {
-                Inst { op: O_OR, ty: t.ty, aux: 0, a: t.a, b: t.c, c: VNONE };
+                Inst { op: O_OR, ty: t.ty, aux: 0, a: t.a, b: t.c, c: VNONE }
             };
             return VNONE;
         }
         if fc && y.is_some() && y.unwrap() <= 1 && flag_b {
             b.insts[i as usize] = if y.unwrap() == 0 {
-                Inst { op: O_AND, ty: t.ty, aux: 0, a: t.a, b: t.b, c: VNONE };
+                Inst { op: O_AND, ty: t.ty, aux: 0, a: t.a, b: t.b, c: VNONE }
             } else {
-                Inst { op: O_ICMP, ty: t.ty, aux: C_UGE, a: t.b, b: t.a, c: VNONE };
+                Inst { op: O_ICMP, ty: t.ty, aux: C_UGE, a: t.b, b: t.a, c: VNONE }
             };
             return VNONE;
         }
@@ -6629,16 +6621,16 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             let ci = b.insts[t.a as usize];
             if (ci.aux == C_EQ || ci.aux == C_NE) && (t.b == ci.a && t.c == ci.b || t.b == ci.b && t.c == ci.a) {
                 return if ci.aux == C_NE {
-                    t.b;
+                    t.b
                 } else {
-                    t.c;
+                    t.c
                 };
             }
         }
         return if t.b == t.c {
-            t.b;
+            t.b
         } else {
-            VNONE;
+            VNONE
         };
     }
     if t.op == O_PTRADD {
@@ -6661,23 +6653,23 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             let x = b.insts[t.b as usize];
             // An `or` of a constant below `2^s` with a value shifted left by `s` adds it.
             let low = if x.op == O_OR && (x.a & (VPARAM | VFLAG)) == 0 && b.insts[x.a as usize].op == O_SHL {
-                const_of(b, b.insts[x.a as usize].b);
+                const_of(b, b.insts[x.a as usize].b)
             } else {
-                Option::<u64>::None;
+                Option::<u64>::None
             };
             let k = if x.op == O_ADD || x.op == O_SUB {
-                const_of(b, x.b);
+                const_of(b, x.b)
             } else if low.is_some() && low.unwrap() < 64 && const_of(b, x.b).is_some() && const_of(b, x.b).unwrap() < 1u64 << low.unwrap() {
-                const_of(b, x.b);
+                const_of(b, x.b)
             } else {
-                Option::<u64>::None;
+                Option::<u64>::None
             };
             if k.is_some() {
                 let kv = le::sign_ext(k.unwrap(), ptr * 8);
                 let d = if x.op == O_SUB {
-                    -kv;
+                    -kv
                 } else {
-                    kv;
+                    kv
                 };
                 let off = (t.c as i32) as i64 + d * t.aux as i64;
                 if kv > -0x80000000 && kv < 0x80000000 && off >= -0x80000000 && off <= 0x7FFFFFFF {
@@ -6689,19 +6681,19 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             // constant joins the scale when the product fits it (modulo 2^64 both ways), so a strided access
             // is one of the counter.
             let x2 = if (t.b & (VPARAM | VFLAG)) == 0 {
-                b.insts[t.b as usize];
+                b.insts[t.b as usize]
             } else {
-                Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE };
+                Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE }
             };
             let f = if x2.op == O_MUL && (x2.b & (VPARAM | VFLAG)) == 0 && b.insts[x2.b as usize].op == O_ICONST {
-                const_of(b, x2.b);
+                const_of(b, x2.b)
             } else if x2.op == O_SHL && (x2.b & (VPARAM | VFLAG)) == 0 && b.insts[x2.b as usize].op == O_ICONST && const_of(
                 b,
                 x2.b,
             ).unwrap() < 16 {
-                Option::<u64>::Some(1u64 << const_of(b, x2.b).unwrap());
+                Option::<u64>::Some(1u64 << const_of(b, x2.b).unwrap())
             } else {
-                Option::<u64>::None;
+                Option::<u64>::None
             };
             if f.is_some() && f.unwrap() != 0 && t.aux as u64 * f.unwrap() <= 0xFFFF {
                 t.aux = (t.aux as u64 * f.unwrap()) as u16;
@@ -6717,9 +6709,9 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         }
         b.insts[i as usize] = t;
         return if t.b == VNONE && t.c == 0 {
-            t.a;
+            t.a
         } else {
-            VNONE;
+            VNONE
         };
     }
     if t.op == O_ICMP {
@@ -6769,9 +6761,9 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
                     op: O_ICMP,
                     ty: t.ty,
                     aux: if same_dir {
-                        f.aux;
+                        f.aux
                     } else {
-                        opposite(f.aux);
+                        opposite(f.aux)
                     },
                     a: f.a,
                     b: f.b,
@@ -6785,9 +6777,9 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             }
             if const_of(b, c.b).unwrap() == 0 && (c.aux == C_UGT || c.aux == C_ULE) {
                 c.aux = if c.aux == C_UGT {
-                    C_NE;
+                    C_NE
                 } else {
-                    C_EQ;
+                    C_EQ
                 };
             }
             b.insts[i as usize] = c;
@@ -6813,9 +6805,9 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         }
         // So is 1.0 * v.
         let one: u64 = if t.ty == T_F32 {
-            0x3F800000;
+            0x3F800000
         } else {
-            0x3FF0000000000000;
+            0x3FF0000000000000
         };
         if t.op == O_FMUL && x.is_some() && x.unwrap() == one && quiet(b, t.b) && (t.ty == T_F32 || t.ty == T_F64) {
             return t.b;
@@ -6899,9 +6891,9 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     }
     let ca = const_of(b, t.a);
     let cb = if op == O_NEG || op == O_NOT {
-        Option::<u64>::Some(0);
+        Option::<u64>::Some(0)
     } else {
-        const_of(b, t.b);
+        const_of(b, t.b)
     };
     let mut r: u64 = 0;
     if ca.is_some() && cb.is_some() {
@@ -6945,14 +6937,14 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
 // `(x - y) + y` is `x`; VNONE when none does.
 fn cancel(b: &Body, t: Inst) Value {
     let a = if (t.a & (VPARAM | VFLAG)) == 0 {
-        b.insts[t.a as usize];
+        b.insts[t.a as usize]
     } else {
-        Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE };
+        Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE }
     };
     let c = if t.b != VNONE && (t.b & (VPARAM | VFLAG)) == 0 {
-        b.insts[t.b as usize];
+        b.insts[t.b as usize]
     } else {
-        Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE };
+        Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE }
     };
     if t.op == O_SUB && a.op == O_ADD {
         if a.a == t.b {
@@ -6974,14 +6966,14 @@ fn cancel(b: &Body, t: Inst) Value {
 // Whether float bits `r` of type `ty` are a normal number: neither zero, subnormal, infinite nor NaN.
 fn regular(ty: u8, r: u64) bool {
     let e = if ty == T_F64 {
-        r >> 52 & 0x7FF;
+        r >> 52 & 0x7FF
     } else {
-        r >> 23 & 0xFF;
+        r >> 23 & 0xFF
     };
     let top = if ty == T_F64 {
-        0x7FFu64;
+        0x7FFu64
     } else {
-        0xFFu64;
+        0xFFu64
     };
     return e != 0 && e != top;
 }
@@ -7096,9 +7088,9 @@ fn fold_data(pk: &Package, b: &mut Body, i: u32) bool {
         }
     }
     b.insts[i as usize] = if is_float(t.ty) {
-        Inst { op: O_FCONST, ty: t.ty, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE };
+        Inst { op: O_FCONST, ty: t.ty, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE }
     } else {
-        iconst(t.ty, v);
+        iconst(t.ty, v)
     };
     return true;
 }
@@ -7136,9 +7128,9 @@ fn call_alloc(pk: &Package, b: &Body, t: Inst) u8 {
     }
     let s = pk.syms[b.syms[t.a as usize] as usize];
     return if s.def == NONE {
-        s.alloc;
+        s.alloc
     } else {
-        ALLOC_NONE;
+        ALLOC_NONE
     };
 }
 
@@ -7148,13 +7140,13 @@ fn call_alloc(pk: &Package, b: &Body, t: Inst) u8 {
 fn write_tag(pk: &Package, b: &Body, t: Inst) usize {
     let a = call_alloc(pk, b, t);
     return if t.op == O_LOAD || t.op == O_STORE {
-        tbaa(t);
+        tbaa(t)
     } else if a == ALLOC_FRESH {
-        tbaa_of(T_I32) as usize;
+        tbaa_of(T_I32) as usize
     } else if a == ALLOC_FREE {
-        TBAA_TAGS;
+        TBAA_TAGS
     } else {
-        0usize;
+        0usize
     };
 }
 
@@ -7202,9 +7194,9 @@ fn frozen(b: &Body, out: &mut Vector<bool>) {
     for i in 0..ni {
         let t = b.insts[i];
         let base = if t.op == O_LOAD || t.op == O_PTRADD {
-            t.a;
+            t.a
         } else {
-            VNONE;
+            VNONE
         };
         let mut via = false;
         if (base & VPARAM) != 0 && (base & VFLAG) == 0 {
@@ -7212,9 +7204,9 @@ fn frozen(b: &Body, out: &mut Vector<bool>) {
             if p >= e.param_start && p < e.param_start + e.param_len as u32 {
                 let q = (p - e.param_start) as usize;
                 let r = if q < b.refs.len() {
-                    b.refs[q];
+                    b.refs[q]
                 } else {
-                    0u32;
+                    0u32
                 };
                 via = (r & REF_READONLY) != 0 && ((r & REF_INNER) == 0 || t.op == O_LOAD && t.c == 0 && t.ty == T_PTR);
                 // A view's own words are no element: its pointer, through which the elements are.
@@ -7274,20 +7266,20 @@ const CLASS_ROUNDS: u32 = 8;
 // The bits of the classes an access of class `c` may touch.
 const fn class_bit(c: u8) u64 {
     return if c >= CL_MANY {
-        ~0u64;
+        ~0u64
     } else {
-        1u64 << c as u64;
+        1u64 << c as u64
     };
 }
 
 // The class of a value that may be either `a`'s or `b`'s.
 const fn join(a: u8, b: u8) u8 {
     return if a == CL_UNSET || a == b {
-        b;
+        b
     } else if b == CL_UNSET {
-        a;
+        a
     } else {
-        CL_MANY;
+        CL_MANY
     };
 }
 
@@ -7354,9 +7346,9 @@ fn same_value(b: &Body, t: Inst, u: Inst) bool {
 // The key of `x` and `y` in `Opt.eqs`, either order.
 const fn eq_key(x: Value, y: Value) u64 {
     return if x < y {
-        rel_key(x, y);
+        rel_key(x, y)
     } else {
-        rel_key(y, x);
+        rel_key(y, x)
     };
 }
 
@@ -7375,54 +7367,54 @@ const SEL_CMP_DEPTH: u32 = 3;
 // comparison `c` a select tests, else `(SC_NONE, _)`.
 fn sel_cmp(b: &Body, t: Inst, ptr: u32, left: bool, depth: u32) (u8, Value) {
     let v = if left {
-        t.a;
+        t.a
     } else {
-        t.b;
+        t.b
     };
     let ty = b.type_of(t.a);
     let k = const_of(b, v);
     if k.is_some() {
         let o = if left {
-            const_of(b, t.b).unwrap();
+            const_of(b, t.b).unwrap()
         } else {
-            const_of(b, t.a).unwrap();
+            const_of(b, t.a).unwrap()
         };
         let r = if left {
-            le::icmp(t.aux, ty, ptr, k.unwrap(), o);
+            le::icmp(t.aux, ty, ptr, k.unwrap(), o)
         } else {
-            le::icmp(t.aux, ty, ptr, o, k.unwrap());
+            le::icmp(t.aux, ty, ptr, o, k.unwrap())
         };
-        return r as u8, VNONE;
+        return (r as u8, VNONE);
     }
     if depth == 0 || (v & (VPARAM | VFLAG)) != 0 {
-        return SC_NONE, VNONE;
+        return (SC_NONE, VNONE);
     }
     // A comparison widened (`simplify`'s form of a select of 1 or 0): as that select.
     let z = b.insts[v as usize];
     if z.op == O_ZEXT && (z.a & (VPARAM | VFLAG)) == 0 && b.insts[z.a as usize].op == O_ICMP {
         let o = if left {
-            const_of(b, t.b);
+            const_of(b, t.b)
         } else {
-            const_of(b, t.a);
+            const_of(b, t.a)
         };
         if o.is_none() {
-            return SC_NONE, VNONE;
+            return (SC_NONE, VNONE);
         }
         let (x, y) = if left {
-            (le::icmp(t.aux, ty, ptr, 1, o.unwrap()) as u8, le::icmp(t.aux, ty, ptr, 0, o.unwrap()) as u8);
+            (le::icmp(t.aux, ty, ptr, 1, o.unwrap()) as u8, le::icmp(t.aux, ty, ptr, 0, o.unwrap()) as u8)
         } else {
-            (le::icmp(t.aux, ty, ptr, o.unwrap(), 1) as u8, le::icmp(t.aux, ty, ptr, o.unwrap(), 0) as u8);
+            (le::icmp(t.aux, ty, ptr, o.unwrap(), 1) as u8, le::icmp(t.aux, ty, ptr, o.unwrap(), 0) as u8)
         };
         if x == y {
-            return x, VNONE;
+            return (x, VNONE);
         }
         if x == 1 {
-            return SC_VALUE, z.a;
+            return (SC_VALUE, z.a);
         }
-        return SC_NONE, VNONE;
+        return (SC_NONE, VNONE);
     }
     if z.op != O_SELECT {
-        return SC_NONE, VNONE;
+        return (SC_NONE, VNONE);
     }
     let sel = z;
     let mut tx = t;
@@ -7437,22 +7429,22 @@ fn sel_cmp(b: &Body, t: Inst, ptr: u32, left: bool, depth: u32) (u8, Value) {
     let (x, _) = sel_cmp(b, tx, ptr, left, depth - 1);
     let (y, _) = sel_cmp(b, ty2, ptr, left, depth - 1);
     if x <= 1 && x == y {
-        return x, VNONE;
+        return (x, VNONE);
     }
     // The select's condition is the result when it is a comparison (0 or 1) and picks 1 over 0.
     let c = sel.a;
     if x == 1 && y == 0 && (c & (VPARAM | VFLAG)) == 0 && b.insts[c as usize].op == O_ICMP {
-        return SC_VALUE, c;
+        return (SC_VALUE, c);
     }
-    return SC_NONE, VNONE;
+    return (SC_NONE, VNONE);
 }
 
 // Reader `r` (`Opt::preader`) after block `k` reads the value too.
 const fn reader(r: u32, k: u32) u32 {
     return if r == NONE || r == k {
-        k;
+        k
     } else {
-        MULTI;
+        MULTI
     };
 }
 
@@ -7469,14 +7461,14 @@ const fn smagic(d: i64, bits: u32) (u64, u32) {
     let one: u128 = 1;
     let two = one << (bits - 1) as usize;
     let ad = if d < 0 {
-        0u64.wrapping_sub(d as u64);
+        0u64.wrapping_sub(d as u64)
     } else {
-        d as u64;
+        d as u64
     } as u128;
     let t = if d < 0 {
-        two + 1;
+        two + 1
     } else {
-        two;
+        two
     };
     let anc = t - 1 - t % ad;
     let mut p = bits - 1;
@@ -7506,11 +7498,11 @@ const fn smagic(d: i64, bits: u32) (u64, u32) {
     let wm = (one << bits as usize) - 1;
     let m = q2 + 1 & wm;
     let ms = if d < 0 {
-        wm + 1 - m & wm;
+        wm + 1 - m & wm
     } else {
-        m;
+        m
     };
-    return ms as u64, p - bits;
+    return (ms as u64, p - bits);
 }
 
 const fn magic(d: u64, bits: u32) (u64, u32, bool) {
@@ -7522,11 +7514,11 @@ const fn magic(d: u64, bits: u32) (u64, u32, bool) {
         let p = one << (bits + s) as usize;
         let m = (p + dd - 1) / dd;
         if m < top && m * dd - p <= one << s as usize {
-            return m as u64, s, false;
+            return (m as u64, s, false);
         }
     }
     let m = top * ((one << l as usize) - dd) / dd + 1;
-    return m as u64, l - 1, true;
+    return (m as u64, l - 1, true);
 }
 
 // Whether edges `x` and `y` of `b` enter one block with the same arguments.
@@ -7545,9 +7537,9 @@ fn same_edge(b: &Body, x: u32, y: u32) bool {
 // The edge branch `t` takes when its condition is `c`.
 const fn side(t: Inst, c: u64) u32 {
     return if c != 0 {
-        t.b;
+        t.b
     } else {
-        t.c;
+        t.c
     };
 }
 
@@ -7555,9 +7547,9 @@ const fn side(t: Inst, c: u64) u32 {
 const fn width_mask(ty: u8, ptr: u32) u64 {
     let w = type_bits(ty, ptr);
     return if w >= 64 {
-        ~0u64;
+        ~0u64
     } else {
-        (1u64 << w as u64) - 1;
+        (1u64 << w as u64) - 1
     };
 }
 
@@ -7577,23 +7569,23 @@ fn decided(b: &Body, t: Inst, c: u64) u32 {
 // The number of edges terminator `t` holds, and its edge `n`.
 const fn edge_count(t: Inst) u32 {
     return if t.op == O_JMP {
-        1u32;
+        1u32
     } else if t.op == O_BR {
-        2u32;
+        2u32
     } else if t.op == O_SWITCH {
-        t.aux as u32 + 1;
+        t.aux as u32 + 1
     } else {
-        0u32;
+        0u32
     };
 }
 
 fn edge_at(b: &Body, t: Inst, n: u32) u32 {
     return if t.op == O_JMP {
-        t.a;
+        t.a
     } else if t.op == O_BR {
-        side(t, (n == 0) as u64);
+        side(t, (n == 0) as u64)
     } else {
-        b.switch_edge(t, n);
+        b.switch_edge(t, n)
     };
 }
 

@@ -38,16 +38,12 @@ fn synthesized(a: &Ast, i: NodeId) bool {
 /// inside it).
 pub fn hir_nodes(s: &ses::Session, file: str, start: u32, end: u32) Result<Vector<HirNode>, ApiError> {
     if !s.checked() {
-        return Result::<Vector<HirNode>, ApiError>::Err(
-            ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"),
-        );
+        return Err(ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"));
     }
     let m = switch s.module_of(file) {
         Some(md) => md.index() as usize,
         None => {
-            return Result::<Vector<HirNode>, ApiError>::Err(
-                ApiError::at(Code::InvalidArgument, "the file is not part of the analysis", file, 0, 0),
-            );
+            return Err(ApiError::at(Code::InvalidArgument, "the file is not part of the analysis", file, 0, 0));
         },
     };
     let p = s.package();
@@ -99,7 +95,7 @@ pub fn hir_nodes(s: &ses::Session, file: str, start: u32, end: u32) Result<Vecto
             },
         );
     }
-    return Result::<Vector<HirNode>, ApiError>::Ok(out);
+    return Ok(out);
 }
 
 /// What ends a Core IR block.
@@ -158,31 +154,23 @@ pub struct CoreFunction {
 /// `InvalidArgument` when no function is named there or it has no body.
 pub fn core_function(s: &mut ses::Session, file: str, off: u32) Result<CoreFunction, ApiError> {
     if !s.checked() {
-        return Result::<CoreFunction, ApiError>::Err(
-            ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"),
-        );
+        return Err(ApiError::new(Code::NotChecked, "the session holds no analysis of its current inputs"));
     }
     let m = switch s.module_of(file) {
         Some(md) => md.index() as usize,
         None => {
-            return Result::<CoreFunction, ApiError>::Err(
-                ApiError::at(Code::InvalidArgument, "the file is not part of the analysis", file, 0, 0),
-            );
+            return Err(ApiError::at(Code::InvalidArgument, "the file is not part of the analysis", file, 0, 0));
         },
     };
     let d = feat::def_at(s.package(), m, off);
     if d.node == NODE_NONE || s.package().modules[d.module as usize].ast.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
-        return Result::<CoreFunction, ApiError>::Err(
-            ApiError::at(Code::InvalidArgument, "no function is named here", file, off, off),
-        );
+        return Err(ApiError::at(Code::InvalidArgument, "no function is named here", file, off, off));
     }
     let mut body = ir::CoreBody::new(d, d.module);
     if !an::lower_item(s.package_mut(), d, &mut body) {
-        return Result::<CoreFunction, ApiError>::Err(
-            ApiError::at(Code::InvalidArgument, "the function has no body to lower", file, off, off),
-        );
+        return Err(ApiError::at(Code::InvalidArgument, "the function has no body to lower", file, off, off));
     }
-    return Result::<CoreFunction, ApiError>::Ok(materialize(s, &body));
+    return Ok(materialize(s, &body));
 }
 
 // Record operand `op` of body `b` in `out` when it is a user move (`CoreBody.user_moves`): a value the

@@ -60,7 +60,7 @@ fn json_dump_roundtrip() {
     let v = parse_ok("{\"a\":[1,2.5,\"x\"],\"b\":{\"c\":true,\"d\":null}}");
     let out = v.dump();
     assert_eq(out.as_str(), "{\"a\":[1,2.5,\"x\"],\"b\":{\"c\":true,\"d\":null}}");
-    let back = parse_ok(out.as_str());
+    let back = parse_ok(&out);
     // C is a bool, not a number.
     assert_eq(back.at_key("b").value_i64("c", 9), 9 as i64);
     assert(back.at_key("b").at_key("c").get_bool());
@@ -171,7 +171,7 @@ fn json_deep_nesting_capped() {
     for i in 0..2000 as usize {
         src.push_byte(b']');
     }
-    parse_err(src.as_str(), "Nesting depth limit exceeded");
+    parse_err(&src, "Nesting depth limit exceeded");
 }
 
 // A pathological exponent must cost O(digits), never a loop proportional to its value, and the
@@ -182,7 +182,7 @@ fn pathological_exponent_is_bounded() {
     for i in 0..2000 as usize {
         src.push_byte(b'9');
     }
-    switch json::parse(src.as_str()) {
+    switch json::parse(&src) {
         Ok(v) => {
             let d = v.dump();
             // Saturated to infinity, serialized as null.
@@ -196,7 +196,7 @@ fn pathological_exponent_is_bounded() {
             ee.free();
             assert(false, "a huge exponent must parse (saturated), not error");
         },
-    };
+    }
     switch json::parse("1e-99999") {
         Ok(v) => {
             let d = v.dump();
@@ -210,7 +210,7 @@ fn pathological_exponent_is_bounded() {
             ee.free();
             assert(false);
         },
-    };
+    }
 }
 
 // Every reject path the parser can reach through `parse`, by message. `parse_err` already asserts

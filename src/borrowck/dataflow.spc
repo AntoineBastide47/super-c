@@ -662,9 +662,9 @@ extend MoveFlow {
                 }
                 for e in es..ee {
                     let ev = if fused {
-                        *f.events.at(e as usize);
+                        *f.events.at(e as usize)
                     } else {
-                        *f.mev.at(e as usize);
+                        *f.mev.at(e as usize)
                     };
                     mf.s_ctx.step(forest, &ev, &mut mf.s_scratch, &mut mf.s_sub, fused, &mut mf.errs);
                 }

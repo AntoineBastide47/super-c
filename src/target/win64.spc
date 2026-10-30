@@ -38,9 +38,9 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, out: &mut CallLayout) {
     out.unknown = false;
     let fixed = b.pool[sig as usize + 1];
     let nfixed = if (fixed & SIG_VARIADIC) != 0 {
-        fixed & ~SIG_VARIADIC;
+        fixed & ~SIG_VARIADIC
     } else {
-        np;
+        np
     };
     // The position of the next argument.
     let mut at: u32 = 0;
@@ -75,9 +75,9 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, out: &mut CallLayout) {
         loc.p0 = out.parts.len() as u32;
         // By value in an integer register's width, a float, or by reference.
         let byref = if agg {
-            !reg_size(n);
+            !reg_size(n)
         } else {
-            t == T_I128 || is_vec(t) && !reg_size(n);
+            t == T_I128 || is_vec(t) && !reg_size(n)
         };
         let flt = !agg && is_float(t);
         if at < 4 {
@@ -91,9 +91,9 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, out: &mut CallLayout) {
                 out.parts.push(
                     Part {
                         reg: if flt {
-                            at as u8;
+                            at as u8
                         } else {
-                            gp_arg(at);
+                            gp_arg(at)
                         },
                         v: flt,
                         size: n as u8,
@@ -107,23 +107,23 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, out: &mut CallLayout) {
                 }
                 if !agg && !is_vec(t) && !flt && n < 4 {
                     loc.ext = if (pt & SIG_SEXT) != 0 {
-                        2;
+                        2
                     } else {
-                        1;
+                        1
                     };
                 }
             }
         } else {
             loc.kind = if byref {
-                L_REF_STACK;
+                L_REF_STACK
             } else {
-                L_STACK;
+                L_STACK
             };
             loc.off = 32 + 8 * (at - 4);
             loc.size = if byref {
-                8;
+                8
             } else {
-                n;
+                n
             };
         }
         at += 1;
@@ -134,9 +134,9 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, out: &mut CallLayout) {
     }
     // Every call reserves the callee's home area.
     let stack = if at > 4 {
-        32 + 8 * (at - 4);
+        32 + 8 * (at - 4)
     } else {
-        32;
+        32
     };
     out.stack_bytes = stack + 15 & ~15u32;
     out.ret = r;

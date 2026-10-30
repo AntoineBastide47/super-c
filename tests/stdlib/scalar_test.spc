@@ -312,9 +312,9 @@ fn powers_match_repeated_multiplication() {
         assert_eq(sr, swrapped);
         assert_eq(so, sexact.is_none());
         let sat = if sb < 0 && e % 2 == 1 {
-            i64::MIN;
+            i64::MIN
         } else {
-            i64::MAX;
+            i64::MAX
         };
         assert_eq(sb.saturating_pow(e), sexact.unwrap_or(sat));
         let nb = sb as i32;
@@ -359,7 +359,7 @@ fn roots_and_logarithms_match_their_definitions() {
             n += 1;
         }
         assert_eq(x.ilog(base), n);
-        assert_eq(x.checked_ilog(base), Option::<u32>::Some(n));
+        assert_eq(x.checked_ilog(base), Some(n));
         let mut d: u32 = 0;
         let mut t: u64 = 10;
         while t <= x {
@@ -397,9 +397,9 @@ fn bit_and_byte_round_trips_hold() {
         assert_eq(x.rotate_left(n).rotate_right(n), x);
         let k = n % 64;
         let rot = if k == 0 {
-            x;
+            x
         } else {
-            x.wrapping_shl(k) | x.wrapping_shr(64 - k);
+            x.wrapping_shl(k) | x.wrapping_shr(64 - k)
         };
         assert_eq(x.rotate_left(n), rot);
         assert_eq(x.to_be(), u64::from_be_bytes(x.to_ne_bytes()));
@@ -547,14 +547,14 @@ fn ascii_classes_match_their_lists() {
         assert_eq(b.is_ascii_whitespace(), in_space);
         assert_eq(b.is_ascii_control(), i < 32 || i == 127);
         let up = if lower {
-            b - 32;
+            b - 32
         } else {
-            b;
+            b
         };
         let down = if upper {
-            b + 32;
+            b + 32
         } else {
-            b;
+            b
         };
         assert_eq(b.to_ascii_uppercase(), up);
         assert_eq(b.to_ascii_lowercase(), down);
@@ -590,7 +590,7 @@ fn digits_match_the_digit_list() {
             let mut want = Option::<u32>::None;
             for k in 0..radix as usize {
                 if digits.byte_at(k) == low {
-                    want = Option::<u32>::Some(k as u32);
+                    want = Some(k as u32);
                 }
             }
             assert_eq(c.to_digit(radix), want);
@@ -600,7 +600,7 @@ fn digits_match_the_digit_list() {
             assert_eq(d.is_some(), num < radix);
             if num < radix {
                 assert_eq(d.unwrap() as u8, digits.byte_at(num as usize));
-                assert_eq(d.unwrap().to_digit(radix), Option::<u32>::Some(num));
+                assert_eq(d.unwrap().to_digit(radix), Some(num));
             }
         }
     }

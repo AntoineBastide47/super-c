@@ -560,7 +560,7 @@ pub(package) fn x_alias(p: &loader::Package, d: DefId, out: &mut String, st: usi
     }
     let nm = String::from_str(out.as_str().slice(st, out.len()));
     out.truncate(st);
-    x_token(nm.as_str(), out);
+    x_token(&nm, out);
 }
 
 /// The alias token of C spelling `name` of an extern item (`x_alias`): `__sc_x_` and the spelling,
@@ -570,9 +570,9 @@ pub(package) fn x_token(name: str, out: &mut String) {
     for i in 0..name.len() {
         out.push_byte(
             if name[i] == b' ' {
-                b'_';
+                b'_'
             } else {
-                name[i];
+                name[i]
             },
         );
     }
@@ -1134,11 +1134,11 @@ extend Mangler {
                 return self.p().assoc_norm(dm, &it, out, depth + 1);
             }
             *out = if y.fn_sig() {
-                unsafe (*da).intern_sig_rec(&it, y.qualifier);
+                unsafe (*da).intern_sig_rec(&it, y.qualifier)
             } else if y.kind == TypeKind::TYPE_DYN {
-                unsafe (*da).intern_dyn(it.module, it.decl, &it.args[0], it.n, y.qualifier);
+                unsafe (*da).intern_dyn(it.module, it.decl, &it.args[0], it.n, y.qualifier)
             } else {
-                unsafe (*da).intern_instance(it.module, it.decl, &it.args[0], it.n);
+                unsafe (*da).intern_instance(it.module, it.decl, &it.args[0], it.n)
             };
             return true;
         }
@@ -1159,7 +1159,7 @@ extend Mangler {
                     return *v;
                 },
                 None => {},
-            };
+            }
         }
         let mut rm = pm;
         let mut rt = t;
@@ -1404,9 +1404,9 @@ extend Mangler {
         let ty = (enc & 0x8000) != 0;
         if m as i64 != self.mark_ctx {
             let src = if self.mark_ctx < 0 {
-                65534u64;
+                65534u64
             } else {
-                self.mark_ctx as u64;
+                self.mark_ctx as u64
             };
             let edge = src << 32 | enc as u64;
             if edge != self.last_edge {
@@ -1451,9 +1451,9 @@ extend Mangler {
     // The first word of row `r`; none when the row has no edge.
     const fn um_at(self: &Self, r: usize) Option<usize> {
         if self.um_slot.len() == 0 || self.um_slot[r] == 0 {
-            return Option::<usize>::None;
+            return None;
         }
-        return Option::Some((self.um_slot[r] - 1) as usize);
+        return Some((self.um_slot[r] - 1) as usize);
     }
 
     fn um_set(self: &mut Self, src: u64, dst: ModuleId, ty: bool) {
@@ -1526,9 +1526,9 @@ extend Mangler {
             return;
         }
         let src = if self.mark_ctx < 0 {
-            65534u64;
+            65534u64
         } else {
-            self.mark_ctx as u64;
+            self.mark_ctx as u64
         };
         let row = self.um_row(src);
         let k = h & 0xFFFFFFFFFFFFFFFEu64 | def as u64;
@@ -1554,9 +1554,9 @@ extend Mangler {
             self.tn_pre.resize_default(1024);
         }
         let row = if self.mark_ctx < 0 {
-            0xFFFFu64;
+            0xFFFFu64
         } else {
-            self.mark_ctx as u64;
+            self.mark_ctx as u64
         };
         let mr = ((row << 1 | def as u64) + 1).wrapping_mul(0x9E3779B97F4A7C15u64);
         let mt = (pm as u64 << 32 | t as u64).wrapping_mul(0xC2B2AE3D27D4EB4Fu64);
@@ -1613,7 +1613,7 @@ extend Mangler {
             let ne = replace(&mut self.no_edges, true);
             let ok = self.type_m(rm, rt, &mut nm);
             self.no_edges = ne;
-            return pick(ok, fnv(nm.as_str()), 0u64);
+            return pick(ok, fnv(&nm), 0u64);
         }
         let mut key: u64 = 0;
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
@@ -1637,7 +1637,7 @@ extend Mangler {
                     return *h;
                 },
                 None => {},
-            };
+            }
         }
         // Spell the name with no side effect: no use edge, no aggregate request.
         let agg = self.agg_on;
@@ -1657,9 +1657,9 @@ extend Mangler {
         self.no_edges = ne;
         self.agg_on = agg;
         let h = if ok {
-            fnv(nm.as_str());
+            fnv(&nm)
         } else {
-            0u64;
+            0u64
         };
         self.tn_buf = nm;
         if ok && key != 0 {
@@ -1683,10 +1683,10 @@ extend Mangler {
                 nm.clear();
                 self.qualified(m, unsafe (*self.p().module_ast_const(m)).ext_name(decl), &mut nm);
                 self.no_edges = ne;
-                let h9 = fnv(nm.as_str());
+                let h9 = fnv(&nm);
                 self.tn_buf = nm;
                 self.tn_memo.insert(key, h9);
-                h9;
+                h9
             },
         };
     }
@@ -1749,16 +1749,16 @@ extend Mangler {
     fn spell_edge(self: &mut Self, m: ModuleId) {
         let ty = self.type_depth != 0;
         let enc = if ty {
-            m | 0x8000;
+            m | 0x8000
         } else {
-            m;
+            m
         };
         let rec = !self.no_edges && (ty || self.seg_depth == 0);
         if m as i64 != self.mark_ctx && rec {
             let src = if self.mark_ctx < 0 {
-                65534u64;
+                65534u64
             } else {
-                self.mark_ctx as u64;
+                self.mark_ctx as u64
             };
             let edge = src << 32 | enc as u64;
             if edge != self.last_edge {
@@ -2019,9 +2019,9 @@ extend Mangler {
             for i in 0..nr + np {
                 out.push_str("_");
                 let st = if i < nr {
-                    unsafe (*a).sig_at(&y, true, i);
+                    unsafe (*a).sig_at(&y, true, i)
                 } else {
-                    unsafe (*a).sig_at(&y, false, i - nr);
+                    unsafe (*a).sig_at(&y, false, i - nr)
                 };
                 if !self.type_m(pm, st, out) {
                     return false;
@@ -2211,9 +2211,9 @@ extend Mangler {
         // A function-pointer type reads its signature record in its own pool `pm`; a function or
         // closure item its declaration (or recorded facts) in its declaring module.
         let sm = if y.fn_sig() {
-            pm;
+            pm
         } else {
-            y.module;
+            y.module
         };
         let fa = self.p().module_ast_const(sm);
         let cf = unsafe (*fa).closure_fact(y.as_data.decl);
@@ -2272,7 +2272,7 @@ extend Mangler {
             Some(b) => b,
             None => String::new(),
         };
-        let ok = self.fn_ptr_decl(sm, fa, y, cf, decl, &mut inner) && self.ctype(sm, rty, inner.as_str(), out);
+        let ok = self.fn_ptr_decl(sm, fa, y, cf, decl, &mut inner) && self.ctype(sm, rty, &inner, out);
         inner.truncate(0);
         self.fp_bufs.push(inner);
         return ok;
@@ -2525,9 +2525,9 @@ extend Mangler {
             } else if !self.spec_inst_name(fm, fnode, target, out) {
                 let dn = unsafe (*self.p().module_ast_const(target.module)).at_const(target.node);
                 let nm = if dn.kind == NodeKind::NODE_TYPE_ALIAS {
-                    dn.as_data.type_alias.name;
+                    dn.as_data.type_alias.name
                 } else {
-                    unsafe (*self.p().module_ast_const(target.module)).ext_name(target.node);
+                    unsafe (*self.p().module_ast_const(target.module)).ext_name(target.node)
                 };
                 self.ident(
                     target.module,
@@ -2748,9 +2748,9 @@ extend Mangler {
             let ee = unsafe (*a).ext(e).extend_def;
             let ep = unsafe (*a).type_of(ee.target_type);
             let er = if ee.interface_type != NODE_NONE {
-                unsafe (*a).resolution_def(ee.interface_type);
+                unsafe (*a).resolution_def(ee.interface_type)
             } else {
-                DefId { module: 0, node: NODE_NONE };
+                DefId { module: 0, node: NODE_NONE }
             };
             if er.module == tr.module && er.node == tr.node && ext_blanket(unsafe &*a, ep, unsafe &*a, m, e) >= 0 {
                 ord += 1;
@@ -2812,9 +2812,9 @@ extend Mangler {
             // extends may each define the constant.
             let dn = unsafe (*self.p().module_ast_const(tgt.module)).at_const(tgt.node);
             let nm = if dn.kind == NodeKind::NODE_TYPE_ALIAS {
-                dn.as_data.type_alias.name;
+                dn.as_data.type_alias.name
             } else {
-                unsafe (*self.p().module_ast_const(tgt.module)).ext_name(tgt.node);
+                unsafe (*self.p().module_ast_const(tgt.module)).ext_name(tgt.node)
             };
             self.ident(tgt.module, unsafe (*self.p().module_ast_const(tgt.module)).at_const(nm).as_data.name.text, out);
         }
@@ -2927,9 +2927,9 @@ extend Mangler {
             return none;
         }
         let mut miss_key = if dd == NODE_NONE {
-            1u64 << 63 | y.as_data.builtin as u64;
+            1u64 << 63 | y.as_data.builtin as u64
         } else {
-            dm as u64 << 32 | dd as u64;
+            dm as u64 << 32 | dd as u64
         };
         for i in 0..mname.len() {
             miss_key = (miss_key ^ mname.byte_at(i) as u64).wrapping_mul(1099511628211u64);
@@ -3070,7 +3070,7 @@ extend Mangler {
                 return (*v) as NodeId;
             },
             None => {},
-        };
+        }
         for xm in 0..self.p().modules.len() {
             if !self.p().modules.at(xm).has_ast {
                 continue;
@@ -3181,7 +3181,7 @@ extend Mangler {
                 return (*v & 0xFFFFFFFFu64) as NodeId;
             },
             None => {},
-        };
+        }
         let mid = self.free_method_scan(dm, dd, ext);
         self.free_memo.insert(key, (*ext) as u64 << 32 | mid as u64);
         return mid;
@@ -3254,9 +3254,9 @@ extend Mangler {
         }
         let mut ext = NODE_NONE;
         let mid = if user {
-            self.free_method(dm, dd, &mut ext);
+            self.free_method(dm, dd, &mut ext)
         } else {
-            NODE_NONE;
+            NODE_NONE
         };
         if mid != NODE_NONE {
             if y.kind == TypeKind::TYPE_INSTANCE {
@@ -3390,9 +3390,9 @@ extend Mangler {
             let mut vt = TYPE_NONE;
             // A box written in the declaration names its parameters; one from an argument is resolved.
             let ok = if pm == *dm {
-                self.inst_arg(*dm, *dn, &it, rm, bi.args[0], &mut vm, &mut vt);
+                self.inst_arg(*dm, *dn, &it, rm, bi.args[0], &mut vm, &mut vt)
             } else {
-                self.resolve(pm, bi.args[0], &mut vm, &mut vt);
+                self.resolve(pm, bi.args[0], &mut vm, &mut vt)
             };
             if !ok || unsafe (*self.p().module_ast_const(vm)).type_at(vt).kind == TypeKind::TYPE_DYN {
                 return lay::NK_NONE;
@@ -3576,7 +3576,7 @@ extend Mangler {
         let mut nm = String::from_str(if_s(by_ptr, "(*", ""));
         nm.push_str(name);
         nm.push_str(if_s(by_ptr, ")", ""));
-        return self.ctype(pm, t, nm.as_str(), out);
+        return self.ctype(pm, t, &nm, out);
     }
 
     pub(package) fn ctype(self: &mut Self, pm: ModuleId, t: TypeId, decl: str, out: &mut String) bool {
@@ -3675,14 +3675,14 @@ extend Mangler {
                 inner.push_str("[");
                 inner.push_u64(n as u64);
                 inner.push_str("]");
-                return self.arr_elem_ctype(pm, y.as_data.elem, inner.as_str(), out);
+                return self.arr_elem_ctype(pm, y.as_data.elem, &inner, out);
             }
             // A zero-length array is zero-sized: no value, member or parameter of it is declared.
             // A macro template, which has no layout to elide by, spells it as a pointer.
             inner.push_str("*");
             inner.push_str(decl);
             self.ptr_depth += 1;
-            let ok = self.ctype(pm, y.as_data.elem, inner.as_str(), out);
+            let ok = self.ctype(pm, y.as_data.elem, &inner, out);
             self.ptr_depth -= 1;
             return ok;
         }
@@ -3694,13 +3694,13 @@ extend Mangler {
             }
             self.join_decl(
                 if n <= 8 {
-                    "uint8_t";
+                    "uint8_t"
                 } else if n <= 16 {
-                    "uint16_t";
+                    "uint16_t"
                 } else if n <= 32 {
-                    "uint32_t";
+                    "uint32_t"
                 } else {
-                    "uint64_t";
+                    "uint64_t"
                 },
                 decl,
                 out,
@@ -3824,7 +3824,7 @@ extend Mangler {
             inner.push_str(")[");
             inner.push_u64(self.arr_len(elm, &el) as u64);
             inner.push_str("]");
-            return self.arr_elem_ctype(elm, el.as_data.arr.elem, inner.as_str(), out);
+            return self.arr_elem_ctype(elm, el.as_data.arr.elem, &inner, out);
         }
         let mut inner = String::new();
         let mut el_ptr = el.kind == TypeKind::TYPE_POINTER || el.kind == TypeKind::TYPE_REFERENCE;
@@ -3843,13 +3843,13 @@ extend Mangler {
         inner.push_str(decl);
         if cp && !el_ptr {
             let st = out.len();
-            let ok = self.ctype(elm, elt, inner.as_str(), out);
+            let ok = self.ctype(elm, elt, &inner, out);
             if !out.as_str().slice(st, out.len()).starts_with("const ") {
                 out.insert_str(st, "const ");
             }
             return ok;
         }
-        let ok = self.ctype(elm, elt, inner.as_str(), out);
+        let ok = self.ctype(elm, elt, &inner, out);
         return ok;
     }
 
@@ -3911,9 +3911,9 @@ extend Mangler {
                 }
                 out.push_byte(
                     if c == b'[' {
-                        b'_';
+                        b'_'
                     } else {
-                        c;
+                        c
                     },
                 );
             }
@@ -4024,7 +4024,7 @@ extend Mangler {
                     mn.push_u64(i as u64);
                 }
                 body.push_str("  ");
-                ok = self.ctype(pm, tys[i], mn.as_str(), &mut body);
+                ok = self.ctype(pm, tys[i], &mn, &mut body);
                 body.push_str(";\n");
             }
             self.ptr_depth = pd;
@@ -4056,7 +4056,7 @@ extend Mangler {
         }
         let nm = String::from_str(out.as_str().slice(st, out.len()));
         let lo = self.layout_sub(pm, t);
-        return lo.ok && self.vec_def(pm, y.as_data.arr.elem, nm.as_str(), n as u64, lo.size, lo.align);
+        return lo.ok && self.vec_def(pm, y.as_data.arr.elem, &nm, n as u64, lo.size, lo.align);
     }
 
     /// The pack of vector struct `nm`, `n` lanes of `elem` (pool `pm`) in `size` bytes aligned to
@@ -4080,7 +4080,7 @@ extend Mangler {
             if size > 16 && reg {
                 // `__sc_v<N>_<lane>` -> `__sc_g<N>_<lane>`.
                 gv.format_into("__sc_g{}", nm.slice(6, nm.len()));
-                if !self.ctype(pm, elem, gv.as_str(), &mut el) {
+                if !self.ctype(pm, elem, &gv, &mut el) {
                     return false;
                 }
                 gv = format("typedef {} __attribute__((vector_size({}), aligned({})));\n", el.as_str(), size, align);
@@ -4089,7 +4089,7 @@ extend Mangler {
                 if !reg {
                     lane.format_into("[{}]", n);
                 }
-                if !self.ctype(pm, elem, lane.as_str(), &mut el) {
+                if !self.ctype(pm, elem, &lane, &mut el) {
                     return false;
                 }
                 if reg {
@@ -4102,7 +4102,7 @@ extend Mangler {
                 // `__sc_v<N>_<lane>` -> `__sc_v<N/k>_<lane>`, its 16-byte chunk.
                 let mut cn = format("__sc_v{}", n / k);
                 cn.push_str(nm.slice(6 + nm.slice(6, nm.len()).find("_") as usize, nm.len()));
-                if !self.vec_def(pm, elem, cn.as_str(), n / k, 16, 16) {
+                if !self.vec_def(pm, elem, &cn, n / k, 16, 16) {
                     return false;
                 }
                 el = format("union {{\n    {};\n    {} c[{}];\n  }}", el.as_str(), cn.as_str(), k);
@@ -4207,9 +4207,9 @@ extend Mangler {
                 return false;
             }
             let sm = if y.fn_sig() {
-                rm;
+                rm
             } else {
-                y.module;
+                y.module
             };
             let fa = self.p().module_ast_const(sm);
             let cf = unsafe (*fa).closure_fact(y.as_data.decl);
@@ -4429,9 +4429,9 @@ const fn sig_len(fa: *const Ast, y: &Ty, cf: *const ClosureFact, ret: bool) u32 
     if cf != null {
         let c = unsafe &*cf;
         return if ret {
-            c.nrets;
+            c.nrets
         } else {
-            c.nparams;
+            c.nparams
         };
     }
     return sig_list(fa, y, ret).len;
@@ -4443,9 +4443,9 @@ const fn sig_list(fa: *const Ast, y: &Ty, ret: bool) NodeList {
     let mut rs = NodeList { start: 0, len: 0 };
     let _ = unsafe (*fa).sig_lists(y.as_data.decl, &mut ps, &mut rs);
     return if ret {
-        rs;
+        rs
     } else {
-        ps;
+        ps
     };
 }
 
@@ -4457,9 +4457,9 @@ fn sig_ty(fa: *const Ast, y: &Ty, cf: *const ClosureFact, ret: bool, i: u32) Typ
     if cf != null {
         let c = unsafe &*cf;
         let k = if ret {
-            c.ncaps + c.nparams + i;
+            c.ncaps + c.nparams + i
         } else {
-            c.ncaps + i;
+            c.ncaps + i
         };
         return unsafe (*fa).caps_of(cf)[k as usize].ty;
     }
@@ -4571,11 +4571,11 @@ static __attribute__((unused)) inline double __sc_qnan_double(double __x) {
 /// The widest vector in one register under build features `fs` (`Mangler.vec_reg_bytes`).
 const fn vec_reg_bytes(fs: cf::CpuFeatureSet) u64 {
     return if cf::has(fs, cf::F_AVX512F) {
-        64;
+        64
     } else if cf::has(fs, cf::F_AVX) {
-        32;
+        32
     } else {
-        16;
+        16
     };
 }
 

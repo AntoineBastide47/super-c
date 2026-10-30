@@ -209,20 +209,20 @@ const fn scan_int(s: str, i: &mut usize) Option<i32> {
     while *i < s.len() && s.byte_at(*i) >= b'0' && s.byte_at(*i) <= b'9' {
         v = v * 10 + (s.byte_at(*i) - b'0') as i64;
         if v > i32::MAX as i64 + 1 {
-            return Option::None;
+            return None;
         }
         *i += 1;
     }
     if *i == start {
-        return Option::None;
+        return None;
     }
     if neg {
         v = -v;
     }
     if v > i32::MAX as i64 {
-        return Option::None;
+        return None;
     }
-    return Option::Some(v as i32);
+    return Some(v as i32);
 }
 
 // The slots beside the implicit one that a budget of `capacity` workers gives, at most JS_MAX.
@@ -368,9 +368,9 @@ pub(package) unsafe fn sc_jobserver_init(capacity: i32) i32 {
     let n = js_extra_slots(capacity);
     let dir = stdlib::getenv("TMPDIR");
     let mut path = if dir != null && unsafe dir[0] != 0 as char {
-        unsafe String::from_cstr(dir);
+        unsafe String::from_cstr(dir)
     } else {
-        String::from_str("/tmp");
+        String::from_str("/tmp")
     };
     path.push_str("/super-c-jobs-XXXXXX");
     if path.len() >= 1024 {
@@ -402,9 +402,9 @@ pub(package) unsafe fn sc_jobserver_init(capacity: i32) i32 {
 unsafe fn jobserver_lock(i: i32, lock: bool) i32 {
     let mut fl = unsafe zeroed::<flock>();
     fl.l_type = if lock {
-        F_WRLCK as i16;
+        F_WRLCK as i16
     } else {
-        F_UNLCK as i16;
+        F_UNLCK as i16
     };
     fl.l_whence = stdio::SEEK_SET as i16;
     fl.l_start = i;

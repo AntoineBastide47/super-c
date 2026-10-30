@@ -42,8 +42,8 @@ fn walk_files(dir: str, base_len: usize, out: &mut Vector<String>) {
     let names = list_dir(dir, false).unwrap_or(Vector::<String>::new());
     for i in 0..names.len() {
         let p = loader::join2(dir, names.at(i).as_str());
-        if is_dir(p.as_str()) {
-            walk_files(p.as_str(), base_len, out);
+        if is_dir(&p) {
+            walk_files(&p, base_len, out);
         } else {
             let full = p.as_str();
             out.push(String::from_str(full.slice(base_len + 1, full.len())));
@@ -58,8 +58,8 @@ fn walk_gen_files(dir: str, base_len: usize, out: &mut Vector<String>) {
     for i in 0..names.len() {
         let nm = names.at(i).as_str();
         let p = loader::join2(dir, nm);
-        if !nm.ends_with(".c") && !nm.ends_with(".h") && !nm.ends_with(".o") && is_dir(p.as_str()) {
-            walk_gen_files(p.as_str(), base_len, out);
+        if !nm.ends_with(".c") && !nm.ends_with(".h") && !nm.ends_with(".o") && is_dir(&p) {
+            walk_gen_files(&p, base_len, out);
         } else {
             let full = p.as_str();
             out.push(String::from_str(full.slice(base_len + 1, full.len())));
@@ -102,7 +102,7 @@ fn newest_mtime(dir: str) i64 {
     let names = list_dir(dir, false).unwrap_or(Vector::<String>::new());
     for i in 0..names.len() {
         let p = loader::join2(dir, names.at(i).as_str());
-        let mt = file_mtime(p.as_str());
+        let mt = file_mtime(&p);
         if mt > best {
             best = mt;
         }
@@ -116,12 +116,12 @@ fn newest_mtime(dir: str) i64 {
 /// runs both now.
 pub(package) fn sweep(m: *const mf::Manifest, now: i64, clean: bool) {
     let croot = if m != null {
-        cache_root(project_name(unsafe &*m));
+        cache_root(project_name(unsafe &*m))
     } else {
-        cache_root("");
+        cache_root("")
     };
-    if croot.len() != 0 && (clean || sweep_due(croot.as_str(), now)) {
-        sweep_cache(croot.as_str(), now);
+    if croot.len() != 0 && (clean || sweep_due(&croot, now)) {
+        sweep_cache(&croot, now);
     }
     if m != null && (clean || sweep_due(unsafe (*m).out_dir.as_str(), now)) {
         sweep_project(unsafe &*m, now);
@@ -132,14 +132,14 @@ pub(package) fn sweep(m: *const mf::Manifest, now: i64, clean: bool) {
 // due sweep restamps first, and one whose stamp cannot be written does not run: every build would sweep.
 fn sweep_due(dir: str, now: i64) bool {
     let stamp = loader::join2(dir, ".sweep");
-    let last = file_mtime(stamp.as_str());
+    let last = file_mtime(&stamp);
     if last != 0 && now - last < SWEEP_EVERY {
         return false;
     }
     mkdir_p(dir);
     let mut body = String::new();
     body.push_i64(now);
-    return write_file_atomic(stamp.as_str(), body.as_str());
+    return write_file_atomic(&stamp, &body);
 }
 
 /// The cache root's directory name of project `m`: its `bin`, else its `[lib]` name.
@@ -164,14 +164,14 @@ pub(package) fn sweep_project(m: &mf::Manifest, now: i64) {
     let names = list_dir(out, false).unwrap_or(Vector::<String>::new());
     for i in 0..names.len() {
         let p = loader::join2(out, names.at(i).as_str());
-        if names.at(i).as_str() != ".sweep" && now - newest_mtime(p.as_str()) >= TREE_IDLE {
-            rm_unlocked(p.as_str());
+        if names.at(i).as_str() != ".sweep" && now - newest_mtime(&p) >= TREE_IDLE {
+            rm_unlocked(&p);
         }
     }
     let trees = root_trees(m);
     for i in 0..trees.len() {
         let raw = loader::join2(trees.at(i).as_str(), "raw");
-        if now - newest_mtime(raw.as_str()) >= TREE_IDLE {
+        if now - newest_mtime(&raw) >= TREE_IDLE {
             rm_root_tree(trees.at(i).as_str());
         }
     }
@@ -214,16 +214,16 @@ fn rm_unlocked(p: str) {
 // with the default `out-dir`): its trees are the engine's, swept with their locks as out-dir entries.
 fn root_trees(m: &mf::Manifest) Vector<String> {
     let mut out = Vector::<String>::new();
-    let b = loader::join2(loader::dirname_of(m.root.as_str()), "build");
-    let rb = real_path(b.as_str());
-    if rb.len() != 0 && rb.as_str() == real_path(m.out_dir.as_str()).as_str() {
+    let b = loader::join2(loader::dirname_of(&m.root), "build");
+    let rb = real_path(&b);
+    if rb.len() != 0 && rb.as_str() == real_path(&m.out_dir).as_str() {
         return out;
     }
-    let names = list_dir(b.as_str(), false).unwrap_or(Vector::<String>::new());
+    let names = list_dir(&b, false).unwrap_or(Vector::<String>::new());
     for i in 0..names.len() {
-        let pd = loader::join2(b.as_str(), names.at(i).as_str());
-        let rt = loader::join2(pd.as_str(), "raw/super_rt.h");
-        if file_mtime(rt.as_str()) != 0 {
+        let pd = loader::join2(&b, names.at(i).as_str());
+        let rt = loader::join2(&pd, "raw/super_rt.h");
+        if file_mtime(&rt) != 0 {
             out.push(pd);
         }
     }
@@ -237,15 +237,15 @@ fn root_trees(m: &mf::Manifest) Vector<String> {
 fn rm_root_tree(pd: str) {
     let lp = loader::join2(pd, ".lock");
     {
-        let h = lock_file(lp.as_str(), 0);
+        let h = lock_file(&lp, 0);
         if !h.held() {
             return;
         }
         rm_rf(loader::join2(pd, "raw").as_str());
         rm_rf(loader::join2(pd, "obj").as_str());
-        let _ = fs::unlink(lp.as_str());
+        let _ = fs::unlink(&lp);
     }
-    let _ = fs::unlink(lp.as_str());
+    let _ = fs::unlink(&lp);
     let _ = fs::rmdir(pd);
     let _ = fs::rmdir(loader::dirname_of(pd));
 }
@@ -420,9 +420,9 @@ pub(package) fn exe_name(base: str, target: i32) String {
 // links its own, so a `debug` build can never end up standing in for the release artifact: the manifest's
 // `bin` is a copy INSTALLED from here, and only by the commands whose job is to produce it.
 fn profile_bin(m: &mf::Manifest, prof_name: str, target: i32) String {
-    let dir = loader::join2(m.out_dir.as_str(), prof_name);
-    let leaf = exe_name(loader::basename_of(m.bin.as_str()), target);
-    return loader::join2(dir.as_str(), leaf.as_str());
+    let dir = loader::join2(&m.out_dir, prof_name);
+    let leaf = exe_name(loader::basename_of(&m.bin), target);
+    return loader::join2(&dir, &leaf);
 }
 
 // Copy the profile's binary to `to`, the path the manifest calls the project's binary. A copy rather than a
@@ -438,18 +438,18 @@ fn install_bin(from: str, to: str) i32 {
     let body = cur.unwrap();
     // Byte-compare first: an unchanged binary keeps its mtime (downstream tools get make-friendly
     // timestamps).
-    if file_eq(to, body.as_str()) {
+    if file_eq(to, &body) {
         return 0;
     }
     let mut tmp = String::from_str(to);
     tmp.push_str(".tmp");
-    if !write_file(tmp.as_str(), body.as_str()) {
-        let _ = fs::unlink(tmp.as_str());
+    if !write_file(&tmp, &body) {
+        let _ = fs::unlink(&tmp);
         eprintln("build: cannot write '{}'", tmp.as_str());
         return 1;
     }
-    let _ = fs::set_permissions(tmp.as_str(), 0o755);
-    if fs::rename(tmp.as_str(), to).is_err() {
+    let _ = fs::set_permissions(&tmp, 0o755);
+    if fs::rename(&tmp, to).is_err() {
         eprintln("build: cannot replace '{}'", to);
         return 1;
     }
@@ -639,7 +639,7 @@ fn stamp_write(
         m.arch,
         p.features,
         p.simd_width,
-        p.simd_dispatch.as_str(),
+        &p.simd_dispatch,
         bootstrap,
         lint,
         ccount,
@@ -655,7 +655,7 @@ fn stamp_write(
         let md = p.modules.at(i);
         // An implicit directory index is its directory's listing, which a `dir` record below covers.
         if md.file.len() != 0 && !md.implicit_index {
-            stamp_line(&mut out, "in\t", md.mtime as u64, md.src_id, md.file.as_str());
+            stamp_line(&mut out, "in\t", md.mtime as u64, md.src_id, &md.file);
         }
     }
     // A native build reads C headers' constants into its objects.
@@ -689,7 +689,7 @@ fn stamp_write(
         stamp_line(&mut out, "dir\t", sl.std_mt as u64, sl.std_h, std_dir);
     }
     out.push_str("end\n");
-    let _ = write_file_atomic(path, out.as_str());
+    let _ = write_file_atomic(path, &out);
 }
 
 // Is the recorded emission still exact for the current inputs? On a hit `rels` holds the files of `gen`
@@ -830,7 +830,7 @@ fn stamp_fresh(
         out.push_str("\n");
         stamp_exe_line(&mut out, cid, stamp_lag(t0));
         out.push_string(&rewritten);
-        let _ = write_file_atomic(path, out.as_str());
+        let _ = write_file_atomic(path, &out);
     }
     return true;
 }
@@ -866,9 +866,9 @@ pub(package) const fn simd_width(m: &mf::Manifest, cx: &BuildCtx) u32 {
 /// `simd-dispatch`; empty for the default.
 pub(package) const fn simd_dispatch<'a>(m: &'a mf::Manifest, cx: &BuildCtx<'a>) str<'a> {
     return if cx.simd_dispatch.len() != 0 {
-        cx.simd_dispatch;
+        cx.simd_dispatch
     } else {
-        m.simd_dispatch.as_str();
+        m.simd_dispatch.as_str()
     };
 }
 
@@ -890,7 +890,7 @@ pub(package) const fn dispatch_for<'a>(m: &mf::Manifest, prof: str, spec: str<'a
 pub(package) fn check_features(m: &mf::Manifest, cli: str) bool {
     let mut s = tgt::baseline(m.target, m.arch);
     let mut err = String::new();
-    let mut ok = cf::level(m.target_cpu.as_str(), m.arch, false, &mut s, &mut err);
+    let mut ok = cf::level(&m.target_cpu, m.arch, false, &mut s, &mut err);
     for i in 0..m.target_features.len() {
         ok = ok && cf::apply(m.target_features.at(i).as_str(), m.target, m.arch, false, &mut s, &mut err);
     }
@@ -913,12 +913,12 @@ pub(package) fn check_features(m: &mf::Manifest, cli: str) bool {
 pub(package) fn features_for(m: &mf::Manifest, prof_name: str, cli: str) cf::CpuFeatureSet {
     let mut s = tgt::baseline(m.target, m.arch);
     let mut err = String::new();
-    let _ = cf::level(m.target_cpu.as_str(), m.arch, false, &mut s, &mut err);
+    let _ = cf::level(&m.target_cpu, m.arch, false, &mut s, &mut err);
     let pi = m.profile_index(prof_name);
     let tf = if pi >= 0 && m.profiles.at(pi as usize).has_features {
-        &m.profiles.at(pi as usize).target_features;
+        &m.profiles.at(pi as usize).target_features
     } else {
-        &m.target_features;
+        &m.target_features
     };
     for i in 0..tf.len() {
         let _ = cf::apply(tf.at(i).as_str(), m.target, m.arch, false, &mut s, &mut err);
@@ -945,9 +945,9 @@ fn emit_closure(
     cid: u64,
 ) i32 {
     let sl = if cid != 0 {
-        stamp_load(cx.std_dir);
+        stamp_load(cx.std_dir)
     } else {
-        StampLoad { t0: 0, std_mt: 0, std_h: 0 };
+        StampLoad { t0: 0, std_mt: 0, std_h: 0 }
     };
     loader::set_load_jobs(jobs);
     let tl0 = ticks_ms();
@@ -968,7 +968,7 @@ fn emit_closure(
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
     let cdir = object_cache_dir(project_name(m));
-    if prelude_stage(&mut p, &mut cirv, cx.std_dir, root, cx.target, jobs, cx.ce_steps, cx.ce_mem, cdir.as_str()) {
+    if prelude_stage(&mut p, &mut cirv, cx.std_dir, root, cx.target, jobs, cx.ce_steps, cx.ce_mem, &cdir) {
         // After the prelude stage, which may swap in a saved prelude package.
         p.std_internals = m.std_internals;
         p.lib_build = m.lib_name.len() != 0 && root == m.lib_root.as_str();
@@ -1034,7 +1034,7 @@ fn write_exports(p: &loader::Package, gen: str) bool {
         }
     }
     let path = loader::join2(gen, "__sc_exports");
-    if !write_file(path.as_str(), out.as_str()) {
+    if !write_file(&path, &out) {
         eprintln("build: cannot write '{}'", path.as_str());
         return false;
     }
@@ -1056,11 +1056,11 @@ fn export_flags(gen: str, pdir: str, target: i32, out: &mut Vector<String>) bool
     let path = loader::join2(
         pdir,
         if fmt == "macho" {
-            "exports.txt";
+            "exports.txt"
         } else if fmt == "coff" {
-            "exports.def";
+            "exports.def"
         } else {
-            "exports.map";
+            "exports.map"
         },
     );
     if fmt == "macho" {
@@ -1084,7 +1084,7 @@ fn export_flags(gen: str, pdir: str, target: i32, out: &mut Vector<String>) bool
     } else {
         return true;
     }
-    if !write_file(path.as_str(), list.as_str()) {
+    if !write_file(&path, &list) {
         eprintln("build: cannot write '{}'", path.as_str());
         return false;
     }
@@ -1103,13 +1103,13 @@ fn transpiler_id(cmd: str) u64 {
         h = skey_mix(fnv_cont(h, w), w.len() as u64);
         let mut path = String::new();
         let mt = if i == 0 {
-            which_path(w, &mut path);
+            which_path(w, &mut path)
         } else {
             path.push_str(w);
-            file_mtime(path.as_str());
+            file_mtime(&path)
         };
-        if mt != 0 && !is_dir(path.as_str()) {
-            h = skey_mix(h, file_id(path.as_str()));
+        if mt != 0 && !is_dir(&path) {
+            h = skey_mix(h, file_id(&path));
         }
     }
     // 0 means "no identity"; a real hash never takes it.
@@ -1145,7 +1145,7 @@ fn run_transpiler(m: &mf::Manifest, prof_name: str, root: str, sub: str, cx: &Bu
         let prof = m.profiles.at(pi as usize);
         let mut fl = String::new();
         mf::cg_spell(prof.opt, prof.cg_on, prof.cg_off, &mut fl);
-        split_args(&mut args, fl.as_str());
+        split_args(&mut args, &fl);
     }
     args.push(format("--target={}", tgt::os(cx.target).name));
     args.push(format("--arch={}", tgt::isa(m.arch).name));
@@ -1210,9 +1210,9 @@ pub(package) fn manifest_emit(m: &mf::Manifest, profile: str, root: str, sub: st
         eprintln("build: unknown profile '{}'", prof_name);
         return 1;
     }
-    let pdir = loader::join2(m.out_dir.as_str(), sub);
-    let srcgen = loader::join2(pdir.as_str(), "raw");
-    let stamp = loader::join2(pdir.as_str(), ".emit_stamp.new");
+    let pdir = loader::join2(&m.out_dir, sub);
+    let srcgen = loader::join2(&pdir, "raw");
+    let stamp = loader::join2(&pdir, ".emit_stamp.new");
     // The engine that runs this emission ran the steps: its stamp and cache keys hold their identity.
     let cur = ext::Current {
         profile: String::from_str(prof_name),
@@ -1231,22 +1231,22 @@ pub(package) fn manifest_emit(m: &mf::Manifest, profile: str, root: str, sub: st
         m,
         prof_name,
         root,
-        loader::dirname_of(m.root.as_str()),
+        loader::dirname_of(&m.root),
         "",
-        srcgen.as_str(),
+        &srcgen,
         build_jobs(m, cx),
         cx,
         null,
         if c {
-            null;
+            null
         } else {
-            &mut sink;
+            &mut sink
         },
-        stamp.as_str(),
+        &stamp,
         id,
     );
     if rc == 0 {
-        let _ = write_file_atomic(loader::join2(pdir.as_str(), ".emit_rewritten").as_str(), log.text.as_str());
+        let _ = write_file_atomic(loader::join2(&pdir, ".emit_rewritten").as_str(), &log.text);
     }
     return rc;
 }
@@ -1288,9 +1288,9 @@ pub(package) fn transpile_step(
     topts: *const TestOpts,
     sink: *mut EmitSink,
 ) Transpiled {
-    let pdir = loader::join2(m.out_dir.as_str(), sub);
-    let srcgen = loader::join2(pdir.as_str(), "raw");
-    let stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
+    let pdir = loader::join2(&m.out_dir, sub);
+    let srcgen = loader::join2(&pdir, "raw");
+    let stamp_path = loader::join2(&pdir, ".emit_stamp");
     let mut stamp_new = stamp_path.clone();
     stamp_new.push_str(".new");
     // The evaluator check needs every body emitted.
@@ -1301,19 +1301,19 @@ pub(package) fn transpile_step(
     // optimizer's switches (SC_LIR_OPT, SC_LIR_INLINE, SC_LIR_PROMOTE).
     let c_tree = sink == null && (topts == null || !unsafe (*topts).enabled);
     let cid = if !cache_on {
-        0 as u64;
+        0 as u64
     } else if external {
-        transpiler_id(cx.transpiler) ^ c_tree as u64;
+        transpiler_id(cx.transpiler) ^ c_tree as u64
     } else {
         let mut sel = String::from_str(pick(c_tree, "c|", "o|"));
         for v in ["SC_LIR_OPT", "SC_LIR_INLINE", "SC_LIR_PROMOTE"] {
             sel.format_into("{}|", stdlib::get_env(v).unwrap_or(String::from_str("-")).as_str());
         }
-        compiler_id() ^ fnv_cont(FNV_BASIS, sel.as_str());
+        compiler_id() ^ fnv_cont(FNV_BASIS, &sel)
     };
     let mut gen_files = Vector::<String>::new();
     let skipped = cache_on && stamp_fresh(
-        stamp_path.as_str(),
+        &stamp_path,
         root_dir,
         cx.std_dir,
         cx.target,
@@ -1323,7 +1323,7 @@ pub(package) fn transpile_step(
         dispatch_for(m, prof_name, simd_dispatch(m, cx)),
         cx.bootstrap_tags,
         cx.lint,
-        srcgen.as_str(),
+        &srcgen,
         cid,
         &mut gen_files,
     );
@@ -1334,26 +1334,26 @@ pub(package) fn transpile_step(
     // An emission that stops part way leaves raw/ partly rewritten: no stamp may vouch for it, or a
     // later build with the old inputs would skip the transpile over a mixed tree. An external
     // transpiler's record of the files it rewrites must be its own.
-    let _ = fs::unlink(stamp_path.as_str());
-    let _ = fs::unlink(stamp_new.as_str());
+    let _ = fs::unlink(&stamp_path);
+    let _ = fs::unlink(&stamp_new);
     if external {
-        let rw = loader::join2(pdir.as_str(), ".emit_rewritten");
-        let _ = fs::unlink(rw.as_str());
+        let rw = loader::join2(&pdir, ".emit_rewritten");
+        let _ = fs::unlink(&rw);
     }
     let rc = if external {
-        run_transpiler(m, prof_name, root, sub, cx, cid, c_tree);
+        run_transpiler(m, prof_name, root, sub, cx, cid, c_tree)
     } else {
-        emit_closure(m, prof_name, root, root_dir, alt, srcgen.as_str(), jobs, cx, topts, sink, stamp_new.as_str(), cid);
+        emit_closure(m, prof_name, root, root_dir, alt, &srcgen, jobs, cx, topts, sink, &stamp_new, cid)
     };
     return Transpiled { rc: rc, skipped: false, cid: cid, gen_files: Vector::<String>::new() };
 }
 
 // The stamp an emission into <out-dir>/<sub> wrote beside the final one: it vouches for the tree now.
 fn stamp_publish(m: &mf::Manifest, sub: str) {
-    let stamp_path = loader::join2(loader::join2(m.out_dir.as_str(), sub).as_str(), ".emit_stamp");
+    let stamp_path = loader::join2(loader::join2(&m.out_dir, sub).as_str(), ".emit_stamp");
     let mut stamp_new = stamp_path.clone();
     stamp_new.push_str(".new");
-    let _ = fs::rename(stamp_new.as_str(), stamp_path.as_str());
+    let _ = fs::rename(&stamp_new, &stamp_path);
 }
 
 /// `super-c build --emit-c`: the C tree of the manifest's primary root under `profile`, for the build's
@@ -1365,8 +1365,8 @@ pub(package) fn manifest_emit_c(m: &mf::Manifest, profile: str, cx: &BuildCtx) i
         eprintln("build: unknown profile '{}'", prof_name);
         return 1;
     }
-    let pdir = loader::join2(m.out_dir.as_str(), prof_name);
-    let lk = tree_lock(pdir.as_str());
+    let pdir = loader::join2(&m.out_dir, prof_name);
+    let lk = tree_lock(&pdir);
     if !lk.held() {
         return 1;
     }
@@ -1427,8 +1427,8 @@ fn engine_build(
     link_kind: i32,
     topts: *const TestOpts,
 ) i32 {
-    let pdir = loader::join2(m.out_dir.as_str(), sub);
-    let lk = tree_lock(pdir.as_str());
+    let pdir = loader::join2(&m.out_dir, sub);
+    let lk = tree_lock(&pdir);
     if !lk.held() {
         return 1;
     }
@@ -1449,13 +1449,13 @@ const TREE_LOCK_WAIT_MS: i64 = 30 * 60 * 1000;
 pub(package) fn tree_lock(dir: str) Lock {
     mkdir_p(dir);
     let p = loader::join2(dir, ".lock");
-    let mut h = lock_file(p.as_str(), 0);
+    let mut h = lock_file(&p, 0);
     if h.busy() {
         eprintln("build: waiting for another build of '{}'", dir);
-        h = lock_file(p.as_str(), TREE_LOCK_WAIT_MS);
+        h = lock_file(&p, TREE_LOCK_WAIT_MS);
         if h.busy() {
             eprintln("build: another build held '{}' for {} minutes", dir, TREE_LOCK_WAIT_MS / 60000);
-            return Lock::Failed;
+            return Failed;
         }
     }
     if !h.held() {
@@ -1483,17 +1483,17 @@ pub(package) fn lock_file(p: str, wait_ms: i64) Lock {
     }
     let opened = fs::open(p, fs::OpenOptions { read: true, write: true, create: true, mode: 0o644 });
     if opened.is_err() {
-        return Lock::Failed;
+        return Failed;
     }
     let mut f = opened.unwrap();
     let r = f.lock_exclusive(wait_ms as u64 * 1000000);
     if r.is_ok() {
-        return Lock::Held(Option::<fs::File>::Some(f));
+        return Held(Some(f));
     }
     if r.unwrap_err().kind == IoErrorKind::TimedOut {
-        return Lock::Busy;
+        return Busy;
     }
-    return Lock::Failed;
+    return Failed;
 }
 
 /// Modification time of `path` in nanoseconds (100 ns steps on Windows); 0 when it does not exist.
@@ -1530,7 +1530,7 @@ pub(package) fn ext_id(m: &mf::Manifest) u64 {
     if h != null {
         t.format_into("hooks\t{}\n", unsafe (*h).id);
     }
-    return str_id(t.as_str()) | 1;
+    return str_id(&t) | 1;
 }
 
 // `path` without leading `./`.
@@ -1554,8 +1554,8 @@ fn is_file(path: str) bool {
 fn push_file_hash(path: str, out: &mut String) bool {
     return switch loader::read_file(path) {
         Some(t) => {
-            hex64(str_id(t.as_str()), out);
-            true;
+            hex64(str_id(&t), out);
+            true
         },
         None => false,
     };
@@ -1599,16 +1599,16 @@ fn step_record(st: &mf::Step, prog: &mut String, rec: &mut String) bool {
             eprintln("build: [step.{}]: the program '{}' does not exist", nm, prog.as_str());
             return false;
         },
-    };
+    }
     for k in 0..st.env.len() {
         let key = st.env[k].as_str();
         switch stdlib::get_env(key) {
             Some(v) => rec.format_into("env\t{}={}\n", key, v.as_str()),
             None => rec.format_into("env\t{}\n", key),
-        };
+        }
     }
     for k in 0..st.inputs.len() {
-        let f = plain_path(st.inputs[k].as_str());
+        let f = plain_path(&st.inputs[k]);
         rec.format_into("in\t{}\t", f);
         if !is_file(f) || !push_file_hash(f, rec) {
             eprintln("build: [step.{}]: the input '{}' does not exist", nm, f);
@@ -1623,7 +1623,7 @@ fn step_record(st: &mf::Step, prog: &mut String, rec: &mut String) bool {
 fn step_outputs(st: &mf::Step, rec: &String, out: &mut String) bool {
     out.push_string(rec);
     for k in 0..st.outputs.len() {
-        let f = plain_path(st.outputs[k].as_str());
+        let f = plain_path(&st.outputs[k]);
         out.format_into("out\t{}\t", f);
         if !is_file(f) || !push_file_hash(f, out) {
             return false;
@@ -1640,11 +1640,8 @@ pub(package) fn step_current(m: &mf::Manifest, i: usize) bool {
     let mut prog = String::new();
     let mut rec = String::new();
     let mut now = String::new();
-    let rpath = loader::join2(loader::join2(m.out_dir.as_str(), ".steps").as_str(), st.name.as_str());
-    return st.cache && step_record(st, &mut prog, &mut rec) && step_outputs(st, &rec, &mut now) && file_eq(
-        rpath.as_str(),
-        now.as_str(),
-    );
+    let rpath = loader::join2(loader::join2(&m.out_dir, ".steps").as_str(), &st.name);
+    return st.cache && step_record(st, &mut prog, &mut rec) && step_outputs(st, &rec, &mut now) && file_eq(&rpath, &now);
 }
 
 /// Run the steps of `m` (`[step.NAME]`) whose record (`<out-dir>/.steps/<name>`) does not match their
@@ -1655,10 +1652,10 @@ pub(package) fn run_steps(m: &mf::Manifest, ran: &mut Vector<String>) i32 {
     if m.steps.len() == 0 {
         return 0;
     }
-    let rdir = loader::join2(m.out_dir.as_str(), ".steps");
-    mkdir_p(rdir.as_str());
+    let rdir = loader::join2(&m.out_dir, ".steps");
+    mkdir_p(&rdir);
     // Builds of two profiles run the same steps over the same files: one at a time.
-    let lk = lock_file(loader::join2(rdir.as_str(), ".lock").as_str(), TREE_LOCK_WAIT_MS);
+    let lk = lock_file(loader::join2(&rdir, ".lock").as_str(), TREE_LOCK_WAIT_MS);
     if !lk.held() {
         eprintln("build: cannot lock '{}'", rdir.as_str());
         return 1;
@@ -1671,34 +1668,34 @@ pub(package) fn run_steps(m: &mf::Manifest, ran: &mut Vector<String>) i32 {
         if !step_record(st, &mut prog, &mut rec) {
             return 1;
         }
-        let rpath = loader::join2(rdir.as_str(), nm);
+        let rpath = loader::join2(&rdir, nm);
         if st.cache {
             let mut now = String::new();
-            if step_outputs(st, &rec, &mut now) && file_eq(rpath.as_str(), now.as_str()) {
+            if step_outputs(st, &rec, &mut now) && file_eq(&rpath, &now) {
                 continue;
             }
         }
-        let _ = fs::unlink(rpath.as_str());
+        let _ = fs::unlink(&rpath);
         let mut envs = Vector::<String>::with_capacity(st.env.len());
         for k in 0..st.env.len() {
-            if let Some(v) = stdlib::get_env(st.env[k].as_str()) {
+            if let Some(v) = stdlib::get_env(&st.env[k]) {
                 envs.push(format("{}={}", st.env[k].as_str(), v.as_str()));
             }
         }
         let mut ev = Vector::<str>::with_capacity(envs.len());
         for k in 0..envs.len() {
-            ev.push(envs[k].as_str());
+            ev.push(&envs[k]);
         }
         let mut av = Vector::<str>::with_capacity(st.argv.len());
         for k in 0..st.argv.len() {
-            av.push(st.argv[k].as_str());
+            av.push(&st.argv[k]);
         }
-        if !process_allowed(prog.as_str()) {
+        if !process_allowed(&prog) {
             return 1;
         }
-        let mut cmd = process::Command::new(av.as_slice());
-        cmd.program = Option::<str>::Some(prog.as_str());
-        cmd.env = Option::<Slice<str>>::Some(ev.as_slice());
+        let mut cmd = process::Command::new(&av);
+        cmd.program = Some(prog.as_str());
+        cmd.env = Some(ev.as_slice());
         let rc = wait_code(process::spawn(cmd));
         if rc != 0 {
             eprintln("build: [step.{}] failed (exit {})", nm, rc);
@@ -1707,13 +1704,13 @@ pub(package) fn run_steps(m: &mf::Manifest, ran: &mut Vector<String>) i32 {
         let mut done = String::new();
         if !step_outputs(st, &rec, &mut done) {
             for k in 0..st.outputs.len() {
-                if !is_file(plain_path(st.outputs[k].as_str())) {
+                if !is_file(plain_path(&st.outputs[k])) {
                     eprintln("build: [step.{}] did not write '{}'", nm, st.outputs[k].as_str());
                 }
             }
             return 1;
         }
-        if !write_file_atomic(rpath.as_str(), done.as_str()) {
+        if !write_file_atomic(&rpath, &done) {
             eprintln("build: cannot write '{}'; the step runs again next build", rpath.as_str());
         }
         ran.push(st.name.clone());
@@ -1781,7 +1778,7 @@ extend NatSink {
             return;
         }
         self.marked = true;
-        if !write_file(self.pending.as_str(), "") {
+        if !write_file(&self.pending, "") {
             eprintln("build: cannot write '{}'", self.pending.as_str());
             self.ret = 1;
         }
@@ -1861,8 +1858,8 @@ fn engine_build_i(
     let prof = m.profiles.at(pi as usize);
     let t0 = ticks_ms();
     bst::mark(bst::B_START);
-    let pdir = loader::join2(m.out_dir.as_str(), sub);
-    let gen = loader::join2(pdir.as_str(), "raw");
+    let pdir = loader::join2(&m.out_dir, sub);
+    let gen = loader::join2(&pdir, "raw");
     let cur = ext::Current {
         profile: String::from_str(prof_name),
         dir: pdir.clone(),
@@ -1894,7 +1891,7 @@ fn engine_build_i(
         g.bin.push_str(bin);
         g.jobs = jobs;
     }
-    let lrec = link_record(m.out_dir.as_str(), bin);
+    let lrec = link_record(&m.out_dir, bin);
     let mut fppath = lrec.clone();
     fppath.push_str(".cmd");
     let mut pending = fppath.clone();
@@ -1936,12 +1933,12 @@ fn engine_build_i(
     if skip_emit || external {
         let mut rels = replace(&mut tr.gen_files, Vector::<String>::new());
         if !skip_emit {
-            walk_gen_files(gen.as_str(), gen.len(), &mut rels);
+            walk_gen_files(&gen, gen.len(), &mut rels);
         }
         let mut rewritten = Set::<String>::new();
         let mut all_new = false;
         if external && !skip_emit {
-            switch loader::read_file(loader::join2(pdir.as_str(), ".emit_rewritten").as_str()) {
+            switch loader::read_file(loader::join2(&pdir, ".emit_rewritten").as_str()) {
                 Some(t) => {
                     for line in t.as_str().lines() {
                         rewritten.insert(String::from_str(line));
@@ -1950,14 +1947,11 @@ fn engine_build_i(
                 None => {
                     all_new = true;
                 },
-            };
+            }
         }
         for i in 0..rels.len() {
             if rels.at(i).as_str().ends_with(".o") {
-                ns.add(
-                    loader::join2(gen.as_str(), rels.at(i).as_str()).as_str(),
-                    all_new || rewritten.contains(rels.at(i)),
-                );
+                ns.add(loader::join2(&gen, rels.at(i).as_str()).as_str(), all_new || rewritten.contains(rels.at(i)));
             }
         }
     }
@@ -1977,11 +1971,11 @@ fn engine_build_i(
         // under that name, in a directory of its own.
         let tmp_dir = tmp.clone();
         if link_kind == 2 {
-            mkdir_p(tmp_dir.as_str());
-            tmp = loader::join2(tmp_dir.as_str(), loader::basename_of(bin));
+            mkdir_p(&tmp_dir);
+            tmp = loader::join2(&tmp_dir, loader::basename_of(bin));
         }
-        let mut largs = link_args(m, prof, cx, gen.as_str(), link_kind, tmp.as_str(), loader::basename_of(bin), objs);
-        if link_kind == 2 && m.lib_exports_c && !export_flags(gen.as_str(), pdir.as_str(), cx.target, &mut largs) {
+        let mut largs = link_args(m, prof, cx, &gen, link_kind, &tmp, loader::basename_of(bin), objs);
+        if link_kind == 2 && m.lib_exports_c && !export_flags(&gen, &pdir, cx.target, &mut largs) {
             return 1;
         }
         let strip = prof.strip && link_kind == 0;
@@ -1994,12 +1988,12 @@ fn engine_build_i(
         }
         // 3) Link when anything changed: a new object, a missing binary, or another command than the
         // recorded one.
-        let mut need = bmt == 0 || file_mtime(ns.pending.as_str()) != 0;
+        let mut need = bmt == 0 || file_mtime(&ns.pending) != 0;
         for i in 0..objs.len() {
             need = need || file_mtime(objs.at(i).as_str()) > bmt;
         }
         if !need {
-            need = (switch loader::read_file(fppath.as_str()) {
+            need = (switch loader::read_file(&fppath) {
                 Some(old) => old.as_str() != fp.as_str(),
                 None => true,
             });
@@ -2009,12 +2003,12 @@ fn engine_build_i(
             if ns.record {
                 link_argv = largs.clone();
             }
-            let _ = fs::unlink(tmp.as_str());
+            let _ = fs::unlink(&tmp);
             let mut why = String::new();
             let r = if link_kind == 1 {
-                lk::archive(m.target, tmp.as_str(), objs, &mut why);
+                lk::archive(m.target, &tmp, objs, &mut why)
             } else {
-                lk::link_args(m.target, m.arch, &largs, strip, jobs, &mut why);
+                lk::link_args(m.target, m.arch, &largs, strip, jobs, &mut why)
             };
             if jobs != 1 {
                 prt::shutdown(); // the link may have started the pool
@@ -2023,23 +2017,23 @@ fn engine_build_i(
                 eprintln(
                     "build: {} failed: {}",
                     if link_kind == 1 {
-                        "archive";
+                        "archive"
                     } else {
-                        "link";
+                        "link"
                     },
                     why.as_str(),
                 );
                 ret = 1;
-            } else if fs::rename(tmp.as_str(), bin).is_err() {
+            } else if fs::rename(&tmp, bin).is_err() {
                 eprintln("build: cannot move '{}' into place", bin);
                 ret = 1;
-            } else if link_kind == 2 && fs::rmdir(tmp_dir.as_str()).is_err() {
+            } else if link_kind == 2 && fs::rmdir(&tmp_dir).is_err() {
                 eprintln("build: cannot remove '{}'", tmp_dir.as_str());
                 ret = 1;
-            } else if write_file_atomic(fppath.as_str(), fp.as_str()) {
+            } else if write_file_atomic(&fppath, &fp) {
                 // The pending marker goes only once the link record holds this link: without the record,
                 // a same-second object could leave the next build on this binary.
-                let _ = fs::unlink(ns.pending.as_str());
+                let _ = fs::unlink(&ns.pending);
             } else {
                 eprintln("build: cannot write '{}'; the next build relinks", fppath.as_str());
             }
@@ -2085,9 +2079,9 @@ fn engine_build_i(
             t_transpile - t0,
             t_link - t_transpile,
             if linked {
-                "relinked";
+                "relinked"
             } else {
-                "cached";
+                "cached"
             },
             t_link - t0,
         );
@@ -2106,7 +2100,7 @@ pub(package) fn link_record(out_dir: str, bin: str) String {
     let mut name = String::from_str("__link-");
     hex64(h1, &mut name);
     hex64(h2, &mut name);
-    return loader::join2(out_dir, name.as_str());
+    return loader::join2(out_dir, &name);
 }
 
 /// `super-c build` from build.toml: run the engine on the manifest's root under the resolved profile
@@ -2118,7 +2112,7 @@ pub(package) fn manifest_build(m: &mf::Manifest, profile: str, bin_override: str
         // `-o` names an exact path: link straight there, no profile copy and nothing installed.
         let ob = exe_name(bin_override, cx.target);
         if sel_bin.len() == 0 || sel_bin == m.bin.as_str() {
-            return root_build(m, prof_name, ob.as_str(), cx);
+            return root_build(m, prof_name, &ob, cx);
         }
         for i in 0..m.bins.len() {
             let bt = m.bins.at(i);
@@ -2126,8 +2120,8 @@ pub(package) fn manifest_build(m: &mf::Manifest, profile: str, bin_override: str
                 let mut sub = String::from_str(prof_name);
                 sub.push_str("-bin-");
                 sub.push_string(&bt.name);
-                let dir = loader::dirname_of(m.root.as_str());
-                return engine_build(m, prof_name, bt.root.as_str(), dir, "", sub.as_str(), ob.as_str(), cx, 0, null);
+                let dir = loader::dirname_of(&m.root);
+                return engine_build(m, prof_name, &bt.root, dir, "", &sub, &ob, cx, 0, null);
             }
         }
         eprintln("build: no target named '{}' (check `bin` and [bin.NAME] sections)", sel_bin);
@@ -2138,8 +2132,8 @@ pub(package) fn manifest_build(m: &mf::Manifest, profile: str, bin_override: str
     if rc != 0 {
         return rc;
     }
-    let dest = exe_name(m.bin.as_str(), cx.target);
-    return install_bin(path.as_str(), dest.as_str());
+    let dest = exe_name(&m.bin, cx.target);
+    return install_bin(&path, &dest);
 }
 
 // Build one named target through the engine into its own <out-dir>/<profile><suffix> tree (per-target
@@ -2156,20 +2150,9 @@ fn target_build(
 ) i32 {
     let mut sub = String::from_str(prof_name);
     sub.push_str(suffix);
-    let dir = loader::join2(m.out_dir.as_str(), sub.as_str());
-    let path = loader::join2(dir.as_str(), leaf);
-    let rc = engine_build(
-        m,
-        prof_name,
-        root,
-        loader::dirname_of(m.root.as_str()),
-        "",
-        sub.as_str(),
-        path.as_str(),
-        cx,
-        link_kind,
-        null,
-    );
+    let dir = loader::join2(&m.out_dir, &sub);
+    let path = loader::join2(&dir, leaf);
+    let rc = engine_build(m, prof_name, root, loader::dirname_of(&m.root), "", &sub, &path, cx, link_kind, null);
     *out = path;
     return rc;
 }
@@ -2184,8 +2167,8 @@ fn root_build(m: &mf::Manifest, prof_name: str, bin: str, cx: &BuildCtx) i32 {
 fn bin_build(m: &mf::Manifest, prof_name: str, bt: &mf::BinTarget, cx: &BuildCtx, out: &mut String) i32 {
     let mut suffix = String::from_str("-bin-");
     suffix.push_string(&bt.name);
-    let leaf = exe_name(bt.name.as_str(), cx.target);
-    return target_build(m, prof_name, bt.root.as_str(), suffix.as_str(), leaf.as_str(), 0, cx, out);
+    let leaf = exe_name(&bt.name, cx.target);
+    return target_build(m, prof_name, &bt.root, &suffix, &leaf, 0, cx, out);
 }
 
 /// `super-c build`/`release` over every manifest target (cargo-style): the [lib] section's static and/or
@@ -2205,19 +2188,19 @@ pub(package) fn manifest_build_all(m: &mf::Manifest, profile: str, sel_bin: str,
             if shared && !m.lib_shared || !shared && !m.lib_static {
                 continue;
             }
-            let leaf = lib_file(m.lib_name.as_str(), shared, cx.target);
+            let leaf = lib_file(&m.lib_name, shared, cx.target);
             let mut path = String::new();
             let rc = target_build(
                 m,
                 prof_name,
-                m.lib_root.as_str(),
+                &m.lib_root,
                 "-lib",
-                leaf.as_str(),
+                &leaf,
                 kind,
                 if shared && m.lib_static {
-                    &nolint;
+                    &nolint
                 } else {
-                    cx;
+                    cx
                 },
                 &mut path,
             );
@@ -2262,11 +2245,11 @@ pub(package) fn manifest_build_all(m: &mf::Manifest, profile: str, sel_bin: str,
 /// library's static and shared files, the primary binary in its profile directory, each [bin.NAME].
 pub(package) fn artifact_paths(m: &mf::Manifest, prof_name: str, target: i32, out: &mut Vector<String>) {
     if m.lib_name.len() != 0 {
-        let dir = loader::join2(m.out_dir.as_str(), format("{}-lib", prof_name).as_str());
+        let dir = loader::join2(&m.out_dir, format("{}-lib", prof_name).as_str());
         for kind in 1..3 {
             let shared = kind == 2;
             if shared && m.lib_shared || !shared && m.lib_static {
-                out.push(loader::join2(dir.as_str(), lib_file(m.lib_name.as_str(), shared, target).as_str()));
+                out.push(loader::join2(&dir, lib_file(&m.lib_name, shared, target).as_str()));
             }
         }
     }
@@ -2275,8 +2258,8 @@ pub(package) fn artifact_paths(m: &mf::Manifest, prof_name: str, target: i32, ou
     }
     for i in 0..m.bins.len() {
         let bt = m.bins.at(i);
-        let dir = loader::join2(m.out_dir.as_str(), format("{}-bin-{}", prof_name, bt.name.as_str()).as_str());
-        out.push(loader::join2(dir.as_str(), exe_name(bt.name.as_str(), target).as_str()));
+        let dir = loader::join2(&m.out_dir, format("{}-bin-{}", prof_name, bt.name.as_str()).as_str());
+        out.push(loader::join2(&dir, exe_name(&bt.name, target).as_str()));
     }
 }
 
@@ -2297,40 +2280,40 @@ pub(package) fn scaffold_project(dir: str, name: str) i32 {
         return 1;
     }
     let man = loader::join2(dir, "build.toml");
-    let probe = stdio::fopen(man.as_str(), "rb");
+    let probe = stdio::fopen(&man, "rb");
     if probe != null {
         unsafe stdio::fclose(probe);
         eprintln("init: '{}' already exists", man.as_str());
         return 1;
     }
     let srcdir = loader::join2(dir, "src");
-    mkdir_p(srcdir.as_str());
+    mkdir_p(&srcdir);
     let mut toml = String::new();
     toml.push_str("bin = \"");
     toml.push_str(name);
     toml.push_str("\"\nroot = \"src/main.spc\"\n");
-    if !write_file(man.as_str(), toml.as_str()) {
+    if !write_file(&man, &toml) {
         eprintln("init: cannot write '{}'", man.as_str());
         return 1;
     }
-    let mainp = loader::join2(srcdir.as_str(), "main.spc");
+    let mainp = loader::join2(&srcdir, "main.spc");
     let mut mains = String::new();
     mains.push_str("fn main() i32 {\n    println(\"Hello from ");
     mains.push_str(name);
     mains.push_str("!\");\n    return 0;\n}\n");
-    if !write_file(mainp.as_str(), mains.as_str()) {
+    if !write_file(&mainp, &mains) {
         eprintln("init: cannot write '{}'", mainp.as_str());
         return 1;
     }
     let gi = loader::join2(dir, ".gitignore");
-    let gprobe = stdio::fopen(gi.as_str(), "rb");
+    let gprobe = stdio::fopen(&gi, "rb");
     if gprobe != null {
         unsafe stdio::fclose(gprobe);
     } else {
-        let _ = write_file(gi.as_str(), "/build\n");
+        let _ = write_file(&gi, "/build\n");
     }
     let gitdir = loader::join2(dir, ".git");
-    if !is_dir(gitdir.as_str()) {
+    if !is_dir(&gitdir) {
         let mut ga = Vector::<String>::new();
         push_arg(&mut ga, "git");
         push_arg(&mut ga, "init");
@@ -2366,11 +2349,11 @@ fn copy_tree(srcd: str, dstd: str, depth: u32) bool {
         }
         let s = loader::join2(srcd, names.at(i).as_str());
         let d = loader::join2(dstd, names.at(i).as_str());
-        if is_dir(s.as_str()) {
-            if !copy_tree(s.as_str(), d.as_str(), depth + 1) {
+        if is_dir(&s) {
+            if !copy_tree(&s, &d, depth + 1) {
                 ok = false;
             }
-        } else if !copy_file(s.as_str(), d.as_str()) {
+        } else if !copy_file(&s, &d) {
             ok = false;
         }
     }
@@ -2388,9 +2371,9 @@ fn strip_git(dir: str) {
     for i in 0..names.len() {
         let d = loader::join2(dir, names.at(i).as_str());
         if names.at(i).as_str() == ".git" {
-            rm_rf(d.as_str());
-        } else if fs::lstat(d.as_str()).map(|m: fs::Metadata| m.kind == fs::FileKind::Dir).unwrap_or(false) {
-            strip_git(d.as_str());
+            rm_rf(&d);
+        } else if fs::lstat(&d).map(|m: fs::Metadata| m.kind == fs::FileKind::Dir).unwrap_or(false) {
+            strip_git(&d);
         }
     }
 }
@@ -2415,9 +2398,9 @@ pub(package) fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, for
         k = k - 1;
     }
     let name = if name_arg.len() != 0 {
-        name_arg;
+        name_arg
     } else {
-        base.slice(k, base.len());
+        base.slice(k, base.len())
     };
     if name.len() == 0 {
         eprintln("vendor: cannot derive a name from '{}' (name one: super-c vendor <src> <name>)", src);
@@ -2429,20 +2412,20 @@ pub(package) fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, for
         return 1;
     }
     let vdir = loader::join2(root, "vendor");
-    let dest = loader::join2(vdir.as_str(), name);
-    if is_dir(dest.as_str()) {
+    let dest = loader::join2(&vdir, name);
+    if is_dir(&dest) {
         if !force {
             eprintln("vendor: '{}' already exists (replace it with --force)", dest.as_str());
             return 1;
         }
-        rm_rf(dest.as_str());
+        rm_rf(&dest);
     }
     let is_git = src.starts_with("git@") || src.ends_with(".git") || scheme_len(src) != 0;
     if !is_git && ref_arg.len() != 0 {
         eprintln("vendor: --ref pins a git source; '{}' is a local directory", src);
         return 1;
     }
-    mkdir_p(vdir.as_str());
+    mkdir_p(&vdir);
     let mut stamp = String::from_str("source = \"");
     stamp.push_str(src);
     stamp.push_str("\"\n");
@@ -2470,7 +2453,7 @@ pub(package) fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, for
             push_arg(&mut co, ref_arg);
             if exec_args(&co, "") != 0 {
                 eprintln("vendor: no ref '{}' in '{}'", ref_arg, src);
-                rm_rf(dest.as_str());
+                rm_rf(&dest);
                 return 1;
             }
             // The checkout moves only the top repository: submodules must follow the ref's commits.
@@ -2485,31 +2468,31 @@ pub(package) fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, for
             push_arg(&mut su, "--recursive");
             if exec_args(&su, "") != 0 {
                 eprintln("vendor: submodule update failed at '{}' in '{}'", ref_arg, src);
-                rm_rf(dest.as_str());
+                rm_rf(&dest);
                 return 1;
             }
         }
         // The exact commit, captured BEFORE the repository is stripped: afterwards nobody can ask.
-        let head = git_head(dest.as_str());
+        let head = git_head(&dest);
         if head.len() != 0 {
             stamp.push_str("commit = \"");
-            stamp.push_str(head.as_str());
+            stamp.push_str(&head);
             stamp.push_str("\"\n");
         }
-        strip_git(dest.as_str());
+        strip_git(&dest);
     } else {
         if !is_dir(src) {
             eprintln("vendor: '{}' is not a directory (a git source needs a scheme, git@, or .git)", src);
             return 1;
         }
-        if !copy_tree(src, dest.as_str(), 0) {
+        if !copy_tree(src, &dest, 0) {
             eprintln("vendor: copy failed for '{}'", src);
-            rm_rf(dest.as_str());
+            rm_rf(&dest);
             return 1;
         }
     }
-    let sf = loader::join2(dest.as_str(), ".vendor");
-    let _ = write_file(sf.as_str(), stamp.as_str());
+    let sf = loader::join2(&dest, ".vendor");
+    let _ = write_file(&sf, &stamp);
     println("vendored {} at {} (import vendor::{}::<module>;)", name, dest.as_str(), name);
     return 0;
 }
@@ -2540,7 +2523,7 @@ fn git_capture(dir: str, tmp: str, a: str, b: str, c: str) String {
                 }
             },
             None => {},
-        };
+        }
     }
     rm_rf(tmp);
     return out;
@@ -2549,19 +2532,19 @@ fn git_capture(dir: str, tmp: str, a: str, b: str, c: str) String {
 // `git rev-parse HEAD` of a checkout.
 fn git_head(dir: str) String {
     let tmp = loader::join2(dir, ".vendor-head");
-    return git_capture(dir, tmp.as_str(), "rev-parse", "HEAD", "");
+    return git_capture(dir, &tmp, "rev-parse", "HEAD", "");
 }
 
 // The checkout's identity for a benchmark record: the short commit, "-dirty" appended when a
 // tracked file differs from it, or "unknown" when git cannot answer.
 fn git_build_id(dir: str, tmp_dir: str) String {
     let tmp = loader::join2(tmp_dir, ".bench_git");
-    let mut id = git_capture(dir, tmp.as_str(), "rev-parse", "--short=12", "HEAD");
+    let mut id = git_capture(dir, &tmp, "rev-parse", "--short=12", "HEAD");
     if id.len() == 0 {
         id.push_str("unknown");
         return id;
     }
-    let st = git_capture(dir, tmp.as_str(), "status", "--porcelain", "--untracked-files=no");
+    let st = git_capture(dir, &tmp, "status", "--porcelain", "--untracked-files=no");
     if st.len() != 0 {
         id.push_str("-dirty");
     }
@@ -2591,7 +2574,7 @@ const fn scheme_len(s: str) usize {
 // is what keeps a `test` run from quietly leaving a debug binary where a release one was.
 fn build_into_profile(m: &mf::Manifest, prof_name: str, cx: &BuildCtx, out: &mut String) i32 {
     let path = profile_bin(m, prof_name, cx.target);
-    let rc = root_build(m, prof_name, path.as_str(), cx);
+    let rc = root_build(m, prof_name, &path, cx);
     *out = path;
     return rc;
 }
@@ -2625,10 +2608,10 @@ pub(package) fn manifest_run_bin(m: &mf::Manifest, profile: str, bin_override: s
     }
     let rc = if bin_override.len() != 0 {
         built = exe_name(bin_override, cx.target);
-        root_build(m, prof_name, built.as_str(), cx);
+        root_build(m, prof_name, &built, cx)
     } else {
         // Run the profile's own binary where it was linked; `run` builds to run, it does not install.
-        build_into_profile(m, prof_name, cx, &mut built);
+        build_into_profile(m, prof_name, cx, &mut built)
     };
     if rc != 0 {
         return rc;
@@ -2654,7 +2637,7 @@ fn lir_eval_check() bool {
 pub(package) fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *const TestOpts) i32 {
     let mut nolint = *cx;
     nolint.lint = false;
-    if !is_dir(m.test_dir.as_str()) {
+    if !is_dir(&m.test_dir) {
         eprintln("test: no {}/ directory next to src/", m.test_dir.as_str());
         return 1;
     }
@@ -2666,55 +2649,55 @@ pub(package) fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, top
     let check = lir_eval_check();
     let mut binp = String::new();
     let rc = if check {
-        0;
+        0
     } else if profile.len() == 0 {
-        let leaf = exe_name(loader::basename_of(m.bin.as_str()), cx.target);
-        target_build(m, "test", m.root.as_str(), "-bin", leaf.as_str(), 0, &nolint, &mut binp);
+        let leaf = exe_name(loader::basename_of(&m.bin), cx.target);
+        target_build(m, "test", &m.root, "-bin", &leaf, 0, &nolint, &mut binp)
     } else {
-        build_into_profile(m, profile, &nolint, &mut binp);
+        build_into_profile(m, profile, &nolint, &mut binp)
     };
     if rc != 0 {
         return rc;
     }
     let mut src = String::new();
-    if suite_import_root(m.test_dir.as_str(), "test", &mut src) == 0 {
+    if suite_import_root(&m.test_dir, "test", &mut src) == 0 {
         eprintln("test: no .spc files under {}/", m.test_dir.as_str());
         return 1;
     }
-    mkdir_p(m.out_dir.as_str());
+    mkdir_p(&m.out_dir);
     // A filter is part of the generated root: it imports only the files with a matching test, so the
     // others are not built. Finding them takes a parse of the whole suite.
     let filter = if unsafe (*topts).filter != null {
-        unsafe str::from_cstr((*topts).filter);
+        unsafe str::from_cstr((*topts).filter)
     } else {
-        "";
+        ""
     };
     if filter.len() != 0 {
-        let scanp = loader::join2(m.out_dir.as_str(), "test_scan.spc");
-        if !write_file(scanp.as_str(), src.as_str()) {
+        let scanp = loader::join2(&m.out_dir, "test_scan.spc");
+        if !write_file(&scanp, &src) {
             eprintln("test: cannot write '{}'", scanp.as_str());
             return 1;
         }
-        let p = suite_scan(scanp.as_str(), loader::dirname_of(m.root.as_str()), cx, m.arch);
+        let p = suite_scan(&scanp, loader::dirname_of(&m.root), cx, m.arch);
         if !p.ok {
             return 1;
         }
         let mut tpref = String::new();
-        push_module_path(&mut tpref, m.test_dir.as_str());
+        push_module_path(&mut tpref, &m.test_dir);
         tpref.push_str("::");
         src.clear();
         src.push_str("// generated by `super-c test` -- do not edit\n");
-        if test_filter_imports(&p, tpref.as_str(), filter, &mut src) == 0 {
+        if test_filter_imports(&p, &tpref, filter, &mut src) == 0 {
             eprintln("test: no test name contains '{}'", filter);
             return 1;
         }
     }
     src.push_str("\nfn main() i32 {\n    return 0;\n}\n");
-    let rootp = loader::join2(m.out_dir.as_str(), "test_root.spc");
+    let rootp = loader::join2(&m.out_dir, "test_root.spc");
     // Rewrite the root only when its content changed: an unchanged root keeps its mtime, so the emit
     // stamp proves the suite unchanged without hashing every input.
-    if !file_eq(rootp.as_str(), src.as_str()) {
-        if !write_file(rootp.as_str(), src.as_str()) {
+    if !file_eq(&rootp, &src) {
+        if !write_file(&rootp, &src) {
             eprintln("test: cannot write '{}'", rootp.as_str());
             return 1;
         }
@@ -2732,37 +2715,26 @@ pub(package) fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, top
         }
         binb.push_string(&binp);
     }
-    let _ = unsafe env::set("SUPERC", binb.as_str());
+    let _ = unsafe env::set("SUPERC", &binb);
     // That compiler looks for std/ beside its binary, which `--out-dir` may place outside the project:
     // a project that holds a std tree names it (`SC_STD_DIR`, read by main.spc's `exe_std_dir`).
     if real_path("std/core.spc").len() != 0 && stdlib::get_env("SC_STD_DIR").is_none() {
         let sd = real_path("std");
-        let _ = unsafe env::set("SC_STD_DIR", sd.as_str());
+        let _ = unsafe env::set("SC_STD_DIR", &sd);
     }
     // The runner is built through the engine under the `test` profile, in its own <out-dir>/test tree:
     // the per-TU cache, the native record and the emit stamp turn an unchanged suite into a link check
     // instead of a rebuild of every module.
     let tsub = "test";
-    let tdir_out = loader::join2(m.out_dir.as_str(), tsub);
-    let tbin = loader::join2(tdir_out.as_str(), exe_name("__tests", cx.target).as_str());
-    let brc = engine_build(
-        m,
-        tsub,
-        rootp.as_str(),
-        ".",
-        loader::dirname_of(m.root.as_str()),
-        tsub,
-        tbin.as_str(),
-        &nolint,
-        0,
-        topts,
-    );
+    let tdir_out = loader::join2(&m.out_dir, tsub);
+    let tbin = loader::join2(&tdir_out, exe_name("__tests", cx.target).as_str());
+    let brc = engine_build(m, tsub, &rootp, ".", loader::dirname_of(&m.root), tsub, &tbin, &nolint, 0, topts);
     if brc != 0 || check {
         return brc;
     }
     // The suite's recorded durations balance the shards: `--test-durations`, else
     // `<test dir>/durations.tsv` (written by --test-record-durations).
-    let mut durp = loader::join2(m.test_dir.as_str(), "durations.tsv");
+    let mut durp = loader::join2(&m.test_dir, "durations.tsv");
     let mut o = unsafe *topts;
     if o.durations == null {
         o.durations = durp.cstr();
@@ -2773,19 +2745,19 @@ pub(package) fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, top
     // change directory.
     let kept = stdlib::get_env("SC_TEST_CACHE_DIR").unwrap_or(String::new());
     let tcache = if kept.len() != 0 {
-        kept.clone();
+        kept.clone()
     } else {
-        loader::join2(tdir_out.as_str(), "cache");
+        loader::join2(&tdir_out, "cache")
     };
     if kept.len() == 0 {
-        rm_rf(tcache.as_str());
+        rm_rf(&tcache);
     }
-    mkdir_p(tcache.as_str());
-    let ac = real_path(tcache.as_str());
-    let _ = unsafe env::set("SC_CACHE_DIR", ac.as_str());
-    let trc = test_run_runner(&o, tbin.as_str());
+    mkdir_p(&tcache);
+    let ac = real_path(&tcache);
+    let _ = unsafe env::set("SC_CACHE_DIR", &ac);
+    let trc = test_run_runner(&o, &tbin);
     if kept.len() == 0 {
-        rm_rf(tcache.as_str());
+        rm_rf(&tcache);
     }
     return trc;
 }
@@ -2973,9 +2945,9 @@ fn bench_run_root(found: &Vector<String>, prefix: str, build_id: str, flags: str
     for i in 0..found.len() {
         let raw = found.at(i).as_str();
         let full = if raw[0] == b'-' {
-            raw.slice(1, raw.len());
+            raw.slice(1, raw.len())
         } else {
-            raw;
+            raw
         };
         let mut cut: usize = 0;
         for k in 0..full.len() {
@@ -3007,15 +2979,15 @@ fn bench_run_root(found: &Vector<String>, prefix: str, build_id: str, flags: str
         let raw = found.at(i).as_str();
         let quiet = raw[0] == b'-';
         let full = if quiet {
-            raw.slice(1, raw.len());
+            raw.slice(1, raw.len())
         } else {
-            raw;
+            raw
         };
         // The `<bench-dir>::` every one of these starts with says nothing: strip it from the name.
         let name = if full.starts_with(prefix) {
-            full.slice(prefix.len(), full.len());
+            full.slice(prefix.len(), full.len())
         } else {
-            full;
+            full
         };
         out.push_str("    if __run.wants(\"");
         out.push_str(name);
@@ -3026,9 +2998,9 @@ fn bench_run_root(found: &Vector<String>, prefix: str, build_id: str, flags: str
         out.push_str("(&mut __b);\n        let __code = __run.done(&mut __b, ");
         out.push_str(
             if quiet {
-                "true";
+                "true"
             } else {
-                "false";
+                "false"
             },
         );
         out.push_str(");\n        if __code >= 0 {\n            return __code;\n        }\n    }\n");
@@ -3042,33 +3014,33 @@ fn bench_run_root(found: &Vector<String>, prefix: str, build_id: str, flags: str
 pub(package) fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, filter: str, cx: &BuildCtx) i32 {
     let mut nolint = *cx;
     nolint.lint = false;
-    if !is_dir(m.bench_dir.as_str()) {
+    if !is_dir(&m.bench_dir) {
         eprintln("bench: no {}/ directory next to src/", m.bench_dir.as_str());
         return 1;
     }
     // The module-path prefix the discovery root gives every bench module ("<bench-dir>::").
     let mut bpref = String::new();
-    push_module_path(&mut bpref, m.bench_dir.as_str());
+    push_module_path(&mut bpref, &m.bench_dir);
     bpref.push_str("::");
     // Two passes, because a benchmark is DISCOVERED rather than registered. The first root imports every
     // module under bench/ so they all get parsed; walking those ASTs for `@bench` gives the list; the second
     // root is written with a call to each one. Loading twice is cheap (the first pass only parses) and it
     // is what keeps a bench file from having to be wired into a hand-maintained `main`.
     let mut listing = String::new();
-    let nmods = suite_import_root(m.bench_dir.as_str(), "bench", &mut listing);
+    let nmods = suite_import_root(&m.bench_dir, "bench", &mut listing);
     if nmods == 0 {
         eprintln("bench: no .spc files under {}/", m.bench_dir.as_str());
         return 1;
     }
-    mkdir_p(m.out_dir.as_str());
-    let scanp = loader::join2(m.out_dir.as_str(), "bench_scan.spc");
-    if !write_file(scanp.as_str(), listing.as_str()) {
+    mkdir_p(&m.out_dir);
+    let scanp = loader::join2(&m.out_dir, "bench_scan.spc");
+    if !write_file(&scanp, &listing) {
         eprintln("bench: cannot write '{}'", scanp.as_str());
         return 1;
     }
-    let p = suite_scan(scanp.as_str(), loader::dirname_of(m.root.as_str()), cx, m.arch);
+    let p = suite_scan(&scanp, loader::dirname_of(&m.root), cx, m.arch);
     let mut found = Vector::<String>::new();
-    if !p.ok || !bench_collect(&p, bpref.as_str(), &mut found) {
+    if !p.ok || !bench_collect(&p, &bpref, &mut found) {
         return 1;
     }
     if found.len() == 0 {
@@ -3082,9 +3054,9 @@ pub(package) fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, fil
         for i in 0..found.len() {
             let e = found.at(i).as_str();
             let quiet = if e[0] == b'-' {
-                1 as usize;
+                1 as usize
             } else {
-                0 as usize;
+                0 as usize
             };
             if e.slice(quiet + bpref.len(), e.len()).contains(filter) {
                 kept.push(String::from_str(e));
@@ -3096,11 +3068,11 @@ pub(package) fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, fil
         }
         found = kept;
     }
-    let build_id = git_build_id(".", m.out_dir.as_str());
+    let build_id = git_build_id(".", &m.out_dir);
     let prof_name = if profile.len() != 0 {
-        profile;
+        profile
     } else {
-        "bench";
+        "bench"
     };
     // The runner prints and records what it was compiled with: the profile, its `opt-level` and its debug
     // information. Quoted into a string literal of the generated root, so no quote survives.
@@ -3116,9 +3088,9 @@ pub(package) fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, fil
         }
     }
     let mut rootsrc = String::new();
-    bench_run_root(&found, bpref.as_str(), build_id.as_str(), flags.as_str(), &mut rootsrc);
-    let genp = loader::join2(m.out_dir.as_str(), "bench_root.spc");
-    if !write_file(genp.as_str(), rootsrc.as_str()) {
+    bench_run_root(&found, &bpref, &build_id, &flags, &mut rootsrc);
+    let genp = loader::join2(&m.out_dir, "bench_root.spc");
+    if !write_file(&genp, &rootsrc) {
         eprintln("bench: cannot write '{}'", genp.as_str());
         return 1;
     }
@@ -3127,20 +3099,9 @@ pub(package) fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, fil
     // Bound, not inlined: a `str` taken from a TEMPORARY String dangles the moment the statement ends, and
     // a short name lives inside the String itself, so the borrow points at a dead stack slot.
     let leaf = exe_name("bench-bin", cx.target);
-    let bin = loader::join2(m.out_dir.as_str(), leaf.as_str());
+    let bin = loader::join2(&m.out_dir, &leaf);
     // Rooted at the project root (like tests), so `import bench::x;` works for lint AND build.
-    let rc = engine_build(
-        m,
-        prof_name,
-        rootp,
-        ".",
-        loader::dirname_of(m.root.as_str()),
-        sub.as_str(),
-        bin.as_str(),
-        &nolint,
-        0,
-        null,
-    );
+    let rc = engine_build(m, prof_name, rootp, ".", loader::dirname_of(&m.root), &sub, &bin, &nolint, 0, null);
     if rc != 0 || no_run {
         return rc;
     }
@@ -3161,7 +3122,7 @@ pub(package) fn manifest_tools(m: &mf::Manifest, args: Slice<str>, cx: &BuildCtx
         return 1;
     }
     let mut cpath = String::new();
-    push_module_path(&mut cpath, m.tools_compiler.as_str());
+    push_module_path(&mut cpath, &m.tools_compiler);
     let mut root = String::new();
     root.format_into("import {}::src::api::cli as compiler;\n", cpath.as_str());
     if m.tools.len() != 0 {
@@ -3173,9 +3134,9 @@ pub(package) fn manifest_tools(m: &mf::Manifest, args: Slice<str>, cx: &BuildCtx
     let nt = m.tools.len();
     for k in 0..nt + m.hooks.len() {
         let t = if k < nt {
-            m.tools.at(k).as_str();
+            m.tools.at(k).as_str()
         } else {
-            m.hooks.at(k - nt).as_str();
+            m.hooks.at(k - nt).as_str()
         };
         if !t.ends_with(".spc") || file_mtime(t) == 0 {
             eprintln("tools: [tools] module '{}' is no .spc file of the project", t);
@@ -3223,28 +3184,17 @@ pub(package) fn manifest_tools(m: &mf::Manifest, args: Slice<str>, cx: &BuildCtx
     }
     // `_installed` uninstalls the hooks when main returns.
     root.push_str("    return rc;\n}\n");
-    mkdir_p(m.out_dir.as_str());
-    let genp = loader::join2(m.out_dir.as_str(), "tools_root.spc");
-    if !write_file(genp.as_str(), root.as_str()) {
+    mkdir_p(&m.out_dir);
+    let genp = loader::join2(&m.out_dir, "tools_root.spc");
+    if !write_file(&genp, &root) {
         eprintln("tools: cannot write '{}'", genp.as_str());
         return 1;
     }
     let mut nolint = *cx;
     nolint.lint = false;
     let leaf = exe_name("tools-super-c", cx.target);
-    let bin = loader::join2(m.out_dir.as_str(), leaf.as_str());
-    let rc = engine_build(
-        m,
-        "debug",
-        genp.as_str(),
-        ".",
-        loader::dirname_of(m.root.as_str()),
-        "tools",
-        bin.as_str(),
-        &nolint,
-        0,
-        null,
-    );
+    let bin = loader::join2(&m.out_dir, &leaf);
+    let rc = engine_build(m, "debug", &genp, ".", loader::dirname_of(&m.root), "tools", &bin, &nolint, 0, null);
     if rc != 0 {
         return rc;
     }
@@ -3305,14 +3255,14 @@ pub(package) fn run_line(line: str) i32 {
     let sh: [str; 3] = ["sh", "-c", line];
     let none: [str; 0] = [];
     let mut cmd = if PLATFORM == Platform::Windows {
-        process::Command::new(none);
+        process::Command::new(none)
     } else {
-        process::Command::new(sh);
+        process::Command::new(sh)
     };
     if PLATFORM == Platform::Windows {
-        cmd.command_line = Option::<str>::Some(line);
+        cmd.command_line = Some(line);
     } else {
-        cmd.program = Option::<str>::Some("/bin/sh");
+        cmd.program = Some("/bin/sh");
     }
     return wait_code(process::spawn(cmd));
 }
@@ -3337,14 +3287,14 @@ pub(package) fn manifest_clean(m: &mf::Manifest, full: bool) i32 {
         sweep(m, time::now(), true);
         return 0;
     }
-    rm_rf(m.out_dir.as_str());
+    rm_rf(&m.out_dir);
     let trees = root_trees(m);
     for i in 0..trees.len() {
         rm_root_tree(trees.at(i).as_str());
     }
     let croot = cache_root(project_name(m));
     if croot.len() != 0 {
-        rm_rf(croot.as_str());
+        rm_rf(&croot);
         println("removed {}", croot.as_str());
     }
     return 0;
