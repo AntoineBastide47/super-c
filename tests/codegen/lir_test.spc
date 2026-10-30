@@ -268,9 +268,10 @@ b2(v49: i64):
 b3: unlikely
   v50 = mulhu.i64 v49, v49
   v51 = mulhs.i64 v50, v49
-  jmp b4(v51)
-b4(v52: i64):
-  ret v52
+  v52 = bswap.i64 v51
+  jmp b4(v52)
+b4(v53: i64):
+  ret v53
 b5:
   unreachable
 fn @floats

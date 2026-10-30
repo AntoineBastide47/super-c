@@ -42,6 +42,8 @@ pub(package) struct Isa {
     /// One instruction gives the high half of a 64-bit product (UMULH, MUL's rdx): the optimizer divides
     /// a 64-bit value by a constant with a product (`lir::ir::Package::mul_high`).
     pub(package) mul_high: bool,
+    /// One instruction reverses the bytes of an integer (REV, BSWAP): `lir::ir::Package::bswap`.
+    pub(package) bswap: bool,
     /// The native backend keeps a 64-bit integer in one register: the optimizer splits a 128-bit one into
     /// its two words (`lir::ir::Package::pairs`).
     pub(package) pairs: bool,
@@ -171,6 +173,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_bytes: 16,
         vector_ops: 1,
         mul_high: true,
+        bswap: true,
         pairs: true,
         half_cvt: false,
         simd_backend: "x86_64",
@@ -191,6 +194,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_bytes: 16,
         vector_ops: 2,
         mul_high: true,
+        bswap: true,
         pairs: true,
         half_cvt: true,
         simd_backend: "aarch64",
@@ -211,6 +215,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_bytes: 0,
         vector_ops: 0,
         mul_high: false,
+        bswap: false,
         pairs: false,
         half_cvt: false,
         simd_backend: "wasm",
@@ -536,6 +541,7 @@ const UNKNOWN_ISA: Isa = Isa {
     vector_bytes: 0,
     vector_ops: 0,
     mul_high: false,
+    bswap: false,
     pairs: false,
     half_cvt: false,
     simd_backend: "",

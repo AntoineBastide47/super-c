@@ -3257,6 +3257,19 @@ extend Gen {
             self.bit_count(i, t);
             return true;
         }
+        if op == O_BSWAP {
+            // 16 bits: the 32-bit reversal moves them to the top half.
+            let bits = type_bits(t.ty, self.ptr);
+            let sz = wsz(bits.max(32));
+            let r = self.reg(t.a);
+            let rd = self.def(i);
+            self.c.mov_rr(sz, rd, r);
+            self.c.bswap(sz, rd);
+            if bits == 16 {
+                self.c.shift_ri(x::SHR, 4, rd, 16);
+            }
+            return true;
+        }
         if op == O_ICMP {
             return self.icmp(i, t);
         }

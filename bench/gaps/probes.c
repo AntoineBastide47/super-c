@@ -1,0 +1,23 @@
+// The clang side of the code generation gap probes (GAPS.md): each function is the C form of the probe
+// of the same name in gaps.spc, with a `c_` prefix. lib.sh archives it. The types are unsigned, so
+// overflow wraps as in Super-C's release and bench profiles.
+#include <stdbool.h>
+#include <stdint.h>
+
+#define F __attribute__((noinline, used))
+
+F uint32_t c_r_sum(uint32_t n) { if (n == 0) return 0; return n + c_r_sum(n - 1); }
+F uint64_t c_r_fact(uint64_t n) { if (n == 0) return 1; return n * c_r_fact(n - 1); }
+F uint32_t c_r_bits(uint32_t x) { if (x == 0) return 0; return (x & 1) + c_r_bits(x >> 1); }
+F uint64_t c_r_pow(uint64_t b, uint32_t e) { if (e == 0) return 1; return b * c_r_pow(b, e - 1); }
+F uint32_t c_r_fib(uint32_t n) { if (n < 2) return n; return c_r_fib(n - 1) + c_r_fib(n - 2); }
+F uint32_t c_r_len(uint32_t n) { if (n == 0) return 0; return 1 + c_r_len(n - 1); }
+F bool c_is_even(uint32_t i) { if (i == 0) return true; return !c_is_even(i - 1); }
+F uint32_t c_l_pop(uint32_t x) { uint32_t c = 0; while (x) { x &= x - 1; c++; } return c; }
+F uint32_t c_l_log2(uint32_t x) { uint32_t c = 0; while (x) { x >>= 1; c++; } return c; }
+F uint32_t c_b_bswap(uint32_t x) { return (x >> 24) | ((x >> 8) & 0xff00) | ((x << 8) & 0xff0000) | (x << 24); }
+F uint32_t c_c_load32be(const uint8_t *b) { return (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16 | (uint32_t)b[2] << 8 | b[3]; }
+F bool c_b_lower(uint8_t c) { return c >= 97 && c <= 122; }
+F bool c_b_pow2(uint32_t x) { return x != 0 && (x & (x - 1)) == 0; }
+F bool c_f_and(uint32_t x, uint32_t y, uint32_t z) { return x == 3 && y < 9 && z != 0; }
+F bool c_f_or0(uint32_t x, uint32_t y) { return x == 0 || y == 0; }

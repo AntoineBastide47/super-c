@@ -2892,6 +2892,20 @@ extend Gen {
             self.bit_count(i, t);
             return true;
         }
+        if op == O_BSWAP {
+            let bits = type_bits(t.ty, self.ptr);
+            let r = self.reg(t.a) as u32;
+            let rd = self.def(i) as u32;
+            let opc = if bits == 16 {
+                a::DP1_REV16
+            } else if bits == 32 {
+                a::DP1_REV32
+            } else {
+                a::DP1_REV64
+            };
+            self.emit(a::dp1(bits == 64, opc, rd, r));
+            return true;
+        }
         if op == O_ICMP {
             return self.icmp(i, t);
         }

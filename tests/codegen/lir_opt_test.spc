@@ -363,6 +363,344 @@ b2:
     same_result(&before, &after, "esc", y, 0);
 }
 
+// Accumulator recursion elimination: a call of the body's own function whose block returns an integer
+// add, mul, and, or or xor of its result and another value becomes a jump back with an accumulator, the
+// operation's identity first, and every other return combines the accumulator with its value. A result
+// of another type than the last parameter (`ipow`), a bool toggled by xor (`even`), the identity of `and`
+// (`band`) and a plain tail call beside an accumulating one (`mix`); calls of two operations (`two`) stay.
+@test
+fn a_call_of_itself_combined_with_a_value_is_a_loop_with_an_accumulator() {
+    let text = M"(lir ptr 8
+sym @fact fn global
+sym @ipow fn global
+sym @even fn global
+sym @band fn global
+sym @mix fn global
+sym @two fn global
+fn @fact
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1:
+  v3 = iconst.i64 1
+  ret v3
+b2:
+  v4 = iconst.i64 1
+  v5 = sub.i64 v0, v4
+  v6 = call.i64 @fact(v5) : (i64) -> i64
+  v7 = mul.i64 v0, v6
+  ret v7
+fn @ipow
+  sig (i64, i32) -> i64
+b0(v0: i64, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.eq v1, v2
+  br v3, b1, b2
+b1:
+  v4 = iconst.i64 1
+  ret v4
+b2:
+  v5 = iconst.i32 1
+  v6 = sub.i32 v1, v5
+  v7 = call.i64 @ipow(v0, v6) : (i64, i32) -> i64
+  v8 = mul.i64 v7, v0
+  ret v8
+fn @even
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1:
+  v3 = iconst.i8 1
+  ret v3
+b2:
+  v4 = iconst.i32 1
+  v5 = sub.i32 v0, v4
+  v6 = call.i8 @even(v5) : (i32) -> i8
+  v7 = iconst.i8 1
+  v8 = xor.i8 v6, v7
+  ret v8
+fn @band
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1:
+  v3 = iconst.i32 65535
+  ret v3
+b2:
+  v4 = iconst.i32 61680
+  v5 = or.i32 v0, v4
+  v6 = iconst.i32 1
+  v7 = sub.i32 v0, v6
+  v8 = call.i32 @band(v7) : (i32) -> i32
+  v9 = and.i32 v5, v8
+  ret v9
+fn @mix
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v0, v2
+  br v3, b1, b2
+b1:
+  ret v1
+b2:
+  v4 = iconst.i64 1
+  v5 = sub.i64 v0, v4
+  v6 = iconst.i64 3
+  v7 = icmp.eq v1, v6
+  br v7, b3, b4
+b3:
+  v8 = add.i64 v1, v4
+  v9 = call.i64 @mix(v5, v8) : (i64, i64) -> i64
+  ret v9
+b4:
+  v10 = iconst.i64 7
+  v11 = mul.i64 v0, v10
+  v12 = call.i64 @mix(v5, v1) : (i64, i64) -> i64
+  v13 = add.i64 v11, v12
+  ret v13
+fn @two
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 2
+  v2 = icmp.ult v0, v1
+  br v2, b1, b2
+b1:
+  ret v0
+b2:
+  v3 = iconst.i64 1
+  v4 = sub.i64 v0, v3
+  v5 = and.i64 v0, v3
+  v6 = icmp.eq v5, v3
+  br v6, b3, b4
+b3:
+  v7 = call.i64 @two(v4) : (i64) -> i64
+  v8 = add.i64 v7, v0
+  ret v8
+b4:
+  v9 = call.i64 @two(v4) : (i64) -> i64
+  v10 = mul.i64 v9, v1
+  ret v10
+)";
+    let mut err = String::new();
+    let before = lparse::parse(text, &mut err).unwrap();
+    let mut after = lparse::parse(text, &mut err).unwrap();
+    after.tail = true;
+    let none = Vector::<bool>::new();
+    lopt::optimize(
+        &mut after,
+        &none,
+        lopt::Config {
+            inline: il::SPEED,
+            loops: lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+        },
+    );
+    let names: []str = ["fact", "ipow", "even", "band", "mix"];
+    for k in 0..names.len() {
+        let s = text_of(&after, names[k]);
+        assert(!s.contains("call"), s.as_str());
+    }
+    let two = text_of(&after, "two");
+    assert(two.contains("call.i64 @two"), two.as_str());
+    let f: []u64 = [20];
+    same_result(&before, &after, "fact", f, 2432902008176640000);
+    let p: []u64 = [3, 40];
+    same_result(&before, &after, "ipow", p, 12157665459056928801);
+    let e: []u64 = [1001];
+    same_result(&before, &after, "even", e, 0);
+    let ev: []u64 = [1000];
+    same_result(&before, &after, "even", ev, 1);
+    let n: []u64 = [0];
+    same_result(&before, &after, "band", n, 65535);
+    let a: []u64 = [5];
+    same_result(&before, &after, "band", a, 0xF0F0);
+    let m: []u64 = [6, 1];
+    same_result(&before, &after, "mix", m, 1 + 7 * (6 + 5 + 4 + 3 + 2 + 1));
+    let m2: []u64 = [6, 3];
+    same_result(&before, &after, "mix", m2, 4 + 7 * (5 + 4 + 3 + 2 + 1));
+    let w: []u64 = [10];
+    same_result(&before, &after, "two", w, 166);
+}
+
+// A choice between a flag and another flag on the first is their `and` or `or` (`&&`, `||` of flags), and
+// two comparisons of one value with constants are one unsigned comparison of its distance to the lower
+// bound: inside the range for an `and` (`lower`, a signed `sin`), outside for an `or` (`out`); an empty
+// intersection is a constant (`none`).
+@test
+fn flag_choices_and_range_checks_fold() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @lower fn global
+sym @sin fn global
+sym @out fn global
+sym @none fn global
+sym @both fn global
+fn @lower
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 97
+  v2 = iconst.i8 122
+  v3 = icmp.uge v0, v1
+  v4 = icmp.ule v0, v2
+  v5 = select.i8 v3, v4, v3
+  ret v5
+fn @sin
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = iconst.i32 -5
+  v2 = iconst.i32 7
+  v3 = icmp.sgt v0, v1
+  v4 = icmp.slt v0, v2
+  v5 = and.i8 v3, v4
+  ret v5
+fn @out
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = iconst.i32 10
+  v2 = iconst.i32 20
+  v3 = icmp.ult v0, v1
+  v4 = icmp.ugt v0, v2
+  v5 = or.i8 v3, v4
+  ret v5
+fn @none
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = iconst.i32 10
+  v2 = iconst.i32 5
+  v3 = icmp.ugt v0, v1
+  v4 = icmp.ult v0, v2
+  v5 = and.i8 v3, v4
+  ret v5
+fn @both
+  sig (i32, i32) -> i8
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.eq v0, v2
+  v4 = icmp.eq v1, v2
+  v5 = select.i8 v3, v3, v4
+  ret v5
+)",
+    );
+    let l = text_of(&a, "lower");
+    assert(l.contains("sub.i8") && l.contains("icmp.ule") && !l.contains("select"), l.as_str());
+    let s = text_of(&a, "sin");
+    assert(s.contains("sub.i32") && s.contains("icmp.ule") && !s.contains("and."), s.as_str());
+    let o = text_of(&a, "out");
+    assert(o.contains("icmp.ugt") && !o.contains("or."), o.as_str());
+    let n = text_of(&a, "none");
+    assert(!n.contains("icmp"), n.as_str());
+    let x = text_of(&a, "both");
+    assert(x.contains("or.i8") && !x.contains("select"), x.as_str());
+    let cs: []u64 = [0, 96, 97, 100, 122, 123, 255];
+    let lw: []u64 = [0, 0, 1, 1, 1, 0, 0];
+    for k in 0..cs.len() {
+        let v: []u64 = [cs[k]];
+        same_result(&b, &a, "lower", v, lw[k]);
+    }
+    let xs: []u64 = [0xFFFFFFFB, 0xFFFFFFFC, 0, 6, 7, 9, 10, 15, 20, 21, 0x80000000];
+    let si: []u64 = [0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+    let ou: []u64 = [1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1];
+    for k in 0..xs.len() {
+        let v: []u64 = [xs[k]];
+        same_result(&b, &a, "sin", v, si[k]);
+        same_result(&b, &a, "out", v, ou[k]);
+        same_result(&b, &a, "none", v, 0);
+    }
+    let p: []u64 = [3, 0];
+    same_result(&b, &a, "both", p, 1);
+    let q: []u64 = [3, 4];
+    same_result(&b, &a, "both", q, 0);
+}
+
+// An `or` of whole bytes of one value through shifts and byte masks is the value when each byte keeps its
+// place (`keep`) and its byte reversal when each takes the mirrored one (`swap`); bytes loaded one by one
+// into a big-endian word are one load reversed (`be`). A permutation of another order stays (`rot`).
+@test
+fn byte_permutations_are_byte_swaps() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @swap fn global
+sym @keep fn global
+sym @be fn global
+sym @rot fn global
+fn @swap
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 24
+  v2 = iconst.i32 8
+  v3 = iconst.i32 65280
+  v4 = iconst.i32 16711680
+  v5 = lshr.i32 v0, v1
+  v6 = lshr.i32 v0, v2
+  v7 = and.i32 v6, v3
+  v8 = or.i32 v5, v7
+  v9 = shl.i32 v0, v2
+  v10 = and.i32 v9, v4
+  v11 = or.i32 v8, v10
+  v12 = shl.i32 v0, v1
+  v13 = or.i32 v11, v12
+  ret v13
+fn @keep
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 -71777214294589696
+  v2 = iconst.i64 71777214294589695
+  v3 = and.i64 v0, v1
+  v4 = and.i64 v2, v0
+  v5 = or.i64 v3, v4
+  ret v5
+fn @be
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i8 v0 align 0
+  v2 = load.i8 v0+1 align 0
+  v3 = load.i8 v0+2 align 0
+  v4 = load.i8 v0+3 align 0
+  v5 = zext.i32 v1
+  v6 = zext.i32 v2
+  v7 = zext.i32 v3
+  v8 = zext.i32 v4
+  v9 = iconst.i32 24
+  v10 = iconst.i32 16
+  v11 = iconst.i32 8
+  v12 = shl.i32 v5, v9
+  v13 = shl.i32 v6, v10
+  v14 = shl.i32 v7, v11
+  v15 = or.i32 v12, v13
+  v16 = or.i32 v15, v14
+  v17 = or.i32 v16, v8
+  ret v17
+fn @rot
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 8
+  v2 = iconst.i32 24
+  v3 = shl.i32 v0, v1
+  v4 = lshr.i32 v0, v2
+  v5 = or.i32 v3, v4
+  ret v5
+)",
+    );
+    let s = text_of(&a, "swap");
+    assert(s.contains("bswap.i32 v0") && !s.contains("or."), s.as_str());
+    let k = text_of(&a, "keep");
+    assert(!k.contains("or.") && k.contains("ret v0"), k.as_str());
+    let e = text_of(&a, "be");
+    assert(e.contains("load.i32") && e.contains("bswap.i32") && !e.contains("load.i8"), e.as_str());
+    let r = text_of(&a, "rot");
+    assert(r.contains("or.") && !r.contains("bswap"), r.as_str());
+    let x: []u64 = [0x12345678];
+    same_result(&b, &a, "swap", x, 0x78563412);
+    same_result(&b, &a, "rot", x, 0x34567812);
+    let y: []u64 = [0x0123456789ABCDEF];
+    same_result(&b, &a, "keep", y, 0x0123456789ABCDEF);
+}
+
 // A load of a slot whose address does not escape reads the value of the one store that writes its bytes
 // and dominates it, across a call; not when the address escapes, nor when another store writes them.
 @test

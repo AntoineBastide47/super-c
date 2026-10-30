@@ -251,7 +251,9 @@ pub(package) const O_VINSERT: u8 = 84;
 /// The high half of the signed product of two integers of up to 64 bits: `(a * b) >> bits`, the product
 /// exact (signed division by a constant, `lir::opt`).
 pub(package) const O_MULHS: u8 = 85;
-pub(package) const OP_COUNT: u8 = 86;
+/// The bytes of an integer of 2, 4 or 8 bytes in reverse order (`Package.bswap`).
+pub(package) const O_BSWAP: u8 = 86;
+pub(package) const OP_COUNT: u8 = 87;
 
 /// One opcode: its text name and its operand form.
 pub(package) struct OpInfo {
@@ -259,7 +261,7 @@ pub(package) struct OpInfo {
     pub(package) form: u8,
 }
 
-pub(package) const OPS: [OpInfo; 86] = [
+pub(package) const OPS: [OpInfo; 87] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -346,6 +348,7 @@ pub(package) const OPS: [OpInfo; 86] = [
     OpInfo { name: "vextract", form: F_UN },
     OpInfo { name: "vinsert", form: F_BIN },
     OpInfo { name: "mulhs", form: F_BIN },
+    OpInfo { name: "bswap", form: F_UN },
 ];
 
 /// The mask a lane-wise comparison of vectors of type `t` gives (`O_VCMP`): integer lanes of its lanes'
@@ -1350,6 +1353,9 @@ pub(package) struct Package {
     /// Whether the native backend computes `O_MULHU` of 64-bit integers in one instruction
     /// (`target::table::Isa`): the optimizer then divides by a 64-bit constant with a product.
     pub(package) mul_high: bool,
+    /// Whether the native backend reverses the bytes of an integer in one instruction (`O_BSWAP`,
+    /// `target::table::Isa`): the optimizer then makes one of a permutation of bytes.
+    pub(package) bswap: bool,
     /// Whether the optimizer splits each 128-bit integer into its two 64-bit words (`lir::pairs`), which
     /// the native backend keeps in registers (`target::table::Isa`); it needs `mul_high`.
     pub(package) pairs: bool,
@@ -1440,6 +1446,7 @@ extend Package {
             vector: 16,
             vops: 0,
             mul_high: true,
+            bswap: true,
             pairs: false,
             pic: false,
             no_plt: false,
