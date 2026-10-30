@@ -32,6 +32,7 @@ import ast::parser as par;
 import ir::cpu_features as cf;
 import lsp::json as json;
 import link::link as lk;
+import link::util as lu;
 import build_system::ext as ext;
 
 // A failed child's captured output is replayed up to this many bytes; the file keeps the rest.
@@ -208,9 +209,9 @@ fn rm_unlocked(p: str) {
 }
 
 // The emitted trees below the root directory of manifest `m` (`<root dir>/build/<profile>`, of bare
-// and script builds): only a directory whose `raw` holds the runtime header, so a user directory named
-// `build` is never one. Their emission rewrites `raw/__sc_manifest` every time, which keeps the idle
-// age of a tree in use low. None when that directory is the manifest's out-dir (`root = "main.spc"`
+// and script builds): only a directory whose `raw` holds the emission's manifest, so a user directory
+// named `build` is never one. Their emission rewrites `raw/__sc_manifest` every time, which keeps the
+// idle age of a tree in use low. None when that directory is the manifest's out-dir (`root = "main.spc"`
 // with the default `out-dir`): its trees are the engine's, swept with their locks as out-dir entries.
 fn root_trees(m: &mf::Manifest) Vector<String> {
     let mut out = Vector::<String>::new();
@@ -222,7 +223,7 @@ fn root_trees(m: &mf::Manifest) Vector<String> {
     let names = list_dir(&b, false).unwrap_or(Vector::<String>::new());
     for i in 0..names.len() {
         let pd = loader::join2(&b, names.at(i).as_str());
-        let rt = loader::join2(&pd, "raw/super_rt.h");
+        let rt = loader::join2(&pd, "raw/__sc_manifest");
         if file_mtime(&rt) != 0 {
             out.push(pd);
         }
@@ -612,7 +613,7 @@ fn stamp_push_env(out: &mut String, name: str) {
 }
 
 // Record the inputs of a completed emission of `p` under manifest `m`, whose tree holds `ccount` `.c`
-// files; `sl` was taken before the load. Written only on full success; an unreadable input or a
+// and `.o` files; `sl` was taken before the load. Written only on full success; an unreadable input or a
 // directory that changed during the build aborts the write (no cache beats a wrong one).
 fn stamp_write(
     path: str,
@@ -819,7 +820,7 @@ fn stamp_fresh(
     walk_gen_files(gen, gen.len(), rels);
     let mut nc: u64 = 0;
     for i in 0..rels.len() {
-        nc += rels.at(i).as_str().ends_with(".c") as u64;
+        nc += (rels.at(i).as_str().ends_with(".c") || rels.at(i).as_str().ends_with(".o")) as u64;
     }
     if nc != ccount {
         return false;
@@ -1005,7 +1006,7 @@ fn emit_closure(
         rc = 1;
     }
     if rc == 0 && cid != 0 {
-        stamp_write(stamp, &p, m, cx.std_dir, root_dir, cx.target, cx.bootstrap_tags, cx.lint, p.c_files, cid, &sl);
+        stamp_write(stamp, &p, m, cx.std_dir, root_dir, cx.target, cx.bootstrap_tags, cx.lint, p.unit_files, cid, &sl);
     }
     // The stamp record is the last output of the emission; the package's teardown that follows
     // belongs to the sync phase.
@@ -1226,7 +1227,7 @@ pub(package) fn manifest_emit(m: &mf::Manifest, profile: str, root: str, sub: st
         ext::end();
     }
     let mut log = RewriteLog { root_len: srcgen.len(), text: String::new() };
-    let mut sink = EmitSink { ctx: (&mut log) as *mut RewriteLog, notify: log_rewritten };
+    let mut sink = EmitSink { ctx: (&mut log) as *mut RewriteLog, notify: log_rewritten, objs: null };
     let rc = emit_closure(
         m,
         prof_name,
@@ -1749,6 +1750,7 @@ struct NatSink {
     pub(package) ret: i32,
     pub(package) record: bool,
     pub(package) units: Vector<ext::CompileUnit>,
+    pub(package) mem: lu::Mem, // the new objects' bytes, which the link reads (`EmitSink.objs`)
 }
 
 fn nat_notify(ctx: *mut void, path: str, _text: str, kind: i32, changed: bool) {
@@ -1809,19 +1811,7 @@ pub(package) fn link_args(
             a.push(format("{}{}", so, soname));
         }
     }
-    push_arg(&mut a, "-o");
-    push_arg(&mut a, out);
-    for i in 0..objs.len() {
-        a.push(objs.at(i).clone());
-    }
-    if cx.sysroot.len() != 0 {
-        a.push(format("--sysroot={}", cx.sysroot));
-    }
-    split_args(&mut a, tgt::os(cx.target).exe_link);
-    let gc = mf::link_gc(mf::cg_effective(prof.opt, prof.cg_on, prof.cg_off), tgt::obj_of(cx.target).name == "macho");
-    if gc.len() != 0 {
-        push_arg(&mut a, gc);
-    }
+    link_head(&mut a, out, objs, cx.sysroot, cx.target, mf::cg_effective(prof.opt, prof.cg_on, prof.cg_off));
     for i in 0..m.ldflags.len() {
         split_args(&mut a, m.ldflags.at(i).as_str());
     }
@@ -1836,6 +1826,24 @@ pub(package) fn link_args(
         split_args(&mut a, m.ldlibs.at(i).as_str());
     }
     return a;
+}
+
+/// The arguments every link of the own linker starts with: output `out`, the objects `objs`, the sysroot,
+/// target `target`'s libraries and, under code-gen flags `cg`, the flag that drops what nothing reaches.
+pub(package) fn link_head(a: &mut Vector<String>, out: str, objs: &Vector<String>, sysroot: str, target: i32, cg: u64) {
+    push_arg(a, "-o");
+    push_arg(a, out);
+    for i in 0..objs.len() {
+        a.push(objs.at(i).clone());
+    }
+    if sysroot.len() != 0 {
+        a.push(format("--sysroot={}", sysroot));
+    }
+    split_args(a, tgt::os(target).exe_link);
+    let gc = mf::link_gc(cg, tgt::obj_of(target).name == "macho");
+    if gc.len() != 0 {
+        push_arg(a, gc);
+    }
 }
 
 fn engine_build_i(
@@ -1904,8 +1912,9 @@ fn engine_build_i(
         ret: 0,
         record: ext::report() != null,
         units: Vector::<ext::CompileUnit>::new(),
+        mem: lu::Mem::new(),
     };
-    let mut sink = EmitSink { ctx: (&mut ns) as *mut NatSink, notify: nat_notify };
+    let mut sink = EmitSink { ctx: (&mut ns) as *mut NatSink, notify: nat_notify, objs: &mut ns.mem };
     bst::mark(bst::B_SETUP);
 
     // 1) The emission into <out-dir>/<sub>/raw, each native object into the sink: unless the emit stamp
@@ -2008,7 +2017,7 @@ fn engine_build_i(
             let r = if link_kind == 1 {
                 lk::archive(m.target, &tmp, objs, &mut why)
             } else {
-                lk::link_args(m.target, m.arch, &largs, strip, jobs, &mut why)
+                lk::link_args(m.target, m.arch, &largs, strip, jobs, &mut ns.mem, &mut why)
             };
             if jobs != 1 {
                 prt::shutdown(); // the link may have started the pool

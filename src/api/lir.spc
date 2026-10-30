@@ -213,7 +213,7 @@ extend Program {
         args.push(lib.clone());
         args.push(op);
         let mut why = String::new();
-        if lk::link_args(tgt::host_os(), tgt::host_isa(), &args, false, 1, &mut why) != lk::LINKED {
+        if lk::link_args(tgt::host_os(), tgt::host_isa(), &args, false, 1, null, &mut why) != lk::LINKED {
             let _ = fs::remove_all(&dir);
             return Err(
                 ApiError::new(Code::VerificationFailed, format("the program does not link: {}", why.as_str()).as_str()),

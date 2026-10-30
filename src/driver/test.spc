@@ -22,8 +22,8 @@ import utils::errors as diag;
 import driver::util as *;
 import build_system::objcache as ocache;
 import build_system::build as bsys;
-import build_system::manifest as bman;
 import link::link as lk;
+import link::util as lu;
 import std::parallel::runtime as prt;
 import utils::diag_codes as dc;
 
@@ -671,15 +671,16 @@ pub(package) fn push_ldflags(args: &mut Vector<String>, path: str) {
     }
 }
 
-/// Link package `p`'s native objects `objs` with the own linker: into `out_bin` (the `build` subcommand),
-/// else into the test runner `<gen_root>/__tests`, which then runs with `topts`' options. Returns the
-/// link's or the runner's exit code.
+/// Link package `p`'s native objects `objs` with the own linker, those `mem` holds from memory: into
+/// `out_bin` (the `build` subcommand), else into the test runner `<gen_root>/__tests`, which then runs with
+/// `topts`' options. Returns the link's or the runner's exit code.
 pub(package) fn native_link_and_run(
     p: &loader::Package,
     topts: *const TestOpts,
     objs: &Vector<String>,
     out_bin: str,
     target: i32,
+    mem: *mut lu::Mem,
 ) i32 {
     let root = p.gen_root.as_str();
     let what = if out_bin.len() != 0 {
@@ -696,22 +697,10 @@ pub(package) fn native_link_and_run(
         outp.format_into("{}/__tests{}", root, tgt::os(unsafe shim::sc_host_platform()).exe_suffix);
     }
     let mut args = Vector::<String>::new();
-    args.push(String::from_str("-o"));
-    args.push(outp.clone());
-    for i in 0..objs.len() {
-        args.push(objs.at(i).clone());
-    }
-    if p.sysroot.len() != 0 {
-        args.push(format("--sysroot={}", p.sysroot.as_str()));
-    }
-    split_args(&mut args, tgt::os(target).exe_link);
-    let gc = bman::link_gc(p.cg, tgt::obj_of(target).name == "macho");
-    if gc.len() != 0 {
-        args.push(String::from_str(gc));
-    }
+    bsys::link_head(&mut args, &outp, objs, &p.sysroot, target, p.cg);
     push_ldflags(&mut args, build_out_path(root, "__ldflags", "").as_str());
     let mut why = String::new();
-    let lr = lk::link_args(target, p.arch, &args, bsys::profile_strip(&p.profile), p.jobs, &mut why);
+    let lr = lk::link_args(target, p.arch, &args, bsys::profile_strip(&p.profile), p.jobs, mem, &mut why);
     if p.jobs != 1 {
         prt::shutdown(); // the link may have started the pool
     }

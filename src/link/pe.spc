@@ -34,6 +34,7 @@ pub(package) struct Opts {
     pub(package) gc: bool, // drop the COMDAT sections nothing reaches (`--gc-sections`, `collect`)
     /// A shared library's exports: None, every default-visibility global; else the globals named.
     pub(package) exports: Option<Set<String>>,
+    pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
 }
 
 const SCN_CODE: u32 = 0x20;
@@ -282,6 +283,13 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     let mut ars = ar::Archives::new();
     for i in 0..o.objs.len() {
         let p = o.objs[i].as_str();
+        let at = blob.len();
+        if lu::take_held(o.mem, p, blob) {
+            if !parse_object(l, p, at, blob) {
+                return false;
+            }
+            continue;
+        }
         if ar::is_archive(p) {
             if !ars.add(nat::OBJ_COFF, p, &mut l.err) {
                 return false;
@@ -298,7 +306,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     }
     let main = global(l, l.names.intern("main"));
     l.gs.index_mut(main as usize).strong = !l.shared;
-    if !resolve_objects(l, 0) || !take_members(l, &mut ars, blob) {
+    if !resolve_objects(l, 0) || !ar::take_members(l, &mut ars, blob) {
         return false;
     }
     bind_weak(l);
@@ -323,6 +331,25 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
         return false;
     }
     return true;
+}
+
+extend L as ar::Members {
+    fn globals(self: &Self) usize {
+        return self.gs.len();
+    }
+
+    fn wanted(self: &Self, g: usize) bool {
+        return self.gs[g].kind == G_UNDEF && self.gs[g].strong && self.gs[g].wdef == NONE;
+    }
+
+    fn global_name(self: &Self, g: usize) str {
+        return self.names.spell(self.gs[g].name);
+    }
+
+    fn enter_member(self: &mut Self, name: str, at: usize, blob: &mut Vector<u8>) bool {
+        let f0 = self.files.len();
+        return parse_object(self, name, at, blob) && resolve_objects(self, f0);
+    }
 }
 
 // ---- input ----------------------------------------------------------------------------------------------
@@ -610,45 +637,6 @@ fn drop_section(l: &mut L, s: u32) {
     }
 }
 
-// Each global still undefined that an archive member defines: take the member, enter its symbols, until
-// no member defines a global still needed.
-fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
-    let mut more = ars.paths.len() != 0;
-    // Per global, whether no archive defined it at its lookup: a member is only ever taken, so none will.
-    let mut miss = Vector::<bool>::new();
-    // Each pass takes at least one member, or ends.
-    while more {
-        more = false;
-        for g in 0..l.gs.len() {
-            if g < miss.len() && miss[g] {
-                continue;
-            }
-            let gy = l.gs[g];
-            if gy.kind != G_UNDEF || !gy.strong || gy.wdef != NONE {
-                continue;
-            }
-            let am = ars.find(l.names.spell(gy.name));
-            if am.is_none() {
-                if miss.len() <= g {
-                    miss.resize_default(l.gs.len());
-                }
-                miss[g] = true;
-                continue;
-            }
-            let m = am.unwrap();
-            ars.take(m);
-            let at = blob.len();
-            blob.extend_from_slice(ars.bytes(m));
-            let f0 = l.files.len();
-            if !parse_object(l, ars.name(m).as_str(), at, blob) || !resolve_objects(l, f0) {
-                return false;
-            }
-            more = true;
-        }
-    }
-    return true;
-}
-
 // A weak external no object defines: its default.
 fn bind_weak(l: &mut L) {
     for g in 0..l.gs.len() {
@@ -777,7 +765,7 @@ fn system_dir(out: &mut String) bool {
 pub(package) fn find_dll(o: &Opts, dll: str, path: &mut String) bool {
     for i in 0..o.dirs.len() {
         let p = format("{}/{}", o.dirs[i].as_str(), dll);
-        if is_file(&p) {
+        if lu::is_file(&p) {
             path.push_string(&p);
             return true;
         }
@@ -785,7 +773,7 @@ pub(package) fn find_dll(o: &Opts, dll: str, path: &mut String) bool {
     let mut sys = String::new();
     if system_dir(&mut sys) {
         let p = format("{}\\{}", sys.as_str(), dll);
-        if is_file(&p) {
+        if lu::is_file(&p) {
             path.push_string(&p);
             return true;
         }
@@ -824,7 +812,7 @@ pub(package) fn static_lib(o: &Opts, name: str, path: &mut String) bool {
     for i in 0..o.dirs.len() {
         for f in 0..FORMS.len() {
             let p = format("{}/{}{}{}", o.dirs[i].as_str(), FORMS[f].0, name, FORMS[f].1);
-            if !is_file(&p) {
+            if !lu::is_file(&p) {
                 continue;
             }
             let d = lu::read(&p);
@@ -844,11 +832,6 @@ pub(package) fn static_lib(o: &Opts, name: str, path: &mut String) bool {
         }
     }
     return false;
-}
-
-fn is_file(p: str) bool {
-    let m = fs::stat(p);
-    return m.is_ok() && m.unwrap().kind == fs::FileKind::File;
 }
 
 // The import-only globals: each undefined `__imp_X` stands for X's slot; the targets of `RENAMES`, the

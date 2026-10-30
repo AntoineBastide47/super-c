@@ -115,9 +115,9 @@ fn clean_keeps_a_user_build_directory() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nout-dir = \"out\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
     p.mkfile("build/keep.txt", "mine\n");
-    p.mkfile("src/build/debug/raw/super_rt.h", "stale\n");
-    p.mkfile("src/build/release/raw/main.c", "stale\n");
-    p.mkfile("src/build/release/raw/super_rt.h", "stale\n");
+    p.mkfile("src/build/debug/raw/__sc_manifest", "stale\n");
+    p.mkfile("src/build/release/raw/main.o", "stale\n");
+    p.mkfile("src/build/release/raw/__sc_manifest", "stale\n");
     let root = p.dir();
     let env = format("1 SC_CACHE_DIR={}/ocache", root);
     assert(cli::superc_env_in(root, E, &env, "build").ok(), "build first");

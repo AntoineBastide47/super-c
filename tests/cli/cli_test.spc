@@ -9383,7 +9383,7 @@ fn project_sweep_keeps_the_tree_of_a_root_beside_the_manifest() {
     age_tree(format("{}/build/.sweep", root).as_str());
     let r = cli::superc_env_in(root, "SC_BUILD_STATS", "-", "build");
     assert(r.ok() && r.out_has("\"skip_emit\":true"), "a build under a fresh emit stamp and an old sweep stamp");
-    let rt = format("{}/build/debug/raw/super_rt.h", root);
+    let rt = format("{}/build/debug/raw/__sc_manifest", root);
     let obj = format("{}/build/debug/raw/main.o", root);
     assert(du::file_mtime(&rt) != 0, "the sweep keeps the engine's tree");
     assert(du::file_mtime(&obj) != 0, "and its objects");

@@ -120,6 +120,7 @@ pub(package) struct Opts {
     pub(package) dead_strip: bool, // keep only what the entry, the exports and the kept symbols reach
     /// A shared library's exports: None, every default-visibility global; else the globals named.
     pub(package) exports: Option<Set<String>>,
+    pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
 }
 
 // An input file: its bytes in the blob, its sections and symbols.
@@ -337,6 +338,13 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     let mut ars = ar::Archives::new();
     for i in 0..o.objs.len() {
         let p = o.objs[i].as_str();
+        let at = blob.len();
+        if lu::take_held(o.mem, p, blob) {
+            if !parse_object(l, p, at, blob) {
+                return false;
+            }
+            continue;
+        }
         if ar::is_archive(p) {
             if !ars.add(nat::OBJ_MACHO, p, &mut l.err) {
                 return false;
@@ -361,7 +369,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     if o.kind == K_EXE {
         let _ = global(l, l.names.intern("__mh_execute_header"));
     }
-    if !resolve_objects(l, 0) || !take_members(l, &mut ars, blob) {
+    if !resolve_objects(l, 0) || !ar::take_members(l, &mut ars, blob) {
         return false;
     }
     if o.dead_strip {
@@ -397,6 +405,25 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     return true;
 }
 
+extend L as ar::Members {
+    fn globals(self: &Self) usize {
+        return self.gs.len();
+    }
+
+    fn wanted(self: &Self, g: usize) bool {
+        return self.gs[g].kind == G_UNDEF;
+    }
+
+    fn global_name(self: &Self, g: usize) str {
+        return self.names.spell(self.gs[g].name);
+    }
+
+    fn enter_member(self: &mut Self, name: str, at: usize, blob: &mut Vector<u8>) bool {
+        let s0 = self.syms.len();
+        return parse_object(self, name, at, blob) && resolve_objects(self, s0);
+    }
+}
+
 // ---- input ----------------------------------------------------------------------------------------------
 
 // Append object `path` to the blob and record its sections and symbols.
@@ -407,44 +434,6 @@ fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
         return false;
     }
     return parse_object(l, path, at, blob);
-}
-
-// The static libraries' members the link needs: each one that defines a global still undefined, its
-// own undefined globals in turn, until none is left (a pass takes at least one member, so the passes are
-// at most the members).
-fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
-    let mut more = ars.paths.len() != 0;
-    // Per global, whether no archive defined it at its lookup: a member is only ever taken, so none will.
-    let mut miss = Vector::<bool>::new();
-    while more {
-        more = false;
-        for g in 0..l.gs.len() {
-            if g < miss.len() && miss[g] {
-                continue;
-            }
-            if l.gs[g].kind != G_UNDEF {
-                continue;
-            }
-            let am = ars.find(l.names.spell(l.gs[g].name));
-            if am.is_none() {
-                if miss.len() <= g {
-                    miss.resize_default(l.gs.len());
-                }
-                miss[g] = true;
-                continue;
-            }
-            let m = am.unwrap();
-            ars.take(m);
-            let at = blob.len();
-            blob.extend_from_slice(ars.bytes(m));
-            let s0 = l.syms.len();
-            if !parse_object(l, ars.name(m).as_str(), at, blob) || !resolve_objects(l, s0) {
-                return false;
-            }
-            more = true;
-        }
-    }
-    return true;
 }
 
 // Record the sections and symbols of the object at `at` of the blob, named `path`.
@@ -657,7 +646,7 @@ fn load_libraries(l: &mut L, o: &Opts, kinds: &Vector<u8>, found: &Vector<String
             };
             for ext in [".tbd", ""] {
                 let c = format("{}/{}.framework/{}{}", dir.as_str(), name, name, ext);
-                if found.len() == 0 && is_file(&c) {
+                if found.len() == 0 && lu::is_file(&c) {
                     found = c;
                 }
             }
@@ -696,7 +685,7 @@ pub(package) fn find_lib(o: &Opts, name: str, path: &mut String) u8 {
                 ".a"
             };
             let c = format("{}/lib{}{}", dir.as_str(), name, ext);
-            if is_file(&c) {
+            if lu::is_file(&c) {
                 path.clear();
                 path.push_string(&c);
                 return if k == 2 {
@@ -708,11 +697,6 @@ pub(package) fn find_lib(o: &Opts, name: str, path: &mut String) u8 {
         }
     }
     return LIB_NONE;
-}
-
-fn is_file(p: str) bool {
-    let m = fs::stat(p);
-    return m.is_ok() && m.unwrap().kind == fs::FileKind::File;
 }
 
 // Load the library in file `path` (a stub or a dylib): it gets the next ordinal unless an earlier
@@ -840,12 +824,12 @@ fn reexport_file(l: &mut L, o: &Opts, install: str, ord: u32, todo: &mut Vector<
 fn load_dylib(l: &mut L, o: &Opts, d: []u8, path: str, ord0: u32) bool {
     let mut at: usize = 0;
     if d.len() >= 8 && lu::r32(d, 0) == FAT_MAGIC {
-        let n = be32(d, 4) as usize;
+        let n = lu::be32(d, 4) as usize;
         let mut hit = false;
         for k in 0..n {
             let e = 8 + 20 * k;
-            if !hit && e + 20 <= d.len() && be32(d, e) == CPU_ARM64 {
-                at = be32(d, e + 8) as usize;
+            if !hit && e + 20 <= d.len() && lu::be32(d, e) == CPU_ARM64 {
+                at = lu::be32(d, e + 8) as usize;
                 hit = true;
             }
         }
@@ -947,10 +931,6 @@ fn load_dylib(l: &mut L, o: &Opts, d: []u8, path: str, ord0: u32) bool {
         }
     }
     return true;
-}
-
-const fn be32(b: []u8, at: usize) u32 {
-    return b[at] as u32 << 24 | b[at + 1] as u32 << 16 | b[at + 2] as u32 << 8 | b[at + 3] as u32;
 }
 
 // The symbols no input defines: `__mh_execute_header` (or `__mh_dylib_header`) is the image's header, a
@@ -1968,11 +1948,11 @@ const fn code(s: ISec) bool {
     return (s.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) != 0;
 }
 
-// The defining input symbol of symbol `k` (itself when defined, else the global's definition); NONE
-// when no object defines it.
+// The defining input symbol of symbol `k`: the global's definition for an external one (another object's
+// for a weak definition that lost), else itself when defined; NONE when no object defines it.
 const fn defining(l: &L, k: u32) u32 {
     let y = l.syms[k as usize];
-    if (y.ty & N_TYPE) == N_SECT {
+    if (y.ty & N_TYPE) == N_SECT && (y.ty & N_EXT) == 0 {
         return k;
     }
     let g = gof(l, y);
@@ -2803,7 +2783,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     let ind_off = sym_off + 16 * nsyms as u64;
     let str_off = lu::align_up(ind_off + ind.len() as u64, 8);
     let sig_off = lu::align_up(str_off + st.len() as u64, 16);
-    let ident = basename(&o.out);
+    let ident = lu::basename(&o.out);
     let npages = (sig_off + 4095) / 4096;
     let sig_size = 20 + 88 + ident.len() as u64 + 1 + 32 * npages;
     let le_size = sig_off + sig_size - le_off;
@@ -3028,7 +3008,7 @@ fn debug_map(l: &L, b: []u8, f: IFile, st: &mut Vector<u8>, locs: &mut Vector<OS
     let mut name: str = "";
     cu_names(l, b, f, &mut dir, &mut name);
     if name.len() == 0 {
-        name = basename(&l.paths[f.path as usize]);
+        name = lu::basename(&l.paths[f.path as usize]);
     }
     let mut d = String::from_str(dir);
     if d.len() != 0 && !d.as_str().ends_with("/") {
@@ -3070,14 +3050,6 @@ fn debug_map(l: &L, b: []u8, f: IFile, st: &mut Vector<u8>, locs: &mut Vector<OS
         locs.push(OSym { name: 1, ty: N_ENSYM, sect: sect, desc: 0, value: e - a });
     }
     locs.push(OSym { name: 1, ty: N_SO, sect: 1, desc: 0, value: 0 });
-}
-
-const fn basename(p: str) str {
-    let mut i = p.len();
-    while i > 0 && p.byte_at(i - 1) != b'/' {
-        i -= 1;
-    }
-    return p.slice(i, p.len());
 }
 
 fn name16(h: &mut Vector<u8>, s: str) {

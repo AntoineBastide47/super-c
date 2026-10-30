@@ -807,26 +807,27 @@ super-c command bootstrap
 `super-c build app.spc` writes its tree into `build/<profile>/raw/` (`build/debug/raw/` without
 `--profile`): `PROFILE` makes the emission depend on the profile, so every profile has its own tree,
 per-TU cache, manifest and orphan pruning, and switching profiles never mixes trees. A linking build
-writes the native objects there; `--emit-c` writes the program's C instead.
+writes the native objects there and no C; `--emit-c` writes the program's C instead.
 
 ```
 build/
   debug/raw/
-    super_rt.h        # the runtime header the C units include: libc includes, arithmetic helpers, prototypes
-    __sc_fwd.h        # runtime and extern-block includes, dyn/extern declarations shared by every TU
-    __sc_registry.c   # runtime helper definitions, ZST sentinels and the reflection registry, as C
-    __sc_registry_n.o # the same, native (a linking build)
-    __sc_manifest     # output paths, content hashes, header dependencies, shard counts
-    __sc_shards       # the shard counts this build used (read back by the next build)
-    __sc_native       # the native record: per module, the key its objects were compiled under
+    app.o app__inst.o # a linking build: the module's object and its instances' object
+    __sc_registry_n.o # a linking build: ZST sentinels and the reflection registry
+    __sc_native       # a linking build: per module, the key its objects were compiled under
     __sc_hfacts       # the record of the header scan (`native_header_facts`)
+    __sc_manifest     # the build's configuration; with --emit-c also output paths, content hashes,
+                      # header dependencies, shard counts
     __ldflags         # linker flags collected from @link (one per line)
     .tu_cache         # per-TU journal/replay cache
-    app.h             # one header per module (prototypes)
-    app.o app__inst.o # a linking build: the module's object and its instances' object
+    super_rt.h        # --emit-c: the runtime header the C units include: libc includes, arithmetic helpers
+    __sc_fwd.h        # --emit-c: runtime and extern-block includes, dyn/extern declarations shared by every TU
+    __sc_registry.c   # --emit-c: runtime helper definitions, ZST sentinels and the reflection registry
+    __sc_shards       # --emit-c: the shard counts this build used (read back by the next build)
+    app.h             # --emit-c: one header per module (prototypes)
     app.c app__inst.c # --emit-c: the module's C and its generic instances, glue and constants
     __units __cflags  # --emit-c: the units to compile and the flags of every compile
-    __sc_t/           # one definition header per type (app__Point.h: typedef, definition, layout check)
+    __sc_t/           # --emit-c: one definition header per type (app__Point.h: typedef, definition, layout check)
     __std/            # demanded prelude modules only
 ```
 

@@ -175,8 +175,9 @@ pub(package) fn object(
             return false;
         }
     }
-    // Local copies of what the object references that the package defines and no unit owns (string
-    // literals, say); the zero-sized sentinels are the C registry's. Each step defines a symbol or ends.
+    // Copies of what the object references that the package defines and no unit owns (string literals,
+    // say: `ob::copy_flags`); the zero-sized sentinels are the registry's. Each step defines a symbol or
+    // ends.
     let mut k: usize = 0;
     while k < o.syms.len() {
         let y = o.syms[k];
@@ -313,8 +314,8 @@ fn wasm_object(p: &Package, funcs: []u32, datas: []u32, text: str, out: &mut Vec
             return false;
         }
     }
-    // Local copies of what the object references that the package defines and no unit owns. Each step
-    // defines a symbol or ends.
+    // Copies of what the object references that the package defines and no unit owns (`ob::copy_flags`).
+    // Each step defines a symbol or ends.
     let mut k: usize = 0;
     while k < o.syms.len() {
         let y = o.syms[k];

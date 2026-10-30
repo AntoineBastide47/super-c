@@ -28,6 +28,11 @@ text depend on the profile, so each profile has its own tree, manifest, per-TU c
 orphan pruning; a program that does not read it emits the same bytes under every profile,
 and every tree comparison compares within one profile.
 
+The C files below are the tree of a build that writes C (`--emit-c`). A linking (native) build
+writes no C: its tree holds the objects (`<mod>.o`, `<mod>__inst.o`, `__sc_registry_n.o`), the native
+record `__sc_native`, `__sc_hfacts`, `__ldflags`, `.tu_cache`, and a `__sc_manifest` of its `cfg`
+line only, which marks the tree (`build_system::build::root_trees`) and its last build.
+
 | File | Content | Included by |
 |------|---------|-------------|
 | `__sc_fwd.h` | runtime includes, the headers of `extern "C" "<header>"` blocks that `super_rt.h` includes too, dyn fat types, `@emit_macro` templates, assert helpers, the `__sc_wrap` address conversion, extern and block-wrapper prototypes that need no definition header (one that does, by an array declarator of an aggregate or a scoped header's alias, is a declaration of the units that call it: `split_protos`), dyn table and ZST sentinel declarations, plus copies of the type declarations those spell; no other type declaration | every generated file |

@@ -37,6 +37,36 @@ pub(package) fn read_append(path: str, out: &mut Vector<u8>) bool {
     return true;
 }
 
+/// The objects a link takes from memory in place of their files, by path: the ones the build that links
+/// them just wrote.
+pub(package) struct Mem {
+    pub(package) objs: Map<String, Vector<u8>>,
+}
+
+extend Mem {
+    pub(package) fn new() Mem {
+        return Mem { objs: Map::<String, Vector<u8>>::new() };
+    }
+}
+
+/// Append the bytes of object `path` that `mem` holds (null: none) to `blob`, and let them go; false when
+/// it holds none.
+pub(package) fn take_held(mem: *mut Mem, path: str, blob: &mut Vector<u8>) bool {
+    if mem == null || unsafe (*mem).objs.len() == 0 {
+        return false;
+    }
+    let key = String::from_str(path);
+    switch unsafe (*mem).objs.remove(&key) {
+        Some(b) => {
+            blob.extend_from_slice(&b);
+            return true;
+        },
+        None => {
+            return false;
+        },
+    }
+}
+
 /// Write `bytes` to a new file `path` with permission bits `mode`: any file there is removed first, so a
 /// running or code-signed copy keeps its own bytes. False when a step fails.
 pub(package) fn write(path: str, bytes: []u8, mode: u32) bool {
@@ -165,6 +195,26 @@ pub(package) const fn cstr<'a>(b: Slice<'a, u8>, at: usize) str<'a> {
 }
 
 /// `v` rounded up to a multiple of `a` (a power of two).
+/// Whether `p` names a regular file.
+pub(package) fn is_file(p: str) bool {
+    let m = fs::stat(p);
+    return m.is_ok() && m.unwrap().kind == fs::FileKind::File;
+}
+
+/// The last component of POSIX path `p`.
+pub(package) const fn basename(p: str) str {
+    let mut i = p.len();
+    while i > 0 && p.byte_at(i - 1) != b'/' {
+        i -= 1;
+    }
+    return p.slice(i, p.len());
+}
+
+/// The big-endian 32-bit word at `at` of `b`.
+pub(package) const fn be32(b: []u8, at: usize) u32 {
+    return b[at] as u32 << 24 | b[at + 1] as u32 << 16 | b[at + 2] as u32 << 8 | b[at + 3] as u32;
+}
+
 pub(package) const fn align_up(v: u64, a: u64) u64 {
     return v + a - 1 & ~(a - 1);
 }

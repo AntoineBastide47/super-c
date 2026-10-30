@@ -273,21 +273,68 @@ extend Archives {
     }
 }
 
+/// A linker that takes archive members (`take_members`).
+pub(package) interface Members {
+    /// The number of globals.
+    fn globals(self: &Self) usize;
+    /// Whether an archive member may define global `g`: it is undefined and strongly referenced.
+    fn wanted(self: &Self, g: usize) bool;
+    /// The name of global `g`.
+    fn global_name(self: &Self, g: usize) str;
+    /// Enter member `name`, the bytes of `blob` from `at` on; false, with the error, when it does not
+    /// parse or clashes.
+    fn enter_member(self: &mut Self, name: str, at: usize, blob: &mut Vector<u8>) bool;
+}
+
+/// Take into `l` each member of `ars` that defines a global `l` wants, its bytes appended to `blob`, until
+/// none does. False when a member does not enter.
+pub(package) fn take_members<L: Members>(l: &mut L, ars: &mut Archives, blob: &mut Vector<u8>) bool {
+    let mut more = ars.paths.len() != 0;
+    // Per global, whether no archive defined it at its lookup: a member is only ever taken, so none will.
+    let mut miss = Vector::<bool>::new();
+    // Each pass takes at least one member, or ends.
+    while more {
+        more = false;
+        for g in 0..l.globals() {
+            if g < miss.len() && miss[g] || !l.wanted(g) {
+                continue;
+            }
+            let am = ars.find(l.global_name(g));
+            if am.is_none() {
+                if miss.len() <= g {
+                    miss.resize_default(l.globals());
+                }
+                miss[g] = true;
+                continue;
+            }
+            let m = am.unwrap();
+            ars.take(m);
+            let at = blob.len();
+            blob.extend_from_slice(ars.bytes(m));
+            if !l.enter_member(ars.name(m).as_str(), at, blob) {
+                return false;
+            }
+            more = true;
+        }
+    }
+    return true;
+}
+
 // A Mach-O universal file (big-endian `fat_header`, then a `fat_arch` per slice) becomes its arm64
 // slice; any other file stays. False when a universal file has no arm64 slice.
 fn arm64_slice(b: &mut Vector<u8>) bool {
-    if b.len() < 8 || be32(b.as_slice(), 0) != 0xCAFEBABE {
+    if b.len() < 8 || lu::be32(b.as_slice(), 0) != 0xCAFEBABE {
         return true;
     }
-    let n = be32(b.as_slice(), 4) as usize;
+    let n = lu::be32(b.as_slice(), 4) as usize;
     for i in 0..n {
         let e = 8 + 20 * i;
         if e + 20 > b.len() {
             return false;
         }
-        let off = be32(b.as_slice(), e + 8) as usize;
-        let size = be32(b.as_slice(), e + 12) as usize;
-        if be32(b.as_slice(), e) == 0x0100000C && off + size <= b.len() {
+        let off = lu::be32(b.as_slice(), e + 8) as usize;
+        let size = lu::be32(b.as_slice(), e + 12) as usize;
+        if lu::be32(b.as_slice(), e) == 0x0100000C && off + size <= b.len() {
             let mut s = Vector::<u8>::with_capacity(size);
             s.extend_from_slice(b.as_slice()[off..off + size]);
             *b = s;
@@ -295,10 +342,6 @@ fn arm64_slice(b: &mut Vector<u8>) bool {
         }
     }
     return false;
-}
-
-const fn be32(b: []u8, at: usize) u32 {
-    return b[at] as u32 << 24 | b[at + 1] as u32 << 16 | b[at + 2] as u32 << 8 | b[at + 3] as u32;
 }
 
 /// Whether input `path` names a static library: `.a`, or `.lib` on Windows.

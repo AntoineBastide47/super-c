@@ -36,6 +36,50 @@ pub(package) const SF_FUNC: u8 = 2;
 pub(package) const SF_TLS: u8 = 4; // a thread-local variable: its section holds its initial value
 pub(package) const SF_USED: u8 = 8; // the linker keeps it though nothing refers to it
 pub(package) const SF_HIDDEN: u8 = 16; // a global symbol the linked image does not export
+pub(package) const SF_WEAK: u8 = 32; // a global definition the link keeps one of among the objects'
+
+/// The flags of an object's copy of data no unit owns (a string literal), which each object that names
+/// it defines: with the data split (`SPLIT_DATA`), a hidden weak global, so the link keeps one copy and
+/// drops the others' sections; else a local symbol.
+pub(package) const fn copy_flags(split: u8) u8 {
+    return if (split & SPLIT_DATA) != 0 {
+        SF_GLOBAL | SF_HIDDEN | SF_WEAK
+    } else {
+        0
+    };
+}
+
+/// The C strings of an object (panic messages): one symbol per text, `__sc_msg.<n>` in S_CSTR.
+pub(package) struct CStrs {
+    syms: Map<String, u32>, // per text, its symbol
+    key: String, // `sym`'s lookup key
+    n: u32,
+}
+
+extend CStrs {
+    pub(package) fn new() CStrs {
+        return CStrs { syms: Map::<String, u32>::new(), key: String::new(), n: 0 };
+    }
+
+    /// The symbol of C string `text` in object `o`, defined at its first use.
+    pub(package) fn sym(self: &mut Self, o: &mut Obj, text: str) u32 {
+        // The key in a reused buffer: a text seen before allocates nothing.
+        self.key.clear();
+        self.key.push_str(text);
+        if let Some(k) = self.syms.get(&self.key) {
+            return *k;
+        }
+        let name = format("__sc_msg.{}", self.n);
+        self.n += 1;
+        let k = o.sym(&name);
+        let _ = o.define(k, S_CSTR, 0, text.len() as u64 + 1, 0);
+        o.put_str(S_CSTR, text);
+        let z: [u8; 1] = [0];
+        o.put(S_CSTR, z);
+        self.syms.insert(self.key.clone(), k);
+        return k;
+    }
+}
 
 /// A symbol: defined in section `sec` at `off` (NOSEC: another object defines it).
 pub(package) struct OSym {

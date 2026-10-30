@@ -28,6 +28,7 @@ const CLASS_EXTERNAL: u32 = 2;
 const CLASS_STATIC: u32 = 3;
 
 const SEL_NODUPLICATES: u32 = 1;
+const SEL_ANY: u32 = 2;
 const SEL_ASSOCIATIVE: u32 = 5;
 
 // A section of the file: its name, flags, bytes (none for `.bss`), size and relocations; a COMDAT one's
@@ -216,10 +217,13 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
                 size: pt.hi - pt.lo,
                 rels: Vector::<u8>::new(),
                 nrel: 0,
-                sel: if comdat {
-                    SEL_NODUPLICATES
-                } else {
+                // A weak definition's section: the link keeps one of the objects' (`ob::SF_WEAK`).
+                sel: if !comdat {
                     0u32
+                } else if (o.syms[pt.sym as usize].flags & ob::SF_WEAK) != 0 {
+                    SEL_ANY
+                } else {
+                    SEL_NODUPLICATES
                 },
                 assoc: 0,
             },

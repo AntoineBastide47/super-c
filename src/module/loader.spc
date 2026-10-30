@@ -238,7 +238,7 @@ pub(package) struct Package {
     pub(package) bootstrap: bool,
     pub(package) root_dir: String, // source root: the directory of the root file; imports resolve relative to it
     pub(package) gen_root: String, // where codegen writes the emitted C tree: <build dir>/raw, set by the driver
-    pub(package) c_files: u64, // the `.c` files the emission left under gen_root (`run_package`), for the emit stamp
+    pub(package) unit_files: u64, // the `.c` and `.o` files the emission left under gen_root (`run_package`), for the emit stamp
     pub(package) std_root: String, // second import search root (parent of std/); empty = none
     /// The project's manifest sets `std_internals = true`: its files see std's `pub(package)` items.
     pub(package) std_internals: bool,

@@ -48,14 +48,24 @@ struct Cmd {
     /// A shared library's export list (`-Wl,-exported_symbols_list,`, `-Wl,--version-script=`, a `.def`
     /// input): the globals it exports, as the image spells them; None: every default-visibility global.
     pub(package) exports: Option<Set<String>>,
+    pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
 }
 
 /// Link for target `(os, isa)` what link command `args` names (its objects, libraries, flags and output, in
 /// the C compiler driver's spelling: `-o`, `-l`, `-L`, `-framework`, `-shared`, `--sysroot=`, `-Wl,` flags),
 /// leaving out the local symbols and the debug information when `strip`, with `jobs` workers (1: no task
-/// pool; else the caller shuts the pool down after). LINKED; NOT_SERVED when the target or an argument is
-/// outside what this linker does (`why` names it); FAILED with the reason in `why`.
-pub(package) fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool, jobs: u32, why: &mut String) i32 {
+/// pool; else the caller shuts the pool down after). An object `mem` holds (null: none) is read from it,
+/// which lets it go. LINKED; NOT_SERVED when the target or an argument is outside what this linker does
+/// (`why` names it); FAILED with the reason in `why`.
+pub(package) fn link_args(
+    os: i32,
+    isa: i32,
+    args: &Vector<String>,
+    strip: bool,
+    jobs: u32,
+    mem: *mut lu::Mem,
+    why: &mut String,
+) i32 {
     let fmt = nat::own_linker(os, isa);
     if fmt == nat::LINK_NONE {
         why.push_str("no own linker for the target");
@@ -78,6 +88,7 @@ pub(package) fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool,
         stack_first: false,
         gc: false,
         exports: None,
+        mem: mem,
     };
     let r = parse(args, &mut c, why);
     if r != LINKED {
@@ -272,6 +283,7 @@ fn macho(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
         jobs: c.jobs,
         dead_strip: c.gc,
         exports: replace(&mut c.exports, Option::<Set<String>>::None),
+        mem: c.mem,
     };
     if o.kind == lm::K_DYLIB && o.install.len() == 0 {
         o.install = o.out.clone();
@@ -321,6 +333,7 @@ fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
         strip: c.strip,
         gc: c.gc,
         exports: replace(&mut c.exports, Option::<Set<String>>::None),
+        mem: c.mem,
     };
     if !le::link(&o, why) {
         return FAILED;
@@ -370,6 +383,7 @@ fn wasm(c: &mut Cmd, why: &mut String) i32 {
         stack_first: c.stack_first,
         strip: c.strip,
         gc: c.gc,
+        mem: c.mem,
     };
     if !lw::link(&o, why) {
         return FAILED;
@@ -391,6 +405,7 @@ fn coff(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
         stack: c.stack,
         gc: c.gc,
         exports: replace(&mut c.exports, Option::<Set<String>>::None),
+        mem: c.mem,
     };
     // The system's DLLs: on a Windows host, or in a directory the command names.
     if !pe::has_dlls(&o, why) {

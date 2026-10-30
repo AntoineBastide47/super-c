@@ -3,6 +3,7 @@
 // Package slot), flushes deferred const-eval errors, then prunes dead modules from
 // the emit set and codegens each live module into <gen_root> in dependency order. Entry points:
 // run_package (build/run/test) and lint_package (report-only lints + `--fix` fix collection).
+import link::util as lku;
 import stdio;
 import stdlib;
 import std::platform::fs;
@@ -1790,6 +1791,8 @@ pub(package) struct CemitOut {
     pub(package) tu_chunks: Vector<Vector<u32>>,
     pub(package) tu_heads: Vector<Vector<String>>,
     pub(package) tu_tail: Vector<String>,
+    /// Per module: U_TU when its unit holds anything, U_INST when its instance unit does.
+    pub(package) unit: Vector<u8>,
     /// The chunk table: bounds in the owning buffer and the shard each chunk landed in.
     pub(package) ck_off: Vector<u32>,
     pub(package) ck_end: Vector<u32>,
@@ -1850,6 +1853,7 @@ extend CemitOut {
             tus: Vector::<String>::new(),
             tu_chunks: Vector::<Vector<u32>>::new(),
             tu_heads: Vector::<Vector<String>>::new(),
+            unit: Vector::<u8>::new(),
             tu_tail: Vector::<String>::new(),
             ck_off: Vector::<u32>::new(),
             ck_end: Vector::<u32>::new(),
@@ -1885,6 +1889,7 @@ extend CemitOut {
         o.tu_chunks.resize_default(n);
         o.tu_heads.resize_default(n);
         o.tu_tail.resize_default(n);
+        o.unit.resize_default(n);
         o.inst_incs.resize_default(n);
         o.tu_x.resize_default(n);
         o.inst_x.resize_default(n);
@@ -3052,7 +3057,9 @@ fn cemit_seed_fn(
     cem.noret = a.attr_of(nid, AttrKind::ATTR_NORETURN) != null;
     cem.fn_attrs.truncate(0);
     cem.fs = p.fn_set(m as ModuleId, nid);
-    cemit_fn_attrs(p, m as ModuleId, nid, cem.fs, &mut cem.fn_attrs);
+    if cem.spells(m as ModuleId) {
+        cemit_fn_attrs(p, m as ModuleId, nid, cem.fs, &mut cem.fn_attrs);
+    }
     if cem.emit_fn(&lw.body, &sym) {
         acc.seeds += 1;
         if is_main {
@@ -3068,61 +3075,66 @@ fn cemit_seed_fn(
         acc.chunk(m as u64, m as ModuleId, &cem.out, cem.mg.rec_on, &mut cem.mg.rec);
         cem.lir_claim(m as u32, "a function", true);
         if is_glue {
-            // The public wrapper: the sig is the __fb sig without the suffix.
-            let mut wr = String::new();
-            let bs9 = cem.out.as_str();
-            let mut le = 0 as usize;
-            while le < bs9.len() && bs9.byte_at(le) != 10 {
-                le += 1;
-            }
-            let sig = bs9.slice(0, le);
-            let mut cut = 0 as usize;
-            while cut + 4 < sig.len() && sig.slice(cut, cut + 5) != "__fb(" {
-                cut += 1;
-            }
-            wr.push_str(sig.slice(0, cut));
-            wr.push_str(sig.slice(cut + 4, sig.len()));
-            // The receiver is the first argument (locals are return-slots then args): ask the
-            // emitter for its C spelling; it may preserve the source name (`self`) over `_N`.
-            let mut selfp = String::new();
-            cem.lspell(lw.body.returns, &mut selfp);
-            wr.push_str("\n  ");
-            wr.push_str(&sym);
-            wr.push_str("(");
-            wr.push_string(&selfp);
-            wr.push_str(");\n");
+            // The public wrapper: its C where C renders, then its LIR.
             let mut wok = true;
-            for gi in 0..gfs.len() {
-                if !wok {
-                    break;
+            if cem.spells(m as ModuleId) {
+                // The sig is the __fb sig without the suffix.
+                let mut wr = String::new();
+                let bs9 = cem.out.as_str();
+                let mut le = 0 as usize;
+                while le < bs9.len() && bs9.byte_at(le) != 10 {
+                    le += 1;
                 }
-                let mut fe9 = String::new();
-                let mut frm9 = m as ModuleId;
-                let mut frt9 = gts[gi];
-                let _ = cem.mg.resolve(m as ModuleId, gts[gi], &mut frm9, &mut frt9);
-                wok = cem.free_expr(frm9, frt9, &mut fe9);
-                if wok {
-                    wr.push_str("  ");
-                    wr.push_string(&fe9);
-                    if cem.mg.is_zst(frm9, frt9) {
-                        // The field has no C member: its destructor runs on the sentinel.
-                        wr.push_str("(");
-                        let mut zr9 = String::new();
-                        let _ = cem.zst_sentinel_ref(frm9, frt9, &mut zr9);
-                        wr.push_string(&zr9);
-                        wr.push_str(");\n");
-                    } else {
-                        wr.push_str("(&");
-                        wr.push_string(&selfp);
-                        wr.push_str("->");
-                        wr.push_string(&gfs[gi]);
-                        wr.push_str(");\n");
+                let sig = bs9.slice(0, le);
+                let mut cut = 0 as usize;
+                while cut + 4 < sig.len() && sig.slice(cut, cut + 5) != "__fb(" {
+                    cut += 1;
+                }
+                wr.push_str(sig.slice(0, cut));
+                wr.push_str(sig.slice(cut + 4, sig.len()));
+                // The receiver is the first argument (locals are return-slots then args): ask the
+                // emitter for its C spelling; it may preserve the source name (`self`) over `_N`.
+                let mut selfp = String::new();
+                cem.lspell(lw.body.returns, &mut selfp);
+                wr.push_str("\n  ");
+                wr.push_str(&sym);
+                wr.push_str("(");
+                wr.push_string(&selfp);
+                wr.push_str(");\n");
+                for gi in 0..gfs.len() {
+                    if !wok {
+                        break;
+                    }
+                    let mut fe9 = String::new();
+                    let mut frm9 = m as ModuleId;
+                    let mut frt9 = gts[gi];
+                    let _ = cem.mg.resolve(m as ModuleId, gts[gi], &mut frm9, &mut frt9);
+                    wok = cem.free_expr(frm9, frt9, &mut fe9);
+                    if wok {
+                        wr.push_str("  ");
+                        wr.push_string(&fe9);
+                        if cem.mg.is_zst(frm9, frt9) {
+                            // The field has no C member: its destructor runs on the sentinel.
+                            wr.push_str("(");
+                            let mut zr9 = String::new();
+                            let _ = cem.zst_sentinel_ref(frm9, frt9, &mut zr9);
+                            wr.push_string(&zr9);
+                            wr.push_str(");\n");
+                        } else {
+                            wr.push_str("(&");
+                            wr.push_string(&selfp);
+                            wr.push_str("->");
+                            wr.push_string(&gfs[gi]);
+                            wr.push_str(");\n");
+                        }
                     }
                 }
+                wr.push_str("}\n");
+                if wok {
+                    acc.chunk(m as u64, m as ModuleId, &wr, cem.mg.rec_on, &mut cem.mg.rec);
+                }
             }
-            wr.push_str("}\n");
             if wok {
-                acc.chunk(m as u64, m as ModuleId, &wr, cem.mg.rec_on, &mut cem.mg.rec);
                 let a9 = unsafe &mut *(p.module_ast_const(m as ModuleId) as *mut Ast);
                 let st9 = a9.intern_type(
                     Ty { kind: TYPE_STRUCT, module: m as ModuleId, as_data: TyAs { decl: tgt.node } },
@@ -3752,7 +3764,9 @@ fn cemit_drain_demand(
     cem.out.clear();
     cem.fn_attrs.truncate(0);
     cem.fs = demand_set(p, cem.demand.at(di));
-    cemit_fn_attrs(p, d_def.module, d_def.node, cem.fs, &mut cem.fn_attrs);
+    if cem.spells(d_def.module) {
+        cemit_fn_attrs(p, d_def.module, d_def.node, cem.fs, &mut cem.fn_attrs);
+    }
     // The instance lands in its generic's module instance shard: spell under that context.
     cem.mg.mark_ctx = mbe::CTX_INST | d_def.module as i64;
     let em_ok9 = cem.emit_fn(&lws.at(li2 as usize).body, &d_sym);
@@ -4001,7 +4015,9 @@ fn cemit_drain_slice_one(
     sh.out.clear();
     sh.fn_attrs.truncate(0);
     sh.fs = demand_set(p, dem.at(di));
-    cemit_fn_attrs(p, d_def.module, d_def.node, sh.fs, &mut sh.fn_attrs);
+    if sh.spells(d_def.module) {
+        cemit_fn_attrs(p, d_def.module, d_def.node, sh.fs, &mut sh.fn_attrs);
+    }
     let em_ok9 = sh.emit_fn(&blw.body, d_sym);
     sh.cf_ext = null;
     if !em_ok9 {
@@ -5543,9 +5559,9 @@ pub(package) fn cemit_package(
     }
     // `@emit_macro` C-reuse templates: `<STEM>_DECLARE/_DEFINE(<params>, NAME)`, the struct body
     // plus every non-generic method of the type's plain generic extends, emitted through cemit
-    // under macro spelling (unresolved params as their names; symbols pasted onto NAME).
+    // under macro spelling (unresolved params as their names; symbols pasted onto NAME). C only.
     let mut macros_out = String::new();
-    {
+    if !p.native {
         let mut mac_ok: u64 = 0;
         let mut mac_skip: u64 = 0;
         for m9 in 0..p.modules.len() {
@@ -6190,27 +6206,31 @@ pub(package) fn cemit_package(
         }
     }
     let asm9 = prd.start();
-    cemit_assemble(
-        p,
-        &mut cem,
-        &mut em,
-        &mut acc,
-        &ext_incs,
-        &gated_incs,
-        &xhdrs,
-        &si_names,
-        &si_defs,
-        &mut si_packs,
-        &macros_out,
-        &cdefs,
-        &sdefs,
-        &tdecl,
-        &reg_names,
-        &reg_decls,
-        vis9,
-        testing,
-        o,
-    );
+    if p.native {
+        native_assemble(p, &mut cem, &acc, &cdefs, &sdefs, &reg_names, testing, o);
+    } else {
+        cemit_assemble(
+            p,
+            &mut cem,
+            &mut em,
+            &mut acc,
+            &ext_incs,
+            &gated_incs,
+            &xhdrs,
+            &si_names,
+            &si_defs,
+            &mut si_packs,
+            &macros_out,
+            &cdefs,
+            &sdefs,
+            &tdecl,
+            &reg_names,
+            &reg_decls,
+            vis9,
+            testing,
+            o,
+        );
+    }
     prd.stop(prb::P_ASSEMBLE, asm9);
     stage_ms(verbose, &mut tt0, "cemit-stage assembly");
     {
@@ -7388,8 +7408,8 @@ fn cemit_simd_entries(
     }
     let mut skips: u64 = 0;
     let mut sc = cbe::CEmit::new(p);
-    // An entry is a `static inline` C function of a header: no native object defines it.
-    sc.render_all = true;
+    // An entry is a `static inline` C function of a header, which a native build does not write.
+    sc.render_all = !p.native;
     // An entry's own vector operations keep their lane loops: no entry calls another.
     sc.simd_on = false;
     // The planner spells an entry's call with the struct ABI.
@@ -8202,6 +8222,11 @@ fn header_type_checks(p: &loader::Package, m: ModuleId, items: NodeList, out: &m
 /// as one unit (`__sc_unity.c`).
 const UNITY_MAX: usize = 2 << 20;
 
+/// `CemitOut.unit`: the module's unit holds anything.
+const U_TU: u8 = 1;
+/// `CemitOut.unit`: the module's instance unit holds anything.
+const U_INST: u8 = 2;
+
 static mut G_DPOOL: *mut Vector<DropCtx> = null;
 static mut G_DPOOL_LOCK: i32 = 0;
 
@@ -8437,6 +8462,92 @@ fn cemit_free_glue_fields(
         }
     }
     return out_f.len() != 0;
+}
+
+// The assembly of a native build, which writes no C (`cemit_assemble`): the units that hold anything
+// (`CemitOut.unit`), the owners of the dyn tables, the C `main`'s LIR, the ZST sentinels and the
+// reflection roots (`native_registry`).
+fn native_assemble(
+    p: &loader::Package,
+    cem: &mut cbe::CEmit,
+    acc: &SeedAcc,
+    cdefs: &Segs,
+    sdefs: &Segs,
+    reg_names: &Vector<String>,
+    testing: bool,
+    o: &mut CemitOut,
+) {
+    let n = p.modules.len();
+    for i in 0..acc.ch.chunk_mod.len() {
+        if acc.ch.chunk_mod[i] == 65534 {
+            o.unit[acc.ch.chunk_own[i] as usize] |= U_INST;
+        } else {
+            o.unit[acc.ch.chunk_mod[i] as usize] |= U_TU;
+        }
+    }
+    // The instance data: block wrappers, constants, descriptor groups and dyn tables.
+    let mut pe: u32 = 0;
+    for i in 0..cem.sh_blk_k.len() {
+        if cem.sh_blk_e[i] != pe {
+            o.unit[(cem.sh_blk_k[i] >> 32) as usize] |= U_INST;
+        }
+        pe = cem.sh_blk_e[i];
+    }
+    for i in 0..cdefs.end.len() {
+        o.unit[cdefs.own[i] as usize] |= U_INST;
+    }
+    for i in 0..sdefs.end.len() {
+        o.unit[sdefs.own[i] as usize] |= U_INST;
+    }
+    pe = 0;
+    for i in 0..cem.sh_dyt_k.len() {
+        if cem.sh_dyt_e[i] != pe {
+            o.unit[cem.dyt_own[i] as usize] |= U_INST;
+        }
+        pe = cem.sh_dyt_e[i];
+        if let Some(l) = &mut cem.lir {
+            l.claim_data(cem.dyt_sym.at(i).as_str(), cem.dyt_own[i]);
+        }
+    }
+    for t in 0..n {
+        if module_has_asm(p, t) {
+            o.unit[t] |= U_TU;
+        }
+    }
+    if acc.have_main && !testing {
+        let mm = acc.main_mod as usize;
+        if acc.main_argv {
+            // The C `main` allocates a Vector<str> through Global.
+            cem.mg.mark_ctx = mm as i64;
+            let g9 = p.prelude_lookup("Global", true);
+            let s9 = p.prelude_lookup("str", true);
+            let v9 = p.prelude_lookup("Vector", true);
+            cem.mg.mark_used(g9.mid);
+            cem.mg.mark_used(g9.mid | 0x8000);
+            cem.mg.mark_used(s9.mid);
+            cem.mg.mark_used(s9.mid | 0x8000);
+            cem.mg.mark_used(v9.mid | 0x8000);
+        }
+        o.unit[mm] |= U_TU;
+        cem.lir_main_wrapper(mm as ModuleId, acc.main_argv);
+        cem.lir_claim(mm as u32, "the C `main`", false);
+    }
+    let mut zi = cem.sent_seen.iter();
+    while let Some(a) = zi.next() {
+        o.zst.push(*a);
+    }
+    o.zst.sort();
+    let mut ord = Vector::<KeyIdx>::with_capacity(reg_names.len());
+    for i in 0..reg_names.len() {
+        ord.push(KeyIdx { key: reg_names[i].as_str(), idx: i as u32 });
+    }
+    ord.sort_by(key_idx_cmp);
+    for k in 0..ord.len() {
+        if k != 0 {
+            o.reg_inputs.push_str(" ");
+        }
+        o.reg_inputs.push_str(ord[k].key);
+    }
 }
 
 // The two shared-header includes, spelled relative to a module's nested output location
@@ -9011,6 +9122,7 @@ fn cemit_assemble(
                 o.inst_incs.set(t, inc);
                 inst_dv.set(t, dv.clone());
                 o.inst_heads.set(t, heads);
+                o.unit[t] |= U_INST;
                 continue;
             }
             if p.modules[t].has_ast {
@@ -9076,6 +9188,7 @@ fn cemit_assemble(
             tu_dv.set(t, dv.clone());
             o.tu_heads.set(t, heads);
             o.tu_tail.set(t, tail);
+            o.unit[t] |= U_TU;
         }
     }
     // Definition header texts: the forward header, the headers of the types the body embeds by
@@ -14808,6 +14921,8 @@ pub(package) struct EmitSink {
     /// (ctx, path, body, kind, changed): `body` is the file's text, or empty when the sink reads the
     /// file; `changed` is set when this build rewrote the file (an unchanged one keeps its mtime).
     pub(package) notify: fn(*mut void, str, str, i32, bool) void,
+    /// The bytes of the objects this build wrote, which the link reads from there (null: from the files).
+    pub(package) objs: *mut lku::Mem,
 }
 
 fn sink_notify(sink: *mut EmitSink, pr: &mut prb::Probe, path: str, body: str, kind: i32, changed: bool) {
@@ -15449,13 +15564,19 @@ pub(package) fn run_package(
     // A tree that did not exist before this build holds no orphan to prune afterwards.
     let gr9 = String::from_str(&p.gen_root);
     let fresh_tree = !is_dir(&gr9);
-    let rt9 = write_super_rt(&gr9);
-    let mut err = rt9 < 0;
     let root = gr9.as_str();
     let mut keep = Vector::<String>::new();
-    keep.push(build_out_path(root, "super_rt", ".h"));
-    if !err {
-        sink_notify(sink, &mut co.pr, keep.at(0).as_str(), "", 0, rt9 != 0);
+    let mut err = false;
+    if p.native {
+        // The tree's directory, which the runtime header creates where C is written.
+        mkdir_p(root);
+    } else {
+        let rt9 = write_super_rt(&gr9);
+        err = rt9 < 0;
+        keep.push(build_out_path(root, "super_rt", ".h"));
+        if !err {
+            sink_notify(sink, &mut co.pr, keep.at(0).as_str(), "", 0, rt9 != 0);
+        }
     }
     // `@link` flags feed `build/<profile>/raw/__ldflags` for the link line.
     ext_c_collect(p, &mut err, target);
@@ -15600,7 +15721,7 @@ pub(package) fn run_package(
     while let Some(s9) = stack9.pop() {
         for e9 in eoff[s9] as usize..eoff[s9 + 1] as usize {
             let dst9 = (co.edges[e9] & 0xFFFFFFFFu64) as usize;
-            if dst9 < n && !*keep_mod.at(dst9) && co.tu_heads.at(dst9).len() != 0 {
+            if dst9 < n && !*keep_mod.at(dst9) && (co.unit[dst9] & U_TU) != 0 {
                 keep_mod.set(dst9, true);
                 stack9.push(dst9);
             }
@@ -15609,7 +15730,7 @@ pub(package) fn run_package(
     let mut lm = Vector::<ModuleId>::new();
     for oi in 0..n {
         let mi = order[oi];
-        if co.tu_heads.at(mi as usize).len() == 0 {
+        if (co.unit[mi as usize] & U_TU) == 0 {
             continue;
         }
         if !*keep_mod.at(mi as usize) {
@@ -15633,7 +15754,7 @@ pub(package) fn run_package(
     sort_big_first(&mut lm, &tsz);
     let mut iq = Vector::<ModuleId>::new();
     for q in 0..n {
-        if co.inst_heads.at(q).len() != 0 {
+        if (co.unit[q] & U_INST) != 0 {
             iq.push(q as ModuleId);
         }
     }
@@ -15701,7 +15822,11 @@ pub(package) fn run_package(
         &isz,
         unity,
         umax == 0,
-        packs_read(root),
+        if p.native {
+            0
+        } else {
+            packs_read(root)
+        },
         &mut tu_pk,
         &mut in_pk,
         &mut reg_pk,
@@ -15749,7 +15874,7 @@ pub(package) fn run_package(
     }
     man.format_into("cfg\t{}\t{}\t{}\n", target, p.opt, p.debug_info as u32);
     let mut members = Vector::<String>::new(); // the units the packs compile
-    if wtree {
+    if wtree && !p.native {
         // The headers in manifest order: path, text (pointer and length), owner module.
         let mut hps = Vector::<String>::new();
         let mut hts = Vector::<usize>::new();
@@ -15918,9 +16043,16 @@ pub(package) fn run_package(
     // record of the own objects, with their keys, when the emission cache is on.
     let mut nat_paths = Vector::<String>::new();
     let mut rec_txt = String::new();
+    // The new objects' bytes for the link: the sink's, else this build's own link's.
+    let mut mem = lku::Mem::new();
+    let memp: *mut lku::Mem = if sink != null && unsafe (*sink).objs != null {
+        unsafe (*sink).objs
+    } else {
+        &mut mem
+    };
     if wtree {
         for k in 0..nat_objs.len() {
-            let ob = nat_objs.at(k);
+            let ob = nat_objs.index_mut(k);
             let mp = p.modules[ob.m as usize].path.as_str();
             let mut op = build_out_path(
                 root,
@@ -15944,6 +16076,7 @@ pub(package) fn run_package(
                 3,
             ) {
                 nat_paths.push(op.clone());
+                unsafe (*memp).objs.insert(op.clone(), replace(&mut ob.bytes, Vector::<u8>::new()));
                 keep.push(op);
             } else {
                 err = true;
@@ -15960,6 +16093,7 @@ pub(package) fn run_package(
                 3,
             ) {
                 nat_paths.push(op.clone());
+                unsafe (*memp).objs.insert(op.clone(), bytes);
                 keep.push(op);
             } else {
                 err = true;
@@ -16009,7 +16143,7 @@ pub(package) fn run_package(
     if !err {
         manifest_publish(root, &man, &mut keep);
         let smp = build_out_path(root, "__sc_shards", "");
-        if write_file(&smp, &shard_meta) {
+        if !p.native && write_file(&smp, &shard_meta) {
             keep.push(smp);
         }
     }
@@ -16029,7 +16163,7 @@ pub(package) fn run_package(
     let mut rc: i32 = err as i32;
     if out_bin.len() != 0 {
         if !err {
-            rc = native_link_and_run(p, null, &nat_paths, out_bin, target);
+            rc = native_link_and_run(p, null, &nat_paths, out_bin, target, memp);
         }
     } else if testing && !err {
         if plan.cases.len() == 0 {
@@ -16047,19 +16181,20 @@ pub(package) fn run_package(
                 3,
             ) {
                 nat_paths.push(op.clone());
+                unsafe (*memp).objs.insert(op.clone(), bytes);
                 keep.push(op);
                 if sink == null {
-                    rc = native_link_and_run(p, topts, &nat_paths, "", target);
+                    rc = native_link_and_run(p, topts, &nat_paths, "", target, memp);
                 }
             } else {
                 rc = 1;
             }
         }
     }
-    // `keep` names every file the tree holds: its `.c` files are the emit stamp's unit count.
-    p.c_files = 0;
+    // `keep` names every file the tree holds: its `.c` and `.o` files are the emit stamp's unit count.
+    p.unit_files = 0;
     for i in 0..keep.len() {
-        p.c_files += keep.at(i).as_str().ends_with(".c") as u64;
+        p.unit_files += (keep.at(i).as_str().ends_with(".c") || keep.at(i).as_str().ends_with(".o")) as u64;
     }
     if istats {
         gitems::report(p, ITEM_TASK_NS);

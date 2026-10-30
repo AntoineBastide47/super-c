@@ -14,6 +14,10 @@ A writer:
 
 - lays out one section per non-empty kind and per named section (`-ffunction-sections` and
   `-fdata-sections` split code and data per symbol; COFF uses COMDAT sections);
+- writes a weak definition (`ob::SF_WEAK`: Mach-O `N_WEAK_DEF`, ELF `STB_WEAK`, a COFF COMDAT section
+  of selection `ANY`, wasm `WASM_SYM_BINDING_WEAK`): each object's copy of data no unit owns (a string
+  literal) is one when the data splits (`ob::copy_flags`), so the link keeps one copy and drops the
+  others' sections;
 - maps each relocation kind to the format's type, with the addend where the format keeps it (ELF
   `.rela`, Mach-O and COFF in the section bytes);
 - writes the symbol table in the format's order (locals first where the format needs it);
@@ -31,8 +35,10 @@ information leaves the code bytes unchanged.
 ## A linker
 
 Models: `src/link/macho.spc`, `src/link/elf.spc`, `src/link/pe.spc`, `src/link/wasm.spc`;
-`src/link/ar.spc` archives, `src/link/tbd.spc` reads Apple's text stubs, `src/link/util.spc` holds the
-byte helpers. `link::link::link_args` takes the C compiler's link command (`-o`, `-l`, `-L`,
+`src/link/ar.spc` archives and takes their members for any linker (`take_members`, over `Members`),
+`src/link/tbd.spc` reads Apple's text stubs, `src/link/util.spc` holds the byte and file helpers and
+`Mem`, the objects a build hands its link in memory (`link_args`' `mem`: the ones it just wrote, read
+from there, not from their files). `link::link::link_args` takes the C compiler's link command (`-o`, `-l`, `-L`,
 `-framework`, `-shared`, `--sysroot=`, `-Wl,` flags), so a build has one link command; it returns
 NOT_SERVED for a flag or input it does not handle.
 
