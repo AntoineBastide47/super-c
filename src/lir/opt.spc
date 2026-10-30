@@ -226,6 +226,7 @@ pub(package) struct Opt {
     sread: Vector<bool>, // per slot, whether it is read (`slot_reads`)
     sused: Vector<u32>, // per slot, NONE when no emitted instruction takes its address (`emit`), else its new number
     done_pool: Vector<bool>, // per pool word, whether it is renumbered
+    cps: PoolScratch, // `Body::compact_pool`'s
     pmap: Vector<u32>, // per block parameter, its new number
     params: Vector<u8>,
     live: Vector<bool>,
@@ -415,6 +416,7 @@ extend Opt {
             sread: Vector::<bool>::new(),
             sused: Vector::<u32>::new(),
             done_pool: Vector::<bool>::new(),
+            cps: PoolScratch::new(),
             prepl: Vector::<u32>::new(),
             frepl: Vector::<u32>::new(),
             extra: Vector::<u32>::new(),
@@ -6008,10 +6010,14 @@ extend Run {
         if r.print.len() != 0 {
             r.print_body(p, j, b);
         }
+        // Its callers copy its pool when they inline it, and the code generators read it: the passes'
+        // dead records go.
+        b.compact_pool(&mut sc.o.cps);
         let mut fits = r.inline && r.shape[j as usize];
         if snap && packed(b) {
             if pre.is_some() {
                 let fin = replace(b, pre.unwrap());
+                b.compact_pool(&mut sc.o.cps);
                 unsafe *(r.finals.as_ptr() as *mut Option<Body> + j as usize) = Some(fin);
             } else {
                 fits = false;

@@ -15,8 +15,10 @@ file is authoritative for where to look first.
 | C control-flow shape (RPO, idom, postdominators, loops) | `emit::cflow` `build_into` | `cem.cf_ext` | read only by the C renderer; not built in a native build |
 | LIR lowering CFG and dominators | `Lower::cfg`, `Lower::dominators` | `Lower`, per body | end of `Lower::body` |
 | Address exposure, argument modes | `Lower::scan` (`arg_mode`) | `Lower`, per body | end of `Lower::body` |
-| Type classes | `Lower::ty` | `Lower.tcache` (key includes the module) | whole build |
+| Type classes | `Lower::ty` | `Lower.tcache` (`Lower::tkey`: a final type id alone, a provisional one with its module) | whole build |
 | Field lists | `Lower::fields_of` (`member` reads `fpool` in place) | `fcache`, `fpool` | whole build |
+| Register leaves of an aggregate | `Lower::layout_of` (`leaves`) | `lcache`, `lpool` | whole build |
+| Static asserts of a module; instances checked | `cemit_inst_asserts` (graph, checker queue, drain) | `Interp` (`sa_list`, `sa_done`) | whole build |
 | Layouts (size, align, offsets) | `ir::layout` `Svc` | one cache per `Svc` owner (each `Mangler`, `Lowerer`, interpreter) | whole build |
 | `@owned` fields of a concrete referent | `owned_of` (`owned_fields`) | `ocache`, `opool` | whole build |
 | Frozen (no `UnsafeCell`) of a concrete type | `frozen_top` (`frozen`) | `zcache` | whole build |
@@ -45,6 +47,7 @@ sets `kept = K_NONE`, and `forget` runs at a job's start and after inlining:
 | Private slots, alias classes and their scope roots' bases, frozen memory, per-block and per-loop writes and tags | `Opt::memory` (`privates`, `classes`, `root_bases`, `frozen`, `bw`, `bt`, `bpw`, `bst`) | `Opt` (`cbase` among them) | `K_MEM`: any change |
 | Slot base, offset, escape | `Opt::slot_writes` | `Opt` | any instruction change |
 | Slots an instruction still addresses | `Opt::rebuild`, `emit` | `Opt.sused` | the next rebuild |
+| The pool records a body names (dead ones dropped) | `Body::compact_pool`, at the end of `Run::job` | `Body.pool` | the next pass that adds records |
 | Rare blocks | `Opt::estimate` | `BLOCK_RARE` flags on the body | any block change; codegen reads them too |
 | Loop weights | `Opt::weigh` | `Opt` | any edge or block change |
 | Unsigned upper bound of a value | `Opt::ubound` | not stored | per call |
@@ -94,9 +97,10 @@ above. Recompute a fact only after a change that the "Valid until" column names.
 These recompute a fact the compiler already holds. Remove each line when it is fixed. Do
 not copy their pattern into new code.
 
-- lower: a native build still renders the C signature, local names and the C tree (headers,
-  `__sc_registry.c`, manifest `h` lines) that only the C backend reads; `Svc`, `tcache` and
-  `fcache` hold one copy per owner or per module.
+- lower: a native build still renders the C signature, local names, destructor and static data
+  text and the C tree (headers, `__sc_registry.c`, manifest `h` lines) that only the C backend reads,
+  and spells each callee's symbol again per calling module for the C units' cross-unit edges; `Svc`
+  holds one copy per owner.
 - optimize: `LoopOpt` analyses a rejected loop again in each round; the exit test has four
   decoders (`cf_test`, `trip`, `counted_by`, `checks`), and `top_of` repeats part of `ubound`.
 - codegen: `Live::rare_blocks` repeats the optimizer's `BLOCK_RARE` when `lir_opt` ran; each

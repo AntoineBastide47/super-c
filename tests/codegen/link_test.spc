@@ -342,3 +342,31 @@ fn a_c_export_list_keeps_the_export_symbols_alone() {
     assert(lib_defines(p.dir(), "x_api"), "the export symbol is exported");
     assert(!lib_defines(p.dir(), "helper"), "the other globals are not");
 }
+
+// A C shared library whose exports share a prefix: their names in the export trie run through a node per
+// shared part, and each binds under its whole name. The own linker links the program against it.
+@platform(macos)
+@test
+fn a_c_shared_library_links_with_the_own_linker() {
+    if !cli::has_cc() {
+        return; // the C compiler builds the library
+    }
+    let p = cli::proj_new();
+    p.mkfile("d.c", "int dyl_add(int a, int b) { return a + b; }\nint dyl_mul(int a, int b) { return a * b; }\n");
+    let mut cc = format(
+        "{} -dynamiclib \"{}/d.c\" -install_name \"{}/libdyl.dylib\" -o \"{}/libdyl.dylib\"",
+        unsafe str::from_cstr(cli::cc_name()),
+        p.dir(),
+        p.dir(),
+        p.dir(),
+    );
+    assert(cli::run_with(cc.cstr(), null, null, null, "") == 0, "the C compiler builds the library");
+    let mut m = format("@link(\"-L{} -ldyl\")\n", p.dir());
+    m.push_str(
+        "extern \"C\" {\n    fn dyl_add(a: i32, b: i32) i32;\n    fn dyl_mul(a: i32, b: i32) i32;\n}\n\nfn main() i32 {\n    return unsafe dyl_add(2, 3) + unsafe dyl_mul(4, 5) - 25;\n}\n",
+    );
+    p.mkfile("main.spc", &m);
+    let r = cli::superc_in(p.dir(), "build main.spc -o bin");
+    assert(r.ok(), "the own linker links the shared library");
+    assert_eq(p.run_bin(), 0);
+}

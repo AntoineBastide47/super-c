@@ -479,9 +479,15 @@ extend Lowerer {
     pub(package) fn take_kept(pkg: *const loader::Package, slot: &mut KeptBody) Lowerer {
         let d = slot.body.owner;
         let mut lw = Lowerer::new(pkg, d.module, d.node);
-        lw.body = replace(&mut slot.body, ir::CoreBody::new(d, d.module));
-        lw.closures = replace(&mut slot.closures, Vector::<NodeId>::new());
+        lw.take_kept_into(slot);
         return lw;
+    }
+
+    /// `take_kept` into this Lowerer, which `new` made for the slot's owner.
+    pub(package) fn take_kept_into(self: &mut Self, slot: &mut KeptBody) {
+        let d = slot.body.owner;
+        self.body = replace(&mut slot.body, ir::CoreBody::new(d, d.module));
+        self.closures = replace(&mut slot.closures, Vector::<NodeId>::new());
     }
 
     // Reset every per-body pool and cursor so one Lowerer lowers many bodies back to back, keeping

@@ -614,16 +614,25 @@ fn drop_section(l: &mut L, s: u32) {
 // no member defines a global still needed.
 fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
     let mut more = ars.paths.len() != 0;
+    // Per global, whether no archive defined it at its lookup: a member is only ever taken, so none will.
+    let mut miss = Vector::<bool>::new();
     // Each pass takes at least one member, or ends.
     while more {
         more = false;
         for g in 0..l.gs.len() {
+            if g < miss.len() && miss[g] {
+                continue;
+            }
             let gy = l.gs[g];
             if gy.kind != G_UNDEF || !gy.strong || gy.wdef != NONE {
                 continue;
             }
             let am = ars.find(l.names.spell(gy.name));
             if am.is_none() {
+                if miss.len() <= g {
+                    miss.resize_default(l.gs.len());
+                }
+                miss[g] = true;
                 continue;
             }
             let m = am.unwrap();
@@ -1203,18 +1212,25 @@ fn layout(l: &mut L, o: &Opts) {
     }
     keyed.sort();
     let mut xc_first = true;
+    // The last input's output section: the next input of the same output name joins it.
+    let mut prev_o = NONE;
+    let mut prev = "";
     for i in 0..keyed.len() {
         let s = keyed[i].1;
         let sc = l.secs[s as usize];
         let n = keyed[i].0.as_str();
-        let on = String::from_str(out_name(n, sc.flags));
-        let mut fl = out_flags(&on);
-        if on.as_str() != ".text" && on.as_str() != ".rdata" && on.as_str() != ".data" && on.as_str() != ".bss" && on.as_str() != ".tls" && on.as_str() != ".pdata" && !on.as_str().starts_with(
-            ".debug_",
-        ) {
-            fl = sc.flags & (SCN_CODE | SCN_IDATA | SCN_UDATA | SCN_EXEC | SCN_READ | SCN_WRITE);
+        let on = out_name(n, sc.flags);
+        if prev_o == NONE || on != prev {
+            let mut fl = out_flags(on);
+            if on != ".text" && on != ".rdata" && on != ".data" && on != ".bss" && on != ".tls" && on != ".pdata" && !on.starts_with(
+                ".debug_",
+            ) {
+                fl = sc.flags & (SCN_CODE | SCN_IDATA | SCN_UDATA | SCN_EXEC | SCN_READ | SCN_WRITE);
+            }
+            prev_o = out_section(l, on, fl);
+            prev = on;
         }
-        let out = out_section(l, &on, fl);
+        let out = prev_o;
         let at = grow(l, out, sc.size, sc.align);
         let m = l.secs.index_mut(s as usize);
         m.out = out;
@@ -1491,9 +1507,7 @@ const fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
             continue;
         }
         let at = (l.osecs[sc.out as usize].off + sc.at) as usize;
-        for i in 0..sc.size as usize {
-            img[at + i] = b[sc.off + i];
-        }
+        img.index_range_mut(at..at + sc.size as usize).copy_from_slice(b[sc.off..sc.off + sc.size as usize]);
     }
 }
 
