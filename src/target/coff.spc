@@ -168,14 +168,26 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
     let mut parts = Vector::<ob::Part>::new();
     let mut first = Vector::<u32>::new();
     ob::parts_of(o, split, &mut parts, &mut first);
+    // Per symbol, its part (NONE32: undefined).
+    let mut sp = Vector::<u32>::with_capacity(o.syms.len());
+    for k in 0..o.syms.len() {
+        let y = o.syms[k];
+        sp.push(
+            if y.sec == ob::NOSEC {
+                ob::NONE32
+            } else {
+                ob::part_at(&parts, &first, y.sec, y.off)
+            },
+        );
+    }
     // A part with a symbol the link must keep stays plain: the linker keeps every section but a COMDAT one
     // nothing reaches.
     let mut kept = Vector::<bool>::new();
     kept.resize_default(parts.len());
     for y in 0..o.syms.len() {
         let sy = o.syms[y];
-        if (sy.flags & ob::SF_USED) != 0 && sy.sec != ob::NOSEC {
-            let q = ob::part_at(&parts, &first, sy.sec, sy.off);
+        if (sy.flags & ob::SF_USED) != 0 {
+            let q = sp[y];
             if q != ob::NONE32 {
                 kept[q as usize] = true;
             }
@@ -222,21 +234,16 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
         let mut xdata = Vector::<u8>::new();
         for f in 0..o.frames.len() {
             let fr = o.frames[f];
-            for j in 0..fr.cfi_len {
-                xdata.push(o.cfi[(fr.cfi_at + j) as usize]);
-            }
+            xdata.extend_from_slice(o.cfi[fr.cfi_at as usize..(fr.cfi_at + fr.cfi_len) as usize]);
         }
         unwind_pair(&mut secs, xdata, 0);
     }
     for f in 0..o.frames.len() {
         if per_fn {
             let fr = o.frames[f];
-            let y = o.syms[fr.sym as usize];
-            let q = ob::part_at(&parts, &first, y.sec, y.off) as usize;
+            let q = sp[fr.sym as usize] as usize;
             let mut xdata = Vector::<u8>::new();
-            for j in 0..fr.cfi_len {
-                xdata.push(o.cfi[(fr.cfi_at + j) as usize]);
-            }
+            xdata.extend_from_slice(o.cfi[fr.cfi_at as usize..(fr.cfi_at + fr.cfi_len) as usize]);
             unwind_pair(
                 &mut secs,
                 xdata,
@@ -256,20 +263,17 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
     let nsec = secs.len() as u32;
     let mut order = Vector::<u64>::with_capacity(o.syms.len());
     for k in 0..o.syms.len() {
-        let y = o.syms[k];
         let mut key: u64 = 0;
         if split != 0 {
-            let q = if y.sec == ob::NOSEC {
-                ob::NONE32
-            } else {
-                ob::part_at(&parts, &first, y.sec, y.off)
-            };
+            let q = sp[k];
             let lead = q != ob::NONE32 && parts[q as usize].sym == k as u32;
             key = q as u64 << 1 | (!lead) as u64;
         }
         order.push(key << 32 | k as u64);
     }
-    order.sort();
+    if split != 0 {
+        order.sort();
+    }
     let mut symix = Vector::<u32>::new();
     symix.resize_default(o.syms.len());
     for i in 0..order.len() {
@@ -414,15 +418,11 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
         while out.len() as u32 < raw[k] {
             out.push(0);
         }
-        for j in 0..secs[k].bytes.len() {
-            out.push(secs[k].bytes[j]);
-        }
+        out.extend_from_slice(&secs[k].bytes);
         if secs[k].nrel > 0xFFFF {
             put_rel(out, secs[k].nrel + 1, 0, 0);
         }
-        for j in 0..secs[k].rels.len() {
-            out.push(secs[k].rels[j]);
-        }
+        out.extend_from_slice(&secs[k].rels);
     }
     assert(out.len() as u32 == symtab, "coff: the laid out size differs from the written one");
     // Section symbols, each with its auxiliary entry: the length and the relocation count.
@@ -449,11 +449,7 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
     for i in 0..order.len() {
         let k = (order[i] & 0xFFFFFFFF) as usize;
         let y = o.syms[k];
-        let q = if y.sec == ob::NOSEC {
-            ob::NONE32
-        } else {
-            ob::part_at(&parts, &first, y.sec, y.off)
-        };
+        let q = sp[k];
         let global = y.sec == ob::NOSEC || (y.flags & ob::SF_GLOBAL) != 0;
         put_sym(
             out,
@@ -486,7 +482,5 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
     for q in 0..4u32 {
         strs[q as usize] = (n >> 8 * q & 0xFF) as u8;
     }
-    for j in 0..strs.len() {
-        out.push(strs[j]);
-    }
+    out.extend_from_slice(&strs);
 }

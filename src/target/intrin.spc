@@ -1,6 +1,7 @@
 // The C compilers' intrinsics the native backends expand in place of a call: the table of each instruction
 // set, a row's lookup, the expansion of its constant arguments, and the vector registers an expansion
 // names and writes, which a backend renames to where its arguments are.
+import lir::ir as *;
 import target::a64intrin as a64i;
 import target::x64intrin as x64i;
 import target::wasmintrin as wasmi;
@@ -17,6 +18,30 @@ pub(package) const fn find(isa: str, name: str) str<'static> {
 pub(package) const fn has(isa: str, name: str) bool {
     let (k, _t) = row(isa, name);
     return k;
+}
+
+/// Per symbol of body `b` of package `p`, the instructions of the intrinsic it names on `isa` (`find`, a
+/// `__sc_x_` prefix aside), into `out`; empty for a function the package defines or no intrinsic.
+pub(package) fn of_symbols(p: &Package, b: &Body, isa: str, out: &mut Vector<str<'static>>) {
+    out.truncate(0);
+    for s in 0..b.syms.len() {
+        let ps = p.syms[b.syms[s] as usize];
+        if ps.def != NONE {
+            out.push("");
+            continue;
+        }
+        let nm = p.spell(ps.name);
+        out.push(
+            find(
+                isa,
+                if nm.starts_with("__sc_x_") {
+                    nm.slice(7, nm.len())
+                } else {
+                    nm
+                },
+            ),
+        );
+    }
 }
 
 // The row of intrinsic `name` of `isa`: whether there is one, and its instructions.

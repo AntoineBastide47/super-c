@@ -186,6 +186,11 @@ pub(package) struct Lower {
     tcache: Map<u64, TyI>, // the classes of concrete types, for every body
     fcache: Map<u64, u64>, // the members of concrete aggregates (`fields_of`): start << 32 | count in `fpool`
     fpool: Vector<FieldAt>,
+    // Per concrete referent (shared << 48 | module << 32 | type), its `owned_fields`: start << 32 | count
+    // in `opool` (`owned_of`); per concrete type (module << 32 | type), whether it is `frozen`.
+    ocache: Map<u64, u64>,
+    opool: Vector<u32>,
+    zcache: Map<u64, bool>,
     // `placed`'s members, a stack: each query appends its own above its callers' and truncates back.
     lms: Vector<lay::MemberAt>,
     bm: ModuleId, // the module of the body being lowered: the pool grounded member types go to
@@ -267,6 +272,9 @@ extend Lower {
             tcache: Map::<u64, TyI>::new(),
             fcache: Map::<u64, u64>::new(),
             fpool: Vector::<FieldAt>::new(),
+            ocache: Map::<u64, u64>::new(),
+            opool: Vector::<u32>::new(),
+            zcache: Map::<u64, bool>::new(),
             lms: Vector::<lay::MemberAt>::new(),
             bm: 0,
             fl_depth: 0,
@@ -1216,6 +1224,15 @@ extend Lower {
         variant: NodeId,
         out: &mut FieldAt,
     ) bool {
+        // A concrete aggregate's members, found before: read in place.
+        let (gm, gt) = self.grounded(c, rm, rt);
+        if let Some(v) = self.fcache.get(&(gm as u64 << 32 | gt as u64)) {
+            let at = (*v >> 32) as usize;
+            if member_in(self.fpool[at..at + (*v & 0xFFFFFFFF) as usize], pj, variant, out) {
+                return true;
+            }
+            return self.fail("member");
+        }
         let mut fl = Vector::<FieldAt>::new();
         if !self.fields_of(c, rm, rt, &mut fl) {
             if self.dbg {
@@ -1223,28 +1240,8 @@ extend Lower {
             }
             return self.fail("member-of");
         }
-        for k in 0..fl.len() {
-            let f = fl[k];
-            if f.idx == 0xFFFFFFFF {
-                continue;
-            }
-            if variant != NODE_NONE && f.variant != variant {
-                continue;
-            }
-            if variant == NODE_NONE && f.variant != NODE_NONE {
-                continue;
-            }
-            let hit = if pj.sub != NODE_NONE && pj.data != irc::PJ_UNION_FIELD {
-                f.node == pj.sub || f.node == NODE_NONE && f.idx == pj.data
-            } else if pj.data == irc::PJ_UNION_FIELD {
-                f.node == pj.sub
-            } else {
-                f.idx == pj.data
-            };
-            if hit {
-                *out = f;
-                return true;
-            }
+        if member_in(&fl, pj, variant, out) {
+            return true;
         }
         return self.fail("member");
     }
@@ -2261,12 +2258,12 @@ extend Lower {
     fn dominators(self: &mut Self) {
         let nb = self.lblk.len();
         let n = self.order.len();
-        fill_u32(&mut self.rpo, nb + 1, NONE);
+        fill(&mut self.rpo, nb + 1, NONE);
         self.rpo[nb] = 0;
         for k in 0..n {
             self.rpo[self.order[k] as usize] = k as u32 + 1;
         }
-        fill_u32(&mut self.idom, nb + 1, NONE);
+        fill(&mut self.idom, nb + 1, NONE);
         self.idom[nb] = nb as u32;
         let mut changed = true;
         // Each pass fixes the dominator of one more block at least.
@@ -2294,7 +2291,7 @@ extend Lower {
                 }
             }
         }
-        fill_u32(&mut self.hdr_before, n + 2, 0);
+        fill(&mut self.hdr_before, n + 2, 0);
         for k in 0..n {
             let blk = self.order[k] as usize;
             let mut h: u32 = 0;
@@ -2366,7 +2363,7 @@ extend Lower {
         let fixed = !b.locals[l as usize].is_mutable;
         return ei.size | if mt && fixed {
             REF_NOALIAS
-        } else if !mt && fixed && self.frozen(c, rm, y.as_data.elem, FROZEN_DEPTH) {
+        } else if !mt && fixed && self.frozen_top(c, rm, y.as_data.elem) {
             REF_READONLY
         } else {
             0u32
@@ -2379,10 +2376,24 @@ extend Lower {
         let mut rm = b.module;
         let mut rt = b.locals[l as usize].ty;
         let y = Lower::resolved(c, b.module, rt, &mut rm, &mut rt);
+        // A concrete referent's fields are the same in every body: found once.
+        let (gm, gt) = self.grounded(c, rm, y.as_data.elem);
+        let key = shared as u64 << 48 | gm as u64 << 32 | gt as u64;
+        if let Some(v) = self.ocache.get(&key) {
+            let at = (*v >> 32) as usize;
+            for x in at..at + (*v & 0xFFFFFFFF) as usize {
+                self.b.owned.push(k << 32 | self.opool[x] as u64);
+            }
+            return;
+        }
         let mut offs = Vector::<u32>::new();
         self.owned_fields(c, rm, y.as_data.elem, 0, shared, FROZEN_DEPTH, &mut offs);
         for x in 0..offs.len() {
             self.b.owned.push(k << 32 | offs[x] as u64);
+        }
+        if Lower::ast(c, gm).type_concrete(gt) {
+            self.ocache.insert(key, self.opool.len() as u64 << 32 | offs.len() as u64);
+            self.opool.extend_copy(&offs);
         }
     }
 
@@ -2426,13 +2437,27 @@ extend Lower {
                 let mut pm = f.m;
                 let mut pt = f.t;
                 let py = Lower::resolved(c, f.m, f.t, &mut pm, &mut pt);
-                if py.kind == TypeKind::TYPE_POINTER && (!frozen || self.frozen(c, pm, py.as_data.elem, FROZEN_DEPTH)) {
+                if py.kind == TypeKind::TYPE_POINTER && (!frozen || self.frozen_top(c, pm, py.as_data.elem)) {
                     out.push(base + f.off);
                 }
             } else if depth != 0 {
                 self.owned_fields(c, f.m, f.t, base + f.off, frozen, depth - 1, out);
             }
         }
+    }
+
+    // `frozen` at FROZEN_DEPTH, once per concrete type.
+    fn frozen_top(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId) bool {
+        let (gm, gt) = self.grounded(c, m, t);
+        let key = gm as u64 << 32 | gt as u64;
+        if let Some(z) = self.zcache.get(&key) {
+            return *z;
+        }
+        let z = self.frozen(c, m, t, FROZEN_DEPTH);
+        if Lower::ast(c, gm).type_concrete(gt) {
+            self.zcache.insert(key, z);
+        }
+        return z;
     }
 
     // Whether a value of `(m, t)` holds no `UnsafeCell`, conservatively: a scalar, a pointer or a
@@ -2532,7 +2557,7 @@ extend Lower {
         let mut pm = f.m;
         let mut pt = f.t;
         let py = Lower::resolved(c, f.m, f.t, &mut pm, &mut pt);
-        return if py.kind == TypeKind::TYPE_POINTER && self.frozen(c, pm, py.as_data.elem, FROZEN_DEPTH) {
+        return if py.kind == TypeKind::TYPE_POINTER && self.frozen_top(c, pm, py.as_data.elem) {
             REF_INNER | REF_READONLY
         } else {
             0u32
@@ -9466,7 +9491,7 @@ extend Lower {
     // renumber what is left in block order. Every step is linear in the body.
     // The tidy body, then slot forwarding over its merged blocks, which a second pass applies.
     fn tidy(self: &mut Self) {
-        fill_bool(&mut self.td.kill, self.b.insts.len(), false);
+        fill(&mut self.td.kill, self.b.insts.len(), false);
         self.tidy_pass();
         if self.forward_slots() {
             self.tidy_pass();
@@ -9480,7 +9505,7 @@ extend Lower {
         self.fold_conversions();
         self.tidy_reach();
         // Liveness: the instructions with an effect in a reached block, then what they use.
-        fill_u32(&mut self.td.imap, ni, NONE);
+        fill(&mut self.td.imap, ni, NONE);
         self.td.work.truncate(0);
         for k in 0..nb {
             if self.td.bmap[k] == NONE {
@@ -9494,7 +9519,7 @@ extend Lower {
                 }
             }
         }
-        fill_u32(&mut self.td.puse, self.b.params.len(), 0);
+        fill(&mut self.td.puse, self.b.params.len(), 0);
         while self.td.work.len() != 0 {
             let i = self.td.work.pop().unwrap();
             inst_uses(&self.b, self.b.insts[i as usize], &mut self.td.uses);
@@ -9511,7 +9536,7 @@ extend Lower {
         }
         // Threading: a reached block whose one live instruction is a `jmp` forwards: one of no
         // parameter, or one that passes its parameters on in order.
-        fill_u32(&mut self.td.fwd, nb, NONE);
+        fill(&mut self.td.fwd, nb, NONE);
         let mut any = false;
         for k in 1..nb {
             let bk = self.b.blocks[k];
@@ -9565,7 +9590,7 @@ extend Lower {
         // as one), their parameters and live instructions in block order.
         let mut n = self.hoist_constants();
         let mut np: u32 = 0;
-        fill_u32(&mut self.td.pmap, self.b.params.len(), NONE);
+        fill(&mut self.td.pmap, self.b.params.len(), NONE);
         for k in 0..nb {
             if self.td.bmap[k] == NONE {
                 continue;
@@ -9595,7 +9620,7 @@ extend Lower {
         self.td.locs.truncate(0);
         self.td.params.truncate(0);
         self.td.blocks.truncate(0);
-        fill_bool(&mut self.td.done, self.b.pool.len(), false);
+        fill(&mut self.td.done, self.b.pool.len(), false);
         for k in 0..nb {
             if self.td.bmap[k] == NONE {
                 continue;
@@ -9653,19 +9678,19 @@ extend Lower {
     fn forward_slots(self: &mut Self) bool {
         let ni = self.b.insts.len();
         let ns = self.b.slots.len();
-        fill_bool(&mut self.td.kill, ni, false);
+        fill(&mut self.td.kill, ni, false);
         if ns < 2 {
             return false;
         }
-        fill_u32(&mut self.td.smap, ni, NONE);
+        fill(&mut self.td.smap, ni, NONE);
         for i in 0..ni {
             if self.b.insts[i].op == O_SLOTADDR {
                 self.td.smap[i] = self.b.insts[i].a;
             }
         }
-        fill_u32(&mut self.td.snuse, ns, 0);
-        fill_u32(&mut self.td.sblk, ns, NONE);
-        fill_bool(&mut self.td.sesc, ns, false);
+        fill(&mut self.td.snuse, ns, 0);
+        fill(&mut self.td.sblk, ns, NONE);
+        fill(&mut self.td.sesc, ns, false);
         // A tidy pass ran: every block is reached.
         let nb = self.b.blocks.len();
         for k in 0..nb {
@@ -9691,14 +9716,14 @@ extend Lower {
                 }
             }
         }
-        fill_u32(&mut self.td.srep, ns, 0);
+        fill(&mut self.td.srep, ns, 0);
         for sl in 0..ns {
             self.td.srep[sl] = sl as u32;
         }
-        fill_u32(&mut self.td.sseen, ns, 0);
-        fill_u32(&mut self.td.sfirst, ns, NONE);
-        fill_u32(&mut self.td.slast, ns, NONE);
-        fill_u32(&mut self.td.slastb, ns, NONE);
+        fill(&mut self.td.sseen, ns, 0);
+        fill(&mut self.td.sfirst, ns, NONE);
+        fill(&mut self.td.slast, ns, NONE);
+        fill(&mut self.td.slastb, ns, NONE);
         let mut any = false;
         for k in 0..nb {
             let bk = self.b.blocks[k];
@@ -9801,7 +9826,7 @@ extend Lower {
     // Drop the slots no instruction takes the address of, and renumber the others in order.
     fn drop_unused_slots(self: &mut Self) {
         let ns = self.b.slots.len();
-        fill_u32(&mut self.td.smap, ns, NONE);
+        fill(&mut self.td.smap, ns, NONE);
         for i in 0..self.b.insts.len() {
             if self.b.insts[i].op == O_SLOTADDR {
                 self.td.smap[self.b.insts[i].a as usize] = 0;
@@ -9832,8 +9857,8 @@ extend Lower {
     // `fwd`: the block merged after each block; NONE when none is. The number of merged blocks.
     fn tidy_merges(self: &mut Self) u32 {
         let nb = self.b.blocks.len();
-        fill_u32(&mut self.td.fwd, nb, 0);
-        fill_u32(&mut self.td.jp, nb, NONE);
+        fill(&mut self.td.fwd, nb, 0);
+        fill(&mut self.td.jp, nb, NONE);
         for k in 0..nb {
             if self.td.bmap[k] == NONE {
                 continue;
@@ -9859,9 +9884,9 @@ extend Lower {
                 m += 1;
             }
         }
-        fill_u32(&mut self.td.psub, self.b.params.len(), VNONE);
+        fill(&mut self.td.psub, self.b.params.len(), VNONE);
         if m == 0 {
-            fill_u32(&mut self.td.fwd, nb, NONE);
+            fill(&mut self.td.fwd, nb, NONE);
             return 0;
         }
         // A merged block's parameters are the values its predecessor's `jmp` passes.
@@ -9913,7 +9938,7 @@ extend Lower {
     // sends each to its first. The entry defines them: it dominates every use. The count.
     fn hoist_constants(self: &mut Self) u32 {
         let nb = self.b.blocks.len();
-        fill_bool(&mut self.td.hoisted, self.b.insts.len(), false);
+        fill(&mut self.td.hoisted, self.b.insts.len(), false);
         self.td.consts.truncate(0);
         self.td.ckey.clear();
         for k in 0..nb {
@@ -9989,7 +10014,7 @@ extend Lower {
     // `bmap`: each block the entry reaches, numbered in block order; NONE for the others.
     fn tidy_reach(self: &mut Self) {
         let nb = self.b.blocks.len();
-        fill_u32(&mut self.td.bmap, nb, NONE);
+        fill(&mut self.td.bmap, nb, NONE);
         self.td.work.truncate(0);
         self.td.bmap[0] = 0;
         self.td.work.push(0);
@@ -10091,23 +10116,6 @@ extend Lower {
             }
         }
         return t;
-    }
-}
-
-// `v` as `n` copies of `x`, its buffer reused.
-fn fill_u32(v: &mut Vector<u32>, n: usize, x: u32) {
-    v.truncate(0);
-    v.resize_default(n);
-    if x != 0 {
-        v.as_mut_slice().fill(x);
-    }
-}
-
-fn fill_bool(v: &mut Vector<bool>, n: usize, x: bool) {
-    v.truncate(0);
-    v.resize_default(n);
-    if x != false {
-        v.as_mut_slice().fill(x);
     }
 }
 
@@ -11063,4 +11071,33 @@ extend Lower {
         let at = self.ptradd(me, VNONE, 0, f.off);
         return self.drop_at(c, frm, frt, at, 0);
     }
+}
+
+// Member `pj` (a PJ_FIELD) of members `fl`, after a downcast to `variant` (NODE_NONE: none), into `out`;
+// whether there is one.
+fn member_in(fl: []FieldAt, pj: irc::Projection, variant: NodeId, out: &mut FieldAt) bool {
+    for k in 0..fl.len() {
+        let f = fl[k];
+        if f.idx == 0xFFFFFFFF {
+            continue;
+        }
+        if variant != NODE_NONE && f.variant != variant {
+            continue;
+        }
+        if variant == NODE_NONE && f.variant != NODE_NONE {
+            continue;
+        }
+        let hit = if pj.sub != NODE_NONE && pj.data != irc::PJ_UNION_FIELD {
+            f.node == pj.sub || f.node == NODE_NONE && f.idx == pj.data
+        } else if pj.data == irc::PJ_UNION_FIELD {
+            f.node == pj.sub
+        } else {
+            f.idx == pj.data
+        };
+        if hit {
+            *out = f;
+            return true;
+        }
+    }
+    return false;
 }

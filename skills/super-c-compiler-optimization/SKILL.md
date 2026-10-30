@@ -321,7 +321,9 @@ Summary:
   `IMPLIED` was evaluated five times, the gen tree was listed twice on a no-op build, and
   the object-cache key read back files the sink had just written. Before you add a walk,
   hash, file read, or evaluation, find the stage that already has the value and take it
-  from there.
+  from there: apply the procedure in `super-c-task-discipline` section 10 and check the
+  analysis inventory (`super-c-compiler-internals`, `references/analyses.md`). The forms of
+  duplicate work to look for are in compiler-patterns.md, "Duplicate Analysis and Work".
 - **Body-sharing for generic instances:** when multiple monomorphizations share the same
   lowered body, emit once and reference.
 - **Rejected levers:** read the measured list in "What to Avoid" before you try a lever.

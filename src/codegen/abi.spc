@@ -48,6 +48,21 @@ pub(package) struct CallLayout {
 }
 
 extend CallLayout {
+    /// `o`'s layout, in this one's buffers.
+    pub(package) fn copy_from(self: &mut Self, o: &CallLayout) {
+        self.locs.truncate(0);
+        self.locs.extend_copy(&o.locs);
+        self.parts.truncate(0);
+        self.parts.extend_copy(&o.parts);
+        self.ret = o.ret;
+        self.stack_bytes = o.stack_bytes;
+        self.named_bytes = o.named_bytes;
+        self.named_gp = o.named_gp;
+        self.named_vr = o.named_vr;
+        self.vr_used = o.vr_used;
+        self.unknown = o.unknown;
+    }
+
     pub(package) fn new() CallLayout {
         return CallLayout {
             locs: Vector::<ALoc>::new(),

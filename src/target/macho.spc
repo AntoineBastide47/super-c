@@ -245,30 +245,26 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         vy.off = at;
         vy.size = 24;
     }
-    // The sections present, in kind order; the descriptors after the initialized ones.
+    // The sections present, in kind order; the descriptors after the initialized ones, the zero-filled
+    // ones (from `nfile` on) last.
     let ns = o.secs.len();
+    let mut zf = Vector::<bool>::with_capacity(ns);
+    for k in 0..ns {
+        zf.push(zerofill(o, k as u8));
+    }
     let mut kinds = Vector::<u8>::new();
     for k in 0..ns {
-        if o.secs[k].size != 0 && !zerofill(o, k as u8) {
+        if o.secs[k].size != 0 && !zf[k] {
             kinds.push(k as u8);
         }
     }
     if tv.len() != 0 {
         kinds.push(TV);
     }
+    let nfile = kinds.len();
     for k in 0..ns {
-        if o.secs[k].size != 0 && zerofill(o, k as u8) {
+        if o.secs[k].size != 0 && zf[k] {
             kinds.push(k as u8);
-        }
-    }
-    // An absolute pointer's addend is the bytes it relocates.
-    for r in 0..o.rels.len() {
-        let x = o.rels[r];
-        if x.kind == a::R_ABS64 {
-            let b = o.secs.index_mut(x.sec as usize);
-            for j in 0..8u32 {
-                b.bytes[(x.off + j) as usize] = (x.addend as u64 >> (8 * j) as u64 & 0xFF) as u8;
-            }
         }
     }
     let nsect = kinds.len() as u32;
@@ -297,35 +293,53 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         va = va + a - 1 & ~(a - 1);
         addr.push(va);
         va += size;
-        if !zerofill(o, k) && a > fal {
+        if i < nfile && a > fal {
             fal = a;
         }
     }
     let data_start = (hdr + cmds) as u64 + fal - 1 & ~(fal - 1);
-    // An address in a debug section holds the object's own address of its target and relocates against
-    // the target's section, as `dsymutil` maps it.
+    // An absolute pointer's addend is the bytes it relocates. An address in a debug section holds the
+    // object's own address of its target and relocates against the target's section, as `dsymutil` maps
+    // it. One pass also lists each section's relocations in order (`rat`, `rix`).
     let mut dbg = Vector::<bool>::new();
     dbg.resize_default(ns);
     for k in ob::S_COUNT as usize..ns {
         dbg[k] = o.secs[k].name.as_str().starts_with("__DWARF,");
     }
+    let mut rat = Vector::<u32>::new();
+    rat.resize_default(ns + 1);
     for r in 0..o.rels.len() {
         let x = o.rels[r];
-        if !dbg[x.sec as usize] {
+        rat[x.sec as usize + 1] += 1;
+        let v = if dbg[x.sec as usize] {
+            let y = o.syms[x.sym as usize];
+            assert(x.kind == a::R_ABS64 && y.sec != ob::NOSEC, "macho: a debug address of a function of the object");
+            addr[(secno[y.sec as usize] - 1) as usize] + y.off + x.addend as u64
+        } else if x.kind == a::R_ABS64 {
+            x.addend as u64
+        } else {
             continue;
-        }
-        let y = o.syms[x.sym as usize];
-        assert(x.kind == a::R_ABS64 && y.sec != ob::NOSEC, "macho: a debug address of a function of the object");
-        let v = addr[(secno[y.sec as usize] - 1) as usize] + y.off + x.addend as u64;
+        };
         let b = o.secs.index_mut(x.sec as usize);
         for j in 0..8u32 {
             b.bytes[(x.off + j) as usize] = (v >> (8 * j) as u64 & 0xFF) as u8;
         }
     }
+    for k in 0..ns {
+        rat[k + 1] += rat[k];
+    }
+    let mut rix = Vector::<u32>::new();
+    rix.resize_default(o.rels.len());
+    let mut rfill = rat.clone();
+    for r in 0..o.rels.len() {
+        let s = o.rels[r].sec as usize;
+        rix[rfill[s] as usize] = r as u32;
+        rfill[s] += 1;
+    }
     let mut filesz: u64 = 0;
     for i in 0..kinds.len() {
         let k = kinds[i];
-        if zerofill(o, k) {
+        if i >= nfile {
             foff.push(0);
         } else {
             let (size, _al) = sec_size(o, &tv, k);
@@ -376,11 +390,8 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
                 put_rel(&mut relbytes, tv_rel[r], &symix);
             }
         } else {
-            for r in 0..o.rels.len() {
-                let x = o.rels[r];
-                if x.sec != k {
-                    continue;
-                }
+            for q in rat[k as usize]..rat[k as usize + 1] {
+                let x = o.rels[rix[q as usize] as usize];
                 if dbg[k as usize] {
                     // Against the section: its number, not extern.
                     ob::w32(&mut relbytes, x.off);
@@ -518,35 +529,21 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
     // Section bytes.
     for i in 0..kinds.len() {
         let k = kinds[i];
-        if zerofill(o, k) {
+        if i >= nfile {
             continue;
         }
-        while out.len() as u64 < foff[i] as u64 {
-            out.push(0);
-        }
+        ob::pad(out, foff[i]);
         if k == TV {
-            for j in 0..tv.len() {
-                out.push(tv[j]);
-            }
+            out.extend_from_slice(&tv);
         } else {
             let b = &o.secs[k as usize].bytes;
-            for j in 0..b.len() {
-                out.push(b[j]);
-            }
+            out.extend_from_slice(b.as_slice());
         }
     }
-    while out.len() as u64 < reloc_start {
-        out.push(0);
-    }
-    for j in 0..relbytes.len() {
-        out.push(relbytes[j]);
-    }
-    for j in 0..nl.len() {
-        out.push(nl[j]);
-    }
-    for j in 0..strs.len() {
-        out.push(strs[j]);
-    }
+    ob::pad(out, reloc_start);
+    out.extend_from_slice(&relbytes);
+    out.extend_from_slice(&nl);
+    out.extend_from_slice(&strs);
 }
 
 // Whether section `k` of `o` is zero-filled: no bytes in the file.

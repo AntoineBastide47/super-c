@@ -40,13 +40,10 @@ extend Pairs {
         };
     }
 
-    /// Split the i128 values of `b`, whose reached blocks are `order` in reverse postorder (`rpo`: per
-    /// block, its position there, NONE when unreached), into `out`; false when `b` has none (`out`
-    /// untouched).
-    pub(package) fn run(self: &mut Self, b: &Body, order: []u32, rpo: []u32, out: &mut Body) bool {
-        if b.naked || !has_i128(b) {
-            return false;
-        }
+    /// Split the i128 values of `b`, which holds one (`has_i128`) and is not naked, whose reached blocks
+    /// are `order` in reverse postorder (`rpo`: per block, its position there, NONE when unreached), into
+    /// `out`.
+    pub(package) fn run(self: &mut Self, b: &Body, order: []u32, rpo: []u32, out: &mut Body) {
         let ni = b.insts.len();
         let np = b.params.len();
         self.ni = ni;
@@ -135,7 +132,6 @@ extend Pairs {
                 out.scopes.push(Scope { site: sc.site, group: sc.group, root: v });
             }
         }
-        return true;
     }
 
     // The value index of `v` in `lo`, `hi` and `whole`.
@@ -462,7 +458,7 @@ extend Pairs {
 }
 
 // Whether `b` has an i128 value.
-const fn has_i128(b: &Body) bool {
+pub(package) const fn has_i128(b: &Body) bool {
     for q in 0..b.params.len() {
         if b.params[q] == T_I128 {
             return true;
@@ -480,11 +476,4 @@ const fn has_i128(b: &Body) bool {
 // an i32.
 const fn word_access(t: Inst) bool {
     return (t.aux & MEM_VOLATILE) == 0 && (t.c as i32) as i64 + 8 <= 0x7FFFFFFF;
-}
-
-fn fill(v: &mut Vector<u32>, n: usize, x: u32) {
-    v.truncate(0);
-    for _ in 0..n {
-        v.push(x);
-    }
 }

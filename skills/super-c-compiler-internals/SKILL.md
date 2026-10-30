@@ -10,6 +10,9 @@ allowed-tools: Bash Read
 
 - Read the linked Core IR and stages reference only when the task needs them.
 - Confirm pipeline order in `src/driver/emit.spc`.
+- Before you add an analysis, traversal, table, or pass, read the phase's facts in
+  [analyses.md](references/analyses.md) and reuse or extend the producer
+  (`super-c-task-discipline` section 10). Keep the inventory current in the same change.
 - Treat typed facts and Core IR ownership rules as hard contracts.
 - Run the self-hosting fixpoint procedure for compiler changes.
 
@@ -1143,8 +1146,9 @@ body the lowering or the backend refuses, a call of a header's `static` function
 without a template) is a build error that names the module and why (`native_plan`); `SC_NATIVE_STATS`
 reports each module. Each native module gives `m.o` (its own items, reused by the emission cache) and
 `m__inst.o` (the rest). The record `__sc_native` holds, per module, the key its own part was compiled
-under (`nat_key`, which mixes in the build configuration, the CPU features, the LIR optimizer's
-switches, the header facts and, with debug information, the compile directory), its low bit `NAT_OBJ`
+under (its emission cache key xor `nat_base`, which mixes in the build configuration, the CPU
+features, the LIR optimizer's switches, the header facts and, with debug information, the compile
+directory), its low bit `NAT_OBJ`
 when that part has an object; `nat_trust` turns an emission cache hit into a miss when the record does
 not hold the module under the current key.
 

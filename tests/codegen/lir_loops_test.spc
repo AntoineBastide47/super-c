@@ -1848,10 +1848,17 @@ b3:
   ret v5
 )";
     let (b, a) = optimized(src, FIN);
+    // Each loop keeps its blocks too: the tests that fail leave no block behind (`close_plan`).
+    let (_, z) = optimized(
+        src,
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+    );
     let names: []str = ["xor", "geo", "mem"];
     for f in 0..names.len() {
         let t = text_of(&a, names[f]);
         assert(t.contains("br "), t.as_str());
+        let k = text_of(&z, names[f]);
+        assert(t.equals(&k), t.as_str());
     }
     let x: []u64 = [10];
     same_outcome(&b, &a, "xor", x, 1, false);

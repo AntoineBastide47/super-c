@@ -57,7 +57,7 @@ extend Caps as Copy {}
 pub(package) struct Live {
     pub(package) order: Vector<u32>, // the blocks in layout order
     pub(package) pos: Vector<u32>, // per block, its layout position
-    pub(package) npred: Vector<u32>, // per block, its predecessor count (an edge each)
+    pub(package) npred: Vector<u32>, // per block, its predecessor count (an edge each from a block the entry reaches)
     pub(package) inner: Vector<u32>, // per block, the header of its innermost loop, NONE outside loops
     pub(package) lend: Vector<u32>, // per loop header, the layout position of the loop's last block
     pub(package) parent: Vector<u32>, // per loop header, the header of the loop around it, NONE
@@ -66,6 +66,14 @@ pub(package) struct Live {
     /// generator's rare blocks that alone set its frame up, after the code that has none.
     pub(package) after: Vector<bool>,
     pub(package) def_blk: Vector<u32>, // per value, its block
+    // Per block, its predecessors that the entry reaches: `preds[pat[k]..pat[k + 1]]` (`loops`).
+    pub(package) pat: Vector<u32>,
+    pub(package) preds: Vector<u32>,
+    // Per instruction of a laid-out block, its uses as `uses_at` gives them: `uv[ua[i]..ua[i] + un[i]]`
+    // (`ranges`; `uses_of`).
+    ua: Vector<u32>,
+    un: Vector<u32>,
+    uv: Vector<Value>,
     pub(package) end: Vector<u32>, // per value, the last layout position it is live in
     pub(package) uses: Vector<u32>, // per value, its use count, one more when a loop keeps it past its last use
     pub(package) last: Vector<u32>, // per value, the highest instruction index that uses it (0: none)
@@ -100,10 +108,12 @@ pub(package) struct Live {
     cand: Vector<u64>,
     act: Vector<u32>,
     cnt: Vector<u32>,
-    rpo: Vector<u32>, // per block, its reverse postorder number (NONE: unreachable)
+    pub(package) rpo: Vector<u32>, // per block, its reverse postorder number (NONE: unreachable)
     succ: Vector<u32>,
     stack: Vector<u32>,
     work: Vector<u32>,
+    /// Per instruction of the body, its use count: operands, call and vector arguments, edge arguments (`folds`).
+    pub(package) count: Vector<u32>,
     keys: Vector<u64>,
     rd: Vector<Value>, // `reads_after`'s scratch
 }
@@ -145,8 +155,14 @@ extend Live {
             succ: Vector::<u32>::new(),
             stack: Vector::<u32>::new(),
             work: Vector::<u32>::new(),
+            count: Vector::<u32>::new(),
             keys: Vector::<u64>::new(),
             rd: Vector::<Value>::new(),
+            ua: Vector::<u32>::new(),
+            pat: Vector::<u32>::new(),
+            preds: Vector::<u32>::new(),
+            un: Vector::<u32>::new(),
+            uv: Vector::<Value>::new(),
         };
     }
 
@@ -170,21 +186,30 @@ extend Live {
         fill(&mut self.npred, nb, 0);
         fill(&mut self.rpo, nb, NONE);
         fill(&mut self.inner, nb, NONE);
-        fill(&mut self.lend, nb, 0);
         fill(&mut self.parent, nb, NONE);
-        fill(&mut self.pos, nb, NONE);
+        self.reverse_postorder(b);
         for k in 0..nb {
+            if self.rpo[k] == NONE {
+                continue;
+            }
             let t = b.insts[(b.blocks[k].start + b.blocks[k].len - 1) as usize];
             b.succ_edges(t, &mut self.succ);
             for e in 0..self.succ.len() {
                 self.npred[b.edge_target(self.succ[e]) as usize] += 1;
             }
         }
-        self.reverse_postorder(b);
         self.rare_blocks(b);
         self.loops(b);
-        self.layout(b);
         self.folds(b);
+        self.relayout(b);
+    }
+
+    /// The layout of `b` and the live ranges again, for another `after`: the rest of `run`'s analysis stands.
+    pub(package) fn relayout(self: &mut Self, b: &Body) {
+        let nb = b.blocks.len();
+        fill(&mut self.lend, nb, 0);
+        fill(&mut self.pos, nb, NONE);
+        self.layout(b);
         self.ranges(b);
     }
 
@@ -203,7 +228,7 @@ extend Live {
             return;
         }
         // The use count of each instruction, and its uses as a condition.
-        fill(&mut self.work, ni, 0);
+        fill(&mut self.count, ni, 0);
         fill(&mut self.cnd, ni, 0);
         for i in 0..ni {
             let t = b.insts[i];
@@ -211,7 +236,7 @@ extend Live {
             for u in 0..self.succ.len() {
                 let v = self.succ[u];
                 if (v & (VPARAM | VFLAG)) == 0 {
-                    self.work[v as usize] += 1;
+                    self.count[v as usize] += 1;
                 }
             }
             if (t.op == O_SELECT || t.op == O_BR) && (t.a & (VPARAM | VFLAG)) == 0 {
@@ -220,7 +245,7 @@ extend Live {
         }
         for i in 0..ni {
             let t = b.insts[i];
-            self.pfold[i] = (self.fold_ops & FOLD_CMP) != 0 && t.op == O_ICMP && b.type_of(t.a) != T_I128 && self.work[i] != 0 && self.cnd[i] == self.work[i];
+            self.pfold[i] = (self.fold_ops & FOLD_CMP) != 0 && t.op == O_ICMP && b.type_of(t.a) != T_I128 && self.count[i] != 0 && self.cnd[i] == self.count[i];
         }
         // An `and`'s uses as an equality with 0.
         fill(&mut self.cnd, ni, 0);
@@ -239,7 +264,7 @@ extend Live {
                 continue;
             }
             let bits = type_bits(t.ty, 8);
-            if t.op == O_AND && (self.fold_ops & FOLD_TST) != 0 && self.work[i] != 0 && self.cnd[i] == self.work[i] {
+            if t.op == O_AND && (self.fold_ops & FOLD_TST) != 0 && self.count[i] != 0 && self.cnd[i] == self.count[i] {
                 // A narrow type's register may hold any bits above it: only a mask within the type tests.
                 let m = int_const(b, t.b);
                 self.pfold[i] = bits >= 32 || m != u64::MAX && m >> bits as u64 == 0;
@@ -249,15 +274,16 @@ extend Live {
             } else {
                 VNONE
             };
-            if (self.fold_ops & FOLD_MADD) != 0 && p != VNONE && (p & (VPARAM | VFLAG)) == 0 && b.insts[p as usize].op == O_MUL && self.work[p as usize] == 1 && int_const(
+            if (self.fold_ops & FOLD_MADD) != 0 && p != VNONE && (p & (VPARAM | VFLAG)) == 0 && b.insts[p as usize].op == O_MUL && self.count[p as usize] == 1 && int_const(
                 b,
                 t.a,
             ) == u64::MAX {
                 self.pfold[p as usize] = true;
             }
             if (self.fold_ops & FOLD_ROT) != 0 && (bits >= 32 || (self.fold_ops & FOLD_ROT_NARROW) != 0) {
-                let amt = rotate_of(b, i as u32).amt;
-                if rotate_of(b, i as u32).x != VNONE && self.work[t.a as usize] == 1 && self.work[t.b as usize] == 1 {
+                let rot = rotate_of(b, i as u32);
+                let amt = rot.amt;
+                if rot.x != VNONE && self.count[t.a as usize] == 1 && self.count[t.b as usize] == 1 {
                     self.pfold[t.a as usize] = true;
                     self.pfold[t.b as usize] = true;
                     // Each amount's extension or truncation with this one use. `inside`: the uses of the
@@ -274,7 +300,7 @@ extend Live {
                         };
                         let s = b.insts[sh as usize].b;
                         let ext = amount_of(b, s) != s;
-                        if ext && self.work[s as usize] == 1 {
+                        if ext && self.count[s as usize] == 1 {
                             self.pfold[s as usize] = true;
                         }
                         if amount_of(b, s) == amt {
@@ -298,7 +324,7 @@ extend Live {
                             sa
                         };
                         for _ in 0..2 {
-                            if !open || !is_inst(v) || self.work[v as usize] != 1 {
+                            if !open || !is_inst(v) || self.count[v as usize] != 1 {
                                 break;
                             }
                             let o = b.insts[v as usize].op;
@@ -317,11 +343,11 @@ extend Live {
                         }
                         // The amount's extension, which the other amount's folded chain may read too: folded
                         // when the shift and that chain are its only users.
-                        if own != amt && !self.pfold[own as usize] && self.work[own as usize] == 1 + (v == own) as u32 {
+                        if own != amt && !self.pfold[own as usize] && self.count[own as usize] == 1 + (v == own) as u32 {
                             self.pfold[own as usize] = true;
                             inside += 1;
                         }
-                        if is_inst(amt) && b.insts[amt as usize].op == O_AND && int_const(b, b.insts[amt as usize].b) == bits as u64 - 1 && self.work[amt as usize] == inside {
+                        if is_inst(amt) && b.insts[amt as usize].op == O_AND && int_const(b, b.insts[amt as usize].b) == bits as u64 - 1 && self.count[amt as usize] == inside {
                             self.pfold[amt as usize] = true;
                         }
                     }
@@ -341,7 +367,7 @@ extend Live {
                     } else {
                         t.a
                     };
-                    if lea_shift(b, v) == 0 || self.pfold[v as usize] || self.work[v as usize] != 1 {
+                    if lea_shift(b, v) == 0 || self.pfold[v as usize] || self.count[v as usize] != 1 {
                         continue;
                     }
                     self.pfold[v as usize] = true;
@@ -356,7 +382,7 @@ extend Live {
                     } else {
                         t.b
                     };
-                    if q == 1 && t.op == O_SUB || !is_inst(v) || self.pfold[v as usize] || self.work[v as usize] != 1 || b.insts[v as usize].op != O_ADD || b.insts[v as usize].ty != t.ty {
+                    if q == 1 && t.op == O_SUB || !is_inst(v) || self.pfold[v as usize] || self.count[v as usize] != 1 || b.insts[v as usize].op != O_ADD || b.insts[v as usize].ty != t.ty {
                         continue;
                     }
                     self.pfold[v as usize] = true;
@@ -375,7 +401,7 @@ extend Live {
                     u64::MAX
                 };
                 // A mask of the low `w` bits under a shift by `k`, both within the width.
-                if self.work[t.a as usize] == 1 && m != u64::MAX && m != 0 && (m & m + 1) == 0 && k < bits as u64 {
+                if self.count[t.a as usize] == 1 && m != u64::MAX && m != 0 && (m & m + 1) == 0 && k < bits as u64 {
                     let w = (m + 1).trailing_zeros() as u64;
                     self.pfold[t.a as usize] = self.pfold[t.a as usize] || k + w <= bits as u64;
                 }
@@ -399,18 +425,17 @@ extend Live {
             let sc = p.aux as u32;
             // A vector of 8 or 16 bytes lives in a register; another is memory.
             let reg = !is_vec(ty) && ty != T_I128 || n == 8 || n == 16;
-            self.fold[i] = p.op == O_PTRADD && p.b != VNONE && p.c == 0 && self.work[t.a as usize] == 1 && reg && (sc == 1 || sc == n && n <= self.fold_max);
+            self.fold[i] = p.op == O_PTRADD && p.b != VNONE && p.c == 0 && self.count[t.a as usize] == 1 && reg && (sc == 1 || sc == n && n <= self.fold_max);
             if self.fold[i] {
                 self.pfold[t.a as usize] = true;
             }
         }
     }
 
-    // `uses_at` into `succ`.
-    fn uses_into(self: &mut Self, b: &Body, i: u32) {
-        let mut out = replace(&mut self.succ, Vector::<u32>::new());
-        self.uses_at(b, i, &mut out);
-        self.succ = out;
+    /// The uses of instruction `i` of a laid-out block, as `uses_at` gives them (`ranges` found them).
+    pub(package) fn uses_of(self: &Self, i: u32) Slice<Value> {
+        let a = self.ua[i as usize] as usize;
+        return self.uv[a..a + self.un[i as usize] as usize];
     }
 
     /// The value index of a parameter that a back edge of terminator `t` (of the block at layout position
@@ -605,8 +630,9 @@ extend Live {
     // header's first enclosing loop its parent.
     fn loops(self: &mut Self, b: &Body) {
         let nb = b.blocks.len();
-        // Predecessor lists (CSR): `keys` holds the starts, `work` the sources.
-        let mut start = Vector::<u32>::with_capacity(nb + 1);
+        // Predecessor lists (CSR): `pat` holds the starts, `preds` the sources.
+        let mut start = replace(&mut self.pat, Vector::<u32>::new());
+        start.truncate(0);
         let mut acc: u32 = 0;
         for k in 0..nb {
             start.push(acc);
@@ -615,8 +641,8 @@ extend Live {
         start.push(acc);
         let mut fillp = Vector::<u32>::with_capacity(nb);
         fillp.extend_copy(&start);
-        let mut preds = Vector::<u32>::new();
-        preds.resize_default(acc as usize);
+        let mut preds = replace(&mut self.preds, Vector::<u32>::new());
+        fill(&mut preds, acc as usize, 0);
         let mut hdrs = Vector::<u64>::new();
         for k in 0..nb {
             if self.rpo[k] == NONE {
@@ -671,6 +697,8 @@ extend Live {
                 }
             }
         }
+        self.pat = start;
+        self.preds = preds;
     }
 
     // `rare`: the reachable blocks the entry reaches only through a block marked rare, that block included;
@@ -907,11 +935,19 @@ extend Live {
         // The values a loop keeps (`kept`): the back edge, past their last use, reads them again.
         let mut kept = Vector::<bool>::new();
         kept.resize_default(n);
+        fill(&mut self.ua, ni, 0);
+        fill(&mut self.un, ni, 0);
+        self.uv.truncate(0);
         for p in 0..self.order.len() {
             let k = self.order[p];
             let bk = b.blocks[k as usize];
             for i in bk.start..bk.start + bk.len {
-                self.uses_into(b, i);
+                let mut us = replace(&mut self.succ, Vector::<u32>::new());
+                self.uses_at(b, i, &mut us);
+                self.ua[i as usize] = self.uv.len() as u32;
+                self.un[i as usize] = us.len() as u32;
+                self.uv.extend_copy(&us);
+                self.succ = us;
                 for u in 0..self.succ.len() {
                     let x = self.vix(b, self.succ[u]);
                     self.uses[x as usize] += 1;
@@ -967,16 +1003,15 @@ extend Live {
     pub(package) fn loop_consts(self: &mut Self, b: &Body, out: &mut Vector<bool>) {
         out.truncate(0);
         out.resize_default(b.insts.len());
-        let mut us = replace(&mut self.succ, Vector::<u32>::new());
         for k in 0..b.blocks.len() {
             if self.inner[k] == NONE || self.pos[k] == NONE {
                 continue;
             }
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
-                self.uses_at(b, i, &mut us);
-                for u in 0..us.len() {
-                    let v = us[u];
+                let a = self.ua[i as usize];
+                for u in a..a + self.un[i as usize] {
+                    let v = self.uv[u as usize];
                     if (v & (VPARAM | VFLAG)) == 0 && (b.insts[v as usize].op == O_FCONST || b.insts[v as usize].op == O_ICONST) {
                         let d = self.def_blk[v as usize];
                         out[v as usize] = out[v as usize] || self.end[v as usize] > self.pos[d as usize];
@@ -984,7 +1019,6 @@ extend Live {
                 }
             }
         }
-        self.succ = us;
     }
 
     /// Plan which values hold one register for their whole range (`home`): the ones `want` (WANT_* per
@@ -1046,9 +1080,9 @@ extend Live {
             for i in bk.start..bk.start + bk.len {
                 self.start[i as usize] = self.base[p] + i - bk.start;
                 self.wt[i as usize] += f;
-                self.uses_into(b, i);
-                for u in 0..self.succ.len() {
-                    let x = self.vix(b, self.succ[u]) as usize;
+                let a = self.ua[i as usize];
+                for u in a..a + self.un[i as usize] {
+                    let x = self.vix(b, self.uv[u as usize]) as usize;
                     self.wt[x] += f;
                     self.au[x] += 1;
                 }
@@ -1294,15 +1328,9 @@ pub(package) const fn reduces(t: Inst) bool {
     return code >= core::OP_SIMD && code < core::OP_CMP_LANES && core::simd_op((code - core::OP_SIMD) as u8).rule == core::SR_REDUCE;
 }
 /// Whether instruction `t` of `b` uses an address of slot `s` (an operand, an argument or an edge's argument);
-/// `us` and `es` are scratch.
-pub(package) fn reads_slot(b: &Body, t: Inst, s: u32, us: &mut Vector<Value>, es: &mut Vector<u32>) bool {
+/// `us` is scratch.
+pub(package) fn reads_slot(b: &Body, t: Inst, s: u32, us: &mut Vector<Value>) bool {
     each_use(b, t, us);
-    b.succ_edges(t, es);
-    for e in 0..es.len() {
-        for q in 0..b.edge_nargs(es[e]) {
-            us.push(b.edge_arg(es[e], q));
-        }
-    }
     for q in 0..us.len() {
         let v = us[q];
         if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_SLOTADDR && b.insts[v as usize].a == s {
@@ -1312,32 +1340,38 @@ pub(package) fn reads_slot(b: &Body, t: Inst, s: u32, us: &mut Vector<Value>, es
     return false;
 }
 
-/// The values instruction `t` of `b` uses into `out`, each use once: its operands, a call's arguments, a
-/// vector operation's operands and each edge's arguments.
 // `reads_before` follows at most BACK_SCAN blocks.
 const BACK_SCAN: u32 = 32;
 
+/// `op_flags` bits: the body holds an `O_RETADDR`, an `O_VASTART`, an `O_ASM`, an `O_SYS`.
+pub(package) const OP_RETADDR: u8 = 1;
+pub(package) const OP_VASTART: u8 = 2;
+pub(package) const OP_ASM: u8 = 4;
+pub(package) const OP_SYS: u8 = 8;
+
+/// Which of the operations `OP_*` names body `b` holds.
+pub(package) const fn op_flags(b: &Body) u8 {
+    let mut f: u8 = 0;
+    for i in 0..b.insts.len() {
+        let op = b.insts[i].op;
+        if op == O_RETADDR {
+            f |= OP_RETADDR;
+        } else if op == O_VASTART {
+            f |= OP_VASTART;
+        } else if op == O_ASM {
+            f |= OP_ASM;
+        } else if op == O_SYS {
+            f |= OP_SYS;
+        }
+    }
+    return f;
+}
+
+/// The values instruction `t` of `b` uses into `out`, each use once: its operands, a call's arguments, a
+/// vector operation's operands and each edge's arguments.
 pub(package) fn each_use(b: &Body, t: Inst, out: &mut Vector<Value>) {
-    out.truncate(0);
-    let f = op_info(t.op).form;
-    if lv::operand_a(f) && t.a != VNONE {
-        out.push(t.a);
-    }
-    if lv::operand_b(f) && t.b != VNONE {
-        out.push(t.b);
-    }
-    if lv::operand_c(f) && t.c != VNONE {
-        out.push(t.c);
-    }
-    if f == F_CALL || f == F_CALLIND {
-        for k in 0..t.aux as u32 {
-            out.push(b.pool[(t.c + k) as usize]);
-        }
-    } else if f == F_VOP || f == F_ASM {
-        for k in 0..t.b {
-            out.push(b.pool[(t.a + k) as usize]);
-        }
-    } else if t.op == O_RET && (b.pool[b.sig as usize + 2] & AGG) != 0 {
+    lv::uses(b, t, out);
+    if t.op == O_RET && (b.pool[b.sig as usize + 2] & AGG) != 0 {
         // The return reads the aggregate result's memory, the parameter after the declared ones.
         out.push(VPARAM | b.blocks[0].param_start + b.pool[b.sig as usize]);
     }
@@ -1378,7 +1412,6 @@ pub(package) fn each_edge_param(b: &Body, t: Inst, out: &mut Vector<u32>) {
     out.truncate(np);
 }
 
-/// Edge `k` of terminator `t` (`jmp`: 0; `br`: 0 taken, 1 not; `switch`: its cases, then the default).
 // Whether a path from block `from` reads value `v` before it reaches block `stop`: an instruction or an
 // edge argument of a block on it; true too past BACK_SCAN blocks. A block laid out past `last` (`pos`),
 // the end of `v`'s range, has `v` dead: no such path passes it.
@@ -1442,6 +1475,7 @@ const fn contains_u32(xs: &Vector<u32>, x: u32) bool {
     return false;
 }
 
+/// Edge `k` of terminator `t` (`jmp`: 0; `br`: 0 taken, 1 not; `switch`: its cases, then the default).
 pub(package) const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
     if t.op == O_JMP {
         return t.a;
@@ -1456,16 +1490,6 @@ pub(package) const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
     return b.switch_edge(t, k);
 }
 
-/// `v` as `n` copies of `x`, its buffer reused.
-pub(package) fn fill(v: &mut Vector<u32>, n: usize, x: u32) {
-    v.truncate(0);
-    v.resize_default(n);
-    if x != 0 {
-        v.as_mut_slice().fill(x);
-    }
-}
-
-// The bits of integer constant `v`, u64::MAX for a value that is no constant (or that constant).
 /// A rotation (`rotate_of`): value `x` by amount `amt` (VNONE for constant `k`, rotating left), to the
 /// right when `right`; `x` VNONE for none. `src` is the shift's own amount operand, `amt` maybe past an
 /// extension of it (`rot_amount`).
@@ -1686,6 +1710,7 @@ const fn sext_bits(k: u64, bits: u32) i64 {
     return (k << s) as i64 >> s as i64;
 }
 
+// The bits of integer constant `v`, u64::MAX for a value that is no constant (or that constant).
 fn int_const(b: &Body, v: Value) u64 {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST {
         return u64::MAX;

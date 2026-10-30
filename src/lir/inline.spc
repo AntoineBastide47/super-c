@@ -274,7 +274,7 @@ extend Inliner {
         for k in 0..c.msgs.len() {
             self.mmap.insert(c.msgs[k], k as u32);
         }
-        fill_bool(&mut self.done, c.pool.len(), false);
+        fill(&mut self.done, c.pool.len(), false);
         let mut si: usize = 0;
         for k in 0..c.blocks.len() {
             let bk = c.blocks[k];
@@ -466,12 +466,11 @@ extend Inliner {
         o.pool.extend_copy(&e.pool);
         o.words.extend_copy(&e.words);
         o.slots.extend_copy(&e.slots);
-        for q in 1..e.lines.len() {
-            o.lines.push(e.lines[q]);
+        // Entry 0, "no location", is the caller's own.
+        if e.lines.len() > 1 {
+            o.lines.extend_from_slice(e.lines[1..e.lines.len()]);
         }
-        for q in 0..e.params.len() {
-            o.params.push(e.params[q]);
-        }
+        o.params.extend_copy(&e.params);
         fill_bool_to(&mut self.done, o.pool.len());
         fill(&mut self.csym, e.syms.len(), 0);
         for q in 0..e.syms.len() {
@@ -653,22 +652,6 @@ const fn ev(s: Site, v: Value) Value {
         return VPARAM | s.pbase + (v & ~VPARAM);
     }
     return s.vbase + (v & ~VFLAG) | v & VFLAG;
-}
-
-fn fill(v: &mut Vector<u32>, n: usize, x: u32) {
-    v.truncate(0);
-    v.resize_default(n);
-    if x != 0 {
-        v.as_mut_slice().fill(x);
-    }
-}
-
-fn fill_bool(v: &mut Vector<bool>, n: usize, x: bool) {
-    v.truncate(0);
-    v.resize_default(n);
-    if x {
-        v.as_mut_slice().fill(x);
-    }
 }
 
 // `v` grown to `n` entries, the new ones false.

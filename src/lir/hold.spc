@@ -265,6 +265,8 @@ pub(package) fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut
         // The free data the inlinable bodies name, then the free data their relocations reach.
         let mut free = Vector::<u32>::new();
         let mut seen = Set::<u32>::new();
+        // Per package signature, its index in `decls`: each one recorded once.
+        let mut sigs = Map::<u32, u32>::new();
         for q in 0..fs.at(u).len() {
             let s = fs.at(u)[q];
             let sy = pk.syms[s as usize];
@@ -297,7 +299,7 @@ pub(package) fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut
                 f.calls.push(sv.name(pk, pk.syms[bsym[cs[c] as usize] as usize].name));
             }
             if ok {
-                f.body = pk.bodies[k as usize].compact();
+                f.body = r.inlined(pk, k).compact();
                 for i in 0..f.body.syms.len() {
                     let ry = pk.syms[f.body.syms[i] as usize];
                     if ry.kind != SK_FUNC && ry.def != NONE && ry.unit == NONE && !seen.contains(&f.body.syms[i]) {
@@ -306,8 +308,15 @@ pub(package) fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut
                     }
                     let mut sig = NONE;
                     if ry.sig != NONE {
-                        sig = sv.rec.decls.len() as u32;
-                        sv.rec.decls.push(pk.decls[ry.sig as usize].compact());
+                        sig = (switch sigs.get(&ry.sig) {
+                            Some(x) => *x,
+                            None => {
+                                let x = sv.rec.decls.len() as u32;
+                                sv.rec.decls.push(pk.decls[ry.sig as usize].compact());
+                                sigs.insert(ry.sig, x);
+                                x
+                            },
+                        });
                     }
                     f.refs.push(HRef { name: sv.name(pk, ry.name), kind: ry.kind, ext: ry.ext, sig: sig });
                 }

@@ -78,8 +78,10 @@ pub(package) struct Promoter {
     gap: Vector<Fld>, // `fill_gaps`'s fields
     reached: Vector<bool>, // per block, whether the entry reaches it
     zeros: Vector<u32>, // per machine type, its zero (`zero`; NONE: none yet)
-    // The merges of copies (`merges`).
+    // The merges of copies (`merges`): their own slot tables, `collect`'s kept.
     rslot: Vector<u32>,
+    mdslot: Vector<u32>,
+    mdoff: Vector<i64>,
     iblk: Vector<u32>,
     muse: Vector<u64>,
     mat: Vector<u32>,
@@ -146,6 +148,8 @@ extend Promoter {
             zeros: Vector::<u32>::new(),
             ptr: 8,
             rslot: Vector::<u32>::new(),
+            mdslot: Vector::<u32>::new(),
+            mdoff: Vector::<i64>::new(),
             iblk: Vector::<u32>::new(),
             muse: Vector::<u64>::new(),
             mat: Vector::<u32>::new(),
@@ -191,7 +195,8 @@ extend Promoter {
 
     /// Promote the private slots of `b`, whose graph is given: successors and predecessors as ranges,
     /// immediate dominators (NONE: unreached), the reverse postorder, the dominator tree's children as
-    /// ranges. The new body goes to `out`; false when no slot promotes (`out` untouched).
+    /// ranges, each instruction's block (NONE: none). The new body goes to `out`; false when no slot
+    /// promotes (`out` untouched).
     pub(package) fn run(
         self: &mut Self,
         b: &Body,
@@ -203,6 +208,7 @@ extend Promoter {
         order: []u32,
         kid_at: []u32,
         kids: []u32,
+        blk: []u32,
         ptr: u32,
         out: &mut Body,
     ) bool {
@@ -215,14 +221,19 @@ extend Promoter {
         for k in 0..b.blocks.len() {
             self.reached.push(idom[k] != NONE);
         }
-        fill_bool(&mut self.busy, ns, false);
-        let _ = self.collect(b, idom);
+        fill(&mut self.busy, ns, false);
+        let any = self.collect(b, idom);
         self.pcand.truncate(0);
         for s in 0..ns {
             self.pcand.push(self.cand[s]);
         }
-        let merged = self.merges(b, succ_at, succs);
-        if !self.collect(b, idom) {
+        // A merge changes the slots `collect` reads (`busy`): only then it runs again.
+        let merged = self.merges(b, succ_at, succs, blk);
+        if !if merged {
+            self.collect(b, idom)
+        } else {
+            any
+        } {
             if !merged {
                 return false;
             }
@@ -263,7 +274,7 @@ extend Promoter {
         self.phis.truncate(0);
         fill(&mut self.phi_at, b.blocks.len() + 1, 0);
         fill(&mut self.repl, b.insts.len(), NONE);
-        fill_bool(&mut self.drop, b.insts.len(), false);
+        fill(&mut self.drop, b.insts.len(), false);
         self.xins.truncate(0);
         self.xwords.truncate(0);
         self.eargs.clear();
@@ -278,27 +289,24 @@ extend Promoter {
     // Merge the slots of each copy between two slots of its size whose source no instruction reads after
     // it and whose destination none uses before it (`mslot`: per slot, the slot it merges into; `cdrop`:
     // the copies that go). A slot takes part in one merge at most. Whether any merged.
-    fn merges(self: &mut Self, b: &Body, succ_at: []u32, succs: []u32) bool {
+    fn merges(self: &mut Self, b: &Body, succ_at: []u32, succs: []u32, blk: []u32) bool {
         let ni = b.insts.len();
         let ns = b.slots.len();
         let nb = b.blocks.len();
         fill(&mut self.mslot, ns, NONE);
-        fill_bool(&mut self.cdrop, ni, false);
-        fill_bool(&mut self.busy, ns, false);
+        fill(&mut self.cdrop, ni, false);
+        fill(&mut self.busy, ns, false);
         // Per instruction its slot through any address arithmetic (`rslot`), and through constant offsets
-        // alone with the offset (`dslot`, `doff`); its block.
+        // alone with the offset (`mdslot`, `mdoff`); its block (`blk`'s).
         fill(&mut self.rslot, ni, NONE);
-        fill(&mut self.dslot, ni, NONE);
-        self.doff.truncate(0);
-        self.doff.resize_default(ni);
-        fill(&mut self.iblk, ni, NONE);
+        fill(&mut self.mdslot, ni, NONE);
+        self.mdoff.truncate(0);
+        self.mdoff.resize_default(ni);
+        self.iblk.truncate(0);
+        self.iblk.extend_from_slice(blk);
         let mut copies: u32 = 0;
-        for k in 0..nb {
-            let bk = b.blocks[k];
-            for i in bk.start..bk.start + bk.len {
-                self.iblk[i as usize] = k as u32;
-                copies += (b.insts[i as usize].op == O_MEMCPY) as u32;
-            }
+        for i in 0..ni {
+            copies += (b.insts[i].op == O_MEMCPY && self.iblk[i] != NONE) as u32;
         }
         if copies == 0 {
             return false;
@@ -309,23 +317,23 @@ extend Promoter {
                 let t = b.insts[i];
                 if t.op == O_SLOTADDR {
                     self.rslot[i] = t.a;
-                    self.dslot[i] = t.a;
+                    self.mdslot[i] = t.a;
                 } else if t.op == O_PTRADD && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE && self.rslot[t.a as usize] != NONE {
                     self.rslot[i] = self.rslot[t.a as usize];
-                    if t.b == VNONE && self.dslot[t.a as usize] != NONE {
-                        self.dslot[i] = self.dslot[t.a as usize];
-                        self.doff[i] = self.doff[t.a as usize] + (t.c as i32) as i64;
+                    if t.b == VNONE && self.mdslot[t.a as usize] != NONE {
+                        self.mdslot[i] = self.mdslot[t.a as usize];
+                        self.mdoff[i] = self.mdoff[t.a as usize] + (t.c as i32) as i64;
                     }
                 }
             }
         }
         // Each slot's uses (slot << 32 | instruction), and whether its address may stay somewhere.
         self.muse.truncate(0);
-        fill_bool(&mut self.mesc, ns, false);
+        fill(&mut self.mesc, ns, false);
         for i in 0..ni {
             let t = b.insts[i];
             if self.iblk[i] == NONE || !self.reached[self.iblk[i] as usize] {
-                uses(b, t, &mut self.uses);
+                lv::uses(b, t, &mut self.uses);
                 for u in 0..self.uses.len() {
                     self.escape(self.uses[u], i as u32);
                 }
@@ -391,10 +399,10 @@ extend Promoter {
 
     // The slot address value `v` is with offset 0 (NONE: none).
     const fn slot_at0(self: &Self, v: Value) u32 {
-        if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || self.dslot[v as usize] == NONE || self.doff[v as usize] != 0 {
+        if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || self.mdslot[v as usize] == NONE || self.mdoff[v as usize] != 0 {
             return NONE;
         }
-        return self.dslot[v as usize];
+        return self.mdslot[v as usize];
     }
 
     // Mark the blocks the copy at instruction `i` of block `k` reaches past it (`reach` = `i`); false when
@@ -486,7 +494,7 @@ extend Promoter {
                 }
             }
         } else {
-            uses(b, t, &mut self.uses);
+            lv::uses(b, t, &mut self.uses);
             for u in 0..self.uses.len() {
                 self.escape(self.uses[u], i);
             }
@@ -511,7 +519,7 @@ extend Promoter {
         fill(&mut self.dslot, ni, NONE);
         self.doff.truncate(0);
         self.doff.resize_default(ni);
-        fill_bool(&mut self.cand, ns, true);
+        fill(&mut self.cand, ns, true);
         for s in 0..ns {
             if self.busy[s] {
                 self.cand[s] = false;
@@ -633,7 +641,7 @@ extend Promoter {
             return;
         }
         // Any other use of a derived address lets it escape.
-        uses(b, t, &mut self.uses);
+        lv::uses(b, t, &mut self.uses);
         for u in 0..self.uses.len() {
             self.reject(self.uses[u]);
         }
@@ -675,7 +683,7 @@ extend Promoter {
         // would be integer words, whose stores into the other slot keep that one in memory for good,
         // where a later promotion (once unrolling gives its accesses constant offsets) takes both with
         // the other's types.
-        fill_bool(&mut self.typed, ns, false);
+        fill(&mut self.typed, ns, false);
         for a in 0..self.accs.len() {
             self.typed[self.accs[a].slot as usize] = true;
         }
@@ -1189,7 +1197,7 @@ extend Promoter {
         fill(&mut self.zeros, 256, NONE);
         self.xwords.truncate(0);
         fill(&mut self.repl, ni, NONE);
-        fill_bool(&mut self.drop, ni, false);
+        fill(&mut self.drop, ni, false);
         for i in 0..ni {
             self.drop[i] = self.cdrop[i];
         }
@@ -1465,7 +1473,7 @@ extend Promoter {
             }
         }
         o.naked = b.naked;
-        fill_bool(&mut self.done, b.pool.len(), false);
+        fill(&mut self.done, b.pool.len(), false);
         let inl = b.inl.len() != 0;
         for k in 0..b.blocks.len() {
             let bk = b.blocks[k];
@@ -1715,43 +1723,5 @@ const fn sort_fields(v: &mut Vector<Fld>, lo: usize, hi: usize) {
             j -= 1;
         }
         v[j] = x;
-    }
-}
-
-// The values instruction `t` of `b` reads in its fields and pool lists.
-fn uses(b: &Body, t: Inst, out: &mut Vector<Value>) {
-    out.truncate(0);
-    let f = op_info(t.op).form;
-    if lv::operand_a(f) && t.a != VNONE {
-        out.push(t.a);
-    }
-    if lv::operand_b(f) && t.b != VNONE {
-        out.push(t.b);
-    }
-    if lv::operand_c(f) && t.c != VNONE {
-        out.push(t.c);
-    }
-    if f == F_CALL || f == F_CALLIND {
-        for q in 0..t.aux as u32 {
-            out.push(b.pool[(t.c + q) as usize]);
-        }
-    } else if f == F_VOP || f == F_ASM {
-        for q in 0..t.b {
-            out.push(b.pool[(t.a + q) as usize]);
-        }
-    }
-}
-
-fn fill(v: &mut Vector<u32>, n: usize, x: u32) {
-    v.truncate(0);
-    for _ in 0..n {
-        v.push(x);
-    }
-}
-
-fn fill_bool(v: &mut Vector<bool>, n: usize, x: bool) {
-    v.truncate(0);
-    for _ in 0..n {
-        v.push(x);
     }
 }

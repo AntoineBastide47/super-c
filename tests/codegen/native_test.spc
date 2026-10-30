@@ -1789,12 +1789,14 @@ fn register_hungry_instructions_compile_and_run() {
 }
 
 // A vector join that a store writes to memory: the join's parameter takes an xmm register home on x86-64,
-// and the store writes that register, as it does an xmm-held vector of any other home. It compiles for
-// x86-64 on every host and runs on the host.
+// and the store writes that register, as it does an xmm-held vector of any other home. A loop's vector
+// sum that a reduction after the loop reads lane by lane in memory: it takes no register of the loop's
+// parameter as its home, but a slot. They compile for x86-64 on every host and run on the host.
 @test
 fn a_stored_vector_join_runs() {
     let lir = M"(lir ptr 8
 sym @pick fn global
+sym @vsum fn global
 fn @pick
   sig (i8, ptr) -> void
 b0(v0: i8, v1: ptr):
@@ -1808,6 +1810,23 @@ b2:
 b3(v4: v4f32):
   store v4, v1+32 align 2
   ret
+fn @vsum
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = wconst.v2i64 0x0, 0x0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 2
+  jmp b1(v3, v2)
+b1(v5: i64, v6: v2i64):
+  v7 = ptradd v0, v5 * 8
+  v8 = load.v2i64 v7 align 3
+  v9 = add.v2i64 v6, v8
+  v10 = add.i64 v5, v4
+  v11 = icmp.ult v10, v1
+  br v11, b1(v10, v9), b2
+b2:
+  v12 = vop.reduce_add.i64 (v9)
+  ret v12
 )";
     let mut obj = Vector::<u8>::new();
     let x64 = tgt::axis_index("x86_64", true);
@@ -1817,7 +1836,7 @@ b3(v4: v4f32):
     if !cli::has_cc() {
         return; // a C driver links it
     }
-    let drv = "void pick(signed char, float *);\nint main(void) {\n  float a[12] = {1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0};\n  pick(1, a);\n  if (a[8] != 1 || a[11] != 4) return 1;\n  pick(0, a);\n  if (a[8] != 5 || a[11] != 8) return 2;\n  return 0;\n}\n";
+    let drv = "#include <stdint.h>\nvoid pick(signed char, float *);\nint64_t vsum(const int64_t *, int64_t);\nint main(void) {\n  float a[12] = {1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0};\n  pick(1, a);\n  if (a[8] != 1 || a[11] != 4) return 1;\n  pick(0, a);\n  if (a[8] != 5 || a[11] != 8) return 2;\n  const int64_t q[6] = {1, 2, 3, 4, 5, -6};\n  if (vsum(q, 6) != 9 || vsum(q, 2) != 3) return 3;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
 }
 

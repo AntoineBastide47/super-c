@@ -99,6 +99,13 @@ pub(package) fn w16(o: &mut Vector<u8>, v: u32) {
 }
 
 /// Append `v` to `o`, little-endian.
+/// `o` grown with zero bytes to `n` bytes, when shorter.
+pub(package) fn pad(o: &mut Vector<u8>, n: u64) {
+    if o.len() as u64 < n {
+        o.resize_default(n as usize);
+    }
+}
+
 pub(package) fn w32(o: &mut Vector<u8>, v: u32) {
     w16(o, v & 0xFFFF);
     w16(o, v >> 16);
@@ -201,9 +208,7 @@ extend Obj {
         let a = 1u64 << al as u64;
         let at = sec.size + a - 1 & ~(a - 1);
         if s != S_BSS && s != S_TBSS {
-            while sec.bytes.len() as u64 < at {
-                sec.bytes.push(0);
-            }
+            pad(&mut sec.bytes, at);
         }
         sec.size = at;
         return at;
@@ -227,8 +232,25 @@ extend Obj {
     /// Append `bytes` to section `s`.
     pub(package) fn put(self: &mut Self, s: u8, bytes: []u8) {
         let sec = self.secs.index_mut(s as usize);
-        for i in 0..bytes.len() {
-            sec.bytes.push(bytes[i]);
+        sec.bytes.extend_from_slice(bytes);
+        sec.size = sec.bytes.len() as u64;
+    }
+
+    /// Append the bytes of `text` to section `s`.
+    pub(package) fn put_str(self: &mut Self, s: u8, text: str) {
+        self.put(s, unsafe Slice::<u8> { ptr: text.ptr(), len: text.len() });
+    }
+
+    /// Append `ws` to section `s` as little-endian words.
+    pub(package) fn put_words(self: &mut Self, s: u8, ws: []u32) {
+        let sec = self.secs.index_mut(s as usize);
+        sec.bytes.reserve(4 * ws.len());
+        for i in 0..ws.len() {
+            let w = ws[i];
+            sec.bytes.push((w & 0xFF) as u8);
+            sec.bytes.push((w >> 8 & 0xFF) as u8);
+            sec.bytes.push((w >> 16 & 0xFF) as u8);
+            sec.bytes.push((w >> 24) as u8);
         }
         sec.size = sec.bytes.len() as u64;
     }
@@ -236,9 +258,7 @@ extend Obj {
     /// Append zero bytes to section `s` up to size `n`.
     pub(package) fn pad_to(self: &mut Self, s: u8, n: u64) {
         let sec = self.secs.index_mut(s as usize);
-        while sec.bytes.len() as u64 < n {
-            sec.bytes.push(0);
-        }
+        pad(&mut sec.bytes, n);
         sec.size = sec.bytes.len() as u64;
     }
 

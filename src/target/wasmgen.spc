@@ -107,11 +107,13 @@ pub(package) struct Gen {
     tasks: Vector<Task>,
     mk_at: Vector<u32>, // per block, its merge children's start in `mk` (ascending reverse postorder)
     mk: Vector<u32>,
-    osym: Vector<u32>, // per body symbol, its object symbol (NONE until used)
+    osym: Vector<u32>, // per package symbol, its object symbol in this generator's object (NONE until used)
+    itpl: Vector<str<'static>>, // per symbol of the body at hand, its intrinsic's instructions (`intrin::of_symbols`)
     sp_sym: u32,
     table_sym: u32,
     local: bool, // the function compiling is a local copy
     msg_sym: Map<String, u32>, // per C string text, its data symbol
+    msg_key: String, // `cstr`'s lookup key
     cstr_n: u32,
     uses: Vector<Value>,
     succ: Vector<u32>,
@@ -213,10 +215,12 @@ extend Gen {
             mk_at: Vector::<u32>::new(),
             mk: Vector::<u32>::new(),
             osym: Vector::<u32>::new(),
+            itpl: Vector::<str<'static>>::new(),
             sp_sym: NONE,
             table_sym: NONE,
             local: false,
             msg_sym: Map::<String, u32>::new(),
+            msg_key: String::new(),
             cstr_n: 0,
             uses: Vector::<Value>::new(),
             succ: Vector::<u32>::new(),
@@ -262,14 +266,21 @@ extend Gen {
 
     // The object symbol of body symbol `s`: a function or data (thread-locals are plain data: no threads).
     fn osym_of(self: &mut Self, s: u32) u32 {
-        if self.osym[s as usize] == NONE {
-            self.osym[s as usize] = self.pkg_osym(self.b().syms[s as usize]);
-        }
-        return self.osym[s as usize];
+        return self.pkg_osym(self.b().syms[s as usize]);
     }
 
     // The object symbol of package symbol `ps`.
     fn pkg_osym(self: &mut Self, ps: u32) u32 {
+        if self.osym.len() == 0 {
+            fill(&mut self.osym, self.p().syms.len(), NONE);
+        }
+        if self.osym[ps as usize] == NONE {
+            self.osym[ps as usize] = self.pkg_osym_new(ps);
+        }
+        return self.osym[ps as usize];
+    }
+
+    fn pkg_osym_new(self: &mut Self, ps: u32) u32 {
         let y = self.p().syms[ps as usize];
         let nm0 = self.p().spell(y.name);
         // `__sc_x_<name>` is a C library name's alias (a macro of a scoped extern header). The C entry
@@ -333,8 +344,10 @@ extend Gen {
 
     // The data symbol of C string `text`, one per text.
     fn cstr(self: &mut Self, text: str) u32 {
-        let key = String::from_str(text);
-        if let Some(k) = self.msg_sym.get(&key) {
+        // The key in a reused buffer: a text seen before allocates nothing.
+        self.msg_key.clear();
+        self.msg_key.push_str(text);
+        if let Some(k) = self.msg_sym.get(&self.msg_key) {
             return *k;
         }
         let name = format("__sc_msg.{}", self.cstr_n);
@@ -353,7 +366,7 @@ extend Gen {
         }
         g.bytes.push(0);
         o.define_data(k, wo::F_LOCAL, g);
-        self.msg_sym.insert(key, k);
+        self.msg_sym.insert(self.msg_key.clone(), k);
         return k;
     }
 
@@ -402,8 +415,9 @@ extend Gen {
         if self.p().ptr_bytes != 4 {
             return self.refuse("a data model whose pointers are not 32-bit");
         }
+        intrin::of_symbols(self.p(), b, "wasm32", &mut self.itpl);
         self.lv.run(b);
-        self.sh.run(b);
+        self.sh.run(b, &self.lv);
         wa::classify(b, b.sig, self.vregs, &mut self.me);
         if self.me.unknown {
             return self.refuse("the signature passes an aggregate whose C class is unknown");
@@ -411,7 +425,6 @@ extend Gen {
         if b.naked {
             return self.naked(s);
         }
-        lv::fill(&mut self.osym, b.syms.len(), NONE);
         self.c.clear();
         self.rels.truncate(0);
         self.rows.truncate(0);
@@ -494,7 +507,7 @@ extend Gen {
         self.call_area = area + 15 & ~15u32;
         let mut at = self.call_area;
         self.falign = 16;
-        lv::fill(&mut self.slot_off, b.slots.len(), 0);
+        fill(&mut self.slot_off, b.slots.len(), 0);
         for k in 0..b.slots.len() {
             let sl = b.slots[k];
             let al = 1u32 << sl.align_log2 as u32;
@@ -512,7 +525,7 @@ extend Gen {
         }
         // The entry's spills: a parameter or result passed as one scalar of an aggregate.
         let np = b.pool[b.sig as usize];
-        lv::fill(&mut self.pspill, np as usize, NONE);
+        fill(&mut self.pspill, np as usize, NONE);
         for k in 0..np {
             let pa = self.me.params[k as usize];
             if pa.kind == wa::P_DIRECT && pa.leaf {
@@ -557,7 +570,7 @@ extend Gen {
     // Per block, its merge children in ascending reverse postorder.
     fn merge_kids(self: &mut Self) {
         let nb = self.b().blocks.len();
-        lv::fill(&mut self.mk_at, nb + 1, 0);
+        fill(&mut self.mk_at, nb + 1, 0);
         self.mk.truncate(0);
         for k in 0..nb {
             self.mk_at[k] = self.mk.len() as u32;
@@ -626,16 +639,16 @@ extend Gen {
     fn assign(self: &mut Self) {
         let b = self.b();
         let n = self.lv.end.len();
-        lv::fill(&mut self.local_of, n, NONE);
-        lv::fill(&mut self.home, n, NONE);
+        fill(&mut self.local_of, n, NONE);
+        fill(&mut self.home, n, NONE);
         let np = b.blocks.len();
         let npos = self.lv.order.len();
-        // Ranges: from the definition's position to `end`; a block parameter's widened over its
-        // predecessors.
+        // Ranges: from the definition's position to `end`; a block parameter's start widened over its
+        // predecessors (`Live::ranges` widened its end).
         let mut start = Vector::<u32>::new();
         let mut end = Vector::<u32>::new();
-        lv::fill(&mut start, n, NONE);
-        lv::fill(&mut end, n, 0);
+        fill(&mut start, n, NONE);
+        fill(&mut end, n, 0);
         for x in 0..n {
             let d = self.lv.def_blk[x];
             if d != NONE && self.lv.pos[d as usize] != NONE {
@@ -660,9 +673,6 @@ extend Gen {
                     }
                     if q < start[x] {
                         start[x] = q;
-                    }
-                    if q > end[x] {
-                        end[x] = q;
                     }
                 }
             }
@@ -689,9 +699,9 @@ extend Gen {
         let mut by_start = Vector::<u32>::new();
         let mut by_end = Vector::<u32>::new();
         let mut s_at = Vector::<u32>::new();
-        lv::fill(&mut s_at, npos + 1, 0);
+        fill(&mut s_at, npos + 1, 0);
         let mut e_at = Vector::<u32>::new();
-        lv::fill(&mut e_at, npos + 2, 0);
+        fill(&mut e_at, npos + 2, 0);
         for x in 0..n {
             if need[x] && !(start[x] == end[x] && x < ni as usize) {
                 s_at[start[x] as usize + 1] += 1;
@@ -704,8 +714,8 @@ extend Gen {
         for q in 0..npos + 1 {
             e_at[q + 1] += e_at[q];
         }
-        lv::fill(&mut by_start, s_at[npos] as usize, 0);
-        lv::fill(&mut by_end, e_at[npos + 1] as usize, 0);
+        fill(&mut by_start, s_at[npos] as usize, 0);
+        fill(&mut by_end, e_at[npos + 1] as usize, 0);
         let mut sf = Vector::<u32>::with_capacity(npos + 1);
         sf.extend_copy(&s_at);
         let mut ef = Vector::<u32>::with_capacity(npos + 2);
@@ -720,7 +730,7 @@ extend Gen {
             }
         }
         let mut left = Vector::<u32>::new(); // per value, its uses left in its own block
-        lv::fill(&mut left, n, 0);
+        fill(&mut left, n, 0);
         for q in 0..npos {
             for j in e_at[q]..e_at[q + 1] {
                 self.release(by_end[j as usize]);
@@ -739,10 +749,10 @@ extend Gen {
                 if early {
                     self.take(i);
                 }
-                lv::each_use(b, t, &mut self.uses);
+                self.uses.truncate(0);
+                self.uses.extend_from_slice(self.lv.uses_of(i));
                 for u in 0..self.uses.len() {
-                    let v = self.uses[u];
-                    let x = self.vx(v);
+                    let x = self.vx(self.uses[u]);
                     if x == NONE || x >= ni || !need[x as usize] || start[x as usize] != end[x as usize] {
                         continue;
                     }
@@ -3170,14 +3180,14 @@ extend Gen {
         let ty = self.vt(t.a);
         let wide = ty == T_I64;
         let bits = type_bits(ty, 4);
-        lv::fill(&mut self.sw_tab, span as usize, n);
+        fill(&mut self.sw_tab, span as usize, n);
         // A later case of an equal value never matches, as in a chain of compares.
         let mut k = n;
         while k > 0 {
             k -= 1;
             self.sw_tab[(trunc_to(b.words[(t.b + k) as usize], bits) - lo) as usize] = k;
         }
-        lv::fill(&mut self.sw_blk, n as usize + 1, NONE);
+        fill(&mut self.sw_blk, n as usize + 1, NONE);
         self.sw_case.truncate(0);
         for c in 0..n + 1 {
             let e = b.switch_edge(t, c);
@@ -3269,23 +3279,10 @@ extend Gen {
 // ---- Calls ----
 
 extend Gen {
-    // The instructions of the intrinsic body symbol `s` names (`target::intrin`); empty for another
+    // The instructions of the intrinsic body symbol `s` names (`target::intrin`, `itpl`); empty for another
     // function.
     const fn intrinsic(self: &Self, s: u32) str<'static> {
-        let p = self.p();
-        let ps = p.syms[self.b().syms[s as usize] as usize];
-        if ps.def != NONE {
-            return "";
-        }
-        let nm = p.spell(ps.name);
-        return intrin::find(
-            "wasm32",
-            if nm.starts_with("__sc_x_") {
-                nm.slice(7, nm.len())
-            } else {
-                nm
-            },
-        );
+        return self.itpl[s as usize];
     }
 
     // Whether `v` is an integer constant: its bits in `out`.
@@ -3351,7 +3348,7 @@ extend Gen {
             }
         } else {
             let mut tmps = Vector::<u32>::new();
-            lv::fill(&mut tmps, np as usize, NONE);
+            fill(&mut tmps, np as usize, NONE);
             for q in 0..args.len() {
                 let k = args[q];
                 // A vector on the stack is a v128 (`wtype` gives a vector's by-reference form).
@@ -3412,7 +3409,7 @@ extend Gen {
         // The call area: copies of memory values passed by reference, then the variadic buffer.
         let mut at: u32 = 0;
         let mut refs = Vector::<u32>::new();
-        lv::fill(&mut refs, np as usize, NONE);
+        fill(&mut refs, np as usize, NONE);
         for k in 0..self.cs.nfixed {
             let pa = self.cs.params[k as usize];
             let pt = b.pool[(sig + 3 + k) as usize];
@@ -3643,12 +3640,8 @@ extend Gen {
             retain: ps.used,
         };
         let bs = p.data_bytes(&d);
-        for j in 0..bs.len() {
-            g.bytes.push(bs[j]);
-        }
-        while g.bytes.len() < d.size as usize {
-            g.bytes.push(0);
-        }
+        g.bytes.extend_from_slice(bs);
+        ob::pad(&mut g.bytes, d.size);
         for j in 0..d.nrelocs {
             let r = p.relocs[(d.relocs + j) as usize];
             let k = self.pkg_osym(r.sym);

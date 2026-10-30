@@ -86,7 +86,7 @@ pub(package) struct Tuc {
     pub(package) slen: Vector<u64>,
     // The previous image's held records (`lir::hold`, after its sections), which outlive `raw`; per module,
     // its record's offset in `hraw`, length (0: none) and the native key it was written under
-    // (`driver::emit::nat_key`).
+    // (its emission key xor `driver::emit::nat_base`).
     pub(package) hraw: String,
     pub(package) hoff: Vector<u64>,
     pub(package) hlen: Vector<u64>,

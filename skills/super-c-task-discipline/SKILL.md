@@ -201,10 +201,31 @@ compiler itself recomputed facts it already held.
 - Before you write a helper, search for one that does the job (`grep -rn "fn <name>" src std
   tests`) and extend it.
 - Brief each agent with the other agents' findings in its area, so one root cause gets one
-  fix.
-- In compiler code, compute a fact once at its creation point and pass it on. Before you add
-  a walk, hash, read, or evaluation, find where the compiler already has the value
+  fix. A brief for compiler work names the analyses that already exist in its area (from
+  the inventory below) and tells the agent to apply the steps below.
+- In compiler code, compute a fact once at its creation point and pass it on
   (`super-c-compiler-optimization`, Phase 6).
+
+**Before you add a traversal, analysis, table, map, pass, rerun, or helper in compiler code**
+(the rule above did not stop it alone; apply these steps at that moment):
+1. Name the fact: what it is, over which input, and at which point of the pipeline you need it.
+2. Find its producers: read the phase's row in the analysis inventory
+   (`super-c-compiler-internals`, [analyses.md](../super-c-compiler-internals/references/analyses.md)),
+   then grep `src/` for the fact's field, type, and function names. Check the earlier phases
+   too: the optimizer and the code generators recompute facts the lowering already had.
+3. Choose the first option that applies: reuse the result as it is; extend the producer's
+   walk to also compute it; keep the result current through the transform that changes its
+   input. Write a new analysis only when none applies, and state why in your report.
+4. Rerun an analysis only after a change that invalidates it. A pass reports whether it
+   changed the input; "to be safe" is not a reason to rerun.
+5. After the change, grep again: no second place computes the same fact. Add the new
+   analysis to the inventory, with its producer, its storage, its consumers, and what
+   invalidates it.
+
+**When you review or audit code:** a second computation of a fact the compiler holds is a
+defect. Report it with both locations and the reason the input is unchanged between them
+([compiler-patterns.md](../super-c-compiler-optimization/references/compiler-patterns.md),
+"Duplicate Analysis and Work", lists the forms).
 
 ## Rationalizations to Reject
 
@@ -217,3 +238,5 @@ compiler itself recomputed facts it already held.
 - "The question implies they want it fixed." It implies they want an answer.
 - "The instruction probably doesn't apply here." It applies until lifted.
 - "The patch script ran without errors." Zero matches also runs without errors.
+- "My pass needs its own order, dominators, or use counts; they are cheap." A cheap
+  analysis runs once per pass, per round, and per body. Find the producer.

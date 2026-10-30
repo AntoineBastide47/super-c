@@ -10460,6 +10460,33 @@ fn replayed_unit_inlines_as_a_rendered_one() {
     assert(warm.equals(&cold), "main's object does not depend on the cache");
 }
 
+// A replayed unit's inlinable function whose loop the optimizer vectorizes gives its callers the form
+// before the vectorization, as the build that renders it does (`lir::opt::Run::inlined`; the static read
+// keeps `mix` from the Core IR inliner): `main`'s object matches one built without the per-TU cache.
+@test
+fn replayed_unit_inlines_the_form_before_vectors() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/b.spc",
+        "static mut SEED: u32 = 0;\n\npub fn mix(a: []u32) u32 {\n    let mut s: u32 = unsafe SEED;\n    for i in 0..a.len() {\n        s ^= a[i];\n    }\n    return s;\n}\n",
+    );
+    let head = "import b;\n\nstatic mut A: [u32; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];\n\nfn main() i32 {\n";
+    p.mkfile("src/main.spc", format("{}    return (b::mix(unsafe A[0..16]) - 16) as i32;\n}}\n", head).as_str());
+    let root = p.dir();
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the first build succeeds");
+    p.mkfile("src/main.spc", format("{}    return (b::mix(unsafe A[0..16]) - 17 + 1) as i32;\n}}\n", head).as_str());
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the build that replays `b` succeeds");
+    assert_eq(p.run_bin(), 0);
+    let obj = format("{}/build/release/raw/main.o", root);
+    let warm = loader::read_file(&obj).unwrap_or(String::new());
+    assert(warm.len() > 0, "the build writes main's object");
+    let r = cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build --profile=release -o bin");
+    assert(r.ok(), "the build without the cache succeeds");
+    let cold = loader::read_file(&obj).unwrap_or(String::new());
+    assert(warm.equals(&cold), "main's object does not depend on the cache");
+}
+
 // A replayed unit's function that no caller inlines keeps the effects its unit's build found (`lir::hold`,
 // `Sym.fx`): `main` reads the static again after the call to `bump`, which writes it, and its object
 // matches one built without the per-TU cache.
