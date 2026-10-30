@@ -531,7 +531,7 @@ extend Gen {
         for k in 0..self.dying.len() {
             let x = self.dying[k];
             let va = self.va[x as usize];
-            if va.reg != NOREG && va.home != H_FIXED && self.owner[va.reg as usize] == x {
+            if va.reg != NOREG && (XALLOC & bit(va.reg)) != 0 && self.owner[va.reg as usize] == x {
                 free |= bit(va.reg);
             }
         }
@@ -542,11 +542,19 @@ extend Gen {
         if r == NOREG || (free & bit(r)) == 0 {
             return NOREG;
         }
-        let own = self.owner[r as usize];
-        self.va.index_mut(own as usize).reg = NOREG;
-        self.va.index_mut(own as usize).dirty = false;
+        self.drop_reg(self.owner[r as usize]);
         self.bind(i, r);
         return r;
+    }
+
+    // Value index `x`, which dies at the current instruction, gives up its register to the result: a
+    // register home (a caller-saved one, which `take_scratch` would evict a value from) frees too.
+    fn drop_reg(self: &mut Self, x: u32) {
+        if self.va[x as usize].home == H_FIXED {
+            self.fixed_busy &= ~bit(self.va[x as usize].reg);
+        }
+        self.va.index_mut(x as usize).reg = NOREG;
+        self.va.index_mut(x as usize).dirty = false;
     }
 
     // The home register of the parameter jump `t` passes `v` to (once), when the jump is no back edge, so
@@ -594,11 +602,10 @@ extend Gen {
         if !fixed && ((XALLOC | valloc()) & bit(ra)) != 0 && is_v(t) == ra >= V0 {
             let own = self.owner[ra as usize];
             let temp = own == NONE && (self.tmps & bit(ra)) != 0;
-            let dies = own == xa && self.va[xa as usize].home != H_FIXED && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
+            let dies = own == xa && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
             if temp || dies {
                 if dies {
-                    self.va.index_mut(xa as usize).reg = NOREG;
-                    self.va.index_mut(xa as usize).dirty = false;
+                    self.drop_reg(xa);
                 }
                 self.tmps &= ~bit(ra);
                 self.bind(x, ra);
@@ -1860,7 +1867,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
         if self.again {
@@ -3473,7 +3480,8 @@ extend Gen {
         self.mem(a::M_X, false, hi, a::SP, off + 8);
     }
 
-    // clz: CLZ; ctz: RBIT then CLZ; popcnt: CNT over the bytes in v30, summed by ADDV. An operand under
+    // clz: CLZ; ctz: RBIT then CLZ; popcnt: CNT over the bytes in v30 (of 4 bytes but at 64 bits), summed
+    // by ADDV. An operand under
     // 32 bits is zero-extended, but for ctz, whose bit set at the width (making 0 count the width) hides
     // the bits above it. The count, at most the width, is `clean`.
     fn bit_count(self: &mut Self, i: u32, t: Inst) {
@@ -3491,7 +3499,8 @@ extend Gen {
         let rd = self.def(i) as u32;
         self.va.index_mut(i as usize).clean = true;
         if t.op == O_POPCNT {
-            self.emit(a::fmov_gv(true, true, 30, r));
+            // A 32-bit move for a narrower count: the register's bits above 32 are no part of the value.
+            self.emit(a::fmov_gv(sf, true, 30, r));
             self.emit(a::cnt8b(30, 30));
             self.emit(a::addv8b(30, 30));
             self.emit(a::fmov_gv(false, false, rd, 30));
@@ -3602,6 +3611,44 @@ extend Gen {
             } else {
                 self.emit(a::addsub_reg(sf, 1, false, a::IP0, a::ZR, rn, 0, 0));
                 self.emit(a::dp2(sf, a::DP2_RORV, rd, ra, a::IP0));
+            }
+            return true;
+        }
+        // A product of two folded 32-bit extensions (`lv::FOLD_MULL`): `umull` or `smull`.
+        if op == O_MUL && (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] {
+            let e = lv::mull_ext(self.b(), t);
+            let rn = self.reg(self.b().insts[t.a as usize].a) as u32;
+            let rm = self.reg(self.b().insts[t.b as usize].a) as u32;
+            let rd = self.def_step(i) as u32;
+            self.emit(a::mull(e == O_SEXT, rd, rn, rm));
+            return true;
+        }
+        // An operand shifted by a constant (`lv::FOLD_SHOP`): the shifted register form.
+        let sv = lv::shop_side(self.b(), &self.lv.pfold, t);
+        if sv != VNONE {
+            let s = self.b().insts[sv as usize];
+            let o = if sv == t.b {
+                t.a
+            } else {
+                t.b
+            };
+            let mut amt: u64 = 0;
+            let _ = self.const_of(s.b, &mut amt);
+            let kind = (s.op - O_SHL) as u32;
+            let rn = self.reg(o) as u32;
+            let rm = self.reg(s.a) as u32;
+            let rd = self.def_step(i) as u32;
+            if op == O_ADD || op == O_SUB {
+                self.emit(a::addsub_reg(sf, (op == O_SUB) as u32, false, rd, rn, rm, kind, amt as u32));
+            } else {
+                let opc = if op == O_AND {
+                    0u32
+                } else if op == O_OR {
+                    1u32
+                } else {
+                    2u32
+                };
+                self.emit(a::logic_reg(sf, opc, false, rd, rn, rm, kind, amt as u32));
             }
             return true;
         }

@@ -4168,6 +4168,20 @@ extend Opt {
                 }
                 t = jump(e);
             }
+            // A jump to a block that only returns returns here: a call before it becomes a sibling call, and
+            // the moves into the block's parameter go (LLVM's tail duplication of return blocks).
+            if t.op == O_JMP {
+                // The block comes later in the walk: its value may have a replacement already, or be one
+                // the walk placed in that block (a hoisted instruction), which this block does not see.
+                let (ok, r) = ret_through(b, t.a);
+                let v = self.val(r);
+                let x = v & ~VFLAG;
+                if ok && (v == VNONE || (v & VPARAM) != 0 || x as usize >= self.blk_of.len() || self.blk_of[x as usize] != b.edge_target(
+                    t.a,
+                )) {
+                    t = Inst { op: O_RET, ty: T_NONE, aux: 0, a: v, b: VNONE, c: VNONE };
+                }
+            }
             b.insts[i as usize] = t;
             return !same(t, t0);
         }
@@ -8560,6 +8574,23 @@ const fn whole_bytes(m: u64, n: u32) bool {
         }
     }
     return true;
+}
+
+// Whether edge `e` of `b` enters a block whose one instruction returns, and the value that return gives on
+// that edge (the edge's argument for a parameter of the block; VNONE for none).
+fn ret_through(b: &Body, e: u32) (bool, Value) {
+    let jb = b.blocks[b.edge_target(e) as usize];
+    let r = b.insts[jb.start as usize];
+    if jb.len != 1 || r.op != O_RET {
+        return (false, VNONE);
+    }
+    if r.a != VNONE && (r.a & VPARAM) != 0 {
+        let p = r.a & ~VPARAM;
+        if p >= jb.param_start && p < jb.param_start + jb.param_len {
+            return (true, b.edge_arg(e, p - jb.param_start));
+        }
+    }
+    return (true, r.a);
 }
 
 const fn jump(e: u32) Inst {

@@ -22,7 +22,10 @@ import ir::core as core;
 /// `and` or `or` of flags that are comparisons each with this one use, or such `and`s and `or`s, compared
 /// one after the other (`conj`: arm64's `ccmp`); a mask of a 32- or 64-bit shift's amount to the low bits
 /// of the width, which the shift takes modulo its width anyway (`shift_amount`); a `select`'s side that is
-/// the other side plus 1, negated or inverted (`cs_kind`: arm64's `csinc`, `csneg`, `csinv`).
+/// the other side plus 1, negated or inverted (`cs_kind`: arm64's `csinc`, `csneg`, `csinv`); two
+/// extensions of the same kind from 32 bits that a 64-bit product alone reads (`mull_ext`: arm64's
+/// `umull`, `smull`); a shift by a constant that a 32- or 64-bit sum, difference or bitwise operation
+/// alone reads as an operand it may take shifted (`shop_side`: arm64's shifted register operand).
 pub(package) const FOLD_CMP: u32 = 1;
 pub(package) const FOLD_TST: u32 = 2;
 pub(package) const FOLD_MADD: u32 = 4;
@@ -33,6 +36,8 @@ pub(package) const FOLD_LEA: u32 = 64;
 pub(package) const FOLD_CCMP: u32 = 128;
 pub(package) const FOLD_SHAMT: u32 = 256;
 pub(package) const FOLD_CSEL: u32 = 512;
+pub(package) const FOLD_MULL: u32 = 1024;
+pub(package) const FOLD_SHOP: u32 = 2048;
 /// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
 pub(package) const CS_NONE: u8 = 0;
 pub(package) const CS_INC: u8 = 1;
@@ -466,6 +471,42 @@ extend Live {
                 }
             }
         }
+        if (self.fold_ops & FOLD_SHOP) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                let bits = type_bits(t.ty, 8);
+                let ops = t.op == O_ADD || t.op == O_SUB || t.op == O_AND || t.op == O_OR || t.op == O_XOR;
+                if !ops || !is_int(t.ty) || bits != 32 && bits != 64 || self.pfold[i] || int_const(b, t.a) != u64::MAX || int_const(
+                    b,
+                    t.b,
+                ) != u64::MAX {
+                    continue;
+                }
+                // The other operand in a register: not one another fold computes in this instruction.
+                let s = if self.shop_ok(b, t.b, bits) && !(is_inst(t.a) && self.pfold[t.a as usize]) {
+                    t.b
+                } else if t.op != O_SUB && self.shop_ok(b, t.a, bits) && !(is_inst(t.b) && self.pfold[t.b as usize]) {
+                    t.a
+                } else {
+                    VNONE
+                };
+                if s != VNONE {
+                    self.pfold[s as usize] = true;
+                }
+            }
+        }
+        if (self.fold_ops & FOLD_MULL) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op != O_MUL || t.ty != T_I64 || self.pfold[i] || mull_ext(b, t) == 0 {
+                    continue;
+                }
+                if self.count[t.a as usize] == 1 && self.count[t.b as usize] == 1 && !self.pfold[t.a as usize] && !self.pfold[t.b as usize] {
+                    self.pfold[t.a as usize] = true;
+                    self.pfold[t.b as usize] = true;
+                }
+            }
+        }
         if (self.fold_ops & FOLD_CSEL) != 0 {
             for i in 0..ni {
                 let t = b.insts[i];
@@ -670,6 +711,16 @@ extend Live {
             self.pfold[t.b as usize] = true;
             self.pfold[i] = self.cnd[i] == self.count[i];
         }
+    }
+
+    // Whether `s` is a shift of `bits` bits by a constant below them, read once and not folded yet: an
+    // operand `FOLD_SHOP` folds.
+    fn shop_ok(self: &Self, b: &Body, s: Value, bits: u32) bool {
+        if !is_inst(s) || self.pfold[s as usize] || self.count[s as usize] != 1 {
+            return false;
+        }
+        let t = b.insts[s as usize];
+        return t.op >= O_SHL && t.op <= O_ASHR && type_bits(t.ty, 8) == bits && int_const(b, t.b) < bits as u64;
     }
 
     // The comparisons operand `v` of an `and` or `or` brings to a `FOLD_CCMP` chain: 1 for a comparison it
@@ -1710,6 +1761,36 @@ fn const_val(b: &Body, v: Value) u64 {
     }
     let t = b.insts[v as usize];
     return t.a as u64 | t.b as u64 << 32;
+}
+
+/// The operand of 32- or 64-bit sum, difference or bitwise operation `t` that is a folded shift by a
+/// constant (`FOLD_SHOP`): `t.b`, else `t.a`; VNONE when neither is.
+pub(package) fn shop_side(b: &Body, pfold: &Vector<bool>, t: Inst) Value {
+    let ops = t.op == O_ADD || t.op == O_SUB || t.op == O_AND || t.op == O_OR || t.op == O_XOR;
+    if !ops || !is_int(t.ty) || t.ty == T_I128 {
+        return VNONE;
+    }
+    if is_inst(t.b) && pfold[t.b as usize] && b.insts[t.b as usize].op >= O_SHL && b.insts[t.b as usize].op <= O_ASHR {
+        return t.b;
+    }
+    if is_inst(t.a) && pfold[t.a as usize] && b.insts[t.a as usize].op >= O_SHL && b.insts[t.a as usize].op <= O_ASHR {
+        return t.a;
+    }
+    return VNONE;
+}
+
+/// The extension (`O_ZEXT`, `O_SEXT`) both operands of 64-bit product `t` are, from 32 bits, two
+/// instructions; 0 when not.
+pub(package) fn mull_ext(b: &Body, t: Inst) u8 {
+    if !is_inst(t.a) || !is_inst(t.b) || t.a == t.b {
+        return 0;
+    }
+    let x = b.insts[t.a as usize];
+    let y = b.insts[t.b as usize];
+    if x.op != y.op || x.op != O_ZEXT && x.op != O_SEXT || b.type_of(x.a) != T_I32 || b.type_of(y.a) != T_I32 {
+        return 0;
+    }
+    return x.op;
 }
 
 /// The amount a shift with amount operand `v` takes: the operand of `v` when `v` is a mask folded into the

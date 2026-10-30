@@ -34,3 +34,12 @@ F bool c_s_srem2(int32_t x) { return x % 2 == 1; }
 F uint32_t c_s_ctz(uint32_t x) { return x == 0 ? 32 : (uint32_t)__builtin_ctz(x); }
 F uint32_t c_s_clz16(uint16_t x) { return x == 0 ? 16 : (uint32_t)__builtin_clz(x) - 16; }
 F uint32_t c_s_shm(uint32_t x, uint32_t n) { return x << (n & 31); }
+F uint32_t c_t_f0(uint32_t a) { return a * 3 + 1; }
+F uint32_t c_t_f1(uint32_t a) { return a ^ 0x55; }
+F uint32_t c_t_f2(uint32_t a) { return a << 2; }
+F uint32_t c_t_call(uint32_t x, uint32_t a) {
+  switch (x) { case 0: return c_t_f0(a); case 1: return c_t_f1(a); case 2: return c_t_f2(a); default: return a; }
+}
+F uint32_t c_o_ref(const uint32_t *p) { return p ? *p : 0; }
+F uint32_t c_s_mulhi(uint32_t a, uint32_t b) { return (uint32_t)(((uint64_t)a * b) >> 32); }
+F uint64_t c_s_ispow2m(uint64_t x, uint64_t a) { return x % 64 + a / 8; }

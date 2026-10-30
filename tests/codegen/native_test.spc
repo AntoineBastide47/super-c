@@ -343,6 +343,20 @@ fn chains_of_compared_flags_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A 64-bit product of two 32-bit extensions is one widening multiply (arm64 `umull`, `smull`); a sum,
+// difference or bitwise operation of a value shifted by a constant takes it as a shifted operand, but
+// not next to a product a multiply-add computes (`madsh`).
+@test
+fn widening_products_and_shifted_operands_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @umulw fn global\nsym @smulw fn global\nsym @addsh fn global\nsym @subsh fn global\nsym @orsh fn global\nsym @xorsh fn global\nsym @madsh fn global\nfn @umulw\n  sig (i32, i32) -> i64\nb0(v0: i32, v1: i32):\n  v2 = zext.i64 v0\n  v3 = zext.i64 v1\n  v4 = mul.i64 v2, v3\n  ret v4\nfn @smulw\n  sig (i32, i32) -> i64\nb0(v0: i32, v1: i32):\n  v2 = sext.i64 v0\n  v3 = sext.i64 v1\n  v4 = mul.i64 v2, v3\n  ret v4\nfn @addsh\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 3\n  v3 = lshr.i64 v1, v2\n  v4 = add.i64 v3, v0\n  ret v4\nfn @subsh\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 5\n  v3 = shl.i64 v1, v2\n  v4 = sub.i64 v0, v3\n  ret v4\nfn @orsh\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 3\n  v3 = ashr.i32 v1, v2\n  v4 = or.i32 v0, v3\n  ret v4\nfn @xorsh\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 31\n  v3 = shl.i32 v1, v2\n  v4 = xor.i32 v3, v0\n  ret v4\nfn @madsh\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 3\n  v4 = shl.i64 v0, v3\n  v5 = mul.i64 v1, v2\n  v6 = add.i64 v4, v5\n  ret v6\n";
+    let drv = "#include <stdint.h>\nuint64_t umulw(uint32_t, uint32_t);\nint64_t smulw(int32_t, int32_t);\nuint64_t addsh(uint64_t, uint64_t);\nuint64_t subsh(uint64_t, uint64_t);\nint32_t orsh(int32_t, int32_t);\nuint32_t xorsh(uint32_t, uint32_t);\nuint64_t madsh(uint64_t, uint64_t, uint64_t);\nint main(void) {\n  uint64_t s = 0x9E3779B97F4A7C15ull;\n  for (int i = 0; i < 1000; i++) {\n    s ^= s << 13; s ^= s >> 7; s ^= s << 17;\n    uint32_t a = (uint32_t)s, b = (uint32_t)(s >> 32);\n    if (umulw(a, b) != (uint64_t)a * b) return 1;\n    if (smulw((int32_t)a, (int32_t)b) != (int64_t)(int32_t)a * (int32_t)b) return 2;\n    if (addsh(s, s * 7) != s + ((s * 7) >> 3)) return 3;\n    if (subsh(s, s * 7) != s - ((s * 7) << 5)) return 4;\n    if (orsh((int32_t)a, (int32_t)b) != ((int32_t)a | ((int32_t)b >> 3))) return 5;\n    if (xorsh(a, b) != (a ^ (b << 31))) return 6;\n    if (madsh(s, a, b) != (s << 3) + (uint64_t)a * b) return 7;\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // A select of a value and that value plus 1, negated or inverted, or of a value and 1 or all ones, is one
 // conditional instruction (arm64 `cinc`, `cneg`, `csinv`, `csinc` with the zero register), in 8, 32 and
 // 64 bits.

@@ -722,6 +722,80 @@ b0(v0: i16):
     same_result(&b, &a, "ctz", v, 6);
 }
 
+// A jump to a block that only returns returns itself: the value the edge passes (`arms`, whose calls then
+// end their blocks), a value from before the block (`outer`), nothing (`none`).
+@test
+fn jumps_to_returns_return() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @arms fn global
+sym @outer fn global
+sym @none fn global
+sym @g fn global noinline
+fn @g
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 3
+  v2 = mul.i32 v0, v1
+  ret v2
+fn @arms
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  switch v0 [0 -> b1, 1 -> b2] else b3(v1)
+b1:
+  v2 = call.i32 @g(v1) : (i32) -> i32
+  jmp b3(v2)
+b2:
+  v3 = iconst.i32 5
+  v4 = add.i32 v1, v3
+  v5 = call.i32 @g(v4) : (i32) -> i32
+  jmp b3(v5)
+b3(v6: i32):
+  ret v6
+fn @outer
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.eq v0, v2
+  v4 = mul.i32 v1, v1
+  br v3, b1, b2
+b1:
+  v5 = call.i32 @g(v0) : (i32) -> i32
+  v6 = icmp.eq v5, v2
+  br v6, b2, b3
+b2:
+  ret v4
+b3:
+  ret v5
+fn @none
+  sig (i32) -> void
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1:
+  v3 = call.i32 @g(v0) : (i32) -> i32
+  jmp b2
+b2:
+  ret
+)",
+    );
+    let s = text_of(&a, "arms");
+    assert(!s.contains("jmp"), s.as_str());
+    let x: []u64 = [0, 4];
+    same_result(&b, &a, "arms", x, 12);
+    let y: []u64 = [1, 4];
+    same_result(&b, &a, "arms", y, 27);
+    let z: []u64 = [7, 4];
+    same_result(&b, &a, "arms", z, 4);
+    let o: []u64 = [0, 6];
+    same_result(&b, &a, "outer", o, 36);
+    let q: []u64 = [2, 6];
+    same_result(&b, &a, "outer", q, 36);
+    let n = text_of(&a, "none");
+    assert(!n.contains("jmp"), n.as_str());
+}
+
 // A branch whose two sides each return a value computed by a few speculable instructions returns the
 // select of the two (`max`, `abs`, and a nested `clamp`); a side with a call stays a branch (`call`).
 @test

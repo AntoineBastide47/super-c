@@ -913,9 +913,14 @@ extend Gen {
         if !fixed && ((self.xalloc | self.valloc) & bit(ra)) != 0 && is_v(t) == ra >= V0 {
             let own = self.owner[ra as usize];
             let temp = own == NONE && (self.tmps & bit(ra)) != 0;
-            let dies = own == xa && self.va[xa as usize].home != H_FIXED && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
+            let dies = own == xa && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
             if temp || dies {
                 if dies {
+                    // A register home (a caller-saved one, which `take_scratch` would evict a value from)
+                    // frees too.
+                    if self.va[xa as usize].home == H_FIXED {
+                        self.fixed_busy &= ~bit(ra);
+                    }
                     self.va.index_mut(xa as usize).reg = NOREG;
                     self.va.index_mut(xa as usize).dirty = false;
                 }
@@ -5157,7 +5162,7 @@ extend Gen {
     fn dies_here(self: &Self, v: Value) bool {
         let x = self.vx(v);
         let r = self.va[x as usize].reg;
-        return r != NOREG && self.owner[r as usize] == x && self.va[x as usize].home != H_FIXED && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos;
+        return r != NOREG && self.owner[r as usize] == x && ((self.xalloc | self.valloc) & bit(r)) != 0 && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos;
     }
 
     // `va_start`: the `va_list` at `t.a` takes the offsets of the first variadic register in the save area
@@ -6666,12 +6671,17 @@ extend Gen {
         // locals end on one. The vector registers' save area tops the locals, 16-aligned.
         // A System V body that calls nothing (no canary check either) and keeps nothing 16-aligned for
         // other code (no slot aligned past 8, no inline assembly) leaves rsp where it falls.
+        // A Microsoft x64 body that calls nothing and keeps nothing on the stack (no slot, spill, saved
+        // register or frame register) needs neither the callees' home area nor a frame.
+        let bare = self.win && !self.called && self.canary < 0 && (self.opf & lv::OP_ASM) == 0 && npush == 0 && xregs.len() == 0 && omit && fp == NOREG && self.spill_base == self.out_size && self.spill_top == 0 && self.max_align <= 16;
         let b = self.b();
-        let mut leaf = !self.win && !self.called && self.canary < 0 && (self.opf & lv::OP_ASM) == 0;
+        let mut leaf = !self.win && !self.called && self.canary < 0 && (self.opf & lv::OP_ASM) == 0 || bare;
         for k in 0..b.slots.len() {
             leaf = leaf && b.slots[k].align_log2 <= 3;
         }
-        let mut local = if leaf {
+        let mut local = if bare {
+            0
+        } else if leaf {
             self.spill_base + self.spill_top + 7 & ~7u32
         } else {
             self.spill_base + self.spill_top + 15 & ~15u32
