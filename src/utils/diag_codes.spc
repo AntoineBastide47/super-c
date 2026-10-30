@@ -1,6 +1,6 @@
 // The stable codes of the compiler's diagnostics: a client branches on a code, never on message text. A
 // code keeps its number and its name once given; a new diagnostic takes the next number, and a removed one
-// leaves its number unused, with an empty name (5, `pub(file)` on an item). The names are provisional until
+// leaves its number unused, with an empty name (5). The names are provisional until
 // the compiler API promotes the diagnostic schema.
 
 /// No code: a diagnostic of a tool that gave none.

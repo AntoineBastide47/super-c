@@ -207,9 +207,7 @@ extend Dwarf {
         let mut fx = Vector::<DFix>::new();
         let mut abbrev = Vector::<u8>::new();
         let ab: []u8 = ABBREVS;
-        for i in 0..ab.len() {
-            abbrev.push(ab[i]);
-        }
+        abbrev.extend_from_slice(ab);
         // The files the rows name, numbered from 1 in order of first use.
         let mut fidx = Vector::<u32>::new();
         let mut used = Vector::<u32>::new();
@@ -319,9 +317,7 @@ fn line_program(
     l.push(LINE_RANGE as u8);
     l.push(OPCODE_BASE as u8);
     let sl: []u8 = STD_LENGTHS;
-    for i in 0..sl.len() {
-        l.push(sl[i]);
-    }
+    l.extend_from_slice(sl);
     // No include directories: each file by its own path, relative to the compile directory.
     l.push(0);
     for k in 0..used.len() {

@@ -3708,7 +3708,8 @@ fn cemit_drain_demand(
             cfs.push(cfl::CFlow::new_empty());
             cf_ok.push(false);
         }
-        if !cf_ok[li2 as usize] {
+        // Only the C renderer reads it: a native build renders no body.
+        if !cf_ok[li2 as usize] && !cbe::native_on(p) {
             let cfp = &mut cfs[li2 as usize];
             cfp.build_into(&lws.at(li2 as usize).body);
             cf_ok.set(li2 as usize, true);
@@ -3956,7 +3957,9 @@ fn cemit_drain_slice_one(
         sh.mg.clos_ids.push(blw.closures[c2]);
     }
     if bv_on || var_on {
-        cf_own.build_into(&blw.body);
+        if !cbe::native_on(p) {
+            cf_own.build_into(&blw.body);
+        }
         cfp = &cf_own;
     } else {
         cfp = cfs.at(li2 as usize);
@@ -4082,7 +4085,9 @@ fn cemit_low_task(t: LowTask) {
         if ok {
             dow2.apply_drops(&mut lw);
             let mut cf = cfl::CFlow::new_empty();
-            cf.build_into(&lw.body);
+            if !cbe::native_on(p) {
+                cf.build_into(&lw.body);
+            }
             let rp = unsafe &mut *(res + i as usize);
             *rp = lw;
             let cp = unsafe &mut *(cfr + i as usize);
@@ -5344,7 +5349,9 @@ pub(package) fn cemit_package(
                                 let slot = lws.len() as u64;
                                 let mv9 = replace(o.dvars.index_mut(vix as usize), irl::Lowerer::new(p, 0, NODE_NONE));
                                 let mut cf9 = cfl::CFlow::new_empty();
-                                cf9.build_into(&mv9.body);
+                                if !cbe::native_on(p) {
+                                    cf9.build_into(&mv9.body);
+                                }
                                 lws.push(mv9);
                                 cfs.push(cf9);
                                 cf_ok.push(true);
@@ -6217,8 +6224,9 @@ pub(package) fn cemit_package(
     let mut recs = Vector::<String>::new();
     let mut nks = Vector::<u64>::new();
     if tuc.on {
+        let base = nat_base(p);
         for m in 0..p.modules.len() {
-            nks.push(nat_key(p, &tuc.keys, m));
+            nks.push(tuc.keys[m] ^ base);
         }
     }
     bst::mark_sub(bst::S_LOWERED);
@@ -12409,8 +12417,8 @@ fn nat_task(t: NatTask) {
 }
 
 // The native objects' record (`__sc_native` in the tree): per module, the key its own part was compiled
-/// under (`nat_key`), its low bit `NAT_OBJ` when that part has an object (`<key> <path>` lines). A cached
-/// emission of a module counts only under its record's key.
+// under (its emission cache key xor `nat_base`), its low bit `NAT_OBJ` when that part has an object
+// (`<key> <path>` lines). A cached emission of a module counts only under its record's key.
 const NAT_RECORD: str = "__sc_native";
 const NAT_OBJ: u64 = 1;
 
@@ -12442,6 +12450,7 @@ fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc, held: &mut Vector<Option<lho
     }
     let rec = nat_record(build_out_path(&p.gen_root, NAT_RECORD, "").as_str());
     let pb = lay::target_for(p.arch).ptr as u32;
+    let base = nat_base(p);
     for m in 0..p.modules.len() {
         if !t.hit[m] {
             continue;
@@ -12450,7 +12459,7 @@ fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc, held: &mut Vector<Option<lho
             Some(v) => *v,
             None => 0,
         };
-        let nk = nat_key(p, &t.keys, m);
+        let nk = t.keys[m] ^ base;
         if r == 0 || (r & ~3u64) != (nk & ~3u64) {
             t.hit.set(m, false);
             continue;
@@ -12531,12 +12540,12 @@ fn loop_budgets(opt: i32, cg: u64) lu::Budgets {
     };
 }
 
-// The key of module `m`'s own object: its emission cache key (`keys`, which covers the bodies the LIR
-// inliner can copy: its imports') and what the native code reads beyond the C text: the build
-// configuration, the CPU features, the LIR optimizer's switches, the C headers' constants, the functions
-// only C defines, and with debug information the directory its file names are relative to.
-fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
-    let mut h = keys[m] ^ p.build_cfg as u64 << 40 ^ p.features.w[0].wrapping_mul(0x9E3779B97F4A7C15) ^ p.features.w[1];
+// The package part of a module's native key, which is its emission cache key (which covers the bodies
+// the LIR inliner can copy: its imports') xor this: what the native code reads beyond the C text: the
+// build configuration, the CPU features, the LIR optimizer's switches, the C headers' constants, the
+// functions only C defines, and with debug information the directory its file names are relative to.
+fn nat_base(p: &loader::Package) u64 {
+    let mut h = p.build_cfg as u64 << 40 ^ p.features.w[0].wrapping_mul(0x9E3779B97F4A7C15) ^ p.features.w[1];
     h = h ^ p.build_target as u64 << 8 ^ p.arch as u64 ^ p.pic as u64 << 7;
     if p.debug_info {
         h = h ^ (fnv(process::current_dir().unwrap_or(String::new()).as_str()) | 1).wrapping_mul(0xC4CEB9FE1A85EC53);
@@ -12701,12 +12710,14 @@ fn native_plan(
             continue;
         }
         let why = whys.index_mut(2 * m);
-        if module_has_asm(p, m) {
+        // Each statement ends in a newline: the text is empty exactly when the module holds none.
+        let text = module_asm(p, m);
+        if text.len() != 0 {
             if !nat::asm_native(p.build_target, p.arch) {
                 why.push_str("module-level assembly, which the assembler does not take for this target");
                 continue;
             }
-            texts.set(2 * m, module_asm(p, m));
+            texts.set(2 * m, text);
         }
         if conly[m] != 0 {
             why.push_string(l.conly_why.at(conly[m] as usize - 1));
@@ -15924,13 +15935,14 @@ pub(package) fn run_package(
                     has.set(nat_objs.at(k).m as usize, true);
                 }
             }
+            let base = nat_base(p);
             for m in 0..p.modules.len() {
                 let fl = if has[m] {
                     NAT_OBJ
                 } else {
                     0
                 };
-                rec_txt.format_into("{} {}\n", nat_key(p, &co.tuc_keys, m) & ~3u64 | fl, p.modules[m].path.as_str());
+                rec_txt.format_into("{} {}\n", (co.tuc_keys[m] ^ base) & ~3u64 | fl, p.modules[m].path.as_str());
             }
         }
         if !err && rec_txt.len() != 0 {

@@ -182,6 +182,25 @@ it lowers, and the instance graph starts from those instead of lowering the pack
 second time. Entries move out on first demand and never return. Redundant lowering was
 the single largest waste before the keep existed.
 
+## Duplicate Analysis and Work
+
+Duplicate computation recurs in this compiler; per-body lowering above was one case. The
+procedure that prevents it is in `super-c-task-discipline` section 10; the facts each phase
+holds are in the analysis inventory (`super-c-compiler-internals`,
+[analyses.md](../../super-c-compiler-internals/references/analyses.md)). Look for these forms
+when you write, review, or audit a phase:
+
+- One fact computed twice on unchanged input (the same order, dominators, loops, use counts,
+  effects, or layout, built again by a later pass of the same body).
+- An analysis rerun after a pass that changed nothing, or changed nothing the analysis reads.
+- Two traversals of one input that one traversal can do.
+- One result built, copied, hashed, sorted, mangled, or formatted twice.
+- A result dropped at a phase boundary and computed again by the next phase.
+- One analysis implemented in two places (in each target's code generator, or in two LIR
+  passes) instead of once in a shared module (`src/codegen/live.spc`, `src/lir/ir.spc`).
+- Per-item work that repeats a per-module or per-package result.
+- Work done for an item that is dropped later.
+
 ## What to Avoid
 
 - **Blanket memoization.** A memo whose probe cost exceeds the recomputation cost is a

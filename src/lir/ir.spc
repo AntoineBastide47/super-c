@@ -364,6 +364,48 @@ pub(package) const fn vcmp_ok(c: u16, lt: u8) bool {
     };
 }
 
+/// `v` as `n` copies of `x`, its buffer reused.
+pub(package) fn fill<T: Clone + Default + Eq>(v: &mut Vector<T>, n: usize, x: T) {
+    v.truncate(0);
+    v.resize_default(n);
+    if x != T::default() {
+        v.as_mut_slice().fill(x);
+    }
+}
+
+/// Whether `t` may write memory or order memory accesses: a store, a copy, a fill, an atomic or a fence,
+/// a call, inline assembly, a system operation, a vector operation or a variadic access.
+pub(package) const fn writes_memory(t: Inst) bool {
+    let op = t.op;
+    return op == O_STORE || op == O_MEMCPY || op == O_MEMSET || op >= O_ALOAD && op <= O_FENCE || op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_SYS || op >= O_VOP && op <= O_VAEND;
+}
+
+/// The address of load or store `t` of `b` as a base under at most 8 constant offsets (`ptradd`s without
+/// an index) and the bytes past it.
+pub(package) const fn address(b: &Body, t: Inst) (Value, i64) {
+    let mut base = t.a;
+    let mut off = (t.c as i32) as i64;
+    // Each step leaves one constant offset.
+    for _ in 0..8 {
+        if base == VNONE || (base & (VPARAM | VFLAG)) != 0 {
+            break;
+        }
+        let x = b.insts[base as usize];
+        if x.op != O_PTRADD || x.b != VNONE {
+            break;
+        }
+        off += x.c as i32;
+        base = x.a;
+    }
+    return (base, off);
+}
+
+/// Block `k`'s terminator.
+pub(package) const fn term(b: &Body, k: u32) Inst {
+    let bk = b.blocks[k as usize];
+    return b.insts[(bk.start + bk.len - 1) as usize];
+}
+
 /// An `O_ASM` record at pool index `r` of `b`: its output, input and clobber counts.
 pub(package) const fn asm_nout(b: &Body, r: u32) u32 {
     return b.pool[(r + 1) as usize];

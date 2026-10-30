@@ -1094,6 +1094,11 @@ pub(package) const fn operand_b(f: u8) bool {
 /// or an assembly statement's operands; not its edges' arguments.
 pub(package) fn uses(b: &Body, t: Inst, out: &mut Vector<Value>) {
     out.truncate(0);
+    uses_into(b, t, out);
+}
+
+/// `uses`, appended to `out`.
+pub(package) fn uses_into(b: &Body, t: Inst, out: &mut Vector<Value>) {
     let f = op_info(t.op).form;
     if operand_a(f) && t.a != VNONE {
         out.push(t.a);

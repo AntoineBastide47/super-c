@@ -16,7 +16,6 @@ pub(package) struct Shape {
     pub(package) kids_at: Vector<u32>, // per block, the start of its children in `kids`; one more entry at the end
     pub(package) kids: Vector<u32>, // the dominator-tree children, each block's in reverse postorder
     succ: Vector<u32>,
-    stack: Vector<u32>,
 }
 
 extend Shape {
@@ -30,7 +29,6 @@ extend Shape {
             kids_at: Vector::<u32>::new(),
             kids: Vector::<u32>::new(),
             succ: Vector::<u32>::new(),
-            stack: Vector::<u32>::new(),
         };
     }
 
@@ -44,15 +42,26 @@ extend Shape {
         return self.rpo[t as usize] <= self.rpo[s as usize];
     }
 
-    /// Analyze `b`.
-    pub(package) fn run(self: &mut Self, b: &Body) {
+    /// Analyze `b`, which `l` analyzed (`Live::run`): its reverse postorder and predecessor lists.
+    pub(package) fn run(self: &mut Self, b: &Body, l: &lv::Live) {
         let nb = b.blocks.len();
-        lv::fill(&mut self.rpo, nb, NONE);
-        lv::fill(&mut self.idom, nb, NONE);
-        lv::fill(&mut self.fwd, nb, 0);
+        self.rpo.truncate(0);
+        self.rpo.extend_copy(&l.rpo);
+        fill(&mut self.idom, nb, NONE);
+        fill(&mut self.fwd, nb, 0);
         self.header.truncate(0);
         self.header.resize_default(nb);
-        self.postorder(b);
+        self.order.truncate(0);
+        for k in 0..nb {
+            if self.rpo[k] != NONE {
+                self.order.push(0);
+            }
+        }
+        for k in 0..nb {
+            if self.rpo[k] != NONE {
+                self.order[self.rpo[k] as usize] = k as u32;
+            }
+        }
         // Forward edges and loop headers.
         for q in 0..self.order.len() {
             let k = self.order[q];
@@ -67,9 +76,9 @@ extend Shape {
                 }
             }
         }
-        self.dominators(b);
+        self.dominators(b, l);
         // The children of each block, in reverse postorder (CSR over `order`).
-        lv::fill(&mut self.kids_at, nb + 1, 0);
+        fill(&mut self.kids_at, nb + 1, 0);
         for q in 1..self.order.len() {
             let k = self.order[q];
             self.kids_at[self.idom[k as usize] as usize + 1] += 1;
@@ -77,7 +86,7 @@ extend Shape {
         for k in 0..nb {
             self.kids_at[k + 1] += self.kids_at[k];
         }
-        lv::fill(&mut self.kids, self.kids_at[nb] as usize, 0);
+        fill(&mut self.kids, self.kids_at[nb] as usize, 0);
         let mut fillp = Vector::<u32>::with_capacity(nb + 1);
         fillp.extend_copy(&self.kids_at);
         for q in 1..self.order.len() {
@@ -88,76 +97,10 @@ extend Shape {
         }
     }
 
-    // `order` and `rpo` by an explicit-stack DFS from the entry (`stack` holds block << 1 | finished): at
-    // most two pops per block and one per edge.
-    fn postorder(self: &mut Self, b: &Body) {
+    // Immediate dominators by Cooper, Harvey and Kennedy's iteration over reverse postorder, over `l`'s
+    // predecessor lists. A reducible graph settles in two passes; each pass is bounded by the edges.
+    fn dominators(self: &mut Self, b: &Body, l: &lv::Live) {
         let nb = b.blocks.len();
-        let mut seen = Vector::<bool>::new();
-        seen.resize_default(nb);
-        self.order.truncate(0);
-        self.stack.truncate(0);
-        self.stack.push(0);
-        while self.stack.len() != 0 {
-            let x = self.stack.pop().unwrap();
-            let k = x >> 1;
-            if (x & 1) != 0 {
-                self.order.push(k);
-                continue;
-            }
-            if seen[k as usize] {
-                continue;
-            }
-            seen[k as usize] = true;
-            self.stack.push(k << 1 | 1);
-            let t = b.insts[(b.blocks[k as usize].start + b.blocks[k as usize].len - 1) as usize];
-            b.succ_edges(t, &mut self.succ);
-            let mut e = self.succ.len();
-            while e > 0 {
-                e -= 1;
-                let s = b.edge_target(self.succ[e]);
-                if !seen[s as usize] {
-                    self.stack.push(s << 1);
-                }
-            }
-        }
-        self.order.reverse();
-        for q in 0..self.order.len() {
-            self.rpo[self.order[q] as usize] = q as u32;
-        }
-    }
-
-    // Immediate dominators by Cooper, Harvey and Kennedy's iteration over reverse postorder. A reducible
-    // graph settles in two passes; each pass is bounded by the edges.
-    fn dominators(self: &mut Self, b: &Body) {
-        let nb = b.blocks.len();
-        // Predecessor lists of the reachable blocks (CSR).
-        let mut start = Vector::<u32>::new();
-        lv::fill(&mut start, nb + 1, 0);
-        for q in 0..self.order.len() {
-            let k = self.order[q];
-            let t = b.insts[(b.blocks[k as usize].start + b.blocks[k as usize].len - 1) as usize];
-            b.succ_edges(t, &mut self.succ);
-            for e in 0..self.succ.len() {
-                start[b.edge_target(self.succ[e]) as usize + 1] += 1;
-            }
-        }
-        for k in 0..nb {
-            start[k + 1] += start[k];
-        }
-        let mut preds = Vector::<u32>::new();
-        lv::fill(&mut preds, start[nb] as usize, 0);
-        let mut fillp = Vector::<u32>::with_capacity(nb + 1);
-        fillp.extend_copy(&start);
-        for q in 0..self.order.len() {
-            let k = self.order[q];
-            let t = b.insts[(b.blocks[k as usize].start + b.blocks[k as usize].len - 1) as usize];
-            b.succ_edges(t, &mut self.succ);
-            for e in 0..self.succ.len() {
-                let s = b.edge_target(self.succ[e]) as usize;
-                preds[fillp[s] as usize] = k;
-                fillp[s] += 1;
-            }
-        }
         if self.order.len() == 0 {
             return;
         }
@@ -168,8 +111,8 @@ extend Shape {
             for q in 1..self.order.len() {
                 let k = self.order[q] as usize;
                 let mut d = NONE;
-                for j in start[k]..start[k + 1] {
-                    let p = preds[j as usize];
+                for j in l.pat[k]..l.pat[k + 1] {
+                    let p = l.preds[j as usize];
                     if self.idom[p as usize] == NONE {
                         continue;
                     }

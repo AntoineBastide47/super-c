@@ -122,7 +122,7 @@ extend Slp {
     /// The packs of body `b` (`ptr` its pointer size, `vb` the bytes of the widest vector, `w` per block the
     /// weight of an instruction there): whether the instructions they save outweigh the splats and gathers
     /// they add. `b` stays as it is.
-    pub(package) fn plan(self: &mut Self, b: &Body, ptr: u32, vb: u32, assoc: bool, w: []u64) bool {
+    pub(package) fn plan(self: &mut Self, b: &Body, ptr: u32, vb: u32, assoc: bool, w: []u64, iblk: []u32, pblk: []u32) bool {
         self.ptr = ptr;
         self.vb = vb;
         self.assoc = assoc;
@@ -138,18 +138,11 @@ extend Slp {
         self.groups.truncate(0);
         fill(&mut self.iown, ni, NONE);
         fill(&mut self.pown, np, NONE);
-        fill(&mut self.iblk, ni, NONE);
-        fill(&mut self.pblk, np, NONE);
-        fill_bool(&mut self.sclaim, ni, false);
-        for k in 0..nb {
-            let bk = b.blocks[k];
-            for i in bk.start..bk.start + bk.len {
-                self.iblk[i as usize] = k as u32;
-            }
-            for q in bk.param_start..bk.param_start + bk.param_len as u32 {
-                self.pblk[q as usize] = k as u32;
-            }
-        }
+        self.iblk.truncate(0);
+        self.iblk.extend_from_slice(iblk);
+        self.pblk.truncate(0);
+        self.pblk.extend_from_slice(pblk);
+        fill(&mut self.sclaim, ni, false);
         fill(&mut self.in_at, nb + 1, 0);
         for k in 0..nb {
             b.succ_edges(term(b, k as u32), &mut self.edges);
@@ -693,7 +686,7 @@ extend Slp {
                 }
             }
             for i in lo + 1..hi {
-                if writes(b.insts[i as usize]) {
+                if writes_memory(b.insts[i as usize]) {
                     return 0;
                 }
             }
@@ -978,25 +971,6 @@ const fn plain_load(b: &Body, v: Value, ty: u8) bool {
     return t.op == O_LOAD && t.ty == ty && (t.aux & MEM_VOLATILE) == 0;
 }
 
-// The address of load or store `t`: a base no constant offset derives from, and the bytes past it.
-const fn address(b: &Body, t: Inst) (Value, i64) {
-    let mut base = t.a;
-    let mut off = (t.c as i32) as i64;
-    // Each step leaves one constant offset.
-    for _ in 0..8 {
-        if base == VNONE || (base & (VPARAM | VFLAG)) != 0 {
-            break;
-        }
-        let x = b.insts[base as usize];
-        if x.op != O_PTRADD || x.b != VNONE {
-            break;
-        }
-        off += x.c as i32;
-        base = x.a;
-    }
-    return (base, off);
-}
-
 // The bits of constant `v` (an integer's or a float's), if it is one.
 fn const_bits(b: &Body, v: Value) Option<u64> {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST && b.insts[v as usize].op != O_FCONST {
@@ -1008,33 +982,5 @@ fn const_bits(b: &Body, v: Value) Option<u64> {
 
 // Whether `t` may read or write memory.
 const fn touches(t: Inst) bool {
-    return t.op == O_LOAD || writes(t);
-}
-
-// Whether `t` may write memory or order memory accesses.
-const fn writes(t: Inst) bool {
-    let op = t.op;
-    return op == O_STORE || op == O_MEMCPY || op == O_MEMSET || op >= O_ALOAD && op <= O_FENCE || op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_SYS || op >= O_VOP && op <= O_VAEND;
-}
-
-// The terminator of block `k`.
-const fn term(b: &Body, k: u32) Inst {
-    let bk = b.blocks[k as usize];
-    return b.insts[(bk.start + bk.len - 1) as usize];
-}
-
-fn fill(v: &mut Vector<u32>, n: usize, x: u32) {
-    v.truncate(0);
-    v.resize_default(n);
-    if x != 0 {
-        v.as_mut_slice().fill(x);
-    }
-}
-
-fn fill_bool(v: &mut Vector<bool>, n: usize, x: bool) {
-    v.truncate(0);
-    v.resize_default(n);
-    if x {
-        v.as_mut_slice().fill(x);
-    }
+    return t.op == O_LOAD || writes_memory(t);
 }

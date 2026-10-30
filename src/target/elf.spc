@@ -333,9 +333,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         } else {
             CIE
         };
-        for j in 0..cie.len() {
-            body.push(cie[j]);
-        }
+        body.extend_from_slice(cie);
         for f in 0..o.frames.len() {
             let fr = o.frames[f];
             let at = body.len() - start;
@@ -585,9 +583,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             entsize: 24,
         },
     );
-    for j in 0..syms.len() {
-        body.push(syms[j]);
-    }
+    body.extend_from_slice(&syms);
     hdrs.push(
         Shdr {
             name: add_str(&mut shstr, ".strtab"),
@@ -601,9 +597,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             entsize: 0,
         },
     );
-    for j in 0..strtab.len() {
-        body.push(strtab[j]);
-    }
+    body.extend_from_slice(&strtab);
     let shstrndx = hdrs.len() as u32;
     let shname = add_str(&mut shstr, ".shstrtab");
     hdrs.push(
@@ -619,9 +613,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             entsize: 0,
         },
     );
-    for j in 0..shstr.len() {
-        body.push(shstr[j]);
-    }
+    body.extend_from_slice(&shstr);
     while body.len() % 8 != 0 {
         body.push(0);
     }
@@ -651,9 +643,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     ob::w16(out, 64);
     ob::w16(out, hdrs.len() as u32);
     ob::w16(out, shstrndx);
-    for j in 0..body.len() {
-        out.push(body[j]);
-    }
+    out.extend_from_slice(&body);
     for i in 0..hdrs.len() {
         let h = hdrs[i];
         ob::w32(out, h.name);

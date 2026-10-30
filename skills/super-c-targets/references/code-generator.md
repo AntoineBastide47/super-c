@@ -14,7 +14,8 @@ set first: it states the value, register and frame model.
    `Live::run`. It gives the block layout (reverse postorder, each loop contiguous, rare blocks last:
    `Live::rare`, a block the entry reaches only through a `BLOCK_RARE` one), the loop nesting, each
    value's last live position and use count. A folded instruction emits no code; its user reads its
-   operands (`Live::uses_at`). The warm code's values take the registers first; a call in a rare block
+   operands (`Live::uses_of`, the folded use lists `Live::ranges` records once). The warm code's values
+   take the registers first; a call in a rare block
    saves around it the scratch registers whose values live past it (`save_scratch`), so it is no call
    for the homes.
 2. Frame: the outgoing argument area (the largest call's stack arguments, from the calling convention),
@@ -25,6 +26,8 @@ set first: it states the value, register and frame model.
    home before the branch; an edge moves the block arguments (`edge_homes`).
 5. `finish`: branch fixups, relocations into the object, call frame rows, line rows. arm64 retries a
    body whose conditional branch is out of range with every one of them over an unconditional branch.
+   A retry (`again`: that one, or a shrink-wrap attempt that failed) keeps the relays, the canary, the
+   operation flags and `Live`'s analysis, and redoes only the layout and the ranges (`Live::relayout`).
 
 A body the backend cannot compile fails with a reason (`refuse`): the build reports the function and
 the reason. Never emit code for an unsupported case.

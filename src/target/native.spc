@@ -184,22 +184,24 @@ pub(package) fn object(
         if y.sec != ob::NOSEC {
             continue;
         }
-        let nm = String::from_str(o.name_of(k as u32 - 1));
-        let s = p.find_symbol(&nm);
-        if s == NONE || nm.as_str().starts_with("__sc_zst_") {
+        // The name is the package symbol's (`p.spell`): the object's may move as the generator adds one.
+        let on = o.name_of(k as u32 - 1);
+        let s = p.find_symbol(on);
+        if s == NONE || on.starts_with("__sc_zst_") {
             continue;
         }
         let ps = p.syms[s as usize];
         if ps.def == NONE || ps.unit != NONE {
             continue;
         }
+        let nm = p.spell(ps.name);
         if ps.kind == SK_FUNC {
             if !g.func(s, true) {
-                err.format_into("{}: {}", nm.as_str(), g.why());
+                err.format_into("{}: {}", nm, g.why());
                 return false;
             }
         } else if !g.data(s, true) {
-            err.format_into("{}: {}", nm.as_str(), g.why());
+            err.format_into("{}: {}", nm, g.why());
             return false;
         }
     }
@@ -320,22 +322,24 @@ fn wasm_object(p: &Package, funcs: []u32, datas: []u32, text: str, out: &mut Vec
         if y.def != wobj::NONE || y.kind == wobj::K_GLOBAL || y.kind == wobj::K_TABLE {
             continue;
         }
-        let nm = String::from_str(o.name_of(k as u32 - 1));
-        let s = p.find_symbol(&nm);
-        if s == NONE || nm.as_str().starts_with("__sc_zst_") {
+        // The name is the package symbol's (`p.spell`): the object's may move as the generator adds one.
+        let on = o.name_of(k as u32 - 1);
+        let s = p.find_symbol(on);
+        if s == NONE || on.starts_with("__sc_zst_") {
             continue;
         }
         let ps = p.syms[s as usize];
         if ps.def == NONE || ps.unit != NONE {
             continue;
         }
+        let nm = p.spell(ps.name);
         let ok = if ps.kind == SK_FUNC {
             g.func(s, true)
         } else {
             g.data(s, true)
         };
         if !ok {
-            err.format_into("{}: {}", nm.as_str(), g.err.as_str());
+            err.format_into("{}: {}", nm, g.err.as_str());
             return false;
         }
     }

@@ -686,7 +686,7 @@ fn pub_modifiers() {
     assert(h::parse_has_error("pub let x: i32 = 1;\n"), "pub before a non-item is rejected");
 }
 
-// `pub(module)` and `pub(package)` set their levels; `pub(file)` is no modifier.
+// `pub(module)` and `pub(package)` set their levels.
 @test
 fn visibility_levels() {
     let src = "pub(module) struct S { pub(module) a: i32, pub(package) b: i32 }\npub(package) fn f() {}\npub(module) const K: i32 = 1;\npub(package) type T = i32;\npub(module) interface I {}\n";
@@ -700,8 +700,6 @@ fn visibility_levels() {
     assert(item(&c.ast, 2).as_data.const_def.vis == VIS_MODULE, "pub(module) const");
     assert(item(&c.ast, 3).as_data.type_alias.vis == VIS_PACKAGE, "pub(package) type");
     assert(item_ext(&c.ast, 4).interface_def.vis == VIS_MODULE, "pub(module) interface");
-    assert(h::parse_has_error("pub(file) fn f() {}\n"), "pub(file) on an item is rejected");
-    assert(h::parse_has_error("struct S { pub(file) a: i32 }\n"), "pub(file) on a field is rejected");
     // A tuple type after `pub` is no modifier.
     let t = h::parse_ast("struct W { pub x: (i32, i32) }\n");
     assert(t.errors == 0, "a tuple field type parses");

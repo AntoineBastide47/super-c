@@ -36,6 +36,8 @@ materially extends** what the skill documents.
 - Adds, removes, or renames a subcommand, flag, or environment variable
 - Changes the syntax or semantics of a language construct the skill documents
 - Alters the compiler pipeline order, adds or removes a pass
+- Adds, removes, or moves an analysis, or changes what invalidates it
+  (`super-c-compiler-internals/references/analyses.md`)
 - Changes the self-hosting contract, fixpoint protocol, or bootstrap workflow
 - Adds a new concurrency primitive, FFI mechanism, or test harness feature
 - Changes a documented invariant (freeze contract, determinism, ownership rules)

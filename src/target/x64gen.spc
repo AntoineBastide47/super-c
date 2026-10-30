@@ -172,9 +172,7 @@ fn win_unwind(
             0u8
         },
     );
-    for q in 0..codes.len() {
-        out.push(codes[q]);
-    }
+    out.extend_from_slice(&codes);
     if n % 2 != 0 {
         out.push(0);
         out.push(0);
@@ -282,7 +280,11 @@ pub(package) struct Gen {
     // warm code used the stack: the body is compiled again without).
     shrink: bool,
     no_shrink: bool,
+    again: bool, // the next `func` compiles the body it compiled last again (`unshrunk`, `far`)
+    prot: bool, // the body has a stack canary (`lver::protected`)
+    opf: u8, // the body's `lv::op_flags`
     rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
+    cret: Vector<bool>, // per instruction, a call that returns (`clobbers`, not `dead_end`; `call_tables`)
     shared: Vector<u32>, // the block parameters that share a header parameter's slot (`back_share`)
     dying: Vector<u32>, // values whose register frees after the current instruction
     wparams: Vector<u32>, // the parameters the current terminator's edges write
@@ -322,15 +324,21 @@ pub(package) struct Gen {
     tail_ok: bool,
     tail_ret: u32,
     rels: Vector<CRel>,
-    osym: Vector<u32>, // per body symbol, its object symbol (NONE until used)
+    osym: Vector<u32>, // per package symbol, its object symbol in this generator's object (NONE until used)
     // Calls.
     lay: ab::CallLayout,
+    // Per symbol of the body at hand, its intrinsic's instructions (`intrin::of_symbols`); per signature
+    // a call of it takes, its layout (`call_layout`: `lays[q]` for `lay_sig[q]`, the first `nlay`).
+    itpl: Vector<str<'static>>,
+    lays: Vector<ab::CallLayout>,
+    lay_sig: Vector<u32>,
     self_lay: ab::CallLayout,
     uses: Vector<Value>,
     mv: Vector<Mv>,
     cstr_n: u32,
     local: bool, // the function compiling is a local copy
     msg_sym: Map<String, u32>, // per C string text, its object symbol
+    msg_key: String, // `cstr`'s lookup key
 }
 
 // A move of the parallel-move resolver: `src` to `dst` (locations), `bytes` wide in register file `v`.
@@ -444,7 +452,11 @@ extend Gen {
             cmp_at: NONE,
             shrink: false,
             no_shrink: false,
+            again: false,
+            prot: false,
+            opf: 0,
             rarec: Vector::<bool>::new(),
+            cret: Vector::<bool>::new(),
             shared: Vector::<u32>::new(),
             dying: Vector::<u32>::new(),
             wparams: Vector::<u32>::new(),
@@ -480,12 +492,16 @@ extend Gen {
             rels: Vector::<CRel>::new(),
             osym: Vector::<u32>::new(),
             lay: ab::CallLayout::new(),
+            itpl: Vector::<str<'static>>::new(),
+            lays: Vector::<ab::CallLayout>::new(),
+            lay_sig: Vector::<u32>::new(),
             self_lay: ab::CallLayout::new(),
             uses: Vector::<Value>::new(),
             mv: Vector::<Mv>::new(),
             cstr_n: 0,
             local: false,
             msg_sym: Map::<String, u32>::new(),
+            msg_key: String::new(),
         };
     }
 
@@ -1319,7 +1335,7 @@ extend Gen {
         let mut leaf = true;
         for x in 0..ni {
             let t = b.insts[x];
-            leaf = leaf && !(Gen::clobbers(b, t) && !self.dead_end(x) && !self.rarec[x]) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !(t.op == O_SYMADDR && !self.remat_inst(
+            leaf = leaf && !(self.cret[x] && !self.rarec[x]) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !(t.op == O_SYMADDR && !self.remat_inst(
                 x as u32,
             ));
         }
@@ -1554,22 +1570,25 @@ extend Gen {
     fn call_tables(self: &mut Self) {
         let b = self.b();
         let ni = b.insts.len();
-        fill32(&mut self.cpre, ni + 1, 0);
-        fill32(&mut self.vpre, ni + 1, 0);
+        fill(&mut self.cpre, ni + 1, 0);
+        fill(&mut self.vpre, ni + 1, 0);
         self.rarec.truncate(0);
         self.rarec.resize_default(ni);
+        fill(&mut self.cret, ni, false);
         for i in 0..ni {
             let t = b.insts[i];
-            if Gen::clobbers(b, t) && !self.dead_end(i) && self.rare(i as u32) {
+            let c = Gen::clobbers(b, t) && !self.dead_end(i);
+            self.cret[i] = c;
+            if c && self.rare(i as u32) {
                 self.rarec[i] = true;
-            } else if Gen::clobbers(b, t) && !self.dead_end(i) {
+            } else if c {
                 self.cpre[i + 1] = 1;
                 self.vpre[i + 1] = (!(t.op == O_CALL && self.intrinsic(t.a).len() != 0)) as u32;
             }
         }
         let nq = self.lv.order.len();
-        fill32(&mut self.cpos, nq + 1, 0);
-        fill32(&mut self.vpos, nq + 1, 0);
+        fill(&mut self.cpos, nq + 1, 0);
+        fill(&mut self.vpos, nq + 1, 0);
         for q in 0..nq {
             let bk = b.blocks[self.lv.order[q] as usize];
             let mut c: u32 = 0;
@@ -1835,7 +1854,8 @@ extend Gen {
         // A pending condition is this instruction's to read: nothing may clobber the flags before.
         self.keep_flags = self.pend.inst != NONE;
         let t = self.b().insts[i as usize];
-        self.lv.uses_at(self.b(), i, &mut self.uses);
+        self.uses.truncate(0);
+        self.uses.extend_from_slice(self.lv.uses_of(i));
         for k in 0..self.uses.len() {
             let x = self.vx(self.uses[k]);
             self.use_once(x);
@@ -2121,17 +2141,10 @@ extend Gen {
         if !self.ymm || self.yblk[k as usize] {
             return false;
         }
-        let b = self.b();
         let mut from = false;
-        let mut es = Vector::<u32>::new();
-        for j in 0..b.blocks.len() {
-            if !self.yblk[j] || self.lv.pos[j] == NONE {
-                continue;
-            }
-            b.succ_edges(b.insts[(b.blocks[j].start + b.blocks[j].len - 1) as usize], &mut es);
-            for e in 0..es.len() {
-                from = from || b.edge_target(es[e]) == k;
-            }
+        for j in self.lv.pat[k as usize]..self.lv.pat[k as usize + 1] {
+            let pj = self.lv.preds[j as usize] as usize;
+            from = from || self.yblk[pj] && self.lv.pos[pj] != NONE;
         }
         if !from {
             return false;
@@ -2173,9 +2186,13 @@ extend Gen {
 
     // The object symbol of body symbol `s`.
     fn osym_of(self: &mut Self, s: u32) u32 {
-        if self.osym[s as usize] == NONE {
-            let p = unsafe &*self.pkg;
-            let ps = p.syms[self.b().syms[s as usize] as usize];
+        let p = unsafe &*self.pkg;
+        if self.osym.len() == 0 {
+            fill(&mut self.osym, p.syms.len(), NONE);
+        }
+        let g = self.b().syms[s as usize] as usize;
+        if self.osym[g] == NONE {
+            let ps = p.syms[g];
             let nm0 = p.spell(ps.name);
             // `__sc_x_<name>` is a C library name's alias (a macro of a scoped extern header).
             let nm = if ps.def == NONE && nm0.starts_with("__sc_x_") {
@@ -2184,9 +2201,9 @@ extend Gen {
                 nm0
             };
             let k = self.obj().sym(nm);
-            self.osym[s as usize] = k;
+            self.osym[g] = k;
         }
-        return self.osym[s as usize];
+        return self.osym[g];
     }
 }
 
@@ -2220,15 +2237,6 @@ const fn trunc64(x: u64, n: u32) u64 {
     return x & (1u64 << n as u64) - 1;
 }
 
-// `v` as `n` copies of `x`, its buffer reused.
-fn fill32(v: &mut Vector<u32>, n: usize, x: u32) {
-    v.truncate(0);
-    v.resize_default(n);
-    if x != 0 {
-        v.as_mut_slice().fill(x);
-    }
-}
-
 // The size and alignment of signature type `pt` of `b`.
 fn sig_size(b: &Body, pt: u32, ptr: u32) (u32, u32) {
     if (pt & AGG) != 0 {
@@ -2251,12 +2259,24 @@ extend Gen {
         let b = self.b();
         self.lv.fold_max = 8;
         self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA;
-        self.arg_relays();
-        self.lv.after.truncate(0);
-        self.lv.run(b);
+        // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
+        // canary and the analysis of the body but its layout.
+        if self.again {
+            self.again = false;
+            self.lv.after.truncate(0);
+            self.lv.relayout(b);
+        } else {
+            intrin::of_symbols(unsafe &*self.pkg, b, "x86_64", &mut self.itpl);
+            self.lay_sig.truncate(0);
+            self.arg_relays();
+            self.prot = lver::protected(unsafe (*self.pkg).protect, b);
+            self.opf = lv::op_flags(b);
+            self.lv.after.truncate(0);
+            self.lv.run(b);
+        }
         self.shrink = !self.no_shrink && self.shrinkable();
         if self.shrink {
-            self.lv.run(b);
+            self.lv.relayout(b);
         }
         let n = self.lv.end.len();
         self.va.truncate(0);
@@ -2269,10 +2289,9 @@ extend Gen {
                 self.va.index_mut(k).home = H_REMAT;
             }
         }
-        fill32(&mut self.osym, b.syms.len(), NONE);
-        fill32(&mut self.owner, 32, NONE);
+        fill(&mut self.owner, 32, NONE);
         self.held = 0;
-        fill32(&mut self.blk_at, b.blocks.len(), NONE);
+        fill(&mut self.blk_at, b.blocks.len(), NONE);
         self.c.clear();
         self.zf.at = NONE;
         self.fused = NONE;
@@ -2333,12 +2352,8 @@ extend Gen {
         self.frame_layout();
         // Without a frame pointer rbp holds values; a frame aligned past 16 bytes or inline assembly, which
         // may name rbp, keeps it.
-        let mut omit = p.omit_fp && self.max_align <= 16;
-        let mut va = false;
-        for k in 0..b.insts.len() {
-            omit = omit && b.insts[k].op != O_ASM;
-            va = va || b.insts[k].op == O_VASTART;
-        }
+        let omit = p.omit_fp && self.max_align <= 16 && (self.opf & lv::OP_ASM) == 0;
+        let va = (self.opf & lv::OP_VASTART) != 0;
         // Sibling calls leave the frame first: none with a canary to check, variadic arguments in it, or a
         // slot's address that may outlive it.
         self.tail_ok = p.tail && self.canary < 0 && !va && !lver::frame_escapes(b);
@@ -2378,6 +2393,7 @@ extend Gen {
     // entry.
     fn unshrunk(self: &mut Self, s: u32, local: bool) bool {
         self.no_shrink = true;
+        self.again = true;
         let ok = self.func(s, local);
         self.no_shrink = false;
         return ok;
@@ -2392,7 +2408,7 @@ extend Gen {
     // ends in `ret` or a jump out of the function.
     fn shrinkable(self: &mut Self) bool {
         let b = self.b();
-        if lver::protected(unsafe (*self.pkg).protect, b) {
+        if self.prot || self.opf != 0 {
             return false;
         }
         for k in 0..b.slots.len() {
@@ -2405,9 +2421,6 @@ extend Gen {
         let mut any = false;
         for i in 0..b.insts.len() {
             let t = b.insts[i];
-            if t.op == O_RETADDR || t.op == O_VASTART || t.op == O_ASM || t.op == O_SYS {
-                return false;
-            }
             let d = self.lv.def_blk[i];
             if d == NONE || self.lv.pos[d as usize] == NONE || !Gen::clobbers(b, t) {
                 continue;
@@ -2481,7 +2494,7 @@ extend Gen {
         self.max_align = 16;
         self.sret_off = -1;
         self.save_off = -1;
-        fill32(&mut self.slot_off, b.slots.len(), 0);
+        fill(&mut self.slot_off, b.slots.len(), 0);
         let mut at = out;
         for k in 0..b.slots.len() {
             // A slot whose stores relay (`arg_relays`) has no memory access.
@@ -2499,7 +2512,7 @@ extend Gen {
         }
         // The canary between the slots and the spills and saved registers above them.
         self.canary = -1;
-        if lver::protected(unsafe (*self.pkg).protect, b) {
+        if self.prot {
             at = at + 7 & ~7u32;
             self.canary = at;
             at += 8;
@@ -2511,7 +2524,7 @@ extend Gen {
     // `ends`: the values grouped by the position their range ends at.
     fn bucket_ends(self: &mut Self) {
         let np = self.lv.order.len();
-        fill32(&mut self.ends_at, np + 1, 0);
+        fill(&mut self.ends_at, np + 1, 0);
         for x in 0..self.lv.end.len() {
             if self.lv.def_blk[x] != NONE && self.lv.pos[self.lv.def_blk[x] as usize] != NONE {
                 self.ends_at[self.lv.end[x] as usize + 1] += 1;
@@ -2520,7 +2533,7 @@ extend Gen {
         for q in 0..np {
             self.ends_at[q + 1] += self.ends_at[q];
         }
-        fill32(&mut self.ends, self.ends_at[np] as usize, 0);
+        fill(&mut self.ends, self.ends_at[np] as usize, 0);
         let mut fillp = Vector::<u32>::with_capacity(np + 1);
         fillp.extend_copy(&self.ends_at);
         for x in 0..self.lv.end.len() {
@@ -4963,7 +4976,7 @@ extend Gen {
     fn ret_stores(self: &mut Self) {
         let b = self.b();
         let ni = b.insts.len();
-        fill32(&mut self.rstore, ni, 0);
+        fill(&mut self.rstore, ni, 0);
         let rt = b.pool[b.sig as usize + 2];
         if self.self_lay.ret.kind != ab::L_REG || (rt & AGG) == 0 {
             return;
@@ -4994,7 +5007,7 @@ extend Gen {
                     continue;
                 }
                 if i < run || i == end {
-                    fill32(&mut self.rstore, ni, 0);
+                    fill(&mut self.rstore, ni, 0);
                     return;
                 }
                 self.rstore[i as usize] = self.part_store(t, pv) + 1;
@@ -5624,17 +5637,10 @@ extend Gen {
         uses.resize_default(b.slots.len());
         let mut calls = false;
         let mut us = Vector::<Value>::new();
-        let mut es = Vector::<u32>::new();
         for i in 0..ni {
             let t = b.insts[i];
             calls = calls || t.op == O_CALL || t.op == O_CALLIND;
             lv::each_use(b, t, &mut us);
-            b.succ_edges(t, &mut es);
-            for e in 0..es.len() {
-                for q in 0..b.edge_nargs(es[e]) {
-                    us.push(b.edge_arg(es[e], q));
-                }
-            }
             for q in 0..us.len() {
                 let v = us[q];
                 if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_SLOTADDR {
@@ -5678,7 +5684,7 @@ extend Gen {
                         let u = b.insts[j as usize];
                         if u.op != O_STORE || (u.a & (VPARAM | VFLAG)) != 0 || b.insts[u.a as usize].op != O_SLOTADDR || b.insts[u.a as usize].a != s {
                             // Another use of the slot's addresses (an earlier call's argument) ends the run.
-                            if lv::reads_slot(b, u, s, &mut us, &mut es) {
+                            if lv::reads_slot(b, u, s, &mut us) {
                                 break;
                             }
                             continue;
@@ -5716,7 +5722,7 @@ extend Gen {
                 continue;
             }
             if self.lv.relay.len() == 0 {
-                fill32(&mut self.lv.relay, ni, NONE);
+                fill(&mut self.lv.relay, ni, NONE);
             }
             let c = gr as u32;
             let st = gst[z] as u32 & 0x7FFFFFFF;
@@ -5793,26 +5799,26 @@ extend Gen {
             ab::intrinsic_layout(b, t.b, self.ptr, gp[0..8], x::RAX, &mut self.lay);
             return;
         }
+        // Once per signature in the body: the same signature has the same layout.
+        for q in 0..self.lay_sig.len() {
+            if self.lay_sig[q] == t.b {
+                self.lay.copy_from(&self.lays[q]);
+                return;
+            }
+        }
         classify(self.win, b, t.b, self.ptr, self.vregs, &mut self.lay);
+        let q = self.lay_sig.len();
+        self.lay_sig.push(t.b);
+        if q == self.lays.len() {
+            self.lays.push(ab::CallLayout::new());
+        }
+        self.lays[q].copy_from(&self.lay);
     }
 
-    // The instructions of the intrinsic body symbol `s` names (`target::intrin`); empty for another
+    // The instructions of the intrinsic body symbol `s` names (`target::intrin`, `itpl`); empty for another
     // function.
     const fn intrinsic(self: &Self, s: u32) str<'static> {
-        let p = unsafe &*self.pkg;
-        let ps = p.syms[self.b().syms[s as usize] as usize];
-        if ps.def != NONE {
-            return "";
-        }
-        let nm = p.spell(ps.name);
-        return intrin::find(
-            "x86_64",
-            if nm.starts_with("__sc_x_") {
-                nm.slice(7, nm.len())
-            } else {
-                nm
-            },
-        );
+        return self.itpl[s as usize];
     }
 
     // Whether call `t`, instruction `i`, is a sibling call (`Package.tail`, `tail_ok`): its block returns
@@ -6832,8 +6838,10 @@ extend Gen {
 
     // The object symbol of C string `text`, one per text.
     fn cstr(self: &mut Self, text: str) u32 {
-        let key = String::from_str(text);
-        if let Some(k) = self.msg_sym.get(&key) {
+        // The key in a reused buffer: a text seen before allocates nothing.
+        self.msg_key.clear();
+        self.msg_key.push_str(text);
+        if let Some(k) = self.msg_sym.get(&self.msg_key) {
             return *k;
         }
         let name = format("__sc_msg.{}", self.cstr_n);
@@ -6841,13 +6849,10 @@ extend Gen {
         let o = self.obj();
         let k = o.sym(&name);
         let _ = o.define(k, ob::S_CSTR, 0, text.len() as u64 + 1, 0);
-        for j in 0..text.len() {
-            let one: [u8; 1] = [text.byte_at(j)];
-            o.put(ob::S_CSTR, one);
-        }
+        o.put_str(ob::S_CSTR, text);
         let z: [u8; 1] = [0];
         o.put(ob::S_CSTR, z);
-        self.msg_sym.insert(key, k);
+        self.msg_sym.insert(self.msg_key.clone(), k);
         return k;
     }
 
@@ -6993,12 +6998,9 @@ extend Gen {
         // A System V body that calls nothing (no canary check either) and keeps nothing 16-aligned for
         // other code (no slot aligned past 8, no inline assembly) leaves rsp where it falls.
         let b = self.b();
-        let mut leaf = !self.win && !self.called && self.canary < 0;
+        let mut leaf = !self.win && !self.called && self.canary < 0 && (self.opf & lv::OP_ASM) == 0;
         for k in 0..b.slots.len() {
             leaf = leaf && b.slots[k].align_log2 <= 3;
-        }
-        for k in 0..b.insts.len() {
-            leaf = leaf && b.insts[k].op != O_ASM;
         }
         let mut local = if leaf {
             self.spill_base + self.spill_top + 7 & ~7u32
@@ -7299,9 +7301,7 @@ extend Gen {
         for q in 0..self.rows.len() {
             ats.push(ast_min((self.rows[q] >> 32) as u32, body_n));
         }
-        for q in 0..stubs.len() {
-            ats.push(stubs[q]);
-        }
+        ats.extend_from_slice(&stubs);
         ats.push(tails_end);
         ats.push(ra);
         ats.push(body_n);

@@ -117,6 +117,7 @@ pub(package) struct LoopOpt {
     tgts: Vector<u32>, // the loop's exit targets
     lbase: Vector<u32>, // per exit target, its landing block's first parameter for `lout` (NONE: none)
     tgt_of: Vector<u32>, // per block, the exit target that dominates its uses of `lout` (NONE: no use)
+    tused: Vector<bool>, // per block, whether it is an exit target `tgt_of` names
     // Per block, the block of the body before the first transform whose dominators it has: itself, a
     // copy's original, a landing block's target, a guard block's preheader.
     proxy: Vector<u32>,
@@ -263,6 +264,7 @@ pub(package) struct LoopOpt {
     cf_idx: Vector<u32>,
     cf_need: Vector<bool>,
     cf_poly: Vector<bool>,
+    cf_leave: Vector<Value>, // the values the loop leaves with: the exit edge's arguments, then `lout`
     cf_val: Vector<Value>,
     cf_pv: Vector<Value>,
     // Unroll and jam (`jam_factor`): the outer header, its preheader, the inner header and body; the inner
@@ -332,6 +334,7 @@ extend LoopOpt {
             tgts: Vector::<u32>::new(),
             lbase: Vector::<u32>::new(),
             tgt_of: Vector::<u32>::new(),
+            tused: Vector::<bool>::new(),
             proxy: Vector::<u32>::new(),
             latch: NONE,
             ctr: VNONE,
@@ -428,6 +431,7 @@ extend LoopOpt {
             cf_idx: Vector::<u32>::new(),
             cf_need: Vector::<bool>::new(),
             cf_poly: Vector::<bool>::new(),
+            cf_leave: Vector::<Value>::new(),
             cf_val: Vector::<Value>::new(),
             cf_pv: Vector::<Value>::new(),
             jb: [0, 0, 0, 0],
@@ -492,7 +496,7 @@ extend LoopOpt {
                     last = 0;
                 }
                 if n != 0 && (n - last) * self.residual(b) + last <= bu.peel {
-                    if self.close(b, dpre, dpost) {
+                    if self.close(b, h, dpre, dpost) {
                         self.peel(b, h, p, n);
                         any = true;
                     }
@@ -580,7 +584,7 @@ extend LoopOpt {
                 }
             }
             if size <= bu.version && self.checks(b, ptr, h, p, u) {
-                if self.close(b, dpre, dpost) {
+                if self.close(b, h, dpre, dpost) {
                     self.version(b, h, p, VNONE);
                     any = true;
                 }
@@ -588,7 +592,7 @@ extend LoopOpt {
             }
             if size <= bu.unswitch {
                 let g = self.invariant_branch(b);
-                if g != VNONE && self.close(b, dpre, dpost) {
+                if g != VNONE && self.close(b, h, dpre, dpost) {
                     self.version(b, h, p, g);
                     any = true;
                 }
@@ -617,7 +621,7 @@ extend LoopOpt {
                 continue;
             }
             let body = self.rotatable(b, h, max);
-            if body != NONE && self.close(b, dpre, dpost) {
+            if body != NONE && self.close(b, h, dpre, dpost) {
                 self.rotate_loop(b, h, body);
                 any = true;
             }
@@ -645,7 +649,7 @@ extend LoopOpt {
             }
         }
         // A header with a loop inside it is not innermost.
-        fill_bool(&mut self.inl, nb, false);
+        fill(&mut self.inl, nb, false);
         for k in 0..nb {
             if lparent[k] != NONE {
                 self.inl[lparent[k] as usize] = true;
@@ -715,28 +719,40 @@ extend LoopOpt {
                 eb = k;
             }
         }
-        if eb != h && eb != self.latch || !self.cf_test(b, ptr, h, p, eb) || !pure && self.cf_guard || !self.close(
+        // Every test before `close` changes the body: a failed one leaves it as it was.
+        if eb != h && eb != self.latch || !self.cf_test(b, ptr, h, p, eb) || !pure && self.cf_guard || !self.close_plan(
             b,
+            h,
             dpre,
             dpost,
         ) {
             return false;
         }
-        let t = term(b, eb);
-        let out = if self.inl[b.edge_target(t.b) as usize] {
-            t.c
+        let t0 = term(b, eb);
+        let out0 = if self.inl[b.edge_target(t0.b) as usize] {
+            t0.c
         } else {
-            t.b
+            t0.b
         };
+        // The exit edge's arguments once `close` lands it: its own, then `lout` when its target lands them.
+        self.cf_leave.truncate(0);
+        for q in 0..b.edge_nargs(out0) {
+            self.cf_leave.push(b.edge_arg(out0, q));
+        }
+        if self.lout.len() != 0 && self.tused[b.edge_target(out0) as usize] {
+            for q in 0..self.lout.len() {
+                self.cf_leave.push(self.lout[q]);
+            }
+        }
         self.cf_resolve(b, ptr);
         // The values that leave as polynomials in their types' bits, of degrees up to CF_DEG (`cf_poly`):
         // all of them when the loop goes, at least one when it stays.
-        let na = b.edge_nargs(out);
-        fill_bool(&mut self.cf_poly, na as usize, false);
+        let na = self.cf_leave.len() as u32;
+        fill(&mut self.cf_poly, na as usize, false);
         let mut d: u32 = 0;
         let mut any = false;
         for q in 0..na {
-            let v = b.edge_arg(out, q);
+            let v = self.cf_leave[q as usize];
             if self.defined_in(v) {
                 let f = self.fact(b, ptr, v);
                 let w = type_bits(value_type(b, v), ptr);
@@ -758,19 +774,26 @@ extend LoopOpt {
         // the same iteration come first; the header parameters they read, and those parameters' back
         // edge values.
         fill(&mut self.cf_idx, b.insts.len(), NONE);
-        fill_bool(&mut self.cf_need, self.cf_init.len(), false);
+        fill(&mut self.cf_need, self.cf_init.len(), false);
         self.cf_order.truncate(0);
         if !self.cf_visit(b, self.cf_x) {
             return false;
         }
         for q in 0..na {
-            if self.cf_poly[q as usize] && !self.cf_visit(b, b.edge_arg(out, q)) {
+            if self.cf_poly[q as usize] && !self.cf_visit(b, self.cf_leave[q as usize]) {
                 return false;
             }
         }
         if self.cf_order.len() as u32 * (d + 1) > budget {
             return false;
         }
+        self.close_apply(b);
+        let t = term(b, eb);
+        let out = if self.inl[b.edge_target(t.b) as usize] {
+            t.c
+        } else {
+            t.b
+        };
         // The block that computes the values (the iterations 0 to `d`, the trip count, the values), with a
         // parameter per value that passes through.
         let xb = b.blocks.len() as u32;
@@ -1056,12 +1079,14 @@ extend LoopOpt {
         for _ in 0..np {
             self.cf_hp.push(p_of(PS_UNKNOWN));
         }
-        fill_u8(&mut self.cf_st, b.insts.len(), 0);
-        fill_poly(&mut self.cf_fv, b.insts.len());
-        fill_u8(&mut self.cf_lst, b.insts.len(), 0);
-        self.cf_lco.truncate(0);
-        self.cf_lco.resize_default(b.insts.len());
-        fill_poly(&mut self.cf_lre, b.insts.len());
+        // The facts and linear forms are read only where `cf_st` and `cf_lst` are set: they only grow.
+        fill(&mut self.cf_st, b.insts.len(), 0);
+        grow_poly(&mut self.cf_fv, b.insts.len());
+        fill(&mut self.cf_lst, b.insts.len(), 0);
+        if self.cf_lco.len() < b.insts.len() {
+            self.cf_lco.resize_default(b.insts.len());
+        }
+        grow_poly(&mut self.cf_lre, b.insts.len());
         let hs = b.blocks[self.cf_h as usize].param_start;
         // Each round resolves at least one parameter.
         for _ in 0..np + 1 {
@@ -1597,7 +1622,7 @@ extend LoopOpt {
         }
         let tu = term(b, u);
         // The body's instructions: the step, the reductions, then the rest in order.
-        fill_u8(&mut self.vk, ub.len as usize, 0);
+        fill(&mut self.vk, ub.len as usize, 0);
         self.vred.truncate(0);
         self.vrup.truncate(0);
         self.vrel.truncate(0);
@@ -1966,22 +1991,33 @@ extend LoopOpt {
         return self.lblocks.len() == 2 && u != h && self.counted_by(b, h, u, u);
     }
 
-    // `counted` for loop `h` (its blocks `lblocks`) whose header enters block `e`, and whose block `u`
-    // jumps back.
-    fn counted_by(self: &mut Self, b: &Body, h: u32, e: u32, u: u32) bool {
+    // The tests of `counted_by` that read header `h` alone: not `novec`, a comparison and a branch on it.
+    fn header_counts(self: &mut Self, b: &Body, h: u32) bool {
         let hb = b.blocks[h as usize];
         let t = term(b, h);
         if (hb.flags & BLOCK_NOVEC) != 0 {
             return self.no("its header is marked `novec`", 0);
         }
-        if hb.len != 2 || t.op != O_BR || (t.a & (VPARAM | VFLAG)) != 0 || t.a != hb.start || b.edge_target(t.b) != e && b.edge_target(
-            t.c,
-        ) != e {
+        if hb.len != 2 || t.op != O_BR || (t.a & (VPARAM | VFLAG)) != 0 || t.a != hb.start {
+            return self.no("its header does more than test the counter", 0);
+        }
+        return b.insts[t.a as usize].op == O_ICMP;
+    }
+
+    // `counted` for loop `h` (its blocks `lblocks`) whose header enters block `e`, and whose block `u`
+    // jumps back.
+    fn counted_by(self: &mut Self, b: &Body, h: u32, e: u32, u: u32) bool {
+        let hb = b.blocks[h as usize];
+        let t = term(b, h);
+        if !self.header_counts(b, h) {
+            return false;
+        }
+        if b.edge_target(t.b) != e && b.edge_target(t.c) != e {
             return self.no("its header does more than test the counter", 0);
         }
         let ci = b.insts[t.a as usize];
         let in_taken = b.edge_target(t.b) == e;
-        if ci.op != O_ICMP || b.edge_nargs(
+        if b.edge_nargs(
             if in_taken {
                 t.b
             } else {
@@ -3679,6 +3715,10 @@ extend LoopOpt {
                 }
             }
         }
+        // The tests of the header alone that `vplan` makes on the copy (`counted_by`), before the copy.
+        if !self.header_counts(b, h) {
+            return NONE;
+        }
         // Saved for `unlinearize`.
         self.lsave = [b.insts.len() as u32, b.params.len() as u32, b.pool.len() as u32, b.blocks.len() as u32, e, u];
         self.lcs.truncate(0);
@@ -3817,6 +3857,9 @@ extend LoopOpt {
                     self.lkeep = true;
                 }
             }
+        }
+        if !self.header_counts(b, h) {
+            return NONE;
         }
         self.lsave = [b.insts.len() as u32, b.params.len() as u32, b.pool.len() as u32, b.blocks.len() as u32, e, u];
         self.lcs.truncate(0);
@@ -4943,14 +4986,29 @@ extend LoopOpt {
     // become parameters of a landing block per exit target that dominates such a use (`dpre`, `dpost`:
     // the dominator tree's numbers, by `proxy`), which that target's edges from the loop enter instead
     // and which jumps on to it; the uses take the parameters of the landing block of the target that
-    // dominates them. False when a use has no such target, or its target has an edge from outside the
-    // loop.
-    fn close(self: &mut Self, b: &mut Body, dpre: []u32, dpost: []u32) bool {
+    // dominates them. False, the body unchanged, when a use has no such target, or its target has an edge
+    // from outside the loop. `h`: the loop's header.
+    fn close(self: &mut Self, b: &mut Body, h: u32, dpre: []u32, dpost: []u32) bool {
+        if !self.close_plan(b, h, dpre, dpost) {
+            return false;
+        }
+        self.close_apply(b);
+        return true;
+    }
+
+    // `close`'s tests, the body unchanged: `lout`, `tgts`, `tgt_of` and `tused` for `close_apply`.
+    fn close_plan(self: &mut Self, b: &Body, h: u32, dpre: []u32, dpost: []u32) bool {
         let nb = b.blocks.len();
         self.lout.truncate(0);
         fill(&mut self.tgt_of, nb, NONE);
+        fill(&mut self.tused, nb, false);
+        let (hpre, hpost) = (dpre[h as usize], dpost[h as usize]);
         for k in 0..nb {
-            if self.inl[k] {
+            // A value of the loop has its uses where its definition dominates them: in the blocks the
+            // header dominates, or in one the entry does not reach (no dominator numbers, by `proxy`); a
+            // block of a transform's with no numbers is read too.
+            let x = self.proxy[k] as usize;
+            if self.inl[k] || x < dpre.len() && !(hpre <= dpre[x] && dpost[x] <= hpost) && (x == 0 || dpre[x] != 0 || dpost[x] != 0) {
                 continue;
             }
             let bk = b.blocks[k];
@@ -5005,6 +5063,7 @@ extend LoopOpt {
                 return false;
             }
             self.tgt_of[k] = t;
+            self.tused[t as usize] = true;
         }
         for k in 0..nb {
             if self.inl[k] {
@@ -5012,24 +5071,26 @@ extend LoopOpt {
             }
             b.succ_edges(term(b, k as u32), &mut self.edges);
             for e in 0..self.edges.len() {
-                let s = b.edge_target(self.edges[e]);
-                for q in 0..nb {
-                    if self.tgt_of[q] == s {
-                        return false;
-                    }
+                if self.tused[b.edge_target(self.edges[e]) as usize] {
+                    return false;
                 }
             }
         }
+        return true;
+    }
+
+    // `close`'s changes, after `close_plan` held.
+    fn close_apply(self: &mut Self, b: &mut Body) {
+        if self.lout.len() == 0 {
+            return;
+        }
+        let nb = self.tgt_of.len();
         // A landing block per target in use: the target's parameters, then the values that leave; it
         // jumps on. The loop's exits into the target enter it with the values that leave.
         self.lbase.truncate(0);
         for q in 0..self.tgts.len() {
             let tg = self.tgts[q];
-            let mut used = false;
-            for k in 0..nb {
-                used = used || self.tgt_of[k] == tg;
-            }
-            if !used {
+            if !self.tused[tg as usize] {
                 self.lbase.push(NONE);
                 continue;
             }
@@ -5089,7 +5150,6 @@ extend LoopOpt {
                 b.insts[i as usize] = t;
             }
         }
-        return true;
     }
 
     // Whether loop `h` (preheader `p`, latch `u`) has bounds checks a guard before it proves: branches
@@ -5770,7 +5830,7 @@ extend LoopOpt {
     // past a base from outside the loop, the branches on them, which the walk folds, and the jumps, which
     // merge the blocks; at least 1.
     fn residual(self: &mut Self, b: &Body) u32 {
-        fill_bool(&mut self.fixed, b.insts.len(), false);
+        fill(&mut self.fixed, b.insts.len(), false);
         // Each pass marks what the last pass's marks decide; a chain longer than RESIDUAL_PASSES counts.
         for _ in 0..RESIDUAL_PASSES {
             for j in 0..self.lblocks.len() {
@@ -6050,11 +6110,6 @@ const fn mask_int_of(l: u32) u8 {
     return T_I64;
 }
 
-const fn term(b: &Body, k: u32) Inst {
-    let bk = b.blocks[k as usize];
-    return b.insts[(bk.start + bk.len - 1) as usize];
-}
-
 // Branch terminator of block `k` as a jump to its taken edge (`side` 0) or its other one.
 fn fix_branch(b: &mut Body, k: u32, side: u8) {
     let bk = b.blocks[k as usize];
@@ -6159,14 +6214,6 @@ fn value_type(b: &Body, v: Value) u8 {
     return b.insts[v as usize].ty;
 }
 
-fn fill_u8(v: &mut Vector<u8>, n: usize, x: u8) {
-    v.truncate(0);
-    v.resize_default(n);
-    if x != 0 {
-        v.as_mut_slice().fill(x);
-    }
-}
-
 // Whether `v` is an instruction's value that is an integer constant.
 // The access class of instruction `i` (`Classes.acc`); CL_MANY for one made since.
 const fn class_at(cl: Classes, i: u32) u8 {
@@ -6205,22 +6252,6 @@ const fn base_op(op: u8) u8 {
     } else {
         O_SUB
     };
-}
-
-fn fill(v: &mut Vector<u32>, n: usize, x: u32) {
-    v.truncate(0);
-    v.resize_default(n);
-    if x != 0 {
-        v.as_mut_slice().fill(x);
-    }
-}
-
-fn fill_bool(v: &mut Vector<bool>, n: usize, x: bool) {
-    v.truncate(0);
-    v.resize_default(n);
-    if x {
-        v.as_mut_slice().fill(x);
-    }
 }
 
 // ---- Final values: facts ----
@@ -6679,10 +6710,13 @@ const fn pick_op(c: bool, a: u8, b: u8) u8 {
     };
 }
 
-fn fill_poly(v: &mut Vector<Poly>, n: usize) {
-    v.truncate(0);
-    v.reserve(n);
-    for _ in 0..n {
+// `v` grown to `n` facts, when shorter.
+fn grow_poly(v: &mut Vector<Poly>, n: usize) {
+    if v.len() >= n {
+        return;
+    }
+    v.reserve(n - v.len());
+    while v.len() < n {
         v.push(p_of(PS_UNKNOWN));
     }
 }

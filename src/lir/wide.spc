@@ -48,13 +48,10 @@ extend Wide {
         };
     }
 
-    /// Split the vectors of `b` wider than `rb` bytes, whose reached blocks are `order` in reverse
-    /// postorder (`rpo`: per block, its position there, NONE when unreached), into `out`; false when `b`
-    /// has none (`out` untouched).
-    pub(package) fn run(self: &mut Self, b: &Body, rb: u32, order: []u32, rpo: []u32, out: &mut Body) bool {
-        if b.naked || !has_wide(b, rb) {
-            return false;
-        }
+    /// Split the vectors of `b` wider than `rb` bytes, which holds one (`has_wide`) and is not naked,
+    /// whose reached blocks are `order` in reverse postorder (`rpo`: per block, its position there, NONE
+    /// when unreached), into `out`.
+    pub(package) fn run(self: &mut Self, b: &Body, rb: u32, order: []u32, rpo: []u32, out: &mut Body) {
         let ni = b.insts.len();
         let np = b.params.len();
         self.ni = ni;
@@ -136,7 +133,6 @@ extend Wide {
                 out.scopes.push(Scope { site: sc.site, group: sc.group, root: v });
             }
         }
-        return true;
     }
 
     // Whether a value of type `t` splits: a vector of a multiple of `rb` bytes past `rb`, with a lane count
@@ -772,7 +768,7 @@ const fn wide_type(t: u8, rb: u32) bool {
 }
 
 // Whether `b` holds a vector wider than `rb` bytes that splits (`wide_type`).
-fn has_wide(b: &Body, rb: u32) bool {
+pub(package) fn has_wide(b: &Body, rb: u32) bool {
     for q in 0..b.params.len() {
         if wide_type(b.params[q], rb) {
             return true;
@@ -798,11 +794,4 @@ const fn mask_int(l: u32) u8 {
         return T_I32;
     }
     return T_I64;
-}
-
-fn fill(v: &mut Vector<u32>, n: usize, x: u32) {
-    v.truncate(0);
-    for _ in 0..n {
-        v.push(x);
-    }
 }
