@@ -2902,7 +2902,7 @@ extend Opt {
 
     // Branch `t`, instruction `i` ending block `k`, whose sides reach one block `j`, each through its edge
     // or an empty block it alone enters: the edge of a jump to `j` whose arguments that differ by side
-    // are selects on the condition (at most MAX_SELECTS, integers up to 64 bits or pointers), which move
+    // are selects on the condition (at most MAX_SELECTS, integers up to 64 bits, pointers or scalar floats), which move
     // to the end of `k`; when the two sides alone enter `j`, its parameters take them in the rest of the
     // walk. NONE when not.
     fn diamond(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst) u32 {
@@ -2929,7 +2929,7 @@ extend Opt {
         for q in 0..jb.param_len as u32 {
             if self.val(b.edge_arg(e0, q)) != self.val(b.edge_arg(e1, q)) {
                 let ty = b.params[(jb.param_start + q) as usize];
-                if !(is_int(ty) && ty != T_I128 || ty == T_PTR) {
+                if !(is_int(ty) && ty != T_I128 || ty == T_PTR || ty == T_F32 || ty == T_F64) {
                     return NONE;
                 }
                 nsel += 1;
@@ -2976,8 +2976,8 @@ extend Opt {
     }
 
     // Branch `t`, instruction `i` ending block `k`, whose sides each enter a block that `k` alone enters,
-    // runs at most SPEC_MAX instructions together (`speculated`) and returns an integer of up to 64 bits or
-    // a pointer: those instructions move to the end of `k` (`speculate`), which returns the select of the
+    // runs at most SPEC_MAX instructions together (`speculated`) and returns an integer of up to 64 bits, a
+    // pointer or a scalar float: those instructions move to the end of `k` (`speculate`), which returns the select of the
     // two results on the condition (if-conversion of a return diamond, as LLVM's SimplifyCFG with
     // FoldTwoEntryPHINode after merging the returns). The value `k` returns; NONE when not.
     fn ret_diamond(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst) u32 {
@@ -2990,12 +2990,12 @@ extend Opt {
         let r1 = term(b, s1).a;
         let ty = b.type_of(r0);
         let rare = (b.blocks[s0 as usize].flags | b.blocks[s1 as usize].flags) & ~b.blocks[k as usize].flags & BLOCK_RARE;
-        if !(is_int(ty) && ty != T_I128 || ty == T_PTR) || rare != 0 || self.speculated(pk, b, k, s0) + self.speculated(
+        if !(is_int(ty) && ty != T_I128 || ty == T_PTR || ty == T_F32 || ty == T_F64) || rare != 0 || self.speculated(
             pk,
             b,
             k,
-            s1,
-        ) > SPEC_MAX {
+            s0,
+        ) + self.speculated(pk, b, k, s1) > SPEC_MAX {
             return NONE;
         }
         self.selected = true;

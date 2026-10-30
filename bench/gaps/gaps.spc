@@ -42,6 +42,9 @@ extern "C" {
     fn c_o_ref(p: *const u32) u32;
     fn c_s_mulhi(a: u32, b: u32) u32;
     fn c_s_ispow2m(x: u64, a: u64) u64;
+    fn c_p_min(a: f64, b: f64) f64;
+    fn c_p_abs(x: f64) f64;
+    fn c_p_clamp01(x: f32) f32;
 }
 
 @arch(x86_64)
@@ -77,6 +80,9 @@ extern "C" {
     fn c_o_ref(p: *const u32) u32;
     fn c_s_mulhi(a: u32, b: u32) u32;
     fn c_s_ispow2m(x: u64, a: u64) u64;
+    fn c_p_min(a: f64, b: f64) f64;
+    fn c_p_abs(x: f64) f64;
+    fn c_p_clamp01(x: f32) f32;
 }
 
 // Gap 1: recursion whose result an associative operation combines with the recursive call.
@@ -325,6 +331,34 @@ fn o_ref(p: Option<&u32>) u32 {
         Some(r) => *r,
         None => 0,
     };
+}
+
+// Gap 45: float return diamonds.
+@noinline
+fn p_min(a: f64, b: f64) f64 {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+@noinline
+fn p_abs(x: f64) f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    return x;
+}
+
+@noinline
+fn p_clamp01(x: f32) f32 {
+    if x < 0.0 {
+        return 0.0;
+    }
+    if x > 1.0 {
+        return 1.0;
+    }
+    return x;
 }
 
 // `CALLS` inputs below `max`: all `max - 1` (`fixed`), or uniform (`random`, a fixed seed).
@@ -754,6 +788,39 @@ pub fn gaps_tail(_b: &mut bench::Bencher) {
                     },
                 )) as u64,
             ),
+        );
+    }
+}
+
+/// Gap 45 (float return diamonds): `p_min`, `p_abs`, `p_clamp01` on signed values from the words, on
+/// unpredictable inputs and as latency chains (the result's bits feed the next input).
+@bench(log_results = false)
+pub fn gaps_float(_b: &mut bench::Bencher) {
+    warm();
+    let xs = inputs(0xFFFFFFFF, true);
+    for m in 0..2 {
+        let mode = if m == 0 {
+            "random"
+        } else {
+            "chain"
+        };
+        row(
+            "p_min",
+            mode,
+            measure(&xs, m == 1, |x: u32| p_min((x as i32) as f64, ((x << 7) as i32) as f64).to_bits()),
+            measure(&xs, m == 1, |x: u32| (unsafe c_p_min((x as i32) as f64, ((x << 7) as i32) as f64)).to_bits()),
+        );
+        row(
+            "p_abs",
+            mode,
+            measure(&xs, m == 1, |x: u32| p_abs((x as i32) as f64).to_bits()),
+            measure(&xs, m == 1, |x: u32| (unsafe c_p_abs((x as i32) as f64)).to_bits()),
+        );
+        row(
+            "p_clamp01",
+            mode,
+            measure(&xs, m == 1, |x: u32| p_clamp01((x as i32) as f32 * 1.0e-9).to_bits() as u64),
+            measure(&xs, m == 1, |x: u32| (unsafe c_p_clamp01((x as i32) as f32 * 1.0e-9)).to_bits() as u64),
         );
     }
 }

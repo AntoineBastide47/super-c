@@ -43,3 +43,6 @@ F uint32_t c_t_call(uint32_t x, uint32_t a) {
 F uint32_t c_o_ref(const uint32_t *p) { return p ? *p : 0; }
 F uint32_t c_s_mulhi(uint32_t a, uint32_t b) { return (uint32_t)(((uint64_t)a * b) >> 32); }
 F uint64_t c_s_ispow2m(uint64_t x, uint64_t a) { return x % 64 + a / 8; }
+F double c_p_min(double a, double b) { return a < b ? a : b; }
+F double c_p_abs(double x) { return x < 0.0 ? -x : x; }
+F float c_p_clamp01(float x) { if (x < 0.0f) return 0.0f; if (x > 1.0f) return 1.0f; return x; }

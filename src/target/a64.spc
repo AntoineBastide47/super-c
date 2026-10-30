@@ -583,6 +583,11 @@ pub(package) const fn fcmp(d: bool, rn: u32, rm: u32) u32 {
     return 0x1E202000 | ftype(d) | rm << 16 | rn << 5;
 }
 
+/// FCMP of `rn` with 0.0.
+pub(package) const fn fcmp_zero(d: bool, rn: u32) u32 {
+    return 0x1E202008 | ftype(d) | rn << 5;
+}
+
 /// FCSEL: `rd` = cond ? rn : rm.
 pub(package) const fn fcsel(d: bool, rd: u32, rn: u32, rm: u32, cond: u32) u32 {
     return 0x1E200C00 | ftype(d) | rm << 16 | cond << 12 | rn << 5 | rd;

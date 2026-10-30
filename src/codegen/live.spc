@@ -25,7 +25,9 @@ import ir::core as core;
 /// the other side plus 1, negated or inverted (`cs_kind`: arm64's `csinc`, `csneg`, `csinv`); two
 /// extensions of the same kind from 32 bits that a 64-bit product alone reads (`mull_ext`: arm64's
 /// `umull`, `smull`); a shift by a constant that a 32- or 64-bit sum, difference or bitwise operation
-/// alone reads as an operand it may take shifted (`shop_side`: arm64's shifted register operand).
+/// alone reads as an operand it may take shifted (`shop_side`: arm64's shifted register operand); a
+/// scalar float comparison only selects and branches read, of one condition (`FOLD_FCMP`; not `one`,
+/// `ueq`).
 pub(package) const FOLD_CMP: u32 = 1;
 pub(package) const FOLD_TST: u32 = 2;
 pub(package) const FOLD_MADD: u32 = 4;
@@ -38,6 +40,7 @@ pub(package) const FOLD_SHAMT: u32 = 256;
 pub(package) const FOLD_CSEL: u32 = 512;
 pub(package) const FOLD_MULL: u32 = 1024;
 pub(package) const FOLD_SHOP: u32 = 2048;
+pub(package) const FOLD_FCMP: u32 = 4096;
 /// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
 pub(package) const CS_NONE: u8 = 0;
 pub(package) const CS_INC: u8 = 1;
@@ -269,7 +272,8 @@ extend Live {
         }
         for i in 0..ni {
             let t = b.insts[i];
-            self.pfold[i] = (self.fold_ops & FOLD_CMP) != 0 && t.op == O_ICMP && b.type_of(t.a) != T_I128 && self.count[i] != 0 && self.cnd[i] == self.count[i];
+            let fc = (self.fold_ops & FOLD_FCMP) != 0 && t.op == O_FCMP && !is_vec(b.type_of(t.a)) && t.aux != C_ONE && t.aux != C_UEQ;
+            self.pfold[i] = (self.fold_ops & FOLD_CMP) != 0 && (t.op == O_ICMP && b.type_of(t.a) != T_I128 || fc) && self.count[i] != 0 && self.cnd[i] == self.count[i];
         }
         // An `and`'s uses as an equality with 0.
         fill(&mut self.cnd, ni, 0);

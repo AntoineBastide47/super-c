@@ -472,17 +472,23 @@ extend Gen {
         let b = self.b();
         let bk = b.blocks[self.lv.def_blk[v as usize] as usize];
         let bits = type_bits(self.vt(v), self.ptr);
+        // A scalar float takes a v register.
+        let fv = self.vt(v) == T_F32 || self.vt(v) == T_F64;
         if v + 1 >= bk.start + bk.len || self.lv.uses[v as usize] != 1 || self.lv.end[v as usize] != self.pos || !is_int(
             self.vt(v),
-        ) && self.vt(v) != T_PTR || bits < 32 || bits > 64 || self.va[v as usize].home != H_NONE {
+        ) && self.vt(v) != T_PTR && !fv || bits < 32 || bits > 64 || self.va[v as usize].home != H_NONE {
             return NOREG;
         }
         let t = b.insts[v as usize + 1];
         let mut r = NOREG;
         if t.op == O_RET {
             let rl = self.self_lay.ret;
-            if t.a == v && rl.kind == ab::L_REG && rl.n == 1 && !self.self_lay.parts[rl.p0 as usize].v {
-                r = self.self_lay.parts[rl.p0 as usize].reg;
+            if t.a == v && rl.kind == ab::L_REG && rl.n == 1 && self.self_lay.parts[rl.p0 as usize].v == fv {
+                r = self.self_lay.parts[rl.p0 as usize].reg + if fv {
+                    V0
+                } else {
+                    0
+                };
             }
         } else if t.op == O_CALL && self.intrinsic(t.a).len() == 0 || t.op == O_CALLIND && t.a != v {
             self.call_layout(t);
@@ -496,10 +502,14 @@ extend Gen {
                     return NOREG;
                 }
                 let pa = self.lay.parts[self.lay.locs[k as usize].p0 as usize];
-                if pa.v {
+                if pa.v != fv {
                     return NOREG;
                 }
-                r = pa.reg;
+                r = pa.reg + if fv {
+                    V0
+                } else {
+                    0
+                };
             }
         } else if t.op == O_JMP {
             // A later block's parameter takes its home here, at the first edge into it, so `v` is defined
@@ -515,7 +525,7 @@ extend Gen {
             }
             return self.jump_reg(b, t, v);
         }
-        if r == NOREG || (((self.held | self.lock) & ~free | self.tmps | self.fixed_busy) & bit(r)) != 0 || (XALLOC & bit(
+        if r == NOREG || (((self.held | self.lock) & ~free | self.tmps | self.fixed_busy) & bit(r)) != 0 || ((XALLOC | valloc()) & bit(
             r,
         )) == 0 {
             return NOREG;
@@ -531,7 +541,7 @@ extend Gen {
         for k in 0..self.dying.len() {
             let x = self.dying[k];
             let va = self.va[x as usize];
-            if va.reg != NOREG && (XALLOC & bit(va.reg)) != 0 && self.owner[va.reg as usize] == x {
+            if va.reg != NOREG && ((XALLOC | valloc()) & bit(va.reg)) != 0 && self.owner[va.reg as usize] == x {
                 free |= bit(va.reg);
             }
         }
@@ -1867,7 +1877,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
         if self.again {
@@ -2921,11 +2931,18 @@ extend Gen {
             return self.icmp(i, t);
         }
         if op == O_FCMP {
+            if self.lv.pfold[i as usize] {
+                return true; // each select or branch on it compares (`folded_cmp`)
+            }
             assert(!is_vec(self.vt(t.a)), "a64gen: a vector comparison the verifier rejects");
             let d = self.vt(t.a) == T_F64;
             let ra = self.reg(t.a);
-            let rb = self.reg(t.b);
-            self.emit(a::fcmp(d, ra - V0, rb - V0));
+            if self.fzero(t.b) {
+                self.emit(a::fcmp_zero(d, ra - V0));
+            } else {
+                let rb = self.reg(t.b);
+                self.emit(a::fcmp(d, ra - V0, rb - V0));
+            }
             let mut c2: u32 = NONE;
             let c = fcond(t.aux, &mut c2);
             self.cond_value(i, c, c2);
@@ -3281,9 +3298,22 @@ extend Gen {
         return lc;
     }
 
-    // Comparison `t` of integers of at most 64 bits into the flags: its condition. A folded `and` compared
+    // Comparison `t` of integers of at most 64 bits, or of scalar floats, into the flags: its condition. A folded `and` compared
     // with 0 is a test (`lv::FOLD_TST`).
     fn compare(self: &mut Self, t: Inst) u32 {
+        // A float comparison of one condition (`lv::FOLD_FCMP`).
+        if t.op == O_FCMP {
+            let d = self.vt(t.a) == T_F64;
+            let ra = self.reg(t.a);
+            if self.fzero(t.b) {
+                self.emit(a::fcmp_zero(d, ra - V0));
+            } else {
+                let rb = self.reg(t.b);
+                self.emit(a::fcmp(d, ra - V0, rb - V0));
+            }
+            let mut c2: u32 = NONE;
+            return fcond(t.aux, &mut c2);
+        }
         let c = t.aux;
         let ty = self.vt(t.a);
         let bits = type_bits(ty, self.ptr);
@@ -4839,6 +4869,20 @@ extend Gen {
         // `csinc rd, x, zr` gives 1 where the condition fails, `csinv rd, x, zr` all ones.
         self.emit(a::csel(sf, (k != 1) as u32, (k == 1) as u32, rd, rx, a::ZR, cond));
         return true;
+    }
+
+    // Whether `v` is a float constant zero of either sign (`fcmp` against #0.0 compares it).
+    const fn fzero(self: &Self, v: Value) bool {
+        if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.b().insts[v as usize].op != O_FCONST {
+            return false;
+        }
+        let k = self.b().insts[v as usize];
+        let bits = k.b as u64 << 32 | k.a as u64;
+        return if k.ty == T_F64 {
+            bits << 1 == 0
+        } else {
+            (bits & 0x7FFFFFFF) == 0
+        };
     }
 
     // Value `v` of type `ty` in a register: the zero register for an integer constant 0.

@@ -343,6 +343,20 @@ fn chains_of_compared_flags_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A branch on a float comparison whose sides each return a value returns a select (arm64 `fcmp` with
+// `fcsel`, a comparison with zero against #0.0), for every ordered and unordered condition and NaN or
+// signed zero operands.
+@test
+fn float_return_diamonds_select() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @s_olt fn global\nsym @s_ogt fn global\nsym @s_ole fn global\nsym @s_oge fn global\nsym @s_oeq fn global\nsym @s_une fn global\nsym @s_uno fn global\nsym @s_one fn global\nsym @s_ueq fn global\nsym @fneg_abs fn global\nfn @s_olt\n  sig (f64, f64, f64, f64) -> f64\nb0(v0: f64, v1: f64, v2: f64, v3: f64):\n  v4 = fcmp.olt v0, v1\n  br v4, b1, b2\nb1:\n  ret v2\nb2:\n  ret v3\nfn @s_ogt\n  sig (f64, f64, f64, f64) -> f64\nb0(v0: f64, v1: f64, v2: f64, v3: f64):\n  v4 = fcmp.ogt v0, v1\n  br v4, b1, b2\nb1:\n  ret v2\nb2:\n  ret v3\nfn @s_ole\n  sig (f64, f64, f64, f64) -> f64\nb0(v0: f64, v1: f64, v2: f64, v3: f64):\n  v4 = fcmp.ole v0, v1\n  br v4, b1, b2\nb1:\n  ret v2\nb2:\n  ret v3\nfn @s_oge\n  sig (f64, f64, f64, f64) -> f64\nb0(v0: f64, v1: f64, v2: f64, v3: f64):\n  v4 = fcmp.oge v0, v1\n  br v4, b1, b2\nb1:\n  ret v2\nb2:\n  ret v3\nfn @s_oeq\n  sig (f64, f64, f64, f64) -> f64\nb0(v0: f64, v1: f64, v2: f64, v3: f64):\n  v4 = fcmp.oeq v0, v1\n  br v4, b1, b2\nb1:\n  ret v2\nb2:\n  ret v3\nfn @s_une\n  sig (f64, f64, f64, f64) -> f64\nb0(v0: f64, v1: f64, v2: f64, v3: f64):\n  v4 = fcmp.une v0, v1\n  br v4, b1, b2\nb1:\n  ret v2\nb2:\n  ret v3\nfn @s_uno\n  sig (f64, f64, f64, f64) -> f64\nb0(v0: f64, v1: f64, v2: f64, v3: f64):\n  v4 = fcmp.uno v0, v1\n  br v4, b1, b2\nb1:\n  ret v2\nb2:\n  ret v3\nfn @s_one\n  sig (f64, f64, f64, f64) -> f64\nb0(v0: f64, v1: f64, v2: f64, v3: f64):\n  v4 = fcmp.one v0, v1\n  br v4, b1, b2\nb1:\n  ret v2\nb2:\n  ret v3\nfn @s_ueq\n  sig (f64, f64, f64, f64) -> f64\nb0(v0: f64, v1: f64, v2: f64, v3: f64):\n  v4 = fcmp.ueq v0, v1\n  br v4, b1, b2\nb1:\n  ret v2\nb2:\n  ret v3\nfn @fneg_abs\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = fconst.f32 0x0\n  v2 = fcmp.olt v0, v1\n  br v2, b1, b2\nb1:\n  v3 = fneg.f32 v0\n  ret v3\nb2:\n  ret v0\n";
+    let drv = "#include <math.h>\ndouble s_olt(double, double, double, double);\ndouble s_ogt(double, double, double, double);\ndouble s_ole(double, double, double, double);\ndouble s_oge(double, double, double, double);\ndouble s_oeq(double, double, double, double);\ndouble s_une(double, double, double, double);\ndouble s_uno(double, double, double, double);\ndouble s_one(double, double, double, double);\ndouble s_ueq(double, double, double, double);\nfloat fneg_abs(float);\nint main(void) {\n  double v[6] = {0.0, -0.0, 1.0, -2.5, 1e300, NAN};\n  for (int i = 0; i < 6; i++)\n    for (int j = 0; j < 6; j++) {\n      double a = v[i], b = v[j];\n      if (s_olt(a, b, 1.0, 2.0) != ((a < b) ? 1.0 : 2.0)) return 1;\n      if (s_ogt(a, b, 1.0, 2.0) != ((a > b) ? 1.0 : 2.0)) return 2;\n      if (s_ole(a, b, 1.0, 2.0) != ((a <= b) ? 1.0 : 2.0)) return 3;\n      if (s_oge(a, b, 1.0, 2.0) != ((a >= b) ? 1.0 : 2.0)) return 4;\n      if (s_oeq(a, b, 1.0, 2.0) != ((a == b) ? 1.0 : 2.0)) return 5;\n      if (s_une(a, b, 1.0, 2.0) != ((!(a == b)) ? 1.0 : 2.0)) return 6;\n      if (s_uno(a, b, 1.0, 2.0) != ((a != a || b != b) ? 1.0 : 2.0)) return 7;\n      if (s_one(a, b, 1.0, 2.0) != ((a < b || a > b) ? 1.0 : 2.0)) return 8;\n      if (s_ueq(a, b, 1.0, 2.0) != (!(a < b || a > b) ? 1.0 : 2.0)) return 9;\n      float f = (float)a;\n      float w = f < 0.0f ? -f : f;\n      float g = fneg_abs(f);\n      if (!(g == w || (g != g && w != w)) || signbit(g) != signbit(w)) return 20;\n    }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // A 64-bit product of two 32-bit extensions is one widening multiply (arm64 `umull`, `smull`); a sum,
 // difference or bitwise operation of a value shifted by a constant takes it as a shifted operand, but
 // not next to a product a multiply-add computes (`madsh`).
