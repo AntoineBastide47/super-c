@@ -2975,6 +2975,64 @@ extend Opt {
         return b.edge(j, &args);
     }
 
+    // Branch `t`, instruction `i` ending block `k`, whose sides each enter a block that `k` alone enters,
+    // runs at most SPEC_MAX instructions together (`speculated`) and returns an integer of up to 64 bits or
+    // a pointer: those instructions move to the end of `k` (`speculate`), which returns the select of the
+    // two results on the condition (if-conversion of a return diamond, as LLVM's SimplifyCFG with
+    // FoldTwoEntryPHINode after merging the returns). The value `k` returns; NONE when not.
+    fn ret_diamond(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst) u32 {
+        let s0 = b.edge_target(t.b);
+        let s1 = b.edge_target(t.c);
+        if s0 == s1 || s0 == k || s1 == k || !self.ret_arm(b, s0) || !self.ret_arm(b, s1) {
+            return NONE;
+        }
+        let r0 = term(b, s0).a;
+        let r1 = term(b, s1).a;
+        let ty = b.type_of(r0);
+        let rare = (b.blocks[s0 as usize].flags | b.blocks[s1 as usize].flags) & ~b.blocks[k as usize].flags & BLOCK_RARE;
+        if !(is_int(ty) && ty != T_I128 || ty == T_PTR) || rare != 0 || self.speculated(pk, b, k, s0) + self.speculated(
+            pk,
+            b,
+            k,
+            s1,
+        ) > SPEC_MAX {
+            return NONE;
+        }
+        self.selected = true;
+        self.speculate(b, k, s0);
+        self.speculate(b, k, s1);
+        let x = self.val(r0);
+        let y = self.val(r1);
+        if x == y {
+            return x;
+        }
+        let v = b.insts.len() as u32;
+        b.insts.push(Inst { op: O_SELECT, ty: ty, aux: 0, a: t.a, b: x, c: y });
+        b.locs.push(b.locs[i as usize]);
+        if b.inl.len() != 0 {
+            b.inl.push(b.inl[i as usize]);
+        }
+        self.repl.push(VNONE);
+        self.frepl.push(VNONE);
+        self.moved.push(true);
+        self.blk_of.push(k);
+        self.hoisted.push(k as u64 << 32 | v as u64);
+        let r = simplify(pk, b, v);
+        return if r != VNONE {
+            r
+        } else {
+            v
+        };
+    }
+
+    // Whether block `a` is a side `ret_diamond` takes: no parameters, one predecessor, at most SPEC_MAX
+    // instructions before a return of a value.
+    fn ret_arm(self: &Self, b: &Body, a: u32) bool {
+        let ab = b.blocks[a as usize];
+        let ta = term(b, a);
+        return ab.param_len == 0 && ab.len <= SPEC_MAX + 1 && ta.op == O_RET && ta.a != VNONE && self.pred_at[a as usize + 1] - self.pred_at[a as usize] == 1;
+    }
+
     // Side `e` of a branch ending block `k`, as `diamond` takes it: the edge out of the block without
     // parameters it alone enters that holds at most SPEC_MAX instructions besides its jump, and that block;
     // else `e` and `k`.
@@ -3169,6 +3227,12 @@ extend Opt {
             } else {
                 Some(width_mask(b.type_of(t.a), pk.ptr_bytes))
             };
+        } else if t.op == O_SEXT {
+            // An operand whose sign bit its bound clears extends as with zeros.
+            let x = self.ubound(pk, b, t.a, depth - 1);
+            if x.is_some() && x.unwrap() >> (type_bits(b.type_of(t.a), pk.ptr_bytes) - 1) as u64 == 0 {
+                r = x;
+            }
         } else if t.op == O_TRUNC {
             // The operand's bound when the narrower type holds it, else any value of that type.
             let x = self.ubound(pk, b, t.a, depth - 1);
@@ -4088,6 +4152,11 @@ extend Opt {
                 let e = self.diamond(pk, b, k, i, t);
                 if e != NONE {
                     t = jump(e);
+                } else {
+                    let r = self.ret_diamond(pk, b, k, i, t);
+                    if r != NONE {
+                        t = Inst { op: O_RET, ty: T_NONE, aux: 0, a: r, b: VNONE, c: VNONE };
+                    }
                 }
             } else if t.op == O_SWITCH && c.is_some() {
                 let mut e = b.switch_edge(t, t.aux);
@@ -4385,12 +4454,25 @@ extend Opt {
                 return true;
             }
             let lop = b.insts[i as usize].op;
-            if (lop == O_AND || lop == O_OR) && self.range_check(pk, b, k, i) {
+            if lop >= O_CLZ && lop <= O_POPCNT && self.narrow_count(pk, b, k, i) || lop == O_TRUNC && self.narrow_const(
+                pk,
+                b,
+                k,
+                i,
+            ) {
+                return true;
+            }
+            if (lop == O_AND || lop == O_OR) && self.range_check(pk, b, k, i) || lop == O_ICMP && self.srem_cmp(
+                pk,
+                b,
+                k,
+                i,
+            ) {
                 return true;
             }
             self.pow2(b, i);
             self.shift_pair(pk, b, i);
-            if self.divide(pk, b, k, i) {
+            if self.divide(pk, b, k, i) || self.rem_by_quotient(b, k, i) {
                 return true;
             }
             return self.number(pk, b, k, i) || !same(b.insts[i as usize], t0);
@@ -4602,6 +4684,174 @@ extend Opt {
             b: span,
             c: VNONE,
         };
+        return true;
+    }
+
+    // Truncation `i` (block `k`) of an addition, subtraction, product or bitwise operation of a value
+    // extended from its type or a narrower one and a constant: that operation at its type on the value
+    // (extended the same way to it) and the constant's low bits (the result's low bits are the
+    // operands'), simplified. Whether it did.
+    fn narrow_const(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        if !is_int(t.ty) || (t.a & (VPARAM | VFLAG)) != 0 || t.a == VNONE {
+            return false;
+        }
+        let w = b.insts[t.a as usize];
+        if w.op < O_ADD || w.op > O_XOR || w.op >= O_SDIV && w.op <= O_UREM || !is_int(w.ty) || w.ty == T_I128 {
+            return false;
+        }
+        let (e, c) = if const_of(b, w.b).is_some() {
+            (w.a, const_of(b, w.b))
+        } else {
+            (w.b, const_of(b, w.a))
+        };
+        if c.is_none() || (e & (VPARAM | VFLAG)) != 0 || e == VNONE {
+            return false;
+        }
+        let x = b.insts[e as usize];
+        let xt = if x.op == O_ZEXT || x.op == O_SEXT {
+            b.type_of(x.a)
+        } else {
+            T_NONE
+        };
+        if !is_int(xt) || type_bits(xt, pk.ptr_bytes) > type_bits(t.ty, pk.ptr_bytes) {
+            return false;
+        }
+        let v = if xt == t.ty {
+            x.a
+        } else {
+            self.before(b, k, i, Inst { op: x.op, ty: t.ty, aux: 0, a: x.a, b: VNONE, c: VNONE })
+        };
+        let kv = self.constant(b, t.ty, c.unwrap() & width_mask(t.ty, pk.ptr_bytes));
+        let sub_first = w.op == O_SUB && const_of(b, w.b).is_none();
+        b.insts[i as usize] = if sub_first {
+            Inst { op: w.op, ty: t.ty, aux: 0, a: kv, b: v, c: VNONE }
+        } else {
+            Inst { op: w.op, ty: t.ty, aux: 0, a: v, b: kv, c: VNONE }
+        };
+        let r = simplify(pk, b, i);
+        if r != VNONE {
+            self.repl[i as usize] = r;
+        }
+        return true;
+    }
+
+    // Bit count `i` (block `k`) of a zero-extended integer: the count of the narrow one (`clz` plus the
+    // extension's bits); `ctz` of one with the bit above it set (`x as u64 | 1 << 32`, a zero counting
+    // the narrow width) the same. Whether it did.
+    fn narrow_count(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        if !is_int(t.ty) || t.ty == T_I128 || (t.a & (VPARAM | VFLAG)) != 0 || t.a == VNONE {
+            return false;
+        }
+        let mut x = b.insts[t.a as usize];
+        let wide = type_bits(t.ty, pk.ptr_bytes);
+        if t.op == O_CTZ && x.op == O_OR {
+            // The bit right above the narrow value, the other operand a zero extension.
+            let (e, c) = if const_of(b, x.b).is_some() {
+                (x.a, const_of(b, x.b))
+            } else {
+                (x.b, const_of(b, x.a))
+            };
+            if c.is_none() || (e & (VPARAM | VFLAG)) != 0 || e == VNONE || b.insts[e as usize].op != O_ZEXT {
+                return false;
+            }
+            let nt = b.type_of(b.insts[e as usize].a);
+            if c.unwrap() != 1u64 << type_bits(nt, pk.ptr_bytes) as u64 {
+                return false;
+            }
+            x = b.insts[e as usize];
+        } else if x.op != O_ZEXT {
+            return false;
+        }
+        let nt = b.type_of(x.a);
+        let narrow = type_bits(nt, pk.ptr_bytes);
+        if !is_int(nt) || narrow < 8 || narrow >= wide || nt == T_I128 {
+            return false;
+        }
+        let n = self.before(b, k, i, Inst { op: t.op, ty: nt, aux: 0, a: x.a, b: VNONE, c: VNONE });
+        let z = self.before(b, k, i, Inst { op: O_ZEXT, ty: t.ty, aux: 0, a: n, b: VNONE, c: VNONE });
+        if t.op != O_CLZ {
+            self.repl[i as usize] = z;
+            return true;
+        }
+        let d = self.constant(b, t.ty, wide - narrow);
+        self.repl[i as usize] = self.before(b, k, i, Inst { op: O_ADD, ty: t.ty, aux: 0, a: z, b: d, c: VNONE });
+        return true;
+    }
+
+    // Equality `i` (block `k`) of a signed remainder by 2^s, in the form `divide_signed` gives it
+    // (`n - ((n + bias) & -2^s)`), with a constant `c`: `n`'s low `s` bits and its sign against `c`'s, or
+    // its low bits against 0 for `c` 0; a constant when no remainder is `c` (LLVM InstCombine's
+    // `X srem 2^s == C`). Whether it did.
+    fn srem_cmp(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        if t.aux != C_EQ && t.aux != C_NE || (t.a & (VPARAM | VFLAG)) != 0 || t.a == VNONE {
+            return false;
+        }
+        let c = const_of(b, t.b);
+        let r = b.insts[t.a as usize];
+        let ty = r.ty;
+        if c.is_none() || r.op != O_SUB || !is_int(ty) || ty == T_I128 || (r.b & (VPARAM | VFLAG)) != 0 || r.b == VNONE {
+            return false;
+        }
+        let n = r.a;
+        let w = type_bits(ty, pk.ptr_bytes) as u64;
+        let wm = width_mask(ty, pk.ptr_bytes);
+        let low = b.insts[r.b as usize];
+        if low.op != O_AND || (low.a & (VPARAM | VFLAG)) != 0 || low.a == VNONE {
+            return false;
+        }
+        let m = const_of(b, low.b);
+        if m.is_none() {
+            return false;
+        }
+        let p = 0u64.wrapping_sub(m.unwrap()) & wm;
+        let up = b.insts[low.a as usize];
+        if p < 2 || (p & p - 1) != 0 || up.op != O_ADD || up.a != n || (up.b & (VPARAM | VFLAG)) != 0 || up.b == VNONE {
+            return false;
+        }
+        let s = p.trailing_zeros() as u64;
+        let bias = b.insts[up.b as usize];
+        if bias.op != O_LSHR {
+            return false;
+        }
+        let sgn_ok = if s == 1 {
+            bias.a == n
+        } else {
+            (bias.a & (VPARAM | VFLAG)) == 0 && bias.a != VNONE && b.insts[bias.a as usize].op == O_ASHR && b.insts[bias.a as usize].a == n && const_of(
+                b,
+                b.insts[bias.a as usize].b,
+            ) == Some(s - 1)
+        };
+        if const_of(b, bias.b) != Some(w - s) || !sgn_ok {
+            return false;
+        }
+        let cv = c.unwrap() & wm;
+        let sign = 1u64 << w - 1;
+        let mask = p - 1;
+        let neg = (cv & sign) != 0;
+        // The remainders lie in (-2^s, 2^s): a `c` outside never equals one.
+        let mag = if neg {
+            0u64.wrapping_sub(cv) & wm
+        } else {
+            cv
+        };
+        if mag >= p {
+            b.insts[i as usize] = iconst(t.ty, (t.aux == C_NE) as u64);
+            return true;
+        }
+        let (mv, want) = if cv == 0 {
+            (mask, 0u64)
+        } else if neg {
+            (sign | mask, sign | cv & mask)
+        } else {
+            (sign | mask, cv)
+        };
+        let mk = self.constant(b, ty, mv);
+        let a = self.before(b, k, i, Inst { op: O_AND, ty: ty, aux: 0, a: n, b: mk, c: VNONE });
+        let wv = self.constant(b, ty, want);
+        b.insts[i as usize] = Inst { op: O_ICMP, ty: t.ty, aux: t.aux, a: a, b: wv, c: VNONE };
         return true;
     }
 
@@ -4877,6 +5127,38 @@ extend Opt {
         }
         let prod = self.before(b, k, i, Inst { op: O_MUL, ty: ty, aux: 0, a: q, b: t.b, c: VNONE });
         self.repl[i as usize] = self.before(b, k, i, Inst { op: O_SUB, ty: ty, aux: 0, a: n, b: prod, c: VNONE });
+        return true;
+    }
+
+    // Remainder `i` of block `k` of an integer by a value whose quotient a dominating instruction computes:
+    // the dividend less that quotient times the divisor (one division where `a / b + a % b` took two).
+    // Whether it did.
+    fn rem_by_quotient(self: &mut Self, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        if t.op != O_UREM && t.op != O_SREM || !is_int(t.ty) || t.ty == T_I128 || is_vec(t.ty) {
+            return false;
+        }
+        let d = Inst {
+            op: if t.op == O_UREM {
+                O_UDIV
+            } else {
+                O_SDIV
+            },
+            ty: t.ty,
+            aux: t.aux,
+            a: t.a,
+            b: t.b,
+            c: t.c,
+        };
+        let q = switch self.pure.get(&value_hash(b, d)) {
+            Some(v) => *v,
+            None => NONE,
+        };
+        if q == NONE || !same_value(b, b.insts[q as usize], d) {
+            return false;
+        }
+        let prod = self.before(b, k, i, Inst { op: O_MUL, ty: t.ty, aux: 0, a: q, b: t.b, c: VNONE });
+        self.repl[i as usize] = self.before(b, k, i, Inst { op: O_SUB, ty: t.ty, aux: 0, a: t.a, b: prod, c: VNONE });
         return true;
     }
 
@@ -7386,6 +7668,42 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         }
         return VNONE;
     }
+    // A truncation of an extension or a truncation: the operand at the type (itself, extended, truncated).
+    // An extension of a truncated bit count of the extension's type: the count, which any type holds.
+    if (t.op == O_TRUNC || t.op == O_ZEXT) && is_int(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE {
+        let w = b.insts[t.a as usize];
+        let ft = if w.op == O_ZEXT || w.op == O_SEXT || w.op == O_TRUNC {
+            b.type_of(w.a)
+        } else {
+            T_NONE
+        };
+        if t.op == O_TRUNC && (w.op == O_ZEXT || w.op == O_SEXT || w.op == O_TRUNC) && is_int(ft) {
+            if ft == t.ty {
+                return w.a;
+            }
+            let wider = type_bits(ft, ptr) > type_bits(t.ty, ptr);
+            b.insts[i as usize] = Inst {
+                op: if wider {
+                    O_TRUNC
+                } else {
+                    w.op
+                },
+                ty: t.ty,
+                aux: 0,
+                a: w.a,
+                b: VNONE,
+                c: VNONE,
+            };
+            return VNONE;
+        }
+        if t.op == O_ZEXT && w.op == O_TRUNC && ft == t.ty && type_bits(w.ty, ptr) >= 8 && (w.a & VPARAM) == 0 && b.insts[w.a as usize].op >= O_CLZ && b.insts[w.a as usize].op <= O_POPCNT {
+            return w.a;
+        }
+        if t.op == O_ZEXT && w.op == O_ZEXT {
+            b.insts[i as usize] = Inst { op: O_ZEXT, ty: t.ty, aux: 0, a: w.a, b: VNONE, c: VNONE };
+            return VNONE;
+        }
+    }
     // A truncation of an addition, subtraction, product or bitwise operation of two values extended from
     // its type is that operation on them: the result's low bits are those of the operands'.
     if t.op == O_TRUNC && is_int(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 {
@@ -7451,8 +7769,9 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         }
         if y == 0 && (op == O_MUL || op == O_AND) || y == ones && op == O_OR {
             b.insts[i as usize] = iconst(t.ty, y);
+            return VNONE;
         }
-        return VNONE;
+        return cancel(b, t);
     }
     if t.a == t.b {
         if op == O_AND || op == O_OR {
@@ -7479,20 +7798,29 @@ fn cancel(b: &Body, t: Inst) Value {
         Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE }
     };
     if t.op == O_SUB && a.op == O_ADD {
-        if a.a == t.b {
+        if same_term(b, a.a, t.b) {
             return a.b;
         }
-        if a.b == t.b {
+        if same_term(b, a.b, t.b) {
             return a.a;
         }
     }
-    if t.op == O_ADD && a.op == O_SUB && a.b == t.b {
+    if t.op == O_ADD && a.op == O_SUB && same_term(b, a.b, t.b) {
         return a.a;
     }
-    if t.op == O_ADD && c.op == O_SUB && c.b == t.a {
+    if t.op == O_ADD && c.op == O_SUB && same_term(b, c.b, t.a) {
         return c.a;
     }
     return VNONE;
+}
+
+// Whether terms `x` and `y` of one sum are one value: the same, or equal constants not yet numbered one.
+fn same_term(b: &Body, x: Value, y: Value) bool {
+    if x == y {
+        return true;
+    }
+    let k = const_of(b, x);
+    return k.is_some() && k == const_of(b, y);
 }
 
 // Whether float bits `r` of type `ty` are a normal number: neither zero, subnormal, infinite nor NaN.
@@ -7804,7 +8132,21 @@ const fn join(a: u8, b: u8) u8 {
 
 // Whether opcode `op` computes a value from its operands alone, the same each time it does not trap.
 const fn pure_op(op: u8) bool {
-    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT;
+    return PURE[op as usize];
+}
+
+// `pure_op` per operation; a byte indexes the 256 entries.
+const PURE: [bool; 256] = pure_ops();
+
+const fn pure_ops() [bool; 256] {
+    let mut t = [false; 256];
+    for k in 0..256u32 {
+        let op = k as u8;
+        unsafe {
+            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT;
+        }
+    }
+    return t;
 }
 
 // Whether pure `t` of `b` may run where the program would not run it: it has operands (a constant is

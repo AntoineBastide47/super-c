@@ -41,6 +41,27 @@ pub(package) const GT: u32 = 12;
 pub(package) const LE: u32 = 13;
 pub(package) const AL: u32 = 14;
 
+/// `ccmp` (`neg`: `ccmn`) of `rn` with register `rm` (`imm`: the immediate `rm`, below 32) when `cond`
+/// holds, else the flags `nzcv`.
+pub(package) const fn ccmp(sf: bool, neg: bool, imm: bool, rn: u32, rm: u32, nzcv: u32, cond: u32) u32 {
+    return sfb(sf) | on(!neg, 0x40000000) | 0x3A400000 | rm << 16 | cond << 12 | on(imm, 0x800) | rn << 5 | nzcv;
+}
+
+/// The flags (N, Z, C, V as bits 3 to 0) that satisfy condition `c`.
+pub(package) const fn nzcv_for(c: u32) u32 {
+    return if c == EQ || c == LE {
+        4u32
+    } else if c == HS || c == HI {
+        2u32
+    } else if c == MI || c == LT {
+        8u32
+    } else if c == VS {
+        1u32
+    } else {
+        0u32
+    };
+}
+
 /// The condition that holds when `c` does not.
 pub(package) const fn invert(c: u32) u32 {
     return c ^ 1;

@@ -617,6 +617,192 @@ b0(v0: i32, v1: i32):
     same_result(&b, &a, "both", q, 0);
 }
 
+// A remainder by the divisor of a dominating quotient is a product and a difference (`dm`); a signed
+// remainder by 2^s compared with a constant is a mask of the low bits and the sign (`odd`, `neg`), or a
+// constant when no remainder equals it (`never`); a bit count of a zero extension counts at the narrow
+// type, and the truncations of its sums back to that type drop their extensions (`clz`, `ctz`).
+@test
+fn quotient_remainders_and_narrow_counts_simplify() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @dm fn global
+sym @odd fn global
+sym @neg fn global
+sym @never fn global
+sym @clz fn global
+sym @ctz fn global
+fn @dm
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.eq v1, v2
+  br v3, b1, b2
+b1: cold
+  ret v2
+b2:
+  v4 = udiv.i32 v0, v1
+  v5 = urem.i32 v0, v1
+  v6 = add.i32 v4, v5
+  ret v6
+fn @odd
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = iconst.i32 2
+  v2 = srem.i32 v0, v1
+  v3 = iconst.i32 1
+  v4 = icmp.eq v2, v3
+  ret v4
+fn @neg
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = iconst.i64 8
+  v2 = srem.i64 v0, v1
+  v3 = iconst.i64 -5
+  v4 = icmp.ne v2, v3
+  ret v4
+fn @never
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = iconst.i32 4
+  v2 = srem.i32 v0, v1
+  v3 = iconst.i32 4
+  v4 = icmp.eq v2, v3
+  ret v4
+fn @clz
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = zext.i64 v0
+  v2 = clz.i64 v1
+  v3 = trunc.i32 v2
+  v4 = zext.i64 v3
+  v5 = iconst.i64 32
+  v6 = sub.i64 v4, v5
+  v7 = trunc.i32 v6
+  ret v7
+fn @ctz
+  sig (i16) -> i32
+b0(v0: i16):
+  v1 = zext.i64 v0
+  v2 = iconst.i64 65536
+  v3 = or.i64 v1, v2
+  v4 = ctz.i64 v3
+  v5 = trunc.i32 v4
+  ret v5
+)",
+    );
+    let d = text_of(&a, "dm");
+    assert(d.contains("udiv") && !d.contains("urem"), d.as_str());
+    let names: []str = ["odd", "neg"];
+    for k in 0..names.len() {
+        let s = text_of(&a, names[k]);
+        assert(!s.contains("srem") && !s.contains("ashr") && !s.contains("lshr"), s.as_str());
+    }
+    let n = text_of(&a, "never");
+    assert(!n.contains("srem") && !n.contains("icmp"), n.as_str());
+    let c = text_of(&a, "clz");
+    assert(c.contains("clz.i32") && !c.contains("i64"), c.as_str());
+    let z = text_of(&a, "ctz");
+    assert(z.contains("ctz.i16") && !z.contains("i64"), z.as_str());
+    let x: []u64 = [100, 7];
+    same_result(&b, &a, "dm", x, 16);
+    let o: []u64 = [0xFFFFFFFF];
+    same_result(&b, &a, "odd", o, 0);
+    let p: []u64 = [7];
+    same_result(&b, &a, "odd", p, 1);
+    let q: []u64 = [0xFFFFFFFFFFFFFFFB];
+    same_result(&b, &a, "neg", q, 0);
+    let r: []u64 = [3];
+    same_result(&b, &a, "neg", r, 1);
+    let s: []u64 = [0x8000];
+    same_result(&b, &a, "clz", s, 16);
+    let u: []u64 = [0];
+    same_result(&b, &a, "clz", u, 32);
+    same_result(&b, &a, "ctz", u, 16);
+    let v: []u64 = [0x40];
+    same_result(&b, &a, "ctz", v, 6);
+}
+
+// A branch whose two sides each return a value computed by a few speculable instructions returns the
+// select of the two (`max`, `abs`, and a nested `clamp`); a side with a call stays a branch (`call`).
+@test
+fn return_diamonds_are_selects() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @max fn global
+sym @abs fn global
+sym @clamp fn global
+sym @call fn global
+sym @g fn global noinline
+fn @g
+  sig (i32) -> i32
+b0(v0: i32):
+  ret v0
+fn @max
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = icmp.sgt v0, v1
+  br v2, b2, b1
+b1:
+  ret v1
+b2:
+  ret v0
+fn @abs
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.slt v0, v1
+  br v2, b2, b1
+b1:
+  ret v0
+b2:
+  v3 = sub.i32 v1, v0
+  ret v3
+fn @clamp
+  sig (i32, i32, i32) -> i32
+b0(v0: i32, v1: i32, v2: i32):
+  v3 = icmp.slt v0, v1
+  br v3, b4, b1
+b1:
+  v4 = icmp.sgt v0, v2
+  br v4, b3, b2
+b2:
+  ret v0
+b3:
+  ret v2
+b4:
+  ret v1
+fn @call
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.slt v0, v1
+  br v2, b2, b1
+b1:
+  ret v0
+b2:
+  v3 = call.i32 @g(v0) : (i32) -> i32
+  ret v3
+)",
+    );
+    let names: []str = ["max", "abs", "clamp"];
+    for k in 0..names.len() {
+        let s = text_of(&a, names[k]);
+        assert(!s.contains("br ") && s.contains("select"), s.as_str());
+    }
+    let c = text_of(&a, "call");
+    assert(c.contains("br "), c.as_str());
+    let x: []u64 = [5, 0xFFFFFFFD];
+    same_result(&b, &a, "max", x, 5);
+    let y: []u64 = [0xFFFFFFF9];
+    same_result(&b, &a, "abs", y, 7);
+    let z: []u64 = [50, 10, 20];
+    same_result(&b, &a, "clamp", z, 20);
+    let w: []u64 = [0xFFFFFFFF, 10, 20];
+    same_result(&b, &a, "clamp", w, 10);
+    let v: []u64 = [15, 10, 20];
+    same_result(&b, &a, "clamp", v, 15);
+}
+
 // An `or` of whole bytes of one value through shifts and byte masks is the value when each byte keeps its
 // place (`keep`) and its byte reversal when each takes the mirrored one (`swap`); bytes loaded one by one
 // into a big-endian word are one load reversed (`be`). A permutation of another order stays (`rot`).
@@ -2276,7 +2462,8 @@ b3(v6: ptr):
     same_result(&b, &a, "pick", no, 0);
 }
 
-// A branch on a condition a dominating branch decided jumps: the edge into its block fixed the value.
+// A branch on a condition a dominating branch decided jumps: the edge into its block fixed the value (the
+// one branch left may become a select of the two returns).
 @test
 fn a_branch_a_dominating_branch_decided_jumps() {
     let (b, a) = optimized(
@@ -2301,7 +2488,7 @@ b4:
     let t = text_of(&a, "k");
     let first = t.as_str().find("br ");
     assert(
-        first >= 0 && t.as_str().slice(first as usize + 3, t.len()).find("br ") < 0 && !t.contains("ret v1"),
+        (first < 0 || t.as_str().slice(first as usize + 3, t.len()).find("br ") < 0) && !t.contains("ret v1"),
         t.as_str(),
     );
     let lo: []u64 = [1, 3];

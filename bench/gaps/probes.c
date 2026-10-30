@@ -21,3 +21,16 @@ F bool c_b_lower(uint8_t c) { return c >= 97 && c <= 122; }
 F bool c_b_pow2(uint32_t x) { return x != 0 && (x & (x - 1)) == 0; }
 F bool c_f_and(uint32_t x, uint32_t y, uint32_t z) { return x == 3 && y < 9 && z != 0; }
 F bool c_f_or0(uint32_t x, uint32_t y) { return x == 0 || y == 0; }
+bool c_r_odd(uint32_t n);
+F bool c_r_even(uint32_t n) { if (n == 0) return true; return c_r_odd(n - 1); }
+F bool c_r_odd(uint32_t n) { if (n == 0) return false; return c_r_even(n - 1); }
+F int32_t c_s_max(int32_t a, int32_t b) { return a > b ? a : b; }
+F int32_t c_s_clamp(int32_t x, int32_t lo, int32_t hi) { if (x < lo) return lo; if (x > hi) return hi; return x; }
+F int32_t c_s_cmp3(int32_t a, int32_t b) { if (a < b) return -1; if (a > b) return 1; return 0; }
+F int32_t c_s_abs(int32_t x) { return x < 0 ? -x : x; }
+F uint32_t c_s_cinc(uint32_t a, uint32_t b, uint32_t c) { return a > b ? c + 1 : c; }
+F uint32_t c_s_divmod(uint32_t a, uint32_t b) { return a / b + a % b; }
+F bool c_s_srem2(int32_t x) { return x % 2 == 1; }
+F uint32_t c_s_ctz(uint32_t x) { return x == 0 ? 32 : (uint32_t)__builtin_ctz(x); }
+F uint32_t c_s_clz16(uint16_t x) { return x == 0 ? 16 : (uint32_t)__builtin_clz(x) - 16; }
+F uint32_t c_s_shm(uint32_t x, uint32_t n) { return x << (n & 31); }

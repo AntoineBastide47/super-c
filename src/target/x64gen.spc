@@ -244,6 +244,11 @@ pub(package) struct Gen {
     csave: Vector<(u8, i64)>, // the scratch homes saved around a rare call (`save_scratch`)
     fused: u32, // the last instruction an earlier one did (`rmw`), NONE
     cmp_at: u32, // the code byte the last compare starts at (`reflag`), NONE
+    // The operands of the last plain compare and the code length up to which its flags hold (past only a
+    // `setcc` and `movzx` of its value), NONE: a compare of the same values there sets nothing.
+    held_a: Value,
+    held_b: Value,
+    held_end: u32,
     // Shrink-wrapping (System V): the frame is set up on the edges into the rare blocks and taken down on
     // the edges out (`shrinkable`); the warm code, which calls nothing, keeps no value in memory and no
     // callee-saved register, has none. Whether the body is compiled so, and whether that try failed (the
@@ -393,6 +398,9 @@ extend Gen {
             csave: Vector::<(u8, i64)>::new(),
             fused: NONE,
             cmp_at: NONE,
+            held_a: VNONE,
+            held_b: VNONE,
+            held_end: NONE,
             shrink: false,
             no_shrink: false,
             again: false,
@@ -922,6 +930,11 @@ extend Gen {
     // The register `step_reg` or `fwd_reg` gives value `v`, which reads `a` before it writes, taken for
     // `v`: the edge's move vanishes. NOREG when neither gives one.
     fn def_shared(self: &mut Self, v: Value, a: Value) u8 {
+        // A vector some instruction reads in memory (`vmem`) needs a slot, which a register home lacks.
+        let xv = self.vx(v);
+        if xv as usize < self.vmem.len() && self.vmem[xv as usize] {
+            return NOREG;
+        }
         let mut sr = self.step_reg(v, a);
         if sr == NOREG {
             sr = self.fwd_reg(v, a);
@@ -1463,7 +1476,11 @@ extend Gen {
         fill(&mut self.cret, ni, false);
         for i in 0..ni {
             let t = b.insts[i];
-            let c = Gen::clobbers(b, t) && !lv::dead_end(unsafe &*self.pkg, b, &self.lv, i, &mut self.uses);
+            // A sibling call does not come back: the body around it may be a leaf.
+            let c = Gen::clobbers(b, t) && !lv::dead_end(unsafe &*self.pkg, b, &self.lv, i, &mut self.uses) && !(t.op == O_CALL && self.sib_shape(
+                i as u32,
+                t,
+            ));
             self.cret[i] = c;
             if c && self.rare(i as u32) {
                 self.rarec[i] = true;
@@ -2223,7 +2240,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
         if self.again {
@@ -2261,6 +2278,7 @@ extend Gen {
         self.zf.at = NONE;
         self.fused = NONE;
         self.cmp_at = NONE;
+        self.held_end = NONE;
         self.fix.truncate(0);
         self.epi.truncate(0);
         self.tails.truncate(0);
@@ -3577,6 +3595,7 @@ extend Gen {
         }
         self.keep_flags = true;
         let rd = self.def(i);
+        let held = self.held_end == self.c.len();
         self.c.setcc(cc, rd);
         if cc2 != NONE {
             self.c.setcc(cc2, S1);
@@ -3593,6 +3612,9 @@ extend Gen {
         }
         self.c.ext(1, 4, false, rd, rd);
         self.va.index_mut(i as usize).clean = true;
+        if held && cc2 == NONE {
+            self.held_end = self.c.len();
+        }
         if cc2 == NONE && self.next_reads(i, i) {
             // The value has other uses; the branch or select after reads the flags all the same.
             self.cond = Cond { inst: self.vx(i), cc: cc };
@@ -3667,6 +3689,9 @@ extend Gen {
         if imm && k == 0 && (t.aux == C_EQ || t.aux == C_NE) && z.at == self.c.len() && z.pos == self.pos && z.reg == ra && z.sz == sz {
             return icond(t.aux);
         }
+        if self.held_end == self.c.len() && self.held_a == t.a && self.held_b == t.b && self.blk_at[self.lv.order[self.pos as usize] as usize] < self.held_end {
+            return icond(t.aux);
+        }
         let s0 = self.c.len();
         if imm && k == 0 {
             self.c.test_rr(sz, ra, ra);
@@ -3676,6 +3701,9 @@ extend Gen {
             self.c.alu_rr(x::CMP, sz, ra, rb);
         }
         self.reflag(s0);
+        self.held_a = t.a;
+        self.held_b = t.b;
+        self.held_end = self.c.len();
         return icond(t.aux);
     }
 
@@ -3799,12 +3827,15 @@ extend Gen {
     fn bit_count(self: &mut Self, i: u32, t: Inst) {
         let bits = type_bits(t.ty, self.ptr);
         let sz = wsz(bits);
-        let r = if bits < 32 {
+        // ctz's bit set at the width hides the bits above it: no extension.
+        let r = if bits < 32 && t.op != O_CTZ {
             self.ext(t.a, false, bits)
         } else {
             self.reg(t.a)
         };
         let rd = self.def(i);
+        // The count, at most the width, is `clean`.
+        self.va.index_mut(i as usize).clean = true;
         if t.op == O_POPCNT {
             self.popcount(rd, r, sz);
             return;
@@ -3823,17 +3854,20 @@ extend Gen {
             }
             return;
         }
-        // clz = (width - 1) - bsr, with bsr taken as -1 for 0.
+        // clz = (w - 1) ^ bsr, with bsr taken as 2w - 1 for 0 (giving w), less the bits a narrow operand's
+        // extension adds.
         let w = if bits < 32 {
             32u32
         } else {
             bits
         };
         self.c.bsx(true, sz, rd, r);
-        self.c.mov_ri(S1, 0xFFFFFFFFFFFFFFFF);
-        self.c.cmov(x::CC_E, 8, rd, S1);
-        self.c.unary(x::NEG, 8, rd);
-        self.c.alu_ri(x::ADD, 4, rd, (w - 1 - (w - bits)) as i32);
+        self.c.mov_ri(S1, 2 * w - 1);
+        self.c.cmov(x::CC_E, sz, rd, S1);
+        self.c.alu_ri(x::XOR, 4, rd, (w - 1) as i32);
+        if bits < 32 {
+            self.c.alu_ri(x::SUB, 4, rd, (32 - bits) as i32);
+        }
     }
 
     // `rd` = the set bits of `r` (its low `sz` bytes, the upper zero for 4), through r10 and r11.
@@ -3933,6 +3967,14 @@ extend Gen {
         let alu = op == O_ADD || op == O_SUB || op == O_AND || op == O_OR || op == O_XOR;
         let mut k: i32 = 0;
         let kc = self.imm32_of(t.b, bits, &mut k);
+        let mut z: u64 = 0;
+        if op == O_SUB && self.const_of(t.a, &mut z) && z == 0 {
+            // 0 - x: a negation.
+            let rx = self.reg(t.b);
+            let rd = self.def_from(i, t.b, rx);
+            self.c.unary(x::NEG, sz, rd);
+            return true;
+        }
         if alu {
             let aop = alu_of(op);
             let ra = self.reg(t.a);
@@ -3963,6 +4005,10 @@ extend Gen {
                 return true;
             }
             let rb = self.reg(t.b);
+            // An `and` of a value whose bits above the type are 0, an `or` or `xor` of two: so are the
+            // result's.
+            let ca = self.va[self.vx(t.a) as usize].clean;
+            let cb = self.va[self.vx(t.b) as usize].clean;
             let rd = self.def_over(i, t.a, ra);
             if rd != ra && op == O_ADD {
                 self.lea_to(sz, rd, x::ix(ra, rb, 0, 0));
@@ -3973,6 +4019,9 @@ extend Gen {
             }
             self.c.alu_rr(aop, sz, rd, rb);
             self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.pos };
+            if small && (op == O_AND && (ca || cb) || (op == O_OR || op == O_XOR) && ca && cb) {
+                self.va.index_mut(i as usize).clean = true;
+            }
             return true;
         }
         if op == O_MUL {
@@ -4013,7 +4062,7 @@ extend Gen {
             }
             self.vacate(x::RCX);
             let ra = self.reg(t.a);
-            let rb = self.reg(t.b);
+            let rb = self.reg(lv::shift_amount(self.b(), &self.lv.pfold, t.b));
             self.c.mov_rr(4, x::RCX, rb);
             let rd = if small && op != O_SHL {
                 let r = self.def(i);
@@ -5057,10 +5106,58 @@ extend Gen {
         // The false side straight into the result's register: a constant or a spilled value takes no
         // register of its own.
         let rb = self.reg(t.b);
-        let rd = self.def(i);
-        self.materialize(t.c, rd);
-        self.c.cmov(cc, 8, rd, rb);
+        let mut kc: u64 = 0;
+        if t.b == t.c || self.const_of(t.c, &mut kc) || self.va[self.vx(t.c) as usize].reg == NOREG {
+            let rd = self.def(i);
+            self.materialize(t.c, rd);
+            self.c.cmov(cc, 8, rd, rb);
+            return true;
+        }
+        // Both in registers: the result takes the register of a side that dies here when a return right
+        // after wants that one, or wants none and the result has no home (the true side's with the
+        // condition inverted).
+        let rc = self.reg(t.c);
+        let want = self.ret_want(i);
+        let free = want == NOREG && self.fix_class(self.vx(i)) == FIX_NONE;
+        let dc = self.dies_here(t.c);
+        let db = self.dies_here(t.b);
+        let tb = db && (want == rb || free && !dc);
+        if !tb && !(dc && (want == rc || free)) {
+            let rd = self.def(i);
+            self.materialize(t.c, rd);
+            self.c.cmov(cc, 8, rd, rb);
+            return true;
+        }
+        let (s, rs, ro, c1) = if tb {
+            (t.b, rb, rc, x::invert(cc))
+        } else {
+            (t.c, rc, rb, cc)
+        };
+        let rd = self.def_over(i, s, rs);
+        if rd != rs {
+            self.c.mov_rr(8, rd, rs);
+        }
+        self.c.cmov(c1, 8, rd, ro);
         return true;
+    }
+
+    // The register a return right after value `v` takes it in; NOREG when no such return follows.
+    fn ret_want(self: &Self, v: Value) u8 {
+        let b = self.b();
+        let bk = b.blocks[self.lv.def_blk[v as usize] as usize];
+        let rl = self.self_lay.ret;
+        if v + 1 >= bk.start + bk.len || b.insts[v as usize + 1].op != O_RET || b.insts[v as usize + 1].a != v || rl.kind != ab::L_REG || rl.n != 1 || self.self_lay.parts[rl.p0 as usize].v {
+            return NOREG;
+        }
+        return self.self_lay.parts[rl.p0 as usize].reg;
+    }
+
+    // Whether value `v`, in a register it owns, dies at this instruction (`def_over` may take that
+    // register).
+    fn dies_here(self: &Self, v: Value) bool {
+        let x = self.vx(v);
+        let r = self.va[x as usize].reg;
+        return r != NOREG && self.owner[r as usize] == x && self.va[x as usize].home != H_FIXED && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos;
     }
 
     // `va_start`: the `va_list` at `t.a` takes the offsets of the first variadic register in the save area
@@ -5401,14 +5498,27 @@ extend Gen {
     // no intrinsic and no call through the address slot (`-fno-plt`); then its return is not emitted
     // (`tail_ret`).
     fn sibling(self: &mut Self, i: u32, t: Inst) bool {
+        if !self.sib_shape(i, t) {
+            return false;
+        }
+        self.tail_ret = i + 1;
+        return true;
+    }
+
+    // `sibling`'s test, without marking the return: the call's shape, then its layout (`call_layout`).
+    fn sib_shape(self: &mut Self, i: u32, t: Inst) bool {
         let b = self.b();
         let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
-        if !self.tail_ok || i + 2 != bk.start + bk.len || self.lay.ret.kind == ab::L_SRET || (b.pool[t.b as usize + 1] & SIG_VARIADIC) != 0 {
+        if !self.tail_ok || i + 2 != bk.start + bk.len || (b.pool[t.b as usize + 1] & SIG_VARIADIC) != 0 {
             return false;
         }
         let r = b.insts[i as usize + 1];
         let rt = b.pool[t.b as usize + 2];
         if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || rt != b.pool[b.sig as usize + 2] || (rt & AGG) != 0 {
+            return false;
+        }
+        self.call_layout(t);
+        if self.lay.ret.kind == ab::L_SRET {
             return false;
         }
         let p = unsafe &*self.pkg;
@@ -5424,7 +5534,6 @@ extend Gen {
         if self.ymm && ymm_parts(&self.lay) {
             return false;
         }
-        self.tail_ret = i + 1;
         return true;
     }
 

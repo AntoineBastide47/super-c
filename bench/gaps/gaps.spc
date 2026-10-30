@@ -27,6 +27,17 @@ extern "C" {
     fn c_b_pow2(x: u32) bool;
     fn c_f_and(x: u32, y: u32, z: u32) bool;
     fn c_f_or0(x: u32, y: u32) bool;
+    fn c_r_even(n: u32) bool;
+    fn c_s_max(a: i32, b: i32) i32;
+    fn c_s_clamp(x: i32, lo: i32, hi: i32) i32;
+    fn c_s_cmp3(a: i32, b: i32) i32;
+    fn c_s_abs(x: i32) i32;
+    fn c_s_cinc(a: u32, b: u32, c: u32) u32;
+    fn c_s_divmod(a: u32, b: u32) u32;
+    fn c_s_srem2(x: i32) bool;
+    fn c_s_ctz(x: u32) u32;
+    fn c_s_clz16(x: u16) u32;
+    fn c_s_shm(x: u32, n: u32) u32;
 }
 
 @arch(x86_64)
@@ -47,6 +58,17 @@ extern "C" {
     fn c_b_pow2(x: u32) bool;
     fn c_f_and(x: u32, y: u32, z: u32) bool;
     fn c_f_or0(x: u32, y: u32) bool;
+    fn c_r_even(n: u32) bool;
+    fn c_s_max(a: i32, b: i32) i32;
+    fn c_s_clamp(x: i32, lo: i32, hi: i32) i32;
+    fn c_s_cmp3(a: i32, b: i32) i32;
+    fn c_s_abs(x: i32) i32;
+    fn c_s_cinc(a: u32, b: u32, c: u32) u32;
+    fn c_s_divmod(a: u32, b: u32) u32;
+    fn c_s_srem2(x: i32) bool;
+    fn c_s_ctz(x: u32) u32;
+    fn c_s_clz16(x: u16) u32;
+    fn c_s_shm(x: u32, n: u32) u32;
 }
 
 // Gap 1: recursion whose result an associative operation combines with the recursive call.
@@ -161,6 +183,98 @@ fn f_or0(x: u32, y: u32) bool {
     return x == 0 || y == 0;
 }
 
+// Gap 8: callee-saved registers around sibling calls.
+@noinline
+fn r_even(n: u32) bool {
+    if n == 0 {
+        return true;
+    }
+    return r_odd(n - 1);
+}
+
+@noinline
+fn r_odd(n: u32) bool {
+    if n == 0 {
+        return false;
+    }
+    return r_even(n - 1);
+}
+
+// Gap 14: return diamonds.
+@noinline
+fn s_max(a: i32, b: i32) i32 {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+@noinline
+fn s_clamp(x: i32, lo: i32, hi: i32) i32 {
+    if x < lo {
+        return lo;
+    }
+    if x > hi {
+        return hi;
+    }
+    return x;
+}
+
+@noinline
+fn s_cmp3(a: i32, b: i32) i32 {
+    if a < b {
+        return -1;
+    }
+    if a > b {
+        return 1;
+    }
+    return 0;
+}
+
+// Gaps 15 to 20: arithmetic idioms.
+@noinline
+fn s_abs(x: i32) i32 {
+    return if x < 0 {
+        -x
+    } else {
+        x
+    };
+}
+
+@noinline
+fn s_cinc(a: u32, b: u32, c: u32) u32 {
+    return if a > b {
+        c + 1
+    } else {
+        c
+    };
+}
+
+@noinline
+fn s_divmod(a: u32, b: u32) u32 {
+    return a / b + a % b;
+}
+
+@noinline
+fn s_srem2(x: i32) bool {
+    return x % 2 == 1;
+}
+
+@noinline
+fn s_ctz(x: u32) u32 {
+    return x.trailing_zeros() as u32;
+}
+
+@noinline
+fn s_clz16(x: u16) u32 {
+    return x.leading_zeros() as u32;
+}
+
+@noinline
+fn s_shm(x: u32, n: u32) u32 {
+    return x << (n & 31);
+}
+
 // `CALLS` inputs below `max`: all `max - 1` (`fixed`), or uniform (`random`, a fixed seed).
 fn inputs(max: u32, random: bool) Vector<u32> {
     let mut v = Vector::<u32>::with_capacity(CALLS);
@@ -232,6 +346,15 @@ fn chain<F: fn(u32) u64>(xs: &Vector<u32>, f: F) Stat {
 }
 
 // One row: probe `name` on `xs` (`mode`), Super-C's `sc` against clang's `c`.
+// `time` of `f` over `xs`, or its `chain` when `latency`.
+fn measure<F: fn(u32) u64>(xs: &Vector<u32>, latency: bool, f: F) Stat {
+    return if latency {
+        chain(xs, f)
+    } else {
+        time(xs, f)
+    };
+}
+
 fn row(name: str, mode: str, sc: Stat, c: Stat) {
     unsafe stdio::printf(
         "gaps %-10.*s %-6.*s  sc %9.2f ns (+%.2f)  c %9.2f ns (+%.2f)  sc/c %.3f\n".ptr() as *const char,
@@ -391,4 +514,134 @@ pub fn gaps_flags(_b: &mut bench::Bencher) {
         chain(&xs, |x: u32| f_and(x & 3, x >> 8 & 15, x >> 16 & 1) as u64),
         chain(&xs, |x: u32| (unsafe c_f_and(x & 3, x >> 8 & 15, x >> 16 & 1)) as u64),
     );
+}
+
+/// Gap 8 (callee-saved registers in a body whose only call is a sibling one): `r_even` on depths below 64.
+@bench(log_results = false)
+pub fn gaps_sibling(_b: &mut bench::Bencher) {
+    warm();
+    for m in 0..2 {
+        let random = m == 1;
+        let mode = if random {
+            "random"
+        } else {
+            "fixed"
+        };
+        let xs = inputs(64, random);
+        row("r_even", mode, time(&xs, |x: u32| r_even(x) as u64), time(&xs, |x: u32| (unsafe c_r_even(x)) as u64));
+    }
+}
+
+/// Gap 14 (return diamonds): `s_max`, `s_clamp`, `s_cmp3` on words (`fixed`: one value, predictable;
+/// `random`: unpredictable), and as latency chains.
+@bench(log_results = false)
+pub fn gaps_select(_b: &mut bench::Bencher) {
+    warm();
+    for m in 0..3 {
+        let random = m != 0;
+        let mode = if m == 0 {
+            "fixed"
+        } else if m == 1 {
+            "random"
+        } else {
+            "chain"
+        };
+        let xs = inputs(0xFFFFFFFF, random);
+        if m < 2 {
+            row(
+                "s_max",
+                mode,
+                time(&xs, |x: u32| s_max(x as i32, (x << 7) as i32) as u64),
+                time(&xs, |x: u32| (unsafe c_s_max(x as i32, (x << 7) as i32)) as u64),
+            );
+            row(
+                "s_clamp",
+                mode,
+                time(&xs, |x: u32| s_clamp(x as i32, -1000000, 1000000) as u64),
+                time(&xs, |x: u32| (unsafe c_s_clamp(x as i32, -1000000, 1000000)) as u64),
+            );
+            row(
+                "s_cmp3",
+                mode,
+                time(&xs, |x: u32| s_cmp3(x as i32, (x << 7) as i32) as u64),
+                time(&xs, |x: u32| (unsafe c_s_cmp3(x as i32, (x << 7) as i32)) as u64),
+            );
+        } else {
+            row(
+                "s_max",
+                mode,
+                chain(&xs, |x: u32| s_max(x as i32, (x << 7) as i32) as u64),
+                chain(&xs, |x: u32| (unsafe c_s_max(x as i32, (x << 7) as i32)) as u64),
+            );
+            row(
+                "s_clamp",
+                mode,
+                chain(&xs, |x: u32| s_clamp(x as i32, -1000000, 1000000) as u64),
+                chain(&xs, |x: u32| (unsafe c_s_clamp(x as i32, -1000000, 1000000)) as u64),
+            );
+            row(
+                "s_cmp3",
+                mode,
+                chain(&xs, |x: u32| s_cmp3(x as i32, (x << 7) as i32) as u64),
+                chain(&xs, |x: u32| (unsafe c_s_cmp3(x as i32, (x << 7) as i32)) as u64),
+            );
+        }
+    }
+}
+
+/// Gaps 15 to 20 (arithmetic idioms): conditional negation and increment, quotient and remainder, a signed
+/// remainder test, 32- and 16-bit bit counts, a masked shift; on unpredictable words and as latency chains.
+@bench(log_results = false)
+pub fn gaps_arith(_b: &mut bench::Bencher) {
+    warm();
+    let xs = inputs(0xFFFFFFFF, true);
+    for m in 0..2 {
+        let mode = if m == 0 {
+            "random"
+        } else {
+            "chain"
+        };
+        row(
+            "s_abs",
+            mode,
+            measure(&xs, m == 1, |x: u32| s_abs(x as i32) as u64),
+            measure(&xs, m == 1, |x: u32| (unsafe c_s_abs(x as i32)) as u64),
+        );
+        row(
+            "s_cinc",
+            mode,
+            measure(&xs, m == 1, |x: u32| s_cinc(x, x << 3, x) as u64),
+            measure(&xs, m == 1, |x: u32| (unsafe c_s_cinc(x, x << 3, x)) as u64),
+        );
+        row(
+            "s_divmod",
+            mode,
+            measure(&xs, m == 1, |x: u32| s_divmod(x, x >> 20 | 1) as u64),
+            measure(&xs, m == 1, |x: u32| (unsafe c_s_divmod(x, x >> 20 | 1)) as u64),
+        );
+        row(
+            "s_srem2",
+            mode,
+            measure(&xs, m == 1, |x: u32| s_srem2(x as i32) as u64),
+            measure(&xs, m == 1, |x: u32| (unsafe c_s_srem2(x as i32)) as u64),
+        );
+        row(
+            "s_ctz",
+            mode,
+            measure(&xs, m == 1, |x: u32| s_ctz(x >> (x & 31)) as u64),
+            measure(&xs, m == 1, |x: u32| (unsafe c_s_ctz(x >> (x & 31))) as u64),
+        );
+        row(
+            "s_clz16",
+            mode,
+            measure(&xs, m == 1, |x: u32| s_clz16(x as u16) as u64),
+            measure(&xs, m == 1, |x: u32| (unsafe c_s_clz16(x as u16)) as u64),
+        );
+        row(
+            "s_shm",
+            mode,
+            measure(&xs, m == 1, |x: u32| s_shm(x, x >> 7) as u64),
+            measure(&xs, m == 1, |x: u32| (unsafe c_s_shm(x, x >> 7)) as u64),
+        );
+    }
 }

@@ -18,7 +18,11 @@ import ir::core as core;
 /// with 0 for equality (`tst`); a product one `add` or `sub` takes (`madd`, `msub`); a logical shift right
 /// by a constant one `and` with a mask of low bits takes (`ubfx`); the two shifts of a rotation and the
 /// arithmetic of its second amount (`rotate_of`), of 32 or 64 bits, with FOLD_ROT_NARROW of 8 and 16 too
-/// (`rol`, `ror`); the shift left by 1 to 3 and the inner sum one sum takes as an address (`lea_of`).
+/// (`rol`, `ror`); the shift left by 1 to 3 and the inner sum one sum takes as an address (`lea_of`); an
+/// `and` or `or` of flags that are comparisons each with this one use, or such `and`s and `or`s, compared
+/// one after the other (`conj`: arm64's `ccmp`); a mask of a 32- or 64-bit shift's amount to the low bits
+/// of the width, which the shift takes modulo its width anyway (`shift_amount`); a `select`'s side that is
+/// the other side plus 1, negated or inverted (`cs_kind`: arm64's `csinc`, `csneg`, `csinv`).
 pub(package) const FOLD_CMP: u32 = 1;
 pub(package) const FOLD_TST: u32 = 2;
 pub(package) const FOLD_MADD: u32 = 4;
@@ -26,6 +30,16 @@ pub(package) const FOLD_UBFX: u32 = 8;
 pub(package) const FOLD_ROT: u32 = 16;
 pub(package) const FOLD_ROT_NARROW: u32 = 32;
 pub(package) const FOLD_LEA: u32 = 64;
+pub(package) const FOLD_CCMP: u32 = 128;
+pub(package) const FOLD_SHAMT: u32 = 256;
+pub(package) const FOLD_CSEL: u32 = 512;
+/// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
+pub(package) const CS_NONE: u8 = 0;
+pub(package) const CS_INC: u8 = 1;
+pub(package) const CS_NEG: u8 = 2;
+pub(package) const CS_NOT: u8 = 3;
+// A chain of conditional comparisons (`FOLD_CCMP`) holds at most this many comparisons.
+const CCMP_MAX: u8 = 3;
 // The most folded instructions `uses_at` expands for one use: a comparison of a test of a field, say.
 const FOLD_DEPTH: u32 = 8;
 
@@ -85,6 +99,9 @@ pub(package) struct Live {
     pub(package) fold_max: u32,
     pub(package) fold: Vector<bool>,
     pub(package) pfold: Vector<bool>,
+    /// Per instruction, the comparisons of the `and` or `or` of flags it is when `FOLD_CCMP` folds them into
+    /// conditional comparisons (`folds`), else 0.
+    pub(package) conj: Vector<u8>,
     /// Stores whose value a call takes in place of memory (the generator's, before `run`): per
     /// instruction, a relayed store's call, else NONE (empty: none); `relayed`, call << 32 | store for each
     /// store whose value the call reads. A relayed store reads nothing; its call reads those values
@@ -138,6 +155,7 @@ extend Live {
             fold_max: 0,
             fold: Vector::<bool>::new(),
             pfold: Vector::<bool>::new(),
+            conj: Vector::<u8>::new(),
             relay: Vector::<u32>::new(),
             relayed: Vector::<u64>::new(),
             fold_ops: 0,
@@ -224,6 +242,7 @@ extend Live {
         self.fold.resize_default(ni);
         self.pfold.truncate(0);
         self.pfold.resize_default(ni);
+        fill(&mut self.conj, ni, 0);
         if self.fold_max == 0 && self.fold_ops == 0 {
             return;
         }
@@ -430,6 +449,43 @@ extend Live {
                 self.pfold[t.a as usize] = true;
             }
         }
+        if (self.fold_ops & FOLD_SHAMT) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                let bits = type_bits(t.ty, 8);
+                if t.op < O_SHL || t.op > O_ASHR || !is_int(t.ty) || bits != 32 && bits != 64 || self.pfold[i] {
+                    continue;
+                }
+                let m = t.b;
+                if (m & (VPARAM | VFLAG)) != 0 || m == VNONE || b.insts[m as usize].op != O_AND || self.count[m as usize] != 1 || self.pfold[m as usize] {
+                    continue;
+                }
+                let k = int_const(b, b.insts[m as usize].b);
+                if k != u64::MAX && (k & (bits - 1) as u64) == (bits - 1) as u64 {
+                    self.pfold[m as usize] = true;
+                }
+            }
+        }
+        if (self.fold_ops & FOLD_CSEL) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op != O_SELECT || !is_int(t.ty) || t.ty == T_I128 || is_vec(t.ty) {
+                    continue;
+                }
+                if is_inst(t.b) && self.count[t.b as usize] == 1 && !self.pfold[t.b as usize] && cs_kind(b, t.b, t.c) != CS_NONE {
+                    self.pfold[t.b as usize] = true;
+                } else if is_inst(t.c) && self.count[t.c as usize] == 1 && !self.pfold[t.c as usize] && cs_kind(
+                    b,
+                    t.c,
+                    t.b,
+                ) != CS_NONE {
+                    self.pfold[t.c as usize] = true;
+                }
+            }
+        }
+        if (self.fold_ops & FOLD_CCMP) != 0 {
+            self.conj_folds(b);
+        }
     }
 
     /// The uses of instruction `i` of a laid-out block, as `uses_at` gives them (`ranges` found them).
@@ -581,6 +637,60 @@ extend Live {
                 out.push(b.insts[(self.relayed[q] & 0xFFFFFFFF) as usize].b);
             }
         }
+    }
+
+    // `FOLD_CCMP`: each `and` or `or` of flags whose operands are comparisons of integers of up to 64 bits
+    // with this one use and no folded operand, or such folded `and`s and `or`s, one of the two a
+    // comparison, at most CCMP_MAX comparisons in all: its comparisons fold into it (`conj`), and it folds
+    // into its users when each is a `select`'s or a `br`'s condition. Instructions come after their
+    // operands, so an inner `and` is known before the one that takes it.
+    fn conj_folds(self: &mut Self, b: &Body) {
+        let ni = b.insts.len();
+        fill(&mut self.cnd, ni, 0);
+        for i in 0..ni {
+            let t = b.insts[i];
+            if (t.op == O_SELECT || t.op == O_BR) && (t.a & (VPARAM | VFLAG)) == 0 {
+                self.cnd[t.a as usize] += 1;
+            }
+        }
+        for i in 0..ni {
+            let t = b.insts[i];
+            if t.op != O_AND && t.op != O_OR || t.ty != T_I8 || self.pfold[i] || self.count[i] == 0 {
+                continue;
+            }
+            let na = self.conj_part(b, t.a);
+            let nb = self.conj_part(b, t.b);
+            let leaf_a = na == 1 && b.insts[t.a as usize].op == O_ICMP;
+            let leaf_b = nb == 1 && b.insts[t.b as usize].op == O_ICMP;
+            if na == 0 || nb == 0 || !leaf_a && !leaf_b || na + nb > CCMP_MAX {
+                continue;
+            }
+            self.conj[i] = na + nb;
+            self.pfold[t.a as usize] = true;
+            self.pfold[t.b as usize] = true;
+            self.pfold[i] = self.cnd[i] == self.count[i];
+        }
+    }
+
+    // The comparisons operand `v` of an `and` or `or` brings to a `FOLD_CCMP` chain: 1 for a comparison it
+    // alone uses, the chain's count for a chain it alone uses, else 0.
+    fn conj_part(self: &Self, b: &Body, v: Value) u8 {
+        if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.count[v as usize] != 1 || self.pfold[v as usize] {
+            return 0;
+        }
+        let t = b.insts[v as usize];
+        if self.conj[v as usize] != 0 {
+            return self.conj[v as usize];
+        }
+        if t.op != O_ICMP || !is_int(b.type_of(t.a)) || b.type_of(t.a) == T_I128 {
+            return 0;
+        }
+        let folded = (t.a & (VPARAM | VFLAG)) == 0 && self.pfold[t.a as usize] || t.b != VNONE && (t.b & (VPARAM | VFLAG)) == 0 && self.pfold[t.b as usize];
+        return if folded {
+            0
+        } else {
+            1
+        };
     }
 
     // `rpo`: the reverse postorder number of each block the entry reaches, by an explicit-stack DFS
@@ -1550,6 +1660,65 @@ pub(package) fn rotate_of(b: &Body, i: u32) Rotation {
         return Rotation { x: l.a, amt: ar, src: r.b, k: 0, right: true };
     }
     return none;
+}
+
+/// What `v` is as a `select`'s side next to side `other` (CS_*): `other + 1`, `-other`, `~other` (an
+/// integer of up to 64 bits), which a conditional instruction computes from `other`; else CS_NONE.
+pub(package) fn cs_kind(b: &Body, v: Value, other: Value) u8 {
+    if !is_inst(v) || other == VNONE {
+        return CS_NONE;
+    }
+    let t = b.insts[v as usize];
+    let ops = t.op == O_ADD || t.op == O_SUB || t.op == O_NEG || t.op == O_NOT || t.op == O_XOR;
+    if !ops || !is_int(t.ty) || t.ty == T_I128 {
+        return CS_NONE;
+    }
+    let m = if type_bits(t.ty, 8) >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << type_bits(t.ty, 8) as u64) - 1
+    };
+    let un = t.op == O_NEG || t.op == O_NOT;
+    let ka = const_val(b, t.a) & m;
+    let kb = if un {
+        0
+    } else {
+        const_val(b, t.b) & m
+    };
+    let ca = is_const_val(b, t.a);
+    let cb = !un && is_const_val(b, t.b);
+    if t.op == O_ADD && (t.a == other && cb && kb == 1 || t.b == other && ca && ka == 1) || t.op == O_SUB && t.a == other && cb && kb == m {
+        return CS_INC;
+    }
+    if t.op == O_NEG && t.a == other || t.op == O_SUB && ca && ka == 0 && t.b == other {
+        return CS_NEG;
+    }
+    if t.op == O_NOT && t.a == other || t.op == O_XOR && (t.a == other && cb && kb == m || t.b == other && ca && ka == m) {
+        return CS_NOT;
+    }
+    return CS_NONE;
+}
+
+// Whether `v` is an integer constant, and its bits.
+fn is_const_val(b: &Body, v: Value) bool {
+    return is_inst(v) && b.insts[v as usize].op == O_ICONST;
+}
+
+fn const_val(b: &Body, v: Value) u64 {
+    if !is_const_val(b, v) {
+        return 0;
+    }
+    let t = b.insts[v as usize];
+    return t.a as u64 | t.b as u64 << 32;
+}
+
+/// The amount a shift with amount operand `v` takes: the operand of `v` when `v` is a mask folded into the
+/// shift (`FOLD_SHAMT`), else `v`.
+pub(package) fn shift_amount(b: &Body, pfold: &Vector<bool>, v: Value) Value {
+    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || !pfold[v as usize] || b.insts[v as usize].op != O_AND {
+        return v;
+    }
+    return b.insts[v as usize].a;
 }
 
 /// The value a generator reads rotation `r`'s amount from (`folded`, the folded instructions): the shift's

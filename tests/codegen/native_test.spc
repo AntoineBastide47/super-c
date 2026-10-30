@@ -329,6 +329,34 @@ fn folded_compares_and_fields_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// `and`s and `or`s of comparisons fold into chains of conditional comparisons (arm64 `ccmp`, `ccmn` for a
+// negative constant): nested, mixed, of 8 and 64 bits, against registers, as a value, a branch's
+// condition and a select's.
+@test
+fn chains_of_compared_flags_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @and3 fn global\nsym @mix fn global\nsym @small fn global\nsym @wide fn global\nsym @brc fn global\nsym @selc fn global\nfn @and3\n  sig (i32, i32, i32) -> i8\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 3\n  v4 = iconst.i32 9\n  v5 = iconst.i32 0\n  v6 = icmp.eq v0, v3\n  v7 = icmp.ult v1, v4\n  v8 = icmp.ne v2, v5\n  v9 = and.i8 v7, v8\n  v10 = and.i8 v6, v9\n  ret v10\nfn @mix\n  sig (i32, i32, i32) -> i8\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 -7\n  v4 = icmp.slt v0, v3\n  v5 = icmp.sgt v1, v2\n  v6 = or.i8 v4, v5\n  v7 = iconst.i32 100\n  v8 = icmp.ule v2, v7\n  v9 = and.i8 v6, v8\n  ret v9\nfn @small\n  sig (i8, i8) -> i8\nb0(v0: i8, v1: i8):\n  v2 = iconst.i8 -3\n  v3 = icmp.sge v0, v2\n  v4 = icmp.ult v1, v0\n  v5 = or.i8 v3, v4\n  ret v5\nfn @wide\n  sig (i64, i64) -> i8\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 1000000\n  v3 = icmp.ugt v0, v2\n  v4 = icmp.eq v1, v0\n  v5 = and.i8 v3, v4\n  ret v5\nfn @brc\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 0\n  v3 = icmp.eq v0, v2\n  v4 = icmp.eq v1, v2\n  v5 = or.i8 v3, v4\n  br v5, b1, b2\nb1:\n  v6 = iconst.i32 11\n  ret v6\nb2:\n  v7 = iconst.i32 22\n  ret v7\nfn @selc\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 5\n  v3 = icmp.sgt v0, v2\n  v4 = icmp.slt v1, v2\n  v5 = and.i8 v3, v4\n  v6 = select.i64 v5, v0, v1\n  ret v6\n";
+    let drv = "#include <stdint.h>\nint8_t and3(int32_t, int32_t, int32_t);\nint8_t mix(int32_t, int32_t, int32_t);\nint8_t small(int8_t, int8_t);\nint8_t wide(int64_t, int64_t);\nint32_t brc(int32_t, int32_t);\nint64_t selc(int64_t, int64_t);\nint main(void) {\n  for (int32_t a = -12; a < 12; a++)\n    for (int32_t b = -12; b < 12; b++)\n      for (int32_t c = -2; c < 120; c += 7) {\n        if (and3(a, b, c) != (a == 3 && (uint32_t)b < 9 && c != 0)) return 1;\n        if (mix(a, b, c) != ((a < -7 || b > c) && (uint32_t)c <= 100)) return 2;\n      }\n  for (int32_t a = -128; a < 128; a++)\n    for (int32_t b = -128; b < 128; b += 3)\n      if (small((int8_t)a, (int8_t)b) != (a >= -3 || (uint8_t)b < (uint8_t)a)) return 3;\n  int64_t ws[5] = {0, 1000000, 1000001, INT64_C(1) << 40, -1};\n  for (int i = 0; i < 5; i++)\n    for (int j = 0; j < 5; j++)\n      if (wide(ws[i], ws[j]) != ((uint64_t)ws[i] > 1000000 && ws[j] == ws[i])) return 4;\n  for (int32_t a = -1; a < 2; a++)\n    for (int32_t b = -1; b < 2; b++)\n      if (brc(a, b) != ((a == 0 || b == 0) ? 11 : 22)) return 5;\n  for (int64_t a = 0; a < 10; a++)\n    for (int64_t b = 0; b < 10; b++)\n      if (selc(a, b) != ((a > 5 && b < 5) ? a : b)) return 6;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// A select of a value and that value plus 1, negated or inverted, or of a value and 1 or all ones, is one
+// conditional instruction (arm64 `cinc`, `cneg`, `csinv`, `csinc` with the zero register), in 8, 32 and
+// 64 bits.
+@test
+fn conditional_increments_negations_and_inversions_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @iabs fn global\nsym @cinc fn global\nsym @cmp3 fn global\nsym @one fn global\nsym @ones fn global\nsym @inv fn global\nsym @dec fn global\nfn @iabs\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 0\n  v2 = icmp.slt v0, v1\n  v3 = sub.i64 v1, v0\n  v4 = select.i64 v2, v3, v0\n  ret v4\nfn @cinc\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = icmp.ugt v0, v1\n  v4 = iconst.i32 1\n  v5 = add.i32 v2, v4\n  v6 = select.i32 v3, v2, v5\n  ret v6\nfn @cmp3\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = icmp.slt v0, v1\n  v3 = icmp.sgt v0, v1\n  v4 = zext.i32 v3\n  v5 = iconst.i32 -1\n  v6 = select.i32 v2, v5, v4\n  ret v6\nfn @one\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 7\n  v3 = icmp.eq v0, v2\n  v4 = iconst.i32 1\n  v5 = select.i32 v3, v1, v4\n  ret v5\nfn @ones\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 0\n  v3 = icmp.sge v0, v2\n  v4 = iconst.i64 -1\n  v5 = select.i64 v3, v4, v1\n  ret v5\nfn @inv\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 100\n  v3 = icmp.ult v0, v2\n  v4 = iconst.i32 -1\n  v5 = xor.i32 v1, v4\n  v6 = select.i32 v3, v5, v1\n  ret v6\nfn @dec\n  sig (i8, i8) -> i8\nb0(v0: i8, v1: i8):\n  v2 = icmp.ugt v0, v1\n  v3 = iconst.i8 -1\n  v4 = sub.i8 v1, v3\n  v5 = select.i8 v2, v4, v1\n  ret v5\n";
+    let drv = "#include <stdint.h>\nint64_t iabs(int64_t);\nint32_t cinc(int32_t, int32_t, int32_t);\nint32_t cmp3(int32_t, int32_t);\nint32_t one(int32_t, int32_t);\nint64_t ones(int64_t, int64_t);\nint32_t inv(int32_t, int32_t);\nuint8_t dec(uint8_t, uint8_t);\nint main(void) {\n  int64_t xs[6] = {0, 1, -1, INT64_C(1) << 40, -(INT64_C(1) << 40), INT64_MIN + 1};\n  for (int i = 0; i < 6; i++) {\n    if (iabs(xs[i]) != (xs[i] < 0 ? -xs[i] : xs[i])) return 1;\n    if (ones(xs[i], 5) != (xs[i] >= 0 ? -1 : 5)) return 5;\n  }\n  for (int32_t a = -3; a < 4; a++)\n    for (int32_t b = -3; b < 4; b++) {\n      if (cinc(a, b, 10) != ((uint32_t)a > (uint32_t)b ? 10 : 11)) return 2;\n      if (cmp3(a, b) != (a < b ? -1 : a > b)) return 3;\n      if (one(a + 5, b) != (a + 5 == 7 ? b : 1)) return 4;\n      if (inv(a * 60, b) != ((uint32_t)(a * 60) < 100 ? ~b : b)) return 6;\n    }\n  for (int a = 0; a < 256; a += 5)\n    for (int b = 0; b < 256; b += 7)\n      if (dec((uint8_t)a, (uint8_t)b) != (uint8_t)(a > b ? b + 1 : b)) return 7;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // Products by 2^s + 1 and 2^s - 1 (a shifted sum, a shift and a difference; `lea` by 3, 5 and 9, then a
 // shift by their multiples by 2^s; a product by all ones, which no shift within the width gives,
 // multiplies), and
