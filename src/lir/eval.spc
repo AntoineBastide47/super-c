@@ -552,6 +552,11 @@ extend Eval {
             self.vals[dst as usize] = trunc_bits((x * y >> bits as usize) as u64, bits);
             return true;
         }
+        if op == O_BSWAP {
+            let bits = type_bits(t.ty, ptr);
+            self.vals[dst as usize] = self.val(&f, b, t.a).swap_bytes() >> (64 - bits) as u64;
+            return true;
+        }
         if op == O_CLZ || op == O_CTZ || op == O_POPCNT {
             let bits = type_bits(t.ty, ptr);
             let x = trunc_bits(self.val(&f, b, t.a), bits);

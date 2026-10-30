@@ -1791,6 +1791,144 @@ b3:
     }
 }
 
+// A header parameter that steps by an exclusive or with an invariant alternates between two values: the
+// loop leaves with its value on the iteration the trip count's parity gives, and a value of it and
+// invariants (`sel`) alternates too.
+@test
+fn a_value_toggled_by_an_invariant_exclusive_or_takes_its_closed_form() {
+    let src = M"(lir ptr 8
+sym @tog fn global
+sym @sel fn global
+fn @tog
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 5
+  jmp b1(v2, v4)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = xor.i64 v6, v1
+  v9 = add.i64 v5, v3
+  jmp b1(v9, v8)
+b3:
+  ret v6
+fn @sel
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 1
+  v3 = iconst.i8 1
+  v4 = iconst.i8 0
+  v5 = iconst.i32 10
+  v6 = iconst.i32 20
+  jmp b1(v0, v4)
+b1(v7: i32, v8: i8):
+  v9 = icmp.ne v8, v4
+  v10 = select.i32 v9, v6, v5
+  v11 = icmp.ne v7, v1
+  br v11, b2, b3
+b2:
+  v12 = xor.i8 v8, v3
+  v13 = sub.i32 v7, v2
+  jmp b1(v13, v12)
+b3:
+  v14 = zext.i32 v8
+  v15 = add.i32 v14, v10
+  ret v15
+)";
+    let (b, a) = closed(src, "tog");
+    let (sb, sa) = closed(src, "sel");
+    let ns: []u64 = [0, 1, 2, 7, 1000];
+    let tog: []u64 = [5, 5 ^ 0x36, 5, 5 ^ 0x36, 5];
+    let sel: []u64 = [10, 21, 10, 21, 10];
+    for k in 0..ns.len() {
+        let x: []u64 = [ns[k], 0x36];
+        same_outcome(&b, &a, "tog", x, tog[k], false);
+        let y: []u64 = [ns[k]];
+        same_outcome(&sb, &sa, "sel", y, sel[k], false);
+    }
+}
+
+// A loop that runs while a value is not 0, the value losing its lowest set bit (`pop`, tested at the
+// header) or shifting right by 1 (`len`, tested at the latch on the shifted value, a counter from 5 beside
+// it), counts its iterations by `popcnt` or `clz`; an arithmetic shift (`neg`, which never reaches 0 from a
+// negative value) stays.
+@test
+fn a_loop_counting_bits_takes_popcnt_or_clz() {
+    let src = M"(lir ptr 8
+sym @pop fn global
+sym @len fn global
+sym @neg fn global
+fn @pop
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  jmp b1(v0, v1)
+b1(v3: i64, v4: i64):
+  v5 = icmp.ne v3, v1
+  br v5, b2, b3
+b2:
+  v6 = sub.i64 v3, v2
+  v7 = and.i64 v3, v6
+  v8 = add.i64 v4, v2
+  jmp b1(v7, v8)
+b3:
+  ret v4
+fn @len
+  sig (i8) -> i32
+b0(v0: i8):
+  v1 = iconst.i8 0
+  v2 = iconst.i8 1
+  v3 = iconst.i32 5
+  v4 = iconst.i32 1
+  jmp b1(v0, v3)
+b1(v5: i8, v6: i32):
+  v7 = lshr.i8 v5, v2
+  v8 = add.i32 v6, v4
+  v9 = icmp.ne v7, v1
+  br v9, b1(v7, v8), b2
+b2:
+  ret v8
+fn @neg
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 1
+  v3 = icmp.sgt v0, v1
+  br v3, b1(v0, v1), b2(v1)
+b1(v4: i32, v5: i32):
+  v6 = ashr.i32 v4, v2
+  v7 = add.i32 v5, v2
+  v8 = icmp.ne v6, v1
+  br v8, b1(v6, v7), b2(v7)
+b2(v9: i32):
+  ret v9
+)";
+    let (b, a) = closed(src, "pop");
+    assert(text_of(&a, "pop").contains("popcnt.i64"), text_of(&a, "pop").as_str());
+    let (lb, la) = closed(src, "len");
+    assert(text_of(&la, "len").contains("clz.i8"), text_of(&la, "len").as_str());
+    let (_, na) = optimized(src, FIN);
+    assert(text_of(&na, "neg").contains("br "), text_of(&na, "neg").as_str());
+    let xs: []u64 = [0, 1, 6, 0x8000000000000000, 0xFFFFFFFFFFFFFFFF, 0x123456789];
+    let pop: []u64 = [0, 1, 2, 1, 64, 15];
+    for k in 0..xs.len() {
+        let x: []u64 = [xs[k]];
+        same_outcome(&b, &a, "pop", x, pop[k], false);
+    }
+    // The latch tests the shifted value: the body runs once for 0 and 1, then once per bit.
+    let ys: []u64 = [0, 1, 2, 3, 0x40, 0x80, 0xFF];
+    let len: []u64 = [6, 6, 7, 7, 12, 13, 13];
+    for k in 0..ys.len() {
+        let y: []u64 = [ys[k]];
+        same_outcome(&lb, &la, "len", y, len[k], false);
+    }
+}
+
 // A loop stays when a value it leaves with is no polynomial (an exclusive or, a product of itself), or
 // when it reads memory.
 @test

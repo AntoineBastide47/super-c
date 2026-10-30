@@ -1076,7 +1076,10 @@ extend Gen {
             // An intrinsic's template writes x0, x1 and v0 to v4 and its arguments' registers: no
             // scratch home.
             let t = b.insts[i];
-            let c = Gen::clobbers(b, t) && !lv::dead_end(unsafe &*self.pkg, b, &self.lv, i, &mut self.uses);
+            // A sibling call does not come back: the body around it may be a leaf.
+            let c = Gen::clobbers(b, t) && !lv::dead_end(unsafe &*self.pkg, b, &self.lv, i, &mut self.uses) && !(t.op == O_CALL && self.intrinsic(
+                t.a,
+            ).len() == 0 && self.sib_shape(i as u32, t));
             self.cret[i] = c;
             if c && self.rare(i as u32) {
                 self.rarec[i] = true;
@@ -1857,7 +1860,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
         if self.again {
@@ -1913,6 +1916,11 @@ extend Gen {
             return self.naked(s);
         }
         self.frame_layout();
+        // Sibling calls leave the frame first: none with a canary to check, variadic arguments in it, or a
+        // slot's address that may outlive it.
+        self.tail_ok = unsafe (*self.pkg).tail && self.canary < 0 && (self.opf & lv::OP_VASTART) == 0 && !lver::frame_escapes(
+            b,
+        );
         self.bucket_ends();
         self.call_tables();
         self.half_forms();
@@ -1931,10 +1939,6 @@ extend Gen {
             self.frameless = self.frameless && kd != ab::L_STACK && kd != ab::L_REF_STACK;
         }
         self.frameless = self.frameless && (self.opf & (lv::OP_RETADDR | lv::OP_VASTART | lv::OP_ASM)) == 0;
-        let va = (self.opf & lv::OP_VASTART) != 0;
-        // Sibling calls leave the frame first: none with a canary to check, variadic arguments in it, or a
-        // slot's address that may outlive it.
-        self.tail_ok = unsafe (*self.pkg).tail && self.canary < 0 && !va && !lver::frame_escapes(b);
         for q in 0..self.lv.order.len() {
             if !self.block(q as u32) {
                 return false;
@@ -2892,6 +2896,20 @@ extend Gen {
             self.bit_count(i, t);
             return true;
         }
+        if op == O_BSWAP {
+            let bits = type_bits(t.ty, self.ptr);
+            let r = self.reg(t.a) as u32;
+            let rd = self.def(i) as u32;
+            let opc = if bits == 16 {
+                a::DP1_REV16
+            } else if bits == 32 {
+                a::DP1_REV32
+            } else {
+                a::DP1_REV64
+            };
+            self.emit(a::dp1(bits == 64, opc, rd, r));
+            return true;
+        }
         if op == O_ICMP {
             return self.icmp(i, t);
         }
@@ -3185,7 +3203,75 @@ extend Gen {
         if (v & (VPARAM | VFLAG)) != 0 || !self.lv.pfold[v as usize] {
             return NONE;
         }
+        if self.lv.conj[v as usize] != 0 {
+            return self.conj_flags(v);
+        }
         return self.compare(self.b().insts[v as usize]);
+    }
+
+    // The flags of `and` or `or` `v` of flags folded into conditional comparisons (`lv::FOLD_CCMP`): its
+    // chain operand's flags (or its first comparison's), then its comparison when they let it run (`ccmp`),
+    // else flags that decide it (false for an `and`, true for an `or`). The condition on them.
+    fn conj_flags(self: &mut Self, v: Value) u32 {
+        let t = self.b().insts[v as usize];
+        let b_leaf = self.lv.conj[t.b as usize] == 0;
+        let (first, leaf) = if b_leaf {
+            (t.a, t.b)
+        } else {
+            (t.b, t.a)
+        };
+        let c1 = if self.lv.conj[first as usize] != 0 {
+            self.conj_flags(first)
+        } else {
+            self.compare(self.b().insts[first as usize])
+        };
+        let l = self.b().insts[leaf as usize];
+        let c = l.aux;
+        let ty = self.vt(l.a);
+        let bits = type_bits(ty, self.ptr);
+        let sf = bits == 64;
+        let signed = signed_cond(c);
+        let ra = if bits < 32 {
+            self.ext(l.a, signed, bits)
+        } else {
+            self.reg(l.a)
+        } as u32;
+        let lc = icond(c);
+        let and = t.op == O_AND;
+        let run = if and {
+            c1
+        } else {
+            a::invert(c1)
+        };
+        let nzcv = if and {
+            a::nzcv_for(a::invert(lc))
+        } else {
+            a::nzcv_for(lc)
+        };
+        let mut k: u64 = 0;
+        if self.const_of(l.b, &mut k) {
+            let kv: i64 = if signed {
+                lp_sext(k, bits)
+            } else {
+                k as i64
+            };
+            if kv >= 0 && kv < 32 || kv < 0 && kv > -32 {
+                let m = if kv < 0 {
+                    -kv
+                } else {
+                    kv
+                };
+                self.emit(a::ccmp(sf, kv < 0, true, ra, m as u32, nzcv, run));
+                return lc;
+            }
+        }
+        let rb = if bits < 32 {
+            self.ext(l.b, signed, bits)
+        } else {
+            self.reg(l.b)
+        } as u32;
+        self.emit(a::ccmp(sf, false, false, ra, rb, nzcv, run));
+        return lc;
     }
 
     // Comparison `t` of integers of at most 64 bits into the flags: its condition. A folded `and` compared
@@ -3299,6 +3385,24 @@ extend Gen {
         if self.blk_at[k as usize] == n as u32 && self.lv.npred[k as usize] == 1 && n >= 2 && self.code[n - 2] == w && (self.code[n - 1] & 0xFF000010) == 0x54000000 && nf != 0 && (self.fix[nf - 1] >> 32) as usize == n - 1 {
             return;
         }
+        // The same comparison earlier in the block, only conditional selects and moves since (a `cset`
+        // reads the flags), none of which writes its operands: the flags hold.
+        let rn = w >> 5 & 31;
+        let rm = w >> 16 & 31;
+        let mut q = n;
+        while q > self.blk_at[k as usize] as usize && n - q < 8 {
+            q -= 1;
+            let c = self.code[q];
+            if c == w {
+                return;
+            }
+            let csel = (c & 0x1FE00000) == 0x1A800000;
+            let movw = (c & 0x1F800000) == 0x12800000;
+            let mov = (c & 0x7F200000) == 0x2A000000;
+            if !csel && !movw && !mov || (c & 31) == rn || (c & 31) == rm {
+                break;
+            }
+        }
         self.emit(w);
     }
 
@@ -3370,11 +3474,12 @@ extend Gen {
     }
 
     // clz: CLZ; ctz: RBIT then CLZ; popcnt: CNT over the bytes in v30, summed by ADDV. An operand under
-    // 32 bits is zero-extended; for ctz a bit set at its width makes 0 count the width.
+    // 32 bits is zero-extended, but for ctz, whose bit set at the width (making 0 count the width) hides
+    // the bits above it. The count, at most the width, is `clean`.
     fn bit_count(self: &mut Self, i: u32, t: Inst) {
         let bits = type_bits(t.ty, self.ptr);
         let sf = bits == 64;
-        let mut r = if bits < 32 {
+        let mut r = if bits < 32 && t.op != O_CTZ {
             self.ext(t.a, false, bits) as u32
         } else {
             self.reg(t.a) as u32
@@ -3384,8 +3489,10 @@ extend Gen {
             r = a::IP0;
         }
         let rd = self.def(i) as u32;
+        self.va.index_mut(i as usize).clean = true;
         if t.op == O_POPCNT {
-            self.emit(a::fmov_gv(true, true, 30, r));
+            // Below 64 bits the 32-bit move: the bits above a narrow value's width are not its own.
+            self.emit(a::fmov_gv(sf, true, 30, r));
             self.emit(a::cnt8b(30, 30));
             self.emit(a::addv8b(30, 30));
             self.emit(a::fmov_gv(false, false, rd, 30));
@@ -3445,6 +3552,11 @@ extend Gen {
         }
         if self.lv.pfold[i as usize] {
             return true; // its use computes it (`lv::FOLD_*`)
+        }
+        if self.lv.conj[i as usize] != 0 {
+            let c = self.conj_flags(i);
+            self.cond_value(i, c, NONE);
+            return true;
         }
         if ty == T_I128 {
             return self.int128(i, t);
@@ -3627,9 +3739,14 @@ extend Gen {
         };
         let rb = if small && div {
             self.ext(t.b, sgn, bits)
+        } else if op >= O_SHL && op <= O_ASHR {
+            self.reg(lv::shift_amount(self.b(), &self.lv.pfold, t.b))
         } else {
             self.reg(t.b)
         };
+        // An `and` of a value whose bits above the type are 0, an `or` or `xor` of two: so are the result's.
+        let ca = self.va[self.vx(t.a) as usize].clean;
+        let cb = self.va[self.vx(t.b) as usize].clean;
         let rd = self.def_step(i);
         let xa = ra as u32;
         let xb = rb as u32;
@@ -3649,6 +3766,9 @@ extend Gen {
                 2u32
             };
             self.emit(a::logic_reg(sf, opc, false, xd, xa, xb, 0, 0));
+            if small && (op == O_AND && (ca || cb) || ca && cb) {
+                self.va.index_mut(i as usize).clean = true;
+            }
         } else if op == O_SHL {
             self.emit(a::dp2(sf, a::DP2_LSLV, xd, xa, xb));
         } else if op == O_LSHR {
@@ -4605,6 +4725,9 @@ extend Gen {
             self.copy_mem(a::SP, d, ra, 0, type_bytes(ty, self.ptr));
             return true;
         }
+        if !is_v(ty) && self.cond_sel(i, t, cc) {
+            return true;
+        }
         // An integer 0 is the zero register.
         let rb = self.reg_or_zr(t.b, ty);
         let rc = self.reg_or_zr(t.c, ty);
@@ -4614,6 +4737,61 @@ extend Gen {
         } else {
             self.emit(a::csel(true, 0, 0, rd, rb, rc, cc));
         }
+        return true;
+    }
+
+    // Integer select `t`, instruction `i`, on condition `cc` as one conditional instruction from one side
+    // (`csinc`, `csinv`, `csneg`): a folded side that is the other plus 1, negated or inverted
+    // (`lv::FOLD_CSEL`), or a side 1 or all ones, the other no constant (the zero register gives it).
+    // Whether it did.
+    fn cond_sel(self: &mut Self, i: u32, t: Inst, cc: u32) bool {
+        let bits = type_bits(t.ty, self.ptr);
+        let sf = bits == 64;
+        let m = if sf {
+            u64::MAX
+        } else {
+            (1u64 << bits as u64) - 1
+        };
+        let b = self.b();
+        let fb = (t.b & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.b as usize];
+        let fc = (t.c & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.c as usize];
+        if fb || fc {
+            let (side, x, cond) = if fb {
+                (t.b, t.c, a::invert(cc))
+            } else {
+                (t.c, t.b, cc)
+            };
+            let kind = lv::cs_kind(b, side, x);
+            let rx = self.reg(x) as u32;
+            let rd = self.def_step(i) as u32;
+            let (op, o2) = if kind == lv::CS_INC {
+                (0u32, 1u32)
+            } else if kind == lv::CS_NOT {
+                (1u32, 0u32)
+            } else {
+                (1u32, 1u32)
+            };
+            self.emit(a::csel(sf, op, o2, rd, rx, rx, cond));
+            return true;
+        }
+        let mut kb: u64 = 0;
+        let mut kc: u64 = 0;
+        let cb = self.const_of(t.b, &mut kb);
+        let cc2 = self.const_of(t.c, &mut kc);
+        let ob = cb && !cc2 && ((kb & m) == 1 || (kb & m) == m);
+        let oc = cc2 && !cb && ((kc & m) == 1 || (kc & m) == m);
+        if !ob && !oc {
+            return false;
+        }
+        let (x, k, cond) = if ob {
+            (t.c, kb & m, a::invert(cc))
+        } else {
+            (t.b, kc & m, cc)
+        };
+        let rx = self.reg(x) as u32;
+        let rd = self.def_step(i) as u32;
+        // `csinc rd, x, zr` gives 1 where the condition fails, `csinv rd, x, zr` all ones.
+        self.emit(a::csel(sf, (k != 1) as u32, (k == 1) as u32, rd, rx, a::ZR, cond));
         return true;
     }
 
@@ -5365,9 +5543,18 @@ extend Gen {
     // argument in registers and none an aggregate (a copy in this frame); then its return is not emitted
     // (`tail_ret`). The callee's argument registers are set; its branch follows the epilogue (`finish`).
     fn sibling(self: &mut Self, i: u32, t: Inst) bool {
+        if !self.sib_shape(i, t) {
+            return false;
+        }
+        self.tail_ret = i + 1;
+        return true;
+    }
+
+    // `sibling`'s test, without marking the return: the call's shape, then its layout (`call_layout`).
+    fn sib_shape(self: &mut Self, i: u32, t: Inst) bool {
         let b = self.b();
         let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
-        if !self.tail_ok || i + 2 != bk.start + bk.len || self.lay.ret.kind == ab::L_SRET {
+        if !self.tail_ok || i + 2 != bk.start + bk.len {
             return false;
         }
         let r = b.insts[i as usize + 1];
@@ -5375,12 +5562,15 @@ extend Gen {
         if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || rt != b.pool[b.sig as usize + 2] || (rt & AGG) != 0 {
             return false;
         }
+        self.call_layout(t);
+        if self.lay.ret.kind == ab::L_SRET {
+            return false;
+        }
         for k in 0..b.pool[t.b as usize] {
             if (b.pool[(t.b + 3 + k) as usize] & AGG) != 0 || self.lay.locs[k as usize].kind != ab::L_REG {
                 return false;
             }
         }
-        self.tail_ret = i + 1;
         return true;
     }
 

@@ -23,7 +23,11 @@
 // or take the larger degree; a conversion keeps the bits it keeps (an extension keeps the polynomial when
 // the interval of its integer values fits); an exact right shift divides it; a select whose condition the
 // intervals decide (the counter's run from its start to the bound) takes that side, one on an invariant
-// condition either. A block that replaces the loop computes the values the loop's instructions take on
+// condition either. A header parameter that steps by an `xor` with an invariant alternates between two
+// values, and so does any value of such ones and invariants: it leaves with its value on the iteration
+// the trip count's parity gives. A loop that runs while a value is not 0, the value losing its lowest set
+// bit per iteration (`x &= x - 1`) or shifting right by 1, counts its iterations by `popcnt` or the bit
+// length (`clz`): LLVM's loop idiom recognition of bit counts. A block that replaces the loop computes the values the loop's instructions take on
 // iterations 0 to the degree (copies of them, so any combination of these operations works), takes their
 // differences (the polynomial's coefficients in the binomial basis), and sums each coefficient times the
 // binomial of the trip count, its factorial's twos shifted out (`lshr.exact`) in a type twice as wide and
@@ -238,8 +242,9 @@ pub(package) struct LoopOpt {
     // parameter at hand (`cf_lst`, `cf_lco`, `cf_lre`); the instructions copied in order (`cf_order`, per
     // instruction its place `cf_idx`), the header parameters they read (`cf_need`), and per iteration the
     // copies' values (`cf_val`) and the parameters' (`cf_pv`); per value the loop leaves with, whether its
-    // closed form replaces it (`cf_poly`).
+    // closed form replaces it (`cf_poly`). `cf_bits` is a bit count's exit (CB_*), CB_NONE for a counter.
     cf_h: u32,
+    cf_bits: u8,
     cf_x: Value,
     cf_q: Value,
     cf_bound: Value,
@@ -414,6 +419,7 @@ extend LoopOpt {
             cf_up: false,
             cf_ns: false,
             cf_ne: false,
+            cf_bits: CB_NONE,
             cf_signed: false,
             cf_w: 0,
             cf_guard: false,
@@ -965,6 +971,10 @@ extend LoopOpt {
         } else {
             opposite(pred)
         };
+        self.cf_bits = CB_NONE;
+        if stay == C_NE && is_const(b, bound) && raw_const(b, bound) == 0 && self.bit_count(b, ptr, x) {
+            return true;
+        }
         // The counter: `x` itself or `x` less an invariant.
         let mut q = x;
         if (x & VPARAM) == 0 {
@@ -1065,6 +1075,66 @@ extend LoopOpt {
         return true;
     }
 
+    // Whether the loop runs while `x` is not 0, `x` a header parameter `q` (or its next value) that steps by
+    // `q & (q - 1)` (it runs popcount(x) more times: CB_POP) or `q >> 1` (bit length: CB_LEN), LLVM's loop
+    // idiom recognition of bit counts. Sets the test's `cf_*` fields.
+    fn bit_count(self: &mut Self, b: &Body, ptr: u32, x: Value) bool {
+        let hb = b.blocks[self.cf_h as usize];
+        let mut q = VNONE;
+        for j in 0..hb.param_len as u32 {
+            let pj = VPARAM | hb.param_start + j;
+            if pj == x || self.cf_next[j as usize] == x {
+                q = pj;
+            }
+        }
+        if q == VNONE {
+            return false;
+        }
+        let ty = b.params[(q & ~VPARAM) as usize];
+        let nv = self.cf_next[((q & ~VPARAM) - hb.param_start) as usize];
+        if !is_int(ty) || ty == T_I128 || (nv & (VPARAM | VFLAG)) != 0 || nv == VNONE || !self.defined_in(nv) {
+            return false;
+        }
+        let s = b.insts[nv as usize];
+        let mut kind = CB_NONE;
+        if s.op == O_LSHR && s.a == q && is_const(b, s.b) && raw_const(b, s.b) == 1 {
+            kind = CB_LEN;
+        } else if s.op == O_AND && (s.a == q || s.b == q) {
+            let d = if s.a == q {
+                s.b
+            } else {
+                s.a
+            };
+            if (d & (VPARAM | VFLAG)) == 0 && d != VNONE && self.defined_in(d) {
+                let m = b.insts[d as usize];
+                let one = m.op == O_SUB && m.a == q && is_const(b, m.b) && raw_const(b, m.b) == 1;
+                let all = mask_of(type_bits(ty, ptr));
+                let minus = m.op == O_ADD && (m.a == q && is_const(b, m.b) && (raw_const(b, m.b) & all) == all || m.b == q && is_const(
+                    b,
+                    m.a,
+                ) && (raw_const(b, m.a) & all) == all);
+                if one || minus {
+                    kind = CB_POP;
+                }
+            }
+        }
+        if kind == CB_NONE {
+            return false;
+        }
+        self.cf_bits = kind;
+        self.cf_x = x;
+        self.cf_q = q;
+        self.cf_bound = VNONE;
+        self.cf_c = 1;
+        self.cf_up = false;
+        self.cf_ns = false;
+        self.cf_ne = true;
+        self.cf_signed = false;
+        self.cf_w = type_bits(ty, ptr);
+        self.cf_guard = false;
+        return true;
+    }
+
     // Whether `v` is a parameter of the loop's header.
     fn header_param(self: &Self, v: Value) bool {
         return v != VNONE && (v & VPARAM) != 0 && self.powner[(v & ~VPARAM) as usize] == self.cf_h;
@@ -1097,14 +1167,30 @@ extend LoopOpt {
                 }
                 self.cf_clear(b, true);
                 let q = VPARAM | hs + j as u32;
+                let w = type_bits(b.params[(hs + j as u32) as usize], ptr);
+                // `q ^ k`, `k` the same on every iteration: it alternates.
+                let k = self.toggle_by(b, q, self.cf_next[j]);
+                if k != VNONE {
+                    let fk = self.fact(b, ptr, k);
+                    if fk.st == PS_UNKNOWN {
+                        continue;
+                    }
+                    any = true;
+                    self.cf_hp[j] = if fk.st == PS_YES && fk.deg == 0 {
+                        p_tog(w)
+                    } else {
+                        p_of(PS_NO)
+                    };
+                    self.cf_clear(b, false);
+                    continue;
+                }
                 let l = self.lin(b, ptr, self.cf_next[j], q);
                 if l.rest.st == PS_UNKNOWN {
                     continue;
                 }
                 any = true;
-                let w = type_bits(b.params[(hs + j as u32) as usize], ptr);
                 let mut f = p_of(PS_NO);
-                if l.rest.st == PS_YES && l.coef == 1 {
+                if l.rest.st == PS_YES && l.coef == 1 && !l.rest.tog {
                     let zero = l.rest.rng && l.rest.lo == 0 && l.rest.hi == 0;
                     let deg = if zero {
                         0
@@ -1136,6 +1222,21 @@ extend LoopOpt {
             }
         }
         self.cf_clear(b, false);
+    }
+
+    // The other operand `k` when `v` is `q ^ k` (an instruction of the loop), else VNONE.
+    fn toggle_by(self: &Self, b: &Body, q: Value, v: Value) Value {
+        if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || !self.defined_in(v) || b.insts[v as usize].op != O_XOR {
+            return VNONE;
+        }
+        let t = b.insts[v as usize];
+        return if t.a == q && t.b != q {
+            t.b
+        } else if t.b == q && t.a != q {
+            t.a
+        } else {
+            VNONE
+        };
     }
 
     // Forget the facts of the loop's instructions (`lin`'s too when `lin` holds).
@@ -1242,7 +1343,14 @@ extend LoopOpt {
             p_inv(w)
         };
         let mut r = p_of(PS_NO);
-        if t.op == O_SELECT && (fa.st != PS_YES || fa.deg != 0) {
+        if fa.tog || fb.tog || fc.tog {
+            let st = p_st(p_st(fa.st, fb.st), fc.st);
+            r = if st != PS_YES {
+                p_of(st)
+            } else {
+                tog_of(tog_of(fa, fb, w), fc, w)
+            };
+        } else if t.op == O_SELECT && (fa.st != PS_YES || fa.deg != 0) {
             // A condition the intervals decide picks its side.
             let d = self.decide(b, ptr, t.a);
             r = if d == 1 {
@@ -1372,6 +1480,7 @@ extend LoopOpt {
                         rng: false,
                         lo: 0,
                         hi: 0,
+                        tog: x.rest.tog,
                     },
                 };
             }
@@ -1456,6 +1565,13 @@ extend LoopOpt {
     fn cf_count(self: &Self, b: &mut Body, x0: Value) Value {
         let at = self.cf_at;
         let ty = value_type(b, x0);
+        if self.cf_bits == CB_POP {
+            return cf_put(b, Inst { op: O_POPCNT, ty: ty, aux: 0, a: x0, b: VNONE, c: VNONE }, at);
+        }
+        if self.cf_bits == CB_LEN {
+            let z = cf_put(b, Inst { op: O_CLZ, ty: ty, aux: 0, a: x0, b: VNONE, c: VNONE }, at);
+            return cf_put(b, bin(O_SUB, ty, cf_put(b, iconst_of(ty, self.cf_w), at), z), at);
+        }
         let bound = self.cf_bound;
         if self.cf_ne {
             return if self.cf_up {
@@ -1498,10 +1614,22 @@ extend LoopOpt {
     // differences).
     fn cf_value(self: &mut Self, b: &mut Body, ptr: u32, v: Value, count: Value) Value {
         let at = self.cf_at;
-        let d = self.fact(b, ptr, v).deg as u32;
+        let f = self.fact(b, ptr, v);
+        let d = f.deg as u32;
         let s0 = self.cf_of(b, v, 0);
         if d == 0 {
             return s0;
+        }
+        if f.tog {
+            let s1 = self.cf_of(b, v, 1);
+            let ct = value_type(b, count);
+            let odd = cf_put(b, bin(O_AND, ct, count, cf_put(b, iconst_of(ct, 1), at)), at);
+            let c = cf_put(
+                b,
+                Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: odd, b: cf_put(b, iconst_of(ct, 0), at), c: VNONE },
+                at,
+            );
+            return cf_put(b, Inst { op: O_SELECT, ty: value_type(b, v), aux: 0, a: c, b: s1, c: s0 }, at);
         }
         let vt = value_type(b, v);
         let ty = if vt == T_PTR {
@@ -6254,11 +6382,19 @@ const fn base_op(op: u8) u8 {
     };
 }
 
+// A loop's counted exit (`LoopOpt::cf_bits`): a counter, or a value that loses its lowest set bit
+// (popcount iterations) or shifts right by 1 (bit length) per iteration.
+const CB_NONE: u8 = 0;
+const CB_POP: u8 = 1;
+const CB_LEN: u8 = 2;
+
 // ---- Final values: facts ----
 
 // What a loop value is as a function of the iteration (`LoopOpt::fact`): `st` PS_YES when it equals a
 // polynomial of degree `deg` with integer values modulo 2^`m`; with `rng`, that polynomial's values lie
-// in [`lo`, `hi`] and the value equals it modulo 2^(its bits).
+// in [`lo`, `hi`] and the value equals it modulo 2^(its bits). With `tog` (degree 1, all its bits), it is
+// no polynomial but takes one value on even iterations and another on odd ones: a header parameter that
+// steps by an `xor` with an invariant, and the values of such ones and invariants (`p_tog`).
 struct Poly {
     pub(package) st: u8,
     pub(package) deg: u8,
@@ -6266,6 +6402,7 @@ struct Poly {
     pub(package) rng: bool,
     pub(package) lo: i64,
     pub(package) hi: i64,
+    pub(package) tog: bool,
 }
 
 extend Poly as Copy {}
@@ -6294,16 +6431,31 @@ const fn p_st(a: u8, b: u8) u8 {
 }
 
 const fn p_of(st: u8) Poly {
-    return Poly { st: st, deg: 0, m: 0, rng: false, lo: 0, hi: 0 };
+    return Poly { st: st, deg: 0, m: 0, rng: false, lo: 0, hi: 0, tog: false };
 }
 
 // A value of `w` bits the same on every iteration.
 const fn p_inv(w: u32) Poly {
-    return Poly { st: PS_YES, deg: 0, m: w as u8, rng: false, lo: 0, hi: 0 };
+    return Poly { st: PS_YES, deg: 0, m: w as u8, rng: false, lo: 0, hi: 0, tog: false };
 }
 
 const fn p_const(w: u32, c: i64) Poly {
-    return Poly { st: PS_YES, deg: 0, m: w as u8, rng: true, lo: c, hi: c };
+    return Poly { st: PS_YES, deg: 0, m: w as u8, rng: true, lo: c, hi: c, tog: false };
+}
+
+// A value of `w` bits that alternates between two values (`Poly.tog`).
+const fn p_tog(w: u32) Poly {
+    return Poly { st: PS_YES, deg: 1, m: w as u8, rng: false, lo: 0, hi: 0, tog: true };
+}
+
+// The facts of a value of operands `x` and `y` (`w` bits, each PS_YES), one of them alternating: an
+// alternating value when the other is too or the same on every iteration.
+const fn tog_of(x: Poly, y: Poly, w: u32) Poly {
+    return if (x.tog || x.deg == 0) && (y.tog || y.deg == 0) {
+        p_tog(w)
+    } else {
+        p_of(PS_NO)
+    };
 }
 
 const fn p_zero(w: u32) Poly {
@@ -6325,6 +6477,9 @@ const fn either(x: Poly, y: Poly, w: u32) Poly {
     if st != PS_YES {
         return p_of(st);
     }
+    if x.tog || y.tog {
+        return tog_of(x, y, w);
+    }
     let rng = x.rng && y.rng;
     return Poly {
         st: PS_YES,
@@ -6342,10 +6497,10 @@ const fn either(x: Poly, y: Poly, w: u32) Poly {
 
 // `f` (`w` bits) times a constant: its degree and bits, no interval.
 const fn scaled(f: Poly, w: u32) Poly {
-    return if f.st != PS_YES {
+    return if f.st != PS_YES || f.tog {
         f
     } else {
-        Poly { st: PS_YES, deg: f.deg, m: (f.m as u32).min(w) as u8, rng: false, lo: 0, hi: 0 }
+        Poly { st: PS_YES, deg: f.deg, m: (f.m as u32).min(w) as u8, rng: false, lo: 0, hi: 0, tog: false }
     };
 }
 
@@ -6355,6 +6510,9 @@ fn arith_fact(op: u8, x: Poly, y: Poly, w: u32) Poly {
     if st != PS_YES {
         return p_of(st);
     }
+    if x.tog || y.tog {
+        return tog_of(x, y, w);
+    }
     let deg = if op == O_MUL {
         x.deg as u32 + y.deg as u32
     } else {
@@ -6363,7 +6521,15 @@ fn arith_fact(op: u8, x: Poly, y: Poly, w: u32) Poly {
     if deg > CF_DEG {
         return p_of(PS_NO);
     }
-    let mut r = Poly { st: PS_YES, deg: deg as u8, m: (x.m as u32).min(y.m).min(w) as u8, rng: false, lo: 0, hi: 0 };
+    let mut r = Poly {
+        st: PS_YES,
+        deg: deg as u8,
+        m: (x.m as u32).min(y.m).min(w) as u8,
+        rng: false,
+        lo: 0,
+        hi: 0,
+        tog: false,
+    };
     if deg == 0 {
         r.m = w as u8;
     }
@@ -6428,13 +6594,13 @@ fn op_fact(b: &Body, ptr: u32, t: Inst, fa: Poly, fb: Poly, w: u32) Poly {
     if op == O_LSHR && t.aux == SH_EXACT && amount < w as u64 {
         let s = amount as u32;
         if fa.rng && fa.lo >= 0 && fa.hi <= umax(w) {
-            return Poly { st: PS_YES, deg: fa.deg, m: w as u8, rng: true, lo: fa.lo >> s, hi: fa.hi >> s };
+            return Poly { st: PS_YES, deg: fa.deg, m: w as u8, rng: true, lo: fa.lo >> s, hi: fa.hi >> s, tog: false };
         }
         let m = (fa.m as u32).min(w);
         return if m <= s {
             p_of(PS_NO)
         } else {
-            Poly { st: PS_YES, deg: fa.deg, m: (m - s) as u8, rng: false, lo: 0, hi: 0 }
+            Poly { st: PS_YES, deg: fa.deg, m: (m - s) as u8, rng: false, lo: 0, hi: 0, tog: false }
         };
     }
     let fw = type_bits(value_type(b, t.a), ptr);
@@ -6445,12 +6611,20 @@ fn op_fact(b: &Body, ptr: u32, t: Inst, fa: Poly, fb: Poly, w: u32) Poly {
             fa.rng && fa.lo >= smin(fw) && fa.hi <= smax(fw)
         };
         if exact {
-            return Poly { st: PS_YES, deg: fa.deg, m: w as u8, rng: true, lo: fa.lo, hi: fa.hi };
+            return Poly { st: PS_YES, deg: fa.deg, m: w as u8, rng: true, lo: fa.lo, hi: fa.hi, tog: false };
         }
-        return Poly { st: PS_YES, deg: fa.deg, m: (fa.m as u32).min(fw) as u8, rng: false, lo: 0, hi: 0 };
+        return Poly { st: PS_YES, deg: fa.deg, m: (fa.m as u32).min(fw) as u8, rng: false, lo: 0, hi: 0, tog: false };
     }
     if op == O_TRUNC {
-        return Poly { st: PS_YES, deg: fa.deg, m: (fa.m as u32).min(w) as u8, rng: fa.rng, lo: fa.lo, hi: fa.hi };
+        return Poly {
+            st: PS_YES,
+            deg: fa.deg,
+            m: (fa.m as u32).min(w) as u8,
+            rng: fa.rng,
+            lo: fa.lo,
+            hi: fa.hi,
+            tog: false,
+        };
     }
     if op == O_PTRADD {
         return arith_fact(O_ADD, scaled(fa, w), scaled(fb, w), w);
@@ -6476,7 +6650,7 @@ fn cf_pure(b: &Body, t: Inst) bool {
         let d = raw_const(b, t.b) & mask_of(type_bits(t.ty, 8));
         return d != 0 && (op == O_UDIV || op == O_UREM || d != mask_of(type_bits(t.ty, 8)));
     }
-    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_CLZ || op == O_CTZ || op == O_POPCNT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_SPLAT;
+    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_CLZ || op == O_CTZ || op == O_POPCNT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_SPLAT;
 }
 
 // Whether addresses `x` and `y` are one: the same value, or the same `ptradd` of the same operands.
