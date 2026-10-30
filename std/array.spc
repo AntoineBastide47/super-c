@@ -87,16 +87,6 @@ extend<T, const N: usize> Array<T, N> {
         return &unsafe self.data[0];
     }
 
-    /// A shared view of every element.
-    pub const fn as_slice(self: &Array<T, N>) []T {
-        return unsafe Slice::<T> { ptr: self.as_ptr(), len: N };
-    }
-
-    /// A writable view of every element: the shared slice algorithms run on it.
-    pub const fn as_mut_slice(self: &mut Array<T, N>) []mut T {
-        return unsafe SliceMut::<T> { ptr: &mut self.data[0], len: N };
-    }
-
     /// Raw byte copy into the array's storage: `memcpy(&data[0], src, n)`. Unsafe: the caller
     /// promises `n` readable bytes at `src`, `n <= N * sizeof(T)`, and that the bytes form valid `T`s;
     /// overwritten elements are NOT freed (raw overwrite, unlike `set`).
@@ -366,5 +356,19 @@ extend<T: Format, const N: usize> Array<T, N> as Format {
         }
         s.push_str("]");
         return s;
+    }
+}
+
+extend<T, const N: usize> Array<T, N> as AsSlice<T> {
+    /// A shared view of every element.
+    pub const fn as_slice(self: &Array<T, N>) []T {
+        return unsafe Slice::<T> { ptr: self.as_ptr(), len: N };
+    }
+}
+
+extend<T, const N: usize> Array<T, N> as AsSliceMut<T> {
+    /// A writable view of every element: the shared slice algorithms run on it.
+    pub const fn as_mut_slice(self: &mut Array<T, N>) []mut T {
+        return unsafe SliceMut::<T> { ptr: &mut self.data[0], len: N };
     }
 }

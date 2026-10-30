@@ -939,7 +939,7 @@ fn header_type_formats_canonically() {
     let pa = h::parse_ast_for_fmt(src);
     assert(pa.errors == 0, "the input parses");
     let mut out = String::new();
-    fbld::format_program(&pa.ast, src, 120, &mut out);
+    fbld::format_program(&pa.ast, src, 120, false, &mut out);
     if out.as_str() != want {
         eprintln("{}", out.as_str());
     }
@@ -947,7 +947,7 @@ fn header_type_formats_canonically() {
     let pb = h::parse_ast_for_fmt(want);
     assert(pb.errors == 0, "the canonical form parses");
     let mut again = String::new();
-    fbld::format_program(&pb.ast, want, 120, &mut again);
+    fbld::format_program(&pb.ast, want, 120, false, &mut again);
     assert(again.as_str() == want, "the canonical form is a fixed point");
 }
 

@@ -80,8 +80,9 @@ Ranked from best to worst for candidate comparison:
 3. Built-in widening between scalars (the `bt_widens` lattice: smaller to larger
    same-signedness integers, unsigned to a wider signed integer, `f32` to `f64`; no integer
    converts to a float implicitly).
-4. Unsized coercions: array to slice, `&T` to `*const T`, pointer to `*void`,
-   concrete to `dyn` erasure, `Box<T>` to `Box<dyn I>`.
+4. Unsized coercions: array to slice, a call argument `&x` (`&mut x`) to the view of `x`'s
+   `AsStr`, `AsSlice<T>` or `AsSliceMut<T>` conformance (`str`, `[]T`, `[]mut T`), `&T` to
+   `*const T`, pointer to `*void`, concrete to `dyn` erasure, `Box<T>` to `Box<dyn I>`.
 5. Literal adaptation (an unsuffixed literal re-typed by context).
 6. User conversions through `From`/`widen` (explicit conformances only).
 
@@ -258,9 +259,25 @@ itself; a type built over it (`Vector<error>`, `&error`) is the error type. Noth
 it reports another diagnostic: a mismatch, an unresolved generic argument, an operator, a
 condition, a pattern, a loop, a format argument, or a constant evaluation that needs it.
 
+## Deferred inference of locals
+
+A `let` without an annotation whose initializer leaves generic arguments open (`Vector::new()`,
+`None`, `Ok(1)`, a closure with an unannotated parameter) binds a type with holes. The body's later
+uses bind each hole: an expected type that meets the local's type (an argument, an assignment, a
+`let` annotation, a `return`) unifies with it. An unsuffixed literal use gives no evidence and the
+hole takes the first typed use's type, else the literal's default; a typed use that differs from the
+first is "conflicting types for 'T' of 'v'" there, with a note at the first. A member of a value
+whose whole type is a hole no use has bound yet is "the type of 'x' must be known here". The checker
+then checks the body again with each solved type as the let's annotation (each closure parameter's
+as its type) and drops the first check's other diagnostics; a hole no use binds leaves the original
+"cannot infer" error. `_` makes a hole in a `let` annotation, and in a call's type arguments leaves
+that argument to the call's inference; anywhere else it is an error. The scope is one function body:
+parameters, results, fields, constants and declarations are never inferred.
+
 ## Limits
 
-- A generic item declares at most 8 type parameters (a declaration error beyond).
+- A generic item declares at most 8 type parameters (a declaration error beyond), and a tuple has
+  at most 8 elements ("a tuple has at most 8 elements: use a struct").
 - Candidate search (32 candidates, `TC_MAX_CANDIDATES`) and constraint counts have fixed
   compiler limits; exceeding one reports the limit and the source expression. The solver worklist needs no
   budget: every round binds a new slot, so it ends after at most one round per slot.

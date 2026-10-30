@@ -102,7 +102,7 @@ C layout rules (not auto-rounded to power-of-2), with the fields in layout order
 largest first, stable (equal alignments keep their declared order). Every size is a multiple of its
 alignment, so no padding falls between fields: the size is the field sizes' sum rounded up to the
 largest alignment. The order is computed per generic instance, after substitution. Tuples (prelude
-`Tuple2`..`Tuple4`) and the payload fields of each enum variant follow the same rule. Zero-sized
+`Tuple2`..`Tuple8`) and the payload fields of each enum variant follow the same rule. Zero-sized
 fields take no storage. The emitted C struct lists its members in layout order.
 
 These keep the declared order (C layout):
@@ -544,19 +544,18 @@ cast no coercion allows is "invalid cast from '&T' to '&dyn N'".
 Dyn-compatibility: every method takes `Self` by reference, no generics on methods, and `Self`
 appears only as the receiver; each interface of the hierarchy is reached with one argument list
 ("a superinterface is reached with two different argument lists") that names no `Self` ("a
-superinterface argument names 'Self'"), and no two methods of the hierarchy share a name. A method may return several results or a
+superinterface argument names 'Self'"), and no two methods of the hierarchy share a name. A method may return a tuple or a
 fixed array (`fn dims(self: &Self) (i32, String)`, `fn corners(self: &Self) [i32; 2]`): its vtable
-slot returns the shared result carrier, and a call through `&dyn`, `&mut dyn` or `Box<dyn>`
-destructures it as a direct call does, for an inherited default as for an override.
+slot returns it, for an inherited default as for an override.
 
 A `dyn fn(..)` erasure and a `fn(..)` value compare the whole signature: every parameter and
-every result, so a function with several results never matches other results or none.
+the result, so a function returning a tuple never matches another result or none.
 
-A function pointer or `dyn fn` may have several results (`fn(i32) (i32, String)`) or a fixed-array
-result (`fn(i32) [i32; 2]`): a function, a closure (capturing ones through `dyn fn` or a `F: fn(..)`
-bound) or a turbofished generic function converts to it, fields and containers hold it, and a call
-through it destructures as a direct call does. In C every function and function value with one
-result list returns one carrier struct (`__sc_ret<n>__<types>`, `__sc_reta__<array>`).
+A function pointer or `dyn fn` may return a tuple (`fn(i32) (i32, String)`) or a fixed array
+(`fn(i32) [i32; 2]`): a function, a closure (capturing ones through `dyn fn` or a `F: fn(..)`
+bound) or a turbofished generic function converts to it, and fields and containers hold it. In C a
+tuple result is its `TupleN` struct, and a fixed-array result returns in a carrier struct
+(`__sc_reta__<array>`).
 
 ## Enums
 
@@ -584,9 +583,11 @@ enum Result<T, E> {
 
 ## Tuples
 
-First-class values, 2–4 elements. Lower to prelude `Tuple2`..`Tuple4`, which conform to `Eq`, `Ord`
-(lexicographic), `Hash`, `Clone`, `Default` and `Format` when every element does, so a tuple is a map key
-and sorts.
+First-class values, 2 to 8 elements ("a tuple has at most 8 elements: use a struct"). Lower to the
+prelude `Tuple2`..`Tuple8`, which the compiler builds (the module `__std::tuple`; `std/tuple.spc`
+serves only releases that predate it), and which conform to `Eq`, `Ord` (lexicographic), `Hash`,
+`Clone`, `Default` and `Format` when every element does, field by field, so a tuple is a map key and
+sorts. Diagnostics write a tuple type as `(A, B)`.
 
 ```superc
 let t = ((1, true), 2);
@@ -602,8 +603,7 @@ A tuple pattern `(p0, p1, ..)` also works in `if let` and `while let`; the eleme
 match the tuple's arity.
 
 `t.0.1` lexes `0.1` as a float ("nested tuple access needs parentheses: write '(t.0).1'"). This
-is deliberate: do not add dot-number lexing. A return list `(A, B)` is several results, not a
-tuple; return a tuple through an alias (`type P = (A, B);`).
+is deliberate: do not add dot-number lexing. A return list `(A, B)` returns the tuple `(A, B)`.
 
 ## Unions
 

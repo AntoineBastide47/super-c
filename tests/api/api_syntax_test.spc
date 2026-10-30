@@ -155,7 +155,7 @@ fn formats_as_super_c_fmt() {
     let out = format_file("m.spc", messy, 120).unwrap();
     let mut want = String::new();
     let src = String::from_str(messy);
-    assert(dutil::format_source(&src, "m.spc", 120, &mut want), "the CLI formatter formats it");
+    assert(dutil::format_source(&src, "m.spc", 120, false, &mut want), "the CLI formatter formats it");
     assert_eq(out.as_str(), want.as_str());
     let e = format_file("m.spc", "fn main( {", 120).unwrap_err();
     assert(e.code == Code::ParseFailed, "unparsable text does not format");

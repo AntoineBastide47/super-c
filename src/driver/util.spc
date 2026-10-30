@@ -198,9 +198,9 @@ pub(package) type Buf64 = Array<char, 64>;
 
 /// Format `src` into `out` at `width` columns. Returns false on lex/parse errors or a
 /// comment-count mismatch; callers must not use `out` after failure.
-pub(package) fn format_source(src: &String, path: str, width: i32, out: &mut String) bool {
+pub(package) fn format_source(src: &String, path: str, width: i32, migrate: bool, out: &mut String) bool {
     let mut errs = diag::Errors::new();
-    if format_quiet(src, path, width, out, &mut errs) {
+    if format_quiet(src, path, width, migrate, out, &mut errs) {
         return true;
     }
     errs.finalize(src.as_str(), path);
@@ -210,7 +210,14 @@ pub(package) fn format_source(src: &String, path: str, width: i32, out: &mut Str
 
 /// `format_source` with the lexer and parser errors, and the formatter's own refusal, recorded in `errs`
 /// against `src` instead of printed.
-pub(package) fn format_quiet(src: &String, path: str, width: i32, out: &mut String, errs: &mut diag::Errors) bool {
+pub(package) fn format_quiet(
+    src: &String,
+    path: str,
+    width: i32,
+    migrate: bool,
+    out: &mut String,
+    errs: &mut diag::Errors,
+) bool {
     let mut vsrc = src.clone();
     let mut lx = lex::Lexer::new(&mut vsrc, path);
     lx.keep_trivia = true;
@@ -241,7 +248,7 @@ pub(package) fn format_quiet(src: &String, path: str, width: i32, out: &mut Stri
         return false;
     }
     let ast = ps.take_ast();
-    let emitted = fbld::format_program(&ast, src.as_str(), width, out);
+    let emitted = fbld::format_program(&ast, src.as_str(), width, migrate, out);
     if emitted != ncomments {
         // Either direction is a formatter defect: a dropped comment or a comment printed twice.
         errs.emit(

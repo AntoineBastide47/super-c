@@ -2282,7 +2282,7 @@ extend Server {
         }
         let doc = self.docs.at(di as usize);
         let mut formatted = String::new();
-        if !dutil::format_source(&doc.txt, doc.path.as_str(), 120, &mut formatted) {
+        if !dutil::format_source(&doc.txt, doc.path.as_str(), 120, false, &mut formatted) {
             // Unparseable or comment-check tripped: never destructive.
             respond_null(f, req);
             return;

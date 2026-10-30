@@ -114,6 +114,8 @@ pub(package) struct InferenceContext {
     /// The one call whose several results its context takes (`let (a, b) = f()`, `return f();`, a
     /// statement, a member's object); any other call with several results is no value.
     pub(package) mret_ok: NodeId,
+    /// The `switch` (or `if let`) a statement holds: its arms are statements and join no type.
+    pub(package) stmt_match: NodeId,
     pub(package) mret_types: [TypeId; 8],
     pub(package) mret_n: u8,
     pub(package) mret_total: u32,
@@ -153,6 +155,7 @@ extend InferenceContext {
             unsafe_used: 0,
             mret_call: NODE_NONE,
             mret_ok: NODE_NONE,
+            stmt_match: NODE_NONE,
             mret_n: 0,
             mret_total: 0,
             call_args: NodeList { start: 0, len: 0 },

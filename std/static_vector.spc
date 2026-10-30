@@ -135,16 +135,6 @@ extend<T, const N: usize> StaticVector<T, N> {
         return &unsafe self.data[0];
     }
 
-    /// A view of the live elements; invalidated when the StaticVector is moved.
-    pub const fn as_slice(self: &StaticVector<T, N>) []T {
-        return unsafe Slice::<T> { ptr: &self.data[0], len: self.len };
-    }
-
-    /// A writable view of the live elements: the shared slice algorithms run on it.
-    pub const fn as_mut_slice(self: &mut StaticVector<T, N>) []mut T {
-        return unsafe SliceMut::<T> { ptr: &mut self.data[0], len: self.len };
-    }
-
     /// Insert `value` at `index`, shifting later elements right. `index` must be <= len; panics when full.
     pub const fn insert(self: &mut StaticVector<T, N>, index: usize, value: T) {
         if self.len == N {
@@ -454,5 +444,19 @@ extend<T: Format, const N: usize> StaticVector<T, N> as Format {
         }
         s.push_str("]");
         return s;
+    }
+}
+
+extend<T, const N: usize> StaticVector<T, N> as AsSlice<T> {
+    /// A view of the live elements; invalidated when the StaticVector is moved.
+    pub const fn as_slice(self: &StaticVector<T, N>) []T {
+        return unsafe Slice::<T> { ptr: &self.data[0], len: self.len };
+    }
+}
+
+extend<T, const N: usize> StaticVector<T, N> as AsSliceMut<T> {
+    /// A writable view of the live elements: the shared slice algorithms run on it.
+    pub const fn as_mut_slice(self: &mut StaticVector<T, N>) []mut T {
+        return unsafe SliceMut::<T> { ptr: &mut self.data[0], len: self.len };
     }
 }

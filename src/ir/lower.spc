@@ -1473,7 +1473,13 @@ extend Lowerer {
             let v = self.f.node(id).as_data.single.value;
             self.tp(ir::TP_MARK_PUSH, 0, id);
             let cb = self.chk_open(v, true);
-            let op = self.lower_expr(v);
+            // A statement `switch` is a statement: its arms write no value.
+            let mut op = ir::IR_NONE;
+            if self.f.node(v).kind == NodeKind::NODE_MATCH {
+                let _ = self.lower_match(v, ir::IR_NONE);
+            } else {
+                op = self.lower_expr(v);
+            }
             self.chk_close(cb);
             self.tp(ir::TP_MARK_POP, 0, id);
             // A fully discarded result still OWNS its value (`foo();`).
@@ -4551,9 +4557,9 @@ extend Lowerer {
             return self.out_op(dest, pl);
         }
         if k == NodeKind::NODE_BLOCK {
-            // A block in value position is a build-constant `if` or `switch` the early prune
-            // replaced by its taken arm: the temporaries its value borrows live as long as that
-            // arm's would (`ExtCx`).
+            // A block in value position (`{ .. }`, or a build-constant `if` or `switch` the early
+            // prune replaced by its taken arm): the temporaries its value borrows live as long as
+            // an arm's would (`ExtCx`).
             let pl = self.out_place(dest, ty, sp);
             let outer = self.ext;
             self.ext = ExtCx { arm: id, val: self.value_tail(id), rf: NODE_NONE, depth: self.ext_depth_for(id) };
@@ -4726,8 +4732,13 @@ extend Lowerer {
             // the target from it. Typing the temp from the node would hand the hop's `deref` call a
             // receiver labeled with the wrong C type.
             let mut bty = ty;
-            if ty != TYPE_NONE && self.f.derefs(id) != null && self.f.ty(ty).kind == TypeKind::TYPE_REFERENCE {
-                let q = self.f.ty(ty).qualifier;
+            if ty != TYPE_NONE && self.f.derefs(id) != null {
+                // A view coercion (`&s` as `str`, `tc_view_arg`) targets a view, not a reference.
+                let q = if self.f.ty(ty).kind == TypeKind::TYPE_REFERENCE {
+                    self.f.ty(ty).qualifier;
+                } else {
+                    pick(mutable == 1, TypeQualifier::TYPE_QUAL_MUT as u8, TypeQualifier::TYPE_QUAL_NONE as u8);
+                };
                 let pty = self.body.places.at(pl as usize).ty;
                 let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
                 bty = sa.intern_type(Ty { kind: TypeKind::TYPE_REFERENCE, qualifier: q, as_data: TyAs { elem: pty } });
@@ -6958,10 +6969,7 @@ extend Lowerer {
             return NODE_NONE;
         }
         let s = unsafe self.f.list(stmts)[(stmts.len - 1) as usize];
-        if self.f.node(s).kind != NodeKind::NODE_EXPRESSION_STATEMENT {
-            return NODE_NONE;
-        }
-        return self.f.node(s).as_data.single.value;
+        return tail_value(self.f.node(s), s);
     }
 
     // A value block: statements run, and the LAST expression statement's value lands in `dest`.
@@ -6988,8 +6996,8 @@ extend Lowerer {
         let mut wrote = false;
         for i in 0..stmts.len {
             let s = unsafe self.f.list(stmts)[i as usize];
-            if i == stmts.len - 1 && self.f.node(s).kind == NodeKind::NODE_EXPRESSION_STATEMENT {
-                let v = self.f.node(s).as_data.single.value;
+            let v = tail_value(self.f.node(s), s);
+            if i == stmts.len - 1 && v != NODE_NONE {
                 self.tp(ir::TP_MARK_PUSH, 0, s);
                 let cb = self.chk_open(v, false);
                 // The tail writes `dest` unless the arm's conversions follow it.
@@ -8559,7 +8567,7 @@ extend Lowerer {
             }
         }
         let mut iop_use = iop;
-        if self.checked_view(self.peeled_view_ty(base)) {
+        if self.checked_view(self.peeled_view_ty(base)) || self.f.index_checked(id) {
             let ck1 = self.bounds_check(base, iop, sp);
             iop_use = self.copy_op(ck1);
         }

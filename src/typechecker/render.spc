@@ -3,6 +3,11 @@ import lexer::token as tok;
 import ast::ast as *;
 import module::loader as loader;
 
+// Whether module `m` is the prelude tuple module: its instances are tuples.
+fn rt_tuple(pkg: *const loader::Package, m: ModuleId) bool {
+    return pkg != null && unsafe (*pkg).modules[m as usize].path.as_str() == "__std::tuple";
+}
+
 // The Ast to read for module `m`'s decls when rendering against the current ast `a` (mirrors
 // TypeChecker::mod_ast): foreign modules come from the package, the current one from `a` itself.
 const fn rt_ast(pkg: *const loader::Package, a: *const Ast, m: ModuleId) *const Ast {
@@ -269,6 +274,17 @@ fn render_lt_type(
         let mut it = *unsafe (*a).instance(y.as_data.inst);
         if k == TypeKind::TYPE_INSTANCE {
             let _ = unsafe (*a).targs_of(t, &mut it);
+        }
+        if k == TypeKind::TYPE_INSTANCE && rt_tuple(pkg, it.module) {
+            out.push_str("(");
+            for i in 0..it.n {
+                if i != 0 {
+                    out.push_str(", ");
+                }
+                render_lt_type(pkg, a, cur_src, unsafe it.args[i as usize], names, pos, out, depth + 1, next);
+            }
+            out.push_str(")");
+            return;
         }
         let ma = rt_ast(pkg, a, it.module);
         if k == TypeKind::TYPE_DYN {
@@ -555,6 +571,18 @@ fn render_ty(pkg: *const loader::Package, a: *const Ast, cur_src: str, elide: bo
     } else if ty.kind == TypeKind::TYPE_INSTANCE || ty.is_vec() {
         let mut it = TyInstance {};
         let _ = unsafe (*a).targs_of(tid, &mut it);
+        if rt_tuple(pkg, it.module) {
+            // A tuple shows as it is written: `(A, B)`.
+            out.push_str("(");
+            for i in 0..it.n {
+                if i != 0 {
+                    out.push_str(", ");
+                }
+                render_ty(pkg, a, cur_src, elide, unsafe it.args[i as usize], out);
+            }
+            out.push_str(")");
+            return;
+        }
         let ma = rt_ast(pkg, a, it.module);
         let s = unsafe (*ma).at_const(unsafe (*ma).ext_name(it.decl)).as_data.name.text;
         rt_put_name(pkg, a, cur_src, it.module, s, out);

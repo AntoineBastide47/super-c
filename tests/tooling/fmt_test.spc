@@ -8,10 +8,15 @@ import string as cstring;
 
 // Parse + format at `width`. Asserts the source parses (goldens are full programs).
 fn fmt_of(src: str, width: i32) String {
+    return fmt_mode(src, width, false);
+}
+
+// `fmt_of`, with the `--migrate` rewrites when `migrate`.
+fn fmt_mode(src: str, width: i32, migrate: bool) String {
     let pa = h::parse_ast_for_fmt(src);
     assert(pa.errors == 0, "golden source does not parse");
     let mut out = String::new();
-    fbld::format_program(&pa.ast, src, width, &mut out);
+    fbld::format_program(&pa.ast, src, width, migrate, &mut out);
     return out;
 }
 
@@ -322,7 +327,7 @@ fn golden_fmt_skip() {
     expect_fmt(src, src);
     let pa = h::parse_ast_for_fmt(src);
     let mut out = String::new();
-    assert_eq(fbld::format_program(&pa.ast, src, 120, &mut out), 3);
+    assert_eq(fbld::format_program(&pa.ast, src, 120, false, &mut out), 3);
 }
 
 @test
@@ -455,4 +460,22 @@ fn golden_range_bound_starting_with_an_if() {
         "fn f(a:usize,b:usize){let r=a..(if b>2{b;}else{2;}).len();let s=a..(if b>2{b;}else{2;})+1;}",
         "fn f(a: usize, b: usize) {\n    let r = a..(if b > 2 {\n        b;\n    } else {\n        2;\n    }.len());\n    let s = a..(if b > 2 {\n        b;\n    } else {\n        2;\n    } + 1);\n}\n",
     );
+}
+
+// The newer forms: fmt keeps the `;` of a statement `switch`, of a value block's last expression and
+// the list of `return a, b;` as written; `--migrate` writes them without `;` and as `return (a, b);`.
+// A statement arm block keeps its `;`. Both outputs are idempotent under their mode.
+@test
+fn golden_newer_forms_and_migrate() {
+    let src = "enum E { A, B }\nfn f(e: E) (i32, i32) {\n    let v = if true { 1; } else { 2; };\n    switch e { A => { v; }, B => {}, };\n    let k = { let q = 3; q; };\n    return v, k;\n}\n";
+    expect_fmt(
+        src,
+        "enum E {\n    A,\n    B,\n}\nfn f(e: E) (i32, i32) {\n    let v = if true {\n        1;\n    } else {\n        2;\n    };\n    switch e {\n        A => {\n            v;\n        },\n        B => {},\n    };\n    let k = {\n        let q = 3;\n        q;\n    };\n    return v, k;\n}\n",
+    );
+    let want = "enum E {\n    A,\n    B,\n}\nfn f(e: E) (i32, i32) {\n    let v = if true {\n        1\n    } else {\n        2\n    };\n    switch e {\n        A => {\n            v;\n        },\n        B => {},\n    }\n    let k = {\n        let q = 3;\n        q\n    };\n    return (v, k);\n}\n";
+    let out = fmt_mode(src, 120, true);
+    assert(out.as_str() == want, "migrated output mismatch");
+    let again = fmt_mode(want, 120, true);
+    assert(again.as_str() == want, "migration is not idempotent");
+    expect_fmt(want, want);
 }

@@ -235,16 +235,24 @@ fn errors() {
         "private field in a struct pattern inside the type's extend",
         "struct S { v: i32, }\nextend S { fn get(self: S) i32 { return switch self { S { v } => v, }; } }\n",
     );
-    // Patterns name a variant bare; a qualified path gets a direct diagnostic at the qualifier.
-    h::expect_err_msg(
+    // A pattern names a variant bare or qualified; a qualified one must name the matched type's.
+    h::expect_ok(
         "qualified variant in a switch pattern",
-        "enum E { A(i32, i32), B, }\nfn f(e: E) i32 { return switch e { E::A(x, _) => x, _ => 0, }; }\n",
-        "a pattern names a variant without its enum: write 'A', not 'E::A'",
+        "enum E { A(i32, i32), B, }\nfn f(e: E) i32 { return switch e { E::A(x, _) => x, E::B => 0, }; }\n",
     );
-    h::expect_err_msg(
+    h::expect_ok(
         "qualified variant in an if-let pattern",
         "enum E { A(i32, i32), B, }\nfn f(e: E) bool { if let E::A(..) = e { return true; } return false; }\n",
-        "a pattern names a variant without its enum: write 'A', not 'E::A'",
+    );
+    h::expect_err_msg(
+        "qualified variant of another enum",
+        "enum E { A(i32), B, }\nenum F { A(i32), B, }\nfn f(e: E) i32 { return switch e { F::A(x) => x, _ => 0, }; }\n",
+        "pattern 'F::A' does not name a variant of the matched type 'E'",
+    );
+    h::expect_err_msg(
+        "qualified unit variant of another enum",
+        "enum E { A(i32), B, }\nenum F { A(i32), B, }\nfn f(e: E) i32 { return switch e { F::B => 1, _ => 0, }; }\n",
+        "pattern 'F::B' does not name a variant of the matched type 'E'",
     );
     h::expect_err_msg("non-bool condition", "fn main() i32 { if (1) { } }\n", "must be 'bool'");
     h::expect_err_msg("assign immutable", "fn main() i32 { let x: i32 = 1; x = 2; }\n", "cannot assign");
@@ -1328,10 +1336,11 @@ fn tuples() {
         "tuple param and generic arg",
         "fn g(p: (i32, bool)) i32 { return p.0; }\nfn f() i32 { let mut v = Vector::<(i32, bool)>::new(); v.free(); return g((5, false)); }\n",
     );
+    h::expect_ok("an 8-tuple", "fn f() i32 { let t = (1, 2, 3, 4, 5, 6, 7, 8u8); return t.4 + t.7 as i32; }\n");
     h::expect_err_msg(
-        "tuple arity capped at 4",
-        "fn f() i32 { let t = (1, 2, 3, 4, 5); return 0; }\n",
-        "tuple arity is limited to 4",
+        "tuple arity capped at 8",
+        "fn f() i32 { let t = (1, 2, 3, 4, 5, 6, 7, 8, 9); return 0; }\n",
+        "a tuple has at most 8 elements: use a struct",
     );
     h::expect_err_msg(
         "tuple index out of range",
@@ -1358,9 +1367,9 @@ fn tuples() {
         "mismatched types: expected",
     );
     h::expect_err_msg(
-        "annotated multi-value binding",
+        "an annotation does not widen a call's tuple",
         "fn two() (i16, i16) { return 1, 2; }\nfn f() i32 { let (c, d): (i32, i16) = two(); return c; }\n",
-        "the annotation of a multi-value call's bindings must name its result types",
+        "mismatched types: expected '(i32, i16)', found '(i16, i16)'",
     );
     h::expect_ok(
         "annotated multi-value binding with its types",
@@ -1371,15 +1380,13 @@ fn tuples() {
         "several results bind, forward and drop",
         "fn two() (i16, i16) { return 1, 2; }\nfn fwd() (i16, i16) { return two(); }\nfn f() i16 { two(); defer two(); let (c, d) = unsafe two(); return c + d; }\n",
     );
-    h::expect_err_msg(
-        "several results bound to one name",
+    h::expect_ok(
+        "a tuple result bound to one name",
         "fn two() (i16, i16) { return 1, 2; }\nfn f() i16 { let x = two(); return x.0; }\n",
-        "a call with several results is not a value",
     );
-    h::expect_err_msg(
-        "several results as a branch value",
+    h::expect_ok(
+        "a tuple result as a branch value",
         "fn two() (i16, i16) { return 1, 2; }\nfn f(c: bool) i16 { let (a, b) = if c { two(); } else { (1i16, 2i16); }; return a + b; }\n",
-        "a call with several results is not a value",
     );
 }
 
@@ -1458,17 +1465,20 @@ fn unsafe_enforcement() {
     h::expect_ok("pointer comparison stays safe", "fn f(a: *i32, b: *i32) bool { return a == b; }\n");
 }
 
-// Raw `[T; N]` indexing follows the raw-pointer rule: a runtime index is unsafe-gated, a
-// const-provable in-bounds index is safe, and a const-provable OOB index is a hard error.
+// `[T; N]` indexing: a run-time index is checked at run time (unchecked under `unsafe`, as a raw
+// pointer's), a const-provable in-bounds index is safe, and a const-provable OOB index is a hard error.
 @test
 fn raw_array_index_gate() {
     let mut b = h::ExitBatch::new();
-    h::expect_err_msg(
-        "runtime index needs unsafe",
-        "fn f(i: usize) i32 { let a = [1, 2, 3]; return a[i]; }\n",
-        "indexing an array with a non-constant index requires an 'unsafe' block",
+    b.add(
+        "a run-time index is checked and safe",
+        "fn f(i: usize) i32 { let a = [1, 2, 3]; return a[i]; }\nfn main() i32 { return f(2); }\n",
+        3,
     );
-    h::expect_ok("unsafe covers a runtime index", "fn f(i: usize) i32 { let a = [1, 2, 3]; return unsafe a[i]; }\n");
+    h::expect_ok(
+        "unsafe keeps a runtime index unchecked",
+        "fn f(i: usize) i32 { let a = [1, 2, 3]; return unsafe a[i]; }\n",
+    );
     h::expect_ok(
         "constant index in bounds stays safe (inferred literal binding keeps its extent)",
         "fn f() i32 { let mut a = [1, 2, 3]; let x = &mut a[0]; *x = 4; return a[2]; }\n",
@@ -1488,10 +1498,10 @@ fn raw_array_index_gate() {
         "fn f() i32 { let a: [i32; 2] = [1, 2]; return a[2]; }\n",
         "index 2 is out of bounds for an array of length 2",
     );
-    h::expect_err_msg(
-        "runtime range slice needs unsafe",
-        "fn f(n: usize) i32 { let a = [1, 2, 3]; let s: []i32 = a[0..n]; return *s.get(0); }\n",
-        "slicing an array with a non-constant range requires an 'unsafe' block",
+    b.add(
+        "a run-time range slice is checked and safe",
+        "fn f(n: usize) usize { let a = [1, 2, 3]; let s: []i32 = a[0..n]; return s.len(); }\nfn main() i32 { return f(2) as i32; }\n",
+        2,
     );
     h::expect_ok(
         "constant range slice in bounds stays safe",
@@ -1522,8 +1532,8 @@ fn raw_array_index_gate() {
         "array literal has 3 elements but the expected type has length 4",
     );
     // A constant index into a symbolic length is safe: every instance checks it (the instance
-    // graph reports the one that is past the end). A non-constant index needs `unsafe`, as for any
-    // array.
+    // graph reports the one that is past the end). A non-constant index is checked at run time, as
+    // for any array.
     b.add(
         "a constant index into a symbolic-length array",
         "fn f<const N: usize>(a: [i32; N]) i32 { return a[2]; }\nfn main() i32 { return f([1, 2, 3]); }\n",
@@ -1539,15 +1549,15 @@ fn raw_array_index_gate() {
         "fn f<const N: usize>(a: [i32; N]) i32 { return a[-1]; }\n",
         "index -1 is out of bounds for an array",
     );
-    h::expect_err_msg(
+    b.add(
         "a non-constant index into a symbolic-length field",
-        "struct S<const N: usize> { pub a: [u8; N] }\nextend<const N: usize> S<N> { fn at(self: &Self, i: usize) u8 { return self.a[i]; } }\n",
-        "indexing an array with a non-constant index requires an 'unsafe' block",
+        "struct S<const N: usize> { pub a: [u8; N] }\nextend<const N: usize> S<N> { fn at(self: &Self, i: usize) u8 { return self.a[i]; } }\nfn main() i32 { let s = S::<3> { a: [4, 5, 6] }; return s.at(1) as i32; }\n",
+        5,
     );
-    h::expect_err_msg(
+    b.add(
         "a constant range over a symbolic-length array",
-        "fn f<const N: usize>(a: [i32; N]) i32 { let s: []i32 = a[0..1]; return *s.get(0); }\n",
-        "slicing an array of unknown length requires an 'unsafe' block",
+        "fn f<const N: usize>(a: [i32; N]) i32 { let s: []i32 = a[0..1]; return *s.get(0); }\nfn main() i32 { return f([8, 9]); }\n",
+        8,
     );
     b.add(
         "unsafe covers a constant index into a symbolic-length array",
@@ -1555,6 +1565,18 @@ fn raw_array_index_gate() {
         3,
     );
     b.run();
+    h::expect_runs(
+        "an index or a range past the end panics",
+        "fn main(args: Vector<str>) i32 { let a = [1, 2, 3]; let i = args.len() + 1; if i == 4 { let s = a[1..i]; return s.len() as i32; } return a[i] - 3; }\n",
+        ["", "x y"],
+        ["", "range out of bounds"],
+    );
+    h::expect_run(
+        "an index past the end panics",
+        "fn main(args: Vector<str>) i32 { let a = [1, 2, 3]; return a[args.len() + 2]; }\n",
+        "",
+        "index out of bounds",
+    );
 }
 
 // A repeat literal takes the element type its context expects, as a list literal does: a struct
@@ -3834,16 +3856,12 @@ fn dyn_conformance_needs_the_dyn_arguments() {
 
 // Several results are not a tuple: a member of the call is an error where it is written.
 @test
-fn several_results_have_no_members() {
-    h::expect_err_msg(
-        "a field of several results",
-        "fn two() (i32, i32) { return 1, 2; }\nfn main() i32 { let x = two().1; return x; }\n",
-        "a call with several results has no members: bind them with `let (a, b) = ..`",
-    );
-    h::expect_err_msg(
-        "a generic call's several results",
-        "fn dup<T: Copy>(a: T) (T, T) { return a, a; }\nfn main() i32 { return dup(3).0; }\n",
-        "a call with several results has no members",
+fn results_are_tuples() {
+    // A parenthesized result list is one result, a tuple: a call is a value with members.
+    h::expect_exit(
+        "members of a call's tuple",
+        "fn two() (i32, i32) { return 1, 2; }\nfn dup<T: Copy>(a: T) (T, T) { return (a, a); }\nfn main() i32 { return two().1 + dup(3).0 - 5; }\n",
+        0,
     );
 }
 
@@ -3860,28 +3878,13 @@ fn unsupported_const_fn_operation_is_named() {
 // Several results are no value: a call with them is an error in an argument, an operand, a
 // single binding and an `assert_eq`, and binds, forwards and stands as a statement.
 @test
-fn several_results_are_no_value() {
+fn results_are_values() {
     const PRE: str = "fn two() (usize, usize) { return 1, 2; }\nfn one(t: (usize, usize)) usize { return t.0; }\n";
-    const MSG: str = "a call with several results is not a value: bind them with `let (a, b) = ..`";
-    let bodies = [
-        "fn main() i32 { assert_eq(two(), (1usize, 2usize)); return 0; }\n",
-        "fn main() i32 { let x = two(); return 0; }\n",
-        "fn main() i32 { return one(two()) as i32; }\n",
-        "fn main() i32 { return (two() == (1usize, 2usize)) as i32; }\n",
-        // The tail of a value block is its value, not a statement.
-        "fn main() i32 { let x = if true { two(); } else { two(); }; return 0; }\n",
-        "fn main() i32 { let x = unsafe { two(); }; return 0; }\n",
-    ];
-    for body in bodies {
-        let mut src = String::from_str(PRE);
-        src.push_str(body);
-        h::expect_err_msg(body, src.as_str(), MSG);
-    }
-    let mut ok = String::from_str(PRE);
-    ok.push_str(
-        "fn fwd() (usize, usize) { return two(); }\nfn main() i32 { two(); unsafe two(); let (a, b) = fwd(); return (a + b + one((a, b))) as i32 - 4; }\n",
+    let mut src = String::from_str(PRE);
+    src.push_str(
+        "fn fwd() (usize, usize) { return two(); }\nfn main() i32 {\n    assert_eq(two(), (1usize, 2usize));\n    let x = two();\n    let y: (usize, usize) = if true { two(); } else { (0, 0); };\n    two();\n    unsafe two();\n    let (a, b) = fwd();\n    return (a + b + one(two()) + x.1 + y.0 + (two() == (1usize, 2usize)) as usize) as i32 - 8;\n}\n",
     );
-    h::expect_exit("several results bound, forwarded and discarded", ok.as_str(), 0);
+    h::expect_exit("results bound, passed, compared, forwarded and discarded", src.as_str(), 0);
 }
 
 // Every method of a conformance block is a member of its interface (a superinterface's methods are its
@@ -6369,9 +6372,9 @@ fn more_rejection_messages() {
         "error: constant 'A' cannot be evaluated at compile time: cyclic constant dependency",
     );
     h::expect_err_msg(
-        "non-constant array range needs unsafe",
+        "a bool literal is no range bound",
         "fn main() i32 { let a: [i32; 3] = [1, 2, 3]; let s: []i32 = a[true..2]; return 0; }\n",
-        "slicing an array with a non-constant range requires an 'unsafe' block",
+        "range bound must be an integer",
     );
     h::expect_err_msg(
         "slicing a raw pointer needs unsafe",

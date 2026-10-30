@@ -356,9 +356,13 @@ fn closure_inference() {
         "closure parameters from an expected fn type",
         "fn main() i32 { let f: fn(i32) i32 = |x| x + 1; return f(1) - 2; }\n",
     );
-    h::expect_err_msg(
-        "standalone closure needs annotations",
+    h::expect_ok(
+        "a bound closure's parameter takes its type from the first call",
         "fn main() i32 { let f = |x| x + 1; return f(1) - 2; }\n",
+    );
+    h::expect_err_msg(
+        "a closure no call fixes needs annotations",
+        "fn main() i32 { let f = |x| x + 1; return 0; }\n",
         "closure parameter needs a type annotation",
     );
     h::expect_ok(
@@ -554,10 +558,11 @@ fn generic_variant_constructors() {
         "fn main() i32 { let o = Option::None; return 0; }\n",
         "cannot infer the generic argument 'T' of this variant",
     );
-    h::expect_resolve_err_msg(
-        "a bare variant is not a value",
-        "fn main() i32 { let o = Some(3); return 0; }\n",
-        "cannot find value 'Some'",
+    h::expect_ok("a bare prelude variant needs no expected type", "fn main() i32 { let o = Some(3); return 0; }\n");
+    h::expect_err_msg(
+        "a bare variant of another enum needs an expected type",
+        "enum Shape { Circle(i32), Unit }\nfn main() i32 { let s = Circle(3); return 0; }\n",
+        "cannot find value 'Circle'",
     );
     b.run();
 }

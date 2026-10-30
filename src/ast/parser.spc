@@ -715,7 +715,9 @@ extend Parser {
             self.expect(TokenType::LeftParen, "'('");
             let params = self.parse_comma_types(TokenType::RightParen);
             self.expect(TokenType::RightParen, "')'");
-            let returns = self.parse_function_returns();
+            // The result names of a function type or a closure bind nothing.
+            let mut _names = NodeList { start: 0, len: 0 };
+            let returns = self.parse_function_returns(&mut _names);
             let fnty = self.fin(
                 NodeKind::NODE_FUNCTION_TYPE,
                 start,
@@ -807,7 +809,9 @@ extend Parser {
         self.expect(TokenType::LeftParen, "'('");
         let params = self.parse_comma_types(TokenType::RightParen);
         self.expect(TokenType::RightParen, "')'");
-        let returns = self.parse_function_returns();
+        // The result names of a function type or a closure bind nothing.
+        let mut _names = NodeList { start: 0, len: 0 };
+        let returns = self.parse_function_returns(&mut _names);
         let fnty = self.fin(
             NodeKind::NODE_FUNCTION_TYPE,
             start,
@@ -999,11 +1003,15 @@ extend Parser {
         return self.ast.commit(params_mark);
     }
 
-    pub(package) fn parse_function_returns(self: &mut Self) NodeList {
+    // The result of a function or a function type: none, one type, or a parenthesized list. A list of
+    // two or more is one result, their tuple (`(A, B)` is the tuple type `(A, B)`). Named results
+    // (`(a: A, b: B)`, all or none) also go to `named`, and the result is their types' (tuple) type.
+    pub(package) fn parse_function_returns(self: &mut Self, named: &mut NodeList) NodeList {
         if !self.check(TokenType::LeftParen) && !Parser::is_type_start(self.peek_type()) {
             return NodeList { start: 0, len: 0 };
         }
         let mark = self.ast.mark();
+        let open = self.raw_peek().start();
         if !self.match(TokenType::LeftParen) {
             self.ast.push(self.parse_type());
             return self.ast.commit(mark);
@@ -1034,10 +1042,35 @@ extend Parser {
         }
         let returns = self.ast.commit(mark);
         self.expect(TokenType::RightParen, "')'");
-        if returns.len == 1 && self.ast.at_const(unsafe self.ast.list(returns)[0]).kind != NodeKind::NODE_PARAMETER {
+        let mut nnamed: u32 = 0;
+        for i in 0..returns.len {
+            nnamed += (self.ast.at_const(unsafe self.ast.list(returns)[i as usize]).kind == NodeKind::NODE_PARAMETER) as u32;
+        }
+        if returns.len == 1 && nnamed == 0 {
             self.error_here("a single unnamed return type must not be parenthesized");
         }
-        return returns;
+        if nnamed != 0 && nnamed != returns.len {
+            self.error_here("either all return values are named or none");
+        }
+        if nnamed == returns.len {
+            *named = returns;
+        }
+        let tm = self.ast.mark();
+        for i in 0..returns.len {
+            self.ast.push(self.ast.slot_type_node(unsafe self.ast.list(returns)[i as usize]));
+        }
+        let types = self.ast.commit(tm);
+        if types.len < 2 {
+            return types;
+        }
+        let tuple = self.fin(
+            NodeKind::NODE_TUPLE_TYPE,
+            open,
+            NodeAs { array_literal: ArrayLiteralData { elements: types } },
+        );
+        let om = self.ast.mark();
+        self.ast.push(tuple);
+        return self.ast.commit(om);
     }
 
     /// `pinned`: the body must stay in the module arena (`const fn`); a generic function, an
@@ -1050,15 +1083,15 @@ extend Parser {
         let generics = self.parse_generics_split(&mut lifetimes);
         let mut is_variadic = false;
         let params = self.parse_parameters(&mut is_variadic);
-        let returns = self.parse_function_returns();
+        let mut named = NodeList { start: 0, len: 0 };
+        let returns = self.parse_function_returns(&mut named);
         let where_clause = self.parse_where_clause();
         // Go-style named returns: `(ret: bool)` binds `ret` in the body as an implicitly declared
         // `let mut ret: bool;` (definite assignment enforced by the usual uninitialized tracking),
-        // and a bare `return;` returns the named bindings. All-or-none named.
+        // and a bare `return;` returns the named bindings.
         let outer_nrets = replace(&mut self.nrets, Vector::<NodeId>::new());
-        let nnamed = self.install_named_returns(returns);
-        if nnamed != 0 && nnamed != returns.len {
-            self.error_here("either all return values are named or none");
+        for i in 0..named.len {
+            self.nrets.push(unsafe self.ast.list(named)[i as usize]);
         }
         let mut body = NODE_NONE;
         let outer_sink = self.ast.sink_body;
@@ -1100,6 +1133,7 @@ extend Parser {
                     generics: generics,
                     params: params,
                     returns: returns,
+                    named_returns: named,
                     where_clause: where_clause,
                     body: body,
                     flags: pick(is_variadic, FN_VARIADIC, 0) | pick(intrinsic, FN_INTRINSIC, 0),
@@ -1113,23 +1147,6 @@ extend Parser {
             );
         }
         return __decl;
-    }
-
-    // Count the named entries of `returns`; when all are named, make them the named-return context
-    // (`nrets`) of the body about to be parsed.
-    fn install_named_returns(self: &mut Self, returns: NodeList) u32 {
-        let mut nnamed: u32 = 0;
-        for i in 0..returns.len {
-            if self.ast.at_const(unsafe self.ast.list(returns)[i as usize]).kind == NodeKind::NODE_PARAMETER {
-                nnamed += 1;
-            }
-        }
-        if nnamed != 0 && nnamed == returns.len {
-            for i in 0..returns.len {
-                self.nrets.push(unsafe self.ast.list(returns)[i as usize]);
-            }
-        }
-        return nnamed;
     }
 
     // A fresh identifier with the name and span of the named return `r`.
@@ -2319,9 +2336,10 @@ extend Parser {
     // The rest of a pattern that starts with name `name` at `start`: a tuple-variant or struct
     // pattern, an `@` binding, or the plain binding.
     fn pattern_after_name(self: &mut Self, start: u32, mut name: NodeId) NodeId {
+        let mut qual = NODE_NONE;
         if self.check(TokenType::PathSeparator) {
-            // A qualified path is a constant (`i64::MAX`, `Foo::K`), the member path an expression
-            // spells; only a variant takes a payload, and a pattern names a variant without its enum.
+            // A qualified path without a payload is a constant (`i64::MAX`, `Foo::K`) or a variant
+            // (`Shape::Unit`), the member path an expression spells; with one it names a variant.
             let path = self.pattern_path(name);
             if path == NODE_NONE {
                 return NODE_NONE;
@@ -2341,7 +2359,12 @@ extend Parser {
                     NodeAs { single: SingleData { value: path } },
                 );
             }
-            name = self.pattern_path_tail(path);
+            if self.check(TokenType::At) {
+                name = self.pattern_path_tail(path);
+            } else {
+                qual = path;
+                name = self.ast.at_const(path).as_data.member.member;
+            }
         }
         if self.match(TokenType::LeftParen) {
             let mark = self.ast.mark();
@@ -2361,7 +2384,7 @@ extend Parser {
             return self.fin(
                 NodeKind::NODE_PATTERN_TUPLE,
                 start,
-                NodeAs { pattern: PatternData { name: name, children: children } },
+                NodeAs { pattern: PatternData { name: name, children: children, qual: qual } },
             );
         }
         if self.match(TokenType::LeftBrace) {
@@ -2394,7 +2417,7 @@ extend Parser {
             return self.fin(
                 NodeKind::NODE_PATTERN_STRUCT,
                 start,
-                NodeAs { pattern: PatternData { name: name, children: children } },
+                NodeAs { pattern: PatternData { name: name, children: children, qual: qual } },
             );
         }
         if self.match(TokenType::At) {
@@ -2430,8 +2453,8 @@ extend Parser {
         return path;
     }
 
-    // Qualified path `path` before a variant payload (`E::A(..)`). Patterns name a variant without its
-    // enum, so this reports the qualifier and returns the last segment, which the pattern continues with.
+    // Qualified path `path` before `@` (`E::A @ p`): a binding takes a bare name, so this reports the
+    // qualifier and returns the last segment, which the pattern continues with.
     @cold
     fn pattern_path_tail(self: &mut Self, path: NodeId) NodeId {
         let start = self.node_span(path).start;
@@ -2646,7 +2669,9 @@ extend Parser {
             if variadic {
                 self.error_here("anonymous functions cannot be variadic");
             }
-            let returns = self.parse_function_returns();
+            // The result names of a function type or a closure bind nothing.
+            let mut _names = NodeList { start: 0, len: 0 };
+            let returns = self.parse_function_returns(&mut _names);
             let body = self.parse_closure_block();
             return self.fin_ext(
                 NodeKind::NODE_CLOSURE,
@@ -2693,6 +2718,10 @@ extend Parser {
                 start,
                 NodeExt { closure: ClosureData { params: params, body: body, expr_body: !is_block } },
             );
+        }
+        if grammar == ExpressionGrammar::EXPR_FULL && self.check(TokenType::LeftBrace) {
+            // A value block: its last expression is its value.
+            return self.parse_block();
         }
         return self.error_skip("expected expression");
     }
@@ -3440,7 +3469,21 @@ extend Parser {
                         self.ast.push(self.nret_name(*self.nrets.at(i)));
                     }
                 }
-                let values = self.ast.commit(mark);
+                let mut values = self.ast.commit(mark);
+                if values.len > 1 {
+                    // `return a, b;` returns the tuple `(a, b)`.
+                    let tuple = self.mk(
+                        NodeKind::NODE_TUPLE,
+                        Span::new(
+                            self.node_span(unsafe self.ast.list(values)[0]).start,
+                            self.node_span(unsafe self.ast.list(values)[(values.len - 1) as usize]).end,
+                        ),
+                        NodeAs { array_literal: ArrayLiteralData { elements: values } },
+                    );
+                    let tm = self.ast.mark();
+                    self.ast.push(tuple);
+                    values = self.ast.commit(tm);
+                }
                 self.expect(TokenType::Semicolon, "';'");
                 result = self.fin(NodeKind::NODE_RETURN, start, NodeAs { return_stmt: ReturnData { values: values } });
             },
@@ -3504,6 +3547,17 @@ extend Parser {
             Select => {
                 result = self.parse_select();
             },
+            Switch => {
+                // A statement `switch` ends at its `}`, as `if` and `loop` do. The `;` the earlier rule
+                // required after it is still accepted.
+                let s = self.parse_switch();
+                let _ = self.match(TokenType::Semicolon);
+                result = self.fin(
+                    NodeKind::NODE_EXPRESSION_STATEMENT,
+                    start,
+                    NodeAs { single: SingleData { value: s } },
+                );
+            },
             If => {
                 let f = self.parse_if();
                 // if-let desugars to a match EXPRESSION; wrap it so it statement-positions
@@ -3551,8 +3605,8 @@ extend Parser {
                 let cast = self.parse_cast_after(unary);
                 let expression = self.parse_expression_from_mode(cast, ExpressionGrammar::EXPR_FULL);
                 // a bare 'unsafe { ... }' statement needs no ';'; if the block turned out to be only
-                // the prefix of a larger expression, the statement does
-                if !is_block || expression != unary {
+                // the prefix of a larger expression, the statement does, unless it ends its block
+                if (!is_block || expression != unary) && !self.check(TokenType::RightBrace) {
                     self.expect(TokenType::Semicolon, "';'");
                 }
                 result = self.fin(
@@ -3563,7 +3617,10 @@ extend Parser {
             },
             _ => {
                 let expression = self.parse_expression();
-                self.expect(TokenType::Semicolon, "';'");
+                // The last expression of a block may omit its `;`.
+                if !self.check(TokenType::RightBrace) {
+                    self.expect(TokenType::Semicolon, "';'");
+                }
                 result = self.fin(
                     NodeKind::NODE_EXPRESSION_STATEMENT,
                     start,

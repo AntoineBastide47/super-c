@@ -251,8 +251,9 @@ default). A `TM_CALL` of the body's own owner converts when all of these hold, e
 `TailMiss` with its `TR_*` reason:
 
 - The path from the call to `TM_RETURN` holds only whole-local moves of the result into the
-  return slot (with several results, whole copies of the destination temporary and member reads
-  that move member `k` into slot `k`), storage markers and constant stores into frame locals (drop flags): no
+  return slot (for a tuple result also the tuple rebuilt from the result's members in order,
+  `tailcall::rebuilds`; with several slots, whole copies of the destination temporary and member
+  reads that move member `k` into slot `k`), storage markers and constant stores into frame locals (drop flags): no
   `TM_DROP` (`TR_DROP`), no other statement or call (`TR_AFTER`, `TR_CANCEL` for the
   cancellation probe), no other use of the result (`TR_NOT_TAIL`).
 - No interface dispatch, no named receiver type, and every generic argument is the function's

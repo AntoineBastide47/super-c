@@ -526,9 +526,17 @@ pub(package) const REACHES_C_UNTYPED_POINTER_TAG_ORDERED: u16 = 519;
 pub(package) const CANNOT_FREE_BOX_THROUGH_REFERENCE: u16 = 520;
 pub(package) const ZEROED_BOX_HAS_NO_ZERO_VALUE: u16 = 521;
 pub(package) const OWNED_APPLIES_RAW_POINTER_FIELD: u16 = 522;
+pub(package) const BODY_VALUE_NEEDS_RETURN: u16 = 523;
+pub(package) const NAME_IS_ALSO_A_VARIANT: u16 = 524;
+pub(package) const QUALIFIED_PATTERN_OTHER_ENUM: u16 = 525;
+pub(package) const DEFERRED_INFERENCE_CONFLICT: u16 = 526;
+pub(package) const TYPE_MUST_BE_KNOWN_HERE: u16 = 527;
+pub(package) const WILDCARD_TYPE_NOT_ALLOWED: u16 = 528;
+pub(package) const MIGRATE_BARE_VARIANT: u16 = 529;
+pub(package) const MIGRATE_VIEW_ARGUMENT: u16 = 530;
 
 /// The number of codes, `NONE` included.
-pub(package) const COUNT: u16 = 523;
+pub(package) const COUNT: u16 = 531;
 
 /// The stable name of `code` (`mismatched_types_expected_found`), empty for `NONE` or an unknown code.
 pub(package) const fn name(code: u16) str<'static> {
@@ -1054,6 +1062,14 @@ pub(package) const fn name(code: u16) str<'static> {
         520 => "cannot_free_box_through_reference",
         521 => "zeroed_box_has_no_zero_value",
         522 => "owned_applies_raw_pointer_field",
+        523 => "body_value_needs_return",
+        524 => "name_is_also_a_variant",
+        525 => "qualified_pattern_other_enum",
+        526 => "deferred_inference_conflict",
+        527 => "type_must_be_known_here",
+        528 => "wildcard_type_not_allowed",
+        529 => "migrate_bare_variant",
+        530 => "migrate_view_argument",
         _ => "",
     };
 }

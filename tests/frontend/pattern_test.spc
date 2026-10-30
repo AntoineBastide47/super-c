@@ -280,10 +280,14 @@ fn main() i32 {
 // constant pattern and a range bound that is no value.
 @test
 fn constant_pattern_errors() {
-    h::expect_err_msg(
+    h::expect_ok(
         "a qualified unit variant",
         "enum E { A, B }\nfn f(e: E) i32 { return switch e { E::A => 1, _ => 2 }; }\n",
-        "error: a pattern names a variant without its enum: write 'A', not 'E::A'\n--> <harness>:2:36",
+    );
+    h::expect_err_msg(
+        "a qualified binding",
+        "enum E { A(i32), B }\nfn f(e: E) i32 { return switch e { E::A @ x => 1, _ => 2 }; }\n",
+        "error: a pattern names a variant without its enum: write 'A', not 'E::A'",
     );
     h::expect_err_msg(
         "a local as a range bound",

@@ -401,11 +401,11 @@ fn lint_project(
 
 // Format every .spc under `dir` (spc_collect order). Returns 1 if a directory could not be read, a
 // file failed, or (--check) a file needs formatting, else 0.
-fn fmt_dir(dir: str, write: bool, check: bool) i32 {
+fn fmt_dir(dir: str, write: bool, check: bool, migrate: bool) i32 {
     let mut files = Vector::<String>::new();
     let mut rc = spc_collect(dir, "fmt", &mut files);
     for i in 0..files.len() {
-        if fmt_one(files.at(i).as_str(), false, write, check) != 0 {
+        if fmt_one(files.at(i).as_str(), false, write, check, migrate) != 0 {
             rc = 1;
         }
     }
@@ -551,7 +551,7 @@ fn lint_pass(
         }
         let out = apply_lint_fixes(p.modules[m].source.as_str(), &mut mf, &ftexts);
         if write_source(p.modules[m].file.as_str(), out.as_str()) {
-            fmt_one(p.modules[m].file.as_str(), false, true, false);
+            fmt_one(p.modules[m].file.as_str(), false, true, false, false);
             written = true;
         } else {
             eprintln("lint: cannot write '{}'", p.modules[m].file.as_str());
@@ -768,15 +768,15 @@ fn lint_batch(
 // changed); --check writes nothing, prints the path, and exits 1 when a file is not already formatted.
 // `-` reads stdin and formats to stdout. A directory recurses over its .spc files. A file the compiler
 // cannot lex or parse is never rewritten: diagnostics are printed and the exit code is 1.
-fn run_fmt(path: str, check: bool) i32 {
+fn run_fmt(path: str, check: bool, migrate: bool) i32 {
     let is_stdin = path == "-";
     if is_stdin {
-        return fmt_one(path, true, false, check);
+        return fmt_one(path, true, false, check, migrate);
     }
     if is_dir(path) {
-        return fmt_dir(path, !check, check);
+        return fmt_dir(path, !check, check, migrate);
     }
-    return fmt_one(path, false, !check, check);
+    return fmt_one(path, false, !check, check, migrate);
 }
 
 // Replace a source file through a temp file and a rename, so a failed write leaves it intact. The link
@@ -788,7 +788,7 @@ fn write_source(path: str, body: str) bool {
     return write_file_atomic(path, body);
 }
 
-fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
+fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool, migrate: bool) i32 {
     let mut src = String::new();
     if is_stdin {
         src = read_stdin();
@@ -802,7 +802,7 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
     }
 
     let mut out = String::new();
-    if !format_source(&src, path, 120, &mut out) {
+    if !format_source(&src, path, 120, migrate, &mut out) {
         return 1;
     }
     let src_view = src.as_str();
@@ -1089,6 +1089,8 @@ OPTIONS:
     --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
     --no-lint              disable the on-by-default lints during a build
     --check                fmt: report unformatted files, write nothing
+    --migrate              fmt: write the newer syntax (`switch` and value blocks without `;`,
+                           `return (a, b);`); lint: report and fix the uses that now read shorter
     --fix                  lint: apply machine-applicable fixes and re-lint
     --const                lint: also flag functions that could be 'const fn'
     --no-run               bench: build the bench binary but do not run it
@@ -1157,6 +1159,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
         Mode::MODE_DEFAULT;
     };
     let mut fmt_check = false; // fmt --check: report unformatted files, write nothing
+    let mut migrate = false; // fmt --migrate, lint --migrate: the rewrites to the forms the language now reads
     let mut lint_fix = false; // lint --fix: apply machine fixes, re-lint to fixpoint
     let mut lint_sc = false; // lint --const: warn on functions the deep CTFE scan proves always evaluable
     let mut bench_norun = false; // bench --no-run: build the bench binary only
@@ -1264,6 +1267,8 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
                 let arg = argv[i];
                 if arg == "--check" {
                     fmt_check = true;
+                } else if arg == "--migrate" {
+                    migrate = true;
                 } else if arg.starts_with("--") {
                     co.reject(arg);
                 } else if file.len() == 0 {
@@ -1278,7 +1283,9 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
         MODE_LINT => {
             while i < argc {
                 let arg = argv[i];
-                if co.common_flag(arg) {} else if arg == "--fix" {
+                if co.common_flag(arg) {} else if arg == "--migrate" {
+                    unsafe tc::LINT_MIGRATE = true;
+                } else if arg == "--fix" {
                     lint_fix = true;
                 } else if arg == "--const" {
                     lint_sc = true;
@@ -1626,7 +1633,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
     if mode == Mode::MODE_FMT {
         let mut rc = 0;
         for k in 0..paths.len() {
-            if run_fmt(paths.at(k).as_str(), fmt_check) != 0 {
+            if run_fmt(paths.at(k).as_str(), fmt_check, migrate) != 0 {
                 rc = 1;
             }
         }

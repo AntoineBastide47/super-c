@@ -706,6 +706,9 @@ pub(package) struct PkgIndex {
     pub(package) pl_map: Map<u64, u64>, // sym*2 + want_type -> node << 32 | module: every exported top-level prelude name, the first prelude module wins (prelude_lookup)
     /// Every top-level prelude declaration's name, public or not: the prelude's bare C symbols.
     pub(package) pl_names: Set<SymbolId>,
+    /// The name of every variant of a top-level enum: the resolver leaves a bare value name it does not
+    /// find to the type checker only when it is one (a variant the expected type names, `Circle(r)`).
+    pub(package) variant_names: Set<SymbolId>,
     /// The `pl_names` that begin longer prelude C symbols: a type's, an interface's or a generic
     /// function's (`String__new`, `Vector__i32`, `replace__u64`). `Mangler::prelude_stem` reads them.
     pub(package) pl_stems: Set<SymbolId>,
@@ -1415,6 +1418,16 @@ pub(package) fn read_file_mt(path: str, mt: &mut i64) Option<String> {
 /// directly in the directory whose stem is an identifier, in name order. Subdirectories stay modules of
 /// their own. `id` takes the identity (`str_id`) of the text read from `file`.
 pub(package) fn read_module(path: str, file: str, mt: &mut i64, id: &mut u64) Option<String> {
+    if path == "__std::tuple" {
+        // The tuple structs and their conformances, built by the compiler for every arity: the file
+        // serves only releases that predate the module.
+        let disk = read_file_mt(file, mt);
+        if disk.is_none() {
+            return disk;
+        }
+        *id = dutil::str_id(disk.unwrap().as_str());
+        return Option::<String>::Some(tuple_module_source());
+    }
     if path == "__std::target" {
         // The target table is the source of the build-setting enums: the file serves only releases that
         // predate the table, and its text is what a cache records.
@@ -1471,6 +1484,88 @@ fn target_module_source() String {
         }
     }
     out.push_str("}\n\n/// The byte order of the target.\npub enum Endian {\n    Little,\n    Big,\n}\n");
+    out.pad_nul(lexer::SOURCE_PAD);
+    return out;
+}
+
+// `TupleN<T0, .., T{n-1}>` for arity `n`, appended to `out`.
+fn tuple_name(out: &mut String, n: u32) {
+    out.format_into("Tuple{}<", n);
+    for i in 0..n {
+        out.format_into("{}T{}", pick(i == 0, "", ", "), i);
+    }
+    out.push_str(">");
+}
+
+// `extend<T0: I, ..> TupleN<..> as I {` for interface `iface`, appended to `out`.
+fn tuple_extend(out: &mut String, n: u32, iface: str) {
+    out.push_str("\nextend<");
+    for i in 0..n {
+        out.format_into("{}T{}: {}", pick(i == 0, "", ", "), i, iface);
+    }
+    out.push_str("> ");
+    tuple_name(out, n);
+    out.format_into(" as {} {{\n", iface);
+}
+
+// The tuple module: `TupleN` for every arity from 2 to `TUPLE_MAX`, and its `Eq`, `Ord`
+// (lexicographic), `Hash`, `Clone`, `Default` and `Format` when every element has them, field by
+// field as `@derive` writes them.
+fn tuple_module_source() String {
+    let mut out = String::from_str(
+        "// First-class tuples, built by the compiler. `(A, B)` is `Tuple2<A, B>`, `t.0` reads field `_0`, and\n// `let (a, b) = t;` destructures by field.\n\n// `sep`, then `v` rendered through its own `fmt`.\nfn push_element<T: Format>(s: &mut String, sep: str, v: &T) {\n    s.push_str(sep);\n    let f = v.fmt();\n    s.push_string(&f);\n}\n",
+    );
+    for n in 2..TUPLE_MAX + 1 {
+        out.format_into("\n/// The struct behind a tuple of {} elements; `.N` is `_N`.\npub struct ", n);
+        tuple_name(&mut out, n);
+        out.push_str(" {\n");
+        for i in 0..n {
+            out.format_into("    pub _{}: T{},\n", i, i);
+        }
+        out.push_str("}\n");
+        tuple_extend(&mut out, n, "Eq");
+        out.push_str("    pub fn eq(self: &Self, other: &Self) bool {\n        return ");
+        for i in 0..n {
+            out.format_into("{}self._{} == other._{}", pick(i == 0, "", " && "), i, i);
+        }
+        out.push_str(";\n    }\n}\n");
+        tuple_extend(&mut out, n, "Ord");
+        out.format_into(
+            "    pub fn cmp(self: &Self, other: &Self) i32 {{\n        let {}c = self._0.cmp(&other._0);\n",
+            pick(n > 2, "mut ", ""),
+        );
+        for i in 0..n - 1 {
+            if i != 0 {
+                out.format_into("        c = self._{}.cmp(&other._{});\n", i, i);
+            }
+            out.push_str("        if c != 0 {\n            return c;\n        }\n");
+        }
+        out.format_into("        return self._{}.cmp(&other._{});\n    }}\n}}\n", n - 1, n - 1);
+        tuple_extend(&mut out, n, "Hash");
+        out.push_str("    pub fn hash_into<H: Hasher>(self: &Self, h: &mut H) {\n");
+        for i in 0..n {
+            out.format_into("        self._{}.hash_into(h);\n", i);
+        }
+        out.push_str("    }\n}\n");
+        tuple_extend(&mut out, n, "Clone");
+        out.push_str("    pub fn clone(self: &Self) Self {\n        return (");
+        for i in 0..n {
+            out.format_into("{}self._{}.clone()", pick(i == 0, "", ", "), i);
+        }
+        out.push_str(");\n    }\n}\n");
+        tuple_extend(&mut out, n, "Default");
+        out.push_str("    pub fn default() Self {\n        return (");
+        for i in 0..n {
+            out.format_into("{}T{}::default()", pick(i == 0, "", ", "), i);
+        }
+        out.push_str(");\n    }\n}\n");
+        tuple_extend(&mut out, n, "Format");
+        out.push_str("    pub fn fmt(self: &Self) String {\n        let mut s = String::from_str(\"(\");\n");
+        for i in 0..n {
+            out.format_into("        push_element(&mut s, \"{}\", &self._{});\n", pick(i == 0, "", ", "), i);
+        }
+        out.push_str("        s.push_str(\")\");\n        return s;\n    }\n}\n");
+    }
     out.pad_nul(lexer::SOURCE_PAD);
     return out;
 }
@@ -7148,6 +7243,14 @@ extend Package {
                 vis = ast.ext(node).aggregate.vis;
                 if n.kind == NodeKind::NODE_ENUM {
                     kind = ItemKind::IK_ENUM;
+                    let ms = ast.ext(node).aggregate.members;
+                    for i in 0..ms.len {
+                        let vsp = ast.at_const(ast.at_const(unsafe ast.list(ms)[i as usize]).as_data.variant.name).as_data.name.text;
+                        let vp = (unsafe (srcp + vsp.start as usize)) as *const u8;
+                        idx.variant_names.insert(
+                            idx.syms.intern(unsafe str::from_raw(vp, (vsp.end - vsp.start) as usize)),
+                        );
+                    }
                 }
             },
             NODE_TYPE_ALIAS => {

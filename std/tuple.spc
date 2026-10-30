@@ -1,7 +1,9 @@
 // First-class tuples. `(A, B)` is sugar for `Tuple2<A, B>`, an ordinary prelude struct, exactly
 // like `[]T` lowering to `Slice<T>`. A tuple literal `(a, b)` builds one, `t.0` reads field `_0`,
-// and `let (a, b) = t;` destructures by field. Arity is 2-4; tuples are plain value types (no
-// `Free` conformance: elements are moved in on construction and moved out on destructuring).
+// and `let (a, b) = t;` destructures by field. Tuples are plain value types (no `Free`
+// conformance: elements are moved in on construction and moved out on destructuring). A compiler
+// that builds the tuple module itself (`tuple_module_source` in `src/module/loader.spc`, arity 2 to
+// 8) does not read this file, which serves the releases before it (arity 2 to 4).
 //
 // A tuple is `Eq`, `Ord`, `Hash`, `Clone`, `Default` and `Format` when every element is: `cmp` is
 // lexicographic in element order, `hash` is FNV-1a over the elements' own hashes and `hash_into` feeds

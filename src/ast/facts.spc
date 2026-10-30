@@ -101,6 +101,11 @@ extend TypedFacts {
     }
 
     /// The operator method selected at operator node `n` ((module << 32 | node)), or None.
+    /// Whether array index node `n` checks its index at run time (`Ast::checked_index`).
+    pub(package) const fn index_checked(self: &Self, n: NodeId) bool {
+        return self.a().checked_index.contains(&n);
+    }
+
     pub(package) const fn op_method(self: &Self, n: NodeId) Option<u64> {
         if self.unchecked_view {
             return Option::<u64>::None;

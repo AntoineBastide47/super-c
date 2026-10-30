@@ -11575,9 +11575,12 @@ extend Interp {
                 if dm == slm && self.span_is(dm, tnm, "SliceMut") {
                     return 10;
                 }
-                // `(A, B)` lowered to the prelude Tuple2..4 before this ever ran: report it as the
+                // `(A, B)` lowered to the prelude `TupleN` before this ever ran: report it as the
                 // tuple it was written as, not as the struct it lowered to.
-                if self.span_is(dm, tnm, "Tuple2") || self.span_is(dm, tnm, "Tuple3") || self.span_is(dm, tnm, "Tuple4") {
+                let tname = self.src_of(dm).slice(tnm.start as usize, tnm.end as usize);
+                if self.p().modules[dm as usize].prelude && tname.starts_with("Tuple") && tname.len() > 5 && tname.byte_at(
+                    5,
+                ) >= b'1' && tname.byte_at(5) <= b'9' {
                     return 12;
                 }
             }

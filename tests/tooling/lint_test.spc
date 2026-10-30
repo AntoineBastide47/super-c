@@ -1165,3 +1165,37 @@ fn lint_sets_test_for_the_test_suite() {
     assert(!r.out_shows("no visible item 'probe'"), "the test file sees the TEST item");
     assert_eq(r.exit, 0);
 }
+
+// `lint --migrate`: a qualified variant the bare name resolves and a view method call a `&` argument
+// replaces are warnings whose fixes write the shorter forms; the fixed program means the same.
+@test
+fn migrate_lints_and_fixes() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "enum Shape {\n    Circle(i32),\n    Unit,\n}\nfn count(s: str) usize {\n    return s.len();\n}\nfn sh() Shape {\n    return Shape::Circle(2);\n}\nfn main() i32 {\n    let s = String::from_str(\"ab\");\n    let o: Option<i32> = Option::Some(3);\n    return count(s.as_str()) as i32 + o.unwrap() + switch sh() {\n        Circle(c) => c,\n        Unit => 0,\n    } - 7;\n}\n",
+    );
+    let mut mp = String::from_str(p.dir());
+    mp.push_str("/main.spc");
+    let mut args = String::from_str("lint --migrate \"");
+    args.push_str(mp.as_str());
+    args.push_str("\"");
+    let r = p.run_raw(args.as_str());
+    assert(r.out_has("write 'Circle': the variant resolves without its enum here"));
+    assert(r.out_has("write 'Some': the variant resolves without its enum here"));
+    assert(r.out_has("write '&s': the argument converts to the view it needs"));
+    // Without `--migrate` the forms stay as written.
+    let mut pargs = String::from_str("lint \"");
+    pargs.push_str(mp.as_str());
+    pargs.push_str("\"");
+    assert(!p.run_raw(pargs.as_str()).out_has("resolves without its enum"));
+    let mut fargs = String::from_str("lint --migrate --fix \"");
+    fargs.push_str(mp.as_str());
+    fargs.push_str("\"");
+    assert(p.run_raw(fargs.as_str()).ok());
+    let fixed = loader::read_file(mp.as_str()).unwrap();
+    assert(fixed.as_str().contains("return Circle(2);"));
+    assert(fixed.as_str().contains("let o: Option<i32> = Some(3);"));
+    assert(fixed.as_str().contains("count(&s)"));
+    assert(p.compile("main.spc").ok());
+}

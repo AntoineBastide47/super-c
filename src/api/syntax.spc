@@ -883,7 +883,7 @@ pub fn format_file(path: str, text: str, width: u32) Result<String, ApiError> {
     let src = String::from_str(text);
     let mut out = String::new();
     let mut errs = diag::Errors::new();
-    if !dutil::format_quiet(&src, path, width as i32, &mut out, &mut errs) {
+    if !dutil::format_quiet(&src, path, width as i32, false, &mut out, &mut errs) {
         let mut e = ApiError::at(Code::ParseFailed, "the text does not format", path, 0, 0);
         if errs.errors.len() != 0 {
             let d = errs.errors.at(0);

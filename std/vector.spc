@@ -222,17 +222,6 @@ extend<T, A: Allocator> Vector<T, A> {
         return self.ptr;
     }
 
-    /// A view of the elements; invalidated by any reallocating mutation.
-    pub const fn as_slice(self: &Vector<T, A>) []T {
-        return unsafe Slice::<T> { ptr: self.ptr, len: self.len };
-    }
-
-    /// A writable view of the elements: the shared slice algorithms (`select_nth_unstable`,
-    /// `rotate_left`, heap operations, ...) run on it.
-    pub const fn as_mut_slice(self: &mut Vector<T, A>) []mut T {
-        return unsafe SliceMut::<T> { ptr: self.ptr, len: self.len };
-    }
-
     /// Insert `value` at `index`, shifting later elements right. Panics when `index > len`.
     pub const fn insert(self: &mut Vector<T, A>, index: usize, value: T) {
         if index > self.len {
@@ -675,5 +664,20 @@ extend<T: Format, A: Allocator> Vector<T, A> as Format {
         }
         s.push_str("]");
         return s;
+    }
+}
+
+extend<T, A: Allocator> Vector<T, A> as AsSlice<T> {
+    /// A view of the elements; invalidated by any reallocating mutation.
+    pub const fn as_slice(self: &Vector<T, A>) []T {
+        return unsafe Slice::<T> { ptr: self.ptr, len: self.len };
+    }
+}
+
+extend<T, A: Allocator> Vector<T, A> as AsSliceMut<T> {
+    /// A writable view of the elements: the shared slice algorithms (`select_nth_unstable`,
+    /// `rotate_left`, heap operations, ...) run on it.
+    pub const fn as_mut_slice(self: &mut Vector<T, A>) []mut T {
+        return unsafe SliceMut::<T> { ptr: self.ptr, len: self.len };
     }
 }

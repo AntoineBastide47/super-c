@@ -3302,7 +3302,7 @@ fn main() i32 {
     h::expect_err_msg(
         "a forwarded result of another type",
         "fn pair() (i32, i64) { return 1, 2; }\nfn forward() (i32, i32) { return pair(); }\nfn main() i32 { let (a, b) = forward(); return a + b; }\n",
-        "result 2 of the forwarded call is 'i64', the function returns 'i32' there",
+        "mismatched types: expected '(i32, i32)', found '(i32, i64)'",
     );
     b.run();
 }

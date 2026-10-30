@@ -534,6 +534,9 @@ pub(package) struct FunctionData {
     pub(package) generics: NodeList,
     pub(package) params: NodeList,
     pub(package) returns: NodeList,
+    /// The named results as written (`(a: i64, b: i64)`, NODE_PARAMETER entries; empty when unnamed):
+    /// the body binds them, and `returns` holds their types.
+    pub(package) named_returns: NodeList,
     pub(package) where_clause: NodeList,
     pub(package) body: NodeId,
     pub(package) flags: u8, // FN_* bits; one byte keeps Node at 56 bytes
@@ -918,6 +921,9 @@ pub(package) struct FieldInitializerData {
 pub(package) struct PatternData {
     pub(package) name: NodeId,
     pub(package) children: NodeList,
+    /// A qualified variant's path (`Shape::Circle` in `Shape::Circle(r)`; `name` is its last
+    /// segment), NODE_NONE for a bare one.
+    pub(package) qual: NodeId,
 }
 pub(package) struct PatternRangeData {
     pub(package) start: NodeId,
@@ -1007,6 +1013,24 @@ const EXT_KINDS: [bool; 128] = [
     [NodeKind::NODE_PARALLEL_FOR as usize] = true,
     [NodeKind::NODE_CLOSURE as usize] = true,
 ];
+
+/// Whether `name` is a compiler intrinsic no declaration defines (`dyn_cast`, `type_info`, `fields`,
+/// `variants`, `payloads`, `zeroed`, `dangling`): the type checker recognizes the unresolved name.
+pub(package) const fn intrinsic_value_name(name: str) bool {
+    return name == "dyn_cast" || name == "type_info" || name == "fields" || name == "variants" || name == "payloads" || name == "zeroed" || name == "dangling";
+}
+
+/// The value a block whose last statement is `n` (node `id`) yields in value position: the
+/// expression of an expression statement, a block, or an `if` with an `else`; NODE_NONE for any other.
+pub(package) const fn tail_value(n: &Node, id: NodeId) NodeId {
+    if n.kind == NodeKind::NODE_EXPRESSION_STATEMENT {
+        return n.as_data.single.value;
+    }
+    if n.kind == NodeKind::NODE_BLOCK || n.kind == NodeKind::NODE_IF && n.as_data.if_stmt.else_branch != NODE_NONE {
+        return id;
+    }
+    return NODE_NONE;
+}
 
 /// Whether a node of kind `k` keeps its payload outside itself (`NodeExt`).
 @always_inline
@@ -2345,6 +2369,10 @@ pub(package) const fn array_ty(k: TypeKind, elem: TypeId, lt: TypeId, ly: &Ty) T
     return Ty { kind: TypeKind::TYPE_ARRAY, qualifier: ARR_SYM, as_data: TyAs { arr: TyArr { elem: elem, len: lt } } };
 }
 
+/// The largest tuple arity: a tuple is the prelude instance `TupleN<..>`, and an instance records
+/// at most 8 arguments.
+pub(package) const TUPLE_MAX: u32 = 8;
+
 @derive(Copy)
 pub(package) struct TyInstance {
     pub(package) module: ModuleId,
@@ -3405,6 +3433,9 @@ pub(package) struct Ast {
     /// may provide one operator for different right operands, so the NAME no longer identifies it and
     /// codegen must not resolve it a second time.
     pub(package) op_method: Map<u32, u64>,
+    /// The `[T; N]` index nodes outside `unsafe` whose index is not a constant: lowering checks the
+    /// index at run time, and an index out of bounds panics, as a view's does.
+    pub(package) checked_index: Set<u32>,
     /// Per integer constant pattern (a literal-pattern value or a range bound): its value in the
     /// matched type, as two's complement bits. The pattern matrix reads values here, so a named or
     /// associated constant, a limit and every literal spelling take part in coverage.
@@ -3521,6 +3552,7 @@ extend Ast as Free {
         self.call_lts.free();
         self.call_lt_at.free();
         self.op_method.free();
+        self.checked_index.free();
         self.pat_vals.free();
         self.seeds.free();
         self.closure_facts.free();

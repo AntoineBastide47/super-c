@@ -251,10 +251,85 @@ const fn numeric(t: BuiltinType) bool {
     return t as u32 >= BuiltinType::BT_I8 as u32 && t as u32 <= BuiltinType::BT_F64 as u32;
 }
 
+// The field declarations of the tuple type `ty` (of `b`'s module), in order; empty for any other type.
+fn result_fields(p: &loader::Package, b: &ir::CoreBody, ty: TypeId) Vector<NodeId> {
+    let mut out = Vector::<NodeId>::new();
+    let a = unsafe &*p.module_ast_const(b.module);
+    let y = *a.type_at(ty);
+    if y.kind != TypeKind::TYPE_INSTANCE {
+        return out;
+    }
+    let it = *a.instance(y.as_data.inst);
+    let da = unsafe &*p.module_ast_const(it.module);
+    if !p.modules[it.module as usize].prelude || da.at_const(it.decl).kind != NodeKind::NODE_STRUCT {
+        return out;
+    }
+    let ms = da.ext(it.decl).aggregate.members;
+    for i in 0..ms.len {
+        out.push(unsafe da.list(ms)[i as usize]);
+    }
+    return out;
+}
+
+// The member of the call's result that projection `pj` of a holder of the whole result reads: the
+// index of its field declaration (`pj.sub`) in `fields` (a single tuple result), else slot `pj.data`
+// (several results).
+fn member_of(b: &ir::CoreBody, fields: &Vector<NodeId>, pj: ir::Projection) u32 {
+    if pj.kind != ir::PJ_FIELD {
+        return ir::IR_NONE;
+    }
+    if b.returns > 1 {
+        return pick(pj.data < b.returns, pj.data, ir::IR_NONE);
+    }
+    for i in 0..fields.len() {
+        if fields[i] == pj.sub {
+            return i as u32;
+        }
+    }
+    return ir::IR_NONE;
+}
+
+// Whether `rv` builds a tuple of the members of the call's result in order: member `i` read from a
+// holder of the whole result (`whole`) or from a holder of member `i` (`mem_l`, `mem_k`).
+fn rebuilds(
+    b: &ir::CoreBody,
+    rv: &ir::Rvalue,
+    fields: &Vector<NodeId>,
+    whole: &Vector<u32>,
+    mem_l: &Vector<u32>,
+    mem_k: &Vector<u32>,
+) bool {
+    if rv.kind != ir::RV_AGGREGATE || rv.c != ir::AGG_TUPLE || rv.b as usize != fields.len() {
+        return false;
+    }
+    for i in 0..rv.b {
+        let o = *b.operands.at(b.oper_pool[(rv.a + i) as usize] as usize);
+        if o.kind == ir::OP_CONST {
+            return false;
+        }
+        let sp = *b.places.at(o.data as usize);
+        let mut k: u32 = ir::IR_NONE;
+        if sp.proj_len == 1 && whole.contains(&sp.base) {
+            k = member_of(b, fields, *b.projections.at(sp.proj_start as usize));
+        } else if sp.proj_len == 0 {
+            for j in 0..mem_l.len() {
+                if mem_l[j] == sp.base {
+                    k = mem_k[j];
+                }
+            }
+        }
+        if k != i {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Walk the path after call `t` to the return. The path may only move the result into the return
-// slots: with one slot the whole result through whole-local copies, with several each member `k`
-// into slot `k` (the call's one destination is a temporary the caller copies whole and reads as
-// members `0..returns`, `inline::multi_alias`). Anything more sets `m.reason`. With `deads`, the
+// slots: with one slot the whole result through whole-local copies, or a tuple rebuilt from its
+// members in order (`let (a, b) = f(..); return a, b;`); with several each member `k` into slot `k`
+// (the call's one destination is a temporary the caller copies whole and reads as members
+// `0..returns`, `inline::multi_alias`). Anything more sets `m.reason`. With `deads`, the
 // storage deaths of the path's locals other than arguments and return slots are appended to it,
 // and the path's blocks to `blocks`.
 fn path_after(
@@ -270,6 +345,8 @@ fn path_after(
         m.reason = TR_NOT_TAIL;
         return;
     }
+    // A single result's fields (a tuple's members are its fields, in order).
+    let fields = result_fields(p, b, dp.ty);
     // The locals holding the whole result, and those holding one member of it (`mem_k`).
     let mut whole = Vector::<u32>::new();
     let mut mem_l = Vector::<u32>::new();
@@ -304,11 +381,8 @@ fn path_after(
                 let same = d.ty == sp.ty;
                 // The member `k` the read takes: a whole holder's field, or a member holder.
                 let mut k: u32 = ir::IR_NONE;
-                if sp.proj_len == 1 && whole.contains(&sp.base) && b.returns > 1 {
-                    let pj = *b.projections.at(sp.proj_start as usize);
-                    if pj.kind == ir::PJ_FIELD && pj.data < b.returns {
-                        k = pj.data;
-                    }
+                if sp.proj_len == 1 && whole.contains(&sp.base) {
+                    k = member_of(b, &fields, *b.projections.at(sp.proj_start as usize));
                 } else if sp.proj_len == 0 {
                     for i in 0..mem_l.len() {
                         if mem_l[i] == sp.base {
@@ -324,7 +398,7 @@ fn path_after(
                     }
                     continue;
                 }
-                if same && k != ir::IR_NONE && (!to_ret || d.base == k) {
+                if same && k != ir::IR_NONE && (!to_ret || b.returns > 1 && d.base == k) {
                     if to_ret {
                         done = done | 1u64 << k as u64;
                     } else {
@@ -333,6 +407,17 @@ fn path_after(
                     }
                     continue;
                 }
+            }
+            if to_ret && b.returns == 1 && d.proj_len == 0 && d.ty == dp.ty && rebuilds(
+                b,
+                &rv,
+                &fields,
+                &whole,
+                &mem_l,
+                &mem_k,
+            ) {
+                done = 1;
+                continue;
             }
             let ds = b.locals.at(d.base as usize).storage;
             let held = whole.contains(&d.base) || mem_l.contains(&d.base);

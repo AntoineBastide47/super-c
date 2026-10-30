@@ -42,9 +42,10 @@ fn items_and_types() {
         c.ast.at_const(cb_id).kind == NodeKind::NODE_FUNCTION_TYPE,
         "items and types: callback should be a function type",
     );
+    let cb_rets = c.ast.at_const(cb_id).as_data.function_type.returns;
     assert(
-        c.ast.at_const(cb_id).as_data.function_type.returns.len == 2,
-        "items and types: callback should have two returns",
+        cb_rets.len == 1 && c.ast.at_const(unsafe c.ast.list(cb_rets)[0]).kind == NodeKind::NODE_TUPLE_TYPE,
+        "items and types: callback should return a tuple",
     );
     assert(item(&c.ast, 3).kind == NodeKind::NODE_CONST, "items and types: item 3 should be const");
     assert(item(&c.ast, 4).kind == NodeKind::NODE_EXTERN_BLOCK, "items and types: item 4 should be extern");
@@ -131,7 +132,11 @@ fn grouped_parameters_and_returns() {
     assert(item_ext(&c.ast, 0).function.returns.len == 1, "grouped parameters and returns: expected one slice return");
 
     assert(item_ext(&c.ast, 1).function.params.len == 2, "grouped parameters and returns: expected 2 divmod parameters");
-    assert(item_ext(&c.ast, 1).function.returns.len == 2, "grouped parameters and returns: expected 2 divmod returns");
+    let dm_rets = item_ext(&c.ast, 1).function.returns;
+    assert(
+        dm_rets.len == 1 && c.ast.at_const(unsafe c.ast.list(dm_rets)[0]).kind == NodeKind::NODE_TUPLE_TYPE,
+        "grouped parameters and returns: divmod returns a tuple",
+    );
     let divmod_body_id = item_ext(&c.ast, 1).function.body;
     let dbstmts = c.ast.at_const(divmod_body_id).as_data.block.statements;
     let dstmts = c.ast.list(dbstmts);
@@ -140,13 +145,18 @@ fn grouped_parameters_and_returns() {
         c.ast.at_const(ret_id).kind == NodeKind::NODE_RETURN,
         "grouped parameters and returns: expected return statement",
     );
+    let rvals = c.ast.at_const(ret_id).as_data.return_stmt.values;
     assert(
-        c.ast.at_const(ret_id).as_data.return_stmt.values.len == 2,
-        "grouped parameters and returns: expected 2 return values",
+        rvals.len == 1 && c.ast.at_const(unsafe c.ast.list(rvals)[0]).as_data.array_literal.elements.len == 2,
+        "grouped parameters and returns: expected the tuple of 2 return values",
     );
 
-    assert(item_ext(&c.ast, 2).function.returns.len == 2, "grouped parameters and returns: expected 2 named returns");
-    let open_rets = item_ext(&c.ast, 2).function.returns;
+    assert(item_ext(&c.ast, 2).function.returns.len == 1, "grouped parameters and returns: expected one tuple result");
+    assert(
+        item_ext(&c.ast, 2).function.named_returns.len == 2,
+        "grouped parameters and returns: expected 2 named returns",
+    );
+    let open_rets = item_ext(&c.ast, 2).function.named_returns;
     let open_returns = c.ast.list(open_rets);
     let or0 = unsafe open_returns[0];
     let or1 = unsafe open_returns[1];

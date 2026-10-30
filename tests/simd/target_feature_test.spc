@@ -627,9 +627,7 @@ fn register_types_in_inferred_storage() {
         "main.spc",
         "extern \"C\" \"stdint.h\" {\n    @value(8, 8)\n    pub type int64_t;\n}\nextern \"C\" \"math.h\" {\n    @value(8, 8)\n    pub type double_t;\n}\n@noinline\nfn two(a: int64_t) (int64_t, int64_t) {\n    return a, a;\n}\n@noinline\nfn twod(a: double_t) (double_t, double_t) {\n    return a, a;\n}\n@used\npub fn use_both(a: int64_t, d: double_t) {\n    let (x, _y) = two(a);\n    let (u, _v) = twod(d);\n    let _ = x;\n    let _ = u;\n}\nfn main() i32 {\n    return 0;\n}\n",
     );
-    assert(p.compile("main.spc").ok(), "it compiles");
-    assert(
-        p.gen_has("main.c", "__sc_ret2__oint64_t__oint64_t") && p.gen_has("main.c", "__sc_ret2__odouble_t__odouble_t"),
-        "two result structs",
-    );
+    // Several results are a tuple, which a register type cannot be an element of.
+    let r = p.compile("main.spc");
+    assert(!r.ok() && r.out_has("`int64_t` is a register type; store it through `Simd<T, N>`"), "a tuple result");
 }

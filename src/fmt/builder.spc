@@ -35,6 +35,18 @@ pub(package) struct Builder<'a> {
     pub(package) st: Vector<d::DocId>,
     pub(package) bin_spine: Vector<NodeId>, // `b_expr`'s stack of left-nested binary nodes (shared by nested calls)
     pub(package) cond_lits: Vector<NodeId>, // struct literals `b_cond` parenthesizes: outside every delimiter of a condition
+    /// `fmt --migrate`: write the forms the language now reads (`switch x { .. }` with no `;`, a value
+    /// block's last expression with no `;`, `return (a, b);`).
+    pub(package) migrate: bool,
+    /// The `if`, `switch` or block about to print is in value position: its blocks end in the value
+    /// (read and cleared by `b_if`, `b_match` and `b_block`).
+    pub(package) vctx: bool,
+    /// The arms of the `switch` printing are values.
+    pub(package) arm_vctx: bool,
+    /// The expression a statement holds: an `if`, `switch` or block there is a statement.
+    pub(package) stmt_root: NodeId,
+    /// The statement about to print is a value block's last one: its value is the block's.
+    pub(package) tail_val: bool,
 }
 
 struct TriviaSeg {
@@ -47,7 +59,7 @@ struct TriviaSeg {
 
 /// Build and render the whole program. Returns the number of comment segments emitted (the caller
 /// checks it against the lexer's comment-token count and refuses to write on a mismatch).
-pub(package) fn format_program(ast: *const Ast, source: str, width: i32, out: &mut String) usize {
+pub(package) fn format_program(ast: *const Ast, source: str, width: i32, migrate: bool, out: &mut String) usize {
     let root = unsafe (*ast).root;
     // The @fmt.skip owners, collected once: one attribute scan per file, a binary search per item.
     let mut skipped = Vector::<NodeId>::new();
@@ -74,6 +86,11 @@ pub(package) fn format_program(ast: *const Ast, source: str, width: i32, out: &m
         st: Vector::<d::DocId>::with_capacity(256),
         bin_spine: Vector::<NodeId>::new(),
         cond_lits: Vector::<NodeId>::new(),
+        migrate: migrate,
+        vctx: false,
+        arm_vctx: false,
+        stmt_root: NODE_NONE,
+        tail_val: false,
     };
     let items = b.nd(root).as_data.program.items;
     let mut prev_end = 0u32;
@@ -914,7 +931,9 @@ extend Builder {
             },
             NODE_PATTERN_TUPLE => {
                 let p = n.as_data.pattern;
-                if p.name != NODE_NONE {
+                if p.qual != NODE_NONE {
+                    self.st.push(self.node_text(p.qual));
+                } else if p.name != NODE_NONE {
                     self.st.push(self.b_pattern_path(p.name));
                 }
                 let cs = self.st.len();
@@ -923,7 +942,9 @@ extend Builder {
             },
             NODE_PATTERN_STRUCT => {
                 let p = n.as_data.pattern;
-                if p.name != NODE_NONE {
+                if p.qual != NODE_NONE {
+                    self.st.push(self.node_text(p.qual));
+                } else if p.name != NODE_NONE {
                     self.st.push(self.b_pattern_path(p.name));
                 }
                 self.st.push(self.p.txt(" { "));
@@ -1012,6 +1033,7 @@ extend Builder {
                         self.st.push(self.p.txt("move "));
                     }
                     if self.is_block_node(u.operand) {
+                        self.vctx = id != self.stmt_root;
                         self.st.push(self.b_block(u.operand));
                     } else {
                         self.st.push(self.b_expr_prec(u.operand, PREC_UNARY));
@@ -1178,6 +1200,7 @@ extend Builder {
                 }
             },
             NODE_MATCH => {
+                self.vctx = id != self.stmt_root;
                 self.st.push(self.b_match(id));
             },
             NODE_SIZEOF => {
@@ -1270,9 +1293,11 @@ extend Builder {
             },
             NODE_IF => {
                 // If-expression (`let x = if c { a; } else { self; };`).
+                self.vctx = true;
                 self.st.push(self.b_if(id));
             },
             NODE_BLOCK => {
+                self.vctx = id != self.stmt_root;
                 self.st.push(self.b_block(id));
             },
             _ => {
@@ -1507,7 +1532,15 @@ extend Builder {
                 self.st.push(self.p.txt(";"));
             },
             NODE_RETURN => {
-                let vals = n.as_data.return_stmt.values;
+                let mut vals = n.as_data.return_stmt.values;
+                // `return a, b;` (and a bare `return;` of named results) parse to a tuple without
+                // parentheses: print the list as written.
+                if vals.len == 1 && self.nd(self.list_at(vals, 0)).kind == NodeKind::NODE_TUPLE && !self.migrate {
+                    let es = self.nd(self.list_at(vals, 0)).as_data.array_literal.elements;
+                    if self.nd(self.list_at(es, 0)).span.start == self.nd(self.list_at(vals, 0)).span.start {
+                        vals = es;
+                    }
+                }
                 // A bare `return;` in a named-return fn carries parser-synthesized identifiers whose
                 // spans point back INTO the signature: print the bare form the user wrote.
                 let mut synthetic = vals.len > 0;
@@ -1587,6 +1620,8 @@ extend Builder {
                 self.st.push(self.b_select(id));
             },
             NODE_IF => {
+                // A value block's last `if` (with an `else`) is its value.
+                self.vctx = replace(&mut self.tail_val, false) && n.as_data.if_stmt.else_branch != NODE_NONE;
                 self.st.push(self.b_if(id));
             },
             NODE_WHILE => {
@@ -1643,7 +1678,11 @@ extend Builder {
             },
             NODE_EXPRESSION_STATEMENT => {
                 let e = n.as_data.single.value;
+                let tv = replace(&mut self.tail_val, false);
+                let osr = self.stmt_root;
+                self.stmt_root = pick(tv, NODE_NONE, e);
                 self.st.push(self.b_expr(e));
+                self.stmt_root = osr;
                 let en = self.nd(e);
                 let mut block_form = en.kind == NodeKind::NODE_BLOCK;
                 if en.kind == NodeKind::NODE_MATCH && self.stmt_starts_with(e, "if") {
@@ -1655,11 +1694,16 @@ extend Builder {
                 ) {
                     block_form = true;
                 }
-                if !block_form {
+                // A statement `switch` and the last expression of a block may omit the `;`: print it
+                // as written, or without it under `--migrate` for a statement `switch`.
+                let end = n.span.end as usize;
+                let drop = self.migrate && (tv && en.kind != NodeKind::NODE_ASSIGNMENT || en.kind == NodeKind::NODE_MATCH);
+                if !block_form && self.src.slice(end - 1, end) == ";" && !drop {
                     self.st.push(self.p.txt(";"));
                 }
             },
             NODE_BLOCK => {
+                self.vctx = replace(&mut self.tail_val, false);
                 self.st.push(self.b_block(id));
             },
             NODE_CONST | NODE_STATIC_ASSERT => {
@@ -1674,15 +1718,18 @@ extend Builder {
     }
 
     fn b_if(self: &mut Self, id: NodeId) d::DocId {
+        let value = replace(&mut self.vctx, false);
         let n = self.nd(id);
         let f = n.as_data.if_stmt;
         let v = self.st.len();
         self.st.push(self.p.txt("if "));
         self.st.push(self.b_cond(f.condition));
         self.st.push(self.p.txt(" "));
+        self.vctx = value;
         self.st.push(self.b_block(f.then_branch));
         if f.else_branch != NODE_NONE {
             self.st.push(self.p.txt(" else "));
+            self.vctx = value;
             self.st.push(self.b_else(f.else_branch));
         }
         return self.cat(v);
@@ -1703,6 +1750,7 @@ extend Builder {
     // `KW let PAT = EXPR BLOCK` from the two-arm match the parser desugars `if let` and `while let` into:
     // arm 0 holds the pattern and the written block. Printing the match itself would rewrite user syntax.
     fn b_let_head(self: &mut Self, kw: str<'static>, mid: NodeId) d::DocId {
+        let value = replace(&mut self.vctx, false);
         let m = self.nd(mid).as_data.match_expr;
         let hit = self.nd(self.list_at(m.arms, 0)).as_data.match_arm;
         let v = self.st.len();
@@ -1711,18 +1759,22 @@ extend Builder {
         self.st.push(self.p.txt(" = "));
         self.st.push(self.b_cond(m.value));
         self.st.push(self.p.txt(" "));
+        self.vctx = value;
         self.st.push(self.b_block(hit.body));
         return self.cat(v);
     }
 
     // `if let`, then its else branch (arm 1). Without a written else, arm 1 is a zero-width parser-made block.
     fn b_if_let(self: &mut Self, id: NodeId) d::DocId {
+        let value = replace(&mut self.vctx, false) && id != self.stmt_root;
         let v = self.st.len();
+        self.vctx = value;
         self.st.push(self.b_let_head("if let ", id));
         let miss = self.nd(self.list_at(self.nd(id).as_data.match_expr.arms, 1)).as_data.match_arm.body;
         let es = self.nd(miss).span;
         if es.end > es.start {
             self.st.push(self.p.txt(" else "));
+            self.vctx = value;
             self.st.push(self.b_else(miss));
         }
         return self.cat(v);
@@ -1732,6 +1784,8 @@ extend Builder {
         if self.stmt_starts_with(id, "if") {
             return self.b_if_let(id);
         }
+        let value = replace(&mut self.vctx, false);
+        let oav = replace(&mut self.arm_vctx, value);
         let n = self.nd(id);
         let m = n.as_data.match_expr;
         let v = self.st.len();
@@ -1745,6 +1799,7 @@ extend Builder {
         self.st.push(self.p.txt(" {"));
         self.b_vertical(m.arms, n.span, 0);
         self.st.push(self.p.txt("}"));
+        self.arm_vctx = oav;
         return self.cat(v);
     }
 
@@ -1804,6 +1859,7 @@ extend Builder {
         }
         self.st.push(self.p.txt(" => "));
         if self.is_block_node(a.body) {
+            self.vctx = self.arm_vctx;
             self.st.push(self.b_block(a.body));
         } else {
             self.st.push(self.b_expr(a.body));
@@ -1814,6 +1870,7 @@ extend Builder {
 
     // A block: `{}` when empty (dangling comments kept), otherwise always broken.
     fn b_block(self: &mut Self, id: NodeId) d::DocId {
+        let value = replace(&mut self.vctx, false);
         let n = self.nd(id);
         let stmts = n.as_data.block.statements;
         let v = self.st.len();
@@ -1835,7 +1892,9 @@ extend Builder {
             } else {
                 self.emit_gap_vertical(prev_end, ssp.start);
             }
+            self.tail_val = value && i == stmts.len - 1;
             self.st.push(self.b_stmt(sid));
+            self.tail_val = false;
             prev_end = ssp.end;
         }
         if !first {
@@ -1940,7 +1999,10 @@ extend Builder {
                 } else {
                     self.st.push(self.b_comma_list("(", ps, ")", true));
                 }
-                if f.returns.len > 0 {
+                if f.named_returns.len > 0 {
+                    self.st.push(self.p.txt(" "));
+                    self.st.push(self.b_returns(f.named_returns));
+                } else if f.returns.len > 0 {
                     self.st.push(self.p.txt(" "));
                     self.st.push(self.b_returns(f.returns));
                 }

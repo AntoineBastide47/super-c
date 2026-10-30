@@ -52,10 +52,19 @@ let (div, mod) = divmod(p);     // destructuring
 ```
 
 An annotation on a destructuring binding types its names: `let (x, y): (i32, i32) = (a, b);`
-widens `i16` values as `let t: (i32, i32) = (a, b);` does. A multi-value call does not convert
-its results: its annotation must name their types ("the annotation of a multi-value call's
-bindings must name its result types"). `let (a, b) = unsafe f();` binds the results of an
-`unsafe` multi-value call.
+widens `i16` values as `let t: (i32, i32) = (a, b);` does. A tuple a call returns does not convert:
+its annotation must name its element types (`mismatched types: expected '(i32, i16)', found '(i16,
+i16)'`).
+
+A local whose initializer leaves generic arguments open keeps them open, and its later uses in the
+same body fill them in: `let mut v = Vector::new(); v.push(x);`, `let mut o = None; o = Some(3);`,
+`let c = |a| a + 1; c(2);` (a closure parameter takes its type from the first call). An unsuffixed
+literal gives no evidence and takes the final type (`v.push(1); v.push(2u8);` is `Vector<u8>`), else
+its default. Two typed uses that disagree are "conflicting types for 'T' of 'v'" at the second, a
+member of a value whose whole type no use has given yet is "the type of 'x' must be known here", and
+a parameter no use fixes stays "cannot infer the generic argument". `_` leaves one type to this
+inference in a local's annotation (`let v: Vector<_> = ..`) and in a call's type arguments
+(`f::<_, u8>(..)`) only. Parameters, results, fields and constants are never inferred.
 
 An immutable binding forbids reassignment, `&mut self` method calls, and `&mut` borrows.
 The rule reaches through a user `Deref`: `*b` is an assignable place when `b`'s type defines
@@ -75,11 +84,21 @@ type when omitted. The program entry is the root module's top-level `main`, decl
 `fn main() i32` or `fn main(args: Vector<str>) i32`. A `main` in another module, or a method
 named `main`, is an ordinary function of any signature.
 
-A parenthesized return list (`fn f() (A, B)`) is several results, not a tuple. To return a
-tuple, name it through an alias: `type P = (A, B); fn f() P`. A call with several results is not
-a value: it is allowed only as `let (a, b) = f();`, `return f();`, or a statement that discards
-them. Anywhere else (an argument, an operand, `assert_eq(pair(), (1, 2))`) is an error: "a call
-with several results is not a value: bind them with `let (a, b) = ..`".
+A parenthesized return list (`fn f() (A, B)`) returns the tuple `(A, B)`: a call is an ordinary
+value (`let t = f();`, `assert_eq(pair(), (1, 2))`, `f().0`), and `let (a, b) = f();` destructures
+it. `return (a, b);` and `return a, b;` return the tuple. Named results (`(a: i64, b: i64)`) bind
+`a` and `b` in the body, and a bare `return;` returns their tuple. A register type (`@value`) is no
+tuple element, so it is never one of several results.
+
+A block in value position (an `if` or `else` branch, a `switch` arm block, `{ .. }`, `unsafe { ..
+}`) is a value block: its value is its last expression, written without `;` (`{ x + 1 }`) or, as
+before, with one (`{ x + 1; }`); an assignment there is no value. A value block's last `if` with an
+`else`, `switch` or block is its value too (`{ prep(); if c { 1 } else { 2 } }`). A block whose last
+statement is no expression is `void`.
+
+A function or closure body gives its results with `return`: a last expression without `;`
+(`fn k() i32 { x + 1 }`) is "a function body gives its result with 'return': write 'return x +
+1;'".
 
 A direct call of a function to itself whose result the function returns as it is becomes a
 jump in every profile, so the recursion runs in one frame. It stays a call when a drop, a
@@ -87,8 +106,8 @@ jump in every profile, so the recursion runs in one frame. It stays a call when 
 generic arguments), when an argument may hold a borrow of a local of the call, or when the
 function takes a raw address of a local. `@tail_recurse` on the function makes each such call
 an error that names the reason; a call to the function from one of its closures and a function
-that never calls itself are errors too. A function with several results converts when it
-returns the call's results in their order (`let (a, b) = f(..); return a, b;`).
+that never calls itself are errors too. A function returning a tuple converts when it returns the
+call's tuple, also rebuilt from its elements in order (`let (a, b) = f(..); return a, b;`).
 
 A function or closure with results cannot reach the end of its body ("function 'f' can reach the
 end of its body without returning a value"): every path ends in a `return`, a call of a `!` or
@@ -96,9 +115,8 @@ end of its body without returning a value"): every path ends in a `return`, a ca
 whose every way out is one of these. A `while` or a `for` can run no iteration, so it does not end
 a path.
 
-`return pair();` forwards the results of a multi-value call as the return list. The call must
-give as many results as the function returns, each of its return slot's type exactly (no
-widening: "result 2 of the forwarded call is 'i64', the function returns 'i32' there").
+`return pair();` returns the call's tuple: its type must be the function's result type exactly (no
+widening: "mismatched types: expected '(i32, i32)', found '(i32, i64)'").
 
 ## Structs and Methods
 
@@ -158,9 +176,21 @@ fn area(s: Shape) i32 {
 }
 ```
 
-`switch` is exhaustive and usable as an expression. Arms combine alternatives with `|`. A pattern
-names a variant bare (`Circle(r)`); a qualified variant (`Shape::Circle(r)`, `Shape::Unit`) is an
-error. A qualified path without a payload is a constant pattern: a builtin limit (`i64::MAX`) takes
+`switch` is exhaustive and usable as an expression. A `switch` that starts a statement ends at its
+`}`, as `if` and `loop` do (a `;` after it is still accepted): its arms are statements, so arm values
+of different types do not join, and `switch x { .. }.len()` there does not continue as an
+expression. Arms combine alternatives with `|`.
+
+A variant is written bare (`Circle(r)`, `None`) or qualified (`Shape::Circle(r)`, `Option::None`)
+in values and in patterns. A bare value resolves through the expected type (a return, an annotated
+`let`, an argument, a field, an array element, the other side of `==` or `!=`, an assignment
+target); without one only the prelude's `Some`, `None`, `Ok` and `Err` resolve, and a variant of
+another enum is "cannot find value". A local or an item that a bare variant in scope also names is
+an error that names both ("'Unit' names both a local and the variant 'Shape::Unit': rename one"). A
+pattern's bare variant resolves through the matched type; a qualified one must name a variant of
+the matched type ("pattern 'F::A' does not name a variant of the matched type 'E'"). A variant has
+priority over an associated constant of the same name. A qualified path without a payload that
+names no variant is a constant pattern: a builtin limit (`i64::MAX`) takes
 the matched type like a literal, and an associated constant (`Lim::HI`) keeps its type, which must be
 the matched type or widen to it; a range bound may name a constant (`0..=LIMIT`). Integer values and
 ranges cover their type: `i64::MIN..=-1` and `0..=i64::MAX` make an `i64` switch exhaustive, and a
@@ -304,13 +334,13 @@ lifetime must be declared to outlive the storage's (`fn fill<'x>(w: &mut Vector<
 
 `unsafe` is **required** for:
 - Raw-pointer dereference, indexing, arithmetic
-- Indexing a fixed array `[T; N]` (also through a reference) with an index that is not a
-  constant within `N`; a constant index is checked at compile time at every nesting level.
-  Against a symbolic length a constant index is safe and every instance checks it: `a[2]` for
-  `a: [i32; N]` is "index 2 is out of bounds for an array of length 2 for N = 2" where `N = 2`
-  is instantiated; under `unsafe` the index is unchecked, as a raw pointer's. Slicing a symbolic length with constant bounds still needs `unsafe`
-  ("slicing an array of unknown length"). A field of a concrete instance has the instance's
-  length (`Buf<i32, 4>.d` is `[i32; 4]`)
+- An unchecked index of a fixed array `[T; N]`: outside `unsafe` a run-time index is checked and
+  panics when out of bounds ("index out of bounds", as `[]T` indexing), and under `unsafe` it is
+  unchecked, as a raw pointer's. A constant index is checked at compile time at every nesting
+  level; against a symbolic length every instance checks it: `a[2]` for `a: [i32; N]` is "index 2
+  is out of bounds for an array of length 2 for N = 2" where `N = 2` is instantiated. Slicing an
+  array (`a[lo..hi]`) checks its bounds at run time ("range out of bounds") and needs no `unsafe`.
+  A field of a concrete instance has the instance's length (`Buf<i32, 4>.d` is `[i32; 4]`)
 - Every call to an `extern "C"` function
 - A `Slice`/`SliceMut` literal (`unsafe SliceMut::<T> { ptr: p, len: n }`, Rust's
   `from_raw_parts`), and a write or `&mut` of a view's `ptr` or `len` field ("writing a field of a
@@ -587,6 +617,14 @@ the end of the block around the whole expression, as if the value stood in place
 expression: `f(if c { [x] } else { [y, z] })` is valid. A local declared in the arm dies with the
 arm, so its view or reference cannot be the arm's value. An `if` or `switch` argument converts
 each arm to the parameter's type, as a `let`'s annotation does.
+
+A call or method argument `&x` passes as the view the prelude view interface of `x`'s type gives:
+`str` through `AsStr` (`String`), `[]T` through `AsSlice<T>` and, from `&mut x`, `[]mut T` through
+`AsSliceMut<T>` (`Vector`, `Array`, `StaticVector`). A user container gets the coercion by
+conforming. The view borrows `x` as `x.as_str()` does, a `[]T` parameter infers `T` through the
+conformance, and the coercion ranks with the array-to-slice one in overload selection. A `let`'s
+annotation, an operand and a `return` keep the explicit method, and an argument `x` without `&`
+stays an error whose note names the borrow (passing `x` would move it).
 `[T; N]` is a distinct type and a value: assignment, an argument, a struct field, a variant payload, a tuple
 element, a closure capture and a return copy it. An array literal has its own length; against
 an expected `[T; n]` it must have exactly `n` elements (a designated literal may have fewer and
@@ -923,13 +961,13 @@ enforced at spawn boundaries.
 | `str` | Borrowed string view (non-NUL-terminated except a literal, whose C spelling ends in a NUL; print via `%.*s`, or `.to_string()` then `String::cstr()`) |
 | `Vector<T>` | Growable array |
 | `Box<T>` | Heap-allocated single value |
-| `Option<T>` | `Option::Some(x)` / `Option::None` in values; bare `Some(..)`/`None` in patterns only |
+| `Option<T>` | `Some(x)` / `None`, bare or qualified (`Option::Some(x)`), in values and patterns |
 | `Result<T, E>` | `Ok(T)` or `Err(E)` |
 | `Map<K, V, A = Global, S = DefaultHash>` | Hash map; `S: BuildHasher` turns a key into its hash (`DefaultHash` is unkeyed and deterministic, `std::hash::keyed::KeyedHash` keyed); `entry(k)` (`or_insert`, `or_default`, `and_modify`, `Occupied`/`Vacant`), `iter()`, `iter_mut()`, `keys()`, `values()`, `drain()`, `retain`; the cursors borrow the map, double-ended with an exact `size_hint` |
 | `Set<T, A = Global, S = DefaultHash>` | Hash set; `iter()` borrows it; `set_union`, `intersection`, `difference`, `symmetric_difference` iterate both sets lazily |
 | `Array<T, N>` | Fixed-size const-generic array, a type distinct from `[T; N]`. `new()` needs `T: Default`; for raw pointers write `Array::<*mut T, N> {}` |
 | `Slice<T>` / `SliceMut<T>` | Fat-pointer views, and the one implementation of the sequence algorithms `Vector`, `Array` and `StaticVector` reach through `as_slice()`/`as_mut_slice()`: `sort` (unstable), `sort_stable` (a scratch block of `len` elements; `_in(alloc)` names its allocator), `sort_stable_in_place` (no heap memory, a 4 KiB stack buffer; about 1.25x the time of `sort_stable` on large inputs), `select_nth_unstable`, the heap operations, `binary_search`, `partition_point`, `partition`, `partition_dedup`, `rotate_left`; comparators return a negative, zero or positive `i32`. A `SliceMut` method takes the view by value: it is reborrowed for the call and conflicts with a live element borrow |
-| `Tuple2<A, B>` ... `Tuple4` | Tuples (access: `.0`, `.1`); `Eq`, `Ord` (lexicographic), `Hash`, `Clone`, `Default` and `Format` when every element has them |
+| `(A, B)` ... 8 elements | Tuples (`Tuple2`..`Tuple8`, built by the compiler; access: `.0`, `.1`); `Eq`, `Ord` (lexicographic), `Hash`, `Clone`, `Default` and `Format` when every element has them |
 | `Iterator<T>` / `DoubleEndedIterator<T>` | `next`, `size_hint` (bounds; equal bounds are an exact size), `next_back`; the adapters of the prelude `iter` module (`map`, `filter`, `take`, `skip`, `chain`, `rev`, `zip`, `enumerate`, `flat_map`, `step_by`, `peekable`, ..) and consumers (`fold`, `any`, `all`, `find`, `min`, `max`, `collect`, `try_collect`, ..) are free functions; a `Range<T>` of a builtin integer is a double-ended iterator |
 | `Hash` / `Hasher` / `BuildHasher` | One method, `hash_into(h)`: feeds the value into a `Hasher` (derived: field by field, consistent only with the derived `Eq`; a type that writes its own `eq` must write `hash_into`, else a static assertion stops the build). Conforming is explicit (`@derive(Hash)`): interior-mutable types (`Cell`, `RefCell`, atomics, locks) are not `Hash`. `hash(&v)` is the prelude's 64-bit hash (`DefaultHasher`), the one `DefaultHash` maps use |
 | `Arc<T>` / `arc::Weak<T>` | Atomic reference counting; `downgrade`, `Weak::upgrade`, `get_mut`, `try_unwrap` |

@@ -217,9 +217,15 @@ modules.
 super-c fmt                  # format all .spc files in-place (the default; Wadler, width 120)
 super-c fmt --check          # exit non-zero if any file would change (CI gate)
 super-c fmt path/file.spc    # format specific paths; `fmt -` reads stdin
+super-c fmt --migrate        # also write the newer syntax (below)
 ```
 
-`@fmt.skip` on an item exempts it from formatting.
+`@fmt.skip` on an item exempts it from formatting. fmt keeps the `;` after a statement `switch` and
+after a value block's last expression, and `return a, b;`, as written. `--migrate` writes the newer
+forms instead: `switch x { .. }` with no `;`, a value block's last expression with no `;` (`if c {
+1 } else { 2 }`; value position is read from the syntax, so it needs no types), and
+`return (a, b);`. The compiler's own sources keep the older forms until a release reads the newer
+ones.
 
 ### Linting
 
@@ -228,8 +234,14 @@ super-c lint                 # default-on lints (errors on missing-free)
 super-c lint --fix           # apply machine fixes, re-lint to fixpoint
 super-c lint --const         # flag functions provably const-evaluable
 super-c lint --fix --const   # make those functions const, save compile time
+super-c lint --migrate       # also the uses the newer forms write shorter (below)
 super-c lint --target=linux --arch=x86_64 --target-cpu=x86-64-v3   # another target's items and features
 ```
+
+`lint --migrate` warns, with fixes, where a qualified variant value resolves bare (`Option::Some(x)`
+to `Some(x)` through the expected type or as a prelude variant; a qualifier with type arguments only
+where the expected type gives them) and where a call argument `x.as_str()` (`as_slice`,
+`as_mut_slice`) converts as `&x` (`&mut x`). `lint --migrate --fix` applies them.
 
 `lint` applies build.toml's `target-cpu` and `target-features` when the file exists, then the
 command line's, as a build does. In a project with `src/`, a subdirectory with its own

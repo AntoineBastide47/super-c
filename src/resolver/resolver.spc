@@ -838,29 +838,39 @@ extend Resolver {
                 return;
             }
         }
-        // `dyn_cast` (vtable type-id compare), `type_info` (reflection fold) and `fields` (the
-        // inline-for reflection binder) are compiler intrinsics: no declaration exists; the
-        // typechecker recognizes the unresolved name.
-        if span_is(self.source, name, "dyn_cast") || span_is(self.source, name, "type_info") || span_is(
-            self.source,
-            name,
-            "fields",
-        ) || span_is(self.source, name, "variants") || span_is(self.source, name, "payloads") || span_is(
-            self.source,
-            name,
-            "zeroed",
-        ) || span_is(self.source, name, "dangling") {
+        let nt = diag::span_str(self.source, name.start, name.end);
+        // `_` as a type leaves it to inference: the type checker allows it in a local's annotation and
+        // a call's type arguments only.
+        if ns == Namespace::NS_TYPE && nt == "_" {
             return;
         }
-        let nt = diag::span_str(self.source, name.start, name.end);
+        // A compiler intrinsic has no declaration, and a bare value name that a variant spells may be
+        // the variant the expected type gives (`Some(x)`, `Circle(r)`): the type checker resolves both.
+        if intrinsic_value_name(nt) || kind == "bare value" && self.variant_name(nt) {
+            return;
+        }
         if kind == QUALIFIER && self.package != null && self.prelude_module(nt) {
             // `iter::count`: the prelude's items are in scope by name; its modules are not.
             self.errors.emit_span(dc::CANNOT_FIND_MODULE, name, format("cannot find module '{}'", nt));
             self.errors.note(format("'{}' is a std module: add 'import std::{};'", nt, nt));
             return;
         }
-        self.errors.emit_span(dc::CANNOT_FIND, name, format("cannot find {} '{}'", kind, nt));
+        self.errors.emit_span(
+            dc::CANNOT_FIND,
+            name,
+            format("cannot find {} '{}'", pick(kind == "bare value", "value", kind), nt),
+        );
         self.errors.note(format("check spelling, imports, and whether the item is declared before this use"));
+    }
+
+    // Whether an enum of the package names a variant `name` (`PkgIndex::variant_names`).
+    fn variant_name(self: &Self, name: str) bool {
+        if self.package == null {
+            return true;
+        }
+        let idx = unsafe (*self.package).idx();
+        let s = idx.syms.find(name);
+        return s != loader::SYM_NONE && idx.variant_names.contains(&s);
     }
 
     // Whether the std prelude holds a module named `name` (`std/<name>.spc`, loaded as `__std::<name>`).
@@ -1655,7 +1665,7 @@ extend Resolver {
         switch kind {
             NODE_IDENTIFIER => {
                 // Also covers 'self'.
-                self.resolve_ref(id, id, Namespace::NS_VALUE, "value");
+                self.resolve_ref(id, id, Namespace::NS_VALUE, "bare value");
             },
             NODE_UNARY => {
                 let op = self.ast.at_const(id).as_data.unary.operand;
@@ -1705,7 +1715,7 @@ extend Resolver {
                         if t.decl != NODE_NONE {
                             self.resolve_ref_hit(cd.callee, t.decl, t.idx, Namespace::NS_TYPE);
                         } else {
-                            self.resolve_ref_miss(cd.callee, cname, Namespace::NS_VALUE, "value");
+                            self.resolve_ref_miss(cd.callee, cname, Namespace::NS_VALUE, "bare value");
                         }
                     }
                 } else {
@@ -1967,6 +1977,9 @@ extend Resolver {
             },
             NODE_PATTERN_TUPLE | NODE_PATTERN_STRUCT | NODE_PATTERN_FIELD => {
                 let children = self.ast.at_const(id).as_data.pattern.children;
+                if self.ast.at_const(id).kind != NodeKind::NODE_PATTERN_FIELD {
+                    self.resolve_expr(self.ast.at_const(id).as_data.pattern.qual);
+                }
                 for i in 0..children.len {
                     let c = self.child(children, i);
                     self.resolve_pattern(c);
@@ -2009,6 +2022,9 @@ extend Resolver {
             return;
         }
         if n.kind == NodeKind::NODE_PATTERN_NAME || n.kind == NodeKind::NODE_PATTERN_TUPLE || n.kind == NodeKind::NODE_PATTERN_STRUCT || n.kind == NodeKind::NODE_PATTERN_FIELD || n.kind == NodeKind::NODE_PATTERN_OR {
+            if n.kind == NodeKind::NODE_PATTERN_TUPLE || n.kind == NodeKind::NODE_PATTERN_STRUCT {
+                self.resolve_expr(n.as_data.pattern.qual);
+            }
             let children = n.as_data.pattern.children;
             for i in 0..children.len {
                 self.resolve_pattern_consts(self.child(children, i));

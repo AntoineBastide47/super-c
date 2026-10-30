@@ -410,6 +410,23 @@ pub interface TryInto<T> {
     fn try_into(self: Self) Result<T, Self::Error>;
 }
 
+/// A type that owns contiguous text: a call argument `&x` passes as the `str` view `as_str` gives.
+pub interface AsStr {
+    fn as_str(self: &Self) str;
+}
+
+/// A type that owns contiguous elements: a call argument `&x` passes as the `[]T` view `as_slice`
+/// gives.
+pub interface AsSlice<T> {
+    fn as_slice(self: &Self) []T;
+}
+
+/// A type that owns contiguous writable elements: a call argument `&mut x` passes as the `[]mut T` view
+/// `as_mut_slice` gives.
+pub interface AsSliceMut<T>: AsSlice<T> {
+    fn as_mut_slice(self: &mut Self) []mut T;
+}
+
 /// Index operator overloading. `T` is the element yielded by `obj[i]`; `S` is the sub-view yielded by
 /// `obj[lo..hi]` (`[]T` for containers, `str` for string types). `obj[i]` dispatches to `index`, and a
 /// reference-returning `index` makes `obj[i]` the element PLACE itself (the compiler inserts the deref),

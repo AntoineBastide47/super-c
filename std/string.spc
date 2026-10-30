@@ -699,11 +699,6 @@ extend<A: Allocator> String<A> {
         return &self.repr.small.data[0];
     }
 
-    /// The bytes as a borrowed `str` view: valid until the next mutation and, for a small string, until a move.
-    pub const fn as_str(self: &String<A>) str {
-        return unsafe str::from_raw(self.as_ptr(), self.len());
-    }
-
     /// Borrowed iterators over the bytes: delegate to the `str` view: valid until the next mutation, and
     /// only while `self` is alive (bind the String to a `let`; do not iterate a temporary's iterator).
     pub const fn bytes(self: &String<A>) Bytes {
@@ -1540,4 +1535,11 @@ const fn sugar_fill_byte(fill: str) u8 {
         return b' ';
     }
     return fill[0];
+}
+
+extend<A: Allocator> String<A> as AsStr {
+    /// The bytes as a borrowed `str` view: valid until the next mutation and, for a small string, until a move.
+    pub const fn as_str(self: &String<A>) str {
+        return unsafe str::from_raw(self.as_ptr(), self.len());
+    }
 }
