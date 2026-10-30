@@ -679,7 +679,8 @@ On x86_64 each function with vector code and no features of its own also gets a 
 the compile of vector code longer) and in a script build without `--profile`;
 levels the build's set holds skipped; `off` for none), and opens with a check: when the CPU has a
 level's features, it calls that level's copy, the highest first (`__sc_simd_lvl()`: the
-detector's answer, read once per TU). A copy calls copies, so one check runs where code without the
+detector's answer, read once per TU of the C tree; in a native build a byte a constructor sets before
+`main`, 0 (no copy) until then). A copy calls copies, so one check runs where code without the
 features enters vector code; a build at a level above the list makes none. The level list is part
 of the emit stamp. `SC_SIMD_LEVEL=<k>` (a test switch) sets the level the checks read.
 

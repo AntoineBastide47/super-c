@@ -79,7 +79,12 @@ under the build's set with `if (__sc_simd_lvl() >= k) return <name>__fs<hex>(<it
 the highest level first (the `__r` split body forwards to the copy's `__r`), and demands each copy
 (its function, symbol, substitutions and closure suffix plus the level's suffix, `fs` the level's
 set). `simd_level_fn` writes `__sc_simd_lvl()` into the forward header (a relaxed per-TU cache over
-`sc_cpu_words` and `SC_SIMD_LEVEL`). The levels join the emit stamp's `opt` line and the TU cache
+`sc_cpu_words` and `SC_SIMD_LEVEL`). A native build renders no C: the prologue only demands the copies
+and lists them (`CEmit.disp`), and the LIR of the function opens with the same choice (`Lower::entry`:
+each copy's call forwards the function's parameters and returns its result) over the byte `__sc_simd_lv`,
+one per program in the registry object (`native_registry`, `simd_level_init`): 0, the build's features,
+until the registry's constructor `__sc_simd_init` sets it before `main` from `sc_cpu_words` and
+`SC_SIMD_LEVEL`; code that runs before it takes the original. The levels join the emit stamp's `opt` line and the TU cache
 header. The interpreter traps on a call of such a function ("`f` has no compile-time
 value"). `ir::facts::call_access` reads the memory annotations (`MA_READ`, `MA_WRITE`, `MA_LANES`);
 `term_effect` gives an annotated read `EF_NONE` and a write `EF_PTR` through its argument.
