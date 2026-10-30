@@ -352,6 +352,308 @@ fn constant_products_and_paired_accesses_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Rotations (`lv::FOLD_ROT`: a constant amount, a masked amount and its negation through extensions, a
+// right one; 8 and 16 bits, by a constant and by a register either way, which arm64 rotates in a 32-bit
+// register filled with the value's copies; a masked `xor` of shifts, which a 0 amount sets to 0, stays two
+// shifts),
+// high products of every width (`mulhs`, `mulhu`: a constant first in rax on x86-64), sums an address
+// computes (`lv::FOLD_LEA`: a shifted index, a displacement, an inner sum, an operand that stays live) and
+// products by constants (`lea` pairs, a shift and a sum, a negation), with their results; a sum on memory
+// whose other operand folds into it (a shifted index, an inner sum), which x86-64 computes in a register,
+// not on memory (`add [m], r`): its object builds for x86-64 on any host. A narrow result returns
+// zero-extended: the driver reads it unsigned.
+@test
+fn rotations_high_products_and_address_sums_run() {
+    let lir = M"(lir ptr 8
+sym @rl64 fn global
+sym @rr32 fn global
+sym @rc64 fn global
+sym @r8 fn global
+sym @rc8 fn global
+sym @r16r fn global
+sym @rx fn global
+sym @hs64 fn global
+sym @hs32 fn global
+sym @hs16 fn global
+sym @hs8 fn global
+sym @hu64 fn global
+sym @hu32 fn global
+sym @hv64 fn global
+sym @lea fn global
+sym @live fn global
+sym @lsub fn global
+sym @idx fn global
+sym @ks fn global
+sym @mi fn global
+sym @ms fn global
+fn @rl64
+  sig (i64, i32) -> i64
+b0(v0: i64, v1: i32):
+  v2 = iconst.i32 63
+  v3 = iconst.i32 64
+  v4 = and.i32 v1, v2
+  v5 = zext.i64 v4
+  v6 = shl.i64 v0, v5
+  v7 = sub.i32 v3, v4
+  v8 = and.i32 v7, v2
+  v9 = zext.i64 v8
+  v10 = lshr.i64 v0, v9
+  v11 = or.i64 v6, v10
+  ret v11
+fn @rr32
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 31
+  v3 = and.i32 v1, v2
+  v4 = lshr.i32 v0, v3
+  v5 = neg.i32 v1
+  v6 = and.i32 v5, v2
+  v7 = shl.i32 v0, v6
+  v8 = or.i32 v4, v7
+  ret v8
+fn @rc64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 13
+  v2 = iconst.i64 51
+  v3 = shl.i64 v0, v1
+  v4 = lshr.i64 v0, v2
+  v5 = xor.i64 v3, v4
+  ret v5
+fn @r8
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = iconst.i8 7
+  v3 = iconst.i8 8
+  v4 = and.i8 v1, v2
+  v5 = shl.i8 v0, v4
+  v6 = sub.i8 v3, v4
+  v7 = and.i8 v6, v2
+  v8 = lshr.i8 v0, v7
+  v9 = or.i8 v5, v8
+  ret v9
+fn @rc8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 3
+  v2 = iconst.i8 5
+  v3 = shl.i8 v0, v1
+  v4 = lshr.i8 v0, v2
+  v5 = or.i8 v3, v4
+  ret v5
+fn @r16r
+  sig (i16, i32) -> i16
+b0(v0: i16, v1: i32):
+  v2 = iconst.i32 15
+  v3 = and.i32 v1, v2
+  v4 = trunc.i16 v3
+  v5 = lshr.i16 v0, v4
+  v6 = neg.i32 v1
+  v7 = and.i32 v6, v2
+  v8 = trunc.i16 v7
+  v9 = shl.i16 v0, v8
+  v10 = or.i16 v5, v9
+  ret v10
+fn @rx
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 63
+  v3 = and.i64 v1, v2
+  v4 = shl.i64 v0, v3
+  v5 = neg.i64 v1
+  v6 = and.i64 v5, v2
+  v7 = lshr.i64 v0, v6
+  v8 = xor.i64 v4, v7
+  ret v8
+fn @hs64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 6148914691236517206
+  v2 = mulhs.i64 v0, v1
+  ret v2
+fn @hs32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 -1840700269
+  v2 = mulhs.i32 v0, v1
+  ret v2
+fn @hs16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = iconst.i16 21846
+  v2 = mulhs.i16 v1, v0
+  ret v2
+fn @hs8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 -109
+  v2 = mulhs.i8 v0, v1
+  ret v2
+fn @hu64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 -6148914691236517205
+  v2 = mulhu.i64 v1, v0
+  ret v2
+fn @hu32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 2863311531
+  v2 = mulhu.i32 v0, v1
+  ret v2
+fn @hv64
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = mulhs.i64 v0, v1
+  ret v2
+fn @lea
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 3
+  v3 = shl.i64 v1, v2
+  v4 = add.i64 v0, v3
+  v5 = iconst.i64 40
+  v6 = add.i64 v4, v5
+  ret v6
+fn @live
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = add.i64 v0, v1
+  v3 = xor.i64 v2, v0
+  ret v3
+fn @lsub
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = add.i32 v0, v1
+  v3 = iconst.i32 9
+  v4 = sub.i32 v2, v3
+  ret v4
+fn @idx
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = shl.i64 v0, v1
+  v3 = iconst.i64 7
+  v4 = add.i64 v2, v3
+  ret v4
+fn @ks
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 15
+  v2 = mul.i64 v0, v1
+  v3 = iconst.i64 13
+  v4 = mul.i64 v0, v3
+  v5 = iconst.i64 -9
+  v6 = mul.i64 v0, v5
+  v7 = iconst.i64 -16
+  v8 = mul.i64 v0, v7
+  v9 = iconst.i64 33
+  v10 = mul.i64 v0, v9
+  v11 = iconst.i64 45
+  v12 = mul.i64 v0, v11
+  v13 = add.i64 v2, v4
+  v14 = xor.i64 v13, v6
+  v15 = add.i64 v14, v8
+  v16 = xor.i64 v15, v10
+  v17 = add.i64 v16, v12
+  ret v17
+fn @mi
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 3
+  v3 = shl.i64 v1, v2
+  v4 = load.i64 v0 align 3
+  v5 = add.i64 v4, v3
+  store v5, v0 align 3
+  ret
+fn @ms
+  sig (ptr, i64, i64) -> void
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = add.i64 v1, v2
+  v4 = load.i64 v0+8 align 3
+  v5 = add.i64 v4, v3
+  store v5, v0+8 align 3
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the x86-64 object",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t rl64(int64_t, int32_t);
+int32_t rr32(int32_t, int32_t);
+int64_t rc64(int64_t);
+uint8_t r8(int8_t, int8_t);
+uint8_t rc8(int8_t);
+uint16_t r16r(int16_t, int32_t);
+int64_t rx(int64_t, int64_t);
+int64_t hs64(int64_t);
+int32_t hs32(int32_t);
+uint16_t hs16(int16_t);
+uint8_t hs8(int8_t);
+int64_t hu64(int64_t);
+int32_t hu32(int32_t);
+int64_t hv64(int64_t, int64_t);
+int64_t lea(int64_t, int64_t);
+int64_t live(int64_t, int64_t);
+int32_t lsub(int32_t, int32_t);
+int64_t idx(int64_t);
+int64_t ks(int64_t);
+void mi(int64_t *, int64_t);
+void ms(int64_t *, int64_t, int64_t);
+static uint64_t rot(uint64_t x, unsigned s, unsigned w) {
+  uint64_t m = w == 64 ? ~UINT64_C(0) : (UINT64_C(1) << w) - 1;
+  x &= m;
+  s %= w;
+  return s == 0 ? x : ((x << s) | (x >> (w - s))) & m;
+}
+int main(void) {
+  static const int64_t xs[] = {0, 1, -1, 3, 0x5A, -0x80, INT64_MIN, INT64_MAX, INT64_C(0x123456789ABCDEF0), -INT64_C(1000000007)};
+  for (int i = 0; i < 10; i++) {
+    int64_t x = xs[i];
+    uint64_t u = (uint64_t)x;
+    for (int n = -3; n < 140; n++) {
+      if ((uint64_t)rl64(x, n) != rot(u, (unsigned)n & 63, 64)) return 1;
+      if ((uint32_t)rr32((int32_t)x, n) != (uint32_t)rot(u, (32 - ((unsigned)n & 31)) & 31, 32)) return 2;
+      if (r8((int8_t)x, (int8_t)n) != (uint8_t)rot(u, (unsigned)n & 7, 8)) return 3;
+      if (r16r((int16_t)x, n) != (uint16_t)rot(u, (16 - ((unsigned)n & 15)) & 15, 16)) return 18;
+      unsigned s = (unsigned)n & 63;
+      if ((uint64_t)rx(x, n) != ((u << s) ^ (u >> ((0u - (unsigned)n) & 63)))) return 4;
+    }
+    if ((uint64_t)rc64(x) != rot(u, 13, 64)) return 5;
+    if (rc8((int8_t)x) != (uint8_t)rot(u, 3, 8)) return 19;
+    if (hs64(x) != (int64_t)(((__int128)x * INT64_C(6148914691236517206)) >> 64)) return 6;
+    if (hs32((int32_t)x) != (int32_t)(((int64_t)(int32_t)x * -1840700269) >> 32)) return 7;
+    if (hs16((int16_t)x) != (uint16_t)(((int32_t)(int16_t)x * 21846) >> 16)) return 8;
+    if (hs8((int8_t)x) != (uint8_t)(((int32_t)(int8_t)x * -109) >> 8)) return 9;
+    if ((uint64_t)hu64(x) != (uint64_t)(((unsigned __int128)u * UINT64_C(0xAAAAAAAAAAAAAAAB)) >> 64)) return 10;
+    if ((uint32_t)hu32((int32_t)x) != (uint32_t)(((uint64_t)(uint32_t)x * UINT64_C(0xAAAAAAAB)) >> 32)) return 11;
+    for (int j = 0; j < 10; j++) {
+      int64_t y = xs[j];
+      uint64_t v = (uint64_t)y;
+      if (hv64(x, y) != (int64_t)(((__int128)x * y) >> 64)) return 12;
+      if ((uint64_t)lea(x, y) != u + (v << 3) + 40) return 13;
+      if ((uint64_t)live(x, y) != ((u + v) ^ u)) return 14;
+      if ((uint32_t)lsub((int32_t)x, (int32_t)y) != (uint32_t)u + (uint32_t)v - 9) return 15;
+    }
+    if ((uint64_t)idx(x) != (u << 1) + 7) return 16;
+    if ((uint64_t)ks(x) != (((u * 15 + u * 13) ^ (u * (uint64_t)-9)) + u * (uint64_t)-16 ^ u * 33) + u * 45) return 17;
+  }
+  int64_t m[2] = {5, 7};
+  mi(m, 3);
+  ms(m, 10, -4);
+  if (m[0] != 29 || m[1] != 13) return 20;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // An aggregate passed in registers whose entry block only loads its parts: the loads take the registers
 // when no call comes before them, and read its memory after one (the call writes the registers: its
 // result arrives in the first one).

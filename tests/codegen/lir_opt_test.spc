@@ -1703,6 +1703,40 @@ b3:
     same_result(&b, &a, "f", none, 1249500);
 }
 
+// A truncation keeps its operand's bound when the narrower type holds it: `trunc.i8 (x & 7) < 8` holds;
+// `trunc.i8 (x & 496)` may be any multiple of 16, so its `< 200` stays.
+@test
+fn a_truncation_keeps_the_bound_its_type_holds() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (i32) -> i64
+b0(v0: i32):
+  v1 = iconst.i32 7
+  v2 = iconst.i8 8
+  v3 = iconst.i32 496
+  v4 = iconst.i8 200
+  v5 = and.i32 v0, v1
+  v6 = trunc.i8 v5
+  v7 = icmp.ult v6, v2
+  v8 = and.i32 v0, v3
+  v9 = trunc.i8 v8
+  v10 = icmp.ult v9, v4
+  v11 = zext.i64 v7
+  v12 = zext.i64 v10
+  v13 = add.i64 v11, v12
+  ret v13
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(count_of(&t, "icmp.ult") == 1, t.as_str());
+    let small: []u64 = [0x2C];
+    same_result(&b, &a, "f", small, 2);
+    let big: []u64 = [0xF0];
+    same_result(&b, &a, "f", big, 1);
+}
+
 // A store that a later store to the same bytes overwrites, with no read between, goes (`@rng`: one
 // store of the state stays); a load between (`@peek`) or a copy that reads the place (`@copy`, which
 // becomes a load and a store) keeps it.
@@ -2293,6 +2327,183 @@ b0(v0: ptr):
     let equal: []u64 = [2, 2];
     same_result(&b, &a, "lt", equal, 0);
     assert(!text_of(&a, "round").contains("inttoptr"), text_of(&a, "round").as_str());
+}
+
+// A quotient or remainder by a constant is a high product (`mulhu`; signed, `mulhs` corrected by the
+// dividend where the multiplier's sign is not the divisor's) or, signed by a power of two, shifts: the
+// division's result for every divisor and dividend of 8 bits, and of 16, 32 and 64 bits for the divisors
+// next to each power of two, the extremes and others, on the dividends at the edges and next to the
+// divisor's multiples there. By 0, and signed by -1, it stays a division.
+@test
+fn quotients_by_constants_give_the_division() {
+    let ops: [str; 4] = ["sdiv", "srem", "udiv", "urem"];
+    let mut src = String::from_str("lir ptr 8\n");
+    let mut body = String::new();
+    // Per function: the operation << 8 | the width, and the divisor sign-extended.
+    let mut kind = Vector::<u32>::new();
+    let mut divs = Vector::<i64>::new();
+    for wi in 0..4u32 {
+        let w = 8u32 << wi;
+        let mut ds = Vector::<i64>::new();
+        if w == 8 {
+            for d in -128..128i64 {
+                ds.push(d);
+            }
+        } else {
+            // Next to each power of two (the multiplier's width and the correction change there); the powers
+            // themselves at a few exponents.
+            for k in 2..w - 1 {
+                let p = 1i64 << k as i64;
+                let near: [i64; 3] = [p - 1, p + 1, -p - 1];
+                for q in 0..3usize {
+                    ds.push(unsafe near[q]);
+                }
+            }
+            let pw: [i64; 5] = [2, 4, 1i64 << (w / 2) as i64, 1i64 << (w - 2) as i64, -(1i64 << (w - 2) as i64)];
+            for q in 0..5usize {
+                ds.push(unsafe pw[q]);
+            }
+            let more: [i64; 7] = [3, 6, 7, 10, 100, 641, 1000];
+            for q in 0..7usize {
+                ds.push(unsafe more[q]);
+                ds.push(-unsafe more[q]);
+            }
+            ds.push(wmin(w));
+            ds.push(wmin(w) + 1);
+            ds.push(wmax(w));
+            ds.push(wmax(w) - 1);
+        }
+        for op in 0..4u32 {
+            for q in 0..ds.len() {
+                let d = ds[q];
+                if d == 0 || op < 2 && d == -1 {
+                    continue;
+                }
+                let n = kind.len();
+                src.push_str(format("sym @d{} fn global\n", n).as_str());
+                body.push_str(
+                    format(
+                        "fn @d{}\n  sig (i{}) -> i{}\nb0(v0: i{}):\n  v1 = iconst.i{} {}\n  v2 = {}.i{} v0, v1\n  ret v2\n",
+                        n,
+                        w,
+                        w,
+                        w,
+                        w,
+                        d,
+                        unsafe ops[op as usize],
+                        w,
+                    ).as_str(),
+                );
+                kind.push(op << 8 | w);
+                divs.push(d);
+            }
+        }
+    }
+    // The two that stay divisions.
+    src.push_str("sym @zero fn global\nsym @minus fn global\n");
+    body.push_str("fn @zero\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 0\n  v2 = udiv.i32 v0, v1\n  ret v2\n");
+    body.push_str(
+        "fn @minus\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 -1\n  v2 = sdiv.i64 v0, v1\n  ret v2\n",
+    );
+    src.push_str(body.as_str());
+    let (_, a) = optimized(src.as_str());
+    assert(text_of(&a, "zero").contains("udiv") && text_of(&a, "minus").contains("sdiv"), "0 and -1 stay");
+    // Those two alone divide.
+    let mut all = String::new();
+    lprint::print_package(&a, &mut all);
+    let n = count_of(&all, "div.") + count_of(&all, "rem.");
+    assert(n == 2, all.as_str());
+    let mut e = leval::Eval::new(&a);
+    let mut xs = Vector::<i64>::new();
+    let mut args: [u64; 1] = [0];
+    for f in 0..kind.len() {
+        let w = kind[f] & 0xFF;
+        let op = kind[f] >> 8;
+        let d = divs[f];
+        let name = format("d{}", f);
+        // The dividends: every one of 8 bits; else the edges, and those next to the multiples of the divisor
+        // nearest them.
+        xs.truncate(0);
+        let lo = wmin(w);
+        let hi = wmax(w);
+        if w == 8 {
+            for x in -128..128i64 {
+                xs.push(x);
+            }
+        }
+        let edges: [i64; 9] = [0, 1, 2, 3, -1, -2, lo, lo + 1, hi];
+        for q in 0..pick(w == 8, 0usize, 9usize) {
+            xs.push(unsafe edges[q]);
+        }
+        let ad = if d < 0 && d != lo {
+            -d;
+        } else {
+            d;
+        };
+        if ad > 0 && w != 8 {
+            let m = hi - hi % ad;
+            let near: [i64; 5] = [m - 1, m, -m - 1, -m, -m + 1];
+            for q in 0..5usize {
+                xs.push(unsafe near[q]);
+            }
+            if m < hi {
+                xs.push(m + 1);
+            }
+        }
+        let mask = if w == 64 {
+            ~0u64;
+        } else {
+            (1u64 << w as u64) - 1;
+        };
+        for q in 0..xs.len() {
+            let x = xs[q];
+            // The evaluator's values are their bits under the width.
+            args[0] = x as u64 & mask;
+            let o = e.run(a.find_symbol(name.as_str()), args);
+            assert(o.kind == leval::EV_OK, o.msg.as_str());
+            let want = divided(op, x, d, mask);
+            if ((o.value ^ want) & mask) != 0 {
+                eprint(
+                    "{} {} by {} at {} bits: {} for {}\n",
+                    unsafe ops[op as usize],
+                    x,
+                    d,
+                    w,
+                    o.value & mask,
+                    want & mask,
+                );
+                assert(false, text_of(&a, name.as_str()).as_str());
+            }
+        }
+    }
+}
+
+// Operation `op` of `quotients_by_constants_give_the_division` (`sdiv`, `srem`, `udiv`, `urem`) of `x` by
+// `d`, both sign-extended; unsigned, their bits under `mask`.
+fn divided(op: u32, x: i64, d: i64, mask: u64) u64 {
+    if op == 0 {
+        return (x / d) as u64;
+    }
+    if op == 1 {
+        return (x % d) as u64;
+    }
+    let ux = x as u64 & mask;
+    let ud = d as u64 & mask;
+    return if op == 2 {
+        ux / ud;
+    } else {
+        ux % ud;
+    };
+}
+
+// The least value of `w` signed bits.
+fn wmin(w: u32) i64 {
+    return i64::MIN >> (64 - w) as i64;
+}
+
+// The greatest value of `w` signed bits.
+fn wmax(w: u32) i64 {
+    return i64::MAX >> (64 - w) as i64;
 }
 
 // A branch whose sides join a block other edges enter too becomes a select on its own edge; a loop

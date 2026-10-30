@@ -248,7 +248,10 @@ pub(package) const O_VZIPHI: u8 = 82;
 pub(package) const O_VEXTRACT: u8 = 83;
 /// Vector `a` (of the result's type) with lane `aux` replaced by scalar `b`.
 pub(package) const O_VINSERT: u8 = 84;
-pub(package) const OP_COUNT: u8 = 85;
+/// The high half of the signed product of two integers of up to 64 bits: `(a * b) >> bits`, the product
+/// exact (signed division by a constant, `lir::opt`).
+pub(package) const O_MULHS: u8 = 85;
+pub(package) const OP_COUNT: u8 = 86;
 
 /// One opcode: its text name and its operand form.
 pub(package) struct OpInfo {
@@ -256,7 +259,7 @@ pub(package) struct OpInfo {
     pub(package) form: u8,
 }
 
-pub(package) const OPS: [OpInfo; 85] = [
+pub(package) const OPS: [OpInfo; 86] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -342,6 +345,7 @@ pub(package) const OPS: [OpInfo; 85] = [
     OpInfo { name: "vziphi", form: F_BIN },
     OpInfo { name: "vextract", form: F_UN },
     OpInfo { name: "vinsert", form: F_BIN },
+    OpInfo { name: "mulhs", form: F_BIN },
 ];
 
 /// The mask a lane-wise comparison of vectors of type `t` gives (`O_VCMP`): integer lanes of its lanes'

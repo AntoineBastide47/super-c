@@ -1379,7 +1379,7 @@ extend Gen {
         if op == O_FCMP {
             return self.fcmp(i, t);
         }
-        if op == O_MULHU {
+        if op == O_MULHU || op == O_MULHS {
             return self.mulhu(i, t);
         }
         if op == O_FMA {
@@ -1578,28 +1578,45 @@ extend Gen {
         return true;
     }
 
-    // The high half of an unsigned product: up to 32 bits, the zero-extended operands' 64-bit product shifted
-    // down; 64 bits, from the four products of the operands' 32-bit halves (wasm has no wider multiply):
-    // high = ah * bh + (ah * bl >> 32) + (cross >> 32), cross = (al * bl >> 32) + (ah * bl & m) + al * bh.
+    // The high half of a product (`O_MULHU`, `O_MULHS`): up to 32 bits, the extended operands' 64-bit
+    // product shifted down; 64 bits, from the four products of the operands' 32-bit halves (wasm has no
+    // wider multiply): high = ah * bh + (ah * bl >> 32) + (cross >> 32), cross = (al * bl >> 32) +
+    // (ah * bl & m) + al * bh, less for a signed one each operand where the other is negative.
     fn mulhu(self: &mut Self, i: u32, t: Inst) bool {
+        let sgn = t.op == O_MULHS;
         if t.ty != T_I64 {
             let bits = type_bits(t.ty, 4);
-            self.get_ext(t.a, false);
-            self.c.op(w::I64_EXTEND_I32_U);
-            self.get_ext(t.b, false);
-            self.c.op(w::I64_EXTEND_I32_U);
+            let ext = if sgn {
+                w::I64_EXTEND_I32_S;
+            } else {
+                w::I64_EXTEND_I32_U;
+            };
+            self.get_ext(t.a, sgn);
+            self.c.op(ext);
+            self.get_ext(t.b, sgn);
+            self.c.op(ext);
             self.c.op(w::I64_MUL);
             self.c.i64_const(bits);
-            self.c.op(w::I64_SHR_U);
+            self.c.op(
+                if sgn {
+                    w::I64_SHR_S;
+                } else {
+                    w::I64_SHR_U;
+                },
+            );
             self.c.op(w::I32_WRAP_I64);
+            // A signed narrow result back to its bits zero-extended, as every value of its type.
+            if sgn {
+                self.canon(t.ty);
+            }
             self.put(i);
             return true;
         }
-        let al = self.tmp(T_I64);
-        let ah = self.tmp(T_I64);
-        let bl = self.tmp(T_I64);
-        let bh = self.tmp(T_I64);
-        let hl = self.tmp(T_I64);
+        let al = self.tmp(w::I64);
+        let ah = self.tmp(w::I64);
+        let bl = self.tmp(w::I64);
+        let bh = self.tmp(w::I64);
+        let hl = self.tmp(w::I64);
         self.halves(t.a, al, ah);
         self.halves(t.b, bl, bh);
         // hl = ah * bl
@@ -1632,6 +1649,21 @@ extend Gen {
         self.c.i64_const(32);
         self.c.op(w::I64_SHR_U);
         self.c.op(w::I64_ADD);
+        if sgn {
+            for k in 0..2u32 {
+                let (x, y) = if k == 0 {
+                    (t.a, t.b);
+                } else {
+                    (t.b, t.a);
+                };
+                self.get(x);
+                self.c.i64_const(63);
+                self.c.op(w::I64_SHR_S);
+                self.get(y);
+                self.c.op(w::I64_AND);
+                self.c.op(w::I64_SUB);
+            }
+        }
         self.put(i);
         return true;
     }

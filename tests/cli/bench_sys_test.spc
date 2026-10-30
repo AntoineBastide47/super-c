@@ -95,6 +95,17 @@ fn disabled_accounting_counts_nothing() {
     assert_eq(unsafe sys::sc_bs_alloc_enabled(), 0);
 }
 
+// The resident set reads as the process's, at least 1 MiB, or as unavailable (-1). On macOS it comes from
+// the record `proc_pid_rusage` writes, as the cycle count does: a field read at another offset (the
+// record reordered) gave 2 bytes, and cycles that never advanced.
+@test
+fn resident_memory_is_the_process_s() {
+    let now = unsafe sys::sc_bs_rss_now();
+    assert(now == -1 || now >= 1048576, "the resident set is at least 1 MiB");
+    let peak = unsafe sys::sc_bs_rss_peak();
+    assert(peak == -1 || peak >= 1048576, "the peak resident set is at least 1 MiB");
+}
+
 // Four threads each perform BURN_ITERS dependent multiplies while the calling thread only waits in
 // `join`: a caller-only counter would report near zero, while a counter that covers every thread must
 // report at least one cycle per multiply of every thread. Bounded by WORK, not by time, so the check holds

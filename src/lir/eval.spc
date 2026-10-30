@@ -545,6 +545,13 @@ extend Eval {
             self.vals[dst as usize] = (x * y >> bits as usize) as u64;
             return true;
         }
+        if op == O_MULHS {
+            let bits = type_bits(t.ty, ptr);
+            let x = sign_ext(self.val(&f, b, t.a), bits) as i128;
+            let y = sign_ext(self.val(&f, b, t.b), bits) as i128;
+            self.vals[dst as usize] = trunc_bits((x * y >> bits as usize) as u64, bits);
+            return true;
+        }
         if op == O_CLZ || op == O_CTZ || op == O_POPCNT {
             let bits = type_bits(t.ty, ptr);
             let x = trunc_bits(self.val(&f, b, t.a), bits);

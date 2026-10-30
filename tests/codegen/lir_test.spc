@@ -267,9 +267,10 @@ b2(v49: i64):
   switch v49 [0 -> b3, -1 -> b4(v49)] else b5
 b3: unlikely
   v50 = mulhu.i64 v49, v49
-  jmp b4(v50)
-b4(v51: i64):
-  ret v51
+  v51 = mulhs.i64 v50, v49
+  jmp b4(v51)
+b4(v52: i64):
+  ret v52
 b5:
   unreachable
 fn @floats

@@ -376,7 +376,7 @@ extend Verifier {
                 "a mask and two vectors of the result's type",
             );
         }
-        if op == O_MULHU {
+        if op == O_MULHU || op == O_MULHS {
             return self.need(
                 name,
                 b,

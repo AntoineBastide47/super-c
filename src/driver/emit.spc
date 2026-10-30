@@ -6252,6 +6252,7 @@ pub(package) fn cemit_package(
             nks.push(nat_key(p, &tuc.keys, m));
         }
     }
+    bst::mark_sub(bst::S_LOWERED);
     // An optimizing build optimizes the finished LIR: every constant's data is defined by now.
     if p.lir_opt && p.ok && cem.lir.is_some() {
         let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
@@ -15625,6 +15626,7 @@ pub(package) fn run_package(
                 return 1;
             }
         }
+        bst::mark_sub(bst::S_GENERATED);
         let isnat = &nat_mod;
         let mut lm2 = Vector::<ModuleId>::new();
         for k in 0..lm.len() {

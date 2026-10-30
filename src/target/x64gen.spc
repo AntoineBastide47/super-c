@@ -829,12 +829,154 @@ extend Gen {
     // A register for the result of value `v` that holds operand `a`'s bits (in `ra`) for a two-operand
     // instruction: `ra` itself when `a` dies here and `v` takes no fixed home, else a copy of it.
     fn def_from(self: &mut Self, v: Value, a: Value, ra: u8) u8 {
+        let rd = self.def_over(v, a, ra);
+        if rd != ra {
+            self.move_reg(self.vt(v), rd, ra);
+        }
+        return rd;
+    }
+
+    // Product `i` of operand `a` (in `ra`) by constant `k` in one-cycle instructions where they take less
+    // time than `imul`'s three cycles (LLVM's x86 lowering): an address (`lea`) by c of 3, 5 or 9; one then
+    // a shift by c * 2^s; two by c * d (d also of 3, 5 or 9) and by 1 + c * 2^j (j of 1 to 3); a shift and
+    // a sum or difference by 2^s + 1 and 2^s - 1; a negation after the first by -c and after a shift by
+    // -2^s. Whether it did.
+    fn mul_const(self: &mut Self, i: u32, a: Value, sz: u32, ra: u8, k: i64) bool {
+        let tz = if k > 0 {
+            k.trailing_zeros() as u32;
+        } else {
+            0u32;
+        };
+        let odd = k >> tz as i64;
+        if k > 0 && lea_factor(odd) {
+            let rd = self.def(i);
+            self.lea_to(sz, rd, x::ix(ra, ra, (odd - 1).trailing_zeros() as u8, 0));
+            if tz != 0 {
+                self.c.shift_ri(x::SHL, sz, rd, tz);
+            }
+            return true;
+        }
+        if k > 0 {
+            for q in 0..3u32 {
+                let c: i64 = if q == 0 {
+                    3;
+                } else if q == 1 {
+                    5;
+                } else {
+                    9;
+                };
+                let sc = (c - 1).trailing_zeros() as u8;
+                if k % c == 0 && lea_factor(k / c) {
+                    let rd = self.def(i);
+                    self.lea_to(sz, rd, x::ix(ra, ra, sc, 0));
+                    self.lea_to(sz, rd, x::ix(rd, rd, (k / c - 1).trailing_zeros() as u8, 0));
+                    return true;
+                }
+                for j in 1..4u8 {
+                    if k == 1 + (c << j as i64) {
+                        // c times the operand in the result's register, unless that is the operand's.
+                        let rd = self.def(i);
+                        let s = if rd == ra {
+                            self.tmp(false);
+                        } else {
+                            rd;
+                        };
+                        self.lea_to(sz, s, x::ix(ra, ra, sc, 0));
+                        self.lea_to(sz, rd, x::ix(ra, s, j, 0));
+                        return true;
+                    }
+                }
+            }
+        }
+        // 2^s + 1 past 9, 2^s - 1 from 7: the operand shifted, then it added or subtracted.
+        let plus = k > 9 && (k - 1 & k - 2) == 0;
+        if plus || k >= 7 && (k & k + 1) == 0 {
+            let sh = if plus {
+                (k - 1).trailing_zeros() as u32;
+            } else {
+                (k + 1).trailing_zeros() as u32;
+            };
+            let op = if plus {
+                x::ADD;
+            } else {
+                x::SUB;
+            };
+            let rd = self.def(i);
+            let src = if rd == ra {
+                let s = self.tmp(false);
+                self.c.mov_rr(sz, s, ra);
+                s;
+            } else {
+                self.c.mov_rr(sz, rd, ra);
+                ra;
+            };
+            self.c.shift_ri(x::SHL, sz, rd, sh);
+            self.c.alu_rr(op, sz, rd, src);
+            return true;
+        }
+        if k < 0 && k > -2147483648 {
+            let n = -k;
+            if lea_factor(n) {
+                let rd = self.def(i);
+                self.lea_to(sz, rd, x::ix(ra, ra, (n - 1).trailing_zeros() as u8, 0));
+                self.c.unary(x::NEG, sz, rd);
+                return true;
+            }
+            if n >= 2 && (n & n - 1) == 0 {
+                let rd = self.def_from(i, a, ra);
+                self.c.shift_ri(x::SHL, sz, rd, n.trailing_zeros() as u32);
+                self.c.unary(x::NEG, sz, rd);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Whether value `v` is an instruction that folds into its use (`lv::FOLD_*`).
+    const fn folded(self: &Self, v: Value) bool {
+        return v != VNONE && (v & (VPARAM | VFLAG)) == 0 && self.lv.pfold[v as usize];
+    }
+
+    // `rd` = the address `m` computes (`lea`); 32 bits of it for a value narrower than 64 (`sz`), whose
+    // upper bits nothing reads.
+    fn lea_to(self: &mut Self, sz: u32, rd: u8, m: x::Mem) {
+        self.c.rm(0, 0x8D, sz == 8, rd, m, false);
+    }
+
+    // Sum `i` as one `lea` of address `f` (`lv::lea_of`; an index alone shifted by at most 1).
+    fn lea_sum(self: &mut Self, i: u32, sz: u32, f: lv::Lea) {
+        let rb = if f.base == VNONE {
+            NOREG;
+        } else {
+            self.reg(f.base);
+        };
+        let ri = if f.index == VNONE {
+            NOREG;
+        } else {
+            self.reg(f.index);
+        };
+        let rd = self.def(i);
+        let d = f.disp as i32;
+        let m = if ri == NOREG {
+            x::at(rb, d);
+        } else if rb == NOREG && f.sh == 0 {
+            x::at(ri, d);
+        } else if rb == NOREG {
+            x::ix(ri, ri, 0, d);
+        } else {
+            x::ix(rb, ri, f.sh as u8, d);
+        };
+        self.lea_to(sz, rd, m);
+    }
+
+    // The register `def_from` gives value `v` over operand `a` (in `ra`), without the copy of `a` into it:
+    // `ra` when `v` may take it.
+    fn def_over(self: &mut Self, v: Value, a: Value, ra: u8) u8 {
         let x = self.vx(v);
         let xa = self.vx(a);
         let t = self.vt(v);
         let sr = self.def_shared(v, a);
         if sr != NOREG {
-            self.move_reg(t, sr, ra);
             return sr;
         }
         let fixed = self.va[x as usize].home == H_FIXED || self.fix_class(x) != FIX_NONE;
@@ -852,9 +994,7 @@ extend Gen {
                 return ra;
             }
         }
-        let rd = self.def(v);
-        self.move_reg(t, rd, ra);
-        return rd;
+        return self.def(v);
     }
 
     // The register `step_reg` or `fwd_reg` gives value `v`, which reads `a` before it writes, taken for
@@ -1237,16 +1377,22 @@ extend Gen {
         if t.op == O_MULO && t.aux != OV_SIGNED && type_bits(t.ty, self.ptr) == 64 {
             return 8;
         }
-        if t.op >= O_SDIV && t.op <= O_UREM || t.op == O_MULHU {
+        if t.op >= O_SDIV && t.op <= O_UREM || t.op == O_MULHU || t.op == O_MULHS {
             return 7;
         }
         if t.op == O_ARMW || t.op == O_ACAS {
             return 6;
         }
-        if t.op >= O_SHL && t.op <= O_ASHR || t.op == O_SELECT {
+        if t.op >= O_SHL && t.op <= O_ASHR || t.op == O_SELECT || self.folds_both(t) {
             return 5;
         }
         return 4;
+    }
+
+    // Whether both operands of `t` fold into it: a rotation (`lv::FOLD_ROT`), which may take its amount in
+    // cl as a shift does.
+    const fn folds_both(self: &Self, t: Inst) bool {
+        return (t.op == O_OR || t.op == O_XOR || t.op == O_ADD) && (t.a & (VPARAM | VFLAG)) == 0 && (t.b & (VPARAM | VFLAG)) == 0 && t.a != VNONE && t.b != VNONE && self.lv.pfold[t.a as usize] && self.lv.pfold[t.b as usize];
     }
 
     // `vmem`: per value, whether it is a vector some instruction defines or reads in memory: any but a
@@ -2053,6 +2199,11 @@ const fn oref(p: *mut ob::Obj) &'static mut ob::Obj {
 }
 
 // `x`'s low `bits` bits sign-extended.
+// Whether `c` is 3, 5 or 9: an address scales an index by `c - 1` and adds it to itself (`mul_const`).
+const fn lea_factor(c: i64) bool {
+    return c == 3 || c == 5 || c == 9;
+}
+
 const fn lp_sext(x: u64, bits: u32) i64 {
     if bits >= 64 {
         return x as i64;
@@ -2099,7 +2250,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA;
         self.arg_relays();
         self.lv.after.truncate(0);
         self.lv.run(b);
@@ -3365,29 +3516,71 @@ extend Gen {
             self.fcmp(i, t);
             return true;
         }
-        if op == O_MULHU {
+        if op == O_MULHU || op == O_MULHS {
             let bits = type_bits(t.ty, self.ptr);
+            let sgn = op == O_MULHS;
+            // The product commutes: a constant operand second.
+            let mut kv: u64 = 0;
+            let (va, vb) = if self.const_of(t.a, &mut kv) {
+                (t.b, t.a);
+            } else {
+                (t.a, t.b);
+            };
             if bits == 64 {
-                // MUL: rdx:rax = rax * the operand.
+                // MUL or IMUL: rdx:rax = rax * the operand, the second operand put in rax.
                 self.vacate(x::RAX);
                 self.vacate(x::RDX);
-                let ra = self.reg(t.a);
-                let rb = self.reg(t.b);
-                self.c.mov_rr(8, x::RAX, ra);
-                self.c.unary(x::MUL, 8, rb);
+                let ra = self.reg(va);
+                self.materialize(vb, x::RAX);
+                self.c.unary(
+                    if sgn {
+                        x::IMUL1;
+                    } else {
+                        x::MUL;
+                    },
+                    8,
+                    ra,
+                );
                 self.result_in(i, x::RDX);
                 return true;
             }
-            // Fewer bits: the operands zero-extended (a 32-bit move clears the upper half), their 64-bit
-            // product, shifted down.
-            let ra = self.ext(t.a, false, bits);
-            let rb = self.ext(t.b, false, bits);
-            let s = self.tmp(false);
-            self.c.mov_rr(4, s, rb);
+            // Fewer bits: the operands extended to 64 bits, their 64-bit product, shifted down; a constant
+            // that a sign-extended 32-bit immediate holds as the immediate.
+            let ra = self.reg(va);
+            let kc = self.const_of(vb, &mut kv);
+            let k = if sgn {
+                lp_sext(kv, bits) as u64;
+            } else {
+                kv & (1u64 << bits as u64) - 1;
+            };
+            let imm = kc && k as i64 >= -2147483648 && k as i64 <= 2147483647;
+            let mut s: u8 = 0;
+            if kc && !imm {
+                // An unsigned constant from 2^31: a 32-bit move zero-extends it.
+                s = self.tmp(false);
+                self.mov_imm(s, k, 4);
+            } else if !kc {
+                let rb = self.reg(vb);
+                s = self.tmp(false);
+                self.c.ext(bits / 8, 8, sgn, s, rb);
+            }
             let rd = self.def(i);
-            self.c.mov_rr(4, rd, ra);
-            self.c.imul_rr(8, rd, s);
-            self.c.shift_ri(x::SHR, 8, rd, bits);
+            self.c.ext(bits / 8, 8, sgn, rd, ra);
+            if imm {
+                self.c.imul_ri(8, rd, rd, k as i32);
+            } else {
+                self.c.imul_rr(8, rd, s);
+            }
+            self.c.shift_ri(
+                if sgn {
+                    x::SAR;
+                } else {
+                    x::SHR;
+                },
+                8,
+                rd,
+                bits,
+            );
             return true;
         }
         if op == O_FMA {
@@ -3934,52 +4127,95 @@ extend Gen {
             );
             return true;
         }
+        // A rotation whose shifts fold into it (`lv::FOLD_ROT`): ROL or ROR by an immediate or by cl, at the
+        // type's own width (a narrow rotation reads the low bits alone).
+        let rot = if self.folds_both(t) {
+            lv::rotate_of(self.b(), i);
+        } else {
+            lv::Rotation { x: VNONE, amt: VNONE, src: VNONE, k: 0, right: false };
+        };
+        if rot.x != VNONE {
+            let xv = rot.x;
+            let amt = rot.amt;
+            let kr = rot.k;
+            let right = rot.right;
+            if amt == VNONE {
+                let ra = self.reg(xv);
+                let rd = self.def_from(i, xv, ra);
+                self.c.shift_ri(x::ROL, bits / 8, rd, kr);
+                return true;
+            }
+            let n = lv::rot_amount(self.b(), &self.lv.pfold, rot);
+            self.vacate(x::RCX);
+            let ra = self.reg(xv);
+            let rn = self.reg(n);
+            self.c.mov_rr(4, x::RCX, rn);
+            let rd = self.def_from(i, xv, ra);
+            self.c.shift_cl(
+                if right {
+                    x::ROR;
+                } else {
+                    x::ROL;
+                },
+                bits / 8,
+                rd,
+            );
+            return true;
+        }
+        // A sum whose shifted index or inner sum folds into it (`lv::FOLD_LEA`): one `lea`.
+        if (op == O_ADD || op == O_SUB) && (self.folded(t.a) || self.folded(t.b)) {
+            let f = lv::lea_of(self.b(), &self.lv.pfold, i);
+            self.lea_sum(i, sz, f);
+            return true;
+        }
         let alu = op == O_ADD || op == O_SUB || op == O_AND || op == O_OR || op == O_XOR;
         let mut k: i32 = 0;
         let kc = self.imm32_of(t.b, bits, &mut k);
         if alu {
             let aop = alu_of(op);
             let ra = self.reg(t.a);
+            // A sum whose first operand stays live: `lea` writes another register, where `add` would take
+            // a copy first.
             if kc {
-                let rd = self.def_from(i, t.a, ra);
+                let rd = self.def_over(i, t.a, ra);
+                if rd != ra && (op == O_ADD || op == O_SUB && k != -2147483648) {
+                    self.lea_to(
+                        sz,
+                        rd,
+                        x::at(
+                            ra,
+                            if op == O_SUB {
+                                -k;
+                            } else {
+                                k;
+                            },
+                        ),
+                    );
+                    return true;
+                }
+                if rd != ra {
+                    self.move_reg(t.ty, rd, ra);
+                }
                 self.c.alu_ri(aop, sz, rd, k);
                 self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.pos };
                 return true;
             }
             let rb = self.reg(t.b);
-            let rd = self.def_from(i, t.a, ra);
+            let rd = self.def_over(i, t.a, ra);
+            if rd != ra && op == O_ADD {
+                self.lea_to(sz, rd, x::ix(ra, rb, 0, 0));
+                return true;
+            }
+            if rd != ra {
+                self.move_reg(t.ty, rd, ra);
+            }
             self.c.alu_rr(aop, sz, rd, rb);
             self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.pos };
             return true;
         }
         if op == O_MUL {
             let ra = self.reg(t.a);
-            // A product by 3, 5 or 9 is an address: `lea` (one cycle against `imul`'s three); by one of them
-            // times 2^s, `lea` then a shift; by 2^s - 1, a shift and a subtraction.
-            let kw = k as i64;
-            let tz = if kw > 0 {
-                kw.trailing_zeros() as u32;
-            } else {
-                0u32;
-            };
-            let odd = kw >> tz as i64;
-            if kc && kw > 0 && (odd == 3 || odd == 5 || odd == 9) {
-                let rd = self.def(i);
-                self.c.rm(0, 0x8D, sz == 8, rd, x::ix(ra, ra, (odd - 1).trailing_zeros() as u8, 0), false);
-                if tz != 0 {
-                    self.c.shift_ri(x::SHL, sz, rd, tz);
-                }
-                return true;
-            }
-            if kc && kw >= 7 && (kw & kw + 1) == 0 {
-                let rd = self.def(i);
-                if rd != ra {
-                    self.c.mov_rr(sz, rd, ra);
-                    self.c.shift_ri(x::SHL, sz, rd, (kw + 1).trailing_zeros() as u32);
-                    self.c.alu_rr(x::SUB, sz, rd, ra);
-                    return true;
-                }
-                self.c.imul_ri(sz, rd, ra, k);
+            if kc && self.mul_const(i, t.a, sz, ra, k) {
                 return true;
             }
             if kc {
@@ -4307,6 +4543,9 @@ extend Gen {
     }
 
     fn convert(self: &mut Self, i: u32, t: Inst) bool {
+        if self.lv.pfold[i as usize] {
+            return true; // its use computes it (`lv::FOLD_ROT`: a rotation's amount)
+        }
         let op = t.op;
         let from = self.vt(t.a);
         let to = t.ty;
@@ -4844,7 +5083,8 @@ extend Gen {
         } else {
             o.b;
         };
-        if !alu || o.ty != t.ty || !swap && (o.a != i || o.b == i) || self.lv.pfold[i as usize + 1] {
+        // An operand folded into the operation (`lv::FOLD_LEA`, `lv::FOLD_ROT`) has no register.
+        if !alu || o.ty != t.ty || !swap && (o.a != i || o.b == i) || self.lv.pfold[i as usize + 1] || self.folded(k) {
             return false;
         }
         if st.op != O_STORE || st.b != i + 1 || st.a != t.a || st.c != t.c || (st.aux & MEM_VOLATILE) != 0 || self.lv.fold[i as usize + 2] {

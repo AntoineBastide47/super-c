@@ -179,18 +179,24 @@ links its prebuilt C kernels: run `sh bench/simd_baseline/kernels.sh` first, see
 control) and prints it as `running benchmarks (build <id>)`. The filter is forwarded to the
 bench binary as a run-time argument, so a filtered run never relinks; a filter that
 selects no benchmark exits nonzero, and so does any benchmark that calls
-`bench::fail`. The compiler's own transpile bench (`self_transpile`) runs 100 serial
-rounds of the transpile step a `super-c build` runs (`build_system::build::root_transpile`,
-one worker, into a fresh scratch tree) and samples CPU time, cycles and allocations at the
-build's own phase boundaries (`driver::stats::set_hook`), so its phases are the build's:
+`bench::fail`. The compiler's own benchmarks (`bench/transpile_bench.spc`, release profile)
+sample wall time, CPU time of every thread, cycles and allocations at the build's own phase boundaries
+(`driver::stats::set_hook`, the backend's sub-boundaries through `mark_sub`), so their phases
+are the build's, plus a lexer-only pass reported as a share of parse. `self_transpile` runs
+100 serial rounds of the transpile step of an emission (`build_system::build::root_transpile`
+with no link: the program's C, as `--emit-c` writes it; one worker, a fresh scratch tree):
 stamp, parse (load, lex and parse), resolve, typecheck, borrowck, checks, prepare, plan,
-render and publish, plus a lexer-only pass reported as a share of parse. It prints
-per-phase averages (CPU ms, Mcyc, Kalloc, MiB), throughput, the min/median/p95/sd of CPU
-ms, Mcyc and wall ms over the rounds, heap requested per round and peak RSS; then it runs
-one cold build of the compiler through the real build engine (debug profile, every core,
-caches and emit stamp off) and reports the engine's phase record, sync,
-compile and link included. A compile or link failure there fails the run and keeps
-the scratch tree. `SC_BENCH_OUT=<file>` writes the whole record as JSON (schema `"v":2`).
+render and publish, then one cold build of the compiler through the real build engine (every
+core, caches and emit stamp off) with the engine's phase record; a build or link failure there
+fails the run and keeps the scratch tree. `self_compile` runs 25 rounds of a whole cold native
+build (`build_system::build::manifest_build`, every cache off, a fresh scratch tree) with one
+job, then 25 with one job per core: setup, the same front end, then lower (the declarations and
+the LIR), optimize (the LIR optimizer), codegen (the native objects), publish, sync and link
+(the own linker). Each job count gets its own table: per-phase averages (wall ms, CPU ms, Mcyc,
+Kalloc, MiB, throughput of wall time with a dash under 1 ms, share of wall time), the effective
+GHz and cores in use, the min/median/p95/sd of wall ms, CPU ms and Mcyc, and heap requested per
+round; then peak RSS. `SC_BENCH_OUT=<file>` writes the whole record as JSON (schema `"v":3`: the
+lane in `lane`, one entry per job count in `modes`).
 
 ### Gates
 

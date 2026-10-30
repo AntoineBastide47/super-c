@@ -1885,7 +1885,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW;
         self.arg_relays();
         self.lv.after.truncate(0);
         self.lv.run(b);
@@ -3168,21 +3168,35 @@ extend Gen {
             self.emit(a::fmadd(t.ty == T_F64, false, rd - V0, ra - V0, rb - V0, rc - V0));
             return true;
         }
-        if op == O_MULHU {
-            // 64 bits: UMULH; fewer: the zero-extended operands' 64-bit product (UMULL), shifted down.
+        if op == O_MULHU || op == O_MULHS {
+            // 64 bits: UMULH or SMULH; fewer: the extended operands' 64-bit product (UMULL or SMULL, which
+            // read 32 bits), shifted down.
             let bits = type_bits(t.ty, self.ptr);
+            let sgn = op == O_MULHS;
             if bits == 64 {
                 let ra = self.reg(t.a);
                 let rb = self.reg(t.b);
                 let rd = self.def(i);
-                self.emit(a::mulh(false, rd, ra, rb));
+                self.emit(a::mulh(sgn, rd, ra, rb));
                 return true;
             }
-            let ra = self.ext(t.a, false, bits);
-            let rb = self.ext(t.b, false, bits);
+            let ra = if bits == 32 {
+                self.reg(t.a);
+            } else {
+                self.ext(t.a, sgn, bits);
+            };
+            let rb = if bits == 32 {
+                self.reg(t.b);
+            } else {
+                self.ext(t.b, sgn, bits);
+            };
             let rd = self.def(i);
-            self.emit(a::mull(false, rd, ra, rb));
-            self.emit(a::lsr_imm(true, rd, rd, bits));
+            self.emit(a::mull(sgn, rd, ra, rb));
+            if sgn {
+                self.emit(a::asr_imm(true, rd, rd, bits));
+            } else {
+                self.emit(a::lsr_imm(true, rd, rd, bits));
+            }
             return true;
         }
         if op >= O_FADD && op <= O_FNEG || op == O_FSQRT {
@@ -3641,6 +3655,42 @@ extend Gen {
         }
     }
 
+    // Whether value `v` is an instruction that folds into its use (`lv::FOLD_*`).
+    const fn folds_in(self: &Self, v: Value) bool {
+        return v != VNONE && (v & (VPARAM | VFLAG)) == 0 && self.lv.pfold[v as usize];
+    }
+
+    // Rotation `i` of value `xv`, 8 or 16 `bits` wide (`lv::FOLD_ROT_NARROW`), on the 32-bit register: by
+    // constant `kr` to the left, the value zero-extended shifted both ways and joined (LSR, then ORR of the
+    // LSL); by register `amt` (right when `right`), the register filled with the value's copies (ORR with
+    // itself shifted by 8 and 16, or by 16), which a 32-bit RORV rotates as the narrow value: the copies
+    // repeat every `bits` bits, so a rotation by n modulo 32 is one by n modulo `bits`, and RORV reads the
+    // amount's low 5 bits only. A left rotation rotates right by the negation. The scratch registers take
+    // the steps, so the result, written last, may take an operand's register; the bits above the width
+    // hold the copies (not `clean`).
+    fn rotate_narrow(self: &mut Self, i: u32, xv: Value, rot: lv::Rotation, kr: u32, right: bool, bits: u32) bool {
+        let xz = self.ext(xv, false, bits) as u32;
+        if rot.amt == VNONE {
+            let rd = self.def(i) as u32;
+            self.emit(a::lsr_imm(false, a::IP0, xz, bits - kr));
+            self.emit(a::logic_reg(false, 1, false, rd, a::IP0, xz, 0, kr));
+            return true;
+        }
+        let rn = self.reg(lv::rot_amount(self.b(), &self.lv.pfold, rot)) as u32;
+        let rd = self.def(i) as u32;
+        self.emit(a::logic_reg(false, 1, false, a::IP1, xz, xz, 0, bits));
+        if bits == 8 {
+            self.emit(a::logic_reg(false, 1, false, a::IP1, a::IP1, a::IP1, 0, 16));
+        }
+        if right {
+            self.emit(a::dp2(false, a::DP2_RORV, rd, a::IP1, rn));
+        } else {
+            self.emit(a::addsub_reg(false, 1, false, a::IP0, a::ZR, rn, 0, 0));
+            self.emit(a::dp2(false, a::DP2_RORV, rd, a::IP1, a::IP0));
+        }
+        return true;
+    }
+
     fn int_op(self: &mut Self, i: u32, t: Inst) bool {
         let ty = t.ty;
         let op = t.op;
@@ -3663,6 +3713,38 @@ extend Gen {
                 self.emit(a::addsub_reg(sf, 1, false, rd, a::ZR, ra, 0, 0));
             } else {
                 self.emit(a::logic_reg(sf, 1, true, rd, a::ZR, ra, 0, 0));
+            }
+            return true;
+        }
+        // A rotation whose shifts fold into it (`lv::FOLD_ROT`), before the folded product a sum may take:
+        // ROR by an immediate, or RORV by a register, of a left rotation by its negation.
+        let rot = if (op == O_OR || op == O_XOR || op == O_ADD) && self.folds_in(t.a) && self.folds_in(t.b) {
+            lv::rotate_of(self.b(), i);
+        } else {
+            lv::Rotation { x: VNONE, amt: VNONE, src: VNONE, k: 0, right: false };
+        };
+        if rot.x != VNONE {
+            let xv = rot.x;
+            let amt = rot.amt;
+            let kr = rot.k;
+            let right = rot.right;
+            if bits < 32 {
+                return self.rotate_narrow(i, xv, rot, kr, right, bits);
+            }
+            let ra = self.reg(xv) as u32;
+            if amt == VNONE {
+                let rd = self.def(i) as u32;
+                self.emit(a::ror_imm(sf, rd, ra, (bits - kr) % bits));
+                return true;
+            }
+            let n = lv::rot_amount(self.b(), &self.lv.pfold, rot);
+            let rn = self.reg(n) as u32;
+            let rd = self.def(i) as u32;
+            if right {
+                self.emit(a::dp2(sf, a::DP2_RORV, rd, ra, rn));
+            } else {
+                self.emit(a::addsub_reg(sf, 1, false, a::IP0, a::ZR, rn, 0, 0));
+                self.emit(a::dp2(sf, a::DP2_RORV, rd, ra, a::IP0));
             }
             return true;
         }
@@ -4039,6 +4121,9 @@ extend Gen {
     }
 
     fn convert(self: &mut Self, i: u32, t: Inst) bool {
+        if self.lv.pfold[i as usize] {
+            return true; // its use computes it (`lv::FOLD_ROT`: a rotation's amount)
+        }
         let op = t.op;
         let from = self.vt(t.a);
         let to = t.ty;

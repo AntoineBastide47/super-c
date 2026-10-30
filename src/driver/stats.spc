@@ -28,12 +28,17 @@ pub(package) const B_TYPECHECK: usize = 5; // typecheck and deferred signature w
 pub(package) const B_BORROWCK: usize = 6; // Core IR lowering and borrow analysis
 pub(package) const B_CHECKS: usize = 7; // layout, facts verification, always-panics, deferred asserts
 pub(package) const B_PREPARE: usize = 8; // runtime and external C wrappers, live set, emit order
-pub(package) const B_PLAN: usize = 9; // instance discovery and C planning
-pub(package) const B_RENDER: usize = 10; // C rendering
-pub(package) const B_PUBLISH: usize = 11; // files written, per-TU cache, orphan prune, emit stamp record
+pub(package) const B_PLAN: usize = 9; // instance discovery and emission planning
+pub(package) const B_RENDER: usize = 10; // C rendering, or LIR lowering (to S_LOWERED) and optimization in a native build
+pub(package) const B_PUBLISH: usize = 11; // native objects (to S_GENERATED), files written, per-TU cache, orphan prune, emit stamp record
 pub(package) const B_SYNC: usize = 12; // external transpiler record and stamp install
-pub(package) const B_LINK: usize = 13;
+pub(package) const B_LINK: usize = 13; // the own linker
 pub(package) const B_COUNT: usize = 14;
+/// Boundaries inside the backend's phases, past B_COUNT, which only the phase hook sees (`mark_sub`; the
+/// record keeps B_RENDER and B_PUBLISH whole): in `render`, the bodies lowered to LIR before the optimizer
+/// runs; in `publish`, the native objects generated before the files are written.
+pub(package) const S_LOWERED: usize = B_COUNT;
+pub(package) const S_GENERATED: usize = B_COUNT + 1;
 
 // Memory boundaries, as indexes into the samples: frontend, borrow analysis, C plan, C output
 // published, build complete. Epoch `k` covers the allocations made before memory boundary `k`.
@@ -185,6 +190,15 @@ pub(package) fn mark(b: usize) {
                 }
             }
         }
+    }
+}
+
+/// Tell the phase hook that sub-boundary `s` (`S_LOWERED`, `S_GENERATED`) was reached now.
+pub(package) fn mark_sub(s: usize) {
+    let h = unsafe G_HOOK;
+    if h != null {
+        let f = unsafe (*h).at;
+        f(unsafe (*h).ctx, s);
     }
 }
 

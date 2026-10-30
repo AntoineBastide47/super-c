@@ -6445,7 +6445,7 @@ fn cf_pure(b: &Body, t: Inst) bool {
         let d = raw_const(b, t.b) & mask_of(type_bits(t.ty, 8));
         return d != 0 && (op == O_UDIV || op == O_UREM || d != mask_of(type_bits(t.ty, 8)));
     }
-    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_CLZ || op == O_CTZ || op == O_POPCNT || op == O_FMA || op == O_MULHU || op == O_SPLAT;
+    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_CLZ || op == O_CTZ || op == O_POPCNT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_SPLAT;
 }
 
 // Whether addresses `x` and `y` are one: the same value, or the same `ptradd` of the same operands.

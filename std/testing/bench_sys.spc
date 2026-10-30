@@ -418,8 +418,10 @@ extern "C" "sys/resource.h" {
 
 // ---- Apple process accounting -----------------------------------------------------------------------------
 
-// `struct rusage_info_v4` of <sys/resource.h>, every member: the build's POSIX level hides it.
+// `struct rusage_info_v4` of <sys/resource.h>, every member: the build's POSIX level hides it. C writes it
+// through `rusage_info_t *` (`void **`), which keeps no order, so it keeps its declared one.
 @platform(macos | ios)
+@ordered
 struct RusageInfoV4 {
     pub ri_uuid: [u8; 16],
     pub ri_user_time: u64,

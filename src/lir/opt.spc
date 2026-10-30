@@ -2900,6 +2900,14 @@ extend Opt {
             } else {
                 Option::<u64>::Some(width_mask(b.type_of(t.a), pk.ptr_bytes));
             };
+        } else if t.op == O_TRUNC {
+            // The operand's bound when the narrower type holds it, else any value of that type.
+            let x = self.ubound(pk, b, t.a, depth - 1);
+            r = if x.is_some() && x.unwrap() <= m {
+                x;
+            } else {
+                Option::<u64>::Some(m);
+            };
         }
         if r.is_some() && best.is_some() {
             return Option::<u64>::Some(r.unwrap().min(best.unwrap()));
@@ -4285,20 +4293,28 @@ extend Opt {
         return v;
     }
 
-    // Instruction `i` of block `k`, an unsigned quotient or remainder of an integer by a constant that is
-    // neither 0 nor a power of two: replaced by the product of the multiplier `magic` gives (a 64-bit one
-    // where the backend has one instruction for it, `Package.mul_high`). Whether it did.
+    // Instruction `i` of block `k`, a quotient or remainder of an integer by a constant: replaced by the high
+    // half of the product by the multiplier `magic` (unsigned) or `smagic` (signed) gives, a 64-bit one where
+    // the backend has one instruction for it (`Package.mul_high`); a signed one by a power of two by shifts
+    // (Warren, Hacker's Delight, 10-1). Not by 0, nor a signed one by -1 (the minimum's overflow stays the
+    // division's), nor an unsigned one by a power of two (`pow2`). Whether it did.
     fn divide(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
-        if t.op != O_UDIV && t.op != O_UREM || !is_int(t.ty) || t.ty == T_I128 || t.ty == T_PTR {
+        if t.op < O_SDIV || t.op > O_UREM || !is_int(t.ty) || t.ty == T_I128 || t.ty == T_PTR {
             return false;
         }
         let bits = type_bits(t.ty, pk.ptr_bytes);
         let c = const_of(b, t.b);
-        if bits == 64 && !pk.mul_high || c.is_none() {
+        if c.is_none() {
             return false;
         }
-        let d = c.unwrap();
+        if t.op == O_SDIV || t.op == O_SREM {
+            return self.divide_signed(pk, b, k, i, le::sign_ext(c.unwrap(), bits));
+        }
+        if bits == 64 && !pk.mul_high {
+            return false;
+        }
+        let d = c.unwrap() & width_mask(t.ty, pk.ptr_bytes);
         if d == 0 || (d & d - 1) == 0 {
             return false;
         }
@@ -4323,6 +4339,86 @@ extend Opt {
         }
         let prod = self.before(b, k, i, Inst { op: O_MUL, ty: t.ty, aux: 0, a: q, b: t.b, c: VNONE });
         self.repl[i as usize] = self.before(b, k, i, Inst { op: O_SUB, ty: t.ty, aux: 0, a: n, b: prod, c: VNONE });
+        return true;
+    }
+
+    // `divide` of signed quotient or remainder `i` by `d`, the constant sign-extended. By a power of two
+    // 2^s (or its negation), the dividend plus 2^s - 1 when negative (`bias`), shifted, the remainder the
+    // dividend less those bits but the low `s`; by another, the high half of the product by `smagic`'s
+    // multiplier, corrected by the dividend when the multiplier's sign is not the divisor's, shifted, plus
+    // 1 when negative (rounding toward 0).
+    fn divide_signed(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, d: i64) bool {
+        let t = b.insts[i as usize];
+        let ty = t.ty;
+        let bits = type_bits(ty, pk.ptr_bytes);
+        let quot = t.op == O_SDIV;
+        let n = t.a;
+        if d == 0 || d == -1 {
+            return false;
+        }
+        if d == 1 {
+            self.repl[i as usize] = if quot {
+                n;
+            } else {
+                self.constant(b, ty, 0);
+            };
+            return true;
+        }
+        let ad = if d < 0 {
+            0u64.wrapping_sub(d as u64);
+        } else {
+            d as u64;
+        };
+        let wm = width_mask(ty, pk.ptr_bytes);
+        if (ad & ad - 1) == 0 {
+            let s = ad.trailing_zeros() as u64;
+            let mut sgn = n;
+            if s > 1 {
+                let sv = self.constant(b, ty, s - 1);
+                sgn = self.before(b, k, i, Inst { op: O_ASHR, ty: ty, aux: 0, a: n, b: sv, c: VNONE });
+            }
+            let rv = self.constant(b, ty, bits as u64 - s);
+            let bias = self.before(b, k, i, Inst { op: O_LSHR, ty: ty, aux: 0, a: sgn, b: rv, c: VNONE });
+            let up = self.before(b, k, i, Inst { op: O_ADD, ty: ty, aux: 0, a: n, b: bias, c: VNONE });
+            if !quot {
+                let mv = self.constant(b, ty, ~(ad - 1) & wm);
+                let low = self.before(b, k, i, Inst { op: O_AND, ty: ty, aux: 0, a: up, b: mv, c: VNONE });
+                self.repl[i as usize] = self.before(b, k, i, Inst { op: O_SUB, ty: ty, aux: 0, a: n, b: low, c: VNONE });
+                return true;
+            }
+            let sv = self.constant(b, ty, s);
+            let mut q = self.before(b, k, i, Inst { op: O_ASHR, ty: ty, aux: 0, a: up, b: sv, c: VNONE });
+            if d < 0 {
+                q = self.before(b, k, i, Inst { op: O_NEG, ty: ty, aux: 0, a: q, b: VNONE, c: VNONE });
+            }
+            self.repl[i as usize] = q;
+            return true;
+        }
+        if bits == 64 && !pk.mul_high {
+            return false;
+        }
+        let (m, sh) = smagic(d, bits);
+        let mv = self.constant(b, ty, m);
+        let mut h = self.before(b, k, i, Inst { op: O_MULHS, ty: ty, aux: 0, a: n, b: mv, c: VNONE });
+        let ms = le::sign_ext(m, bits);
+        if d > 0 && ms < 0 {
+            h = self.before(b, k, i, Inst { op: O_ADD, ty: ty, aux: 0, a: h, b: n, c: VNONE });
+        } else if d < 0 && ms > 0 {
+            h = self.before(b, k, i, Inst { op: O_SUB, ty: ty, aux: 0, a: h, b: n, c: VNONE });
+        }
+        if sh != 0 {
+            let sv = self.constant(b, ty, sh);
+            h = self.before(b, k, i, Inst { op: O_ASHR, ty: ty, aux: 0, a: h, b: sv, c: VNONE });
+        }
+        let top = self.constant(b, ty, bits as u64 - 1);
+        let neg = self.before(b, k, i, Inst { op: O_LSHR, ty: ty, aux: 0, a: h, b: top, c: VNONE });
+        let q = self.before(b, k, i, Inst { op: O_ADD, ty: ty, aux: 0, a: h, b: neg, c: VNONE });
+        if quot {
+            self.repl[i as usize] = q;
+            return true;
+        }
+        let prod = self.before(b, k, i, Inst { op: O_MUL, ty: ty, aux: 0, a: q, b: t.b, c: VNONE });
+        self.repl[i as usize] = self.before(b, k, i, Inst { op: O_SUB, ty: ty, aux: 0, a: n, b: prod, c: VNONE });
         return true;
     }
 
@@ -7197,7 +7293,7 @@ const fn join(a: u8, b: u8) u8 {
 
 // Whether opcode `op` computes a value from its operands alone, the same each time it does not trap.
 const fn pure_op(op: u8) bool {
-    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT;
+    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT;
 }
 
 // Whether pure `t` of `b` may run where the program would not run it: it has operands (a constant is
@@ -7365,6 +7461,58 @@ const fn reader(r: u32, k: u32) u32 {
 // `mulhu(n, m) >> s`, with the least `s` whose `m = ceil(2^(bits + s) / d)` fits in `bits` bits and errs
 // by at most `2^s` (`m * d - 2^(bits + s) <= 2^s`, exact for every `n`); else `(m, l - 1, true)` for
 // `((n - h) / 2 + h) >> (l - 1)`, `h = mulhu(n, m)`, `m = 2^bits * (2^l - d) / d + 1`, `l = ceil(log2 d)`.
+// The multiplier and shift of signed division by `d` at `bits` bits (Warren, Hacker's Delight, 10-1:
+// `magic`), `|d|` at least 3 and no power of two: the multiplier `bits` wide, the smallest shift. The loop
+// raises `p` from `bits` while `2^p / anc` is below `|d| - 2^p % |d|`, at most `bits` times: past that
+// `2^p / anc` reaches `2^(bits - 1)`, above every `|d|`.
+const fn smagic(d: i64, bits: u32) (u64, u32) {
+    let one: u128 = 1;
+    let two = one << (bits - 1) as usize;
+    let ad = if d < 0 {
+        0u64.wrapping_sub(d as u64);
+    } else {
+        d as u64;
+    } as u128;
+    let t = if d < 0 {
+        two + 1;
+    } else {
+        two;
+    };
+    let anc = t - 1 - t % ad;
+    let mut p = bits - 1;
+    let mut q1 = two / anc;
+    let mut r1 = two - q1 * anc;
+    let mut q2 = two / ad;
+    let mut r2 = two - q2 * ad;
+    for _ in 0..bits {
+        p += 1;
+        q1 *= 2;
+        r1 *= 2;
+        if r1 >= anc {
+            q1 += 1;
+            r1 -= anc;
+        }
+        q2 *= 2;
+        r2 *= 2;
+        if r2 >= ad {
+            q2 += 1;
+            r2 -= ad;
+        }
+        let delta = ad - r2;
+        if q1 > delta || q1 == delta && r1 != 0 {
+            break;
+        }
+    }
+    let wm = (one << bits as usize) - 1;
+    let m = q2 + 1 & wm;
+    let ms = if d < 0 {
+        wm + 1 - m & wm;
+    } else {
+        m;
+    };
+    return ms as u64, p - bits;
+}
+
 const fn magic(d: u64, bits: u32) (u64, u32, bool) {
     let one: u128 = 1;
     let l = 64 - (d - 1).leading_zeros() as u32;

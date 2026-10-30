@@ -16,11 +16,16 @@ import ir::core as core;
 /// `Live::fold_ops`: an integer comparison whose every use is a `select`'s or a `br`'s condition (each
 /// compares again instead of testing a boolean set from the flags); an `and` whose every use compares it
 /// with 0 for equality (`tst`); a product one `add` or `sub` takes (`madd`, `msub`); a logical shift right
-/// by a constant one `and` with a mask of low bits takes (`ubfx`).
+/// by a constant one `and` with a mask of low bits takes (`ubfx`); the two shifts of a rotation and the
+/// arithmetic of its second amount (`rotate_of`), of 32 or 64 bits, with FOLD_ROT_NARROW of 8 and 16 too
+/// (`rol`, `ror`); the shift left by 1 to 3 and the inner sum one sum takes as an address (`lea_of`).
 pub(package) const FOLD_CMP: u32 = 1;
 pub(package) const FOLD_TST: u32 = 2;
 pub(package) const FOLD_MADD: u32 = 4;
 pub(package) const FOLD_UBFX: u32 = 8;
+pub(package) const FOLD_ROT: u32 = 16;
+pub(package) const FOLD_ROT_NARROW: u32 = 32;
+pub(package) const FOLD_LEA: u32 = 64;
 // The most folded instructions `uses_at` expands for one use: a comparison of a test of a field, say.
 const FOLD_DEPTH: u32 = 8;
 
@@ -250,6 +255,117 @@ extend Live {
             ) == u64::MAX {
                 self.pfold[p as usize] = true;
             }
+            if (self.fold_ops & FOLD_ROT) != 0 && (bits >= 32 || (self.fold_ops & FOLD_ROT_NARROW) != 0) {
+                let amt = rotate_of(b, i as u32).amt;
+                if rotate_of(b, i as u32).x != VNONE && self.work[t.a as usize] == 1 && self.work[t.b as usize] == 1 {
+                    self.pfold[t.a as usize] = true;
+                    self.pfold[t.b as usize] = true;
+                    // Each amount's extension or truncation with this one use. `inside`: the uses of the
+                    // amount the folded instructions make; `open`: the other amount's user folds.
+                    let mut inside: u32 = 0;
+                    let mut open = false;
+                    // The amount operand of the shift that takes `amt` itself, maybe its extension.
+                    let mut own = VNONE;
+                    for q in 0..2u32 {
+                        let sh = if q == 0 {
+                            t.a;
+                        } else {
+                            t.b;
+                        };
+                        let s = b.insts[sh as usize].b;
+                        let ext = amount_of(b, s) != s;
+                        if ext && self.work[s as usize] == 1 {
+                            self.pfold[s as usize] = true;
+                        }
+                        if amount_of(b, s) == amt {
+                            own = s;
+                        }
+                        if amount_of(b, s) == amt && (!ext || self.pfold[s as usize]) {
+                            inside += 1;
+                        }
+                        if amount_of(b, s) != amt && (!ext || self.pfold[s as usize]) {
+                            open = true;
+                        }
+                    }
+                    if amt != VNONE {
+                        // The other amount's `and` and `sub` or `neg`, while each has this one use; then the
+                        // amount's own mask to the width, when the rotation alone reads it (a rotation
+                        // takes its amount modulo the width).
+                        let sa = amount_of(b, b.insts[t.a as usize].b);
+                        let mut v = if sa == amt {
+                            amount_of(b, b.insts[t.b as usize].b);
+                        } else {
+                            sa;
+                        };
+                        for _ in 0..2 {
+                            if !open || !is_inst(v) || self.work[v as usize] != 1 {
+                                break;
+                            }
+                            let o = b.insts[v as usize].op;
+                            if o != O_AND && o != O_SUB && o != O_NEG {
+                                break;
+                            }
+                            self.pfold[v as usize] = true;
+                            v = if o == O_SUB {
+                                b.insts[v as usize].b;
+                            } else {
+                                b.insts[v as usize].a;
+                            };
+                        }
+                        if v == amt {
+                            inside += 1;
+                        }
+                        // The amount's extension, which the other amount's folded chain may read too: folded
+                        // when the shift and that chain are its only users.
+                        if own != amt && !self.pfold[own as usize] && self.work[own as usize] == 1 + (v == own) as u32 {
+                            self.pfold[own as usize] = true;
+                            inside += 1;
+                        }
+                        if is_inst(amt) && b.insts[amt as usize].op == O_AND && int_const(b, b.insts[amt as usize].b) == bits as u64 - 1 && self.work[amt as usize] == inside {
+                            self.pfold[amt as usize] = true;
+                        }
+                    }
+                    continue;
+                }
+            }
+            if (self.fold_ops & FOLD_LEA) != 0 && (t.op == O_ADD || t.op == O_SUB) {
+                // The shift an index takes, then the inner sum whose operands the address takes.
+                let nq: u32 = if t.op == O_ADD {
+                    2;
+                } else {
+                    0;
+                };
+                for q in 0..nq {
+                    let v = if q == 0 {
+                        t.b;
+                    } else {
+                        t.a;
+                    };
+                    if lea_shift(b, v) == 0 || self.pfold[v as usize] || self.work[v as usize] != 1 {
+                        continue;
+                    }
+                    self.pfold[v as usize] = true;
+                    if lea_of(b, &self.pfold, i as u32).ok {
+                        break;
+                    }
+                    self.pfold[v as usize] = false;
+                }
+                for q in 0..2u32 {
+                    let v = if q == 0 {
+                        t.a;
+                    } else {
+                        t.b;
+                    };
+                    if q == 1 && t.op == O_SUB || !is_inst(v) || self.pfold[v as usize] || self.work[v as usize] != 1 || b.insts[v as usize].op != O_ADD || b.insts[v as usize].ty != t.ty {
+                        continue;
+                    }
+                    self.pfold[v as usize] = true;
+                    if lea_of(b, &self.pfold, i as u32).ok {
+                        break;
+                    }
+                    self.pfold[v as usize] = false;
+                }
+            }
             if (self.fold_ops & FOLD_UBFX) != 0 && t.op == O_AND && !self.pfold[i] && (t.a & (VPARAM | VFLAG)) == 0 {
                 let s = b.insts[t.a as usize];
                 let m = int_const(b, t.b);
@@ -431,7 +547,9 @@ extend Live {
             let p = b.insts[v as usize];
             out.swap_remove(u);
             out.push(p.a);
-            out.push(p.b);
+            if p.b != VNONE {
+                out.push(p.b);
+            }
         }
         for q in 0..self.relayed.len() {
             if (self.relayed[q] >> 32) as u32 == i {
@@ -1348,6 +1466,226 @@ pub(package) fn fill(v: &mut Vector<u32>, n: usize, x: u32) {
 }
 
 // The bits of integer constant `v`, u64::MAX for a value that is no constant (or that constant).
+/// A rotation (`rotate_of`): value `x` by amount `amt` (VNONE for constant `k`, rotating left), to the
+/// right when `right`; `x` VNONE for none. `src` is the shift's own amount operand, `amt` maybe past an
+/// extension of it (`rot_amount`).
+pub(package) struct Rotation {
+    pub(package) x: Value,
+    pub(package) amt: Value,
+    pub(package) src: Value,
+    pub(package) k: u32,
+    pub(package) right: bool,
+}
+
+extend Rotation as Copy {}
+
+/// The rotation `or`, `xor` or `add` `i` of `b` computes: of a shift left and a logical shift right of one
+/// value, by constants `k` and `w - k` (0 < k < w, the width), or by `s` and `w - s`, or, for an `or`, by
+/// `s` and `(c - s) & (w - 1)` (c a multiple of w) or `-s & (w - 1)`, `s` the amount or the value it masks
+/// with `w - 1`, each amount maybe through a zero extension or a truncation (`amount_of`: an amount of
+/// another type). A shift past the width is undefined, so `s` is below it: by `w - s`, `s` is not 0 and the
+/// shifts' bits are disjoint, so their sum and their `xor` are their `or`; a masked `s` of 0 shifts both
+/// by 0, which only the `or` of the value with itself rotates. The amount rotates right when it is the
+/// shift right's.
+pub(package) fn rotate_of(b: &Body, i: u32) Rotation {
+    let none = Rotation { x: VNONE, amt: VNONE, src: VNONE, k: 0, right: false };
+    let t = b.insts[i as usize];
+    if t.op != O_OR && t.op != O_XOR && t.op != O_ADD || !is_int(t.ty) || t.ty == T_I128 || !is_inst(t.a) || !is_inst(
+        t.b,
+    ) {
+        return none;
+    }
+    let bits = type_bits(t.ty, 8) as u64;
+    let p = b.insts[t.a as usize];
+    let q = b.insts[t.b as usize];
+    let (l, r) = if p.op == O_SHL && q.op == O_LSHR {
+        (p, q);
+    } else if p.op == O_LSHR && q.op == O_SHL {
+        (q, p);
+    } else {
+        return none;
+    };
+    if l.a != r.a || l.ty != t.ty || r.ty != t.ty {
+        return none;
+    }
+    let kl = int_const(b, l.b);
+    let kr = int_const(b, r.b);
+    let al = amount_of(b, l.b);
+    let ar = amount_of(b, r.b);
+    if kl != u64::MAX && kr != u64::MAX {
+        if kl > 0 && kl < bits && kl + kr == bits {
+            return Rotation { x: l.a, amt: VNONE, src: VNONE, k: kl as u32, right: false };
+        }
+        return none;
+    }
+    let or = t.op == O_OR;
+    if negated(b, ar, al, bits, or) {
+        return Rotation { x: l.a, amt: al, src: l.b, k: 0, right: false };
+    }
+    if negated(b, al, ar, bits, or) {
+        return Rotation { x: l.a, amt: ar, src: r.b, k: 0, right: true };
+    }
+    return none;
+}
+
+/// The value a generator reads rotation `r`'s amount from (`folded`, the folded instructions): the shift's
+/// own amount operand, past a folded extension or truncation and a folded mask to the width (the
+/// rotation takes the amount modulo the width), whose operands live to the rotation; an unfolded one
+/// lives itself.
+pub(package) fn rot_amount(b: &Body, folded: &Vector<bool>, r: Rotation) Value {
+    let mut n = r.src;
+    for _ in 0..2 {
+        if !is_inst(n) || !folded[n as usize] {
+            break;
+        }
+        n = b.insts[n as usize].a;
+    }
+    return n;
+}
+
+/// Shift amount `v` past one zero extension or truncation: the amount computed in another type, which
+/// is below the width wherever the shift is defined.
+pub(package) fn amount_of(b: &Body, v: Value) Value {
+    if is_inst(v) && (b.insts[v as usize].op == O_ZEXT || b.insts[v as usize].op == O_TRUNC) {
+        return b.insts[v as usize].a;
+    }
+    return v;
+}
+
+// Whether shift amount `v` is `w - s` or, when `masks`, `(c - s) & (w - 1)` (c a multiple of width `w`) or
+// `-s & (w - 1)`, for the amount `s` (`rotate_of`).
+fn negated(b: &Body, v: Value, s: Value, w: u64, masks: bool) bool {
+    if !is_inst(v) {
+        return false;
+    }
+    let mut u = v;
+    let masked = masks && b.insts[u as usize].op == O_AND && int_const(b, b.insts[u as usize].b) == w - 1;
+    if masked {
+        u = b.insts[u as usize].a;
+        if !is_inst(u) {
+            return false;
+        }
+    }
+    let p = b.insts[u as usize];
+    let c = int_const(b, p.a);
+    let n = if p.op == O_SUB && c != u64::MAX && (masked && c % w == 0 || c == w) {
+        p.b;
+    } else if p.op == O_NEG && masked {
+        p.a;
+    } else {
+        VNONE;
+    };
+    if n == VNONE {
+        return false;
+    }
+    // `s` itself, or the value it masks to the width, either past an extension or a truncation.
+    let m = amount_of(b, n);
+    return m == s || is_inst(s) && b.insts[s as usize].op == O_AND && int_const(b, b.insts[s as usize].b) == w - 1 && amount_of(
+        b,
+        b.insts[s as usize].a,
+    ) == m;
+}
+
+/// The shift a scaled index of an address takes (`lea_of`): 1 to 3 for a shift left by that constant, else
+/// 0.
+pub(package) fn lea_shift(b: &Body, v: Value) u32 {
+    if !is_inst(v) || b.insts[v as usize].op != O_SHL {
+        return 0;
+    }
+    let k = int_const(b, b.insts[v as usize].b);
+    return if k >= 1 && k <= 3 {
+        k as u32;
+    } else {
+        0u32;
+    };
+}
+
+/// An address `lea` computes (`lea_of`): `base` + `index` << `sh` + `disp`, either register VNONE; `ok`
+/// false for none.
+pub(package) struct Lea {
+    pub(package) ok: bool,
+    pub(package) base: Value,
+    pub(package) index: Value,
+    pub(package) sh: u32,
+    pub(package) disp: i64,
+}
+
+extend Lea as Copy {}
+
+/// The address form in which `lea` computes sum `i` of `b` (`FOLD_LEA`; `folded`, the folded
+/// instructions): an `add`, or a `sub` of a constant, of up to two registers, one of them shifted left by
+/// 1 to 3 when folded (`lea_shift`), and a displacement that 32 signed bits hold, a folded inner `add`'s
+/// operands among its own. An index alone takes a shift of at most 1 (`index + index`): no form here
+/// lacks a base.
+pub(package) fn lea_of(b: &Body, folded: &Vector<bool>, i: u32) Lea {
+    let mut f = Lea { ok: true, base: VNONE, index: VNONE, sh: 0, disp: 0 };
+    let t = b.insts[i as usize];
+    if t.op != O_ADD && t.op != O_SUB || !is_int(t.ty) || t.ty == T_I128 || t.op == O_SUB && int_const(b, t.b) == u64::MAX {
+        f.ok = false;
+        return f;
+    }
+    let bits = type_bits(t.ty, 8);
+    for q in 0..2u32 {
+        let v = if q == 0 {
+            t.a;
+        } else {
+            t.b;
+        };
+        let neg = q == 1 && t.op == O_SUB;
+        // A folded inner sum's operands in its place.
+        if is_inst(v) && folded[v as usize] && b.insts[v as usize].op == O_ADD {
+            lea_term(b, folded, b.insts[v as usize].a, false, bits, &mut f);
+            lea_term(b, folded, b.insts[v as usize].b, false, bits, &mut f);
+        } else {
+            lea_term(b, folded, v, neg, bits, &mut f);
+        }
+    }
+    if f.disp < -2147483648 || f.disp > 2147483647 || f.base == VNONE && (f.index == VNONE || f.sh > 1) {
+        f.ok = false;
+    }
+    return f;
+}
+
+// Operand `v` (`bits` wide, negated when `neg`) into address `f` (`lea_of`): a constant into the
+// displacement, a folded shift as the index, a register as the base, then as the index; `ok` false when
+// it takes none (a folded operand has no register).
+fn lea_term(b: &Body, folded: &Vector<bool>, v: Value, neg: bool, bits: u32, f: &mut Lea) {
+    let k = int_const(b, v);
+    if k != u64::MAX {
+        let s = sext_bits(k, bits);
+        f.disp = if neg {
+            f.disp - s;
+        } else {
+            f.disp + s;
+        };
+        return;
+    }
+    let fold = is_inst(v) && folded[v as usize];
+    if fold && lea_shift(b, v) != 0 && f.index == VNONE {
+        f.index = b.insts[v as usize].a;
+        f.sh = lea_shift(b, v);
+    } else if fold {
+        f.ok = false;
+    } else if f.base == VNONE {
+        f.base = v;
+    } else if f.index == VNONE {
+        f.index = v;
+    } else {
+        f.ok = false;
+    }
+}
+
+// Value `v` is an instruction's (no parameter, no flag, not VNONE).
+const fn is_inst(v: Value) bool {
+    return v != VNONE && (v & (VPARAM | VFLAG)) == 0;
+}
+
+// The signed value of the low `bits` of `k`.
+const fn sext_bits(k: u64, bits: u32) i64 {
+    let s = 64 - bits as u64;
+    return (k << s) as i64 >> s as i64;
+}
+
 fn int_const(b: &Body, v: Value) u64 {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST {
         return u64::MAX;

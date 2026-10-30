@@ -37,10 +37,11 @@ Before any optimization work, understand these non-negotiable constraints:
    flags"). If a target shows ~0 samples under the build's optimizer, the optimization will
    not produce a corpus-level win.
 
-3. **Benchmark protocol.** Measure with `super-c bench --filter=self_transpile`
-   (100 serial rounds of the build's own transpile step, timed per build phase from
-   stamp to publish, then one cold real build through the engine for sync, compile and
-   link).
+3. **Benchmark protocol.** Measure with `super-c bench --filter=self_compile` (25 rounds
+   of a whole cold native build of the compiler at the release profile with one job, then
+   25 with one job per core, each timed per build phase from setup to link, the backend's
+   lower, optimize and codegen included); `--filter=self_transpile` times the front end
+   and the C emission (`--emit-c`) in 100 serial rounds.
    Judge on **Mcyc/Kalloc**, not wall-clock ms (clock frequency varies 2.0–3.8 GHz
    between E/P cores and thermal state); the run prints min/median/p95/sd of every
    round, and a wide spread means the box was not quiet. First run after a rebuild is
