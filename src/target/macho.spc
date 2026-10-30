@@ -31,6 +31,7 @@ const N_EXT: u8 = 1;
 const N_SECT: u8 = 0xE;
 const N_PEXT: u8 = 0x10;
 const N_NO_DEAD_STRIP: u32 = 0x20;
+const N_WEAK_DEF: u32 = 0x80;
 
 // The section types and attributes a `segment,section,type,attributes` name spells, as the assembler
 // reads them.
@@ -444,6 +445,10 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
                 &mut nl,
                 if (y.flags & ob::SF_USED) != 0 {
                     N_NO_DEAD_STRIP
+                } else {
+                    0
+                } | if (y.flags & ob::SF_WEAK) != 0 {
+                    N_WEAK_DEF
                 } else {
                     0
                 },

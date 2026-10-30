@@ -28,6 +28,7 @@ const SHF_GNU_RETAIN: u64 = 0x200000;
 
 const STB_LOCAL: u32 = 0;
 const STB_GLOBAL: u32 = 1;
+const STB_WEAK: u32 = 2;
 const STT_NOTYPE: u32 = 0;
 const STT_OBJECT: u32 = 1;
 const STT_FUNC: u32 = 2;
@@ -424,7 +425,9 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             } else {
                 STT_OBJECT
             };
-            let bind = if global {
+            let bind = if (y.flags & ob::SF_WEAK) != 0 {
+                STB_WEAK
+            } else if global {
                 STB_GLOBAL
             } else {
                 STB_LOCAL

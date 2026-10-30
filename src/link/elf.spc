@@ -36,6 +36,7 @@ pub(package) struct Opts {
     pub(package) gc: bool, // drop the sections nothing reaches (`--gc-sections`, `collect`)
     /// A shared library's exports: None, every default-visibility global; else the globals named.
     pub(package) exports: Option<Set<String>>,
+    pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
 }
 
 const SHT_PROGBITS: u32 = 1;
@@ -417,6 +418,13 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     let mut ars = ar::Archives::new();
     for i in 0..o.objs.len() {
         let p = o.objs[i].as_str();
+        let at = blob.len();
+        if lu::take_held(o.mem, p, blob) {
+            if !parse_object(l, p, at, blob) {
+                return false;
+            }
+            continue;
+        }
         if ar::is_archive(p) {
             if !ars.add(nat::OBJ_ELF, p, &mut l.err) {
                 return false;
@@ -438,7 +446,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
         l.gs.index_mut(main as usize).used = true;
         l.gs.index_mut(lsm as usize).used = true;
     }
-    if !resolve_objects(l, 0) || !take_members(l, &mut ars, blob) {
+    if !resolve_objects(l, 0) || !ar::take_members(l, &mut ars, blob) {
         return false;
     }
     let b = blob.as_slice();
@@ -472,6 +480,25 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     return true;
 }
 
+extend L as ar::Members {
+    fn globals(self: &Self) usize {
+        return self.gs.len();
+    }
+
+    fn wanted(self: &Self, g: usize) bool {
+        return self.gs[g].kind == G_UNDEF && self.gs[g].strong;
+    }
+
+    fn global_name(self: &Self, g: usize) str {
+        return self.names.spell(self.gs[g].name);
+    }
+
+    fn enter_member(self: &mut Self, name: str, at: usize, blob: &mut Vector<u8>) bool {
+        let f0 = self.files.len();
+        return parse_object(self, name, at, blob) && resolve_objects(self, f0);
+    }
+}
+
 // ---- input ----------------------------------------------------------------------------------------------
 
 fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
@@ -481,45 +508,6 @@ fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
         return false;
     }
     return parse_object(l, path, at, blob);
-}
-
-// The static libraries' members the link needs: each one that defines a global a strong reference
-// leaves undefined, its own references in turn, until none is left (a pass takes at least one member,
-// so the passes are at most the members).
-fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
-    let mut more = ars.paths.len() != 0;
-    // Per global, whether no archive defined it at its lookup: a member is only ever taken, so none will.
-    let mut miss = Vector::<bool>::new();
-    while more {
-        more = false;
-        for g in 0..l.gs.len() {
-            if g < miss.len() && miss[g] {
-                continue;
-            }
-            let gy = l.gs[g];
-            if gy.kind != G_UNDEF || !gy.strong {
-                continue;
-            }
-            let am = ars.find(l.names.spell(gy.name));
-            if am.is_none() {
-                if miss.len() <= g {
-                    miss.resize_default(l.gs.len());
-                }
-                miss[g] = true;
-                continue;
-            }
-            let m = am.unwrap();
-            ars.take(m);
-            let at = blob.len();
-            blob.extend_from_slice(ars.bytes(m));
-            let f0 = l.files.len();
-            if !parse_object(l, ars.name(m).as_str(), at, blob) || !resolve_objects(l, f0) {
-                return false;
-            }
-            more = true;
-        }
-    }
-    return true;
 }
 
 // Record the sections and symbols of the object at `at` of the blob, named `path`.
@@ -799,7 +787,7 @@ fn lib_dirs(o: &Opts) LibDirs {
 fn find(ld: &mut LibDirs, name: str, path: &mut String) u8 {
     for d in 0..ld.dirs.len() {
         let so = format("{}/lib{}.so", ld.dirs[d].as_str(), name);
-        if is_file(&so) {
+        if lu::is_file(&so) {
             path.clear();
             path.push_string(&so);
             return LIB_SHARED;
@@ -811,18 +799,13 @@ fn find(ld: &mut LibDirs, name: str, path: &mut String) u8 {
             return LIB_SHARED;
         }
         let a = format("{}/lib{}.a", ld.dirs[d].as_str(), name);
-        if is_file(&a) {
+        if lu::is_file(&a) {
             path.clear();
             path.push_string(&a);
             return LIB_ARCHIVE;
         }
     }
     return LIB_NONE;
-}
-
-fn is_file(p: str) bool {
-    let m = fs::stat(p);
-    return m.is_ok() && m.unwrap().kind == fs::FileKind::File;
 }
 
 // The newest `lib<name>.so.<N>` of directory `d` of `ld` (the largest N), empty when none.
@@ -899,7 +882,7 @@ fn script_files(o: &Opts, path: str, out: &mut Vector<String>) bool {
         let w = t.slice(s, i);
         if w.starts_with("/") && (w.ends_with(".so") || w.contains(".so.") || w.ends_with(".a")) {
             let f = format("{}{}", root, w);
-            if root.len() != 0 && !is_file(&f) {
+            if root.len() != 0 && !lu::is_file(&f) {
                 out.push(String::from_str(w));
             } else {
                 out.push(f);
@@ -954,7 +937,7 @@ fn load_so(l: &mut L, path: str) bool {
     let st = lu::r64(b, strh + 24) as usize;
     let strs = b[st..b.len()];
     // The soname: DT_SONAME, else the file's name.
-    let mut soname = String::from_str(basename(path));
+    let mut soname = String::from_str(lu::basename(path));
     if dynamic != 0 {
         let doff = lu::r64(b, dynamic + 24) as usize;
         let dn = lu::r64(b, dynamic + 32) as usize / 16;
@@ -1026,14 +1009,6 @@ fn load_so(l: &mut L, path: str) bool {
         }
     }
     return true;
-}
-
-const fn basename(p: str) str {
-    let mut i = p.len();
-    while i > 0 && p.byte_at(i - 1) != b'/' {
-        i -= 1;
-    }
-    return p.slice(i, p.len());
 }
 
 // The symbols no input defines: `__dso_handle` is the image itself (the key glibc's `__cxa_atexit` takes);

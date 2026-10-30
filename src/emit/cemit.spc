@@ -1821,6 +1821,17 @@ extend CEmit {
             self.refuse(b);
             return false;
         }
+        if !self.spells(b.module) {
+            // No C: the LIR alone, with the feature copies the C dispatch would call.
+            self.dispatch_prologue(b, name, false, false, "", false);
+            let nr = self.noret;
+            self.noret = false;
+            if self.lir_on(b.module) {
+                self.lir_body(b, name, 0, NODE_NONE, nr);
+            }
+            self.pr.count(prb::C_BODIES, 1);
+            return true;
+        }
         let mark = self.out.len();
         let pm = self.pr.start();
         let d0 = self.pr.ns[prb::P_DECL];
@@ -1839,6 +1850,12 @@ extend CEmit {
     /// Whether module `m`'s bodies render to C (`backends_of`).
     pub(package) const fn renders(self: &Self, m: ModuleId) bool {
         return (self.backends[m as usize] & BK_C) != 0;
+    }
+
+    /// Whether this emitter writes C text for module `m`: its bodies render, or every body does
+    /// (`render_all`).
+    pub(package) const fn spells(self: &Self, m: ModuleId) bool {
+        return self.render_all || self.renders(m);
     }
 
     // Whether LIR lowers what module `m` emits (a `@emit_macro` template is C text only).
@@ -2215,7 +2232,7 @@ extend CEmit {
         if (unsafe (*self.p().module_ast_const(b.owner.module)).unsafe_claims(b.owner.node) & UNSAFE_NAKED) != 0 {
             return self.emit_naked_body(b, &fname, hstart, hhead);
         }
-        self.dispatch_prologue(b, name, split, ret_void, &pnames);
+        self.dispatch_prologue(b, name, split, ret_void, &pnames, true);
         for k in 0..views.len() {
             // The body reads the view through its usual local.
             let l = views[k];
@@ -2878,12 +2895,6 @@ extend CEmit {
         self.sx_nm_len.clear();
         for l in 0..n {
             self.sx_coal.push(l as u32);
-        }
-        // A body that renders no C spells its signature alone, which needs the names, not the analysis
-        // of how the body uses its locals.
-        if !self.render_all && !self.renders(b.module) {
-            self.name_locals(b);
-            return;
         }
         let mut refs = self.uget();
         let mut defs = self.uget();
@@ -7709,6 +7720,14 @@ extend CEmit {
         // A closure runs with the build's features, whatever its function's.
         self.fs = self.p().features;
         self.err = "";
+        if !self.spells(b.module) {
+            // No C: the LIR alone.
+            if self.lir_on(b.module) {
+                self.lir_body(b, sym, cm, cnode, false);
+            }
+            self.pr.count(prb::C_BODIES, 1);
+            return true;
+        }
         self.arr_ret = false;
         let mark = self.out.len();
         let pm = self.pr.start();
@@ -16523,8 +16542,16 @@ extend CEmit {
     // of `simd_levels` the CPU has, the highest first, to its copy compiled with that level's
     // features (`<name>__fs<hex>`, demanded here). `__sc_simd_lvl()` (the forward header) reads the
     // detector once. A copy calls copies (`clone_set`): the check runs where code without the
-    // features enters vector code.
-    fn dispatch_prologue(self: &mut Self, b: &ir::CoreBody, name: str, split: bool, ret_void: bool, args: str) {
+    // features enters vector code. Without `text`, the copies' demands alone.
+    fn dispatch_prologue(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        name: str,
+        split: bool,
+        ret_void: bool,
+        args: str,
+        text: bool,
+    ) {
         let p = self.p();
         let n = p.simd_levels.len();
         if n == 0 || self.mg.macro_on || !cf::contains(cf::close(p.features), self.fs) || p.inl_store == null {
@@ -16572,6 +16599,9 @@ extend CEmit {
                         self.demand.push(d9);
                     }
                 }
+            }
+            if !text {
+                continue;
             }
             if split {
                 sym.push_str("__r");
@@ -19044,7 +19074,7 @@ extend CEmit {
             let sb0 = *self.glue_envs.at(idx).subs.at(gi);
             self.mg.push_msub(sb0);
         }
-        let ok0x = self.emit_glue_inner(idx);
+        let ok0x = !self.spells(self.glue.at(idx).em) || self.emit_glue_inner(idx);
         if ok0x && self.lir_on(self.glue.at(idx).em) {
             let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
             let sym = self.glue.at(idx).sym.clone();

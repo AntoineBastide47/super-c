@@ -370,3 +370,56 @@ fn a_c_shared_library_links_with_the_own_linker() {
     assert(r.ok(), "the own linker links the shared library");
     assert_eq(p.run_bin(), 0);
 }
+
+// Two modules whose `@noinline` functions return one string literal: each object defines its copy. With
+// variables in sections of their own (the default from -O1), each copy is a weak definition and the link
+// keeps one; without, each object's copy is its own.
+@test
+fn a_string_literal_of_two_objects_links_once() {
+    let p = cli::proj_new();
+    p.mkfile("a.spc", "@noinline\npub fn a_text() str<'static> {\n    return \"dedup marker 7f3a9c\";\n}\n");
+    p.mkfile("b.spc", "@noinline\npub fn b_text() str<'static> {\n    return \"dedup marker 7f3a9c\";\n}\n");
+    p.mkfile(
+        "main.spc",
+        "import a;\nimport b;\n\nfn main() i32 {\n    return (a::a_text().len() + b::b_text().len()) as i32 - 38;\n}\n",
+    );
+    let one = format("{}/one{}", p.dir(), unsafe str::from_cstr(cli::binext()));
+    let two = format("{}/two{}", p.dir(), unsafe str::from_cstr(cli::binext()));
+    let a = format("build main.spc -O2 -o \"{}\"", one.as_str());
+    assert(cli::superc_in(p.dir(), &a).ok(), "the build with data sections");
+    let b = format("build main.spc -O2 -fno-data-sections -o \"{}\"", two.as_str());
+    assert(cli::superc_in(p.dir(), &b).ok(), "the build without");
+    let ob = loader::read_file(&one).unwrap();
+    let tb = loader::read_file(&two).unwrap();
+    assert_eq(count(&ob, "dedup marker 7f3a9c"), 1);
+    assert_eq(count(&tb, "dedup marker 7f3a9c"), 2);
+    let mut run = format("\"{}\"", one.as_str());
+    assert_eq(cli::run_with(run.cstr(), null, null, null, ""), 0);
+    if stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new()).len() == 0 || cli::on_wasm() {
+        return;
+    }
+    let w = format("build main.spc -O2 --target=wasm -o \"{}/one.wasm\"", p.dir());
+    assert(cli::superc_in(p.dir(), &w).ok(), "the wasm build");
+    let wp = format("{}/one.wasm", p.dir());
+    let wb = loader::read_file(&wp).unwrap();
+    assert_eq(count(&wb, "dedup marker 7f3a9c"), 1);
+    let mut wrun = format("wasmtime run \"{}\"", wp.as_str());
+    assert_eq(cli::run_with(wrun.cstr(), null, null, null, ""), 0);
+}
+
+// How many times the bytes `b` hold those of `s`.
+fn count(b: str, s: str) u32 {
+    let n = s.len();
+    let mut c: u32 = 0;
+    if b.len() < n {
+        return 0;
+    }
+    for i in 0..b.len() - n + 1 {
+        let mut k: usize = 0;
+        while k < n && b.byte_at(i + k) == s.byte_at(k) {
+            k += 1;
+        }
+        c += (k == n) as u32;
+    }
+    return c;
+}

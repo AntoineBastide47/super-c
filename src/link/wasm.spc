@@ -23,6 +23,7 @@ pub(package) struct Opts {
     pub(package) stack_first: bool,
     pub(package) strip: bool,
     pub(package) gc: bool, // drop the bodies and data segments nothing reaches (`--gc-sections`, `collect`)
+    pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
 }
 
 // Symbol kinds and flags (the linking conventions').
@@ -212,6 +213,13 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     let mut ars = ar::Archives::new();
     for i in 0..o.objs.len() {
         let p = o.objs[i].as_str();
+        let at = blob.len();
+        if lu::take_held(o.mem, p, blob) {
+            if !parse_object(l, p, at, blob) {
+                return false;
+            }
+            continue;
+        }
         if ar::is_archive(p) {
             if !ars.add(nat::OBJ_WASM, p, &mut l.err) {
                 return false;
@@ -225,7 +233,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
             return false;
         }
     }
-    if !enter(l, 0) || !take_members(l, &mut ars, blob) || !resolve(l) {
+    if !enter(l, 0) || !ar::take_members(l, &mut ars, blob) || !resolve(l) {
         return false;
     }
     let b = blob.as_slice();
@@ -245,6 +253,25 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
         return false;
     }
     return true;
+}
+
+extend L as ar::Members {
+    fn globals(self: &Self) usize {
+        return self.gs.len();
+    }
+
+    fn wanted(self: &Self, g: usize) bool {
+        return self.gs[g].kind == G_UNDEF && self.gs[g].strong;
+    }
+
+    fn global_name(self: &Self, g: usize) str {
+        return self.names.spell(self.gs[g].name);
+    }
+
+    fn enter_member(self: &mut Self, name: str, at: usize, blob: &mut Vector<u8>) bool {
+        let f0 = self.files.len();
+        return parse_object(self, name, at, blob) && enter(self, f0);
+    }
 }
 
 // ---- reading --------------------------------------------------------------------------------------------
@@ -572,45 +599,6 @@ fn enter(l: &mut L, from: usize) bool {
             gy.kind = G_DEF;
             gy.sym = k;
             l.gs[g as usize] = gy;
-        }
-    }
-    return true;
-}
-
-// Each global still undefined and strongly referenced that an archive member defines: take the member,
-// enter its symbols, until no member defines a global still needed.
-fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
-    let mut more = ars.paths.len() != 0;
-    // Per global, whether no archive defined it at its lookup: a member is only ever taken, so none will.
-    let mut miss = Vector::<bool>::new();
-    // Each pass takes at least one member, or ends.
-    while more {
-        more = false;
-        for g in 0..l.gs.len() {
-            if g < miss.len() && miss[g] {
-                continue;
-            }
-            let gy = l.gs[g];
-            if gy.kind != G_UNDEF || !gy.strong {
-                continue;
-            }
-            let am = ars.find(l.names.spell(gy.name));
-            if am.is_none() {
-                if miss.len() <= g {
-                    miss.resize_default(l.gs.len());
-                }
-                miss[g] = true;
-                continue;
-            }
-            let m = am.unwrap();
-            ars.take(m);
-            let at = blob.len();
-            blob.extend_from_slice(ars.bytes(m));
-            let f0 = l.files.len();
-            if !parse_object(l, ars.name(m).as_str(), at, blob) || !enter(l, f0) {
-                return false;
-            }
-            more = true;
         }
     }
     return true;

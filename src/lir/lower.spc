@@ -10208,6 +10208,12 @@ extend Lower {
             return true;
         }
         let (cd, ro) = self.synth_begin(c, rm);
+        if !c.spells(rm) {
+            // No C renders the destructor: its lowering queues the members' destructors (`drop_at`) and
+            // journals them.
+            c.collect_demand = cd && Lower::p(c).native;
+            c.mg.rec_on = ro;
+        }
         let ok = self.glue_i(c, rm, rt, fb, fields);
         return self.synth_end(c, cd, ro, sym, ok);
     }

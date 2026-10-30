@@ -3663,7 +3663,10 @@ extend Gen {
         if o.syms[k as usize].def != wo::NONE {
             return self.refuse("data defined twice in one object");
         }
-        let mut fl = if ps.linkage == SL_GLOBAL && !local {
+        // A copy of data no unit owns: as `ob::copy_flags` makes it.
+        let mut fl = if local && (p.split & ob::SPLIT_DATA) != 0 {
+            wo::F_WEAK | wo::F_HIDDEN
+        } else if ps.linkage == SL_GLOBAL && !local {
             wo::F_HIDDEN
         } else {
             wo::F_LOCAL

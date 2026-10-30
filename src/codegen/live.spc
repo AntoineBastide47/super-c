@@ -1711,6 +1711,64 @@ const fn sext_bits(k: u64, bits: u32) i64 {
 }
 
 // The bits of integer constant `v`, u64::MAX for a value that is no constant (or that constant).
+/// The type of value index `x` of `b`: an instruction's, a block parameter's, else i8.
+pub(package) const fn xty(b: &Body, x: u32) u8 {
+    let ni = b.insts.len() as u32;
+    if x < ni {
+        return b.insts[x as usize].ty;
+    }
+    if x < ni + b.params.len() as u32 {
+        return b.params[(x - ni) as usize];
+    }
+    return T_I8;
+}
+
+/// Whether symbol `s` of `b` (of package `p`) is a thread-local variable.
+pub(package) const fn tls_sym(p: &Package, b: &Body, s: u32) bool {
+    return p.syms[b.syms[s as usize] as usize].kind == SK_TLS;
+}
+
+/// Whether `v` of `b` (of package `p`) is an instruction value a generator recomputes at each use.
+pub(package) const fn remat_inst(p: &Package, b: &Body, v: Value) bool {
+    if (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    return t.op == O_ICONST || t.op == O_FCONST || t.op == O_SLOTADDR || t.op == O_SYMADDR && !tls_sym(p, b, t.a);
+}
+
+/// Whether `v` of `b` is an integer constant; its bits in `out`.
+pub(package) const fn const_of(b: &Body, v: Value, out: &mut u64) bool {
+    if (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.op != O_ICONST {
+        return false;
+    }
+    *out = t.b as u64 << 32 | t.a as u64;
+    return true;
+}
+
+/// Whether instruction `i` of `b` (of package `p`, liveness `lv`) leads only to its block's `unreachable`:
+/// every instruction after it reads values a generator recomputes. `uses` is scratch.
+pub(package) fn dead_end(p: &Package, b: &Body, lv: &Live, i: usize, uses: &mut Vector<Value>) bool {
+    let bk = b.blocks[lv.def_blk[i] as usize];
+    let end = (bk.start + bk.len - 1) as usize;
+    if b.insts[end].op != O_UNREACHABLE {
+        return false;
+    }
+    for j in i + 1..end {
+        each_use(b, b.insts[j], uses);
+        for u in 0..uses.len() {
+            if !remat_inst(p, b, uses[u]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 fn int_const(b: &Body, v: Value) u64 {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST {
         return u64::MAX;

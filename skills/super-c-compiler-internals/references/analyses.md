@@ -83,7 +83,7 @@ above. Recompute a fact only after a change that the "Valid until" column names.
 
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
-| Object bytes | `nat::object` | `NatObj.bytes`, then the `.o` file | end of `run_package` (memory) |
+| Object bytes | `nat::object` | `NatObj.bytes`, then the `.o` file and the link's `lu::Mem` | the link reads them (memory) |
 | Output file hash, manifest line | `out_hash`, `man_line` | manifest | end of the build |
 | Per-TU cache image | `driver::tuc` | `.tu_cache` | next emitting build |
 | Parsed input objects | `parse_object` (`link::macho`, `elf`, `pe`, `wasm`) | linker state | end of the link |
@@ -97,15 +97,17 @@ above. Recompute a fact only after a change that the "Valid until" column names.
 These recompute a fact the compiler already holds. Remove each line when it is fixed. Do
 not copy their pattern into new code.
 
-- lower: a native build still renders the C signature, local names, destructor and static data
-  text and the C tree (headers, `__sc_registry.c`, manifest `h` lines) that only the C backend reads,
-  and spells each callee's symbol again per calling module for the C units' cross-unit edges; `Svc`
-  holds one copy per owner.
+- lower: a native build still renders the C text of its constants and statics, of its aggregates'
+  definitions and of the extern headers' checks, which only the C backend reads, and spells each
+  callee's symbol again per calling module for the cross-unit edges (which choose the objects too);
+  `Svc` holds one copy per owner.
 - optimize: `LoopOpt` analyses a rejected loop again in each round; the exit test has four
   decoders (`cf_test`, `trip`, `counted_by`, `checks`), and `top_of` repeats part of `ubound`.
 - codegen: `Live::rare_blocks` repeats the optimizer's `BLOCK_RARE` when `lir_opt` ran; each
-  object compiles its own copy of the unowned package data it names (string literals: 3712
-  extra copies over 298 objects in a self-build); a64gen and x64gen hold identical copies of
-  `arg_relays`, `relay_parts`, `parts_taken`, `dead_end`, `edge_moves`, `resolve_moves` and more.
-- publish, sync, link: the linker reads back and parses the objects the build had in memory; the
-  four linkers repeat `read_object`, `take_members`, `global` and `copy_sections`.
+  object compiles its own copy of the unowned package data it names (string literals; weak with
+  `-fdata-sections`, so the link keeps one); a64gen and x64gen hold parallel copies of the
+  target-dependent parts of the register allocation (`edge_moves`, `continues`, `entry_reg`,
+  `param_home`, `call_tables`, `plan_homes` and more).
+- publish, sync, link: the linker parses again the objects the build had in memory, and reads the
+  replayed ones from their files; the four linkers repeat `global`, `out_section` and the
+  `copy_sections` loops.
