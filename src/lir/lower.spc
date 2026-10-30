@@ -29,6 +29,10 @@ import bindgen::bindgen as bg;
 import typechecker::render as rnd;
 import std::parallel::sync as psync;
 
+/// The byte that holds the level of `simd_levels` the native copies run at: 0 (the build's features) until
+/// the registry's constructor sets it (`driver::emit::native_registry`).
+const SIMD_LV: str = "__sc_simd_lv";
+
 // Value classes of a type.
 const VC_ZST: u8 = 0; // no storage: unit, void, never, zero-sized
 const VC_SCALAR: u8 = 1;
@@ -2703,6 +2707,19 @@ extend Lower {
             self.lblk[self.order[k] as usize] = self.block();
         }
         self.b.begin(b0);
+        // A native function with run-time copies: the copy of the highest level the CPU has takes the call.
+        let copies = replace(&mut c.disp, Vector::<String>::new());
+        let mut takes = Vector::<u32>::new();
+        if copies.len() != 0 && Lower::p(c).native {
+            let la = self.symaddr(SIMD_LV, SK_DATA);
+            let lvl = self.inst(O_ALOAD, T_I8, MO_RELAXED, la, VNONE, 0);
+            for i in 0..copies.len() {
+                let t = self.block();
+                let at = self.icmp(C_UGE, lvl, self.iconst(T_I8, (copies.len() - i) as u64));
+                self.split(at, t, true);
+                takes.push(t);
+            }
+        }
         self.cur = self.virt;
         // The safepoint counter may add one variable.
         if self.cv.len() <= self.var_ty.len() {
@@ -2787,6 +2804,23 @@ extend Lower {
         }
         let e = self.edge(self.lblk[b.entry as usize], self.virt, b.entry);
         let _ = self.inst(O_JMP, T_NONE, 0, e, VNONE, VNONE);
+        // Each copy's call: the function's parameters, its result.
+        let mut ps = Vector::<Value>::new();
+        for k in 0..ast::pick(takes.len() != 0, etys.len(), 0) {
+            ps.push(self.b.param(b0, k as u32));
+        }
+        for i in 0..takes.len() {
+            self.b.begin(takes[i]);
+            let k = self.sym(&copies[i], SK_FUNC);
+            let at = self.b.pool_list(ps[0..ps.len()]);
+            let rty = ast::pick((ret & AGG) != 0, T_NONE, ret as u8);
+            let r = self.inst(O_CALL, rty, ps.len() as u16, k, self.b.sig, at);
+            if self.noret {
+                let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
+            } else {
+                let _ = self.inst(O_RET, T_NONE, 0, ast::pick(rty != T_NONE, r, VNONE), VNONE, VNONE);
+            }
+        }
         let _ = cap_base;
         return true;
     }

@@ -244,6 +244,9 @@ pub(package) struct CEmit {
     /// Every body renders, whatever its module's backends: C text no native object replaces (a vector
     /// backend entry's header).
     pub(package) render_all: bool,
+    /// The run-time copies of the body being emitted without C (`dispatch_prologue`), the highest level
+    /// first: its LIR opens with the choice among them.
+    pub(package) disp: Vector<String>,
     /// Forwarded call texts spelled so far: a call argument whose spelling grew it repeats a call
     /// when spelled twice.
     fwd_spelled: u64,
@@ -655,6 +658,7 @@ extend CEmit {
             vec_prog: pk.names_vectors(),
             no_split: native_on(pk),
             render_all: false,
+            disp: Vector::<String>::new(),
             fwd_spelled: 0,
             simd_trace: stdlib::env_is("SC_SIMD_TRACE", "1"),
             fs: pk.features,
@@ -1822,13 +1826,15 @@ extend CEmit {
             return false;
         }
         if !self.spells(b.module) {
-            // No C: the LIR alone, with the feature copies the C dispatch would call.
+            // No C: the LIR alone, which chooses among the feature copies at run time (`disp`).
+            self.disp.clear();
             self.dispatch_prologue(b, name, false, false, "", false);
             let nr = self.noret;
             self.noret = false;
             if self.lir_on(b.module) {
                 self.lir_body(b, name, 0, NODE_NONE, nr);
             }
+            self.disp.clear();
             self.pr.count(prb::C_BODIES, 1);
             return true;
         }
@@ -16542,7 +16548,7 @@ extend CEmit {
     // of `simd_levels` the CPU has, the highest first, to its copy compiled with that level's
     // features (`<name>__fs<hex>`, demanded here). `__sc_simd_lvl()` (the forward header) reads the
     // detector once. A copy calls copies (`clone_set`): the check runs where code without the
-    // features enters vector code. Without `text`, the copies' demands alone.
+    // features enters vector code. Without `text`, the copies' demands, and their symbols into `disp`.
     fn dispatch_prologue(
         self: &mut Self,
         b: &ir::CoreBody,
@@ -16601,6 +16607,7 @@ extend CEmit {
                 }
             }
             if !text {
+                self.disp.push(sym);
                 continue;
             }
             if split {

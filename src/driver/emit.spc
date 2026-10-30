@@ -16317,6 +16317,9 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
         }
         t.format_into("data @__sc_zst_{} size 1 align {}\n", zst[i], lg);
     }
+    if p.simd_levels.len() != 0 && p.names_vectors() {
+        simd_level_init(p, int, &mut t);
+    }
     let mut err = String::new();
     let mut ok = false;
     switch lparse::parse(&t, &mut err) {
@@ -16340,6 +16343,77 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
         eprintln("super-c: the registry does not compile natively: {}", err.as_str());
     }
     return ok;
+}
+
+// The level the native copies of a program with run-time copies run at (`simd_levels`; the C tree's
+// `simd_level_fn`), as LIR into `t`: the byte `__sc_simd_lv` every dispatching function reads, 0 (the
+// build's features) until the constructor `__sc_simd_init` sets it before `main` to the highest level k
+// (1-based) whose features the CPU detector reports (`sc_cpu_words`). `SC_SIMD_LEVEL=<k>` (a test switch)
+// sets it, up to the highest. `int` is the pointer-sized integer type.
+fn simd_level_init(p: &loader::Package, int: str, t: &mut String) {
+    let n = p.simd_levels.len();
+    let f = tgt::obj_of(p.build_target).name;
+    let sec = if f == "macho" {
+        "__DATA,__mod_init_func,mod_init_funcs"
+    } else if f == "coff" {
+        ".CRT$XCU"
+    } else {
+        ".init_array"
+    };
+    let ptr = lay::target_for(p.arch).ptr as u32;
+    t.push_str("sym @__sc_simd_lv data global\nsym @getenv fn global ext\nsym @sc_cpu_words fn global\n");
+    t.format_into(
+        "sym @__sc_simd_env data local\nsym @__sc_simd_init fn local\nsym @__sc_simd_ctor data local used section \"{}\"\n",
+        sec,
+    );
+    t.push_str("fn @__sc_simd_init\n  sig () -> void\n  slot s0 size 16 align 3\nb0:\n  v0 = symaddr @__sc_simd_lv\n");
+    t.format_into(
+        "  v1 = symaddr @__sc_simd_env\n  v2 = call.ptr @getenv(v1) : (ptr) -> ptr\n  v3 = ptrtoint.{} v2\n  v4 = iconst.{} 0\n",
+        int,
+        int,
+    );
+    t.push_str("  v5 = icmp.ne v3, v4\n  br v5, b1, b3\n");
+    // A digit: its value, up to the highest level.
+    t.push_str("b1:\n  v6 = load.i8 v2 align 0\n  v7 = zext.i32 v6\n  v8 = iconst.i32 48\n  v9 = sub.i32 v7, v8\n");
+    t.push_str("  v10 = iconst.i32 10\n  v11 = icmp.ult v9, v10\n  br v11, b2, b3\n");
+    t.format_into("b2:\n  v12 = iconst.i32 {}\n  v13 = icmp.ult v9, v12\n  v14 = select.i32 v13, v9, v12\n", n);
+    t.push_str("  v15 = trunc.i8 v14\n  astore v15, v0 relaxed\n  ret\n");
+    // The detector's two words against each level's, the highest first: block b(4 + 2i) tests level
+    // n - i, b(5 + 2i) sets it.
+    t.push_str("b3:\n  v16 = slotaddr s0\n  call @sc_cpu_words(v16) : (ptr) -> void\n  v17 = load.i64 v16 align 3\n");
+    t.push_str("  v18 = load.i64 v16+8 align 3\n  jmp b4\n");
+    let mut v: usize = 19;
+    for i in 0..n {
+        let w = p.simd_levels[n - 1 - i].w;
+        t.format_into(
+            "b{}:\n  v{} = iconst.i64 {}\n  v{} = and.i64 v17, v{}\n  v{} = icmp.eq v{}, v{}\n",
+            4 + 2 * i,
+            v,
+            w[0] as i64,
+            v + 1,
+            v,
+            v + 2,
+            v + 1,
+            v,
+        );
+        t.format_into(
+            "  v{} = iconst.i64 {}\n  v{} = and.i64 v18, v{}\n  v{} = icmp.eq v{}, v{}\n",
+            v + 3,
+            w[1] as i64,
+            v + 4,
+            v + 3,
+            v + 5,
+            v + 4,
+            v + 3,
+        );
+        t.format_into("  v{} = and.i8 v{}, v{}\n  br v{}, b{}, b{}\n", v + 6, v + 2, v + 5, v + 6, 5 + 2 * i, 6 + 2 * i);
+        t.format_into("b{}:\n  v{} = iconst.i8 {}\n  astore v{}, v0 relaxed\n  ret\n", 5 + 2 * i, v + 7, n - i, v + 7);
+        v += 8;
+    }
+    t.format_into("b{}:\n  ret\n", 4 + 2 * n);
+    t.push_str("data @__sc_simd_lv size 1 align 0\n");
+    t.push_str("data @__sc_simd_env size 14 align 0 ro bytes 53435f53494d445f4c4556454c00\n");
+    t.format_into("data @__sc_simd_ctor size {} align {} reloc 0 @__sc_simd_init\n", ptr, pick(ptr == 4, 2u32, 3u32));
 }
 
 /// The measured cost of one runtime task (launch, run, join; 0.7 to 1.0 us over 20k empty tasks

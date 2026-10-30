@@ -228,6 +228,38 @@ fn vector_functions_choose_their_copy_at_run_time() {
     assert(!man.ok() && man.out_has("simd dispatch: unknown target CPU 'x86-64-v9'"), "a bad manifest level");
 }
 
+// A native x86_64 build makes the same choice: the function with vector code reads the level the
+// registry's constructor sets (`__sc_simd_lv`) and, at a level the CPU has, calls its copy; `off` builds
+// neither (the build's LIR, `SC_LIR_TEXT`).
+@test
+fn native_vector_functions_choose_their_copy_at_run_time() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import std::simd;\n\n@noinline\nfn kern(c: []mut f32, a: []f32) {\n    let mut i: usize = 0;\n    while i + 8 <= a.len() {\n        simd::store(c, i, simd::load::<f32, 8>(a, i).fma(simd::load::<f32, 8>(a, i), simd::load::<f32, 8>(c, i)));\n        i += 8;\n    }\n}\n\nfn main(args: Vector<str>) i32 {\n    let a: [f32; 8] = [1.0; 8];\n    let mut c: [f32; 8] = [0.0; 8];\n    kern(c, a);\n    return args.len() as i32 - 1;\n}\n",
+    );
+    let root = p.dir();
+    let flags: [str; 2] = ["", " --simd-dispatch=off"];
+    for i in 0..2 {
+        bsys::rm_rf(format("{}/build", root).as_str());
+        let env = format("1 SC_LIR_OPT=0 SC_NO_TU_CACHE=1 SC_NO_EMIT_CACHE=1 SC_LIR_TEXT={}/pkg.lir", root);
+        let cmd = format("build main.spc --profile=release --arch=x86_64 --target=linux -o app{}", unsafe flags[i]);
+        let _ = cli::superc_env_in(root, "SC_LIR", &env, &cmd);
+        let text = cli::read_text(format("{}/pkg.lir", root).as_str());
+        if i == 0 {
+            assert(
+                text.contains("aload.i8 v") && text.contains("@__sc_simd_lv") && text.contains("@main__kern__fs"),
+                "the level and the copy",
+            );
+        } else {
+            assert(
+                text.contains("fn @main__kern") && !text.contains("__sc_simd_lv") && !text.contains("main__kern__fs"),
+                "off",
+            );
+        }
+    }
+}
+
 // A function's address casts to `usize`, and back inside `unsafe`; a generic cast to a type that is no
 // function pointer fails for that instance.
 fn function_addresses_cast_to_usize_and_back(b: &mut h::ExitBatch) {
