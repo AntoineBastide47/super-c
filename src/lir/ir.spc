@@ -923,6 +923,19 @@ pub(package) struct Scope {
 }
 
 // An exact-capacity copy of `v`.
+/// `Body::compact_pool`'s scratch: per old pool index, the copy of the record that starts there (its new
+/// index plus 1 << 32 | its length; 0: none), and the new pool.
+pub(package) struct PoolScratch {
+    pub(package) map: Vector<u64>,
+    pub(package) out: Vector<u32>,
+}
+
+extend PoolScratch {
+    pub(package) fn new() PoolScratch {
+        return PoolScratch { map: Vector::<u64>::new(), out: Vector::<u32>::new() };
+    }
+}
+
 fn exact<T: Copy>(v: &Vector<T>) Vector<T> {
     let mut out = Vector::<T>::with_capacity(v.len());
     out.extend_copy(v);
@@ -1008,6 +1021,103 @@ extend Body {
             naked: self.naked,
             cur: 0,
         };
+    }
+
+    /// Keep in the pool only the records the body names: its signature, then per instruction its
+    /// signature (with its layouts), argument and operand lists, lane list, `asm` record and edges, each
+    /// copied once in that order. A pass's dead edges and lists go.
+    pub(package) fn compact_pool(self: &mut Self, s: &mut PoolScratch) {
+        let map = &mut s.map;
+        let out = &mut s.out;
+        map.truncate(0);
+        map.resize_default(self.pool.len());
+        out.truncate(0);
+        if self.sig != NONE {
+            self.sig = self.move_sig(self.sig, map, out);
+        }
+        for i in 0..self.insts.len() {
+            let mut t = self.insts[i];
+            let f = op_info(t.op).form;
+            if f == F_CALL || f == F_CALLIND {
+                t.b = self.move_sig(t.b, map, out);
+                t.c = self.move_range(t.c, t.aux, map, out);
+            } else if f == F_VOP || f == F_ASM {
+                t.a = self.move_range(t.a, t.b, map, out);
+                if f == F_ASM {
+                    t.c = self.move_range(
+                        t.c,
+                        4 + 2 * asm_nout(self, t.c) + asm_nin(self, t.c) + asm_nclob(self, t.c),
+                        map,
+                        out,
+                    );
+                } else if t.c != VNONE {
+                    t.c = self.move_range(t.c, 1 + self.pool[t.c as usize], map, out);
+                }
+            } else if f == F_JMP {
+                t.a = self.move_edge(t.a, map, out);
+            } else if f == F_BR {
+                t.b = self.move_edge(t.b, map, out);
+                t.c = self.move_edge(t.c, map, out);
+            } else if f == F_SWITCH {
+                // The edge list, then each edge, the list's entries the edges' new indexes.
+                let n = t.aux as u32 + 1;
+                let m = map[t.c as usize];
+                if m != 0 && (m & 0xFFFFFFFF) as u32 >= n {
+                    t.c = (m >> 32) as u32 - 1;
+                } else {
+                    let at = out.len() as u32;
+                    map[t.c as usize] = at as u64 + 1 << 32 | n as u64;
+                    for k in 0..n {
+                        out.push(self.pool[(t.c + k) as usize]);
+                    }
+                    for k in 0..n {
+                        let e = out[(at + k) as usize];
+                        out[(at + k) as usize] = self.move_edge(e, map, out);
+                    }
+                    t.c = at;
+                }
+            }
+            self.insts[i] = t;
+        }
+        self.pool = exact(out);
+    }
+
+    // `compact_pool`'s copy of the `n` words at `at` (an empty range: the copy's end).
+    fn move_range(self: &Self, at: u32, n: u32, map: &mut Vector<u64>, out: &mut Vector<u32>) u32 {
+        if n == 0 {
+            return out.len() as u32;
+        }
+        let m = map[at as usize];
+        if m != 0 && (m & 0xFFFFFFFF) as u32 >= n {
+            return (m >> 32) as u32 - 1;
+        }
+        let to = out.len() as u32;
+        map[at as usize] = to as u64 + 1 << 32 | n as u64;
+        out.extend_from_slice(self.pool[at as usize..(at + n) as usize]);
+        return to;
+    }
+
+    // `compact_pool`'s copy of edge `e`.
+    fn move_edge(self: &Self, e: u32, map: &mut Vector<u64>, out: &mut Vector<u32>) u32 {
+        return self.move_range(e, 2 + self.pool[e as usize + 1], map, out);
+    }
+
+    // `compact_pool`'s copy of signature `s`, its aggregates' layouts copied too.
+    fn move_sig(self: &Self, s: u32, map: &mut Vector<u64>, out: &mut Vector<u32>) u32 {
+        let n = 3 + self.pool[s as usize];
+        let m = map[s as usize];
+        if m != 0 && (m & 0xFFFFFFFF) as u32 >= n {
+            return (m >> 32) as u32 - 1;
+        }
+        let to = self.move_range(s, n, map, out);
+        for k in 2..n {
+            let w = out[(to + k) as usize];
+            if (w & AGG) != 0 {
+                let l = w & ~AGG;
+                out[(to + k) as usize] = AGG | self.move_range(l, 3 + 2 * self.pool[l as usize + 2], map, out);
+            }
+        }
+        return to;
     }
 
     // ---- Building ----

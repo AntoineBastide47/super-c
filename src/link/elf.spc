@@ -488,15 +488,24 @@ fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
 // so the passes are at most the members).
 fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
     let mut more = ars.paths.len() != 0;
+    // Per global, whether no archive defined it at its lookup: a member is only ever taken, so none will.
+    let mut miss = Vector::<bool>::new();
     while more {
         more = false;
         for g in 0..l.gs.len() {
+            if g < miss.len() && miss[g] {
+                continue;
+            }
             let gy = l.gs[g];
             if gy.kind != G_UNDEF || !gy.strong {
                 continue;
             }
             let am = ars.find(l.names.spell(gy.name));
             if am.is_none() {
+                if miss.len() <= g {
+                    miss.resize_default(l.gs.len());
+                }
+                miss[g] = true;
                 continue;
             }
             let m = am.unwrap();
@@ -705,15 +714,25 @@ fn load_libraries(l: &mut L, sos: &Vector<String>) bool {
 // `ars`. A GNU ld script gives each file it names (its `AS_NEEDED` ones too: a library no symbol binds to
 // gets no DT_NEEDED anyway).
 fn lib_files(l: &mut L, o: &Opts, sos: &mut Vector<String>, ars: &mut ar::Archives) bool {
+    // Each library once.
     let mut names = Vector::<String>::new();
-    for i in 0..o.libs.len() {
-        names.push(o.libs[i].clone());
+    for i in 0..o.libs.len() + 1 {
+        let nm = if i < o.libs.len() {
+            o.libs[i].as_str()
+        } else {
+            "c"
+        };
+        let s = String::from_str(nm);
+        if !names.contains(&s) {
+            names.push(s);
+        }
     }
-    names.push(String::from_str("c"));
+    let mut ld = lib_dirs(o);
     let mut files = Vector::<String>::new();
+    let mut taken = Vector::<String>::new();
     for i in 0..names.len() {
         let mut path = String::new();
-        let kind = find(o, &names[i], &mut path);
+        let kind = find(&mut ld, &names[i], &mut path);
         if kind == LIB_NONE {
             l.err.format_into("library not found: -l{}", names[i].as_str());
             return false;
@@ -726,6 +745,11 @@ fn lib_files(l: &mut L, o: &Opts, sos: &mut Vector<String>, ars: &mut ar::Archiv
         }
         for k in 0..files.len() {
             let f = files[k].as_str();
+            // A file two libraries name (a script's, libc's) loads once.
+            if taken.contains(&files[k]) {
+                continue;
+            }
+            taken.push(files[k].clone());
             if ar::is_archive(f) {
                 if !ars.add(nat::OBJ_ELF, f, &mut l.err) {
                     return false;
@@ -743,36 +767,50 @@ pub(package) const LIB_NONE: u8 = 0;
 pub(package) const LIB_SHARED: u8 = 1;
 pub(package) const LIB_ARCHIVE: u8 = 2;
 
-/// Library `-l<name>` of link `o`, as glibc's linker searches: each directory of `dirs`, then the system's,
-/// for `lib<name>.so` (a shared library or a GNU ld script), `lib<name>.so.<N>`, then `lib<name>.a`; its
-/// path into `path`.
-pub(package) fn find(o: &Opts, name: str, path: &mut String) u8 {
+// The library directories of a link, in search order (its own, then the system's), each with its entries
+// once `newest_version` listed it.
+struct LibDirs {
+    dirs: Vector<String>,
+    ents: Vector<Option<Vector<String>>>,
+}
+
+// The library directories of link `o`.
+fn lib_dirs(o: &Opts) LibDirs {
     let sys: []str = if o.a64 {
         DIRS_A64
     } else {
         DIRS_X64
     };
-    let mut dirs = Vector::<String>::new();
+    let mut ld = LibDirs { dirs: Vector::<String>::new(), ents: Vector::<Option<Vector<String>>>::new() };
     for i in 0..o.dirs.len() {
-        dirs.push(o.dirs[i].clone());
+        ld.dirs.push(o.dirs[i].clone());
     }
     for i in 0..sys.len() {
-        dirs.push(format("{}{}", o.sysroot.as_str(), sys[i]));
+        ld.dirs.push(format("{}{}", o.sysroot.as_str(), sys[i]));
     }
-    for d in 0..dirs.len() {
-        let so = format("{}/lib{}.so", dirs[d].as_str(), name);
+    for _ in 0..ld.dirs.len() {
+        ld.ents.push(None);
+    }
+    return ld;
+}
+
+/// Library `-l<name>` in directories `ld`, as glibc's linker searches: each directory for `lib<name>.so` (a
+/// shared library or a GNU ld script), `lib<name>.so.<N>`, then `lib<name>.a`; its path into `path`.
+fn find(ld: &mut LibDirs, name: str, path: &mut String) u8 {
+    for d in 0..ld.dirs.len() {
+        let so = format("{}/lib{}.so", ld.dirs[d].as_str(), name);
         if is_file(&so) {
             path.clear();
             path.push_string(&so);
             return LIB_SHARED;
         }
-        let v = newest_version(&dirs[d], name);
+        let v = newest_version(ld, d, name);
         if v.len() != 0 {
             path.clear();
             path.push_string(&v);
             return LIB_SHARED;
         }
-        let a = format("{}/lib{}.a", dirs[d].as_str(), name);
+        let a = format("{}/lib{}.a", ld.dirs[d].as_str(), name);
         if is_file(&a) {
             path.clear();
             path.push_string(&a);
@@ -787,22 +825,31 @@ fn is_file(p: str) bool {
     return m.is_ok() && m.unwrap().kind == fs::FileKind::File;
 }
 
-// The newest `lib<name>.so.<N>` of directory `dir` (the largest N), empty when none.
-fn newest_version(dir: str, name: str) String {
+// The newest `lib<name>.so.<N>` of directory `d` of `ld` (the largest N), empty when none.
+fn newest_version(ld: &mut LibDirs, d: usize, name: str) String {
     let mut best = String::new();
     let mut best_v: u64 = 0;
-    let opened = fs::read_dir(dir);
-    if opened.is_err() {
-        return best;
+    if ld.ents[d].is_none() {
+        let mut ents = Vector::<String>::new();
+        let opened = fs::read_dir(&ld.dirs[d]);
+        if opened.is_ok() {
+            let mut rd = opened.unwrap();
+            // Bounded by the directory's entries.
+            while let Some(Ok(e)) = rd.next() {
+                ents.push(String::from_str(e.name));
+            }
+        }
+        ld.ents[d] = Some(ents);
     }
+    let dir = ld.dirs[d].as_str();
+    let ents = ld.ents[d].as_ref().unwrap();
     let pre = format("lib{}.so.", name);
-    let mut rd = opened.unwrap();
-    // Bounded by the directory's entries.
-    while let Some(Ok(e)) = rd.next() {
-        if !e.name.starts_with(&pre) {
+    for k in 0..ents.len() {
+        let en = ents[k].as_str();
+        if !en.starts_with(&pre) {
             continue;
         }
-        let rest = e.name.slice(pre.len(), e.name.len());
+        let rest = en.slice(pre.len(), en.len());
         let mut v: u64 = 0;
         let mut ok = rest.len() != 0;
         for i in 0..rest.len() {
@@ -815,7 +862,7 @@ fn newest_version(dir: str, name: str) String {
         }
         if ok && (best.len() == 0 || v > best_v) {
             best_v = v;
-            best = format("{}/{}", dir, e.name);
+            best = format("{}/{}", dir, en);
         }
     }
     return best;
@@ -1757,20 +1804,29 @@ fn layout(l: &mut L, o: &Opts, b: []u8) {
     };
     l.osecs.index_mut(text).align = 16;
     let mut has_eh = false;
+    // The last input's output section and its name: the next input of that name joins it.
+    let mut prev = String::new();
+    let mut prev_o = NONE;
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
         if !kept(l, sc) || l.sn.spell(sc.name) == ".note.GNU-stack" {
             continue;
         }
         let mut rank: u32 = 0;
-        let name = String::from_str(out_name(l, sc, &mut rank));
-        let ty = if sc.ty == SHT_X86_64_UNWIND {
-            SHT_PROGBITS
+        let o = if prev_o != NONE && out_name(l, sc, &mut rank) == prev.as_str() {
+            prev_o
         } else {
-            sc.ty
+            let name = String::from_str(out_name(l, sc, &mut rank));
+            let ty = if sc.ty == SHT_X86_64_UNWIND {
+                SHT_PROGBITS
+            } else {
+                sc.ty
+            };
+            prev_o = out_section(l, &name, ty, sc.flags & (SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR | SHF_TLS), rank);
+            has_eh = has_eh || name.as_str() == ".eh_frame";
+            prev = name;
+            prev_o
         };
-        let o = out_section(l, &name, ty, sc.flags & (SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR | SHF_TLS), rank);
-        has_eh = has_eh || name.as_str() == ".eh_frame";
         let os = l.osecs.index_mut(o as usize);
         os.align = os.align.max(sc.align);
         os.size = lu::align_up(os.size, sc.align);
@@ -2141,9 +2197,7 @@ const fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
             copy_eh(l, b, sc, img, at);
             continue;
         }
-        for i in 0..sc.size as usize {
-            img[at + i] = b[sc.off + i];
-        }
+        img.index_range_mut(at..at + sc.size as usize).copy_from_slice(b[sc.off..sc.off + sc.size as usize]);
     }
 }
 
@@ -3120,9 +3174,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
                 continue;
             }
             let at = (dbg_off[sc.out as usize] + sc.at) as usize;
-            for i in 0..sc.size as usize {
-                img[at + i] = b[sc.off + i];
-            }
+            img.index_range_mut(at..at + sc.size as usize).copy_from_slice(b[sc.off..sc.off + sc.size as usize]);
         }
         apply_debug(l, b, img, &dbg_off);
     }

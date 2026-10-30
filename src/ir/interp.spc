@@ -1077,6 +1077,11 @@ pub(package) struct Interp {
     pub(package) pending_strict: Vector<bool>, // per deferred const: a silent failure is an error too
     pub(package) inst_asserts: Vector<InstAssert>, // per-instance static_assert evaluations concrete calls ask for
     pub(package) inst_asserts_failed: bool, // the instance graph's check reported a failure (driver `graph_inst_asserts`)
+    // The driver's per-instance checks (`cemit_inst_asserts`): per module, its static_asserts once
+    // `sa_built` lists them; the instances whose asserts all decided, keyed by the evaluation's inputs.
+    pub(package) sa_list: Vector<Vector<NodeId>>,
+    pub(package) sa_built: Vector<bool>,
+    pub(package) sa_done: Set<u64>,
     /// Body-syntax demand per module, for the LSP's release of closed documents' bodies: the
     /// modules whose bodies this engine needed but refused (released, or not typed yet in the
     /// running pass: `body_missing`), and the refusal count (`body_miss_n`) an analysis pass
@@ -1223,6 +1228,9 @@ pub(package) fn interp_new(pkg: *const loader::Package) Interp {
         pending_strict: Vector::<bool>::new(),
         inst_asserts: Vector::<InstAssert>::new(),
         inst_asserts_failed: false,
+        sa_list: Vector::<Vector<NodeId>>::new(),
+        sa_built: Vector::<bool>::new(),
+        sa_done: Set::<u64>::new(),
         body_missing: Vector::<bool>::new(),
         body_miss_n: 0,
         dyn_rec: false,

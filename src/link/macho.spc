@@ -345,11 +345,17 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
             return false;
         }
     }
+    // Each `-l` library's kind and file (`find_lib`), found once.
+    let mut kinds = Vector::<u8>::with_capacity(o.libs.len());
+    let mut found = Vector::<String>::with_capacity(o.libs.len());
     for i in 0..o.libs.len() {
         let mut path = String::new();
-        if find_lib(o, &o.libs[i], &mut path) == LIB_ARCHIVE && !ars.add(nat::OBJ_MACHO, &path, &mut l.err) {
+        let kind = find_lib(o, &o.libs[i], &mut path);
+        if kind == LIB_ARCHIVE && !ars.add(nat::OBJ_MACHO, &path, &mut l.err) {
             return false;
         }
+        kinds.push(kind);
+        found.push(path);
     }
     // An executable exports its header, as ld64 defines it.
     if o.kind == K_EXE {
@@ -362,7 +368,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
         split_sections(l, blob);
     }
     let b = blob.as_slice();
-    if !load_libraries(l, o) || !finish_symbols(l) {
+    if !load_libraries(l, o, &kinds, &found) || !finish_symbols(l) {
         return false;
     }
     if o.dead_strip {
@@ -408,14 +414,23 @@ fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
 // at most the members).
 fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
     let mut more = ars.paths.len() != 0;
+    // Per global, whether no archive defined it at its lookup: a member is only ever taken, so none will.
+    let mut miss = Vector::<bool>::new();
     while more {
         more = false;
         for g in 0..l.gs.len() {
+            if g < miss.len() && miss[g] {
+                continue;
+            }
             if l.gs[g].kind != G_UNDEF {
                 continue;
             }
             let am = ars.find(l.names.spell(l.gs[g].name));
             if am.is_none() {
+                if miss.len() <= g {
+                    miss.resize_default(l.gs.len());
+                }
+                miss[g] = true;
                 continue;
             }
             let m = am.unwrap();
@@ -603,27 +618,33 @@ const fn sec_type(l: &L, f: u32, sect: u8) u32 {
 // The stub targets an arm64 macOS image links against: Apple's system stubs list only arm64e.
 const WANT: [str; 2] = ["arm64-macos", "arm64e-macos"];
 
-// Load libSystem, then each `-l` shared library and framework in order; each one's exports resolve the
-// undefined globals not yet resolved.
-fn load_libraries(l: &mut L, o: &Opts) bool {
+// Load libSystem, then each `-l` shared library (of kind `kinds[i]` in file `found[i]`, `find_lib`) and
+// framework in order; each one's exports resolve the undefined globals not yet resolved. A file loads once:
+// the SDK's `libm.tbd` and `libpthread.tbd` are links to libSystem's.
+fn load_libraries(l: &mut L, o: &Opts, kinds: &Vector<u8>, found: &Vector<String>) bool {
     let sys = format("{}/usr/lib/libSystem.tbd", o.sdk.as_str());
     if !load_file(l, o, &sys) {
         return false;
     }
+    let mut loaded = Vector::<String>::new();
+    loaded.push(fs::realpath(&sys).unwrap_or(sys));
     for i in 0..o.libs.len() {
         let name = o.libs[i].as_str();
-        let mut found = String::new();
-        let kind = find_lib(o, name, &mut found);
-        if kind == LIB_ARCHIVE {
+        if kinds[i] == LIB_ARCHIVE {
             continue; // `take_members` read it
         }
-        if kind != LIB_SHARED {
+        if kinds[i] != LIB_SHARED {
             l.err.format_into("library not found: -l{}", name);
             return false;
         }
-        if !load_file(l, o, &found) {
+        let rp = fs::realpath(&found[i]).unwrap_or(found[i].clone());
+        if loaded.contains(&rp) {
+            continue;
+        }
+        if !load_file(l, o, &found[i]) {
             return false;
         }
+        loaded.push(rp);
     }
     for i in 0..o.fworks.len() {
         let name = o.fworks[i].as_str();
@@ -866,12 +887,13 @@ fn load_dylib(l: &mut L, o: &Opts, d: []u8, path: str, ord0: u32) bool {
         l.err.format_into("'{}' has no install name", path);
         return false;
     }
-    // Walk the trie depth-first with an explicit stack of (node offset, name length).
+    // Walk the trie depth-first with an explicit stack of (node offset, name start, name length): each
+    // entry's whole name in `names`, after the names of the entries below it.
     let t = d[trie_off..trie_off + trie_size];
-    let mut name = Vector::<u8>::new();
-    let mut stack = Vector::<(usize, usize)>::new();
+    let mut names = Vector::<u8>::new();
+    let mut stack = Vector::<(usize, usize, usize)>::new();
     if trie_size != 0 {
-        stack.push((0usize, 0usize));
+        stack.push((0usize, 0usize, 0usize));
     }
     let mut steps: usize = 0;
     while stack.len() != 0 {
@@ -880,12 +902,13 @@ fn load_dylib(l: &mut L, o: &Opts, d: []u8, path: str, ord0: u32) bool {
             l.err.format_into("'{}': malformed exports trie", path);
             return false;
         }
-        let (node, nl) = stack.pop().unwrap();
-        name.truncate(nl);
+        let (node, at, nl) = stack.pop().unwrap();
+        // The entries above this one are done: their names go.
+        names.truncate(at + nl);
         let mut p = node;
         let term = lu::read_uleb(t, &mut p) as usize;
         if term != 0 {
-            bind_export(l, unsafe str::from_raw(name.as_ptr(), name.len()), ord);
+            bind_export(l, unsafe str::from_raw(names.as_ptr() + at, nl), ord);
         }
         p += term;
         if p >= t.len() {
@@ -901,15 +924,14 @@ fn load_dylib(l: &mut L, o: &Opts, d: []u8, path: str, ord0: u32) bool {
             let edge = t[es..p];
             p += 1;
             let child = lu::read_uleb(t, &mut p) as usize;
-            // The child's name: this node's, then the edge; kept past the stack's other entries.
-            let mut full = Vector::<u8>::new();
-            full.extend_from_slice(&name);
-            full.extend_from_slice(edge);
-            let sub = name.len();
-            name.extend_from_slice(edge);
-            stack.push((child, name.len()));
-            name.truncate(sub);
-            let _ = full;
+            // The child's name: this node's, then the edge.
+            let cat = names.len();
+            for k in 0..nl {
+                let c = names[at + k];
+                names.push(c);
+            }
+            names.extend_from_slice(edge);
+            stack.push((child, cat, nl + edge.len()));
         }
     }
     for i in 0..reexp.len() {
@@ -1111,10 +1133,26 @@ fn split_sections(l: &mut L, blob: &mut Vector<u8>) {
     let mut pidx = Vector::<u32>::new();
     let mut at = Vector::<u32>::new();
     let mut put = Vector::<u32>::new();
+    // Per section of the file at hand, the addresses of its symbols that may start a part.
+    let mut starts = Vector::<Vector<u64>>::new();
     for fi in 0..l.files.len() {
         let f = l.files[fi];
         if !f.subs {
             continue;
+        }
+        // Each step adds one section's list.
+        while starts.len() < f.nsec as usize {
+            starts.push(Vector::<u64>::new());
+        }
+        for q in 0..f.nsec as usize {
+            starts[q].truncate(0);
+        }
+        for k in f.sym0..f.sym0 + f.nsym {
+            let y = l.syms[k as usize];
+            if (y.ty & N_STAB) != 0 || (y.ty & N_TYPE) != N_SECT || (y.desc & N_ALT_ENTRY) != 0 || y.sect == 0 || y.sect as u32 > f.nsec {
+                continue;
+            }
+            starts[y.sect as usize - 1].push(y.value);
         }
         for s in f.sec0..f.sec0 + f.nsec {
             let sc = l.secs[s as usize];
@@ -1123,13 +1161,10 @@ fn split_sections(l: &mut L, blob: &mut Vector<u8>) {
             }
             cuts.truncate(0);
             cuts.push(sc.addr);
-            for k in f.sym0..f.sym0 + f.nsym {
-                let y = l.syms[k as usize];
-                if (y.ty & N_STAB) != 0 || (y.ty & N_TYPE) != N_SECT || f.sec0 + y.sect as u32 - 1 != s || (y.desc & N_ALT_ENTRY) != 0 {
-                    continue;
-                }
-                if y.value > sc.addr && y.value < sc.addr + sc.size {
-                    cuts.push(y.value);
+            let ss = &starts[(s - f.sec0) as usize];
+            for k in 0..ss.len() {
+                if ss[k] > sc.addr && ss[k] < sc.addr + sc.size {
+                    cuts.push(ss[k]);
                 }
             }
             if cuts.len() < 2 {
@@ -1309,11 +1344,19 @@ fn reach(l: &mut L, s: u32, work: &mut Vector<u32>) {
 fn out_section(l: &mut L, segname: str, sect: str, flags: u32) u32 {
     let sg = l.sn.intern(segname);
     let st = l.sn.intern(sect);
+    return out_section_of(l, sg, st, flags);
+}
+
+// `out_section` of the interned names `sg` and `st`.
+fn out_section_of(l: &mut L, sg: u32, st: u32, flags: u32) u32 {
     for i in 0..l.osecs.len() {
         if l.osecs[i].segname == sg && l.osecs[i].sect == st {
             return i as u32;
         }
     }
+    let segname = l.sn.spell(sg);
+    let sect = l.sn.spell(st);
+    let rk = rank(segname, sect, flags);
     let seg = if segname == "__TEXT" {
         SEG_TEXT
     } else if segname == "__DATA_CONST" {
@@ -1323,19 +1366,7 @@ fn out_section(l: &mut L, segname: str, sect: str, flags: u32) u32 {
     } else {
         3 + l.osecs.len() as u32
     };
-    l.osecs.push(
-        OSec {
-            seg: seg,
-            segname: sg,
-            sect: st,
-            flags: flags,
-            align: 0,
-            rank: rank(segname, sect, flags),
-            size: 0,
-            addr: 0,
-            off: 0,
-        },
-    );
+    l.osecs.push(OSec { seg: seg, segname: sg, sect: st, flags: flags, align: 0, rank: rk, size: 0, addr: 0, off: 0 });
     return (l.osecs.len() - 1) as u32;
 }
 
@@ -1402,18 +1433,21 @@ fn layout(l: &mut L, b: []u8) bool {
     if l.got.len() != 0 {
         l.o_got = out_section(l, "__DATA_CONST", "__got", S_NON_LAZY_SYMBOL_POINTERS);
     }
+    let data = l.sn.intern("__DATA");
+    let dconst = l.sn.intern("__DATA_CONST");
+    let cnst = l.sn.intern("__const");
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
         if dropped(l, sc) || !sc.live || sc.size == 0 && (sc.flags & S_TYPE) != S_THREAD_LOCAL_VARIABLES {
             continue;
         }
-        let mut seg = String::from_str(l.sn.spell(sc.seg));
-        let sect = String::from_str(l.sn.spell(sc.sect));
         // Read-only after the fixups: constant data with pointers and the initializers.
-        if seg.as_str() == "__DATA" && (sect.as_str() == "__const" || (sc.flags & S_TYPE) == S_MOD_INIT_FUNC_POINTERS) {
-            seg = String::from_str("__DATA_CONST");
-        }
-        let o = out_section(l, &seg, &sect, sc.flags);
+        let seg = if sc.seg == data && (sc.sect == cnst || (sc.flags & S_TYPE) == S_MOD_INIT_FUNC_POINTERS) {
+            dconst
+        } else {
+            sc.seg
+        };
+        let o = out_section_of(l, seg, sc.sect, sc.flags);
         let os = l.osecs.index_mut(o as usize);
         if sc.align > os.align {
             os.align = sc.align;
@@ -1673,9 +1707,7 @@ const fn copy_sections(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
             continue;
         }
         let at = (l.osecs[sc.out as usize].off + sc.at) as usize;
-        for i in 0..sc.size as usize {
-            img[at + i] = b[sc.off + i];
-        }
+        img.index_range_mut(at..at + sc.size as usize).copy_from_slice(b[sc.off..sc.off + sc.size as usize]);
     }
     return true;
 }
@@ -1998,16 +2030,14 @@ fn collect_unwind(l: &mut L, b: []u8) bool {
             lens.push(lu::r32(b, e + 8));
         }
     }
-    // Function starts no entry covers: binary search the entries sorted by key.
-    let mut order = Vector::<u64>::with_capacity(keys.len());
+    // Function starts no entry covers: binary search the entries, (key, end) sorted by key; a start
+    // without one gets an entry of its own (`added`), which covers that start alone.
+    let mut order = Vector::<(u64, u64)>::with_capacity(keys.len());
     for i in 0..keys.len() {
-        order.push(keys[i]);
+        order.push((keys[i], keys[i] + lens[i]));
     }
     order.sort();
-    let mut ends = Map::<u64, u64>::new();
-    for i in 0..keys.len() {
-        let _ = ends.insert(keys[i], keys[i] + lens[i]);
-    }
+    let mut added = Set::<u64>::new();
     for k in 0..l.syms.len() {
         let y = l.syms[k];
         if (y.ty & N_STAB) != 0 || (y.ty & N_TYPE) != N_SECT {
@@ -2023,33 +2053,27 @@ fn collect_unwind(l: &mut L, b: []u8) bool {
         let mut hi = order.len();
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if order[mid] <= key {
+            if order[mid].0 <= key {
                 lo = mid + 1;
             } else {
                 hi = mid;
             }
         }
-        let covered = lo != 0 && order[lo - 1] >> 40 == sec as u64 && key < *ends.get(&order[lo - 1]).unwrap();
+        let covered = lo != 0 && order[lo - 1].0 >> 40 == sec as u64 && key < order[lo - 1].1 || added.contains(&key);
         if !covered {
             l.unw.push(Unw { sec: sec, v: y.value, enc: 0 });
-            order.push(key);
-            let _ = ends.insert(key, key + 1);
-            // Keep the search order: a later symbol at the same address finds this one.
-            let mut j = order.len() - 1;
-            while j > 0 && order[j - 1] > order[j] {
-                let t = order[j - 1];
-                order[j - 1] = order[j];
-                order[j] = t;
-                j -= 1;
-            }
+            added.insert(key);
         }
     }
     if l.stubs.len() != 0 {
         l.unw.push(Unw { sec: NONE, v: 0, enc: 0 });
     }
+    // The distinct encodings in order of first use.
+    let mut seen = Set::<u32>::new();
     for i in 0..l.unw.len() {
         let e = l.unw[i].enc;
-        if !l.unw_enc.contains(&e) {
+        if !seen.contains(&e) {
+            seen.insert(e);
             l.unw_enc.push(e);
         }
     }
@@ -2115,6 +2139,11 @@ fn write_unwind(l: &mut L, img: &mut Vector<u8>) bool {
     } else {
         0usize
     };
+    // Each common encoding's index.
+    let mut enc_ix = Map::<u32, u32>::new();
+    for i in 0..nc {
+        enc_ix.insert(l.unw_enc[i], i as u32);
+    }
     let mut o = Vector::<u8>::with_capacity(os.size as usize);
     let idx = 28 + 4 * nc;
     let lsda = idx + 12 * (npages + 1);
@@ -2169,7 +2198,7 @@ fn write_unwind(l: &mut L, img: &mut Vector<u8>) bool {
                     l.err.push_str("unwind information: a page spans more than 16 MiB of code");
                     return false;
                 }
-                let ei = l.unw_enc.position(&enc).unwrap() as u32;
+                let ei = *enc_ix.get(&enc).unwrap();
                 lu::w32(&mut o, d as u32 | ei << 24);
             } else {
                 lu::w32(&mut o, a as u32);
@@ -2178,9 +2207,7 @@ fn write_unwind(l: &mut L, img: &mut Vector<u8>) bool {
         }
     }
     assert(o.len() as u64 == os.size, "macho: the unwind table's size");
-    for i in 0..o.len() {
-        img[at + i] = o[i];
-    }
+    img.index_range_mut(at..at + o.len()).copy_from_slice(&o);
     return true;
 }
 
@@ -2636,7 +2663,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     let mut enames = Vector::<u32>::new();
     let mut eflags = Vector::<u64>::new();
     let mut eaddrs = Vector::<u64>::new();
-    let mut keyed = Vector::<(String, u32)>::new();
+    let mut keyed = Vector::<u32>::new();
     let all = !o.strip || o.kind != K_EXE;
     for g in 0..l.gs.len() {
         let gy = l.gs[g];
@@ -2645,12 +2672,19 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             gy.sym,
         )) && lu::listed(&o.exports, l.names.spell(gy.name)) || gy.kind == G_HEADER;
         if exported {
-            keyed.push((String::from_str(l.names.spell(gy.name)), g as u32));
+            keyed.push(g as u32);
         }
     }
-    keyed.sort();
+    let nm = &l.names;
+    let gs = &l.gs;
+    keyed.sort_stable_in_place_by(
+        |x: &u32, y: &u32| {
+            let ys = nm.spell(gs[(*y) as usize].name);
+            return nm.spell(gs[(*x) as usize].name).cmp(&ys);
+        },
+    );
     for i in 0..keyed.len() {
-        let g = keyed[i].1;
+        let g = keyed[i];
         let gy = l.gs[g as usize];
         let a = g_addr(l, g);
         let abs = gy.kind == G_DEF && (l.syms[gy.sym as usize].ty & N_TYPE) == N_ABS;

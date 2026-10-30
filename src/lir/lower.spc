@@ -181,10 +181,14 @@ pub(package) struct Lower {
     // ---- per body ----
     m: ModuleId,
     file: u32,
+    fids: Vector<u32>, // per module, its source's file id (`file_of`; NONE: not yet)
     b: Body,
     li: Vector<LInfo>,
     tcache: Map<u64, TyI>, // the classes of concrete types, for every body
     fcache: Map<u64, u64>, // the members of concrete aggregates (`fields_of`): start << 32 | count in `fpool`
+    // The register leaves of concrete aggregates (`layout_of`): start << 32 | count in `lpool`.
+    lcache: Map<u64, u64>,
+    lpool: Vector<(u32, u8)>,
     fpool: Vector<FieldAt>,
     // Per concrete referent (shared << 48 | module << 32 | type), its `owned_fields`: start << 32 | count
     // in `opool` (`owned_of`); per concrete type (module << 32 | type), whether it is `frozen`.
@@ -267,10 +271,13 @@ extend Lower {
             dbg: false,
             m: 0,
             file: 0,
+            fids: Vector::<u32>::new(),
             b: Body::new(),
             li: Vector::<LInfo>::new(),
             tcache: Map::<u64, TyI>::new(),
             fcache: Map::<u64, u64>::new(),
+            lcache: Map::<u64, u64>::new(),
+            lpool: Vector::<(u32, u8)>::new(),
             fpool: Vector::<FieldAt>::new(),
             ocache: Map::<u64, u64>::new(),
             opool: Vector::<u32>::new(),
@@ -338,6 +345,27 @@ extend Lower {
         return unsafe &*(*c.pkg).module_ast_const(m);
     }
 
+    // The file id of module `m`'s source, added once.
+    fn file_of(self: &mut Self, c: &cbe::CEmit, m: ModuleId) u32 {
+        // Each step adds one module's entry.
+        while self.fids.len() <= m as usize {
+            self.fids.push(NONE);
+        }
+        if self.fids[m as usize] == NONE {
+            self.fids[m as usize] = self.pkg.add_file(&Lower::p(c).modules.at(m as usize).file);
+        }
+        return self.fids[m as usize];
+    }
+
+    // The cache key of concrete type `(m, t)`: a final id alone, the same type in every module
+    // (`Ast::type_at`); a provisional one with its module.
+    const fn tkey(c: &cbe::CEmit, m: ModuleId, t: TypeId) u64 {
+        if (t & TYPE_PROV) == 0 && Lower::ast(c, m).gt.p != null {
+            return 1u64 << 63 | t as u64;
+        }
+        return m as u64 << 32 | t as u64;
+    }
+
     const fn ptr_int(self: &Self) u8 {
         return ast::pick(self.pkg.ptr_bytes == 8, T_I64, T_I32);
     }
@@ -357,7 +385,7 @@ extend Lower {
             *out = TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 };
             return true;
         }
-        let key = m as u64 << 32 | t as u64;
+        let key = Lower::tkey(c, m, t);
         switch self.tcache.get(&key) {
             Some(v) => {
                 *out = *v;
@@ -758,8 +786,22 @@ extend Lower {
     // say so.
     fn layout_of(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId, ti: TyI) u32 {
         let mut leaves = Vector::<(u32, u8)>::new();
-        if ti.size <= 64 && !self.leaves(c, m, t, 0, &mut leaves, 0) {
-            leaves.truncate(ast::pick(leaves.len() > 16, 16usize, 0usize));
+        if ti.size <= 64 {
+            // A concrete aggregate's leaves are the same in every body: found once.
+            let (gm, gt) = self.grounded(c, m, t);
+            let key = Lower::tkey(c, gm, gt);
+            if let Some(v) = self.lcache.get(&key) {
+                let at = (*v >> 32) as usize;
+                leaves.extend_from_slice(self.lpool[at..at + (*v & 0xFFFFFFFF) as usize]);
+            } else {
+                if !self.leaves(c, m, t, 0, &mut leaves, 0) {
+                    leaves.truncate(ast::pick(leaves.len() > 16, 16usize, 0usize));
+                }
+                if self.err.len() == 0 && Lower::ast(c, gm).type_concrete(gt) {
+                    self.lcache.insert(key, self.lpool.len() as u64 << 32 | leaves.len() as u64);
+                    self.lpool.extend_copy(&leaves);
+                }
+            }
         }
         return self.layout(ti.size, log2(ti.align), &leaves);
     }
@@ -922,7 +964,7 @@ extend Lower {
         // inside `Float<E, ..>`'s instance), which binding the instance's own parameters would shadow.
         let (rm, rt) = self.grounded(c, rm0, rt0);
         // A concrete aggregate's members are the same in every body.
-        let key = rm as u64 << 32 | rt as u64;
+        let key = Lower::tkey(c, rm, rt);
         if let Some(v) = self.fcache.get(&key) {
             let at = (*v >> 32) as usize;
             for k in 0..(*v & 0xFFFFFFFF) as usize {
@@ -1009,8 +1051,12 @@ extend Lower {
             if !a.enum_has_payload(dn) {
                 return false;
             }
+            // The variants `enum_place` stacks, each from its base (none for a niche enum).
+            let b0 = self.lms.len();
+            let mut bases = Vector::<u32>::new();
             let mut el = EnumL { ok: false };
-            if !self.enum_shape(c, dm, dn, &mut el) {
+            if !self.enum_place(c, dm, dn, &mut el, &mut bases, true) {
+                self.lms.truncate(b0);
                 return false;
             }
             if el.niche == lay::NK_NONE {
@@ -1030,20 +1076,15 @@ extend Lower {
             for i in 0..ms.len {
                 let vid = unsafe a.list(ms)[i as usize];
                 let pl = a.at_const(vid).as_data.variant.payload;
-                let mut size: u64 = 0;
-                let mut al: u64 = 1;
-                let base = self.placed(
-                    c,
-                    dm,
-                    pl,
-                    true,
-                    c.mg.lay.payload_prefix(dm, dn, pl),
-                    false,
-                    false,
-                    &mut size,
-                    &mut al,
-                );
+                let base = if bases.len() != 0 {
+                    bases[i as usize]
+                } else {
+                    let mut size: u64 = 0;
+                    let mut al: u64 = 1;
+                    self.placed(c, dm, pl, true, c.mg.lay.payload_prefix(dm, dn, pl), false, false, &mut size, &mut al)
+                };
                 if base == NONE {
+                    self.lms.truncate(b0);
                     return false;
                 }
                 for k in 0..pl.len {
@@ -1052,8 +1093,11 @@ extend Lower {
                     let off = el.payload_off + self.placed_off(base, k);
                     out.push(FieldAt { m: gm, t: gt, off: off, idx: k, node: pid, variant: vid });
                 }
-                self.lms.truncate(base as usize);
+                if bases.len() == 0 {
+                    self.lms.truncate(base as usize);
+                }
             }
+            self.lms.truncate(b0);
             return true;
         }
         let is_union = a.ext(dn).aggregate.is_union;
@@ -1155,6 +1199,21 @@ extend Lower {
 
     // The shape of payload enum `(dm, dn)` (its generic parameters bound).
     fn enum_shape(self: &mut Self, c: &mut cbe::CEmit, dm: ModuleId, dn: NodeId, out: &mut EnumL) bool {
+        let mut none = Vector::<u32>::new();
+        return self.enum_place(c, dm, dn, out, &mut none, false);
+    }
+
+    // `enum_shape`; with `keep`, each variant's payload members stay stacked on `lms` (`placed`), variant
+    // k's from `bases[k]` (none for a niche enum), and the caller truncates `lms`.
+    fn enum_place(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        dm: ModuleId,
+        dn: NodeId,
+        out: &mut EnumL,
+        bases: &mut Vector<u32>,
+        keep: bool,
+    ) bool {
         let a = Lower::ast(c, dm);
         let ms = a.ext(dn).aggregate.members;
         let mut ns = NODE_NONE;
@@ -1199,7 +1258,11 @@ extend Lower {
             if base == NONE {
                 return false;
             }
-            self.lms.truncate(base as usize);
+            if keep {
+                bases.push(base);
+            } else {
+                self.lms.truncate(base as usize);
+            }
             let off = round_up(size as u32, al as u32);
             usize9 = ast::pick(off > usize9, off, usize9);
             ualign = ast::pick(al as u32 > ualign, al as u32, ualign);
@@ -1226,7 +1289,7 @@ extend Lower {
     ) bool {
         // A concrete aggregate's members, found before: read in place.
         let (gm, gt) = self.grounded(c, rm, rt);
-        if let Some(v) = self.fcache.get(&(gm as u64 << 32 | gt as u64)) {
+        if let Some(v) = self.fcache.get(&Lower::tkey(c, gm, gt)) {
             let at = (*v >> 32) as usize;
             if member_in(self.fpool[at..at + (*v & 0xFFFFFFFF) as usize], pj, variant, out) {
                 return true;
@@ -1892,7 +1955,8 @@ extend Lower {
         noret: bool,
     ) bool {
         self.nbodies += 1;
-        if self.pkg.find_symbol(name) != NONE && self.pkg.syms[self.pkg.find_symbol(name) as usize].def != NONE {
+        let s0 = self.pkg.find_symbol(name);
+        if s0 != NONE && self.pkg.syms[s0 as usize].def != NONE {
             return true; // an emission of a body already lowered
         }
         let cd = c.collect_demand;
@@ -1915,7 +1979,11 @@ extend Lower {
             return false;
         }
         self.tidy();
-        let s = self.pkg.symbol(name, SK_FUNC);
+        let s = if s0 != NONE {
+            s0
+        } else {
+            self.pkg.symbol(name, SK_FUNC)
+        };
         let _ = self.pkg.define(s, &self.b);
         self.pend.push(s);
         if cnode == NODE_NONE {
@@ -1973,8 +2041,7 @@ extend Lower {
         self.reset(b.module);
         self.bm = b.module;
         self.noret = noret;
-        let pk = Lower::p(c);
-        self.file = self.pkg.add_file(&pk.modules.at(b.module as usize).file);
+        self.file = self.file_of(c, b.module);
         let oa = Lower::ast(c, b.owner.module);
         // A naked function's code is its assembly: the generators read its `O_ASM`s alone.
         self.b.naked = cnode == NODE_NONE && b.owner.node != NODE_NONE && (oa.unsafe_claims(b.owner.node) & UNSAFE_NAKED) != 0;
@@ -2378,7 +2445,7 @@ extend Lower {
         let y = Lower::resolved(c, b.module, rt, &mut rm, &mut rt);
         // A concrete referent's fields are the same in every body: found once.
         let (gm, gt) = self.grounded(c, rm, y.as_data.elem);
-        let key = shared as u64 << 48 | gm as u64 << 32 | gt as u64;
+        let key = Lower::tkey(c, gm, gt) ^ shared as u64 << 62;
         if let Some(v) = self.ocache.get(&key) {
             let at = (*v >> 32) as usize;
             for x in at..at + (*v & 0xFFFFFFFF) as usize {
@@ -2449,7 +2516,7 @@ extend Lower {
     // `frozen` at FROZEN_DEPTH, once per concrete type.
     fn frozen_top(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId) bool {
         let (gm, gt) = self.grounded(c, m, t);
-        let key = gm as u64 << 32 | gt as u64;
+        let key = Lower::tkey(c, gm, gt);
         if let Some(z) = self.zcache.get(&key) {
             return *z;
         }
@@ -7897,6 +7964,7 @@ extend Lower {
         }
         other.tests.clear();
         other.pkg = Package::new(other.pkg.ptr_bytes);
+        other.fids.truncate(0);
         other.fails.truncate(0);
         other.nbodies = 0;
     }
@@ -10156,7 +10224,7 @@ extend Lower {
         self.reset(m);
         self.bm = m;
         self.noret = false;
-        self.file = self.pkg.add_file(&Lower::p(c).modules.at(m as usize).file);
+        self.file = self.file_of(c, m);
         return (cd, ro);
     }
 
@@ -10190,7 +10258,8 @@ extend Lower {
     ) bool {
         let mut name = String::new();
         name.format_into("__sc_test_w_{}_{}", tm, func);
-        if self.pkg.find_symbol(&name) != NONE && self.pkg.syms[self.pkg.find_symbol(&name) as usize].def != NONE {
+        let s0 = self.pkg.find_symbol(&name);
+        if s0 != NONE && self.pkg.syms[s0 as usize].def != NONE {
             return true;
         }
         let (cd, ro) = self.synth_begin(c, tm);
@@ -10987,6 +11056,8 @@ extend Lower {
             }
         }
         // Each member in order; an enum's run of one variant's members behind its tag test.
+        // Per member of the run, the type its free drops (`freed`; TYPE_NONE: no free).
+        let mut fr = Vector::<(ModuleId, TypeId)>::new();
         let mut k: usize = 0;
         for _ in 0..fl.len() {
             if k >= fl.len() {
@@ -10997,9 +11068,16 @@ extend Lower {
             while end < fl.len() && fl[end].variant == v {
                 end += 1;
             }
+            fr.truncate(0);
             let mut any = false;
             for j in k..end {
-                any = any || Lower::listed(fb, fields, fl[j].node) && self.glue_member(c, fl[j], VNONE, true);
+                let r = if Lower::listed(fb, fields, fl[j].node) {
+                    self.freed(c, fl[j])
+                } else {
+                    (fl[j].m, TYPE_NONE)
+                };
+                any = any || r.1 != TYPE_NONE;
+                fr.push(r);
             }
             if any {
                 let mut skip = NONE;
@@ -11021,8 +11099,10 @@ extend Lower {
                     self.b.begin(body);
                 }
                 for j in k..end {
-                    if Lower::listed(fb, fields, fl[j].node) {
-                        let _ = self.glue_member(c, fl[j], me, false);
+                    let (frm, frt) = fr[j - k];
+                    if frt != TYPE_NONE {
+                        let at = self.ptradd(me, VNONE, 0, fl[j].off);
+                        let _ = self.drop_at(c, frm, frt, at, 0);
                     }
                     if self.err.len() != 0 {
                         return false;
@@ -11054,22 +11134,18 @@ extend Lower {
         return false;
     }
 
-    // Whether member `f` (not an enum's tag, not a capture by reference) needs a free; with `probe`
-    // false, free it in the object at `me`.
-    fn glue_member(self: &mut Self, c: &mut cbe::CEmit, f: FieldAt, me: Value, probe: bool) bool {
+    // The resolved type of member `f` (not an enum's tag, not a capture by reference) when it needs a
+    // free; TYPE_NONE when not.
+    fn freed(self: &mut Self, c: &mut cbe::CEmit, f: FieldAt) (ModuleId, TypeId) {
         if f.t == TYPE_NONE || f.idx == 0xFFFFFFFF {
-            return false;
+            return (f.m, TYPE_NONE);
         }
         let mut frm = f.m;
         let mut frt = f.t;
         if !c.mg.resolve(f.m, f.t, &mut frm, &mut frt) || !c.is_destructible(frm, frt) {
-            return false;
+            return (f.m, TYPE_NONE);
         }
-        if probe {
-            return true;
-        }
-        let at = self.ptradd(me, VNONE, 0, f.off);
-        return self.drop_at(c, frm, frt, at, 0);
+        return (frm, frt);
     }
 }
 

@@ -1829,6 +1829,8 @@ pub(package) struct CemitOut {
     /// The emission cache's module keys and hits (empty when it is off), for the native objects' reuse.
     pub(package) tuc_keys: Vector<u64>,
     pub(package) tuc_hit: Vector<bool>,
+    /// The record of the objects an earlier build left (`nat_record`; empty unless `nat_trust` read it).
+    pub(package) nat_rec: Map<String, u64>,
     /// Merged emission counters (SC_CEMIT_STATS); the write stage adds publication and reports.
     pub(package) pr: prb::Probe,
     /// The LIR of every body of a native build (`cbe::native_on`), for the write stage's objects.
@@ -1873,6 +1875,7 @@ extend CemitOut {
             tuc_path: String::new(),
             tuc_keys: Vector::<u64>::new(),
             tuc_hit: Vector::<bool>::new(),
+            nat_rec: Map::<String, u64>::new(),
             pr: prb::Probe::new(false, false),
             lir: None,
         };
@@ -2106,7 +2109,8 @@ fn cemit_inst_error(p: &mut loader::Package, d: DefId, subs: &Vector<mbe::MSub>,
 
 // Per-instantiation static_asserts inside a demanded generic body: evaluate each under the
 // demand's substitution; false fails the build, naming every binding. `mg` (null when `subs` is
-// flat and concrete) grounds an emission demand's chain.
+// flat and concrete) grounds an emission demand's chain. `seen`: the caller's keys `dk` of the
+// instances checked; the interpreter's `sa_done` keeps them across callers by the evaluation's inputs.
 fn cemit_inst_asserts(
     p: &mut loader::Package,
     mg: *mut mbe::Mangler,
@@ -2114,8 +2118,6 @@ fn cemit_inst_asserts(
     subs: &Vector<mbe::MSub>,
     dk: u64,
     seen: &mut Map<u64, u64>,
-    ia: &mut Vector<Vector<NodeId>>,
-    ia_built: &mut Vector<bool>,
 ) {
     let hit = seen.contains_key(&dk);
     if hit || p.cir == null || subs.len() == 0 || unsafe (*(p.cir as *mut iri::Interp)).inst_asserts_failed {
@@ -2125,8 +2127,15 @@ fn cemit_inst_asserts(
     if a.at_const(d_def.node).kind != NodeKind::NODE_FUNCTION {
         return;
     }
+    let cev = p.cir as *mut iri::Interp;
     // One static_assert scan per module, not per demand: generic bodies are demanded thousands of
     // times and the node array is large, while asserts are rare.
+    let ia = unsafe &mut (*cev).sa_list;
+    let ia_built = unsafe &mut (*cev).sa_built;
+    if ia_built.len() == 0 {
+        ia.resize_default(p.modules.len());
+        ia_built.resize_default(p.modules.len());
+    }
     let dm = d_def.module as usize;
     if !*ia_built.at(dm) {
         ia_built.set(dm, true);
@@ -2152,7 +2161,6 @@ fn cemit_inst_asserts(
         seen.insert(dk, 1);
         return;
     }
-    let cev = p.cir as *mut iri::Interp;
     // The instance's own bindings: the innermost entry of each of its parameters. A demand from a
     // generic body lists the caller's frames first, and its entries may name them: `mg` grounds
     // each through the frames below its group (`MSub.lim`).
@@ -2193,6 +2201,15 @@ fn cemit_inst_asserts(
             unsafe (*mg).push_msub(*saved.at(k));
         }
     }
+    // The evaluation's inputs: an instance another caller checked with the same ones is done.
+    let mut ek = skey_mix(0, d_def.module as u64 << 32 | d_def.node as u64);
+    for k in 0..np as usize {
+        ek = skey_mix(skey_mix(ek, prm[k]), ams[k] as u64 << 32 | ats[k] as u64);
+    }
+    if unsafe (*cev).sa_done.contains(&ek) {
+        seen.insert(dk, 1);
+        return;
+    }
     let src = p.modules[d_def.module as usize].source.as_str();
     let mut decided = true;
     for ni in 0..ia.at(dm).len() {
@@ -2228,6 +2245,7 @@ fn cemit_inst_asserts(
     }
     if decided {
         seen.insert(dk, 1);
+        unsafe (*cev).sa_done.insert(ek);
     }
 }
 
@@ -2241,10 +2259,6 @@ fn flush_inst_asserts(p: &mut loader::Package) {
     }
     let recs = replace(unsafe &mut (*cev).inst_asserts, Vector::<iri::InstAssert>::new());
     let mut seen = Map::<u64, u64>::new();
-    let mut ia = Vector::<Vector<NodeId>>::new();
-    let mut ia_built = Vector::<bool>::new();
-    ia.resize_default(p.modules.len());
-    ia_built.resize_default(p.modules.len());
     let mut subs = Vector::<mbe::MSub>::new();
     for i in 0..recs.len() {
         let r = recs.at(i);
@@ -2263,7 +2277,7 @@ fn flush_inst_asserts(p: &mut loader::Package) {
             );
             dk = skey_mix(dk, (unsafe r.ams[k as usize]) as u64 << 32 | at as u64);
         }
-        cemit_inst_asserts(p, null, r.f, &subs, dk, &mut seen, &mut ia, &mut ia_built);
+        cemit_inst_asserts(p, null, r.f, &subs, dk, &mut seen);
     }
 }
 
@@ -2281,10 +2295,6 @@ fn graph_inst_asserts(p: &mut loader::Package, g: &mut ig::InstGraph) u64 {
     let ok0 = p.ok;
     p.ok = true;
     let mut seen = Map::<u64, u64>::new();
-    let mut ia = Vector::<Vector<NodeId>>::new();
-    let mut ia_built = Vector::<bool>::new();
-    ia.resize_default(p.modules.len());
-    ia_built.resize_default(p.modules.len());
     let mut subs = Vector::<mbe::MSub>::new();
     let mut prm = Vector::<NodeId>::new();
     let mut tys = Vector::<TypeId>::new();
@@ -2301,7 +2311,7 @@ fn graph_inst_asserts(p: &mut loader::Package, g: &mut ig::InstGraph) u64 {
             subs.push(mbe::MSub { pnode: prm[k], at: tys[k], lim: 0, pm: f.module, am: f.module });
             dk = skey_mix(dk, tys[k]);
         }
-        cemit_inst_asserts(p, null, f, &subs, dk, &mut seen, &mut ia, &mut ia_built);
+        cemit_inst_asserts(p, null, f, &subs, dk, &mut seen);
         n += 1;
     }
     unsafe (*cev).inst_asserts_failed = !p.ok;
@@ -2516,8 +2526,13 @@ fn push_layout_assert(out: &mut String, nm: str, size: u64, align: u64) {
     out.push_str("\");\n");
 }
 
-// Tally a template: a generic body whose shared lowering must re-lower per instance (an
-// unexpanded reflection binder, or a vector index list over a parameter) or per zero-size signature.
+// Whether template `b` re-lowers per instance (an unexpanded reflection binder, or a vector index list
+// over a parameter) or per zero-size signature: no instance emits its shared lowering.
+const fn relowered(b: &irc::CoreBody) bool {
+    return b.has_reflect || b.has_lists || b.has_zst_cond;
+}
+
+// Tally a template: a generic body whose shared lowering must re-lower (`relowered`).
 fn count_template(b: &irc::CoreBody, pr: &mut prb::Probe) {
     if b.has_reflect || b.has_lists {
         pr.count(prb::C_TPL_REFLECT, 1);
@@ -2717,7 +2732,7 @@ fn cemit_take_body(
         None => (-2) as i64,
     };
     if ki >= 0 {
-        *lw_out = irl::Lowerer::take_kept(p, g.kept_mut(ki as usize));
+        lw_out.take_kept_into(g.kept_mut(ki as usize));
         let _ = g.kept_ix.remove(&key);
         pr.count(prb::C_TAKEN, 1);
         pr.stop(prb::P_ACQUIRE, am);
@@ -3006,7 +3021,7 @@ fn cemit_seed_fn(
     if !dow.inl.off && inl::holds_vector(&lw.body, p) {
         // A call a splice brought through an interface binds and inlines too.
         let mut sites = Vector::<BoundSite>::new();
-        bind_calls(cem, dow, &mut lw, &mut sites);
+        bind_calls(cem, dow, &mut lw, &mut sites, false);
     }
     let mut sym = String::new();
     let sm9 = cem.pr.start();
@@ -3030,7 +3045,7 @@ fn cemit_seed_fn(
     let mut gfs = Vector::<String>::new();
     let mut gts = Vector::<TypeId>::new();
     let mut gns = Vector::<NodeId>::new();
-    let is_glue = cemit_free_glue_fields(p, cem, m as ModuleId, nid, &mut gfs, &mut gts, &mut gns);
+    let is_glue = cemit_free_glue_fields(p, cem, m as ModuleId, nid, tgt, &mut gfs, &mut gts, &mut gns);
     if is_glue {
         sym.push_str("__fb");
     }
@@ -3108,10 +3123,9 @@ fn cemit_seed_fn(
             wr.push_str("}\n");
             if wok {
                 acc.chunk(m as u64, m as ModuleId, &wr, cem.mg.rec_on, &mut cem.mg.rec);
-                let tgt9 = cem.mg.method_target(m as ModuleId, nid);
                 let a9 = unsafe &mut *(p.module_ast_const(m as ModuleId) as *mut Ast);
                 let st9 = a9.intern_type(
-                    Ty { kind: TYPE_STRUCT, module: m as ModuleId, as_data: TyAs { decl: tgt9.node } },
+                    Ty { kind: TYPE_STRUCT, module: m as ModuleId, as_data: TyAs { decl: tgt.node } },
                 );
                 let wsym = sym.as_str().slice(0, sym.len() - 4);
                 cem.lir_free_wrapper(m as ModuleId, st9, wsym, &sym, gns[0..gns.len()]);
@@ -3480,7 +3494,8 @@ fn bound_variant_in(cem: &mut cbe::CEmit, dow: &mut DropCtx, base: &irl::Lowerer
     if !inl::ground_body(&mut out, &binds) {
         return None;
     }
-    bind_calls(cem, dow, &mut out, &mut sites);
+    let fixed = !inl::holds_vector(&out.body, out.pkg);
+    bind_calls(cem, dow, &mut out, &mut sites, fixed);
     return Some(out);
 }
 
@@ -3490,8 +3505,14 @@ fn bound_variant_in(cem: &mut cbe::CEmit, dow: &mut DropCtx, base: &irl::Lowerer
 // where its depth stopped. Nothing changes when no call binds at first. In a body without vectors
 // only the methods whose result the instance fixes bind and inline (`inl::InlineCtx::fixed_result`):
 // the C compiler inlines the rest after the link, where splicing them earlier made some loops slower.
-fn bind_calls(cem: &mut cbe::CEmit, dow: &mut DropCtx, lw: &mut irl::Lowerer, sites: &mut Vector<BoundSite>) {
-    let fixed = !inl::holds_vector(&lw.body, lw.pkg);
+// `fixed`: `lw` holds no vector (`inl::holds_vector`).
+fn bind_calls(
+    cem: &mut cbe::CEmit,
+    dow: &mut DropCtx,
+    lw: &mut irl::Lowerer,
+    sites: &mut Vector<BoundSite>,
+    fixed: bool,
+) {
     dow.inl.only_fixed = fixed;
     bind_rounds(cem, dow, lw, sites);
     dow.inl.only_fixed = false;
@@ -3516,6 +3537,18 @@ fn bind_rounds(cem: &mut cbe::CEmit, dow: &mut DropCtx, lw: &mut irl::Lowerer, s
             return;
         }
     }
+}
+
+// The hash of demand `di`'s symbol, the key of the demands done, computed once (`dsk`: per demand,
+// 0 until then).
+fn demand_key(cem: &cbe::CEmit, dsk: &mut Vector<u64>, di: usize) u64 {
+    if dsk.len() <= di {
+        dsk.resize_default(cem.demand.len());
+    }
+    if dsk[di] == 0 {
+        dsk[di] = fnv(&cem.demand.at(di).sym);
+    }
+    return dsk[di];
 }
 
 // A call `bound_calls` found: its block, the method it dispatches to, the receiver, and the method's
@@ -3581,9 +3614,8 @@ fn cemit_drain_demand(
     cfs: &mut Vector<cfl::CFlow>,
     cf_ok: &mut Vector<bool>,
     done: &mut Map<u64, u64>,
+    dsk: &mut Vector<u64>,
     sa_seen: &mut Map<u64, u64>,
-    ia_idx: &mut Vector<Vector<NodeId>>,
-    ia_built: &mut Vector<bool>,
     di: usize,
     verbose: bool,
     acc: &mut SeedAcc,
@@ -3591,8 +3623,7 @@ fn cemit_drain_demand(
     rcounts: &mut Vector<u64>,
 ) {
     let d_def = cem.demand.at(di).def;
-    let ds = cem.demand.at(di).sym.as_str();
-    let dk = fnv(ds);
+    let dk = demand_key(cem, dsk, di);
     // Dedup on SUCCESS only: two demands for one symbol can carry different substitution
     // chains, and the first may be the incomplete one; a later, fuller chain must retry.
     let seen = done.contains_key(&dk);
@@ -3610,7 +3641,9 @@ fn cemit_drain_demand(
             let mut slot = 0xFFFFFFFFFFFFFFFFu64;
             if okl {
                 count_template(&lw.body, &mut dow.pr);
-                dow.apply_drops(&mut lw);
+                if !relowered(&lw.body) {
+                    dow.apply_drops(&mut lw);
+                }
                 slot = lws.len() as u64;
                 lws.push(lw);
             } else {
@@ -3627,7 +3660,7 @@ fn cemit_drain_demand(
     let d_sfx = cem.demand.at(di).sfx.clone();
     // Per-instantiation static_asserts: under this demand's substitution the condition is
     // this instance's compile-time fact; false is a COMPILE error naming the type argument.
-    cemit_inst_asserts(p, &mut cem.mg, d_def, &d_subs, dk, sa_seen, ia_idx, ia_built);
+    cemit_inst_asserts(p, &mut cem.mg, d_def, &d_subs, dk, sa_seen);
     // A body with an UNEXPANDED reflection binder re-lowers per instance: the demand env
     // makes the binder's owner concrete, so the copies expand for real. A body whose only
     // env-dependence is `sizeof(T) <op> 0` branches re-lowers once per ZST-BIT SIGNATURE of
@@ -4083,7 +4116,9 @@ fn cemit_low_task(t: LowTask) {
         let mut lw = irl::Lowerer::new(p, m, n);
         let ok = cemit_seed_take(unsafe &mut *t.g, p, m, n, &mut lw, t.kl, false, &mut dow2.pr);
         if ok {
-            dow2.apply_drops(&mut lw);
+            if !relowered(&lw.body) {
+                dow2.apply_drops(&mut lw);
+            }
             let mut cf = cfl::CFlow::new_empty();
             if !cbe::native_on(p) {
                 cf.build_into(&lw.body);
@@ -4883,7 +4918,7 @@ pub(package) fn cemit_package(
         2 * src_total,
     );
     let mut held = Vector::<Option<lhold::Rec>>::new();
-    nat_trust(p, &mut tuc, &mut held);
+    nat_trust(p, &mut tuc, &mut held, &mut o.nat_rec);
     let par9 = p.jobs != 1 && p.modules.len() > 1;
     if par9 {
         // Parallel seed frontier: one task per module with a private emitter shard; gated
@@ -5078,10 +5113,7 @@ pub(package) fn cemit_package(
     let mut cfs = Vector::<cfl::CFlow>::new();
     let mut cf_ok = Vector::<bool>::new();
     let mut sa_seen = Map::<u64, u64>::new();
-    let mut ia_idx = Vector::<Vector<NodeId>>::new();
-    let mut ia_built = Vector::<bool>::new();
-    ia_idx.resize_default(p.modules.len());
-    ia_built.resize_default(p.modules.len());
+    let mut dsk = Vector::<u64>::new();
     let mut gi9: usize = 0;
     let mut reasons = Vector::<str<'static>>::new();
     let mut rcounts = Vector::<u64>::new();
@@ -5120,9 +5152,8 @@ pub(package) fn cemit_package(
                     &mut cfs,
                     &mut cf_ok,
                     &mut done,
+                    &mut dsk,
                     &mut sa_seen,
-                    &mut ia_idx,
-                    &mut ia_built,
                     di0,
                     verbose,
                     &mut acc,
@@ -5142,7 +5173,7 @@ pub(package) fn cemit_package(
             let mut newsyms = Vector::<String>::new(); // first demanding symbol, for the failure print
             let mut newdef_seen = Map::<u64, u64>::new();
             for j in qi..len0 {
-                let dkj = fnv(&cem.demand.at(j).sym);
+                let dkj = demand_key(&cem, &mut dsk, j);
                 let seenj = done.contains_key(&dkj);
                 if seenj {
                     continue;
@@ -5294,9 +5325,8 @@ pub(package) fn cemit_package(
                         &mut cfs,
                         &mut cf_ok,
                         &mut done,
+                        &mut dsk,
                         &mut sa_seen,
-                        &mut ia_idx,
-                        &mut ia_built,
                         j,
                         verbose,
                         &mut acc,
@@ -5311,7 +5341,7 @@ pub(package) fn cemit_package(
                 {
                     let jd = cem.demand.at(j).def;
                     let jsubs = mbe::subs_copy(&cem.demand.at(j).subs);
-                    cemit_inst_asserts(p, &mut cem.mg, jd, &jsubs, dkj, &mut sa_seen, &mut ia_idx, &mut ia_built);
+                    cemit_inst_asserts(p, &mut cem.mg, jd, &jsubs, dkj, &mut sa_seen);
                 }
                 {
                     let o = dsh.index_mut(scur);
@@ -5459,8 +5489,7 @@ pub(package) fn cemit_package(
     {
         let mut fseen = Map::<u64, u64>::new();
         for di9 in 0..cem.demand.len() {
-            let fs9 = cem.demand.at(di9).sym.as_str();
-            let fk9 = fnv(fs9);
+            let fk9 = demand_key(&cem, &mut dsk, di9);
             let emitted9 = done.contains_key(&fk9);
             let counted9 = fseen.contains_key(&fk9);
             if !emitted9 && !counted9 {
@@ -6070,6 +6099,15 @@ pub(package) fn cemit_package(
                     continue;
                 }
                 let a9 = unsafe &mut *(p.module_ast_const(m9 as ModuleId) as *mut Ast);
+                if a9.metas.len() == 0 {
+                    continue;
+                }
+                // The items a meta attribute tags.
+                let mut tags9 = Set::<NodeId>::new();
+                for k9 in 0..a9.metas.len() {
+                    tags9.insert(a9.metas.at(k9).owner);
+                }
+                let mut rty9 = TYPE_NONE;
                 let its9 = a9.at_const(a9.root).as_data.program.items;
                 for i9 in 0..its9.len {
                     let nid9 = unsafe a9.list(its9)[i9 as usize];
@@ -6077,17 +6115,7 @@ pub(package) fn cemit_package(
                     if nk9 != NodeKind::NODE_STRUCT && nk9 != NodeKind::NODE_ENUM {
                         continue;
                     }
-                    if a9.ext(nid9).aggregate.generics.len != 0 {
-                        continue;
-                    }
-                    let mut tagged = false;
-                    for k9 in 0..a9.metas.len() {
-                        if a9.metas.at(k9).owner == nid9 {
-                            tagged = true;
-                            break;
-                        }
-                    }
-                    if !tagged {
+                    if a9.ext(nid9).aggregate.generics.len != 0 || !tags9.contains(&nid9) {
                         continue;
                     }
                     let tk9 = if nk9 == NodeKind::NODE_ENUM {
@@ -6096,9 +6124,11 @@ pub(package) fn cemit_package(
                         TypeKind::TYPE_STRUCT
                     };
                     let tt9 = a9.intern_type(Ty { kind: tk9, module: m9 as ModuleId, as_data: TyAs { decl: nid9 } });
-                    let rty9 = a9.intern_type(
-                        Ty { kind: TYPE_STRUCT, module: tih.mid, as_data: TyAs { decl: tih.node } },
-                    );
+                    if rty9 == TYPE_NONE {
+                        rty9 = a9.intern_type(
+                            Ty { kind: TYPE_STRUCT, module: tih.mid, as_data: TyAs { decl: tih.node } },
+                        );
+                    }
                     let sr = cdit.eval_type_info_export(m9 as ModuleId, rty9, m9 as ModuleId, tt9);
                     if !sr.ok {
                         ti_skip += 1;
@@ -8338,17 +8368,18 @@ extend DropCtx {
 
 // The free-glue wrapper fields (frozen `__fb` convention): a CONCRETE struct's selected user
 // `free` whose body never touches some destructible owning fields gets renamed `<sym>__fb`, and
-// the public symbol wraps it, freeing each untouched field, covering every early return.
+// the public symbol wraps it, freeing each untouched field, covering every early return. `tgt`: the
+// method's target (`Mangler::method_target`).
 fn cemit_free_glue_fields(
     p: &loader::Package,
     cem: &mut cbe::CEmit,
     m: ModuleId,
     fnid: NodeId,
+    tgt: DefId,
     out_f: &mut Vector<String>,
     out_t: &mut Vector<TypeId>,
     out_n: &mut Vector<NodeId>,
 ) bool {
-    let tgt = cem.mg.method_target(m, fnid);
     if tgt.node == NODE_NONE || tgt.module != m {
         return false;
     }
@@ -11328,6 +11359,11 @@ fn native_header_facts(p: &mut loader::Package) {
         }
     }
     let mut rec = String::from_str(HF_FORMAT);
+    // The hashes of the paths in `header_files`: a path joins it once.
+    let mut hseen = Set::<u64>::new();
+    for j in 0..p.header_files.len() {
+        hseen.insert(fnv(&p.header_files[j]));
+    }
     for q in 0..tasks.len() {
         let t = tasks.index_mut(q);
         let k = t.k as usize;
@@ -11338,9 +11374,12 @@ fn native_header_facts(p: &mut loader::Package) {
         }
         hf_write(&mut rec, t);
         for j in 0..t.read.len() {
-            if !p.header_files.contains(&t.read[j]) {
-                p.header_files.push(t.read[j].clone());
+            let h = fnv(&t.read[j]);
+            if hseen.contains(&h) && p.header_files.contains(&t.read[j]) {
+                continue;
             }
+            hseen.insert(h);
+            p.header_files.push(t.read[j].clone());
         }
         if !t.ok {
             // A header the preprocessor cannot read: its functions may be anything.
@@ -12376,12 +12415,12 @@ const fn hf_word<'a>(line: &mut str<'a>) str<'a> {
 }
 
 // One object of a native build: its unit's own part (`own`: the module's own items) or the part the
-// build adds (instances, glue, data, wrappers): its bytes, or the reused object's (`old`).
+// build adds (instances, glue, data, wrappers): its bytes, or the object the tree holds (`old`).
 struct NatObj {
     pub(package) m: ModuleId,
     pub(package) own: bool,
     pub(package) bytes: Vector<u8>,
-    pub(package) old: String,
+    pub(package) old: bool,
 }
 
 // One part of one unit to compile: its functions `fs` and data `ds` of LIR package `pk` for `(os, isa)`
@@ -12443,12 +12482,12 @@ fn nat_record(path: str) Map<String, u64> {
 // A native build replays a module's cached emission only when the record holds it under its key, with
 // its own object when it has one, and, when the LIR optimizer runs, with its held record, which `held`
 // gets (`lir::hold`: the other units then optimize as with the module rendered). The rest emit again.
-fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc, held: &mut Vector<Option<lhold::Rec>>) {
+fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc, held: &mut Vector<Option<lhold::Rec>>, rec: &mut Map<String, u64>) {
     held.resize_default(p.modules.len());
     if !t.on || !p.native {
         return;
     }
-    let rec = nat_record(build_out_path(&p.gen_root, NAT_RECORD, "").as_str());
+    *rec = nat_record(build_out_path(&p.gen_root, NAT_RECORD, "").as_str());
     let pb = lay::target_for(p.arch).ptr as u32;
     let base = nat_base(p);
     for m in 0..p.modules.len() {
@@ -12695,7 +12734,7 @@ fn native_plan(
     // Each unit's reason it does not compile, else its parts, compiled in parallel; a replayed unit's own
     // part is its recorded object.
     let mut bytes = Vector::<Vector<u8>>::new();
-    let mut olds = Vector::<String>::new();
+    let mut olds = Vector::<bool>::new();
     olds.resize_default(n);
     let mut whys = Vector::<String>::new();
     let mut oks = Vector::<bool>::new();
@@ -12727,12 +12766,11 @@ fn native_plan(
             // The record holds the module under its key (`nat_trust`).
             let r = *rec.get(&p.modules[m].path).unwrap();
             if (r & NAT_OBJ) != 0 {
-                let old = loader::read_file(build_out_path(root, &p.modules[m].path, ".o").as_str());
-                if old.is_none() {
+                if fs::stat(build_out_path(root, &p.modules[m].path, ".o").as_str()).is_err() {
                     why.push_str("its cached emission has no native object");
                     continue;
                 }
-                olds.set(m, old.unwrap());
+                olds.set(m, true);
             }
             oks.set(2 * m, true);
         } else if funcs.at(2 * m).len() + datas.at(2 * m).len() + texts.at(2 * m).len() != 0 {
@@ -12786,12 +12824,8 @@ fn native_plan(
             isnat.set(m, true);
             nn += 1;
             for part in 0..2usize {
-                let old = if part == 0 {
-                    replace(olds.index_mut(m), String::new())
-                } else {
-                    String::new()
-                };
-                if bytes.at(2 * m + part).len() != 0 || old.len() != 0 {
+                let old = part == 0 && olds[m];
+                if bytes.at(2 * m + part).len() != 0 || old {
                     let b = replace(bytes.index_mut(2 * m + part), Vector::<u8>::new());
                     objs.push(NatObj { m: m as ModuleId, own: part == 0, bytes: b, old: old });
                 }
@@ -15612,10 +15646,9 @@ pub(package) fn run_package(
     // Every module compiled natively: the registry is a native object too, and no C object links.
     let mut nat_all = false;
     if co.lir.is_some() && !err {
-        // The record of the objects an earlier build left, for the modules the emission cache replayed.
-        if co.tuc_keys.len() != 0 {
-            nat_rec = nat_record(&nat_rp);
-        }
+        // The record of the objects an earlier build left, for the modules the emission cache replayed
+        // (`nat_trust` read it).
+        nat_rec = replace(&mut co.nat_rec, Map::<String, u64>::new());
         if let Some(l) = &co.lir {
             if !native_plan(p, l, &lm, &iq, root, &co.tuc_hit, &nat_rec, &mut nat_mod, &mut nat_objs) {
                 return 1;
@@ -15898,12 +15931,18 @@ pub(package) fn run_package(
                     "__inst.o"
                 },
             );
-            let body = if ob.old.len() != 0 {
-                ob.old.as_str()
-            } else {
-                unsafe str::from_raw(ob.bytes.as_ptr(), ob.bytes.len())
-            };
-            if publish_out(osink, &mut co.pr, &mut op, body, 3) {
+            // The tree's object of a replayed unit stands as it is.
+            if ob.old {
+                sink_notify(osink, &mut co.pr, &op, "", 3, false);
+                nat_paths.push(op.clone());
+                keep.push(op);
+            } else if publish_out(
+                osink,
+                &mut co.pr,
+                &mut op,
+                unsafe str::from_raw(ob.bytes.as_ptr(), ob.bytes.len()),
+                3,
+            ) {
                 nat_paths.push(op.clone());
                 keep.push(op);
             } else {

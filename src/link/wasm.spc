@@ -581,16 +581,25 @@ fn enter(l: &mut L, from: usize) bool {
 // enter its symbols, until no member defines a global still needed.
 fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
     let mut more = ars.paths.len() != 0;
+    // Per global, whether no archive defined it at its lookup: a member is only ever taken, so none will.
+    let mut miss = Vector::<bool>::new();
     // Each pass takes at least one member, or ends.
     while more {
         more = false;
         for g in 0..l.gs.len() {
+            if g < miss.len() && miss[g] {
+                continue;
+            }
             let gy = l.gs[g];
             if gy.kind != G_UNDEF || !gy.strong {
                 continue;
             }
             let am = ars.find(l.names.spell(gy.name));
             if am.is_none() {
+                if miss.len() <= g {
+                    miss.resize_default(l.gs.len());
+                }
+                miss[g] = true;
                 continue;
             }
             let m = am.unwrap();
