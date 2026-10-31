@@ -1359,6 +1359,9 @@ pub(package) struct Package {
     /// Whether the optimizer splits each 128-bit integer into its two 64-bit words (`lir::pairs`), which
     /// the native backend keeps in registers (`target::table::Isa`); it needs `mul_high`.
     pub(package) pairs: bool,
+    /// The native backend starts each loop at a 16-byte boundary, as compilers do for speed but not size
+    /// (x86-64: a loop's branches then share fewer fetch blocks and decoded-instruction cache lines).
+    pub(package) align_loops: bool,
     /// The float rewrites the build allows (`FM_*`, `-ffast-math` and its parts), and whether the
     /// processor has a scalar fused multiply-add (`O_FMA` for contraction).
     pub(package) fmath: u8,
@@ -1448,6 +1451,7 @@ extend Package {
             mul_high: true,
             bswap: true,
             pairs: false,
+            align_loops: false,
             pic: false,
             no_plt: false,
             debug: false,

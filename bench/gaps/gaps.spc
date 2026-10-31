@@ -38,6 +38,13 @@ extern "C" {
     fn c_s_ctz(x: u32) u32;
     fn c_s_clz16(x: u16) u32;
     fn c_s_shm(x: u32, n: u32) u32;
+    fn c_t_call(x: u32, a: u32) u32;
+    fn c_o_ref(p: *const u32) u32;
+    fn c_s_mulhi(a: u32, b: u32) u32;
+    fn c_s_ispow2m(x: u64, a: u64) u64;
+    fn c_p_min(a: f64, b: f64) f64;
+    fn c_p_abs(x: f64) f64;
+    fn c_p_clamp01(x: f32) f32;
 }
 
 @arch(x86_64)
@@ -69,6 +76,13 @@ extern "C" {
     fn c_s_ctz(x: u32) u32;
     fn c_s_clz16(x: u16) u32;
     fn c_s_shm(x: u32, n: u32) u32;
+    fn c_t_call(x: u32, a: u32) u32;
+    fn c_o_ref(p: *const u32) u32;
+    fn c_s_mulhi(a: u32, b: u32) u32;
+    fn c_s_ispow2m(x: u64, a: u64) u64;
+    fn c_p_min(a: f64, b: f64) f64;
+    fn c_p_abs(x: f64) f64;
+    fn c_p_clamp01(x: f32) f32;
 }
 
 // Recursion whose result an associative operation combines with the recursive call.
@@ -271,8 +285,80 @@ fn s_clz16(x: u16) u32 {
 }
 
 @noinline
+fn s_mulhi(a: u32, b: u32) u32 {
+    return (a as u64 * b as u64 >> 32) as u32;
+}
+
+@noinline
+fn s_ispow2m(x: u64, a: u64) u64 {
+    return x % 64 + a / 8;
+}
+
+@noinline
 fn s_shm(x: u32, n: u32) u32 {
     return x << (n & 31);
+}
+
+// Arms that return a call.
+@noinline
+fn t_f0(a: u32) u32 {
+    return a * 3 + 1;
+}
+
+@noinline
+fn t_f1(a: u32) u32 {
+    return a ^ 0x55;
+}
+
+@noinline
+fn t_f2(a: u32) u32 {
+    return a << 2;
+}
+
+@noinline
+fn t_call(x: u32, a: u32) u32 {
+    return switch x {
+        0 => t_f0(a),
+        1 => t_f1(a),
+        2 => t_f2(a),
+        _ => a,
+    };
+}
+
+@noinline
+fn o_ref(p: Option<&u32>) u32 {
+    return switch p {
+        Some(r) => *r,
+        None => 0,
+    };
+}
+
+// Float return diamonds.
+@noinline
+fn p_min(a: f64, b: f64) f64 {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+@noinline
+fn p_abs(x: f64) f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    return x;
+}
+
+@noinline
+fn p_clamp01(x: f32) f32 {
+    if x < 0.0 {
+        return 0.0;
+    }
+    if x > 1.0 {
+        return 1.0;
+    }
+    return x;
 }
 
 // `CALLS` inputs below `max`: all `max - 1` (`fixed`), or uniform (`random`, a fixed seed).
@@ -590,7 +676,8 @@ pub fn gaps_select(_b: &mut bench::Bencher) {
 }
 
 /// Arithmetic idioms: conditional negation and increment, quotient and remainder, a signed
-/// remainder test, 32- and 16-bit bit counts, a masked shift; on unpredictable words and as latency chains.
+/// remainder test, 32- and 16-bit bit counts, a masked shift, a widening product's high half, a shifted
+/// operand; on unpredictable words and as latency chains.
 @bench(log_results = false)
 pub fn gaps_arith(_b: &mut bench::Bencher) {
     warm();
@@ -642,6 +729,98 @@ pub fn gaps_arith(_b: &mut bench::Bencher) {
             mode,
             measure(&xs, m == 1, |x: u32| s_shm(x, x >> 7) as u64),
             measure(&xs, m == 1, |x: u32| (unsafe c_s_shm(x, x >> 7)) as u64),
+        );
+        row(
+            "s_mulhi",
+            mode,
+            measure(&xs, m == 1, |x: u32| s_mulhi(x, x ^ 0x9E3779B9) as u64),
+            measure(&xs, m == 1, |x: u32| (unsafe c_s_mulhi(x, x ^ 0x9E3779B9)) as u64),
+        );
+        row(
+            "s_ispow2m",
+            mode,
+            measure(&xs, m == 1, |x: u32| s_ispow2m(x, x as u64 << 9)),
+            measure(&xs, m == 1, |x: u32| unsafe c_s_ispow2m(x, x as u64 << 9)),
+        );
+    }
+}
+
+/// Arms that return a call or a load: `t_call` on 4 arms (`fixed`: one arm; `random`: any), and
+/// `o_ref` on present and absent references.
+@bench(log_results = false)
+pub fn gaps_tail(_b: &mut bench::Bencher) {
+    warm();
+    let v: u32 = 7;
+    for m in 0..2 {
+        let random = m == 1;
+        let mode = if random {
+            "random"
+        } else {
+            "fixed"
+        };
+        let xs = inputs(0xFFFFFFFF, random);
+        row(
+            "t_call",
+            mode,
+            time(&xs, |x: u32| t_call(x & 3, x) as u64),
+            time(&xs, |x: u32| (unsafe c_t_call(x & 3, x)) as u64),
+        );
+        row(
+            "o_ref",
+            mode,
+            time(
+                &xs,
+                |x: u32| o_ref(
+                    if (x & 1) != 0 {
+                        Some(&v)
+                    } else {
+                        None
+                    },
+                ) as u64,
+            ),
+            time(
+                &xs,
+                |x: u32| (unsafe c_o_ref(
+                    if (x & 1) != 0 {
+                        &v
+                    } else {
+                        0 as *const u32
+                    },
+                )) as u64,
+            ),
+        );
+    }
+}
+
+/// Float return diamonds: `p_min`, `p_abs`, `p_clamp01` on signed values from the words, on
+/// unpredictable inputs and as latency chains (the result's bits feed the next input).
+@bench(log_results = false)
+pub fn gaps_float(_b: &mut bench::Bencher) {
+    warm();
+    let xs = inputs(0xFFFFFFFF, true);
+    for m in 0..2 {
+        let mode = if m == 0 {
+            "random"
+        } else {
+            "chain"
+        };
+        row(
+            "p_min",
+            mode,
+            measure(&xs, m == 1, |x: u32| p_min((x as i32) as f64, ((x << 7) as i32) as f64).to_bits()),
+            measure(&xs, m == 1, |x: u32| (unsafe c_p_min((x as i32) as f64, ((x << 7) as i32) as f64)).to_bits()),
+        );
+        row(
+            "p_abs",
+            mode,
+            measure(&xs, m == 1, |x: u32| p_abs((x as i32) as f64).to_bits()),
+            measure(&xs, m == 1, |x: u32| (unsafe c_p_abs((x as i32) as f64)).to_bits()),
+        );
+        row(
+            "p_clamp01",
+            mode,
+            measure(&xs, m == 1, |x: u32| p_clamp01((x as i32) as f32 * 1.0e-9).to_bits() as u64),
+            measure(&xs, m == 1, |x: u32| (unsafe c_p_clamp01((x as i32) as f32 * 1.0e-9)).to_bits() as u64),
         );
     }
 }

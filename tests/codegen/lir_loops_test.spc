@@ -2074,6 +2074,65 @@ b3:
     let _ = b;
 }
 
+// Scalar copies of a loop that counts down to 0 while it multiplies: each copy reads its own counter (a
+// factorial), or a value from before the loop through a 32-bit counter (a power). The copies' products
+// combine after them, and the loop runs the rest.
+@test
+fn a_product_counting_down_interleaves_scalar_copies() {
+    let src = M"(lir ptr 8
+sym @fact fn global
+sym @pow fn global
+fn @fact
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = iconst.i64 0
+  jmp b1(v0, v1)
+b1(v3: i64, v4: i64):
+  v5 = icmp.eq v3, v2
+  br v5, b3, b2
+b2:
+  v6 = mul.i64 v4, v3
+  v7 = sub.i64 v3, v1
+  jmp b1(v7, v6)
+b3:
+  ret v4
+fn @pow
+  sig (i64, i32) -> i64
+b0(v0: i64, v1: i32):
+  v2 = iconst.i64 1
+  v3 = iconst.i32 0
+  v4 = iconst.i32 1
+  jmp b1(v1, v2)
+b1(v5: i32, v6: i64):
+  v7 = icmp.eq v5, v3
+  br v7, b3, b2
+b2:
+  v8 = mul.i64 v6, v0
+  v9 = sub.i32 v5, v4
+  jmp b1(v9, v8)
+b3:
+  ret v6
+)";
+    let (b, a) = optimized(src, VECTOR);
+    let tf = text_of(&a, "fact");
+    let tp = text_of(&a, "pow");
+    assert(count(&tf, "mul.i64") == 4 && tf.contains("novec"), tf.as_str());
+    assert(count(&tp, "mul.i64") == 4 && tp.contains("novec"), tp.as_str());
+    let n0: []u64 = [0];
+    let n5: []u64 = [5];
+    let n7: []u64 = [7];
+    same_outcome(&b, &a, "fact", n0, 1, false);
+    same_outcome(&b, &a, "fact", n5, 120, false);
+    same_outcome(&b, &a, "fact", n7, 5040, false);
+    let p0: []u64 = [3, 0];
+    let p5: []u64 = [3, 5];
+    let p7: []u64 = [2, 7];
+    same_outcome(&b, &a, "pow", p0, 1, false);
+    same_outcome(&b, &a, "pow", p5, 243, false);
+    same_outcome(&b, &a, "pow", p7, 128, false);
+}
+
 // Package text `text` read, then optimized with loop budgets `bu` for a target of `vector`-byte registers
 // that converts vectors and shifts their lanes as `vops` says (`Package.vops`): each body verifies after.
 fn optimized_for(text: str, bu: lu::Budgets, vector: u32, vops: u8) (Package, Package) {

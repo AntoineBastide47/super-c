@@ -22,7 +22,12 @@ import ir::core as core;
 /// `and` or `or` of flags that are comparisons each with this one use, or such `and`s and `or`s, compared
 /// one after the other (`conj`: arm64's `ccmp`); a mask of a 32- or 64-bit shift's amount to the low bits
 /// of the width, which the shift takes modulo its width anyway (`shift_amount`); a `select`'s side that is
-/// the other side plus 1, negated or inverted (`cs_kind`: arm64's `csinc`, `csneg`, `csinv`).
+/// the other side plus 1, negated or inverted (`cs_kind`: arm64's `csinc`, `csneg`, `csinv`); two
+/// extensions of the same kind from 32 bits that a 64-bit product alone reads (`mull_ext`: arm64's
+/// `umull`, `smull`); a shift by a constant that a 32- or 64-bit sum, difference or bitwise operation
+/// alone reads as an operand it may take shifted (`shop_side`: arm64's shifted register operand); a
+/// scalar float comparison only selects and branches read, of one condition (`FOLD_FCMP`; not `one`,
+/// `ueq`).
 pub(package) const FOLD_CMP: u32 = 1;
 pub(package) const FOLD_TST: u32 = 2;
 pub(package) const FOLD_MADD: u32 = 4;
@@ -33,6 +38,12 @@ pub(package) const FOLD_LEA: u32 = 64;
 pub(package) const FOLD_CCMP: u32 = 128;
 pub(package) const FOLD_SHAMT: u32 = 256;
 pub(package) const FOLD_CSEL: u32 = 512;
+pub(package) const FOLD_MULL: u32 = 1024;
+pub(package) const FOLD_SHOP: u32 = 2048;
+pub(package) const FOLD_FCMP: u32 = 4096;
+pub(package) const FOLD_BLEN: u32 = 8192;
+pub(package) const FOLD_CARRY: u32 = 16384;
+pub(package) const FOLD_FSEL: u32 = 32768;
 /// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
 pub(package) const CS_NONE: u8 = 0;
 pub(package) const CS_INC: u8 = 1;
@@ -264,7 +275,8 @@ extend Live {
         }
         for i in 0..ni {
             let t = b.insts[i];
-            self.pfold[i] = (self.fold_ops & FOLD_CMP) != 0 && t.op == O_ICMP && b.type_of(t.a) != T_I128 && self.count[i] != 0 && self.cnd[i] == self.count[i];
+            let fc = (self.fold_ops & FOLD_FCMP) != 0 && t.op == O_FCMP && !is_vec(b.type_of(t.a)) && t.aux != C_ONE && t.aux != C_UEQ;
+            self.pfold[i] = (self.fold_ops & FOLD_CMP) != 0 && (t.op == O_ICMP && b.type_of(t.a) != T_I128 || fc) && self.count[i] != 0 && self.cnd[i] == self.count[i];
         }
         // An `and`'s uses as an equality with 0.
         fill(&mut self.cnd, ni, 0);
@@ -449,6 +461,24 @@ extend Live {
                 self.pfold[t.a as usize] = true;
             }
         }
+        // `FOLD_BLEN`: a count of leading zeros of 32 or 64 bits that only `width - clz` reads, the bit
+        // length, folds into it.
+        if (self.fold_ops & FOLD_BLEN) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                let c = t.b;
+                if t.op != O_SUB || !is_int(t.ty) || type_bits(t.ty, 8) != 32 && type_bits(t.ty, 8) != 64 || (c & (VPARAM | VFLAG)) != 0 || c == VNONE {
+                    continue;
+                }
+                let ci = b.insts[c as usize];
+                if ci.op == O_CLZ && ci.ty == t.ty && self.count[c as usize] == 1 && !self.pfold[c as usize] && int_const(
+                    b,
+                    t.a,
+                ) == type_bits(t.ty, 8) as u64 {
+                    self.pfold[c as usize] = true;
+                }
+            }
+        }
         if (self.fold_ops & FOLD_SHAMT) != 0 {
             for i in 0..ni {
                 let t = b.insts[i];
@@ -463,6 +493,42 @@ extend Live {
                 let k = int_const(b, b.insts[m as usize].b);
                 if k != u64::MAX && (k & (bits - 1) as u64) == (bits - 1) as u64 {
                     self.pfold[m as usize] = true;
+                }
+            }
+        }
+        if (self.fold_ops & FOLD_SHOP) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                let bits = type_bits(t.ty, 8);
+                let ops = t.op == O_ADD || t.op == O_SUB || t.op == O_AND || t.op == O_OR || t.op == O_XOR;
+                if !ops || !is_int(t.ty) || bits != 32 && bits != 64 || self.pfold[i] || int_const(b, t.a) != u64::MAX || int_const(
+                    b,
+                    t.b,
+                ) != u64::MAX {
+                    continue;
+                }
+                // The other operand in a register: not one another fold computes in this instruction.
+                let s = if self.shop_ok(b, t.b, bits) && !(is_inst(t.a) && self.pfold[t.a as usize]) {
+                    t.b
+                } else if t.op != O_SUB && self.shop_ok(b, t.a, bits) && !(is_inst(t.b) && self.pfold[t.b as usize]) {
+                    t.a
+                } else {
+                    VNONE
+                };
+                if s != VNONE {
+                    self.pfold[s as usize] = true;
+                }
+            }
+        }
+        if (self.fold_ops & FOLD_MULL) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op != O_MUL || t.ty != T_I64 || self.pfold[i] || mull_ext(b, t) == 0 {
+                    continue;
+                }
+                if self.count[t.a as usize] == 1 && self.count[t.b as usize] == 1 && !self.pfold[t.a as usize] && !self.pfold[t.b as usize] {
+                    self.pfold[t.a as usize] = true;
+                    self.pfold[t.b as usize] = true;
                 }
             }
         }
@@ -485,6 +551,36 @@ extend Live {
         }
         if (self.fold_ops & FOLD_CCMP) != 0 {
             self.conj_folds(b);
+        }
+        // `FOLD_FSEL`: a comparison of scalar floats but `one` and `ueq` (no SSE comparison gives their mask)
+        // whose every use is the condition of a select of floats of its type folds into the selects.
+        if (self.fold_ops & FOLD_FSEL) != 0 {
+            fill(&mut self.cnd, ni, 0);
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op == O_SELECT && (t.ty == T_F32 || t.ty == T_F64) && is_inst(t.a) && b.insts[t.a as usize].op == O_FCMP && b.type_of(
+                    b.insts[t.a as usize].a,
+                ) == t.ty {
+                    self.cnd[t.a as usize] += 1;
+                }
+            }
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op == O_FCMP && !is_vec(b.type_of(t.a)) && t.aux != C_ONE && t.aux != C_UEQ && self.count[i] != 0 && self.cnd[i] == self.count[i] {
+                    self.pfold[i] = true;
+                }
+            }
+        }
+        // `FOLD_CARRY`: a select of 32 or 64 bits between a value and that value plus 1 (`CS_INC`, its one
+        // use) on a folded unsigned order comparison of 32 or 64 bits: the side folds into the select, an
+        // add of the carry (`carry_inc`).
+        if (self.fold_ops & FOLD_CARRY) != 0 {
+            for i in 0..ni {
+                let s = carry_inc(b, &self.pfold, i as u32);
+                if s != VNONE && self.count[s as usize] == 1 {
+                    self.pfold[s as usize] = true;
+                }
+            }
         }
     }
 
@@ -670,6 +766,16 @@ extend Live {
             self.pfold[t.b as usize] = true;
             self.pfold[i] = self.cnd[i] == self.count[i];
         }
+    }
+
+    // Whether `s` is a shift of `bits` bits by a constant below them, read once and not folded yet: an
+    // operand `FOLD_SHOP` folds.
+    fn shop_ok(self: &Self, b: &Body, s: Value, bits: u32) bool {
+        if !is_inst(s) || self.pfold[s as usize] || self.count[s as usize] != 1 {
+            return false;
+        }
+        let t = b.insts[s as usize];
+        return t.op >= O_SHL && t.op <= O_ASHR && type_bits(t.ty, 8) == bits && int_const(b, t.b) < bits as u64;
     }
 
     // The comparisons operand `v` of an `and` or `or` brings to a `FOLD_CCMP` chain: 1 for a comparison it
@@ -1664,6 +1770,27 @@ pub(package) fn rotate_of(b: &Body, i: u32) Rotation {
 
 /// What `v` is as a `select`'s side next to side `other` (CS_*): `other + 1`, `-other`, `~other` (an
 /// integer of up to 64 bits), which a conditional instruction computes from `other`; else CS_NONE.
+/// The side of select `i` of `b` that `FOLD_CARRY` folds (the other side plus 1), when `i` is of 32 or 64
+/// bits on a folded (`folded`) unsigned order comparison of 32 or 64 bits; VNONE else.
+pub(package) fn carry_inc(b: &Body, folded: &Vector<bool>, i: u32) Value {
+    let t = b.insts[i as usize];
+    if t.op != O_SELECT || !is_int(t.ty) || type_bits(t.ty, 8) < 32 || t.ty == T_I128 || !is_inst(t.a) || !folded[t.a as usize] {
+        return VNONE;
+    }
+    let c = b.insts[t.a as usize];
+    let cb = type_bits(b.type_of(c.a), 8);
+    if c.op != O_ICMP || c.aux != C_ULT && c.aux != C_UGT && c.aux != C_ULE && c.aux != C_UGE || cb != 32 && cb != 64 {
+        return VNONE;
+    }
+    if is_inst(t.b) && !folded[t.b as usize] && cs_kind(b, t.b, t.c) == CS_INC {
+        return t.b;
+    }
+    if is_inst(t.c) && !folded[t.c as usize] && cs_kind(b, t.c, t.b) == CS_INC {
+        return t.c;
+    }
+    return VNONE;
+}
+
 pub(package) fn cs_kind(b: &Body, v: Value, other: Value) u8 {
     if !is_inst(v) || other == VNONE {
         return CS_NONE;
@@ -1710,6 +1837,36 @@ fn const_val(b: &Body, v: Value) u64 {
     }
     let t = b.insts[v as usize];
     return t.a as u64 | t.b as u64 << 32;
+}
+
+/// The operand of 32- or 64-bit sum, difference or bitwise operation `t` that is a folded shift by a
+/// constant (`FOLD_SHOP`): `t.b`, else `t.a`; VNONE when neither is.
+pub(package) fn shop_side(b: &Body, pfold: &Vector<bool>, t: Inst) Value {
+    let ops = t.op == O_ADD || t.op == O_SUB || t.op == O_AND || t.op == O_OR || t.op == O_XOR;
+    if !ops || !is_int(t.ty) || t.ty == T_I128 {
+        return VNONE;
+    }
+    if is_inst(t.b) && pfold[t.b as usize] && b.insts[t.b as usize].op >= O_SHL && b.insts[t.b as usize].op <= O_ASHR {
+        return t.b;
+    }
+    if is_inst(t.a) && pfold[t.a as usize] && b.insts[t.a as usize].op >= O_SHL && b.insts[t.a as usize].op <= O_ASHR {
+        return t.a;
+    }
+    return VNONE;
+}
+
+/// The extension (`O_ZEXT`, `O_SEXT`) both operands of 64-bit product `t` are, from 32 bits, two
+/// instructions; 0 when not.
+pub(package) fn mull_ext(b: &Body, t: Inst) u8 {
+    if !is_inst(t.a) || !is_inst(t.b) || t.a == t.b {
+        return 0;
+    }
+    let x = b.insts[t.a as usize];
+    let y = b.insts[t.b as usize];
+    if x.op != y.op || x.op != O_ZEXT && x.op != O_SEXT || b.type_of(x.a) != T_I32 || b.type_of(y.a) != T_I32 {
+        return 0;
+    }
+    return x.op;
 }
 
 /// The amount a shift with amount operand `v` takes: the operand of `v` when `v` is a mask folded into the

@@ -49,7 +49,9 @@
 // loop reads or writes through another base (same base, same element: an update in place). A loop of up
 // to ILV_SIZE instructions that does not vectorize (a 64-bit product, a lane of 8 bytes on a 16-byte
 // vector's terms) runs `vector` scalar copies of its body the same way (LLVM's interleaving at a vector
-// factor of 1): each instruction's copies together, so their loads and stores pair (`ldp`, `stp`).
+// factor of 1): each instruction's copies together, so their loads and stores pair (`ldp`, `stp`). Its
+// counter may be narrower than a pointer or count down to 0 (`r *= b` while `e != 0`), each copy reads its
+// own counter value, and a reduction may combine a value from before the loop.
 //
 // Beyond that shape: a load through every 2nd or 4th element unzips its vectors (`vunzip`); a group of
 // stores that writes every element of such a step zips its vectors and stores them whole (`vziplo`,
@@ -208,6 +210,7 @@ pub(package) struct LoopOpt {
     vstrided: bool, // a vector load reads every 2nd or 4th element: the loop runs the last iteration
     vgroups: bool, // stores write every 2nd or 4th element, each group of them every element (`store_groups`)
     vind: Vector<u32>, // the truncations of the counter the plan reads as lanes (`vclass`)
+    vqc: Vector<Value>, // scalar copies: each copy's counter value
     vmax: u32, // the bytes of the widest vector of the target (`run`); `vbytes` the plan's
     vmin: u32, // the narrowest lane's bytes; `vsz` the widest's (at most twice as wide: `lane_size`)
     /// How the target converts vectors and shifts their lanes (`Package.vops`): with VOPS_SOME or
@@ -395,6 +398,7 @@ extend LoopOpt {
             vstrided: false,
             vgroups: false,
             vind: Vector::<u32>::new(),
+            vqc: Vector::<Value>::new(),
             vmax: 0,
             vmin: 0,
             vops: 0,
@@ -757,8 +761,16 @@ extend LoopOpt {
         fill(&mut self.cf_poly, na as usize, false);
         let mut d: u32 = 0;
         let mut any = false;
+        // A loop that stays computes its counter for its test: the counter's values leave as they are,
+        // unless the start and the bound are constants (the values are).
+        let qi = ((self.cf_q & ~VPARAM) - b.blocks[h as usize].param_start) as usize;
+        let qn = self.cf_next[qi];
+        let known = is_const(b, self.cf_init[qi]) && (self.cf_bound == VNONE || is_const(b, self.cf_bound));
         for q in 0..na {
             let v = self.cf_leave[q as usize];
+            if !pure && !known && (v == self.cf_q || v == self.cf_x || v == qn) {
+                continue;
+            }
             if self.defined_in(v) {
                 let f = self.fact(b, ptr, v);
                 let w = type_bits(value_type(b, v), ptr);
@@ -1736,7 +1748,7 @@ extend LoopOpt {
         let ub = b.blocks[u as usize];
         let q = self.viv;
         let qt = b.params[(q & ~VPARAM) as usize];
-        if type_bytes(qt, ptr) != ptr {
+        if type_bytes(qt, ptr) != ptr && !one {
             return self.no("its counter is narrower than a pointer", 0);
         }
         if self.vsigned {
@@ -1853,7 +1865,7 @@ extend LoopOpt {
                 } else {
                     t.a
                 };
-                if self.kind(b, u, o) != VK_LANE && self.kind(b, u, o) != VK_INV {
+                if self.kind(b, u, o) != VK_LANE && self.kind(b, u, o) != VK_INV && !(one && !self.defined_in(o)) {
                     return self.no("a reduction takes no lane value", t.op);
                 }
                 continue;
@@ -1877,7 +1889,7 @@ extend LoopOpt {
                 }
             }
         }
-        // The counter only steps and indexes.
+        // The counter only steps and indexes, but in scalar copies.
         for i in ub.start..ub.start + ub.len {
             let x = (i - ub.start) as usize;
             if i < ub.start + ub.len - 1 && (self.vk[x] == VK_ADDR || self.vk[x] == VK_STEP || contains_u32(
@@ -1894,7 +1906,8 @@ extend LoopOpt {
                 continue;
             }
             self.outside_uses(b, b.insts[i as usize]);
-            if contains(&self.uses, q) {
+            // Scalar copies read their own counter (`vqc`), but not in an address they gather through.
+            if contains(&self.uses, q) && (!one || self.vgat.len() != 0) {
                 return self.no("its counter is a value besides an index", b.insts[i as usize].op);
             }
         }
@@ -2400,6 +2413,9 @@ extend LoopOpt {
 
     // The plan's kind of value `v` defined in body `u` (0: none or outside it).
     fn kind(self: &Self, b: &Body, u: u32, v: Value) u8 {
+        if self.vone && v == self.viv {
+            return VK_LANE;
+        }
         if !self.in_body(b, u, v) {
             return 0;
         }
@@ -2674,7 +2690,7 @@ extend LoopOpt {
         } else {
             self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: d, c: z }, l0)
         };
-        let mk = self.vconst(b, qt, ~((step - 1) as u64), l0);
+        let mk = self.vconst(b, qt, ~((step - 1) as u64) & mask_of(type_bits(qt, 8)), l0);
         let cnt = self.vi(b, Inst { op: O_AND, ty: qt, aux: 0, a: trips, b: mk, c: 0 }, l0);
         let mut ok = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: cnt, b: z, c: 0 }, l0);
         for k in 0..self.vca.len() {
@@ -2776,6 +2792,18 @@ extend LoopOpt {
         }
         let lstart = b.insts.len() as u32;
         let vi = VPARAM | vps;
+        // Scalar copies: copy c's counter, `c` steps on from the loop's.
+        self.vqc.truncate(0);
+        for c in 0..ast::pick(self.vone, nv, 0u32) {
+            self.vqc.push(
+                if c == 0 {
+                    vi
+                } else {
+                    let kc = self.vconst(b, qt, c * self.vqk, l0);
+                    self.vi(b, Inst { op: ast::pick(self.vrev, O_SUB, O_ADD), ty: qt, aux: 0, a: vi, b: kc, c: 0 }, l0)
+                },
+            );
+        }
         // With an early exit, the latch block's start: past the exit test.
         let mut ls: u32 = 0;
         for i in ub.start..ub.start + ub.len - 1 {
@@ -4524,7 +4552,7 @@ extend LoopOpt {
     // The splat of value `v` of body `u` when the loop does not define it (a constant as a wide constant,
     // else `splat`), recorded in `vinv`/`vspl` once.
     fn vsplat(self: &mut Self, b: &mut Body, u: u32, v: Value, l: u32) {
-        if v == VNONE || self.in_body(b, u, v) || contains(&self.vinv, v) {
+        if v == VNONE || self.in_body(b, u, v) || contains(&self.vinv, v) || self.vone && v == self.viv {
             return;
         }
         if self.vone {
@@ -4619,6 +4647,9 @@ extend LoopOpt {
     // Value `v` of body `u` in interleaved copy `c` of the vector loop: a lane value's copy, else its
     // splat.
     fn vval(self: &Self, b: &Body, u: u32, c: u32, v: Value) Value {
+        if self.vone && v == self.viv {
+            return self.vqc[c as usize];
+        }
         if self.in_body(b, u, v) {
             let ub = b.blocks[u as usize];
             return self.vmap[(c * ub.len + v - ub.start) as usize];
@@ -4627,6 +4658,10 @@ extend LoopOpt {
             if self.vinv[k] == v {
                 return self.vspl[k];
             }
+        }
+        // Scalar copies read a value from before the loop as it is.
+        if self.vone && !self.defined_in(v) {
+            return v;
         }
         assert(false, "loops: a vector operand without a splat");
         return VNONE;

@@ -472,17 +472,23 @@ extend Gen {
         let b = self.b();
         let bk = b.blocks[self.lv.def_blk[v as usize] as usize];
         let bits = type_bits(self.vt(v), self.ptr);
+        // A scalar float takes a v register.
+        let fv = self.vt(v) == T_F32 || self.vt(v) == T_F64;
         if v + 1 >= bk.start + bk.len || self.lv.uses[v as usize] != 1 || self.lv.end[v as usize] != self.pos || !is_int(
             self.vt(v),
-        ) && self.vt(v) != T_PTR || bits < 32 || bits > 64 || self.va[v as usize].home != H_NONE {
+        ) && self.vt(v) != T_PTR && !fv || bits < 32 || bits > 64 || self.va[v as usize].home != H_NONE {
             return NOREG;
         }
         let t = b.insts[v as usize + 1];
         let mut r = NOREG;
         if t.op == O_RET {
             let rl = self.self_lay.ret;
-            if t.a == v && rl.kind == ab::L_REG && rl.n == 1 && !self.self_lay.parts[rl.p0 as usize].v {
-                r = self.self_lay.parts[rl.p0 as usize].reg;
+            if t.a == v && rl.kind == ab::L_REG && rl.n == 1 && self.self_lay.parts[rl.p0 as usize].v == fv {
+                r = self.self_lay.parts[rl.p0 as usize].reg + if fv {
+                    V0
+                } else {
+                    0
+                };
             }
         } else if t.op == O_CALL && self.intrinsic(t.a).len() == 0 || t.op == O_CALLIND && t.a != v {
             self.call_layout(t);
@@ -496,10 +502,14 @@ extend Gen {
                     return NOREG;
                 }
                 let pa = self.lay.parts[self.lay.locs[k as usize].p0 as usize];
-                if pa.v {
+                if pa.v != fv {
                     return NOREG;
                 }
-                r = pa.reg;
+                r = pa.reg + if fv {
+                    V0
+                } else {
+                    0
+                };
             }
         } else if t.op == O_JMP {
             // A later block's parameter takes its home here, at the first edge into it, so `v` is defined
@@ -515,7 +525,7 @@ extend Gen {
             }
             return self.jump_reg(b, t, v);
         }
-        if r == NOREG || (((self.held | self.lock) & ~free | self.tmps | self.fixed_busy) & bit(r)) != 0 || (XALLOC & bit(
+        if r == NOREG || (((self.held | self.lock) & ~free | self.tmps | self.fixed_busy) & bit(r)) != 0 || ((XALLOC | valloc()) & bit(
             r,
         )) == 0 {
             return NOREG;
@@ -531,7 +541,7 @@ extend Gen {
         for k in 0..self.dying.len() {
             let x = self.dying[k];
             let va = self.va[x as usize];
-            if va.reg != NOREG && va.home != H_FIXED && self.owner[va.reg as usize] == x {
+            if va.reg != NOREG && ((XALLOC | valloc()) & bit(va.reg)) != 0 && self.owner[va.reg as usize] == x {
                 free |= bit(va.reg);
             }
         }
@@ -542,11 +552,19 @@ extend Gen {
         if r == NOREG || (free & bit(r)) == 0 {
             return NOREG;
         }
-        let own = self.owner[r as usize];
-        self.va.index_mut(own as usize).reg = NOREG;
-        self.va.index_mut(own as usize).dirty = false;
+        self.drop_reg(self.owner[r as usize]);
         self.bind(i, r);
         return r;
+    }
+
+    // Value index `x`, which dies at the current instruction, gives up its register to the result: a
+    // register home (a caller-saved one, which `take_scratch` would evict a value from) frees too.
+    fn drop_reg(self: &mut Self, x: u32) {
+        if self.va[x as usize].home == H_FIXED {
+            self.fixed_busy &= ~bit(self.va[x as usize].reg);
+        }
+        self.va.index_mut(x as usize).reg = NOREG;
+        self.va.index_mut(x as usize).dirty = false;
     }
 
     // The home register of the parameter jump `t` passes `v` to (once), when the jump is no back edge, so
@@ -594,11 +612,10 @@ extend Gen {
         if !fixed && ((XALLOC | valloc()) & bit(ra)) != 0 && is_v(t) == ra >= V0 {
             let own = self.owner[ra as usize];
             let temp = own == NONE && (self.tmps & bit(ra)) != 0;
-            let dies = own == xa && self.va[xa as usize].home != H_FIXED && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
+            let dies = own == xa && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
             if temp || dies {
                 if dies {
-                    self.va.index_mut(xa as usize).reg = NOREG;
-                    self.va.index_mut(xa as usize).dirty = false;
+                    self.drop_reg(xa);
                 }
                 self.tmps &= ~bit(ra);
                 self.bind(x, ra);
@@ -1860,7 +1877,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
         if self.again {
@@ -2914,11 +2931,18 @@ extend Gen {
             return self.icmp(i, t);
         }
         if op == O_FCMP {
+            if self.lv.pfold[i as usize] {
+                return true; // each select or branch on it compares (`folded_cmp`)
+            }
             assert(!is_vec(self.vt(t.a)), "a64gen: a vector comparison the verifier rejects");
             let d = self.vt(t.a) == T_F64;
             let ra = self.reg(t.a);
-            let rb = self.reg(t.b);
-            self.emit(a::fcmp(d, ra - V0, rb - V0));
+            if self.fzero(t.b) {
+                self.emit(a::fcmp_zero(d, ra - V0));
+            } else {
+                let rb = self.reg(t.b);
+                self.emit(a::fcmp(d, ra - V0, rb - V0));
+            }
             let mut c2: u32 = NONE;
             let c = fcond(t.aux, &mut c2);
             self.cond_value(i, c, c2);
@@ -3274,9 +3298,22 @@ extend Gen {
         return lc;
     }
 
-    // Comparison `t` of integers of at most 64 bits into the flags: its condition. A folded `and` compared
+    // Comparison `t` of integers of at most 64 bits, or of scalar floats, into the flags: its condition. A folded `and` compared
     // with 0 is a test (`lv::FOLD_TST`).
     fn compare(self: &mut Self, t: Inst) u32 {
+        // A float comparison of one condition (`lv::FOLD_FCMP`).
+        if t.op == O_FCMP {
+            let d = self.vt(t.a) == T_F64;
+            let ra = self.reg(t.a);
+            if self.fzero(t.b) {
+                self.emit(a::fcmp_zero(d, ra - V0));
+            } else {
+                let rb = self.reg(t.b);
+                self.emit(a::fcmp(d, ra - V0, rb - V0));
+            }
+            let mut c2: u32 = NONE;
+            return fcond(t.aux, &mut c2);
+        }
         let c = t.aux;
         let ty = self.vt(t.a);
         let bits = type_bits(ty, self.ptr);
@@ -3473,7 +3510,8 @@ extend Gen {
         self.mem(a::M_X, false, hi, a::SP, off + 8);
     }
 
-    // clz: CLZ; ctz: RBIT then CLZ; popcnt: CNT over the bytes in v30, summed by ADDV. An operand under
+    // clz: CLZ; ctz: RBIT then CLZ; popcnt: CNT over the bytes in v30 (of 4 bytes but at 64 bits), summed
+    // by ADDV. An operand under
     // 32 bits is zero-extended, but for ctz, whose bit set at the width (making 0 count the width) hides
     // the bits above it. The count, at most the width, is `clean`.
     fn bit_count(self: &mut Self, i: u32, t: Inst) {
@@ -3491,7 +3529,7 @@ extend Gen {
         let rd = self.def(i) as u32;
         self.va.index_mut(i as usize).clean = true;
         if t.op == O_POPCNT {
-            // Below 64 bits the 32-bit move: the bits above a narrow value's width are not its own.
+            // A 32-bit move for a narrower count: the register's bits above 32 are no part of the value.
             self.emit(a::fmov_gv(sf, true, 30, r));
             self.emit(a::cnt8b(30, 30));
             self.emit(a::addv8b(30, 30));
@@ -3603,6 +3641,44 @@ extend Gen {
             } else {
                 self.emit(a::addsub_reg(sf, 1, false, a::IP0, a::ZR, rn, 0, 0));
                 self.emit(a::dp2(sf, a::DP2_RORV, rd, ra, a::IP0));
+            }
+            return true;
+        }
+        // A product of two folded 32-bit extensions (`lv::FOLD_MULL`): `umull` or `smull`.
+        if op == O_MUL && (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] {
+            let e = lv::mull_ext(self.b(), t);
+            let rn = self.reg(self.b().insts[t.a as usize].a) as u32;
+            let rm = self.reg(self.b().insts[t.b as usize].a) as u32;
+            let rd = self.def_step(i) as u32;
+            self.emit(a::mull(e == O_SEXT, rd, rn, rm));
+            return true;
+        }
+        // An operand shifted by a constant (`lv::FOLD_SHOP`): the shifted register form.
+        let sv = lv::shop_side(self.b(), &self.lv.pfold, t);
+        if sv != VNONE {
+            let s = self.b().insts[sv as usize];
+            let o = if sv == t.b {
+                t.a
+            } else {
+                t.b
+            };
+            let mut amt: u64 = 0;
+            let _ = self.const_of(s.b, &mut amt);
+            let kind = (s.op - O_SHL) as u32;
+            let rn = self.reg(o) as u32;
+            let rm = self.reg(s.a) as u32;
+            let rd = self.def_step(i) as u32;
+            if op == O_ADD || op == O_SUB {
+                self.emit(a::addsub_reg(sf, (op == O_SUB) as u32, false, rd, rn, rm, kind, amt as u32));
+            } else {
+                let opc = if op == O_AND {
+                    0u32
+                } else if op == O_OR {
+                    1u32
+                } else {
+                    2u32
+                };
+                self.emit(a::logic_reg(sf, opc, false, rd, rn, rm, kind, amt as u32));
             }
             return true;
         }
@@ -4793,6 +4869,20 @@ extend Gen {
         // `csinc rd, x, zr` gives 1 where the condition fails, `csinv rd, x, zr` all ones.
         self.emit(a::csel(sf, (k != 1) as u32, (k == 1) as u32, rd, rx, a::ZR, cond));
         return true;
+    }
+
+    // Whether `v` is a float constant zero of either sign (`fcmp` against #0.0 compares it).
+    const fn fzero(self: &Self, v: Value) bool {
+        if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.b().insts[v as usize].op != O_FCONST {
+            return false;
+        }
+        let k = self.b().insts[v as usize];
+        let bits = k.b as u64 << 32 | k.a as u64;
+        return if k.ty == T_F64 {
+            bits << 1 == 0
+        } else {
+            (bits & 0x7FFFFFFF) == 0
+        };
     }
 
     // Value `v` of type `ty` in a register: the zero register for an integer constant 0.
@@ -6196,10 +6286,6 @@ extend Gen {
         // A leaf body keeps its return address in x30: no frame record, and its frame from sp. The
         // compact unwind encoding's frameless form holds frames up to 65520 bytes.
         let leaf = self.frameless && local <= 32768 && self.canary < 0 && !self.calls_before(self.code.len() as u32);
-        if !leaf {
-            pro.push(a::ldstp(a::M_X, false, 3, a::FP, a::LR, a::SP, -16));
-            pro.push(a::add_imm(true, a::FP, a::SP, 0));
-        }
         // The callee-saved registers in the pairs compact unwind names (x19/x20 to x27/x28, d8/d9 to
         // d14/d15), both of a pair when the body uses one: each pair below the last, its lower register 8
         // bytes higher (x19 at x29 - 8), as libunwind reads a frame. `xs` and `vs` hold each pair's lower
@@ -6223,13 +6309,34 @@ extend Gen {
                 enc |= 0x100u32 << q;
             }
         }
-        for k in 0..xs.len() {
-            pro.push(a::ldstp(a::M_X, false, 3, xs[k] + 1, xs[k], a::SP, -16));
+        // One `sp` update for the frame record and the pairs: the lowest pair stored pre-indexed by all of
+        // them, the others and the record above it at offsets (`pair_at`).
+        let np = (xs.len() + vs.len()) as u32;
+        let csr_bytes = 16 * np;
+        let top = if leaf {
+            csr_bytes
+        } else {
+            csr_bytes + 16
+        };
+        let mut j = np;
+        while j > 0 {
+            j -= 1;
+            let (m, r) = pair_at(&xs, &vs, j);
+            let (mode, off) = if j + 1 == np {
+                (3u32, -(top as i32))
+            } else {
+                (2u32, (csr_bytes - 16 * (j + 1)) as i32)
+            };
+            pro.push(a::ldstp(m, false, mode, r + 1, r, a::SP, off));
         }
-        for k in 0..vs.len() {
-            pro.push(a::ldstp(a::M_VD, false, 3, vs[k] + 1, vs[k], a::SP, -16));
+        if !leaf && np == 0 {
+            pro.push(a::ldstp(a::M_X, false, 3, a::FP, a::LR, a::SP, -16));
+        } else if !leaf {
+            pro.push(a::ldstp(a::M_X, false, 2, a::FP, a::LR, a::SP, csr_bytes as i32));
         }
-        let csr_bytes = 16 * (xs.len() + vs.len()) as u32;
+        if !leaf {
+            pro.push(a::add_imm(true, a::FP, a::SP, csr_bytes));
+        }
         if leaf {
             enc |= (csr_bytes + local) / 16 << 12;
         }
@@ -6284,23 +6391,24 @@ extend Gen {
             if back != 0 {
                 epi.push(a::add_imm(true, a::SP, a::SP, back));
             }
-        } else if csr_bytes != 0 {
+        } else if local != 0 || self.max_align > 16 || (self.opf & lv::OP_ASM) != 0 {
+            // `sp` back from x29: past the locals, an over-aligned frame or inline assembly's own moves.
             epi.push(a::sub_imm(true, a::SP, a::FP, csr_bytes));
-        } else {
-            epi.push(a::mov_sp(a::SP, a::FP));
         }
-        let mut k = vs.len();
-        while k > 0 {
-            k -= 1;
-            epi.push(a::ldstp(a::M_VD, true, 1, vs[k] + 1, vs[k], a::SP, 16));
-        }
-        k = xs.len();
-        while k > 0 {
-            k -= 1;
-            epi.push(a::ldstp(a::M_X, true, 1, xs[k] + 1, xs[k], a::SP, 16));
-        }
-        if !leaf {
+        // The frame record and the pairs at their offsets, the lowest pair post-indexed past them all.
+        if !leaf && np == 0 {
             epi.push(a::ldstp(a::M_X, true, 1, a::FP, a::LR, a::SP, 16));
+        } else if !leaf {
+            epi.push(a::ldstp(a::M_X, true, 2, a::FP, a::LR, a::SP, csr_bytes as i32));
+        }
+        for j in 0..np {
+            let (m, r) = pair_at(&xs, &vs, j);
+            let (mode, off) = if j + 1 == np {
+                (1u32, top as i32)
+            } else {
+                (2u32, (csr_bytes - 16 * (j + 1)) as i32)
+            };
+            epi.push(a::ldstp(m, true, mode, r + 1, r, a::SP, off));
         }
         epi.push(a::RET);
         // Branches: through a block that is one `b` alone, to that branch's target (at most 8 steps; one
@@ -6634,44 +6742,56 @@ extend Gen {
     }
 }
 
-// The unwind rules of function `sym` (`size` bytes) for `.eh_frame`, after the prologue's `stp x29, x30,
-// [sp, #-16]!` (the CFA is sp + 16, x29 at CFA - 16, x30 at CFA - 8), `mov x29, sp` (the CFA is x29 +
-// 16) and the pushes of the callee-saved pairs whose lower registers are `xs` and `vs` (16 bytes each
-// below x29, the lower register 8 bytes higher). The common entry's code alignment is 4 bytes and its
-// data alignment -8.
+// Pair `j` of the callee-saved pairs whose lower registers are `xs` then `vs`: its access size and lower
+// register.
+fn pair_at(xs: &Vector<u32>, vs: &Vector<u32>, j: u32) (u32, u32) {
+    let nx = xs.len() as u32;
+    return if j < nx {
+        (a::M_X, xs[j as usize])
+    } else {
+        (a::M_VD, vs[(j - nx) as usize])
+    };
+}
+
+// The unwind rules of function `sym` (`size` bytes) for `.eh_frame`. The prologue stores the callee-saved
+// pairs whose lower registers are `xs` and `vs` (16 bytes each below x29, the lower register 8 bytes
+// higher) and the frame record above them (x29 at CFA - 16, x30 at CFA - 8): its first store moves sp
+// past all of them (the CFA is sp + their bytes), the record's store is the last, then `add x29` (the CFA
+// is x29 + 16). The common entry's code alignment is 4 bytes and its data alignment -8.
 fn frame_rules(o: &mut ob::Obj, sym: u32, size: u32, xs: &Vector<u32>, vs: &Vector<u32>) {
     let c0 = o.cfi.len() as u32;
+    let nx = xs.len() as u32;
+    let npush = nx + vs.len() as u32;
     o.cfi.push(0x40 | 1);
     o.cfi.push(0x0E);
-    o.cfi.push(16);
+    dw::uleb(&mut o.cfi, 16 + 16 * npush);
+    if npush != 0 {
+        o.cfi.push(0x40 | npush as u8);
+    }
     o.cfi.push(0x80 | a::FP as u8);
     o.cfi.push(2);
     o.cfi.push(0x80 | a::LR as u8);
     o.cfi.push(1);
-    o.cfi.push(0x40 | 1);
-    o.cfi.push(0x0D);
-    o.cfi.push(a::FP as u8);
-    let nx = xs.len() as u32;
-    let npush = nx + vs.len() as u32;
-    if npush != 0 {
-        o.cfi.push(0x40 | npush as u8);
-        // Pair q stores its lower register at CFA - 24 - 16 q, its upper one 8 bytes below.
-        for k in 0..nx {
-            o.cfi.push(0x80 | xs[k as usize] as u8);
-            o.cfi.push((3 + 2 * k) as u8);
-            o.cfi.push(0x80 | (xs[k as usize] + 1) as u8);
-            o.cfi.push((4 + 2 * k) as u8);
-        }
-        for k in 0..vs.len() as u32 {
-            // DW_CFA_offset_extended: the DWARF numbers of v0..v31 are 64..95.
-            o.cfi.push(0x05);
-            o.cfi.push((64 + vs[k as usize]) as u8);
-            o.cfi.push((3 + 2 * (nx + k)) as u8);
-            o.cfi.push(0x05);
-            o.cfi.push((65 + vs[k as usize]) as u8);
-            o.cfi.push((4 + 2 * (nx + k)) as u8);
-        }
+    // Pair q stores its lower register at CFA - 24 - 16 q, its upper one 8 bytes below; the DWARF numbers
+    // of v0..v31 are 64..95 (DW_CFA_offset_extended).
+    for k in 0..npush {
+        let lo = if k < nx {
+            xs[k as usize]
+        } else {
+            64 + vs[(k - nx) as usize]
+        };
+        o.cfi.push(0x05);
+        dw::uleb(&mut o.cfi, lo);
+        dw::uleb(&mut o.cfi, 3 + 2 * k);
+        o.cfi.push(0x05);
+        dw::uleb(&mut o.cfi, lo + 1);
+        dw::uleb(&mut o.cfi, 4 + 2 * k);
     }
+    // DW_CFA_def_cfa x29, 16.
+    o.cfi.push(0x40 | 1);
+    o.cfi.push(0x0C);
+    o.cfi.push(a::FP as u8);
+    o.cfi.push(16);
     o.frames.push(ob::OFrame { sym: sym, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0, compact: 0 });
 }
 
@@ -6699,18 +6819,25 @@ fn shrink_rules(o: &mut ob::Obj, sym: u32, size: u32, ra: u32) {
 }
 
 // The unwind rules of leaf function `sym` (`size` bytes, a prologue of `pl` words) for `.eh_frame`: the
-// return address stays in x30; the CFA is sp plus 16 after each push of the callee-saved pairs whose
-// lower registers are `xs` and `vs` (the lower register at the pair's top, its upper one 8 bytes below),
-// then plus the `local` bytes the prologue's end has allocated.
+// return address stays in x30; the CFA is sp plus the bytes of the callee-saved pairs whose lower
+// registers are `xs` and `vs` (the lower register at the pair's top, its upper one 8 bytes below) after the
+// first store, which moves sp past all of them, then plus the `local` bytes the prologue's end has
+// allocated.
 fn leaf_rules(o: &mut ob::Obj, sym: u32, size: u32, xs: &Vector<u32>, vs: &Vector<u32>, pl: u32, local: u32) {
     let c0 = o.cfi.len() as u32;
     let nx = xs.len() as u32;
     let npush = nx + vs.len() as u32;
-    for k in 0..npush {
-        // One word per push; the pairs' DWARF numbers: x registers as they are, v0..v31 at 64..95.
+    if npush != 0 {
+        // The first store moves sp past every pair; the others follow, one word each.
         o.cfi.push(0x40 | 1);
         o.cfi.push(0x0E);
-        dw::uleb(&mut o.cfi, 16 * (k + 1));
+        dw::uleb(&mut o.cfi, 16 * npush);
+        if npush > 1 {
+            o.cfi.push((0x40 | npush - 1) as u8);
+        }
+    }
+    for k in 0..npush {
+        // The pairs' DWARF numbers: x registers as they are, v0..v31 at 64..95.
         let lo = if k < nx {
             xs[k as usize]
         } else {
