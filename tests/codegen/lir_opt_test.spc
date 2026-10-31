@@ -6351,3 +6351,122 @@ b0(v0: i64):
     let w: []u64 = [0x11223344, 0x55667788];
     same_result(&b, &a, "inside", w, run_of(&b, "inside", w));
 }
+
+// A sum compared below one of its addends (either order) is the unsigned addition's carry, and at or above
+// it the carry's absence: the addition becomes `addo`, a select on the negated flag swaps its arms. A
+// compare with a value that is not an addend stays.
+@test
+fn sums_below_an_addend_are_carries() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @carry fn global
+sym @fits fn global
+sym @other fn global
+fn @carry
+  sig (i32, i32) -> i8
+b0(v0: i32, v1: i32):
+  v2 = add.i32 v0, v1
+  v3 = icmp.ugt v1, v2
+  ret v3
+fn @fits
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = add.i64 v0, v1
+  v4 = icmp.uge v3, v0
+  v5 = select.i64 v4, v3, v2
+  ret v5
+fn @other
+  sig (i32, i32, i32) -> i8
+b0(v0: i32, v1: i32, v2: i32):
+  v3 = add.i32 v0, v1
+  v4 = icmp.ult v3, v2
+  ret v4
+)",
+    );
+    let c = text_of(&a, "carry");
+    assert(c.contains("addo.u.i32") && !c.contains("icmp"), c.as_str());
+    let f = text_of(&a, "fits");
+    assert(f.contains("addo.u.i64") && !f.contains("icmp"), f.as_str());
+    let o = text_of(&a, "other");
+    assert(!o.contains("addo") && o.contains("icmp"), o.as_str());
+    let x: []u64 = [0xFFFFFFF0, 0x20];
+    let y: []u64 = [5, 7];
+    same_result(&b, &a, "carry", x, 1);
+    same_result(&b, &a, "carry", y, 0);
+    let p: []u64 = [0xFFFFFFFFFFFFFFF0, 0x20];
+    same_result(&b, &a, "fits", p, 0);
+    same_result(&b, &a, "fits", y, 12);
+}
+
+// The sign of `(x ^ s) & (y ^ s)` for `s = x + y`, and of `(x ^ y) & (x ^ s)` for `s = x - y`, is the
+// signed overflow of `addo` and `subo`; a select by a sign of `~c` or `c` is a shift and an `xor`; a plain
+// product beside the checked one on its operands is that one's value.
+@test
+fn signed_overflow_idioms_fold() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @sat fn global
+sym @dif fn global
+sym @prod fn global
+fn @sat
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 2147483647
+  v4 = iconst.i32 -2147483648
+  v5 = add.i32 v0, v1
+  v6 = xor.i32 v0, v5
+  v7 = xor.i32 v5, v1
+  v8 = and.i32 v6, v7
+  v9 = icmp.sge v8, v2
+  v10 = icmp.slt v1, v2
+  v11 = select.i32 v10, v4, v3
+  v12 = select.i32 v9, v5, v11
+  ret v12
+fn @dif
+  sig (i64, i64) -> i8
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = sub.i64 v0, v1
+  v4 = xor.i64 v1, v0
+  v5 = xor.i64 v0, v3
+  v6 = and.i64 v4, v5
+  v7 = icmp.slt v6, v2
+  ret v7
+fn @prod
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = mul.i64 v0, v1
+  v4, v5 = mulo.u.i64 v0, v1
+  v6 = select.i64 v5, v2, v3
+  ret v6
+)",
+    );
+    let s = text_of(&a, "sat");
+    assert(
+        s.contains("addo.s.i32") && s.contains("ashr") && !s.contains("icmp") && count_of(&s, "select") == 1,
+        s.as_str(),
+    );
+    let d = text_of(&a, "dif");
+    assert(d.contains("subo.s.i64") && !d.contains("icmp"), d.as_str());
+    let p = text_of(&a, "prod");
+    assert(count_of(&p, "mul") == 1, p.as_str());
+    let sv: [[u64; 2]; 4] = [[3, 4], [0x7FFFFFFF, 1], [0x80000000, 0xFFFFFFFF], [0xFFFFFFFE, 1]];
+    let sw: [u64; 4] = [7, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF];
+    for q in 0..4 {
+        let x: []u64 = [sv[q][0], sv[q][1]];
+        same_result(&b, &a, "sat", x, sw[q]);
+    }
+    let dv: [[u64; 2]; 3] = [[5, 3], [0x8000000000000000, 1], [0x7FFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF]];
+    let dw: [u64; 3] = [0, 1, 1];
+    for q in 0..3 {
+        let x: []u64 = [dv[q][0], dv[q][1]];
+        same_result(&b, &a, "dif", x, dw[q]);
+    }
+    let m: []u64 = [6, 7];
+    same_result(&b, &a, "prod", m, 42);
+    let n: []u64 = [0x100000000, 0x100000000];
+    same_result(&b, &a, "prod", n, 0);
+}

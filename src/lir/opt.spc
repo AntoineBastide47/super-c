@@ -64,6 +64,8 @@ const SET_MAX: usize = 16;
 const PSLOT_MAX: u32 = 64;
 // `dead_allocs` takes at most FRESH_MAX allocations of a body.
 const FRESH_MAX: usize = 16;
+// `flag_next` moves a flag's definition at most FLAG_REACH instructions.
+const FLAG_REACH: u32 = 8;
 // `memcmp_eq` expands counts of at most MEMCMP_MAX bytes, in at most MEMCMP_LOADS loads a side.
 const MEMCMP_MAX: u64 = 32;
 const MEMCMP_LOADS: u32 = 4;
@@ -4290,6 +4292,28 @@ extend Opt {
         return i;
     }
 
+    // Checked operation `i` (`addo`, `subo`, `mulo`) whose plain operation on its operands an earlier
+    // instruction computes: that one becomes the checked operation, whose value and flag are `i`'s (one
+    // product, not two). Else `i` stands for the plain operation in the numbering (`as_plain`), for a later
+    // one. Whether it merged.
+    fn checked_plain(self: &mut Self, b: &mut Body, i: u32) bool {
+        let t = b.insts[i as usize];
+        let p = as_plain(t);
+        let h = value_hash(b, p);
+        let f = switch self.pure.get(&h) {
+            Some(v) => *v,
+            None => NONE,
+        };
+        if f != NONE && same_value(b, b.insts[f as usize], p) {
+            b.insts[f as usize] = t;
+            self.repl[i as usize] = f;
+            self.frepl[i as usize] = VFLAG | f;
+            return true;
+        }
+        self.enter(LOG_PURE, h, i);
+        return false;
+    }
+
     // Checked operation `i` of constants, or of an identity (`x + 0`, `x - 0`, `x * 1`, `x * 0`): its value
     // and flag replaced by the result and a constant flag. Whether it folded.
     fn fold_checked(self: &mut Self, pk: &Package, b: &mut Body, i: u32) bool {
@@ -4668,7 +4692,10 @@ extend Opt {
             if (safe || self.runs_first(b, k, i)) && self.hoist(pk, b, k, i, true, p == PRIV_KEPT, !safe) {
                 return true;
             }
-        } else if (t.op == O_ADDO || t.op == O_SUBO || t.op == O_MULO) && self.fold_checked(pk, b, i) {
+        } else if (t.op == O_ADDO || t.op == O_SUBO || t.op == O_MULO) && (self.fold_checked(pk, b, i) || self.checked_plain(
+            b,
+            i,
+        )) {
             return true;
         } else if t.op == O_CALL && call_alloc(pk, b, t) == ALLOC_MEMCMP && self.memcmp_eq(pk, b, k, i) {
             return true;
@@ -4737,7 +4764,19 @@ extend Opt {
             if b.insts[i as usize].op == O_OR && (self.combine_loads(pk, b, k, i) || self.byte_perm(pk, b, i)) {
                 return true;
             }
+            if b.insts[i as usize].op == O_SELECT && self.sign_select(pk, b, k, i) {
+                return true;
+            }
+            if b.insts[i as usize].op == O_SELECT {
+                self.flag_next(b, k, i);
+            }
             if b.insts[i as usize].op == O_ICMP && self.icmp_select(pk, b, k, i) {
+                return true;
+            }
+            if b.insts[i as usize].op == O_ICMP && self.flag_test(b, i) {
+                if self.repl[i as usize] == VNONE {
+                    let _ = self.number(pk, b, k, i);
+                }
                 return true;
             }
             let rr = self.range_fold(pk, b, i);
@@ -5667,6 +5706,134 @@ extend Opt {
         return false;
     }
 
+    // Comparison `i` that tests the carry or the signed overflow of an addition or subtraction (`flag_of`):
+    // the operation becomes the checked one, whose flag `i` is (`repl`) or whose flag's equality with 0 `i`
+    // becomes. Whether it did.
+    fn flag_test(self: &mut Self, b: &mut Body, i: u32) bool {
+        let (s, signed, negated) = flag_of(b, b.insts[i as usize]);
+        if s == VNONE {
+            return false;
+        }
+        let a = b.insts[s as usize];
+        let op = if a.op == O_ADD {
+            O_ADDO
+        } else {
+            O_SUBO
+        };
+        b.insts[s as usize] = Inst {
+            op: op,
+            ty: a.ty,
+            aux: if signed {
+                OV_SIGNED
+            } else {
+                0
+            },
+            a: a.a,
+            b: a.b,
+            c: VNONE,
+        };
+        if negated {
+            let z = self.constant(b, T_I8, 0);
+            b.insts[i as usize] = Inst { op: O_ICMP, ty: T_I8, aux: C_EQ, a: VFLAG | s, b: z, c: VNONE };
+        } else {
+            self.repl[i as usize] = VFLAG | s;
+        }
+        return true;
+    }
+
+    // Select `i` of block `k` on a comparison or a checked operation's flag defined earlier in `k`, which no
+    // instruction between reads (up to FLAG_REACH back): that definition moves right before `i`, where
+    // every backend tests its flags in place rather than setting a register.
+    fn flag_next(self: &mut Self, b: &Body, k: u32, i: u32) {
+        let c = b.insts[i as usize].a;
+        if c == VNONE || (c & VPARAM) != 0 {
+            return;
+        }
+        let s = c & ~VFLAG;
+        let d = b.insts[s as usize];
+        let ok = if (c & VFLAG) != 0 {
+            d.op >= O_ADDO && d.op <= O_MULO
+        } else {
+            d.op == O_ICMP || d.op == O_FCMP
+        };
+        if !ok || s >= i || self.blk_of[s as usize] != k || self.moved[s as usize] || i - s > FLAG_REACH {
+            return;
+        }
+        // Whether an instruction lies between: else the definition is in place already.
+        let mut between = false;
+        for j in s + 1..i {
+            if self.blk_of[j as usize] != k || self.repl[j as usize] == DROPPED {
+                continue;
+            }
+            if self.reads(b, j, s) {
+                return;
+            }
+            between = between || !self.moved[j as usize] && self.repl[j as usize] == VNONE;
+        }
+        // The instructions the walk made before those (`pre`): the newest entries, from the last back.
+        let mut q = self.pre.len();
+        // Each step goes back one entry.
+        while q > 0 {
+            q -= 1;
+            let at = (self.pre[q] >> 32) as u32;
+            if at <= s || at > i || self.blk_of[at as usize] != k {
+                break;
+            }
+            if self.reads(b, self.pre[q] as u32, s) {
+                return;
+            }
+            between = true;
+        }
+        if !between {
+            return;
+        }
+        self.moved[s as usize] = true;
+        self.pre.push(i as u64 << 32 | s as u64);
+    }
+
+    // Whether instruction `j` reads value `s` or its flag (operands as the walk replaced them).
+    fn reads(self: &mut Self, b: &Body, j: u32, s: u32) bool {
+        lv::uses(b, b.insts[j as usize], &mut self.uses);
+        for u in 0..self.uses.len() {
+            let v = self.val(self.uses[u]);
+            if v == s || v == (VFLAG | s) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Select `i` of block `k` of `~c` or `c` by the sign of `x`, an integer of its type: `(x >>s (n - 1)) ^ c`,
+    // no compare (LLVM InstCombine's select of a sign test). Whether it did.
+    fn sign_select(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        if !is_int(t.ty) || t.ty == T_PTR || t.ty == T_I128 || t.a == VNONE || (t.a & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        let c = b.insts[t.a as usize];
+        if c.op != O_ICMP || const_of(b, c.b) != Some(0u64) || c.aux != C_SLT && c.aux != C_SGE || b.type_of(c.a) != t.ty {
+            return false;
+        }
+        let x = const_of(b, t.b);
+        let y = const_of(b, t.c);
+        let m = width_mask(t.ty, pk.ptr_bytes);
+        if x.is_none() || y.is_none() || ((x.unwrap() ^ y.unwrap()) & m) != m {
+            return false;
+        }
+        // The constant where `x` is not negative.
+        let k0 = if c.aux == C_SLT {
+            y.unwrap()
+        } else {
+            x.unwrap()
+        };
+        let sh = self.constant(b, t.ty, type_bits(t.ty, pk.ptr_bytes) as u64 - 1);
+        let sg = self.made(pk, b, k, i, Inst { op: O_ASHR, ty: t.ty, aux: 0, a: c.a, b: sh, c: VNONE });
+        let kv = self.constant(b, t.ty, k0 & m);
+        b.insts[i as usize] = Inst { op: O_XOR, ty: t.ty, aux: 0, a: sg, b: kv, c: VNONE };
+        let _ = self.number(pk, b, k, i);
+        return true;
+    }
+
     // Integer comparison `i` of block `k` of a select with a constant, whose arms are each a constant, a
     // three-way comparison (`order_test`) or such a select, ZO_DEPTH deep: a select of the arms'
     // comparisons, each a flag constant or one comparison (LLVM InstCombine's fold of a compare into a
@@ -6091,7 +6258,7 @@ extend Opt {
             Some(v) => *v,
             None => NONE,
         };
-        if found != NONE && same_value(b, b.insts[found as usize], t) {
+        if found != NONE && same_value(b, as_plain(b.insts[found as usize]), t) {
             self.repl[i as usize] = found;
             return true;
         }
@@ -8670,6 +8837,31 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
                 t.c
             };
         }
+        // A select on a zero extension of an `i8` (a flag) tests that `i8`.
+        if (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE {
+            let c = b.insts[t.a as usize];
+            if c.op == O_ZEXT && b.type_of(c.a) == T_I8 {
+                b.insts.index_mut(i as usize).a = c.a;
+                t = b.insts[i as usize];
+            }
+        }
+        // A select on a flag's equality with 0 or its `xor` with 1 (`!f`) is one on the flag, arms swapped.
+        if (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE {
+            let c = b.insts[t.a as usize];
+            let not = c.op == O_XOR && const_of(b, c.b) == Some(1u64) && zero_one(b, c.a, ZO_DEPTH);
+            if not || c.op == O_ICMP && (c.aux == C_EQ || c.aux == C_NE) && const_of(b, c.b) == Some(0u64) && zero_one(
+                b,
+                c.a,
+                ZO_DEPTH,
+            ) {
+                b.insts[i as usize] = if not || c.aux == C_EQ {
+                    Inst { op: O_SELECT, ty: t.ty, aux: 0, a: c.a, b: t.c, c: t.b }
+                } else {
+                    Inst { op: O_SELECT, ty: t.ty, aux: 0, a: c.a, b: t.b, c: t.c }
+                };
+                t = b.insts[i as usize];
+            }
+        }
         // An arm that is a select on a condition this one decides (`implied`) is that select's arm.
         let tb = decided_arm(b, t.a, t.b, true);
         let tc = decided_arm(b, t.a, t.c, false);
@@ -10048,11 +10240,11 @@ const fn pure_ops() [bool; 256] {
 }
 
 // Whether pure `t` of `b` may run where the program would not run it: it has operands (a constant is
-// `tidy`'s to place), cannot trap and gives a defined value (a shift amount below the width; no checked
-// arithmetic, division or float to integer conversion).
+// `tidy`'s to place), cannot trap and gives a defined value (a shift amount below the width; no division
+// or float to integer conversion). Checked arithmetic gives its wrapped value and its flag, defined both.
 fn speculable(pk: &Package, b: &Body, t: Inst) bool {
     let op = t.op;
-    if op <= O_SLOTADDR || op >= O_SDIV && op <= O_UREM || op >= O_ADDO && op <= O_MULO || op == O_FPTOSI || op == O_FPTOUI {
+    if op <= O_SLOTADDR || op >= O_SDIV && op <= O_UREM || op == O_FPTOSI || op == O_FPTOUI {
         return false;
     }
     if op == O_SHL || op == O_LSHR || op == O_ASHR {
@@ -10083,6 +10275,106 @@ fn value_hash(b: &Body, t: Inst) u64 {
         h = mix(h, b.words[(t.a + q) as usize]);
     }
     return h;
+}
+
+// Comparison `t` of `b` that tests whether an addition or subtraction `s` carried or overflowed: a sum
+// `s = x + y` below `x` (either order) carried, at or above it did not; the sign of `(x ^ s) & (y ^ s)`
+// for `s = x + y`, or of `(x ^ y) & (x ^ s)` for `s = x - y` (operands in any order), compared with 0 is
+// the signed overflow (`< 0`) or its absence (`>= 0`). `s`, whether signed, whether `t` is the flag's
+// negation; VNONE when `t` is none of these (LLVM's `uadd.with.overflow` and `sadd.with.overflow`
+// idioms).
+fn flag_of(b: &Body, t: Inst) (Value, bool, bool) {
+    let none = (VNONE, false, false);
+    // Most comparisons are equalities.
+    if t.op != O_ICMP || t.aux < C_SLT || t.aux > C_UGE {
+        return none;
+    }
+    if t.aux < C_ULT {
+        return signed_flag_of(b, t);
+    }
+    for side in 0..2 {
+        let (s, x, code) = if side == 0 {
+            (t.a, t.b, t.aux)
+        } else {
+            (t.b, t.a, mirror(t.aux))
+        };
+        if (code == C_ULT || code == C_UGE) && is_op(b, s, O_ADD) {
+            let a = b.insts[s as usize];
+            if is_int(a.ty) && a.ty != T_PTR && a.ty != T_I128 && (a.a == x || a.b == x) {
+                return (s, false, code == C_UGE);
+            }
+        }
+    }
+    return none;
+}
+
+// `flag_of` for signed comparison `t`.
+fn signed_flag_of(b: &Body, t: Inst) (Value, bool, bool) {
+    let none = (VNONE, false, false);
+    let (m, code) = if const_of(b, t.b) == Some(0u64) {
+        (t.a, t.aux)
+    } else if const_of(b, t.a) == Some(0u64) {
+        (t.b, mirror(t.aux))
+    } else {
+        return none;
+    };
+    if code != C_SLT && code != C_SGE || !is_op(b, m, O_AND) {
+        return none;
+    }
+    let mi = b.insts[m as usize];
+    if !is_int(mi.ty) || mi.ty == T_PTR || mi.ty == T_I128 || !is_op(b, mi.a, O_XOR) || !is_op(b, mi.b, O_XOR) {
+        return none;
+    }
+    let p = b.insts[mi.a as usize];
+    let q = b.insts[mi.b as usize];
+    // Each common operand `c` of the two `xor`s, with their other operands `po` and `qo`.
+    for e in 0..4 {
+        let (c, po) = if e < 2 {
+            (p.a, p.b)
+        } else {
+            (p.b, p.a)
+        };
+        let (qc, qo) = if e % 2 == 0 {
+            (q.a, q.b)
+        } else {
+            (q.b, q.a)
+        };
+        if c != qc {
+            continue;
+        }
+        // `s` the common operand, `s = po + qo`; or `x` the common one, `s = x - y` the other.
+        let mut s = VNONE;
+        if is_op(b, c, O_ADD) && (b.insts[c as usize].a == po && b.insts[c as usize].b == qo || b.insts[c as usize].a == qo && b.insts[c as usize].b == po) {
+            s = c;
+        } else if is_op(b, po, O_SUB) && b.insts[po as usize].a == c && b.insts[po as usize].b == qo {
+            s = po;
+        } else if is_op(b, qo, O_SUB) && b.insts[qo as usize].a == c && b.insts[qo as usize].b == po {
+            s = qo;
+        }
+        if s != VNONE && b.insts[s as usize].ty == mi.ty {
+            return (s, true, code == C_SGE);
+        }
+    }
+    return none;
+}
+
+// Whether value `v` of `b` is an instruction of operation `op`.
+fn is_op(b: &Body, v: Value, op: u8) bool {
+    return v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == op;
+}
+
+// The plain operation whose value checked operation `t` (`addo`, `subo`, `mulo`) gives; else `t`.
+const fn as_plain(t: Inst) Inst {
+    let op = if t.op == O_ADDO {
+        O_ADD
+    } else if t.op == O_SUBO {
+        O_SUB
+    } else if t.op == O_MULO {
+        O_MUL
+    } else {
+        return t;
+    };
+    return Inst { op: op, ty: t.ty, aux: 0, a: t.a, b: t.b, c: VNONE };
 }
 
 // Whether pure instructions `t` and `u` of `b` compute one value: equal, or wide constants of equal words.
