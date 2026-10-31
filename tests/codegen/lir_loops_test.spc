@@ -2075,8 +2075,9 @@ b3:
 }
 
 // Scalar copies of a loop that counts down to 0 while it multiplies: each copy reads its own counter (a
-// factorial), or a value from before the loop through a 32-bit counter (a power). The copies' products
-// combine after them, and the loop runs the rest.
+// factorial), the copies' products combined after them; a product by a value from before the loop
+// through a 32-bit counter (a power) takes that value's square once per iteration of the two copies,
+// squared before them. The loop runs the rest.
 @test
 fn a_product_counting_down_interleaves_scalar_copies() {
     let src = M"(lir ptr 8
@@ -2118,7 +2119,7 @@ b3:
     let tf = text_of(&a, "fact");
     let tp = text_of(&a, "pow");
     assert(count(&tf, "mul.i64") == 4 && tf.contains("novec"), tf.as_str());
-    assert(count(&tp, "mul.i64") == 4 && tp.contains("novec"), tp.as_str());
+    assert(count(&tp, "mul.i64") == 3 && tp.contains("mul.i64 v0, v0") && tp.contains("novec"), tp.as_str());
     let n0: []u64 = [0];
     let n5: []u64 = [5];
     let n7: []u64 = [7];

@@ -46,3 +46,15 @@ F uint64_t c_s_ispow2m(uint64_t x, uint64_t a) { return x % 64 + a / 8; }
 F double c_p_min(double a, double b) { return a < b ? a : b; }
 F double c_p_abs(double x) { return x < 0.0 ? -x : x; }
 F float c_p_clamp01(float x) { if (x < 0.0f) return 0.0f; if (x > 1.0f) return 1.0f; return x; }
+F uint32_t c_b_table(uint32_t x) { switch (x) { case 0: return 10; case 1: return 33; case 2: return 7; case 3: return 99; case 4: return 5; default: return 0; } }
+F uint32_t c_t_sparse(uint32_t x) {
+  switch (x) { case 1: return 3; case 10: return 9; case 100: return 4; case 1000: return 8; case 5000: return 1; case 9000: return 7; case 20000: return 2; case 77777: return 6; default: return 0; }
+}
+F uint32_t c_t_jump(uint32_t x, uint32_t a) {
+  switch (x) { case 0: return a + 1; case 1: return a * 3; case 2: return a ^ 7; case 3: return a << 2; case 4: return a - 9; case 5: return a / 3; case 6: return a | 64; case 7: return a & 5; default: return 0; }
+}
+F bool c_f_space(uint8_t c) { return c == 32 || c == 9 || c == 10 || c == 13; }
+F uint8_t c_f_class(uint8_t c) { if (c >= 97 && c <= 122) return 1; if (c >= 65 && c <= 90) return 1; if (c >= 48 && c <= 57) return 2; if (c == 32 || c == 9 || c == 10) return 3; return 0; }
+F uint32_t c_b_bfi(uint32_t x, uint32_t v) { return (x & 0xffff00ffu) | ((v & 0xff) << 8); }
+F uint64_t c_b_andn(uint64_t x, uint64_t y) { return ~x & y; }
+F int32_t c_b_sbfx(uint32_t x) { return ((int32_t)(x << 20)) >> 24; }

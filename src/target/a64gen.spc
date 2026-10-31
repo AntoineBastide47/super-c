@@ -1877,7 +1877,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
         if self.again {
@@ -3651,6 +3651,76 @@ extend Gen {
             let rm = self.reg(self.b().insts[t.b as usize].a) as u32;
             let rd = self.def_step(i) as u32;
             self.emit(a::mull(e == O_SEXT, rd, rn, rm));
+            return true;
+        }
+        // A field inserted, its three instructions folded (`lv::FOLD_BFI`): BFI into a copy of the value it
+        // keeps the other bits of.
+        if op == O_OR && (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] && (t.b & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.b as usize] {
+            let f = lv::bfi_of(self.b(), t);
+            if f.x != VNONE {
+                let rx = self.reg(f.x) as u32;
+                let rv = self.reg(f.v) as u32;
+                let rd = self.def_step(i) as u32;
+                let r = if rd == rv && rd != rx {
+                    a::IP0
+                } else {
+                    rd
+                };
+                if r != rx {
+                    self.emit(a::mov_reg(sf, r, rx));
+                }
+                self.emit(a::bitfield(sf, 1, r, rv, (bits - f.s) % bits, f.w - 1));
+                if r != rd {
+                    self.emit(a::mov_reg(sf, rd, r));
+                }
+                return true;
+            }
+        }
+        // An inverted operand (`lv::FOLD_NOT`): BIC, ORN or EON.
+        let nv = lv::not_side(self.b(), &self.lv.pfold, t);
+        if nv != VNONE {
+            let o = if nv == t.b {
+                t.a
+            } else {
+                t.b
+            };
+            let rn = self.reg(o) as u32;
+            let rm = self.reg(lv::inversion(self.b(), nv)) as u32;
+            let rd = self.def_step(i) as u32;
+            let opc = if op == O_AND {
+                0u32
+            } else if op == O_OR {
+                1u32
+            } else {
+                2u32
+            };
+            self.emit(a::logic_reg(sf, opc, true, rd, rn, rm, 0, 0));
+            return true;
+        }
+        // A field of a folded left shift (`lv::FOLD_XBFX`): `(x << l) >> k` is SBFX or UBFX of bits k - l up.
+        if (op == O_LSHR || op == O_ASHR) && (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] && self.b().insts[t.a as usize].op == O_SHL {
+            let s = self.b().insts[t.a as usize];
+            let mut l: u64 = 0;
+            let mut k: u64 = 0;
+            let _ = self.const_of(s.b, &mut l);
+            let _ = self.const_of(t.b, &mut k);
+            let rn = self.reg(s.a) as u32;
+            let rd = self.def_step(i) as u32;
+            self.emit(
+                a::bitfield(
+                    sf,
+                    if op == O_ASHR {
+                        0u32
+                    } else {
+                        2u32
+                    },
+                    rd,
+                    rn,
+                    (k - l) as u32,
+                    bits - 1 - l as u32,
+                ),
+            );
+            self.va.index_mut(i as usize).clean = op == O_LSHR;
             return true;
         }
         // An operand shifted by a constant (`lv::FOLD_SHOP`): the shifted register form.

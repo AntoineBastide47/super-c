@@ -79,7 +79,7 @@ fn spread(b: *const Buf, x: f64) {
 
 @noinline
 fn mix(x: f64, y: f64) f64 {
-    return x * y + x / 8.0;
+    return x * y + x / 6.0;
 }
 
 fn main() i32 {
@@ -116,7 +116,7 @@ fn each_level_builds_its_own_code() {
     p.mkfile("main.spc", PROGRAM);
     let levels: []str = ["-O0", "-O1", "-O2", "-O3", "-Os", "-Oz"];
     let (_, want) = built(&p, "-O0", "b");
-    assert(want.as_str().contains("-58 -79 -4 3891 15.375 -27 4.5"), want.as_str());
+    assert(want.as_str().contains("-58 -79 -4 3891 15.5 -27 4.5"), want.as_str());
     let mut bins = Vector::<String>::new();
     for k in 0..levels.len() {
         let (bin, out) = built(&p, levels[k], format("b{}", k).as_str());

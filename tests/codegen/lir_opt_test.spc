@@ -35,11 +35,15 @@ fn optimized_loops(text: str, fm: u8, fma: bool, bu: lu::Budgets) (Package, Pack
 }
 
 fn optimized_cfg(text: str, fm: u8, fma: bool, inl: il::Budget, bu: lu::Budgets) (Package, Package) {
-    return optimized_split(text, fm, fma, inl, bu, false);
+    return optimized_split(text, fm, fma, inl, bu, false, false);
 }
 
-// `optimized_cfg` with each 128-bit integer split into its two words when `pairs` (`Package.pairs`).
-fn optimized_split(text: str, fm: u8, fma: bool, inl: il::Budget, bu: lu::Budgets, pairs: bool) (Package, Package) {
+// `optimized_cfg` with each 128-bit integer split into its two words when `pairs` (`Package.pairs`), the
+// switches lowered to compares and branches when `switches` (`Package.switch_tree`).
+fn optimized_split(text: str, fm: u8, fma: bool, inl: il::Budget, bu: lu::Budgets, pairs: bool, switches: bool) (
+    Package,
+    Package
+) {
     let mut err = String::new();
     let q = lparse::parse(text, &mut err);
     assert(q.is_some(), err.as_str());
@@ -48,6 +52,7 @@ fn optimized_split(text: str, fm: u8, fma: bool, inl: il::Budget, bu: lu::Budget
     after.fmath = fm;
     after.fma = fma;
     after.pairs = pairs;
+    after.switch_tree = switches;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut after, &none, lopt::Config { inline: inl, loops: bu });
     let mut v = verify::Verifier::new();
@@ -215,6 +220,7 @@ b1(v35: i128, v36: i64):
         il::SPEED,
         lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
         true,
+        false,
     );
     let t = text_of(&a, "mix");
     // Only the call's argument joins the words again (`hi << 64 | lo`).
@@ -798,6 +804,63 @@ b2:
 
 // A branch whose two sides each return a value computed by a few speculable instructions returns the
 // select of the two (`max`, `abs`, and a nested `clamp`); a side with a call stays a branch (`call`).
+// A float division by a power of 2 whose reciprocal is normal is a product by that reciprocal (`x / 2.0`
+// is `x * 0.5`, `x / 4.0f` is `x * 0.25f`, `x / 2^-1022` is `x * 2^1022`); by 3, whose reciprocal is
+// inexact, or by 2^1023, whose reciprocal is subnormal, it stays a division.
+@test
+fn float_divisions_by_powers_of_two_are_products() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @half fn global
+sym @quarter fn global
+sym @tiny fn global
+sym @third fn global
+sym @huge fn global
+fn @half
+  sig (f64) -> f64
+b0(v0: f64):
+  v1 = fconst.f64 0x4000000000000000
+  v2 = fdiv.f64 v0, v1
+  ret v2
+fn @quarter
+  sig (f32) -> f32
+b0(v0: f32):
+  v1 = fconst.f32 0x40800000
+  v2 = fdiv.f32 v0, v1
+  ret v2
+fn @tiny
+  sig (f64) -> f64
+b0(v0: f64):
+  v1 = fconst.f64 0x0010000000000000
+  v2 = fdiv.f64 v0, v1
+  ret v2
+fn @third
+  sig (f64) -> f64
+b0(v0: f64):
+  v1 = fconst.f64 0x4008000000000000
+  v2 = fdiv.f64 v0, v1
+  ret v2
+fn @huge
+  sig (f64) -> f64
+b0(v0: f64):
+  v1 = fconst.f64 0x7fe0000000000000
+  v2 = fdiv.f64 v0, v1
+  ret v2
+)",
+    );
+    let h = text_of(&a, "half");
+    assert(h.contains("fmul.f64") && h.contains("0x3fe0000000000000") && !h.contains("fdiv"), h.as_str());
+    let q = text_of(&a, "quarter");
+    assert(q.contains("fmul.f32") && q.contains("0x3e800000"), q.as_str());
+    let y = text_of(&a, "tiny");
+    assert(y.contains("fmul.f64") && y.contains("0x7fd0000000000000"), y.as_str());
+    let d = text_of(&a, "third");
+    assert(d.contains("fdiv.f64"), d.as_str());
+    let g = text_of(&a, "huge");
+    assert(g.contains("fdiv.f64"), g.as_str());
+    let _ = b;
+}
+
 // `a && b && c` of comparisons: the inner `&&` becomes an `and`, then the outer branch's sides both
 // return (the false side the first comparison, which is false there), so it returns an `and` too.
 @test
@@ -1981,7 +2044,8 @@ b0(v0: i64):
 // The float rewrites `-ffast-math` allows: `x * 1` and `x + 0` go, a division by a constant becomes a
 // product by its reciprocal, two constants of an addition chain fold, and a product added becomes one
 // fused multiply-add, but for a loop's accumulator, and so does a product less a constant or a constant
-// less a product by a constant; none happens without its flag. The values are exact, so the results agree.
+// less a product by a constant; none happens without its flag (but the product by the reciprocal of 4,
+// which is exact). The values are exact, so the results agree.
 @test
 fn fast_math_rewrites_float_arithmetic_only_when_allowed() {
     let src = M"(lir ptr 8
@@ -2072,7 +2136,7 @@ b0(v0: f64, v1: f64):
     let abc: []u64 = [0x4000000000000000, 0x4008000000000000, 0x4010000000000000];
     same_result(&b, &a, "g", abc, 0x4024000000000000);
     let (_, plain) = optimized_fm(src, 0, true);
-    assert(text_of(&plain, "f").contains("fdiv") && text_of(&plain, "g").contains("fadd"), "no flag, no rewrite");
+    assert(text_of(&plain, "f").contains("fadd") && text_of(&plain, "g").contains("fadd"), "no flag, no rewrite");
     let (_, nofma) = optimized_fm(src, all, false);
     assert(!text_of(&nofma, "g").contains("fma"), "no fused multiply-add on the processor");
 }
@@ -2708,8 +2772,8 @@ b3(v5: i64):
     same_result(&b, &a, "arm", lesser, 0);
 }
 
-// Jump threading: a `&&` join whose flag an edge fixes is passed by that edge, and a jump into it becomes
-// a branch on its argument; an `Option` tag a side fixes skips its test (a small join of pure
+// Jump threading: a `&&` of comparisons stays a diamond, which becomes an `and` and a select (threading its
+// sides apart would leave branches); an `Option` tag a side fixes skips its test (a small join of pure
 // instructions its switch alone reads), while the side whose target reads the join's values keeps it.
 @test
 fn an_edge_that_decides_a_join_passes_it() {
@@ -2755,7 +2819,7 @@ b5:
 )",
     );
     let t = text_of(&a, "both");
-    assert(!t.contains(": i8)") && count_of(&t, "br ") == 2, t.as_str());
+    assert(!t.contains(": i8)") && count_of(&t, "br ") == 0 && t.contains("and.i8"), t.as_str());
     let x: []u64 = [1, 2];
     same_result(&b, &a, "both", x, 1);
     let y: []u64 = [0, 2];
@@ -5086,4 +5150,133 @@ b0(v0: i64):
     assert(t.contains("scope") && !t.contains("call @push"), t.as_str());
     let x: [u64; 1] = [4];
     same_result(&b, &a, "top", x, 4 + 3);
+}
+
+// `x == 32 || x == 9 || x == 10 || x == 13` (the `||` diamonds made selects, not threaded apart, then an
+// `or` of equalities): a range test and a shift of the set's mask.
+@test
+fn an_or_of_equalities_is_a_bit_test() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 32
+  v2 = iconst.i8 9
+  v3 = iconst.i8 10
+  v4 = iconst.i8 13
+  v5 = icmp.eq v0, v1
+  br v5, b2(v5), b1
+b1:
+  v6 = icmp.eq v0, v2
+  jmp b2(v6)
+b2(v7: i8):
+  br v7, b4(v7), b3
+b3:
+  v8 = icmp.eq v0, v3
+  jmp b4(v8)
+b4(v9: i8):
+  br v9, b6(v9), b5
+b5:
+  v10 = icmp.eq v0, v4
+  jmp b6(v10)
+b6(v11: i8):
+  ret v11
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(t.contains("lshr.i64") && !t.contains("br ") && !t.contains("icmp.eq"), t.as_str());
+    let xs: [u64; 9] = [9, 10, 13, 32, 0, 8, 11, 41, 255];
+    for i in 0..9 {
+        let x: [u64; 1] = [xs[i]];
+        same_result(&b, &a, "f", x, (i < 4) as u64);
+    }
+}
+
+// Switches lowered (`Package.switch_tree`): one of ranges to range tests, one whose edges pass constants to
+// one block (two through blocks that only jump there) to a table in a register, and one of few sparse
+// values left a switch.
+@test
+fn switches_become_range_tests_and_tables() {
+    let (b, a) = optimized_split(
+        M"(lir ptr 8
+sym @class fn global
+sym @table fn global
+sym @sparse fn global
+fn @class
+  sig (i8) -> i32
+b0(v0: i8):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 2
+  v3 = iconst.i32 1
+  v4 = iconst.i32 3
+  switch v0 [48 -> b1(v2), 49 -> b1(v2), 50 -> b1(v2), 51 -> b1(v2), 52 -> b1(v2), 53 -> b1(v2), 54 -> b1(v2), 55 -> b1(v2), 56 -> b1(v2), 57 -> b1(v2), 65 -> b1(v3), 66 -> b1(v3), 67 -> b1(v3), 68 -> b1(v3), 69 -> b1(v3), 70 -> b1(v3), 71 -> b1(v3), 72 -> b1(v3), 73 -> b1(v3), 74 -> b1(v3), 75 -> b1(v3), 76 -> b1(v3), 77 -> b1(v3), 78 -> b1(v3), 79 -> b1(v3), 80 -> b1(v3), 81 -> b1(v3), 82 -> b1(v3), 83 -> b1(v3), 84 -> b1(v3), 85 -> b1(v3), 86 -> b1(v3), 87 -> b1(v3), 88 -> b1(v3), 89 -> b1(v3), 90 -> b1(v3), 97 -> b1(v3), 98 -> b1(v3), 99 -> b1(v3), 100 -> b1(v3), 101 -> b1(v3), 102 -> b1(v3), 103 -> b1(v3), 104 -> b1(v3), 105 -> b1(v3), 106 -> b1(v3), 107 -> b1(v3), 108 -> b1(v3), 109 -> b1(v3), 110 -> b1(v3), 111 -> b1(v3), 112 -> b1(v3), 113 -> b1(v3), 114 -> b1(v3), 115 -> b1(v3), 116 -> b1(v3), 117 -> b1(v3), 118 -> b1(v3), 119 -> b1(v3), 120 -> b1(v3), 121 -> b1(v3), 122 -> b1(v3), 9 -> b1(v4), 10 -> b1(v4), 32 -> b1(v4)] else b1(v1)
+b1(v5: i32):
+  ret v5
+fn @table
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 5
+  v3 = iconst.i32 99
+  v4 = iconst.i32 7
+  v5 = iconst.i32 33
+  v6 = iconst.i32 10
+  switch v0 [0 -> b1(v6), 1 -> b1(v5), 2 -> b1(v4), 3 -> b1(v3), 4 -> b2] else b3
+b1(v7: i32):
+  ret v7
+b2:
+  jmp b1(v2)
+b3:
+  jmp b1(v1)
+fn @sparse
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 3
+  v3 = iconst.i32 9
+  v4 = iconst.i32 4
+  switch v0 [1 -> b1(v2), 1000 -> b1(v3), 77777 -> b1(v4)] else b2
+b1(v5: i32):
+  ret v5
+b2:
+  v6 = iconst.i32 6
+  v7 = mul.i32 v0, v6
+  ret v7
+)",
+        0,
+        false,
+        il::SPEED,
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+        false,
+        true,
+    );
+    let tc = text_of(&a, "class");
+    assert(!tc.contains("switch") && tc.contains("icmp.ule"), tc.as_str());
+    for x in 0..256u64 {
+        let c = x as u8;
+        let want: u64 = if c >= 48 && c <= 57 {
+            2
+        } else if c >= 65 && c <= 90 || c >= 97 && c <= 122 {
+            1
+        } else if c == 9 || c == 10 || c == 32 {
+            3
+        } else {
+            0
+        };
+        let xs: [u64; 1] = [x];
+        same_result(&b, &a, "class", xs, want);
+    }
+    let tt = text_of(&a, "table");
+    assert(!tt.contains("switch") && !tt.contains("br ") && tt.contains("select"), tt.as_str());
+    let want: [u64; 7] = [10, 33, 7, 99, 5, 0, 0];
+    for x in 0..7u64 {
+        let xs: [u64; 1] = [x];
+        same_result(&b, &a, "table", xs, want[x as usize]);
+    }
+    let big: [u64; 1] = [0xFFFFFFFF];
+    same_result(&b, &a, "table", big, 0);
+    let ts = text_of(&a, "sparse");
+    assert(ts.contains("switch"), ts.as_str());
 }
