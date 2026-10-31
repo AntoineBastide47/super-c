@@ -136,9 +136,10 @@ pub(package) const fn lsl_imm(sf: bool, rd: u32, rn: u32, s: u32) u32 {
     return bitfield(sf, 2, rd, rn, (w - s) % w, w - 1 - s);
 }
 
-/// ROR (immediate) by `s`, below the width: EXTR of `rn` with itself.
-pub(package) const fn ror_imm(sf: bool, rd: u32, rn: u32, s: u32) u32 {
-    return sfb(sf) | 0x13800000 | on(sf, 0x00400000) | rn << 16 | s << 10 | rn << 5 | rd;
+/// EXTR: `rd` = the bits `lsb` up of the pair `rn:rm` (`rn << (w - lsb) | rm >> lsb`); ROR by `lsb` when
+/// `rn` is `rm`.
+pub(package) const fn extr(sf: bool, rd: u32, rn: u32, rm: u32, lsb: u32) u32 {
+    return sfb(sf) | 0x13800000 | on(sf, 0x00400000) | rm << 16 | lsb << 10 | rn << 5 | rd;
 }
 
 /// LSR (immediate).

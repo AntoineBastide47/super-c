@@ -2016,6 +2016,114 @@ b0(v0: i64):
     same_result(&b, &a, "bits", x, 77);
 }
 
+// Small aggregates by value whose fields share an 8-byte chunk, which the targets pass and return in one
+// integer register: each field of a parameter comes from one load of its chunk, the result's stores before
+// a return join into one store per chunk (a float's bits among them), and a 4-byte fill of zero is a store.
+@test
+fn aggregate_fields_in_one_chunk_load_and_store_whole() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @padd fn global noinline
+sym @opt fn global noinline
+sym @fi fn global noinline
+sym @use fn global
+fn @padd
+  layout l0 size 8 align 2 [0 i32, 4 i32]
+  sig (l0, l0) -> l0
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.i32 v0 align 2
+  v4 = load.i32 v1 align 2
+  v5 = add.i32 v3, v4
+  v6 = load.i32 v0+4 align 2
+  v7 = load.i32 v1+4 align 2
+  v8 = sub.i32 v6, v7
+  store v5, v2 align 2
+  store v8, v2+4 align 2
+  ret
+fn @opt
+  layout l0 size 8 align 2 [0 i8, 4 i32]
+  sig (i32) -> l0
+b0(v0: i32, v1: ptr):
+  v2 = iconst.i32 5
+  v3 = iconst.i8 1
+  v4 = iconst.i8 0
+  v5 = iconst.i64 4
+  v6 = icmp.ugt v0, v2
+  br v6, b2, b1
+b1:
+  store v4, v1 align 0
+  v7 = ptradd v1+4
+  memset v7, v4, v5
+  ret
+b2:
+  store v3, v1 align 0
+  store v0, v1+4 align 2
+  ret
+fn @fi
+  layout l0 size 8 align 2 [0 f32, 4 i32]
+  sig (l0) -> l0
+b0(v0: ptr, v1: ptr):
+  v2 = load.f32 v0 align 2
+  v3 = load.i32 v0+4 align 2
+  v4 = fadd.f32 v2, v2
+  v5 = add.i32 v3, v3
+  store v4, v1 align 2
+  store v5, v1+4 align 2
+  ret
+fn @use
+  layout l0 size 8 align 2 [0 i32, 4 i32]
+  layout l1 size 8 align 2 [0 i8, 4 i32]
+  sig (i64) -> i64
+  slot s0 size 8 align 2
+  slot s1 size 8 align 2
+  slot s2 size 8 align 2
+  slot s3 size 8 align 2
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = slotaddr s3
+  v5 = trunc.i32 v0
+  v6 = iconst.i32 3
+  v7 = add.i32 v5, v6
+  store v5, v1 align 2
+  store v7, v1+4 align 2
+  store v7, v2 align 2
+  store v5, v2+4 align 2
+  call @padd(v1, v2, v3) : (l0, l0) -> l0
+  call @opt(v5, v4) : (i32) -> l1
+  v8 = load.i32 v3 align 2
+  v9 = load.i32 v3+4 align 2
+  v10 = load.i8 v4 align 0
+  v11 = load.i32 v4+4 align 2
+  v12 = iconst.i32 16
+  v13 = mul.i32 v8, v12
+  v14 = add.i32 v13, v9
+  v15 = zext.i32 v10
+  v16 = iconst.i32 1000
+  v17 = mul.i32 v15, v16
+  v18 = add.i32 v14, v17
+  v19 = add.i32 v18, v11
+  v20 = zext.i64 v19
+  ret v20
+)",
+    );
+    let p = text_of(&a, "padd");
+    assert(!p.contains("load.i32") && p.contains("load.i64") && p.contains("lshr.i64"), "each parameter is one load");
+    assert(p.contains("or.i64") && p.find("store") == p.rfind("store"), "the result is one store");
+    let o = text_of(&a, "opt");
+    assert(
+        !o.contains("memset") && !o.contains("store.i8") && o.contains("shl.i64"),
+        "each path stores the result whole",
+    );
+    let f = text_of(&a, "fi");
+    assert(f.contains("bitcast.i32") && f.contains("bitcast.f32"), "the float's bits join the chunk");
+    let x: []u64 = [9];
+    same_result(&b, &a, "use", x, 21 * 16 + 3 + 1000 + 9);
+    let y: []u64 = [2];
+    same_result(&b, &a, "use", y, 7 * 16 + 3);
+}
+
 // A copy out of the memory a call writes its aggregate result into merges that memory with the copy's
 // destination, which another call reads: the result goes straight to the second call.
 @test

@@ -785,6 +785,13 @@ extend Code {
     }
 
     /// `dst` = `dst` * `src` (the low `sz` bytes; sz 4 or 8).
+    /// `dst` = `dst` << `k` | `src` >> (width - `k`) (SHLD by an immediate).
+    pub(package) fn shld_ri(self: &mut Self, sz: u32, dst: u8, src: u8, k: u32) {
+        self.osize(sz);
+        self.rr(0, 0x0FA4, sz == 8, src, dst, false);
+        self.byte(k);
+    }
+
     pub(package) fn imul_rr(self: &mut Self, sz: u32, dst: u8, src: u8) {
         self.osize(sz);
         self.rr(0, 0x0FAF, sz == 8, dst, src, false);

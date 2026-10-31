@@ -763,8 +763,9 @@ extend Gen {
     // others, which temporaries hold (an entry parameter that dies in the entry block stays in the register it arrives
     // in). A vector of 16 bytes that lives past its block or is a block parameter, which no call that returns runs in
     // the range of and no instruction reads or writes in memory (`vec_homes`: a loop's accumulator, a value splat
-    // before the loop), asks a caller-saved v register. x19..x28 and v8..v15; six of x9..x15 and twelve of v16..v29,
-    // the others left to temporaries.
+    // before the loop), asks a caller-saved v register, else one of v8..v15, whose low 8 bytes, all a caller keeps,
+    // the prologue saves. x19..x28 and v8..v15; six of x9..x15 and twelve of v16..v29, the others left to
+    // temporaries.
     fn plan_homes(self: &mut Self) {
         let b = self.b();
         let n = self.lv.end.len();
@@ -836,7 +837,7 @@ extend Gen {
             if in_vreg(t) && type_bytes(t, 8) == 16 && x < nv && !self.vmem[x] && d != NONE && self.lv.pos[d as usize] != NONE && (self.lv.end[x] > self.lv.pos[d as usize] || x >= ni) && !self.crosses_call(
                 x as u32,
             ) {
-                w = lv::WANT_SCRATCH | lv::WANT_V;
+                w = lv::WANT_SCRATCH | lv::WANT_CALLEE | lv::WANT_V;
             }
             if !in_mem(t) && d != NONE && self.lv.pos[d as usize] != NONE && !(x < ni && self.remat_inst(x as u32) && !self.lconst[x]) {
                 if x < nv && self.crosses_call(x as u32) {
@@ -864,14 +865,14 @@ extend Gen {
         } else {
             6
         };
-        // Twelve scratch homes of v16..v29 (the others, v30, v31 and v0..v7 stay for temporaries);
-        // shrink-wrapped, no callee-saved home.
+        // Twelve scratch homes of v16..v29 (the others, v30, v31 and v0..v7 stay for temporaries) and eight
+        // callee-saved ones, v8..v15, twenty in all; shrink-wrapped, no callee-saved home.
         let (xc, vc, vs) = if self.shrink {
             (0u32, 0u32, 12u32)
         } else {
             (10u32, 8u32, 12u32)
         };
-        self.lv.plan(b, &self.want, lv::Caps { xc: xc, xs: xs, xj: 16, vc: vc, vs: vs, vj: 16 });
+        self.lv.plan(b, &self.want, lv::Caps { xc: xc, xs: xs, xj: 16, vc: vc, vs: vs, vj: vc + vs });
         for x in 0..ni {
             if self.lconst[x] && self.fix_class(x as u32) != FIX_NONE {
                 self.va.index_mut(x).home = H_NONE;
@@ -2996,7 +2997,12 @@ extend Gen {
             return true;
         }
         if op >= O_ADD && op <= O_NOT {
-            return self.int_op(i, t);
+            let done = self.int_op(i, t);
+            // A 32-bit operation (a `w` register's) clears the bits above.
+            if t.ty == T_I32 && !self.lv.pfold[i as usize] {
+                self.va.index_mut(i as usize).clean = true;
+            }
+            return done;
         }
         if op >= O_ADDO && op <= O_MULO {
             return self.ovf_op(i, t);
@@ -3731,7 +3737,7 @@ extend Gen {
         let rot = if (op == O_OR || op == O_XOR || op == O_ADD) && self.folds_in(t.a) && self.folds_in(t.b) {
             lv::rotate_of(self.b(), i)
         } else {
-            lv::Rotation { x: VNONE, amt: VNONE, src: VNONE, k: 0, right: false }
+            lv::Rotation { x: VNONE, y: VNONE, amt: VNONE, src: VNONE, k: 0, right: false }
         };
         if rot.x != VNONE {
             let xv = rot.x;
@@ -3743,8 +3749,10 @@ extend Gen {
             }
             let ra = self.reg(xv) as u32;
             if amt == VNONE {
+                // EXTR of `x:y` (ROR when they are one value).
+                let ry = self.reg(rot.y) as u32;
                 let rd = self.def(i) as u32;
-                self.emit(a::ror_imm(sf, rd, ra, (bits - kr) % bits));
+                self.emit(a::extr(sf, rd, ra, ry, (bits - kr) % bits));
                 return true;
             }
             let n = lv::rot_amount(self.b(), &self.lv.pfold, rot);

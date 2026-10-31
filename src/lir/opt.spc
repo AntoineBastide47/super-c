@@ -40,6 +40,10 @@ import std::platform::clock as pclock;
 
 // `Opt.repl` of an instruction without a value that the rebuild drops.
 const DROPPED: u32 = 0xFFFFFFFE;
+// `Opt::ret_chunks` joins at most RUN_MAX result stores before a return.
+const RUN_MAX: usize = 16;
+// `zero_unless_zero` looks through at most ZERO_TEST_DEPTH extensions and negations.
+const ZERO_TEST_DEPTH: u32 = 4;
 
 // The scoped tables (`Opt.log`).
 const LOG_PURE: u8 = 0;
@@ -187,6 +191,8 @@ pub(package) struct Opt {
     frepl: Vector<u32>, // per checked operation, the value that replaced its flag (VNONE: none)
     extra: Vector<u32>, // the constants the walk made, which the entry block starts with
     aggp: u64, // the entry parameters whose loads move to the entry's start (`agg_params`)
+    aggint: u64, // per such parameter `k` below 32 and 8-byte chunk `c`, bit 2k + c: an integer load reads it
+    aggload: [u32; 64], // per such chunk, its load this walk made at the entry's start (`agg_chunk`), NONE
     made: Map<u64, u32>, // a made constant's hash to the constant
     moved: Vector<bool>,
     hoisted: Vector<u64>, // block << 32 | instruction, in the order they moved
@@ -457,6 +463,8 @@ extend Opt {
             frepl: Vector::<u32>::new(),
             extra: Vector::<u32>::new(),
             aggp: 0,
+            aggint: 0,
+            aggload: [NONE; 64],
             made: Map::<u64, u32>::new(),
             pmap: Vector::<u32>::new(),
             params: Vector::<u8>::new(),
@@ -2707,6 +2715,7 @@ extend Opt {
                 out |= 1u64 << k as u64;
             }
         }
+        self.aggint = 0;
         if out == 0 {
             return 0;
         }
@@ -2725,10 +2734,183 @@ extend Opt {
                     if !load || (bk.flags & BLOCK_COLD) != 0 {
                         out &= ~(1u64 << ((v & ~VPARAM) - ps) as u64);
                     }
+                    let kp = (v & ~VPARAM) - ps;
+                    if load && kp < 32 && t.c < 16 && is_int(t.ty) && t.ty != T_PTR && t.ty != T_I128 {
+                        self.aggint |= 1u64 << (2 * kp + t.c / 8) as u64;
+                    }
                 }
             }
         }
         return out;
+    }
+
+    // Store `i`, the last before block `blk`'s `ret`, of the run of stores before it (past instructions
+    // that touch no memory) to the address of an aggregate result of at most 16 bytes: each 8-byte chunk (of 1, 2, 4 or 8 bytes) whose every
+    // leaf byte (of the result's layout; the others are padding) two or more of the run's stores write,
+    // each byte once, one of them an integer's, is one store of their values joined (bits of a float as
+    // an integer, each shifted to its offset, padding 0). The targets return such a chunk in one integer
+    // register, which the code generator moves the store's value into (`ret_stores`). Whether it did.
+    fn ret_chunks(self: &mut Self, pk: &Package, b: &mut Body, blk: u32, i: u32) bool {
+        let rt = b.pool[b.sig as usize + 2];
+        if b.sig == NONE || (rt & AGG) == 0 || b.pool[(rt & ~AGG) as usize] > 16 {
+            return false;
+        }
+        let size = b.pool[(rt & ~AGG) as usize];
+        let pv = VPARAM | b.blocks[0].param_start + b.pool[b.sig as usize];
+        let bk = b.blocks[blk as usize];
+        // The run: stores of scalars to `pv`, from `i` back, past instructions that touch no memory; at most
+        // RUN_MAX.
+        let mut run = StaticVector::<u32, RUN_MAX>::new();
+        let mut j = i + 1;
+        while j > bk.start && run.len() < RUN_MAX {
+            j -= 1;
+            let s = b.insts[j as usize];
+            if s.op != O_STORE {
+                if pure_op(s.op) {
+                    continue;
+                }
+                break;
+            }
+            if s.a != pv || (s.aux & MEM_VOLATILE) != 0 || self.repl[j as usize] != VNONE || s.c >= 16 {
+                break;
+            }
+            let vt = b.type_of(s.b);
+            if is_vec(vt) || vt == T_I128 || vt == T_PTR {
+                break;
+            }
+            run.push(j);
+        }
+        let mut any = false;
+        for c in 0..(size + 7) / 8 {
+            let cs = (size - 8 * c).min(8);
+            if (cs & cs - 1) != 0 {
+                continue;
+            }
+            // Its stores: each within the chunk, their bytes once each, one an integer's.
+            let mut mask: u32 = 0;
+            let mut n: u32 = 0;
+            let mut int = false;
+            let mut ok = true;
+            for r in 0..run.len() {
+                let s = b.insts[run[r] as usize];
+                let sz = type_bytes(b.type_of(s.b), pk.ptr_bytes);
+                if s.c + sz <= 8 * c || s.c >= 8 * c + cs {
+                    continue;
+                }
+                if s.c < 8 * c || s.c + sz > 8 * c + cs {
+                    ok = false;
+                    continue;
+                }
+                let m = (1u32 << sz) - 1 << s.c - 8 * c;
+                ok = ok && (mask & m) == 0;
+                mask |= m;
+                n += 1;
+                int = int || is_int(b.type_of(s.b));
+            }
+            // The chunk's leaf bytes.
+            let lay = (rt & ~AGG) as usize;
+            let mut leaves: u32 = 0;
+            for q in 0..b.pool[lay + 2] {
+                let lo = b.pool[lay + 3 + 2 * q as usize];
+                let ls = type_bytes(b.pool[lay + 4 + 2 * q as usize] as u8, pk.ptr_bytes);
+                if lo >= 8 * c && lo + ls <= 8 * c + cs {
+                    leaves |= (1u32 << ls) - 1 << lo - 8 * c;
+                } else if lo < 8 * c + cs && lo + ls > 8 * c {
+                    ok = false;
+                }
+            }
+            if !ok || n < 2 || !int || (mask & leaves) != leaves {
+                continue;
+            }
+            let ct = int_type_of(cs);
+            let mut v = VNONE;
+            // The joined store's alignment: the chunk's first byte's store's; no type tag (it writes several).
+            let mut al: u16 = 0;
+            for r in 0..run.len() {
+                let s = b.insts[run[r] as usize];
+                let vt = b.type_of(s.b);
+                let sz = type_bytes(vt, pk.ptr_bytes);
+                if s.c < 8 * c || s.c >= 8 * c + cs {
+                    continue;
+                }
+                let mut x = s.b;
+                if is_float(vt) {
+                    x = self.made(
+                        pk,
+                        b,
+                        blk,
+                        i,
+                        Inst { op: O_BITCAST, ty: int_type_of(sz), aux: 0, a: x, b: VNONE, c: VNONE },
+                    );
+                }
+                if sz < cs {
+                    x = self.made(pk, b, blk, i, Inst { op: O_ZEXT, ty: ct, aux: 0, a: x, b: VNONE, c: VNONE });
+                }
+                if s.c > 8 * c {
+                    let sh = self.constant(b, ct, 8 * (s.c - 8 * c));
+                    x = self.made(pk, b, blk, i, Inst { op: O_SHL, ty: ct, aux: 0, a: x, b: sh, c: VNONE });
+                }
+                v = if v == VNONE {
+                    x
+                } else {
+                    self.made(pk, b, blk, i, Inst { op: O_OR, ty: ct, aux: 0, a: v, b: x, c: VNONE })
+                };
+                self.repl[run[r] as usize] = DROPPED;
+                if s.c == 8 * c {
+                    al = s.aux & 15;
+                }
+            }
+            let _ = self.before(b, blk, i, Inst { op: O_STORE, ty: T_NONE, aux: al, a: pv, b: v, c: 8 * c });
+            any = true;
+        }
+        return any;
+    }
+
+    // Load `i` (`u`) of an 8-byte chunk of entry aggregate parameter `k` (`aggp`) that an integer load
+    // reads (`aggint`), of fewer bytes than the chunk: the chunk's load (1, 2, 4 or 8 bytes) shifted and
+    // truncated, an f32's or f64's bits as the float. The targets pass such a chunk in one integer
+    // register, which the code generator takes for the chunk's load (`place::parts_taken`). The
+    // parameter's bytes are a copy nothing writes: one load at the entry's start serves each part
+    // (`aggload`). Whether it did.
+    fn agg_chunk(self: &mut Self, pk: &Package, b: &mut Body, blk: u32, i: u32, u: Inst, k: u32) bool {
+        let lay = (b.pool[(b.sig + 3 + k) as usize] & ~AGG) as usize;
+        let size = b.pool[lay];
+        let c = u.c / 8;
+        let cs = (size - 8 * c).min(8);
+        let s = type_bytes(u.ty, pk.ptr_bytes);
+        let o = u.c - 8 * c;
+        if k >= 32 || u.c >= 16 || (self.aggint >> (2 * k + c) as u64 & 1) == 0 || (cs & cs - 1) != 0 || s >= cs || o + s > cs || is_vec(
+            u.ty,
+        ) || u.ty == T_PTR {
+            return false;
+        }
+        let ct = int_type_of(cs);
+        let slot = (2 * k + c) as usize;
+        if self.aggload[slot] == NONE {
+            // The aggregate's alignment, no type tag (the chunk holds several values).
+            let al = b.pool[lay + 1] as u16 & 15;
+            self.aggload[slot] = self.before(
+                b,
+                0,
+                b.blocks[0].start,
+                Inst { op: O_LOAD, ty: ct, aux: al, a: u.a, b: VNONE, c: 8 * c },
+            );
+        }
+        let w = self.aggload[slot];
+        let mut x = w;
+        if o != 0 {
+            let sh = self.constant(b, ct, 8 * o as u64);
+            x = self.before(b, blk, i, Inst { op: O_LSHR, ty: ct, aux: 0, a: x, b: sh, c: VNONE });
+        }
+        let it = int_type_of(s);
+        if s < cs {
+            x = self.before(b, blk, i, Inst { op: O_TRUNC, ty: it, aux: 0, a: x, b: VNONE, c: VNONE });
+        }
+        if is_float(u.ty) {
+            x = self.before(b, blk, i, Inst { op: O_BITCAST, ty: u.ty, aux: 0, a: x, b: VNONE, c: VNONE });
+        }
+        self.repl[i as usize] = x;
+        return true;
     }
 
     fn walk(self: &mut Self, pk: &Package, b: &mut Body) bool {
@@ -2766,6 +2948,7 @@ extend Opt {
         fill(&mut self.bwrites, nb, 0);
         fill(&mut self.rmark, nb, NONE);
         self.aggp = self.agg_params(b);
+        self.aggload = [NONE; 64];
         for k in 0..nb {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
@@ -2904,8 +3087,14 @@ extend Opt {
                         self.pend.truncate(0);
                     }
                     // A load of a small by-value aggregate parameter moves to the entry's start, before any
-                    // call (`agg_params`).
+                    // call (`agg_params`); one of part of an integer chunk reads the chunk (`agg_chunk`).
                     let u = b.insts[i as usize];
+                    if u.op == O_STORE && self.repl[i as usize] == VNONE && i + 1 < bk.start + bk.len && b.insts[i as usize + 1].op == O_RET {
+                        changed = self.ret_chunks(pk, b, k as u32, i) || changed;
+                    }
+                    if self.aggp != 0 && u.op == O_LOAD && self.repl[i as usize] == VNONE && (u.a & VPARAM) != 0 && (u.a & ~VPARAM) >= b.blocks[0].param_start && (u.a & ~VPARAM) - b.blocks[0].param_start < 64 && (self.aggp >> ((u.a & ~VPARAM) - b.blocks[0].param_start) as u64 & 1) != 0 {
+                        changed = self.agg_chunk(pk, b, k as u32, i, u, (u.a & ~VPARAM) - b.blocks[0].param_start) || changed;
+                    }
                     if self.aggp != 0 && u.op == O_LOAD && self.repl[i as usize] == VNONE && (k != 0 || called) && (u.a & VPARAM) != 0 && (u.a & ~VPARAM) - b.blocks[0].param_start < 64 && (self.aggp >> ((u.a & ~VPARAM) - b.blocks[0].param_start) as u64 & 1) != 0 {
                         self.moved[i as usize] = true;
                         self.blk_of[i as usize] = 0;
@@ -4584,6 +4773,27 @@ extend Opt {
                 b.insts[i as usize] = t;
             }
         }
+        // A fill of 1, 2, 4 or 8 bytes with a constant byte is a store of the integer of those bytes.
+        let fill = if t.op == O_MEMSET && (t.aux & MEM_VOLATILE) == 0 {
+            const_of(b, t.b)
+        } else {
+            Option::<u64>::None
+        };
+        if size.is_some() && fill.is_some() {
+            let n = size.unwrap();
+            if n == 1 || n == 2 || n == 4 || n == 8 {
+                let ty = int_type_of(n as u32);
+                let v = self.constant(b, ty, (fill.unwrap() & 0xFF) * 0x0101010101010101 & width_mask(ty, 8));
+                // At a constant offset from an address: that address and the offset.
+                let (base, off) = if is_op(b, t.a, O_PTRADD) && b.insts[t.a as usize].b == VNONE {
+                    (b.insts[t.a as usize].a, b.insts[t.a as usize].c)
+                } else {
+                    (t.a, 0u32)
+                };
+                t = Inst { op: O_STORE, ty: T_NONE, aux: 0, a: base, b: v, c: off };
+                b.insts[i as usize] = t;
+            }
+        }
         if t.op == O_MEMCPY && (t.aux & MEM_VOLATILE) == 0 && size.is_some() {
             // A copy of the bytes a copy of as many wrote, with no write since (neither memory state
             // changed): a copy of that copy's source, which holds them still when that copy did not
@@ -4851,16 +5061,33 @@ extend Opt {
     }
 
     // Instruction `i`, a logical shift right of a shift left by the same constant (or left of right): in
-    // place the mask of the bits both keep (`x << k >> k` is `x & (ones >> k)`).
+    // place the mask of the bits both keep (`x << k >> k` is `x & (ones >> k)`). A shift of a shift the
+    // same way, both by constants below the width: in place one shift by their sum (`x << 1 << 62` is
+    // `x << 63`); from the width up, 0, or for an arithmetic one the sign (a shift by the width less 1).
     fn shift_pair(self: &mut Self, pk: &Package, b: &mut Body, i: u32) {
         let t = b.insts[i as usize];
-        if t.op != O_LSHR && t.op != O_SHL || !is_int(t.ty) || t.ty == T_I128 || (t.a & (VPARAM | VFLAG)) != 0 {
+        if t.op != O_LSHR && t.op != O_SHL && t.op != O_ASHR || !is_int(t.ty) || t.ty == T_I128 || (t.a & (VPARAM | VFLAG)) != 0 {
             return;
         }
         let x = b.insts[t.a as usize];
         let k = const_of(b, t.b);
         let bits = type_bits(t.ty, pk.ptr_bytes) as u64;
-        if x.op != if t.op == O_LSHR {
+        let k1 = if x.op == t.op {
+            const_of(b, x.b)
+        } else {
+            Option::<u64>::None
+        };
+        if x.ty == t.ty && k.is_some() && k1.is_some() && k.unwrap() < bits && k1.unwrap() < bits {
+            let s = k.unwrap() + k1.unwrap();
+            if s >= bits && t.op != O_ASHR {
+                b.insts[i as usize] = iconst(t.ty, 0);
+                return;
+            }
+            let sv = self.constant(b, t.ty, s.min(bits - 1));
+            b.insts[i as usize] = Inst { op: t.op, ty: t.ty, aux: 0, a: x.a, b: sv, c: VNONE };
+            return;
+        }
+        if t.op == O_ASHR || x.op != if t.op == O_LSHR {
             O_SHL
         } else {
             O_LSHR
@@ -7891,6 +8118,10 @@ extend Run {
                 lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: bu.fin },
             );
         }
+        // The final values compute in 128 bits (`lir::loops`): in words too.
+        if sc.o.split_pairs(p, b) {
+            let _ = sc.o.run(p, b, true);
+        }
         // Vectors of mixed lane widths two registers wide, by parts.
         if sc.o.unr.wide && sc.o.split_wide(p, b) {
             let _ = sc.o.run(p, b, true);
@@ -8765,6 +8996,31 @@ const fn const_of(b: &Body, v: Value) Option<u64> {
     return Some(t.b as u64 << 32 | t.a as u64);
 }
 
+// Whether value `v` of `b` is 0 unless value `x` is 0: a test that `x` is 0 (`x == 0`, `x <u 1`), extended
+// or negated (`-y`, `0 - y`), at most ZERO_TEST_DEPTH times.
+fn zero_unless_zero(b: &Body, v: Value, x: Value) bool {
+    let mut u = v;
+    for _ in 0..ZERO_TEST_DEPTH {
+        if u == VNONE || (u & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        let t = b.insts[u as usize];
+        if t.op == O_ICMP {
+            let k = const_of(b, t.b);
+            return t.a == x && k.is_some() && (k.unwrap() == 0 && (t.aux == C_EQ || t.aux == C_ULE) || k.unwrap() == 1 && t.aux == C_ULT);
+        }
+        if t.op == O_SUB && const_of(b, t.a) == Some(0u64) {
+            u = t.b;
+            continue;
+        }
+        if t.op != O_ZEXT && t.op != O_SEXT && t.op != O_NEG {
+            return false;
+        }
+        u = t.a;
+    }
+    return false;
+}
+
 // The words of 128-bit constant `v` (low, high), if it is one.
 fn wide_of(b: &Body, v: Value) Option<(u64, u64)> {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_WCONST || b.insts[v as usize].ty != T_I128 {
@@ -9462,6 +9718,12 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             return VNONE;
         }
         return cancel(b, t);
+    }
+    // A product with a factor that is 0 unless the other is 0 is 0 (`x * -(x == 0)`, which a 128-bit
+    // product splits into: `lir::pairs`).
+    if op == O_MUL && t.ty != T_I128 && (zero_unless_zero(b, t.a, t.b) || zero_unless_zero(b, t.b, t.a)) {
+        b.insts[i as usize] = iconst(t.ty, 0);
+        return VNONE;
     }
     // A sum with a negation is a difference, a difference with one a sum.
     if (op == O_ADD || op == O_SUB) && t.ty != T_I128 {

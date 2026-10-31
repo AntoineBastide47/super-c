@@ -71,6 +71,40 @@ fn a_tool_built_body_verifies_and_reads_back() {
     assert(t1.as_str().contains("panic \"attempt to add with overflow\""), t1.as_str());
 }
 
+// Data defined after the held data (a constant local array the optimizer places) keeps its bytes and
+// relocations when the held data goes.
+@test
+fn data_defined_after_held_data_stays_when_it_goes() {
+    let mut p = Package::new(8);
+    let none: []Reloc = [];
+    let own = p.add_symbol("own", SK_DATA, SL_LOCAL);
+    let ob: []u8 = [1, 2];
+    assert(p.add_data(own, 8, 3, false, ob, none), "own data");
+    p.held.body = p.bodies.len() as u32;
+    p.held.data = p.data.len() as u32;
+    p.held.bytes = p.bytes.len() as u32;
+    p.held.relocs = p.relocs.len() as u32;
+    let held = p.add_symbol("held", SK_DATA, SL_LOCAL);
+    let hb: []u8 = [9, 9, 9];
+    assert(p.add_data(held, 8, 3, false, hb, none), "held data");
+    p.held.dsyms.push(held);
+    let late = p.add_symbol("late", SK_DATA, SL_LOCAL);
+    let lb: []u8 = [5, 6, 7];
+    let lr: []Reloc = [Reloc { offset: 8, sym: own, addend: 4 }];
+    assert(p.add_data(late, 16, 3, true, lb, lr), "late data");
+    p.drop_held();
+    assert_eq(p.syms[held as usize].def, NONE);
+    let d = p.data[p.syms[late as usize].def as usize];
+    let bs = p.data_bytes(&d);
+    assert(bs.len() == 3 && bs[0] == 5 && bs[2] == 7 && d.readonly, "its bytes");
+    assert(
+        d.nrelocs == 1 && p.relocs[d.relocs as usize].sym == own && p.relocs[d.relocs as usize].addend == 4,
+        "its relocation",
+    );
+    let o = p.data[p.syms[own as usize].def as usize];
+    assert(p.data_bytes(&o)[1] == 2, "the own data");
+}
+
 @test
 fn the_verifier_rejects_a_use_its_definition_does_not_dominate() {
     let p = mid_package();

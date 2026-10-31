@@ -1467,6 +1467,51 @@ fn closed(text: str, name: str) (Package, Package) {
     return (b, a);
 }
 
+// With 128-bit integers split into words (`Package.pairs`, as on the native targets), the closed form a
+// sum takes in 128 bits after that split splits too: no 128-bit value is left. The product's cross term by
+// the high word of `n - 1`, 0 unless `n` is 0, goes, and the halving joins the words: one product, its
+// high half and shifts. Each result is the loop's.
+@test
+fn closed_forms_split_into_words() {
+    let src = M"(lir ptr 8
+sym @sum fn global
+fn @sum
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  jmp b1(v1, v1)
+b1(v3: i64, v4: i64):
+  v5 = icmp.ult v3, v0
+  br v5, b2, b3
+b2:
+  v6 = add.i64 v4, v3
+  v7 = add.i64 v3, v2
+  jmp b1(v7, v6)
+b3:
+  ret v4
+)";
+    let mut err = String::new();
+    let b = lparse::parse(src, &mut err).unwrap();
+    let mut a = lparse::parse(src, &mut err).unwrap();
+    a.pairs = true;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: FIN });
+    let mut v = verify::Verifier::new();
+    assert(v.check(&a, "sum", &a.bodies[a.syms[a.find_symbol("sum") as usize].def as usize]), v.err.as_str());
+    let s = text_of(&a, "sum");
+    assert(!s.contains("br ") && !s.contains("i128"), s.as_str());
+    assert(s.contains("mulhu.i64") && s.find("mul.i64") == s.rfind("mul.i64"), s.as_str());
+    let x0: []u64 = [0];
+    same_outcome(&b, &a, "sum", x0, 0, false);
+    let x1: []u64 = [1];
+    same_outcome(&b, &a, "sum", x1, 0, false);
+    let x2: []u64 = [10];
+    same_outcome(&b, &a, "sum", x2, 45, false);
+    let x3: []u64 = [100000];
+    same_outcome(&b, &a, "sum", x3, 4999950000, false);
+}
+
 // Sums of the counter, of its square through a second accumulator, of a nested loop's sums: each
 // accumulator steps by itself plus what does not read it, so their degrees resolve in turn. The nested
 // loop's closed form reads the outer counter as a polynomial (a start past the bound never happens: the

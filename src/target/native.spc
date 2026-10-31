@@ -17,6 +17,7 @@ import target::wasmgen as wgen;
 import target::wasmobj as wobj;
 import target::assembler as asmr;
 import target::ctxswitch as ctxs;
+import target::win64 as w64;
 
 /// Whether a native backend compiles for operating system `os` on instruction set `isa`.
 pub(package) const fn supported(os: i32, isa: i32) bool {
@@ -117,6 +118,16 @@ pub(package) const fn asm_native(os: i32, isa: i32) bool {
 /// Write into `out` an object for `(os, isa)` that defines function symbols `funcs` and data symbols
 /// `datas` of package `p`, and module-level assembly `text` (`asm_native`). False, with the function and
 /// the reason in `err`, when a body is outside what the backend compiles.
+/// Package `p` made ready for `object` for `(os, isa)`: under Microsoft x64, the C entries of the
+/// functions of Super-C's own convention whose address it takes (`w64::thunks`). False, with the reason
+/// in `err`, when it cannot be.
+pub(package) fn prepare(p: &mut Package, os: i32, isa: i32, err: &mut String) bool {
+    if windows_x64(os, isa) {
+        return w64::thunks(p, err);
+    }
+    return true;
+}
+
 pub(package) fn object(
     p: &Package,
     os: i32,

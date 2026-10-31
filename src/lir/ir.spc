@@ -1657,7 +1657,8 @@ extend Package {
         return true;
     }
 
-    /// Remove the held bodies and data definitions (`Held`): their symbols are undefined again.
+    /// Remove the held bodies and data definitions (`Held`): their symbols are undefined again. Data
+    /// defined after them keeps its definition.
     pub(package) fn drop_held(self: &mut Self) {
         if self.held.body == NONE {
             return;
@@ -1668,10 +1669,39 @@ extend Package {
         for k in 0..self.held.dsyms.len() {
             self.syms.index_mut(self.held.dsyms[k] as usize).def = NONE;
         }
+        // Data a pass defined after the held data (`lir::opt`'s `const_slots`) stays: it moves down.
+        let mut late = Vector::<u32>::new();
+        let mut defs = Vector::<DataDef>::new();
+        let mut bytes = Vector::<u8>::new();
+        let mut relocs = Vector::<Reloc>::new();
+        for s in 0..self.syms.len() {
+            let y = self.syms[s];
+            if y.kind == SK_FUNC || y.def == NONE || y.def < self.held.data {
+                continue;
+            }
+            let mut d = self.data[y.def as usize];
+            let bs = self.data_bytes(&d);
+            for j in 0..bs.len() {
+                bytes.push(bs[j]);
+            }
+            for j in d.relocs..d.relocs + d.nrelocs {
+                relocs.push(self.relocs[j as usize]);
+            }
+            d.bytes = self.held.bytes + bytes.len() as u32 - d.nbytes;
+            d.relocs = self.held.relocs + relocs.len() as u32 - d.nrelocs;
+            late.push(s as u32);
+            defs.push(d);
+        }
         self.bodies.truncate(self.held.body as usize);
         self.data.truncate(self.held.data as usize);
         self.bytes.truncate(self.held.bytes as usize);
         self.relocs.truncate(self.held.relocs as usize);
+        for k in 0..late.len() {
+            self.syms.index_mut(late[k] as usize).def = self.data.len() as u32;
+            self.data.push(defs[k]);
+        }
+        self.bytes.extend_from_slice(bytes[0..bytes.len()]);
+        self.relocs.extend_from_slice(relocs[0..relocs.len()]);
         self.held = Held::new();
     }
 

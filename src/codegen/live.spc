@@ -1920,9 +1920,11 @@ pub(package) const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
 
 /// A rotation (`rotate_of`): value `x` by amount `amt` (VNONE for constant `k`, rotating left), to the
 /// right when `right`; `x` VNONE for none. `src` is the shift's own amount operand, `amt` maybe past an
-/// extension of it (`rot_amount`).
+/// extension of it (`rot_amount`). A funnel shift when `y`, the value shifted right, is not `x`: `x << k |
+/// y >> (w - k)`, by a constant.
 pub(package) struct Rotation {
     pub(package) x: Value,
+    pub(package) y: Value,
     pub(package) amt: Value,
     pub(package) src: Value,
     pub(package) k: u32,
@@ -1938,9 +1940,9 @@ extend Rotation as Copy {}
 /// another type). A shift past the width is undefined, so `s` is below it: by `w - s`, `s` is not 0 and the
 /// shifts' bits are disjoint, so their sum and their `xor` are their `or`; a masked `s` of 0 shifts both
 /// by 0, which only the `or` of the value with itself rotates. The amount rotates right when it is the
-/// shift right's.
+/// shift right's. Of two values of 32 or 64 bits by constants, a funnel shift.
 pub(package) fn rotate_of(b: &Body, i: u32) Rotation {
-    let none = Rotation { x: VNONE, amt: VNONE, src: VNONE, k: 0, right: false };
+    let none = Rotation { x: VNONE, y: VNONE, amt: VNONE, src: VNONE, k: 0, right: false };
     let t = b.insts[i as usize];
     if t.op != O_OR && t.op != O_XOR && t.op != O_ADD || !is_int(t.ty) || t.ty == T_I128 || !is_inst(t.a) || !is_inst(
         t.b,
@@ -1957,7 +1959,7 @@ pub(package) fn rotate_of(b: &Body, i: u32) Rotation {
     } else {
         return none;
     };
-    if l.a != r.a || l.ty != t.ty || r.ty != t.ty {
+    if l.ty != t.ty || r.ty != t.ty || l.a != r.a && bits < 32 {
         return none;
     }
     let kl = int_const(b, l.b);
@@ -1966,16 +1968,19 @@ pub(package) fn rotate_of(b: &Body, i: u32) Rotation {
     let ar = amount_of(b, r.b);
     if kl != u64::MAX && kr != u64::MAX {
         if kl > 0 && kl < bits && kl + kr == bits {
-            return Rotation { x: l.a, amt: VNONE, src: VNONE, k: kl as u32, right: false };
+            return Rotation { x: l.a, y: r.a, amt: VNONE, src: VNONE, k: kl as u32, right: false };
         }
+        return none;
+    }
+    if l.a != r.a {
         return none;
     }
     let or = t.op == O_OR;
     if negated(b, ar, al, bits, or) {
-        return Rotation { x: l.a, amt: al, src: l.b, k: 0, right: false };
+        return Rotation { x: l.a, y: l.a, amt: al, src: l.b, k: 0, right: false };
     }
     if negated(b, al, ar, bits, or) {
-        return Rotation { x: l.a, amt: ar, src: r.b, k: 0, right: true };
+        return Rotation { x: l.a, y: l.a, amt: ar, src: r.b, k: 0, right: true };
     }
     return none;
 }

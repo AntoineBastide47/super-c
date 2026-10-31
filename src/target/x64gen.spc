@@ -176,10 +176,11 @@ fn win_unwind(
     }
 }
 
-// The layout of signature `sig` of body `b` into `out`, by Microsoft x64 (`win`) or System V.
-fn classify(win: bool, b: &Body, sig: u32, ptr: u32, vregs: u32, out: &mut ab::CallLayout) {
+// The layout of signature `sig` of body `b` into `out`, by Microsoft x64 (`win`; Super-C's own variant
+// when `sc`) or System V.
+fn classify(win: bool, sc: bool, b: &Body, sig: u32, ptr: u32, vregs: u32, out: &mut ab::CallLayout) {
     if win {
-        w64::classify(b, sig, ptr, out);
+        w64::classify(b, sig, ptr, sc, out);
     } else {
         cc::classify(b, sig, ptr, vregs, out);
     }
@@ -213,6 +214,7 @@ pub(package) struct Gen {
     ptr: u32,
     vregs: u32, // the package's `vec_regs`
     win: bool, // Microsoft x64 and COFF, else System V and ELF
+    sc_self: bool, // the body takes Super-C's own convention (`sc_conv`)
     avx: bool, // AVX2: 32-byte vectors in ymm registers (`Package.vector`)
     z512: bool, // AVX-512 (F, BW, DQ, VL): 64-byte vectors in zmm registers too
     ymm: bool, // the body holds a 32-byte vector in a register: `vzeroupper` before each call and return
@@ -320,10 +322,11 @@ pub(package) struct Gen {
     // Calls.
     lay: ab::CallLayout,
     // Per symbol of the body at hand, its intrinsic's instructions (`intrin::of_symbols`); per signature
-    // a call of it takes, its layout (`call_layout`: `lays[q]` for `lay_sig[q]`, the first `nlay`).
+    // and convention a call of it takes, its layout (`call_layout`: `lays[q]` for `lay_sig[q]`, the
+    // signature | `sc_conv` << 32, the first `nlay`).
     itpl: Vector<str<'static>>,
     lays: Vector<ab::CallLayout>,
-    lay_sig: Vector<u32>,
+    lay_sig: Vector<u64>,
     self_lay: ab::CallLayout,
     uses: Vector<Value>,
     mv: Vector<Mv>,
@@ -344,6 +347,7 @@ extend Gen {
             ptr: pkg.ptr_bytes,
             vregs: pkg.vec_regs,
             win: win,
+            sc_self: false,
             avx: pkg.vector >= 32,
             z512: pkg.vector == 64,
             ymm: false,
@@ -469,7 +473,7 @@ extend Gen {
             lay: ab::CallLayout::new(),
             itpl: Vector::<str<'static>>::new(),
             lays: Vector::<ab::CallLayout>::new(),
-            lay_sig: Vector::<u32>::new(),
+            lay_sig: Vector::<u64>::new(),
             self_lay: ab::CallLayout::new(),
             uses: Vector::<Value>::new(),
             mv: Vector::<Mv>::new(),
@@ -633,6 +637,17 @@ extend Gen {
         self.va.index_mut(x as usize).reg = NOREG;
         self.va.index_mut(x as usize).dirty = false;
         self.set_owner(r, NONE);
+    }
+
+    // Whether instruction `i` reads value `v`, through the operands that fold into it too (`lv::uses_of`).
+    fn reads(self: &Self, i: u32, v: Value) bool {
+        let us = self.lv.uses_of(i);
+        for k in 0..us.len() {
+            if us[k] == v {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Whether the current instruction reads value index `x`.
@@ -1110,9 +1125,8 @@ extend Gen {
             return NOREG;
         }
         let pv = VPARAM | px - b.insts.len() as u32;
-        // A field that is no operand may equal the parameter only by chance: then no hint, still correct.
-        let t = b.insts[v as usize];
-        let other = (t.a == pv || t.b == pv || t.c == pv) && a != pv;
+        // `v` reads the parameter other than as `a`, maybe through an operand that folds into it.
+        let other = self.reads(v, pv) && a != pv;
         if self.va[px as usize].home != H_FIXED || self.lv.end[px as usize] < self.pos || past && self.lv.end[px as usize] != self.pos || other || self.lv.reads_after(
             b,
             k,
@@ -1171,8 +1185,7 @@ extend Gen {
                 return NOREG;
             }
             let pv = VPARAM | ov - ni;
-            let t = b.insts[v as usize];
-            if (t.a == pv || t.b == pv || t.c == pv) && a != pv || self.lv.reads_after(b, k, v, pv) {
+            if self.reads(v, pv) && a != pv || self.lv.reads_after(b, k, v, pv) {
                 return NOREG;
             }
             for q in 0..b.edge_nargs(tm.a) {
@@ -2503,6 +2516,7 @@ extend Gen {
     /// body uses what the generator does not compile.
     pub(package) fn func(self: &mut Self, s: u32, local: bool) bool {
         self.local = local;
+        self.sc_self = self.sc_conv(s);
         let p = unsafe &*self.pkg;
         let ps = p.syms[s as usize];
         self.bp = &p.bodies[ps.def as usize];
@@ -2807,7 +2821,7 @@ extend Gen {
             self.guard(S1);
             self.c.store(8, S1, x::at(x::RSP, self.canary as i32));
         }
-        classify(self.win, b, b.sig, self.ptr, self.vregs, &mut self.self_lay);
+        classify(self.win, self.sc_self, b, b.sig, self.ptr, self.vregs, &mut self.self_lay);
         if self.self_lay.unknown {
             let _ = self.refuse("the signature passes an aggregate whose C class is unknown");
         }
@@ -3538,7 +3552,12 @@ extend Gen {
             return true;
         }
         if op >= O_ADD && op <= O_NOT {
-            return self.int_op(i, t);
+            let done = self.int_op(i, t);
+            // A 32-bit operation clears the bits above.
+            if t.ty == T_I32 && !self.lv.pfold[i as usize] {
+                self.va.index_mut(i as usize).clean = true;
+            }
+            return done;
         }
         if op >= O_ADDO && op <= O_MULO {
             return self.ovf_op(i, t);
@@ -3582,11 +3601,25 @@ extend Gen {
                 (t.a, t.b)
             };
             if bits == 64 {
-                // MUL or IMUL: rdx:rax = rax * the operand, the second operand put in rax.
-                self.vacate(x::RAX);
+                // MUL or IMUL: rdx:rax = rax * the operand, the second operand put in rax; an operand rax
+                // holds is that one, and stays there when it dies here.
+                let (va, vb) = if self.va[self.vx(va) as usize].reg == x::RAX {
+                    (vb, va)
+                } else {
+                    (va, vb)
+                };
+                let xb = self.vx(vb);
+                let stays = self.va[xb as usize].reg == x::RAX && !self.live_on(xb);
+                if stays {
+                    self.lock |= bit(x::RAX);
+                } else {
+                    self.vacate(x::RAX);
+                }
                 self.vacate(x::RDX);
                 let ra = self.reg(va);
-                self.materialize(vb, x::RAX);
+                if !stays {
+                    self.materialize(vb, x::RAX);
+                }
                 self.c.unary(
                     if sgn {
                         x::IMUL1
@@ -3596,6 +3629,11 @@ extend Gen {
                     8,
                     ra,
                 );
+                if stays {
+                    self.va.index_mut(xb as usize).reg = NOREG;
+                    self.va.index_mut(xb as usize).dirty = false;
+                    self.set_owner(x::RAX, NONE);
+                }
                 self.result_in(i, x::RDX);
                 return true;
             }
@@ -4313,13 +4351,27 @@ extend Gen {
         let rot = if self.folds_both(t) {
             lv::rotate_of(self.b(), i)
         } else {
-            lv::Rotation { x: VNONE, amt: VNONE, src: VNONE, k: 0, right: false }
+            lv::Rotation { x: VNONE, y: VNONE, amt: VNONE, src: VNONE, k: 0, right: false }
         };
         if rot.x != VNONE {
             let xv = rot.x;
             let amt = rot.amt;
             let kr = rot.k;
             let right = rot.right;
+            if amt == VNONE && rot.y != xv {
+                // A funnel shift: SHLD of `x` by `y`'s high bits.
+                let ry = self.reg(rot.y);
+                let ra = self.reg(xv);
+                let rd = self.def_from(i, xv, ra);
+                let src = if rd == ry {
+                    self.c.mov_rr(bits / 8, S0, ry);
+                    S0
+                } else {
+                    ry
+                };
+                self.c.shld_ri(bits / 8, rd, src, kr);
+                return true;
+            }
             if amt == VNONE {
                 let ra = self.reg(xv);
                 let rd = self.def_from(i, xv, ra);
@@ -6024,20 +6076,30 @@ extend Gen {
             ab::intrinsic_layout(b, t.b, self.ptr, gp[0..8], x::RAX, &mut self.lay);
             return;
         }
-        // Once per signature in the body: the same signature has the same layout.
+        // Once per signature and convention in the body: they give the layout.
+        let sc = t.op == O_CALL && self.sc_conv(b.syms[t.a as usize]);
+        let key = t.b as u64 | sc as u64 << 32;
         for q in 0..self.lay_sig.len() {
-            if self.lay_sig[q] == t.b {
+            if self.lay_sig[q] == key {
                 self.lay.copy_from(&self.lays[q]);
                 return;
             }
         }
-        classify(self.win, b, t.b, self.ptr, self.vregs, &mut self.lay);
+        classify(self.win, sc, b, t.b, self.ptr, self.vregs, &mut self.lay);
         let q = self.lay_sig.len();
-        self.lay_sig.push(t.b);
+        self.lay_sig.push(key);
         if q == self.lays.len() {
             self.lays.push(ab::CallLayout::new());
         }
         self.lays[q].copy_from(&self.lay);
+    }
+
+    // Whether a call of package function symbol `s` takes Super-C's own convention (`w64::classify`'s
+    // `sc`): under Microsoft x64, a function of the program no C code reaches by name (not an extern
+    // binding, not `@export` or `@used`). C reaches the others through `w64::thunks`.
+    const fn sc_conv(self: &Self, s: u32) bool {
+        let y = unsafe (*self.pkg).syms[s as usize];
+        return self.win && y.kind == SK_FUNC && !y.ext && !y.used;
     }
 
     // The instructions of the intrinsic body symbol `s` names (`target::intrin`, `itpl`); empty for another

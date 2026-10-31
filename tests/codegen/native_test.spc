@@ -5,6 +5,8 @@ import lir::parse as lparse;
 import lir::verify as verify;
 import target::native as nat;
 import target::table as tgt;
+import target::win64 as w64;
+import codegen::abi as ab;
 import tests::cli_harness as cli;
 import std::platform::fs;
 import std::platform::process;
@@ -150,6 +152,11 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
             eprint("verify: {}\n", v.err.as_str());
             return false;
         }
+    }
+    // The thunks `prepare` adds compile too.
+    if !nat::prepare(&mut p, os, isa, &mut err) {
+        eprint("native: {}\n", err.as_str());
+        return false;
     }
     let mut fs_ = Vector::<u32>::new();
     let mut ds = Vector::<u32>::new();
@@ -613,6 +620,19 @@ b0(v0: ptr, v1: ptr):
     let drv = "#include <stdint.h>\n#include <string.h>\nvoid widen(const uint16_t *, uint32_t *);\nint main(void) {\n  uint16_t a[8] = {1, 2, 65535, 4, 5, 60000, 7, 8};\n  uint32_t d[8];\n  widen(a, d);\n  for (int k = 0; k < 4; k++) if (d[k] != 2u * a[k] + a[k + 4]) return k + 1;\n  if (memcmp(d, d + 4, 16) != 0) return 5;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wide(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// A loop that carries 18 vectors, more than the caller-saved vector homes: on arm64 the others take
+// v8..v15, whose low halves the prologue saves; none goes through memory, and each sum is right.
+@test
+fn many_loop_vectors_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @acc fn global\nfn @acc\n  sig (ptr, i64, ptr) -> void\nb0(v0: ptr, v1: i64, v2: ptr):\n  v3 = iconst.i32 0\n  v4 = splat.v4i32 v3\n  v5 = iconst.i64 0\n  jmp b1(v5, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4)\nb1(v6: i64, v7: v4i32, v8: v4i32, v9: v4i32, v10: v4i32, v11: v4i32, v12: v4i32, v13: v4i32, v14: v4i32, v15: v4i32, v16: v4i32, v17: v4i32, v18: v4i32, v19: v4i32, v20: v4i32, v21: v4i32, v22: v4i32, v23: v4i32, v24: v4i32):\n  v25 = icmp.ult v6, v1\n  br v25, b2, b3\nb2:\n  v26 = iconst.i64 288\n  v27 = mul.i64 v6, v26\n  v28 = ptradd v0, v27 * 1\n  v29 = load.v4i32 v28+0 align 2\n  v30 = add.v4i32 v7, v29\n  v31 = load.v4i32 v28+16 align 2\n  v32 = add.v4i32 v8, v31\n  v33 = load.v4i32 v28+32 align 2\n  v34 = add.v4i32 v9, v33\n  v35 = load.v4i32 v28+48 align 2\n  v36 = add.v4i32 v10, v35\n  v37 = load.v4i32 v28+64 align 2\n  v38 = add.v4i32 v11, v37\n  v39 = load.v4i32 v28+80 align 2\n  v40 = add.v4i32 v12, v39\n  v41 = load.v4i32 v28+96 align 2\n  v42 = add.v4i32 v13, v41\n  v43 = load.v4i32 v28+112 align 2\n  v44 = add.v4i32 v14, v43\n  v45 = load.v4i32 v28+128 align 2\n  v46 = add.v4i32 v15, v45\n  v47 = load.v4i32 v28+144 align 2\n  v48 = add.v4i32 v16, v47\n  v49 = load.v4i32 v28+160 align 2\n  v50 = add.v4i32 v17, v49\n  v51 = load.v4i32 v28+176 align 2\n  v52 = add.v4i32 v18, v51\n  v53 = load.v4i32 v28+192 align 2\n  v54 = add.v4i32 v19, v53\n  v55 = load.v4i32 v28+208 align 2\n  v56 = add.v4i32 v20, v55\n  v57 = load.v4i32 v28+224 align 2\n  v58 = add.v4i32 v21, v57\n  v59 = load.v4i32 v28+240 align 2\n  v60 = add.v4i32 v22, v59\n  v61 = load.v4i32 v28+256 align 2\n  v62 = add.v4i32 v23, v61\n  v63 = load.v4i32 v28+272 align 2\n  v64 = add.v4i32 v24, v63\n  v65 = iconst.i64 1\n  v66 = add.i64 v6, v65\n  jmp b1(v66, v30, v32, v34, v36, v38, v40, v42, v44, v46, v48, v50, v52, v54, v56, v58, v60, v62, v64)\nb3:\n  store v7, v2+0 align 2\n  store v8, v2+16 align 2\n  store v9, v2+32 align 2\n  store v10, v2+48 align 2\n  store v11, v2+64 align 2\n  store v12, v2+80 align 2\n  store v13, v2+96 align 2\n  store v14, v2+112 align 2\n  store v15, v2+128 align 2\n  store v16, v2+144 align 2\n  store v17, v2+160 align 2\n  store v18, v2+176 align 2\n  store v19, v2+192 align 2\n  store v20, v2+208 align 2\n  store v21, v2+224 align 2\n  store v22, v2+240 align 2\n  store v23, v2+256 align 2\n  store v24, v2+272 align 2\n  ret\n";
+    let drv = "#include <stdint.h>\nvoid acc(const uint32_t *, int64_t, uint32_t *);\nint main(void) {\n  static uint32_t a[5 * 18 * 4];\n  uint32_t d[18 * 4];\n  for (int k = 0; k < 5 * 18 * 4; k++) a[k] = (uint32_t)(k * 2654435761u);\n  acc(a, 5, d);\n  for (int k = 0; k < 18 * 4; k++) {\n    uint32_t s = 0;\n    for (int r = 0; r < 5; r++) s += a[r * 18 * 4 + k];\n    if (d[k] != s) return 1;\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }
 
@@ -2647,6 +2667,324 @@ b3(v7: ptr):
 data @tab size 16 align 3 ro reloc 0 @twice reloc 8 @thrice
 )";
     let drv = "int apply(int, int);\nint main(void) { return apply(0, 21) == 42 && apply(1, 5) == 15 ? 0 : 1; }\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Funnel shifts, `x << k | y >> (w - k)` of two values by constants (`lv::rotate_of`: arm64 `extr`, x86-64
+// `shld`), of 64 and 32 bits, through `or`, `xor` and `add`, the right-shifted value first or second, one
+// that stays live, and one in a loop that reads the loop's old value only through its folded shift, whose
+// result goes back to that value (`x64gen::step_reg` gives it the register only when nothing else reads
+// it); and the high half of a product whose operand dies in the register `mul` reads on x86-64 (`tri`, a
+// triangle number from its 128-bit product's words).
+@test
+fn funnel_shifts_and_word_products_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @f64 fn global
+sym @f32 fn global
+sym @fadd fn global
+sym @flive fn global
+sym @halve fn global
+sym @tri fn global
+fn @f64
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 13
+  v3 = iconst.i64 51
+  v4 = shl.i64 v0, v2
+  v5 = lshr.i64 v1, v3
+  v6 = or.i64 v4, v5
+  ret v6
+fn @f32
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 5
+  v3 = iconst.i32 27
+  v4 = lshr.i32 v1, v2
+  v5 = shl.i32 v0, v3
+  v6 = xor.i32 v4, v5
+  ret v6
+fn @fadd
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 63
+  v3 = iconst.i64 1
+  v4 = shl.i64 v1, v2
+  v5 = lshr.i64 v0, v3
+  v6 = add.i64 v5, v4
+  ret v6
+fn @flive
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 40
+  v3 = iconst.i64 24
+  v4 = shl.i64 v1, v2
+  v5 = lshr.i64 v0, v3
+  v6 = or.i64 v4, v5
+  v7 = add.i64 v6, v0
+  v8 = xor.i64 v7, v1
+  ret v8
+fn @halve
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 63
+  jmp b1(v3, v0, v1)
+b1(v6: i64, v7: i64, v8: i64):
+  v9 = icmp.ult v6, v2
+  br v9, b2, b3
+b2:
+  v10 = lshr.i64 v7, v4
+  v11 = shl.i64 v8, v5
+  v12 = or.i64 v11, v10
+  v13 = lshr.i64 v8, v4
+  v14 = add.i64 v6, v4
+  jmp b1(v14, v12, v13)
+b3:
+  v15 = xor.i64 v7, v8
+  ret v15
+fn @tri
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = iconst.i64 63
+  v3 = sub.i64 v0, v1
+  v4 = mul.i64 v0, v3
+  v5 = mulhu.i64 v0, v3
+  v6 = lshr.i64 v4, v1
+  v7 = shl.i64 v5, v2
+  v8 = or.i64 v6, v7
+  ret v8
+)";
+    let drv = M"(#include <stdint.h>
+int64_t f64(int64_t, int64_t);
+int32_t f32(int32_t, int32_t);
+int64_t fadd(int64_t, int64_t);
+int64_t flive(int64_t, int64_t);
+int64_t halve(int64_t, int64_t, int64_t);
+int64_t tri(int64_t);
+int main(void) {
+  uint64_t x = 0x9e3779b97f4a7c15u, y = 0xc2b2ae3d27d4eb4fu;
+  uint32_t a = 0x85ebca6bu, b = 0x27d4eb2fu;
+  if ((uint64_t)f64((int64_t)x, (int64_t)y) != (x << 13 | y >> 51)) return 1;
+  if ((uint32_t)f32((int32_t)a, (int32_t)b) != (b >> 5 ^ a << 27)) return 2;
+  if ((uint64_t)fadd((int64_t)x, (int64_t)y) != (x >> 1) + (y << 63)) return 3;
+  if ((uint64_t)flive((int64_t)x, (int64_t)y) != (((y << 40 | x >> 24) + x) ^ y)) return 4;
+  unsigned __int128 w = (unsigned __int128)y << 64 | x;
+  for (int k = 0; k < 37; k++) w >>= 1;
+  if ((uint64_t)halve((int64_t)x, (int64_t)y, 37) != ((uint64_t)w ^ (uint64_t)(w >> 64))) return 7;
+  uint64_t n = 0x123456789u;
+  if ((uint64_t)tri((int64_t)n) != (uint64_t)((unsigned __int128)n * (n - 1) >> 1)) return 5;
+  if (tri(0) != 0 || tri(1) != 0 || tri(10) != 45) return 6;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// Super-C's own convention under Microsoft x64 (`w64::classify`'s `sc`): a 16-byte aggregate (a slice)
+// passes in two integer registers by position (rcx and rdx, then the next argument in r8) and returns in
+// rax and rdx, where C's convention passes and returns it through memory. A function of that convention
+// whose address the package takes gets a C entry, a thunk that calls it (`w64::thunks`), which the
+// address names; a direct call names the function. Only under Microsoft x64, and the objects build.
+@test
+fn slices_pass_in_two_registers_between_super_c_functions_on_windows() {
+    let lir = M"(lir ptr 8
+sym @sum fn global
+sym @take fn global
+sym @call fn global
+fn @sum
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0, i32) -> l0
+b0(v0: ptr, v1: i32, v2: ptr):
+  v3 = load.ptr v0 align 3
+  v4 = load.i64 v0+8 align 3
+  v5 = zext.i64 v1
+  v6 = add.i64 v4, v5
+  store v3, v2 align 3
+  store v6, v2+8 align 3
+  ret
+fn @take
+  sig () -> ptr
+b0:
+  v0 = symaddr @sum
+  ret v0
+fn @call
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (ptr, i64) -> i64
+  slot s0 size 16 align 3
+  slot s1 size 16 align 3
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = iconst.i32 3
+  store v0, v2 align 3
+  store v1, v2+8 align 3
+  call @sum(v2, v4, v3) : (l0, i32) -> l0
+  v5 = load.i64 v3+8 align 3
+  ret v5
+)";
+    let mut err = String::new();
+    let mut p = lparse::parse(lir, &mut err).unwrap();
+    let b = &p.bodies[p.syms[p.find_symbol("sum") as usize].def as usize];
+    let mut lay = ab::CallLayout::new();
+    w64::classify(b, b.sig, 8, true, &mut lay);
+    assert(
+        lay.locs[0].kind == ab::L_REG && lay.locs[0].n == 2 && lay.locs[1].kind == ab::L_REG,
+        "the slice in two registers",
+    );
+    assert_eq(lay.parts[lay.locs[0].p0 as usize].reg, w64::gp_arg(0));
+    assert_eq(lay.parts[lay.locs[0].p0 as usize + 1].reg, w64::gp_arg(1));
+    assert_eq(lay.parts[lay.locs[1].p0 as usize].reg, w64::gp_arg(2));
+    assert(lay.ret.kind == ab::L_REG && lay.ret.n == 2, "the result in rax and rdx");
+    w64::classify(b, b.sig, 8, false, &mut lay);
+    assert(lay.locs[0].kind == ab::L_REF_REG && lay.ret.kind == ab::L_SRET, "C passes and returns it in memory");
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(nat::prepare(&mut p, tgt::axis_index("windows", false), x64, &mut err), err.as_str());
+    let th = p.find_symbol("sum.msabi");
+    assert(th != NONE && p.syms[th as usize].used && p.syms[th as usize].def != NONE, "a C entry");
+    let tk = &p.bodies[p.syms[p.find_symbol("take") as usize].def as usize];
+    assert_eq(tk.syms[tk.insts[0].a as usize], th);
+    let cl = &p.bodies[p.syms[p.find_symbol("call") as usize].def as usize];
+    let sum = p.find_symbol("sum");
+    let mut direct = false;
+    let mut entry = false;
+    for k in 0..cl.syms.len() {
+        direct = direct || cl.syms[k] == sum;
+        entry = entry || cl.syms[k] == th;
+    }
+    assert(direct && !entry, "a direct call names the function");
+    // The thunk is local: it goes in the object of the code that takes the address, a unit's own.
+    let mut u = lparse::parse(lir, &mut err).unwrap();
+    let ut = u.find_symbol("take");
+    u.syms.index_mut(ut as usize).unit = 0;
+    u.syms.index_mut(ut as usize).own = true;
+    assert(nat::prepare(&mut u, tgt::axis_index("windows", false), x64, &mut err), err.as_str());
+    let uth = u.find_symbol("sum.msabi0");
+    assert(uth != NONE && u.syms[uth as usize].unit == 0 && u.syms[uth as usize].own, "in the unit's own object");
+    let mut q = lparse::parse(lir, &mut err).unwrap();
+    assert(nat::prepare(&mut q, tgt::axis_index("linux", false), x64, &mut err), err.as_str());
+    assert(q.find_symbol("sum.msabi") == NONE, "System V needs no entry");
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Microsoft x64 object");
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the System V object");
+}
+
+// Small aggregates by value whose fields share an 8-byte chunk, in the form the optimizer gives them
+// (`lir::opt`'s `agg_chunk`, `ret_chunks`): each parameter chunk is one load, which takes the chunk's
+// register, and each result chunk one store, which the return moves into its register; a float's bits
+// share a chunk with an integer. The C side reads each field.
+@test
+fn aggregate_fields_in_shared_chunks_cross_the_c_abi() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @padd fn global
+sym @opt fn global
+sym @fi fn global
+sym @tri fn global
+fn @padd
+  layout l0 size 8 align 2 [0 i32, 4 i32]
+  sig (l0, l0) -> l0
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = iconst.i64 32
+  v4 = load.i64 v0 align 2
+  v5 = load.i64 v1 align 2
+  v6 = trunc.i32 v4
+  v7 = trunc.i32 v5
+  v8 = add.i32 v6, v7
+  v9 = lshr.i64 v4, v3
+  v10 = trunc.i32 v9
+  v11 = lshr.i64 v5, v3
+  v12 = trunc.i32 v11
+  v13 = sub.i32 v10, v12
+  v14 = zext.i64 v8
+  v15 = zext.i64 v13
+  v16 = shl.i64 v15, v3
+  v17 = or.i64 v14, v16
+  store v17, v2 align 2
+  ret
+fn @opt
+  layout l0 size 8 align 2 [0 i8, 4 i32]
+  sig (i32) -> l0
+b0(v0: i32, v1: ptr):
+  v2 = iconst.i32 5
+  v3 = iconst.i64 0
+  v4 = iconst.i64 32
+  v5 = iconst.i64 1
+  v6 = icmp.ugt v0, v2
+  br v6, b2, b1
+b1:
+  store v3, v1 align 0
+  ret
+b2:
+  v7 = zext.i64 v0
+  v8 = shl.i64 v7, v4
+  v9 = or.i64 v8, v5
+  store v9, v1 align 0
+  ret
+fn @fi
+  layout l0 size 8 align 2 [0 f32, 4 i32]
+  sig (l0) -> l0
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.i64 32
+  v3 = load.i64 v0 align 2
+  v4 = trunc.i32 v3
+  v5 = bitcast.f32 v4
+  v6 = fadd.f32 v5, v5
+  v7 = lshr.i64 v3, v2
+  v8 = trunc.i32 v7
+  v9 = add.i32 v8, v8
+  v10 = bitcast.i32 v6
+  v11 = zext.i64 v10
+  v12 = zext.i64 v9
+  v13 = shl.i64 v12, v2
+  v14 = or.i64 v11, v13
+  store v14, v1 align 2
+  ret
+fn @tri
+  layout l0 size 12 align 2 [0 i32, 4 i32, 8 i32]
+  sig (i32) -> l0
+b0(v0: i32, v1: ptr):
+  v2 = iconst.i32 1
+  v3 = iconst.i32 2
+  v4 = iconst.i64 32
+  v5 = add.i32 v0, v2
+  v6 = add.i32 v0, v3
+  v7 = zext.i64 v0
+  v8 = zext.i64 v5
+  v9 = shl.i64 v8, v4
+  v10 = or.i64 v7, v9
+  store v10, v1 align 2
+  store v6, v1+8 align 2
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+typedef struct { int32_t x, y; } P;
+typedef struct { uint8_t some; uint32_t v; } O;
+typedef struct { float f; int32_t i; } FI;
+typedef struct { int32_t a, b, c; } T;
+P padd(P, P);
+O opt(uint32_t);
+FI fi(FI);
+T tri(int32_t);
+int main(void) {
+  P p = padd((P){7, -3}, (P){5, 9});
+  O s = opt(9), n = opt(2);
+  FI f = fi((FI){1.5f, -4});
+  T t = tri(-1);
+  if (p.x != 12 || p.y != -12) return 1;
+  if (s.some != 1 || s.v != 9 || n.some != 0 || n.v != 0) return 2;
+  if (f.f != 3.0f || f.i != -8) return 3;
+  if (t.a != -1 || t.b != 0 || t.c != 1) return 4;
+  return 0;
+}
+)";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }

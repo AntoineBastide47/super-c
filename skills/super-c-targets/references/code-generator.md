@@ -71,6 +71,11 @@ A module per convention fills the layout of `src/codegen/abi.spc` for a signatur
 parameter part and of the result (a register of a file, the stack, or memory the caller provides).
 `src/target/sysv.spc`, `src/target/win64.spc`, `src/target/aapcs64.spc` (with Apple's variant) and
 `src/target/wasmabi.spc` are the models. The code generator only moves the bytes each location names.
+Under Microsoft x64, a call of a function no C code reaches by name takes Super-C's own convention
+(`w64::classify`'s `sc`): an aggregate of 9 to 16 bytes whose last 8 or fewer bytes pass as an integer
+(a slice, a `str`) passes in two integer registers and returns in rax and rdx, as System V passes it.
+Where the program takes such a function's address, the address names a local thunk with C's convention
+(`w64::thunks`, from `native::prepare`), in the object of the code that takes it.
 Check every rule against the C compiler with a C driver (`tests/codegen/native_test.spc`): aggregates
 of each size class, floats in aggregates, i128, vectors, variadic calls, results in memory.
 

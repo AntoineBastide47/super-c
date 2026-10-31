@@ -15770,6 +15770,13 @@ pub(package) fn run_package(
         // The record of the objects an earlier build left, for the modules the emission cache replayed
         // (`nat_trust` read it).
         nat_rec = replace(&mut co.nat_rec, Map::<String, u64>::new());
+        if let Some(l) = &mut co.lir {
+            let mut why = String::new();
+            if !nat::prepare(&mut l.pkg, p.build_target, p.arch, &mut why) {
+                eprint("error: the native objects do not compile: {}\n", why.as_str());
+                return 1;
+            }
+        }
         if let Some(l) = &co.lir {
             if !native_plan(p, l, &lm, &iq, root, &co.tuc_hit, &nat_rec, &mut nat_mod, &mut nat_objs) {
                 return 1;
@@ -16213,7 +16220,10 @@ fn native_test_main(p: &loader::Package, plan: &TestPlan, out: &mut Vector<u8>) 
     let mut err = String::new();
     let mut ok = false;
     switch lparse::parse(&text, &mut err) {
-        Some(pk) => {
+        Some(pk0) => {
+            let mut pk = pk0;
+            // The thunks `prepare` adds compile too.
+            let ready = nat::prepare(&mut pk, p.build_target, p.arch, &mut err);
             let mut fs = Vector::<u32>::new();
             let mut ds = Vector::<u32>::new();
             for i in 0..pk.syms.len() {
@@ -16225,7 +16235,7 @@ fn native_test_main(p: &loader::Package, plan: &TestPlan, out: &mut Vector<u8>) 
                     }
                 }
             }
-            ok = nat::object(&pk, p.build_target, p.arch, fs[0..fs.len()], ds[0..ds.len()], "", out, &mut err);
+            ok = ready && nat::object(&pk, p.build_target, p.arch, fs[0..fs.len()], ds[0..ds.len()], "", out, &mut err);
         },
         None => {},
     }
@@ -16323,7 +16333,10 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
     let mut err = String::new();
     let mut ok = false;
     switch lparse::parse(&t, &mut err) {
-        Some(pk) => {
+        Some(pk0) => {
+            let mut pk = pk0;
+            // The thunks `prepare` adds compile too.
+            let ready = nat::prepare(&mut pk, p.build_target, p.arch, &mut err);
             let mut fs = Vector::<u32>::new();
             let mut ds = Vector::<u32>::new();
             for i in 0..pk.syms.len() {
@@ -16335,7 +16348,7 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
                     }
                 }
             }
-            ok = nat::object(&pk, p.build_target, p.arch, fs[0..fs.len()], ds[0..ds.len()], "", out, &mut err);
+            ok = ready && nat::object(&pk, p.build_target, p.arch, fs[0..fs.len()], ds[0..ds.len()], "", out, &mut err);
         },
         None => {},
     }
