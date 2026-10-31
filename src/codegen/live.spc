@@ -47,6 +47,10 @@ pub(package) const FOLD_FSEL: u32 = 32768;
 pub(package) const FOLD_NOT: u32 = 65536;
 pub(package) const FOLD_XBFX: u32 = 131072;
 pub(package) const FOLD_BFI: u32 = 262144;
+/// A load's or store's folded index that is the 64-bit zero or sign extension of a 32-bit value (or of an
+/// unsigned 8- or 16-bit entry parameter, under `ext_args`), which only that access reads: the access
+/// extends it (arm64 `[xn, wm, uxtw]`).
+pub(package) const FOLD_XIDX: u32 = 524288;
 /// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
 pub(package) const CS_NONE: u8 = 0;
 pub(package) const CS_INC: u8 = 1;
@@ -126,6 +130,9 @@ pub(package) struct Live {
     /// instruction from its operands, which live to it (`uses_at`), and the instruction emits nothing
     /// (`pfold`).
     pub(package) fold_ops: u32,
+    /// Whether the calling convention has the caller extend 8- and 16-bit arguments to 32 bits by their
+    /// signedness (Apple arm64), so their registers' low 32 bits are their values extended.
+    pub(package) ext_args: bool,
     cnd: Vector<u32>, // `folds`' scratch: per instruction, its uses as a condition
     // `plan`'s scratch: per layout position its first instruction's ordinal; per block its frequency; per
     // value its range's first and last ordinals, its weight and its uses by instructions and edges; the
@@ -173,6 +180,7 @@ extend Live {
             relay: Vector::<u32>::new(),
             relayed: Vector::<u64>::new(),
             fold_ops: 0,
+            ext_args: false,
             cnd: Vector::<u32>::new(),
             base: Vector::<u32>::new(),
             freq: Vector::<u64>::new(),
@@ -250,6 +258,28 @@ extend Live {
     // address (`ldr x0, [x1, x2, lsl #3]`, `mov (%rax,%rcx,8), %rdx`): they live to the access.
     //
     // The other instructions fold as `fold_ops` lets them (`FOLD_*`).
+    // Whether index `v` of `b` is the 64-bit extension `FOLD_XIDX` folds into its one access.
+    fn ext_index(self: &Self, b: &Body, v: Value) bool {
+        if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.count[v as usize] != 1 || self.pfold[v as usize] {
+            return false;
+        }
+        let t = b.insts[v as usize];
+        if t.op != O_ZEXT && t.op != O_SEXT || t.ty != T_I64 {
+            return false;
+        }
+        let ft = b.type_of(t.a);
+        if ft == T_I32 {
+            return true;
+        }
+        // An unsigned entry parameter of 8 or 16 bits the caller zero-extended.
+        if !self.ext_args || t.op != O_ZEXT || ft != T_I8 && ft != T_I16 || (t.a & VPARAM) == 0 {
+            return false;
+        }
+        let k = (t.a & ~VPARAM) as usize;
+        let np = b.pool[b.sig as usize] as usize;
+        return k < np && b.blocks[0].param_start == 0 && (b.pool[b.sig as usize + 3 + k] & (SIG_SEXT | AGG)) == 0;
+    }
+
     fn folds(self: &mut Self, b: &Body) {
         let ni = b.insts.len();
         self.fold.truncate(0);
@@ -465,6 +495,9 @@ extend Live {
             self.fold[i] = p.op == O_PTRADD && p.b != VNONE && p.c == 0 && self.count[t.a as usize] == 1 && reg && (sc == 1 || sc == n && n <= self.fold_max);
             if self.fold[i] {
                 self.pfold[t.a as usize] = true;
+                if (self.fold_ops & FOLD_XIDX) != 0 && self.ext_index(b, p.b) {
+                    self.pfold[p.b as usize] = true;
+                }
             }
         }
         // `FOLD_BLEN`: a count of leading zeros of 32 or 64 bits that only `width - clz` reads, the bit

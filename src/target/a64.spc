@@ -373,6 +373,12 @@ pub(package) const fn ldst_reg(m: u32, load: bool, rt: u32, rn: u32, rm: u32, sc
     return mbits(m, load) | 0x00200800 | rm << 16 | 3u32 << 13 | s | rn << 5 | rt;
 }
 
+/// `ldst_reg` with index register `rm` extended by `opt`: 2 its low 32 bits zero-extended (`uxtw`), 6
+/// sign-extended (`sxtw`), 3 as it is (`lsl`).
+pub(package) const fn ldst_ext(m: u32, load: bool, rt: u32, rn: u32, rm: u32, scaled: bool, opt: u32) u32 {
+    return ldst_reg(m, load, rt, rn, rm, scaled) & ~(7u32 << 13) | opt << 13;
+}
+
 /// Whether byte offset `off` fits access `m`'s unsigned scaled immediate.
 pub(package) const fn uimm_fits(m: u32, off: i64) bool {
     let s = msize(m);

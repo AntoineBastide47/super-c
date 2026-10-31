@@ -129,6 +129,7 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     let mut p = q.unwrap();
     p.tail = (opts & TAIL) != 0;
     p.popcnt = (opts & POPCNT) != 0;
+    p.bitrev = isa == tgt::axis_index("aarch64", true);
     if (opts & WIDE) != 0 {
         p.vector = 32;
     }
@@ -2542,6 +2543,98 @@ b0(v0: i64):
   ret v4
 )";
     let drv = "#include <stdint.h>\ntypedef struct { int64_t a; double b; } P;\ntypedef struct { double d; } H;\nP swap(P);\nH half(H);\nint64_t via_c(int64_t);\nP cswap(P p) { P r = {(int64_t)p.b + 1, (double)p.a}; return r; }\nint main(void) {\n  P p = {7, 2.5};\n  P q = swap(p);\n  if (q.a != 2 || q.b != 7.0) return 1;\n  H h = {3.0};\n  if (half(h).d != 1.5) return 2;\n  if (via_c(41) != 42) return 3;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Bit reversals of 8, 16, 32 and 64 bits (arm64 `rbit`, shifted down for the narrow ones).
+@test
+fn bit_reversals_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @r8 fn global
+sym @r16 fn global
+sym @r32 fn global
+sym @r64 fn global
+fn @r8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = bitrev.i8 v0
+  ret v1
+fn @r16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = bitrev.i16 v0
+  ret v1
+fn @r32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = bitrev.i32 v0
+  ret v1
+fn @r64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = bitrev.i64 v0
+  ret v1
+)";
+    let drv = "#include <stdint.h>\nuint8_t r8(uint8_t);\nuint16_t r16(uint16_t);\nuint32_t r32(uint32_t);\nuint64_t r64(uint64_t);\nint main(void) {\n  if (r8(0x01) != 0x80 || r8(0x0F) != 0xF0) return 1;\n  if (r16(0x0001) != 0x8000 || r16(0x1234) != 0x2C48) return 2;\n  if (r32(0x12345678u) != 0x1E6A2C48u) return 3;\n  if (r64(1) != 0x8000000000000000ull || r64(0x00000000000000F0ull) != 0x0F00000000000000ull) return 4;\n  return 0;\n}\n";
+    if tgt::host_isa() == tgt::axis_index("aarch64", true) {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// Loads and stores at an index that is a 32-bit value zero- or sign-extended (arm64 `uxtw`, `sxtw`; a
+// negative index), or an 8- or 16-bit parameter zero-extended (Apple arm64: the caller extended it).
+@test
+fn extended_indexes_address_right() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @ld32 fn global
+sym @lds32 fn global
+sym @st32 fn global
+sym @ld8 fn global
+sym @ld16 fn global
+fn @ld32
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = zext.i64 v1
+  v3 = ptradd v0, v2 * 4
+  v4 = load.i32 v3 align 2
+  ret v4
+fn @lds32
+  sig (ptr, i32) -> i64
+b0(v0: ptr, v1: i32):
+  v2 = sext.i64 v1
+  v3 = ptradd v0, v2 * 8
+  v4 = load.i64 v3 align 3
+  ret v4
+fn @st32
+  sig (ptr, i32, i16) -> void
+b0(v0: ptr, v1: i32, v2: i16):
+  v3 = zext.i64 v1
+  v4 = ptradd v0, v3 * 2
+  store v2, v4 align 1
+  ret
+fn @ld8
+  sig (ptr, i8) -> i32
+b0(v0: ptr, v1: i8):
+  v2 = zext.i64 v1
+  v3 = ptradd v0, v2 * 4
+  v4 = load.i32 v3 align 2
+  ret v4
+fn @ld16
+  sig (ptr, i16) -> i32
+b0(v0: ptr, v1: i16):
+  v2 = zext.i64 v1
+  v3 = ptradd v0, v2 * 4
+  v4 = load.i32 v3 align 2
+  ret v4
+)";
+    let drv = "#include <stdint.h>\nint32_t ld32(const int32_t *, uint32_t);\nint64_t lds32(const int64_t *, int32_t);\nvoid st32(int16_t *, uint32_t, int16_t);\nint32_t ld8(const int32_t *, uint8_t);\nint32_t ld16(const int32_t *, uint16_t);\nstatic int32_t a[70000];\nstatic int64_t w[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};\nstatic int16_t h[8];\nint main(void) {\n  for (int i = 0; i < 70000; i++) a[i] = i * 3;\n  if (ld32(a, 65537) != 196611) return 1;\n  if (lds32(w + 4, -3) != 2 || lds32(w + 4, 4) != 9) return 2;\n  st32(h, 5, -7);\n  if (h[5] != -7 || h[4] != 0) return 3;\n  if (ld8(a, 255) != 765) return 4;\n  if (ld16(a, 65535) != 196605) return 5;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }

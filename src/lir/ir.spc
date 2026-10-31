@@ -253,7 +253,9 @@ pub(package) const O_VINSERT: u8 = 84;
 pub(package) const O_MULHS: u8 = 85;
 /// The bytes of an integer of 2, 4 or 8 bytes in reverse order (`Package.bswap`).
 pub(package) const O_BSWAP: u8 = 86;
-pub(package) const OP_COUNT: u8 = 87;
+/// The bits of an integer of up to 8 bytes in reverse order (`Package.bitrev`).
+pub(package) const O_BITREV: u8 = 87;
+pub(package) const OP_COUNT: u8 = 88;
 
 /// One opcode: its text name and its operand form.
 pub(package) struct OpInfo {
@@ -261,7 +263,7 @@ pub(package) struct OpInfo {
     pub(package) form: u8,
 }
 
-pub(package) const OPS: [OpInfo; 87] = [
+pub(package) const OPS: [OpInfo; 88] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -349,6 +351,7 @@ pub(package) const OPS: [OpInfo; 87] = [
     OpInfo { name: "vinsert", form: F_BIN },
     OpInfo { name: "mulhs", form: F_BIN },
     OpInfo { name: "bswap", form: F_UN },
+    OpInfo { name: "bitrev", form: F_UN },
 ];
 
 /// The mask a lane-wise comparison of vectors of type `t` gives (`O_VCMP`): integer lanes of its lanes'
@@ -1369,6 +1372,9 @@ pub(package) struct Package {
     /// Whether the native backend reverses the bytes of an integer in one instruction (`O_BSWAP`,
     /// `target::table::Isa`): the optimizer then makes one of a permutation of bytes.
     pub(package) bswap: bool,
+    /// Whether the native backend reverses the bits of an integer in one instruction (`O_BITREV`,
+    /// `target::table::Isa`): the optimizer then makes one of a reversal of bits.
+    pub(package) bitrev: bool,
     /// Whether the optimizer splits each 128-bit integer into its two 64-bit words (`lir::pairs`), which
     /// the native backend keeps in registers (`target::table::Isa`); it needs `mul_high`.
     pub(package) pairs: bool,
@@ -1469,6 +1475,7 @@ extend Package {
             vops: 0,
             mul_high: true,
             bswap: true,
+            bitrev: true,
             pairs: false,
             align_loops: false,
             popcnt: false,

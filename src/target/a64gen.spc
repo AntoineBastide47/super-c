@@ -1474,22 +1474,38 @@ extend Gen {
     // A load (`load`) or store of access `m` between register `rt` and memory at `base` + `off`. A
     // base or offset that does not encode goes through x17.
     // The address of load or store `i` that folds its `ptradd` (`Live::fold`): its base and index
-    // registers, and whether the index scales by the access's size.
-    fn folded(self: &mut Self, i: u32) (u32, u32, bool) {
+    // registers, whether the index scales by the access's size, and how the access extends the index
+    // (`a::ldst_ext`: 3 not, 2 `uxtw`, 6 `sxtw`, for an extension `lv::FOLD_XIDX` folds).
+    fn folded(self: &mut Self, i: u32) (u32, u32, bool, u32) {
         let p = self.b().insts[self.b().insts[i as usize].a as usize];
         let rn = self.reg(p.a);
+        if (p.b & (VPARAM | VFLAG)) == 0 && self.lv.pfold[p.b as usize] {
+            let x = self.b().insts[p.b as usize];
+            let rm = self.reg(x.a);
+            return (
+                rn,
+                rm,
+                p.aux != 1,
+                if x.op == O_ZEXT {
+                    2u32
+                } else {
+                    6u32
+                }
+            );
+        }
         let rm = self.reg(p.b);
-        return (rn, rm, p.aux != 1);
+        return (rn, rm, p.aux != 1, 3);
     }
 
-    // An access `m` of register `rt` at `rn` + `rm`, scaled by its size when `scaled`.
-    fn mem_ix(self: &mut Self, m: u32, load: bool, rt: u8, rn: u32, rm: u32, scaled: bool) {
+    // An access `m` of register `rt` at `rn` + `rm` extended by `opt` (`a::ldst_ext`), scaled by its size
+    // when `scaled`.
+    fn mem_ix(self: &mut Self, m: u32, load: bool, rt: u8, rn: u32, rm: u32, scaled: bool, opt: u32) {
         let r = if m >= a::M_VB {
             (rt - V0) as u32
         } else {
             rt as u32
         };
-        self.emit(a::ldst_reg(m, load, r, rn, rm, scaled));
+        self.emit(a::ldst_ext(m, load, r, rn, rm, scaled, opt));
     }
 
     fn mem(self: &mut Self, m: u32, load: bool, rt: u8, base: u32, off: i64) {
@@ -1915,7 +1931,8 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX;
+        self.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
         if self.again {
@@ -2983,6 +3000,19 @@ extend Gen {
         }
         if op >= O_CLZ && op <= O_POPCNT {
             self.bit_count(i, t);
+            return true;
+        }
+        if op == O_BITREV {
+            // A 32-bit reversal puts the bits of a narrower type at the top: shifted down.
+            let bits = type_bits(t.ty, self.ptr);
+            let r = self.reg(t.a) as u32;
+            let rd = self.def_step(i) as u32;
+            self.emit(a::dp1(bits == 64, a::DP1_RBIT, rd, r));
+            if bits < 32 {
+                self.emit(a::lsr_imm(false, rd, rd, 32 - bits));
+            }
+            // A 32-bit operation clears the bits above.
+            self.va.index_mut(i as usize).clean = bits < 64;
             return true;
         }
         if op == O_BSWAP {
@@ -4595,13 +4625,13 @@ extend Gen {
             }
         }
         if self.lv.fold[i as usize] {
-            let (rn, rm, sc) = self.folded(i);
+            let (rn, rm, sc, opt) = self.folded(i);
             let rd = if in_vreg(ty) {
                 self.vec_def(i)
             } else {
                 self.def_step(i)
             };
-            self.mem_ix(mkind(ty, true), true, rd, rn, rm, sc);
+            self.mem_ix(mkind(ty, true), true, rd, rn, rm, sc, opt);
             self.va.index_mut(i as usize).clean = !is_v(ty) && type_bits(ty, self.ptr) < 64;
             return true;
         }
@@ -4779,7 +4809,7 @@ extend Gen {
             }
         }
         if self.lv.fold[self.cur as usize] {
-            let (rn, rm, sc) = self.folded(self.cur);
+            let (rn, rm, sc, opt) = self.folded(self.cur);
             let mut k: u64 = 0;
             let r = if in_vreg(ty) {
                 self.vec_use(t.b, V0 + 30)
@@ -4788,7 +4818,7 @@ extend Gen {
             } else {
                 self.reg(t.b)
             };
-            self.mem_ix(mkind(ty, false), false, r, rn, rm, sc);
+            self.mem_ix(mkind(ty, false), false, r, rn, rm, sc, opt);
             return true;
         }
         let mut s: u32 = 0;

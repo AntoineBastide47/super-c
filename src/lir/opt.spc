@@ -4764,6 +4764,10 @@ extend Opt {
             if b.insts[i as usize].op == O_OR && (self.combine_loads(pk, b, k, i) || self.byte_perm(pk, b, i)) {
                 return true;
             }
+            if b.insts[i as usize].op == O_OR && pk.bitrev && bit_reverse(pk, b, i) {
+                let _ = self.number(pk, b, k, i);
+                return true;
+            }
             if b.insts[i as usize].op == O_SELECT && self.sign_select(pk, b, k, i) {
                 return true;
             }
@@ -8793,14 +8797,16 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         return VNONE;
     }
     let ptr = pk.ptr_bytes;
-    // A byte swap or bit count of a constant.
-    if (t.op == O_BSWAP || t.op >= O_CLZ && t.op <= O_POPCNT) && is_int(t.ty) && t.ty != T_PTR {
+    // A byte or bit reversal or a bit count of a constant.
+    if (t.op == O_BSWAP || t.op == O_BITREV || t.op >= O_CLZ && t.op <= O_POPCNT) && is_int(t.ty) && t.ty != T_PTR {
         let c = const_of(b, t.a);
         if c.is_some() {
             let bits = type_bits(t.ty, ptr);
             let x = le::trunc_bits(c.unwrap(), bits);
             let r = if t.op == O_BSWAP {
                 x.swap_bytes() >> (64 - bits) as u64
+            } else if t.op == O_BITREV {
+                x.reverse_bits() >> (64 - bits) as u64
             } else if t.op == O_POPCNT {
                 x.count_ones() as u64
             } else if x == 0 {
@@ -10233,7 +10239,7 @@ const fn pure_ops() [bool; 256] {
     for k in 0..256u32 {
         let op = k as u8;
         unsafe {
-            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT;
+            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_BITREV || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT;
         }
     }
     return t;
@@ -10356,6 +10362,114 @@ fn signed_flag_of(b: &Body, t: Inst) (Value, bool, bool) {
         }
     }
     return none;
+}
+
+// `bit_sources` follows at most BIT_DEPTH operations.
+const BIT_DEPTH: u32 = 12;
+
+// The value whose bits integer value `v` of `b` (of `bits` bits) moves, and per bit of `v` the bit of that
+// value it holds (`src`, 0xFF: 0): through `or`s of values of disjoint bits, `and`s with constants, shifts
+// by constants and byte swaps of one type, `depth` operations deep; else `v` itself. VNONE when the two
+// sides of an `or` move different values or overlap.
+fn bit_sources(b: &Body, v: Value, bits: u32, depth: u32, src: &mut [u8; 64]) Value {
+    let t = if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        Inst { op: O_ICONST, ty: T_NONE, aux: 0, a: VNONE, b: VNONE, c: VNONE }
+    } else {
+        b.insts[v as usize]
+    };
+    let c = if t.op == O_AND || t.op == O_SHL || t.op == O_LSHR {
+        const_of(b, t.b)
+    } else {
+        Option::<u64>::None
+    };
+    let moves = t.op == O_OR || t.op == O_BSWAP || c.is_some() && (t.op == O_AND || c.unwrap() < bits as u64);
+    if depth == 0 || !moves || b.type_of(v) != b.type_of(t.a) {
+        for j in 0..bits {
+            src[j as usize] = j as u8;
+        }
+        return v;
+    }
+    let mut x = [0xFFu8; 64];
+    let base = bit_sources(b, t.a, bits, depth - 1, &mut x);
+    if base == VNONE {
+        return VNONE;
+    }
+    if t.op == O_OR {
+        let mut y = [0xFFu8; 64];
+        let other = bit_sources(b, t.b, bits, depth - 1, &mut y);
+        if other != base {
+            return VNONE;
+        }
+        for j in 0..bits as usize {
+            if x[j] != 0xFF && y[j] != 0xFF {
+                return VNONE;
+            }
+            src[j] = if x[j] != 0xFF {
+                x[j]
+            } else {
+                y[j]
+            };
+        }
+        return base;
+    }
+    for j in 0..bits {
+        let s = if t.op == O_AND {
+            if (c.unwrap() >> j as u64 & 1) != 0 {
+                x[j as usize]
+            } else {
+                0xFF
+            }
+        } else if t.op == O_SHL {
+            if j >= c.unwrap() as u32 {
+                x[(j - c.unwrap() as u32) as usize]
+            } else {
+                0xFF
+            }
+        } else if t.op == O_LSHR {
+            if j + c.unwrap() as u32 < bits {
+                x[(j + c.unwrap() as u32) as usize]
+            } else {
+                0xFF
+            }
+        } else {
+            // A byte swap: bit `j` comes from byte `bits / 8 - 1 - j / 8`, the same bit of that byte.
+            x[((bits / 8 - 1 - j / 8) * 8 + j % 8) as usize]
+        };
+        src[j as usize] = s;
+    }
+    return base;
+}
+
+// Whether value `v` of `b` is a shift, a mask or a byte swap: what each side of a bit reversal's `or` is.
+fn moves_bits(b: &Body, v: Value) bool {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let op = b.insts[v as usize].op;
+    return op == O_SHL || op == O_LSHR || op == O_AND || op == O_BSWAP;
+}
+
+// `or` `i` of `b` whose bits are those of one value in reverse order (`bit_sources`; `u32::reverse_bits`'s
+// swaps of halves, nibbles, pairs and bits): in place, that value's `bitrev` (`Package.bitrev`). Whether it
+// did.
+fn bit_reverse(pk: &Package, b: &mut Body, i: u32) bool {
+    let t = b.insts[i as usize];
+    if !is_int(t.ty) || t.ty == T_PTR || t.ty == T_I128 || !moves_bits(b, t.a) || !moves_bits(b, t.b) {
+        return false;
+    }
+    let bits = type_bits(t.ty, pk.ptr_bytes);
+    let mut src = [0xFFu8; 64];
+    let x = bit_sources(b, i, bits, BIT_DEPTH, &mut src);
+    if x == VNONE || x == i {
+        return false;
+    }
+    for j in 0..bits {
+        if src[j as usize] != (bits - 1 - j) as u8 {
+            return false;
+        }
+    }
+    b.insts[i as usize] = Inst { op: O_BITREV, ty: t.ty, aux: 0, a: x, b: VNONE, c: VNONE };
+    return true;
 }
 
 // Whether value `v` of `b` is an instruction of operation `op`.

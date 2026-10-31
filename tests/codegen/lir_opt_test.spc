@@ -6470,3 +6470,85 @@ b0(v0: i64, v1: i64):
     let n: []u64 = [0x100000000, 0x100000000];
     same_result(&b, &a, "prod", n, 0);
 }
+
+// An `or` tree of shifts, masks and byte swaps that puts the bits of one value in reverse order is that
+// value's `bitrev` (`u8` and `u32` `reverse_bits`); one that swaps nibbles only stays.
+@test
+fn bit_reversals_are_one_operation() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @r8 fn global
+sym @r32 fn global
+sym @nib fn global
+fn @r8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 4
+  v2 = iconst.i8 2
+  v3 = iconst.i8 1
+  v4 = iconst.i8 51
+  v5 = iconst.i8 85
+  v6 = lshr.i8 v0, v1
+  v7 = shl.i8 v0, v1
+  v8 = or.i8 v6, v7
+  v9 = lshr.i8 v8, v2
+  v10 = and.i8 v9, v4
+  v11 = and.i8 v8, v4
+  v12 = shl.i8 v11, v2
+  v13 = or.i8 v10, v12
+  v14 = lshr.i8 v13, v3
+  v15 = and.i8 v14, v5
+  v16 = and.i8 v13, v5
+  v17 = shl.i8 v16, v3
+  v18 = or.i8 v15, v17
+  ret v18
+fn @r32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 4
+  v2 = iconst.i32 2
+  v3 = iconst.i32 1
+  v4 = iconst.i32 252645135
+  v5 = iconst.i32 858993459
+  v6 = iconst.i32 1431655765
+  v7 = bswap.i32 v0
+  v8 = lshr.i32 v7, v1
+  v9 = and.i32 v8, v4
+  v10 = and.i32 v7, v4
+  v11 = shl.i32 v10, v1
+  v12 = or.i32 v9, v11
+  v13 = lshr.i32 v12, v2
+  v14 = and.i32 v13, v5
+  v15 = and.i32 v12, v5
+  v16 = shl.i32 v15, v2
+  v17 = or.i32 v14, v16
+  v18 = lshr.i32 v17, v3
+  v19 = and.i32 v18, v6
+  v20 = and.i32 v17, v6
+  v21 = shl.i32 v20, v3
+  v22 = or.i32 v21, v19
+  ret v22
+fn @nib
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 4
+  v2 = iconst.i32 252645135
+  v3 = lshr.i32 v0, v1
+  v4 = and.i32 v3, v2
+  v5 = and.i32 v0, v2
+  v6 = shl.i32 v5, v1
+  v7 = or.i32 v4, v6
+  ret v7
+)",
+    );
+    let e = text_of(&a, "r8");
+    assert(e.contains("bitrev.i8 v0") && !e.contains("or."), e.as_str());
+    let f = text_of(&a, "r32");
+    assert(f.contains("bitrev.i32 v0") && !f.contains("bswap"), f.as_str());
+    let n = text_of(&a, "nib");
+    assert(!n.contains("bitrev"), n.as_str());
+    let x: []u64 = [0x01];
+    same_result(&b, &a, "r8", x, 0x80);
+    let y: []u64 = [0x12345678];
+    same_result(&b, &a, "r32", y, 0x1E6A2C48);
+}

@@ -385,6 +385,15 @@ extend Verifier {
                 "two integer operands of the result's type, up to 64 bits",
             );
         }
+        if op == O_BITREV {
+            return self.need(
+                name,
+                b,
+                i,
+                is_int(t.ty) && t.ty != T_I128 && t.ty != T_PTR && ta == t.ty,
+                "an integer operand of the result's type, up to 8 bytes",
+            );
+        }
         if op == O_BSWAP {
             return self.need(
                 name,

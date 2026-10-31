@@ -44,6 +44,8 @@ pub(package) struct Isa {
     pub(package) mul_high: bool,
     /// One instruction reverses the bytes of an integer (REV, BSWAP): `lir::ir::Package::bswap`.
     pub(package) bswap: bool,
+    /// One instruction reverses the bits of an integer (RBIT): `lir::ir::Package::bitrev`.
+    pub(package) bitrev: bool,
     /// The native backend keeps a 64-bit integer in one register: the optimizer splits a 128-bit one into
     /// its two words (`lir::ir::Package::pairs`).
     pub(package) pairs: bool,
@@ -177,6 +179,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_ops: 1,
         mul_high: true,
         bswap: true,
+        bitrev: false,
         pairs: true,
         half_cvt: false,
         switch_tree: true,
@@ -199,6 +202,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_ops: 2,
         mul_high: true,
         bswap: true,
+        bitrev: true,
         pairs: true,
         half_cvt: true,
         switch_tree: true,
@@ -221,6 +225,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_ops: 0,
         mul_high: false,
         bswap: false,
+        bitrev: false,
         pairs: false,
         half_cvt: false,
         switch_tree: false,
@@ -548,6 +553,7 @@ const UNKNOWN_ISA: Isa = Isa {
     vector_ops: 0,
     mul_high: false,
     bswap: false,
+    bitrev: false,
     pairs: false,
     half_cvt: false,
     switch_tree: false,
