@@ -316,7 +316,7 @@ pub(package) const fn kind_at(ops: u64, i: u32) u8 {
 
 // ---- The table ----
 
-pub(package) const ROWS: [Row; 651] = [
+pub(package) const ROWS: [Row; 662] = [
     // Add and subtract, immediate.
     rf("mov", 0x11000000, Q::SF, QWX, k2(K::RDS, K::RNS), FL_SPMOV),
     r("cmp", 0x7100001F, Q::SF, QWX, k2(K::RNS, K::AIMM)),
@@ -528,6 +528,18 @@ pub(package) const ROWS: [Row; 651] = [
     r("ldaxr", 0x885FFC00, Q::B30, QWX, k2(K::RD, K::M0)),
     r("stxr", 0x88007C00, Q::B30, QWX, k3(K::WM, K::RD, K::M0)),
     r("stlxr", 0x8800FC00, Q::B30, QWX, k3(K::WM, K::RD, K::M0)),
+    r("ldxrb", 0x085F7C00, Q::NONE, 0, k2(K::WD, K::M0)),
+    r("ldxrh", 0x485F7C00, Q::NONE, 0, k2(K::WD, K::M0)),
+    r("ldaxrb", 0x085FFC00, Q::NONE, 0, k2(K::WD, K::M0)),
+    r("ldaxrh", 0x485FFC00, Q::NONE, 0, k2(K::WD, K::M0)),
+    r("stxrb", 0x08007C00, Q::NONE, 0, k3(K::WM, K::WD, K::M0)),
+    r("stxrh", 0x48007C00, Q::NONE, 0, k3(K::WM, K::WD, K::M0)),
+    r("stlxrb", 0x0800FC00, Q::NONE, 0, k3(K::WM, K::WD, K::M0)),
+    r("stlxrh", 0x4800FC00, Q::NONE, 0, k3(K::WM, K::WD, K::M0)),
+    // RCpc (FEAT_LRCPC): the acquire load that waits for no earlier release store.
+    r("ldaprb", 0x38BFC000, Q::NONE, 0, k2(K::WD, K::M0)),
+    r("ldaprh", 0x78BFC000, Q::NONE, 0, k2(K::WD, K::M0)),
+    r("ldapr", 0xB8BFC000, Q::B30, QWX, k2(K::RD, K::M0)),
     // Atomic memory operations (LSE): the store aliases of a load whose register is the zero register,
     // without acquire.
     r("staddb", 0x3820001F, Q::NONE, 0, k2(K::WM, K::M0)),

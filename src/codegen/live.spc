@@ -54,6 +54,13 @@ pub(package) const FOLD_XIDX: u32 = 524288;
 /// `FOLD_LDOP`: a load of an integer that one comparison or `add`, `sub`, `and`, `or` or `xor` reads folds
 /// into it, which reads the memory (x86-64's `cmp [m], k`, `add r, [m]`; `Live::ldop_user`).
 pub(package) const FOLD_LDOP: u32 = 1048576;
+/// `FOLD_ANY`: an `or` of the lanes of a 16-byte lane mask (`lane_mask`) that equalities with 0 alone
+/// read folds into each: they test the lanes' sign bits (x86-64's `pmovmskb` and `test`). `FOLD_ANY_WIDE`:
+/// of a 32-byte one too (AVX2's `vpmovmskb`).
+pub(package) const FOLD_ANY: u32 = 2097152;
+pub(package) const FOLD_ANY_WIDE: u32 = 4194304;
+// `lane_mask` follows this many `and`, `or` and `xor` operations.
+const MASK_DEPTH: u32 = 8;
 // `Live::ldop_user` looks this many instructions past a load for its use.
 const LDOP_REACH: u32 = 16;
 /// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
@@ -320,7 +327,7 @@ extend Live {
         fill(&mut self.cnd, ni, 0);
         for i in 0..ni {
             let t = b.insts[i];
-            if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_AND && int_const(
+            if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (t.a & (VPARAM | VFLAG)) == 0 && (b.insts[t.a as usize].op == O_AND || b.insts[t.a as usize].op == O_VOP) && int_const(
                 b,
                 t.b,
             ) == 0 {
@@ -333,6 +340,9 @@ extend Live {
                 continue;
             }
             let bits = type_bits(t.ty, 8);
+            if t.op == O_VOP && self.count[i] != 0 && self.cnd[i] == self.count[i] && self.any_fold(b, t) {
+                self.pfold[i] = true;
+            }
             if t.op == O_AND && (self.fold_ops & FOLD_TST) != 0 && self.count[i] != 0 && self.cnd[i] == self.count[i] {
                 // A narrow type's register may hold any bits above it: only a mask within the type tests.
                 let m = int_const(b, t.b);
@@ -899,7 +909,7 @@ extend Live {
     }
 
     /// The values instruction `i` of `b` uses, as `each_use` gives them but for the folded instructions
-    /// (`pfold`): a use of one is a use of its two operands, and one uses none.
+    /// (`pfold`): a use of one is a use of its operands, and one uses none.
     pub(package) fn uses_at(self: &Self, b: &Body, i: u32, out: &mut Vector<Value>) {
         if self.pfold[i as usize] || self.relay.len() != 0 && self.relay[i as usize] != NONE {
             out.truncate(0);
@@ -918,9 +928,16 @@ extend Live {
             assert(n <= FOLD_DEPTH, "live: more folded instructions in one use than FOLD_DEPTH");
             let p = b.insts[v as usize];
             out.swap_remove(u);
-            out.push(p.a);
-            if p.b != VNONE {
-                out.push(p.b);
+            if p.op == O_VOP {
+                // Its operands in the pool (`FOLD_ANY`'s one).
+                for q in 0..p.b {
+                    out.push(b.pool[(p.a + q) as usize]);
+                }
+            } else {
+                out.push(p.a);
+                if p.b != VNONE {
+                    out.push(p.b);
+                }
             }
         }
         for q in 0..self.relayed.len() {
@@ -968,6 +985,24 @@ extend Live {
             self.pfold[t.b as usize] = true;
             self.pfold[i] = self.cnd[i] == self.count[i];
         }
+    }
+
+    // Whether `O_VOP` `t` is an `or` of the lanes of an integer lane mask that `FOLD_ANY` (16 bytes) or
+    // `FOLD_ANY_WIDE` (32) folds.
+    fn any_fold(self: &Self, b: &Body, t: Inst) bool {
+        if (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_REDUCE_OR as u32 || t.b != 1 {
+            return false;
+        }
+        let v = b.pool[t.a as usize];
+        let nb = type_bytes(b.type_of(v), 8);
+        let f = if nb == 16 {
+            FOLD_ANY
+        } else if nb == 32 {
+            FOLD_ANY_WIDE
+        } else {
+            0
+        };
+        return (self.fold_ops & f) != 0 && lane_mask(b, v, MASK_DEPTH);
     }
 
     // Whether `v` is an equality with 0 of an `and` `FOLD_TST` folds, which this use alone reads: a chain's
@@ -1755,6 +1790,23 @@ pub(package) const fn reduces(t: Inst) bool {
     let code = (t.aux & VOP_CODE) as u32;
     return code >= core::OP_SIMD && code < core::OP_CMP_LANES && core::simd_op((code - core::OP_SIMD) as u8).rule == core::SR_REDUCE;
 }
+/// Whether integer vector `v` of `b` is a lane mask, each lane all ones or 0: a comparison's, or an `and`,
+/// `or` or `xor` of masks, within `depth` of them.
+pub(package) fn lane_mask(b: &Body, v: Value, depth: u32) bool {
+    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_VCMP {
+        return true;
+    }
+    return depth != 0 && (t.op == O_AND || t.op == O_OR || t.op == O_XOR) && lane_mask(b, t.a, depth - 1) && lane_mask(
+        b,
+        t.b,
+        depth - 1,
+    );
+}
+
 /// Whether instruction `t` of `b` uses an address of slot `s` (an operand, an argument or an edge's argument);
 /// `us` is scratch.
 pub(package) fn reads_slot(b: &Body, t: Inst, s: u32, us: &mut Vector<Value>) bool {

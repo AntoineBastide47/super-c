@@ -211,6 +211,7 @@ pub(package) struct Opt {
     merged: bool, // the last rebuild merged blocks
     selected: bool, // the last walk made selects (`diamond`), which no walk simplified
     refold: bool, // the last walk folded a value its readers saw before (`null_test`, `merge_exits`)
+    rethru: bool, // `thread` made a jump a return (`ret_folded`)
     unstored: bool, // the last walk dropped a store in a loop, whose loads may leave it now
     pre_at: Vector<u32>, // the rebuild's ranges of `pre_list` per instruction
     pre_list: Vector<u32>,
@@ -424,6 +425,7 @@ extend Opt {
             merged: false,
             selected: false,
             refold: false,
+            rethru: false,
             unstored: false,
             pre_at: Vector::<u32>::new(),
             pre_list: Vector::<u32>::new(),
@@ -875,6 +877,7 @@ extend Opt {
             return false;
         }
         self.merged = false;
+        self.rethru = false;
         if self.ptr_params(pk, b) {
             self.forget();
         }
@@ -979,6 +982,15 @@ extend Opt {
             let _ = self.walk(pk, b);
             self.rebuild(b);
             round += 1;
+        }
+        // A jump made a return (in this `run`) leaves the values it passed dead, which the walk counted where
+        // it would make the returns one (`ret_diamond`): once more, without them.
+        if self.rethru {
+            self.rethru = false;
+            self.tables(pk, b, K_MEM);
+            self.slot_writes(pk, b);
+            let _ = self.walk(pk, b);
+            self.rebuild(b);
         }
         return round != 0;
     }
@@ -4223,16 +4235,25 @@ extend Opt {
         self.min_parts(b, x, t.c, depth - 1);
     }
 
-    // The value of condition `c` the order facts in scope decide (`order_facts`), if any.
+    // The value of condition `c` the order facts in scope decide (`order_facts`), if any: `x <u y` itself,
+    // or `x <u a + 1` false where `a <u x` holds (`a + 1` does not wrap: an inclusive range's second test,
+    // `i + 1 <=u last` after `i <u last`).
     fn order_decided(self: &Self, b: &Body, c: Value) Option<u64> {
         let (x, y, neg) = Opt::as_ult(b, c);
         if x == VNONE {
             return None;
         }
-        return switch self.rel.get(&rel_key(x, y)) {
-            Some(r) => Some((*r != 0 != neg) as u64),
-            None => Option::<u64>::None,
-        };
+        if let Some(r) = self.rel.get(&rel_key(x, y)) {
+            return Some((*r != 0 != neg) as u64);
+        }
+        if is_op(b, y, O_ADD) && const_of(b, b.insts[y as usize].b) == Some(1u64) {
+            if let Some(r) = self.rel.get(&rel_key(b.insts[y as usize].a, x)) {
+                if *r != 0 {
+                    return Some(neg as u64);
+                }
+            }
+        }
+        return None;
     }
 
     // The parameters of block `k`, whose one predecessor (its dominator, which the walk visited) has
@@ -4399,6 +4420,16 @@ extend Opt {
             if t.op == O_JMP {
                 t.a = self.follow(pk, b, k as u32, t.a, VNONE, 0);
                 let j = b.edge_target(t.a);
+                let r = self.ret_folded(pk, b, k as u32, t.a);
+                if r.is_some() {
+                    // The jump returns what its target would.
+                    let mut rt = term(b, j);
+                    rt.a = r.unwrap();
+                    b.insts[i as usize] = rt;
+                    any = true;
+                    self.rethru = true;
+                    continue;
+                }
                 let q = self.threadable(b, k as u32, j);
                 if q != NONE && !self.diamond_side(pk, b, k as u32, t.a, j) {
                     let jt = term(b, j);
@@ -4599,6 +4630,93 @@ extend Opt {
             }
         }
         return s;
+    }
+
+    // What the return ending block `j` gives along jump `e` of block `k` into `j`, as a value `k` has: `j`
+    // heads no loop and holds at most THREAD_BLOCK_MAX pure instructions, and each one the return reads,
+    // `j`'s parameters the edge's arguments, simplifies (`simplify`, on scratch instructions after the
+    // body's) to a value `k` has or to a constant a block that dominates `k` holds (an `Option` built on
+    // each side of a join and taken apart after it). None when not.
+    fn ret_folded(self: &Self, pk: &Package, b: &mut Body, k: u32, e: u32) Option<Value> {
+        let j = b.edge_target(e);
+        let jb = b.blocks[j as usize];
+        let jt = term(b, j);
+        if j == k || j == 0 || self.hdr[j as usize] || jt.op != O_RET || jb.len - 1 > THREAD_BLOCK_MAX {
+            return None;
+        }
+        let base = b.insts.len() as u32;
+        // Per instruction of `j`: its value along the edge, VNONE when it does not simplify.
+        let mut sub: [Value; THREAD_BLOCK_MAX as usize] = [VNONE; THREAD_BLOCK_MAX as usize];
+        let mut ok = true;
+        for i in jb.start..jb.start + jb.len - 1 {
+            let mut s = b.insts[i as usize];
+            let op = s.op;
+            if op != O_ICONST && !(op >= O_ADD && op <= O_INTTOPTR && (op < O_ADDO || op > O_MULO)) && op != O_SELECT {
+                ok = false;
+                break;
+            }
+            let mut known = true;
+            if op != O_ICONST {
+                let (va, ka) = thru_val(b, jb, e, &sub, s.a);
+                let (vb, kb) = thru_val(b, jb, e, &sub, s.b);
+                s.a = va;
+                s.b = vb;
+                known = ka && kb;
+                if op == O_SELECT {
+                    let (vc, kc) = thru_val(b, jb, e, &sub, s.c);
+                    s.c = vc;
+                    known = known && kc;
+                }
+            }
+            if !known {
+                continue;
+            }
+            let x = b.insts.len() as u32;
+            b.insts.push(s);
+            let r = if op == O_ICONST {
+                VNONE
+            } else {
+                simplify(pk, b, x)
+            };
+            if b.insts.len() as u32 != x + 1 {
+                ok = false;
+                break;
+            }
+            sub[(i - jb.start) as usize] = if r != VNONE {
+                r
+            } else if b.insts[x as usize].op == O_ICONST {
+                x
+            } else {
+                VNONE
+            };
+        }
+        let (mut w, kw) = thru_val(b, jb, e, &sub, jt.a);
+        ok = ok && kw;
+        if ok && w != VNONE && (w & (VPARAM | VFLAG)) == 0 && w >= base {
+            // A constant: one a block that dominates `k` holds.
+            let c = b.insts[w as usize];
+            w = VNONE;
+            let mut d = k;
+            for _ in 0..b.blocks.len() {
+                let db = b.blocks[d as usize];
+                for x in db.start..db.start + db.len {
+                    if w == VNONE && same(b.insts[x as usize], c) {
+                        w = x;
+                    }
+                }
+                if w != VNONE || d == 0 {
+                    break;
+                }
+                d = self.idom[d as usize];
+            }
+            ok = w != VNONE;
+        }
+        b.insts.truncate(base as usize);
+        return if ok {
+            Some(w)
+        } else {
+            None
+        };
     }
 
     // Whether edge `e` of block `k` into `j` is a side of a diamond the walk makes selects of: `k` branches
@@ -9123,8 +9241,16 @@ extend Run {
         }
         // Once the walks forwarded the loads of the allocations' blocks; the run folds their null tests.
         let placed = sc.o.promote_places(p, b);
-        // Where every vector operation is in registers (arm64): x86-64 without SSE4.1 has no lane maximum.
-        let minmax = p.vector != 0 && p.vops == VOPS_ALL && vec_minmaxes(b);
+        // Where the backend computes them in registers: arm64 every vector; x86-64 up to 32 bytes (one
+        // `pmax` where it has one, else a `pcmpgt` mask, as the select).
+        let minmax = p.vector != 0 && p.vops != 0 && vec_minmaxes(
+            b,
+            if p.vops == VOPS_ALL {
+                p.vector
+            } else {
+                p.vector.min(32)
+            },
+        );
         if sc.o.dead_allocs(p, b) || placed || minmax {
             let _ = sc.o.run(p, b, true);
         }
@@ -10105,6 +10231,27 @@ fn same_test(b: &Body, x: Value, c: Value) u8 {
     };
 }
 
+// Operand `v` of block `jb`'s instructions along edge `e` into it (`Opt::ret_folded`): a parameter of `jb` is
+// the edge's argument, an instruction of `jb` its value in `sub`, another value itself; and whether it is
+// known (an instruction of `jb` that did not simplify is not).
+fn thru_val(b: &Body, jb: Block, e: u32, sub: &[Value; THREAD_BLOCK_MAX as usize], v: Value) (Value, bool) {
+    if v == VNONE || (v & VFLAG) != 0 {
+        return (v, true);
+    }
+    if (v & VPARAM) != 0 {
+        let q = v & ~VPARAM;
+        if q >= jb.param_start && q < jb.param_start + jb.param_len as u32 {
+            return (b.edge_arg(e, q - jb.param_start), true);
+        }
+        return (v, true);
+    }
+    if v >= jb.start && v < jb.start + jb.len {
+        let w = sub[(v - jb.start) as usize];
+        return (w, w != VNONE);
+    }
+    return (v, true);
+}
+
 // Branch `t` of `b`: each edge argument that is a select on the branch's condition, or on the opposite
 // comparison, takes the side the edge implies (`select(c, x, y)` passed where `c` holds is `x`). Whether
 // any did.
@@ -10360,13 +10507,13 @@ const fn float_const(b: &Body, v: Value) Option<u64> {
 // rewritten in place: to a constant, to a canonical form (a commutative operation's constant second), or
 // an address with its constant index and its base address's offset in its own.
 // Each vector select of integer lanes of at most 4 bytes, of `x` or `y` by their comparison `x REL y` (an
-// order, signed or not): the lanes' maximum or minimum (`vop.max`, `vop.min`; arm64 `smax`, x86-64
-// `pmaxsd`), as LLVM InstCombine's select of a compare. Outside the walk, which reads a vector operation's
-// operands in the pool only where it numbers them. Whether any changed.
-fn vec_minmaxes(b: &mut Body) bool {
+// order, signed or not) of at most `max` bytes: the lanes' maximum or minimum (`vop.max`, `vop.min`; arm64
+// `smax`, x86-64 `pmaxsw`), as LLVM InstCombine's select of a compare. Outside the walk, which reads a
+// vector operation's operands in the pool only where it numbers them. Whether any changed.
+fn vec_minmaxes(b: &mut Body, max: u32) bool {
     let mut any = false;
     for i in 0..b.insts.len() {
-        if b.insts[i].op == O_VSEL && vec_minmax(b, i as u32) {
+        if b.insts[i].op == O_VSEL && type_bytes(b.insts[i].ty, 8) <= max && vec_minmax(b, i as u32) {
             any = true;
         }
     }

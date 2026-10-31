@@ -84,8 +84,8 @@ fn aarch64_baselines_and_c_flags() {
     let lin = tgt::baseline(2, 1);
     let ios = tgt::baseline(4, 1);
     assert(
-        cf::count(lin) == 1 && cf::count(ios) == 3 && cf::count(mac) == 9,
-        "neon; aes, sha2; fp16 dotprod rdm sha3 crc lse",
+        cf::count(lin) == 1 && cf::count(ios) == 3 && cf::count(mac) == 10,
+        "neon; aes, sha2; fp16 dotprod rdm sha3 crc lse rcpc",
     );
     assert(tgt::baseline(0, 1).w[0] == lin.w[0] && tgt::baseline(5, 1).w[0] == lin.w[0], "Windows and Android: neon");
     let mut f = String::new();

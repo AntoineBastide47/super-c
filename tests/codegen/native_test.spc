@@ -17,12 +17,16 @@ import module::loader;
 // The package options a test may set (`object_of`): sibling calls (`Package.tail`), 32-byte vectors
 // (`Package.vector`: x86-64's ymm registers with AVX2), binary16 instructions (`Package.half`: arithmetic
 // on macOS arm64, whose every processor has FEAT_FP16, else conversions), 64-byte vectors (x86-64's zmm
-// registers with AVX-512).
+// registers with AVX-512), `popcnt`, SSE4.1's roundings (`Package.sse41`), arm64's LSE atomics and RCpc
+// acquire loads (`Package.lse`, `Package.rcpc`).
 const TAIL: u32 = 1;
 const WIDE: u32 = 2;
 const HALF: u32 = 4;
 const Z512: u32 = 8;
 const POPCNT: u32 = 16;
+const SSE41: u32 = 32;
+const LSE: u32 = 64;
+const RCPC: u32 = 128;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -59,6 +63,17 @@ fn run_wide(text: str, driver: str) i32 {
 // `run_native` with `popcnt` on an x86-64 host: the driver's `main` returns 0 first on a processor without
 // it. 0 on another host.
 fn run_popcnt(text: str, driver: str) i32 {
+    return run_x64_feature(text, driver, "popcnt", POPCNT);
+}
+
+// `run_native` with SSE4.1 on an x86-64 host, as `run_popcnt`.
+fn run_sse41(text: str, driver: str) i32 {
+    return run_x64_feature(text, driver, "sse4.1", SSE41);
+}
+
+// `run_native` with package option `opt` on an x86-64 host: the driver's `main` returns 0 first on a
+// processor without feature `name` (`__builtin_cpu_supports`). 0 on another host.
+fn run_x64_feature(text: str, driver: str, name: str, opt: u32) i32 {
     if tgt::host_isa() != tgt::axis_index("x86_64", true) {
         return 0;
     }
@@ -66,12 +81,13 @@ fn run_popcnt(text: str, driver: str) i32 {
     let at = driver.find(head);
     assert(at >= 0, "the driver's main");
     let d = format(
-        "{}{}  if (!__builtin_cpu_supports(\"popcnt\")) return 0;\n{}",
+        "{}{}  if (!__builtin_cpu_supports(\"{}\")) return 0;\n{}",
         driver.slice(0, at as usize),
         head,
+        name,
         driver.slice(at as usize + head.len(), driver.len()),
     );
-    return run_native_with(text, &d, POPCNT);
+    return run_native_with(text, &d, opt);
 }
 
 // `run_native` with 64-byte vectors on an x86-64 host: under the emulator command `SC_SDE` names (Intel
@@ -131,6 +147,9 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     let mut p = q.unwrap();
     p.tail = (opts & TAIL) != 0;
     p.popcnt = (opts & POPCNT) != 0;
+    p.sse41 = (opts & SSE41) != 0;
+    p.lse = (opts & LSE) != 0;
+    p.rcpc = (opts & RCPC) != 0;
     p.bitrev = isa == tgt::axis_index("aarch64", true);
     if (opts & WIDE) != 0 {
         p.vector = 32;
@@ -426,6 +445,142 @@ fn runs_of_zero_stores_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Atomic read-modify-writes that return the old value, compare-and-swaps that store and that do not, and
+// acquire and sequentially consistent loads of 8 to 64 bits: arm64 with LSE (`ldadd`, `cas`) and without
+// (exclusive load and store loops), with RCpc (`ldapr`) and without.
+@test
+fn atomic_operations_of_every_width_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @at fn global
+fn @at
+  sig (ptr, ptr, ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: ptr, v4: ptr):
+  v5 = iconst.i8 53
+  v6 = armw.add.i8 v5, v0 acq_rel
+  v7 = iconst.i8 17
+  v8 = armw.sub.i8 v7, v0 relaxed
+  v9 = iconst.i8 90
+  v10 = armw.and.i8 v9, v0 seq_cst
+  v11 = iconst.i8 129
+  v12 = armw.or.i8 v11, v0 acquire
+  v13 = iconst.i8 126
+  v14 = armw.xor.i8 v13, v0 release
+  v15 = iconst.i8 108
+  v16 = armw.xchg.i8 v15, v0 seq_cst
+  v17 = iconst.i8 108
+  v18 = iconst.i8 71
+  v19 = acas v0, v17, v18 seq_cst seq_cst
+  v20 = iconst.i8 19
+  v21 = acas v0, v17, v20 acquire relaxed
+  v22 = aload.i8 v0 acquire
+  v23 = aload.i8 v0 seq_cst
+  v24 = iconst.i16 53
+  v25 = armw.add.i16 v24, v1 acq_rel
+  v26 = iconst.i16 17
+  v27 = armw.sub.i16 v26, v1 relaxed
+  v28 = iconst.i16 90
+  v29 = armw.and.i16 v28, v1 seq_cst
+  v30 = iconst.i16 129
+  v31 = armw.or.i16 v30, v1 acquire
+  v32 = iconst.i16 126
+  v33 = armw.xor.i16 v32, v1 release
+  v34 = iconst.i16 108
+  v35 = armw.xchg.i16 v34, v1 seq_cst
+  v36 = iconst.i16 108
+  v37 = iconst.i16 71
+  v38 = acas v1, v36, v37 seq_cst seq_cst
+  v39 = iconst.i16 19
+  v40 = acas v1, v36, v39 acquire relaxed
+  v41 = aload.i16 v1 acquire
+  v42 = aload.i16 v1 seq_cst
+  v43 = iconst.i32 53
+  v44 = armw.add.i32 v43, v2 acq_rel
+  v45 = iconst.i32 17
+  v46 = armw.sub.i32 v45, v2 relaxed
+  v47 = iconst.i32 90
+  v48 = armw.and.i32 v47, v2 seq_cst
+  v49 = iconst.i32 129
+  v50 = armw.or.i32 v49, v2 acquire
+  v51 = iconst.i32 126
+  v52 = armw.xor.i32 v51, v2 release
+  v53 = iconst.i32 108
+  v54 = armw.xchg.i32 v53, v2 seq_cst
+  v55 = iconst.i32 108
+  v56 = iconst.i32 71
+  v57 = acas v2, v55, v56 seq_cst seq_cst
+  v58 = iconst.i32 19
+  v59 = acas v2, v55, v58 acquire relaxed
+  v60 = aload.i32 v2 acquire
+  v61 = aload.i32 v2 seq_cst
+  v62 = iconst.i64 53
+  v63 = armw.add.i64 v62, v3 acq_rel
+  v64 = iconst.i64 17
+  v65 = armw.sub.i64 v64, v3 relaxed
+  v66 = iconst.i64 90
+  v67 = armw.and.i64 v66, v3 seq_cst
+  v68 = iconst.i64 129
+  v69 = armw.or.i64 v68, v3 acquire
+  v70 = iconst.i64 126
+  v71 = armw.xor.i64 v70, v3 release
+  v72 = iconst.i64 108
+  v73 = armw.xchg.i64 v72, v3 seq_cst
+  v74 = iconst.i64 108
+  v75 = iconst.i64 71
+  v76 = acas v3, v74, v75 seq_cst seq_cst
+  v77 = iconst.i64 19
+  v78 = acas v3, v74, v77 acquire relaxed
+  v79 = aload.i64 v3 acquire
+  v80 = aload.i64 v3 seq_cst
+  store v6, v4+0 align 0
+  store v8, v4+8 align 0
+  store v10, v4+16 align 0
+  store v12, v4+24 align 0
+  store v14, v4+32 align 0
+  store v16, v4+40 align 0
+  store v19, v4+48 align 0
+  store v21, v4+56 align 0
+  store v22, v4+64 align 0
+  store v23, v4+72 align 0
+  store v25, v4+80 align 0
+  store v27, v4+88 align 0
+  store v29, v4+96 align 0
+  store v31, v4+104 align 0
+  store v33, v4+112 align 0
+  store v35, v4+120 align 0
+  store v38, v4+128 align 0
+  store v40, v4+136 align 0
+  store v41, v4+144 align 0
+  store v42, v4+152 align 0
+  store v44, v4+160 align 0
+  store v46, v4+168 align 0
+  store v48, v4+176 align 0
+  store v50, v4+184 align 0
+  store v52, v4+192 align 0
+  store v54, v4+200 align 0
+  store v57, v4+208 align 0
+  store v59, v4+216 align 0
+  store v60, v4+224 align 0
+  store v61, v4+232 align 0
+  store v63, v4+240 align 0
+  store v65, v4+248 align 0
+  store v67, v4+256 align 0
+  store v69, v4+264 align 0
+  store v71, v4+272 align 0
+  store v73, v4+280 align 0
+  store v76, v4+288 align 0
+  store v78, v4+296 align 0
+  store v79, v4+304 align 0
+  store v80, v4+312 align 0
+  ret
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\nvoid at(void *, void *, void *, void *, unsigned char *);\n#define CHECK(T, at0, x) { T v = (T)(x); T w; uint64_t o = at0; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != v) return 1; v = (T)(v + 0x35); o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != v) return 2; v = (T)(v - 0x11); o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != v) return 3; v = (T)(v & 0x5A); o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != v) return 4; v = (T)(v | 0x81); o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != v) return 5; v = (T)(v ^ 0x7E); o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != v) return 6; o += 8; \\\n  if (r[o] != 1) return 7; o += 8; \\\n  if (r[o] != 0) return 8; o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != 0x47) return 9; o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != 0x47) return 10; }\nint main(void) {\n  uint8_t a = 0xF3; uint16_t b = 0x8123; uint32_t c = 0x80001234u; uint64_t d = 0x8000000012345678ull;\n  unsigned char r[320];\n  memset(r, 0xEE, sizeof r);\n  at(&a, &b, &c, &d, r);\n  CHECK(uint8_t, 0, 0xF3) CHECK(uint16_t, 80, 0x8123) CHECK(uint32_t, 160, 0x80001234u)\n  CHECK(uint64_t, 240, 0x8000000012345678ull)\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_native_with(lir, drv, LSE | RCPC), 0);
+}
+
 // Atomic read-modify-writes whose old value nothing reads (x86-64 `lock or`, `lock and`, `lock add`,
 // `lock sub`, `lock xor` on the memory, with an immediate or a register) of 16, 32 and 64 bits.
 @test
@@ -510,9 +665,9 @@ fn bit_counts_with_and_without_popcnt_run() {
 }
 
 // The C library's exact rounding, absolute value, minimum and maximum of f64 and f32, which arm64 expands
-// in place of the call (`frintm`, `frintp`, `frinta`, `frintz`, `fabs`, `fminnm`, `fmaxnm`), equal the
-// library's on signed zeros, halves, the last fraction below one half, infinities and NaN (a minimum or
-// maximum of two zeros may be either).
+// in place of the call (`frintm`, `frintp`, `frinta`, `frintz`, `fabs`, `fminnm`, `fmaxnm`) and x86-64 too
+// (SSE2's `andpd`, `minsd`, `maxsd`; SSE4.1's `roundsd`), equal the library's on signed zeros, halves, the
+// last fraction below one half, infinities and NaN (a minimum or maximum of two zeros may be either).
 @test
 fn libm_rounding_minimum_and_maximum_calls_run() {
     if !cli::has_cc() {
@@ -521,6 +676,7 @@ fn libm_rounding_minimum_and_maximum_calls_run() {
     let lir = "lir ptr 8\nsym @floor fn global\nsym @t_floor fn global\nsym @floorf fn global\nsym @t_floorf fn global\nsym @ceil fn global\nsym @t_ceil fn global\nsym @ceilf fn global\nsym @t_ceilf fn global\nsym @round fn global\nsym @t_round fn global\nsym @roundf fn global\nsym @t_roundf fn global\nsym @trunc fn global\nsym @t_trunc fn global\nsym @truncf fn global\nsym @t_truncf fn global\nsym @fabs fn global\nsym @t_fabs fn global\nsym @fabsf fn global\nsym @t_fabsf fn global\nsym @fmin fn global\nsym @t_fmin fn global\nsym @fminf fn global\nsym @t_fminf fn global\nsym @fmax fn global\nsym @t_fmax fn global\nsym @fmaxf fn global\nsym @t_fmaxf fn global\nfn @t_floor\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @floor(v0) : (f64) -> f64\n  ret v1\nfn @t_floorf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @floorf(v0) : (f32) -> f32\n  ret v1\nfn @t_ceil\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @ceil(v0) : (f64) -> f64\n  ret v1\nfn @t_ceilf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @ceilf(v0) : (f32) -> f32\n  ret v1\nfn @t_round\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @round(v0) : (f64) -> f64\n  ret v1\nfn @t_roundf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @roundf(v0) : (f32) -> f32\n  ret v1\nfn @t_trunc\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @trunc(v0) : (f64) -> f64\n  ret v1\nfn @t_truncf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @truncf(v0) : (f32) -> f32\n  ret v1\nfn @t_fabs\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @fabs(v0) : (f64) -> f64\n  ret v1\nfn @t_fabsf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @fabsf(v0) : (f32) -> f32\n  ret v1\nfn @t_fmin\n  sig (f64, f64) -> f64\nb0(v0: f64, v1: f64):\n  v2 = call.f64 @fmin(v0, v1) : (f64, f64) -> f64\n  ret v2\nfn @t_fminf\n  sig (f32, f32) -> f32\nb0(v0: f32, v1: f32):\n  v2 = call.f32 @fminf(v0, v1) : (f32, f32) -> f32\n  ret v2\nfn @t_fmax\n  sig (f64, f64) -> f64\nb0(v0: f64, v1: f64):\n  v2 = call.f64 @fmax(v0, v1) : (f64, f64) -> f64\n  ret v2\nfn @t_fmaxf\n  sig (f32, f32) -> f32\nb0(v0: f32, v1: f32):\n  v2 = call.f32 @fmaxf(v0, v1) : (f32, f32) -> f32\n  ret v2\n";
     let drv = "#include <math.h>\n#include <string.h>\n#include <stdint.h>\ndouble t_floor(double);\nfloat t_floorf(float);\ndouble t_ceil(double);\nfloat t_ceilf(float);\ndouble t_round(double);\nfloat t_roundf(float);\ndouble t_trunc(double);\nfloat t_truncf(float);\ndouble t_fabs(double);\nfloat t_fabsf(float);\ndouble t_fmin(double, double);\nfloat t_fminf(float, float);\ndouble t_fmax(double, double);\nfloat t_fmaxf(float, float);\nstatic int same64(double x, double y) { uint64_t a, b; memcpy(&a, &x, 8); memcpy(&b, &y, 8); return a == b || (x != x && y != y) || (x == 0 && y == 0); }\nstatic int same32(float x, float y) { uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4); return a == b || (x != x && y != y) || (x == 0 && y == 0); }\nstatic int bits64(double x, double y) { uint64_t a, b; memcpy(&a, &x, 8); memcpy(&b, &y, 8); return a == b || (x != x && y != y); }\nstatic int bits32(float x, float y) { uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4); return a == b || (x != x && y != y); }\nint main(void) {\n  double v[14] = {0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999999999999994, 4503599627370497.0, 1e300, -INFINITY, NAN, -3.75};\n  for (int i = 0; i < 14; i++) {\n    double x = v[i];\n    float f = (float)x;\n    if (!bits64(t_floor(x), floor(x))) return 1;\n    if (!bits32(t_floorf(f), floorf(f))) return 2;\n    if (!bits64(t_ceil(x), ceil(x))) return 3;\n    if (!bits32(t_ceilf(f), ceilf(f))) return 4;\n    if (!bits64(t_round(x), round(x))) return 5;\n    if (!bits32(t_roundf(f), roundf(f))) return 6;\n    if (!bits64(t_trunc(x), trunc(x))) return 7;\n    if (!bits32(t_truncf(f), truncf(f))) return 8;\n    if (!bits64(t_fabs(x), fabs(x))) return 9;\n    if (!bits32(t_fabsf(f), fabsf(f))) return 10;\n    for (int j = 0; j < 14; j++) {\n      double y = v[j];\n      float g = (float)y;\n      if (!same64(t_fmin(x, y), fmin(x, y))) return 11;\n      if (!same32(t_fminf(f, g), fminf(f, g))) return 12;\n      if (!same64(t_fmax(x, y), fmax(x, y))) return 13;\n      if (!same32(t_fmaxf(f, g), fmaxf(f, g))) return 14;\n    }\n  }\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_sse41(lir, drv), 0);
 }
 
 // A select of floats of one width on a comparison of floats of the other: the comparison's own width
@@ -3378,6 +3534,491 @@ b0(v0: ptr, v1: ptr):
   ret
 )";
     let drv = "#include <stdint.h>\n#include <string.h>\nvoid reds(const void *, void *);\nint main(void) {\n  int32_t w[4] = {7, -3, 100, -40};\n  unsigned char o[56];\n  reds(w, o);\n  int32_t s, mx, mn; int8_t bs, bmn; uint8_t bmx; int16_t hs; int64_t ds; int32_t ps, pm;\n  memcpy(&s, o, 4); memcpy(&mx, o + 4, 4); memcpy(&mn, o + 8, 4);\n  memcpy(&bs, o + 12, 1); memcpy(&bmn, o + 13, 1); memcpy(&bmx, o + 14, 1);\n  memcpy(&hs, o + 16, 2); memcpy(&ds, o + 24, 8); memcpy(&ps, o + 32, 4); memcpy(&pm, o + 36, 4);\n  if (s != 64 || mx != 100 || mn != 7) return 1;\n  const uint8_t *b = (const uint8_t *)w;\n  int bsum = 0, bmin = 127, bmax = 0;\n  for (int i = 0; i < 16; i++) { bsum += b[i]; if ((int8_t)b[i] < bmin) bmin = (int8_t)b[i]; if (b[i] > bmax) bmax = b[i]; }\n  if (bs != (int8_t)bsum || bmn != bmin || bmx != bmax) return 2;\n  const int16_t *h = (const int16_t *)w;\n  int hsum = 0;\n  for (int i = 0; i < 8; i++) hsum += h[i];\n  if (hs != (int16_t)hsum) return 3;\n  const int64_t *d = (const int64_t *)w;\n  if (ds != (int64_t)((uint64_t)d[0] + (uint64_t)d[1])) return 4;\n  if (ps != 4 || pm != 7) return 5;\n  int32_t ra; uint8_t ro; int16_t rx; int64_t rq;\n  memcpy(&ra, o + 40, 4); memcpy(&ro, o + 44, 1); memcpy(&rx, o + 46, 2); memcpy(&rq, o + 48, 8);\n  if (ra != (w[0] & w[1] & w[2] & w[3])) return 6;\n  uint8_t bo = 0; for (int i = 0; i < 16; i++) bo |= b[i];\n  if (ro != bo) return 7;\n  int16_t hx = 0; for (int i = 0; i < 8; i++) hx ^= h[i];\n  if (rx != hx) return 8;\n  if (rq != (d[0] ^ d[1])) return 9;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// The minimum and maximum of a vector's integer lanes and the lanes' minimum and maximum of two vectors,
+// signed and unsigned, of every lane width (x86-64: `pminsw`, `pmaxub`, AVX2's `pmin`/`pmax`, else a
+// `pcmpgt` mask; 64-bit lanes by one `cmov`), in xmm and in ymm registers.
+@test
+fn vector_minimums_and_maximums_of_every_lane_width_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @mm fn global
+fn @mm
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v16i8 v0 align 0
+  v4 = load.v16i8 v1 align 0
+  v5 = vop.reduce_min.s.i8 (v3)
+  v6 = vop.reduce_max.s.i8 (v3)
+  v7 = vop.reduce_min.i8 (v3)
+  v8 = vop.reduce_max.i8 (v3)
+  v9 = vop.min.s.v16i8 (v3, v4)
+  v10 = vop.max.s.v16i8 (v3, v4)
+  v11 = vop.min.v16i8 (v3, v4)
+  v12 = vop.max.v16i8 (v3, v4)
+  v13 = load.v8i16 v0 align 0
+  v14 = load.v8i16 v1 align 0
+  v15 = vop.reduce_min.s.i16 (v13)
+  v16 = vop.reduce_max.s.i16 (v13)
+  v17 = vop.reduce_min.i16 (v13)
+  v18 = vop.reduce_max.i16 (v13)
+  v19 = vop.min.s.v8i16 (v13, v14)
+  v20 = vop.max.s.v8i16 (v13, v14)
+  v21 = vop.min.v8i16 (v13, v14)
+  v22 = vop.max.v8i16 (v13, v14)
+  v23 = load.v4i32 v0 align 0
+  v24 = load.v4i32 v1 align 0
+  v25 = vop.reduce_min.s.i32 (v23)
+  v26 = vop.reduce_max.s.i32 (v23)
+  v27 = vop.reduce_min.i32 (v23)
+  v28 = vop.reduce_max.i32 (v23)
+  v29 = vop.min.s.v4i32 (v23, v24)
+  v30 = vop.max.s.v4i32 (v23, v24)
+  v31 = vop.min.v4i32 (v23, v24)
+  v32 = vop.max.v4i32 (v23, v24)
+  v33 = load.v2i64 v0 align 0
+  v34 = load.v2i64 v1 align 0
+  v35 = vop.reduce_min.s.i64 (v33)
+  v36 = vop.reduce_max.s.i64 (v33)
+  v37 = vop.reduce_min.i64 (v33)
+  v38 = vop.reduce_max.i64 (v33)
+  store v5, v2+0 align 0
+  store v6, v2+8 align 0
+  store v7, v2+16 align 0
+  store v8, v2+24 align 0
+  store v9, v2+128 align 0
+  store v10, v2+144 align 0
+  store v11, v2+160 align 0
+  store v12, v2+176 align 0
+  store v15, v2+32 align 0
+  store v16, v2+40 align 0
+  store v17, v2+48 align 0
+  store v18, v2+56 align 0
+  store v19, v2+192 align 0
+  store v20, v2+208 align 0
+  store v21, v2+224 align 0
+  store v22, v2+240 align 0
+  store v25, v2+64 align 0
+  store v26, v2+72 align 0
+  store v27, v2+80 align 0
+  store v28, v2+88 align 0
+  store v29, v2+256 align 0
+  store v30, v2+272 align 0
+  store v31, v2+288 align 0
+  store v32, v2+304 align 0
+  store v35, v2+96 align 0
+  store v36, v2+104 align 0
+  store v37, v2+112 align 0
+  store v38, v2+120 align 0
+  ret
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\nvoid mm(const void *, const void *, void *);\n#define RED(T, n, at) { T x[n]; memcpy(x, a, 16); T lo = x[0], hi = x[0]; for (int i = 1; i < n; i++) { if (x[i] < lo) lo = x[i]; if (x[i] > hi) hi = x[i]; } T r0, r1; memcpy(&r0, o + at, sizeof(T)); memcpy(&r1, o + at + 8, sizeof(T)); if (r0 != lo || r1 != hi) return at / 8 + 1; }\n#define LANE(T, n, at) { T x[n], y[n], r[n]; memcpy(x, a, 16); memcpy(y, b, 16); memcpy(r, o + at, 16); for (int i = 0; i < n; i++) if (r[i] != (x[i] < y[i] ? x[i] : y[i])) return at / 16 + 40; memcpy(r, o + at + 16, 16); for (int i = 0; i < n; i++) if (r[i] != (x[i] > y[i] ? x[i] : y[i])) return at / 16 + 60; }\nint main(void) {\n  unsigned char a[16], b[16], o[320];\n  for (int i = 0; i < 16; i++) { a[i] = (unsigned char)(i * 73 + 129); b[i] = (unsigned char)(i * 151 + 7); }\n  mm(a, b, o);\n  RED(int8_t, 16, 0) RED(uint8_t, 16, 16) RED(int16_t, 8, 32) RED(uint16_t, 8, 48)\n  RED(int32_t, 4, 64) RED(uint32_t, 4, 80) RED(int64_t, 2, 96) RED(uint64_t, 2, 112)\n  LANE(int8_t, 16, 128) LANE(uint8_t, 16, 160) LANE(int16_t, 8, 192) LANE(uint16_t, 8, 224)\n  LANE(int32_t, 4, 256) LANE(uint32_t, 4, 288)\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+    let wide = M"(lir ptr 8
+sym @mm fn global
+fn @mm
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v32i8 v0 align 0
+  v4 = load.v32i8 v1 align 0
+  v5 = vop.min.s.v32i8 (v3, v4)
+  v6 = vop.max.s.v32i8 (v3, v4)
+  v7 = vop.min.v32i8 (v3, v4)
+  v8 = vop.max.v32i8 (v3, v4)
+  v9 = load.v16i16 v0 align 0
+  v10 = load.v16i16 v1 align 0
+  v11 = vop.min.s.v16i16 (v9, v10)
+  v12 = vop.max.s.v16i16 (v9, v10)
+  v13 = vop.min.v16i16 (v9, v10)
+  v14 = vop.max.v16i16 (v9, v10)
+  v15 = load.v8i32 v0 align 0
+  v16 = load.v8i32 v1 align 0
+  v17 = vop.min.s.v8i32 (v15, v16)
+  v18 = vop.max.s.v8i32 (v15, v16)
+  v19 = vop.min.v8i32 (v15, v16)
+  v20 = vop.max.v8i32 (v15, v16)
+  store v5, v2+0 align 0
+  store v6, v2+32 align 0
+  store v7, v2+64 align 0
+  store v8, v2+96 align 0
+  store v11, v2+128 align 0
+  store v12, v2+160 align 0
+  store v13, v2+192 align 0
+  store v14, v2+224 align 0
+  store v17, v2+256 align 0
+  store v18, v2+288 align 0
+  store v19, v2+320 align 0
+  store v20, v2+352 align 0
+  ret
+)";
+    let wdrv = "#include <stdint.h>\n#include <string.h>\nvoid mm(const void *, const void *, void *);\n#define LANE(T, n, at) { T x[n], y[n], r[n]; memcpy(x, a, 32); memcpy(y, b, 32); memcpy(r, o + at, 32); for (int i = 0; i < n; i++) if (r[i] != (x[i] < y[i] ? x[i] : y[i])) return at / 32 + 1; memcpy(r, o + at + 32, 32); for (int i = 0; i < n; i++) if (r[i] != (x[i] > y[i] ? x[i] : y[i])) return at / 32 + 20; }\nint main(void) {\n  unsigned char a[32], b[32], o[384];\n  for (int i = 0; i < 32; i++) { a[i] = (unsigned char)(i * 73 + 129); b[i] = (unsigned char)(i * 151 + 7); }\n  mm(a, b, o);\n  LANE(int8_t, 32, 0) LANE(uint8_t, 32, 64) LANE(int16_t, 16, 128) LANE(uint16_t, 16, 192)\n  LANE(int32_t, 8, 256) LANE(uint32_t, 8, 320)\n  return 0;\n}\n";
+    assert_eq(run_wide(wide, wdrv), 0);
+}
+
+// Whether any lane of a lane mask is set (`vop.reduce_or` compared with 0) of comparisons of every lane
+// width and their `and`, `or` and `xor` (x86-64: `pmovmskb` and `test`, AVX2's `vpmovmskb` for 32 bytes).
+@test
+fn any_lane_of_a_mask_runs() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @anyl fn global
+fn @anyl
+  sig (ptr, ptr) -> i32
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = load.v16i8 v0 align 0
+  v5 = load.v16i8 v1 align 0
+  v6 = vcmp.eq.v16i8 v4, v5
+  v7 = vcmp.sgt.v16i8 v4, v5
+  v8 = vcmp.ult.v16i8 v4, v5
+  v9 = and.v16i8 v6, v7
+  v10 = or.v16i8 v8, v6
+  v11 = xor.v16i8 v6, v7
+  v12 = vop.reduce_or.i8 (v6)
+  v13 = iconst.i8 0
+  v14 = icmp.ne v12, v13
+  v15 = vop.reduce_or.i8 (v9)
+  v16 = iconst.i8 0
+  v17 = icmp.ne v15, v16
+  v18 = vop.reduce_or.i8 (v10)
+  v19 = iconst.i8 0
+  v20 = icmp.ne v18, v19
+  v21 = vop.reduce_or.i8 (v11)
+  v22 = iconst.i8 0
+  v23 = icmp.ne v21, v22
+  v24 = load.v8i16 v0 align 0
+  v25 = load.v8i16 v1 align 0
+  v26 = vcmp.eq.v8i16 v24, v25
+  v27 = vcmp.sgt.v8i16 v24, v25
+  v28 = vcmp.ult.v8i16 v24, v25
+  v29 = and.v8i16 v26, v27
+  v30 = or.v8i16 v28, v26
+  v31 = xor.v8i16 v26, v27
+  v32 = vop.reduce_or.i16 (v26)
+  v33 = iconst.i16 0
+  v34 = icmp.ne v32, v33
+  v35 = vop.reduce_or.i16 (v29)
+  v36 = iconst.i16 0
+  v37 = icmp.ne v35, v36
+  v38 = vop.reduce_or.i16 (v30)
+  v39 = iconst.i16 0
+  v40 = icmp.ne v38, v39
+  v41 = vop.reduce_or.i16 (v31)
+  v42 = iconst.i16 0
+  v43 = icmp.ne v41, v42
+  v44 = load.v4i32 v0 align 0
+  v45 = load.v4i32 v1 align 0
+  v46 = vcmp.eq.v4i32 v44, v45
+  v47 = vcmp.sgt.v4i32 v44, v45
+  v48 = vcmp.ult.v4i32 v44, v45
+  v49 = and.v4i32 v46, v47
+  v50 = or.v4i32 v48, v46
+  v51 = xor.v4i32 v46, v47
+  v52 = vop.reduce_or.i32 (v46)
+  v53 = iconst.i32 0
+  v54 = icmp.ne v52, v53
+  v55 = vop.reduce_or.i32 (v49)
+  v56 = iconst.i32 0
+  v57 = icmp.ne v55, v56
+  v58 = vop.reduce_or.i32 (v50)
+  v59 = iconst.i32 0
+  v60 = icmp.ne v58, v59
+  v61 = vop.reduce_or.i32 (v51)
+  v62 = iconst.i32 0
+  v63 = icmp.ne v61, v62
+  v64 = load.v2i64 v0 align 0
+  v65 = load.v2i64 v1 align 0
+  v66 = vcmp.eq.v2i64 v64, v65
+  v67 = vcmp.sgt.v2i64 v64, v65
+  v68 = vcmp.ult.v2i64 v64, v65
+  v69 = and.v2i64 v66, v67
+  v70 = or.v2i64 v68, v66
+  v71 = xor.v2i64 v66, v67
+  v72 = vop.reduce_or.i64 (v66)
+  v73 = iconst.i64 0
+  v74 = icmp.ne v72, v73
+  v75 = vop.reduce_or.i64 (v69)
+  v76 = iconst.i64 0
+  v77 = icmp.ne v75, v76
+  v78 = vop.reduce_or.i64 (v70)
+  v79 = iconst.i64 0
+  v80 = icmp.ne v78, v79
+  v81 = vop.reduce_or.i64 (v71)
+  v82 = iconst.i64 0
+  v83 = icmp.ne v81, v82
+  v84 = zext.i32 v14
+  v85 = iconst.i32 0
+  v86 = shl.i32 v84, v85
+  v87 = or.i32 v2, v86
+  v88 = zext.i32 v17
+  v89 = iconst.i32 1
+  v90 = shl.i32 v88, v89
+  v91 = or.i32 v87, v90
+  v92 = zext.i32 v20
+  v93 = iconst.i32 2
+  v94 = shl.i32 v92, v93
+  v95 = or.i32 v91, v94
+  v96 = zext.i32 v23
+  v97 = iconst.i32 3
+  v98 = shl.i32 v96, v97
+  v99 = or.i32 v95, v98
+  v100 = zext.i32 v34
+  v101 = iconst.i32 4
+  v102 = shl.i32 v100, v101
+  v103 = or.i32 v99, v102
+  v104 = zext.i32 v37
+  v105 = iconst.i32 5
+  v106 = shl.i32 v104, v105
+  v107 = or.i32 v103, v106
+  v108 = zext.i32 v40
+  v109 = iconst.i32 6
+  v110 = shl.i32 v108, v109
+  v111 = or.i32 v107, v110
+  v112 = zext.i32 v43
+  v113 = iconst.i32 7
+  v114 = shl.i32 v112, v113
+  v115 = or.i32 v111, v114
+  v116 = zext.i32 v54
+  v117 = iconst.i32 8
+  v118 = shl.i32 v116, v117
+  v119 = or.i32 v115, v118
+  v120 = zext.i32 v57
+  v121 = iconst.i32 9
+  v122 = shl.i32 v120, v121
+  v123 = or.i32 v119, v122
+  v124 = zext.i32 v60
+  v125 = iconst.i32 10
+  v126 = shl.i32 v124, v125
+  v127 = or.i32 v123, v126
+  v128 = zext.i32 v63
+  v129 = iconst.i32 11
+  v130 = shl.i32 v128, v129
+  v131 = or.i32 v127, v130
+  v132 = zext.i32 v74
+  v133 = iconst.i32 12
+  v134 = shl.i32 v132, v133
+  v135 = or.i32 v131, v134
+  v136 = zext.i32 v77
+  v137 = iconst.i32 13
+  v138 = shl.i32 v136, v137
+  v139 = or.i32 v135, v138
+  v140 = zext.i32 v80
+  v141 = iconst.i32 14
+  v142 = shl.i32 v140, v141
+  v143 = or.i32 v139, v142
+  v144 = iconst.i32 32768
+  br v83, b1, b2
+b1:
+  v145 = or.i32 v143, v144
+  ret v145
+b2:
+  ret v143
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\nint32_t anyl(const void *, const void *);\n#define T(S, U, at) { S x[16 / sizeof(S)], y[16 / sizeof(S)]; memcpy(x, a, 16); memcpy(y, b, 16); int e = 0, n = 0, o = 0, q = 0; for (unsigned i = 0; i < 16 / sizeof(S); i++) { int eq = x[i] == y[i], gt = x[i] > y[i]; e |= eq; n |= eq && gt; o |= (U)x[i] < (U)y[i] || eq; q |= eq != gt; } want |= e << at | n << (at + 1) | o << (at + 2) | q << (at + 3); }\nstatic int check(const unsigned char *a, const unsigned char *b) {\n  int want = 0;\n  T(int8_t, uint8_t, 0) T(int16_t, uint16_t, 4) T(int32_t, uint32_t, 8) T(int64_t, uint64_t, 12)\n  return anyl(a, b) == want;\n}\nint main(void) {\n  unsigned char a[16], b[16];\n  for (int i = 0; i < 16; i++) { a[i] = (unsigned char)(i * 37 + 3); b[i] = (unsigned char)(i * 37 + 3); }\n  if (!check(a, b)) return 1;\n  for (int i = 0; i < 16; i++) b[i] = (unsigned char)(a[i] + 1);\n  if (!check(a, b)) return 2;\n  b[16 - 1] = a[16 - 1];\n  if (!check(a, b)) return 3;\n  for (int i = 0; i < 16; i++) b[i] = (unsigned char)(a[i] - 1);\n  if (!check(a, b)) return 4;\n  b[0] = 0x80; a[0] = 0x7F;\n  if (!check(a, b)) return 5;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+    let wide = M"(lir ptr 8
+sym @anyl fn global
+fn @anyl
+  sig (ptr, ptr) -> i32
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = load.v32i8 v0 align 0
+  v5 = load.v32i8 v1 align 0
+  v6 = vcmp.eq.v32i8 v4, v5
+  v7 = vcmp.sgt.v32i8 v4, v5
+  v8 = vcmp.ult.v32i8 v4, v5
+  v9 = and.v32i8 v6, v7
+  v10 = or.v32i8 v8, v6
+  v11 = xor.v32i8 v6, v7
+  v12 = vop.reduce_or.i8 (v6)
+  v13 = iconst.i8 0
+  v14 = icmp.ne v12, v13
+  v15 = vop.reduce_or.i8 (v9)
+  v16 = iconst.i8 0
+  v17 = icmp.ne v15, v16
+  v18 = vop.reduce_or.i8 (v10)
+  v19 = iconst.i8 0
+  v20 = icmp.ne v18, v19
+  v21 = vop.reduce_or.i8 (v11)
+  v22 = iconst.i8 0
+  v23 = icmp.ne v21, v22
+  v24 = load.v16i16 v0 align 0
+  v25 = load.v16i16 v1 align 0
+  v26 = vcmp.eq.v16i16 v24, v25
+  v27 = vcmp.sgt.v16i16 v24, v25
+  v28 = vcmp.ult.v16i16 v24, v25
+  v29 = and.v16i16 v26, v27
+  v30 = or.v16i16 v28, v26
+  v31 = xor.v16i16 v26, v27
+  v32 = vop.reduce_or.i16 (v26)
+  v33 = iconst.i16 0
+  v34 = icmp.ne v32, v33
+  v35 = vop.reduce_or.i16 (v29)
+  v36 = iconst.i16 0
+  v37 = icmp.ne v35, v36
+  v38 = vop.reduce_or.i16 (v30)
+  v39 = iconst.i16 0
+  v40 = icmp.ne v38, v39
+  v41 = vop.reduce_or.i16 (v31)
+  v42 = iconst.i16 0
+  v43 = icmp.ne v41, v42
+  v44 = load.v8i32 v0 align 0
+  v45 = load.v8i32 v1 align 0
+  v46 = vcmp.eq.v8i32 v44, v45
+  v47 = vcmp.sgt.v8i32 v44, v45
+  v48 = vcmp.ult.v8i32 v44, v45
+  v49 = and.v8i32 v46, v47
+  v50 = or.v8i32 v48, v46
+  v51 = xor.v8i32 v46, v47
+  v52 = vop.reduce_or.i32 (v46)
+  v53 = iconst.i32 0
+  v54 = icmp.ne v52, v53
+  v55 = vop.reduce_or.i32 (v49)
+  v56 = iconst.i32 0
+  v57 = icmp.ne v55, v56
+  v58 = vop.reduce_or.i32 (v50)
+  v59 = iconst.i32 0
+  v60 = icmp.ne v58, v59
+  v61 = vop.reduce_or.i32 (v51)
+  v62 = iconst.i32 0
+  v63 = icmp.ne v61, v62
+  v64 = load.v4i64 v0 align 0
+  v65 = load.v4i64 v1 align 0
+  v66 = vcmp.eq.v4i64 v64, v65
+  v67 = vcmp.sgt.v4i64 v64, v65
+  v68 = vcmp.ult.v4i64 v64, v65
+  v69 = and.v4i64 v66, v67
+  v70 = or.v4i64 v68, v66
+  v71 = xor.v4i64 v66, v67
+  v72 = vop.reduce_or.i64 (v66)
+  v73 = iconst.i64 0
+  v74 = icmp.ne v72, v73
+  v75 = vop.reduce_or.i64 (v69)
+  v76 = iconst.i64 0
+  v77 = icmp.ne v75, v76
+  v78 = vop.reduce_or.i64 (v70)
+  v79 = iconst.i64 0
+  v80 = icmp.ne v78, v79
+  v81 = vop.reduce_or.i64 (v71)
+  v82 = iconst.i64 0
+  v83 = icmp.ne v81, v82
+  v84 = zext.i32 v14
+  v85 = iconst.i32 0
+  v86 = shl.i32 v84, v85
+  v87 = or.i32 v2, v86
+  v88 = zext.i32 v17
+  v89 = iconst.i32 1
+  v90 = shl.i32 v88, v89
+  v91 = or.i32 v87, v90
+  v92 = zext.i32 v20
+  v93 = iconst.i32 2
+  v94 = shl.i32 v92, v93
+  v95 = or.i32 v91, v94
+  v96 = zext.i32 v23
+  v97 = iconst.i32 3
+  v98 = shl.i32 v96, v97
+  v99 = or.i32 v95, v98
+  v100 = zext.i32 v34
+  v101 = iconst.i32 4
+  v102 = shl.i32 v100, v101
+  v103 = or.i32 v99, v102
+  v104 = zext.i32 v37
+  v105 = iconst.i32 5
+  v106 = shl.i32 v104, v105
+  v107 = or.i32 v103, v106
+  v108 = zext.i32 v40
+  v109 = iconst.i32 6
+  v110 = shl.i32 v108, v109
+  v111 = or.i32 v107, v110
+  v112 = zext.i32 v43
+  v113 = iconst.i32 7
+  v114 = shl.i32 v112, v113
+  v115 = or.i32 v111, v114
+  v116 = zext.i32 v54
+  v117 = iconst.i32 8
+  v118 = shl.i32 v116, v117
+  v119 = or.i32 v115, v118
+  v120 = zext.i32 v57
+  v121 = iconst.i32 9
+  v122 = shl.i32 v120, v121
+  v123 = or.i32 v119, v122
+  v124 = zext.i32 v60
+  v125 = iconst.i32 10
+  v126 = shl.i32 v124, v125
+  v127 = or.i32 v123, v126
+  v128 = zext.i32 v63
+  v129 = iconst.i32 11
+  v130 = shl.i32 v128, v129
+  v131 = or.i32 v127, v130
+  v132 = zext.i32 v74
+  v133 = iconst.i32 12
+  v134 = shl.i32 v132, v133
+  v135 = or.i32 v131, v134
+  v136 = zext.i32 v77
+  v137 = iconst.i32 13
+  v138 = shl.i32 v136, v137
+  v139 = or.i32 v135, v138
+  v140 = zext.i32 v80
+  v141 = iconst.i32 14
+  v142 = shl.i32 v140, v141
+  v143 = or.i32 v139, v142
+  v144 = iconst.i32 32768
+  br v83, b1, b2
+b1:
+  v145 = or.i32 v143, v144
+  ret v145
+b2:
+  ret v143
+)";
+    let wdrv = "#include <stdint.h>\n#include <string.h>\nint32_t anyl(const void *, const void *);\n#define T(S, U, at) { S x[32 / sizeof(S)], y[32 / sizeof(S)]; memcpy(x, a, 32); memcpy(y, b, 32); int e = 0, n = 0, o = 0, q = 0; for (unsigned i = 0; i < 32 / sizeof(S); i++) { int eq = x[i] == y[i], gt = x[i] > y[i]; e |= eq; n |= eq && gt; o |= (U)x[i] < (U)y[i] || eq; q |= eq != gt; } want |= e << at | n << (at + 1) | o << (at + 2) | q << (at + 3); }\nstatic int check(const unsigned char *a, const unsigned char *b) {\n  int want = 0;\n  T(int8_t, uint8_t, 0) T(int16_t, uint16_t, 4) T(int32_t, uint32_t, 8) T(int64_t, uint64_t, 12)\n  return anyl(a, b) == want;\n}\nint main(void) {\n  unsigned char a[32], b[32];\n  for (int i = 0; i < 32; i++) { a[i] = (unsigned char)(i * 37 + 3); b[i] = (unsigned char)(i * 37 + 3); }\n  if (!check(a, b)) return 1;\n  for (int i = 0; i < 32; i++) b[i] = (unsigned char)(a[i] + 1);\n  if (!check(a, b)) return 2;\n  b[32 - 1] = a[32 - 1];\n  if (!check(a, b)) return 3;\n  for (int i = 0; i < 32; i++) b[i] = (unsigned char)(a[i] - 1);\n  if (!check(a, b)) return 4;\n  b[0] = 0x80; a[0] = 0x7F;\n  if (!check(a, b)) return 5;\n  return 0;\n}\n";
+    assert_eq(run_wide(wide, wdrv), 0);
+}
+
+// A loop's vector accumulator added to a load that dies there, the accumulator first and second (x86-64:
+// the sum takes the accumulator's register or the load's, `def_shared` and `def_over`).
+@test
+fn a_vector_accumulator_and_a_dying_load_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @vsum fn global
+fn @vsum
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = wconst.v2i64 0x0, 0x0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3, v2, v2)
+b1(v5: i64, v6: v2i64, v7: v2i64):
+  v8 = ptradd v0, v5 * 16
+  v9 = load.v2i64 v8 align 3
+  v10 = load.v2i64 v8 align 3
+  v11 = add.v2i64 v6, v9
+  v12 = xor.v2i64 v10, v7
+  v13 = add.i64 v5, v4
+  v14 = icmp.ult v13, v1
+  br v14, b1(v13, v11, v12), b2
+b2:
+  v15 = vop.reduce_add.i64 (v11)
+  v16 = vop.reduce_xor.i64 (v12)
+  v17 = add.i64 v15, v16
+  ret v17
+)";
+    let drv = "#include <stdint.h>\nint64_t vsum(const int64_t *, int64_t);\nint main(void) {\n  int64_t a[10];\n  int64_t s = 0, x = 0;\n  for (int i = 0; i < 10; i++) { a[i] = (int64_t)i * 1000003 - 7; s += a[i]; x ^= a[i]; }\n  if (vsum(a, 5) != s + x) return 1;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }

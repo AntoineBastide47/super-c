@@ -4314,7 +4314,8 @@ b2:
 }
 
 // A vectorized maximum (a select of the lane or the accumulator by their comparison) is the lanes'
-// maximum (`vop.max.s`) where every vector operation is in registers; elsewhere the select stays.
+// maximum (`vop.max.s`) where the backend computes it in registers: every vector (arm64), up to 32 bytes
+// (x86-64); past them the select stays.
 @test
 fn a_vectorized_maximum_takes_the_lanes_maximum() {
     let src = M"(lir ptr 8
@@ -4369,7 +4370,10 @@ b3:
     assert(t.contains("vop.max.s.v4i32") && !t.contains("vsel"), t.as_str());
     let (_, n) = optimized_for(src, VECTOR, 16, VOPS_SOME);
     let u = text_of(&n, "top");
-    assert(!u.contains("vop.max.s.v4i32"), u.as_str());
+    assert(u.contains("vop.max.s.v4i32") && !u.contains("vsel"), u.as_str());
+    let (_, w) = optimized_for(src, VECTOR, 64, VOPS_SOME);
+    let z = text_of(&w, "top");
+    assert(z.contains("vsel.v16i32") && !z.contains("vop.max"), z.as_str());
     let lens: [u64; 4] = [0, 5, 37, 128];
     for k in 0..4usize {
         let args: []u64 = [unsafe lens[k]];

@@ -630,6 +630,9 @@ extend CEmit {
             l.pkg.pairs = tgt::isa(pk.arch).pairs;
             l.pkg.align_loops = pk.opt > 0 && pk.opt != bman::OPT_S && pk.opt != bman::OPT_Z;
             l.pkg.popcnt = feature(pk, "popcnt");
+            l.pkg.sse41 = feature(pk, "sse4.1");
+            l.pkg.lse = feature(pk, "lse");
+            l.pkg.rcpc = feature(pk, "rcpc");
             l.pkg.switch_tree = tgt::isa(pk.arch).switch_tree;
             l.pkg.split = pick((pk.cg & bman::CG_FUNCTION_SECTIONS) != 0, cob::SPLIT_FUNCS, 0u8) | pick(
                 (pk.cg & bman::CG_DATA_SECTIONS) != 0,

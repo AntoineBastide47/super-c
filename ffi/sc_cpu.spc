@@ -233,7 +233,7 @@ fn os_zmm() i32 {
 // absent.
 @platform(macos | ios)
 @arch(aarch64)
-const APPLE_ROWS: [(str<'static>, cpu::Feature); 13] = [
+const APPLE_ROWS: [(str<'static>, cpu::Feature); 14] = [
     ("hw.optional.arm.FEAT_FP16", cpu::Feature::Fp16),
     ("hw.optional.arm.FEAT_DotProd", cpu::Feature::Dotprod),
     ("hw.optional.arm.FEAT_RDM", cpu::Feature::Rdm),
@@ -247,6 +247,7 @@ const APPLE_ROWS: [(str<'static>, cpu::Feature); 13] = [
     ("hw.optional.arm.FEAT_SME", cpu::Feature::Sme),
     ("hw.optional.arm.FEAT_SME2", cpu::Feature::Sme2),
     ("hw.optional.arm.FEAT_SME_F64F64", cpu::Feature::SmeF64f64),
+    ("hw.optional.arm.FEAT_LRCPC", cpu::Feature::Rcpc),
 ];
 
 @platform(macos | ios)
@@ -282,7 +283,7 @@ fn sysctl_flag(key: str<'static>) bool {
 // names). A V8 crypto bit covers AES and SHA-2; no constant exists for RDM.
 @platform(windows)
 @arch(aarch64)
-const WINDOWS_ROWS: [(u32, cpu::Feature); 14] = [
+const WINDOWS_ROWS: [(u32, cpu::Feature); 15] = [
     (67, cpu::Feature::Fp16),
     (43, cpu::Feature::Dotprod),
     (66, cpu::Feature::I8mm),
@@ -297,6 +298,7 @@ const WINDOWS_ROWS: [(u32, cpu::Feature); 14] = [
     (70, cpu::Feature::Sme),
     (71, cpu::Feature::Sme2),
     (85, cpu::Feature::SmeF64f64),
+    (45, cpu::Feature::Rcpc),
 ];
 
 // kernel32's `BOOL IsProcessorFeaturePresent(DWORD)`. Its header declares it: a prototype of
@@ -325,7 +327,7 @@ fn query() u64 {
 // libc headers lack some names. fp16 needs both its scalar and its vector bit (HWCAP bits 9 and 10).
 @platform(linux | android)
 @arch(aarch64)
-const HWCAP_ROWS: [(u8, u8, cpu::Feature); 15] = [
+const HWCAP_ROWS: [(u8, u8, cpu::Feature); 16] = [
     (0, 1, cpu::Feature::Neon),
     (0, 20, cpu::Feature::Dotprod),
     (0, 12, cpu::Feature::Rdm),
@@ -341,6 +343,7 @@ const HWCAP_ROWS: [(u8, u8, cpu::Feature); 15] = [
     (1, 23, cpu::Feature::Sme),
     (1, 37, cpu::Feature::Sme2),
     (1, 25, cpu::Feature::SmeF64f64),
+    (0, 15, cpu::Feature::Rcpc),
 ];
 
 // getauxval gives 0 for an entry the kernel does not supply.

@@ -1906,7 +1906,8 @@ fn wasm_intrinsics_match_the_c_compiler() {
     wasm_compare("the intrinsics", &ours, &text, &sdk);
 }
 
-// Every x86-64 intrinsic row, its constant arguments 1, assembles to the C compiler's bytes.
+// Every x86-64 intrinsic row and SSE4.1 rounding row, its constant arguments 1, assembles to the C
+// compiler's bytes.
 @test
 fn x64_intrinsics_match_the_c_compiler() {
     let imm: [i64; 8] = [1; 8];
@@ -1915,10 +1916,16 @@ fn x64_intrinsics_match_the_c_compiler() {
     let mut bytes = Vector::<u8>::new();
     let mut ends = Vector::<u32>::new();
     let mut bad: u32 = 0;
-    let rows: [](str, str) = x64i::ROWS;
-    for i in 0..rows.len() {
+    let all: [](str, str) = x64i::ROWS;
+    let sse41: [](str, str) = x64i::SSE41_ROWS;
+    for i in 0..all.len() + sse41.len() {
+        let row = if i < all.len() {
+            all[i]
+        } else {
+            sse41[i - all.len()]
+        };
         let mut t = String::new();
-        assert(intrin::expand(rows[i].1, imm[0..8], known[0..8], &mut t), rows[i].0);
+        assert(intrin::expand(row.1, imm[0..8], known[0..8], &mut t), row.0);
         let mut lines = t.split("\n");
         loop {
             let line = switch lines.next() {
@@ -1931,7 +1938,7 @@ fn x64_intrinsics_match_the_c_compiler() {
             let mut e = String::new();
             let n0 = bytes.len();
             if !asmr::Asm::inline_x64(line, &mut bytes, &mut rels, &mut e) {
-                eprint("{}: '{}': {}\n", rows[i].0, line, e.as_str());
+                eprint("{}: '{}': {}\n", row.0, line, e.as_str());
                 bad += 1;
                 bytes.truncate(n0);
                 continue;

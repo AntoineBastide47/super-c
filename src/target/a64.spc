@@ -703,6 +703,21 @@ pub(package) const fn ldar(size: u32, load: bool, rt: u32, rn: u32) u32 {
     return size << 30 | b | rn << 5 | rt;
 }
 
+/// LDXR (LDAXR with `a`, acquire) of `1 << size` bytes.
+pub(package) const fn ldxr(size: u32, a: bool, rt: u32, rn: u32) u32 {
+    return size << 30 | 0x085F7C00 | a as u32 << 15 | rn << 5 | rt;
+}
+
+/// STXR (STLXR with `r`, release) of `1 << size` bytes; `rs` the status, 0 when it stored.
+pub(package) const fn stxr(size: u32, r: bool, rs: u32, rt: u32, rn: u32) u32 {
+    return size << 30 | 0x08007C00 | r as u32 << 15 | rs << 16 | rn << 5 | rt;
+}
+
+/// LDAPR (FEAT_LRCPC) of `1 << size` bytes.
+pub(package) const fn ldapr(size: u32, rt: u32, rn: u32) u32 {
+    return size << 30 | 0x38BFC000 | rn << 5 | rt;
+}
+
 /// The LSE atomic memory operations: `opc` 0 LDADD, 1 LDCLR, 2 LDEOR, 3 LDSET, 8 SWP; `a` acquire,
 /// `r` release.
 pub(package) const fn lse(size: u32, opc: u32, a: bool, r: bool, rs: u32, rt: u32, rn: u32) u32 {

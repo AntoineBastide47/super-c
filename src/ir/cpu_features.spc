@@ -38,7 +38,7 @@ pub(package) struct CpuFeature {
     pub(package) level: u8,
 }
 
-pub(package) const FEATURE_COUNT: usize = 52;
+pub(package) const FEATURE_COUNT: usize = 53;
 pub(package) const F_SIMD128: usize = 0;
 pub(package) const F_RELAXED_SIMD: usize = 1;
 pub(package) const F_SSE2: usize = 2;
@@ -277,6 +277,8 @@ pub(package) const CPU_FEATURES: [CpuFeature; FEATURE_COUNT] = [
         c_flag: "+sme-f64f64",
         level: L_NEED82,
     },
+    // FEAT_LRCPC: `ldapr`, the acquire load weaker than `ldar` (no order against an earlier release store).
+    CpuFeature { name: "rcpc", variant: "Rcpc", arch: 1, implies: V82, c_flag: "+rcpc", level: L_NEED82 },
 ];
 
 // Each row's implied set closed under `implies`, the row itself included (Warshall): after step `k`,

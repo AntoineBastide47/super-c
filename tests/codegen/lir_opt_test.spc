@@ -117,6 +117,52 @@ fn same_result(before: &Package, after: &Package, name: str, args: []u64, want: 
     assert_eq(o2.value, want);
 }
 
+// An `Option` built on each side of a join and taken apart after it (`o.map(f).unwrap_or(0)`): each jump into
+// the join returns what the join would along it, its tag and payload folded (`Opt::ret_folded`), and the
+// two returns are one select (`ret_diamond`).
+@test
+fn an_option_built_and_taken_apart_across_a_join_folds() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = iconst.i32 0
+  v2 = iconst.i64 32
+  v3 = trunc.i8 v0
+  v4 = zext.i32 v3
+  v5 = icmp.eq v4, v1
+  br v5, b2, b1
+b1:
+  v6 = iconst.i64 1
+  jmp b3(v6)
+b2:
+  v7 = lshr.i64 v0, v2
+  v8 = trunc.i32 v7
+  v9 = iconst.i32 1
+  v10 = add.i32 v8, v9
+  v11 = zext.i64 v10
+  v12 = shl.i64 v11, v2
+  jmp b3(v12)
+b3(v13: i64):
+  v14 = trunc.i8 v13
+  v15 = zext.i32 v14
+  v16 = lshr.i64 v13, v2
+  v17 = trunc.i32 v16
+  v18 = icmp.eq v15, v1
+  v19 = select.i32 v18, v17, v1
+  ret v19
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(t.contains("select.i32") && !t.contains("b1") && !t.contains("shl"), t.as_str());
+    let some: []u64 = [41u64 << 32];
+    same_result(&b, &a, "f", some, 42);
+    let none: []u64 = [41u64 << 32 | 1];
+    same_result(&b, &a, "f", none, 0);
+}
+
 // The evaluator's binary16 conversions (`htof`, `ftoh`) agree with `std::float`'s limb code: every
 // encoding widened, and each finite one's value, its midpoints to its neighbours and the floats next to
 // those rounded, a NaN as a NaN.

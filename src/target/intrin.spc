@@ -44,6 +44,23 @@ pub(package) fn of_symbols(p: &Package, b: &Body, isa: str, out: &mut Vector<str
     }
 }
 
+/// `of_symbols` for x86-64 with SSE4.1: the C library's exact roundings (`x64i::SSE41_ROWS`) too.
+pub(package) fn x64_sse41(p: &Package, b: &Body, out: &mut Vector<str<'static>>) {
+    let rows: [](str<'static>, str<'static>) = x64i::SSE41_ROWS;
+    for s in 0..b.syms.len() {
+        let ps = p.syms[b.syms[s] as usize];
+        if ps.def != NONE {
+            continue;
+        }
+        let nm = p.spell(ps.name);
+        for k in 0..rows.len() {
+            if rows[k].0 == nm {
+                out[s] = rows[k].1;
+            }
+        }
+    }
+}
+
 // The row of intrinsic `name` of `isa`: whether there is one, and its instructions.
 const fn row(isa: str, name: str) (bool, str<'static>) {
     let rows: [](str<'static>, str<'static>) = if isa == "aarch64" {

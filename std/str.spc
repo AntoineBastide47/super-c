@@ -116,10 +116,14 @@ extend str {
         return -1;
     }
 
-    /// First byte index where `needle` occurs, or -1 if absent (naive O(n*m) window scan).
+    /// First byte index where `needle` occurs, or -1 if absent (naive O(n*m) window scan; a byte search,
+    /// which vectorizes, for a one-byte needle).
     pub const fn find(self: &str, needle: str) isize {
         if needle.len == 0 {
             return 0;
+        }
+        if needle.len == 1 {
+            return self.find_byte(unsafe needle.ptr[0]);
         }
         if needle.len > self.len {
             return -1;

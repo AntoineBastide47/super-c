@@ -1337,12 +1337,12 @@ extend Gen {
         } else {
             self.xscr_cap
         };
-        // Six of Microsoft x64's callee-saved xmm homes (xmm0..xmm3, xmm6, xmm7 and two of xmm8..xmm13 stay
-        // for temporaries), or four of System V's caller-saved ones.
+        // Every xmm home: Microsoft x64's callee-saved xmm8..xmm15 (`vfix`; xmm0..xmm3, xmm6 and xmm7
+        // stay for temporaries), or System V's caller-saved xmm8..xmm13 (`vscr`; xmm0..xmm7 stay).
         let (vc, vs) = if self.win {
-            (6u32, 0u32)
+            (self.vfix.count_ones() as u32, 0u32)
         } else {
-            (0u32, 4u32)
+            (0u32, self.vscr.count_ones() as u32)
         };
         self.lv.plan(
             b,
@@ -1410,8 +1410,9 @@ extend Gen {
 
     // `vmem`: per value, whether it is a vector some instruction defines or reads in memory: any but a
     // vector load, a lane-wise operation with an SSE form (its operands too; a product of 32-bit lanes,
-    // `mul_lanes32`), a bitcast between register vectors, a reduction in registers (`reduce_reg`), a store
-    // of it, and an edge argument (a return reads its vector in memory).
+    // `mul_lanes32`; an integer minimum or maximum, `ext_reg`), a bitcast between register vectors, a
+    // reduction in registers (`reduce_reg`), a store of it, and an edge argument (a return reads its vector
+    // in memory).
     fn vec_homes(self: &mut Self) {
         let b = self.b();
         let ni = b.insts.len();
@@ -1440,13 +1441,16 @@ extend Gen {
             ) != NONE || self.z512 && is_vec(t.ty) && type_bytes(t.ty, 8) == 64 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && evex_of_op(
                 t.op,
                 lane_type(t.ty),
-            ) != NONE || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a)) || self.reduce_reg(t) || t.op == O_MUL && is_vec(
+            ) != NONE || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a)) || self.reduce_reg(t) || self.ext_reg(
+                t,
+            ) || t.op == O_VOP && self.lv.pfold[i] || t.op == O_MUL && is_vec(t.ty) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(
                 t.ty,
-            ) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(t.ty, 8) == 16 && in_vreg(t.ty);
+                8,
+            ) == 16 && in_vreg(t.ty);
             if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
                 self.vmem[i] = true;
             }
-            self.vreg[i] = reg_op && is_vec(t.ty) || self.reduce_reg(t);
+            self.vreg[i] = reg_op && is_vec(t.ty) || self.reduce_reg(t) || t.op == O_VOP && self.lv.pfold[i];
             if t.op == O_RET && t.a != VNONE && is_vec(self.vt(t.a)) {
                 self.vmem[self.vx(t.a) as usize] = true;
             }
@@ -1579,7 +1583,7 @@ extend Gen {
         for i in 0..ni {
             let t = b.insts[i];
             // A sibling call does not come back: the body around it may be a leaf.
-            let c = Gen::clobbers(b, t) && !lv::dead_end(unsafe &*self.pkg, b, &self.lv, i, &mut self.uses) && !(t.op == O_CALL && self.sib_shape(
+            let c = self.calls(t) && !lv::dead_end(unsafe &*self.pkg, b, &self.lv, i, &mut self.uses) && !(t.op == O_CALL && self.sib_shape(
                 i as u32,
                 t,
             ));
@@ -1611,6 +1615,11 @@ extend Gen {
         }
     }
 
+    // `clobbers` of `t` but a vector operation the body computes in registers (`ext_reg`).
+    fn calls(self: &Self, t: Inst) bool {
+        return Gen::clobbers(self.b(), t) && !self.ext_reg(t);
+    }
+
     const fn clobbers(b: &Body, t: Inst) bool {
         let op = t.op;
         if op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_VOP && !lv::reduces(t) || op == O_MEMCPY || op == O_MEMSET {
@@ -1629,7 +1638,8 @@ extend Gen {
     // picks the lesser or greater of the compared values by `<` or `>` (their unordered and equal cases
     // give the second operand, as the select does); else the comparison's mask (`cmps`: equal, less, less
     // or equal, unordered, not equal; greater ones swapped), the true side under it and the false side
-    // under its complement.
+    // under its complement. The result takes the register of the operand it starts from when that dies
+    // here (`def_over`).
     fn fsel(self: &mut Self, i: u32, t: Inst) {
         let c = self.b().insts[t.a as usize];
         let pf: u32 = if t.ty == T_F64 {
@@ -1644,8 +1654,8 @@ extend Gen {
         let nb = t.b;
         if c.aux == C_OLT && zero && t.c == c.a && (nb & (VPARAM | VFLAG)) == 0 && self.b().insts[nb as usize].op == O_FNEG && self.b().insts[nb as usize].a == c.a {
             let rn = self.reg(nb);
-            let rd = self.def(i);
             let ra = self.reg(c.a);
+            let rd = self.def_over(i, nb, rn);
             let m = if rd == ra {
                 self.tmp(true)
             } else {
@@ -1676,7 +1686,7 @@ extend Gen {
             } else {
                 0x0F5F
             };
-            let rd = self.def(i);
+            let rd = self.def_over(i, t.b, x);
             let m = if rd == y {
                 self.tmp(true)
             } else {
@@ -1708,7 +1718,15 @@ extend Gen {
         };
         let rt = self.reg(t.b);
         let rf = self.reg(t.c);
-        let rd = self.def(i);
+        let rd = self.def_over(
+            i,
+            if p == ra {
+                c.a
+            } else {
+                c.b
+            },
+            p,
+        );
         let m = if rd == q || rd == rt || rd == rf {
             self.tmp(true)
         } else {
@@ -2551,7 +2569,11 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | if self.avx {
+            lv::FOLD_ANY_WIDE
+        } else {
+            0
+        };
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
         if self.again {
@@ -2560,6 +2582,9 @@ extend Gen {
             self.lv.relayout(b);
         } else {
             intrin::of_symbols(unsafe &*self.pkg, b, "x86_64", &mut self.itpl);
+            if unsafe (*self.pkg).sse41 {
+                intrin::x64_sse41(unsafe &*self.pkg, b, &mut self.itpl);
+            }
             self.lay_sig.truncate(0);
             arg_relays(self);
             self.prot = lver::protected(unsafe (*self.pkg).protect, b);
@@ -2720,7 +2745,7 @@ extend Gen {
         for i in 0..b.insts.len() {
             let t = b.insts[i];
             let d = self.lv.def_blk[i];
-            if d == NONE || self.lv.pos[d as usize] == NONE || !Gen::clobbers(b, t) {
+            if d == NONE || self.lv.pos[d as usize] == NONE || !self.calls(t) {
                 continue;
             }
             if !self.lv.rare[d as usize] {
@@ -4014,6 +4039,20 @@ extend Gen {
         let ty = self.vt(t.a);
         let bits = type_bits(ty, self.ptr);
         let sz = bits / 8;
+        if (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] && self.b().insts[t.a as usize].op == O_VOP {
+            // The `or` of a lane mask's lanes is 0 when no byte's sign bit is set: `pmovmskb`, `test`.
+            let n = self.b().insts[t.a as usize];
+            let v = self.b().pool[n.a as usize];
+            let rv = self.vec_use(v, self.vs0) - V0;
+            self.zero_for(zi, S0, NOREG);
+            if type_bytes(self.vt(v), 8) == 32 {
+                self.c.vex_rr(0x66, 1, 0xD7, false, true, S0, 0, rv);
+            } else {
+                self.c.rr(0x66, 0x0FD7, false, S0, rv, false);
+            }
+            self.c.test_rr(4, S0, S0);
+            return icond(t.aux);
+        }
         if (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] {
             let n = self.b().insts[t.a as usize];
             let ra = self.reg(n.a);
@@ -6725,7 +6764,8 @@ extend Gen {
             self.call_clear();
             self.c.call_r(S1);
         }
-        self.called = true;
+        // An intrinsic's instructions call nothing: the frame stays a leaf's.
+        self.called = self.called || tpl.len() == 0;
         if rl.kind != ab::L_REG {
             return true;
         }
@@ -8645,7 +8685,29 @@ extend Gen {
         } else {
             NOREG
         };
-        let rd = self.def_pass(i, xv);
+        // The result over the register the first operand shares with it (`def_shared`) or frees
+        // (`def_over`); of a commutative integer operation, over the second's when it alone dies here.
+        let comm = op == O_ADD || op == O_MUL || op == O_AND || op == O_OR || op == O_XOR;
+        let mut rd = self.def_shared(i, xv);
+        if rd == NOREG {
+            rd = if comm && yv != VNONE && !self.dies_here(xv) && self.dies_here(yv) {
+                self.def_over(i, yv, ry)
+            } else {
+                self.def_over(i, xv, rx)
+            };
+        }
+        if yv != VNONE && rd == ry && rd != rx {
+            // The result's register holds the second operand.
+            if comm {
+                self.c.sse_rr(pfx, opc, rd - V0, rx - V0);
+            } else {
+                let s = self.tmp(true);
+                self.c.vmov(s - V0, ry - V0);
+                self.c.vmov(rd - V0, rx - V0);
+                self.c.sse_rr(pfx, opc, rd - V0, s - V0);
+            }
+            return;
+        }
         self.c.vmov(rd - V0, rx - V0);
         if op == O_NOT || op == O_FNEG {
             self.splat_const(self.vs1 - V0, op, lt);
@@ -8892,12 +8954,18 @@ extend Gen {
             (a, b)
         };
         let rx = self.vec_use(xv, self.vs0);
-        let ry = self.vec_use(yv, self.vs1);
+        let mut ry = self.vec_use(yv, self.vs1);
         let rd = if i == NONE {
             self.tmp(true)
         } else {
-            self.vec_def(i)
+            self.def_over(i, xv, rx)
         };
+        if rd == ry && rd != rx {
+            // The result's register holds the second operand, which the code reads after it writes it.
+            let s = self.tmp(true);
+            self.c.vmov(s - V0, ry - V0);
+            ry = s;
+        }
         if fl {
             self.c.vmov(rd - V0, rx - V0);
             self.c.sse_rr((lt == T_F64) as u32 * 0x66, 0x0FC2, rd - V0, ry - V0);
@@ -8919,8 +8987,8 @@ extend Gen {
             self.c.mov_ri(S1, sb);
             self.c.movd_to_x(8, s - V0, S1);
             self.c.sse_rr(0x66, 0x0F6C, s - V0, s - V0);
-            self.c.vmov(rd - V0, s - V0);
-            self.c.sse_rr(0x66, 0x0FEF, rd - V0, rx - V0);
+            self.c.vmov(rd - V0, rx - V0);
+            self.c.sse_rr(0x66, 0x0FEF, rd - V0, s - V0);
             self.c.sse_rr(0x66, 0x0FEF, s - V0, ry - V0);
             self.c.sse_rr(0x66, opc, rd - V0, s - V0);
         } else {
@@ -10028,6 +10096,9 @@ extend Gen {
 
     // A portable vector operation (`O_VOP`).
     fn vop(self: &mut Self, i: u32, t: Inst) bool {
+        if self.lv.pfold[i as usize] {
+            return true; // each equality with 0 tests the mask's sign bits (`lv::FOLD_ANY`, `compare`)
+        }
         let code = (t.aux & VOP_CODE) as u32;
         let sg = (t.aux & VOP_SIGNED) != 0;
         let dsg = (t.aux & VOP_DSIGNED) != 0;
@@ -10176,6 +10247,37 @@ extend Gen {
                 self.copy_mem(x::RSP, d, b0, o0 + rb as i64, rb);
             } else {
                 self.copy_mem(x::RSP, d, b0, o0, rb);
+            }
+            return;
+        }
+        if self.ext_reg(t) {
+            let lo = c == core::SIMD_MIN;
+            let rx = self.vec_use(ops[0], self.vs0) - V0;
+            let ry = self.vec_use(ops[1], self.vs1) - V0;
+            if nb == 32 {
+                let r = self.vec_def(i) - V0;
+                self.lane_ext(lo, sg, lb, true, r, rx, ry);
+            } else {
+                // The operation commutes: the result may take the register either operand shares with it
+                // (a loop's accumulator, `def_shared`) or that dies here, which then holds that operand.
+                let mut r = self.def_shared(i, ops[0]);
+                if r == NOREG {
+                    r = self.def_shared(i, ops[1]);
+                }
+                if r == NOREG {
+                    r = if self.dies_here(ops[1]) && !self.dies_here(ops[0]) {
+                        self.def_over(i, ops[1], ry + V0)
+                    } else {
+                        self.def_over(i, ops[0], rx + V0)
+                    };
+                }
+                let rd = r - V0;
+                if rd == ry {
+                    self.lane_ext(lo, sg, lb, false, rd, rd, rx);
+                } else {
+                    self.c.vmov(rd, rx);
+                    self.lane_ext(lo, sg, lb, false, rd, rd, ry);
+                }
             }
             return;
         }
@@ -11332,7 +11434,7 @@ extend Gen {
             return;
         }
         if self.reduce_reg(t) {
-            self.reduce_halves(i, c, ops[0], type_bits(lt, self.ptr));
+            self.reduce_halves(i, c, sg, ops[0], type_bits(lt, self.ptr));
             return;
         }
         let xr = self.tmp(false);
@@ -11396,7 +11498,7 @@ extend Gen {
     }
 
     // Whether `O_VOP` `t` is an integer reduction `reduce_halves` computes in xmm registers: a sum, `and`,
-    // `or` or `xor` of a 16-byte vector in a register, at its lanes' width.
+    // `or`, `xor`, minimum or maximum of a 16-byte vector in a register, at its lanes' width.
     fn reduce_reg(self: &Self, t: Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
         if t.op != O_VOP || code < core::OP_SIMD || code >= core::OP_CMP_LANES || t.b != 1 {
@@ -11405,7 +11507,7 @@ extend Gen {
         let c = (code - core::OP_SIMD) as u8;
         let vt = self.vt(self.b().pool[t.a as usize]);
         let lt = lane_type(vt);
-        return (c == core::SIMD_REDUCE_ADD || c == core::SIMD_REDUCE_ADD_TREE || c == core::SIMD_REDUCE_AND || c == core::SIMD_REDUCE_OR || c == core::SIMD_REDUCE_XOR) && is_vec(
+        return (c == core::SIMD_REDUCE_ADD || c == core::SIMD_REDUCE_ADD_TREE || c == core::SIMD_REDUCE_AND || c == core::SIMD_REDUCE_OR || c == core::SIMD_REDUCE_XOR || c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX) && is_vec(
             vt,
         ) && !is_float(lt) && type_bytes(vt, self.ptr) == 16 && self.in_reg(vt) && type_bits(t.ty, self.ptr) == type_bits(
             lt,
@@ -11413,13 +11515,58 @@ extend Gen {
         );
     }
 
-    // Integer reduction `c` (a sum, `and`, `or`, `xor`) of 16-byte vector `v` (lanes of `lb` bits) into
-    // instruction `i`, at the lanes' width: the vector's halves combined in xmm registers until one lane
-    // holds the result (`pshufd` across the qwords and dwords, `pshuflw` across the words, `psrlw` across
-    // the bytes), then one `movd`, as LLVM's x86 lowering of `vector.reduce`.
-    fn reduce_halves(self: &mut Self, i: u32, c: u8, v: Value, lb: u32) {
+    // Whether `O_VOP` `t` is the lanes' minimum or maximum of two vectors of integer lanes of at most 4
+    // bytes in registers: 16 bytes in xmm registers, or 32 in ymm registers under AVX2 (`lane_ext`).
+    fn ext_reg(self: &Self, t: Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        if t.op != O_VOP || code != core::OP_SIMD + core::SIMD_MIN as u32 && code != core::OP_SIMD + core::SIMD_MAX as u32 || t.b != 2 {
+            return false;
+        }
+        let lt = lane_type(t.ty);
+        let nb = type_bytes(t.ty, 8);
+        return is_vec(t.ty) && is_int(lt) && type_bytes(lt, 8) <= 4 && (nb == 16 && in_vreg(t.ty) || nb == 32 && self.avx && self.in_reg(
+            t.ty,
+        ));
+    }
+
+    // Integer reduction `c` (a sum, `and`, `or`, `xor`, a minimum or maximum, signed with `sg`) of 16-byte
+    // vector `v` (lanes of `lb` bits) into instruction `i`, at the lanes' width: the vector's halves
+    // combined in xmm registers until one lane holds the result (`pshufd` across the qwords and dwords,
+    // `pshuflw` across the words, `psrlw` across the bytes), then one `movd`, as LLVM's x86 lowering of
+    // `vector.reduce`. The minimum or maximum of two 64-bit lanes is one `cmov` of both lanes.
+    fn reduce_halves(self: &mut Self, i: u32, c: u8, sg: bool, v: Value, lb: u32) {
         let rv = self.vec_use(v, self.vs0) - V0;
         let ta = self.tmp(true) - V0;
+        let ext = c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX;
+        let lo = c == core::SIMD_REDUCE_MIN;
+        if ext && lb == 64 {
+            let rd = self.def(i);
+            self.c.movd_from_x(8, rd, rv);
+            self.shuf(0x66, ta, rv, 0x4E);
+            self.c.movd_from_x(8, S0, ta);
+            self.c.alu_rr(x::CMP, 8, S0, rd);
+            let below = if sg {
+                x::CC_L
+            } else {
+                x::CC_B
+            };
+            let above = if sg {
+                x::CC_G
+            } else {
+                x::CC_A
+            };
+            self.c.cmov(
+                if lo {
+                    below
+                } else {
+                    above
+                },
+                8,
+                rd,
+                S0,
+            );
+            return;
+        }
         let tb = self.tmp(true) - V0;
         // paddb/w/d/q, pand, por, pxor.
         let op: u32 = if c == core::SIMD_REDUCE_AND {
@@ -11439,14 +11586,26 @@ extend Gen {
         };
         // ta = the qwords swapped, combined with v; each step the lanes' halves in the low half.
         self.shuf(0x66, ta, rv, 0x4E);
-        self.lane_op(op, ta, rv);
+        if ext {
+            self.lane_ext(lo, sg, lb, false, ta, ta, rv);
+        } else {
+            self.lane_op(op, ta, rv);
+        }
         if lb <= 32 {
             self.shuf(0x66, tb, ta, 0xB1);
-            self.lane_op(op, ta, tb);
+            if ext {
+                self.lane_ext(lo, sg, lb, false, ta, ta, tb);
+            } else {
+                self.lane_op(op, ta, tb);
+            }
         }
         if lb <= 16 {
             self.shuf(0xF2, tb, ta, 0xB1);
-            self.lane_op(op, ta, tb);
+            if ext {
+                self.lane_ext(lo, sg, lb, false, ta, ta, tb);
+            } else {
+                self.lane_op(op, ta, tb);
+            }
         }
         if lb == 8 {
             // psrlw tb, ta, 8.
@@ -11457,7 +11616,11 @@ extend Gen {
                 self.c.sse_rr(0x66, 0x0F71, 2, tb);
             }
             self.c.byte(8);
-            self.lane_op(op, ta, tb);
+            if ext {
+                self.lane_ext(lo, sg, lb, false, ta, ta, tb);
+            } else {
+                self.lane_op(op, ta, tb);
+            }
         }
         let rd = self.def(i);
         self.c.movd_from_x(
@@ -11469,6 +11632,103 @@ extend Gen {
             rd,
             ta,
         );
+    }
+
+    // xmm `dst` = the lanes' minimum (`lo`) or maximum of xmm `a` and `src`, lanes of `lb` (8 to 32) bits,
+    // signed with `sg`; ymm registers with `y` (AVX2); `src` kept, `a` too unless it is `dst`, which it is
+    // without AVX. One `pmin`/`pmax` where the target has it (SSE2: signed words, unsigned bytes; AVX2: all
+    // of them); unsigned words through the saturating difference; else a `pcmpgt` mask (of the lanes with
+    // the sign bit flipped, unsigned) that picks each lane by `src ^ ((dst ^ src) & mask)`.
+    fn lane_ext(self: &mut Self, lo: bool, sg: bool, lb: u32, y: bool, dst: u8, a: u8, src: u8) {
+        if self.avx {
+            // pminsw, pminub (0F EA, DA); pminsb, pminsd, pminuw, pminud (0F38 38..3B); the maximum 4 above
+            // (0F EE, DE: 4 above too).
+            let (mm, base): (u32, u32) = if lb == 16 && sg {
+                (1, 0xEA)
+            } else if lb == 8 && !sg {
+                (1, 0xDA)
+            } else if lb == 8 {
+                (2, 0x38)
+            } else if lb == 32 && sg {
+                (2, 0x39)
+            } else if lb == 16 {
+                (2, 0x3A)
+            } else {
+                (2, 0x3B)
+            };
+            self.c.vex_rr(
+                0x66,
+                mm,
+                base + if lo {
+                    0
+                } else {
+                    4
+                },
+                false,
+                y,
+                dst,
+                a,
+                src,
+            );
+            return;
+        }
+        if lb == 16 && sg || lb == 8 && !sg {
+            // pminsw/pmaxsw, pminub/pmaxub.
+            let op: u32 = if lb == 16 {
+                if lo {
+                    0x0FEA
+                } else {
+                    0x0FEE
+                }
+            } else if lo {
+                0x0FDA
+            } else {
+                0x0FDE
+            };
+            self.c.sse_rr(0x66, op, dst, src);
+            return;
+        }
+        if lb == 16 {
+            // max = (dst -sat src) + src; min = dst - (dst -sat src).
+            if lo {
+                let d = self.tmp(true) - V0;
+                self.c.vmov(d, dst);
+                self.c.sse_rr(0x66, 0x0FD9, d, src);
+                self.c.sse_rr(0x66, 0x0FF9, dst, d);
+            } else {
+                self.c.sse_rr(0x66, 0x0FD9, dst, src);
+                self.c.sse_rr(0x66, 0x0FFD, dst, src);
+            }
+            return;
+        }
+        // mask = (max ? dst : src) > (max ? src : dst): the lanes that keep `dst`.
+        let (hi, other) = if lo {
+            (src, dst)
+        } else {
+            (dst, src)
+        };
+        let gt: u32 = if lb == 8 {
+            0x0F64
+        } else {
+            0x0F66
+        };
+        let m = self.tmp(true) - V0;
+        self.c.vmov(m, hi);
+        if sg {
+            self.c.sse_rr(0x66, gt, m, other);
+        } else {
+            // Both sides with the sign bit flipped: s = 0x80000000 in each lane (pcmpeqd, pslld 31).
+            let s = self.tmp(true) - V0;
+            self.c.sse_rr(0x66, 0x0F76, s, s);
+            self.c.sse_rr(0x66, 0x0F72, 6, s);
+            self.c.byte(31);
+            self.c.sse_rr(0x66, 0x0FEF, m, s);
+            self.c.sse_rr(0x66, 0x0FEF, s, other);
+            self.c.sse_rr(0x66, gt, m, s);
+        }
+        self.c.sse_rr(0x66, 0x0FEF, dst, src);
+        self.c.sse_rr(0x66, 0x0FDB, dst, m);
+        self.c.sse_rr(0x66, 0x0FEF, dst, src);
     }
 
     // xmm `dst` = xmm `src` shuffled by `imm`: `pshufd` (prefix 0x66) or `pshuflw` (0xF2), VEX-encoded

@@ -1366,8 +1366,9 @@ pub(package) struct Package {
     pub(package) vector: u32,
     /// How the native backend converts vectors and shifts their lanes (`target::table::Isa`): 0 lane by
     /// lane, VOPS_SOME or VOPS_ALL in registers. With either the loop vectorizer mixes lane widths up to a
-    /// factor of two and shifts; its cost model counts the lane by lane forms of VOPS_SOME. With VOPS_ALL
-    /// the optimizer turns a select of a comparison into the lanes' minimum or maximum (`vec_minmaxes`).
+    /// factor of two and shifts; its cost model counts the lane by lane forms of VOPS_SOME. With either the
+    /// optimizer turns a select of a comparison into the lanes' minimum or maximum (`vec_minmaxes`; up to
+    /// 32 bytes with VOPS_SOME).
     pub(package) vops: u8,
     /// Whether the native backend computes `O_MULHU` of 64-bit integers in one instruction
     /// (`target::table::Isa`): the optimizer then divides by a 64-bit constant with a product.
@@ -1387,6 +1388,14 @@ pub(package) struct Package {
     /// The processor counts set bits in one instruction where that is optional (x86-64 `popcnt`, from
     /// x86-64-v2 or `-mpopcnt`).
     pub(package) popcnt: bool,
+    /// The processor has SSE4.1 (x86-64 `roundsd`, from x86-64-v2 or `-msse4.1`): the C library's exact
+    /// roundings are instructions (`target::x64intrin::SSE41_ROWS`).
+    pub(package) sse41: bool,
+    /// The processor has the Large System Extensions (arm64 `ldadd`, `cas`; Armv8.1-A): else an atomic
+    /// read-modify-write or compare-and-swap is a loop of exclusive loads and stores.
+    pub(package) lse: bool,
+    /// The processor has FEAT_LRCPC (arm64 `ldapr`): an acquire load waits for no earlier release store.
+    pub(package) rcpc: bool,
     /// The optimizer lowers each `switch` with a range or many values to compares and branches
     /// (`lir::switches`): the native backends test a `switch`'s values one by one.
     pub(package) switch_tree: bool,
@@ -1482,6 +1491,9 @@ extend Package {
             pairs: false,
             align_loops: false,
             popcnt: false,
+            sse41: false,
+            lse: false,
+            rcpc: false,
             switch_tree: false,
             pic: false,
             no_plt: false,

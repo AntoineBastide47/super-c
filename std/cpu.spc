@@ -111,6 +111,8 @@ pub enum Feature {
     Sme2,
     /// SME outer products of `f64` lanes (aarch64; `sme-f64f64`; implies `sme`).
     SmeF64f64,
+    /// The acquire load that waits for no earlier release store, `ldapr` (aarch64; `rcpc`).
+    Rcpc,
 }
 
 /// The x86-64 psABI level `x86-64-v2` beyond the baseline (`@target_feature(cpu::X86_64_V2)`).

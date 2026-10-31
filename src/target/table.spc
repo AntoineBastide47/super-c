@@ -459,7 +459,7 @@ const fn targets() [Target; 11] {
     let mut mac_a64 = apple(
         a64(
             row(ISA_A64, CC_APPLE, OBJ_MACHO, OS_MACOS, "arm64-apple-macos11.0", 1),
-            "neon fp16 dotprod rdm aes sha2 sha3 crc lse",
+            "neon fp16 dotprod rdm aes sha2 sha3 crc lse rcpc",
         ),
         "MacOSX",
     );

@@ -2074,10 +2074,10 @@ extend Gen {
         for i in 0..b.insts.len() {
             let t = b.insts[i];
             let d = self.lv.def_blk[i];
-            // A vector operation's lane trap calls too: its block needs the frame.
+            // A vector operation's lane trap and a panic call too: their blocks need the frame.
             if d == NONE || self.lv.pos[d as usize] == NONE || !Gen::clobbers(b, t) && !(t.op == O_VOP && !lv::reduces(
                 t,
-            )) {
+            )) && t.op != O_PANIC {
                 continue;
             }
             if !self.lv.rare[d as usize] {
@@ -5294,7 +5294,9 @@ extend Gen {
         }
     }
 
-    // Atomic loads, stores, read-modify-writes, compare-and-swaps and fences (LSE).
+    // Atomic loads, stores, read-modify-writes, compare-and-swaps and fences: an acquire load `ldapr`
+    // with FEAT_LRCPC (`Package.rcpc`; a sequentially consistent one `ldar`); with LSE (`Package.lse`)
+    // one instruction each, else a loop of exclusive loads and stores (`llsc_rmw`, `llsc_cas`).
     fn atomic(self: &mut Self, i: u32, t: Inst) bool {
         let op = t.op;
         if op == O_FENCE {
@@ -5329,8 +5331,10 @@ extend Gen {
             base
         };
         if op == O_ALOAD {
-            let rd = self.def(i) as u32;
-            if acq {
+            let rd = self.def_step(i) as u32;
+            if ord == MO_ACQUIRE && unsafe (*self.pkg).rcpc {
+                self.emit(a::ldapr(size, rd, rp));
+            } else if acq {
                 self.emit(a::ldar(size, true, rd, rp));
             } else {
                 self.emit(a::ldst_uimm(size_kind(1u32 << size), true, rd, rp, 0));
@@ -5349,7 +5353,12 @@ extend Gen {
         if op == O_ARMW {
             let r = t.aux >> 4;
             let rv = self.reg(t.b) as u32;
-            let rd = self.def(i) as u32;
+            // One instruction with LSE, which reads its operands before it writes: a dying one's register.
+            let rd = self.def_step(i) as u32;
+            if !unsafe (*self.pkg).lse {
+                self.llsc_rmw(size, r, acq, rel, rv, rd, rp);
+                return true;
+            }
             let mut src = rv;
             let opc = if r == RMW_XCHG {
                 a::LSE_SWP
@@ -5379,17 +5388,76 @@ extend Gen {
         let re = self.reg(t.b) as u32;
         let rn = self.reg(t.c) as u32;
         let rd = self.def(i) as u32;
-        self.emit(a::mov_reg(true, a::IP0, re));
-        self.emit(a::cas(size, acq2, rel2, a::IP0, rn, rp));
+        if unsafe (*self.pkg).lse {
+            self.emit(a::mov_reg(true, a::IP0, re));
+            self.emit(a::cas(size, acq2, rel2, a::IP0, rn, rp));
+            self.cmp_old(size, re);
+        } else {
+            // x16 takes the old value; the store runs when it equals the expected one, again while
+            // another write broke the exclusive access. The flags hold the last comparison.
+            let s = self.tmp(false) as u32;
+            let top = self.code.len();
+            self.emit(a::ldxr(size, acq2, a::IP0, rp));
+            self.cmp_old(size, re);
+            let ne = self.code.len() as u32;
+            self.emit(a::bcond(a::NE, 0));
+            self.emit(a::stxr(size, rel2, s, rn, rp));
+            self.emit(a::cbz(false, true, s, (top as i32 - self.code.len() as i32) * 4));
+            self.here(ne);
+        }
+        self.emit(a::cset(false, rd, a::EQ));
+        self.va.index_mut(i as usize).clean = true;
+        return true;
+    }
+
+    // The flags of x16 (an atomic's old value, `1 << size` bytes) against the expected value in `re`, whose
+    // bits above them may be any.
+    fn cmp_old(self: &mut Self, size: u32, re: u32) {
         let sf = size == 3;
         if size < 2 {
             self.emit(a::addsub_ext(false, 1, true, a::ZR, a::IP0, re, size, 0));
         } else {
             self.emit(a::addsub_reg(sf, 1, true, a::ZR, a::IP0, re, 0, 0));
         }
-        self.emit(a::cset(false, rd, a::EQ));
-        self.va.index_mut(i as usize).clean = true;
-        return true;
+    }
+
+    // Read-modify-write `r` (RMW_*) of `1 << size` bytes at `rp` with `rv` without LSE: the old value
+    // (into `rd`) by an exclusive load, the new one into x16, an exclusive store, again while another
+    // write broke the exclusive access. `acq` and `rel` order the load and the store (both for a
+    // sequentially consistent one, as GCC's loop).
+    fn llsc_rmw(self: &mut Self, size: u32, r: u32, acq: bool, rel: bool, rv: u32, rd: u32, rp: u32) {
+        let sf = size == 3;
+        // The old value's register, which the loop reads after the load: not one of the operands.
+        let o = if rd == rv || rd == rp {
+            self.tmp(false) as u32
+        } else {
+            rd
+        };
+        let s = self.tmp(false) as u32;
+        let top = self.code.len();
+        self.emit(a::ldxr(size, acq, o, rp));
+        let src = if r == RMW_XCHG {
+            rv
+        } else {
+            if r == RMW_ADD || r == RMW_SUB {
+                self.emit(a::addsub_reg(sf, (r == RMW_SUB) as u32, false, a::IP0, o, rv, 0, 0));
+            } else {
+                let opc = if r == RMW_AND {
+                    0u32
+                } else if r == RMW_OR {
+                    1u32
+                } else {
+                    2u32
+                };
+                self.emit(a::logic_reg(sf, opc, false, a::IP0, o, rv, 0, 0));
+            }
+            a::IP0
+        };
+        self.emit(a::stxr(size, rel, s, src, rp));
+        self.emit(a::cbz(false, true, s, (top as i32 - self.code.len() as i32) * 4));
+        if o != rd {
+            self.emit(a::mov_reg(true, rd, o));
+        }
     }
 }
 

@@ -1,5 +1,6 @@
-// The SSE to AVX-512 intrinsics (`immintrin.h`) the x86-64 backend expands in place of a call: per
-// intrinsic, its instructions (AT&T) over the registers the System V convention gives the call's
+// The SSE to AVX-512 intrinsics (`immintrin.h`) and the C library's exact absolute value, minimum and
+// maximum (`fabs`, `fmin`; SSE2, -0 below +0 and a NaN ignored as `std::rt::libm`'s) the x86-64 backend
+// expands in place of a call: per intrinsic, its instructions (AT&T) over the registers the System V convention gives the call's
 // arguments and result (xmm0, xmm1, .. for vectors and floats; rdi, rsi, rdx, rcx, r8, r9, then r10 and
 // r11 for the stack's, for integers and pointers, in order), `@k` the constant argument `k` and
 // `@(k*a+b)` its multiple. Derived from clang's code for a one-call wrapper of each, without the
@@ -7,7 +8,7 @@
 // `tests/codegen/asm_test.spc` checks each assembles to clang's bytes.
 
 /// The rows, by name: the intrinsic and its instructions.
-pub(package) const ROWS: [(str<'static>, str<'static>); 700] = [
+pub(package) const ROWS: [(str<'static>, str<'static>); 706] = [
     ("_mm256_abs_epi16", "vpabsw %ymm0, %ymm0"),
     ("_mm256_abs_epi32", "vpabsd %ymm0, %ymm0"),
     ("_mm256_abs_epi64", "vpabsq %ymm0, %ymm0"),
@@ -729,4 +730,43 @@ pub(package) const ROWS: [(str<'static>, str<'static>); 700] = [
     ("_mm_xor_pd", "xorps %xmm1, %xmm0"),
     ("_mm_xor_ps", "xorps %xmm1, %xmm0"),
     ("_mm_xor_si128", "xorps %xmm1, %xmm0"),
+    ("fabs", "pcmpeqd %xmm1, %xmm1\npsrlq $1, %xmm1\nandpd %xmm1, %xmm0"),
+    ("fabsf", "pcmpeqd %xmm1, %xmm1\npsrld $1, %xmm1\nandps %xmm1, %xmm0"),
+    (
+        "fmax",
+        "movapd %xmm1, %xmm2\ncmpsd $4, %xmm0, %xmm2\norpd %xmm1, %xmm2\nmovapd %xmm1, %xmm3\nmaxsd %xmm0, %xmm3\nandpd %xmm2, %xmm3\nmovapd %xmm0, %xmm2\ncmpsd $3, %xmm0, %xmm2\nandpd %xmm2, %xmm1\nandnpd %xmm3, %xmm2\norpd %xmm1, %xmm2\nmovapd %xmm2, %xmm0"
+    ),
+    (
+        "fmaxf",
+        "movaps %xmm1, %xmm2\ncmpss $4, %xmm0, %xmm2\norps %xmm1, %xmm2\nmovaps %xmm1, %xmm3\nmaxss %xmm0, %xmm3\nandps %xmm2, %xmm3\nmovaps %xmm0, %xmm2\ncmpss $3, %xmm0, %xmm2\nandps %xmm2, %xmm1\nandnps %xmm3, %xmm2\norps %xmm1, %xmm2\nmovaps %xmm2, %xmm0"
+    ),
+    (
+        "fmin",
+        "movapd %xmm1, %xmm2\ncmpsd $0, %xmm0, %xmm2\nandpd %xmm1, %xmm2\nmovapd %xmm1, %xmm3\nminsd %xmm0, %xmm3\norpd %xmm2, %xmm3\nmovapd %xmm0, %xmm2\ncmpsd $3, %xmm0, %xmm2\nandpd %xmm2, %xmm1\nandnpd %xmm3, %xmm2\norpd %xmm1, %xmm2\nmovapd %xmm2, %xmm0"
+    ),
+    (
+        "fminf",
+        "movaps %xmm1, %xmm2\ncmpss $0, %xmm0, %xmm2\nandps %xmm1, %xmm2\nmovaps %xmm1, %xmm3\nminss %xmm0, %xmm3\norps %xmm2, %xmm3\nmovaps %xmm0, %xmm2\ncmpss $3, %xmm0, %xmm2\nandps %xmm2, %xmm1\nandnps %xmm3, %xmm2\norps %xmm1, %xmm2\nmovaps %xmm2, %xmm0"
+    ),
+];
+
+/// The C library's exact roundings (`floor`, `round`: SSE4.1's `roundsd` and `roundss`, x86-64-v2), in
+/// place of the call when the processor has SSE4.1 (`Package.sse41`), as the rows. `round` rounds half away
+/// from zero: the truncation of the value plus the largest number below 1/2 of its sign, as LLVM's x86
+/// lowering, the constants made in registers.
+pub(package) const SSE41_ROWS: [(str<'static>, str<'static>); 8] = [
+    ("ceil", "roundsd $10, %xmm0, %xmm0"),
+    ("ceilf", "roundss $10, %xmm0, %xmm0"),
+    ("floor", "roundsd $9, %xmm0, %xmm0"),
+    ("floorf", "roundss $9, %xmm0, %xmm0"),
+    (
+        "round",
+        "pcmpeqd %xmm1, %xmm1\npsrlq $2, %xmm1\npcmpeqd %xmm2, %xmm2\npsrlq $63, %xmm2\npsllq $53, %xmm2\npxor %xmm2, %xmm1\npsllq $10, %xmm2\nandpd %xmm0, %xmm2\norpd %xmm2, %xmm1\naddsd %xmm0, %xmm1\nroundsd $11, %xmm1, %xmm0"
+    ),
+    (
+        "roundf",
+        "pcmpeqd %xmm1, %xmm1\npsrld $2, %xmm1\npcmpeqd %xmm2, %xmm2\npsrld $31, %xmm2\npslld $24, %xmm2\npxor %xmm2, %xmm1\npslld $7, %xmm2\nandps %xmm0, %xmm2\norps %xmm2, %xmm1\naddss %xmm0, %xmm1\nroundss $11, %xmm1, %xmm0"
+    ),
+    ("trunc", "roundsd $11, %xmm0, %xmm0"),
+    ("truncf", "roundss $11, %xmm0, %xmm0"),
 ];
