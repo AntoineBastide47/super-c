@@ -56,6 +56,8 @@ const UB_DEPTH: u32 = 4;
 const MAX_SELECTS: u32 = 2;
 // The instructions but constants an if-conversion moves out of its two sides (`Opt::speculate`).
 const SPEC_MAX: u32 = 4;
+// `ConstSlot::find` follows address chains at most CONST_PASSES deep.
+const CONST_PASSES: u32 = 8;
 // `bit_set` takes at most SET_MAX comparisons.
 const SET_MAX: usize = 16;
 const MIN_DEPTH: u32 = 3;
@@ -4536,6 +4538,19 @@ extend Opt {
                 u.b = u.a;
                 b.insts[i as usize] = u;
             }
+            // A truncation of an addition, subtraction, product or bitwise operation of two values extended
+            // from its type, which it alone reads, is that operation on them: the result's low bits are
+            // those of the operands'. (Another reader keeps the wide operation; the truncation is free.)
+            if t.op == O_TRUNC && is_int(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE && (t.a as usize >= self.icount.len() || self.icount[t.a as usize] == 1) {
+                let w = b.insts[t.a as usize];
+                if w.op >= O_ADD && w.op <= O_XOR && !(w.op >= O_SDIV && w.op <= O_UREM) {
+                    let x = ext_from(b, w.a, t.ty);
+                    let y = ext_from(b, w.b, t.ty);
+                    if x != VNONE && y != VNONE {
+                        b.insts[i as usize] = Inst { op: w.op, ty: t.ty, aux: 0, a: x, b: y, c: VNONE };
+                    }
+                }
+            }
             let r = simplify(pk, b, i);
             if r != VNONE {
                 self.repl[i as usize] = r;
@@ -4568,12 +4583,44 @@ extend Opt {
             }
             self.pow2(b, i);
             self.shift_pair(pk, b, i);
+            self.add_pair(pk, b, i);
             if self.divide(pk, b, k, i) || self.rem_by_quotient(b, k, i) {
                 return true;
             }
             return self.number(pk, b, k, i) || !same(b.insts[i as usize], t0);
         }
         return !same(t, t0);
+    }
+
+    // Instruction `i`, a sum or difference of a constant and a sum or difference of a constant: in place one
+    // sum of the inner operand and the constants combined (`(x + 1) + 1` is `x + 2`; an unrolled loop's
+    // counter steps).
+    fn add_pair(self: &mut Self, pk: &Package, b: &mut Body, i: u32) {
+        let t = b.insts[i as usize];
+        if t.op != O_ADD && t.op != O_SUB || !is_int(t.ty) || t.ty == T_I128 || (t.a & (VPARAM | VFLAG)) != 0 {
+            return;
+        }
+        let x = b.insts[t.a as usize];
+        let k2 = const_of(b, t.b);
+        if x.op != O_ADD && x.op != O_SUB || x.ty != t.ty || k2.is_none() {
+            return;
+        }
+        let k1 = const_of(b, x.b);
+        if k1.is_none() {
+            return;
+        }
+        let s1 = if x.op == O_ADD {
+            k1.unwrap()
+        } else {
+            0u64.wrapping_sub(k1.unwrap())
+        };
+        let s2 = if t.op == O_ADD {
+            k2.unwrap()
+        } else {
+            0u64.wrapping_sub(k2.unwrap())
+        };
+        let kv = self.constant(b, t.ty, le::trunc_bits(s1.wrapping_add(s2), type_bits(t.ty, pk.ptr_bytes)));
+        b.insts[i as usize] = Inst { op: O_ADD, ty: t.ty, aux: 0, a: x.a, b: kv, c: VNONE };
     }
 
     // Instruction `i`, a logical shift right of a shift left by the same constant (or left of right): in
@@ -4737,8 +4784,8 @@ extend Opt {
 
     // `or` `i` of block `k` that no `or` reads, a tree of `or`s each read once whose leaves are at least 3
     // and at most SET_MAX equalities of one integer `x` with constants within 64 of each other, `lo` the
-    // least: `x - lo <=u span` and bit `x - lo` of the constants' mask (LLVM's bit tests for switches).
-    // Whether it did.
+    // least: `x - lo <=u span` and bit `x - lo` of the constants' mask (LLVM's bit tests for switches); from
+    // 0 when every constant is below 64. Whether it did.
     fn bit_set(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
         if is_vec(t.ty) || i as usize < self.in_or.len() && self.in_or[i as usize] {
@@ -4791,6 +4838,9 @@ extend Opt {
         if hi - lo >= 64 {
             return false;
         }
+        if hi < 64 {
+            lo = 0;
+        }
         let mut mask: u64 = 0;
         for q in 0..vals.len() {
             mask |= 1u64 << (vals[q] & m) - lo;
@@ -4812,10 +4862,8 @@ extend Opt {
         let mv = self.constant(b, T_I64, mask);
         let sh = self.before(b, k, i, Inst { op: O_LSHR, ty: T_I64, aux: 0, a: mv, b: amt, c: VNONE });
         let low = self.before(b, k, i, Inst { op: O_TRUNC, ty: t.ty, aux: 0, a: sh, b: VNONE, c: VNONE });
-        let one = self.constant(b, t.ty, 1);
-        let bit = self.before(b, k, i, Inst { op: O_AND, ty: t.ty, aux: 0, a: low, b: one, c: VNONE });
-        let zero = self.constant(b, t.ty, 0);
-        b.insts[i as usize] = Inst { op: O_SELECT, ty: t.ty, aux: 0, a: inr, b: bit, c: zero };
+        // The range test is 0 or 1: it keeps bit 0 of the shifted mask alone.
+        b.insts[i as usize] = Inst { op: O_AND, ty: t.ty, aux: 0, a: inr, b: low, c: VNONE };
         return true;
     }
 
@@ -5208,6 +5256,32 @@ extend Opt {
         }
         let (m, sh, add) = magic(d, bits);
         let n = t.a;
+        let mut q = VNONE;
+        if bits == 32 && !add {
+            // A 32-bit dividend: its 64-bit product by the multiplier, shifted once by 32 more.
+            let w = self.before(b, k, i, Inst { op: O_ZEXT, ty: T_I64, aux: 0, a: n, b: VNONE, c: VNONE });
+            let mv = self.constant(b, T_I64, m);
+            let p = self.before(b, k, i, Inst { op: O_MUL, ty: T_I64, aux: 0, a: w, b: mv, c: VNONE });
+            let sv = self.constant(b, T_I64, 32 + sh);
+            let h = self.before(b, k, i, Inst { op: O_LSHR, ty: T_I64, aux: 0, a: p, b: sv, c: VNONE });
+            q = self.before(b, k, i, Inst { op: O_TRUNC, ty: t.ty, aux: 0, a: h, b: VNONE, c: VNONE });
+        }
+        if q == VNONE {
+            q = self.mulhu_quotient(b, k, i, n, m, sh, add);
+        }
+        if t.op == O_UDIV {
+            self.repl[i as usize] = q;
+            return true;
+        }
+        let prod = self.before(b, k, i, Inst { op: O_MUL, ty: t.ty, aux: 0, a: q, b: t.b, c: VNONE });
+        self.repl[i as usize] = self.before(b, k, i, Inst { op: O_SUB, ty: t.ty, aux: 0, a: n, b: prod, c: VNONE });
+        return true;
+    }
+
+    // `divide`'s quotient of `n` (instruction `i` of block `k`) by the high half of its product by `m`,
+    // `add` adding `n` back (a multiplier one bit wider than the type), shifted right by `sh`.
+    fn mulhu_quotient(self: &mut Self, b: &mut Body, k: u32, i: u32, n: Value, m: u64, sh: u64, add: bool) Value {
+        let t = b.insts[i as usize];
         let mv = self.constant(b, t.ty, m);
         let h = self.before(b, k, i, Inst { op: O_MULHU, ty: t.ty, aux: 0, a: n, b: mv, c: VNONE });
         let mut q = h;
@@ -5221,13 +5295,7 @@ extend Opt {
             let sv = self.constant(b, t.ty, sh);
             q = self.before(b, k, i, Inst { op: O_LSHR, ty: t.ty, aux: 0, a: q, b: sv, c: VNONE });
         }
-        if t.op == O_UDIV {
-            self.repl[i as usize] = q;
-            return true;
-        }
-        let prod = self.before(b, k, i, Inst { op: O_MUL, ty: t.ty, aux: 0, a: q, b: t.b, c: VNONE });
-        self.repl[i as usize] = self.before(b, k, i, Inst { op: O_SUB, ty: t.ty, aux: 0, a: n, b: prod, c: VNONE });
-        return true;
+        return q;
     }
 
     // `divide` of signed quotient or remainder `i` by `d`, the constant sign-extended. By a power of two
@@ -6614,6 +6682,7 @@ struct Scratch {
 extend Run {
     /// The job graph of `pk`'s bodies under `cf`; `pk` keeps no body until `finish`.
     pub(package) fn new(pk: &mut Package, sealed: &Vector<bool>, cf: Config) Run {
+        direct_calls(pk);
         let bodies = replace(&mut pk.bodies, Vector::<Body>::new());
         let n = bodies.len();
         let held = if pk.held.body == NONE {
@@ -6812,6 +6881,9 @@ extend Run {
             let _ = sc.o.run(p, b, true);
         }
         let _ = sc.o.split_exits(p, b);
+        if ret_edges(b) {
+            sc.o.forget();
+        }
         sc.o.estimate(p, b);
         if r.print.len() != 0 {
             r.print_body(p, j, b);
@@ -6877,7 +6949,8 @@ extend Run {
         g.get_mut().push(sc);
     }
 
-    /// Give the bodies back to `pk`, the package `new` took them from, in their final forms.
+    /// Give the bodies back to `pk`, the package `new` took them from, in their final forms, their constant
+    /// slots in read-only data (`const_slots`).
     pub(package) fn finish(self: &mut Self, pk: &mut Package) {
         for j in 0..self.finals.len() {
             let f = replace(&mut self.finals[j], Option::<Body>::None);
@@ -6887,6 +6960,7 @@ extend Run {
             }
         }
         pk.bodies = replace(&mut self.bodies, Vector::<Body>::new());
+        const_slots(pk);
     }
 
     /// After `finish`, the form of body `k` its callers inlined: the one before the loop transforms and
@@ -6942,6 +7016,264 @@ pub(package) fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
         r.job(r.order[k]);
     }
     r.finish(pk);
+}
+
+// At most CONST_SLOT_BYTES bytes of a slot go to read-only data (`const_slots`).
+const CONST_SLOT_BYTES: u32 = 4096;
+// `const_slot`'s offset of an address the slot gives at a variable place, and of a value it does not give.
+const OFF_VAR: u64 = 0xFFFFFFFFFFFFFFFE;
+const OFF_NONE: u64 = 0xFFFFFFFFFFFFFFFF;
+
+// Place each slot of the optimized bodies that only constants of disjoint bytes are stored into, and whose
+// address only those stores and loads read (through offsets and indices), in read-only data of its own:
+// the code loads from it rather than store the constants at each call (a constant local array; LLVM
+// promotes such an alloca to a constant global). A byte no store writes is 0, which a read of it before
+// any store, undefined, may give. The stores become unused constants.
+fn const_slots(pk: &mut Package) {
+    let held = if pk.held.body == NONE {
+        pk.bodies.len()
+    } else {
+        pk.held.body as usize
+    };
+    let mut owner = Vector::<u32>::with_capacity(pk.bodies.len());
+    for _ in 0..pk.bodies.len() {
+        owner.push(NONE);
+    }
+    for s in 0..pk.syms.len() {
+        let y = pk.syms[s];
+        if y.kind == SK_FUNC && y.def != NONE {
+            owner[y.def as usize] = s as u32;
+        }
+    }
+    let mut cs = ConstSlot {
+        slot: Vector::<u32>::new(),
+        off: Vector::<u64>::new(),
+        bad: Vector::<bool>::new(),
+        has: Vector::<bool>::new(),
+        adds: Vector::<u32>::new(),
+        us: Vector::<Value>::new(),
+        es: Vector::<u32>::new(),
+        stores: Vector::<u32>::new(),
+        bytes: Vector::<u8>::new(),
+        set: Vector::<bool>::new(),
+    };
+    for k in 0..held {
+        if owner[k] == NONE || pk.bodies[k].slots.len() == 0 || !cs.scan(&pk.bodies[k]) {
+            continue;
+        }
+        for s in 0..pk.bodies[k].slots.len() {
+            if !cs.fill_bytes(&pk.bodies[k], s as u32, pk.ptr_bytes) {
+                continue;
+            }
+            let o = pk.syms[owner[k] as usize];
+            let name = format("{}.const{}", pk.spell(o.name), s);
+            let d = pk.add_symbol(&name, SK_DATA, SL_LOCAL);
+            if d == NONE {
+                continue;
+            }
+            pk.syms.index_mut(d as usize).unit = o.unit;
+            pk.syms.index_mut(d as usize).own = o.own;
+            let sl = pk.bodies[k].slots[s];
+            let none: []Reloc = [];
+            if !pk.add_data(d, sl.size, sl.align_log2, true, &cs.bytes, none) {
+                continue;
+            }
+            let b = pk.bodies.index_mut(k);
+            let r = b.ref_sym(d);
+            for i in 0..b.insts.len() {
+                let t = b.insts[i];
+                if t.op == O_SLOTADDR && t.a == s as u32 {
+                    b.insts[i] = Inst { op: O_SYMADDR, ty: T_PTR, aux: 0, a: r, b: 0, c: VNONE };
+                } else if t.op == O_STORE && cs.slot[i] == s as u32 {
+                    b.insts[i] = iconst(T_I8, 0);
+                }
+            }
+            b.slots.index_mut(s).size = 0;
+            b.slots.index_mut(s).align_log2 = 0;
+        }
+    }
+}
+
+// `const_slots`'s scratch, per body: per instruction the slot an address it gives is into (`slot`, NONE for
+// none; a store's, its address's) and the offset into it (`off`, OFF_VAR for a variable one), per slot
+// whether something but stores of constants and loads reads its address (`bad`) and whether a constant
+// store writes it (`has`); the slot addresses and offsets (`adds`), operands, edges, the constant stores;
+// per slot at hand its bytes and which are stored.
+struct ConstSlot {
+    slot: Vector<u32>,
+    off: Vector<u64>,
+    bad: Vector<bool>,
+    has: Vector<bool>,
+    adds: Vector<u32>,
+    us: Vector<Value>,
+    es: Vector<u32>,
+    stores: Vector<u32>,
+    bytes: Vector<u8>,
+    set: Vector<bool>,
+}
+
+extend ConstSlot {
+    // The slots of `b` and the addresses they give, each instruction read a few times: whether a slot is
+    // stored into with constants and read by loads alone (not `bad`).
+    fn scan(self: &mut Self, b: &Body) bool {
+        let n = b.insts.len();
+        // A slot read at constant offsets alone became values (`lir::promote`): a table has an index. Most
+        // bodies have no constant store into a slot nor an indexed slot address: one look at each
+        // instruction tells; the slots' addresses and the offsets kept for the passes below.
+        let mut cstore = false;
+        let mut indexed = false;
+        self.adds.truncate(0);
+        for i in 0..n {
+            let t = b.insts[i];
+            if t.op == O_STORE {
+                cstore = cstore || (t.b & (VPARAM | VFLAG)) == 0 && (b.insts[t.b as usize].op == O_ICONST || b.insts[t.b as usize].op == O_FCONST) && (t.a & (VPARAM | VFLAG)) == 0 && (b.insts[t.a as usize].op == O_SLOTADDR || b.insts[t.a as usize].op == O_PTRADD);
+            } else if t.op == O_SLOTADDR || t.op == O_PTRADD {
+                indexed = indexed || t.op == O_PTRADD && t.b != VNONE && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_SLOTADDR;
+                self.adds.push(i as u32);
+            }
+        }
+        if !cstore || !indexed {
+            return false;
+        }
+        fill(&mut self.slot, n, NONE);
+        fill(&mut self.off, n, 0);
+        fill(&mut self.bad, b.slots.len(), false);
+        for q in 0..self.adds.len() {
+            let i = self.adds[q] as usize;
+            let t = b.insts[i];
+            if t.op == O_SLOTADDR && t.a as usize < b.slots.len() {
+                let sz = b.slots[t.a as usize].size;
+                if sz == 0 || sz > CONST_SLOT_BYTES {
+                    self.bad[t.a as usize] = true;
+                } else {
+                    self.slot[i] = t.a;
+                }
+            }
+        }
+        // The addresses offsets and indices give, a chain at most CONST_PASSES deep (a use may come before
+        // its definition in the instruction order); a deeper one makes the body's slots stay.
+        let mut changed = true;
+        let mut pass: u32 = 0;
+        while changed {
+            if pass == CONST_PASSES {
+                return false;
+            }
+            pass += 1;
+            changed = false;
+            for q in 0..self.adds.len() {
+                let i = self.adds[q] as usize;
+                let t = b.insts[i];
+                if t.op != O_PTRADD || self.slot[i] != NONE || !self.gives(t.a) {
+                    continue;
+                }
+                let base = self.off[t.a as usize];
+                self.slot[i] = self.slot[t.a as usize];
+                self.off[i] = if t.b != VNONE || base == OFF_VAR {
+                    OFF_VAR
+                } else {
+                    base.wrapping_add(((t.c as i32) as i64) as u64)
+                };
+                changed = true;
+            }
+        }
+        self.stores.truncate(0);
+        for i in 0..n {
+            let t = b.insts[i];
+            if t.op >= O_JMP && t.op <= O_SWITCH {
+                b.succ_edges(t, &mut self.es);
+                for q in 0..self.es.len() {
+                    for x in 0..b.edge_nargs(self.es[q]) {
+                        let v = b.edge_arg(self.es[q], x);
+                        if self.gives(v) {
+                            self.bad[self.slot[v as usize] as usize] = true;
+                        }
+                    }
+                }
+            }
+            if t.op == O_SLOTADDR {
+                continue;
+            }
+            lv::uses(b, t, &mut self.us);
+            // A load's or an offset's address, a store's address (of a constant at a known offset, not
+            // volatile): kept; any other read of a slot's address makes the slot stay.
+            let mut keep = VNONE;
+            if t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 || t.op == O_PTRADD {
+                keep = t.a;
+            } else if t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 && self.gives(t.a) && self.off[t.a as usize] != OFF_VAR && (t.b & (VPARAM | VFLAG)) == 0 && (b.insts[t.b as usize].op == O_ICONST || b.insts[t.b as usize].op == O_FCONST) {
+                keep = t.a;
+                self.slot[i] = self.slot[t.a as usize];
+                self.off[i] = self.off[t.a as usize];
+                self.stores.push(i as u32);
+            }
+            for q in 0..self.us.len() {
+                let v = self.us[q];
+                if self.gives(v) && (v != keep || q != 0) {
+                    self.bad[self.slot[v as usize] as usize] = true;
+                }
+            }
+            if t.op == O_STORE && keep == VNONE && self.gives(t.a) {
+                self.bad[self.slot[t.a as usize] as usize] = true;
+            }
+        }
+        // A slot without a constant store stays.
+        fill(&mut self.has, b.slots.len(), false);
+        for q in 0..self.stores.len() {
+            self.has[self.slot[self.stores[q] as usize] as usize] = true;
+        }
+        let mut any = false;
+        for s in 0..b.slots.len() {
+            any = any || self.has[s] && !self.bad[s];
+        }
+        return any;
+    }
+
+    // Slot `s`'s bytes from its constant stores (`scan`), when it is not `bad`, has one, and none overlaps
+    // another or passes its end (constants of `ptr`-byte pointers aside). Whether it goes to data.
+    fn fill_bytes(self: &mut Self, b: &Body, s: u32, ptr: u32) bool {
+        if self.bad[s as usize] || !self.has[s as usize] {
+            return false;
+        }
+        let size = b.slots[s as usize].size;
+        self.bytes.truncate(0);
+        self.set.truncate(0);
+        for _ in 0..size {
+            self.bytes.push(0);
+            self.set.push(false);
+        }
+        let mut n: u32 = 0;
+        for q in 0..self.stores.len() {
+            let i = self.stores[q] as usize;
+            let t = b.insts[i];
+            if self.slot[i] != s {
+                continue;
+            }
+            let c = b.insts[t.b as usize];
+            let ty = c.ty;
+            if !(is_int(ty) && ty != T_I128 || ty == T_F32 || ty == T_F64) {
+                return false;
+            }
+            let w = type_bytes(ty, ptr) as u64;
+            let at = self.off[i].wrapping_add(((t.c as i32) as i64) as u64);
+            if at >= size as u64 || at + w > size as u64 {
+                return false;
+            }
+            let bits = c.b as u64 << 32 | c.a as u64;
+            for q in 0..w {
+                if self.set[(at + q) as usize] {
+                    return false;
+                }
+                self.set[(at + q) as usize] = true;
+                self.bytes[(at + q) as usize] = (bits >> 8 * q) as u8;
+            }
+            n += 1;
+        }
+        return n != 0;
+    }
+
+    // Whether value `v` is an address a slot gives.
+    fn gives(self: &Self, v: Value) bool {
+        return (v & (VPARAM | VFLAG)) == 0 && v != VNONE && self.slot[v as usize] != NONE;
+    }
 }
 
 // The direct calls of the bodies (`Run::new`): per body, its range of `callee` (in instruction order; a
@@ -7917,19 +8249,6 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             return VNONE;
         }
     }
-    // A truncation of an addition, subtraction, product or bitwise operation of two values extended from
-    // its type is that operation on them: the result's low bits are those of the operands'.
-    if t.op == O_TRUNC && is_int(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 {
-        let w = b.insts[t.a as usize];
-        if w.op >= O_ADD && w.op <= O_XOR && !(w.op >= O_SDIV && w.op <= O_UREM) {
-            let x = ext_from(b, w.a, t.ty);
-            let y = ext_from(b, w.b, t.ty);
-            if x != VNONE && y != VNONE {
-                b.insts[i as usize] = Inst { op: w.op, ty: t.ty, aux: 0, a: x, b: y, c: VNONE };
-                return VNONE;
-            }
-        }
-    }
     if t.op == O_SEXT || t.op == O_ZEXT || t.op == O_TRUNC || t.op == O_INTTOPTR || t.op == O_PTRTOINT {
         let x = const_of(b, t.a);
         let mut r: u64 = 0;
@@ -8784,6 +9103,105 @@ const fn other_edge(t: Inst, e: u32) u32 {
     } else {
         t.b
     };
+}
+
+// Make each indirect call of `pk`'s bodies through the address of a function whose signature the call fits
+// a direct call of it, before the bodies' calls order their optimization: the inliner may inline it (a
+// local binding of a function called; LLVM's InstCombine).
+fn direct_calls(pk: &mut Package) {
+    // (body, instruction, the body's symbol number), found before any changes.
+    let mut fix = Vector::<(u32, u32, u32)>::new();
+    for k in 0..pk.bodies.len() {
+        let b = &pk.bodies[k];
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if t.op != O_CALLIND || (t.a & (VPARAM | VFLAG)) != 0 {
+                continue;
+            }
+            let f = b.insts[t.a as usize];
+            if f.op != O_SYMADDR || f.b != 0 {
+                continue;
+            }
+            let sy = pk.syms[b.syms[f.a as usize] as usize];
+            if sy.kind == SK_FUNC && sy.def != NONE && lv::call_fits(&pk.bodies[sy.def as usize], b, t.b) {
+                fix.push((k as u32, i as u32, f.a));
+            }
+        }
+    }
+    for q in 0..fix.len() {
+        let (k, i, s) = fix[q];
+        let t = pk.bodies.index_mut(k as usize).insts.index_mut(i as usize);
+        t.op = O_CALL;
+        t.a = s;
+    }
+}
+
+// At most RET_EDGES branch edges of a body return through blocks of their own (`ret_edges`).
+const RET_EDGES: u32 = 8;
+
+// Give each edge of a branch of `b` that passes arguments to a block that only returns a block of its own
+// that returns the value (`ret_through`), up to RET_EDGES and but one edge into each such block (which stays
+// reachable): the native code returns at once rather than move the arguments and jump (LLVM's tail
+// duplication of return blocks; the walk makes a jump's own return). Whether any.
+fn ret_edges(b: &mut Body) bool {
+    let nb = b.blocks.len();
+    // Per block, the edges into it.
+    let mut into = Vector::<u32>::with_capacity(nb);
+    for _ in 0..nb {
+        into.push(0);
+    }
+    let mut es = Vector::<u32>::new();
+    for k in 0..nb {
+        let bk = b.blocks[k];
+        if bk.len != 0 {
+            b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut es);
+            for q in 0..es.len() {
+                into[b.edge_target(es[q]) as usize] += 1;
+            }
+        }
+    }
+    let mut n: u32 = 0;
+    for k in 0..nb {
+        let bk = b.blocks[k];
+        if bk.len == 0 {
+            continue;
+        }
+        let at = bk.start + bk.len - 1;
+        let mut t = b.insts[at as usize];
+        if t.op != O_BR {
+            continue;
+        }
+        for side in 0..2 {
+            let e = if side == 0 {
+                t.b
+            } else {
+                t.c
+            };
+            let (ok, v) = ret_through(b, e);
+            let j = b.edge_target(e);
+            if !ok || b.edge_nargs(e) == 0 || n == RET_EDGES || into[j as usize] < 2 {
+                continue;
+            }
+            into[j as usize] -= 1;
+            let rb = b.blocks[j as usize];
+            let r = b.add_block([]);
+            b.blocks.index_mut(r as usize).flags = rb.flags;
+            b.begin(r);
+            let _ = b.emit(Inst { op: O_RET, ty: T_NONE, aux: 0, a: v, b: VNONE, c: VNONE }, b.locs[rb.start as usize]);
+            if b.inl.len() != 0 {
+                b.inl.push(b.inl[rb.start as usize]);
+            }
+            let ne = b.edge(r, []);
+            if side == 0 {
+                t.b = ne;
+            } else {
+                t.c = ne;
+            }
+            n += 1;
+        }
+        b.insts[at as usize] = t;
+    }
+    return n != 0;
 }
 
 fn ret_through(b: &Body, e: u32) (bool, Value) {

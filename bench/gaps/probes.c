@@ -2,6 +2,7 @@
 // of the same name in gaps.spc, with a `c_` prefix. lib.sh archives it. The types are unsigned, so
 // overflow wraps as in Super-C's release and bench profiles.
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define F __attribute__((noinline, used))
@@ -58,3 +59,5 @@ F uint8_t c_f_class(uint8_t c) { if (c >= 97 && c <= 122) return 1; if (c >= 65 
 F uint32_t c_b_bfi(uint32_t x, uint32_t v) { return (x & 0xffff00ffu) | ((v & 0xff) << 8); }
 F uint64_t c_b_andn(uint64_t x, uint64_t y) { return ~x & y; }
 F int32_t c_b_sbfx(uint32_t x) { return ((int32_t)(x << 20)) >> 24; }
+F uint32_t c_f_hash(const uint8_t *s, size_t n) { uint32_t h = 2166136261u; for (size_t k = 0; k < n; k++) h = (h ^ s[k]) * 16777619u; return h; }
+F size_t c_m_count(const uint8_t *s, size_t n, uint8_t c) { size_t r = 0; for (size_t k = 0; k < n; k++) if (s[k] == c) r++; return r; }
