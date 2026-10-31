@@ -6286,10 +6286,6 @@ extend Gen {
         // A leaf body keeps its return address in x30: no frame record, and its frame from sp. The
         // compact unwind encoding's frameless form holds frames up to 65520 bytes.
         let leaf = self.frameless && local <= 32768 && self.canary < 0 && !self.calls_before(self.code.len() as u32);
-        if !leaf {
-            pro.push(a::ldstp(a::M_X, false, 3, a::FP, a::LR, a::SP, -16));
-            pro.push(a::add_imm(true, a::FP, a::SP, 0));
-        }
         // The callee-saved registers in the pairs compact unwind names (x19/x20 to x27/x28, d8/d9 to
         // d14/d15), both of a pair when the body uses one: each pair below the last, its lower register 8
         // bytes higher (x19 at x29 - 8), as libunwind reads a frame. `xs` and `vs` hold each pair's lower
@@ -6313,13 +6309,34 @@ extend Gen {
                 enc |= 0x100u32 << q;
             }
         }
-        for k in 0..xs.len() {
-            pro.push(a::ldstp(a::M_X, false, 3, xs[k] + 1, xs[k], a::SP, -16));
+        // One `sp` update for the frame record and the pairs: the lowest pair stored pre-indexed by all of
+        // them, the others and the record above it at offsets (`pair_at`).
+        let np = (xs.len() + vs.len()) as u32;
+        let csr_bytes = 16 * np;
+        let top = if leaf {
+            csr_bytes
+        } else {
+            csr_bytes + 16
+        };
+        let mut j = np;
+        while j > 0 {
+            j -= 1;
+            let (m, r) = pair_at(&xs, &vs, j);
+            let (mode, off) = if j + 1 == np {
+                (3u32, -(top as i32))
+            } else {
+                (2u32, (csr_bytes - 16 * (j + 1)) as i32)
+            };
+            pro.push(a::ldstp(m, false, mode, r + 1, r, a::SP, off));
         }
-        for k in 0..vs.len() {
-            pro.push(a::ldstp(a::M_VD, false, 3, vs[k] + 1, vs[k], a::SP, -16));
+        if !leaf && np == 0 {
+            pro.push(a::ldstp(a::M_X, false, 3, a::FP, a::LR, a::SP, -16));
+        } else if !leaf {
+            pro.push(a::ldstp(a::M_X, false, 2, a::FP, a::LR, a::SP, csr_bytes as i32));
         }
-        let csr_bytes = 16 * (xs.len() + vs.len()) as u32;
+        if !leaf {
+            pro.push(a::add_imm(true, a::FP, a::SP, csr_bytes));
+        }
         if leaf {
             enc |= (csr_bytes + local) / 16 << 12;
         }
@@ -6374,23 +6391,24 @@ extend Gen {
             if back != 0 {
                 epi.push(a::add_imm(true, a::SP, a::SP, back));
             }
-        } else if csr_bytes != 0 {
+        } else if local != 0 || self.max_align > 16 || (self.opf & lv::OP_ASM) != 0 {
+            // `sp` back from x29: past the locals, an over-aligned frame or inline assembly's own moves.
             epi.push(a::sub_imm(true, a::SP, a::FP, csr_bytes));
-        } else {
-            epi.push(a::mov_sp(a::SP, a::FP));
         }
-        let mut k = vs.len();
-        while k > 0 {
-            k -= 1;
-            epi.push(a::ldstp(a::M_VD, true, 1, vs[k] + 1, vs[k], a::SP, 16));
-        }
-        k = xs.len();
-        while k > 0 {
-            k -= 1;
-            epi.push(a::ldstp(a::M_X, true, 1, xs[k] + 1, xs[k], a::SP, 16));
-        }
-        if !leaf {
+        // The frame record and the pairs at their offsets, the lowest pair post-indexed past them all.
+        if !leaf && np == 0 {
             epi.push(a::ldstp(a::M_X, true, 1, a::FP, a::LR, a::SP, 16));
+        } else if !leaf {
+            epi.push(a::ldstp(a::M_X, true, 2, a::FP, a::LR, a::SP, csr_bytes as i32));
+        }
+        for j in 0..np {
+            let (m, r) = pair_at(&xs, &vs, j);
+            let (mode, off) = if j + 1 == np {
+                (1u32, top as i32)
+            } else {
+                (2u32, (csr_bytes - 16 * (j + 1)) as i32)
+            };
+            epi.push(a::ldstp(m, true, mode, r + 1, r, a::SP, off));
         }
         epi.push(a::RET);
         // Branches: through a block that is one `b` alone, to that branch's target (at most 8 steps; one
@@ -6724,44 +6742,56 @@ extend Gen {
     }
 }
 
-// The unwind rules of function `sym` (`size` bytes) for `.eh_frame`, after the prologue's `stp x29, x30,
-// [sp, #-16]!` (the CFA is sp + 16, x29 at CFA - 16, x30 at CFA - 8), `mov x29, sp` (the CFA is x29 +
-// 16) and the pushes of the callee-saved pairs whose lower registers are `xs` and `vs` (16 bytes each
-// below x29, the lower register 8 bytes higher). The common entry's code alignment is 4 bytes and its
-// data alignment -8.
+// Pair `j` of the callee-saved pairs whose lower registers are `xs` then `vs`: its access size and lower
+// register.
+fn pair_at(xs: &Vector<u32>, vs: &Vector<u32>, j: u32) (u32, u32) {
+    let nx = xs.len() as u32;
+    return if j < nx {
+        (a::M_X, xs[j as usize])
+    } else {
+        (a::M_VD, vs[(j - nx) as usize])
+    };
+}
+
+// The unwind rules of function `sym` (`size` bytes) for `.eh_frame`. The prologue stores the callee-saved
+// pairs whose lower registers are `xs` and `vs` (16 bytes each below x29, the lower register 8 bytes
+// higher) and the frame record above them (x29 at CFA - 16, x30 at CFA - 8): its first store moves sp
+// past all of them (the CFA is sp + their bytes), the record's store is the last, then `add x29` (the CFA
+// is x29 + 16). The common entry's code alignment is 4 bytes and its data alignment -8.
 fn frame_rules(o: &mut ob::Obj, sym: u32, size: u32, xs: &Vector<u32>, vs: &Vector<u32>) {
     let c0 = o.cfi.len() as u32;
+    let nx = xs.len() as u32;
+    let npush = nx + vs.len() as u32;
     o.cfi.push(0x40 | 1);
     o.cfi.push(0x0E);
-    o.cfi.push(16);
+    dw::uleb(&mut o.cfi, 16 + 16 * npush);
+    if npush != 0 {
+        o.cfi.push(0x40 | npush as u8);
+    }
     o.cfi.push(0x80 | a::FP as u8);
     o.cfi.push(2);
     o.cfi.push(0x80 | a::LR as u8);
     o.cfi.push(1);
-    o.cfi.push(0x40 | 1);
-    o.cfi.push(0x0D);
-    o.cfi.push(a::FP as u8);
-    let nx = xs.len() as u32;
-    let npush = nx + vs.len() as u32;
-    if npush != 0 {
-        o.cfi.push(0x40 | npush as u8);
-        // Pair q stores its lower register at CFA - 24 - 16 q, its upper one 8 bytes below.
-        for k in 0..nx {
-            o.cfi.push(0x80 | xs[k as usize] as u8);
-            o.cfi.push((3 + 2 * k) as u8);
-            o.cfi.push(0x80 | (xs[k as usize] + 1) as u8);
-            o.cfi.push((4 + 2 * k) as u8);
-        }
-        for k in 0..vs.len() as u32 {
-            // DW_CFA_offset_extended: the DWARF numbers of v0..v31 are 64..95.
-            o.cfi.push(0x05);
-            o.cfi.push((64 + vs[k as usize]) as u8);
-            o.cfi.push((3 + 2 * (nx + k)) as u8);
-            o.cfi.push(0x05);
-            o.cfi.push((65 + vs[k as usize]) as u8);
-            o.cfi.push((4 + 2 * (nx + k)) as u8);
-        }
+    // Pair q stores its lower register at CFA - 24 - 16 q, its upper one 8 bytes below; the DWARF numbers
+    // of v0..v31 are 64..95 (DW_CFA_offset_extended).
+    for k in 0..npush {
+        let lo = if k < nx {
+            xs[k as usize]
+        } else {
+            64 + vs[(k - nx) as usize]
+        };
+        o.cfi.push(0x05);
+        dw::uleb(&mut o.cfi, lo);
+        dw::uleb(&mut o.cfi, 3 + 2 * k);
+        o.cfi.push(0x05);
+        dw::uleb(&mut o.cfi, lo + 1);
+        dw::uleb(&mut o.cfi, 4 + 2 * k);
     }
+    // DW_CFA_def_cfa x29, 16.
+    o.cfi.push(0x40 | 1);
+    o.cfi.push(0x0C);
+    o.cfi.push(a::FP as u8);
+    o.cfi.push(16);
     o.frames.push(ob::OFrame { sym: sym, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0, compact: 0 });
 }
 
@@ -6789,18 +6819,25 @@ fn shrink_rules(o: &mut ob::Obj, sym: u32, size: u32, ra: u32) {
 }
 
 // The unwind rules of leaf function `sym` (`size` bytes, a prologue of `pl` words) for `.eh_frame`: the
-// return address stays in x30; the CFA is sp plus 16 after each push of the callee-saved pairs whose
-// lower registers are `xs` and `vs` (the lower register at the pair's top, its upper one 8 bytes below),
-// then plus the `local` bytes the prologue's end has allocated.
+// return address stays in x30; the CFA is sp plus the bytes of the callee-saved pairs whose lower
+// registers are `xs` and `vs` (the lower register at the pair's top, its upper one 8 bytes below) after the
+// first store, which moves sp past all of them, then plus the `local` bytes the prologue's end has
+// allocated.
 fn leaf_rules(o: &mut ob::Obj, sym: u32, size: u32, xs: &Vector<u32>, vs: &Vector<u32>, pl: u32, local: u32) {
     let c0 = o.cfi.len() as u32;
     let nx = xs.len() as u32;
     let npush = nx + vs.len() as u32;
-    for k in 0..npush {
-        // One word per push; the pairs' DWARF numbers: x registers as they are, v0..v31 at 64..95.
+    if npush != 0 {
+        // The first store moves sp past every pair; the others follow, one word each.
         o.cfi.push(0x40 | 1);
         o.cfi.push(0x0E);
-        dw::uleb(&mut o.cfi, 16 * (k + 1));
+        dw::uleb(&mut o.cfi, 16 * npush);
+        if npush > 1 {
+            o.cfi.push((0x40 | npush - 1) as u8);
+        }
+    }
+    for k in 0..npush {
+        // The pairs' DWARF numbers: x registers as they are, v0..v31 at 64..95.
         let lo = if k < nx {
             xs[k as usize]
         } else {

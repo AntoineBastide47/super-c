@@ -798,6 +798,43 @@ b2:
 
 // A branch whose two sides each return a value computed by a few speculable instructions returns the
 // select of the two (`max`, `abs`, and a nested `clamp`); a side with a call stays a branch (`call`).
+// `a && b && c` of comparisons: the inner `&&` becomes an `and`, then the outer branch's sides both
+// return (the false side the first comparison, which is false there), so it returns an `and` too.
+@test
+fn a_chain_of_ands_returns_one_value() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (i32, i32, i32) -> i8
+b0(v0: i32, v1: i32, v2: i32):
+  v3 = iconst.i32 3
+  v4 = iconst.i32 9
+  v5 = iconst.i32 0
+  v6 = icmp.eq v0, v3
+  br v6, b1, b2(v6)
+b1:
+  v7 = icmp.ult v1, v4
+  jmp b2(v7)
+b2(v8: i8):
+  br v8, b3, b4(v8)
+b3:
+  v9 = icmp.ne v2, v5
+  jmp b4(v9)
+b4(v10: i8):
+  ret v10
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(!t.contains("br ") && count_of(&t, "and.i8") == 2, t.as_str());
+    let x: []u64 = [3, 4, 1];
+    same_result(&b, &a, "f", x, 1);
+    let y: []u64 = [3, 9, 1];
+    same_result(&b, &a, "f", y, 0);
+    let z: []u64 = [2, 4, 1];
+    same_result(&b, &a, "f", z, 0);
+}
+
 @test
 fn return_diamonds_are_selects() {
     let (b, a) = optimized(

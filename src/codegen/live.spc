@@ -41,6 +41,9 @@ pub(package) const FOLD_CSEL: u32 = 512;
 pub(package) const FOLD_MULL: u32 = 1024;
 pub(package) const FOLD_SHOP: u32 = 2048;
 pub(package) const FOLD_FCMP: u32 = 4096;
+pub(package) const FOLD_BLEN: u32 = 8192;
+pub(package) const FOLD_CARRY: u32 = 16384;
+pub(package) const FOLD_FSEL: u32 = 32768;
 /// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
 pub(package) const CS_NONE: u8 = 0;
 pub(package) const CS_INC: u8 = 1;
@@ -458,6 +461,24 @@ extend Live {
                 self.pfold[t.a as usize] = true;
             }
         }
+        // `FOLD_BLEN`: a count of leading zeros of 32 or 64 bits that only `width - clz` reads, the bit
+        // length, folds into it.
+        if (self.fold_ops & FOLD_BLEN) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                let c = t.b;
+                if t.op != O_SUB || !is_int(t.ty) || type_bits(t.ty, 8) != 32 && type_bits(t.ty, 8) != 64 || (c & (VPARAM | VFLAG)) != 0 || c == VNONE {
+                    continue;
+                }
+                let ci = b.insts[c as usize];
+                if ci.op == O_CLZ && ci.ty == t.ty && self.count[c as usize] == 1 && !self.pfold[c as usize] && int_const(
+                    b,
+                    t.a,
+                ) == type_bits(t.ty, 8) as u64 {
+                    self.pfold[c as usize] = true;
+                }
+            }
+        }
         if (self.fold_ops & FOLD_SHAMT) != 0 {
             for i in 0..ni {
                 let t = b.insts[i];
@@ -530,6 +551,36 @@ extend Live {
         }
         if (self.fold_ops & FOLD_CCMP) != 0 {
             self.conj_folds(b);
+        }
+        // `FOLD_FSEL`: a comparison of scalar floats but `one` and `ueq` (no SSE comparison gives their mask)
+        // whose every use is the condition of a select of floats of its type folds into the selects.
+        if (self.fold_ops & FOLD_FSEL) != 0 {
+            fill(&mut self.cnd, ni, 0);
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op == O_SELECT && (t.ty == T_F32 || t.ty == T_F64) && is_inst(t.a) && b.insts[t.a as usize].op == O_FCMP && b.type_of(
+                    b.insts[t.a as usize].a,
+                ) == t.ty {
+                    self.cnd[t.a as usize] += 1;
+                }
+            }
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op == O_FCMP && !is_vec(b.type_of(t.a)) && t.aux != C_ONE && t.aux != C_UEQ && self.count[i] != 0 && self.cnd[i] == self.count[i] {
+                    self.pfold[i] = true;
+                }
+            }
+        }
+        // `FOLD_CARRY`: a select of 32 or 64 bits between a value and that value plus 1 (`CS_INC`, its one
+        // use) on a folded unsigned order comparison of 32 or 64 bits: the side folds into the select, an
+        // add of the carry (`carry_inc`).
+        if (self.fold_ops & FOLD_CARRY) != 0 {
+            for i in 0..ni {
+                let s = carry_inc(b, &self.pfold, i as u32);
+                if s != VNONE && self.count[s as usize] == 1 {
+                    self.pfold[s as usize] = true;
+                }
+            }
         }
     }
 
@@ -1719,6 +1770,27 @@ pub(package) fn rotate_of(b: &Body, i: u32) Rotation {
 
 /// What `v` is as a `select`'s side next to side `other` (CS_*): `other + 1`, `-other`, `~other` (an
 /// integer of up to 64 bits), which a conditional instruction computes from `other`; else CS_NONE.
+/// The side of select `i` of `b` that `FOLD_CARRY` folds (the other side plus 1), when `i` is of 32 or 64
+/// bits on a folded (`folded`) unsigned order comparison of 32 or 64 bits; VNONE else.
+pub(package) fn carry_inc(b: &Body, folded: &Vector<bool>, i: u32) Value {
+    let t = b.insts[i as usize];
+    if t.op != O_SELECT || !is_int(t.ty) || type_bits(t.ty, 8) < 32 || t.ty == T_I128 || !is_inst(t.a) || !folded[t.a as usize] {
+        return VNONE;
+    }
+    let c = b.insts[t.a as usize];
+    let cb = type_bits(b.type_of(c.a), 8);
+    if c.op != O_ICMP || c.aux != C_ULT && c.aux != C_UGT && c.aux != C_ULE && c.aux != C_UGE || cb != 32 && cb != 64 {
+        return VNONE;
+    }
+    if is_inst(t.b) && !folded[t.b as usize] && cs_kind(b, t.b, t.c) == CS_INC {
+        return t.b;
+    }
+    if is_inst(t.c) && !folded[t.c as usize] && cs_kind(b, t.c, t.b) == CS_INC {
+        return t.c;
+    }
+    return VNONE;
+}
+
 pub(package) fn cs_kind(b: &Body, v: Value, other: Value) u8 {
     if !is_inst(v) || other == VNONE {
         return CS_NONE;

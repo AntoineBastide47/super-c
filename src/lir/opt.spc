@@ -2983,11 +2983,14 @@ extend Opt {
     fn ret_diamond(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst) u32 {
         let s0 = b.edge_target(t.b);
         let s1 = b.edge_target(t.c);
-        if s0 == s1 || s0 == k || s1 == k || !self.ret_arm(b, s0) || !self.ret_arm(b, s1) {
+        if s0 == s1 || s0 == k || s1 == k {
             return NONE;
         }
-        let r0 = term(b, s0).a;
-        let r1 = term(b, s1).a;
+        let r0 = self.ret_arm(b, t.b);
+        let r1 = self.ret_arm(b, t.c);
+        if r0 == VNONE || r1 == VNONE {
+            return NONE;
+        }
         let ty = b.type_of(r0);
         let rare = (b.blocks[s0 as usize].flags | b.blocks[s1 as usize].flags) & ~b.blocks[k as usize].flags & BLOCK_RARE;
         if !(is_int(ty) && ty != T_I128 || ty == T_PTR || ty == T_F32 || ty == T_F64) || rare != 0 || self.speculated(
@@ -3025,12 +3028,35 @@ extend Opt {
         };
     }
 
-    // Whether block `a` is a side `ret_diamond` takes: no parameters, one predecessor, at most SPEC_MAX
-    // instructions before a return of a value.
-    fn ret_arm(self: &Self, b: &Body, a: u32) bool {
+    // The value the block edge `e` enters returns as a side `ret_diamond` takes (one predecessor, at most
+    // SPEC_MAX instructions before a return of a value or a jump to a block that only returns, parameters
+    // only before a return alone: the edge's arguments); VNONE when it is not one.
+    fn ret_arm(self: &Self, b: &Body, e: u32) Value {
+        let a = b.edge_target(e);
         let ab = b.blocks[a as usize];
         let ta = term(b, a);
-        return ab.param_len == 0 && ab.len <= SPEC_MAX + 1 && ta.op == O_RET && ta.a != VNONE && self.pred_at[a as usize + 1] - self.pred_at[a as usize] == 1;
+        if ab.len > SPEC_MAX + 1 || self.pred_at[a as usize + 1] - self.pred_at[a as usize] != 1 || ab.param_len != 0 && (ab.len != 1 || ta.op != O_RET) {
+            return VNONE;
+        }
+        if ta.op == O_RET && ta.a != VNONE && (ta.a & VPARAM) != 0 && (ta.a & ~VPARAM) >= ab.param_start && (ta.a & ~VPARAM) < ab.param_start + ab.param_len as u32 {
+            return b.edge_arg(e, (ta.a & ~VPARAM) - ab.param_start);
+        }
+        if ta.op == O_RET {
+            return ta.a;
+        }
+        if ta.op != O_JMP {
+            return VNONE;
+        }
+        // A jump to a block that only returns (`ret_through`, which the walk reaches after this branch):
+        // not a value the walk placed in that block.
+        let (ok, r) = ret_through(b, ta.a);
+        let x = r & ~VFLAG;
+        if !ok || r == VNONE || (r & VPARAM) == 0 && x as usize < self.blk_of.len() && self.blk_of[x as usize] == b.edge_target(
+            ta.a,
+        ) {
+            return VNONE;
+        }
+        return r;
     }
 
     // Side `e` of a branch ending block `k`, as `diamond` takes it: the edge out of the block without
