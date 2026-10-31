@@ -1,11 +1,12 @@
-// The Advanced SIMD intrinsics (`arm_neon.h`, `arm_acle.h`) the arm64 backend expands in place of a call:
-// per intrinsic, its instructions over the registers the standard calling convention gives the call's
+// The Advanced SIMD intrinsics (`arm_neon.h`, `arm_acle.h`) and the C library's exact rounding, absolute
+// value, minimum and maximum (`floor`, `fmin`: one instruction each) the arm64 backend expands in place of
+// a call: per intrinsic, its instructions over the registers the standard calling convention gives the call's
 // arguments and result (v0, v1, .. for vectors and floats, x0, x1, .. for integers and pointers, in
 // order), `@k` the constant argument `k` and `@(k*a+b)` its multiple. Derived from clang's code for a
 // one-call wrapper of each; `tests/codegen/asm_test.spc` checks each assembles to clang's bytes.
 
 /// The rows, by name: the intrinsic and its instructions.
-pub(package) const ROWS: [(str<'static>, str<'static>); 645] = [
+pub(package) const ROWS: [(str<'static>, str<'static>); 659] = [
     ("__crc32b", "crc32b w0, w0, w1"),
     ("__crc32cb", "crc32cb w0, w0, w1"),
     ("__crc32cd", "crc32cx w0, w0, x1"),
@@ -14,6 +15,20 @@ pub(package) const ROWS: [(str<'static>, str<'static>); 645] = [
     ("__crc32d", "crc32x w0, w0, x1"),
     ("__crc32h", "crc32h w0, w0, w1"),
     ("__crc32w", "crc32w w0, w0, w1"),
+    ("ceil", "frintp d0, d0"),
+    ("ceilf", "frintp s0, s0"),
+    ("fabs", "fabs d0, d0"),
+    ("fabsf", "fabs s0, s0"),
+    ("floor", "frintm d0, d0"),
+    ("floorf", "frintm s0, s0"),
+    ("fmax", "fmaxnm d0, d0, d1"),
+    ("fmaxf", "fmaxnm s0, s0, s1"),
+    ("fmin", "fminnm d0, d0, d1"),
+    ("fminf", "fminnm s0, s0, s1"),
+    ("round", "frinta d0, d0"),
+    ("roundf", "frinta s0, s0"),
+    ("trunc", "frintz d0, d0"),
+    ("truncf", "frintz s0, s0"),
     ("vabd_s16", "sabd v0.4h, v0.4h, v1.4h"),
     ("vabd_s32", "sabd v0.2s, v0.2s, v1.2s"),
     ("vabd_s8", "sabd v0.8b, v0.8b, v1.8b"),

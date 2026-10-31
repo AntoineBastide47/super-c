@@ -20,6 +20,7 @@ const TAIL: u32 = 1;
 const WIDE: u32 = 2;
 const HALF: u32 = 4;
 const Z512: u32 = 8;
+const POPCNT: u32 = 16;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -27,7 +28,7 @@ fn run_native(text: str, driver: str) i32 {
     return run_native_with(text, driver, 0);
 }
 
-// `run_native` with package options `opts` (TAIL, WIDE, HALF, Z512).
+// `run_native` with package options `opts` (TAIL, WIDE, HALF, Z512, POPCNT).
 fn run_native_with(text: str, driver: str, opts: u32) i32 {
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return 0;
@@ -51,6 +52,24 @@ fn run_wide(text: str, driver: str) i32 {
         driver.slice(at as usize + head.len(), driver.len()),
     );
     return run_native_with(text, &d, WIDE);
+}
+
+// `run_native` with `popcnt` on an x86-64 host: the driver's `main` returns 0 first on a processor without
+// it. 0 on another host.
+fn run_popcnt(text: str, driver: str) i32 {
+    if tgt::host_isa() != tgt::axis_index("x86_64", true) {
+        return 0;
+    }
+    let head = "int main(void) {\n";
+    let at = driver.find(head);
+    assert(at >= 0, "the driver's main");
+    let d = format(
+        "{}{}  if (!__builtin_cpu_supports(\"popcnt\")) return 0;\n{}",
+        driver.slice(0, at as usize),
+        head,
+        driver.slice(at as usize + head.len(), driver.len()),
+    );
+    return run_native_with(text, &d, POPCNT);
 }
 
 // `run_native` with 64-byte vectors on an x86-64 host: under the emulator command `SC_SDE` names (Intel
@@ -98,7 +117,7 @@ fn run_wasm(text: str, driver: str) i32 {
     return run_lir(&t, driver, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), &cc, "wasmtime run ", 0);
 }
 
-// Compile LIR `text` for `(os, isa)` into object `obj`, with package options `opts` (TAIL, WIDE, HALF, Z512);
+// Compile LIR `text` for `(os, isa)` into object `obj`, with package options `opts` (TAIL, WIDE, HALF, Z512, POPCNT);
 // whether it did (the failure on stderr).
 fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool {
     let mut err = String::new();
@@ -109,6 +128,7 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     }
     let mut p = q.unwrap();
     p.tail = (opts & TAIL) != 0;
+    p.popcnt = (opts & POPCNT) != 0;
     if (opts & WIDE) != 0 {
         p.vector = 32;
     }
@@ -168,7 +188,8 @@ fn run_lir(text: str, driver: str, os: i32, isa: i32, cc: str, runner: str, opts
     let g = stdio::fopen(&cp, "wb");
     unsafe stdio::fwrite(driver.ptr(), 1, driver.len(), g);
     unsafe stdio::fclose(g);
-    let mut cmd = format("{} -o \"{}\" \"{}\" \"{}\"", cc, bp.as_str(), cp.as_str(), op.as_str());
+    // The driver may call the C math library: its link flag where the C library does not hold it.
+    let mut cmd = format("{} -o \"{}\" \"{}\" \"{}\" {}", cc, bp.as_str(), cp.as_str(), op.as_str(), tgt::os(os).libm);
     if cli::run_with(cmd.cstr(), null, null, null, "") != 0 {
         return -1;
     }
@@ -396,6 +417,48 @@ fn conditional_increments_negations_and_inversions_run() {
     let drv = "#include <stdint.h>\nint64_t iabs(int64_t);\nint32_t cinc(int32_t, int32_t, int32_t);\nint32_t cmp3(int32_t, int32_t);\nint32_t one(int32_t, int32_t);\nint64_t ones(int64_t, int64_t);\nint32_t inv(int32_t, int32_t);\nuint8_t dec(uint8_t, uint8_t);\nint main(void) {\n  int64_t xs[6] = {0, 1, -1, INT64_C(1) << 40, -(INT64_C(1) << 40), INT64_MIN + 1};\n  for (int i = 0; i < 6; i++) {\n    if (iabs(xs[i]) != (xs[i] < 0 ? -xs[i] : xs[i])) return 1;\n    if (ones(xs[i], 5) != (xs[i] >= 0 ? -1 : 5)) return 5;\n  }\n  for (int32_t a = -3; a < 4; a++)\n    for (int32_t b = -3; b < 4; b++) {\n      if (cinc(a, b, 10) != ((uint32_t)a > (uint32_t)b ? 10 : 11)) return 2;\n      if (cmp3(a, b) != (a < b ? -1 : a > b)) return 3;\n      if (one(a + 5, b) != (a + 5 == 7 ? b : 1)) return 4;\n      if (inv(a * 60, b) != ((uint32_t)(a * 60) < 100 ? ~b : b)) return 6;\n    }\n  for (int a = 0; a < 256; a += 5)\n    for (int b = 0; b < 256; b += 7)\n      if (dec((uint8_t)a, (uint8_t)b) != (uint8_t)(a > b ? b + 1 : b)) return 7;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
+}
+
+// An `and`, `or` or `xor` of an inverted value (`not`, or `xor` with all ones; arm64 `bic`, `orn`, `eon`) in
+// 64, 32 and 8 bits, a right shift of a left shift by at most as much (arm64 `sbfx`, `ubfx`), and a field
+// inserted into the other bits of a value (arm64 `bfi`; not with a mask that keeps bits of the field),
+// with their results.
+@test
+fn inverted_operands_and_shifted_fields_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @bic64 fn global\nsym @orn32 fn global\nsym @eon64 fn global\nsym @bicx32 fn global\nsym @bic8 fn global\nsym @sbf32 fn global\nsym @ubf64 fn global\nsym @sbf64 fn global\nsym @ubf32 fn global\nsym @bfi32 fn global\nsym @bfi64 fn global\nsym @nobfi fn global\nfn @bic64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = not.i64 v0\n  v3 = and.i64 v2, v1\n  ret v3\nfn @orn32\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = not.i32 v1\n  v3 = or.i32 v0, v2\n  ret v3\nfn @eon64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 -1\n  v3 = xor.i64 v1, v2\n  v4 = xor.i64 v0, v3\n  ret v4\nfn @bicx32\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 -1\n  v3 = xor.i32 v0, v2\n  v4 = and.i32 v1, v3\n  ret v4\nfn @bic8\n  sig (i8, i8) -> i8\nb0(v0: i8, v1: i8):\n  v2 = not.i8 v0\n  v3 = and.i8 v2, v1\n  ret v3\nfn @sbf32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 20\n  v2 = shl.i32 v0, v1\n  v3 = iconst.i32 24\n  v4 = ashr.i32 v2, v3\n  ret v4\nfn @ubf64\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 3\n  v2 = shl.i64 v0, v1\n  v3 = iconst.i64 60\n  v4 = lshr.i64 v2, v3\n  ret v4\nfn @sbf64\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 8\n  v2 = shl.i64 v0, v1\n  v3 = iconst.i64 8\n  v4 = ashr.i64 v2, v3\n  ret v4\nfn @ubf32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 0\n  v2 = shl.i32 v0, v1\n  v3 = iconst.i32 31\n  v4 = lshr.i32 v2, v3\n  ret v4\nfn @bfi32\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 4294902015\n  v3 = and.i32 v0, v2\n  v4 = iconst.i32 255\n  v5 = and.i32 v1, v4\n  v6 = iconst.i32 8\n  v7 = shl.i32 v5, v6\n  v8 = or.i32 v3, v7\n  ret v8\nfn @bfi64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 65535\n  v3 = and.i64 v1, v2\n  v4 = iconst.i64 40\n  v5 = shl.i64 v3, v4\n  v6 = iconst.i64 -72056494526300161\n  v7 = and.i64 v0, v6\n  v8 = or.i64 v5, v7\n  ret v8\nfn @nobfi\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 4294901775\n  v3 = and.i32 v0, v2\n  v4 = iconst.i32 255\n  v5 = and.i32 v1, v4\n  v6 = iconst.i32 8\n  v7 = shl.i32 v5, v6\n  v8 = or.i32 v3, v7\n  ret v8\n";
+    let drv = "#include <stdint.h>\nint64_t bic64(int64_t, int64_t);\nint32_t orn32(int32_t, int32_t);\nint64_t eon64(int64_t, int64_t);\nint32_t bicx32(int32_t, int32_t);\nuint8_t bic8(uint8_t, uint8_t);\nint32_t sbf32(int32_t);\nuint64_t ubf64(uint64_t);\nint64_t sbf64(int64_t);\nuint32_t ubf32(uint32_t);\nuint32_t bfi32(uint32_t, uint32_t);\nuint64_t bfi64(uint64_t, uint64_t);\nuint32_t nobfi(uint32_t, uint32_t);\nint main(void) {\n  uint64_t s = 0x9E3779B97F4A7C15u;\n  for (int i = 0; i < 1000; i++) {\n    s ^= s << 13;\n    s ^= s >> 7;\n    s ^= s << 17;\n    uint64_t r = s * 0x2545F4914F6CDD1Du;\n    if (bic64((int64_t)s, (int64_t)r) != (int64_t)(~s & r)) return 1;\n    if (orn32((int32_t)s, (int32_t)r) != (int32_t)((uint32_t)s | ~(uint32_t)r)) return 2;\n    if (eon64((int64_t)s, (int64_t)r) != (int64_t)(s ^ ~r)) return 3;\n    if (bicx32((int32_t)s, (int32_t)r) != (int32_t)((uint32_t)r & ~(uint32_t)s)) return 4;\n    if (bic8((uint8_t)s, (uint8_t)r) != (uint8_t)(~(uint8_t)s & (uint8_t)r)) return 5;\n    if (sbf32((int32_t)s) != (int32_t)((uint32_t)s << 20) >> 24) return 6;\n    if (ubf64(s) != (s << 3) >> 60) return 7;\n    if (sbf64((int64_t)s) != (int64_t)(s << 8) >> 8) return 8;\n    if (ubf32((uint32_t)s) != (uint32_t)s >> 31) return 9;\n    if (bfi32((uint32_t)s, (uint32_t)r) != (((uint32_t)s & 0xffff00ffu) | (((uint32_t)r & 0xffu) << 8))) return 10;\n    if (bfi64(s, r) != ((s & ~(UINT64_C(0xffff) << 40)) | ((r & 0xffff) << 40))) return 11;\n    if (nobfi((uint32_t)s, (uint32_t)r) != (((uint32_t)s & 0xffff000fu) | (((uint32_t)r & 0xffu) << 8))) return 12;\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Bit counts of 64, 32, 16 and 8 bits with the processor's count instruction (x86-64 `popcnt`, the
+// narrow operands zero-extended) and without it.
+@test
+fn bit_counts_with_and_without_popcnt_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @p64 fn global\nsym @p32 fn global\nsym @p16 fn global\nsym @p8 fn global\nfn @p64\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = popcnt.i64 v0\n  ret v1\nfn @p32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = popcnt.i32 v0\n  ret v1\nfn @p16\n  sig (i16) -> i16\nb0(v0: i16):\n  v1 = popcnt.i16 v0\n  ret v1\nfn @p8\n  sig (i8) -> i8\nb0(v0: i8):\n  v1 = popcnt.i8 v0\n  ret v1\n";
+    let drv = "#include <stdint.h>\nuint64_t p64(uint64_t);\nuint32_t p32(uint32_t);\nuint16_t p16(uint16_t);\nuint8_t p8(uint8_t);\nint main(void) {\n  uint64_t s = 0x9E3779B97F4A7C15u;\n  for (int i = 0; i < 1000; i++) {\n    s ^= s << 13;\n    s ^= s >> 7;\n    s ^= s << 17;\n    if (p64(s) != (uint64_t)__builtin_popcountll(s)) return 1;\n    if (p32((uint32_t)s) != (uint32_t)__builtin_popcount((uint32_t)s)) return 2;\n    if (p16((uint16_t)s) != (uint16_t)__builtin_popcount((uint16_t)s)) return 3;\n    if (p8((uint8_t)s) != (uint8_t)__builtin_popcount((uint8_t)s)) return 4;\n  }\n  if (p64(UINT64_MAX) != 64 || p64(0) != 0 || p32(UINT32_MAX) != 32 || p16(0xFFFF) != 16 || p8(0xFF) != 8) return 5;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_popcnt(lir, drv), 0);
+}
+
+// The C library's exact rounding, absolute value, minimum and maximum of f64 and f32, which arm64 expands
+// in place of the call (`frintm`, `frintp`, `frinta`, `frintz`, `fabs`, `fminnm`, `fmaxnm`), equal the
+// library's on signed zeros, halves, the last fraction below one half, infinities and NaN (a minimum or
+// maximum of two zeros may be either).
+@test
+fn libm_rounding_minimum_and_maximum_calls_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @floor fn global\nsym @t_floor fn global\nsym @floorf fn global\nsym @t_floorf fn global\nsym @ceil fn global\nsym @t_ceil fn global\nsym @ceilf fn global\nsym @t_ceilf fn global\nsym @round fn global\nsym @t_round fn global\nsym @roundf fn global\nsym @t_roundf fn global\nsym @trunc fn global\nsym @t_trunc fn global\nsym @truncf fn global\nsym @t_truncf fn global\nsym @fabs fn global\nsym @t_fabs fn global\nsym @fabsf fn global\nsym @t_fabsf fn global\nsym @fmin fn global\nsym @t_fmin fn global\nsym @fminf fn global\nsym @t_fminf fn global\nsym @fmax fn global\nsym @t_fmax fn global\nsym @fmaxf fn global\nsym @t_fmaxf fn global\nfn @t_floor\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @floor(v0) : (f64) -> f64\n  ret v1\nfn @t_floorf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @floorf(v0) : (f32) -> f32\n  ret v1\nfn @t_ceil\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @ceil(v0) : (f64) -> f64\n  ret v1\nfn @t_ceilf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @ceilf(v0) : (f32) -> f32\n  ret v1\nfn @t_round\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @round(v0) : (f64) -> f64\n  ret v1\nfn @t_roundf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @roundf(v0) : (f32) -> f32\n  ret v1\nfn @t_trunc\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @trunc(v0) : (f64) -> f64\n  ret v1\nfn @t_truncf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @truncf(v0) : (f32) -> f32\n  ret v1\nfn @t_fabs\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @fabs(v0) : (f64) -> f64\n  ret v1\nfn @t_fabsf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @fabsf(v0) : (f32) -> f32\n  ret v1\nfn @t_fmin\n  sig (f64, f64) -> f64\nb0(v0: f64, v1: f64):\n  v2 = call.f64 @fmin(v0, v1) : (f64, f64) -> f64\n  ret v2\nfn @t_fminf\n  sig (f32, f32) -> f32\nb0(v0: f32, v1: f32):\n  v2 = call.f32 @fminf(v0, v1) : (f32, f32) -> f32\n  ret v2\nfn @t_fmax\n  sig (f64, f64) -> f64\nb0(v0: f64, v1: f64):\n  v2 = call.f64 @fmax(v0, v1) : (f64, f64) -> f64\n  ret v2\nfn @t_fmaxf\n  sig (f32, f32) -> f32\nb0(v0: f32, v1: f32):\n  v2 = call.f32 @fmaxf(v0, v1) : (f32, f32) -> f32\n  ret v2\n";
+    let drv = "#include <math.h>\n#include <string.h>\n#include <stdint.h>\ndouble t_floor(double);\nfloat t_floorf(float);\ndouble t_ceil(double);\nfloat t_ceilf(float);\ndouble t_round(double);\nfloat t_roundf(float);\ndouble t_trunc(double);\nfloat t_truncf(float);\ndouble t_fabs(double);\nfloat t_fabsf(float);\ndouble t_fmin(double, double);\nfloat t_fminf(float, float);\ndouble t_fmax(double, double);\nfloat t_fmaxf(float, float);\nstatic int same64(double x, double y) { uint64_t a, b; memcpy(&a, &x, 8); memcpy(&b, &y, 8); return a == b || (x != x && y != y) || (x == 0 && y == 0); }\nstatic int same32(float x, float y) { uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4); return a == b || (x != x && y != y) || (x == 0 && y == 0); }\nstatic int bits64(double x, double y) { uint64_t a, b; memcpy(&a, &x, 8); memcpy(&b, &y, 8); return a == b || (x != x && y != y); }\nstatic int bits32(float x, float y) { uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4); return a == b || (x != x && y != y); }\nint main(void) {\n  double v[14] = {0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999999999999994, 4503599627370497.0, 1e300, -INFINITY, NAN, -3.75};\n  for (int i = 0; i < 14; i++) {\n    double x = v[i];\n    float f = (float)x;\n    if (!bits64(t_floor(x), floor(x))) return 1;\n    if (!bits32(t_floorf(f), floorf(f))) return 2;\n    if (!bits64(t_ceil(x), ceil(x))) return 3;\n    if (!bits32(t_ceilf(f), ceilf(f))) return 4;\n    if (!bits64(t_round(x), round(x))) return 5;\n    if (!bits32(t_roundf(f), roundf(f))) return 6;\n    if (!bits64(t_trunc(x), trunc(x))) return 7;\n    if (!bits32(t_truncf(f), truncf(f))) return 8;\n    if (!bits64(t_fabs(x), fabs(x))) return 9;\n    if (!bits32(t_fabsf(f), fabsf(f))) return 10;\n    for (int j = 0; j < 14; j++) {\n      double y = v[j];\n      float g = (float)y;\n      if (!same64(t_fmin(x, y), fmin(x, y))) return 11;\n      if (!same32(t_fminf(f, g), fminf(f, g))) return 12;\n      if (!same64(t_fmax(x, y), fmax(x, y))) return 13;\n      if (!same32(t_fmaxf(f, g), fmaxf(f, g))) return 14;\n    }\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
 }
 
 // A select of floats of one width on a comparison of floats of the other: the comparison's own width

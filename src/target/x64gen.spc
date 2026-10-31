@@ -4060,6 +4060,10 @@ extend Gen {
         let rd = self.def(i);
         // The count, at most the width, is `clean`.
         self.va.index_mut(i as usize).clean = true;
+        if t.op == O_POPCNT && unsafe (*self.pkg).popcnt {
+            self.c.rr(0xF3, 0x0FB8, sz == 8, rd, r, false);
+            return;
+        }
         if t.op == O_POPCNT {
             self.popcount(rd, r, sz);
             return;

@@ -211,6 +211,7 @@ pub(package) struct LoopOpt {
     vgroups: bool, // stores write every 2nd or 4th element, each group of them every element (`store_groups`)
     vind: Vector<u32>, // the truncations of the counter the plan reads as lanes (`vclass`)
     vqc: Vector<Value>, // scalar copies: each copy's counter value
+    vpow: Vector<Value>, // scalar copies: per reduction, the power its invariant factor takes (`vpowers`), VNONE
     vmax: u32, // the bytes of the widest vector of the target (`run`); `vbytes` the plan's
     vmin: u32, // the narrowest lane's bytes; `vsz` the widest's (at most twice as wide: `lane_size`)
     /// How the target converts vectors and shifts their lanes (`Package.vops`): with VOPS_SOME or
@@ -399,6 +400,7 @@ extend LoopOpt {
             vgroups: false,
             vind: Vector::<u32>::new(),
             vqc: Vector::<Value>::new(),
+            vpow: Vector::<Value>::new(),
             vmax: 0,
             vmin: 0,
             vops: 0,
@@ -2720,6 +2722,7 @@ extend LoopOpt {
             cnt
         };
         let iend = self.vi(b, Inst { op: ast::pick(self.vrev, O_SUB, O_ADD), ty: qt, aux: 0, a: i0, b: cu, c: 0 }, l0);
+        self.vpowers(b, u, nv, l0);
         self.vinv.truncate(0);
         self.vspl.truncate(0);
         fill(&mut self.vmap, (nv * ub.len) as usize, VNONE);
@@ -3001,6 +3004,20 @@ extend LoopOpt {
                     };
                     let xv = self.vval(b, u, c, x);
                     self.vmap[at] = self.vbeat(b, self.vrel[r as usize], xv, acc, b.locs[i as usize]);
+                } else if k == VK_RED && self.vpow[self.red_of(i) as usize] != VNONE {
+                    // One product by the factor's power per iteration of the copies; the other
+                    // accumulators stay 1.
+                    let r = self.red_of(i);
+                    let acc = VPARAM | vps + 1 + r * nv + c;
+                    self.vmap[at] = if c == 0 {
+                        self.vi(
+                            b,
+                            Inst { op: O_MUL, ty: t.ty, aux: 0, a: acc, b: self.vpow[r as usize], c: VNONE },
+                            b.locs[i as usize],
+                        )
+                    } else {
+                        acc
+                    };
                 } else if k == VK_RED {
                     let r = self.red_of(i);
                     let acc = VPARAM | vps + 1 + r * nv + c;
@@ -4665,6 +4682,37 @@ extend LoopOpt {
         }
         assert(false, "loops: a vector operand without a splat");
         return VNONE;
+    }
+
+    // Scalar copies (`nv` of body `u`): per reduction (`vpow`), when it is an integer product by a value
+    // from before the loop, that value to the power `nv`, computed here (squares for a power of 2), which
+    // one accumulator takes per iteration of the copies, as LLVM's reassociation of the unrolled product
+    // does; VNONE for the others. Exact: integer products wrap and commute.
+    fn vpowers(self: &mut Self, b: &mut Body, u: u32, nv: u32, l: u32) {
+        self.vpow.truncate(0);
+        for r in 0..self.vred.len() {
+            let t = b.insts[self.vrup[r] as usize];
+            let o = if t.a == self.vred[r] {
+                t.b
+            } else {
+                t.a
+            };
+            if !self.vone || t.op != O_MUL || self.defined_in(o) || self.in_body(b, u, o) || nv < 2 {
+                self.vpow.push(VNONE);
+                continue;
+            }
+            let mut p = o;
+            if (nv & nv - 1) == 0 {
+                for _ in 0..nv.trailing_zeros() {
+                    p = self.vi(b, Inst { op: O_MUL, ty: t.ty, aux: 0, a: p, b: p, c: VNONE }, l);
+                }
+            } else {
+                for _ in 1..nv {
+                    p = self.vi(b, Inst { op: O_MUL, ty: t.ty, aux: 0, a: p, b: o, c: VNONE }, l);
+                }
+            }
+            self.vpow.push(p);
+        }
     }
 
     // The index in `lcs` of store `i`, NONE when it stores in every iteration.

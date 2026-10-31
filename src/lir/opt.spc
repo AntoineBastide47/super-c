@@ -34,6 +34,7 @@ import lir::slp as sl;
 import lir::pairs as pa;
 import lir::wide as wd;
 import lir::print as lp;
+import lir::switches as sws;
 import stdlib;
 import std::platform::clock as pclock;
 
@@ -55,6 +56,8 @@ const UB_DEPTH: u32 = 4;
 const MAX_SELECTS: u32 = 2;
 // The instructions but constants an if-conversion moves out of its two sides (`Opt::speculate`).
 const SPEC_MAX: u32 = 4;
+// `bit_set` takes at most SET_MAX comparisons.
+const SET_MAX: usize = 16;
 const MIN_DEPTH: u32 = 3;
 // `Opt::private_load`'s answers besides a value, and the memory state of the loads it keeps.
 const PRIV_NONE: Value = VNONE;
@@ -147,6 +150,7 @@ pub(package) struct Opt {
     pcount: Vector<u8>, // per block parameter, how many instructions read it, up to 2 (`thread`)
     icount: Vector<u8>, // per instruction, how many instructions read it, up to 2 (`thread`)
     ireader: Vector<u32>, // per instruction, the block outside its own that reads it (`thread`)
+    in_or: Vector<bool>, // per instruction, whether an `or` reads it (`thread`, for `bit_set`)
     puser: Vector<u32>, // per block parameter, the last instruction that reads it (`thread`)
     textra: Vector<u32>, // the constants `thread` made, for the walk's `extra`
     settle: Vector<u32>, // `thread`'s settled branches: block, edge
@@ -353,6 +357,7 @@ extend Opt {
             pcount: Vector::<u8>::new(),
             icount: Vector::<u8>::new(),
             ireader: Vector::<u32>::new(),
+            in_or: Vector::<bool>::new(),
             puser: Vector::<u32>::new(),
             textra: Vector::<u32>::new(),
             settle: Vector::<u32>::new(),
@@ -3459,9 +3464,11 @@ extend Opt {
         fill(&mut self.preader, b.params.len(), NONE);
         fill(&mut self.icount, b.insts.len(), 0);
         fill(&mut self.ireader, b.insts.len(), NONE);
+        fill(&mut self.in_or, b.insts.len(), false);
         for k in 0..nb {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
+                let is_or = b.insts[i as usize].op == O_OR;
                 let u0 = self.ops_at[i as usize];
                 for u in 0..self.ops_at[i as usize + 1] - u0 {
                     let v = self.ops[(u0 + u) as usize];
@@ -3478,6 +3485,7 @@ extend Opt {
                     } else {
                         let x = (v & ~VFLAG) as usize;
                         self.icount[x] = (self.icount[x] + 1).min(2);
+                        self.in_or[x] = self.in_or[x] || is_or;
                         if self.blk_of[x] != k as u32 {
                             self.ireader[x] = reader(self.ireader[x], k as u32);
                         }
@@ -3520,7 +3528,7 @@ extend Opt {
                 t.a = self.follow(pk, b, k as u32, t.a, VNONE, 0);
                 let j = b.edge_target(t.a);
                 let q = self.threadable(b, k as u32, j);
-                if q != NONE {
+                if q != NONE && !self.diamond_side(pk, b, k as u32, t.a, j) {
                     let jt = term(b, j);
                     let a = b.edge_arg(t.a, q);
                     t = Inst {
@@ -3683,6 +3691,12 @@ extend Opt {
                 return NONE;
             }
         }
+        // A branch whose one side enters `j` and whose other side is a small block of pure instructions that
+        // jumps to `j` too is a diamond the walk makes selects of (`diamond`: `a || b` of comparisons, an
+        // `or`): threading either side (from the branch, or from the small block) would leave none.
+        if self.diamond_side(pk, b, k, e, j) {
+            return NONE;
+        }
         let c = self.decide(pk, b, k, j, e, jt.a, cond, holds, THREAD_DEPTH);
         if c.is_none() {
             return NONE;
@@ -3709,6 +3723,45 @@ extend Opt {
             }
         }
         return s;
+    }
+
+    // Whether edge `e` of block `k` into `j` is a side of a diamond the walk makes selects of: `k` branches
+    // into `j` and into a small block of pure, speculable instructions (`arm`) that jumps to `j`, or `k` is
+    // that block.
+    fn diamond_side(self: &Self, pk: &Package, b: &Body, k: u32, e: u32, j: u32) bool {
+        let kt = term(b, k);
+        let (p, other) = if kt.op == O_BR && (kt.b == e || kt.c == e) {
+            (k, other_edge(kt, e))
+        } else if kt.op == O_JMP && self.pred_at[k as usize + 1] - self.pred_at[k as usize] == 1 {
+            let p = self.preds[self.pred_at[k as usize] as usize];
+            let pt = term(b, p);
+            if pt.op != O_BR || b.edge_target(pt.b) != k && b.edge_target(pt.c) != k {
+                return false;
+            }
+            (
+                p,
+                if b.edge_target(pt.b) == k {
+                    pt.b
+                } else {
+                    pt.c
+                }
+            )
+        } else {
+            return false;
+        };
+        let pt = term(b, p);
+        let direct = other_edge(pt, other);
+        let (oe, os) = self.arm(b, p, other);
+        if os == p || b.edge_target(oe) != j || b.edge_target(direct) != j {
+            return false;
+        }
+        let ob = b.blocks[os as usize];
+        for i in ob.start..ob.start + ob.len - 1 {
+            if !pure_op(b.insts[i as usize].op) || !speculable(pk, b, b.insts[i as usize]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // The edge of block `j`'s branch or switch that every edge into `j` decides alike (`decide`): `j` is
@@ -4472,6 +4525,9 @@ extend Opt {
                     return true;
                 }
             }
+            if t.op == O_FDIV && (t.ty == T_F32 || t.ty == T_F64) {
+                self.exact_reciprocal(b, i);
+            }
             // Two operands the branches in scope make equal: one of them twice (`x - y` is 0 where `x == y`).
             if (t.op == O_SUB || t.op == O_XOR || t.op == O_AND || t.op == O_OR || t.op == O_ICMP) && t.a != t.b && !is_vec(
                 t.ty,
@@ -4502,12 +4558,12 @@ extend Opt {
             ) {
                 return true;
             }
-            if (lop == O_AND || lop == O_OR) && self.range_check(pk, b, k, i) || lop == O_ICMP && self.srem_cmp(
+            if (lop == O_AND || lop == O_OR) && self.range_check(pk, b, k, i) || lop == O_OR && self.bit_set(
                 pk,
                 b,
                 k,
                 i,
-            ) {
+            ) || lop == O_ICMP && self.srem_cmp(pk, b, k, i) {
                 return true;
             }
             self.pow2(b, i);
@@ -4676,6 +4732,90 @@ extend Opt {
         }
         let w = self.before(b, k, i, ld);
         b.insts[i as usize] = Inst { op: O_BSWAP, ty: t.ty, aux: 0, a: w, b: VNONE, c: VNONE };
+        return true;
+    }
+
+    // `or` `i` of block `k` that no `or` reads, a tree of `or`s each read once whose leaves are at least 3
+    // and at most SET_MAX equalities of one integer `x` with constants within 64 of each other, `lo` the
+    // least: `x - lo <=u span` and bit `x - lo` of the constants' mask (LLVM's bit tests for switches).
+    // Whether it did.
+    fn bit_set(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        if is_vec(t.ty) || i as usize < self.in_or.len() && self.in_or[i as usize] {
+            return false;
+        }
+        let mut x = VNONE;
+        let mut vals = StaticVector::<u64, SET_MAX>::new();
+        let mut stack = StaticVector::<Value, SET_MAX>::new();
+        stack.push(t.a);
+        stack.push(t.b);
+        // Each step takes a value off the stack; an `or` puts back two: at most 2 * SET_MAX steps.
+        for _ in 0..2 * SET_MAX {
+            if stack.len() == 0 {
+                break;
+            }
+            let v = stack.pop().unwrap();
+            if (v & (VPARAM | VFLAG)) != 0 || v as usize < self.icount.len() && self.icount[v as usize] != 1 {
+                return false;
+            }
+            let u = b.insts[v as usize];
+            if u.op == O_OR && u.ty == t.ty {
+                if stack.len() + 2 > SET_MAX {
+                    return false;
+                }
+                stack.push(u.a);
+                stack.push(u.b);
+                continue;
+            }
+            if u.op != O_ICMP || u.aux != C_EQ || u.ty != t.ty || x != VNONE && u.a != x || vals.len() == SET_MAX {
+                return false;
+            }
+            let c = const_of(b, u.b);
+            if c.is_none() {
+                return false;
+            }
+            x = u.a;
+            vals.push(c.unwrap());
+        }
+        let ty = b.type_of(x);
+        if stack.len() != 0 || vals.len() < 3 || !is_int(ty) || ty == T_I128 {
+            return false;
+        }
+        let m = width_mask(ty, pk.ptr_bytes);
+        let mut lo = u64::MAX;
+        let mut hi: u64 = 0;
+        for q in 0..vals.len() {
+            lo = lo.min(vals[q] & m);
+            hi = hi.max(vals[q] & m);
+        }
+        if hi - lo >= 64 {
+            return false;
+        }
+        let mut mask: u64 = 0;
+        for q in 0..vals.len() {
+            mask |= 1u64 << (vals[q] & m) - lo;
+        }
+        let mut d = x;
+        if lo != 0 {
+            let lv = self.constant(b, ty, lo);
+            d = self.before(b, k, i, Inst { op: O_SUB, ty: ty, aux: 0, a: x, b: lv, c: VNONE });
+        }
+        let sv = self.constant(b, ty, hi - lo);
+        let inr = self.before(b, k, i, Inst { op: O_ICMP, ty: t.ty, aux: C_ULE, a: d, b: sv, c: VNONE });
+        let mut d64 = d;
+        if type_bits(ty, pk.ptr_bytes) < 64 {
+            d64 = self.before(b, k, i, Inst { op: O_ZEXT, ty: T_I64, aux: 0, a: d, b: VNONE, c: VNONE });
+        }
+        // The amount within the width: the range test discards the bit past it.
+        let k63 = self.constant(b, T_I64, 63);
+        let amt = self.before(b, k, i, Inst { op: O_AND, ty: T_I64, aux: 0, a: d64, b: k63, c: VNONE });
+        let mv = self.constant(b, T_I64, mask);
+        let sh = self.before(b, k, i, Inst { op: O_LSHR, ty: T_I64, aux: 0, a: mv, b: amt, c: VNONE });
+        let low = self.before(b, k, i, Inst { op: O_TRUNC, ty: t.ty, aux: 0, a: sh, b: VNONE, c: VNONE });
+        let one = self.constant(b, t.ty, 1);
+        let bit = self.before(b, k, i, Inst { op: O_AND, ty: t.ty, aux: 0, a: low, b: one, c: VNONE });
+        let zero = self.constant(b, t.ty, 0);
+        b.insts[i as usize] = Inst { op: O_SELECT, ty: t.ty, aux: 0, a: inr, b: bit, c: zero };
         return true;
     }
 
@@ -5218,6 +5358,36 @@ extend Opt {
         // On a hash collision the newer entry shadows the older: either is correct.
         self.enter(LOG_PURE, h, i);
         return self.hoist(pk, b, k, i, false, false, false);
+    }
+
+    // Division `i` of a scalar float by a power of 2 whose reciprocal is a normal number: in place, the
+    // product by that reciprocal, which rounds the same exact value once (LLVM's exact inverse; `x / 2.0`
+    // is `x * 0.5` in every mode).
+    fn exact_reciprocal(self: &mut Self, b: &mut Body, i: u32) {
+        let mut t = b.insts[i as usize];
+        if t.op != O_FDIV {
+            return; // `fast_math` made it a product already
+        }
+        let c = float_const(b, t.b);
+        let frac = if t.ty == T_F64 {
+            0xFFFFFFFFFFFFFu64
+        } else {
+            0x7FFFFFu64
+        };
+        if c.is_none() || (c.unwrap() & frac) != 0 || !regular(t.ty, c.unwrap()) {
+            return;
+        }
+        let one = if t.ty == T_F64 {
+            0x3FF0000000000000u64
+        } else {
+            0x3F800000u64
+        };
+        let r = le::float_op(O_FDIV, t.ty, one, c.unwrap());
+        if regular(t.ty, r) {
+            t.op = O_FMUL;
+            t.b = self.fconstant(b, t.ty, r);
+            b.insts[i as usize] = t;
+        }
     }
 
     // The rewrites of float operation `i` the package's `fmath` allows: an identity's operand (`x + 0` without
@@ -6580,10 +6750,13 @@ extend Run {
         // the inlining (a copy takes its call's marks) and once the transforms made their blocks.
         sc.o.estimate(p, b);
         let inlined = sc.il.run(p, base, &r.ok, &r.level, &r.unit, j, b);
-        if inlined {
+        // The switches as compares and branches, before the first walk, which simplifies them (a test that
+        // returns a value on either side returns a select).
+        let lowered = p.switch_tree && sws::lower(b, p.ptr_bytes);
+        if inlined || lowered {
             sc.o.forget();
         }
-        let _ = sc.o.run(p, b, inlined);
+        let _ = sc.o.run(p, b, inlined || lowered);
         if sc.o.tail_self(p, b, j) {
             let _ = sc.o.run(p, b, true);
         }
@@ -8604,6 +8777,15 @@ const fn whole_bytes(m: u64, n: u32) bool {
 
 // Whether edge `e` of `b` enters a block whose one instruction returns, and the value that return gives on
 // that edge (the edge's argument for a parameter of the block; VNONE for none).
+// The edge of branch `t` that is not `e`.
+const fn other_edge(t: Inst, e: u32) u32 {
+    return if t.b == e {
+        t.c
+    } else {
+        t.b
+    };
+}
+
 fn ret_through(b: &Body, e: u32) (bool, Value) {
     let jb = b.blocks[b.edge_target(e) as usize];
     let r = b.insts[jb.start as usize];

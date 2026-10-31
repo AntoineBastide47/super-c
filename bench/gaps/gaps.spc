@@ -45,6 +45,14 @@ extern "C" {
     fn c_p_min(a: f64, b: f64) f64;
     fn c_p_abs(x: f64) f64;
     fn c_p_clamp01(x: f32) f32;
+    fn c_b_table(x: u32) u32;
+    fn c_t_sparse(x: u32) u32;
+    fn c_t_jump(x: u32, a: u32) u32;
+    fn c_f_space(c: u8) bool;
+    fn c_f_class(c: u8) u8;
+    fn c_b_bfi(x: u32, v: u32) u32;
+    fn c_b_andn(x: u64, y: u64) u64;
+    fn c_b_sbfx(x: u32) i32;
 }
 
 @arch(x86_64)
@@ -83,6 +91,14 @@ extern "C" {
     fn c_p_min(a: f64, b: f64) f64;
     fn c_p_abs(x: f64) f64;
     fn c_p_clamp01(x: f32) f32;
+    fn c_b_table(x: u32) u32;
+    fn c_t_sparse(x: u32) u32;
+    fn c_t_jump(x: u32, a: u32) u32;
+    fn c_f_space(c: u8) bool;
+    fn c_f_class(c: u8) u8;
+    fn c_b_bfi(x: u32, v: u32) u32;
+    fn c_b_andn(x: u64, y: u64) u64;
+    fn c_b_sbfx(x: u32) i32;
 }
 
 // Recursion whose result an associative operation combines with the recursive call.
@@ -195,6 +211,81 @@ fn f_and(x: u32, y: u32, z: u32) bool {
 @noinline
 fn f_or0(x: u32, y: u32) bool {
     return x == 0 || y == 0;
+}
+
+// Switches, ranges and sets of constants.
+@noinline
+fn b_table(x: u32) u32 {
+    return switch x {
+        0 => 10,
+        1 => 33,
+        2 => 7,
+        3 => 99,
+        4 => 5,
+        _ => 0,
+    };
+}
+
+@noinline
+fn t_sparse(x: u32) u32 {
+    return switch x {
+        1 => 3,
+        10 => 9,
+        100 => 4,
+        1000 => 8,
+        5000 => 1,
+        9000 => 7,
+        20000 => 2,
+        77777 => 6,
+        _ => 0,
+    };
+}
+
+@noinline
+fn t_jump(x: u32, a: u32) u32 {
+    return switch x {
+        0 => a + 1,
+        1 => a * 3,
+        2 => a ^ 7,
+        3 => a << 2,
+        4 => a - 9,
+        5 => a / 3,
+        6 => a | 64,
+        7 => a & 5,
+        _ => 0,
+    };
+}
+
+@noinline
+fn f_space(c: u8) bool {
+    return c == 32 || c == 9 || c == 10 || c == 13;
+}
+
+@noinline
+fn f_class(c: u8) u8 {
+    return switch c {
+        97..=122 => 1,
+        65..=90 => 1,
+        48..=57 => 2,
+        32 | 9 | 10 => 3,
+        _ => 0,
+    };
+}
+
+// Bit fields and inverted operands.
+@noinline
+fn b_bfi(x: u32, v: u32) u32 {
+    return x & 0xffff00ff | (v & 0xff) << 8;
+}
+
+@noinline
+fn b_andn(x: u64, y: u64) u64 {
+    return ~x & y;
+}
+
+@noinline
+fn b_sbfx(x: u32) i32 {
+    return (x << 20) as i32 >> 24;
 }
 
 // Callee-saved registers around sibling calls.
@@ -821,6 +912,71 @@ pub fn gaps_float(_b: &mut bench::Bencher) {
             mode,
             measure(&xs, m == 1, |x: u32| p_clamp01((x as i32) as f32 * 1.0e-9).to_bits() as u64),
             measure(&xs, m == 1, |x: u32| (unsafe c_p_clamp01((x as i32) as f32 * 1.0e-9)).to_bits() as u64),
+        );
+    }
+}
+
+/// Switches, ranges, sets and bit fields: each kernel on unpredictable inputs (the
+/// switches' values mostly among their cases) and as a latency chain.
+@bench(log_results = false)
+pub fn gaps_switch(_b: &mut bench::Bencher) {
+    warm();
+    let xs = inputs(0xFFFFFFFF, true);
+    let sparse: [u32; 9] = [1, 10, 100, 1000, 5000, 9000, 20000, 77777, 3];
+    for m in 0..2 {
+        let mode = if m == 0 {
+            "random"
+        } else {
+            "chain"
+        };
+        let l = m == 1;
+        row(
+            "b_table",
+            mode,
+            measure(&xs, l, |x: u32| b_table(x % 6) as u64),
+            measure(&xs, l, |x: u32| (unsafe c_b_table(x % 6)) as u64),
+        );
+        row(
+            "t_sparse",
+            mode,
+            measure(&xs, l, |x: u32| t_sparse(sparse[(x % 9) as usize]) as u64),
+            measure(&xs, l, |x: u32| (unsafe c_t_sparse(sparse[(x % 9) as usize])) as u64),
+        );
+        row(
+            "t_jump",
+            mode,
+            measure(&xs, l, |x: u32| t_jump(x % 9, x) as u64),
+            measure(&xs, l, |x: u32| (unsafe c_t_jump(x % 9, x)) as u64),
+        );
+        row(
+            "f_space",
+            mode,
+            measure(&xs, l, |x: u32| f_space((x % 40) as u8) as u64),
+            measure(&xs, l, |x: u32| (unsafe c_f_space((x % 40) as u8)) as u64),
+        );
+        row(
+            "f_class",
+            mode,
+            measure(&xs, l, |x: u32| f_class(x as u8 & 0x7f) as u64),
+            measure(&xs, l, |x: u32| (unsafe c_f_class(x as u8 & 0x7f)) as u64),
+        );
+        row(
+            "b_bfi",
+            mode,
+            measure(&xs, l, |x: u32| b_bfi(x, x >> 5) as u64),
+            measure(&xs, l, |x: u32| (unsafe c_b_bfi(x, x >> 5)) as u64),
+        );
+        row(
+            "b_andn",
+            mode,
+            measure(&xs, l, |x: u32| b_andn(x, x as u64 * 0x9E3779B9)),
+            measure(&xs, l, |x: u32| unsafe c_b_andn(x, x as u64 * 0x9E3779B9)),
+        );
+        row(
+            "b_sbfx",
+            mode,
+            measure(&xs, l, |x: u32| b_sbfx(x) as u64),
+            measure(&xs, l, |x: u32| (unsafe c_b_sbfx(x)) as u64),
         );
     }
 }

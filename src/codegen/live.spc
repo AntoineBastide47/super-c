@@ -44,6 +44,9 @@ pub(package) const FOLD_FCMP: u32 = 4096;
 pub(package) const FOLD_BLEN: u32 = 8192;
 pub(package) const FOLD_CARRY: u32 = 16384;
 pub(package) const FOLD_FSEL: u32 = 32768;
+pub(package) const FOLD_NOT: u32 = 65536;
+pub(package) const FOLD_XBFX: u32 = 131072;
+pub(package) const FOLD_BFI: u32 = 262144;
 /// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
 pub(package) const CS_NONE: u8 = 0;
 pub(package) const CS_INC: u8 = 1;
@@ -568,6 +571,75 @@ extend Live {
                 let t = b.insts[i];
                 if t.op == O_FCMP && !is_vec(b.type_of(t.a)) && t.aux != C_ONE && t.aux != C_UEQ && self.count[i] != 0 && self.cnd[i] == self.count[i] {
                     self.pfold[i] = true;
+                }
+            }
+        }
+        // `FOLD_NOT`: an inversion (`not`, or `xor` with all ones) whose one use is an `and`, `or` or `xor` of
+        // at most 64 bits, whose other operand and the inverted value fold nothing, folds into it (arm64
+        // `bic`, `orn`, `eon`: `not_side`).
+        if (self.fold_ops & FOLD_NOT) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op != O_AND && t.op != O_OR && t.op != O_XOR || !is_int(t.ty) || t.ty == T_I128 || self.pfold[i] {
+                    continue;
+                }
+                for side in 0..2 {
+                    let (s, o) = if side == 0 {
+                        (t.b, t.a)
+                    } else {
+                        (t.a, t.b)
+                    };
+                    let x = inversion(b, s);
+                    if x != VNONE && self.count[s as usize] == 1 && !self.pfold[s as usize] && !(is_inst(o) && self.pfold[o as usize]) && !(is_inst(
+                        x,
+                    ) && self.pfold[x as usize]) {
+                        self.pfold[s as usize] = true;
+                        break;
+                    }
+                }
+            }
+        }
+        // `FOLD_XBFX`: a left shift by a constant whose one use is a right shift of 32 or 64 bits by at least
+        // as much folds into it: a field extracted, sign- or zero-extended (arm64 `sbfx`, `ubfx`).
+        if (self.fold_ops & FOLD_XBFX) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                let bits = type_bits(t.ty, 8);
+                if t.op != O_LSHR && t.op != O_ASHR || !is_int(t.ty) || bits != 32 && bits != 64 || self.pfold[i] || !is_inst(
+                    t.a,
+                ) {
+                    continue;
+                }
+                let s = b.insts[t.a as usize];
+                let k = int_const(b, t.b);
+                let l = if s.op == O_SHL {
+                    int_const(b, s.b)
+                } else {
+                    u64::MAX
+                };
+                if l != u64::MAX && k != u64::MAX && l <= k && k < bits as u64 && self.count[t.a as usize] == 1 && !self.pfold[t.a as usize] && !(is_inst(
+                    s.a,
+                ) && self.pfold[s.a as usize]) {
+                    self.pfold[t.a as usize] = true;
+                }
+            }
+        }
+        // `FOLD_BFI`: an insertion of a field (`bfi_of`) whose three inner instructions each have this one use
+        // folds them (arm64 `bfi`); the shift may be a shifted operand already (`FOLD_SHOP`).
+        if (self.fold_ops & FOLD_BFI) != 0 {
+            for i in 0..ni {
+                let f = bfi_of(b, b.insts[i]);
+                if f.x == VNONE || self.pfold[i] {
+                    continue;
+                }
+                let (ka, kb) = (f.keep, f.field);
+                let kc = b.insts[kb as usize].a;
+                if self.count[ka as usize] == 1 && self.count[kb as usize] == 1 && self.count[kc as usize] == 1 && !self.pfold[ka as usize] && !self.pfold[kc as usize] && !(is_inst(
+                    f.x,
+                ) && self.pfold[f.x as usize]) && !(is_inst(f.v) && self.pfold[f.v as usize]) {
+                    self.pfold[ka as usize] = true;
+                    self.pfold[kb as usize] = true;
+                    self.pfold[kc as usize] = true;
                 }
             }
         }
@@ -1770,6 +1842,93 @@ pub(package) fn rotate_of(b: &Body, i: u32) Rotation {
 
 /// What `v` is as a `select`'s side next to side `other` (CS_*): `other + 1`, `-other`, `~other` (an
 /// integer of up to 64 bits), which a conditional instruction computes from `other`; else CS_NONE.
+/// A field insertion `bfi_of` reads: `keep` (`x & ~(m << s)`), `field` (`(v & m) << s`), `m` the `w` low
+/// bits.
+pub(package) struct Bfi {
+    pub(package) x: Value,
+    pub(package) v: Value,
+    pub(package) keep: Value,
+    pub(package) field: Value,
+    pub(package) s: u32,
+    pub(package) w: u32,
+}
+
+/// Instruction `t` of `b` as an insertion of `v`'s low `w` bits into `x` at bit `s`: an `or` of 32 or 64
+/// bits of `x & ~(m << s)` and `(v & m) << s`, `m` the `w` low bits, the field within the width; `x` VNONE
+/// when it is not one.
+pub(package) fn bfi_of(b: &Body, t: Inst) Bfi {
+    let none = Bfi { x: VNONE, v: VNONE, keep: VNONE, field: VNONE, s: 0, w: 0 };
+    let bits = type_bits(t.ty, 8);
+    if t.op != O_OR || !is_int(t.ty) || bits != 32 && bits != 64 || !is_inst(t.a) || !is_inst(t.b) {
+        return none;
+    }
+    let all = if bits == 64 {
+        u64::MAX
+    } else {
+        0xFFFFFFFFu64
+    };
+    for side in 0..2 {
+        let (ka, kb) = if side == 0 {
+            (t.a, t.b)
+        } else {
+            (t.b, t.a)
+        };
+        let a = b.insts[ka as usize];
+        let sh = b.insts[kb as usize];
+        if a.op != O_AND || sh.op != O_SHL || !is_inst(sh.a) || b.insts[sh.a as usize].op != O_AND {
+            continue;
+        }
+        let f = b.insts[sh.a as usize];
+        let s = int_const(b, sh.b);
+        let m = int_const(b, f.b);
+        let k = int_const(b, a.b);
+        if s == u64::MAX || m == u64::MAX || k == u64::MAX || m == 0 || (m & m + 1) != 0 || s >= bits as u64 {
+            continue;
+        }
+        let w = (m + 1).trailing_zeros() as u64;
+        if s + w <= bits as u64 && (k & all) == (~(m << s) & all) {
+            return Bfi { x: a.a, v: f.a, keep: ka, field: kb, s: s as u32, w: w as u32 };
+        }
+    }
+    return none;
+}
+
+/// The value instruction `v` of `b` inverts (`not v`, or `xor v` with all ones of its width); VNONE when it
+/// is no inversion.
+pub(package) fn inversion(b: &Body, v: Value) Value {
+    if !is_inst(v) {
+        return VNONE;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_NOT {
+        return t.a;
+    }
+    let m = if type_bits(t.ty, 8) >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << type_bits(t.ty, 8) as u64) - 1
+    };
+    if t.op == O_XOR && is_int(t.ty) && t.ty != T_I128 && is_const_val(b, t.b) && (const_val(b, t.b) & m) == m {
+        return t.a;
+    }
+    return VNONE;
+}
+
+/// The operand of `and`, `or` or `xor` `t` of `b` that is a folded inversion (`FOLD_NOT`, `folded`); VNONE
+/// when none.
+pub(package) fn not_side(b: &Body, folded: &Vector<bool>, t: Inst) Value {
+    if t.op != O_AND && t.op != O_OR && t.op != O_XOR {
+        return VNONE;
+    }
+    if is_inst(t.b) && folded[t.b as usize] && inversion(b, t.b) != VNONE {
+        return t.b;
+    }
+    if is_inst(t.a) && folded[t.a as usize] && inversion(b, t.a) != VNONE {
+        return t.a;
+    }
+    return VNONE;
+}
+
 /// The side of select `i` of `b` that `FOLD_CARRY` folds (the other side plus 1), when `i` is of 32 or 64
 /// bits on a folded (`folded`) unsigned order comparison of 32 or 64 bits; VNONE else.
 pub(package) fn carry_inc(b: &Body, folded: &Vector<bool>, i: u32) Value {

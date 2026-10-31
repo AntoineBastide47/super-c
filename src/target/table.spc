@@ -50,6 +50,9 @@ pub(package) struct Isa {
     /// Every processor converts IEEE binary16 values to and from f32 (arm64's FCVT); else only one with
     /// its feature does (x86-64's `f16c`). `lir::ir::Package::half`.
     pub(package) half_cvt: bool,
+    /// The native backend tests a switch's values one after another (no table of branches): the optimizer
+    /// lowers a switch of ranges or many values to compares and branches (`lir::ir::Package::switch_tree`).
+    pub(package) switch_tree: bool,
     pub(package) simd_backend: str<'static>, // `std/simd/backend/<name>.spc`
     /// The C headers whose functions are the C compiler's intrinsics, space-separated: no object defines
     /// them, so a native backend expands each call from its template (`target::intrin`), and a call of
@@ -176,6 +179,7 @@ pub(package) const ISAS: [Isa; 3] = [
         bswap: true,
         pairs: true,
         half_cvt: false,
+        switch_tree: true,
         simd_backend: "x86_64",
         intrinsics: "immintrin.h x86intrin.h",
     },
@@ -197,6 +201,7 @@ pub(package) const ISAS: [Isa; 3] = [
         bswap: true,
         pairs: true,
         half_cvt: true,
+        switch_tree: true,
         simd_backend: "aarch64",
         intrinsics: "arm_neon.h arm_acle.h arm_sve.h arm_sme.h",
     },
@@ -218,6 +223,7 @@ pub(package) const ISAS: [Isa; 3] = [
         bswap: false,
         pairs: false,
         half_cvt: false,
+        switch_tree: false,
         simd_backend: "wasm",
         intrinsics: "wasm_simd128.h",
     },
@@ -544,6 +550,7 @@ const UNKNOWN_ISA: Isa = Isa {
     bswap: false,
     pairs: false,
     half_cvt: false,
+    switch_tree: false,
     simd_backend: "",
     intrinsics: "",
 };
