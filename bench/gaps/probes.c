@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define F __attribute__((noinline, used))
 
@@ -61,3 +63,8 @@ F uint64_t c_b_andn(uint64_t x, uint64_t y) { return ~x & y; }
 F int32_t c_b_sbfx(uint32_t x) { return ((int32_t)(x << 20)) >> 24; }
 F uint32_t c_f_hash(const uint8_t *s, size_t n) { uint32_t h = 2166136261u; for (size_t k = 0; k < n; k++) h = (h ^ s[k]) * 16777619u; return h; }
 F size_t c_m_count(const uint8_t *s, size_t n, uint8_t c) { size_t r = 0; for (size_t k = 0; k < n; k++) if (s[k] == c) r++; return r; }
+F bool c_s_eq(const char *s, size_t n) { return n == 5 && memcmp(s, "hello", 5) == 0; }
+F bool c_s_starts(const char *s, size_t n) { return n >= 4 && memcmp(s, "http", 4) == 0; }
+F uint32_t c_n_pow(uint32_t x) { uint32_t r = 1, b = x; for (uint32_t e = 5; e; e >>= 1) { if (e & 1) r *= b; b *= b; } return r; }
+F uint32_t c_q_slsum(const uint32_t *s, size_t n, uint32_t acc) { if (n == 0) return acc; return c_q_slsum(s + 1, n - 1, acc + s[0]); }
+F uint32_t c_h_box(uint32_t x) { uint32_t *b = malloc(4); if (!b) abort(); *b = x; uint32_t r = *b + 1; free(b); return r; }

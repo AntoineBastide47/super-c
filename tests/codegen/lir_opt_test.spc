@@ -5482,3 +5482,302 @@ b0:
     let none: []u64 = [];
     same_result(&b, &a, "out", none, 5);
 }
+
+// A branch between two blocks that compute the same values and jump alike is a jump to one (`twins`):
+// the flag that chose between them is then dead. A block that differs in one constant stays.
+@test
+fn identical_branch_targets_merge() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f fn global
+sym @g fn global
+fn @f
+  sig (i64, i8) -> i64
+b0(v0: i64, v1: i8):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i8 1
+  jmp b1(v0, v2, v1)
+b1(v5: i64, v6: i64, v7: i8):
+  v8 = icmp.eq v5, v2
+  br v8, b5, b2
+b2:
+  br v7, b3, b4
+b3:
+  v9 = sub.i64 v5, v3
+  v10 = add.i64 v6, v5
+  v11 = xor.i8 v7, v4
+  jmp b1(v9, v10, v11)
+b4:
+  v12 = sub.i64 v5, v3
+  v13 = add.i64 v6, v5
+  v14 = xor.i8 v7, v4
+  jmp b1(v12, v13, v14)
+b5:
+  ret v6
+fn @g
+  sig (i64, i8) -> i64
+b0(v0: i64, v1: i8):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i8 1
+  jmp b1(v0, v2, v1)
+b1(v5: i64, v6: i64, v7: i8):
+  v8 = icmp.eq v5, v2
+  br v8, b5, b2
+b2:
+  br v7, b3, b4
+b3:
+  v9 = sub.i64 v5, v3
+  v10 = add.i64 v6, v5
+  v11 = xor.i8 v7, v4
+  jmp b1(v9, v10, v11)
+b4:
+  v12 = sub.i64 v5, v3
+  v13 = add.i64 v6, v3
+  v14 = add.i64 v13, v3
+  v15 = xor.i8 v7, v4
+  jmp b1(v12, v14, v15)
+b5:
+  ret v6
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(!t.contains("xor."), t.as_str());
+    let u = text_of(&a, "g");
+    assert(u.contains("xor."), u.as_str());
+    let x: []u64 = [10, 0];
+    same_result(&b, &a, "f", x, 55);
+    let y: []u64 = [10, 1];
+    same_result(&b, &a, "f", y, 55);
+    let z: []u64 = [5, 1];
+    same_result(&b, &a, "g", z, 5 + 2 + 3 + 2 + 1);
+}
+
+// A reference parameter (`ref`) is never null: its equality with 0 folds. A pointer parameter's stays.
+@test
+fn a_reference_parameter_is_not_null() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (ptr, ptr) -> i8
+  ref p0 4 readonly
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.ptr 0
+  v3 = icmp.eq v0, v2
+  v4 = icmp.ne v2, v0
+  v5 = icmp.eq v1, v2
+  v6 = and.i8 v4, v5
+  v7 = or.i8 v3, v6
+  ret v7
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(count_of(&t, "icmp.") == 1 && t.contains("icmp.eq v1"), t.as_str());
+    let x: []u64 = [16, 0];
+    same_result(&b, &a, "f", x, 1);
+    let y: []u64 = [16, 32];
+    same_result(&b, &a, "f", y, 0);
+}
+
+// A `memcmp` of a small count whose result only an equality with 0 reads is a compare of loads (two
+// overlapping ones each for 5 bytes, one for 4); a count a branch into the block settles counts too, and a
+// load of read-only bytes is their constant. A result an ordering reads, or a count past 16 bytes, keeps
+// the call.
+@test
+fn small_memory_compares_expand() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @memcmp fn global
+sym @s data global
+sym @r data global
+sym @w data global
+sym @eq5 fn global
+sym @starts fn global
+sym @less fn global
+sym @long fn global
+fn @eq5
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = symaddr @s
+  v2 = symaddr @w
+  v3 = iconst.i64 5
+  v4 = iconst.i32 0
+  v5 = iconst.i8 0
+  v6 = ptradd v2, v0 * 1
+  v7 = icmp.ne v0, v3
+  br v7, b2, b1
+b1:
+  v8 = call.i32 @memcmp(v6, v1, v0) : (ptr, ptr, i64) -> i32
+  v9 = icmp.eq v8, v4
+  ret v9
+b2:
+  ret v5
+fn @starts
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = symaddr @r
+  v2 = symaddr @w
+  v3 = iconst.i64 4
+  v4 = iconst.i32 0
+  v5 = ptradd v2, v0 * 1
+  v6 = call.i32 @memcmp(v5, v1, v3) : (ptr, ptr, i64) -> i32
+  v7 = icmp.ne v4, v6
+  ret v7
+fn @less
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = symaddr @s
+  v2 = symaddr @w
+  v3 = iconst.i64 5
+  v4 = iconst.i32 0
+  v5 = ptradd v2, v0 * 1
+  v6 = call.i32 @memcmp(v5, v1, v3) : (ptr, ptr, i64) -> i32
+  v7 = icmp.slt v6, v4
+  ret v7
+fn @long
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = symaddr @s
+  v2 = symaddr @w
+  v3 = iconst.i64 17
+  v4 = iconst.i32 0
+  v5 = ptradd v2, v0 * 1
+  v6 = call.i32 @memcmp(v5, v1, v3) : (ptr, ptr, i64) -> i32
+  v7 = icmp.eq v6, v4
+  ret v7
+data @s size 24 align 0 ro bytes 68656c6c6f68656c6c6f68656c6c6f68656c6c6f00000000
+data @r size 4 align 0 ro bytes 68747470
+data @w size 32 align 0 bytes 68656c6c6f68656c6c6f68656c6c6f68656c6c6f687474706800000000000000
+)",
+    );
+    let e = text_of(&a, "eq5");
+    assert(!e.contains("call") && count_of(&e, "load.i32") == 2, e.as_str());
+    let s = text_of(&a, "starts");
+    assert(!s.contains("call") && count_of(&s, "load.i32") == 1 && !s.contains("symaddr @r"), s.as_str());
+    assert(text_of(&a, "less").contains("call"), text_of(&a, "less").as_str());
+    assert(text_of(&a, "long").contains("call"), text_of(&a, "long").as_str());
+    let x: []u64 = [5];
+    same_result(&b, &a, "eq5", x, 1);
+    let y: []u64 = [4];
+    same_result(&b, &a, "eq5", y, 0);
+    let z: []u64 = [20];
+    same_result(&b, &a, "starts", z, 0);
+    let z2: []u64 = [19];
+    same_result(&b, &a, "starts", z2, 1);
+    let l: []u64 = [1];
+    same_result(&b, &a, "less", l, 1);
+}
+
+// An allocation only stores write through, a null test reads and one free takes on every path to a return
+// goes with them, its test folding as for a block that exists. One freed twice, or not on every path, or
+// whose pointer a load reads, stays.
+@test
+fn an_unread_allocation_goes() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @malloc fn global
+sym @free fn global
+sym @abort fn global
+sym @boxed fn global
+sym @twice fn global
+sym @leaks fn global
+fn @boxed
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 1
+  v2 = iconst.ptr 0
+  v3 = iconst.i64 4
+  v4 = call.ptr @malloc(v3) : (i64) -> ptr
+  v5 = icmp.eq v4, v2
+  br v5, b1, b2
+b1: unlikely
+  call @abort() : () -> void
+  unreachable
+b2:
+  store v0, v4 align 2
+  v6 = add.i32 v0, v1
+  call @free(v4) : (ptr) -> void
+  ret v6
+fn @twice
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i64 4
+  v2 = call.ptr @malloc(v1) : (i64) -> ptr
+  store v0, v2 align 2
+  call @free(v2) : (ptr) -> void
+  call @free(v2) : (ptr) -> void
+  ret v0
+fn @leaks
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i64 4
+  v2 = iconst.i32 0
+  v3 = call.ptr @malloc(v1) : (i64) -> ptr
+  store v0, v3 align 2
+  v4 = icmp.eq v0, v2
+  br v4, b1, b2
+b1:
+  ret v0
+b2:
+  call @free(v3) : (ptr) -> void
+  ret v0
+)",
+    );
+    let t = text_of(&a, "boxed");
+    assert(!t.contains("call") && !t.contains("store"), t.as_str());
+    assert(text_of(&a, "twice").contains("@malloc"), text_of(&a, "twice").as_str());
+    assert(text_of(&a, "leaks").contains("@malloc"), text_of(&a, "leaks").as_str());
+    let x: []u64 = [41];
+    same_result(&b, &a, "boxed", x, 42);
+}
+
+// A by-value aggregate parameter a loop writes (a tail recursion's) becomes a slot the entry copies it
+// into, then values the loop carries: no load or store stays in the loop. One passed to a call stays.
+@test
+fn a_written_aggregate_parameter_becomes_values() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @fib fn global
+sym @keep fn global noinline
+sym @kept fn global
+fn @fib
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i32, l0) -> i64
+b0(v0: i32, v1: ptr):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = icmp.eq v0, v2
+  br v4, b2, b1(v0)
+b1(v5: i32):
+  v6 = sub.i32 v5, v3
+  v7 = load.i64 v1 align 3
+  v8 = load.i64 v1+8 align 3
+  v9 = add.i64 v7, v8
+  store v8, v1 align 3
+  store v9, v1+8 align 3
+  v10 = icmp.eq v6, v2
+  br v10, b2, b1(v6)
+b2:
+  v11 = load.i64 v1 align 3
+  ret v11
+fn @keep
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  ret v1
+fn @kept
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (l0) -> i64
+b0(v0: ptr):
+  v1 = iconst.i64 7
+  store v1, v0 align 3
+  v2 = call.i64 @keep(v0) : (ptr) -> i64
+  ret v2
+)",
+    );
+    let t = text_of(&a, "fib");
+    assert(count_of(&t, "load.") == 2 && !t.contains("store") && !t.contains("slot"), t.as_str());
+    assert(text_of(&a, "kept").contains("store"), text_of(&a, "kept").as_str());
+}
