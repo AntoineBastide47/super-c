@@ -55,6 +55,11 @@ extern "C" {
     fn c_b_sbfx(x: u32) i32;
     fn c_f_hash(s: *const u8, n: usize) u32;
     fn c_m_count(s: *const u8, n: usize, c: u8) usize;
+    fn c_s_eq(s: *const u8, n: usize) bool;
+    fn c_s_starts(s: *const u8, n: usize) bool;
+    fn c_n_pow(x: u32) u32;
+    fn c_q_slsum(s: *const u32, n: usize, acc: u32) u32;
+    fn c_h_box(x: u32) u32;
 }
 
 @arch(x86_64)
@@ -103,6 +108,11 @@ extern "C" {
     fn c_b_sbfx(x: u32) i32;
     fn c_f_hash(s: *const u8, n: usize) u32;
     fn c_m_count(s: *const u8, n: usize, c: u8) usize;
+    fn c_s_eq(s: *const u8, n: usize) bool;
+    fn c_s_starts(s: *const u8, n: usize) bool;
+    fn c_n_pow(x: u32) u32;
+    fn c_q_slsum(s: *const u32, n: usize, acc: u32) u32;
+    fn c_h_box(x: u32) u32;
 }
 
 // Gap 1: recursion whose result an associative operation combines with the recursive call.
@@ -311,6 +321,37 @@ fn m_count(s: []u8, c: u8) usize {
         }
     }
     return n;
+}
+
+// Gaps 34, 53, 56, 57 and 61: compares with constant strings, a constant power, a tail recursion over a
+// slice, a box nothing keeps.
+@noinline
+fn s_eq(s: str) bool {
+    return s == "hello";
+}
+
+@noinline
+fn s_starts(s: str) bool {
+    return s.starts_with("http");
+}
+
+@noinline
+fn n_pow(x: u32) u32 {
+    return x.wrapping_pow(5);
+}
+
+@noinline
+fn q_slsum(s: []u32, acc: u32) u32 {
+    if s.len() == 0 {
+        return acc;
+    }
+    return q_slsum(s[1..s.len()], acc.wrapping_add(s[0]));
+}
+
+@noinline
+fn h_box(x: u32) u32 {
+    let b = Box::new(x);
+    return *b + 1;
 }
 
 // Gap 8: callee-saved registers around sibling calls.
@@ -547,7 +588,6 @@ fn chain<F: fn(u32) u64>(xs: &Vector<u32>, f: F) Stat {
     return Stat { median: sm.median * 1e9 / n, spread: (sm.p95 - sm.min) * 1e9 / n, sum: sum };
 }
 
-// One row: probe `name` on `xs` (`mode`), Super-C's `sc` against clang's `c`.
 // `time` of `f` over `xs`, or its `chain` when `latency`.
 fn measure<F: fn(u32) u64>(xs: &Vector<u32>, latency: bool, f: F) Stat {
     return if latency {
@@ -557,6 +597,7 @@ fn measure<F: fn(u32) u64>(xs: &Vector<u32>, latency: bool, f: F) Stat {
     };
 }
 
+// One row: probe `name` on `xs` (`mode`), Super-C's `sc` against clang's `c`.
 fn row(name: str, mode: str, sc: Stat, c: Stat) {
     unsafe stdio::printf(
         "gaps %-10.*s %-6.*s  sc %9.2f ns (+%.2f)  c %9.2f ns (+%.2f)  sc/c %.3f\n".ptr() as *const char,
@@ -1027,4 +1068,37 @@ pub fn gaps_loops(_b: &mut bench::Bencher) {
         time(&xs, |x: u32| m_count(buf[0..(x % 64 + 1) as usize], x as u8) as u64),
         time(&xs, |x: u32| (unsafe c_m_count(&buf[0], (x % 64 + 1) as usize, x as u8)) as u64),
     );
+}
+
+/// Gaps 34, 53, 56, 57 and 61: `s_eq` and `s_starts` on strings of 4 to 7 bytes, `n_pow`, `q_slsum` on
+/// the first 0 to 63 elements of an array, `h_box`.
+@bench(log_results = false)
+pub fn gaps_misc(_b: &mut bench::Bencher) {
+    warm();
+    let xs = inputs(0xFFFFFFFF, true);
+    let words: [str; 4] = ["hell", "hello", "https", "hello!!"];
+    let mut nums: [u32; 64] = [0; 64];
+    for i in 0..64 {
+        nums[i] = (i as u64 * 2654435761) as u32;
+    }
+    row(
+        "s_eq",
+        "random",
+        time(&xs, |x: u32| s_eq(words[(x % 4) as usize]) as u64),
+        time(&xs, |x: u32| (unsafe c_s_eq(words[(x % 4) as usize].ptr(), words[(x % 4) as usize].len())) as u64),
+    );
+    row(
+        "s_starts",
+        "random",
+        time(&xs, |x: u32| s_starts(words[(x % 4) as usize]) as u64),
+        time(&xs, |x: u32| (unsafe c_s_starts(words[(x % 4) as usize].ptr(), words[(x % 4) as usize].len())) as u64),
+    );
+    row("n_pow", "random", time(&xs, |x: u32| n_pow(x) as u64), time(&xs, |x: u32| (unsafe c_n_pow(x)) as u64));
+    row(
+        "q_slsum",
+        "random",
+        time(&xs, |x: u32| q_slsum(nums[0..(x % 64) as usize], 0) as u64),
+        time(&xs, |x: u32| (unsafe c_q_slsum(&nums[0], (x % 64) as usize, 0)) as u64),
+    );
+    row("h_box", "random", time(&xs, |x: u32| h_box(x) as u64), time(&xs, |x: u32| (unsafe c_h_box(x)) as u64));
 }

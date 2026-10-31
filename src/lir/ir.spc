@@ -770,7 +770,8 @@ pub(package) struct Sym {
     /// return, pass on to a call that may): `lir::opt::Run::new` infers it for a function with a body;
     /// all for any other. The text form does not carry it.
     pub(package) esc: u64,
-    /// What a call of it does to memory by its name (`alloc_of`): ALLOC_FRESH, ALLOC_FREE or ALLOC_NONE.
+    /// What a call of it does to memory by its name (`alloc_of`): ALLOC_FRESH, ALLOC_FREE, ALLOC_MEMCMP or
+    /// ALLOC_NONE.
     pub(package) alloc: u8,
 }
 
@@ -784,9 +785,11 @@ pub(package) const HALF_ARITH: u8 = 2;
 /// writes no memory the program reads but `errno` (an `i32`); a C library or runtime free, which writes no
 /// memory the program may read. Only for a call from outside it: a package that defines the function
 /// (wasm's C library, the runtime's leak tracker) treats it as any other (`lir::opt`'s `call_alloc`).
+/// ALLOC_MEMCMP: the C library's `memcmp`, which `lir::opt` expands for a small count.
 pub(package) const ALLOC_NONE: u8 = 0;
 pub(package) const ALLOC_FRESH: u8 = 1;
 pub(package) const ALLOC_FREE: u8 = 2;
+pub(package) const ALLOC_MEMCMP: u8 = 3;
 
 /// The `Sym.alloc` of the function named `name0` (`__sc_x_<c name>` is a C library name's alias).
 pub(package) const fn alloc_of(name0: str) u8 {
@@ -800,6 +803,9 @@ pub(package) const fn alloc_of(name0: str) u8 {
     }
     if name == "free" || name == "_aligned_free" || name == "sc_lk_free" || name == "sc_lk_aligned_free" {
         return ALLOC_FREE;
+    }
+    if name == "memcmp" {
+        return ALLOC_MEMCMP;
     }
     return ALLOC_NONE;
 }
@@ -1279,9 +1285,15 @@ extend Body {
             out.push(t.b);
             out.push(t.c);
         } else if t.op == O_SWITCH {
-            for k in 0..t.aux as u32 + 1 {
-                out.push(self.switch_edge(t, k));
-            }
+            self.switch_edges(t, out);
+        }
+    }
+
+    // `succ_edges` of switch `t`. Apart, so the common path saves no registers for its loop.
+    @noinline
+    fn switch_edges(self: &Self, t: Inst, out: &mut Vector<u32>) {
+        for k in 0..t.aux as u32 + 1 {
+            out.push(self.switch_edge(t, k));
         }
     }
 

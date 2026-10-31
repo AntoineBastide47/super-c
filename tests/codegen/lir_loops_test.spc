@@ -4228,3 +4228,41 @@ b3:
         assert(t.contains("v2i64") && t.contains("icmp.ule"), t.as_str());
     }
 }
+
+// A loop whose counter starts at a constant and shifts right (`x.pow(5)`'s square and multiply) runs a
+// count of iterations its evaluation gives: fully unrolled, no loop is left.
+@test
+fn a_counter_that_shifts_right_unrolls_fully() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @pow5 fn global
+fn @pow5
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 5
+  v2 = iconst.i32 1
+  jmp b1(v1, v2, v0)
+b1(v3: i32, v4: i32, v5: i32):
+  v6 = and.i32 v3, v2
+  v7 = icmp.eq v6, v2
+  v8 = mul.i32 v4, v5
+  v9 = select.i32 v7, v8, v4
+  v10 = lshr.i32 v3, v2
+  v11 = mul.i32 v5, v5
+  v12 = icmp.ugt v10, v2
+  br v12, b1(v10, v9, v11), b2
+b2:
+  v13 = mul.i32 v9, v11
+  ret v13
+)",
+        PEEL,
+    );
+    let t = text_of(&a, "pow5");
+    assert(!t.contains("br ") && !t.contains("jmp ") && count(&t, "mul.") == 3, t.as_str());
+    let xs: [u64; 4] = [0, 1, 3, 7];
+    for i in 0..4 {
+        let x: []u64 = [xs[i]];
+        let want = xs[i] * xs[i] * xs[i] * xs[i] * xs[i];
+        same_outcome(&b, &a, "pow5", x, want, false);
+    }
+}

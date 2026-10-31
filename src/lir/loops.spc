@@ -5963,7 +5963,7 @@ extend LoopOpt {
             return 0;
         };
         let k = b.insts[kv as usize].a as u64 | b.insts[kv as usize].b as u64 << 32;
-        // `x` is header parameter `q`, or `q` plus or minus constant `xs` (op `xop`).
+        // `x` is header parameter `q`, or `q` and constant `xs` by a step operation `xop` (`step_op`).
         let mut q = x;
         let mut xop: u8 = 0;
         let mut xs: u64 = 0;
@@ -5994,7 +5994,8 @@ extend LoopOpt {
         if !is_const(b, init) {
             return 0;
         }
-        // Its step: the back edge's argument, the parameter plus or minus a constant.
+        // Its step: the back edge's argument, the parameter and a constant by a step operation (a sum,
+        // difference, product or shift: `x.pow(5)`'s exponent shifts right).
         b.succ_edges(term(b, u), &mut self.edges);
         let mut be = NONE;
         for j in 0..self.edges.len() {
@@ -6451,17 +6452,20 @@ fn is_const(b: &Body, v: Value) bool {
     return v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_ICONST;
 }
 
-// Whether `op` steps a counter: an addition or a subtraction, checked or not (the value result).
+// Whether `op` steps a counter `trip` evaluates: an addition or a subtraction, checked or not (the value
+// result), a product or a shift.
 const fn step_op(op: u8) bool {
-    return op == O_ADD || op == O_SUB || op == O_ADDO || op == O_SUBO;
+    return op == O_ADD || op == O_SUB || op == O_ADDO || op == O_SUBO || op == O_MUL || op >= O_SHL && op <= O_ASHR;
 }
 
 // The unchecked operation of step `op`.
 const fn base_op(op: u8) u8 {
     return if op == O_ADD || op == O_ADDO {
         O_ADD
-    } else {
+    } else if op == O_SUB || op == O_SUBO {
         O_SUB
+    } else {
+        op
     };
 }
 

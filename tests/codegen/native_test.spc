@@ -391,6 +391,31 @@ fn small_parameters_a_loop_compares_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A run of 8-byte stores of 0 at consecutive offsets (x86-64: a zeroed xmm register stored 16 bytes at a
+// time, an odd last store alone), and one a volatile store breaks, write those bytes alone.
+@test
+fn runs_of_zero_stores_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @zero5 fn global\nsym @zero4 fn global\nfn @zero5\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = iconst.i64 0\n  store v1, v0+8 align 0\n  store v1, v0+16 align 0\n  store v1, v0+24 align 0\n  store v1, v0+32 align 0\n  store v1, v0+40 align 0\n  ret\nfn @zero4\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = iconst.i64 0\n  store v1, v0 align 0\n  store v1, v0+8 align 0\n  store v1, v0+16 align 0 volatile\n  store v1, v0+24 align 0\n  ret\n";
+    let drv = "#include <stdint.h>\nvoid zero5(uint64_t *);\nvoid zero4(uint64_t *);\nint main(void) {\n  uint64_t a[7];\n  for (int i = 0; i < 7; i++) a[i] = 0x1111111111111111ull * (i + 1);\n  zero5(a);\n  if (a[0] != 0x1111111111111111ull || a[6] != 0x7777777777777777ull) return 1;\n  for (int i = 1; i < 6; i++) if (a[i] != 0) return 2;\n  uint64_t b[5];\n  for (int i = 0; i < 5; i++) b[i] = 9;\n  zero4(b);\n  for (int i = 0; i < 4; i++) if (b[i] != 0) return 3;\n  if (b[4] != 9) return 4;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Atomic read-modify-writes whose old value nothing reads (x86-64 `lock or`, `lock and`, `lock add`,
+// `lock sub`, `lock xor` on the memory, with an immediate or a register) of 16, 32 and 64 bits.
+@test
+fn atomic_updates_without_their_old_values_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @rmw fn global\nfn @rmw\n  sig (ptr, ptr, ptr, i64) -> void\nb0(v0: ptr, v1: ptr, v2: ptr, v3: i64):\n  v4 = iconst.i32 4\n  v5 = armw.or.i32 v4, v0 relaxed\n  v6 = iconst.i32 -2\n  v7 = armw.and.i32 v6, v0 seq_cst\n  v8 = armw.add.i64 v3, v1 acq_rel\n  v9 = iconst.i16 5\n  v10 = armw.sub.i16 v9, v2 relaxed\n  v11 = iconst.i64 255\n  v12 = armw.xor.i64 v11, v1 release\n  ret\n";
+    let drv = "#include <stdint.h>\nvoid rmw(uint32_t *, uint64_t *, uint16_t *, uint64_t);\nint main(void) {\n  uint32_t a = 0x13;\n  uint64_t b = 0x100000000ull;\n  uint16_t c = 3;\n  rmw(&a, &b, &c, 0x7777);\n  if (a != ((0x13u | 4u) & 0xFFFFFFFEu)) return 1;\n  if (b != ((0x100000000ull + 0x7777) ^ 255)) return 2;\n  if (c != (uint16_t)(3 - 5)) return 3;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
 // A float absolute value by a select (`x < 0 ? -x : x`, x86-64 `maxsd` of `-x` and `x`) keeps -0 and NaN as
 // the select does; a trailing-zero count of 32 or 64 bits counts the width for 0 (x86-64 `tzcnt` into the
 // width preset).

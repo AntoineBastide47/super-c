@@ -39,6 +39,9 @@ const S0: u8 = 10; // r10
 const S1: u8 = 11; // r11
 // A division looks this many instructions ahead for its remainder (`int_op`).
 const DIV_REACH: u32 = 8;
+// `zero_run` takes runs of ZERO_RUN to ZERO_RUN_MAX stores.
+const ZERO_RUN: u32 = 4;
+const ZERO_RUN_MAX: u32 = 32;
 
 // Register sets (bit `r` for register number `r`) and vector scratch registers, per ABI: System V
 // saves no vector register; Microsoft x64 saves rsi, rdi and xmm6..xmm15, so its scratch ones are xmm4
@@ -308,6 +311,8 @@ pub(package) struct Gen {
     // The remainder the division before it computed (`int_op`) and the product it reads, NONE for none.
     div_pair: u32,
     div_mul: u32,
+    // The instruction after the run of zero stores `zero_run` wrote (0: none).
+    zero_end: u32,
     rels: Vector<CRel>,
     osym: Vector<u32>, // per package symbol, its object symbol in this generator's object (NONE until used)
     // Calls.
@@ -455,6 +460,7 @@ extend Gen {
             tail_ret: NONE,
             div_pair: NONE,
             div_mul: NONE,
+            zero_end: 0,
             rels: Vector::<CRel>::new(),
             osym: Vector::<u32>::new(),
             lay: ab::CallLayout::new(),
@@ -2503,6 +2509,7 @@ extend Gen {
         self.tail_ret = NONE;
         self.div_pair = NONE;
         self.div_mul = NONE;
+        self.zero_end = 0;
         self.rels.truncate(0);
         self.free_slots.truncate(0);
         self.taken.truncate(0);
@@ -5238,6 +5245,9 @@ extend Gen {
     }
 
     fn store(self: &mut Self, t: Inst) bool {
+        if self.cur < self.zero_end {
+            return true; // the run of zero stores before it wrote its bytes (`zero_run`)
+        }
         let ty = self.vt(t.b);
         // A store a call takes the value of (`arg_relays`) writes nothing.
         if self.lv.relay.len() != 0 && self.lv.relay[self.cur as usize] != NONE {
@@ -5269,6 +5279,9 @@ extend Gen {
         let n = type_bytes(ty, self.ptr);
         let mut k: i32 = 0;
         if !is_v(ty) && self.imm32_of(t.b, n * 8, &mut k) {
+            if n == 8 && k == 0 && (t.aux & MEM_VOLATILE) == 0 && self.zero_run(t) {
+                return true;
+            }
             let m = self.mem_at(t.a, t.c as i32, &mut rs, &mut radd);
             self.c.store_i(n, k, m);
             self.mem_rel(rs, radd);
@@ -5278,6 +5291,48 @@ extend Gen {
         let m = self.mem_at(t.a, t.c as i32, &mut rs, &mut radd);
         self.st(ty, r, m);
         self.mem_rel(rs, radd);
+        return true;
+    }
+
+    // A run of at least ZERO_RUN 8-byte stores of 0 from store `t` (the current instruction) on, one after
+    // another at consecutive offsets of one address: a zeroed xmm register stored 16 bytes at a time (clang's
+    // `xorps` and `movups`), the odd last 8 bytes as a store of 0. The run's other stores then write
+    // nothing (`zero_end`). Whether it was one.
+    fn zero_run(self: &mut Self, t: Inst) bool {
+        let b = self.b();
+        let c = self.cur;
+        let bk = b.blocks[self.lv.def_blk[c as usize] as usize];
+        let last = (bk.start + bk.len - 1).min(c + ZERO_RUN_MAX);
+        let mut j = c + 1;
+        while j < last {
+            let u = b.insts[j as usize];
+            let mut k: i32 = 0;
+            if u.op != O_STORE || u.a != t.a || u.c as i32 != t.c as i32 + 8 * (j - c) as i32 || (u.aux & MEM_VOLATILE) != 0 || self.vt(
+                u.b,
+            ) != self.vt(t.b) || !self.imm32_of(u.b, 64, &mut k) || k != 0 || self.rstore[j as usize] != 0 || self.lv.relay.len() != 0 && self.lv.relay[j as usize] != NONE {
+                break;
+            }
+            j += 1;
+        }
+        let len = j - c;
+        if len < ZERO_RUN {
+            return false;
+        }
+        let z = self.tmp(true);
+        self.c.sse_rr(0, 0x0F57, z - V0, z - V0);
+        let mut rs: u32 = NONE;
+        let mut radd: i64 = 0;
+        for p in 0..len / 2 {
+            let m = self.mem_at(t.a, t.c as i32 + 16 * p as i32, &mut rs, &mut radd);
+            self.c.vstore(16, z - V0, m);
+            self.mem_rel(rs, radd);
+        }
+        if len % 2 != 0 {
+            let m = self.mem_at(t.a, t.c as i32 + 8 * (len - 1) as i32, &mut rs, &mut radd);
+            self.c.store_i(8, 0, m);
+            self.mem_rel(rs, radd);
+        }
+        self.zero_end = j;
         return true;
     }
 
@@ -5625,6 +5680,31 @@ extend Gen {
         }
         if op == O_ARMW {
             let r = t.aux >> 4;
+            // A sum, difference, and, or or xor whose old value nothing reads: one locked operation on the
+            // memory (`lock or [m], 4`), every order's (a locked instruction is a full barrier).
+            if r != RMW_XCHG && !self.live_on(self.vx(i)) {
+                let alu = if r == RMW_ADD {
+                    x::ADD
+                } else if r == RMW_SUB {
+                    x::SUB
+                } else if r == RMW_AND {
+                    x::AND
+                } else if r == RMW_OR {
+                    x::OR
+                } else {
+                    x::XOR
+                };
+                let mut k: i32 = 0;
+                if self.imm32_of(t.b, sz * 8, &mut k) {
+                    self.c.byte(0xF0);
+                    self.c.alu_mi(alu, sz, m, k);
+                } else {
+                    let rv = self.reg(t.b);
+                    self.c.byte(0xF0);
+                    self.c.alu_mr(alu, sz, m, rv);
+                }
+                return true;
+            }
             let rv = self.reg(t.b);
             if r == RMW_XCHG || r == RMW_ADD || r == RMW_SUB {
                 let rd = self.def(i);

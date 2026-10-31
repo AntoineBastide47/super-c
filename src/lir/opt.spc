@@ -60,6 +60,12 @@ const SPEC_MAX: u32 = 4;
 const CONST_PASSES: u32 = 8;
 // `bit_set` takes at most SET_MAX comparisons.
 const SET_MAX: usize = 16;
+// `param_slots` copies by-value aggregates of at most PSLOT_MAX bytes into slots.
+const PSLOT_MAX: u32 = 64;
+// `dead_allocs` takes at most FRESH_MAX allocations of a body.
+const FRESH_MAX: usize = 16;
+// `memcmp_eq` expands counts of at most MEMCMP_MAX bytes.
+const MEMCMP_MAX: u64 = 16;
 const MIN_DEPTH: u32 = 3;
 // `Opt::private_load`'s answers besides a value, and the memory state of the loads it keeps.
 const PRIV_NONE: Value = VNONE;
@@ -84,6 +90,8 @@ const MULTI: u32 = 0xFFFFFFFE;
 // branch's condition is followed THREAD_DEPTH instructions deep.
 const THREAD_ROUNDS: u32 = 3;
 const THREAD_BLOCK_MAX: u32 = 8;
+// `twins` compares blocks of at most TWIN_MAX instructions.
+const TWIN_MAX: u32 = 16;
 const THREAD_DEPTH: u32 = 4;
 // `Opt::implied` follows a parameter back through at most IMPLY_FAN edges into its block.
 const IMPLY_FAN: u32 = 4;
@@ -153,6 +161,15 @@ pub(package) struct Opt {
     icount: Vector<u8>, // per instruction, how many instructions read it, up to 2 (`thread`)
     ireader: Vector<u32>, // per instruction, the block outside its own that reads it (`thread`)
     in_or: Vector<bool>, // per instruction, whether an `or` reads it (`thread`, for `bit_set`)
+    // `dead_allocs`: the allocations, whether each may go, per block whether a path visited it, the blocks
+    // to visit, an instruction's operands.
+    fresh: Vector<u32>,
+    pslots: bool, // whether `param_slots` may look at the body (once per body after the inliner)
+    fresh_ok: Vector<bool>,
+    fresh_free: Vector<u32>, // per allocation, the block of its one free (NONE: none)
+    seen: Vector<bool>,
+    fstack: Vector<u32>,
+    fuses: Vector<Value>,
     puser: Vector<u32>, // per block parameter, the last instruction that reads it (`thread`)
     textra: Vector<u32>, // the constants `thread` made, for the walk's `extra`
     settle: Vector<u32>, // `thread`'s settled branches: block, edge
@@ -360,6 +377,13 @@ extend Opt {
             icount: Vector::<u8>::new(),
             ireader: Vector::<u32>::new(),
             in_or: Vector::<bool>::new(),
+            fresh: Vector::<u32>::new(),
+            pslots: true,
+            fresh_ok: Vector::<bool>::new(),
+            fresh_free: Vector::<u32>::new(),
+            seen: Vector::<bool>::new(),
+            fstack: Vector::<u32>::new(),
+            fuses: Vector::<Value>::new(),
             puser: Vector::<u32>::new(),
             textra: Vector::<u32>::new(),
             settle: Vector::<u32>::new(),
@@ -500,8 +524,9 @@ extend Opt {
             return false;
         }
         self.merged = false;
+        let slotted = self.param_slots(pk, b);
         // `thread` computes the graph and the dominators: they stand when it moves no edge (`kept`).
-        let threaded = self.thread(pk, b);
+        let threaded = self.thread(pk, b) || slotted;
         self.tables(pk, b, K_NEST);
         // The walk hoists into preheaders: the memory facts are those of the body that has them.
         let entered = self.preheaders(b);
@@ -2537,6 +2562,129 @@ extend Opt {
         self.unbiased.clear();
     }
 
+    // The entry parameters that point at a by-value aggregate of at most PSLOT_MAX bytes (the body's own copy)
+    // that only loads and stores at constant offsets and copies of a constant size address, and that a store
+    // or a copy in a loop writes: each becomes a slot that a new entry block copies the aggregate into and
+    // passes to the old one, for that parameter, which promotion then turns into values: a loop a tail
+    // recursion made carries them in registers. Once per body; not when an edge enters the entry. Whether
+    // any did.
+    fn param_slots(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        if b.sig == NONE || !self.pslots {
+            return false;
+        }
+        self.pslots = false;
+        let e = b.blocks[0];
+        let np = b.pool[b.sig as usize].min(e.param_len).min(64);
+        let mut cand: u64 = 0;
+        for k in 0..np {
+            let pt = b.pool[(b.sig + 3 + k) as usize];
+            if (pt & AGG) != 0 && b.pool[(pt & ~AGG) as usize] <= PSLOT_MAX {
+                cand |= 1u64 << k as u64;
+            }
+        }
+        if cand == 0 {
+            return false;
+        }
+        // Only where a loop writes it: elsewhere the walk forwards its stores to its loads.
+        self.tables(pk, b, K_NEST);
+        let mut looped: u64 = 0;
+        for k in 0..b.blocks.len() {
+            if self.inner[k] == NONE {
+                continue;
+            }
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                let a = if t.op == O_STORE || t.op == O_MEMCPY {
+                    t.a
+                } else {
+                    VNONE
+                };
+                if a != VNONE && (a & VPARAM) != 0 && (a & ~VPARAM) >= e.param_start && (a & ~VPARAM) < e.param_start + np {
+                    looped |= 1u64 << ((a & ~VPARAM) - e.param_start) as u64;
+                }
+            }
+        }
+        cand &= looped;
+        if cand == 0 {
+            return false;
+        }
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            self.fuses.truncate(0);
+            lv::uses_into(b, t, &mut self.fuses);
+            if is_terminator(t.op) {
+                b.succ_edges(t, &mut self.edges);
+                for x in 0..self.edges.len() {
+                    if b.edge_target(self.edges[x]) == 0 {
+                        return false;
+                    }
+                    for q in 0..b.edge_nargs(self.edges[x]) {
+                        self.fuses.push(b.edge_arg(self.edges[x], q));
+                    }
+                }
+            }
+            for u in 0..self.fuses.len() {
+                let v = self.fuses[u];
+                if v == VNONE || (v & VPARAM) == 0 || (v & ~VPARAM) < e.param_start || (v & ~VPARAM) >= e.param_start + np {
+                    continue;
+                }
+                let ok = t.op == O_LOAD && t.a == v || t.op == O_STORE && t.a == v && t.b != v || t.op == O_MEMCPY && t.a == v != (t.b == v) && const_of(
+                    b,
+                    t.c,
+                ).is_some();
+                if !ok {
+                    cand &= ~(1u64 << ((v & ~VPARAM) - e.param_start) as u64);
+                }
+            }
+        }
+        if cand == 0 {
+            return false;
+        }
+        // The new entry: the old one's parameters again, passed on to it but the copied ones' slots.
+        let mut types = Vector::<u8>::with_capacity(e.param_len as usize);
+        for q in 0..e.param_len as u32 {
+            types.push(b.params[(e.param_start + q) as usize]);
+        }
+        let ne = b.add_block(&types);
+        let mut args = Vector::<Value>::with_capacity(types.len());
+        for q in 0..e.param_len as u32 {
+            args.push(b.param(ne, q));
+        }
+        let at = b.locs[e.start as usize];
+        let it = if pk.ptr_bytes == 8 {
+            T_I64
+        } else {
+            T_I32
+        };
+        b.begin(ne);
+        let mut made: u32 = 0;
+        for k in 0..np {
+            if (cand >> k as u64 & 1) == 0 {
+                continue;
+            }
+            let lay = (b.pool[(b.sig + 3 + k) as usize] & ~AGG) as usize;
+            let s = b.slots.len() as u32;
+            b.slots.push(Slot { size: b.pool[lay], align_log2: b.pool[lay + 1] as u8 });
+            let sa = b.emit(Inst { op: O_SLOTADDR, ty: T_PTR, aux: 0, a: s, b: VNONE, c: VNONE }, at);
+            let n = b.emit(iconst(it, b.pool[lay]), at);
+            let _ = b.emit(Inst { op: O_MEMCPY, ty: T_NONE, aux: 0, a: sa, b: args[k as usize], c: n }, at);
+            args[k as usize] = sa;
+            made += 3;
+        }
+        let _ = b.emit(jump(b.edge(ne, &args)), at);
+        if b.inl.len() != 0 {
+            for _ in 0..made + 1 {
+                b.inl.push(0);
+            }
+        }
+        let old = b.blocks[0];
+        b.blocks.set(0, b.blocks[ne as usize]);
+        b.blocks.set(ne as usize, old);
+        self.kept = K_NONE;
+        return true;
+    }
+
     // The entry parameters (bits) that point at a by-value aggregate of at most 16 bytes, which the targets
     // pass in registers, that only loads outside cold blocks read: their loads may move to the entry's
     // start, where the code generator takes each part's register for its load and the aggregate needs no
@@ -3470,7 +3618,8 @@ extend Opt {
         for k in 0..nb {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
-                let is_or = b.insts[i as usize].op == O_OR;
+                let ti = b.insts[i as usize];
+                let is_or = ti.op == O_OR;
                 let u0 = self.ops_at[i as usize];
                 for u in 0..self.ops_at[i as usize + 1] - u0 {
                     let v = self.ops[(u0 + u) as usize];
@@ -3545,7 +3694,11 @@ extend Opt {
             } else if t.op == O_BR {
                 t.b = self.follow(pk, b, k as u32, t.b, t.a, 1);
                 t.c = self.follow(pk, b, k as u32, t.c, t.a, 0);
-                if same_edge(b, t.b, t.c) {
+                if same_edge(b, t.b, t.c) || b.edge_nargs(t.b) == 0 && b.edge_nargs(t.c) == 0 && twins(
+                    b,
+                    b.edge_target(t.b),
+                    b.edge_target(t.c),
+                ) {
                     t = jump(t.b);
                 }
             } else if t.op == O_SWITCH {
@@ -4266,9 +4419,26 @@ extend Opt {
             b.insts[i as usize] = t;
             return !same(t, t0);
         }
+        // A reference parameter is never null.
+        if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (const_of(b, t.b) == Some(0u64) && ref_param(b, t.a) || const_of(
+            b,
+            t.a,
+        ) == Some(0u64) && ref_param(b, t.b)) {
+            t = iconst(t.ty, (t.aux == C_NE) as u64);
+        }
         // An equality of a value from before the block with a constant that the branches into the block
-        // settle (`entry_fact`): the `None` test of an `Option` a loop that stops on `Some` returns.
-        if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) {
+        // settle (`entry_fact`): the `None` test of an `Option` a loop that stops on `Some` returns. So is
+        // `x <u 1`, which is `x == 0`, and `x >=u 1` (a bounds check of index 0 after a length test).
+        let below1 = t.op == O_ICMP && (t.aux == C_ULT || t.aux == C_UGE) && const_of(b, t.b) == Some(1u64);
+        if below1 && (t.a & VFLAG) == 0 && !((t.a & VPARAM) == 0 && (t.a as usize >= self.blk_of.len() || self.blk_of[t.a as usize] == k)) && const_of(
+            b,
+            t.a,
+        ).is_none() {
+            let r = self.entry_fact(pk, b, k, t.a, 0, THREAD_DEPTH);
+            if r.is_some() {
+                t = iconst(t.ty, (r.unwrap() == (t.aux == C_ULT)) as u64);
+            }
+        } else if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) {
             let kb = const_of(b, t.b);
             let a = if kb.is_some() {
                 t.a
@@ -4493,6 +4663,8 @@ extend Opt {
                 return true;
             }
         } else if (t.op == O_ADDO || t.op == O_SUBO || t.op == O_MULO) && self.fold_checked(pk, b, i) {
+            return true;
+        } else if t.op == O_CALL && call_alloc(pk, b, t) == ALLOC_MEMCMP && self.memcmp_eq(pk, b, k, i) {
             return true;
         } else if t.op == O_CALL && t.ty != T_NONE && (pk.syms[b.syms[t.a as usize] as usize].fx & (FX_WRITE | FX_ARG)) == 0 {
             // A call of a function that writes no memory gives what an earlier one with the same
@@ -5210,6 +5382,248 @@ extend Opt {
             by[j] = j as u8;
         }
         return true;
+    }
+
+    // The allocations (`ALLOC_FRESH` by the name, at most FRESH_MAX) whose pointer only stores write
+    // through, equalities with null test and one free (`ALLOC_FREE`) takes, which every path from the
+    // allocation to a return or back to it passes once: they go with their stores and free, and the tests
+    // fold as for a block that exists (LLVM InstCombine's removal of unused allocations). The runtime's
+    // leak tracker counts such a pair as nothing either. Whether any went.
+    pub(package) fn dead_allocs(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        self.fresh.truncate(0);
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if t.op == O_CALL && t.ty == T_PTR && self.fresh.len() < FRESH_MAX && named_alloc(pk, b, t) == ALLOC_FRESH {
+                self.fresh.push(i as u32);
+            }
+        }
+        if self.fresh.len() == 0 {
+            return false;
+        }
+        fill(&mut self.fresh_ok, self.fresh.len(), true);
+        fill(&mut self.fresh_free, self.fresh.len(), NONE);
+        let lo = self.fresh[0];
+        let hi = self.fresh[self.fresh.len() - 1];
+        let mut left = self.fresh.len();
+        let nb = b.blocks.len();
+        for k in 0..nb {
+            if left == 0 {
+                return false;
+            }
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                self.fuses.truncate(0);
+                lv::uses_into(b, t, &mut self.fuses);
+                if is_terminator(t.op) {
+                    b.succ_edges(t, &mut self.edges);
+                    for e in 0..self.edges.len() {
+                        for q in 0..b.edge_nargs(self.edges[e]) {
+                            self.fuses.push(b.edge_arg(self.edges[e], q));
+                        }
+                    }
+                }
+                for u in 0..self.fuses.len() {
+                    let v = self.fuses[u];
+                    if v < lo || v > hi {
+                        continue;
+                    }
+                    for f in 0..self.fresh.len() {
+                        if v != self.fresh[f] || !self.fresh_ok[f] {
+                            continue;
+                        }
+                        let ok = t.op == O_STORE && t.a == v && t.b != v && (t.aux & MEM_VOLATILE) == 0 || t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (const_of(
+                            b,
+                            t.a,
+                        ) == Some(0u64) || const_of(b, t.b) == Some(0u64));
+                        let free = t.op == O_CALL && t.aux == 1 && named_alloc(pk, b, t) == ALLOC_FREE && self.fresh_free[f] == NONE;
+                        if free {
+                            self.fresh_free[f] = k as u32;
+                        }
+                        if !ok && !free {
+                            self.fresh_ok[f] = false;
+                            left -= 1;
+                        }
+                    }
+                }
+            }
+        }
+        let mut any = false;
+        for f in 0..self.fresh.len() {
+            let fb = self.fresh_free[f];
+            if !self.fresh_ok[f] || fb == NONE || !self.freed_once(b, self.fresh[f], fb) {
+                continue;
+            }
+            let v = self.fresh[f];
+            for i in 0..b.insts.len() {
+                let t = b.insts[i];
+                if t.op == O_ICMP && (t.a == v || t.b == v) {
+                    b.insts[i] = iconst(t.ty, (t.aux == C_NE) as u64);
+                } else if t.op == O_STORE && t.a == v || t.op == O_CALL && t.aux == 1 && b.pool[t.c as usize] == v {
+                    b.insts[i] = iconst(T_I8, 0);
+                }
+            }
+            b.insts[v as usize] = iconst(T_PTR, 0);
+            any = true;
+        }
+        if any {
+            self.kept = K_NONE;
+        }
+        return any;
+    }
+
+    // Whether every path from allocation `v` (`dead_allocs`) to a return or back to the allocation passes
+    // block `fb`, which frees it, and every path from that free to a return passes the allocation before
+    // the free again: the block is freed once.
+    fn freed_once(self: &mut Self, b: &Body, v: u32, fb: u32) bool {
+        let mut home = NONE;
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            if v >= bk.start && v < bk.start + bk.len {
+                home = k as u32;
+            }
+        }
+        // The free in the allocation's block comes after it (it reads its value).
+        return home == fb || self.reaches_end(b, home, fb, home) && self.reaches_end(b, fb, home, fb);
+    }
+
+    // Whether every path from the end of block `from` reaches block `stop` before a return or block `back`.
+    fn reaches_end(self: &mut Self, b: &Body, from: u32, stop: u32, back: u32) bool {
+        fill(&mut self.seen, b.blocks.len(), false);
+        self.fstack.truncate(0);
+        b.succ_edges(term(b, from), &mut self.edges);
+        for e in 0..self.edges.len() {
+            self.fstack.push(b.edge_target(self.edges[e]));
+        }
+        // Each step visits one block once, or drops one already visited.
+        for _ in 0..b.blocks.len() + self.fstack.len() + b.pool.len() {
+            if self.fstack.len() == 0 {
+                return true;
+            }
+            let k = self.fstack.pop().unwrap();
+            if k == stop || self.seen[k as usize] {
+                continue;
+            }
+            let tt = term(b, k);
+            if k == back || tt.op == O_RET {
+                return false;
+            }
+            self.seen[k as usize] = true;
+            b.succ_edges(tt, &mut self.edges);
+            for e in 0..self.edges.len() {
+                self.fstack.push(b.edge_target(self.edges[e]));
+            }
+        }
+        return false;
+    }
+
+    // Call `i` of block `k` of the C library's `memcmp` whose result only an equality with 0 right after it
+    // reads, of a count
+    // up to MEMCMP_MAX bytes that is a constant or that a branch into the block settles: a compare of loads
+    // of both sides, two each (overlapping) for a count that is not a power of two (LLVM ExpandMemCmp). A
+    // load of read-only data folds to its constant. Whether it did.
+    fn memcmp_eq(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        let bk = b.blocks[k as usize];
+        if t.aux != 3 || t.ty != T_I32 || i as usize >= self.icount.len() || self.icount[i as usize] != 1 || i + 1 >= bk.start + bk.len {
+            return false;
+        }
+        let u = b.insts[i as usize + 1];
+        if u.op != O_ICMP || u.aux != C_EQ && u.aux != C_NE || !(u.a == i && const_of(b, u.b) == Some(0u64) || u.b == i && const_of(
+            b,
+            u.a,
+        ) == Some(0u64)) {
+            return false;
+        }
+        let pa = self.val(b.pool[t.c as usize]);
+        let pb = self.val(b.pool[t.c as usize + 1]);
+        let nv = self.val(b.pool[t.c as usize + 2]);
+        let mut n = const_of(b, nv);
+        if n.is_none() {
+            n = self.count_fact(pk, b, k, nv);
+        }
+        if n.is_none() || n.unwrap() > MEMCMP_MAX {
+            return false;
+        }
+        let c = n.unwrap() as u32;
+        if c == 0 {
+            b.insts[i as usize] = iconst(T_I32, 0);
+            return true;
+        }
+        // The widest power of two not past the count, at most 8 bytes: its loads at 0 and at `c - w`.
+        let w: u32 = if c >= 8 {
+            8
+        } else if c >= 4 {
+            4
+        } else if c >= 2 {
+            2
+        } else {
+            1
+        };
+        let ty = if w == 8 {
+            T_I64
+        } else if w == 4 {
+            T_I32
+        } else if w == 2 {
+            T_I16
+        } else {
+            T_I8
+        };
+        let mut d = VNONE;
+        let mut la1 = VNONE;
+        let mut lb1 = VNONE;
+        let offs: [u32; 2] = [0, c - w];
+        let parts: u32 = if c == w {
+            1
+        } else {
+            2
+        };
+        for q in 0..parts {
+            let la = self.before(b, k, i, Inst { op: O_LOAD, ty: ty, aux: 0, a: pa, b: VNONE, c: offs[q as usize] });
+            let _ = fold_data(pk, b, la);
+            let lb = self.before(b, k, i, Inst { op: O_LOAD, ty: ty, aux: 0, a: pb, b: VNONE, c: offs[q as usize] });
+            let _ = fold_data(pk, b, lb);
+            if parts == 1 {
+                la1 = la;
+                lb1 = lb;
+                break;
+            }
+            let x = self.before(b, k, i, Inst { op: O_XOR, ty: ty, aux: 0, a: la, b: lb, c: VNONE });
+            d = if d == VNONE {
+                x
+            } else {
+                self.before(b, k, i, Inst { op: O_OR, ty: ty, aux: 0, a: d, b: x, c: VNONE })
+            };
+        }
+        // One load each: their compare; two: the `or` of their differences against 0.
+        if parts == 2 {
+            la1 = d;
+            lb1 = self.constant(b, ty, 0);
+        }
+        let ne = self.before(b, k, i, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: la1, b: lb1, c: VNONE });
+        b.insts[i as usize] = Inst { op: O_ZEXT, ty: T_I32, aux: 0, a: ne, b: VNONE, c: VNONE };
+        return true;
+    }
+
+    // The constant that value `n` (no instruction of block `k`) equals where `k` starts, by the equality
+    // the branch of `k`'s one predecessor tests (`entry_fact`); None when none settles it.
+    fn count_fact(self: &Self, pk: &Package, b: &Body, k: u32, n: Value) Option<u64> {
+        if self.pred_at[k as usize + 1] - self.pred_at[k as usize] != 1 {
+            return None;
+        }
+        let st = term(b, self.preds[self.pred_at[k as usize] as usize]);
+        if st.op != O_BR || (st.a & (VPARAM | VFLAG)) != 0 || st.a == VNONE {
+            return None;
+        }
+        let ci = b.insts[st.a as usize];
+        if ci.op != O_ICMP || ci.aux != C_EQ && ci.aux != C_NE || ci.a != n {
+            return None;
+        }
+        let c = const_of(b, ci.b);
+        if c.is_none() || self.entry_fact(pk, b, k, n, c.unwrap(), THREAD_DEPTH) != Some(true) {
+            return None;
+        }
+        return c;
     }
 
     // An instruction for block `k` that runs right before instruction `at` (`pre`), its operands final;
@@ -6815,6 +7229,7 @@ extend Run {
         let mut sc = r.take();
         let b = unsafe &mut *(base + j as usize);
         sc.o.forget();
+        sc.o.pslots = true;
         // The inliner reads the rare blocks, the loop transforms and the code generators too: marked before
         // the inlining (a copy takes its call's marks) and once the transforms made their blocks.
         sc.o.estimate(p, b);
@@ -6877,7 +7292,9 @@ extend Run {
         if bu.vector != 0 {
             let _ = sc.o.slp(p, b);
         }
-        if sc.o.promote_places(p, b) {
+        // Once the walks forwarded the loads of the allocations' blocks; the run folds their null tests.
+        let placed = sc.o.promote_places(p, b);
+        if sc.o.dead_allocs(p, b) || placed {
             let _ = sc.o.run(p, b, true);
         }
         let _ = sc.o.split_exits(p, b);
@@ -8508,6 +8925,16 @@ const fn header_read(b: &Body, t: Inst, v: Value) bool {
 
 // The `Sym.alloc` of the function call `t` calls, ALLOC_NONE for any other instruction and for a function
 // the package defines: its own code (wasm's C library, the runtime's leak tracker) reads what it writes.
+// The `Sym.alloc` of call `t`'s function by its name alone, whether the package defines it or not
+// (`dead_allocs`): ALLOC_NONE for another instruction.
+fn named_alloc(pk: &Package, b: &Body, t: Inst) u8 {
+    return if t.op == O_CALL {
+        pk.syms[b.syms[t.a as usize] as usize].alloc
+    } else {
+        ALLOC_NONE
+    };
+}
+
 fn call_alloc(pk: &Package, b: &Body, t: Inst) u8 {
     if t.op != O_CALL {
         return ALLOC_NONE;
@@ -8609,7 +9036,6 @@ fn frozen(b: &Body, out: &mut Vector<bool>) {
     }
 }
 
-// Whether signature parameter `k` of `b` is a view whose loaded pointer is exclusive (`REF_INNER`).
 // Whether `Body.owned` holds a field of parameter `k` at offset `off`.
 fn owned_at(b: &Body, k: u32, off: u32) bool {
     for x in 0..b.owned.len() {
@@ -8620,8 +9046,23 @@ fn owned_at(b: &Body, k: u32, off: u32) bool {
     return false;
 }
 
+// Whether signature parameter `k` of `b` is a view whose loaded pointer is exclusive (`REF_INNER`).
 const fn inner(b: &Body, k: u32) bool {
     return k < b.refs.len() as u32 && (b.refs[k as usize] & REF_INNER) != 0;
+}
+
+// Whether value `v` is a reference parameter of `b` (`Body.refs`), not a view: never null.
+fn ref_param(b: &Body, v: Value) bool {
+    if v == VNONE || (v & VPARAM) == 0 || (v & VFLAG) != 0 {
+        return false;
+    }
+    let e = b.blocks[0];
+    let p = v & ~VPARAM;
+    if p < e.param_start || p >= e.param_start + e.param_len as u32 || p - e.param_start >= b.refs.len() as u32 {
+        return false;
+    }
+    let r = b.refs[(p - e.param_start) as usize];
+    return r != 0 && (r & REF_INNER) == 0;
 }
 
 // Whether any signature parameter of `b` is a view (`inner`).
@@ -8915,6 +9356,72 @@ const fn magic(d: u64, bits: u32) (u64, u32, bool) {
 }
 
 // Whether edges `x` and `y` of `b` enter one block with the same arguments.
+// Whether blocks `x` and `y`, without parameters, of at most TWIN_MAX instructions, compute the same values
+// from the same values and end by the same jump or return: a branch to one or the other jumps to `x` (LLVM
+// SimplifyCFG's merge of identical successors). Only `y` reads its own results, as it jumps or returns.
+fn twins(b: &Body, x: u32, y: u32) bool {
+    let bx = b.blocks[x as usize];
+    let by = b.blocks[y as usize];
+    if x == y || bx.len != by.len || bx.len > TWIN_MAX || bx.param_len != 0 || by.param_len != 0 {
+        return false;
+    }
+    for j in 0..bx.len {
+        let s = b.insts[(bx.start + j) as usize];
+        let u = b.insts[(by.start + j) as usize];
+        if s.op != u.op || s.ty != u.ty || s.aux != u.aux {
+            return false;
+        }
+        let f = op_info(s.op).form;
+        if f == F_JMP {
+            if b.edge_target(s.a) != b.edge_target(u.a) {
+                return false;
+            }
+            for q in 0..b.edge_nargs(s.a) {
+                if !twin_val(bx, by, b.edge_arg(s.a, q), b.edge_arg(u.a, q)) {
+                    return false;
+                }
+            }
+            continue;
+        }
+        if f > F_STORE && f != F_OVF && f != F_RET {
+            return false;
+        }
+        let a = if lv::operand_a(f) {
+            twin_val(bx, by, s.a, u.a)
+        } else {
+            s.a == u.a
+        };
+        let bb = if lv::operand_b(f) {
+            twin_val(bx, by, s.b, u.b)
+        } else {
+            s.b == u.b
+        };
+        let c = if lv::operand_c(f) {
+            twin_val(bx, by, s.c, u.c)
+        } else {
+            s.c == u.c
+        };
+        if !a || !bb || !c {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether value `v` in block `bx` stands where value `w` in block `by` does (`twins`): one value from
+// outside both blocks, or the results at the same place in each.
+const fn twin_val(bx: Block, by: Block, v: Value, w: Value) bool {
+    if v == VNONE || w == VNONE || (v & VPARAM) != 0 || (w & VPARAM) != 0 {
+        return v == w;
+    }
+    let i = v & ~VFLAG;
+    let j = w & ~VFLAG;
+    if i >= bx.start && i < bx.start + bx.len {
+        return (v & VFLAG) == (w & VFLAG) && j == by.start + i - bx.start;
+    }
+    return v == w && !(j >= by.start && j < by.start + by.len);
+}
+
 fn same_edge(b: &Body, x: u32, y: u32) bool {
     if b.edge_target(x) != b.edge_target(y) {
         return false;

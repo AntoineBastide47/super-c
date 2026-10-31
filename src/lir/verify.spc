@@ -1104,11 +1104,20 @@ pub(package) fn uses_into(b: &Body, t: Inst, out: &mut Vector<Value>) {
     if operand_c(f) && t.c != VNONE {
         out.push(t.c);
     }
+    if f == F_CALL || f == F_CALLIND || f == F_VOP || f == F_ASM {
+        pool_uses(b, t, f, out);
+    }
+}
+
+// `uses_into` of the operands in the pool of `t` (form `f`): a call's arguments, a vector operation's or an
+// assembly statement's operands. Apart, so the common path saves no registers for its loops.
+@noinline
+fn pool_uses(b: &Body, t: Inst, f: u8, out: &mut Vector<Value>) {
     if f == F_CALL || f == F_CALLIND {
         for q in 0..t.aux as u32 {
             out.push(b.pool[(t.c + q) as usize]);
         }
-    } else if f == F_VOP || f == F_ASM {
+    } else {
         for q in 0..t.b {
             out.push(b.pool[(t.a + q) as usize]);
         }
