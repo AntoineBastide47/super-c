@@ -212,6 +212,9 @@ extend Printer {
             if (blk.flags & BLOCK_NOVEC) != 0 {
                 out.push_str(" novec");
             }
+            if (blk.flags & BLOCK_EPI) != 0 {
+                out.push_str(" epi");
+            }
             out.push_byte(b'\n');
             for j in 0..blk.len {
                 self.inst(p, b, blk.start + j, out);

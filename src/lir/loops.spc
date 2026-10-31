@@ -515,6 +515,16 @@ extend LoopOpt {
                     continue;
                 }
             }
+            // What an interleaved vector loop left: one vector at a time, then nothing more.
+            if (b.blocks[h as usize].flags & BLOCK_EPI) != 0 {
+                if bu.vector != 0 && vec >= VBYTES && self.vplan(b, ptr, fmath, h, p, u, cl, false) {
+                    self.vectorize(b, h, p, u, 1);
+                    any = true;
+                } else {
+                    b.blocks.index_mut(h as usize).flags ^= BLOCK_EPI | BLOCK_NOVEC;
+                }
+                continue;
+            }
             if bu.vector != 0 && vec >= VBYTES && self.vplan(b, ptr, fmath, h, p, u, cl, false) {
                 self.vectorize(b, h, p, u, bu.vector);
                 any = true;
@@ -2632,6 +2642,8 @@ extend LoopOpt {
     fn vectorize(self: &mut Self, b: &mut Body, h: u32, p: u32, u: u32, nv: u32) {
         self.wide = self.wide || !self.vone && self.vlanes * self.vsz > self.vmax;
         let hb = b.blocks[h as usize];
+        // The flags the new blocks take: no `BLOCK_EPI`, which only `h` keeps.
+        let hf = hb.flags & ~BLOCK_EPI;
         let ub = b.blocks[u as usize];
         let l0 = b.locs[hb.start as usize];
         let qt = b.params[(self.viv & ~VPARAM) as usize];
@@ -2711,7 +2723,7 @@ extend LoopOpt {
         let none: []Value = [];
         let to_vp = b.edge(vp, none);
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: ok, b: to_vp, c: to_sp }, l0);
-        self.vblock(b, g, gstart, gps, hb.param_len, hb.flags, p);
+        self.vblock(b, g, gstart, gps, hb.param_len, hf, p);
         // The vector preheader: the end of the vector iterations, the splats, the accumulators' start.
         let pstart = b.insts.len() as u32;
         // The counter's end: the iterations times its step.
@@ -2781,7 +2793,7 @@ extend LoopOpt {
         }
         let to_vl = b.edge(vl, &self.args);
         let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_vl, b: 0, c: 0 }, l0);
-        self.vblock(b, vp, pstart, b.params.len() as u32, 0, hb.flags, g);
+        self.vblock(b, vp, pstart, b.params.len() as u32, 0, hf, g);
         // The vector loop: the counter, the accumulators; `nv` copies of the body's lanes, each instruction's
         // copies together (the copies' loads and stores next to each other pair).
         let vps = b.params.len() as u32;
@@ -2811,7 +2823,7 @@ extend LoopOpt {
         let mut ls: u32 = 0;
         for i in ub.start..ub.start + ub.len - 1 {
             if self.vexit && self.lsplit != NONE && i == ub.start + self.lsplit {
-                ls = self.vexit_test(b, ub, nv, vps, vi, vx, lb, lstart, hb.flags, vp, l0);
+                ls = self.vexit_test(b, ub, nv, vps, vi, vx, lb, lstart, hf, vp, l0);
             }
             for c in 0..nv {
                 let x = i - ub.start;
@@ -3035,7 +3047,7 @@ extend LoopOpt {
             }
         }
         if self.vexit && (self.lsplit == NONE || self.lsplit == ub.len - 1) {
-            ls = self.vexit_test(b, ub, nv, vps, vi, vx, lb, lstart, hb.flags, vp, l0);
+            ls = self.vexit_test(b, ub, nv, vps, vi, vx, lb, lstart, hf, vp, l0);
         }
         let sk = self.vconst(b, qt, step * self.vqk, l0);
         let vnext = self.vi(b, Inst { op: ast::pick(self.vrev, O_SUB, O_ADD), ty: qt, aux: 0, a: vi, b: sk, c: 0 }, l0);
@@ -3071,9 +3083,9 @@ extend LoopOpt {
         let out = b.edge(ast::pick(self.vtail, sp + 1, vx), &self.args);
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: more, b: back, c: out }, l0);
         if self.vexit {
-            self.vblock(b, lb, ls, b.params.len() as u32, 0, hb.flags, vl);
+            self.vblock(b, lb, ls, b.params.len() as u32, 0, hf, vl);
         } else {
-            self.vblock(b, vl, lstart, vps, (1 + nred * nv) as u16, hb.flags | BLOCK_NOVEC, vp);
+            self.vblock(b, vl, lstart, vps, (1 + nred * nv) as u16, hf | BLOCK_NOVEC, vp);
         }
         // The vector exit: the counter where the vectors stop; each reduction's accumulators combined and
         // reduced into its start value.
@@ -3182,7 +3194,7 @@ extend LoopOpt {
             let from0 = b.edge(sp, &self.args);
             let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: again, b: from0, c: to_sp2 }, l0);
         }
-        self.vblock(b, vx, xstart, xq, (1 + nred * nv) as u16, hb.flags, vl);
+        self.vblock(b, vx, xstart, xq, (1 + nred * nv) as u16, hf, vl);
         // The loop's new preheader.
         let sps = self.vblock_params(b, h);
         let sstart = b.insts.len() as u32;
@@ -3192,7 +3204,7 @@ extend LoopOpt {
         }
         let to_h = b.edge(h, &self.args);
         let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_h, b: 0, c: 0 }, l0);
-        self.vblock(b, sp, sstart, sps, hb.param_len, hb.flags, g);
+        self.vblock(b, sp, sstart, sps, hb.param_len, hf, g);
         if self.vtail {
             // The tail block: the vector loop once more at `n - k` while elements are left, else out.
             let tq = b.params.len() as u32;
@@ -3204,12 +3216,18 @@ extend LoopOpt {
             let done = [self.vn];
             let to_vx = b.edge(vx, done[0..1]);
             let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: rem, b: to_vl, c: to_vx }, l0);
-            self.vblock(b, sp + 1, tstart, tq, 1, hb.flags, vl);
+            self.vblock(b, sp + 1, tstart, tq, 1, hf, vl);
         }
-        // The preheader enters the guard; the loop runs what the vectors leave and vectorizes no more.
+        // The preheader enters the guard; the loop runs what the vectors leave and vectorizes no more, but
+        // once without interleaving what interleaved vectors leave (`BLOCK_EPI`).
         let pe = term(b, p).a;
         b.pool[pe as usize] = g;
-        b.blocks.index_mut(h as usize).flags |= BLOCK_NOVEC;
+        let epi = nv > 1 && self.vlanes > 1 && (hb.flags & BLOCK_EPI) == 0 && !self.vone && !self.vtail && !self.vexit && !self.vrev;
+        b.blocks.index_mut(h as usize).flags = hf | if epi {
+            BLOCK_EPI
+        } else {
+            BLOCK_NOVEC
+        };
     }
 
     // ---- Partial unrolling ----
@@ -3666,7 +3684,7 @@ extend LoopOpt {
             (to_fc, to_fb)
         };
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: cv, b: eb, c: ec }, l0);
-        self.vblock(b, fh, fstart, fps, (k * ni) as u16, ib.flags | BLOCK_NOVEC, g);
+        self.vblock(b, fh, fstart, fps, (k * ni) as u16, ib.flags & ~BLOCK_EPI | BLOCK_NOVEC, g);
         // The inner body: each copy with its counter, its copy of the first chain and its parameters.
         let bstart = b.insts.len() as u32;
         self.jargs.truncate(0);
@@ -4447,7 +4465,7 @@ extend LoopOpt {
         let on = b.edge(lb, none2);
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: stay, b: on, c: leave }, l0);
         let ls = b.insts.len() as u32;
-        self.vblock(b, vl, lstart, vps, (1 + nred * nv) as u16, fl | BLOCK_NOVEC, vp);
+        self.vblock(b, vl, lstart, vps, (1 + nred * nv) as u16, fl & ~BLOCK_EPI | BLOCK_NOVEC, vp);
         return ls;
     }
 

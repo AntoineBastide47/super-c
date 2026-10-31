@@ -713,6 +713,9 @@ pub(package) const BLOCK_NOVEC: u16 = 2;
 pub(package) const BLOCK_UNLIKELY: u16 = 4;
 /// A block that runs rarely: cold or unlikely.
 pub(package) const BLOCK_RARE: u16 = BLOCK_COLD | BLOCK_UNLIKELY;
+/// The loop this block heads runs what an interleaved vector copy of it left (`lir::loops`): it vectorizes
+/// once more without interleaving (LLVM's epilogue vectorization), then is `BLOCK_NOVEC`; it unrolls not.
+pub(package) const BLOCK_EPI: u16 = 8;
 
 /// A stack slot: `size` bytes aligned to `1 << align_log2`.
 pub(package) struct Slot {

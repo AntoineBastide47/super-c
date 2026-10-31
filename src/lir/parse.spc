@@ -769,7 +769,7 @@ extend<'a> Parser<'a> {
         return true;
     }
 
-    // `b<k>[(v<n>: type, ...)]:[ cold][ unlikely][ novec]`.
+    // `b<k>[(v<n>: type, ...)]:[ cold][ unlikely][ novec][ epi]`.
     fn block_header(self: &mut Self) bool {
         if self.sym == NONE {
             return self.fail("a block outside a function");
@@ -809,6 +809,7 @@ extend<'a> Parser<'a> {
         let cold = self.keyword("cold");
         let unlikely = self.keyword("unlikely");
         let novec = self.keyword("novec");
+        let epi = self.keyword("epi");
         let mut loc = Loc { file: 0, line: 0, col: 0 };
         if !self.line_end_loc(&mut loc) {
             return false;
@@ -825,6 +826,9 @@ extend<'a> Parser<'a> {
         }
         if novec {
             self.body.blocks.index_mut(blk as usize).flags |= BLOCK_NOVEC;
+        }
+        if epi {
+            self.body.blocks.index_mut(blk as usize).flags |= BLOCK_EPI;
         }
         self.body.begin(blk);
         for j in 0..nums.len() {

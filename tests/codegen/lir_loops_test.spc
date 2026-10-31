@@ -760,8 +760,9 @@ b0(v0: i64):
 }
 
 // Loads of every 2nd element vectorize: the vectors from each field on, their even lanes (`vunzip`), and
-// the loop runs the last iteration, so no vector reads past the element it reads. A sum through indices
-// a load gives (a gather) interleaves scalar copies.
+// the loop runs the last iteration, so no vector reads past the element it reads; the 2 interleaved
+// copies (4 `vunzip`), then one vector at a time for what they leave (2). A sum through indices a load
+// gives (a gather) interleaves scalar copies.
 @test
 fn strided_and_gathered_loads_vectorize() {
     let src = M"(lir ptr 8
@@ -875,7 +876,7 @@ b0(v0: i64):
 )";
     let (b, a) = optimized(src, VECTOR);
     let m = text_of(&a, "mag");
-    assert(count(&m, "vunzip.v4i32") == 4 && m.contains("mul.v4i32"), m.as_str());
+    assert(count(&m, "vunzip.v4i32") == 6 && m.contains("mul.v4i32"), m.as_str());
     let g = text_of(&a, "gsum");
     assert_eq(count(&g, "load.i64"), 3);
     // `mag` reads 64 words as 32 pairs.
@@ -4328,5 +4329,130 @@ b3:
     for k in 0..4usize {
         let args: []u64 = [unsafe lens[k]];
         same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A loop whose header tests a counter carries a pointer the body steps by the element size: the pointer is
+// its start plus the iterations done times that size, and a counter down to 0 counts up, so the loop
+// vectorizes (a tail recursion over a slice); a pointer the exit reads stays carried.
+@test
+fn pointers_stepped_with_a_counter_index_the_loop() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @w data global
+sym @down fn global
+sym @up fn global
+sym @kept fn global
+fn @down
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = symaddr @w
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 0
+  jmp b1(v1, v0, v4)
+b1(v5: ptr, v6: i64, v7: i32):
+  v8 = icmp.ne v6, v2
+  br v8, b2, b3
+b2:
+  v9 = load.i32 v5 align 2
+  v10 = add.i32 v7, v9
+  v11 = ptradd v5+4
+  v12 = sub.i64 v6, v3
+  jmp b1(v11, v12, v10)
+b3:
+  ret v7
+fn @up
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = symaddr @w
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 0
+  jmp b1(v1, v2, v4)
+b1(v5: ptr, v6: i64, v7: i32):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b3
+b2:
+  v9 = load.i32 v5 align 2
+  v10 = add.i32 v7, v9
+  v11 = ptradd v5+4
+  v12 = add.i64 v6, v3
+  jmp b1(v11, v12, v10)
+b3:
+  ret v7
+fn @kept
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @w
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v1, v0)
+b1(v4: ptr, v5: i64):
+  v6 = icmp.ne v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v4+4
+  v8 = sub.i64 v5, v3
+  jmp b1(v7, v8)
+b3:
+  v9 = ptrtoint.i64 v4
+  v10 = ptrtoint.i64 v1
+  v11 = sub.i64 v9, v10
+  ret v11
+data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000700000008000000090000000a0000000b0000000c0000000d0000000e0000000f00000010000000110000001200000013000000140000001500000016000000170000001800000019000000
+)",
+        VECTOR,
+    );
+    let d = text_of(&a, "down");
+    assert(d.contains("v4i32"), d.as_str());
+    let u = text_of(&a, "up");
+    assert(u.contains("v4i32"), u.as_str());
+    let ns: [u64; 4] = [0, 3, 17, 25];
+    let sums: [u64; 4] = [0, 6, 153, 325];
+    for q in 0..4 {
+        let x: []u64 = [ns[q]];
+        same_outcome(&b, &a, "down", x, sums[q], false);
+        same_outcome(&b, &a, "up", x, sums[q], false);
+        same_outcome(&b, &a, "kept", x, 4 * ns[q], false);
+    }
+}
+
+// What an interleaved vector loop leaves vectorizes once more, one vector at a time (an epilogue), before
+// the scalar loop: 2 interleaved loads and 1 per iteration; no loop is left to vectorize.
+@test
+fn remainders_of_interleaved_vectors_vectorize() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @w data global
+sym @sum fn global
+fn @sum
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = symaddr @w
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 0
+  jmp b1(v2, v4)
+b1(v5: i64, v6: i32):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v5 * 4
+  v9 = load.i32 v8 align 2
+  v10 = add.i32 v6, v9
+  v11 = add.i64 v5, v3
+  jmp b1(v11, v10)
+b3:
+  ret v6
+data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000700000008000000090000000a0000000b0000000c0000000d0000000e0000000f00000010000000110000001200000013000000140000001500000016000000170000001800000019000000
+)",
+        VECTOR,
+    );
+    let s = text_of(&a, "sum");
+    assert(count(&s, "load.v4i32") == 3 && !s.contains(" epi"), s.as_str());
+    for n in 0..26u64 {
+        let x: []u64 = [n];
+        same_outcome(&b, &a, "sum", x, n * (n + 1) / 2, false);
     }
 }

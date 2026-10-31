@@ -530,7 +530,7 @@ extend Gen {
             }
             return self.jump_reg(b, t, v);
         }
-        if r == NOREG || (((self.held | self.lock) & ~free | self.tmps | self.fixed_busy) & bit(r)) != 0 || ((XALLOC | valloc()) & bit(
+        if r == NOREG || (((self.held | self.lock | self.fixed_busy) & ~free | self.tmps) & bit(r)) != 0 || ((XALLOC | valloc()) & bit(
             r,
         )) == 0 {
             return NOREG;
@@ -614,7 +614,7 @@ extend Gen {
         let xa = self.vx(a);
         let t = self.vt(v);
         let fixed = self.va[x as usize].home == H_FIXED || self.fix_class(x) != FIX_NONE;
-        if !fixed && ((XALLOC | valloc()) & bit(ra)) != 0 && is_v(t) == ra >= V0 {
+        if !fixed && ((XALLOC | valloc()) & bit(ra)) != 0 && (is_v(t) || is_vec(t)) == ra >= V0 {
             let own = self.owner[ra as usize];
             let temp = own == NONE && (self.tmps & bit(ra)) != 0;
             let dies = own == xa && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
@@ -880,8 +880,8 @@ extend Gen {
     }
 
     // `vmem`: per value, whether it is a vector some instruction defines or reads in memory: any but a
-    // vector load, a lane-wise operation with a Neon form (its operands too), a store of it, and an edge
-    // argument (a return reads its vector in memory).
+    // vector load, a lane-wise operation with a Neon form (its operands too), a bitcast between register
+    // vectors, a store of it, and an edge argument (a return reads its vector in memory).
     fn vec_homes(self: &mut Self) {
         let b = self.b();
         let ni = b.insts.len();
@@ -898,7 +898,9 @@ extend Gen {
                 t.ty,
             ) || (t.op == O_VCMP || t.op == O_VEXTRACT) && in_vreg(self.vt(t.a)) || t.op == O_VOP && self.vop_reg(t) || self.conv_reg(
                 t,
-            ) || (t.op == O_LSHR || t.op == O_ASHR) && is_vec(t.ty) && in_vreg(t.ty);
+            ) || (t.op == O_LSHR || t.op == O_ASHR) && is_vec(t.ty) && in_vreg(t.ty) || t.op == O_BITCAST && in_vreg(
+                t.ty,
+            ) && in_vreg(self.vt(t.a));
             if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
                 self.vmem[i] = true;
             }
@@ -1361,7 +1363,7 @@ extend Gen {
         // and calls (a vector passed in memory goes through `mloc`).
         let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT) || t.op == O_VEXTRACT || self.conv_reg(
             t,
-        );
+        ) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.vt(t.a));
         if !reg_form && !is_terminator(t.op) {
             for k in 0..self.uses.len() {
                 self.sync(self.uses[k]);
@@ -4266,6 +4268,12 @@ extend Gen {
         let from = self.vt(t.a);
         let to = t.ty;
         if is_vec(from) || is_vec(to) {
+            // Vectors of one size in v registers: the bits stay in the register.
+            if op == O_BITCAST && in_vreg(from) && in_vreg(to) {
+                let ra = self.reg(t.a);
+                let _ = self.def_from(i, t.a, ra);
+                return true;
+            }
             if op == O_BITCAST && in_mem(from) && in_mem(to) {
                 let (base, off) = self.mloc(t.a);
                 let d = self.mdef(i);

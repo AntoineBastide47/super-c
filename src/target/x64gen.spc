@@ -947,7 +947,7 @@ extend Gen {
         let fixed = self.va[x as usize].home == H_FIXED || self.fix_class(x) != FIX_NONE;
         // A callee-saved register `alloc` gave a loop's temporary (saved, no home) counts as a caller-saved one.
         let temps = self.xalloc | self.valloc | self.xfix & self.csr & ~self.fixed_busy;
-        if !fixed && (temps & bit(ra)) != 0 && is_v(t) == ra >= V0 {
+        if !fixed && (temps & bit(ra)) != 0 && (is_v(t) || is_vec(t)) == ra >= V0 {
             let own = self.owner[ra as usize];
             let temp = own == NONE && (self.tmps & bit(ra)) != 0;
             let dies = own == xa && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
@@ -1385,8 +1385,9 @@ extend Gen {
     }
 
     // `vmem`: per value, whether it is a vector some instruction defines or reads in memory: any but a
-    // vector load, a lane-wise operation with an SSE form (its operands too), a store of it, and an edge
-    // argument (a return reads its vector in memory).
+    // vector load, a lane-wise operation with an SSE form (its operands too; a product of 32-bit lanes,
+    // `mul_lanes32`), a bitcast between register vectors, a store of it, and an edge argument (a return
+    // reads its vector in memory).
     fn vec_homes(self: &mut Self) {
         let b = self.b();
         let ni = b.insts.len();
@@ -1414,7 +1415,9 @@ extend Gen {
             ) != NONE || self.z512 && is_vec(t.ty) && type_bytes(t.ty, 8) == 64 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && evex_of_op(
                 t.op,
                 lane_type(t.ty),
-            ) != NONE;
+            ) != NONE || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a)) || t.op == O_MUL && is_vec(
+                t.ty,
+            ) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(t.ty, 8) == 16 && in_vreg(t.ty);
             if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
                 self.vmem[i] = true;
             }
@@ -1681,9 +1684,10 @@ extend Gen {
         }
     }
 
-    // Select `i` (`t`) of a value and that value plus 1 on an unsigned order comparison, the side folded
-    // (`lv::FOLD_CARRY`): the comparison as `p <u q` sets CF, then the value plus CF (`adc`), or plus 1
-    // less CF (`sbb -1`) when the side is taken on `!(p <u q)`.
+    // Select `i` (`t`) of a value and that value plus 1 on an integer comparison, the side folded
+    // (`lv::FOLD_CARRY`): an unsigned order comparison of 32 or 64 bits as `p <u q` sets CF, then the
+    // value plus CF (`adc`), or plus 1 less CF (`sbb -1`) when the side is taken on `!(p <u q)`; another
+    // sets the side's condition into a zeroed register the value adds (clang's `setcc`, `add`).
     fn carry_select(self: &mut Self, i: u32, t: Inst) {
         let b = self.b();
         let inc_b = (t.b & (VPARAM | VFLAG)) == 0 && t.b != VNONE && self.lv.pfold[t.b as usize];
@@ -1693,6 +1697,29 @@ extend Gen {
             t.b
         };
         let c = b.insts[t.a as usize];
+        let dz = type_bits(t.ty, self.ptr) / 8;
+        let cb = type_bits(b.type_of(c.a), self.ptr);
+        if c.aux != C_ULT && c.aux != C_UGT && c.aux != C_ULE && c.aux != C_UGE || cb != 32 && cb != 64 {
+            let ro = self.reg(other);
+            let rz = self.tmp(false);
+            self.c.alu_rr(x::XOR, 4, rz, rz);
+            let cc = self.compare(c, NONE);
+            self.c.setcc(
+                if inc_b {
+                    cc
+                } else {
+                    x::invert(cc)
+                },
+                rz,
+            );
+            let rd = self.def_over(i, other, ro);
+            if rd != ro {
+                self.c.mov_rr(dz, rd, ro);
+            }
+            self.c.alu_rr(x::ADD, dz, rd, rz);
+            self.va.index_mut(i as usize).clean = dz == 4;
+            return;
+        }
         // ult(a, b): a < b; ugt(a, b): b < a; uge(a, b): !(a < b); ule(a, b): !(b < a).
         let swap = c.aux == C_UGT || c.aux == C_ULE;
         let lt = (c.aux == C_ULT || c.aux == C_UGT) == inc_b;
@@ -1723,7 +1750,6 @@ extend Gen {
         } else {
             self.c.alu_rr(x::CMP, sz, rp, rq);
         }
-        let dz = type_bits(t.ty, self.ptr) / 8;
         if rd != ro {
             self.c.mov_rr(dz, rd, ro);
         }
@@ -1737,8 +1763,9 @@ extend Gen {
 
     // Whether body `b` lets rax, rcx and rdx be homes (`xhome`): no instruction takes one of them for
     // itself (a division, a 64-bit product's high half, an overflow check, a shift by a register, an
-    // atomic, a system operation, inline assembly, a call, a thread-local address, a 128-bit or vector
-    // value), and no aggregate or second register returns.
+    // atomic, a system operation, inline assembly, a call that comes back (`cret`: not a sibling call
+    // or one before a trap), a thread-local address, a 128-bit or vector value), and no aggregate or
+    // second register returns.
     fn owns_none(self: &Self, b: &Body) bool {
         let rl = self.self_lay.ret;
         if (b.pool[b.sig as usize + 2] & AGG) != 0 || rl.kind == ab::L_SRET || rl.kind == ab::L_REG && rl.n > 1 {
@@ -1753,7 +1780,7 @@ extend Gen {
             let t = b.insts[i];
             let op = t.op;
             let mut k: u64 = 0;
-            if t.ty == T_I128 || is_vec(t.ty) || op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_SYS || op == O_VOP || op == O_VASTART || op == O_VAARG || op == O_MEMCPY || op == O_MEMSET || op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM || op >= O_ADDO && op <= O_MULO || op >= O_ALOAD && op <= O_FENCE || op == O_SYMADDR && !self.remat_inst(
+            if t.ty == T_I128 || is_vec(t.ty) || (op == O_CALL || op == O_CALLIND) && self.cret[i] || op == O_ASM || op == O_SYS || op == O_VOP || op == O_VASTART || op == O_VAARG || op == O_MEMCPY || op == O_MEMSET || op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM || op >= O_ADDO && op <= O_MULO || op >= O_ALOAD && op <= O_FENCE || op == O_SYMADDR && !self.remat_inst(
                 i as u32,
             ) || (op == O_SHL || op == O_LSHR || op == O_ASHR) && !self.const_of(t.b, &mut k) {
                 return false;
@@ -2007,7 +2034,7 @@ extend Gen {
         // and calls (a vector passed in memory goes through `mloc`).
         let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI) || t.op == O_VEXTRACT || t.op == O_VINSERT || self.conv_reg(
             t,
-        );
+        ) || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a));
         if !reg_form && !is_terminator(t.op) {
             for k in 0..self.uses.len() {
                 self.sync(self.uses[k]);
@@ -2481,7 +2508,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
         if self.again {
@@ -3913,6 +3940,9 @@ extend Gen {
     // then writes its low byte with no extension after.
     fn compare(self: &mut Self, t: Inst, zi: u32) u32 {
         self.zeroed = NOREG;
+        if self.ld_folded(t.a) || self.ld_folded(t.b) {
+            return self.compare_mem(t, zi);
+        }
         let ty = self.vt(t.a);
         let bits = type_bits(ty, self.ptr);
         let sz = bits / 8;
@@ -3970,6 +4000,48 @@ extend Gen {
         self.held_a = t.a;
         self.held_b = t.b;
         self.held_end = self.c.len();
+        return icond(t.aux);
+    }
+
+    // Whether `v` is a load its use reads in memory (`lv::FOLD_LDOP`).
+    const fn ld_folded(self: &Self, v: Value) bool {
+        return (v & (VPARAM | VFLAG)) == 0 && v != VNONE && self.lv.pfold[v as usize] && self.b().insts[v as usize].op == O_LOAD;
+    }
+
+    // `compare` of `t` with an operand load folded (`lv::FOLD_LDOP`): the memory against the other operand
+    // (an immediate or a register), or a register against the memory.
+    fn compare_mem(self: &mut Self, t: Inst, zi: u32) u32 {
+        let bits = type_bits(self.vt(t.a), self.ptr);
+        let sz = bits / 8;
+        let fa = self.ld_folded(t.a);
+        let (l, o) = if fa {
+            (t.a, t.b)
+        } else {
+            (t.b, t.a)
+        };
+        let lt = self.b().insts[l as usize];
+        let mut k: i32 = 0;
+        let imm = fa && self.imm32_of(o, bits, &mut k);
+        let ro = if imm {
+            NOREG
+        } else {
+            self.reg(o)
+        };
+        let mut rs: u32 = NONE;
+        let mut radd: i64 = 0;
+        let m = self.mem_at(lt.a, lt.c as i32, &mut rs, &mut radd);
+        self.zero_for(zi, m.base, ro);
+        if imm {
+            self.c.alu_mi(x::CMP, sz, m, k);
+        } else if fa {
+            self.c.alu_mr(x::CMP, sz, m, ro);
+        } else {
+            self.c.alu_rm(x::CMP, sz, ro, m);
+        }
+        self.mem_rel(rs, radd);
+        // No later compare reuses these flags by its bytes (`reflag`): a relocation may differ.
+        self.cmp_at = NONE;
+        self.held_end = NONE;
         return icond(t.aux);
     }
 
@@ -4269,6 +4341,28 @@ extend Gen {
                 bits / 8,
                 rd,
             );
+            return true;
+        }
+        // An operand load that folds into the operation (`lv::FOLD_LDOP`): the operation reads the memory
+        // (the load second for a `sub`).
+        if self.ld_folded(t.a) || self.ld_folded(t.b) {
+            let (l, o) = if self.ld_folded(t.b) {
+                (t.b, t.a)
+            } else {
+                (t.a, t.b)
+            };
+            let lt = self.b().insts[l as usize];
+            let ro = self.reg(o);
+            let mut rs: u32 = NONE;
+            let mut radd: i64 = 0;
+            let m = self.mem_at(lt.a, lt.c as i32, &mut rs, &mut radd);
+            let rd = self.def_over(i, o, ro);
+            if rd != ro {
+                self.move_reg(t.ty, rd, ro);
+            }
+            self.c.alu_rm(alu_of(op), sz, rd, m);
+            self.mem_rel(rs, radd);
+            self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.pos };
             return true;
         }
         // A sum whose shifted index or inner sum folds into it (`lv::FOLD_LEA`): one `lea`.
@@ -4704,6 +4798,15 @@ extend Gen {
                 self.vconv_reg(i, t);
                 return true;
             }
+            // Vectors of one size in registers: the bits stay in the register.
+            if op == O_BITCAST && self.in_reg(from) && self.in_reg(to) {
+                let ra = self.vec_use(t.a, self.vs0);
+                let rd = self.def_over(i, t.a, ra);
+                if rd != ra {
+                    self.c.vmov(rd - V0, ra - V0);
+                }
+                return true;
+            }
             if op == O_BITCAST && in_mem(from) && in_mem(to) {
                 let (base, off) = self.mloc(t.a);
                 let d = self.mdef(i);
@@ -5074,6 +5177,9 @@ extend Gen {
     }
 
     fn load(self: &mut Self, i: u32, t: Inst) bool {
+        if self.lv.pfold[i as usize] {
+            return true; // its use reads the memory (`lv::FOLD_LDOP`)
+        }
         let ty = t.ty;
         // A part of a register-passed aggregate: its register already.
         for q in 0..self.taken.len() {
@@ -6742,7 +6848,6 @@ extend Gen {
         self.fix.push(at as u64 << 32 | k as u64);
     }
 
-    // A two-way branch: condition `cc` takes edge `et`, else `ef`; each edge's moves on its own path.
     // Whether an argument of edge `e` is not in its parameter's home yet (the homes chosen).
     fn moves_needed(self: &Self, e: u32) bool {
         let b = self.b();
@@ -6759,6 +6864,73 @@ extend Gen {
         return false;
     }
 
+    // Whether edge `e`'s moves may run before the branch: every parameter of `e`'s target (a loop header,
+    // its back edge) ends its range in this block, so the other path reads none of the homes they write.
+    // The moves keep the flags (`keep_flags`). One branch then takes the edge.
+    fn early_moves(self: &Self, e: u32) bool {
+        let b = self.b();
+        let tb = b.blocks[b.edge_target(e) as usize];
+        let ni = b.insts.len() as u32;
+        for q in 0..tb.param_len as u32 {
+            if self.lv.end[(ni + tb.param_start + q) as usize] > self.pos {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Whether edge `e`'s moves may run before the branch whose other edge is `o`: `early_moves`, or each
+    // writes a register home that no argument of `o` is in and that holds its parameter of a later block
+    // (`edge_homes`), a value that dies in this block, or a copy (its home elsewhere) that `o`'s target
+    // does not keep.
+    fn early_ok(self: &Self, e: u32, o: u32) bool {
+        if self.early_moves(e) {
+            return true;
+        }
+        let b = self.b();
+        let sp = self.lv.pos[b.edge_target(o) as usize];
+        let kept = sp == self.pos + 1 && self.continues(sp);
+        // A later target's parameters are not live yet: their homes are only reserved (`edge_homes`).
+        let fwd = self.lv.pos[b.edge_target(e) as usize] > self.pos;
+        let tb = b.blocks[b.edge_target(e) as usize];
+        let ni = b.insts.len() as u32;
+        for q in 0..b.edge_nargs(e) {
+            let px = ni + tb.param_start + q;
+            let ax = self.vx(b.edge_arg(e, q));
+            let pva = self.va[px as usize];
+            if ax == px || pva.home == H_FIXED && self.va[ax as usize].reg == pva.reg {
+                continue;
+            }
+            if pva.home != H_FIXED {
+                return false;
+            }
+            let r = pva.reg;
+            if (self.held & bit(r)) != 0 {
+                let y = self.owner[r as usize];
+                if !(fwd && y == px) && self.lv.end[y as usize] > self.pos && (kept || self.va[y as usize].home == H_FIXED) {
+                    return false;
+                }
+            }
+            for j in 0..b.edge_nargs(o) {
+                let l = self.loc_of(self.vx(b.edge_arg(o, j)));
+                if l.kind == LC_REG && l.reg == r {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    // Edge `e`'s moves before a branch: the flags stay.
+    fn flag_moves(self: &mut Self, e: u32) {
+        let kf = self.keep_flags;
+        self.keep_flags = true;
+        self.edge_moves(e);
+        self.keep_flags = kf;
+    }
+
+    // A two-way branch: condition `cc` takes edge `et`, else `ef`; each edge's moves on its own path, or
+    // before the branch (`early_moves`).
     fn branch2(self: &mut Self, cc: u32, et: u32, ef: u32) {
         let b = self.b();
         let mt = self.moves_needed(et);
@@ -6778,6 +6950,21 @@ extend Gen {
                 self.cbranch(cc, tt);
                 self.goto(tf, false);
             }
+        } else if mt && !mf && (tt != next && self.early_ok(et, ef) || self.early_moves(et)) {
+            self.flag_moves(et);
+            self.cbranch(cc, tt);
+            self.goto(tf, false);
+        } else if !mt && mf && (tf != next && self.early_ok(ef, et) || self.early_moves(ef)) {
+            self.flag_moves(ef);
+            self.cbranch(x::invert(cc), tf);
+            self.goto(tt, false);
+        } else if mt && mf && tt != next && self.early_ok(et, ef) {
+            // The edge to the block that does not follow first: the other's moves fall through.
+            self.flag_moves(et);
+            self.branch_over(cc, tt, ef);
+        } else if mt && mf && tf != next && self.early_ok(ef, et) {
+            self.flag_moves(ef);
+            self.branch_over(x::invert(cc), tf, et);
         } else if mt && !mf {
             self.branch_over(x::invert(cc), tf, et);
         } else if !mt && mf {
@@ -9270,6 +9457,10 @@ extend Gen {
             self.sse_reg(w, op, lt, i, t.a, y);
             return true;
         }
+        if op == O_MUL && type_bytes(lt, 8) == 4 && nb == 16 && in_vreg(t.ty) {
+            self.mul_lanes32(i, t);
+            return true;
+        }
         if nb == 32 && self.in_reg(t.ty) && avx_of_op(op, lt) != NONE {
             self.avx_reg(avx_of_op(op, lt), op, lt, i, t.a, y);
             return true;
@@ -9321,6 +9512,34 @@ extend Gen {
             self.st_lane(xr, d, k, lt, false);
         }
         return true;
+    }
+
+    // Product `i` (`t`) of two 16-byte vectors of 32-bit lanes in xmm registers: `vpmulld` with AVX2; else
+    // (SSE2 has no such product) the even lanes' 64-bit products (`pmuludq`), the odd lanes' after `pshufd`
+    // moves them down, and the low halves of both interleaved (`pshufd`, `punpckldq`; clang's lowering).
+    fn mul_lanes32(self: &mut Self, i: u32, t: Inst) {
+        let rx = self.vec_use(t.a, self.vs0) - V0;
+        let ry = self.vec_use(t.b, self.vs1) - V0;
+        if self.avx {
+            let rd = self.vec_def(i) - V0;
+            self.c.vex_rr(0x66, 2, 0x40, false, false, rd, rx, ry);
+            return;
+        }
+        let ta = self.tmp(true) - V0;
+        let tb = self.tmp(true) - V0;
+        self.c.sse_rr(0x66, 0x0F70, ta, rx);
+        self.c.byte(0xF5);
+        self.c.sse_rr(0x66, 0x0F70, tb, ry);
+        self.c.byte(0xF5);
+        self.c.sse_rr(0x66, 0x0FF4, ta, tb);
+        let rd = self.def_pass(i, t.a) - V0;
+        self.c.vmov(rd, rx);
+        self.c.sse_rr(0x66, 0x0FF4, rd, ry);
+        self.c.sse_rr(0x66, 0x0F70, rd, rd);
+        self.c.byte(0xE8);
+        self.c.sse_rr(0x66, 0x0F70, ta, ta);
+        self.c.byte(0xE8);
+        self.c.sse_rr(0x66, 0x0F62, rd, ta);
     }
 
     // `xr` = `xr` op `yr` on 64-bit registers (integer LIR operation `op`): a division through rdx:rax and

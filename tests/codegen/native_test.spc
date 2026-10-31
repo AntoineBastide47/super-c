@@ -544,7 +544,8 @@ fn float_minimum_and_maximum_selects_run() {
 }
 
 // A select of a value and that value plus 1 on an unsigned order comparison, the increment on either
-// side, in 32 and 64 bits, a constant compared first (x86-64 `cmp` then `adc 0` or `sbb -1`); the bit
+// side, in 32 and 64 bits, a constant compared first (x86-64 `cmp` then `adc 0` or `sbb -1`), or on
+// another comparison, of bytes or signed (x86-64 `setcc` into a zeroed register, then `add`); the bit
 // length `width - clz(x)` (x86-64 `bsr`, `add 1`, `cmove` for 0); comparison values (x86-64 `xor` of the
 // register before the compare, `setcc` after).
 @test
@@ -552,8 +553,162 @@ fn carry_selects_bit_lengths_and_comparison_values_run() {
     if !cli::has_cc() {
         return; // a C driver links it
     }
-    let lir = "lir ptr 8\nsym @c_ult_t32 fn global\nsym @c_ult_t64 fn global\nsym @c_ult_f32 fn global\nsym @c_ult_f64 fn global\nsym @c_ugt_t32 fn global\nsym @c_ugt_t64 fn global\nsym @c_ugt_f32 fn global\nsym @c_ugt_f64 fn global\nsym @c_ule_t32 fn global\nsym @c_ule_t64 fn global\nsym @c_ule_f32 fn global\nsym @c_ule_f64 fn global\nsym @c_uge_t32 fn global\nsym @c_uge_t64 fn global\nsym @c_uge_f32 fn global\nsym @c_uge_f64 fn global\nsym @c_imm fn global\nsym @blen32 fn global\nsym @blen64 fn global\nsym @cmpv fn global\nfn @c_ult_t32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.ult v0, v1\n  v6 = select.i32 v5, v4, v2\n  ret v6\nfn @c_ult_t64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.ult v0, v1\n  v6 = select.i64 v5, v4, v2\n  ret v6\nfn @c_ult_f32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.ult v0, v1\n  v6 = select.i32 v5, v2, v4\n  ret v6\nfn @c_ult_f64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.ult v0, v1\n  v6 = select.i64 v5, v2, v4\n  ret v6\nfn @c_ugt_t32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.ugt v0, v1\n  v6 = select.i32 v5, v4, v2\n  ret v6\nfn @c_ugt_t64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.ugt v0, v1\n  v6 = select.i64 v5, v4, v2\n  ret v6\nfn @c_ugt_f32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.ugt v0, v1\n  v6 = select.i32 v5, v2, v4\n  ret v6\nfn @c_ugt_f64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.ugt v0, v1\n  v6 = select.i64 v5, v2, v4\n  ret v6\nfn @c_ule_t32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.ule v0, v1\n  v6 = select.i32 v5, v4, v2\n  ret v6\nfn @c_ule_t64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.ule v0, v1\n  v6 = select.i64 v5, v4, v2\n  ret v6\nfn @c_ule_f32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.ule v0, v1\n  v6 = select.i32 v5, v2, v4\n  ret v6\nfn @c_ule_f64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.ule v0, v1\n  v6 = select.i64 v5, v2, v4\n  ret v6\nfn @c_uge_t32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.uge v0, v1\n  v6 = select.i32 v5, v4, v2\n  ret v6\nfn @c_uge_t64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.uge v0, v1\n  v6 = select.i64 v5, v4, v2\n  ret v6\nfn @c_uge_f32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.uge v0, v1\n  v6 = select.i32 v5, v2, v4\n  ret v6\nfn @c_uge_f64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.uge v0, v1\n  v6 = select.i64 v5, v2, v4\n  ret v6\nfn @c_imm\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 1\n  v3 = add.i32 v1, v2\n  v4 = iconst.i32 100\n  v5 = icmp.ugt v4, v0\n  v6 = select.i32 v5, v3, v1\n  ret v6\nfn @blen32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = clz.i32 v0\n  v2 = iconst.i32 32\n  v3 = sub.i32 v2, v1\n  ret v3\nfn @blen64\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = clz.i64 v0\n  v2 = iconst.i64 64\n  v3 = sub.i64 v2, v1\n  ret v3\nfn @cmpv\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = icmp.slt v0, v1\n  v3 = zext.i32 v2\n  v4 = icmp.eq v0, v1\n  v5 = zext.i32 v4\n  v6 = add.i32 v3, v5\n  v7 = icmp.ne v6, v0\n  v8 = zext.i32 v7\n  v9 = add.i32 v6, v8\n  ret v9\n";
-    let drv = "#include <stdint.h>\nuint32_t c_ult_t32(uint32_t, uint32_t, uint32_t);\nuint64_t c_ult_t64(uint64_t, uint64_t, uint64_t);\nuint32_t c_ult_f32(uint32_t, uint32_t, uint32_t);\nuint64_t c_ult_f64(uint64_t, uint64_t, uint64_t);\nuint32_t c_ugt_t32(uint32_t, uint32_t, uint32_t);\nuint64_t c_ugt_t64(uint64_t, uint64_t, uint64_t);\nuint32_t c_ugt_f32(uint32_t, uint32_t, uint32_t);\nuint64_t c_ugt_f64(uint64_t, uint64_t, uint64_t);\nuint32_t c_ule_t32(uint32_t, uint32_t, uint32_t);\nuint64_t c_ule_t64(uint64_t, uint64_t, uint64_t);\nuint32_t c_ule_f32(uint32_t, uint32_t, uint32_t);\nuint64_t c_ule_f64(uint64_t, uint64_t, uint64_t);\nuint32_t c_uge_t32(uint32_t, uint32_t, uint32_t);\nuint64_t c_uge_t64(uint64_t, uint64_t, uint64_t);\nuint32_t c_uge_f32(uint32_t, uint32_t, uint32_t);\nuint64_t c_uge_f64(uint64_t, uint64_t, uint64_t);\nuint32_t c_imm(uint32_t, uint32_t);\nuint32_t blen32(uint32_t);\nuint64_t blen64(uint64_t);\nint32_t cmpv(int32_t, int32_t);\nint main(void) {\n  uint64_t vs[7] = {0, 1, 2, 99, 100, 0xFFFFFFFFu, UINT64_MAX};\n  for (int i = 0; i < 7; i++)\n    for (int j = 0; j < 7; j++) {\n      uint64_t a = vs[i], b = vs[j], c = vs[(i + j) % 7];\n      uint32_t a32 = (uint32_t)a, b32 = (uint32_t)b, c32 = (uint32_t)c;\n      if (c_ult_t32(a32, b32, c32) != ((a32 < b32) ? (uint32_t)(c32 + 1) : c32)) return 1;\n      if (c_ult_t64(a, b, c) != ((a < b) ? c + 1 : c)) return 2;\n      if (c_ult_f32(a32, b32, c32) != ((a32 < b32) ? c32 : (uint32_t)(c32 + 1))) return 3;\n      if (c_ult_f64(a, b, c) != ((a < b) ? c : c + 1)) return 4;\n      if (c_ugt_t32(a32, b32, c32) != ((a32 > b32) ? (uint32_t)(c32 + 1) : c32)) return 5;\n      if (c_ugt_t64(a, b, c) != ((a > b) ? c + 1 : c)) return 6;\n      if (c_ugt_f32(a32, b32, c32) != ((a32 > b32) ? c32 : (uint32_t)(c32 + 1))) return 7;\n      if (c_ugt_f64(a, b, c) != ((a > b) ? c : c + 1)) return 8;\n      if (c_ule_t32(a32, b32, c32) != ((a32 <= b32) ? (uint32_t)(c32 + 1) : c32)) return 9;\n      if (c_ule_t64(a, b, c) != ((a <= b) ? c + 1 : c)) return 10;\n      if (c_ule_f32(a32, b32, c32) != ((a32 <= b32) ? c32 : (uint32_t)(c32 + 1))) return 11;\n      if (c_ule_f64(a, b, c) != ((a <= b) ? c : c + 1)) return 12;\n      if (c_uge_t32(a32, b32, c32) != ((a32 >= b32) ? (uint32_t)(c32 + 1) : c32)) return 13;\n      if (c_uge_t64(a, b, c) != ((a >= b) ? c + 1 : c)) return 14;\n      if (c_uge_f32(a32, b32, c32) != ((a32 >= b32) ? c32 : (uint32_t)(c32 + 1))) return 15;\n      if (c_uge_f64(a, b, c) != ((a >= b) ? c : c + 1)) return 16;\n      if (c_imm(a32, c32) != (100u > a32 ? c32 + 1 : c32)) return 17;\n      if (blen32(a32) != (a32 ? 32 - __builtin_clz(a32) : 0)) return 18;\n      if (blen64(a) != (a ? 64 - __builtin_clzll(a) : 0)) return 19;\n      int32_t x = (int32_t)a32, y = (int32_t)b32;\n      int32_t s = (x < y) + (x == y);\n      if (cmpv(x, y) != s + (s != x)) return 20;\n    }\n  return 0;\n}\n";
+    let lir = "lir ptr 8\nsym @c_ult_t32 fn global\nsym @c_ult_t64 fn global\nsym @c_ult_f32 fn global\nsym @c_ult_f64 fn global\nsym @c_ugt_t32 fn global\nsym @c_ugt_t64 fn global\nsym @c_ugt_f32 fn global\nsym @c_ugt_f64 fn global\nsym @c_ule_t32 fn global\nsym @c_ule_t64 fn global\nsym @c_ule_f32 fn global\nsym @c_ule_f64 fn global\nsym @c_uge_t32 fn global\nsym @c_uge_t64 fn global\nsym @c_uge_f32 fn global\nsym @c_uge_f64 fn global\nsym @c_imm fn global\nsym @c_eq8 fn global\nsym @c_slt_f32 fn global\nsym @blen32 fn global\nsym @blen64 fn global\nsym @cmpv fn global\nfn @c_ult_t32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.ult v0, v1\n  v6 = select.i32 v5, v4, v2\n  ret v6\nfn @c_ult_t64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.ult v0, v1\n  v6 = select.i64 v5, v4, v2\n  ret v6\nfn @c_ult_f32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.ult v0, v1\n  v6 = select.i32 v5, v2, v4\n  ret v6\nfn @c_ult_f64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.ult v0, v1\n  v6 = select.i64 v5, v2, v4\n  ret v6\nfn @c_ugt_t32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.ugt v0, v1\n  v6 = select.i32 v5, v4, v2\n  ret v6\nfn @c_ugt_t64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.ugt v0, v1\n  v6 = select.i64 v5, v4, v2\n  ret v6\nfn @c_ugt_f32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.ugt v0, v1\n  v6 = select.i32 v5, v2, v4\n  ret v6\nfn @c_ugt_f64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.ugt v0, v1\n  v6 = select.i64 v5, v2, v4\n  ret v6\nfn @c_ule_t32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.ule v0, v1\n  v6 = select.i32 v5, v4, v2\n  ret v6\nfn @c_ule_t64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.ule v0, v1\n  v6 = select.i64 v5, v4, v2\n  ret v6\nfn @c_ule_f32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.ule v0, v1\n  v6 = select.i32 v5, v2, v4\n  ret v6\nfn @c_ule_f64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.ule v0, v1\n  v6 = select.i64 v5, v2, v4\n  ret v6\nfn @c_uge_t32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.uge v0, v1\n  v6 = select.i32 v5, v4, v2\n  ret v6\nfn @c_uge_t64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.uge v0, v1\n  v6 = select.i64 v5, v4, v2\n  ret v6\nfn @c_uge_f32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.uge v0, v1\n  v6 = select.i32 v5, v2, v4\n  ret v6\nfn @c_uge_f64\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.uge v0, v1\n  v6 = select.i64 v5, v2, v4\n  ret v6\nfn @c_imm\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 1\n  v3 = add.i32 v1, v2\n  v4 = iconst.i32 100\n  v5 = icmp.ugt v4, v0\n  v6 = select.i32 v5, v3, v1\n  ret v6\nfn @c_eq8\n  sig (i8, i8, i64) -> i64\nb0(v0: i8, v1: i8, v2: i64):\n  v3 = iconst.i64 1\n  v4 = add.i64 v2, v3\n  v5 = icmp.eq v0, v1\n  v6 = select.i64 v5, v4, v2\n  ret v6\nfn @c_slt_f32\n  sig (i32, i32, i32) -> i32\nb0(v0: i32, v1: i32, v2: i32):\n  v3 = iconst.i32 1\n  v4 = add.i32 v2, v3\n  v5 = icmp.slt v0, v1\n  v6 = select.i32 v5, v2, v4\n  ret v6\nfn @blen32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = clz.i32 v0\n  v2 = iconst.i32 32\n  v3 = sub.i32 v2, v1\n  ret v3\nfn @blen64\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = clz.i64 v0\n  v2 = iconst.i64 64\n  v3 = sub.i64 v2, v1\n  ret v3\nfn @cmpv\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = icmp.slt v0, v1\n  v3 = zext.i32 v2\n  v4 = icmp.eq v0, v1\n  v5 = zext.i32 v4\n  v6 = add.i32 v3, v5\n  v7 = icmp.ne v6, v0\n  v8 = zext.i32 v7\n  v9 = add.i32 v6, v8\n  ret v9\n";
+    let drv = "#include <stdint.h>\nuint32_t c_ult_t32(uint32_t, uint32_t, uint32_t);\nuint64_t c_ult_t64(uint64_t, uint64_t, uint64_t);\nuint32_t c_ult_f32(uint32_t, uint32_t, uint32_t);\nuint64_t c_ult_f64(uint64_t, uint64_t, uint64_t);\nuint32_t c_ugt_t32(uint32_t, uint32_t, uint32_t);\nuint64_t c_ugt_t64(uint64_t, uint64_t, uint64_t);\nuint32_t c_ugt_f32(uint32_t, uint32_t, uint32_t);\nuint64_t c_ugt_f64(uint64_t, uint64_t, uint64_t);\nuint32_t c_ule_t32(uint32_t, uint32_t, uint32_t);\nuint64_t c_ule_t64(uint64_t, uint64_t, uint64_t);\nuint32_t c_ule_f32(uint32_t, uint32_t, uint32_t);\nuint64_t c_ule_f64(uint64_t, uint64_t, uint64_t);\nuint32_t c_uge_t32(uint32_t, uint32_t, uint32_t);\nuint64_t c_uge_t64(uint64_t, uint64_t, uint64_t);\nuint32_t c_uge_f32(uint32_t, uint32_t, uint32_t);\nuint64_t c_uge_f64(uint64_t, uint64_t, uint64_t);\nuint32_t c_imm(uint32_t, uint32_t);\nuint64_t c_eq8(uint8_t, uint8_t, uint64_t);\nuint32_t c_slt_f32(int32_t, int32_t, uint32_t);\nuint32_t blen32(uint32_t);\nuint64_t blen64(uint64_t);\nint32_t cmpv(int32_t, int32_t);\nint main(void) {\n  uint64_t vs[7] = {0, 1, 2, 99, 100, 0xFFFFFFFFu, UINT64_MAX};\n  for (int i = 0; i < 7; i++)\n    for (int j = 0; j < 7; j++) {\n      uint64_t a = vs[i], b = vs[j], c = vs[(i + j) % 7];\n      uint32_t a32 = (uint32_t)a, b32 = (uint32_t)b, c32 = (uint32_t)c;\n      if (c_ult_t32(a32, b32, c32) != ((a32 < b32) ? (uint32_t)(c32 + 1) : c32)) return 1;\n      if (c_ult_t64(a, b, c) != ((a < b) ? c + 1 : c)) return 2;\n      if (c_ult_f32(a32, b32, c32) != ((a32 < b32) ? c32 : (uint32_t)(c32 + 1))) return 3;\n      if (c_ult_f64(a, b, c) != ((a < b) ? c : c + 1)) return 4;\n      if (c_ugt_t32(a32, b32, c32) != ((a32 > b32) ? (uint32_t)(c32 + 1) : c32)) return 5;\n      if (c_ugt_t64(a, b, c) != ((a > b) ? c + 1 : c)) return 6;\n      if (c_ugt_f32(a32, b32, c32) != ((a32 > b32) ? c32 : (uint32_t)(c32 + 1))) return 7;\n      if (c_ugt_f64(a, b, c) != ((a > b) ? c : c + 1)) return 8;\n      if (c_ule_t32(a32, b32, c32) != ((a32 <= b32) ? (uint32_t)(c32 + 1) : c32)) return 9;\n      if (c_ule_t64(a, b, c) != ((a <= b) ? c + 1 : c)) return 10;\n      if (c_ule_f32(a32, b32, c32) != ((a32 <= b32) ? c32 : (uint32_t)(c32 + 1))) return 11;\n      if (c_ule_f64(a, b, c) != ((a <= b) ? c : c + 1)) return 12;\n      if (c_uge_t32(a32, b32, c32) != ((a32 >= b32) ? (uint32_t)(c32 + 1) : c32)) return 13;\n      if (c_uge_t64(a, b, c) != ((a >= b) ? c + 1 : c)) return 14;\n      if (c_uge_f32(a32, b32, c32) != ((a32 >= b32) ? c32 : (uint32_t)(c32 + 1))) return 15;\n      if (c_uge_f64(a, b, c) != ((a >= b) ? c : c + 1)) return 16;\n      if (c_imm(a32, c32) != (100u > a32 ? c32 + 1 : c32)) return 17;\n      if (c_eq8((uint8_t)a, (uint8_t)b, c) != ((uint8_t)a == (uint8_t)b ? c + 1 : c)) return 21;\n      if (c_slt_f32((int32_t)a32, (int32_t)b32, c32) != ((int32_t)a32 < (int32_t)b32 ? c32 : c32 + 1)) return 22;\n      if (blen32(a32) != (a32 ? 32 - __builtin_clz(a32) : 0)) return 18;\n      if (blen64(a) != (a ? 64 - __builtin_clzll(a) : 0)) return 19;\n      int32_t x = (int32_t)a32, y = (int32_t)b32;\n      int32_t s = (x < y) + (x == y);\n      if (cmpv(x, y) != s + (s != x)) return 20;\n    }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Products of 32-bit lanes in a register, wrapping, of signed and unsigned values: x86-64 SSE2 has no
+// such product (`pmuludq` pairs), AVX2 `vpmulld`.
+@test
+fn products_of_32_bit_lanes_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @mul4 fn global
+fn @mul4
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v4i32 v0 align 2
+  v4 = load.v4i32 v1 align 2
+  v5 = mul.v4i32 v3, v4
+  v6 = mul.v4i32 v5, v3
+  store v6, v2 align 2
+  ret
+)";
+    let drv = "#include <stdint.h>\nvoid mul4(const uint32_t *, const uint32_t *, uint32_t *);\nint main(void) {\n  uint32_t a[4] = {3, 0xFFFFFFFFu, 0x80000001u, 123456789u};\n  uint32_t b[4] = {7, 0xFFFFFFFEu, 0x7FFFFFFFu, 987654321u};\n  uint32_t d[4];\n  mul4(a, b, d);\n  for (int k = 0; k < 4; k++) if (d[k] != a[k] * b[k] * a[k]) return k + 1;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Bits of a vector in a register read as another vector type of its size (`bitcast`): the register
+// stays, no memory; halves of 16-bit lanes interleaved with 0 read as 32-bit lanes (a widening).
+@test
+fn vector_bitcasts_in_registers_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @widen fn global
+fn @widen
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8i16 v0 align 1
+  v3 = iconst.i16 0
+  v4 = splat.v8i16 v3
+  v5 = vziplo.v8i16 v2, v4
+  v6 = bitcast.v4i32 v5
+  v7 = vziphi.v8i16 v2, v4
+  v8 = bitcast.v4i32 v7
+  v9 = add.v4i32 v6, v8
+  v10 = add.v4i32 v9, v6
+  store v10, v1 align 2
+  v11 = bitcast.v8i16 v10
+  store v11, v1+16 align 1
+  ret
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\nvoid widen(const uint16_t *, uint32_t *);\nint main(void) {\n  uint16_t a[8] = {1, 2, 65535, 4, 5, 60000, 7, 8};\n  uint32_t d[8];\n  widen(a, d);\n  for (int k = 0; k < 4; k++) if (d[k] != 2u * a[k] + a[k + 4]) return k + 1;\n  if (memcmp(d, d + 4, 16) != 0) return 5;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// A load one comparison or operation reads folds into it (x86-64 `lv::FOLD_LDOP`): the memory against an
+// immediate or a register either way, a byte, a global's (RIP-relative), the second operand of a `sub`,
+// the first of an `and`; a store between the load and its use keeps the load.
+@test
+fn loads_read_by_one_operation_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @g data global
+sym @cmi fn global
+sym @crm fn global
+sym @cmr fn global
+sym @cb fn global
+sym @addm fn global
+sym @subm fn global
+sym @andm fn global
+sym @xg fn global
+sym @kept fn global
+fn @cmi
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0+4 align 2
+  v2 = iconst.i32 7
+  v3 = icmp.eq v1, v2
+  v4 = iconst.i32 10
+  v5 = iconst.i32 20
+  v6 = select.i32 v3, v4, v5
+  ret v6
+fn @crm
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = load.i64 v0+8 align 3
+  v3 = icmp.ult v1, v2
+  br v3, b1, b2
+b1:
+  ret v1
+b2:
+  ret v2
+fn @cmr
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = load.i32 v0 align 2
+  v3 = icmp.slt v2, v1
+  v4 = zext.i32 v3
+  ret v4
+fn @cb
+  sig (ptr, i8) -> i32
+b0(v0: ptr, v1: i8):
+  v2 = load.i8 v0+3 align 0
+  v3 = icmp.eq v2, v1
+  v4 = zext.i32 v3
+  ret v4
+fn @addm
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = load.i64 v0+8 align 3
+  v3 = add.i64 v1, v2
+  ret v3
+fn @subm
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = load.i32 v0 align 2
+  v3 = sub.i32 v1, v2
+  ret v3
+fn @andm
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = load.i32 v0+4 align 2
+  v3 = and.i32 v2, v1
+  ret v3
+fn @xg
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = symaddr @g
+  v2 = load.i32 v1 align 2
+  v3 = xor.i32 v0, v2
+  v4 = iconst.i32 5
+  v5 = load.i32 v1+4 align 2
+  v6 = icmp.ugt v5, v4
+  v7 = zext.i32 v6
+  v8 = add.i32 v3, v7
+  ret v8
+fn @kept
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = load.i32 v0 align 2
+  store v1, v0 align 2
+  v3 = add.i32 v1, v2
+  ret v3
+data @g size 8 align 2 bytes f00f000009000000
+)";
+    let drv = "#include <stdint.h>\nint32_t cmi(const int32_t *);\nint64_t crm(const int64_t *, int64_t);\nint32_t cmr(const int32_t *, int32_t);\nint32_t cb(const uint8_t *, uint8_t);\nint64_t addm(const int64_t *, int64_t);\nint32_t subm(const int32_t *, int32_t);\nint32_t andm(const int32_t *, int32_t);\nint32_t xg(int32_t);\nint32_t kept(int32_t *, int32_t);\nint main(void) {\n  int32_t a[2] = {-3, 7};\n  int64_t q[2] = {0, 100};\n  uint8_t s[4] = {1, 2, 3, 200};\n  if (cmi(a) != 10) return 1;\n  a[1] = 8;\n  if (cmi(a) != 20) return 2;\n  if (crm(q, 99) != 99 || crm(q, 100) != 100 || crm(q, -1) != 100) return 3;\n  if (cmr(a, -2) != 1 || cmr(a, -3) != 0 || cmr(a, -4) != 0) return 4;\n  if (cb(s, 200) != 1 || cb(s, 3) != 0) return 5;\n  if (addm(q, -1) != 99) return 6;\n  if (subm(a, 10) != 13) return 7;\n  if (andm(a, 12) != 8) return 8;\n  if (xg(0xFF) != (0xFF ^ 0xFF0) + 1) return 9;\n  int32_t w = 4;\n  if (kept(&w, 9) != 13 || w != 9) return 10;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }

@@ -6552,3 +6552,40 @@ b0(v0: i32):
     let y: []u64 = [0x12345678];
     same_result(&b, &a, "r32", y, 0x1E6A2C48);
 }
+
+// Differences that cancel a term: `(x - y) - x` and `x - (x + y)` are `-y` (a constant for a constant
+// `y`), `x - (x - y)` is `y`; a product by -1 is a negation, and a sum with a negation a difference.
+@test
+fn differences_that_cancel_a_term_fold() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 5
+  v3 = sub.i32 v0, v2
+  v4 = sub.i32 v3, v0
+  v5 = add.i32 v0, v1
+  v6 = sub.i32 v0, v5
+  v7 = sub.i32 v0, v1
+  v8 = sub.i32 v0, v7
+  v9 = iconst.i32 -1
+  v10 = mul.i32 v8, v9
+  v11 = add.i32 v4, v6
+  v12 = add.i32 v11, v10
+  v13 = add.i32 v12, v8
+  ret v13
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(!t.contains("mul") && count_of(&t, "sub") + count_of(&t, "add") <= 2, t.as_str());
+    let xs: [u64; 3] = [0, 7, 0xFFFFFFF0];
+    for p in 0..3 {
+        for q in 0..3 {
+            let args: []u64 = [xs[p], xs[q]];
+            let want = 0xFFFFFFFBu64.wrapping_sub(xs[q]) & 0xFFFFFFFF;
+            same_result(&b, &a, "f", args, want);
+        }
+    }
+}

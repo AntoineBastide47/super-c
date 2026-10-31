@@ -51,6 +51,11 @@ pub(package) const FOLD_BFI: u32 = 262144;
 /// unsigned 8- or 16-bit entry parameter, under `ext_args`), which only that access reads: the access
 /// extends it (arm64 `[xn, wm, uxtw]`).
 pub(package) const FOLD_XIDX: u32 = 524288;
+/// `FOLD_LDOP`: a load of an integer that one comparison or `add`, `sub`, `and`, `or` or `xor` reads folds
+/// into it, which reads the memory (x86-64's `cmp [m], k`, `add r, [m]`; `Live::ldop_user`).
+pub(package) const FOLD_LDOP: u32 = 1048576;
+// `Live::ldop_user` looks this many instructions past a load for its use.
+const LDOP_REACH: u32 = 16;
 /// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
 pub(package) const CS_NONE: u8 = 0;
 pub(package) const CS_INC: u8 = 1;
@@ -681,8 +686,8 @@ extend Live {
             }
         }
         // `FOLD_CARRY`: a select of 32 or 64 bits between a value and that value plus 1 (`CS_INC`, its one
-        // use) on a folded unsigned order comparison of 32 or 64 bits: the side folds into the select, an
-        // add of the carry (`carry_inc`).
+        // use) on a folded integer comparison: the side folds into the select, an add of the condition
+        // (`carry_inc`).
         if (self.fold_ops & FOLD_CARRY) != 0 {
             for i in 0..ni {
                 let s = carry_inc(b, &self.pfold, i as u32);
@@ -691,6 +696,87 @@ extend Live {
                 }
             }
         }
+        if (self.fold_ops & FOLD_LDOP) != 0 {
+            for k in 0..b.blocks.len() {
+                let bk = b.blocks[k];
+                for i in bk.start..bk.start + bk.len {
+                    if self.ldop_user(b, i, bk.start + bk.len) {
+                        self.pfold[i as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// `FOLD_LDOP`: whether load `i` of `b` (its block ending before `end`) folds into its one use, a
+    /// comparison of its type or an `add`, `sub` (the load second), `and`, `or` or `xor` of 32 or 64 bits
+    /// that folds into nothing, within LDOP_REACH instructions, whose other operand is no folded
+    /// instruction, with no write of memory up to where the use is computed (a folded comparison: its
+    /// select's or branch's place; not a `FOLD_CARRY` select's unsigned order comparison of 32 or 64 bits,
+    /// whose `adc` the generator computes from the operands' registers).
+    /// Not a load at an indexed address (`fold`), of an entry parameter's aggregate (the generator takes
+    /// its registers, `place::parts_taken`) or of the aggregate result (which registers may hold), nor one
+    /// whose operation's result is stored back in place (the generator's read-modify-write).
+    fn ldop_user(self: &Self, b: &Body, i: u32, end: u32) bool {
+        let t = b.insts[i as usize];
+        if t.op != O_LOAD || (t.aux & MEM_VOLATILE) != 0 || !is_int(t.ty) || t.ty == T_I128 || self.count[i as usize] != 1 || self.pfold[i as usize] || self.fold[i as usize] || agg_param(
+            b,
+            t.a,
+        ) {
+            return false;
+        }
+        let mut u = i + 1;
+        while u < end && u <= i + LDOP_REACH {
+            let x = b.insts[u as usize];
+            let alu = x.op == O_ADD || x.op == O_SUB || x.op == O_AND || x.op == O_OR || x.op == O_XOR;
+            if (x.op == O_ICMP || alu) && (x.a == i || x.b == i) {
+                break;
+            }
+            if writes_mem(x) {
+                return false;
+            }
+            u += 1;
+        }
+        if u == end || u > i + LDOP_REACH {
+            return false;
+        }
+        let x = b.insts[u as usize];
+        let o = if x.a == i {
+            x.b
+        } else {
+            x.a
+        };
+        if is_inst(o) && self.pfold[o as usize] {
+            return false;
+        }
+        if x.op != O_ICMP {
+            let st = b.insts[u as usize + 1];
+            let back = u == i + 1 && st.op == O_STORE && st.b == u && st.a == t.a && st.c == t.c;
+            return !self.pfold[u as usize] && type_bits(t.ty, 8) >= 32 && (x.op != O_SUB || x.b == i) && !back;
+        }
+        if !self.pfold[u as usize] {
+            return true;
+        }
+        // A folded comparison: its one select or branch, with no write of memory before.
+        if self.count[u as usize] != 1 {
+            return false;
+        }
+        for w in u + 1..end {
+            let y = b.insts[w as usize];
+            if y.op == O_SELECT && y.a == u {
+                let side = is_inst(y.b) && self.pfold[y.b as usize] || is_inst(y.c) && self.pfold[y.c as usize];
+                let order = x.aux == C_ULT || x.aux == C_UGT || x.aux == C_ULE || x.aux == C_UGE;
+                let wide = type_bits(t.ty, 8) >= 32;
+                return !(side && order && wide);
+            }
+            if y.op == O_BR && y.a == u {
+                return true;
+            }
+            if writes_mem(y) {
+                return false;
+            }
+        }
+        return false;
     }
 
     /// The uses of instruction `i` of a laid-out block, as `uses_at` gives them (`ranges` found them).
@@ -1983,16 +2069,37 @@ pub(package) fn not_side(b: &Body, folded: &Vector<bool>, t: Inst) Value {
     return VNONE;
 }
 
+// Whether instruction `t` may write memory: a store, a call, a block copy or fill, an atomic operation,
+// inline assembly, a system call or a variadic access.
+const fn writes_mem(t: Inst) bool {
+    let op = t.op;
+    return op == O_STORE || op == O_CALL || op == O_CALLIND || op == O_MEMCPY || op == O_MEMSET || op >= O_ALOAD && op <= O_FENCE || op == O_ASM || op == O_SYS || op == O_VASTART || op == O_VAARG;
+}
+
+// Whether value `v` of `b` is an entry parameter of aggregate type (a pointer to its bytes), or the
+// pointer to an aggregate result (the parameter after the signature's).
+fn agg_param(b: &Body, v: Value) bool {
+    if (v & VPARAM) == 0 || v == VNONE || b.sig == NONE {
+        return false;
+    }
+    let e = b.blocks[0];
+    let q = (v & ~VPARAM) - e.param_start;
+    let np = b.pool[b.sig as usize];
+    if (v & ~VPARAM) < e.param_start || q >= e.param_len as u32 {
+        return false;
+    }
+    return q < np && (b.pool[(b.sig + 3 + q) as usize] & AGG) != 0 || q == np && (b.pool[b.sig as usize + 2] & AGG) != 0;
+}
+
 /// The side of select `i` of `b` that `FOLD_CARRY` folds (the other side plus 1), when `i` is of 32 or 64
-/// bits on a folded (`folded`) unsigned order comparison of 32 or 64 bits; VNONE else.
+/// bits on a folded (`folded`) integer comparison of at most 64 bits; VNONE else.
 pub(package) fn carry_inc(b: &Body, folded: &Vector<bool>, i: u32) Value {
     let t = b.insts[i as usize];
     if t.op != O_SELECT || !is_int(t.ty) || type_bits(t.ty, 8) < 32 || t.ty == T_I128 || !is_inst(t.a) || !folded[t.a as usize] {
         return VNONE;
     }
     let c = b.insts[t.a as usize];
-    let cb = type_bits(b.type_of(c.a), 8);
-    if c.op != O_ICMP || c.aux != C_ULT && c.aux != C_UGT && c.aux != C_ULE && c.aux != C_UGE || cb != 32 && cb != 64 {
+    if c.op != O_ICMP || type_bits(b.type_of(c.a), 8) > 64 {
         return VNONE;
     }
     if is_inst(t.b) && !folded[t.b as usize] && cs_kind(b, t.b, t.c) == CS_INC {

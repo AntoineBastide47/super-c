@@ -2851,6 +2851,9 @@ extend Opt {
                 self.pstate = states;
             }
             let bk = b.blocks[k];
+            if self.inner[k] != NONE {
+                changed = self.index_ivs(b, k as u32) || changed;
+            }
             self.pend.truncate(0);
             let mut called = false;
             for i in bk.start..bk.start + bk.len {
@@ -5741,6 +5744,178 @@ extend Opt {
             b.insts[i as usize] = Inst { op: O_ICMP, ty: T_I8, aux: C_EQ, a: VFLAG | s, b: z, c: VNONE };
         } else {
             self.repl[i as usize] = VFLAG | s;
+        }
+        return true;
+    }
+
+    // Body `k` of a loop whose header only tests a counter `q` (`counted`'s shape: the body jumps back): each
+    // pointer the header carries that the body steps by a constant and alone reads becomes its initial value
+    // plus that step times the iterations done, before the body's first instruction; a counter that steps
+    // down by 1 to 0, which only its step reads, first counts up from 0 to its initial value. The vectorizer
+    // and the unroller read such a loop as indexed (LLVM's canonical induction variable and its rewrite of
+    // the others). Whether it did.
+    fn index_ivs(self: &mut Self, b: &mut Body, k: u32) bool {
+        let h = self.inner[k as usize];
+        if h == NONE || h == k {
+            return false;
+        }
+        let hb = b.blocks[h as usize];
+        let bk = b.blocks[k as usize];
+        let tk = term(b, k);
+        let th = term(b, h);
+        if bk.len < 2 || hb.len != 2 || tk.op != O_JMP || b.edge_target(tk.a) != h || th.op != O_BR || th.a != hb.start || self.pred_at[h as usize + 1] - self.pred_at[h as usize] != 2 {
+            return false;
+        }
+        let stay_t = b.edge_target(th.b) == k;
+        let se = if stay_t {
+            th.b
+        } else {
+            th.c
+        };
+        if !stay_t && b.edge_target(th.c) != k || b.edge_nargs(se) != 0 {
+            return false;
+        }
+        // The preheader's edge.
+        let mut pe = NONE;
+        for j in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
+            let pb = self.preds[j as usize];
+            if pb != k {
+                let tp = term(b, pb);
+                b.succ_edges(tp, &mut self.edges);
+                for e in 0..self.edges.len() {
+                    if b.edge_target(self.edges[e]) == h {
+                        pe = self.edges[e];
+                    }
+                }
+            }
+        }
+        if pe == NONE {
+            return false;
+        }
+        // The counter: the test of a parameter with a value from outside the loop.
+        let c = b.insts[th.a as usize];
+        if c.op != O_ICMP {
+            return false;
+        }
+        let np = hb.param_len as u32;
+        let mut m = NONE;
+        for q in 0..np {
+            let pv = VPARAM | hb.param_start + q;
+            if c.a == pv && outside(b, c.b, h) || c.b == pv && outside(b, c.a, h) {
+                m = q;
+            }
+        }
+        if m == NONE {
+            return false;
+        }
+        let qv = VPARAM | hb.param_start + m;
+        let qt = b.params[(hb.param_start + m) as usize];
+        let qnext = b.edge_arg(tk.a, m);
+        let step = counter_step(b, qnext, qv);
+        if step == 0 || !in_block(b, qnext, k) || !is_int(qt) || qt == T_PTR || qt == T_I128 {
+            return false;
+        }
+        let q0 = self.val(b.edge_arg(pe, m));
+        // Down by 1 to 0: `q != 0` stays, `q == 0` leaves.
+        let bound = if c.a == qv {
+            c.b
+        } else {
+            c.a
+        };
+        let down = step == 2 && const_of(b, bound) == Some(0u64) && (stay_t && c.aux == C_NE || !stay_t && c.aux == C_EQ);
+        let up = step == 1 && const_of(b, q0) == Some(0u64);
+        if !down && !up {
+            return false;
+        }
+        // The pointers: stepped in the body by a constant, read in it alone.
+        let mut ivs = StaticVector::<(u32, u32), 8>::new();
+        for q in 0..np {
+            let pn = b.edge_arg(tk.a, q);
+            let s = ptr_step(b, pn, VPARAM | hb.param_start + q);
+            if q != m && s != 0 && in_block(b, pn, k) && ivs.len() < 8 && self.only_in(
+                b,
+                VPARAM | hb.param_start + q,
+                k,
+            ) {
+                ivs.push((q, s));
+            }
+        }
+        if ivs.len() == 0 || down && !self.only_step(b, qv, qnext, h) {
+            return false;
+        }
+        if down {
+            // Count up from 0 to the initial value: the preheader passes 0, the body adds 1, the header tests
+            // the count against the initial value.
+            let z = self.constant(b, qt, 0);
+            b.pool[(pe + 2 + m) as usize] = z;
+            let sn = b.insts[qnext as usize];
+            let one = self.constant(b, qt, 1);
+            b.insts[qnext as usize] = Inst { op: O_ADD, ty: qt, aux: 0, a: sn.a, b: one, c: VNONE };
+            if c.a == qv {
+                b.insts.index_mut(th.a as usize).b = q0;
+            } else {
+                b.insts.index_mut(th.a as usize).a = q0;
+            }
+        }
+        for x in 0..ivs.len() {
+            let (q, s) = ivs[x];
+            let p0 = self.val(b.edge_arg(pe, q));
+            let pv = self.before(b, k, bk.start, Inst { op: O_PTRADD, ty: T_PTR, aux: s as u16, a: p0, b: qv, c: 0 });
+            self.prepl[(hb.param_start + q) as usize] = pv;
+        }
+        return true;
+    }
+
+    // Whether value `v` is read by instructions and edges of block `k` alone.
+    fn only_in(self: &mut Self, b: &Body, v: Value, k: u32) bool {
+        for j in 0..b.blocks.len() {
+            if j as u32 == k {
+                continue;
+            }
+            let bj = b.blocks[j];
+            for i in bj.start..bj.start + bj.len {
+                lv::uses(b, b.insts[i as usize], &mut self.uses);
+                for u in 0..self.uses.len() {
+                    if self.uses[u] == v {
+                        return false;
+                    }
+                }
+                b.succ_edges(b.insts[i as usize], &mut self.edges);
+                for e in 0..self.edges.len() {
+                    for q in 0..b.edge_nargs(self.edges[e]) {
+                        if b.edge_arg(self.edges[e], q) == v {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    // Whether counter `q` of header `h` is read only there and by `next`, its step.
+    fn only_step(self: &mut Self, b: &Body, q: Value, next: Value, h: u32) bool {
+        for j in 0..b.blocks.len() {
+            let bj = b.blocks[j];
+            for i in bj.start..bj.start + bj.len {
+                if i == next || j as u32 == h {
+                    continue;
+                }
+                lv::uses(b, b.insts[i as usize], &mut self.uses);
+                for u in 0..self.uses.len() {
+                    if self.uses[u] == q {
+                        return false;
+                    }
+                }
+                b.succ_edges(b.insts[i as usize], &mut self.edges);
+                for e in 0..self.edges.len() {
+                    for x in 0..b.edge_nargs(self.edges[e]) {
+                        if b.edge_arg(self.edges[e], x) == q {
+                            return false;
+                        }
+                    }
+                }
+            }
         }
         return true;
     }
@@ -9282,7 +9457,27 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             b.insts[i as usize] = iconst(t.ty, y);
             return VNONE;
         }
+        if y == ones && op == O_MUL && t.ty != T_I128 {
+            b.insts[i as usize] = Inst { op: O_NEG, ty: t.ty, aux: 0, a: t.a, b: VNONE, c: VNONE };
+            return VNONE;
+        }
         return cancel(b, t);
+    }
+    // A sum with a negation is a difference, a difference with one a sum.
+    if (op == O_ADD || op == O_SUB) && t.ty != T_I128 {
+        if is_op(b, t.b, O_NEG) {
+            let o = if op == O_ADD {
+                O_SUB
+            } else {
+                O_ADD
+            };
+            b.insts[i as usize] = Inst { op: o, ty: t.ty, aux: 0, a: t.a, b: b.insts[t.b as usize].a, c: VNONE };
+            return VNONE;
+        }
+        if op == O_ADD && is_op(b, t.a, O_NEG) {
+            b.insts[i as usize] = Inst { op: O_SUB, ty: t.ty, aux: 0, a: t.b, b: b.insts[t.a as usize].a, c: VNONE };
+            return VNONE;
+        }
     }
     if t.a == t.b {
         if op == O_AND || op == O_OR {
@@ -9290,6 +9485,41 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         }
         if op == O_SUB || op == O_XOR {
             b.insts[i as usize] = iconst(t.ty, 0);
+        }
+    }
+    // `(x - y) - x` and `x - (x + y)` are `-y` (a constant negated), `x - (x - y)` is `y`.
+    if op == O_SUB && t.ty != T_I128 {
+        let none = Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE };
+        let c = if (t.b & (VPARAM | VFLAG)) == 0 {
+            b.insts[t.b as usize]
+        } else {
+            none
+        };
+        if c.op == O_SUB && same_term(b, c.a, t.a) {
+            return c.b;
+        }
+        let a = if (t.a & (VPARAM | VFLAG)) == 0 {
+            b.insts[t.a as usize]
+        } else {
+            none
+        };
+        let y = if a.op == O_SUB && same_term(b, a.a, t.b) {
+            a.b
+        } else if c.op == O_ADD && same_term(b, c.a, t.a) {
+            c.b
+        } else if c.op == O_ADD && same_term(b, c.b, t.a) {
+            c.a
+        } else {
+            VNONE
+        };
+        if y != VNONE {
+            let k = const_of(b, y);
+            b.insts[i as usize] = if k.is_some() {
+                iconst(t.ty, le::trunc_bits(k.unwrap().wrapping_neg(), type_bits(t.ty, ptr)))
+            } else {
+                Inst { op: O_NEG, ty: t.ty, aux: 0, a: y, b: VNONE, c: VNONE }
+            };
+            return VNONE;
         }
     }
     return cancel(b, t);
@@ -11074,6 +11304,72 @@ fn ret_through(b: &Body, e: u32) (bool, Value) {
         }
     }
     return (true, r.a);
+}
+
+// The step of counter parameter `q` that `v` (what a loop passes it back) takes: 1 for `q + 1`, 2 for `q - 1`
+// (or `q + -1`), else 0.
+fn counter_step(b: &Body, v: Value, q: Value) u32 {
+    if !is_op(b, v, O_ADD) && !is_op(b, v, O_SUB) || b.insts[v as usize].a != q {
+        return 0;
+    }
+    let t = b.insts[v as usize];
+    let c = const_of(b, t.b);
+    if c.is_none() {
+        return 0;
+    }
+    let m = width_mask(t.ty, 8);
+    let k = c.unwrap() & m;
+    return if t.op == O_ADD && k == 1 || t.op == O_SUB && k == m {
+        1
+    } else if t.op == O_SUB && k == 1 || t.op == O_ADD && k == m {
+        2
+    } else {
+        0
+    };
+}
+
+// The constant positive byte step of pointer parameter `q` that `v` (what a loop passes it back) takes,
+// `ptradd q, k * scale + c` of a constant `k` or none (the step up to 0xFFFF); else 0.
+fn ptr_step(b: &Body, v: Value, q: Value) u32 {
+    if !is_op(b, v, O_PTRADD) || b.insts[v as usize].a != q {
+        return 0;
+    }
+    let t = b.insts[v as usize];
+    let mut s = (t.c as i32) as i64;
+    if t.b != VNONE {
+        let k = const_of(b, t.b);
+        if k.is_none() || k.unwrap() > 0xFFFF {
+            return 0;
+        }
+        s += k.unwrap() as i64 * t.aux as i64;
+    }
+    return if s > 0 && s <= 0xFFFF {
+        s as u32
+    } else {
+        0
+    };
+}
+
+// Whether value `v` of `b` is defined outside block `k`: not one of its instructions or parameters.
+fn outside(b: &Body, v: Value, k: u32) bool {
+    if v == VNONE || (v & VFLAG) != 0 {
+        return false;
+    }
+    let bk = b.blocks[k as usize];
+    if (v & VPARAM) != 0 {
+        let q = v & ~VPARAM;
+        return q < bk.param_start || q >= bk.param_start + bk.param_len as u32;
+    }
+    return !in_block(b, v, k);
+}
+
+// Whether instruction value `v` of `b` is one of block `k`'s.
+fn in_block(b: &Body, v: Value, k: u32) bool {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let bk = b.blocks[k as usize];
+    return v >= bk.start && v < bk.start + bk.len;
 }
 
 const fn jump(e: u32) Inst {
