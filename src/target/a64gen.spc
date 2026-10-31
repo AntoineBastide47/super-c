@@ -2250,6 +2250,19 @@ extend Gen {
                 );
             }
         }
+        // A parameter of 8 or 16 bits in a register that a loop reads zero-extended (`loop_zext`): extended in
+        // place once, as the bits above its type are free, so no use in the loop extends it again.
+        for k in 0..np {
+            let x = ni + e0 + k;
+            let t = self.xty(x);
+            let v = self.va[x as usize];
+            if is_int(t) && (t == T_I8 || t == T_I16) && v.reg != NOREG && v.reg < V0 && (v.home == H_NONE || v.home == H_FIXED) && self.loop_zext(
+                VPARAM | e0 + k,
+            ) {
+                self.emit(a::uxt(v.reg, v.reg, type_bits(t, self.ptr)));
+                self.va.index_mut(x as usize).clean = true;
+            }
+        }
         // An aggregate result: its memory is x8's, or a slot the return reads.
         let rt = b.pool[b.sig as usize + 2];
         if (rt & AGG) == 0 && self.self_lay.ret.kind == ab::L_SRET {
@@ -2269,6 +2282,27 @@ extend Gen {
             }
         }
         return true;
+    }
+
+    // Whether an instruction of a loop reads value `v` zero-extended: compares it unsigned or for equality,
+    // extends it, shifts it right logically or divides it unsigned.
+    fn loop_zext(self: &Self, v: Value) bool {
+        let b = self.b();
+        for k in 0..b.blocks.len() {
+            if self.lv.inner[k] == NONE {
+                continue;
+            }
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                let op = t.op;
+                let reads = t.a == v || t.b == v && (op == O_ICMP || op == O_UDIV || op == O_UREM);
+                if reads && (op == O_ICMP && (t.aux <= C_NE || t.aux >= C_ULT && t.aux <= C_UGE) || op == O_ZEXT || op == O_LSHR && t.a == v || op == O_UDIV || op == O_UREM) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // Whether the aggregate parameter `x`, passed in registers (`loc`), is read only by loads of the entry
@@ -3644,11 +3678,16 @@ extend Gen {
             }
             return true;
         }
-        // A product of two folded 32-bit extensions (`lv::FOLD_MULL`): `umull` or `smull`.
+        // A product of a folded 32-bit extension and another or a constant (`lv::FOLD_MULL`): `umull` or
+        // `smull`.
         if op == O_MUL && (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] {
             let e = lv::mull_ext(self.b(), t);
             let rn = self.reg(self.b().insts[t.a as usize].a) as u32;
-            let rm = self.reg(self.b().insts[t.b as usize].a) as u32;
+            let rm = if self.lv.pfold[t.b as usize] {
+                self.reg(self.b().insts[t.b as usize].a)
+            } else {
+                self.reg(t.b)
+            } as u32;
             let rd = self.def_step(i) as u32;
             self.emit(a::mull(e == O_SEXT, rd, rn, rm));
             return true;

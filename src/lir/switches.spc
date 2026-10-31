@@ -350,15 +350,19 @@ fn edge_index(b: &Body, es: &Vector<u32>, e: u32) usize {
     return es.len();
 }
 
-// Clusters `l` to `r` of `cls` as a bit test: the offset from the first cluster's low value, checked
-// within the span (unless `lo` to `hi` is the span), then per edge a test of its bit in the edge's mask,
-// the last edge none when the clusters cover the span.
+// Clusters `l` to `r` of `cls` as a bit test: the offset from the first cluster's low value (from 0 when
+// every value is below BT_SPAN), checked within the span (unless `lo` to `hi` is the span), then per edge a
+// test of its bit in the edge's mask, the last edge none when the clusters cover the span.
 fn bit_test(b: &mut Body, sw: &Sw, cls: &Vector<Cl>, l: usize, r: usize, lo: u64, hi: u64) u32 {
-    let base = cls[l].lo;
+    let base = if cls[r - 1].hi < BT_SPAN {
+        0u64
+    } else {
+        cls[l].lo
+    };
     let span = cls[r - 1].hi - base;
     let mut es = Vector::<u32>::new();
     let mut masks = Vector::<u64>::new();
-    let mut full = true;
+    let mut full = base == cls[l].lo;
     for j in l..r {
         let q = edge_index(b, &es, cls[j].e);
         if q == es.len() {

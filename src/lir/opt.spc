@@ -4536,6 +4536,19 @@ extend Opt {
                 u.b = u.a;
                 b.insts[i as usize] = u;
             }
+            // A truncation of an addition, subtraction, product or bitwise operation of two values extended
+            // from its type, which it alone reads, is that operation on them: the result's low bits are
+            // those of the operands'. (Another reader keeps the wide operation; the truncation is free.)
+            if t.op == O_TRUNC && is_int(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE && (t.a as usize >= self.icount.len() || self.icount[t.a as usize] == 1) {
+                let w = b.insts[t.a as usize];
+                if w.op >= O_ADD && w.op <= O_XOR && !(w.op >= O_SDIV && w.op <= O_UREM) {
+                    let x = ext_from(b, w.a, t.ty);
+                    let y = ext_from(b, w.b, t.ty);
+                    if x != VNONE && y != VNONE {
+                        b.insts[i as usize] = Inst { op: w.op, ty: t.ty, aux: 0, a: x, b: y, c: VNONE };
+                    }
+                }
+            }
             let r = simplify(pk, b, i);
             if r != VNONE {
                 self.repl[i as usize] = r;
@@ -4568,12 +4581,44 @@ extend Opt {
             }
             self.pow2(b, i);
             self.shift_pair(pk, b, i);
+            self.add_pair(pk, b, i);
             if self.divide(pk, b, k, i) || self.rem_by_quotient(b, k, i) {
                 return true;
             }
             return self.number(pk, b, k, i) || !same(b.insts[i as usize], t0);
         }
         return !same(t, t0);
+    }
+
+    // Instruction `i`, a sum or difference of a constant and a sum or difference of a constant: in place one
+    // sum of the inner operand and the constants combined (`(x + 1) + 1` is `x + 2`; an unrolled loop's
+    // counter steps).
+    fn add_pair(self: &mut Self, pk: &Package, b: &mut Body, i: u32) {
+        let t = b.insts[i as usize];
+        if t.op != O_ADD && t.op != O_SUB || !is_int(t.ty) || t.ty == T_I128 || (t.a & (VPARAM | VFLAG)) != 0 {
+            return;
+        }
+        let x = b.insts[t.a as usize];
+        let k2 = const_of(b, t.b);
+        if x.op != O_ADD && x.op != O_SUB || x.ty != t.ty || k2.is_none() {
+            return;
+        }
+        let k1 = const_of(b, x.b);
+        if k1.is_none() {
+            return;
+        }
+        let s1 = if x.op == O_ADD {
+            k1.unwrap()
+        } else {
+            0u64.wrapping_sub(k1.unwrap())
+        };
+        let s2 = if t.op == O_ADD {
+            k2.unwrap()
+        } else {
+            0u64.wrapping_sub(k2.unwrap())
+        };
+        let kv = self.constant(b, t.ty, le::trunc_bits(s1.wrapping_add(s2), type_bits(t.ty, pk.ptr_bytes)));
+        b.insts[i as usize] = Inst { op: O_ADD, ty: t.ty, aux: 0, a: x.a, b: kv, c: VNONE };
     }
 
     // Instruction `i`, a logical shift right of a shift left by the same constant (or left of right): in
@@ -4737,8 +4782,8 @@ extend Opt {
 
     // `or` `i` of block `k` that no `or` reads, a tree of `or`s each read once whose leaves are at least 3
     // and at most SET_MAX equalities of one integer `x` with constants within 64 of each other, `lo` the
-    // least: `x - lo <=u span` and bit `x - lo` of the constants' mask (LLVM's bit tests for switches).
-    // Whether it did.
+    // least: `x - lo <=u span` and bit `x - lo` of the constants' mask (LLVM's bit tests for switches); from
+    // 0 when every constant is below 64. Whether it did.
     fn bit_set(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
         if is_vec(t.ty) || i as usize < self.in_or.len() && self.in_or[i as usize] {
@@ -4791,6 +4836,9 @@ extend Opt {
         if hi - lo >= 64 {
             return false;
         }
+        if hi < 64 {
+            lo = 0;
+        }
         let mut mask: u64 = 0;
         for q in 0..vals.len() {
             mask |= 1u64 << (vals[q] & m) - lo;
@@ -4812,10 +4860,8 @@ extend Opt {
         let mv = self.constant(b, T_I64, mask);
         let sh = self.before(b, k, i, Inst { op: O_LSHR, ty: T_I64, aux: 0, a: mv, b: amt, c: VNONE });
         let low = self.before(b, k, i, Inst { op: O_TRUNC, ty: t.ty, aux: 0, a: sh, b: VNONE, c: VNONE });
-        let one = self.constant(b, t.ty, 1);
-        let bit = self.before(b, k, i, Inst { op: O_AND, ty: t.ty, aux: 0, a: low, b: one, c: VNONE });
-        let zero = self.constant(b, t.ty, 0);
-        b.insts[i as usize] = Inst { op: O_SELECT, ty: t.ty, aux: 0, a: inr, b: bit, c: zero };
+        // The range test is 0 or 1: it keeps bit 0 of the shifted mask alone.
+        b.insts[i as usize] = Inst { op: O_AND, ty: t.ty, aux: 0, a: inr, b: low, c: VNONE };
         return true;
     }
 
@@ -5208,6 +5254,32 @@ extend Opt {
         }
         let (m, sh, add) = magic(d, bits);
         let n = t.a;
+        let mut q = VNONE;
+        if bits == 32 && !add {
+            // A 32-bit dividend: its 64-bit product by the multiplier, shifted once by 32 more.
+            let w = self.before(b, k, i, Inst { op: O_ZEXT, ty: T_I64, aux: 0, a: n, b: VNONE, c: VNONE });
+            let mv = self.constant(b, T_I64, m);
+            let p = self.before(b, k, i, Inst { op: O_MUL, ty: T_I64, aux: 0, a: w, b: mv, c: VNONE });
+            let sv = self.constant(b, T_I64, 32 + sh);
+            let h = self.before(b, k, i, Inst { op: O_LSHR, ty: T_I64, aux: 0, a: p, b: sv, c: VNONE });
+            q = self.before(b, k, i, Inst { op: O_TRUNC, ty: t.ty, aux: 0, a: h, b: VNONE, c: VNONE });
+        }
+        if q == VNONE {
+            q = self.mulhu_quotient(b, k, i, n, m, sh, add);
+        }
+        if t.op == O_UDIV {
+            self.repl[i as usize] = q;
+            return true;
+        }
+        let prod = self.before(b, k, i, Inst { op: O_MUL, ty: t.ty, aux: 0, a: q, b: t.b, c: VNONE });
+        self.repl[i as usize] = self.before(b, k, i, Inst { op: O_SUB, ty: t.ty, aux: 0, a: n, b: prod, c: VNONE });
+        return true;
+    }
+
+    // `divide`'s quotient of `n` (instruction `i` of block `k`) by the high half of its product by `m`,
+    // `add` adding `n` back (a multiplier one bit wider than the type), shifted right by `sh`.
+    fn mulhu_quotient(self: &mut Self, b: &mut Body, k: u32, i: u32, n: Value, m: u64, sh: u64, add: bool) Value {
+        let t = b.insts[i as usize];
         let mv = self.constant(b, t.ty, m);
         let h = self.before(b, k, i, Inst { op: O_MULHU, ty: t.ty, aux: 0, a: n, b: mv, c: VNONE });
         let mut q = h;
@@ -5221,13 +5293,7 @@ extend Opt {
             let sv = self.constant(b, t.ty, sh);
             q = self.before(b, k, i, Inst { op: O_LSHR, ty: t.ty, aux: 0, a: q, b: sv, c: VNONE });
         }
-        if t.op == O_UDIV {
-            self.repl[i as usize] = q;
-            return true;
-        }
-        let prod = self.before(b, k, i, Inst { op: O_MUL, ty: t.ty, aux: 0, a: q, b: t.b, c: VNONE });
-        self.repl[i as usize] = self.before(b, k, i, Inst { op: O_SUB, ty: t.ty, aux: 0, a: n, b: prod, c: VNONE });
-        return true;
+        return q;
     }
 
     // `divide` of signed quotient or remainder `i` by `d`, the constant sign-extended. By a power of two
@@ -6812,6 +6878,9 @@ extend Run {
             let _ = sc.o.run(p, b, true);
         }
         let _ = sc.o.split_exits(p, b);
+        if ret_edges(b) {
+            sc.o.forget();
+        }
         sc.o.estimate(p, b);
         if r.print.len() != 0 {
             r.print_body(p, j, b);
@@ -7917,19 +7986,6 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             return VNONE;
         }
     }
-    // A truncation of an addition, subtraction, product or bitwise operation of two values extended from
-    // its type is that operation on them: the result's low bits are those of the operands'.
-    if t.op == O_TRUNC && is_int(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 {
-        let w = b.insts[t.a as usize];
-        if w.op >= O_ADD && w.op <= O_XOR && !(w.op >= O_SDIV && w.op <= O_UREM) {
-            let x = ext_from(b, w.a, t.ty);
-            let y = ext_from(b, w.b, t.ty);
-            if x != VNONE && y != VNONE {
-                b.insts[i as usize] = Inst { op: w.op, ty: t.ty, aux: 0, a: x, b: y, c: VNONE };
-                return VNONE;
-            }
-        }
-    }
     if t.op == O_SEXT || t.op == O_ZEXT || t.op == O_TRUNC || t.op == O_INTTOPTR || t.op == O_PTRTOINT {
         let x = const_of(b, t.a);
         let mut r: u64 = 0;
@@ -8784,6 +8840,74 @@ const fn other_edge(t: Inst, e: u32) u32 {
     } else {
         t.b
     };
+}
+
+// At most RET_EDGES branch edges of a body return through blocks of their own (`ret_edges`).
+const RET_EDGES: u32 = 8;
+
+// Give each edge of a branch of `b` that passes arguments to a block that only returns a block of its own
+// that returns the value (`ret_through`), up to RET_EDGES and but one edge into each such block (which stays
+// reachable): the native code returns at once rather than move the arguments and jump (LLVM's tail
+// duplication of return blocks; the walk makes a jump's own return). Whether any.
+fn ret_edges(b: &mut Body) bool {
+    let nb = b.blocks.len();
+    // Per block, the edges into it.
+    let mut into = Vector::<u32>::with_capacity(nb);
+    for _ in 0..nb {
+        into.push(0);
+    }
+    let mut es = Vector::<u32>::new();
+    for k in 0..nb {
+        let bk = b.blocks[k];
+        if bk.len != 0 {
+            b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut es);
+            for q in 0..es.len() {
+                into[b.edge_target(es[q]) as usize] += 1;
+            }
+        }
+    }
+    let mut n: u32 = 0;
+    for k in 0..nb {
+        let bk = b.blocks[k];
+        if bk.len == 0 {
+            continue;
+        }
+        let at = bk.start + bk.len - 1;
+        let mut t = b.insts[at as usize];
+        if t.op != O_BR {
+            continue;
+        }
+        for side in 0..2 {
+            let e = if side == 0 {
+                t.b
+            } else {
+                t.c
+            };
+            let (ok, v) = ret_through(b, e);
+            let j = b.edge_target(e);
+            if !ok || b.edge_nargs(e) == 0 || n == RET_EDGES || into[j as usize] < 2 {
+                continue;
+            }
+            into[j as usize] -= 1;
+            let rb = b.blocks[j as usize];
+            let r = b.add_block([]);
+            b.blocks.index_mut(r as usize).flags = rb.flags;
+            b.begin(r);
+            let _ = b.emit(Inst { op: O_RET, ty: T_NONE, aux: 0, a: v, b: VNONE, c: VNONE }, b.locs[rb.start as usize]);
+            if b.inl.len() != 0 {
+                b.inl.push(b.inl[rb.start as usize]);
+            }
+            let ne = b.edge(r, []);
+            if side == 0 {
+                t.b = ne;
+            } else {
+                t.c = ne;
+            }
+            n += 1;
+        }
+        b.insts[at as usize] = t;
+    }
+    return n != 0;
 }
 
 fn ret_through(b: &Body, e: u32) (bool, Value) {

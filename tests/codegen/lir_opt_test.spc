@@ -269,12 +269,26 @@ b1(v35: i128, v36: i64):
 }
 
 // A truncated sum, difference, product or bitwise operation of extended values is that operation in the
-// narrow type; a quotient is not, nor an operand extended from another type.
+// narrow type; a quotient is not, nor an operand extended from another type, nor a sum another
+// instruction reads too (`sat`: the truncation is free, a narrow sum another instruction).
 @test
 fn a_truncated_operation_of_extensions_narrows() {
     let (b, a) = optimized(
         M"(lir ptr 8
 sym @f fn global
+sym @sat fn global
+fn @sat
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = iconst.i32 255
+  v3 = iconst.i8 -1
+  v4 = zext.i32 v0
+  v5 = zext.i32 v1
+  v6 = add.i32 v4, v5
+  v7 = icmp.ugt v6, v2
+  v8 = trunc.i8 v6
+  v9 = select.i8 v7, v3, v8
+  ret v9
 fn @f
   sig (i32, i32, i16) -> i32
 b0(v0: i32, v1: i32, v2: i16):
@@ -299,6 +313,12 @@ b0(v0: i32, v1: i32, v2: i16):
     let mut e = leval::Eval::new(&b);
     let o = e.run(b.find_symbol("f"), args);
     same_result(&b, &a, "f", args, o.value);
+    let s = text_of(&a, "sat");
+    assert(count_of(&s, "add.") == 1 && s.contains("trunc.i8"), s.as_str());
+    let low: []u64 = [100, 55];
+    same_result(&b, &a, "sat", low, 155);
+    let high: []u64 = [200, 56];
+    same_result(&b, &a, "sat", high, 255);
 }
 
 // Tail recursion elimination (`Package.tail`): a call of the body's own function whose result its block
@@ -2930,7 +2950,7 @@ b0(v0: i64, v1: i64, v2: i64):
 
 // Arithmetic rewrites: a product, quotient or remainder by a power of two is a shift or a mask; a quotient
 // or remainder by another constant is a high product (`mulhu`, with the fix-up of a multiplier wider
-// than the type for 7); a flag picked as 1 or 0 is the flag, as 0 or 1 or negated the opposite
+// than the type for 7; of 32 bits, the 64-bit product shifted once); a flag picked as 1 or 0 is the flag, as 0 or 1 or negated the opposite
 // comparison; an ordering a `cmp` gives, compared with 0, is the comparison; a pointer turned into an
 // integer and back is the pointer.
 @test
@@ -3009,7 +3029,10 @@ b0(v0: ptr):
     let x: []u64 = [100];
     same_result(&b, &a, "p2", x, 816);
     let d = text_of(&a, "digits");
-    assert(!d.contains("udiv") && !d.contains("urem") && d.contains("mulhu"), d.as_str());
+    assert(
+        !d.contains("udiv") && !d.contains("urem") && count_of(&d, "mulhu") == 3 && d.contains("iconst.i64 38"),
+        d.as_str(),
+    );
     let small: []u64 = [12345, 123456, 200];
     same_result(&b, &a, "digits", small, 1234 + 456 + 4 + 1763);
     let top: []u64 = [0xFFFFFFFFFFFFFFFF, 0xFFFFFFFF, 0xFF];
@@ -5279,4 +5302,75 @@ b2:
     same_result(&b, &a, "table", big, 0);
     let ts = text_of(&a, "sparse");
     assert(ts.contains("switch"), ts.as_str());
+}
+
+// A sum or difference of a constant and another of a constant is one sum (`(x + 1) + 1` is `x + 2`).
+@test
+fn chained_constant_sums_combine() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 1
+  v2 = iconst.i32 3
+  v3 = iconst.i32 5
+  v4 = add.i32 v0, v1
+  v5 = add.i32 v4, v1
+  v6 = sub.i32 v5, v2
+  v7 = add.i32 v6, v3
+  ret v7
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(count_of(&t, "add.") + count_of(&t, "sub.") == 1 && t.contains("iconst.i32 4"), t.as_str());
+    let x: []u64 = [10];
+    same_result(&b, &a, "f", x, 14);
+    let y: []u64 = [0xFFFFFFFE];
+    same_result(&b, &a, "f", y, 2);
+}
+
+// A branch edge into a block that only returns its parameter returns from a block of its own, but one edge
+// into that block stays.
+@test
+fn branch_edges_into_a_return_return_at_once() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @g fn global noinline
+sym @f fn global
+fn @g
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 9
+  v2 = mul.i64 v0, v1
+  ret v2
+fn @f
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 10
+  v2 = iconst.i64 20
+  v3 = iconst.i64 5
+  v4 = iconst.i64 7
+  v5 = icmp.ult v0, v1
+  br v5, b1(v3), b2
+b1(v6: i64):
+  ret v6
+b2:
+  v7 = call.i64 @g(v0) : (i64) -> i64
+  v8 = icmp.ult v7, v2
+  br v8, b1(v4), b3
+b3:
+  v9 = call.i64 @g(v7) : (i64) -> i64
+  ret v9
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(count_of(&t, "ret ") == 3 && t.contains("ret v3") && t.contains("b1(v4)"), t.as_str());
+    let x: []u64 = [3];
+    same_result(&b, &a, "f", x, 5);
+    let y: []u64 = [11];
+    same_result(&b, &a, "f", y, 891);
+    let z: []u64 = [1];
+    same_result(&b, &a, "f", z, 5);
 }

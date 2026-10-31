@@ -23,8 +23,8 @@ import ir::core as core;
 /// one after the other (`conj`: arm64's `ccmp`); a mask of a 32- or 64-bit shift's amount to the low bits
 /// of the width, which the shift takes modulo its width anyway (`shift_amount`); a `select`'s side that is
 /// the other side plus 1, negated or inverted (`cs_kind`: arm64's `csinc`, `csneg`, `csinv`); two
-/// extensions of the same kind from 32 bits that a 64-bit product alone reads (`mull_ext`: arm64's
-/// `umull`, `smull`); a shift by a constant that a 32- or 64-bit sum, difference or bitwise operation
+/// extensions of the same kind from 32 bits, or one and a constant within the extension's range, that a
+/// 64-bit product alone reads (`mull_ext`: arm64's `umull`, `smull`); a shift by a constant that a 32- or 64-bit sum, difference or bitwise operation
 /// alone reads as an operand it may take shifted (`shop_side`: arm64's shifted register operand); a
 /// scalar float comparison only selects and branches read, of one condition (`FOLD_FCMP`; not `one`,
 /// `ueq`).
@@ -529,9 +529,10 @@ extend Live {
                 if t.op != O_MUL || t.ty != T_I64 || self.pfold[i] || mull_ext(b, t) == 0 {
                     continue;
                 }
-                if self.count[t.a as usize] == 1 && self.count[t.b as usize] == 1 && !self.pfold[t.a as usize] && !self.pfold[t.b as usize] {
+                let k = is_const_val(b, t.b);
+                if self.count[t.a as usize] == 1 && (k || self.count[t.b as usize] == 1) && !self.pfold[t.a as usize] && !self.pfold[t.b as usize] {
                     self.pfold[t.a as usize] = true;
-                    self.pfold[t.b as usize] = true;
+                    self.pfold[t.b as usize] = !k;
                 }
             }
         }
@@ -2015,13 +2016,27 @@ pub(package) fn shop_side(b: &Body, pfold: &Vector<bool>, t: Inst) Value {
 }
 
 /// The extension (`O_ZEXT`, `O_SEXT`) both operands of 64-bit product `t` are, from 32 bits, two
-/// instructions; 0 when not.
+/// instructions, or its first operand is with the second a constant the extension of its low 32 bits; 0
+/// when not.
 pub(package) fn mull_ext(b: &Body, t: Inst) u8 {
     if !is_inst(t.a) || !is_inst(t.b) || t.a == t.b {
         return 0;
     }
     let x = b.insts[t.a as usize];
     let y = b.insts[t.b as usize];
+    if is_const_val(b, t.b) && (x.op == O_ZEXT || x.op == O_SEXT) && b.type_of(x.a) == T_I32 {
+        let c = const_val(b, t.b);
+        let fits = if x.op == O_ZEXT {
+            c >> 32 == 0
+        } else {
+            c as i64 >= -2147483648 && c as i64 < 2147483648
+        };
+        return if fits {
+            x.op
+        } else {
+            0u8
+        };
+    }
     if x.op != y.op || x.op != O_ZEXT && x.op != O_SEXT || b.type_of(x.a) != T_I32 || b.type_of(y.a) != T_I32 {
         return 0;
     }

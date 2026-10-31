@@ -1642,7 +1642,7 @@ b3:
         assert(!t.contains("br ") && !t.contains("jmp "), t.as_str());
     }
     let d = text_of(&a, "down");
-    assert(d.contains("icmp.sge v1, v4"), d.as_str());
+    assert(d.contains("icmp.sge v1, v") && d.contains("iconst.i64 -9223372036854775807"), d.as_str());
     // Argument pairs; the one-argument functions take the first.
     let args: []u64 = [20, 0, 7, 0xFFFFFFFFFFFFFFF7, 3, 3, 0xFFFFFFFFFFFFFFFE, 9, 0xFFFFFFFFFFFFFFFB, 4, 1000, 1, 0, 1];
     for f in 0..names.len() {
