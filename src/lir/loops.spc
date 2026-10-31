@@ -1738,9 +1738,6 @@ extend LoopOpt {
 
     // The plan fails for reason `why` (`report`), about an instruction of opcode `op` (0: none).
     fn no(self: &mut Self, why: str<'static>, op: u8) bool {
-        if stdlib::getenv("ZZWHY") != null {
-            eprint("ZZWHY {} {}\n", why, op);
-        }
         self.why = why;
         self.why_op = op;
         return false;
@@ -2559,6 +2556,10 @@ extend LoopOpt {
         let op = t.op;
         let eb = type_bytes(t.ty, ptr);
         if op == O_SHL || op == O_LSHR || op == O_ASHR {
+            // By a constant: SSE2's shifts by an immediate, lanes of 2 to 8 bytes (none arithmetic of 8).
+            if is_const(b, t.b) {
+                return eb < 2 || op == O_ASHR && eb == 8;
+            }
             return self.vbytes < 32 || eb < 4 || op == O_ASHR && eb == 8;
         }
         // A narrower integer to a float extends, then converts as signed (`vconv`).

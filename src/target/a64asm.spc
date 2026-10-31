@@ -1082,7 +1082,7 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
             ws(s, i);
             return parse_list(s, i, k - t::K::T1B + 1, 1, &mut v[at]);
         },
-        t::K::IMM4X | t::K::SHL8 | t::K::SHL16 | t::K::SHL32 | t::K::IMM6X => {
+        t::K::IMM4X | t::K::SHL8 | t::K::SHL16 | t::K::SHL32 | t::K::IMM6X | t::K::BMASK => {
             return number(s, i, &mut v[at]);
         },
         t::K::FELEM => {
@@ -2110,6 +2110,7 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
             o.push_str(" }");
         },
         t::K::IMM4X | t::K::SHL8 | t::K::SHL16 | t::K::SHL32 | t::K::IMM6X => o.format_into("#{}", a),
+        t::K::BMASK => o.format_into("#0x{}", hex(a as u64)),
         _ => {},
     }
 }

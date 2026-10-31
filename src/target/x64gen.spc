@@ -1428,14 +1428,14 @@ extend Gen {
                 &mut un,
             ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_WCONST) && self.in_reg(t.ty) || self.conv_reg(
                 t,
-            ) || self.shift_reg(t) || (t.op == O_VEXTRACT || t.op == O_VINSERT) && self.lane_reg(t) || (t.op == O_VZIPLO || t.op == O_VZIPHI) && type_bytes(
+            ) || self.shift_reg(t) || self.shift_imm(t) != NONE || (t.op == O_VEXTRACT || t.op == O_VINSERT) && self.lane_reg(
+                t,
+            ) || (t.op == O_VZIPLO || t.op == O_VZIPHI) && type_bytes(t.ty, 8) <= 32 && self.in_reg(t.ty) || t.op == O_VUNZIP && type_bytes(
                 t.ty,
                 8,
-            ) <= 32 && self.in_reg(t.ty) || t.op == O_VUNZIP && type_bytes(t.ty, 8) >= 16 && self.in_reg(t.ty) || t.op == O_VCMP && self.in_reg(
-                self.vt(t.a),
-            ) && (is_float(lane_type(self.vt(t.a))) || type_bytes(lane_type(t.ty), 8) < 8 || self.avx) || self.avx && is_vec(
-                t.ty,
-            ) && type_bytes(t.ty, 8) == 32 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && avx_of_op(
+            ) >= 16 && self.in_reg(t.ty) || t.op == O_VCMP && self.in_reg(self.vt(t.a)) && (is_float(
+                lane_type(self.vt(t.a)),
+            ) || type_bytes(lane_type(t.ty), 8) < 8 || self.avx) || self.avx && is_vec(t.ty) && type_bytes(t.ty, 8) == 32 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && avx_of_op(
                 t.op,
                 lane_type(t.ty),
             ) != NONE || self.z512 && is_vec(t.ty) && type_bytes(t.ty, 8) == 64 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && evex_of_op(
@@ -9698,6 +9698,36 @@ extend Gen {
             self.vacate(x::RAX);
             self.vacate(x::RDX);
         }
+        let k = self.shift_imm(t);
+        if k != NONE {
+            // `psll`, `psrl`, `psra` by an immediate (66 0F 71, 72, 73 by the lanes' bytes; /6, /2, /4).
+            let eb = type_bytes(lt, 8);
+            let opc: u32 = if eb == 2 {
+                0x71
+            } else if eb == 4 {
+                0x72
+            } else {
+                0x73
+            };
+            let dg: u8 = if op == O_SHL {
+                6
+            } else if op == O_LSHR {
+                2
+            } else {
+                4
+            };
+            let rx = self.vec_use(t.a, self.vs0);
+            if self.avx {
+                let rd = self.vec_def(i) - V0;
+                self.c.vex_rr(0x66, 1, opc, false, nb == 32, dg, rd, rx - V0);
+            } else {
+                let rd = self.def_over(i, t.a, rx) - V0;
+                self.c.vmov(rd, rx - V0);
+                self.c.sse_rr(0x66, 0x0F00 | opc, dg, rd);
+            }
+            self.c.byte(k);
+            return true;
+        }
         if self.shift_reg(t) {
             // AVX2: `vpsllv`, `vpsrlv`, `vpsrav` (VEX.66.0F38 47, 45, 46) shift each lane by its own amount.
             let rx = self.vec_use(t.a, self.vs0) - V0;
@@ -9900,6 +9930,62 @@ extend Gen {
                 self.st_lane(xr, d, k, tl, false);
             }
         }
+    }
+
+    // The amount of vector shift `t` in registers when every lane shifts by one constant below the lanes'
+    // width (a splat of a constant, or a wide constant of equal lanes): lanes of 2, 4 or 8 bytes, but an
+    // arithmetic shift of 8-byte lanes, which SSE2 lacks; vectors of 16 bytes, of 32 with AVX2. NONE when
+    // not.
+    fn shift_imm(self: &Self, t: Inst) u32 {
+        let lt = lane_type(t.ty);
+        let eb = type_bytes(lt, 8);
+        let nb = type_bytes(t.ty, 8);
+        if !is_vec(t.ty) || !(t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR) || !is_int(lt) || eb < 2 || t.op == O_ASHR && eb == 8 || !(nb == 16 && in_vreg(
+            t.ty,
+        ) || nb == 32 && self.avx && self.in_reg(t.ty)) || (t.b & (VPARAM | VFLAG)) != 0 || t.b == VNONE {
+            return NONE;
+        }
+        let b = self.b();
+        let a = b.insts[t.b as usize];
+        let bits = 8 * eb as u64;
+        let mut k: u64 = 0;
+        if a.op == O_SPLAT && (a.a & (VPARAM | VFLAG)) == 0 && b.insts[a.a as usize].op == O_ICONST {
+            let mut v: u64 = 0;
+            if !self.const_of(a.a, &mut v) {
+                return NONE;
+            }
+            k = v & if bits == 64 {
+                ~0u64
+            } else {
+                (1u64 << bits) - 1
+            };
+        } else if a.op == O_WCONST {
+            let w = b.words[a.a as usize];
+            k = w & if bits == 64 {
+                ~0u64
+            } else {
+                (1u64 << bits) - 1
+            };
+            for q in 0..a.b {
+                let x = b.words[(a.a + q) as usize];
+                for l in 0..64 / bits {
+                    if (x >> l * bits & if bits == 64 {
+                        ~0u64
+                    } else {
+                        (1u64 << bits) - 1
+                    }) != k {
+                        return NONE;
+                    }
+                }
+            }
+        } else {
+            return NONE;
+        }
+        return if k < bits {
+            k as u32
+        } else {
+            NONE
+        };
     }
 
     // Whether vector shift `t` has an AVX2 form in registers (`vec_arith`): lanes of 4 or 8 bytes, but an
@@ -10288,10 +10374,14 @@ extend Gen {
         } else {
             sse_of_simd(c, lt, sg, &mut un)
         };
+        // The operation `sse_reg` sees: a negation, a unary one, a difference (which does not commute), or
+        // another binary one (which does).
         let o = if un && c == core::SIMD_WRAP_NEG {
             O_NEG
         } else if un {
             O_FADD
+        } else if c == core::SIMD_WRAP_SUB {
+            O_SUB
         } else {
             O_ADD
         };

@@ -958,12 +958,15 @@ extend Opt {
     }
 
     // Blocks the last rebuild merged are one block now, the selects the last walk made are new, a fold of
-    // the last walk came after its readers (`refold`), and a loop may write less: one more walk numbers and forwards across the blocks (a load the second
+    // the last walk came after its readers (`refold`), a jump this `run` made a return left the values it
+    // passed dead, which the walk counted where it would make two returns one (`rethru`, `ret_diamond`), and
+    // a loop may write less: one more walk numbers and forwards across the blocks (a load the second
     // repeats), simplifies the selects and hoists the loads. Whether it ran.
     fn rewalk(self: &mut Self, pk: &Package, b: &mut Body) bool {
-        if !self.merged && !self.selected && !self.unstored && !self.refold {
+        if !self.merged && !self.selected && !self.unstored && !self.refold && !self.rethru {
             return false;
         }
+        self.rethru = false;
         self.tables(pk, b, K_MEM);
         self.slot_writes(pk, b);
         let _ = self.walk(pk, b);
@@ -982,15 +985,6 @@ extend Opt {
             let _ = self.walk(pk, b);
             self.rebuild(b);
             round += 1;
-        }
-        // A jump made a return (in this `run`) leaves the values it passed dead, which the walk counted where
-        // it would make the returns one (`ret_diamond`): once more, without them.
-        if self.rethru {
-            self.rethru = false;
-            self.tables(pk, b, K_MEM);
-            self.slot_writes(pk, b);
-            let _ = self.walk(pk, b);
-            self.rebuild(b);
         }
         return round != 0;
     }

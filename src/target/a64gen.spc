@@ -29,6 +29,8 @@ import std::float as fl;
 import target::assembler as asmr;
 import target::intrin as intrin;
 
+// `Gen::zero_quads` counts at most this many runs of four stores of 0.
+const ZERO_QUADS: u32 = 8;
 const V0: u8 = 32; // register number of v0: x registers are 0..31
 
 // Register sets: bit `r` for register number `r`.
@@ -104,7 +106,7 @@ pub(package) struct Gen {
     rr: u32, // the eviction cursor
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
-    paired: u32, // the access the one before it took into an `ldp` or `stp` (NONE: none)
+    paired: u32, // the last access the one before it took into an `ldp` or `stp` (NONE: none)
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
     csave: Vector<(u8, i64)>, // the scratch homes saved around a rare call (`save_scratch`)
     rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
@@ -1962,6 +1964,8 @@ extend Gen {
         if self.shrink {
             self.lv.relayout(b);
         }
+        // The entry's code (a variadic body's register save area) is the entry block's (`frame_use`).
+        self.pos = self.lv.pos[0];
         let n = self.lv.end.len();
         self.va.truncate(0);
         self.va.reserve(n);
@@ -2447,8 +2451,10 @@ extend Gen {
                 place::row(&mut self.rows, self.code.len() as u64, b.locs[i as usize]);
             }
             self.begin_inst(i);
-            if i == self.paired {
-                self.paired = NONE;
+            if self.paired != NONE && i <= self.paired {
+                if i == self.paired {
+                    self.paired = NONE;
+                }
                 self.end_inst();
                 continue;
             }
@@ -4599,6 +4605,23 @@ extend Gen {
         if off % size != 0 || off < -64 * size || off > 63 * size {
             return false;
         }
+        // Runs of four 8-byte stores of 0 at consecutive offsets: a zeroed q register, stored twice per 32
+        // bytes (clang's `movi` and `stp q`).
+        let quads = if !load && size == 8 && off % 16 == 0 {
+            self.zero_quads(i)
+        } else {
+            0
+        };
+        if quads != 0 && off >= -1024 && off + 32 * (quads as i64 - 1) <= 1008 {
+            self.frame_use(base);
+            // MOVI V31.2D, #0.
+            self.emit(0x6F00E41F);
+            for q in 0..quads {
+                self.emit(a::ldstp(a::M_VQ, false, 2, 31, 31, base, off as i32 + 32 * q as i32));
+            }
+            self.paired = i + 4 * quads - 1;
+            return true;
+        }
         let m = mkind(ty, load);
         let (r1, r2) = if load {
             (self.def(i), self.def(i + 1))
@@ -4626,6 +4649,27 @@ extend Gen {
         }
         self.paired = i + 1;
         return true;
+    }
+
+    // How many runs of four stores from store `i` on in its block (at most ZERO_QUADS) each write 0 to 8
+    // bytes, at consecutive offsets of one address, none volatile or through a folded index.
+    fn zero_quads(self: &Self, i: u32) u32 {
+        let b = self.b();
+        let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
+        let t = b.insts[i as usize];
+        let mut n: u32 = 0;
+        // The block's terminator ends it: a store is never the last instruction.
+        while i + n < bk.start + bk.len - 1 && n < 4 * ZERO_QUADS {
+            let u = b.insts[(i + n) as usize];
+            let mut k: u64 = 1;
+            if u.op != O_STORE || u.a != t.a || (u.c as i32) as i64 != (t.c as i32) as i64 + 8 * n as i64 || (u.aux & MEM_VOLATILE) != 0 || self.lv.fold[(i + n) as usize] || is_v(
+                self.vt(u.b),
+            ) || type_bytes(self.vt(u.b), self.ptr) != 8 || !self.const_of(u.b, &mut k) || k != 0 {
+                break;
+            }
+            n += 1;
+        }
+        return n / 4;
     }
 
     // The register a store writes value `v` from: the zero register for 0.

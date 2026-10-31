@@ -432,15 +432,16 @@ fn small_parameters_a_loop_compares_run() {
 }
 
 // A run of 8-byte stores of 0 at consecutive offsets (x86-64: a zeroed xmm register stored 16 bytes at a
-// time, an odd last store alone), and one a volatile store breaks, write those bytes alone; a rare block
+// time, an odd last store alone; arm64: a zeroed q register stored by `stp q` per 32 bytes from a 16-byte
+// offset, the rest by `stp xzr`), and one a volatile store breaks, write those bytes alone; a rare block
 // the layout puts after such a run, of lower instructions, keeps its stores.
 @test
 fn runs_of_zero_stores_run() {
     if !cli::has_cc() {
         return; // a C driver links it
     }
-    let lir = "lir ptr 8\nsym @zero5 fn global\nsym @zero4 fn global\nsym @zcold fn global\nfn @zero5\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = iconst.i64 0\n  store v1, v0+8 align 0\n  store v1, v0+16 align 0\n  store v1, v0+24 align 0\n  store v1, v0+32 align 0\n  store v1, v0+40 align 0\n  ret\nfn @zero4\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = iconst.i64 0\n  store v1, v0 align 0\n  store v1, v0+8 align 0\n  store v1, v0+16 align 0 volatile\n  store v1, v0+24 align 0\n  ret\nfn @zcold\n  sig (ptr, i8) -> void\nb0(v0: ptr, v1: i8):\n  v2 = iconst.i64 0\n  v3 = iconst.i64 7\n  br v1, b1, b2\nb1: unlikely\n  store v3, v0+40 align 0\n  ret\nb2:\n  store v2, v0 align 0\n  store v2, v0+8 align 0\n  store v2, v0+16 align 0\n  store v2, v0+24 align 0\n  ret\n";
-    let drv = "#include <stdint.h>\nvoid zero5(uint64_t *);\nvoid zero4(uint64_t *);\nvoid zcold(uint64_t *, int8_t);\nint main(void) {\n  uint64_t a[7];\n  for (int i = 0; i < 7; i++) a[i] = 0x1111111111111111ull * (i + 1);\n  zero5(a);\n  if (a[0] != 0x1111111111111111ull || a[6] != 0x7777777777777777ull) return 1;\n  for (int i = 1; i < 6; i++) if (a[i] != 0) return 2;\n  uint64_t b[5];\n  for (int i = 0; i < 5; i++) b[i] = 9;\n  zero4(b);\n  for (int i = 0; i < 4; i++) if (b[i] != 0) return 3;\n  if (b[4] != 9) return 4;\n  uint64_t c[6] = {1, 1, 1, 1, 1, 1};\n  zcold(c, 0);\n  if (c[0] != 0 || c[3] != 0 || c[5] != 1) return 5;\n  zcold(c, 1);\n  if (c[5] != 7) return 6;\n  return 0;\n}\n";
+    let lir = "lir ptr 8\nsym @zero5 fn global\nsym @zero4 fn global\nsym @zcold fn global\nsym @zero9 fn global\nfn @zero9\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = iconst.i64 0\n  store v1, v0+16 align 0\n  store v1, v0+24 align 0\n  store v1, v0+32 align 0\n  store v1, v0+40 align 0\n  store v1, v0+48 align 0\n  store v1, v0+56 align 0\n  store v1, v0+64 align 0\n  store v1, v0+72 align 0\n  store v1, v0+80 align 0\n  ret\nfn @zero5\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = iconst.i64 0\n  store v1, v0+8 align 0\n  store v1, v0+16 align 0\n  store v1, v0+24 align 0\n  store v1, v0+32 align 0\n  store v1, v0+40 align 0\n  ret\nfn @zero4\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = iconst.i64 0\n  store v1, v0 align 0\n  store v1, v0+8 align 0\n  store v1, v0+16 align 0 volatile\n  store v1, v0+24 align 0\n  ret\nfn @zcold\n  sig (ptr, i8) -> void\nb0(v0: ptr, v1: i8):\n  v2 = iconst.i64 0\n  v3 = iconst.i64 7\n  br v1, b1, b2\nb1: unlikely\n  store v3, v0+40 align 0\n  ret\nb2:\n  store v2, v0 align 0\n  store v2, v0+8 align 0\n  store v2, v0+16 align 0\n  store v2, v0+24 align 0\n  ret\n";
+    let drv = "#include <stdint.h>\nvoid zero5(uint64_t *);\nvoid zero4(uint64_t *);\nvoid zcold(uint64_t *, int8_t);\nvoid zero9(uint64_t *);\nint main(void) {\n  uint64_t z[13];\n  for (int i = 0; i < 13; i++) z[i] = 5;\n  zero9(z);\n  for (int i = 0; i < 13; i++) if (z[i] != (i >= 2 && i < 11 ? 0 : 5)) return 7;\n  uint64_t a[7];\n  for (int i = 0; i < 7; i++) a[i] = 0x1111111111111111ull * (i + 1);\n  zero5(a);\n  if (a[0] != 0x1111111111111111ull || a[6] != 0x7777777777777777ull) return 1;\n  for (int i = 1; i < 6; i++) if (a[i] != 0) return 2;\n  uint64_t b[5];\n  for (int i = 0; i < 5; i++) b[i] = 9;\n  zero4(b);\n  for (int i = 0; i < 4; i++) if (b[i] != 0) return 3;\n  if (b[4] != 9) return 4;\n  uint64_t c[6] = {1, 1, 1, 1, 1, 1};\n  zcold(c, 0);\n  if (c[0] != 0 || c[3] != 0 || c[5] != 1) return 5;\n  zcold(c, 1);\n  if (c[5] != 7) return 6;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }
@@ -2782,6 +2783,46 @@ b0(v0: i32):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A variadic body that calls only in a rare block, after a body of the same shape (arm64 shrink-wrapping):
+// its entry stores the register save area (the standard convention), so it sets its frame up there, which
+// the caller's frame relies on. The C side checks its own locals after the calls.
+@test
+fn a_variadic_body_with_rare_calls_keeps_its_frame_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @poll fn global ext
+sym @first fn global
+sym @second fn global
+fn @first
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1: cold
+  v3 = call.i64 @poll() : () -> i64
+  ret v3
+b2:
+  ret v0
+fn @second
+  sig (i64, ...) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1: cold
+  v3 = call.i64 @poll() : () -> i64
+  ret v3
+b2:
+  ret v0
+)";
+    let drv = "#include <stdint.h>\nint64_t first(int64_t);\nint64_t second(int64_t, ...);\nint64_t poll(void) { return 0; }\nint main(void) {\n  volatile int64_t g[24];\n  for (int i = 0; i < 24; i++) g[i] = i + 1;\n  if (first(5) != 5 || second(7, 1, 2.0) != 7) return 1;\n  for (int i = 0; i < 24; i++) if (g[i] != i + 1) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // Function addresses in data (relocations) and indirect calls through them.
 @test
 fn indirect_calls_through_data_run() {
@@ -3987,6 +4028,31 @@ b2:
     assert_eq(run_wide(wide, wdrv), 0);
 }
 
+// A vector difference whose second operand dies there while the first lives on (x86-64: the result may
+// take the second's register only for an operation that commutes).
+@test
+fn a_vector_difference_whose_second_operand_dies_runs() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @vdiff fn global
+fn @vdiff
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v2i64 v0 align 3
+  v4 = load.v2i64 v1 align 3
+  v5 = vop.wrapping_sub.v2i64 (v3, v4)
+  v6 = vop.wrapping_add.v2i64 (v3, v5)
+  store v6, v2 align 3
+  store v5, v2+16 align 3
+  ret
+)";
+    let drv = "#include <stdint.h>\nvoid vdiff(const int64_t *, const int64_t *, int64_t *);\nint main(void) {\n  int64_t a[2] = {1000003, -77}, b[2] = {5, 900000000001}, o[4];\n  vdiff(a, b, o);\n  for (int i = 0; i < 2; i++) { if (o[2 + i] != a[i] - b[i] || o[i] != a[i] + (a[i] - b[i])) return 1 + i; }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // A loop's vector accumulator added to a load that dies there, the accumulator first and second (x86-64:
 // the sum takes the accumulator's register or the load's, `def_shared` and `def_over`).
 @test
@@ -4021,6 +4087,124 @@ b2:
     let drv = "#include <stdint.h>\nint64_t vsum(const int64_t *, int64_t);\nint main(void) {\n  int64_t a[10];\n  int64_t s = 0, x = 0;\n  for (int i = 0; i < 10; i++) { a[i] = (int64_t)i * 1000003 - 7; s += a[i]; x ^= a[i]; }\n  if (vsum(a, 5) != s + x) return 1;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Vector shifts of every lane by one constant (a splat of a constant, or a wide constant of equal lanes),
+// left, logical and arithmetic, of 2-, 4- and 8-byte lanes (x86-64: SSE2's `psll`, `psrl`, `psra` by an
+// immediate; AVX2's for 32 bytes).
+@test
+fn vector_shifts_by_a_constant_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @sh fn global
+fn @sh
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8i16 v0 align 0
+  v3 = iconst.i16 5
+  v4 = splat.v8i16 v3
+  v5 = wconst.v8i16 0x6000600060006, 0x6000600060006
+  v6 = shl.v8i16 v2, v4
+  v7 = lshr.v8i16 v2, v4
+  v8 = shl.v8i16 v2, v5
+  v9 = lshr.v8i16 v2, v5
+  v10 = ashr.v8i16 v2, v4
+  v11 = ashr.v8i16 v2, v5
+  v12 = load.v4i32 v0 align 0
+  v13 = iconst.i32 13
+  v14 = splat.v4i32 v13
+  v15 = wconst.v4i32 0xe0000000e, 0xe0000000e
+  v16 = shl.v4i32 v12, v14
+  v17 = lshr.v4i32 v12, v14
+  v18 = shl.v4i32 v12, v15
+  v19 = lshr.v4i32 v12, v15
+  v20 = ashr.v4i32 v12, v14
+  v21 = ashr.v4i32 v12, v15
+  v22 = load.v2i64 v0 align 0
+  v23 = iconst.i64 37
+  v24 = splat.v2i64 v23
+  v25 = wconst.v2i64 0x26, 0x26
+  v26 = shl.v2i64 v22, v24
+  v27 = lshr.v2i64 v22, v24
+  v28 = shl.v2i64 v22, v25
+  v29 = lshr.v2i64 v22, v25
+  store v6, v1+0 align 0
+  store v7, v1+16 align 0
+  store v8, v1+32 align 0
+  store v9, v1+48 align 0
+  store v10, v1+64 align 0
+  store v11, v1+80 align 0
+  store v16, v1+96 align 0
+  store v17, v1+112 align 0
+  store v18, v1+128 align 0
+  store v19, v1+144 align 0
+  store v20, v1+160 align 0
+  store v21, v1+176 align 0
+  store v26, v1+192 align 0
+  store v27, v1+208 align 0
+  store v28, v1+224 align 0
+  store v29, v1+240 align 0
+  ret
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\nvoid sh(const void *, void *);\n#define CHK(S, U, k, n) { S x[16 / sizeof(S)], r[16 / sizeof(S)]; memcpy(x, a, 16); \\\n  for (int j = 0; j < n; j++) { int s = j < 2 || j == 4 ? k : k + 1; int op = j % 2; if (j >= 4) op = 2; \\\n    memcpy(r, o + off, 16); off += 16; \\\n    for (unsigned i = 0; i < 16 / sizeof(S); i++) { S want = op == 0 ? (S)((U)x[i] << s) : op == 1 ? (S)((U)x[i] >> s) : (S)(x[i] >> s); \\\n      if (r[i] != want) return 1 + j; } } }\nint main(void) {\n  unsigned char a[16], o[16 * 16];\n  for (int i = 0; i < 16; i++) a[i] = (unsigned char)(i * 89 + 151);\n  sh(a, o);\n  int off = 0;\n  CHK(int16_t, uint16_t, 5, 6) CHK(int32_t, uint32_t, 13, 6) CHK(int64_t, uint64_t, 37, 4)\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+    let wide = M"(lir ptr 8
+sym @sh fn global
+fn @sh
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v16i16 v0 align 0
+  v3 = iconst.i16 5
+  v4 = splat.v16i16 v3
+  v5 = wconst.v16i16 0x6000600060006, 0x6000600060006, 0x6000600060006, 0x6000600060006
+  v6 = shl.v16i16 v2, v4
+  v7 = lshr.v16i16 v2, v4
+  v8 = shl.v16i16 v2, v5
+  v9 = lshr.v16i16 v2, v5
+  v10 = ashr.v16i16 v2, v4
+  v11 = ashr.v16i16 v2, v5
+  v12 = load.v8i32 v0 align 0
+  v13 = iconst.i32 13
+  v14 = splat.v8i32 v13
+  v15 = wconst.v8i32 0xe0000000e, 0xe0000000e, 0xe0000000e, 0xe0000000e
+  v16 = shl.v8i32 v12, v14
+  v17 = lshr.v8i32 v12, v14
+  v18 = shl.v8i32 v12, v15
+  v19 = lshr.v8i32 v12, v15
+  v20 = ashr.v8i32 v12, v14
+  v21 = ashr.v8i32 v12, v15
+  v22 = load.v4i64 v0 align 0
+  v23 = iconst.i64 37
+  v24 = splat.v4i64 v23
+  v25 = wconst.v4i64 0x26, 0x26, 0x26, 0x26
+  v26 = shl.v4i64 v22, v24
+  v27 = lshr.v4i64 v22, v24
+  v28 = shl.v4i64 v22, v25
+  v29 = lshr.v4i64 v22, v25
+  store v6, v1+0 align 0
+  store v7, v1+32 align 0
+  store v8, v1+64 align 0
+  store v9, v1+96 align 0
+  store v10, v1+128 align 0
+  store v11, v1+160 align 0
+  store v16, v1+192 align 0
+  store v17, v1+224 align 0
+  store v18, v1+256 align 0
+  store v19, v1+288 align 0
+  store v20, v1+320 align 0
+  store v21, v1+352 align 0
+  store v26, v1+384 align 0
+  store v27, v1+416 align 0
+  store v28, v1+448 align 0
+  store v29, v1+480 align 0
+  ret
+)";
+    let wdrv = "#include <stdint.h>\n#include <string.h>\nvoid sh(const void *, void *);\n#define CHK(S, U, k, n) { S x[32 / sizeof(S)], r[32 / sizeof(S)]; memcpy(x, a, 32); \\\n  for (int j = 0; j < n; j++) { int s = j < 2 || j == 4 ? k : k + 1; int op = j % 2; if (j >= 4) op = 2; \\\n    memcpy(r, o + off, 32); off += 32; \\\n    for (unsigned i = 0; i < 32 / sizeof(S); i++) { S want = op == 0 ? (S)((U)x[i] << s) : op == 1 ? (S)((U)x[i] >> s) : (S)(x[i] >> s); \\\n      if (r[i] != want) return 1 + j; } } }\nint main(void) {\n  unsigned char a[32], o[16 * 32];\n  for (int i = 0; i < 32; i++) a[i] = (unsigned char)(i * 89 + 151);\n  sh(a, o);\n  int off = 0;\n  CHK(int16_t, uint16_t, 5, 6) CHK(int32_t, uint32_t, 13, 6) CHK(int64_t, uint64_t, 37, 4)\n  return 0;\n}\n";
+    assert_eq(run_wide(wide, wdrv), 0);
 }
 
 // A loop whose product by a constant is the first addend of a sum (arm64 `madd`, the constant kept in a

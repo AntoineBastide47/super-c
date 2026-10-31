@@ -269,7 +269,8 @@ extend K {
     pub(package) const SHL16: u8 = 194;
     pub(package) const SHL32: u8 = 195;
     pub(package) const IMM6X: u8 = 196; // at 10
-    pub(package) const COUNT: u8 = 197;
+    pub(package) const BMASK: u8 = 197; // a 64-bit value of 0 or 0xFF bytes, a bit per byte: abc at 16, defgh at 5
+    pub(package) const COUNT: u8 = 198;
 }
 
 // Register kinds 1 to 64: a class (`(k - 1) / 4`) and a field (`(k - 1) % 4`: bits 0, 5, 10, 16).
@@ -316,7 +317,7 @@ pub(package) const fn kind_at(ops: u64, i: u32) u8 {
 
 // ---- The table ----
 
-pub(package) const ROWS: [Row; 662] = [
+pub(package) const ROWS: [Row; 664] = [
     // Add and subtract, immediate.
     rf("mov", 0x11000000, Q::SF, QWX, k2(K::RDS, K::RNS), FL_SPMOV),
     r("cmp", 0x7100001F, Q::SF, QWX, k2(K::RNS, K::AIMM)),
@@ -888,6 +889,8 @@ pub(package) const ROWS: [Row; 662] = [
     r("ushll2", 0x6F08A400, Q::NONE, 0, k3(K::V8HD, K::V16BN, K::SHL8)),
     r("ushll2", 0x6F10A400, Q::NONE, 0, k3(K::V4SD, K::V8HN, K::SHL16)),
     r("ushll2", 0x6F20A400, Q::NONE, 0, k3(K::V2DD, K::V4SN, K::SHL32)),
+    r("movi", 0x6F00E400, Q::NONE, 0, k2(K::V2DD, K::BMASK)),
+    r("movi", 0x2F00E400, Q::NONE, 0, k2(K::DD, K::BMASK)),
     r("dup", 0x0E010C00, Q::NONE, 0, k2(K::V8BD, K::WN)),
     r("dup", 0x4E010C00, Q::NONE, 0, k2(K::V16BD, K::WN)),
     r("dup", 0x0E020C00, Q::NONE, 0, k2(K::V4HD, K::WN)),
@@ -1194,6 +1197,7 @@ const fn kmask(k: u8, q: u32) u32 {
         K::IMM16 => 0xFFFFu32 << 5,
         K::UDF16 => 0xFFFFu32,
         K::FPIMM => 0xFFu32 << 13,
+        K::BMASK => 7u32 << 16 | 31u32 << 5,
         K::L26 => 0x3FFFFFFu32,
         K::L19 => 0x7FFFFu32 << 5,
         K::L14 => 0x3FFFu32 << 5,
@@ -1500,6 +1504,20 @@ pub(package) const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
             K::FPIMM => {
                 w |= (a as u32 & 0xFF) << 13;
                 ok = within(a, 0, 0xFF);
+            },
+            K::BMASK => {
+                let mut m: u32 = 0;
+                ok = true;
+                for q in 0..8u32 {
+                    let y = a as u64 >> (8 * q) as u64 & 0xFF;
+                    ok = ok && (y == 0 || y == 0xFF);
+                    m |= if y != 0 {
+                        1u32
+                    } else {
+                        0
+                    } << q;
+                }
+                w |= m >> 5 << 16 | (m & 31) << 5;
             },
             K::FZERO | K::SMSM | K::SMZA => {
                 ok = a == 0;
@@ -1819,6 +1837,16 @@ pub(package) const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) boo
             },
             K::FPIMM => {
                 v[at] = w >> 13 & 0xFF;
+            },
+            K::BMASK => {
+                let m = (w >> 16 & 7) << 5 | w >> 5 & 31;
+                let mut x: u64 = 0;
+                for q in 0..8u32 {
+                    if (m >> q & 1) != 0 {
+                        x |= 0xFFu64 << (8 * q) as u64;
+                    }
+                }
+                v[at] = x as i64;
             },
             K::FZERO | K::SMSM | K::SMZA => {
                 v[at] = 0;
