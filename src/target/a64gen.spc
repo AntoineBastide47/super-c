@@ -99,6 +99,8 @@ pub(package) struct Gen {
     csr: u64, // callee-saved registers the body uses
     rows: Vector<u64>, // with debug information, per change of location: its code word << 32 | its `lines` index
     rstore: Vector<u32>, // per instruction, 1 + the result part a store moves into its register (`ret_stores`), else 0
+    rload: Vector<u32>, // per call, the loads after it its result's registers give (`res_relays`)
+    suse: Vector<u32>, // per slot, the uses of its addresses (`place::slot_uses`)
     rr: u32, // the eviction cursor
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
@@ -202,6 +204,8 @@ extend Gen {
             csr: 0,
             rows: Vector::<u64>::new(),
             rstore: Vector::<u32>::new(),
+            rload: Vector::<u32>::new(),
+            suse: Vector::<u32>::new(),
             rr: 0,
             pos: 0,
             cur: 0,
@@ -496,17 +500,18 @@ extend Gen {
                 };
             }
         } else if t.op == O_CALL && self.intrinsic(t.a).len() == 0 || t.op == O_CALLIND && t.a != v {
-            self.call_layout(t);
+            // Not `call_layout`: a call being compiled may define `v` (`relay_result`) and still read `lay`.
+            let lay = &self.lays[self.lay_index(t)];
             let np = b.pool[t.b as usize];
             let nops = np + ((b.pool[t.b as usize + 2] & AGG) != 0) as u32;
             for k in 0..nops {
                 if b.pool[(t.c + k) as usize] != v {
                     continue;
                 }
-                if r != NOREG || k == np || self.lay.locs[k as usize].kind != ab::L_REG || self.lay.locs[k as usize].n != 1 || (b.pool[(t.b + 3 + k) as usize] & AGG) != 0 {
+                if r != NOREG || k == np || lay.locs[k as usize].kind != ab::L_REG || lay.locs[k as usize].n != 1 || (b.pool[(t.b + 3 + k) as usize] & AGG) != 0 {
                     return NOREG;
                 }
-                let pa = self.lay.parts[self.lay.locs[k as usize].p0 as usize];
+                let pa = lay.parts[lay.locs[k as usize].p0 as usize];
                 if pa.v != fv {
                     return NOREG;
                 }
@@ -834,7 +839,7 @@ extend Gen {
             let t = self.xty(x as u32);
             let d = self.lv.def_blk[x];
             let mut w: u8 = 0;
-            if in_vreg(t) && type_bytes(t, 8) == 16 && x < nv && !self.vmem[x] && d != NONE && self.lv.pos[d as usize] != NONE && (self.lv.end[x] > self.lv.pos[d as usize] || x >= ni) && !self.crosses_call(
+            if in_vreg(t) && x < nv && !self.vmem[x] && d != NONE && self.lv.pos[d as usize] != NONE && (self.lv.end[x] > self.lv.pos[d as usize] || x >= ni) && !self.crosses_call(
                 x as u32,
             ) {
                 w = lv::WANT_SCRATCH | lv::WANT_CALLEE | lv::WANT_V;
@@ -2212,6 +2217,7 @@ extend Gen {
             return self.refuse("the signature passes an aggregate whose C class is unknown");
         }
         self.ret_stores();
+        self.res_relays();
         if self.va_save != NONE {
             // The argument registers the fixed parameters leave, where `va_arg` reads them.
             for r in self.self_lay.named_gp as u32..8 {
@@ -4682,6 +4688,66 @@ extend Gen {
         return true;
     }
 
+    // `rload`: per call of an aggregate result in registers, the loads right after it that its parts
+    // give (`place::result_loads`), else 0.
+    fn res_relays(self: &mut Self) {
+        let b = self.b();
+        fill(&mut self.rload, b.insts.len(), 0);
+        if b.slots.len() == 0 {
+            return;
+        }
+        place::slot_uses(b, &self.lv, &mut self.suse);
+        for i in 0..b.insts.len() as u32 {
+            let t = b.insts[i as usize];
+            if (t.op == O_CALL || t.op == O_CALLIND) && (b.pool[t.b as usize + 2] & AGG) != 0 {
+                self.call_layout(t);
+                self.rload[i as usize] = place::result_loads(b, &self.lv, &self.lay, self.ptr, &self.suse, i);
+            }
+        }
+    }
+
+    // Call `i` (`lay` its layout) of an aggregate result whose parts the loads after it read (`rload`):
+    // each load's value in its part's register, which the result's memory never holds; the loads emit
+    // nothing (`taken`). A load with a fixed home, or a second load of a part, moves to a register of its
+    // own (no home is a part's register).
+    fn relay_result(self: &mut Self, i: u32) {
+        let b = self.b();
+        let rl = self.lay.ret;
+        for q in 0..rl.n as u32 {
+            let pa = self.lay.parts[(rl.p0 + q) as usize];
+            self.lock |= bit(
+                pa.reg + if pa.v {
+                    V0
+                } else {
+                    0
+                },
+            );
+        }
+        // The part registers a load took; a second load of that part takes a register of its own.
+        let mut bound: u64 = 0;
+        for k in 1..self.rload[i as usize] + 1 {
+            let j = i + k;
+            let pa = self.lay.parts[(rl.p0 + place::result_part(&self.lay, self.ptr, b.insts[j as usize])) as usize];
+            let r = pa.reg + if pa.v {
+                V0
+            } else {
+                0
+            };
+            self.taken.push(j);
+            let x = self.vx(j);
+            if !self.live_on(x) {
+                continue;
+            }
+            if self.fix_class(x) != FIX_NONE || (bound >> r as u64 & 1) != 0 {
+                let rd = self.def(j);
+                self.move_reg(self.vt(j), rd, r);
+            } else {
+                self.bind(x, r);
+                bound |= 1u64 << r as u64;
+            }
+        }
+    }
+
     // `rstore`: when the result (an aggregate in registers) is written only by stores that end blocks
     // which return, each a whole part and only such stores between it and the `ret`, 1 + each one's part:
     // the first of each run moves the run's values into the part registers (`ret_moves`), and the return
@@ -5858,6 +5924,10 @@ extend Gen {
         if rl.kind != ab::L_REG {
             return true;
         }
+        if (rt & AGG) != 0 && self.rload[i as usize] != 0 {
+            self.relay_result(i);
+            return true;
+        }
         if (rt & AGG) != 0 {
             self.materialize(b.pool[(t.c + np) as usize], a::IP1 as u8);
             for q in 0..rl.n as u32 {
@@ -5969,20 +6039,25 @@ extend Gen {
             ab::intrinsic_layout(b, t.b, self.ptr, gp[0..8], 0, &mut self.lay);
             return;
         }
-        // Once per signature in the body: the same signature has the same layout.
+        let q = self.lay_index(t);
+        self.lay.copy_from(&self.lays[q]);
+    }
+
+    // The index in `lays` of the layout of call `t` (no intrinsic), `self.lay` unchanged: once per
+    // signature in the body, which gives the layout.
+    fn lay_index(self: &mut Self, t: Inst) usize {
         for q in 0..self.lay_sig.len() {
             if self.lay_sig[q] == t.b {
-                self.lay.copy_from(&self.lays[q]);
-                return;
+                return q;
             }
         }
-        cc::classify(b, t.b, self.ptr, self.apple, self.vregs, &mut self.lay);
         let q = self.lay_sig.len();
         self.lay_sig.push(t.b);
         if q == self.lays.len() {
             self.lays.push(ab::CallLayout::new());
         }
-        self.lays[q].copy_from(&self.lay);
+        cc::classify(self.b(), t.b, self.ptr, self.apple, self.vregs, self.lays.index_mut(q));
+        return q;
     }
 
     // The instructions of the intrinsic body symbol `s` names (`target::intrin`, `itpl`); empty for another
@@ -9587,13 +9662,17 @@ extend Gen {
     // Integer reduction `c` (`reduce_add`, `reduce_min`, `reduce_max`, signed `sg`) `t` (instruction `i`) of
     // vector `v` of type `vt` (8 or 16 bytes) into a result of its lane type, in v registers: ADDV, SMAXV,
     // UMAXV, SMINV or UMINV across the lanes (the pairwise ADDP, SMAXP and the like for two), then UMOV of
-    // lane 0, which zero-extends it. Whether it did: not for floats, nor for a minimum or maximum of 8-byte
-    // lanes.
+    // lane 0, which zero-extends it; an `and`, `or` or `xor` in `reduce_bits`. Whether it did: not for
+    // floats, nor for a minimum or maximum of 8-byte lanes.
     fn reduce_reg(self: &mut Self, i: u32, t: Inst, c: u8, sg: bool, v: Value, vt: u8) bool {
         let lt = lane_type(vt);
         let eb = type_bytes(lt, 8);
         let nb = type_bytes(vt, 8);
         let n = nb / eb;
+        if !is_float(lt) && type_bytes(t.ty, 8) == eb && (c == core::SIMD_REDUCE_AND || c == core::SIMD_REDUCE_OR || c == core::SIMD_REDUCE_XOR) {
+            self.reduce_bits(i, c, v, eb, nb);
+            return true;
+        }
         if is_float(lt) || c != core::SIMD_REDUCE_ADD && c != core::SIMD_REDUCE_MIN && c != core::SIMD_REDUCE_MAX || type_bytes(
             t.ty,
             8,
@@ -9628,6 +9707,49 @@ extend Gen {
         self.emit(a::on(eb == 8, 0x40000000) | 0x0E003C00 | eb << 16 | 31 << 5 | rd);
         self.va.index_mut(i as usize).clean = true;
         return true;
+    }
+
+    // Bitwise reduction `c` (`and`, `or`, `xor`) of instruction `i` over vector `v` of `nb` bytes (8 or 16)
+    // with lanes of `eb` bytes: a 16-byte vector's high half (EXT) combined with its low one in v31 (v30), those 8
+    // bytes moved to the result's x register (FMOV), whose halves combine (the shifted-register form) down to
+    // a lane. The bits above the lane are not cleared.
+    fn reduce_bits(self: &mut Self, i: u32, c: u8, v: Value, eb: u32, nb: u32) {
+        let s = (self.vec_use(v, V0 + 31) - V0) as u32;
+        let mut lo = s;
+        if nb == 16 {
+            // EXT Vt.16B, Vs.16B, Vs.16B, #8, then AND, ORR or EOR Vt.8B, Vt.8B, Vs.8B: t is v31, or v30 when
+            // the vector came into v31 from memory.
+            let tv: u32 = if s == 31 {
+                30
+            } else {
+                31
+            };
+            self.emit(0x6E000000 | s << 16 | 8 << 11 | s << 5 | tv);
+            let vop: u32 = if c == core::SIMD_REDUCE_AND {
+                0x0E201C00
+            } else if c == core::SIMD_REDUCE_OR {
+                0x0EA01C00
+            } else {
+                0x2E201C00
+            };
+            self.emit(vop | s << 16 | tv << 5 | tv);
+            lo = tv;
+        }
+        let rd = self.def(i) as u32;
+        self.emit(a::fmov_gv(true, false, rd, lo));
+        let opc: u32 = if c == core::SIMD_REDUCE_AND {
+            0
+        } else if c == core::SIMD_REDUCE_OR {
+            1
+        } else {
+            2
+        };
+        // Halves of 32, 16 and 8 bits down to the lane: at most 3 steps.
+        let mut w: u32 = 32;
+        while w >= eb * 8 {
+            self.emit(a::logic_reg(true, opc, false, rd, rd, rd, 1, w));
+            w = w / 2;
+        }
     }
 
     // A float reduction (`vreduce`) of rule `c` into an `at` result over the `n` lanes (of `lt`) of operand 0

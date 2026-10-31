@@ -13,7 +13,10 @@
 // lane (of its lane type, at a lane's offset) reads it as `vextract` or sets it as `vinsert`. An integer
 // load that other accesses overlap spans their fields (LLVM SROA's rewrite of a wide access over several
 // partitions): its fields' values combined in their little-endian places, a byte no field holds reading
-// 0. A field across its edge keeps the slot in memory. A wide store stays one: its fields would each take a
+// 0. An integer load inside a wider integer field reads its bits there (`part_at`). A store of an integer
+// constant over narrower fields, each inside it, writes each its bits of the constant, when its bytes no
+// field holds are 0 (a spanning load reads them as 0): an `Option`'s `None` as one word over its tag and
+// payload. A field across its edge keeps the slot in memory. A wide store stays one: its fields would each take a
 // store where a copy reads them, and the walk forwards its bytes to narrower loads.
 //
 // Before that, a copy between two slots of its size whose source no instruction reads after it and whose
@@ -41,7 +44,8 @@ struct Acc {
     pub(package) off: i64,
     pub(package) size: i64,
     pub(package) ty: u8,
-    pub(package) kind: u8, // W_LOAD: an integer load that may span fields (`wide_kind`)
+    pub(package) kind: u8, // W_LOAD: an integer load that may span fields or read part of one (`wide_kind`);
+    // W_CSTORE: a store of an integer constant, which may span fields
 }
 
 extend Acc as Copy {}
@@ -68,9 +72,10 @@ struct Fld {
     pub(package) w: u8,
 }
 
-// `Acc.kind` and `Fld.w`: an integer load; one that spans other fields.
+// `Acc.kind` and `Fld.w`: an integer load; one that spans other fields; a store of an integer constant.
 const W_LOAD: u8 = 1;
 const W_SPANS: u8 = 2;
+const W_CSTORE: u8 = 4;
 
 extend Fld as Copy {}
 
@@ -109,6 +114,7 @@ pub(package) struct Promoter {
     fid: Vector<u32>,
     lane: Vector<u32>,
     spanned: Vector<bool>, // per instruction, whether it is a load that spans fields (`spans`)
+    part: Vector<u32>, // per instruction, a load's byte offset in the wider field it reads part of (`part_at`)
     repl: Vector<u32>,
     drop: Vector<bool>,
     // The dominance frontiers: block `k`'s are `df[df_at[k] .. df_at[k + 1]]`.
@@ -176,6 +182,7 @@ extend Promoter {
             fid: Vector::<u32>::new(),
             lane: Vector::<u32>::new(),
             spanned: Vector::<bool>::new(),
+            part: Vector::<u32>::new(),
             repl: Vector::<u32>::new(),
             drop: Vector::<bool>::new(),
             df_at: Vector::<u32>::new(),
@@ -614,13 +621,18 @@ extend Promoter {
             let s = self.slot_of(t.a);
             self.cand[s as usize] = self.cand[s as usize] && reached;
             self.reject(t.b);
+            let ty = b.type_of(t.b);
             self.accs.push(
                 Acc {
                     slot: s,
                     off: self.doff[t.a as usize] + (t.c as i32) as i64,
                     size: 0,
-                    ty: b.type_of(t.b),
-                    kind: 0,
+                    ty: ty,
+                    kind: if wide_kind(ty) != 0 && int_bits(b, t.b).is_some() {
+                        W_CSTORE
+                    } else {
+                        0
+                    },
                 },
             );
             return;
@@ -775,6 +787,7 @@ extend Promoter {
             fill(&mut self.fid, b.insts.len(), NONE);
             fill(&mut self.lane, b.insts.len(), NONE);
             fill(&mut self.spanned, b.insts.len(), false);
+            fill(&mut self.part, b.insts.len(), NONE);
             let mut any = false;
             for s in 0..ns {
                 any = any || self.cand[s];
@@ -801,7 +814,21 @@ extend Promoter {
                             self.lane[i] = k;
                         }
                         if self.fid[i] == NONE {
+                            let pf = if t.op == O_LOAD && wide_kind(ty) != 0 {
+                                self.part_at(s, off, size_of(ty, self.ptr))
+                            } else {
+                                NONE
+                            };
                             if t.op == O_LOAD && wide_kind(ty) != 0 && self.spannable(s, off, size_of(ty, self.ptr)) {
+                                self.spanned[i] = true;
+                            } else if pf != NONE {
+                                self.fid[i] = pf;
+                                self.part[i] = (off - self.flds[pf as usize].off) as u32;
+                            } else if t.op == O_STORE && wide_kind(ty) != 0 && int_bits(b, t.b).is_some() && self.spannable(
+                                s,
+                                off,
+                                size_of(ty, self.ptr),
+                            ) && self.gaps_zero(s, off, size_of(ty, self.ptr), int_bits(b, t.b).unwrap()) {
                                 self.spanned[i] = true;
                             } else {
                                 self.cand[s as usize] = false;
@@ -943,7 +970,7 @@ extend Promoter {
 
     // Mark W_SPANS each load of `tmp[lo .. hi]` (one slot's, sorted) that may span fields (`Acc.kind`)
     // and overlaps another access that is not the same field (the same offset in a type that converts, or a
-    // lane of it). Whether any.
+    // lane of it), and each constant store that holds such an access whole. Whether any.
     fn spans(self: &mut Self, lo: usize, hi: usize) bool {
         let mut any = false;
         for j in lo..hi {
@@ -959,7 +986,9 @@ extend Promoter {
                     break;
                 }
                 let same = c.off == a.off && conv_op(c.ty, a.ty, self.ptr) != NO_CONV || is_lane(a, c) || is_lane(c, a);
-                if q != j && !same && a.off < c.off + size_of(c.ty, self.ptr) {
+                // A constant store spans only accesses it holds whole; a narrower one keeps its field.
+                let held = (a.w & W_CSTORE) == 0 || a.off <= c.off && c.off + size_of(c.ty, self.ptr) <= ae;
+                if q != j && !same && held && a.off < c.off + size_of(c.ty, self.ptr) {
                     self.tmp[j].w = a.w | W_SPANS;
                     any = true;
                     break;
@@ -1055,6 +1084,38 @@ extend Promoter {
             }
         }
         return true;
+    }
+
+    // Whether the bytes of constant `c` (`n` bytes at `off` of slot `s`) that no field holds are 0.
+    const fn gaps_zero(self: &Self, s: u32, off: i64, n: i64, c: u64) bool {
+        for p in 0..n {
+            let mut held = false;
+            for f in self.fat[s as usize]..self.fat[s as usize + 1] {
+                let fl = self.flds[f as usize];
+                held = held || fl.off <= off + p && off + p < fl.off + size_of(fl.ty, self.ptr);
+            }
+            if !held && (c >> (8 * p) as u64 & 0xFF) != 0 {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The global index of slot `s`'s field wider than `n` bytes that holds bytes `off` to `off + n`, a
+    // scalar whose bits an integer of its size holds (a load of them reads part of it); NONE when none.
+    const fn part_at(self: &Self, s: u32, off: i64, n: i64) u32 {
+        for f in self.fat[s as usize]..self.fat[s as usize + 1] {
+            let fl = self.flds[f as usize];
+            let fw = size_of(fl.ty, self.ptr);
+            if fl.off <= off && off + n <= fl.off + fw && fw > n && !is_vec(fl.ty) && fl.ty != T_I128 && conv_op(
+                fl.ty,
+                int_of(fw),
+                self.ptr,
+            ) != NO_CONV {
+                return f;
+            }
+        }
+        return NONE;
     }
 
     // The global index of slot `s`'s field at `off` whose type `ty` converts to (NONE: none).
@@ -1223,9 +1284,18 @@ extend Promoter {
         if self.spanned[i as usize] {
             let s = self.slot_of(t.a);
             let off = self.doff[t.a as usize] + (t.c as i32) as i64;
+            let n = if t.op == O_STORE {
+                size_of(b.type_of(t.b), self.ptr)
+            } else {
+                size_of(t.ty, self.ptr)
+            };
             for f2 in self.fat[s as usize]..self.fat[s as usize + 1] {
-                if in_range(self.flds[f2 as usize], off, size_of(t.ty, self.ptr), self.ptr) {
-                    self.read(f2, k);
+                if in_range(self.flds[f2 as usize], off, n, self.ptr) {
+                    if t.op == O_STORE {
+                        self.write(f2, k);
+                    } else {
+                        self.read(f2, k);
+                    }
                 }
             }
             return;
@@ -1418,6 +1488,11 @@ extend Promoter {
     // stand for returns its slot (NONE: none).
     fn rename_inst(self: &mut Self, b: &Body, i: u32) u32 {
         let t = b.insts[i as usize];
+        if self.spanned[i as usize] && t.op == O_STORE {
+            self.drop[i as usize] = true;
+            self.rename_cstore(b, i, t);
+            return NONE;
+        }
         if self.spanned[i as usize] {
             self.drop[i as usize] = true;
             self.rename_span(b, i, t);
@@ -1428,7 +1503,22 @@ extend Promoter {
             self.drop[i as usize] = true;
             let fty = self.flds[f as usize].ty;
             let k = self.lane[i as usize];
-            if k != NONE {
+            if self.part[i as usize] != NONE {
+                // Part of a wider field: its integer bits shifted down and truncated (little-endian).
+                let it = int_of(size_of(fty, self.ptr));
+                let fv = self.value(b, f);
+                let mut v = self.convert(b, i, fv, fty, it);
+                let sh = 8 * self.part[i as usize] as u64;
+                if sh != 0 {
+                    let c = self.push(b, i, fill_int(it, sh));
+                    v = self.push(b, i, Inst { op: O_LSHR, ty: it, aux: 0, a: v, b: c, c: VNONE });
+                }
+                self.repl[i as usize] = self.push(
+                    b,
+                    i,
+                    Inst { op: O_TRUNC, ty: t.ty, aux: 0, a: v, b: VNONE, c: VNONE },
+                );
+            } else if k != NONE {
                 let v = self.value(b, f);
                 let x = (b.insts.len() + self.xins.len()) as u32;
                 if t.op == O_LOAD {
@@ -1504,6 +1594,28 @@ extend Promoter {
             self.set(f2, v);
         }
         return NONE;
+    }
+
+    // Spanning store `t` (instruction `i`) of an integer constant: each field it holds takes its bits.
+    fn rename_cstore(self: &mut Self, b: &Body, i: u32, t: Inst) {
+        let s = self.slot_of(t.a);
+        let off = self.doff[t.a as usize] + (t.c as i32) as i64;
+        let c = int_bits(b, t.b).unwrap();
+        let n = size_of(b.type_of(t.b), self.ptr);
+        for f2 in self.fat[s as usize]..self.fat[s as usize + 1] {
+            let fl = self.flds[f2 as usize];
+            if !in_range(fl, off, n, self.ptr) {
+                continue;
+            }
+            let fb = size_of(fl.ty, self.ptr);
+            let mut x = c >> (8 * (fl.off - off)) as u64;
+            if fb < 8 {
+                x &= (1u64 << (8 * fb) as u64) - 1;
+            }
+            let k = bits_const(fl.ty, x);
+            let v = self.push(b, i, k);
+            self.set(f2, v);
+        }
     }
 
     // Spanning load `t` (instruction `i`): its fields' bits, each zero-extended and shifted to its place,
@@ -1799,9 +1911,10 @@ extend Promoter {
     }
 }
 
-// W_LOAD for a load of type `ty` that may span fields, an integer of 2 to 8 bytes; else 0.
+// W_LOAD for a load of type `ty` that may span fields or read part of a wider one, an integer of 1 to 8
+// bytes; else 0.
 const fn wide_kind(ty: u8) u8 {
-    return if is_int(ty) && ty != T_PTR && ty != T_I128 && ty != T_I8 {
+    return if is_int(ty) && ty != T_PTR && ty != T_I128 {
         W_LOAD
     } else {
         0
@@ -1891,6 +2004,31 @@ const fn fill_const(ty: u8, byte: u64, ptr: u32) Inst {
         return Inst { op: O_FCONST, ty: ty, aux: 0, a: x as u32, b: (x >> 32) as u32, c: VNONE };
     }
     return Inst { op: NO_CONST, ty: T_NONE, aux: 0, a: 0, b: 0, c: 0 };
+}
+
+// The bits of integer constant `v` of `b`, None when it is no constant.
+const fn int_bits(b: &Body, v: Value) Option<u64> {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST {
+        return None;
+    }
+    let t = b.insts[v as usize];
+    return Some(t.b as u64 << 32 | t.a as u64);
+}
+
+// A constant of scalar type `ty` (an integer, a pointer or a float) of bits `x`.
+const fn bits_const(ty: u8, x: u64) Inst {
+    return Inst {
+        op: if is_float(ty) {
+            O_FCONST
+        } else {
+            O_ICONST
+        },
+        ty: ty,
+        aux: 0,
+        a: x as u32,
+        b: (x >> 32) as u32,
+        c: VNONE,
+    };
 }
 
 // `v[lo .. hi]` by offset (insertion sort: a slot has few accesses).

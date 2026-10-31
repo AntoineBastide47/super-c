@@ -68,3 +68,9 @@ F bool c_s_starts(const char *s, size_t n) { return n >= 4 && memcmp(s, "http", 
 F uint32_t c_n_pow(uint32_t x) { uint32_t r = 1, b = x; for (uint32_t e = 5; e; e >>= 1) { if (e & 1) r *= b; b *= b; } return r; }
 F uint32_t c_q_slsum(const uint32_t *s, size_t n, uint32_t acc) { if (n == 0) return acc; return c_q_slsum(s + 1, n - 1, acc + s[0]); }
 F uint32_t c_h_box(uint32_t x) { uint32_t *b = malloc(4); if (!b) abort(); *b = x; uint32_t r = *b + 1; free(b); return r; }
+F uint32_t c_i_fold(const uint32_t *s, size_t n) { uint32_t a = 0; for (size_t k = 0; k < n; k++) a += s[k]; return a; }
+F uint32_t c_i_mapsum(const uint32_t *s, size_t n) { uint32_t a = 0; for (size_t k = 0; k < n; k++) a += s[k] * 2; return a; }
+F size_t c_i_filter(const uint32_t *s, size_t n) { size_t r = 0; for (size_t k = 0; k < n; k++) if (s[k] > 0x80000000u) r++; return r; }
+F uint32_t c_i_zip(const uint32_t *a, size_t na, const uint32_t *b, size_t nb) { size_t n = na < nb ? na : nb; uint32_t t = 0; for (size_t k = 0; k < n; k++) t += a[k] * b[k]; return t; }
+F bool c_i_any(const uint32_t *s, size_t n, uint32_t c) { for (size_t k = 0; k < n; k++) if (s[k] == c) return true; return false; }
+F uint32_t c_i_max(const uint32_t *s, size_t n) { uint32_t m = 0; for (size_t k = 0; k < n; k++) m = s[k] > m ? s[k] : m; return m; }

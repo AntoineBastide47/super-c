@@ -2016,6 +2016,222 @@ b0(v0: i64):
     same_result(&b, &a, "bits", x, 77);
 }
 
+// A counted loop whose body may leave it (a search, the vectorizer's `vexit` shape) does not partially
+// unroll: the unroller copies a body that jumps back. Each result is the one of the body before.
+@test
+fn a_search_loop_stays_one_loop_when_partial_unrolling_runs() {
+    let (b, a) = optimized_loops(
+        M"(lir ptr 8
+sym @find fn global
+fn @find
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v2)
+b1(v4: i64):
+  v5 = icmp.ult v4, v0
+  br v5, b2, b4(v0)
+b2:
+  v6 = mul.i64 v4, v4
+  v7 = add.i64 v4, v3
+  v8 = icmp.eq v6, v1
+  br v8, b3, b1(v7)
+b3:
+  ret v4
+b4(v9: i64):
+  ret v9
+)",
+        0,
+        false,
+        lu::Budgets { peel: 0, partial: 16, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+    );
+    let cases: [[u64; 3]; 5] = [[100, 49, 7], [100, 50, 100], [10, 81, 9], [5, 81, 5], [0, 0, 0]];
+    for k in 0..5 {
+        let x: []u64 = [cases[k][0], cases[k][1]];
+        same_result(&b, &a, "find", x, cases[k][2]);
+    }
+}
+
+// Whether an integer is a power of two, `x != 0 && (x & (x - 1)) == 0` in either order, is one unsigned
+// comparison `(x ^ (x - 1)) >u x - 1`, and its negation `x == 0 || (x & (x - 1)) != 0` the opposite one
+// (`pow2_test`). Each result is the one of the body before.
+@test
+fn power_of_two_tests_compare_once() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @is fn global
+sym @isnt fn global
+fn @is
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 -1
+  v3 = icmp.ne v0, v1
+  v4 = add.i32 v0, v2
+  v5 = and.i32 v0, v4
+  v6 = icmp.eq v5, v1
+  v7 = and.i8 v6, v3
+  ret v7
+fn @isnt
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = icmp.eq v0, v1
+  v4 = sub.i64 v0, v2
+  v5 = and.i64 v4, v0
+  v6 = icmp.ne v5, v1
+  v7 = or.i8 v3, v6
+  ret v7
+)",
+    );
+    let s = text_of(&a, "is");
+    assert(s.contains("xor.i32") && s.contains("icmp.ugt") && !s.contains(" and."), s.as_str());
+    let n = text_of(&a, "isnt");
+    assert(n.contains("xor.i64") && n.contains("icmp.ule") && !n.contains(" or."), n.as_str());
+    let xs: [u64; 8] = [0, 1, 2, 3, 64, 96, 0x80000000, 0xFFFFFFFF];
+    for k in 0..8 {
+        let x: []u64 = [xs[k]];
+        let p = xs[k] != 0 && (xs[k] & xs[k] - 1) == 0;
+        same_result(&b, &a, "is", x, p as u64);
+        same_result(&b, &a, "isnt", x, (!p) as u64);
+    }
+}
+
+// A call's aggregate result in a slot only loads read: each load of part of an 8-byte chunk with an
+// integer field reads that chunk's one load right after the call (`res_chunk`), which the code generators
+// take from the result's register. Before a return, a run of result stores and constant fills (a fill
+// of 3 bytes too), past a load of the body's own slot, joins into one store per chunk (`ret_chunks`). A
+// chunk's load after a call that ends its block goes at the block's end, and a parameter chunk's load in
+// an entry block of a jump alone at the entry's start: the bodies verify.
+@test
+fn call_results_load_whole_chunks_and_fills_join() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @dig fn global noinline
+sym @both fn global
+sym @last fn global
+sym @jumps fn global
+fn @last
+  layout l0 size 8 align 2 [0 i8, 4 i32, 4 i8]
+  sig (i8) -> i32
+  slot s0 size 8 align 2
+b0(v0: i8):
+  v1 = slotaddr s0
+  call @dig(v0, v1) : (i8) -> l0
+  jmp b1
+b1:
+  v2 = load.i32 v1+4 align 2
+  v3 = load.i8 v1 align 0
+  v4 = zext.i32 v3
+  v5 = add.i32 v2, v4
+  ret v5
+fn @jumps
+  layout l0 size 8 align 2 [0 i32, 4 i32]
+  sig (l0) -> i32
+b0(v0: ptr):
+  jmp b1
+b1:
+  v1 = load.i32 v0 align 2
+  v2 = load.i32 v0+4 align 2
+  v3 = sub.i32 v1, v2
+  ret v3
+fn @dig
+  layout l0 size 8 align 2 [0 i8, 4 i32, 4 i8]
+  sig (i8) -> l0
+b0(v0: i8, v1: ptr):
+  v2 = iconst.i8 9
+  v3 = iconst.i8 48
+  v4 = iconst.i8 1
+  v5 = iconst.i8 0
+  v6 = iconst.i64 3
+  v7 = sub.i8 v0, v3
+  v8 = icmp.ule v7, v2
+  br v8, b2, b1
+b1:
+  store v4, v1 align 0
+  store v0, v1+4 align 0
+  v9 = ptradd v1+5
+  memset v9, v5, v6
+  ret
+b2:
+  v10 = zext.i32 v7
+  store v5, v1 align 0
+  store v10, v1+4 align 2
+  ret
+fn @both
+  layout l0 size 8 align 2 [0 i8, 4 i32, 4 i8]
+  sig (i8, i8) -> l0
+  slot s0 size 8 align 2
+  slot s1 size 8 align 2
+b0(v0: i8, v1: i8, v2: ptr):
+  v3 = slotaddr s0
+  v4 = slotaddr s1
+  v5 = iconst.i8 1
+  v6 = iconst.i8 0
+  v7 = iconst.i64 3
+  v8 = iconst.i32 10
+  call @dig(v0, v3) : (i8) -> l0
+  v9 = load.i8 v3 align 0
+  v10 = icmp.eq v9, v6
+  br v10, b2, b1
+b1:
+  store v5, v2 align 0
+  v11 = load.i8 v3+4 align 0
+  store v11, v2+4 align 0
+  v12 = ptradd v2+5
+  memset v12, v6, v7
+  ret
+b2:
+  v13 = load.i32 v3+4 align 2
+  call @dig(v1, v4) : (i8) -> l0
+  v14 = load.i8 v4 align 0
+  v15 = icmp.eq v14, v6
+  br v15, b4, b3
+b3:
+  store v5, v2 align 0
+  v16 = load.i8 v4+4 align 0
+  store v16, v2+4 align 0
+  v17 = ptradd v2+5
+  memset v17, v6, v7
+  ret
+b4:
+  v18 = load.i32 v4+4 align 2
+  v19 = mul.i32 v13, v8
+  v20 = add.i32 v19, v18
+  store v6, v2 align 0
+  store v20, v2+4 align 2
+  ret
+)",
+    );
+    let d = text_of(&a, "dig");
+    assert(!d.contains("memset") && !d.contains("load"), d.as_str());
+    let s = text_of(&a, "both");
+    assert(
+        !s.contains("memset") && !s.contains("load.i8") && !s.contains("load.i32") && s.contains("load.i64"),
+        s.as_str(),
+    );
+    // One store per return.
+    let mut stores: u32 = 0;
+    let mut at = s.as_str();
+    for _ in 0..16 {
+        let k = at.find("store ");
+        if k < 0 {
+            break;
+        }
+        stores += 1;
+        at = at.slice(k as usize + 6, at.len());
+    }
+    assert_eq(stores, 3);
+    let l = text_of(&a, "last");
+    assert(l.contains("load.i64") && !l.contains("load.i32"), l.as_str());
+    let x: []u64 = [0x35];
+    same_result(&b, &a, "last", x, 5);
+    let y: []u64 = [0x7A];
+    same_result(&b, &a, "last", y, 123);
+}
+
 // Small aggregates by value whose fields share an 8-byte chunk, which the targets pass and return in one
 // integer register: each field of a parameter comes from one load of its chunk, the result's stores before
 // a return join into one store per chunk (a float's bits among them), and a 4-byte fill of zero is a store.

@@ -506,6 +506,62 @@ pub(package) fn parts_taken(
     return true;
 }
 
+/// Per slot of `b`, the uses of its addresses (`lv.uses`, before the code generator consumes any), into
+/// `out`.
+pub(package) fn slot_uses(b: &Body, lv: &lv::Live, out: &mut Vector<u32>) {
+    out.truncate(0);
+    out.resize_default(b.slots.len());
+    for k in 0..b.insts.len() {
+        let t = b.insts[k];
+        if t.op == O_SLOTADDR {
+            out[t.a as usize] += lv.uses[k];
+        }
+    }
+}
+
+/// The count of the loads right after call `i` of `b` whose values its aggregate result's register parts
+/// (`lay`'s result, pointers `ptr` bytes) give: each reads one whole part (`result_part`) at the
+/// result's address, a slot's whose addresses nothing uses but the call and those loads (`suse`, from
+/// `slot_uses`), and none folds into its user (`lv.pfold`: a memory operand reads the slot); then the
+/// call stores nothing. 0 when not.
+pub(package) fn result_loads(b: &Body, lv: &lv::Live, lay: &ab::CallLayout, ptr: u32, suse: &Vector<u32>, i: u32) u32 {
+    let t = b.insts[i as usize];
+    let rl = lay.ret;
+    let rv = b.pool[(t.c + b.pool[t.b as usize]) as usize];
+    if rl.kind != ab::L_REG || (rv & (VPARAM | VFLAG)) != 0 || b.insts[rv as usize].op != O_SLOTADDR {
+        return 0;
+    }
+    let mut n: u32 = 0;
+    while n < rl.n as u32 && i + 1 + n < b.insts.len() as u32 {
+        let u = b.insts[(i + 1 + n) as usize];
+        if u.op != O_LOAD || u.a != rv || (u.aux & MEM_VOLATILE) != 0 || result_part(lay, ptr, u) == NONE {
+            break;
+        }
+        if lv.pfold[(i + 1 + n) as usize] {
+            return 0;
+        }
+        n += 1;
+    }
+    return if suse[b.insts[rv as usize].a as usize] == n + 1 {
+        n
+    } else {
+        0
+    };
+}
+
+/// The part (0 ..) of call layout `lay`'s register result that load `u` reads whole (pointers `ptr`
+/// bytes), else NONE.
+pub(package) fn result_part(lay: &ab::CallLayout, ptr: u32, u: Inst) u32 {
+    let rl = lay.ret;
+    for q in 0..rl.n as u32 {
+        let pa = lay.parts[(rl.p0 + q) as usize];
+        if pa.off == u.c && pa.size as u32 == type_bytes(u.ty, ptr) && pa.v == is_v(u.ty) && !is_vec(u.ty) {
+            return q;
+        }
+    }
+    return NONE;
+}
+
 /// The part (0 ..) of register-passed argument `loc` (of call layout `lay`, pointers `ptr` bytes) that
 /// store `u` of `b` writes whole, else NONE.
 pub(package) fn arg_part(b: &Body, lay: &ab::CallLayout, ptr: u32, loc: ab::ALoc, u: Inst) u32 {

@@ -1738,6 +1738,9 @@ extend LoopOpt {
 
     // The plan fails for reason `why` (`report`), about an instruction of opcode `op` (0: none).
     fn no(self: &mut Self, why: str<'static>, op: u8) bool {
+        if stdlib::getenv("ZZWHY") != null {
+            eprint("ZZWHY {} {}\n", why, op);
+        }
         self.why = why;
         self.why_op = op;
         return false;
@@ -2341,6 +2344,13 @@ extend LoopOpt {
         }
         if (op == O_AND || op == O_OR) && self.kind(b, u, t.a) == VK_MASK && self.kind(b, u, t.b) == VK_MASK {
             return VK_MASK;
+        }
+        // A comparison's flag, 0 or 1, extended: the mask at the lane width, negated (`n += (x > c) as T`).
+        if !self.vone && (op == O_ZEXT || op == O_SEXT) && self.kind(b, u, t.a) == VK_MASK && is_int(t.ty) && t.ty != T_I128 && self.lane_size(
+            t.ty,
+            ptr,
+        ) {
+            return VK_LANE;
         }
         if op == O_SELECT {
             // The condition a mask, or a value from outside the loop (one side for every lane).
@@ -2960,6 +2970,15 @@ extend LoopOpt {
                         } else if t.op == O_SELECT && self.defined_in(t.a) {
                             nt.op = O_VSEL;
                             nt.a = self.vmask(b, nt.a, mask_type(nt.ty), l);
+                        } else if (t.op == O_ZEXT || t.op == O_SEXT) && self.kind(b, u, t.a) == VK_MASK {
+                            // The mask's lanes are 0 or -1: negated, the flag's 0 or 1.
+                            let m = self.vmask(b, nt.a, mask_type(nt.ty), l);
+                            self.vmap[at] = self.vi(
+                                b,
+                                Inst { op: O_NEG, ty: nt.ty, aux: 0, a: m, b: VNONE, c: VNONE },
+                                l,
+                            );
+                            continue;
                         } else if t.op >= O_SEXT && t.op <= O_UITOFP {
                             self.vmap[at] = self.vconv(b, nt, l);
                             continue;
@@ -3233,9 +3252,13 @@ extend LoopOpt {
     // ---- Partial unrolling ----
 
     // The copies of counted loop `h`'s body `u` (`counted`) an unrolled loop runs within `budget`
-    // instructions: 4 or 2, 0 when the body does not unroll (its counter steps by other than 1, it calls,
-    // whose cost the saved tests do not change, holds inline assembly, or reads the header's test).
+    // instructions: 4 or 2, 0 when the body does not unroll (it leaves the loop itself, `vexit`, where
+    // `unroll` takes its jump back; its counter steps by other than 1; it calls, whose cost the saved tests
+    // do not change; holds inline assembly; or reads the header's test).
     fn unroll_factor(self: &mut Self, b: &Body, h: u32, u: u32, budget: u32) u32 {
+        if self.vexit {
+            return 0;
+        }
         let ub = b.blocks[u as usize];
         let n = ub.len - 1;
         let mut k: u32 = 4;

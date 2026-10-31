@@ -244,6 +244,8 @@ pub(package) struct Gen {
     csr: u64, // callee-saved registers the body uses
     rows: Vector<u64>, // with debug information, per change of location: its code byte << 32 | its `lines` index
     rstore: Vector<u32>, // per instruction, 1 + the result part a store moves into its register (`ret_stores`), else 0
+    rload: Vector<u32>, // per call, the loads after it its result's registers give (`res_relays`)
+    suse: Vector<u32>, // per slot, the uses of its addresses (`place::slot_uses`)
     rr: u32, // the eviction cursor
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
@@ -278,6 +280,7 @@ pub(package) struct Gen {
     want: Vector<u8>, // per value, its request to `Live::plan`
     lconst: Vector<bool>, // per instruction, a constant a loop keeps in a register (`Live::loop_consts`)
     vmem: Vector<bool>, // per value, a vector some instruction reads or writes in memory (`vec_homes`)
+    vreg: Vector<bool>, // per instruction, one on vectors in xmm registers alone (`vec_homes`)
     ends: Vector<u32>, // values by the position their range ends at (CSR, `ends_at`)
     ends_at: Vector<u32>,
     cpre: Vector<u32>, // per instruction index, the calls that return before it (`call_tables`)
@@ -412,6 +415,8 @@ extend Gen {
             csr: 0,
             rows: Vector::<u64>::new(),
             rstore: Vector::<u32>::new(),
+            rload: Vector::<u32>::new(),
+            suse: Vector::<u32>::new(),
             rr: 0,
             pos: 0,
             cur: 0,
@@ -438,6 +443,7 @@ extend Gen {
             want: Vector::<u8>::new(),
             lconst: Vector::<bool>::new(),
             vmem: Vector::<bool>::new(),
+            vreg: Vector::<bool>::new(),
             ends: Vector::<u32>::new(),
             ends_at: Vector::<u32>::new(),
             cpre: Vector::<u32>::new(),
@@ -1056,17 +1062,18 @@ extend Gen {
                 r = self.self_lay.parts[rl.p0 as usize].reg + fb;
             }
         } else if t.op == O_CALL && self.intrinsic(t.a).len() == 0 || t.op == O_CALLIND && t.a != v {
-            self.call_layout(t);
+            // Not `call_layout`: a call being compiled may define `v` (`relay_result`) and still read `lay`.
+            let lay = &self.lays[self.lay_index(t)];
             let np = b.pool[t.b as usize];
             let nops = np + ((b.pool[t.b as usize + 2] & AGG) != 0) as u32;
             for k in 0..nops {
                 if b.pool[(t.c + k) as usize] != v {
                     continue;
                 }
-                if r != NOREG || k == np || self.lay.locs[k as usize].kind != ab::L_REG || self.lay.locs[k as usize].n != 1 || (b.pool[(t.b + 3 + k) as usize] & AGG) != 0 {
+                if r != NOREG || k == np || lay.locs[k as usize].kind != ab::L_REG || lay.locs[k as usize].n != 1 || (b.pool[(t.b + 3 + k) as usize] & AGG) != 0 {
                     return NOREG;
                 }
-                let pa = self.lay.parts[self.lay.locs[k as usize].p0 as usize];
+                let pa = lay.parts[lay.locs[k as usize].p0 as usize];
                 if pa.v != fv {
                     return NOREG;
                 }
@@ -1308,7 +1315,7 @@ extend Gen {
         }
         let mut nd: u32 = 4;
         for x in 0..ni {
-            nd = nd.max(self.need(b.insts[x]));
+            nd = nd.max(self.need(x as u32));
         }
         let most = self.xfix.count_ones() as u32 + self.xalloc.count_ones() as u32 - nd;
         // A body that calls nothing that returns (no instruction `clobbers` but one before a trap or in a
@@ -1360,20 +1367,24 @@ extend Gen {
         }
     }
 
-    // The integer registers instruction `t` holds at once besides the homes: its operands outside a
+    // The integer registers instruction `i` holds at once besides the homes: its operands outside a
     // home, its temporaries and its result (`end_inst` checks it). 8 for one that reads or writes a
     // vector or an i128 (a masked store reads 8), a vector operation, inline assembly and a system
-    // operation; 8 for an unsigned 64-bit multiplication with overflow (rax and rdx, the values moved out
-    // of them, the operands, the flag and the result); 7 for a division and a high multiplication (the
-    // same but the flag); 6 for an atomic operation; 5 for a shift and a select; 4 for the others.
-    fn need(self: &mut Self, t: Inst) u32 {
-        if in_mem(t.ty) || t.op == O_VOP || t.op == O_ASM || t.op == O_SYS {
-            return 8;
-        }
-        lv::each_use(self.b(), t, &mut self.uses);
-        for k in 0..self.uses.len() {
-            if in_mem(self.vt(self.uses[k])) {
+    // operation, but an operation on vectors in xmm registers alone (`vreg`); 8 for an unsigned 64-bit
+    // multiplication with overflow (rax and rdx, the values moved out of them, the operands, the flag and
+    // the result); 7 for a division and a high multiplication (the same but the flag); 6 for an atomic
+    // operation; 5 for a shift and a select; 4 for the others.
+    fn need(self: &mut Self, i: u32) u32 {
+        let t = self.b().insts[i as usize];
+        if !self.vreg[i as usize] {
+            if in_mem(t.ty) || t.op == O_VOP || t.op == O_ASM || t.op == O_SYS {
                 return 8;
+            }
+            lv::each_use(self.b(), t, &mut self.uses);
+            for k in 0..self.uses.len() {
+                if in_mem(self.vt(self.uses[k])) {
+                    return 8;
+                }
             }
         }
         if t.op == O_MULO && t.aux != OV_SIGNED && type_bits(t.ty, self.ptr) == 64 {
@@ -1399,13 +1410,14 @@ extend Gen {
 
     // `vmem`: per value, whether it is a vector some instruction defines or reads in memory: any but a
     // vector load, a lane-wise operation with an SSE form (its operands too; a product of 32-bit lanes,
-    // `mul_lanes32`), a bitcast between register vectors, a store of it, and an edge argument (a return
-    // reads its vector in memory).
+    // `mul_lanes32`), a bitcast between register vectors, a reduction in registers (`reduce_reg`), a store
+    // of it, and an edge argument (a return reads its vector in memory).
     fn vec_homes(self: &mut Self) {
         let b = self.b();
         let ni = b.insts.len();
         self.vmem.truncate(0);
         self.vmem.resize_default(self.lv.end.len());
+        fill(&mut self.vreg, ni, false);
         for i in 0..ni {
             let t = b.insts[i];
             let mut un = false;
@@ -1428,12 +1440,13 @@ extend Gen {
             ) != NONE || self.z512 && is_vec(t.ty) && type_bytes(t.ty, 8) == 64 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && evex_of_op(
                 t.op,
                 lane_type(t.ty),
-            ) != NONE || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a)) || t.op == O_MUL && is_vec(
+            ) != NONE || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a)) || self.reduce_reg(t) || t.op == O_MUL && is_vec(
                 t.ty,
             ) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(t.ty, 8) == 16 && in_vreg(t.ty);
             if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
                 self.vmem[i] = true;
             }
+            self.vreg[i] = reg_op && is_vec(t.ty) || self.reduce_reg(t);
             if t.op == O_RET && t.a != VNONE && is_vec(self.vt(t.a)) {
                 self.vmem[self.vx(t.a) as usize] = true;
             }
@@ -1450,6 +1463,25 @@ extend Gen {
                 if x != NONE && is_vec(self.xty(x)) {
                     self.vmem[x as usize] = true;
                 }
+            }
+        }
+        // A vector load into a register, a store of a vector from one, and a jump or branch that passes vectors
+        // in registers alone (`vmem` is final now).
+        for i in 0..ni {
+            let t = b.insts[i];
+            let mut reg = t.op == O_LOAD && is_vec(t.ty) && self.in_reg(t.ty) && !self.vmem[i] || t.op == O_STORE && is_vec(
+                self.vt(t.b),
+            ) && self.in_reg(self.vt(t.b)) && !self.vmem[self.vx(t.b) as usize];
+            if t.op == O_JMP || t.op == O_BR {
+                lv::each_use(b, t, &mut self.uses);
+                reg = true;
+                for k in 0..self.uses.len() {
+                    let vt = self.vt(self.uses[k]);
+                    reg = reg && (!in_mem(vt) || is_vec(vt) && self.in_reg(vt) && !self.vmem[self.vx(self.uses[k]) as usize]);
+                }
+            }
+            if reg {
+                self.vreg[i] = true;
             }
         }
     }
@@ -2074,10 +2106,7 @@ extend Gen {
     fn end_inst(self: &mut Self) {
         // `plan_homes` leaves `need` integer registers to each instruction.
         let used = ((self.lock | self.tmps) & ~self.fixed_busy & (self.xalloc | self.xfix)).count_ones() as u32;
-        assert(
-            used <= self.need(self.b().insts[self.cur as usize]),
-            "x64gen: an instruction takes more registers than `need`",
-        );
+        assert(used <= self.need(self.cur), "x64gen: an instruction takes more registers than `need`");
         self.lock = 0;
         self.tmps = 0;
         self.keep_flags = false;
@@ -2826,6 +2855,7 @@ extend Gen {
             let _ = self.refuse("the signature passes an aggregate whose C class is unknown");
         }
         self.ret_stores();
+        self.res_relays();
         let np = b.pool[b.sig as usize];
         let ni = b.insts.len() as u32;
         let e0 = b.blocks[0].param_start;
@@ -4417,8 +4447,9 @@ extend Gen {
             self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.pos };
             return true;
         }
-        // A sum whose shifted index or inner sum folds into it (`lv::FOLD_LEA`): one `lea`.
-        if (op == O_ADD || op == O_SUB) && (self.folded(t.a) || self.folded(t.b)) {
+        // A sum (an `or` of disjoint bits too) whose shifted index or inner sum folds into it
+        // (`lv::FOLD_LEA`): one `lea`.
+        if (op == O_ADD || op == O_SUB || lv::is_sum_or(self.b(), t)) && (self.folded(t.a) || self.folded(t.b)) {
             let f = lv::lea_of(self.b(), &self.lv.pfold, i);
             self.lea_sum(i, sz, f);
             return true;
@@ -4437,11 +4468,22 @@ extend Gen {
         if alu {
             let aop = alu_of(op);
             let ra = self.reg(t.a);
-            // A sum whose first operand stays live: `lea` writes another register, where `add` would take
-            // a copy first.
+            // A sum whose first operand stays live, or whose result the next instruction wants in another
+            // register (a return's, an argument's, a jump's parameter's, `next_reg`): `lea` writes that
+            // register, where `add` would take a copy first or after.
             if kc {
-                let rd = self.def_over(i, t.a, ra);
-                if rd != ra && (op == O_ADD || op == O_SUB && k != -2147483648) {
+                let sum = op == O_ADD || op == O_SUB && k != -2147483648;
+                let n = if sum {
+                    self.next_reg(i)
+                } else {
+                    NOREG
+                };
+                let rd = if n != NOREG && n != ra {
+                    self.def(i)
+                } else {
+                    self.def_over(i, t.a, ra)
+                };
+                if rd != ra && sum {
                     self.lea_to(
                         sz,
                         rd,
@@ -5281,6 +5323,87 @@ extend Gen {
         return any;
     }
 
+    // `rload`: per call of an aggregate result in registers, the loads right after it that its parts
+    // give (`place::result_loads`), else 0.
+    fn res_relays(self: &mut Self) {
+        let b = self.b();
+        fill(&mut self.rload, b.insts.len(), 0);
+        if b.slots.len() == 0 {
+            return;
+        }
+        place::slot_uses(b, &self.lv, &mut self.suse);
+        for i in 0..b.insts.len() as u32 {
+            let t = b.insts[i as usize];
+            if (t.op == O_CALL || t.op == O_CALLIND) && (b.pool[t.b as usize + 2] & AGG) != 0 {
+                self.call_layout(t);
+                self.rload[i as usize] = place::result_loads(b, &self.lv, &self.lay, self.ptr, &self.suse, i);
+            }
+        }
+    }
+
+    // Call `i` (`lay` its layout) of an aggregate result whose parts the loads after it read (`rload`):
+    // each load's value in its part's register, which the result's memory never holds; the loads emit
+    // nothing (`taken`). A load with a fixed home moves there; one without takes its part's register, or a
+    // free one when a fixed home or another load of that part has it (`rdx`, say); the moves are one
+    // parallel move.
+    fn relay_result(self: &mut Self, i: u32) {
+        let b = self.b();
+        let rl = self.lay.ret;
+        for q in 0..rl.n as u32 {
+            let pa = self.lay.parts[(rl.p0 + q) as usize];
+            self.lock |= bit(
+                pa.reg + if pa.v {
+                    V0
+                } else {
+                    0
+                },
+            );
+        }
+        self.mv.truncate(0);
+        let mut homes: u64 = 0;
+        // The part registers a load took; a second load of that part takes a register of its own.
+        let mut bound: u64 = 0;
+        for pass in 0..2u32 {
+            for k in 1..self.rload[i as usize] + 1 {
+                let j = i + k;
+                let pa = self.lay.parts[(rl.p0 + place::result_part(&self.lay, self.ptr, b.insts[j as usize])) as usize];
+                let r = pa.reg + if pa.v {
+                    V0
+                } else {
+                    0
+                };
+                let x = self.vx(j);
+                if pass == 0 {
+                    self.taken.push(j);
+                }
+                if !self.live_on(x) {
+                    continue;
+                }
+                let fixed = self.va[x as usize].home == H_FIXED || self.fix_class(x) != FIX_NONE;
+                if fixed != (pass == 0) {
+                    continue;
+                }
+                if !fixed && ((homes | bound) & bit(r)) == 0 {
+                    self.bind(x, r);
+                    bound |= bit(r);
+                    continue;
+                }
+                let rd = self.def(j);
+                homes |= bit(rd);
+                self.mv.push(
+                    Mv {
+                        src: Lc { kind: LC_REG, reg: r, off: 0, val: NONE },
+                        dst: Lc { kind: LC_REG, reg: rd, off: 0, val: NONE },
+                        v: pa.v,
+                        bytes: 8,
+                        done: false,
+                    },
+                );
+            }
+        }
+        resolve_moves(self);
+    }
+
     // `rstore`: when the result (an aggregate in registers) is written only by stores that end blocks
     // which return, each a whole part and only such stores between it and the `ret`, 1 + each one's part:
     // the first of each run moves the run's values into the part registers (`ret_moves`), and the return
@@ -6076,22 +6199,28 @@ extend Gen {
             ab::intrinsic_layout(b, t.b, self.ptr, gp[0..8], x::RAX, &mut self.lay);
             return;
         }
-        // Once per signature and convention in the body: they give the layout.
+        let q = self.lay_index(t);
+        self.lay.copy_from(&self.lays[q]);
+    }
+
+    // The index in `lays` of the layout of call `t` (no intrinsic), `self.lay` unchanged: once per
+    // signature and convention in the body, which give the layout.
+    fn lay_index(self: &mut Self, t: Inst) usize {
+        let b = self.b();
         let sc = t.op == O_CALL && self.sc_conv(b.syms[t.a as usize]);
         let key = t.b as u64 | sc as u64 << 32;
         for q in 0..self.lay_sig.len() {
             if self.lay_sig[q] == key {
-                self.lay.copy_from(&self.lays[q]);
-                return;
+                return q;
             }
         }
-        classify(self.win, sc, b, t.b, self.ptr, self.vregs, &mut self.lay);
         let q = self.lay_sig.len();
         self.lay_sig.push(key);
         if q == self.lays.len() {
             self.lays.push(ab::CallLayout::new());
         }
-        self.lays[q].copy_from(&self.lay);
+        classify(self.win, sc, b, t.b, self.ptr, self.vregs, self.lays.index_mut(q));
+        return q;
     }
 
     // Whether a call of package function symbol `s` takes Super-C's own convention (`w64::classify`'s
@@ -6598,6 +6727,10 @@ extend Gen {
         }
         self.called = true;
         if rl.kind != ab::L_REG {
+            return true;
+        }
+        if (rt & AGG) != 0 && self.rload[i as usize] != 0 {
+            self.relay_result(i);
             return true;
         }
         if (rt & AGG) != 0 {
@@ -9912,7 +10045,9 @@ extend Gen {
         } else {
             0u8
         };
-        if !simd || rule == core::SR_MLOAD || rule == core::SR_MSTORE || rule == core::SR_REDUCE || rule == core::SR_DOT || rule == core::SR_INDEX || rule == core::SR_RT_INDEX || rule == core::SR_MASKED {
+        if (!simd || rule == core::SR_MLOAD || rule == core::SR_MSTORE || rule == core::SR_REDUCE || rule == core::SR_DOT || rule == core::SR_INDEX || rule == core::SR_RT_INDEX || rule == core::SR_MASKED) && !self.reduce_reg(
+            t,
+        ) {
             self.sync_ops(&ops);
         }
         if code == core::OP_CAST {
@@ -11196,6 +11331,10 @@ extend Gen {
             self.reduce_float(i, c, add, mul, dot, at, ops, lt, n);
             return;
         }
+        if self.reduce_reg(t) {
+            self.reduce_halves(i, c, ops[0], type_bits(lt, self.ptr));
+            return;
+        }
         let xr = self.tmp(false);
         let yr = self.tmp(false);
         let acc = self.tmp(false);
@@ -11254,6 +11393,102 @@ extend Gen {
         }
         let rd = self.def(i);
         self.c.mov_rr(8, rd, acc);
+    }
+
+    // Whether `O_VOP` `t` is an integer reduction `reduce_halves` computes in xmm registers: a sum, `and`,
+    // `or` or `xor` of a 16-byte vector in a register, at its lanes' width.
+    fn reduce_reg(self: &Self, t: Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        if t.op != O_VOP || code < core::OP_SIMD || code >= core::OP_CMP_LANES || t.b != 1 {
+            return false;
+        }
+        let c = (code - core::OP_SIMD) as u8;
+        let vt = self.vt(self.b().pool[t.a as usize]);
+        let lt = lane_type(vt);
+        return (c == core::SIMD_REDUCE_ADD || c == core::SIMD_REDUCE_ADD_TREE || c == core::SIMD_REDUCE_AND || c == core::SIMD_REDUCE_OR || c == core::SIMD_REDUCE_XOR) && is_vec(
+            vt,
+        ) && !is_float(lt) && type_bytes(vt, self.ptr) == 16 && self.in_reg(vt) && type_bits(t.ty, self.ptr) == type_bits(
+            lt,
+            self.ptr,
+        );
+    }
+
+    // Integer reduction `c` (a sum, `and`, `or`, `xor`) of 16-byte vector `v` (lanes of `lb` bits) into
+    // instruction `i`, at the lanes' width: the vector's halves combined in xmm registers until one lane
+    // holds the result (`pshufd` across the qwords and dwords, `pshuflw` across the words, `psrlw` across
+    // the bytes), then one `movd`, as LLVM's x86 lowering of `vector.reduce`.
+    fn reduce_halves(self: &mut Self, i: u32, c: u8, v: Value, lb: u32) {
+        let rv = self.vec_use(v, self.vs0) - V0;
+        let ta = self.tmp(true) - V0;
+        let tb = self.tmp(true) - V0;
+        // paddb/w/d/q, pand, por, pxor.
+        let op: u32 = if c == core::SIMD_REDUCE_AND {
+            0x0FDB
+        } else if c == core::SIMD_REDUCE_OR {
+            0x0FEB
+        } else if c == core::SIMD_REDUCE_XOR {
+            0x0FEF
+        } else if lb == 8 {
+            0x0FFC
+        } else if lb == 16 {
+            0x0FFD
+        } else if lb == 32 {
+            0x0FFE
+        } else {
+            0x0FD4
+        };
+        // ta = the qwords swapped, combined with v; each step the lanes' halves in the low half.
+        self.shuf(0x66, ta, rv, 0x4E);
+        self.lane_op(op, ta, rv);
+        if lb <= 32 {
+            self.shuf(0x66, tb, ta, 0xB1);
+            self.lane_op(op, ta, tb);
+        }
+        if lb <= 16 {
+            self.shuf(0xF2, tb, ta, 0xB1);
+            self.lane_op(op, ta, tb);
+        }
+        if lb == 8 {
+            // psrlw tb, ta, 8.
+            if self.avx {
+                self.c.vex_rr(0x66, 1, 0x71, false, false, 2, tb, ta);
+            } else {
+                self.c.vmov(tb, ta);
+                self.c.sse_rr(0x66, 0x0F71, 2, tb);
+            }
+            self.c.byte(8);
+            self.lane_op(op, ta, tb);
+        }
+        let rd = self.def(i);
+        self.c.movd_from_x(
+            if lb == 64 {
+                8
+            } else {
+                4
+            },
+            rd,
+            ta,
+        );
+    }
+
+    // xmm `dst` = xmm `src` shuffled by `imm`: `pshufd` (prefix 0x66) or `pshuflw` (0xF2), VEX-encoded
+    // under AVX.
+    fn shuf(self: &mut Self, pfx: u32, dst: u8, src: u8, imm: u32) {
+        if self.avx {
+            self.c.vex_rr(pfx, 1, 0x70, false, false, dst, 0, src);
+        } else {
+            self.c.sse_rr(pfx, 0x0F70, dst, src);
+        }
+        self.c.byte(imm);
+    }
+
+    // xmm `dst` = `dst` op `src` for the 66-prefixed lane operation `op` (`0F xx`), VEX-encoded under AVX.
+    fn lane_op(self: &mut Self, op: u32, dst: u8, src: u8) {
+        if self.avx {
+            self.c.vex_rr(0x66, 1, op & 0xFF, false, false, dst, dst, src);
+        } else {
+            self.c.sse_rr(0x66, op, dst, src);
+        }
     }
 
     // A float reduction (`vreduce`) of rule `c` into an `at` result over the `n` lanes (of `lt`) of operand 0

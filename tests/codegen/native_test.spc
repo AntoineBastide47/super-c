@@ -2874,6 +2874,128 @@ b0(v0: ptr, v1: i64):
     assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the System V object");
 }
 
+// A call's aggregate result in registers whose parts the loads right after it read whole, from a slot
+// nothing else uses (`place::result_loads`): the loads take the result's registers and the call stores
+// nothing; of one part and of two. A slot that a later load reads too keeps the stores, as does one whose
+// load folds into its user (x86-64's memory operand, `lv.pfold`). Two loads of one part each keep the
+// value. The C side checks each sum.
+@test
+fn call_results_stay_in_their_registers_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @mk fn global noinline
+sym @pair fn global noinline
+sym @one fn global
+sym @two fn global
+sym @kept fn global
+sym @folded fn global
+sym @dup fn global
+fn @mk
+  layout l0 size 8 align 2 [0 i32, 4 i32]
+  sig (i32) -> l0
+b0(v0: i32, v1: ptr):
+  v2 = iconst.i32 7
+  v3 = mul.i32 v0, v2
+  store v0, v1 align 2
+  store v3, v1+4 align 2
+  ret
+fn @pair
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64) -> l0
+b0(v0: i64, v1: ptr):
+  v2 = iconst.i64 3
+  v3 = shl.i64 v0, v2
+  store v0, v1 align 3
+  store v3, v1+8 align 3
+  ret
+fn @one
+  layout l0 size 8 align 2 [0 i32, 4 i32]
+  sig (i32) -> i64
+  slot s0 size 8 align 2
+b0(v0: i32):
+  v1 = slotaddr s0
+  call @mk(v0, v1) : (i32) -> l0
+  v2 = load.i64 v1 align 2
+  v3 = iconst.i64 32
+  v4 = lshr.i64 v2, v3
+  v5 = add.i64 v2, v4
+  ret v5
+fn @two
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  call @pair(v0, v1) : (i64) -> l0
+  v2 = load.i64 v1 align 3
+  v3 = load.i64 v1+8 align 3
+  v4 = sub.i64 v3, v2
+  ret v4
+fn @kept
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  call @pair(v0, v1) : (i64) -> l0
+  v2 = load.i64 v1 align 3
+  v3 = iconst.i64 0
+  v4 = icmp.eq v2, v3
+  br v4, b1, b2
+b1:
+  ret v3
+b2:
+  v5 = load.i64 v1+8 align 3
+  ret v5
+fn @folded
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64, i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  call @pair(v0, v2) : (i64) -> l0
+  v3 = load.i64 v2+8 align 3
+  v4 = add.i64 v1, v3
+  v5 = load.i64 v2 align 3
+  v6 = sub.i64 v4, v5
+  ret v6
+fn @dup
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  call @pair(v0, v1) : (i64) -> l0
+  v2 = load.i64 v1 align 3
+  v3 = load.i64 v1 align 3
+  v4 = load.i64 v1+8 align 3
+  v5 = mul.i64 v2, v4
+  v6 = add.i64 v5, v3
+  v7 = mul.i64 v6, v3
+  ret v7
+)";
+    let drv = M"(#include <stdint.h>
+int64_t one(int32_t);
+int64_t two(int64_t);
+int64_t kept(int64_t);
+int64_t folded(int64_t, int64_t);
+int64_t dup(int64_t);
+int main(void) {
+  uint64_t o = (uint64_t)(uint32_t)5 | (uint64_t)(uint32_t)35 << 32;
+  if ((uint64_t)one(5) != o + (o >> 32)) return 1;
+  if (two(9) != 72 - 9) return 2;
+  if (kept(4) != 32 || kept(0) != 0) return 3;
+  if (folded(5, 100) != 100 + 40 - 5) return 4;
+  if (dup(5) != (5 * 40 + 5) * 5) return 5;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // Small aggregates by value whose fields share an 8-byte chunk, in the form the optimizer gives them
 // (`lir::opt`'s `agg_chunk`, `ret_chunks`): each parameter chunk is one load, which takes the chunk's
 // register, and each result chunk one store, which the return moves into its register; a float's bits
@@ -3207,8 +3329,9 @@ b0(v0: ptr, v1: i64, v2: i64):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
-// Sums, minimums and maximums of a vector's integer lanes (arm64: `addv`, `addp`, `smaxv`, `uminv` and
-// the like in v registers): lanes of 1, 2, 4 and 8 bytes, signed and unsigned.
+// Sums, minimums, maximums, `and`s, `or`s and `xor`s of a vector's integer lanes (arm64: `addv`, `addp`,
+// `smaxv`, `uminv` and the like in v registers; x86-64: halves combined in xmm registers,
+// `reduce_halves`): lanes of 1, 2, 4 and 8 bytes, signed and unsigned.
 @test
 fn vector_reductions_in_registers_run() {
     if !cli::has_cc() {
@@ -3234,6 +3357,14 @@ b0(v0: ptr, v1: ptr):
   v14 = load.v2i32 v0 align 2
   v15 = vop.reduce_add.i32 (v14)
   v16 = vop.reduce_max.s.i32 (v14)
+  v17 = vop.reduce_and.i32 (v2)
+  v18 = vop.reduce_or.i8 (v6)
+  v19 = vop.reduce_xor.i16 (v10)
+  v20 = vop.reduce_xor.i64 (v12)
+  store v17, v1+40 align 2
+  store v18, v1+44 align 0
+  store v19, v1+46 align 1
+  store v20, v1+48 align 3
   store v3, v1 align 2
   store v4, v1+4 align 2
   store v5, v1+8 align 2
@@ -3246,7 +3377,7 @@ b0(v0: ptr, v1: ptr):
   store v16, v1+36 align 2
   ret
 )";
-    let drv = "#include <stdint.h>\n#include <string.h>\nvoid reds(const void *, void *);\nint main(void) {\n  int32_t w[4] = {7, -3, 100, -40};\n  unsigned char o[40];\n  reds(w, o);\n  int32_t s, mx, mn; int8_t bs, bmn; uint8_t bmx; int16_t hs; int64_t ds; int32_t ps, pm;\n  memcpy(&s, o, 4); memcpy(&mx, o + 4, 4); memcpy(&mn, o + 8, 4);\n  memcpy(&bs, o + 12, 1); memcpy(&bmn, o + 13, 1); memcpy(&bmx, o + 14, 1);\n  memcpy(&hs, o + 16, 2); memcpy(&ds, o + 24, 8); memcpy(&ps, o + 32, 4); memcpy(&pm, o + 36, 4);\n  if (s != 64 || mx != 100 || mn != 7) return 1;\n  const uint8_t *b = (const uint8_t *)w;\n  int bsum = 0, bmin = 127, bmax = 0;\n  for (int i = 0; i < 16; i++) { bsum += b[i]; if ((int8_t)b[i] < bmin) bmin = (int8_t)b[i]; if (b[i] > bmax) bmax = b[i]; }\n  if (bs != (int8_t)bsum || bmn != bmin || bmx != bmax) return 2;\n  const int16_t *h = (const int16_t *)w;\n  int hsum = 0;\n  for (int i = 0; i < 8; i++) hsum += h[i];\n  if (hs != (int16_t)hsum) return 3;\n  const int64_t *d = (const int64_t *)w;\n  if (ds != (int64_t)((uint64_t)d[0] + (uint64_t)d[1])) return 4;\n  if (ps != 4 || pm != 7) return 5;\n  return 0;\n}\n";
+    let drv = "#include <stdint.h>\n#include <string.h>\nvoid reds(const void *, void *);\nint main(void) {\n  int32_t w[4] = {7, -3, 100, -40};\n  unsigned char o[56];\n  reds(w, o);\n  int32_t s, mx, mn; int8_t bs, bmn; uint8_t bmx; int16_t hs; int64_t ds; int32_t ps, pm;\n  memcpy(&s, o, 4); memcpy(&mx, o + 4, 4); memcpy(&mn, o + 8, 4);\n  memcpy(&bs, o + 12, 1); memcpy(&bmn, o + 13, 1); memcpy(&bmx, o + 14, 1);\n  memcpy(&hs, o + 16, 2); memcpy(&ds, o + 24, 8); memcpy(&ps, o + 32, 4); memcpy(&pm, o + 36, 4);\n  if (s != 64 || mx != 100 || mn != 7) return 1;\n  const uint8_t *b = (const uint8_t *)w;\n  int bsum = 0, bmin = 127, bmax = 0;\n  for (int i = 0; i < 16; i++) { bsum += b[i]; if ((int8_t)b[i] < bmin) bmin = (int8_t)b[i]; if (b[i] > bmax) bmax = b[i]; }\n  if (bs != (int8_t)bsum || bmn != bmin || bmx != bmax) return 2;\n  const int16_t *h = (const int16_t *)w;\n  int hsum = 0;\n  for (int i = 0; i < 8; i++) hsum += h[i];\n  if (hs != (int16_t)hsum) return 3;\n  const int64_t *d = (const int64_t *)w;\n  if (ds != (int64_t)((uint64_t)d[0] + (uint64_t)d[1])) return 4;\n  if (ps != 4 || pm != 7) return 5;\n  int32_t ra; uint8_t ro; int16_t rx; int64_t rq;\n  memcpy(&ra, o + 40, 4); memcpy(&ro, o + 44, 1); memcpy(&rx, o + 46, 2); memcpy(&rq, o + 48, 8);\n  if (ra != (w[0] & w[1] & w[2] & w[3])) return 6;\n  uint8_t bo = 0; for (int i = 0; i < 16; i++) bo |= b[i];\n  if (ro != bo) return 7;\n  int16_t hx = 0; for (int i = 0; i < 8; i++) hx ^= h[i];\n  if (rx != hx) return 8;\n  if (rq != (d[0] ^ d[1])) return 9;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }

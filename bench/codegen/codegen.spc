@@ -5,6 +5,7 @@
 // Inputs come in two modes: `fixed` (one value, predictable branches) and `random` (uniform values).
 import stdio;
 import std::testing::bench as bench;
+import std::iter as iter;
 
 const CALLS: usize = 4096; // kernel calls per round
 const ROUNDS: i32 = 30;
@@ -60,6 +61,12 @@ extern "C" {
     fn c_n_pow(x: u32) u32;
     fn c_q_slsum(s: *const u32, n: usize, acc: u32) u32;
     fn c_h_box(x: u32) u32;
+    fn c_i_fold(s: *const u32, n: usize) u32;
+    fn c_i_mapsum(s: *const u32, n: usize) u32;
+    fn c_i_filter(s: *const u32, n: usize) usize;
+    fn c_i_zip(a: *const u32, na: usize, b: *const u32, nb: usize) u32;
+    fn c_i_any(s: *const u32, n: usize, c: u32) bool;
+    fn c_i_max(s: *const u32, n: usize) u32;
 }
 
 @arch(x86_64)
@@ -113,6 +120,12 @@ extern "C" {
     fn c_n_pow(x: u32) u32;
     fn c_q_slsum(s: *const u32, n: usize, acc: u32) u32;
     fn c_h_box(x: u32) u32;
+    fn c_i_fold(s: *const u32, n: usize) u32;
+    fn c_i_mapsum(s: *const u32, n: usize) u32;
+    fn c_i_filter(s: *const u32, n: usize) usize;
+    fn c_i_zip(a: *const u32, na: usize, b: *const u32, nb: usize) u32;
+    fn c_i_any(s: *const u32, n: usize, c: u32) bool;
+    fn c_i_max(s: *const u32, n: usize) u32;
 }
 
 // Recursion whose result an associative operation combines with the recursive call.
@@ -321,6 +334,42 @@ fn m_count(s: []u8, c: u8) usize {
         }
     }
     return n;
+}
+
+// Iterator pipelines over slices: a sum, a sum of products by a constant, a count of matches, a dot
+// product of two zipped slices, a search that stops at the first match and a maximum.
+@noinline
+fn i_fold(s: []u32) u32 {
+    return iter::fold(s.iter(), 0u32, |a: u32, x: &u32| a.wrapping_add(*x));
+}
+
+@noinline
+fn i_mapsum(s: []u32) u32 {
+    return iter::fold(iter::map(s.iter(), |x: &u32| x.wrapping_mul(2)), 0u32, |a: u32, x: u32| a.wrapping_add(x));
+}
+
+@noinline
+fn i_filter(s: []u32) usize {
+    return iter::count(iter::filter(s.iter(), |x: &&u32| **x > 0x80000000));
+}
+
+@noinline
+fn i_zip(a: []u32, b: []u32) u32 {
+    return iter::fold(
+        iter::zip(a.iter(), b.iter()),
+        0u32,
+        |t: u32, p: (&u32, &u32)| t.wrapping_add(p.0.wrapping_mul(*p.1)),
+    );
+}
+
+@noinline
+fn i_any(s: []u32, c: u32) bool {
+    return iter::any(s.iter(), |x: &&u32| **x == c);
+}
+
+@noinline
+fn i_max(s: []u32) u32 {
+    return iter::max(iter::copied(s.iter())).unwrap_or(0);
 }
 
 // Compares with constant strings, a constant power, a tail recursion over a slice, a box nothing keeps.
@@ -1100,4 +1149,52 @@ pub fn codegen_misc(_b: &mut bench::Bencher) {
         time(&xs, |x: u32| (unsafe c_q_slsum(&nums[0], (x % 64) as usize, 0)) as u64),
     );
     row("h_box", "random", time(&xs, |x: u32| h_box(x) as u64), time(&xs, |x: u32| (unsafe c_h_box(x)) as u64));
+}
+
+/// Iterator pipelines: `i_fold`, `i_mapsum`, `i_filter`, `i_any` and `i_max` on the first 0 to 255 elements of
+/// an array, `i_zip` on two such prefixes of different lengths.
+@bench(log_results = false)
+pub fn codegen_iters(_b: &mut bench::Bencher) {
+    warm();
+    let xs = inputs(0xFFFFFFFF, true);
+    let mut nums: [u32; 256] = [0; 256];
+    for i in 0..256 {
+        nums[i] = (i as u64 * 2654435761) as u32;
+    }
+    row(
+        "i_fold",
+        "random",
+        time(&xs, |x: u32| i_fold(nums[0..(x % 256) as usize]) as u64),
+        time(&xs, |x: u32| (unsafe c_i_fold(&nums[0], (x % 256) as usize)) as u64),
+    );
+    row(
+        "i_mapsum",
+        "random",
+        time(&xs, |x: u32| i_mapsum(nums[0..(x % 256) as usize]) as u64),
+        time(&xs, |x: u32| (unsafe c_i_mapsum(&nums[0], (x % 256) as usize)) as u64),
+    );
+    row(
+        "i_filter",
+        "random",
+        time(&xs, |x: u32| i_filter(nums[0..(x % 256) as usize]) as u64),
+        time(&xs, |x: u32| (unsafe c_i_filter(&nums[0], (x % 256) as usize)) as u64),
+    );
+    row(
+        "i_zip",
+        "random",
+        time(&xs, |x: u32| i_zip(nums[0..(x % 256) as usize], nums[0..(x >> 8 & 255) as usize]) as u64),
+        time(&xs, |x: u32| (unsafe c_i_zip(&nums[0], (x % 256) as usize, &nums[0], (x >> 8 & 255) as usize)) as u64),
+    );
+    row(
+        "i_any",
+        "random",
+        time(&xs, |x: u32| i_any(nums[0..(x % 256) as usize], nums[(x >> 8 & 255) as usize]) as u64),
+        time(&xs, |x: u32| (unsafe c_i_any(&nums[0], (x % 256) as usize, nums[(x >> 8 & 255) as usize])) as u64),
+    );
+    row(
+        "i_max",
+        "random",
+        time(&xs, |x: u32| i_max(nums[0..(x % 256) as usize]) as u64),
+        time(&xs, |x: u32| (unsafe c_i_max(&nums[0], (x % 256) as usize)) as u64),
+    );
 }

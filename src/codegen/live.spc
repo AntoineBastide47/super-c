@@ -426,9 +426,9 @@ extend Live {
                     continue;
                 }
             }
-            if (self.fold_ops & FOLD_LEA) != 0 && (t.op == O_ADD || t.op == O_SUB) {
+            if (self.fold_ops & FOLD_LEA) != 0 && (t.op == O_ADD || t.op == O_SUB || is_sum_or(b, t)) {
                 // The shift an index takes, then the inner sum whose operands the address takes.
-                let nq: u32 = if t.op == O_ADD {
+                let nq: u32 = if t.op != O_SUB {
                     2
                 } else {
                     0
@@ -2302,14 +2302,18 @@ pub(package) struct Lea {
 extend Lea as Copy {}
 
 /// The address form in which `lea` computes sum `i` of `b` (`FOLD_LEA`; `folded`, the folded
-/// instructions): an `add`, or a `sub` of a constant, of up to two registers, one of them shifted left by
+/// instructions): an `add`, an `or` of disjoint bits (`is_sum_or`), or a `sub` of a constant, of up to
+/// two registers, one of them shifted left by
 /// 1 to 3 when folded (`lea_shift`), and a displacement that 32 signed bits hold, a folded inner `add`'s
 /// operands among its own. An index alone takes a shift of at most 1 (`index + index`): no form here
 /// lacks a base.
 pub(package) fn lea_of(b: &Body, folded: &Vector<bool>, i: u32) Lea {
     let mut f = Lea { ok: true, base: VNONE, index: VNONE, sh: 0, disp: 0 };
     let t = b.insts[i as usize];
-    if t.op != O_ADD && t.op != O_SUB || !is_int(t.ty) || t.ty == T_I128 || t.op == O_SUB && int_const(b, t.b) == u64::MAX {
+    if t.op != O_ADD && t.op != O_SUB && !is_sum_or(b, t) || !is_int(t.ty) || t.ty == T_I128 || t.op == O_SUB && int_const(
+        b,
+        t.b,
+    ) == u64::MAX {
         f.ok = false;
         return f;
     }
@@ -2363,6 +2367,65 @@ fn lea_term(b: &Body, folded: &Vector<bool>, v: Value, neg: bool, bits: u32, f: 
         f.ok = false;
     }
 }
+
+/// Whether `t` of `b` is an `or` of two integers no bit of which both may have (`ones_of`): a sum.
+pub(package) fn is_sum_or(b: &Body, t: Inst) bool {
+    if t.op != O_OR || !is_int(t.ty) || t.ty == T_I128 || t.ty == T_PTR {
+        return false;
+    }
+    let bits = type_bits(t.ty, 8);
+    return (ones_of(b, t.a, bits, ONES_DEPTH) & ones_of(b, t.b, bits, ONES_DEPTH)) == 0;
+}
+
+// The bits value `v` of `b` (`bits` wide) may have set, through at most `depth` instructions: a
+// constant's, an `and`'s with a constant, a shift's by a constant, a zero extension's; else all.
+fn ones_of(b: &Body, v: Value, bits: u32, depth: u32) u64 {
+    let all = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits as u64) - 1
+    };
+    let k = int_const(b, v);
+    if k != u64::MAX {
+        return k & all;
+    }
+    if !is_inst(v) || depth == 0 {
+        return all;
+    }
+    let t = b.insts[v as usize];
+    if t.op != O_AND && t.op != O_SHL && t.op != O_LSHR && t.op != O_ZEXT {
+        return all;
+    }
+    // `b` is a value of these (a call's is a pool index).
+    let c = if t.op == O_ZEXT {
+        u64::MAX
+    } else {
+        int_const(b, t.b)
+    };
+    if t.op == O_AND {
+        let m = if c != u64::MAX {
+            c
+        } else {
+            ones_of(b, t.b, bits, depth - 1)
+        };
+        return ones_of(b, t.a, bits, depth - 1) & m & all;
+    }
+    if (t.op == O_SHL || t.op == O_LSHR) && c != u64::MAX && c < bits as u64 {
+        let x = ones_of(b, t.a, bits, depth - 1);
+        return if t.op == O_SHL {
+            x << c & all
+        } else {
+            x >> c
+        };
+    }
+    if t.op == O_ZEXT && is_int(b.type_of(t.a)) && b.type_of(t.a) != T_I128 {
+        return ones_of(b, t.a, type_bits(b.type_of(t.a), 8), depth - 1);
+    }
+    return all;
+}
+
+// `ones_of` looks through at most ONES_DEPTH instructions.
+const ONES_DEPTH: u32 = 4;
 
 // Value `v` is an instruction's (no parameter, no flag, not VNONE).
 const fn is_inst(v: Value) bool {
