@@ -563,6 +563,17 @@ extend Gen {
             let r = (open & ~self.held).trailing_zeros() as u32;
             return self.taken(r as u8);
         }
+        // In a loop, a callee-saved register that holds nothing, which the prologue saves once, before an
+        // eviction, which may store and reload at each iteration.
+        let blk = self.lv.order[self.pos as usize] as usize;
+        if !vreg && self.lv.inner[blk] != NONE && !self.lv.rare[blk] {
+            for r in 0..16u32 {
+                if self.fixed_free(r as u8) && (self.held & bit(r as u8)) == 0 {
+                    self.csr |= bit(r as u8);
+                    return r as u8;
+                }
+            }
+        }
         // Evict round-robin: the next unlocked register that holds a value.
         let busy = open & self.held;
         if busy != 0 {
@@ -934,7 +945,9 @@ extend Gen {
             return sr;
         }
         let fixed = self.va[x as usize].home == H_FIXED || self.fix_class(x) != FIX_NONE;
-        if !fixed && ((self.xalloc | self.valloc) & bit(ra)) != 0 && is_v(t) == ra >= V0 {
+        // A callee-saved register `alloc` gave a loop's temporary (saved, no home) counts as a caller-saved one.
+        let temps = self.xalloc | self.valloc | self.xfix & self.csr & ~self.fixed_busy;
+        if !fixed && (temps & bit(ra)) != 0 && is_v(t) == ra >= V0 {
             let own = self.owner[ra as usize];
             let temp = own == NONE && (self.tmps & bit(ra)) != 0;
             let dies = own == xa && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
@@ -2375,7 +2388,9 @@ extend Gen as Mover {
         self.st(t, r, x::at(dst.reg, dst.off));
     }
 
-    fn scratch(self: &mut Self) Lc {
+    fn scratch(self: &mut Self, _m: Mv) Lc {
+        // Every allocatable integer register is an argument or result register, which a call may have set
+        // outside the moves; the scratch registers are the moves' own.
         let s = self.slot_alloc(64, 16) as i32;
         return Lc { kind: LC_MEM, reg: x::RSP, off: s, val: NONE };
     }
@@ -2878,7 +2893,7 @@ extend Gen {
             let x = ni + e0 + np;
             if self.self_lay.ret.kind == ab::L_SRET {
                 self.entry_reg(x, self.arg(0));
-            } else {
+            } else if !self.ret_moved() {
                 let (size, _) = sig_size(b, rt, self.ptr);
                 let off = self.slot_alloc(size + 7 & ~7u32, 16);
                 self.va.index_mut(x as usize).home = H_SPADDR;
@@ -5087,6 +5102,25 @@ extend Gen {
         self.mem_rel(rs, radd);
         self.va.index_mut(i as usize).clean = !is_v(ty) && type_bits(ty, self.ptr) < 64;
         return true;
+    }
+
+    // Whether every return of the body takes the result from a run of part stores (`rstore`): then nothing
+    // reads the result's memory, which needs no slot.
+    fn ret_moved(self: &Self) bool {
+        let b = self.b();
+        let mut any = false;
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            let end = bk.start + bk.len - 1;
+            if bk.len == 0 || b.insts[end as usize].op != O_RET {
+                continue;
+            }
+            if end == bk.start || self.rstore[end as usize - 1] == 0 {
+                return false;
+            }
+            any = true;
+        }
+        return any;
     }
 
     // `rstore`: when the result (an aggregate in registers) is written only by stores that end blocks

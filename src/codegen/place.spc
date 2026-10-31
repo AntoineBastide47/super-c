@@ -103,12 +103,31 @@ pub(package) interface Mover {
     fn moves(self: &mut Self) &mut Vector<Mv>;
     /// One move of `bytes` bytes (`v`: a float or memory value) from `src` to `dst`.
     fn do_move(self: &mut Self, src: Lc, dst: Lc, v: bool, bytes: u32);
-    /// A free stack location of 64 bytes, aligned 16, that breaks a cycle.
-    fn scratch(self: &mut Self) Lc;
+    /// A location that breaks a cycle by holding move `m`'s source: a free register of its file, else a free
+    /// stack location of 64 bytes, aligned 16.
+    fn scratch(self: &mut Self, m: Mv) Lc;
+}
+
+/// The registers the pending moves of `mv` read or write, a bit each (a memory location's base too).
+pub(package) fn move_regs(mv: &Vector<Mv>) u64 {
+    let mut r: u64 = 0;
+    for i in 0..mv.len() {
+        let m = mv[i];
+        if m.done {
+            continue;
+        }
+        if m.src.kind != LC_VAL {
+            r |= 1u64 << m.src.reg as u64;
+        }
+        if m.dst.kind != LC_VAL {
+            r |= 1u64 << m.dst.reg as u64;
+        }
+    }
+    return r;
 }
 
 /// Perform the pending moves of `g` as one parallel move: a move waits while its destination is a pending
-/// move's source; a cycle breaks through a scratch slot.
+/// move's source; a cycle breaks through a scratch register or slot (`Mover::scratch`).
 pub(package) fn resolve_moves<G: Mover>(g: &mut G) {
     let n = g.moves().len();
     let mut left = n;
@@ -132,7 +151,7 @@ pub(package) fn resolve_moves<G: Mover>(g: &mut G) {
             for i in 0..n {
                 if !g.moves()[i].done {
                     let m = g.moves()[i];
-                    let tmp = g.scratch();
+                    let tmp = g.scratch(m);
                     g.do_move(m.src, tmp, m.v, m.bytes);
                     g.moves().index_mut(i).src = tmp;
                     break;

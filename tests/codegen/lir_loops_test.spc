@@ -4266,3 +4266,67 @@ b2:
         same_outcome(&b, &a, "pow5", x, want, false);
     }
 }
+
+// A vectorized maximum (a select of the lane or the accumulator by their comparison) is the lanes'
+// maximum (`vop.max.s`) where every vector operation is in registers; elsewhere the select stays.
+@test
+fn a_vectorized_maximum_takes_the_lanes_maximum() {
+    let src = M"(lir ptr 8
+sym @top fn global noinline
+sym @drive fn global
+fn @top
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 -2147483648
+  jmp b1(v2, v4)
+b1(v5: i64, v6: i32):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v5 * 4
+  v9 = load.i32 v8 align 2
+  v10 = icmp.sgt v9, v6
+  v11 = select.i32 v10, v9, v6
+  v12 = add.i64 v5, v3
+  jmp b1(v12, v11)
+b3:
+  ret v6
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 128
+  v5 = iconst.i32 -7919
+  jmp b1(v2)
+b1(v6: i64):
+  v7 = icmp.ult v6, v4
+  br v7, b2, b3
+b2:
+  v8 = trunc.i32 v6
+  v9 = mul.i32 v8, v5
+  v10 = ptradd v1, v6 * 4
+  store v9, v10 align 2
+  v11 = add.i64 v6, v3
+  jmp b1(v11)
+b3:
+  v12 = call.i32 @top(v1, v0) : (ptr, i64) -> i32
+  v13 = sext.i64 v12
+  ret v13
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let t = text_of(&a, "top");
+    assert(t.contains("vop.max.s.v4i32") && !t.contains("vsel"), t.as_str());
+    let (_, n) = optimized_for(src, VECTOR, 16, VOPS_SOME);
+    let u = text_of(&n, "top");
+    assert(!u.contains("vop.max.s.v4i32"), u.as_str());
+    let lens: [u64; 4] = [0, 5, 37, 128];
+    for k in 0..4usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}

@@ -165,6 +165,7 @@ pub(package) struct Opt {
     // to visit, an instruction's operands.
     fresh: Vector<u32>,
     pslots: bool, // whether `param_slots` may look at the body (once per body after the inliner)
+    unit: u32, // the unit of the body's function (`Sym.unit`; NONE: none), for `fold_ptr`
     fresh_ok: Vector<bool>,
     fresh_free: Vector<u32>, // per allocation, the block of its one free (NONE: none)
     seen: Vector<bool>,
@@ -379,6 +380,7 @@ extend Opt {
             in_or: Vector::<bool>::new(),
             fresh: Vector::<u32>::new(),
             pslots: true,
+            unit: NONE,
             fresh_ok: Vector::<bool>::new(),
             fresh_free: Vector::<u32>::new(),
             seen: Vector::<bool>::new(),
@@ -4618,6 +4620,9 @@ extend Opt {
                     self.repl[i as usize - 1] = DROPPED;
                 }
             }
+            if self.combine_stores(pk, b, k, i) {
+                return true;
+            }
             // A load of the place the store wrote, in the state the store starts, reads the stored value.
             self.remember(t.a, t.c, b.type_of(t.b), t.b, self.state);
         } else if t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 {
@@ -4652,7 +4657,7 @@ extend Opt {
                 self.repl[i as usize] = part;
                 return true;
             }
-            if fold_data(pk, b, i) {
+            if fold_data(pk, b, i) || self.fold_ptr(pk, b, i) {
                 let _ = self.number(pk, b, k, i);
                 return true;
             }
@@ -4846,6 +4851,87 @@ extend Opt {
             O_LSHR
         };
         b.insts[i as usize] = Inst { op: op, ty: t.ty, aux: 0, a: t.a, b: s, c: VNONE };
+    }
+
+    // Store `i` of block `k`, the last of byte stores of the bytes of one value `x` of 2, 4 or 8 bytes
+    // (`x as u8`, `(x >> 8) as u8`, ...) at consecutive offsets from one address, with no other memory access
+    // between them (up to 3 instructions a byte back): one store of `x` (little-endian) or of its bytes
+    // reversed (`Package.bswap`) at the lowest offset, the others dropped, untagged (LLVM's store merging).
+    // Every native target is little-endian. Whether it did.
+    fn combine_stores(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        let (x, j0) = stored_byte(b, t.b);
+        if x == VNONE {
+            return false;
+        }
+        let xt = b.type_of(x);
+        let w = type_bytes(xt, pk.ptr_bytes);
+        // The run ends with its first or last byte (written in order).
+        if !is_int(xt) || xt == T_PTR || w != 2 && w != 4 && w != 8 || j0 != 0 && j0 != w - 1 {
+            return false;
+        }
+        // Per byte of `x`, the offset its store writes (`i64::MIN`: none yet); the other stores of the run.
+        let mut at = [i64::MIN; 8];
+        let mut run = StaticVector::<u32, 8>::new();
+        at[j0 as usize] = t.c as i32;
+        let bk = b.blocks[k as usize];
+        let mut j = i;
+        let mut found: u32 = 1;
+        // Each step goes back one instruction of the block: a byte's store and its shift and truncation.
+        for _ in 0..3 * w {
+            if found == w || j == bk.start {
+                break;
+            }
+            j -= 1;
+            if self.blk_of[j as usize] != k || self.repl[j as usize] == DROPPED {
+                continue;
+            }
+            let u = b.insts[j as usize];
+            if u.op == O_STORE {
+                let (y, jb) = stored_byte(b, u.b);
+                if y != x || u.a != t.a || u.aux != t.aux || at[jb as usize] != i64::MIN {
+                    return false;
+                }
+                at[jb as usize] = u.c as i32;
+                run.push(j);
+                found += 1;
+                continue;
+            }
+            if u.op == O_LOAD || writes_memory(u) || is_terminator(u.op) {
+                return false;
+            }
+        }
+        if found != w {
+            return false;
+        }
+        // Byte `q` at `lo + q` (little-endian) or at `lo + w - 1 - q` (big-endian).
+        let mut le = true;
+        let mut be = pk.bswap;
+        let lo = at[0].min(at[w as usize - 1]);
+        for q in 0..w {
+            le = le && at[q as usize] == lo + q as i64;
+            be = be && at[q as usize] == lo + (w - 1 - q) as i64;
+        }
+        if !le && !be {
+            return false;
+        }
+        let v = if le {
+            x
+        } else {
+            self.before(b, k, i, Inst { op: O_BSWAP, ty: xt, aux: 0, a: x, b: VNONE, c: VNONE })
+        };
+        for q in 0..run.len() {
+            self.repl[run[q] as usize] = DROPPED;
+        }
+        b.insts[i as usize] = Inst {
+            op: O_STORE,
+            ty: T_NONE,
+            aux: t.aux & ~MEM_TBAA,
+            a: t.a,
+            b: v,
+            c: (lo as i32) as u32,
+        };
+        return true;
     }
 
     // `or` `i` of block `k` that assembles a little-endian word from its bytes (`b0 | b1 << 8 | ...`, each
@@ -5515,6 +5601,10 @@ extend Opt {
             }
         }
         return false;
+    }
+
+    fn fold_ptr(self: &Self, pk: &Package, b: &mut Body, i: u32) bool {
+        return fold_ptr(pk, b, i, self.unit);
     }
 
     // Call `i` of block `k` of the C library's `memcmp` whose result only an equality with 0 right after it
@@ -7072,6 +7162,7 @@ pub(package) struct Run {
     wargs: Vector<u64>,
     shape: Vector<bool>,
     unit: Vector<u32>,
+    bunit: Vector<u32>, // per body, its function's `Sym.unit` (NONE: none)
     level: Vector<u32>,
     // Per body, whether a caller may inline it: written by the body's job, read by its callers' jobs.
     ok: Vector<bool>,
@@ -7133,12 +7224,15 @@ extend Run {
         let mut ok = Vector::<bool>::with_capacity(n);
         ok.resize_default(n);
         let mut unit = Vector::<u32>::with_capacity(n);
+        let mut bunit = Vector::<u32>::with_capacity(n);
         for _ in 0..n {
             unit.push(NONE);
+            bunit.push(NONE);
         }
         for s in 0..p.syms.len() {
             let sy = p.syms[s];
             if sy.kind == SK_FUNC && sy.def != NONE {
+                bunit[sy.def as usize] = sy.unit;
                 if sy.def < held {
                     shape[sy.def as usize] = il::shape_ok(p, s as u32, &bodies[sy.def as usize]);
                 }
@@ -7206,6 +7300,7 @@ extend Run {
             wargs: wargs,
             shape: shape,
             unit: unit,
+            bunit: bunit,
             level: level,
             ok: ok,
             // SC_LIR_INLINE=0 inlines nothing (a debugging aid).
@@ -7230,6 +7325,7 @@ extend Run {
         let b = unsafe &mut *(base + j as usize);
         sc.o.forget();
         sc.o.pslots = true;
+        sc.o.unit = r.bunit[j as usize];
         // The inliner reads the rare blocks, the loop transforms and the code generators too: marked before
         // the inlining (a copy takes its call's marks) and once the transforms made their blocks.
         sc.o.estimate(p, b);
@@ -7294,7 +7390,9 @@ extend Run {
         }
         // Once the walks forwarded the loads of the allocations' blocks; the run folds their null tests.
         let placed = sc.o.promote_places(p, b);
-        if sc.o.dead_allocs(p, b) || placed {
+        // Where every vector operation is in registers (arm64): x86-64 without SSE4.1 has no lane maximum.
+        let minmax = p.vector != 0 && p.vops == VOPS_ALL && vec_minmaxes(b);
+        if sc.o.dead_allocs(p, b) || placed || minmax {
             let _ = sc.o.run(p, b, true);
         }
         let _ = sc.o.split_exits(p, b);
@@ -7378,6 +7476,9 @@ extend Run {
         }
         pk.bodies = replace(&mut self.bodies, Vector::<Body>::new());
         const_slots(pk);
+        // The calls through a method a constant table holds (`fold_ptr`): the jobs, which ran at once, did
+        // not read another body's signature.
+        direct_calls(pk);
     }
 
     /// After `finish`, the form of body `k` its callers inlined: the one before the loop transforms and
@@ -8296,6 +8397,55 @@ const fn float_const(b: &Body, v: Value) Option<u64> {
 // Pure instruction `i` of `b`, its operands final: the value it equals (VNONE: none). Else it may be
 // rewritten in place: to a constant, to a canonical form (a commutative operation's constant second), or
 // an address with its constant index and its base address's offset in its own.
+// Each vector select of integer lanes of at most 4 bytes, of `x` or `y` by their comparison `x REL y` (an
+// order, signed or not): the lanes' maximum or minimum (`vop.max`, `vop.min`; arm64 `smax`, x86-64
+// `pmaxsd`), as LLVM InstCombine's select of a compare. Outside the walk, which reads a vector operation's
+// operands in the pool only where it numbers them. Whether any changed.
+fn vec_minmaxes(b: &mut Body) bool {
+    let mut any = false;
+    for i in 0..b.insts.len() {
+        if b.insts[i].op == O_VSEL && vec_minmax(b, i as u32) {
+            any = true;
+        }
+    }
+    return any;
+}
+
+// `vec_minmaxes` of vector select `i`: whether it changed.
+fn vec_minmax(b: &mut Body, i: u32) bool {
+    let t = b.insts[i as usize];
+    let lt = lane_type(t.ty);
+    if !is_int(lt) || type_bytes(lt, 8) > 4 || (t.a & (VPARAM | VFLAG)) != 0 || t.a == VNONE {
+        return false;
+    }
+    let m = b.insts[t.a as usize];
+    let same = m.a == t.b && m.b == t.c;
+    if m.op != O_VCMP || !same && !(m.a == t.c && m.b == t.b) || m.a == m.b {
+        return false;
+    }
+    let gt = m.aux == C_SGT || m.aux == C_SGE || m.aux == C_UGT || m.aux == C_UGE;
+    let lt_ = m.aux == C_SLT || m.aux == C_SLE || m.aux == C_ULT || m.aux == C_ULE;
+    if !gt && !lt_ {
+        return false;
+    }
+    let signed = m.aux == C_SGT || m.aux == C_SGE || m.aux == C_SLT || m.aux == C_SLE;
+    // `x > y ? x : y` is the maximum; with the sides swapped, the minimum.
+    let max = gt == same;
+    let code = (core::OP_SIMD + if max {
+        core::SIMD_MAX
+    } else {
+        core::SIMD_MIN
+    } as u32) as u16 | if signed {
+        VOP_SIGNED
+    } else {
+        0
+    };
+    let ops = [t.b, t.c];
+    let at = b.pool_list(ops[0..2]);
+    b.insts[i as usize] = Inst { op: O_VOP, ty: t.ty, aux: code, a: at, b: 2, c: VNONE };
+    return true;
+}
+
 fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     let mut t = b.insts[i as usize];
     if t.op == O_VEXTRACT || t.op == O_VINSERT {
@@ -8865,6 +9015,40 @@ const fn slot_based(b: &Body, v: Value) bool {
     return false;
 }
 
+// Pointer load `i` of `b`, of read-only data of the package at the place of a relocation (a method in a
+// conformance table): the relocation's symbol address, when an object of unit `unit` may name it (a global
+// symbol, or one of that unit); a call through it becomes direct (`direct_calls`). Whether it did.
+fn fold_ptr(pk: &Package, b: &mut Body, i: u32, unit: u32) bool {
+    let t = b.insts[i as usize];
+    if t.ty != T_PTR || (t.a & (VPARAM | VFLAG)) != 0 || b.insts[t.a as usize].op != O_SYMADDR {
+        return false;
+    }
+    let at = b.insts[t.a as usize];
+    let s = pk.syms[b.syms[at.a as usize] as usize];
+    if s.kind != SK_DATA || s.def == NONE {
+        return false;
+    }
+    let d = pk.data[s.def as usize];
+    let off = (at.b as i32) as i64 + (t.c as i32) as i64;
+    if !d.readonly || off < 0 || off + pk.ptr_bytes as i64 > d.size as i64 {
+        return false;
+    }
+    for r in d.relocs..d.relocs + d.nrelocs {
+        let rl = pk.relocs[r as usize];
+        if rl.offset as i64 != off {
+            continue;
+        }
+        let y = pk.syms[rl.sym as usize];
+        if y.linkage != SL_GLOBAL && y.unit != unit || rl.addend < i32::MIN as i64 || rl.addend > i32::MAX as i64 {
+            return false;
+        }
+        let bs = b.ref_sym(rl.sym);
+        b.insts[i as usize] = Inst { op: O_SYMADDR, ty: T_PTR, aux: 0, a: bs, b: (rl.addend as i32) as u32, c: VNONE };
+        return true;
+    }
+    return false;
+}
+
 // A load of read-only data of the package at a constant place clear of its relocations: rewritten to the
 // constant it reads. Whether instruction `i` folded.
 fn fold_data(pk: &Package, b: &mut Body, i: u32) bool {
@@ -9420,6 +9604,24 @@ const fn twin_val(bx: Block, by: Block, v: Value, w: Value) bool {
         return (v & VFLAG) == (w & VFLAG) && j == by.start + i - bx.start;
     }
     return v == w && !(j >= by.start && j < by.start + by.len);
+}
+
+// The value whose byte `v` is and the byte's index (`combine_stores`): `trunc.i8 x` is byte 0 of `x`,
+// `trunc.i8 (lshr x, 8j)` byte `j`. VNONE when `v` is neither.
+fn stored_byte(b: &Body, v: Value) (Value, u32) {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_TRUNC || b.insts[v as usize].ty != T_I8 {
+        return (VNONE, 0);
+    }
+    let x = b.insts[v as usize].a;
+    if (x & (VPARAM | VFLAG)) == 0 && x != VNONE && b.insts[x as usize].op == O_LSHR {
+        let s = const_of(b, b.insts[x as usize].b);
+        let n = type_bits(b.type_of(x), 8) as u64;
+        if s.is_some() && s.unwrap() % 8 == 0 && s.unwrap() < n {
+            return (b.insts[x as usize].a, (s.unwrap() / 8) as u32);
+        }
+        return (VNONE, 0);
+    }
+    return (x, 0);
 }
 
 fn same_edge(b: &Body, x: u32, y: u32) bool {

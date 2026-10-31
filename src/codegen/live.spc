@@ -313,6 +313,9 @@ extend Live {
                 t.a,
             ) == u64::MAX {
                 self.pfold[p as usize] = true;
+            } else if (self.fold_ops & FOLD_MADD) != 0 && p != VNONE && t.op == O_ADD && is_inst(t.a) && b.insts[t.a as usize].op == O_MUL && self.count[t.a as usize] == 1 {
+                // The product as the first addend.
+                self.pfold[t.a as usize] = true;
             }
             if (self.fold_ops & FOLD_ROT) != 0 && (bits >= 32 || (self.fold_ops & FOLD_ROT_NARROW) != 0) {
                 let rot = rotate_of(b, i as u32);

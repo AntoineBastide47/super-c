@@ -1360,7 +1360,8 @@ pub(package) struct Package {
     pub(package) vector: u32,
     /// How the native backend converts vectors and shifts their lanes (`target::table::Isa`): 0 lane by
     /// lane, VOPS_SOME or VOPS_ALL in registers. With either the loop vectorizer mixes lane widths up to a
-    /// factor of two and shifts; its cost model counts the lane by lane forms of VOPS_SOME.
+    /// factor of two and shifts; its cost model counts the lane by lane forms of VOPS_SOME. With VOPS_ALL
+    /// the optimizer turns a select of a comparison into the lanes' minimum or maximum (`vec_minmaxes`).
     pub(package) vops: u8,
     /// Whether the native backend computes `O_MULHU` of 64-bit integers in one instruction
     /// (`target::table::Isa`): the optimizer then divides by a 64-bit constant with a product.
