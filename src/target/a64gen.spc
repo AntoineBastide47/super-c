@@ -6438,6 +6438,190 @@ extend Gen {
         self.code[w as usize] = a::repatch(self.code[w as usize], off);
     }
 
+    // x17 = switch value `r` (`bits` wide, zero-extended below 32 bits) minus `min`, wrapped at its width
+    // and zero-extended.
+    fn switch_index(self: &mut Self, r: u32, bits: u32, min: u64) {
+        let sf = bits == 64;
+        if min == 0 {
+            self.emit(a::mov_reg(sf, a::IP1, r));
+        } else if min < 4096 {
+            self.emit(a::sub_imm(sf, a::IP1, r, min as u32));
+        } else {
+            self.mov_imm(a::IP1 as u8, min, sf);
+            self.emit(a::addsub_reg(sf, 1, false, a::IP1, r, a::IP1, 0, 0));
+        }
+        if bits < 32 && min != 0 {
+            // AND w17, w17, #0xFF or #0xFFFF (imms 7 or 15).
+            self.emit(a::logic_imm(false, 0, a::IP1, a::IP1, bits - 1));
+        }
+    }
+
+    // A branch to the default edge `d` of a switch, `word` with a 0 offset: to its block (`T_CC` `cc`), or to
+    // its moves past the switch (`stubs`, the words to patch) when it has some.
+    fn to_default(self: &mut Self, word: u32, test: Test, d: u32, stubs: &mut Vector<u32>) {
+        if self.moves_needed(d) {
+            stubs.push(self.code.len() as u32);
+            self.emit(word);
+        } else {
+            self.cbranch(test, self.b().edge_target(d));
+        }
+    }
+
+    // A switch whose cases all pass constants to one block (`lv::switch_lookup`): the bound and hole tests
+    // to the default, then each parameter from its column of a read-only table (x16), indexed by x17;
+    // memory homes through v30. Whether it did.
+    fn lookup(self: &mut Self, t: Inst, r: u32, bits: u32) bool {
+        let b = self.b();
+        let mut lk = lv::Lookup::new();
+        if !lv::switch_lookup(b, t, bits, self.ptr, &mut lk) {
+            return false;
+        }
+        let d = b.switch_edge(t, t.aux);
+        let to = b.edge_target(b.switch_edge(t, 0));
+        self.switch_index(r, bits, lk.min);
+        let mut stubs = Vector::<u32>::new();
+        self.emit(a::cmp_imm(bits == 64, a::IP1, lk.span - 1));
+        self.to_default(a::bcond(a::HI, 0), Test { kind: T_CC, cc: a::HI, reg: 0 }, d, &mut stubs);
+        if lk.holes != 0 {
+            // A hole's bit of the mask, shifted to bit 0.
+            self.mov_imm(a::IP0 as u8, lk.holes, true);
+            self.emit(a::dp2(true, a::DP2_LSRV, a::IP0, a::IP0, a::IP1));
+            self.to_default(a::tbz(true, a::IP0, 0, 0), Test { kind: T_TBNZ, cc: 0, reg: a::IP0 }, d, &mut stubs);
+        }
+        let k = self.table_sym(&lk);
+        self.reloc(a::R_PAGE21, k, 0);
+        self.emit(a::adr(true, a::IP0, 0));
+        self.reloc(a::R_PAGEOFF12, k, 0);
+        self.emit(a::add_imm(true, a::IP0, a::IP0, 0));
+        let tb = b.blocks[to as usize];
+        let ni = b.insts.len() as u32;
+        let mut cur: u32 = 0;
+        for q in 0..tb.param_len as u32 {
+            let px = ni + tb.param_start + q;
+            self.param_home(px, NOREG);
+            let ty = self.xty(px);
+            let e = type_bytes(ty, self.ptr);
+            let pva = self.va[px as usize];
+            // x16 to the column's start.
+            let off = lk.off[q as usize];
+            if off != cur {
+                self.add_off(a::IP0 as u8, a::IP0, off - cur);
+                cur = off;
+            }
+            if pva.home == H_FIXED {
+                let rt = if pva.reg >= V0 {
+                    (pva.reg - V0) as u32
+                } else {
+                    pva.reg as u32
+                };
+                self.emit(a::ldst_reg(mkind(ty, true), true, rt, a::IP0, a::IP1, true));
+            } else {
+                let m = a::M_VB + e.trailing_zeros() as u32;
+                self.emit(a::ldst_reg(m, true, 30, a::IP0, a::IP1, true));
+                self.mem(m, false, V0 + 30, a::SP as u8, pva.off);
+            }
+        }
+        self.goto(to, stubs.len() != 0);
+        if stubs.len() != 0 {
+            for q in 0..stubs.len() {
+                self.here(stubs[q]);
+            }
+            self.edge_moves(d);
+            self.goto(b.edge_target(d), false);
+        }
+        return true;
+    }
+
+    // A dense switch (`lv::switch_span`) of at least TABLE_MIN cases that go elsewhere than the default: the
+    // bound test to the default, then a branch through a table of branches (`b`), one per entry: to its
+    // case's block, or its moves past the table; an entry no case takes to the default's. Whether it did.
+    fn jump_table(self: &mut Self, t: Inst, r: u32, bits: u32) bool {
+        let b = self.b();
+        let n = t.aux as u32;
+        let d = b.switch_edge(t, n);
+        let mut own: u32 = 0;
+        for k in 0..n {
+            let e = b.switch_edge(t, k);
+            if b.edge_nargs(e) != 0 || b.edge_target(e) != b.edge_target(d) || b.edge_nargs(d) != 0 {
+                own += 1;
+            }
+        }
+        let mut min: u64 = 0;
+        let mut span: u32 = 0;
+        if own < lv::TABLE_MIN || !lv::switch_span(b, t, bits, &mut min, &mut span) {
+            return false;
+        }
+        let m = if bits == 64 {
+            ~0u64
+        } else {
+            (1u64 << bits as u64) - 1
+        };
+        // The edge of each entry.
+        let mut es = Vector::<u32>::with_capacity(span as usize);
+        for _ in 0..span {
+            es.push(d);
+        }
+        for k in 0..n {
+            es[(b.words[(t.b + k) as usize].wrapping_sub(min) & m) as usize] = b.switch_edge(t, k);
+        }
+        self.switch_index(r, bits, min);
+        self.emit(a::cmp_imm(bits == 64, a::IP1, span - 1));
+        // Per edge with moves (the default first), the branches to patch to them.
+        let mut ds = Vector::<u32>::new();
+        self.to_default(a::bcond(a::HI, 0), Test { kind: T_CC, cc: a::HI, reg: 0 }, d, &mut ds);
+        // ADR x16 to the table, three words on; x16 += x17 * 4; BR x16.
+        self.emit(a::adr(false, a::IP0, 12));
+        self.emit(a::addsub_reg(true, 0, false, a::IP0, a::IP0, a::IP1, 0, 2));
+        self.emit(0xD61F0000u32 | a::IP0 << 5);
+        let mut cs = Vector::<u64>::new();
+        for x in 0..span {
+            let e = es[x as usize];
+            let w = self.code.len() as u32;
+            if !self.moves_needed(e) {
+                self.fix.push(w as u64 << 32 | b.edge_target(e) as u64);
+            } else if e == d {
+                ds.push(w);
+            } else {
+                cs.push(w as u64 << 32 | e as u64);
+            }
+            self.emit(a::b(0));
+        }
+        let total = cs.len() + if ds.len() != 0 {
+            1
+        } else {
+            0
+        };
+        let mut done: usize = 0;
+        if ds.len() != 0 {
+            for q in 0..ds.len() {
+                self.here(ds[q]);
+            }
+            self.edge_moves(d);
+            done += 1;
+            self.goto(b.edge_target(d), done < total);
+        }
+        for q in 0..cs.len() {
+            self.here((cs[q] >> 32) as u32);
+            let e = cs[q] as u32;
+            self.edge_moves(e);
+            done += 1;
+            self.goto(b.edge_target(e), done < total);
+        }
+        return true;
+    }
+
+    // A local read-only symbol of the object holding table `lk`'s bytes.
+    fn table_sym(self: &mut Self, lk: &lv::Lookup) u32 {
+        let o = self.obj();
+        let nm = format("__sc_tab.{}", o.syms.len());
+        let k = o.sym(&nm);
+        let n = lk.bytes.len() as u64;
+        let at = o.define(k, ob::S_RODATA, lk.align_log2, n, 0);
+        o.put(ob::S_RODATA, lk.bytes[0..lk.bytes.len()]);
+        o.pad_to(ob::S_RODATA, at + n);
+        return k;
+    }
+
     // Whether an argument of edge `e` is not in its parameter's home yet (the homes chosen).
     fn moves_needed(self: &Self, e: u32) bool {
         let b = self.b();
@@ -6567,6 +6751,9 @@ extend Gen {
                 self.reg(t.a)
             } as u32;
             self.spill_live_out();
+            if self.lookup(t, r, bits) || self.jump_table(t, r, bits) {
+                return true;
+            }
             let n = t.aux as u32;
             let mut stubs = Vector::<u64>::new();
             // A case that goes where the default goes, neither passing arguments, needs no test.

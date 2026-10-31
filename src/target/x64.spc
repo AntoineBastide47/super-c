@@ -113,7 +113,8 @@ pub(package) const fn rip() Mem {
 
 /// The code position of the displacement of the last RIP-relative operand an encoder wrote: the
 /// caller's relocation goes there. Set by every form that takes a `Mem`. `jumps`: the positions of the
-/// 32-bit displacements of the jumps, ascending, for `relax`; `in_at`: the positions of the displacements of
+/// 32-bit displacements of the jumps, ascending, for `relax`; `longs`: those of the jumps `relax` keeps
+/// long (a table's entries), ascending; `in_at`: the positions of the displacements of
 /// the operands based on `IN`; `stack_at`: the first position in an instruction that uses the stack (a
 /// memory operand based on rsp, rbp or `IN`, a push, a pop, a call), 0xFFFFFFFF before
 /// one.
@@ -121,6 +122,7 @@ pub(package) struct Code {
     pub(package) b: Vector<u8>,
     pub(package) rip_at: u32,
     pub(package) jumps: Vector<u32>,
+    pub(package) longs: Vector<u32>,
     pub(package) in_at: Vector<u32>,
     pub(package) stack_at: u32,
 }
@@ -131,6 +133,7 @@ extend Code {
             b: Vector::<u8>::new(),
             rip_at: 0,
             jumps: Vector::<u32>::new(),
+            longs: Vector::<u32>::new(),
             in_at: Vector::<u32>::new(),
             stack_at: 0xFFFFFFFF,
         };
@@ -140,6 +143,7 @@ extend Code {
     pub(package) fn clear(self: &mut Self) {
         self.b.truncate(0);
         self.jumps.truncate(0);
+        self.longs.truncate(0);
         self.in_at.truncate(0);
         self.stack_at = 0xFFFFFFFF;
     }
@@ -167,7 +171,7 @@ extend Code {
         }
     }
 
-    /// Give every jump whose target an 8-bit displacement reaches its 2-byte form, every target and the
+    /// Give every jump whose target an 8-bit displacement reaches its 2-byte form (but `longs`), every target and the
     /// positions `at` (none inside a jump) moved with the code. A shorter jump never lengthens another's
     /// distance, so the passes stop once one shortens none: at most one pass per jump, plus one. Each of
     /// the positions `heads` (ascending, none inside a jump) then starts at a 16-byte boundary of the
@@ -192,6 +196,16 @@ extend Code {
         // `cut[k]`: the bytes the short jumps before jump k save; `cut[nj]` all of them.
         let mut short = Vector::<bool>::new();
         short.resize_default(nj);
+        // The jumps kept long: both lists ascend.
+        let mut long = Vector::<bool>::new();
+        long.resize_default(nj);
+        let mut l: usize = 0;
+        for k in 0..nj {
+            while l < self.longs.len() && self.longs[l] < self.jumps[k] {
+                l += 1;
+            }
+            long[k] = l < self.longs.len() && self.longs[l] == self.jumps[k];
+        }
         let mut cut = Vector::<u32>::new();
         cut.resize_default(nj + 1);
         for _ in 0..nj + 1 {
@@ -204,7 +218,7 @@ extend Code {
             }
             let mut changed = false;
             for k in 0..nj {
-                if short[k] {
+                if short[k] || long[k] {
                     continue;
                 }
                 let d = moved(&op, &cut, to[k]) as i64 - (moved(&op, &cut, op[k]) as i64 + 2);
@@ -298,6 +312,7 @@ extend Code {
         }
         self.b = nb;
         self.jumps.truncate(0);
+        self.longs.truncate(0);
     }
 
     pub(package) const fn len(self: &Self) u32 {
@@ -1000,6 +1015,13 @@ extend Code {
         }
         let at = self.jcc32(cc);
         self.patch32(at, (to as i64 - (at as i64 + 4)) as u32);
+    }
+
+    /// A jump with a 32-bit displacement that `relax` keeps long; the field's position.
+    pub(package) fn jmp32_long(self: &mut Self) u32 {
+        let at = self.jmp32();
+        self.longs.push(at);
+        return at;
     }
 
     /// A jump with a 32-bit displacement; the field's position.

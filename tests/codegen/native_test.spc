@@ -4207,6 +4207,382 @@ b0(v0: ptr, v1: ptr):
     assert_eq(run_wide(wide, wdrv), 0);
 }
 
+// Switches whose dense cases all pass constants to one block read the values from a table: signed i8
+// cases, i16 cases with a hole the default (elsewhere) takes, two columns (f64, i32), i64 cases from 2^40,
+// i32 cases near the top of the unsigned range, f32 values whose holes take the default's, and twelve
+// columns of every integer width.
+@test
+fn switches_whose_cases_pass_constants_read_tables_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @l8 fn global
+sym @l16 fn global
+sym @l32 fn global
+sym @l64 fn global
+sym @lu fn global
+sym @lf fn global
+sym @lm fn global
+fn @l8
+  sig (i8) -> i64
+b0(v0: i8):
+  v1 = iconst.i64 -3000016
+  v2 = iconst.i64 -2000013
+  v3 = iconst.i64 -1000010
+  v4 = iconst.i64 -7
+  v5 = iconst.i64 999996
+  v6 = iconst.i64 1999999
+  v7 = iconst.i64 3000002
+  v8 = iconst.i64 77
+  switch v0 [-3 -> b1(v1), -2 -> b1(v2), -1 -> b1(v3), 0 -> b1(v4), 1 -> b1(v5), 2 -> b1(v6), 3 -> b1(v7)] else b1(v8)
+b1(v9: i64):
+  ret v9
+fn @l16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = iconst.i16 6500
+  v2 = iconst.i16 6537
+  v3 = iconst.i16 6574
+  v4 = iconst.i16 6648
+  v5 = iconst.i16 6685
+  v6 = iconst.i16 6722
+  v7 = iconst.i16 6759
+  switch v0 [1000 -> b1(v1), 1001 -> b1(v2), 1002 -> b1(v3), 1004 -> b1(v4), 1005 -> b1(v5), 1006 -> b1(v6), 1007 -> b1(v7)] else b2
+b1(v8: i16):
+  ret v8
+b2:
+  v9 = iconst.i16 -1
+  v10 = add.i16 v0, v9
+  ret v10
+fn @l32
+  sig (i32) -> f64
+b0(v0: i32):
+  v1 = fconst.f64 0x4002000000000000
+  v2 = iconst.i32 -5
+  v3 = fconst.f64 0x4008000000000000
+  v4 = iconst.i32 -2
+  v5 = fconst.f64 0x400e000000000000
+  v6 = iconst.i32 1
+  v7 = fconst.f64 0x4012000000000000
+  v8 = iconst.i32 4
+  v9 = fconst.f64 0x4015000000000000
+  v10 = iconst.i32 7
+  v11 = fconst.f64 0x4018000000000000
+  v12 = iconst.i32 10
+  v13 = fconst.f64 0x3fe0000000000000
+  v14 = iconst.i32 -7
+  switch v0 [5 -> b1(v1, v2), 6 -> b1(v3, v4), 7 -> b1(v5, v6), 8 -> b1(v7, v8), 9 -> b1(v9, v10), 10 -> b1(v11, v12)] else b1(v13, v14)
+b1(v15: f64, v16: i32):
+  v17 = sitofp.f64 v16
+  v18 = fadd.f64 v15, v17
+  ret v18
+fn @l64
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = iconst.i32 -9
+  v2 = iconst.i32 -8
+  v3 = iconst.i32 -5
+  v4 = iconst.i32 0
+  v5 = iconst.i32 7
+  v6 = iconst.i32 16
+  v7 = iconst.i32 1234
+  switch v0 [1099511627776 -> b1(v1), 1099511627777 -> b1(v2), 1099511627778 -> b1(v3), 1099511627779 -> b1(v4), 1099511627780 -> b1(v5), 1099511627781 -> b1(v6)] else b1(v7)
+b1(v8: i32):
+  ret v8
+fn @lu
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = iconst.i8 4
+  v2 = iconst.i8 2
+  v3 = iconst.i8 0
+  v4 = iconst.i8 5
+  v5 = iconst.i8 3
+  v6 = iconst.i8 1
+  v7 = iconst.i8 9
+  switch v0 [-16 -> b1(v1), -15 -> b1(v2), -14 -> b1(v3), -13 -> b1(v4), -12 -> b1(v5), -11 -> b1(v6)] else b1(v7)
+b1(v8: i8):
+  ret v8
+fn @lf
+  sig (i32) -> f32
+b0(v0: i32):
+  v1 = fconst.f32 0x3f000000
+  v2 = fconst.f32 0x3fe00000
+  v3 = fconst.f32 0x40880000
+  v4 = fconst.f32 0x40b00000
+  v5 = fconst.f32 0x41000000
+  v6 = fconst.f32 0x41140000
+  v7 = fconst.f32 0xc0000000
+  switch v0 [0 -> b1(v1), 1 -> b1(v2), 3 -> b1(v3), 4 -> b1(v4), 6 -> b1(v5), 7 -> b1(v6)] else b1(v7)
+b1(v8: f32):
+  ret v8
+fn @lm
+  sig (i32) -> i64
+b0(v0: i32):
+  v1 = iconst.i8 -1
+  v2 = iconst.i16 12
+  v3 = iconst.i32 25
+  v4 = iconst.i64 38
+  v5 = iconst.i8 51
+  v6 = iconst.i16 -36
+  v7 = iconst.i32 -23
+  v8 = iconst.i64 -10
+  v9 = iconst.i8 3
+  v10 = iconst.i16 16
+  v11 = iconst.i32 29
+  v12 = iconst.i64 42
+  v13 = iconst.i8 38
+  v14 = iconst.i16 -36
+  v15 = iconst.i32 -10
+  v16 = iconst.i64 16
+  v17 = iconst.i8 42
+  v18 = iconst.i16 -32
+  v19 = iconst.i32 -6
+  v20 = iconst.i64 20
+  v21 = iconst.i8 46
+  v22 = iconst.i16 -28
+  v23 = iconst.i32 -2
+  v24 = iconst.i64 24
+  v25 = iconst.i8 -23
+  v26 = iconst.i16 16
+  v27 = iconst.i32 55
+  v28 = iconst.i64 -6
+  v29 = iconst.i8 33
+  v30 = iconst.i16 -28
+  v31 = iconst.i32 11
+  v32 = iconst.i64 50
+  v33 = iconst.i8 -11
+  v34 = iconst.i16 28
+  v35 = iconst.i32 -33
+  v36 = iconst.i64 6
+  v37 = iconst.i8 16
+  v38 = iconst.i16 -32
+  v39 = iconst.i32 20
+  v40 = iconst.i64 -28
+  v41 = iconst.i8 24
+  v42 = iconst.i16 -24
+  v43 = iconst.i32 28
+  v44 = iconst.i64 -20
+  v45 = iconst.i8 32
+  v46 = iconst.i16 -16
+  v47 = iconst.i32 36
+  v48 = iconst.i64 -12
+  v49 = iconst.i8 55
+  v50 = iconst.i16 20
+  v51 = iconst.i32 -15
+  v52 = iconst.i64 50
+  v53 = iconst.i8 15
+  v54 = iconst.i16 -20
+  v55 = iconst.i32 45
+  v56 = iconst.i64 10
+  v57 = iconst.i8 -25
+  v58 = iconst.i16 40
+  v59 = iconst.i32 5
+  v60 = iconst.i64 -30
+  v61 = iconst.i8 -6
+  v62 = iconst.i16 -5
+  v63 = iconst.i32 -4
+  v64 = iconst.i64 -3
+  v65 = iconst.i8 -2
+  v66 = iconst.i16 -1
+  v67 = iconst.i32 0
+  v68 = iconst.i64 1
+  v69 = iconst.i8 2
+  v70 = iconst.i16 3
+  v71 = iconst.i32 4
+  v72 = iconst.i64 5
+  switch v0 [0 -> b1(v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12), 1 -> b1(v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24), 2 -> b1(v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36), 3 -> b1(v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48), 4 -> b1(v49, v50, v51, v52, v53, v54, v55, v56, v57, v58, v59, v60)] else b1(v61, v62, v63, v64, v65, v66, v67, v68, v69, v70, v71, v72)
+b1(v73: i8, v74: i16, v75: i32, v76: i64, v77: i8, v78: i16, v79: i32, v80: i64, v81: i8, v82: i16, v83: i32, v84: i64):
+  v85 = sext.i64 v73
+  v86 = iconst.i64 1
+  v87 = mul.i64 v85, v86
+  v88 = sext.i64 v74
+  v89 = iconst.i64 2
+  v90 = mul.i64 v88, v89
+  v91 = add.i64 v87, v90
+  v92 = sext.i64 v75
+  v93 = iconst.i64 3
+  v94 = mul.i64 v92, v93
+  v95 = add.i64 v91, v94
+  v96 = iconst.i64 4
+  v97 = mul.i64 v76, v96
+  v98 = add.i64 v95, v97
+  v99 = sext.i64 v77
+  v100 = iconst.i64 5
+  v101 = mul.i64 v99, v100
+  v102 = add.i64 v98, v101
+  v103 = sext.i64 v78
+  v104 = iconst.i64 6
+  v105 = mul.i64 v103, v104
+  v106 = add.i64 v102, v105
+  v107 = sext.i64 v79
+  v108 = iconst.i64 7
+  v109 = mul.i64 v107, v108
+  v110 = add.i64 v106, v109
+  v111 = iconst.i64 8
+  v112 = mul.i64 v80, v111
+  v113 = add.i64 v110, v112
+  v114 = sext.i64 v81
+  v115 = iconst.i64 9
+  v116 = mul.i64 v114, v115
+  v117 = add.i64 v113, v116
+  v118 = sext.i64 v82
+  v119 = iconst.i64 10
+  v120 = mul.i64 v118, v119
+  v121 = add.i64 v117, v120
+  v122 = sext.i64 v83
+  v123 = iconst.i64 11
+  v124 = mul.i64 v122, v123
+  v125 = add.i64 v121, v124
+  v126 = iconst.i64 12
+  v127 = mul.i64 v84, v126
+  v128 = add.i64 v125, v127
+  ret v128
+)";
+    let drv = "#include <stdint.h>\nint64_t l8(int8_t); int16_t l16(int16_t); double l32(int32_t); int32_t l64(int64_t); int8_t lu(int32_t); float lf(int32_t); int64_t lm(int32_t);\nint main(void) {\n  for (int x = -128; x < 128; x++) { int64_t w = 77; switch (x) { case -3: w = -3000016ll; break; case -2: w = -2000013ll; break; case -1: w = -1000010ll; break; case 0: w = -7ll; break; case 1: w = 999996ll; break; case 2: w = 1999999ll; break; case 3: w = 3000002ll; break; } if (l8((int8_t)x) != w) return 1; }\n  for (int x = 990; x < 1012; x++) { int16_t w = (int16_t)(x - 1); switch (x) { case 1000: w = 6500; break; case 1001: w = 6537; break; case 1002: w = 6574; break; case 1004: w = 6648; break; case 1005: w = 6685; break; case 1006: w = 6722; break; case 1007: w = 6759; break; } if (l16((int16_t)x) != w) return 2; }\n  if (l16(-32768) != 32767) return 2;\n  for (int x = -3; x < 14; x++) { double w = 0.5 - 7; switch (x) { case 5: w = 2.25 + -5; break; case 6: w = 3.0 + -2; break; case 7: w = 3.75 + 1; break; case 8: w = 4.5 + 4; break; case 9: w = 5.25 + 7; break; case 10: w = 6.0 + 10; break; } if (l32(x) != w) return 3; }\n  for (int64_t d = -3; d < 9; d++) { int64_t x = 1099511627776ll + d; int32_t w = 1234; if (d >= 0 && d < 6) w = (int32_t)(d * d - 9); if (l64(x) != w) return 4; }\n  if (l64(0) != 1234 || l64(-1) != 1234) return 4;\n  for (int x = -20; x < 4; x++) { int8_t w = 9; switch (x) { case -16: w = 4; break; case -15: w = 2; break; case -14: w = 0; break; case -13: w = 5; break; case -12: w = 3; break; case -11: w = 1; break; } if (lu(x) != w) return 5; }\n  if (lu(2147483647) != 9 || lu(-2147483647 - 1) != 9) return 5;\n  for (int x = -2; x < 10; x++) { float w = -2.0f; switch (x) { case 0: w = 0.5f; break; case 1: w = 1.75f; break; case 3: w = 4.25f; break; case 4: w = 5.5f; break; case 6: w = 8.0f; break; case 7: w = 9.25f; break; } if (lf(x) != w) return 6; }\n  static const int64_t mt[6][12] = { { -1, 12, 25, 38, 51, -36, -23, -10, 3, 16, 29, 42 }, { 38, -36, -10, 16, 42, -32, -6, 20, 46, -28, -2, 24 }, { -23, 16, 55, -6, 33, -28, 11, 50, -11, 28, -33, 6 }, { 16, -32, 20, -28, 24, -24, 28, -20, 32, -16, 36, -12 }, { 55, 20, -15, 50, 15, -20, 45, 10, -25, 40, 5, -30 }, { -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5 } };\n  for (int x = -2; x < 8; x++) { int r = x >= 0 && x < 5 ? x : 5; int64_t w = 0; for (int q = 0; q < 12; q++) w += mt[r][q] * (q + 1); if (lm(x) != w) return 7; }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Dense switches whose cases go to blocks of their own branch through a table: signed i8 cases, i16
+// cases with holes whose even cases pass an argument (moves past the table) and whose default passes
+// another, i64 cases from 2^40, and 257 i32 cases over 300 entries sharing five blocks.
+@test
+fn dense_switches_branch_through_tables_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @j8 fn global
+sym @j16 fn global
+sym @j64 fn global
+sym @jbig fn global
+fn @j8
+  sig (i8, i32) -> i32
+b0(v0: i8, v1: i32):
+  switch v0 [-2 -> b1, -1 -> b2, 0 -> b3, 1 -> b4, 2 -> b5, 3 -> b6] else b7
+b1:
+  v2 = iconst.i32 1
+  v3 = mul.i32 v1, v2
+  v4 = iconst.i32 -2
+  v5 = add.i32 v3, v4
+  ret v5
+b2:
+  v6 = iconst.i32 2
+  v7 = mul.i32 v1, v6
+  v8 = iconst.i32 -1
+  v9 = add.i32 v7, v8
+  ret v9
+b3:
+  v10 = iconst.i32 3
+  v11 = mul.i32 v1, v10
+  v12 = iconst.i32 0
+  v13 = add.i32 v11, v12
+  ret v13
+b4:
+  v14 = iconst.i32 4
+  v15 = mul.i32 v1, v14
+  v16 = iconst.i32 1
+  v17 = add.i32 v15, v16
+  ret v17
+b5:
+  v18 = iconst.i32 5
+  v19 = mul.i32 v1, v18
+  v20 = iconst.i32 2
+  v21 = add.i32 v19, v20
+  ret v21
+b6:
+  v22 = iconst.i32 6
+  v23 = mul.i32 v1, v22
+  v24 = iconst.i32 3
+  v25 = add.i32 v23, v24
+  ret v25
+b7:
+  v26 = iconst.i32 -99
+  ret v26
+fn @j16
+  sig (i16, i32) -> i32
+b0(v0: i16, v1: i32):
+  v2 = iconst.i32 5
+  switch v0 [100 -> b1(v1), 101 -> b3, 102 -> b1(v1), 104 -> b1(v1), 105 -> b4, 106 -> b1(v1), 108 -> b1(v1), 109 -> b5, 110 -> b1(v1)] else b2(v2)
+b1(v3: i32):
+  v4 = iconst.i32 3
+  v5 = mul.i32 v3, v4
+  ret v5
+b2(v6: i32):
+  v7 = sub.i32 v1, v6
+  ret v7
+b3:
+  v8 = iconst.i32 707
+  v9 = xor.i32 v1, v8
+  ret v9
+b4:
+  v10 = iconst.i32 735
+  v11 = xor.i32 v1, v10
+  ret v11
+b5:
+  v12 = iconst.i32 763
+  v13 = xor.i32 v1, v12
+  ret v13
+fn @j64
+  sig (i64) -> i64
+b0(v0: i64):
+  switch v0 [1099511627776 -> b1, 1099511627777 -> b2, 1099511627778 -> b3, 1099511627779 -> b4, 1099511627780 -> b5, 1099511627781 -> b6] else b7
+b1:
+  v1 = iconst.i64 0
+  v2 = add.i64 v0, v1
+  ret v2
+b2:
+  v3 = iconst.i64 11
+  v4 = add.i64 v0, v3
+  ret v4
+b3:
+  v5 = iconst.i64 22
+  v6 = add.i64 v0, v5
+  ret v6
+b4:
+  v7 = iconst.i64 33
+  v8 = add.i64 v0, v7
+  ret v8
+b5:
+  v9 = iconst.i64 44
+  v10 = add.i64 v0, v9
+  ret v10
+b6:
+  v11 = iconst.i64 55
+  v12 = add.i64 v0, v11
+  ret v12
+b7:
+  v13 = iconst.i64 -1
+  ret v13
+fn @jbig
+  sig (i32) -> i32
+b0(v0: i32):
+  switch v0 [1 -> b2, 2 -> b3, 3 -> b4, 4 -> b5, 5 -> b1, 6 -> b2, 8 -> b4, 9 -> b5, 10 -> b1, 11 -> b2, 12 -> b3, 13 -> b4, 15 -> b1, 16 -> b2, 17 -> b3, 18 -> b4, 19 -> b5, 20 -> b1, 22 -> b3, 23 -> b4, 24 -> b5, 25 -> b1, 26 -> b2, 27 -> b3, 29 -> b5, 30 -> b1, 31 -> b2, 32 -> b3, 33 -> b4, 34 -> b5, 36 -> b2, 37 -> b3, 38 -> b4, 39 -> b5, 40 -> b1, 41 -> b2, 43 -> b4, 44 -> b5, 45 -> b1, 46 -> b2, 47 -> b3, 48 -> b4, 50 -> b1, 51 -> b2, 52 -> b3, 53 -> b4, 54 -> b5, 55 -> b1, 57 -> b3, 58 -> b4, 59 -> b5, 60 -> b1, 61 -> b2, 62 -> b3, 64 -> b5, 65 -> b1, 66 -> b2, 67 -> b3, 68 -> b4, 69 -> b5, 71 -> b2, 72 -> b3, 73 -> b4, 74 -> b5, 75 -> b1, 76 -> b2, 78 -> b4, 79 -> b5, 80 -> b1, 81 -> b2, 82 -> b3, 83 -> b4, 85 -> b1, 86 -> b2, 87 -> b3, 88 -> b4, 89 -> b5, 90 -> b1, 92 -> b3, 93 -> b4, 94 -> b5, 95 -> b1, 96 -> b2, 97 -> b3, 99 -> b5, 100 -> b1, 101 -> b2, 102 -> b3, 103 -> b4, 104 -> b5, 106 -> b2, 107 -> b3, 108 -> b4, 109 -> b5, 110 -> b1, 111 -> b2, 113 -> b4, 114 -> b5, 115 -> b1, 116 -> b2, 117 -> b3, 118 -> b4, 120 -> b1, 121 -> b2, 122 -> b3, 123 -> b4, 124 -> b5, 125 -> b1, 127 -> b3, 128 -> b4, 129 -> b5, 130 -> b1, 131 -> b2, 132 -> b3, 134 -> b5, 135 -> b1, 136 -> b2, 137 -> b3, 138 -> b4, 139 -> b5, 141 -> b2, 142 -> b3, 143 -> b4, 144 -> b5, 145 -> b1, 146 -> b2, 148 -> b4, 149 -> b5, 150 -> b1, 151 -> b2, 152 -> b3, 153 -> b4, 155 -> b1, 156 -> b2, 157 -> b3, 158 -> b4, 159 -> b5, 160 -> b1, 162 -> b3, 163 -> b4, 164 -> b5, 165 -> b1, 166 -> b2, 167 -> b3, 169 -> b5, 170 -> b1, 171 -> b2, 172 -> b3, 173 -> b4, 174 -> b5, 176 -> b2, 177 -> b3, 178 -> b4, 179 -> b5, 180 -> b1, 181 -> b2, 183 -> b4, 184 -> b5, 185 -> b1, 186 -> b2, 187 -> b3, 188 -> b4, 190 -> b1, 191 -> b2, 192 -> b3, 193 -> b4, 194 -> b5, 195 -> b1, 197 -> b3, 198 -> b4, 199 -> b5, 200 -> b1, 201 -> b2, 202 -> b3, 204 -> b5, 205 -> b1, 206 -> b2, 207 -> b3, 208 -> b4, 209 -> b5, 211 -> b2, 212 -> b3, 213 -> b4, 214 -> b5, 215 -> b1, 216 -> b2, 218 -> b4, 219 -> b5, 220 -> b1, 221 -> b2, 222 -> b3, 223 -> b4, 225 -> b1, 226 -> b2, 227 -> b3, 228 -> b4, 229 -> b5, 230 -> b1, 232 -> b3, 233 -> b4, 234 -> b5, 235 -> b1, 236 -> b2, 237 -> b3, 239 -> b5, 240 -> b1, 241 -> b2, 242 -> b3, 243 -> b4, 244 -> b5, 246 -> b2, 247 -> b3, 248 -> b4, 249 -> b5, 250 -> b1, 251 -> b2, 253 -> b4, 254 -> b5, 255 -> b1, 256 -> b2, 257 -> b3, 258 -> b4, 260 -> b1, 261 -> b2, 262 -> b3, 263 -> b4, 264 -> b5, 265 -> b1, 267 -> b3, 268 -> b4, 269 -> b5, 270 -> b1, 271 -> b2, 272 -> b3, 274 -> b5, 275 -> b1, 276 -> b2, 277 -> b3, 278 -> b4, 279 -> b5, 281 -> b2, 282 -> b3, 283 -> b4, 284 -> b5, 285 -> b1, 286 -> b2, 288 -> b4, 289 -> b5, 290 -> b1, 291 -> b2, 292 -> b3, 293 -> b4, 295 -> b1, 296 -> b2, 297 -> b3, 298 -> b4, 299 -> b5] else b6
+b1:
+  v1 = iconst.i32 1
+  ret v1
+b2:
+  v2 = iconst.i32 2
+  ret v2
+b3:
+  v3 = iconst.i32 5
+  ret v3
+b4:
+  v4 = iconst.i32 10
+  ret v4
+b5:
+  v5 = iconst.i32 17
+  ret v5
+b6:
+  v6 = iconst.i32 0
+  ret v6
+)";
+    let drv = "#include <stdint.h>\nint32_t j8(int8_t, int32_t); int32_t j16(int16_t, int32_t); int64_t j64(int64_t); int32_t jbig(int32_t);\nint main(void) {\n  for (int x = -128; x < 128; x++) { int32_t w = x >= -2 && x <= 3 ? 1000 * (x + 3) + x : -99; if (j8((int8_t)x, 1000) != w) return 1; }\n  for (int x = 90; x < 120; x++) { int32_t w; int in = x >= 100 && x <= 110 && x != 103 && x != 107; if (!in) w = 40 - 5; else if (x % 2 == 0) w = 40 * 3; else w = 40 ^ (x * 7); if (j16((int16_t)x, 40) != w) return 2; }\n  if (j16(-32768, 40) != 35 || j16(32767, 40) != 35) return 2;\n  for (int64_t d = -3; d < 9; d++) { int64_t x = 1099511627776ll + d; int64_t w = d >= 0 && d < 6 ? x + d * 11 : -1; if (j64(x) != w) return 3; }\n  if (j64(0) != -1 || j64(-1) != -1) return 3;\n  for (int x = -5; x < 310; x++) { int32_t w = x >= 0 && x < 300 && x % 7 ? (x % 5) * (x % 5) + 1 : 0; if (jbig(x) != w) return 4; }\n  if (jbig(-2147483647 - 1) != 0 || jbig(2147483647) != 0) return 4;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // A loop whose product by a constant is the first addend of a sum (arm64 `madd`, the constant kept in a
 // register) parses decimal digits.
 @test

@@ -7083,6 +7083,219 @@ extend Gen {
         self.fix.push(at as u64 << 32 | k as u64);
     }
 
+    // S0 = switch value `r` (`sz` bytes) minus `min`, wrapped at its width and zero-extended.
+    fn switch_index(self: &mut Self, r: u8, sz: u32, min: u64) {
+        if sz == 8 {
+            self.c.mov_rr(8, S0, r);
+            let s = min as i64;
+            if s >= -2147483648 && s <= 2147483647 {
+                if s != 0 {
+                    self.c.alu_ri(x::SUB, 8, S0, s as i32);
+                }
+            } else {
+                self.c.mov_ri(S1, min);
+                self.c.alu_rr(x::SUB, 8, S0, S1);
+            }
+            return;
+        }
+        self.c.ext(sz, 4, false, S0, r);
+        if min != 0 {
+            self.c.alu_ri(x::SUB, 4, S0, (min as u32) as i32);
+            if sz < 4 {
+                self.c.alu_ri(x::AND, 4, S0, ((1u32 << 8 * sz) - 1) as i32);
+            }
+        }
+    }
+
+    // A branch on condition `cc` to the default edge `d` of a switch: to its block, or to its moves past
+    // the switch (`stubs`, the displacements to land) when it has some.
+    fn to_default(self: &mut Self, cc: u32, d: u32, stubs: &mut Vector<u32>) {
+        if self.moves_needed(d) {
+            stubs.push(self.c.jcc32(cc));
+        } else {
+            self.cbranch(cc, self.b().edge_target(d));
+        }
+    }
+
+    // A switch whose cases all pass constants to one block (`lv::switch_lookup`): the bound and hole tests
+    // to the default, then each parameter from its column of a read-only table (memory homes first: a
+    // narrow one goes through S0, which the value then gives again). Whether it did.
+    fn lookup(self: &mut Self, t: Inst, r: u8, sz: u32) bool {
+        let b = self.b();
+        let mut lk = lv::Lookup::new();
+        if !lv::switch_lookup(b, t, 8 * sz, self.ptr, &mut lk) {
+            return false;
+        }
+        let d = b.switch_edge(t, t.aux);
+        let to = b.edge_target(b.switch_edge(t, 0));
+        self.switch_index(r, sz, lk.min);
+        let mut stubs = Vector::<u32>::new();
+        self.c.alu_ri(
+            x::CMP,
+            if sz == 8 {
+                8
+            } else {
+                4
+            },
+            S0,
+            (lk.span - 1) as i32,
+        );
+        self.to_default(x::CC_A, d, &mut stubs);
+        if lk.holes != 0 {
+            // bt S1, S0 (0F A3): a hole's bit sets the carry.
+            self.c.mov_ri(S1, lk.holes);
+            self.c.rr(0, 0x0FA3, true, S0, S1, false);
+            self.to_default(x::CC_B, d, &mut stubs);
+        }
+        let k = self.table_sym(&lk);
+        self.c.lea(S1, x::rip());
+        self.reloc_rip(x::R_PC32, k, 0);
+        let tb = b.blocks[to as usize];
+        let ni = b.insts.len() as u32;
+        for pass in 0..2u32 {
+            for q in 0..tb.param_len as u32 {
+                let px = ni + tb.param_start + q;
+                self.param_home(px, NOREG);
+                let ty = self.xty(px);
+                let e = type_bytes(ty, self.ptr);
+                let m = x::ix(S1, S0, e.trailing_zeros() as u8, lk.off[q as usize] as i32);
+                let pva = self.va[px as usize];
+                if pva.home == H_FIXED {
+                    if pass == 1 {
+                        self.ld(ty, pva.reg, m);
+                    }
+                } else if pass == 0 {
+                    let dst = x::at(x::RSP, pva.off);
+                    if e >= 4 {
+                        self.ld(ty, self.vs0, m);
+                        self.st(ty, self.vs0, dst);
+                    } else {
+                        self.ld(ty, S0, m);
+                        self.st(ty, S0, dst);
+                        self.switch_index(r, sz, lk.min);
+                        self.c.lea(S1, x::rip());
+                        self.reloc_rip(x::R_PC32, k, 0);
+                    }
+                }
+            }
+        }
+        self.goto(to, stubs.len() != 0);
+        if stubs.len() != 0 {
+            for q in 0..stubs.len() {
+                self.c.land(stubs[q], self.c.len());
+            }
+            self.edge_moves(d);
+            self.goto(b.edge_target(d), false);
+        }
+        return true;
+    }
+
+    // A dense switch (`lv::switch_span`) of at least TABLE_MIN cases that go elsewhere than the default: the
+    // bound test to the default, then a jump through a table of jumps, one per entry, each 8 bytes (`jmp
+    // rel32`, kept long, then `int3`s): to its case's block, or its moves past the table; an entry no case
+    // takes to the default's. Whether it did.
+    fn jump_table(self: &mut Self, t: Inst, r: u8, sz: u32) bool {
+        let b = self.b();
+        let n = t.aux as u32;
+        let d = b.switch_edge(t, n);
+        let mut own: u32 = 0;
+        for k in 0..n {
+            let e = b.switch_edge(t, k);
+            if b.edge_nargs(e) != 0 || b.edge_target(e) != b.edge_target(d) || b.edge_nargs(d) != 0 {
+                own += 1;
+            }
+        }
+        let mut min: u64 = 0;
+        let mut span: u32 = 0;
+        if own < lv::TABLE_MIN || !lv::switch_span(b, t, 8 * sz, &mut min, &mut span) {
+            return false;
+        }
+        let m = if sz == 8 {
+            ~0u64
+        } else {
+            (1u64 << 8 * sz as u64) - 1
+        };
+        // The edge of each entry.
+        let mut es = Vector::<u32>::with_capacity(span as usize);
+        for _ in 0..span {
+            es.push(d);
+        }
+        for k in 0..n {
+            es[(b.words[(t.b + k) as usize].wrapping_sub(min) & m) as usize] = b.switch_edge(t, k);
+        }
+        self.switch_index(r, sz, min);
+        self.c.alu_ri(
+            x::CMP,
+            if sz == 8 {
+                8
+            } else {
+                4
+            },
+            S0,
+            (span - 1) as i32,
+        );
+        // Per edge with moves (the default first), the jumps to land at them.
+        let mut ds = Vector::<u32>::new();
+        self.to_default(x::CC_A, d, &mut ds);
+        self.c.lea(S1, x::rip());
+        let disp = self.c.rip_at;
+        self.c.lea(S1, x::ix(S1, S0, 3, 0));
+        // jmp r11
+        self.c.byte(0x41);
+        self.c.byte(0xFF);
+        self.c.byte(0xE3);
+        self.c.patch32(disp, self.c.len() - (disp + 4));
+        let mut cs = Vector::<u64>::new();
+        for x in 0..span {
+            let e = es[x as usize];
+            let j = self.c.jmp32_long();
+            for _ in 0..3 {
+                self.c.byte(0xCC);
+            }
+            if !self.moves_needed(e) {
+                self.fix.push(j as u64 << 32 | b.edge_target(e) as u64);
+            } else if e == d {
+                ds.push(j);
+            } else {
+                cs.push(j as u64 << 32 | e as u64);
+            }
+        }
+        let total = cs.len() + if ds.len() != 0 {
+            1
+        } else {
+            0
+        };
+        let mut done: usize = 0;
+        if ds.len() != 0 {
+            for q in 0..ds.len() {
+                self.c.land(ds[q], self.c.len());
+            }
+            self.edge_moves(d);
+            done += 1;
+            self.goto(b.edge_target(d), done < total);
+        }
+        for q in 0..cs.len() {
+            self.c.land((cs[q] >> 32) as u32, self.c.len());
+            let e = cs[q] as u32;
+            self.edge_moves(e);
+            done += 1;
+            self.goto(b.edge_target(e), done < total);
+        }
+        return true;
+    }
+
+    // A local read-only symbol of the object holding table `lk`'s bytes.
+    fn table_sym(self: &mut Self, lk: &lv::Lookup) u32 {
+        let o = self.obj();
+        let nm = format("__sc_tab.{}", o.syms.len());
+        let k = o.sym(&nm);
+        let n = lk.bytes.len() as u64;
+        let at = o.define(k, ob::S_RODATA, lk.align_log2, n, 0);
+        o.put(ob::S_RODATA, lk.bytes[0..lk.bytes.len()]);
+        o.pad_to(ob::S_RODATA, at + n);
+        return k;
+    }
+
     // Whether an argument of edge `e` is not in its parameter's home yet (the homes chosen).
     fn moves_needed(self: &Self, e: u32) bool {
         let b = self.b();
@@ -7261,6 +7474,9 @@ extend Gen {
             let sz = bits / 8;
             let r = self.reg(t.a);
             self.spill_live_out();
+            if self.lookup(t, r, sz) || self.jump_table(t, r, sz) {
+                return true;
+            }
             let n = t.aux as u32;
             let mut stubs = Vector::<u64>::new();
             // A case that goes where the default goes, neither passing arguments, needs no test.
