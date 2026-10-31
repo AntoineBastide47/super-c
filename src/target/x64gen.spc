@@ -311,7 +311,9 @@ pub(package) struct Gen {
     // The remainder the division before it computed (`int_op`) and the product it reads, NONE for none.
     div_pair: u32,
     div_mul: u32,
-    // The instruction after the run of zero stores `zero_run` wrote (0: none).
+    // The stores `zero_run` wrote with the first of their run: instructions `zero_from` to `zero_end` (the
+    // layout need not visit blocks in instruction order).
+    zero_from: u32,
     zero_end: u32,
     rels: Vector<CRel>,
     osym: Vector<u32>, // per package symbol, its object symbol in this generator's object (NONE until used)
@@ -460,6 +462,7 @@ extend Gen {
             tail_ret: NONE,
             div_pair: NONE,
             div_mul: NONE,
+            zero_from: 0,
             zero_end: 0,
             rels: Vector::<CRel>::new(),
             osym: Vector::<u32>::new(),
@@ -559,6 +562,17 @@ extend Gen {
         if (open & ~self.held) != 0 {
             let r = (open & ~self.held).trailing_zeros() as u32;
             return self.taken(r as u8);
+        }
+        // In a loop, a callee-saved register that holds nothing, which the prologue saves once, before an
+        // eviction, which may store and reload at each iteration.
+        let blk = self.lv.order[self.pos as usize] as usize;
+        if !vreg && self.lv.inner[blk] != NONE && !self.lv.rare[blk] {
+            for r in 0..16u32 {
+                if self.fixed_free(r as u8) && (self.held & bit(r as u8)) == 0 {
+                    self.csr |= bit(r as u8);
+                    return r as u8;
+                }
+            }
         }
         // Evict round-robin: the next unlocked register that holds a value.
         let busy = open & self.held;
@@ -931,7 +945,9 @@ extend Gen {
             return sr;
         }
         let fixed = self.va[x as usize].home == H_FIXED || self.fix_class(x) != FIX_NONE;
-        if !fixed && ((self.xalloc | self.valloc) & bit(ra)) != 0 && is_v(t) == ra >= V0 {
+        // A callee-saved register `alloc` gave a loop's temporary (saved, no home) counts as a caller-saved one.
+        let temps = self.xalloc | self.valloc | self.xfix & self.csr & ~self.fixed_busy;
+        if !fixed && (temps & bit(ra)) != 0 && is_v(t) == ra >= V0 {
             let own = self.owner[ra as usize];
             let temp = own == NONE && (self.tmps & bit(ra)) != 0;
             let dies = own == xa && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
@@ -2373,7 +2389,9 @@ extend Gen as Mover {
         self.st(t, r, x::at(dst.reg, dst.off));
     }
 
-    fn scratch(self: &mut Self) Lc {
+    fn scratch(self: &mut Self, _m: Mv) Lc {
+        // Every allocatable integer register is an argument or result register, which a call may have set
+        // outside the moves; the scratch registers are the moves' own.
         let s = self.slot_alloc(64, 16) as i32;
         return Lc { kind: LC_MEM, reg: x::RSP, off: s, val: NONE };
     }
@@ -2509,6 +2527,7 @@ extend Gen {
         self.tail_ret = NONE;
         self.div_pair = NONE;
         self.div_mul = NONE;
+        self.zero_from = 0;
         self.zero_end = 0;
         self.rels.truncate(0);
         self.free_slots.truncate(0);
@@ -2875,7 +2894,7 @@ extend Gen {
             let x = ni + e0 + np;
             if self.self_lay.ret.kind == ab::L_SRET {
                 self.entry_reg(x, self.arg(0));
-            } else {
+            } else if !self.ret_moved() {
                 let (size, _) = sig_size(b, rt, self.ptr);
                 let off = self.slot_alloc(size + 7 & ~7u32, 16);
                 self.va.index_mut(x as usize).home = H_SPADDR;
@@ -5086,6 +5105,25 @@ extend Gen {
         return true;
     }
 
+    // Whether every return of the body takes the result from a run of part stores (`rstore`): then nothing
+    // reads the result's memory, which needs no slot.
+    fn ret_moved(self: &Self) bool {
+        let b = self.b();
+        let mut any = false;
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            let end = bk.start + bk.len - 1;
+            if bk.len == 0 || b.insts[end as usize].op != O_RET {
+                continue;
+            }
+            if end == bk.start || self.rstore[end as usize - 1] == 0 {
+                return false;
+            }
+            any = true;
+        }
+        return any;
+    }
+
     // `rstore`: when the result (an aggregate in registers) is written only by stores that end blocks
     // which return, each a whole part and only such stores between it and the `ret`, 1 + each one's part:
     // the first of each run moves the run's values into the part registers (`ret_moves`), and the return
@@ -5245,7 +5283,7 @@ extend Gen {
     }
 
     fn store(self: &mut Self, t: Inst) bool {
-        if self.cur < self.zero_end {
+        if self.cur >= self.zero_from && self.cur < self.zero_end {
             return true; // the run of zero stores before it wrote its bytes (`zero_run`)
         }
         let ty = self.vt(t.b);
@@ -5297,7 +5335,7 @@ extend Gen {
     // A run of at least ZERO_RUN 8-byte stores of 0 from store `t` (the current instruction) on, one after
     // another at consecutive offsets of one address: a zeroed xmm register stored 16 bytes at a time (clang's
     // `xorps` and `movups`), the odd last 8 bytes as a store of 0. The run's other stores then write
-    // nothing (`zero_end`). Whether it was one.
+    // nothing (`zero_from`, `zero_end`). Whether it was one.
     fn zero_run(self: &mut Self, t: Inst) bool {
         let b = self.b();
         let c = self.cur;
@@ -5332,6 +5370,7 @@ extend Gen {
             self.c.store_i(8, 0, m);
             self.mem_rel(rs, radd);
         }
+        self.zero_from = c + 1;
         self.zero_end = j;
         return true;
     }

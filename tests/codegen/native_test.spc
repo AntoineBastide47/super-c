@@ -392,14 +392,15 @@ fn small_parameters_a_loop_compares_run() {
 }
 
 // A run of 8-byte stores of 0 at consecutive offsets (x86-64: a zeroed xmm register stored 16 bytes at a
-// time, an odd last store alone), and one a volatile store breaks, write those bytes alone.
+// time, an odd last store alone), and one a volatile store breaks, write those bytes alone; a rare block
+// the layout puts after such a run, of lower instructions, keeps its stores.
 @test
 fn runs_of_zero_stores_run() {
     if !cli::has_cc() {
         return; // a C driver links it
     }
-    let lir = "lir ptr 8\nsym @zero5 fn global\nsym @zero4 fn global\nfn @zero5\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = iconst.i64 0\n  store v1, v0+8 align 0\n  store v1, v0+16 align 0\n  store v1, v0+24 align 0\n  store v1, v0+32 align 0\n  store v1, v0+40 align 0\n  ret\nfn @zero4\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = iconst.i64 0\n  store v1, v0 align 0\n  store v1, v0+8 align 0\n  store v1, v0+16 align 0 volatile\n  store v1, v0+24 align 0\n  ret\n";
-    let drv = "#include <stdint.h>\nvoid zero5(uint64_t *);\nvoid zero4(uint64_t *);\nint main(void) {\n  uint64_t a[7];\n  for (int i = 0; i < 7; i++) a[i] = 0x1111111111111111ull * (i + 1);\n  zero5(a);\n  if (a[0] != 0x1111111111111111ull || a[6] != 0x7777777777777777ull) return 1;\n  for (int i = 1; i < 6; i++) if (a[i] != 0) return 2;\n  uint64_t b[5];\n  for (int i = 0; i < 5; i++) b[i] = 9;\n  zero4(b);\n  for (int i = 0; i < 4; i++) if (b[i] != 0) return 3;\n  if (b[4] != 9) return 4;\n  return 0;\n}\n";
+    let lir = "lir ptr 8\nsym @zero5 fn global\nsym @zero4 fn global\nsym @zcold fn global\nfn @zero5\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = iconst.i64 0\n  store v1, v0+8 align 0\n  store v1, v0+16 align 0\n  store v1, v0+24 align 0\n  store v1, v0+32 align 0\n  store v1, v0+40 align 0\n  ret\nfn @zero4\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = iconst.i64 0\n  store v1, v0 align 0\n  store v1, v0+8 align 0\n  store v1, v0+16 align 0 volatile\n  store v1, v0+24 align 0\n  ret\nfn @zcold\n  sig (ptr, i8) -> void\nb0(v0: ptr, v1: i8):\n  v2 = iconst.i64 0\n  v3 = iconst.i64 7\n  br v1, b1, b2\nb1: unlikely\n  store v3, v0+40 align 0\n  ret\nb2:\n  store v2, v0 align 0\n  store v2, v0+8 align 0\n  store v2, v0+16 align 0\n  store v2, v0+24 align 0\n  ret\n";
+    let drv = "#include <stdint.h>\nvoid zero5(uint64_t *);\nvoid zero4(uint64_t *);\nvoid zcold(uint64_t *, int8_t);\nint main(void) {\n  uint64_t a[7];\n  for (int i = 0; i < 7; i++) a[i] = 0x1111111111111111ull * (i + 1);\n  zero5(a);\n  if (a[0] != 0x1111111111111111ull || a[6] != 0x7777777777777777ull) return 1;\n  for (int i = 1; i < 6; i++) if (a[i] != 0) return 2;\n  uint64_t b[5];\n  for (int i = 0; i < 5; i++) b[i] = 9;\n  zero4(b);\n  for (int i = 0; i < 4; i++) if (b[i] != 0) return 3;\n  if (b[4] != 9) return 4;\n  uint64_t c[6] = {1, 1, 1, 1, 1, 1};\n  zcold(c, 0);\n  if (c[0] != 0 || c[3] != 0 || c[5] != 1) return 5;\n  zcold(c, 1);\n  if (c[5] != 7) return 6;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }
@@ -2509,6 +2510,179 @@ b0(v0: i64):
   ret v4
 )";
     let drv = "#include <stdint.h>\ntypedef struct { int64_t a; double b; } P;\ntypedef struct { double d; } H;\nP swap(P);\nH half(H);\nint64_t via_c(int64_t);\nP cswap(P p) { P r = {(int64_t)p.b + 1, (double)p.a}; return r; }\nint main(void) {\n  P p = {7, 2.5};\n  P q = swap(p);\n  if (q.a != 2 || q.b != 7.0) return 1;\n  H h = {3.0};\n  if (half(h).d != 1.5) return 2;\n  if (via_c(41) != 42) return 3;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Indirect calls whose target is in a register no argument takes, in one an argument takes (moved first),
+// and a sibling one, each reading its arguments right.
+@test
+fn indirect_calls_through_registers_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @via3 fn global
+sym @via0 fn global
+sym @tail fn global
+fn @via3
+  sig (i64, i64, ptr) -> i64
+b0(v0: i64, v1: i64, v2: ptr):
+  v3 = call.ind.i64 v2(v0, v1) : (i64, i64) -> i64
+  v4 = iconst.i64 1
+  v5 = add.i64 v3, v4
+  ret v5
+fn @via0
+  sig (ptr, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = call.ind.i64 v0(v2, v1) : (i64, i64) -> i64
+  v4 = iconst.i64 2
+  v5 = mul.i64 v3, v4
+  ret v5
+fn @tail
+  sig (ptr, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = call.ind.i64 v0(v2, v1) : (i64, i64) -> i64
+  ret v3
+)";
+    let drv = "#include <stdint.h>\ntypedef int64_t (*F)(int64_t, int64_t);\nint64_t via3(int64_t, int64_t, F);\nint64_t via0(F, int64_t, int64_t);\nint64_t tail(F, int64_t, int64_t);\nstatic int64_t sub(int64_t a, int64_t b) { return a - b; }\nint main(void) {\n  if (via3(10, 3, sub) != 8) return 1;\n  if (via0(sub, 10, 3) != -14) return 2;\n  if (tail(sub, 10, 3) != -7) return 3;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_native_with(lir, drv, TAIL), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Sums, minimums and maximums of a vector's integer lanes (arm64: `addv`, `addp`, `smaxv`, `uminv` and
+// the like in v registers): lanes of 1, 2, 4 and 8 bytes, signed and unsigned.
+@test
+fn vector_reductions_in_registers_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @reds fn global
+fn @reds
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4i32 v0 align 2
+  v3 = vop.reduce_add.i32 (v2)
+  v4 = vop.reduce_max.s.i32 (v2)
+  v5 = vop.reduce_min.i32 (v2)
+  v6 = load.v16i8 v0 align 0
+  v7 = vop.reduce_add.i8 (v6)
+  v8 = vop.reduce_min.s.i8 (v6)
+  v9 = vop.reduce_max.i8 (v6)
+  v10 = load.v8i16 v0 align 1
+  v11 = vop.reduce_add.i16 (v10)
+  v12 = load.v2i64 v0 align 3
+  v13 = vop.reduce_add.i64 (v12)
+  v14 = load.v2i32 v0 align 2
+  v15 = vop.reduce_add.i32 (v14)
+  v16 = vop.reduce_max.s.i32 (v14)
+  store v3, v1 align 2
+  store v4, v1+4 align 2
+  store v5, v1+8 align 2
+  store v7, v1+12 align 0
+  store v8, v1+13 align 0
+  store v9, v1+14 align 0
+  store v11, v1+16 align 1
+  store v13, v1+24 align 3
+  store v15, v1+32 align 2
+  store v16, v1+36 align 2
+  ret
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\nvoid reds(const void *, void *);\nint main(void) {\n  int32_t w[4] = {7, -3, 100, -40};\n  unsigned char o[40];\n  reds(w, o);\n  int32_t s, mx, mn; int8_t bs, bmn; uint8_t bmx; int16_t hs; int64_t ds; int32_t ps, pm;\n  memcpy(&s, o, 4); memcpy(&mx, o + 4, 4); memcpy(&mn, o + 8, 4);\n  memcpy(&bs, o + 12, 1); memcpy(&bmn, o + 13, 1); memcpy(&bmx, o + 14, 1);\n  memcpy(&hs, o + 16, 2); memcpy(&ds, o + 24, 8); memcpy(&ps, o + 32, 4); memcpy(&pm, o + 36, 4);\n  if (s != 64 || mx != 100 || mn != 7) return 1;\n  const uint8_t *b = (const uint8_t *)w;\n  int bsum = 0, bmin = 127, bmax = 0;\n  for (int i = 0; i < 16; i++) { bsum += b[i]; if ((int8_t)b[i] < bmin) bmin = (int8_t)b[i]; if (b[i] > bmax) bmax = b[i]; }\n  if (bs != (int8_t)bsum || bmn != bmin || bmx != bmax) return 2;\n  const int16_t *h = (const int16_t *)w;\n  int hsum = 0;\n  for (int i = 0; i < 8; i++) hsum += h[i];\n  if (hs != (int16_t)hsum) return 3;\n  const int64_t *d = (const int64_t *)w;\n  if (ds != (int64_t)((uint64_t)d[0] + (uint64_t)d[1])) return 4;\n  if (ps != 4 || pm != 7) return 5;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// A loop whose product by a constant is the first addend of a sum (arm64 `madd`, the constant kept in a
+// register) parses decimal digits.
+@test
+fn a_loop_of_products_added_to_runs() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @parse fn global
+fn @parse
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i32 0
+  v4 = iconst.i32 10
+  v5 = iconst.i8 48
+  v6 = iconst.i64 1
+  v7 = icmp.eq v1, v2
+  br v7, b2(v3), b1(v2, v3)
+b1(v8: i64, v9: i32):
+  v10 = ptradd v0, v8 * 1
+  v11 = load.i8 v10 align 0
+  v12 = sub.i8 v11, v5
+  v13 = zext.i32 v12
+  v14 = mul.i32 v9, v4
+  v15 = add.i32 v14, v13
+  v16 = add.i64 v8, v6
+  v17 = icmp.ult v16, v1
+  br v17, b1(v16, v15), b2(v15)
+b2(v18: i32):
+  ret v18
+)";
+    let drv = "#include <stdint.h>\nint32_t parse(const char *, int64_t);\nint main(void) {\n  if (parse(\"1234567\", 7) != 1234567) return 1;\n  if (parse(\"\", 0) != 0) return 2;\n  if (parse(\"90\", 2) != 90) return 3;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// A result in registers whose parts swap the parameters' registers (a cycle the moves break through a
+// free register, the result needing no memory), integer and float, and one a return of memory reads.
+@test
+fn results_that_swap_registers_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @order fn global
+sym @forder fn global
+sym @kept fn global
+fn @order
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64, i64) -> l0
+b0(v0: i64, v1: i64, v2: ptr):
+  v3 = icmp.slt v0, v1
+  br v3, b2, b1
+b1:
+  store v1, v2 align 3
+  store v0, v2+8 align 3
+  ret
+b2:
+  store v0, v2 align 3
+  store v1, v2+8 align 3
+  ret
+fn @forder
+  layout l0 size 16 align 3 [0 f64, 8 f64]
+  sig (f64, f64) -> l0
+b0(v0: f64, v1: f64, v2: ptr):
+  v3 = fcmp.olt v0, v1
+  br v3, b2, b1
+b1:
+  store v1, v2 align 3
+  store v0, v2+8 align 3
+  ret
+b2:
+  store v0, v2 align 3
+  store v1, v2+8 align 3
+  ret
+fn @kept
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64, i64) -> l0
+b0(v0: i64, v1: i64, v2: ptr):
+  store v1, v2 align 3
+  store v0, v2+8 align 3
+  v3 = load.i64 v2 align 3
+  v4 = add.i64 v3, v0
+  store v4, v2+8 align 3
+  ret
+)";
+    let drv = "#include <stdint.h>\ntypedef struct { int64_t a, b; } P;\ntypedef struct { double a, b; } F;\nP order(int64_t, int64_t);\nF forder(double, double);\nP kept(int64_t, int64_t);\nint main(void) {\n  P p = order(9, 4);\n  if (p.a != 4 || p.b != 9) return 1;\n  p = order(-3, 5);\n  if (p.a != -3 || p.b != 5) return 2;\n  F f = forder(2.5, -1.0);\n  if (f.a != -1.0 || f.b != 2.5) return 3;\n  p = kept(3, 10);\n  if (p.a != 10 || p.b != 13) return 4;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }

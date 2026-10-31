@@ -114,6 +114,7 @@ pub(package) struct Gen {
     wparams: Vector<u32>, // the parameters the current terminator's edges write
     want: Vector<u8>, // per value, its request to `Live::plan`
     lconst: Vector<bool>, // per instruction, a constant a loop keeps in a register (`Live::loop_consts`)
+    regc: Vector<bool>, // per instruction, whether a loop's product or division reads it (`plan_homes`)
     vmem: Vector<bool>, // per value, a vector some instruction reads or writes in memory (`vec_homes`)
     ends: Vector<u32>, // values by the position their range ends at (CSR, `ends_at`)
     ends_at: Vector<u32>,
@@ -216,6 +217,7 @@ extend Gen {
             wparams: Vector::<u32>::new(),
             want: Vector::<u8>::new(),
             lconst: Vector::<bool>::new(),
+            regc: Vector::<bool>::new(),
             vmem: Vector::<bool>::new(),
             ends: Vector::<u32>::new(),
             ends_at: Vector::<u32>::new(),
@@ -474,9 +476,11 @@ extend Gen {
         let bits = type_bits(self.vt(v), self.ptr);
         // A scalar float takes a v register.
         let fv = self.vt(v) == T_F32 || self.vt(v) == T_F64;
+        // A comparison's 0 or 1 (`cset`) fills its register whatever its width.
+        let flag = b.insts[v as usize].op == O_ICMP || b.insts[v as usize].op == O_FCMP;
         if v + 1 >= bk.start + bk.len || self.lv.uses[v as usize] != 1 || self.lv.end[v as usize] != self.pos || !is_int(
             self.vt(v),
-        ) && self.vt(v) != T_PTR && !fv || bits < 32 || bits > 64 || self.va[v as usize].home != H_NONE {
+        ) && self.vt(v) != T_PTR && !fv || bits < 32 && !flag || bits > 64 || self.va[v as usize].home != H_NONE {
             return NOREG;
         }
         let t = b.insts[v as usize + 1];
@@ -766,8 +770,28 @@ extend Gen {
         let ni = b.insts.len();
         let nv = ni + b.params.len();
         self.lv.loop_consts(b, &mut self.lconst);
-        // An integer that one instruction builds stays rematerialized; one of three or more instructions
-        // that several blocks read is kept in a register too, loop or not.
+        // A loop's product, division or multiply-add, which takes no immediate, keeps its constant in a
+        // register (`regc`) instead of building it at each use.
+        fill(&mut self.regc, ni, false);
+        for k in 0..b.blocks.len() {
+            if self.lv.inner[k] == NONE || self.lv.pos[k] == NONE {
+                continue;
+            }
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                if t.op == O_MUL || t.op >= O_SDIV && t.op <= O_UREM || t.op == O_MULHU || t.op == O_MULHS {
+                    if (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE {
+                        self.regc[t.a as usize] = true;
+                    }
+                    if (t.b & (VPARAM | VFLAG)) == 0 && t.b != VNONE {
+                        self.regc[t.b as usize] = true;
+                    }
+                }
+            }
+        }
+        // An integer that one instruction builds stays rematerialized but for `regc`; one of three or more
+        // instructions that several blocks read is kept in a register too, loop or not.
         for x in 0..ni {
             let t = b.insts[x];
             if t.op != O_ICONST {
@@ -775,7 +799,7 @@ extend Gen {
             }
             let n = self.imm_insts(t.b as u64 << 32 | t.a as u64, type_bytes(t.ty, self.ptr) == 8);
             if n < 2 {
-                self.lconst[x] = false;
+                self.lconst[x] = self.lconst[x] && self.regc[x];
             } else if n >= 3 && self.lv.uses[x] >= 2 && self.lv.def_blk[x] != NONE && self.lv.pos[self.lv.def_blk[x] as usize] != NONE && self.lv.end[x] > self.lv.pos[self.lv.def_blk[x] as usize] {
                 self.lconst[x] = true;
             }
@@ -1789,7 +1813,21 @@ extend Gen as Mover {
         self.mem(mkind(t, false), false, r, dst.reg, dst.off);
     }
 
-    fn scratch(self: &mut Self) Lc {
+    fn scratch(self: &mut Self, m: Mv) Lc {
+        // A caller-saved register of the move's file that no argument or result uses (x9..x15, v16..v29: a
+        // call may have set an argument register outside the moves), holds nothing and no pending move
+        // names.
+        let set = if !m.v {
+            XSCR
+        } else if m.bytes <= 16 {
+            vscr()
+        } else {
+            0u64
+        };
+        let open = set & ~(self.held | self.lock | self.tmps | self.fixed_busy | move_regs(&self.mv));
+        if open != 0 {
+            return Lc { kind: LC_REG, reg: open.trailing_zeros() as u8, off: 0, val: NONE };
+        }
         let s = self.slot_alloc(64, 16) as i32;
         return Lc { kind: LC_MEM, reg: a::SP as u8, off: s, val: NONE };
     }
@@ -2274,7 +2312,7 @@ extend Gen {
             let x = ni + e0 + np;
             if self.self_lay.ret.kind == ab::L_SRET {
                 self.entry_reg(x, 8);
-            } else {
+            } else if !self.ret_moved() {
                 let (size, _) = sig_size(b, rt, self.ptr);
                 let off = self.slot_alloc(size + 7 & ~7u32, 16);
                 self.va.index_mut(x as usize).home = H_SPADDR;
@@ -3230,7 +3268,11 @@ extend Gen {
             self.cond = Cond { inst: self.vx(i), cc: c, cc2: NONE };
             return;
         }
-        let rd = self.def(i);
+        // The compare read the operands: a dying one's register or a temporary (a constant it built) may take
+        // the flag.
+        self.lock &= ~self.tmps;
+        self.tmps = 0;
+        let rd = self.def_step(i);
         self.emit(a::cset(false, rd, c));
         if c2 != NONE {
             self.emit(a::csel(false, 0, 1, rd, rd, a::ZR, a::invert(c2)));
@@ -3791,7 +3833,16 @@ extend Gen {
             }
             return true;
         }
-        // A folded product added or subtracted (`lv::FOLD_MADD`).
+        // A folded product added or subtracted (`lv::FOLD_MADD`), or added to.
+        if op == O_ADD && (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] && self.b().insts[t.a as usize].op == O_MUL {
+            let m = self.b().insts[t.a as usize];
+            let ra = self.reg(t.b);
+            let rn = self.reg(m.a);
+            let rm = self.reg(m.b);
+            let rd = self.def_step(i);
+            self.emit(a::madd(sf, false, rd, rn, rm, ra));
+            return true;
+        }
         if (op == O_ADD || op == O_SUB) && (t.b & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.b as usize] {
             let m = self.b().insts[t.b as usize];
             let ra = self.reg(t.a);
@@ -4623,6 +4674,25 @@ extend Gen {
                 self.rstore[i as usize] = self.part_store(t, pv) + 1;
             }
         }
+    }
+
+    // Whether every return of the body takes the result from a run of part stores (`rstore`): then nothing
+    // reads the result's memory, which needs no slot.
+    fn ret_moved(self: &Self) bool {
+        let b = self.b();
+        let mut any = false;
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            let end = bk.start + bk.len - 1;
+            if bk.len == 0 || b.insts[end as usize].op != O_RET {
+                continue;
+            }
+            if end == bk.start || self.rstore[end as usize - 1] == 0 {
+                return false;
+            }
+            any = true;
+        }
+        return any;
     }
 
     // The result part store `t` writes whole through the result's address `pv`, else NONE.
@@ -5475,6 +5545,47 @@ extend Gen {
                 }
             }
         }
+        // An indirect call's target that no argument is and that dies at the call, in a register the
+        // argument setup leaves (none of the call's argument registers, x8 or the scratch x16 and x17; else
+        // one of x9..x15), for `blr`; not through its slot.
+        let mut target = NOREG;
+        if t.op == O_CALLIND {
+            let x = self.vx(t.a);
+            let r = self.va[x as usize].reg;
+            let mut arg = false;
+            for k in 0..nops {
+                arg = arg || self.vx(b.pool[(t.c + k) as usize]) == x;
+            }
+            let mut args: u64 = bit(8) | bit(a::IP0 as u8) | bit(a::IP1 as u8);
+            for k in 0..np {
+                let loc = self.lay.locs[k as usize];
+                if loc.kind == ab::L_REG || loc.kind == ab::L_REF_REG {
+                    for q in 0..loc.n as u32 {
+                        let pa = self.lay.parts[(loc.p0 + q) as usize];
+                        if !pa.v {
+                            args |= bit(pa.reg);
+                        }
+                    }
+                }
+            }
+            let free = XSCR & ~(self.held | self.lock | self.tmps | self.fixed_busy);
+            if r != NOREG && r < V0 && !arg && !self.live_on(x) && self.va[x as usize].home != H_FIXED && ((args & bit(
+                r,
+            )) == 0 || free != 0) {
+                target = if (args & bit(r)) == 0 {
+                    r
+                } else {
+                    free.trailing_zeros() as u8
+                };
+                if target != r {
+                    self.emit(a::mov_reg(true, target, r));
+                    self.set_owner(r, NONE);
+                    self.set_owner(target, x);
+                    self.va.index_mut(x as usize).reg = target;
+                }
+                keep.push(x);
+            }
+        }
         self.spill_around_call(&keep);
         let mut rvals = Vector::<u64>::new();
         // The registers the template reads in place of its argument registers hold no temporary.
@@ -5677,13 +5788,20 @@ extend Gen {
                 self.emit(a::bl(0));
             }
         } else {
-            self.materialize(t.a, a::IP0 as u8);
+            if target == NOREG {
+                self.materialize(t.a, a::IP0 as u8);
+                target = a::IP0 as u8;
+            }
             if self.sibling(i, t) {
+                // A sibling call's `br` restores the frame first: through x16, which the epilogue keeps.
+                if target != a::IP0 as u8 {
+                    self.emit(a::mov_reg(true, a::IP0 as u8, target));
+                }
                 self.tails.push(self.code.len() as u64 << 32 | NONE as u64);
                 self.emit(a::b(0));
                 return true;
             }
-            self.emit(a::blr(a::IP0));
+            self.emit(a::blr(target));
         }
         if rl.kind != ab::L_REG {
             return true;
@@ -8047,6 +8165,9 @@ extend Gen {
             self.masked_in_reg(i, sc == core::SIMD_STORE_MASKED_PTR, &ops, &tys);
             return true;
         }
+        if rule == core::SR_REDUCE && in_vreg(tys[0]) && self.reduce_reg(i, t, sc, sg, ops[0], tys[0]) {
+            return true;
+        }
         let greg = sc == core::SIMD_GATHER_UNCHECKED && Gen::gather_reg(self.b(), t);
         if !greg && (!simd || rule == core::SR_MLOAD || rule == core::SR_MSTORE || rule == core::SR_REDUCE || rule == core::SR_DOT || rule == core::SR_INDEX || rule == core::SR_RT_INDEX || rule == core::SR_MASKED) {
             self.sync_ops(&ops);
@@ -9409,6 +9530,52 @@ extend Gen {
         }
         let rd = self.def(i);
         self.emit(a::mov_reg(true, rd, acc));
+    }
+
+    // Integer reduction `c` (`reduce_add`, `reduce_min`, `reduce_max`, signed `sg`) `t` (instruction `i`) of
+    // vector `v` of type `vt` (8 or 16 bytes) into a result of its lane type, in v registers: ADDV, SMAXV,
+    // UMAXV, SMINV or UMINV across the lanes (the pairwise ADDP, SMAXP and the like for two), then UMOV of
+    // lane 0, which zero-extends it. Whether it did: not for floats, nor for a minimum or maximum of 8-byte
+    // lanes.
+    fn reduce_reg(self: &mut Self, i: u32, t: Inst, c: u8, sg: bool, v: Value, vt: u8) bool {
+        let lt = lane_type(vt);
+        let eb = type_bytes(lt, 8);
+        let nb = type_bytes(vt, 8);
+        let n = nb / eb;
+        if is_float(lt) || c != core::SIMD_REDUCE_ADD && c != core::SIMD_REDUCE_MIN && c != core::SIMD_REDUCE_MAX || type_bytes(
+            t.ty,
+            8,
+        ) != eb || eb == 8 && (c != core::SIMD_REDUCE_ADD || n != 2) {
+            return false;
+        }
+        let s = (self.vec_use(v, V0 + 31) - V0) as u32;
+        if n == 2 && eb == 8 {
+            self.emit(0x5EF1B800 | s << 5 | 31); // ADDP Dd, Vn.2D
+        } else if n == 2 {
+            // ADDP, SMAXP, UMAXP, SMINP or UMINP Vd.2S of the vector with itself.
+            let pw: u32 = if c == core::SIMD_REDUCE_ADD {
+                0x0E20BC00
+            } else if c == core::SIMD_REDUCE_MAX {
+                a::on(!sg, 0x20000000) | 0x0E20A400
+            } else {
+                a::on(!sg, 0x20000000) | 0x0E20AC00
+            };
+            self.emit(pw | vsize(eb) << 22 | s << 16 | s << 5 | 31);
+        } else {
+            let base: u32 = if c == core::SIMD_REDUCE_ADD {
+                0x0E31B800
+            } else if c == core::SIMD_REDUCE_MAX {
+                a::on(!sg, 0x20000000) | 0x0E30A800
+            } else {
+                a::on(!sg, 0x20000000) | 0x0E31A800
+            };
+            self.emit(base | a::on(nb == 16, 1u32 << 30) | vsize(eb) << 22 | s << 5 | 31);
+        }
+        let rd = self.def(i) as u32;
+        // UMOV Wd or Xd, V31.<lane>[0].
+        self.emit(a::on(eb == 8, 0x40000000) | 0x0E003C00 | eb << 16 | 31 << 5 | rd);
+        self.va.index_mut(i as usize).clean = true;
+        return true;
     }
 
     // A float reduction (`vreduce`) of rule `c` into an `at` result over the `n` lanes (of `lt`) of operand 0

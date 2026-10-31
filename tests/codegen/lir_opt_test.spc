@@ -5781,3 +5781,111 @@ b0(v0: ptr):
     assert(count_of(&t, "load.") == 2 && !t.contains("store") && !t.contains("slot"), t.as_str());
     assert(text_of(&a, "kept").contains("store"), text_of(&a, "kept").as_str());
 }
+
+// Byte stores of the bytes of one value at consecutive offsets are one store of it (little-endian order) or
+// of its bytes reversed (big-endian order); a load between them keeps them apart.
+@test
+fn byte_stores_of_one_value_combine() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @le fn global
+sym @be fn global
+sym @gap fn global
+fn @le
+  sig (ptr, i32) -> void
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i32 8
+  v3 = iconst.i32 16
+  v4 = iconst.i32 24
+  v5 = trunc.i8 v1
+  store v5, v0 align 0
+  v6 = lshr.i32 v1, v2
+  v7 = trunc.i8 v6
+  store v7, v0+1 align 0
+  v8 = lshr.i32 v1, v3
+  v9 = trunc.i8 v8
+  store v9, v0+2 align 0
+  v10 = lshr.i32 v1, v4
+  v11 = trunc.i8 v10
+  store v11, v0+3 align 0
+  ret
+fn @be
+  sig (ptr, i16) -> void
+b0(v0: ptr, v1: i16):
+  v2 = iconst.i16 8
+  v3 = lshr.i16 v1, v2
+  v4 = trunc.i8 v3
+  store v4, v0+4 align 0
+  v5 = trunc.i8 v1
+  store v5, v0+5 align 0
+  ret
+fn @gap
+  sig (ptr, i16) -> i8
+b0(v0: ptr, v1: i16):
+  v2 = iconst.i16 8
+  v3 = trunc.i8 v1
+  store v3, v0 align 0
+  v4 = load.i8 v0+1 align 0
+  v5 = lshr.i16 v1, v2
+  v6 = trunc.i8 v5
+  store v6, v0+1 align 0
+  ret v4
+)",
+    );
+    let l = text_of(&a, "le");
+    assert(count_of(&l, "store ") == 1 && l.contains("store v1, v0 align 0"), l.as_str());
+    let e = text_of(&a, "be");
+    assert(count_of(&e, "store ") == 1 && e.contains("bswap.i16") && e.contains("v0+4"), e.as_str());
+    let g = text_of(&a, "gap");
+    assert(count_of(&g, "store ") == 2, g.as_str());
+}
+
+// A pointer load from read-only data at a relocation's place (a method of a conformance table) is that
+// symbol's address, and the call through it is direct; a writable table's load stays.
+@test
+fn a_method_a_constant_table_holds_is_called_directly() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @area fn global noinline
+sym @vtbl data global
+sym @wtbl data global
+sym @f fn global
+sym @g fn global
+fn @area
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  v2 = iconst.i32 3
+  v3 = mul.i32 v1, v2
+  ret v3
+fn @f
+  sig (i32) -> i32
+  slot s0 size 4 align 2
+b0(v0: i32):
+  v1 = slotaddr s0
+  store v0, v1 align 2
+  v2 = symaddr @vtbl
+  v3 = load.ptr v2+8 align 3
+  v4 = call.ind.i32 v3(v1) : (ptr) -> i32
+  ret v4
+fn @g
+  sig (i32) -> i32
+  slot s0 size 4 align 2
+b0(v0: i32):
+  v1 = slotaddr s0
+  store v0, v1 align 2
+  v2 = symaddr @wtbl
+  v3 = load.ptr v2+8 align 3
+  v4 = call.ind.i32 v3(v1) : (ptr) -> i32
+  ret v4
+data @vtbl size 16 align 3 ro bytes 00000000000000000000000000000000 reloc 8 @area
+data @wtbl size 16 align 3 bytes 00000000000000000000000000000000 reloc 8 @area
+)",
+    );
+    let f = text_of(&a, "f");
+    assert(f.contains("call.i32 @area") && !f.contains("load.ptr"), f.as_str());
+    let g = text_of(&a, "g");
+    assert(g.contains("call.ind") && g.contains("load.ptr"), g.as_str());
+    let x: []u64 = [7];
+    same_result(&b, &a, "f", x, 21);
+}
