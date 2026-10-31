@@ -863,10 +863,17 @@ extend Live {
             if t.op != O_AND && t.op != O_OR || t.ty != T_I8 || self.pfold[i] || self.count[i] == 0 {
                 continue;
             }
-            let na = self.conj_part(b, t.a);
-            let nb = self.conj_part(b, t.b);
+            let mut na = self.conj_part(b, t.a);
+            let mut nb = self.conj_part(b, t.b);
             let leaf_a = na == 1 && b.insts[t.a as usize].op == O_ICMP;
             let leaf_b = nb == 1 && b.insts[t.b as usize].op == O_ICMP;
+            // A comparison of a folded operand (a `tst`) starts the chain, before a comparison the other
+            // side is: the generator compares it first (`conj_flags`).
+            if na == 0 && leaf_b && self.tst_leaf(b, t.a) {
+                na = 1;
+            } else if nb == 0 && leaf_a && self.tst_leaf(b, t.b) {
+                nb = 1;
+            }
             if na == 0 || nb == 0 || !leaf_a && !leaf_b || na + nb > CCMP_MAX {
                 continue;
             }
@@ -875,6 +882,16 @@ extend Live {
             self.pfold[t.b as usize] = true;
             self.pfold[i] = self.cnd[i] == self.count[i];
         }
+    }
+
+    // Whether `v` is an equality with 0 of an `and` `FOLD_TST` folds, which this use alone reads: a chain's
+    // first comparison (`conj_folds`).
+    fn tst_leaf(self: &Self, b: &Body, v: Value) bool {
+        if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.count[v as usize] != 1 || self.pfold[v as usize] {
+            return false;
+        }
+        let t = b.insts[v as usize];
+        return t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (t.a & (VPARAM | VFLAG)) == 0 && self.pfold[t.a as usize] && b.insts[t.a as usize].op == O_AND;
     }
 
     // Whether `s` is a shift of `bits` bits by a constant below them, read once and not folded yet: an

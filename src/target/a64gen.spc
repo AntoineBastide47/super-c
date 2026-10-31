@@ -476,8 +476,9 @@ extend Gen {
         let bits = type_bits(self.vt(v), self.ptr);
         // A scalar float takes a v register.
         let fv = self.vt(v) == T_F32 || self.vt(v) == T_F64;
-        // A comparison's 0 or 1 (`cset`) fills its register whatever its width.
-        let flag = b.insts[v as usize].op == O_ICMP || b.insts[v as usize].op == O_FCMP;
+        // A comparison's 0 or 1 (`cset`), or a chain of them (`lv::FOLD_CCMP`), fills its register whatever its
+        // width.
+        let flag = b.insts[v as usize].op == O_ICMP || b.insts[v as usize].op == O_FCMP || self.lv.conj[v as usize] != 0;
         if v + 1 >= bk.start + bk.len || self.lv.uses[v as usize] != 1 || self.lv.end[v as usize] != self.pos || !is_int(
             self.vt(v),
         ) && self.vt(v) != T_PTR && !fv || bits < 32 && !flag || bits > 64 || self.va[v as usize].home != H_NONE {
@@ -3345,7 +3346,12 @@ extend Gen {
     fn conj_flags(self: &mut Self, v: Value) u32 {
         let t = self.b().insts[v as usize];
         let b_leaf = self.lv.conj[t.b as usize] == 0;
-        let (first, leaf) = if b_leaf {
+        // A `tst` (a comparison of a folded `and`) compares first: no conditional comparison tests bits.
+        let b_tst = (t.b & (VPARAM | VFLAG)) == 0 && {
+            let x = self.b().insts[t.b as usize];
+            (x.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[x.a as usize]
+        };
+        let (first, leaf) = if b_leaf && !b_tst {
             (t.a, t.b)
         } else {
             (t.b, t.a)

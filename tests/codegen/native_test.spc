@@ -2547,6 +2547,44 @@ b0(v0: i64):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// `and`s and `or`s of a bit test and a comparison (arm64: `tst` then `ccmp`), the bit test on either side,
+// and a chain's result returned in place.
+@test
+fn chains_that_start_with_a_bit_test_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @pow2 fn global
+sym @either fn global
+fn @pow2
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 1
+  v3 = icmp.ne v0, v1
+  v4 = sub.i32 v0, v2
+  v5 = and.i32 v0, v4
+  v6 = icmp.eq v5, v1
+  v7 = and.i8 v3, v6
+  ret v7
+fn @either
+  sig (i64, i64) -> i8
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 7
+  v3 = iconst.i64 0
+  v4 = iconst.i64 100
+  v5 = and.i64 v0, v2
+  v6 = icmp.ne v5, v3
+  v7 = icmp.sgt v1, v4
+  v8 = or.i8 v6, v7
+  ret v8
+)";
+    let drv = "#include <stdint.h>\nuint8_t pow2(uint32_t);\nuint8_t either(int64_t, int64_t);\nint main(void) {\n  if (pow2(0) != 0 || pow2(1) != 1 || pow2(64) != 1 || pow2(96) != 0 || pow2(0x80000000u) != 1) return 1;\n  if (either(8, 5) != 0 || either(9, 5) != 1 || either(8, 101) != 1 || either(16, -5) != 0) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // Bit reversals of 8, 16, 32 and 64 bits (arm64 `rbit`, shifted down for the narrow ones).
 @test
 fn bit_reversals_run() {
