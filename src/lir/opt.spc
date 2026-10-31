@@ -56,6 +56,8 @@ const UB_DEPTH: u32 = 4;
 const MAX_SELECTS: u32 = 2;
 // The instructions but constants an if-conversion moves out of its two sides (`Opt::speculate`).
 const SPEC_MAX: u32 = 4;
+// `ConstSlot::find` follows address chains at most CONST_PASSES deep.
+const CONST_PASSES: u32 = 8;
 // `bit_set` takes at most SET_MAX comparisons.
 const SET_MAX: usize = 16;
 const MIN_DEPTH: u32 = 3;
@@ -6680,6 +6682,7 @@ struct Scratch {
 extend Run {
     /// The job graph of `pk`'s bodies under `cf`; `pk` keeps no body until `finish`.
     pub(package) fn new(pk: &mut Package, sealed: &Vector<bool>, cf: Config) Run {
+        direct_calls(pk);
         let bodies = replace(&mut pk.bodies, Vector::<Body>::new());
         let n = bodies.len();
         let held = if pk.held.body == NONE {
@@ -6946,7 +6949,8 @@ extend Run {
         g.get_mut().push(sc);
     }
 
-    /// Give the bodies back to `pk`, the package `new` took them from, in their final forms.
+    /// Give the bodies back to `pk`, the package `new` took them from, in their final forms, their constant
+    /// slots in read-only data (`const_slots`).
     pub(package) fn finish(self: &mut Self, pk: &mut Package) {
         for j in 0..self.finals.len() {
             let f = replace(&mut self.finals[j], Option::<Body>::None);
@@ -6956,6 +6960,7 @@ extend Run {
             }
         }
         pk.bodies = replace(&mut self.bodies, Vector::<Body>::new());
+        const_slots(pk);
     }
 
     /// After `finish`, the form of body `k` its callers inlined: the one before the loop transforms and
@@ -7011,6 +7016,264 @@ pub(package) fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
         r.job(r.order[k]);
     }
     r.finish(pk);
+}
+
+// At most CONST_SLOT_BYTES bytes of a slot go to read-only data (`const_slots`).
+const CONST_SLOT_BYTES: u32 = 4096;
+// `const_slot`'s offset of an address the slot gives at a variable place, and of a value it does not give.
+const OFF_VAR: u64 = 0xFFFFFFFFFFFFFFFE;
+const OFF_NONE: u64 = 0xFFFFFFFFFFFFFFFF;
+
+// Place each slot of the optimized bodies that only constants of disjoint bytes are stored into, and whose
+// address only those stores and loads read (through offsets and indices), in read-only data of its own:
+// the code loads from it rather than store the constants at each call (a constant local array; LLVM
+// promotes such an alloca to a constant global). A byte no store writes is 0, which a read of it before
+// any store, undefined, may give. The stores become unused constants.
+fn const_slots(pk: &mut Package) {
+    let held = if pk.held.body == NONE {
+        pk.bodies.len()
+    } else {
+        pk.held.body as usize
+    };
+    let mut owner = Vector::<u32>::with_capacity(pk.bodies.len());
+    for _ in 0..pk.bodies.len() {
+        owner.push(NONE);
+    }
+    for s in 0..pk.syms.len() {
+        let y = pk.syms[s];
+        if y.kind == SK_FUNC && y.def != NONE {
+            owner[y.def as usize] = s as u32;
+        }
+    }
+    let mut cs = ConstSlot {
+        slot: Vector::<u32>::new(),
+        off: Vector::<u64>::new(),
+        bad: Vector::<bool>::new(),
+        has: Vector::<bool>::new(),
+        adds: Vector::<u32>::new(),
+        us: Vector::<Value>::new(),
+        es: Vector::<u32>::new(),
+        stores: Vector::<u32>::new(),
+        bytes: Vector::<u8>::new(),
+        set: Vector::<bool>::new(),
+    };
+    for k in 0..held {
+        if owner[k] == NONE || pk.bodies[k].slots.len() == 0 || !cs.scan(&pk.bodies[k]) {
+            continue;
+        }
+        for s in 0..pk.bodies[k].slots.len() {
+            if !cs.fill_bytes(&pk.bodies[k], s as u32, pk.ptr_bytes) {
+                continue;
+            }
+            let o = pk.syms[owner[k] as usize];
+            let name = format("{}.const{}", pk.spell(o.name), s);
+            let d = pk.add_symbol(&name, SK_DATA, SL_LOCAL);
+            if d == NONE {
+                continue;
+            }
+            pk.syms.index_mut(d as usize).unit = o.unit;
+            pk.syms.index_mut(d as usize).own = o.own;
+            let sl = pk.bodies[k].slots[s];
+            let none: []Reloc = [];
+            if !pk.add_data(d, sl.size, sl.align_log2, true, &cs.bytes, none) {
+                continue;
+            }
+            let b = pk.bodies.index_mut(k);
+            let r = b.ref_sym(d);
+            for i in 0..b.insts.len() {
+                let t = b.insts[i];
+                if t.op == O_SLOTADDR && t.a == s as u32 {
+                    b.insts[i] = Inst { op: O_SYMADDR, ty: T_PTR, aux: 0, a: r, b: 0, c: VNONE };
+                } else if t.op == O_STORE && cs.slot[i] == s as u32 {
+                    b.insts[i] = iconst(T_I8, 0);
+                }
+            }
+            b.slots.index_mut(s).size = 0;
+            b.slots.index_mut(s).align_log2 = 0;
+        }
+    }
+}
+
+// `const_slots`'s scratch, per body: per instruction the slot an address it gives is into (`slot`, NONE for
+// none; a store's, its address's) and the offset into it (`off`, OFF_VAR for a variable one), per slot
+// whether something but stores of constants and loads reads its address (`bad`) and whether a constant
+// store writes it (`has`); the slot addresses and offsets (`adds`), operands, edges, the constant stores;
+// per slot at hand its bytes and which are stored.
+struct ConstSlot {
+    slot: Vector<u32>,
+    off: Vector<u64>,
+    bad: Vector<bool>,
+    has: Vector<bool>,
+    adds: Vector<u32>,
+    us: Vector<Value>,
+    es: Vector<u32>,
+    stores: Vector<u32>,
+    bytes: Vector<u8>,
+    set: Vector<bool>,
+}
+
+extend ConstSlot {
+    // The slots of `b` and the addresses they give, each instruction read a few times: whether a slot is
+    // stored into with constants and read by loads alone (not `bad`).
+    fn scan(self: &mut Self, b: &Body) bool {
+        let n = b.insts.len();
+        // A slot read at constant offsets alone became values (`lir::promote`): a table has an index. Most
+        // bodies have no constant store into a slot nor an indexed slot address: one look at each
+        // instruction tells; the slots' addresses and the offsets kept for the passes below.
+        let mut cstore = false;
+        let mut indexed = false;
+        self.adds.truncate(0);
+        for i in 0..n {
+            let t = b.insts[i];
+            if t.op == O_STORE {
+                cstore = cstore || (t.b & (VPARAM | VFLAG)) == 0 && (b.insts[t.b as usize].op == O_ICONST || b.insts[t.b as usize].op == O_FCONST) && (t.a & (VPARAM | VFLAG)) == 0 && (b.insts[t.a as usize].op == O_SLOTADDR || b.insts[t.a as usize].op == O_PTRADD);
+            } else if t.op == O_SLOTADDR || t.op == O_PTRADD {
+                indexed = indexed || t.op == O_PTRADD && t.b != VNONE && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_SLOTADDR;
+                self.adds.push(i as u32);
+            }
+        }
+        if !cstore || !indexed {
+            return false;
+        }
+        fill(&mut self.slot, n, NONE);
+        fill(&mut self.off, n, 0);
+        fill(&mut self.bad, b.slots.len(), false);
+        for q in 0..self.adds.len() {
+            let i = self.adds[q] as usize;
+            let t = b.insts[i];
+            if t.op == O_SLOTADDR && t.a as usize < b.slots.len() {
+                let sz = b.slots[t.a as usize].size;
+                if sz == 0 || sz > CONST_SLOT_BYTES {
+                    self.bad[t.a as usize] = true;
+                } else {
+                    self.slot[i] = t.a;
+                }
+            }
+        }
+        // The addresses offsets and indices give, a chain at most CONST_PASSES deep (a use may come before
+        // its definition in the instruction order); a deeper one makes the body's slots stay.
+        let mut changed = true;
+        let mut pass: u32 = 0;
+        while changed {
+            if pass == CONST_PASSES {
+                return false;
+            }
+            pass += 1;
+            changed = false;
+            for q in 0..self.adds.len() {
+                let i = self.adds[q] as usize;
+                let t = b.insts[i];
+                if t.op != O_PTRADD || self.slot[i] != NONE || !self.gives(t.a) {
+                    continue;
+                }
+                let base = self.off[t.a as usize];
+                self.slot[i] = self.slot[t.a as usize];
+                self.off[i] = if t.b != VNONE || base == OFF_VAR {
+                    OFF_VAR
+                } else {
+                    base.wrapping_add(((t.c as i32) as i64) as u64)
+                };
+                changed = true;
+            }
+        }
+        self.stores.truncate(0);
+        for i in 0..n {
+            let t = b.insts[i];
+            if t.op >= O_JMP && t.op <= O_SWITCH {
+                b.succ_edges(t, &mut self.es);
+                for q in 0..self.es.len() {
+                    for x in 0..b.edge_nargs(self.es[q]) {
+                        let v = b.edge_arg(self.es[q], x);
+                        if self.gives(v) {
+                            self.bad[self.slot[v as usize] as usize] = true;
+                        }
+                    }
+                }
+            }
+            if t.op == O_SLOTADDR {
+                continue;
+            }
+            lv::uses(b, t, &mut self.us);
+            // A load's or an offset's address, a store's address (of a constant at a known offset, not
+            // volatile): kept; any other read of a slot's address makes the slot stay.
+            let mut keep = VNONE;
+            if t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 || t.op == O_PTRADD {
+                keep = t.a;
+            } else if t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 && self.gives(t.a) && self.off[t.a as usize] != OFF_VAR && (t.b & (VPARAM | VFLAG)) == 0 && (b.insts[t.b as usize].op == O_ICONST || b.insts[t.b as usize].op == O_FCONST) {
+                keep = t.a;
+                self.slot[i] = self.slot[t.a as usize];
+                self.off[i] = self.off[t.a as usize];
+                self.stores.push(i as u32);
+            }
+            for q in 0..self.us.len() {
+                let v = self.us[q];
+                if self.gives(v) && (v != keep || q != 0) {
+                    self.bad[self.slot[v as usize] as usize] = true;
+                }
+            }
+            if t.op == O_STORE && keep == VNONE && self.gives(t.a) {
+                self.bad[self.slot[t.a as usize] as usize] = true;
+            }
+        }
+        // A slot without a constant store stays.
+        fill(&mut self.has, b.slots.len(), false);
+        for q in 0..self.stores.len() {
+            self.has[self.slot[self.stores[q] as usize] as usize] = true;
+        }
+        let mut any = false;
+        for s in 0..b.slots.len() {
+            any = any || self.has[s] && !self.bad[s];
+        }
+        return any;
+    }
+
+    // Slot `s`'s bytes from its constant stores (`scan`), when it is not `bad`, has one, and none overlaps
+    // another or passes its end (constants of `ptr`-byte pointers aside). Whether it goes to data.
+    fn fill_bytes(self: &mut Self, b: &Body, s: u32, ptr: u32) bool {
+        if self.bad[s as usize] || !self.has[s as usize] {
+            return false;
+        }
+        let size = b.slots[s as usize].size;
+        self.bytes.truncate(0);
+        self.set.truncate(0);
+        for _ in 0..size {
+            self.bytes.push(0);
+            self.set.push(false);
+        }
+        let mut n: u32 = 0;
+        for q in 0..self.stores.len() {
+            let i = self.stores[q] as usize;
+            let t = b.insts[i];
+            if self.slot[i] != s {
+                continue;
+            }
+            let c = b.insts[t.b as usize];
+            let ty = c.ty;
+            if !(is_int(ty) && ty != T_I128 || ty == T_F32 || ty == T_F64) {
+                return false;
+            }
+            let w = type_bytes(ty, ptr) as u64;
+            let at = self.off[i].wrapping_add(((t.c as i32) as i64) as u64);
+            if at >= size as u64 || at + w > size as u64 {
+                return false;
+            }
+            let bits = c.b as u64 << 32 | c.a as u64;
+            for q in 0..w {
+                if self.set[(at + q) as usize] {
+                    return false;
+                }
+                self.set[(at + q) as usize] = true;
+                self.bytes[(at + q) as usize] = (bits >> 8 * q) as u8;
+            }
+            n += 1;
+        }
+        return n != 0;
+    }
+
+    // Whether value `v` is an address a slot gives.
+    fn gives(self: &Self, v: Value) bool {
+        return (v & (VPARAM | VFLAG)) == 0 && v != VNONE && self.slot[v as usize] != NONE;
+    }
 }
 
 // The direct calls of the bodies (`Run::new`): per body, its range of `callee` (in instruction order; a
@@ -8840,6 +9103,37 @@ const fn other_edge(t: Inst, e: u32) u32 {
     } else {
         t.b
     };
+}
+
+// Make each indirect call of `pk`'s bodies through the address of a function whose signature the call fits
+// a direct call of it, before the bodies' calls order their optimization: the inliner may inline it (a
+// local binding of a function called; LLVM's InstCombine).
+fn direct_calls(pk: &mut Package) {
+    // (body, instruction, the body's symbol number), found before any changes.
+    let mut fix = Vector::<(u32, u32, u32)>::new();
+    for k in 0..pk.bodies.len() {
+        let b = &pk.bodies[k];
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if t.op != O_CALLIND || (t.a & (VPARAM | VFLAG)) != 0 {
+                continue;
+            }
+            let f = b.insts[t.a as usize];
+            if f.op != O_SYMADDR || f.b != 0 {
+                continue;
+            }
+            let sy = pk.syms[b.syms[f.a as usize] as usize];
+            if sy.kind == SK_FUNC && sy.def != NONE && lv::call_fits(&pk.bodies[sy.def as usize], b, t.b) {
+                fix.push((k as u32, i as u32, f.a));
+            }
+        }
+    }
+    for q in 0..fix.len() {
+        let (k, i, s) = fix[q];
+        let t = pk.bodies.index_mut(k as usize).insts.index_mut(i as usize);
+        t.op = O_CALL;
+        t.a = s;
+    }
 }
 
 // At most RET_EDGES branch edges of a body return through blocks of their own (`ret_edges`).

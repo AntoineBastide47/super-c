@@ -391,6 +391,20 @@ fn small_parameters_a_loop_compares_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A float absolute value by a select (`x < 0 ? -x : x`, x86-64 `maxsd` of `-x` and `x`) keeps -0 and NaN as
+// the select does; a trailing-zero count of 32 or 64 bits counts the width for 0 (x86-64 `tzcnt` into the
+// width preset).
+@test
+fn float_absolute_selects_and_trailing_zero_counts_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @abs64 fn global\nsym @abs32 fn global\nsym @ctz32 fn global\nsym @ctz64 fn global\nfn @abs64\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = fconst.f64 0x0\n  v2 = fcmp.olt v0, v1\n  v3 = fneg.f64 v0\n  v4 = select.f64 v2, v3, v0\n  ret v4\nfn @abs32\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = fconst.f32 0x80000000\n  v2 = fcmp.olt v0, v1\n  v3 = fneg.f32 v0\n  v4 = select.f32 v2, v3, v0\n  ret v4\nfn @ctz32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = ctz.i32 v0\n  ret v1\nfn @ctz64\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = ctz.i64 v0\n  ret v1\n";
+    let drv = "#include <math.h>\n#include <string.h>\n#include <stdint.h>\ndouble abs64(double);\nfloat abs32(float);\nuint32_t ctz32(uint32_t);\nuint64_t ctz64(uint64_t);\nstatic int bits64(double x, double y) { uint64_t a, b; memcpy(&a, &x, 8); memcpy(&b, &y, 8); return a == b; }\nstatic int bits32(float x, float y) { uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4); return a == b; }\nint main(void) {\n  double v[9] = {0.0, -0.0, 1.5, -1.5, INFINITY, -INFINITY, NAN, -NAN, -1e-310};\n  for (int i = 0; i < 9; i++) {\n    double x = v[i];\n    float f = (float)x;\n    if (!bits64(abs64(x), x < 0.0 ? -x : x)) return 1;\n    if (!bits32(abs32(f), f < -0.0f ? -f : f)) return 2;\n  }\n  if (ctz32(0) != 32 || ctz64(0) != 64) return 3;\n  for (int k = 0; k < 64; k++) {\n    uint64_t x = (0x8000000000000000ull >> k) | (0x8000000000000000ull >> (k / 2));\n    if (ctz64(x) != (uint64_t)__builtin_ctzll(x)) return 4;\n    if ((uint32_t)x != 0 && ctz32((uint32_t)x) != (uint32_t)__builtin_ctz((uint32_t)x)) return 5;\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // A 64-bit product of two 32-bit extensions, or of one and a constant within its range, is one widening
 // multiply (arm64 `umull`, `smull`; not with a constant past the range, `umulb`); a sum,
 // difference or bitwise operation of a value shifted by a constant takes it as a shifted operand, but

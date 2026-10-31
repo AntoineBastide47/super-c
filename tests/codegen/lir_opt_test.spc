@@ -5374,3 +5374,111 @@ b3:
     let z: []u64 = [1];
     same_result(&b, &a, "f", z, 5);
 }
+
+// An indirect call through a function's address is a direct call of it, which inlines; not when the call's
+// signature differs from the function's (`other`).
+@test
+fn calls_through_a_known_address_are_direct() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @add1 fn global
+sym @f fn global
+sym @other fn global
+fn @add1
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 1
+  v2 = add.i32 v0, v1
+  ret v2
+fn @f
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = symaddr @add1
+  v2 = call.ind.i32 v1(v0) : (i32) -> i32
+  ret v2
+fn @other
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @add1
+  v2 = call.ind.i64 v1(v0) : (i64) -> i64
+  ret v2
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(!t.contains("call"), t.as_str());
+    let x: []u64 = [41];
+    same_result(&b, &a, "f", x, 42);
+    let o = text_of(&a, "other");
+    assert(o.contains("call.ind"), o.as_str());
+}
+
+// A slot only constants of disjoint bytes are stored into, which only loads read, is read-only data of its
+// own; not one two stores overlap in (`twice`), nor one whose address a call takes (`out`).
+@test
+fn constant_slots_become_read_only_data() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @keep fn global noinline
+sym @lut fn global
+sym @twice fn global
+sym @out fn global
+fn @keep
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  ret v1
+fn @lut
+  sig (i64) -> i32
+  slot s0 size 16 align 2
+b0(v0: i64):
+  v1 = iconst.i64 4294967299
+  v2 = iconst.i64 25769803778
+  v3 = slotaddr s0
+  v4 = iconst.i64 3
+  v5 = and.i64 v0, v4
+  store v1, v3 align 2
+  store v2, v3+8 align 2
+  v6 = ptradd v3, v5 * 4
+  v7 = load.i32 v6 align 2
+  ret v7
+fn @twice
+  sig (i64) -> i32
+  slot s0 size 8 align 2
+b0(v0: i64):
+  v1 = iconst.i64 4294967299
+  v2 = iconst.i32 7
+  v3 = slotaddr s0
+  v4 = iconst.i64 1
+  v5 = and.i64 v0, v4
+  store v1, v3 align 2
+  store v2, v3+4 align 2
+  v6 = ptradd v3, v5 * 4
+  v7 = load.i32 v6 align 2
+  ret v7
+fn @out
+  sig () -> i32
+  slot s0 size 4 align 2
+b0:
+  v0 = iconst.i32 5
+  v1 = slotaddr s0
+  store v0, v1 align 2
+  v2 = call.i32 @keep(v1) : (ptr) -> i32
+  ret v2
+)",
+    );
+    let t = text_of(&a, "lut");
+    assert(t.contains("symaddr") && !t.contains("store") && !t.contains("slotaddr"), t.as_str());
+    let want: [u64; 4] = [3, 1, 2, 6];
+    for i in 0..4 {
+        let x: []u64 = [i as u64 + 4];
+        same_result(&b, &a, "lut", x, want[i]);
+    }
+    let w = text_of(&a, "twice");
+    assert(w.contains("slotaddr") || !w.contains("symaddr"), w.as_str());
+    let one: []u64 = [1];
+    same_result(&b, &a, "twice", one, 7);
+    let o = text_of(&a, "out");
+    assert(!o.contains("symaddr @out"), o.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "out", none, 5);
+}

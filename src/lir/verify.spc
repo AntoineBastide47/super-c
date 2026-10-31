@@ -756,21 +756,7 @@ extend Verifier {
             let cb = &p.bodies[sy.def as usize];
             let cs = cb.sig as usize;
             let ks = t.b as usize;
-            let cn = cb.pool[cs];
-            let cflags = cb.pool[cs + 1];
-            let kn = b.pool[ks];
-            let kfixed = b.pool[ks + 1] & ~SIG_VARIADIC;
-            let cvar = (cflags & SIG_VARIADIC) != 0;
-            let mut ok = same_type(cb, cb.pool[cs + 2], b, b.pool[ks + 2]);
-            ok = ok && if cvar {
-                kfixed == cn
-            } else {
-                kn == cn
-            };
-            for k in 0..cn {
-                ok = ok && k < kn && same_type(cb, cb.pool[cs + 3 + k as usize], b, b.pool[ks + 3 + k as usize]);
-            }
-            if !ok {
+            if !call_fits(cb, b, t.b) {
                 let _ = self.fail_at(name, b, i as u32, "a call of its callee's signature");
                 self.err.format_into(" (the call: ");
                 push_sig(b, ks, &mut self.err);
@@ -1404,6 +1390,26 @@ const fn conv_ok(op: u8, from: u8, to: u8, ptr: u32) bool {
 
 // Whether signature type `x` of body `bx` and `y` of `by` are one type: a scalar type, or two
 // aggregate layouts of one size, alignment and leaves.
+/// Whether a call of `b` with signature `ks` (a pool index) fits callee body `cb`'s signature: the same
+/// result and parameter types, the variadic arguments past the fixed ones.
+pub(package) fn call_fits(cb: &Body, b: &Body, ks: u32) bool {
+    let cs = cb.sig as usize;
+    let k = ks as usize;
+    let cn = cb.pool[cs];
+    let kn = b.pool[k];
+    let kfixed = b.pool[k + 1] & ~SIG_VARIADIC;
+    let mut ok = same_type(cb, cb.pool[cs + 2], b, b.pool[k + 2]);
+    ok = ok && if (cb.pool[cs + 1] & SIG_VARIADIC) != 0 {
+        kfixed == cn
+    } else {
+        kn == cn
+    };
+    for q in 0..cn {
+        ok = ok && q < kn && same_type(cb, cb.pool[cs + 3 + q as usize], b, b.pool[k + 3 + q as usize]);
+    }
+    return ok;
+}
+
 const fn same_type(bx: &Body, x: u32, by: &Body, y: u32) bool {
     if (x & AGG) == 0 || (y & AGG) == 0 {
         return x == y;

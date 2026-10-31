@@ -53,6 +53,8 @@ extern "C" {
     fn c_b_bfi(x: u32, v: u32) u32;
     fn c_b_andn(x: u64, y: u64) u64;
     fn c_b_sbfx(x: u32) i32;
+    fn c_f_hash(s: *const u8, n: usize) u32;
+    fn c_m_count(s: *const u8, n: usize, c: u8) usize;
 }
 
 @arch(x86_64)
@@ -99,6 +101,8 @@ extern "C" {
     fn c_b_bfi(x: u32, v: u32) u32;
     fn c_b_andn(x: u64, y: u64) u64;
     fn c_b_sbfx(x: u32) i32;
+    fn c_f_hash(s: *const u8, n: usize) u32;
+    fn c_m_count(s: *const u8, n: usize, c: u8) usize;
 }
 
 // Gap 1: recursion whose result an associative operation combines with the recursive call.
@@ -286,6 +290,27 @@ fn b_andn(x: u64, y: u64) u64 {
 @noinline
 fn b_sbfx(x: u32) i32 {
     return (x << 20) as i32 >> 24;
+}
+
+// Gaps 7, 28, 29 and 39: loops over bytes, a serial recurrence and a count of matches.
+@noinline
+fn f_hash(s: []u8) u32 {
+    let mut h: u32 = 2166136261;
+    for k in 0..s.len() {
+        h = (h ^ s[k] as u32).wrapping_mul(16777619);
+    }
+    return h;
+}
+
+@noinline
+fn m_count(s: []u8, c: u8) usize {
+    let mut n: usize = 0;
+    for k in 0..s.len() {
+        if s[k] == c {
+            n += 1;
+        }
+    }
+    return n;
 }
 
 // Gap 8: callee-saved registers around sibling calls.
@@ -979,4 +1004,27 @@ pub fn gaps_switch(_b: &mut bench::Bencher) {
             measure(&xs, l, |x: u32| (unsafe c_b_sbfx(x)) as u64),
         );
     }
+}
+
+/// Gaps 7, 28, 29 and 39 (byte loops): `f_hash` and `m_count` on the first 1 to 64 bytes of a buffer.
+@bench(log_results = false)
+pub fn gaps_loops(_b: &mut bench::Bencher) {
+    warm();
+    let xs = inputs(0xFFFFFFFF, true);
+    let mut buf: [u8; 64] = [0; 64];
+    for i in 0..64 {
+        buf[i] = (i * 37 + 11) as u8;
+    }
+    row(
+        "f_hash",
+        "random",
+        time(&xs, |x: u32| f_hash(buf[0..(x % 64 + 1) as usize]) as u64),
+        time(&xs, |x: u32| (unsafe c_f_hash(&buf[0], (x % 64 + 1) as usize)) as u64),
+    );
+    row(
+        "m_count",
+        "random",
+        time(&xs, |x: u32| m_count(buf[0..(x % 64 + 1) as usize], x as u8) as u64),
+        time(&xs, |x: u32| (unsafe c_m_count(&buf[0], (x % 64 + 1) as usize, x as u8)) as u64),
+    );
 }

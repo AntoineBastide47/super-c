@@ -37,6 +37,8 @@ const V0: u8 = 16; // register number of xmm0: general registers are 0..15
 // Scratch registers; the vector ones are the ABI's (`Gen.vs0`, `Gen.vs1`).
 const S0: u8 = 10; // r10
 const S1: u8 = 11; // r11
+// A division looks this many instructions ahead for its remainder (`int_op`).
+const DIV_REACH: u32 = 8;
 
 // Register sets (bit `r` for register number `r`) and vector scratch registers, per ABI: System V
 // saves no vector register; Microsoft x64 saves rsi, rdi and xmm6..xmm15, so its scratch ones are xmm4
@@ -303,6 +305,9 @@ pub(package) struct Gen {
     tails: Vector<u64>,
     tail_ok: bool,
     tail_ret: u32,
+    // The remainder the division before it computed (`int_op`) and the product it reads, NONE for none.
+    div_pair: u32,
+    div_mul: u32,
     rels: Vector<CRel>,
     osym: Vector<u32>, // per package symbol, its object symbol in this generator's object (NONE until used)
     // Calls.
@@ -448,6 +453,8 @@ extend Gen {
             tails: Vector::<u64>::new(),
             tail_ok: false,
             tail_ret: NONE,
+            div_pair: NONE,
+            div_mul: NONE,
             rels: Vector::<CRel>::new(),
             osym: Vector::<u32>::new(),
             lay: ab::CallLayout::new(),
@@ -1561,6 +1568,29 @@ extend Gen {
         } else {
             0xF3
         };
+        // olt(x, 0) ? -x : x = max(-x, x): maxs gives its second operand for equal zeros and for a NaN, as
+        // the select gives x (LLVM's lowering of a float absolute value that keeps -0).
+        let k = c.b;
+        let zero = (k & (VPARAM | VFLAG)) == 0 && self.b().insts[k as usize].op == O_FCONST && self.b().insts[k as usize].a == 0 && (self.b().insts[k as usize].b & 0x7FFFFFFF) == 0;
+        let nb = t.b;
+        if c.aux == C_OLT && zero && t.c == c.a && (nb & (VPARAM | VFLAG)) == 0 && self.b().insts[nb as usize].op == O_FNEG && self.b().insts[nb as usize].a == c.a {
+            let rn = self.reg(nb);
+            let rd = self.def(i);
+            let ra = self.reg(c.a);
+            let m = if rd == ra {
+                self.tmp(true)
+            } else {
+                rd
+            };
+            if m != rn {
+                self.c.vmov(m - V0, rn - V0);
+            }
+            self.c.sse_rr(pf, 0x0F5F, m - V0, ra - V0);
+            if m != rd {
+                self.c.vmov(rd - V0, m - V0);
+            }
+            return;
+        }
         let ra = self.reg(c.a);
         let rb = self.reg(c.b);
         let ext = c.aux == C_OLT || c.aux == C_OGT;
@@ -2471,6 +2501,8 @@ extend Gen {
         self.epi.truncate(0);
         self.tails.truncate(0);
         self.tail_ret = NONE;
+        self.div_pair = NONE;
+        self.div_mul = NONE;
         self.rels.truncate(0);
         self.free_slots.truncate(0);
         self.taken.truncate(0);
@@ -4069,6 +4101,13 @@ extend Gen {
             self.popcount(rd, r, sz);
             return;
         }
+        // `tzcnt` (bsf with F3) into the width preset: the count where the processor has it, else bsf,
+        // which every x86-64 processor makes keep the destination for 0 (as clang relies on).
+        if t.op == O_CTZ && bits >= 32 && rd != r {
+            self.c.mov_ri(rd, bits);
+            self.c.rr(0xF3, 0x0FBC, sz == 8, rd, r, false);
+            return;
+        }
         if t.op == O_CTZ {
             let mut src = r;
             if bits < 32 {
@@ -4128,6 +4167,9 @@ extend Gen {
         let op = t.op;
         if is_vec(ty) {
             return self.vec_arith(i, t);
+        }
+        if i == self.div_pair || i == self.div_mul {
+            return true; // the division before it gave the remainder
         }
         if self.lv.pfold[i as usize] {
             return true; // its use computes it (`lv::FOLD_*`)
@@ -4348,14 +4390,40 @@ extend Gen {
             sz,
             rb,
         );
+        let quot = op == O_SDIV || op == O_UDIV;
         self.result_in(
             i,
-            if op == O_SDIV || op == O_UDIV {
+            if quot {
                 x::RAX
             } else {
                 x::RDX
             },
         );
+        // The remainder `a - q * b` (`lir::opt`'s form of `a % b` beside `a / b`) later in the block, its
+        // product read by the difference alone: rdx, which the division gave (its product is no code).
+        let b = self.b();
+        let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
+        let end = (bk.start + bk.len - 1).min(i + 1 + DIV_REACH);
+        if quot {
+            for m in i + 1..end {
+                let u = b.insts[m as usize];
+                if u.op != O_MUL || u.ty != t.ty || !(u.a == i && u.b == t.b || u.b == i && u.a == t.b) || self.lv.uses[self.vx(
+                    m,
+                ) as usize] != 1 || self.lv.pfold[m as usize] {
+                    continue;
+                }
+                for s in m + 1..end {
+                    let w = b.insts[s as usize];
+                    if w.op == O_SUB && w.a == t.a && w.b == m && !self.lv.pfold[s as usize] {
+                        self.result_in(s, x::RDX);
+                        self.div_mul = m;
+                        self.div_pair = s;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
         return true;
     }
 
