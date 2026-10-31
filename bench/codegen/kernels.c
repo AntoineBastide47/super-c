@@ -1,5 +1,5 @@
-// The clang side of the code generation gap probes: each function is the C form of the probe
-// of the same name in gaps.spc, with a `c_` prefix. lib.sh archives it. The types are unsigned, so
+// The clang side of the code generation kernels: each function is the C form of the kernel of the same
+// name in codegen.spc, with a `c_` prefix. lib.sh archives it. The types are unsigned, so
 // overflow wraps as in Super-C's release and bench profiles.
 #include <stdbool.h>
 #include <stddef.h>

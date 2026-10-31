@@ -10,7 +10,11 @@
 // the dominator tree); a copy into the slot becomes loads of the source's fields, a copy out of it
 // stores of its fields, a copy between two promoted slots nothing. A field read where no store reaches
 // reads the zero of its type (the slot's bytes are unspecified there). A load or store of a vector field's
-// lane (of its lane type, at a lane's offset) reads it as `vextract` or sets it as `vinsert`.
+// lane (of its lane type, at a lane's offset) reads it as `vextract` or sets it as `vinsert`. An integer
+// load that other accesses overlap spans their fields (LLVM SROA's rewrite of a wide access over several
+// partitions): its fields' values combined in their little-endian places, a byte no field holds reading
+// 0. A field across its edge keeps the slot in memory. A wide store stays one: its fields would each take a
+// store where a copy reads them, and the walk forwards its bytes to narrower loads.
 //
 // Before that, a copy between two slots of its size whose source no instruction reads after it and whose
 // destination none uses before it (the copy in no cycle, the source's address passed nowhere it may stay
@@ -37,6 +41,7 @@ struct Acc {
     pub(package) off: i64,
     pub(package) size: i64,
     pub(package) ty: u8,
+    pub(package) kind: u8, // W_LOAD: an integer load that may span fields (`wide_kind`)
 }
 
 extend Acc as Copy {}
@@ -55,11 +60,17 @@ struct Copy {
 
 extend Copy as Copy {}
 
-// A field: a slot's bytes `off` to `off + type_bytes(ty)`.
+// A field: a slot's bytes `off` to `off + type_bytes(ty)`. In `build_fields`' scratch, an access, with its
+// `Acc.kind` and W_SPANS when it overlaps another access it is not the same field as.
 struct Fld {
     pub(package) off: i64,
     pub(package) ty: u8,
+    pub(package) w: u8,
 }
+
+// `Acc.kind` and `Fld.w`: an integer load; one that spans other fields.
+const W_LOAD: u8 = 1;
+const W_SPANS: u8 = 2;
 
 extend Fld as Copy {}
 
@@ -97,6 +108,7 @@ pub(package) struct Promoter {
     // of a vector field it accesses (NONE: the whole field), and what replaced a promoted load.
     fid: Vector<u32>,
     lane: Vector<u32>,
+    spanned: Vector<bool>, // per instruction, whether it is a load that spans fields (`spans`)
     repl: Vector<u32>,
     drop: Vector<bool>,
     // The dominance frontiers: block `k`'s are `df[df_at[k] .. df_at[k + 1]]`.
@@ -163,6 +175,7 @@ extend Promoter {
             xwords: Vector::<u64>::new(),
             fid: Vector::<u32>::new(),
             lane: Vector::<u32>::new(),
+            spanned: Vector::<bool>::new(),
             repl: Vector::<u32>::new(),
             drop: Vector::<bool>::new(),
             df_at: Vector::<u32>::new(),
@@ -586,7 +599,15 @@ extend Promoter {
         if op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 && self.slot_of(t.a) != NONE {
             let s = self.slot_of(t.a);
             self.cand[s as usize] = self.cand[s as usize] && reached;
-            self.accs.push(Acc { slot: s, off: self.doff[t.a as usize] + (t.c as i32) as i64, size: 0, ty: t.ty });
+            self.accs.push(
+                Acc {
+                    slot: s,
+                    off: self.doff[t.a as usize] + (t.c as i32) as i64,
+                    size: 0,
+                    ty: t.ty,
+                    kind: wide_kind(t.ty),
+                },
+            );
             return;
         }
         if op == O_STORE && (t.aux & MEM_VOLATILE) == 0 && self.slot_of(t.a) != NONE {
@@ -594,7 +615,13 @@ extend Promoter {
             self.cand[s as usize] = self.cand[s as usize] && reached;
             self.reject(t.b);
             self.accs.push(
-                Acc { slot: s, off: self.doff[t.a as usize] + (t.c as i32) as i64, size: 0, ty: b.type_of(t.b) },
+                Acc {
+                    slot: s,
+                    off: self.doff[t.a as usize] + (t.c as i32) as i64,
+                    size: 0,
+                    ty: b.type_of(t.b),
+                    kind: 0,
+                },
             );
             return;
         }
@@ -741,37 +768,55 @@ extend Promoter {
                 self.build_fields(b, true);
             }
         }
-        // The field of each load and store.
-        fill(&mut self.fid, b.insts.len(), NONE);
-        fill(&mut self.lane, b.insts.len(), NONE);
-        let mut any = false;
-        for s in 0..ns {
-            any = any || self.cand[s];
-        }
-        if !any {
-            return false;
-        }
-        for i in 0..b.insts.len() {
-            let t = b.insts[i];
-            if (t.op == O_LOAD || t.op == O_STORE) && (t.aux & MEM_VOLATILE) == 0 && self.slot_of(t.a) != NONE {
-                let s = self.slot_of(t.a);
-                if self.cand[s as usize] {
-                    let ty = if t.op == O_LOAD {
-                        t.ty
-                    } else {
-                        b.type_of(t.b)
-                    };
-                    let off = self.doff[t.a as usize] + (t.c as i32) as i64;
-                    self.fid[i] = self.field_at(s, off, ty);
-                    if self.fid[i] == NONE {
-                        let (f, k) = self.lane_at(s, off, ty);
-                        self.fid[i] = f;
-                        self.lane[i] = k;
+        // The field of each load and store, or whether it spans fields (`spanned`); a slot with a spanning
+        // access `spannable` refuses stays in memory, and the fields are built again. Each round drops a
+        // slot or ends.
+        for _ in 0..ns + 1 {
+            fill(&mut self.fid, b.insts.len(), NONE);
+            fill(&mut self.lane, b.insts.len(), NONE);
+            fill(&mut self.spanned, b.insts.len(), false);
+            let mut any = false;
+            for s in 0..ns {
+                any = any || self.cand[s];
+            }
+            if !any {
+                return false;
+            }
+            let mut dropped = false;
+            for i in 0..b.insts.len() {
+                let t = b.insts[i];
+                if (t.op == O_LOAD || t.op == O_STORE) && (t.aux & MEM_VOLATILE) == 0 && self.slot_of(t.a) != NONE {
+                    let s = self.slot_of(t.a);
+                    if self.cand[s as usize] {
+                        let ty = if t.op == O_LOAD {
+                            t.ty
+                        } else {
+                            b.type_of(t.b)
+                        };
+                        let off = self.doff[t.a as usize] + (t.c as i32) as i64;
+                        self.fid[i] = self.field_at(s, off, ty);
+                        if self.fid[i] == NONE {
+                            let (f, k) = self.lane_at(s, off, ty);
+                            self.fid[i] = f;
+                            self.lane[i] = k;
+                        }
+                        if self.fid[i] == NONE {
+                            if t.op == O_LOAD && wide_kind(ty) != 0 && self.spannable(s, off, size_of(ty, self.ptr)) {
+                                self.spanned[i] = true;
+                            } else {
+                                self.cand[s as usize] = false;
+                                dropped = true;
+                            }
+                        }
                     }
                 }
             }
+            if !dropped {
+                return true;
+            }
+            self.build_fields(b, true);
         }
-        return true;
+        return false;
     }
 
     // Add to slot `d`'s accesses the fields of slot `s` in bytes `so` to `so + n`, at `do`.
@@ -779,7 +824,7 @@ extend Promoter {
         for f in self.fat[s as usize]..self.fat[s as usize + 1] {
             let fl = self.flds[f as usize];
             if fl.off >= so && fl.off + size_of(fl.ty, self.ptr) <= so + n {
-                self.accs.push(Acc { slot: d, off: fl.off - so + dof, size: 0, ty: fl.ty });
+                self.accs.push(Acc { slot: d, off: fl.off - so + dof, size: 0, ty: fl.ty, kind: 0 });
             }
         }
     }
@@ -827,11 +872,11 @@ extend Promoter {
         self.mark.extend_copy(&self.fat);
         self.tmp.truncate(0);
         for _ in 0..self.accs.len() {
-            self.tmp.push(Fld { off: 0, ty: T_NONE });
+            self.tmp.push(Fld { off: 0, ty: T_NONE, w: 0 });
         }
         for a in 0..self.accs.len() {
             let ac = self.accs[a];
-            self.tmp[self.mark[ac.slot as usize] as usize] = Fld { off: ac.off, ty: ac.ty };
+            self.tmp[self.mark[ac.slot as usize] as usize] = Fld { off: ac.off, ty: ac.ty, w: ac.kind };
             self.mark[ac.slot as usize] += 1;
         }
         self.flds.truncate(0);
@@ -846,27 +891,11 @@ extend Promoter {
                     self.cand[s] = false;
                 } else {
                     sort_fields(&mut self.tmp, lo, hi);
-                    // Merge equal accesses; overlapping different ones reject the slot.
-                    for j in lo..hi {
-                        let f = self.tmp[j];
-                        let n = self.flds.len();
-                        // The same bytes as another type that converts to the field's: one field.
-                        if n > start && self.flds[n - 1].off == f.off && conv_op(f.ty, self.flds[n - 1].ty, self.ptr) != NO_CONV {
-                            continue;
-                        }
-                        // A lane of a vector field is part of it; a vector over lane 0 takes its place.
-                        if n > start && is_lane(self.flds[n - 1], f) {
-                            continue;
-                        }
-                        if n > start && self.flds[n - 1].off == f.off && is_lane(f, self.flds[n - 1]) {
-                            self.flds[n - 1] = f;
-                            continue;
-                        }
-                        if n > start && self.flds[n - 1].off + size_of(self.flds[n - 1].ty, self.ptr) > f.off {
-                            self.cand[s] = false;
-                            break;
-                        }
-                        self.flds.push(f);
+                    // Accesses that overlap otherwise span fields when they may (`spans`), else reject
+                    // the slot.
+                    if !self.merge(lo, hi, start) {
+                        self.flds.truncate(start);
+                        self.cand[s] = self.spans(lo, hi) && self.merge(lo, hi, start);
                     }
                 }
                 if self.cand[s] && gaps {
@@ -880,6 +909,64 @@ extend Promoter {
             at.push(self.flds.len() as u32);
         }
         self.fat = at;
+    }
+
+    // The fields of the accesses `tmp[lo .. hi]` (one slot's, sorted) but those marked W_SPANS, pushed from
+    // `flds[start]`: equal accesses merge. False at two that overlap otherwise.
+    fn merge(self: &mut Self, lo: usize, hi: usize, start: usize) bool {
+        for j in lo..hi {
+            let mut f = self.tmp[j];
+            if (f.w & W_SPANS) != 0 {
+                continue;
+            }
+            f.w = 0;
+            let n = self.flds.len();
+            // The same bytes as another type that converts to the field's: one field.
+            if n > start && self.flds[n - 1].off == f.off && conv_op(f.ty, self.flds[n - 1].ty, self.ptr) != NO_CONV {
+                continue;
+            }
+            // A lane of a vector field is part of it; a vector over lane 0 takes its place.
+            if n > start && is_lane(self.flds[n - 1], f) {
+                continue;
+            }
+            if n > start && self.flds[n - 1].off == f.off && is_lane(f, self.flds[n - 1]) {
+                self.flds[n - 1] = f;
+                continue;
+            }
+            if n > start && self.flds[n - 1].off + size_of(self.flds[n - 1].ty, self.ptr) > f.off {
+                return false;
+            }
+            self.flds.push(f);
+        }
+        return true;
+    }
+
+    // Mark W_SPANS each load of `tmp[lo .. hi]` (one slot's, sorted) that may span fields (`Acc.kind`)
+    // and overlaps another access that is not the same field (the same offset in a type that converts, or a
+    // lane of it). Whether any.
+    fn spans(self: &mut Self, lo: usize, hi: usize) bool {
+        let mut any = false;
+        for j in lo..hi {
+            let a = self.tmp[j];
+            if a.w == 0 {
+                continue;
+            }
+            let ae = a.off + size_of(a.ty, self.ptr);
+            // The accesses are by offset: those from `ae` on overlap none of its bytes.
+            for q in lo..hi {
+                let c = self.tmp[q];
+                if c.off >= ae {
+                    break;
+                }
+                let same = c.off == a.off && conv_op(c.ty, a.ty, self.ptr) != NO_CONV || is_lane(a, c) || is_lane(c, a);
+                if q != j && !same && a.off < c.off + size_of(c.ty, self.ptr) {
+                    self.tmp[j].w = a.w | W_SPANS;
+                    any = true;
+                    break;
+                }
+            }
+        }
+        return any;
     }
 
     // The bytes of slot `s`'s copies that no field (from `flds[start ..]`) covers: integer fields, each
@@ -936,7 +1023,7 @@ extend Promoter {
                     } else {
                         T_I8
                     };
-                    self.gap.push(Fld { off: p, ty: ty });
+                    self.gap.push(Fld { off: p, ty: ty, w: 0 });
                     p += w;
                     if self.gap.len() > FIELDS_MAX as usize {
                         self.cand[s as usize] = false;
@@ -953,13 +1040,30 @@ extend Promoter {
         }
     }
 
+    // Whether the fields of slot `s` that bytes `off` to `off + n` overlap all lie in them, each a scalar
+    // whose bits an integer of its size holds (`spanned`).
+    const fn spannable(self: &Self, s: u32, off: i64, n: i64) bool {
+        for f in self.fat[s as usize]..self.fat[s as usize + 1] {
+            let fl = self.flds[f as usize];
+            let fe = fl.off + size_of(fl.ty, self.ptr);
+            if fl.off < off + n && off < fe && (fl.off < off || fe > off + n || is_vec(fl.ty) || fl.ty == T_I128 || conv_op(
+                fl.ty,
+                int_of(size_of(fl.ty, self.ptr)),
+                self.ptr,
+            ) == NO_CONV) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // The global index of slot `s`'s field at `off` whose type `ty` converts to (NONE: none).
     // The vector field of slot `s` that bytes `off` as `ty` are a lane of, and the lane; NONE twice when
     // none.
     const fn lane_at(self: &Self, s: u32, off: i64, ty: u8) (u32, u32) {
         for f in self.fat[s as usize]..self.fat[s as usize + 1] {
             let fl = self.flds[f as usize];
-            if is_lane(fl, Fld { off: off, ty: ty }) {
+            if is_lane(fl, Fld { off: off, ty: ty, w: 0 }) {
                 return (f, ((off - fl.off) / size_of(ty, self.ptr)) as u32);
             }
         }
@@ -1116,6 +1220,16 @@ extend Promoter {
     // the block (`ublk`, by `isdef` per field: the last block that defined it in this scan).
     fn reads_writes(self: &mut Self, b: &Body, i: u32, k: u32) {
         let t = b.insts[i as usize];
+        if self.spanned[i as usize] {
+            let s = self.slot_of(t.a);
+            let off = self.doff[t.a as usize] + (t.c as i32) as i64;
+            for f2 in self.fat[s as usize]..self.fat[s as usize + 1] {
+                if in_range(self.flds[f2 as usize], off, size_of(t.ty, self.ptr), self.ptr) {
+                    self.read(f2, k);
+                }
+            }
+            return;
+        }
         let f = self.fid[i as usize];
         if f != NONE {
             // A lane's store keeps the other lanes: it reads the field too.
@@ -1304,6 +1418,11 @@ extend Promoter {
     // stand for returns its slot (NONE: none).
     fn rename_inst(self: &mut Self, b: &Body, i: u32) u32 {
         let t = b.insts[i as usize];
+        if self.spanned[i as usize] {
+            self.drop[i as usize] = true;
+            self.rename_span(b, i, t);
+            return NONE;
+        }
         let f = self.fid[i as usize];
         if f != NONE {
             self.drop[i as usize] = true;
@@ -1385,6 +1504,49 @@ extend Promoter {
             self.set(f2, v);
         }
         return NONE;
+    }
+
+    // Spanning load `t` (instruction `i`): its fields' bits, each zero-extended and shifted to its place,
+    // combined.
+    fn rename_span(self: &mut Self, b: &Body, i: u32, t: Inst) {
+        let s = self.slot_of(t.a);
+        let off = self.doff[t.a as usize] + (t.c as i32) as i64;
+        let n = size_of(t.ty, self.ptr);
+        let mut acc = NONE;
+        for f2 in self.fat[s as usize]..self.fat[s as usize + 1] {
+            let fl = self.flds[f2 as usize];
+            if !in_range(fl, off, n, self.ptr) {
+                continue;
+            }
+            let it = int_of(size_of(fl.ty, self.ptr));
+            let sh = 8 * (fl.off - off) as u64;
+            let fv = self.value(b, f2);
+            let mut v = self.convert(b, i, fv, fl.ty, it);
+            if it != t.ty {
+                v = self.push(b, i, Inst { op: O_ZEXT, ty: t.ty, aux: 0, a: v, b: VNONE, c: VNONE });
+            }
+            if sh != 0 {
+                let c = self.push(b, i, fill_int(t.ty, sh));
+                v = self.push(b, i, Inst { op: O_SHL, ty: t.ty, aux: 0, a: v, b: c, c: VNONE });
+            }
+            acc = if acc == NONE {
+                v
+            } else {
+                self.push(b, i, Inst { op: O_OR, ty: t.ty, aux: 0, a: acc, b: v, c: VNONE })
+            };
+        }
+        self.repl[i as usize] = if acc == NONE {
+            self.zero(b, t.ty)
+        } else {
+            acc
+        };
+    }
+
+    // New instruction `x` before instruction `i`: its value.
+    fn push(self: &mut Self, b: &Body, i: u32, x: Inst) u32 {
+        let v = (b.insts.len() + self.xins.len()) as u32;
+        self.xins.push((i, x));
+        return v;
     }
 
     // ---- Emission ------------------------------------------------------------------------------------
@@ -1635,6 +1797,33 @@ extend Promoter {
         }
         return at;
     }
+}
+
+// W_LOAD for a load of type `ty` that may span fields, an integer of 2 to 8 bytes; else 0.
+const fn wide_kind(ty: u8) u8 {
+    return if is_int(ty) && ty != T_PTR && ty != T_I128 && ty != T_I8 {
+        W_LOAD
+    } else {
+        0
+    };
+}
+
+// The integer type of `n` bytes (1, 2, 4 or 8).
+const fn int_of(n: i64) u8 {
+    return if n == 1 {
+        T_I8
+    } else if n == 2 {
+        T_I16
+    } else if n == 4 {
+        T_I32
+    } else {
+        T_I64
+    };
+}
+
+// The integer constant `v` of type `ty`.
+const fn fill_int(ty: u8, v: u64) Inst {
+    return Inst { op: O_ICONST, ty: ty, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE };
 }
 
 // `conv_op`'s answer when no conversion exists.

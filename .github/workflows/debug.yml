@@ -1,7 +1,7 @@
 # The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
 # content, run on demand from the Actions tab. Edit the job for the next investigation; do not remove
-# the file. Current probe: the code generation gap benchmarks (bench/gaps), each probe as
-# Super-C compiles it against the same probe compiled by clang -O2, on Linux x86-64, Linux arm64 and
+# the file. Current probe: the code generation benchmarks (bench/codegen), each kernel as Super-C
+# compiles it against the same kernel compiled by clang -O2, on Linux x86-64, Linux arm64 and
 # Windows x86-64; then the same benchmarks built by the latest release's compiler (the "before").
 # No test suite runs.
 name: Debug
@@ -13,8 +13,8 @@ concurrency:
   group: debug-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  gaps:
-    name: gaps (${{ matrix.target }})
+  codegen:
+    name: codegen (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
@@ -47,7 +47,7 @@ jobs:
           [ -f "./super-c${BINEXT:-}" ] || mv ./super-c "./super-c${BINEXT:-}"
 
       # clang -O2 for the C side: the runner's on Linux, llvm-mingw's on Windows (the mingw ABI).
-      - name: Build the clang probes
+      - name: Build the clang kernels
         run: |
           set -eu
           if [ "${{ matrix.target }}" = windows ]; then
@@ -56,17 +56,17 @@ jobs:
             export CC=clang
           fi
           $CC --version | head -1
-          sh bench/gaps/lib.sh
+          sh bench/codegen/lib.sh
 
-      - name: Gap benchmarks (this tree's compiler)
+      - name: Code generation benchmarks (this tree's compiler)
         run: |
-          "./super-c${BINEXT:-}" bench --filter=gaps_
+          "./super-c${BINEXT:-}" bench --filter=codegen_
 
-      - name: Gap benchmarks (the latest release's compiler)
+      - name: Code generation benchmarks (the latest release's compiler)
         continue-on-error: true
         run: |
           rm -rf build/bench
-          "./super-c-boot${BINEXT:-}" bench --filter=gaps_
+          "./super-c-boot${BINEXT:-}" bench --filter=codegen_
 
   # Linux arm64: no release ships a Linux arm64 compiler, so the x86-64 runner cross-builds this tree's
   # compiler against the arm64 C library, and the arm64 runner benchmarks with it.
@@ -100,9 +100,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  gaps-arm64:
+  codegen-arm64:
     needs: arm64-compile
-    name: gaps (linux arm64)
+    name: codegen (linux arm64)
     runs-on: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@v7
@@ -111,16 +111,16 @@ jobs:
         with:
           name: compiler-linux-arm64
 
-      - name: Build the clang probes
+      - name: Build the clang kernels
         run: |
           set -eu
           command -v clang || { sudo apt-get update; sudo apt-get install -y clang; }
           clang --version | head -1
-          CC=clang sh bench/gaps/lib.sh
+          CC=clang sh bench/codegen/lib.sh
 
-      - name: Gap benchmarks (this tree's compiler)
+      - name: Code generation benchmarks (this tree's compiler)
         run: |
           set -eu
           chmod +x super-c-a64
           mv super-c-a64 super-c
-          ./super-c bench --filter=gaps_
+          ./super-c bench --filter=codegen_

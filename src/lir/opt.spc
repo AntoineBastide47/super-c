@@ -64,8 +64,9 @@ const SET_MAX: usize = 16;
 const PSLOT_MAX: u32 = 64;
 // `dead_allocs` takes at most FRESH_MAX allocations of a body.
 const FRESH_MAX: usize = 16;
-// `memcmp_eq` expands counts of at most MEMCMP_MAX bytes.
-const MEMCMP_MAX: u64 = 16;
+// `memcmp_eq` expands counts of at most MEMCMP_MAX bytes, in at most MEMCMP_LOADS loads a side.
+const MEMCMP_MAX: u64 = 32;
+const MEMCMP_LOADS: u32 = 4;
 const MIN_DEPTH: u32 = 3;
 // `Opt::private_load`'s answers besides a value, and the memory state of the loads it keeps.
 const PRIV_NONE: Value = VNONE;
@@ -4736,6 +4737,9 @@ extend Opt {
             if b.insts[i as usize].op == O_OR && (self.combine_loads(pk, b, k, i) || self.byte_perm(pk, b, i)) {
                 return true;
             }
+            if b.insts[i as usize].op == O_ICMP && self.icmp_select(pk, b, k, i) {
+                return true;
+            }
             let rr = self.range_fold(pk, b, i);
             if rr != VNONE {
                 self.repl[i as usize] = rr;
@@ -4853,33 +4857,57 @@ extend Opt {
         b.insts[i as usize] = Inst { op: op, ty: t.ty, aux: 0, a: t.a, b: s, c: VNONE };
     }
 
-    // Store `i` of block `k`, the last of byte stores of the bytes of one value `x` of 2, 4 or 8 bytes
-    // (`x as u8`, `(x >> 8) as u8`, ...) at consecutive offsets from one address, with no other memory access
-    // between them (up to 3 instructions a byte back): one store of `x` (little-endian) or of its bytes
-    // reversed (`Package.bswap`) at the lowest offset, the others dropped, untagged (LLVM's store merging).
-    // Every native target is little-endian. Whether it did.
+    // Store `i` of block `k`, the last of stores of pieces of one integer value `x` (`x as u8`,
+    // `(x >> 16) as u16`, ...: `stored_piece`) through one address, with no other memory access between
+    // them (up to 3 instructions a byte back), that cover a contiguous range of 2, 4 or 8 of its bytes in
+    // its little-endian order: one store of that range of `x` at the lowest offset, the others dropped,
+    // untagged (LLVM's store merging). Byte stores in the reverse order store the range's bytes reversed
+    // (`Package.bswap`). A run that a store after `i` continues waits for that store. Every native target is
+    // little-endian. Whether it did.
     fn combine_stores(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
-        let (x, j0) = stored_byte(b, t.b);
+        let (x, s0, n0) = stored_piece(b, t.b, pk.ptr_bytes);
         if x == VNONE {
             return false;
         }
         let xt = b.type_of(x);
         let w = type_bytes(xt, pk.ptr_bytes);
-        // The run ends with its first or last byte (written in order).
-        if !is_int(xt) || xt == T_PTR || w != 2 && w != 4 && w != 8 || j0 != 0 && j0 != w - 1 {
+        if !is_int(xt) || xt == T_PTR || xt == T_I128 {
             return false;
         }
-        // Per byte of `x`, the offset its store writes (`i64::MIN`: none yet); the other stores of the run.
-        let mut at = [i64::MIN; 8];
-        let mut run = StaticVector::<u32, 8>::new();
-        at[j0 as usize] = t.c as i32;
         let bk = b.blocks[k as usize];
-        let mut j = i;
-        let mut found: u32 = 1;
-        // Each step goes back one instruction of the block: a byte's store and its shift and truncation.
+        let end = bk.start + bk.len;
+        // Each step goes forward one instruction of the block.
+        let mut j = i + 1;
         for _ in 0..3 * w {
-            if found == w || j == bk.start {
+            if j >= end {
+                break;
+            }
+            if self.blk_of[j as usize] == k && self.repl[j as usize] != DROPPED {
+                let u = b.insts[j as usize];
+                if u.op == O_STORE {
+                    if u.a == t.a && stored_piece(b, u.b, pk.ptr_bytes).0 == x {
+                        return false;
+                    }
+                    break;
+                }
+                if u.op == O_LOAD || writes_memory(u) || is_terminator(u.op) {
+                    break;
+                }
+            }
+            j += 1;
+        }
+        // Per byte of `x`, the offset its store writes (`i64::MIN`: none); the other stores of the run.
+        let mut at = [i64::MIN; 8];
+        for q in 0..n0 {
+            at[(s0 + q) as usize] = t.c as i32 + q as i64;
+        }
+        let mut run = StaticVector::<u32, 8>::new();
+        let mut bytes = n0 == 1;
+        j = i;
+        // Each step goes back one instruction of the block: a piece's store, its shift and its truncation.
+        for _ in 0..3 * w {
+            if j == bk.start {
                 break;
             }
             j -= 1;
@@ -4888,48 +4916,84 @@ extend Opt {
             }
             let u = b.insts[j as usize];
             if u.op == O_STORE {
-                let (y, jb) = stored_byte(b, u.b);
-                if y != x || u.a != t.a || u.aux != t.aux || at[jb as usize] != i64::MIN {
-                    return false;
+                let (y, s, n) = stored_piece(b, u.b, pk.ptr_bytes);
+                if y != x || u.a != t.a || u.aux != t.aux || run.len() == 7 {
+                    break;
                 }
-                at[jb as usize] = u.c as i32;
+                for q in s..s + n {
+                    if at[q as usize] != i64::MIN {
+                        return false;
+                    }
+                    at[q as usize] = u.c as i32 + (q - s) as i64;
+                }
+                bytes = bytes && n == 1;
                 run.push(j);
-                found += 1;
                 continue;
             }
             if u.op == O_LOAD || writes_memory(u) || is_terminator(u.op) {
-                return false;
+                break;
             }
         }
-        if found != w {
+        if run.len() == 0 {
             return false;
         }
-        // Byte `q` at `lo + q` (little-endian) or at `lo + w - 1 - q` (big-endian).
-        let mut le = true;
-        let mut be = pk.bswap;
-        let lo = at[0].min(at[w as usize - 1]);
+        // The covered bytes `lo` to `hi`, every one between.
+        let mut lo = w;
+        let mut hi: u32 = 0;
         for q in 0..w {
-            le = le && at[q as usize] == lo + q as i64;
-            be = be && at[q as usize] == lo + (w - 1 - q) as i64;
+            if at[q as usize] != i64::MIN {
+                lo = lo.min(q);
+                hi = q;
+            }
+        }
+        let n = hi - lo + 1;
+        if n != 2 && n != 4 && n != 8 {
+            return false;
+        }
+        // Byte `q` at `at[lo] + q - lo` (little-endian) or at `at[hi] + hi - q` (big-endian).
+        let mut le = true;
+        let mut be = pk.bswap && bytes;
+        for q in lo..hi + 1 {
+            let a = at[q as usize];
+            le = le && a != i64::MIN && a == at[lo as usize] + (q - lo) as i64;
+            be = be && a != i64::MIN && a == at[hi as usize] + (hi - q) as i64;
         }
         if !le && !be {
             return false;
         }
-        let v = if le {
-            x
+        let pt = if n == 2 {
+            T_I16
+        } else if n == 4 {
+            T_I32
         } else {
-            self.before(b, k, i, Inst { op: O_BSWAP, ty: xt, aux: 0, a: x, b: VNONE, c: VNONE })
+            T_I64
         };
+        let mut v = x;
+        if lo != 0 {
+            let sh = self.constant(b, xt, 8 * lo as u64);
+            v = self.made(pk, b, k, i, Inst { op: O_LSHR, ty: xt, aux: 0, a: v, b: sh, c: VNONE });
+        }
+        if pt != xt {
+            v = self.made(pk, b, k, i, Inst { op: O_TRUNC, ty: pt, aux: 0, a: v, b: VNONE, c: VNONE });
+        }
+        if !le {
+            v = self.made(pk, b, k, i, Inst { op: O_BSWAP, ty: pt, aux: 0, a: v, b: VNONE, c: VNONE });
+        }
         for q in 0..run.len() {
             self.repl[run[q] as usize] = DROPPED;
         }
+        let off = if le {
+            at[lo as usize]
+        } else {
+            at[hi as usize]
+        };
         b.insts[i as usize] = Inst {
             op: O_STORE,
             ty: T_NONE,
             aux: t.aux & ~MEM_TBAA,
             a: t.a,
             b: v,
-            c: (lo as i32) as u32,
+            c: (off as i32) as u32,
         };
         return true;
     }
@@ -5603,27 +5667,86 @@ extend Opt {
         return false;
     }
 
+    // Integer comparison `i` of block `k` of a select with a constant, whose arms are each a constant, a
+    // three-way comparison (`order_test`) or such a select, ZO_DEPTH deep: a select of the arms'
+    // comparisons, each a flag constant or one comparison (LLVM InstCombine's fold of a compare into a
+    // select whose arms simplify). Whether it did.
+    fn icmp_select(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        if t.aux > C_UGE {
+            return false;
+        }
+        let left = const_of(b, t.b).is_some();
+        let s = if left {
+            t.a
+        } else {
+            t.b
+        };
+        if !left && const_of(b, t.a).is_none() || (s & (VPARAM | VFLAG)) != 0 || s == VNONE || b.insts[s as usize].op != O_SELECT || !cmp_arm(
+            pk,
+            b,
+            t,
+            left,
+            s,
+            ZO_DEPTH,
+        ) {
+            return false;
+        }
+        self.repl[i as usize] = self.cmp_into(pk, b, k, i, t, left, s);
+        return true;
+    }
+
+    // Comparison `t` with value `v` in place of its non-constant side (`left`: its first), made before
+    // instruction `i` of block `k`, through the selects `cmp_arm` accepts. The value made.
+    fn cmp_into(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst, left: bool, v: Value) Value {
+        let mut u = t;
+        if left {
+            u.a = v;
+        } else {
+            u.b = v;
+        }
+        let x = const_of(b, u.a);
+        let y = const_of(b, u.b);
+        if x.is_some() && y.is_some() {
+            return self.constant(
+                b,
+                t.ty,
+                holds_const(u.aux, x.unwrap(), y.unwrap(), type_bits(b.type_of(v), pk.ptr_bytes)) as u64,
+            );
+        }
+        let f = order_test(b, u, pk.ptr_bytes);
+        if f.is_some() {
+            return self.made(pk, b, k, i, f.unwrap());
+        }
+        let sel = b.insts[v as usize];
+        let p = self.cmp_into(pk, b, k, i, t, left, sel.b);
+        let q = self.cmp_into(pk, b, k, i, t, left, sel.c);
+        return self.made(pk, b, k, i, Inst { op: O_SELECT, ty: t.ty, aux: 0, a: sel.a, b: p, c: q });
+    }
+
     fn fold_ptr(self: &Self, pk: &Package, b: &mut Body, i: u32) bool {
         return fold_ptr(pk, b, i, self.unit);
     }
 
-    // Call `i` of block `k` of the C library's `memcmp` whose result only an equality with 0 right after it
-    // reads, of a count
-    // up to MEMCMP_MAX bytes that is a constant or that a branch into the block settles: a compare of loads
-    // of both sides, two each (overlapping) for a count that is not a power of two (LLVM ExpandMemCmp). A
-    // load of read-only data folds to its constant. Whether it did.
+    // Call `i` of block `k` of the C library's `memcmp` of a count up to MEMCMP_MAX bytes that is a constant
+    // or that a branch into the block settles: loads of both sides, the widest power of two of at most 8
+    // bytes, up to MEMCMP_LOADS each, the last overlapping the one before for a count it does not divide
+    // (LLVM ExpandMemCmp). A result whose one reader is an equality with 0 right after is whether a pair
+    // differs; another is the order of the first pair that differs, compared as big-endian numbers
+    // (`Package.bswap`). A load of read-only data folds to its constant. Whether it did.
     fn memcmp_eq(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
         let bk = b.blocks[k as usize];
-        if t.aux != 3 || t.ty != T_I32 || i as usize >= self.icount.len() || self.icount[i as usize] != 1 || i + 1 >= bk.start + bk.len {
+        if t.aux != 3 || t.ty != T_I32 {
             return false;
         }
-        let u = b.insts[i as usize + 1];
-        if u.op != O_ICMP || u.aux != C_EQ && u.aux != C_NE || !(u.a == i && const_of(b, u.b) == Some(0u64) || u.b == i && const_of(
-            b,
-            u.a,
-        ) == Some(0u64)) {
-            return false;
+        let mut eq = false;
+        if i as usize < self.icount.len() && self.icount[i as usize] == 1 && i + 1 < bk.start + bk.len {
+            let u = b.insts[i as usize + 1];
+            eq = u.op == O_ICMP && (u.aux == C_EQ || u.aux == C_NE) && (u.a == i && const_of(b, u.b) == Some(0u64) || u.b == i && const_of(
+                b,
+                u.a,
+            ) == Some(0u64));
         }
         let pa = self.val(b.pool[t.c as usize]);
         let pb = self.val(b.pool[t.c as usize + 1]);
@@ -5640,7 +5763,6 @@ extend Opt {
             b.insts[i as usize] = iconst(T_I32, 0);
             return true;
         }
-        // The widest power of two not past the count, at most 8 bytes: its loads at 0 and at `c - w`.
         let w: u32 = if c >= 8 {
             8
         } else if c >= 4 {
@@ -5650,6 +5772,10 @@ extend Opt {
         } else {
             1
         };
+        let parts = (c + w - 1) / w;
+        if parts > MEMCMP_LOADS || !eq && w > 1 && !pk.bswap {
+            return false;
+        }
         let ty = if w == 8 {
             T_I64
         } else if w == 4 {
@@ -5659,39 +5785,69 @@ extend Opt {
         } else {
             T_I8
         };
-        let mut d = VNONE;
-        let mut la1 = VNONE;
-        let mut lb1 = VNONE;
-        let offs: [u32; 2] = [0, c - w];
-        let parts: u32 = if c == w {
-            1
-        } else {
-            2
-        };
+        let mut la = StaticVector::<Value, 4>::new();
+        let mut lb = StaticVector::<Value, 4>::new();
         for q in 0..parts {
-            let la = self.before(b, k, i, Inst { op: O_LOAD, ty: ty, aux: 0, a: pa, b: VNONE, c: offs[q as usize] });
-            let _ = fold_data(pk, b, la);
-            let lb = self.before(b, k, i, Inst { op: O_LOAD, ty: ty, aux: 0, a: pb, b: VNONE, c: offs[q as usize] });
-            let _ = fold_data(pk, b, lb);
-            if parts == 1 {
-                la1 = la;
-                lb1 = lb;
-                break;
-            }
-            let x = self.before(b, k, i, Inst { op: O_XOR, ty: ty, aux: 0, a: la, b: lb, c: VNONE });
-            d = if d == VNONE {
-                x
+            let off = (q * w).min(c - w);
+            let x = self.made(pk, b, k, i, Inst { op: O_LOAD, ty: ty, aux: 0, a: pa, b: VNONE, c: off });
+            let _ = fold_data(pk, b, x);
+            let y = self.made(pk, b, k, i, Inst { op: O_LOAD, ty: ty, aux: 0, a: pb, b: VNONE, c: off });
+            let _ = fold_data(pk, b, y);
+            la.push(x);
+            lb.push(y);
+        }
+        if eq {
+            // One pair: its compare; more: the `or` of their differences against 0.
+            let (l, r) = if parts == 1 {
+                (la[0], lb[0])
             } else {
-                self.before(b, k, i, Inst { op: O_OR, ty: ty, aux: 0, a: d, b: x, c: VNONE })
+                let mut d = VNONE;
+                for q in 0..parts as usize {
+                    let x = self.made(pk, b, k, i, Inst { op: O_XOR, ty: ty, aux: 0, a: la[q], b: lb[q], c: VNONE });
+                    d = if d == VNONE {
+                        x
+                    } else {
+                        self.made(pk, b, k, i, Inst { op: O_OR, ty: ty, aux: 0, a: d, b: x, c: VNONE })
+                    };
+                }
+                (d, self.constant(b, ty, 0))
             };
+            let ne = self.made(pk, b, k, i, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: l, b: r, c: VNONE });
+            b.insts[i as usize] = Inst { op: O_ZEXT, ty: T_I32, aux: 0, a: ne, b: VNONE, c: VNONE };
+            return true;
         }
-        // One load each: their compare; two: the `or` of their differences against 0.
-        if parts == 2 {
-            la1 = d;
-            lb1 = self.constant(b, ty, 0);
+        // From the last pair back: the pair's order where it differs, else the order after it.
+        let mut r = VNONE;
+        for e in 0..parts as usize {
+            let q = parts as usize - 1 - e;
+            let mut x = la[q];
+            let mut y = lb[q];
+            if w > 1 {
+                x = self.made(pk, b, k, i, Inst { op: O_BSWAP, ty: ty, aux: 0, a: x, b: VNONE, c: VNONE });
+                y = self.made(pk, b, k, i, Inst { op: O_BSWAP, ty: ty, aux: 0, a: y, b: VNONE, c: VNONE });
+            }
+            let gt = self.made(pk, b, k, i, Inst { op: O_ICMP, ty: T_I8, aux: C_UGT, a: x, b: y, c: VNONE });
+            let lt = self.made(pk, b, k, i, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: x, b: y, c: VNONE });
+            let g = self.made(pk, b, k, i, Inst { op: O_ZEXT, ty: T_I32, aux: 0, a: gt, b: VNONE, c: VNONE });
+            let l = self.made(pk, b, k, i, Inst { op: O_ZEXT, ty: T_I32, aux: 0, a: lt, b: VNONE, c: VNONE });
+            let o = Inst { op: O_SUB, ty: T_I32, aux: 0, a: g, b: l, c: VNONE };
+            if e == 0 && parts == 1 {
+                b.insts[i as usize] = o;
+                return true;
+            }
+            let ov = self.made(pk, b, k, i, o);
+            if e == 0 {
+                r = ov;
+                continue;
+            }
+            let ne = self.made(pk, b, k, i, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: la[q], b: lb[q], c: VNONE });
+            let s = Inst { op: O_SELECT, ty: T_I32, aux: 0, a: ne, b: ov, c: r };
+            if q == 0 {
+                b.insts[i as usize] = s;
+                return true;
+            }
+            r = self.made(pk, b, k, i, s);
         }
-        let ne = self.before(b, k, i, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: la1, b: lb1, c: VNONE });
-        b.insts[i as usize] = Inst { op: O_ZEXT, ty: T_I32, aux: 0, a: ne, b: VNONE, c: VNONE };
         return true;
     }
 
@@ -5718,6 +5874,18 @@ extend Opt {
 
     // An instruction for block `k` that runs right before instruction `at` (`pre`), its operands final;
     // its value.
+    // Instruction `x` made before instruction `at` of block `k` (`before`), simplified (`simplify`) as the
+    // walk, which has passed it, would: the value it is.
+    fn made(self: &mut Self, pk: &Package, b: &mut Body, k: u32, at: u32, x: Inst) Value {
+        let v = self.before(b, k, at, x);
+        let r = simplify(pk, b, v);
+        if r != VNONE {
+            self.repl[v as usize] = r;
+            return r;
+        }
+        return v;
+    }
+
     fn before(self: &mut Self, b: &mut Body, k: u32, at: u32, t: Inst) Value {
         let v = b.insts.len() as u32;
         b.insts.push(t);
@@ -8458,6 +8626,41 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         return VNONE;
     }
     let ptr = pk.ptr_bytes;
+    // A byte swap or bit count of a constant.
+    if (t.op == O_BSWAP || t.op >= O_CLZ && t.op <= O_POPCNT) && is_int(t.ty) && t.ty != T_PTR {
+        let c = const_of(b, t.a);
+        if c.is_some() {
+            let bits = type_bits(t.ty, ptr);
+            let x = le::trunc_bits(c.unwrap(), bits);
+            let r = if t.op == O_BSWAP {
+                x.swap_bytes() >> (64 - bits) as u64
+            } else if t.op == O_POPCNT {
+                x.count_ones() as u64
+            } else if x == 0 {
+                bits as u64
+            } else if t.op == O_CLZ {
+                (x.leading_zeros() - (64 - bits as usize)) as u64
+            } else {
+                x.trailing_zeros() as u64
+            };
+            b.insts[i as usize] = iconst(t.ty, r);
+            return VNONE;
+        }
+    }
+    if t.op == O_ICMP && t.aux <= C_UGE {
+        let f = order_test(b, t, ptr);
+        if f.is_some() {
+            b.insts[i as usize] = f.unwrap();
+            return VNONE;
+        }
+    }
+    if is_int(t.ty) && t.ty != T_PTR && (t.op == O_TRUNC || t.op == O_LSHR || t.op == O_SHL || t.op == O_AND || t.op == O_OR) {
+        let r = demanded_fold(b, i, ptr);
+        if r != VNONE {
+            return r;
+        }
+        t = b.insts[i as usize];
+    }
     if t.op == O_SELECT {
         let c = const_of(b, t.a);
         if c.is_some() {
@@ -8466,6 +8669,17 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             } else {
                 t.c
             };
+        }
+        // An arm that is a select on a condition this one decides (`implied`) is that select's arm.
+        let tb = decided_arm(b, t.a, t.b, true);
+        let tc = decided_arm(b, t.a, t.c, false);
+        if tb != t.b || tc != t.c {
+            if tb == tc {
+                return tb;
+            }
+            b.insts.index_mut(i as usize).b = tb;
+            b.insts.index_mut(i as usize).c = tc;
+            t = b.insts[i as usize];
         }
         // A flag (`zero_one`) chosen as 1 or 0 is the flag; as 0 or 1, the opposite comparison, or the
         // flag's equality with that 0.
@@ -8955,6 +9169,533 @@ fn same_sig(b: &Body, s: u32, r: u32) bool {
         }
     }
     return true;
+}
+
+// The outcomes (bits: below, equal, above) of a comparison of two integers for which code `c` holds.
+const fn outcomes(c: u16) u32 {
+    let k = if c < C_SLT {
+        c
+    } else {
+        (c - C_SLT) % 4 + 2
+    };
+    return if k == C_EQ {
+        0b010
+    } else if k == C_NE {
+        0b101
+    } else if k == 2 {
+        0b001
+    } else if k == 3 {
+        0b011
+    } else if k == 4 {
+        0b100
+    } else {
+        0b110
+    };
+}
+
+// The value of condition `q` of `b` where condition `p` is `truth`: 1 true, 0 false, 2 unknown. `q` is `p`,
+// or both are integer comparisons of the same two values (either order) whose outcomes, of one
+// signedness, one contains or excludes the other's (`a < b` decides `a <= b`, `b > a` and `a == b`).
+fn implied(b: &Body, p: Value, q: Value, truth: bool) u8 {
+    if q == p {
+        return truth as u8;
+    }
+    if (p & (VPARAM | VFLAG)) != 0 || (q & (VPARAM | VFLAG)) != 0 || p == VNONE || q == VNONE {
+        return 2;
+    }
+    let x = b.insts[p as usize];
+    let y = b.insts[q as usize];
+    if x.op != O_ICMP || y.op != O_ICMP || x.aux > C_UGE || y.aux > C_UGE {
+        return 2;
+    }
+    let qc = if y.a == x.a && y.b == x.b {
+        y.aux
+    } else if y.a == x.b && y.b == x.a {
+        mirror(y.aux)
+    } else {
+        return 2;
+    };
+    let pc = if truth {
+        x.aux
+    } else {
+        opposite(x.aux)
+    };
+    // Of two ordered comparisons, one signed and one unsigned: unrelated.
+    if pc >= C_SLT && qc >= C_SLT && pc >= C_ULT != qc >= C_ULT {
+        return 2;
+    }
+    let ps = outcomes(pc);
+    let qs = outcomes(qc);
+    return if (ps & ~qs) == 0 {
+        1
+    } else if (ps & qs) == 0 {
+        0
+    } else {
+        2
+    };
+}
+
+// Arm `v` of a select on `p`, taken where `p` is `truth`: through each select on a condition `p` decides
+// there (`implied`), the arm it takes. At most ZO_DEPTH steps.
+fn decided_arm(b: &Body, p: Value, v: Value, truth: bool) Value {
+    let mut x = v;
+    for _ in 0..ZO_DEPTH {
+        if (x & (VPARAM | VFLAG)) != 0 || x == VNONE || b.insts[x as usize].op != O_SELECT {
+            return x;
+        }
+        let s = b.insts[x as usize];
+        let d = implied(b, p, s.a, truth);
+        if d == 2 {
+            return x;
+        }
+        x = if d == 1 {
+            s.b
+        } else {
+            s.c
+        };
+    }
+    return x;
+}
+
+// Whether comparison `t` with value `v` in place of its non-constant side (`left`: its first) folds into
+// constants and comparisons (`Opt::icmp_select`): `v` is a constant, a three-way comparison, or a select of
+// such values, `depth` selects deep.
+fn cmp_arm(pk: &Package, b: &Body, t: Inst, left: bool, v: Value, depth: u32) bool {
+    if const_of(b, v).is_some() {
+        return true;
+    }
+    let mut u = t;
+    if left {
+        u.a = v;
+    } else {
+        u.b = v;
+    }
+    if order_test(b, u, pk.ptr_bytes).is_some() {
+        return true;
+    }
+    if depth == 0 || (v & (VPARAM | VFLAG)) != 0 || v == VNONE || b.insts[v as usize].op != O_SELECT {
+        return false;
+    }
+    let s = b.insts[v as usize];
+    return is_int(s.ty) && s.ty != T_PTR && s.ty != T_I128 && cmp_arm(pk, b, t, left, s.b, depth - 1) && cmp_arm(
+        pk,
+        b,
+        t,
+        left,
+        s.c,
+        depth - 1,
+    );
+}
+
+// Integer condition `c` between constants `x` and `y` of `bits` bits.
+fn holds_const(c: u16, x: u64, y: u64, bits: u32) bool {
+    let xu = le::trunc_bits(x, bits);
+    let yu = le::trunc_bits(y, bits);
+    let xs = le::sign_ext(x, bits);
+    let ys = le::sign_ext(y, bits);
+    return if c == C_EQ {
+        xu == yu
+    } else if c == C_NE {
+        xu != yu
+    } else if c == C_SLT {
+        xs < ys
+    } else if c == C_SLE {
+        xs <= ys
+    } else if c == C_SGT {
+        xs > ys
+    } else if c == C_SGE {
+        xs >= ys
+    } else if c == C_ULT {
+        xu < yu
+    } else if c == C_ULE {
+        xu <= yu
+    } else if c == C_UGT {
+        xu > yu
+    } else {
+        xu >= yu
+    };
+}
+
+// The two values and the signedness of three-way comparison `v` of `b`: `(x > y) - (x < y)` of flags
+// extended, the comparisons of one signedness and of one pair (either order). VNONE when `v` is not one.
+fn three_way(b: &Body, v: Value) (Value, Value, bool) {
+    let none = (VNONE, VNONE, false);
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SUB {
+        return none;
+    }
+    let s = b.insts[v as usize];
+    if (s.a & (VPARAM | VFLAG)) != 0 || (s.b & (VPARAM | VFLAG)) != 0 || b.insts[s.a as usize].op != O_ZEXT || b.insts[s.b as usize].op != O_ZEXT {
+        return none;
+    }
+    let f = b.insts[s.a as usize].a;
+    let g = b.insts[s.b as usize].a;
+    if (f & (VPARAM | VFLAG)) != 0 || (g & (VPARAM | VFLAG)) != 0 || b.insts[f as usize].op != O_ICMP || b.insts[g as usize].op != O_ICMP {
+        return none;
+    }
+    let x = b.insts[f as usize];
+    let y = b.insts[g as usize];
+    let gc = if y.a == x.a && y.b == x.b {
+        y.aux
+    } else if y.a == x.b && y.b == x.a {
+        mirror(y.aux)
+    } else {
+        return none;
+    };
+    if x.aux == C_SGT && gc == C_SLT || x.aux == C_UGT && gc == C_ULT {
+        return (x.a, x.b, x.aux == C_SGT);
+    }
+    return none;
+}
+
+// Comparison `t` of a three-way comparison of `x` and `y` (`three_way`, of -1, 0 or 1) with a constant: the
+// comparison of `x` and `y` that holds for the same outcomes, or a constant flag. None when `t` is not one.
+fn order_test(b: &Body, t: Inst, ptr: u32) Option<Inst> {
+    let (v, k, code) = if const_of(b, t.b).is_some() {
+        (t.a, const_of(b, t.b).unwrap(), t.aux)
+    } else if const_of(b, t.a).is_some() {
+        (t.b, const_of(b, t.a).unwrap(), mirror(t.aux))
+    } else {
+        return None;
+    };
+    let (x, y, signed) = three_way(b, v);
+    if x == VNONE {
+        return None;
+    }
+    let bits = type_bits(b.type_of(v), ptr);
+    let m = width_mask(b.type_of(v), ptr);
+    let ks = le::sign_ext(k, bits);
+    // Per outcome (below, equal, above: -1, 0, 1), whether `code` holds of it against `k`.
+    let mut holds: u32 = 0;
+    for o in 0..3 {
+        let r = o as i64 - 1;
+        let h = if code == C_EQ {
+            (r as u64 & m) == (k & m)
+        } else if code == C_NE {
+            (r as u64 & m) != (k & m)
+        } else if code < C_ULT {
+            let d = code - C_SLT;
+            d == 0 && r < ks || d == 1 && r <= ks || d == 2 && r > ks || d == 3 && r >= ks
+        } else {
+            let (ru, ku) = (r as u64 & m, k & m);
+            let d = code - C_ULT;
+            d == 0 && ru < ku || d == 1 && ru <= ku || d == 2 && ru > ku || d == 3 && ru >= ku
+        };
+        holds |= h as u32 << o as u32;
+    }
+    if holds == 0 || holds == 7 {
+        return Some(iconst(t.ty, (holds == 7) as u64));
+    }
+    let base = if signed {
+        C_SLT
+    } else {
+        C_ULT
+    };
+    let codes: [u16; 6] = [C_EQ, C_NE, base, base + 1, base + 2, base + 3];
+    for q in 0..6 {
+        if outcomes(codes[q]) == holds {
+            return Some(Inst { op: O_ICMP, ty: t.ty, aux: codes[q], a: x, b: y, c: VNONE });
+        }
+    }
+    return None;
+}
+
+// `zero_bits` follows at most ZB_DEPTH operations.
+const ZB_DEPTH: u32 = 6;
+
+// The bits of integer value `v` of `b` known to be 0, within its type's width (LLVM's known bits, for
+// zeros): constants, extensions, comparisons, `bool` values, bitwise operations, shifts by constants,
+// selects and bit counts, `depth` operations deep.
+fn zero_bits(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
+    if v == VNONE {
+        return 0;
+    }
+    if (v & VFLAG) != 0 {
+        return ~1u64;
+    }
+    if (v & VPARAM) != 0 {
+        let k = entry_param(b, v);
+        return if k < 64 && (b.bools >> k as u64 & 1) != 0 {
+            ~1u64
+        } else {
+            0
+        };
+    }
+    let t = b.insts[v as usize];
+    if !is_int(t.ty) || t.ty == T_PTR || t.ty == T_I128 {
+        return 0;
+    }
+    let m = width_mask(t.ty, ptr);
+    if t.op == O_ICONST {
+        return ~const_of(b, v).unwrap() & m;
+    }
+    if t.op == O_ICMP || t.op == O_FCMP || t.op == O_LOAD && (t.aux & MEM_BOOL) != 0 {
+        return ~1u64 & m;
+    }
+    if t.op >= O_CLZ && t.op <= O_POPCNT {
+        // A count is at most the width: below twice the width.
+        return ~(2 * type_bits(t.ty, ptr) as u64 - 1) & m;
+    }
+    if depth == 0 {
+        return 0;
+    }
+    let d = depth - 1;
+    let z = if t.op == O_ZEXT {
+        let at = b.type_of(t.a);
+        if !is_int(at) || at == T_PTR || at == T_I128 {
+            return 0;
+        }
+        zero_bits(b, t.a, ptr, d) | ~width_mask(at, ptr)
+    } else if t.op == O_TRUNC {
+        if b.type_of(t.a) == T_I128 {
+            return 0;
+        }
+        zero_bits(b, t.a, ptr, d)
+    } else if t.op == O_AND {
+        zero_bits(b, t.a, ptr, d) | zero_bits(b, t.b, ptr, d)
+    } else if t.op == O_OR || t.op == O_XOR {
+        zero_bits(b, t.a, ptr, d) & zero_bits(b, t.b, ptr, d)
+    } else if t.op == O_SELECT {
+        zero_bits(b, t.b, ptr, d) & zero_bits(b, t.c, ptr, d)
+    } else if t.op == O_SHL || t.op == O_LSHR {
+        let c = const_of(b, t.b);
+        if c.is_none() || c.unwrap() >= type_bits(t.ty, ptr) as u64 {
+            return 0;
+        }
+        let s = c.unwrap();
+        if t.op == O_SHL {
+            zero_bits(b, t.a, ptr, d) << s | (1u64 << s) - 1
+        } else {
+            (zero_bits(b, t.a, ptr, d) & m) >> s | ~(m >> s)
+        }
+    } else {
+        0
+    };
+    return z & m;
+}
+
+// `or` leaves `rejoined` takes at most.
+const REJOIN_MAX: usize = 8;
+
+// The value whose bits `v` of `b` keeps in place and their mask: `x`, `x & c`, `zext(trunc x)`,
+// `zext(trunc(x >> s)) << s`, `x >> s << s`, `x << s >> s`, each of `x` of `v`'s type; VNONE when `v` is
+// none of them.
+fn in_place(b: &Body, v: Value, ty: u8, ptr: u32) (Value, u64) {
+    let m = width_mask(ty, ptr);
+    let bits = type_bits(ty, ptr) as u64;
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return (v, m);
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_AND && const_of(b, t.b).is_some() {
+        return (t.a, const_of(b, t.b).unwrap() & m);
+    }
+    let c = if t.op == O_SHL || t.op == O_LSHR {
+        const_of(b, t.b)
+    } else {
+        Option::<u64>::None
+    };
+    if c.is_some() && c.unwrap() < bits && (t.a & (VPARAM | VFLAG)) == 0 {
+        let s = c.unwrap();
+        let u = b.insts[t.a as usize];
+        let back = if t.op == O_SHL {
+            O_LSHR
+        } else {
+            O_SHL
+        };
+        // `x >> s << s` and `x << s >> s`.
+        if u.op == back && const_of(b, u.b) == c && u.ty == ty {
+            return (
+                u.a,
+                if t.op == O_SHL {
+                    m & ~((1u64 << s) - 1)
+                } else {
+                    m >> s
+                }
+            );
+        }
+        // `zext(trunc(x >> s)) << s`.
+        if t.op == O_SHL {
+            let (x, lo, n) = piece_of(b, t.a, ptr);
+            if x != VNONE && lo == s && b.type_of(x) == ty {
+                return (x, width_mask(int_type_of(n), ptr) << s & m);
+            }
+        }
+        return (VNONE, 0);
+    }
+    let (x, lo, n) = piece_of(b, v, ptr);
+    if x != VNONE && lo == 0 && b.type_of(x) == ty {
+        return (x, width_mask(int_type_of(n), ptr));
+    }
+    if t.ty == ty {
+        return (v, m);
+    }
+    return (VNONE, 0);
+}
+
+// `zext(trunc.N x)` or `zext(trunc.N(x >> s))` of `b`: `x`, `s` and the bytes N. VNONE when `v` is neither.
+fn piece_of(b: &Body, v: Value, ptr: u32) (Value, u64, u32) {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ZEXT {
+        return (VNONE, 0, 0);
+    }
+    let (x, j, n) = stored_piece(b, b.insts[v as usize].a, ptr);
+    return (x, 8 * j as u64, n);
+}
+
+// The integer type of `n` bytes (1, 2, 4 or 8).
+const fn int_type_of(n: u32) u8 {
+    return if n == 1 {
+        T_I8
+    } else if n == 2 {
+        T_I16
+    } else if n == 4 {
+        T_I32
+    } else {
+        T_I64
+    };
+}
+
+// `or` tree `i` of `b` whose leaves (at most REJOIN_MAX) each keep bits of one value `x` in place
+// (`in_place`) and together all of them: `x` (the pieces of a value a wide store split into fields, which a
+// wide load joins). VNONE when it is not one.
+fn rejoined(b: &Body, i: u32, ptr: u32) Value {
+    let t = b.insts[i as usize];
+    if !is_int(t.ty) || t.ty == T_PTR || t.ty == T_I128 {
+        return VNONE;
+    }
+    let mut todo = StaticVector::<Value, REJOIN_MAX>::new();
+    todo.push(t.a);
+    todo.push(t.b);
+    let mut src = VNONE;
+    let mut mask: u64 = 0;
+    let mut leaves: usize = 0;
+    // Each step takes one node of the tree: an `or` adds two, a leaf none; at most REJOIN_MAX leaves.
+    for _ in 0..2 * REJOIN_MAX {
+        if todo.len() == 0 {
+            break;
+        }
+        let v = todo.pop().unwrap();
+        if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_OR && b.insts[v as usize].ty == t.ty {
+            if todo.len() + 2 > REJOIN_MAX {
+                return VNONE;
+            }
+            todo.push(b.insts[v as usize].a);
+            todo.push(b.insts[v as usize].b);
+            continue;
+        }
+        let (x, km) = in_place(b, v, t.ty, ptr);
+        leaves += 1;
+        if x == VNONE || src != VNONE && x != src || leaves > REJOIN_MAX {
+            return VNONE;
+        }
+        src = x;
+        mask |= km;
+    }
+    if todo.len() != 0 || src == VNONE || leaves < 2 {
+        return VNONE;
+    }
+    return if mask == width_mask(t.ty, ptr) {
+        src
+    } else {
+        VNONE
+    };
+}
+
+// Through `or` and `xor` operations: `v` without each operand whose possibly-set bits are outside mask `dm`
+// (the bits a reader of `v` reads). At most ZB_DEPTH steps.
+fn undemanded(b: &Body, v: Value, dm: u64, ptr: u32) Value {
+    let mut x = v;
+    for _ in 0..ZB_DEPTH {
+        if (x & (VPARAM | VFLAG)) != 0 || x == VNONE {
+            return x;
+        }
+        let t = b.insts[x as usize];
+        if t.op != O_OR && t.op != O_XOR || !is_int(t.ty) || t.ty == T_PTR || t.ty == T_I128 {
+            return x;
+        }
+        let m = width_mask(t.ty, ptr);
+        if (~zero_bits(b, t.b, ptr, ZB_DEPTH) & m & dm) == 0 {
+            x = t.a;
+        } else if (~zero_bits(b, t.a, ptr, ZB_DEPTH) & m & dm) == 0 {
+            x = t.b;
+        } else {
+            return x;
+        }
+    }
+    return x;
+}
+
+// Demanded and known bits of integer instruction `i` (a truncation, shift by a constant, `and` or `or`; LLVM
+// InstCombine's SimplifyDemandedBits, in part): an `or` or `xor` operand whose bits it does not read goes
+// (`undemanded`); `x << c >> c` and `x >> c << c` are `x` masked, and an `and` that keeps every bit its
+// other operand may have is that operand, as is an `or` with a value of no possible bit. The value `i` is
+// (VNONE: none; `i` may be rewritten).
+fn demanded_fold(b: &mut Body, i: u32, ptr: u32) Value {
+    let t = b.insts[i as usize];
+    let m = width_mask(t.ty, ptr);
+    if t.op == O_OR {
+        if (~zero_bits(b, t.b, ptr, ZB_DEPTH) & m) == 0 {
+            return t.a;
+        }
+        if (~zero_bits(b, t.a, ptr, ZB_DEPTH) & m) == 0 {
+            return t.b;
+        }
+        return rejoined(b, i, ptr);
+    }
+    let at = b.type_of(t.a);
+    if !is_int(at) || at == T_PTR || at == T_I128 {
+        return VNONE;
+    }
+    let c = const_of(b, t.b);
+    let dm = if t.op == O_TRUNC {
+        m
+    } else if t.op == O_AND {
+        if c.is_none() {
+            return VNONE;
+        }
+        c.unwrap() & m
+    } else {
+        if c.is_none() || c.unwrap() >= type_bits(t.ty, ptr) as u64 {
+            return VNONE;
+        }
+        if t.op == O_LSHR {
+            m & ~((1u64 << c.unwrap()) - 1)
+        } else {
+            m >> c.unwrap()
+        }
+    };
+    let x = undemanded(b, t.a, dm, ptr);
+    if x != t.a {
+        b.insts.index_mut(i as usize).a = x;
+    }
+    let u = b.insts[i as usize];
+    if u.op == O_AND {
+        let z = zero_bits(b, u.a, ptr, ZB_DEPTH);
+        if (~z & m & ~dm) == 0 {
+            return u.a;
+        }
+        return VNONE;
+    }
+    // `x << c >> c` and `x >> c << c`, which the `and` that follows folds when `x`'s other bits are 0.
+    if (u.op == O_LSHR || u.op == O_SHL) && (u.a & (VPARAM | VFLAG)) == 0 {
+        let w = b.insts[u.a as usize];
+        let inner = if u.op == O_LSHR {
+            O_SHL
+        } else {
+            O_LSHR
+        };
+        if w.op == inner && w.ty == u.ty && const_of(b, w.b) == c {
+            let z = zero_bits(b, w.a, ptr, ZB_DEPTH);
+            let keep = if u.op == O_LSHR {
+                m >> c.unwrap()
+            } else {
+                m & ~((1u64 << c.unwrap()) - 1)
+            };
+            if (~z & m & ~keep) == 0 {
+                return w.a;
+            }
+        }
+    }
+    return VNONE;
 }
 
 // `zero_one` follows at most ZO_DEPTH operations.
@@ -9606,22 +10347,23 @@ const fn twin_val(bx: Block, by: Block, v: Value, w: Value) bool {
     return v == w && !(j >= by.start && j < by.start + by.len);
 }
 
-// The value whose byte `v` is and the byte's index (`combine_stores`): `trunc.i8 x` is byte 0 of `x`,
-// `trunc.i8 (lshr x, 8j)` byte `j`. VNONE when `v` is neither.
-fn stored_byte(b: &Body, v: Value) (Value, u32) {
-    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_TRUNC || b.insts[v as usize].ty != T_I8 {
-        return (VNONE, 0);
+// The value whose piece stored value `v` is, the piece's first byte and its byte count (`combine_stores`):
+// `trunc x` is the low bytes of `x`, `trunc (lshr x, 8j)` the bytes from `j`. VNONE when `v` is neither.
+fn stored_piece(b: &Body, v: Value, ptr: u32) (Value, u32, u32) {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_TRUNC || !is_int(b.insts[v as usize].ty) {
+        return (VNONE, 0, 0);
     }
+    let n = type_bytes(b.insts[v as usize].ty, ptr);
     let x = b.insts[v as usize].a;
     if (x & (VPARAM | VFLAG)) == 0 && x != VNONE && b.insts[x as usize].op == O_LSHR {
         let s = const_of(b, b.insts[x as usize].b);
-        let n = type_bits(b.type_of(x), 8) as u64;
-        if s.is_some() && s.unwrap() % 8 == 0 && s.unwrap() < n {
-            return (b.insts[x as usize].a, (s.unwrap() / 8) as u32);
+        let xn = type_bytes(b.type_of(x), ptr) as u64;
+        if s.is_some() && s.unwrap() % 8 == 0 && s.unwrap() / 8 + n as u64 <= xn {
+            return (b.insts[x as usize].a, (s.unwrap() / 8) as u32, n);
         }
-        return (VNONE, 0);
+        return (VNONE, 0, 0);
     }
-    return (x, 0);
+    return (x, 0, n);
 }
 
 fn same_edge(b: &Body, x: u32, y: u32) bool {

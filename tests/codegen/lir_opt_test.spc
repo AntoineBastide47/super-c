@@ -5583,8 +5583,8 @@ b0(v0: ptr, v1: ptr):
 
 // A `memcmp` of a small count whose result only an equality with 0 reads is a compare of loads (two
 // overlapping ones each for 5 bytes, one for 4); a count a branch into the block settles counts too, and a
-// load of read-only bytes is their constant. A result an ordering reads, or a count past 16 bytes, keeps
-// the call.
+// load of read-only bytes is their constant. A result an ordering reads is the order of the first pair of
+// loads that differs (17 bytes: three pairs); a count past 32 bytes keeps the call.
 @test
 fn small_memory_compares_expand() {
     let (b, a) = optimized(
@@ -5597,6 +5597,7 @@ sym @eq5 fn global
 sym @starts fn global
 sym @less fn global
 sym @long fn global
+sym @huge fn global
 fn @eq5
   sig (i64) -> i8
 b0(v0: i64):
@@ -5645,19 +5646,32 @@ b0(v0: i64):
   v4 = iconst.i32 0
   v5 = ptradd v2, v0 * 1
   v6 = call.i32 @memcmp(v5, v1, v3) : (ptr, ptr, i64) -> i32
+  v7 = icmp.sgt v6, v4
+  ret v7
+fn @huge
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = symaddr @s
+  v2 = symaddr @w
+  v3 = iconst.i64 33
+  v4 = iconst.i32 0
+  v5 = ptradd v2, v0 * 1
+  v6 = call.i32 @memcmp(v5, v1, v3) : (ptr, ptr, i64) -> i32
   v7 = icmp.eq v6, v4
   ret v7
-data @s size 24 align 0 ro bytes 68656c6c6f68656c6c6f68656c6c6f68656c6c6f00000000
+data @s size 40 align 0 ro bytes 68656c6c6f68656c6c6f68656c6c6f68656c6c6f0000000000000000000000000000000000000000
 data @r size 4 align 0 ro bytes 68747470
-data @w size 32 align 0 bytes 68656c6c6f68656c6c6f68656c6c6f68656c6c6f687474706800000000000000
+data @w size 64 align 0 bytes 68656c6c6f68656c6c6f68656c6c6f68656c6c6f68747470680000000000000000000000000000000000000000000000000000000000000000000000
 )",
     );
     let e = text_of(&a, "eq5");
     assert(!e.contains("call") && count_of(&e, "load.i32") == 2, e.as_str());
     let s = text_of(&a, "starts");
     assert(!s.contains("call") && count_of(&s, "load.i32") == 1 && !s.contains("symaddr @r"), s.as_str());
-    assert(text_of(&a, "less").contains("call"), text_of(&a, "less").as_str());
-    assert(text_of(&a, "long").contains("call"), text_of(&a, "long").as_str());
+    assert(!text_of(&a, "less").contains("call"), text_of(&a, "less").as_str());
+    let g = text_of(&a, "long");
+    assert(!g.contains("call") && count_of(&g, "load.i64") == 3, g.as_str());
+    assert(text_of(&a, "huge").contains("call"), text_of(&a, "huge").as_str());
     let x: []u64 = [5];
     same_result(&b, &a, "eq5", x, 1);
     let y: []u64 = [4];
@@ -5666,8 +5680,16 @@ data @w size 32 align 0 bytes 68656c6c6f68656c6c6f68656c6c6f68656c6c6f6874747068
     same_result(&b, &a, "starts", z, 0);
     let z2: []u64 = [19];
     same_result(&b, &a, "starts", z2, 1);
-    let l: []u64 = [1];
-    same_result(&b, &a, "less", l, 1);
+    // `w` from each offset against "hellohello...": equal, a lower first byte, a higher one, a higher later
+    // byte; the 17-byte compare differs in its first, middle and last pairs.
+    let offs: [u64; 8] = [0, 1, 2, 10, 15, 20, 24, 28];
+    let less: [u64; 8] = [0, 1, 0, 0, 0, 0, 1, 1];
+    let more: [u64; 8] = [0, 0, 1, 1, 1, 1, 0, 0];
+    for q in 0..8 {
+        let o: []u64 = [offs[q]];
+        same_result(&b, &a, "less", o, less[q]);
+        same_result(&b, &a, "long", o, more[q]);
+    }
 }
 
 // An allocation only stores write through, a null test reads and one free takes on every path to a return
@@ -5782,8 +5804,9 @@ b0(v0: ptr):
     assert(text_of(&a, "kept").contains("store"), text_of(&a, "kept").as_str());
 }
 
-// Byte stores of the bytes of one value at consecutive offsets are one store of it (little-endian order) or
-// of its bytes reversed (big-endian order); a load between them keeps them apart.
+// Stores of pieces of one value that cover 2, 4 or 8 of its bytes in order are one store of those bytes:
+// bytes, halves in any store order, the high word of a 64-bit value; byte stores in the reverse order store
+// the bytes reversed. A load between them keeps them apart, as does a run of 3 bytes.
 @test
 fn byte_stores_of_one_value_combine() {
     let (b, a) = optimized(
@@ -5791,6 +5814,10 @@ fn byte_stores_of_one_value_combine() {
 sym @le fn global
 sym @be fn global
 sym @apart fn global
+sym @halves fn global
+sym @high fn global
+sym @be4 fn global
+sym @three fn global
 fn @le
   sig (ptr, i32) -> void
 b0(v0: ptr, v1: i32):
@@ -5819,6 +5846,68 @@ b0(v0: ptr, v1: i16):
   v5 = trunc.i8 v1
   store v5, v0+5 align 0
   ret
+fn @halves
+  sig (ptr, i32) -> void
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i32 16
+  v3 = lshr.i32 v1, v2
+  v4 = trunc.i16 v3
+  store v4, v0+2 align 0
+  v5 = trunc.i16 v1
+  store v5, v0 align 0
+  ret
+fn @high
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 32
+  v3 = iconst.i64 40
+  v4 = iconst.i64 48
+  v5 = iconst.i64 56
+  v6 = lshr.i64 v1, v2
+  v7 = trunc.i8 v6
+  store v7, v0+8 align 0
+  v8 = lshr.i64 v1, v3
+  v9 = trunc.i8 v8
+  store v9, v0+9 align 0
+  v10 = lshr.i64 v1, v4
+  v11 = trunc.i8 v10
+  store v11, v0+10 align 0
+  v12 = lshr.i64 v1, v5
+  v13 = trunc.i8 v12
+  store v13, v0+11 align 0
+  ret
+fn @be4
+  sig (ptr, i32) -> void
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i32 8
+  v3 = iconst.i32 16
+  v4 = iconst.i32 24
+  v5 = lshr.i32 v1, v4
+  v6 = trunc.i8 v5
+  store v6, v0 align 0
+  v7 = lshr.i32 v1, v3
+  v8 = trunc.i8 v7
+  store v8, v0+1 align 0
+  v9 = lshr.i32 v1, v2
+  v10 = trunc.i8 v9
+  store v10, v0+2 align 0
+  v11 = trunc.i8 v1
+  store v11, v0+3 align 0
+  ret
+fn @three
+  sig (ptr, i32) -> void
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i32 8
+  v3 = iconst.i32 16
+  v4 = trunc.i8 v1
+  store v4, v0 align 0
+  v5 = lshr.i32 v1, v2
+  v6 = trunc.i8 v5
+  store v6, v0+1 align 0
+  v7 = lshr.i32 v1, v3
+  v8 = trunc.i8 v7
+  store v8, v0+2 align 0
+  ret
 fn @apart
   sig (ptr, i16) -> i8
 b0(v0: ptr, v1: i16):
@@ -5838,6 +5927,14 @@ b0(v0: ptr, v1: i16):
     assert(count_of(&e, "store ") == 1 && e.contains("bswap.i16") && e.contains("v0+4"), e.as_str());
     let g = text_of(&a, "apart");
     assert(count_of(&g, "store ") == 2, g.as_str());
+    let h = text_of(&a, "halves");
+    assert(count_of(&h, "store ") == 1 && h.contains("store v1, v0 align 0"), h.as_str());
+    let hi = text_of(&a, "high");
+    assert(count_of(&hi, "store ") == 1 && hi.contains("trunc.i32") && hi.contains("v0+8"), hi.as_str());
+    let e4 = text_of(&a, "be4");
+    assert(count_of(&e4, "store ") == 1 && e4.contains("bswap.i32"), e4.as_str());
+    let th = text_of(&a, "three");
+    assert(count_of(&th, "store ") >= 2, th.as_str());
 }
 
 // A pointer load from read-only data at a relocation's place (a method of a conformance table) is that
@@ -5888,4 +5985,369 @@ data @wtbl size 16 align 3 bytes 00000000000000000000000000000000 reloc 8 @area
     assert(g.contains("call.ind") && g.contains("load.ptr"), g.as_str());
     let x: []u64 = [7];
     same_result(&b, &a, "f", x, 21);
+}
+
+// A load of a slot that spans several writes (a tag byte and a payload word, one path filling the payload)
+// is a load of each written place combined: the slot then holds values, and the bits each reader takes
+// come from their writes.
+@test
+fn a_load_over_separate_writes_splits() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (i32, i32) -> i32
+  slot s0 size 8 align 2
+b0(v0: i32, v1: i32):
+  v2 = iconst.i64 32
+  v3 = slotaddr s0
+  v4 = iconst.i8 0
+  v5 = iconst.i8 1
+  v6 = iconst.i64 4
+  v7 = iconst.i32 0
+  v8 = add.i32 v0, v1
+  v9 = icmp.ult v8, v0
+  br v9, b2, b1
+b1:
+  store v4, v3 align 0
+  store v8, v3+4 align 2
+  jmp b3
+b2:
+  store v5, v3 align 0
+  v10 = ptradd v3+4
+  memset v10, v4, v6
+  jmp b3
+b3:
+  v11 = load.i64 v3 align 0
+  v12 = trunc.i8 v11
+  v13 = zext.i32 v12
+  v14 = icmp.eq v13, v7
+  v15 = lshr.i64 v11, v2
+  v16 = trunc.i32 v15
+  v17 = select.i32 v14, v16, v7
+  ret v17
+)",
+    );
+    let f = text_of(&a, "f");
+    assert(!f.contains("load") && !f.contains("store") && !f.contains("slot") && !f.contains("shl"), f.as_str());
+    let x: []u64 = [3, 4];
+    same_result(&b, &a, "f", x, 7);
+    let y: []u64 = [0xFFFFFFFF, 2];
+    same_result(&b, &a, "f", y, 0);
+}
+
+// The bits a truncation, a shift or a mask reads: an `or` operand of none of them goes; `x << c >> c` of an
+// `x` whose top `c` bits are 0 is `x`; a mask that keeps every bit its operand may have goes; an `or` with
+// a value of no possible bit is the other operand. A mask that drops a possible bit stays.
+@test
+fn bits_no_reader_takes_go() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @lo fn global
+sym @hi fn global
+sym @mask fn global
+sym @kept fn global
+fn @lo
+  sig (i8, i32) -> i8
+b0(v0: i8, v1: i32):
+  v2 = iconst.i64 32
+  v3 = zext.i64 v0
+  v4 = zext.i64 v1
+  v5 = shl.i64 v4, v2
+  v6 = or.i64 v3, v5
+  v7 = trunc.i8 v6
+  ret v7
+fn @hi
+  sig (i8, i32) -> i32
+b0(v0: i8, v1: i32):
+  v2 = iconst.i64 32
+  v3 = zext.i64 v0
+  v4 = zext.i64 v1
+  v5 = shl.i64 v4, v2
+  v6 = xor.i64 v3, v5
+  v7 = lshr.i64 v6, v2
+  v8 = trunc.i32 v7
+  ret v8
+fn @mask
+  sig (i16) -> i64
+b0(v0: i16):
+  v1 = iconst.i64 65535
+  v2 = iconst.i64 0
+  v3 = zext.i64 v0
+  v4 = and.i64 v3, v1
+  v5 = or.i64 v4, v2
+  ret v5
+fn @kept
+  sig (i16) -> i64
+b0(v0: i16):
+  v1 = iconst.i64 255
+  v2 = zext.i64 v0
+  v3 = and.i64 v2, v1
+  ret v3
+)",
+    );
+    let l = text_of(&a, "lo");
+    assert(!l.contains("or.") && !l.contains("shl"), l.as_str());
+    let h = text_of(&a, "hi");
+    assert(!h.contains("xor") && !h.contains("shl") && !h.contains("lshr"), h.as_str());
+    let m = text_of(&a, "mask");
+    assert(!m.contains("and") && !m.contains("or."), m.as_str());
+    let k = text_of(&a, "kept");
+    assert(k.contains("and"), k.as_str());
+    let x: []u64 = [0xAB, 0x12345678];
+    same_result(&b, &a, "lo", x, 0xAB);
+    same_result(&b, &a, "hi", x, 0x12345678);
+    let y: []u64 = [0xBEEF];
+    same_result(&b, &a, "mask", y, 0xBEEF);
+    same_result(&b, &a, "kept", y, 0xEF);
+}
+
+// A select whose arm is a select on a condition the outer one decides takes that arm's decided side: the
+// same comparison, its opposite, its mirror (`b > a` for `a < b`), one it implies (`a < b` gives
+// `a <= b`); a comparison of the other signedness decides nothing.
+@test
+fn selects_on_decided_conditions_fold() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @opp fn global
+sym @mir fn global
+sym @weak fn global
+sym @sign fn global
+fn @opp
+  sig (i32, i32, i32, i32) -> i32
+b0(v0: i32, v1: i32, v2: i32, v3: i32):
+  v4 = icmp.ult v0, v1
+  v5 = select.i32 v4, v2, v3
+  v6 = icmp.uge v0, v1
+  v7 = select.i32 v6, v5, v2
+  ret v7
+fn @mir
+  sig (i32, i32, i32, i32) -> i32
+b0(v0: i32, v1: i32, v2: i32, v3: i32):
+  v4 = icmp.slt v0, v1
+  v5 = select.i32 v4, v2, v3
+  v6 = icmp.sgt v1, v0
+  v7 = select.i32 v6, v5, v3
+  ret v7
+fn @weak
+  sig (i32, i32, i32, i32) -> i32
+b0(v0: i32, v1: i32, v2: i32, v3: i32):
+  v4 = icmp.sle v0, v1
+  v5 = select.i32 v4, v2, v3
+  v6 = icmp.slt v0, v1
+  v7 = select.i32 v6, v5, v3
+  ret v7
+fn @sign
+  sig (i32, i32, i32, i32) -> i32
+b0(v0: i32, v1: i32, v2: i32, v3: i32):
+  v4 = icmp.ult v0, v1
+  v5 = select.i32 v4, v2, v3
+  v6 = icmp.slt v0, v1
+  v7 = select.i32 v6, v5, v3
+  ret v7
+)",
+    );
+    let o = text_of(&a, "opp");
+    assert(count_of(&o, "select") == 1 && count_of(&o, "icmp") == 1, o.as_str());
+    let m = text_of(&a, "mir");
+    assert(count_of(&m, "select") == 1, m.as_str());
+    let w = text_of(&a, "weak");
+    assert(count_of(&w, "select") == 1 && w.contains("icmp.slt"), w.as_str());
+    let s = text_of(&a, "sign");
+    assert(count_of(&s, "select") == 2, s.as_str());
+    let x: []u64 = [1, 2, 10, 20];
+    let y: []u64 = [2, 1, 10, 20];
+    let z: []u64 = [0xFFFFFFFF, 1, 10, 20];
+    same_result(&b, &a, "opp", x, 10);
+    same_result(&b, &a, "opp", y, 20);
+    same_result(&b, &a, "mir", x, 10);
+    same_result(&b, &a, "mir", y, 20);
+    same_result(&b, &a, "weak", x, 10);
+    same_result(&b, &a, "weak", y, 20);
+    same_result(&b, &a, "sign", z, 20);
+}
+
+// A three-way comparison `(x > y) - (x < y)` compared with -1, 0 or 1 is one comparison of `x` and `y` (or
+// a constant), signed or unsigned as its parts; a select of such values compared is a select of the
+// comparisons. A byte swap or bit count of a constant is a constant.
+@test
+fn three_way_comparisons_fold() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @neg fn global
+sym @pos fn global
+sym @never fn global
+sym @pick fn global
+sym @consts fn global
+fn @neg
+  sig (i32, i32) -> i8
+b0(v0: i32, v1: i32):
+  v2 = icmp.sgt v0, v1
+  v3 = icmp.slt v0, v1
+  v4 = zext.i32 v2
+  v5 = zext.i32 v3
+  v6 = sub.i32 v4, v5
+  v7 = iconst.i32 -1
+  v8 = icmp.eq v6, v7
+  ret v8
+fn @pos
+  sig (i64, i64) -> i8
+b0(v0: i64, v1: i64):
+  v2 = icmp.ugt v0, v1
+  v3 = icmp.ugt v1, v0
+  v4 = zext.i32 v2
+  v5 = zext.i32 v3
+  v6 = sub.i32 v4, v5
+  v7 = iconst.i32 0
+  v8 = icmp.sge v6, v7
+  ret v8
+fn @never
+  sig (i32, i32) -> i8
+b0(v0: i32, v1: i32):
+  v2 = icmp.sgt v0, v1
+  v3 = icmp.slt v0, v1
+  v4 = zext.i32 v2
+  v5 = zext.i32 v3
+  v6 = sub.i32 v4, v5
+  v7 = iconst.i32 2
+  v8 = icmp.sge v6, v7
+  ret v8
+fn @pick
+  sig (i32, i32, i8) -> i8
+b0(v0: i32, v1: i32, v2: i8):
+  v3 = icmp.sgt v0, v1
+  v4 = icmp.slt v0, v1
+  v5 = zext.i32 v3
+  v6 = zext.i32 v4
+  v7 = sub.i32 v5, v6
+  v8 = iconst.i32 5
+  v9 = select.i32 v2, v7, v8
+  v10 = iconst.i32 0
+  v11 = icmp.sgt v9, v10
+  ret v11
+fn @consts
+  sig () -> i32
+b0:
+  v0 = iconst.i32 287454020
+  v1 = bswap.i32 v0
+  v2 = popcnt.i32 v1
+  v3 = add.i32 v1, v2
+  ret v3
+)",
+    );
+    let n = text_of(&a, "neg");
+    assert(count_of(&n, "icmp") == 1 && n.contains("icmp.slt v0, v1") && !n.contains("sub"), n.as_str());
+    let p = text_of(&a, "pos");
+    assert(count_of(&p, "icmp") == 1 && p.contains("icmp.uge v0, v1"), p.as_str());
+    let v = text_of(&a, "never");
+    assert(!v.contains("icmp"), v.as_str());
+    let k = text_of(&a, "pick");
+    assert(count_of(&k, "icmp") == 1 && !k.contains("sub"), k.as_str());
+    let c = text_of(&a, "consts");
+    assert(!c.contains("bswap") && !c.contains("popcnt"), c.as_str());
+    let args: [[u64; 2]; 3] = [[1, 2], [2, 2], [3, 0xFFFFFFFF]];
+    for q in 0..3 {
+        let x: []u64 = [args[q][0], args[q][1]];
+        same_result(&b, &a, "neg", x, run_of(&b, "neg", x));
+        same_result(&b, &a, "pos", x, run_of(&b, "pos", x));
+        same_result(&b, &a, "never", x, 0);
+        let y: []u64 = [args[q][0], args[q][1], 1];
+        same_result(&b, &a, "pick", y, run_of(&b, "pick", y));
+        let z: []u64 = [args[q][0], args[q][1], 0];
+        same_result(&b, &a, "pick", z, 1);
+    }
+    let none: []u64 = [];
+    same_result(&b, &a, "consts", none, 0x44332211 + 10);
+}
+
+// What function `name` of `p` returns for `args`.
+fn run_of(p: &Package, name: str, args: []u64) u64 {
+    let mut e = leval::Eval::new(p);
+    let o = e.run(p.find_symbol(name), args);
+    assert_eq(o.kind, leval::EV_OK);
+    return o.value;
+}
+
+// A wide integer load over fields combines their bits (an integer and a float's), and the pieces of one
+// value joined in place are that value; the walk forwards a wide store's bytes to narrower loads. A wide
+// store over two fields keeps its slot, as does a field across a wide load's edge.
+@test
+fn wide_slot_accesses_promote() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @parts fn global
+sym @mixed fn global
+sym @across fn global
+sym @inside fn global
+sym @round fn global
+fn @parts
+  sig (i64) -> i32
+  slot s0 size 8 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3
+  v2 = load.i8 v1+1 align 0
+  v3 = load.i32 v1+4 align 2
+  v4 = zext.i32 v2
+  v5 = add.i32 v3, v4
+  ret v5
+fn @mixed
+  sig (f32, i32) -> i64
+  slot s0 size 8 align 3
+b0(v0: f32, v1: i32):
+  v2 = slotaddr s0
+  store v0, v2 align 2
+  store v1, v2+4 align 2
+  v3 = load.i64 v2 align 3
+  ret v3
+fn @across
+  sig (i32, i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i32, v1: i64):
+  v2 = slotaddr s0
+  store v1, v2+4 align 0
+  store v0, v2 align 2
+  v3 = load.i64 v2 align 3
+  ret v3
+fn @inside
+  sig (i32, i32) -> i64
+  slot s0 size 16 align 3
+b0(v0: i32, v1: i32):
+  v2 = slotaddr s0
+  store v0, v2 align 2
+  store v1, v2+4 align 2
+  v3 = load.i64 v2+2 align 0
+  ret v3
+fn @round
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3
+  v2 = load.i8 v1+1 align 0
+  v3 = load.i64 v1 align 3
+  v4 = zext.i64 v2
+  v5 = add.i64 v3, v4
+  ret v5
+)",
+    );
+    let p = text_of(&a, "parts");
+    assert(!p.contains("slot") && !p.contains("load") && !p.contains("store"), p.as_str());
+    let m = text_of(&a, "mixed");
+    assert(!m.contains("slot") && m.contains("bitcast"), m.as_str());
+    let c = text_of(&a, "across");
+    assert(c.contains("slot"), c.as_str());
+    let r = text_of(&a, "round");
+    assert(!r.contains("slot") && !r.contains("or.") && !r.contains("shl"), r.as_str());
+    let d = text_of(&a, "inside");
+    assert(d.contains("slot"), d.as_str());
+    let x: []u64 = [0x1122334455667788];
+    same_result(&b, &a, "parts", x, 0x11223344 + 0x77);
+    same_result(&b, &a, "round", x, 0x1122334455667788 + 0x77);
+    let y: []u64 = [0x3F800000, 7];
+    same_result(&b, &a, "mixed", y, 0x000000073F800000);
+    let z: []u64 = [5, 0x0102030405060708];
+    same_result(&b, &a, "across", z, 0x0506070800000005);
+    let w: []u64 = [0x11223344, 0x55667788];
+    same_result(&b, &a, "inside", w, run_of(&b, "inside", w));
 }

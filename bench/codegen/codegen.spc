@@ -1,16 +1,16 @@
-// Code generation gaps against clang -O2: each probe as Super-C compiles it and as clang compiles
-// its C form (probes.c, archived by lib.sh into build/gaps/<arch>/libgaps.a: run `sh bench/gaps/lib.sh`
+// Native code generation against clang -O2: each kernel as Super-C compiles it and as clang compiles its C
+// form (kernels.c, archived by lib.sh into build/codegen/<arch>/libcodegen.a: run `sh bench/codegen/lib.sh`
 // first), timed on the same inputs in one binary. A row gives the median ns per call of each side, their
-// ratio and each side's spread (p95 - min); a probe whose two sides give different results fails the run.
+// ratio and each side's spread (p95 - min); a kernel whose two sides give different results fails the run.
 // Inputs come in two modes: `fixed` (one value, predictable branches) and `random` (uniform values).
 import stdio;
 import std::testing::bench as bench;
 
-const CALLS: usize = 4096; // probe calls per round
+const CALLS: usize = 4096; // kernel calls per round
 const ROUNDS: i32 = 30;
 
 @arch(aarch64)
-@link("-Lbuild/gaps/aarch64 -lgaps")
+@link("-Lbuild/codegen/aarch64 -lcodegen")
 extern "C" {
     fn c_r_sum(n: u32) u32;
     fn c_r_fact(n: u64) u64;
@@ -63,7 +63,7 @@ extern "C" {
 }
 
 @arch(x86_64)
-@link("-Lbuild/gaps/x86_64 -lgaps")
+@link("-Lbuild/codegen/x86_64 -lcodegen")
 extern "C" {
     fn c_r_sum(n: u32) u32;
     fn c_r_fact(n: u64) u64;
@@ -302,7 +302,7 @@ fn b_sbfx(x: u32) i32 {
     return (x << 20) as i32 >> 24;
 }
 
-// Loops over bytes: a serial recurrence and a count of matches.
+// Loops over bytes, a serial recurrence and a count of matches.
 @noinline
 fn f_hash(s: []u8) u32 {
     let mut h: u32 = 2166136261;
@@ -544,7 +544,7 @@ struct Stat {
 }
 
 fn time<F: fn(u32) u64>(xs: &Vector<u32>, f: F) Stat {
-    let mut b = bench::Bencher::new("gap probe");
+    let mut b = bench::Bencher::new("codegen kernel");
     b.set_diag_rounds(0);
     b.set_rounds(ROUNDS);
     let mut sum: u64 = 0;
@@ -566,9 +566,9 @@ fn warm() {
     bench::black_box(bench::burn((0.2e9 / bench::burn_ns_per_iter()) as i64));
 }
 
-// `time` with each call's input depending on the previous result (`x ^ (r & 1)`): the probe's latency.
+// `time` with each call's input depending on the previous result (`x ^ (r & 1)`): the kernel's latency.
 fn chain<F: fn(u32) u64>(xs: &Vector<u32>, f: F) Stat {
-    let mut b = bench::Bencher::new("gap probe");
+    let mut b = bench::Bencher::new("codegen kernel");
     b.set_diag_rounds(0);
     b.set_rounds(ROUNDS);
     let mut sum: u64 = 0;
@@ -599,7 +599,7 @@ fn measure<F: fn(u32) u64>(xs: &Vector<u32>, latency: bool, f: F) Stat {
 // One row: kernel `name` on `xs` (`mode`), Super-C's `sc` against clang's `c`.
 fn row(name: str, mode: str, sc: Stat, c: Stat) {
     unsafe stdio::printf(
-        "gaps %-10.*s %-6.*s  sc %9.2f ns (+%.2f)  c %9.2f ns (+%.2f)  sc/c %.3f\n".ptr() as *const char,
+        "codegen %-10.*s %-6.*s  sc %9.2f ns (+%.2f)  c %9.2f ns (+%.2f)  sc/c %.3f\n".ptr() as *const char,
         name.len() as i32,
         name.ptr(),
         mode.len() as i32,
@@ -611,13 +611,13 @@ fn row(name: str, mode: str, sc: Stat, c: Stat) {
         sc.median / c.median,
     );
     if sc.sum != c.sum {
-        bench::fail(format("gaps {} {}: Super-C sums {}, clang {}", name, mode, sc.sum, c.sum).as_str());
+        bench::fail(format("codegen {} {}: Super-C sums {}, clang {}", name, mode, sc.sum, c.sum).as_str());
     }
 }
 
-/// Accumulator recursion: the recursion probes, each on depths below 64 (`r_fib`: below 20).
+/// Accumulator recursion: the recursion kernels, each on depths below 64 (`r_fib`: below 20).
 @bench(log_results = false)
-pub fn gaps_recursion(_b: &mut bench::Bencher) {
+pub fn codegen_recursion(_b: &mut bench::Bencher) {
     warm();
     for m in 0..2 {
         let random = m == 1;
@@ -645,7 +645,7 @@ pub fn gaps_recursion(_b: &mut bench::Bencher) {
 
 /// Bit-count loops: `l_pop` and `l_log2` on random words, and on one word of 16 set bits.
 @bench(log_results = false)
-pub fn gaps_bits(_b: &mut bench::Bencher) {
+pub fn codegen_bits(_b: &mut bench::Bencher) {
     warm();
     for m in 0..2 {
         let random = m == 1;
@@ -669,7 +669,7 @@ pub fn gaps_bits(_b: &mut bench::Bencher) {
 
 /// Byte swaps: `b_bswap` on words, `c_load32be` on the 4 bytes of each word.
 @bench(log_results = false)
-pub fn gaps_bswap(_b: &mut bench::Bencher) {
+pub fn codegen_bswap(_b: &mut bench::Bencher) {
     warm();
     for m in 0..2 {
         let random = m == 1;
@@ -700,10 +700,10 @@ pub fn gaps_bswap(_b: &mut bench::Bencher) {
     }
 }
 
-/// `&&`, `||` of comparisons: each probe on bytes or words (`fixed`: all true; `random`), and as a
+/// `&&` and `||` of comparisons: each kernel on bytes or words (`fixed`: all true; `random`), and as a
 /// latency chain.
 @bench(log_results = false)
-pub fn gaps_flags(_b: &mut bench::Bencher) {
+pub fn codegen_flags(_b: &mut bench::Bencher) {
     warm();
     for m in 0..2 {
         let random = m == 1;
@@ -760,7 +760,7 @@ pub fn gaps_flags(_b: &mut bench::Bencher) {
 
 /// Callee-saved registers in a body whose only call is a sibling one: `r_even` on depths below 64.
 @bench(log_results = false)
-pub fn gaps_sibling(_b: &mut bench::Bencher) {
+pub fn codegen_sibling(_b: &mut bench::Bencher) {
     warm();
     for m in 0..2 {
         let random = m == 1;
@@ -777,7 +777,7 @@ pub fn gaps_sibling(_b: &mut bench::Bencher) {
 /// Return diamonds: `s_max`, `s_clamp`, `s_cmp3` on words (`fixed`: one value, predictable;
 /// `random`: unpredictable), and as latency chains.
 @bench(log_results = false)
-pub fn gaps_select(_b: &mut bench::Bencher) {
+pub fn codegen_select(_b: &mut bench::Bencher) {
     warm();
     for m in 0..3 {
         let random = m != 0;
@@ -835,7 +835,7 @@ pub fn gaps_select(_b: &mut bench::Bencher) {
 /// remainder test, 32- and 16-bit bit counts, a masked shift, a widening product's high half, a shifted
 /// operand; on unpredictable words and as latency chains.
 @bench(log_results = false)
-pub fn gaps_arith(_b: &mut bench::Bencher) {
+pub fn codegen_arith(_b: &mut bench::Bencher) {
     warm();
     let xs = inputs(0xFFFFFFFF, true);
     for m in 0..2 {
@@ -904,7 +904,7 @@ pub fn gaps_arith(_b: &mut bench::Bencher) {
 /// Arms that return a call or a load: `t_call` on 4 arms (`fixed`: one arm; `random`: any), and
 /// `o_ref` on present and absent references.
 @bench(log_results = false)
-pub fn gaps_tail(_b: &mut bench::Bencher) {
+pub fn codegen_tail(_b: &mut bench::Bencher) {
     warm();
     let v: u32 = 7;
     for m in 0..2 {
@@ -951,7 +951,7 @@ pub fn gaps_tail(_b: &mut bench::Bencher) {
 /// Float return diamonds: `p_min`, `p_abs`, `p_clamp01` on signed values from the words, on
 /// unpredictable inputs and as latency chains (the result's bits feed the next input).
 @bench(log_results = false)
-pub fn gaps_float(_b: &mut bench::Bencher) {
+pub fn codegen_float(_b: &mut bench::Bencher) {
     warm();
     let xs = inputs(0xFFFFFFFF, true);
     for m in 0..2 {
@@ -984,7 +984,7 @@ pub fn gaps_float(_b: &mut bench::Bencher) {
 /// Switches, ranges, sets and bit fields: each kernel on unpredictable inputs (the
 /// switches' values mostly among their cases) and as a latency chain.
 @bench(log_results = false)
-pub fn gaps_switch(_b: &mut bench::Bencher) {
+pub fn codegen_switch(_b: &mut bench::Bencher) {
     warm();
     let xs = inputs(0xFFFFFFFF, true);
     let sparse: [u32; 9] = [1, 10, 100, 1000, 5000, 9000, 20000, 77777, 3];
@@ -1048,7 +1048,7 @@ pub fn gaps_switch(_b: &mut bench::Bencher) {
 
 /// Byte loops: `f_hash` and `m_count` on the first 1 to 64 bytes of a buffer.
 @bench(log_results = false)
-pub fn gaps_loops(_b: &mut bench::Bencher) {
+pub fn codegen_loops(_b: &mut bench::Bencher) {
     warm();
     let xs = inputs(0xFFFFFFFF, true);
     let mut buf: [u8; 64] = [0; 64];
@@ -1069,10 +1069,10 @@ pub fn gaps_loops(_b: &mut bench::Bencher) {
     );
 }
 
-/// String compares, a constant power, a slice recursion and an unused box: `s_eq` and `s_starts` on
-/// strings of 4 to 7 bytes, `n_pow`, `q_slsum` on the first 0 to 63 elements of an array, `h_box`.
+/// Constant strings, powers, slices and boxes: `s_eq` and `s_starts` on strings of 4 to 7 bytes, `n_pow`, `q_slsum` on
+/// the first 0 to 63 elements of an array, `h_box`.
 @bench(log_results = false)
-pub fn gaps_misc(_b: &mut bench::Bencher) {
+pub fn codegen_misc(_b: &mut bench::Bencher) {
     warm();
     let xs = inputs(0xFFFFFFFF, true);
     let words: [str; 4] = ["hell", "hello", "https", "hello!!"];
