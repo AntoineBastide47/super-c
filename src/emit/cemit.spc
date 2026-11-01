@@ -624,6 +624,9 @@ extend CEmit {
             l.pkg.vops = tgt::isa(pk.arch).vector_ops;
             l.pkg.vec_mulh = tgt::isa(pk.arch).vector_mulh;
             l.pkg.vec_accs = tgt::isa(pk.arch).vector_accs;
+            l.pkg.vec_sat = tgt::isa(pk.arch).vector_sat;
+            l.pkg.vec_absd = tgt::isa(pk.arch).vector_absd;
+            l.pkg.vec_sumw = tgt::isa(pk.arch).vector_sumw;
             l.pkg.vfloat = tgt::isa(pk.arch).vector_float;
             // binary16: every arm64 processor converts it (FCVT) and one with FEAT_FP16 computes with it;
             // x86-64 converts it with F16C.

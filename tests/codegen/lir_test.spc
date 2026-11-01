@@ -355,6 +355,9 @@ b0(v0: f32, v1: f64):
   v39 = vziphi.v2f64 v38, v30
   v40 = vinsert.1.v2f64 v39, v37
   v41 = vextract.1.f64 v40
+  v42 = bitcast.v2i64 v40
+  v43 = bitcast.v16i8 v40
+  v44 = vsumw.v2i64 v42, v43
   ret v41
 fn @memory
   sig (ptr, i64) -> void

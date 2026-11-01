@@ -520,6 +520,22 @@ extend Eval {
             }
             return true;
         }
+        if op == O_VSUMW {
+            let lb = type_bits(lane_type(t.ty), ptr);
+            let nb = type_bits(lane_type(b.type_of(t.b)), ptr);
+            let n = lanes(t.ty);
+            let g = lanes(b.type_of(t.b)) / n;
+            let wa = self.word(&f, b, t.a);
+            let wb = self.word(&f, b, t.b);
+            for k in 0..n {
+                let mut x = get_lane(&self.vals, wa, k, lb);
+                for j in 0..g {
+                    x = x.wrapping_add(get_lane(&self.vals, wb, k * g + j, nb));
+                }
+                set_lane(&mut self.vals, dst, k, lb, x);
+            }
+            return true;
+        }
         if op == O_HTOF {
             self.vals[dst as usize] = half_to_f32_bits(self.val(&f, b, t.a) as u32 & 0xFFFF);
             return true;

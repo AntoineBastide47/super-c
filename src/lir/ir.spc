@@ -313,7 +313,12 @@ pub(package) const O_MULHS: u8 = 85;
 pub(package) const O_BSWAP: u8 = 86;
 /// The bits of an integer of up to 8 bytes in reverse order (`Package.bitrev`).
 pub(package) const O_BITREV: u8 = 87;
-pub(package) const OP_COUNT: u8 = 88;
+/// Integer vector `a` plus the lanes of integer vector `b` (of the same bytes, narrower lanes) zero-extended
+/// and summed in runs of adjacent lanes, one run per lane of `a`: lane k adds lanes `k * g` to `k * g + g - 1`
+/// of `b`, `g` the ratio of their lane counts (a loop's widening sum, `lir::loops`; arm64's UADALP, x86-64's
+/// PSADBW).
+pub(package) const O_VSUMW: u8 = 88;
+pub(package) const OP_COUNT: u8 = 89;
 
 /// One opcode: its text name and its operand form.
 pub(package) struct OpInfo {
@@ -321,7 +326,7 @@ pub(package) struct OpInfo {
     pub(package) form: u8,
 }
 
-pub(package) const OPS: [OpInfo; 88] = [
+pub(package) const OPS: [OpInfo; 89] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -410,6 +415,7 @@ pub(package) const OPS: [OpInfo; 88] = [
     OpInfo { name: "mulhs", form: F_BIN },
     OpInfo { name: "bswap", form: F_UN },
     OpInfo { name: "bitrev", form: F_UN },
+    OpInfo { name: "vsumw", form: F_BIN },
 ];
 
 /// Whether integer vector `v` of `b` is a lane mask, each lane all ones or 0: a comparison's, an `and`, `or`
@@ -1494,6 +1500,18 @@ pub(package) struct Package {
     /// (`target::table::Isa`), 0 for no bound: the loop vectorizer interleaves fewer copies of reductions
     /// several registers wide.
     pub(package) vec_accs: u32,
+    /// The lane sizes whose saturating sums and differences (`SIMD_SAT_ADD`, `SIMD_SAT_SUB`) the native
+    /// backend computes in registers (`target::table::Isa`), a bit per size in bytes (1, 2, 4): the loop
+    /// vectorizer computes a saturating sum's idiom at the narrow lanes (`lir::loops`).
+    pub(package) vec_sat: u8,
+    /// The lane sizes whose absolute differences (`SIMD_ABS_DIFF`) the native backend computes in registers
+    /// (`target::table::Isa`), a bit per size in bytes (1, 2, 4): the loop vectorizer computes the idiom at
+    /// the narrow lanes.
+    pub(package) vec_absd: u8,
+    /// The widening sums (`O_VSUMW`) the native backend computes in registers (`target::table::Isa`), a bit
+    /// per pair of lane sizes (`lir::loops::sumw_bit`): the loop vectorizer sums a narrower value's lanes
+    /// into accumulators of such lanes.
+    pub(package) vec_sumw: u16,
     /// Whether the native backend computes the absolute value, the roundings to an integer and the fused
     /// multiply-add of float vectors in registers (`target::table::Isa`): the loop vectorizer then widens
     /// the calls of C's `fabs`, `floor`, `ceil`, `trunc` and `fma` (`lir::loops::lane_fn`).
@@ -1643,6 +1661,9 @@ extend Package {
             vops: 0,
             vec_mulh: 7,
             vec_accs: 0,
+            vec_sat: 7,
+            vec_absd: 7,
+            vec_sumw: 0x8CE,
             vfloat: true,
             mul_high: true,
             bswap: true,

@@ -224,15 +224,21 @@ pub(package) const V128_STORE: u32 = 0x0B;
 /// The bytes of one function body or data segment, and the relocations it holds.
 pub(package) struct Code {
     pub(package) bytes: Vector<u8>,
+    /// Per local access (`local`), in order: its code byte << 32 | its local, and its opcode (bits 6 and 7
+    /// the code generator's marks of a value's write, `wasmgen::Gen::value_write`).
+    pub(package) acc: Vector<u64>,
+    pub(package) acc_op: Vector<u8>,
 }
 
 extend Code {
     pub(package) fn new() Code {
-        return Code { bytes: Vector::<u8>::new() };
+        return Code { bytes: Vector::<u8>::new(), acc: Vector::<u64>::new(), acc_op: Vector::<u8>::new() };
     }
 
     pub(package) fn clear(self: &mut Self) {
         self.bytes.truncate(0);
+        self.acc.truncate(0);
+        self.acc_op.truncate(0);
     }
 
     pub(package) const fn len(self: &Self) u32 {
@@ -289,6 +295,8 @@ extend Code {
 
     /// `local.get`, `local.set` or `local.tee` (`op`) of local `k`.
     pub(package) fn local(self: &mut Self, op: u8, k: u32) {
+        self.acc.push(self.bytes.len() as u64 << 32 | k as u64);
+        self.acc_op.push(op);
         self.bytes.push(op);
         self.uleb(k);
     }

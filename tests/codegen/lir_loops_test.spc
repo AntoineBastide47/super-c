@@ -2984,6 +2984,99 @@ b3:
     }
 }
 
+// A bounds check of a row's element `y * w + x` in the loop over `x` versions that loop on
+// `w <= (len > y * w ? len - y * w : 0)`, and the copy without it vectorizes through the row's start; a
+// row past the length, a product that wraps, and a count past the length panic as before.
+@test
+fn row_bounds_checks_version_the_inner_loop() {
+    let src = M"(lir ptr 8
+sym @rows fn global noinline
+sym @drive fn global
+fn @rows
+  sig (ptr, i64, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i32 0
+  jmp b1(v4, v6)
+b1(v7: i64, v8: i32):
+  v9 = icmp.ult v7, v3
+  br v9, b2, b8
+b2:
+  v10 = mul.i64 v7, v2
+  jmp b3(v4, v8)
+b3(v11: i64, v12: i32):
+  v13 = icmp.ult v11, v2
+  br v13, b4, b7
+b4:
+  v14 = add.i64 v10, v11
+  v15 = icmp.uge v14, v1
+  br v15, b6, b5
+b5:
+  v16 = ptradd v0, v14 * 4
+  v17 = load.i32 v16 align 2
+  v18 = add.i32 v12, v17
+  v19 = add.i64 v11, v5
+  jmp b3(v19, v18)
+b6: cold
+  panic "index out of bounds"
+b7:
+  v20 = add.i64 v7, v5
+  jmp b1(v20, v12)
+b8:
+  v21 = sext.i64 v8
+  ret v21
+fn @drive
+  sig (i64, i64, i64) -> i64
+  slot s0 size 256 align 3
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = slotaddr s0
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 64
+  v7 = iconst.i32 7
+  jmp b1(v4)
+b1(v8: i64):
+  v9 = icmp.ult v8, v6
+  br v9, b2, b3
+b2:
+  v10 = trunc.i32 v8
+  v11 = mul.i32 v10, v7
+  v12 = ptradd v3, v8 * 4
+  store v11, v12 align 2
+  v13 = add.i64 v8, v5
+  jmp b1(v13)
+b3:
+  v14 = call.i64 @rows(v3, v0, v1, v2) : (ptr, i64, i64, i64) -> i64
+  ret v14
+)";
+    let both = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 200,
+        unswitch: 0,
+        rotate: 0,
+        vector: 2,
+        interleave: 2,
+        fin: 0,
+    };
+    let (b, a) = optimized(src, both);
+    let t = text_of(&a, "rows");
+    assert(t.contains("load.v4i32") && count(&t, "panic") == 1, t.as_str());
+    // (len, w, h): rows within the 64 elements, then a row past the length, a product that wraps to row 0,
+    // and widths past it.
+    let fits: [[u64; 3]; 5] = [[64, 8, 8], [64, 13, 4], [60, 30, 2], [64, 0, 9], [5, 64, 0]];
+    for k in 0..5usize {
+        let args: []u64 = [unsafe fits[k][0], unsafe fits[k][1], unsafe fits[k][2]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+    let past: [[u64; 3]; 4] = [[64, 13, 5], [59, 30, 2], [64, 0x8000000000000000, 2], [64, 65, 1]];
+    for k in 0..4usize {
+        let args: []u64 = [unsafe past[k][0], unsafe past[k][1], unsafe past[k][2]];
+        same_outcome(&b, &a, "drive", args, 0, true);
+    }
+}
+
 // With conversions and shifts in registers (`vops`): a narrower lane widened, a lane shifted by an
 // invariant and an integer converted to a float vectorize in one plan, the narrow vectors half a register.
 @test
@@ -5365,5 +5458,275 @@ b0(v0: i64):
     for k in 0..3usize {
         let args: []u64 = [unsafe vals[k]];
         same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// Package text `text` read, then optimized with loop budgets `bu` for a target of 16-byte registers that
+// converts vectors in registers and computes the saturating sums and absolute differences of the lane sizes
+// `sat` and `absd` and the widening sums `sumw` there (`Package.vec_sat`, `vec_absd`, `vec_sumw`).
+fn optimized_idioms(text: str, bu: lu::Budgets, sat: u8, absd: u8, sumw: u16) (Package, Package) {
+    let mut err = String::new();
+    let q = lparse::parse(text, &mut err);
+    assert(q.is_some(), err.as_str());
+    let before = q.unwrap();
+    let mut after = lparse::parse(text, &mut err).unwrap();
+    after.vector = 16;
+    after.vops = VOPS_SOME;
+    after.vec_sat = sat;
+    after.vec_absd = absd;
+    after.vec_sumw = sumw;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: bu });
+    let mut v = verify::Verifier::new();
+    for i in 0..after.syms.len() {
+        let s = after.syms[i];
+        if s.def != NONE && s.kind == SK_FUNC {
+            assert(v.check(&after, after.spell(s.name), &after.bodies[s.def as usize]), v.err.as_str());
+        }
+    }
+    return (before, after);
+}
+
+// A byte saturating sum (`select(s >u 255, -1, trunc(s))` of the bytes' 16-bit sum, a constant or a value
+// from before the loop) and absolute differences of zero- and sign-extended bytes (`select(d <s 0, -d, d)`)
+// that a 32-bit sum reads or a truncation stores vectorize at the byte lanes: `saturating_add`, `abs_diff`
+// and a widening sum (`vsumw`) into 4-byte lanes, or 8-byte ones where the target widens bytes there alone.
+// Without the target's forms the loops vectorize as before, through wider lanes. Each count runs as before.
+const IDIOMS: str = M"(lir ptr 8
+sym @sat fn global noinline
+sym @sat_k fn global noinline
+sym @sad fn global noinline
+sym @sads fn global noinline
+sym @adiff fn global noinline
+sym @drive fn global
+fn @sat
+  sig (ptr, i64, i8) -> void
+b0(v0: ptr, v1: i64, v2: i8):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i16 255
+  v6 = iconst.i8 -1
+  v7 = zext.i16 v2
+  jmp b1(v3)
+b1(v8: i64):
+  v9 = icmp.ult v8, v1
+  br v9, b2, b3
+b2:
+  v10 = ptradd v0, v8 * 1
+  v11 = load.i8 v10 align 0
+  v12 = zext.i16 v11
+  v13 = add.i16 v12, v7
+  v14 = trunc.i8 v13
+  v15 = icmp.ugt v13, v5
+  v16 = select.i8 v15, v6, v14
+  store v16, v10 align 0
+  v17 = add.i64 v8, v4
+  jmp b1(v17)
+b3:
+  ret
+fn @sat_k
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 256
+  v5 = iconst.i8 -1
+  v6 = iconst.i32 200
+  jmp b1(v2)
+b1(v7: i64):
+  v8 = icmp.ult v7, v1
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v7 * 1
+  v10 = load.i8 v9 align 0
+  v11 = zext.i32 v10
+  v12 = add.i32 v6, v11
+  v13 = trunc.i8 v12
+  v14 = icmp.ult v12, v4
+  v15 = select.i8 v14, v13, v5
+  store v15, v9 align 0
+  v16 = add.i64 v7, v3
+  jmp b1(v16)
+b3:
+  ret
+fn @sad
+  sig (ptr, ptr, i64) -> i32
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v2
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 1
+  v10 = load.i8 v9 align 0
+  v11 = zext.i32 v10
+  v12 = ptradd v1, v6 * 1
+  v13 = load.i8 v12 align 0
+  v14 = zext.i32 v13
+  v15 = sub.i32 v11, v14
+  v16 = sub.i32 v5, v15
+  v17 = icmp.slt v15, v5
+  v18 = select.i32 v17, v16, v15
+  v19 = add.i32 v7, v18
+  v20 = add.i64 v6, v4
+  jmp b1(v20, v19)
+b3:
+  ret v7
+fn @sads
+  sig (ptr, ptr, i64) -> i32
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 0
+  v6 = iconst.i32 -1
+  jmp b1(v3, v5)
+b1(v7: i64, v8: i32):
+  v9 = icmp.ult v7, v2
+  br v9, b2, b3
+b2:
+  v10 = ptradd v0, v7 * 1
+  v11 = load.i8 v10 align 0
+  v12 = sext.i32 v11
+  v13 = ptradd v1, v7 * 1
+  v14 = load.i8 v13 align 0
+  v15 = sext.i32 v14
+  v16 = sub.i32 v12, v15
+  v17 = neg.i32 v16
+  v18 = icmp.sgt v16, v6
+  v19 = select.i32 v18, v16, v17
+  v20 = add.i32 v8, v19
+  v21 = add.i64 v7, v4
+  jmp b1(v21, v20)
+b3:
+  ret v8
+fn @adiff
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i16 0
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v6 * 1
+  v9 = load.i8 v8 align 0
+  v10 = zext.i16 v9
+  v11 = ptradd v1, v6 * 1
+  v12 = load.i8 v11 align 0
+  v13 = zext.i16 v12
+  v14 = sub.i16 v10, v13
+  v15 = sub.i16 v5, v14
+  v16 = icmp.slt v14, v5
+  v17 = select.i16 v16, v15, v14
+  v18 = trunc.i8 v17
+  store v18, v8 align 0
+  v19 = add.i64 v6, v4
+  jmp b1(v19)
+b3:
+  ret
+fn @drive
+  sig (i64, i8) -> i64
+  slot s0 size 64 align 3
+  slot s1 size 64 align 3
+b0(v0: i64, v1: i8):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 64
+  v7 = iconst.i8 37
+  v8 = iconst.i8 11
+  v9 = iconst.i8 -59
+  jmp b1(v4)
+b1(v10: i64):
+  v11 = icmp.ult v10, v6
+  br v11, b2, b3
+b2:
+  v12 = trunc.i8 v10
+  v13 = mul.i8 v12, v7
+  v14 = add.i8 v13, v8
+  v15 = ptradd v2, v10 * 1
+  store v14, v15 align 0
+  v16 = mul.i8 v12, v9
+  v17 = ptradd v3, v10 * 1
+  store v16, v17 align 0
+  v18 = add.i64 v10, v5
+  jmp b1(v18)
+b3:
+  v19 = call.i32 @sad(v2, v3, v0) : (ptr, ptr, i64) -> i32
+  v20 = call.i32 @sads(v2, v3, v0) : (ptr, ptr, i64) -> i32
+  call @sat(v2, v0, v1) : (ptr, i64, i8) -> void
+  call @sat_k(v3, v0) : (ptr, i64) -> void
+  call @adiff(v2, v3, v0) : (ptr, ptr, i64) -> void
+  jmp b4(v4, v4)
+b4(v21: i64, v22: i64):
+  v23 = icmp.ult v21, v6
+  br v23, b5, b6
+b5:
+  v24 = ptradd v2, v21 * 1
+  v25 = load.i8 v24 align 0
+  v26 = zext.i64 v25
+  v27 = ptradd v3, v21 * 1
+  v28 = load.i8 v27 align 0
+  v29 = zext.i64 v28
+  v30 = iconst.i64 31
+  v31 = mul.i64 v22, v30
+  v32 = add.i64 v31, v26
+  v33 = mul.i64 v32, v30
+  v34 = add.i64 v33, v29
+  v35 = add.i64 v21, v5
+  jmp b4(v35, v34)
+b6:
+  v36 = zext.i64 v19
+  v37 = zext.i64 v20
+  v38 = iconst.i64 32
+  v39 = shl.i64 v37, v38
+  v40 = add.i64 v36, v39
+  v41 = xor.i64 v40, v22
+  ret v41
+)";
+
+@test
+fn byte_idioms_vectorize_at_their_lanes() {
+    let four = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 2, interleave: 2, fin: 0 };
+    // (saturating sizes, difference sizes, widening sums, the text each loop's vectors take)
+    let (b, a) = optimized_idioms(IDIOMS, four, 7, 7, lu::sumw_bit(1, 4) | lu::sumw_bit(1, 8));
+    let wants: [(str, str); 5] = [
+        ("sat", "vop.saturating_add.v16i8"),
+        ("sat_k", "vop.saturating_add.v16i8"),
+        ("sad", "vsumw.v4i32"),
+        ("sads", "vop.abs_diff.s.v16i8"),
+        ("adiff", "vop.abs_diff.v16i8"),
+    ];
+    for k in 0..5usize {
+        let (f, want) = unsafe wants[k];
+        let t = text_of(&a, f);
+        assert(t.contains(want), t.as_str());
+    }
+    // Bytes widened into 8-byte lanes alone: the 32-bit sums take them.
+    let (b8, a8) = optimized_idioms(IDIOMS, four, 7, 7, lu::sumw_bit(1, 8));
+    let t8 = text_of(&a8, "sad");
+    assert(t8.contains("vsumw.v2i64") && t8.contains("vop.abs_diff.v16i8"), t8.as_str());
+    // Without the forms: no idiom, the wider lanes.
+    let (b0, a0) = optimized_idioms(IDIOMS, four, 0, 0, 0);
+    let fs: [str; 5] = ["sat", "sat_k", "sad", "sads", "adiff"];
+    for k in 0..5usize {
+        let t = text_of(&a0, unsafe fs[k]);
+        assert(!t.contains("saturating_add") && !t.contains("abs_diff") && !t.contains("vsumw"), t.as_str());
+    }
+    assert(text_of(&a0, "sad").contains("load.v8i8"), text_of(&a0, "sad").as_str());
+    for n in 0..65u64 {
+        for kk in 0..4u64 {
+            let args: []u64 = [n, kk * 85];
+            let want = run_value(&b, "drive", args);
+            same_outcome(&b, &a, "drive", args, want, false);
+            same_outcome(&b8, &a8, "drive", args, want, false);
+            same_outcome(&b0, &a0, "drive", args, want, false);
+        }
     }
 }

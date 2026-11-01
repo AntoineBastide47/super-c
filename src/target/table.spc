@@ -74,6 +74,16 @@ pub(package) struct Isa {
     /// (`lir::ir::Package::vec_accs`): fewer copies interleave when theirs need more (a reduction of lanes
     /// several registers wide). 0 for no vectors.
     pub(package) vector_accs: u8,
+    /// The lane sizes whose saturating sums and differences the native backend computes in registers, a bit
+    /// per size in bytes (1, 2, 4): `lir::ir::Package::vec_sat`.
+    pub(package) vector_sat: u8,
+    /// The lane sizes whose absolute differences the native backend computes in registers:
+    /// `lir::ir::Package::vec_absd`.
+    pub(package) vector_absd: u8,
+    /// The widening sums of lanes into wider lanes the native backend computes in registers, a bit per pair
+    /// of sizes (`lir::loops::sumw_bit`): `lir::ir::Package::vec_sumw`. arm64 widens any lanes (UADDLP,
+    /// UADALP); x86-64 bytes into 8-byte lanes (PSADBW).
+    pub(package) vector_sumw: u16,
     /// Two accesses of adjacent bytes through one address are one instruction (arm64's `ldp`, `stp`):
     /// `lir::ir::Package::apairs`.
     pub(package) access_pairs: bool,
@@ -226,6 +236,9 @@ pub(package) const ISAS: [Isa; 3] = [
         arg_copy: 0xFFFFFFFF,
         vector_copies: 4,
         vector_accs: 8,
+        vector_sat: 3,
+        vector_absd: 3,
+        vector_sumw: 0x8,
         access_pairs: false,
         pairs: true,
         half_cvt: false,
@@ -258,6 +271,9 @@ pub(package) const ISAS: [Isa; 3] = [
         arg_copy: 16,
         vector_copies: 2,
         vector_accs: 16,
+        vector_sat: 7,
+        vector_absd: 7,
+        vector_sumw: 0x8CE,
         access_pairs: true,
         pairs: true,
         half_cvt: true,
@@ -290,6 +306,9 @@ pub(package) const ISAS: [Isa; 3] = [
         arg_copy: 0,
         vector_copies: 4,
         vector_accs: 0,
+        vector_sat: 0,
+        vector_absd: 0,
+        vector_sumw: 0,
         access_pairs: false,
         pairs: false,
         half_cvt: false,
@@ -627,6 +646,9 @@ const UNKNOWN_ISA: Isa = Isa {
     arg_copy: 0,
     vector_copies: 4,
     vector_accs: 0,
+    vector_sat: 0,
+    vector_absd: 0,
+    vector_sumw: 0,
     access_pairs: false,
     pairs: false,
     half_cvt: false,

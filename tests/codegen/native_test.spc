@@ -2694,17 +2694,17 @@ b0(v0: ptr, v1: ptr, v2: i64):
   v5 = wconst.v4i32 0x500000005, 0x500000005
   v6 = iconst.i64 0
   v7 = iconst.i64 1
-  jmp b1(v6, v4)
-b1(v8: i64, v9: v4i32):
-  v10 = icmp.ult v8, v2
-  br v10, b2, b3
+  jmp b1(v6, v4, v1)
+b1(v8: i64, v9: v4i32, v10: ptr):
+  v11 = icmp.ult v8, v2
+  br v11, b2, b3
 b2:
-  v11 = ptradd v1, v8 * 16
-  v12 = load.v4i32 v11 align 2
+  v12 = load.v4i32 v10 align 2
   v13 = lshr.v4i32 v12, v5
   v14 = add.v4i32 v9, v13
   v15 = add.i64 v8, v7
-  jmp b1(v15, v14)
+  v16 = ptradd v10+16
+  jmp b1(v15, v14, v16)
 b3:
   store v9, v0 align 2
   ret
@@ -2760,6 +2760,338 @@ int main(void) {
     assert_eq(run_sse41(lir, drv), 0);
     assert_eq(run_wide(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Saturating sums and differences, absolute differences and widening sums of integer lanes, as the loop
+// vectorizer makes them: in registers (arm64 UQADD, UABD, UADDLP and UADALP; x86-64 PADDUS, PSUBUS and
+// their `or`, PMAXS less PMINS or, bytes without SSE4.1, the difference negated where the second is
+// greater, PSADBW of an absolute difference or of zeros, then PADDQ), each lane width and sign, a loop's
+// accumulator, and 32- and 64-byte vectors (in registers with AVX2 and AVX-512, else lane by lane).
+@test
+fn lane_idioms_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @sat fn global
+sym @absd fn global
+sym @sums fn global
+sym @sad_loop fn global
+sym @wide32 fn global
+sym @wide64 fn global
+fn @sat
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v16i8 v1 align 0
+  v4 = load.v16i8 v2 align 0
+  v5 = vop.saturating_add.v16i8 (v3, v4)
+  store v5, v0 align 0
+  v6 = vop.saturating_add.s.v16i8 (v3, v4)
+  store v6, v0+16 align 0
+  v7 = vop.saturating_sub.v16i8 (v3, v4)
+  store v7, v0+32 align 0
+  v8 = vop.saturating_sub.s.v16i8 (v3, v4)
+  store v8, v0+48 align 0
+  v9 = load.v8i16 v1 align 1
+  v10 = load.v8i16 v2 align 1
+  v11 = vop.saturating_add.v8i16 (v9, v10)
+  store v11, v0+64 align 1
+  v12 = vop.saturating_add.s.v8i16 (v9, v10)
+  store v12, v0+80 align 1
+  v13 = vop.saturating_sub.v8i16 (v9, v10)
+  store v13, v0+96 align 1
+  v14 = vop.saturating_sub.s.v8i16 (v9, v10)
+  store v14, v0+112 align 1
+  ret
+fn @absd
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v16i8 v1 align 0
+  v4 = load.v16i8 v2 align 0
+  v5 = vop.abs_diff.v16i8 (v3, v4)
+  store v5, v0 align 0
+  v6 = vop.abs_diff.s.v16i8 (v3, v4)
+  store v6, v0+16 align 0
+  v7 = load.v8i16 v1 align 1
+  v8 = load.v8i16 v2 align 1
+  v9 = vop.abs_diff.v8i16 (v7, v8)
+  store v9, v0+32 align 1
+  v10 = vop.abs_diff.s.v8i16 (v7, v8)
+  store v10, v0+48 align 1
+  ret
+fn @sums
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v16i8 v1 align 0
+  v4 = load.v2i64 v0 align 3
+  v5 = vsumw.v2i64 v4, v3
+  store v5, v0 align 3
+  v6 = load.v4i32 v0+16 align 2
+  v7 = vsumw.v4i32 v6, v3
+  store v7, v0+16 align 2
+  v8 = load.v8i16 v1 align 1
+  v9 = load.v4i32 v0+32 align 2
+  v10 = vsumw.v4i32 v9, v8
+  store v10, v0+32 align 2
+  v11 = load.v2i64 v0+48 align 3
+  v12 = vsumw.v2i64 v11, v8
+  store v12, v0+48 align 3
+  v13 = load.v4i32 v1 align 2
+  v14 = load.v2i64 v0+64 align 3
+  v15 = vsumw.v2i64 v14, v13
+  store v15, v0+64 align 3
+  v16 = load.v16i8 v2 align 0
+  v17 = vop.abs_diff.v16i8 (v3, v16)
+  v18 = load.v2i64 v0+80 align 3
+  v19 = vsumw.v2i64 v18, v17
+  store v19, v0+80 align 3
+  v20 = load.v8i16 v0+96 align 1
+  v21 = vsumw.v8i16 v20, v3
+  store v21, v0+96 align 1
+  ret
+fn @sad_loop
+  sig (ptr, ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = load.v2i64 v0 align 3
+  jmp b1(v4, v6, v1, v2)
+b1(v7: i64, v8: v2i64, v9: ptr, v10: ptr):
+  v11 = icmp.ult v7, v3
+  br v11, b2, b3
+b2:
+  v12 = load.v16i8 v9 align 0
+  v13 = load.v16i8 v10 align 0
+  v14 = vop.abs_diff.v16i8 (v12, v13)
+  v15 = vsumw.v2i64 v8, v14
+  v16 = add.i64 v7, v5
+  v17 = ptradd v9+16
+  v18 = ptradd v10+16
+  jmp b1(v16, v15, v17, v18)
+b3:
+  store v8, v0 align 3
+  ret
+fn @wide32
+  sig (ptr, ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: ptr):
+  v4 = load.v32i8 v1 align 0
+  v5 = load.v32i8 v2 align 0
+  v6 = vop.saturating_add.v32i8 (v4, v5)
+  store v6, v0 align 0
+  v7 = vop.abs_diff.v32i8 (v4, v5)
+  store v7, v0+32 align 0
+  v8 = vop.abs_diff.s.v32i8 (v4, v5)
+  store v8, v0+64 align 0
+  v9 = load.v4i64 v3 align 3
+  v10 = vsumw.v4i64 v9, v7
+  store v10, v3 align 3
+  ret
+fn @wide64
+  sig (ptr, ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: ptr):
+  v4 = load.v64i8 v1 align 0
+  v5 = load.v64i8 v2 align 0
+  v6 = vop.saturating_sub.v64i8 (v4, v5)
+  store v6, v0 align 0
+  v7 = vop.abs_diff.v64i8 (v4, v5)
+  store v7, v0+64 align 0
+  v8 = vop.abs_diff.s.v64i8 (v4, v5)
+  store v8, v0+128 align 0
+  v9 = load.v8i64 v3 align 3
+  v10 = vsumw.v8i64 v9, v4
+  store v10, v3 align 3
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void sat(uint8_t *, const uint8_t *, const uint8_t *);
+void absd(uint8_t *, const uint8_t *, const uint8_t *);
+void sums(uint8_t *, const uint8_t *, const uint8_t *);
+void sad_loop(uint64_t *, const uint8_t *, const uint8_t *, int64_t);
+void wide32(uint8_t *, const uint8_t *, const uint8_t *, uint64_t *);
+void wide64(uint8_t *, const uint8_t *, const uint8_t *, uint64_t *);
+static uint64_t s = 0x9E3779B97F4A7C15u;
+static uint64_t next(void) { s = s * 6364136223846793005u + 1442695040888963407u; return s; }
+static int64_t clamp(int64_t v, int64_t lo, int64_t hi) { return v < lo ? lo : v > hi ? hi : v; }
+static uint64_t dist(int64_t x, int64_t y) { return (uint64_t)(x > y ? x - y : y - x); }
+int main(void) {
+  for (int r = 0; r < 64; r++) {
+    uint8_t a[128], b[128], o[256];
+    uint16_t a16[8], b16[8], o16[32];
+    uint32_t a32[4], o32[12];
+    uint64_t acc[16], o64[16];
+    for (int k = 0; k < 128; k++) { a[k] = (uint8_t)(next() >> 56); b[k] = (uint8_t)(next() >> 56); }
+    if (r == 0) for (int k = 0; k < 128; k++) { a[k] = (uint8_t)(k & 1 ? 0xFF : k * 2); b[k] = (uint8_t)(k & 2 ? 0x80 : 0x7F - k); }
+    memcpy(a16, a, 16); memcpy(b16, b, 16); memcpy(a32, a, 16);
+    sat(o, a, b);
+    memcpy(o16, o + 64, 64);
+    for (int k = 0; k < 16; k++) {
+      if (o[k] != clamp(a[k] + b[k], 0, 255)) return 1;
+      if ((int8_t)o[16 + k] != clamp((int8_t)a[k] + (int8_t)b[k], -128, 127)) return 2;
+      if (o[32 + k] != clamp(a[k] - b[k], 0, 255)) return 3;
+      if ((int8_t)o[48 + k] != clamp((int8_t)a[k] - (int8_t)b[k], -128, 127)) return 4;
+    }
+    for (int k = 0; k < 8; k++) {
+      if (o16[k] != clamp(a16[k] + b16[k], 0, 65535)) return 5;
+      if ((int16_t)o16[8 + k] != clamp((int16_t)a16[k] + (int16_t)b16[k], -32768, 32767)) return 6;
+      if (o16[16 + k] != clamp(a16[k] - b16[k], 0, 65535)) return 7;
+      if ((int16_t)o16[24 + k] != clamp((int16_t)a16[k] - (int16_t)b16[k], -32768, 32767)) return 8;
+    }
+    absd(o, a, b);
+    memcpy(o16, o + 32, 32);
+    for (int k = 0; k < 16; k++) {
+      if (o[k] != dist(a[k], b[k])) return 9;
+      if (o[16 + k] != (uint8_t)dist((int8_t)a[k], (int8_t)b[k])) return 10;
+    }
+    for (int k = 0; k < 8; k++) {
+      if (o16[k] != dist(a16[k], b16[k])) return 11;
+      if (o16[8 + k] != (uint16_t)dist((int16_t)a16[k], (int16_t)b16[k])) return 12;
+    }
+    for (int k = 0; k < 16; k++) acc[k] = next();
+    memcpy(o, acc, 128);
+    sums(o, a, b);
+    memcpy(o64, o, 128);
+    const uint32_t *acc32 = (const uint32_t *)acc;
+    const uint16_t *acc16 = (const uint16_t *)acc;
+    memcpy(o32, o + 16, 48);
+    memcpy(o16, o + 96, 16);
+    for (int k = 0; k < 2; k++) {
+      uint64_t e = acc[k], f = acc[6 + k], g = acc[8 + k], h = acc[10 + k];
+      for (int j = 0; j < 8; j++) { e += a[8 * k + j]; h += dist(a[8 * k + j], b[8 * k + j]); }
+      for (int j = 0; j < 4; j++) f += a16[4 * k + j];
+      for (int j = 0; j < 2; j++) g += a32[2 * k + j];
+      if (o64[k] != e) return 13;
+      if (o64[6 + k] != f) return 16;
+      if (o64[8 + k] != g) return 17;
+      if (o64[10 + k] != h) return 18;
+    }
+    for (int k = 0; k < 4; k++) {
+      uint32_t e = acc32[4 + k] + a[4 * k] + a[4 * k + 1] + a[4 * k + 2] + a[4 * k + 3];
+      uint32_t f = acc32[8 + k] + a16[2 * k] + a16[2 * k + 1];
+      if (o32[k] != e) return 14;
+      if (o32[4 + k] != f) return 15;
+    }
+    for (int k = 0; k < 8; k++) if (o16[k] != (uint16_t)(acc16[48 + k] + a[2 * k] + a[2 * k + 1])) return 19;
+    uint64_t sl[2] = {acc[0], acc[1]};
+    sad_loop(sl, a, b, 8);
+    for (int k = 0; k < 2; k++) {
+      uint64_t e = acc[k];
+      for (int v = 0; v < 8; v++) for (int j = 0; j < 8; j++) e += dist(a[16 * v + 8 * k + j], b[16 * v + 8 * k + j]);
+      if (sl[k] != e) return 20;
+    }
+    uint64_t w[8];
+    memcpy(w, acc, 64);
+    wide32(o, a, b, w);
+    for (int k = 0; k < 32; k++) {
+      if (o[k] != clamp(a[k] + b[k], 0, 255)) return 21;
+      if (o[32 + k] != dist(a[k], b[k])) return 22;
+      if (o[64 + k] != (uint8_t)dist((int8_t)a[k], (int8_t)b[k])) return 23;
+    }
+    for (int k = 0; k < 4; k++) {
+      uint64_t e = acc[k];
+      for (int j = 0; j < 8; j++) e += dist(a[8 * k + j], b[8 * k + j]);
+      if (w[k] != e) return 24;
+    }
+    memcpy(w, acc, 64);
+    wide64(o, a, b, w);
+    for (int k = 0; k < 64; k++) {
+      if (o[k] != clamp(a[k] - b[k], 0, 255)) return 25;
+      if (o[64 + k] != dist(a[k], b[k])) return 26;
+      if (o[128 + k] != (uint8_t)dist((int8_t)a[k], (int8_t)b[k])) return 27;
+    }
+    for (int k = 0; k < 8; k++) {
+      uint64_t e = acc[k];
+      for (int j = 0; j < 8; j++) e += a[8 * k + j];
+      if (w[k] != e) return 28;
+    }
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_sse41(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+    assert_eq(run_zmm(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// wasm32 keeps a value the next instruction reads on the operand stack: neither `local.set` nor
+// `local.get` when nothing reads it again, `local.tee` when an instruction does; an equality with 0 is
+// `eqz`; a body that ends in its return ends without it. Each runs as before.
+@test
+fn wasm_values_stay_on_the_stack() {
+    let lir = M"(lir ptr 8
+sym @sq1 fn global
+sym @tw fn global
+sym @isz fn global
+fn @sq1
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = mul.i32 v0, v0
+  v2 = iconst.i32 1
+  v3 = add.i32 v1, v2
+  ret v3
+fn @tw
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = mul.i32 v0, v0
+  v2 = add.i32 v1, v1
+  ret v2
+fn @isz
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.eq v0, v1
+  v3 = zext.i32 v2
+  ret v3
+)";
+    let mut obj = Vector::<u8>::new();
+    let t = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&t, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    // local.get 0, local.get 0, i32.mul, then: i32.const 1, i32.add, end; local.tee 1, local.get 1, i32.add,
+    // end; and local.get 0, i32.eqz, end.
+    let sq1: [u8; 9] = [0x20, 0x00, 0x20, 0x00, 0x6C, 0x41, 0x01, 0x6A, 0x0B];
+    let tw: [u8; 11] = [0x20, 0x00, 0x20, 0x00, 0x6C, 0x22, 0x01, 0x20, 0x01, 0x6A, 0x0B];
+    let isz: [u8; 4] = [0x20, 0x00, 0x45, 0x0B];
+    assert(holds(&obj, sq1[0..9]), "sq1");
+    assert(holds(&obj, tw[0..11]), "tw");
+    assert(holds(&obj, isz[0..4]), "isz");
+    let drv = M"(#include <stdint.h>
+int32_t sq1(int32_t);
+int32_t tw(int32_t);
+int32_t isz(int32_t);
+int main(void) {
+  for (int32_t x = -3; x < 4; x++) {
+    if (sq1(x) != x * x + 1 || tw(x) != 2 * x * x || isz(x) != (x == 0)) return 1;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
+// Whether `bytes` holds `seq` at some offset.
+fn holds(bytes: &Vector<u8>, seq: []u8) bool {
+    let n = seq.len();
+    if bytes.len() < n {
+        return false;
+    }
+    for at in 0..bytes.len() - n + 1 {
+        let mut k: usize = 0;
+        while k < n && bytes[at + k] == seq[k] {
+            k += 1;
+        }
+        if k == n {
+            return true;
+        }
+    }
+    return false;
 }
 
 // A body whose one call is in a rare block, with aggregates in registers that its entry stores into slots,

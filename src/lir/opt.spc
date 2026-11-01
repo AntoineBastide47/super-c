@@ -1228,6 +1228,9 @@ extend Opt {
         self.unr.apairs = pk.apairs;
         self.unr.vmulh = pk.vec_mulh;
         self.unr.vaccs = pk.vec_accs;
+        self.unr.vsat = pk.vec_sat;
+        self.unr.vabsd = pk.vec_absd;
+        self.unr.vsumw = pk.vec_sumw;
         self.unr.vfn.truncate(0);
         for s in 0..b.syms.len() {
             let sy = pk.syms[b.syms[s] as usize];
@@ -6213,6 +6216,7 @@ extend Opt {
             self.pow2(b, i);
             self.shift_pair(pk, b, i);
             self.add_pair(pk, b, i);
+            self.split_base(b, k, i);
             if self.divide(pk, b, k, i) || self.rem_by_quotient(b, k, i) {
                 return true;
             }
@@ -6278,6 +6282,40 @@ extend Opt {
         };
         let kv = self.constant(b, t.ty, le::trunc_bits(s1.wrapping_add(s2), type_bits(t.ty, pk.ptr_bytes)));
         b.insts[i as usize] = Inst { op: O_ADD, ty: t.ty, aux: 0, a: x.a, b: kv, c: VNONE };
+    }
+
+    // Address `i` of block `k`, `ptradd p, (x + y) * s + c` in a loop that defines `x` but neither `p` nor
+    // `y`: in place `ptradd q, x * s + c`, `q = ptradd p, y * s` made in the loop's preheader. The same
+    // address (both wrap alike); the loop's access steps through `x` alone, the shape the loop vectorizer
+    // reads (a row's elements `m[r * w + x]`).
+    fn split_base(self: &mut Self, b: &mut Body, k: u32, i: u32) {
+        let t = b.insts[i as usize];
+        let h = self.inner[k as usize];
+        if t.op != O_PTRADD || h == NONE || self.preh[h as usize] == NONE || t.b == VNONE || (t.b & (VPARAM | VFLAG)) != 0 || !self.outside(
+            t.a,
+            h,
+        ) {
+            return;
+        }
+        let s = b.insts[t.b as usize];
+        if s.op != O_ADD {
+            return;
+        }
+        for side in 0..2u32 {
+            let (x, y) = if side == 0 {
+                (s.a, s.b)
+            } else {
+                (s.b, s.a)
+            };
+            if self.outside(x, h) || !self.outside(y, h) || const_of(b, y).is_some() {
+                continue;
+            }
+            let p = self.preh[h as usize];
+            let at = b.blocks[p as usize].start + b.blocks[p as usize].len - 1;
+            let q = self.placed(b, p, at, Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux, a: t.a, b: y, c: 0 }, false);
+            b.insts[i as usize] = Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux, a: q, b: x, c: t.c };
+            return;
+        }
     }
 
     // Instruction `i`, a logical shift right of a shift left by the same constant (or left of right): in
@@ -13452,7 +13490,7 @@ const fn pure_ops() [bool; 256] {
     for k in 0..256u32 {
         let op = k as u8;
         unsafe {
-            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_BITREV || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT;
+            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_BITREV || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT || op == O_VSUMW;
         }
     }
     return t;

@@ -78,6 +78,11 @@ pub(package) struct Gen {
     rels: Vector<wo::WRel>,
     rows: Vector<u64>, // with debug information, per change of location: its code byte << 32 | its `lines` index
     body_at: u32, // where the body starts past the prologue
+    asm_code: bool, // the body holds assembled code, whose local accesses `Code::local` does not see
+    ret_end: u32, // the code byte past the last `return`
+    nxt: Vector<u32>, // `stack_values`: per local access, the next of its local (NONE: none)
+    last_of: Vector<u32>, // `stack_values`: per local, its access seen last
+    cuts: Vector<u64>, // `stack_values`: the code ranges it removes, start << 32 | end
     me: wa::WSig, // the body's own signature
     cs: wa::WSig, // a call's
     enc: Vector<u8>,
@@ -185,6 +190,11 @@ extend Gen {
             rels: Vector::<wo::WRel>::new(),
             rows: Vector::<u64>::new(),
             body_at: 0,
+            asm_code: false,
+            ret_end: NONE,
+            nxt: Vector::<u32>::new(),
+            last_of: Vector::<u32>::new(),
+            cuts: Vector::<u64>::new(),
             me: wa::WSig::new(),
             cs: wa::WSig::new(),
             enc: Vector::<u8>::new(),
@@ -430,6 +440,8 @@ extend Gen {
         self.rows.truncate(0);
         self.locals.truncate(0);
         self.labels.truncate(0);
+        self.asm_code = false;
+        self.ret_end = NONE;
         self.tasks.truncate(0);
         for k in 0..CL_N as usize {
             self.free.index_mut(k).truncate(0);
@@ -463,9 +475,116 @@ extend Gen {
                 return false;
             }
         }
-        self.c.op(w::UNREACHABLE);
+        // A return that ends the code: the function's end returns the values.
+        if self.ret_end == self.c.len() {
+            let _ = self.c.bytes.pop();
+        } else {
+            self.c.op(w::UNREACHABLE);
+        }
         self.c.op(w::END);
+        if !self.asm_code {
+            self.stack_values();
+        }
         return self.finish(s);
+    }
+
+    // The values an instruction or an edge writes to their local that the code reads at once (`local.set l`
+    // then `local.get l`, adjacent bytes: the read runs right after the write, and only then) stay on the
+    // operand stack. Both go when one instruction reads the value (VW_ONE) and the next access of `l` in the
+    // code writes it: every read of `l` that sees this write reads the value, and that instruction's code,
+    // which starts at the read, reads it again before it writes `l` if at all. Else the write becomes
+    // `local.tee l`. The scratch locals of one instruction's code, which its own loops may carry, stay. The
+    // relocations and the line rows move with the code.
+    fn stack_values(self: &mut Self) {
+        let n = self.c.acc.len();
+        if n < 2 {
+            return;
+        }
+        let nl = self.nwp as usize + self.locals.len();
+        fill(&mut self.nxt, n, NONE);
+        fill(&mut self.last_of, nl, NONE);
+        let mut i = n;
+        // Each step visits one access, last first.
+        while i > 0 {
+            i -= 1;
+            let l = (self.c.acc[i] & 0xFFFFFFFF) as usize;
+            self.nxt[i] = self.last_of[l];
+            self.last_of[l] = i as u32;
+        }
+        self.cuts.truncate(0);
+        for i in 0..n - 1 {
+            let j = self.nxt[i];
+            if (self.c.acc_op[i] & ~VW_ONE) != (w::LOCAL_SET | VW_VALUE) || j == NONE || (self.c.acc_op[j as usize] & VW_OP) != w::LOCAL_GET {
+                continue;
+            }
+            let l = (self.c.acc[i] & 0xFFFFFFFF) as u32;
+            let at = (self.c.acc[i] >> 32) as u32;
+            let len = 1 + uleb_len(l);
+            let jat = (self.c.acc[j as usize] >> 32) as u32;
+            if jat != at + len {
+                continue;
+            }
+            let k = self.nxt[j as usize];
+            if (self.c.acc_op[i] & VW_ONE) == 0 || k != NONE && (self.c.acc_op[k as usize] & VW_OP) == w::LOCAL_GET {
+                self.c.bytes[at as usize] = w::LOCAL_TEE;
+                self.cuts.push(jat as u64 << 32 | (jat + len) as u64);
+            } else {
+                self.cuts.push(at as u64 << 32 | (jat + len) as u64);
+            }
+        }
+        if self.cuts.len() == 0 {
+            return;
+        }
+        // The code without the cuts, which follow in order.
+        let mut out: usize = 0;
+        let mut q: usize = 0;
+        let total = self.c.bytes.len();
+        for p in 0..total {
+            while q < self.cuts.len() && (self.cuts[q] & 0xFFFFFFFF) as usize <= p {
+                q += 1;
+            }
+            if q < self.cuts.len() && (self.cuts[q] >> 32) as usize <= p {
+                continue;
+            }
+            self.c.bytes[out] = self.c.bytes[p];
+            out += 1;
+        }
+        self.c.bytes.truncate(out);
+        // The relocations and the rows in code order, each walk past the cuts before them.
+        let mut cut = Cursor { q: 0, d: 0 };
+        self.body_at = self.moved(&mut cut, self.body_at);
+        cut = Cursor { q: 0, d: 0 };
+        for r in 0..self.rels.len() {
+            let o = self.rels[r].off;
+            self.rels.index_mut(r).off = self.moved(&mut cut, o);
+        }
+        // Rows at one byte after the move: the last stands.
+        cut = Cursor { q: 0, d: 0 };
+        let mut m: usize = 0;
+        for r in 0..self.rows.len() {
+            let row = self.rows[r];
+            let o = self.moved(&mut cut, (row >> 32) as u32) as u64;
+            if m != 0 && self.rows[m - 1] >> 32 == o {
+                m -= 1;
+            }
+            self.rows[m] = o << 32 | row & 0xFFFFFFFF;
+            m += 1;
+        }
+        self.rows.truncate(m);
+    }
+
+    // Code byte `o` past the cuts (`stack_values`), `o` at least the last one `at` saw: less the bytes cut
+    // before it; one inside a cut, at the cut's start.
+    fn moved(self: &Self, at: &mut Cursor, o: u32) u32 {
+        // Each step passes one cut.
+        while at.q < self.cuts.len() && self.cuts[at.q] as u32 <= o {
+            at.d += self.cuts[at.q] as u32 - (self.cuts[at.q] >> 32) as u32;
+            at.q += 1;
+        }
+        if at.q < self.cuts.len() && (self.cuts[at.q] >> 32) as u32 < o {
+            return (self.cuts[at.q] >> 32) as u32 - at.d;
+        }
+        return o - at.d;
     }
 
     // The frame: the call area, the slots, the entry's spills; the homes follow (`assign`). False when a
@@ -622,6 +741,30 @@ const fn pick8(c: bool, a: u8, b: u8) u8 {
         return a;
     }
     return b;
+}
+
+// A walk over the cuts of `Gen::stack_values` in code order: the next cut, the bytes the ones before it cut.
+struct Cursor {
+    q: usize,
+    d: u32,
+}
+
+// The marks `Gen::value_write` puts on a local access's opcode (`Code.acc_op`): the write of a value, of one
+// read; the opcode's bits.
+const VW_VALUE: u8 = 0x80;
+const VW_ONE: u8 = 0x40;
+const VW_OP: u8 = 0x3F;
+
+// The bytes of `x` as an unsigned LEB128.
+const fn uleb_len(x: u32) u32 {
+    let mut n: u32 = 1;
+    let mut y = x >> 7;
+    // Each step takes 7 bits.
+    while y != 0 {
+        n += 1;
+        y >>= 7;
+    }
+    return n;
 }
 
 const fn ast_max(a: u32, b: u32) u32 {
@@ -1188,6 +1331,14 @@ extend Gen {
             return;
         }
         self.c.local(w::LOCAL_SET, l);
+        self.value_write(self.vx(i));
+    }
+
+    // The last local access, a `local.set` of value index `x`: marked for `stack_values` (VW_VALUE, and
+    // VW_ONE when one instruction or edge reads it, which no loop keeps).
+    fn value_write(self: &mut Self, x: u32) {
+        let n = self.c.acc_op.len();
+        self.c.acc_op[n - 1] = w::LOCAL_SET | VW_VALUE | pick8(self.lv.uses[x as usize] == 1, VW_ONE, 0);
     }
 
     // The frame offset of memory value `v`.
@@ -1587,9 +1738,7 @@ extend Gen {
     }
 
     // The high half of a product (`O_MULHU`, `O_MULHS`): up to 32 bits, the extended operands' 64-bit
-    // product shifted down; 64 bits, from the four products of the operands' 32-bit halves (wasm has no
-    // wider multiply): high = ah * bh + (ah * bl >> 32) + (cross >> 32), cross = (al * bl >> 32) +
-    // (ah * bl & m) + al * bh, less for a signed one each operand where the other is negative.
+    // product shifted down; 64 bits, `mulh64` of the operands.
     fn mulhu(self: &mut Self, i: u32, t: Inst) bool {
         let sgn = t.op == O_MULHS;
         if t.ty != T_I64 {
@@ -1620,13 +1769,29 @@ extend Gen {
             self.put(i);
             return true;
         }
+        let x = self.tmp(w::I64);
+        let y = self.tmp(w::I64);
+        self.get(t.a);
+        self.c.local(w::LOCAL_SET, x);
+        self.get(t.b);
+        self.c.local(w::LOCAL_SET, y);
+        self.mulh64(sgn, x, y);
+        self.put(i);
+        return true;
+    }
+
+    // Push the high 64 bits of the product of i64 locals `x` and `y` (signed `sgn`), from the four products
+    // of their 32-bit halves (wasm has no wider multiply): high = ah * bh + (ah * bl >> 32) + (cross >> 32),
+    // cross = (al * bl >> 32) + (ah * bl & m) + al * bh, less for a signed one each operand where the other
+    // is negative.
+    fn mulh64(self: &mut Self, sgn: bool, x: u32, y: u32) {
         let al = self.tmp(w::I64);
         let ah = self.tmp(w::I64);
         let bl = self.tmp(w::I64);
         let bh = self.tmp(w::I64);
         let hl = self.tmp(w::I64);
-        self.halves(t.a, al, ah);
-        self.halves(t.b, bl, bh);
+        self.halves(x, al, ah);
+        self.halves(y, bl, bh);
         // hl = ah * bl
         self.c.local(w::LOCAL_GET, ah);
         self.c.local(w::LOCAL_GET, bl);
@@ -1659,26 +1824,56 @@ extend Gen {
         self.c.op(w::I64_ADD);
         if sgn {
             for k in 0..2u32 {
-                let (x, y) = if k == 0 {
-                    (t.a, t.b)
+                let (p, q) = if k == 0 {
+                    (x, y)
                 } else {
-                    (t.b, t.a)
+                    (y, x)
                 };
-                self.get(x);
+                self.c.local(w::LOCAL_GET, p);
                 self.c.i64_const(63);
                 self.c.op(w::I64_SHR_S);
-                self.get(y);
+                self.c.local(w::LOCAL_GET, q);
                 self.c.op(w::I64_AND);
                 self.c.op(w::I64_SUB);
             }
         }
-        self.put(i);
-        return true;
     }
 
-    // The 32-bit halves of i64 value `v` into locals `lo` and `hi`.
-    fn halves(self: &mut Self, v: Value, lo: u32, hi: u32) {
-        self.get(v);
+    // The high halves of the products of each pair of lanes of vectors `t.a` and `t.b` (`O_MULHU`,
+    // `O_MULHS`): lanes below 8 bytes as the extended lanes' product shifted down, 8-byte ones by `mulh64`.
+    fn vec_mulh(self: &mut Self, i: u32, t: Inst) {
+        let sgn = t.op == O_MULHS;
+        let lt = lane_type(t.ty);
+        let lb = type_bits(lt, 4);
+        let d = self.vdef(i);
+        let x = self.tmp(w::I64);
+        let y = self.tmp(w::I64);
+        for k in 0..lanes(t.ty) {
+            self.ld_lane_to(x, t.a, k, lt, sgn, false);
+            self.ld_lane_to(y, t.b, k, lt, sgn, false);
+            if lb == 64 {
+                self.mulh64(sgn, x, y);
+            } else {
+                self.c.local(w::LOCAL_GET, x);
+                self.c.local(w::LOCAL_GET, y);
+                self.c.op(w::I64_MUL);
+                self.c.i64_const(lb);
+                self.c.op(
+                    if sgn {
+                        w::I64_SHR_S
+                    } else {
+                        w::I64_SHR_U
+                    },
+                );
+            }
+            self.c.local(w::LOCAL_SET, x);
+            self.st_lane(x, d, k, lt, false);
+        }
+    }
+
+    // The 32-bit halves of i64 local `v` into locals `lo` and `hi`.
+    fn halves(self: &mut Self, v: u32, lo: u32, hi: u32) {
+        self.c.local(w::LOCAL_GET, v);
         self.c.local(w::LOCAL_TEE, lo);
         self.c.i64_const(32);
         self.c.op(w::I64_SHR_U);
@@ -2027,6 +2222,21 @@ extend Gen {
                 self.c.op(w::I32_AND);
                 self.c.op(w::I32_OR);
             }
+            self.put(i);
+            return true;
+        }
+        // An equality with 0: `eqz`.
+        let mut z: u64 = 1;
+        let x = if c == C_EQ && self.const_of(t.b, &mut z) && z == 0 {
+            t.a
+        } else if c == C_EQ && self.const_of(t.a, &mut z) && z == 0 {
+            t.b
+        } else {
+            VNONE
+        };
+        if x != VNONE {
+            self.get(x);
+            self.c.op(pick8(ty == T_I64, w::I64_EQZ, w::I32_EQZ));
             self.put(i);
             return true;
         }
@@ -2986,6 +3196,7 @@ extend Gen {
                 self.c.op(w::DROP);
             } else {
                 self.c.local(w::LOCAL_SET, l);
+                self.value_write(x);
             }
         }
         if nmem == 0 {
@@ -3270,6 +3481,7 @@ extend Gen {
         }
         self.epilogue();
         self.c.op(w::RETURN);
+        self.ret_end = self.c.len();
         return true;
     }
 }
@@ -3845,6 +4057,10 @@ extend Gen {
             self.vec_arith(i, t);
             return true;
         }
+        if op == O_MULHS || op == O_MULHU {
+            self.vec_mulh(i, t);
+            return true;
+        }
         if op == O_VCMP {
             self.vcmp(i, t);
             return true;
@@ -3888,6 +4104,25 @@ extend Gen {
                 self.ld_lane(t.b, h + k, lt, false, true);
                 self.c.local(w::LOCAL_SET, x);
                 self.st_lane(x, d, 2 * k + 1, lt, true);
+            }
+            return true;
+        }
+        if op == O_VSUMW {
+            // Lane k of `a` plus lanes `k * g` to `k * g + g - 1` of `b` zero-extended.
+            let lt = lane_type(t.ty);
+            let nl = lane_type(self.vt(t.b));
+            let n = lanes(t.ty);
+            let g = lanes(self.vt(t.b)) / n;
+            let d = self.vdef(i);
+            let x = self.tmp(w::I64);
+            for k in 0..n {
+                self.ld_lane(t.a, k, lt, false, false);
+                for j in 0..g {
+                    self.ld_lane(t.b, k * g + j, nl, false, false);
+                    self.c.op(w::I64_ADD);
+                }
+                self.c.local(w::LOCAL_SET, x);
+                self.st_lane(x, d, k, lt, false);
             }
             return true;
         }
@@ -5943,6 +6178,7 @@ extend Gen {
 
     // Assemble template `text` onto the code, its symbols as relocations.
     fn asm_text(self: &mut Self, text: str) bool {
+        self.asm_code = true;
         let mut sts = Vector::<asmr::Stmt>::new();
         asmr::statements(text, true, &mut sts);
         let none = Vector::<asmr::WasmType>::new();

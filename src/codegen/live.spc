@@ -103,6 +103,10 @@ pub(package) const FOLD_LANE_MUL: u64 = 8589934592;
 /// with `k + s` at least the width, folds into it: every bit the extension clears leaves the result, so
 /// the shift reads the narrow value's register (`shl_source`). Neither may fold into anything else.
 pub(package) const FOLD_ZSHL: u64 = 17179869184;
+/// `FOLD_VSAD`: an unsigned absolute difference of byte vectors (`vop` `SIMD_ABS_DIFF`) that one widening
+/// sum into 8-byte lanes (`O_VSUMW`) alone reads folds into it: the sum takes the two vectors (x86-64
+/// `psadbw`).
+pub(package) const FOLD_VSAD: u64 = 34359738368;
 /// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
 /// flags keep, a folded sum or extension, the sum with the carry.
 pub(package) const CARRY_NONE: u8 = 0;
@@ -526,6 +530,12 @@ extend Live {
                 b.insts[t.b as usize].a,
             ) && self.pfold[b.insts[t.b as usize].a as usize] {
                 self.pfold[t.b as usize] = true;
+            }
+            if (self.fold_ops & FOLD_VSAD) != 0 && t.op == O_VSUMW {
+                let p = self.vsad_diff(b, t);
+                if p != VNONE {
+                    self.pfold[p as usize] = true;
+                }
             }
             if (self.fold_ops & FOLD_VWADD) != 0 && t.op == O_ADD && is_vec(t.ty) {
                 let p = self.vwadd_ext(b, t);
@@ -1442,6 +1452,22 @@ extend Live {
             return t.a;
         }
         return VNONE;
+    }
+
+    // The absolute difference `FOLD_VSAD` folds into widening sum `t`: its second operand, an unsigned
+    // `SIMD_ABS_DIFF` of two byte vectors of one use, when `t` sums into 8-byte lanes. VNONE when none.
+    pub(package) fn vsad_diff(self: &Self, b: &Body, t: Inst) Value {
+        let v = t.b;
+        if type_bytes(lane_type(t.ty), 8) != 8 || (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.count[v as usize] != 1 {
+            return VNONE;
+        }
+        let d = b.insts[v as usize];
+        let code = (core::OP_SIMD + core::SIMD_ABS_DIFF as u32) as u16;
+        return if d.op == O_VOP && d.aux == code && d.b == 2 && type_bytes(lane_type(d.ty), 8) == 1 {
+            v
+        } else {
+            VNONE
+        };
     }
 
     // The extension `FOLD_VWADD` folds into vector sum `t`: its second operand, else its first. VNONE when

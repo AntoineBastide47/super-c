@@ -343,6 +343,18 @@ extend Verifier {
         if op == O_VUNZIP || op == O_VZIPLO || op == O_VZIPHI {
             return self.need(name, b, i, is_vec(t.ty) && ta == t.ty && tb == t.ty, "two vectors of the result's type");
         }
+        if op == O_VSUMW {
+            return self.need(
+                name,
+                b,
+                i,
+                is_vec(t.ty) && is_int(lane_type(t.ty)) && ta == t.ty && is_vec(tb) && is_int(lane_type(tb)) && type_bytes(
+                    tb,
+                    8,
+                ) == type_bytes(t.ty, 8) && lanes(tb) > lanes(t.ty),
+                "an integer vector of the result's type and one of its bytes in narrower lanes",
+            );
+        }
         if op == O_VEXTRACT {
             return self.need(
                 name,

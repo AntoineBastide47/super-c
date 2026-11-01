@@ -699,3 +699,89 @@ fn main() i32 {
 fn loops_counting_down_match_across_profiles() {
     h::expect_same_output("loops counting down", DOWN_LOOPS, ["--profile=debug"], ["--profile=release"]);
 }
+
+// Byte idioms the loop vectorizer computes at the narrow lanes, and a row's elements whose bounds check one
+// test before the row's loop proves: saturating sums of bytes (by a value, a constant, of two slices, the
+// test either way) and of 16-bit lanes, absolute differences of zero- and sign-extended bytes summed into
+// 32 bits or stored as bytes, and widening sums of bytes and 16-bit lanes, every length from 0 past two
+// vectors; rows of every shape within the matrix. Then rows past the matrix and a sum's second slice one
+// short, whose checks fail.
+const BYTE_IDIOMS: str = M"(@noinline fn sat_by(s: []mut u8, k: u8) { for i in 0..s.len() { let v = s[i] as u16 + k as u16; s[i] = if v > 255 { 255 } else { v as u8 }; } }
+@noinline fn sat_const(s: []mut u8) { for i in 0..s.len() { let v = s[i] as u32 + 200; s[i] = if v < 256 { v as u8 } else { 255 }; } }
+@noinline fn sat_two(d: []mut u8, a: []u8, b: []u8) { for i in 0..d.len() { let v = a[i] as u16 + b[i] as u16; d[i] = if v >= 256 { 255 } else { v as u8 }; } }
+@noinline fn sat16(s: []mut u16, k: u16) { for i in 0..s.len() { let v = s[i] as u32 + k as u32; s[i] = if v > 65535 { 65535 } else { v as u16 }; } }
+@noinline fn sad(a: []u8, b: []u8) u32 { let mut t: u32 = 0; for i in 0..a.len() { let x = a[i] as i32 - b[i] as i32; t += (if x < 0 { -x } else { x }) as u32; } return t; }
+@noinline fn sads(a: []i8, b: []i8) u32 { let mut t: u32 = 0; for i in 0..a.len() { let x = a[i] as i32 - b[i] as i32; t += (if x >= 0 { x } else { -x }) as u32; } return t; }
+@noinline fn adiff(d: []mut u8, a: []u8, b: []u8) { for i in 0..d.len() { let x = a[i] as i16 - b[i] as i16; d[i] = (if x < 0 { -x } else { x }) as u8; } }
+@noinline fn bsum(s: []u8) u32 { let mut t: u32 = 0; for i in 0..s.len() { t += s[i] as u32; } return t; }
+@noinline fn wsum(s: []u16) u64 { let mut t: u64 = 0; for i in 0..s.len() { t += s[i] as u64; } return t; }
+@noinline fn rows(m: []u32, w: usize, h: usize) u32 { let mut t: u32 = 0; for y in 0..h { for x in 0..w { t = t.wrapping_add(m[y * w + x]); } } return t; }
+fn hash(s: []u8) u32 { let mut h: u32 = 0; for i in 0..s.len() { h = h.wrapping_mul(31).wrapping_add(s[i] as u32); } return h; }
+fn main(args: Vector<str>) i32 {
+    let edges: [u32; 6] = [0, 255, 128, 127, 1, 254];
+    let mut x: u32 = 2463534242;
+    let mut m = Vector::<u32>::new();
+    for k in 0..96u32 {
+        m.push(k.wrapping_mul(2654435761));
+    }
+    for n in 0..70usize {
+        let mut a = Vector::<u8>::new();
+        let mut b = Vector::<u8>::new();
+        let mut c = Vector::<i8>::new();
+        let mut e = Vector::<i8>::new();
+        let mut w = Vector::<u16>::new();
+        for k in 0..n {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            let v = if k % 7 == 0 { edges[k / 7 % 6] } else { x };
+            a.push(v as u8);
+            b.push((v >> 8) as u8);
+            c.push(v as i8);
+            e.push((v >> 16) as i8);
+            w.push((v >> 3) as u16);
+        }
+        let mut d = Vector::<u8>::new();
+        for _ in 0..n {
+            d.push(0);
+        }
+        let s1 = sad(&a, &b);
+        let s2 = sads(&c, &e);
+        let s3 = bsum(&a);
+        let s4 = wsum(&w);
+        sat_two(&mut d, &a, &b);
+        let h1 = hash(&d);
+        adiff(&mut d, &a, &b);
+        let h2 = hash(&d);
+        sat_by(&mut a, (n * 37) as u8);
+        let h3 = hash(&a);
+        sat_const(&mut b);
+        let h4 = hash(&b);
+        sat16(&mut w, (n * 1931) as u16);
+        let mut h5: u32 = 0;
+        for i in 0..n {
+            h5 = h5.wrapping_mul(31).wrapping_add(w[i] as u32);
+        }
+        println("{} {} {} {} {} {} {} {} {} {}", n, s1, s2, s3, s4, h1, h2, h3, h4, h5);
+        println("{} {} {}", rows(&m, n % 13, 96 / (n % 13 + 1)), rows(&m, 96 / (n % 9 + 1), n % 9), rows(&m, 0, n));
+    }
+    if args.len() > 2 {
+        let mut a = Vector::<u8>::new();
+        for k in 0..40u8 {
+            a.push(k * 5);
+        }
+        println("{}", sad(&a, a[0..39]));
+    } else if args.len() > 1 {
+        println("{}", rows(&m, 10, 10));
+    } else {
+        println("{}", rows(&m, 7, 13) + rows(&m, 97, 1));
+    }
+    return 0;
+}
+)";
+
+@test
+fn byte_idioms_and_rows_match_across_profiles() {
+    let d = h::same_output(BYTE_IDIOMS, ["--profile=debug"], ["--profile=release"], ["", "rows", "rows short"]);
+    assert(d.len() == 0, d.as_str());
+}

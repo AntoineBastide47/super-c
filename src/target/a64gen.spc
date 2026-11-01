@@ -1037,7 +1037,7 @@ extend Gen {
                 t.op,
                 lane_type(t.ty),
                 &mut un,
-            ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_WCONST || t.op == O_VINSERT) && in_vreg(
+            ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_WCONST || t.op == O_VINSERT || t.op == O_VSUMW) && in_vreg(
                 t.ty,
             ) || (t.op == O_VCMP || t.op == O_VEXTRACT) && in_vreg(self.vt(t.a)) || t.op == O_VOP && self.vop_reg(t) || self.conv_reg(
                 t,
@@ -1556,7 +1556,7 @@ extend Gen {
         // a splat of a lane, `lv::FOLD_LANE`) and calls (a vector passed in memory goes through `mloc`).
         let reg_form = t.op == O_STORE || t.op == O_SPLAT || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(
             t.ty,
-        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT) || t.op == O_VEXTRACT || self.conv_reg(
+        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT || t.op == O_VSUMW) || t.op == O_VEXTRACT || self.conv_reg(
             t,
         ) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.vt(t.a));
         if !reg_form && !is_terminator(t.op) {
@@ -3497,6 +3497,10 @@ extend Gen {
         }
         if op == O_VUNZIP {
             self.vunzip(i, t);
+            return true;
+        }
+        if op == O_VSUMW {
+            self.vsumw(i, t);
             return true;
         }
         if op == O_VZIPLO || op == O_VZIPHI {
@@ -8913,6 +8917,15 @@ const fn neon_of_simd(c: u8, lt: u8, sg: bool, un: &mut bool, fma: &mut bool) u3
     if c == core::SIMD_WRAP_MUL && eb < 8 {
         return a::v3op(false, a::V3_MUL, s, 0, 0, 0);
     }
+    if (c == core::SIMD_SAT_ADD || c == core::SIMD_SAT_SUB) && eb < 8 {
+        // UQADD, SQADD, UQSUB or SQSUB.
+        let opc: u32 = if c == core::SIMD_SAT_ADD {
+            0x01
+        } else {
+            0x05
+        };
+        return a::v3(false, !sg, s, opc, 0, 0, 0);
+    }
     if c == core::SIMD_MIN && eb < 8 {
         return a::v3op(
             false,
@@ -9182,6 +9195,43 @@ extend Gen {
                 self.ld_lane(x, t.a, 2 * k, lt, false, true);
             } else {
                 self.ld_lane(x, t.b, 2 * k - n, lt, false, true);
+            }
+            self.st_lane(x, d, k, lt, true);
+        }
+    }
+
+    // Widening sum `t` (`O_VSUMW`) into vector `i`: UADDLP of the narrow lanes until twice as wide as the
+    // accumulator's halves, then UADALP over the accumulator; a vector outside a v register sums each lane.
+    fn vsumw(self: &mut Self, i: u32, t: Inst) {
+        let nt = self.vt(t.b);
+        let nb = type_bytes(t.ty, 8);
+        let lt = lane_type(t.ty);
+        let ab = type_bytes(lt, 8);
+        let mut eb = type_bytes(lane_type(nt), 8);
+        if in_vreg(t.ty) {
+            let q = a::on(nb == 16, 1u32 << 30);
+            let mut rn = self.vec_use(t.b, V0 + 31);
+            // Each step doubles the lanes' width.
+            while 2 * eb < ab {
+                self.emit(0x2E202800u32 | q | vsize(eb) << 22 | (rn - V0) as u32 << 5 | 31);
+                rn = V0 + 31;
+                eb *= 2;
+            }
+            self.accumulate(0x2E206800u32 | vsize(eb) << 22, i, t.a, rn, NOREG);
+            return;
+        }
+        self.sync(t.a);
+        self.sync(t.b);
+        let d = self.mdef(i);
+        let n = lanes(t.ty);
+        let g = lanes(nt) / n;
+        let x = self.tmp(false);
+        let y = self.tmp(false);
+        for k in 0..n {
+            self.ld_lane(x, t.a, k, lt, false, true);
+            for j in 0..g {
+                self.ld_lane(y, t.b, k * g + j, lane_type(nt), false, false);
+                self.emit(a::addsub_reg(true, 0, false, x, x, y, 0, 0));
             }
             self.st_lane(x, d, k, lt, true);
         }

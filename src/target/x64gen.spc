@@ -1666,13 +1666,11 @@ extend Gen {
                 lane_type(t.ty),
             ) != NONE || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a)) || self.reduce_reg(t) || self.ext_reg(
                 t,
-            ) || t.op == O_VOP && self.lv.pfold[i] || t.op == O_MUL && is_vec(t.ty) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(
+            ) || t.op == O_VOP && (self.lv.pfold[i] || self.idiom_reg(t)) || self.sumw_reg(t) || t.op == O_MUL && is_vec(
                 t.ty,
-                8,
-            ) == 16 && in_vreg(t.ty) || (t.op == O_MULHS || t.op == O_MULHU) && is_vec(t.ty) && type_bytes(
-                lane_type(t.ty),
-                8,
-            ) == 4 && self.in_reg(t.ty);
+            ) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(t.ty, 8) == 16 && in_vreg(t.ty) || (t.op == O_MULHS || t.op == O_MULHU) && is_vec(
+                t.ty,
+            ) && type_bytes(lane_type(t.ty), 8) == 4 && self.in_reg(t.ty);
             if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
                 self.vmem[i] = true;
             }
@@ -1877,7 +1875,7 @@ extend Gen {
 
     // `clobbers` of `t` but a vector operation the body computes in registers (`ext_reg`).
     fn calls(self: &Self, t: Inst) bool {
-        return Gen::clobbers(self.b(), t) && !self.ext_reg(t);
+        return Gen::clobbers(self.b(), t) && !self.ext_reg(t) && !self.idiom_reg(t);
     }
 
     const fn clobbers(b: &Body, t: Inst) bool {
@@ -2164,7 +2162,7 @@ extend Gen {
             let shift = op == O_SHL || op == O_LSHR || op == O_ASHR;
             if t.ty == T_I128 || (op == O_CALL || op == O_CALLIND) && self.cret[i] || op == O_ASM || op == O_SYS || op == O_VOP && !self.reduce_reg(
                 t,
-            ) && !self.ext_reg(t) && !self.lv.pfold[i] || op == O_VASTART || op == O_VAARG || op == O_MEMCPY || op == O_MEMSET || is_vec(
+            ) && !self.ext_reg(t) && !self.idiom_reg(t) && !self.lv.pfold[i] || op == O_VASTART || op == O_VAARG || op == O_MEMCPY || op == O_MEMSET || is_vec(
                 t.ty,
             ) && (op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM) || op >= O_ADDO && op <= O_MULO && (t.aux == OV_SIGNED || type_bits(
                 t.ty,
@@ -2436,7 +2434,7 @@ extend Gen {
         // a splat of a lane, `lv::FOLD_LANE`) and calls (a vector passed in memory goes through `mloc`).
         let reg_form = t.op == O_STORE || t.op == O_SPLAT || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(
             t.ty,
-        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI) || t.op == O_VEXTRACT || t.op == O_VINSERT || self.conv_reg(
+        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VSUMW) || t.op == O_VEXTRACT || t.op == O_VINSERT || self.conv_reg(
             t,
         ) || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a));
         if !reg_form && !is_terminator(t.op) {
@@ -2975,7 +2973,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_ZSHL | if self.avx {
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE
         } else {
             0
@@ -4450,6 +4448,10 @@ extend Gen {
         }
         if op == O_VOP {
             return self.vop(i, t);
+        }
+        if op == O_VSUMW {
+            self.vsumw(i, t);
+            return true;
         }
         if op == O_VASTART {
             self.va_start(t);
@@ -12013,6 +12015,10 @@ extend Gen {
             }
             return;
         }
+        if self.idiom_reg(t) {
+            self.idiom_lanes(i, t, c, sg, ops);
+            return;
+        }
         if self.ext_reg(t) {
             let lo = c == core::SIMD_MIN;
             let rx = self.vec_use(ops[0], self.vs0) - V0;
@@ -13294,6 +13300,176 @@ extend Gen {
         return is_vec(t.ty) && is_int(lt) && type_bytes(lt, 8) <= 4 && (nb == 16 && in_vreg(t.ty) || nb == 32 && self.avx && self.in_reg(
             t.ty,
         ));
+    }
+
+    // Whether `O_VOP` `t` is a saturating sum or difference, or an absolute difference, of two vectors of
+    // integer lanes of 1 or 2 bytes in registers (16 bytes; 32 and 64 with AVX2 and AVX-512), which
+    // `idiom_lanes` computes there.
+    fn idiom_reg(self: &Self, t: Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        if t.op != O_VOP || t.b != 2 || !is_vec(t.ty) || code < core::OP_SIMD || code >= core::OP_CMP_LANES {
+            return false;
+        }
+        let c = (code - core::OP_SIMD) as u8;
+        if c != core::SIMD_SAT_ADD && c != core::SIMD_SAT_SUB && c != core::SIMD_ABS_DIFF {
+            return false;
+        }
+        let lt = lane_type(t.ty);
+        let nb = type_bytes(t.ty, 8);
+        return is_int(lt) && type_bytes(lt, 8) <= 2 && (nb == 16 && in_vreg(t.ty) || nb > 16 && self.in_reg(t.ty));
+    }
+
+    // Idiom `t` (`idiom_reg`: rule `c`, signed `sg`) of `ops` into vector `i`: PADDUS, PADDS, PSUBUS or PSUBS;
+    // an unsigned absolute difference as the `or` of the two saturating differences, a signed one as the
+    // larger lane less the smaller (PMAXS, PMINS; bytes without SSE4.1 as the difference, negated where the
+    // second is greater: PCMPGT, PXOR, PSUB).
+    fn idiom_lanes(self: &mut Self, i: u32, t: Inst, c: u8, sg: bool, ops: &[Value; 4]) {
+        let nb = type_bytes(t.ty, 8);
+        let wb = (type_bytes(lane_type(t.ty), 8) == 2) as u32;
+        let rx = self.vec_use(ops[0], self.vs0) - V0;
+        let ry = self.vec_use(ops[1], self.vs1) - V0;
+        if c == core::SIMD_SAT_ADD || c == core::SIMD_SAT_SUB {
+            let base: u32 = if c == core::SIMD_SAT_ADD && sg {
+                0xEC
+            } else if c == core::SIMD_SAT_ADD {
+                0xDC
+            } else if sg {
+                0xE8
+            } else {
+                0xD8
+            };
+            // Over the first operand's register when it dies here.
+            let rd = self.def_over(i, ops[0], rx + V0) - V0;
+            self.op3(1, base + wb, false, nb, rd, rx, ry);
+            return;
+        }
+        let ta = self.tmp(true) - V0;
+        let tb = self.tmp(true) - V0;
+        if !sg {
+            self.op3(1, 0xD8 + wb, false, nb, ta, rx, ry);
+            self.op3(1, 0xD8 + wb, false, nb, tb, ry, rx);
+            let rd = self.vec_def(i) - V0;
+            self.op3(1, 0xEB, false, nb, rd, ta, tb);
+            return;
+        }
+        if wb == 1 || nb > 16 || unsafe (*self.pkg).sse41 {
+            if wb == 1 {
+                self.op3(1, 0xEE, false, nb, ta, rx, ry);
+                self.op3(1, 0xEA, false, nb, tb, rx, ry);
+            } else {
+                self.op3(2, 0x3C, false, nb, ta, rx, ry);
+                self.op3(2, 0x38, false, nb, tb, rx, ry);
+            }
+        } else {
+            self.op3(1, 0x64, false, nb, tb, ry, rx);
+            self.op3(1, 0xF8, false, nb, ta, rx, ry);
+            self.op3(1, 0xEF, false, nb, ta, ta, tb);
+        }
+        let rd = self.vec_def(i) - V0;
+        self.op3(1, 0xF8 + wb, false, nb, rd, ta, tb);
+    }
+
+    // `rd` = `rx` op `ry` of the 0x66-prefixed integer vector instruction `opc` of opcode map `mm` (1: 0F, 2:
+    // 0F38) on `nb` bytes: SSE on 16 (`rx` copied into `rd` first, through a temporary when `rd` holds `ry`),
+    // VEX.256 on 32, EVEX.512 (W `ew`) on 64.
+    fn op3(self: &mut Self, mm: u32, opc: u32, ew: bool, nb: u32, rd: u8, rx: u8, ry: u8) {
+        if nb == 64 {
+            self.c.evex_rr(0x66, mm, opc, ew, rd, rx, ry);
+            return;
+        }
+        if nb == 32 {
+            self.c.vex_rr(0x66, mm, opc, false, true, rd, rx, ry);
+            return;
+        }
+        let op = if mm == 1 {
+            0x0F00 | opc
+        } else {
+            0x0F3800 | opc
+        };
+        if rd == ry && rd != rx {
+            let s = self.tmp(true) - V0;
+            self.c.vmov(s, rx);
+            self.c.sse_rr(0x66, op, s, ry);
+            self.c.vmov(rd, s);
+            return;
+        }
+        self.c.vmov(rd, rx);
+        self.c.sse_rr(0x66, op, rd, ry);
+    }
+
+    // Whether `O_VSUMW` `t` sums bytes into 8-byte lanes of a vector in registers (16 bytes; 32 and 64 with
+    // AVX2 and AVX-512), which `vsumw` computes there.
+    fn sumw_reg(self: &Self, t: Inst) bool {
+        if t.op != O_VSUMW {
+            return false;
+        }
+        let nb = type_bytes(t.ty, 8);
+        return type_bytes(lane_type(t.ty), 8) == 8 && type_bytes(lane_type(self.vt(t.b)), 8) == 1 && (nb == 16 && in_vreg(
+            t.ty,
+        ) || nb > 16 && self.in_reg(t.ty));
+    }
+
+    // Widening sum `t` (`O_VSUMW`) into vector `i`: in registers (`sumw_reg`) PSADBW of the bytes and zeros, or
+    // of the two vectors of an absolute difference that folds into it (`lv::FOLD_VSAD`), then PADDQ over
+    // the accumulator; else lane by lane in memory.
+    fn vsumw(self: &mut Self, i: u32, t: Inst) {
+        let nt = self.vt(t.b);
+        let nb = type_bytes(t.ty, 8);
+        if self.sumw_reg(t) {
+            let s = self.tmp(true) - V0;
+            let p = self.lv.vsad_diff(self.b(), t);
+            if p != VNONE && self.lv.pfold[p as usize] {
+                let d = self.b().insts[p as usize];
+                let rx = self.vec_use(self.b().pool[d.a as usize], self.vs0) - V0;
+                let ry = self.vec_use(self.b().pool[(d.a + 1) as usize], self.vs1) - V0;
+                self.op3(1, 0xF6, false, nb, s, rx, ry);
+            } else {
+                let rb = self.vec_use(t.b, self.vs1) - V0;
+                let z = self.tmp(true) - V0;
+                self.op3(1, 0xEF, false, nb, z, z, z);
+                self.op3(1, 0xF6, false, nb, s, rb, z);
+            }
+            let ra = self.vec_use(t.a, self.vs0);
+            let rd = self.def_over(i, t.a, ra) - V0;
+            self.op3(1, 0xD4, true, nb, rd, ra - V0, s);
+            return;
+        }
+        // A folded absolute difference (`lv::FOLD_VSAD`) of each pair of lanes.
+        let p = self.lv.vsad_diff(self.b(), t);
+        let (fx, fy) = if p != VNONE && self.lv.pfold[p as usize] {
+            let d = self.b().insts[p as usize];
+            (self.b().pool[d.a as usize], self.b().pool[(d.a + 1) as usize])
+        } else {
+            (t.b, VNONE)
+        };
+        self.sync(t.a);
+        self.sync(fx);
+        if fy != VNONE {
+            self.sync(fy);
+        }
+        let d = self.mdef(i);
+        let lt = lane_type(t.ty);
+        let n = lanes(t.ty);
+        let g = lanes(nt) / n;
+        let xr = self.tmp(false);
+        let yr = self.tmp(false);
+        let zr = self.tmp(false);
+        for k in 0..n {
+            self.ld_lane(xr, t.a, k, lt, false, false);
+            for j in 0..g {
+                self.ld_lane(yr, fx, k * g + j, lane_type(nt), false, false);
+                if fy != VNONE {
+                    // |y - z| of the zero-extended lanes: the difference, negated when negative.
+                    self.ld_lane(zr, fy, k * g + j, lane_type(nt), false, false);
+                    self.c.alu_rr(x::SUB, 8, yr, zr);
+                    self.c.mov_rr(8, zr, yr);
+                    self.c.unary(x::NEG, 8, zr);
+                    self.c.cmov(x::CC_G, 8, yr, zr);
+                }
+                self.c.alu_rr(x::ADD, 8, xr, yr);
+            }
+            self.st_lane(xr, d, k, lt, false);
+        }
     }
 
     // Integer reduction `c` (a sum, `and`, `or`, `xor`, a minimum or maximum, signed with `sg`) of 16-byte
