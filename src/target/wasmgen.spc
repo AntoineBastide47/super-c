@@ -1476,25 +1476,23 @@ extend Gen {
             return self.asm_inst(t);
         }
         if op == O_MEMCPY || op == O_MEMSET {
+            // The bulk memory forms (`memory.copy` takes overlapping regions as memmove does), on memory 0.
             self.get(t.a);
-            if op == O_MEMCPY {
-                self.get(t.b);
-            } else {
-                self.get(t.b);
-            }
+            self.get(t.b);
             self.get(t.c);
             if self.vt(t.c) == T_I64 {
                 self.c.op(w::I32_WRAP_I64);
             }
-            let name = if op == O_MEMSET {
-                "memset"
-            } else if t.aux == MEM_OVERLAP {
-                "memmove"
+            self.c.op(0xFC);
+            if op == O_MEMSET {
+                self.c.uleb(0xB);
+                self.c.uleb(0);
             } else {
-                "memcpy"
-            };
-            self.call_rt(name, [w::I32, w::I32, w::I32], [w::I32]);
-            self.c.op(w::DROP);
+                self.c.uleb(0xA);
+                self.c.uleb(0);
+                self.c.uleb(0);
+            }
+            self.obj().bulk = true;
             return true;
         }
         if op == O_SELECT {

@@ -85,6 +85,7 @@ pub(package) struct WObj {
     pub(package) funcs: Vector<WFunc>,
     pub(package) segs: Vector<WSeg>,
     pub(package) simd: bool, // a body uses v128
+    pub(package) bulk: bool, // a body uses `memory.fill` or `memory.copy`
     /// With debug information: the package's file paths by file id and the compile directory.
     pub(package) debug: bool,
     pub(package) files: Vector<String>,
@@ -101,6 +102,7 @@ extend WObj {
             funcs: Vector::<WFunc>::new(),
             segs: Vector::<WSeg>::new(),
             simd: false,
+            bulk: false,
             debug: false,
             files: Vector::<String>::new(),
             comp_dir: String::new(),
@@ -452,6 +454,9 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
     }
     if o.simd {
         feats.push("simd128");
+    }
+    if o.bulk {
+        feats.push("bulk-memory");
     }
     w::uleb(&mut tf, feats.len() as u64);
     for i in 0..feats.len() {

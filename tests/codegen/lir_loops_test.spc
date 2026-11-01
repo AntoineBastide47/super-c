@@ -4632,6 +4632,7 @@ b3:
 )";
     let mut src = String::from_str(
         M"(lir ptr 8
+sym @looked data global
 sym @own fn global noinline
 sym @called fn global noinline
 sym @stored fn global noinline
@@ -4641,6 +4642,8 @@ sym @look fn global noinline
 fn @look
   sig (ptr) -> void
 b0(v0: ptr):
+  v1 = symaddr @looked
+  store v0, v1 align 3
   ret
 fn @own
   sig (ptr, ptr) -> void
@@ -4696,6 +4699,7 @@ b2:
   jmp b1(v11)
 b3:
   ret
+data @looked size 8 align 3
 )",
     );
     let (_, a) = optimized(&src, VECTOR);

@@ -208,6 +208,7 @@ pub(package) struct Opt {
     rload: Vector<Value>, // per slot and 8-byte chunk (2 per slot), its load after that call (`res_chunk`), NONE
     made: Map<u64, u32>, // a made constant's hash to the constant
     moved: Vector<bool>,
+    nofx: Vector<bool>, // per instruction, a call that writes no memory and comes back: it goes when unused
     hoisted: Vector<u64>, // block << 32 | instruction, in the order they moved
     pnew: Vector<bool>, // per block, a preheader `preheaders` made
     touched: Vector<bool>, // per block, one `promote_places` changed: a preheader or a block of a loop
@@ -427,6 +428,7 @@ extend Opt {
             blk_of: Vector::<u32>::new(),
             repl: Vector::<u32>::new(),
             moved: Vector::<bool>::new(),
+            nofx: Vector::<bool>::new(),
             hoisted: Vector::<u64>::new(),
             pnew: Vector::<bool>::new(),
             touched: Vector::<bool>::new(),
@@ -923,7 +925,7 @@ extend Opt {
         let entered = self.preheaders(b);
         self.tables(pk, b, K_MEM);
         self.slot_writes(pk, b);
-        let changed = self.walk(pk, b) || force || threaded || entered;
+        let changed = self.walk(pk, b) || force || threaded || entered || self.unused_call(b);
         if entered {
             self.unenter(b);
         }
@@ -2975,6 +2977,44 @@ extend Opt {
 
     // ---- The walk --------------------------------------------------------------------------------------
 
+    // Whether a call the walk found removable (`nofx`) is a value nothing reads: the rebuild drops it.
+    fn unused_call(self: &mut Self, b: &Body) bool {
+        let mut any = false;
+        for i in 0..self.nofx.len() {
+            any = any || self.nofx[i];
+        }
+        if !any {
+            return false;
+        }
+        let ni = b.insts.len();
+        let mut used = Vector::<bool>::new();
+        used.resize_default(ni);
+        for i in 0..ni {
+            let t = b.insts[i];
+            lv::uses_into(b, t, &mut self.uses);
+            if is_terminator(t.op) {
+                b.succ_edges(t, &mut self.edges);
+                for e in 0..self.edges.len() {
+                    for q in 0..b.edge_nargs(self.edges[e]) {
+                        self.uses.push(b.edge_arg(self.edges[e], q));
+                    }
+                }
+            }
+            for u in 0..self.uses.len() {
+                let v = self.uses[u];
+                if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && v as usize < ni {
+                    used[v as usize] = true;
+                }
+            }
+        }
+        for i in 0..self.nofx.len().min(ni) {
+            if self.nofx[i] && !used[i] {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Whether an instruction changed.
     // The rebuild's tables for body `b` with nothing replaced, moved or made.
     // Its block map is `graph`'s (`block_map`): every caller runs on the body `tables` just read.
@@ -2985,6 +3025,7 @@ extend Opt {
         fill(&mut self.prepl, b.params.len(), VNONE);
         fill(&mut self.frepl, ni, VNONE);
         fill(&mut self.moved, ni, false);
+        fill(&mut self.nofx, ni, false);
         self.extra.truncate(0);
         self.hoisted.truncate(0);
         self.pre.truncate(0);
@@ -5458,6 +5499,9 @@ extend Opt {
     // hoisting. Whether it changed.
     fn visit(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t0 = b.insts[i as usize];
+        if t0.op == O_CALL && i as usize < self.nofx.len() {
+            self.nofx[i as usize] = (pk.syms[b.syms[t0.a as usize] as usize].fx & (FX_WRITE | FX_ARG | FX_STALL)) == 0;
+        }
         let mut t = t0;
         let f = op_info(t.op).form;
         if lv::operand_a(f) {
@@ -5851,7 +5895,7 @@ extend Opt {
                 return true;
             }
             self.enter(LOG_PURE, h, i);
-            if self.hoist_call(b, k, i) {
+            if self.hoist_call(pk, b, k, i) {
                 return true;
             }
         } else if pure_op(t.op) && !tls_addr(pk, b, t) {
@@ -8932,13 +8976,15 @@ extend Opt {
     // when its arguments come from outside the loop, the loop writes no memory but private slots' (which
     // no call reaches) and nothing before the call in `k` writes memory: every entry into the loop runs
     // the call first, with the arguments and the memory every iteration has, so the preheader runs it
-    // once in place of each iteration. Whether it moved.
-    fn hoist_call(self: &mut Self, b: &Body, k: u32, i: u32) bool {
+    // once in place of each iteration. From any block of the innermost loop when the function comes back
+    // (no `FX_STALL`): it may run where that block would not. Whether it moved.
+    fn hoist_call(self: &mut Self, pk: &Package, b: &Body, k: u32, i: u32) bool {
         let h = self.inner[k as usize];
-        if h != k || self.preh[h as usize] == NONE || self.writes[h as usize] != 0 || self.tags[h as usize] != 0 {
+        let t = b.insts[i as usize];
+        let back = (pk.syms[b.syms[t.a as usize] as usize].fx & FX_STALL) == 0;
+        if h == NONE || h != k && !back || self.preh[h as usize] == NONE || self.writes[h as usize] != 0 || self.tags[h as usize] != 0 {
             return false;
         }
-        let t = b.insts[i as usize];
         for q in 0..t.aux as u32 {
             if !self.outside(b.pool[(t.c + q) as usize], h) {
                 return false;
@@ -9003,6 +9049,9 @@ extend Opt {
         self.kept = K_NONE;
         let ni = b.insts.len();
         let nb = b.blocks.len();
+        // The walk's removable calls (`nofx`) hold for this rebuild alone: another runs on renumbered
+        // instructions.
+        let nofx = replace(&mut self.nofx, Vector::<bool>::new());
         let npar = b.params.len();
         fill(&mut self.sused, b.slots.len(), NONE);
         self.reach(b);
@@ -9050,7 +9099,7 @@ extend Opt {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
                 let t = b.insts[i as usize];
-                if self.repl[i as usize] == VNONE && !droppable(t) && !self.dead_store(b, t) {
+                if self.repl[i as usize] == VNONE && !droppable(t) && !self.dead_store(b, t) && !(t.op == O_CALL && i as usize < nofx.len() && nofx[i as usize]) {
                     self.mark(i);
                 }
             }
@@ -10347,7 +10396,9 @@ fn calls_of(p: &Package, bodies: &Vector<Body>, held: u32, cs: &mut Calls) {
 // (an atomic, a fence, assembly, a system or vector operation, a variadic access, a volatile load), and
 // its calls': a body's, as this inference finds it (a fixed point: the flags only grow, at most twice per
 // body), both for any other call. A block that ends the program (`panic`, `unreachable`) counts for
-// nothing: no code of the caller runs after it. A held body (`Package.held`) keeps the flags and the
+// nothing (but `FX_STALL`): no code of the caller runs after it. A body that may not come back (`FX_STALL`):
+// one that may end the program, loops, calls a function that may not come back, or is on a cycle of calls (a
+// least fixed point: a body comes back when each body it calls does). A held body (`Package.held`) keeps the flags and the
 // parameters its unit's build found: the others then take the values a build without held bodies gives
 // them. Into `wargs`, per body, the parameters whose memory it may write (`FX_ARG`), a bit each; into
 // `esc`, those whose pointer it may let escape (`Sym.esc`): its own uses' (`own_escapes`), and a pass to
@@ -10422,6 +10473,7 @@ fn effects(p: &Package, bodies: &Vector<Body>, cs: &Calls, wargs: &mut Vector<u6
             }
         }
         if !changed {
+            stalls(&mut fx, cs, held);
             return fx;
         }
     }
@@ -10429,14 +10481,54 @@ fn effects(p: &Package, bodies: &Vector<Body>, cs: &Calls, wargs: &mut Vector<u6
     return fx;
 }
 
+// `FX_STALL` for each body below `held` that is on a cycle of calls or calls one (`effects`): the bodies
+// that come back are those whose own code does and each of whose calls' bodies does, from none up.
+fn stalls(fx: &mut Vector<u8>, cs: &Calls, held: usize) {
+    let n = fx.len();
+    let mut back = Vector::<bool>::with_capacity(n);
+    for k in 0..n {
+        back.push(k >= held && (fx[k] & FX_STALL) == 0);
+    }
+    // Each round adds a body or ends: at most `held` + 1 rounds.
+    for _ in 0..held + 1 {
+        let mut changed = false;
+        for k in 0..held {
+            if back[k] || (fx[k] & FX_STALL) != 0 {
+                continue;
+            }
+            let mut all = true;
+            for x in cs.at[k]..cs.at[k + 1] {
+                all = all && (!cs.live[x as usize] || back[cs.callee[x as usize] as usize]);
+            }
+            if all {
+                back[k] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for k in 0..held {
+        if !back[k] {
+            fx[k] |= FX_STALL;
+        }
+    }
+}
+
 // The flags (`FX_*`) of body `b`'s own instructions (`effects`), and into `w` the parameters whose memory
 // they may write: a call of a body counts for none here.
 fn own_effects(p: &Package, b: &Body, w: &mut u64) u8 {
-    let mut f: u8 = 0;
+    let mut f: u8 = if has_cycle(b) {
+        FX_STALL
+    } else {
+        0
+    };
     for k in 0..b.blocks.len() {
         let bk = b.blocks[k];
         let end = b.insts[(bk.start + bk.len - 1) as usize].op;
         if end == O_PANIC || end == O_UNREACHABLE {
+            f |= FX_STALL;
             continue;
         }
         for i in bk.start..bk.start + bk.len {
@@ -10462,10 +10554,53 @@ fn own_effects(p: &Package, b: &Body, w: &mut u64) u8 {
                 continue;
             } else if writes_memory(t) {
                 f |= FX_READ | FX_WRITE;
+                // Another function's call, assembly or a system operation may not come back.
+                if t.op == O_CALL || t.op == O_CALLIND || t.op == O_ASM || t.op == O_SYS {
+                    f |= FX_STALL;
+                }
             }
         }
     }
     return f;
+}
+
+// Whether a block of `b` reaches itself (a loop): a depth-first walk that meets a block on its path.
+fn has_cycle(b: &Body) bool {
+    let nb = b.blocks.len();
+    // Per block: 0 unseen, 1 on the walk's path, 2 done.
+    let mut state = Vector::<u8>::with_capacity(nb);
+    for _ in 0..nb {
+        state.push(0);
+    }
+    // The path: a block and its next edge to take, each block on it once.
+    let mut path = Vector::<u64>::with_capacity(nb);
+    let mut es = Vector::<u32>::new();
+    state[0] = 1;
+    path.push(0);
+    // Each step takes an edge or leaves a block: at most the edges and blocks.
+    while path.len() != 0 {
+        let top = path[path.len() - 1];
+        let k = (top & 0xFFFFFFFF) as u32;
+        let e = (top >> 32) as u32;
+        let bk = b.blocks[k as usize];
+        b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut es);
+        if e as usize >= es.len() {
+            state[k as usize] = 2;
+            let _ = path.pop();
+            continue;
+        }
+        let at = path.len() - 1;
+        path[at] = e as u64 + 1 << 32 | k as u64;
+        let s = b.edge_target(es[e as usize]);
+        if state[s as usize] == 1 {
+            return true;
+        }
+        if state[s as usize] == 0 {
+            state[s as usize] = 1;
+            path.push(s);
+        }
+    }
+    return false;
 }
 
 // The parameters (the first 64, a bit each) whose pointer body `b`'s own instructions may let escape

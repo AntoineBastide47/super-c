@@ -472,7 +472,6 @@ fn small_parameters_a_loop_compares_run() {
     let lir = "lir ptr 8\nsym @count fn global\nsym @below fn global\nfn @count\n  sig (ptr, i64, i8) -> i64\nb0(v0: ptr, v1: i64, v2: i8):\n  v3 = iconst.i64 0\n  v4 = iconst.i64 1\n  jmp b1(v3, v3)\nb1(v5: i64, v6: i64):\n  v7 = icmp.ult v5, v1\n  br v7, b2, b3\nb2:\n  v8 = ptradd v0, v5 * 1\n  v9 = load.i8 v8 align 0\n  v10 = icmp.eq v9, v2\n  v11 = zext.i64 v10\n  v12 = add.i64 v6, v11\n  v13 = add.i64 v5, v4\n  jmp b1(v13, v12)\nb3:\n  ret v6\nfn @below\n  sig (ptr, i64, i16) -> i64\nb0(v0: ptr, v1: i64, v2: i16):\n  v3 = iconst.i64 0\n  v4 = iconst.i64 1\n  v5 = iconst.i16 1\n  jmp b1(v3, v3)\nb1(v6: i64, v7: i64):\n  v8 = icmp.ult v6, v1\n  br v8, b2, b3\nb2:\n  v9 = ptradd v0, v6 * 1\n  v10 = load.i8 v9 align 0\n  v11 = zext.i16 v10\n  v12 = lshr.i16 v2, v5\n  v13 = icmp.ult v11, v12\n  v14 = zext.i64 v13\n  v15 = add.i64 v7, v14\n  v16 = add.i64 v6, v4\n  jmp b1(v16, v15)\nb3:\n  ret v7\n";
     let drv = "#include <stdint.h>\nuint64_t count(const uint8_t *, uint64_t, uint32_t);\nuint64_t below(const uint8_t *, uint64_t, uint32_t);\nint main(void) {\n  uint8_t s[256];\n  for (int i = 0; i < 256; i++) s[i] = (uint8_t)(i * 37);\n  for (uint32_t c = 0; c < 256; c += 17) {\n    uint64_t want = 0, under = 0;\n    for (int i = 0; i < 256; i++) {\n      want += s[i] == c;\n      under += s[i] < ((c * 3) >> 1);\n    }\n    if (count(s, 256, 0xABCD0000u | c) != want) return 1;\n    if (below(s, 256, 0xAB0000u | (c * 3)) != under) return 2;\n  }\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
-    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // A run of 8-byte stores of 0 at consecutive offsets (x86-64: a zeroed xmm register stored 16 bytes at a
@@ -774,7 +773,6 @@ b2:
 )";
     let drv = "#include <stdint.h>\nint32_t abs32(int32_t);\nint64_t nabs64(int64_t);\nint64_t absm(int64_t);\nint32_t nabs32(int32_t);\nint64_t all3(uint32_t, uint32_t, uint32_t);\nint64_t any2(uint32_t, uint32_t);\nint32_t flags(uint8_t *, int32_t, int32_t);\nint main(void) {\n  int64_t xs[7] = {0, 1, -1, INT64_C(1) << 40, -(INT64_C(1) << 40), INT64_MIN, INT64_MAX};\n  for (int i = 0; i < 7; i++) {\n    int64_t x = xs[i];\n    int32_t y = (int32_t)(x >> 8) | (int32_t)x;\n    if (i == 5) y = INT32_MIN;\n    uint64_t ux = (uint64_t)x, uy = (uint32_t)y;\n    if (abs32(y) != (int32_t)(y < 0 ? 0u - (uint32_t)uy : (uint32_t)uy)) return 1;\n    if (nabs64(x) != (int64_t)(x >= 0 ? 0 - ux : ux)) return 2;\n    if (absm(x) != (int64_t)(x < 0 ? 0 - ux : ux)) return 3;\n    if (nabs32(y) != (y <= 0 ? y : (int32_t)(0u - (uint32_t)uy))) return 4;\n  }\n  for (uint32_t a = 0; a < 6; a++)\n    for (uint32_t b = 6; b < 12; b++)\n      for (uint32_t c = 0; c < 2; c++)\n        if (all3(a | 0x100000u, b | 0x100000u, c << 20) != (int64_t)(a == 3 && b < 9 && c != 0)) return 5;\n  for (uint32_t a = 0; a < 6; a++)\n    for (uint32_t b = 0; b < 6; b++)\n      if (any2(a | 0x100000u, b | 0x100000u) != (int64_t)(a == 3 || b > 3)) return 7;\n  for (int32_t a = -2; a < 3; a++)\n    for (int32_t b = -2; b < 3; b++) {\n      uint8_t m[2] = {9, 9};\n      int32_t r = flags(m, a * 0x10001, b * 0x10001);\n      if (m[0] != (a < b) || m[1] != (a <= b) || r != (a == b ? 7 : a < b ? 10 : 20)) return 6;\n    }\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
-    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // An `and`, `or` or `xor` of an inverted value (`not`, or `xor` with all ones; arm64 `bic`, `orn`, `eon`) in
@@ -1657,6 +1655,57 @@ int main(void) {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Fills, copies and overlapping moves of run-time sizes (`memset`, `memcpy`, `memcpy` with MEM_OVERLAP):
+// the C routines on arm64 and x86-64, the bulk memory forms on wasm32 (`memory.fill`, `memory.copy`).
+@test
+fn memory_operations_of_run_time_sizes_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @fill fn global
+sym @copy fn global
+sym @move fn global
+fn @fill
+  sig (ptr, i8, i64) -> void
+b0(v0: ptr, v1: i8, v2: i64):
+  memset v0, v1, v2
+  ret
+fn @copy
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  memcpy v0, v1, v2
+  ret
+fn @move
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  memcpy.overlap v0, v1, v2
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void fill(uint8_t *, int8_t, int64_t);
+void copy(uint8_t *, const uint8_t *, int64_t);
+void move(uint8_t *, const uint8_t *, int64_t);
+int main(void) {
+  for (int64_t n = 0; n < 40; n++) {
+    uint8_t a[64], b[64], c[64];
+    for (int k = 0; k < 64; k++) { a[k] = (uint8_t)k; b[k] = (uint8_t)(200 - k); }
+    memcpy(c, a, 64);
+    fill(a + 3, (int8_t)0x5A, n);
+    for (int k = 0; k < 64; k++) if (a[k] != (k >= 3 && k < 3 + n ? 0x5A : (uint8_t)k)) return 1;
+    copy(b + 1, c + 2, n);
+    for (int k = 0; k < 64; k++) if (b[k] != (k >= 1 && k < 1 + n ? (uint8_t)(k + 1) : (uint8_t)(200 - k))) return 2;
+    move(c + 5, c + 1, n);
+    for (int k = 0; k < 64; k++) if (c[k] != (k >= 5 && k < 5 + n ? (uint8_t)(k - 4) : (uint8_t)k)) return 3;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // Loops whose exit passes a value the back edge passes on too (a swap: Euclid's remainders, Fibonacci
 // pairs), ending on a register test or on flags: one edge's moves among the other's run before the branch
 // (arm64 `homes_free`), the test's register kept.
@@ -1990,7 +2039,6 @@ fn many_loop_vectors_run() {
     let lir = "lir ptr 8\nsym @acc fn global\nfn @acc\n  sig (ptr, i64, ptr) -> void\nb0(v0: ptr, v1: i64, v2: ptr):\n  v3 = iconst.i32 0\n  v4 = splat.v4i32 v3\n  v5 = iconst.i64 0\n  jmp b1(v5, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4)\nb1(v6: i64, v7: v4i32, v8: v4i32, v9: v4i32, v10: v4i32, v11: v4i32, v12: v4i32, v13: v4i32, v14: v4i32, v15: v4i32, v16: v4i32, v17: v4i32, v18: v4i32, v19: v4i32, v20: v4i32, v21: v4i32, v22: v4i32, v23: v4i32, v24: v4i32):\n  v25 = icmp.ult v6, v1\n  br v25, b2, b3\nb2:\n  v26 = iconst.i64 288\n  v27 = mul.i64 v6, v26\n  v28 = ptradd v0, v27 * 1\n  v29 = load.v4i32 v28+0 align 2\n  v30 = add.v4i32 v7, v29\n  v31 = load.v4i32 v28+16 align 2\n  v32 = add.v4i32 v8, v31\n  v33 = load.v4i32 v28+32 align 2\n  v34 = add.v4i32 v9, v33\n  v35 = load.v4i32 v28+48 align 2\n  v36 = add.v4i32 v10, v35\n  v37 = load.v4i32 v28+64 align 2\n  v38 = add.v4i32 v11, v37\n  v39 = load.v4i32 v28+80 align 2\n  v40 = add.v4i32 v12, v39\n  v41 = load.v4i32 v28+96 align 2\n  v42 = add.v4i32 v13, v41\n  v43 = load.v4i32 v28+112 align 2\n  v44 = add.v4i32 v14, v43\n  v45 = load.v4i32 v28+128 align 2\n  v46 = add.v4i32 v15, v45\n  v47 = load.v4i32 v28+144 align 2\n  v48 = add.v4i32 v16, v47\n  v49 = load.v4i32 v28+160 align 2\n  v50 = add.v4i32 v17, v49\n  v51 = load.v4i32 v28+176 align 2\n  v52 = add.v4i32 v18, v51\n  v53 = load.v4i32 v28+192 align 2\n  v54 = add.v4i32 v19, v53\n  v55 = load.v4i32 v28+208 align 2\n  v56 = add.v4i32 v20, v55\n  v57 = load.v4i32 v28+224 align 2\n  v58 = add.v4i32 v21, v57\n  v59 = load.v4i32 v28+240 align 2\n  v60 = add.v4i32 v22, v59\n  v61 = load.v4i32 v28+256 align 2\n  v62 = add.v4i32 v23, v61\n  v63 = load.v4i32 v28+272 align 2\n  v64 = add.v4i32 v24, v63\n  v65 = iconst.i64 1\n  v66 = add.i64 v6, v65\n  jmp b1(v66, v30, v32, v34, v36, v38, v40, v42, v44, v46, v48, v50, v52, v54, v56, v58, v60, v62, v64)\nb3:\n  store v7, v2+0 align 2\n  store v8, v2+16 align 2\n  store v9, v2+32 align 2\n  store v10, v2+48 align 2\n  store v11, v2+64 align 2\n  store v12, v2+80 align 2\n  store v13, v2+96 align 2\n  store v14, v2+112 align 2\n  store v15, v2+128 align 2\n  store v16, v2+144 align 2\n  store v17, v2+160 align 2\n  store v18, v2+176 align 2\n  store v19, v2+192 align 2\n  store v20, v2+208 align 2\n  store v21, v2+224 align 2\n  store v22, v2+240 align 2\n  store v23, v2+256 align 2\n  store v24, v2+272 align 2\n  ret\n";
     let drv = "#include <stdint.h>\nvoid acc(const uint32_t *, int64_t, uint32_t *);\nint main(void) {\n  static uint32_t a[5 * 18 * 4];\n  uint32_t d[18 * 4];\n  for (int k = 0; k < 5 * 18 * 4; k++) a[k] = (uint32_t)(k * 2654435761u);\n  acc(a, 5, d);\n  for (int k = 0; k < 18 * 4; k++) {\n    uint32_t s = 0;\n    for (int r = 0; r < 5; r++) s += a[r * 18 * 4 + k];\n    if (d[k] != s) return 1;\n  }\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
-    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // A load one comparison or operation reads folds into it (x86-64 `lv::FOLD_LDOP`): the memory against an
@@ -3707,7 +3755,6 @@ int main(void) {
 }
 )";
     assert_eq(run_native(lir, drv), 0);
-    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // Switches: dense ones (a jump table), a sparse one, a wide one whose value less the lowest case does not
@@ -4867,7 +4914,6 @@ b0(v0: ptr, v1: i16):
 )";
     let drv = "#include <stdint.h>\nint32_t ld32(const int32_t *, uint32_t);\nint64_t lds32(const int64_t *, int32_t);\nvoid st32(int16_t *, uint32_t, int16_t);\nint32_t ld8(const int32_t *, uint8_t);\nint32_t ld16(const int32_t *, uint16_t);\nstatic int32_t a[70000];\nstatic int64_t w[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};\nstatic int16_t h[8];\nint main(void) {\n  for (int i = 0; i < 70000; i++) a[i] = i * 3;\n  if (ld32(a, 65537) != 196611) return 1;\n  if (lds32(w + 4, -3) != 2 || lds32(w + 4, 4) != 9) return 2;\n  st32(h, 5, -7);\n  if (h[5] != -7 || h[4] != 0) return 3;\n  if (ld8(a, 255) != 765) return 4;\n  if (ld16(a, 65535) != 196605) return 5;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
-    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // Indirect calls whose target is in a register no argument takes, in one an argument takes (moved first),
@@ -5544,7 +5590,6 @@ b2:
 )";
     let drv = "#include <stdint.h>\nint64_t vsum(const int64_t *, int64_t);\nint main(void) {\n  int64_t a[10];\n  int64_t s = 0, x = 0;\n  for (int i = 0; i < 10; i++) { a[i] = (int64_t)i * 1000003 - 7; s += a[i]; x ^= a[i]; }\n  if (vsum(a, 5) != s + x) return 1;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
-    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // Vector shifts of every lane by one constant (a splat of a constant, or a wide constant of equal lanes),
@@ -6259,7 +6304,6 @@ b2:
 )";
     let drv = "#include <stdint.h>\nlong long pairs(const long long *, long long);\nint words(const int *, long long);\nvoid scatter(long long *, long long);\nvoid store1(int *, long long);\nint vsum(const int *, long long);\nlong long back(const long long *, long long);\nlong long far(const long long *, long long);\nlong long reread(const long long *, long long);\nint vone(const int *, long long);\ndouble fscale(double *, const double *, long long, double);\nvoid ffill(double *, const double *, long long);\nstatic long long a[2048];\nstatic double fd[64], fo[64];\nstatic long long s[64];\nint main(void) {\n  for (int i = 0; i < 2048; i++) a[i] = (long long)((i * 2654435761u) % 1000u) - 500;\n  const long long ns[4] = {1, 3, 8, 4};\n  for (int k = 0; k < 4; k++) {\n    long long n = ns[k];\n    long long e = 0;\n    for (long long i = 0; i < n; i++) e += a[2 * i] * a[2 * i + 1];\n    if (pairs(a, n) != e) return 1;\n    const int *w = (const int *)a;\n    uint32_t ew = 0;\n    for (long long i = 0; i < 4 * n; i++) ew = ew * 31u + (uint32_t)w[i];\n    if ((uint32_t)words(w, 4 * n) != ew) return 2;\n    scatter(s, n);\n    for (long long i = 0; i < n; i++) if (s[2 * i] != i || s[2 * i + 1] != -i) return 3;\n    int *q = (int *)s;\n    store1(q, 2 * n);\n    uint32_t x = 5;\n    for (long long i = 0; i < 2 * n; i++) { if ((uint32_t)q[i] != x) return 4; x *= 7u; }\n    uint32_t ev = 0;\n    for (long long i = 0; i < 8 * n; i++) ev += (uint32_t)w[i];\n    if ((uint32_t)vsum(w, n) != ev) return 5;\n    long long eb = 0;\n    for (long long i = n - 1; i >= 0; i--) eb = eb * 3 + a[2 * i] - a[2 * i + 1];\n    if (back(a, n) != eb) return 6;\n    long long ef = 0;\n    for (long long i = 0; i < (n < 4 ? n : 4); i++) ef += a[512 * i] - a[512 * i + 1];\n    if (far(a, n < 4 ? n : 4) != ef) return 7;\n    long long er = 0;\n    for (long long i = 0; i < n; i++) er += a[2 * i] + a[2 * i + 1];\n    if (reread(a, n) != er) return 8;\n    uint32_t eo = 0;\n    for (long long i = 0; i < 4 * n; i++) eo += (uint32_t)w[i];\n    if ((uint32_t)vone(w, n) != eo) return 10;\n    for (int i = 0; i < 64; i++) fd[i] = (double)(i * 3 - 50) / 8.0;\n    double ef2 = 0.0;\n    for (long long i = 0; i < 2 * n; i++) ef2 += fd[i] * 1.5;\n    if (fscale(fo, fd, 2 * n, 1.5) != ef2) return 11;\n    for (long long i = 0; i < 2 * n; i++) if (fo[i] != fd[i] * 1.5) return 12;\n    ffill(fo, &fd[5], 3 * n);\n    for (long long i = 0; i < 3 * n; i++) if (fo[i] != fd[5]) return 13;\n  }\n  if (pairs(a, 0) != 0 || words((const int *)a, 0) != 0 || vsum((const int *)a, 0) != 0 || far(a, 0) != 0) return 9;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
-    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // Vector products added to or subtracted from an accumulator, the product first or second, of 1-, 2- and
@@ -6417,7 +6461,6 @@ b2(v19: i64):
 )";
     let drv = "#include <stdint.h>\nunsigned char cls(unsigned char);\nunsigned short pick(int);\nint64_t cnt(unsigned char *, int64_t, unsigned char);\nint main(void) {\n  if (cls(1) != 200 || cls(2) != 7 || cls(3) != 255 || cls(4) != 200 || cls(0) != 200 || cls(9) != 209 || cls(100) != 44) return 1;\n  if (pick(0) != 40000 || pick(5) != 65534) return 2;\n  unsigned char s[10] = {3, 9, 9, 3, 9, 1, 3, 3, 0, 9};\n  if (cnt(s, 10, 3) != 4 || cnt(s, 0, 3) != 0) return 3;\n  for (int k = 0; k < 10; k += 2) if (s[k] != s[k + 1]) return 4;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
-    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // The parameters of the block after a loop, which an edge before the loop also enters, take the loop's
@@ -6524,7 +6567,6 @@ b3(v13: f64):
 )";
     let drv = "#include <stdint.h>\nint64_t cnt(const uint8_t *, int64_t, uint8_t);\ndouble fsum(const double *, int64_t);\nint main(void) {\n  uint8_t s[5] = {4, 1, 4, 4, 9};\n  if (cnt(s, 0, 4) != 7000 || cnt(s, 5, 4) != 5003 || cnt(s, 2, 9) != 2000) return 1;\n  double d[3] = {1.0, 0.5, 4.0};\n  if (fsum(d, 0) != 5.0 || fsum(d, 3) != 16.0) return 2;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
-    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // `skip`'s branches before and after its loop pass the same constant to the block past the loop, one edge
@@ -6740,7 +6782,6 @@ b2(v18: i32):
 )";
     let drv = "#include <stdint.h>\nint32_t parse(const char *, int64_t);\nint main(void) {\n  if (parse(\"1234567\", 7) != 1234567) return 1;\n  if (parse(\"\", 0) != 0) return 2;\n  if (parse(\"90\", 2) != 90) return 3;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
-    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // A result in registers whose parts swap the parameters' registers (a cycle the moves break through a

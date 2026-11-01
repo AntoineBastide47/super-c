@@ -905,10 +905,12 @@ pub(package) const fn alloc_of(name0: str) u8 {
     return ALLOC_NONE;
 }
 /// `Sym.fx`: a call may read memory; a call may write memory; a call may write the memory its pointer
-/// arguments address (and no other).
+/// arguments address (and no other); a call may not come back (a panic, a trap, a loop, a recursion, a
+/// call that may not).
 pub(package) const FX_READ: u8 = 1;
 pub(package) const FX_WRITE: u8 = 2;
 pub(package) const FX_ARG: u8 = 4;
+pub(package) const FX_STALL: u8 = 8;
 
 /// `Package.protect`: no body has a stack canary, the bodies with a slot of at least 8 bytes, with any
 /// slot, every body.
@@ -1697,7 +1699,7 @@ extend Package {
                 used: false,
                 noinline: false,
                 cold: false,
-                fx: FX_READ | FX_WRITE,
+                fx: FX_READ | FX_WRITE | FX_STALL,
                 esc: ~0u64,
                 alloc: if kind == SK_FUNC {
                     alloc_of(name)

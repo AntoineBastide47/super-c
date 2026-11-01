@@ -511,7 +511,7 @@ extend LoopOpt {
             if size == 0 {
                 continue;
             }
-            if bu.fin != 0 && self.final_values(b, ptr, h, p, size, bu.fin, dpre, dpost) {
+            if bu.fin != 0 && self.final_values(b, ptr, h, p, size, bu.fin, dpre, dpost, cl) {
                 any = true;
                 continue;
             }
@@ -718,7 +718,9 @@ extend LoopOpt {
     // exit, each value it leaves with is a polynomial of the iteration, and the copies of the iterations
     // take at most `budget` instructions. A loop with effects stays, its exit edge entering a block that
     // computes the polynomial values it leaves with (the others pass through), when it leaves only by the
-    // counted exit (or never comes back: a return, a panic, a trap) and needs no guard. Whether it did.
+    // counted exit (or never comes back: a return, a panic, a trap) and needs no guard. A loop of one block
+    // whose one effect fills or copies consecutive elements (`mem_run`) goes too, a `memset` or `memcpy` in
+    // its place (LLVM's loop idiom recognition). Whether it did.
     fn final_values(
         self: &mut Self,
         b: &mut Body,
@@ -729,17 +731,31 @@ extend LoopOpt {
         budget: u32,
         dpre: []u32,
         dpost: []u32,
+        cl: Classes,
     ) bool {
         if size > CF_SIZE || term(b, p).op != O_JMP || b.edge_target(term(b, p).a) != h {
             return false;
         }
         let mut eb = NONE;
         let mut pure = true;
+        // The one store and load of a fill or copy (`mem_run`), NONE for none.
+        let mut st = NONE;
+        let mut ld = NONE;
         for j in 0..self.lblocks.len() {
             let k = self.lblocks[j];
             let bk = b.blocks[k as usize];
             for i in bk.start..bk.start + bk.len - 1 {
-                pure = pure && cf_pure(b, b.insts[i as usize]);
+                let u = b.insts[i as usize];
+                if cf_pure(b, u) {
+                    continue;
+                }
+                if u.op == O_STORE && st == NONE {
+                    st = i;
+                } else if u.op == O_LOAD && ld == NONE {
+                    ld = i;
+                } else {
+                    pure = false;
+                }
             }
             let t = term(b, k);
             if t.op != O_JMP && t.op != O_BR && t.op != O_SWITCH {
@@ -766,13 +782,20 @@ extend LoopOpt {
                 eb = k;
             }
         }
+        if eb != h && eb != self.latch || !self.cf_test(b, ptr, h, p, eb) {
+            return false;
+        }
+        // A store and its load are no effect when they fill or copy, else the loop stays.
+        let mut run = Option::<MemRun>::None;
+        // Not a loop the vectorizer left its rest to: those few iterations stay inline.
+        if st != NONE && pure && (b.blocks[h as usize].flags & (BLOCK_NOVEC | BLOCK_EPI)) == 0 {
+            run = self.mem_run(b, ptr, cl, h, eb, st, ld);
+        }
+        if (st != NONE || ld != NONE) && run.is_none() {
+            pure = false;
+        }
         // Every test before `close` changes the body: a failed one leaves it as it was.
-        if eb != h && eb != self.latch || !self.cf_test(b, ptr, h, p, eb) || !pure && self.cf_guard || !self.close_plan(
-            b,
-            h,
-            dpre,
-            dpost,
-        ) {
+        if !pure && self.cf_guard || !self.close_plan(b, h, dpre, dpost) {
             return false;
         }
         let t0 = term(b, eb);
@@ -910,6 +933,9 @@ extend LoopOpt {
             };
             self.args.push(r);
         }
+        if let Some(m) = run {
+            self.mem_put(b, ptr, m, count);
+        }
         let target = b.edge_target(out);
         let e = b.edge(target, &self.args);
         let _ = cf_put(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: e, b: 0, c: 0 }, at);
@@ -980,6 +1006,161 @@ extend LoopOpt {
             self.owner.push(xb);
         }
         return true;
+    }
+
+    // The fill or copy that store `st` (and load `ld` for a copy, else NONE) of loop `h` makes, when each
+    // iteration writes the element after the last one (`MemRun`): the store's address `base + r * n + off`
+    // (`r` a header parameter stepping by 1, `base` from before the loop, `n` the stored bytes), its value
+    // from before the loop of one byte (a fill), or the load of `src + r * n + off` that the store alone
+    // reads, its bytes apart from the store's (a copy). The loop is one block, or a header that exits (`eb`)
+    // and a latch: a store in the header runs once more than the back edge, one in the latch as often.
+    // None else.
+    fn mem_run(self: &Self, b: &Body, ptr: u32, cl: Classes, h: u32, eb: u32, st: u32, ld: u32) Option<MemRun> {
+        let none = Option::<MemRun>::None;
+        if self.lblocks.len() > 2 {
+            return none;
+        }
+        let sb = self.owner[st as usize];
+        let extra: u32 = if sb == h {
+            1
+        } else if eb == h && sb == self.latch {
+            0
+        } else {
+            return none;
+        };
+        let t = b.insts[st as usize];
+        let ty = value_type(b, t.b);
+        if !is_int(ty) || ty == T_I128 || (t.aux & MEM_VOLATILE) != 0 {
+            return none;
+        }
+        let n = type_bytes(ty, ptr);
+        let (dst, idx, doff) = self.run_addr(b, h, t.a, t.c, n);
+        if dst == VNONE {
+            return none;
+        }
+        let mut m = MemRun {
+            copy: ld != NONE,
+            dst: dst,
+            src: VNONE,
+            idx: idx,
+            scale: n,
+            doff: doff,
+            soff: 0,
+            byte: VNONE,
+            k: 0,
+            extra: extra,
+        };
+        if ld == NONE {
+            if self.defined_in(t.b) {
+                return none;
+            }
+            if n == 1 {
+                m.byte = t.b;
+                return Some(m);
+            }
+            // A constant of one byte repeated.
+            if !is_const(b, t.b) {
+                return none;
+            }
+            let k = raw_const(b, t.b) & mask_of(8 * n);
+            let c = k & 0xFF;
+            for q in 1..n {
+                if (k >> (8 * q) as u64 & 0xFF) != c {
+                    return none;
+                }
+            }
+            m.k = c;
+            return Some(m);
+        }
+        let l = b.insts[ld as usize];
+        if t.b != ld || l.ty != ty || (l.aux & MEM_VOLATILE) != 0 || !self.apart(cl, st, ld) {
+            return none;
+        }
+        // The store alone reads the load.
+        for j in 0..self.lblocks.len() {
+            let bk = b.blocks[self.lblocks[j] as usize];
+            for i in bk.start..bk.start + bk.len {
+                let u = b.insts[i as usize];
+                if i != st && (u.a == ld || u.b == ld || u.c == ld) {
+                    return none;
+                }
+            }
+        }
+        let (src, sidx, soff) = self.run_addr(b, h, l.a, l.c, n);
+        if src == VNONE || sidx != idx {
+            return none;
+        }
+        m.src = src;
+        m.soff = soff;
+        return Some(m);
+    }
+
+    // Address `a` plus offset `c` of an access of `n` bytes in loop `h` as `base + r * n + off`: `base` from
+    // before the loop, `r` header parameter `idx` (its index among the header's) stepping by 1 (`cf_next`).
+    // (VNONE, 0, 0) when not.
+    fn run_addr(self: &Self, b: &Body, h: u32, a: Value, c: u32, n: u32) (Value, u32, u32) {
+        let no = (VNONE, 0u32, 0u32);
+        if (a & (VPARAM | VFLAG)) != 0 || a == VNONE || !self.defined_in(a) {
+            return no;
+        }
+        let x = b.insts[a as usize];
+        if x.op != O_PTRADD || x.aux as u32 != n || self.defined_in(x.a) || !self.header_param(x.b) {
+            return no;
+        }
+        let j = (x.b & ~VPARAM) - b.blocks[h as usize].param_start;
+        let nx = self.cf_next[j as usize];
+        if (nx & (VPARAM | VFLAG)) != 0 || nx == VNONE {
+            return no;
+        }
+        let s = b.insts[nx as usize];
+        let one = s.op == O_ADD && (s.a == x.b && is_const(b, s.b) && raw_const(b, s.b) == 1 || s.b == x.b && is_const(
+            b,
+            s.a,
+        ) && raw_const(b, s.a) == 1);
+        if !one {
+            return no;
+        }
+        return (x.a, j, x.c.wrapping_add(c));
+    }
+
+    // The `memset` or `memcpy` of fill or copy `m` of a loop whose back edge runs `count` times (the store
+    // `count` + `extra` times), from its first index `cf_init`, in the block `final_values` builds.
+    fn mem_put(self: &Self, b: &mut Body, ptr: u32, m: MemRun, count: Value) {
+        let at = self.cf_at;
+        let it = if ptr == 8 {
+            T_I64
+        } else {
+            T_I32
+        };
+        let ct = value_type(b, count);
+        let mut c = count;
+        if type_bits(ct, ptr) < type_bits(it, ptr) {
+            c = cf_put(b, Inst { op: O_ZEXT, ty: it, aux: 0, a: count, b: VNONE, c: VNONE }, at);
+        } else if type_bits(ct, ptr) > type_bits(it, ptr) {
+            c = cf_put(b, Inst { op: O_TRUNC, ty: it, aux: 0, a: count, b: VNONE, c: VNONE }, at);
+        }
+        let mut len = c;
+        if m.extra != 0 {
+            let one = cf_put(b, iconst_of(it, m.extra), at);
+            len = cf_put(b, bin(O_ADD, it, c, one), at);
+        }
+        if m.scale != 1 {
+            let s = cf_put(b, iconst_of(it, m.scale), at);
+            len = cf_put(b, bin(O_MUL, it, len, s), at);
+        }
+        let r0 = self.cf_init[m.idx as usize];
+        let d = cf_put(b, Inst { op: O_PTRADD, ty: T_PTR, aux: m.scale as u16, a: m.dst, b: r0, c: m.doff }, at);
+        if m.copy {
+            let s = cf_put(b, Inst { op: O_PTRADD, ty: T_PTR, aux: m.scale as u16, a: m.src, b: r0, c: m.soff }, at);
+            let _ = cf_put(b, Inst { op: O_MEMCPY, ty: T_NONE, aux: 0, a: d, b: s, c: len }, at);
+            return;
+        }
+        let v = if m.byte != VNONE {
+            m.byte
+        } else {
+            cf_put(b, iconst_of(T_I8, m.k), at)
+        };
+        let _ = cf_put(b, Inst { op: O_MEMSET, ty: T_NONE, aux: 0, a: d, b: v, c: len }, at);
     }
 
     // Whether block `eb`'s branch leaves loop `h` (preheader `p`) by a counted test: a comparison of a
@@ -6889,6 +7070,24 @@ fn op_fact(b: &Body, ptr: u32, t: Inst, fa: Poly, fb: Poly, w: u32) Poly {
 // Whether instruction `t` of a loop computes its value without an effect and without a trap, so the loop
 // may not run: the arithmetic, comparisons, conversions and selects of scalars, a division by a constant
 // it may take (not 0, a signed one not -1).
+// A fill or copy of consecutive elements (`LoopOpt::mem_run`): the destination `dst + r * scale + doff`,
+// `r` header parameter `idx`; a fill's byte (`byte`, else the constant `k`), a copy's source `src + r *
+// scale + soff`.
+struct MemRun {
+    copy: bool,
+    dst: Value,
+    src: Value,
+    idx: u32,
+    scale: u32,
+    doff: u32,
+    soff: u32,
+    byte: Value,
+    k: u64,
+    extra: u32, // the store's runs past the back edge's: 1 in the header, 0 in the latch
+}
+
+extend MemRun as Copy {}
+
 fn cf_pure(b: &Body, t: Inst) bool {
     let op = t.op;
     if is_vec(t.ty) || op == O_ADDO || op == O_SUBO || op == O_MULO {

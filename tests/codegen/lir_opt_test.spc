@@ -382,12 +382,15 @@ b0(v0: i32, v1: i32, v2: i16):
 @test
 fn a_call_of_itself_returned_at_once_is_a_loop() {
     let text = M"(lir ptr 8
+sym @kept_ptr data global
 sym @keep fn global noinline
 sym @sum fn global
 sym @esc fn global
 fn @keep
   sig (ptr) -> void
 b0(v0: ptr):
+  v1 = symaddr @kept_ptr
+  store v0, v1 align 3
   ret
 fn @sum
   sig (i64, i64) -> i64
@@ -420,6 +423,7 @@ b2:
   v5 = sub.i64 v0, v4
   v6 = call.i64 @esc(v5) : (i64) -> i64
   ret v6
+data @kept_ptr size 8 align 3
 )";
     let mut err = String::new();
     let before = lparse::parse(text, &mut err).unwrap();
@@ -1927,6 +1931,7 @@ b0(v0: i32):
 fn private_slots_become_values() {
     let (b, a) = optimized(
         M"(lir ptr 8
+sym @leaked data global
 sym @leak fn global noinline
 sym @count fn global
 sym @copied fn global
@@ -1935,6 +1940,8 @@ sym @maybe fn global
 fn @leak
   sig (ptr) -> void
 b0(v0: ptr):
+  v1 = symaddr @leaked
+  store v0, v1 align 3
   ret
 fn @count
   sig (i64) -> i64
@@ -1988,6 +1995,7 @@ b1:
 b2:
   v3 = load.i64 v2 align 3
   ret v3
+data @leaked size 8 align 3
 )",
     );
     assert(!text_of(&a, "count").contains("load"), "the counter is a parameter of the loop header");
@@ -4974,6 +4982,7 @@ b2(v18: i64):
 fn comparisons_addresses_and_neighbouring_accesses_fold() {
     let (b, a) = optimized(
         M"(lir ptr 8
+sym @sunk data global
 sym @order0 fn global
 sym @widen fn global
 sym @negated fn global
@@ -5103,6 +5112,8 @@ b0(v0: ptr):
 fn @sink
   sig (ptr, i64) -> void
 b0(v0: ptr, v1: i64):
+  v2 = symaddr @sunk
+  store v1, v2 align 3
   ret
 fn @guard
   layout l0 size 16 align 3 [0 ptr, 8 i64]
@@ -5175,6 +5186,7 @@ b0(v0: i64):
   v5 = zext.i64 v3
   v6 = add.i64 v4, v5
   ret v6
+data @sunk size 8 align 3
 )",
     );
     let iz = text_of(&a, "iszero");
@@ -7332,11 +7344,17 @@ b0(v0: i8):
 fn a_compared_parameter_returns_through_its_edges() {
     let (b, a) = optimized(
         M"(lir ptr 8
+sym @calls data global
 sym @tag fn global
 sym @g fn global noinline
 fn @g
   sig () -> void
 b0:
+  v0 = symaddr @calls
+  v1 = load.i64 v0 align 3
+  v2 = iconst.i64 1
+  v3 = add.i64 v1, v2
+  store v3, v0 align 3
   ret
 fn @tag
   sig (i32) -> i32
@@ -7357,6 +7375,7 @@ b3(v6: i8):
   v7 = icmp.eq v6, v1
   v8 = select.i32 v7, v3, v4
   ret v8
+data @calls size 8 align 3
 )",
     );
     let tt = text_of(&a, "tag");
@@ -7670,5 +7689,278 @@ b2(v8: i32):
     for (x, y, r) in [(12u64, 18u64, 6u64), (7, 0, 7), (0, 5, 5), (35, 14, 7)] {
         let args: []u64 = [x, y];
         same_result(&b, &a, "gcd", args, r);
+    }
+}
+
+// A counted loop whose one effect writes the element after the last one goes, a `memset` or `memcpy` in its
+// place (`final_values`' `mem_run`): a fill of 4-byte elements of one repeated byte, its test at its end
+// (the store runs once more than the back edge), a copy from a read-only source to an exclusive destination,
+// its test in the header (the store in the latch runs as often as the back edge). A fill whose bytes differ
+// stays a loop.
+@test
+fn fill_and_copy_loops_become_calls() {
+    let (b, a) = optimized_loops(
+        M"(lir ptr 8
+sym @fill fn global noinline
+sym @mixed fn global noinline
+sym @copy fn global noinline
+sym @run fn global
+sym @runm fn global
+sym @runc fn global
+sym @buf data global
+sym @src data global
+fn @fill
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.ne v1, v2
+  br v3, b1(v2), b2
+b1(v4: i64):
+  v5 = ptradd v0, v4 * 4
+  v6 = iconst.i32 16843009
+  store v6, v5 align 2
+  v7 = iconst.i64 1
+  v8 = add.i64 v4, v7
+  v9 = icmp.ult v8, v1
+  br v9, b1(v8), b2
+b2:
+  ret
+fn @mixed
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.ne v1, v2
+  br v3, b1(v2), b2
+b1(v4: i64):
+  v5 = ptradd v0, v4 * 4
+  v6 = iconst.i32 258
+  store v6, v5 align 2
+  v7 = iconst.i64 1
+  v8 = add.i64 v4, v7
+  v9 = icmp.ult v8, v1
+  br v9, b1(v8), b2
+b2:
+  ret
+fn @copy
+  sig (ptr, ptr, i64) -> void
+  ref p0 0 noalias
+  ref p1 0 readonly
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 2
+  v8 = load.i16 v7 align 1
+  v9 = ptradd v0, v5 * 2
+  store v8, v9 align 1
+  v10 = add.i64 v5, v4
+  jmp b1(v10)
+b3:
+  ret
+fn @run
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @buf
+  call @fill(v1, v0) : (ptr, i64) -> void
+  v2 = iconst.i64 1
+  v3 = sub.i64 v0, v2
+  v4 = ptradd v1, v3 * 4
+  v5 = load.i32 v4 align 2
+  v6 = ptradd v1, v0 * 4
+  v7 = load.i32 v6 align 2
+  v8 = zext.i64 v5
+  v9 = zext.i64 v7
+  v10 = add.i64 v8, v9
+  ret v10
+fn @runm
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @buf
+  call @mixed(v1, v0) : (ptr, i64) -> void
+  v2 = ptradd v1, v0 * 4
+  v3 = load.i64 v1 align 3
+  v4 = load.i32 v2 align 2
+  v5 = zext.i64 v4
+  v6 = add.i64 v3, v5
+  ret v6
+fn @runc
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @buf
+  v2 = symaddr @src
+  call @copy(v1, v2, v0) : (ptr, ptr, i64) -> void
+  v3 = load.i64 v1 align 3
+  v4 = ptradd v1, v0 * 2
+  v5 = load.i16 v4 align 1
+  v6 = zext.i64 v5
+  v7 = add.i64 v3, v6
+  ret v7
+data @buf size 64 align 3 bytes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+data @src size 64 align 3 bytes 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f
+)",
+        0,
+        false,
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 512 },
+    );
+    let f = text_of(&a, "fill");
+    assert(f.contains("memset") && !f.contains("store"), f.as_str());
+    let m = text_of(&a, "mixed");
+    assert(!m.contains("memset") && m.contains("store"), m.as_str());
+    let c = text_of(&a, "copy");
+    assert(c.contains("memcpy") && !c.contains("store"), c.as_str());
+    for n in 1..16u64 {
+        let args: []u64 = [n];
+        same_result(&b, &a, "run", args, 0x01010101u64 + 0xAAAAAAAAu64);
+    }
+    let zero: []u64 = [0];
+    same_result(&b, &a, "runm", zero, 0xAAAAAAAAAAAAAAAAu64 + 0xAAAAAAAAu64);
+    let three: []u64 = [3];
+    same_result(&b, &a, "runm", three, 0x0000010200000102u64 + 0xAAAAAAAAu64);
+    same_result(&b, &a, "runc", zero, 0xAAAAAAAAAAAAAAAAu64 + 0xAAAAu64);
+    let five: []u64 = [5];
+    same_result(&b, &a, "runc", five, 0x0706050403020100u64 + 0xAAAAu64);
+    let two: []u64 = [2];
+    same_result(&b, &a, "runc", two, 0xAAAAAAAA03020100u64 + 0xAAAAu64);
+}
+
+// A call whose result nothing reads goes when its function writes no memory and comes back (no `FX_WRITE`,
+// `FX_ARG` or `FX_STALL`): not when the function may panic, loops, or calls itself.
+@test
+fn unused_calls_without_effects_go() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @sq fn global noinline
+sym @chk fn global noinline
+sym @spin fn global noinline
+sym @rec fn global noinline
+sym @f fn global
+fn @sq
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = mul.i32 v0, v0
+  ret v1
+fn @chk
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 100
+  v2 = icmp.ult v0, v1
+  br v2, b1, b2
+b1:
+  ret v0
+b2: cold
+  panic "too large"
+fn @spin
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  jmp b1(v0)
+b1(v2: i32):
+  v3 = icmp.eq v2, v1
+  br v3, b2, b1(v2)
+b2:
+  ret v2
+fn @rec
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1:
+  ret v0
+b2:
+  v3 = call.i32 @rec(v0) : (i32) -> i32
+  ret v3
+fn @f
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = call.i32 @sq(v0) : (i32) -> i32
+  v2 = call.i32 @chk(v0) : (i32) -> i32
+  v3 = call.i32 @spin(v0) : (i32) -> i32
+  v4 = call.i32 @rec(v0) : (i32) -> i32
+  v5 = iconst.i32 1
+  v6 = add.i32 v0, v5
+  ret v6
+)",
+    );
+    let f = text_of(&a, "f");
+    assert(!f.contains("@sq") && f.contains("@chk") && f.contains("@spin") && f.contains("@rec"), f.as_str());
+    let zero: []u64 = [0];
+    same_result(&b, &a, "f", zero, 1);
+}
+
+// A call in a loop's body (not its header) of a function that writes no memory and comes back moves before
+// the loop, though the body may not run (`hoist_call`); one of a function that may panic stays.
+@test
+fn calls_that_come_back_leave_loop_bodies() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @sq fn global noinline
+sym @chk fn global noinline
+sym @sum fn global
+sym @sumc fn global
+fn @sq
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = mul.i32 v0, v0
+  ret v1
+fn @chk
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 100
+  v2 = icmp.ult v0, v1
+  br v2, b1, b2
+b1:
+  ret v0
+b2: cold
+  panic "too large"
+fn @sum
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  jmp b1(v2, v2)
+b1(v4: i32, v5: i32):
+  v6 = icmp.ult v4, v0
+  br v6, b2, b3
+b2:
+  v7 = call.i32 @sq(v1) : (i32) -> i32
+  v8 = add.i32 v5, v7
+  v9 = add.i32 v4, v3
+  jmp b1(v9, v8)
+b3:
+  ret v5
+fn @sumc
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  jmp b1(v2, v2)
+b1(v4: i32, v5: i32):
+  v6 = icmp.ult v4, v0
+  br v6, b2, b3
+b2:
+  v7 = call.i32 @chk(v1) : (i32) -> i32
+  v8 = add.i32 v5, v7
+  v9 = add.i32 v4, v3
+  jmp b1(v9, v8)
+b3:
+  ret v5
+)",
+    );
+    // The call before the loop's header: the first block holds it.
+    let s = text_of(&a, "sum");
+    let first = s.find("b1");
+    assert(s.find("call.i32 @sq") < first, s.as_str());
+    let c = text_of(&a, "sumc");
+    let cfirst = c.find("b1");
+    assert(c.find("call.i32 @chk") > cfirst && c.find("call.i32 @chk") != usize::MAX, c.as_str());
+    for (n, k) in [(0u64, 3u64), (4, 3), (7, 9)] {
+        let args: []u64 = [n, k];
+        same_result(&b, &a, "sum", args, n * k * k);
+        same_result(&b, &a, "sumc", args, n * k);
     }
 }

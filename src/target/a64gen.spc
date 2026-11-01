@@ -6748,10 +6748,12 @@ extend Gen {
                 self.materialize(vs[k], k as u8);
             }
         }
-        // A narrow integer (a 32-bit size, a fill byte) extends to the register's width, as C reads it.
+        // A narrow integer (a 32-bit size, a fill byte) extends to the register's width, as C reads it: not a
+        // constant whose bits above its width are zero.
         for k in 0..vs.len() {
             let ty = self.vt(vs[k]);
-            if type_bytes(ty, self.ptr) < 8 {
+            let mut c: u64 = 0;
+            if type_bytes(ty, self.ptr) < 8 && !(self.const_of(vs[k], &mut c) && c >> type_bits(ty, self.ptr) as u64 == 0) {
                 self.emit(a::uxt(k as u32, k as u32, type_bits(ty, self.ptr)));
             }
         }
