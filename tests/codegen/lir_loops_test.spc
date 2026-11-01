@@ -5035,3 +5035,81 @@ data @w size 200 align 3 bytes 21c0a9dc5920318c312059dca9c021ccc100895c79e0918cd
         same_outcome(&b, &a, "ss", args, run_value(&b, "ss", args), false);
     }
 }
+
+// A loop's calls of C's float functions (`floorf`, `fmaf`) widen to vector operations where the target computes
+// them in registers (`lane_fn`, `Package.vfloat`); a call of another function stays.
+@test
+fn calls_of_float_functions_widen() {
+    let src = M"(lir ptr 8
+sym @floorf fn global
+sym @fmaf fn global
+sym @cosf fn global
+sym @fl fn global
+sym @fm fn global
+sym @co fn global
+fn @fl
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 4
+  v8 = load.f32 v7 align 2
+  v9 = call.f32 @floorf(v8) : (f32) -> f32
+  v10 = ptradd v0, v5 * 4
+  store v9, v10 align 2
+  v11 = add.i64 v5, v4
+  jmp b1(v11)
+b3:
+  ret
+fn @fm
+  sig (ptr, ptr, f32, i64) -> void
+b0(v0: ptr, v1: ptr, v2: f32, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.ult v6, v3
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 4
+  v9 = load.f32 v8 align 2
+  v10 = call.f32 @fmaf(v9, v2, v9) : (f32, f32, f32) -> f32
+  v11 = ptradd v0, v6 * 4
+  store v10, v11 align 2
+  v12 = add.i64 v6, v5
+  jmp b1(v12)
+b3:
+  ret
+fn @co
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 4
+  v8 = load.f32 v7 align 2
+  v9 = call.f32 @cosf(v8) : (f32) -> f32
+  v10 = ptradd v0, v5 * 4
+  store v9, v10 align 2
+  v11 = add.i64 v5, v4
+  jmp b1(v11)
+b3:
+  ret
+)";
+    let (_, a) = optimized(src, VECTOR);
+    let f = text_of(&a, "fl");
+    assert(f.contains("vop.floor.v4f32"), f.as_str());
+    let m = text_of(&a, "fm");
+    assert(m.contains("vop.fma.v4f32"), m.as_str());
+    let c = text_of(&a, "co");
+    assert(!c.contains("v4f32") && c.contains("call.f32 @cosf"), c.as_str());
+}

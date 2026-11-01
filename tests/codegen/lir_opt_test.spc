@@ -1802,18 +1802,28 @@ b0(v0: i64):
     same_result(&b, &a, "caller", x, 12);
 }
 
-// The address of a thread-local variable is never one value across a call: the thread may change there
-// (a coroutine parks on one thread and resumes on another).
+// The address of a thread-local variable is one value until a call that writes memory: the thread may
+// change there (a coroutine parks on one thread and resumes on another). Two reads with no such call
+// between share it, and a loop without one takes it once, before the loop.
 @test
 fn a_thread_local_address_is_taken_again_after_a_call() {
-    let (_b, a) = optimized(
+    let (b, a) = optimized(
         M"(lir ptr 8
 sym @park fn global noinline
+sym @parks data global
 sym @t tls global
 sym @both fn global
+sym @twice fn global
+sym @sum fn global
+sym @sump fn global
 fn @park
   sig () -> void
 b0:
+  v0 = symaddr @parks
+  v1 = load.i64 v0 align 3
+  v2 = iconst.i64 1
+  v3 = add.i64 v1, v2
+  store v3, v0 align 3
   ret
 fn @both
   sig () -> i64
@@ -1825,12 +1835,72 @@ b0:
   v3 = load.i64 v2 align 3
   v4 = add.i64 v1, v3
   ret v4
+fn @twice
+  sig () -> i64
+b0:
+  v0 = symaddr @t
+  v1 = load.i64 v0 align 3
+  v2 = symaddr @t
+  v3 = load.i64 v2 align 3
+  v4 = add.i64 v1, v3
+  ret v4
+fn @sum
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v2)
+b1(v4: i64):
+  v5 = icmp.ult v4, v1
+  br v5, b2, b3
+b2:
+  v6 = ptradd v0, v4 * 8
+  v7 = load.i64 v6 align 3
+  v8 = symaddr @t
+  v9 = load.i64 v8 align 3
+  v10 = add.i64 v9, v7
+  store v10, v8 align 3
+  v11 = add.i64 v4, v3
+  jmp b1(v11)
+b3:
+  ret
+fn @sump
+  sig (i64) -> void
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  jmp b1(v1)
+b1(v3: i64):
+  v4 = icmp.ult v3, v0
+  br v4, b2, b3
+b2:
+  v5 = symaddr @t
+  v6 = load.i64 v5 align 3
+  v7 = add.i64 v6, v2
+  store v7, v5 align 3
+  call @park() : () -> void
+  v8 = add.i64 v3, v2
+  jmp b1(v8)
+b3:
+  ret
+data @parks size 8 align 3
 data @t size 8 align 3
 )",
     );
     let t = text_of(&a, "both");
-    let first = t.as_str().find("symaddr @t");
-    assert(first >= 0 && t.as_str().slice(first as usize + 1, t.len()).contains("symaddr @t"), t.as_str());
+    assert(count_of(&t, "symaddr @t") == 2, t.as_str());
+    let w = text_of(&a, "twice");
+    assert(count_of(&w, "symaddr @t") == 1, w.as_str());
+    // Before the loop: in the entry block, ahead of its first jump or branch.
+    let s = text_of(&a, "sum");
+    let head = s.find("\nb1");
+    assert(count_of(&s, "symaddr @t") == 1 && s.find("symaddr @t") < head, s.as_str());
+    // A loop that calls a function that writes memory takes the address in each iteration.
+    let p = text_of(&a, "sump");
+    let phead = p.find("\nb1");
+    assert(p.find("symaddr @t") > phead, p.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "twice", none, 0);
 }
 
 // A copy of no byte goes, and checked arithmetic on constants folds with its branch.
@@ -7963,4 +8033,59 @@ b3:
         same_result(&b, &a, "sum", args, n * k * k);
         same_result(&b, &a, "sumc", args, n * k);
     }
+}
+
+// A callee over the inline budget inlines at a call whose constant argument selects a small part of it
+// (`folds_small`): a switch on that parameter reaches one arm. A call with a variable argument stays.
+@test
+fn constant_arguments_that_shrink_a_callee_inline() {
+    let mut src = String::from_str(
+        M"(lir ptr 8
+sym @pick fn global
+sym @one fn global
+sym @any fn global
+fn @pick
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 3
+  v3 = iconst.i32 1
+  switch v1 [0 -> b1, 1 -> b2] else b3
+b1:
+  ret v0
+b2:
+  v4 = mul.i32 v0, v2
+  v5 = add.i32 v4, v3
+  ret v5
+b3:
+  v6 = add.i32 v0, v3)",
+    );
+    // A long default arm puts the body past the budget's 40 instructions.
+    for k in 0..48u32 {
+        src.push_str(format("\n  v{} = mul.i32 v{}, v{}", 7 + k, 6 + k, 6 + k).as_str());
+    }
+    src.push_str(
+        M"(
+  ret v54
+fn @one
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 1
+  v2 = call.i32 @pick(v0, v1) : (i32, i32) -> i32
+  ret v2
+fn @any
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = call.i32 @pick(v0, v1) : (i32, i32) -> i32
+  ret v2
+)",
+    );
+    let (b, a) = optimized(&src);
+    let o = text_of(&a, "one");
+    assert(!o.contains("call"), o.as_str());
+    let y = text_of(&a, "any");
+    assert(y.contains("call.i32 @pick"), y.as_str());
+    let x: []u64 = [5];
+    same_result(&b, &a, "one", x, 16);
+    let xy: []u64 = [5, 1];
+    same_result(&b, &a, "any", xy, 16);
 }

@@ -326,3 +326,50 @@ fn asm_wasm32() {
     }
     h::expect_asm("wasm32 multiply", MULW, ["--profile=release", "--target=wasm"], "mulw", ["i64.mul"], ["call"]);
 }
+
+// Loops of `abs`, `floor`, `ceil`, `trunc` and `mul_add`, which the loop vectorizer widens to vector
+// operations where the target computes them in registers: each lane as the C function gives it, on values
+// that round both ways, halves, both zeros, the infinities and a NaN, past a vector and with a remainder.
+const FLOAT_LOOPS: str = M"(@noinline fn fl(d: []mut f32, s: []f32) { for i in 0..s.len() { d[i] = s[i].floor(); } }
+@noinline fn ce(d: []mut f32, s: []f32) { for i in 0..s.len() { d[i] = s[i].ceil(); } }
+@noinline fn tr(d: []mut f32, s: []f32) { for i in 0..s.len() { d[i] = s[i].trunc(); } }
+@noinline fn ab(d: []mut f32, s: []f32) { for i in 0..s.len() { d[i] = s[i].abs(); } }
+@noinline fn ma(d: []mut f32, s: []f32, k: f32) { for i in 0..s.len() { d[i] = s[i].mul_add(k, s[i]); } }
+@noinline fn fl64(d: []mut f64, s: []f64) { for i in 0..s.len() { d[i] = s[i].floor(); } }
+@noinline fn ma64(d: []mut f64, s: []f64, k: f64) { for i in 0..s.len() { d[i] = s[i].mul_add(k, s[i]); } }
+fn show(name: str, d: []f32) { for i in 0..d.len() { println("{} {} {}", name, i, d[i].to_bits()); } }
+fn main() i32 {
+    let base: [f32; 12] = [0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.75, -2.75, 1.0e30, -3.0e-30, 1.0 / 0.0, -1.0 / 0.0];
+    let mut s = Vector::<f32>::new();
+    let mut s64 = Vector::<f64>::new();
+    let mut d = Vector::<f32>::new();
+    let mut d64 = Vector::<f64>::new();
+    for i in 0..37usize {
+        let x = if i == 36 { 0.0 / 0.0 } else { base[i % 12] * (1 + i / 12) as f32 };
+        s.push(x);
+        s64.push(x as f64 + 0.25);
+        d.push(0.0);
+        d64.push(0.0);
+    }
+    fl(&mut d, &s);
+    show("floor", &d);
+    ce(&mut d, &s);
+    show("ceil", &d);
+    tr(&mut d, &s);
+    show("trunc", &d);
+    ab(&mut d, &s);
+    show("abs", &d);
+    ma(&mut d, &s, 3.0e-8);
+    show("mul_add", &d);
+    fl64(&mut d64, &s64);
+    for i in 0..37usize { println("floor64 {} {}", i, d64[i].to_bits()); }
+    ma64(&mut d64, &s64, 1.0e-17);
+    for i in 0..37usize { println("mul_add64 {} {}", i, d64[i].to_bits()); }
+    return 0;
+}
+)";
+
+@test
+fn float_function_loops_match_their_scalar_calls() {
+    h::expect_same_output("float function loops", FLOAT_LOOPS, ["--profile=debug"], ["--profile=release"]);
+}

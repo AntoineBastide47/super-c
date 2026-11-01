@@ -1223,6 +1223,17 @@ extend Opt {
         self.unr.vops = pk.vops;
         self.unr.apairs = pk.apairs;
         self.unr.vmulh = pk.vec_mulh;
+        self.unr.vfn.truncate(0);
+        for s in 0..b.syms.len() {
+            let sy = pk.syms[b.syms[s] as usize];
+            self.unr.vfn.push(
+                if pk.vfloat && sy.kind == SK_FUNC && sy.def == NONE {
+                    lu::lane_fn(pk.spell(sy.name))
+                } else {
+                    0u8
+                },
+            );
+        }
         let any = self.unr.run(
             b,
             pk.ptr_bytes,
@@ -5898,6 +5909,23 @@ extend Opt {
             if self.hoist_call(pk, b, k, i) {
                 return true;
             }
+        } else if tls_addr(pk, b, t) {
+            // The running thread's copy: a task moves to another thread only in a call that writes memory,
+            // so one address serves until the untagged accesses' state changes, and it leaves the loops
+            // without such a call.
+            let h = mix(value_hash(b, t), self.tstate[0] as u64 + 1);
+            let found = switch self.pure.get(&h) {
+                Some(v) => *v,
+                None => NONE,
+            };
+            if found != NONE && same_value(b, as_plain(b.insts[found as usize]), t) {
+                self.repl[i as usize] = found;
+                return true;
+            }
+            self.enter(LOG_PURE, h, i);
+            if self.hoist(pk, b, k, i, false, false, false) {
+                return true;
+            }
         } else if pure_op(t.op) && !tls_addr(pk, b, t) {
             if pk.fmath != 0 && t.op >= O_FADD && t.op <= O_FDIV && !is_vec(t.ty) {
                 let r = self.fast_math(pk, b, k, i);
@@ -8936,7 +8964,8 @@ extend Opt {
         // A constant leaves its loops too: the backends rebuild one that one instruction makes at each use
         // and keep the others in a register (a 64-bit integer on arm64, a float, a wide constant).
         let konst = t.op == O_ICONST || t.op == O_FCONST || t.op == O_WCONST;
-        if !load && !konst && !speculable(pk, b, t) {
+        let tls = tls_addr(pk, b, t);
+        if !load && !konst && !tls && !speculable(pk, b, t) {
             return false;
         }
         let mut target = k;
@@ -8947,7 +8976,7 @@ extend Opt {
             // type tag (or untagged); one of a private slot's memory, when the loop writes that memory.
             let private = self.private(t);
             let cls = class_bit(self.loop_acc(i, h)) | self.sbits & ~self.member(i);
-            if h == NONE || self.preh[h as usize] == NONE || load && !kept && private && self.pwrite[h as usize] || load && !kept && !private && (self.writes[h as usize] & cls) != 0 && (tbaa(
+            if h == NONE || self.preh[h as usize] == NONE || tls && self.moves_task(pk, b, h) || load && !kept && private && self.pwrite[h as usize] || load && !kept && !private && (self.writes[h as usize] & cls) != 0 && (tbaa(
                 t,
             ) == 0 || (self.tags[h as usize] & (1u16 << tbaa(t) as u16 | 1)) != 0) && !self.fields_apart(
                 pk,
@@ -8970,6 +8999,22 @@ extend Opt {
         self.blk_of[i as usize] = target;
         self.hoisted.push(target as u64 << 32 | i as u64);
         return true;
+    }
+
+    // Whether a block of loop `h` of `b` holds a call, assembly or a system operation that writes memory: a
+    // task may resume on another thread after it.
+    fn moves_task(self: &Self, pk: &Package, b: &Body, h: u32) bool {
+        let r = self.lb_at[h as usize];
+        for q in (r >> 32) as u32..r as u32 {
+            let bk = b.blocks[self.lbs[q as usize] as usize];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                if (t.op == O_CALL || t.op == O_CALLIND || t.op == O_ASM || t.op == O_SYS) && writes(pk, b, t) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // Call `i` of block `k`, of a function that writes no memory, to the preheader of the loop `k` heads,
@@ -9739,7 +9784,7 @@ extend Run {
         // The inliner reads the rare blocks, the loop transforms and the code generators too: marked before
         // the inlining (a copy takes its call's marks) and once the transforms made their blocks.
         sc.o.estimate(p, b);
-        let inlined = sc.il.run(p, base, &r.ok, &r.level, &r.unit, j, b);
+        let inlined = sc.il.run(p, base, &r.ok, &r.level, &r.unit, j, r.cf.inline, b);
         // The switches as compares and branches, before the first walk, which simplifies them (a test that
         // returns a value on either side returns a select).
         let lowered = p.switch_tree && sws::lower(b, p.ptr_bytes);
@@ -9778,7 +9823,7 @@ extend Run {
             let _ = sc.o.run(p, b, true);
         }
         let snap = r.inline && r.shape[j as usize] && bu.vector != 0 && !packed(b);
-        let pre = if snap && il::small(b, r.cf.inline) {
+        let pre = if snap && il::bounded(b, r.cf.inline) {
             Option::<Body>::Some(b.compact())
         } else {
             Option::<Body>::None
@@ -9872,7 +9917,7 @@ extend Run {
                 fits = false;
             }
         }
-        unsafe *(r.ok.as_ptr() as *mut bool + j as usize) = fits && il::small(b, r.cf.inline);
+        unsafe *(r.ok.as_ptr() as *mut bool + j as usize) = fits && il::bounded(b, r.cf.inline);
         r.give(sc);
     }
 
@@ -13006,8 +13051,8 @@ fn speculable(pk: &Package, b: &Body, t: Inst) bool {
     return true;
 }
 
-// Whether `t` of `b` is the address of a thread-local variable: the running thread's copy, which a call
-// may change (a task resumes on another thread), so no two of them are one value.
+// Whether `t` of `b` is the address of a thread-local variable: the running thread's copy, which a call that
+// writes memory may change (a task resumes on another thread).
 const fn tls_addr(pk: &Package, b: &Body, t: Inst) bool {
     return t.op == O_SYMADDR && pk.syms[b.syms[t.a as usize] as usize].kind == SK_TLS;
 }

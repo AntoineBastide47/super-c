@@ -78,6 +78,107 @@ pub(package) const fn forwarder(b: &Body) bool {
     return calls == 1;
 }
 
+/// Whether body `b` may fit budget `bu` at a call: at most `bu.all` instructions (`small`, or `folds_small`
+/// for the call's constant arguments).
+pub(package) const fn bounded(b: &Body, bu: Budget) bool {
+    return b.insts.len() as u32 <= bu.all;
+}
+
+/// Whether the blocks of body `e` that call `t` of `c` reaches fit budget `bu` (`small`): a branch or a
+/// switch on an entry parameter whose argument is a constant, or on its comparison with a constant, takes
+/// its one edge (`scale(x, 1)` reaches one arm of `switch mode`). `seen` and `work` are scratch.
+fn folds_small(
+    e: &Body,
+    c: &Body,
+    t: Inst,
+    bu: Budget,
+    seen: &mut Vector<bool>,
+    work: &mut Vector<u32>,
+    es: &mut Vector<u32>,
+) bool {
+    fill(seen, e.blocks.len(), false);
+    work.truncate(0);
+    work.push(0);
+    seen[0] = true;
+    let mut warm: u32 = 0;
+    let mut all: u32 = 0;
+    // Each block enters the walk once.
+    while work.len() != 0 {
+        let k = work.pop().unwrap();
+        let bk = e.blocks[k as usize];
+        all += bk.len;
+        if (bk.flags & BLOCK_RARE) == 0 {
+            warm += bk.len;
+        }
+        let end = e.insts[(bk.start + bk.len - 1) as usize];
+        e.succ_edges(end, es);
+        let mut only = NONE;
+        if end.op == O_BR && (end.a & (VPARAM | VFLAG)) == 0 && e.insts[end.a as usize].op == O_ICMP {
+            let q = e.insts[end.a as usize];
+            let x = known(e, c, t, q.a);
+            let y = known(e, c, t, q.b);
+            if x.is_some() && y.is_some() {
+                only = if le::icmp(q.aux, e.type_of(q.a), 8, x.unwrap(), y.unwrap()) {
+                    end.b
+                } else {
+                    end.c
+                };
+            }
+        } else if end.op == O_SWITCH {
+            let x = known(e, c, t, end.a);
+            if x.is_some() {
+                let m = mask(e.type_of(end.a));
+                only = e.switch_edge(end, end.aux);
+                for q in 0..end.aux as u32 {
+                    if (e.words[(end.b + q) as usize] & m) == (x.unwrap() & m) {
+                        only = e.switch_edge(end, q);
+                    }
+                }
+            }
+        }
+        for q in 0..es.len() {
+            let s = e.edge_target(es[q]);
+            if (only == NONE || es[q] == only) && !seen[s as usize] {
+                seen[s as usize] = true;
+                work.push(s);
+            }
+        }
+    }
+    return warm <= bu.warm && all <= bu.all;
+}
+
+// The constant value `v` of callee `e` has at call `t` of `c`: an integer constant, or an entry parameter
+// whose argument is one.
+fn known(e: &Body, c: &Body, t: Inst, v: Value) Option<u64> {
+    let w = if (v & VPARAM) != 0 && (v & ~VPARAM) < e.blocks[0].param_len as u32 {
+        c.pool[(t.c + (v & ~VPARAM)) as usize]
+    } else if (v & (VPARAM | VFLAG)) == 0 {
+        v
+    } else {
+        return None;
+    };
+    let b = if w == v {
+        e
+    } else {
+        c
+    };
+    if w == VNONE || (w & (VPARAM | VFLAG)) != 0 || b.insts[w as usize].op != O_ICONST || b.insts[w as usize].ty == T_I128 {
+        return None;
+    }
+    let k = b.insts[w as usize];
+    return Some(k.b as u64 << 32 | k.a as u64);
+}
+
+// The bits of integer type `ty` up to 64.
+const fn mask(ty: u8) u64 {
+    let n = type_bits(ty, 8);
+    return if n >= 64 {
+        ~0u64
+    } else {
+        (1u64 << n as u64) - 1
+    };
+}
+
 /// Whether body `b` fits budget `bu`.
 pub(package) const fn small(b: &Body, bu: Budget) bool {
     let mut warm: u32 = 0;
@@ -115,6 +216,8 @@ pub(package) struct Inliner {
     csym: Vector<u32>, // per callee symbol number, the new body's
     cmsg: Vector<u32>, // per callee message number, the new body's
     edges: Vector<u32>,
+    seen: Vector<bool>, // `folds_small`'s scratch
+    work: Vector<u32>,
 }
 
 // The bases of one callee copy's tables in the new body.
@@ -138,6 +241,8 @@ extend Inliner {
             mmap: Map::<u32, u32>::new(),
             csym: Vector::<u32>::new(),
             cmsg: Vector::<u32>::new(),
+            seen: Vector::<bool>::new(),
+            work: Vector::<u32>::new(),
             edges: Vector::<u32>::new(),
         };
     }
@@ -154,9 +259,10 @@ extend Inliner {
         level: &Vector<u32>,
         unit: &Vector<u32>,
         ci: u32,
+        bu: Budget,
         c: &mut Body,
     ) bool {
-        if !self.plan(pk, bodies, ok, level, unit, ci, c) {
+        if !self.plan(pk, bodies, ok, level, unit, ci, bu, c) {
             return false;
         }
         let out = self.build(bodies, c);
@@ -174,6 +280,7 @@ extend Inliner {
         level: &Vector<u32>,
         unit: &Vector<u32>,
         ci: u32,
+        bu: Budget,
         c: &Body,
     ) bool {
         self.sites.truncate(0);
@@ -208,7 +315,10 @@ extend Inliner {
                 let tiny = e.blocks.len() == 1 && e.insts.len() <= 3;
                 // A `@cold` callee stays a call unless it is no bigger than one: its callers' code stays small.
                 let cold = pk.syms[c.syms[t.a as usize] as usize].cold && !small(e, SHRINK);
-                if !warm && !forwarder(e) || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 {
+                if !warm && !forwarder(e) || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || !small(
+                    e,
+                    bu,
+                ) && !folds_small(e, c, t, bu, &mut self.seen, &mut self.work, &mut self.edges) {
                     self.cmap[i as usize] = ni;
                     ni += 1;
                     continue;

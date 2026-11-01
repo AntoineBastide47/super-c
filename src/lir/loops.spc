@@ -230,6 +230,8 @@ pub(package) struct LoopOpt {
     /// The lane sizes whose vectors the target multiplies to their high halves (`Package.vec_mulh`): a plan
     /// divides such lanes by a constant.
     pub(package) vmulh: u8,
+    /// Per symbol of the body, the vector operation a call of it computes per lane (`lane_fn`), 0 for none.
+    pub(package) vfn: Vector<u8>,
     vgat: Vector<u32>, // the gathered loads and scattered stores (`vgather`)
     vmap: Vector<Value>,
     vinv: Vector<Value>,
@@ -422,6 +424,7 @@ extend LoopOpt {
             vops: 0,
             apairs: true,
             vmulh: 0,
+            vfn: Vector::<u8>::new(),
             vgat: Vector::<u32>::new(),
             vmap: Vector::<Value>::new(),
             vinv: Vector::<Value>::new(),
@@ -2597,6 +2600,26 @@ extend LoopOpt {
         // A shift's amounts are lanes too (each below the width, as the scalar shift's).
         let shift = (op == O_SHL || op == O_LSHR || op == O_ASHR) && self.vops != 0 && !self.vone;
         let int_op = op == O_ADD || op == O_SUB || op == O_AND || op == O_OR || op == O_XOR || op == O_NEG || op == O_NOT || op == O_MUL || shift;
+        // A call of a C float function a vector operation computes per lane (`lane_fn`).
+        if op == O_CALL && !self.vone && t.a as usize < self.vfn.len() && self.vfn[t.a as usize] != 0 && is_float(t.ty) && self.lane_size(
+            t.ty,
+            ptr,
+        ) {
+            let mut lane = false;
+            for q in 0..t.aux as u32 {
+                let a = b.pool[(t.c + q) as usize];
+                let k = self.kind(b, u, a);
+                if value_type(b, a) != t.ty || k != VK_LANE && k != VK_INV && self.defined_in(a) {
+                    return 0;
+                }
+                lane = lane || k == VK_LANE;
+            }
+            return if lane {
+                VK_LANE
+            } else {
+                0
+            };
+        }
         let float_op = op >= O_FADD && op <= O_FNEG || op == O_FSQRT;
         if !(is_int(t.ty) && t.ty != T_I128 && int_op || is_float(t.ty) && float_op) || !self.lane_size(t.ty, ptr) {
             return 0;
@@ -3022,6 +3045,10 @@ extend LoopOpt {
                 } else if t.op == O_SELECT {
                     self.vsplat(b, u, t.b, l0);
                     self.vsplat(b, u, t.c, l0);
+                } else if t.op == O_CALL {
+                    for q in 0..t.aux as u32 {
+                        self.vsplat(b, u, b.pool[(t.c + q) as usize], l0);
+                    }
                 } else if t.op != O_LOAD {
                     if lv::operand_a(f) {
                         self.vsplat(b, u, t.a, l0);
@@ -3232,6 +3259,20 @@ extend LoopOpt {
                         let at3 = b.pool_list(sv[0..3]);
                         let code = (core::OP_SIMD + core::SIMD_STORE_MASKED_PTR as u32) as u16;
                         self.vmap[at] = self.vi(b, Inst { op: O_VOP, ty: T_NONE, aux: code, a: at3, b: 3, c: VNONE }, l);
+                        continue;
+                    }
+                    if t.op == O_CALL {
+                        let mut args = Vector::<Value>::with_capacity(t.aux as usize);
+                        for q in 0..t.aux as u32 {
+                            args.push(self.vval(b, u, c, b.pool[(t.c + q) as usize]));
+                        }
+                        let at2 = b.pool_list(args[0..args.len()]);
+                        let code = (core::OP_SIMD + self.vfn[t.a as usize] as u32) as u16;
+                        self.vmap[at] = self.vi(
+                            b,
+                            Inst { op: O_VOP, ty: nt.ty, aux: code, a: at2, b: t.aux, c: VNONE },
+                            b.locs[i as usize],
+                        );
                         continue;
                     }
                     if lv::operand_a(f) && !(t.op == O_SELECT && !self.defined_in(t.a)) {
@@ -7857,4 +7898,27 @@ fn piv_mapped(b: &mut Body, t0: Inst, map: &Vector<Value>, ni: usize, npar: usiz
         }
     }
     return t;
+}
+
+/// The vector operation (`core::SIMD_*`) a call of C float function `name` computes per lane, 0 for none:
+/// `fabs`, `floor`, `ceil`, `trunc` and `fma`, and their `f` forms, which set no `errno` (`Package.vfloat`).
+pub(package) const fn lane_fn(name: str) u8 {
+    let n = if name.ends_with("f") && name != "f" {
+        name.slice(0, name.len() - 1)
+    } else {
+        name
+    };
+    return if n == "fabs" {
+        core::SIMD_ABS
+    } else if n == "floor" {
+        core::SIMD_FLOOR
+    } else if n == "ceil" {
+        core::SIMD_CEIL
+    } else if n == "trunc" {
+        core::SIMD_TRUNC
+    } else if n == "fma" {
+        core::SIMD_FMA
+    } else {
+        0
+    };
 }
