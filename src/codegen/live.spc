@@ -69,6 +69,10 @@ pub(package) const FOLD_VMLA: u32 = 8388608;
 pub(package) const FOLD_VSHIMM: u32 = 16777216;
 pub(package) const FOLD_VSHIMM_WIDE: u32 = 33554432;
 pub(package) const FOLD_VSHIMM_ALL: u32 = 67108864;
+/// `FOLD_XADDR`: an address `ptradd` of a base and an index scaled by 1, 2, 4 or 8 that only the loads
+/// and stores of its block read as their address folds into each, at any offset (x86-64's
+/// `[base + index * scale + disp]`).
+pub(package) const FOLD_XADDR: u32 = 134217728;
 // `lane_mask` follows this many `and`, `or` and `xor` operations.
 pub(package) const MASK_DEPTH: u32 = 8;
 // `Live::ldop_user` looks this many instructions past a load for its use.
@@ -531,6 +535,9 @@ extend Live {
                 }
             }
         }
+        if (self.fold_ops & FOLD_XADDR) != 0 {
+            self.fold_addrs(b);
+        }
         // `FOLD_BLEN`: a count of leading zeros of 32 or 64 bits that only `width - clz` reads, the bit
         // length, folds into it.
         if (self.fold_ops & FOLD_BLEN) != 0 {
@@ -774,12 +781,12 @@ extend Live {
     /// instruction, with no write of memory up to where the use is computed (a folded comparison: its
     /// select's or branch's place; not a `FOLD_CARRY` select's unsigned order comparison of 32 or 64 bits,
     /// whose `adc` the generator computes from the operands' registers).
-    /// Not a load at an indexed address (`fold`), of an entry parameter's aggregate (the generator takes
-    /// its registers, `place::parts_taken`) or of the aggregate result (which registers may hold), nor one
+    /// Not a load of an entry parameter's aggregate (the generator takes its registers,
+    /// `place::parts_taken`) or of the aggregate result (which registers may hold), nor one
     /// whose operation's result is stored back in place (the generator's read-modify-write).
     fn ldop_user(self: &Self, b: &Body, i: u32, end: u32) bool {
         let t = b.insts[i as usize];
-        if t.op != O_LOAD || (t.aux & MEM_VOLATILE) != 0 || !is_int(t.ty) || t.ty == T_I128 || self.count[i as usize] != 1 || self.pfold[i as usize] || self.fold[i as usize] || agg_param(
+        if t.op != O_LOAD || (t.aux & MEM_VOLATILE) != 0 || !is_int(t.ty) || t.ty == T_I128 || self.count[i as usize] != 1 || self.pfold[i as usize] || agg_param(
             b,
             t.a,
         ) {
@@ -945,6 +952,91 @@ extend Live {
         }
         self.rd = out;
         return found;
+    }
+
+    // `FOLD_XADDR` over `b`: each address `ptradd` that the loads and stores of its block alone read, as
+    // their address, folds into them all.
+    fn fold_addrs(self: &mut Self, b: &Body) {
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let p = b.insts[i as usize];
+                if p.op != O_PTRADD || p.b == VNONE || p.c != 0 || p.aux != 1 && p.aux != 2 && p.aux != 4 && p.aux != 8 || self.pfold[i as usize] || self.count[i as usize] == 0 {
+                    continue;
+                }
+                let mut n: u32 = 0;
+                for j in i + 1..bk.start + bk.len {
+                    if self.addr_of(b, j) == i {
+                        n += 1;
+                    }
+                }
+                if n != self.count[i as usize] {
+                    continue;
+                }
+                self.pfold[i as usize] = true;
+                for j in i + 1..bk.start + bk.len {
+                    if self.addr_of(b, j) == i {
+                        self.fold[j as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // The address instruction `j` of `b` accesses through when it is a load or store a folded address may
+    // serve (`fold`'s rule: not volatile, a value a register holds, the stored value not the address);
+    // NONE else.
+    const fn addr_of(self: &Self, b: &Body, j: u32) u32 {
+        let t = b.insts[j as usize];
+        if t.op != O_LOAD && t.op != O_STORE || (t.aux & MEM_VOLATILE) != 0 || (t.a & (VPARAM | VFLAG)) != 0 || t.op == O_STORE && t.b == t.a {
+            return NONE;
+        }
+        let ty = if t.op == O_LOAD {
+            t.ty
+        } else {
+            b.type_of(t.b)
+        };
+        let n = type_bytes(ty, 8);
+        if is_vec(ty) && n != 8 && n != 16 || ty == T_I128 {
+            return NONE;
+        }
+        return t.a;
+    }
+
+    /// Whether `v` of `b` is a parameter of a block other than the entry that every edge into it passes a
+    /// constant: verified LIR holds a narrow constant zero-extended (`verify::fits`), which the backends
+    /// write as it is, by an edge's move or from a switch's table (a narrow load), so the parameter's
+    /// register holds it so.
+    pub(package) fn zero_param(self: &Self, b: &Body, v: Value) bool {
+        if (v & VPARAM) == 0 {
+            return false;
+        }
+        let k = self.def_blk[self.vix(b, v) as usize];
+        if k == 0 {
+            return false;
+        }
+        let q = (v & ~VPARAM) - b.blocks[k as usize].param_start;
+        for j in self.pat[k as usize]..self.pat[k as usize + 1] {
+            let pb = b.blocks[self.preds[j as usize] as usize];
+            let t = b.insts[(pb.start + pb.len - 1) as usize];
+            let ne: u32 = if t.op == O_JMP {
+                1
+            } else if t.op == O_BR {
+                2
+            } else if t.op == O_SWITCH {
+                t.aux as u32 + 1
+            } else {
+                0
+            };
+            for e in 0..ne {
+                let ed = edge_of(b, t, e);
+                let mut c: u64 = 0;
+                if b.edge_target(ed) == k && !const_of(b, b.edge_arg(ed, q), &mut c) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /// Whether the stores into slot `s` of `b` relay (`relay`): every use of its addresses is such a store

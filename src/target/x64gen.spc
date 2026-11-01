@@ -2107,7 +2107,10 @@ extend Gen {
         let x = self.vx(v);
         let va = self.va[x as usize];
         // A narrow load zero-extends.
-        let clean = va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG);
+        let clean = va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG) || self.lv.zero_param(
+            self.b(),
+            v,
+        );
         self.materialize(v, r);
         if signed {
             self.c.ext(bits / 8, 4, true, r, r);
@@ -2650,7 +2653,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | if self.avx {
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE
         } else {
             0
@@ -3262,6 +3265,9 @@ extend Gen {
             for q in 0..tb.param_len as u32 {
                 let x = ni + tb.param_start + q;
                 let r = self.ret_reg(b, x);
+                if r != NOREG {
+                    self.free_home(b.edge_arg(ed, q), r);
+                }
                 self.param_home(
                     x,
                     if r != NOREG {
@@ -3271,6 +3277,19 @@ extend Gen {
                     },
                 );
             }
+        }
+    }
+
+    // Edge argument `v`, when register `r` is its home and it dies at this terminator, gives `r` up: the
+    // parameter that takes `r` then holds it, and the edge moves nothing.
+    fn free_home(self: &mut Self, v: Value, r: u8) {
+        let x = self.vx(v);
+        if x == NONE {
+            return;
+        }
+        let va = self.va[x as usize];
+        if va.home == H_FIXED && va.reg == r && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos {
+            self.fixed_busy &= ~bit(r);
         }
     }
 
@@ -4398,7 +4417,13 @@ extend Gen {
         } else {
             self.reg(t.a)
         };
-        let rd = self.def(i);
+        // A clz or popcnt reads its operand before it writes: the result may take a dying operand's register.
+        // ctz's `tzcnt` presets a register of its own.
+        let rd = if t.op == O_CTZ {
+            self.def(i)
+        } else {
+            self.def_over(i, t.a, r)
+        };
         // The count, at most the width, is `clean`.
         self.va.index_mut(i as usize).clean = true;
         if t.op == O_POPCNT && unsafe (*self.pkg).popcnt {
@@ -5090,7 +5115,7 @@ extend Gen {
                 self.va.index_mut(i as usize).clean = true;
                 return true;
             }
-            let rd = self.def(i);
+            let rd = self.def_over(i, t.a, ra);
             if op == O_SEXT {
                 self.c.ext(fb / 8, wsz(tb), true, rd, ra);
             } else {
@@ -5116,7 +5141,7 @@ extend Gen {
         }
         if op == O_FPEXT || op == O_FPTRUNC {
             let ra = self.reg(t.a);
-            let rd = self.def(i);
+            let rd = self.def_over(i, t.a, ra);
             self.c.sse_rr(
                 if op == O_FPEXT {
                     0xF3u32

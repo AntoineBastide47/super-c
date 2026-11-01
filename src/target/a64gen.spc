@@ -1335,7 +1335,10 @@ extend Gen {
         let x = self.vx(v);
         let va = self.va[x as usize];
         // A narrow load zero-extends.
-        let clean = va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG);
+        let clean = va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG) || self.lv.zero_param(
+            self.b(),
+            v,
+        );
         self.materialize(v, r);
         if signed {
             self.emit(a::sxt(false, r, r, bits));
@@ -2584,6 +2587,9 @@ extend Gen {
             for q in 0..tb.param_len as u32 {
                 let x = ni + tb.param_start + q;
                 let r = self.ret_reg(b, x);
+                if r != NOREG {
+                    self.free_home(b.edge_arg(ed, q), r);
+                }
                 self.param_home(
                     x,
                     if r != NOREG {
@@ -2593,6 +2599,19 @@ extend Gen {
                     },
                 );
             }
+        }
+    }
+
+    // Edge argument `v`, when register `r` is its home and it dies at this terminator, gives `r` up: the
+    // parameter that takes `r` then holds it, and the edge moves nothing.
+    fn free_home(self: &mut Self, v: Value, r: u8) {
+        let x = self.vx(v);
+        if x == NONE {
+            return;
+        }
+        let va = self.va[x as usize];
+        if va.home == H_FIXED && va.reg == r && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos {
+            self.fixed_busy &= ~bit(r);
         }
     }
 
@@ -3718,13 +3737,13 @@ extend Gen {
     fn rotate_narrow(self: &mut Self, i: u32, xv: Value, rot: lv::Rotation, kr: u32, right: bool, bits: u32) bool {
         let xz = self.ext(xv, false, bits) as u32;
         if rot.amt == VNONE {
-            let rd = self.def(i) as u32;
+            let rd = self.def_step(i) as u32;
             self.emit(a::lsr_imm(false, a::IP0, xz, bits - kr));
             self.emit(a::logic_reg(false, 1, false, rd, a::IP0, xz, 0, kr));
             return true;
         }
         let rn = self.reg(lv::rot_amount(self.b(), &self.lv.pfold, rot)) as u32;
-        let rd = self.def(i) as u32;
+        let rd = self.def_step(i) as u32;
         self.emit(a::logic_reg(false, 1, false, a::IP1, xz, xz, 0, bits));
         if bits == 8 {
             self.emit(a::logic_reg(false, 1, false, a::IP1, a::IP1, a::IP1, 0, 16));
@@ -4355,7 +4374,7 @@ extend Gen {
         }
         if op == O_SEXT || op == O_ZEXT {
             let ra = self.reg(t.a) as u32;
-            let rd = self.def(i);
+            let rd = self.def_step(i);
             if op == O_SEXT {
                 self.emit(a::sxt(tb == 64, rd, ra, fb));
             } else if fb == 32 {
@@ -4373,7 +4392,7 @@ extend Gen {
         }
         if op == O_BITCAST {
             let ra = self.reg(t.a);
-            let rd = self.def(i);
+            let rd = self.def_step(i);
             if is_v(from) {
                 self.emit(a::fmov_gv(from == T_F64, false, rd, ra - V0));
             } else {
@@ -4383,7 +4402,7 @@ extend Gen {
         }
         if op == O_FPEXT || op == O_FPTRUNC {
             let ra = self.reg(t.a);
-            let rd = self.def(i);
+            let rd = self.def_step(i);
             self.emit(a::fcvt(op == O_FPEXT, rd - V0, ra - V0));
             return true;
         }
@@ -4394,14 +4413,14 @@ extend Gen {
             } else {
                 self.reg(t.a)
             };
-            let rd = self.def(i);
+            let rd = self.def_step(i);
             self.emit(a::cvtf(fb == 64, to == T_F64, signed, rd - V0, ra));
             return true;
         }
         // A float to an integer: FCVTZ saturates and takes NaN to 0; an i8 or i16 clamps after.
         let signed = op == O_FPTOSI;
         let ra = self.reg(t.a);
-        let rd = self.def(i) as u32;
+        let rd = self.def_step(i) as u32;
         self.emit(a::fcvtz(tb == 64, from == T_F64, signed, rd, ra - V0));
         if tb < 32 && t.aux != CV_UNCHECKED {
             let hi: u64 = if signed {

@@ -5082,6 +5082,67 @@ b0(v0: ptr, v1: ptr, v2: ptr, v3: ptr):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Narrow results that blocks join (`cls`'s through a switch, from constants and a sum, `pick`'s through a
+// branch) return extended to 32 bits, as the C driver reads them; a loop reads and writes bytes at offsets of one
+// indexed address (x86-64 folds it into each access) and counts matches.
+@test
+fn narrow_joins_and_indexed_accesses_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @cls fn global
+sym @pick fn global
+sym @cnt fn global
+fn @cls
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 200
+  v2 = iconst.i8 7
+  v3 = iconst.i8 -1
+  v4 = add.i8 v0, v1
+  switch v0 [1 -> b1(v1), 2 -> b1(v2), 3 -> b1(v3), 4 -> b1(v1)] else b1(v4)
+b1(v5: i8):
+  ret v5
+fn @pick
+  sig (i32) -> i16
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.eq v0, v1
+  v3 = iconst.i16 40000
+  v4 = iconst.i16 -2
+  br v2, b1(v3), b1(v4)
+b1(v5: i16):
+  ret v5
+fn @cnt
+  sig (ptr, i64, i8) -> i64
+b0(v0: ptr, v1: i64, v2: i8):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 2
+  v5 = icmp.eq v1, v3
+  br v5, b2(v3), b1(v3, v3)
+b1(v6: i64, v7: i64):
+  v8 = ptradd v0, v6 * 1
+  v9 = load.i8 v8 align 0
+  v10 = load.i8 v8+1 align 0
+  v11 = icmp.eq v9, v2
+  v12 = zext.i64 v11
+  v13 = icmp.eq v10, v2
+  v14 = zext.i64 v13
+  v15 = add.i64 v7, v12
+  v16 = add.i64 v15, v14
+  store v10, v8 align 0
+  v17 = add.i64 v6, v4
+  v18 = icmp.ult v17, v1
+  br v18, b1(v17, v16), b2(v16)
+b2(v19: i64):
+  ret v19
+)";
+    let drv = "#include <stdint.h>\nunsigned cls(unsigned char);\nunsigned pick(int);\nint64_t cnt(unsigned char *, int64_t, unsigned char);\nint main(void) {\n  if (cls(1) != 200 || cls(2) != 7 || cls(3) != 255 || cls(4) != 200 || cls(0) != 200 || cls(9) != 209 || cls(100) != 44) return 1;\n  if (pick(0) != 40000 || pick(5) != 65534) return 2;\n  unsigned char s[10] = {3, 9, 9, 3, 9, 1, 3, 3, 0, 9};\n  if (cnt(s, 10, 3) != 4 || cnt(s, 0, 3) != 0) return 3;\n  for (int k = 0; k < 10; k += 2) if (s[k] != s[k + 1]) return 4;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // A loop whose product by a constant is the first addend of a sum (arm64 `madd`, the constant kept in a
 // register) parses decimal digits.
 @test
