@@ -7195,3 +7195,52 @@ b2(v10: i64):
     let k3: [u64; 2] = [0, 3];
     same_result(&b, &a, "kept", k3[0..2], 0);
 }
+
+// A subtraction floored at 0 (`n - a` when `a <u n`, else 0) whose `a` is at most `n` on every edge into
+// its block (0, or `n` masked) is the subtraction alone (`floor_sub`): `rem` takes it either way round the
+// select. `open`'s `a` comes from the caller, which may pass more than `n`: the select stays.
+@test
+fn subtractions_floored_at_zero_drop_a_select_a_bound_settles() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @rem fn global
+sym @open fn global
+fn @rem
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 -16
+  v3 = and.i64 v0, v2
+  v4 = iconst.i64 0
+  v5 = icmp.ne v1, v4
+  br v5, b1(v3), b1(v4)
+b1(v6: i64):
+  v7 = sub.i64 v0, v6
+  v8 = icmp.ult v6, v0
+  v9 = select.i64 v8, v7, v4
+  v10 = icmp.uge v6, v0
+  v11 = select.i64 v10, v4, v7
+  v12 = add.i64 v9, v11
+  ret v12
+fn @open
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = sub.i64 v0, v1
+  v4 = icmp.ult v1, v0
+  v5 = select.i64 v4, v3, v2
+  ret v5
+)",
+    );
+    let tr = text_of(&a, "rem");
+    let to = text_of(&a, "open");
+    assert(!tr.contains("icmp.ult") && !tr.contains("icmp.uge"), tr.as_str());
+    assert(to.contains("select"), to.as_str());
+    let r1: [u64; 2] = [37, 1];
+    let r0: [u64; 2] = [37, 0];
+    let o1: [u64; 2] = [5, 9];
+    let o2: [u64; 2] = [9, 5];
+    same_result(&b, &a, "rem", r1[0..2], 10);
+    same_result(&b, &a, "rem", r0[0..2], 74);
+    same_result(&b, &a, "open", o1[0..2], 0);
+    same_result(&b, &a, "open", o2[0..2], 4);
+}

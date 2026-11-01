@@ -270,6 +270,7 @@ pub(package) struct Gen {
     // the compare (not an operand's), so `setcc` needs no extension after.
     zeroed: u8,
     zx: bool,
+    raw: bool, // the next `cond_value` sets its byte alone (`bytes_only`)
     // Shrink-wrapping (System V): the frame is set up on the edges into the rare blocks and taken down on
     // the edges out (`shrinkable`); the warm code, which calls nothing, keeps no value in memory and no
     // callee-saved register, has none. Whether the body is compiled so, and whether that try failed (the
@@ -444,6 +445,7 @@ extend Gen {
             held_end: NONE,
             zeroed: NOREG,
             zx: false,
+            raw: false,
             shrink: false,
             no_shrink: false,
             again: false,
@@ -858,8 +860,8 @@ extend Gen {
     }
 
     // Whether commutative instruction `i` should write over its second operand `b` (in `rb`), not its first
-    // (in `ra`): `b` dies here, and the return or call after takes `i` in `rb` (`next_reg`; a jump's would
-    // place a parameter's home, which may take `rb`).
+    // (in `ra`): `b` dies here, and the return or call after takes `i` in `rb` (`next_reg`, `ret_want`; a
+    // jump's would place a parameter's home, which may take `rb`).
     fn swaps(self: &mut Self, i: u32, b: Value, ra: u8, rb: u8) bool {
         let xb = self.vx(b);
         let bd = self.b();
@@ -879,7 +881,7 @@ extend Gen {
         let n = self.next_reg(i);
         self.held = held;
         self.lock = lock;
-        return n == rb;
+        return n == rb || self.ret_want(i) == rb;
     }
 
     // A register for the result of value `v` that holds operand `a`'s bits (in `ra`) for a two-operand
@@ -1414,8 +1416,8 @@ extend Gen {
         }
         let most = self.xfix.count_ones() as u32 + self.xalloc.count_ones() as u32 - nd;
         self.xhome = self.xscr;
-        if leaf && self.owns_none(b) {
-            self.xhome |= bit(x::RAX) | bit(x::RCX) | bit(x::RDX);
+        if leaf {
+            self.xhome |= self.homes_free(b);
         }
         let xs = if leaf {
             self.xhome.count_ones() as u32
@@ -1963,41 +1965,47 @@ extend Gen {
         self.va.index_mut(i as usize).clean = dz == 4;
     }
 
-    // Whether body `b` lets rax, rcx and rdx be homes (`xhome`): no instruction takes one of them for
-    // itself (a division, a 64-bit product's high half, an overflow check, a shift by a register, an
-    // atomic, a system operation, inline assembly, a call that comes back (`cret`: not a sibling call
-    // or one before a trap), a thread-local address, a 128-bit value, a lane-wise operation but one in
-    // xmm registers (`reduce_reg`, `ext_reg`, `FOLD_ANY`), a vector shift by no immediate
-    // (`Live::vshimm`)), and no aggregate or second register returns.
-    fn owns_none(self: &Self, b: &Body) bool {
+    // Which of rax, rcx and rdx body `b` lets be homes (`xhome`): those no instruction takes for itself. A
+    // scalar division or product's high half takes rax and rdx, a scalar shift by a register rcx; an
+    // overflow check, an atomic, a system operation, inline assembly, a call that comes back (`cret`: not
+    // a sibling call or one before a trap), a thread-local address, a 128-bit value, a lane-wise operation
+    // but one in xmm registers (`reduce_reg`, `ext_reg`, `FOLD_ANY`), a vector shift by no immediate
+    // (`Live::vshimm`) take all three, as does an aggregate or second register return.
+    fn homes_free(self: &Self, b: &Body) u64 {
+        let all = bit(x::RAX) | bit(x::RCX) | bit(x::RDX);
         let rl = self.self_lay.ret;
         if (b.pool[b.sig as usize + 2] & AGG) != 0 || rl.kind == ab::L_SRET || rl.kind == ab::L_REG && rl.n > 1 {
-            return false;
+            return 0;
         }
         // The entry's parameters: the other blocks' take what instructions define.
         let e = b.blocks[0];
         for q in e.param_start..e.param_start + e.param_len as u32 {
             if b.params[q as usize] == T_I128 || is_vec(b.params[q as usize]) {
-                return false;
+                return 0;
             }
         }
+        let mut free = all;
         for i in 0..b.insts.len() {
             let t = b.insts[i];
             let op = t.op;
             let mut k: u64 = 0;
+            let shift = op == O_SHL || op == O_LSHR || op == O_ASHR;
             if t.ty == T_I128 || (op == O_CALL || op == O_CALLIND) && self.cret[i] || op == O_ASM || op == O_SYS || op == O_VOP && !self.reduce_reg(
                 t,
-            ) && !self.ext_reg(t) && !self.lv.pfold[i] || op == O_VASTART || op == O_VAARG || op == O_MEMCPY || op == O_MEMSET || op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM || op >= O_ADDO && op <= O_MULO || op >= O_ALOAD && op <= O_FENCE || op == O_SYMADDR && !self.remat_inst(
+            ) && !self.ext_reg(t) && !self.lv.pfold[i] || op == O_VASTART || op == O_VAARG || op == O_MEMCPY || op == O_MEMSET || is_vec(
+                t.ty,
+            ) && (op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM) || op >= O_ADDO && op <= O_MULO || op >= O_ALOAD && op <= O_FENCE || op == O_SYMADDR && !self.remat_inst(
                 i as u32,
-            ) || (op == O_SHL || op == O_LSHR || op == O_ASHR) && if is_vec(t.ty) {
-                self.lv.vshimm(b, t) == NONE
-            } else {
-                !self.const_of(t.b, &mut k)
-            } {
-                return false;
+            ) || shift && is_vec(t.ty) && self.lv.vshimm(b, t) == NONE {
+                return 0;
+            }
+            if op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM {
+                free &= ~(bit(x::RAX) | bit(x::RDX));
+            } else if shift && !is_vec(t.ty) && !self.const_of(t.b, &mut k) {
+                free &= ~bit(x::RCX);
             }
         }
-        return true;
+        return free;
     }
 
     // Give value index `x` a caller-saved register of file `vr` (`xhome`, `vscr`) as its home, the value
@@ -2177,6 +2185,11 @@ extend Gen {
             self.b(),
             v,
         );
+        // In a register: extended from there, not copied first.
+        if va.reg != NOREG && va.reg < V0 && (signed || !clean) {
+            self.c.ext(bits / 8, 4, signed, r, va.reg);
+            return;
+        }
         self.materialize(v, r);
         if signed {
             self.c.ext(bits / 8, 4, true, r, r);
@@ -2938,7 +2951,7 @@ extend Gen {
     }
 
     // Whether the body may set its frame up in its rare blocks alone (`shrink`): every call (one that does
-    // not return too: it needs the frame's alignment) is in a rare block (`Live::rare`), there is one, and
+    // not return too, a panic's: it needs the frame's alignment) is in a rare block (`Live::rare`), there is one, and
     // the body reads no return address, variadic argument or inline assembly, runs no system operation,
     // aligns no slot past 16 bytes and has no canary. The rare blocks connected to one with a call by edges
     // between rare blocks set the frame up: `Live::after`, which the layout puts after the others. Under
@@ -2960,7 +2973,7 @@ extend Gen {
         for i in 0..b.insts.len() {
             let t = b.insts[i];
             let d = self.lv.def_blk[i];
-            if d == NONE || self.lv.pos[d as usize] == NONE || !self.calls(t) {
+            if d == NONE || self.lv.pos[d as usize] == NONE || !self.calls(t) && t.op != O_PANIC {
                 continue;
             }
             if !self.lv.rare[d as usize] {
@@ -4235,6 +4248,8 @@ extend Gen {
             return;
         }
         self.keep_flags = true;
+        let raw = self.raw;
+        self.raw = false;
         let z = self.zeroed;
         self.zeroed = NOREG;
         let rd = if z != NOREG {
@@ -4257,10 +4272,10 @@ extend Gen {
                 S1,
             );
         }
-        if z == NOREG || !self.zx {
+        if !raw && (z == NOREG || !self.zx) {
             self.c.ext(1, 4, false, rd, rd);
         }
-        self.va.index_mut(i as usize).clean = true;
+        self.va.index_mut(i as usize).clean = !raw;
         if held && cc2 == NONE {
             self.held_end = self.c.len();
         }
@@ -4292,14 +4307,67 @@ extend Gen {
         if ty == T_I128 {
             return self.icmp128(i, t);
         }
-        let zi = if self.fusable(i, i) {
+        // Read as a byte alone (`bytes_only`): `setcc` with no register zeroed nor extension after.
+        let raw = !self.fusable(i, i) && self.bytes_only(i);
+        let zi = if self.fusable(i, i) || raw {
             NONE
         } else {
             i
         };
         let cc = self.compare(t, zi);
+        self.raw = raw;
         self.cond_value(i, cc, NONE, false);
         return true;
+    }
+
+    // Whether every read of comparison `i` is in its block and takes the low byte alone: an 8-bit `and`,
+    // `or` or `xor` with another comparison (two zeroings for at most one extension of the result), a
+    // branch on it, a select's condition, a byte store of it (not a return, which extends).
+    fn bytes_only(self: &Self, i: u32) bool {
+        let b = self.b();
+        let k = self.lv.def_blk[i as usize];
+        if self.lv.end[i as usize] != self.lv.pos[k as usize] {
+            return false;
+        }
+        let bk = b.blocks[k as usize];
+        for j in i + 1..bk.start + bk.len {
+            let t = b.insts[j as usize];
+            let us = self.lv.uses_of(j);
+            let mut reads = false;
+            for q in 0..us.len() {
+                reads = reads || us[q] == i;
+            }
+            if !reads {
+                continue;
+            }
+            let other = if t.a == i {
+                t.b
+            } else {
+                t.a
+            };
+            let logic = (t.op == O_AND || t.op == O_OR || t.op == O_XOR) && t.ty == T_I8;
+            let ok = logic && (other & (VPARAM | VFLAG)) == 0 && other != i && b.insts[other as usize].op == O_ICMP || t.op == O_BR && t.a == i && !self.edge_reads(
+                t,
+                i,
+            ) || t.op == O_SELECT && t.a == i && t.b != i && t.c != i || t.op == O_STORE && t.b == i && t.a != i;
+            if !ok {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Whether an edge of branch `t` passes value `v`.
+    fn edge_reads(self: &Self, t: Inst, v: u32) bool {
+        let b = self.b();
+        for e in [t.b, t.c] {
+            for q in 0..b.edge_nargs(e) {
+                if b.edge_arg(e, q) == v {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // The flags of the comparison condition value `v` folds into its select or branch (`lv::FOLD_CMP`),
@@ -4618,20 +4686,12 @@ extend Gen {
             }
             return;
         }
-        // clz = (w - 1) ^ bsr, with bsr taken as 2w - 1 for 0 (giving w), less the bits a narrow operand's
-        // extension adds.
-        let w = if bits < 32 {
-            32u32
-        } else {
-            bits
-        };
+        // clz = (w - 1) ^ bsr for width w (a narrow operand zero-extended, its bsr below w), with bsr taken
+        // as 2w - 1 for 0 (giving w).
         self.c.bsx(true, sz, rd, r);
-        self.c.mov_ri(S1, 2 * w - 1);
+        self.c.mov_ri(S1, 2 * bits - 1);
         self.c.cmov(x::CC_E, sz, rd, S1);
-        self.c.alu_ri(x::XOR, 4, rd, (w - 1) as i32);
-        if bits < 32 {
-            self.c.alu_ri(x::SUB, 4, rd, (32 - bits) as i32);
-        }
+        self.c.alu_ri(x::XOR, 4, rd, (bits - 1) as i32);
     }
 
     // `rd` = the set bits of `r` (its low `sz` bytes, the upper zero for 4), through r10 and r11.
@@ -4705,6 +4765,9 @@ extend Gen {
                 sz,
                 rd,
             );
+            if op == O_NEG {
+                self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.pos };
+            }
             return true;
         }
         // A rotation whose shifts fold into it (`lv::FOLD_ROT`): ROL or ROR by an immediate or by cl, at the
@@ -4794,6 +4857,7 @@ extend Gen {
             let rx = self.reg(t.b);
             let rd = self.def_from(i, t.b, rx);
             self.c.unary(x::NEG, sz, rd);
+            self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.pos };
             return true;
         }
         if alu {
@@ -4847,7 +4911,17 @@ extend Gen {
                 rb = ra;
                 ra = self.reg(t.b);
             }
-            let rd = self.def_over(i, a, ra);
+            // A sum the next instruction wants in a register of neither operand (`next_reg`): `lea` there.
+            let n = if op == O_ADD {
+                self.next_reg(i)
+            } else {
+                NOREG
+            };
+            let rd = if n != NOREG && n != ra && n != rb {
+                self.def(i)
+            } else {
+                self.def_over(i, a, ra)
+            };
             if rd != ra && op == O_ADD {
                 self.lea_to(sz, rd, x::ix(ra, rb, 0, 0));
                 return true;
@@ -6122,6 +6196,9 @@ extend Gen {
             self.fsel(i, t);
             return true;
         }
+        if self.abs_select(i, t) {
+            return true;
+        }
         let cx = self.vx(t.a);
         // The condition first: a folded comparison loads its operands, which the values' registers survive.
         let cc = self.cond_of(cx, t.a);
@@ -6183,6 +6260,62 @@ extend Gen {
             self.c.mov_rr(8, rd, rs);
         }
         self.c.cmov(c1, 8, rd, ro);
+        return true;
+    }
+
+    // Select `i` (`t`) on a folded signed comparison of `x` with 0 between `x` and its negation, which the
+    // instruction just emitted computed: the sign that negation set picks `x` (`cmovs` for the absolute
+    // value, `cmovns` for its negation), with no comparison. Whether it did.
+    fn abs_select(self: &mut Self, i: u32, t: Inst) bool {
+        let b = self.b();
+        if (t.a & (VPARAM | VFLAG)) != 0 || !self.lv.pfold[t.a as usize] || b.insts[t.a as usize].op != O_ICMP {
+            return false;
+        }
+        let (n, x, neg_true) = if lv::cs_kind(b, t.b, t.c) == lv::CS_NEG {
+            (t.b, t.c, true)
+        } else if lv::cs_kind(b, t.c, t.b) == lv::CS_NEG {
+            (t.c, t.b, false)
+        } else {
+            return false;
+        };
+        let c = b.insts[t.a as usize];
+        let mut k: u64 = 0;
+        let zb = c.a == x && self.const_of(c.b, &mut k) && k == 0;
+        if !zb && !(c.b == x && self.const_of(c.a, &mut k) && k == 0) {
+            return false;
+        }
+        let cc = if zb {
+            c.aux
+        } else {
+            mirror(c.aux)
+        };
+        let below = cc == C_SLT || cc == C_SLE;
+        if !below && cc != C_SGT && cc != C_SGE {
+            return false;
+        }
+        let z = self.zf;
+        let rn = self.va[self.vx(n) as usize].reg;
+        if z.at != self.c.len() || z.pos != self.pos || rn == NOREG || z.reg != rn || z.sz != type_bytes(
+            self.vt(x),
+            self.ptr,
+        ) || self.const_of(x, &mut k) {
+            return false;
+        }
+        let rx = self.reg(x);
+        let rd = self.def_over(i, n, rn);
+        if rd != rn {
+            self.c.mov_rr(8, rd, rn);
+        }
+        self.c.cmov(
+            if below == neg_true {
+                x::CC_S
+            } else {
+                x::CC_NS
+            },
+            8,
+            rd,
+            rx,
+        );
         return true;
     }
 
@@ -10661,6 +10794,9 @@ extend Gen {
     // Product `i` (`t`) of two 16-byte vectors of 32-bit lanes in xmm registers: `vpmulld` with AVX2; else
     // (SSE2 has no such product) the even lanes' 64-bit products (`pmuludq`), the odd lanes' after `pshufd`
     // moves them down, and the low halves of both interleaved (`pshufd`, `punpckldq`; clang's lowering).
+    // The odd lanes take the vector scratch registers the operands leave (a register of its own only when
+    // both hold operands): `ta` from the start, `tb` once the operands are read but `y` (which it may
+    // overwrite in its scratch register, its last read).
     fn mul_lanes32(self: &mut Self, i: u32, t: Inst) {
         let rx = self.vec_use(t.a, self.vs0) - V0;
         let ry = self.vec_use(t.b, self.vs1) - V0;
@@ -10669,16 +10805,29 @@ extend Gen {
             self.c.vex_rr(0x66, 2, 0x40, false, false, rd, rx, ry);
             return;
         }
-        let ta = self.tmp(true) - V0;
-        let tb = self.tmp(true) - V0;
+        let (s0, s1) = (self.vs0 - V0, self.vs1 - V0);
+        let ta = if rx != s0 && ry != s0 {
+            s0
+        } else if rx != s1 && ry != s1 {
+            s1
+        } else {
+            self.tmp(true) - V0
+        };
+        let tb = if ry == s0 || ry == s1 {
+            ry
+        } else if ta != s0 {
+            s0
+        } else {
+            s1
+        };
         self.c.sse_rr(0x66, 0x0F70, ta, rx);
         self.c.byte(0xF5);
-        self.c.sse_rr(0x66, 0x0F70, tb, ry);
-        self.c.byte(0xF5);
-        self.c.sse_rr(0x66, 0x0FF4, ta, tb);
         let rd = self.def_pass(i, t.a) - V0;
         self.c.vmov(rd, rx);
         self.c.sse_rr(0x66, 0x0FF4, rd, ry);
+        self.c.sse_rr(0x66, 0x0F70, tb, ry);
+        self.c.byte(0xF5);
+        self.c.sse_rr(0x66, 0x0FF4, ta, tb);
         self.c.sse_rr(0x66, 0x0F70, rd, rd);
         self.c.byte(0xE8);
         self.c.sse_rr(0x66, 0x0F70, ta, ta);

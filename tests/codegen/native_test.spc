@@ -681,6 +681,102 @@ fn conditional_increments_negations_and_inversions_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Selects between a value and its negation on the value's sign (x86-64: the negation's sign flag picks, no
+// comparison) in 32 and 64 bits, the comparison either way round, `abs` and its negation; and comparisons
+// that only 8-bit operations read (x86-64: `setcc` alone, no extension), widened after their `and`, stored,
+// branched and selected on.
+@test
+fn absolute_values_and_byte_comparisons_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @abs32 fn global
+sym @nabs64 fn global
+sym @absm fn global
+sym @nabs32 fn global
+sym @all3 fn global
+sym @any2 fn global
+sym @flags fn global
+fn @abs32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.slt v0, v1
+  v3 = sub.i32 v1, v0
+  v4 = select.i32 v2, v3, v0
+  ret v4
+fn @nabs64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.sge v0, v1
+  v3 = neg.i64 v0
+  v4 = select.i64 v2, v3, v0
+  ret v4
+fn @absm
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.sgt v1, v0
+  v3 = sub.i64 v1, v0
+  v4 = select.i64 v2, v3, v0
+  ret v4
+fn @nabs32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.sle v0, v1
+  v3 = neg.i32 v0
+  v4 = select.i32 v2, v0, v3
+  ret v4
+fn @all3
+  sig (i32, i32, i32) -> i64
+b0(v0: i32, v1: i32, v2: i32):
+  v3 = iconst.i32 1048579
+  v4 = icmp.eq v0, v3
+  v5 = iconst.i32 1048585
+  v6 = icmp.ult v1, v5
+  v7 = and.i8 v4, v6
+  v8 = iconst.i32 0
+  v9 = icmp.ne v2, v8
+  v10 = and.i8 v7, v9
+  v11 = zext.i64 v10
+  ret v11
+fn @any2
+  sig (i32, i32) -> i64
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 1048579
+  v3 = icmp.eq v0, v2
+  v4 = icmp.ugt v1, v2
+  v5 = or.i8 v3, v4
+  v6 = zext.i64 v5
+  ret v6
+fn @flags
+  sig (ptr, i32, i32) -> i32
+b0(v0: ptr, v1: i32, v2: i32):
+  v3 = icmp.slt v1, v2
+  store v3, v0 align 0
+  v4 = icmp.eq v1, v2
+  v5 = or.i8 v3, v4
+  v6 = iconst.i64 1
+  v7 = ptradd v0, v6 * 1
+  store v5, v7 align 0
+  br v4, b1, b2
+b1:
+  v8 = iconst.i32 7
+  ret v8
+b2:
+  v9 = iconst.i32 10
+  v10 = iconst.i32 20
+  v11 = select.i32 v3, v9, v10
+  ret v11
+)";
+    let drv = "#include <stdint.h>\nint32_t abs32(int32_t);\nint64_t nabs64(int64_t);\nint64_t absm(int64_t);\nint32_t nabs32(int32_t);\nint64_t all3(uint32_t, uint32_t, uint32_t);\nint64_t any2(uint32_t, uint32_t);\nint32_t flags(uint8_t *, int32_t, int32_t);\nint main(void) {\n  int64_t xs[7] = {0, 1, -1, INT64_C(1) << 40, -(INT64_C(1) << 40), INT64_MIN, INT64_MAX};\n  for (int i = 0; i < 7; i++) {\n    int64_t x = xs[i];\n    int32_t y = (int32_t)(x >> 8) | (int32_t)x;\n    if (i == 5) y = INT32_MIN;\n    uint64_t ux = (uint64_t)x, uy = (uint32_t)y;\n    if (abs32(y) != (int32_t)(y < 0 ? 0u - (uint32_t)uy : (uint32_t)uy)) return 1;\n    if (nabs64(x) != (int64_t)(x >= 0 ? 0 - ux : ux)) return 2;\n    if (absm(x) != (int64_t)(x < 0 ? 0 - ux : ux)) return 3;\n    if (nabs32(y) != (y <= 0 ? y : (int32_t)(0u - (uint32_t)uy))) return 4;\n  }\n  for (uint32_t a = 0; a < 6; a++)\n    for (uint32_t b = 6; b < 12; b++)\n      for (uint32_t c = 0; c < 2; c++)\n        if (all3(a | 0x100000u, b | 0x100000u, c << 20) != (int64_t)(a == 3 && b < 9 && c != 0)) return 5;\n  for (uint32_t a = 0; a < 6; a++)\n    for (uint32_t b = 0; b < 6; b++)\n      if (any2(a | 0x100000u, b | 0x100000u) != (int64_t)(a == 3 || b > 3)) return 7;\n  for (int32_t a = -2; a < 3; a++)\n    for (int32_t b = -2; b < 3; b++) {\n      uint8_t m[2] = {9, 9};\n      int32_t r = flags(m, a * 0x10001, b * 0x10001);\n      if (m[0] != (a < b) || m[1] != (a <= b) || r != (a == b ? 7 : a < b ? 10 : 20)) return 6;\n    }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // An `and`, `or` or `xor` of an inverted value (`not`, or `xor` with all ones; arm64 `bic`, `orn`, `eon`) in
 // 64, 32 and 8 bits, a right shift of a left shift by at most as much (arm64 `sbfx`, `ubfx`), and a field
 // inserted into the other bits of a value (arm64 `bfi`; not with a mask that keeps bits of the field),
@@ -692,6 +788,33 @@ fn inverted_operands_and_shifted_fields_run() {
     }
     let lir = "lir ptr 8\nsym @bic64 fn global\nsym @orn32 fn global\nsym @eon64 fn global\nsym @bicx32 fn global\nsym @bic8 fn global\nsym @sbf32 fn global\nsym @ubf64 fn global\nsym @sbf64 fn global\nsym @ubf32 fn global\nsym @bfi32 fn global\nsym @bfi64 fn global\nsym @nobfi fn global\nfn @bic64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = not.i64 v0\n  v3 = and.i64 v2, v1\n  ret v3\nfn @orn32\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = not.i32 v1\n  v3 = or.i32 v0, v2\n  ret v3\nfn @eon64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 -1\n  v3 = xor.i64 v1, v2\n  v4 = xor.i64 v0, v3\n  ret v4\nfn @bicx32\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 -1\n  v3 = xor.i32 v0, v2\n  v4 = and.i32 v1, v3\n  ret v4\nfn @bic8\n  sig (i8, i8) -> i8\nb0(v0: i8, v1: i8):\n  v2 = not.i8 v0\n  v3 = and.i8 v2, v1\n  ret v3\nfn @sbf32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 20\n  v2 = shl.i32 v0, v1\n  v3 = iconst.i32 24\n  v4 = ashr.i32 v2, v3\n  ret v4\nfn @ubf64\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 3\n  v2 = shl.i64 v0, v1\n  v3 = iconst.i64 60\n  v4 = lshr.i64 v2, v3\n  ret v4\nfn @sbf64\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 8\n  v2 = shl.i64 v0, v1\n  v3 = iconst.i64 8\n  v4 = ashr.i64 v2, v3\n  ret v4\nfn @ubf32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 0\n  v2 = shl.i32 v0, v1\n  v3 = iconst.i32 31\n  v4 = lshr.i32 v2, v3\n  ret v4\nfn @bfi32\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 4294902015\n  v3 = and.i32 v0, v2\n  v4 = iconst.i32 255\n  v5 = and.i32 v1, v4\n  v6 = iconst.i32 8\n  v7 = shl.i32 v5, v6\n  v8 = or.i32 v3, v7\n  ret v8\nfn @bfi64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 65535\n  v3 = and.i64 v1, v2\n  v4 = iconst.i64 40\n  v5 = shl.i64 v3, v4\n  v6 = iconst.i64 -72056494526300161\n  v7 = and.i64 v0, v6\n  v8 = or.i64 v5, v7\n  ret v8\nfn @nobfi\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 4294901775\n  v3 = and.i32 v0, v2\n  v4 = iconst.i32 255\n  v5 = and.i32 v1, v4\n  v6 = iconst.i32 8\n  v7 = shl.i32 v5, v6\n  v8 = or.i32 v3, v7\n  ret v8\n";
     let drv = "#include <stdint.h>\nint64_t bic64(int64_t, int64_t);\nint32_t orn32(int32_t, int32_t);\nint64_t eon64(int64_t, int64_t);\nint32_t bicx32(int32_t, int32_t);\nuint8_t bic8(uint8_t, uint8_t);\nint32_t sbf32(int32_t);\nuint64_t ubf64(uint64_t);\nint64_t sbf64(int64_t);\nuint32_t ubf32(uint32_t);\nuint32_t bfi32(uint32_t, uint32_t);\nuint64_t bfi64(uint64_t, uint64_t);\nuint32_t nobfi(uint32_t, uint32_t);\nint main(void) {\n  uint64_t s = 0x9E3779B97F4A7C15u;\n  for (int i = 0; i < 1000; i++) {\n    s ^= s << 13;\n    s ^= s >> 7;\n    s ^= s << 17;\n    uint64_t r = s * 0x2545F4914F6CDD1Du;\n    if (bic64((int64_t)s, (int64_t)r) != (int64_t)(~s & r)) return 1;\n    if (orn32((int32_t)s, (int32_t)r) != (int32_t)((uint32_t)s | ~(uint32_t)r)) return 2;\n    if (eon64((int64_t)s, (int64_t)r) != (int64_t)(s ^ ~r)) return 3;\n    if (bicx32((int32_t)s, (int32_t)r) != (int32_t)((uint32_t)r & ~(uint32_t)s)) return 4;\n    if (bic8((uint8_t)s, (uint8_t)r) != (uint8_t)(~(uint8_t)s & (uint8_t)r)) return 5;\n    if (sbf32((int32_t)s) != (int32_t)((uint32_t)s << 20) >> 24) return 6;\n    if (ubf64(s) != (s << 3) >> 60) return 7;\n    if (sbf64((int64_t)s) != (int64_t)(s << 8) >> 8) return 8;\n    if (ubf32((uint32_t)s) != (uint32_t)s >> 31) return 9;\n    if (bfi32((uint32_t)s, (uint32_t)r) != (((uint32_t)s & 0xffff00ffu) | (((uint32_t)r & 0xffu) << 8))) return 10;\n    if (bfi64(s, r) != ((s & ~(UINT64_C(0xffff) << 40)) | ((r & 0xffff) << 40))) return 11;\n    if (nobfi((uint32_t)s, (uint32_t)r) != (((uint32_t)s & 0xffff000fu) | (((uint32_t)r & 0xffu) << 8))) return 12;\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Leading zero counts of 16 and 8 bits, every value (x86-64: the zero-extended operand's highest set bit
+// against the width's, the width for 0).
+@test
+fn narrow_leading_zero_counts_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @lz16 fn global
+sym @lz8 fn global
+fn @lz16
+  sig (i16) -> i32
+b0(v0: i16):
+  v1 = clz.i16 v0
+  v2 = zext.i32 v1
+  ret v2
+fn @lz8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = clz.i8 v0
+  ret v1
+)";
+    let drv = "#include <stdint.h>\nuint32_t lz16(uint16_t);\nuint8_t lz8(uint8_t);\nint main(void) {\n  for (uint32_t x = 0; x < 65536; x++) {\n    uint32_t n = 16;\n    for (uint32_t y = x; y != 0; y >>= 1) n--;\n    if (lz16((uint16_t)x) != n) return 1;\n    if (x < 256 && lz8((uint8_t)x) != (uint8_t)(n - 8)) return 2;\n  }\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }
@@ -767,8 +890,9 @@ fn carry_selects_bit_lengths_and_comparison_values_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
-// Products of 32-bit lanes in a register, wrapping, of signed and unsigned values: x86-64 SSE2 has no
-// such product (`pmuludq` pairs), AVX2 `vpmulld`.
+// Products of 32-bit lanes in a register, wrapping, of signed and unsigned values, a square and operands
+// a load gives: x86-64 SSE2 has no such product (`pmuludq` pairs, through the vector scratch registers
+// the operands leave), AVX2 `vpmulld`.
 @test
 fn products_of_32_bit_lanes_run() {
     if !cli::has_cc() {
@@ -783,10 +907,13 @@ b0(v0: ptr, v1: ptr, v2: ptr):
   v4 = load.v4i32 v1 align 2
   v5 = mul.v4i32 v3, v4
   v6 = mul.v4i32 v5, v3
-  store v6, v2 align 2
+  v7 = mul.v4i32 v6, v6
+  v8 = load.v4i32 v1 align 2
+  v9 = mul.v4i32 v8, v7
+  store v9, v2 align 2
   ret
 )";
-    let drv = "#include <stdint.h>\nvoid mul4(const uint32_t *, const uint32_t *, uint32_t *);\nint main(void) {\n  uint32_t a[4] = {3, 0xFFFFFFFFu, 0x80000001u, 123456789u};\n  uint32_t b[4] = {7, 0xFFFFFFFEu, 0x7FFFFFFFu, 987654321u};\n  uint32_t d[4];\n  mul4(a, b, d);\n  for (int k = 0; k < 4; k++) if (d[k] != a[k] * b[k] * a[k]) return k + 1;\n  return 0;\n}\n";
+    let drv = "#include <stdint.h>\nvoid mul4(const uint32_t *, const uint32_t *, uint32_t *);\nint main(void) {\n  uint32_t a[4] = {3, 0xFFFFFFFFu, 0x80000001u, 123456789u};\n  uint32_t b[4] = {7, 0xFFFFFFFEu, 0x7FFFFFFFu, 987654321u};\n  uint32_t d[4];\n  mul4(a, b, d);\n  for (int k = 0; k < 4; k++) {\n    uint32_t e = a[k] * b[k] * a[k];\n    if (d[k] != b[k] * (e * e)) return k + 1;\n  }\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wide(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);

@@ -12681,13 +12681,16 @@ fn loop_budgets(p: &loader::Package, opt: i32, cg: u64) lu::Budgets {
         } else {
             8u32
         },
-        // Apple's cores interleave 4 copies, others the target's generic count.
+        // Apple's cores interleave 4 copies, a calling convention with few caller-saved vector registers
+        // its own count (`CallConv.vector_copies`), others the target's generic count.
         vector: if (cg & bman::CG_VECTORIZE) == 0 {
             0u32
         } else if opt == bman::OPT_S {
             1u32
         } else if tgt::os(p.build_target).darwin {
             4u32
+        } else if tgt::callconv_of(p.build_target, p.arch).vector_copies != 0 {
+            tgt::callconv_of(p.build_target, p.arch).vector_copies
         } else {
             tgt::isa(p.arch).vector_copies
         },

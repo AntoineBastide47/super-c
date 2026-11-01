@@ -92,6 +92,10 @@ pub(package) struct Isa {
 pub(package) struct CallConv {
     pub(package) name: str<'static>,
     pub(package) va_list_bytes: u8, // C `va_list`: a pointer, or the register save area's record
+    /// The vector copies a vectorized loop interleaves, 0 for the instruction set's (`Isa.vector_copies`):
+    /// 2 under Microsoft x64, whose caller-saved xmm0..xmm5 hold 2 copies' values (past them, each
+    /// register a body takes is saved and restored).
+    pub(package) vector_copies: u8,
 }
 
 /// An object format: the object writer, relocations, section names and the linker.
@@ -281,12 +285,12 @@ pub(package) const ISAS: [Isa; 3] = [
 ];
 
 pub(package) const CALLCONVS: [CallConv; 6] = [
-    CallConv { name: "sysv", va_list_bytes: 24 },
-    CallConv { name: "win64", va_list_bytes: 8 },
-    CallConv { name: "aapcs64", va_list_bytes: 32 },
-    CallConv { name: "apple-aapcs64", va_list_bytes: 8 },
-    CallConv { name: "win-aapcs64", va_list_bytes: 8 },
-    CallConv { name: "wasm-c", va_list_bytes: 4 },
+    CallConv { name: "sysv", va_list_bytes: 24, vector_copies: 0 },
+    CallConv { name: "win64", va_list_bytes: 8, vector_copies: 2 },
+    CallConv { name: "aapcs64", va_list_bytes: 32, vector_copies: 0 },
+    CallConv { name: "apple-aapcs64", va_list_bytes: 8, vector_copies: 0 },
+    CallConv { name: "win-aapcs64", va_list_bytes: 8, vector_copies: 0 },
+    CallConv { name: "wasm-c", va_list_bytes: 4, vector_copies: 0 },
 ];
 
 pub(package) const OBJFORMATS: [ObjFormat; 4] = [

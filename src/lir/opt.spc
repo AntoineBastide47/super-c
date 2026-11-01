@@ -5884,6 +5884,11 @@ extend Opt {
                 return true;
             }
             if b.insts[i as usize].op == O_SELECT {
+                let r = self.floor_sub(b, i);
+                if r != VNONE {
+                    self.repl[i as usize] = r;
+                    return true;
+                }
                 self.flag_next(b, k, i);
             }
             if b.insts[i as usize].op == O_ICMP && self.icmp_select(pk, b, k, i) {
@@ -7405,6 +7410,97 @@ extend Opt {
         }
         self.moved[s as usize] = true;
         self.pre.push(c as u64 << 32 | s as u64);
+    }
+
+    // Select `i` of `n - a` where `a <u n` or `a <=u n` holds and of 0 else (a subtraction floored at 0, as a
+    // vector loop's remainder count takes it) when `a <=u n` always holds (`at_most`): the subtraction.
+    // VNONE else.
+    fn floor_sub(self: &Self, b: &Body, i: u32) Value {
+        let t = b.insts[i as usize];
+        let c = self.val(t.a);
+        if is_vec(t.ty) || t.ty == T_I128 || c == VNONE || (c & (VPARAM | VFLAG)) != 0 || b.insts[c as usize].op != O_ICMP {
+            return VNONE;
+        }
+        let tb = self.val(t.b);
+        let tc = self.val(t.c);
+        let on_true = const_of(b, tc) == Some(0u64);
+        let s = if on_true {
+            tb
+        } else if const_of(b, tb) == Some(0u64) {
+            tc
+        } else {
+            VNONE
+        };
+        if s == VNONE || (s & (VPARAM | VFLAG)) != 0 || b.insts[s as usize].op != O_SUB {
+            return VNONE;
+        }
+        let n = self.val(b.insts[s as usize].a);
+        let a = self.val(b.insts[s as usize].b);
+        let ct = b.insts[c as usize];
+        let (ca, cb) = (self.val(ct.a), self.val(ct.b));
+        let aux = if ca == a && cb == n {
+            ct.aux
+        } else if ca == n && cb == a {
+            mirror(ct.aux)
+        } else {
+            return VNONE;
+        };
+        let ok = if on_true {
+            aux == C_ULT || aux == C_ULE
+        } else {
+            aux == C_UGE || aux == C_UGT
+        };
+        if !ok || !self.at_most(b, a, n, UB_DEPTH) {
+            return VNONE;
+        }
+        return s;
+    }
+
+    // Whether `a <=u n` always holds: `a` is `n`, 0, an `and` with an operand that is at most `n`, a select
+    // of two, or a parameter every edge into its block passes such a value for (up to `depth` deep).
+    fn at_most(self: &Self, b: &Body, a: Value, n: Value, depth: u32) bool {
+        if a == n || const_of(b, a) == Some(0u64) {
+            return true;
+        }
+        if depth == 0 || (a & VFLAG) != 0 {
+            return false;
+        }
+        if (a & VPARAM) == 0 {
+            let x = b.insts[a as usize];
+            if x.op == O_SELECT {
+                let (l, r) = (self.val(x.b), self.val(x.c));
+                return self.at_most(b, l, n, depth - 1) && self.at_most(b, r, n, depth - 1);
+            }
+            if x.op != O_AND {
+                return false;
+            }
+            let (p, q) = (self.val(x.a), self.val(x.b));
+            return self.at_most(b, p, n, depth - 1) || self.at_most(b, q, n, depth - 1);
+        }
+        // A parameter or block the walk added has no entry in the maps.
+        let k = if (a & ~VPARAM) as usize < self.pblock.len() {
+            self.def_blk(a)
+        } else {
+            NONE
+        };
+        if k == NONE || k == 0 || k as usize >= self.rpo.len() || k as usize + 1 >= self.pred_at.len() || self.rpo[k as usize] == NONE {
+            return false;
+        }
+        let np = self.pred_at[k as usize + 1] - self.pred_at[k as usize];
+        if np == 0 || np > IMPLY_FAN {
+            return false;
+        }
+        let q = (a & ~VPARAM) - b.blocks[k as usize].param_start;
+        for x in self.pred_at[k as usize]..self.pred_at[k as usize + 1] {
+            let st = term(b, self.preds[x as usize]);
+            for e in 0..edge_count(st) {
+                let ed = edge_at(b, st, e);
+                if b.edge_target(ed) == k && !self.at_most(b, self.val(b.edge_arg(ed, q)), n, depth - 1) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     // Whether instruction `j` reads value `s` or its flag (operands as the walk replaced them).
