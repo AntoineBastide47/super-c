@@ -5846,6 +5846,9 @@ extend Opt {
                 return true;
             }
             let lop = b.insts[i as usize].op;
+            if lop == O_VCMP && self.signed_vcmp(pk, b, k, i) {
+                return true;
+            }
             if lop >= O_CLZ && lop <= O_POPCNT && self.narrow_count(pk, b, k, i) || lop == O_TRUNC && self.narrow_const(
                 pk,
                 b,
@@ -5870,6 +5873,34 @@ extend Opt {
             return self.number(pk, b, k, i) || !same(b.insts[i as usize], t0);
         }
         return !same(t, t0);
+    }
+
+    // Comparison `i` (block `k`) of integer lanes of vectors of at most 32 bytes as unsigned, on a target
+    // that compares them as signed only (`Package.vucmp`): the signed comparison of the operands with their
+    // sign bits flipped (an `xor` with a splat of the lanes' sign bit, which folds into a constant
+    // operand). Whether it did.
+    fn signed_vcmp(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        let vt = b.type_of(t.a);
+        let lt = lane_type(vt);
+        let nb = type_bytes(vt, 8);
+        if pk.vucmp || t.aux < C_ULT || t.aux > C_UGE || !is_int(lt) || nb > 32 || nb % 8 != 0 {
+            return false;
+        }
+        let bits = 8 * type_bytes(lt, 8);
+        let mut w: u64 = 0;
+        for l in 0..64 / bits {
+            w |= 1u64 << (l * bits + bits - 1) as u64;
+        }
+        let at = b.words.len() as u32;
+        for _ in 0..nb / 8 {
+            b.words.push(w);
+        }
+        let s = self.before(b, k, i, Inst { op: O_WCONST, ty: vt, aux: 0, a: at, b: nb / 8, c: VNONE });
+        let x = self.before(b, k, i, Inst { op: O_XOR, ty: vt, aux: 0, a: t.a, b: s, c: VNONE });
+        let y = self.before(b, k, i, Inst { op: O_XOR, ty: vt, aux: 0, a: t.b, b: s, c: VNONE });
+        b.insts[i as usize] = Inst { op: O_VCMP, ty: t.ty, aux: t.aux - C_ULT + C_SLT, a: x, b: y, c: VNONE };
+        return true;
     }
 
     // Instruction `i`, a sum or difference of a constant and a sum or difference of a constant: in place one
@@ -7372,8 +7403,10 @@ extend Opt {
     // or that a branch into the block settles: loads of both sides, the widest power of two of at most 8
     // bytes, up to MEMCMP_LOADS each, the last overlapping the one before for a count it does not divide
     // (LLVM ExpandMemCmp). A result whose one reader is an equality with 0 right after is whether a pair
-    // differs; another is the order of the first pair that differs, compared as big-endian numbers
-    // (`Package.bswap`). A load of read-only data folds to its constant. Whether it did.
+    // differs: then the widest power of two that fits each remaining count, unless that takes more loads
+    // than the overlapping ones (5 bytes as 4 and 1, 7 as two overlapping 4), a narrower pair extended to
+    // the widest. Another is the order of the first pair that differs, compared as big-endian
+    // numbers (`Package.bswap`). A load of read-only data folds to its constant. Whether it did.
     fn memcmp_eq(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
         let bk = b.blocks[k as usize];
@@ -7435,6 +7468,89 @@ extend Opt {
             let _ = fold_data(pk, b, y);
             la.push(x);
             lb.push(y);
+        }
+        // Equality over fewer loads of falling widths (4 and 1 for 5 bytes) when they take no more.
+        let mut np: u32 = 0;
+        let mut left = c;
+        while left != 0 {
+            let s = if left >= 8 {
+                8u32
+            } else if left >= 4 {
+                4u32
+            } else if left >= 2 {
+                2u32
+            } else {
+                1u32
+            };
+            left -= s;
+            np += 1;
+        }
+        if eq && np <= parts && np > 1 {
+            // With conditional comparisons (`Package.ccmp`), the reader is the pairs' equalities' `and` (its
+            // test `== 0`) or their inequalities' `or` (`!= 0`), and the call's result goes; else the
+            // reader tests the `or` of the pairs' differences.
+            let ui = i + 1;
+            let rel = b.insts[ui as usize].aux;
+            let mut d = VNONE;
+            let mut off: u32 = 0;
+            for q in 0..np {
+                let s = if c - off >= 8 {
+                    8u32
+                } else if c - off >= 4 {
+                    4u32
+                } else if c - off >= 2 {
+                    2u32
+                } else {
+                    1u32
+                };
+                // A narrower pair loads zero-extended to the widest width.
+                let st = int_type_of(s);
+                let mut x = self.made(pk, b, k, i, Inst { op: O_LOAD, ty: st, aux: 0, a: pa, b: VNONE, c: off });
+                let _ = fold_data(pk, b, x);
+                let mut y = self.made(pk, b, k, i, Inst { op: O_LOAD, ty: st, aux: 0, a: pb, b: VNONE, c: off });
+                let _ = fold_data(pk, b, y);
+                if st != ty {
+                    x = self.made(pk, b, k, i, Inst { op: O_ZEXT, ty: ty, aux: 0, a: x, b: VNONE, c: VNONE });
+                    y = self.made(pk, b, k, i, Inst { op: O_ZEXT, ty: ty, aux: 0, a: y, b: VNONE, c: VNONE });
+                }
+                off += s;
+                if pk.ccmp {
+                    let z = self.made(pk, b, k, i, Inst { op: O_ICMP, ty: T_I8, aux: rel, a: x, b: y, c: VNONE });
+                    if q == 0 {
+                        d = z;
+                        continue;
+                    }
+                    let o = Inst {
+                        op: if rel == C_EQ {
+                            O_AND
+                        } else {
+                            O_OR
+                        },
+                        ty: T_I8,
+                        aux: 0,
+                        a: d,
+                        b: z,
+                        c: VNONE,
+                    };
+                    if q + 1 == np {
+                        b.insts[ui as usize] = o;
+                        b.insts[i as usize] = iconst(T_I32, 0);
+                        return true;
+                    }
+                    d = self.made(pk, b, k, i, o);
+                    continue;
+                }
+                let z = self.made(pk, b, k, i, Inst { op: O_XOR, ty: ty, aux: 0, a: x, b: y, c: VNONE });
+                d = if d == VNONE {
+                    z
+                } else {
+                    self.made(pk, b, k, i, Inst { op: O_OR, ty: ty, aux: 0, a: d, b: z, c: VNONE })
+                };
+            }
+            let zero = self.constant(b, ty, 0);
+            let ne = self.made(pk, b, k, i, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: d, b: zero, c: VNONE });
+            b.insts[i as usize] = Inst { op: O_ZEXT, ty: T_I32, aux: 0, a: ne, b: VNONE, c: VNONE };
+            return true;
         }
         if eq {
             // One pair: its compare; more: the `or` of their differences against 0.
@@ -10549,6 +10665,68 @@ fn vec_minmax(b: &mut Body, i: u32) bool {
     return true;
 }
 
+// Vector instruction `i` of `b` (integer lanes), in place: a sum with a negation a difference, a
+// difference with one a sum; an `xor` of two constants (`vec_words`) a wide constant.
+fn simplify_vec(b: &mut Body, i: u32) {
+    let t = b.insts[i as usize];
+    let lt = lane_type(t.ty);
+    if !is_int(lt) {
+        return;
+    }
+    if (t.op == O_ADD || t.op == O_SUB) && is_op(b, t.b, O_NEG) {
+        let o = if t.op == O_ADD {
+            O_SUB
+        } else {
+            O_ADD
+        };
+        b.insts[i as usize] = Inst { op: o, ty: t.ty, aux: 0, a: t.a, b: b.insts[t.b as usize].a, c: VNONE };
+        return;
+    }
+    if t.op == O_ADD && is_op(b, t.a, O_NEG) {
+        b.insts[i as usize] = Inst { op: O_SUB, ty: t.ty, aux: 0, a: t.b, b: b.insts[t.a as usize].a, c: VNONE };
+        return;
+    }
+    let nb = type_bytes(t.ty, 8);
+    let mut x: [u64; 8] = [0; 8];
+    let mut y: [u64; 8] = [0; 8];
+    if t.op == O_XOR && nb % 8 == 0 && vec_words(b, t.a, t.ty, &mut x) && vec_words(b, t.b, t.ty, &mut y) {
+        let at = b.words.len() as u32;
+        for q in 0..nb / 8 {
+            b.words.push(x[q as usize] ^ y[q as usize]);
+        }
+        b.insts[i as usize] = Inst { op: O_WCONST, ty: t.ty, aux: 0, a: at, b: nb / 8, c: VNONE };
+    }
+}
+
+// The 8-byte words of vector constant `v` of `b` of type `vt` (a multiple of 8 bytes, at most 64), in
+// `out`: a wide constant's, or a splat of an integer constant's. Whether it is one.
+fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) bool {
+    if (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    let nw = type_bytes(vt, 8) / 8;
+    if t.op == O_WCONST && t.b == nw {
+        for q in 0..nw {
+            out[q as usize] = b.words[(t.a + q) as usize];
+        }
+        return true;
+    }
+    let c = const_of(b, t.a);
+    if t.op != O_SPLAT || c.is_none() {
+        return false;
+    }
+    let bits = 8 * type_bytes(lane_type(vt), 8);
+    let mut w: u64 = 0;
+    for l in 0..64 / bits {
+        w |= le::trunc_bits(c.unwrap(), bits) << (l * bits) as u64;
+    }
+    for q in 0..nw {
+        out[q as usize] = w;
+    }
+    return true;
+}
+
 fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     let mut t = b.insts[i as usize];
     if t.op == O_VEXTRACT || t.op == O_VINSERT {
@@ -10558,6 +10736,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         return simplify_wide(b, i);
     }
     if is_vec(t.ty) {
+        simplify_vec(b, i);
         return VNONE;
     }
     let ptr = pk.ptr_bytes;

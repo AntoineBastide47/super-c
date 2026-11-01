@@ -60,7 +60,7 @@ pub(package) const FOLD_LDOP: u32 = 1048576;
 pub(package) const FOLD_ANY: u32 = 2097152;
 pub(package) const FOLD_ANY_WIDE: u32 = 4194304;
 // `lane_mask` follows this many `and`, `or` and `xor` operations.
-const MASK_DEPTH: u32 = 8;
+pub(package) const MASK_DEPTH: u32 = 8;
 // `Live::ldop_user` looks this many instructions past a load for its use.
 const LDOP_REACH: u32 = 16;
 /// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
@@ -2530,191 +2530,41 @@ pub(package) const fn const_of(b: &Body, v: Value, out: &mut u64) bool {
     return true;
 }
 
-/// A switch takes a table (`switch_span`) from this many cases.
-pub(package) const TABLE_MIN: u32 = 4;
-/// A table holds at most this many entries.
-pub(package) const TABLE_MAX: u32 = 4096;
-
-/// The least case `min` of switch `t` of `b` (its value `bits` wide) and the entries `span` a table from it
-/// takes, when its cases are dense: at least TABLE_MIN of them, at least 40% of the entries (LLVM's
-/// density for jump tables), at most TABLE_MAX entries. The cases order as unsigned or as signed values,
-/// whichever spans fewer; value `v`'s entry is `v - min` wrapped at `bits`.
-pub(package) fn switch_span(b: &Body, t: Inst, bits: u32, min: &mut u64, span: &mut u32) bool {
-    let n = t.aux as u32;
-    if n < TABLE_MIN {
-        return false;
+/// The amount every lane of vector shift `t` of `b` (integer lanes) shifts by, when one constant below the
+/// lanes' width: a splat of an integer constant, or a wide constant of equal lanes. NONE when not.
+pub(package) fn vec_shift_amount(b: &Body, t: Inst) u32 {
+    let lt = lane_type(t.ty);
+    if !is_vec(t.ty) || !is_int(lt) || (t.b & (VPARAM | VFLAG)) != 0 || t.b == VNONE {
+        return NONE;
     }
+    let a = b.insts[t.b as usize];
+    let bits = 8 * type_bytes(lt, 8) as u64;
     let m = if bits == 64 {
         ~0u64
     } else {
-        (1u64 << bits as u64) - 1
+        (1u64 << bits) - 1
     };
-    // The signed order is the unsigned one of the values with their sign bits flipped.
-    let sb = 1u64 << (bits - 1) as u64;
-    let mut ulo = ~0u64;
-    let mut uhi: u64 = 0;
-    let mut slo = ~0u64;
-    let mut shi: u64 = 0;
-    for k in 0..n {
-        let c = b.words[(t.b + k) as usize] & m;
-        let s = c ^ sb;
-        if c < ulo {
-            ulo = c;
-        }
-        if c > uhi {
-            uhi = c;
-        }
-        if s < slo {
-            slo = s;
-        }
-        if s > shi {
-            shi = s;
-        }
-    }
-    let (lo, d) = if uhi - ulo <= shi - slo {
-        (ulo, uhi - ulo)
-    } else {
-        (slo ^ sb, shi - slo)
-    };
-    if d >= TABLE_MAX as u64 || 2 * (d + 1) > 5 * n as u64 {
-        return false;
-    }
-    *min = lo;
-    *span = (d + 1) as u32;
-    return true;
-}
-
-/// A switch's lookup table (`switch_lookup`): entry `k` for the case `min + k`, `span` entries; per
-/// parameter of the block the cases enter, a column of its constants at `off[q]` of `bytes`, aligned to
-/// `1 << align_log2`. `holes`: bit `k` set when entry `k` is no case and the default takes it.
-pub(package) struct Lookup {
-    pub(package) min: u64,
-    pub(package) span: u32,
-    pub(package) holes: u64,
-    pub(package) off: Vector<u32>,
-    pub(package) bytes: Vector<u8>,
-    pub(package) align_log2: u8,
-}
-
-extend Lookup {
-    pub(package) fn new() Lookup {
-        return Lookup {
-            min: 0,
-            span: 0,
-            holes: 0,
-            off: Vector::<u32>::new(),
-            bytes: Vector::<u8>::new(),
-            align_log2: 0,
-        };
-    }
-}
-
-// The bits of constant `v` of `b` (an integer or a float), in `out`.
-const fn const_bits(b: &Body, v: Value, out: &mut u64) bool {
-    if (v & (VPARAM | VFLAG)) != 0 {
-        return false;
-    }
-    let t = b.insts[v as usize];
-    if t.op != O_ICONST && t.op != O_FCONST {
-        return false;
-    }
-    *out = t.b as u64 << 32 | t.a as u64;
-    return true;
-}
-
-// Whether edge `e` of `b` enters block `to` passing a constant to each of its `np` parameters.
-fn consts_to(b: &Body, e: u32, to: u32, np: u32) bool {
-    if b.edge_target(e) != to || b.edge_nargs(e) != np {
-        return false;
-    }
     let mut k: u64 = 0;
-    for q in 0..np {
-        if !const_bits(b, b.edge_arg(e, q), &mut k) {
-            return false;
+    if a.op == O_SPLAT && const_of(b, a.a, &mut k) {
+        k &= m;
+    } else if a.op == O_WCONST {
+        k = b.words[a.a as usize] & m;
+        for q in 0..a.b {
+            let x = b.words[(a.a + q) as usize];
+            for l in 0..64 / bits {
+                if (x >> l * bits & m) != k {
+                    return NONE;
+                }
+            }
         }
-    }
-    return true;
-}
-
-/// Whether switch `t` of `b` (its value `bits` wide, pointers `ptr` bytes) takes lookup table `lk`: dense
-/// cases (`switch_span`) that all enter one block passing constants (integers to 8 bytes, pointers,
-/// floats). An entry no case takes holds the default's constants when the default enters that block
-/// passing constants too; else the default takes it (`holes`, at most 64 entries).
-pub(package) fn switch_lookup(b: &Body, t: Inst, bits: u32, ptr: u32, lk: &mut Lookup) bool {
-    if !switch_span(b, t, bits, &mut lk.min, &mut lk.span) {
-        return false;
-    }
-    let n = t.aux as u32;
-    let to = b.edge_target(b.switch_edge(t, 0));
-    let bk = b.blocks[to as usize];
-    let np = bk.param_len as u32;
-    if np == 0 {
-        return false;
-    }
-    for q in 0..np {
-        let ty = b.type_of(VPARAM | bk.param_start + q);
-        if !(ty >= T_I8 && ty <= T_I64 || ty == T_F32 || ty == T_F64 || ty == T_PTR) {
-            return false;
-        }
-    }
-    for k in 0..n {
-        if !consts_to(b, b.switch_edge(t, k), to, np) {
-            return false;
-        }
-    }
-    let d = b.switch_edge(t, n);
-    let fill = consts_to(b, d, to, np);
-    let span = lk.span;
-    if !fill && span > n && span > 64 {
-        return false;
-    }
-    let m = if bits == 64 {
-        ~0u64
     } else {
-        (1u64 << bits as u64) - 1
+        return NONE;
+    }
+    return if k < bits {
+        k as u32
+    } else {
+        NONE
     };
-    // The case of each entry (NONE: none).
-    let mut at = Vector::<u32>::with_capacity(span as usize);
-    for _ in 0..span {
-        at.push(NONE);
-    }
-    for k in 0..n {
-        at[(b.words[(t.b + k) as usize].wrapping_sub(lk.min) & m) as usize] = k;
-    }
-    lk.holes = 0;
-    if !fill {
-        for x in 0..span {
-            if at[x as usize] == NONE {
-                lk.holes |= 1u64 << x as u64;
-            }
-        }
-    }
-    lk.off.truncate(0);
-    lk.bytes.truncate(0);
-    lk.align_log2 = 0;
-    for q in 0..np {
-        let e = type_bytes(b.type_of(VPARAM | bk.param_start + q), ptr);
-        while lk.bytes.len() as u32 % e != 0 {
-            lk.bytes.push(0);
-        }
-        lk.off.push(lk.bytes.len() as u32);
-        for x in 0..span {
-            let k = at[x as usize];
-            let mut v: u64 = 0;
-            if k != NONE {
-                let _ = const_bits(b, b.edge_arg(b.switch_edge(t, k), q), &mut v);
-            } else if fill {
-                let _ = const_bits(b, b.edge_arg(d, q), &mut v);
-            }
-            for y in 0..e {
-                lk.bytes.push((v >> (8 * y) as u64) as u8);
-            }
-        }
-        if e.trailing_zeros() as u8 > lk.align_log2 {
-            lk.align_log2 = e.trailing_zeros() as u8;
-        }
-    }
-    return true;
 }
 
 /// Whether instruction `i` of `b` (of package `p`, liveness `lv`) leads only to its block's `unreachable`:

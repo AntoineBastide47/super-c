@@ -5587,14 +5587,16 @@ b6(v11: i8):
     }
 }
 
-// Switches lowered (`Package.switch_tree`): one of ranges to range tests, one whose edges pass constants to
-// one block (two through blocks that only jump there) to a table in a register, and one of few sparse
-// values left a switch.
+// Switches lowered (`Package.switch_tree`): a dense one whose edges pass constants to one block left a
+// switch (the backends read a table), one of sparse ranges to range tests, one of three values whose edges
+// pass constants to one block (one through a block that only jumps there) to a table in a register, and
+// one of few sparse values left a switch.
 @test
 fn switches_become_range_tests_and_tables() {
     let (b, a) = optimized_split(
         M"(lir ptr 8
 sym @class fn global
+sym @ranges fn global
 sym @table fn global
 sym @sparse fn global
 fn @class
@@ -5607,18 +5609,25 @@ b0(v0: i8):
   switch v0 [48 -> b1(v2), 49 -> b1(v2), 50 -> b1(v2), 51 -> b1(v2), 52 -> b1(v2), 53 -> b1(v2), 54 -> b1(v2), 55 -> b1(v2), 56 -> b1(v2), 57 -> b1(v2), 65 -> b1(v3), 66 -> b1(v3), 67 -> b1(v3), 68 -> b1(v3), 69 -> b1(v3), 70 -> b1(v3), 71 -> b1(v3), 72 -> b1(v3), 73 -> b1(v3), 74 -> b1(v3), 75 -> b1(v3), 76 -> b1(v3), 77 -> b1(v3), 78 -> b1(v3), 79 -> b1(v3), 80 -> b1(v3), 81 -> b1(v3), 82 -> b1(v3), 83 -> b1(v3), 84 -> b1(v3), 85 -> b1(v3), 86 -> b1(v3), 87 -> b1(v3), 88 -> b1(v3), 89 -> b1(v3), 90 -> b1(v3), 97 -> b1(v3), 98 -> b1(v3), 99 -> b1(v3), 100 -> b1(v3), 101 -> b1(v3), 102 -> b1(v3), 103 -> b1(v3), 104 -> b1(v3), 105 -> b1(v3), 106 -> b1(v3), 107 -> b1(v3), 108 -> b1(v3), 109 -> b1(v3), 110 -> b1(v3), 111 -> b1(v3), 112 -> b1(v3), 113 -> b1(v3), 114 -> b1(v3), 115 -> b1(v3), 116 -> b1(v3), 117 -> b1(v3), 118 -> b1(v3), 119 -> b1(v3), 120 -> b1(v3), 121 -> b1(v3), 122 -> b1(v3), 9 -> b1(v4), 10 -> b1(v4), 32 -> b1(v4)] else b1(v1)
 b1(v5: i32):
   ret v5
+fn @ranges
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 2
+  v3 = iconst.i32 1
+  switch v0 [48 -> b1(v2), 49 -> b1(v2), 50 -> b1(v2), 51 -> b1(v2), 52 -> b1(v2), 53 -> b1(v2), 54 -> b1(v2), 55 -> b1(v2), 56 -> b1(v2), 57 -> b1(v2), 1000 -> b1(v3), 1001 -> b1(v3), 1002 -> b1(v3), 1003 -> b1(v3), 1004 -> b1(v3), 1005 -> b1(v3), 1006 -> b1(v3), 1007 -> b1(v3), 1008 -> b1(v3), 1009 -> b1(v3), 1010 -> b1(v3)] else b1(v1)
+b1(v4: i32):
+  ret v4
 fn @table
   sig (i32) -> i32
 b0(v0: i32):
   v1 = iconst.i32 0
-  v2 = iconst.i32 5
-  v3 = iconst.i32 99
-  v4 = iconst.i32 7
-  v5 = iconst.i32 33
-  v6 = iconst.i32 10
-  switch v0 [0 -> b1(v6), 1 -> b1(v5), 2 -> b1(v4), 3 -> b1(v3), 4 -> b2] else b3
-b1(v7: i32):
-  ret v7
+  v2 = iconst.i32 7
+  v3 = iconst.i32 33
+  v4 = iconst.i32 10
+  switch v0 [0 -> b1(v4), 1 -> b1(v3), 2 -> b2] else b3
+b1(v5: i32):
+  ret v5
 b2:
   jmp b1(v2)
 b3:
@@ -5646,7 +5655,7 @@ b2:
         true,
     );
     let tc = text_of(&a, "class");
-    assert(!tc.contains("switch") && tc.contains("icmp.ule"), tc.as_str());
+    assert(tc.contains("switch"), tc.as_str());
     for x in 0..256u64 {
         let c = x as u8;
         let want: u64 = if c >= 48 && c <= 57 {
@@ -5661,10 +5670,23 @@ b2:
         let xs: [u64; 1] = [x];
         same_result(&b, &a, "class", xs, want);
     }
+    let tr = text_of(&a, "ranges");
+    assert(!tr.contains("switch") && tr.contains("icmp.ule"), tr.as_str());
+    for x in 0..1100u64 {
+        let want: u64 = if x >= 48 && x <= 57 {
+            2
+        } else if x >= 1000 && x <= 1010 {
+            1
+        } else {
+            0
+        };
+        let xs: [u64; 1] = [x];
+        same_result(&b, &a, "ranges", xs, want);
+    }
     let tt = text_of(&a, "table");
     assert(!tt.contains("switch") && !tt.contains("br ") && tt.contains("select"), tt.as_str());
-    let want: [u64; 7] = [10, 33, 7, 99, 5, 0, 0];
-    for x in 0..7u64 {
+    let want: [u64; 5] = [10, 33, 7, 0, 0];
+    for x in 0..5u64 {
         let xs: [u64; 1] = [x];
         same_result(&b, &a, "table", xs, want[x as usize]);
     }
@@ -5951,8 +5973,8 @@ b0(v0: ptr, v1: ptr):
     same_result(&b, &a, "f", y, 0);
 }
 
-// A `memcmp` of a small count whose result only an equality with 0 reads is a compare of loads (two
-// overlapping ones each for 5 bytes, one for 4); a count a branch into the block settles counts too, and a
+// A `memcmp` of a small count whose result only an equality with 0 reads is a compare of loads (a 4-byte
+// and a 1-byte one each for 5 bytes, one for 4); a count a branch into the block settles counts too, and a
 // load of read-only bytes is their constant. A result an ordering reads is the order of the first pair of
 // loads that differs (17 bytes: three pairs); a count past 32 bytes keeps the call.
 @test
@@ -6035,7 +6057,7 @@ data @w size 64 align 0 bytes 68656c6c6f68656c6c6f68656c6c6f68656c6c6f6874747068
 )",
     );
     let e = text_of(&a, "eq5");
-    assert(!e.contains("call") && count_of(&e, "load.i32") == 2, e.as_str());
+    assert(!e.contains("call") && count_of(&e, "load.i32") == 1 && count_of(&e, "load.i8") == 1, e.as_str());
     let s = text_of(&a, "starts");
     assert(!s.contains("call") && count_of(&s, "load.i32") == 1 && !s.contains("symaddr @r"), s.as_str());
     assert(!text_of(&a, "less").contains("call"), text_of(&a, "less").as_str());

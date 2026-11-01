@@ -18,6 +18,7 @@
 // the spills and memory values; then the callee-saved registers and rbp, which rbp points at.
 import lir::ir as *;
 import codegen::live as lv;
+import lir::switches as sws;
 import codegen::place;
 import codegen::place as *;
 import lir::verify as lver;
@@ -1228,7 +1229,7 @@ extend Gen {
     // parameter, an xmm register: under Microsoft x64 a callee-saved one (`vfix`), under System V, which
     // keeps no xmm register across a call, a caller-saved one when no call that returns runs in its
     // range; none for the others, which temporaries hold (an entry parameter that dies in the entry
-    // block stays in the register it arrives in). A vector of 16 bytes that lives past its block or is a
+    // block stays in the register it arrives in). A vector of 8 or 16 bytes that lives past its block or is a
     // block parameter and no instruction reads or writes in memory (`vec_homes`: a loop's accumulator, a
     // value splat before the loop) asks an xmm register the same way. The homes leave 8 integer registers
     // to one instruction (a masked store reads 8).
@@ -1283,7 +1284,7 @@ extend Gen {
             let d = self.lv.def_blk[x];
             let mut w: u8 = 0;
             // A ymm register keeps only its low 16 bytes across a call (Microsoft x64's xmm6..xmm15).
-            if self.in_reg(t) && type_bytes(t, 8) >= 16 && x < nv && !self.vmem[x] && d != NONE && self.lv.pos[d as usize] != NONE && (self.lv.end[x] > self.lv.pos[d as usize] || x >= ni) && (self.win && type_bytes(
+            if self.in_reg(t) && type_bytes(t, 8) >= 8 && x < nv && !self.vmem[x] && d != NONE && self.lv.pos[d as usize] != NONE && (self.lv.end[x] > self.lv.pos[d as usize] || x >= ni) && (self.win && type_bytes(
                 t,
                 8,
             ) == 16 || !self.crosses_call(x as u32, true)) {
@@ -7117,13 +7118,13 @@ extend Gen {
         }
     }
 
-    // A switch whose cases all pass constants to one block (`lv::switch_lookup`): the bound and hole tests
+    // A switch whose cases all pass constants to one block (`sws::switch_lookup`): the bound and hole tests
     // to the default, then each parameter from its column of a read-only table (memory homes first: a
     // narrow one goes through S0, which the value then gives again). Whether it did.
     fn lookup(self: &mut Self, t: Inst, r: u8, sz: u32) bool {
         let b = self.b();
-        let mut lk = lv::Lookup::new();
-        if !lv::switch_lookup(b, t, 8 * sz, self.ptr, &mut lk) {
+        let mut lk = sws::Lookup::new();
+        if !sws::switch_lookup(b, t, 8 * sz, self.ptr, false, &mut lk) {
             return false;
         }
         let d = b.switch_edge(t, t.aux);
@@ -7190,7 +7191,7 @@ extend Gen {
         return true;
     }
 
-    // A dense switch (`lv::switch_span`) of at least TABLE_MIN cases that go elsewhere than the default: the
+    // A dense switch (`sws::switch_span`) of at least TABLE_MIN cases that go elsewhere than the default: the
     // bound test to the default, then a jump through a table of jumps, one per entry, each 8 bytes (`jmp
     // rel32`, kept long, then `int3`s): to its case's block, or its moves past the table; an entry no case
     // takes to the default's. Whether it did.
@@ -7207,7 +7208,7 @@ extend Gen {
         }
         let mut min: u64 = 0;
         let mut span: u32 = 0;
-        if own < lv::TABLE_MIN || !lv::switch_span(b, t, 8 * sz, &mut min, &mut span) {
+        if own < sws::TABLE_MIN || !sws::switch_span(b, t, 8 * sz, &mut min, &mut span) {
             return false;
         }
         let m = if sz == 8 {
@@ -7285,7 +7286,7 @@ extend Gen {
     }
 
     // A local read-only symbol of the object holding table `lk`'s bytes.
-    fn table_sym(self: &mut Self, lk: &lv::Lookup) u32 {
+    fn table_sym(self: &mut Self, lk: &sws::Lookup) u32 {
         let o = self.obj();
         let nm = format("__sc_tab.{}", o.syms.len());
         let k = o.sym(&nm);
@@ -10161,47 +10162,7 @@ extend Gen {
         ) || nb == 32 && self.avx && self.in_reg(t.ty)) || (t.b & (VPARAM | VFLAG)) != 0 || t.b == VNONE {
             return NONE;
         }
-        let b = self.b();
-        let a = b.insts[t.b as usize];
-        let bits = 8 * eb as u64;
-        let mut k: u64 = 0;
-        if a.op == O_SPLAT && (a.a & (VPARAM | VFLAG)) == 0 && b.insts[a.a as usize].op == O_ICONST {
-            let mut v: u64 = 0;
-            if !self.const_of(a.a, &mut v) {
-                return NONE;
-            }
-            k = v & if bits == 64 {
-                ~0u64
-            } else {
-                (1u64 << bits) - 1
-            };
-        } else if a.op == O_WCONST {
-            let w = b.words[a.a as usize];
-            k = w & if bits == 64 {
-                ~0u64
-            } else {
-                (1u64 << bits) - 1
-            };
-            for q in 0..a.b {
-                let x = b.words[(a.a + q) as usize];
-                for l in 0..64 / bits {
-                    if (x >> l * bits & if bits == 64 {
-                        ~0u64
-                    } else {
-                        (1u64 << bits) - 1
-                    }) != k {
-                        return NONE;
-                    }
-                }
-            }
-        } else {
-            return NONE;
-        }
-        return if k < bits {
-            k as u32
-        } else {
-            NONE
-        };
+        return lv::vec_shift_amount(self.b(), t);
     }
 
     // Whether vector shift `t` has an AVX2 form in registers (`vec_arith`): lanes of 4 or 8 bytes, but an
@@ -10254,7 +10215,11 @@ extend Gen {
             self.vconv_ymm(t, fb, tb, rd, rx);
             return;
         }
-        if op == O_SEXT || op == O_ZEXT {
+        if op == O_SEXT && lv::lane_mask(self.b(), t.a, lv::MASK_DEPTH) {
+            // A mask's lanes are all ones or 0: each lane beside itself (`punpckl`).
+            self.c.vmov(rd, rx);
+            self.c.sse_rr(0x66, 0x0F60 + lg, rd, rd);
+        } else if op == O_SEXT || op == O_ZEXT {
             let s = self.tmp(true) - V0;
             self.c.sse_rr(0x66, 0x0FEF, s, s);
             if op == O_SEXT {

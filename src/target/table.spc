@@ -46,14 +46,21 @@ pub(package) struct Isa {
     pub(package) bswap: bool,
     /// One instruction reverses the bits of an integer (RBIT): `lir::ir::Package::bitrev`.
     pub(package) bitrev: bool,
+    /// The native backend compares integer lanes of vectors in registers as unsigned (Neon's CMHI; x86-64's
+    /// SSE and AVX2 compare them as signed only): `lir::ir::Package::vucmp`.
+    pub(package) vector_ucmp: bool,
+    /// The native backend chains comparisons into conditional ones (CCMP), so an equality of several pairs
+    /// is best their comparisons' `and`: `lir::ir::Package::ccmp`.
+    pub(package) ccmp: bool,
     /// The native backend keeps a 64-bit integer in one register: the optimizer splits a 128-bit one into
     /// its two words (`lir::ir::Package::pairs`).
     pub(package) pairs: bool,
     /// Every processor converts IEEE binary16 values to and from f32 (arm64's FCVT); else only one with
     /// its feature does (x86-64's `f16c`). `lir::ir::Package::half`.
     pub(package) half_cvt: bool,
-    /// The native backend tests a switch's values one after another (no table of branches): the optimizer
-    /// lowers a switch of ranges or many values to compares and branches (`lir::ir::Package::switch_tree`).
+    /// The optimizer lowers a switch of ranges or many values to compares and branches, but a dense one the
+    /// native backend reads from a table of values or branches through a table of branches
+    /// (`lir::ir::Package::switch_tree`).
     pub(package) switch_tree: bool,
     pub(package) simd_backend: str<'static>, // `std/simd/backend/<name>.spc`
     /// The C headers whose functions are the C compiler's intrinsics, space-separated: no object defines
@@ -180,6 +187,8 @@ pub(package) const ISAS: [Isa; 3] = [
         mul_high: true,
         bswap: true,
         bitrev: false,
+        vector_ucmp: false,
+        ccmp: false,
         pairs: true,
         half_cvt: false,
         switch_tree: true,
@@ -203,6 +212,8 @@ pub(package) const ISAS: [Isa; 3] = [
         mul_high: true,
         bswap: true,
         bitrev: true,
+        vector_ucmp: true,
+        ccmp: true,
         pairs: true,
         half_cvt: true,
         switch_tree: true,
@@ -226,6 +237,8 @@ pub(package) const ISAS: [Isa; 3] = [
         mul_high: false,
         bswap: false,
         bitrev: false,
+        vector_ucmp: true,
+        ccmp: false,
         pairs: false,
         half_cvt: false,
         switch_tree: false,
@@ -554,6 +567,8 @@ const UNKNOWN_ISA: Isa = Isa {
     mul_high: false,
     bswap: false,
     bitrev: false,
+    vector_ucmp: true,
+    ccmp: false,
     pairs: false,
     half_cvt: false,
     switch_tree: false,

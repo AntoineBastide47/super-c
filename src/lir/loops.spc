@@ -583,7 +583,14 @@ extend LoopOpt {
                 cl,
                 true,
             ) {
-                self.vectorize(b, h, p, u, bu.vector);
+                // Copies whose every reduction is a product by a value from before the loop take one
+                // product by its power per iteration (`vpowers`): twice the copies halve the products.
+                let nv = if self.all_powers(b, u) {
+                    2 * bu.vector
+                } else {
+                    bu.vector
+                };
+                self.vectorize(b, h, p, u, nv);
                 any = true;
                 continue;
             }
@@ -4724,6 +4731,26 @@ extend LoopOpt {
         }
         assert(false, "loops: a vector operand without a splat");
         return VNONE;
+    }
+
+    // Whether the plan's scalar copies of body `u` have reductions, each an integer product by a value from
+    // before the loop (`vpowers`).
+    fn all_powers(self: &Self, b: &Body, u: u32) bool {
+        if !self.vone || self.vred.len() == 0 {
+            return false;
+        }
+        for r in 0..self.vred.len() {
+            let t = b.insts[self.vrup[r] as usize];
+            let o = if t.a == self.vred[r] {
+                t.b
+            } else {
+                t.a
+            };
+            if t.op != O_MUL || self.defined_in(o) || self.in_body(b, u, o) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // Scalar copies (`nv` of body `u`): per reduction (`vpow`), when it is an integer product by a value

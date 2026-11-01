@@ -2162,6 +2162,18 @@ const fn tpoff(l: &L, a: u64) i64 {
 // ---- section bytes and relocations ----------------------------------------------------------------------
 
 const fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
+    // x86-64 code sections: `int3` between the inputs, so that the processor decodes no memory access past
+    // a `ret` (arm64's 0 words are `udf`).
+    if !l.a64 {
+        for k in 0..l.osecs.len() {
+            let os = l.osecs[k];
+            if (os.flags & SHF_EXECINSTR) != 0 && os.ty != SHT_NOBITS {
+                for q in os.off..os.off + os.size {
+                    img[q as usize] = 0xCC;
+                }
+            }
+        }
+    }
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
         if sc.out == NONE || sc.ty == SHT_NOBITS || seg_of(l.osecs[sc.out as usize].rank) == 4 {

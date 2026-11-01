@@ -1379,6 +1379,13 @@ pub(package) struct Package {
     /// Whether the native backend reverses the bits of an integer in one instruction (`O_BITREV`,
     /// `target::table::Isa`): the optimizer then makes one of a reversal of bits.
     pub(package) bitrev: bool,
+    /// Whether the native backend compares integer lanes of vectors of up to 32 bytes as unsigned
+    /// (`target::table::Isa`): else the optimizer makes such a comparison the signed one of the lanes with
+    /// their sign bits flipped.
+    pub(package) vucmp: bool,
+    /// Whether the native backend chains comparisons into conditional ones (`target::table::Isa`): an
+    /// expanded `memcmp` equality is then the `or` of its pairs' inequalities, not an `or` of differences.
+    pub(package) ccmp: bool,
     /// Whether the optimizer splits each 128-bit integer into its two 64-bit words (`lir::pairs`), which
     /// the native backend keeps in registers (`target::table::Isa`); it needs `mul_high`.
     pub(package) pairs: bool,
@@ -1488,6 +1495,8 @@ extend Package {
             mul_high: true,
             bswap: true,
             bitrev: true,
+            vucmp: true,
+            ccmp: true,
             pairs: false,
             align_loops: false,
             popcnt: false,

@@ -177,6 +177,9 @@ pub(package) struct Obj {
     pub(package) funcs: Vector<OFunc>, // with debug information, every function
     pub(package) names: nm::Names,
     sym_of: Vector<u32>, // per name id, its symbol plus 1 (0: none)
+    /// The byte that pads code sections between functions: x86-64's `int3` (0xCC), so that the processor
+    /// decodes no memory access past a `ret`; 0 (arm64's `udf`) else.
+    pub(package) code_fill: u8,
 }
 
 extend Obj {
@@ -191,6 +194,7 @@ extend Obj {
             funcs: Vector::<OFunc>::new(),
             names: nm::Names::with_capacity(1 << 12, 1 << 8),
             sym_of: Vector::<u32>::new(),
+            code_fill: 0,
         };
         for _ in 0..S_COUNT {
             o.secs.push(
@@ -252,7 +256,14 @@ extend Obj {
         let a = 1u64 << al as u64;
         let at = sec.size + a - 1 & ~(a - 1);
         if s != S_BSS && s != S_TBSS {
-            pad(&mut sec.bytes, at);
+            let fill = if sec.code || s == S_TEXT {
+                self.code_fill
+            } else {
+                0
+            };
+            while sec.bytes.len() as u64 < at {
+                sec.bytes.push(fill);
+            }
         }
         sec.size = at;
         return at;

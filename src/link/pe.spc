@@ -1484,6 +1484,15 @@ fn in_section(l: &L, k: u32) bool {
 // ---- section bytes and relocations ----------------------------------------------------------------------
 
 const fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
+    // Code sections: `int3` between the inputs, so that the processor decodes no memory access past a `ret`.
+    for k in 0..l.osecs.len() {
+        let os = l.osecs[k];
+        if (os.flags & SCN_CODE) != 0 && os.raw != 0 {
+            for q in os.off..os.off + os.size.min(os.raw) {
+                img[q as usize] = 0xCC;
+            }
+        }
+    }
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
         if sc.out == NONE || sc.off == 0 || (l.osecs[sc.out as usize].flags & SCN_UDATA) != 0 {

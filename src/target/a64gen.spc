@@ -16,6 +16,7 @@
 // values, the callee-saved registers, then x29 and x30, which x29 points at.
 import lir::ir as *;
 import codegen::live as lv;
+import lir::switches as sws;
 import codegen::place;
 import codegen::place as *;
 import lir::verify as lver;
@@ -963,6 +964,9 @@ extend Gen {
         }
         if rule == core::SR_CHOOSE {
             return in_vreg(t.ty) && lanes(t.ty) >= 2;
+        }
+        if rule == core::SR_REDUCE {
+            return reduce_in_reg(c, t0, t.ty);
         }
         let lt = lane_type(t0);
         if rule == core::SR_MASK {
@@ -6467,13 +6471,13 @@ extend Gen {
         }
     }
 
-    // A switch whose cases all pass constants to one block (`lv::switch_lookup`): the bound and hole tests
+    // A switch whose cases all pass constants to one block (`sws::switch_lookup`): the bound and hole tests
     // to the default, then each parameter from its column of a read-only table (x16), indexed by x17;
     // memory homes through v30. Whether it did.
     fn lookup(self: &mut Self, t: Inst, r: u32, bits: u32) bool {
         let b = self.b();
-        let mut lk = lv::Lookup::new();
-        if !lv::switch_lookup(b, t, bits, self.ptr, &mut lk) {
+        let mut lk = sws::Lookup::new();
+        if !sws::switch_lookup(b, t, bits, self.ptr, false, &mut lk) {
             return false;
         }
         let d = b.switch_edge(t, t.aux);
@@ -6532,7 +6536,7 @@ extend Gen {
         return true;
     }
 
-    // A dense switch (`lv::switch_span`) of at least TABLE_MIN cases that go elsewhere than the default: the
+    // A dense switch (`sws::switch_span`) of at least TABLE_MIN cases that go elsewhere than the default: the
     // bound test to the default, then a branch through a table of branches (`b`), one per entry: to its
     // case's block, or its moves past the table; an entry no case takes to the default's. Whether it did.
     fn jump_table(self: &mut Self, t: Inst, r: u32, bits: u32) bool {
@@ -6548,7 +6552,7 @@ extend Gen {
         }
         let mut min: u64 = 0;
         let mut span: u32 = 0;
-        if own < lv::TABLE_MIN || !lv::switch_span(b, t, bits, &mut min, &mut span) {
+        if own < sws::TABLE_MIN || !sws::switch_span(b, t, bits, &mut min, &mut span) {
             return false;
         }
         let m = if bits == 64 {
@@ -6611,7 +6615,7 @@ extend Gen {
     }
 
     // A local read-only symbol of the object holding table `lk`'s bytes.
-    fn table_sym(self: &mut Self, lk: &lv::Lookup) u32 {
+    fn table_sym(self: &mut Self, lk: &sws::Lookup) u32 {
         let o = self.obj();
         let nm = format("__sc_tab.{}", o.syms.len());
         let k = o.sym(&nm);
@@ -7393,6 +7397,19 @@ extend Gen {
         }
         return true;
     }
+}
+
+// Whether reduction `c` of a vector of type `vt` into type `ty` has a form in v registers (`Gen::reduce_reg`):
+// a vector of 8 or 16 bytes of integer lanes, the result of the lanes' width; an `and`, `or`, `xor`, a
+// sum, or a minimum or maximum of lanes below 8 bytes (of 8-byte ones, a sum of two).
+const fn reduce_in_reg(c: u8, vt: u8, ty: u8) bool {
+    let lt = lane_type(vt);
+    if !in_vreg(vt) || is_float(lt) || type_bytes(ty, 8) != type_bytes(lt, 8) {
+        return false;
+    }
+    let eb = type_bytes(lt, 8);
+    let n = type_bytes(vt, 8) / eb;
+    return c == core::SIMD_REDUCE_AND || c == core::SIMD_REDUCE_OR || c == core::SIMD_REDUCE_XOR || (c == core::SIMD_REDUCE_ADD || c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX) && !(eb == 8 && (c != core::SIMD_REDUCE_ADD || n != 2));
 }
 
 // Pair `j` of the callee-saved pairs whose lower registers are `xs` then `vs`: its access size and lower
@@ -8344,6 +8361,34 @@ extend Gen {
         } else {
             t.b
         };
+        let k = if (op == O_SHL || op == O_LSHR || op == O_ASHR) && in_vreg(t.ty) && !(nb == 8 && lt == T_I64) {
+            lv::vec_shift_amount(self.b(), t)
+        } else {
+            NONE
+        };
+        if k != NONE {
+            // Every lane by one constant: SHL, USHR or SSHR by an immediate (immh:immb the lanes' bits plus
+            // the amount, or twice them less it); by 0, a copy.
+            let bits = 8 * type_bytes(lt, 8);
+            let rx = (self.vec_use(t.a, V0 + 30) - V0) as u32;
+            let rd = (self.vec_def(i) - V0) as u32;
+            let q = a::on(nb == 16, 1u32 << 30);
+            if k == 0 {
+                if rd != rx {
+                    self.emit(a::vmov(nb == 16, rd, rx));
+                }
+            } else if op == O_SHL {
+                self.emit(0x0F005400 | q | bits + k << 16 | rx << 5 | rd);
+            } else {
+                let base: u32 = if op == O_ASHR {
+                    0x0F000400
+                } else {
+                    0x2F000400
+                };
+                self.emit(base | q | 2 * bits - k << 16 | rx << 5 | rd);
+            }
+            return true;
+        }
         if w != NONE && in_vreg(t.ty) {
             self.neon_reg(w, i, t.a, y, VNONE, nb);
             return true;
@@ -9968,15 +10013,12 @@ extend Gen {
         let eb = type_bytes(lt, 8);
         let nb = type_bytes(vt, 8);
         let n = nb / eb;
-        if !is_float(lt) && type_bytes(t.ty, 8) == eb && (c == core::SIMD_REDUCE_AND || c == core::SIMD_REDUCE_OR || c == core::SIMD_REDUCE_XOR) {
+        if !reduce_in_reg(c, vt, t.ty) {
+            return false;
+        }
+        if c == core::SIMD_REDUCE_AND || c == core::SIMD_REDUCE_OR || c == core::SIMD_REDUCE_XOR {
             self.reduce_bits(i, c, v, eb, nb);
             return true;
-        }
-        if is_float(lt) || c != core::SIMD_REDUCE_ADD && c != core::SIMD_REDUCE_MIN && c != core::SIMD_REDUCE_MAX || type_bytes(
-            t.ty,
-            8,
-        ) != eb || eb == 8 && (c != core::SIMD_REDUCE_ADD || n != 2) {
-            return false;
         }
         let s = (self.vec_use(v, V0 + 31) - V0) as u32;
         if n == 2 && eb == 8 {

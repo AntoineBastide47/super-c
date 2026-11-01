@@ -153,6 +153,9 @@ pub(package) fn object(
         return false;
     }
     let mut o = ob::Obj::new();
+    if x64 {
+        o.code_fill = 0xCC;
+    }
     let mut ga = gen::Gen::new(p, &mut o, apple, !apple);
     let mut gx = xgen::Gen::new(p, &mut o, win);
     let mut g = Backend { a: &mut ga, x: &mut gx, x64: x64 };
