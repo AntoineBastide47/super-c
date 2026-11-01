@@ -2188,7 +2188,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE_MUL;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL;
         self.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -4509,7 +4509,7 @@ extend Gen {
             }
         }
         if kc && (op == O_SHL || op == O_LSHR || op == O_ASHR) && k < bits as u64 {
-            let ra = self.reg(t.a);
+            let ra = self.reg(lv::shl_source(self.b(), &self.lv.pfold, t.a));
             let rd = self.def_step(i);
             let s = k as u32;
             if op == O_SHL {

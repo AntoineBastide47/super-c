@@ -99,6 +99,10 @@ pub(package) const FOLD_LANE: u64 = 4294967296;
 /// `FOLD_LANE_MUL`: such a splat of a lane with one use, the second operand of a product of float vectors of 8
 /// or 16 bytes, folds into it too: the product multiplies by the lane (arm64 `fmul v, v, v[k]`).
 pub(package) const FOLD_LANE_MUL: u64 = 8589934592;
+/// `FOLD_ZSHL`: a zero extension of an integer of `k` bits with one use, a left shift by a constant `s`
+/// with `k + s` at least the width, folds into it: every bit the extension clears leaves the result, so
+/// the shift reads the narrow value's register (`shl_source`). Neither may fold into anything else.
+pub(package) const FOLD_ZSHL: u64 = 17179869184;
 /// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
 /// flags keep, a folded sum or extension, the sum with the carry.
 pub(package) const CARRY_NONE: u8 = 0;
@@ -983,6 +987,25 @@ extend Live {
         // Last: its parts fold no other operand.
         if (self.fold_ops & FOLD_ADC) != 0 {
             self.carries(b);
+        }
+        if (self.fold_ops & FOLD_ZSHL) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op != O_SHL || !is_int(t.ty) || t.ty == T_I128 || self.pfold[i] || !is_inst(t.a) {
+                    continue;
+                }
+                let s = int_const(b, t.b);
+                let z = b.insts[t.a as usize];
+                if z.op != O_ZEXT || self.count[t.a as usize] != 1 || self.pfold[t.a as usize] || is_inst(z.a) && self.pfold[z.a as usize] {
+                    continue;
+                }
+                if s != u64::MAX && type_bits(b.type_of(z.a), 8) as u64 + s >= type_bits(t.ty, 8) as u64 && s < type_bits(
+                    t.ty,
+                    8,
+                ) as u64 {
+                    self.pfold[t.a as usize] = true;
+                }
+            }
         }
     }
 
@@ -3123,6 +3146,15 @@ pub(package) fn mull_ext(b: &Body, t: Inst) u8 {
         return 0;
     }
     return x.op;
+}
+
+/// The value a left shift with operand `v` shifts: the narrow value when `v` is a zero extension folded
+/// into it (`FOLD_ZSHL`), else `v`.
+pub(package) fn shl_source(b: &Body, pfold: &Vector<bool>, v: Value) Value {
+    if !is_inst(v) || !pfold[v as usize] || b.insts[v as usize].op != O_ZEXT {
+        return v;
+    }
+    return b.insts[v as usize].a;
 }
 
 /// The amount a shift with amount operand `v` takes: the operand of `v` when `v` is a mask folded into the

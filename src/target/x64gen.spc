@@ -2975,7 +2975,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | if self.avx {
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_ZSHL | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE
         } else {
             0
@@ -5383,13 +5383,14 @@ extend Gen {
             };
             let mut kk: u64 = 0;
             if self.const_of(t.b, &mut kk) && kk < bits as u64 {
-                let ra = self.reg(t.a);
+                let src = lv::shl_source(self.b(), &self.lv.pfold, t.a);
+                let ra = self.reg(src);
                 let rd = if small && op != O_SHL {
                     let r = self.def(i);
                     self.c.ext(bits / 8, 4, op == O_ASHR, r, ra);
                     r
                 } else {
-                    self.def_from(i, t.a, ra)
+                    self.def_from(i, src, ra)
                 };
                 self.c.shift_ri(sop, sz, rd, kk as u32);
                 return true;

@@ -8907,3 +8907,69 @@ int main(void) {
     assert_eq(run_native_with(lir, drv, OMIT_FP), 0);
     assert_eq(run_native(lir, drv), 0);
 }
+
+// Left shifts of zero extensions: when the shift moves every bit the extension clears out of the result,
+// it shifts the narrow value's register (`lv::FOLD_ZSHL`), whose bits above the value are not 0 (the
+// values are truncations); a shift that leaves some of them keeps the extension.
+@test
+fn shifts_of_zero_extensions_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @hi32 fn global
+sym @hi40 fn global
+sym @b24 fn global
+sym @h8 fn global
+fn @hi32
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = trunc.i32 v0
+  v2 = zext.i64 v1
+  v3 = iconst.i64 32
+  v4 = shl.i64 v2, v3
+  ret v4
+fn @hi40
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = trunc.i32 v0
+  v2 = zext.i64 v1
+  v3 = iconst.i64 40
+  v4 = shl.i64 v2, v3
+  ret v4
+fn @b24
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = trunc.i8 v0
+  v2 = zext.i32 v1
+  v3 = iconst.i32 24
+  v4 = shl.i32 v2, v3
+  ret v4
+fn @h8
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = trunc.i16 v0
+  v2 = zext.i64 v1
+  v3 = iconst.i64 8
+  v4 = shl.i64 v2, v3
+  ret v4
+)";
+    let drv = M"(#include <stdint.h>
+uint64_t hi32(uint64_t);
+uint64_t hi40(uint64_t);
+uint32_t b24(uint32_t);
+uint64_t h8(uint64_t);
+int main(void) {
+  uint64_t xs[4] = {0, 0x123456789ABCDEF0u, 0xFFFFFFFFFFFFFFFFu, 0x80000001FFFF7F80u};
+  for (int i = 0; i < 4; i++) {
+    uint64_t x = xs[i];
+    if (hi32(x) != (uint64_t)(uint32_t)x << 32) return 1;
+    if (hi40(x) != (uint64_t)(uint32_t)x << 40) return 2;
+    if (b24((uint32_t)x) != (uint32_t)(uint8_t)x << 24) return 3;
+    if (h8(x) != (uint64_t)(uint16_t)x << 8) return 4;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
