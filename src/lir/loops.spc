@@ -7474,12 +7474,16 @@ fn piv_loop(b: &mut Body, h: u32, e: u32) bool {
 }
 
 // At the end of the block begun last, with instruction `from`'s location: pointer `p`'s base plus index
-// `x` times its scale plus its bias, the index folded into the offset when a constant the offset holds.
+// `x` times its scale plus its bias, the index folded into the offset when a constant the offset holds
+// (the base itself for 0).
 fn piv_at(b: &mut Body, p: Piv, x: Value, from: u32) Value {
     if x != VNONE && (x & (VPARAM | VFLAG)) == 0 && b.insts[x as usize].op == O_ICONST {
         let k = raw_const(b, x) as i64;
         if k > -0x80000000 && k < 0x80000000 {
             let off = k * p.scale as i64 + p.bias;
+            if off == 0 {
+                return p.base;
+            }
             if off >= -0x80000000 && off <= 0x7FFFFFFF {
                 return piv_put(
                     b,

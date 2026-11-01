@@ -58,6 +58,9 @@ pub(package) struct Isa {
     /// An access may step its base register by a constant (arm64's post-indexed forms), so a loop's
     /// counted addresses become pointers it steps: `lir::ir::Package::postinc`.
     pub(package) post_index: bool,
+    /// The vector copies a vectorized loop interleaves on a core of no named tuning (LLVM's generic
+    /// `MaxInterleaveFactor`); Apple's cores take 4 (`lir::loops::Budgets.vector`).
+    pub(package) vector_copies: u32,
     /// Two accesses of adjacent bytes through one address are one instruction (arm64's `ldp`, `stp`):
     /// `lir::ir::Package::apairs`.
     pub(package) access_pairs: bool,
@@ -200,6 +203,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_ucmp: false,
         ccmp: false,
         post_index: false,
+        vector_copies: 4,
         access_pairs: false,
         pairs: true,
         half_cvt: false,
@@ -228,6 +232,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_ucmp: true,
         ccmp: true,
         post_index: true,
+        vector_copies: 2,
         access_pairs: true,
         pairs: true,
         half_cvt: true,
@@ -256,6 +261,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_ucmp: true,
         ccmp: false,
         post_index: false,
+        vector_copies: 4,
         access_pairs: false,
         pairs: false,
         half_cvt: false,
@@ -589,6 +595,7 @@ const UNKNOWN_ISA: Isa = Isa {
     vector_ucmp: true,
     ccmp: false,
     post_index: false,
+    vector_copies: 4,
     access_pairs: false,
     pairs: false,
     half_cvt: false,

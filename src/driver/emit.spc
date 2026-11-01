@@ -6304,7 +6304,7 @@ pub(package) fn cemit_package(
         let mut r = lopt::Run::new(
             pkg,
             &sealed,
-            lopt::Config { inline: inline_budget(p.opt, p.cg), loops: loop_budgets(p.opt, p.cg) },
+            lopt::Config { inline: inline_budget(p.opt, p.cg), loops: loop_budgets(p, p.opt, p.cg) },
         );
         // Each body starts once the callees it may inline are done.
         let mut g = sch::Jobs::from_edges(r.order.len(), &r.edges, replace(&mut r.order, Vector::<u32>::new()));
@@ -12650,7 +12650,7 @@ fn inline_budget(opt: i32, cg: u64) il::Budget {
 // vectors (LLVM's AArch64 maximum; 2 left a sum's accumulator latency exposed: 0.20 against 0.15 s), 1 at
 // "s"; a loop's final values take up to 512 instructions of copied iterations at every level (LLVM's
 // IndVarSimplify runs from 1).
-fn loop_budgets(opt: i32, cg: u64) lu::Budgets {
+fn loop_budgets(p: &loader::Package, opt: i32, cg: u64) lu::Budgets {
     return lu::Budgets {
         peel: if (cg & bman::CG_UNROLL) == 0 {
             0u32
@@ -12681,12 +12681,15 @@ fn loop_budgets(opt: i32, cg: u64) lu::Budgets {
         } else {
             8u32
         },
+        // Apple's cores interleave 4 copies, others the target's generic count.
         vector: if (cg & bman::CG_VECTORIZE) == 0 {
             0u32
         } else if opt == bman::OPT_S {
             1u32
-        } else {
+        } else if tgt::os(p.build_target).darwin {
             4u32
+        } else {
+            tgt::isa(p.arch).vector_copies
         },
         fin: 512,
     };
