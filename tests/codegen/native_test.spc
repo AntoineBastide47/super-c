@@ -992,7 +992,8 @@ b0(v0: i64):
 // Returned values that take the return register or a dying argument's home: a shift loop unrolled by 4
 // whose remainder loop and exit take the registers its last values leave (`home_dying` when the value
 // already took a loop parameter's register over), a bit count and a constant minus a leading zero count
-// that the return reads (`next_reg`, a constant's temporary given to the result: `take_dying`).
+// that the return reads (`next_reg`, a constant's temporary given to the result: `take_dying`), a select
+// of a sum or 0 that writes over the sum (x86-64 `select_op`).
 @test
 fn returned_values_take_their_registers_run() {
     if !cli::has_cc() {
@@ -1002,6 +1003,7 @@ fn returned_values_take_their_registers_run() {
 sym @shl fn global
 sym @pop fn global
 sym @lg2 fn global
+sym @inc_or_zero fn global
 fn @shl
   sig (i32) -> i32
 b0(v0: i32):
@@ -1041,12 +1043,25 @@ b0(v0: i32):
   v2 = iconst.i32 32
   v3 = sub.i32 v2, v1
   ret v3
+fn @inc_or_zero
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = add.i64 v1, v2
+  v4 = iconst.i64 0
+  v5 = icmp.ne v0, v4
+  v6 = select.i64 v5, v3, v4
+  ret v6
 )";
     let drv = M"(#include <stdint.h>
 uint32_t shl(uint32_t);
 int64_t pop(int64_t);
 uint32_t lg2(uint32_t);
+int64_t inc_or_zero(int64_t, int64_t);
 int main(void) {
+  for (int64_t c = -1; c < 2; c++)
+    for (int64_t x = -2; x < 3; x++)
+      if (inc_or_zero(c, x) != (c != 0 ? x + 1 : 0)) return 4;
   for (uint32_t n = 0; n < 40; n++)
     if (shl(n) != (n < 32 ? 1u << n : 0u)) return 1;
   for (int k = 0; k < 64; k++) {
@@ -1163,6 +1178,477 @@ int main(void) {
         int64_t top = w == 64 ? INT64_MAX : (int64_t)((1ull << (w - 1)) - 1);
         if (lo[0] != -top - 1 || lo[1] != -1 || hi[0] != top || hi[1] != 0) return 2;
       }
+    }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Comparisons of 8- and 16-bit truncations of wider values, under every condition, against each other and
+// a constant, into a value, a branch and a conditional comparison: each reads the low bits in the source's
+// register (`lv::FOLD_TRUNC`).
+@test
+fn comparisons_of_truncations_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @c8 fn global
+sym @z8 fn global
+sym @j8 fn global
+sym @c16 fn global
+sym @z16 fn global
+sym @j16 fn global
+fn @c8
+  sig (i64, i32) -> i64
+b0(v0: i64, v1: i32):
+  v2 = trunc.i8 v0
+  v3 = trunc.i8 v1
+  v4 = iconst.i8 5
+  v5 = iconst.i64 0
+  v6 = icmp.eq v2, v3
+  v7 = zext.i64 v6
+  v8 = iconst.i64 0
+  v9 = shl.i64 v7, v8
+  v10 = or.i64 v5, v9
+  v11 = icmp.eq v2, v4
+  v12 = zext.i64 v11
+  v13 = iconst.i64 1
+  v14 = shl.i64 v12, v13
+  v15 = or.i64 v10, v14
+  v16 = icmp.ne v2, v3
+  v17 = zext.i64 v16
+  v18 = iconst.i64 2
+  v19 = shl.i64 v17, v18
+  v20 = or.i64 v15, v19
+  v21 = icmp.ne v2, v4
+  v22 = zext.i64 v21
+  v23 = iconst.i64 3
+  v24 = shl.i64 v22, v23
+  v25 = or.i64 v20, v24
+  v26 = icmp.slt v2, v3
+  v27 = zext.i64 v26
+  v28 = iconst.i64 4
+  v29 = shl.i64 v27, v28
+  v30 = or.i64 v25, v29
+  v31 = icmp.slt v2, v4
+  v32 = zext.i64 v31
+  v33 = iconst.i64 5
+  v34 = shl.i64 v32, v33
+  v35 = or.i64 v30, v34
+  v36 = icmp.sle v2, v3
+  v37 = zext.i64 v36
+  v38 = iconst.i64 6
+  v39 = shl.i64 v37, v38
+  v40 = or.i64 v35, v39
+  v41 = icmp.sle v2, v4
+  v42 = zext.i64 v41
+  v43 = iconst.i64 7
+  v44 = shl.i64 v42, v43
+  v45 = or.i64 v40, v44
+  v46 = icmp.sgt v2, v3
+  v47 = zext.i64 v46
+  v48 = iconst.i64 8
+  v49 = shl.i64 v47, v48
+  v50 = or.i64 v45, v49
+  v51 = icmp.sgt v2, v4
+  v52 = zext.i64 v51
+  v53 = iconst.i64 9
+  v54 = shl.i64 v52, v53
+  v55 = or.i64 v50, v54
+  v56 = icmp.sge v2, v3
+  v57 = zext.i64 v56
+  v58 = iconst.i64 10
+  v59 = shl.i64 v57, v58
+  v60 = or.i64 v55, v59
+  v61 = icmp.sge v2, v4
+  v62 = zext.i64 v61
+  v63 = iconst.i64 11
+  v64 = shl.i64 v62, v63
+  v65 = or.i64 v60, v64
+  v66 = icmp.ult v2, v3
+  v67 = zext.i64 v66
+  v68 = iconst.i64 12
+  v69 = shl.i64 v67, v68
+  v70 = or.i64 v65, v69
+  v71 = icmp.ult v2, v4
+  v72 = zext.i64 v71
+  v73 = iconst.i64 13
+  v74 = shl.i64 v72, v73
+  v75 = or.i64 v70, v74
+  v76 = icmp.ule v2, v3
+  v77 = zext.i64 v76
+  v78 = iconst.i64 14
+  v79 = shl.i64 v77, v78
+  v80 = or.i64 v75, v79
+  v81 = icmp.ule v2, v4
+  v82 = zext.i64 v81
+  v83 = iconst.i64 15
+  v84 = shl.i64 v82, v83
+  v85 = or.i64 v80, v84
+  v86 = icmp.ugt v2, v3
+  v87 = zext.i64 v86
+  v88 = iconst.i64 16
+  v89 = shl.i64 v87, v88
+  v90 = or.i64 v85, v89
+  v91 = icmp.ugt v2, v4
+  v92 = zext.i64 v91
+  v93 = iconst.i64 17
+  v94 = shl.i64 v92, v93
+  v95 = or.i64 v90, v94
+  v96 = icmp.uge v2, v3
+  v97 = zext.i64 v96
+  v98 = iconst.i64 18
+  v99 = shl.i64 v97, v98
+  v100 = or.i64 v95, v99
+  v101 = icmp.uge v2, v4
+  v102 = zext.i64 v101
+  v103 = iconst.i64 19
+  v104 = shl.i64 v102, v103
+  v105 = or.i64 v100, v104
+  ret v105
+fn @z8
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = trunc.i8 v0
+  v2 = iconst.i8 0
+  v3 = icmp.eq v1, v2
+  br v3, b1, b2
+b1:
+  v4 = iconst.i32 7
+  ret v4
+b2:
+  v5 = iconst.i32 9
+  ret v5
+fn @j8
+  sig (i64, i64) -> i32
+b0(v0: i64, v1: i64):
+  v2 = trunc.i8 v0
+  v3 = trunc.i8 v1
+  v4 = iconst.i8 3
+  v5 = iconst.i8 0
+  v6 = icmp.slt v2, v4
+  v7 = icmp.ne v3, v5
+  v8 = and.i8 v6, v7
+  v9 = iconst.i32 11
+  v10 = iconst.i32 13
+  v11 = select.i32 v8, v9, v10
+  ret v11
+fn @c16
+  sig (i64, i32) -> i64
+b0(v0: i64, v1: i32):
+  v2 = trunc.i16 v0
+  v3 = trunc.i16 v1
+  v4 = iconst.i16 5
+  v5 = iconst.i64 0
+  v6 = icmp.eq v2, v3
+  v7 = zext.i64 v6
+  v8 = iconst.i64 0
+  v9 = shl.i64 v7, v8
+  v10 = or.i64 v5, v9
+  v11 = icmp.eq v2, v4
+  v12 = zext.i64 v11
+  v13 = iconst.i64 1
+  v14 = shl.i64 v12, v13
+  v15 = or.i64 v10, v14
+  v16 = icmp.ne v2, v3
+  v17 = zext.i64 v16
+  v18 = iconst.i64 2
+  v19 = shl.i64 v17, v18
+  v20 = or.i64 v15, v19
+  v21 = icmp.ne v2, v4
+  v22 = zext.i64 v21
+  v23 = iconst.i64 3
+  v24 = shl.i64 v22, v23
+  v25 = or.i64 v20, v24
+  v26 = icmp.slt v2, v3
+  v27 = zext.i64 v26
+  v28 = iconst.i64 4
+  v29 = shl.i64 v27, v28
+  v30 = or.i64 v25, v29
+  v31 = icmp.slt v2, v4
+  v32 = zext.i64 v31
+  v33 = iconst.i64 5
+  v34 = shl.i64 v32, v33
+  v35 = or.i64 v30, v34
+  v36 = icmp.sle v2, v3
+  v37 = zext.i64 v36
+  v38 = iconst.i64 6
+  v39 = shl.i64 v37, v38
+  v40 = or.i64 v35, v39
+  v41 = icmp.sle v2, v4
+  v42 = zext.i64 v41
+  v43 = iconst.i64 7
+  v44 = shl.i64 v42, v43
+  v45 = or.i64 v40, v44
+  v46 = icmp.sgt v2, v3
+  v47 = zext.i64 v46
+  v48 = iconst.i64 8
+  v49 = shl.i64 v47, v48
+  v50 = or.i64 v45, v49
+  v51 = icmp.sgt v2, v4
+  v52 = zext.i64 v51
+  v53 = iconst.i64 9
+  v54 = shl.i64 v52, v53
+  v55 = or.i64 v50, v54
+  v56 = icmp.sge v2, v3
+  v57 = zext.i64 v56
+  v58 = iconst.i64 10
+  v59 = shl.i64 v57, v58
+  v60 = or.i64 v55, v59
+  v61 = icmp.sge v2, v4
+  v62 = zext.i64 v61
+  v63 = iconst.i64 11
+  v64 = shl.i64 v62, v63
+  v65 = or.i64 v60, v64
+  v66 = icmp.ult v2, v3
+  v67 = zext.i64 v66
+  v68 = iconst.i64 12
+  v69 = shl.i64 v67, v68
+  v70 = or.i64 v65, v69
+  v71 = icmp.ult v2, v4
+  v72 = zext.i64 v71
+  v73 = iconst.i64 13
+  v74 = shl.i64 v72, v73
+  v75 = or.i64 v70, v74
+  v76 = icmp.ule v2, v3
+  v77 = zext.i64 v76
+  v78 = iconst.i64 14
+  v79 = shl.i64 v77, v78
+  v80 = or.i64 v75, v79
+  v81 = icmp.ule v2, v4
+  v82 = zext.i64 v81
+  v83 = iconst.i64 15
+  v84 = shl.i64 v82, v83
+  v85 = or.i64 v80, v84
+  v86 = icmp.ugt v2, v3
+  v87 = zext.i64 v86
+  v88 = iconst.i64 16
+  v89 = shl.i64 v87, v88
+  v90 = or.i64 v85, v89
+  v91 = icmp.ugt v2, v4
+  v92 = zext.i64 v91
+  v93 = iconst.i64 17
+  v94 = shl.i64 v92, v93
+  v95 = or.i64 v90, v94
+  v96 = icmp.uge v2, v3
+  v97 = zext.i64 v96
+  v98 = iconst.i64 18
+  v99 = shl.i64 v97, v98
+  v100 = or.i64 v95, v99
+  v101 = icmp.uge v2, v4
+  v102 = zext.i64 v101
+  v103 = iconst.i64 19
+  v104 = shl.i64 v102, v103
+  v105 = or.i64 v100, v104
+  ret v105
+fn @z16
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = trunc.i16 v0
+  v2 = iconst.i16 0
+  v3 = icmp.eq v1, v2
+  br v3, b1, b2
+b1:
+  v4 = iconst.i32 7
+  ret v4
+b2:
+  v5 = iconst.i32 9
+  ret v5
+fn @j16
+  sig (i64, i64) -> i32
+b0(v0: i64, v1: i64):
+  v2 = trunc.i16 v0
+  v3 = trunc.i16 v1
+  v4 = iconst.i16 3
+  v5 = iconst.i16 0
+  v6 = icmp.slt v2, v4
+  v7 = icmp.ne v3, v5
+  v8 = and.i8 v6, v7
+  v9 = iconst.i32 11
+  v10 = iconst.i32 13
+  v11 = select.i32 v8, v9, v10
+  ret v11
+)";
+    let drv = M"(#include <stdint.h>
+int64_t c8(int64_t, int32_t);
+int32_t z8(int32_t);
+int32_t j8(int64_t, int64_t);
+int64_t c16(int64_t, int32_t);
+int32_t z16(int32_t);
+int32_t j16(int64_t, int64_t);
+static int64_t want8(int64_t x, int32_t y) {
+  int8_t sa = (int8_t)x, sb = (int8_t)y, sk = 5;
+  uint8_t ua = (uint8_t)x, ub = (uint8_t)y, uk = 5;
+  int64_t r = 0; int bit = 0;
+  r |= (int64_t)(ua == ub) << bit++;
+  r |= (int64_t)(ua == uk) << bit++;
+  r |= (int64_t)(ua != ub) << bit++;
+  r |= (int64_t)(ua != uk) << bit++;
+  r |= (int64_t)(sa < sb) << bit++;
+  r |= (int64_t)(sa < sk) << bit++;
+  r |= (int64_t)(sa <= sb) << bit++;
+  r |= (int64_t)(sa <= sk) << bit++;
+  r |= (int64_t)(sa > sb) << bit++;
+  r |= (int64_t)(sa > sk) << bit++;
+  r |= (int64_t)(sa >= sb) << bit++;
+  r |= (int64_t)(sa >= sk) << bit++;
+  r |= (int64_t)(ua < ub) << bit++;
+  r |= (int64_t)(ua < uk) << bit++;
+  r |= (int64_t)(ua <= ub) << bit++;
+  r |= (int64_t)(ua <= uk) << bit++;
+  r |= (int64_t)(ua > ub) << bit++;
+  r |= (int64_t)(ua > uk) << bit++;
+  r |= (int64_t)(ua >= ub) << bit++;
+  r |= (int64_t)(ua >= uk) << bit++;
+  return r;
+}
+static int64_t want16(int64_t x, int32_t y) {
+  int16_t sa = (int16_t)x, sb = (int16_t)y, sk = 5;
+  uint16_t ua = (uint16_t)x, ub = (uint16_t)y, uk = 5;
+  int64_t r = 0; int bit = 0;
+  r |= (int64_t)(ua == ub) << bit++;
+  r |= (int64_t)(ua == uk) << bit++;
+  r |= (int64_t)(ua != ub) << bit++;
+  r |= (int64_t)(ua != uk) << bit++;
+  r |= (int64_t)(sa < sb) << bit++;
+  r |= (int64_t)(sa < sk) << bit++;
+  r |= (int64_t)(sa <= sb) << bit++;
+  r |= (int64_t)(sa <= sk) << bit++;
+  r |= (int64_t)(sa > sb) << bit++;
+  r |= (int64_t)(sa > sk) << bit++;
+  r |= (int64_t)(sa >= sb) << bit++;
+  r |= (int64_t)(sa >= sk) << bit++;
+  r |= (int64_t)(ua < ub) << bit++;
+  r |= (int64_t)(ua < uk) << bit++;
+  r |= (int64_t)(ua <= ub) << bit++;
+  r |= (int64_t)(ua <= uk) << bit++;
+  r |= (int64_t)(ua > ub) << bit++;
+  r |= (int64_t)(ua > uk) << bit++;
+  r |= (int64_t)(ua >= ub) << bit++;
+  r |= (int64_t)(ua >= uk) << bit++;
+  return r;
+}
+int main(void) {
+  static const int64_t xs[] = {0, 1, 5, 6, -1, -5, 127, 128, 255, 256, 0x7FFF, 0x8000, 0xFFFF, 0x10005, -0x10000, 0x123456789ABCDEF0};
+  for (int i = 0; i < 16; i++)
+    for (int j = 0; j < 16; j++) {
+      int64_t x = xs[i], y = xs[j];
+      if (c8(x, (int32_t)y) != want8(x, (int32_t)y)) return 8;
+      if (z8((int32_t)x) != ((int8_t)x == 0 ? 7 : 9)) return 9;
+      if (j8(x, y) != ((int8_t)x < 3 && (int8_t)y != 0 ? 11 : 13)) return 10;
+      if (c16(x, (int32_t)y) != want16(x, (int32_t)y)) return 16;
+      if (z16((int32_t)x) != ((int16_t)x == 0 ? 7 : 9)) return 17;
+      if (j16(x, y) != ((int16_t)x < 3 && (int16_t)y != 0 ? 11 : 13)) return 18;
+    }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Sums and differences of two-word values: the high words with the low words' carry or borrow (`addo`,
+// `subo` and the extension of their flag), 64 and 32 bits, either operand order, a constant high word, and
+// a comparison between, which sets the flags, so that sum does not fold (`lv::FOLD_ADC`: `adc`, `sbc`,
+// x86-64 `sbb`).
+@test
+fn sums_with_a_carry_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @add64 fn global
+sym @sub64 fn global
+sym @add32 fn global
+sym @addk fn global
+sym @mixed fn global
+fn @add64
+  sig (ptr, i64, i64, i64, i64) -> void
+b0(v0: ptr, v1: i64, v2: i64, v3: i64, v4: i64):
+  v5, v6 = addo.u.i64 v1, v3
+  v7, v8 = addo.u.i64 v2, v4
+  v9 = zext.i64 v6
+  v10, v11 = addo.u.i64 v9, v7
+  store v5, v0 align 3
+  store v10, v0+8 align 3
+  ret
+fn @sub64
+  sig (ptr, i64, i64, i64, i64) -> void
+b0(v0: ptr, v1: i64, v2: i64, v3: i64, v4: i64):
+  v5, v6 = subo.u.i64 v1, v3
+  v7 = sub.i64 v2, v4
+  v8 = zext.i64 v6
+  v9 = sub.i64 v7, v8
+  store v5, v0 align 3
+  store v9, v0+8 align 3
+  ret
+fn @add32
+  sig (ptr, i32, i32, i32, i32) -> void
+b0(v0: ptr, v1: i32, v2: i32, v3: i32, v4: i32):
+  v5, v6 = addo.u.i32 v1, v3
+  v7 = zext.i32 v6
+  v8 = add.i32 v2, v4
+  v9 = add.i32 v8, v7
+  store v5, v0 align 2
+  store v9, v0+4 align 2
+  ret
+fn @addk
+  sig (ptr, i64, i64, i64) -> void
+b0(v0: ptr, v1: i64, v2: i64, v3: i64):
+  v4 = iconst.i64 0
+  v5, v6 = addo.u.i64 v1, v3
+  v7 = add.i64 v2, v4
+  v8 = zext.i64 v6
+  v9 = add.i64 v7, v8
+  store v5, v0 align 3
+  store v9, v0+8 align 3
+  ret
+fn @mixed
+  sig (ptr, i64, i64, i64, i64) -> void
+b0(v0: ptr, v1: i64, v2: i64, v3: i64, v4: i64):
+  v5, v6 = addo.u.i64 v1, v3
+  v7 = icmp.ult v2, v4
+  v8 = add.i64 v2, v4
+  v9 = zext.i64 v6
+  v10 = add.i64 v8, v9
+  v11 = zext.i64 v7
+  store v5, v0 align 3
+  store v10, v0+8 align 3
+  store v11, v0+16 align 3
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+void add64(uint64_t *, uint64_t, uint64_t, uint64_t, uint64_t);
+void sub64(uint64_t *, uint64_t, uint64_t, uint64_t, uint64_t);
+void add32(uint32_t *, uint32_t, uint32_t, uint32_t, uint32_t);
+void addk(uint64_t *, uint64_t, uint64_t, uint64_t);
+void mixed(uint64_t *, uint64_t, uint64_t, uint64_t, uint64_t);
+int main(void) {
+  static const uint64_t xs[] = {0, 1, 2, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x100000000ull, 0x7FFFFFFFFFFFFFFFull, 0x8000000000000000ull, 0xFFFFFFFFFFFFFFFEull, 0xFFFFFFFFFFFFFFFFull, 0x123456789ABCDEFull};
+  for (int i = 0; i < 12; i++)
+    for (int j = 0; j < 12; j++) {
+      uint64_t x = xs[i], y = xs[j], h1 = xs[(i + 3) % 12], h2 = xs[(j + 5) % 12];
+      unsigned __int128 a = (unsigned __int128)h1 << 64 | x, b = (unsigned __int128)h2 << 64 | y;
+      uint64_t r[3];
+      add64(r, x, h1, y, h2);
+      unsigned __int128 s = a + b;
+      if (r[0] != (uint64_t)s || r[1] != (uint64_t)(s >> 64)) return 1;
+      sub64(r, x, h1, y, h2);
+      unsigned __int128 d = a - b;
+      if (r[0] != (uint64_t)d || r[1] != (uint64_t)(d >> 64)) return 2;
+      uint32_t q[2];
+      add32(q, (uint32_t)x, (uint32_t)h1, (uint32_t)y, (uint32_t)h2);
+      uint64_t s32 = ((uint64_t)(uint32_t)h1 << 32 | (uint32_t)x) + ((uint64_t)(uint32_t)h2 << 32 | (uint32_t)y);
+      if (q[0] != (uint32_t)s32 || q[1] != (uint32_t)(s32 >> 32)) return 3;
+      addk(r, x, h1, y);
+      unsigned __int128 sk = a + y;
+      if (r[0] != (uint64_t)sk || r[1] != (uint64_t)(sk >> 64)) return 4;
+      mixed(r, x, h1, y, h2);
+      uint64_t lo = x + y, hi = h1 + h2 + (lo < x);
+      if (r[0] != lo || r[1] != hi || r[2] != (h1 < h2)) return 5;
     }
   return 0;
 }

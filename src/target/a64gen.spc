@@ -496,12 +496,52 @@ extend Gen {
         return r2;
     }
 
+    // The register of the result part that the run of result stores before the `ret` of value `v`'s block
+    // moves `v` into (`rstore`), when that store is `v`'s only use: `v` is there for it. NOREG else.
+    fn ret_part(self: &Self, v: Value) u8 {
+        if (v & (VPARAM | VFLAG)) != 0 || self.rstore.len() == 0 || self.lv.uses[v as usize] != 1 {
+            return NOREG;
+        }
+        let b = self.b();
+        let bk = b.blocks[self.lv.def_blk[v as usize] as usize];
+        let end = bk.start + bk.len - 1;
+        if b.insts[end as usize].op != O_RET {
+            return NOREG;
+        }
+        // The run, back from the `ret`: at most the block's instructions.
+        let mut j = end;
+        while j > v + 1 && self.rstore[j as usize - 1] != 0 {
+            j -= 1;
+            if b.insts[j as usize].b == v {
+                let pa = self.self_lay.parts[(self.self_lay.ret.p0 + self.rstore[j as usize] - 1) as usize];
+                return pa.reg + if pa.v {
+                    V0
+                } else {
+                    0
+                };
+            }
+        }
+        return NOREG;
+    }
+
     // The register the instruction after instruction `v` in its block takes `v` in, when that is `v`'s
-    // only use: a call's scalar register argument, or the result; so `v` is there for it. NOREG when not,
-    // or when a value or the current instruction holds that register (but one in `free`).
+    // only use: a call's scalar register argument, or the result; or the result part a store before the
+    // return moves it into (`ret_part`); so `v` is there for it. NOREG when not, or when a value or the
+    // current instruction holds that register (but one in `free`).
     fn next_reg(self: &mut Self, v: Value, free: u64) u8 {
         if (v & (VPARAM | VFLAG)) != 0 {
             return NOREG;
+        }
+        // A result part the return takes it in.
+        let rp = self.ret_part(v);
+        if rp != NOREG {
+            return if ((self.held | self.lock | self.fixed_busy | self.tmps) & ~free & bit(rp)) == 0 && ((XALLOC | valloc()) & bit(
+                rp,
+            )) != 0 {
+                rp
+            } else {
+                NOREG
+            };
         }
         let b = self.b();
         let bk = b.blocks[self.lv.def_blk[v as usize] as usize];
@@ -2081,7 +2121,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_ADC;
         self.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -3255,6 +3295,14 @@ extend Gen {
             self.half_conv(i, t);
             return true;
         }
+        // A sum with a carry (`lv::FOLD_ADC`): its folded sum computes nothing; it adds with the carry.
+        if self.lv.carry[i as usize] == lv::CARRY_PART {
+            return true;
+        }
+        if self.lv.carry[i as usize] == lv::CARRY_ADC {
+            self.adc(i, t);
+            return true;
+        }
         if op >= O_ADD && op <= O_NOT {
             let done = self.int_op(i, t);
             // A 32-bit operation (a `w` register's) clears the bits above.
@@ -3527,9 +3575,10 @@ extend Gen {
 
     // Value `v` (an integer of `bits` bits, 8 or 16) in a register extended to 32 bits.
     fn ext(self: &mut Self, v: Value, signed: bool, bits: u32) u8 {
-        let r = self.reg(v);
+        let s = self.narrow_src(v);
+        let r = self.reg(s);
         let x = self.vx(v);
-        if !signed && self.va[x as usize].clean {
+        if s == v && !signed && self.va[x as usize].clean {
             return r;
         }
         let d = self.tmp(false);
@@ -3539,6 +3588,15 @@ extend Gen {
             self.emit(a::uxt(d, r, bits));
         }
         return d;
+    }
+
+    // The value whose low bits value `v` is: the source of a folded truncation (`lv::FOLD_TRUNC`), else `v`.
+    const fn narrow_src(self: &Self, v: Value) Value {
+        return if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && self.lv.pfold[v as usize] && self.b().insts[v as usize].op == O_TRUNC {
+            self.b().insts[v as usize].a
+        } else {
+            v
+        };
     }
 
     // Whether the next instruction of the block reads value `x` (its only use) as a condition: a `br` or
@@ -3620,7 +3678,7 @@ extend Gen {
         // A `tst` (a comparison of a folded `and`) compares first: no conditional comparison tests bits.
         let b_tst = (t.b & (VPARAM | VFLAG)) == 0 && {
             let x = self.b().insts[t.b as usize];
-            (x.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[x.a as usize]
+            (x.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[x.a as usize] && self.b().insts[x.a as usize].op == O_AND
         };
         let (first, leaf) = if b_leaf && !b_tst {
             (t.a, t.b)
@@ -3700,7 +3758,7 @@ extend Gen {
         let c = t.aux;
         let ty = self.vt(t.a);
         let bits = type_bits(ty, self.ptr);
-        if (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] {
+        if (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] && self.b().insts[t.a as usize].op == O_AND {
             let n = self.b().insts[t.a as usize];
             let ra = self.reg(n.a);
             let mut m: u64 = 0;
@@ -3723,7 +3781,7 @@ extend Gen {
         let mut k: u64 = 0;
         // A narrow value's equality with 0 tests its low bits (`tst`), with no extension.
         if small && (c == C_EQ || c == C_NE) && self.const_of(t.b, &mut k) && (k & (1u64 << bits as u64) - 1) == 0 {
-            let r = self.reg(t.a);
+            let r = self.reg(self.narrow_src(t.a));
             self.emit_cmp(a::logic_imm(false, 3, a::ZR, r, a::logical_imm((1u64 << bits as u64) - 1, false)));
             return icond(c);
         }
@@ -4490,7 +4548,7 @@ extend Gen {
             } else {
                 self.reg(t.b) as u32
             };
-            let rd = self.def(i) as u32;
+            let rd = self.def_step(i) as u32;
             if op == O_ADDO || op == O_SUBO {
                 let sub = op == O_SUBO;
                 if imm {
@@ -4522,10 +4580,13 @@ extend Gen {
                 self.emit(a::cmp_imm(true, a::IP0, 0));
             }
         }
-        // The flag: for the branch right after, or set into its own register.
+        // The flag: kept for the sum with it (`lv::FOLD_ADC`), for the branch right after, or set into its own
+        // register.
         if let Some(fx) = self.lv.flag_of.get(&i) {
             let f = *fx;
-            if self.fusable(i, VFLAG | i) {
+            if self.lv.carry[i as usize] == lv::CARRY_LO {
+                // The flags hold it.
+            } else if self.fusable(i, VFLAG | i) {
                 self.cond = Cond { inst: f, cc: cc, cc2: NONE };
             } else if self.lv.uses[f as usize] != 0 {
                 let r = self.alloc(false);
@@ -4535,6 +4596,23 @@ extend Gen {
             }
         }
         return true;
+    }
+
+    // Sum or difference `i` (`t`) with the carry or borrow of the `addo` or `subo` before it, which the
+    // flags hold (`lv::FOLD_ADC`): `adc` or `sbc` of its folded sum's or difference's operands.
+    fn adc(self: &mut Self, i: u32, t: Inst) {
+        let b = self.b();
+        let sub = t.op == O_SUB || t.op == O_SUBO;
+        let h = if (t.a & (VPARAM | VFLAG)) == 0 && self.lv.carry[t.a as usize] == lv::CARRY_PART && b.insts[t.a as usize].op != O_ZEXT {
+            t.a
+        } else {
+            t.b
+        };
+        let s = b.insts[h as usize];
+        let ra = self.reg_or_zr(s.a, t.ty) as u32;
+        let rb = self.reg_or_zr(s.b, t.ty) as u32;
+        let rd = self.def_step(i) as u32;
+        self.emit(a::adc(type_bits(t.ty, self.ptr) == 64, sub as u32, false, rd, ra, rb));
     }
 
     fn convert(self: &mut Self, i: u32, t: Inst) bool {
@@ -6790,7 +6868,7 @@ extend Gen {
         }
         let bits = type_bits(self.vt(t.a), self.ptr);
         let eq = t.aux == C_EQ;
-        if (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] {
+        if (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] && self.b().insts[t.a as usize].op != O_TRUNC {
             let n = self.b().insts[t.a as usize];
             if n.op != O_AND {
                 return none;

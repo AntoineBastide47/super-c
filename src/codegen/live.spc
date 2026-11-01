@@ -82,6 +82,21 @@ pub(package) const FOLD_BRCONJ: u32 = 268435456;
 /// low or high half zero-extended to lanes twice as wide), each with one use, that a vector sum of the
 /// wide lanes adds: the sum widens and adds (arm64 `uaddw`, `uaddw2`).
 pub(package) const FOLD_VWADD: u32 = 536870912;
+/// `FOLD_TRUNC`: a truncation of an integer to 8 or 16 bits that only integer comparisons read folds into
+/// each: they extend or test its low bits in the source's register (arm64 `tst`, `uxtb`, `sxth`).
+pub(package) const FOLD_TRUNC: u32 = 1073741824;
+/// `FOLD_ADC`: the sum `h + zext(c)` (or difference `h - zext(c)`) of a sum (difference) `h` of two values
+/// and the carry (borrow) `c` of an unsigned `addo` (`subo`) of the same width, 32 or 64 bits, with only
+/// `h` and the extension between them, each of one use and no flag read: `h` and the extension fold into
+/// it, the `addo` keeps its carry in the flags, and it adds with it (`adc`, arm64 `sbc` / x86-64 `sbb`).
+/// `Live::carry` marks the three parts.
+pub(package) const FOLD_ADC: u32 = 2147483648;
+/// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
+/// flags keep, a folded sum or extension, the sum with the carry.
+pub(package) const CARRY_NONE: u8 = 0;
+pub(package) const CARRY_LO: u8 = 1;
+pub(package) const CARRY_PART: u8 = 2;
+pub(package) const CARRY_ADC: u8 = 3;
 // `lane_mask` follows this many `and`, `or` and `xor` operations.
 pub(package) const MASK_DEPTH: u32 = 8;
 // `Live::ldop_user` looks this many instructions past a load for its use.
@@ -167,6 +182,7 @@ pub(package) struct Live {
     pub(package) fold_max: u32,
     pub(package) fold: Vector<bool>,
     pub(package) pfold: Vector<bool>,
+    pub(package) carry: Vector<u8>, // per instruction, its CARRY_* part of a `FOLD_ADC` sum
     /// Per instruction, the comparisons of the `and` or `or` of flags it is when `FOLD_CCMP` folds them into
     /// conditional comparisons (`folds`), else 0.
     pub(package) conj: Vector<u8>,
@@ -231,6 +247,7 @@ extend Live {
             fold_max: 0,
             fold: Vector::<bool>::new(),
             pfold: Vector::<bool>::new(),
+            carry: Vector::<u8>::new(),
             conj: Vector::<u8>::new(),
             relay: Vector::<u32>::new(),
             relayed: Vector::<u64>::new(),
@@ -423,6 +440,7 @@ extend Live {
         self.pfold.truncate(0);
         self.pfold.resize_default(ni);
         fill(&mut self.conj, ni, 0);
+        fill(&mut self.carry, ni, CARRY_NONE);
         if self.fold_max == 0 && self.fold_ops == 0 {
             return;
         }
@@ -815,6 +833,30 @@ extend Live {
                 }
             }
         }
+        // `FOLD_TRUNC`: a narrow truncation of a value that folds nothing, read by comparisons alone.
+        if (self.fold_ops & FOLD_TRUNC) != 0 {
+            fill(&mut self.cnd, ni, 0);
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op != O_ICMP {
+                    continue;
+                }
+                for s in [t.a, t.b] {
+                    if is_inst(s) && b.insts[s as usize].op == O_TRUNC {
+                        self.cnd[s as usize] += 1;
+                    }
+                }
+            }
+            for i in 0..ni {
+                let t = b.insts[i];
+                let bits = type_bits(t.ty, 8);
+                if t.op == O_TRUNC && (bits == 8 || bits == 16) && (t.a & VFLAG) == 0 && is_int(b.type_of(t.a)) && b.type_of(
+                    t.a,
+                ) != T_I128 && self.count[i] != 0 && self.cnd[i] == self.count[i] && !self.pfold[i] && !(is_inst(t.a) && self.pfold[t.a as usize]) {
+                    self.pfold[i] = true;
+                }
+            }
+        }
         // `FOLD_XBFX`: a left shift by a constant whose one use is a right shift of 32 or 64 bits by at least
         // as much folds into it: a field extracted, sign- or zero-extended (arm64 `sbfx`, `ubfx`).
         if (self.fold_ops & FOLD_XBFX) != 0 {
@@ -894,6 +936,10 @@ extend Live {
                     self.pfold[i] = true;
                 }
             }
+        }
+        // Last: its parts fold no other operand.
+        if (self.fold_ops & FOLD_ADC) != 0 {
+            self.carries(b);
         }
     }
 
@@ -2054,6 +2100,90 @@ extend Live {
             return HOME_CALLEE;
         }
         return HOME_NONE;
+    }
+
+    // `FOLD_ADC`: each sum or difference with a carry or borrow (`carry_of`), its parts marked (`carry`).
+    fn carries(self: &mut Self, b: &Body) {
+        let ni = b.insts.len();
+        // The uses of each instruction's flag.
+        fill(&mut self.cnd, ni, 0);
+        for i in 0..ni {
+            each_use(b, b.insts[i], &mut self.succ);
+            for u in 0..self.succ.len() {
+                let v = self.succ[u];
+                if (v & (VPARAM | VFLAG)) == VFLAG {
+                    self.cnd[(v & ~VFLAG) as usize] += 1;
+                }
+            }
+        }
+        for i in 0..ni as u32 {
+            let t = b.insts[i as usize];
+            let sub = t.op == O_SUB || t.op == O_SUBO;
+            if !self.wrapping(b, i, sub) {
+                continue;
+            }
+            for side in 0..2u32 {
+                // A difference's borrow is its second operand.
+                if sub && side == 0 {
+                    continue;
+                }
+                let (z, h) = if side == 0 {
+                    (t.a, t.b)
+                } else {
+                    (t.b, t.a)
+                };
+                if !is_inst(z) || !is_inst(h) || self.count[z as usize] != 1 || self.count[h as usize] != 1 || self.pfold[z as usize] || self.pfold[h as usize] || !self.wrapping(
+                    b,
+                    h,
+                    sub,
+                ) {
+                    continue;
+                }
+                let zt = b.insts[z as usize];
+                if zt.op != O_ZEXT || zt.ty != t.ty || (zt.a & (VPARAM | VFLAG)) != VFLAG {
+                    continue;
+                }
+                let lo = zt.a & ~VFLAG;
+                let lt = b.insts[lo as usize];
+                let ht = b.insts[h as usize];
+                if lt.op != if sub {
+                    O_SUBO
+                } else {
+                    O_ADDO
+                } || lt.aux == OV_SIGNED || lt.ty != t.ty || self.cnd[lo as usize] != 1 || self.pfold[lo as usize] || is_inst(
+                    ht.a,
+                ) && self.pfold[ht.a as usize] || is_inst(ht.b) && self.pfold[ht.b as usize] {
+                    continue;
+                }
+                // Only `h` and the extension between the `addo` and the sum: no code between sets the flags.
+                let mut ok = lo < z && lo < h && z < i && h < i;
+                for j in lo + 1..i {
+                    ok = ok && (j == z || j == h);
+                }
+                if ok {
+                    self.pfold[z as usize] = true;
+                    self.pfold[h as usize] = true;
+                    self.carry[lo as usize] = CARRY_LO;
+                    self.carry[z as usize] = CARRY_PART;
+                    self.carry[h as usize] = CARRY_PART;
+                    self.carry[i as usize] = CARRY_ADC;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Whether instruction `i` of `b` is a sum (`sub`: difference) of two integers of 32 or 64 bits that
+    // wraps: `add`, or `addo` whose flag nothing reads (`cnd`).
+    fn wrapping(self: &Self, b: &Body, i: u32, sub: bool) bool {
+        let t = b.insts[i as usize];
+        let bits = type_bits(t.ty, 8);
+        let (plain, ovf) = if sub {
+            (O_SUB, O_SUBO)
+        } else {
+            (O_ADD, O_ADDO)
+        };
+        return (t.op == plain || t.op == ovf && self.cnd[i as usize] == 0) && is_int(t.ty) && (bits == 32 || bits == 64);
     }
 
     // The header parameter of a loop that parameter value `x` of `b`, of a block laid out after the loop,
