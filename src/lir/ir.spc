@@ -1364,6 +1364,8 @@ pub(package) struct Package {
     /// The bytes of a vector the native backend computes in one register (`target::table::Isa`), 0 for
     /// none: the loop vectorizer's vectors (`lir::loops`).
     pub(package) vector: u32,
+    /// The vectors a vectorized loop interleaves at most (`target::table::Isa::vector_copies`).
+    pub(package) vcopies: u32,
     /// How the native backend converts vectors and shifts their lanes (`target::table::Isa`): 0 lane by
     /// lane, VOPS_SOME or VOPS_ALL in registers. With either the loop vectorizer mixes lane widths up to a
     /// factor of two and shifts; its cost model counts the lane by lane forms of VOPS_SOME. With either the
@@ -1491,6 +1493,7 @@ extend Package {
             ptr_bytes: ptr_bytes,
             vec_regs: 16,
             vector: 16,
+            vcopies: 4,
             vops: 0,
             mul_high: true,
             bswap: true,

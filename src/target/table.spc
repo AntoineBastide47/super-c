@@ -33,6 +33,10 @@ pub(package) struct Isa {
     /// The bytes of a vector the native backend computes in one register, 0 when it computes vectors
     /// lane by lane in memory (wasm32): the LIR vectorizer runs only with registers.
     pub(package) vector_bytes: u8,
+    /// The vectors a vectorized loop of `vector_bytes` vectors interleaves at most (and the scalar copies
+    /// one interleaves), LLVM's maximum interleave factor: 2 on x86-64 (4 with AVX:
+    /// `lir::ir::Package::vcopies`), 4 on AArch64.
+    pub(package) vector_copies: u8,
     /// How the native backend converts a vector to one of the same lane count (an integer to a float of
     /// its width and back, an integer or a float to twice or half its width) and shifts each lane by its
     /// own amount (`lir::ir::Package::vops`): 0 lane by lane, 1 (x86-64) in registers but a 64-bit integer
@@ -183,6 +187,7 @@ pub(package) const ISAS: [Isa; 3] = [
         scalar_fma: false,
         merge_apart: false,
         vector_bytes: 16,
+        vector_copies: 2,
         vector_ops: 1,
         mul_high: true,
         bswap: true,
@@ -208,6 +213,7 @@ pub(package) const ISAS: [Isa; 3] = [
         scalar_fma: true,
         merge_apart: false,
         vector_bytes: 16,
+        vector_copies: 4,
         vector_ops: 2,
         mul_high: true,
         bswap: true,
@@ -233,6 +239,7 @@ pub(package) const ISAS: [Isa; 3] = [
         scalar_fma: false,
         merge_apart: true,
         vector_bytes: 0,
+        vector_copies: 4,
         vector_ops: 0,
         mul_high: false,
         bswap: false,
@@ -563,6 +570,7 @@ const UNKNOWN_ISA: Isa = Isa {
     mask_fold: false,
     merge_apart: false,
     vector_bytes: 0,
+    vector_copies: 4,
     vector_ops: 0,
     mul_high: false,
     bswap: false,

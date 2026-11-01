@@ -612,6 +612,11 @@ extend CEmit {
             } else {
                 tgt::isa(pk.arch).vector_bytes
             };
+            l.pkg.vcopies = if l.pkg.vector > tgt::isa(pk.arch).vector_bytes as u32 {
+                4u32
+            } else {
+                tgt::isa(pk.arch).vector_copies
+            };
             l.pkg.mul_high = tgt::isa(pk.arch).mul_high;
             l.pkg.bswap = tgt::isa(pk.arch).bswap;
             l.pkg.bitrev = tgt::isa(pk.arch).bitrev;

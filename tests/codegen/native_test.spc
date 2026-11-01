@@ -4583,6 +4583,103 @@ b6:
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Vector products added to or subtracted from an accumulator, the product first or second, of 1-, 2- and
+// 4-byte lanes in 8- and 16-byte vectors, the accumulator read again after (arm64: MLA and MLS).
+@test
+fn vector_products_added_and_subtracted_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @mla fn global
+fn @mla
+  sig (ptr, ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: ptr):
+  v4 = load.v8i8 v0 align 0
+  v5 = load.v8i8 v1 align 0
+  v6 = load.v8i8 v2 align 0
+  v7 = mul.v8i8 v5, v6
+  v8 = add.v8i8 v4, v7
+  v9 = mul.v8i8 v5, v6
+  v10 = sub.v8i8 v4, v9
+  v11 = mul.v8i8 v5, v6
+  v12 = add.v8i8 v11, v4
+  v13 = load.v4i16 v0 align 0
+  v14 = load.v4i16 v1 align 0
+  v15 = load.v4i16 v2 align 0
+  v16 = mul.v4i16 v14, v15
+  v17 = add.v4i16 v13, v16
+  v18 = mul.v4i16 v14, v15
+  v19 = sub.v4i16 v13, v18
+  v20 = mul.v4i16 v14, v15
+  v21 = add.v4i16 v20, v13
+  v22 = load.v2i32 v0 align 0
+  v23 = load.v2i32 v1 align 0
+  v24 = load.v2i32 v2 align 0
+  v25 = mul.v2i32 v23, v24
+  v26 = add.v2i32 v22, v25
+  v27 = mul.v2i32 v23, v24
+  v28 = sub.v2i32 v22, v27
+  v29 = mul.v2i32 v23, v24
+  v30 = add.v2i32 v29, v22
+  v31 = load.v16i8 v0 align 0
+  v32 = load.v16i8 v1 align 0
+  v33 = load.v16i8 v2 align 0
+  v34 = mul.v16i8 v32, v33
+  v35 = add.v16i8 v31, v34
+  v36 = mul.v16i8 v32, v33
+  v37 = sub.v16i8 v31, v36
+  v38 = mul.v16i8 v32, v33
+  v39 = add.v16i8 v38, v31
+  v40 = load.v8i16 v0 align 0
+  v41 = load.v8i16 v1 align 0
+  v42 = load.v8i16 v2 align 0
+  v43 = mul.v8i16 v41, v42
+  v44 = add.v8i16 v40, v43
+  v45 = mul.v8i16 v41, v42
+  v46 = sub.v8i16 v40, v45
+  v47 = mul.v8i16 v41, v42
+  v48 = add.v8i16 v47, v40
+  v49 = load.v4i32 v0 align 0
+  v50 = load.v4i32 v1 align 0
+  v51 = load.v4i32 v2 align 0
+  v52 = mul.v4i32 v50, v51
+  v53 = add.v4i32 v49, v52
+  v54 = mul.v4i32 v50, v51
+  v55 = sub.v4i32 v49, v54
+  v56 = mul.v4i32 v50, v51
+  v57 = add.v4i32 v56, v49
+  store v8, v3+0 align 0
+  store v10, v3+8 align 0
+  store v12, v3+16 align 0
+  store v4, v3+24 align 0
+  store v17, v3+32 align 0
+  store v19, v3+40 align 0
+  store v21, v3+48 align 0
+  store v13, v3+56 align 0
+  store v26, v3+64 align 0
+  store v28, v3+72 align 0
+  store v30, v3+80 align 0
+  store v22, v3+88 align 0
+  store v35, v3+96 align 0
+  store v37, v3+112 align 0
+  store v39, v3+128 align 0
+  store v31, v3+144 align 0
+  store v44, v3+160 align 0
+  store v46, v3+176 align 0
+  store v48, v3+192 align 0
+  store v40, v3+208 align 0
+  store v53, v3+224 align 0
+  store v55, v3+240 align 0
+  store v57, v3+256 align 0
+  store v49, v3+272 align 0
+  ret
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\nvoid mla(const void *, const void *, const void *, void *);\nint main(void) {\n  unsigned char a[16], x[16], y[16], o[288];\n  for (int i = 0; i < 16; i++) { a[i] = (unsigned char)(i * 31 + 7); x[i] = (unsigned char)(i * 17 + 200); y[i] = (unsigned char)(i * 13 + 99); }\n  mla(a, x, y, o);\n  { uint8_t aa[8], xx[8], yy[8], rr[8]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 0, sizeof rr); for (int i = 0; i < 8; i++) if (rr[i] != (uint8_t)(aa[i] + xx[i] * yy[i])) return 1; }\n  { uint8_t aa[8], xx[8], yy[8], rr[8]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 8, sizeof rr); for (int i = 0; i < 8; i++) if (rr[i] != (uint8_t)(aa[i] - xx[i] * yy[i])) return 2; }\n  { uint8_t aa[8], xx[8], yy[8], rr[8]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 16, sizeof rr); for (int i = 0; i < 8; i++) if (rr[i] != (uint8_t)(aa[i] + xx[i] * yy[i])) return 3; }\n  { uint8_t aa[8], xx[8], yy[8], rr[8]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 24, sizeof rr); for (int i = 0; i < 8; i++) if (rr[i] != (uint8_t)(aa[i])) return 4; }\n  { uint16_t aa[4], xx[4], yy[4], rr[4]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 32, sizeof rr); for (int i = 0; i < 4; i++) if (rr[i] != (uint16_t)(aa[i] + xx[i] * yy[i])) return 5; }\n  { uint16_t aa[4], xx[4], yy[4], rr[4]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 40, sizeof rr); for (int i = 0; i < 4; i++) if (rr[i] != (uint16_t)(aa[i] - xx[i] * yy[i])) return 6; }\n  { uint16_t aa[4], xx[4], yy[4], rr[4]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 48, sizeof rr); for (int i = 0; i < 4; i++) if (rr[i] != (uint16_t)(aa[i] + xx[i] * yy[i])) return 7; }\n  { uint16_t aa[4], xx[4], yy[4], rr[4]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 56, sizeof rr); for (int i = 0; i < 4; i++) if (rr[i] != (uint16_t)(aa[i])) return 8; }\n  { uint32_t aa[2], xx[2], yy[2], rr[2]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 64, sizeof rr); for (int i = 0; i < 2; i++) if (rr[i] != (uint32_t)(aa[i] + xx[i] * yy[i])) return 9; }\n  { uint32_t aa[2], xx[2], yy[2], rr[2]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 72, sizeof rr); for (int i = 0; i < 2; i++) if (rr[i] != (uint32_t)(aa[i] - xx[i] * yy[i])) return 10; }\n  { uint32_t aa[2], xx[2], yy[2], rr[2]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 80, sizeof rr); for (int i = 0; i < 2; i++) if (rr[i] != (uint32_t)(aa[i] + xx[i] * yy[i])) return 11; }\n  { uint32_t aa[2], xx[2], yy[2], rr[2]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 88, sizeof rr); for (int i = 0; i < 2; i++) if (rr[i] != (uint32_t)(aa[i])) return 12; }\n  { uint8_t aa[16], xx[16], yy[16], rr[16]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 96, sizeof rr); for (int i = 0; i < 16; i++) if (rr[i] != (uint8_t)(aa[i] + xx[i] * yy[i])) return 13; }\n  { uint8_t aa[16], xx[16], yy[16], rr[16]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 112, sizeof rr); for (int i = 0; i < 16; i++) if (rr[i] != (uint8_t)(aa[i] - xx[i] * yy[i])) return 14; }\n  { uint8_t aa[16], xx[16], yy[16], rr[16]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 128, sizeof rr); for (int i = 0; i < 16; i++) if (rr[i] != (uint8_t)(aa[i] + xx[i] * yy[i])) return 15; }\n  { uint8_t aa[16], xx[16], yy[16], rr[16]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 144, sizeof rr); for (int i = 0; i < 16; i++) if (rr[i] != (uint8_t)(aa[i])) return 16; }\n  { uint16_t aa[8], xx[8], yy[8], rr[8]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 160, sizeof rr); for (int i = 0; i < 8; i++) if (rr[i] != (uint16_t)(aa[i] + xx[i] * yy[i])) return 17; }\n  { uint16_t aa[8], xx[8], yy[8], rr[8]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 176, sizeof rr); for (int i = 0; i < 8; i++) if (rr[i] != (uint16_t)(aa[i] - xx[i] * yy[i])) return 18; }\n  { uint16_t aa[8], xx[8], yy[8], rr[8]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 192, sizeof rr); for (int i = 0; i < 8; i++) if (rr[i] != (uint16_t)(aa[i] + xx[i] * yy[i])) return 19; }\n  { uint16_t aa[8], xx[8], yy[8], rr[8]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 208, sizeof rr); for (int i = 0; i < 8; i++) if (rr[i] != (uint16_t)(aa[i])) return 20; }\n  { uint32_t aa[4], xx[4], yy[4], rr[4]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 224, sizeof rr); for (int i = 0; i < 4; i++) if (rr[i] != (uint32_t)(aa[i] + xx[i] * yy[i])) return 21; }\n  { uint32_t aa[4], xx[4], yy[4], rr[4]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 240, sizeof rr); for (int i = 0; i < 4; i++) if (rr[i] != (uint32_t)(aa[i] - xx[i] * yy[i])) return 22; }\n  { uint32_t aa[4], xx[4], yy[4], rr[4]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 256, sizeof rr); for (int i = 0; i < 4; i++) if (rr[i] != (uint32_t)(aa[i] + xx[i] * yy[i])) return 23; }\n  { uint32_t aa[4], xx[4], yy[4], rr[4]; memcpy(aa, a, sizeof aa); memcpy(xx, x, sizeof xx); memcpy(yy, y, sizeof yy); memcpy(rr, o + 272, sizeof rr); for (int i = 0; i < 4; i++) if (rr[i] != (uint32_t)(aa[i])) return 24; }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // A loop whose product by a constant is the first addend of a sum (arm64 `madd`, the constant kept in a
 // register) parses decimal digits.
 @test

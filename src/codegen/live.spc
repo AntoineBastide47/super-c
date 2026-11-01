@@ -59,6 +59,16 @@ pub(package) const FOLD_LDOP: u32 = 1048576;
 /// of a 32-byte one too (AVX2's `vpmovmskb`).
 pub(package) const FOLD_ANY: u32 = 2097152;
 pub(package) const FOLD_ANY_WIDE: u32 = 4194304;
+/// `FOLD_VMLA`: a product of integer vectors of 8 or 16 bytes, lanes below 8 bytes, with one use, the second
+/// operand of a sum or a difference or the first of a sum, folds into it (arm64's MLA and MLS).
+pub(package) const FOLD_VMLA: u32 = 8388608;
+/// `FOLD_VSHIMM`: a vector shift by one constant below its integer lanes' width (`vec_shift_amount`) shifts
+/// by an immediate, and a splat or wide constant such shifts alone read as their amount folds into them:
+/// 16-byte vectors of 2- to 8-byte lanes, the arithmetic shifts below 8 (SSE2). `FOLD_VSHIMM_WIDE`: 32-byte
+/// ones too (AVX2). `FOLD_VSHIMM_ALL`: 8- and 16-byte vectors of any lanes but a lone 8-byte one (Neon).
+pub(package) const FOLD_VSHIMM: u32 = 16777216;
+pub(package) const FOLD_VSHIMM_WIDE: u32 = 33554432;
+pub(package) const FOLD_VSHIMM_ALL: u32 = 67108864;
 // `lane_mask` follows this many `and`, `or` and `xor` operations.
 pub(package) const MASK_DEPTH: u32 = 8;
 // `Live::ldop_user` looks this many instructions past a load for its use.
@@ -336,6 +346,12 @@ extend Live {
         }
         for i in 0..ni {
             let t = b.insts[i];
+            if (self.fold_ops & FOLD_VMLA) != 0 && (t.op == O_ADD || t.op == O_SUB) && is_vec(t.ty) {
+                let p = self.vmla_mul(b, t);
+                if p != VNONE {
+                    self.pfold[p as usize] = true;
+                }
+            }
             if !is_int(t.ty) || t.ty == T_I128 {
                 continue;
             }
@@ -716,6 +732,40 @@ extend Live {
                 }
             }
         }
+        if (self.fold_ops & (FOLD_VSHIMM | FOLD_VSHIMM_ALL)) != 0 {
+            fill(&mut self.cnd, ni, 0);
+            for i in 0..ni {
+                let t = b.insts[i];
+                if self.vshimm(b, t) != NONE && t.a != t.b {
+                    self.cnd[t.b as usize] += 1;
+                }
+            }
+            for i in 0..ni {
+                let op = b.insts[i].op;
+                if (op == O_SPLAT || op == O_WCONST) && self.count[i] != 0 && self.cnd[i] == self.count[i] {
+                    self.pfold[i] = true;
+                }
+            }
+        }
+    }
+
+    /// The immediate amount vector shift `t` of `b` takes (`FOLD_VSHIMM`), else NONE.
+    pub(package) fn vshimm(self: &Self, b: &Body, t: Inst) u32 {
+        if t.op != O_SHL && t.op != O_LSHR && t.op != O_ASHR || !is_vec(t.ty) {
+            return NONE;
+        }
+        let eb = type_bytes(lane_type(t.ty), 8);
+        let nb = type_bytes(t.ty, 8);
+        let ok = if (self.fold_ops & FOLD_VSHIMM_ALL) != 0 {
+            (nb == 8 || nb == 16) && !(nb == 8 && eb == 8)
+        } else {
+            (self.fold_ops & FOLD_VSHIMM) != 0 && eb >= 2 && !(t.op == O_ASHR && eb == 8) && (nb == 16 || nb == 32 && (self.fold_ops & FOLD_VSHIMM_WIDE) != 0)
+        };
+        return if ok {
+            vec_shift_amount(b, t)
+        } else {
+            NONE
+        };
     }
 
     /// `FOLD_LDOP`: whether load `i` of `b` (its block ending before `end`) folds into its one use, a
@@ -928,7 +978,9 @@ extend Live {
             assert(n <= FOLD_DEPTH, "live: more folded instructions in one use than FOLD_DEPTH");
             let p = b.insts[v as usize];
             out.swap_remove(u);
-            if p.op == O_VOP {
+            if p.op == O_SPLAT || p.op == O_WCONST {
+                // An immediate shift amount (`FOLD_VSHIMM`): nothing.
+            } else if p.op == O_VOP {
                 // Its operands in the pool (`FOLD_ANY`'s one).
                 for q in 0..p.b {
                     out.push(b.pool[(p.a + q) as usize]);
@@ -985,6 +1037,24 @@ extend Live {
             self.pfold[t.b as usize] = true;
             self.pfold[i] = self.cnd[i] == self.count[i];
         }
+    }
+
+    // The product `FOLD_VMLA` folds into vector sum or difference `t`: its second operand, else (a sum) its
+    // first. VNONE when none.
+    pub(package) fn vmla_mul(self: &Self, b: &Body, t: Inst) Value {
+        let lt = lane_type(t.ty);
+        let nb = type_bytes(t.ty, 8);
+        if !is_int(lt) || type_bytes(lt, 8) >= 8 || nb != 8 && nb != 16 {
+            return VNONE;
+        }
+        let ok = |v: Value| (v & (VPARAM | VFLAG)) == 0 && v != VNONE && b.insts[v as usize].op == O_MUL && b.insts[v as usize].ty == t.ty && self.count[v as usize] == 1;
+        if ok(t.b) && t.b != t.a {
+            return t.b;
+        }
+        if t.op == O_ADD && ok(t.a) && t.a != t.b {
+            return t.a;
+        }
+        return VNONE;
     }
 
     // Whether `O_VOP` `t` is an `or` of the lanes of an integer lane mask that `FOLD_ANY` (16 bytes) or

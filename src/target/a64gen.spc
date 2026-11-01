@@ -1946,7 +1946,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VSHIMM_ALL;
         self.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -2953,6 +2953,9 @@ extend Gen {
             let r = self.def(i);
             self.mov_imm(r, t.b as u64 << 32 | t.a as u64, type_bytes(t.ty, self.ptr) == 8);
             return true;
+        }
+        if (op == O_SPLAT || op == O_WCONST) && self.lv.pfold[i as usize] {
+            return true; // its shifts take it as an immediate (`lv::FOLD_VSHIMM_ALL`)
         }
         if op == O_WCONST && in_vreg(t.ty) {
             self.wconst_reg(i, t);
@@ -6443,8 +6446,8 @@ extend Gen {
     }
 
     // x17 = switch value `r` (`bits` wide, zero-extended below 32 bits) minus `min`, wrapped at its width
-    // and zero-extended.
-    fn switch_index(self: &mut Self, r: u32, bits: u32, min: u64) {
+    // (when the `span` entries from `min` pass it) and zero-extended.
+    fn switch_index(self: &mut Self, r: u32, bits: u32, min: u64, span: u32) {
         let sf = bits == 64;
         if min == 0 {
             self.emit(a::mov_reg(sf, a::IP1, r));
@@ -6454,7 +6457,7 @@ extend Gen {
             self.mov_imm(a::IP1 as u8, min, sf);
             self.emit(a::addsub_reg(sf, 1, false, a::IP1, r, a::IP1, 0, 0));
         }
-        if bits < 32 && min != 0 {
+        if bits < 32 && min != 0 && min + span as u64 > 1u64 << bits as u64 {
             // AND w17, w17, #0xFF or #0xFFFF (imms 7 or 15).
             self.emit(a::logic_imm(false, 0, a::IP1, a::IP1, bits - 1));
         }
@@ -6482,7 +6485,7 @@ extend Gen {
         }
         let d = b.switch_edge(t, t.aux);
         let to = b.edge_target(b.switch_edge(t, 0));
-        self.switch_index(r, bits, lk.min);
+        self.switch_index(r, bits, lk.min, lk.span);
         let mut stubs = Vector::<u32>::new();
         self.emit(a::cmp_imm(bits == 64, a::IP1, lk.span - 1));
         self.to_default(a::bcond(a::HI, 0), Test { kind: T_CC, cc: a::HI, reg: 0 }, d, &mut stubs);
@@ -6568,7 +6571,7 @@ extend Gen {
         for k in 0..n {
             es[(b.words[(t.b + k) as usize].wrapping_sub(min) & m) as usize] = b.switch_edge(t, k);
         }
-        self.switch_index(r, bits, min);
+        self.switch_index(r, bits, min, span);
         self.emit(a::cmp_imm(bits == 64, a::IP1, span - 1));
         // Per edge with moves (the default first), the branches to patch to them.
         let mut ds = Vector::<u32>::new();
@@ -7119,6 +7122,11 @@ extend Gen {
                 to = body_n;
             }
             if lone && to == body_n && (self.code[w as usize] & 0xFC000000) == 0x14000000 {
+                self.code[w as usize] = a::RET;
+                continue;
+            }
+            if !sw && (self.code[w as usize] & 0xFC000000) == 0x14000000 && to as usize < self.code.len() && self.code[to as usize] == a::RET {
+                // A branch to a `ret`: that `ret`.
                 self.code[w as usize] = a::RET;
                 continue;
             }
@@ -8350,7 +8358,49 @@ extend Gen {
 
     // Vector arithmetic: O_ADD .. O_NOT, O_FADD .. O_FNEG and O_FSQRT on vectors.
     fn vec_arith(self: &mut Self, i: u32, t: Inst) bool {
+        if self.lv.pfold[i as usize] {
+            return true; // its sum or difference multiplies and accumulates (`lv::FOLD_VMLA`)
+        }
         let op = t.op;
+        if (op == O_ADD || op == O_SUB) && is_vec(t.ty) {
+            let p = self.lv.vmla_mul(self.b(), t);
+            if p != VNONE && self.lv.pfold[p as usize] {
+                // MLA or MLS Vd, Vn, Vm: the accumulator (the other operand) in the result's register first.
+                let m = self.b().insts[p as usize];
+                let acc = if t.b == p {
+                    t.a
+                } else {
+                    t.b
+                };
+                let nb = type_bytes(t.ty, 8);
+                let w = if op == O_SUB {
+                    0x2E209400u32
+                } else {
+                    0x0E209400u32
+                } | vsize(type_bytes(lane_type(t.ty), 8)) << 22 | a::on(nb == 16, 1u32 << 30);
+                let rn = self.vec_use(m.a, V0 + 30);
+                let rm = self.vec_use(m.b, V0 + 31);
+                let rd = self.def_step(i);
+                let r = if rd == rn || rd == rm {
+                    self.tmp(true)
+                } else {
+                    rd
+                };
+                let xa = self.vx(acc);
+                let ra = self.va[xa as usize].reg;
+                if ra == NOREG {
+                    let (base, off) = self.mloc(acc);
+                    self.mem(mkind(t.ty, true), true, r, base, off);
+                } else if ra != r {
+                    self.emit(a::vmov(nb == 16, r - V0, ra - V0));
+                }
+                self.emit(w | (r - V0) as u32 | (rn - V0) as u32 << 5 | (rm - V0) as u32 << 16);
+                if r != rd {
+                    self.emit(a::vmov(nb == 16, rd - V0, r - V0));
+                }
+                return true;
+            }
+        }
         let lt = lane_type(t.ty);
         let n = lanes(t.ty);
         let nb = type_bytes(t.ty, 8);
@@ -8361,11 +8411,7 @@ extend Gen {
         } else {
             t.b
         };
-        let k = if (op == O_SHL || op == O_LSHR || op == O_ASHR) && in_vreg(t.ty) && !(nb == 8 && lt == T_I64) {
-            lv::vec_shift_amount(self.b(), t)
-        } else {
-            NONE
-        };
+        let k = self.lv.vshimm(self.b(), t);
         if k != NONE {
             // Every lane by one constant: SHL, USHR or SSHR by an immediate (immh:immb the lanes' bits plus
             // the amount, or twice them less it); by 0, a copy.

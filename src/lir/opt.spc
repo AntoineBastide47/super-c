@@ -9298,7 +9298,8 @@ extend Run {
         // copy once the copy's slots are values (`lir::promote`), which a vector access of a slot prevents.
         // The copy, only of a body small enough to inline: a larger one that ends with vectors inlines in
         // neither form (`fits`).
-        let bu = r.cf.loops;
+        let mut bu = r.cf.loops;
+        bu.vector = bu.vector.min(p.vcopies);
         if bu.vector != 0 && sc.o.unnest(p, b) {
             let _ = sc.o.run(p, b, true);
         }

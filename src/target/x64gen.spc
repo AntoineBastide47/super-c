@@ -66,6 +66,8 @@ const FIX_CALLEE: u8 = 1;
 const FIX_SCRATCH: u8 = 2;
 const XFIX_WIN: u64 = 0xF0C8; // rbx rsi rdi r12 r13 r14 r15
 const VALLOC_WIN: u64 = 0x3FCF0000; // xmm0..xmm3, xmm6..xmm13
+// The caller-saved xmm homes of a body that calls nothing that returns (`plan_homes`).
+const VSCR_WIN_BARE: u64 = 0xF0000; // xmm0..xmm3
 const VSAVE_WIN: u64 = 0xFFC00000; // xmm6..xmm15
 // The callee-saved xmm registers a value may hold for its whole range (Microsoft x64), in the order taken:
 // xmm14 and xmm15 (no temporary's), then xmm8..xmm13 (no intrinsic's template names xmm8 and up).
@@ -585,8 +587,14 @@ extend Gen {
                 }
             }
         }
-        // Evict round-robin: the next unlocked register that holds a value.
+        // Evict a register whose value needs no store (`cheapest`), else round-robin: the next unlocked
+        // register that holds a value.
         let busy = open & self.held;
+        let c = self.cheapest(busy);
+        if busy != 0 && !self.stores(c) {
+            self.evict(c);
+            return self.taken(c);
+        }
         if busy != 0 {
             let s = self.rr % 32;
             let r = if busy >> s as u64 != 0 {
@@ -644,6 +652,27 @@ extend Gen {
         self.va.index_mut(x as usize).reg = NOREG;
         self.va.index_mut(x as usize).dirty = false;
         self.set_owner(r, NONE);
+    }
+
+    // Whether evicting register `r`'s value stores it (`evict`).
+    fn stores(self: &Self, r: u8) bool {
+        let x = self.owner[r as usize];
+        return x != NONE && self.va[x as usize].home != H_FIXED && self.va[x as usize].dirty && (self.live_on(x) || self.read_now(
+            x,
+        ));
+    }
+
+    // The first register of `set` (not empty) whose eviction stores nothing, else its first.
+    fn cheapest(self: &Self, set: u64) u8 {
+        let mut s = set;
+        while s != 0 {
+            let r = s.trailing_zeros() as u8;
+            if !self.stores(r) {
+                return r;
+            }
+            s &= s - 1;
+        }
+        return set.trailing_zeros() as u8;
     }
 
     // Whether instruction `i` reads value `v`, through the operands that fold into it too (`lv::uses_of`).
@@ -1271,13 +1300,36 @@ extend Gen {
                 self.lconst[x] = false;
             }
         }
+        // A body that calls nothing that returns (no instruction `clobbers` but one before a trap or in a
+        // rare block, no thread-local address's getter) and runs no system operation or variadic access:
+        // every register of `xscr` may be a home at once. `bare`: not even in a rare block.
+        let mut leaf = true;
+        let mut bare = true;
+        for x in 0..ni {
+            let t = b.insts[x];
+            leaf = leaf && !(self.cret[x] && !self.rarec[x]) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !(t.op == O_SYMADDR && !self.remat_inst(
+                x as u32,
+            ));
+            bare = bare && !self.cret[x];
+        }
+        bare = bare && leaf;
+        // An xmm home: Microsoft x64's callee-saved ones, but in a body that calls nothing that returns
+        // its caller-saved xmm0..xmm3 first (`vscr`); System V's caller-saved ones.
+        if self.win {
+            self.vscr = if bare {
+                VSCR_WIN_BARE
+            } else {
+                0
+            };
+        }
         self.vec_homes();
         self.want.truncate(0);
-        // An xmm home: Microsoft x64's callee-saved ones, System V's caller-saved ones.
-        let vw = lv::WANT_V | if self.win {
-            lv::WANT_CALLEE
-        } else {
+        let vw = lv::WANT_V | if !self.win {
             lv::WANT_SCRATCH
+        } else if bare {
+            lv::WANT_SCRATCH | lv::WANT_CALLEE
+        } else {
+            lv::WANT_CALLEE
         };
         for x in 0..n {
             let t = self.xty(x as u32);
@@ -1319,16 +1371,6 @@ extend Gen {
             nd = nd.max(self.need(x as u32));
         }
         let most = self.xfix.count_ones() as u32 + self.xalloc.count_ones() as u32 - nd;
-        // A body that calls nothing that returns (no instruction `clobbers` but one before a trap or in a
-        // rare block, no thread-local address's getter) and runs no system operation or variadic access:
-        // every register of `xscr` may be a home at once.
-        let mut leaf = true;
-        for x in 0..ni {
-            let t = b.insts[x];
-            leaf = leaf && !(self.cret[x] && !self.rarec[x]) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !(t.op == O_SYMADDR && !self.remat_inst(
-                x as u32,
-            ));
-        }
         self.xhome = self.xscr;
         if leaf && self.owns_none(b) {
             self.xhome |= bit(x::RAX) | bit(x::RCX) | bit(x::RDX);
@@ -1339,9 +1381,10 @@ extend Gen {
             self.xscr_cap
         };
         // Every xmm home: Microsoft x64's callee-saved xmm8..xmm15 (`vfix`; xmm0..xmm3, xmm6 and xmm7
-        // stay for temporaries), or System V's caller-saved xmm8..xmm13 (`vscr`; xmm0..xmm7 stay).
+        // stay for temporaries) and, calling nothing, xmm0..xmm3 (`vscr`; then temporaries take xmm6 and
+        // up), or System V's caller-saved xmm8..xmm13 (`vscr`; xmm0..xmm7 stay).
         let (vc, vs) = if self.win {
-            (self.vfix.count_ones() as u32, 0u32)
+            (self.vfix.count_ones() as u32, self.vscr.count_ones() as u32)
         } else {
             (0u32, self.vscr.count_ones() as u32)
         };
@@ -1429,7 +1472,7 @@ extend Gen {
                 &mut un,
             ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_WCONST) && self.in_reg(t.ty) || self.conv_reg(
                 t,
-            ) || self.shift_reg(t) || self.shift_imm(t) != NONE || (t.op == O_VEXTRACT || t.op == O_VINSERT) && self.lane_reg(
+            ) || self.shift_reg(t) || self.lv.vshimm(self.b(), t) != NONE || (t.op == O_VEXTRACT || t.op == O_VINSERT) && self.lane_reg(
                 t,
             ) || (t.op == O_VZIPLO || t.op == O_VZIPHI) && type_bytes(t.ty, 8) <= 32 && self.in_reg(t.ty) || t.op == O_VUNZIP && type_bytes(
                 t.ty,
@@ -1828,15 +1871,18 @@ extend Gen {
     // Whether body `b` lets rax, rcx and rdx be homes (`xhome`): no instruction takes one of them for
     // itself (a division, a 64-bit product's high half, an overflow check, a shift by a register, an
     // atomic, a system operation, inline assembly, a call that comes back (`cret`: not a sibling call
-    // or one before a trap), a thread-local address, a 128-bit or vector value), and no aggregate or
-    // second register returns.
+    // or one before a trap), a thread-local address, a 128-bit value, a lane-wise operation but one in
+    // xmm registers (`reduce_reg`, `ext_reg`, `FOLD_ANY`), a vector shift by no immediate
+    // (`Live::vshimm`)), and no aggregate or second register returns.
     fn owns_none(self: &Self, b: &Body) bool {
         let rl = self.self_lay.ret;
         if (b.pool[b.sig as usize + 2] & AGG) != 0 || rl.kind == ab::L_SRET || rl.kind == ab::L_REG && rl.n > 1 {
             return false;
         }
-        for q in 0..b.params.len() {
-            if b.params[q] == T_I128 || is_vec(b.params[q]) {
+        // The entry's parameters: the other blocks' take what instructions define.
+        let e = b.blocks[0];
+        for q in e.param_start..e.param_start + e.param_len as u32 {
+            if b.params[q as usize] == T_I128 || is_vec(b.params[q as usize]) {
                 return false;
             }
         }
@@ -1844,9 +1890,15 @@ extend Gen {
             let t = b.insts[i];
             let op = t.op;
             let mut k: u64 = 0;
-            if t.ty == T_I128 || is_vec(t.ty) || (op == O_CALL || op == O_CALLIND) && self.cret[i] || op == O_ASM || op == O_SYS || op == O_VOP || op == O_VASTART || op == O_VAARG || op == O_MEMCPY || op == O_MEMSET || op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM || op >= O_ADDO && op <= O_MULO || op >= O_ALOAD && op <= O_FENCE || op == O_SYMADDR && !self.remat_inst(
+            if t.ty == T_I128 || (op == O_CALL || op == O_CALLIND) && self.cret[i] || op == O_ASM || op == O_SYS || op == O_VOP && !self.reduce_reg(
+                t,
+            ) && !self.ext_reg(t) && !self.lv.pfold[i] || op == O_VASTART || op == O_VAARG || op == O_MEMCPY || op == O_MEMSET || op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM || op >= O_ADDO && op <= O_MULO || op >= O_ALOAD && op <= O_FENCE || op == O_SYMADDR && !self.remat_inst(
                 i as u32,
-            ) || (op == O_SHL || op == O_LSHR || op == O_ASHR) && !self.const_of(t.b, &mut k) {
+            ) || (op == O_SHL || op == O_LSHR || op == O_ASHR) && if is_vec(t.ty) {
+                self.lv.vshimm(b, t) == NONE
+            } else {
+                !self.const_of(t.b, &mut k)
+            } {
                 return false;
             }
         }
@@ -1868,7 +1920,7 @@ extend Gen {
         } else if (open & ~self.held) != 0 {
             (open & ~self.held).trailing_zeros() as u8
         } else if open != 0 {
-            open.trailing_zeros() as u8
+            self.cheapest(open)
         } else {
             NOREG
         };
@@ -2570,8 +2622,8 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | if self.avx {
-            lv::FOLD_ANY_WIDE
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | if self.avx {
+            lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE
         } else {
             0
         };
@@ -3548,6 +3600,9 @@ extend Gen {
             self.mov_imm(r, t.b as u64 << 32 | t.a as u64, type_bytes(t.ty, 8));
             return true;
         }
+        if (op == O_SPLAT || op == O_WCONST) && self.lv.pfold[i as usize] {
+            return true; // its shifts take it as an immediate (`lv::FOLD_VSHIMM`)
+        }
         if op == O_WCONST && self.in_reg(t.ty) {
             self.wconst_reg(i, t);
             return true;
@@ -3627,8 +3682,10 @@ extend Gen {
             let bits = type_bits(t.ty, self.ptr);
             let sz = wsz(bits.max(32));
             let r = self.reg(t.a);
-            let rd = self.def(i);
-            self.c.mov_rr(sz, rd, r);
+            let rd = self.def_over(i, t.a, r);
+            if rd != r {
+                self.c.mov_rr(sz, rd, r);
+            }
             self.c.bswap(sz, rd);
             if bits == 16 {
                 self.c.shift_ri(x::SHR, 4, rd, 16);
@@ -7084,8 +7141,9 @@ extend Gen {
         self.fix.push(at as u64 << 32 | k as u64);
     }
 
-    // S0 = switch value `r` (`sz` bytes) minus `min`, wrapped at its width and zero-extended.
-    fn switch_index(self: &mut Self, r: u8, sz: u32, min: u64) {
+    // S0 = switch value `r` (`sz` bytes) minus `min`, wrapped at its width (when the `span` entries from `min`
+    // pass it) and zero-extended.
+    fn switch_index(self: &mut Self, r: u8, sz: u32, min: u64, span: u32) {
         if sz == 8 {
             self.c.mov_rr(8, S0, r);
             let s = min as i64;
@@ -7102,7 +7160,7 @@ extend Gen {
         self.c.ext(sz, 4, false, S0, r);
         if min != 0 {
             self.c.alu_ri(x::SUB, 4, S0, (min as u32) as i32);
-            if sz < 4 {
+            if sz < 4 && min + span as u64 > 1u64 << 8 * sz as u64 {
                 self.c.alu_ri(x::AND, 4, S0, ((1u32 << 8 * sz) - 1) as i32);
             }
         }
@@ -7129,7 +7187,7 @@ extend Gen {
         }
         let d = b.switch_edge(t, t.aux);
         let to = b.edge_target(b.switch_edge(t, 0));
-        self.switch_index(r, sz, lk.min);
+        self.switch_index(r, sz, lk.min, lk.span);
         let mut stubs = Vector::<u32>::new();
         self.c.alu_ri(
             x::CMP,
@@ -7173,7 +7231,7 @@ extend Gen {
                     } else {
                         self.ld(ty, S0, m);
                         self.st(ty, S0, dst);
-                        self.switch_index(r, sz, lk.min);
+                        self.switch_index(r, sz, lk.min, lk.span);
                         self.c.lea(S1, x::rip());
                         self.reloc_rip(x::R_PC32, k, 0);
                     }
@@ -7224,7 +7282,7 @@ extend Gen {
         for k in 0..n {
             es[(b.words[(t.b + k) as usize].wrapping_sub(min) & m) as usize] = b.switch_edge(t, k);
         }
-        self.switch_index(r, sz, min);
+        self.switch_index(r, sz, min, span);
         self.c.alu_ri(
             x::CMP,
             if sz == 8 {
@@ -7987,6 +8045,8 @@ extend Gen {
         let mut enter = Map::<u32, u32>::new();
         let mut leave = Map::<u32, u32>::new();
         let mut wret = NONE;
+        // The jumps that became `ret`s.
+        let mut rets = Vector::<u32>::new();
         for q in 0..self.fix.len() {
             let at = (self.fix[q] >> 32) as u32;
             let mut to = self.blk_at[(self.fix[q] as u32) as usize];
@@ -8049,7 +8109,32 @@ extend Gen {
                     },
                 });
             }
+            if !sw && self.c.b[at as usize - 1] == 0xE9 && to < self.c.len() && self.c.b[to as usize] == 0xC3 {
+                // A jump to a `ret`: that `ret`, the bytes after it traps.
+                self.c.b[at as usize - 1] = 0xC3;
+                for k in 0..4u32 {
+                    self.c.b[(at + k) as usize] = 0xCC;
+                }
+                rets.push(at);
+                continue;
+            }
             self.c.land(at, to);
+        }
+        if rets.len() != 0 {
+            rets.sort();
+            let mut keep = Vector::<u32>::with_capacity(self.c.jumps.len());
+            let mut q: usize = 0;
+            for j in 0..self.c.jumps.len() {
+                let at = self.c.jumps[j];
+                while q < rets.len() && rets[q] < at {
+                    q += 1;
+                }
+                if q < rets.len() && rets[q] == at {
+                    continue;
+                }
+                keep.push(at);
+            }
+            self.c.jumps = keep;
         }
         for q in 0..self.epi.len() {
             self.c.land(self.epi[q], body_n);
@@ -9915,7 +10000,7 @@ extend Gen {
             self.vacate(x::RAX);
             self.vacate(x::RDX);
         }
-        let k = self.shift_imm(t);
+        let k = self.lv.vshimm(self.b(), t);
         if k != NONE {
             // `psll`, `psrl`, `psra` by an immediate (66 0F 71, 72, 73 by the lanes' bytes; /6, /2, /4).
             let eb = type_bytes(lt, 8);
@@ -10147,22 +10232,6 @@ extend Gen {
                 self.st_lane(xr, d, k, tl, false);
             }
         }
-    }
-
-    // The amount of vector shift `t` in registers when every lane shifts by one constant below the lanes'
-    // width (a splat of a constant, or a wide constant of equal lanes): lanes of 2, 4 or 8 bytes, but an
-    // arithmetic shift of 8-byte lanes, which SSE2 lacks; vectors of 16 bytes, of 32 with AVX2. NONE when
-    // not.
-    fn shift_imm(self: &Self, t: Inst) u32 {
-        let lt = lane_type(t.ty);
-        let eb = type_bytes(lt, 8);
-        let nb = type_bytes(t.ty, 8);
-        if !is_vec(t.ty) || !(t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR) || !is_int(lt) || eb < 2 || t.op == O_ASHR && eb == 8 || !(nb == 16 && in_vreg(
-            t.ty,
-        ) || nb == 32 && self.avx && self.in_reg(t.ty)) || (t.b & (VPARAM | VFLAG)) != 0 || t.b == VNONE {
-            return NONE;
-        }
-        return lv::vec_shift_amount(self.b(), t);
     }
 
     // Whether vector shift `t` has an AVX2 form in registers (`vec_arith`): lanes of 4 or 8 bytes, but an
