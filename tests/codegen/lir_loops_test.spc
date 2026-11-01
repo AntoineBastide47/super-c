@@ -441,8 +441,9 @@ b3:
 )";
     let (b, a) = optimized(src, ROTATE);
     let t = text_of(&a, "sum");
-    // The latch branches back; the exit that passes the sum has a block of its own (`split_exits`).
-    assert(count(&t, "icmp.ne v0") == 1 && count(&t, "icmp.ult") == 1 && count(&t, "jmp") == 1, t.as_str());
+    // The latch branches back; the exit passes the sum the back edge passes too, so it keeps it on the branch
+    // (`split_exits` gives it no block).
+    assert(count(&t, "icmp.ne v0") == 1 && count(&t, "icmp.ult") == 1 && count(&t, "jmp") == 0, t.as_str());
     let none: []u64 = [0];
     same_outcome(&b, &a, "sum", none, 0, false);
     let four: []u64 = [4];
@@ -450,7 +451,7 @@ b3:
     let q = text_of(&a, "squares");
     // The test before the loop folds its `0 * 0`; the body takes the square as a parameter.
     assert(
-        count(&q, "icmp.ne v0") == 1 && count(&q, "icmp.ult") == 1 && count(&q, "mul.i64") == 1 && count(&q, "jmp") == 1,
+        count(&q, "icmp.ne v0") == 1 && count(&q, "icmp.ult") == 1 && count(&q, "mul.i64") == 1 && count(&q, "jmp") == 0,
         q.as_str(),
     );
     same_outcome(&b, &a, "squares", four, 14, false);

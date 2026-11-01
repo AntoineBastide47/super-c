@@ -150,6 +150,8 @@ pub(package) struct Live {
     pub(package) end: Vector<u32>, // per value, the last layout position it is live in
     pub(package) uses: Vector<u32>, // per value, its use count, one more when a loop keeps it past its last use
     pub(package) last: Vector<u32>, // per value, the highest instruction index that uses it (0: none)
+    wpos: Vector<u32>, // per block parameter, the last layout position of a block whose edge writes it, NONE: none
+    wn: Vector<u32>, // per block parameter, how many edges write it
     pub(package) flag_of: Map<u32, u32>, // an instruction with a used flag -> the flag's value index
     pub(package) home: Vector<u8>, // per value, its HOME_* (`plan`)
     /// Per value, the loop header parameter whose register a parameter of a block after the loop takes
@@ -219,6 +221,8 @@ extend Live {
             end: Vector::<u32>::new(),
             uses: Vector::<u32>::new(),
             last: Vector::<u32>::new(),
+            wpos: Vector::<u32>::new(),
+            wn: Vector::<u32>::new(),
             flag_of: Map::<u32, u32>::new(),
             home: Vector::<u8>::new(),
             share: Vector::<u32>::new(),
@@ -1720,6 +1724,8 @@ extend Live {
         fill(&mut self.end, n, 0);
         fill(&mut self.uses, n, 0);
         fill(&mut self.last, n, 0);
+        fill(&mut self.wpos, n, NONE);
+        fill(&mut self.wn, n, 0);
         for k in 0..b.blocks.len() {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
@@ -1783,6 +1789,10 @@ extend Live {
                 for q in 0..sb.param_len as u32 {
                     let x = ni + (sb.param_start + q) as usize;
                     self.uses[x] += 1;
+                    self.wn[x] += 1;
+                    if self.wpos[x] == NONE || p as u32 > self.wpos[x] {
+                        self.wpos[x] = p as u32;
+                    }
                     if p as u32 > self.end[x] {
                         self.end[x] = p as u32;
                     }
@@ -1919,7 +1929,14 @@ extend Live {
             }
             let e = self.end[x] as usize;
             let l = self.last[x];
-            self.stop[x] = if x < ni && self.au[x] != 0 && self.uses[x] == self.au[x] && self.pos[self.def_blk[l as usize] as usize] == e as u32 {
+            // A block parameter ends at its last read too when no edge from its last block writes it
+            // (edges write at the block's end).
+            let read = if x < ni {
+                self.au[x] != 0
+            } else {
+                x < nv && self.uses[x] > self.wn[x] && (self.wpos[x] == NONE || self.wpos[x] < e as u32)
+            };
+            self.stop[x] = if read && self.uses[x] == self.au[x] && self.pos[self.def_blk[l as usize] as usize] == e as u32 {
                 self.base[e] + l - b.blocks[self.def_blk[l as usize] as usize].start
             } else {
                 self.base[e + 1] - 1
@@ -2081,7 +2098,7 @@ extend Live {
                 if b.edge_target(ed) != k {
                     continue;
                 }
-                let p = self.header_of_value(b, hh, b.edge_arg(ed, q));
+                let p = self.exit_value(b, hh, t, ed, q);
                 if p == NONE || px != NONE && p != px {
                     return NONE;
                 }
@@ -2115,7 +2132,7 @@ extend Live {
                 };
                 for e in 0..ne {
                     let ed = edge_of(b, t, e);
-                    if b.edge_target(ed) == k && self.header_of_value(b, h, b.edge_arg(ed, q)) != px {
+                    if b.edge_target(ed) == k && self.exit_value(b, h, t, ed, q) != px {
                         return NONE;
                     }
                 }
@@ -2140,6 +2157,29 @@ extend Live {
             return NONE;
         }
         return hp;
+    }
+
+    // The parameter value of loop header `h` that argument `q` of edge `ed` of terminator `t` continues: the
+    // one the other edge of `t`, a back edge to `h`, passes it to (that edge's moves before the branch then
+    // serve `ed` too), else `header_of_value`.
+    fn exit_value(self: &Self, b: &Body, h: u32, t: Inst, ed: u32, q: u32) u32 {
+        let v = b.edge_arg(ed, q);
+        if t.op == O_BR {
+            let o = if ed == t.b {
+                t.c
+            } else {
+                t.b
+            };
+            if b.edge_target(o) == h {
+                let hb = b.blocks[h as usize];
+                for j in 0..hb.param_len as u32 {
+                    if b.edge_arg(o, j) == v {
+                        return b.insts.len() as u32 + hb.param_start + j;
+                    }
+                }
+            }
+        }
+        return self.header_of_value(b, h, v);
     }
 
     // The parameter value of loop header `h` that `v` of `b` is: the parameter itself, or the value a back

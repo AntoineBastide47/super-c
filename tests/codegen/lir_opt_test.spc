@@ -7591,3 +7591,84 @@ data @w size 4 align 2
     let none: []u64 = [];
     same_result(&b, &a, "g", none, 42);
 }
+
+// The place a loop keeps in a register (`promote_places`) is kept before the loop transforms: the final
+// value of the loop's sum through an exclusive referent leaves no loop (`*d += n * *a`).
+@test
+fn an_exclusive_referent_sums_without_a_loop() {
+    let (b, a) = optimized_loops(
+        M"(lir ptr 8
+sym @acc fn global noinline
+sym @run fn global
+sym @d data global
+sym @x data global
+fn @acc
+  sig (ptr, ptr, i32) -> void
+  ref p0 4 noalias
+  ref p1 4 readonly
+b0(v0: ptr, v1: ptr, v2: i32):
+  v3 = iconst.i32 0
+  v4 = iconst.i32 1
+  v5 = icmp.ne v2, v3
+  br v5, b1(v3), b2
+b1(v6: i32):
+  v7 = load.i32 v0 align 2
+  v8 = load.i32 v1 align 2
+  v9 = add.i32 v7, v8
+  store v9, v0 align 2
+  v10 = add.i32 v6, v4
+  v11 = icmp.ult v10, v2
+  br v11, b1(v10), b2
+b2:
+  ret
+fn @run
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = symaddr @d
+  v2 = symaddr @x
+  call @acc(v1, v2, v0) : (ptr, ptr, i32) -> void
+  v3 = load.i32 v1 align 2
+  ret v3
+data @d size 4 align 2 bytes 05000000
+data @x size 4 align 2 bytes 07000000
+)",
+        0,
+        false,
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 512 },
+    );
+    let t = text_of(&a, "acc");
+    assert(count_of(&t, "load.") == 2 && count_of(&t, "store ") == 1 && t.contains("mul.i32"), t.as_str());
+    for n in 0..6u64 {
+        let args: []u64 = [n];
+        same_result(&b, &a, "run", args, 5 + 7 * n);
+    }
+}
+
+// A loop exit whose arguments the back edge passes too keeps them on the branch: `split_exits` gives it no
+// block of its own, and the back edge's moves before the branch serve it.
+@test
+fn exits_that_share_the_back_edge_keep_their_arguments() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @gcd fn global
+fn @gcd
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.eq v1, v2
+  br v3, b2(v0), b1(v0, v1)
+b1(v4: i32, v5: i32):
+  v6 = urem.i32 v4, v5
+  v7 = icmp.eq v6, v2
+  br v7, b2(v5), b1(v5, v6)
+b2(v8: i32):
+  ret v8
+)",
+    );
+    let g = text_of(&a, "gcd");
+    assert(g.contains("br v7, b2(v5), b1(v5, v6)"), g.as_str());
+    for (x, y, r) in [(12u64, 18u64, 6u64), (7, 0, 7), (0, 5, 5), (35, 14, 7)] {
+        let args: []u64 = [x, y];
+        same_result(&b, &a, "gcd", args, r);
+    }
+}

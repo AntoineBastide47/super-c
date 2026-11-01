@@ -1254,7 +1254,9 @@ extend Opt {
 
     /// Give each loop exit of body `b` that passes arguments from a branch whose other side stays in the
     /// loop a block of its own that jumps on with them: the native layout places that block after the
-    /// loop, so the loop's path takes no branch around the exit's moves. Whether any.
+    /// loop, so the loop's path takes no branch around the exit's moves. Not an exit whose arguments the
+    /// other side passes too: an exit parameter shares the register of the loop's parameter that takes the
+    /// same value (`lv::Live::share`), and the back edge's moves before the branch serve both. Whether any.
     pub(package) fn split_exits(self: &mut Self, pk: &Package, b: &mut Body) bool {
         if b.naked {
             return false;
@@ -1280,7 +1282,15 @@ extend Opt {
             } else {
                 t.b
             };
-            if b.edge_nargs(e) == 0 {
+            if b.edge_nargs(e) == 0 || args_among(
+                b,
+                e,
+                if ib {
+                    t.b
+                } else {
+                    t.c
+                },
+            ) {
                 continue;
             }
             let x = b.add_block(none);
@@ -9697,6 +9707,11 @@ extend Run {
         if sc.o.split_wide(p, b) {
             let _ = sc.o.run(p, b, true);
         }
+        // The places loops keep in registers, before the loop transforms: a final value then takes a sum
+        // that went through memory.
+        if sc.o.promote_places(p, b) {
+            let _ = sc.o.run(p, b, true);
+        }
         // A body callers may inline keeps its form before the loop transforms and the packing: when those
         // make vectors or rotate its loops (a rotated loop is no counted one a caller's vectorizer reads),
         // callers inline that form, as LLVM vectorizes after inlining. A caller packs its
@@ -13595,6 +13610,20 @@ fn direct_calls(pk: &mut Package) {
         t.op = O_CALL;
         t.a = s;
     }
+}
+
+// Whether every argument of edge `e` of `b` is an argument of edge `o` too.
+fn args_among(b: &Body, e: u32, o: u32) bool {
+    for q in 0..b.edge_nargs(e) {
+        let mut found = false;
+        for j in 0..b.edge_nargs(o) {
+            found = found || b.edge_arg(o, j) == b.edge_arg(e, q);
+        }
+        if !found {
+            return false;
+        }
+    }
+    return true;
 }
 
 // At most RET_EDGES branch edges of a body return through blocks of their own (`ret_edges`).

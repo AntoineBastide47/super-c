@@ -1472,9 +1472,13 @@ extend Gen {
     // operation, but an operation on vectors in xmm registers alone (`vreg`); 8 for an unsigned 64-bit
     // multiplication with overflow (rax and rdx, the values moved out of them, the operands, the flag and
     // the result); 7 for a division and a high multiplication (the same but the flag); 6 for an atomic
-    // operation; 5 for a shift and a select; 4 for the others.
+    // operation; 5 for a shift and a select; a branch on two folded comparisons by `conj_need`; 4 for the
+    // others.
     fn need(self: &mut Self, i: u32) u32 {
         let t = self.b().insts[i as usize];
+        if t.op == O_BR && self.folded(t.a) && (self.b().insts[t.a as usize].op == O_AND || self.b().insts[t.a as usize].op == O_OR) {
+            return self.conj_need(t);
+        }
         if !self.vreg[i as usize] {
             if in_mem(t.ty) || t.op == O_VOP || t.op == O_ASM || t.op == O_SYS {
                 return 8;
@@ -1503,6 +1507,34 @@ extend Gen {
             return 6;
         }
         return 4;
+    }
+
+    // The integer registers branch `t` on two folded comparisons holds at once (`branch_conj`, which locks
+    // the registers of the values it reads): each comparison operand and edge argument but a constant, and
+    // one a comparison loads an operand into; 4 to 8.
+    fn conj_need(self: &mut Self, t: Inst) u32 {
+        let b = self.b();
+        let c = b.insts[t.a as usize];
+        let ops: [Value; 4] = [
+            b.insts[c.a as usize].a,
+            b.insts[c.a as usize].b,
+            b.insts[c.b as usize].a,
+            b.insts[c.b as usize].b,
+        ];
+        lv::each_use(b, t, &mut self.uses);
+        let mut n: u32 = 1;
+        let mut k: u64 = 0;
+        for q in 0..self.uses.len() {
+            if self.uses[q] != t.a && !self.const_of(self.uses[q], &mut k) {
+                n += 1;
+            }
+        }
+        for q in 0..4usize {
+            if !self.const_of(ops[q], &mut k) {
+                n += 1;
+            }
+        }
+        return n.max(4).min(8);
     }
 
     // Whether both operands of `t` fold into it: a rotation (`lv::FOLD_ROT`), which may take its amount in
@@ -3440,10 +3472,13 @@ extend Gen {
             let tb = b.blocks[b.edge_target(ed) as usize];
             for q in 0..tb.param_len as u32 {
                 let x = ni + tb.param_start + q;
-                // The return register, else the register home of an argument that dies here, given up: kept
-                // busy again when the parameter does not take it (its class is another), as the argument
-                // holds it until the edge moves.
+                // The return register when no home holds it, else the register home of an argument that dies
+                // here, given up: kept busy again when the parameter does not take it (its class is another),
+                // as the argument holds it until the edge moves.
                 let mut r = self.ret_reg(b, x);
+                if r != NOREG && (self.fixed_busy & bit(r)) != 0 {
+                    r = NOREG;
+                }
                 let hd = r == NOREG;
                 if hd {
                     r = self.home_dying(b.edge_arg(ed, q));
@@ -3502,9 +3537,9 @@ extend Gen {
             return NOREG;
         }
         let va = self.va[x as usize];
-        // Not one a later parameter shares (`heir`), which takes the register over, nor one that shares
-        // another's (`back_share`: the owner keeps it).
-        return if va.home == H_FIXED && va.reg != NOREG && self.owner[va.reg as usize] == x && self.heir[va.reg as usize] == NONE && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos {
+        // Not one a later parameter shares (`heir`, unless the parameter is `x`, which took the register
+        // over), nor one that shares another's (`back_share`: the owner keeps it).
+        return if va.home == H_FIXED && va.reg != NOREG && self.owner[va.reg as usize] == x && (self.heir[va.reg as usize] == NONE || self.heir[va.reg as usize] == x) && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos {
             va.reg
         } else {
             NOREG
@@ -4693,9 +4728,10 @@ extend Gen {
         } else {
             self.reg(t.a)
         };
-        // A clz or popcnt reads its operand before it writes: the result may take a dying operand's register.
-        // ctz's `tzcnt` presets a register of its own.
-        let rd = if t.op == O_CTZ {
+        // A clz or popcnt reads its operand before it writes: the result may take a dying operand's register,
+        // unless the next instruction takes it in one (`next_reg`). ctz's `tzcnt` presets a register of its
+        // own.
+        let rd = if t.op == O_CTZ || self.next_reg(i) != NOREG {
             self.def(i)
         } else {
             self.def_over(i, t.a, r)
@@ -7917,9 +7953,14 @@ extend Gen {
     // (`edge_homes`), a value that dies in this block, or a copy (its home elsewhere) that `o`'s target
     // does not keep.
     fn early_ok(self: &Self, e: u32, o: u32) bool {
-        if self.early_moves(e, o) {
-            return true;
-        }
+        return self.early_moves(e, o) || self.moves_free(e, o, false);
+    }
+
+    // Whether the register homes edge `e`'s moves write hold no value the path of edge `o` reads: each holds
+    // `e`'s parameter of a later block (`edge_homes`), a value that dies in this block, or a copy (its home
+    // elsewhere) that `o`'s target does not keep; and, unless `o`'s moves are among `e`'s (`within`: those
+    // moves then serve `o` too), no argument of `o` is in one.
+    fn moves_free(self: &Self, e: u32, o: u32, within: bool) bool {
         let b = self.b();
         let sp = self.lv.pos[b.edge_target(o) as usize];
         let kept = sp == self.pos + 1 && self.continues(sp);
@@ -7946,7 +7987,7 @@ extend Gen {
             }
             for j in 0..b.edge_nargs(o) {
                 let l = self.loc_of(self.vx(b.edge_arg(o, j)));
-                if l.kind == LC_REG && l.reg == r {
+                if !within && l.kind == LC_REG && l.reg == r {
                     return false;
                 }
             }
@@ -8128,6 +8169,26 @@ extend Gen {
             }
         } else if mt && mf && self.same_moves(et, ef) {
             self.flag_moves(et);
+            if tt == next {
+                self.cbranch(x::invert(cc), tf);
+            } else {
+                self.cbranch(cc, tt);
+                self.goto(tf, false);
+            }
+        } else if mt && mf && (self.moves_within(et, ef) && self.moves_free(ef, et, true) || self.moves_within(ef, et) && self.moves_free(
+            et,
+            ef,
+            true,
+        )) {
+            // One edge's moves are among the other's: those before the branch serve both (a loop's exit that
+            // takes a value its back edge also passes on).
+            self.flag_moves(
+                if self.moves_within(et, ef) {
+                    ef
+                } else {
+                    et
+                },
+            );
             if tt == next {
                 self.cbranch(x::invert(cc), tf);
             } else {

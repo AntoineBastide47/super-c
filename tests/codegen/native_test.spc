@@ -989,6 +989,188 @@ b0(v0: i64):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Returned values that take the return register or a dying argument's home: a shift loop unrolled by 4
+// whose remainder loop and exit take the registers its last values leave (`home_dying` when the value
+// already took a loop parameter's register over), a bit count and a constant minus a leading zero count
+// that the return reads (`next_reg`, a constant's temporary given to the result: `take_dying`).
+@test
+fn returned_values_take_their_registers_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @shl fn global
+sym @pop fn global
+sym @lg2 fn global
+fn @shl
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 4
+  v2 = iconst.i32 1
+  v3 = iconst.i32 0
+  v4 = iconst.i32 -4
+  v5 = and.i32 v0, v4
+  v6 = icmp.ne v5, v3
+  br v6, b2(v3, v2), b3(v3, v2)
+b1(v7: i32, v8: i32):
+  v9 = shl.i32 v7, v2
+  v10 = add.i32 v8, v2
+  v11 = icmp.ult v10, v0
+  br v11, b1(v9, v10), b5
+b2(v12: i32, v13: i32):
+  v14 = shl.i32 v13, v1
+  v15 = add.i32 v12, v1
+  v16 = icmp.ne v15, v5
+  br v16, b2(v15, v14), b3(v15, v14)
+b3(v17: i32, v18: i32):
+  v19 = icmp.ult v17, v0
+  br v19, b1(v18, v17), b4(v18)
+b4(v20: i32):
+  ret v20
+b5:
+  ret v9
+fn @pop
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = popcnt.i64 v0
+  ret v1
+fn @lg2
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = clz.i32 v0
+  v2 = iconst.i32 32
+  v3 = sub.i32 v2, v1
+  ret v3
+)";
+    let drv = M"(#include <stdint.h>
+uint32_t shl(uint32_t);
+int64_t pop(int64_t);
+uint32_t lg2(uint32_t);
+int main(void) {
+  for (uint32_t n = 0; n < 40; n++)
+    if (shl(n) != (n < 32 ? 1u << n : 0u)) return 1;
+  for (int k = 0; k < 64; k++) {
+    uint64_t x = 0x9E3779B97F4A7C15ull >> k;
+    if (pop((int64_t)x) != __builtin_popcountll(x)) return 2;
+    uint32_t y = (uint32_t)(x >> 32) >> (k & 31);
+    if (lg2(y) != (y == 0 ? 0u : 32u - (uint32_t)__builtin_clz(y))) return 3;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_popcnt(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// A switch whose cases pass constants to one block and whose blocks after it pass constants to blocks
+// that store and return, the arguments' homes dying at the edges: every register home ends with its value
+// (`a64gen`'s check at the body's end).
+@test
+fn constant_edges_after_a_switch_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @__sc_panic fn global
+sym @range fn global
+fn @range
+  sig (i32, i8, ptr, ptr) -> void
+  ref p2 16 noalias
+  ref p3 16 noalias
+  bool p1
+b0(v0: i32, v1: i8, v2: ptr, v3: ptr):
+  v4 = iconst.i8 4
+  v5 = iconst.i64 0
+  v6 = iconst.i8 7
+  v7 = iconst.i64 64
+  v8 = iconst.i64 1
+  v9 = iconst.i64 9223372036854775807
+  v10 = iconst.i64 -1
+  v11 = iconst.i32 0
+  v12 = iconst.i32 64
+  v13 = iconst.i32 32
+  v14 = iconst.i32 16
+  v15 = iconst.i32 8
+  switch v0 [2 -> b2(v15), 7 -> b2(v15), 3 -> b2(v14), 8 -> b2(v14), 4 -> b2(v13), 9 -> b2(v13), 5 -> b2(v12), 10 -> b2(v12), 6 -> b1, 11 -> b1] else b2(v11)
+b1:
+  v16 = select.i32 v1, v13, v12
+  jmp b3(v16)
+b2(v17: i32):
+  jmp b3(v17)
+b3(v18: i32):
+  v19 = zext.i64 v18
+  v20 = trunc.i8 v0
+  v21 = sub.i8 v20, v6
+  v22 = icmp.ule v21, v4
+  br v22, b7, b4
+b4:
+  v23 = icmp.eq v18, v12
+  br v23, b6(v9), b5
+b5:
+  v24 = sub.i64 v19, v8
+  v25 = icmp.uge v24, v7
+  br v25, b10, b11
+b6(v26: i64):
+  v27 = sub.i64 v5, v26
+  v28 = sub.i64 v27, v8
+  v29 = iconst.i64 63
+  v30 = ashr.i64 v28, v29
+  store v28, v2 align 0
+  store v30, v2+8 align 0
+  v31 = ashr.i64 v26, v29
+  store v26, v3 align 0
+  store v31, v3+8 align 0
+  ret
+b7:
+  v32 = icmp.eq v18, v12
+  br v32, b9(v10), b8
+b8:
+  v33 = icmp.uge v18, v12
+  br v33, b12, b13
+b9(v34: i64):
+  store v5, v2 align 0
+  store v5, v2+8 align 0
+  store v34, v3 align 0
+  store v5, v3+8 align 0
+  ret
+b10: cold
+  panic "attempt to shift left with overflow"
+b11:
+  v35 = shl.i64 v8, v24
+  v36 = sub.i64 v35, v8
+  jmp b6(v36)
+b12: cold
+  panic "attempt to shift left with overflow"
+b13:
+  v37 = shl.i64 v8, v19
+  v38 = sub.i64 v37, v8
+  jmp b9(v38)
+)";
+    let drv = M"(#include <stdint.h>
+void range(int32_t, int8_t, int64_t *, int64_t *);
+void __sc_panic(const char *m) { (void)m; __builtin_trap(); }
+int main(void) {
+  for (int32_t k = 2; k < 12; k++)
+    for (int8_t b = 0; b < 2; b++) {
+      int64_t lo[2], hi[2];
+      range(k, b, lo, hi);
+      int w = k == 2 || k == 7 ? 8 : k == 3 || k == 8 ? 16 : k == 4 || k == 9 ? 32 : k == 5 || k == 10 ? 64 : b ? 32 : 64;
+      if (k >= 7) {
+        uint64_t m = w == 64 ? ~0ull : (1ull << w) - 1;
+        if (lo[0] != 0 || lo[1] != 0 || hi[0] != (int64_t)m || hi[1] != 0) return 1;
+      } else {
+        int64_t top = w == 64 ? INT64_MAX : (int64_t)((1ull << (w - 1)) - 1);
+        if (lo[0] != -top - 1 || lo[1] != -1 || hi[0] != top || hi[1] != 0) return 2;
+      }
+    }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // Loops whose exit passes a value the back edge passes on too (a swap: Euclid's remainders, Fibonacci
 // pairs), ending on a register test or on flags: one edge's moves among the other's run before the branch
 // (arm64 `homes_free`), the test's register kept.

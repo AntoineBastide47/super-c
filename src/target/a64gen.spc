@@ -498,7 +498,7 @@ extend Gen {
 
     // The register the instruction after instruction `v` in its block takes `v` in, when that is `v`'s
     // only use: a call's scalar register argument, or the result; so `v` is there for it. NOREG when not,
-    // or when a value (but one in `free`) or the current instruction holds that register.
+    // or when a value or the current instruction holds that register (but one in `free`).
     fn next_reg(self: &mut Self, v: Value, free: u64) u8 {
         if (v & (VPARAM | VFLAG)) != 0 {
             return NOREG;
@@ -565,7 +565,7 @@ extend Gen {
             }
             return self.jump_reg(b, t, v);
         }
-        if r == NOREG || (((self.held | self.lock | self.fixed_busy) & ~free | self.tmps) & bit(r)) != 0 || ((XALLOC | valloc()) & bit(
+        if r == NOREG || ((self.held | self.lock | self.fixed_busy | self.tmps) & ~free & bit(r)) != 0 || ((XALLOC | valloc()) & bit(
             r,
         )) == 0 {
             return NOREG;
@@ -574,8 +574,8 @@ extend Gen {
     }
 
     // `def_step` of instruction `i` into the register the next instruction takes it in (`next_reg`) when a
-    // value that dies at `i` holds that register: `i`'s one machine instruction reads it before it writes.
-    // NOREG when not.
+    // value that dies at `i`, or a constant `i` reads (`remat`), holds that register: `i`'s one machine
+    // instruction reads it before it writes. NOREG when not.
     fn take_dying(self: &mut Self, i: u32) u8 {
         let mut free: u64 = 0;
         for k in 0..self.dying.len() {
@@ -585,6 +585,12 @@ extend Gen {
                 free |= bit(va.reg);
             }
         }
+        for k in 0..self.remat.len() {
+            let r = self.remat[k] as u8;
+            if (self.tmps & bit(r)) != 0 && ((XALLOC | valloc()) & bit(r)) != 0 {
+                free |= bit(r);
+            }
+        }
         if free == 0 || self.va[i as usize].home != H_NONE || self.fix_class(i) != FIX_NONE {
             return NOREG;
         }
@@ -592,7 +598,11 @@ extend Gen {
         if r == NOREG || (free & bit(r)) == 0 {
             return NOREG;
         }
-        self.drop_reg(self.owner[r as usize]);
+        if (self.tmps & bit(r)) != 0 {
+            self.tmps &= ~bit(r);
+        } else {
+            self.drop_reg(self.owner[r as usize]);
+        }
         self.bind(i, r);
         return r;
     }
@@ -2734,10 +2744,13 @@ extend Gen {
             let tb = b.blocks[b.edge_target(ed) as usize];
             for q in 0..tb.param_len as u32 {
                 let x = ni + tb.param_start + q;
-                // The return register, else the register home of an argument that dies here, given up: kept
-                // busy again when the parameter does not take it (its class is another), as the argument
-                // holds it until the edge moves.
+                // The return register when no home holds it, else the register home of an argument that dies
+                // here, given up: kept busy again when the parameter does not take it (its class is another),
+                // as the argument holds it until the edge moves.
                 let mut r = self.ret_reg(b, x);
+                if r != NOREG && (self.fixed_busy & bit(r)) != 0 {
+                    r = NOREG;
+                }
                 let hd = r == NOREG;
                 if hd {
                     r = self.home_dying(b.edge_arg(ed, q));
@@ -2796,9 +2809,9 @@ extend Gen {
             return NOREG;
         }
         let va = self.va[x as usize];
-        // Not one a later parameter shares (`heir`), which takes the register over, nor one that shares
-        // another's (`back_share`: the owner keeps it).
-        return if va.home == H_FIXED && va.reg != NOREG && self.owner[va.reg as usize] == x && self.heir[va.reg as usize] == NONE && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos {
+        // Not one a later parameter shares (`heir`, unless the parameter is `x`, which took the register
+        // over), nor one that shares another's (`back_share`: the owner keeps it).
+        return if va.home == H_FIXED && va.reg != NOREG && self.owner[va.reg as usize] == x && (self.heir[va.reg as usize] == NONE || self.heir[va.reg as usize] == x) && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos {
             va.reg
         } else {
             NOREG
