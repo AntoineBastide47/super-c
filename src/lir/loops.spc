@@ -7122,10 +7122,19 @@ const PIV_MAX: usize = 8;
 /// less that one, so the last reads it at 0, and it steps right before the back edge (the code generator
 /// steps it in that access: arm64's post-indexed `ldr`, `ldp`, `str`, `stp`), where each iteration added
 /// the scaled counter to the base. A counter that only steps, indexes them and meets its bound gives
-/// its exit test to the first pointer and goes. Whether it changed a loop; the walk then renumbers the
-/// body.
+/// its exit test to the first pointer and goes. Whether it changed a loop; the caller's rebuild then
+/// drops what it left unused and renumbers the body (`opt::Opt::pointer_ivs`).
 pub(package) fn pointer_ivs(b: &mut Body) bool {
     let nb = b.blocks.len();
+    // A loop of one block branches to itself: without one, nothing to do.
+    let mut self_loop = false;
+    for k in 0..nb {
+        let t = term(b, k as u32);
+        self_loop = self_loop || t.op == O_BR && (b.edge_target(t.b) == k as u32 || b.edge_target(t.c) == k as u32);
+    }
+    if !self_loop {
+        return false;
+    }
     // Per block, the edges into it and the last block an edge from another block enters from.
     let mut into = Vector::<u32>::new();
     let mut from = Vector::<u32>::new();
@@ -7308,40 +7317,6 @@ fn piv_loop(b: &mut Body, h: u32, e: u32) bool {
     let ni = b.insts.len();
     let npar = b.params.len();
     let last = hb.start + hb.len - 1;
-    // The new preheader: the entry edge's arguments, each pointer's initial value, then the loop.
-    let mut tys = Vector::<u8>::new();
-    for q in 0..hb.param_len as u32 {
-        tys.push(b.params[(hb.param_start + q) as usize]);
-    }
-    let pre = b.add_block(&tys);
-    b.begin(pre);
-    let mut args = Vector::<Value>::new();
-    for q in 0..hb.param_len as u32 {
-        args.push(b.param(pre, q));
-    }
-    for x in 0..ps.len() {
-        if used[x] != NONE {
-            let p = ps[x];
-            let c0 = b.param(pre, p.q);
-            args.push(
-                piv_put(
-                    b,
-                    Inst { op: O_PTRADD, ty: T_PTR, aux: p.scale, a: p.base, b: c0, c: (p.bias as i32) as u32 },
-                    hb.start,
-                ),
-            );
-        }
-    }
-    // The first pointer's value past the last iteration, for the exit test.
-    let end = if test != VNONE {
-        let f = ps[first as usize];
-        piv_put(b, Inst { op: O_PTRADD, ty: T_PTR, aux: f.scale, a: f.base, b: bound, c: (f.bias as i32) as u32 }, test)
-    } else {
-        VNONE
-    };
-    let to_h = b.edge(h, &args);
-    let _ = piv_put(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_h, b: 0, c: 0 }, last);
-    // The entry edge enters the new preheader with its arguments.
     let ee = if te.op == O_JMP {
         te.a
     } else if b.edge_target(te.b) == h {
@@ -7349,11 +7324,33 @@ fn piv_loop(b: &mut Body, h: u32, e: u32) bool {
     } else {
         te.c
     };
-    args.truncate(0);
+    // The new preheader: each pointer's initial value from the entry edge's counter, then the loop with
+    // the entry edge's arguments and those.
+    let none: []u8 = [];
+    let pre = b.add_block(none);
+    b.begin(pre);
+    let mut args = Vector::<Value>::new();
     for q in 0..b.edge_nargs(ee) {
         args.push(b.edge_arg(ee, q));
     }
-    let to_pre = b.edge(pre, &args);
+    for x in 0..ps.len() {
+        if used[x] != NONE {
+            let p = ps[x];
+            let v = piv_at(b, p, b.edge_arg(ee, p.q), hb.start);
+            args.push(v);
+        }
+    }
+    // The first pointer's value past the last iteration, for the exit test.
+    let end = if test != VNONE {
+        piv_at(b, ps[first as usize], bound, test)
+    } else {
+        VNONE
+    };
+    let to_h = b.edge(h, &args);
+    let _ = piv_put(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_h, b: 0, c: 0 }, last);
+    // The entry edge enters the new preheader.
+    let noargs: []Value = [];
+    let to_pre = b.edge(pre, noargs);
     let ek = b.blocks[e as usize];
     let ti = (ek.start + ek.len - 1) as usize;
     if te.op == O_JMP {
@@ -7383,15 +7380,17 @@ fn piv_loop(b: &mut Body, h: u32, e: u32) bool {
     let p0 = start + hb.param_len as u32;
     b.blocks.index_mut(h as usize).param_start = start;
     b.blocks.index_mut(h as usize).param_len = hb.param_len + np as u16;
-    // The loop again: each address of a pointer its offset from it, each pointer's step, the terminator.
+    // The loop again: each access through an address of a pointer at its offset from it (the address
+    // stays for its other readers), each pointer's step, the terminator.
     b.begin(h);
     for i in hb.start..last {
         if i == test {
             continue;
         }
+        let s = b.insts[i as usize];
         let g = of[(i - hb.start) as usize];
-        let t = if g != NONE && used[g as usize] != NONE {
-            let off = (b.insts[i as usize].c as i32) as i64 - ps[g as usize].bias;
+        let mut t = if g != NONE && used[g as usize] != NONE {
+            let off = (s.c as i32) as i64 - ps[g as usize].bias;
             Inst {
                 op: O_PTRADD,
                 ty: T_PTR,
@@ -7401,8 +7400,18 @@ fn piv_loop(b: &mut Body, h: u32, e: u32) bool {
                 c: (off as i32) as u32,
             }
         } else {
-            piv_mapped(b, b.insts[i as usize], &map, ni, npar, &mut es)
+            piv_mapped(b, s, &map, ni, npar, &mut es)
         };
+        if (s.op == O_LOAD || s.op == O_STORE) && piv_inst(hb, s.a) {
+            let ga = of[(s.a - hb.start) as usize];
+            if ga != NONE && used[ga as usize] != NONE {
+                let off = (b.insts[s.a as usize].c as i32) as i64 - ps[ga as usize].bias + (s.c as i32) as i64;
+                if off >= -0x80000000 && off <= 0x7FFFFFFF {
+                    t.a = VPARAM | p0 + used[ga as usize];
+                    t.c = (off as i32) as u32;
+                }
+            }
+        }
         map[i as usize] = piv_put(b, t, i);
     }
     let mut steps = Vector::<Value>::new();
@@ -7462,6 +7471,25 @@ fn piv_loop(b: &mut Body, h: u32, e: u32) bool {
         }
     }
     return true;
+}
+
+// At the end of the block begun last, with instruction `from`'s location: pointer `p`'s base plus index
+// `x` times its scale plus its bias, the index folded into the offset when a constant the offset holds.
+fn piv_at(b: &mut Body, p: Piv, x: Value, from: u32) Value {
+    if x != VNONE && (x & (VPARAM | VFLAG)) == 0 && b.insts[x as usize].op == O_ICONST {
+        let k = raw_const(b, x) as i64;
+        if k > -0x80000000 && k < 0x80000000 {
+            let off = k * p.scale as i64 + p.bias;
+            if off >= -0x80000000 && off <= 0x7FFFFFFF {
+                return piv_put(
+                    b,
+                    Inst { op: O_PTRADD, ty: T_PTR, aux: 0, a: p.base, b: VNONE, c: (off as i32) as u32 },
+                    from,
+                );
+            }
+        }
+    }
+    return piv_put(b, Inst { op: O_PTRADD, ty: T_PTR, aux: p.scale, a: p.base, b: x, c: (p.bias as i32) as u32 }, from);
 }
 
 // Whether `v` is a parameter of block `hb`.

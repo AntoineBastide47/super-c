@@ -855,6 +855,22 @@ extend Opt {
         return any;
     }
 
+    /// `lu::pointer_ivs` on body `b` of package `pk`, then the rebuild, which drops what it left unused (the
+    /// addresses its accesses no longer read, a counter whose exit test went) and renumbers the body.
+    /// Whether it changed it.
+    pub(package) fn pointer_ivs(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        if !lu::pointer_ivs(b) {
+            return false;
+        }
+        // The rebuild reads the block map alone (`fresh`).
+        self.forget();
+        self.tables(pk, b, K_GRAPH);
+        self.fresh(b);
+        self.rebuild(b);
+        self.forget();
+        return true;
+    }
+
     // The analyses up to level `want` (`K_*`) for body `b`: those `kept` lacks, computed.
     fn tables(self: &mut Self, pk: &Package, b: &Body, want: u8) {
         let have = self.kept;
@@ -9446,8 +9462,8 @@ extend Run {
             let _ = sc.o.run(p, b, true);
         }
         // The loops' counted addresses as pointers their accesses step, on the loops' final shape.
-        if p.postinc && lu::pointer_ivs(b) {
-            let _ = sc.o.run(p, b, true);
+        if p.postinc {
+            let _ = sc.o.pointer_ivs(p, b);
         }
         let _ = sc.o.split_exits(p, b);
         if ret_edges(b) {
