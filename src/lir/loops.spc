@@ -2452,7 +2452,7 @@ extend LoopOpt {
 
     // Whether scalar type `ty` has the plan's lane size, setting it when unset. Scalar copies mix lane
     // sizes; vectors do when the target converts them in registers (`vops`), the widest lane at most twice
-    // the narrowest, or 4 times with registers of at most 32 bytes (`plan_lanes`).
+    // the narrowest, or 8 times with registers of at most 32 bytes (`plan_lanes`).
     fn lane_size(self: &mut Self, ty: u8, ptr: u32) bool {
         let n = type_bytes(ty, ptr);
         if n == 0 || n > 8 {
@@ -2467,7 +2467,7 @@ extend LoopOpt {
         }
         let lo = self.vmin.min(n);
         let hi = self.vsz.max(n);
-        if self.vops == 0 || hi > 4 * lo || hi > 2 * lo && self.vmax > 32 {
+        if self.vops == 0 || hi > 8 * lo || hi > 2 * lo && self.vmax > 32 {
             return false;
         }
         self.vmin = lo;

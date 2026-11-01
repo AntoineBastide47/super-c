@@ -873,6 +873,251 @@ b0(v0: i32, v1: i32):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Vector constants of each MOVI form on arm64 (a repeated byte, bytes each 0 or all ones, 4- and 2-byte
+// lanes of one nonzero byte at each place, 8-byte vectors) and some of none (two bytes in a lane, words that
+// differ), stored for the driver to read.
+@test
+fn vector_constants_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @consts fn global
+fn @consts
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = wconst.v16i8 0xa0a0a0a0a0a0a0a, 0xa0a0a0a0a0a0a0a
+  store v1, v0 align 0
+  v2 = wconst.v2i64 0xff00ff0000ffff00, 0xff00ff0000ffff00
+  store v2, v0+16 align 0
+  v3 = wconst.v4i32 0x8000000080000000, 0x8000000080000000
+  store v3, v0+32 align 0
+  v4 = wconst.v4i32 0x5500000055, 0x5500000055
+  store v4, v0+48 align 0
+  v5 = wconst.v4i32 0xc0000000c000, 0xc0000000c000
+  store v5, v0+64 align 0
+  v6 = wconst.v4i32 0x7f0000007f0000, 0x7f0000007f0000
+  store v6, v0+80 align 0
+  v7 = wconst.v8i16 0x3300330033003300, 0x3300330033003300
+  store v7, v0+96 align 0
+  v8 = wconst.v8i16 0x11001100110011, 0x11001100110011
+  store v8, v0+112 align 0
+  v9 = wconst.v8i16 0x123412341234, 0x123412341234
+  store v9, v0+128 align 0
+  v10 = wconst.v2i64 0x1, 0x2
+  store v10, v0+144 align 0
+  v11 = wconst.v8i8 0xfefefefefefefefe
+  store v11, v0+160 align 0
+  ret
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\nvoid consts(uint8_t *);\nint main(void) {\n  uint8_t m[168];\n  memset(m, 0x5A, sizeof m);\n  consts(m);\n  uint64_t w[21];\n  memcpy(w, m, sizeof w);\n  const uint64_t e[21] = {0x0a0a0a0a0a0a0a0aull, 0x0a0a0a0a0a0a0a0aull, 0xff00ff0000ffff00ull, 0xff00ff0000ffff00ull, 0x8000000080000000ull, 0x8000000080000000ull, 0x5500000055ull, 0x5500000055ull, 0xc0000000c000ull, 0xc0000000c000ull, 0x7f0000007f0000ull, 0x7f0000007f0000ull, 0x3300330033003300ull, 0x3300330033003300ull, 0x11001100110011ull, 0x11001100110011ull, 0x123412341234ull, 0x123412341234ull, 1, 2, 0xfefefefefefefefeull};\n  for (int k = 0; k < 21; k++) if (w[k] != e[k]) return k + 1;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Branches on an `and` or `or` of two comparisons (x86-64: a jump after each comparison, `FOLD_BRCONJ`), one
+// whose settled edge passes values (both conditions in bytes then), and comparisons of extended values with
+// constants (compared narrow).
+@test
+fn branches_on_two_comparisons_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @inr fn global
+sym @either fn global
+sym @moved fn global
+sym @tag fn global
+fn @inr
+  sig (i32, i32, i32) -> i32
+b0(v0: i32, v1: i32, v2: i32):
+  v3 = icmp.sge v0, v1
+  v4 = icmp.sle v0, v2
+  v5 = and.i8 v3, v4
+  br v5, b1, b2
+b1:
+  v6 = iconst.i32 1
+  ret v6
+b2:
+  v7 = iconst.i32 0
+  ret v7
+fn @either
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v0, v2
+  v4 = icmp.eq v1, v2
+  v5 = or.i8 v3, v4
+  br v5, b1, b2
+b1:
+  v6 = iconst.i64 7
+  ret v6
+b2:
+  v7 = mul.i64 v0, v1
+  ret v7
+fn @moved
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 10
+  v3 = icmp.ult v0, v2
+  v4 = icmp.ugt v1, v0
+  v5 = and.i8 v3, v4
+  v6 = add.i64 v0, v1
+  v7 = sub.i64 v1, v0
+  br v5, b1(v6), b1(v7)
+b1(v8: i64):
+  ret v8
+fn @tag
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = trunc.i8 v0
+  v2 = zext.i32 v1
+  v3 = iconst.i32 200
+  v4 = icmp.ugt v2, v3
+  v5 = sext.i32 v1
+  v6 = iconst.i32 -3
+  v7 = icmp.eq v5, v6
+  v8 = zext.i32 v4
+  v9 = zext.i32 v7
+  v10 = iconst.i32 2
+  v11 = mul.i32 v9, v10
+  v12 = add.i32 v8, v11
+  ret v12
+)";
+    let drv = "#include <stdint.h>\nint32_t inr(int32_t, int32_t, int32_t);\nint64_t either(int64_t, int64_t);\nint64_t moved(uint64_t, uint64_t);\nint32_t tag(uint64_t);\nint main(void) {\n  for (int32_t x = -3; x < 4; x++)\n    for (int32_t lo = -2; lo < 2; lo++)\n      if (inr(x, lo, lo + 2) != (x >= lo && x <= lo + 2)) return 1;\n  for (int64_t a = -1; a < 2; a++)\n    for (int64_t b = -1; b < 2; b++)\n      if (either(a, b) != (a == 0 || b == 0 ? 7 : a * b)) return 2;\n  for (uint64_t a = 8; a < 12; a++)\n    for (uint64_t b = 7; b < 13; b++)\n      if (moved(a, b) != (a < 10 && b > a ? a + b : b - a)) return 3;\n  for (uint64_t v = 0; v < 512; v += 7) {\n    uint64_t x = v | 0xABCD00ull << 8;\n    uint8_t lo = (uint8_t)x;\n    if (tag(x) != (lo > 200) + 2 * ((int8_t)lo == -3)) return 4;\n  }\n  if (tag(0x1FDu) != 3) return 5;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Loops whose exit passes a value the back edge passes on too (a swap: Euclid's remainders, Fibonacci
+// pairs), ending on a register test or on flags: one edge's moves among the other's run before the branch
+// (arm64 `homes_free`), the test's register kept.
+@test
+fn loops_ending_on_a_swap_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @gcd fn global
+sym @fibm fn global
+fn @gcd
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.eq v1, v2
+  br v3, b2(v0), b1(v0, v1)
+b1(v4: i32, v5: i32):
+  v6 = urem.i32 v4, v5
+  v7 = icmp.eq v6, v2
+  br v7, b2(v5), b1(v5, v6)
+b2(v8: i32):
+  ret v8
+fn @fibm
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v2, v3, v0)
+b1(v4: i64, v5: i64, v6: i64):
+  v7 = add.i64 v4, v5
+  v8 = urem.i64 v7, v1
+  v9 = sub.i64 v6, v3
+  v10 = icmp.ult v9, v3
+  br v10, b2(v5), b1(v5, v8, v9)
+b2(v11: i64):
+  ret v11
+)";
+    let drv = "#include <stdint.h>\nuint32_t gcd(uint32_t, uint32_t);\nuint64_t fibm(uint64_t, uint64_t);\nint main(void) {\n  for (uint32_t a = 0; a < 60; a++)\n    for (uint32_t b = 0; b < 60; b++) {\n      uint32_t x = a, y = b;\n      while (y != 0) { uint32_t r = x % y; x = y; y = r; }\n      if (gcd(a, b) != x) return 1;\n    }\n  for (uint64_t n = 1; n < 40; n++) {\n    uint64_t p = 0, q = 1, k = n;\n    for (;;) { uint64_t s = (p + q) % 1000003; k--; if (k < 1) break; p = q; q = s; }\n    if (fibm(n, 1000003) != q) return 2;\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// A branch on an `and` of two comparisons whose second operand lives in memory across a call, its false
+// edge the next block: the jump after the first comparison does not take that block, which keeps the
+// registers the second comparison leaves (x86-64 `branch_conj`).
+@test
+fn a_conjunction_past_a_call_runs() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @opq fn global
+sym @conj fn global
+fn @conj
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = mul.i64 v0, v2
+  v4 = add.i64 v3, v1
+  v5 = iconst.i64 4
+  v6 = mul.i64 v0, v5
+  v7 = add.i64 v6, v1
+  v8 = iconst.i64 7
+  v9 = mul.i64 v0, v8
+  v10 = add.i64 v9, v1
+  v11 = iconst.i64 10
+  v12 = mul.i64 v0, v11
+  v13 = add.i64 v12, v1
+  v14 = iconst.i64 13
+  v15 = mul.i64 v0, v14
+  v16 = add.i64 v15, v1
+  v17 = iconst.i64 16
+  v18 = mul.i64 v0, v17
+  v19 = add.i64 v18, v1
+  v20 = iconst.i64 19
+  v21 = mul.i64 v0, v20
+  v22 = add.i64 v21, v1
+  v23 = iconst.i64 22
+  v24 = mul.i64 v0, v23
+  v25 = add.i64 v24, v1
+  v26 = iconst.i64 25
+  v27 = mul.i64 v0, v26
+  v28 = add.i64 v27, v1
+  v29 = iconst.i64 28
+  v30 = mul.i64 v0, v29
+  v31 = add.i64 v30, v1
+  v32 = iconst.i64 31
+  v33 = mul.i64 v0, v32
+  v34 = add.i64 v33, v1
+  v35 = iconst.i64 34
+  v36 = mul.i64 v0, v35
+  v37 = add.i64 v36, v1
+  v38 = iconst.i64 37
+  v39 = mul.i64 v0, v38
+  v40 = add.i64 v39, v1
+  v41 = iconst.i64 40
+  v42 = mul.i64 v0, v41
+  v43 = add.i64 v42, v1
+  call @opq() : () -> void
+  v44 = iconst.i64 12
+  v45 = icmp.eq v0, v44
+  v46 = icmp.eq v43, v44
+  v47 = and.i8 v45, v46
+  br v47, b2, b1
+b1:
+  v48 = add.i64 v4, v7
+  v49 = add.i64 v48, v10
+  v50 = add.i64 v49, v13
+  v51 = add.i64 v50, v16
+  v52 = add.i64 v51, v19
+  v53 = add.i64 v52, v22
+  v54 = add.i64 v53, v25
+  v55 = add.i64 v54, v28
+  v56 = add.i64 v55, v31
+  v57 = add.i64 v56, v34
+  v58 = add.i64 v57, v37
+  v59 = add.i64 v58, v40
+  v60 = add.i64 v59, v43
+  ret v60
+b2:
+  v61 = iconst.i64 77
+  ret v61
+)";
+    let drv = "#include <stdint.h>\nvoid opq(void) {}\nint64_t conj(int64_t, int64_t);\nint main(void) {\n  static const int64_t c[14] = {1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34, 37, 40};\n  for (int64_t a = 10; a < 14; a++)\n    for (int64_t b = -60; b < 60; b++) {\n      int64_t s = 0, last = 0;\n      for (int k = 0; k < 14; k++) { last = a * c[k] + b; s += last; }\n      int64_t want = a == 12 && last == 12 ? 77 : s;\n      if (conj(a, b) != want) return 1;\n    }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // Leading zero counts of 16 and 8 bits, every value (x86-64: the zero-extended operand's highest set bit
 // against the width's, the width for 0).
 @test
@@ -926,6 +1171,41 @@ fn libm_rounding_minimum_and_maximum_calls_run() {
     let drv = "#include <math.h>\n#include <string.h>\n#include <stdint.h>\ndouble t_floor(double);\nfloat t_floorf(float);\ndouble t_ceil(double);\nfloat t_ceilf(float);\ndouble t_round(double);\nfloat t_roundf(float);\ndouble t_trunc(double);\nfloat t_truncf(float);\ndouble t_fabs(double);\nfloat t_fabsf(float);\ndouble t_fmin(double, double);\nfloat t_fminf(float, float);\ndouble t_fmax(double, double);\nfloat t_fmaxf(float, float);\nstatic int same64(double x, double y) { uint64_t a, b; memcpy(&a, &x, 8); memcpy(&b, &y, 8); return a == b || (x != x && y != y) || (x == 0 && y == 0); }\nstatic int same32(float x, float y) { uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4); return a == b || (x != x && y != y) || (x == 0 && y == 0); }\nstatic int bits64(double x, double y) { uint64_t a, b; memcpy(&a, &x, 8); memcpy(&b, &y, 8); return a == b || (x != x && y != y); }\nstatic int bits32(float x, float y) { uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4); return a == b || (x != x && y != y); }\nint main(void) {\n  double v[14] = {0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999999999999994, 4503599627370497.0, 1e300, -INFINITY, NAN, -3.75};\n  for (int i = 0; i < 14; i++) {\n    double x = v[i];\n    float f = (float)x;\n    if (!bits64(t_floor(x), floor(x))) return 1;\n    if (!bits32(t_floorf(f), floorf(f))) return 2;\n    if (!bits64(t_ceil(x), ceil(x))) return 3;\n    if (!bits32(t_ceilf(f), ceilf(f))) return 4;\n    if (!bits64(t_round(x), round(x))) return 5;\n    if (!bits32(t_roundf(f), roundf(f))) return 6;\n    if (!bits64(t_trunc(x), trunc(x))) return 7;\n    if (!bits32(t_truncf(f), truncf(f))) return 8;\n    if (!bits64(t_fabs(x), fabs(x))) return 9;\n    if (!bits32(t_fabsf(f), fabsf(f))) return 10;\n    for (int j = 0; j < 14; j++) {\n      double y = v[j];\n      float g = (float)y;\n      if (!same64(t_fmin(x, y), fmin(x, y))) return 11;\n      if (!same32(t_fminf(f, g), fminf(f, g))) return 12;\n      if (!same64(t_fmax(x, y), fmax(x, y))) return 13;\n      if (!same32(t_fmaxf(f, g), fmaxf(f, g))) return 14;\n    }\n  }\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_sse41(lir, drv), 0);
+}
+
+// Vector extensions to lanes twice as wide, zero and sign (x86-64: SSE2's unpacking, SSE4.1's `pmovzx`
+// and `pmovsx`).
+@test
+fn vector_extensions_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @vext fn global
+fn @vext
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8i8 v0 align 0
+  v3 = zext.v8i16 v2
+  v4 = sext.v8i16 v2
+  store v3, v1+0 align 0
+  store v4, v1+16 align 0
+  v5 = load.v4i16 v0 align 0
+  v6 = zext.v4i32 v5
+  v7 = sext.v4i32 v5
+  store v6, v1+32 align 0
+  store v7, v1+48 align 0
+  v8 = load.v2i32 v0 align 0
+  v9 = zext.v2i64 v8
+  v10 = sext.v2i64 v8
+  store v9, v1+64 align 0
+  store v10, v1+80 align 0
+  ret
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\nvoid vext(const void *, void *);\n#define T(N, S, U, WS, WU, at) { S s[N]; U u[N]; WS ws[N]; WU wu[N]; memcpy(s, a, sizeof s); memcpy(u, a, sizeof u); memcpy(wu, o + at, sizeof wu); memcpy(ws, o + at + 16, sizeof ws); for (int i = 0; i < N; i++) { if (wu[i] != (WU)u[i]) return at / 32 * 2 + 1; if (ws[i] != (WS)s[i]) return at / 32 * 2 + 2; } }\nint main(void) {\n  unsigned char a[8], o[96];\n  for (int k = 0; k < 4; k++) {\n    for (int i = 0; i < 8; i++) a[i] = (unsigned char)(i * 89 + k * 61 + 200);\n    vext(a, o);\n    T(8, int8_t, uint8_t, int16_t, uint16_t, 0) T(4, int16_t, uint16_t, int32_t, uint32_t, 32) T(2, int32_t, uint32_t, int64_t, uint64_t, 64)\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_sse41(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // A select of floats of one width on a comparison of floats of the other: the comparison's own width
@@ -4134,6 +4414,83 @@ b0(v0: ptr, v1: ptr, v2: ptr):
 )";
     let wdrv = "#include <stdint.h>\n#include <string.h>\nvoid mm(const void *, const void *, void *);\n#define LANE(T, n, at) { T x[n], y[n], r[n]; memcpy(x, a, 32); memcpy(y, b, 32); memcpy(r, o + at, 32); for (int i = 0; i < n; i++) if (r[i] != (x[i] < y[i] ? x[i] : y[i])) return at / 32 + 1; memcpy(r, o + at + 32, 32); for (int i = 0; i < n; i++) if (r[i] != (x[i] > y[i] ? x[i] : y[i])) return at / 32 + 20; }\nint main(void) {\n  unsigned char a[32], b[32], o[384];\n  for (int i = 0; i < 32; i++) { a[i] = (unsigned char)(i * 73 + 129); b[i] = (unsigned char)(i * 151 + 7); }\n  mm(a, b, o);\n  LANE(int8_t, 32, 0) LANE(uint8_t, 32, 64) LANE(int16_t, 16, 128) LANE(uint16_t, 16, 192)\n  LANE(int32_t, 8, 256) LANE(uint32_t, 8, 320)\n  return 0;\n}\n";
     assert_eq(run_wide(wide, wdrv), 0);
+}
+
+// Whether any lane of an 8-byte lane mask is set (`vop.reduce_or` compared with 0): arm64's UMAXV takes 8
+// and 16-bit lanes, two 32-bit lanes another form.
+@test
+fn any_lane_of_a_narrow_mask_runs() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @anyn fn global
+fn @anyn
+  sig (ptr, ptr) -> i32
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.i32 0
+  v3 = load.v8i8 v0 align 0
+  v4 = load.v8i8 v1 align 0
+  v5 = vcmp.eq.v8i8 v3, v4
+  v6 = vcmp.ult.v8i8 v3, v4
+  v7 = or.v8i8 v5, v6
+  v8 = vop.reduce_or.i8 (v5)
+  v9 = iconst.i8 0
+  v10 = icmp.ne v8, v9
+  v11 = vop.reduce_or.i8 (v7)
+  v12 = iconst.i8 0
+  v13 = icmp.ne v11, v12
+  v14 = load.v4i16 v0 align 0
+  v15 = load.v4i16 v1 align 0
+  v16 = vcmp.eq.v4i16 v14, v15
+  v17 = vcmp.ult.v4i16 v14, v15
+  v18 = or.v4i16 v16, v17
+  v19 = vop.reduce_or.i16 (v16)
+  v20 = iconst.i16 0
+  v21 = icmp.ne v19, v20
+  v22 = vop.reduce_or.i16 (v18)
+  v23 = iconst.i16 0
+  v24 = icmp.ne v22, v23
+  v25 = load.v2i32 v0 align 0
+  v26 = load.v2i32 v1 align 0
+  v27 = vcmp.eq.v2i32 v25, v26
+  v28 = vcmp.ult.v2i32 v25, v26
+  v29 = or.v2i32 v27, v28
+  v30 = vop.reduce_or.i32 (v27)
+  v31 = iconst.i32 0
+  v32 = icmp.ne v30, v31
+  v33 = vop.reduce_or.i32 (v29)
+  v34 = iconst.i32 0
+  v35 = icmp.ne v33, v34
+  v36 = zext.i32 v10
+  v37 = iconst.i32 0
+  v38 = shl.i32 v36, v37
+  v39 = or.i32 v2, v38
+  v40 = zext.i32 v13
+  v41 = iconst.i32 1
+  v42 = shl.i32 v40, v41
+  v43 = or.i32 v39, v42
+  v44 = zext.i32 v21
+  v45 = iconst.i32 2
+  v46 = shl.i32 v44, v45
+  v47 = or.i32 v43, v46
+  v48 = zext.i32 v24
+  v49 = iconst.i32 3
+  v50 = shl.i32 v48, v49
+  v51 = or.i32 v47, v50
+  v52 = zext.i32 v32
+  v53 = iconst.i32 4
+  v54 = shl.i32 v52, v53
+  v55 = or.i32 v51, v54
+  v56 = zext.i32 v35
+  v57 = iconst.i32 5
+  v58 = shl.i32 v56, v57
+  v59 = or.i32 v55, v58
+  ret v59
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\nint32_t anyn(const void *, const void *);\n#define T(U, at) { U x[8 / sizeof(U)], y[8 / sizeof(U)]; memcpy(x, a, 8); memcpy(y, b, 8); int e = 0, o = 0; for (unsigned i = 0; i < 8 / sizeof(U); i++) { e |= x[i] == y[i]; o |= x[i] < y[i] || x[i] == y[i]; } want |= e << at | o << (at + 1); }\nstatic int check(const unsigned char *a, const unsigned char *b) {\n  int want = 0;\n  T(uint8_t, 0) T(uint16_t, 2) T(uint32_t, 4)\n  return anyn(a, b) == want;\n}\nint main(void) {\n  unsigned char a[8], b[8];\n  for (int i = 0; i < 8; i++) { a[i] = (unsigned char)(i * 37 + 3); b[i] = a[i]; }\n  if (!check(a, b)) return 1;\n  for (int i = 0; i < 8; i++) b[i] = (unsigned char)(a[i] - 1);\n  if (!check(a, b)) return 2;\n  b[7] = a[7];\n  if (!check(a, b)) return 3;\n  b[7] = (unsigned char)(a[7] + 1);\n  if (!check(a, b)) return 4;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // Whether any lane of a lane mask is set (`vop.reduce_or` compared with 0) of comparisons of every lane

@@ -7265,3 +7265,329 @@ b0(v0: i64, v1: i64):
     same_result(&b, &a, "open", o1[0..2], 0);
     same_result(&b, &a, "open", o2[0..2], 4);
 }
+
+// A comparison of an extended value with a constant its narrow type holds compares the narrow value
+// (`narrow_cmp`): equalities and unsigned orders of a zero extension, signed orders of a sign extension,
+// two values extended alike. `kept` keeps its extensions: a signed order of a zero extension, a constant
+// past the narrow type.
+@test
+fn comparisons_of_extended_values_compare_them_narrow() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @narrow fn global
+sym @kept fn global
+fn @narrow
+  sig (i8, i8, i16) -> i32
+b0(v0: i8, v1: i8, v2: i16):
+  v3 = zext.i32 v0
+  v4 = iconst.i32 200
+  v5 = icmp.ugt v3, v4
+  v6 = sext.i32 v2
+  v7 = iconst.i32 -5
+  v8 = icmp.slt v6, v7
+  v9 = zext.i32 v1
+  v10 = icmp.eq v3, v9
+  v11 = zext.i32 v5
+  v12 = zext.i32 v8
+  v13 = zext.i32 v10
+  v14 = iconst.i32 2
+  v15 = mul.i32 v12, v14
+  v16 = iconst.i32 4
+  v17 = mul.i32 v13, v16
+  v18 = add.i32 v11, v15
+  v19 = add.i32 v18, v17
+  ret v19
+fn @kept
+  sig (i8) -> i32
+b0(v0: i8):
+  v1 = zext.i32 v0
+  v2 = iconst.i32 -5
+  v3 = icmp.slt v1, v2
+  v4 = iconst.i32 300
+  v5 = icmp.ult v1, v4
+  v6 = zext.i32 v3
+  v7 = zext.i32 v5
+  v8 = add.i32 v6, v7
+  ret v8
+)",
+    );
+    let tn = text_of(&a, "narrow");
+    assert(tn.contains("iconst.i8") && tn.contains("iconst.i16"), tn.as_str());
+    let tk = text_of(&a, "kept");
+    assert(!tk.contains("iconst.i8"), tk.as_str());
+    let c1: [u64; 3] = [201, 201, 0xFFF0];
+    let c2: [u64; 3] = [7, 9, 3];
+    let c3: [u64; 3] = [255, 3, 0xFFFB];
+    same_result(&b, &a, "narrow", c1[0..3], 7);
+    same_result(&b, &a, "narrow", c2[0..3], 0);
+    same_result(&b, &a, "narrow", c3[0..3], 1);
+    let k1: [u64; 1] = [255];
+    same_result(&b, &a, "kept", k1[0..1], 1);
+}
+
+// A parameter compared with a constant takes each edge's comparison result instead (`param_cmp`), and
+// the comparison reads that result: a jump whose target only returns returns the right arm
+// (`ret_folded`, which reads the target's instructions as they stand).
+@test
+fn a_compared_parameter_returns_through_its_edges() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @tag fn global
+sym @g fn global noinline
+fn @g
+  sig () -> void
+b0:
+  ret
+fn @tag
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i8 0
+  v2 = iconst.i8 1
+  v3 = iconst.i32 0
+  v4 = iconst.i32 4
+  v5 = icmp.ne v0, v3
+  br v5, b2, b1
+b1:
+  call @g() : () -> void
+  jmp b3(v1)
+b2:
+  call @g() : () -> void
+  jmp b3(v2)
+b3(v6: i8):
+  v7 = icmp.eq v6, v1
+  v8 = select.i32 v7, v3, v4
+  ret v8
+)",
+    );
+    let tt = text_of(&a, "tag");
+    assert(!tt.contains("select"), tt.as_str());
+    let c1: [u64; 1] = [1];
+    let c0: [u64; 1] = [0];
+    same_result(&b, &a, "tag", c1[0..1], 4);
+    same_result(&b, &a, "tag", c0[0..1], 0);
+}
+
+// A dense switch that passes one block a function's address per case reads it from a read-only table
+// (`symbol_tables`): the default's address fills a hole, values past the table take the default's edge.
+@test
+fn a_switch_of_function_addresses_reads_a_table() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f0 fn global noinline
+sym @f1 fn global noinline
+sym @f2 fn global noinline
+sym @pick fn global
+sym @run fn global
+fn @f0
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 1
+  v2 = add.i32 v0, v1
+  ret v2
+fn @f1
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 3
+  v2 = mul.i32 v0, v1
+  ret v2
+fn @f2
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 7
+  v2 = xor.i32 v0, v1
+  ret v2
+fn @pick
+  sig (i32) -> ptr
+b0(v0: i32):
+  switch v0 [2 -> b1, 3 -> b2, 4 -> b3, 6 -> b2] else b4
+b1:
+  v1 = symaddr @f0
+  jmp b5(v1)
+b2:
+  v2 = symaddr @f1
+  jmp b5(v2)
+b3:
+  v3 = symaddr @f2
+  jmp b5(v3)
+b4:
+  v4 = symaddr @f2
+  jmp b5(v4)
+b5(v5: ptr):
+  ret v5
+fn @run
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = call.ptr @pick(v0) : (i32) -> ptr
+  v3 = call.ind.i32 v2(v1) : (i32) -> i32
+  ret v3
+)",
+    );
+    let tp = text_of(&a, "pick");
+    assert(!tp.contains("switch") && tp.contains("load.ptr"), tp.as_str());
+    let want: [u64; 10] = [13, 13, 11, 30, 13, 13, 30, 13, 13, 13];
+    for x in 0..10u64 {
+        let args: [u64; 2] = [x, 10];
+        same_result(&b, &a, "run", args[0..2], want[x as usize]);
+    }
+}
+
+// Branches that share one edge record into a block whose parameter a comparison with a constant reads:
+// `param_cmp` passes the comparison's result along that edge once, not once per branch.
+@test
+fn a_shared_edge_passes_a_compared_parameter_once() {
+    let text = M"(lir ptr 8
+sym @g fn global noinline
+sym @f fn global
+fn @g
+  sig () -> void
+b0:
+  ret
+fn @f
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i8 0
+  v4 = iconst.i8 1
+  v5 = iconst.i32 5
+  v6 = iconst.i32 6
+  v7 = icmp.eq v0, v2
+  br v7, b1, b2
+b1:
+  call @g() : () -> void
+  v8 = icmp.eq v1, v5
+  br v8, b5(v4), b3
+b2:
+  call @g() : () -> void
+  v9 = icmp.eq v1, v6
+  br v9, b5(v4), b4
+b3:
+  jmp b5(v3)
+b4:
+  v10 = iconst.i32 40
+  ret v10
+b5(v11: i8):
+  v12 = icmp.eq v11, v3
+  br v12, b6, b7
+b6:
+  v13 = iconst.i32 10
+  ret v13
+b7:
+  v14 = iconst.i32 20
+  ret v14
+)";
+    let mut err = String::new();
+    let q = lparse::parse(text, &mut err);
+    assert(q.is_some(), err.as_str());
+    let before = q.unwrap();
+    let mut after = lparse::parse(text, &mut err).unwrap();
+    for k in 0..after.bodies.len() {
+        share_edges(after.bodies.index_mut(k));
+    }
+    let none = Vector::<bool>::new();
+    lopt::optimize(
+        &mut after,
+        &none,
+        lopt::Config {
+            inline: il::SPEED,
+            loops: lu::Budgets {
+                peel: 0,
+                partial: 0,
+                version: 0,
+                unswitch: 0,
+                rotate: 0,
+                vector: 0,
+                interleave: 0,
+                fin: 0,
+            },
+        },
+    );
+    let c05: [u64; 2] = [0, 5];
+    let c06: [u64; 2] = [1, 6];
+    let c07: [u64; 2] = [0, 7];
+    let c17: [u64; 2] = [1, 7];
+    same_result(&before, &after, "f", c05[0..2], 20);
+    same_result(&before, &after, "f", c06[0..2], 20);
+    same_result(&before, &after, "f", c07[0..2], 10);
+    same_result(&before, &after, "f", c17[0..2], 40);
+}
+
+// Each branch edge of `b` equal to an earlier one (target and arguments) becomes that edge.
+fn share_edges(b: &mut Body) {
+    let mut seen = Vector::<u32>::new();
+    for k in 0..b.blocks.len() {
+        let bk = b.blocks[k];
+        if bk.len == 0 {
+            continue;
+        }
+        let at = (bk.start + bk.len - 1) as usize;
+        let mut t = b.insts[at];
+        if t.op == O_JMP {
+            t.a = shared_edge(b, &mut seen, t.a);
+        } else if t.op == O_BR {
+            t.b = shared_edge(b, &mut seen, t.b);
+            t.c = shared_edge(b, &mut seen, t.c);
+        }
+        b.insts[at] = t;
+    }
+}
+
+// The edge of `seen` equal to edge `e` of `b`, else `e`, which `seen` takes.
+fn shared_edge(b: &Body, seen: &mut Vector<u32>, e: u32) u32 {
+    for j in 0..seen.len() {
+        let s = seen[j];
+        let mut same = b.edge_target(s) == b.edge_target(e) && b.edge_nargs(s) == b.edge_nargs(e);
+        for q in 0..b.edge_nargs(e) {
+            same = same && b.edge_arg(s, q) == b.edge_arg(e, q);
+        }
+        if same {
+            return s;
+        }
+    }
+    seen.push(e);
+    return e;
+}
+
+// A load of a read-only referent (`ref ... readonly`) after a call reads the value the load before it
+// read: no write of the body, a call's included, touches the referent.
+@test
+fn a_read_only_referent_keeps_its_value_across_a_call() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @opq fn global noinline
+sym @f fn global noinline
+sym @g fn global
+sym @d data global
+sym @w data global
+fn @opq
+  sig () -> void
+b0:
+  v0 = symaddr @w
+  v1 = load.i32 v0 align 2
+  v2 = iconst.i32 1
+  v3 = add.i32 v1, v2
+  store v3, v0 align 2
+  ret
+fn @f
+  sig (ptr) -> i32
+  ref p0 4 readonly
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  call @opq() : () -> void
+  v2 = load.i32 v0 align 2
+  v3 = add.i32 v1, v2
+  ret v3
+fn @g
+  sig () -> i32
+b0:
+  v0 = symaddr @d
+  v1 = call.i32 @f(v0) : (ptr) -> i32
+  ret v1
+data @d size 4 align 2 bytes 15000000
+data @w size 4 align 2
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(count_of(&t, "load.") == 1, t.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "g", none, 42);
+}

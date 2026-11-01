@@ -4533,8 +4533,9 @@ extend Opt {
             return false;
         }
         let q = p - jb.param_start;
-        // The first pass checks every edge, the second rewrites them. The predecessors come in block order,
-        // a block once per edge.
+        // The first pass checks every edge, the second rewrites them, each once: terminators may share an
+        // edge (`done`). The predecessors come in block order, a block once per edge.
+        let mut done = Vector::<u32>::new();
         for pass in 0..2u32 {
             for x in self.pred_at[j as usize]..self.pred_at[j as usize + 1] {
                 let src = self.preds[x as usize];
@@ -4544,8 +4545,11 @@ extend Opt {
                 b.succ_edges(term(b, src), &mut self.edges);
                 for e in 0..self.edges.len() {
                     let ed = self.edges[e];
-                    if b.edge_target(ed) != j {
+                    if b.edge_target(ed) != j || pass == 1 && done.contains(&ed) {
                         continue;
+                    }
+                    if pass == 1 {
+                        done.push(ed);
                     }
                     let a = b.edge_arg(ed, q);
                     let c = const_of(b, a);
@@ -4571,6 +4575,9 @@ extend Opt {
             }
         }
         b.params[p as usize] = t.ty;
+        // The comparison reads the result as it now is (`ret_folded` evaluates it before the walk).
+        let z = self.tconst(b, t.ty, 0);
+        b.insts[u as usize] = Inst { op: O_ICMP, ty: t.ty, aux: C_NE, a: VPARAM | p, b: z, c: VNONE };
         self.trepl.push(u as u64 << 32 | (VPARAM | p) as u64);
         return true;
     }
@@ -5778,8 +5785,9 @@ extend Opt {
                 let _ = self.number(pk, b, k, i);
                 return true;
             }
-            // A load of bytes no write touches reads one value in every memory state.
-            let st = if p == PRIV_KEPT {
+            // A load of bytes no write touches (a private slot's, a read-only referent's: `frozen`) reads one
+            // value in every memory state.
+            let st = if p == PRIV_KEPT || i as usize < self.acls.len() && self.acls[i as usize] == CL_FROZEN {
                 KEPT_STATE
             } else {
                 self.state
@@ -5890,6 +5898,10 @@ extend Opt {
                     return true;
                 }
                 self.flag_next(b, k, i);
+            }
+            if b.insts[i as usize].op == O_ICMP && self.narrow_cmp(pk, b, i) {
+                let _ = self.number(pk, b, k, i);
+                return true;
             }
             if b.insts[i as usize].op == O_ICMP && self.icmp_select(pk, b, k, i) {
                 return true;
@@ -6660,6 +6672,71 @@ extend Opt {
             }
         }
         return false;
+    }
+
+    // Comparison `i` of an extended value with a constant its type holds, or of two values extended the
+    // same way from one type: the comparison of the narrow values (an equality or an order that the
+    // extension keeps: unsigned for `zext`, signed for `sext`). Whether it did.
+    fn narrow_cmp(self: &mut Self, pk: &Package, b: &mut Body, i: u32) bool {
+        let t = b.insts[i as usize];
+        let (ea, eb) = (extension(b, t.a), extension(b, t.b));
+        let e = if ea.op != O_ICONST {
+            ea
+        } else {
+            eb
+        };
+        if e.op == O_ICONST || is_vec(b.type_of(t.a)) {
+            return false;
+        }
+        let nt = b.type_of(e.a);
+        let sg = e.op == O_SEXT;
+        let eq = t.aux == C_EQ || t.aux == C_NE;
+        let ok = eq || sg == (t.aux == C_SLT || t.aux == C_SLE || t.aux == C_SGT || t.aux == C_SGE);
+        if !ok || !is_int(nt) || nt == T_I128 {
+            return false;
+        }
+        if ea.op == e.op && eb.op == e.op && b.type_of(eb.a) == nt {
+            b.insts[i as usize] = Inst { op: O_ICMP, ty: t.ty, aux: t.aux, a: ea.a, b: eb.a, c: VNONE };
+            return true;
+        }
+        let kv = const_of(
+            b,
+            if ea.op != O_ICONST {
+                t.b
+            } else {
+                t.a
+            },
+        );
+        if kv.is_none() {
+            return false;
+        }
+        let wt = b.type_of(t.a);
+        let wb = type_bits(wt, pk.ptr_bytes);
+        let nb = type_bits(nt, pk.ptr_bytes);
+        let c = kv.unwrap() & width_mask(wt, pk.ptr_bytes);
+        let low = c & width_mask(nt, pk.ptr_bytes);
+        // The constant is an extension of its low bits the same way.
+        let fits = if sg {
+            let top = (low >> (nb - 1) as u64 & 1) != 0;
+            let ext = if top {
+                low | width_mask(wt, pk.ptr_bytes) & ~width_mask(nt, pk.ptr_bytes)
+            } else {
+                low
+            };
+            ext == c
+        } else {
+            low == c
+        };
+        if !fits || nb >= wb {
+            return false;
+        }
+        let n = self.constant(b, nt, low);
+        b.insts[i as usize] = if ea.op != O_ICONST {
+            Inst { op: O_ICMP, ty: t.ty, aux: t.aux, a: ea.a, b: n, c: VNONE }
+        } else {
+            Inst { op: O_ICMP, ty: t.ty, aux: t.aux, a: n, b: eb.a, c: VNONE }
+        };
+        return true;
     }
 
     // Truncation `i` (block `k`) of an addition, subtraction, product, bitwise operation or left shift by
@@ -9791,6 +9868,7 @@ extend Run {
         }
         pk.bodies = replace(&mut self.bodies, Vector::<Body>::new());
         const_slots(pk);
+        symbol_tables(pk);
         // The calls through a method a constant table holds (`fold_ptr`): the jobs, which ran at once, did
         // not read another body's signature.
         direct_calls(pk);
@@ -9849,6 +9927,80 @@ pub(package) fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
         r.job(r.order[k]);
     }
     r.finish(pk);
+}
+
+// Each switch of the optimized bodies that selects symbol addresses (`sws::symbol_table`) reads them from
+// a read-only table of its own (LLVM's switch to lookup table): a load in place of a branch per case. A
+// body that took one is optimized again, which removes the cases' blocks.
+fn symbol_tables(pk: &mut Package) {
+    let held = if pk.held.body == NONE {
+        pk.bodies.len()
+    } else {
+        pk.held.body as usize
+    };
+    let mut owner = Vector::<u32>::with_capacity(pk.bodies.len());
+    for _ in 0..pk.bodies.len() {
+        owner.push(NONE);
+    }
+    for s in 0..pk.syms.len() {
+        let y = pk.syms[s];
+        if y.kind == SK_FUNC && y.def != NONE {
+            owner[y.def as usize] = s as u32;
+        }
+    }
+    let ptr = pk.ptr_bytes;
+    let mut st = sws::SymTable::new();
+    let mut o = Opt::new();
+    for j in 0..held {
+        if owner[j] == NONE {
+            continue;
+        }
+        let mut took = false;
+        let nb = pk.bodies[j].blocks.len();
+        for k in 0..nb {
+            let b = &pk.bodies[j];
+            let bk = b.blocks[k];
+            if bk.len == 0 {
+                continue;
+            }
+            let t = b.insts[(bk.start + bk.len - 1) as usize];
+            if t.op != O_SWITCH || !is_int(b.type_of(t.a)) || b.type_of(t.a) == T_I128 || !sws::symbol_table(
+                b,
+                t,
+                type_bits(b.type_of(t.a), ptr),
+                &mut st,
+            ) {
+                continue;
+            }
+            let o = pk.syms[owner[j] as usize];
+            let name = format("{}.tab{}", pk.spell(o.name), k);
+            let d = pk.add_symbol(&name, SK_DATA, SL_LOCAL);
+            if d == NONE {
+                continue;
+            }
+            pk.syms.index_mut(d as usize).unit = o.unit;
+            pk.syms.index_mut(d as usize).own = o.own;
+            let mut rs = Vector::<Reloc>::with_capacity(st.syms.len());
+            for x in 0..st.syms.len() {
+                rs.push(Reloc { offset: x as u32 * ptr, sym: st.syms[x], addend: st.adds[x] });
+            }
+            let none: []u8 = [];
+            if !pk.add_data(d, st.span * ptr, ptr.trailing_zeros() as u8, true, none, rs[0..rs.len()]) {
+                continue;
+            }
+            sws::use_symbol_table(pk.bodies.index_mut(j), k as u32, &st, d, ptr);
+            took = true;
+        }
+        if took {
+            let mut b = replace(pk.bodies.index_mut(j), Body::new());
+            o.forget();
+            o.unit = pk.syms[owner[j] as usize].unit;
+            let _ = o.run(pk, &mut b, true);
+            let _ = ret_edges(&mut b);
+            o.estimate(pk, &mut b);
+            pk.bodies[j] = b;
+        }
+    }
 }
 
 // At most CONST_SLOT_BYTES bytes of a slot go to read-only data (`const_slots`).
@@ -11035,6 +11187,35 @@ fn simplify_vec(b: &mut Body, i: u32) {
     let nb = type_bytes(t.ty, 8);
     let mut x: [u64; 8] = [0; 8];
     let mut y: [u64; 8] = [0; 8];
+    // A lane mask's choice of 1 or 0 is the mask's lowest bits; a sum with them is a difference with the
+    // mask (each lane -1 or 0).
+    if t.op == O_VSEL && b.type_of(t.a) == t.ty && lane_mask(b, t.a, 4) && lanes_are(b, t.b, t.ty, 1) && lanes_are(
+        b,
+        t.c,
+        t.ty,
+        0,
+    ) {
+        b.insts[i as usize] = Inst { op: O_AND, ty: t.ty, aux: 0, a: t.a, b: t.b, c: VNONE };
+        return;
+    }
+    if t.op == O_ADD {
+        for (s, o) in [(t.a, t.b), (t.b, t.a)] {
+            if is_op(b, s, O_AND) {
+                let m = b.insts[s as usize];
+                let mk = if lanes_are(b, m.b, t.ty, 1) {
+                    m.a
+                } else if lanes_are(b, m.a, t.ty, 1) {
+                    m.b
+                } else {
+                    VNONE
+                };
+                if mk != VNONE && b.type_of(mk) == t.ty && lane_mask(b, mk, 4) {
+                    b.insts[i as usize] = Inst { op: O_SUB, ty: t.ty, aux: 0, a: o, b: mk, c: VNONE };
+                    return;
+                }
+            }
+        }
+    }
     if t.op == O_XOR && nb % 8 == 0 && vec_words(b, t.a, t.ty, &mut x) && vec_words(b, t.b, t.ty, &mut y) {
         let at = b.words.len() as u32;
         for q in 0..nb / 8 {
@@ -11042,6 +11223,33 @@ fn simplify_vec(b: &mut Body, i: u32) {
         }
         b.insts[i as usize] = Inst { op: O_WCONST, ty: t.ty, aux: 0, a: at, b: nb / 8, c: VNONE };
     }
+}
+
+// Whether every lane of vector `v` of `b` (of type `vt`) is the constant `k`.
+fn lanes_are(b: &Body, v: Value, vt: u8, k: u64) bool {
+    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    let bits = 8 * type_bytes(lane_type(vt), 8);
+    if t.op == O_SPLAT {
+        let c = const_of(b, t.a);
+        return c.is_some() && le::trunc_bits(c.unwrap(), bits) == k;
+    }
+    let mut w: [u64; 8] = [0; 8];
+    if type_bytes(vt, 8) % 8 != 0 || !vec_words(b, v, vt, &mut w) {
+        return false;
+    }
+    let mut e: u64 = 0;
+    for l in 0..64 / bits {
+        e |= k << (l * bits) as u64;
+    }
+    for q in 0..type_bytes(vt, 8) / 8 {
+        if w[q as usize] != e {
+            return false;
+        }
+    }
+    return true;
 }
 
 // The 8-byte words of vector constant `v` of `b` of type `vt` (a multiple of 8 bytes, at most 64), in
@@ -11058,8 +11266,11 @@ fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) bool {
         }
         return true;
     }
+    if t.op != O_SPLAT {
+        return false;
+    }
     let c = const_of(b, t.a);
-    if t.op != O_SPLAT || c.is_none() {
+    if c.is_none() {
         return false;
     }
     let bits = 8 * type_bytes(lane_type(vt), 8);
@@ -11071,6 +11282,14 @@ fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) bool {
         out[q as usize] = w;
     }
     return true;
+}
+
+// The zero or sign extension that defines `v` (not of an overflow flag), else an `iconst` (no extension).
+fn extension(b: &Body, v: Value) Inst {
+    if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && (b.insts[v as usize].op == O_ZEXT || b.insts[v as usize].op == O_SEXT) && (b.insts[v as usize].a & VFLAG) == 0 {
+        return b.insts[v as usize];
+    }
+    return iconst(T_I32, 0);
 }
 
 fn simplify(pk: &Package, b: &mut Body, i: u32) Value {

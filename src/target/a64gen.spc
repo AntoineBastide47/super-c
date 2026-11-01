@@ -2071,7 +2071,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VSHIMM_ALL;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL;
         self.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -2734,7 +2734,14 @@ extend Gen {
             let tb = b.blocks[b.edge_target(ed) as usize];
             for q in 0..tb.param_len as u32 {
                 let x = ni + tb.param_start + q;
-                let r = self.ret_reg(b, x);
+                // The return register, else the register home of an argument that dies here, given up: kept
+                // busy again when the parameter does not take it (its class is another), as the argument
+                // holds it until the edge moves.
+                let mut r = self.ret_reg(b, x);
+                let hd = r == NOREG;
+                if hd {
+                    r = self.home_dying(b.edge_arg(ed, q));
+                }
                 if r != NOREG {
                     self.free_home(b.edge_arg(ed, q), r);
                 }
@@ -2746,6 +2753,9 @@ extend Gen {
                         self.dying_reg(b.edge_arg(ed, q))
                     },
                 );
+                if hd && r != NOREG && self.va[x as usize].reg != r {
+                    self.fixed_busy |= bit(r);
+                }
             }
         }
     }
@@ -2774,6 +2784,25 @@ extend Gen {
             return NOREG;
         }
         return self.self_lay.parts[rl.p0 as usize].reg;
+    }
+
+    // The register home of edge argument `v` when `v` dies at this terminator, NOREG else.
+    fn home_dying(self: &Self, v: Value) u8 {
+        if v == VNONE {
+            return NOREG;
+        }
+        let x = self.vx(v);
+        if x == NONE {
+            return NOREG;
+        }
+        let va = self.va[x as usize];
+        // Not one a later parameter shares (`heir`), which takes the register over, nor one that shares
+        // another's (`back_share`: the owner keeps it).
+        return if va.home == H_FIXED && va.reg != NOREG && self.owner[va.reg as usize] == x && self.heir[va.reg as usize] == NONE && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos {
+            va.reg
+        } else {
+            NOREG
+        };
     }
 
     // The register of edge argument `v` when it holds `v` without being its home and `v` dies at this
@@ -3199,7 +3228,10 @@ extend Gen {
             return true;
         }
         if op == O_VZIPLO || op == O_VZIPHI {
-            self.vzip(i, t);
+            // Unless a sum widens it (`lv::FOLD_VWADD`).
+            if !self.lv.pfold[i as usize] {
+                self.vzip(i, t);
+            }
             return true;
         }
         if op == O_VEXTRACT || op == O_VINSERT {
@@ -3675,12 +3707,18 @@ extend Gen {
         let sf = bits == 64;
         let small = bits < 32;
         let signed = signed_cond(c);
+        let mut k: u64 = 0;
+        // A narrow value's equality with 0 tests its low bits (`tst`), with no extension.
+        if small && (c == C_EQ || c == C_NE) && self.const_of(t.b, &mut k) && (k & (1u64 << bits as u64) - 1) == 0 {
+            let r = self.reg(t.a);
+            self.emit_cmp(a::logic_imm(false, 3, a::ZR, r, a::logical_imm((1u64 << bits as u64) - 1, false)));
+            return icond(c);
+        }
         let ra = if small {
             self.ext(t.a, signed, bits)
         } else {
             self.reg(t.a)
         };
-        let mut k: u64 = 0;
         if self.const_of(t.b, &mut k) {
             let kv: i64 = if signed {
                 lp_sext(k, bits)
@@ -5510,8 +5548,18 @@ extend Gen {
             } else {
                 (t.c, t.b, cc)
             };
-            let kind = lv::cs_kind(b, side, x);
-            let rx = self.reg(x) as u32;
+            // The other side, or the zero register when it is 0 and the side is of another value.
+            let (kind, base) = lv::cs_base(b, side);
+            let rx = if base == x {
+                self.reg(x) as u32
+            } else {
+                a::ZR
+            };
+            let rm = if base == x {
+                rx
+            } else {
+                self.reg(base) as u32
+            };
             let rd = self.def_step(i) as u32;
             let (op, o2) = if kind == lv::CS_INC {
                 (0u32, 1u32)
@@ -5520,7 +5568,7 @@ extend Gen {
             } else {
                 (1u32, 1u32)
             };
-            self.emit(a::csel(sf, op, o2, rd, rx, rx, cond));
+            self.emit(a::csel(sf, op, o2, rd, rx, rm, cond));
             return true;
         }
         let mut kb: u64 = 0;
@@ -7016,11 +7064,13 @@ extend Gen {
         return false;
     }
 
-    // Whether edge `e`'s moves may run before a branch on flags `test`: they leave the flags as they are,
-    // and every parameter of `e`'s target (a loop header, its back edge) ends its range in this block, so
-    // the other path reads none of the homes they write. One branch then takes the edge.
-    fn early_moves(self: &Self, test: Test, e: u32) bool {
-        if test.kind != T_CC {
+    // Whether edge `e`'s moves may run before a branch on `test` whose other edge is `o`: they leave the
+    // flags as they are and write no register the test reads (`keeps_test`), every parameter of `e`'s
+    // target (a loop header, its back edge) ends its range in this block, and no argument of `o` is in a
+    // register they write, so the other path reads none of the homes they write. One branch then takes the
+    // edge.
+    fn early_moves(self: &Self, test: Test, e: u32, o: u32) bool {
+        if !self.keeps_test(test, e) {
             return false;
         }
         let b = self.b();
@@ -7029,6 +7079,99 @@ extend Gen {
         for q in 0..tb.param_len as u32 {
             if self.lv.end[(ni + tb.param_start + q) as usize] > self.pos {
                 return false;
+            }
+        }
+        return self.args_apart(e, o);
+    }
+
+    // Whether no argument of edge `o` is in a register home edge `e`'s moves write.
+    fn args_apart(self: &Self, e: u32, o: u32) bool {
+        let b = self.b();
+        let tb = b.blocks[b.edge_target(e) as usize];
+        let ni = b.insts.len() as u32;
+        for q in 0..b.edge_nargs(e) {
+            let px = ni + tb.param_start + q;
+            let ax = self.vx(b.edge_arg(e, q));
+            let pva = self.va[px as usize];
+            if ax == px || pva.home != H_FIXED || self.va[ax as usize].reg == pva.reg {
+                continue;
+            }
+            for j in 0..b.edge_nargs(o) {
+                let l = self.loc_of(self.vx(b.edge_arg(o, j)));
+                if l.kind == LC_REG && l.reg == pva.reg {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    // Whether edge `e`'s moves leave `test` as it is: they leave the flags, and a register test's register
+    // is no home they write.
+    fn keeps_test(self: &Self, test: Test, e: u32) bool {
+        if test.kind == T_CC {
+            return true;
+        }
+        let b = self.b();
+        let tb = b.blocks[b.edge_target(e) as usize];
+        let ni = b.insts.len() as u32;
+        for q in 0..b.edge_nargs(e) {
+            let pva = self.va[(ni + tb.param_start + q) as usize];
+            if pva.home != H_FIXED || pva.reg as u32 == test.reg {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Whether edge `e`'s moves may run before the branch on `test` whose other edge is `o`: `early_moves`,
+    // or they keep the test (`keeps_test`) and each writes a register home that no argument of `o` is in
+    // and that holds its parameter of a later block (`edge_homes`), a value that dies in this block, or a
+    // copy (its home elsewhere) that `o`'s target does not keep.
+    fn early_ok(self: &Self, test: Test, e: u32, o: u32) bool {
+        if self.early_moves(test, e, o) {
+            return true;
+        }
+        if !self.keeps_test(test, e) {
+            return false;
+        }
+        return self.homes_free(e, o, false);
+    }
+
+    // Whether the register homes edge `e`'s moves write hold no value the path of edge `o` reads: each holds
+    // `e`'s parameter of a later block (`edge_homes`), a value that dies in this block, or a copy (its home
+    // elsewhere) that `o`'s target does not keep; and, unless `o`'s moves are among `e`'s (`within`: those
+    // moves then serve `o` too), no argument of `o` is in one.
+    fn homes_free(self: &Self, e: u32, o: u32, within: bool) bool {
+        let b = self.b();
+        let sp = self.lv.pos[b.edge_target(o) as usize];
+        let kept = sp == self.pos + 1 && self.continues(sp);
+        // A later target's parameters are not live yet: their homes are only reserved (`edge_homes`).
+        let fwd = self.lv.pos[b.edge_target(e) as usize] > self.pos;
+        let tb = b.blocks[b.edge_target(e) as usize];
+        let ni = b.insts.len() as u32;
+        for q in 0..b.edge_nargs(e) {
+            let px = ni + tb.param_start + q;
+            let ax = self.vx(b.edge_arg(e, q));
+            let pva = self.va[px as usize];
+            if ax == px || pva.home == H_FIXED && self.va[ax as usize].reg == pva.reg {
+                continue;
+            }
+            if pva.home != H_FIXED {
+                return false;
+            }
+            let r = pva.reg;
+            if (self.held & bit(r)) != 0 {
+                let y = self.owner[r as usize];
+                if !(fwd && y == px) && self.lv.end[y as usize] > self.pos && (kept || self.va[y as usize].home == H_FIXED) {
+                    return false;
+                }
+            }
+            for j in 0..b.edge_nargs(o) {
+                let l = self.loc_of(self.vx(b.edge_arg(o, j)));
+                if !within && l.kind == LC_REG && l.reg == r {
+                    return false;
+                }
             }
         }
         return true;
@@ -7113,14 +7256,41 @@ extend Gen {
                 self.cbranch(test, tt);
                 self.goto(tf, false);
             }
-        } else if mt && !mf && self.early_moves(test, et) {
-            self.edge_moves(et);
+        } else if mt && mf && self.moves_within(et, ef) && self.keeps_test(test, ef) && self.homes_free(ef, et, true) || mt && mf && self.moves_within(
+            ef,
+            et,
+        ) && self.keeps_test(test, et) && self.homes_free(et, ef, true) {
+            // One edge's moves are among the other's: those before the branch serve both (a loop's exit that
+            // takes a value its back edge also passes on).
+            self.moves_before(
+                test,
+                if self.moves_within(et, ef) {
+                    ef
+                } else {
+                    et
+                },
+            );
+            if tt == next {
+                self.cbranch(invert_test(test), tf);
+            } else {
+                self.cbranch(test, tt);
+                self.goto(tf, false);
+            }
+        } else if mt && !mf && (tt != next && self.early_ok(test, et, ef) || self.early_moves(test, et, ef)) {
+            self.moves_before(test, et);
             self.cbranch(test, tt);
             self.goto(tf, false);
-        } else if !mt && mf && self.early_moves(test, ef) {
-            self.edge_moves(ef);
+        } else if !mt && mf && (tf != next && self.early_ok(test, ef, et) || self.early_moves(test, ef, et)) {
+            self.moves_before(test, ef);
             self.cbranch(invert_test(test), tf);
             self.goto(tt, false);
+        } else if mt && mf && tt != next && self.early_ok(test, et, ef) {
+            // The edge to the block that does not follow first: the other's moves fall through.
+            self.moves_before(test, et);
+            self.branch_over(test, tt, ef);
+        } else if mt && mf && tf != next && self.early_ok(test, ef, et) {
+            self.moves_before(test, ef);
+            self.branch_over(invert_test(test), tf, et);
         } else if mt && !mf {
             self.branch_over(invert_test(test), tf, et);
         } else if !mt && mf {
@@ -7140,6 +7310,17 @@ extend Gen {
             self.edge_moves(et);
             self.goto(tt, false);
         }
+    }
+
+    // Edge `e`'s moves before the branch on `test`: a register test's register stays out of their scratch
+    // registers.
+    fn moves_before(self: &mut Self, test: Test, e: u32) {
+        let saved = self.lock;
+        if test.kind != T_CC {
+            self.lock |= bit(test.reg as u8);
+        }
+        self.edge_moves(e);
+        self.lock = saved;
     }
 
     // A branch on `test` to block `k`, then the moves of edge `e` and a jump to its target. When the moves
@@ -7858,6 +8039,48 @@ extend Gen {
     }
 }
 
+// The MOVI (Q and Rd 0) that sets each 8-byte word of a vector to `w`, NONE when none does: a repeated byte
+// (MOVI .16B, cmode 1110), bytes each 0 or all ones (MOVI .2D, op 1), a repeated 2- or 4-byte lane of one
+// nonzero byte (MOVI .8H, .4S with LSL).
+const fn movi_of(w: u64) u32 {
+    let lo = w & 0xFF;
+    if w == lo * 0x0101010101010101 {
+        return 0x0F00E400 | movi_imm(lo);
+    }
+    let mut m: u64 = 0;
+    let mut mask = true;
+    for k in 0..8u64 {
+        let x = w >> 8 * k & 0xFF;
+        mask = mask && (x == 0 || x == 0xFF);
+        m |= (x & 1) << k;
+    }
+    if mask {
+        return 0x2F00E400 | movi_imm(m);
+    }
+    let w32 = w & 0xFFFFFFFF;
+    if w == (w32 << 32 | w32) {
+        for p in 0..4u64 {
+            if (w32 & ~(0xFFu64 << 8 * p)) == 0 {
+                return 0x0F000400 | p as u32 * 2 << 12 | movi_imm(w32 >> 8 * p);
+            }
+        }
+    }
+    let w16 = w & 0xFFFF;
+    if w == w16 * 0x0001000100010001 {
+        for p in 0..2u64 {
+            if (w16 & ~(0xFFu64 << 8 * p)) == 0 {
+                return 0x0F008400 | p as u32 * 2 << 12 | movi_imm(w16 >> 8 * p);
+            }
+        }
+    }
+    return NONE;
+}
+
+// MOVI's imm8 `k` in its fields: abc (bits 18..16) and defgh (bits 9..5).
+const fn movi_imm(k: u64) u32 {
+    return (k as u32 >> 5 & 7) << 16 | (k as u32 & 31) << 5;
+}
+
 // Whether reduction `c` of a vector of type `vt` into type `ty` has a form in v registers (`Gen::reduce_reg`):
 // a vector of 8 or 16 bytes of integer lanes, the result of the lanes' width; an `and`, `or`, `xor`, a
 // sum, or a minimum or maximum of lanes below 8 bytes (of 8-byte ones, a sum of two).
@@ -8405,8 +8628,9 @@ extend Gen {
         }
     }
 
-    // Vector constant `t` into a v register for `i`: 0 and all ones by MOVI, else each 8-byte word through
-    // ip0 (DUP when one word repeats, else FMOV then INS).
+    // Vector constant `t` into a v register for `i`: by one MOVI when a byte repeats, every byte is 0 or all
+    // ones, or each 2- or 4-byte lane holds one byte (`movi_of`); else each 8-byte word through ip0 (DUP
+    // when one word repeats, else FMOV then INS).
     fn wconst_reg(self: &mut Self, i: u32, t: Inst) {
         let b = self.b();
         let q = type_bytes(t.ty, 8) == 16;
@@ -8417,9 +8641,13 @@ extend Gen {
             w0
         };
         let rd = self.vec_def(i) - V0;
-        if w0 == w1 && (w0 == 0 || w0 == ~0u64) {
-            // MOVI Vd.2D (or Dd), #0 or #-1: cmode 1110, op 1, imm8 0 or 0xFF.
-            self.emit(0x2F00E400 | a::on(q, 1u32 << 30) | a::on(w0 != 0, 0x7u32 << 16 | 0x1Fu32 << 5) | rd as u32);
+        let mv = if w0 == w1 {
+            movi_of(w0)
+        } else {
+            NONE
+        };
+        if mv != NONE {
+            self.emit(mv | a::on(q, 1u32 << 30) | rd as u32);
             return;
         }
         self.mov_imm(a::IP0 as u8, w0, true);
@@ -8813,6 +9041,27 @@ extend Gen {
             return true; // its sum or difference multiplies and accumulates (`lv::FOLD_VMLA`)
         }
         let op = t.op;
+        if op == O_ADD {
+            let p = self.lv.vwadd_ext(self.b(), t);
+            if p != VNONE && self.lv.pfold[p as usize] {
+                // UADDW or UADDW2 Vd, Vn, Vm: the other operand plus the low or high half of the zipped
+                // vector, widened.
+                let b = self.b();
+                let z = b.insts[b.insts[p as usize].a as usize];
+                let acc = if t.b == p {
+                    t.a
+                } else {
+                    t.b
+                };
+                let rn = self.vec_use(acc, V0 + 30);
+                let rm = self.vec_use(z.a, V0 + 31);
+                let rd = self.def_step(i);
+                self.emit(
+                    0x2E201000u32 | a::on(z.op == O_VZIPHI, 1u32 << 30) | vsize(type_bytes(lane_type(z.ty), 8)) << 22 | (rd - V0) as u32 | (rn - V0) as u32 << 5 | (rm - V0) as u32 << 16,
+                );
+                return true;
+            }
+        }
         if (op == O_ADD || op == O_SUB) && is_vec(t.ty) {
             let p = self.lv.vmla_mul(self.b(), t);
             if p != VNONE && self.lv.pfold[p as usize] {
@@ -10597,8 +10846,23 @@ extend Gen {
     // with lanes of `eb` bytes: a 16-byte vector's high half (EXT) combined with its low one in v31 (v30), those 8
     // bytes moved to the result's x register (FMOV), whose halves combine (the shifted-register form) down to
     // a lane. The bits above the lane are not cleared.
+    // An `or` of lane masks (every lane all zeros or all ones) of up to 4-byte lanes, but two of them (UMAXV
+    // has no 2S form), is their unsigned maximum: one UMAXV into v31 (v30), then FMOV.
     fn reduce_bits(self: &mut Self, i: u32, c: u8, v: Value, eb: u32, nb: u32) {
         let s = (self.vec_use(v, V0 + 31) - V0) as u32;
+        if c == core::SIMD_REDUCE_OR && eb <= 4 && nb / eb > 2 && lane_mask(self.b(), v, lv::MASK_DEPTH) {
+            let tv: u32 = if s == 31 {
+                30
+            } else {
+                31
+            };
+            self.emit(0x2E30A800 | (nb == 16) as u32 << 30 | eb.trailing_zeros() as u32 << 22 | s << 5 | tv);
+            let rd = self.def(i) as u32;
+            self.emit(a::fmov_gv(false, false, rd, tv));
+            // FMOV from the lane's S register clears the bits above it.
+            self.va.index_mut(i as usize).clean = true;
+            return;
+        }
         let mut lo = s;
         if nb == 16 {
             // EXT Vt.16B, Vs.16B, Vs.16B, #8, then AND, ORR or EOR Vt.8B, Vt.8B, Vs.8B: t is v31, or v30 when

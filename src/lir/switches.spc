@@ -119,6 +119,145 @@ fn lower_one(b: &mut Body, k: u32, ptr: u32) bool {
     return true;
 }
 
+/// The entries of a table of symbol addresses (`symbol_table`): per entry its package symbol and addend;
+/// the block whose one parameter takes the entry, NONE when the entry returns.
+pub(package) struct SymTable {
+    pub(package) min: u64,
+    pub(package) span: u32,
+    pub(package) to: u32,
+    pub(package) syms: Vector<u32>,
+    pub(package) adds: Vector<i64>,
+}
+
+extend SymTable {
+    pub(package) fn new() SymTable {
+        return SymTable { min: 0, span: 0, to: NONE, syms: Vector::<u32>::new(), adds: Vector::<i64>::new() };
+    }
+}
+
+/// Whether switch `t` of `b` (its value `bits` wide) takes table `st` of symbol addresses (LLVM's switch
+/// to lookup table): dense cases (`switch_span`) that all give a `symaddr` one way (`sym_arg`); an entry
+/// no case takes holds the default's when the default gives one so too, else the switch takes no table.
+/// Values past the table take the default's edge.
+pub(package) fn symbol_table(b: &Body, t: Inst, bits: u32, st: &mut SymTable) bool {
+    if !switch_span(b, t, bits, &mut st.min, &mut st.span) {
+        return false;
+    }
+    let n = t.aux as u32;
+    let (_, to) = sym_arg(b, b.switch_edge(t, 0));
+    let m = if bits == 64 {
+        ~0u64
+    } else {
+        (1u64 << bits as u64) - 1
+    };
+    let (dv, dto) = sym_arg(b, b.switch_edge(t, n));
+    let mut at = Vector::<Value>::with_capacity(st.span as usize);
+    for _ in 0..st.span {
+        at.push(
+            if dto == to {
+                dv
+            } else {
+                VNONE
+            },
+        );
+    }
+    for k in 0..n {
+        let (v, kto) = sym_arg(b, b.switch_edge(t, k));
+        if v == VNONE || kto != to {
+            return false;
+        }
+        at[(b.words[(t.b + k) as usize].wrapping_sub(st.min) & m) as usize] = v;
+    }
+    st.to = to;
+    st.syms.truncate(0);
+    st.adds.truncate(0);
+    for x in 0..st.span {
+        let v = at[x as usize];
+        if v == VNONE {
+            return false;
+        }
+        let s = b.insts[v as usize];
+        st.syms.push(b.syms[s.a as usize]);
+        st.adds.push(s.b as i32);
+    }
+    return true;
+}
+
+// The `symaddr` edge `e` of `b` gives and how: the one argument it passes a block of one pointer parameter
+// (that block), or the value its block of that one instruction returns (NONE); (VNONE, NONE) else.
+fn sym_arg(b: &Body, e: u32) (Value, u32) {
+    let j = b.edge_target(e);
+    let jb = b.blocks[j as usize];
+    if b.edge_nargs(e) == 1 && jb.param_len == 1 && b.params[jb.param_start as usize] == T_PTR {
+        let v = b.edge_arg(e, 0);
+        if (v & (VPARAM | VFLAG)) == 0 && v != VNONE && b.insts[v as usize].op == O_SYMADDR {
+            return (v, j);
+        }
+    }
+    if b.edge_nargs(e) == 0 && jb.param_len == 0 && jb.len == 2 && b.insts[jb.start as usize].op == O_SYMADDR {
+        let r = b.insts[(jb.start + 1) as usize];
+        if r.op == O_RET && r.a == jb.start {
+            return (jb.start, NONE);
+        }
+    }
+    return (VNONE, NONE);
+}
+
+/// Switch ending block `k` of `b` as table `st` (data symbol `tab` of the package, pointers of `ptr`
+/// bytes): the switched value less the table's least case, compared with the entries in its type, then
+/// below them its entry loaded for the parameter or returned; else the default's edge.
+pub(package) fn use_symbol_table(b: &mut Body, k: u32, st: &SymTable, tab: u32, ptr: u32) {
+    let bk = b.blocks[k as usize];
+    let at = bk.start + bk.len - 1;
+    let t = b.insts[at as usize];
+    let ty = b.type_of(t.a);
+    let sw = Sw {
+        x: t.a,
+        ty: ty,
+        loc: b.locs[at as usize],
+        inl: inl_of(b, at),
+        flags: bk.flags & BLOCK_RARE,
+        dflt: b.switch_edge(t, t.aux),
+    };
+    let it = if ptr == 8 {
+        T_I64
+    } else {
+        T_I32
+    };
+    let ck = b.add_block([]);
+    let ld = b.add_block([]);
+    b.blocks.index_mut(ck as usize).flags = sw.flags;
+    b.blocks.index_mut(ld as usize).flags = sw.flags;
+    b.begin(ck);
+    let mut x = sw.x;
+    if st.min != 0 {
+        let lo = konst(b, &sw, ty, st.min);
+        x = emit(b, &sw, Inst { op: O_SUB, ty: ty, aux: 0, a: x, b: lo, c: VNONE });
+    }
+    let n = konst(b, &sw, ty, st.span);
+    let inb = emit(b, &sw, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: x, b: n, c: VNONE });
+    let el = b.edge(ld, []);
+    let _ = emit(b, &sw, Inst { op: O_BR, ty: T_NONE, aux: 0, a: inb, b: el, c: sw.dflt });
+    b.begin(ld);
+    if type_bits(ty, ptr) < type_bits(it, ptr) {
+        x = emit(b, &sw, Inst { op: O_ZEXT, ty: it, aux: 0, a: x, b: VNONE, c: VNONE });
+    } else if type_bits(ty, ptr) > type_bits(it, ptr) {
+        x = emit(b, &sw, Inst { op: O_TRUNC, ty: it, aux: 0, a: x, b: VNONE, c: VNONE });
+    }
+    let r = b.ref_sym(tab);
+    let base = emit(b, &sw, Inst { op: O_SYMADDR, ty: T_PTR, aux: 0, a: r, b: 0, c: VNONE });
+    let p = emit(b, &sw, Inst { op: O_PTRADD, ty: T_PTR, aux: ptr as u16, a: base, b: x, c: 0 });
+    let v = emit(b, &sw, Inst { op: O_LOAD, ty: T_PTR, aux: ptr.trailing_zeros() as u16, a: p, b: VNONE, c: 0 });
+    if st.to == NONE {
+        let _ = emit(b, &sw, Inst { op: O_RET, ty: T_NONE, aux: 0, a: v, b: VNONE, c: VNONE });
+    } else {
+        let args = [v];
+        let et = b.edge(st.to, args[0..1]);
+        let _ = emit(b, &sw, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: et, b: VNONE, c: VNONE });
+    }
+    b.insts[at as usize] = Inst { op: O_JMP, ty: T_NONE, aux: 0, a: b.edge(ck, []), b: VNONE, c: VNONE };
+}
+
 /// A switch takes a table (`switch_span`) from this many cases.
 pub(package) const TABLE_MIN: u32 = 4;
 /// A table holds at most this many entries.

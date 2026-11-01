@@ -74,6 +74,14 @@ pub(package) const FOLD_VSHIMM_ALL: u32 = 67108864;
 /// and stores of its block read as their address folds into each, at any offset (x86-64's
 /// `[base + index * scale + disp]`).
 pub(package) const FOLD_XADDR: u32 = 134217728;
+/// `FOLD_BRCONJ`: an `and` or `or` of two integer comparisons of up to 64 bits, each with that one use,
+/// whose one use is a `br`: both fold into the branch, which tests the first and jumps, then the second
+/// (x86-64's `cmp; jcc; cmp; jcc`).
+pub(package) const FOLD_BRCONJ: u32 = 268435456;
+/// `FOLD_VWADD`: a 16-byte integer vector `bitcast` of a `vziplo` or `vziphi` of a vector with zeros (its
+/// low or high half zero-extended to lanes twice as wide), each with one use, that a vector sum of the
+/// wide lanes adds: the sum widens and adds (arm64 `uaddw`, `uaddw2`).
+pub(package) const FOLD_VWADD: u32 = 536870912;
 // `lane_mask` follows this many `and`, `or` and `xor` operations.
 pub(package) const MASK_DEPTH: u32 = 8;
 // `Live::ldop_user` looks this many instructions past a load for its use.
@@ -454,6 +462,13 @@ extend Live {
                     self.pfold[p as usize] = true;
                 }
             }
+            if (self.fold_ops & FOLD_VWADD) != 0 && t.op == O_ADD && is_vec(t.ty) {
+                let p = self.vwadd_ext(b, t);
+                if p != VNONE {
+                    self.pfold[p as usize] = true;
+                    self.pfold[b.insts[p as usize].a as usize] = true;
+                }
+            }
             if !is_int(t.ty) || t.ty == T_I128 {
                 continue;
             }
@@ -714,14 +729,38 @@ extend Live {
                 if t.op != O_SELECT || !is_int(t.ty) || t.ty == T_I128 || is_vec(t.ty) {
                     continue;
                 }
-                if is_inst(t.b) && self.count[t.b as usize] == 1 && !self.pfold[t.b as usize] && cs_kind(b, t.b, t.c) != CS_NONE {
+                // A side the other plus 1, negated or inverted, or such a value of anything when the other is 0
+                // (the zero register).
+                let zb = is_const_val(b, t.b) && const_val(b, t.b) == 0;
+                let zc = is_const_val(b, t.c) && const_val(b, t.c) == 0;
+                if is_inst(t.b) && self.count[t.b as usize] == 1 && !self.pfold[t.b as usize] && (cs_kind(b, t.b, t.c) != CS_NONE || zc && cs_base(
+                    b,
+                    t.b,
+                ).0 != CS_NONE) {
                     self.pfold[t.b as usize] = true;
-                } else if is_inst(t.c) && self.count[t.c as usize] == 1 && !self.pfold[t.c as usize] && cs_kind(
+                } else if is_inst(t.c) && self.count[t.c as usize] == 1 && !self.pfold[t.c as usize] && (cs_kind(
                     b,
                     t.c,
                     t.b,
-                ) != CS_NONE {
+                ) != CS_NONE || zb && cs_base(b, t.c).0 != CS_NONE) {
                     self.pfold[t.c as usize] = true;
+                }
+            }
+        }
+        if (self.fold_ops & FOLD_BRCONJ) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op != O_BR || !is_inst(t.a) {
+                    continue;
+                }
+                let c = b.insts[t.a as usize];
+                if (c.op == O_AND || c.op == O_OR) && c.ty == T_I8 && self.count[t.a as usize] == 1 && !self.pfold[t.a as usize] && c.a != c.b && self.cmp_leaf(
+                    b,
+                    c.a,
+                ) && self.cmp_leaf(b, c.b) {
+                    self.pfold[t.a as usize] = true;
+                    self.pfold[c.a as usize] = true;
+                    self.pfold[c.b as usize] = true;
                 }
             }
         }
@@ -1229,6 +1268,16 @@ extend Live {
         }
     }
 
+    // Whether `v` is an integer comparison of up to 64 bits with one use that folds into nothing
+    // (`FOLD_BRCONJ`).
+    fn cmp_leaf(self: &Self, b: &Body, v: Value) bool {
+        if !is_inst(v) || b.insts[v as usize].op != O_ICMP || self.count[v as usize] != 1 || self.pfold[v as usize] {
+            return false;
+        }
+        let ty = b.type_of(b.insts[v as usize].a);
+        return is_int(ty) && ty != T_I128 || ty == T_PTR;
+    }
+
     // The product `FOLD_VMLA` folds into vector sum or difference `t`: its second operand, else (a sum) its
     // first. VNONE when none.
     pub(package) fn vmla_mul(self: &Self, b: &Body, t: Inst) Value {
@@ -1245,6 +1294,39 @@ extend Live {
             return t.a;
         }
         return VNONE;
+    }
+
+    // The extension `FOLD_VWADD` folds into vector sum `t`: its second operand, else its first. VNONE when
+    // none.
+    pub(package) fn vwadd_ext(self: &Self, b: &Body, t: Inst) Value {
+        let lt = lane_type(t.ty);
+        if !is_int(lt) || type_bytes(lt, 8) < 2 || type_bytes(t.ty, 8) != 16 {
+            return VNONE;
+        }
+        if self.zero_zip(b, lt, t.b) && t.b != t.a {
+            return t.b;
+        }
+        if self.zero_zip(b, lt, t.a) && t.a != t.b {
+            return t.a;
+        }
+        return VNONE;
+    }
+
+    // Whether `v`, with one use, is a `bitcast` to lanes of type `lt` of a 16-byte `vziplo` or `vziphi`,
+    // with one use, of a vector of half-width lanes with zeros (`FOLD_VWADD`).
+    fn zero_zip(self: &Self, b: &Body, lt: u8, v: Value) bool {
+        if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.count[v as usize] != 1 || b.insts[v as usize].op != O_BITCAST {
+            return false;
+        }
+        let z = b.insts[v as usize].a;
+        if (z & (VPARAM | VFLAG)) != 0 || z == VNONE || self.count[z as usize] != 1 {
+            return false;
+        }
+        let zt = b.insts[z as usize];
+        return (zt.op == O_VZIPLO || zt.op == O_VZIPHI) && type_bytes(zt.ty, 8) == 16 && 2 * type_bytes(
+            lane_type(zt.ty),
+            8,
+        ) == type_bytes(lt, 8) && zero_vec(b, zt.b) && zt.a != zt.b;
     }
 
     // Whether `O_VOP` `t` is an `or` of the lanes of an integer lane mask that `FOLD_ANY` (16 bytes) or
@@ -2226,23 +2308,6 @@ pub(package) const fn reduces(t: Inst) bool {
     let code = (t.aux & VOP_CODE) as u32;
     return code >= core::OP_SIMD && code < core::OP_CMP_LANES && core::simd_op((code - core::OP_SIMD) as u8).rule == core::SR_REDUCE;
 }
-/// Whether integer vector `v` of `b` is a lane mask, each lane all ones or 0: a comparison's, or an `and`,
-/// `or` or `xor` of masks, within `depth` of them.
-pub(package) fn lane_mask(b: &Body, v: Value, depth: u32) bool {
-    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
-        return false;
-    }
-    let t = b.insts[v as usize];
-    if t.op == O_VCMP {
-        return true;
-    }
-    return depth != 0 && (t.op == O_AND || t.op == O_OR || t.op == O_XOR) && lane_mask(b, t.a, depth - 1) && lane_mask(
-        b,
-        t.b,
-        depth - 1,
-    );
-}
-
 /// Whether instruction `t` of `b` uses an address of slot `s` (an operand, an argument or an edge's argument);
 /// `us` is scratch.
 pub(package) fn reads_slot(b: &Body, t: Inst, s: u32, us: &mut Vector<Value>) bool {
@@ -2605,13 +2670,27 @@ pub(package) fn carry_inc(b: &Body, folded: &Vector<bool>, i: u32) Value {
 }
 
 pub(package) fn cs_kind(b: &Body, v: Value, other: Value) u8 {
-    if !is_inst(v) || other == VNONE {
+    if other == VNONE {
         return CS_NONE;
+    }
+    let (k, x) = cs_base(b, v);
+    return if x == other {
+        k
+    } else {
+        CS_NONE
+    };
+}
+
+/// `cs_kind` of `v` with the value it adds 1 to, negates or inverts: that kind and value, else
+/// (CS_NONE, VNONE).
+pub(package) fn cs_base(b: &Body, v: Value) (u8, Value) {
+    if !is_inst(v) {
+        return (CS_NONE, VNONE);
     }
     let t = b.insts[v as usize];
     let ops = t.op == O_ADD || t.op == O_SUB || t.op == O_NEG || t.op == O_NOT || t.op == O_XOR;
     if !ops || !is_int(t.ty) || t.ty == T_I128 {
-        return CS_NONE;
+        return (CS_NONE, VNONE);
     }
     let m = if type_bits(t.ty, 8) >= 64 {
         u64::MAX
@@ -2627,16 +2706,25 @@ pub(package) fn cs_kind(b: &Body, v: Value, other: Value) u8 {
     };
     let ca = is_const_val(b, t.a);
     let cb = !un && is_const_val(b, t.b);
-    if t.op == O_ADD && (t.a == other && cb && kb == 1 || t.b == other && ca && ka == 1) || t.op == O_SUB && t.a == other && cb && kb == m {
-        return CS_INC;
+    if t.op == O_ADD && cb && kb == 1 || t.op == O_SUB && cb && kb == m {
+        return (CS_INC, t.a);
     }
-    if t.op == O_NEG && t.a == other || t.op == O_SUB && ca && ka == 0 && t.b == other {
-        return CS_NEG;
+    if t.op == O_ADD && ca && ka == 1 {
+        return (CS_INC, t.b);
     }
-    if t.op == O_NOT && t.a == other || t.op == O_XOR && (t.a == other && cb && kb == m || t.b == other && ca && ka == m) {
-        return CS_NOT;
+    if t.op == O_NEG {
+        return (CS_NEG, t.a);
     }
-    return CS_NONE;
+    if t.op == O_SUB && ca && ka == 0 && !cb {
+        return (CS_NEG, t.b);
+    }
+    if t.op == O_NOT || t.op == O_XOR && cb && kb == m {
+        return (CS_NOT, t.a);
+    }
+    if t.op == O_XOR && ca && ka == m {
+        return (CS_NOT, t.b);
+    }
+    return (CS_NONE, VNONE);
 }
 
 // Whether `v` is an integer constant, and its bits.
@@ -3017,6 +3105,26 @@ pub(package) fn dead_end(p: &Package, b: &Body, lv: &Live, i: usize, uses: &mut 
             if !remat_inst(p, b, uses[u]) {
                 return false;
             }
+        }
+    }
+    return true;
+}
+
+// Whether `v` is a vector of zeros: a splat of 0 or a wide constant of zero words.
+fn zero_vec(b: &Body, v: Value) bool {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_SPLAT {
+        return int_const(b, t.a) == 0;
+    }
+    if t.op != O_WCONST {
+        return false;
+    }
+    for k in t.a..t.a + t.b {
+        if b.words[k as usize] != 0 {
+            return false;
         }
     }
     return true;

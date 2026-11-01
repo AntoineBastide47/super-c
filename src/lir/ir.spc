@@ -412,6 +412,37 @@ pub(package) const OPS: [OpInfo; 88] = [
     OpInfo { name: "bitrev", form: F_UN },
 ];
 
+/// Whether integer vector `v` of `b` is a lane mask, each lane all ones or 0: a comparison's, an `and`, `or`
+/// or `xor` of masks, a mask's sign extension, or a mask's low or high lanes interleaved with themselves
+/// (`vziplo`, `vziphi`) as lanes twice as wide, within `depth` of them.
+pub(package) fn lane_mask(b: &Body, v: Value, depth: u32) bool {
+    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_VCMP {
+        return true;
+    }
+    if depth == 0 {
+        return false;
+    }
+    if t.op == O_SEXT && is_vec(t.ty) {
+        return lane_mask(b, t.a, depth - 1);
+    }
+    if t.op == O_BITCAST && is_vec(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE {
+        let z = b.insts[t.a as usize];
+        return (z.op == O_VZIPLO || z.op == O_VZIPHI) && z.a == z.b && is_vec(z.ty) && type_bytes(lane_type(t.ty), 8) == 2 * type_bytes(
+            lane_type(z.ty),
+            8,
+        ) && lane_mask(b, z.a, depth - 1);
+    }
+    return (t.op == O_AND || t.op == O_OR || t.op == O_XOR) && lane_mask(b, t.a, depth - 1) && lane_mask(
+        b,
+        t.b,
+        depth - 1,
+    );
+}
+
 /// The mask a lane-wise comparison of vectors of type `t` gives (`O_VCMP`): integer lanes of its lanes'
 /// width.
 pub(package) const fn mask_type(t: u8) u8 {

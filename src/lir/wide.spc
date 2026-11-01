@@ -270,9 +270,10 @@ extend Wide {
     }
 
     // Conversion `t` by parts: of a vector and a result of one width part by part; an integer of a
-    // register to twice its width as two parts, each the source's low or high lanes interleaved
-    // (`vziplo`, `vziphi`) with zeros or with their signs (a lane comparison with 0), which as the wider
-    // lanes are the extended values; an integer of two parts to half its width in a register, the even
+    // register (or half of one, extended in its register first) to a power of 2 times its width, by levels
+    // that double the lanes' width: each vector's low and high lanes interleaved (`vziplo`, `vziphi`) with
+    // zeros or with their signs (a lane comparison with 0; a lane mask with itself), which as the wider lanes are the extended
+    // values, the last level's vectors the parts; an integer of two parts to half its width in a register, the even
     // narrower lanes of the parts (`vunzip`), which are the wider lanes' low halves. Whether it applied.
     fn conv_parts(self: &mut Self, b: &Body, out: &mut Body, i: u32, t: Inst) bool {
         let op = t.op;
@@ -294,19 +295,47 @@ extend Wide {
             self.at[i as usize] = first;
             return true;
         }
-        if (op == O_SEXT || op == O_ZEXT) && !ws && wd && fb == self.rb && tb == 2 * fb {
-            let s = self.whole(b, out, i, t.a);
-            let fl = lane_type(ft);
-            let z = self.put(b, out, i, Inst { op: O_ICONST, ty: fl, aux: 0, a: 0, b: 0, c: VNONE });
-            let mut hi = self.put(b, out, i, Inst { op: O_SPLAT, ty: ft, aux: 0, a: z, b: VNONE, c: VNONE });
-            if op == O_SEXT {
-                hi = self.put(b, out, i, Inst { op: O_VCMP, ty: mask_type(ft), aux: C_SLT, a: s, b: hi, c: 0 });
+        if (op == O_SEXT || op == O_ZEXT) && !ws && wd && (fb == self.rb || 2 * fb == self.rb) && tb > fb && (tb / fb).is_power_of_two() {
+            // A vector of half a register first extends in its register to lanes twice as wide; then each
+            // vector of a level gives the next its low and high lanes extended (zipped with zeros or signs).
+            let mut s = self.whole(b, out, i, t.a);
+            let mut st = ft;
+            if fb < self.rb {
+                st = vec_type(T_I8 + (2 * type_bytes(lane_type(ft), 8)).trailing_zeros() as u8, lanes(ft));
+                s = self.put(b, out, i, Inst { op: op, ty: st, aux: 0, a: s, b: VNONE, c: VNONE });
             }
-            let pt = self.part_type(t.ty);
-            for zop in [O_VZIPLO, O_VZIPHI] {
-                let zv = self.put(b, out, i, Inst { op: zop, ty: ft, aux: 0, a: s, b: hi, c: VNONE });
-                let p = self.put(b, out, i, Inst { op: O_BITCAST, ty: pt, aux: 0, a: zv, b: VNONE, c: VNONE });
-                self.parts.push(p);
+            // A lane mask's lanes beside themselves are its sign extension.
+            let mask = op == O_SEXT && lane_mask(b, t.a, 4);
+            let mut cur = Vector::<Value>::new();
+            cur.push(s);
+            let mut lb = type_bytes(lane_type(st), 8);
+            while lb < type_bytes(lane_type(t.ty), 8) {
+                let lt = vec_type(T_I8 + lb.trailing_zeros() as u8, self.rb / lb);
+                let wt = vec_type(T_I8 + (2 * lb).trailing_zeros() as u8, self.rb / (2 * lb));
+                let z = self.put(b, out, i, Inst { op: O_ICONST, ty: lane_type(lt), aux: 0, a: 0, b: 0, c: VNONE });
+                let zs = self.put(b, out, i, Inst { op: O_SPLAT, ty: lt, aux: 0, a: z, b: VNONE, c: VNONE });
+                let mut next = Vector::<Value>::with_capacity(2 * cur.len());
+                for k in 0..cur.len() {
+                    let v = cur[k];
+                    let hi = if mask {
+                        v
+                    } else if op == O_SEXT {
+                        self.put(b, out, i, Inst { op: O_VCMP, ty: mask_type(lt), aux: C_SLT, a: v, b: zs, c: 0 })
+                    } else {
+                        zs
+                    };
+                    for zop in [O_VZIPLO, O_VZIPHI] {
+                        let zv = self.put(b, out, i, Inst { op: zop, ty: lt, aux: 0, a: v, b: hi, c: VNONE });
+                        next.push(
+                            self.put(b, out, i, Inst { op: O_BITCAST, ty: wt, aux: 0, a: zv, b: VNONE, c: VNONE }),
+                        );
+                    }
+                }
+                cur = next;
+                lb *= 2;
+            }
+            for k in 0..cur.len() {
+                self.parts.push(cur[k]);
             }
             self.at[i as usize] = first;
             return true;
@@ -598,11 +627,67 @@ extend Wide {
         return true;
     }
 
+    // Reduction `t` (instruction `i`) of a split vector: its parts combined lane-wise as the halves of a
+    // tree (lower with upper, until one part), then that part reduced. A sum, product or bitwise reduction
+    // of integers, whose order does not matter, or a tree sum or product of floats, whose first levels
+    // these are. Whether it did.
+    fn reduce_parts(self: &mut Self, b: &Body, out: &mut Body, i: u32, t: Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        if t.b != 1 || t.c != VNONE || code < core::OP_SIMD || code >= core::OP_CMP_LANES {
+            return false;
+        }
+        let v = b.pool[t.a as usize];
+        let vt = b.type_of(v);
+        if (v & VFLAG) != 0 || !self.splits(vt) || !self.count(vt).is_power_of_two() {
+            return false;
+        }
+        let c = (code - core::OP_SIMD) as u8;
+        let tree = c == core::SIMD_REDUCE_ADD_TREE || c == core::SIMD_REDUCE_MUL_TREE;
+        let add = c == core::SIMD_REDUCE_ADD || c == core::SIMD_REDUCE_ADD_ORD || c == core::SIMD_REDUCE_ADD_TREE;
+        let mul = c == core::SIMD_REDUCE_MUL || c == core::SIMD_REDUCE_MUL_ORD || c == core::SIMD_REDUCE_MUL_TREE;
+        let fl = is_float(lane_type(vt));
+        let lop = if add {
+            ast::pick(fl, O_FADD, O_ADD)
+        } else if mul {
+            ast::pick(fl, O_FMUL, O_MUL)
+        } else if c == core::SIMD_REDUCE_AND {
+            O_AND
+        } else if c == core::SIMD_REDUCE_OR {
+            O_OR
+        } else if c == core::SIMD_REDUCE_XOR {
+            O_XOR
+        } else {
+            return false;
+        };
+        if fl && !tree || !fl && !is_int(lane_type(vt)) {
+            return false;
+        }
+        let n = self.count(vt);
+        let pt = self.part_type(vt);
+        let mut ops = Vector::<Value>::with_capacity(n as usize);
+        self.operand_parts(b, out, i, v, n, &mut ops);
+        let mut h = n / 2;
+        while h != 0 {
+            for j in 0..h as usize {
+                ops[j] = self.put(
+                    b,
+                    out,
+                    i,
+                    Inst { op: lop, ty: pt, aux: 0, a: ops[j], b: ops[j + h as usize], c: VNONE },
+                );
+            }
+            h /= 2;
+        }
+        let list = out.pool_list(ops[0..1]);
+        self.val[i as usize] = self.put(b, out, i, Inst { op: O_VOP, ty: t.ty, aux: t.aux, a: list, b: 1, c: VNONE });
+        return true;
+    }
+
     // Instruction `i` (`t`) of `b` by parts, when it has a part form: whether it did.
     fn by_parts(self: &mut Self, b: &Body, out: &mut Body, i: u32, t: Inst) bool {
         let op = t.op;
         if op == O_VOP {
-            return self.masked_parts(b, out, i, t) || self.vop_parts(b, out, i, t);
+            return self.masked_parts(b, out, i, t) || self.vop_parts(b, out, i, t) || self.reduce_parts(b, out, i, t);
         }
         if (op == O_AND || op == O_OR || op == O_XOR) && is_int(t.ty) {
             return self.mask_op(b, out, i, t);

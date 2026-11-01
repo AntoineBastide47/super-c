@@ -4944,3 +4944,89 @@ data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000
         same_outcome(&b, &a2, "sum", x, n * (n + 1) / 2, false);
     }
 }
+
+// Sums in 8-byte lanes of byte lanes: a count of matches widened through 2-, 4- and 8-byte lanes in
+// 16-byte registers (each lane mask beside itself, then subtracted); zero and sign extensions; each length
+// runs as before.
+@test
+fn byte_lanes_widen_to_8_bytes() {
+    let src = M"(lir ptr 8
+sym @cnt fn global
+sym @su fn global
+sym @ss fn global
+sym @w data local
+fn @cnt
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @w
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i8 -36
+  jmp b1(v2, v2)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v5 * 1
+  v9 = load.i8 v8 align 0
+  v10 = icmp.eq v9, v4
+  v11 = zext.i64 v10
+  v12 = add.i64 v6, v11
+  v13 = add.i64 v5, v3
+  jmp b1(v13, v12)
+b3:
+  ret v6
+fn @su
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @w
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i8 43
+  jmp b1(v2, v2)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v5 * 1
+  v9 = load.i8 v8 align 0
+  v10 = iconst.i8 0
+  v11 = zext.i64 v9
+  v12 = add.i64 v6, v11
+  v13 = add.i64 v5, v3
+  jmp b1(v13, v12)
+b3:
+  ret v6
+fn @ss
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @w
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i8 43
+  jmp b1(v2, v2)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v5 * 1
+  v9 = load.i8 v8 align 0
+  v10 = iconst.i8 0
+  v11 = sext.i64 v9
+  v12 = add.i64 v6, v11
+  v13 = add.i64 v5, v3
+  jmp b1(v13, v12)
+b3:
+  ret v6
+data @w size 200 align 3 bytes 21c0a9dc5920318c312059dca9c021ccc100895c79e0918cd160395cc98081cc614069dc99a0f18c71a019dce940e1cc0180495cb960518c11e0f95c090041cca1c029dcd920b18cb120d9dc29c0a1cc4100095cf9e0118c5160b95c498001cce140e9dc19a0718cf1a099dc694061cc8180c95c3960d18c91e0795c8900c1cc21c0a9dc5920318c312059dca9c021ccc100895c79e0918cd160395cc98081cc614069dc99a0f18c71a019dce940e1cc0180495cb960518c11e0f95c090041cca1c029dcd920b18c
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let c = text_of(&a, "cnt");
+    assert(c.contains("sub.v2i64") && !c.contains("vsel"), c.as_str());
+    for n in 0..67u64 {
+        let args: []u64 = [n * 3];
+        same_outcome(&b, &a, "cnt", args, run_value(&b, "cnt", args), false);
+        same_outcome(&b, &a, "su", args, run_value(&b, "su", args), false);
+        same_outcome(&b, &a, "ss", args, run_value(&b, "ss", args), false);
+    }
+}
