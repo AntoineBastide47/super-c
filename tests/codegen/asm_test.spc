@@ -1995,3 +1995,49 @@ fn template_registers_read_written_and_renamed() {
     intrin::vrename(false, x, f2, t2, &mut o2);
     assert_eq(o2.as_str(), "vpcmpd $2, %ymm12, %ymm0, %k0\naddps %xmm12, %xmm0");
 }
+
+// A result the body stores, then returns, is computed into the return register (`a64gen`'s `next_reg`),
+// which the dying load gives up after the call: no move follows the store.
+@test
+fn a_stored_and_returned_result_takes_the_return_register() {
+    let lir = M"(lir ptr 8
+sym @g fn global
+sym @sr fn global
+fn @sr
+  sig (ptr) -> i32
+b0(v0: ptr):
+  call @g() : () -> void
+  v1 = load.i32 v0 align 2
+  v2 = iconst.i32 2
+  v3 = add.i32 v1, v2
+  store v3, v0 align 2
+  ret v3
+)";
+    let mut err = String::new();
+    let q = lparse::parse(lir, &mut err);
+    assert(q.is_some(), err.as_str());
+    let pk = q.unwrap();
+    let fs_: [u32; 1] = [pk.find_symbol("sr")];
+    let ds = Vector::<u32>::new();
+    let mut o = Vector::<u8>::new();
+    assert(
+        nat::object(
+            &pk,
+            tgt::axis_index("macos", false),
+            tgt::axis_index("aarch64", true),
+            fs_[0..1],
+            ds[0..0],
+            "",
+            &mut o,
+            &mut err,
+        ),
+        err.as_str(),
+    );
+    let code = text_section(&o);
+    let mut all = String::new();
+    for k in 0..code.len() / 4 {
+        assert(aa::disassemble(le(&code, 4 * k, 4) as u32, &mut all), "the word disassembles");
+        all.push_str("\n");
+    }
+    assert(all.as_str().find("add w0, ") >= 0 && all.as_str().find("mov x0") < 0, all.as_str());
+}

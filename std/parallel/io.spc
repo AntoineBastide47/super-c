@@ -213,9 +213,27 @@ static mut G_STATS: IoStats = IoStats {
 
 /// The reactor counters (see `IoStats`): the totals of every reactor stopped so far plus the running one.
 pub fn io_stats() IoStats {
-    let mut s = unsafe G_STATS;
-    let r = unsafe G_REACTOR;
-    if r != null && unsafe atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 1) == 2 {
+    let mut s = IoStats {
+        arms: 0,
+        disarms: 0,
+        sets: 0,
+        polls: 0,
+        events: 0,
+        wakes: 0,
+        pipe_wakes: 0,
+        batches: 0,
+        stale: 0,
+        records: 0,
+    };
+    // The stopped reactors' totals: `shutdown` adds to them while this may run.
+    let sp = ((&mut s) as *mut IoStats) as *mut u64;
+    let gp = ((&mut unsafe G_STATS) as *mut IoStats) as *mut u64;
+    for i in 0..sizeof(IoStats) / sizeof(u64) {
+        unsafe sp[i] = unsafe atomic::load_u64(gp + i, 0);
+    }
+    // The running reactor's pointer is ordered by the acquire of state 2, as its builder publishes it.
+    if unsafe atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 1) == 2 {
+        let r = unsafe G_REACTOR;
         // Relaxed reads of counters only the reactor thread writes: a snapshot, not a fence.
         s.arms = s.arms + unsafe atomic::load_u64(&mut unsafe (*r).st.arms, 0);
         s.disarms = s.disarms + unsafe atomic::load_u64(&mut unsafe (*r).st.disarms, 0);
@@ -1248,16 +1266,13 @@ pub fn shutdown() {
     }
     unsafe sc_io::sc_io_free((*r).poller);
     if io_stats_on() {
-        let t = &mut unsafe G_STATS;
-        t.arms = t.arms + unsafe (*r).st.arms;
-        t.disarms = t.disarms + unsafe (*r).st.disarms;
-        t.sets = t.sets + unsafe (*r).st.sets;
-        t.polls = t.polls + unsafe (*r).st.polls;
-        t.events = t.events + unsafe (*r).st.events;
-        t.wakes = t.wakes + unsafe (*r).st.wakes;
-        t.pipe_wakes = t.pipe_wakes + unsafe (*r).st.pipe_wakes;
-        t.batches = t.batches + unsafe (*r).st.batches;
-        t.stale = t.stale + unsafe (*r).st.stale;
+        // Every counter but `records` (the running reactor's table, not a total), atomically: `io_stats`
+        // may read the totals meanwhile.
+        let gp = ((&mut unsafe G_STATS) as *mut IoStats) as *mut u64;
+        let rp = ((&mut unsafe (*r).st) as *mut IoStats) as *mut u64;
+        for i in 0..sizeof(IoStats) / sizeof(u64) - 1 {
+            let _ = unsafe atomic::add_u64(gp + i, unsafe rp[i], 0);
+        }
     }
     let mut g = Global {};
     unsafe g.dealloc((*r).recs, (*r).nrec * sizeof(FdRec), alignof(FdRec));

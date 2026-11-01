@@ -326,41 +326,49 @@ fn zst_ptrdiff() {
 }
 
 // ---- scheduler hooks --------------------------------------------------------------------------------
-// Installed by the scheduler before it starts any worker, so every safepoint's read happens after the
-// write.
+// Installed by the scheduler before it starts any worker. A thread the program started itself runs
+// safepoints too, maybe while another thread starts the scheduler: the hooks are read and written with
+// relaxed atomics, as the functions' addresses (0: none yet).
 
-static mut PRE_HOOK: fn() = no_preempt;
-static mut CANCEL_HOOK: fn() i32 = no_cancel;
-
-// The hooks before the scheduler installs its own.
-const fn no_preempt() {}
-const fn no_cancel() i32 {
-    return 0;
-}
+static mut PRE_HOOK: usize = 0;
+static mut CANCEL_HOOK: usize = 0;
 
 // Install the preemption hook every safepoint of a running task calls.
 @export("__sc_set_preempt_hook")
 fn set_preempt_hook(f: fn()) {
-    unsafe PRE_HOOK = f;
+    unsafe atomic_store_usize(&mut PRE_HOOK, f as usize, RELAXED);
 }
 
 // Install the cancellation hook a combined safepoint asks: 1 when it accepted a pending cancellation.
 @export("__sc_set_cancel_hook")
 fn set_cancel_hook(f: fn() i32) {
-    unsafe CANCEL_HOOK = f;
+    unsafe atomic_store_usize(&mut CANCEL_HOOK, f as usize, RELAXED);
 }
 
 // The cold half of a safepoint tick: run the preemption hook, and hand back the tick budget.
 @export("__sc_preempt_check")
 fn preempt_check() i32 {
-    unsafe PRE_HOOK();
+    let f = unsafe atomic_load_usize(&PRE_HOOK, RELAXED);
+    if f != 0 {
+        let h = unsafe {
+            f as fn()
+        };
+        h();
+    }
     return 2048;
 }
 
 // The cancellation half of a combined safepoint: 1 when the hook accepted a pending cancellation.
 @export("__sc_cancel_tick")
 fn cancel_tick() i32 {
-    return unsafe CANCEL_HOOK();
+    let f = unsafe atomic_load_usize(&CANCEL_HOOK, RELAXED);
+    if f == 0 {
+        return 0;
+    }
+    let h = unsafe {
+        f as fn() i32
+    };
+    return h();
 }
 
 // ---- reflection registry ------------------------------------------------------------------------

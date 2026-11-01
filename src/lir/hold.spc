@@ -125,15 +125,16 @@ pub(package) struct HRef {
 extend HRef as Persist {}
 
 // A function of the object: its spelling, walk facts (`HELD_*`), effects (`Sym.fx`), the parameters
-// whose memory it may write and those it may let escape (`Sym.esc`), direct calls (spellings, in
-// instruction order) and, with HELD_OK, its optimized body, whose symbols are `refs`, whose messages and
-// line files are spellings.
+// whose memory it may write and those it may let escape (`Sym.esc`), its parameters' byte ranges
+// (`Sym.span`'s entries), direct calls (spellings, in instruction order) and, with HELD_OK, its optimized
+// body, whose symbols are `refs`, whose messages and line files are spellings.
 pub(package) struct HFunc {
     pub(package) name: u32,
     pub(package) flags: u8,
     pub(package) fx: u8,
     pub(package) wargs: u64,
     pub(package) esc: u64,
+    pub(package) spans: Vector<u64>,
     pub(package) calls: Vector<u32>,
     pub(package) body: Body,
     pub(package) refs: Vector<HRef>,
@@ -290,10 +291,15 @@ pub(package) fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut
                 fx: sy.fx,
                 wargs: r.wargs_of(k),
                 esc: sy.esc,
+                spans: Vector::<u64>::new(),
                 calls: Vector::<u32>::new(),
                 body: Body::new(),
                 refs: Vector::<HRef>::new(),
             };
+            if sy.span != NONE {
+                let n = pk.spans[sy.span as usize] as usize;
+                f.spans.extend_from_slice(pk.spans[sy.span as usize + 1..sy.span as usize + 1 + n]);
+            }
             let cs = r.calls_of(k);
             for c in 0..cs.len() {
                 f.calls.push(sv.name(pk, pk.syms[bsym[cs[c] as usize] as usize].name));
@@ -446,6 +452,7 @@ pub(package) fn add(pk: &mut Package, unit: u32, rec: &Rec) {
         pk.held.bytes = pk.bytes.len() as u32;
         pk.held.relocs = pk.relocs.len() as u32;
         pk.held.at.push(0);
+        pk.held.span_at.push(0);
     }
     for q in 0..rec.funcs.len() {
         let f = rec.funcs.at(q);
@@ -486,6 +493,8 @@ pub(package) fn add(pk: &mut Package, unit: u32, rec: &Rec) {
         pk.held.fx.push(f.fx);
         pk.held.wargs.push(f.wargs);
         pk.held.esc.push(f.esc);
+        pk.held.spans.extend_copy(&f.spans);
+        pk.held.span_at.push(pk.held.spans.len() as u32);
         for c in 0..f.calls.len() {
             pk.held.calls.push(pk.symbol(rec.names.at(f.calls[c] as usize).as_str(), SK_FUNC));
         }

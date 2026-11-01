@@ -220,7 +220,9 @@ pub(package) struct Opt {
     selected: bool, // the last walk made selects (`diamond`), which no walk simplified
     refold: bool, // the last walk folded a value its readers saw before (`null_test`, `merge_exits`)
     rethru: bool, // `thread` made a jump a return (`ret_folded`)
-    unstored: bool, // the last walk dropped a store in a loop, whose loads may leave it now
+    // The last walk dropped a store in a loop, whose loads may leave it now, or one before a call, whose
+    // loads may move past it (`sink_load`).
+    unstored: bool,
     pre_at: Vector<u32>, // the rebuild's ranges of `pre_list` per instruction
     pre_list: Vector<u32>,
     // The scoped tables: a pure instruction's hash to the instruction, a memory place's hash to its
@@ -1540,10 +1542,15 @@ extend Opt {
     }
 
     /// Keep in a register the place each innermost loop of body `b` reads and writes through an exclusive
-    /// pointer from outside the loop (LLVM's LICM scalar promotion), when the loop has a preheader, calls
-    /// nothing and no other access of it may touch the place's bytes: a new slot takes the place's accesses
-    /// in the loop, loaded from the place in a block between the preheader and the loop and stored back to
-    /// it in a block on each edge out; the promotion of `run` makes the slot values. Whether any loop's did.
+    /// pointer, or in a `static mut`, from outside the loop (LLVM's LICM scalar promotion), when the loop has
+    /// a preheader, calls nothing, orders no memory (an atomic, a fence) and no other access of it may touch
+    /// the place's bytes. A data race is undefined behavior: with no synchronizing operation and no
+    /// suspension point in the loop, no other thread may read or write a static meanwhile; the store back is
+    /// then made only when the value differs from the one loaded before the loop (a loop that wrote nothing
+    /// writes nothing, as another thread may write the static outside such a run). A new slot takes the
+    /// place's accesses in the loop, loaded from the place in a block between the preheader and the loop and
+    /// stored back to it in a block on each edge out; the promotion of `run` makes the slot values. Whether
+    /// any loop's did.
     pub(package) fn promote_places(self: &mut Self, pk: &Package, b: &mut Body) bool {
         if b.naked {
             return false;
@@ -1562,6 +1569,7 @@ extend Opt {
             }
             let st = b.insts[s as usize];
             let ty = b.type_of(st.b);
+            let stat = self.static_place(pk, s);
             let al = type_align(ty, pk.ptr_bytes).trailing_zeros() as u16;
             let slot = b.slot(type_bytes(ty, pk.ptr_bytes), al as u8);
             // The block before the loop: the place's value into the slot.
@@ -1608,11 +1616,39 @@ extend Opt {
                     b.blocks.index_mut(ek as usize).flags = b.blocks[to as usize].flags & BLOCK_RARE;
                     b.begin(ek);
                     let l = b.locs[ti as usize];
+                    let n0 = b.insts.len();
                     let w = b.emit(Inst { op: O_LOAD, ty: ty, aux: al, a: sa, b: VNONE, c: 0 }, l);
+                    if stat {
+                        // A static: stored back only when the loop changed it, then on along a copy of `e`.
+                        let (x, y) = if ty == T_F32 || ty == T_F64 {
+                            let it = if ty == T_F32 {
+                                T_I32
+                            } else {
+                                T_I64
+                            };
+                            (
+                                b.emit(Inst { op: O_BITCAST, ty: it, aux: 0, a: w, b: VNONE, c: VNONE }, l),
+                                b.emit(Inst { op: O_BITCAST, ty: it, aux: 0, a: v, b: VNONE, c: VNONE }, l)
+                            )
+                        } else {
+                            (w, v)
+                        };
+                        let ne = b.emit(Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: x, b: y, c: VNONE }, l);
+                        self.uargs.truncate(0);
+                        for a in 0..b.edge_nargs(e) {
+                            self.uargs.push(b.edge_arg(e, a));
+                        }
+                        let skip = b.edge(to, &self.uargs);
+                        let sk = b.add_block(none);
+                        b.blocks.index_mut(sk as usize).flags = b.blocks[ek as usize].flags;
+                        let into = b.edge(sk, noargs);
+                        let _ = b.emit(Inst { op: O_BR, ty: T_NONE, aux: 0, a: ne, b: into, c: skip }, l);
+                        b.begin(sk);
+                    }
                     let _ = b.emit(Inst { op: O_STORE, ty: T_NONE, aux: st.aux, a: st.a, b: w, c: st.c }, l);
                     let _ = b.emit(jump(e), l);
                     if b.inl.len() != 0 {
-                        for _ in 0..3 {
+                        for _ in n0..b.insts.len() {
                             b.inl.push(b.inl[ti as usize]);
                         }
                     }
@@ -1638,9 +1674,11 @@ extend Opt {
     // The store that names the place `promote_places` keeps in a register for loop `h`: an innermost loop
     // with a preheader no earlier loop's change touched, whose blocks end in jumps and branches and hold no
     // call nor other access of memory but loads and stores. The place: a store's address from outside the
-    // loop, of an exclusive class, and an offset; a scalar that a load of the loop reads too, whose load
-    // before the loop cannot fault; every other access of the loop of another class (neither may be any),
-    // of other bytes of the same address, or of another type tag. NONE when none.
+    // loop, of an exclusive class or into a data symbol the package defines (`static_place`), and an offset;
+    // a scalar that a load of the loop reads too, whose load before the loop cannot fault; every other
+    // access of the loop of another class (neither may be any), of other bytes of the same address, of
+    // another object, or of another type tag. A static whose address another pointer may hold stays in
+    // memory when an access through such a pointer may touch it. NONE when none.
     fn place_of(self: &Self, pk: &Package, b: &Body, h: u32) u32 {
         // The blocks the loop tables cover (`nest`'s): `promote_places` adds others.
         if self.inner[h as usize] != h || self.preh[h as usize] == NONE || self.touched[self.preh[h as usize] as usize] {
@@ -1666,10 +1704,10 @@ extend Opt {
                 if t.op != O_LOAD && t.op != O_STORE && (writes_memory(t) || t.op == O_VAARG) {
                     return NONE;
                 }
-                if cand == NONE && t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 && self.outside(t.a, h) && self.loop_acc(
+                if cand == NONE && t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 && self.outside(t.a, h) && (self.loop_acc(
                     i,
                     h,
-                ) >= CL_NOALIAS && self.loop_acc(i, h) < CL_MANY {
+                ) >= CL_NOALIAS && self.loop_acc(i, h) < CL_MANY || self.static_place(pk, i)) {
                     cand = i;
                 }
             }
@@ -1709,9 +1747,10 @@ extend Opt {
                 }
                 let c = self.loop_acc(i, h);
                 let qlo = (t.c as i32) as i64;
-                let apart = c < CL_MANY && c != cls || c == cls && t.a == s.a && (qlo + type_bytes(tt, pk.ptr_bytes) as i64 <= lo || lo + n <= qlo) || c >= CL_MANY && tbaa(
+                let o = self.aobj[i as usize];
+                let apart = c < CL_MANY && c != cls || c == cls && t.a == s.a && (qlo + type_bytes(tt, pk.ptr_bytes) as i64 <= lo || lo + n <= qlo) || (c >= CL_MANY || c == CL_OTHER) && tbaa(
                     t,
-                ) != 0 && tbaa(s) != 0 && tbaa(t) != tbaa(s);
+                ) != 0 && tbaa(s) != 0 && tbaa(t) != tbaa(s) || o != NONE && self.aobj[cand as usize] != NONE && o != self.aobj[cand as usize];
                 if !apart {
                     return NONE;
                 }
@@ -1721,6 +1760,17 @@ extend Opt {
             return NONE;
         }
         return cand;
+    }
+
+    // Whether store `i` of the body writes a `static mut`: a writable data object the package defines
+    // (`aobj`), not a thread's own (a thread-local address is no value across code).
+    fn static_place(self: &Self, pk: &Package, i: u32) bool {
+        let o = self.aobj[i as usize];
+        if o == NONE || (o & (lu::OBJ_SLOT | lu::OBJ_PRIVATE)) != 0 {
+            return false;
+        }
+        let y = pk.syms[o as usize];
+        return y.kind == SK_DATA && y.def != NONE && !pk.data[y.def as usize].readonly;
     }
 
     // Give each loop header no preheader enters one (LLVM's LoopSimplify): a block that the jumps and
@@ -3777,8 +3827,10 @@ extend Opt {
 
     // Instruction `i`, which stays, in the walk's order within its block: a store drops each earlier one
     // of `pend` it writes all bytes of through the same address (no instruction between reads memory or
-    // leaves the block), then joins `pend`; a call keeps those it cannot read; any other instruction but a
-    // pure one that cannot trap empties `pend`. Whether it dropped any.
+    // leaves the block), then joins `pend`; a call keeps those it cannot read: the ones of a class it does
+    // not reach, and, for a call that comes back (no `FX_STALL`), the ones whose bytes it does not read
+    // (`call_apart`); any other instruction but a pure one that cannot trap empties `pend`. Whether it
+    // dropped any.
     fn overwrite(self: &mut Self, pk: &Package, b: &Body, i: u32) bool {
         let t = b.insts[i as usize];
         if pure_op(t.op) && !tls_addr(pk, b, t) && (t.op < O_SDIV || t.op > O_UREM) {
@@ -3787,14 +3839,26 @@ extend Opt {
         if t.op == O_CALL || t.op == O_CALLIND {
             // A call keeps the stores into an exclusive parameter's referent whose class it does not reach
             // (`carry`'s test): no pointer it holds points there, and a panic in it ends the program, so no
-            // code reads those bytes before a later store writes them.
+            // code reads those bytes before a later store writes them. A call that comes back keeps those
+            // of bytes it does not read either (`call_apart`).
             let wb = self.write_bits(pk, b, i) | self.sbits;
+            let back = t.op == O_CALL && (pk.syms[b.syms[t.a as usize] as usize].fx & FX_STALL) == 0;
             let mut x: usize = 0;
             // Each step keeps or drops one entry.
             while x < self.pend.len() {
                 let j = self.pend[x];
-                let c = self.acc(j, b.insts[j as usize].a);
-                if c >= CL_NOALIAS && c < CL_FROZEN && (class_bit(c) & wb) == 0 {
+                let s = b.insts[j as usize];
+                let c = self.acc(j, s.a);
+                let lo = (s.c as i32) as i64;
+                if c >= CL_NOALIAS && c < CL_FROZEN && (class_bit(c) & wb) == 0 || back && self.call_apart(
+                    pk,
+                    b,
+                    i,
+                    t,
+                    self.val(s.a),
+                    lo,
+                    lo + type_bytes(b.type_of(s.b), pk.ptr_bytes) as i64,
+                ) {
                     x += 1;
                 } else {
                     let _ = self.pend.swap_remove(x);
@@ -3822,6 +3886,10 @@ extend Opt {
             ) as i64 <= hi {
                 self.repl[j as usize] = DROPPED;
                 dropped = true;
+                // Each step reads one instruction between the two stores.
+                for x in j + 1..i {
+                    self.unstored = self.unstored || b.insts[x as usize].op == O_CALL;
+                }
                 let last = self.pend.len() - 1;
                 self.pend[x] = self.pend[last];
                 self.pend.truncate(last);
@@ -6070,6 +6138,9 @@ extend Opt {
             // A load that may fault leaves only the loop whose every entry runs it.
             let safe = self.safe_load(pk, b, t);
             if (safe || self.runs_first(b, k, i)) && self.hoist(pk, b, k, i, true, p == PRIV_KEPT, !safe) {
+                return true;
+            }
+            if safe && self.sink_load(pk, b, k, i, t) {
                 return true;
             }
         } else if (t.op == O_ADDO || t.op == O_SUBO || t.op == O_MULO) && (self.fold_checked(pk, b, i) || self.checked_plain(
@@ -9239,9 +9310,10 @@ extend Opt {
     // Write `i`, which started memory state `states` for the type tags whose state `before` held
     // otherwise: each place of `recent` known in such a state that the write cannot touch holds its value
     // in the new state too. A write cannot touch a place of an alias class it writes none of (`write_bits`,
-    // a scope's class aside), nor a store bytes of its own address apart from its own. A place moves only
-    // along the states a load of it reads: the untagged accesses' and its type's tag's; another tag's
-    // state may be its number by chance and then miss the writes of the place's own tag.
+    // a scope's class aside), nor a store bytes of its own address apart from its own, nor a call bytes
+    // its arguments reach none of (`call_apart`). A place moves only along the states a load of it reads:
+    // the untagged accesses' and its type's tag's; another tag's state may be its number by chance and then
+    // miss the writes of the place's own tag.
     fn carry(self: &mut Self, pk: &Package, b: &Body, i: u32, before: [u32; TBAA_TAGS]) {
         let t = b.insts[i as usize];
         let wb = self.write_bits(pk, b, i);
@@ -9267,10 +9339,89 @@ extend Opt {
                 b.type_of(t.b),
                 pk.ptr_bytes,
             ) as i64);
-            if (other_class || other_bytes) && self.recall(p.addr, p.off, p.ty, to) == VNONE {
+            let apart = !other_class && !other_bytes && t.op == O_CALL && self.call_apart(
+                pk,
+                b,
+                i,
+                t,
+                p.addr,
+                lo,
+                lo + type_bytes(p.ty, pk.ptr_bytes) as i64,
+            );
+            if (other_class || other_bytes || apart) && self.recall(p.addr, p.off, p.ty, to) == VNONE {
                 self.remember(p.addr, p.off, p.ty, p.val, to);
             }
         }
+    }
+
+    // Load `t`, instruction `i` of block `k`, that cannot fault: moved past the next call of its block when
+    // that call does not write its bytes (`call_apart`) and nothing before the call reads it, loads or
+    // writes memory: its value then need not live across the call. Whether it moved.
+    fn sink_load(self: &mut Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) bool {
+        let bk = b.blocks[k as usize];
+        let lo = (t.c as i32) as i64;
+        let hi = lo + type_bytes(t.ty, pk.ptr_bytes) as i64;
+        // Each step reads one later instruction of the block.
+        for j in i + 1..bk.start + bk.len - 1 {
+            let u = b.insts[j as usize];
+            if self.moved[j as usize] || self.repl[j as usize] != VNONE {
+                return false;
+            }
+            lv::uses(b, u, &mut self.uses);
+            for q in 0..self.uses.len() {
+                if self.uses[q] == i {
+                    return false;
+                }
+            }
+            if u.op == O_CALL {
+                if !self.call_apart(pk, b, j, u, t.a, lo, hi) {
+                    return false;
+                }
+                self.moved[i as usize] = true;
+                if j + 1 == bk.start + bk.len - 1 {
+                    self.hoisted.push(k as u64 << 32 | i as u64);
+                } else {
+                    self.pre.push((j + 1) as u64 << 32 | i as u64);
+                }
+                return true;
+            }
+            if u.op == O_LOAD || writes_memory(u) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    // Whether call `t`, instruction `i` of `b`, reads and writes none of the bytes `[lo, hi)` past address
+    // `a`, of an exclusive class (a parameter's, an inlined call's or an allocation's) but a scope's: the
+    // call reaches that class only through its arguments of it (`arg_bits`), each `a`'s base at a constant
+    // offset, through which the callee reaches only bytes apart from those (`Sym.span`).
+    fn call_apart(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst, a: Value, lo: i64, hi: i64) bool {
+        let c = self.class(a);
+        if c < CL_NOALIAS || c >= CL_FROZEN || (class_bit(c) & self.sbits) != 0 {
+            return false;
+        }
+        let sy = pk.syms[b.syms[t.a as usize] as usize];
+        let (base, off) = address_of(b, a);
+        for q in 0..t.aux as u32 {
+            let v = b.pool[(t.c + q) as usize];
+            if (class_bit(self.acc(i, v)) & class_bit(c)) == 0 {
+                continue;
+            }
+            let (vb, vo) = address_of(b, v);
+            let s = if sy.span != NONE && q as u64 < pk.spans[sy.span as usize] {
+                pk.spans[(sy.span + 1 + q) as usize]
+            } else {
+                SPAN_ANY
+            };
+            if s == SPAN_NONE {
+                continue;
+            }
+            if vb != base || s == SPAN_ANY || span_lo(s) + vo < off + hi && off + lo < span_hi(s) + vo {
+                return false;
+            }
+        }
+        return true;
     }
 
     // Whether load `t` cannot fault wherever its address is defined: it reads inside a slot, a data
@@ -10092,13 +10243,21 @@ extend Run {
         calls_of(pk, &bodies, held, &mut cs);
         let mut wargs = Vector::<u64>::new();
         let mut esc = Vector::<u64>::new();
-        let fx = effects(pk, &bodies, &cs, &mut wargs, &mut esc);
+        let mut sp = Vector::<u64>::new();
+        let mut sp_at = Vector::<u32>::new();
+        let fx = effects(pk, &bodies, &cs, &mut wargs, &mut esc, &mut sp, &mut sp_at);
+        // Per body, its count, then its parameters' ranges.
+        pk.spans.truncate(0);
         for s in 0..pk.syms.len() {
             let d = pk.syms[s].def;
+            pk.syms.index_mut(s).span = NONE;
             if pk.syms[s].kind == SK_FUNC && d != NONE {
                 pk.syms.index_mut(s).fx = fx[d as usize];
                 pk.syms.index_mut(s).esc = esc[d as usize];
                 pk.syms.index_mut(s).wargs = wargs[d as usize];
+                pk.syms.index_mut(s).span = pk.spans.len() as u32;
+                pk.spans.push(sp_at[d as usize + 1] - sp_at[d as usize]);
+                pk.spans.extend_from_slice(sp[sp_at[d as usize] as usize..sp_at[d as usize + 1] as usize]);
             }
         }
         let p: &Package = pk;
@@ -10881,9 +11040,19 @@ fn calls_of(p: &Package, bodies: &Vector<Body>, held: u32, cs: &mut Calls) {
 // least fixed point: a body comes back when each body it calls does). A held body (`Package.held`) keeps the flags and the
 // parameters its unit's build found: the others then take the values a build without held bodies gives
 // them. Into `wargs`, per body, the parameters whose memory it may write (`FX_ARG`), a bit each; into
-// `esc`, those whose pointer it may let escape (`Sym.esc`): its own uses' (`own_escapes`), and a pass to
-// a body's parameter that escapes. The calls and their arguments' roots are `cs`'s.
-fn effects(p: &Package, bodies: &Vector<Body>, cs: &Calls, wargs: &mut Vector<u64>, esc: &mut Vector<u64>) Vector<u8> {
+// `esc`, those whose pointer it may let escape (`Sym.esc`): its own uses' (`own_escapes`), every argument
+// past its parameters (a variadic one, which its accesses do not show), and a pass to a body's parameter
+// that escapes; into `sp`, the byte ranges of its parameters (`Sym.span`'s entries,
+// `sp[sp_at[k]..sp_at[k + 1]]`, `spans`). The calls and their arguments' roots are `cs`'s.
+fn effects(
+    p: &Package,
+    bodies: &Vector<Body>,
+    cs: &Calls,
+    wargs: &mut Vector<u64>,
+    esc: &mut Vector<u64>,
+    sp: &mut Vector<u64>,
+    sp_at: &mut Vector<u32>,
+) Vector<u8> {
     let n = bodies.len();
     let held = if p.held.body == NONE {
         n
@@ -10893,22 +11062,37 @@ fn effects(p: &Package, bodies: &Vector<Body>, cs: &Calls, wargs: &mut Vector<u6
     let mut fx = Vector::<u8>::with_capacity(n);
     wargs.truncate(0);
     esc.truncate(0);
-    // Per body below `held`, its parameters' passes to a body (`own_escapes`): `pass[at[k]..at[k + 1]]`.
+    sp.truncate(0);
+    sp_at.truncate(0);
+    // Per body below `held`, its parameters' passes to a body and their offsets (`own_escapes`):
+    // `pass[at[k]..at[k + 1]]`.
     let mut pass = Vector::<u64>::new();
+    let mut poff = Vector::<i64>::new();
     let mut at = Vector::<u32>::with_capacity(held + 1);
     for k in 0..n {
+        sp_at.push(sp.len() as u32);
         if k >= held {
             fx.push(p.held.fx[k - held]);
             wargs.push(p.held.wargs[k - held]);
             esc.push(p.held.esc[k - held]);
+            let hd = &p.held;
+            sp.extend_from_slice(hd.spans[hd.span_at[k - held] as usize..hd.span_at[k - held + 1] as usize]);
             continue;
         }
         let mut w: u64 = 0;
         fx.push(own_effects(p, &bodies[k], &mut w));
         wargs.push(w);
         at.push(pass.len() as u32);
-        esc.push(own_escapes(p, &bodies[k], &mut pass));
+        let np = (bodies[k].blocks[0].param_len as u64).min(64);
+        esc.push(
+            own_escapes(p, &bodies[k], &mut pass, &mut poff, sp) | if np < 64 {
+                ~0u64 << np
+            } else {
+                0u64
+            },
+        );
     }
+    sp_at.push(sp.len() as u32);
     at.push(pass.len() as u32);
     // Each round adds one of a body's 3 flags, 64 written or 64 escaping parameters, or ends.
     for _ in 0..131 * n + 1 {
@@ -10954,11 +11138,97 @@ fn effects(p: &Package, bodies: &Vector<Body>, cs: &Calls, wargs: &mut Vector<u6
         }
         if !changed {
             stalls(&mut fx, cs, held);
+            spans(sp, sp_at, esc, &pass, &poff, &at, held);
             return fx;
         }
     }
     assert(false, "opt: the effect inference does not settle");
     return fx;
+}
+
+// The byte ranges of the parameters of the bodies below `held` (`effects`), from their own accesses in
+// `sp`: any byte through one that escapes (`esc`); with each pass to a body's parameter (`pass`, `poff`,
+// `at`) that parameter's bytes moved by the pass's offset. The least fixed point: a worklist of the
+// bodies whose ranges grew, each pass into such a body evaluated again; a range only grows, to SPAN_ANY
+// past SPAN_MAX, so the result does not depend on the order.
+fn spans(
+    sp: &mut Vector<u64>,
+    sp_at: &Vector<u32>,
+    esc: &Vector<u64>,
+    pass: &Vector<u64>,
+    poff: &Vector<i64>,
+    at: &Vector<u32>,
+    held: usize,
+) {
+    let n = sp_at.len() - 1;
+    for k in 0..held {
+        for x in sp_at[k]..sp_at[k + 1] {
+            if (esc[k] >> (x - sp_at[k]) as u64 & 1) != 0 {
+                sp[x as usize] = SPAN_ANY;
+            }
+        }
+    }
+    // The passes by callee (`into[into_at[c]..into_at[c + 1]]`) and per pass its caller.
+    let np = pass.len();
+    let mut from = Vector::<u32>::with_capacity(np);
+    for k in 0..held {
+        for _ in at[k]..at[k + 1] {
+            from.push(k as u32);
+        }
+    }
+    let mut into_at = Vector::<u32>::new();
+    into_at.resize_default(n + 1);
+    for x in 0..np {
+        into_at[(pass[x] >> 32) as usize + 1] += 1;
+    }
+    for c in 0..n {
+        into_at[c + 1] += into_at[c];
+    }
+    let mut into = Vector::<u32>::new();
+    into.resize_default(np);
+    let mut fill_at = Vector::<u32>::new();
+    fill_at.extend_copy(&into_at);
+    for x in 0..np {
+        let c = (pass[x] >> 32) as usize;
+        into[fill_at[c] as usize] = x as u32;
+        fill_at[c] += 1;
+    }
+    let mut queued = Vector::<bool>::new();
+    queued.resize_default(n);
+    let mut work = Vector::<u32>::with_capacity(n);
+    for c in 0..n {
+        queued[c] = true;
+        work.push(c as u32);
+    }
+    // Each entry grows at most 4 * SPAN_MAX + 2 times, and each growth queues at most one body.
+    let bound = n + (sp.len() + 1) * (4 * SPAN_MAX as usize + 2);
+    for _ in 0..bound {
+        if work.len() == 0 {
+            return;
+        }
+        let c = work.pop().unwrap() as usize;
+        queued[c] = false;
+        for y in into_at[c]..into_at[c + 1] {
+            let x = into[y as usize] as usize;
+            let k = from[x] as usize;
+            let q = (pass[x] >> 8 & 0xFF) as u32;
+            let r = sp_at[k] + (pass[x] & 0xFF) as u32;
+            let s = if sp_at[c] + q < sp_at[c + 1] {
+                sp[(sp_at[c] + q) as usize]
+            } else {
+                SPAN_ANY
+            };
+            let v = span_join(sp[r as usize], span_shift(s, poff[x]));
+            if v != sp[r as usize] {
+                sp[r as usize] = v;
+                if !queued[k] {
+                    queued[k] = true;
+                    work.push(k as u32);
+                }
+            }
+        }
+    }
+    assert(work.len() == 0, "opt: the parameter ranges do not settle");
 }
 
 // `FX_STALL` for each body below `held` that is on a cycle of calls or calls one (`effects`): the bodies
@@ -11087,15 +11357,20 @@ fn has_cycle(b: &Body) bool {
 // (`effects`): a use of the parameter, or of address arithmetic on it, but as an access's address, the
 // base of more arithmetic or a comparison's operand (not a by-value aggregate's, whose address compared
 // tells its copy from the bytes `copied_args` passes in its place). A pass to a body's parameter goes into
-// `pass` instead (`body << 32 | argument << 8 | parameter`): it escapes when that parameter does. A block
-// that ends the program counts for nothing.
-fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>) u64 {
+// `pass` instead (`body << 32 | argument << 8 | parameter`), its offset from the parameter into `poff`
+// (OFF_ANY: not constant): it escapes when that parameter does. Into `span`, per parameter of the first
+// 64, the bytes its accesses touch (`Sym.span`'s entries). A block that ends the program counts for
+// nothing.
+fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>, poff: &mut Vector<i64>, span: &mut Vector<u64>) u64 {
     let ni = b.insts.len();
-    // Per instruction, the parameter its value is address arithmetic on (NONE: none). Each pass sets at
-    // least one more or ends: at most `ni + 1`.
+    // Per instruction, the parameter its value is address arithmetic on (NONE: none) and the constant
+    // offset (`doff`, OFF_ANY: not constant or past SPAN_MAX). Each pass sets at least one more or ends: at
+    // most `ni + 1`.
     let mut der = Vector::<u32>::with_capacity(ni);
+    let mut doff = Vector::<i64>::with_capacity(ni);
     for _ in 0..ni {
         der.push(NONE);
+        doff.push(OFF_ANY);
     }
     for _ in 0..ni + 1 {
         let mut changed = false;
@@ -11105,6 +11380,24 @@ fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>) u64 {
                 let k = param_of(b, &der, t.a);
                 if k != NONE {
                     der[i] = k;
+                    let o = off_of(&doff, t.a);
+                    let n = if t.b == VNONE {
+                        Option::<u64>::Some(0)
+                    } else {
+                        const_of(b, t.b)
+                    };
+                    if o != OFF_ANY && n.is_some() {
+                        // A 32-bit index is a 32-bit target's: its address arithmetic wraps at 32 bits.
+                        let x = if t.b != VNONE && b.type_of(t.b) == T_I32 {
+                            ((n.unwrap() as u32) as i32) as i64
+                        } else {
+                            n.unwrap() as i64
+                        };
+                        let d = o.wrapping_add(x.wrapping_mul(t.aux)).wrapping_add(t.c as i32);
+                        if d >= -SPAN_MAX && d <= SPAN_MAX {
+                            doff[i] = d;
+                        }
+                    }
                     changed = true;
                 }
             }
@@ -11112,6 +11405,12 @@ fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>) u64 {
         if !changed {
             break;
         }
+    }
+    let e = b.blocks[0];
+    let np = (e.param_len as usize).min(64);
+    let s0 = span.len();
+    for _ in 0..np {
+        span.push(SPAN_NONE);
     }
     let mut out: u64 = 0;
     let mut uses = Vector::<Value>::new();
@@ -11133,6 +11432,7 @@ fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>) u64 {
                     }
                     if q < 64 {
                         pass.push(c as u64 << 32 | q as u64 << 8 | x as u64);
+                        poff.push(off_of(&doff, b.pool[(t.c + q) as usize]));
                     } else {
                         out |= 1u64 << x as u64;
                     }
@@ -11156,10 +11456,92 @@ fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>) u64 {
                 if x != NONE && !kept {
                     out |= 1u64 << x as u64;
                 }
+                if x == NONE || !kept || t.op == O_PTRADD || t.op == O_ICMP {
+                    continue;
+                }
+                // An access: its bytes from the parameter, any when the offset or a copy's count is not
+                // constant.
+                let o = off_of(&doff, v);
+                let (lo, n) = if t.op == O_LOAD {
+                    ((t.c as i32) as i64, type_bytes(t.ty, p.ptr_bytes) as i64)
+                } else if t.op == O_STORE {
+                    ((t.c as i32) as i64, type_bytes(b.type_of(t.b), p.ptr_bytes) as i64)
+                } else {
+                    let c = const_of(b, t.c);
+                    (
+                        0i64,
+                        if c.is_some() && c.unwrap() <= SPAN_MAX as u64 {
+                            c.unwrap() as i64
+                        } else {
+                            OFF_ANY
+                        }
+                    )
+                };
+                span[s0 + x as usize] = span_join(
+                    span[s0 + x as usize],
+                    if o == OFF_ANY || n == OFF_ANY {
+                        SPAN_ANY
+                    } else {
+                        span_of(o + lo, o + lo + n)
+                    },
+                );
             }
         }
     }
     return out;
+}
+
+// The constant offset (`own_escapes`' `doff`) of address value `v` from the parameter it is address
+// arithmetic on: 0 for the parameter itself.
+const fn off_of(doff: &Vector<i64>, v: Value) i64 {
+    return if (v & (VPARAM | VFLAG)) != 0 {
+        0i64
+    } else {
+        doff[v as usize]
+    };
+}
+
+// The `Sym.span` entry of the bytes `[lo, hi)`: SPAN_ANY past SPAN_MAX.
+const fn span_of(lo: i64, hi: i64) u64 {
+    if lo >= hi {
+        return SPAN_NONE;
+    }
+    if lo < -SPAN_MAX || hi > SPAN_MAX {
+        return SPAN_ANY;
+    }
+    return ((lo as i32) as u32) as u64 << 32 | ((hi as i32) as u32) as u64;
+}
+
+// The bytes of `Sym.span` entry `s` (not SPAN_NONE or SPAN_ANY).
+const fn span_lo(s: u64) i64 {
+    return ((s >> 32) as u32) as i32;
+}
+
+const fn span_hi(s: u64) i64 {
+    return (s as u32) as i32;
+}
+
+// The `Sym.span` entry of the bytes either of `a` and `c` holds.
+const fn span_join(a: u64, c: u64) u64 {
+    if a == SPAN_ANY || c == SPAN_ANY {
+        return SPAN_ANY;
+    }
+    if a == SPAN_NONE || c == SPAN_NONE {
+        return a | c;
+    }
+    return span_of(span_lo(a).min(span_lo(c)), span_hi(a).max(span_hi(c)));
+}
+
+// `Sym.span` entry `s` moved `off` bytes (OFF_ANY: not constant).
+const fn span_shift(s: u64, off: i64) u64 {
+    if s == SPAN_NONE || s == SPAN_ANY {
+        return s;
+    }
+    return if off == OFF_ANY {
+        SPAN_ANY
+    } else {
+        span_of(span_lo(s) + off, span_hi(s) + off)
+    };
 }
 
 // The parameter (of the first 64) value `v` of `b` is or is address arithmetic on (`der`), NONE for none.

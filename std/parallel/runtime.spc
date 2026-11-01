@@ -905,14 +905,14 @@ fn dq_push(w: *mut Worker, co: *mut Runnable) bool {
     let h = unsafe atomic::load_usize(dq_head(w), 1);
     if t - h >= DEQUE_CAP {
         if sched_stats_on() {
-            unsafe (*w).st.spills = unsafe (*w).st.spills + 1;
+            stat_bump(&mut unsafe (*w).st.spills, 1);
         }
         return false;
     }
     slot_store(w, t, co);
     unsafe atomic::store_usize(dq_tail(w), t + 1, 2); // Release: publishes the slot
     if sched_stats_on() {
-        unsafe (*w).st.pushes = unsafe (*w).st.pushes + 1;
+        stat_bump(&mut unsafe (*w).st.pushes, 1);
     }
     return true;
 }
@@ -931,8 +931,8 @@ fn dq_pop(w: *mut Worker) *mut Runnable {
         let co = slot_load(w, h);
         if unsafe atomic::cas_usize(dq_head(w), h, h + 1, false, 4, 0) {
             if sched_stats_on() {
-                unsafe (*w).st.pops = unsafe (*w).st.pops + 1;
-                unsafe (*w).st.occupancy = unsafe (*w).st.occupancy + (t - h) as u64;
+                stat_bump(&mut unsafe (*w).st.pops, 1);
+                stat_bump(&mut unsafe (*w).st.occupancy, (t - h) as u64);
             }
             return co;
         }
@@ -1009,12 +1009,12 @@ fn dq_empty(w: *mut Worker) bool {
 fn yq_push(w: *mut Worker, co: *mut Runnable) bool {
     if unsafe (*w).ylen >= Y_MAX {
         if sched_stats_on() {
-            unsafe (*w).st.yield_spills = unsafe (*w).st.yield_spills + 1;
+            stat_bump(&mut unsafe (*w).st.yield_spills, 1);
         }
         return false;
     }
     if sched_stats_on() {
-        unsafe (*w).st.yields = unsafe (*w).st.yields + 1;
+        stat_bump(&mut unsafe (*w).st.yields, 1);
     }
     unsafe (*co).next = null;
     if unsafe (*w).ytail == null {
@@ -1096,7 +1096,7 @@ fn take_injection(s: *mut Scheduler, w: *mut Worker) *mut Runnable {
     }
     qlock(s);
     if sched_stats_on() {
-        unsafe (*w).st.inj_locks = unsafe (*w).st.inj_locks + 1;
+        stat_bump(&mut unsafe (*w).st.inj_locks, 1);
     }
     let co = pop_injection(s);
     if co == null {
@@ -1104,7 +1104,7 @@ fn take_injection(s: *mut Scheduler, w: *mut Worker) *mut Runnable {
         return null;
     }
     if sched_stats_on() {
-        unsafe (*w).st.inj_takes = unsafe (*w).st.inj_takes + 1;
+        stat_bump(&mut unsafe (*w).st.inj_takes, 1);
     }
     // A share, not the lot: leaving the rest shared is what lets a worker that is still busy catch up.
     // Profiled at one lock per task when a submitter feeds one task at a time, and a floor of three per
@@ -1219,7 +1219,7 @@ fn wake_parked(s: *mut Scheduler, idx: usize) {
 fn stat_wake(s: *mut Scheduler) {
     let w = my_worker(s);
     if w != null {
-        unsafe (*w).st.wakes = unsafe (*w).st.wakes + 1;
+        stat_bump(&mut unsafe (*w).st.wakes, 1);
     } else {
         let _ = unsafe atomic::add_u64(&mut unsafe G_STATS_EXT.wakes, 1, 0);
     }
@@ -1482,7 +1482,7 @@ fn steal_any(s: *mut Scheduler, me: usize) *mut Runnable {
     unsafe (*w).rng = r;
     let start = (r % nw as u64) as usize;
     if sched_stats_on() {
-        unsafe (*w).st.steal_searches = unsafe (*w).st.steal_searches + 1;
+        stat_bump(&mut unsafe (*w).st.steal_searches, 1);
     }
     for k in 0..nw {
         let v = (start + k) % nw;
@@ -1490,12 +1490,12 @@ fn steal_any(s: *mut Scheduler, me: usize) *mut Runnable {
             continue;
         }
         if sched_stats_on() {
-            unsafe (*w).st.steal_probes = unsafe (*w).st.steal_probes + 1;
+            stat_bump(&mut unsafe (*w).st.steal_probes, 1);
         }
         let co = dq_steal(unsafe ((*s).deques + v), w);
         if co != null {
             if sched_stats_on() {
-                unsafe (*w).st.steals = unsafe (*w).st.steals + 1;
+                stat_bump(&mut unsafe (*w).st.steals, 1);
             }
             if tracing() {
                 trace("stolen", unsafe (*co).id);
@@ -1610,7 +1610,7 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
                 }
             }
             if sched_stats_on() {
-                unsafe (*w).st.search_cycles = unsafe (*w).st.search_cycles + (sc_runtime::sc_rt_cycles() - t0);
+                stat_bump(&mut unsafe (*w).st.search_cycles, sc_runtime::sc_rt_cycles() - t0);
             }
             return co;
         }
@@ -1627,7 +1627,7 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         if spins < budget {
             spins = spins + 1;
             if sched_stats_on() {
-                unsafe (*w).st.spin_iters = unsafe (*w).st.spin_iters + 1;
+                stat_bump(&mut unsafe (*w).st.spin_iters, 1);
             }
             sc_runtime::sc_rt_cpu_relax();
             continue;
@@ -1727,7 +1727,7 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         let timed = dl != 0 && unsafe atomic::cas_i32(&mut unsafe (*s).timer_waiter, -1, me as i32, false, 4, 0);
         let mut park_t0: u64 = 0;
         if sched_stats_on() {
-            unsafe (*w).st.parks = unsafe (*w).st.parks + 1;
+            stat_bump(&mut unsafe (*w).st.parks, 1);
             park_t0 = sc_runtime::sc_rt_cycles();
         }
         while unsafe (*pk).notified == 0 {
@@ -1810,7 +1810,7 @@ pub fn replay_release() {
     if unsafe G_SEED == 0 {
         return;
     }
-    let s = unsafe G_SCHED;
+    let s = running();
     if s == null {
         return;
     }
@@ -2051,13 +2051,13 @@ fn take_block(s: *mut Scheduler) *mut Coroutine {
         unsafe atomic::store_i32(&mut unsafe (*w).blen, unsafe (*w).blen - 1, 0);
         unsafe (*co).run.next = null;
         if sched_stats_on() {
-            unsafe (*w).st.stash_hits = unsafe (*w).st.stash_hits + 1;
+            stat_bump(&mut unsafe (*w).st.stash_hits, 1);
         }
         return co;
     }
     // Empty: refill the stash and keep the head, so the next `stash_max` spawns take no lock at all.
     if sched_stats_on() {
-        unsafe (*w).st.pool_locks = unsafe (*w).st.pool_locks + 1;
+        stat_bump(&mut unsafe (*w).st.pool_locks, 1);
     }
     let mut got: i32 = 0;
     let chain = pool_take_chain(s, unsafe (*s).stash_max, &mut got);
@@ -2084,7 +2084,7 @@ fn free_coroutine(s: *mut Scheduler, co: *mut Coroutine) {
         unsafe (*w).bhead = null;
         unsafe atomic::store_i32(&mut unsafe (*w).blen, 0, 0);
         if sched_stats_on() {
-            unsafe (*w).st.pool_locks = unsafe (*w).st.pool_locks + 1;
+            stat_bump(&mut unsafe (*w).st.pool_locks, 1);
         }
         pool_put_chain(s, full);
     }
@@ -2454,6 +2454,15 @@ fn build_scheduler() *mut Scheduler {
     return s;
 }
 
+// The running pool, null when none: `G_SCHED` read after the acquire of `G_STATE`, for a caller that did not
+// start the pool and may run while another thread builds it.
+fn running() *mut Scheduler {
+    if unsafe atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 1) != 2 {
+        return null;
+    }
+    return unsafe G_SCHED;
+}
+
 /// Start the pool if it is not running yet and return it. Thread-safe; `pub` for linkage.
 pub fn ensure_started() *mut Scheduler {
     // `G_SCHED` is ordered by `G_STATE`, which the compiler cannot see: the winner of the CAS publishes the
@@ -2529,7 +2538,7 @@ pub unsafe fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inl
         if sched_stats_on() {
             let w = my_worker(unsafe G_SCHED);
             if w != null {
-                unsafe (*w).st.block_allocs = unsafe (*w).st.block_allocs + 1;
+                stat_bump(&mut unsafe (*w).st.block_allocs, 1);
             }
         }
         co = co_alloc();
@@ -3140,7 +3149,7 @@ pub fn wait_clear() {
 /// Completions that were accepted cancellations (the task was reclaimed rather than finishing normally).
 pub fn cancelled_tasks() usize {
     let mut n = unsafe atomic::load_u64(&mut unsafe G_CANCELLED_BASE, 1);
-    let s = unsafe G_SCHED;
+    let s = running();
     if s != null {
         for i in 0..unsafe (*s).nw {
             n = n + unsafe atomic::load_u64(&mut unsafe (*((*s).deques + i)).cancelled, 1);
@@ -3198,7 +3207,7 @@ pub fn spawned_tasks() usize {
         &mut unsafe G_SPAWNED_BASE,
         1,
     );
-    let s = unsafe G_SCHED;
+    let s = running();
     if s != null {
         for i in 0..unsafe (*s).nw {
             n = n + unsafe atomic::load_u64(&mut unsafe (*((*s).deques + i)).spawned, 1);
@@ -3211,7 +3220,7 @@ pub fn spawned_tasks() usize {
 /// worker). Exact when quiescent, never ahead of the truth otherwise.
 pub fn completed_tasks() usize {
     let mut n = unsafe atomic::load_u64(&mut unsafe G_DONE_BASE, 1);
-    let s = unsafe G_SCHED;
+    let s = running();
     if s != null {
         for i in 0..unsafe (*s).nw {
             n = n + unsafe atomic::load_u64(&mut unsafe (*((*s).deques + i)).done, 1);
@@ -3228,7 +3237,7 @@ pub fn sched_stats() SchedStats {
         return t;
     }
     stats_add(&mut t, &unsafe G_STATS_EXT);
-    let s = unsafe G_SCHED;
+    let s = running();
     if s == null {
         return t;
     }
@@ -3239,35 +3248,33 @@ pub fn sched_stats() SchedStats {
 }
 
 // `t += w`, field by field.
-const fn stats_add(t: &mut SchedStats, w: &SchedStats) {
-    t.pushes = t.pushes + w.pushes;
-    t.spills = t.spills + w.spills;
-    t.pops = t.pops + w.pops;
-    t.occupancy = t.occupancy + w.occupancy;
-    t.steal_searches = t.steal_searches + w.steal_searches;
-    t.steal_probes = t.steal_probes + w.steal_probes;
-    t.steals = t.steals + w.steals;
-    t.inj_locks = t.inj_locks + w.inj_locks;
-    t.inj_takes = t.inj_takes + w.inj_takes;
-    t.yields = t.yields + w.yields;
-    t.yield_spills = t.yield_spills + w.yield_spills;
-    t.wakes = t.wakes + w.wakes;
-    t.parks = t.parks + w.parks;
-    t.spin_iters = t.spin_iters + w.spin_iters;
-    t.search_cycles = t.search_cycles + w.search_cycles;
-    t.stash_hits = t.stash_hits + w.stash_hits;
-    t.pool_locks = t.pool_locks + w.pool_locks;
-    t.block_allocs = t.block_allocs + w.block_allocs;
+// The counters of `SchedStats`, all `u64`: a record is read and folded as that many words.
+const STAT_WORDS: usize = sizeof(SchedStats) / sizeof(u64);
+
+// `t += w`, word by word: `w`'s words read atomically, as their owner (a running worker, an off-pool
+// submitter) may add to them meanwhile.
+fn stats_add(t: &mut SchedStats, w: &SchedStats) {
+    let tp = (t as *mut SchedStats) as *mut u64;
+    let wp = (w as *const SchedStats) as *const u64;
+    for i in 0..STAT_WORDS {
+        unsafe tp[i] = unsafe tp[i] + unsafe atomic::load_u64(wp + i, 0);
+    }
 }
 
-// A dying worker's counters go into the process-lifetime block (only ever called at pool destruction,
-// with no worker running: plain adds are enough for every field but `wakes`, which off-pool submitters
-// add to atomically, so that one is added atomically too).
+// Add `n` to counter `p` of the calling worker's own record: the owner alone writes it, a reader of the
+// totals (`sched_stats`) reads it at any time.
+fn stat_bump(p: *mut u64, n: u64) {
+    unsafe atomic::store_u64(p, unsafe *p + n, 0);
+}
+
+// A dying worker's counters go into the process-lifetime block (only ever called at pool destruction, with
+// no worker running): atomically, as off-pool submitters add to its `wakes` and `sched_stats` reads it.
 fn stats_fold(w: &mut SchedStats) {
-    let wk = w.wakes;
-    w.wakes = 0;
-    stats_add(&mut unsafe G_STATS_EXT, w);
-    let _ = unsafe atomic::add_u64(&mut unsafe G_STATS_EXT.wakes, wk, 0);
+    let ext = ((&mut unsafe G_STATS_EXT) as *mut SchedStats) as *mut u64;
+    let wp = (w as *mut SchedStats) as *mut u64;
+    for i in 0..STAT_WORDS {
+        let _ = unsafe atomic::add_u64(ext + i, unsafe wp[i], 0);
+    }
 }
 
 /// Tasks created but not finished: still runnable, running, or parked. Zero after every launched task has

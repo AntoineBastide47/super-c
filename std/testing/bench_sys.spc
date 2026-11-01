@@ -1131,7 +1131,8 @@ pub unsafe fn sc_bs_flush() {
 
 // ---- optimisation barrier ----------------------------------------------------------------------------------
 
-// The barrier's cell: written and read only next to a compiler memory barrier.
+// The barrier's cell: written and read only next to a compiler memory barrier, with relaxed atomics, as
+// tasks on several threads consume their values at once.
 static mut SINK_CELL: u64 = 0;
 
 // A compiler memory barrier (`lir::ir::SYS_BARRIER`).
@@ -1143,7 +1144,7 @@ extern "C" {
 /// folded across this call, however hard link-time optimization tries.
 pub unsafe fn sc_bs_sink(v: u64) {
     unsafe {
-        SINK_CELL = v;
+        atomic::store_u64(&mut SINK_CELL, v, RELAXED);
         sc_sys_barrier();
     }
 }
@@ -1151,7 +1152,7 @@ pub unsafe fn sc_bs_sink(v: u64) {
 /// The last value `sc_bs_sink` stored, read from memory: how a test proves the store happened.
 pub unsafe fn sc_bs_sunk() u64 {
     unsafe sc_sys_barrier();
-    return unsafe SINK_CELL;
+    return unsafe atomic::load_u64(&SINK_CELL, RELAXED);
 }
 
 @platform(windows)

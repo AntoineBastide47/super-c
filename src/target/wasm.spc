@@ -228,17 +228,26 @@ pub(package) struct Code {
     /// the code generator's marks of a value's write, `wasmgen::Gen::value_write`).
     pub(package) acc: Vector<u64>,
     pub(package) acc_op: Vector<u8>,
+    /// The code byte of each control instruction `op` writes (a block, loop, if, else, end, branch, return
+    /// or unreachable; an immediate `op` writes with one's value counts too), in order.
+    pub(package) ctl: Vector<u32>,
 }
 
 extend Code {
     pub(package) fn new() Code {
-        return Code { bytes: Vector::<u8>::new(), acc: Vector::<u64>::new(), acc_op: Vector::<u8>::new() };
+        return Code {
+            bytes: Vector::<u8>::new(),
+            acc: Vector::<u64>::new(),
+            acc_op: Vector::<u8>::new(),
+            ctl: Vector::<u32>::new(),
+        };
     }
 
     pub(package) fn clear(self: &mut Self) {
         self.bytes.truncate(0);
         self.acc.truncate(0);
         self.acc_op.truncate(0);
+        self.ctl.truncate(0);
     }
 
     pub(package) const fn len(self: &Self) u32 {
@@ -246,6 +255,9 @@ extend Code {
     }
 
     pub(package) fn op(self: &mut Self, x: u8) {
+        if x == UNREACHABLE || x >= BLOCK && x <= ELSE || x >= END && x <= RETURN {
+            self.ctl.push(self.bytes.len() as u32);
+        }
         self.bytes.push(x);
     }
 

@@ -2008,9 +2008,11 @@ pub(package) static mut TS_ON: bool = false;
 /// SC_TYPE_COLLIDE=1: every type and instance hashes to one bucket, so the tables run on full
 /// equality alone (the validation configuration for the collision path). Off, one predictable branch.
 pub(package) static mut TS_COLLIDE: bool = false;
+// The counters: worker threads add to them at once (`ts_add`), the driver reads them between phases.
 pub(package) static mut TS: [u64; TS_COUNT] = [[0] = 0u64];
 pub(package) static mut TS_LAST: [u64; TS_COUNT] = [[0] = 0u64];
-pub(package) static mut TS_DEPTH: u32 = 0; // reentry depth shared by the timed translation paths
+@thread_local
+pub(package) static mut TS_DEPTH: u32 = 0; // the calling thread's reentry depth of the timed translation paths
 pub(package) const TS_INTERN: usize = 0; // intern_type calls
 pub(package) const TS_INTERN_HIT: usize = 1;
 pub(package) const TS_INTERN_PROBE: usize = 2; // extra probe steps (hash collisions)
@@ -2051,7 +2053,7 @@ pub(package) fn ts_init() {
 }
 
 pub(package) fn ts_add(i: usize, v: u64) {
-    unsafe TS[i] += v;
+    let _ = unsafe atomic::add_u64(&mut unsafe TS[i], v, 0);
 }
 
 pub(package) fn ts_get(i: usize) u64 {

@@ -95,6 +95,17 @@ pub(package) const fn zext_returned(b: &Body, bk: Block, v: u32) bool {
     return z.op == O_ZEXT && z.a == v && r.op == O_RET && r.a == v + 1;
 }
 
+/// Whether instruction `v` of `b` (in block `bk`) is followed by a plain store of it, then a return of it
+/// (a result also written through a pointer).
+pub(package) const fn store_returned(b: &Body, bk: Block, v: u32) bool {
+    if v + 2 >= bk.start + bk.len {
+        return false;
+    }
+    let s = b.insts[v as usize + 1];
+    let r = b.insts[v as usize + 2];
+    return s.op == O_STORE && s.b == v && s.a != v && (s.aux & MEM_VOLATILE) == 0 && r.op == O_RET && r.a == v;
+}
+
 /// The location value index `x` is read from now (`va`): its register, its slot at stack pointer `sp` +
 /// off, its incoming argument at frame pointer `fp` + off, else the value to rematerialize.
 pub(package) const fn loc_of(va: &Vector<Va>, x: u32, sp: u8, fp: u8) Lc {

@@ -426,6 +426,7 @@ extend Gen {
             return self.refuse("a data model whose pointers are not 32-bit");
         }
         intrin::of_symbols(self.p(), b, "wasm32", &mut self.itpl);
+        self.lv.fold_ops = lv::FOLD_FREE_ZEXT;
         self.lv.run(b);
         self.sh.run(b, &self.lv);
         wa::classify(b, b.sig, self.vregs, &mut self.me);
@@ -490,11 +491,11 @@ extend Gen {
 
     // The values an instruction or an edge writes to their local that the code reads at once (`local.set l`
     // then `local.get l`, adjacent bytes: the read runs right after the write, and only then) stay on the
-    // operand stack. Both go when one instruction reads the value (VW_ONE) and the next access of `l` in the
-    // code writes it: every read of `l` that sees this write reads the value, and that instruction's code,
-    // which starts at the read, reads it again before it writes `l` if at all. Else the write becomes
-    // `local.tee l`. The scratch locals of one instruction's code, which its own loops may carry, stay. The
-    // relocations and the line rows move with the code.
+    // operand stack. Both go when one instruction reads the value (VW_ONE) and `l` is not read again, or
+    // its next access in the code writes it with no control instruction between (`Code.ctl`): every path
+    // from the read runs that write before any other read of `l`. Else the write becomes `local.tee l`.
+    // The scratch locals of one instruction's code, which its own loops may carry, stay. The relocations
+    // and the line rows move with the code.
     fn stack_values(self: &mut Self) {
         let n = self.c.acc.len();
         if n < 2 {
@@ -512,6 +513,8 @@ extend Gen {
             self.last_of[l] = i as u32;
         }
         self.cuts.truncate(0);
+        // The first control instruction past the read the step sees.
+        let mut cq: usize = 0;
         for i in 0..n - 1 {
             let j = self.nxt[i];
             if (self.c.acc_op[i] & ~VW_ONE) != (w::LOCAL_SET | VW_VALUE) || j == NONE || (self.c.acc_op[j as usize] & VW_OP) != w::LOCAL_GET {
@@ -525,7 +528,11 @@ extend Gen {
                 continue;
             }
             let k = self.nxt[j as usize];
-            if (self.c.acc_op[i] & VW_ONE) == 0 || k != NONE && (self.c.acc_op[k as usize] & VW_OP) == w::LOCAL_GET {
+            while cq < self.c.ctl.len() && self.c.ctl[cq] < jat {
+                cq += 1;
+            }
+            let written = k == NONE || (self.c.acc_op[k as usize] & VW_OP) != w::LOCAL_GET && (cq == self.c.ctl.len() || self.c.ctl[cq] >= (self.c.acc[k as usize] >> 32) as u32);
+            if (self.c.acc_op[i] & VW_ONE) == 0 || !written {
                 self.c.bytes[at as usize] = w::LOCAL_TEE;
                 self.cuts.push(jat as u64 << 32 | (jat + len) as u64);
             } else {
@@ -832,7 +839,7 @@ extend Gen {
             if x < ni as usize {
                 // A memory result needs its home even unused: the instruction writes it.
                 let t = b.insts[x];
-                need[x] = t.ty != T_NONE && !self.remat[x] && (self.lv.uses[x] != 0 || in_mem(t.ty));
+                need[x] = t.ty != T_NONE && !self.remat[x] && !self.lv.pfold[x] && (self.lv.uses[x] != 0 || in_mem(t.ty));
             } else {
                 need[x] = self.lv.uses[x] != 0 || x < (ni + b.params.len() as u32) as usize;
             }
@@ -1068,9 +1075,10 @@ extend Gen {
             let pt = b.pool[(b.sig + 3 + k) as usize];
             let used = self.lv.uses[x as usize] != 0;
             if pa.kind == wa::P_DIRECT && !pa.leaf {
-                // A narrow integer: zero-extended, as every value of its type.
+                // A narrow signed integer: zero-extended, as every value of its type (the caller extends an
+                // unsigned one so already, as the C convention has it).
                 let m = narrow_mask(pa.ty);
-                if m != 0 && used {
+                if m != 0 && used && pa.sext {
                     self.c.local(w::LOCAL_GET, wp);
                     self.c.i32_const(m as i32);
                     self.c.op(w::I32_AND);
@@ -1217,6 +1225,11 @@ extend Gen {
     fn get(self: &mut Self, v: Value) {
         if (v & (VPARAM | VFLAG)) == 0 && self.remat[v as usize] {
             self.remat_value(v);
+            return;
+        }
+        // A zero extension of a narrow integer, which its locals hold so already (`lv::FOLD_FREE_ZEXT`).
+        if (v & (VPARAM | VFLAG)) == 0 && self.lv.pfold[v as usize] {
+            self.get(self.b().insts[v as usize].a);
             return;
         }
         let x = self.vx(v);
@@ -1491,7 +1504,7 @@ extend Gen {
         let b = self.b();
         let t = b.insts[i as usize];
         let op = t.op;
-        if self.remat[i as usize] {
+        if self.remat[i as usize] || self.lv.pfold[i as usize] {
             return true;
         }
         if op == O_WCONST {

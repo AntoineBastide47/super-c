@@ -2282,13 +2282,13 @@ b0(v0: i32):
   v2 = mulhs.i32 v0, v1
   ret v2
 fn @hs16
-  sig (i16) -> i16
+  sig (i16.s) -> i16
 b0(v0: i16):
   v1 = iconst.i16 21846
   v2 = mulhs.i16 v1, v0
   ret v2
 fn @hs8
-  sig (i8) -> i8
+  sig (i8.s) -> i8
 b0(v0: i8):
   v1 = iconst.i8 -109
   v2 = mulhs.i8 v0, v1
@@ -2391,9 +2391,9 @@ b0(v0: ptr, v1: i64, v2: i64):
 int64_t rl64(int64_t, int32_t);
 int32_t rr32(int32_t, int32_t);
 int64_t rc64(int64_t);
-uint8_t r8(int8_t, int8_t);
-uint8_t rc8(int8_t);
-uint16_t r16r(int16_t, int32_t);
+uint8_t r8(uint8_t, uint8_t);
+uint8_t rc8(uint8_t);
+uint16_t r16r(uint16_t, int32_t);
 int64_t rx(int64_t, int64_t);
 int64_t hs64(int64_t);
 int32_t hs32(int32_t);
@@ -2423,13 +2423,13 @@ int main(void) {
     for (int n = -3; n < 140; n++) {
       if ((uint64_t)rl64(x, n) != rot(u, (unsigned)n & 63, 64)) return 1;
       if ((uint32_t)rr32((int32_t)x, n) != (uint32_t)rot(u, (32 - ((unsigned)n & 31)) & 31, 32)) return 2;
-      if (r8((int8_t)x, (int8_t)n) != (uint8_t)rot(u, (unsigned)n & 7, 8)) return 3;
-      if (r16r((int16_t)x, n) != (uint16_t)rot(u, (16 - ((unsigned)n & 15)) & 15, 16)) return 18;
+      if (r8((uint8_t)x, (uint8_t)n) != (uint8_t)rot(u, (unsigned)n & 7, 8)) return 3;
+      if (r16r((uint16_t)x, n) != (uint16_t)rot(u, (16 - ((unsigned)n & 15)) & 15, 16)) return 18;
       unsigned s = (unsigned)n & 63;
       if ((uint64_t)rx(x, n) != ((u << s) ^ (u >> ((0u - (unsigned)n) & 63)))) return 4;
     }
     if ((uint64_t)rc64(x) != rot(u, 13, 64)) return 5;
-    if (rc8((int8_t)x) != (uint8_t)rot(u, 3, 8)) return 19;
+    if (rc8((uint8_t)x) != (uint8_t)rot(u, 3, 8)) return 19;
     if (hs64(x) != (int64_t)(((__int128)x * INT64_C(6148914691236517206)) >> 64)) return 6;
     if (hs32((int32_t)x) != (int32_t)(((int64_t)(int32_t)x * -1840700269) >> 32)) return 7;
     if (hs16((int16_t)x) != (uint16_t)(((int32_t)(int16_t)x * 21846) >> 16)) return 8;
@@ -6519,7 +6519,7 @@ sym @lu fn global
 sym @lf fn global
 sym @lm fn global
 fn @l8
-  sig (i8) -> i64
+  sig (i8.s) -> i64
 b0(v0: i8):
   v1 = iconst.i64 -3000016
   v2 = iconst.i64 -2000013
@@ -6533,7 +6533,7 @@ b0(v0: i8):
 b1(v9: i64):
   ret v9
 fn @l16
-  sig (i16) -> i16
+  sig (i16.s) -> i16
 b0(v0: i16):
   v1 = iconst.i16 6500
   v2 = iconst.i16 6537
@@ -6752,7 +6752,7 @@ sym @j16 fn global
 sym @j64 fn global
 sym @jbig fn global
 fn @j8
-  sig (i8, i32) -> i32
+  sig (i8.s, i32) -> i32
 b0(v0: i8, v1: i32):
   switch v0 [-2 -> b1, -1 -> b2, 0 -> b3, 1 -> b4, 2 -> b5, 3 -> b6] else b7
 b1:
@@ -6795,7 +6795,7 @@ b7:
   v26 = iconst.i32 -99
   ret v26
 fn @j16
-  sig (i16, i32) -> i32
+  sig (i16.s, i32) -> i32
 b0(v0: i16, v1: i32):
   v2 = iconst.i32 5
   switch v0 [100 -> b1(v1), 101 -> b3, 102 -> b1(v1), 104 -> b1(v1), 105 -> b4, 106 -> b1(v1), 108 -> b1(v1), 109 -> b5, 110 -> b1(v1)] else b2(v2)
@@ -9304,4 +9304,58 @@ int main(void) {
 }
 )";
     assert_eq(run_native(lir, drv), 0);
+}
+
+// Narrow integer parameters and their zero extensions: wasm keeps every narrow integer zero-extended in an
+// i32 local, so an unsigned parameter, which the caller extends, needs no mask and its extension is no
+// copy (`lv::FOLD_FREE_ZEXT`); a signed one, which the caller sign-extends, is masked at the entry. The C
+// driver passes values whose bits above the narrow type are set where the type is signed.
+@test
+fn narrow_parameters_extend_once_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @usum fn global
+sym @ssum fn global
+sym @mix fn global
+fn @usum
+  sig (i8, i16) -> i32
+b0(v0: i8, v1: i16):
+  v2 = zext.i32 v0
+  v3 = zext.i32 v1
+  v4 = add.i32 v2, v3
+  ret v4
+fn @ssum
+  sig (i8.s, i16.s) -> i32
+b0(v0: i8, v1: i16):
+  v2 = zext.i32 v0
+  v3 = zext.i32 v1
+  v4 = add.i32 v2, v3
+  ret v4
+fn @mix
+  sig (i8, i8.s) -> i32
+b0(v0: i8, v1: i8):
+  v2 = zext.i16 v0
+  v3 = zext.i32 v2
+  v4 = sext.i32 v1
+  v5 = mul.i32 v3, v4
+  v6 = zext.i32 v1
+  v7 = add.i32 v5, v6
+  ret v7
+)";
+    let drv = M"(#include <stdint.h>
+int32_t usum(uint8_t, uint16_t);
+int32_t ssum(int8_t, int16_t);
+int32_t mix(uint8_t, int8_t);
+int main(void) {
+  if (usum(200, 60000) != 60200) return 1;
+  if (ssum(-1, -2) != 255 + 65534) return 2;
+  if (mix(250, -3) != 250 * -3 + 253) return 3;
+  if (mix(7, 100) != 800) return 4;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
 }

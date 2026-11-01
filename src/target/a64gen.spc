@@ -578,12 +578,14 @@ extend Gen {
         let flag = b.insts[v as usize].op == O_ICMP || b.insts[v as usize].op == O_FCMP || self.lv.conj[v as usize] != 0;
         // A zero extension of `v` alone that the block returns next extends it in the return's register.
         let ext = zext_returned(b, bk, v);
-        if v + 1 >= bk.start + bk.len || self.lv.uses[v as usize] != 1 || self.lv.end[v as usize] != self.pos || !is_int(
+        // A result the block stores, then returns, is in the return's register for both.
+        let st = store_returned(b, bk, v);
+        if v + 1 >= bk.start + bk.len || self.lv.uses[v as usize] != 1 + st as u32 || self.lv.end[v as usize] != self.pos || !is_int(
             self.vt(v),
         ) && self.vt(v) != T_PTR && !fv || bits < 32 && !flag && !ext || bits > 64 && !vv || self.va[v as usize].home != H_NONE {
             return NOREG;
         }
-        let t = b.insts[v as usize + 1 + ext as usize];
+        let t = b.insts[v as usize + 1 + ext as usize + st as usize];
         let mut r = NOREG;
         if t.op == O_RET {
             let rl = self.self_lay.ret;

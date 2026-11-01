@@ -10536,6 +10536,34 @@ fn replayed_unit_keeps_its_effects() {
     assert(warm.equals(&cold), "main's object does not depend on the cache");
 }
 
+// A replayed unit's function that no caller inlines keeps the bytes its unit's build found it reaches
+// through each parameter (`lir::hold`, `Sym.span`): `field` keeps `p.a` across the call of `bump`, which
+// reaches `p.b` alone, and `main`'s object matches one built without the per-TU cache.
+@test
+fn replayed_unit_keeps_its_parameter_ranges() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/b.spc",
+        "pub struct P {\n    pub a: u32,\n    pub b: u32,\n}\n\n@noinline\npub fn bump(x: &mut u32) {\n    *x += 3;\n}\n",
+    );
+    let head = "import b;\n\n@noinline\nfn field(p: &mut b::P) u32 {\n    p.a += 1;\n    b::bump(&mut p.b);\n    p.a += 1;\n    return p.a;\n}\n\nfn main() i32 {\n    let mut p = b::P { a: 1, b: 2 };\n";
+    p.mkfile("src/main.spc", format("{}    return (field(&mut p) + p.b) as i32 - 8;\n}}\n", head).as_str());
+    let root = p.dir();
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the first build succeeds");
+    assert_eq(p.run_bin(), 0);
+    p.mkfile("src/main.spc", format("{}    return (field(&mut p) + p.b) as i32 - 9 + 1;\n}}\n", head).as_str());
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the build that replays `b` succeeds");
+    assert_eq(p.run_bin(), 0);
+    let obj = format("{}/build/release/raw/main.o", root);
+    let warm = loader::read_file(&obj).unwrap_or(String::new());
+    assert(warm.len() > 0, "the build writes main's object");
+    let r = cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build --profile=release -o bin");
+    assert(r.ok(), "the build without the cache succeeds");
+    let cold = loader::read_file(&obj).unwrap_or(String::new());
+    assert(warm.equals(&cold), "main's object does not depend on the cache");
+}
+
 // A replayed unit's `@cold` function stays `@cold` (`lir::hold`, `Sym.cold`): `main`'s call of `slow`, a
 // body past SHRINK, stays a call, and `main`'s object matches one built without the per-TU cache.
 @test

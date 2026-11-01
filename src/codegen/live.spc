@@ -103,6 +103,9 @@ pub(package) const FOLD_LANE_MUL: u64 = 8589934592;
 /// with `k + s` at least the width, folds into it: every bit the extension clears leaves the result, so
 /// the shift reads the narrow value's register (`shl_source`). Neither may fold into anything else.
 pub(package) const FOLD_ZSHL: u64 = 17179869184;
+/// `FOLD_FREE_ZEXT`: a zero extension of an 8- or 16-bit integer to 16 or 32 bits, for a target that keeps
+/// every narrow integer zero-extended in a 32-bit location (wasm): each use reads its operand.
+pub(package) const FOLD_FREE_ZEXT: u64 = 68719476736;
 /// `FOLD_VSAD`: an unsigned absolute difference of byte vectors (`vop` `SIMD_ABS_DIFF`) that one widening
 /// sum into 8-byte lanes (`O_VSUMW`) alone reads folds into it: the sum takes the two vectors (x86-64
 /// `psadbw`).
@@ -694,6 +697,16 @@ extend Live {
                 if self.count[t.a as usize] == 1 && m != u64::MAX && m != 0 && (m & m + 1) == 0 && k < bits as u64 {
                     let w = (m + 1).trailing_zeros() as u64;
                     self.pfold[t.a as usize] = self.pfold[t.a as usize] || k + w <= bits as u64;
+                }
+            }
+        }
+        if (self.fold_ops & FOLD_FREE_ZEXT) != 0 {
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op == O_ZEXT && (t.ty == T_I16 || t.ty == T_I32) && (b.type_of(t.a) == T_I8 || b.type_of(t.a) == T_I16) && b.type_of(
+                    t.a,
+                ) != t.ty {
+                    self.pfold[i] = true;
                 }
             }
         }

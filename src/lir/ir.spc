@@ -484,8 +484,14 @@ pub(package) const fn writes_memory(t: Inst) bool {
 /// The address of load or store `t` of `b` as a base under at most 8 constant offsets (`ptradd`s without
 /// an index) and the bytes past it.
 pub(package) const fn address(b: &Body, t: Inst) (Value, i64) {
-    let mut base = t.a;
-    let mut off = (t.c as i32) as i64;
+    let (base, off) = address_of(b, t.a);
+    return (base, off + (t.c as i32) as i64);
+}
+
+/// Address value `v` of `b` as a base under at most 8 constant offsets (`address`) and the bytes past it.
+pub(package) const fn address_of(b: &Body, v: Value) (Value, i64) {
+    let mut base = v;
+    let mut off: i64 = 0;
     // Each step leaves one constant offset.
     for _ in 0..8 {
         if base == VNONE || (base & (VPARAM | VFLAG)) != 0 {
@@ -875,6 +881,11 @@ pub(package) struct Sym {
     /// through them included: `lir::opt::Run::new` infers it for a function with a body; all for any other.
     /// The text form does not carry it.
     pub(package) wargs: u64,
+    /// Where `Package.spans` holds, per parameter (the first 64), the bytes a call of it may read or write
+    /// through that parameter (`SPAN_*`): the count, then an entry per parameter. `lir::opt::Run::new`
+    /// infers it for a function with a body; NONE, any byte through each, for any other. The text form
+    /// does not carry it.
+    pub(package) span: u32,
     /// What a call of it does to memory by its name (`alloc_of`): ALLOC_FRESH, ALLOC_FREE, ALLOC_MEMCMP or
     /// ALLOC_NONE.
     pub(package) alloc: u8,
@@ -921,6 +932,13 @@ pub(package) const FX_READ: u8 = 1;
 pub(package) const FX_WRITE: u8 = 2;
 pub(package) const FX_ARG: u8 = 4;
 pub(package) const FX_STALL: u8 = 8;
+/// `Sym.span` entries: the bytes `[lo, hi)` relative to a pointer parameter a call may read or write
+/// through it, `lo << 32 | hi` (32-bit each, two's complement, within `SPAN_MAX` of the pointer);
+/// SPAN_NONE for none; SPAN_ANY for any byte (an escape, an offset not constant or past `SPAN_MAX`, a
+/// call of a function without a body).
+pub(package) const SPAN_NONE: u64 = 0;
+pub(package) const SPAN_ANY: u64 = ~0u64;
+pub(package) const SPAN_MAX: i64 = 4096;
 
 /// `Package.protect`: no body has a stack canary, the bodies with a slot of at least 8 bytes, with any
 /// slot, every body.
@@ -1588,6 +1606,8 @@ pub(package) struct Package {
     /// The signatures `Sym.sig` records, each the `sig` of a body that has no instructions.
     pub(package) decls: Vector<Body>,
     pub(package) held: Held,
+    /// The parameters' byte ranges `Sym.span` indexes.
+    pub(package) spans: Vector<u64>,
     // Per name id, its file, symbol and message ids plus 1 (0: none).
     file_of: Vector<u32>,
     sym_of: Vector<u32>,
@@ -1608,7 +1628,8 @@ pub(package) struct Held {
     pub(package) bytes_end: u32,
     pub(package) relocs_end: u32,
     /// Per held body: its symbol, its walk facts (`HELD_SHAPE`, `HELD_OK`, `HELD_COLD`), its effects (`Sym.fx`), the
-    /// parameters whose memory it may write and those it may let escape (`Sym.esc`), a bit each, and its
+    /// parameters whose memory it may write and those it may let escape (`Sym.esc`), a bit each, its
+    /// parameters' byte ranges (`Sym.span`'s entries: `spans[span_at[k]..span_at[k + 1]]`) and its
     /// direct calls before optimization
     /// (`calls[at[k]..at[k + 1]]`: symbols, in instruction order).
     pub(package) syms: Vector<u32>,
@@ -1616,6 +1637,8 @@ pub(package) struct Held {
     pub(package) fx: Vector<u8>,
     pub(package) wargs: Vector<u64>,
     pub(package) esc: Vector<u64>,
+    pub(package) span_at: Vector<u32>,
+    pub(package) spans: Vector<u64>,
     pub(package) at: Vector<u32>,
     pub(package) calls: Vector<u32>,
     /// Per held data definition, its symbol.
@@ -1644,6 +1667,8 @@ extend Held {
             fx: Vector::<u8>::new(),
             wargs: Vector::<u64>::new(),
             esc: Vector::<u64>::new(),
+            span_at: Vector::<u32>::new(),
+            spans: Vector::<u64>::new(),
             at: Vector::<u32>::new(),
             calls: Vector::<u32>::new(),
             dsyms: Vector::<u32>::new(),
@@ -1701,6 +1726,7 @@ extend Package {
             bodies: Vector::<Body>::new(),
             decls: Vector::<Body>::new(),
             held: Held::new(),
+            spans: Vector::<u64>::new(),
             file_of: Vector::<u32>::new(),
             sym_of: Vector::<u32>::new(),
             msg_of: Vector::<u32>::new(),
@@ -1763,6 +1789,7 @@ extend Package {
                 fx: FX_READ | FX_WRITE | FX_STALL,
                 esc: ~0u64,
                 wargs: ~0u64,
+                span: NONE,
                 alloc: if kind == SK_FUNC {
                     alloc_of(name)
                 } else {

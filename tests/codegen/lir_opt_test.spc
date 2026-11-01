@@ -2769,6 +2769,200 @@ b0:
     same_result(&b, &a, "drive", none, 48);
 }
 
+// A `static mut` a loop reads and writes stays in a register across it (`promote_places`): loaded before,
+// stored back after only when the loop changed it (a loop that wrote nothing, as one that ran no
+// iteration, writes nothing), when the loop's other accesses touch other objects or type tags (`tally`,
+// `other`). A call, a fence, or a store through a pointer of the static's type tag keeps it in memory.
+@test
+fn a_static_a_loop_updates_stays_in_a_register() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @count data global
+data @count size 4 align 2
+sym @base data global
+data @base size 4 align 2
+sym @opaque fn global noinline
+sym @tally fn global noinline
+sym @other fn global noinline
+sym @called fn global noinline
+sym @fenced fn global noinline
+sym @pointed fn global noinline
+sym @drive fn global
+fn @opaque
+  sig () -> void
+b0:
+  v0 = symaddr @base
+  v1 = iconst.i32 1
+  store v1, v0 align 2
+  ret
+fn @tally
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = symaddr @count
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.slt v5, v1
+  br v6, b2, b3
+b2:
+  v7 = ptradd v0, v5 * 8
+  v8 = load.i64 v7 align 3 tbaa 4
+  v9 = trunc.i32 v8
+  v10 = load.i32 v2 align 2 tbaa 3
+  v11 = add.i32 v10, v9
+  store v11, v2 align 2 tbaa 3
+  v12 = add.i64 v5, v4
+  jmp b1(v12)
+b3:
+  ret
+fn @other
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = symaddr @count
+  v3 = symaddr @base
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.slt v6, v1
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v6 * 8
+  v9 = load.i64 v8 align 3 tbaa 4
+  v10 = trunc.i32 v9
+  v11 = load.i32 v2 align 2 tbaa 3
+  v12 = add.i32 v11, v10
+  store v12, v2 align 2 tbaa 3
+  v13 = load.i32 v3 align 2 tbaa 3
+  v14 = add.i32 v13, v10
+  store v14, v3 align 2 tbaa 3
+  v15 = add.i64 v6, v5
+  jmp b1(v15)
+b3:
+  ret
+fn @called
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = symaddr @count
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.slt v5, v1
+  br v6, b2, b3
+b2:
+  v7 = ptradd v0, v5 * 8
+  v8 = load.i64 v7 align 3 tbaa 4
+  v9 = trunc.i32 v8
+  v10 = load.i32 v2 align 2 tbaa 3
+  v11 = add.i32 v10, v9
+  store v11, v2 align 2 tbaa 3
+  call @opaque() : () -> void
+  v12 = add.i64 v5, v4
+  jmp b1(v12)
+b3:
+  ret
+fn @fenced
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = symaddr @count
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.slt v5, v1
+  br v6, b2, b3
+b2:
+  v7 = ptradd v0, v5 * 8
+  v8 = load.i64 v7 align 3 tbaa 4
+  v9 = trunc.i32 v8
+  v10 = load.i32 v2 align 2 tbaa 3
+  v11 = add.i32 v10, v9
+  store v11, v2 align 2 tbaa 3
+  fence seq_cst
+  v12 = add.i64 v5, v4
+  jmp b1(v12)
+b3:
+  ret
+fn @pointed
+  sig (ptr, i64, ptr) -> void
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = symaddr @count
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.slt v6, v1
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v6 * 8
+  v9 = load.i64 v8 align 3 tbaa 4
+  v10 = trunc.i32 v9
+  v11 = load.i32 v3 align 2 tbaa 3
+  v12 = add.i32 v11, v10
+  store v12, v3 align 2 tbaa 3
+  store v10, v2 align 2 tbaa 3
+  v13 = add.i64 v6, v5
+  jmp b1(v13)
+b3:
+  ret
+fn @drive
+  sig () -> i32
+  slot s0 size 32 align 3
+  slot s1 size 4 align 2
+b0:
+  v0 = slotaddr s0
+  v1 = slotaddr s1
+  v2 = iconst.i64 3
+  v3 = iconst.i64 5
+  v4 = iconst.i64 0
+  store v2, v0 align 3
+  store v3, v0+8 align 3
+  store v2, v0+16 align 3
+  store v3, v0+24 align 3
+  call @tally(v0, v4) : (ptr, i64) -> void
+  call @tally(v0, v2) : (ptr, i64) -> void
+  call @other(v0, v2) : (ptr, i64) -> void
+  call @called(v0, v2) : (ptr, i64) -> void
+  call @fenced(v0, v2) : (ptr, i64) -> void
+  call @pointed(v0, v2, v1) : (ptr, i64, ptr) -> void
+  v5 = symaddr @count
+  v6 = load.i32 v5 align 2
+  v7 = load.i32 v1 align 2
+  v8 = add.i32 v6, v7
+  ret v8
+)",
+    );
+    let kept: [str; 2] = ["tally", "other"];
+    for name in kept {
+        let t = text_of(&a, name);
+        assert(!stored_in_loop(&t) && t.as_str().find("icmp.ne") >= 0, t.as_str());
+    }
+    let stay: [str; 3] = ["called", "fenced", "pointed"];
+    for name in stay {
+        let t = text_of(&a, name);
+        assert(stored_in_loop(&t), t.as_str());
+    }
+    // tally 0, then 3 + 5 + 3; other, called, fenced and pointed the same each; pointed's slot 3.
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 58);
+}
+
+// Whether body text `t` stores to `@count` in the block that loads its loop's elements (`load.i64`).
+fn stored_in_loop(t: &String) bool {
+    let s = t.as_str();
+    let at = s.find(" = symaddr @count");
+    assert(at >= 0, s);
+    let mut from = at as usize;
+    // Each step goes back one byte, to the value's name.
+    while from > 0 && s.byte_at(from - 1) != b' ' {
+        from -= 1;
+    }
+    let pat = format(", {} align", s.slice(from, at as usize));
+    return block_at(s, s.find("load.i64") as usize).find(&pat) >= 0;
+}
+
 // Loads of an exclusive reference's fields leave a loop that stores only another field through the
 // parameter itself (`self.len += 1`, a `Vector` push): `cap` and `data` move out; `len`, which the loop
 // also stores, stays in a register across it and is stored back after it (`promote_places`), and so
@@ -5777,6 +5971,263 @@ b0:
     let mut e2 = leval::Eval::new(&a);
     let o2 = e2.run(a.find_symbol("drive"), []);
     assert(o.kind == leval::EV_OK && o2.kind == leval::EV_OK && o.value == o2.value, o2.msg.as_str());
+}
+
+// A pointer passed as a variadic argument escapes (`Sym.esc`): the callee's accesses do not show what it
+// does with it, here keep it. The exclusive parameter loses its class, so the load of its referent stays
+// in the loop that writes through the kept pointer.
+@test
+fn a_variadic_argument_escapes() {
+    let (_, a) = optimized(
+        M"(lir ptr 8
+sym @vkeep fn global noinline
+sym @leaky fn global noinline
+sym @kept data global
+data @kept size 8 align 3
+fn @vkeep
+  sig (i32, ...) -> void
+  slot s0 size 32 align 3
+b0(v0: i32):
+  v1 = slotaddr s0
+  vastart v1
+  v2 = vaarg.ptr v1
+  vaend v1
+  v3 = symaddr @kept
+  store v2, v3 align 3
+  ret
+fn @leaky
+  sig (ptr) -> i64
+  ref p0 16 noalias
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = iconst.i32 1
+  call @vkeep(v3, v0) : (i32, ... ptr) -> void
+  jmp b1(v1, v1)
+b1(v4: i64, v5: i64):
+  v6 = load.i64 v0+8 align 3
+  v7 = icmp.ult v4, v6
+  br v7, b2, b3
+b2:
+  v8 = symaddr @kept
+  v9 = load.ptr v8 align 3
+  store v4, v9+8 align 3
+  v10 = add.i64 v5, v6
+  v11 = add.i64 v4, v2
+  jmp b1(v11, v10)
+b3:
+  ret v5
+)",
+    );
+    let l = text_of(&a, "leaky");
+    assert(l.as_str().find("load.i64 v0+8") > l.as_str().find("b1("), l.as_str());
+}
+
+// A call passed an offset into an exclusive referent reaches only the bytes its callee reaches through
+// that parameter, moved by the offset (`Sym.span`; through the calls it makes too): a field it does not
+// reach keeps its value across the call, which moves past the load (`field`, `relayed`), and the store
+// before the call goes when the callee comes back. A callee that reaches back before its pointer
+// (`behind`), or recurses at offsets that never settle (`cycle`), makes the field load again; a callee
+// that may not come back keeps the store (`kept`), and so does one that reads the field (`peeks`).
+@test
+fn a_call_keeps_the_fields_its_callee_does_not_reach() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @bump fn global noinline
+sym @back fn global noinline
+sym @relay fn global noinline
+sym @walk fn global noinline
+sym @halt fn global noinline
+sym @peek fn global noinline
+sym @field fn global noinline
+sym @behind fn global noinline
+sym @relayed fn global noinline
+sym @cycle fn global noinline
+sym @kept fn global noinline
+sym @peeks fn global noinline
+sym @drive fn global
+fn @bump
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  v2 = iconst.i32 3
+  v3 = add.i32 v1, v2
+  store v3, v0 align 2
+  ret
+fn @back
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = load.i32 v0-4 align 2
+  v2 = iconst.i32 3
+  v3 = add.i32 v1, v2
+  store v3, v0-4 align 2
+  ret
+fn @relay
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = ptradd v0+4
+  call @bump(v1) : (ptr) -> void
+  ret
+fn @walk
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  v2 = iconst.i32 0
+  v3 = icmp.eq v1, v2
+  br v3, b1, b2
+b1:
+  ret
+b2:
+  store v2, v0 align 2
+  v4 = ptradd v0-4
+  call @walk(v4) : (ptr) -> void
+  ret
+fn @halt
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  v2 = iconst.i32 0
+  v3 = icmp.eq v1, v2
+  br v3, b1, b2
+b1:
+  unreachable
+b2:
+  v4 = iconst.i32 3
+  v5 = add.i32 v1, v4
+  store v5, v0 align 2
+  ret
+fn @peek
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0-4 align 2
+  ret v1
+fn @field
+  sig (ptr) -> i32
+  ref p0 8 noalias
+b0(v0: ptr):
+  v1 = iconst.i32 1
+  v2 = load.i32 v0 align 2
+  v3 = add.i32 v2, v1
+  store v3, v0 align 2
+  v4 = ptradd v0+4
+  call @bump(v4) : (ptr) -> void
+  v5 = load.i32 v0 align 2
+  v6 = add.i32 v5, v1
+  store v6, v0 align 2
+  ret v6
+fn @behind
+  sig (ptr) -> i32
+  ref p0 8 noalias
+b0(v0: ptr):
+  v1 = iconst.i32 1
+  v2 = load.i32 v0 align 2
+  v3 = add.i32 v2, v1
+  store v3, v0 align 2
+  v4 = ptradd v0+4
+  call @back(v4) : (ptr) -> void
+  v5 = load.i32 v0 align 2
+  v6 = add.i32 v5, v1
+  store v6, v0 align 2
+  ret v6
+fn @relayed
+  sig (ptr) -> i32
+  ref p0 8 noalias
+b0(v0: ptr):
+  v1 = iconst.i32 1
+  v2 = load.i32 v0 align 2
+  v3 = add.i32 v2, v1
+  store v3, v0 align 2
+  call @relay(v0) : (ptr) -> void
+  v4 = load.i32 v0 align 2
+  v5 = add.i32 v4, v1
+  store v5, v0 align 2
+  ret v5
+fn @cycle
+  sig (ptr) -> i32
+  ref p0 8 noalias
+b0(v0: ptr):
+  v1 = iconst.i32 1
+  v2 = load.i32 v0 align 2
+  v3 = add.i32 v2, v1
+  store v3, v0 align 2
+  v4 = ptradd v0+4
+  call @walk(v4) : (ptr) -> void
+  v5 = load.i32 v0 align 2
+  v6 = add.i32 v5, v1
+  store v6, v0 align 2
+  ret v6
+fn @kept
+  sig (ptr) -> i32
+  ref p0 8 noalias
+b0(v0: ptr):
+  v1 = iconst.i32 1
+  store v1, v0 align 2
+  v2 = ptradd v0+4
+  call @halt(v2) : (ptr) -> void
+  v3 = load.i32 v0 align 2
+  v4 = add.i32 v3, v1
+  store v4, v0 align 2
+  ret v4
+fn @peeks
+  sig (ptr) -> i32
+  ref p0 8 noalias
+b0(v0: ptr):
+  v1 = iconst.i32 1
+  store v1, v0 align 2
+  v2 = ptradd v0+4
+  v3 = call.i32 @peek(v2) : (ptr) -> i32
+  v4 = load.i32 v0 align 2
+  v5 = add.i32 v4, v3
+  store v5, v0 align 2
+  ret v5
+fn @drive
+  sig () -> i32
+  slot s0 size 16 align 3
+b0:
+  v0 = slotaddr s0
+  v1 = ptradd v0+8
+  v2 = iconst.i32 0
+  v3 = iconst.i32 5
+  v4 = iconst.i32 7
+  store v2, v0+4 align 2
+  store v3, v0+8 align 2
+  store v4, v0+12 align 2
+  v5 = call.i32 @cycle(v1) : (ptr) -> i32
+  store v4, v0+12 align 2
+  v6 = call.i32 @field(v1) : (ptr) -> i32
+  v7 = call.i32 @behind(v1) : (ptr) -> i32
+  v8 = call.i32 @relayed(v1) : (ptr) -> i32
+  v9 = call.i32 @kept(v1) : (ptr) -> i32
+  v10 = call.i32 @peeks(v1) : (ptr) -> i32
+  v11 = load.i32 v0+12 align 2
+  v12 = add.i32 v5, v6
+  v13 = add.i32 v12, v7
+  v14 = add.i32 v13, v8
+  v15 = add.i32 v14, v9
+  v16 = add.i32 v15, v10
+  v17 = add.i32 v16, v11
+  ret v17
+)",
+    );
+    let keeps: [str; 2] = ["field", "relayed"];
+    for name in keeps {
+        let t = text_of(&a, name);
+        assert(count_of(&t, "load.i32") == 1 && count_of(&t, "store") == 1, t.as_str());
+        assert(t.as_str().find("load.i32") > t.as_str().find("call @"), t.as_str());
+    }
+    let loads: [str; 2] = ["behind", "cycle"];
+    for name in loads {
+        let t = text_of(&a, name);
+        assert(count_of(&t, "load.i32") == 2 && count_of(&t, "store") == 2, t.as_str());
+    }
+    let stores: [str; 2] = ["kept", "peeks"];
+    for name in stores {
+        let t = text_of(&a, name);
+        assert(count_of(&t, "store") == 2, t.as_str());
+    }
+    // cycle 1 (walk clears both fields), field 3, behind 8, relayed 10, kept 2, peeks 2, the second field 16.
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 42);
 }
 
 // An inlined call's exclusive parameter rooted at an offset into the caller's (`Body.scopes`) escapes

@@ -17,6 +17,7 @@ import ir::cpu_features as cf;
 import std::platform::fs;
 import std::platform::dylib;
 import std::platform::process;
+import atomic;
 import link::link as lk;
 import build_system::manifest as bman;
 
@@ -195,8 +196,7 @@ extend Program {
             },
         };
         // One directory per load: the process id and a counter name it.
-        unsafe LOADS = unsafe LOADS + 1;
-        let dir = format("{}/superc_lir_{}_{}", base.as_str(), process::pid().unwrap_or(0), unsafe LOADS);
+        let dir = format("{}/superc_lir_{}_{}", base.as_str(), process::pid().unwrap_or(0), next_load());
         let _ = fs::remove_all(&dir);
         if let Err(e) = fs::mkdir_all(&dir) {
             return Err(ApiError::io(e, &dir));
@@ -240,8 +240,7 @@ pub fn of_program(path: str, std_dir: str) Result<Program, ApiError> {
             return Err(ApiError::io(e, ""));
         },
     };
-    unsafe LOADS = unsafe LOADS + 1;
-    let out_dir = format("{}/superc_lirp_{}_{}", base.as_str(), process::pid().unwrap_or(0), unsafe LOADS);
+    let out_dir = format("{}/superc_lirp_{}_{}", base.as_str(), process::pid().unwrap_or(0), next_load());
     let mut text = String::new();
     let topts = dtest::TestOpts {};
     let os = tgt::host_os();
@@ -283,8 +282,13 @@ fn write_bytes(path: str, bytes: Slice<u8>) Result<Unit, IoError> {
     return f.close();
 }
 
-// Loads made by this process, for the directory names.
+// Loads made by this process, for the directory names: threads of a library user may load at once.
 static mut LOADS: u64 = 0;
+
+// The number of a new load, 1 for the first.
+fn next_load() u64 {
+    return unsafe atomic::add_u64(&mut unsafe LOADS, 1, 0) + 1;
+}
 
 // The host's file name of a shared library.
 fn shared_name() str<'static> {
