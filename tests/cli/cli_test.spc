@@ -3520,6 +3520,25 @@ fn a_replayed_module_inlines_as_a_clean_build_does() {
     assert_eq(p.run_bin(), 0);
 }
 
+// A build that replays a module's cached emission holds the module's data while the optimizer runs, which
+// defines data of its own after them (`pick`'s constant local array): dropping the held data keeps those.
+@test
+fn data_the_optimizer_defines_outlive_the_held_data() {
+    let p = cli::proj_new();
+    p.mkfile("a.spc", "static mut COUNT: i32 = 8;\n\npub fn count() i32 {\n    return unsafe COUNT;\n}\n");
+    let main = "import a;\n\n@noinline\nfn pick(i: u32) u32 {\n    let t: [u32; 8] = [3, 1, 4, 1, 5, 9, 2, 6];\n    return t[(i & 7) as usize];\n}\n\nfn main() i32 {\n    return pick(5) as i32 + a::count() - ";
+    p.mkfile("main.spc", format("{}17;\n}}\n", main).as_str());
+    let args = "build --profile=release main.spc -o bin";
+    assert(cli::superc_in(p.dir(), args).ok(), "the first build");
+    p.mkfile("main.spc", format("{}8 - 9;\n}}\n", main).as_str());
+    let r = cli::superc_in(p.dir(), args);
+    if !r.ok() {
+        r.show();
+    }
+    assert(r.ok(), "the build after an edit of main");
+    assert_eq(p.run_bin(), 0);
+}
+
 // A wasm build that replays a module's cached emission keeps its object, and compiles the module's statics
 // again: the address of a function a static holds takes its type from the static's type, as the function's
 // body is not lowered.

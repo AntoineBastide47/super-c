@@ -77,6 +77,12 @@ pub(package) const FOLD_XADDR: u32 = 134217728;
 pub(package) const MASK_DEPTH: u32 = 8;
 // `Live::ldop_user` looks this many instructions past a load for its use.
 const LDOP_REACH: u32 = 16;
+// The terminator of block `k` of `b`.
+const fn term_of(b: &Body, k: u32) Inst {
+    let bk = b.blocks[k as usize];
+    return b.insts[(bk.start + bk.len - 1) as usize];
+}
+
 /// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
 pub(package) const CS_NONE: u8 = 0;
 pub(package) const CS_INC: u8 = 1;
@@ -137,6 +143,10 @@ pub(package) struct Live {
     pub(package) last: Vector<u32>, // per value, the highest instruction index that uses it (0: none)
     pub(package) flag_of: Map<u32, u32>, // an instruction with a used flag -> the flag's value index
     pub(package) home: Vector<u8>, // per value, its HOME_* (`plan`)
+    /// Per value, the loop header parameter whose register a parameter of a block after the loop takes
+    /// (`exit_partner`), else NONE (`plan`).
+    pub(package) share: Vector<u32>,
+    shared_by: Vector<u32>, // per loop header parameter, the one parameter that shares its register (`share`)
     /// The largest access a scaled index addresses (the target's, 0: none); per instruction, whether the
     /// load or store takes its address `ptradd`'s operands (`fold`), and whether the `ptradd` emits nothing
     /// for that (`pfold`; `uses_at`).
@@ -199,6 +209,8 @@ extend Live {
             last: Vector::<u32>::new(),
             flag_of: Map::<u32, u32>::new(),
             home: Vector::<u8>::new(),
+            share: Vector::<u32>::new(),
+            shared_by: Vector::<u32>::new(),
             fold_max: 0,
             fold: Vector::<bool>::new(),
             pfold: Vector::<bool>::new(),
@@ -1660,6 +1672,8 @@ extend Live {
         let np = self.order.len();
         self.home.truncate(0);
         self.home.resize_default(n);
+        fill(&mut self.share, n, NONE);
+        fill(&mut self.shared_by, n, NONE);
         fill(&mut self.base, np + 1, 0);
         for p in 0..np {
             self.base[p + 1] = self.base[p] + b.blocks[self.order[p] as usize].len;
@@ -1763,6 +1777,24 @@ extend Live {
                     j += 1;
                 }
             }
+            // A parameter of a block after a loop shares the register of the loop's parameter it continues
+            // (`exit_partner`): that parameter's range covers it.
+            let ep = self.exit_partner(b, x);
+            if ep != NONE && self.shared_by[ep as usize] == NONE && self.home[ep as usize] != HOME_NONE && (want[x as usize] & WANT_V) == (want[ep as usize] & WANT_V) && (want[x as usize] & Live::want_of(
+                self.home[ep as usize],
+            )) != 0 {
+                let mut j: usize = 0;
+                while j < self.act.len() && self.act[j] != ep {
+                    j += 1;
+                }
+                if j < self.act.len() {
+                    self.home[x as usize] = self.home[ep as usize];
+                    self.stop[ep as usize] = self.stop[ep as usize].max(self.stop[x as usize]);
+                    self.share[x as usize] = ep;
+                    self.shared_by[ep as usize] = x;
+                    continue;
+                }
+            }
             let mut h = self.fits(x, want, caps, NONE);
             if h == HOME_NONE {
                 // The lightest value of the file that holds a register this one could take.
@@ -1835,6 +1867,160 @@ extend Live {
             return HOME_CALLEE;
         }
         return HOME_NONE;
+    }
+
+    // The header parameter of a loop that parameter value `x` of `b`, of a block laid out after the loop,
+    // continues: every edge into `x`'s block comes from a block laid out before it, and leaves the loop
+    // passing that parameter or the value its back edge passes it, or comes from a block laid out before
+    // the loop; the parameter is dead past the loop and of `x`'s type. Its register may then hold `x` too:
+    // on the loop's exits it holds the value already, and an edge that skips the loop finds it unused.
+    // NONE else.
+    fn exit_partner(self: &Self, b: &Body, x: u32) u32 {
+        let ni = b.insts.len() as u32;
+        if x < ni || x >= ni + b.params.len() as u32 {
+            return NONE;
+        }
+        let k = self.def_blk[x as usize];
+        if k == 0 || k == NONE || self.pos[k as usize] == NONE {
+            return NONE;
+        }
+        let q = x - ni - b.blocks[k as usize].param_start;
+        let mut px = NONE;
+        let mut h = NONE;
+        // Each predecessor's terminator and its edges into the block: a bounded walk of the edge lists.
+        for j in self.pat[k as usize]..self.pat[k as usize + 1] {
+            let pb = self.preds[j as usize];
+            // An edge from a later block would write the register after the range ends.
+            if self.pos[pb as usize] != NONE && self.pos[pb as usize] >= self.pos[k as usize] {
+                return NONE;
+            }
+            let hh = self.left(b, pb);
+            if self.pos[pb as usize] == NONE || hh == NONE || self.pos[k as usize] <= self.lend[hh as usize] {
+                continue;
+            }
+            let t = term_of(b, pb);
+            let ne: u32 = if t.op == O_JMP {
+                1
+            } else if t.op == O_BR {
+                2
+            } else {
+                0
+            };
+            for e in 0..ne {
+                let ed = edge_of(b, t, e);
+                if b.edge_target(ed) != k {
+                    continue;
+                }
+                let p = self.header_of_value(b, hh, b.edge_arg(ed, q));
+                if p == NONE || px != NONE && p != px {
+                    return NONE;
+                }
+                px = p;
+                h = hh;
+            }
+        }
+        if px == NONE || b.params[(px - ni) as usize] != b.params[(x - ni) as usize] || self.end[px as usize] > self.lend[h as usize] {
+            return NONE;
+        }
+        // The other edges come from before the loop, or from inside it with the same value.
+        for j in self.pat[k as usize]..self.pat[k as usize + 1] {
+            let pb = self.preds[j as usize];
+            let pp = self.pos[pb as usize];
+            if pp == NONE {
+                continue;
+            }
+            let inside = pp >= self.pos[h as usize] && pp <= self.lend[h as usize] || self.left(b, pb) == h;
+            if !inside && pp >= self.pos[h as usize] {
+                return NONE;
+            }
+            if inside {
+                let t = term_of(b, pb);
+                if t.op != O_JMP && t.op != O_BR {
+                    return NONE;
+                }
+                let ne: u32 = if t.op == O_JMP {
+                    1
+                } else {
+                    2
+                };
+                for e in 0..ne {
+                    let ed = edge_of(b, t, e);
+                    if b.edge_target(ed) == k && self.header_of_value(b, h, b.edge_arg(ed, q)) != px {
+                        return NONE;
+                    }
+                }
+            }
+        }
+        return px;
+    }
+
+    // The loop block `k` of `b` leaves: its innermost one, or for a lone jump whose one predecessor is in a
+    // loop the block is outside of (a split exit edge), that loop. NONE else.
+    fn left(self: &Self, b: &Body, k: u32) u32 {
+        let h = self.inner[k as usize];
+        if h != NONE {
+            return h;
+        }
+        if b.blocks[k as usize].len != 1 || term_of(b, k).op != O_JMP || self.pat[k as usize + 1] - self.pat[k as usize] != 1 {
+            return NONE;
+        }
+        let p = self.preds[self.pat[k as usize] as usize];
+        let hp = self.inner[p as usize];
+        if hp == NONE || self.pos[k as usize] == NONE || self.pos[k as usize] >= self.pos[hp as usize] && self.pos[k as usize] <= self.lend[hp as usize] {
+            return NONE;
+        }
+        return hp;
+    }
+
+    // The parameter value of loop header `h` that `v` of `b` is: the parameter itself, or the value a back
+    // edge of the loop passes it. NONE else.
+    fn header_of_value(self: &Self, b: &Body, h: u32, v: Value) u32 {
+        let ni = b.insts.len() as u32;
+        let hb = b.blocks[h as usize];
+        if v != VNONE && (v & VFLAG) == 0 && (v & VPARAM) != 0 {
+            let p = v & ~VPARAM;
+            return if p >= hb.param_start && p < hb.param_start + hb.param_len as u32 {
+                ni + p
+            } else {
+                NONE
+            };
+        }
+        for j in self.pat[h as usize]..self.pat[h as usize + 1] {
+            let pb = self.preds[j as usize];
+            let pp = self.pos[pb as usize];
+            if pp == NONE || pp < self.pos[h as usize] || pp > self.lend[h as usize] {
+                continue;
+            }
+            let t = term_of(b, pb);
+            let ne: u32 = if t.op == O_JMP {
+                1
+            } else if t.op == O_BR {
+                2
+            } else {
+                0
+            };
+            for e in 0..ne {
+                let ed = edge_of(b, t, e);
+                if b.edge_target(ed) != h {
+                    continue;
+                }
+                for q in 0..hb.param_len as u32 {
+                    if b.edge_arg(ed, q) == v {
+                        return ni + hb.param_start + q;
+                    }
+                }
+            }
+        }
+        return NONE;
+    }
+
+    // The request that home `h` answers.
+    const fn want_of(h: u8) u8 {
+        return if h == HOME_CALLEE {
+            WANT_CALLEE
+        } else {
+            WANT_SCRATCH
+        };
     }
 
     // `cnt`'s entry of the file of request `w` and home `h`.

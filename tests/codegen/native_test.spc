@@ -5143,6 +5143,191 @@ b2(v19: i64):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// The parameters of the block after a loop, which an edge before the loop also enters, take the loop's
+// parameter registers; the loop leaves through a block of its own, so its steps outlive the loop and hold
+// those registers last. Values the block computes next take other registers: the last parameter lives on.
+@test
+fn a_loop_exit_keeps_the_registers_it_shares_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @lev fn global
+fn @lev
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 64
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 2
+  v5 = icmp.ugt v0, v1
+  br v5, b1(v0, v2, v2), b3(v0, v2, v2)
+b1(v6: i64, v7: i64, v8: i64):
+  v9 = sub.i64 v6, v3
+  v10 = lshr.i64 v9, v4
+  v11 = add.i64 v7, v10
+  v12 = shl.i64 v10, v3
+  v13 = sub.i64 v6, v12
+  v14 = add.i64 v8, v3
+  v15 = icmp.ugt v13, v1
+  br v15, b1(v13, v11, v14), b2
+b2:
+  jmp b3(v13, v11, v14)
+b3(v16: i64, v17: i64, v18: i64):
+  v19 = shl.i64 v17, v3
+  v20 = lshr.i64 v19, v4
+  v21 = and.i64 v19, v1
+  v22 = xor.i64 v20, v16
+  v23 = add.i64 v22, v21
+  v24 = mul.i64 v23, v18
+  v25 = add.i64 v24, v18
+  ret v25
+)";
+    let drv = "#include <stdint.h>\nuint64_t lev(uint64_t);\nstatic uint64_t ref(uint64_t bl) {\n  uint64_t k = 0, n = 0;\n  while (bl > 64) { uint64_t t = (bl - 1) >> 2; k += t; bl -= t << 1; n++; }\n  uint64_t a = k << 1;\n  return (((a >> 2) ^ bl) + (a & 64)) * n + n;\n}\nint main(void) {\n  uint64_t xs[6] = {0, 64, 65, 100, 1000, 123456789};\n  for (int i = 0; i < 6; i++) if (lev(xs[i]) != ref(xs[i])) return i + 1;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Switches with a case of 0 (arm64 `cbz`): `last` tests it last, its block next (the default's is cold:
+// the branch inverts to it, `cbnz`), `first` tests it first, `byte` on an 8-bit value, `wide` on a 64-bit one.
+@test
+fn switch_cases_of_zero_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @last fn global
+sym @first fn global
+sym @byte fn global
+sym @wide fn global
+fn @last
+  sig (i32) -> i32
+b0(v0: i32):
+  switch v0 [3 -> b2, 0 -> b1] else b3
+b1:
+  v1 = iconst.i32 10
+  ret v1
+b2:
+  v2 = iconst.i32 20
+  ret v2
+b3: cold
+  v3 = iconst.i32 30
+  ret v3
+fn @first
+  sig (i32) -> i32
+b0(v0: i32):
+  switch v0 [0 -> b3, 7 -> b2, 9 -> b1] else b1
+b1:
+  v1 = iconst.i32 1
+  ret v1
+b2:
+  v2 = iconst.i32 2
+  ret v2
+b3:
+  v3 = iconst.i32 3
+  ret v3
+fn @byte
+  sig (i8) -> i32
+b0(v0: i8):
+  switch v0 [0 -> b1, 5 -> b2] else b3
+b1:
+  v1 = iconst.i32 1
+  ret v1
+b2:
+  v2 = iconst.i32 2
+  ret v2
+b3:
+  v3 = iconst.i32 3
+  ret v3
+fn @wide
+  sig (i64) -> i32
+b0(v0: i64):
+  switch v0 [8 -> b2, 0 -> b1] else b3
+b1:
+  v1 = iconst.i32 1
+  ret v1
+b2:
+  v2 = iconst.i32 2
+  ret v2
+b3:
+  v3 = iconst.i32 3
+  ret v3
+)";
+    let drv = "#include <stdint.h>\nint32_t last(int32_t);\nint32_t first(int32_t);\nint32_t byte(uint8_t);\nint32_t wide(int64_t);\nint main(void) {\n  if (last(0) != 10 || last(3) != 20 || last(1) != 30 || last(-1) != 30) return 1;\n  if (first(0) != 3 || first(7) != 2 || first(9) != 1 || first(4) != 1) return 2;\n  if (byte(0) != 1 || byte(5) != 2 || byte(255) != 3) return 3;\n  if (wide(0) != 1 || wide(8) != 2 || wide(1LL << 32) != 3) return 4;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Float selects on a comparison with +0.0 as one side (x86-64: the mask's other half alone, `andnps` or
+// `andps`): `lo` gives 0 below 0, `hi` gives 0 unless above 1, in both widths; a NaN takes the false side.
+@test
+fn float_selects_of_zero_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @lo fn global
+sym @hi fn global
+sym @lo64 fn global
+fn @lo
+  sig (f32) -> f32
+b0(v0: f32):
+  v1 = fconst.f32 0x0
+  v2 = fcmp.olt v0, v1
+  v3 = select.f32 v2, v1, v0
+  ret v3
+fn @hi
+  sig (f32) -> f32
+b0(v0: f32):
+  v1 = fconst.f32 0x0
+  v2 = fconst.f32 0x3f800000
+  v3 = fcmp.ogt v0, v2
+  v4 = select.f32 v3, v0, v1
+  ret v4
+fn @lo64
+  sig (f64) -> f64
+b0(v0: f64):
+  v1 = fconst.f64 0x0
+  v2 = fcmp.olt v0, v1
+  v3 = select.f64 v2, v1, v0
+  ret v3
+)";
+    let drv = "#include <math.h>\nfloat lo(float);\nfloat hi(float);\ndouble lo64(double);\nint main(void) {\n  if (lo(-2.5f) != 0.0f || signbit(lo(-2.5f)) || lo(0.75f) != 0.75f || !isnan(lo(NAN))) return 1;\n  if (hi(2.5f) != 2.5f || hi(0.5f) != 0.0f || signbit(hi(0.5f)) || hi(NAN) != 0.0f) return 2;\n  if (lo64(-1e300) != 0.0 || lo64(3.0) != 3.0 || !isnan(lo64(NAN))) return 3;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Aggregate arguments at addresses in registers load their parts in the call's parallel move. Each
+// address arrives in the argument register that the other aggregate's parts take: `pass2`'s first part
+// waits until the loads through its register's old value are done, `pass1`'s two loads form a cycle.
+@test
+fn aggregate_parts_load_through_argument_registers_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @two fn global ext
+sym @one fn global ext
+sym @pass2 fn global
+sym @pass1 fn global
+fn @pass2
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (ptr, ptr) -> i64
+b0(v0: ptr, v1: ptr):
+  v2 = call.i64 @two(v1, v0) : (l0, l0) -> i64
+  ret v2
+fn @pass1
+  layout l0 size 8 align 3 [0 i64]
+  sig (ptr, ptr) -> i64
+b0(v0: ptr, v1: ptr):
+  v2 = call.i64 @one(v1, v0) : (l0, l0) -> i64
+  ret v2
+)";
+    let drv = "#include <stdint.h>\nstruct P { int64_t a, b; };\nstruct Q { int64_t a; };\nint64_t two(struct P x, struct P y) { return x.a + 10 * x.b + 100 * y.a + 1000 * y.b; }\nint64_t one(struct Q x, struct Q y) { return x.a + 10 * y.a; }\nint64_t pass2(struct P *, struct P *);\nint64_t pass1(struct Q *, struct Q *);\nint main(void) {\n  struct P p = {1, 2}, q = {3, 4};\n  if (pass2(&p, &q) != 2143) return 1;\n  struct Q r = {5}, s = {6};\n  if (pass1(&r, &s) != 56) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // A loop whose product by a constant is the first addend of a sum (arm64 `madd`, the constant kept in a
 // register) parses decimal digits.
 @test

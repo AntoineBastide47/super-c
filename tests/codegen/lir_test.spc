@@ -88,6 +88,9 @@ fn data_defined_after_held_data_stays_when_it_goes() {
     let hb: []u8 = [9, 9, 9];
     assert(p.add_data(held, 8, 3, false, hb, none), "held data");
     p.held.dsyms.push(held);
+    p.held.data_end = p.data.len() as u32;
+    p.held.bytes_end = p.bytes.len() as u32;
+    p.held.relocs_end = p.relocs.len() as u32;
     let late = p.add_symbol("late", SK_DATA, SL_LOCAL);
     let lb: []u8 = [5, 6, 7];
     let lr: []Reloc = [Reloc { offset: 8, sym: own, addend: 4 }];

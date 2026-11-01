@@ -181,7 +181,8 @@ const fn blocked(mv: &Vector<Mv>, i: usize) bool {
             continue;
         }
         let s = mv[j].src;
-        if s.kind == LC_REG && d.kind == LC_REG && s.reg == d.reg {
+        // A register move's source, or a memory source's base register (an aggregate's address).
+        if s.kind != LC_VAL && d.kind == LC_REG && s.reg == d.reg {
             return true;
         }
         if s.kind == LC_MEM && d.kind == LC_MEM && s.reg == d.reg {

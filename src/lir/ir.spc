@@ -1451,6 +1451,10 @@ pub(package) struct Package {
     /// Whether the native backend's accesses step their base (`target::table::Isa::post_index`): the
     /// loops' counted addresses become pointers (`lir::loops::pointer_ivs`).
     pub(package) postinc: bool,
+    /// The largest aggregate argument the native backend passes by value through a copy of its own
+    /// (`target::table::Isa::arg_copy`): the optimizer passes the source of a copy into such an argument
+    /// in place of the copy.
+    pub(package) arg_copy: u32,
     /// Whether the native backend joins two accesses of adjacent bytes (`target::table::Isa`): the
     /// vectorizer keeps each access's copies together (`lir::loops`).
     pub(package) apairs: bool,
@@ -1506,11 +1510,15 @@ pub(package) struct Package {
 /// after the package's own, that the optimizer reads but neither optimizes nor emits.
 pub(package) struct Held {
     /// The first held body and data definition, NONE when nothing is held; the package's bytes and
-    /// relocations before the held data.
+    /// relocations before the held data. Then the ends of the held data, bytes and relocations: the
+    /// optimizer defines data after them (`lir::opt::const_slots`).
     pub(package) body: u32,
     pub(package) data: u32,
     pub(package) bytes: u32,
     pub(package) relocs: u32,
+    pub(package) data_end: u32,
+    pub(package) bytes_end: u32,
+    pub(package) relocs_end: u32,
     /// Per held body: its symbol, its walk facts (`HELD_SHAPE`, `HELD_OK`, `HELD_COLD`), its effects (`Sym.fx`), the
     /// parameters whose memory it may write and those it may let escape (`Sym.esc`), a bit each, and its
     /// direct calls before optimization
@@ -1540,6 +1548,9 @@ extend Held {
             data: NONE,
             bytes: 0,
             relocs: 0,
+            data_end: 0,
+            bytes_end: 0,
+            relocs_end: 0,
             syms: Vector::<u32>::new(),
             flags: Vector::<u8>::new(),
             fx: Vector::<u8>::new(),
@@ -1567,6 +1578,7 @@ extend Package {
             vucmp: true,
             ccmp: true,
             postinc: false,
+            arg_copy: 0,
             apairs: true,
             pairs: false,
             align_loops: false,
@@ -1749,8 +1761,8 @@ extend Package {
         return true;
     }
 
-    /// Remove the held bodies and data definitions (`Held`): their symbols are undefined again. Data
-    /// defined after them keeps its definition.
+    /// Remove the held bodies and data definitions (`Held`): their symbols are undefined again. The data
+    /// defined after the held data, with their bytes and relocations, move down over them.
     pub(package) fn drop_held(self: &mut Self) {
         if self.held.body == NONE {
             return;
@@ -1761,39 +1773,32 @@ extend Package {
         for k in 0..self.held.dsyms.len() {
             self.syms.index_mut(self.held.dsyms[k] as usize).def = NONE;
         }
-        // Data a pass defined after the held data (`lir::opt`'s `const_slots`) stays: it moves down.
-        let mut late = Vector::<u32>::new();
-        let mut defs = Vector::<DataDef>::new();
-        let mut bytes = Vector::<u8>::new();
-        let mut relocs = Vector::<Reloc>::new();
+        self.bodies.truncate(self.held.body as usize);
+        let (de, be, re) = (self.held.data_end, self.held.bytes_end, self.held.relocs_end);
+        let nd = de - self.held.data;
+        let nb = be - self.held.bytes;
+        let nr = re - self.held.relocs;
+        for k in de..self.data.len() as u32 {
+            let mut d = self.data[k as usize];
+            d.bytes -= nb;
+            d.relocs -= nr;
+            self.data.set((k - nd) as usize, d);
+        }
+        for j in be..self.bytes.len() as u32 {
+            self.bytes[(j - nb) as usize] = self.bytes[j as usize];
+        }
+        for j in re..self.relocs.len() as u32 {
+            self.relocs.set((j - nr) as usize, self.relocs[j as usize]);
+        }
+        self.data.truncate(self.data.len() - nd as usize);
+        self.bytes.truncate(self.bytes.len() - nb as usize);
+        self.relocs.truncate(self.relocs.len() - nr as usize);
         for s in 0..self.syms.len() {
             let y = self.syms[s];
-            if y.kind == SK_FUNC || y.def == NONE || y.def < self.held.data {
-                continue;
+            if y.kind != SK_FUNC && y.def != NONE && y.def >= de {
+                self.syms.index_mut(s).def = y.def - nd;
             }
-            let mut d = self.data[y.def as usize];
-            let bs = self.data_bytes(&d);
-            for j in 0..bs.len() {
-                bytes.push(bs[j]);
-            }
-            for j in d.relocs..d.relocs + d.nrelocs {
-                relocs.push(self.relocs[j as usize]);
-            }
-            d.bytes = self.held.bytes + bytes.len() as u32 - d.nbytes;
-            d.relocs = self.held.relocs + relocs.len() as u32 - d.nrelocs;
-            late.push(s as u32);
-            defs.push(d);
         }
-        self.bodies.truncate(self.held.body as usize);
-        self.data.truncate(self.held.data as usize);
-        self.bytes.truncate(self.held.bytes as usize);
-        self.relocs.truncate(self.held.relocs as usize);
-        for k in 0..late.len() {
-            self.syms.index_mut(late[k] as usize).def = self.data.len() as u32;
-            self.data.push(defs[k]);
-        }
-        self.bytes.extend_from_slice(bytes[0..bytes.len()]);
-        self.relocs.extend_from_slice(relocs[0..relocs.len()]);
         self.held = Held::new();
     }
 

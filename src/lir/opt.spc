@@ -259,6 +259,9 @@ pub(package) struct Opt {
     lst_at: Vector<u64>, // per loop header, its range of `lst`: start << 32 | end
     imprecise: Vector<u64>, // per loop header, the classes a write but a plain store touches
     pesc: Vector<bool>, // per slot, whether its address escapes
+    /// Per slot, whether its address reaches memory or a callee (`privates`): an escape but a by-value
+    /// aggregate argument the backend copies (`arg_copied`).
+    pleak: Vector<bool>,
     bwrites: Vector<u16>, // per block, the type tags its writes write (bit 0: an untagged write, all of them)
     rmark: Vector<u32>, // per block, the last block whose `between_writes` reached it
     rstack: Vector<u32>,
@@ -465,6 +468,7 @@ extend Opt {
             lst_at: Vector::<u64>::new(),
             imprecise: Vector::<u64>::new(),
             pesc: Vector::<bool>::new(),
+            pleak: Vector::<bool>::new(),
             bwrites: Vector::<u16>::new(),
             rmark: Vector::<u32>::new(),
             rstack: Vector::<u32>::new(),
@@ -2846,7 +2850,7 @@ extend Opt {
         fill(&mut self.lst_at, nb, 0);
         fill(&mut self.imprecise, nb, 0);
         self.lst.truncate(0);
-        self.privates(b);
+        self.privates(pk, b);
         self.classes(pk, b);
         // The classes of the loads' and stores' accesses before the walk forwards their addresses: a
         // parameter an inlined body's accesses go through, a scope's, becomes the caller's pointer.
@@ -5705,6 +5709,9 @@ extend Opt {
             self.enter(LOG_MEM, place_hash(t.a, self.pstate, T_NONE, self.tstate[0]), self.places.len() as u32);
             self.places.push(Place { addr: t.a, off: self.pstate, ty: T_NONE, state: self.tstate[0], val: i });
         }
+        if (t.op == O_CALL || t.op == O_CALLIND) && pk.arg_copy != 0 {
+            t = self.copied_args(pk, b, i);
+        }
         if t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 {
             // A store of the value its place holds (a load of it, or a store to it) does nothing.
             if self.recall(t.a, t.c, b.type_of(t.b), self.prior) == t.b {
@@ -7964,6 +7971,44 @@ extend Opt {
         return true;
     }
 
+    // Call `i` of `b`, each by-value aggregate argument of at most `Package.arg_copy` bytes that a copy of as
+    // many bytes wrote with no write since (neither memory state changed) passing that copy's source in its
+    // place: the backend copies the argument itself, and the source still holds the bytes when the copy did
+    // not overlap it (no move, or a private destination that the source does not point into). The copy may
+    // then go. The call.
+    fn copied_args(self: &mut Self, pk: &Package, b: &mut Body, i: u32) Inst {
+        let t = b.insts[i as usize];
+        let np = b.pool[t.b as usize].min(t.aux);
+        for k in 0..np {
+            let pt = b.pool[(t.b + 3 + k) as usize];
+            let v = b.pool[(t.c + k) as usize];
+            if (pt & AGG) == 0 || b.pool[(pt & ~AGG) as usize] > pk.arg_copy {
+                continue;
+            }
+            let m = self.recall(v, self.pprior, T_NONE, self.tprior);
+            if m == VNONE || (m & (VPARAM | VFLAG)) != 0 || b.insts[m as usize].op != O_MEMCPY {
+                continue;
+            }
+            let c = b.insts[m as usize];
+            let n = const_of(b, c.c);
+            let ca = self.base(b, c.a);
+            let cb = self.base(b, c.b);
+            // A slot whose address leaks nowhere holds no bytes of a source not derived from it.
+            let s = if (c.a & (VPARAM | VFLAG)) == 0 && c.a as usize < self.pder.len() {
+                self.pder[c.a as usize]
+            } else {
+                NONE
+            };
+            let foreign = s != NONE && !self.pleak[s as usize] && ((c.b & (VPARAM | VFLAG)) != 0 || c.b as usize < self.pder.len() && self.pder[c.b as usize] != s);
+            let apart = (c.aux & MEM_OVERLAP) == 0 || ca != NONE && cb != NONE && ca != cb || foreign;
+            if c.a != v || c.b == v || (c.aux & MEM_VOLATILE) != 0 || n.is_none() || n.unwrap() != b.pool[(pt & ~AGG) as usize] as u64 || !apart {
+                continue;
+            }
+            b.pool[(t.c + k) as usize] = c.b;
+        }
+        return t;
+    }
+
     // Value-number pure instruction `i` of block `k`: an equal one of a dominating block replaces it, else
     // it enters the scope and moves out of the loops it does not vary in. Whether it went or moved.
     fn number(self: &mut Self, pk: &Package, b: &Body, k: u32, i: u32) bool {
@@ -8360,11 +8405,12 @@ extend Opt {
     // The private slots: those whose address and the addresses derived from it (`ptradd`) are only the
     // addresses of loads, stores, copies and fills (`pder`, `pesc`). No pointer but these reaches their
     // memory, so no other access touches it. A derived address another way used (stored, passed, joined,
-    // compared) escapes.
-    fn privates(self: &mut Self, b: &Body) {
+    // compared) escapes; one that is not a by-value aggregate argument the backend copies leaks (`pleak`).
+    fn privates(self: &mut Self, pk: &Package, b: &Body) {
         let ni = b.insts.len();
         fill(&mut self.pder, ni, NONE);
         fill(&mut self.pesc, b.slots.len(), false);
+        fill(&mut self.pleak, b.slots.len(), false);
         // In reverse postorder a definition comes before its uses: block arguments, which escape, aside.
         for q in 0..self.order.len() {
             let bk = b.blocks[self.order[q] as usize];
@@ -8388,6 +8434,9 @@ extend Opt {
                 let addr = t.op == O_LOAD && t.a == v && u == 0 || t.op == O_STORE && t.a == v && t.b != v || t.op == O_MEMCPY && (t.a == v || t.b == v) && t.c != v || t.op == O_MEMSET && t.a == v && t.b != v && t.c != v || t.op == O_PTRADD && t.a == v && t.b != v;
                 if !addr || (t.op == O_LOAD || t.op == O_STORE) && (t.aux & MEM_VOLATILE) != 0 {
                     self.pesc[self.pder[v as usize] as usize] = true;
+                    if !arg_copied(pk, b, t, v) {
+                        self.pleak[self.pder[v as usize] as usize] = true;
+                    }
                 }
             }
         }
@@ -12420,6 +12469,29 @@ fn speculable(pk: &Package, b: &Body, t: Inst) bool {
 // may change (a task resumes on another thread), so no two of them are one value.
 const fn tls_addr(pk: &Package, b: &Body, t: Inst) bool {
     return t.op == O_SYMADDR && pk.syms[b.syms[t.a as usize] as usize].kind == SK_TLS;
+}
+
+// Whether value `v` is an operand of call `t` of `b` only as by-value aggregate arguments of at most
+// `Package.arg_copy` bytes, which the backend copies: the callee never sees `v`.
+fn arg_copied(pk: &Package, b: &Body, t: Inst, v: Value) bool {
+    if t.op != O_CALL && t.op != O_CALLIND || t.op == O_CALLIND && t.a == v {
+        return false;
+    }
+    let np = b.pool[t.b as usize];
+    for k in 0..t.aux as u32 {
+        if b.pool[(t.c + k) as usize] != v {
+            continue;
+        }
+        let pt = if k < np {
+            b.pool[(t.b + 3 + k) as usize]
+        } else {
+            0
+        };
+        if (pt & AGG) == 0 || b.pool[(pt & ~AGG) as usize] > pk.arg_copy {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Whether `t` and `u` are the same instruction.

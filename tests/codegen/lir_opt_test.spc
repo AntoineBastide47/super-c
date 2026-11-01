@@ -7017,3 +7017,126 @@ b0(v0: i32, v1: i32):
         }
     }
 }
+
+// Package text `text` read, then optimized for a target that copies each by-value aggregate argument of at
+// most `arg_copy` bytes itself (`Package.arg_copy`): each body verifies after.
+fn optimized_copying(text: str, arg_copy: u32) (Package, Package) {
+    let mut err = String::new();
+    let q = lparse::parse(text, &mut err);
+    assert(q.is_some(), err.as_str());
+    let before = q.unwrap();
+    let mut after = lparse::parse(text, &mut err).unwrap();
+    after.arg_copy = arg_copy;
+    let none = Vector::<bool>::new();
+    let bu = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 };
+    lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: bu });
+    let mut v = verify::Verifier::new();
+    for i in 0..after.syms.len() {
+        let s = after.syms[i];
+        if s.def != NONE && s.kind == SK_FUNC {
+            assert(v.check(&after, after.spell(s.name), &after.bodies[s.def as usize]), v.err.as_str());
+        }
+    }
+    return (before, after);
+}
+
+// A by-value aggregate argument that a copy into a slot wrote, with no write since, passes the copy's
+// source in its place when the target copies such an argument itself (`Package.arg_copy`): `pick`'s copy
+// goes. `wrote`'s source changes between the copy and the call, `big`'s aggregate is larger than the
+// target copies, and with no `arg_copy` `pick`'s copy stays. The results are the same.
+@test
+fn copies_into_aggregate_arguments_pass_their_source() {
+    let src = M"(lir ptr 8
+sym @take fn global noinline
+sym @take3 fn global noinline
+sym @pick fn global noinline
+sym @wrote fn global noinline
+sym @big fn global noinline
+sym @drive fn global
+fn @take
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (l0) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  v2 = load.i64 v0+8 align 3
+  v3 = sub.i64 v1, v2
+  ret v3
+fn @take3
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (l0) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  v2 = load.i64 v0+16 align 3
+  v3 = sub.i64 v1, v2
+  ret v3
+fn @pick
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (ptr, i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 16
+  v4 = ptradd v0, v1 * 16
+  memcpy.overlap v2, v4, v3
+  v5 = call.i64 @take(v2) : (l0) -> i64
+  ret v5
+fn @wrote
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (ptr, i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 16
+  v4 = ptradd v0, v1 * 16
+  memcpy.overlap v2, v4, v3
+  store v1, v4 align 3
+  v5 = call.i64 @take(v2) : (l0) -> i64
+  ret v5
+fn @big
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (ptr, i64) -> i64
+  slot s0 size 24 align 3
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 24
+  v4 = ptradd v0, v1 * 24
+  memcpy.overlap v2, v4, v3
+  v5 = call.i64 @take3(v2) : (l0) -> i64
+  ret v5
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 48 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 100
+  v3 = iconst.i64 7
+  v4 = iconst.i64 1
+  store v2, v1 align 3
+  store v3, v1+8 align 3
+  store v0, v1+16 align 3
+  store v4, v1+24 align 3
+  store v3, v1+32 align 3
+  store v2, v1+40 align 3
+  v5 = call.i64 @pick(v1, v4) : (ptr, i64) -> i64
+  v6 = call.i64 @wrote(v1, v4) : (ptr, i64) -> i64
+  v7 = call.i64 @big(v1, v4) : (ptr, i64) -> i64
+  v8 = iconst.i64 1000
+  v9 = mul.i64 v6, v8
+  v10 = add.i64 v5, v9
+  v11 = mul.i64 v7, v8
+  v12 = mul.i64 v11, v8
+  v13 = add.i64 v10, v12
+  ret v13
+)";
+    let (b, a) = optimized_copying(src, 16);
+    let pick = text_of(&a, "pick");
+    assert(pick.as_str().find("memcpy") < 0 && pick.as_str().find("slotaddr") < 0, pick.as_str());
+    assert(text_of(&a, "wrote").as_str().find("memcpy") >= 0, "a write to the source keeps the copy");
+    assert(text_of(&a, "big").as_str().find("memcpy") >= 0, "a larger aggregate keeps its copy");
+    // pick: 5 - 1; wrote: 5 - 1, the copy's bytes from before the store, which then writes 1 over the 5;
+    // big: 1 - 100.
+    let args: [u64; 1] = [5];
+    same_result(&b, &a, "drive", args[0..1], (4 + 4 * 1000 - 99 * 1000000i64) as u64);
+    let (_, n) = optimized_copying(src, 0);
+    assert(text_of(&n, "pick").as_str().find("memcpy") >= 0, "with no arg_copy the copy stays");
+}

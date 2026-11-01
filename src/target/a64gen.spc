@@ -94,10 +94,17 @@ pub(package) struct Gen {
     va: Vector<Va>,
     code: Vector<u32>,
     owner: Vector<u32>, // per register number, the value index it holds, NONE
+    /// Per register number, the parameter of a block after a loop that shares it with the loop's parameter
+    /// (`lv::Live::share`): it holds the register on when the value that holds it now (the loop's
+    /// parameter, or the step `def_step` defines in its register) is released. NONE else.
+    heir: Vector<u32>,
     held: u64, // a bit per register whose `owner` is a value
     clob: u64, // the caller-saved registers the current call writes: all, or an intrinsic's
     lock: u64, // registers the current instruction reads or writes
     tmps: u64, // registers the current instruction took as temporaries
+    /// The temporaries `reg` rebuilt a value in this instruction: value index << 8 | register. One holds
+    /// its value while its bit is in `tmps`.
+    remat: Vector<u64>,
     fixed_busy: u64,
     csr: u64, // callee-saved registers the body uses
     rows: Vector<u64>, // with debug information, per change of location: its code word << 32 | its `lines` index
@@ -200,10 +207,12 @@ extend Gen {
             va: Vector::<Va>::new(),
             code: Vector::<u32>::new(),
             owner: owner,
+            heir: Vector::<u32>::new(),
             held: 0,
             clob: ~0u64,
             lock: 0,
             tmps: 0,
+            remat: Vector::<u64>::new(),
             fixed_busy: 0,
             csr: 0,
             rows: Vector::<u64>::new(),
@@ -424,6 +433,14 @@ extend Gen {
     fn tmp(self: &mut Self, vreg: bool) u8 {
         let r = self.alloc(vreg);
         self.tmps |= bit(r);
+        let mut k: usize = 0;
+        while k < self.remat.len() {
+            if (self.remat[k] & 0xFF) as u8 == r {
+                let _ = self.remat.swap_remove(k);
+            } else {
+                k += 1;
+            }
+        }
         return r;
     }
 
@@ -616,6 +633,35 @@ extend Gen {
             return NOREG;
         }
         return r;
+    }
+
+    // Whether register aggregate argument `v` (layout `loc`), at an address in a register that no value read
+    // after the call's parallel move is (`late`), loads its parts in that move: each of 1, 2, 4 or 8 bytes
+    // (a vector one of 4, 8 or 16). The register stays live until the move reads it.
+    fn parts_moved(self: &Self, v: Value, loc: ab::ALoc, late: &Vector<u32>) bool {
+        let x = self.vx(v);
+        if loc.kind != ab::L_REG || self.va[x as usize].reg == NOREG || self.va[x as usize].reg >= V0 || self.frame_addr(
+            v,
+        ).0 {
+            return false;
+        }
+        for q in 0..late.len() {
+            if late[q] == x {
+                return false;
+            }
+        }
+        for q in 0..loc.n as u32 {
+            let n = self.lay.parts[(loc.p0 + q) as usize].size as u32;
+            let ok = if self.lay.parts[(loc.p0 + q) as usize].v {
+                n == 4 || n == 8 || n == 16
+            } else {
+                n == 1 || n == 2 || n == 4 || n == 8
+            };
+            if !ok {
+                return false;
+            }
+        }
+        return true;
     }
 
     // A register for the result of value `v` that holds operand `a`'s bits (in `ra`), for an instruction
@@ -1252,8 +1298,16 @@ extend Gen {
         }
         let t = self.vt(v);
         if va.home == H_REMAT || va.home == H_SPADDR || va.home == H_FPADDR {
+            // Once per instruction: a second operand of the same value reads the first one's register.
+            for k in 0..self.remat.len() {
+                let e = self.remat[k];
+                if (e >> 8) as u32 == x && (self.tmps & bit(e as u8)) != 0 {
+                    return e as u8;
+                }
+            }
             let r = self.tmp(is_v(t));
             self.materialize(v, r);
+            self.remat.push(x as u64 << 8 | r as u64);
             return r;
         }
         let r = self.alloc(is_v(t));
@@ -1409,6 +1463,7 @@ extend Gen {
     fn end_inst(self: &mut Self) {
         self.lock = 0;
         self.tmps = 0;
+        self.remat.truncate(0);
         for k in 0..self.dying.len() {
             self.release(self.dying[k]);
         }
@@ -1419,9 +1474,18 @@ extend Gen {
     fn release(self: &mut Self, x: u32) {
         let va = self.va[x as usize];
         if va.reg != NOREG && self.owner[va.reg as usize] == x {
-            self.set_owner(va.reg, NONE);
-            if va.home == H_FIXED {
-                self.fixed_busy &= ~bit(va.reg);
+            // A later block's parameter that shares the register (`param_home`) holds it on.
+            let to = self.heir[va.reg as usize];
+            if to == x {
+                self.heir[va.reg as usize] = NONE;
+            }
+            if va.home == H_FIXED && to != NONE && to != x && self.va[to as usize].home == H_FIXED && self.va[to as usize].reg == va.reg {
+                self.set_owner(va.reg, to);
+            } else {
+                self.set_owner(va.reg, NONE);
+                if va.home == H_FIXED {
+                    self.fixed_busy &= ~bit(va.reg);
+                }
             }
         }
         if va.home == H_SLOT && !self.is_shared(x) {
@@ -1989,6 +2053,7 @@ extend Gen {
             }
         }
         fill(&mut self.owner, 64, NONE);
+        fill(&mut self.heir, 64, NONE);
         self.held = 0;
         fill(&mut self.blk_at, b.blocks.len(), NONE);
         self.code.truncate(0);
@@ -2655,6 +2720,21 @@ extend Gen {
             return;
         }
         let t = self.xty(x);
+        // The register of the loop parameter it continues (`lv::Live::share`), which passes to it when that
+        // parameter's range ends (`release`).
+        let sp = self.lv.share[x as usize];
+        if sp != NONE {
+            self.param_home(sp, NOREG);
+            let spa = self.va[sp as usize];
+            if spa.home == H_FIXED {
+                let va = self.va.index_mut(x as usize);
+                va.home = H_FIXED;
+                va.reg = spa.reg;
+                va.dirty = false;
+                self.heir[spa.reg as usize] = x;
+                return;
+            }
+        }
         let px = back_share(self.b(), &self.lv, &self.va, x);
         if px != NONE {
             // The header parameter keeps the register's ownership and the slot: its range holds this
@@ -5920,6 +6000,17 @@ extend Gen {
         if t.op == O_CALLIND {
             other.push(self.vx(t.a));
         }
+        // The values read after the move: an aggregate's address passed by reference, the callee, the
+        // result's address.
+        let mut late = Vector::<u32>::new();
+        for k in 0..nops {
+            if k == np || self.lay.locs[k as usize].kind == ab::L_REF_REG {
+                late.push(self.vx(b.pool[(t.c + k) as usize]));
+            }
+        }
+        if t.op == O_CALLIND {
+            late.push(self.vx(t.a));
+        }
         let mut keep = Vector::<u32>::new();
         for k in 0..np {
             let v = b.pool[(t.c + k) as usize];
@@ -5930,6 +6021,10 @@ extend Gen {
             }
             let vty = self.vt(v);
             let loc = self.lay.locs[k as usize];
+            if tpl.len() == 0 && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && self.parts_moved(v, loc, &late) {
+                keep.push(x);
+                continue;
+            }
             if !shared && loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) == 0 && (!in_mem(vty) || self.vec_in_reg(
                 loc,
                 vty,
@@ -6041,6 +6136,37 @@ extend Gen {
                 loc,
                 &mut rvals,
             ) {
+                moved.push(true);
+                clean.push(true);
+                continue;
+            }
+            if tpl.len() == 0 && loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && self.parts_moved(
+                v,
+                loc,
+                &late,
+            ) {
+                // Each part loads through the address's register in the parallel move.
+                for q in 0..loc.n as u32 {
+                    let pa = self.lay.parts[(loc.p0 + q) as usize];
+                    self.mv.push(
+                        Mv {
+                            src: Lc { kind: LC_MEM, reg: src.reg, off: pa.off as i32, val: NONE },
+                            dst: Lc {
+                                kind: LC_REG,
+                                reg: if pa.v {
+                                    pa.reg + V0
+                                } else {
+                                    pa.reg
+                                },
+                                off: 0,
+                                val: NONE,
+                            },
+                            v: pa.v,
+                            bytes: pa.size,
+                            done: false,
+                        },
+                    );
+                }
                 moved.push(true);
                 clean.push(true);
                 continue;
@@ -6827,6 +6953,45 @@ extend Gen {
         return true;
     }
 
+    // Whether edges `e` and `o` need the same moves: each argument either passes into a register home
+    // the other edge fills with the same value (a loop's parameter and the one after the loop that shares
+    // its register, `lv::Live::share`); and each such register holds no other value that lives on. The
+    // moves then run once, before the branch.
+    fn same_moves(self: &Self, e: u32, o: u32) bool {
+        return self.moves_within(e, o) && self.moves_within(o, e);
+    }
+
+    // `same_moves` one way: each move of edge `e` is one of edge `o`'s.
+    fn moves_within(self: &Self, e: u32, o: u32) bool {
+        let b = self.b();
+        let ni = b.insts.len() as u32;
+        let tb = b.blocks[b.edge_target(e) as usize];
+        let ob = b.blocks[b.edge_target(o) as usize];
+        for q in 0..b.edge_nargs(e) {
+            let px = ni + tb.param_start + q;
+            let a = b.edge_arg(e, q);
+            let ax = self.vx(a);
+            let pva = self.va[px as usize];
+            if ax == px || pva.home == H_FIXED && self.va[ax as usize].reg == pva.reg {
+                continue;
+            }
+            if pva.home != H_FIXED {
+                return false;
+            }
+            let mut found = false;
+            for j in 0..b.edge_nargs(o) {
+                let oy = ni + ob.param_start + j;
+                found = found || b.edge_arg(o, j) == a && self.va[oy as usize].home == H_FIXED && self.va[oy as usize].reg == pva.reg;
+            }
+            let y = self.owner[pva.reg as usize];
+            let mine = y == NONE || y == px || self.lv.share[px as usize] == y || self.lv.end[y as usize] <= self.pos;
+            if !found || !mine {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // A two-way branch: `test` takes edge `et`, else `ef`; each edge's moves on its own path, or before the
     // branch (`early_moves`).
     fn branch2(self: &mut Self, test: Test, et: u32, ef: u32) {
@@ -6842,6 +7007,14 @@ extend Gen {
             NONE
         };
         if !mt && !mf {
+            if tt == next {
+                self.cbranch(invert_test(test), tf);
+            } else {
+                self.cbranch(test, tt);
+                self.goto(tf, false);
+            }
+        } else if mt && mf && test.kind == T_CC && self.same_moves(et, ef) {
+            self.edge_moves(et);
             if tt == next {
                 self.cbranch(invert_test(test), tf);
             } else {
@@ -6930,6 +7103,8 @@ extend Gen {
             // A case that goes where the default goes, neither passing arguments, needs no test.
             let d = b.switch_edge(t, n);
             let mut last = NONE;
+            // The last test: a case of 0 compares and branches in one instruction (`cbz`).
+            let mut zt = Test { kind: T_CC, cc: a::EQ, reg: 0 };
             for k in 0..n {
                 let e = b.switch_edge(t, k);
                 if b.edge_nargs(e) == 0 && b.edge_nargs(d) == 0 && b.edge_target(e) == b.edge_target(d) {
@@ -6939,6 +7114,20 @@ extend Gen {
                 let mut c = b.words[(t.b + k) as usize];
                 if bits < 64 {
                     c &= (1u64 << bits as u64) - 1;
+                }
+                zt = Test { kind: T_CC, cc: a::EQ, reg: 0 };
+                if c == 0 && b.edge_nargs(e) == 0 {
+                    zt = Test {
+                        kind: T_CBZ,
+                        cc: if sf {
+                            64
+                        } else {
+                            32
+                        },
+                        reg: r,
+                    };
+                    self.cbranch(zt, b.edge_target(e));
+                    continue;
                 }
                 if c < 4096 {
                     self.emit(a::cmp_imm(sf, r, c as u32));
@@ -6959,7 +7148,7 @@ extend Gen {
                 // The last case's block follows: its branch inverted to the default.
                 let _ = self.code.pop();
                 let _ = self.fix.pop();
-                self.cbranch(Test { kind: T_CC, cc: a::NE, reg: 0 }, b.edge_target(d));
+                self.cbranch(invert_test(zt), b.edge_target(d));
                 return true;
             }
             self.edge_moves(d);

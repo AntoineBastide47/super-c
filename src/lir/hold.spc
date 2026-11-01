@@ -501,4 +501,7 @@ pub(package) fn add(pk: &mut Package, unit: u32, rec: &Rec) {
         y.own = true;
         pk.held.dsyms.push(s);
     }
+    pk.held.data_end = pk.data.len() as u32;
+    pk.held.bytes_end = pk.bytes.len() as u32;
+    pk.held.relocs_end = pk.relocs.len() as u32;
 }

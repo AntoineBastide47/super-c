@@ -58,8 +58,14 @@ pub(package) struct Isa {
     /// An access may step its base register by a constant (arm64's post-indexed forms), so a loop's
     /// counted addresses become pointers it steps: `lir::ir::Package::postinc`.
     pub(package) post_index: bool,
-    /// The vector copies a vectorized loop interleaves on a core of no named tuning (as LLVM's generic
-    /// one does); Apple's cores take 4 (`lir::loops::Budgets.vector`).
+    /// The largest aggregate a call passes by value through a copy the backend makes (in registers, or
+    /// on the stack), so the caller may pass the address of any bytes equal to it
+    /// (`lir::ir::Package::arg_copy`): x86-64 copies each one, arm64 those of at most 16 bytes (a larger one
+    /// passes as its address), wasm none that passes as an address.
+    pub(package) arg_copy: u32,
+    /// The vector copies a vectorized loop interleaves on the target's cores but Apple's, which take 4
+    /// (`lir::loops::Budgets.vector`): 2 on arm64 (Neoverse), 4 on x86-64, where the vector remainder
+    /// loop pays for 4.
     pub(package) vector_copies: u32,
     /// Two accesses of adjacent bytes through one address are one instruction (arm64's `ldp`, `stp`):
     /// `lir::ir::Package::apairs`.
@@ -203,7 +209,8 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_ucmp: false,
         ccmp: false,
         post_index: false,
-        vector_copies: 2,
+        arg_copy: 0xFFFFFFFF,
+        vector_copies: 4,
         access_pairs: false,
         pairs: true,
         half_cvt: false,
@@ -232,6 +239,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_ucmp: true,
         ccmp: true,
         post_index: true,
+        arg_copy: 16,
         vector_copies: 2,
         access_pairs: true,
         pairs: true,
@@ -261,6 +269,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_ucmp: true,
         ccmp: false,
         post_index: false,
+        arg_copy: 0,
         vector_copies: 4,
         access_pairs: false,
         pairs: false,
@@ -595,6 +604,7 @@ const UNKNOWN_ISA: Isa = Isa {
     vector_ucmp: true,
     ccmp: false,
     post_index: false,
+    arg_copy: 0,
     vector_copies: 4,
     access_pairs: false,
     pairs: false,
