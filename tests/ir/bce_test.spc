@@ -236,6 +236,15 @@ fn removal_canonical_loops() {
         "__sc_bounds(",
         false,
     );
+    // A signed counter from 0 (`0..1024` is of `i32`) indexes 1024 elements in bounds: its interval is not
+    // negative.
+    expect_in_fn(
+        "an i32 counter from 0 into 1024 elements",
+        "@noinline\npub fn add7(a: &mut [i32; 1024]) {\n    for i in 0..1024 {\n        a[i] = a[i] + 7;\n    }\n}\n",
+        "add7(",
+        "__sc_bounds(",
+        false,
+    );
 }
 
 @test
@@ -267,6 +276,14 @@ fn removal_keeps_unproved() {
             "__sc_bounds(",
         );
     }
+    // A signed index below the length but maybe negative keeps its check.
+    expect_in_fn(
+        "a signed index that may be negative keeps its check",
+        "@noinline\npub fn at(a: &[i32; 8], i: i32) i32 {\n    if i < 8 {\n        return a[i];\n    }\n    return 0;\n}\n",
+        "at(",
+        "__sc_bounds(",
+        true,
+    );
     // A dynamic range keeps its range check.
     expect_c_user_present(
         "dynamic range keeps its check",

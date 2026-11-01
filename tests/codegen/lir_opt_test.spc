@@ -3422,11 +3422,11 @@ b0(v0: ptr):
     assert(!text_of(&a, "round").contains("inttoptr"), text_of(&a, "round").as_str());
 }
 
-// A quotient or remainder by a constant is a high product (`mulhu`; signed, `mulhs` corrected by the
-// dividend where the multiplier's sign is not the divisor's) or, signed by a power of two, shifts: the
-// division's result for every divisor and dividend of 8 bits, and of 16, 32 and 64 bits for the divisors
-// next to each power of two, the extremes and others, on the dividends at the edges and next to the
-// divisor's multiples there. By 0, and signed by -1, it stays a division.
+// A quotient or remainder by a constant is a high product (`mulhu`; signed, `mulhs` by the multiplier of
+// the divisor's magnitude, plus the dividend where that multiplier is negative) or, signed by a power of
+// two, shifts: the division's result for every divisor and dividend of 8 bits, and of 16, 32 and 64 bits
+// for the divisors next to each power of two, the extremes and others, on the dividends at the edges and
+// next to the divisor's multiples there. By 0, and signed by -1, it stays a division.
 @test
 fn quotients_by_constants_give_the_division() {
     let ops: [str; 4] = ["sdiv", "srem", "udiv", "urem"];

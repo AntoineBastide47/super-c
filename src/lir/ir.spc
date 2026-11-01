@@ -79,6 +79,64 @@ pub(package) const fn lane_type(t: u8) u8 {
     return T_I8 + e;
 }
 
+/// The words of a wide constant of vector type `vt` (an integer or float lane) with every lane the low bits
+/// of `x`, pushed to `b.words`: the first word and the count (`O_WCONST`'s operands).
+pub(package) fn splat_words(b: &mut Body, vt: u8, x: u64) (u32, u32) {
+    let lb = type_bits(lane_type(vt), 8);
+    let n = lanes(vt);
+    let nw = (n * lb + 63) / 64;
+    let w = b.words.len() as u32;
+    for _ in 0..nw {
+        b.words.push(0);
+    }
+    let mut lv = x;
+    if lb < 64 {
+        lv &= (1u64 << lb as u64) - 1;
+    }
+    for k in 0..n {
+        let bit = (k * lb) as u64;
+        let at = (w as u64 + bit / 64) as usize;
+        b.words[at] = b.words[at] | lv << bit % 64;
+    }
+    return (w, nw);
+}
+
+/// The lane bits of vector `v` of `b` when every lane holds the same constant (a wide constant, or a splat
+/// of a constant), else None.
+pub(package) fn splat_of(b: &Body, v: Value) Option<u64> {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return None;
+    }
+    let t = b.insts[v as usize];
+    if !is_vec(t.ty) || !is_int(lane_type(t.ty)) {
+        return None;
+    }
+    let lb = type_bits(lane_type(t.ty), 8) as u64;
+    let lm = if lb == 64 {
+        ~0u64
+    } else {
+        (1u64 << lb) - 1
+    };
+    if t.op == O_SPLAT {
+        let c = t.a;
+        if c == VNONE || (c & (VPARAM | VFLAG)) != 0 || b.insts[c as usize].op != O_ICONST {
+            return None;
+        }
+        return Some((b.insts[c as usize].b as u64 << 32 | b.insts[c as usize].a as u64) & lm);
+    }
+    if t.op != O_WCONST {
+        return None;
+    }
+    let x = b.words[t.a as usize] & lm;
+    for q in 1..lanes(t.ty) as u64 {
+        let bit = q * lb;
+        if (b.words[t.a as usize + (bit / 64) as usize] >> bit % 64 & lm) != x {
+            return None;
+        }
+    }
+    return Some(x);
+}
+
 /// The size of type `t` in bytes, with pointers of `ptr` bytes.
 /// The alignment of type `t` in memory: its size, a vector's capped at 16 bytes (the C layout on every
 /// target).
@@ -1370,6 +1428,10 @@ pub(package) struct Package {
     /// optimizer turns a select of a comparison into the lanes' minimum or maximum (`vec_minmaxes`; up to
     /// 32 bytes with VOPS_SOME).
     pub(package) vops: u8,
+    /// The lane sizes whose vectors' high products (`O_MULHS`, `O_MULHU`) the native backend computes in
+    /// registers (`target::table::Isa`), a bit per size in bytes (1, 2, 4): the loop vectorizer divides
+    /// such lanes by a constant, which `lir::opt` turns into high products.
+    pub(package) vec_mulh: u8,
     /// Whether the native backend computes `O_MULHU` of 64-bit integers in one instruction
     /// (`target::table::Isa`): the optimizer then divides by a 64-bit constant with a product.
     pub(package) mul_high: bool,
@@ -1498,6 +1560,7 @@ extend Package {
             vec_regs: 16,
             vector: 16,
             vops: 0,
+            vec_mulh: 7,
             mul_high: true,
             bswap: true,
             bitrev: true,

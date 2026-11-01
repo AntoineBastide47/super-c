@@ -538,18 +538,28 @@ extend Eval {
             }
             return true;
         }
-        if op == O_MULHU {
-            let bits = type_bits(t.ty, ptr);
-            let x = trunc_bits(self.val(&f, b, t.a), bits) as u128;
-            let y = trunc_bits(self.val(&f, b, t.b), bits) as u128;
-            self.vals[dst as usize] = (x * y >> bits as usize) as u64;
-            return true;
-        }
-        if op == O_MULHS {
-            let bits = type_bits(t.ty, ptr);
-            let x = sign_ext(self.val(&f, b, t.a), bits) as i128;
-            let y = sign_ext(self.val(&f, b, t.b), bits) as i128;
-            self.vals[dst as usize] = trunc_bits((x * y >> bits as usize) as u64, bits);
+        if op == O_MULHU || op == O_MULHS {
+            if is_vec(t.ty) {
+                let lb = type_bits(lane_type(t.ty), ptr);
+                let wa = self.word(&f, b, t.a);
+                let wb = self.word(&f, b, t.b);
+                for k in 0..lanes(t.ty) {
+                    let r = mul_high(
+                        op == O_MULHS,
+                        get_lane(&self.vals, wa, k, lb),
+                        get_lane(&self.vals, wb, k, lb),
+                        lb,
+                    );
+                    set_lane(&mut self.vals, dst, k, lb, r);
+                }
+                return true;
+            }
+            self.vals[dst as usize] = mul_high(
+                op == O_MULHS,
+                self.val(&f, b, t.a),
+                self.val(&f, b, t.b),
+                type_bits(t.ty, ptr),
+            );
             return true;
         }
         if op == O_BITREV {
@@ -2022,6 +2032,16 @@ pub(package) const fn sign_ext(x: u64, bits: u32) i64 {
 const fn get_lane(vals: &Vector<u64>, w: u32, k: u32, bits: u32) u64 {
     let bit = k as u64 * bits as u64;
     return trunc_bits(vals[(w as u64 + bit / 64) as usize] >> bit % 64, bits);
+}
+
+// The high `bits` bits of the `2 * bits`-bit product of the low `bits` bits of `x` and `y`, signed when
+// `signed` (`O_MULHS`, else `O_MULHU`).
+const fn mul_high(signed: bool, x: u64, y: u64, bits: u32) u64 {
+    if signed {
+        let p = sign_ext(x, bits) as i128 * sign_ext(y, bits);
+        return trunc_bits((p >> bits as usize) as u64, bits);
+    }
+    return (trunc_bits(x, bits) as u128 * trunc_bits(y, bits) >> bits as usize) as u64;
 }
 
 const fn set_lane(vals: &mut Vector<u64>, w: u32, k: u32, bits: u32, v: u64) {

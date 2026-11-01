@@ -1408,7 +1408,8 @@ extend Bce {
         return true;
     }
 
-    /// Do the solved integer facts prove `x < y` (`strict`) or `x <= y` here?
+    /// Do the solved integer facts prove `x < y` (`strict`) or `x <= y` here? A signed operand counts when
+    /// its interval is non-negative, where its value is its unsigned one (an `i32` counter from 0).
     fn int_le(self: &Self, b: &ir::CoreBody, xop: u32, yop: u32, strict: bool) bool {
         let mut xw: u32 = 0;
         let mut xs = false;
@@ -1416,7 +1417,7 @@ extend Bce {
         let mut ys = false;
         let x = self.fx.ival(b, xop, &mut xw, &mut xs);
         let y = self.fx.ival(b, yop, &mut yw, &mut ys);
-        if xw == 0 || yw == 0 || xs || ys || x.hn || y.ln {
+        if xw == 0 || yw == 0 || x.ln && x.lo != 0 || x.hn || y.ln {
             return false;
         }
         if strict {

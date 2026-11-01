@@ -381,8 +381,11 @@ extend Verifier {
                 name,
                 b,
                 i,
-                is_int(t.ty) && t.ty != T_I128 && ta == t.ty && tb == t.ty,
-                "two integer operands of the result's type, up to 64 bits",
+                (is_int(t.ty) && t.ty != T_I128 || is_vec(t.ty) && is_int(lane_type(t.ty)) && type_bits(
+                    lane_type(t.ty),
+                    8,
+                ) <= 32) && ta == t.ty && tb == t.ty,
+                "two integer operands of the result's type, up to 64 bits, or vectors of lanes up to 32 bits",
             );
         }
         if op == O_BITREV {

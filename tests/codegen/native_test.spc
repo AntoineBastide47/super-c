@@ -1221,6 +1221,187 @@ fn register_passed_aggregate_parts_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// The high halves of vector lanes' products (`mulhs`, `mulhu`; the lane sizes `Package.vec_mulh` names) run
+// against the C driver's products of the lanes' extremes, -1, 0 and a sequence of both signs: on arm64
+// lanes of 8, 16 and 32 bits in 8- and 16-byte registers and in 32-byte vectors in memory; on x86-64 those
+// of 16 and 32 bits, in xmm registers with SSE2 and with SSE4.1, in ymm (AVX2) and zmm (AVX-512) ones, and
+// lane by lane in memory.
+@test
+fn vector_high_products_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let x64 = tgt::host_isa() == tgt::axis_index("x86_64", true);
+    // (signed, lane bits, lanes)
+    let cases: [(bool, u32, u32); 12] = [
+        (true, 8, 16),
+        (false, 8, 16),
+        (true, 16, 8),
+        (false, 16, 8),
+        (true, 32, 4),
+        (false, 32, 4),
+        (true, 8, 8),
+        (false, 16, 4),
+        (true, 32, 2),
+        (true, 32, 8),
+        (false, 16, 16),
+        (false, 8, 32),
+    ];
+    let mut lir = String::from_str("lir ptr 8\n");
+    let mut fns = String::new();
+    let mut drv = String::from_str(
+        "#include <stdint.h>\nstatic uint64_t s = 0x9E3779B97F4A7C15u;\nstatic uint64_t next(void) { s = s * 6364136223846793005u + 1442695040888963407u; return s >> 17; }\n",
+    );
+    let mut calls = String::new();
+    for c in 0..12usize {
+        let (sg, w, n) = unsafe cases[c];
+        if x64 && w == 8 {
+            continue; // no product of bytes
+        }
+        let vt = format("v{}i{}", n, w);
+        let op = if sg {
+            "mulhs"
+        } else {
+            "mulhu"
+        };
+        let al = (w / 8).trailing_zeros();
+        lir.push_str(format("sym @h{} fn global\n", c).as_str());
+        fns.push_str(
+            format(
+                "fn @h{}\n  sig (ptr, ptr, ptr) -> void\nb0(v0: ptr, v1: ptr, v2: ptr):\n  v3 = load.{} v1 align {}\n  v4 = load.{} v2 align {}\n  v5 = {}.{} v3, v4\n  store v5, v0 align {}\n  ret\n",
+                c,
+                vt,
+                al,
+                vt,
+                al,
+                op,
+                vt,
+                al,
+            ).as_str(),
+        );
+        let ct = format(
+            "{}int{}_t",
+            if sg {
+                ""
+            } else {
+                "u"
+            },
+            w,
+        );
+        let wide = if sg {
+            "int64_t"
+        } else {
+            "uint64_t"
+        };
+        drv.push_str(
+            format("void h{}({} *, const {} *, const {} *);\n", c, ct.as_str(), ct.as_str(), ct.as_str()).as_str(),
+        );
+        calls.push_str(
+            format(
+                "  for (int r = 0; r < 64; r++) {{\n    {} a[{}], b[{}], d[{}];\n    for (int k = 0; k < {}; k++) {{ a[k] = ({})next(); b[k] = ({})next(); }}\n    if (r == 0) {{\n      {} e[4] = {{ ({})((uint64_t)1 << {}), ({})~((uint64_t)1 << {}), ({})-1, 0 }};\n      {} f[4] = {{ e[0], e[0], ({})-1, e[1] }};\n      for (int k = 0; k < {} && k < 4; k++) {{ a[k] = e[k]; b[k] = f[k]; }}\n    }}\n    h{}(d, a, b);\n    for (int k = 0; k < {}; k++) if (d[k] != ({})((({})a[k] * ({})b[k]) >> {})) return {};\n  }}\n",
+                ct.as_str(),
+                n,
+                n,
+                n,
+                n,
+                ct.as_str(),
+                ct.as_str(),
+                ct.as_str(),
+                ct.as_str(),
+                w - 1,
+                ct.as_str(),
+                w - 1,
+                ct.as_str(),
+                ct.as_str(),
+                ct.as_str(),
+                n,
+                c,
+                n,
+                ct.as_str(),
+                wide,
+                wide,
+                w,
+                c + 1,
+            ).as_str(),
+        );
+    }
+    lir.push_str(&fns);
+    drv.push_str("int main(void) {\n");
+    drv.push_str(&calls);
+    drv.push_str("  return 0;\n}\n");
+    assert_eq(run_native(&lir, &drv), 0);
+    assert_eq(run_sse41(&lir, &drv), 0);
+    assert_eq(run_wide(&lir, &drv), 0);
+    assert_eq(run_zmm(&lir, &drv), 0);
+}
+
+// A body whose one call is in a rare block, with aggregates in registers that its entry stores into slots,
+// after a body of more blocks: the stores use the frame, so the frame is set up at the entry, not on the
+// edge into the rare block (no shrink-wrapping).
+@test
+fn register_aggregates_stored_at_entry_keep_the_frame() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @steps fn global
+sym @fail fn global
+sym @need fn global
+fn @steps
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = iconst.i64 3
+  v3 = icmp.ult v0, v2
+  br v3, b1, b2
+b1:
+  v4 = add.i64 v0, v1
+  jmp b3(v4)
+b2:
+  v5 = sub.i64 v0, v1
+  jmp b3(v5)
+b3(v6: i64):
+  v7 = icmp.eq v6, v2
+  br v7, b4, b5
+b4:
+  v8 = mul.i64 v6, v2
+  jmp b6(v8)
+b5:
+  v9 = xor.i64 v6, v2
+  jmp b6(v9)
+b6(v10: i64):
+  ret v10
+fn @need
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (ptr, l0, ptr, i32, i8, l0) -> i8
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i32, v4: i8, v5: ptr):
+  br v4, b1, b2
+b1:
+  v6 = iconst.i8 1
+  ret v6
+b2: unlikely
+  v7 = call.i8 @fail(v0, v1, v2, v3, v5) : (ptr, l0, ptr, i32, l0) -> i8
+  ret v7
+)";
+    let drv = M"(#include <stdint.h>
+struct S { const char *p; int64_t n; };
+int64_t steps(int64_t);
+int8_t need(void *, struct S, void *, int32_t, int8_t, struct S);
+int8_t fail(void *c, struct S name, void *b, int32_t i, struct S what) {
+  return (int8_t)(name.n + what.n + i + (c == b) + name.p[0] - what.p[0]);
+}
+int main(void) {
+  struct S a = {"x", 5}, w = {"y", 7};
+  int x = 0;
+  if (steps(1) != 1 || steps(2) != 9 || steps(5) != 7) return 1;
+  if (need(&x, a, &x, 2, 1, w) != 1) return 2;
+  if (need(&x, a, &x, 2, 0, w) != 5 + 7 + 2 + 1 - 1) return 3;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
 // Aggregates a call takes in registers, built by stores into a slot no other access reads: the stores'
 // values go to the argument registers (the last of each part, a constant, a float part, a slot two calls
 // share); a slot read after the call keeps its stores. A runtime call (`memset`) takes its operands from

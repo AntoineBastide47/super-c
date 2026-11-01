@@ -3734,6 +3734,9 @@ extend Gen {
             return true;
         }
         if op == O_MULHU || op == O_MULHS {
+            if is_vec(t.ty) {
+                return self.vec_arith(i, t);
+            }
             let bits = type_bits(t.ty, self.ptr);
             let sgn = op == O_MULHS;
             // The product commutes: a constant operand second.
@@ -8515,6 +8518,13 @@ const fn sse_of_op(op: u8, lt: u8, un: &mut bool) u32 {
     if op == O_MUL && eb == 2 {
         return 0x66_0FD5;
     }
+    if (op == O_MULHS || op == O_MULHU) && eb == 2 {
+        return if op == O_MULHS {
+            0x66_0FE5
+        } else {
+            0x66_0FE4
+        };
+    }
     if op == O_AND {
         return 0x66_0FDB;
     }
@@ -8588,6 +8598,12 @@ const fn avx_of_op(op: u8, lt: u8) u32 {
         0x6601D5
     } else if op == O_MUL && eb == 4 {
         0x660240
+    } else if (op == O_MULHS || op == O_MULHU) && eb == 2 {
+        if op == O_MULHS {
+            0x6601E5
+        } else {
+            0x6601E4
+        }
     } else if op == O_AND {
         0x6601DB
     } else if op == O_OR {
@@ -8639,6 +8655,12 @@ const fn evex_of_op(op: u8, lt: u8) u32 {
         0x6601D5
     } else if op == O_MUL && eb >= 4 {
         w | 0x660240
+    } else if (op == O_MULHS || op == O_MULHU) && eb == 2 {
+        if op == O_MULHS {
+            0x6601E5
+        } else {
+            0x6601E4
+        }
     } else if op == O_AND {
         0x6601DB
     } else if op == O_OR {
@@ -10115,6 +10137,10 @@ extend Gen {
             self.mul_lanes32(i, t);
             return true;
         }
+        if (op == O_MULHS || op == O_MULHU) && type_bytes(lt, 8) == 4 && self.in_reg(t.ty) {
+            self.mulh_lanes32(i, t, nb);
+            return true;
+        }
         if nb == 32 && self.in_reg(t.ty) && avx_of_op(op, lt) != NONE {
             self.avx_reg(avx_of_op(op, lt), op, lt, i, t.a, y);
             return true;
@@ -10150,7 +10176,7 @@ extend Gen {
             }
             return true;
         }
-        let sg = op == O_ASHR || op == O_SDIV || op == O_SREM;
+        let sg = op == O_ASHR || op == O_SDIV || op == O_SREM || op == O_MULHS;
         let xr = self.tmp(false);
         let yr = if sh {
             x::RCX
@@ -10162,10 +10188,124 @@ extend Gen {
             if !un {
                 self.ld_lane(yr, t.b, k, lt, sg, false);
             }
-            self.int_lane(op, xr, yr);
+            if op == O_MULHS || op == O_MULHU {
+                // The extended lanes' 64-bit product, shifted down by the lane's bits.
+                self.c.imul_rr(8, xr, yr);
+                self.c.shift_ri(
+                    if sg {
+                        x::SAR
+                    } else {
+                        x::SHR
+                    },
+                    8,
+                    xr,
+                    type_bits(lt, 8),
+                );
+            } else {
+                self.int_lane(op, xr, yr);
+            }
             self.st_lane(xr, d, k, lt, false);
         }
         return true;
+    }
+
+    // The high halves of the products of the 32-bit lanes of vectors `t.a` and `t.b` (`O_MULHS`,
+    // `O_MULHU`, `nb` bytes in registers) into `i`: the even lanes' 64-bit products (`pmuludq`, signed
+    // `pmuldq` from SSE4.1) shifted down 32, and the odd lanes' (both operands shifted down 32 first),
+    // whose high halves are in place, merged: `vpblendd` (AVX2), else an `and` with the odd halves' mask
+    // and an `or`. Signed without SSE4.1: the unsigned high product less each operand where the other is
+    // negative.
+    fn mulh_lanes32(self: &mut Self, i: u32, t: Inst, nb: u32) {
+        let sg = t.op == O_MULHS;
+        let rx = self.vec_use(t.a, self.vs0) - V0;
+        let ry = self.vec_use(t.b, self.vs1) - V0;
+        let e = self.tmp(true) - V0;
+        let ao = self.tmp(true) - V0;
+        let bo = self.tmp(true) - V0;
+        if nb == 64 {
+            // EVEX.512.66: `vpmuldq` (0F38.W1 28), `vpmuludq` (0F.W1 F4), `vpsrlq` (0F.W1 73 /2), `vpandq`,
+            // `vporq` (0F.W1 DB, EB).
+            let (mm, opc) = if sg {
+                (2u32, 0x28u32)
+            } else {
+                (1u32, 0xF4u32)
+            };
+            self.c.evex_rr(0x66, mm, opc, true, e, rx, ry);
+            self.c.evex_rr(0x66, 1, 0x73, true, 2, e, e);
+            self.c.byte(32);
+            self.c.evex_rr(0x66, 1, 0x73, true, 2, ao, rx);
+            self.c.byte(32);
+            self.c.evex_rr(0x66, 1, 0x73, true, 2, bo, ry);
+            self.c.byte(32);
+            self.c.evex_rr(0x66, mm, opc, true, ao, ao, bo);
+            self.zmm_splat64(bo, 0xFFFFFFFF00000000);
+            self.c.evex_rr(0x66, 1, 0xDB, true, ao, ao, bo);
+            let rd = self.vec_def(i) - V0;
+            self.c.evex_rr(0x66, 1, 0xEB, true, rd, ao, e);
+            return;
+        }
+        if self.avx {
+            // VEX: `vpmuldq` (66.0F38 28) or `vpmuludq` (66.0F F4), `vpsrlq` (66.0F 73 /2), `vpblendd`
+            // (66.0F3A.W0 02) of the odd lanes.
+            let l = nb == 32;
+            let (mm, opc) = if sg {
+                (2u32, 0x28u32)
+            } else {
+                (1u32, 0xF4u32)
+            };
+            self.c.vex_rr(0x66, mm, opc, false, l, e, rx, ry);
+            self.c.vex_rr(0x66, 1, 0x73, false, l, 2, e, e);
+            self.c.byte(32);
+            self.c.vex_rr(0x66, 1, 0x73, false, l, 2, ao, rx);
+            self.c.byte(32);
+            self.c.vex_rr(0x66, 1, 0x73, false, l, 2, bo, ry);
+            self.c.byte(32);
+            self.c.vex_rr(0x66, mm, opc, false, l, ao, ao, bo);
+            let rd = self.vec_def(i) - V0;
+            self.c.vex_rr(0x66, 3, 0x02, false, l, rd, e, ao);
+            self.c.byte(0xAA);
+            return;
+        }
+        // SSE: `pmuldq` (66 0F 38 28) or `pmuludq` (66 0F F4), `psrlq` (66 0F 73 /2), the mask of the odd
+        // halves by `pcmpeqd` and `psllq` (66 0F 73 /6), `pand`, `por`.
+        let smul = sg && unsafe (*self.pkg).sse41;
+        let mo = if smul {
+            0x0F3828u32
+        } else {
+            0x0FF4
+        };
+        self.c.vmov(e, rx);
+        self.c.sse_rr(0x66, mo, e, ry);
+        self.c.sse_rr(0x66, 0x0F73, 2, e);
+        self.c.byte(32);
+        self.c.vmov(ao, rx);
+        self.c.sse_rr(0x66, 0x0F73, 2, ao);
+        self.c.byte(32);
+        self.c.vmov(bo, ry);
+        self.c.sse_rr(0x66, 0x0F73, 2, bo);
+        self.c.byte(32);
+        self.c.sse_rr(0x66, mo, ao, bo);
+        self.c.sse_rr(0x66, 0x0F76, bo, bo);
+        self.c.sse_rr(0x66, 0x0F73, 6, bo);
+        self.c.byte(32);
+        self.c.sse_rr(0x66, 0x0FDB, ao, bo);
+        self.c.sse_rr(0x66, 0x0FEB, ao, e);
+        if sg && !smul {
+            // Less `b` where `a` is negative (`psrad` 66 0F 72 /4 by 31, `pand`, `psubd` 66 0F FA), and
+            // `a` where `b` is.
+            self.c.vmov(e, rx);
+            self.c.sse_rr(0x66, 0x0F72, 4, e);
+            self.c.byte(31);
+            self.c.sse_rr(0x66, 0x0FDB, e, ry);
+            self.c.sse_rr(0x66, 0x0FFA, ao, e);
+            self.c.vmov(e, ry);
+            self.c.sse_rr(0x66, 0x0F72, 4, e);
+            self.c.byte(31);
+            self.c.sse_rr(0x66, 0x0FDB, e, rx);
+            self.c.sse_rr(0x66, 0x0FFA, ao, e);
+        }
+        let rd = self.vec_def(i) - V0;
+        self.c.vmov(rd, ao);
     }
 
     // Product `i` (`t`) of two 16-byte vectors of 32-bit lanes in xmm registers: `vpmulld` with AVX2; else

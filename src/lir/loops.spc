@@ -106,6 +106,9 @@ const VK_INV: u8 = 6; // a load of an address the loop does not define, which no
 const VK_MASK: u8 = 7; // a comparison of lane values, or `and`/`or` of two: a select's condition
 const VK_GADDR: u8 = 8; // `base + lane value * size + offset`: a gathered load's or a scattered store's address
 const VK_RCMP: u8 = 9; // the comparison of a min or max reduction's select (`minmax`)
+// A counter narrower than a pointer extended to a pointer's width without wrapping in the loop: an index
+// of the addresses it alone feeds (`VK_ADDR`)
+const VK_XIV: u8 = 10;
 
 /// The peeling's scratch, reused from body to body.
 pub(package) struct LoopOpt {
@@ -221,6 +224,9 @@ pub(package) struct LoopOpt {
     /// Whether the target joins two accesses of adjacent bytes (`Package.apairs`): the copies of each
     /// access go together (`vectorize`).
     pub(package) apairs: bool,
+    /// The lane sizes whose vectors the target multiplies to their high halves (`Package.vec_mulh`): a plan
+    /// divides such lanes by a constant.
+    pub(package) vmulh: u8,
     vgat: Vector<u32>, // the gathered loads and scattered stores (`vgather`)
     vmap: Vector<Value>,
     vinv: Vector<Value>,
@@ -410,6 +416,7 @@ extend LoopOpt {
             vmin: 0,
             vops: 0,
             apairs: true,
+            vmulh: 0,
             vgat: Vector::<u32>::new(),
             vmap: Vector::<Value>::new(),
             vinv: Vector::<Value>::new(),
@@ -1773,9 +1780,8 @@ extend LoopOpt {
         let ub = b.blocks[u as usize];
         let q = self.viv;
         let qt = b.params[(q & ~VPARAM) as usize];
-        if type_bytes(qt, ptr) != ptr && !one {
-            return self.no("its counter is narrower than a pointer", 0);
-        }
+        // A narrower counter indexes through its extensions alone (`VK_XIV`).
+        let narrow = type_bytes(qt, ptr) != ptr && !one;
         if self.vsigned {
             let init = b.edge_arg(term(b, p).a, (q & ~VPARAM) - hb.param_start);
             if !is_const(b, init) || le::sign_ext(
@@ -1917,10 +1923,13 @@ extend LoopOpt {
         // The counter only steps and indexes, but in scalar copies.
         for i in ub.start..ub.start + ub.len {
             let x = (i - ub.start) as usize;
-            if i < ub.start + ub.len - 1 && (self.vk[x] == VK_ADDR || self.vk[x] == VK_STEP || contains_u32(
+            if i < ub.start + ub.len - 1 && (self.vk[x] == VK_ADDR || self.vk[x] == VK_STEP || self.vk[x] == VK_XIV || contains_u32(
                 &self.vind,
                 i,
             )) {
+                if narrow && contains_u32(&self.vind, i) {
+                    return self.no("its counter is narrower than a pointer", O_TRUNC);
+                }
                 continue;
             }
             if self.vexit && i == ub.start + ub.len - 1 {
@@ -2071,7 +2080,7 @@ extend LoopOpt {
             let i = ub.start + x;
             let t = b.insts[i as usize];
             let k = self.vk[x as usize];
-            if k == VK_ADDR || k == VK_GADDR || k == VK_INV || k == VK_STEP || k == 0 {
+            if k == VK_ADDR || k == VK_GADDR || k == VK_INV || k == VK_STEP || k == VK_XIV || k == 0 {
                 continue;
             }
             s += 1;
@@ -2271,11 +2280,18 @@ extend LoopOpt {
     // from a lane value's type.
     fn vclass(self: &mut Self, b: &Body, ptr: u32, u: u32, t: Inst) u8 {
         let op = t.op;
+        // The counter extended to a pointer's width: lanes `ext(i) + k` while it does not wrap, which a test
+        // `i <u n` excludes for a zero extension, and `i <s n` from a start at 0 or above (`vplan`) for both.
+        if (op == O_ZEXT || op == O_SEXT) && t.a == self.viv && !self.vone && !self.vrev && type_bytes(t.ty, ptr) == ptr && (op == O_ZEXT || self.vsigned) {
+            return VK_XIV;
+        }
         if op == O_PTRADD {
             if t.a == VNONE || self.defined_in(t.a) {
                 return 0;
             }
-            return if t.b == self.viv && t.aux != 0 {
+            // A narrower counter itself (the index sign-extended) only below its signed maximum: `i <s n`.
+            let iv = t.b == self.viv && (type_bytes(value_type(b, t.b), ptr) == ptr || self.vsigned);
+            return if (iv || self.kind(b, u, t.b) == VK_XIV) && t.aux != 0 {
                 VK_ADDR
             } else if self.kind(b, u, t.b) == VK_LANE && is_int(value_type(b, t.b)) {
                 VK_GADDR
@@ -2380,6 +2396,17 @@ extend LoopOpt {
             } else {
                 0
             };
+        }
+        // A quotient or remainder by a constant: high products of lanes (`opt::divide`) where the target
+        // computes them for the lane size (`vmulh`).
+        if op >= O_SDIV && op <= O_UREM {
+            if !is_int(t.ty) || !by_constant(b, t) || !self.lane_size(t.ty, ptr) || !self.vone && (self.vmulh & type_bytes(
+                t.ty,
+                ptr,
+            ) as u8) == 0 {
+                return 0;
+            }
+            return self.lane_operands(b, u, t, false);
         }
         // A shift's amounts are lanes too (each below the width, as the scalar shift's).
         let shift = (op == O_SHL || op == O_LSHR || op == O_ASHR) && self.vops != 0 && !self.vone;
@@ -2886,12 +2913,17 @@ extend LoopOpt {
                     // One address per iteration: the copies' accesses add their offsets to it. Counting
                     // down, the lowest element's: the counter's value `step - 1` on.
                     self.vmap[at] = if c == 0 {
-                        let ix = if self.vrev {
+                        let mut ix = if self.vrev {
                             let sk1 = self.vconst(b, qt, step - 1, l0);
                             self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: vi, b: sk1, c: 0 }, l0)
                         } else {
                             vi
                         };
+                        if t.b != self.viv {
+                            // Through the counter's extension (`VK_XIV`).
+                            let e = b.insts[t.b as usize];
+                            ix = self.vi(b, Inst { op: e.op, ty: e.ty, aux: 0, a: ix, b: VNONE, c: VNONE }, l0);
+                        }
                         self.vi(
                             b,
                             Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux, a: t.a, b: ix, c: t.c },
@@ -4698,22 +4730,7 @@ extend LoopOpt {
             };
             return self.vi(b, Inst { op: op, ty: vt, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE }, l);
         }
-        let lb = type_bits(lane_type(vt), 8);
-        let n = lanes(vt);
-        let nw = (n * lb + 63) / 64;
-        let w = b.words.len() as u32;
-        for _ in 0..nw {
-            b.words.push(0);
-        }
-        let mut lv = x;
-        if lb < 64 {
-            lv &= (1u64 << lb as u64) - 1;
-        }
-        for k in 0..n {
-            let bit = (k * lb) as u64;
-            let at = (w as u64 + bit / 64) as usize;
-            b.words[at] = b.words[at] | lv << bit % 64;
-        }
+        let (w, nw) = splat_words(b, vt, x);
         return self.vi(b, Inst { op: O_WCONST, ty: vt, aux: 0, a: w, b: nw, c: VNONE }, l);
     }
 
@@ -6839,13 +6856,18 @@ fn cf_pure(b: &Body, t: Inst) bool {
         return false;
     }
     if op >= O_SDIV && op <= O_UREM {
-        if !is_const(b, t.b) || t.ty == T_I128 {
-            return false;
-        }
-        let d = raw_const(b, t.b) & mask_of(type_bits(t.ty, 8));
-        return d != 0 && (op == O_UDIV || op == O_UREM || d != mask_of(type_bits(t.ty, 8)));
+        return by_constant(b, t);
     }
     return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_CLZ || op == O_CTZ || op == O_POPCNT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_SPLAT;
+}
+
+// Whether quotient or remainder `t` (a scalar) is by a constant it may take: not 0, a signed one not -1.
+fn by_constant(b: &Body, t: Inst) bool {
+    if !is_const(b, t.b) || t.ty == T_I128 {
+        return false;
+    }
+    let d = raw_const(b, t.b) & mask_of(type_bits(t.ty, 8));
+    return d != 0 && (t.op == O_UDIV || t.op == O_UREM || d != mask_of(type_bits(t.ty, 8)));
 }
 
 // Whether addresses `x` and `y` are one: the same value, or the same `ptradd` of the same operands.

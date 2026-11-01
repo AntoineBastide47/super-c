@@ -2019,6 +2019,8 @@ extend Gen {
         if self.shrink && self.lv.homeless(&self.want) {
             return self.unshrunk(s, local);
         }
+        // The entry's code runs in the entry block, warm: its frame use fails the shrink-wrapped try.
+        self.pos = self.lv.pos[0];
         if self.err.len() != 0 || !self.entry() {
             return false;
         }
@@ -3098,6 +3100,10 @@ extend Gen {
             return true;
         }
         if op == O_MULHU || op == O_MULHS {
+            if is_vec(t.ty) {
+                self.vec_mulh(i, t);
+                return true;
+            }
             // 64 bits: UMULH or SMULH; fewer: the extended operands' 64-bit product (UMULL or SMULL, which
             // read 32 bits), shifted down.
             let bits = type_bits(t.ty, self.ptr);
@@ -8643,6 +8649,52 @@ extend Gen {
             self.st_lane(x, d, k, lt, false);
         }
         return true;
+    }
+
+    // The high halves of the lanes' products of vectors `t.a` and `t.b` (`O_MULHS`, `O_MULHU`, lanes up to
+    // 32 bits) into `i`: SMULL or UMULL of the low lanes and of the high lanes (the `2` form) into lanes
+    // twice as wide, then UZP2 of their odd halves; of 8 bytes, the one product's halves by SHRN. A vector
+    // in memory 16 bytes at a time through v30 and v31.
+    fn vec_mulh(self: &mut Self, i: u32, t: Inst) {
+        let lt = lane_type(t.ty);
+        let lb = type_bits(lt, 8);
+        let s = vsize(type_bytes(lt, 8));
+        let nb = type_bytes(t.ty, 8);
+        let mull = 0x0E20C000u32 | a::on(t.op == O_MULHU, 1u32 << 29) | s << 22;
+        let uzp2 = 0x4E005800u32 | s << 22;
+        if in_vreg(t.ty) {
+            let rx = (self.vec_use(t.a, V0 + 30) - V0) as u32;
+            let ry = (self.vec_use(t.b, V0 + 31) - V0) as u32;
+            let rd = (self.vec_def(i) - V0) as u32;
+            let lo = (self.tmp(true) - V0) as u32;
+            self.emit(mull | ry << 16 | rx << 5 | lo);
+            if nb == 8 {
+                // SHRN by the lane width: the high half of each double-width lane.
+                self.emit(0x0F008400u32 | lb << 16 | lo << 5 | rd);
+                return;
+            }
+            let hi = (self.tmp(true) - V0) as u32;
+            self.emit(mull | 1u32 << 30 | ry << 16 | rx << 5 | hi);
+            self.emit(uzp2 | hi << 16 | lo << 5 | rd);
+            return;
+        }
+        self.sync(t.a);
+        self.sync(t.b);
+        let d = self.mdef(i);
+        let lo = (self.tmp(true) - V0) as u32;
+        let hi = (self.tmp(true) - V0) as u32;
+        let mut at: u32 = 0;
+        while at < nb {
+            let (bx, ox) = self.lane(t.a, at, 1);
+            self.mem(a::M_VQ, true, V0 + 30, bx, ox);
+            let (by, oy) = self.lane(t.b, at, 1);
+            self.mem(a::M_VQ, true, V0 + 31, by, oy);
+            self.emit(mull | 31u32 << 16 | 30u32 << 5 | lo);
+            self.emit(mull | 1u32 << 30 | 31u32 << 16 | 30u32 << 5 | hi);
+            self.emit(uzp2 | hi << 16 | lo << 5 | 30);
+            self.mem(a::M_VQ, false, V0 + 30, a::SP, d + at as i64);
+            at += 16;
+        }
     }
 
     // `x` = `x` op `y` on 64-bit registers (integer LIR operation `op`; `z` a temporary).

@@ -486,6 +486,47 @@ b3:
     assert_eq(count(&s, "mul.i32"), 1);
 }
 
+// A counted loop whose body ends in a second exit test, not a jump back, does not unroll partially (the
+// copies would take the back edge's arguments from the branch): it keeps its one copy and its outcome.
+@test
+fn a_counted_loop_with_an_exit_at_its_end_does_not_unroll() {
+    let text = M"(lir ptr 8
+sym @scan fn global
+fn @scan
+  sig (i64, i64) -> i32
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i32 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 3
+  jmp b1(v2, v3)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b3(v7)
+b2:
+  v9 = trunc.i32 v6
+  v10 = xor.i32 v9, v7
+  v11 = mul.i32 v10, v5
+  v12 = add.i64 v6, v4
+  v13 = icmp.ult v12, v1
+  br v13, b1(v12, v11), b3(v11)
+b3(v14: i32):
+  ret v14
+)";
+    let (before, after) = optimized(text, PARTIAL);
+    let s = text_of(&after, "scan");
+    assert_eq(count(&s, "mul.i32"), 1);
+    let ns: [u64; 5] = [0, 1, 4, 9, 13];
+    for n in ns {
+        for m in ns {
+            let args: [u64; 2] = [n, m];
+            let mut e = leval::Eval::new(&before);
+            let want = e.run(before.find_symbol("scan"), args).value;
+            same_outcome(&before, &after, "scan", args, want, false);
+        }
+    }
+}
+
 // A loop whose lanes pick by a comparison vectorizes: a float `max(x, 0)` map (`vcmp` of floats, `vsel`),
 // and an integer sum of the values inside a range else the bound (two masks `and`ed, a select into a
 // reduction).
@@ -619,6 +660,161 @@ b0(v0: i64, v1: i32):
         for q in 0..3usize {
             let args2: []u64 = [n, unsafe bounds[q]];
             same_outcome(&b, &a, "drive2", args2, run_value(&b, "drive2", args2), false);
+        }
+    }
+}
+
+// A loop of quotients or remainders by a constant vectorizes: the lanes' high products (`mulhs`, `mulhu`)
+// or, by a power of two, shifts; signed and unsigned, of 8, 16 and 32 bits, by positive and negative
+// divisors. Each kernel's driver fills its input (the type's extremes, -1 and 0, then a sequence that
+// covers both signs), runs it on the first `n` elements and sums them; the sums match the scalar loop's.
+@test
+fn a_loop_dividing_by_a_constant_vectorizes() {
+    // (operation, lane bits, divisor, what the vector loop computes with)
+    let cases: [(str, u32, i64, str); 11] = [
+        ("sdiv", 32, 7, "mulhs.v4i32"),
+        ("sdiv", 32, -7, "mulhs.v4i32"),
+        ("srem", 32, -7, "mulhs.v4i32"),
+        ("udiv", 32, 7, "mulhu.v4i32"),
+        ("urem", 32, 10, "mulhu.v4i32"),
+        ("sdiv", 32, 8, "ashr.v4i32"),
+        ("sdiv", 16, -3, "mulhs.v8i16"),
+        ("udiv", 16, 7, "mulhu.v8i16"),
+        ("srem", 8, 5, "mulhs.v16i8"),
+        ("udiv", 8, 3, "mulhu.v16i8"),
+        ("sdiv", 8, 127, "mulhs.v16i8"),
+    ];
+    let mut src = String::from_str("lir ptr 8\n");
+    let mut body = String::new();
+    for c in 0..11usize {
+        let (op, w, d, _) = unsafe cases[c];
+        let eb = w / 8;
+        let al = eb.trailing_zeros();
+        src.push_str(format("sym @k{} fn global noinline\nsym @drive{} fn global\n", c, c).as_str());
+        body.push_str(
+            format(
+                "fn @k{}\n  sig (ptr, ptr, i64) -> void\nb0(v0: ptr, v1: ptr, v2: i64):\n  v3 = iconst.i64 0\n  v4 = iconst.i64 1\n  v5 = iconst.i{} {}\n  jmp b1(v3)\nb1(v6: i64):\n  v7 = icmp.ult v6, v2\n  br v7, b2, b3\nb2:\n  v8 = ptradd v1, v6 * {}\n  v9 = load.i{} v8 align {}\n  v10 = {}.i{} v9, v5\n  v11 = ptradd v0, v6 * {}\n  store v10, v11 align {}\n  v12 = add.i64 v6, v4\n  jmp b1(v12)\nb3:\n  ret\n",
+                c,
+                w,
+                d,
+                eb,
+                w,
+                al,
+                op,
+                w,
+                eb,
+                al,
+            ).as_str(),
+        );
+        // The driver: the extremes, -1 and 0 in elements 0 to 3, then `x * 0x9E3779B97F4A7C15 + seed`
+        // truncated; the kernel on the first `n`; their sum, each zero-extended, times 31 each step.
+        let lo = i64::MIN >> (64 - w) as i64;
+        let hi = i64::MAX >> (64 - w) as i64;
+        body.push_str(
+            format(
+                "fn @drive{}\n  sig (i64, i64) -> i64\n  slot s0 size 512 align 4\n  slot s1 size 512 align 4\nb0(v0: i64, v1: i64):\n  v2 = slotaddr s0\n  v3 = slotaddr s1\n  v4 = iconst.i64 0\n  v5 = iconst.i64 1\n  v6 = iconst.i64 128\n  v7 = iconst.i64 -7046029254386353131\n  v8 = iconst.i64 31\n  jmp b1(v4, v1)\nb1(v9: i64, v10: i64):\n  v11 = icmp.ult v9, v6\n  br v11, b2, b3\nb2:\n  v12 = mul.i64 v10, v7\n  v13 = add.i64 v12, v1\n  v14 = trunc.i{} v13\n  v15 = ptradd v2, v9 * {}\n  store v14, v15 align {}\n  v16 = add.i64 v9, v5\n  jmp b1(v16, v13)\nb3:\n  v17 = iconst.i{} {}\n  store v17, v2 align {}\n  v18 = iconst.i{} {}\n  store v18, v2+{} align {}\n  v19 = iconst.i{} -1\n  store v19, v2+{} align {}\n  v20 = iconst.i{} 0\n  store v20, v2+{} align {}\n  call @k{}(v3, v2, v0) : (ptr, ptr, i64) -> void\n  jmp b4(v4, v4)\nb4(v21: i64, v22: i64):\n  v23 = icmp.ult v21, v0\n  br v23, b5, b6\nb5:\n  v24 = ptradd v3, v21 * {}\n  v25 = load.i{} v24 align {}\n  v26 = zext.i64 v25\n  v27 = mul.i64 v22, v8\n  v28 = add.i64 v27, v26\n  v29 = add.i64 v21, v5\n  jmp b4(v29, v28)\nb6:\n  ret v22\n",
+                c,
+                w,
+                eb,
+                al,
+                w,
+                lo,
+                al,
+                w,
+                hi,
+                eb,
+                al,
+                w,
+                2 * eb,
+                al,
+                w,
+                3 * eb,
+                al,
+                c,
+                eb,
+                w,
+                al,
+            ).as_str(),
+        );
+    }
+    src.push_str(&body);
+    let (b, a) = optimized(&src, VECTOR);
+    let lens: [u64; 6] = [0, 1, 4, 17, 33, 128];
+    let seeds: [u64; 2] = [1, 0x5DEECE66D];
+    for c in 0..11usize {
+        let (_, _, _, want) = unsafe cases[c];
+        let k = text_of(&a, format("k{}", c).as_str());
+        assert(k.contains(want), k.as_str());
+        for n in lens {
+            for s in seeds {
+                let args: []u64 = [n, s];
+                let name = format("drive{}", c);
+                same_outcome(&b, &a, &name, args, run_value(&b, &name, args), false);
+            }
+        }
+    }
+}
+
+// A loop of a 32-bit counter vectorizes where it indexes through its extension to 64 bits, which does not
+// wrap in the loop: a zero extension under `i <s n` from 0 or under `i <u n`, a sign extension under
+// `i <s n`. A sign extension under `i <u n`, a start below 0 and an extension the body also computes with
+// keep the loop scalar. Each kernel adds 7 to the first `n` elements; the drivers sum them.
+@test
+fn a_narrow_counter_indexes_through_its_extension() {
+    // (start, comparison, extension, an extra use of the extension, vectorizes)
+    let cases: [(i64, str, str, bool, bool); 6] = [
+        (0, "slt", "zext", false, true),
+        (0, "slt", "sext", false, true),
+        (0, "ult", "zext", false, true),
+        (0, "ult", "sext", false, false),
+        (-4, "slt", "sext", false, false),
+        (0, "slt", "zext", true, false),
+    ];
+    let mut src = String::from_str("lir ptr 8\n");
+    let mut body = String::new();
+    for c in 0..6usize {
+        let (st, cmp, ext, extra, _) = unsafe cases[c];
+        src.push_str(format("sym @n{} fn global noinline\nsym @dn{} fn global\n", c, c).as_str());
+        // The stored value and the step: `v10` or `v11`, then the next value.
+        let (val, sv, nx) = if extra {
+            ("  v10 = trunc.i32 v7\n  v11 = add.i32 v9, v10\n", 11, 12)
+        } else {
+            ("  v10 = add.i32 v9, v4\n", 10, 11)
+        };
+        body.push_str(
+            format(
+                "fn @n{}\n  sig (ptr, i32) -> void\nb0(v0: ptr, v1: i32):\n  v2 = iconst.i32 {}\n  v3 = iconst.i32 1\n  v4 = iconst.i32 7\n  jmp b1(v2)\nb1(v5: i32):\n  v6 = icmp.{} v5, v1\n  br v6, b2, b3\nb2:\n  v7 = {}.i64 v5\n  v8 = ptradd v0, v7 * 4\n  v9 = load.i32 v8 align 2\n{}  store v{}, v8 align 2\n  v{} = add.i32 v5, v3\n  jmp b1(v{})\nb3:\n  ret\n",
+                c,
+                st,
+                cmp,
+                ext,
+                val,
+                sv,
+                nx,
+                nx,
+            ).as_str(),
+        );
+        // The driver: 64 elements from 64 bytes into its slot (a start below 0 indexes back to the slot's
+        // first), the kernel on `n` of them, their sum.
+        body.push_str(
+            format(
+                "fn @dn{}\n  sig (i32) -> i64\n  slot s0 size 512 align 4\nb0(v0: i32):\n  v1 = slotaddr s0\n  v2 = ptradd v1+64\n  v3 = iconst.i64 0\n  v4 = iconst.i64 1\n  v5 = iconst.i64 112\n  jmp b1(v3)\nb1(v6: i64):\n  v7 = icmp.ult v6, v5\n  br v7, b2, b3\nb2:\n  v8 = ptradd v1, v6 * 4\n  v9 = trunc.i32 v6\n  store v9, v8 align 2\n  v10 = add.i64 v6, v4\n  jmp b1(v10)\nb3:\n  call @n{}(v2, v0) : (ptr, i32) -> void\n  jmp b4(v3, v3)\nb4(v11: i64, v12: i64):\n  v13 = icmp.ult v11, v5\n  br v13, b5, b6\nb5:\n  v14 = ptradd v1, v11 * 4\n  v15 = load.i32 v14 align 2\n  v16 = sext.i64 v15\n  v17 = mul.i64 v16, v11\n  v18 = add.i64 v12, v17\n  v19 = add.i64 v11, v4\n  jmp b4(v19, v18)\nb6:\n  ret v12\n",
+                c,
+                c,
+            ).as_str(),
+        );
+    }
+    src.push_str(&body);
+    let (b, a) = optimized(&src, VECTOR);
+    let ns: [u64; 5] = [0, 3, 8, 13, 64];
+    for c in 0..6usize {
+        let (_, _, _, _, vec) = unsafe cases[c];
+        let k = text_of(&a, format("n{}", c).as_str());
+        assert(k.contains("v4i32") == vec, k.as_str());
+        for n in ns {
+            let args: []u64 = [n];
+            let name = format("dn{}", c);
+            same_outcome(&b, &a, &name, args, run_value(&b, &name, args), false);
         }
     }
 }

@@ -178,6 +178,10 @@ pub(package) struct Opt {
     // to visit, an instruction's operands.
     fresh: Vector<u32>,
     pslots: bool, // whether `param_slots` may look at the body (once per body after the inliner)
+    // `divide` keeps scalar quotients and remainders by a constant for the loop vectorizer (`defer_div`,
+    // until the loop transforms ran), and whether it kept one (`deferred`).
+    defer_div: bool,
+    deferred: bool,
     unit: u32, // the unit of the body's function (`Sym.unit`; NONE: none), for `fold_ptr`
     fresh_ok: Vector<bool>,
     fresh_free: Vector<u32>, // per allocation, the block of its one free (NONE: none)
@@ -403,6 +407,8 @@ extend Opt {
             in_or: Vector::<bool>::new(),
             fresh: Vector::<u32>::new(),
             pslots: true,
+            defer_div: false,
+            deferred: false,
             unit: NONE,
             fresh_ok: Vector::<bool>::new(),
             fresh_free: Vector::<u32>::new(),
@@ -1186,6 +1192,7 @@ extend Opt {
         self.tables(pk, b, K_MEM);
         self.unr.vops = pk.vops;
         self.unr.apairs = pk.apairs;
+        self.unr.vmulh = pk.vec_mulh;
         let any = self.unr.run(
             b,
             pk.ptr_bytes,
@@ -5314,6 +5321,12 @@ extend Opt {
         if found != NONE && same(b.insts[found as usize], t) {
             return found;
         }
+        return self.add_const(b, t, h);
+    }
+
+    // Constant `t` (hash `h`) at the end of the instructions, which the rebuild places in the entry
+    // (`extra`).
+    fn add_const(self: &mut Self, b: &mut Body, t: Inst, h: u64) Value {
         let i = b.insts.len() as u32;
         b.insts.push(t);
         b.locs.push(0);
@@ -7684,31 +7697,48 @@ extend Opt {
     // half of the product by the multiplier `magic` (unsigned) or `smagic` (signed) gives, a 64-bit one where
     // the backend has one instruction for it (`Package.mul_high`); a signed one by a power of two by shifts
     // (Warren, Hacker's Delight, 10-1). Not by 0, nor a signed one by -1 (the minimum's overflow stays the
-    // division's), nor an unsigned one by a power of two (`pow2`). Whether it did.
+    // division's), nor an unsigned one by a power of two (`pow2`). A vector's divisor is one constant in
+    // every lane, of a size whose high products the backend computes (`Package.vec_mulh`); a scalar of such
+    // a size stays while the loop vectorizer may take it (`defer_div`). Whether it did.
     fn divide(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
-        if t.op < O_SDIV || t.op > O_UREM || !is_int(t.ty) || t.ty == T_I128 || t.ty == T_PTR {
+        if t.op < O_SDIV || t.op > O_UREM || t.ty == T_I128 || t.ty == T_PTR {
             return false;
         }
-        let bits = type_bits(t.ty, pk.ptr_bytes);
-        let c = const_of(b, t.b);
+        let vec = is_vec(t.ty);
+        let lt = if vec {
+            lane_type(t.ty)
+        } else {
+            t.ty
+        };
+        if !is_int(lt) || vec && (pk.vec_mulh & type_bytes(lt, pk.ptr_bytes) as u8) == 0 {
+            return false;
+        }
+        let c = if vec {
+            splat_of(b, t.b)
+        } else {
+            const_of(b, t.b)
+        };
         if c.is_none() {
             return false;
         }
-        if t.op == O_SDIV || t.op == O_SREM {
-            return self.divide_signed(pk, b, k, i, le::sign_ext(c.unwrap(), bits));
-        }
-        if bits == 64 && !pk.mul_high {
+        let bits = type_bits(lt, pk.ptr_bytes);
+        let d = c.unwrap() & width_mask(lt, pk.ptr_bytes);
+        let signed = t.op == O_SDIV || t.op == O_SREM;
+        if signed && (d == 0 || d == width_mask(lt, pk.ptr_bytes)) || !signed && (d == 0 || (d & d - 1) == 0 || bits == 64 && !pk.mul_high) {
             return false;
         }
-        let d = c.unwrap() & width_mask(t.ty, pk.ptr_bytes);
-        if d == 0 || (d & d - 1) == 0 {
+        if self.defer_div && !vec && (pk.vec_mulh & type_bytes(lt, pk.ptr_bytes) as u8) != 0 {
+            self.deferred = true;
             return false;
+        }
+        if signed {
+            return self.divide_signed(pk, b, k, i, le::sign_ext(d, bits));
         }
         let (m, sh, add) = magic(d, bits);
         let n = t.a;
         let mut q = VNONE;
-        if bits == 32 && !add {
+        if bits == 32 && !add && !vec {
             // A 32-bit dividend: its 64-bit product by the multiplier, shifted once by 32 more.
             let w = self.before(b, k, i, Inst { op: O_ZEXT, ty: T_I64, aux: 0, a: n, b: VNONE, c: VNONE });
             let mv = self.constant(b, T_I64, m);
@@ -7733,17 +7763,17 @@ extend Opt {
     // `add` adding `n` back (a multiplier one bit wider than the type), shifted right by `sh`.
     fn mulhu_quotient(self: &mut Self, b: &mut Body, k: u32, i: u32, n: Value, m: u64, sh: u64, add: bool) Value {
         let t = b.insts[i as usize];
-        let mv = self.constant(b, t.ty, m);
+        let mv = self.lane_const(b, t.ty, m);
         let h = self.before(b, k, i, Inst { op: O_MULHU, ty: t.ty, aux: 0, a: n, b: mv, c: VNONE });
         let mut q = h;
         if add {
             let diff = self.before(b, k, i, Inst { op: O_SUB, ty: t.ty, aux: 0, a: n, b: h, c: VNONE });
-            let one = self.constant(b, t.ty, 1);
+            let one = self.lane_const(b, t.ty, 1);
             let half = self.before(b, k, i, Inst { op: O_LSHR, ty: t.ty, aux: 0, a: diff, b: one, c: VNONE });
             q = self.before(b, k, i, Inst { op: O_ADD, ty: t.ty, aux: 0, a: half, b: h, c: VNONE });
         }
         if sh != 0 {
-            let sv = self.constant(b, t.ty, sh);
+            let sv = self.lane_const(b, t.ty, sh);
             q = self.before(b, k, i, Inst { op: O_LSHR, ty: t.ty, aux: 0, a: q, b: sv, c: VNONE });
         }
         return q;
@@ -7751,23 +7781,29 @@ extend Opt {
 
     // `divide` of signed quotient or remainder `i` by `d`, the constant sign-extended. By a power of two
     // 2^s (or its negation), the dividend plus 2^s - 1 when negative (`bias`), shifted, the remainder the
-    // dividend less those bits but the low `s`; by another, the high half of the product by `smagic`'s
-    // multiplier, corrected by the dividend when the multiplier's sign is not the divisor's, shifted, plus
-    // 1 when negative (rounding toward 0).
+    // dividend less those bits but the low `s`; by another, `h`: the product by `smagic`'s multiplier `m` of
+    // `|d|` over `2^(bits + sh)`, rounded down, of the dividend's sign. Up to 32 bits, the 64-bit product by
+    // `m` read unsigned, shifted once (its magnitude is below `2^(2 * bits - 1)`: no correction, Lemire
+    // 2026); at 64, the high half of the product by `m`, plus the dividend when `m` is negative, shifted.
+    // The quotient rounds toward 0 from the dividend's sign, off `h`'s path: `h + 1` when negative by a
+    // positive `d`, `-1 - h` when negative by a negative one, else `h` or `-h`.
     fn divide_signed(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, d: i64) bool {
         let t = b.insts[i as usize];
         let ty = t.ty;
-        let bits = type_bits(ty, pk.ptr_bytes);
+        let vec = is_vec(ty);
+        let lt = if vec {
+            lane_type(ty)
+        } else {
+            ty
+        };
+        let bits = type_bits(lt, pk.ptr_bytes);
         let quot = t.op == O_SDIV;
         let n = t.a;
-        if d == 0 || d == -1 {
-            return false;
-        }
         if d == 1 {
             self.repl[i as usize] = if quot {
                 n
             } else {
-                self.constant(b, ty, 0)
+                self.lane_const(b, ty, 0)
             };
             return true;
         }
@@ -7776,24 +7812,24 @@ extend Opt {
         } else {
             d as u64
         };
-        let wm = width_mask(ty, pk.ptr_bytes);
+        let wm = width_mask(lt, pk.ptr_bytes);
         if (ad & ad - 1) == 0 {
             let s = ad.trailing_zeros() as u64;
             let mut sgn = n;
             if s > 1 {
-                let sv = self.constant(b, ty, s - 1);
+                let sv = self.lane_const(b, ty, s - 1);
                 sgn = self.before(b, k, i, Inst { op: O_ASHR, ty: ty, aux: 0, a: n, b: sv, c: VNONE });
             }
-            let rv = self.constant(b, ty, bits as u64 - s);
+            let rv = self.lane_const(b, ty, bits as u64 - s);
             let bias = self.before(b, k, i, Inst { op: O_LSHR, ty: ty, aux: 0, a: sgn, b: rv, c: VNONE });
             let up = self.before(b, k, i, Inst { op: O_ADD, ty: ty, aux: 0, a: n, b: bias, c: VNONE });
             if !quot {
-                let mv = self.constant(b, ty, ~(ad - 1) & wm);
+                let mv = self.lane_const(b, ty, ~(ad - 1) & wm);
                 let low = self.before(b, k, i, Inst { op: O_AND, ty: ty, aux: 0, a: up, b: mv, c: VNONE });
                 self.repl[i as usize] = self.before(b, k, i, Inst { op: O_SUB, ty: ty, aux: 0, a: n, b: low, c: VNONE });
                 return true;
             }
-            let sv = self.constant(b, ty, s);
+            let sv = self.lane_const(b, ty, s);
             let mut q = self.before(b, k, i, Inst { op: O_ASHR, ty: ty, aux: 0, a: up, b: sv, c: VNONE });
             if d < 0 {
                 q = self.before(b, k, i, Inst { op: O_NEG, ty: ty, aux: 0, a: q, b: VNONE, c: VNONE });
@@ -7804,22 +7840,34 @@ extend Opt {
         if bits == 64 && !pk.mul_high {
             return false;
         }
-        let (m, sh) = smagic(d, bits);
-        let mv = self.constant(b, ty, m);
-        let mut h = self.before(b, k, i, Inst { op: O_MULHS, ty: ty, aux: 0, a: n, b: mv, c: VNONE });
-        let ms = le::sign_ext(m, bits);
-        if d > 0 && ms < 0 {
-            h = self.before(b, k, i, Inst { op: O_ADD, ty: ty, aux: 0, a: h, b: n, c: VNONE });
-        } else if d < 0 && ms > 0 {
-            h = self.before(b, k, i, Inst { op: O_SUB, ty: ty, aux: 0, a: h, b: n, c: VNONE });
-        }
-        if sh != 0 {
-            let sv = self.constant(b, ty, sh);
-            h = self.before(b, k, i, Inst { op: O_ASHR, ty: ty, aux: 0, a: h, b: sv, c: VNONE });
-        }
-        let top = self.constant(b, ty, bits as u64 - 1);
-        let neg = self.before(b, k, i, Inst { op: O_LSHR, ty: ty, aux: 0, a: h, b: top, c: VNONE });
-        let q = self.before(b, k, i, Inst { op: O_ADD, ty: ty, aux: 0, a: h, b: neg, c: VNONE });
+        let (m, sh) = smagic(ad, bits);
+        let h = if bits <= 32 && !vec {
+            let w = self.before(b, k, i, Inst { op: O_SEXT, ty: T_I64, aux: 0, a: n, b: VNONE, c: VNONE });
+            let mv = self.constant(b, T_I64, m);
+            let p = self.before(b, k, i, Inst { op: O_MUL, ty: T_I64, aux: 0, a: w, b: mv, c: VNONE });
+            let sv = self.constant(b, T_I64, bits + sh);
+            let hw = self.before(b, k, i, Inst { op: O_ASHR, ty: T_I64, aux: 0, a: p, b: sv, c: VNONE });
+            self.before(b, k, i, Inst { op: O_TRUNC, ty: ty, aux: 0, a: hw, b: VNONE, c: VNONE })
+        } else {
+            let mv = self.lane_const(b, ty, m);
+            let mut h = self.before(b, k, i, Inst { op: O_MULHS, ty: ty, aux: 0, a: n, b: mv, c: VNONE });
+            if le::sign_ext(m, bits) < 0 {
+                h = self.before(b, k, i, Inst { op: O_ADD, ty: ty, aux: 0, a: h, b: n, c: VNONE });
+            }
+            if sh != 0 {
+                let sv = self.lane_const(b, ty, sh);
+                h = self.before(b, k, i, Inst { op: O_ASHR, ty: ty, aux: 0, a: h, b: sv, c: VNONE });
+            }
+            h
+        };
+        let top = self.lane_const(b, ty, bits as u64 - 1);
+        let q = if d > 0 {
+            let neg = self.before(b, k, i, Inst { op: O_LSHR, ty: ty, aux: 0, a: n, b: top, c: VNONE });
+            self.before(b, k, i, Inst { op: O_ADD, ty: ty, aux: 0, a: h, b: neg, c: VNONE })
+        } else {
+            let sgn = self.before(b, k, i, Inst { op: O_ASHR, ty: ty, aux: 0, a: n, b: top, c: VNONE });
+            self.before(b, k, i, Inst { op: O_SUB, ty: ty, aux: 0, a: sgn, b: h, c: VNONE })
+        };
         if quot {
             self.repl[i as usize] = q;
             return true;
@@ -7827,6 +7875,30 @@ extend Opt {
         let prod = self.before(b, k, i, Inst { op: O_MUL, ty: ty, aux: 0, a: q, b: t.b, c: VNONE });
         self.repl[i as usize] = self.before(b, k, i, Inst { op: O_SUB, ty: ty, aux: 0, a: n, b: prod, c: VNONE });
         return true;
+    }
+
+    // Constant `v` of type `ty`: a scalar one (`constant`), or a vector of `v` in every lane, in the entry
+    // too, once per type and value.
+    fn lane_const(self: &mut Self, b: &mut Body, ty: u8, v: u64) Value {
+        if !is_vec(ty) {
+            return self.constant(b, ty, v);
+        }
+        let lb = type_bits(lane_type(ty), 8) as u64;
+        let x = if lb == 64 {
+            v
+        } else {
+            v & (1u64 << lb) - 1
+        };
+        let h = mix(O_WCONST as u64 | ty as u64 << 8, x);
+        let f = switch self.made.get(&h) {
+            Some(y) => *y,
+            None => NONE,
+        };
+        if f != NONE && b.insts[f as usize].op == O_WCONST && b.insts[f as usize].ty == ty && splat_of(b, f) == Some(x) {
+            return f;
+        }
+        let (w, nw) = splat_words(b, ty, x);
+        return self.add_const(b, Inst { op: O_WCONST, ty: ty, aux: 0, a: w, b: nw, c: VNONE }, h);
     }
 
     // Remainder `i` of block `k` of an integer by a value whose quotient a dominating instruction computes:
@@ -9273,6 +9345,9 @@ extend Run {
         sc.o.forget();
         sc.o.pslots = true;
         sc.o.unit = r.bunit[j as usize];
+        // Scalar quotients by a constant stay for the loop vectorizer until the loop transforms ran.
+        sc.o.defer_div = r.cf.loops.vector != 0 && p.vector != 0 && p.vec_mulh != 0;
+        sc.o.deferred = false;
         // The inliner reads the rare blocks, the loop transforms and the code generators too: marked before
         // the inlining (a copy takes its call's marks) and once the transforms made their blocks.
         sc.o.estimate(p, b);
@@ -9324,6 +9399,11 @@ extend Run {
             bu,
         ) {
             round += 1;
+        }
+        sc.o.defer_div = false;
+        if sc.o.deferred {
+            sc.o.deferred = false;
+            let _ = sc.o.run(p, b, true);
         }
         // Then rotation, which moves the exit tests the transforms above read; the loads each iteration
         // starts with leave the rotated loops, so their sums have final values too.
@@ -12649,29 +12729,15 @@ const fn reader(r: u32, k: u32) u32 {
     };
 }
 
-// The multiplier and shift that divide a `bits`-bit unsigned value by `d` (neither 0 nor a power of two)
-// with a high product (Granlund and Montgomery 1994; Warren, Hacker's Delight, 10-8): `(m, s, false)` for
-// `mulhu(n, m) >> s`, with the least `s` whose `m = ceil(2^(bits + s) / d)` fits in `bits` bits and errs
-// by at most `2^s` (`m * d - 2^(bits + s) <= 2^s`, exact for every `n`); else `(m, l - 1, true)` for
-// `((n - h) / 2 + h) >> (l - 1)`, `h = mulhu(n, m)`, `m = 2^bits * (2^l - d) / d + 1`, `l = ceil(log2 d)`.
 // The multiplier and shift of signed division by `d` at `bits` bits (Warren, Hacker's Delight, 10-1:
-// `magic`), `|d|` at least 3 and no power of two: the multiplier `bits` wide, the smallest shift. The loop
-// raises `p` from `bits` while `2^p / anc` is below `|d| - 2^p % |d|`, at most `bits` times: past that
-// `2^p / anc` reaches `2^(bits - 1)`, above every `|d|`.
-const fn smagic(d: i64, bits: u32) (u64, u32) {
+// `magic`), `d` at least 3 and no power of two: the multiplier `bits` wide, the smallest shift. The loop
+// raises `p` from `bits` while `2^p / anc` is below `d - 2^p % d`, at most `bits` times: past that
+// `2^p / anc` reaches `2^(bits - 1)`, above every `d`.
+const fn smagic(d: u64, bits: u32) (u64, u32) {
     let one: u128 = 1;
     let two = one << (bits - 1) as usize;
-    let ad = if d < 0 {
-        0u64.wrapping_sub(d as u64)
-    } else {
-        d as u64
-    } as u128;
-    let t = if d < 0 {
-        two + 1
-    } else {
-        two
-    };
-    let anc = t - 1 - t % ad;
+    let ad = d as u128;
+    let anc = two - 1 - two % ad;
     let mut p = bits - 1;
     let mut q1 = two / anc;
     let mut r1 = two - q1 * anc;
@@ -12697,15 +12763,14 @@ const fn smagic(d: i64, bits: u32) (u64, u32) {
         }
     }
     let wm = (one << bits as usize) - 1;
-    let m = q2 + 1 & wm;
-    let ms = if d < 0 {
-        wm + 1 - m & wm
-    } else {
-        m
-    };
-    return (ms as u64, p - bits);
+    return ((q2 + 1 & wm) as u64, p - bits);
 }
 
+// The multiplier and shift that divide a `bits`-bit unsigned value by `d` (neither 0 nor a power of two)
+// with a high product (Granlund and Montgomery 1994; Warren, Hacker's Delight, 10-8): `(m, s, false)` for
+// `mulhu(n, m) >> s`, with the least `s` whose `m = ceil(2^(bits + s) / d)` fits in `bits` bits and errs
+// by at most `2^s` (`m * d - 2^(bits + s) <= 2^s`, exact for every `n`); else `(m, l - 1, true)` for
+// `((n - h) / 2 + h) >> (l - 1)`, `h = mulhu(n, m)`, `m = 2^bits * (2^l - d) / d + 1`, `l = ceil(log2 d)`.
 const fn magic(d: u64, bits: u32) (u64, u32, bool) {
     let one: u128 = 1;
     let l = 64 - (d - 1).leading_zeros() as u32;

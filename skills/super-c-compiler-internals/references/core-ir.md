@@ -329,7 +329,9 @@ panic-guard folding and widening).
   offset, a strict upper fact for `+1`; `lower_of` takes constant lower bounds, by value or place,
   `0 < x` for a strict bound by an unsigned value, and the solved interval), so `xs[len - 1]` after
   `len > 0` and `xs[i - 1]` after `1 <= i` prove in every profile. Constants bridge an index bound and
-  a length bound (`const_lt`: `i < 10`, `20 < len`), and `c <= len` proves a constant index below `c`.
+  a length bound (`const_lt`: `i < 10`, `20 < len`), and `c <= len` proves a constant index below `c`. The solved intervals prove `x < y` (`int_le`) over
+  unsigned values and over signed ones whose interval is not negative (an `i32` counter from 0 indexes as
+  its unsigned value).
 - **Loop counters** (`iv_scan`, `iv_facts`). At a loop header, before its writes are bumped, an
   unsigned local whose one write in the loop is `l = l + 1` (or `l - 1`, directly or through a
   temporary) outside every nested loop, with an exit test outside them that compares it with a

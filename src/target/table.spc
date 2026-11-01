@@ -39,6 +39,9 @@ pub(package) struct Isa {
     /// to or from f64, an unsigned integer to or from a float, and a shift of 16-byte vectors or of lanes
     /// of 1, 2 or (arithmetic) 8 bytes, 2 each in registers.
     pub(package) vector_ops: u8,
+    /// The lane sizes whose vectors' high products the native backend computes in registers, a bit per size
+    /// in bytes (1, 2, 4): `lir::ir::Package::vec_mulh`.
+    pub(package) vector_mulh: u8,
     /// One instruction gives the high half of a 64-bit product (UMULH, MUL's rdx): the optimizer divides
     /// a 64-bit value by a constant with a product (`lir::ir::Package::mul_high`).
     pub(package) mul_high: bool,
@@ -190,6 +193,7 @@ pub(package) const ISAS: [Isa; 3] = [
         merge_apart: false,
         vector_bytes: 16,
         vector_ops: 1,
+        vector_mulh: 6,
         mul_high: true,
         bswap: true,
         bitrev: false,
@@ -217,6 +221,7 @@ pub(package) const ISAS: [Isa; 3] = [
         merge_apart: false,
         vector_bytes: 16,
         vector_ops: 2,
+        vector_mulh: 7,
         mul_high: true,
         bswap: true,
         bitrev: true,
@@ -244,6 +249,7 @@ pub(package) const ISAS: [Isa; 3] = [
         merge_apart: true,
         vector_bytes: 0,
         vector_ops: 0,
+        vector_mulh: 0,
         mul_high: false,
         bswap: false,
         bitrev: false,
@@ -576,6 +582,7 @@ const UNKNOWN_ISA: Isa = Isa {
     merge_apart: false,
     vector_bytes: 0,
     vector_ops: 0,
+    vector_mulh: 0,
     mul_high: false,
     bswap: false,
     bitrev: false,

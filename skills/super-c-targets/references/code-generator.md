@@ -38,7 +38,8 @@ Shrink-wrapping (`shrinkable`): when every call is in a rare block, the warm cod
 returns with `ret`; the rare blocks joined by edges to one with a call set the frame up
 (`Live::after`, laid out last), the prologue on each edge into them, the epilogue on each edge out.
 Not with a canary, a slot aligned past 16 bytes, inline assembly, a return address or variadic
-access. Microsoft x64: no edge may leave them for the warm code (its unwinder reads an epilogue only
+access; nor when the entry's code uses the frame (a parameter's register parts stored into its slot):
+it runs in the warm entry block (`frame_use` at the entry's layout position). Microsoft x64: no edge may leave them for the warm code (its unwinder reads an epilogue only
 where it ends in `ret` or a jump out); the warm code has no function table entry (a leaf's rule), the
 framed code one with a prologue of 0 bytes, each entry stub one with its prologue (`OFrame.off`). A
 `@cold` function's code goes to its own section (`cold_text`).
@@ -61,7 +62,11 @@ framed code one with a prologue of 0 bytes, each entry stub one with its prologu
   unchecked gathers, masked loads and stores, absolute differences), conversions (`conv_reg`: arm64
   each `Isa.vector_ops` allows; x86-64 SSE2 for integers to twice or half their width, i32 and f32, f32
   and f64, AVX2 for those of 32-byte vectors) and shifts by vector amounts (x86-64 with AVX2,
-  `shift_reg`). Any other form computes lane by lane through memory.
+  `shift_reg`), and lane high products (`mulhs`, `mulhu`; arm64 `vec_mulh`: SMULL or UMULL of the low
+  and high lanes and UZP2, SHRN for 8 bytes; x86-64 `pmulhw`/`pmulhuw` for 16-bit lanes, `mulh_lanes32`
+  for 32-bit ones: the even and odd lanes' `pmuludq` (signed `pmuldq` with SSE4.1, else a correction)
+  merged by a mask, `vpblendd` with AVX2, `vpandq`/`vporq` with AVX-512). Any other form computes lane by
+  lane through memory.
 - `O_ASM` and module-level assembly assemble through the instruction table (`src/target/assembler.spc`
   for directives, labels and sections; the instruction set's assembler for instructions).
 
