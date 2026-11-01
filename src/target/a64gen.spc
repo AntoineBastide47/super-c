@@ -1013,9 +1013,9 @@ extend Gen {
                 t.ty,
             ) || (t.op == O_VCMP || t.op == O_VEXTRACT) && in_vreg(self.vt(t.a)) || t.op == O_VOP && self.vop_reg(t) || self.conv_reg(
                 t,
-            ) || (t.op == O_LSHR || t.op == O_ASHR) && is_vec(t.ty) && in_vreg(t.ty) || t.op == O_BITCAST && in_vreg(
+            ) || (t.op == O_LSHR || t.op == O_ASHR || t.op == O_MULHS || t.op == O_MULHU) && is_vec(t.ty) && in_vreg(
                 t.ty,
-            ) && in_vreg(self.vt(t.a));
+            ) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.vt(t.a));
             if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
                 self.vmem[i] = true;
             }
@@ -1488,9 +1488,9 @@ extend Gen {
             self.use_once(x);
         }
         // Code that may branch past a lane reads a vector from its home: a vector in a register reaches
-        // it first, but for the instructions with register forms (`vop` and `vec_arith` sync their others)
-        // and calls (a vector passed in memory goes through `mloc`).
-        let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT) || t.op == O_VEXTRACT || self.conv_reg(
+        // it first, but for the instructions with register forms (`vop`, `vec_arith` and `vec_mulh` sync
+        // their others) and calls (a vector passed in memory goes through `mloc`).
+        let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT) || t.op == O_VEXTRACT || self.conv_reg(
             t,
         ) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.vt(t.a));
         if !reg_form && !is_terminator(t.op) {
@@ -7083,14 +7083,20 @@ extend Gen {
         for k in 0..n {
             es[(b.words[(t.b + k) as usize].wrapping_sub(min) & m) as usize] = b.switch_edge(t, k);
         }
-        self.switch_index(r, bits, min, span);
-        self.emit(a::cmp_imm(bits == 64, a::IP1, span - 1));
+        // From 0, the index is the value's register (its bits above 32 zero-extended by the sum).
+        let ix = if min == 0 {
+            r
+        } else {
+            self.switch_index(r, bits, min, span);
+            a::IP1
+        };
+        self.emit(a::cmp_imm(bits == 64, ix, span - 1));
         // Per edge with moves (the default first), the branches to patch to them.
         let mut ds = Vector::<u32>::new();
         self.to_default(a::bcond(a::HI, 0), Test { kind: T_CC, cc: a::HI, reg: 0 }, d, &mut ds);
-        // ADR x16 to the table, three words on; x16 += x17 * 4; BR x16.
+        // ADR x16 to the table, three words on; x16 += the index * 4 (UXTW or UXTX); BR x16.
         self.emit(a::adr(false, a::IP0, 12));
-        self.emit(a::addsub_reg(true, 0, false, a::IP0, a::IP0, a::IP1, 0, 2));
+        self.emit(a::addsub_ext(true, 0, false, a::IP0, a::IP0, ix, 2 | (bits == 64) as u32, 2));
         self.emit(0xD61F0000u32 | a::IP0 << 5);
         let mut cs = Vector::<u64>::new();
         for x in 0..span {
@@ -8722,8 +8728,8 @@ extend Gen {
     }
 
     // Vector constant `t` into a v register for `i`: by one MOVI when a byte repeats, every byte is 0 or all
-    // ones, or each 2- or 4-byte lane holds one byte (`movi_of`); else each 8-byte word through ip0 (DUP
-    // when one word repeats, else FMOV then INS).
+    // ones, or each 2- or 4-byte lane holds one byte (`movi_of`); else each 8-byte word through ip0 (DUP of
+    // the narrowest element that repeats when one word repeats, else FMOV then INS).
     fn wconst_reg(self: &mut Self, i: u32, t: Inst) {
         let b = self.b();
         let q = type_bytes(t.ty, 8) == 16;
@@ -8743,12 +8749,29 @@ extend Gen {
             self.emit(mv | a::on(q, 1u32 << 30) | rd as u32);
             return;
         }
-        self.mov_imm(a::IP0 as u8, w0, true);
-        if q && w0 == w1 {
-            // DUP Vd.2D, ip0.
-            self.emit(0x4E080C00 | a::IP0 << 5 | rd as u32);
+        // The narrowest element that repeats through the words: DUP Vd.8H, 4S or 2D (2S, 4H of 8 bytes).
+        let e: u32 = if w0 != w1 || w0 >> 32 != (w0 & 0xFFFFFFFF) {
+            8
+        } else if (w0 >> 16 & 0xFFFF) != (w0 & 0xFFFF) {
+            4
+        } else {
+            2
+        };
+        if w0 == w1 && (q || e < 8) {
+            // A 32-bit move builds the low 4 bytes; DUP reads the element's bytes alone.
+            self.mov_imm(
+                a::IP0 as u8,
+                w0 & if e == 2 {
+                    0xFFFF
+                } else {
+                    u64::MAX
+                },
+                e == 8,
+            );
+            self.emit(0x0E000C00 | a::on(q, 1u32 << 30) | e << 16 | a::IP0 << 5 | rd as u32);
             return;
         }
+        self.mov_imm(a::IP0 as u8, w0, true);
         self.emit(a::fmov_gv(true, true, rd, a::IP0 as u8));
         if q {
             self.mov_imm(a::IP0 as u8, w1, true);
@@ -9128,10 +9151,47 @@ extend Gen {
         self.call_rt("__sc_lane_panic");
     }
 
+    // Accumulating vector instruction `w` (MLA, MLS, USRA, SSRA: Vd plus a function of Vn and Vm, or of Vn
+    // alone when `rm` is NOREG) of result `i` over accumulator `acc`, its other operands in `rn` and `rm`:
+    // in `acc`'s register when `acc`, an instruction's value in no other operand's register, dies here
+    // (`def_from`); else `acc` copied into the result's register (`def_step`), or into a temporary moved
+    // there after when that register holds `rn` or `rm`.
+    fn accumulate(self: &mut Self, w0: u32, i: u32, acc: Value, rn: u8, rm: u8) {
+        let nb = type_bytes(self.vt(acc), 8);
+        let w = w0 | a::on(nb == 16, 1u32 << 30) | (rn - V0) as u32 << 5 | if rm == NOREG {
+            0
+        } else {
+            (rm - V0) as u32 << 16
+        };
+        let xa = self.vx(acc);
+        let ra = self.va[xa as usize].reg;
+        if (acc & (VPARAM | VFLAG)) == 0 && ra != NOREG && ra != rn && ra != rm && self.owner[ra as usize] == xa && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos {
+            let rd = self.def_from(i, acc, ra);
+            self.emit(w | (rd - V0) as u32);
+            return;
+        }
+        let rd = self.def_step(i);
+        let r = if rd == rn || rd == rm {
+            self.tmp(true)
+        } else {
+            rd
+        };
+        if ra == NOREG {
+            let (base, off) = self.mloc(acc);
+            self.mem(mkind(self.vt(acc), true), true, r, base, off);
+        } else if ra != r {
+            self.emit(a::vmov(nb == 16, r - V0, ra - V0));
+        }
+        self.emit(w | (r - V0) as u32);
+        if r != rd {
+            self.emit(a::vmov(nb == 16, rd - V0, r - V0));
+        }
+    }
+
     // Vector arithmetic: O_ADD .. O_NOT, O_FADD .. O_FNEG and O_FSQRT on vectors.
     fn vec_arith(self: &mut Self, i: u32, t: Inst) bool {
         if self.lv.pfold[i as usize] {
-            return true; // its sum or difference multiplies and accumulates (`lv::FOLD_VMLA`)
+            return true; // its sum or difference multiplies or shifts and accumulates (`lv::FOLD_VMLA`)
         }
         let op = t.op;
         if op == O_ADD {
@@ -9158,39 +9218,45 @@ extend Gen {
         if (op == O_ADD || op == O_SUB) && is_vec(t.ty) {
             let p = self.lv.vmla_mul(self.b(), t);
             if p != VNONE && self.lv.pfold[p as usize] {
-                // MLA or MLS Vd, Vn, Vm: the accumulator (the other operand) in the result's register first.
+                // MLA or MLS Vd, Vn, Vm over the accumulator, the other operand.
                 let m = self.b().insts[p as usize];
                 let acc = if t.b == p {
                     t.a
                 } else {
                     t.b
                 };
-                let nb = type_bytes(t.ty, 8);
                 let w = if op == O_SUB {
                     0x2E209400u32
                 } else {
                     0x0E209400u32
-                } | vsize(type_bytes(lane_type(t.ty), 8)) << 22 | a::on(nb == 16, 1u32 << 30);
+                } | vsize(type_bytes(lane_type(t.ty), 8)) << 22;
                 let rn = self.vec_use(m.a, V0 + 30);
                 let rm = self.vec_use(m.b, V0 + 31);
-                let rd = self.def_step(i);
-                let r = if rd == rn || rd == rm {
-                    self.tmp(true)
+                self.accumulate(w, i, acc, rn, rm);
+                return true;
+            }
+            let s = if op == O_ADD {
+                self.lv.vsra_shift(self.b(), t)
+            } else {
+                VNONE
+            };
+            if s != VNONE && self.lv.pfold[s as usize] {
+                // USRA or SSRA Vd, Vn, #k (immh:immb twice the lanes' bits less k) over the other operand.
+                let sh = self.b().insts[s as usize];
+                let k = self.lv.vshimm(self.b(), sh);
+                let acc = if t.b == s {
+                    t.a
                 } else {
-                    rd
+                    t.b
                 };
-                let xa = self.vx(acc);
-                let ra = self.va[xa as usize].reg;
-                if ra == NOREG {
-                    let (base, off) = self.mloc(acc);
-                    self.mem(mkind(t.ty, true), true, r, base, off);
-                } else if ra != r {
-                    self.emit(a::vmov(nb == 16, r - V0, ra - V0));
-                }
-                self.emit(w | (r - V0) as u32 | (rn - V0) as u32 << 5 | (rm - V0) as u32 << 16);
-                if r != rd {
-                    self.emit(a::vmov(nb == 16, rd - V0, r - V0));
-                }
+                let bits = 8 * type_bytes(lane_type(t.ty), 8);
+                let w = if sh.op == O_ASHR {
+                    0x0F001400u32
+                } else {
+                    0x2F001400u32
+                } | 2 * bits - k << 16;
+                let rn = self.vec_use(sh.a, V0 + 31);
+                self.accumulate(w, i, acc, rn, NOREG);
                 return true;
             }
         }

@@ -622,6 +622,7 @@ extend CEmit {
             l.pkg.apairs = tgt::isa(pk.arch).access_pairs;
             l.pkg.vops = tgt::isa(pk.arch).vector_ops;
             l.pkg.vec_mulh = tgt::isa(pk.arch).vector_mulh;
+            l.pkg.vec_accs = tgt::isa(pk.arch).vector_accs;
             l.pkg.vfloat = tgt::isa(pk.arch).vector_float;
             // binary16: every arm64 processor converts it (FCVT) and one with FEAT_FP16 computes with it;
             // x86-64 converts it with F16C.
@@ -18273,6 +18274,14 @@ extend CEmit {
             }
             if zst9 && (is_arr || is_arri) {
                 ok = self.zst_sentinel_ref(b.module, elem9, dst);
+            } else if (is_arr || is_arri) && elem9 != TYPE_NONE && self.mg.is_zst(rm, rt) {
+                // A zero-length array has no storage either: the view (of no element) points at the
+                // sentinel, as its subscript does.
+                dst.push_str("((");
+                ok = ok && self.ty_c(b.module, elem9, "*", dst);
+                dst.push_str(")");
+                ok = ok && self.zst_sentinel_ref(rm, rt, dst);
+                dst.push_str(")");
             } else {
                 dst.push_string(&bv);
                 if is_arri {

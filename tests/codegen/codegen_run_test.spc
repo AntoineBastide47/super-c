@@ -2322,8 +2322,8 @@ fn main() i32 {
 }
 
 // `[]` takes its element type from an expected array or slice. A zero-length array (a constant, a
-// local, a parameter, one read through a reference) viewed as a slice points at the aligned
-// zero-size sentinel with length 0: C has no zero-length object to point at.
+// local, a parameter, one read through a reference) viewed as a slice, whole or by an empty range,
+// points at the aligned zero-size sentinel with length 0: C has no zero-length object to point at.
 @test
 fn zero_length_array_views() {
     run_leak_free(
@@ -2338,8 +2338,9 @@ fn main() i32 {
     let u: []i32 = [];
     let r = &NONE;
     let w: []i32 = *r;
+    let g: []i32 = e[0..0];
     for x in view() { return x; }
-    return (view().len() + t.len() + u.len() + take(NONE) + w.len() + EMPTY.len()) as i32;
+    return (view().len() + t.len() + u.len() + take(NONE) + w.len() + EMPTY.len() + g.len()) as i32;
 }
 )",
         0,
@@ -2351,6 +2352,16 @@ fn view() Slice<'static, i32> { return NONE; }
 fn main() i32 { return view().len() as i32; }
 )",
         ".ptr = ((void *)&__sc_zst_4), .len = 0 }",
+    );
+    h::expect_c(
+        "an empty range of a zero-length local",
+        M"(fn main() i32 {
+    let e: [i32; 0] = [];
+    let g: []i32 = e[0..0];
+    return g.len() as i32;
+}
+)",
+        "{ .ptr = ((int32_t *)((void *)&__sc_zst_",
     );
 }
 

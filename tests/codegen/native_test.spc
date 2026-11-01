@@ -2583,6 +2583,182 @@ fn vector_high_products_run() {
     assert_eq(run_zmm(&lir, &drv), 0);
 }
 
+// Lane quotients and remainders by constants as the optimizer gives them, their operands and constants in
+// registers: high products by a wide constant or by a splat of a parameter (x86-64 multiplies the odd lanes
+// by it unmoved), a sum with a lane shift by an immediate (arm64 USRA and SSRA, over a dying sum, a
+// constant, a value read again after, or a loop's accumulator), a difference with a product (arm64 MLS,
+// x86-64 `pmulld` with SSE4.1), constants of one repeated 2- or 4-byte element (arm64 DUP of the element).
+@test
+fn lane_divisions_by_constants_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @sdiv7 fn global
+sym @udiv7 fn global
+sym @urem10 fn global
+sym @udiv3 fn global
+sym @ssra fn global
+sym @mulhs_by fn global
+sym @usra_sum fn global
+fn @sdiv7
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = wconst.v4i32 0x9249249392492493, 0x9249249392492493
+  v3 = wconst.v4i32 0x200000002, 0x200000002
+  v4 = wconst.v4i32 0x1f0000001f, 0x1f0000001f
+  v5 = load.v4i32 v1 align 2
+  v6 = mulhs.v4i32 v5, v2
+  v7 = add.v4i32 v6, v5
+  v8 = ashr.v4i32 v7, v3
+  v9 = lshr.v4i32 v5, v4
+  v10 = add.v4i32 v8, v9
+  store v10, v0 align 2
+  ret
+fn @udiv7
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = wconst.v4i32 0x2492492524924925, 0x2492492524924925
+  v3 = wconst.v4i32 0x100000001, 0x100000001
+  v4 = wconst.v4i32 0x200000002, 0x200000002
+  v5 = load.v4i32 v1 align 2
+  v6 = mulhu.v4i32 v5, v2
+  v7 = sub.v4i32 v5, v6
+  v8 = lshr.v4i32 v7, v3
+  v9 = add.v4i32 v8, v6
+  v10 = lshr.v4i32 v9, v4
+  store v10, v0 align 2
+  ret
+fn @urem10
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = wconst.v4i32 0xcccccccdcccccccd, 0xcccccccdcccccccd
+  v3 = wconst.v4i32 0x300000003, 0x300000003
+  v4 = wconst.v4i32 0xa0000000a, 0xa0000000a
+  v5 = load.v4i32 v1 align 2
+  v6 = mulhu.v4i32 v5, v2
+  v7 = lshr.v4i32 v6, v3
+  v8 = mul.v4i32 v7, v4
+  v9 = sub.v4i32 v5, v8
+  store v9, v0 align 2
+  ret
+fn @udiv3
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = wconst.v8i16 0xaaabaaabaaabaaab, 0xaaabaaabaaabaaab
+  v3 = wconst.v8i16 0x1000100010001, 0x1000100010001
+  v4 = wconst.v4i16 0x1234567812345678
+  v5 = load.v8i16 v1 align 1
+  v6 = mulhu.v8i16 v5, v2
+  v7 = lshr.v8i16 v6, v3
+  store v7, v0 align 1
+  v8 = load.v4i16 v1+16 align 1
+  v9 = add.v4i16 v8, v4
+  store v9, v0+16 align 1
+  ret
+fn @ssra
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = wconst.v2i32 0x300000003
+  v3 = wconst.v2i32 0x8765432187654321
+  v4 = load.v2i32 v1 align 2
+  v5 = load.v2i32 v1+8 align 2
+  v6 = ashr.v2i32 v5, v2
+  v7 = add.v2i32 v3, v6
+  v8 = add.v2i32 v7, v4
+  v9 = ashr.v2i32 v4, v2
+  v10 = add.v2i32 v9, v5
+  v11 = add.v2i32 v10, v5
+  store v8, v0 align 2
+  store v11, v0+8 align 2
+  ret
+fn @mulhs_by
+  sig (ptr, ptr, i32) -> void
+b0(v0: ptr, v1: ptr, v2: i32):
+  v3 = splat.v4i32 v2
+  v4 = load.v4i32 v1 align 2
+  v5 = load.v4i32 v1+16 align 2
+  v6 = mulhs.v4i32 v4, v3
+  v7 = mulhu.v4i32 v5, v3
+  v8 = add.v4i32 v6, v7
+  store v8, v0 align 2
+  ret
+fn @usra_sum
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i32 0
+  v4 = splat.v4i32 v3
+  v5 = wconst.v4i32 0x500000005, 0x500000005
+  v6 = iconst.i64 0
+  v7 = iconst.i64 1
+  jmp b1(v6, v4)
+b1(v8: i64, v9: v4i32):
+  v10 = icmp.ult v8, v2
+  br v10, b2, b3
+b2:
+  v11 = ptradd v1, v8 * 16
+  v12 = load.v4i32 v11 align 2
+  v13 = lshr.v4i32 v12, v5
+  v14 = add.v4i32 v9, v13
+  v15 = add.i64 v8, v7
+  jmp b1(v15, v14)
+b3:
+  store v9, v0 align 2
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+void sdiv7(int32_t *, const int32_t *);
+void udiv7(uint32_t *, const uint32_t *);
+void urem10(uint32_t *, const uint32_t *);
+void udiv3(uint16_t *, const uint16_t *);
+void ssra(int32_t *, const int32_t *);
+void mulhs_by(uint32_t *, const int32_t *, int32_t);
+void usra_sum(uint32_t *, const uint32_t *, int64_t);
+static uint64_t s = 0x9E3779B97F4A7C15u;
+static uint32_t next(void) { s = s * 6364136223846793005u + 1442695040888963407u; return (uint32_t)(s >> 29); }
+int main(void) {
+  for (int r = 0; r < 256; r++) {
+    uint32_t u[12];
+    for (int k = 0; k < 12; k++) u[k] = next();
+    if (r == 0) { u[0] = 0; u[1] = 0x7FFFFFFFu; u[2] = 0x80000000u; u[3] = 0xFFFFFFFFu; u[4] = 7; u[5] = 0xFFFFFFF9u; u[6] = 9; u[7] = 10; }
+    const int32_t *a = (const int32_t *)u;
+    int32_t q[4];
+    uint32_t p[4];
+    uint16_t h[12];
+    sdiv7(q, a);
+    for (int k = 0; k < 4; k++) if (q[k] != a[k] / 7) return 1;
+    udiv7(p, u);
+    for (int k = 0; k < 4; k++) if (p[k] != u[k] / 7) return 2;
+    urem10(p, u);
+    for (int k = 0; k < 4; k++) if (p[k] != u[k] % 10) return 3;
+    const uint16_t *w = (const uint16_t *)u;
+    udiv3(h, w);
+    for (int k = 0; k < 8; k++) if (h[k] != w[k] / 3) return 4;
+    const uint16_t c[4] = {0x5678, 0x1234, 0x5678, 0x1234};
+    for (int k = 0; k < 4; k++) if (h[8 + k] != (uint16_t)(w[8 + k] + c[k])) return 5;
+    ssra(q, a);
+    for (int k = 0; k < 2; k++) {
+      uint32_t e = 0x87654321u + (uint32_t)(a[2 + k] >> 3) + (uint32_t)a[k];
+      if ((uint32_t)q[k] != e || (uint32_t)q[2 + k] != (uint32_t)(a[k] >> 3) + 2u * (uint32_t)a[2 + k]) return 6;
+    }
+    int32_t m = (int32_t)u[8];
+    mulhs_by(p, a, m);
+    for (int k = 0; k < 4; k++) {
+      uint32_t hs = (uint32_t)(((int64_t)a[k] * m) >> 32), hu = (uint32_t)(((uint64_t)u[4 + k] * (uint32_t)m) >> 32);
+      if (p[k] != hs + hu) return 7;
+    }
+    usra_sum(p, u, 3);
+    for (int k = 0; k < 4; k++) if (p[k] != (u[k] >> 5) + (u[4 + k] >> 5) + (u[8 + k] >> 5)) return 8;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_sse41(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // A body whose one call is in a rare block, with aggregates in registers that its entry stores into slots,
 // after a body of more blocks: the stores use the frame, so the frame is set up at the entry, not on the
 // edge into the rare block (no shrink-wrapping).
@@ -3757,8 +3933,6 @@ int main(void) {
     assert_eq(run_native(lir, drv), 0);
 }
 
-// Switches: dense ones (a jump table), a sparse one, a wide one whose value less the lowest case does not
-// fit 32 bits, and one that drives a loop.
 // The instructions that hold the most registers on x86-64 besides the homes, each with values that live
 // past it in rax and rdx and a result a call later reads: an unsigned 64-bit division, checked product and
 // high product, a narrow division and checked sum (their operands extended). They compile for x86-64 on
@@ -3924,6 +4098,8 @@ int main(void) {
     assert_eq(run_native_with(lir, drv, TAIL), 0);
 }
 
+// Switches: dense ones (a jump table; from 0, of 8 and 64 bits, the value's register its index), a sparse
+// one, a wide one whose value less the lowest case does not fit 32 bits, and one that drives a loop.
 @test
 fn switches_run() {
     if !cli::has_cc() {
@@ -3934,6 +4110,46 @@ sym @dense fn global
 sym @sparse fn global
 sym @wide fn global
 sym @machine fn global
+sym @from0 fn global
+sym @byte0 fn global
+fn @from0
+  sig (i64) -> i32
+b0(v0: i64):
+  switch v0 [0 -> b1, 1 -> b2, 2 -> b3, 3 -> b1, 4 -> b4] else b5
+b1:
+  v1 = iconst.i32 10
+  ret v1
+b2:
+  v2 = iconst.i32 20
+  ret v2
+b3:
+  v3 = iconst.i32 30
+  ret v3
+b4:
+  v4 = iconst.i32 40
+  ret v4
+b5:
+  v5 = iconst.i32 -1
+  ret v5
+fn @byte0
+  sig (i8) -> i32
+b0(v0: i8):
+  switch v0 [0 -> b1, 1 -> b2, 2 -> b3, 3 -> b4] else b5
+b1:
+  v1 = iconst.i32 1
+  ret v1
+b2:
+  v2 = iconst.i32 2
+  ret v2
+b3:
+  v3 = iconst.i32 3
+  ret v3
+b4:
+  v4 = iconst.i32 4
+  ret v4
+b5:
+  v5 = iconst.i32 -1
+  ret v5
 fn @dense
   sig (i32) -> i32
 b0(v0: i32):
@@ -4009,7 +4225,7 @@ b6:
   v12 = iconst.i32 -1
   ret v12
 )";
-    let drv = "#include <stdint.h>\nint dense(int);\nint sparse(int64_t);\nint wide(int64_t);\nint machine(int);\nint main(void) {\n  int d[10] = {-1, -1, 10, 20, 30, 20, -1, 107, 10, -1};\n  for (int i = 0; i < 10; i++) if (dense(i) != d[i]) return 1;\n  if (dense(-2) != -1 || dense(1 << 30) != -1) return 2;\n  if (sparse(0) != 1 || sparse(1000) != 2 || sparse(-5) != 3 || sparse((int64_t)1 << 40) != 2 || sparse(5) != 4) return 3;\n  int w[7] = {3, 1, 2, 1, 2, 3, 1};\n  for (int i = 0; i < 7; i++) if (wide(9 + i) != w[i]) return 4;\n  if (wide(((int64_t)1 << 33) + 10) != 3 || wide(-1) != 3) return 5;\n  if (machine(3) != 111 || machine(0) != 0 || machine(9) != -1) return 6;\n  return 0;\n}\n";
+    let drv = "#include <stdint.h>\nint dense(int);\nint sparse(int64_t);\nint wide(int64_t);\nint machine(int);\nint from0(int64_t);\nint byte0(uint8_t);\nint main(void) {\n  int f[6] = {10, 20, 30, 10, 40, -1};\n  for (int i = 0; i < 6; i++) if (from0(i) != f[i]) return 7;\n  if (from0(-1) != -1 || from0((int64_t)1 << 32) != -1) return 8;\n  for (int i = 0; i < 256; i++) if (byte0((uint8_t)i) != (i < 4 ? i + 1 : -1)) return 9;\n  int d[10] = {-1, -1, 10, 20, 30, 20, -1, 107, 10, -1};\n  for (int i = 0; i < 10; i++) if (dense(i) != d[i]) return 1;\n  if (dense(-2) != -1 || dense(1 << 30) != -1) return 2;\n  if (sparse(0) != 1 || sparse(1000) != 2 || sparse(-5) != 3 || sparse((int64_t)1 << 40) != 2 || sparse(5) != 4) return 3;\n  int w[7] = {3, 1, 2, 1, 2, 3, 1};\n  for (int i = 0; i < 7; i++) if (wide(9 + i) != w[i]) return 4;\n  if (wide(((int64_t)1 << 33) + 10) != 3 || wide(-1) != 3) return 5;\n  if (machine(3) != 111 || machine(0) != 0 || machine(9) != -1) return 6;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }

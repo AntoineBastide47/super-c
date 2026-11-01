@@ -61,7 +61,8 @@ pub(package) const FOLD_LDOP: u32 = 1048576;
 pub(package) const FOLD_ANY: u32 = 2097152;
 pub(package) const FOLD_ANY_WIDE: u32 = 4194304;
 /// `FOLD_VMLA`: a product of integer vectors of 8 or 16 bytes, lanes below 8 bytes, with one use, the second
-/// operand of a sum or a difference or the first of a sum, folds into it (arm64's MLA and MLS).
+/// operand of a sum or a difference or the first of a sum, folds into it (arm64's MLA and MLS); else a right
+/// shift by an immediate (`vshimm`) with one use, an operand of a sum, folds into it (USRA and SSRA).
 pub(package) const FOLD_VMLA: u32 = 8388608;
 /// `FOLD_VSHIMM`: a vector shift by one constant below its integer lanes' width (`vec_shift_amount`) shifts
 /// by an immediate, and a splat or wide constant such shifts alone read as their amount folds into them:
@@ -479,7 +480,10 @@ extend Live {
         for i in 0..ni {
             let t = b.insts[i];
             if (self.fold_ops & FOLD_VMLA) != 0 && (t.op == O_ADD || t.op == O_SUB) && is_vec(t.ty) {
-                let p = self.vmla_mul(b, t);
+                let mut p = self.vmla_mul(b, t);
+                if p == VNONE && t.op == O_ADD {
+                    p = self.vsra_shift(b, t);
+                }
                 if p != VNONE {
                     self.pfold[p as usize] = true;
                 }
@@ -1341,6 +1345,22 @@ extend Live {
             return t.b;
         }
         if t.op == O_ADD && ok(t.a) && t.a != t.b {
+            return t.a;
+        }
+        return VNONE;
+    }
+
+    // The right shift by an immediate `FOLD_VMLA` folds into vector sum `t` when no product does: its second
+    // operand, else its first. VNONE when none.
+    pub(package) fn vsra_shift(self: &Self, b: &Body, t: Inst) Value {
+        let ok = |v: Value| is_inst(v) && (b.insts[v as usize].op == O_LSHR || b.insts[v as usize].op == O_ASHR) && b.insts[v as usize].ty == t.ty && self.count[v as usize] == 1 && self.vshimm(
+            b,
+            b.insts[v as usize],
+        ) != NONE && self.vshimm(b, b.insts[v as usize]) != 0;
+        if ok(t.b) && t.b != t.a {
+            return t.b;
+        }
+        if ok(t.a) && t.a != t.b {
             return t.a;
         }
         return VNONE;

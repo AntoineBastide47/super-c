@@ -1224,6 +1224,7 @@ extend Opt {
         self.unr.vops = pk.vops;
         self.unr.apairs = pk.apairs;
         self.unr.vmulh = pk.vec_mulh;
+        self.unr.vaccs = pk.vec_accs;
         self.unr.vfn.truncate(0);
         for s in 0..b.syms.len() {
             let sy = pk.syms[b.syms[s] as usize];

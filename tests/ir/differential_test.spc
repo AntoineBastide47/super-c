@@ -432,3 +432,140 @@ fn main() i32 {
 fn offset_loop_tests_match_across_profiles() {
     h::expect_same_output("offset loop tests", OFFSET_LOOPS, ["--profile=debug"], ["--profile=release"]);
 }
+
+// A loop that reads from the end (`d[k] = s[n - 1 - k]` while `k < n`), and one indexed by a `u32` counter,
+// check once, before them (`mirrored`, `affine`'s extension): every length, a source of exactly `n`; then a
+// source one short, a read from the end of a longer count, and a `u32` count past the source, whose checks
+// fail.
+const MIRRORED: str = M"(@noinline fn rev(d: []mut u32, s: []u32) { let n = d.len(); for k in 0..n { d[k] = s[n - 1 - k]; } }
+@noinline fn far(d: []mut u32, s: []u32, m: usize) { let n = d.len(); for k in 0..n { d[k] = s[m - 1 - k]; } }
+@noinline fn narrow(s: []u32, n: u32) u32 { let mut t: u32 = 0; let mut i: u32 = 0; while i < n { t = t.wrapping_add(s[i as usize]); i += 1; } return t; }
+fn main(args: Vector<str>) i32 {
+    let mut s = Vector::<u32>::new();
+    let mut d = Vector::<u32>::new();
+    for i in 0..40u32 {
+        s.push(i * 7 + 1);
+        d.push(0);
+    }
+    for n in 0..41usize {
+        rev(d.index_range_mut(0..n), s[0..n]);
+        let mut h: u32 = 0;
+        for i in 0..n {
+            h = h.wrapping_mul(31).wrapping_add(d[i]);
+        }
+        println("{} {} {}", n, h, narrow(s[0..n], n as u32));
+    }
+    if args.len() > 2 {
+        println("{}", narrow(s[0..30], 31));
+    } else if args.len() > 1 {
+        far(d.index_range_mut(0..8), s[0..20], 21);
+    } else {
+        rev(d.index_range_mut(0..9), s[0..8]);
+    }
+    return 0;
+}
+)";
+
+@test
+fn mirrored_indexes_match_across_profiles() {
+    let d = h::same_output(MIRRORED, ["--profile=debug"], ["--profile=release"], ["", "far", "far narrow"]);
+    assert(d.len() == 0, d.as_str());
+}
+
+// Quotients and remainders by constants that the loop vectorizer computes by lane high products, and a count
+// of matching bytes whose 8-byte lanes take several registers per vector: in place over slices past a vector
+// and with a remainder, the lanes' extremes included.
+const LANE_DIVISIONS: str = M"(@noinline fn sdiv7(s: []mut i32) { for i in 0..s.len() { s[i] = s[i] / 7; } }
+@noinline fn sdivm3(s: []mut i16) { for i in 0..s.len() { s[i] = s[i] / -3; } }
+@noinline fn udiv7(s: []mut u32) { for i in 0..s.len() { s[i] = s[i] / 7; } }
+@noinline fn urem10(s: []mut u32) { for i in 0..s.len() { s[i] = s[i] % 10; } }
+@noinline fn udiv3(s: []mut u16) { for i in 0..s.len() { s[i] = s[i] / 3; } }
+@noinline fn count(s: []u8, c: u8) usize { let mut n: usize = 0; for k in 0..s.len() { if s[k] == c { n += 1; } } return n; }
+fn main() i32 {
+    let edges: [u32; 6] = [0, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 7, 0xFFFFFFF9];
+    let mut x: u32 = 2463534242;
+    for n in [0usize, 5, 37, 100] {
+        let mut a = Vector::<i32>::new();
+        let mut h = Vector::<i16>::new();
+        let mut u = Vector::<u32>::new();
+        let mut r = Vector::<u32>::new();
+        let mut w = Vector::<u16>::new();
+        let mut b = Vector::<u8>::new();
+        for k in 0..n {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            let v = if k % 9 == 0 { edges[k / 9 % 6] } else { x };
+            a.push(v as i32);
+            h.push(v as i16);
+            u.push(v);
+            r.push(v);
+            w.push(v as u16);
+            b.push((v % 5) as u8);
+        }
+        sdiv7(&mut a);
+        sdivm3(&mut h);
+        udiv7(&mut u);
+        urem10(&mut r);
+        udiv3(&mut w);
+        let mut t: u64 = 0;
+        for k in 0..n {
+            t = t.wrapping_mul(31).wrapping_add(a[k] as u32).wrapping_mul(31).wrapping_add(h[k] as u16);
+            t = t.wrapping_mul(31).wrapping_add(u[k]).wrapping_mul(31).wrapping_add(r[k]);
+            t = t.wrapping_mul(31).wrapping_add(w[k]);
+        }
+        println("{} {} {}", n, t, count(&b, 3));
+    }
+    return 0;
+}
+)";
+
+@test
+fn lane_divisions_by_constants_match_across_profiles() {
+    h::expect_same_output("lane divisions by constants", LANE_DIVISIONS, ["--profile=debug"], ["--profile=release"]);
+}
+
+// Loops that update every field of a struct array alike, which run as one loop over the fields
+// (`lir::loops` `reroll`), then vectorize: three `f32` fields plus an operand, four `u32` fields by a
+// product and a shift, every count from 0 past a vector; and loops that do not qualify: one field left
+// out (inside the element, or at its end), two fields updated differently.
+const FIELD_LOOPS: str = M"(struct V { x: f32, y: f32, z: f32 }
+struct Q { a: u32, b: u32, c: u32, d: u32 }
+struct W { x: f32, y: f32, z: f32, w: f32 }
+@noinline fn three(v: []mut W, d: f32) { for k in 0..v.len() { v[k].x += d; v[k].y += d; v[k].z += d; } }
+@noinline fn shift(v: []mut V, d: f32) { for k in 0..v.len() { v[k].x += d; v[k].y += d; v[k].z += d; } }
+@noinline fn scale(v: []mut Q, m: u32) { for k in 0..v.len() { v[k].a = v[k].a.wrapping_mul(m) >> 1; v[k].b = v[k].b.wrapping_mul(m) >> 1; v[k].c = v[k].c.wrapping_mul(m) >> 1; v[k].d = v[k].d.wrapping_mul(m) >> 1; } }
+@noinline fn part(v: []mut V, d: f32) { for k in 0..v.len() { v[k].x += d; v[k].z += d; } }
+@noinline fn mixed(v: []mut V, d: f32) { for k in 0..v.len() { v[k].x += d; v[k].y -= d; v[k].z += d; } }
+fn main() i32 {
+    for n in 0..20usize {
+        let mut v = Vector::<V>::new();
+        let mut q = Vector::<Q>::new();
+        let mut w = Vector::<W>::new();
+        for i in 0..n {
+            let f = i as f32;
+            v.push(V { x: f, y: f * 0.5, z: -f });
+            w.push(W { x: f, y: -f, z: f * 2.0, w: f * 3.0 });
+            q.push(Q { a: i as u32, b: 3 * i as u32, c: 7 * i as u32, d: 0xFFFF0000 + i as u32 });
+        }
+        shift(v.as_mut_slice(), 1.25);
+        part(v.as_mut_slice(), 2.5);
+        mixed(v.as_mut_slice(), 0.75);
+        scale(q.as_mut_slice(), 3);
+        three(w.as_mut_slice(), 0.5);
+        let mut h: u32 = 0;
+        for i in 0..n {
+            h = h.wrapping_mul(31).wrapping_add(v[i].x.to_bits()).wrapping_mul(31).wrapping_add(v[i].y.to_bits());
+            h = h.wrapping_mul(31).wrapping_add(v[i].z.to_bits()).wrapping_mul(31).wrapping_add(q[i].a ^ q[i].b ^ q[i].c ^ q[i].d);
+            h = h.wrapping_mul(31).wrapping_add(w[i].x.to_bits() ^ w[i].y.to_bits() ^ w[i].z.to_bits() ^ w[i].w.to_bits());
+        }
+        println("{} {}", n, h);
+    }
+    return 0;
+}
+)";
+
+@test
+fn field_loops_match_across_profiles() {
+    h::expect_same_output("field loops", FIELD_LOOPS, ["--profile=debug"], ["--profile=release"]);
+}

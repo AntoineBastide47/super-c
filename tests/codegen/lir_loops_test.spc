@@ -2610,6 +2610,11 @@ b0(v0: i64):
 // Package text `text` read, then optimized with loop budgets `bu` for a target of `vector`-byte registers
 // that converts vectors and shifts their lanes as `vops` says (`Package.vops`): each body verifies after.
 fn optimized_for(text: str, bu: lu::Budgets, vector: u32, vops: u8) (Package, Package) {
+    return optimized_with(text, bu, vector, vops, 0);
+}
+
+// `optimized_for` with `accs` vector registers for a loop's reductions (`Package.vec_accs`).
+fn optimized_with(text: str, bu: lu::Budgets, vector: u32, vops: u8, accs: u32) (Package, Package) {
     let mut err = String::new();
     let q = lparse::parse(text, &mut err);
     assert(q.is_some(), err.as_str());
@@ -2617,6 +2622,7 @@ fn optimized_for(text: str, bu: lu::Budgets, vector: u32, vops: u8) (Package, Pa
     let mut after = lparse::parse(text, &mut err).unwrap();
     after.vector = vector;
     after.vops = vops;
+    after.vec_accs = accs;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: bu });
     let mut v = verify::Verifier::new();
@@ -5036,6 +5042,56 @@ data @w size 200 align 3 bytes 21c0a9dc5920318c312059dca9c021ccc100895c79e0918cd
     }
 }
 
+// A count whose 8-byte lanes take 4 registers per vector of byte lanes interleaves as many copies as hold
+// its accumulators in the target's registers for them (`Package.vec_accs`): 2 of 4 within 8 registers, 1
+// within 4, all 4 without a bound; each length runs as before.
+@test
+fn wide_reductions_interleave_within_their_registers() {
+    let src = M"(lir ptr 8
+sym @cnt fn global
+sym @w data local
+fn @cnt
+  sig (i64, i8) -> i64
+b0(v0: i64, v1: i8):
+  v2 = symaddr @w
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3, v3)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v2, v5 * 1
+  v9 = load.i8 v8 align 0
+  v10 = icmp.eq v9, v1
+  v11 = zext.i64 v10
+  v12 = add.i64 v6, v11
+  v13 = add.i64 v5, v4
+  jmp b1(v13, v12)
+b3:
+  ret v6
+data @w size 64 align 3 bytes 21c0a9dc5920318c312059dca9c021ccc100895c79e0918cd160395cc98081cc614069dc99a0f18c71a019dce940e1cc0180495cb960518c11e0f95c090041cc
+)";
+    let four = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 4, interleave: 4, fin: 0 };
+    // (registers, vector loads of the first vector loop)
+    let cases: [(u32, u32); 3] = [(8, 2), (4, 1), (0, 4)];
+    for k in 0..3usize {
+        let (accs, loads) = unsafe cases[k];
+        let (b, a) = optimized_with(src, four, 16, VOPS_SOME, accs);
+        // The block of the first vector load, to its branch.
+        let c = text_of(&a, "cnt");
+        let at = c.find("load.v8i8");
+        assert(at < c.len(), c.as_str());
+        let rest = c.as_str().slice(at, c.len());
+        let block = String::from_str(rest.slice(0, rest.find("br ") as usize));
+        assert(count(&block, "load.v8i8") == loads, c.as_str());
+        for n in 0..65u64 {
+            let args: []u64 = [n, 0xdc];
+            same_outcome(&b, &a, "cnt", args, run_value(&b, "cnt", args), false);
+        }
+    }
+}
+
 // A loop's calls of C's float functions (`floorf`, `fmaf`) widen to vector operations where the target computes
 // them in registers (`lane_fn`, `Package.vfloat`); a call of another function stays.
 @test
@@ -5148,4 +5204,83 @@ b5(v13: i32):
     let (_, a) = optimized(src, VECTOR);
     let f = text_of(&a, "cs");
     assert(f.contains("vsel.v4i32") && f.contains("add.v4i32"), f.as_str());
+}
+
+// A sum of three vectors' worth of terms (loads from consecutive addresses) packs into three vector loads,
+// two vector adds and one reduction.
+@test
+fn a_sum_of_several_vectors_of_terms_packs() {
+    let src = M"(lir ptr 8
+sym @sum12 fn global noinline
+sym @drive fn global
+fn @sum12
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  v2 = load.i32 v0+4 align 2
+  v3 = load.i32 v0+8 align 2
+  v4 = load.i32 v0+12 align 2
+  v5 = load.i32 v0+16 align 2
+  v6 = load.i32 v0+20 align 2
+  v7 = load.i32 v0+24 align 2
+  v8 = load.i32 v0+28 align 2
+  v9 = load.i32 v0+32 align 2
+  v10 = load.i32 v0+36 align 2
+  v11 = load.i32 v0+40 align 2
+  v12 = load.i32 v0+44 align 2
+  v13 = add.i32 v1, v2
+  v14 = add.i32 v13, v3
+  v15 = add.i32 v14, v4
+  v16 = add.i32 v15, v5
+  v17 = add.i32 v16, v6
+  v18 = add.i32 v17, v7
+  v19 = add.i32 v18, v8
+  v20 = add.i32 v19, v9
+  v21 = add.i32 v20, v10
+  v22 = add.i32 v21, v11
+  v23 = add.i32 v22, v12
+  ret v23
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 48 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = trunc.i32 v0
+  v3 = iconst.i32 7
+  v4 = mul.i32 v2, v3
+  store v4, v1 align 2
+  v5 = mul.i32 v4, v3
+  store v5, v1+4 align 2
+  v6 = mul.i32 v5, v3
+  store v6, v1+8 align 2
+  v7 = mul.i32 v6, v3
+  store v7, v1+12 align 2
+  v8 = mul.i32 v7, v3
+  store v8, v1+16 align 2
+  v9 = mul.i32 v8, v3
+  store v9, v1+20 align 2
+  v10 = mul.i32 v9, v3
+  store v10, v1+24 align 2
+  v11 = mul.i32 v10, v3
+  store v11, v1+28 align 2
+  v12 = mul.i32 v11, v3
+  store v12, v1+32 align 2
+  v13 = mul.i32 v12, v3
+  store v13, v1+36 align 2
+  v14 = mul.i32 v13, v3
+  store v14, v1+40 align 2
+  v15 = mul.i32 v14, v3
+  store v15, v1+44 align 2
+  v16 = call.i32 @sum12(v1) : (ptr) -> i32
+  v17 = sext.i64 v16
+  ret v17
+)";
+    let (b, a) = optimized(src, VECTOR);
+    let t = text_of(&a, "sum12");
+    assert(count(&t, "load.v4i32") == 3 && count(&t, "add.v4i32") == 2 && t.contains("reduce_add"), t.as_str());
+    let vals: [u64; 3] = [0, 3, 0x7FFFFFFF];
+    for k in 0..3usize {
+        let args: []u64 = [unsafe vals[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
 }

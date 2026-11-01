@@ -1584,10 +1584,10 @@ extend Gen {
     }
 
     // `vmem`: per value, whether it is a vector some instruction defines or reads in memory: any but a
-    // vector load, a lane-wise operation with an SSE form (its operands too; a product of 32-bit lanes,
-    // `mul_lanes32`; an integer minimum or maximum, `ext_reg`), a bitcast between register vectors, a
-    // reduction in registers (`reduce_reg`), a store of it, and an edge argument (a return reads its vector
-    // in memory).
+    // vector load, a lane-wise operation with an SSE form (its operands too; a product or high product of
+    // 32-bit lanes, `mul_lanes32`, `mulh_lanes32`; an integer minimum or maximum, `ext_reg`), a bitcast
+    // between register vectors, a reduction in registers (`reduce_reg`), a store of it, and an edge argument
+    // (a return reads its vector in memory).
     fn vec_homes(self: &mut Self) {
         let b = self.b();
         let ni = b.insts.len();
@@ -1597,23 +1597,20 @@ extend Gen {
         for i in 0..ni {
             let t = b.insts[i];
             let mut un = false;
-            let reg_op = is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && sse_of_op(
-                t.op,
-                lane_type(t.ty),
-                &mut un,
-            ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_WCONST) && self.in_reg(t.ty) || self.conv_reg(
-                t,
-            ) || self.shift_reg(t) || self.lv.vshimm(self.b(), t) != NONE || (t.op == O_VEXTRACT || t.op == O_VINSERT) && self.lane_reg(
+            let arith = t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU;
+            let reg_op = is_vec(t.ty) && arith && sse_of_op(t.op, lane_type(t.ty), &mut un) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_WCONST) && self.in_reg(
+                t.ty,
+            ) || self.conv_reg(t) || self.shift_reg(t) || self.lv.vshimm(self.b(), t) != NONE || (t.op == O_VEXTRACT || t.op == O_VINSERT) && self.lane_reg(
                 t,
             ) || (t.op == O_VZIPLO || t.op == O_VZIPHI) && type_bytes(t.ty, 8) <= 32 && self.in_reg(t.ty) || t.op == O_VUNZIP && type_bytes(
                 t.ty,
                 8,
             ) >= 16 && self.in_reg(t.ty) || t.op == O_VCMP && self.in_reg(self.vt(t.a)) && (is_float(
                 lane_type(self.vt(t.a)),
-            ) || type_bytes(lane_type(t.ty), 8) < 8 || self.avx) || self.avx && is_vec(t.ty) && type_bytes(t.ty, 8) == 32 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && avx_of_op(
+            ) || type_bytes(lane_type(t.ty), 8) < 8 || self.avx) || self.avx && is_vec(t.ty) && type_bytes(t.ty, 8) == 32 && arith && avx_of_op(
                 t.op,
                 lane_type(t.ty),
-            ) != NONE || self.z512 && is_vec(t.ty) && type_bytes(t.ty, 8) == 64 && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT) && evex_of_op(
+            ) != NONE || self.z512 && is_vec(t.ty) && type_bytes(t.ty, 8) == 64 && arith && evex_of_op(
                 t.op,
                 lane_type(t.ty),
             ) != NONE || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a)) || self.reduce_reg(t) || self.ext_reg(
@@ -1621,7 +1618,10 @@ extend Gen {
             ) || t.op == O_VOP && self.lv.pfold[i] || t.op == O_MUL && is_vec(t.ty) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(
                 t.ty,
                 8,
-            ) == 16 && in_vreg(t.ty);
+            ) == 16 && in_vreg(t.ty) || (t.op == O_MULHS || t.op == O_MULHU) && is_vec(t.ty) && type_bytes(
+                lane_type(t.ty),
+                8,
+            ) == 4 && self.in_reg(t.ty);
             if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
                 self.vmem[i] = true;
             }
@@ -2349,7 +2349,7 @@ extend Gen {
         // Code that may branch past a lane reads a vector from its home: a vector in a register reaches
         // it first, but for the instructions with register forms (`vop` and `vec_arith` sync their others)
         // and calls (a vector passed in memory goes through `mloc`).
-        let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI) || t.op == O_VEXTRACT || t.op == O_VINSERT || self.conv_reg(
+        let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI) || t.op == O_VEXTRACT || t.op == O_VINSERT || self.conv_reg(
             t,
         ) || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a));
         if !reg_form && !is_terminator(t.op) {
@@ -11006,17 +11006,24 @@ extend Gen {
 
     // The high halves of the products of the 32-bit lanes of vectors `t.a` and `t.b` (`O_MULHS`,
     // `O_MULHU`, `nb` bytes in registers) into `i`: the even lanes' 64-bit products (`pmuludq`, signed
-    // `pmuldq` from SSE4.1) shifted down 32, and the odd lanes' (both operands shifted down 32 first),
-    // whose high halves are in place, merged: `vpblendd` (AVX2), else an `and` with the odd halves' mask
-    // and an `or`. Signed without SSE4.1: the unsigned high product less each operand where the other is
-    // negative.
+    // `pmuldq` from SSE4.1) and the odd lanes' (both operands' odd lanes moved down first; `t.b`'s own when
+    // its lanes are all one value, a splat), merged: the even products shifted down 32 and `vpblendd` (AVX2),
+    // or under SSE `pshufd` of the even products' high halves and `pblendw` of the odd ones' (SSE4.1), else
+    // both `pshufd` to the low lanes and `punpckldq`. Signed without SSE4.1: the unsigned high product less
+    // each operand where the other is negative.
     fn mulh_lanes32(self: &mut Self, i: u32, t: Inst, nb: u32) {
         let sg = t.op == O_MULHS;
+        let b = self.b();
+        let same = (t.b & (VPARAM | VFLAG)) == 0 && b.insts[t.b as usize].op == O_SPLAT || splat_of(b, t.b).is_some();
         let rx = self.vec_use(t.a, self.vs0) - V0;
         let ry = self.vec_use(t.b, self.vs1) - V0;
         let e = self.tmp(true) - V0;
         let ao = self.tmp(true) - V0;
-        let bo = self.tmp(true) - V0;
+        let bo = if same && nb != 64 {
+            ry
+        } else {
+            self.tmp(true) - V0
+        };
         if nb == 64 {
             // EVEX.512.66: `vpmuldq` (0F38.W1 28), `vpmuludq` (0F.W1 F4), `vpsrlq` (0F.W1 73 /2), `vpandq`,
             // `vporq` (0F.W1 DB, EB).
@@ -11030,9 +11037,14 @@ extend Gen {
             self.c.byte(32);
             self.c.evex_rr(0x66, 1, 0x73, true, 2, ao, rx);
             self.c.byte(32);
-            self.c.evex_rr(0x66, 1, 0x73, true, 2, bo, ry);
-            self.c.byte(32);
-            self.c.evex_rr(0x66, mm, opc, true, ao, ao, bo);
+            let yo = if same {
+                ry
+            } else {
+                self.c.evex_rr(0x66, 1, 0x73, true, 2, bo, ry);
+                self.c.byte(32);
+                bo
+            };
+            self.c.evex_rr(0x66, mm, opc, true, ao, ao, yo);
             self.zmm_splat64(bo, 0xFFFFFFFF00000000);
             self.c.evex_rr(0x66, 1, 0xDB, true, ao, ao, bo);
             let rd = self.vec_def(i) - V0;
@@ -11053,38 +11065,53 @@ extend Gen {
             self.c.byte(32);
             self.c.vex_rr(0x66, 1, 0x73, false, l, 2, ao, rx);
             self.c.byte(32);
-            self.c.vex_rr(0x66, 1, 0x73, false, l, 2, bo, ry);
-            self.c.byte(32);
+            if !same {
+                self.c.vex_rr(0x66, 1, 0x73, false, l, 2, bo, ry);
+                self.c.byte(32);
+            }
             self.c.vex_rr(0x66, mm, opc, false, l, ao, ao, bo);
             let rd = self.vec_def(i) - V0;
             self.c.vex_rr(0x66, 3, 0x02, false, l, rd, e, ao);
             self.c.byte(0xAA);
             return;
         }
-        // SSE: `pmuldq` (66 0F 38 28) or `pmuludq` (66 0F F4), `psrlq` (66 0F 73 /2), the mask of the odd
-        // halves by `pcmpeqd` and `psllq` (66 0F 73 /6), `pand`, `por`.
-        let smul = sg && unsafe (*self.pkg).sse41;
+        // SSE: `pshufd` (66 0F 70) [1, 1, 3, 3] moves the odd lanes down, `pmuldq` (66 0F 38 28) or `pmuludq`
+        // (66 0F F4) multiplies, `pblendw` (66 0F 3A 0E) or `pshufd` [1, 3, 2, 3] and `punpckldq` (66 0F 62)
+        // merge.
+        let sse41 = unsafe (*self.pkg).sse41;
+        let smul = sg && sse41;
         let mo = if smul {
             0x0F3828u32
         } else {
             0x0FF4
         };
-        self.c.vmov(e, rx);
-        self.c.sse_rr(0x66, mo, e, ry);
-        self.c.sse_rr(0x66, 0x0F73, 2, e);
-        self.c.byte(32);
-        self.c.vmov(ao, rx);
-        self.c.sse_rr(0x66, 0x0F73, 2, ao);
-        self.c.byte(32);
-        self.c.vmov(bo, ry);
-        self.c.sse_rr(0x66, 0x0F73, 2, bo);
-        self.c.byte(32);
+        self.c.sse_rr(0x66, 0x0F70, ao, rx);
+        self.c.byte(0xF5);
+        if !same {
+            self.c.sse_rr(0x66, 0x0F70, bo, ry);
+            self.c.byte(0xF5);
+        }
         self.c.sse_rr(0x66, mo, ao, bo);
-        self.c.sse_rr(0x66, 0x0F76, bo, bo);
-        self.c.sse_rr(0x66, 0x0F73, 6, bo);
-        self.c.byte(32);
-        self.c.sse_rr(0x66, 0x0FDB, ao, bo);
-        self.c.sse_rr(0x66, 0x0FEB, ao, e);
+        // Over `t.a` when it dies here and no correction reads it after.
+        let rd = if sg && !smul {
+            self.vec_def(i)
+        } else {
+            self.def_over(i, t.a, rx + V0)
+        } - V0;
+        self.c.vmov(rd, rx);
+        self.c.sse_rr(0x66, mo, rd, ry);
+        if sse41 {
+            self.c.sse_rr(0x66, 0x0F70, rd, rd);
+            self.c.byte(0xF5);
+            self.c.sse_rr(0x66, 0x0F3A0E, rd, ao);
+            self.c.byte(0xCC);
+        } else {
+            self.c.sse_rr(0x66, 0x0F70, rd, rd);
+            self.c.byte(0xED);
+            self.c.sse_rr(0x66, 0x0F70, ao, ao);
+            self.c.byte(0xED);
+            self.c.sse_rr(0x66, 0x0F62, rd, ao);
+        }
         if sg && !smul {
             // Less `b` where `a` is negative (`psrad` 66 0F 72 /4 by 31, `pand`, `psubd` 66 0F FA), and
             // `a` where `b` is.
@@ -11092,20 +11119,19 @@ extend Gen {
             self.c.sse_rr(0x66, 0x0F72, 4, e);
             self.c.byte(31);
             self.c.sse_rr(0x66, 0x0FDB, e, ry);
-            self.c.sse_rr(0x66, 0x0FFA, ao, e);
+            self.c.sse_rr(0x66, 0x0FFA, rd, e);
             self.c.vmov(e, ry);
             self.c.sse_rr(0x66, 0x0F72, 4, e);
             self.c.byte(31);
             self.c.sse_rr(0x66, 0x0FDB, e, rx);
-            self.c.sse_rr(0x66, 0x0FFA, ao, e);
+            self.c.sse_rr(0x66, 0x0FFA, rd, e);
         }
-        let rd = self.vec_def(i) - V0;
-        self.c.vmov(rd, ao);
     }
 
-    // Product `i` (`t`) of two 16-byte vectors of 32-bit lanes in xmm registers: `vpmulld` with AVX2; else
-    // (SSE2 has no such product) the even lanes' 64-bit products (`pmuludq`), the odd lanes' after `pshufd`
-    // moves them down, and the low halves of both interleaved (`pshufd`, `punpckldq`; clang's lowering).
+    // Product `i` (`t`) of two 16-byte vectors of 32-bit lanes in xmm registers: `vpmulld` with AVX2,
+    // `pmulld` with SSE4.1; else (SSE2 has no such product) the even lanes' 64-bit products (`pmuludq`),
+    // the odd lanes' after `pshufd` moves them down, and the low halves of both interleaved (`pshufd`,
+    // `punpckldq`; clang's lowering).
     // The odd lanes take the vector scratch registers the operands leave (a register of its own only when
     // both hold operands): `ta` from the start, `tb` once the operands are read but `y` (which it may
     // overwrite in its scratch register, its last read).
@@ -11115,6 +11141,13 @@ extend Gen {
         if self.avx {
             let rd = self.vec_def(i) - V0;
             self.c.vex_rr(0x66, 2, 0x40, false, false, rd, rx, ry);
+            return;
+        }
+        if unsafe (*self.pkg).sse41 {
+            // `pmulld` (66 0F 38 40), over `t.a` when it dies here.
+            let rd = self.def_over(i, t.a, rx + V0) - V0;
+            self.c.vmov(rd, rx);
+            self.c.sse_rr(0x66, 0x0F3840, rd, ry);
             return;
         }
         let (s0, s1) = (self.vs0 - V0, self.vs1 - V0);

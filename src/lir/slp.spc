@@ -5,7 +5,8 @@
 // addresses with nothing that touches memory between them, N parameters of a block whose arguments on
 // one edge are loads from consecutive addresses (a loop's carried values: the vector stays in a register
 // across the back edge), and the N terms of a sum (a tree of integer adds, or float adds the build
-// reassociates, each but the root with one use: one vector reduction). The lanes of a pack's operand
+// reassociates, each but the root with one use: one vector reduction), or a multiple of N of them up to
+// SUM_PACKS packs (their vectors added, then one reduction). The lanes of a pack's operand
 // form a pack in turn: N instructions of one operation in one block, N loads from consecutive addresses
 // with no write between them (one vector load), N parameters of one block other than the entry (one
 // vector parameter; each edge into the block passes the pack of its arguments), one value (a splat) or
@@ -26,6 +27,8 @@ const DEPTH_MAX: u32 = 32;
 // group's last; loads more than SPAN_MAX apart are no pack (each search is linear in them).
 const ARGS_MAX: u32 = 64;
 const SPAN_MAX: u32 = 64;
+// A sum seed takes at most SUM_PACKS packs of its terms.
+const SUM_PACKS: u32 = 16;
 // A vector load of what scalar stores just wrote waits for them (no store forwarding): its cost in
 // instructions.
 const GATHER_COST: u64 = 8;
@@ -71,7 +74,8 @@ pub(package) struct Slp {
     eargs: Vector<(u32, u32, u32)>, // (PK_PARAM pack, an edge into its block, the pack of its arguments)
     stores: Vector<u32>, // the seeds' stores, by group
     groups: Vector<(u32, u32)>, // per store seed: its first `stores` index, the pack of its values
-    reds: Vector<(u32, u32)>, // per sum seed: its root add, the pack of its terms
+    reds: Vector<(u32, u32, u32)>, // per sum seed: its root add, its first pack in `rpk`, their count
+    rpk: Vector<u32>, // the packs of the sum seeds' terms, `n` terms each
     uses: Vector<u32>, // per instruction, its uses (`red_seeds`)
     assoc: bool, // float adds reassociate
     sclaim: Vector<bool>, // per instruction, whether a store seed holds it
@@ -106,7 +110,8 @@ extend Slp {
             eargs: Vector::<(u32, u32, u32)>::new(),
             stores: Vector::<u32>::new(),
             groups: Vector::<(u32, u32)>::new(),
-            reds: Vector::<(u32, u32)>::new(),
+            reds: Vector::<(u32, u32, u32)>::new(),
+            rpk: Vector::<u32>::new(),
             uses: Vector::<u32>::new(),
             assoc: false,
             sclaim: Vector::<bool>::new(),
@@ -127,6 +132,7 @@ extend Slp {
         self.vb = vb;
         self.assoc = assoc;
         self.reds.truncate(0);
+        self.rpk.truncate(0);
         let ni = b.insts.len();
         let np = b.params.len();
         let nb = b.blocks.len();
@@ -239,12 +245,16 @@ extend Slp {
             let q0 = p0 - b.blocks[self.pblk[p0 as usize] as usize].param_start;
             b.pool[(e + 2 + q0) as usize] = v;
         }
-        // A sum's root: the reduction of its terms' vector.
+        // A sum's root: the reduction of the sum of its terms' vectors.
         for x in 0..self.reds.len() {
-            let (r, vp) = self.reds[x];
+            let (r, p0, np) = self.reds[x];
             let t = b.insts[r as usize];
-            let v = self.vector(b, vp);
             let k = self.iblk[r as usize];
+            let mut v = self.vector(b, self.rpk[p0 as usize]);
+            for q in 1..np {
+                let w = self.vector(b, self.rpk[(p0 + q) as usize]);
+                v = self.make(b, Inst { op: t.op, ty: b.type_of(v), aux: 0, a: v, b: w, c: VNONE }, k, r, true);
+            }
             let one = [v];
             let at = b.pool_list(one[0..1]);
             let code = (core::OP_SIMD + core::SIMD_REDUCE_ADD as u32) as u16;
@@ -320,9 +330,9 @@ extend Slp {
             let mut open = Vector::<Value>::with_capacity(8);
             open.push(i);
             let mut ok = true;
-            // Each step opens one add or takes one term: at most 2 * n + 1 steps.
+            // Each step opens one add or takes one term: at most 2 * n * SUM_PACKS + 1 steps.
             let mut steps: u32 = 0;
-            while open.len() != 0 && ok && steps <= 2 * n + 1 {
+            while open.len() != 0 && ok && steps <= 2 * n * SUM_PACKS + 1 {
                 steps += 1;
                 let v = open.pop().unwrap();
                 if v == i || self.inner(b, v, k, t) {
@@ -330,7 +340,7 @@ extend Slp {
                     let x = b.insts[v as usize];
                     open.push(x.b);
                     open.push(x.a);
-                } else if (self.tmp.len() - at) as u32 == n {
+                } else if (self.tmp.len() - at) as u32 == n * SUM_PACKS {
                     ok = false;
                 } else {
                     self.tmp.push(v);
@@ -338,19 +348,36 @@ extend Slp {
             }
             let got = (self.tmp.len() - at) as u32;
             let size = type_bytes(t.ty, self.ptr);
-            if ok && open.len() == 0 && got >= 2 && fit(got, n, size) == got {
+            // One pack of the terms, or a pack of each `n` of them.
+            let np = if got <= n && fit(got, n, size) == got {
+                1u32
+            } else if got > n && got % n == 0 {
+                got / n
+            } else {
+                0u32
+            };
+            if ok && open.len() == 0 && got >= 2 && np != 0 {
                 // Kept when no pack it makes gathers; else its packs go.
                 let np0 = self.packs.len();
                 let nl0 = self.lv.len();
                 let ne0 = self.eargs.len();
-                let vp = self.build(b, at as u32, got, t.ty, k, i, 0);
-                let mut keep = vp != NONE && self.packs[vp as usize].kind != PK_SPLAT && self.packs[vp as usize].kind != PK_GATHER;
+                let r0 = self.rpk.len() as u32;
+                let mut keep = true;
+                for q in 0..np {
+                    let vp = self.build(b, at as u32 + q * (got / np), got / np, t.ty, k, i, 0);
+                    keep = keep && vp != NONE && self.packs[vp as usize].kind != PK_SPLAT && self.packs[vp as usize].kind != PK_GATHER;
+                    if !keep {
+                        break;
+                    }
+                    self.rpk.push(vp);
+                }
                 for p in np0..self.packs.len() {
                     keep = keep && self.packs[p].kind != PK_GATHER;
                 }
                 if keep {
-                    self.reds.push((i, vp));
+                    self.reds.push((i, r0, np));
                 } else {
+                    self.rpk.truncate(r0 as usize);
                     self.drop_packs(np0, nl0, ne0);
                 }
             }

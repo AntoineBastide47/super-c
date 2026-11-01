@@ -70,6 +70,10 @@ pub(package) struct Isa {
     /// (`lir::loops::Budgets.vector`): 2 on arm64 (Neoverse), 4 on x86-64, where the vector remainder
     /// loop pays for 4.
     pub(package) vector_copies: u32,
+    /// The vector registers a vectorized loop's reductions hold over all its copies
+    /// (`lir::ir::Package::vec_accs`): fewer copies interleave when theirs need more (a reduction of lanes
+    /// several registers wide). 0 for no vectors.
+    pub(package) vector_accs: u8,
     /// Two accesses of adjacent bytes through one address are one instruction (arm64's `ldp`, `stp`):
     /// `lir::ir::Package::apairs`.
     pub(package) access_pairs: bool,
@@ -219,6 +223,7 @@ pub(package) const ISAS: [Isa; 3] = [
         post_index: false,
         arg_copy: 0xFFFFFFFF,
         vector_copies: 4,
+        vector_accs: 8,
         access_pairs: false,
         pairs: true,
         half_cvt: false,
@@ -250,6 +255,7 @@ pub(package) const ISAS: [Isa; 3] = [
         post_index: true,
         arg_copy: 16,
         vector_copies: 2,
+        vector_accs: 16,
         access_pairs: true,
         pairs: true,
         half_cvt: true,
@@ -281,6 +287,7 @@ pub(package) const ISAS: [Isa; 3] = [
         post_index: false,
         arg_copy: 0,
         vector_copies: 4,
+        vector_accs: 0,
         access_pairs: false,
         pairs: false,
         half_cvt: false,
@@ -617,6 +624,7 @@ const UNKNOWN_ISA: Isa = Isa {
     post_index: false,
     arg_copy: 0,
     vector_copies: 4,
+    vector_accs: 0,
     access_pairs: false,
     pairs: false,
     half_cvt: false,

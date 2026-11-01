@@ -1465,6 +1465,10 @@ pub(package) struct Package {
     /// registers (`target::table::Isa`), a bit per size in bytes (1, 2, 4): the loop vectorizer divides
     /// such lanes by a constant, which `lir::opt` turns into high products.
     pub(package) vec_mulh: u8,
+    /// The vector registers a vectorized loop's reductions may hold over all its copies
+    /// (`target::table::Isa`), 0 for no bound: the loop vectorizer interleaves fewer copies of reductions
+    /// several registers wide.
+    pub(package) vec_accs: u32,
     /// Whether the native backend computes the absolute value, the roundings to an integer and the fused
     /// multiply-add of float vectors in registers (`target::table::Isa`): the loop vectorizer then widens
     /// the calls of C's `fabs`, `floor`, `ceil`, `trunc` and `fma` (`lir::loops::lane_fn`).
@@ -1609,6 +1613,7 @@ extend Package {
             vector: 16,
             vops: 0,
             vec_mulh: 7,
+            vec_accs: 0,
             vfloat: true,
             mul_high: true,
             bswap: true,

@@ -44,9 +44,10 @@
 // lane-wise arithmetic of them and of values defined before the loop, and reductions (a header parameter
 // the block only combines with one such value by an integer `add`, `and`, `or` or `xor`, or a float
 // `fadd` when the build allows reassociation) gets a copy that runs 16 bytes of lanes at a time,
-// `vector` copies of them interleaved, while at least that many iterations are left; the loop runs the
-// rest. A guard before the copy checks the count and that each stored range overlaps no other range the
-// loop reads or writes through another base (same base, same element: an update in place). A loop of up
+// `vector` copies of them interleaved (fewer when the reductions' lanes would take more than
+// `Package.vec_accs` registers), while at least that many iterations are left; the loop runs the rest. A
+// guard before the copy checks the count and that each stored range overlaps no other range the loop
+// reads or writes through another base (same base, same element: an update in place). A loop of up
 // to ILV_SIZE instructions that does not vectorize (a 64-bit product, a lane of 8 bytes on a 16-byte
 // vector's terms) runs `vector` scalar copies of its body the same way (LLVM's interleaving at a vector
 // factor of 1): each instruction's copies together, so their loads and stores pair (`ldp`, `stp`). Its
@@ -230,6 +231,9 @@ pub(package) struct LoopOpt {
     /// The lane sizes whose vectors the target multiplies to their high halves (`Package.vec_mulh`): a plan
     /// divides such lanes by a constant.
     pub(package) vmulh: u8,
+    /// The vector registers the reductions may hold over all the copies (`Package.vec_accs`, 0: no bound):
+    /// `vcopies`.
+    pub(package) vaccs: u32,
     /// Per symbol of the body, the vector operation a call of it computes per lane (`lane_fn`), 0 for none.
     pub(package) vfn: Vector<u8>,
     vgat: Vector<u32>, // the gathered loads and scattered stores (`vgather`)
@@ -424,6 +428,7 @@ extend LoopOpt {
             vops: 0,
             apairs: true,
             vmulh: 0,
+            vaccs: 0,
             vfn: Vector::<u8>::new(),
             vgat: Vector::<u32>::new(),
             vmap: Vector::<Value>::new(),
@@ -519,6 +524,11 @@ extend LoopOpt {
                 continue;
             }
             let u = self.latch;
+            // Fields a loop updates alike: one loop over them all, which a later round vectorizes.
+            if bu.vector != 0 && self.reroll(b, ptr, h, p, u) {
+                any = true;
+                continue;
+            }
             if size <= bu.peel {
                 // The counted exit: a branch of the header or the latch. The last copy of a loop that
                 // exits from its header runs the header's test alone, which folds.
@@ -547,7 +557,7 @@ extend LoopOpt {
                 continue;
             }
             if bu.vector != 0 && vec >= VBYTES && self.vplan(b, ptr, fmath, h, p, u, cl, false) {
-                self.vectorize(b, h, p, u, bu.vector);
+                self.vectorize(b, h, p, u, self.vcopies(b, bu.vector));
                 any = true;
                 continue;
             }
@@ -558,7 +568,7 @@ extend LoopOpt {
                     if self.vplan(b, ptr, fmath, h, p, nb, cl, false) {
                         if self.lcs.len() == 0 && !self.lkeep {
                             self.commit_linear(b, u);
-                            self.vectorize(b, h, p, nb, bu.vector);
+                            self.vectorize(b, h, p, nb, self.vcopies(b, bu.vector));
                             self.lsplit = NONE;
                         } else {
                             // The vectors store a side's lanes alone; the loop keeps its branch for the
@@ -566,7 +576,7 @@ extend LoopOpt {
                             let e = self.lsave[4];
                             let ein = self.ledge;
                             self.lsave = [0, 0, 0, 0, 0, 0];
-                            self.vectorize(b, h, p, nb, bu.vector);
+                            self.vectorize(b, h, p, nb, self.vcopies(b, bu.vector));
                             self.lcs.truncate(0);
                             self.lkeep = false;
                             self.lsplit = NONE;
@@ -2247,6 +2257,21 @@ extend LoopOpt {
             self.plan_lanes()
         };
         return self.vchecks(b, cl);
+    }
+
+    // The vector copies of the plan to interleave, at most `n`: as many as hold the reductions' lanes in
+    // `vaccs` registers of `vmax` bytes (an ordered one keeps a scalar), at least one.
+    const fn vcopies(self: &Self, b: &Body, n: u32) u32 {
+        let mut regs: u32 = 0;
+        for r in 0..self.vred.len() {
+            if !self.vord[r] {
+                regs += (self.vlanes * type_bytes(b.type_of(self.vred[r]), 8) + self.vmax - 1) / self.vmax;
+            }
+        }
+        if self.vaccs == 0 || regs == 0 {
+            return n;
+        }
+        return n.min(self.vaccs / regs).max(1);
     }
 
     // The lanes of the plan's vectors: a register of the widest lane, or past a width ratio of 2 those of
@@ -4738,6 +4763,124 @@ extend LoopOpt {
         return false;
     }
 
+    // Loop `h` (preheader `p`, body `u`), `for q in 0..n` over elements of `S` bytes at `base + q * S`, whose
+    // body updates each of `k` fields alike: a load at `+ j * e`, the same operations with the same other
+    // operands (from outside the loop), a store back, the fields covering the element (`k * e == S`): one
+    // loop over `n * k` fields of `e` bytes, the field at 0's update kept, the others' gone (dead constants).
+    // The counter runs to `n * k`, made in a block the preheader enters (LLVM's loop rerolling). Whether it
+    // did.
+    fn reroll(self: &mut Self, b: &mut Body, ptr: u32, h: u32, p: u32, u: u32) bool {
+        let hb = b.blocks[h as usize];
+        let ub = b.blocks[u as usize];
+        let th = term(b, h);
+        let tp = term(b, p);
+        let tu = term(b, u);
+        if u == h || hb.len != 2 || hb.param_len != 1 || th.op != O_BR || th.a != hb.start || tp.op != O_JMP || b.edge_target(
+            tp.a,
+        ) != h || tu.op != O_JMP || b.edge_target(tu.a) != h || ub.len < 7 {
+            return false;
+        }
+        let q = VPARAM | hb.param_start;
+        let c = b.insts[th.a as usize];
+        let stay_b = b.edge_target(th.b) == u;
+        if !(stay_b && c.aux == C_ULT || !stay_b && b.edge_target(th.c) == u && c.aux == C_UGE) || c.a != q || self.defined_in(
+            c.b,
+        ) || !is_const(b, b.edge_arg(tp.a, 0)) || raw_const(b, b.edge_arg(tp.a, 0)) != 0 {
+            return false;
+        }
+        // The address, first; the step and the jump, last.
+        let pa = b.insts[ub.start as usize];
+        let st = b.insts[(ub.start + ub.len - 2) as usize];
+        let nx = b.edge_arg(tu.a, 0);
+        if pa.op != O_PTRADD || pa.b != q || pa.c != 0 || self.defined_in(pa.a) || nx != ub.start + ub.len - 2 || st.op != O_ADD || st.a != q || !is_const(
+            b,
+            st.b,
+        ) || raw_const(b, st.b) != 1 {
+            return false;
+        }
+        let pv = ub.start;
+        // The groups: a load, operations each on the value before and an outside operand, a store.
+        let first = ub.start + 1;
+        let end = ub.start + ub.len - 2;
+        let mut glen: u32 = 0;
+        while first + glen < end && b.insts[(first + glen) as usize].op != O_STORE {
+            glen += 1;
+        }
+        glen += 1;
+        let n = end - first;
+        if glen < 2 || n % glen != 0 || n / glen < 2 {
+            return false;
+        }
+        let k = n / glen;
+        let l0 = b.insts[first as usize];
+        let e = type_bytes(l0.ty, ptr);
+        if l0.op != O_LOAD || e == 0 || k * e != pa.aux as u32 || (l0.aux & MEM_VOLATILE) != 0 {
+            return false;
+        }
+        let mut seen: u64 = 0;
+        let mut zero = NONE;
+        for g in 0..k {
+            let g0 = first + g * glen;
+            let l = b.insts[g0 as usize];
+            let s = b.insts[(g0 + glen - 1) as usize];
+            let off = (l.c as i32) as i64;
+            if l.op != O_LOAD || l.a != pv || l.ty != l0.ty || l.aux != l0.aux || off < 0 || off % e as i64 != 0 || off / e as i64 >= k as i64 {
+                return false;
+            }
+            let bit = 1u64 << (off / e as i64) as u64;
+            if (seen & bit) != 0 || s.op != O_STORE || s.a != pv || s.c != l.c || s.b != g0 + glen - 2 || s.aux != b.insts[(first + glen - 1) as usize].aux {
+                return false;
+            }
+            seen |= bit;
+            if off == 0 {
+                zero = g0;
+            }
+            for j in 1..glen - 1 {
+                // The same binary operation as the first group's, on the value before and the same operand
+                // from outside the loop, on the same side.
+                let x = b.insts[(g0 + j) as usize];
+                let x0 = b.insts[(first + j) as usize];
+                let bin_op = x.op >= O_ADD && x.op <= O_ASHR || x.op >= O_FADD && x.op <= O_FDIV;
+                let left = x.a == g0 + j - 1 && x0.a == first + j - 1 && x.b == x0.b && !self.defined_in(x.b);
+                let right = x.b == g0 + j - 1 && x0.b == first + j - 1 && x.a == x0.a && !self.defined_in(x.a);
+                if !bin_op || x.op != x0.op || x.ty != x0.ty || x.aux != x0.aux || !left && !right {
+                    return false;
+                }
+            }
+        }
+        if zero == NONE || k >= 64 {
+            return false;
+        }
+        // The other groups go: their values are constants nothing reads.
+        for g in 0..k {
+            let g0 = first + g * glen;
+            if g0 == zero {
+                continue;
+            }
+            for j in 0..glen {
+                b.insts[(g0 + j) as usize] = Inst { op: O_ICONST, ty: T_I8, aux: 0, a: 0, b: 0, c: VNONE };
+            }
+        }
+        b.insts[pv as usize].aux = e as u16;
+        // The block that makes `n * k` and enters the header.
+        let nb = b.blocks.len() as u32;
+        let start = b.insts.len() as u32;
+        let pi = b.blocks[p as usize].start + b.blocks[p as usize].len - 1;
+        let nt = value_type(b, c.b);
+        let kv = cf_put(b, iconst_of(nt, k), pi);
+        let nk = cf_put(b, bin(O_MUL, nt, c.b, kv), pi);
+        let init = [b.edge_arg(tp.a, 0)];
+        let he = b.edge(h, init[0..1]);
+        let _ = cf_put(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: he, b: 0, c: 0 }, pi);
+        let pf = b.blocks[p as usize].flags;
+        self.vblock(b, nb, start, b.params.len() as u32, 0, pf, p);
+        let none: [Value; 0] = [];
+        let pe = b.edge(nb, none[0..0]);
+        b.insts[pi as usize].a = pe;
+        b.insts[th.a as usize].b = nk;
+        return true;
+    }
+
     // The integer constant `v` of type `ty`.
     fn vconst(self: &mut Self, b: &mut Body, ty: u8, v: u64, l: u32) Value {
         return self.vi(b, Inst { op: O_ICONST, ty: ty, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE }, l);
@@ -5939,6 +6082,14 @@ extend LoopOpt {
             if self.grev {
                 sa = ast::pick(self.down_of(b, bc.a, q), 0u8, 0xFFu8);
                 sb = ast::pick(self.down_of(b, bc.b, q), 0u8, 0xFFu8);
+            } else if cond == C_ULT {
+                // `(n - 1) - q` below `len` wherever `q` is: at most `n - 1`, as `q` itself is.
+                if sa == 0xFF && self.mirrored(b, bc.a, q, n) {
+                    sa = 0;
+                }
+                if sb == 0xFF && self.mirrored(b, bc.b, q, n) {
+                    sb = 0;
+                }
             }
             let ok = rsh != 0xFF || sa != 0xFF && (bc.aux == C_ULT && cold_c || bc.aux == C_UGE && cold_b) || sb != 0xFF && (bc.aux == C_UGT && cold_c || bc.aux == C_ULE && cold_b);
             if !ok {
@@ -5959,7 +6110,13 @@ extend LoopOpt {
             } else {
                 (sb, ob)
             };
-            if len == VNONE || self.defined_in(len) || value_type(b, len) != value_type(b, ast::pick(self.grev, q, n)) {
+            // The length of the index's width: `q`'s, or an extension's of it (`affine`).
+            let it = if rsh != 0xFF || self.grev {
+                value_type(b, ast::pick(self.grev, q, n))
+            } else {
+                value_type(b, ast::pick(on_a, bc.a, bc.b))
+            };
+            if len == VNONE || self.defined_in(len) || value_type(b, len) != it {
                 continue;
             }
             if self.fixes.len() == MAX_CHECKS {
@@ -6034,6 +6191,20 @@ extend LoopOpt {
         return (0xFFu8, 0u64, VNONE);
     }
 
+    // Whether `x` is `(n - 1) - q`, the index from the end of a loop that keeps `q` below `n` (`checks`): it
+    // wraps nowhere and stays at most `n - 1`.
+    fn mirrored(self: &Self, b: &Body, x: Value, q: Value, n: Value) bool {
+        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || !self.defined_in(x) {
+            return false;
+        }
+        let t = b.insts[x as usize];
+        if t.op != O_SUB || t.b != q || (t.a & (VPARAM | VFLAG)) != 0 || t.a == VNONE {
+            return false;
+        }
+        let c = b.insts[t.a as usize];
+        return c.op == O_SUB && c.a == n && is_const(b, c.b) && raw_const(b, c.b) == 1;
+    }
+
     // `x` as `q << s + c` (`checks`): (s, c), (0xFF, 0) when it is not of that form.
     fn affine(self: &Self, b: &Body, ptr: u32, x: Value, q: Value) (u8, u64) {
         if x == q {
@@ -6043,6 +6214,10 @@ extend LoopOpt {
             return (0xFFu8, 0u64);
         }
         let t = b.insts[x as usize];
+        // A narrower counter zero-extended to the length's width: its values (the guard extends `n`).
+        if t.op == O_ZEXT && t.a == q {
+            return (0u8, 0u64);
+        }
         let bits = type_bits(t.ty, ptr);
         let k = if (t.b & (VPARAM | VFLAG)) == 0 && t.b != VNONE && t.b < b.insts.len() as u32 && b.insts[t.b as usize].op == O_ICONST {
             b.insts[t.b as usize].a as u64 | b.insts[t.b as usize].b as u64 << 32
@@ -6212,13 +6387,17 @@ extend LoopOpt {
                     let s1 = vpush(b, bin(O_ADD, ty, s, one), l0);
                     y = vpush(b, Inst { op: O_SELECT, ty: ty, aux: 0, a: gt, b: s1, c: zero }, l0);
                 }
-                let c = b.insts.len() as u32;
-                // Counting down from `i0`, the checks read `i0 - 1` at most: `i0 <= len`.
-                let x = if self.grev {
+                // Counting down from `i0`, the checks read `i0 - 1` at most: `i0 <= len`. A narrower `n`
+                // extends to the length's width, as the checked index does.
+                let mut x = if self.grev {
                     VPARAM | ps + self.gq
                 } else {
                     self.gx[k]
                 };
+                if value_type(b, x) != value_type(b, y) {
+                    x = vpush(b, Inst { op: O_ZEXT, ty: value_type(b, y), aux: 0, a: x, b: VNONE, c: VNONE }, l0);
+                }
+                let c = b.insts.len() as u32;
                 b.insts.push(Inst { op: O_ICMP, ty: T_I8, aux: self.gcond, a: x, b: y, c: 0 });
                 b.locs.push(l0);
                 if gv != VNONE {
