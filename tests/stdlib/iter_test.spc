@@ -485,6 +485,46 @@ fn step_by_keeps_the_grid_from_both_ends() {
     check(show_back(step_by(bag(7), 4)), "s4,s0");
 }
 
+// A range drops `n` values at once (`advance_by`): on every small range, both kinds, each `n`, the result and
+// what follows agree with `n` calls of `next`; at the integer limits too.
+@test
+fn ranges_advance_as_their_steps_do() {
+    for lo in -3..4 {
+        for hi in -3..4 {
+            for inc in [false, true] {
+                for n in 0..10usize {
+                    let mut r = Range::<i32> { start: lo, end: hi, inclusive: inc };
+                    let mut w = Range::<i32> { start: lo, end: hi, inclusive: inc };
+                    let mut ok = true;
+                    for _ in 0..n {
+                        ok = ok && w.next().is_some();
+                    }
+                    assert_eq(r.advance_by(n), ok);
+                    for _ in 0..12 {
+                        let (x, y) = (r.next(), w.next());
+                        assert(x.is_some() == y.is_some() && (x.is_none() || x.unwrap() == y.unwrap()));
+                    }
+                }
+            }
+        }
+    }
+    let mut b = 250u8..=255;
+    assert(b.advance_by(5));
+    assert_eq(b.next().unwrap(), 255u8);
+    assert(b.next().is_none());
+    let mut e = 250u8..=255;
+    assert(e.advance_by(6) && e.next().is_none());
+    let mut f = 250u8..=255;
+    assert(!f.advance_by(7) && f.next().is_none());
+    let mut all = i64::MIN..i64::MAX;
+    assert(all.advance_by(usize::MAX) && all.next().is_none());
+    let mut most = i64::MIN..=i64::MAX;
+    assert(most.advance_by(usize::MAX));
+    assert_eq(most.next().unwrap(), i64::MAX);
+    assert(most.next().is_none());
+    check(show(step_by(-5..=5, 4)), "-5,-1,3");
+}
+
 @test(should_panic)
 fn step_by_zero_panics() {
     let _ = step_by(0..3, 0);

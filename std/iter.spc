@@ -297,7 +297,7 @@ extend<I: Iterator<T>, T> SkipIter<I, T> as Iterator<T> {
         if self.n > 0 {
             let k = self.n;
             self.n = 0;
-            if !advance(&mut self.it, k) {
+            if !self.it.advance_by(k) {
                 return None;
             }
         }
@@ -639,13 +639,10 @@ extend<I: Iterator<T>, T> StepByIter<I, T> {
 
 extend<I: Iterator<T>, T> StepByIter<I, T> as Iterator<T> {
     pub fn next(self: &mut StepByIter<I, T>) Option<T> {
-        if self.first {
-            self.first = false;
-            return self.it.next();
-        }
-        if !advance(&mut self.it, self.gap) {
+        if !self.first && !self.it.advance_by(self.gap) {
             return None;
         }
+        self.first = false;
         return self.it.next();
     }
 
@@ -1256,7 +1253,7 @@ pub fn position<I: Iterator<T>, T, P: fn(&T) bool>(it: I, p: P) Option<usize> {
 /// The element at zero-based position `n`, after dropping the `n` before it; `None` when there are fewer.
 pub fn nth<I: Iterator<T>, T>(it: I, n: usize) Option<T> {
     let mut i = it;
-    if !advance(&mut i, n) {
+    if !i.advance_by(n) {
         return None;
     }
     return i.next();
@@ -1502,18 +1499,6 @@ fn exact_len<I: Iterator<T>, T>(it: &I, msg: str) usize {
         panic(msg);
     }
     return lo;
-}
-
-// Drops the next `n` values of `it`; false when it ends first.
-fn advance<I: Iterator<T>, T>(it: &mut I, n: usize) bool {
-    let mut k: usize = 0;
-    while k < n {
-        if it.next().is_none() {
-            return false;
-        }
-        k = k + 1;
-    }
-    return true;
 }
 
 // Drops the last `n` values of `it`; false when it ends first.

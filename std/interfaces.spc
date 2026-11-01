@@ -389,6 +389,19 @@ pub interface Iterator<T> {
     fn size_hint(self: &Self) (usize, Option<usize>) {
         return (0, Option::<usize>::None);
     }
+
+    /// Drops the next `n` values; false when it ends first. One `next` per value, unless the iterator
+    /// steps over them at once (a range moves its start).
+    fn advance_by(self: &mut Self, n: usize) bool {
+        let mut k: usize = 0;
+        while k < n {
+            if self.next().is_none() {
+                return false;
+            }
+            k = k + 1;
+        }
+        return true;
+    }
 }
 
 /// An iterator that also yields from its far end. `next` and `next_back` take values from one

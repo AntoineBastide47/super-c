@@ -756,8 +756,8 @@ extend Opt {
     }
 
     // The instructions of each loop header that compute a value from their operands alone and that only the
-    // block the header enters inside the loop reads, when that block has no other predecessor: moved to
-    // its start, in their order. The header is then a test alone, the counted shape the vectorizer and the
+    // block the header enters inside the loop reads, or one block it dominates (a step the back edge
+    // passes), when that block has no other predecessor: moved to its start, in their order. The header is then a test alone, the counted shape the vectorizer and the
     // unroller read (an iterator's `next` computes its item before the test). Whether any moved.
     pub(package) fn sink_heads(self: &mut Self, pk: &Package, b: &mut Body) bool {
         if b.naked {
@@ -833,7 +833,8 @@ extend Opt {
                 let s = b.insts[i as usize];
                 let op = s.op;
                 let movable = op >= O_ADD && op <= O_INTTOPTR && !(op >= O_SDIV && op <= O_UREM) && !(op >= O_ADDO && op <= O_MULO) || op == O_PTRADD || op == O_SELECT;
-                if !movable || self.sn[i as usize] != 0 || self.sb[i as usize] != u {
+                let r = self.sb[i as usize];
+                if !movable || self.sn[i as usize] != 0 || r == NONE || r == MANY || r != u && !self.dominates(u, r) {
                     continue;
                 }
                 self.moved[i as usize] = true;
@@ -3569,7 +3570,7 @@ extend Opt {
             }
         }
         let mut states: u32 = 0;
-        let mut changed = false;
+        let mut changed = self.param_cycles(b);
         // Preorder over the dominator tree: block << 1 enters a block, n << 33 | 1 closes its scope at log
         // length n.
         self.stack.truncate(0);
@@ -3642,6 +3643,7 @@ extend Opt {
             }
             if self.inner[k] == k as u32 {
                 changed = self.same_params(b, k as u32) || changed;
+                changed = self.offset_test(b, k as u32) || changed;
             }
             self.pend.truncate(0);
             let mut called = false;
@@ -4388,6 +4390,90 @@ extend Opt {
         } else {
             NONE
         };
+    }
+
+    // The block parameters of a set that every edge into them passes either a member of the set or one value
+    // `v` (an iterator's flag that only a constant ever sets, carried through a loop and its joins): each is
+    // `v` (`prepl`), by induction over the edges taken, when `v` dominates their blocks (the redundant phi
+    // cycles of Braun et al., "Simple and Efficient Construction of Static Single Assignment Form"). The sets
+    // are the parameters the edges connect. Whether any is.
+    fn param_cycles(self: &mut Self, b: &Body) bool {
+        let np = b.params.len();
+        if np == 0 {
+            return false;
+        }
+        let mut uf = Vector::<u32>::with_capacity(np);
+        let mut ext = Vector::<Value>::with_capacity(np);
+        let mut bad = Vector::<bool>::with_capacity(np);
+        for q in 0..np {
+            uf.push(q as u32);
+            ext.push(VNONE);
+            bad.push(false);
+        }
+        // Two passes over the reached edges: the sets, then each set's other values.
+        for pass in 0..2u32 {
+            for k in 1..b.blocks.len() {
+                let kb = b.blocks[k];
+                if self.rpo[k] == NONE || kb.param_len == 0 {
+                    continue;
+                }
+                for x in self.pred_at[k]..self.pred_at[k + 1] {
+                    let src = self.preds[x as usize];
+                    if self.rpo[src as usize] == NONE || x > self.pred_at[k] && self.preds[x as usize - 1] == src {
+                        continue;
+                    }
+                    b.succ_edges(term(b, src), &mut self.edges);
+                    for e in 0..self.edges.len() {
+                        let ed = self.edges[e];
+                        if b.edge_target(ed) != k as u32 {
+                            continue;
+                        }
+                        for q in 0..kb.param_len as u32 {
+                            let pq = kb.param_start + q;
+                            let a = b.edge_arg(ed, q);
+                            let ap = a & ~VPARAM;
+                            let member = (a & VPARAM) != 0 && a != VNONE && ap as usize < np;
+                            if pass == 0 {
+                                if member {
+                                    let (ra, rq) = (set_of(&mut uf, ap), set_of(&mut uf, pq));
+                                    uf[ra as usize] = rq;
+                                }
+                                continue;
+                            }
+                            let r = set_of(&mut uf, pq) as usize;
+                            if member && set_of(&mut uf, ap) as usize == r {
+                                continue;
+                            }
+                            if ext[r] == VNONE {
+                                ext[r] = a;
+                            } else if ext[r] != a && !same_iconst(b, ext[r], a) {
+                                bad[r] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The entry's parameters take the caller's values.
+        let e0 = b.blocks[0];
+        for q in e0.param_start..e0.param_start + e0.param_len as u32 {
+            let r = set_of(&mut uf, q) as usize;
+            bad[r] = true;
+        }
+        let mut any = false;
+        for q in 0..np as u32 {
+            let r = set_of(&mut uf, q) as usize;
+            let v = ext[r];
+            if bad[r] || v == VNONE || (v & VFLAG) != 0 || self.rpo[self.pblock[q as usize] as usize] == NONE {
+                continue;
+            }
+            let d = self.def_blk(v);
+            if d != NONE && self.dominates(d, self.pblock[q as usize]) && d != self.pblock[q as usize] {
+                self.prepl[q as usize] = v;
+                any = true;
+            }
+        }
+        return any;
     }
 
     fn same_args(self: &mut Self, b: &Body, k: u32) bool {
@@ -9015,6 +9101,81 @@ extend Opt {
             }
         }
         return false;
+    }
+
+    // Header `h`'s exit test `q + c <u n`, before a body of other blocks, of a counter `q` that starts at a
+    // constant and steps by 1, `c` a nonzero constant whose sum with the start does not wrap, `n` from outside
+    // the loop: `q <u n - min(n, c)`, the difference made in the preheader. Each sum the test reads is at most
+    // `n`, so none wraps and both tests agree; the header then only tests its counter, a counted loop (LLVM's
+    // IndVarSimplify). Whether it did.
+    fn offset_test(self: &mut Self, b: &mut Body, h: u32) bool {
+        let p = self.preh[h as usize];
+        let th = term(b, h);
+        if p == NONE || th.op != O_BR || (th.a & (VPARAM | VFLAG)) != 0 || th.a == VNONE || b.edge_target(th.b) == h || b.edge_target(
+            th.c,
+        ) == h {
+            return false;
+        }
+        let c = b.insts[th.a as usize];
+        if c.op != O_ICMP || c.aux != C_ULT || (c.a & (VPARAM | VFLAG)) != 0 || c.a == VNONE || !self.outside(c.b, h) {
+            return false;
+        }
+        let s = b.insts[c.a as usize];
+        let hb = b.blocks[h as usize];
+        if s.op != O_ADD || !is_int(s.ty) || s.ty == T_I128 || (s.a & VPARAM) == 0 || s.a == VNONE || (s.a & ~VPARAM) < hb.param_start || (s.a & ~VPARAM) >= hb.param_start + hb.param_len as u32 {
+            return false;
+        }
+        let off = const_of(b, s.b);
+        let bits = type_bits(s.ty, 8);
+        let top = if bits >= 64 {
+            ~0u64
+        } else {
+            (1u64 << bits as u64) - 1
+        };
+        if off.is_none() || off.unwrap() == 0 || off.unwrap() > top {
+            return false;
+        }
+        let kc = off.unwrap();
+        let qi = (s.a & ~VPARAM) - hb.param_start;
+        // The start from the preheader, a step by 1 from each other edge into the header.
+        for j in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
+            let pb = self.preds[j as usize];
+            b.succ_edges(term(b, pb), &mut self.edges);
+            for e in 0..self.edges.len() {
+                let ed = self.edges[e];
+                if b.edge_target(ed) != h {
+                    continue;
+                }
+                let x = self.val(b.edge_arg(ed, qi));
+                if pb == p {
+                    let st = const_of(b, x);
+                    if st.is_none() || st.unwrap() > top - kc {
+                        return false;
+                    }
+                    continue;
+                }
+                if (x & (VPARAM | VFLAG)) != 0 || x == VNONE {
+                    return false;
+                }
+                let u = b.insts[x as usize];
+                let one = u.op == O_ADD && u.ty == s.ty && (u.a == s.a && const_of(b, u.b).unwrap_or(0) == 1 || u.b == s.a && const_of(
+                    b,
+                    u.a,
+                ).unwrap_or(0) == 1);
+                if !one {
+                    return false;
+                }
+            }
+        }
+        let at = b.blocks[p as usize].start + b.blocks[p as usize].len - 1;
+        let n = self.val(c.b);
+        let kv = self.constant(b, s.ty, kc);
+        let zv = self.constant(b, s.ty, 0);
+        let ge = self.placed(b, p, at, Inst { op: O_ICMP, ty: T_I8, aux: C_UGE, a: n, b: kv, c: VNONE }, false);
+        let d = self.placed(b, p, at, Inst { op: O_SUB, ty: s.ty, aux: 0, a: n, b: kv, c: VNONE }, false);
+        let n2 = self.placed(b, p, at, Inst { op: O_SELECT, ty: s.ty, aux: 0, a: ge, b: d, c: zv }, false);
+        b.insts[th.a as usize] = Inst { op: O_ICMP, ty: c.ty, aux: C_ULT, a: s.a, b: n2, c: VNONE };
+        return true;
     }
 
     // Call `i` of block `k`, of a function that writes no memory, to the preheader of the loop `k` heads,
@@ -13931,6 +14092,27 @@ fn ptr_step(b: &Body, v: Value, q: Value) u32 {
     } else {
         0
     };
+}
+
+// The representative of parameter `q`'s set in union-find `uf`, its path halved (`param_cycles`).
+fn set_of(uf: &mut Vector<u32>, q: u32) u32 {
+    let mut x = q;
+    // Each step halves the path: at most its length.
+    while uf[x as usize] != x {
+        let up = uf[uf[x as usize] as usize];
+        uf[x as usize] = up;
+        x = up;
+    }
+    return x;
+}
+
+// Whether values `x` and `y` of `b` are integer constants of one type and value.
+fn same_iconst(b: &Body, x: Value, y: Value) bool {
+    if (x & (VPARAM | VFLAG)) != 0 || (y & (VPARAM | VFLAG)) != 0 || x == VNONE || y == VNONE {
+        return false;
+    }
+    let (s, u) = (b.insts[x as usize], b.insts[y as usize]);
+    return s.op == O_ICONST && u.op == O_ICONST && s.ty == u.ty && s.a == u.a && s.b == u.b;
 }
 
 // Whether value `v` of `b` is defined outside block `k`: not one of its instructions or parameters.

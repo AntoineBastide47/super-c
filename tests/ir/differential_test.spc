@@ -373,3 +373,62 @@ fn main() i32 {
 fn float_function_loops_match_their_scalar_calls() {
     h::expect_same_output("float function loops", FLOAT_LOOPS, ["--profile=debug"], ["--profile=release"]);
 }
+
+// Conditional sums and counts, which the loop vectorizer widens as reductions of a select (`cond_step`):
+// wrapping sums of signed and unsigned elements, a sum of the other side, and a count, past a vector and
+// with a remainder.
+const COND_SUMS: str = M"(@noinline fn pos(s: []i32) i32 { let mut t: i32 = 0; for i in 0..s.len() { if s[i] > 0 { t = t.wrapping_add(s[i]); } } return t; }
+@noinline fn neg(s: []i32) i32 { let mut t: i32 = 0; for i in 0..s.len() { if s[i] > 0 { } else { t = t.wrapping_sub(s[i]); } } return t; }
+@noinline fn big(s: []u32, k: u32) u32 { let mut t: u32 = 0; for i in 0..s.len() { if s[i] >= k { t = t.wrapping_add(s[i]); } } return t; }
+@noinline fn odd(s: []u32) u32 { let mut t: u32 = 0; for i in 0..s.len() { if (s[i] & 1) != 0 { t ^= s[i]; } } return t; }
+fn main() i32 {
+    let mut s = Vector::<i32>::new();
+    let mut u = Vector::<u32>::new();
+    let mut x: u32 = 12345;
+    for _ in 0..77 {
+        x = x.wrapping_mul(1103515245).wrapping_add(12345);
+        s.push(x as i32);
+        u.push(x >> 3);
+    }
+    for n in [0usize, 3, 16, 31, 77] {
+        println("{} {} {} {} {}", n, pos(s[0..n]), neg(s[0..n]), big(u[0..n], 0x08000000), odd(u[0..n]));
+    }
+    return 0;
+}
+)";
+
+@test
+fn conditional_sums_match_across_profiles() {
+    h::expect_same_output("conditional sums", COND_SUMS, ["--profile=debug"], ["--profile=release"]);
+}
+
+// Loops whose test is `i + c < n` (`opt::offset_test` makes it `i < n - min(n, c)`, then a counted loop the
+// vectorizer widens after a guard proves its slice checks): sums of neighbours from 0 and from 2, a wider
+// window, and a byte loop, on every length from 0 past a vector with remainders; then a bound past the
+// slice, whose check fails in the last iteration.
+const OFFSET_LOOPS: str = M"(@noinline fn pair(s: []u32) u32 { let mut t: u32 = 0; let mut i: usize = 0; while i + 1 < s.len() { t = t.wrapping_add(s[i].wrapping_mul(s[i + 1])); i += 1; } return t; }
+@noinline fn quad(s: []u32) u32 { let mut t: u32 = 0; let mut i: usize = 2; while i + 3 < s.len() { t = t.wrapping_add(s[i] ^ s[i + 3]); i += 1; } return t; }
+@noinline fn bytes(s: []u8) u32 { let mut t: u32 = 0; let mut i: usize = 0; while i + 1 < s.len() { t += (s[i] as u32) * (s[i + 1] as u32); i += 1; } return t; }
+@noinline fn over(s: []u32, n: usize) u32 { let mut t: u32 = 0; let mut i: usize = 0; while i + 1 < n { t = t.wrapping_add(s[i] ^ s[i + 1]); i += 1; } return t; }
+fn main() i32 {
+    let mut s = Vector::<u32>::new();
+    let mut u = Vector::<u8>::new();
+    let mut x: u32 = 7;
+    for _ in 0..40 {
+        x = x.wrapping_mul(1103515245).wrapping_add(12345);
+        s.push(x);
+        u.push((x >> 24) as u8);
+    }
+    for n in 0..41usize {
+        println("{} {} {} {}", n, pair(s[0..n]), quad(s[0..n]), bytes(u[0..n]));
+    }
+    // A bound past the slice: the last pair's check fails.
+    println("{}", over(s[0..33], 34));
+    return 0;
+}
+)";
+
+@test
+fn offset_loop_tests_match_across_profiles() {
+    h::expect_same_output("offset loop tests", OFFSET_LOOPS, ["--profile=debug"], ["--profile=release"]);
+}

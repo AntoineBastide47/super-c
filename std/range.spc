@@ -21,6 +21,7 @@ interface Step: Copy + Ord {
     fn up(self: Self) Self;
     fn down(self: Self) Self;
     fn bits(self: Self) u64; // sign-extended, so `hi - lo` wraps to the exact distance
+    fn plus(self: Self, n: usize) Self; // `n` steps up, at most to the range's end
 }
 
 // The number of steps from `lo` to `hi` (`lo <= hi`), or None when it does not fit `usize`.
@@ -64,6 +65,28 @@ extend<T: Step> Range<T> as Iterator<T> {
         }
         return (0, Option::<usize>::Some(0));
     }
+
+    /// The start moves `n` steps at once.
+    pub fn advance_by(self: &mut Range<T>, n: usize) bool {
+        if self.start < self.end {
+            // The values before the end, and the end itself for `..=`.
+            let d = self.end.bits().wrapping_sub(self.start.bits());
+            if n as u64 <= d {
+                self.start = self.start.plus(n);
+                return true;
+            }
+            let all = self.inclusive && n as u64 == d + 1;
+            self.start = self.end;
+            self.inclusive = false;
+            return all;
+        }
+        if n == 0 {
+            return true;
+        }
+        let one = self.inclusive && self.start == self.end && n == 1;
+        self.inclusive = false;
+        return one;
+    }
 }
 
 extend<T: Step> Range<T> as DoubleEndedIterator<T> {
@@ -98,6 +121,10 @@ extend i8 as Step {
     fn bits(self: i8) u64 {
         return self as u64;
     }
+    @always_inline
+    fn plus(self: i8, n: usize) i8 {
+        return self.bits().wrapping_add(n as u64) as i8;
+    }
 }
 
 extend i16 as Step {
@@ -112,6 +139,10 @@ extend i16 as Step {
     @always_inline
     fn bits(self: i16) u64 {
         return self as u64;
+    }
+    @always_inline
+    fn plus(self: i16, n: usize) i16 {
+        return self.bits().wrapping_add(n as u64) as i16;
     }
 }
 
@@ -128,6 +159,10 @@ extend i32 as Step {
     fn bits(self: i32) u64 {
         return self as u64;
     }
+    @always_inline
+    fn plus(self: i32, n: usize) i32 {
+        return self.bits().wrapping_add(n as u64) as i32;
+    }
 }
 
 extend i64 as Step {
@@ -142,6 +177,10 @@ extend i64 as Step {
     @always_inline
     fn bits(self: i64) u64 {
         return self as u64;
+    }
+    @always_inline
+    fn plus(self: i64, n: usize) i64 {
+        return self.bits().wrapping_add(n as u64) as i64;
     }
 }
 
@@ -158,6 +197,10 @@ extend isize as Step {
     fn bits(self: isize) u64 {
         return self as u64;
     }
+    @always_inline
+    fn plus(self: isize, n: usize) isize {
+        return self.bits().wrapping_add(n as u64) as isize;
+    }
 }
 
 extend u8 as Step {
@@ -172,6 +215,10 @@ extend u8 as Step {
     @always_inline
     fn bits(self: u8) u64 {
         return self;
+    }
+    @always_inline
+    fn plus(self: u8, n: usize) u8 {
+        return self.bits().wrapping_add(n as u64) as u8;
     }
 }
 
@@ -188,6 +235,10 @@ extend u16 as Step {
     fn bits(self: u16) u64 {
         return self;
     }
+    @always_inline
+    fn plus(self: u16, n: usize) u16 {
+        return self.bits().wrapping_add(n as u64) as u16;
+    }
 }
 
 extend u32 as Step {
@@ -202,6 +253,10 @@ extend u32 as Step {
     @always_inline
     fn bits(self: u32) u64 {
         return self;
+    }
+    @always_inline
+    fn plus(self: u32, n: usize) u32 {
+        return self.bits().wrapping_add(n as u64) as u32;
     }
 }
 
@@ -218,6 +273,10 @@ extend u64 as Step {
     fn bits(self: u64) u64 {
         return self;
     }
+    @always_inline
+    fn plus(self: u64, n: usize) u64 {
+        return self.wrapping_add(n as u64);
+    }
 }
 
 extend usize as Step {
@@ -232,5 +291,9 @@ extend usize as Step {
     @always_inline
     fn bits(self: usize) u64 {
         return self as u64;
+    }
+    @always_inline
+    fn plus(self: usize, n: usize) usize {
+        return self.bits().wrapping_add(n as u64) as usize;
     }
 }

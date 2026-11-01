@@ -8089,3 +8089,129 @@ b0(v0: i32, v1: i32):
     let xy: []u64 = [5, 1];
     same_result(&b, &a, "any", xy, 16);
 }
+
+// A loop's test `i + 1 <u n` of a counter from 0 by 1 becomes `i <u n - min(n, 1)` (`offset_test`), the
+// difference before the loop; the step that only the back edge reads leaves the header (`sink_heads`).
+// Not from a start that is no constant: the sum might wrap there.
+@test
+fn tests_of_a_counter_plus_a_constant_become_counted() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @pairs fn global
+sym @from fn global
+fn @pairs
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  jmp b1(v1, v1)
+b1(v3: i64, v4: i64):
+  v5 = add.i64 v3, v2
+  v6 = icmp.ult v5, v0
+  br v6, b2, b3
+b2:
+  v7 = add.i64 v4, v3
+  jmp b1(v5, v7)
+b3:
+  ret v4
+fn @from
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v1, v2)
+b1(v4: i64, v5: i64):
+  v6 = add.i64 v4, v3
+  v7 = icmp.ult v6, v0
+  br v7, b2, b3
+b2:
+  v8 = add.i64 v5, v4
+  jmp b1(v6, v8)
+b3:
+  ret v5
+)",
+    );
+    let p = text_of(&a, "pairs");
+    assert(p.contains("select.i64") && count_of(&p, "icmp.ult v") == 1, p.as_str());
+    let f = text_of(&a, "from");
+    assert(!f.contains("select"), f.as_str());
+    for n in [0u64, 1, 2, 3, 10] {
+        let x: [u64; 1] = [n];
+        let want = if n < 2 {
+            0u64
+        } else {
+            (n - 1) * (n - 2) / 2
+        };
+        same_result(&b, &a, "pairs", x[0..1], want);
+    }
+    let w: [u64; 2] = [5, 0xFFFFFFFFFFFFFFFF];
+    same_result(&b, &a, "from", w[0..2], 5);
+}
+
+// Block parameters that pass one another around a loop and its join, every other value they take one
+// constant (a flag only a constant sets), are that constant (`param_cycles`): its test folds. A cycle that
+// also takes another value stays.
+@test
+fn parameter_cycles_of_one_value_fold() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @flag fn global
+sym @mixed fn global
+fn @flag
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = iconst.i8 0
+  jmp b1(v1, v1, v3)
+b1(v4: i64, v5: i64, v6: i8):
+  v7 = icmp.ult v4, v0
+  br v7, b2, b5
+b2:
+  v8 = and.i64 v4, v2
+  v9 = icmp.ne v8, v1
+  br v9, b3, b4(v6)
+b3:
+  jmp b4(v3)
+b4(v10: i8):
+  v11 = zext.i64 v10
+  v12 = add.i64 v5, v4
+  v13 = add.i64 v12, v11
+  v14 = add.i64 v4, v2
+  jmp b1(v14, v13, v10)
+b5:
+  ret v5
+fn @mixed
+  sig (i64, i8) -> i64
+b0(v0: i64, v1: i8):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i8 0
+  jmp b1(v2, v2, v1)
+b1(v5: i64, v6: i64, v7: i8):
+  v8 = icmp.ult v5, v0
+  br v8, b2, b5
+b2:
+  v9 = icmp.ne v7, v4
+  br v9, b3, b4(v7)
+b3:
+  v10 = add.i64 v6, v3
+  jmp b4(v4)
+b4(v11: i8):
+  v12 = add.i64 v6, v5
+  v13 = select.i64 v9, v10, v12
+  v14 = add.i64 v5, v3
+  jmp b1(v14, v13, v11)
+b5:
+  ret v6
+)",
+    );
+    let f = text_of(&a, "flag");
+    assert(!f.contains("i8"), f.as_str());
+    let m = text_of(&a, "mixed");
+    assert(m.contains("icmp.ne"), m.as_str());
+    let x: [u64; 1] = [5];
+    same_result(&b, &a, "flag", x[0..1], 10);
+    let y: [u64; 2] = [5, 1];
+    same_result(&b, &a, "mixed", y[0..2], 11);
+}

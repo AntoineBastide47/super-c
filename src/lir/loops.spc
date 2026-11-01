@@ -2502,6 +2502,14 @@ extend LoopOpt {
         ) && self.lane_size(value_type(b, t.a), ptr) && self.lane_size(t.ty, ptr) {
             return self.lane_operands(b, u, t, true);
         }
+        // An integer constant in the body (`cond_step`'s 0): one value for every lane, made before the loop.
+        if op == O_ICONST && is_int(t.ty) && t.ty != T_I128 {
+            return if self.lane_size(t.ty, ptr) {
+                VK_INV
+            } else {
+                0
+            };
+        }
         if op == O_LOAD && !self.defined_in(t.a) && (t.aux & MEM_VOLATILE) == 0 && is_int(t.ty) && t.ty != T_I128 || op == O_LOAD && !self.defined_in(
             t.a,
         ) && (t.aux & MEM_VOLATILE) == 0 && is_float(t.ty) {
@@ -4303,12 +4311,12 @@ extend LoopOpt {
                     let mut v = x;
                     if x != y {
                         let ty = b.params[(ub.param_start + q) as usize];
-                        v = self.vi(
-                            b,
-                            Inst { op: O_SELECT, ty: ty, aux: 0, a: c, b: x, c: y },
-                            b.locs[(ub.start + ub.len - 1) as usize],
-                        );
-                        self.lorig.push(NONE);
+                        let l = b.locs[(ub.start + ub.len - 1) as usize];
+                        v = self.cond_step(b, h, start, c, x, y, ty, l);
+                        if v == VNONE {
+                            v = self.vi(b, Inst { op: O_SELECT, ty: ty, aux: 0, a: c, b: x, c: y }, l);
+                            self.lorig.push(NONE);
+                        }
                     }
                     self.pmap[(ub.param_start + q) as usize] = v;
                 }
@@ -4663,6 +4671,71 @@ extend LoopOpt {
             b.inl.push(0);
         }
         return v;
+    }
+
+    // The join of `x` (when `c`) and `y`, integers of type `ty`, at location `l` of a linearized copy whose
+    // instructions start at `start`: when one is a parameter `a` of header `h` and the other `a op d` (an
+    // `add`, `or`, `xor`, or `sub` of `d` from `a`) that no other instruction of the copy reads, the step
+    // `a op select(c, d, 0)` (arms swapped when `a` is `x`), a reduction the vectorizer widens (a
+    // conditional sum, as `lir::opt`'s `select_step` makes); `a op d` becomes the 0. Else VNONE.
+    fn cond_step(self: &mut Self, b: &mut Body, h: u32, start: u32, c: Value, x: Value, y: Value, ty: u8, l: u32) Value {
+        if !is_int(ty) || ty == T_I128 || ty == T_PTR {
+            return VNONE;
+        }
+        let hb = b.blocks[h as usize];
+        for side in 0..2u32 {
+            let (s, a) = if side == 0 {
+                (x, y)
+            } else {
+                (y, x)
+            };
+            let pi = a & ~VPARAM;
+            if (a & VPARAM) == 0 || a == VNONE || pi < hb.param_start || pi >= hb.param_start + hb.param_len as u32 || (s & (VPARAM | VFLAG)) != 0 || s == VNONE {
+                continue;
+            }
+            let o = b.insts[s as usize];
+            if o.op != O_ADD && o.op != O_OR && o.op != O_XOR && o.op != O_SUB || o.ty != ty {
+                continue;
+            }
+            let d = if o.a == a {
+                o.b
+            } else if o.b == a && o.op != O_SUB {
+                o.a
+            } else {
+                VNONE
+            };
+            if d == VNONE || s < start || self.read_in(b, start, s) {
+                continue;
+            }
+            b.insts[s as usize] = Inst { op: O_ICONST, ty: ty, aux: 0, a: 0, b: 0, c: VNONE };
+            self.lorig[(s - start) as usize] = NONE;
+            let z = s;
+            let sel = if side == 0 {
+                Inst { op: O_SELECT, ty: ty, aux: 0, a: c, b: d, c: z }
+            } else {
+                Inst { op: O_SELECT, ty: ty, aux: 0, a: c, b: z, c: d }
+            };
+            let sv = self.vi(b, sel, l);
+            self.lorig.push(NONE);
+            let r = self.vi(b, Inst { op: o.op, ty: ty, aux: 0, a: a, b: sv, c: 0 }, l);
+            self.lorig.push(NONE);
+            return r;
+        }
+        return VNONE;
+    }
+
+    // Whether an instruction of `b` from `start` on reads value `v`.
+    fn read_in(self: &Self, b: &Body, start: u32, v: Value) bool {
+        let mut us = Vector::<Value>::new();
+        for i in start..b.insts.len() as u32 {
+            lv::uses_into(b, b.insts[i as usize], &mut us);
+            for q in 0..us.len() {
+                if us[q] == v {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // The integer constant `v` of type `ty`.
@@ -5851,7 +5924,13 @@ extend LoopOpt {
             let bc = b.insts[bt.a as usize];
             let cold_b = cold(b, b.edge_target(bt.b));
             let cold_c = cold(b, b.edge_target(bt.c));
-            if bc.op != O_ICMP || cold_b == cold_c {
+            // Both bounds of a range at once, holding on the taken edge (`range_check`).
+            let (rsh, roff, rlen) = if bc.op == O_AND && cold_c && !cold_b && !self.grev {
+                self.range_check(b, ptr, bc, q)
+            } else {
+                (0xFFu8, 0u64, VNONE)
+            };
+            if bc.op != O_ICMP && rsh == 0xFF || cold_b == cold_c {
                 continue;
             }
             // `x <u len` holds on the edge that does not fail, `x` of `q` (counting down, `x` is `q - 1`).
@@ -5861,17 +5940,21 @@ extend LoopOpt {
                 sa = ast::pick(self.down_of(b, bc.a, q), 0u8, 0xFFu8);
                 sb = ast::pick(self.down_of(b, bc.b, q), 0u8, 0xFFu8);
             }
-            let ok = sa != 0xFF && (bc.aux == C_ULT && cold_c || bc.aux == C_UGE && cold_b) || sb != 0xFF && (bc.aux == C_UGT && cold_c || bc.aux == C_ULE && cold_b);
+            let ok = rsh != 0xFF || sa != 0xFF && (bc.aux == C_ULT && cold_c || bc.aux == C_UGE && cold_b) || sb != 0xFF && (bc.aux == C_UGT && cold_c || bc.aux == C_ULE && cold_b);
             if !ok {
                 continue;
             }
             let on_a = sa != 0xFF && (bc.aux == C_ULT || bc.aux == C_UGE);
-            let len = if on_a {
+            let len = if rsh != 0xFF {
+                rlen
+            } else if on_a {
                 bc.b
             } else {
                 bc.a
             };
-            let (sh, off) = if on_a {
+            let (sh, off) = if rsh != 0xFF {
+                (rsh, roff)
+            } else if on_a {
                 (sa, oa)
             } else {
                 (sb, ob)
@@ -5903,6 +5986,52 @@ extend LoopOpt {
         }
         self.gcond = C_ULE;
         return self.fixes.len() != 0 && !self.guarded(b, p);
+    }
+
+    // The `and` `t` of `x <=u len` and `len - x >=u w` (a range's two bounds, `s[x..x + w]`), `w` a nonzero
+    // constant and `x` as `q << s + c` (`affine`): the check `x + (w - 1) <u len` that `checks` guards, as
+    // (s, c + w - 1, len); (0xFF, 0, VNONE) when not of that form. Where the guard holds, `x + w - 1` stays
+    // below `len` without wrapping, so both bounds hold.
+    fn range_check(self: &Self, b: &Body, ptr: u32, t: Inst, q: Value) (u8, u64, Value) {
+        for side in 0..2u32 {
+            let (x, y) = if side == 0 {
+                (t.a, t.b)
+            } else {
+                (t.b, t.a)
+            };
+            if x == VNONE || y == VNONE || (x & (VPARAM | VFLAG)) != 0 || (y & (VPARAM | VFLAG)) != 0 {
+                continue;
+            }
+            let le = b.insts[x as usize];
+            let ge = b.insts[y as usize];
+            if le.op != O_ICMP || ge.op != O_ICMP || le.aux != C_ULE && le.aux != C_UGE || ge.aux != C_ULE && ge.aux != C_UGE {
+                continue;
+            }
+            let (v, len) = if le.aux == C_ULE {
+                (le.a, le.b)
+            } else {
+                (le.b, le.a)
+            };
+            let (d, wv) = if ge.aux == C_UGE {
+                (ge.a, ge.b)
+            } else {
+                (ge.b, ge.a)
+            };
+            if d == VNONE || (d & (VPARAM | VFLAG)) != 0 || !is_const(b, wv) {
+                continue;
+            }
+            let s = b.insts[d as usize];
+            let w = raw_const(b, wv);
+            if s.op != O_SUB || s.a != len || s.b != v || w == 0 || w >= 0x80000000 {
+                continue;
+            }
+            let (sh, off) = self.affine(b, ptr, v, q);
+            if sh == 0xFF || off + w - 1 >= 0x80000000 {
+                continue;
+            }
+            return (sh, off + w - 1, len);
+        }
+        return (0xFFu8, 0u64, VNONE);
     }
 
     // `x` as `q << s + c` (`checks`): (s, c), (0xFF, 0) when it is not of that form.

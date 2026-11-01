@@ -5113,3 +5113,39 @@ b3:
     let c = text_of(&a, "co");
     assert(!c.contains("v4f32") && c.contains("call.f32 @cosf"), c.as_str());
 }
+
+// A sum a branch of the loop adds to (`if s[i] > 0 { t += s[i] }`), if-converted, is the step
+// `t + select(c, s[i], 0)` (`cond_step`): a reduction the vectorizer widens.
+@test
+fn conditional_sums_vectorize() {
+    let src = M"(lir ptr 8
+sym @cs fn global
+fn @cs
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i32 0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = load.i64 v0 align 3
+  jmp b1(v3, v2)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v1
+  br v8, b3, b2
+b2:
+  ret v7
+b3:
+  v9 = ptradd v0, v6 * 4
+  v10 = load.i32 v9 align 2
+  v11 = icmp.sgt v10, v2
+  br v11, b4, b5(v7)
+b4:
+  v12 = add.i32 v7, v10
+  jmp b5(v12)
+b5(v13: i32):
+  v14 = add.i64 v6, v4
+  jmp b1(v14, v13)
+)";
+    let (_, a) = optimized(src, VECTOR);
+    let f = text_of(&a, "cs");
+    assert(f.contains("vsel.v4i32") && f.contains("add.v4i32"), f.as_str());
+}
