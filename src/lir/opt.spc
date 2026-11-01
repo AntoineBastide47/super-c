@@ -5528,6 +5528,9 @@ extend Opt {
                     t = Inst { op: O_RET, ty: T_NONE, aux: 0, a: v, b: VNONE, c: VNONE };
                 }
             }
+            if t.op == O_BR {
+                self.step_next(b, k, t);
+            }
             b.insts[i as usize] = t;
             return !same(t, t0);
         }
@@ -7345,6 +7348,63 @@ extend Opt {
         }
         self.moved[s as usize] = true;
         self.pre.push(i as u64 << 32 | s as u64);
+    }
+
+    // Branch `t` ending block `k` on whether an `add`, `sub` or `and` of `k` equals 0 (a counter's step), the
+    // test in `k` too: when instructions lie between them and read neither (up to FLAG_REACH back), the
+    // operation moves right before the test, where every backend tests the flags it sets.
+    fn step_next(self: &mut Self, b: &Body, k: u32, t: Inst) {
+        let c = t.a;
+        if c == VNONE || (c & (VPARAM | VFLAG)) != 0 || self.blk_of[c as usize] != k || self.moved[c as usize] {
+            return;
+        }
+        let ct = b.insts[c as usize];
+        if ct.op != O_ICMP || ct.aux != C_EQ && ct.aux != C_NE {
+            return;
+        }
+        let s = if const_of(b, ct.b) == Some(0u64) {
+            ct.a
+        } else if const_of(b, ct.a) == Some(0u64) {
+            ct.b
+        } else {
+            VNONE
+        };
+        if s == VNONE || (s & (VPARAM | VFLAG)) != 0 || s >= c || self.blk_of[s as usize] != k || self.moved[s as usize] || c - s > FLAG_REACH {
+            return;
+        }
+        let d = b.insts[s as usize].op;
+        if d != O_ADD && d != O_SUB && d != O_AND {
+            return;
+        }
+        let mut between = false;
+        for j in s + 1..c {
+            if self.blk_of[j as usize] != k || self.repl[j as usize] == DROPPED {
+                continue;
+            }
+            if self.reads(b, j, s) {
+                return;
+            }
+            between = between || !self.moved[j as usize] && self.repl[j as usize] == VNONE;
+        }
+        // The instructions the walk made before those (`pre`): the newest entries, from the last back.
+        let mut q = self.pre.len();
+        // Each step goes back one entry.
+        while q > 0 {
+            q -= 1;
+            let at = (self.pre[q] >> 32) as u32;
+            if at <= s || at > c || self.blk_of[at as usize] != k {
+                break;
+            }
+            if self.reads(b, self.pre[q] as u32, s) {
+                return;
+            }
+            between = true;
+        }
+        if !between {
+            return;
+        }
+        self.moved[s as usize] = true;
+        self.pre.push(c as u64 << 32 | s as u64);
     }
 
     // Whether instruction `j` reads value `s` or its flag (operands as the walk replaced them).

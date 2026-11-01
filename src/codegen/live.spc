@@ -147,6 +147,9 @@ pub(package) struct Live {
     /// (`exit_partner`), else NONE (`plan`).
     pub(package) share: Vector<u32>,
     shared_by: Vector<u32>, // per loop header parameter, the one parameter that shares its register (`share`)
+    /// The edges whose moves the generator places in a stub past the last block (`late_edges`): source
+    /// block << 32 | edge.
+    pub(package) late: Vector<u64>,
     /// The largest access a scaled index addresses (the target's, 0: none); per instruction, whether the
     /// load or store takes its address `ptradd`'s operands (`fold`), and whether the `ptradd` emits nothing
     /// for that (`pfold`; `uses_at`).
@@ -211,6 +214,7 @@ extend Live {
             home: Vector::<u8>::new(),
             share: Vector::<u32>::new(),
             shared_by: Vector::<u32>::new(),
+            late: Vector::<u64>::new(),
             fold_max: 0,
             fold: Vector::<bool>::new(),
             pfold: Vector::<bool>::new(),
@@ -288,7 +292,88 @@ extend Live {
         fill(&mut self.lend, nb, 0);
         fill(&mut self.pos, nb, NONE);
         self.layout(b);
+        self.late_edges(b);
         self.ranges(b);
+    }
+
+    // The edges whose moves wait in a stub past the last block, which then jumps to the target (`late`):
+    // each passes only integer and float constants, from a warm block laid out before a loop to a warm block
+    // laid out after it that an edge from a block laid out between them, with no loop after that block,
+    // reaches too (its parameters take their homes there). The target's parameters then start their ranges
+    // after the loop (`plan`) in place of holding registers across it.
+    fn late_edges(self: &mut Self, b: &Body) {
+        self.late.truncate(0);
+        let np = self.order.len();
+        // Per layout position, the least last position of a loop whose header is there or later.
+        let mut close = Vector::<u32>::with_capacity(np + 1);
+        fill(&mut close, np + 1, NONE);
+        for q0 in 0..np {
+            let q = np - 1 - q0;
+            let h = self.order[q];
+            close[q] = close[q + 1];
+            if self.inner[h as usize] == h {
+                close[q] = close[q].min(self.lend[h as usize]);
+            }
+        }
+        for q in 0..np {
+            let p = self.order[q];
+            if self.rare[p as usize] || close[q + 1] == NONE {
+                continue;
+            }
+            let t = term_of(b, p);
+            let ne: u32 = if t.op == O_JMP {
+                1
+            } else if t.op == O_BR {
+                2
+            } else {
+                0
+            };
+            for e in 0..ne {
+                let ed = edge_of(b, t, e);
+                let j = b.edge_target(ed);
+                let pj = self.pos[j as usize];
+                if b.edge_nargs(ed) == 0 || pj == NONE || pj <= q as u32 || self.rare[j as usize] || close[q + 1] >= pj || ne == 2 && b.edge_target(
+                    edge_of(b, t, 1 - e),
+                ) == j {
+                    continue;
+                }
+                let mut ok = true;
+                for a in 0..b.edge_nargs(ed) {
+                    let v = b.edge_arg(ed, a);
+                    ok = ok && (v & (VPARAM | VFLAG)) == 0 && (b.insts[v as usize].op == O_ICONST || b.insts[v as usize].op == O_FCONST);
+                }
+                let mut other = false;
+                for x in self.pat[j as usize]..self.pat[j as usize + 1] {
+                    let pq = self.pos[self.preds[x as usize] as usize];
+                    other = other || pq != NONE && pq > q as u32 && pq < pj && close[pq as usize + 1] >= pj;
+                }
+                if ok && other {
+                    self.late.push(p as u64 << 32 | ed as u64);
+                }
+            }
+        }
+    }
+
+    /// The target of block `k`'s late edge (`late`), NONE when it has none.
+    pub(package) fn late_target(self: &Self, b: &Body, k: u32) u32 {
+        for q in 0..self.late.len() {
+            if (self.late[q] >> 32) as u32 == k {
+                return b.edge_target(self.late[q] as u32);
+            }
+        }
+        return NONE;
+    }
+
+    /// The index in `late` of edge `e` of block `k`'s terminator (blocks may share an edge's record), NONE
+    /// when it is not late.
+    pub(package) fn late_index(self: &Self, k: u32, e: u32) u32 {
+        let key = k as u64 << 32 | e as u64;
+        for q in 0..self.late.len() {
+            if self.late[q] == key {
+                return q as u32;
+            }
+        }
+        return NONE;
     }
 
     // `fold`: a load or store of no offset whose address is a `ptradd` with an index, no offset, a scale
@@ -1726,14 +1811,16 @@ extend Live {
                     self.au[x] += 1;
                 }
             }
-            // The terminator's edges write their targets' parameters.
+            // The terminator's edges write their targets' parameters; a late edge's moves wait past the last
+            // block (`late`).
             let o = self.base[p + 1] - 1;
             each_edge_param(b, b.insts[(bk.start + bk.len - 1) as usize], &mut self.succ);
+            let lt = self.late_target(b, k);
             for q in 0..self.succ.len() {
                 let x = self.succ[q] as usize;
                 self.wt[x] += f;
                 self.au[x] += 1;
-                if o < self.start[x] {
+                if o < self.start[x] && (lt == NONE || self.def_blk[x] != lt) {
                     self.start[x] = o;
                 }
             }

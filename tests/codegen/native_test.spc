@@ -18,7 +18,8 @@ import module::loader;
 // (`Package.vector`: x86-64's ymm registers with AVX2), binary16 instructions (`Package.half`: arithmetic
 // on macOS arm64, whose every processor has FEAT_FP16, else conversions), 64-byte vectors (x86-64's zmm
 // registers with AVX-512), `popcnt`, SSE4.1's roundings (`Package.sse41`), arm64's LSE atomics and RCpc
-// acquire loads (`Package.lse`, `Package.rcpc`).
+// acquire loads (`Package.lse`, `Package.rcpc`); and equal edges of a body sharing one record, as the
+// optimizer's rewrites may leave them (`SHARE`).
 const TAIL: u32 = 1;
 const WIDE: u32 = 2;
 const HALF: u32 = 4;
@@ -27,6 +28,7 @@ const POPCNT: u32 = 16;
 const SSE41: u32 = 32;
 const LSE: u32 = 64;
 const RCPC: u32 = 128;
+const SHARE: u32 = 256;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -164,6 +166,11 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
             HALF_CVT
         };
     }
+    if (opts & SHARE) != 0 {
+        for d in 0..p.bodies.len() {
+            share_edges(p.bodies.index_mut(d));
+        }
+    }
     let mut v = verify::Verifier::new();
     for i in 0..p.syms.len() {
         let s = p.syms[i];
@@ -194,6 +201,43 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
         return false;
     }
     return true;
+}
+
+// Each jump's and branch's edge of `b` that equals an earlier one (its target and arguments) takes that
+// one's record.
+fn share_edges(b: &mut Body) {
+    let mut seen = Vector::<u32>::new();
+    for k in 0..b.blocks.len() {
+        let bk = b.blocks[k];
+        if bk.len == 0 {
+            continue;
+        }
+        let at = (bk.start + bk.len - 1) as usize;
+        let mut t = b.insts[at];
+        if t.op == O_JMP {
+            t.a = shared_edge(b, &mut seen, t.a);
+        } else if t.op == O_BR {
+            t.b = shared_edge(b, &mut seen, t.b);
+            t.c = shared_edge(b, &mut seen, t.c);
+        }
+        b.insts[at] = t;
+    }
+}
+
+// The edge of `seen` equal to edge `e` of `b`, else `e`, which `seen` takes.
+fn shared_edge(b: &Body, seen: &mut Vector<u32>, e: u32) u32 {
+    for j in 0..seen.len() {
+        let s = seen[j];
+        let mut same = b.edge_target(s) == b.edge_target(e) && b.edge_nargs(s) == b.edge_nargs(e);
+        for q in 0..b.edge_nargs(e) {
+            same = same && b.edge_arg(s, q) == b.edge_arg(e, q);
+        }
+        if same {
+            return s;
+        }
+    }
+    seen.push(e);
+    return e;
 }
 
 // Compile LIR `text` for `(os, isa)` (with package options `opts`), link it with C `driver` by C compiler
@@ -5186,6 +5230,107 @@ b3(v16: i64, v17: i64, v18: i64):
     let drv = "#include <stdint.h>\nuint64_t lev(uint64_t);\nstatic uint64_t ref(uint64_t bl) {\n  uint64_t k = 0, n = 0;\n  while (bl > 64) { uint64_t t = (bl - 1) >> 2; k += t; bl -= t << 1; n++; }\n  uint64_t a = k << 1;\n  return (((a >> 2) ^ bl) + (a & 64)) * n + n;\n}\nint main(void) {\n  uint64_t xs[6] = {0, 64, 65, 100, 1000, 123456789};\n  for (int i = 0; i < 6; i++) if (lev(xs[i]) != ref(xs[i])) return i + 1;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
+}
+
+// A branch past a loop that passes only constants to the block after it moves them in a stub past the last
+// block (`lv::Live::late`): the block's parameters take registers after the loop. `cnt` counts matches
+// (the integer constants on an empty slice), `fsum` adds floats (a float constant).
+@test
+fn constants_into_a_block_past_a_loop_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @cnt fn global
+sym @fsum fn global
+fn @cnt
+  sig (ptr, i64, i8) -> i64
+b0(v0: ptr, v1: i64, v2: i8):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 7
+  v5 = icmp.eq v1, v3
+  br v5, b3(v3, v4), b1(v3, v3)
+b1(v6: i64, v7: i64):
+  v8 = ptradd v0, v6 * 1
+  v9 = load.i8 v8 align 0
+  v10 = icmp.eq v9, v2
+  v11 = zext.i64 v10
+  v12 = add.i64 v7, v11
+  v13 = iconst.i64 1
+  v14 = add.i64 v6, v13
+  v15 = icmp.ult v14, v1
+  br v15, b1(v14, v12), b2
+b2:
+  jmp b3(v12, v14)
+b3(v16: i64, v17: i64):
+  v18 = iconst.i64 1000
+  v19 = mul.i64 v17, v18
+  v20 = add.i64 v16, v19
+  ret v20
+fn @fsum
+  sig (ptr, i64) -> f64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = fconst.f64 0x4004000000000000
+  v4 = icmp.eq v1, v2
+  br v4, b3(v3), b1(v2, v3)
+b1(v5: i64, v6: f64):
+  v7 = ptradd v0, v5 * 8
+  v8 = load.f64 v7 align 3
+  v9 = fadd.f64 v6, v8
+  v10 = iconst.i64 1
+  v11 = add.i64 v5, v10
+  v12 = icmp.ult v11, v1
+  br v12, b1(v11, v9), b2
+b2:
+  jmp b3(v9)
+b3(v13: f64):
+  v14 = fconst.f64 0x4000000000000000
+  v15 = fmul.f64 v13, v14
+  ret v15
+)";
+    let drv = "#include <stdint.h>\nint64_t cnt(const uint8_t *, int64_t, uint8_t);\ndouble fsum(const double *, int64_t);\nint main(void) {\n  uint8_t s[5] = {4, 1, 4, 4, 9};\n  if (cnt(s, 0, 4) != 7000 || cnt(s, 5, 4) != 5003 || cnt(s, 2, 9) != 2000) return 1;\n  double d[3] = {1.0, 0.5, 4.0};\n  if (fsum(d, 0) != 5.0 || fsum(d, 3) != 16.0) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// `skip`'s branches before and after its loop pass the same constant to the block past the loop, one edge
+// record for both (`SHARE`): the branch before the loop moves in a stub (`lv::Live::late`), the one after
+// the loop, the block's only other way in, in place.
+@test
+fn a_shared_edge_past_a_loop_runs() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @skip fn global
+fn @skip
+  sig (ptr, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 5
+  v5 = icmp.eq v1, v3
+  br v5, b4(v4), b1(v3, v3)
+b1(v6: i64, v7: i64):
+  v8 = ptradd v0, v6 * 8
+  v9 = load.i64 v8 align 3
+  v10 = add.i64 v7, v9
+  v11 = iconst.i64 1
+  v12 = add.i64 v6, v11
+  v13 = icmp.ult v12, v1
+  br v13, b1(v12, v10), b2
+b2:
+  v14 = icmp.eq v2, v3
+  br v14, b4(v4), b3
+b3:
+  ret v10
+b4(v15: i64):
+  v16 = iconst.i64 100
+  v17 = mul.i64 v15, v16
+  ret v17
+)";
+    let drv = "#include <stdint.h>\nint64_t skip(const int64_t *, int64_t, int64_t);\nint main(void) {\n  int64_t s[3] = {1, 2, 4};\n  if (skip(s, 0, 1) != 500 || skip(s, 3, 0) != 500 || skip(s, 3, 1) != 7) return 1;\n  return 0;\n}\n";
+    assert_eq(run_native_with(lir, drv, SHARE), 0);
 }
 
 // Switches with a case of 0 (arm64 `cbz`): `last` tests it last, its block next (the default's is cold:

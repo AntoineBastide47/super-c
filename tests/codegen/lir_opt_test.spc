@@ -7140,3 +7140,58 @@ b0(v0: i64):
     let (_, n) = optimized_copying(src, 0);
     assert(text_of(&n, "pick").as_str().find("memcpy") >= 0, "with no arg_copy the copy stays");
 }
+
+// A loop's counter step tested against 0 after other work moves right before the test, where the backends
+// test the flags it sets (`step_next`): `pow`'s `sub` follows the `mul`. `kept`'s product reads the step,
+// which stays in place.
+@test
+fn a_counter_step_moves_to_its_zero_test() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @pow fn global
+sym @kept fn global
+fn @pow
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 0
+  v4 = icmp.eq v1, v3
+  br v4, b2(v2), b1(v1, v2)
+b1(v5: i64, v6: i64):
+  v7 = sub.i64 v5, v2
+  v8 = mul.i64 v6, v0
+  v9 = icmp.ne v7, v3
+  br v9, b1(v7, v8), b2(v8)
+b2(v10: i64):
+  ret v10
+fn @kept
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 0
+  v4 = icmp.eq v1, v3
+  br v4, b2(v2), b1(v1, v2)
+b1(v5: i64, v6: i64):
+  v7 = sub.i64 v5, v2
+  v8 = mul.i64 v6, v7
+  v9 = icmp.ne v7, v3
+  br v9, b1(v7, v8), b2(v8)
+b2(v10: i64):
+  ret v10
+)",
+    );
+    let tp = text_of(&a, "pow");
+    let tk = text_of(&a, "kept");
+    let sp = tp.as_str().find("sub.i64");
+    let mp = tp.as_str().find("mul.i64");
+    assert(sp >= 0 && mp >= 0 && mp < sp, tp.as_str());
+    let sk = tk.as_str().find("sub.i64");
+    let mk = tk.as_str().find("mul.i64");
+    assert(sk >= 0 && mk >= 0 && sk < mk, tk.as_str());
+    let p0: [u64; 2] = [3, 0];
+    let p5: [u64; 2] = [3, 5];
+    same_result(&b, &a, "pow", p0[0..2], 1);
+    same_result(&b, &a, "pow", p5[0..2], 243);
+    let k3: [u64; 2] = [0, 3];
+    same_result(&b, &a, "kept", k3[0..2], 0);
+}

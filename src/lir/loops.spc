@@ -87,6 +87,9 @@ const MAX_CHECKS: usize = 8;
 const VBYTES: u32 = 16;
 // The blocks of a chain unroll and jam takes before or after the inner loop (`jam_chain`).
 const JAM_CHAIN: u32 = 4;
+// The fewest lanes an iteration of an interleaved vector loop covers (lanes times copies) for one vector at a
+// time to run what it leaves, as LLVM's vectorizer chooses: past fewer, at most a few scalar iterations are left.
+const EPI_LANES: u32 = 16;
 // The most instructions of a loop's body the vectorizer interleaves as scalars.
 const ILV_SIZE: u32 = 12;
 // Final values: loops of at most CF_SIZE instructions, values of degree at most CF_DEG.
@@ -2492,6 +2495,30 @@ extend LoopOpt {
         return v >= ub.start && v < ub.start + ub.len;
     }
 
+    // Whether the counter of loop body `u` feeds nothing but its step and the exit test: the vector loop may
+    // then count its steps down to 0.
+    fn counter_free(self: &mut Self, b: &Body, u: u32) bool {
+        let ub = b.blocks[u as usize];
+        let tm = b.insts[(ub.start + ub.len - 1) as usize];
+        let test = if tm.op == O_BR {
+            tm.a
+        } else {
+            VNONE
+        };
+        for i in ub.start..ub.start + ub.len - 1 {
+            if self.vk[(i - ub.start) as usize] == VK_STEP || i == test {
+                continue;
+            }
+            self.outside_uses(b, b.insts[i as usize]);
+            for q in 0..self.uses.len() {
+                if self.uses[q] == self.viv {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     // The reads of value `v` in block `u`, its edges' arguments included.
     fn reads(self: &mut Self, b: &Body, u: u32, v: Value) u32 {
         let ub = b.blocks[u as usize];
@@ -2824,8 +2851,11 @@ extend LoopOpt {
                 }
             }
         }
+        // A counter that feeds only its step and the exit test (`counter_free`) counts the steps left down
+        // to 0 from their sum: the loop runs at least once, and its steps reach 0 exactly.
+        let down = !self.vtail && !self.vexit && self.counter_free(b, u);
         self.args.truncate(0);
-        self.args.push(i0);
+        self.args.push(ast::pick(down, cu, i0));
         for r in 0..nred {
             let rt = b.params[(self.vred[r as usize] & ~VPARAM) as usize];
             let vt = self.lane_ty(rt);
@@ -3145,7 +3175,11 @@ extend LoopOpt {
             ls = self.vexit_test(b, ub, nv, vps, vi, vx, lb, lstart, hf, vp, l0);
         }
         let sk = self.vconst(b, qt, step * self.vqk, l0);
-        let vnext = self.vi(b, Inst { op: ast::pick(self.vrev, O_SUB, O_ADD), ty: qt, aux: 0, a: vi, b: sk, c: 0 }, l0);
+        let vnext = self.vi(
+            b,
+            Inst { op: ast::pick(self.vrev || down, O_SUB, O_ADD), ty: qt, aux: 0, a: vi, b: sk, c: 0 },
+            l0,
+        );
         // An overlapping last iteration: on while below `n - k`, then the tail block (`sp + 1`) runs the
         // iteration at `n - k` once when elements are left; the counter's chain stays an add.
         let last = if self.vtail {
@@ -3155,6 +3189,9 @@ extend LoopOpt {
         };
         let more = if self.vtail {
             self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: vnext, b: last, c: 0 }, l0)
+        } else if down {
+            let z = self.vconst(b, qt, 0, l0);
+            self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: vnext, b: z, c: 0 }, l0)
         } else {
             self.vi(
                 b,
@@ -3314,10 +3351,10 @@ extend LoopOpt {
             self.vblock(b, sp + 1, tstart, tq, 1, hf, vl);
         }
         // The preheader enters the guard; the loop runs what the vectors leave and vectorizes no more, but
-        // once without interleaving what interleaved vectors leave (`BLOCK_EPI`).
+        // once without interleaving what interleaved vectors of EPI_LANES lanes or more leave (`BLOCK_EPI`).
         let pe = term(b, p).a;
         b.pool[pe as usize] = g;
-        let epi = nv > 1 && self.vlanes > 1 && (hb.flags & BLOCK_EPI) == 0 && !self.vone && !self.vtail && !self.vexit && !self.vrev;
+        let epi = nv > 1 && self.vlanes > 1 && nv * self.vlanes >= EPI_LANES && (hb.flags & BLOCK_EPI) == 0 && !self.vone && !self.vtail && !self.vexit && !self.vrev;
         b.blocks.index_mut(h as usize).flags = hf | if epi {
             BLOCK_EPI
         } else {

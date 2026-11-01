@@ -151,6 +151,10 @@ pub(package) struct Gen {
     // then q0..q7), NONE when none.
     va_save: u32,
     // Labels.
+    /// The parameters of the late edges' targets with their homes as each target starts: value index, home
+    /// (`lv::Live::late`); their stubs move into those homes after the ranges ended.
+    late_va: Vector<(u32, Va)>,
+    stubs_out: bool, // the late edges' stubs are in the code
     blk_at: Vector<u32>, // per block, its first word, NONE before it is compiled
     fix: Vector<u64>, // word << 32 | block: a branch to patch
     // A conditional branch to a block is an inverted one over a `B`: the function is past the 1 MiB a
@@ -253,6 +257,8 @@ extend Gen {
             sret_off: -1,
             canary: -1,
             va_save: NONE,
+            late_va: Vector::<(u32, Va)>::new(),
+            stubs_out: false,
             blk_at: Vector::<u32>::new(),
             fix: Vector::<u64>::new(),
             far: false,
@@ -1502,6 +1508,54 @@ extend Gen {
         w.dirty = false;
     }
 
+    // Whether the code so far ends with a branch that nothing falls past: `b`, `br` or `ret`.
+    const fn ends_jump(self: &Self) bool {
+        let n = self.code.len();
+        if n == 0 {
+            return false;
+        }
+        let w = self.code[n - 1];
+        return (w & 0xFC000000) == 0x14000000 || w == a::RET || (w & 0xFFFFFC1F) == 0xD61F0000;
+    }
+
+    // Whether every late edge's target lies before layout position `q` (`lv::Live::late`).
+    fn late_ready(self: &Self, q: u32) bool {
+        let b = self.b();
+        for j in 0..self.lv.late.len() {
+            if self.lv.pos[b.edge_target(self.lv.late[j] as u32) as usize] >= q {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The late edges' stubs (`lv::Live::late`): each edge's moves into its target's parameter homes as the
+    // target started (`late_va`), then a jump to the target. The parameters' state comes back after.
+    fn late_stubs(self: &mut Self) {
+        self.stubs_out = true;
+        let nb = self.b().blocks.len();
+        let mut cur = Vector::<Va>::with_capacity(self.late_va.len());
+        for j in 0..self.late_va.len() {
+            let (x, va) = self.late_va[j];
+            cur.push(self.va[x as usize]);
+            let w = self.va.index_mut(x as usize);
+            *w = va;
+            w.dirty = false;
+            if va.home != H_FIXED {
+                w.reg = NOREG;
+            }
+        }
+        for q in 0..self.lv.late.len() {
+            let e = self.lv.late[q] as u32;
+            self.blk_at[nb + q] = self.code.len() as u32;
+            self.edge_moves(e);
+            self.goto(self.b().edge_target(e), true);
+        }
+        for j in 0..self.late_va.len() {
+            self.va.set(self.late_va[j].0 as usize, cur[j]);
+        }
+    }
+
     // Whether block parameter `x` shares a header parameter's slot (`back_share`).
     fn is_shared(self: &Self, x: u32) bool {
         for k in 0..self.shared.len() {
@@ -2038,6 +2092,8 @@ extend Gen {
         self.shrink_bad = false;
         if self.shrink {
             self.lv.relayout(b);
+            // A shrink-wrapped body places no code past its blocks: each late edge moves in place.
+            self.lv.late.truncate(0);
         }
         // The entry's code (a variadic body's register save area) is the entry block's (`frame_use`).
         self.pos = self.lv.pos[0];
@@ -2055,7 +2111,10 @@ extend Gen {
         fill(&mut self.owner, 64, NONE);
         fill(&mut self.heir, 64, NONE);
         self.held = 0;
-        fill(&mut self.blk_at, b.blocks.len(), NONE);
+        // Past the blocks, one per late edge: its stub (`lv::Live::late`).
+        fill(&mut self.blk_at, b.blocks.len() + self.lv.late.len(), NONE);
+        self.late_va.truncate(0);
+        self.stubs_out = self.lv.late.len() == 0;
         self.code.truncate(0);
         self.fix.truncate(0);
         self.epi.truncate(0);
@@ -2108,6 +2167,9 @@ extend Gen {
             }
         }
         assert(self.fixed_busy == 0, "a64gen: a register home outlives its value");
+        if !self.stubs_out {
+            self.late_stubs();
+        }
         if self.shrink && (self.shrink_bad || self.csr != 0 || self.warm_calls()) {
             return self.unshrunk(s, local);
         }
@@ -2504,10 +2566,25 @@ extend Gen {
 
     // Compile the block at layout position `q`.
     fn block(self: &mut Self, q: u32) bool {
+        // The late edges' stubs at the first place no block falls into, once their targets are compiled.
+        if !self.stubs_out && self.ends_jump() && self.late_ready(q) {
+            self.late_stubs();
+        }
         self.pos = q;
         let k = self.lv.order[q as usize];
         let b = self.b();
         self.blk_at[k as usize] = self.code.len() as u32;
+        // A late edge's target: its parameters' homes, for its stub.
+        for j in 0..self.lv.late.len() {
+            if b.edge_target(self.lv.late[j] as u32) == k {
+                let bk = b.blocks[k as usize];
+                for p in bk.param_start..bk.param_start + bk.param_len as u32 {
+                    let x = b.insts.len() as u32 + p;
+                    self.late_va.push((x, self.va[x as usize]));
+                }
+                break;
+            }
+        }
         if !self.continues(q) {
             let mut m = self.held;
             // Each step clears one register's bit: at most 64 steps.
@@ -2650,6 +2727,10 @@ extend Gen {
         };
         for e in 0..ne {
             let ed = lv::edge_of(b, t, e);
+            // A late edge's target takes its homes at an edge after the loop.
+            if self.lv.late_index(self.lv.order[self.pos as usize], ed) != NONE {
+                continue;
+            }
             let tb = b.blocks[b.edge_target(ed) as usize];
             for q in 0..tb.param_len as u32 {
                 let x = ni + tb.param_start + q;
@@ -6996,10 +7077,21 @@ extend Gen {
     // branch (`early_moves`).
     fn branch2(self: &mut Self, test: Test, et: u32, ef: u32) {
         let b = self.b();
-        let mt = self.moves_needed(et);
-        let mf = self.moves_needed(ef);
-        let tt = b.edge_target(et);
-        let tf = b.edge_target(ef);
+        // A late edge goes to its stub past the blocks, which moves (`lv::Live::late`).
+        let lt = self.lv.late_index(self.lv.order[self.pos as usize], et);
+        let lf = self.lv.late_index(self.lv.order[self.pos as usize], ef);
+        let mt = lt == NONE && self.moves_needed(et);
+        let mf = lf == NONE && self.moves_needed(ef);
+        let tt = if lt != NONE {
+            b.blocks.len() as u32 + lt
+        } else {
+            b.edge_target(et)
+        };
+        let tf = if lf != NONE {
+            b.blocks.len() as u32 + lf
+        } else {
+            b.edge_target(ef)
+        };
         let q = self.pos as usize + 1;
         let next = if q < self.lv.order.len() && !self.crosses(self.lv.order[q]) {
             self.lv.order[q]
@@ -7074,6 +7166,12 @@ extend Gen {
         self.edge_homes(t);
         if op == O_JMP {
             self.spill_live_out();
+            let li = self.lv.late_index(self.lv.order[self.pos as usize], t.a);
+            if li != NONE {
+                // Its moves wait in its stub past the blocks (`lv::Live::late`).
+                self.goto(b.blocks.len() as u32 + li, true);
+                return true;
+            }
             self.edge_moves(t.a);
             self.goto(b.edge_target(t.a), false);
             return true;

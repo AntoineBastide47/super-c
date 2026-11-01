@@ -1004,8 +1004,8 @@ b0(v0: i64):
 
 // Loads of every 2nd element vectorize: the vectors from each field on, their even lanes (`vunzip`), and
 // the loop runs the last iteration, so no vector reads past the element it reads; the 2 interleaved
-// copies (4 `vunzip`), then one vector at a time for what they leave (2). A sum through indices a load
-// gives (a gather) interleaves scalar copies.
+// copies (4 `vunzip`), whose 8 lanes leave too few for one vector at a time (`EPI_LANES`). A sum through
+// indices a load gives (a gather) interleaves scalar copies.
 @test
 fn strided_and_gathered_loads_vectorize() {
     let src = M"(lir ptr 8
@@ -1119,7 +1119,7 @@ b0(v0: i64):
 )";
     let (b, a) = optimized(src, VECTOR);
     let m = text_of(&a, "mag");
-    assert(count(&m, "vunzip.v4i32") == 6 && m.contains("mul.v4i32"), m.as_str());
+    assert(count(&m, "vunzip.v4i32") == 4 && m.contains("mul.v4i32"), m.as_str());
     let g = text_of(&a, "gsum");
     assert_eq(count(&g, "load.i64"), 3);
     // `mag` reads 64 words as 32 pairs.
@@ -2375,7 +2375,9 @@ b3:
 // Scalar copies of a loop that counts down to 0 while it multiplies: each copy reads its own counter (a
 // factorial), the copies' products combined after them; a product by a value from before the loop
 // through a 32-bit counter (a power) takes twice the copies, the value's fourth power once per iteration
-// of the four, squared twice before them. The loop runs the rest.
+// of the four, squared twice before them; its counter feeds only its step and the exit test, so the copies'
+// loop counts its steps left down to 0 (`counter_free`), where the factorial's compares its counter with
+// the copies' end. The loop runs the rest.
 @test
 fn a_product_counting_down_interleaves_scalar_copies() {
     let src = M"(lir ptr 8
@@ -2418,6 +2420,7 @@ b3:
     let tp = text_of(&a, "pow");
     assert(count(&tf, "mul.i64") == 4 && tf.contains("novec"), tf.as_str());
     assert(count(&tp, "mul.i64") == 4 && tp.contains("mul.i64 v0, v0") && tp.contains("novec"), tp.as_str());
+    assert(!tp.contains("icmp.ugt") && tf.contains("icmp.ugt"), tp.as_str());
     let n0: []u64 = [0];
     let n5: []u64 = [5];
     let n7: []u64 = [7];
@@ -2430,6 +2433,10 @@ b3:
     same_outcome(&b, &a, "pow", p0, 1, false);
     same_outcome(&b, &a, "pow", p5, 243, false);
     same_outcome(&b, &a, "pow", p7, 128, false);
+    let p20: []u64 = [3, 20];
+    let p17: []u64 = [2, 17];
+    same_outcome(&b, &a, "pow", p20, 3486784401, false);
+    same_outcome(&b, &a, "pow", p17, 131072, false);
 }
 
 // Package text `text` read, then optimized with loop budgets `bu` for a target whose accesses step their
@@ -4895,12 +4902,12 @@ data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000
     }
 }
 
-// What an interleaved vector loop leaves vectorizes once more, one vector at a time (an epilogue), before
-// the scalar loop: 2 interleaved loads and 1 per iteration; no loop is left to vectorize.
+// What an interleaved vector loop of 16 lanes or more leaves vectorizes once more, one vector at a time (an
+// epilogue), before the scalar loop: 4 interleaved loads and 1 per iteration; no loop is left to vectorize.
+// 2 interleaved vectors of 4 lanes leave at most 7 elements: the scalar loop alone runs them.
 @test
 fn remainders_of_interleaved_vectors_vectorize() {
-    let (b, a) = optimized(
-        M"(lir ptr 8
+    let src = M"(lir ptr 8
 sym @w data global
 sym @sum fn global
 fn @sum
@@ -4923,13 +4930,17 @@ b2:
 b3:
   ret v6
 data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000700000008000000090000000a0000000b0000000c0000000d0000000e0000000f00000010000000110000001200000013000000140000001500000016000000170000001800000019000000
-)",
-        VECTOR,
-    );
+)";
+    let four = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 4, interleave: 4, fin: 0 };
+    let (b, a) = optimized(src, four);
     let s = text_of(&a, "sum");
-    assert(count(&s, "load.v4i32") == 3 && !s.contains(" epi"), s.as_str());
+    assert(count(&s, "load.v4i32") == 5 && !s.contains(" epi"), s.as_str());
+    let (_, a2) = optimized(src, VECTOR);
+    let s2 = text_of(&a2, "sum");
+    assert(count(&s2, "load.v4i32") == 2 && !s2.contains(" epi"), s2.as_str());
     for n in 0..26u64 {
         let x: []u64 = [n];
         same_outcome(&b, &a, "sum", x, n * (n + 1) / 2, false);
+        same_outcome(&b, &a2, "sum", x, n * (n + 1) / 2, false);
     }
 }
