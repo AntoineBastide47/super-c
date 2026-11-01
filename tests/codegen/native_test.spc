@@ -4583,6 +4583,227 @@ b6:
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Loops that step pointers (`lir::loops::pointer_ivs`), each step the first read of its pointer after an
+// access at offset 0: a pair of 8-byte loads, single 4-byte loads, a pair of stores, single stores,
+// 16-byte vectors in pairs and alone, scalar floats loaded and stored, a step down, a step past a pair's immediate (an `add`), and a
+// pointer read after its step (an `add`). arm64 steps them in the access (post-indexed `ldp`, `ldr`, `stp`, `str`).
+@test
+fn loops_that_step_pointers_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @pairs fn global
+sym @words fn global
+sym @scatter fn global
+sym @store1 fn global
+sym @vsum fn global
+sym @back fn global
+sym @far fn global
+sym @reread fn global
+sym @vone fn global
+sym @fscale fn global
+sym @ffill fn global
+fn @pairs
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = ptradd v0, v1 * 16
+  v4 = icmp.eq v1, v2
+  br v4, b2(v2), b1(v2, v0)
+b1(v5: i64, v6: ptr):
+  v7 = load.i64 v6 align 3
+  v8 = load.i64 v6+8 align 3
+  v9 = mul.i64 v7, v8
+  v10 = add.i64 v5, v9
+  v11 = ptradd v6+16
+  v12 = icmp.ne v11, v3
+  br v12, b1(v10, v11), b2(v10)
+b2(v13: i64):
+  ret v13
+fn @words
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i32 0
+  v3 = ptradd v0, v1 * 4
+  v4 = iconst.i64 0
+  v5 = icmp.eq v1, v4
+  v6 = iconst.i32 31
+  br v5, b2(v2), b1(v2, v0)
+b1(v7: i32, v8: ptr):
+  v9 = load.i32 v8 align 2
+  v10 = mul.i32 v7, v6
+  v11 = add.i32 v10, v9
+  v12 = ptradd v8+4
+  v13 = icmp.ne v12, v3
+  br v13, b1(v11, v12), b2(v11)
+b2(v14: i32):
+  ret v14
+fn @scatter
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = ptradd v0, v1 * 16
+  v4 = icmp.eq v1, v2
+  v5 = iconst.i64 1
+  br v4, b2, b1(v2, v0)
+b1(v6: i64, v7: ptr):
+  v8 = sub.i64 v2, v6
+  store v6, v7 align 3
+  store v8, v7+8 align 3
+  v9 = add.i64 v6, v5
+  v10 = ptradd v7+16
+  v11 = icmp.ne v10, v3
+  br v11, b1(v9, v10), b2
+b2:
+  ret
+fn @store1
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = ptradd v0, v1 * 4
+  v4 = icmp.eq v1, v2
+  v5 = iconst.i32 7
+  v6 = iconst.i32 5
+  br v4, b2, b1(v6, v0)
+b1(v7: i32, v8: ptr):
+  store v7, v8 align 2
+  v9 = mul.i32 v7, v5
+  v10 = ptradd v8+4
+  v11 = icmp.ne v10, v3
+  br v11, b1(v9, v10), b2
+b2:
+  ret
+fn @vsum
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = ptradd v0, v1 * 32
+  v4 = wconst.v4i32 0x0, 0x0
+  v5 = icmp.eq v1, v2
+  br v5, b2(v4), b1(v4, v0)
+b1(v6: v4i32, v7: ptr):
+  v8 = load.v4i32 v7 align 2
+  v9 = load.v4i32 v7+16 align 2
+  v10 = add.v4i32 v6, v8
+  v11 = add.v4i32 v10, v9
+  v12 = ptradd v7+32
+  v13 = icmp.ne v12, v3
+  br v13, b1(v11, v12), b2(v11)
+b2(v14: v4i32):
+  v15 = vop.reduce_add.i32 (v14)
+  ret v15
+fn @back
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = ptradd v0, v1 * 16
+  v4 = ptradd v3-16
+  v5 = ptradd v0-16
+  v6 = iconst.i64 3
+  jmp b1(v2, v4)
+b1(v7: i64, v8: ptr):
+  v9 = load.i64 v8 align 3
+  v10 = load.i64 v8+8 align 3
+  v11 = mul.i64 v7, v6
+  v12 = add.i64 v11, v9
+  v13 = sub.i64 v12, v10
+  v14 = ptradd v8-16
+  v15 = icmp.ne v14, v5
+  br v15, b1(v13, v14), b2(v13)
+b2(v16: i64):
+  ret v16
+fn @far
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = ptradd v0, v1 * 4096
+  v4 = icmp.eq v1, v2
+  br v4, b2(v2), b1(v2, v0)
+b1(v5: i64, v6: ptr):
+  v7 = load.i64 v6 align 3
+  v8 = load.i64 v6+8 align 3
+  v9 = sub.i64 v7, v8
+  v10 = add.i64 v5, v9
+  v11 = ptradd v6+4096
+  v12 = icmp.ne v11, v3
+  br v12, b1(v10, v11), b2(v10)
+b2(v13: i64):
+  ret v13
+fn @reread
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = ptradd v0, v1 * 16
+  v4 = ptradd v3-16
+  jmp b1(v2, v0)
+b1(v5: i64, v6: ptr):
+  v7 = load.i64 v6 align 3
+  v8 = load.i64 v6+8 align 3
+  v9 = add.i64 v7, v8
+  v10 = add.i64 v5, v9
+  v11 = ptradd v6+16
+  v12 = icmp.ne v6, v4
+  br v12, b1(v10, v11), b2(v10)
+b2(v13: i64):
+  ret v13
+fn @vone
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = ptradd v0, v1 * 16
+  v4 = wconst.v4i32 0x0, 0x0
+  v5 = icmp.eq v1, v2
+  br v5, b2(v4), b1(v4, v0)
+b1(v6: v4i32, v7: ptr):
+  v8 = load.v4i32 v7 align 2
+  v9 = add.v4i32 v6, v8
+  v10 = ptradd v7+16
+  v11 = icmp.ne v10, v3
+  br v11, b1(v9, v10), b2(v9)
+b2(v12: v4i32):
+  v13 = vop.reduce_add.i32 (v12)
+  ret v13
+fn @fscale
+  sig (ptr, ptr, i64, f64) -> f64
+b0(v0: ptr, v1: ptr, v2: i64, v3: f64):
+  v4 = iconst.i64 0
+  v5 = ptradd v1, v2 * 8
+  v6 = fconst.f64 0x0
+  v7 = icmp.eq v2, v4
+  br v7, b2(v6), b1(v6, v1, v0)
+b1(v8: f64, v9: ptr, v10: ptr):
+  v11 = load.f64 v9 align 3
+  v12 = fmul.f64 v11, v3
+  store v12, v10 align 3
+  v13 = fadd.f64 v8, v12
+  v14 = ptradd v9+8
+  v15 = ptradd v10+8
+  v16 = icmp.ne v14, v5
+  br v16, b1(v13, v14, v15), b2(v13)
+b2(v17: f64):
+  ret v17
+fn @ffill
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = ptradd v0, v2 * 8
+  v5 = icmp.eq v2, v3
+  br v5, b2, b1(v0)
+b1(v6: ptr):
+  v7 = load.f64 v1 align 3
+  store v7, v6 align 3
+  v8 = ptradd v6+8
+  v9 = icmp.ne v8, v4
+  br v9, b1(v8), b2
+b2:
+  ret
+)";
+    let drv = "#include <stdint.h>\nlong long pairs(const long long *, long long);\nint words(const int *, long long);\nvoid scatter(long long *, long long);\nvoid store1(int *, long long);\nint vsum(const int *, long long);\nlong long back(const long long *, long long);\nlong long far(const long long *, long long);\nlong long reread(const long long *, long long);\nint vone(const int *, long long);\ndouble fscale(double *, const double *, long long, double);\nvoid ffill(double *, const double *, long long);\nstatic long long a[2048];\nstatic double fd[64], fo[64];\nstatic long long s[64];\nint main(void) {\n  for (int i = 0; i < 2048; i++) a[i] = (long long)((i * 2654435761u) % 1000u) - 500;\n  const long long ns[4] = {1, 3, 8, 4};\n  for (int k = 0; k < 4; k++) {\n    long long n = ns[k];\n    long long e = 0;\n    for (long long i = 0; i < n; i++) e += a[2 * i] * a[2 * i + 1];\n    if (pairs(a, n) != e) return 1;\n    const int *w = (const int *)a;\n    uint32_t ew = 0;\n    for (long long i = 0; i < 4 * n; i++) ew = ew * 31u + (uint32_t)w[i];\n    if ((uint32_t)words(w, 4 * n) != ew) return 2;\n    scatter(s, n);\n    for (long long i = 0; i < n; i++) if (s[2 * i] != i || s[2 * i + 1] != -i) return 3;\n    int *q = (int *)s;\n    store1(q, 2 * n);\n    uint32_t x = 5;\n    for (long long i = 0; i < 2 * n; i++) { if ((uint32_t)q[i] != x) return 4; x *= 7u; }\n    uint32_t ev = 0;\n    for (long long i = 0; i < 8 * n; i++) ev += (uint32_t)w[i];\n    if ((uint32_t)vsum(w, n) != ev) return 5;\n    long long eb = 0;\n    for (long long i = n - 1; i >= 0; i--) eb = eb * 3 + a[2 * i] - a[2 * i + 1];\n    if (back(a, n) != eb) return 6;\n    long long ef = 0;\n    for (long long i = 0; i < (n < 4 ? n : 4); i++) ef += a[512 * i] - a[512 * i + 1];\n    if (far(a, n < 4 ? n : 4) != ef) return 7;\n    long long er = 0;\n    for (long long i = 0; i < n; i++) er += a[2 * i] + a[2 * i + 1];\n    if (reread(a, n) != er) return 8;\n    uint32_t eo = 0;\n    for (long long i = 0; i < 4 * n; i++) eo += (uint32_t)w[i];\n    if ((uint32_t)vone(w, n) != eo) return 10;\n    for (int i = 0; i < 64; i++) fd[i] = (double)(i * 3 - 50) / 8.0;\n    double ef2 = 0.0;\n    for (long long i = 0; i < 2 * n; i++) ef2 += fd[i] * 1.5;\n    if (fscale(fo, fd, 2 * n, 1.5) != ef2) return 11;\n    for (long long i = 0; i < 2 * n; i++) if (fo[i] != fd[i] * 1.5) return 12;\n    ffill(fo, &fd[5], 3 * n);\n    for (long long i = 0; i < 3 * n; i++) if (fo[i] != fd[5]) return 13;\n  }\n  if (pairs(a, 0) != 0 || words((const int *)a, 0) != 0 || vsum((const int *)a, 0) != 0 || far(a, 0) != 0) return 9;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // Vector products added to or subtracted from an accumulator, the product first or second, of 1-, 2- and
 // 4-byte lanes in 8- and 16-byte vectors, the accumulator read again after (arm64: MLA and MLS).
 @test

@@ -324,6 +324,8 @@ pub(package) struct Gen {
     zero_from: u32,
     zero_end: u32,
     rels: Vector<CRel>,
+    kcon: Vector<(u32, u32, u32)>, // the body's read-only constants: first word in `kwords`, words, symbol
+    kwords: Vector<u64>, // the words of `kcon`'s constants (`const_sym`)
     osym: Vector<u32>, // per package symbol, its object symbol in this generator's object (NONE until used)
     // Calls.
     lay: ab::CallLayout,
@@ -478,6 +480,8 @@ extend Gen {
             zero_from: 0,
             zero_end: 0,
             rels: Vector::<CRel>::new(),
+            kcon: Vector::<(u32, u32, u32)>::new(),
+            kwords: Vector::<u64>::new(),
             osym: Vector::<u32>::new(),
             lay: ab::CallLayout::new(),
             itpl: Vector::<str<'static>>::new(),
@@ -840,6 +844,31 @@ extend Gen {
             return NOREG;
         }
         return r;
+    }
+
+    // Whether commutative instruction `i` should write over its second operand `b` (in `rb`), not its first
+    // (in `ra`): `b` dies here, and the return or call after takes `i` in `rb` (`next_reg`; a jump's would
+    // place a parameter's home, which may take `rb`).
+    fn swaps(self: &mut Self, i: u32, b: Value, ra: u8, rb: u8) bool {
+        let xb = self.vx(b);
+        let bd = self.b();
+        let bk = bd.blocks[self.lv.def_blk[i as usize] as usize];
+        let nx = if i + 1 < bk.start + bk.len {
+            bd.insts[i as usize + 1].op
+        } else {
+            O_JMP
+        };
+        if nx != O_RET && nx != O_CALL && nx != O_CALLIND || ra == rb || self.owner[rb as usize] != xb || self.lv.uses[xb as usize] != 0 || self.lv.end[xb as usize] != self.pos || self.va[xb as usize].home == H_FIXED {
+            return false;
+        }
+        // `b` holds `rb` until the instruction writes it.
+        let (held, lock) = (self.held, self.lock);
+        self.held &= ~bit(rb);
+        self.lock &= ~bit(rb);
+        let n = self.next_reg(i);
+        self.held = held;
+        self.lock = lock;
+        return n == rb;
     }
 
     // A register for the result of value `v` that holds operand `a`'s bits (in `ra`) for a two-operand
@@ -2265,22 +2294,21 @@ extend Gen {
         self.c.mov_ri(rd, k);
     }
 
-    // xmm register `r` = the float of bits `bits` (`d` double).
+    // xmm register `r` = the float of bits `bits` (`d` double): 0 by `xorps`, else a load of the constant
+    // (`const_sym`).
     fn fconst(self: &mut Self, r: u8, d: bool, bits: u64) {
         if bits == 0 {
             self.c.sse_rr(0, 0x0F57, r - V0, r - V0);
             return;
         }
-        self.c.mov_ri(S1, bits);
-        self.c.movd_to_x(
-            if d {
-                8u32
-            } else {
-                4u32
-            },
-            r - V0,
-            S1,
-        );
+        let n: u32 = if d {
+            8
+        } else {
+            4
+        };
+        let k = self.const_sym([bits]);
+        self.c.vload(n, r - V0, x::rip());
+        self.reloc_rip(x::R_PC32, k, 0);
     }
 
     // Register `r` = the address of body symbol `s` plus `addend`.
@@ -2677,6 +2705,8 @@ extend Gen {
         self.zero_from = 0;
         self.zero_end = 0;
         self.rels.truncate(0);
+        self.kcon.truncate(0);
+        self.kwords.truncate(0);
         self.free_slots.truncate(0);
         self.taken.truncate(0);
         self.shared.truncate(0);
@@ -4025,7 +4055,7 @@ extend Gen {
         let rd = if z != NOREG {
             z
         } else {
-            self.def(i)
+            self.def_cmp(i)
         };
         let held = self.held_end == self.c.len();
         self.c.setcc(cc, rd);
@@ -4053,6 +4083,19 @@ extend Gen {
             // The value has other uses; the branch or select after reads the flags all the same.
             self.cond = Cond { inst: self.vx(i), cc: cc };
         }
+    }
+
+    // The register for comparison `i`'s result when none was zeroed before it: its first operand's, which
+    // the comparison read, when that dies here (`def_over`), else `def`'s.
+    fn def_cmp(self: &mut Self, i: u32) u8 {
+        let t = self.b().insts[i as usize];
+        if t.op == O_ICMP && t.a != VNONE && (t.a & VFLAG) == 0 {
+            let ra = self.va[self.vx(t.a) as usize].reg;
+            if ra != NOREG {
+                return self.def_over(i, t.a, ra);
+            }
+        }
+        return self.def(i);
     }
 
     fn icmp(self: &mut Self, i: u32, t: Inst) bool {
@@ -4564,7 +4607,7 @@ extend Gen {
         }
         if alu {
             let aop = alu_of(op);
-            let ra = self.reg(t.a);
+            let mut ra = self.reg(t.a);
             // A sum whose first operand stays live, or whose result the next instruction wants in another
             // register (a return's, an argument's, a jump's parameter's, `next_reg`): `lea` writes that
             // register, where `add` would take a copy first or after.
@@ -4602,12 +4645,18 @@ extend Gen {
                 self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.pos };
                 return true;
             }
-            let rb = self.reg(t.b);
+            let mut rb = self.reg(t.b);
             // An `and` of a value whose bits above the type are 0, an `or` or `xor` of two: so are the
             // result's.
             let ca = self.va[self.vx(t.a) as usize].clean;
             let cb = self.va[self.vx(t.b) as usize].clean;
-            let rd = self.def_over(i, t.a, ra);
+            let mut a = t.a;
+            if op != O_SUB && self.swaps(i, t.b, ra, rb) {
+                a = t.b;
+                rb = ra;
+                ra = self.reg(t.b);
+            }
+            let rd = self.def_over(i, a, ra);
             if rd != ra && op == O_ADD {
                 self.lea_to(sz, rd, x::ix(ra, rb, 0, 0));
                 return true;
@@ -4623,7 +4672,7 @@ extend Gen {
             return true;
         }
         if op == O_MUL {
-            let ra = self.reg(t.a);
+            let mut ra = self.reg(t.a);
             if kc && self.mul_const(i, t.a, sz, ra, k) {
                 return true;
             }
@@ -4632,8 +4681,14 @@ extend Gen {
                 self.c.imul_ri(sz, rd, ra, k);
                 return true;
             }
-            let rb = self.reg(t.b);
-            let rd = self.def_from(i, t.a, ra);
+            let mut rb = self.reg(t.b);
+            let mut a = t.a;
+            if self.swaps(i, t.b, ra, rb) {
+                a = t.b;
+                rb = ra;
+                ra = self.reg(t.b);
+            }
+            let rd = self.def_from(i, a, ra);
             self.c.imul_rr(sz, rd, rb);
             return true;
         }
@@ -4941,40 +4996,38 @@ extend Gen {
         }
     }
 
-    // `r` (an xmm register) with its sign bit cleared (`abs`) or flipped, through r11 and xmm15.
+    // `r` (an xmm register) with its sign bit cleared (`abs`) or flipped.
     fn fsign(self: &mut Self, d: bool, abs: bool, r: u8) {
         let sb = if d {
             0x8000000000000000u64
         } else {
             0x80000000u64
         };
-        self.c.mov_ri(
-            S1,
-            if abs {
-                ~sb & ast_mask(d)
-            } else {
-                sb
-            },
-        );
-        self.c.movd_to_x(
-            if d {
-                8u32
-            } else {
-                4u32
-            },
-            self.vs1 - V0,
-            S1,
-        );
-        self.c.sse_rr(
+        // `andps` or `xorps` with the mask in every lane (`const_sym`).
+        let m = if abs {
+            ~sb & ast_mask(d)
+        } else {
+            sb
+        };
+        let w = if d {
+            m
+        } else {
+            m | m << 32
+        };
+        let k = self.const_sym([w, w]);
+        self.c.rm(
             0,
             if abs {
                 0x0F54u32
             } else {
                 0x0F57u32
             },
+            false,
             r - V0,
-            self.vs1 - V0,
+            x::rip(),
+            false,
         );
+        self.reloc_rip(x::R_PC32, k, 0);
     }
 
     fn convert(self: &mut Self, i: u32, t: Inst) bool {
@@ -7345,13 +7398,39 @@ extend Gen {
 
     // A local read-only symbol of the object holding table `lk`'s bytes.
     fn table_sym(self: &mut Self, lk: &sws::Lookup) u32 {
+        return self.rodata_sym(lk.bytes[0..lk.bytes.len()], lk.align_log2);
+    }
+
+    // A local read-only symbol of the object holding `bytes`, aligned to `1 << align_log2`.
+    fn rodata_sym(self: &mut Self, bytes: []u8, align_log2: u8) u32 {
         let o = self.obj();
         let nm = format("__sc_tab.{}", o.syms.len());
         let k = o.sym(&nm);
-        let n = lk.bytes.len() as u64;
-        let at = o.define(k, ob::S_RODATA, lk.align_log2, n, 0);
-        o.put(ob::S_RODATA, lk.bytes[0..lk.bytes.len()]);
+        let n = bytes.len() as u64;
+        let at = o.define(k, ob::S_RODATA, align_log2, n, 0);
+        o.put(ob::S_RODATA, bytes);
         o.pad_to(ob::S_RODATA, at + n);
+        return k;
+    }
+
+    // The read-only symbol holding words `ws` (little-endian), aligned to their size up to 64 bytes: one per
+    // contents in a body (`kcon`), as clang's constant pool.
+    fn const_sym(self: &mut Self, ws: []u64) u32 {
+        for q in 0..self.kcon.len() {
+            let (at, n, ks) = self.kcon[q];
+            if n as usize == ws.len() && self.kwords[at as usize..(at + n) as usize] == ws {
+                return ks;
+            }
+        }
+        let mut bs = Vector::<u8>::with_capacity(8 * ws.len());
+        for q in 0..ws.len() {
+            for k in 0..8u64 {
+                bs.push((ws[q] >> 8 * k) as u8);
+            }
+        }
+        let k = self.rodata_sym(&bs, (8 * ws.len() as u32).min(64).trailing_zeros() as u8);
+        self.kcon.push((self.kwords.len() as u32, ws.len() as u32, k));
+        self.kwords.extend_from_slice(ws);
         return k;
     }
 
@@ -8867,18 +8946,15 @@ extend Gen {
     }
 
     // Vector constant `t` into a register for `i`: 0 by `pxor`, all ones by `pcmpeqd` (`vpternlogd` 0xFF
-    // for 64 bytes), one 8-byte word repeated through r11 and a broadcast, else its words through a slot of
-    // the frame.
+    // for 64 bytes), else a load of its words (`wconst_load`).
     fn wconst_reg(self: &mut Self, i: u32, t: Inst) {
         let b = self.b();
         let mut zero = true;
         let mut ones = true;
-        let mut same = true;
         for k in 0..t.b {
             let w = b.words[(t.a + k) as usize];
             zero = zero && w == 0;
             ones = ones && w == ~0u64;
-            same = same && w == b.words[t.a as usize];
         }
         let nb = type_bytes(t.ty, 8);
         let rd = self.vec_def(i) - V0;
@@ -8888,15 +8964,8 @@ extend Gen {
             } else if ones {
                 self.c.evex_rr(0x66, 3, 0x25, false, rd, rd, rd);
                 self.c.byte(0xFF);
-            } else if same {
-                self.zmm_splat64(rd, b.words[t.a as usize]);
             } else {
-                let s = self.slot_alloc(64, 16) as i32;
-                for k in 0..8u32 {
-                    self.c.mov_ri(S1, b.words[(t.a + k) as usize]);
-                    self.c.store(8, S1, x::at(x::RSP, s + 8 * k as i32));
-                }
-                self.c.vload(64, rd, x::at(x::RSP, s));
+                self.wconst_load(rd, t);
             }
             return;
         }
@@ -8916,15 +8985,8 @@ extend Gen {
                     rd,
                     rd,
                 );
-            } else if same {
-                self.ymm_splat64(rd, b.words[t.a as usize]);
             } else {
-                let s = self.slot_alloc(32, 16) as i32;
-                for k in 0..4u32 {
-                    self.c.mov_ri(S1, b.words[(t.a + k) as usize]);
-                    self.c.store(8, S1, x::at(x::RSP, s + 8 * k as i32));
-                }
-                self.c.vload(32, rd, x::at(x::RSP, s));
+                self.wconst_load(rd, t);
             }
             return;
         }
@@ -8941,19 +9003,16 @@ extend Gen {
             );
             return;
         }
-        self.c.mov_ri(S1, b.words[t.a as usize]);
-        self.c.movd_to_x(8, rd, S1);
-        if nb == 16 {
-            let hi = b.words[t.a as usize + 1];
-            if same {
-                self.c.sse_rr(0x66, 0x0F6C, rd, rd);
-            } else {
-                let s = self.vs1 - V0;
-                self.c.mov_ri(S1, hi);
-                self.c.movd_to_x(8, s, S1);
-                self.c.sse_rr(0x66, 0x0F6C, rd, s);
-            }
-        }
+        self.wconst_load(rd, t);
+    }
+
+    // xmm, ymm or zmm `rd` (its number in the file) = wide constant `t`, loaded from the body's constants
+    // (`const_sym`).
+    fn wconst_load(self: &mut Self, rd: u8, t: Inst) {
+        let b = self.b();
+        let k = self.const_sym(b.words[t.a as usize..(t.a + t.b) as usize]);
+        self.c.vload(type_bytes(t.ty, 8), rd, x::rip());
+        self.reloc_rip(x::R_PC32, k, 0);
     }
 
     // ymm `r` = every 8-byte lane `x`: through r11 (`vmovq`), then `vpbroadcastq`.

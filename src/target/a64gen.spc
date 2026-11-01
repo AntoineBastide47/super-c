@@ -108,6 +108,7 @@ pub(package) struct Gen {
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
     paired: u32, // the last access the one before it took into an `ldp` or `stp` (NONE: none)
+    stepped: Vector<u32>, // the pointer steps accesses before them took as their post-index (`post_step`)
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
     csave: Vector<(u8, i64)>, // the scratch homes saved around a rare call (`save_scratch`)
     rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
@@ -213,6 +214,7 @@ extend Gen {
             pos: 0,
             cur: 0,
             paired: NONE,
+            stepped: Vector::<u32>::new(),
             taken: Vector::<u64>::new(),
             csave: Vector::<(u8, i64)>::new(),
             rarec: Vector::<bool>::new(),
@@ -2462,6 +2464,15 @@ extend Gen {
                 self.end_inst();
                 continue;
             }
+            let mut took = false;
+            for q in 0..self.stepped.len() {
+                took = took || self.stepped[q] == i;
+            }
+            if took {
+                self.stepped.retain(|j: &u32| *j != i);
+                self.end_inst();
+                continue;
+            }
             let saved = self.save_scratch(i);
             if !self.inst(i) {
                 return false;
@@ -3046,7 +3057,7 @@ extend Gen {
         if op == O_BSWAP {
             let bits = type_bits(t.ty, self.ptr);
             let r = self.reg(t.a) as u32;
-            let rd = self.def(i) as u32;
+            let rd = self.def_step(i) as u32;
             let opc = if bits == 16 {
                 a::DP1_REV16
             } else if bits == 32 {
@@ -3082,7 +3093,7 @@ extend Gen {
             let ra = self.reg(t.a);
             let rb = self.reg(t.b);
             let rc = self.reg(t.c);
-            let rd = self.def(i);
+            let rd = self.def_step(i);
             self.emit(a::fmadd(t.ty == T_F64, false, rd - V0, ra - V0, rb - V0, rc - V0));
             return true;
         }
@@ -3094,7 +3105,7 @@ extend Gen {
             if bits == 64 {
                 let ra = self.reg(t.a);
                 let rb = self.reg(t.b);
-                let rd = self.def(i);
+                let rd = self.def_step(i);
                 self.emit(a::mulh(sgn, rd, ra, rb));
                 return true;
             }
@@ -3108,7 +3119,7 @@ extend Gen {
             } else {
                 self.ext(t.b, sgn, bits)
             };
-            let rd = self.def(i);
+            let rd = self.def_step(i);
             self.emit(a::mull(sgn, rd, ra, rb));
             if sgn {
                 self.emit(a::asr_imm(true, rd, rd, bits));
@@ -3124,7 +3135,7 @@ extend Gen {
             let d = t.ty == T_F64;
             let ra = self.reg(t.a);
             if op == O_FNEG || op == O_FSQRT {
-                let rd = self.def(i);
+                let rd = self.def_step(i);
                 self.emit(
                     a::fp1(d, a::on(op == O_FNEG, a::FP_NEG) | a::on(op == O_FSQRT, a::FP_SQRT), rd - V0, ra - V0),
                 );
@@ -3665,7 +3676,7 @@ extend Gen {
             self.emit(a::logic_imm(false, 1, a::IP0, r, a::logical_imm(1u64 << bits as u64, false)));
             r = a::IP0;
         }
-        let rd = self.def(i) as u32;
+        let rd = self.def_step(i) as u32;
         self.va.index_mut(i as usize).clean = true;
         if t.op == O_POPCNT {
             // A 32-bit move for a narrower count: the register's bits above 32 are no part of the value.
@@ -3743,7 +3754,7 @@ extend Gen {
         let small = bits < 32;
         if op == O_NEG || op == O_NOT {
             let ra = self.reg(t.a);
-            let rd = self.def(i);
+            let rd = self.def_step(i);
             if op == O_NEG {
                 self.emit(a::addsub_reg(sf, 1, false, rd, a::ZR, ra, 0, 0));
             } else {
@@ -3770,13 +3781,13 @@ extend Gen {
             if amt == VNONE {
                 // EXTR of `x:y` (ROR when they are one value).
                 let ry = self.reg(rot.y) as u32;
-                let rd = self.def(i) as u32;
+                let rd = self.def_step(i) as u32;
                 self.emit(a::extr(sf, rd, ra, ry, (bits - kr) % bits));
                 return true;
             }
             let n = lv::rot_amount(self.b(), &self.lv.pfold, rot);
             let rn = self.reg(n) as u32;
-            let rd = self.def(i) as u32;
+            let rd = self.def_step(i) as u32;
             if right {
                 self.emit(a::dp2(sf, a::DP2_RORV, rd, ra, rn));
             } else {
@@ -3926,7 +3937,7 @@ extend Gen {
             let _ = self.const_of(s.b, &mut sh);
             let w = (k + 1).trailing_zeros() as u32;
             let rn = self.reg(s.a);
-            let rd = self.def(i);
+            let rd = self.def_step(i);
             self.emit(a::bitfield(sf, 2, rd, rn, sh as u32, sh as u32 + w - 1));
             self.va.index_mut(i as usize).clean = true;
             return true;
@@ -3965,7 +3976,7 @@ extend Gen {
             let li = a::logical_imm(k, sf);
             if li != 0xFFFFFFFF {
                 let ra = self.reg(t.a);
-                let rd = self.def(i);
+                let rd = self.def_step(i);
                 let opc = if op == O_AND {
                     0u32
                 } else if op == O_OR {
@@ -3983,7 +3994,7 @@ extend Gen {
         }
         if kc && (op == O_SHL || op == O_LSHR || op == O_ASHR) && k < bits as u64 {
             let ra = self.reg(t.a);
-            let rd = self.def(i);
+            let rd = self.def_step(i);
             let s = k as u32;
             if op == O_SHL {
                 self.emit(a::lsl_imm(sf, rd, ra, s));
@@ -4506,7 +4517,8 @@ extend Gen {
         }
         let (base, boff) = self.addr(t.a, 0);
         if t.b == VNONE {
-            let rd = self.def(i);
+            // A pointer's step takes the register of the loop parameter it passes to (`def_step`).
+            let rd = self.def_step(i);
             self.add_off(rd, base, boff + off);
             return true;
         }
@@ -4597,8 +4609,9 @@ extend Gen {
     }
 
     // Access `i` and the next one (`pairs`) as one `ldp` or `stp` at `base` + `off`, when the offset fits the
-    // pair's scaled 7 bits; the next one then emits nothing. Whether it did.
-    fn pair(self: &mut Self, i: u32, base: u32, off: i64) bool {
+    // pair's scaled 7 bits, post-indexed by pointer step `step` (`post_step`) unless NONE; the next one then
+    // emits nothing. Whether it did.
+    fn pair(self: &mut Self, i: u32, base: u32, off: i64, step: u32) bool {
         let b = self.b();
         let t = b.insts[i as usize];
         let u = b.insts[i as usize + 1];
@@ -4614,7 +4627,7 @@ extend Gen {
         }
         // Runs of four 8-byte stores of 0 at consecutive offsets: a zeroed q register, stored twice per 32
         // bytes (clang's `movi` and `stp q`).
-        let quads = if !load && size == 8 && off % 16 == 0 {
+        let quads = if !load && size == 8 && off % 16 == 0 && step == NONE {
             self.zero_quads(i)
         } else {
             0
@@ -4649,13 +4662,85 @@ extend Gen {
             r2
         };
         self.frame_use(base);
-        self.emit(a::ldstp(m, load, 2, n1, n2, base, off as i32));
+        if step != NONE {
+            self.emit(a::ldstp(m, load, 1, n1, n2, base, self.b().insts[step as usize].c as i32));
+            self.took_step(step);
+        } else {
+            self.emit(a::ldstp(m, load, 2, n1, n2, base, off as i32));
+        }
         if load && !vr {
             self.va.index_mut(i as usize).clean = size < 8;
             self.va.index_mut(i as usize + 1).clean = size < 8;
         }
         self.paired = i + 1;
         return true;
+    }
+
+    // The pointer step (`ptradd p, VNONE, k`, `k` within `lo` to `hi`, a multiple of `align`) that access
+    // `i`, and the next one when `n` is 2, through block parameter `p` at offset 0 takes as its post-index
+    // (`lir::loops::pointer_ivs`): the first instruction after them to read `p`, which nothing after reads,
+    // that the back edge passes to `p` and `def_step` gives `p`'s register; none when a store writes `p`.
+    // NONE for none. Its result's register is then `p`'s (`took_step`), locked until the access ends.
+    fn post_step(self: &mut Self, i: u32, n: u32, lo: i64, hi: i64, align: i64) u32 {
+        let b = self.b();
+        let t = b.insts[i as usize];
+        let p = t.a;
+        if t.c != 0 || p == VNONE || (p & VPARAM) == 0 || (p & VFLAG) != 0 || self.lv.fold[i as usize] {
+            return NONE;
+        }
+        for q in i..i + n {
+            if b.insts[q as usize].op == O_STORE && b.insts[q as usize].b == p {
+                return NONE;
+            }
+        }
+        let ni = b.insts.len() as u32;
+        let px = ni + (p & ~VPARAM);
+        let va = self.va[px as usize];
+        if va.home != H_FIXED || va.reg == NOREG || self.owner[va.reg as usize] != px {
+            return NONE;
+        }
+        let k = self.lv.def_blk[i as usize];
+        let bk = b.blocks[k as usize];
+        let tm = b.insts[(bk.start + bk.len - 1) as usize];
+        for j in i + n..bk.start + bk.len {
+            let us = self.lv.uses_of(j);
+            let mut reads = false;
+            for q in 0..us.len() {
+                reads = reads || us[q] == p;
+            }
+            if !reads {
+                continue;
+            }
+            let s = b.insts[j as usize];
+            let st = (s.c as i32) as i64;
+            // `def_step`'s parameter register for a result that dies in its block.
+            if s.op != O_PTRADD || s.a != p || s.b != VNONE || st < lo || st > hi || st % align != 0 || self.lv.end[j as usize] != self.pos || self.lv.pos[k as usize] != self.pos || self.va[j as usize].home != H_NONE || self.fix_class(
+                j,
+            ) != FIX_NONE || self.crosses_call(j) || self.lv.back_param(b, tm, j, self.pos) != px || self.lv.end[px as usize] < self.pos || self.lv.reads_after(
+                b,
+                k,
+                j,
+                p,
+            ) {
+                return NONE;
+            }
+            self.lock |= bit(va.reg);
+            return j;
+        }
+        return NONE;
+    }
+
+    // Pointer step `j` (`post_step`), which the access took: its result in its parameter's register, as
+    // `def_step` gives it; its instruction emits nothing.
+    fn took_step(self: &mut Self, j: u32) {
+        let b = self.b();
+        let s = b.insts[j as usize];
+        let r = self.va[(b.insts.len() as u32 + (s.a & ~VPARAM)) as usize].reg;
+        let w = self.va.index_mut(j as usize);
+        w.reg = r;
+        w.dirty = false;
+        w.clean = false;
+        self.stepped.push(j);
     }
 
     // How many runs of four stores from store `i` on in its block (at most ZERO_QUADS) each write 0 to 8
@@ -4699,9 +4784,34 @@ extend Gen {
         }
         if self.pairs(i) {
             let (base, off) = self.addr(t.a, t.c as i32);
-            if self.pair(i, base, off) {
+            let size = type_bytes(ty, self.ptr) as i64;
+            let step = self.post_step(i, 2, -64 * size, 63 * size, size);
+            if self.pair(i, base, off, step) {
                 return true;
             }
+        }
+        let step = if in_mem(ty) && !in_vreg(ty) || self.pairs(i) {
+            NONE
+        } else {
+            self.post_step(i, 1, -256, 255, 1)
+        };
+        if step != NONE {
+            let (base, _) = self.addr(t.a, 0);
+            let rd = if in_vreg(ty) {
+                self.vec_def(i)
+            } else {
+                self.def_step(i)
+            };
+            // A v register's number within its file.
+            let rt = if rd >= V0 {
+                rd - V0
+            } else {
+                rd
+            };
+            self.emit(a::ldst_post(mkind(ty, true), true, rt, base, self.b().insts[step as usize].c as i32));
+            self.va.index_mut(i as usize).clean = !is_v(ty) && type_bits(ty, self.ptr) < 64;
+            self.took_step(step);
+            return true;
         }
         if self.lv.fold[i as usize] {
             let (rn, rm, sc, opt) = self.folded(i);
@@ -4943,9 +5053,36 @@ extend Gen {
         }
         if self.pairs(self.cur) {
             let (base, off) = self.addr(t.a, t.c as i32);
-            if self.pair(self.cur, base, off) {
+            let size = type_bytes(ty, self.ptr) as i64;
+            let step = self.post_step(self.cur, 2, -64 * size, 63 * size, size);
+            if self.pair(self.cur, base, off, step) {
                 return true;
             }
+        }
+        let step = if in_mem(ty) && !in_vreg(ty) || self.pairs(self.cur) {
+            NONE
+        } else {
+            self.post_step(self.cur, 1, -256, 255, 1)
+        };
+        if step != NONE {
+            let (base, _) = self.addr(t.a, 0);
+            let mut k: u64 = 0;
+            let r = if in_vreg(ty) {
+                self.vec_use(t.b, V0 + 30) as u32
+            } else if !is_v(ty) && self.const_of(t.b, &mut k) && k == 0 {
+                a::ZR
+            } else {
+                self.reg(t.b) as u32
+            };
+            // A v register's number within its file.
+            let rt = if r >= V0 as u32 {
+                r - V0 as u32
+            } else {
+                r
+            };
+            self.emit(a::ldst_post(mkind(ty, false), false, rt, base, self.b().insts[step as usize].c as i32));
+            self.took_step(step);
+            return true;
         }
         if self.lv.fold[self.cur as usize] {
             let (rn, rm, sc, opt) = self.folded(self.cur);

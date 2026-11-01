@@ -1364,8 +1364,6 @@ pub(package) struct Package {
     /// The bytes of a vector the native backend computes in one register (`target::table::Isa`), 0 for
     /// none: the loop vectorizer's vectors (`lir::loops`).
     pub(package) vector: u32,
-    /// The vectors a vectorized loop interleaves at most (`target::table::Isa::vector_copies`).
-    pub(package) vcopies: u32,
     /// How the native backend converts vectors and shifts their lanes (`target::table::Isa`): 0 lane by
     /// lane, VOPS_SOME or VOPS_ALL in registers. With either the loop vectorizer mixes lane widths up to a
     /// factor of two and shifts; its cost model counts the lane by lane forms of VOPS_SOME. With either the
@@ -1388,6 +1386,12 @@ pub(package) struct Package {
     /// Whether the native backend chains comparisons into conditional ones (`target::table::Isa`): an
     /// expanded `memcmp` equality is then the `or` of its pairs' inequalities, not an `or` of differences.
     pub(package) ccmp: bool,
+    /// Whether the native backend's accesses step their base (`target::table::Isa::post_index`): the
+    /// loops' counted addresses become pointers (`lir::loops::pointer_ivs`).
+    pub(package) postinc: bool,
+    /// Whether the native backend joins two accesses of adjacent bytes (`target::table::Isa`): the
+    /// vectorizer keeps each access's copies together (`lir::loops`).
+    pub(package) apairs: bool,
     /// Whether the optimizer splits each 128-bit integer into its two 64-bit words (`lir::pairs`), which
     /// the native backend keeps in registers (`target::table::Isa`); it needs `mul_high`.
     pub(package) pairs: bool,
@@ -1493,13 +1497,14 @@ extend Package {
             ptr_bytes: ptr_bytes,
             vec_regs: 16,
             vector: 16,
-            vcopies: 4,
             vops: 0,
             mul_high: true,
             bswap: true,
             bitrev: true,
             vucmp: true,
             ccmp: true,
+            postinc: false,
+            apairs: true,
             pairs: false,
             align_loops: false,
             popcnt: false,

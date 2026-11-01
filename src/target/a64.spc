@@ -364,6 +364,11 @@ pub(package) const fn ldst_unscaled(m: u32, load: bool, rt: u32, rn: u32, off: i
     return mbits(m, load) | (off as u32 & 0x1FF) << 12 | rn << 5 | rt;
 }
 
+/// LDR/STR (immediate, post-index): the access at rn, then rn += `off` (-256 to 255).
+pub(package) const fn ldst_post(m: u32, load: bool, rt: u32, rn: u32, off: i32) u32 {
+    return ldst_unscaled(m, load, rt, rn, off) | 0x400;
+}
+
 /// LDR/STR (register): the address is rn + rm (64-bit), shifted by the size when `scaled`.
 pub(package) const fn ldst_reg(m: u32, load: bool, rt: u32, rn: u32, rm: u32, scaled: bool) u32 {
     let s = if scaled {

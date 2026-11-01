@@ -2180,6 +2180,173 @@ b3:
     same_outcome(&b, &a, "pow", p7, 128, false);
 }
 
+// Package text `text` read, then optimized with loop budgets `bu` for a target whose accesses step their
+// base (`Package.postinc`): each body verifies after.
+fn optimized_stepping(text: str, bu: lu::Budgets) (Package, Package) {
+    let mut err = String::new();
+    let q = lparse::parse(text, &mut err);
+    assert(q.is_some(), err.as_str());
+    let before = q.unwrap();
+    let mut after = lparse::parse(text, &mut err).unwrap();
+    after.postinc = true;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: bu });
+    let mut v = verify::Verifier::new();
+    for i in 0..after.syms.len() {
+        let s = after.syms[i];
+        if s.def != NONE && s.kind == SK_FUNC {
+            assert(v.check(&after, after.spell(s.name), &after.bodies[s.def as usize]), v.err.as_str());
+        }
+    }
+    return (before, after);
+}
+
+// A loop of one block whose counter indexes a base with one scale for two or more accesses carries a
+// pointer to the last access or pair instead, stepped before the back edge: `pairs` (a pair of loads, a
+// counter that only meets its bound, which the pointer's exit test then takes, and goes), `spread` (two
+// accesses 16 bytes apart, a counter the sum reads, which stays), `down` (a counter that steps down, its
+// exit test on the counter itself), `sum` (one load, a counter that only meets its bound: the pointer
+// takes its exit test). `fill`'s one store, through a counter its value reads, keeps its indexed address.
+@test
+fn counted_addresses_become_stepped_pointers() {
+    let src = M"(lir ptr 8
+sym @fill fn global noinline
+sym @pairs fn global noinline
+sym @spread fn global noinline
+sym @down fn global noinline
+sym @sum fn global noinline
+sym @drive fn global
+fn @fill
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v1, v2
+  br v3, b2, b1(v2)
+b1(v4: i64):
+  v5 = iconst.i64 7
+  v6 = mul.i64 v4, v5
+  v7 = iconst.i64 3
+  v8 = add.i64 v6, v7
+  v9 = ptradd v0, v4 * 8
+  store v8, v9 align 3
+  v10 = iconst.i64 1
+  v11 = add.i64 v4, v10
+  v12 = icmp.ult v11, v1
+  br v12, b1(v11), b2
+b2:
+  ret
+fn @pairs
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v1, v2
+  br v3, b2(v2), b1(v2, v2)
+b1(v4: i64, v5: i64):
+  v6 = ptradd v0, v4 * 16
+  v7 = load.i64 v6 align 3
+  v8 = load.i64 v6+8 align 3
+  v9 = mul.i64 v7, v8
+  v10 = add.i64 v5, v9
+  v11 = iconst.i64 1
+  v12 = add.i64 v4, v11
+  v13 = icmp.ne v12, v1
+  br v13, b1(v12, v10), b2(v10)
+b2(v14: i64):
+  ret v14
+fn @spread
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v1, v2
+  br v3, b2(v2), b1(v2, v2)
+b1(v4: i64, v5: i64):
+  v6 = ptradd v0, v4 * 8
+  v7 = load.i64 v6 align 3
+  v8 = load.i64 v6+16 align 3
+  v9 = sub.i64 v8, v7
+  v10 = mul.i64 v9, v4
+  v11 = add.i64 v5, v10
+  v12 = iconst.i64 1
+  v13 = add.i64 v4, v12
+  v14 = icmp.ult v13, v1
+  br v14, b1(v13, v11), b2(v11)
+b2(v15: i64):
+  ret v15
+fn @down
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 1
+  v3 = sub.i64 v1, v2
+  v4 = iconst.i64 0
+  jmp b1(v3, v4)
+b1(v5: i64, v6: i64):
+  v7 = ptradd v0, v5 * 16
+  v8 = load.i64 v7 align 3
+  v9 = load.i64 v7+8 align 3
+  v10 = mul.i64 v8, v6
+  v11 = add.i64 v10, v9
+  v12 = sub.i64 v5, v2
+  v13 = icmp.ne v5, v4
+  br v13, b1(v12, v11), b2(v11)
+b2(v14: i64):
+  ret v14
+fn @sum
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v1, v2
+  br v3, b2(v2), b1(v2, v2)
+b1(v4: i64, v5: i64):
+  v6 = ptradd v0, v4 * 8
+  v7 = load.i64 v6 align 3
+  v8 = add.i64 v5, v7
+  v9 = iconst.i64 1
+  v10 = add.i64 v4, v9
+  v11 = icmp.ult v10, v1
+  br v11, b1(v10, v8), b2(v8)
+b2(v12: i64):
+  ret v12
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 1024 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 128
+  call @fill(v1, v2) : (ptr, i64) -> void
+  v3 = call.i64 @pairs(v1, v0) : (ptr, i64) -> i64
+  v4 = call.i64 @spread(v1, v0) : (ptr, i64) -> i64
+  v5 = call.i64 @down(v1, v0) : (ptr, i64) -> i64
+  v6 = iconst.i64 3
+  v7 = mul.i64 v4, v6
+  v8 = add.i64 v3, v7
+  v9 = iconst.i64 5
+  v10 = mul.i64 v5, v9
+  v11 = add.i64 v8, v10
+  v12 = call.i64 @sum(v1, v0) : (ptr, i64) -> i64
+  v13 = iconst.i64 7
+  v14 = mul.i64 v12, v13
+  v15 = add.i64 v11, v14
+  ret v15
+)";
+    let (b, a) = optimized_stepping(src, NO_LOOPS);
+    let tf = text_of(&a, "fill");
+    let tp = text_of(&a, "pairs");
+    let ts = text_of(&a, "spread");
+    let td = text_of(&a, "down");
+    // A loop parameter that is a pointer; the counters `pairs` dropped and `spread` kept.
+    assert(!tf.contains("ptr):") && tf.contains(" * 8"), tf.as_str());
+    assert(tp.contains("ptr):") && count(&tp, "add.i64") == 1 && tp.contains("+16\n"), tp.as_str());
+    assert(ts.contains("ptr):") && count(&ts, "add.i64") == 2 && ts.contains("-16 align"), ts.as_str());
+    assert(td.contains("ptr):") && td.contains("-16\n"), td.as_str());
+    let tu = text_of(&a, "sum");
+    assert(tu.contains("ptr):") && count(&tu, "add.i64") == 1 && tu.contains("+8\n"), tu.as_str());
+    let ns: [u64; 5] = [1, 2, 5, 31, 63];
+    for k in 0..5usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
 // Package text `text` read, then optimized with loop budgets `bu` for a target of `vector`-byte registers
 // that converts vectors and shifts their lanes as `vops` says (`Package.vops`): each body verifies after.
 fn optimized_for(text: str, bu: lu::Budgets, vector: u32, vops: u8) (Package, Package) {
