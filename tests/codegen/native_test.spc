@@ -792,6 +792,87 @@ fn inverted_operands_and_shifted_fields_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Products of a loaded operand, in 32 and 64 bits, the load either side (x86-64: `imul` reads the memory),
+// and a load's square and a load by a constant, which keep the load apart.
+@test
+fn products_of_loaded_operands_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @mul32 fn global
+sym @mul64 fn global
+sym @sq64 fn global
+sym @mulk fn global
+fn @mul32
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = load.i32 v0 align 2
+  v3 = mul.i32 v1, v2
+  ret v3
+fn @mul64
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = load.i64 v0+8 align 3
+  v3 = mul.i64 v2, v1
+  ret v3
+fn @sq64
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  v2 = mul.i64 v1, v1
+  ret v2
+fn @mulk
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  v2 = iconst.i32 12345
+  v3 = mul.i32 v1, v2
+  ret v3
+)";
+    let drv = "#include <stdint.h>\nuint32_t mul32(const uint32_t *, uint32_t);\nuint64_t mul64(const uint64_t *, uint64_t);\nuint64_t sq64(const uint64_t *);\nuint32_t mulk(const uint32_t *);\nint main(void) {\n  uint64_t s = 0x9E3779B97F4A7C15u;\n  for (int i = 0; i < 100; i++) {\n    s ^= s << 13;\n    s ^= s >> 7;\n    s ^= s << 17;\n    uint64_t m[2] = {s, s * 31};\n    uint32_t w = (uint32_t)(s >> 7);\n    if (mul32(&w, (uint32_t)s) != w * (uint32_t)s) return 1;\n    if (mul64(m, s >> 3) != m[1] * (s >> 3)) return 2;\n    if (sq64(m) != s * s) return 3;\n    if (mulk(&w) != w * 12345u) return 4;\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Narrow results whose register holds other bits above them (a truncation, a comparison set in a byte):
+// the caller extends them (x86-64 returns them as they are, as clang's callers expect), signed or not.
+@test
+fn narrow_results_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @lo8 fn global
+sym @lo16 fn global
+sym @hi8 fn global
+sym @lt fn global
+fn @lo8
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = trunc.i8 v0
+  ret v1
+fn @lo16
+  sig (i64) -> i16.s
+b0(v0: i64):
+  v1 = trunc.i16 v0
+  ret v1
+fn @hi8
+  sig (i32) -> i8.s
+b0(v0: i32):
+  v1 = trunc.i8 v0
+  ret v1
+fn @lt
+  sig (i32, i32) -> i8
+b0(v0: i32, v1: i32):
+  v2 = icmp.slt v0, v1
+  ret v2
+)";
+    let drv = "#include <stdint.h>\n#include <stdbool.h>\nuint8_t lo8(uint32_t);\nint16_t lo16(int64_t);\nint8_t hi8(int32_t);\nbool lt(int32_t, int32_t);\nint main(void) {\n  if (lo8(0x12345678u) != 0x78) return 1;\n  if ((int)lo16(INT64_C(0x123456789ABCDEF0)) != (int)(int16_t)0xDEF0) return 2;\n  if ((int)hi8((int32_t)0x7FFFFF80) != -128) return 3;\n  if (lt(0x7FFFFF00, 1) != 0 || lt(-5, 3) != 1) return 4;\n  if (lt(-5, 3) + lt(3, -5) * 4 != 1) return 5;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // Leading zero counts of 16 and 8 bits, every value (x86-64: the zero-extended operand's highest set bit
 // against the width's, the width for 0).
 @test
@@ -5254,8 +5335,8 @@ b0(v0: ptr, v1: ptr, v2: ptr, v3: ptr):
 }
 
 // Narrow results that blocks join (`cls`'s through a switch, from constants and a sum, `pick`'s through a
-// branch) return extended to 32 bits, as the C driver reads them; a loop reads and writes bytes at offsets of one
-// indexed address (x86-64 folds it into each access) and counts matches.
+// branch), which the C driver reads at their width; a loop reads and writes bytes at offsets of one indexed
+// address (x86-64 folds it into each access) and counts matches.
 @test
 fn narrow_joins_and_indexed_accesses_run() {
     if !cli::has_cc() {
@@ -5309,7 +5390,7 @@ b1(v6: i64, v7: i64):
 b2(v19: i64):
   ret v19
 )";
-    let drv = "#include <stdint.h>\nunsigned cls(unsigned char);\nunsigned pick(int);\nint64_t cnt(unsigned char *, int64_t, unsigned char);\nint main(void) {\n  if (cls(1) != 200 || cls(2) != 7 || cls(3) != 255 || cls(4) != 200 || cls(0) != 200 || cls(9) != 209 || cls(100) != 44) return 1;\n  if (pick(0) != 40000 || pick(5) != 65534) return 2;\n  unsigned char s[10] = {3, 9, 9, 3, 9, 1, 3, 3, 0, 9};\n  if (cnt(s, 10, 3) != 4 || cnt(s, 0, 3) != 0) return 3;\n  for (int k = 0; k < 10; k += 2) if (s[k] != s[k + 1]) return 4;\n  return 0;\n}\n";
+    let drv = "#include <stdint.h>\nunsigned char cls(unsigned char);\nunsigned short pick(int);\nint64_t cnt(unsigned char *, int64_t, unsigned char);\nint main(void) {\n  if (cls(1) != 200 || cls(2) != 7 || cls(3) != 255 || cls(4) != 200 || cls(0) != 200 || cls(9) != 209 || cls(100) != 44) return 1;\n  if (pick(0) != 40000 || pick(5) != 65534) return 2;\n  unsigned char s[10] = {3, 9, 9, 3, 9, 1, 3, 3, 0, 9};\n  if (cnt(s, 10, 3) != 4 || cnt(s, 0, 3) != 0) return 3;\n  for (int k = 0; k < 10; k += 2) if (s[k] != s[k + 1]) return 4;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }

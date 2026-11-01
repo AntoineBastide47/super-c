@@ -7355,21 +7355,28 @@ extend Opt {
         self.pre.push(i as u64 << 32 | s as u64);
     }
 
-    // Branch `t` ending block `k` on whether an `add`, `sub` or `and` of `k` equals 0 (a counter's step), the
-    // test in `k` too: when instructions lie between them and read neither (up to FLAG_REACH back), the
-    // operation moves right before the test, where every backend tests the flags it sets.
+    // Branch `t` ending block `k` on a comparison in `k` of an `add` or `sub` of `k` by a constant (a counter's
+    // step), or on whether an `add`, `sub` or `and` of `k` equals 0: when instructions lie between them and
+    // read neither (up to FLAG_REACH back), the operation moves right before the comparison. Its operand's
+    // reads end before it, so the step writes the operand's register in place, and every backend tests
+    // the flags it sets against 0.
     fn step_next(self: &mut Self, b: &Body, k: u32, t: Inst) {
         let c = t.a;
         if c == VNONE || (c & (VPARAM | VFLAG)) != 0 || self.blk_of[c as usize] != k || self.moved[c as usize] {
             return;
         }
         let ct = b.insts[c as usize];
-        if ct.op != O_ICMP || ct.aux != C_EQ && ct.aux != C_NE {
+        if ct.op != O_ICMP {
             return;
         }
-        let s = if const_of(b, ct.b) == Some(0u64) {
+        let eq = ct.aux == C_EQ || ct.aux == C_NE;
+        let s = if eq && const_of(b, ct.b) == Some(0u64) {
             ct.a
-        } else if const_of(b, ct.a) == Some(0u64) {
+        } else if eq && const_of(b, ct.a) == Some(0u64) {
+            ct.b
+        } else if self.counter_step(b, ct.a) {
+            ct.a
+        } else if self.counter_step(b, ct.b) {
             ct.b
         } else {
             VNONE
@@ -7501,6 +7508,15 @@ extend Opt {
             }
         }
         return true;
+    }
+
+    // Whether `v` is an `add` or `sub` of a value by a constant.
+    fn counter_step(self: &Self, b: &Body, v: Value) bool {
+        if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        let x = b.insts[v as usize];
+        return (x.op == O_ADD || x.op == O_SUB) && (const_of(b, x.b).is_some() || x.op == O_ADD && const_of(b, x.a).is_some());
     }
 
     // Whether instruction `j` reads value `s` or its flag (operands as the walk replaced them).

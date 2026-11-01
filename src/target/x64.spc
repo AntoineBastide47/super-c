@@ -812,6 +812,12 @@ extend Code {
         self.rr(0, 0x0FAF, sz == 8, dst, src, false);
     }
 
+    /// `dst` = `dst` * the memory at `m`.
+    pub(package) fn imul_rm(self: &mut Self, sz: u32, dst: u8, m: Mem) {
+        self.osize(sz);
+        self.rm(0, 0x0FAF, sz == 8, dst, m, false);
+    }
+
     /// `dst` = `src` * `k`.
     pub(package) fn imul_ri(self: &mut Self, sz: u32, dst: u8, src: u8, k: i32) {
         if k >= -128 && k < 128 {

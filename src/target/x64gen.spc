@@ -1121,11 +1121,13 @@ extend Gen {
         } else {
             0
         };
-        // A zero extension of `v` alone that the block returns next extends it in the return's register.
+        // A zero extension of `v` alone that the block returns next extends it in the return's register; a
+        // narrow value returned next goes there as it is (the caller extends it).
         let ext = zext_returned(b, bk, v);
+        let ret = v + 1 < bk.start + bk.len && b.insts[v as usize + 1].op == O_RET;
         if v + 1 >= bk.start + bk.len || self.lv.uses[v as usize] != 1 || self.lv.end[v as usize] != self.pos || !is_int(
             self.vt(v),
-        ) && self.vt(v) != T_PTR && !fv || bits < 32 && !ext || bits > 64 || self.va[v as usize].home != H_NONE {
+        ) && self.vt(v) != T_PTR && !fv || bits < 32 && !ext && !ret || bits > 64 || self.va[v as usize].home != H_NONE {
             return NOREG;
         }
         let t = b.insts[v as usize + 1 + ext as usize];
@@ -4285,11 +4287,12 @@ extend Gen {
         }
     }
 
-    // The register for comparison `i`'s result when none was zeroed before it: its first operand's, which
-    // the comparison read, when that dies here (`def_over`), else `def`'s.
+    // The register for comparison `i`'s result when none was zeroed before it: the one the next instruction
+    // takes it in (`next_reg`, through `def`), else its first operand's, which the comparison read, when
+    // that dies here (`def_over`), else `def`'s.
     fn def_cmp(self: &mut Self, i: u32) u8 {
         let t = self.b().insts[i as usize];
-        if t.op == O_ICMP && t.a != VNONE && (t.a & VFLAG) == 0 {
+        if t.op == O_ICMP && t.a != VNONE && (t.a & VFLAG) == 0 && self.next_reg(i) == NOREG {
             let ra = self.va[self.vx(t.a) as usize].reg;
             if ra != NOREG {
                 return self.def_over(i, t.a, ra);
@@ -4322,7 +4325,7 @@ extend Gen {
 
     // Whether every read of comparison `i` is in its block and takes the low byte alone: an 8-bit `and`,
     // `or` or `xor` with another comparison (two zeroings for at most one extension of the result), a
-    // branch on it, a select's condition, a byte store of it (not a return, which extends).
+    // return, a branch on it, a select's condition, a byte store of it.
     fn bytes_only(self: &Self, i: u32) bool {
         let b = self.b();
         let k = self.lv.def_blk[i as usize];
@@ -4346,7 +4349,7 @@ extend Gen {
                 t.a
             };
             let logic = (t.op == O_AND || t.op == O_OR || t.op == O_XOR) && t.ty == T_I8;
-            let ok = logic && (other & (VPARAM | VFLAG)) == 0 && other != i && b.insts[other as usize].op == O_ICMP || t.op == O_BR && t.a == i && !self.edge_reads(
+            let ok = logic && (other & (VPARAM | VFLAG)) == 0 && other != i && b.insts[other as usize].op == O_ICMP || t.op == O_RET || t.op == O_BR && t.a == i && !self.edge_reads(
                 t,
                 i,
             ) || t.op == O_SELECT && t.a == i && t.b != i && t.c != i || t.op == O_STORE && t.b == i && t.a != i;
@@ -4835,6 +4838,11 @@ extend Gen {
             let rd = self.def_over(i, o, ro);
             if rd != ro {
                 self.move_reg(t.ty, rd, ro);
+            }
+            if op == O_MUL {
+                self.c.imul_rm(sz, rd, m);
+                self.mem_rel(rs, radd);
+                return true;
             }
             self.c.alu_rm(alu_of(op), sz, rd, m);
             self.mem_rel(rs, radd);
@@ -8186,12 +8194,8 @@ extend Gen {
                 } else {
                     0
                 };
-                let ty = self.vt(t.a);
-                if ty == T_I8 || ty == T_I16 {
-                    self.materialize_ext(t.a, r, (rt & SIG_SEXT) != 0, type_bits(ty, self.ptr));
-                } else {
-                    self.materialize(t.a, r);
-                }
+                // A narrow result's bits above it are the caller's to extend (as clang's callers do).
+                self.materialize(t.a, r);
             }
         } else if rl.kind == ab::L_SRET {
             // rax: the memory's pointer, the value copied there first for a memory value.

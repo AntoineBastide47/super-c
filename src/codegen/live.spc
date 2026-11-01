@@ -51,8 +51,9 @@ pub(package) const FOLD_BFI: u32 = 262144;
 /// unsigned 8- or 16-bit entry parameter, under `ext_args`), which only that access reads: the access
 /// extends it (arm64 `[xn, wm, uxtw]`).
 pub(package) const FOLD_XIDX: u32 = 524288;
-/// `FOLD_LDOP`: a load of an integer that one comparison or `add`, `sub`, `and`, `or` or `xor` reads folds
-/// into it, which reads the memory (x86-64's `cmp [m], k`, `add r, [m]`; `Live::ldop_user`).
+/// `FOLD_LDOP`: a load of an integer that one comparison or `add`, `sub`, `and`, `or`, `xor` or `mul` reads
+/// folds into it, which reads the memory (x86-64's `cmp [m], k`, `add r, [m]`, `imul r, [m]`;
+/// `Live::ldop_user`).
 pub(package) const FOLD_LDOP: u32 = 1048576;
 /// `FOLD_ANY`: an `or` of the lanes of a 16-byte lane mask (`lane_mask`) that equalities with 0 alone
 /// read folds into each: they test the lanes' sign bits (x86-64's `pmovmskb` and `test`). `FOLD_ANY_WIDE`:
@@ -873,8 +874,8 @@ extend Live {
     }
 
     /// `FOLD_LDOP`: whether load `i` of `b` (its block ending before `end`) folds into its one use, a
-    /// comparison of its type or an `add`, `sub` (the load second), `and`, `or` or `xor` of 32 or 64 bits
-    /// that folds into nothing, within LDOP_REACH instructions, whose other operand is no folded
+    /// comparison of its type or an `add`, `sub` (the load second), `and`, `or`, `xor` or `mul` (by no
+    /// constant, which `imul`'s immediate form takes) of 32 or 64 bits that folds into nothing, within LDOP_REACH instructions, whose other operand is no folded
     /// instruction, with no write of memory up to where the use is computed (a folded comparison: its
     /// select's or branch's place; not a `FOLD_CARRY` select's unsigned order comparison of 32 or 64 bits,
     /// whose `adc` the generator computes from the operands' registers).
@@ -892,7 +893,7 @@ extend Live {
         let mut u = i + 1;
         while u < end && u <= i + LDOP_REACH {
             let x = b.insts[u as usize];
-            let alu = x.op == O_ADD || x.op == O_SUB || x.op == O_AND || x.op == O_OR || x.op == O_XOR;
+            let alu = x.op == O_ADD || x.op == O_SUB || x.op == O_AND || x.op == O_OR || x.op == O_XOR || x.op == O_MUL;
             if (x.op == O_ICMP || alu) && (x.a == i || x.b == i) {
                 break;
             }
@@ -910,7 +911,7 @@ extend Live {
         } else {
             x.a
         };
-        if is_inst(o) && self.pfold[o as usize] {
+        if is_inst(o) && self.pfold[o as usize] || x.op == O_MUL && (is_const_val(b, o) || o == i) {
             return false;
         }
         if x.op != O_ICMP {
