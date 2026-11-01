@@ -1108,16 +1108,18 @@ extend Gen {
         } else {
             0
         };
+        // A zero extension of `v` alone that the block returns next extends it in the return's register.
+        let ext = zext_returned(b, bk, v);
         if v + 1 >= bk.start + bk.len || self.lv.uses[v as usize] != 1 || self.lv.end[v as usize] != self.pos || !is_int(
             self.vt(v),
-        ) && self.vt(v) != T_PTR && !fv || bits < 32 || bits > 64 || self.va[v as usize].home != H_NONE {
+        ) && self.vt(v) != T_PTR && !fv || bits < 32 && !ext || bits > 64 || self.va[v as usize].home != H_NONE {
             return NOREG;
         }
-        let t = b.insts[v as usize + 1];
+        let t = b.insts[v as usize + 1 + ext as usize];
         let mut r = NOREG;
         if t.op == O_RET {
             let rl = self.self_lay.ret;
-            if t.a == v && rl.kind == ab::L_REG && rl.n == 1 && self.self_lay.parts[rl.p0 as usize].v == fv {
+            if t.a == v + ext as u32 && rl.kind == ab::L_REG && rl.n == 1 && self.self_lay.parts[rl.p0 as usize].v == fv {
                 r = self.self_lay.parts[rl.p0 as usize].reg + fb;
             }
         } else if t.op == O_CALL && self.intrinsic(t.a).len() == 0 || t.op == O_CALLIND && t.a != v {

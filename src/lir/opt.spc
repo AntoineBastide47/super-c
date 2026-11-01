@@ -204,6 +204,7 @@ pub(package) struct Opt {
     aggint: u64, // per such parameter `k` below 32 and 8-byte chunk `c`, bit 2k + c: an integer load reads it
     aggload: [u32; 64], // per such chunk, its load this walk made at the entry's start (`agg_chunk`), NONE
     rslot: Vector<u32>, // per slot, the one call whose aggregate result it holds, which only loads read, else NONE
+    rcall: bool, // a call has an aggregate result of at most 16 bytes (`operands`; `result_slots`)
     rload: Vector<Value>, // per slot and 8-byte chunk (2 per slot), its load after that call (`res_chunk`), NONE
     made: Map<u64, u32>, // a made constant's hash to the constant
     moved: Vector<bool>,
@@ -488,6 +489,7 @@ extend Opt {
             aggint: 0,
             aggload: [NONE; 64],
             rslot: Vector::<u32>::new(),
+            rcall: false,
             rload: Vector::<Value>::new(),
             made: Map::<u64, u32>::new(),
             pmap: Vector::<u32>::new(),
@@ -551,7 +553,13 @@ extend Opt {
             self.pok[q] = b.params[q] == it;
             any = any || self.pok[q];
         }
-        if !any {
+        // An edge must pass `ptrtoint` of a pointer: without one, no parameter qualifies.
+        let mut casts = false;
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            casts = casts || t.op == O_PTRTOINT && b.type_of(t.a) == T_PTR;
+        }
+        if !any || !casts {
             return false;
         }
         for k in 0..b.blocks.len() {
@@ -1920,15 +1928,18 @@ extend Opt {
         self.operands(b);
     }
 
-    // `ops_at`, `ops_arg`, `ops` for `b`: the passes over one body read its instructions' operands once.
+    // `ops_at`, `ops_arg`, `ops` for `b`: the passes over one body read its instructions' operands once;
+    // `rcall`.
     fn operands(self: &mut Self, b: &Body) {
         let ni = b.insts.len();
         self.ops_at.truncate(0);
         self.ops_arg.truncate(0);
         self.ops.truncate(0);
         self.ops_dst.truncate(0);
+        self.rcall = false;
         for i in 0..ni {
             let t = b.insts[i];
+            self.rcall = self.rcall || (t.op == O_CALL || t.op == O_CALLIND) && (b.pool[t.b as usize + 2] & AGG) != 0 && b.pool[(b.pool[t.b as usize + 2] & ~AGG) as usize] <= 16;
             self.ops_at.push(self.ops.len() as u32);
             lv::uses_into(b, t, &mut self.ops);
             while self.ops_dst.len() < self.ops.len() {
@@ -3314,6 +3325,10 @@ extend Opt {
         fill(&mut self.rslot, ns, NONE);
         fill(&mut self.rload, 2 * ns, NONE);
         if ns == 0 {
+            return;
+        }
+        // Only a call with an aggregate result of at most 16 bytes gives a slot one (`rcall`).
+        if !self.rcall {
             return;
         }
         // A slot another use rules out: NONE - 1.
