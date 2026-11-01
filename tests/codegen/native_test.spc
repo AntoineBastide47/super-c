@@ -18,8 +18,8 @@ import module::loader;
 // (`Package.vector`: x86-64's ymm registers with AVX2), binary16 instructions (`Package.half`: arithmetic
 // on macOS arm64, whose every processor has FEAT_FP16, else conversions), 64-byte vectors (x86-64's zmm
 // registers with AVX-512), `popcnt`, SSE4.1's roundings (`Package.sse41`), arm64's LSE atomics and RCpc
-// acquire loads (`Package.lse`, `Package.rcpc`); and equal edges of a body sharing one record, as the
-// optimizer's rewrites may leave them (`SHARE`).
+// acquire loads (`Package.lse`, `Package.rcpc`); equal edges of a body sharing one record, as the
+// optimizer's rewrites may leave them (`SHARE`); and no frame pointer kept (`Package.omit_fp`).
 const TAIL: u32 = 1;
 const WIDE: u32 = 2;
 const HALF: u32 = 4;
@@ -29,6 +29,7 @@ const SSE41: u32 = 32;
 const LSE: u32 = 64;
 const RCPC: u32 = 128;
 const SHARE: u32 = 256;
+const OMIT_FP: u32 = 512;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -148,6 +149,7 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     }
     let mut p = q.unwrap();
     p.tail = (opts & TAIL) != 0;
+    p.omit_fp = (opts & OMIT_FP) != 0;
     p.popcnt = (opts & POPCNT) != 0;
     p.sse41 = (opts & SSE41) != 0;
     p.lse = (opts & LSE) != 0;
@@ -778,14 +780,15 @@ b2:
 // An `and`, `or` or `xor` of an inverted value (`not`, or `xor` with all ones; arm64 `bic`, `orn`, `eon`) in
 // 64, 32 and 8 bits, a right shift of a left shift by at most as much (arm64 `sbfx`, `ubfx`), and a field
 // inserted into the other bits of a value (arm64 `bfi`; not with a mask that keeps bits of the field),
-// with their results.
+// also as a value's truncation extended under an extended field shifted above it (not with bits between
+// them), with their results.
 @test
 fn inverted_operands_and_shifted_fields_run() {
     if !cli::has_cc() {
         return; // a C driver links it
     }
-    let lir = "lir ptr 8\nsym @bic64 fn global\nsym @orn32 fn global\nsym @eon64 fn global\nsym @bicx32 fn global\nsym @bic8 fn global\nsym @sbf32 fn global\nsym @ubf64 fn global\nsym @sbf64 fn global\nsym @ubf32 fn global\nsym @bfi32 fn global\nsym @bfi64 fn global\nsym @nobfi fn global\nfn @bic64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = not.i64 v0\n  v3 = and.i64 v2, v1\n  ret v3\nfn @orn32\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = not.i32 v1\n  v3 = or.i32 v0, v2\n  ret v3\nfn @eon64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 -1\n  v3 = xor.i64 v1, v2\n  v4 = xor.i64 v0, v3\n  ret v4\nfn @bicx32\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 -1\n  v3 = xor.i32 v0, v2\n  v4 = and.i32 v1, v3\n  ret v4\nfn @bic8\n  sig (i8, i8) -> i8\nb0(v0: i8, v1: i8):\n  v2 = not.i8 v0\n  v3 = and.i8 v2, v1\n  ret v3\nfn @sbf32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 20\n  v2 = shl.i32 v0, v1\n  v3 = iconst.i32 24\n  v4 = ashr.i32 v2, v3\n  ret v4\nfn @ubf64\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 3\n  v2 = shl.i64 v0, v1\n  v3 = iconst.i64 60\n  v4 = lshr.i64 v2, v3\n  ret v4\nfn @sbf64\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 8\n  v2 = shl.i64 v0, v1\n  v3 = iconst.i64 8\n  v4 = ashr.i64 v2, v3\n  ret v4\nfn @ubf32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 0\n  v2 = shl.i32 v0, v1\n  v3 = iconst.i32 31\n  v4 = lshr.i32 v2, v3\n  ret v4\nfn @bfi32\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 4294902015\n  v3 = and.i32 v0, v2\n  v4 = iconst.i32 255\n  v5 = and.i32 v1, v4\n  v6 = iconst.i32 8\n  v7 = shl.i32 v5, v6\n  v8 = or.i32 v3, v7\n  ret v8\nfn @bfi64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 65535\n  v3 = and.i64 v1, v2\n  v4 = iconst.i64 40\n  v5 = shl.i64 v3, v4\n  v6 = iconst.i64 -72056494526300161\n  v7 = and.i64 v0, v6\n  v8 = or.i64 v5, v7\n  ret v8\nfn @nobfi\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 4294901775\n  v3 = and.i32 v0, v2\n  v4 = iconst.i32 255\n  v5 = and.i32 v1, v4\n  v6 = iconst.i32 8\n  v7 = shl.i32 v5, v6\n  v8 = or.i32 v3, v7\n  ret v8\n";
-    let drv = "#include <stdint.h>\nint64_t bic64(int64_t, int64_t);\nint32_t orn32(int32_t, int32_t);\nint64_t eon64(int64_t, int64_t);\nint32_t bicx32(int32_t, int32_t);\nuint8_t bic8(uint8_t, uint8_t);\nint32_t sbf32(int32_t);\nuint64_t ubf64(uint64_t);\nint64_t sbf64(int64_t);\nuint32_t ubf32(uint32_t);\nuint32_t bfi32(uint32_t, uint32_t);\nuint64_t bfi64(uint64_t, uint64_t);\nuint32_t nobfi(uint32_t, uint32_t);\nint main(void) {\n  uint64_t s = 0x9E3779B97F4A7C15u;\n  for (int i = 0; i < 1000; i++) {\n    s ^= s << 13;\n    s ^= s >> 7;\n    s ^= s << 17;\n    uint64_t r = s * 0x2545F4914F6CDD1Du;\n    if (bic64((int64_t)s, (int64_t)r) != (int64_t)(~s & r)) return 1;\n    if (orn32((int32_t)s, (int32_t)r) != (int32_t)((uint32_t)s | ~(uint32_t)r)) return 2;\n    if (eon64((int64_t)s, (int64_t)r) != (int64_t)(s ^ ~r)) return 3;\n    if (bicx32((int32_t)s, (int32_t)r) != (int32_t)((uint32_t)r & ~(uint32_t)s)) return 4;\n    if (bic8((uint8_t)s, (uint8_t)r) != (uint8_t)(~(uint8_t)s & (uint8_t)r)) return 5;\n    if (sbf32((int32_t)s) != (int32_t)((uint32_t)s << 20) >> 24) return 6;\n    if (ubf64(s) != (s << 3) >> 60) return 7;\n    if (sbf64((int64_t)s) != (int64_t)(s << 8) >> 8) return 8;\n    if (ubf32((uint32_t)s) != (uint32_t)s >> 31) return 9;\n    if (bfi32((uint32_t)s, (uint32_t)r) != (((uint32_t)s & 0xffff00ffu) | (((uint32_t)r & 0xffu) << 8))) return 10;\n    if (bfi64(s, r) != ((s & ~(UINT64_C(0xffff) << 40)) | ((r & 0xffff) << 40))) return 11;\n    if (nobfi((uint32_t)s, (uint32_t)r) != (((uint32_t)s & 0xffff000fu) | (((uint32_t)r & 0xffu) << 8))) return 12;\n  }\n  return 0;\n}\n";
+    let lir = "lir ptr 8\nsym @bic64 fn global\nsym @orn32 fn global\nsym @eon64 fn global\nsym @bicx32 fn global\nsym @bic8 fn global\nsym @sbf32 fn global\nsym @ubf64 fn global\nsym @sbf64 fn global\nsym @ubf32 fn global\nsym @bfi32 fn global\nsym @bfi64 fn global\nsym @nobfi fn global\nsym @bfiz fn global\nsym @bfiz16 fn global\nsym @nobfiz fn global\nfn @bic64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = not.i64 v0\n  v3 = and.i64 v2, v1\n  ret v3\nfn @orn32\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = not.i32 v1\n  v3 = or.i32 v0, v2\n  ret v3\nfn @eon64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 -1\n  v3 = xor.i64 v1, v2\n  v4 = xor.i64 v0, v3\n  ret v4\nfn @bicx32\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 -1\n  v3 = xor.i32 v0, v2\n  v4 = and.i32 v1, v3\n  ret v4\nfn @bic8\n  sig (i8, i8) -> i8\nb0(v0: i8, v1: i8):\n  v2 = not.i8 v0\n  v3 = and.i8 v2, v1\n  ret v3\nfn @sbf32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 20\n  v2 = shl.i32 v0, v1\n  v3 = iconst.i32 24\n  v4 = ashr.i32 v2, v3\n  ret v4\nfn @ubf64\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 3\n  v2 = shl.i64 v0, v1\n  v3 = iconst.i64 60\n  v4 = lshr.i64 v2, v3\n  ret v4\nfn @sbf64\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 8\n  v2 = shl.i64 v0, v1\n  v3 = iconst.i64 8\n  v4 = ashr.i64 v2, v3\n  ret v4\nfn @ubf32\n  sig (i32) -> i32\nb0(v0: i32):\n  v1 = iconst.i32 0\n  v2 = shl.i32 v0, v1\n  v3 = iconst.i32 31\n  v4 = lshr.i32 v2, v3\n  ret v4\nfn @bfi32\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 4294902015\n  v3 = and.i32 v0, v2\n  v4 = iconst.i32 255\n  v5 = and.i32 v1, v4\n  v6 = iconst.i32 8\n  v7 = shl.i32 v5, v6\n  v8 = or.i32 v3, v7\n  ret v8\nfn @bfi64\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 65535\n  v3 = and.i64 v1, v2\n  v4 = iconst.i64 40\n  v5 = shl.i64 v3, v4\n  v6 = iconst.i64 -72056494526300161\n  v7 = and.i64 v0, v6\n  v8 = or.i64 v5, v7\n  ret v8\nfn @nobfi\n  sig (i32, i32) -> i32\nb0(v0: i32, v1: i32):\n  v2 = iconst.i32 4294901775\n  v3 = and.i32 v0, v2\n  v4 = iconst.i32 255\n  v5 = and.i32 v1, v4\n  v6 = iconst.i32 8\n  v7 = shl.i32 v5, v6\n  v8 = or.i32 v3, v7\n  ret v8\nfn @bfiz\n  sig (i64, i32) -> i64\nb0(v0: i64, v1: i32):\n  v2 = trunc.i32 v0\n  v3 = zext.i64 v2\n  v4 = zext.i64 v1\n  v5 = iconst.i64 32\n  v6 = shl.i64 v4, v5\n  v7 = or.i64 v6, v3\n  ret v7\nfn @bfiz16\n  sig (i32, i16) -> i32\nb0(v0: i32, v1: i16):\n  v2 = trunc.i16 v0\n  v3 = zext.i32 v2\n  v4 = zext.i32 v1\n  v5 = iconst.i32 16\n  v6 = shl.i32 v4, v5\n  v7 = or.i32 v3, v6\n  ret v7\nfn @nobfiz\n  sig (i32, i16) -> i32\nb0(v0: i32, v1: i16):\n  v2 = trunc.i8 v0\n  v3 = zext.i32 v2\n  v4 = zext.i32 v1\n  v5 = iconst.i32 16\n  v6 = shl.i32 v4, v5\n  v7 = or.i32 v3, v6\n  ret v7\n";
+    let drv = "#include <stdint.h>\nint64_t bic64(int64_t, int64_t);\nint32_t orn32(int32_t, int32_t);\nint64_t eon64(int64_t, int64_t);\nint32_t bicx32(int32_t, int32_t);\nuint8_t bic8(uint8_t, uint8_t);\nint32_t sbf32(int32_t);\nuint64_t ubf64(uint64_t);\nint64_t sbf64(int64_t);\nuint32_t ubf32(uint32_t);\nuint32_t bfi32(uint32_t, uint32_t);\nuint64_t bfi64(uint64_t, uint64_t);\nuint32_t nobfi(uint32_t, uint32_t);\nuint64_t bfiz(uint64_t, uint32_t);\nuint32_t bfiz16(uint32_t, uint16_t);\nuint32_t nobfiz(uint32_t, uint16_t);\nint main(void) {\n  uint64_t s = 0x9E3779B97F4A7C15u;\n  for (int i = 0; i < 1000; i++) {\n    s ^= s << 13;\n    s ^= s >> 7;\n    s ^= s << 17;\n    uint64_t r = s * 0x2545F4914F6CDD1Du;\n    if (bic64((int64_t)s, (int64_t)r) != (int64_t)(~s & r)) return 1;\n    if (orn32((int32_t)s, (int32_t)r) != (int32_t)((uint32_t)s | ~(uint32_t)r)) return 2;\n    if (eon64((int64_t)s, (int64_t)r) != (int64_t)(s ^ ~r)) return 3;\n    if (bicx32((int32_t)s, (int32_t)r) != (int32_t)((uint32_t)r & ~(uint32_t)s)) return 4;\n    if (bic8((uint8_t)s, (uint8_t)r) != (uint8_t)(~(uint8_t)s & (uint8_t)r)) return 5;\n    if (sbf32((int32_t)s) != (int32_t)((uint32_t)s << 20) >> 24) return 6;\n    if (ubf64(s) != (s << 3) >> 60) return 7;\n    if (sbf64((int64_t)s) != (int64_t)(s << 8) >> 8) return 8;\n    if (ubf32((uint32_t)s) != (uint32_t)s >> 31) return 9;\n    if (bfi32((uint32_t)s, (uint32_t)r) != (((uint32_t)s & 0xffff00ffu) | (((uint32_t)r & 0xffu) << 8))) return 10;\n    if (bfi64(s, r) != ((s & ~(UINT64_C(0xffff) << 40)) | ((r & 0xffff) << 40))) return 11;\n    if (nobfi((uint32_t)s, (uint32_t)r) != (((uint32_t)s & 0xffff000fu) | (((uint32_t)r & 0xffu) << 8))) return 12;\n    if (bfiz(s, (uint32_t)r) != ((s & 0xffffffffu) | ((uint64_t)(uint32_t)r << 32))) return 13;\n    if (bfiz16((uint32_t)s, (uint16_t)r) != (((uint32_t)s & 0xffffu) | ((uint32_t)(uint16_t)r << 16))) return 14;\n    if (nobfiz((uint32_t)s, (uint16_t)r) != ((uint32_t)(uint8_t)s | ((uint32_t)(uint16_t)r << 16))) return 15;\n  }\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }
@@ -3289,6 +3292,246 @@ fn even_lanes_of_two_vectors_run() {
     assert_eq(run_wide(&lir, &drv), 0);
     assert_eq(run_zmm(&lir, &drv), 0);
     assert_eq(run_wasm(&lir, &drv), 0);
+}
+
+// 16-byte vectors passed and returned in vector registers stay there (arm64, System V; Microsoft x64
+// passes them by reference into registers and returns them through memory): a sum straight into the
+// result's register, a vector passed to a call from its register, a parameter a loop reads from its home
+// and one that crosses a call.
+@test
+fn vectors_pass_and_return_in_registers() {
+    let lir = M"(lir ptr 8
+sym @vadd fn global noinline
+sym @vchain fn global
+sym @vscale fn global
+fn @vadd
+  sig (v4f32, v4f32) -> v4f32
+b0(v0: v4f32, v1: v4f32):
+  v2 = fadd.v4f32 v0, v1
+  ret v2
+fn @vchain
+  sig (v4f32, v4f32, v4f32) -> v4f32
+b0(v0: v4f32, v1: v4f32, v2: v4f32):
+  v3 = fmul.v4f32 v0, v1
+  v4 = call.v4f32 @vadd(v3, v2) : (v4f32, v4f32) -> v4f32
+  v5 = fmul.v4f32 v4, v0
+  ret v5
+fn @vscale
+  sig (v4f32, ptr, i64) -> v4f32
+b0(v0: v4f32, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = wconst.v4f32 0x0, 0x0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: v4f32):
+  v8 = icmp.ult v6, v2
+  br v8, b2, b3
+b2:
+  v9 = ptradd v1, v6 * 16
+  v10 = load.v4f32 v9 align 2
+  v11 = fmul.v4f32 v10, v0
+  v12 = fadd.v4f32 v7, v11
+  v13 = add.i64 v6, v4
+  jmp b1(v13, v12)
+b3:
+  v14 = call.v4f32 @vadd(v7, v0) : (v4f32, v4f32) -> v4f32
+  ret v14
+)";
+    let drv = M"(#include <stdint.h>
+typedef float f4 __attribute__((vector_size(16)));
+f4 vadd(f4, f4);
+f4 vchain(f4, f4, f4);
+f4 vscale(f4, const f4 *, int64_t);
+int main(void) {
+  f4 a = {1, 2, 3, 4}, b = {5, -6, 7, 0.5f}, c = {0.25f, 8, -1, 3};
+  f4 s = vadd(a, b), h = vchain(a, b, c);
+  f4 xs[3] = {{1, 1, 1, 1}, {2, 0, -2, 4}, {0.5f, 3, 1, -1}};
+  f4 k = vscale(b, xs, 3);
+  for (int i = 0; i < 4; i++) {
+    if (s[i] != a[i] + b[i]) return 1 + i;
+    if (h[i] != (a[i] * b[i] + c[i]) * a[i]) return 5 + i;
+    if (k[i] != ((xs[0][i] * b[i] + xs[1][i] * b[i]) + xs[2][i] * b[i]) + b[i]) return 9 + i;
+  }
+  return 0;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the System V object");
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Microsoft x64 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// The halves of a 16-byte vector in registers (arm64: the low one its register's D view, copied when the
+// vector lives on; the high one by `ext`), and lane 0 of a float vector as its register's scalar view: a
+// float tree sum of four lanes, as `reduce_add_tree` gives it.
+@test
+fn vector_halves_and_low_lanes_run() {
+    let lir = M"(lir ptr 8
+sym @halves fn global
+fn @halves
+  sig (ptr, ptr) -> f32
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4f32 v0 align 2
+  v3 = vop.low_half.v2f32 (v2)
+  v4 = vop.high_half.v2f32 (v2)
+  v5 = fadd.v2f32 v3, v4
+  store v5, v1 align 2
+  v6 = load.v4i32 v0+16 align 2
+  v7 = vop.high_half.v2i32 (v6)
+  store v7, v1+8 align 2
+  v8 = vop.low_half.v2i32 (v6)
+  store v8, v1+16 align 2
+  v9 = vextract.0.f32 v5
+  v10 = vextract.1.f32 v5
+  v11 = fadd.f32 v9, v10
+  ret v11
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+float halves(const void *, void *);
+int main(void) {
+  float f[4] = {1.5f, -20, 300.25f, 4000};
+  int32_t w[4] = {7, -8, 9, -10};
+  unsigned char in[32], o[24];
+  memcpy(in, f, 16);
+  memcpy(in + 16, w, 16);
+  float r = halves(in, o);
+  float s[2]; int32_t h[2], l[2];
+  memcpy(s, o, 8); memcpy(h, o + 8, 8); memcpy(l, o + 16, 8);
+  if (s[0] != f[0] + f[2] || s[1] != f[1] + f[3]) return 1;
+  if (h[0] != w[2] || h[1] != w[3] || l[0] != w[0] || l[1] != w[1]) return 2;
+  if (r != (f[0] + f[2]) + (f[1] + f[3])) return 3;
+  return 0;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the x86-64 object",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// On an arm64 host, `reduce_add_tree` of an `f32x4` (its Neon entry's `vget_low_f32` and `vget_lane_f32`)
+// lowers to a vector's low half and lane reads at constant indexes (`intrin::lane_read`), through no slot.
+@test
+fn neon_low_halves_and_lane_reads_lower_to_vector_operations() {
+    if tgt::host_isa() != tgt::axis_index("aarch64", true) {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import std::simd;\n@noinline\nfn tree(v: f32x4) f32 {\n    return simd::reduce_add_tree(v);\n}\n\nfn main() i32 {\n    return tree(f32x4::splat(2.5)) as i32 - 10;\n}\n",
+    );
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "tree", "build -O2 main.spc -o app");
+    let ok = r.ok() && r.out_has("vop.low_half.v2f32") && r.out_has("vextract.1.f32") && !r.out_has("slotaddr");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "a low half and lane reads");
+}
+
+// A splat of a lane of a vector in a register broadcasts the lane in place (`lv::FOLD_LANE`; arm64 `dup v,
+// v[k]`, x86-64 `pshufd`): 4- and 8-byte lanes, integer and float, of 8- and 16-byte vectors, every index;
+// a float product by one multiplies by the lane (arm64 `fmul v, v, v[k]`, `lv::FOLD_LANE_MUL`).
+@test
+fn splats_of_lanes_run() {
+    let lir = M"(lir ptr 8
+sym @lsplat fn global
+fn @lsplat
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4f32 v0 align 2
+  v3 = vextract.0.f32 v2
+  v4 = splat.v4f32 v3
+  v5 = vextract.3.f32 v2
+  v6 = splat.v4f32 v5
+  v7 = fmul.v4f32 v4, v2
+  v8 = fadd.v4f32 v7, v6
+  store v8, v1 align 2
+  v9 = load.v2f64 v0+16 align 3
+  v10 = vextract.1.f64 v9
+  v11 = splat.v2f64 v10
+  store v11, v1+16 align 3
+  v12 = load.v4i32 v0 align 2
+  v13 = vextract.2.i32 v12
+  v14 = splat.v4i32 v13
+  v15 = add.v4i32 v14, v12
+  store v15, v1+32 align 2
+  v16 = load.v2i64 v0 align 3
+  v17 = vextract.1.i64 v16
+  v18 = splat.v2i64 v17
+  v19 = vextract.0.i64 v16
+  v20 = splat.v2i64 v19
+  v21 = xor.v2i64 v18, v20
+  store v21, v1+48 align 3
+  v22 = load.v2f32 v0 align 2
+  v23 = vextract.1.f32 v22
+  v24 = splat.v2f32 v23
+  store v24, v1+64 align 2
+  v25 = vextract.1.f32 v2
+  v26 = splat.v2f32 v25
+  store v26, v1+72 align 2
+  v27 = vextract.2.f32 v2
+  v28 = splat.v4f32 v27
+  v29 = fmul.v4f32 v2, v28
+  store v29, v1+80 align 2
+  v30 = vextract.1.f64 v9
+  v31 = splat.v2f64 v30
+  v32 = fmul.v2f64 v9, v31
+  store v32, v1+96 align 3
+  v33 = vextract.1.f32 v22
+  v34 = splat.v2f32 v33
+  v35 = fmul.v2f32 v22, v34
+  store v35, v1+112 align 2
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void lsplat(const void *, void *);
+int main(void) {
+  float f[8] = {1.5f, -2, 3.25f, 8, 0, 0, 0, 0};
+  double d[2];
+  unsigned char in[32], o[120];
+  memcpy(in, f, 16);
+  d[0] = 7.5; d[1] = -0.125;
+  memcpy(in + 16, d, 16);
+  lsplat(in, o);
+  float r[4], s[2], u[2], m[4], t[2]; double e[2], g[2]; int32_t w[4], iw[4]; int64_t q[2], iq[2];
+  memcpy(m, o + 80, 16); memcpy(g, o + 96, 16); memcpy(t, o + 112, 8);
+  memcpy(r, o, 16); memcpy(e, o + 16, 16); memcpy(w, o + 32, 16); memcpy(q, o + 48, 16);
+  memcpy(s, o + 64, 8); memcpy(u, o + 72, 8); memcpy(iw, in, 16); memcpy(iq, in, 16);
+  for (int i = 0; i < 4; i++) {
+    if (r[i] != f[0] * f[i] + f[3]) return 1 + i;
+    if (w[i] != (int32_t)((uint32_t)iw[2] + (uint32_t)iw[i])) return 5 + i;
+    if (m[i] != f[i] * f[2]) return 15 + i;
+  }
+  for (int i = 0; i < 2; i++) {
+    if (e[i] != d[1]) return 9 + i;
+    if (q[i] != (iq[0] ^ iq[1])) return 11 + i;
+    if (s[i] != f[1] || u[i] != f[1]) return 13 + i;
+    if (g[i] != d[i] * d[1] || t[i] != f[i] * f[1]) return 19 + i;
+  }
+  return 0;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the x86-64 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // 32- and 64-byte vectors passed to and returned from calls, in a body that holds them in registers: with
@@ -7408,6 +7651,202 @@ fn main() i32 {
 }
 )";
 
+// Calls whose arguments the backends move without a copy, run against the C driver: an aggregate result
+// into the caller's memory, from a body that returns nothing (`fwd_sret`, a sibling call), an aggregate
+// argument by its address, swapped with a scalar one (`fwd_ref`), constant stack arguments and swapped
+// register ones (`swap_many`), stack arguments from the registers the register arguments then take
+// (`regs_many`), and a sum of stack parameters (`sum10`, which x86-64 adds from memory).
+@test
+fn calls_pass_results_and_arguments_in_place() {
+    let lir = M"(lir ptr 8
+sym @mk fn global ext
+sym @take fn global ext
+sym @many fn global ext
+sym @fwd_sret fn global
+sym @fwd_ref fn global
+sym @swap_many fn global
+sym @regs_many fn global
+sym @sum10 fn global
+fn @fwd_sret
+  layout l0 size 40 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64]
+  sig (ptr, i64) -> void
+  ref p0 40 noalias
+b0(v0: ptr, v1: i64):
+  call @mk(v1, v0) : (i64) -> l0
+  ret
+fn @fwd_ref
+  layout l0 size 40 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64]
+  sig (i64, ptr) -> i64
+  ref p1 40 readonly
+b0(v0: i64, v1: ptr):
+  v2 = call.i64 @take(v1, v0) : (l0, i64) -> i64
+  ret v2
+fn @swap_many
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 2
+  v5 = call.i64 @many(v1, v0, v2, v2, v2, v2, v2, v2, v3, v4) : (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+  ret v5
+fn @regs_many
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = call.i64 @many(v0, v1, v0, v1, v0, v1, v0, v1, v0, v1) : (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+  v3 = add.i64 v2, v0
+  ret v3
+fn @sum10
+  sig (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v8: i64, v9: i64):
+  v10 = add.i64 v0, v1
+  v11 = add.i64 v10, v2
+  v12 = add.i64 v11, v3
+  v13 = add.i64 v12, v4
+  v14 = add.i64 v13, v5
+  v15 = add.i64 v14, v6
+  v16 = sub.i64 v15, v7
+  v17 = sub.i64 v16, v8
+  v18 = add.i64 v9, v17
+  ret v18
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, TAIL, &mut obj), "the System V object");
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, TAIL, &mut obj), "the Microsoft x64 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+struct B { int64_t a, b, c, d, e; };
+struct B mk(int64_t a) { struct B r = {a, a + 1, a + 2, a + 3, a + 4}; return r; }
+int64_t take(struct B b, int64_t k) { return b.a * k + b.e; }
+int64_t many(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h, int64_t i, int64_t j) {
+  return a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * f + 7 * g + 8 * h + 9 * i + 10 * j;
+}
+void fwd_sret(struct B *, int64_t);
+int64_t fwd_ref(int64_t, const struct B *);
+int64_t swap_many(int64_t, int64_t);
+int64_t regs_many(int64_t, int64_t);
+int64_t sum10(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int main(void) {
+  struct B b = {0, 0, 0, 0, 0};
+  fwd_sret(&b, 7);
+  if (b.a != 7 || b.c != 9 || b.e != 11) return 1;
+  if (fwd_ref(3, &b) != 32 || b.a != 7) return 2;
+  if (swap_many(3, 5) != 40) return 3;
+  if (regs_many(3, 5) != 228) return 4;
+  if (sum10(1, 2, 4, 8, 16, 32, 64, 128, 256, 512) != 127 - 128 - 256 + 512) return 5;
+  return 0;
+}
+)";
+    assert_eq(run_native_with(lir, drv, TAIL), 0);
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// An aggregate parameter whose one use is an argument the call takes in registers of the same parts goes
+// on in the registers it arrived in: `down` and `step` pass it on to each other in sibling calls (through
+// a pointer too), their argument registers swapped, ten million deep in a constant stack; `shifty` holds
+// its registers over a shift and a division (rcx and rdx on System V), `fswap` its float registers. An
+// 8-byte aggregate passed on by its address (`by_addr`) keeps its memory, which the frame holds: no
+// sibling call (`peek` writes its own stack before it reads it).
+@test
+fn aggregate_parameters_pass_on_in_their_registers() {
+    let lir = M"(lir ptr 8
+sym @fin fn global
+sym @step fn global
+sym @down fn global
+sym @eat fn global ext
+sym @shifty fn global
+sym @fsum fn global ext
+sym @fswap fn global
+sym @peek fn global ext
+sym @by_addr fn global
+fn @by_addr
+  layout l0 size 8 align 3 [0 i64]
+  sig (l0) -> i64
+b0(v0: ptr):
+  v1 = call.i64 @peek(v0) : (ptr) -> i64
+  ret v1
+fn @fin
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64, l0) -> i64
+b0(v0: i64, v1: ptr):
+  v2 = load.i64 v1 align 3
+  v3 = load.i64 v1+8 align 3
+  v4 = sub.i64 v2, v3
+  v5 = add.i64 v4, v0
+  ret v5
+fn @step
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64, l0) -> i64
+b0(v0: i64, v1: ptr):
+  v2 = call.i64 @down(v1, v0) : (l0, i64) -> i64
+  ret v2
+fn @down
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (l0, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v1, v2
+  v4 = symaddr @fin
+  v5 = symaddr @step
+  v6 = select.ptr v3, v4, v5
+  v7 = iconst.i64 1
+  v8 = sub.i64 v1, v7
+  v9 = call.ind.i64 v6(v8, v0) : (i64, l0) -> i64
+  ret v9
+fn @shifty
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64, i64, l0) -> i64
+b0(v0: i64, v1: i64, v2: ptr):
+  v3 = shl.i64 v0, v1
+  v4 = sdiv.i64 v0, v1
+  v5 = add.i64 v3, v4
+  v6 = call.i64 @eat(v2, v5) : (l0, i64) -> i64
+  ret v6
+fn @fswap
+  layout l0 size 16 align 3 [0 f64, 8 f64]
+  sig (f64, l0) -> f64
+b0(v0: f64, v1: ptr):
+  v2 = call.f64 @fsum(v1, v0) : (l0, f64) -> f64
+  ret v2
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, TAIL, &mut obj), "the System V object");
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, TAIL, &mut obj), "the Microsoft x64 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+struct P { int64_t a, b; };
+struct F { double x, y; };
+int64_t down(struct P, int64_t);
+int64_t shifty(int64_t, int64_t, struct P);
+double fswap(double, struct F);
+struct Q { int64_t a; };
+int64_t by_addr(struct Q);
+int64_t peek(const struct Q *q) {
+  volatile int64_t pad[64];
+  for (int i = 0; i < 64; i++) pad[i] = -1;
+  return q->a + 1 + pad[0] + 1;
+}
+int64_t eat(struct P p, int64_t v) { return p.a * 3 + p.b * 5 + v; }
+double fsum(struct F f, double x) { return f.x * 2 + f.y * 3 + x; }
+int main(void) {
+  struct P p = {7, 100};
+  if (down(p, 10000000) != -94 || down(p, 0) != -94) return 1;
+  if (shifty(13, 3, p) != 629) return 2;
+  struct F f = {1.5, 2.25};
+  if (fswap(0.5, f) != 10.25) return 3;
+  struct Q q = {41};
+  if (by_addr(q) != 42) return 4;
+  return 0;
+}
+)";
+    assert_eq(run_native_with(lir, drv, TAIL), 0);
+}
+
 @test
 fn inline_assembly_compiles_natively() {
     if cli::on_wasm() {
@@ -8400,4 +8839,71 @@ int main(void) {
             0,
         );
     }
+}
+
+// Stack parameters of a body that keeps no frame are read through sp (`a64gen` `sp_args`): a leaf's ten
+// integers, a leaf's aggregate past the argument registers; a body that calls, and one whose values
+// outlive a call, set up a frame and read them through x29 (`fp_args`).
+@test
+fn stack_parameters_of_frameless_bodies_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @sum10 fn global
+sym @agg9 fn global
+sym @call10 fn global
+sym @keep10 fn global
+sym @bump fn global ext
+fn @sum10
+  sig (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v8: i64, v9: i64):
+  v10 = iconst.i64 3
+  v11 = mul.i64 v8, v10
+  v12 = add.i64 v0, v1
+  v13 = add.i64 v12, v7
+  v14 = add.i64 v13, v11
+  v15 = sub.i64 v14, v9
+  ret v15
+fn @agg9
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64, i64, i64, i64, i64, i64, i64, i64, l0) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v8: ptr):
+  v9 = load.i64 v8 align 3
+  v10 = load.i64 v8+8 align 3
+  v11 = sub.i64 v9, v10
+  v12 = add.i64 v11, v7
+  ret v12
+fn @call10
+  sig (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v8: i64, v9: i64):
+  v10 = call.i64 @bump(v9) : (i64) -> i64
+  v11 = add.i64 v10, v8
+  ret v11
+fn @keep10
+  sig (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v8: i64, v9: i64):
+  v10 = call.i64 @bump(v0) : (i64) -> i64
+  v11 = add.i64 v10, v8
+  v12 = sub.i64 v11, v9
+  ret v12
+)";
+    let drv = M"(#include <stdint.h>
+struct P { int64_t a, b; };
+int64_t sum10(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t agg9(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, struct P);
+int64_t call10(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t keep10(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t bump(int64_t x) { volatile int64_t pad[32]; for (int i = 0; i < 32; i++) pad[i] = x; return pad[5] + 1; }
+int main(void) {
+  if (sum10(1, 2, 3, 4, 5, 6, 7, 8, 1000, 20000) != 1 + 2 + 8 + 3000 - 20000) return 1;
+  struct P p = {700, 50};
+  if (agg9(1, 2, 3, 4, 5, 6, 7, 8, p) != 658) return 2;
+  if (call10(1, 2, 3, 4, 5, 6, 7, 8, 300, 4000) != 4301) return 3;
+  if (keep10(1, 2, 3, 4, 5, 6, 7, 8, 300, 4000) != 2 + 300 - 4000) return 4;
+  return 0;
+}
+)";
+    assert_eq(run_native_with(lir, drv, OMIT_FP), 0);
+    assert_eq(run_native(lir, drv), 0);
 }

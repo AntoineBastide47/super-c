@@ -1184,16 +1184,24 @@ pub(package) fn protected(p: u8, b: &Body) bool {
     return false;
 }
 
-/// Whether the address of a slot of `b` (through address arithmetic, selects and block parameters) is
-/// used but as an access's or a copy's address or a comparison's operand: a call, a store of it, a
-/// return. True also when the derivation does not settle in FRAME_ROUNDS rounds.
-pub(package) fn frame_escapes(b: &Body) bool {
-    if b.slots.len() == 0 {
+/// Whether the address of a slot of `b`, or of an entry parameter `held` marks (an aggregate whose memory
+/// the frame holds: one that arrives in registers), through address arithmetic, selects and block
+/// parameters, is used but as an access's or a copy's address or a comparison's operand: a call, a store
+/// of it, a return. True also when the derivation does not settle in FRAME_ROUNDS rounds.
+pub(package) fn frame_escapes(b: &Body, held: []bool) bool {
+    let mut any = b.slots.len() != 0;
+    for p in 0..held.len() {
+        any = any || held[p];
+    }
+    if !any {
         return false;
     }
     let ni = b.insts.len();
     let mut d = Vector::<bool>::new();
     d.resize_default(ni + b.params.len());
+    for p in 0..held.len() {
+        d[ni + b.blocks[0].param_start as usize + p] = held[p];
+    }
     let mut uses_ = Vector::<Value>::new();
     let mut edges = Vector::<u32>::new();
     // Each round marks at least one more value or ends.
@@ -1249,13 +1257,38 @@ pub(package) fn frame_escapes(b: &Body) bool {
             }
             uses(b, t, &mut uses_);
             for u in 0..uses_.len() {
-                if derived(&d, ni, uses_[u]) {
+                if derived(&d, ni, uses_[u]) && !by_value(b, held, t, uses_[u]) {
                     return true;
                 }
             }
         }
     }
     return false;
+}
+
+// Whether value `v`, a use of call `t`, is an entry parameter `held` marks that `t` reads only as
+// aggregate arguments: copies of its bytes, not its address.
+fn by_value(b: &Body, held: []bool, t: Inst, v: Value) bool {
+    let e0 = b.blocks[0].param_start;
+    if (v & VPARAM) == 0 || (v & ~VPARAM) < e0 || ((v & ~VPARAM) - e0) as usize >= held.len() || !held[((v & ~VPARAM) - e0) as usize] {
+        return false;
+    }
+    if t.op != O_CALL && t.op != O_CALLIND || t.op == O_CALLIND && t.a == v {
+        return false;
+    }
+    // The aggregate result's address follows the arguments.
+    let na = b.pool[t.b as usize];
+    let n = if (b.pool[t.b as usize + 2] & AGG) != 0 {
+        na + 1
+    } else {
+        na
+    };
+    for k in 0..n {
+        if b.pool[(t.c + k) as usize] == v && (k == na || (b.pool[(t.b + 3 + k) as usize] & AGG) == 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Whether value `v` is marked in `d` (instructions, then block parameters past `ni`).

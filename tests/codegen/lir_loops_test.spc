@@ -360,6 +360,89 @@ b5:
     same_outcome(&b, &a, "sum", args, 0, true);
 }
 
+// A loop while `i + 4 <=u a && i + 4 <=u b`, by steps of 4, whose range checks of `s[i..i + 4]` branch
+// twice into one failure block (`i >u len`, then `len - i <u 4`): the copy without them runs where the
+// least bound is at most `len` and at most the type's maximum less a step. Past the maximum `i + 4` wraps
+// to a small value, the test holds and the second check fails: the loop with the checks runs and panics.
+@test
+fn range_checks_under_an_offset_test_version_the_loop() {
+    let src = M"(lir ptr 8
+sym @sum fn global
+fn @sum
+  sig (i8, i8, i8) -> i8
+b0(v0: i8, v1: i8, v2: i8):
+  v3 = iconst.i8 0
+  v4 = iconst.i8 4
+  jmp b1(v3, v3)
+b1(v5: i8, v6: i8):
+  v7 = add.i8 v5, v4
+  v8 = icmp.ule v7, v0
+  v9 = icmp.ule v7, v1
+  v10 = and.i8 v8, v9
+  br v10, b2, b6
+b2:
+  v11 = icmp.ugt v5, v2
+  br v11, b5, b3
+b3:
+  v12 = sub.i8 v2, v5
+  v13 = icmp.ult v12, v4
+  br v13, b5, b4
+b4:
+  v14 = add.i8 v6, v5
+  jmp b1(v7, v14)
+b5: cold
+  panic "index out of bounds"
+b6:
+  ret v6
+)";
+    let (b, a) = optimized(src, VERSION);
+    let t = text_of(&a, "sum");
+    assert(count(&t, "sub.i8") == 1 && count(&t, "panic") == 1 && t.contains("iconst.i8 -5"), t.as_str());
+    let fits: [[u64; 3]; 4] = [[40, 60, 50], [100, 30, 30], [0, 9, 0], [251, 251, 251]];
+    for k in 0..4usize {
+        let args: []u64 = [unsafe fits[k][0], unsafe fits[k][1], unsafe fits[k][2]];
+        same_outcome(&b, &a, "sum", args, run_value(&b, "sum", args), false);
+    }
+    let past: [[u64; 3]; 3] = [[60, 60, 50], [30, 100, 27], [255, 255, 255]];
+    for k in 0..3usize {
+        let args: []u64 = [unsafe past[k][0], unsafe past[k][1], unsafe past[k][2]];
+        same_outcome(&b, &a, "sum", args, 0, true);
+    }
+}
+
+// An exit test of two comparisons of one value from outside the loop (no counter plus a constant) is no
+// offset test: the loop stays as it is.
+@test
+fn an_exit_test_of_an_outside_value_is_no_offset_test() {
+    let src = M"(lir ptr 8
+sym @inv fn global
+fn @inv
+  sig (i8, i8, i8, i8) -> i8
+b0(v0: i8, v1: i8, v2: i8, v3: i8):
+  v4 = iconst.i8 0
+  v5 = iconst.i8 1
+  jmp b1(v4, v4)
+b1(v6: i8, v7: i8):
+  v8 = icmp.ult v0, v1
+  v9 = icmp.ult v0, v2
+  v10 = and.i8 v8, v9
+  br v10, b2, b3(v7)
+b2:
+  v11 = add.i8 v7, v6
+  v12 = add.i8 v6, v5
+  v13 = icmp.eq v12, v3
+  br v13, b3(v11), b1(v12, v11)
+b3(v14: i8):
+  ret v14
+)";
+    let (b, a) = optimized(src, VERSION);
+    let cases: [[u64; 4]; 3] = [[1, 5, 6, 4], [7, 5, 9, 4], [0, 1, 1, 10]];
+    for k in 0..3usize {
+        let args: []u64 = [unsafe cases[k][0], unsafe cases[k][1], unsafe cases[k][2], unsafe cases[k][3]];
+        same_outcome(&b, &a, "inv", args, run_value(&b, "inv", args), false);
+    }
+}
+
 // A branch on a value the loop does not change splits the loop in two, one per side, the test before
 // them.
 @test

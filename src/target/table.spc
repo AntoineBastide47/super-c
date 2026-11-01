@@ -103,6 +103,8 @@ pub(package) struct CallConv {
     /// 2 under Microsoft x64, whose caller-saved xmm0..xmm5 hold 2 copies' values (past them, each
     /// register a body takes is saved and restored).
     pub(package) vector_copies: u8,
+    /// A homogeneous float aggregate passes one element per register (`lir::ir::Package::hfa_regs`).
+    pub(package) hfa_regs: bool,
 }
 
 /// An object format: the object writer, relocations, section names and the linker.
@@ -298,12 +300,12 @@ pub(package) const ISAS: [Isa; 3] = [
 ];
 
 pub(package) const CALLCONVS: [CallConv; 6] = [
-    CallConv { name: "sysv", va_list_bytes: 24, vector_copies: 0 },
-    CallConv { name: "win64", va_list_bytes: 8, vector_copies: 2 },
-    CallConv { name: "aapcs64", va_list_bytes: 32, vector_copies: 0 },
-    CallConv { name: "apple-aapcs64", va_list_bytes: 8, vector_copies: 0 },
-    CallConv { name: "win-aapcs64", va_list_bytes: 8, vector_copies: 0 },
-    CallConv { name: "wasm-c", va_list_bytes: 4, vector_copies: 0 },
+    CallConv { name: "sysv", va_list_bytes: 24, vector_copies: 0, hfa_regs: false },
+    CallConv { name: "win64", va_list_bytes: 8, vector_copies: 2, hfa_regs: false },
+    CallConv { name: "aapcs64", va_list_bytes: 32, vector_copies: 0, hfa_regs: true },
+    CallConv { name: "apple-aapcs64", va_list_bytes: 8, vector_copies: 0, hfa_regs: true },
+    CallConv { name: "win-aapcs64", va_list_bytes: 8, vector_copies: 0, hfa_regs: true },
+    CallConv { name: "wasm-c", va_list_bytes: 4, vector_copies: 0, hfa_regs: false },
 ];
 
 pub(package) const OBJFORMATS: [ObjFormat; 4] = [

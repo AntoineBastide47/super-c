@@ -12,27 +12,6 @@ const fn align_up(x: u32, a: u32) u32 {
     return x + a - 1 & ~(a - 1);
 }
 
-// The homogeneous aggregate element of layout `l` of `b`: its type when 1 to 4 leaves of one float type
-// or one 8- or 16-byte vector type tile the layout, else T_NONE.
-const fn homogeneous(b: &Body, l: u32, ptr: u32) u8 {
-    let size = b.pool[l as usize];
-    let n = b.pool[l as usize + 2];
-    if n == 0 || n > 4 {
-        return T_NONE;
-    }
-    let t = b.pool[l as usize + 4] as u8;
-    let es = type_bytes(t, ptr);
-    if !(is_float(t) || is_vec(t) && (es == 8 || es == 16)) || es * n != size {
-        return T_NONE;
-    }
-    for k in 0..n {
-        if b.pool[(l + 4 + 2 * k) as usize] as u8 != t || b.pool[(l + 3 + 2 * k) as usize] != es * k {
-            return T_NONE;
-        }
-    }
-    return t;
-}
-
 /// The layout of signature `sig` of body `b` (`ptr`-byte pointers) under the Apple variant when `apple`;
 /// `vregs` is the package's `vec_regs`.
 pub(package) fn classify(b: &Body, sig: u32, ptr: u32, apple: bool, vregs: u32, out: &mut CallLayout) {

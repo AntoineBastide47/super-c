@@ -569,3 +569,133 @@ fn main() i32 {
 fn field_loops_match_across_profiles() {
     h::expect_same_output("field loops", FIELD_LOOPS, ["--profile=debug"], ["--profile=release"]);
 }
+
+// Calls whose arguments and results go without a copy under release: a slice parameter passed on in its
+// registers (also after another argument), a read-only reference's referent passed by value, a result
+// made in an exclusive reference's referent, an immutable local lent to a call that only reads it, a store
+// into an exclusive referent that a later store overwrites across a call, and stack arguments.
+const IN_PLACE: str = M"(struct Big { a: u64, b: u64, c: u64, d: u64, e: u64 }
+static mut G: u64 = 0;
+@noinline fn tick() { unsafe { G += 1; } }
+@noinline fn sum(s: []u32, k: u32) u32 { let mut t = k; for i in 0..s.len() { t = t.wrapping_mul(31).wrapping_add(s[i]); } return t; }
+@noinline fn fwd(s: []u32, k: u32) u32 { return sum(s, k); }
+@noinline fn fwd_swap(k: u32, s: []u32) u32 { return sum(s, k + 1); }
+@noinline fn take(b: Big) u64 { return b.a * 3 + b.e; }
+@noinline fn by_ref(b: &Big) u64 { return take(*b); }
+@noinline fn mk(a: u64) Big { return Big { a: a, b: a + 1, c: a + 2, d: a + 3, e: a + 4 }; }
+@noinline fn into(out: &mut Big, a: u64) { *out = mk(a); }
+@noinline fn look(x: &u64) u64 { return *x + 1; }
+@noinline fn lent(a: u64) u64 { let x = a * 3; let y = look(&x); tick(); return x + y; }
+@noinline fn over(p: &mut u64) u64 { *p = 1; tick(); *p += 1; return *p; }
+@noinline fn many(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u64, j: u64) u64 { return a + b * 2 + c + d + e + f + g + h + i * 3 + j; }
+@noinline fn sibling(x: u64, y: u64) u64 { return many(y, x, 0, 0, 0, 0, 0, 0, 1, 2); }
+fn main() i32 {
+    let v: [u32; 5] = [3, 1, 4, 1, 5];
+    println("{} {}", fwd(v[0..5], 9), fwd_swap(9, v[1..4]));
+    let mut b = Big { a: 0, b: 0, c: 0, d: 0, e: 0 };
+    into(&mut b, 7);
+    println("{} {} {}", b.a, b.e, by_ref(&b));
+    let mut p: u64 = 5;
+    println("{} {} {}", lent(4), over(&mut p), p);
+    println("{} {}", sibling(10, 20), unsafe G);
+    return 0;
+}
+)";
+
+@test
+fn in_place_calls_match_across_profiles() {
+    h::expect_same_output(
+        "calls passing arguments and results in place",
+        IN_PLACE,
+        ["--profile=debug"],
+        ["--profile=release"],
+    );
+}
+
+// Vector loads of two slices in a loop while `i + 16 <= x.len() && i + 16 <= y.len()`, by steps of 16
+// (`lir::loops` versions it on the least bound, which a guard also keeps 16 below the maximum, and the
+// copy without the range checks runs); every pair of lengths around a step; then a bound past the slice,
+// whose last load's check fails.
+const OFFSET_VECTORS: str = M"(import std::simd;
+@noinline fn dot(x: []f32, y: []f32) f32 {
+    let z = f32x4::splat(0.0);
+    let mut a0 = z; let mut a1 = z; let mut a2 = z; let mut a3 = z;
+    let mut i: usize = 0;
+    while i + 16 <= x.len() && i + 16 <= y.len() {
+        a0 += simd::load::<f32, 4>(x, i) * simd::load::<f32, 4>(y, i);
+        a1 += simd::load::<f32, 4>(x, i + 4) * simd::load::<f32, 4>(y, i + 4);
+        a2 += simd::load::<f32, 4>(x, i + 8) * simd::load::<f32, 4>(y, i + 8);
+        a3 += simd::load::<f32, 4>(x, i + 12) * simd::load::<f32, 4>(y, i + 12);
+        i += 16;
+    }
+    return simd::reduce_add_tree((a0 + a1) + (a2 + a3));
+}
+@noinline fn sum8(s: []u32, n: usize) u32x4 {
+    let mut t = u32x4::splat(0);
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        t = t ^ simd::load::<u32, 4>(s, i) ^ (simd::load::<u32, 4>(s, i + 4) >> 1);
+        i += 8;
+    }
+    return t;
+}
+fn main() i32 {
+    let mut x = Vector::<f32>::new();
+    let mut u = Vector::<u32>::new();
+    let mut r: u32 = 11;
+    for _ in 0..50 {
+        r = r.wrapping_mul(1103515245).wrapping_add(12345);
+        x.push((r >> 20) as f32);
+        u.push(r);
+    }
+    for n in [0usize, 15, 16, 17, 31, 32, 47, 50] {
+        for m in [0usize, 16, 33, 50] {
+            println("{} {} {}", n, m, dot(x[0..n], x[50 - m..50]));
+        }
+        let v = sum8(u[0..n], n);
+        println("{} {} {} {}", v[0], v[1], v[2], v[3]);
+    }
+    // A bound past the slice: the last load's check fails.
+    let v = sum8(u[0..30], 32);
+    println("{}", v[0]);
+    return 0;
+}
+)";
+
+@test
+fn offset_vector_loops_match_across_profiles() {
+    h::expect_same_output("offset vector loops", OFFSET_VECTORS, ["--profile=debug"], ["--profile=release"]);
+}
+
+// Loops that count down to 0 and read the element below the counter, checked (`lir::loops` versions
+// them on `i0 <= len`): from the length, from a shorter start, and from past the end, which traps in both
+// profiles.
+const DOWN_LOOPS: str = M"(@noinline fn down(s: []u32, from: usize) u32 {
+    let mut t: u32 = 0;
+    let mut i = from;
+    while i != 0 { i -= 1; t = t.wrapping_mul(31).wrapping_add(s[i]); }
+    return t;
+}
+@noinline fn down_gt(s: []u64, from: usize) u64 {
+    let mut t: u64 = 0;
+    let mut i = from;
+    while i > 0 { i -= 1; t ^= s[i] << (i & 7) as u64; }
+    return t;
+}
+fn main() i32 {
+    let mut v = Vector::<u32>::new();
+    let mut w = Vector::<u64>::new();
+    for n in 0..20usize {
+        println("{} {} {}", n, down(&v, n), down_gt(&w, n / 2));
+        v.push(n as u32 * 7 + 1);
+        w.push(n as u64 * 0x9E3779B9);
+    }
+    println("{}", down(&v, v.len() + 1));
+    return 0;
+}
+)";
+
+@test
+fn loops_counting_down_match_across_profiles() {
+    h::expect_same_output("loops counting down", DOWN_LOOPS, ["--profile=debug"], ["--profile=release"]);
+}

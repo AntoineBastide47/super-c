@@ -199,6 +199,10 @@ pub(package) struct LoopOpt {
     vxs: bool,
     gq: u32, // `checks` of a test `i != n`: the counter's index among the header's parameters, else NONE
     grev: bool, // `checks` of a counter down by 1 while not 0 (`gq` its index): each check of `i - 1` needs `i0 <= len`
+    // `checks` of a test of the counter plus a constant (`offset_head`): the bounds `n` with `q + hoff <u n`
+    // in the loop for each; empty for a test of the counter alone.
+    hn: Vector<Value>,
+    hoff: u64,
     vacc: Vector<u32>,
     vca: Vector<u32>,
     vcb: Vector<u32>,
@@ -405,6 +409,8 @@ extend LoopOpt {
             vxs: true,
             gq: NONE,
             grev: false,
+            hn: Vector::<Value>::new(),
+            hoff: 0,
             vacc: Vector::<u32>::new(),
             vca: Vector::<u32>::new(),
             vcb: Vector::<u32>::new(),
@@ -5967,8 +5973,11 @@ extend LoopOpt {
     // or-ed with a constant `c`, below `2^s` for an `or`), `n` defined outside the loop. A check of `i`
     // holds wherever `n <= len` does; one of `i << s + c` wherever `n <= bound(len)`, with `bound(len)`
     // `((len - c - 1) >> s) + 1` when `len > c`, else 0: then `(n - 1) << s + c` stays below `len` and wraps
-    // nowhere. Sets `fixes`, `fside` and the guard's `gx` (the `n`s), `gy` (the `len`s), `gsh` and `goff`.
-    // The loop with the checks a guard keeps (`BLOCK_NOVEC`) has none.
+    // nowhere. The exit test may also keep `i + k` below or at most `n`, or `i` below two bounds
+    // (`offset_head`), and a check may be a range's (`range_check`, `group_check`). Sets `fixes`, `fside`
+    // and the guard's `gx` (the `n`s), `gy` (the `len`s, VNONE for `offset_head`'s wrap test), `gsh` and
+    // `goff`, one comparison per `n`, `len` and shift. The loop with the checks a guard keeps
+    // (`BLOCK_NOVEC`) has none.
     fn checks(self: &mut Self, b: &Body, ptr: u32, h: u32, p: u32, u: u32) bool {
         self.fixes.truncate(0);
         self.fside.truncate(0);
@@ -5986,12 +5995,23 @@ extend LoopOpt {
         }
         let ci = b.insts[t.a as usize];
         let in_taken = self.inl[b.edge_target(t.b) as usize];
-        if ci.op != O_ICMP || in_taken == self.inl[b.edge_target(t.c) as usize] {
+        if in_taken == self.inl[b.edge_target(t.c) as usize] {
             return false;
+        }
+        let (oq, step) = self.offset_head(b, ptr, h, p, u, t.a, in_taken);
+        if ci.op != O_ICMP && oq == VNONE {
+            return false;
+        }
+        if step != 0 {
+            // The test's sum wraps nowhere: `n <= max - step` (`version`).
+            self.gx.push(ast::pick(self.hn.len() == 1, self.hn[0], VNONE));
+            self.gy.push(VNONE);
+            self.gsh.push(0);
+            self.goff.push(step);
         }
         // The comparison read as `q < n` on the in-loop side; `q != n` too, by steps of 1 from at most `n`
         // (`gq`: the guard checks the start).
-        let ne = in_taken && ci.aux == C_NE || !in_taken && ci.aux == C_EQ;
+        let ne = oq == VNONE && (in_taken && ci.aux == C_NE || !in_taken && ci.aux == C_EQ);
         let hb0 = b.blocks[h as usize];
         let pa = (ci.a & VPARAM) != 0 && (ci.a & ~VPARAM) >= hb0.param_start && (ci.a & ~VPARAM) < hb0.param_start + hb0.param_len as u32;
         let pb = (ci.b & VPARAM) != 0 && (ci.b & ~VPARAM) >= hb0.param_start && (ci.b & ~VPARAM) < hb0.param_start + hb0.param_len as u32;
@@ -6006,11 +6026,13 @@ extend LoopOpt {
         } else {
             VNONE
         };
-        self.grev = qd != VNONE && self.steps_down(b, h, u, qd, (qd & ~VPARAM) - hb0.param_start);
+        self.grev = oq == VNONE && qd != VNONE && self.steps_down(b, h, u, qd, (qd & ~VPARAM) - hb0.param_start);
         if self.grev {
             self.gq = (qd & ~VPARAM) - hb0.param_start;
         }
-        let (q, n, cond) = if self.grev {
+        let (q, n, cond) = if oq != VNONE {
+            (oq, self.hn[0], C_ULT)
+        } else if self.grev {
             (qd, VNONE, C_ULT)
         } else if ne && pa {
             (ci.a, ci.b, C_ULT)
@@ -6067,9 +6089,14 @@ extend LoopOpt {
             let bc = b.insts[bt.a as usize];
             let cold_b = cold(b, b.edge_target(bt.b));
             let cold_c = cold(b, b.edge_target(bt.c));
-            // Both bounds of a range at once, holding on the taken edge (`range_check`).
-            let (rsh, roff, rlen) = if bc.op == O_AND && cold_c && !cold_b && !self.grev {
+            // Both bounds of a range at once, holding on the taken edge (`range_check`), or one of the two
+            // branches that check them into one failure block (`group_check`).
+            let (rsh, roff, rlen) = if self.grev || cold_b == cold_c {
+                (0xFFu8, 0u64, VNONE)
+            } else if bc.op == O_AND && cold_c {
                 self.range_check(b, ptr, bc, q)
+            } else if bc.op == O_ICMP {
+                self.group_check(b, ptr, bt, cold_b, q)
             } else {
                 (0xFFu8, 0u64, VNONE)
             };
@@ -6119,8 +6146,36 @@ extend LoopOpt {
             if len == VNONE || self.defined_in(len) || value_type(b, len) != it {
                 continue;
             }
-            if self.fixes.len() == MAX_CHECKS {
-                break;
+            // Under a test of `q + hoff` (`offset_head`): the test's bound that is `len`, else the least of its
+            // bounds (VNONE, `version`), and `x = (q + hoff) + (off - hoff)`, below `len` where `n <= len - (off
+            // - hoff)`; with `off <= hoff`, `x < q + hoff < n <= len`.
+            let mut gn = n;
+            let mut goff = off;
+            if self.hn.len() != 0 {
+                if sh != 0 && self.hoff != 0 {
+                    continue;
+                }
+                gn = ast::pick(self.hn.len() == 1, n, VNONE);
+                for g in 0..self.hn.len() {
+                    if self.hn[g] == len {
+                        gn = len;
+                    }
+                }
+                goff = if off > self.hoff {
+                    off - self.hoff
+                } else {
+                    0u64
+                };
+            }
+            // One comparison per bound, length and shift: the largest offset's, which implies the others.
+            let mut at = self.gx.len();
+            for g in 0..self.gx.len() {
+                if self.gx[g] == gn && self.gy[g] == len && self.gsh[g] == sh {
+                    at = g;
+                }
+            }
+            if at == self.gx.len() && at == MAX_CHECKS {
+                continue;
             }
             self.fixes.push(k);
             self.fside.push(
@@ -6130,15 +6185,13 @@ extend LoopOpt {
                     1u8
                 },
             );
-            let mut seen = false;
-            for g in 0..self.gy.len() {
-                seen = seen || self.gy[g] == len && self.gsh[g] == sh && self.goff[g] == off;
-            }
-            if !seen {
-                self.gx.push(n);
+            if at == self.gx.len() {
+                self.gx.push(gn);
                 self.gy.push(len);
                 self.gsh.push(sh);
-                self.goff.push(off);
+                self.goff.push(goff);
+            } else if goff > self.goff[at] {
+                self.goff[at] = goff;
             }
         }
         self.gcond = C_ULE;
@@ -6203,6 +6256,215 @@ extend LoopOpt {
         }
         let c = b.insts[t.a as usize];
         return c.op == O_SUB && c.a == n && is_const(b, c.b) && raw_const(b, c.b) == 1;
+    }
+
+    // Branch `bt` on a comparison (failing on its taken edge when `cold_b`) as one of the two branches of a
+    // vector access's bounds check: `len - x >=u w` where it does not fail (`room_test`), or `x <=u len`
+    // where its other edge enters a block that ends in that test of the same `x` and `len`. Both hold where
+    // `x + (w - 1) <u len` does: (s, c + w - 1, len) as `range_check` gives it; (0xFF, 0, VNONE) when not
+    // of that form.
+    fn group_check(self: &Self, b: &Body, ptr: u32, bt: Inst, cold_b: bool, q: Value) (u8, u64, Value) {
+        let bc = b.insts[bt.a as usize];
+        let (sh0, off0, l0, _) = self.room_test(b, ptr, bc, cold_b, q);
+        if sh0 != 0xFF {
+            return (sh0, off0, l0);
+        }
+        let r = if cold_b {
+            opposite(bc.aux)
+        } else {
+            bc.aux
+        };
+        let (x, len) = if r == C_ULE {
+            (bc.a, bc.b)
+        } else if r == C_UGE {
+            (bc.b, bc.a)
+        } else {
+            (VNONE, VNONE)
+        };
+        if x == VNONE {
+            return (0xFFu8, 0u64, VNONE);
+        }
+        let nt = term(
+            b,
+            b.edge_target(
+                if cold_b {
+                    bt.c
+                } else {
+                    bt.b
+                },
+            ),
+        );
+        if nt.op != O_BR || nt.a == VNONE || (nt.a & (VPARAM | VFLAG)) != 0 || b.insts[nt.a as usize].op != O_ICMP {
+            return (0xFFu8, 0u64, VNONE);
+        }
+        for side in 0..2u32 {
+            let (sh, off, l, x2) = self.room_test(b, ptr, b.insts[nt.a as usize], side == 0, q);
+            if sh != 0xFF && l == len && x2 == x {
+                return (sh, off, len);
+            }
+        }
+        return (0xFFu8, 0u64, VNONE);
+    }
+
+    // Comparison `t` (failing when true if `fails_true`) as `len - x >=u w` where it does not fail, `w` a
+    // nonzero constant and `x` as `q << s + c` (`affine`): (s, c + w - 1, len, x); (0xFF, 0, VNONE, VNONE)
+    // when not of that form.
+    fn room_test(self: &Self, b: &Body, ptr: u32, t: Inst, fails_true: bool, q: Value) (u8, u64, Value, Value) {
+        let r = if fails_true {
+            opposite(t.aux)
+        } else {
+            t.aux
+        };
+        let (d, wv) = if r == C_UGE {
+            (t.a, t.b)
+        } else if r == C_ULE {
+            (t.b, t.a)
+        } else {
+            (VNONE, VNONE)
+        };
+        if d == VNONE || (d & (VPARAM | VFLAG)) != 0 || !is_const(b, wv) {
+            return (0xFFu8, 0u64, VNONE, VNONE);
+        }
+        let s = b.insts[d as usize];
+        let w = raw_const(b, wv);
+        if s.op != O_SUB || w == 0 || w >= 0x80000000 {
+            return (0xFFu8, 0u64, VNONE, VNONE);
+        }
+        let (sh, off) = self.affine(b, ptr, s.b, q);
+        if sh == 0xFF || off + w - 1 >= 0x80000000 {
+            return (0xFFu8, 0u64, VNONE, VNONE);
+        }
+        return (sh, off + w - 1, s.a, s.b);
+    }
+
+    // Header `h`'s exit test `c` (preheader `p`, latch `u`; in the loop on its true side when `in_taken`) as
+    // `q + k <u n` or `q + k <=u n`, `q` a header parameter, `k` a constant, `n` from outside the loop: one
+    // comparison of `q + k` with `k` nonzero, or a conjunction of two of one value (`and` on the true side,
+    // `or` of their opposites on the false one). Sets `hn` (the `n`s) and `hoff` (`k`, or `k - 1` for
+    // `<=`: `q + hoff <u n` for each `n` in the loop) and gives `q` and the step to guard (`n <= max -
+    // step`), 0 for `q` itself; VNONE when not of that form. A sum `q + k` of `k > 0` wraps nowhere when `q`
+    // starts at a constant `s` with `s + k <= max` and steps by a constant `d`, and `n <= max - d`: each
+    // iteration's `q + k` is at most `n`, so the next is at most `n + d`. Then `q + hoff < n` holds in the
+    // loop without wrapping.
+    fn offset_head(self: &mut Self, b: &Body, ptr: u32, h: u32, p: u32, u: u32, c: Value, in_taken: bool) (Value, u64) {
+        self.hn.truncate(0);
+        self.hoff = 0;
+        if c == VNONE || (c & (VPARAM | VFLAG)) != 0 {
+            return (VNONE, 0u64);
+        }
+        let ct = b.insts[c as usize];
+        let two = ct.op == if in_taken {
+            O_AND
+        } else {
+            O_OR
+        } && ct.a != ct.b;
+        let mut sum = VNONE;
+        let mut strict = false;
+        for leaf in 0..1u32 + two as u32 {
+            let v = if !two {
+                c
+            } else if leaf == 0 {
+                ct.a
+            } else {
+                ct.b
+            };
+            if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICMP {
+                self.hn.truncate(0);
+                return (VNONE, 0u64);
+            }
+            let t = b.insts[v as usize];
+            // The relation that holds in the loop.
+            let r = if in_taken {
+                t.aux
+            } else {
+                opposite(t.aux)
+            };
+            let (x, n) = if r == C_ULT || r == C_ULE {
+                (t.a, t.b)
+            } else if r == C_UGT || r == C_UGE {
+                (t.b, t.a)
+            } else {
+                (VNONE, VNONE)
+            };
+            let st = r == C_ULT || r == C_UGT;
+            if x == VNONE || n == VNONE || self.defined_in(n) || leaf != 0 && (x != sum || st != strict) {
+                self.hn.truncate(0);
+                return (VNONE, 0u64);
+            }
+            sum = x;
+            strict = st;
+            self.hn.push(n);
+        }
+        let hb = b.blocks[h as usize];
+        let is_hparam = |v: Value| (v & VPARAM) != 0 && v != VNONE && (v & ~VPARAM) >= hb.param_start && (v & ~VPARAM) < hb.param_start + hb.param_len as u32;
+        // `q` alone: `q <u n`, of two bounds only (`checks` reads one).
+        if is_hparam(sum) {
+            if !strict || !two {
+                self.hn.truncate(0);
+                return (VNONE, 0u64);
+            }
+            return (sum, 0u64);
+        }
+        if (sum & (VPARAM | VFLAG)) != 0 {
+            self.hn.truncate(0);
+            return (VNONE, 0u64);
+        }
+        let ty = value_type(b, sum);
+        let top = mask_of(type_bits(ty, ptr));
+        let st = b.insts[sum as usize];
+        if st.op != O_ADD || !is_int(ty) || ty == T_I128 || !is_hparam(st.a) || !is_const(b, st.b) {
+            self.hn.truncate(0);
+            return (VNONE, 0u64);
+        }
+        let q = st.a;
+        let k = raw_const(b, st.b) & top;
+        let qi = (q & ~VPARAM) - hb.param_start;
+        let init = b.edge_arg(term(b, p).a, qi);
+        if k == 0 || init == VNONE || (init & (VPARAM | VFLAG)) != 0 || !is_const(b, init) || (raw_const(b, init) & top) > top - k {
+            self.hn.truncate(0);
+            return (VNONE, 0u64);
+        }
+        // The step: the latch passes `q + d`, `d` a nonzero constant.
+        let mut d: u64 = 0;
+        b.succ_edges(term(b, u), &mut self.edges);
+        for j in 0..self.edges.len() {
+            let e = self.edges[j];
+            if b.edge_target(e) != h {
+                continue;
+            }
+            let nv = b.edge_arg(e, qi);
+            if nv == VNONE || (nv & (VPARAM | VFLAG)) != 0 {
+                d = 0;
+                break;
+            }
+            let si = b.insts[nv as usize];
+            let dj = if si.op == O_ADD && si.ty == ty && si.a == q && is_const(b, si.b) {
+                raw_const(b, si.b) & top
+            } else {
+                0u64
+            };
+            if dj == 0 || d != 0 && dj != d {
+                d = 0;
+                break;
+            }
+            d = dj;
+        }
+        if d == 0 {
+            self.hn.truncate(0);
+            return (VNONE, 0u64);
+        }
+        for j in 0..self.hn.len() {
+            if value_type(b, self.hn[j]) != ty {
+                self.hn.truncate(0);
+                return (VNONE, 0u64);
+            }
+        }
+        self.hoff = if strict {
+            k
+        } else {
+            k - 1
+        };
+        return (q, d);
     }
 
     // `x` as `q << s + c` (`checks`): (s, c), (0xFF, 0) when it is not of that form.
@@ -6370,10 +6632,21 @@ extend LoopOpt {
         let start = b.insts.len() as u32;
         let l0 = b.locs[hb.start as usize];
         let mut gv = g;
+        // The least of two bounds of an exit test (`offset_head`), for a guard's VNONE `n` (counting down, `n`
+        // is VNONE and the guard reads the start).
+        let mut hmin = VNONE;
         if g == VNONE {
             for k in 0..self.gx.len() {
+                if self.gx[k] == VNONE && hmin == VNONE && !self.grev {
+                    let lt = vpush(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: self.hn[0], b: self.hn[1], c: 0 }, l0);
+                    let ty = value_type(b, self.hn[0]);
+                    hmin = vpush(b, Inst { op: O_SELECT, ty: ty, aux: 0, a: lt, b: self.hn[0], c: self.hn[1] }, l0);
+                }
                 let mut y = self.gy[k];
-                if self.gsh[k] != 0 || self.goff[k] != 0 {
+                if y == VNONE {
+                    // A sum of the counter wraps nowhere (`offset_head`): `n <= max - step`.
+                    y = vpush(b, iconst_of(value_type(b, self.hn[0]), ~self.goff[k]), l0);
+                } else if self.gsh[k] != 0 || self.goff[k] != 0 {
                     // bound(len) = len > c ? ((len - c - 1) >> s) + 1 : 0 (`checks`).
                     let ty = value_type(b, y);
                     let c0 = vpush(b, iconst_of(ty, self.goff[k]), l0);
@@ -6391,6 +6664,8 @@ extend LoopOpt {
                 // extends to the length's width, as the checked index does.
                 let mut x = if self.grev {
                     VPARAM | ps + self.gq
+                } else if self.gx[k] == VNONE {
+                    hmin
                 } else {
                     self.gx[k]
                 };

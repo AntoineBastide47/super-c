@@ -865,6 +865,10 @@ pub(package) struct Sym {
     /// return, pass on to a call that may): `lir::opt::Run::new` infers it for a function with a body;
     /// all for any other. The text form does not carry it.
     pub(package) esc: u64,
+    /// The parameters (a bit each) whose memory a call of it may write (`FX_ARG`), its callees' writes
+    /// through them included: `lir::opt::Run::new` infers it for a function with a body; all for any other.
+    /// The text form does not carry it.
+    pub(package) wargs: u64,
     /// What a call of it does to memory by its name (`alloc_of`): ALLOC_FRESH, ALLOC_FREE, ALLOC_MEMCMP or
     /// ALLOC_NONE.
     pub(package) alloc: u8,
@@ -944,6 +948,27 @@ pub(package) struct Reloc {
     pub(package) offset: u32,
     pub(package) sym: u32,
     pub(package) addend: i64,
+}
+
+/// The homogeneous aggregate element of layout `l` of `b`: its type when 1 to 4 leaves of one float type
+/// or one 8- or 16-byte vector type tile the layout, else T_NONE.
+pub(package) const fn homogeneous(b: &Body, l: u32, ptr: u32) u8 {
+    let size = b.pool[l as usize];
+    let n = b.pool[l as usize + 2];
+    if n == 0 || n > 4 {
+        return T_NONE;
+    }
+    let t = b.pool[l as usize + 4] as u8;
+    let es = type_bytes(t, ptr);
+    if !(is_float(t) || is_vec(t) && (es == 8 || es == 16)) || es * n != size {
+        return T_NONE;
+    }
+    for k in 0..n {
+        if b.pool[(l + 4 + 2 * k) as usize] as u8 != t || b.pool[(l + 3 + 2 * k) as usize] != es * k {
+            return T_NONE;
+        }
+    }
+    return t;
 }
 
 // Signature and layout records in a body's pool. A signature is: parameter count, fixed-parameter count
@@ -1496,6 +1521,10 @@ pub(package) struct Package {
     /// (`target::table::Isa::arg_copy`): the optimizer passes the source of a copy into such an argument
     /// in place of the copy.
     pub(package) arg_copy: u32,
+    /// Whether the calling convention passes a homogeneous float aggregate parameter or result (`homogeneous`)
+    /// one element per register (AAPCS64): the packing of straight-line values (`lir::slp`) loads and stores
+    /// no vector of its elements, which the native backend reads from and returns in their registers.
+    pub(package) hfa_regs: bool,
     /// Whether the native backend joins two accesses of adjacent bytes (`target::table::Isa`): the
     /// vectorizer keeps each access's copies together (`lir::loops`).
     pub(package) apairs: bool,
@@ -1622,6 +1651,7 @@ extend Package {
             ccmp: true,
             postinc: false,
             arg_copy: 0,
+            hfa_regs: false,
             apairs: true,
             pairs: false,
             align_loops: false,
@@ -1711,6 +1741,7 @@ extend Package {
                 cold: false,
                 fx: FX_READ | FX_WRITE | FX_STALL,
                 esc: ~0u64,
+                wargs: ~0u64,
                 alloc: if kind == SK_FUNC {
                     alloc_of(name)
                 } else {

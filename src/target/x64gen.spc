@@ -256,6 +256,10 @@ pub(package) struct Gen {
     lock: u64, // registers the current instruction reads or writes
     tmps: u64, // registers the current instruction took as temporaries
     fixed_busy: u64,
+    // The registers of the aggregate parameters a call takes as they arrive (`pass_parts`), held until it;
+    // per part of the body's layout, the register that holds it then (`vacate` may move one), NOREG else.
+    pin: u64,
+    pin_reg: Vector<u8>,
     csr: u64, // callee-saved registers the body uses
     rows: Vector<u64>, // with debug information, per change of location: its code byte << 32 | its `lines` index
     rstore: Vector<u32>, // per instruction, 1 + the result part a store moves into its register (`ret_stores`), else 0
@@ -294,6 +298,7 @@ pub(package) struct Gen {
     wparams: Vector<u32>, // the parameters the current terminator's edges write
     want: Vector<u8>, // per value, its request to `Live::plan`
     lconst: Vector<bool>, // per instruction, a constant a loop keeps in a register (`Live::loop_consts`)
+    pheld: Vector<bool>, // per entry parameter, an aggregate whose memory the frame holds (`frame_escapes`)
     vmem: Vector<bool>, // per value, a vector some instruction reads or writes in memory (`vec_homes`)
     vreg: Vector<bool>, // per instruction, one on vectors in xmm registers alone (`vec_homes`)
     ends: Vector<u32>, // values by the position their range ends at (CSR, `ends_at`)
@@ -436,6 +441,8 @@ extend Gen {
             lock: 0,
             tmps: 0,
             fixed_busy: 0,
+            pin: 0,
+            pin_reg: Vector::<u8>::new(),
             csr: 0,
             rows: Vector::<u64>::new(),
             rstore: Vector::<u32>::new(),
@@ -466,6 +473,7 @@ extend Gen {
             wparams: Vector::<u32>::new(),
             want: Vector::<u8>::new(),
             lconst: Vector::<bool>::new(),
+            pheld: Vector::<bool>::new(),
             vmem: Vector::<bool>::new(),
             vreg: Vector::<bool>::new(),
             ends: Vector::<u32>::new(),
@@ -717,6 +725,19 @@ extend Gen {
     // that lives on or that the instruction reads moves to another register, and `r` is locked.
     fn vacate(self: &mut Self, r: u8) {
         self.lock |= bit(r);
+        if (self.pin & bit(r)) != 0 {
+            // A parameter's part a call takes as it arrived (`pass_parts`) moves to another held register.
+            let r2 = self.alloc(r >= V0);
+            self.c.mov_rr(8, r2, r);
+            self.pin = self.pin & ~bit(r) | bit(r2);
+            self.fixed_busy = self.fixed_busy & ~bit(r) | bit(r2);
+            for p in 0..self.pin_reg.len() {
+                if self.pin_reg[p] == r {
+                    self.pin_reg[p] = r2;
+                }
+            }
+            return;
+        }
         let x = self.owner[r as usize];
         if x == NONE {
             return;
@@ -1154,8 +1175,9 @@ extend Gen {
         let b = self.b();
         let bk = b.blocks[self.lv.def_blk[v as usize] as usize];
         let bits = type_bits(self.vt(v), self.ptr);
-        // A scalar float takes an xmm register.
-        let fv = self.vt(v) == T_F32 || self.vt(v) == T_F64;
+        // A scalar float takes an xmm register, and a vector one whole (`whole_vreg`).
+        let vv = in_vreg(self.vt(v));
+        let fv = self.vt(v) == T_F32 || self.vt(v) == T_F64 || vv;
         let fb: u8 = if fv {
             V0
         } else {
@@ -1167,14 +1189,17 @@ extend Gen {
         let ret = v + 1 < bk.start + bk.len && b.insts[v as usize + 1].op == O_RET;
         if v + 1 >= bk.start + bk.len || self.lv.uses[v as usize] != 1 || self.lv.end[v as usize] != self.pos || !is_int(
             self.vt(v),
-        ) && self.vt(v) != T_PTR && !fv || bits < 32 && !ext && !ret || bits > 64 || self.va[v as usize].home != H_NONE {
+        ) && self.vt(v) != T_PTR && !fv || bits < 32 && !ext && !ret || bits > 64 && !vv || self.va[v as usize].home != H_NONE {
             return NOREG;
         }
         let t = b.insts[v as usize + 1 + ext as usize];
         let mut r = NOREG;
         if t.op == O_RET {
             let rl = self.self_lay.ret;
-            if t.a == v + ext as u32 && rl.kind == ab::L_REG && rl.n == 1 && self.self_lay.parts[rl.p0 as usize].v == fv {
+            if t.a == v + ext as u32 && rl.kind == ab::L_REG && rl.n == 1 && self.self_lay.parts[rl.p0 as usize].v == fv && (!vv || self.self_lay.whole_vreg(
+                rl,
+                self.vt(v),
+            )) {
                 r = self.self_lay.parts[rl.p0 as usize].reg + fb;
             }
         } else if t.op == O_CALL && self.intrinsic(t.a).len() == 0 || t.op == O_CALLIND && t.a != v {
@@ -1190,7 +1215,7 @@ extend Gen {
                     return NOREG;
                 }
                 let pa = lay.parts[lay.locs[k as usize].p0 as usize];
-                if pa.v != fv {
+                if pa.v != fv || vv && !lay.whole_vreg(lay.locs[k as usize], self.vt(v)) {
                     return NOREG;
                 }
                 r = pa.reg + fb;
@@ -1425,7 +1450,7 @@ extend Gen {
             let d = self.lv.def_blk[x];
             let mut w: u8 = 0;
             // A ymm register keeps only its low 16 bytes across a call (Microsoft x64's xmm6..xmm15).
-            if self.in_reg(t) && type_bytes(t, 8) >= 8 && x < nv && !self.vmem[x] && d != NONE && self.lv.pos[d as usize] != NONE && (self.lv.end[x] > self.lv.pos[d as usize] || x >= ni) && (self.win && type_bytes(
+            if self.in_reg(t) && type_bytes(t, 8) >= 8 && x < nv && !self.vmem[x] && d != NONE && self.lv.pos[d as usize] != NONE && (self.lv.end[x] > self.lv.pos[d as usize] || x >= ni && d != 0) && (self.win && type_bytes(
                 t,
                 8,
             ) == 16 || !self.crosses_call(x as u32, true)) {
@@ -1460,6 +1485,19 @@ extend Gen {
         for x in 0..ni {
             nd = nd.max(self.need(x as u32));
             vd = vd.max(self.vneed(x as u32));
+        }
+        // The registers held for a call that takes parameters' parts as they arrive (`pass_parts`) are not
+        // there for the instructions up to it, the first that calls.
+        let pins = (self.pin & self.xalloc).count_ones() as u32;
+        let e = b.blocks[0];
+        for i in e.start..e.start + e.len {
+            if pins == 0 {
+                break;
+            }
+            nd = nd.max(self.need(i) + pins);
+            if Gen::clobbers(b, b.insts[i as usize]) {
+                break;
+            }
         }
         let most = self.xfix.count_ones() as u32 + self.xalloc.count_ones() as u32 - nd;
         self.xhome = self.xscr;
@@ -1639,16 +1677,25 @@ extend Gen {
                 self.vmem[i] = true;
             }
             self.vreg[i] = reg_op && is_vec(t.ty) || self.reduce_reg(t) || t.op == O_VOP && self.lv.pfold[i];
-            if t.op == O_RET && t.a != VNONE && is_vec(self.vt(t.a)) {
+            // A return reads in memory a vector it neither returns in one register nor stores whole.
+            let rl = self.self_lay.ret;
+            if t.op == O_RET && t.a != VNONE && is_vec(self.vt(t.a)) && !self.self_lay.whole_vreg(rl, self.vt(t.a)) && !(rl.kind == ab::L_SRET && self.in_reg(
+                self.vt(t.a),
+            )) {
                 self.vmem[self.vx(t.a) as usize] = true;
             }
             if reg_op || is_terminator(t.op) {
                 continue;
             }
+            // A call takes a vector argument it passes whole in a register from that register.
+            let call = t.op == O_CALL && self.intrinsic(t.a).len() == 0 || t.op == O_CALLIND;
+            if call {
+                self.call_layout(t);
+            }
             lv::each_use(b, t, &mut self.uses);
             for k in 0..self.uses.len() {
                 let u = self.uses[k];
-                if t.op == O_STORE && u == t.b {
+                if t.op == O_STORE && u == t.b || call && self.whole_arg(t, u) {
                     continue;
                 }
                 let x = self.vx(u);
@@ -1676,6 +1723,31 @@ extend Gen {
                 self.vreg[i] = true;
             }
         }
+    }
+
+    // Whether call `t` (its layout in `lay`) reads vector `u` only as arguments it passes whole in one
+    // register (`whole_vreg`), not in memory.
+    fn whole_arg(self: &Self, t: Inst, u: Value) bool {
+        let b = self.b();
+        if !is_vec(self.vt(u)) || t.op == O_CALLIND && t.a == u {
+            return false;
+        }
+        let np = b.pool[t.b as usize];
+        let nops = np + ((b.pool[t.b as usize + 2] & AGG) != 0) as u32;
+        let mut any = false;
+        for k in 0..nops {
+            if b.pool[(t.c + k) as usize] != u {
+                continue;
+            }
+            if k == np || (b.pool[(t.b + 3 + k) as usize] & AGG) != 0 || !self.lay.whole_vreg(
+                self.lay.locs[k as usize],
+                self.vt(u),
+            ) {
+                return false;
+            }
+            any = true;
+        }
+        return any;
     }
 
     // Whether a call that returns (`clobbers`) runs while value index `x` (an instruction's or a
@@ -2360,9 +2432,11 @@ extend Gen {
             self.use_once(x);
         }
         // Code that may branch past a lane reads a vector from its home: a vector in a register reaches
-        // it first, but for the instructions with register forms (`vop` and `vec_arith` sync their others)
-        // and calls (a vector passed in memory goes through `mloc`).
-        let reg_form = t.op == O_STORE || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI) || t.op == O_VEXTRACT || t.op == O_VINSERT || self.conv_reg(
+        // it first, but for the instructions with register forms (`vop` and `vec_arith` sync their others;
+        // a splat of a lane, `lv::FOLD_LANE`) and calls (a vector passed in memory goes through `mloc`).
+        let reg_form = t.op == O_STORE || t.op == O_SPLAT || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(
+            t.ty,
+        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI) || t.op == O_VEXTRACT || t.op == O_VINSERT || self.conv_reg(
             t,
         ) || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a));
         if !reg_form && !is_terminator(t.op) {
@@ -2798,9 +2872,18 @@ extend Gen as Mover {
         self.st(t, r, x::at(dst.reg, dst.off));
     }
 
-    fn scratch(self: &mut Self, _m: Mv) Lc {
+    fn scratch(self: &mut Self, m: Mv) Lc {
         // Every allocatable integer register is an argument or result register, which a call may have set
-        // outside the moves; the scratch registers are the moves' own.
+        // outside the moves; the scratch registers are the moves' own. rax, which no argument takes, when
+        // it holds nothing, no pending move names it and none rematerializes a value (a thread-local
+        // address's comes in rax).
+        let mut vals = false;
+        for q in 0..self.mv.len() {
+            vals = vals || !self.mv[q].done && self.mv[q].src.kind == LC_VAL;
+        }
+        if !m.v && !vals && ((self.held | self.lock | self.tmps | self.fixed_busy | move_regs(&self.mv)) & bit(x::RAX)) == 0 {
+            return Lc { kind: LC_REG, reg: x::RAX, off: 0, val: NONE };
+        }
         let s = self.slot_alloc(64, 16) as i32;
         return Lc { kind: LC_MEM, reg: x::RSP, off: s, val: NONE };
     }
@@ -2892,7 +2975,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | if self.avx {
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE
         } else {
             0
@@ -3007,9 +3090,6 @@ extend Gen {
         // may name rbp, keeps it.
         let omit = p.omit_fp && self.max_align <= 16 && (self.opf & lv::OP_ASM) == 0;
         let va = (self.opf & lv::OP_VASTART) != 0;
-        // Sibling calls leave the frame first: none with a canary to check, variadic arguments in it, or a
-        // slot's address that may outlive it.
-        self.tail_ok = p.tail && self.canary < 0 && !va && !lver::frame_escapes(b);
         self.fb = ast_pick(omit, x::IN, x::RBP);
         self.xfix = if self.win {
             XFIX_WIN
@@ -3020,6 +3100,15 @@ extend Gen {
         } else {
             0
         };
+        classify(self.win, self.sc_self, b, b.sig, self.ptr, self.vregs, &mut self.self_lay);
+        if self.self_lay.unknown {
+            return self.refuse("the signature passes an aggregate whose C class is unknown");
+        }
+        // Sibling calls leave the frame first: none with a canary to check, variadic arguments in it, or the
+        // address of a slot or of an aggregate parameter that arrives in registers that may outlive it.
+        place::held_params(b, &self.self_lay, &mut self.pheld);
+        self.tail_ok = p.tail && self.canary < 0 && !va && !lver::frame_escapes(b, &self.pheld);
+        self.pass_parts();
         self.bucket_ends();
         self.call_tables();
         self.lv.split = !self.shrink;
@@ -3216,10 +3305,6 @@ extend Gen {
             self.guard(S1);
             self.c.store(8, S1, x::at(x::RSP, self.canary as i32));
         }
-        classify(self.win, self.sc_self, b, b.sig, self.ptr, self.vregs, &mut self.self_lay);
-        if self.self_lay.unknown {
-            let _ = self.refuse("the signature passes an aggregate whose C class is unknown");
-        }
         self.ret_stores();
         self.res_relays();
         let np = b.pool[b.sig as usize];
@@ -3291,6 +3376,19 @@ extend Gen {
                 }
                 if agg {
                     self.entry_reg(x, r);
+                } else if self.in_reg(t) {
+                    // A vector loaded into its home, else a register it spills from.
+                    if self.lv.uses[x as usize] != 0 {
+                        let mut f = self.take_home(x, true, NOREG);
+                        if f == NOREG {
+                            f = self.alloc(true);
+                            self.set_owner(f, x);
+                            self.va.index_mut(x as usize).reg = f;
+                            self.va.index_mut(x as usize).dirty = true;
+                        }
+                        self.lock |= bit(f);
+                        self.c.vload(type_bytes(t, self.ptr), f - V0, x::at(r, 0));
+                    }
                 } else {
                     let sz = type_bytes(t, self.ptr);
                     let off = self.slot_alloc(sz, 16);
@@ -3298,9 +3396,9 @@ extend Gen {
                     self.va.index_mut(x as usize).home = H_SLOT;
                     self.va.index_mut(x as usize).off = off as i32;
                 }
-            } else if agg && self.parts_taken(x, loc) {
+            } else if agg && (self.va[x as usize].home == H_PASSED || self.parts_taken(x, loc)) {
                 continue;
-            } else if agg || in_mem(t) {
+            } else if agg || in_mem(t) && !self.self_lay.whole_vreg(loc, t) {
                 // Register parts into a slot: the aggregate's memory, or the memory value.
                 let (size, _) = sig_size(b, pt, self.ptr);
                 let off = self.slot_alloc(size + 7 & ~7u32, 16);
@@ -3373,13 +3471,71 @@ extend Gen {
         return true;
     }
 
+    // The aggregate parameters whose one use is an argument of a call (no intrinsic) that takes it by
+    // value in registers of the same parts (`place::parts_passed`): that call takes the parts from the
+    // registers they arrive in, held until it (`pin`, in `fixed_busy`; `plan_homes` leaves the
+    // instructions before it room), and the parameter (`H_PASSED`) takes no memory.
+    fn pass_parts(self: &mut Self) {
+        let b = self.b();
+        self.pin = 0;
+        fill(&mut self.pin_reg, self.self_lay.parts.len(), NOREG);
+        let ni = b.insts.len() as u32;
+        let e0 = b.blocks[0].param_start;
+        for k in 0..b.pool[b.sig as usize] {
+            let pl = self.self_lay.locs[k as usize];
+            let x = ni + e0 + k;
+            if (b.pool[(b.sig + 3 + k) as usize] & AGG) == 0 || pl.kind != ab::L_REG {
+                continue;
+            }
+            let i = place::parts_passed(b, &self.lv, Gen::clobbers, x, &mut self.uses);
+            if i == NONE {
+                continue;
+            }
+            let t = b.insts[i as usize];
+            if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
+                continue;
+            }
+            self.call_layout(t);
+            let mut same = false;
+            for j in 0..b.pool[t.b as usize] {
+                let cl = self.lay.locs[j as usize];
+                if b.pool[(t.c + j) as usize] != (VPARAM | e0 + k) || (b.pool[(t.b + 3 + j) as usize] & AGG) == 0 || cl.kind != ab::L_REG || cl.n != pl.n {
+                    continue;
+                }
+                same = true;
+                for p in 0..pl.n as u32 {
+                    let pa = self.lay.parts[(cl.p0 + p) as usize];
+                    let ps = self.self_lay.parts[(pl.p0 + p) as usize];
+                    same = same && pa.off == ps.off && pa.size == ps.size && pa.v == ps.v;
+                }
+            }
+            // At most 4 general registers held: an instruction before the call may need 8 of the 12 (`need`).
+            let mut gp = (self.pin & self.xalloc).count_ones() as u32;
+            for p in pl.p0..pl.p0 + pl.n as u32 {
+                gp += (!self.self_lay.parts[p as usize].v) as u32;
+            }
+            if !same || gp > 4 {
+                continue;
+            }
+            for p in pl.p0..pl.p0 + pl.n as u32 {
+                let ps = self.self_lay.parts[p as usize];
+                let r = ps.reg + ast_pick(ps.v, V0, 0);
+                self.pin_reg[p as usize] = r;
+                self.pin |= bit(r);
+            }
+            self.va.index_mut(x as usize).home = H_PASSED;
+            self.va.index_mut(x as usize).off = k as i32;
+        }
+        self.fixed_busy |= self.pin;
+    }
+
     // Parameter value index `x` arrives in register `r`.
     fn entry_reg(self: &mut Self, x: u32, r: u8) {
         if self.lv.uses[x as usize] == 0 {
             return;
         }
         let t = self.xty(x);
-        let f = self.take_home(x, is_v(t), r);
+        let f = self.take_home(x, is_v(t) || is_vec(t), r);
         if f != NOREG {
             self.move_reg(t, f, r);
             return;
@@ -4021,6 +4177,9 @@ extend Gen {
         }
         if (op == O_SPLAT || op == O_WCONST) && self.lv.pfold[i as usize] {
             return true; // its shifts take it as an immediate (`lv::FOLD_VSHIMM`)
+        }
+        if op == O_VEXTRACT && self.lv.pfold[i as usize] {
+            return true; // its splat reads the lane (`lv::FOLD_LANE`)
         }
         if op == O_WCONST && self.in_reg(t.ty) {
             self.wconst_reg(i, t);
@@ -4687,6 +4846,15 @@ extend Gen {
         return icond(t.aux);
     }
 
+    // Whether only its home in memory holds scalar integer value `v`: a stack parameter or a spilled value.
+    const fn mem_home(self: &Self, v: Value) bool {
+        if (v & VFLAG) != 0 || v == VNONE {
+            return false;
+        }
+        let va = self.va[self.vx(v) as usize];
+        return va.reg == NOREG && (va.home == H_ARG || va.home == H_SLOT) && is_int(self.vt(v)) && !in_mem(self.vt(v));
+    }
+
     // Whether `v` is a load its use reads in memory (`lv::FOLD_LDOP`).
     const fn ld_folded(self: &Self, v: Value) bool {
         return (v & (VPARAM | VFLAG)) == 0 && v != VNONE && self.lv.pfold[v as usize] && self.b().insts[v as usize].op == O_LOAD;
@@ -5091,6 +5259,25 @@ extend Gen {
         }
         if alu {
             let aop = alu_of(op);
+            // An operand that only memory holds (a stack parameter, a spilled value): the operation reads it
+            // there (the second one of a `sub`).
+            let mb = !kc && !small && self.mem_home(t.b);
+            if mb || !kc && !small && op != O_SUB && self.mem_home(t.a) {
+                let (m, o) = if mb {
+                    (t.b, t.a)
+                } else {
+                    (t.a, t.b)
+                };
+                let ro = self.reg(o);
+                let rd = self.def_over(i, o, ro);
+                if rd != ro {
+                    self.move_reg(t.ty, rd, ro);
+                }
+                let mv = self.va[self.vx(m) as usize];
+                self.c.alu_rm(aop, sz, rd, x::at(ast_pick(mv.home == H_SLOT, x::RSP, self.fb), mv.off));
+                self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.pos };
+                return true;
+            }
             let mut ra = self.reg(t.a);
             // A sum whose first operand stays live, or whose result the next instruction wants in another
             // register (a return's, an argument's, a jump's parameter's, `next_reg`): `lea` writes that
@@ -7002,7 +7189,9 @@ extend Gen {
 
     // Whether call `t`, instruction `i`, is a sibling call (`Package.tail`, `tail_ok`): its block returns
     // its result (or nothing) right after it, its result's code is the body's, it passes every argument in
-    // registers and none an aggregate (a copy in this frame), and it is no variadic call (System V's al),
+    // registers and no aggregate but one in the registers it arrived in (`pass_parts`; else a copy in this
+    // frame), its aggregate result, from a body that returns nothing, in memory outside this frame, and it
+    // is no variadic call (System V's al),
     // no intrinsic and no call through the address slot (`-fno-plt`); then its return is not emitted
     // (`tail_ret`).
     fn sibling(self: &mut Self, i: u32, t: Inst) bool {
@@ -7022,19 +7211,35 @@ extend Gen {
         }
         let r = b.insts[i as usize + 1];
         let rt = b.pool[t.b as usize + 2];
-        if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || rt != b.pool[b.sig as usize + 2] || (rt & AGG) != 0 {
+        // An aggregate result into memory its address operand names, from a body that returns nothing.
+        let into = (rt & AGG) != 0 && b.pool[b.sig as usize + 2] == T_NONE as u32 && t.ty == T_NONE;
+        if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || (rt != b.pool[b.sig as usize + 2] || (rt & AGG) != 0) && !into {
             return false;
         }
         self.call_layout(t);
-        if self.lay.ret.kind == ab::L_SRET {
+        if self.lay.ret.kind == ab::L_SRET != into {
             return false;
+        }
+        // That memory is not an aggregate parameter's that arrives in registers, which this frame holds.
+        let v = if into {
+            b.pool[(t.c + b.pool[t.b as usize]) as usize]
+        } else {
+            VNONE
+        };
+        let e0 = b.blocks[0].param_start;
+        if into && (v & VPARAM) != 0 && (v & ~VPARAM) >= e0 && (v & ~VPARAM) - e0 < b.pool[b.sig as usize] {
+            let p = (v & ~VPARAM) - e0;
+            if (b.pool[(b.sig + 3 + p) as usize] & AGG) != 0 && self.self_lay.locs[p as usize].kind == ab::L_REG {
+                return false;
+            }
         }
         let p = unsafe &*self.pkg;
         if t.op == O_CALL && (self.intrinsic(t.a).len() != 0 || p.no_plt && !self.win && p.syms[b.syms[t.a as usize] as usize].ext) {
             return false;
         }
         for k in 0..b.pool[t.b as usize] {
-            if (b.pool[(t.b + 3 + k) as usize] & AGG) != 0 || self.lay.locs[k as usize].kind != ab::L_REG {
+            let passed = self.va[self.vx(b.pool[(t.c + k) as usize]) as usize].home == H_PASSED;
+            if (b.pool[(t.b + 3 + k) as usize] & AGG) != 0 && !passed || self.lay.locs[k as usize].kind != ab::L_REG {
                 return false;
             }
         }
@@ -7121,7 +7326,7 @@ extend Gen {
             let x = self.vx(v);
             let vr = self.va[x as usize].reg;
             // Free of the template, or already in its own argument register.
-            let mut ok = tpl.len() != 0 && self.vec_in_reg(loc, self.vt(v)) && vr != NOREG && vr >= V0;
+            let mut ok = tpl.len() != 0 && self.lay.whole_vreg(loc, self.vt(v)) && vr != NOREG && vr >= V0;
             ok = ok && ((self.clob & bit(vr)) == 0 || vr == V0 + self.lay.parts[loc.p0 as usize].reg);
             for j in 0..to.len() {
                 ok = ok && to[j] != (vr - V0) as u32;
@@ -7133,7 +7338,7 @@ extend Gen {
             };
             if ok && intrin::vwrites(false, tx, pr) {
                 let rl = self.lay.ret;
-                ok = rres == NOREG && self.vec_in_reg(rl, t.ty);
+                ok = rres == NOREG && self.lay.whole_vreg(rl, t.ty);
                 ok = ok && self.lay.parts[rl.p0 as usize].reg as u32 == pr && self.dies(x);
                 if ok {
                     rres = vr;
@@ -7150,7 +7355,7 @@ extend Gen {
         // template's result register takes its name, and an argument there moves to it instead.
         let mut rmov = NONE;
         let rl = self.lay.ret;
-        if tpl.len() != 0 && rres == NOREG && self.vec_in_reg(rl, t.ty) && self.live_on(self.vx(i)) {
+        if tpl.len() != 0 && rres == NOREG && self.lay.whole_vreg(rl, t.ty) && self.live_on(self.vx(i)) {
             let mut taken = self.clob | self.lock | self.tmps;
             for j in 0..to.len() {
                 taken |= bit(V0 + to[j] as u8);
@@ -7203,6 +7408,19 @@ extend Gen {
             late.push(self.vx(t.a));
         }
         let mut keep = Vector::<u32>::new();
+        // The result's address that a register holds and no other operand is moves with the scalars.
+        let mut resmv = false;
+        if tpl.len() == 0 && nops > np && self.lay.ret.kind == ab::L_SRET {
+            let x = self.vx(b.pool[(t.c + np) as usize]);
+            let mut n = (t.op == O_CALLIND && self.vx(t.a) == x) as u32;
+            for q in 0..nops {
+                n += (self.vx(b.pool[(t.c + q) as usize]) == x) as u32;
+            }
+            resmv = n == 1 && self.va[x as usize].reg != NOREG;
+            if resmv {
+                keep.push(x);
+            }
+        }
         for k in 0..np {
             let v = b.pool[(t.c + k) as usize];
             let x = self.vx(v);
@@ -7212,11 +7430,17 @@ extend Gen {
             }
             let vty = self.vt(v);
             let loc = self.lay.locs[k as usize];
-            if tpl.len() == 0 && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && self.parts_moved(v, loc, &late) {
+            // A stack argument reads its register before the move, which may write it (so not when the call
+            // reads the value after the move too).
+            let mut after = false;
+            for q in 0..late.len() {
+                after = after || late[q] == x;
+            }
+            if tpl.len() == 0 && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && self.parts_moved(v, loc, &late) || loc.kind == ab::L_STACK && !after && self.va[x as usize].reg != NOREG {
                 keep.push(x);
                 continue;
             }
-            if !shared && loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) == 0 && (!in_mem(vty) || self.vec_in_reg(
+            if !shared && loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) == 0 && (!in_mem(vty) || self.lay.whole_vreg(
                 loc,
                 vty,
             )) && self.va[x as usize].reg != NOREG {
@@ -7290,19 +7514,33 @@ extend Gen {
             let pt = b.pool[(sig + 3 + k) as usize];
             let vty = self.vt(v);
             if (pt & AGG) != 0 {
-                self.materialize(v, S1);
-                self.copy_mem(x::RSP, loc.off, S1, 0, loc.size);
+                // From the address's register when one holds it.
+                let rv = self.va[self.vx(v) as usize].reg;
+                if rv == NOREG {
+                    self.materialize(v, S1);
+                }
+                self.copy_mem(x::RSP, loc.off, ast_pick(rv == NOREG, S1, rv), 0, loc.size);
             } else if in_mem(vty) {
                 let (base, off) = self.mloc(v);
                 self.copy_mem(x::RSP, loc.off, base, off, loc.size);
             } else {
-                let r = if is_v(vty) {
-                    self.vs0
+                // A constant a 32-bit immediate holds goes into memory as it is, a value in a register from
+                // there.
+                let mut k: i32 = 0;
+                let rv = self.va[self.vx(v) as usize].reg;
+                if rv != NOREG {
+                    self.st(vty, rv, x::at(x::RSP, loc.off as i32));
+                } else if !is_v(vty) && self.imm32_of(v, type_bits(vty, self.ptr), &mut k) {
+                    self.c.mov_mi(type_bytes(vty, self.ptr), x::at(x::RSP, loc.off as i32), k);
                 } else {
-                    S0
-                };
-                self.materialize(v, r);
-                self.st(vty, r, x::at(x::RSP, loc.off as i32));
+                    let r = if is_v(vty) {
+                        self.vs0
+                    } else {
+                        S0
+                    };
+                    self.materialize(v, r);
+                    self.st(vty, r, x::at(x::RSP, loc.off as i32));
+                }
             }
         }
         // The scalars from registers and homes as one parallel move; a narrow one then extends in place. An
@@ -7313,6 +7551,29 @@ extend Gen {
             let loc = self.lay.locs[k as usize];
             let v = b.pool[(t.c + k) as usize];
             let vty = self.vt(v);
+            let va = self.va[self.vx(v) as usize];
+            if va.home == H_PASSED {
+                // Each part from the register it arrived in (`pass_parts`), whole.
+                let pl = self.self_lay.locs[va.off as usize];
+                for q in 0..loc.n as u32 {
+                    let pa = self.lay.parts[(loc.p0 + q) as usize];
+                    self.mv.push(
+                        Mv {
+                            src: Lc { kind: LC_REG, reg: self.pin_reg[(pl.p0 + q) as usize], off: 0, val: NONE },
+                            dst: Lc { kind: LC_REG, reg: pa.reg + ast_pick(pa.v, V0, 0), off: 0, val: NONE },
+                            v: pa.v,
+                            bytes: if pa.v && pa.size > 8 {
+                                16
+                            } else {
+                                8
+                            },
+                            done: false,
+                        },
+                    );
+                }
+                relayed.push(true);
+                continue;
+            }
             relayed.push(
                 loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && relay_parts(
                     self,
@@ -7353,7 +7614,7 @@ extend Gen {
                 relayed[k as usize] = true;
                 continue;
             }
-            if loc.kind != ab::L_REG || (b.pool[(sig + 3 + k) as usize] & AGG) != 0 || in_mem(vty) && !self.vec_in_reg(
+            if loc.kind != ab::L_REG || (b.pool[(sig + 3 + k) as usize] & AGG) != 0 || in_mem(vty) && !self.lay.whole_vreg(
                 loc,
                 vty,
             ) || ren[k as usize] {
@@ -7381,6 +7642,18 @@ extend Gen {
                 },
             );
         }
+        if resmv {
+            let src = self.loc_of(self.vx(b.pool[(t.c + np) as usize]));
+            self.mv.push(
+                Mv {
+                    src: src,
+                    dst: Lc { kind: LC_REG, reg: self.arg(0), off: 0, val: NONE },
+                    v: false,
+                    bytes: 8,
+                    done: false,
+                },
+            );
+        }
         // Per argument: whether the move took it, and whether its register then holds it zero-extended.
         let mut moved = Vector::<bool>::with_capacity(np as usize);
         let mut clean = Vector::<bool>::with_capacity(np as usize);
@@ -7392,7 +7665,7 @@ extend Gen {
             let loc = self.lay.locs[k as usize];
             // A renamed argument is read where it is.
             moved.push(
-                loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) == 0 && (!in_mem(vty) || self.vec_in_reg(
+                loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) == 0 && (!in_mem(vty) || self.lay.whole_vreg(
                     loc,
                     vty,
                 )) && self.loc_of(x).kind != LC_VAL || ren[k as usize] || relayed[k as usize],
@@ -7400,8 +7673,10 @@ extend Gen {
             clean.push(va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG));
         }
         resolve_moves(self);
-        // The moved values' registers now hold arguments.
+        // The moved values' registers now hold arguments; the parts passed on are in theirs.
         self.forget_caller_saved();
+        self.fixed_busy &= ~self.pin;
+        self.pin = 0;
         // The relayed aggregate parts' constants and addresses (`relay_parts`).
         for q in 0..rvals.len() {
             self.materialize(rvals[q] as u32, (rvals[q] >> 32) as u8);
@@ -7478,7 +7753,7 @@ extend Gen {
                 }
             }
         }
-        if self.lay.ret.kind == ab::L_SRET {
+        if self.lay.ret.kind == ab::L_SRET && !resmv {
             if (rt & AGG) != 0 {
                 self.materialize(b.pool[(t.c + np) as usize], self.arg(0));
             } else {
@@ -7551,7 +7826,7 @@ extend Gen {
             }
             return true;
         }
-        if self.vec_in_reg(rl, t.ty) {
+        if self.lay.whole_vreg(rl, t.ty) {
             self.result_in(
                 i,
                 if rres != NOREG {
@@ -7590,15 +7865,6 @@ extend Gen {
             }
         }
         return false;
-    }
-
-    // Whether argument or result location `loc` (`lay`) takes vector type `t` whole in one vector register.
-    const fn vec_in_reg(self: &Self, loc: ab::ALoc, t: u8) bool {
-        if loc.kind != ab::L_REG || loc.n != 1 || !in_vreg(t) {
-            return false;
-        }
-        let pa = self.lay.parts[loc.p0 as usize];
-        return pa.v && pa.size as u32 == type_bytes(t, 8);
     }
 
     // A copy of argument `v` of signature type `pt` (an aggregate's address, or a memory value) that a
@@ -8570,7 +8836,10 @@ extend Gen {
             } else if self.ret_in_vreg(t.a) {
                 // A vector a register holds, returned whole in one xmm register.
                 let pa = self.self_lay.parts[rl.p0 as usize];
-                self.c.vmov(pa.reg, self.va[self.vx(t.a) as usize].reg - V0);
+                let ra = self.va[self.vx(t.a) as usize].reg;
+                if ra != V0 + pa.reg {
+                    self.c.vmov(pa.reg, ra - V0);
+                }
             } else if in_mem(self.vt(t.a)) {
                 let (base, off) = self.mloc(t.a);
                 for q in 0..rl.n as u32 {
@@ -8591,6 +8860,11 @@ extend Gen {
             // rax: the memory's pointer, the value copied there first for a memory value.
             if (rt & AGG) != 0 {
                 self.materialize(VPARAM | b.blocks[0].param_start + np, x::RAX);
+            } else if self.va[self.vx(t.a) as usize].reg != NOREG && self.in_reg(self.vt(t.a)) {
+                // A vector a register holds, stored there.
+                self.c.load(8, false, x::RAX, x::at(x::RSP, self.sret_off as i32));
+                let ra = self.va[self.vx(t.a) as usize].reg;
+                self.c.vstore(type_bytes(self.vt(t.a), self.ptr), ra - V0, x::at(x::RAX, 0));
             } else {
                 self.c.load(8, false, x::RAX, x::at(x::RSP, self.sret_off as i32));
                 let (base, off) = self.mloc(t.a);
@@ -9964,12 +10238,7 @@ extend Gen {
 
     // Whether the body returns vector `v` whole in one xmm register and an xmm register holds it.
     const fn ret_in_vreg(self: &Self, v: Value) bool {
-        let rl = self.self_lay.ret;
-        if rl.kind != ab::L_REG || rl.n != 1 || self.va[self.vx(v) as usize].reg == NOREG || !in_vreg(self.vt(v)) {
-            return false;
-        }
-        let pa = self.self_lay.parts[rl.p0 as usize];
-        return pa.v && pa.size as u32 == type_bytes(self.vt(v), 8);
+        return self.va[self.vx(v) as usize].reg != NOREG && self.self_lay.whole_vreg(self.self_lay.ret, self.vt(v));
     }
 
     // A binary16 conversion (`O_HTOF`, `O_FTOH`, F16C: `Package.half`): the encoding moved into the low
@@ -10031,6 +10300,23 @@ extend Gen {
             for k in 0..lanes(t.ty) {
                 self.st_lane(r, d, k, lt, false);
             }
+            return;
+        }
+        if (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] {
+            // A lane of a vector in a register (`lv::FOLD_LANE`): `pshufd` of its dwords, a 4-byte lane's
+            // 4 times, an 8-byte lane's pair twice.
+            let e = self.b().insts[t.a as usize];
+            let rv = self.vec_use(e.a, self.vs0);
+            let rd = self.vec_def(i);
+            let k = e.aux as u32;
+            self.c.sse_rr(0x66, 0x0F70, rd - V0, rv - V0);
+            self.c.byte(
+                if eb == 4 {
+                    (k * 0x55) as u8
+                } else {
+                    (k * 0xAA + 0x44) as u8
+                },
+            );
             return;
         }
         let rs = self.reg(t.a);

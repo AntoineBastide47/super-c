@@ -63,6 +63,15 @@ extend CallLayout {
         self.unknown = o.unknown;
     }
 
+    /// Whether location `loc` takes a vector of type `t`, of 8 or 16 bytes, whole in one vector register.
+    pub(package) const fn whole_vreg(self: &Self, loc: ALoc, t: u8) bool {
+        if loc.kind != L_REG || loc.n != 1 || !is_vec(t) || type_bytes(t, 8) != 8 && type_bytes(t, 8) != 16 {
+            return false;
+        }
+        let pa = self.parts[loc.p0 as usize];
+        return pa.v && pa.size as u32 == type_bytes(t, 8);
+    }
+
     pub(package) fn new() CallLayout {
         return CallLayout {
             locs: Vector::<ALoc>::new(),

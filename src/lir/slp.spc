@@ -78,6 +78,7 @@ pub(package) struct Slp {
     rpk: Vector<u32>, // the packs of the sum seeds' terms, `n` terms each
     uses: Vector<u32>, // per instruction, its uses (`red_seeds`)
     assoc: bool, // float adds reassociate
+    hfa: bool, // a homogeneous float aggregate parameter or result passes in registers (`Package.hfa_regs`)
     sclaim: Vector<bool>, // per instruction, whether a store seed holds it
     extr: Vector<Value>, // per block parameter of a PK_PARAM pack, its lane out of the vector
     edges: Vector<u32>,
@@ -114,6 +115,7 @@ extend Slp {
             rpk: Vector::<u32>::new(),
             uses: Vector::<u32>::new(),
             assoc: false,
+            hfa: false,
             sclaim: Vector::<bool>::new(),
             extr: Vector::<Value>::new(),
             edges: Vector::<u32>::new(),
@@ -127,10 +129,21 @@ extend Slp {
     /// The packs of body `b` (`ptr` its pointer size, `vb` the bytes of the widest vector, `w` per block the
     /// weight of an instruction there): whether the instructions they save outweigh the splats and gathers
     /// they add. `b` stays as it is.
-    pub(package) fn plan(self: &mut Self, b: &Body, ptr: u32, vb: u32, assoc: bool, w: []u64, iblk: []u32, pblk: []u32) bool {
+    pub(package) fn plan(
+        self: &mut Self,
+        b: &Body,
+        ptr: u32,
+        vb: u32,
+        assoc: bool,
+        hfa: bool,
+        w: []u64,
+        iblk: []u32,
+        pblk: []u32,
+    ) bool {
         self.ptr = ptr;
         self.vb = vb;
         self.assoc = assoc;
+        self.hfa = hfa;
         self.reds.truncate(0);
         self.rpk.truncate(0);
         let ni = b.insts.len();
@@ -491,6 +504,9 @@ extend Slp {
                 continue;
             }
             let (root, off) = address(b, t);
+            if self.in_regs(b, root) {
+                continue;
+            }
             let size = type_bytes(ty, self.ptr) as i64;
             // The values on the lane stack, the stores past the seeds' (`stores`) until it is one.
             let at = self.tmp.len();
@@ -705,6 +721,9 @@ extend Slp {
                 return 0;
             }
             let (root, off) = address(b, t0);
+            if self.in_regs(b, root) {
+                return 0;
+            }
             let size = type_bytes(ty, self.ptr) as i64;
             for q in 1..n {
                 let (r2, o2) = address(b, b.insts[self.tmp[(at + q) as usize] as usize]);
@@ -730,6 +749,29 @@ extend Slp {
         } else {
             0u8
         };
+    }
+
+    // Whether `v` is the address of an aggregate parameter or result whose elements pass in registers, one
+    // each (`hfa`): a vector of them is built lane by lane and taken apart again.
+    const fn in_regs(self: &Self, b: &Body, v: Value) bool {
+        if !self.hfa || (v & VPARAM) == 0 || v == VNONE {
+            return false;
+        }
+        let e = b.blocks[0];
+        if (v & ~VPARAM) < e.param_start {
+            return false;
+        }
+        let k = (v & ~VPARAM) - e.param_start;
+        let np = b.pool[b.sig as usize];
+        if k > np {
+            return false;
+        }
+        let pt = b.pool[(b.sig + if k == np {
+            2
+        } else {
+            3 + k
+        }) as usize];
+        return (pt & AGG) != 0 && is_float(homogeneous(b, pt & ~AGG, self.ptr));
     }
 
     // Whether the lanes of splat or gather `pk` are constants.

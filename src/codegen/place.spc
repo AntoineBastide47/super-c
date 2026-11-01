@@ -17,6 +17,9 @@ pub(package) const H_FIXED: u8 = 3; // `reg` for its whole range
 pub(package) const H_REMAT: u8 = 4; // a constant or an address, recomputed at each use
 pub(package) const H_SPADDR: u8 = 5; // the address stack pointer + off
 pub(package) const H_FPADDR: u8 = 6; // the address frame pointer + off
+// An aggregate parameter's parts in the registers they arrive in, kept for the one call that reads it
+// (`parts_passed`); `off` is the parameter's index.
+pub(package) const H_PASSED: u8 = 7;
 
 /// Per value: where it is.
 pub(package) struct Va {
@@ -516,6 +519,53 @@ pub(package) fn parts_taken(
         return false;
     }
     return true;
+}
+
+/// The call of `b`'s entry block whose one argument is the only use of parameter value index `x` (an
+/// aggregate the body takes in registers), when no instruction before it `clobbers` registers: that
+/// call's instruction, whose registers may take the aggregate's parts from the registers they arrive in;
+/// NONE else. `uses` is scratch.
+pub(package) fn parts_passed(b: &Body, lv: &lv::Live, clobbers: fn(&Body, Inst) bool, x: u32, uses: &mut Vector<Value>) u32 {
+    if lv.uses[x as usize] != 1 {
+        return NONE;
+    }
+    let e = b.blocks[0];
+    let v = VPARAM | x - b.insts.len() as u32;
+    for i in e.start..e.start + e.len {
+        let t = b.insts[i as usize];
+        lv.uses_at(b, i, uses);
+        let mut reads = false;
+        for q in 0..uses.len() {
+            reads = reads || uses[q] == v;
+        }
+        if reads {
+            if t.op != O_CALL && t.op != O_CALLIND || lv.fold[i as usize] {
+                return NONE;
+            }
+            let mut arg = false;
+            for k in 0..b.pool[t.b as usize] {
+                arg = arg || b.pool[(t.c + k) as usize] == v;
+            }
+            return if arg {
+                i
+            } else {
+                NONE
+            };
+        }
+        if clobbers(b, t) {
+            return NONE;
+        }
+    }
+    return NONE;
+}
+
+/// Per entry parameter of `b` (signature layout `lay`), whether it is an aggregate that arrives in
+/// registers, whose memory the frame holds, into `out`.
+pub(package) fn held_params(b: &Body, lay: &ab::CallLayout, out: &mut Vector<bool>) {
+    out.truncate(0);
+    for k in 0..b.pool[b.sig as usize] {
+        out.push((b.pool[(b.sig + 3 + k) as usize] & AGG) != 0 && lay.locs[k as usize].kind == ab::L_REG);
+    }
 }
 
 /// Per slot of `b`, the uses of its addresses (`lv.uses`, before the code generator consumes any), into

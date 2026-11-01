@@ -359,6 +359,12 @@ pub(package) fn lane_form(isa: str, name: str) u32 {
     return 0;
 }
 
+/// Whether intrinsic `name` reads one lane of a vector at an index its second argument gives
+/// (`vget_lane_f32`, `vgetq_lane_s64`): the lowering makes it a lane read (`vextract`) for a constant index.
+pub(package) const fn lane_read(name: str) bool {
+    return name.starts_with("vget_lane_") || name.starts_with("vgetq_lane_");
+}
+
 /// Whether intrinsic `name` only loads or stores one whole vector at its pointer argument, of any
 /// alignment (`vld1q_f32`, `_mm_loadu_ps`, `_mm256_store_si256`, `wasm_v128_load`): the lowering makes it
 /// a plain load or store the optimizer sees through. An aligned form's alignment is a precondition, so an

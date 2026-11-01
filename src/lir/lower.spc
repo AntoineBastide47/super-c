@@ -7121,9 +7121,10 @@ extend Lower {
     }
 
     // An intrinsic that only loads or stores one vector (`intrin::mem_form`) as that load or store, with
-    // no alignment; one of no instruction as its argument's bytes (a bitcast, else through a slot: a low
-    // part, or a wider value whose other bytes are zero; an argument through memory, `tys` its signature
-    // type, is read from its bytes): true, with the value in `out` (VNONE for a store), when `name` is one.
+    // no alignment; one of no instruction as its argument's bytes (a bitcast, a vector's low half, else
+    // through a slot: a low part, or a wider value whose other bytes are zero; an argument through memory,
+    // `tys` its signature type, is read from its bytes); a lane read at a constant index as a `vextract`
+    // (`intrin::lane_read`): true, with the value in `out` (VNONE for a store), when `name` is one.
     fn mem_intrin(
         self: &mut Self,
         c: &cbe::CEmit,
@@ -7160,6 +7161,9 @@ extend Lower {
                 *out = a[0];
             } else if fb == tb {
                 *out = self.inst(O_BITCAST, ti.mty, 0, a[0], VNONE, VNONE);
+            } else if is_vec(from) && is_vec(ti.mty) && lane_type(from) == lane_type(ti.mty) && fb == 2 * tb {
+                // A low half (`vget_low_f32`): the vector operation, which a backend computes in registers.
+                *out = self.vop((irc::OP_SIMD + irc::SIMD_LOW_HALF as u32) as u16, ti.mty, [a[0]], VNONE);
             } else {
                 let big = ast::pick(fb > tb, from, ti.mty);
                 let s = self.temp(
@@ -7172,6 +7176,16 @@ extend Lower {
                 *out = self.load(ti.mty, s, 0, false);
             }
             return true;
+        }
+        // A lane read at a constant index (`intrin::lane_read`).
+        if intrin::lane_read(name) && a.len() == 2 && ti.cls == VC_SCALAR && is_vec(self.vty(a[0])) && lane_type(
+            self.vty(a[0]),
+        ) == ti.mty && (a[1] & (VPARAM | VFLAG)) == 0 && self.b.insts[a[1] as usize].op == O_ICONST {
+            let k = self.b.insts[a[1] as usize].a;
+            if k < lanes(self.vty(a[0])) {
+                *out = self.inst(O_VEXTRACT, ti.mty, k as u16, a[0], VNONE, VNONE);
+                return true;
+            }
         }
         let f = intrin::mem_form(name);
         if f == intrin::MF_LOAD && a.len() == 1 && ti.cls == VC_SCALAR && is_vec(ti.mty) {

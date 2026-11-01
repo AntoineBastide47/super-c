@@ -28,71 +28,77 @@ import ir::core as core;
 /// alone reads as an operand it may take shifted (`shop_side`: arm64's shifted register operand); a
 /// scalar float comparison only selects and branches read, of one condition (`FOLD_FCMP`; not `one`,
 /// `ueq`).
-pub(package) const FOLD_CMP: u32 = 1;
-pub(package) const FOLD_TST: u32 = 2;
-pub(package) const FOLD_MADD: u32 = 4;
-pub(package) const FOLD_UBFX: u32 = 8;
-pub(package) const FOLD_ROT: u32 = 16;
-pub(package) const FOLD_ROT_NARROW: u32 = 32;
-pub(package) const FOLD_LEA: u32 = 64;
-pub(package) const FOLD_CCMP: u32 = 128;
-pub(package) const FOLD_SHAMT: u32 = 256;
-pub(package) const FOLD_CSEL: u32 = 512;
-pub(package) const FOLD_MULL: u32 = 1024;
-pub(package) const FOLD_SHOP: u32 = 2048;
-pub(package) const FOLD_FCMP: u32 = 4096;
-pub(package) const FOLD_BLEN: u32 = 8192;
-pub(package) const FOLD_CARRY: u32 = 16384;
-pub(package) const FOLD_FSEL: u32 = 32768;
-pub(package) const FOLD_NOT: u32 = 65536;
-pub(package) const FOLD_XBFX: u32 = 131072;
-pub(package) const FOLD_BFI: u32 = 262144;
+pub(package) const FOLD_CMP: u64 = 1;
+pub(package) const FOLD_TST: u64 = 2;
+pub(package) const FOLD_MADD: u64 = 4;
+pub(package) const FOLD_UBFX: u64 = 8;
+pub(package) const FOLD_ROT: u64 = 16;
+pub(package) const FOLD_ROT_NARROW: u64 = 32;
+pub(package) const FOLD_LEA: u64 = 64;
+pub(package) const FOLD_CCMP: u64 = 128;
+pub(package) const FOLD_SHAMT: u64 = 256;
+pub(package) const FOLD_CSEL: u64 = 512;
+pub(package) const FOLD_MULL: u64 = 1024;
+pub(package) const FOLD_SHOP: u64 = 2048;
+pub(package) const FOLD_FCMP: u64 = 4096;
+pub(package) const FOLD_BLEN: u64 = 8192;
+pub(package) const FOLD_CARRY: u64 = 16384;
+pub(package) const FOLD_FSEL: u64 = 32768;
+pub(package) const FOLD_NOT: u64 = 65536;
+pub(package) const FOLD_XBFX: u64 = 131072;
+pub(package) const FOLD_BFI: u64 = 262144;
 /// A load's or store's folded index that is the 64-bit zero or sign extension of a 32-bit value (or of an
 /// unsigned 8- or 16-bit entry parameter, under `ext_args`), which only that access reads: the access
 /// extends it (arm64 `[xn, wm, uxtw]`).
-pub(package) const FOLD_XIDX: u32 = 524288;
+pub(package) const FOLD_XIDX: u64 = 524288;
 /// `FOLD_LDOP`: a single-use scalar float load as the right operand of arithmetic, or an integer load
 /// that one comparison or `add`, `sub`, `and`, `or`, `xor` or `mul` reads
 /// folds into it, which reads the memory (x86-64's `cmp [m], k`, `add r, [m]`, `imul r, [m]`;
 /// `Live::ldop_user`).
-pub(package) const FOLD_LDOP: u32 = 1048576;
+pub(package) const FOLD_LDOP: u64 = 1048576;
 /// `FOLD_ANY`: an `or` of the lanes of a 16-byte lane mask (`lane_mask`) that equalities with 0 alone
 /// read folds into each: they test the lanes' sign bits (x86-64's `pmovmskb` and `test`). `FOLD_ANY_WIDE`:
 /// of a 32-byte one too (AVX2's `vpmovmskb`).
-pub(package) const FOLD_ANY: u32 = 2097152;
-pub(package) const FOLD_ANY_WIDE: u32 = 4194304;
+pub(package) const FOLD_ANY: u64 = 2097152;
+pub(package) const FOLD_ANY_WIDE: u64 = 4194304;
 /// `FOLD_VMLA`: a product of integer vectors of 8 or 16 bytes, lanes below 8 bytes, with one use, the second
 /// operand of a sum or a difference or the first of a sum, folds into it (arm64's MLA and MLS); else a right
 /// shift by an immediate (`vshimm`) with one use, an operand of a sum, folds into it (USRA and SSRA).
-pub(package) const FOLD_VMLA: u32 = 8388608;
+pub(package) const FOLD_VMLA: u64 = 8388608;
 /// `FOLD_VSHIMM`: a vector shift by one constant below its integer lanes' width (`vec_shift_amount`) shifts
 /// by an immediate, and a splat or wide constant such shifts alone read as their amount folds into them:
 /// 16-byte vectors of 2- to 8-byte lanes, the arithmetic shifts below 8 (SSE2). `FOLD_VSHIMM_WIDE`: 32-byte
 /// ones too (AVX2). `FOLD_VSHIMM_ALL`: 8- and 16-byte vectors of any lanes but a lone 8-byte one (Neon).
-pub(package) const FOLD_VSHIMM: u32 = 16777216;
-pub(package) const FOLD_VSHIMM_WIDE: u32 = 33554432;
-pub(package) const FOLD_VSHIMM_ALL: u32 = 67108864;
+pub(package) const FOLD_VSHIMM: u64 = 16777216;
+pub(package) const FOLD_VSHIMM_WIDE: u64 = 33554432;
+pub(package) const FOLD_VSHIMM_ALL: u64 = 67108864;
 /// `FOLD_XADDR`: an address `ptradd` of a base and an index scaled by 1, 2, 4 or 8 that only the loads
 /// and stores of its block read as their address folds into each, at any offset (x86-64's
 /// `[base + index * scale + disp]`).
-pub(package) const FOLD_XADDR: u32 = 134217728;
+pub(package) const FOLD_XADDR: u64 = 134217728;
 /// `FOLD_BRCONJ`: an `and` or `or` of two integer comparisons of up to 64 bits, each with that one use,
 /// whose one use is a `br`: both fold into the branch, which tests the first and jumps, then the second
 /// (x86-64's `cmp; jcc; cmp; jcc`).
-pub(package) const FOLD_BRCONJ: u32 = 268435456;
+pub(package) const FOLD_BRCONJ: u64 = 268435456;
 /// `FOLD_VWADD`: a 16-byte integer vector `bitcast` of a `vziplo` or `vziphi` of a vector with zeros (its
 /// low or high half zero-extended to lanes twice as wide), each with one use, that a vector sum of the
 /// wide lanes adds: the sum widens and adds (arm64 `uaddw`, `uaddw2`).
-pub(package) const FOLD_VWADD: u32 = 536870912;
+pub(package) const FOLD_VWADD: u64 = 536870912;
 /// `FOLD_TRUNC`: a truncation of an integer to 8 or 16 bits that only integer comparisons read folds into
 /// each: they extend or test its low bits in the source's register (arm64 `tst`, `uxtb`, `sxth`).
-pub(package) const FOLD_TRUNC: u32 = 1073741824;
+pub(package) const FOLD_TRUNC: u64 = 1073741824;
 /// `FOLD_ADC`: the sum `h + zext(c)` (or difference `h - zext(c)`) of a sum (difference) `h` of two values
 /// and the carry (borrow) `c` of an unsigned `addo` (`subo`) of the same width, 32 or 64 bits, with only
 /// `h` and the extension between them, each of one use and no flag read: `h` and the extension fold into
 /// it, the `addo` keeps its carry in the flags, and it adds with it (`adc`, arm64 `sbc` / x86-64 `sbb`).
 /// `Live::carry` marks the three parts.
-pub(package) const FOLD_ADC: u32 = 2147483648;
+pub(package) const FOLD_ADC: u64 = 2147483648;
+/// `FOLD_LANE`: a lane read (`vextract`) of a vector of 8 or 16 bytes, lanes of 4 or 8 bytes, whose one use is
+/// a `splat`: the splat broadcasts the lane from the vector's register (arm64 `dup v, v[k]`, x86-64 `pshufd`).
+pub(package) const FOLD_LANE: u64 = 4294967296;
+/// `FOLD_LANE_MUL`: such a splat of a lane with one use, the second operand of a product of float vectors of 8
+/// or 16 bytes, folds into it too: the product multiplies by the lane (arm64 `fmul v, v, v[k]`).
+pub(package) const FOLD_LANE_MUL: u64 = 8589934592;
 /// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
 /// flags keep, a folded sum or extension, the sum with the carry.
 pub(package) const CARRY_NONE: u8 = 0;
@@ -202,7 +208,7 @@ pub(package) struct Live {
     /// The instructions that fold into their uses (`FOLD_*`, the target's): each use computes the folded
     /// instruction from its operands, which live to it (`uses_at`), and the instruction emits nothing
     /// (`pfold`).
-    pub(package) fold_ops: u32,
+    pub(package) fold_ops: u64,
     /// Whether the calling convention has the caller extend 8- and 16-bit arguments to 32 bits by their
     /// signedness (Apple arm64), so their registers' low 32 bits are their values extended.
     pub(package) ext_args: bool,
@@ -498,6 +504,24 @@ extend Live {
                 if p != VNONE {
                     self.pfold[p as usize] = true;
                 }
+            }
+            if (self.fold_ops & FOLD_LANE) != 0 && t.op == O_SPLAT && is_inst(t.a) && b.insts[t.a as usize].op == O_VEXTRACT && self.count[t.a as usize] == 1 {
+                let vt = b.type_of(b.insts[t.a as usize].a);
+                let eb = type_bytes(lane_type(vt), 8);
+                if (type_bytes(t.ty, 8) == 8 || type_bytes(t.ty, 8) == 16) && (type_bytes(vt, 8) == 8 || type_bytes(
+                    vt,
+                    8,
+                ) == 16) && (eb == 4 || eb == 8) {
+                    self.pfold[t.a as usize] = true;
+                }
+            }
+            if (self.fold_ops & FOLD_LANE_MUL) != 0 && t.op == O_FMUL && is_vec(t.ty) && (type_bytes(t.ty, 8) == 8 || type_bytes(
+                t.ty,
+                8,
+            ) == 16) && is_inst(t.b) && b.insts[t.b as usize].op == O_SPLAT && self.count[t.b as usize] == 1 && is_inst(
+                b.insts[t.b as usize].a,
+            ) && self.pfold[b.insts[t.b as usize].a as usize] {
+                self.pfold[t.b as usize] = true;
             }
             if (self.fold_ops & FOLD_VWADD) != 0 && t.op == O_ADD && is_vec(t.ty) {
                 let p = self.vwadd_ext(b, t);
@@ -907,12 +931,16 @@ extend Live {
                 }
                 let (ka, kb) = (f.keep, f.field);
                 let kc = b.insts[kb as usize].a;
-                if self.count[ka as usize] == 1 && self.count[kb as usize] == 1 && self.count[kc as usize] == 1 && !self.pfold[ka as usize] && !self.pfold[kc as usize] && !(is_inst(
+                let tr = f.trunc == VNONE || self.count[f.trunc as usize] == 1 && !self.pfold[f.trunc as usize];
+                if tr && self.count[ka as usize] == 1 && self.count[kb as usize] == 1 && self.count[kc as usize] == 1 && !self.pfold[ka as usize] && !self.pfold[kc as usize] && !(is_inst(
                     f.x,
                 ) && self.pfold[f.x as usize]) && !(is_inst(f.v) && self.pfold[f.v as usize]) {
                     self.pfold[ka as usize] = true;
                     self.pfold[kb as usize] = true;
                     self.pfold[kc as usize] = true;
+                    if f.trunc != VNONE {
+                        self.pfold[f.trunc as usize] = true;
+                    }
                 }
             }
         }
@@ -1285,7 +1313,10 @@ extend Live {
             assert(n <= FOLD_DEPTH, "live: more folded instructions in one use than FOLD_DEPTH");
             let p = b.insts[v as usize];
             out.swap_remove(u);
-            if p.op == O_SPLAT || p.op == O_WCONST {
+            if p.op == O_SPLAT && is_inst(p.a) && self.pfold[p.a as usize] {
+                // A lane a product multiplies by (`FOLD_LANE_MUL`): its lane read.
+                out.push(p.a);
+            } else if p.op == O_SPLAT || p.op == O_WCONST {
                 // An immediate shift amount (`FOLD_VSHIMM`): nothing.
             } else if p.op == O_VOP {
                 // Its operands in the pool (`FOLD_ANY`'s one).
@@ -2146,6 +2177,13 @@ extend Live {
                         self.cut[a as usize] = block as u32;
                     } else {
                         self.home[a as usize] = HOME_NONE;
+                        // The parameter that shares its register (`exit_partner`) loses it too: no count holds it.
+                        let sx = self.shared_by[a as usize];
+                        if sx != NONE {
+                            self.home[sx as usize] = HOME_NONE;
+                            self.share[sx as usize] = NONE;
+                            self.shared_by[a as usize] = NONE;
+                        }
                     }
                     h = self.fits(x, want, caps, NONE);
                 }
@@ -2831,15 +2869,17 @@ pub(package) struct Bfi {
     pub(package) v: Value,
     pub(package) keep: Value,
     pub(package) field: Value,
+    pub(package) trunc: Value, // the truncation the kept side extends, else VNONE
     pub(package) s: u32,
     pub(package) w: u32,
 }
 
 /// Instruction `t` of `b` as an insertion of `v`'s low `w` bits into `x` at bit `s`: an `or` of 32 or 64
-/// bits of `x & ~(m << s)` and `(v & m) << s`, `m` the `w` low bits, the field within the width; `x` VNONE
-/// when it is not one.
+/// bits of `x & ~(m << s)` (or the extension of `x` truncated to the bits below the field when it reaches
+/// the top) and `(v & m) << s` (or `v` extended from `w` bits, shifted), `m` the `w` low bits, the field
+/// within the width; `x` VNONE when it is not one.
 pub(package) fn bfi_of(b: &Body, t: Inst) Bfi {
-    let none = Bfi { x: VNONE, v: VNONE, keep: VNONE, field: VNONE, s: 0, w: 0 };
+    let none = Bfi { x: VNONE, v: VNONE, keep: VNONE, field: VNONE, trunc: VNONE, s: 0, w: 0 };
     let bits = type_bits(t.ty, 8);
     if t.op != O_OR || !is_int(t.ty) || bits != 32 && bits != 64 || !is_inst(t.a) || !is_inst(t.b) {
         return none;
@@ -2857,19 +2897,36 @@ pub(package) fn bfi_of(b: &Body, t: Inst) Bfi {
         };
         let a = b.insts[ka as usize];
         let sh = b.insts[kb as usize];
-        if a.op != O_AND || sh.op != O_SHL || !is_inst(sh.a) || b.insts[sh.a as usize].op != O_AND {
+        if a.op != O_AND && a.op != O_ZEXT || sh.op != O_SHL || !is_inst(sh.a) {
             continue;
         }
         let f = b.insts[sh.a as usize];
         let s = int_const(b, sh.b);
-        let m = int_const(b, f.b);
-        let k = int_const(b, a.b);
-        if s == u64::MAX || m == u64::MAX || k == u64::MAX || m == 0 || (m & m + 1) != 0 || s >= bits as u64 {
+        let m = if f.op == O_AND {
+            int_const(b, f.b)
+        } else if f.op == O_ZEXT && type_bits(b.type_of(f.a), 8) < 64 {
+            (1u64 << type_bits(b.type_of(f.a), 8) as u64) - 1
+        } else {
+            u64::MAX
+        };
+        // The kept bits: an `and`'s mask, or those below a truncation's width.
+        let (x, k, tr) = if a.op == O_AND {
+            (a.a, int_const(b, a.b), VNONE)
+        } else if is_inst(a.a) && b.insts[a.a as usize].op == O_TRUNC && type_bits(b.type_of(a.a), 8) < 64 {
+            let n = b.insts[a.a as usize];
+            (n.a, (1u64 << type_bits(n.ty, 8) as u64) - 1, a.a)
+        } else {
+            (VNONE, u64::MAX, VNONE)
+        };
+        if s == u64::MAX || m == u64::MAX || k == u64::MAX || m == 0 || (m & m + 1) != 0 || s >= bits as u64 || type_bits(
+            b.type_of(x),
+            8,
+        ) != bits {
             continue;
         }
         let w = (m + 1).trailing_zeros() as u64;
         if s + w <= bits as u64 && (k & all) == (~(m << s) & all) {
-            return Bfi { x: a.a, v: f.a, keep: ka, field: kb, s: s as u32, w: w as u32 };
+            return Bfi { x: x, v: f.a, keep: ka, field: kb, trunc: tr, s: s as u32, w: w as u32 };
         }
     }
     return none;

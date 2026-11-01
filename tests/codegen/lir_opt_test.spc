@@ -3013,6 +3013,211 @@ b0:
     same_result(&b, &a, "drive", none, 24790);
 }
 
+// A store into an exclusive reference's referent that a later store overwrites goes across a call that
+// cannot reach that memory (`@over`: one store stays); not when the call takes the reference (`@lent`,
+// whose callee reads it), nor when the reference is a shared one, which the callee may reach (`@shared`).
+@test
+fn a_store_a_later_store_overwrites_goes_across_a_call() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @tick fn global noinline
+sym @peek fn global noinline
+sym @over fn global noinline
+sym @lent fn global noinline
+sym @shared fn global noinline
+sym @drive fn global
+sym @n data global
+data @n size 8 align 3
+fn @tick
+  sig () -> void
+b0:
+  v0 = symaddr @n
+  v1 = load.i64 v0 align 3
+  v2 = iconst.i64 1
+  v3 = add.i64 v1, v2
+  store v3, v0 align 3
+  ret
+fn @peek
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  ret v1
+fn @over
+  sig (ptr) -> void
+  ref p0 8 noalias
+b0(v0: ptr):
+  v1 = iconst.i64 5
+  v2 = iconst.i64 9
+  store v1, v0 align 3
+  call @tick() : () -> void
+  store v2, v0 align 3
+  ret
+fn @lent
+  sig (ptr) -> i64
+  ref p0 8 noalias
+b0(v0: ptr):
+  v1 = iconst.i64 5
+  v2 = iconst.i64 9
+  store v1, v0 align 3
+  v3 = call.i64 @peek(v0) : (ptr) -> i64
+  store v2, v0 align 3
+  ret v3
+fn @shared
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = iconst.i64 5
+  v2 = iconst.i64 9
+  store v1, v0 align 3
+  call @tick() : () -> void
+  store v2, v0 align 3
+  ret
+fn @drive
+  sig () -> i64
+  slot s0 size 8 align 3
+b0:
+  v0 = slotaddr s0
+  call @over(v0) : (ptr) -> void
+  v1 = call.i64 @lent(v0) : (ptr) -> i64
+  call @shared(v0) : (ptr) -> void
+  v2 = load.i64 v0 align 3
+  v3 = symaddr @n
+  v4 = load.i64 v3 align 3
+  v5 = mul.i64 v1, v2
+  v6 = add.i64 v5, v4
+  ret v6
+)",
+    );
+    let o = text_of(&a, "over");
+    assert(count_of(&o, "store") == 1, o.as_str());
+    let l = text_of(&a, "lent");
+    assert(count_of(&l, "store") == 2, l.as_str());
+    let s = text_of(&a, "shared");
+    assert(count_of(&s, "store") == 2, s.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 47);
+}
+
+// A slot whose address goes to a call that neither writes through it nor keeps it (`@look`) holds the
+// value of its one store after the call and after any other call: the load after them reads that value
+// (`@lent`); not when the callee writes through it (`@poke`; `@deep`, through more address arithmetic than
+// the effect inference follows) or keeps it (`@keep`).
+@test
+fn a_slot_a_call_only_reads_keeps_its_value() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @look fn global noinline
+sym @poke fn global noinline
+sym @deep fn global noinline
+sym @keep fn global noinline
+sym @lent fn global noinline
+sym @poked fn global noinline
+sym @deeply fn global noinline
+sym @kept fn global noinline
+sym @drive fn global
+sym @at data global
+data @at size 8 align 3
+fn @deep
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = ptradd v0+0
+  v2 = ptradd v1+0
+  v3 = ptradd v2+0
+  v4 = ptradd v3+0
+  v5 = ptradd v4+0
+  v6 = ptradd v5+0
+  v7 = ptradd v6+0
+  v8 = ptradd v7+0
+  v9 = ptradd v8+0
+  v10 = iconst.i64 50
+  store v10, v9 align 3
+  ret v10
+fn @deeply
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3
+  v2 = call.i64 @deep(v1) : (ptr) -> i64
+  v3 = load.i64 v1 align 3
+  v4 = add.i64 v3, v2
+  ret v4
+fn @look
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  v2 = iconst.i64 1
+  v3 = add.i64 v1, v2
+  ret v3
+fn @poke
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = iconst.i64 40
+  store v1, v0 align 3
+  ret v1
+fn @keep
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = symaddr @at
+  store v0, v1 align 3
+  v2 = iconst.i64 1
+  ret v2
+fn @lent
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3
+  v2 = call.i64 @look(v1) : (ptr) -> i64
+  v3 = symaddr @at
+  v4 = call.i64 @keep(v3) : (ptr) -> i64
+  v5 = load.i64 v1 align 3
+  v6 = add.i64 v5, v2
+  ret v6
+fn @poked
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3
+  v2 = call.i64 @poke(v1) : (ptr) -> i64
+  v3 = load.i64 v1 align 3
+  v4 = add.i64 v3, v2
+  ret v4
+fn @kept
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3
+  v2 = call.i64 @keep(v1) : (ptr) -> i64
+  v3 = load.i64 v1 align 3
+  v4 = add.i64 v3, v2
+  ret v4
+fn @drive
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = call.i64 @lent(v0) : (i64) -> i64
+  v2 = call.i64 @poked(v0) : (i64) -> i64
+  v3 = call.i64 @kept(v0) : (i64) -> i64
+  v4 = call.i64 @deeply(v0) : (i64) -> i64
+  v5 = add.i64 v1, v2
+  v6 = add.i64 v5, v3
+  v7 = add.i64 v6, v4
+  ret v7
+)",
+    );
+    let l = text_of(&a, "lent");
+    assert(count_of(&l, "load") == 0, l.as_str());
+    let p = text_of(&a, "poked");
+    assert(count_of(&p, "load") == 1, p.as_str());
+    let d = text_of(&a, "deeply");
+    assert(count_of(&d, "load") == 1, d.as_str());
+    let k = text_of(&a, "kept");
+    assert(count_of(&k, "load") == 1, k.as_str());
+    let x: []u64 = [6];
+    same_result(&b, &a, "drive", x, 200);
+}
+
 // Type tags (`-fstrict-aliasing`): a tagged load leaves a loop whose only writes have another tag, and
 // reads the value a store with its tag wrote across a store of another tag; an untagged store keeps both
 // loads where they are.
@@ -7223,6 +7428,279 @@ b0(v0: i64):
     assert(text_of(&n, "pick").as_str().find("memcpy") >= 0, "with no arg_copy the copy stays");
 }
 
+// A by-value aggregate argument larger than the target copies passes the source of the copy into it when
+// the callee neither writes nor keeps its parameter nor compares its address, and nothing writes the source
+// during the call: a read-only reference's referent (`ronly`) or an exclusive one no other argument
+// reaches (`excl`). The copy stays when the callee compares its parameter's address (`cmpd`), writes its
+// parameter (`wrt`), or the source is a shared reference's (`shr`). The results are the same.
+@test
+fn copies_into_large_aggregate_arguments_pass_a_kept_source() {
+    let src = M"(lir ptr 8
+sym @take fn global noinline
+sym @same fn global noinline
+sym @bump fn global noinline
+sym @ronly fn global noinline
+sym @excl fn global noinline
+sym @cmpd fn global noinline
+sym @wrt fn global noinline
+sym @shr fn global noinline
+sym @drive fn global
+fn @take
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (l0) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  v2 = load.i64 v0+16 align 3
+  v3 = sub.i64 v1, v2
+  ret v3
+fn @same
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (l0, ptr) -> i64
+b0(v0: ptr, v1: ptr):
+  v2 = icmp.eq v0, v1
+  v3 = zext.i64 v2
+  ret v3
+fn @bump
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (l0) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  v2 = iconst.i64 1
+  v3 = add.i64 v1, v2
+  store v3, v0 align 3
+  v4 = load.i64 v0+16 align 3
+  v5 = sub.i64 v3, v4
+  ret v5
+fn @ronly
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (ptr) -> i64
+  ref p0 24 readonly
+  slot s0 size 24 align 3
+b0(v0: ptr):
+  v1 = slotaddr s0
+  v2 = iconst.i64 24
+  memcpy.overlap v1, v0, v2
+  v3 = call.i64 @take(v1) : (l0) -> i64
+  ret v3
+fn @excl
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (ptr) -> i64
+  ref p0 24 noalias
+  slot s0 size 24 align 3
+b0(v0: ptr):
+  v1 = slotaddr s0
+  v2 = iconst.i64 24
+  memcpy.overlap v1, v0, v2
+  v3 = call.i64 @take(v1) : (l0) -> i64
+  ret v3
+fn @cmpd
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (ptr) -> i64
+  ref p0 24 readonly
+  slot s0 size 24 align 3
+b0(v0: ptr):
+  v1 = slotaddr s0
+  v2 = iconst.i64 24
+  memcpy.overlap v1, v0, v2
+  v3 = call.i64 @same(v1, v0) : (l0, ptr) -> i64
+  ret v3
+fn @wrt
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (ptr) -> i64
+  ref p0 24 readonly
+  slot s0 size 24 align 3
+b0(v0: ptr):
+  v1 = slotaddr s0
+  v2 = iconst.i64 24
+  memcpy.overlap v1, v0, v2
+  v3 = call.i64 @bump(v1) : (l0) -> i64
+  ret v3
+fn @shr
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (ptr) -> i64
+  slot s0 size 24 align 3
+b0(v0: ptr):
+  v1 = slotaddr s0
+  v2 = iconst.i64 24
+  memcpy.overlap v1, v0, v2
+  v3 = call.i64 @take(v1) : (l0) -> i64
+  ret v3
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 24 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 2
+  store v0, v1 align 3
+  store v0, v1+8 align 3
+  store v2, v1+16 align 3
+  v3 = call.i64 @ronly(v1) : (ptr) -> i64
+  v4 = call.i64 @excl(v1) : (ptr) -> i64
+  v5 = call.i64 @cmpd(v1) : (ptr) -> i64
+  v6 = call.i64 @wrt(v1) : (ptr) -> i64
+  v7 = call.i64 @shr(v1) : (ptr) -> i64
+  v8 = load.i64 v1 align 3
+  v9 = add.i64 v3, v4
+  v10 = add.i64 v9, v5
+  v11 = add.i64 v10, v6
+  v12 = add.i64 v11, v7
+  v13 = add.i64 v12, v8
+  ret v13
+)";
+    let (b, a) = optimized_copying(src, 16);
+    for name in ["ronly", "excl"] {
+        let t = text_of(&a, name);
+        assert(t.as_str().find("memcpy") < 0 && t.as_str().find("slotaddr") < 0, t.as_str());
+    }
+    for name in ["cmpd", "wrt", "shr"] {
+        let t = text_of(&a, name);
+        assert(t.as_str().find("memcpy") >= 0, t.as_str());
+    }
+    // ronly, excl, shr: 9 - 2 each; cmpd: 0 (a copy); wrt: 10 - 2 (its copy written); the source's 9.
+    let args: [u64; 1] = [9];
+    same_result(&b, &a, "drive", args[0..1], 7 + 7 + 0 + 8 + 7 + 9);
+}
+
+// A call's aggregate result that a copy moves from its slot into an exclusive reference's referent, right
+// after the call, through another slot too (`hop`), goes there at once: the call writes that referent and
+// the copies go (`into`, `hop`). They stay when the referent is a shared reference's (`shr`), when another
+// argument reaches it (`lent`), and when the callee keeps its result's address (`kept`).
+@test
+fn a_call_result_copied_into_an_exclusive_referent_goes_there_at_once() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @mk fn global noinline
+sym @mk2 fn global noinline
+sym @mkk fn global noinline
+sym @into fn global noinline
+sym @hop fn global noinline
+sym @shr fn global noinline
+sym @lent fn global noinline
+sym @kept fn global noinline
+sym @drive fn global
+sym @at data global
+data @at size 8 align 3
+fn @mk
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (i64) -> l0
+b0(v0: i64, v1: ptr):
+  v2 = iconst.i64 1
+  v3 = add.i64 v0, v2
+  store v0, v1 align 3
+  store v3, v1+8 align 3
+  store v0, v1+16 align 3
+  ret
+fn @mk2
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (i64, ptr) -> l0
+b0(v0: i64, v1: ptr, v2: ptr):
+  v3 = load.i64 v1 align 3
+  v4 = add.i64 v0, v3
+  store v4, v2 align 3
+  store v4, v2+8 align 3
+  store v4, v2+16 align 3
+  ret
+fn @mkk
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (i64) -> l0
+b0(v0: i64, v1: ptr):
+  v2 = symaddr @at
+  store v1, v2 align 3
+  store v0, v1 align 3
+  store v0, v1+8 align 3
+  store v0, v1+16 align 3
+  ret
+fn @into
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (ptr, i64) -> void
+  ref p0 24 noalias
+  slot s0 size 24 align 3
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 24
+  call @mk(v1, v2) : (i64) -> l0
+  memcpy.overlap v0, v2, v3
+  ret
+fn @hop
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (ptr, i64) -> void
+  ref p0 24 noalias
+  slot s0 size 24 align 3
+  slot s1 size 24 align 3
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = iconst.i64 24
+  call @mk(v1, v2) : (i64) -> l0
+  memcpy v3, v2, v4
+  memcpy.overlap v0, v3, v4
+  ret
+fn @shr
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (ptr, i64) -> void
+  slot s0 size 24 align 3
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 24
+  call @mk(v1, v2) : (i64) -> l0
+  memcpy.overlap v0, v2, v3
+  ret
+fn @lent
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (ptr, i64) -> void
+  ref p0 24 noalias
+  slot s0 size 24 align 3
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 24
+  call @mk2(v1, v0, v2) : (i64, ptr) -> l0
+  memcpy.overlap v0, v2, v3
+  ret
+fn @kept
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (ptr, i64) -> void
+  ref p0 24 noalias
+  slot s0 size 24 align 3
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 24
+  call @mkk(v1, v2) : (i64) -> l0
+  memcpy.overlap v0, v2, v3
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 24 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 3
+  store v2, v1 align 3
+  call @into(v1, v0) : (ptr, i64) -> void
+  v3 = load.i64 v1+8 align 3
+  call @hop(v1, v3) : (ptr, i64) -> void
+  v4 = load.i64 v1+8 align 3
+  call @shr(v1, v4) : (ptr, i64) -> void
+  call @lent(v1, v0) : (ptr, i64) -> void
+  v5 = load.i64 v1+16 align 3
+  call @kept(v1, v5) : (ptr, i64) -> void
+  v6 = load.i64 v1 align 3
+  v7 = load.i64 v1+8 align 3
+  v8 = add.i64 v6, v7
+  ret v8
+)",
+    );
+    for name in ["into", "hop"] {
+        let t = text_of(&a, name);
+        assert(t.as_str().find("memcpy") < 0 && t.as_str().find("slotaddr") < 0, t.as_str());
+    }
+    for name in ["shr", "lent", "kept"] {
+        let t = text_of(&a, name);
+        assert(t.as_str().find("memcpy") >= 0, t.as_str());
+    }
+    // into(5): 5, 6, 5; hop(6): 6, 7, 6; shr(7): 7, 8, 7; lent(5): 12 each; kept(12): 12 each.
+    let args: [u64; 1] = [5];
+    same_result(&b, &a, "drive", args[0..1], 24);
+}
+
 // A loop's counter step tested against 0 after other work moves right before the test, where the backends
 // test the flags it sets (`step_next`): `pow`'s `sub` follows the `mul`. `upto`'s step compared with the
 // bound moves so too (its old value's reads end before it). `kept`'s product reads the step, which stays.
@@ -8252,5 +8730,349 @@ fn costly_float_arms_keep_their_branch() {
             assert_eq(text.contains("br "), i != 0);
             assert_eq(text.contains("select.f64"), i == 0);
         }
+    }
+}
+
+// A stepping iterator's loop: a flag only the first iteration sees set, an `Option` slot its `next`
+// writes as a tag byte (`None`) or as its tag widened to a word over that byte (`Some`). The word's
+// store spans the tag's field, so the slot becomes values (`lir::promote`); the jump that only passes
+// them on and the test of the tag thread away (`Opt::thread`): no slot access and no tag test is left.
+// In `wide`, a word load reads bytes only the word's store writes: its slot keeps its memory.
+@test
+fn a_tag_stored_as_a_word_over_its_byte_promotes_and_threads() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @steps fn global
+sym @wide fn global
+fn @steps
+  sig (i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64):
+  v1 = iconst.i8 0
+  v2 = iconst.i64 0
+  v3 = slotaddr s0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 3
+  v6 = iconst.i8 1
+  jmp b1(v2, v2, v6)
+b1(v7: i64, v8: i64, v9: i8):
+  v10 = xor.i8 v9, v6
+  br v10, b2, b6(v8)
+b2:
+  v11 = icmp.ult v8, v0
+  br v11, b3, b5(v8)
+b3:
+  v12 = sub.i64 v0, v8
+  v13 = icmp.uge v12, v5
+  br v13, b4, b5(v0)
+b4:
+  v14 = add.i64 v8, v5
+  jmp b6(v14)
+b5(v15: i64):
+  store v6, v3 align 0
+  store v2, v3+8 align 0
+  jmp b9(v15, v9)
+b6(v16: i64):
+  v17 = icmp.ult v16, v0
+  br v17, b7, b8(v6, v2, v16)
+b7:
+  v18 = add.i64 v16, v4
+  jmp b8(v1, v16, v18)
+b8(v19: i8, v20: i64, v21: i64):
+  v22 = zext.i64 v19
+  store v22, v3 align 0
+  store v20, v3+8 align 0
+  jmp b9(v21, v1)
+b9(v23: i64, v24: i8):
+  v25 = load.i8 v3 align 0
+  v26 = icmp.eq v25, v1
+  br v26, b11, b10
+b10:
+  ret v7
+b11:
+  v27 = load.i64 v3+8 align 3
+  v28 = add.i64 v7, v27
+  jmp b1(v28, v23, v24)
+fn @wide
+  sig (i64, i8) -> i64
+  slot s0 size 8 align 3
+b0(v0: i64, v1: i8):
+  v2 = slotaddr s0
+  v3 = iconst.i8 1
+  br v1, b1, b2
+b1:
+  store v3, v2 align 0
+  jmp b3
+b2:
+  store v0, v2 align 3
+  jmp b3
+b3:
+  v4 = load.i8 v2 align 0
+  v5 = load.i64 v2 align 3
+  v6 = zext.i64 v4
+  v7 = add.i64 v5, v6
+  ret v7
+)",
+    );
+    let s = text_of(&a, "steps");
+    assert(!s.contains("load") && !s.contains("store"), s.as_str());
+    assert(!s.contains("icmp.eq"), s.as_str());
+    let cases: [u64; 4] = [0, 1, 5, 10];
+    let want: [u64; 4] = [0, 0, 4, 12];
+    for c in 0..4 {
+        let x: [u64; 1] = [cases[c]];
+        same_result(&b, &a, "steps", x[0..1], want[c]);
+    }
+    let y: [u64; 2] = [0x123456789, 0];
+    same_result(&b, &a, "wide", y[0..2], 0x123456789 + 0x89);
+}
+
+// The same loop once its slot is values: a block that only jumps on with the values it takes (the
+// join of a branch whose sides differ in three of them, too many selects) is threaded through; then
+// every edge into the tag's test passes a constant tag, the test threads along each, though blocks
+// below its `Some` side read its other parameters (`Opt::apart`: one block only that side enters
+// dominates them). No tag test is left.
+@test
+fn jumps_that_pass_parameters_on_thread() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @steps fn global
+fn @steps
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i8 0
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 3
+  v5 = iconst.i8 1
+  jmp b1(v2, v2, v5)
+b1(v6: i64, v7: i64, v8: i8):
+  v9 = xor.i8 v8, v5
+  br v9, b2, b6(v7)
+b2:
+  v10 = icmp.ult v7, v0
+  br v10, b3, b5(v7)
+b3:
+  v11 = sub.i64 v0, v7
+  v12 = icmp.uge v11, v4
+  br v12, b4, b5(v0)
+b4:
+  v13 = add.i64 v7, v4
+  jmp b6(v13)
+b5(v14: i64):
+  jmp b9(v14, v8, v5, v2)
+b6(v15: i64):
+  v16 = icmp.ult v15, v0
+  br v16, b7, b8(v5, v2, v15)
+b7:
+  v17 = add.i64 v15, v3
+  jmp b8(v1, v15, v17)
+b8(v18: i8, v19: i64, v20: i64):
+  jmp b9(v20, v1, v18, v19)
+b9(v21: i64, v22: i8, v23: i8, v24: i64):
+  v25 = icmp.eq v23, v1
+  br v25, b11, b10
+b10:
+  ret v6
+b11:
+  v26 = icmp.ult v24, v0
+  br v26, b12, b10
+b12:
+  v27 = add.i64 v6, v24
+  jmp b1(v27, v21, v22)
+)",
+    );
+    let s = text_of(&a, "steps");
+    assert(!s.contains("icmp.eq"), s.as_str());
+    let cases: [u64; 4] = [0, 1, 5, 10];
+    let want: [u64; 4] = [0, 0, 4, 12];
+    for c in 0..4 {
+        let x: [u64; 1] = [cases[c]];
+        same_result(&b, &a, "steps", x[0..1], want[c]);
+    }
+}
+
+// A branch on a parameter every edge into its block passes as a constant threads along each edge,
+// though two blocks below its taken side read the block's other parameters: the block only that side
+// enters dominates both (`Opt::apart`, the readers' nearest common dominator). No block is left that
+// branches on the parameter alone.
+@test
+fn a_branch_threads_past_readers_its_side_dominates() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @found fn global
+fn @found
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i8 0
+  v2 = iconst.i8 1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 3
+  jmp b1(v3, v3, v2)
+b1(v6: i64, v7: i64, v8: i8):
+  v9 = xor.i8 v8, v2
+  br v9, b2, b5(v7)
+b2:
+  v10 = icmp.ult v7, v0
+  br v10, b3, b7(v7, v8, v1, v3)
+b3:
+  v11 = sub.i64 v0, v7
+  v12 = icmp.uge v11, v5
+  br v12, b4, b7(v0, v8, v1, v3)
+b4:
+  v13 = add.i64 v7, v5
+  jmp b5(v13)
+b5(v14: i64):
+  v15 = icmp.ult v14, v0
+  br v15, b6, b7(v14, v1, v1, v3)
+b6:
+  v16 = add.i64 v14, v4
+  jmp b7(v16, v1, v2, v14)
+b7(v17: i64, v18: i8, v19: i8, v20: i64):
+  br v19, b9, b8
+b8:
+  ret v6
+b9:
+  v21 = icmp.uge v20, v0
+  br v21, b11, b10
+b10:
+  v22 = add.i64 v6, v20
+  jmp b1(v22, v17, v18)
+b11:
+  ret v3
+)",
+    );
+    let s = text_of(&a, "found");
+    assert(!s.contains("i8, v"), s.as_str());
+    let cases: [u64; 4] = [0, 1, 5, 10];
+    let want: [u64; 4] = [0, 0, 4, 12];
+    for c in 0..4 {
+        let x: [u64; 1] = [cases[c]];
+        same_result(&b, &a, "found", x[0..1], want[c]);
+    }
+}
+
+// Inserts of one scalar into every lane of a vector, in any order, are its splat; inserts that leave a lane
+// of the vector inserted into are not.
+@test
+fn inserts_of_one_scalar_into_every_lane_are_a_splat() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @every fn global
+sym @three fn global
+fn @every
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = wconst.v4i32 0x700000007, 0x700000007
+  v2 = vinsert.2.v4i32 v1, v0
+  v3 = vinsert.0.v4i32 v2, v0
+  v4 = vinsert.3.v4i32 v3, v0
+  v5 = vinsert.1.v4i32 v4, v0
+  v6 = vop.reduce_add.i32 (v5)
+  ret v6
+fn @three
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = wconst.v4i32 0x700000007, 0x700000007
+  v2 = vinsert.0.v4i32 v1, v0
+  v3 = vinsert.1.v4i32 v2, v0
+  v4 = vinsert.2.v4i32 v3, v0
+  v5 = vop.reduce_add.i32 (v4)
+  ret v5
+)",
+    );
+    let e = text_of(&a, "every");
+    assert(e.contains("splat.v4i32 v0") && !e.contains("vinsert"), e.as_str());
+    let t = text_of(&a, "three");
+    assert(!t.contains("splat"), t.as_str());
+    let x: [u64; 1] = [5];
+    same_result(&b, &a, "every", x[0..1], 20);
+    same_result(&b, &a, "three", x[0..1], 22);
+}
+
+// The element-wise sum of two aggregates of four `f32`s into a third: where the calling convention passes
+// such an aggregate one element per register (`Package.hfa_regs`, AAPCS64), its loads and the result's
+// stores stay scalars, which the native backend takes from and returns in those registers; elsewhere they
+// pack into vectors (`lir::slp`).
+@test
+fn float_aggregates_in_registers_do_not_pack() {
+    let text = M"(lir ptr 8
+sym @add4 fn global noinline
+sym @drive fn global
+fn @add4
+  layout l0 size 16 align 2 [0 f32, 4 f32, 8 f32, 12 f32]
+  sig (l0, l0) -> l0
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.f32 v0 align 2
+  v4 = load.f32 v0+4 align 2
+  v5 = load.f32 v0+8 align 2
+  v6 = load.f32 v0+12 align 2
+  v7 = load.f32 v1 align 2
+  v8 = load.f32 v1+4 align 2
+  v9 = load.f32 v1+8 align 2
+  v10 = load.f32 v1+12 align 2
+  v11 = fadd.f32 v3, v7
+  v12 = fadd.f32 v4, v8
+  v13 = fadd.f32 v5, v9
+  v14 = fadd.f32 v6, v10
+  store v11, v2 align 2
+  store v12, v2+4 align 2
+  store v13, v2+8 align 2
+  store v14, v2+12 align 2
+  ret
+fn @drive
+  layout l0 size 16 align 2 [0 f32, 4 f32, 8 f32, 12 f32]
+  sig (i32) -> i32
+  slot s0 size 16 align 2
+  slot s1 size 16 align 2
+  slot s2 size 16 align 2
+b0(v0: i32):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = sitofp.f32 v0
+  v5 = fconst.f32 0x3fc00000
+  store v4, v1 align 2
+  store v5, v1+4 align 2
+  store v4, v1+8 align 2
+  store v5, v1+12 align 2
+  store v5, v2 align 2
+  store v5, v2+4 align 2
+  store v4, v2+8 align 2
+  store v4, v2+12 align 2
+  call @add4(v1, v2, v3) : (l0, l0) -> l0
+  v6 = load.f32 v3+8 align 2
+  v7 = fptosi.i32 v6
+  ret v7
+)";
+    let mut err = String::new();
+    let b = lparse::parse(text, &mut err).unwrap();
+    let none = Vector::<bool>::new();
+    let packs: []bool = [false, true];
+    for k in 0..2usize {
+        let mut a = lparse::parse(text, &mut err).unwrap();
+        a.hfa_regs = packs[k];
+        lopt::optimize(
+            &mut a,
+            &none,
+            lopt::Config {
+                inline: il::SPEED,
+                loops: lu::Budgets {
+                    peel: 0,
+                    partial: 0,
+                    version: 0,
+                    unswitch: 0,
+                    rotate: 0,
+                    vector: 4,
+                    interleave: 4,
+                    fin: 0,
+                },
+            },
+        );
+        let t = text_of(&a, "add4");
+        assert(t.contains("v4f32") != packs[k], t.as_str());
+        let x: []u64 = [7];
+        same_result(&b, &a, "drive", x, 14);
     }
 }
