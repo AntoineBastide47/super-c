@@ -323,7 +323,8 @@ pub(package) const OBJ_PRIVATE: u32 = 0x80000000;
 /// The instructions a loop transform's copies may take (0: none): full unrolling (all its copies),
 /// partial unrolling (the unrolled loop's copies of the body), versioning on bounds checks and unswitching
 /// (the loop itself), rotation (the header's copy), final values (the copies of the iterations they
-/// take); the vectors a vectorized loop interleaves (0: no vectorization).
+/// take); the vectors a vectorized loop interleaves (0: no vectorization), the copies of a scalar loop's
+/// reductions a loop of scalar lanes interleaves.
 pub(package) struct Budgets {
     pub(package) peel: u32,
     pub(package) partial: u32,
@@ -331,6 +332,7 @@ pub(package) struct Budgets {
     pub(package) unswitch: u32,
     pub(package) rotate: u32,
     pub(package) vector: u32,
+    pub(package) interleave: u32,
     pub(package) fin: u32,
 }
 
@@ -586,7 +588,7 @@ extend LoopOpt {
                 }
                 self.rejected.push((b.lines[b.locs[b.blocks[h as usize].start as usize] as usize], s));
             }
-            if bu.vector > 1 && u != h && b.blocks[u as usize].len <= ILV_SIZE && self.vplan(
+            if bu.vector != 0 && bu.interleave > 1 && u != h && b.blocks[u as usize].len <= ILV_SIZE && self.vplan(
                 b,
                 ptr,
                 fmath,
@@ -599,9 +601,9 @@ extend LoopOpt {
                 // Copies whose every reduction is a product by a value from before the loop take one
                 // product by its power per iteration (`vpowers`): twice the copies halve the products.
                 let nv = if self.all_powers(b, u) {
-                    2 * bu.vector
+                    2 * bu.interleave
                 } else {
-                    bu.vector
+                    bu.interleave
                 };
                 self.vectorize(b, h, p, u, nv);
                 any = true;

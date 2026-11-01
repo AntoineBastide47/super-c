@@ -9998,8 +9998,9 @@ extend Gen {
         }
     }
 
-    // Lane select `t` into vector `i`: `c ^ ((b ^ c) & mask)` (SSE2); a vector outside an xmm register
-    // selects each lane's bits the same way.
+    // Lane select `t` into vector `i`: `c ^ ((b ^ c) & mask)` (SSE2), the inner part in a temporary when
+    // `c` is in a register, so the result may take `c`'s (a loop's accumulator: `def_over`); a vector
+    // outside an xmm register selects each lane's bits the same way.
     fn vsel(self: &mut Self, i: u32, t: Inst) {
         if type_bytes(t.ty, 8) == 64 && self.in_reg(t.ty) {
             // AVX-512: the mask copied into the result, then `vpternlogq` 0xCA (the first operand's bit
@@ -10019,6 +10020,13 @@ extend Gen {
             let rx = self.vec_use(t.b, self.vs1) - V0;
             let s = self.tmp(true);
             let ry = self.vec_use(t.c, s) - V0;
+            if ry != s - V0 {
+                let rd = self.def_over(i, t.c, ry + V0) - V0;
+                self.c.vex_rr(0x66, 1, 0xEF, false, true, s - V0, rx, ry);
+                self.c.vex_rr(0x66, 1, 0xDB, false, true, s - V0, s - V0, rm);
+                self.c.vex_rr(0x66, 1, 0xEF, false, true, rd, ry, s - V0);
+                return;
+            }
             let rd = self.vec_def(i) - V0;
             self.c.vex_rr(0x66, 1, 0xEF, false, true, rd, rx, ry);
             self.c.vex_rr(0x66, 1, 0xDB, false, true, rd, rd, rm);
@@ -10030,6 +10038,21 @@ extend Gen {
             let rx = self.vec_use(t.b, self.vs1);
             let s = self.tmp(true);
             let ry = self.vec_use(t.c, s);
+            if ry != s {
+                let rd = self.def_over(i, t.c, ry);
+                if rd == ry {
+                    self.c.vmov(s - V0, rx - V0);
+                    self.c.sse_rr(0x66, 0x0FEF, s - V0, ry - V0);
+                    self.c.sse_rr(0x66, 0x0FDB, s - V0, rm - V0);
+                    self.c.sse_rr(0x66, 0x0FEF, rd - V0, s - V0);
+                    return;
+                }
+                self.c.vmov(rd - V0, rx - V0);
+                self.c.sse_rr(0x66, 0x0FEF, rd - V0, ry - V0);
+                self.c.sse_rr(0x66, 0x0FDB, rd - V0, rm - V0);
+                self.c.sse_rr(0x66, 0x0FEF, rd - V0, ry - V0);
+                return;
+            }
             let rd = self.vec_def(i);
             self.c.vmov(rd - V0, rx - V0);
             self.c.sse_rr(0x66, 0x0FEF, rd - V0, ry - V0);

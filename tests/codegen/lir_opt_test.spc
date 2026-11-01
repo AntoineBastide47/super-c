@@ -25,7 +25,16 @@ fn optimized_with(text: str, fm: u8, fma: bool, vector: u32) (Package, Package) 
         text,
         fm,
         fma,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: vector, fin: 0 },
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            unswitch: 0,
+            rotate: 0,
+            vector: vector,
+            interleave: vector,
+            fin: 0,
+        },
     );
 }
 
@@ -264,7 +273,7 @@ b1(v35: i128, v36: i64):
         0,
         false,
         il::SPEED,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
         true,
         false,
     );
@@ -422,7 +431,16 @@ b2:
         &none,
         lopt::Config {
             inline: il::SPEED,
-            loops: lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+            loops: lu::Budgets {
+                peel: 0,
+                partial: 0,
+                version: 0,
+                unswitch: 0,
+                rotate: 0,
+                vector: 0,
+                interleave: 0,
+                fin: 0,
+            },
         },
     );
     let s = text_of(&after, "sum");
@@ -569,7 +587,16 @@ b4:
         &none,
         lopt::Config {
             inline: il::SPEED,
-            loops: lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+            loops: lu::Budgets {
+                peel: 0,
+                partial: 0,
+                version: 0,
+                unswitch: 0,
+                rotate: 0,
+                vector: 0,
+                interleave: 0,
+                fin: 0,
+            },
         },
     );
     let names: []str = ["fact", "ipow", "even", "band", "mix"];
@@ -1876,7 +1903,16 @@ b0(v0: i32):
         &sealed,
         lopt::Config {
             inline: il::SPEED,
-            loops: lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+            loops: lu::Budgets {
+                peel: 0,
+                partial: 0,
+                version: 0,
+                unswitch: 0,
+                rotate: 0,
+                vector: 0,
+                interleave: 0,
+                fin: 0,
+            },
         },
     );
     assert(!text_of(&p, "same").contains("@leaf"), "a body of the same unit inlines it");
@@ -2090,7 +2126,7 @@ b4(v9: i64):
 )",
         0,
         false,
-        lu::Budgets { peel: 0, partial: 16, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+        lu::Budgets { peel: 0, partial: 16, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
     );
     let cases: [[u64; 3]; 5] = [[100, 49, 7], [100, 50, 100], [10, 81, 9], [5, 81, 5], [0, 0, 0]];
     for k in 0..5 {
@@ -4540,7 +4576,7 @@ b0(v0: i64):
         0,
         false,
         il::FAST,
-        lu::Budgets { peel: 300, partial: 0, version: 200, unswitch: 50, rotate: 8, vector: 4, fin: 0 },
+        lu::Budgets { peel: 300, partial: 0, version: 200, unswitch: 50, rotate: 8, vector: 4, interleave: 4, fin: 0 },
     );
     let x: []u64 = [0x2020202041202020];
     same_result(&b, &a, "top", x, 3);
@@ -5650,7 +5686,7 @@ b2:
         0,
         false,
         il::SPEED,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
         false,
         true,
     );

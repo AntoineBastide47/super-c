@@ -12691,6 +12691,11 @@ fn loop_budgets(p: &loader::Package, opt: i32, cg: u64) lu::Budgets {
         } else {
             tgt::isa(p.arch).vector_copies
         },
+        interleave: if opt == bman::OPT_S {
+            1u32
+        } else {
+            4u32
+        },
         fin: 512,
     };
 }

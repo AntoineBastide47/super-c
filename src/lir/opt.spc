@@ -8582,8 +8582,8 @@ extend Opt {
     fn hoist(self: &mut Self, pk: &Package, b: &Body, k: u32, i: u32, load: bool, kept: bool, one: bool) bool {
         let t = b.insts[i as usize];
         // A constant leaves its loops too: the backends rebuild one that one instruction makes at each use
-        // and keep the others in a register (a 64-bit integer on arm64, a float).
-        let konst = t.op == O_ICONST || t.op == O_FCONST;
+        // and keep the others in a register (a 64-bit integer on arm64, a float, a wide constant).
+        let konst = t.op == O_ICONST || t.op == O_FCONST || t.op == O_WCONST;
         if !load && !konst && !speculable(pk, b, t) {
             return false;
         }
@@ -9443,7 +9443,16 @@ extend Run {
             let _ = sc.o.loop_opts(
                 p,
                 b,
-                lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: bu.fin },
+                lu::Budgets {
+                    peel: 0,
+                    partial: 0,
+                    version: 0,
+                    unswitch: 0,
+                    rotate: 0,
+                    vector: 0,
+                    interleave: 0,
+                    fin: bu.fin,
+                },
             );
         }
         // The final values compute in 128 bits (`lir::loops`): in words too.

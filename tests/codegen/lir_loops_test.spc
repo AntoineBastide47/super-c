@@ -81,8 +81,26 @@ fn same_outcome(before: &Package, after: &Package, name: str, args: []u64, want:
     }
 }
 
-const NO_LOOPS: lu::Budgets = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 };
-const PEEL: lu::Budgets = lu::Budgets { peel: 200, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 };
+const NO_LOOPS: lu::Budgets = lu::Budgets {
+    peel: 0,
+    partial: 0,
+    version: 0,
+    unswitch: 0,
+    rotate: 0,
+    vector: 0,
+    interleave: 0,
+    fin: 0,
+};
+const PEEL: lu::Budgets = lu::Budgets {
+    peel: 200,
+    partial: 0,
+    version: 0,
+    unswitch: 0,
+    rotate: 0,
+    vector: 0,
+    interleave: 0,
+    fin: 0,
+};
 const VERSION: lu::Budgets = lu::Budgets {
     peel: 0,
     partial: 0,
@@ -90,6 +108,7 @@ const VERSION: lu::Budgets = lu::Budgets {
     unswitch: 0,
     rotate: 0,
     vector: 0,
+    interleave: 0,
     fin: 0,
 };
 const UNSWITCH: lu::Budgets = lu::Budgets {
@@ -99,11 +118,39 @@ const UNSWITCH: lu::Budgets = lu::Budgets {
     unswitch: 50,
     rotate: 0,
     vector: 0,
+    interleave: 0,
     fin: 0,
 };
-const ROTATE: lu::Budgets = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 8, vector: 0, fin: 0 };
-const VECTOR: lu::Budgets = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 2, fin: 0 };
-const PARTIAL: lu::Budgets = lu::Budgets { peel: 0, partial: 32, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 };
+const ROTATE: lu::Budgets = lu::Budgets {
+    peel: 0,
+    partial: 0,
+    version: 0,
+    unswitch: 0,
+    rotate: 8,
+    vector: 0,
+    interleave: 0,
+    fin: 0,
+};
+const VECTOR: lu::Budgets = lu::Budgets {
+    peel: 0,
+    partial: 0,
+    version: 0,
+    unswitch: 0,
+    rotate: 0,
+    vector: 2,
+    interleave: 2,
+    fin: 0,
+};
+const PARTIAL: lu::Budgets = lu::Budgets {
+    peel: 0,
+    partial: 32,
+    version: 0,
+    unswitch: 0,
+    rotate: 0,
+    vector: 0,
+    interleave: 0,
+    fin: 0,
+};
 
 // `x` times 0 + 1 + ... + (`bound` - 1), by a loop counted from 0 by 1 while `i <u bound`, the bound the
 // text's.
@@ -182,7 +229,7 @@ b5:
 )";
     let (b, a) = optimized(
         src,
-        lu::Budgets { peel: 40, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+        lu::Budgets { peel: 40, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
     );
     let t = text_of(&a, "bytes");
     assert(!t.contains("icmp") && !t.contains("panic"), t.as_str());
@@ -409,7 +456,7 @@ b3:
     same_outcome(&b, &a, "squares", four, 14, false);
     let (b2, a2) = optimized(
         src,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 1, vector: 0, fin: 0 },
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 1, vector: 0, interleave: 0, fin: 0 },
     );
     let q2 = text_of(&a2, "squares");
     assert(count(&q2, "icmp.ult") == 1 && q2.contains("jmp"), q2.as_str());
@@ -480,7 +527,7 @@ b3:
     }
     let (_, small) = optimized(
         text,
-        lu::Budgets { peel: 0, partial: 5, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+        lu::Budgets { peel: 0, partial: 5, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
     );
     let s = text_of(&small, "mix");
     assert_eq(count(&s, "mul.i32"), 1);
@@ -1170,7 +1217,7 @@ b5:
 b6:
   ret v21
 )";
-    let jam = lu::Budgets { peel: 0, partial: 32, version: 0, unswitch: 0, rotate: 0, vector: 2, fin: 0 };
+    let jam = lu::Budgets { peel: 0, partial: 32, version: 0, unswitch: 0, rotate: 0, vector: 2, interleave: 2, fin: 0 };
     for excl in 0..2usize {
         let src = format(
             "lir ptr 8\nsym @mv fn global noinline\nsym @drive fn global\nfn @mv\n  sig (ptr, ptr, ptr, i64, i64) -> void\n{}b0(v0: ptr, v1: ptr, v2: ptr, v3: i64, v4: i64):\n{}{}",
@@ -1652,7 +1699,16 @@ b3:
     same_outcome(&b, &a, "top", x, 360, false);
 }
 
-const FIN: lu::Budgets = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 512 };
+const FIN: lu::Budgets = lu::Budgets {
+    peel: 0,
+    partial: 0,
+    version: 0,
+    unswitch: 0,
+    rotate: 0,
+    vector: 0,
+    interleave: 0,
+    fin: 512,
+};
 
 // A loop whose final values are polynomials of the iteration goes: its body copied for iterations 0 to
 // the degree, the copies' differences times the binomials of the trip count.
@@ -2231,7 +2287,7 @@ b3:
     // Each loop keeps its blocks too: the tests that fail leave no block behind (`close_plan`).
     let (_, z) = optimized(
         src,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: 0 },
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
     );
     let names: []str = ["xor", "geo", "mem"];
     for f in 0..names.len() {
@@ -2805,7 +2861,16 @@ b3:
   v12 = call.i64 @dup(v2, v1, v3, v0) : (ptr, i64, ptr, i64) -> i64
   ret v12
 )";
-    let both = lu::Budgets { peel: 0, partial: 0, version: 200, unswitch: 0, rotate: 0, vector: 2, fin: 0 };
+    let both = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 200,
+        unswitch: 0,
+        rotate: 0,
+        vector: 2,
+        interleave: 2,
+        fin: 0,
+    };
     let (b, a) = optimized(src, both);
     let t = text_of(&a, "dup");
     assert(t.contains("vziplo.v4i32") && count(&t, "panic") == 1, t.as_str());
