@@ -9400,7 +9400,7 @@ extend Run {
             let _ = sc.o.run(p, b, true);
         }
         // A body callers may inline keeps its form before the loop transforms and the packing: when those
-        // make vectors or change its loops (a rotated loop is no counted one a caller's vectorizer reads),
+        // make vectors or rotate its loops (a rotated loop is no counted one a caller's vectorizer reads),
         // callers inline that form, as LLVM vectorizes after inlining. A caller packs its
         // copy once the copy's slots are values (`lir::promote`), which a vector access of a slot prevents.
         // The copy, only of a body small enough to inline: a larger one that ends with vectors inlines in
@@ -9492,7 +9492,7 @@ extend Run {
         // dead records go.
         b.compact_pool(&mut sc.o.cps);
         let mut fits = r.inline && r.shape[j as usize];
-        if snap && (packed(b) || round != 0 || rotated) {
+        if snap && (packed(b) || rotated) {
             if pre.is_some() {
                 let fin = replace(b, pre.unwrap());
                 b.compact_pool(&mut sc.o.cps);
@@ -9567,7 +9567,7 @@ extend Run {
     }
 
     /// After `finish`, the form of body `k` its callers inlined: the one before the loop transforms and
-    /// the packing when those made vectors or changed its loops, else `pk`'s.
+    /// the packing when those made vectors or rotated its loops, else `pk`'s.
     pub(package) fn inlined<'a>(self: &'a Self, pk: &'a Package, k: u32) &'a Body {
         if let Some(b) = self.finals.at(k as usize) {
             return b;
