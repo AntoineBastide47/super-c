@@ -8215,3 +8215,42 @@ b5:
     let y: [u64; 2] = [5, 1];
     same_result(&b, &a, "mixed", y[0..2], 11);
 }
+
+// Cheap arithmetic can run on both sides of a select. Division, square root and long multiply chains
+// stay conditional, both at returns and at a join.
+@test
+fn costly_float_arms_keep_their_branch() {
+    let arms: []str = [
+        "  v3 = fadd.f64 v1, v2\n",
+        "  v3 = fdiv.f64 v1, v2\n",
+        "  v3 = fsqrt.f64 v1\n",
+        "  v3 = fmul.f64 v1, v2\n  v4 = fmul.f64 v3, v2\n  v5 = fmul.f64 v4, v2\n",
+    ];
+    for join in 0..2 {
+        for i in 0..arms.len() {
+            let mut src = String::from_str(
+                "lir ptr 8\nsym @f fn global\nfn @f\n  sig (i8, f64, f64) -> f64\nb0(v0: i8, v1: f64, v2: f64):\n  br v0, b1, b2\nb1:\n",
+            );
+            src.push_str(arms[i]);
+            let result = if i == 3 {
+                5
+            } else {
+                3
+            };
+            if join == 0 {
+                src.format_into("  ret v{}\nb2:\n  ret v2\n", result);
+            } else {
+                src.format_into(
+                    "  jmp b3(v{})\nb2:\n  jmp b3(v2)\nb3(v{}: f64):\n  ret v{}\n",
+                    result,
+                    result + 1,
+                    result + 1,
+                );
+            }
+            let (_, after) = optimized(&src);
+            let text = text_of(&after, "f");
+            assert_eq(text.contains("br "), i != 0);
+            assert_eq(text.contains("select.f64"), i == 0);
+        }
+    }
+}

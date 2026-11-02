@@ -175,11 +175,11 @@ static mut G_STATE: i32 = 0; // 0 uninit / 1 building / 2 ready / 3 stopping / 4
 
 static mut G_REACTOR: *mut Reactor = null;
 
-// Threads inside `close` between reading the reactor state and publishing their report: a stopping
-// reactor leaves only when this is zero, so no report is pushed onto a released reactor and no exclusion
-// reads its registration counters. The reactor leaves by moving it from 0 to -1, which tells a later closer
-// that nothing can be registering; the next reactor's builder sets it back to 0.
-static mut G_CLOSERS: i32 = 0;
+// Close calls and park hand-offs still accessing the reactor. A task can resume and clear its wait
+// before its publishing worker finishes the wake, so wait records alone do not protect the poller.
+// The reactor leaves only after the waits end and this count moves from 0 to -1. A later close then
+// registers nothing; the next reactor's builder clears the leaving mark.
+static mut G_USERS: i32 = 0;
 
 // Closes in progress: raised around every close(2) of a descriptor the reactor may hold, so that no
 // registration overlaps it. On macOS a close that overlaps a concurrent registration of the same socket
@@ -641,16 +641,16 @@ fn reactor_main(arg: *mut void) *mut void {
             }
             batch_flush(r, &mut b);
             // Every task that can still reach this reactor has recorded an I/O wait: none left means
-            // nothing more will be pushed (see `wait_until` for the order that makes this sound).
+            // nothing more will be admitted. Counted users finish publishing and waking before it leaves.
             if runtime::tasks_waiting(runtime::WK_IO) == 0 && unsafe atomic::cas_i32(
-                &mut unsafe G_CLOSERS,
+                &mut unsafe G_USERS,
                 0,
                 -1,
                 false,
                 4,
                 4,
             ) {
-                // A closer counts out after its report is pushed, and one that comes from here on finds
+                // A user counts out after its last poller access, and a close that comes from here on finds
                 // the count negative and reports nothing: what the list holds now is all it will hold.
                 drain_commands(r, &mut b);
                 batch_flush(r, &mut b);
@@ -870,8 +870,8 @@ fn io_diag() {
     l.snum(unsafe atomic::load_i32(&mut unsafe (*r).deferred, 0));
     l.put(" closing ");
     l.snum(unsafe atomic::load_i32(&mut unsafe G_CLOSING, 0));
-    l.put(" closers ");
-    l.snum(unsafe atomic::load_i32(&mut unsafe G_CLOSERS, 0));
+    l.put(" users ");
+    l.snum(unsafe atomic::load_i32(&mut unsafe G_USERS, 0));
     l.put(" closes ");
     l.num(unsafe atomic::load_u64(&mut unsafe G_CLOSES, 0));
     l.end();
@@ -924,7 +924,7 @@ pub fn ensure_reactor() *mut Reactor {
                 // Closers count in again if a previous reactor's mark is still there (`shutdown` clears it).
                 // A closer that counted in while no reactor ran keeps its count: a plain store lost it,
                 // and its count out then left -1 under a running reactor, whose stop waited for good.
-                let _ = unsafe atomic::cas_i32(&mut G_CLOSERS, -1, 0, false, 4, 4);
+                let _ = unsafe atomic::cas_i32(&mut G_USERS, -1, 0, false, 4, 4);
                 let r = build_reactor();
                 G_REACTOR = r;
                 unsafe atomic::store_i32(sp, 2, 2);
@@ -955,6 +955,9 @@ fn admit() *mut Reactor {
 // does not know about this one until its context is safely stored.
 fn commit_arm(p: *mut void) {
     let n = p as *mut IoWait;
+    // The task's wait record protects this increment until the command is published. Keep the
+    // reactor alive after publication too: another worker can already have ended that wait.
+    let _ = unsafe atomic::add_i32(&mut unsafe G_USERS, 1, 4);
     let r = unsafe G_REACTOR;
     // Register, then publish: an event that lands before the node is seen marks the record stale and
     // the arm registers again (see `do_arm`). A failed registration brings no event, so only then is the
@@ -986,10 +989,13 @@ fn commit_arm(p: *mut void) {
     ) != closes) && unsafe atomic::load_i32(&mut unsafe (*r).sleeping, 4) != 0 {
         unsafe sc_io::sc_io_wake((*r).poller);
     }
+    let _ = unsafe atomic::sub_i32(&mut unsafe G_USERS, 1, 4);
 }
 
 fn commit_disarm(p: *mut void) {
+    let _ = unsafe atomic::add_i32(&mut unsafe G_USERS, 1, 4);
     push_cmd(unsafe G_REACTOR, p as *mut IoWait, CMD_DISARM, true);
+    let _ = unsafe atomic::sub_i32(&mut unsafe G_USERS, 1, 4);
 }
 
 /// Wait until `fd` is ready in the given direction, or until `deadline` (a `time::deadline_in` value; 0
@@ -1091,7 +1097,7 @@ pub fn close(fd: i32) i32 {
     // Count in before reading the state: a stopping reactor waits for the count (see `reactor_main`). A
     // negative count means a stopping reactor has left: it saw no admitted wait, so nothing is registering.
     // Every failed attempt is another closer's successful one.
-    let cp = &mut unsafe G_CLOSERS;
+    let cp = &mut unsafe G_USERS;
     let mut c = unsafe atomic::load_i32(cp, 4);
     while c >= 0 && !unsafe atomic::cas_i32(cp, c, c + 1, false, 4, 4) {
         c = unsafe atomic::load_i32(cp, 4);
@@ -1262,5 +1268,5 @@ pub fn shutdown() {
     // Clear the reactor's leaving mark once the state says no reactor runs (a closer that counts in from
     // here on closes plainly). A compare-and-swap, as the builder's: a reactor started since may already
     // have cleared it and have closers counted in.
-    let _ = unsafe atomic::cas_i32(&mut unsafe G_CLOSERS, -1, 0, false, 4, 4);
+    let _ = unsafe atomic::cas_i32(&mut unsafe G_USERS, -1, 0, false, 4, 4);
 }

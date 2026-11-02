@@ -243,6 +243,8 @@ pub(package) struct Gen {
     bp: *const Body,
     lv: lv::Live,
     va: Vector<Va>,
+    split_at: usize,
+    split_off: Vector<i32>, // per split value, its stack home, reserved before emission
     c: x::Code,
     owner: Vector<u32>, // per register number, the value index it holds, NONE
     /// Per register number, the parameter of a block after a loop that shares it with the loop's parameter
@@ -259,7 +261,6 @@ pub(package) struct Gen {
     rstore: Vector<u32>, // per instruction, 1 + the result part a store moves into its register (`ret_stores`), else 0
     rload: Vector<u32>, // per call, the loads after it its result's registers give (`res_relays`)
     suse: Vector<u32>, // per slot, the uses of its addresses (`place::slot_uses`)
-    rr: u32, // the eviction cursor
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
     called: bool, // the body's code calls
@@ -425,6 +426,8 @@ extend Gen {
             bp: null,
             lv: lv::Live::new(),
             va: Vector::<Va>::new(),
+            split_at: 0,
+            split_off: Vector::<i32>::new(),
             c: x::Code::new(),
             owner: owner,
             heir: Vector::<u32>::new(),
@@ -438,7 +441,6 @@ extend Gen {
             rstore: Vector::<u32>::new(),
             rload: Vector::<u32>::new(),
             suse: Vector::<u32>::new(),
-            rr: 0,
             pos: 0,
             cur: 0,
             called: false,
@@ -610,24 +612,11 @@ extend Gen {
                 }
             }
         }
-        // Evict a register whose value needs no store (`cheapest`), else round-robin: the next unlocked
-        // register that holds a value.
         let busy = open & self.held;
-        let c = self.cheapest(busy);
-        if busy != 0 && !self.stores(c) {
-            self.evict(c);
-            return self.taken(c);
-        }
         if busy != 0 {
-            let s = self.rr % 32;
-            let r = if busy >> s as u64 != 0 {
-                s + (busy >> s as u64).trailing_zeros() as u32
-            } else {
-                busy.trailing_zeros() as u32
-            };
-            self.rr = r + 1;
-            self.evict(r as u8);
-            return self.taken(r as u8);
+            let r = self.cheapest(busy);
+            self.evict(r);
+            return self.taken(r);
         }
         // Past the caller-saved ones: a callee-saved register no loop value holds, which the prologue
         // then saves (an operation that reads 8 registers, a masked store's).
@@ -685,17 +674,22 @@ extend Gen {
         ));
     }
 
-    // The first register of `set` (not empty) whose eviction stores nothing, else its first.
+    // Prefer no store, then the value whose next use is farthest away.
     fn cheapest(self: &Self, set: u64) u8 {
-        let mut s = set;
-        while s != 0 {
-            let r = s.trailing_zeros() as u8;
-            if !self.stores(r) {
-                return r;
+        let mut best = NOREG;
+        let mut score: u64 = 0;
+        let mut left = set;
+        while left != 0 {
+            let r = left.trailing_zeros() as u8;
+            left &= left - 1;
+            let x = self.owner[r as usize];
+            let cost = (!self.stores(r)) as u64 << 32 | self.lv.next[x as usize] as u64;
+            if best == NOREG || cost > score {
+                best = r;
+                score = cost;
             }
-            s &= s - 1;
         }
-        return set.trailing_zeros() as u8;
+        return best;
     }
 
     // Whether instruction `i` reads value `v`, through the operands that fold into it too (`lv::uses_of`).
@@ -1341,7 +1335,7 @@ extend Gen {
 
     // Which register value index `x` holds for its whole range (`plan_homes`).
     const fn fix_class(self: &Self, x: u32) u8 {
-        return self.lv.home[x as usize];
+        return self.lv.home_at(x, self.pos);
     }
 
     // Plan the homes (`Live::plan`) over each value's request: none in memory or rematerialized; an integer a call that
@@ -1462,8 +1456,10 @@ extend Gen {
             self.want.push(w);
         }
         let mut nd: u32 = 4;
+        let mut vd: u32 = 3;
         for x in 0..ni {
             nd = nd.max(self.need(x as u32));
+            vd = vd.max(self.vneed(x as u32));
         }
         let most = self.xfix.count_ones() as u32 + self.xalloc.count_ones() as u32 - nd;
         self.xhome = self.xscr;
@@ -1475,9 +1471,9 @@ extend Gen {
         } else {
             self.xscr_cap
         };
-        // Every xmm home: Microsoft x64's callee-saved xmm8..xmm15 (`vfix`; xmm0..xmm3, xmm6 and xmm7
-        // stay for temporaries) and, calling nothing, xmm0..xmm3 (`vscr`; then temporaries take xmm6 and
-        // up), or System V's caller-saved xmm8..xmm13, calling nothing xmm4..xmm13 (`vscr`; xmm0..xmm3 stay).
+        // Candidate xmm homes: Microsoft x64's callee-saved xmm8..xmm15 (`vfix`) and, calling nothing,
+        // xmm0..xmm3 (`vscr`), or System V's caller-saved xmm8..xmm13, calling nothing xmm4..xmm13.
+        // The joint cap leaves `vneed` registers for operands, temporaries and a separate result.
         let (vc, vs) = if self.win {
             (self.vfix.count_ones() as u32, self.vscr.count_ones() as u32)
         } else {
@@ -1496,7 +1492,7 @@ extend Gen {
                 xj: most,
                 vc: vc,
                 vs: vs,
-                vj: vc + vs,
+                vj: (vc + vs).min((self.valloc | self.vfix).count_ones() as u32 - vd),
             },
         );
         for x in 0..ni {
@@ -1547,6 +1543,23 @@ extend Gen {
             return 6;
         }
         return 4;
+    }
+
+    // The xmm registers instruction `i` holds at once besides the homes (`end_inst` checks it): 6 for a
+    // vector result, a vector operation and a float select (a high product's two operands, three
+    // temporaries and result; a folded comparison's four operands, result and temporary); 4 for an FMA
+    // and a `memcpy` (an overlapping copy of 64 bytes, in four registers); 3 for the others (two
+    // operands and a separate result).
+    const fn vneed(self: &Self, i: u32) u32 {
+        let t = self.b().insts[i as usize];
+        if is_vec(t.ty) || t.op == O_VOP || t.op == O_SELECT && is_v(t.ty) {
+            return 6;
+        }
+        return if t.op == O_FMA || t.op == O_MEMCPY {
+            4
+        } else {
+            3
+        };
     }
 
     // The integer registers branch `t` on two folded comparisons holds at once (`branch_conj`, which locks
@@ -2376,9 +2389,12 @@ extend Gen {
 
     // End the current instruction: its locks and temporaries end and its dead values free.
     fn end_inst(self: &mut Self) {
-        // `plan_homes` leaves `need` integer registers to each instruction.
+        self.lv.advance(self.b(), self.cur);
+        // `plan_homes` leaves `need` integer and `vneed` xmm registers to each instruction.
         let used = ((self.lock | self.tmps) & ~self.fixed_busy & (self.xalloc | self.xfix)).count_ones() as u32;
         assert(used <= self.need(self.cur), "x64gen: an instruction takes more registers than `need`");
+        let vused = ((self.lock | self.tmps) & ~self.fixed_busy & self.valloc).count_ones() as u32;
+        assert(vused <= self.vneed(self.cur), "x64gen: an instruction takes more xmm registers than `vneed`");
         self.lock = 0;
         self.tmps = 0;
         self.keep_flags = false;
@@ -2982,7 +2998,6 @@ extend Gen {
         self.fixed_busy = 0;
         self.csr = 0;
         self.rows.truncate(0);
-        self.rr = 0;
         self.cond = Cond { inst: NONE, cc: 0 };
         if b.naked {
             return self.naked(s);
@@ -3007,7 +3022,15 @@ extend Gen {
         };
         self.bucket_ends();
         self.call_tables();
+        self.lv.split = !self.shrink;
         self.plan_homes();
+        self.split_at = 0;
+        fill(&mut self.split_off, n, -1);
+        for j in 0..self.lv.splits.len() {
+            let x = self.lv.splits[j] as u32;
+            let sz = type_bytes(self.xty(x), self.ptr);
+            self.split_off[x as usize] = self.slot_alloc(sz.max(8), sz.min(16)) as i32;
+        }
         if self.shrink && self.lv.homeless(&self.want) {
             return self.unshrunk(s, local);
         }
@@ -3374,6 +3397,20 @@ extend Gen {
             self.late_stubs();
         }
         self.pos = q;
+        while self.split_at < self.lv.splits.len() && (self.lv.splits[self.split_at] >> 32) as u32 == q {
+            let x = self.lv.splits[self.split_at] as u32;
+            let va = self.va[x as usize];
+            if va.reg != NOREG && self.owner[va.reg as usize] == x {
+                self.set_owner(va.reg, NONE);
+                self.fixed_busy &= ~bit(va.reg);
+            }
+            let w = self.va.index_mut(x as usize);
+            w.home = H_SLOT;
+            w.reg = NOREG;
+            w.off = self.split_off[x as usize];
+            w.dirty = false;
+            self.split_at += 1;
+        }
         let k = self.lv.order[q as usize];
         let b = self.b();
         self.blk_at[k as usize] = self.c.len();
@@ -3467,6 +3504,7 @@ extend Gen {
         let k = self.lv.order[self.pos as usize];
         let t = b.insts[(b.blocks[k as usize].start + b.blocks[k as usize].len - 1) as usize];
         let ne = nedges(t);
+        self.save_splits(t, ne);
         let mut m = self.held;
         // Each step clears one register's bit: at most 64 steps.
         while m != 0 {
@@ -3489,6 +3527,40 @@ extend Gen {
             if need {
                 self.spill(x);
             }
+        }
+    }
+
+    // Every edge leaving a register prefix writes the suffix's stack home, including edges that
+    // skip the cut's block. No edge can return from the suffix to the prefix.
+    fn save_splits(self: &mut Self, t: Inst, ne: u32) {
+        let b = self.b();
+        let mut end = self.pos;
+        for e in 0..ne {
+            end = end.max(self.lv.pos[b.edge_target(lv::edge_of(b, t, e)) as usize]);
+        }
+        for j in self.split_at..self.lv.splits.len() {
+            let entry = self.lv.splits[j];
+            if (entry >> 32) as u32 > end {
+                break;
+            }
+            let x = entry as u32;
+            if self.lv.pos[self.lv.def_blk[x as usize] as usize] > self.pos {
+                continue;
+            }
+            let ty = self.xty(x);
+            let va = self.va[x as usize];
+            let r = if va.reg != NOREG {
+                va.reg
+            } else {
+                let scratch = if is_v(ty) || is_vec(ty) {
+                    self.vs0
+                } else {
+                    S0
+                };
+                self.materialize(self.xval(x), scratch);
+                scratch
+            };
+            self.st(ty, r, x::at(x::RSP, self.split_off[x as usize]));
         }
     }
 
@@ -4171,6 +4243,16 @@ extend Gen {
             if op == O_FSQRT {
                 let rd = self.def_from(i, t.a, ra);
                 self.c.sse_rr(fpfx(d), 0x0F51, rd - V0, rd - V0);
+                return true;
+            }
+            if self.ld_folded(t.b) {
+                let lt = self.b().insts[t.b as usize];
+                let mut rs = NONE;
+                let mut add: i64 = 0;
+                let m = self.mem_at(lt.a, lt.c as i32, &mut rs, &mut add);
+                let rd = self.def_from(i, t.a, ra);
+                self.c.rm(fpfx(d), fop(op), false, rd - V0, m, false);
+                self.mem_rel(rs, add);
                 return true;
             }
             let rb = self.reg(t.b);
@@ -13086,6 +13168,8 @@ extend Gen {
             self.c.sse_rr(0x66, op, dst, src);
             return;
         }
+        // The temporaries end here: a reduction's later steps reuse them.
+        let tmps = self.tmps;
         if lb == 16 {
             // max = (dst -sat src) + src; min = dst - (dst -sat src).
             if lo {
@@ -13093,6 +13177,7 @@ extend Gen {
                 self.c.vmov(d, dst);
                 self.c.sse_rr(0x66, 0x0FD9, d, src);
                 self.c.sse_rr(0x66, 0x0FF9, dst, d);
+                self.tmps = tmps;
             } else {
                 self.c.sse_rr(0x66, 0x0FD9, dst, src);
                 self.c.sse_rr(0x66, 0x0FFD, dst, src);
@@ -13127,6 +13212,7 @@ extend Gen {
         self.c.sse_rr(0x66, 0x0FEF, dst, src);
         self.c.sse_rr(0x66, 0x0FDB, dst, m);
         self.c.sse_rr(0x66, 0x0FEF, dst, src);
+        self.tmps = tmps;
     }
 
     // xmm `dst` = xmm `src` shuffled by `imm`: `pshufd` (prefix 0x66) or `pshuflw` (0xF2), VEX-encoded

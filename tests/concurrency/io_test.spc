@@ -664,3 +664,34 @@ fn a_burst_of_waits_from_one_worker_is_all_served() {
     assert_eq(count(&hits), 2 * n);
     finish();
 }
+
+// A ready task can clear its wait before the publishing worker finishes its wake-pipe write. Repeated
+// shutdown and restart must retain the poller until those publishing workers have left it.
+@test
+fn shutdown_waits_for_the_publishing_workers() {
+    rt::set_worker_count(4);
+    let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
+    for _round in 0..32 {
+        let mut pairs = Vector::<Pair>::new();
+        for _i in 0..8 {
+            pairs.push(pair(&l));
+        }
+        let wg = sync::WaitGroup::new();
+        wg.add(8);
+        for i in 0..8usize {
+            let fd = pairs.at(i).b.fd;
+            let done = wg.clone();
+            launch || {
+                defer done.done();
+                let _ = io::wait_until(fd, false, 0);
+            };
+        }
+        assert(wait_pending(8), "all waits are recorded before shutdown");
+        for i in 0..4usize {
+            write_one(&pairs.at(i).a);
+        }
+        io::shutdown();
+        assert(wg.wait_timeout(time::Duration::from_secs(10)), "shutdown settles every waiter");
+    }
+    finish();
+}

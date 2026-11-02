@@ -1336,7 +1336,7 @@ pub fn set_permissions(path: str, mode: u32) Result<Unit, IoError> {
 /// owner's write bit: without it the file becomes read-only. Unsupported on WASI.
 @platform(wasm)
 pub fn set_permissions(_path: str, _mode: u32) Result<Unit, IoError> {
-    return Result::<Unit, IoError>::Err(error::unsupported(IoOp::SetPermissions));
+    return Err(error::unsupported(IoOp::SetPermissions));
 }
 
 /// Set the access and modification times of `path`, following links (`touch`: both `FileTime::Now`).
@@ -1745,7 +1745,7 @@ extend File {
     }
     @platform(wasm)
     fn try_lock(self: &mut File) Result<bool, IoError> {
-        return Result::<bool, IoError>::Err(error::unsupported(IoOp::Lock));
+        return Err(error::unsupported(IoOp::Lock));
     }
 
     /// Release the lock `lock_exclusive` took. Unsupported on WASI.
@@ -1771,7 +1771,7 @@ extend File {
     /// Release the lock `lock_exclusive` took. Unsupported on WASI.
     @platform(wasm)
     pub fn unlock(self: &mut File) Result<Unit, IoError> {
-        return Result::<Unit, IoError>::Err(error::unsupported(IoOp::Unlock));
+        return Err(error::unsupported(IoOp::Unlock));
     }
 
     /// Whether a read returns at once: bytes are waiting, or the stream ended or failed.

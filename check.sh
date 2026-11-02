@@ -15,7 +15,7 @@ if ! files=$(SC_LEAK_CHECK=fatal ./super-c fmt --check); then
 fi
 
 # 2) Full lint, once per supported target (@platform gates differ); any warning fails the check.
-for target in macos linux windows; do
+for target in macos linux windows wasm; do
     printf 'check: lint (--target=%s)\n' "$target"
     if ! SC_LEAK_CHECK=fatal ./super-c lint --target="$target"; then
         printf 'check: FAILED -- lint warnings above (--target=%s) must be fixed (or try: ./super-c lint --fix <file>)\n' "$target" >&2

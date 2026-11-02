@@ -13,7 +13,9 @@ set first: it states the value, register and frame model.
 1. Analysis: set `Live.fold_ops` to the `FOLD_*` patterns the backend fuses into their users, then
    `Live::run`. It gives the block layout (reverse postorder, each loop contiguous, rare blocks last:
    `Live::rare`, a block the entry reaches only through a `BLOCK_RARE` one), the loop nesting, each
-   value's last live position and use count. A folded instruction emits no code; its user reads its
+   value's last live position, use count and next-use chain. `end_inst` calls `Live::advance`
+   after emission, so unread current operands remain near uses during allocation. Eviction
+   prefers no store, then the farthest next use. A folded instruction emits no code; its user reads its
    operands (`Live::uses_of`, the folded use lists `Live::ranges` records once). The warm code's values
    take the registers first; a call in a rare block
    saves around it the scratch registers whose values live past it (`save_scratch`), so it is no call
@@ -22,6 +24,11 @@ set first: it states the value, register and frame model.
    the LIR slots, then the spills; the callee-saved registers and the frame pointer last.
 3. Homes: `Live::plan` gives each value a home class per register file (none, callee-saved for a value
    a loop keeps, caller-saved); constants and symbol and slot addresses rematerialize at each use.
+   A displaced interval can keep its register prefix up to a block boundary no backward edge
+   crosses. `cut` and sorted `splits` describe these prefixes; `home_at` selects the class at
+   the current layout position. Shared homes, aggregate entry pointers and shrink-wrapped
+   functions do not split. Reserve the suffix stack slots before emission. Every edge that
+   leaves a prefix, including one that skips the cut block, writes the suffix slot (`save_splits`).
 4. Blocks in layout order, each instruction emitted by its op. A value live past its block is in its
    home before the branch; an edge moves the block arguments (`edge_homes`).
 5. `finish`: branch fixups, relocations into the object, call frame rows, line rows. arm64 retries a
@@ -67,6 +74,12 @@ framed code one with a prologue of 0 bytes, each entry stub one with its prologu
   for 32-bit ones: the even and odd lanes' `pmuludq` (signed `pmuldq` with SSE4.1, else a correction)
   merged by a mask, `vpblendd` with AVX2, `vpandq`/`vporq` with AVX-512). Any other form computes lane by
   lane through memory.
+- arm64 pairs loads or stores at adjacent offsets in either order across up to seven pure
+  scalar instructions (`pair_next`). It never crosses another memory operation or control
+  flow. A store source must already exist; a second load can take its planned register home,
+  but cannot already have an assigned fixed home.
+- x86-64 folds single-use f32/f64 loads into the right memory operand of scalar arithmetic
+  (`FOLD_LDOP`). Preserve operand order and reject intervening memory writes.
 - `O_ASM` and module-level assembly assemble through the instruction table (`src/target/assembler.spc`
   for directives, labels and sections; the instruction set's assembler for instructions).
 

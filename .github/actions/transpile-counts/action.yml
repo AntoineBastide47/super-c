@@ -72,7 +72,7 @@ runs:
         count() {
           mkdir -p "$w/raw-$1"
           set +e
-          env SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1 LLVM_PROFILE_FILE="$w/raw-$1/%p.profraw" \
+          env SC_NO_CACHE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1 LLVM_PROFILE_FILE="$w/raw-$1/%p.profraw" \
             "$2" build --profile=debug --jobs=1 --emit-c --bootstrap-tags --out-dir="$w/tree-$1" >/dev/null 2>"$w/$1.err"
           status=$?
           set -e

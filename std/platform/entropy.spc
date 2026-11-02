@@ -88,7 +88,7 @@ pub fn fill(buf: []mut u8) Result<Unit, IoError> {
 pub fn fill(buf: []mut u8) Result<Unit, IoError> {
     let e = unsafe wasi_random_get(buf.as_mut_ptr(), buf.len());
     if e != 0 {
-        return Result::<Unit, IoError>::Err(error::code_error(e, IoOp::Entropy));
+        return Err(error::code_error(e, IoOp::Entropy));
     }
-    return Result::<Unit, IoError>::Ok(Unit {});
+    return Ok(Unit {});
 }

@@ -18,11 +18,12 @@ The gate's form (`ci/gate.sh`, `ci/contract.sh`):
 
 1. Copy `src`, `std`, `ffi` and `build.toml` into a clean tree, and the compiler beside
    them, so `std`/`ffi` resolve inside the copy.
-2. Gen-1: `./super-c build --profile=test` in the tree; keep `build/test/raw` and
-   `build/test/super-c`. The emitted C does not depend on the profile; the test profile only makes
-   the generations, and every build they run, faster.
-3. Remove `build/`. Gen-2: the gen-1 binary, copied into the tree root, builds again.
-4. `diff -r` the two `raw` trees, excluding only `CONTRACT_NONDET_FILES` (`.tu_cache`).
+2. Gen-1: `./super-c build --profile=test` in the tree; keep the resulting compiler.
+3. Remove `build/`. Gen-2: the gen-1 binary, copied into the tree root, builds again
+   at the same output path with the same options.
+4. Compare the two native binaries with `cmp`. Generation two then runs the worker-count
+   identity checks for C emission and native objects. Tree comparisons exclude only
+   `CONTRACT_NONDET_FILES` (`.tu_cache`).
 
 The per-TU cache header hashes the running compiler's content (`header_hash` in
 `src/driver/tuc.spc`, `compiler_id` in `src/driver/util.spc`), so `.tu_cache` differs
@@ -60,7 +61,7 @@ otherwise (`include_name`); the content hash of `__sc_fwd.h` in `__sc_manifest` 
   deterministic insertion-order map.
 - Prefilter without reordering: if you skip items during emission, skip them in-place
   rather than copying to a new container.
-- Test the fixpoint after every structural change, not just at the end of a batch.
+- Run the full fixpoint gate once after the complete change; use focused checks while editing.
 
 ## The Bootstrap Command
 

@@ -1480,7 +1480,7 @@ pub(package) enum Lock {
 /// to release it. No child process inherits it, and the system releases it when this process ends.
 pub(package) fn lock_file(p: str, wait_ms: i64) Lock {
     if PLATFORM == Platform::Wasm {
-        return Lock::Held(Option::<fs::File>::None);
+        return Held(None);
     }
     let opened = fs::open(p, fs::OpenOptions { read: true, write: true, create: true, mode: 0o644 });
     if opened.is_err() {

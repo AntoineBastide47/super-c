@@ -51,7 +51,8 @@ pub(package) const FOLD_BFI: u32 = 262144;
 /// unsigned 8- or 16-bit entry parameter, under `ext_args`), which only that access reads: the access
 /// extends it (arm64 `[xn, wm, uxtw]`).
 pub(package) const FOLD_XIDX: u32 = 524288;
-/// `FOLD_LDOP`: a load of an integer that one comparison or `add`, `sub`, `and`, `or`, `xor` or `mul` reads
+/// `FOLD_LDOP`: a single-use scalar float load as the right operand of arithmetic, or an integer load
+/// that one comparison or `add`, `sub`, `and`, `or`, `xor` or `mul` reads
 /// folds into it, which reads the memory (x86-64's `cmp [m], k`, `add r, [m]`, `imul r, [m]`;
 /// `Live::ldop_user`).
 pub(package) const FOLD_LDOP: u32 = 1048576;
@@ -163,6 +164,8 @@ pub(package) struct Live {
     ua: Vector<u32>,
     un: Vector<u32>,
     uv: Vector<Value>,
+    pub(package) next: Vector<u32>, // per value, its next use's layout ordinal, NONE after the last use
+    use_next: Vector<u32>, // per folded operand, the next use of that value
     pub(package) end: Vector<u32>, // per value, the last layout position it is live in
     pub(package) uses: Vector<u32>, // per value, its use count, one more when a loop keeps it past its last use
     pub(package) last: Vector<u32>, // per value, the highest instruction index that uses it (0: none)
@@ -170,6 +173,9 @@ pub(package) struct Live {
     wn: Vector<u32>, // per block parameter, how many edges write it
     pub(package) flag_of: Map<u32, u32>, // an instruction with a used flag -> the flag's value index
     pub(package) home: Vector<u8>, // per value, its HOME_* (`plan`)
+    pub(package) split: bool, // permit a register prefix followed by a stack home
+    pub(package) cut: Vector<u32>, // per value, the first layout block outside its register prefix, NONE otherwise
+    pub(package) splits: Vector<u64>, // cut << 32 | value, in cut order
     /// Per value, the loop header parameter whose register a parameter of a block after the loop takes
     /// (`exit_partner`), else NONE (`plan`).
     pub(package) share: Vector<u32>,
@@ -242,6 +248,9 @@ extend Live {
             wn: Vector::<u32>::new(),
             flag_of: Map::<u32, u32>::new(),
             home: Vector::<u8>::new(),
+            split: false,
+            cut: Vector::<u32>::new(),
+            splits: Vector::<u64>::new(),
             share: Vector::<u32>::new(),
             shared_by: Vector::<u32>::new(),
             late: Vector::<u64>::new(),
@@ -276,6 +285,8 @@ extend Live {
             preds: Vector::<u32>::new(),
             un: Vector::<u32>::new(),
             uv: Vector::<Value>::new(),
+            next: Vector::<u32>::new(),
+            use_next: Vector::<u32>::new(),
         };
     }
 
@@ -977,7 +988,7 @@ extend Live {
     /// whose operation's result is stored back in place (the generator's read-modify-write).
     fn ldop_user(self: &Self, b: &Body, i: u32, end: u32) bool {
         let t = b.insts[i as usize];
-        if t.op != O_LOAD || (t.aux & MEM_VOLATILE) != 0 || !is_int(t.ty) || t.ty == T_I128 || self.count[i as usize] != 1 || self.pfold[i as usize] || agg_param(
+        if t.op != O_LOAD || (t.aux & MEM_VOLATILE) != 0 || !(is_int(t.ty) || is_float(t.ty)) || t.ty == T_I128 || self.count[i as usize] != 1 || self.pfold[i as usize] || agg_param(
             b,
             t.a,
         ) {
@@ -987,7 +998,8 @@ extend Live {
         while u < end && u <= i + LDOP_REACH {
             let x = b.insts[u as usize];
             let alu = x.op == O_ADD || x.op == O_SUB || x.op == O_AND || x.op == O_OR || x.op == O_XOR || x.op == O_MUL;
-            if (x.op == O_ICMP || alu) && (x.a == i || x.b == i) {
+            let fp = is_float(t.ty) && x.op >= O_FADD && x.op <= O_FDIV && x.b == i;
+            if fp || !is_float(t.ty) && (x.op == O_ICMP || alu) && (x.a == i || x.b == i) {
                 break;
             }
             if writes_mem(x) {
@@ -1006,6 +1018,9 @@ extend Live {
         };
         if is_inst(o) && self.pfold[o as usize] || x.op == O_MUL && (is_const_val(b, o) || o == i) {
             return false;
+        }
+        if is_float(t.ty) {
+            return !self.pfold[u as usize];
         }
         if x.op != O_ICMP {
             let st = b.insts[u as usize + 1];
@@ -1041,6 +1056,15 @@ extend Live {
     pub(package) fn uses_of(self: &Self, i: u32) Slice<Value> {
         let a = self.ua[i as usize] as usize;
         return self.uv[a..a + self.un[i as usize] as usize];
+    }
+
+    /// Advance the next-use cursors past instruction `i`, once in layout order.
+    pub(package) fn advance(self: &mut Self, b: &Body, i: u32) {
+        let a = self.ua[i as usize];
+        for u in a..a + self.un[i as usize] {
+            let x = self.vix(b, self.uv[u as usize]);
+            self.next[x as usize] = self.use_next[u as usize];
+        }
     }
 
     /// The value index of a parameter that a back edge of terminator `t` (of the block at layout position
@@ -1866,6 +1890,24 @@ extend Live {
             }
         }
         self.rare_entries(b, &mut kept);
+        fill(&mut self.next, n, NONE);
+        fill(&mut self.use_next, self.uv.len(), NONE);
+        let mut ordinal = ni as u32;
+        for q in 0..self.order.len() {
+            let bk = b.blocks[self.order[self.order.len() - 1 - q] as usize];
+            for j in 0..bk.len {
+                let i = bk.start + bk.len - 1 - j;
+                ordinal -= 1;
+                let a = self.ua[i as usize];
+                let nu = self.un[i as usize];
+                for r in 0..nu {
+                    let u = (a + nu - 1 - r) as usize;
+                    let x = self.vix(b, self.uv[u]) as usize;
+                    self.use_next[u] = self.next[x];
+                    self.next[x] = ordinal;
+                }
+            }
+        }
         // One more use, which no instruction makes: a kept value lives to the end of its last block.
         for x in 0..n {
             if kept[x] {
@@ -1902,7 +1944,7 @@ extend Live {
         }
     }
 
-    /// Plan which values hold one register for their whole range (`home`): the ones `want` (WANT_* per
+    /// Plan which values hold one register for their whole range or a block prefix (`home`, `cut`): the ones `want` (WANT_* per
     /// value) asks one for, by a linear scan over the layout in the order the ranges start (Poletto and
     /// Sarkar's); when a file's registers are taken, the active value of least weight (the frequency of
     /// its definition and uses: 8 per loop level up to 5, an eighth of that in an unlikely block, 0 in a
@@ -1916,6 +1958,24 @@ extend Live {
         let np = self.order.len();
         self.home.truncate(0);
         self.home.resize_default(n);
+        fill(&mut self.cut, n, NONE);
+        self.splits.truncate(0);
+        // A cut cannot cross a backward edge: code after it never re-enters the register prefix.
+        fill(&mut self.work, np + 1, 0);
+        if self.split {
+            for q in 0..np {
+                let k = self.order[q] as usize;
+                for j in self.pat[k]..self.pat[k + 1] {
+                    let p = self.pos[self.preds[j as usize] as usize];
+                    if p != NONE && p > q as u32 {
+                        self.work[q + 1] = self.work[q + 1].max(p + 1);
+                    }
+                }
+            }
+            for q in 1..np {
+                self.work[q] = self.work[q].max(self.work[q - 1]);
+            }
+        }
         fill(&mut self.share, n, NONE);
         fill(&mut self.shared_by, n, NONE);
         fill(&mut self.base, np + 1, 0);
@@ -2067,7 +2127,26 @@ extend Live {
                 if v != NONE as usize {
                     let a = self.act[v];
                     self.leave(v, want);
-                    self.home[a as usize] = HOME_NONE;
+                    let mut lo: usize = 0;
+                    let mut hi = np;
+                    while lo + 1 < hi {
+                        let mid = lo + (hi - lo) / 2;
+                        if self.base[mid] <= s {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    let block = lo;
+                    let d = self.pos[self.def_blk[a as usize] as usize] as usize;
+                    if self.split && self.work[block] <= block as u32 && d < block && self.start[a as usize] < self.base[block] && self.share[a as usize] == NONE && self.shared_by[a as usize] == NONE && a < nv as u32 && !(a >= ni as u32 && agg_param(
+                        b,
+                        VPARAM | a - ni as u32,
+                    )) {
+                        self.cut[a as usize] = block as u32;
+                    } else {
+                        self.home[a as usize] = HOME_NONE;
+                    }
                     h = self.fits(x, want, caps, NONE);
                 }
             }
@@ -2077,6 +2156,21 @@ extend Live {
                 self.act.push(x);
             }
         }
+        for x in 0..n {
+            if self.cut[x] != NONE {
+                self.splits.push(self.cut[x] as u64 << 32 | x as u64);
+            }
+        }
+        self.splits.sort();
+    }
+
+    /// The register home of value `x` in layout block `pos`.
+    pub(package) const fn home_at(self: &Self, x: u32, pos: u32) u8 {
+        return if pos < self.cut[x as usize] {
+            self.home[x as usize]
+        } else {
+            HOME_NONE
+        };
     }
 
     /// Whether `plan` gave no register to a used value that `want` asked one for, in a block the layout

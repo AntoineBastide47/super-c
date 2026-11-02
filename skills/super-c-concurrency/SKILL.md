@@ -469,7 +469,7 @@ report pushed after the exclusion once settled that arm as not ready): the recor
 generation moves on, every wait on the number settles as not ready at once, and an arm
 whose registration raced the close registers again and fails. The exclusion also holds
 while the reactor is stopping; once it has left, a close is a plain close. The leaving
-mark (a closer count of -1) is cleared by compare-and-swap in `shutdown` and in the next
+mark (`G_USERS`, a count of close calls and park hand-offs, at -1) is cleared by compare-and-swap in `shutdown` and in the next
 reactor's builder, never by a store: a closer counted in while no reactor runs keeps its
 count, where a store once let its count out leave -1 under a running reactor, whose stop
 then waited for good (`closes_racing_the_reactor_start_keep_their_count`). A descriptor closed with
@@ -480,7 +480,10 @@ reactor is shutting down or the descriptor cannot be watched (a closed number, a
 the reactor's own poller or wake pipe now holds, the Windows set limit); a descriptor the poller cannot watch at all (a regular file under
 epoll) reports ready.
 `io::shutdown()` settles every pending wait as not ready, keeps acknowledging until no
-admitted wait remains, then joins the thread; a later wait starts a fresh reactor.
+admitted wait remains and every counted user has finished, then joins the thread; a later
+wait starts a fresh reactor. `commit_arm` and `commit_disarm` count in before publishing
+and count out after their last wake-pipe access. A resumed task can clear its wait before
+that publishing worker finishes, so wait records alone do not protect the poller.
 `io::pending_waits()` counts wait records, which exist before a wait is admitted and
 registered (zero when every task has left its wait), so a test must not treat a count
 as proof that the reactor registered the wait;

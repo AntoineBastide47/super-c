@@ -3966,7 +3966,7 @@ extend Opt {
     }
 
     // Branch `t`, instruction `i` ending block `k`, whose sides each enter a block that `k` alone enters,
-    // runs at most SPEC_MAX instructions together (`speculated`) and returns an integer of up to 64 bits, a
+    // costs at most SPEC_MAX together (`speculated`) and returns an integer of up to 64 bits, a
     // pointer or a scalar float: those instructions move to the end of `k` (`speculate`), which returns the select of the
     // two results on the condition (if-conversion of a return diamond, as LLVM's SimplifyCFG with
     // FoldTwoEntryPHINode after merging the returns). The value `k` returns; NONE when not.
@@ -4062,7 +4062,7 @@ extend Opt {
         return (e, k);
     }
 
-    // How many instructions but constants side `a` of block `k`'s branch (`arm`) runs that `speculate`
+    // The weighted cost, excluding constants, of side `a` of block `k`'s branch (`arm`) that `speculate`
     // would move into `k`: each must be pure and speculable, or a load that cannot fault (`safe_load`);
     // SPEC_MAX + 1 when one is not.
     fn speculated(self: &Self, pk: &Package, b: &Body, k: u32, a: u32) u32 {
@@ -4087,7 +4087,15 @@ extend Opt {
             if !ok {
                 return SPEC_MAX + 1;
             }
-            n += 1;
+            // Expensive arithmetic must not run on both sides of a select. Other multiplies and
+            // loads consume more of the budget than a register operation.
+            n += if t.op == O_FDIV || t.op == O_FSQRT || t.ty == T_I128 {
+                SPEC_MAX + 1
+            } else if t.op == O_MUL || t.op == O_FMUL || t.op == O_FMA || t.op == O_LOAD {
+                2
+            } else {
+                1
+            };
         }
         return n;
     }

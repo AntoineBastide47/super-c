@@ -13,17 +13,17 @@ allowed-tools: Bash Read
 - Measure the serial benchmark in interleaved A/B runs.
 - Verify byte-identical self-hosting output after structural changes.
 
-This skill covers optimizing the **compiler itself** (the self-hosting Super-C transpiler),
-not the code it generates. Every optimization must preserve the byte-identical
-two-generation fixpoint: the emitted C from gen-1 and gen-2 must be identical byte for
-byte.
+This skill covers optimizing the **compiler itself**. Generated-code changes can use
+release self-builds or focused temporary benchmarks to measure their effect. Every
+compiler change must preserve the byte-identical two-generation native fixpoint.
+The correctness gate also checks deterministic C emission and native objects across worker counts.
 
 ## Hard Contracts
 
 Before any optimization work, understand these non-negotiable constraints:
 
-1. **Byte-identical fixpoint.** Every change must preserve the gen-1 vs gen-2 emitted-C
-   diff. A non-empty diff is a semantic regression. See
+1. **Byte-identical fixpoint.** Every change must preserve the gen-1 vs gen-2 native
+   binary comparison. A difference is a correctness failure. See
    [fixpoint.md](references/fixpoint.md) for the verification protocol.
 
 2. **Optimizer gate.** Know which optimizer built the binary, and do not keep a
@@ -31,8 +31,9 @@ Before any optimization work, understand these non-negotiable constraints:
    natively: the LIR optimizer (`lir::opt`, super-c-compiler-internals, "LIR") inlines
    small bodies across modules, numbers values, forwards loads and stores, promotes the
    loads of private memory one store writes, moves invariant code out of loops and folds
-   constants and branches; it does not lower fixed-size `memcmp` or forward copies
-   between slots; at 2 and 3 it also vectorizes counted loops over slices, and every level's
+   constants and branches, lowers eligible fixed-size `memcmp` equality checks
+   (`memcmp_eq`), forwards copied arguments (`copy_arg`), and forwards private-copy loads
+   (`private_load`); at 2 and 3 it also vectorizes counted loops over slices, and every level's
    passes and flags are in the binary skill ("Optimization levels and code-generation
    flags"). If a target shows ~0 samples under the build's optimizer, the optimization will
    not produce a corpus-level win.

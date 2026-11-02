@@ -59,7 +59,7 @@ pub unsafe fn open(path: str) Result<Library, IoError> {
 /// Safety: the library's initializers run in this process.
 @platform(wasm)
 pub unsafe fn open(_path: str) Result<Library, IoError> {
-    return Result::<Library, IoError>::Err(error::unsupported(IoOp::LoadLibrary));
+    return Err(error::unsupported(IoOp::LoadLibrary));
 }
 
 extend Library {
@@ -100,7 +100,7 @@ extend Library {
     /// Safety: as on the other targets.
     @platform(wasm)
     pub unsafe fn symbol(self: &Library, _name: str) Result<*mut void, IoError> {
-        return Result::<*mut void, IoError>::Err(error::unsupported(IoOp::Symbol));
+        return Err(error::unsupported(IoOp::Symbol));
     }
 }
 
@@ -134,7 +134,7 @@ extend Library {
     @platform(wasm)
     pub unsafe fn close(self: Library) Result<Unit, IoError> {
         forget(self);
-        return Result::<Unit, IoError>::Err(error::unsupported(IoOp::Close));
+        return Err(error::unsupported(IoOp::Close));
     }
 }
 

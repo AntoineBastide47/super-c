@@ -68,7 +68,8 @@ above. Recompute a fact only after a change that the "Valid until" column names.
 | RPO, predecessors of reached blocks (CSR), loop nesting, rare blocks, fold decisions, use counts | `Live::run` (`reverse_postorder`, `loops`, `rare_blocks`, `folds`) | `Live` (`rpo`, `npred`, `pat`, `preds`, `inner`, `pfold`, `count`) | end of the function, retries included |
 | Block layout, live ranges, last uses, folded use lists (CSR) | `Live::relayout` (`layout`, `ranges`; `uses_of`) | `Live` (`pos`, `end`, `ua`, `un`, `uv`) | a change of the layout (`after`) |
 | Rare blocks | `Live::rare_blocks` | `Live` | end of the function; the optimizer's `BLOCK_RARE` holds the same fact only when `lir_opt` ran |
-| Homes | `Live::plan` | `Live` | end of the function |
+| Next use of each folded operand | `Live::ranges`, reverse walk of the existing operand CSR; `Live::advance` consumes it | `Live.next`, `use_next`; native eviction scoring reads `next` | layout change; cursors advance once per instruction |
+| Register home classes and prefix cuts | `Live::plan`; safe cuts reuse `pat`, `preds`, `pos` | `Live.home`, `cut`, sorted `splits`; native `home_at` and `save_splits` consume them | next home plan or layout change |
 | Operand list of one instruction (edge arguments included) | `live::each_use`; folded: `Live::uses_of` | caller's vector; `Live` | per call |
 | Special operations of the body | `lv::op_flags` | `Gen.opf` | end of the function, retries included |
 | Stack canary | `lver::protected` | `Gen.prot` | end of the function, retries included |

@@ -56,9 +56,9 @@ fn simd_baseline_kernels_match_the_scalar_loops() {
     // The x86-64 kernels call the C compiler's runtime, which the build links by name (kernels.sh).
     if ARCH != Arch::AArch64 {
         let rt = format("{}/libccrt.a", out.as_str());
-        assert(p.cc_runtime(out.as_str()).contains("-lccrt"), "the C compiler has its runtime archive");
+        assert(p.cc_runtime(&out).contains("-lccrt"), "the C compiler has its runtime archive");
         assert(
-            fs::rename(rt.as_str(), format("{}/libsimd_baseline_rt.a", out.as_str()).as_str()).is_ok(),
+            fs::rename(&rt, format("{}/libsimd_baseline_rt.a", out.as_str()).as_str()).is_ok(),
             "the runtime archive",
         );
     }

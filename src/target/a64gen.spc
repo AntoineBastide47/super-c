@@ -92,6 +92,8 @@ pub(package) struct Gen {
     bp: *const Body,
     lv: lv::Live,
     va: Vector<Va>,
+    split_at: usize,
+    split_off: Vector<i32>, // per split value, its stack home, reserved before emission
     code: Vector<u32>,
     owner: Vector<u32>, // per register number, the value index it holds, NONE
     /// Per register number, the parameter of a block after a loop that shares it with the loop's parameter
@@ -111,11 +113,10 @@ pub(package) struct Gen {
     rstore: Vector<u32>, // per instruction, 1 + the result part a store moves into its register (`ret_stores`), else 0
     rload: Vector<u32>, // per call, the loads after it its result's registers give (`res_relays`)
     suse: Vector<u32>, // per slot, the uses of its addresses (`place::slot_uses`)
-    rr: u32, // the eviction cursor
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
     paired: u32, // the last access the one before it took into an `ldp` or `stp` (NONE: none)
-    stepped: Vector<u32>, // the pointer steps accesses before them took as their post-index (`post_step`)
+    stepped: Vector<u32>, // accesses paired early and pointer steps taken as post-index updates
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
     csave: Vector<(u8, i64)>, // the scratch homes saved around a rare call (`save_scratch`)
     rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
@@ -209,6 +210,8 @@ extend Gen {
             bp: null,
             lv: lv::Live::new(),
             va: Vector::<Va>::new(),
+            split_at: 0,
+            split_off: Vector::<i32>::new(),
             code: Vector::<u32>::new(),
             owner: owner,
             heir: Vector::<u32>::new(),
@@ -223,7 +226,6 @@ extend Gen {
             rstore: Vector::<u32>::new(),
             rload: Vector::<u32>::new(),
             suse: Vector::<u32>::new(),
-            rr: 0,
             pos: 0,
             cur: 0,
             paired: NONE,
@@ -352,18 +354,11 @@ extend Gen {
             let r = (open & ~self.held).trailing_zeros() as u32;
             return r as u8;
         }
-        // Evict round-robin: the next unlocked register that holds a value.
         let busy = open & self.held;
         if busy != 0 {
-            let s = self.rr % 64;
-            let r = if busy >> s as u64 != 0 {
-                s + (busy >> s as u64).trailing_zeros() as u32
-            } else {
-                busy.trailing_zeros() as u32
-            };
-            self.rr = r + 1;
-            self.evict(r as u8);
-            return r as u8;
+            let r = self.cheapest(busy);
+            self.evict(r);
+            return r;
         }
         assert(false, "a64gen: every register is locked");
         return 0;
@@ -385,6 +380,25 @@ extend Gen {
         self.va.index_mut(x as usize).reg = NOREG;
         self.va.index_mut(x as usize).dirty = false;
         self.set_owner(r, NONE);
+    }
+
+    // Prefer no store, then the value whose next use is farthest away.
+    fn cheapest(self: &Self, set: u64) u8 {
+        let mut best = NOREG;
+        let mut score: u64 = 0;
+        let mut left = set;
+        while left != 0 {
+            let r = left.trailing_zeros() as u8;
+            left &= left - 1;
+            let x = self.owner[r as usize];
+            let stores = self.va[x as usize].dirty && (self.live_on(x) || self.read_now(x));
+            let cost = (!stores) as u64 << 32 | self.lv.next[x as usize] as u64;
+            if best == NOREG || cost > score {
+                best = r;
+                score = cost;
+            }
+        }
+        return best;
     }
 
     // Whether the current instruction reads value `x`.
@@ -868,7 +882,7 @@ extend Gen {
 
     // Which register value index `x` holds for its whole range (`plan_homes`).
     const fn fix_class(self: &Self, x: u32) u8 {
-        return self.lv.home[x as usize];
+        return self.lv.home_at(x, self.pos);
     }
 
     // Plan the homes (`Live::plan`) over each value's request: none in memory or rematerialized; a callee-saved
@@ -1517,6 +1531,7 @@ extend Gen {
 
     // End the current instruction: its locks and temporaries end and its dead values free.
     fn end_inst(self: &mut Self) {
+        self.lv.advance(self.b(), self.cur);
         self.lock = 0;
         self.tmps = 0;
         self.remat.truncate(0);
@@ -2180,7 +2195,6 @@ extend Gen {
         self.fixed_busy = 0;
         self.csr = 0;
         self.rows.truncate(0);
-        self.rr = 0;
         self.cond = Cond { inst: NONE, cc: 0, cc2: NONE };
         if b.naked {
             return self.naked(s);
@@ -2194,7 +2208,15 @@ extend Gen {
         self.bucket_ends();
         self.call_tables();
         self.half_forms();
+        self.lv.split = !self.shrink;
         self.plan_homes();
+        self.split_at = 0;
+        fill(&mut self.split_off, n, -1);
+        for j in 0..self.lv.splits.len() {
+            let x = self.lv.splits[j] as u32;
+            let sz = type_bytes(self.xty(x), self.ptr);
+            self.split_off[x as usize] = self.slot_alloc(sz.max(8), sz.min(16)) as i32;
+        }
         if self.shrink && self.lv.homeless(&self.want) {
             return self.unshrunk(s, local);
         }
@@ -2621,6 +2643,20 @@ extend Gen {
             self.late_stubs();
         }
         self.pos = q;
+        while self.split_at < self.lv.splits.len() && (self.lv.splits[self.split_at] >> 32) as u32 == q {
+            let x = self.lv.splits[self.split_at] as u32;
+            let va = self.va[x as usize];
+            if va.reg != NOREG && self.owner[va.reg as usize] == x {
+                self.set_owner(va.reg, NONE);
+                self.fixed_busy &= ~bit(va.reg);
+            }
+            let w = self.va.index_mut(x as usize);
+            w.home = H_SLOT;
+            w.reg = NOREG;
+            w.off = self.split_off[x as usize];
+            w.dirty = false;
+            self.split_at += 1;
+        }
         let k = self.lv.order[q as usize];
         let b = self.b();
         self.blk_at[k as usize] = self.code.len() as u32;
@@ -2736,6 +2772,7 @@ extend Gen {
         } else {
             0
         };
+        self.save_splits(t, ne);
         let mut m = self.held;
         // Each step clears one register's bit: at most 64 steps.
         while m != 0 {
@@ -2758,6 +2795,40 @@ extend Gen {
             if need {
                 self.spill(x);
             }
+        }
+    }
+
+    // Every edge leaving a register prefix writes the suffix's stack home, including edges that
+    // skip the cut's block. No edge can return from the suffix to the prefix.
+    fn save_splits(self: &mut Self, t: Inst, ne: u32) {
+        let b = self.b();
+        let mut end = self.pos;
+        for e in 0..ne {
+            end = end.max(self.lv.pos[b.edge_target(lv::edge_of(b, t, e)) as usize]);
+        }
+        for j in self.split_at..self.lv.splits.len() {
+            let entry = self.lv.splits[j];
+            if (entry >> 32) as u32 > end {
+                break;
+            }
+            let x = entry as u32;
+            if self.lv.pos[self.lv.def_blk[x as usize] as usize] > self.pos {
+                continue;
+            }
+            let ty = self.xty(x);
+            let va = self.va[x as usize];
+            let r = if va.reg != NOREG {
+                va.reg
+            } else {
+                let scratch = if is_v(ty) || is_vec(ty) {
+                    V0 + 30
+                } else {
+                    a::IP0 as u8
+                };
+                self.materialize(self.xval(x), scratch);
+                scratch
+            };
+            self.mem(mkind(ty, false), false, r, a::SP, self.split_off[x as usize]);
         }
     }
 
@@ -4871,67 +4942,68 @@ extend Gen {
         return true;
     }
 
-    // Whether access `i` and the next instruction of its block, the same access of the next bytes through
-    // the same address value, pair into one `ldp` or `stp` (`pair`): 4- or 8-byte integers, floats, vectors
-    // in v registers, not volatile, not through a folded index or a symbol's page; loaded values without a
-    // fixed register (the pair defines the second one early).
-    fn pairs(self: &Self, i: u32) bool {
+    // A matching access within eight instructions. Crossing memory or control flow is forbidden;
+    // a store's source must already exist where the pair executes.
+    fn pair_next(self: &Self, i: u32) u32 {
         let b = self.b();
         let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
-        if i + 1 >= bk.start + bk.len {
-            return false;
-        }
         let t = b.insts[i as usize];
-        let u = b.insts[i as usize + 1];
         let load = t.op == O_LOAD;
-        if t.op != u.op || !load && t.op != O_STORE || t.a != u.a || ((t.aux | u.aux) & MEM_VOLATILE) != 0 || self.lv.fold[i as usize] || self.lv.fold[i as usize + 1] {
-            return false;
+        if !load && t.op != O_STORE || (t.aux & MEM_VOLATILE) != 0 || self.lv.fold[i as usize] {
+            return NONE;
         }
         let ty = if load {
             t.ty
         } else {
             self.vt(t.b)
         };
-        let uy = if load {
-            u.ty
-        } else {
-            self.vt(u.b)
-        };
         let m = mkind(ty, load);
-        if ty != uy || m != a::M_W && m != a::M_X && m != a::M_VS && m != a::M_VD && m != a::M_VQ || in_mem(ty) && !in_vreg(
-            ty,
-        ) {
-            return false;
+        if m != a::M_W && m != a::M_X && m != a::M_VS && m != a::M_VD && m != a::M_VQ || in_mem(ty) && !in_vreg(ty) {
+            return NONE;
         }
         let size = type_bytes(ty, self.ptr) as i64;
         let mut sy: u32 = 0;
         let mut add: i64 = 0;
-        if (u.c as i32) as i64 != (t.c as i32) as i64 + size || self.sym_mem(
-            t.a,
-            t.c as i32,
-            size as u32,
-            &mut sy,
-            &mut add,
-        ) {
-            return false;
+        if self.sym_mem(t.a, t.c as i32, size as u32, &mut sy, &mut add) {
+            return NONE;
         }
-        if load {
-            for x in i..i + 2 {
-                if self.va[x as usize].home == H_FIXED || self.fix_class(x) != FIX_NONE {
-                    return false;
+        for j in i + 1..(i + 9).min(bk.start + bk.len) {
+            let u = b.insts[j as usize];
+            if u.op == t.op {
+                let uy = if load {
+                    u.ty
+                } else {
+                    self.vt(u.b)
+                };
+                let delta = (u.c as i32) as i64 - (t.c as i32) as i64;
+                if u.a != t.a || ty != uy || delta != size && delta != -size || (u.aux & MEM_VOLATILE) != 0 || self.lv.fold[j as usize] {
+                    return NONE;
                 }
+                if load {
+                    if self.va[j as usize].home == H_FIXED {
+                        return NONE;
+                    }
+                } else if (u.b & (VPARAM | VFLAG)) == 0 && u.b >= i || self.lv.relay.len() != 0 && self.lv.relay[j as usize] != NONE || self.rstore[j as usize] != 0 {
+                    return NONE;
+                }
+                return j;
+            }
+            let op = u.op;
+            let pure = op == O_ICONST || op == O_FCONST || op == O_PTRADD || op == O_ADD || op == O_SUB || op == O_MUL || op >= O_AND && op <= O_NOT || op == O_ICMP || op == O_ZEXT || op == O_SEXT || op == O_TRUNC;
+            if !pure || in_mem(u.ty) {
+                return NONE;
             }
         }
-        return true;
+        return NONE;
     }
 
-    // Access `i` and the next one (`pairs`) as one `ldp` or `stp` at `base` + `off`, when the offset fits the
+    // Accesses `i` and `j` (`pair_next`) as one `ldp` or `stp` at `base` + the lower offset, when it fits the
     // pair's scaled 7 bits, post-indexed by pointer step `step` (`post_step`) unless NONE; the next one then
     // emits nothing. Whether it did.
-    fn pair(self: &mut Self, i: u32, base: u32, off: i64, step: u32) bool {
+    fn pair(self: &mut Self, i: u32, j: u32, base: u32, first_off: i64, step: u32) bool {
         let b = self.b();
         let t = b.insts[i as usize];
-        let u = b.insts[i as usize + 1];
+        let u = b.insts[j as usize];
         let load = t.op == O_LOAD;
         let ty = if load {
             t.ty
@@ -4939,12 +5011,18 @@ extend Gen {
             self.vt(t.b)
         };
         let size = type_bytes(ty, self.ptr) as i64;
+        let reverse = u.c as i32 < t.c as i32;
+        let off = if reverse {
+            first_off - size
+        } else {
+            first_off
+        };
         if off % size != 0 || off < -64 * size || off > 63 * size {
             return false;
         }
         // Runs of four 8-byte stores of 0 at consecutive offsets: a zeroed q register, stored twice per 32
         // bytes (clang's `movi` and `stp q`).
-        let quads = if !load && size == 8 && off % 16 == 0 && step == NONE {
+        let quads = if !load && j == i + 1 && !reverse && size == 8 && off % 16 == 0 && step == NONE {
             self.zero_quads(i)
         } else {
             0
@@ -4960,12 +5038,26 @@ extend Gen {
             return true;
         }
         let m = mkind(ty, load);
-        let (r1, r2) = if load {
-            (self.def(i), self.def(i + 1))
+        let (ra, rb) = if load {
+            let first = self.def(i);
+            let vr = is_v(ty) || in_vreg(ty);
+            let home = self.take_home(j, vr, NOREG);
+            let second = if home != NOREG {
+                home
+            } else {
+                self.alloc(vr)
+            };
+            self.bind(j, second);
+            (first, second)
         } else if in_vreg(ty) {
             (self.vec_use(t.b, V0 + 30), self.vec_use(u.b, V0 + 31))
         } else {
             (self.store_reg(t.b), self.store_reg(u.b))
+        };
+        let (r1, r2) = if reverse {
+            (rb, ra)
+        } else {
+            (ra, rb)
         };
         let vr = m >= a::M_VB;
         let n1 = if vr {
@@ -4987,9 +5079,9 @@ extend Gen {
         }
         if load && !vr {
             self.va.index_mut(i as usize).clean = size < 8;
-            self.va.index_mut(i as usize + 1).clean = size < 8;
+            self.va.index_mut(j as usize).clean = size < 8;
         }
-        self.paired = i + 1;
+        self.stepped.push(j);
         return true;
     }
 
@@ -5099,15 +5191,20 @@ extend Gen {
                 return true;
             }
         }
-        if self.pairs(i) {
+        let partner = self.pair_next(i);
+        if partner != NONE {
             let (base, off) = self.addr(t.a, t.c as i32);
             let size = type_bytes(ty, self.ptr) as i64;
-            let step = self.post_step(i, 2, -64 * size, 63 * size, size);
-            if self.pair(i, base, off, step) {
+            let step = if partner == i + 1 && self.b().insts[partner as usize].c as i32 > t.c as i32 {
+                self.post_step(i, 2, -64 * size, 63 * size, size)
+            } else {
+                NONE
+            };
+            if self.pair(i, partner, base, off, step) {
                 return true;
             }
         }
-        let step = if in_mem(ty) && !in_vreg(ty) || self.pairs(i) {
+        let step = if in_mem(ty) && !in_vreg(ty) || partner != NONE {
             NONE
         } else {
             self.post_step(i, 1, -256, 255, 1)
@@ -5368,15 +5465,20 @@ extend Gen {
             }
             return true;
         }
-        if self.pairs(self.cur) {
+        let partner = self.pair_next(self.cur);
+        if partner != NONE {
             let (base, off) = self.addr(t.a, t.c as i32);
             let size = type_bytes(ty, self.ptr) as i64;
-            let step = self.post_step(self.cur, 2, -64 * size, 63 * size, size);
-            if self.pair(self.cur, base, off, step) {
+            let step = if partner == self.cur + 1 && self.b().insts[partner as usize].c as i32 > t.c as i32 {
+                self.post_step(self.cur, 2, -64 * size, 63 * size, size)
+            } else {
+                NONE
+            };
+            if self.pair(self.cur, partner, base, off, step) {
                 return true;
             }
         }
-        let step = if in_mem(ty) && !in_vreg(ty) || self.pairs(self.cur) {
+        let step = if in_mem(ty) && !in_vreg(ty) || partner != NONE {
             NONE
         } else {
             self.post_step(self.cur, 1, -256, 255, 1)

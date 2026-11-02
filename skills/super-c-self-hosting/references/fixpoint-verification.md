@@ -10,7 +10,7 @@ The gate keeps the per-TU cache on and excludes the files in `CONTRACT_NONDET_FI
 (`.tu_cache`) from every tree comparison (`same_tree` in `ci/gate.sh`). It excludes nothing
 else and normalizes nothing: both generations build in one checkout, so the
 files with absolute paths are identical. The manual form
-below disables the per-TU cache instead, so it diffs the whole tree.
+below disables every cache and compares the two binaries.
 
 Emission hashes include paths. Both generations must use the same source, output,
 standard-library, and FFI paths. Place the bootstrap binary beside the copied `std/`
@@ -22,35 +22,26 @@ Run from the repository root with a rebuilt `./super-c`.
 
 ```sh
 set -eu
-# Fresh sources, no build directories or manifest.
 fix_dir=$(mktemp -d /tmp/super-c-fix.XXXXXX)
-rsync -a --exclude=build src std ffi "$fix_dir/"
+rsync -a --exclude=build src std ffi build.toml "$fix_dir/"
 cp ./super-c "$fix_dir/bootstrap-bin"
 
 export SC_NO_CACHE=1
 export SC_NO_EMIT_CACHE=1
 export SC_NO_TU_CACHE=1
 
-# Gen-1 compiles the compiler using the copied libraries into native objects and links gen1-bin with the
-# own linker.
-"$fix_dir/bootstrap-bin" build "$fix_dir/src/main.spc" -o "$fix_dir/gen1-bin"
-mv "$fix_dir/src/build" "$fix_dir/gen1"
-
-# Gen-2: the compiler gen-1 built compiles the same sources at the same absolute paths, with no previous
-# build tree.
-"$fix_dir/gen1-bin" build "$fix_dir/src/main.spc" -o "$fix_dir/discard-bin"
-
-# Require an empty diff over the whole tree: the per-TU cache is off, so nothing is excluded.
-diff -r "$fix_dir/gen1" "$fix_dir/src/build"
+# Both generations link under the same name: the binary records its output path.
+(cd "$fix_dir" && ./bootstrap-bin build --profile=test)
+mv "$fix_dir/build/test/super-c" "$fix_dir/gen1-bin"
+rm -rf "$fix_dir/build"
+(cd "$fix_dir" && SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 ./gen1-bin build --profile=test)
+cmp "$fix_dir/gen1-bin" "$fix_dir/build/test/super-c"
 ```
 
-To compare the C instead, add `--emit-c` to both builds and drop `-o`; compile a C tree with
-`ci/cc_tree.sh`, never by hand: a pack or unity file includes its members, so compiling every `.c`
-file defines each member twice. Pass every path absolute and the same in both generations: an assertion's location embeds the source path as
-written.
-
-An empty diff means the fixpoint holds. **Any** difference is a semantic regression
-unless the contract itself is intentionally changed.
+The binaries must be identical. For the additional worker-count checks of C trees,
+native objects, type tables, item indexes and diagnostics, run `sh ci/gate.sh --core`.
+To compile a C tree, use `ci/cc_tree.sh`, never a command over every `.c` file: a pack
+or unity file includes its members, so compiling every file defines those members twice.
 
 ## Absolute Paths in the Emitted Tree
 

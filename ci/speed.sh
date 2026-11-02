@@ -12,7 +12,7 @@ x=${BINEXT:-}
 runs=${RUNS:-3}
 w=${RUNNER_TEMP:-/tmp}/speed
 rm -rf "$w" && mkdir -p "$w"
-export SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1
+export SC_NO_CACHE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1
 TIMEFORMAT='%3R %3U %3S'
 
 # The fastest wall time of `runs` runs of "$@" (after `env` words), with that run's user and system

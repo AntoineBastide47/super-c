@@ -486,7 +486,7 @@ pub fn spawn(cmd: Command) Result<Child, IoError> {
 /// Start `cmd`. Unsupported: WASI has no processes.
 @platform(wasm)
 pub fn spawn(_cmd: Command) Result<Child, IoError> {
-    return Result::<Child, IoError>::Err(error::unsupported(IoOp::Spawn));
+    return Err(error::unsupported(IoOp::Spawn));
 }
 
 @platform(!wasm)
@@ -780,7 +780,7 @@ pub fn wait_any(children: []mut Child) Result<(usize, ExitStatus), IoError> {
 /// Block until one of `children` ends. Unsupported: WASI has no processes.
 @platform(wasm)
 pub fn wait_any(_children: []mut Child) Result<(usize, ExitStatus), IoError> {
-    return Result::<(usize, ExitStatus), IoError>::Err(error::unsupported(IoOp::Wait));
+    return Err(error::unsupported(IoOp::Wait));
 }
 
 /// One of `children` that has already ended, with its status, without blocking; None when every one
@@ -856,7 +856,7 @@ pub fn pid() Result<u32, IoError> {
 /// This process's id. Unsupported on WASI, which has no process ids.
 @platform(wasm)
 pub fn pid() Result<u32, IoError> {
-    return Result::<u32, IoError>::Err(error::unsupported(IoOp::ProcessId));
+    return Err(error::unsupported(IoOp::ProcessId));
 }
 
 @platform(macos | ios | linux | android)
@@ -916,7 +916,7 @@ pub fn is_alive(pid: u32) Result<bool, IoError> {
 /// Whether process `pid` exists. Unsupported: WASI has no processes.
 @platform(wasm)
 pub fn is_alive(_pid: u32) Result<bool, IoError> {
-    return Result::<bool, IoError>::Err(error::unsupported(IoOp::Signal));
+    return Err(error::unsupported(IoOp::Signal));
 }
 
 /// The path of the running executable ('/' separators on Windows). Unsupported on WASI, where a module
@@ -968,7 +968,7 @@ pub fn exe_path() Result<String, IoError> {
 /// The path of the running executable. Unsupported on WASI, where a module has no path of its own.
 @platform(wasm)
 pub fn exe_path() Result<String, IoError> {
-    return Result::<String, IoError>::Err(error::unsupported(IoOp::ExePath));
+    return Err(error::unsupported(IoOp::ExePath));
 }
 
 /// The working directory ('/' separators on Windows).
@@ -1072,7 +1072,7 @@ pub fn pipe() Result<(fs::File, fs::File), IoError> {
 /// A new pipe: its read end and its write end. Unsupported: WASI has no pipes.
 @platform(wasm)
 pub fn pipe() Result<(fs::File, fs::File), IoError> {
-    return Result::<(fs::File, fs::File), IoError>::Err(error::unsupported(IoOp::Pipe));
+    return Err(error::unsupported(IoOp::Pipe));
 }
 
 /// The largest resident set this process has had, in bytes. Unsupported on WASI.
@@ -1105,7 +1105,7 @@ pub fn peak_rss() Result<u64, IoError> {
 /// The largest resident set this process has had, in bytes. Unsupported on WASI.
 @platform(wasm)
 pub fn peak_rss() Result<u64, IoError> {
-    return Result::<u64, IoError>::Err(error::unsupported(IoOp::ResourceUsage));
+    return Err(error::unsupported(IoOp::ResourceUsage));
 }
 
 /// Raise this process's limit of open descriptors to at least `need`, within the hard limit:
@@ -1139,7 +1139,7 @@ pub fn raise_open_file_limit(_need: u64) Result<Unit, IoError> {
 /// can change.
 @platform(wasm)
 pub fn raise_open_file_limit(_need: u64) Result<Unit, IoError> {
-    return Result::<Unit, IoError>::Err(error::unsupported(IoOp::SetLimit));
+    return Err(error::unsupported(IoOp::SetLimit));
 }
 
 // ---- Helpers ----------------------------------------------------------------------------------------
@@ -1242,7 +1242,7 @@ extend Child {
     /// Block until the child ends. Unsupported: WASI has no processes.
     @platform(wasm)
     pub fn wait(self: &mut Child) Result<ExitStatus, IoError> {
-        return Result::<ExitStatus, IoError>::Err(error::unsupported(IoOp::Wait));
+        return Err(error::unsupported(IoOp::Wait));
     }
 
     /// The child's status when it has ended, else None, without blocking.
@@ -1286,7 +1286,7 @@ extend Child {
     /// The child's status when it has ended. Unsupported: WASI has no processes.
     @platform(wasm)
     pub fn try_wait(self: &mut Child) Result<Option<ExitStatus>, IoError> {
-        return Result::<Option<ExitStatus>, IoError>::Err(error::unsupported(IoOp::Wait));
+        return Err(error::unsupported(IoOp::Wait));
     }
 
     @platform(windows)
@@ -1330,7 +1330,7 @@ extend Child {
     /// End the child at once. Unsupported: WASI has no processes.
     @platform(wasm)
     pub fn kill(self: &mut Child) Result<Unit, IoError> {
-        return Result::<Unit, IoError>::Err(error::unsupported(IoOp::Kill));
+        return Err(error::unsupported(IoOp::Kill));
     }
 }
 

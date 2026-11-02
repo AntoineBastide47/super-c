@@ -71,7 +71,7 @@ pub unsafe fn spawn(entry: fn(*mut void) *mut void, arg: *mut void) Result<Threa
 /// Safety: `arg` stays valid, and is safe to use from the new thread, for as long as `entry` uses it.
 @platform(wasm)
 pub unsafe fn spawn(_entry: fn(*mut void) *mut void, _arg: *mut void) Result<Thread, IoError> {
-    return Result::<Thread, IoError>::Err(error::unsupported(IoOp::ThreadCreate));
+    return Err(error::unsupported(IoOp::ThreadCreate));
 }
 
 // The error of a substrate thread call that returned `rc`: an errno value on POSIX, nonzero with the
@@ -159,7 +159,7 @@ extend TlsKey {
     /// A new slot, null on every thread. LimitExceeded when the system has no free key.
     @platform(wasm)
     pub fn new() Result<TlsKey, IoError> {
-        return Result::<TlsKey, IoError>::Ok(TlsKey { slot: null });
+        return Ok(TlsKey { slot: null });
     }
 
     /// This thread's value of the slot.
@@ -199,7 +199,7 @@ extend TlsKey {
     @platform(wasm)
     pub fn set(self: &mut TlsKey, value: *mut void) Result<Unit, IoError> {
         self.slot = value;
-        return Result::<Unit, IoError>::Ok(Unit {});
+        return Ok(Unit {});
     }
 }
 

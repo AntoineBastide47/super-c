@@ -318,6 +318,7 @@ fn has(b: str, s: str) bool {
 
 // Whether the shared library `x` the project in `dir` builds into `build/debug-lib` defines `name` for a
 // program that loads it.
+@platform(!wasm)
 fn lib_defines(dir: str, name: str) bool {
     let lib = format("{}/build/debug-lib/{}", dir, bsys::lib_file("x", true, tgt::host_os()).as_str());
     let l = (unsafe dylib::open(&lib)).unwrap();

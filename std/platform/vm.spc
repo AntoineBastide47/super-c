@@ -144,7 +144,7 @@ extend Mapping {
     }
     @platform(wasm)
     fn os_commit(self: &mut Mapping, _offset: usize, _len: usize) Result<Unit, IoError> {
-        return Result::<Unit, IoError>::Err(error::unsupported(IoOp::Commit));
+        return Err(error::unsupported(IoOp::Commit));
     }
 
     @platform(macos | ios | linux | android)
@@ -174,7 +174,7 @@ extend Mapping {
     }
     @platform(wasm)
     fn os_protect(self: &mut Mapping, _offset: usize, _len: usize, _prot: Protection) Result<Unit, IoError> {
-        return Result::<Unit, IoError>::Err(error::unsupported(IoOp::Protect));
+        return Err(error::unsupported(IoOp::Protect));
     }
 }
 

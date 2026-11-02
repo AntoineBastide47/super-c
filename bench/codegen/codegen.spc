@@ -129,6 +129,7 @@ extern "C" {
 }
 
 // Recursion whose result an associative operation combines with the recursive call.
+@arch(!wasm32)
 @noinline
 fn r_sum(n: u32) u32 {
     if n == 0 {
@@ -137,6 +138,7 @@ fn r_sum(n: u32) u32 {
     return n + r_sum(n - 1);
 }
 
+@arch(!wasm32)
 @noinline
 fn r_fact(n: u64) u64 {
     if n == 0 {
@@ -145,6 +147,7 @@ fn r_fact(n: u64) u64 {
     return n * r_fact(n - 1);
 }
 
+@arch(!wasm32)
 @noinline
 fn r_bits(x: u32) u32 {
     if x == 0 {
@@ -153,6 +156,7 @@ fn r_bits(x: u32) u32 {
     return (x & 1) + r_bits(x >> 1);
 }
 
+@arch(!wasm32)
 @noinline
 fn r_pow(b: u64, e: u32) u64 {
     if e == 0 {
@@ -161,6 +165,7 @@ fn r_pow(b: u64, e: u32) u64 {
     return b * r_pow(b, e - 1);
 }
 
+@arch(!wasm32)
 @noinline
 fn r_fib(n: u32) u32 {
     if n < 2 {
@@ -169,6 +174,7 @@ fn r_fib(n: u32) u32 {
     return r_fib(n - 1) + r_fib(n - 2);
 }
 
+@arch(!wasm32)
 @noinline
 fn r_len(n: u32) u32 {
     if n == 0 {
@@ -177,6 +183,7 @@ fn r_len(n: u32) u32 {
     return 1 + r_len(n - 1);
 }
 
+@arch(!wasm32)
 @noinline
 fn is_even(i: u32) bool {
     if i == 0 {
@@ -186,6 +193,7 @@ fn is_even(i: u32) bool {
 }
 
 // Bit counts as loops.
+@arch(!wasm32)
 @noinline
 fn l_pop(x0: u32) u32 {
     let mut x = x0;
@@ -197,6 +205,7 @@ fn l_pop(x0: u32) u32 {
     return c;
 }
 
+@arch(!wasm32)
 @noinline
 fn l_log2(x0: u32) u32 {
     let mut x = x0;
@@ -209,38 +218,45 @@ fn l_log2(x0: u32) u32 {
 }
 
 // Byte swaps.
+@arch(!wasm32)
 @noinline
 fn b_bswap(x: u32) u32 {
     return x >> 24 | x >> 8 & 0xff00 | x << 8 & 0xff0000 | x << 24;
 }
 
+@arch(!wasm32)
 @noinline
 fn c_load32be(b: &[u8; 4]) u32 {
     return b[0] as u32 << 24 | b[1] as u32 << 16 | b[2] as u32 << 8 | b[3] as u32;
 }
 
 // `&&` and `||` of comparisons.
+@arch(!wasm32)
 @noinline
 fn b_lower(c: u8) bool {
     return c >= 97 && c <= 122;
 }
 
+@arch(!wasm32)
 @noinline
 fn b_pow2(x: u32) bool {
     return x != 0 && (x & x - 1) == 0;
 }
 
+@arch(!wasm32)
 @noinline
 fn f_and(x: u32, y: u32, z: u32) bool {
     return x == 3 && y < 9 && z != 0;
 }
 
+@arch(!wasm32)
 @noinline
 fn f_or0(x: u32, y: u32) bool {
     return x == 0 || y == 0;
 }
 
 // Switches, ranges and sets of constants.
+@arch(!wasm32)
 @noinline
 fn b_table(x: u32) u32 {
     return switch x {
@@ -253,6 +269,7 @@ fn b_table(x: u32) u32 {
     };
 }
 
+@arch(!wasm32)
 @noinline
 fn t_sparse(x: u32) u32 {
     return switch x {
@@ -268,6 +285,7 @@ fn t_sparse(x: u32) u32 {
     };
 }
 
+@arch(!wasm32)
 @noinline
 fn t_jump(x: u32, a: u32) u32 {
     return switch x {
@@ -283,11 +301,13 @@ fn t_jump(x: u32, a: u32) u32 {
     };
 }
 
+@arch(!wasm32)
 @noinline
 fn f_space(c: u8) bool {
     return c == 32 || c == 9 || c == 10 || c == 13;
 }
 
+@arch(!wasm32)
 @noinline
 fn f_class(c: u8) u8 {
     return switch c {
@@ -300,22 +320,26 @@ fn f_class(c: u8) u8 {
 }
 
 // Bit fields and inverted operands.
+@arch(!wasm32)
 @noinline
 fn b_bfi(x: u32, v: u32) u32 {
     return x & 0xffff00ff | (v & 0xff) << 8;
 }
 
+@arch(!wasm32)
 @noinline
 fn b_andn(x: u64, y: u64) u64 {
     return ~x & y;
 }
 
+@arch(!wasm32)
 @noinline
 fn b_sbfx(x: u32) i32 {
     return (x << 20) as i32 >> 24;
 }
 
 // Loops over bytes, a serial recurrence and a count of matches.
+@arch(!wasm32)
 @noinline
 fn f_hash(s: []u8) u32 {
     let mut h: u32 = 2166136261;
@@ -325,6 +349,7 @@ fn f_hash(s: []u8) u32 {
     return h;
 }
 
+@arch(!wasm32)
 @noinline
 fn m_count(s: []u8, c: u8) usize {
     let mut n: usize = 0;
@@ -338,21 +363,25 @@ fn m_count(s: []u8, c: u8) usize {
 
 // Iterator pipelines over slices: a sum, a sum of products by a constant, a count of matches, a dot
 // product of two zipped slices, a search that stops at the first match and a maximum.
+@arch(!wasm32)
 @noinline
 fn i_fold(s: []u32) u32 {
     return iter::fold(s.iter(), 0u32, |a: u32, x: &u32| a.wrapping_add(*x));
 }
 
+@arch(!wasm32)
 @noinline
 fn i_mapsum(s: []u32) u32 {
     return iter::fold(iter::map(s.iter(), |x: &u32| x.wrapping_mul(2)), 0u32, |a: u32, x: u32| a.wrapping_add(x));
 }
 
+@arch(!wasm32)
 @noinline
 fn i_filter(s: []u32) usize {
     return iter::count(iter::filter(s.iter(), |x: &&u32| **x > 0x80000000));
 }
 
+@arch(!wasm32)
 @noinline
 fn i_zip(a: []u32, b: []u32) u32 {
     return iter::fold(
@@ -362,32 +391,38 @@ fn i_zip(a: []u32, b: []u32) u32 {
     );
 }
 
+@arch(!wasm32)
 @noinline
 fn i_any(s: []u32, c: u32) bool {
     return iter::any(s.iter(), |x: &&u32| **x == c);
 }
 
+@arch(!wasm32)
 @noinline
 fn i_max(s: []u32) u32 {
     return iter::max(iter::copied(s.iter())).unwrap_or(0);
 }
 
 // Compares with constant strings, a constant power, a tail recursion over a slice, a box nothing keeps.
+@arch(!wasm32)
 @noinline
 fn s_eq(s: str) bool {
     return s == "hello";
 }
 
+@arch(!wasm32)
 @noinline
 fn s_starts(s: str) bool {
     return s.starts_with("http");
 }
 
+@arch(!wasm32)
 @noinline
 fn n_pow(x: u32) u32 {
     return x.wrapping_pow(5);
 }
 
+@arch(!wasm32)
 @noinline
 fn q_slsum(s: []u32, acc: u32) u32 {
     if s.len() == 0 {
@@ -396,6 +431,7 @@ fn q_slsum(s: []u32, acc: u32) u32 {
     return q_slsum(s[1..s.len()], acc.wrapping_add(s[0]));
 }
 
+@arch(!wasm32)
 @noinline
 fn h_box(x: u32) u32 {
     let b = Box::new(x);
@@ -403,6 +439,7 @@ fn h_box(x: u32) u32 {
 }
 
 // Callee-saved registers around sibling calls.
+@arch(!wasm32)
 @noinline
 fn r_even(n: u32) bool {
     if n == 0 {
@@ -411,6 +448,7 @@ fn r_even(n: u32) bool {
     return r_odd(n - 1);
 }
 
+@arch(!wasm32)
 @noinline
 fn r_odd(n: u32) bool {
     if n == 0 {
@@ -420,6 +458,7 @@ fn r_odd(n: u32) bool {
 }
 
 // Return diamonds.
+@arch(!wasm32)
 @noinline
 fn s_max(a: i32, b: i32) i32 {
     if a > b {
@@ -428,6 +467,7 @@ fn s_max(a: i32, b: i32) i32 {
     return b;
 }
 
+@arch(!wasm32)
 @noinline
 fn s_clamp(x: i32, lo: i32, hi: i32) i32 {
     if x < lo {
@@ -439,6 +479,7 @@ fn s_clamp(x: i32, lo: i32, hi: i32) i32 {
     return x;
 }
 
+@arch(!wasm32)
 @noinline
 fn s_cmp3(a: i32, b: i32) i32 {
     if a < b {
@@ -451,6 +492,7 @@ fn s_cmp3(a: i32, b: i32) i32 {
 }
 
 // Arithmetic idioms.
+@arch(!wasm32)
 @noinline
 fn s_abs(x: i32) i32 {
     return if x < 0 {
@@ -460,6 +502,7 @@ fn s_abs(x: i32) i32 {
     };
 }
 
+@arch(!wasm32)
 @noinline
 fn s_cinc(a: u32, b: u32, c: u32) u32 {
     return if a > b {
@@ -469,57 +512,68 @@ fn s_cinc(a: u32, b: u32, c: u32) u32 {
     };
 }
 
+@arch(!wasm32)
 @noinline
 fn s_divmod(a: u32, b: u32) u32 {
     return a / b + a % b;
 }
 
+@arch(!wasm32)
 @noinline
 fn s_srem2(x: i32) bool {
     return x % 2 == 1;
 }
 
+@arch(!wasm32)
 @noinline
 fn s_ctz(x: u32) u32 {
     return x.trailing_zeros() as u32;
 }
 
+@arch(!wasm32)
 @noinline
 fn s_clz16(x: u16) u32 {
     return x.leading_zeros() as u32;
 }
 
+@arch(!wasm32)
 @noinline
 fn s_mulhi(a: u32, b: u32) u32 {
     return (a as u64 * b as u64 >> 32) as u32;
 }
 
+@arch(!wasm32)
 @noinline
 fn s_ispow2m(x: u64, a: u64) u64 {
     return x % 64 + a / 8;
 }
 
+@arch(!wasm32)
 @noinline
 fn s_shm(x: u32, n: u32) u32 {
     return x << (n & 31);
 }
 
 // Arms that return a call.
+@arch(!wasm32)
 @noinline
 fn t_f0(a: u32) u32 {
     return a * 3 + 1;
 }
 
+@arch(!wasm32)
 @noinline
 fn t_f1(a: u32) u32 {
     return a ^ 0x55;
 }
 
+@arch(!wasm32)
 @noinline
 fn t_f2(a: u32) u32 {
     return a << 2;
 }
 
+@arch(!wasm32)
 @noinline
 fn t_call(x: u32, a: u32) u32 {
     return switch x {
@@ -530,6 +584,7 @@ fn t_call(x: u32, a: u32) u32 {
     };
 }
 
+@arch(!wasm32)
 @noinline
 fn o_ref(p: Option<&u32>) u32 {
     return switch p {
@@ -539,6 +594,7 @@ fn o_ref(p: Option<&u32>) u32 {
 }
 
 // Float return diamonds.
+@arch(!wasm32)
 @noinline
 fn p_min(a: f64, b: f64) f64 {
     if a < b {
@@ -547,6 +603,7 @@ fn p_min(a: f64, b: f64) f64 {
     return b;
 }
 
+@arch(!wasm32)
 @noinline
 fn p_abs(x: f64) f64 {
     if x < 0.0 {
@@ -555,6 +612,7 @@ fn p_abs(x: f64) f64 {
     return x;
 }
 
+@arch(!wasm32)
 @noinline
 fn p_clamp01(x: f32) f32 {
     if x < 0.0 {
@@ -567,6 +625,7 @@ fn p_clamp01(x: f32) f32 {
 }
 
 // `CALLS` inputs below `max`: all `max - 1` (`fixed`), or uniform (`random`, a fixed seed).
+@arch(!wasm32)
 fn inputs(max: u32, random: bool) Vector<u32> {
     let mut v = Vector::<u32>::with_capacity(CALLS);
     let mut s: u64 = 0x9E3779B97F4A7C15;
@@ -586,12 +645,14 @@ fn inputs(max: u32, random: bool) Vector<u32> {
 }
 
 // The median and spread (p95 - min) of one call of `f` over `xs`, in ns, and the sum of its results.
+@arch(!wasm32)
 struct Stat {
     median: f64,
     spread: f64,
     sum: u64,
 }
 
+@arch(!wasm32)
 fn time<F: fn(u32) u64>(xs: &Vector<u32>, f: F) Stat {
     let mut b = bench::Bencher::new("codegen kernel");
     b.set_diag_rounds(0);
@@ -611,11 +672,13 @@ fn time<F: fn(u32) u64>(xs: &Vector<u32>, f: F) Stat {
 }
 
 // About 200 ms of work, so the clock is up before the first row.
+@arch(!wasm32)
 fn warm() {
     bench::black_box(bench::burn((0.2e9 / bench::burn_ns_per_iter()) as i64));
 }
 
 // `time` with each call's input depending on the previous result (`x ^ (r & 1)`): the kernel's latency.
+@arch(!wasm32)
 fn chain<F: fn(u32) u64>(xs: &Vector<u32>, f: F) Stat {
     let mut b = bench::Bencher::new("codegen kernel");
     b.set_diag_rounds(0);
@@ -637,6 +700,7 @@ fn chain<F: fn(u32) u64>(xs: &Vector<u32>, f: F) Stat {
 }
 
 // `time` of `f` over `xs`, or its `chain` when `latency`.
+@arch(!wasm32)
 fn measure<F: fn(u32) u64>(xs: &Vector<u32>, latency: bool, f: F) Stat {
     return if latency {
         chain(xs, f)
@@ -646,6 +710,7 @@ fn measure<F: fn(u32) u64>(xs: &Vector<u32>, latency: bool, f: F) Stat {
 }
 
 // One row: kernel `name` on `xs` (`mode`), Super-C's `sc` against clang's `c`.
+@arch(!wasm32)
 fn row(name: str, mode: str, sc: Stat, c: Stat) {
     unsafe stdio::printf(
         "codegen %-10.*s %-6.*s  sc %9.2f ns (+%.2f)  c %9.2f ns (+%.2f)  sc/c %.3f\n".ptr() as *const char,
@@ -665,6 +730,7 @@ fn row(name: str, mode: str, sc: Stat, c: Stat) {
 }
 
 /// Accumulator recursion: the recursion kernels, each on depths below 64 (`r_fib`: below 20).
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_recursion(_b: &mut bench::Bencher) {
     warm();
@@ -693,6 +759,7 @@ pub fn codegen_recursion(_b: &mut bench::Bencher) {
 }
 
 /// Bit-count loops: `l_pop` and `l_log2` on random words, and on one word of 16 set bits.
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_bits(_b: &mut bench::Bencher) {
     warm();
@@ -717,6 +784,7 @@ pub fn codegen_bits(_b: &mut bench::Bencher) {
 }
 
 /// Byte swaps: `b_bswap` on words, `c_load32be` on the 4 bytes of each word.
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_bswap(_b: &mut bench::Bencher) {
     warm();
@@ -751,6 +819,7 @@ pub fn codegen_bswap(_b: &mut bench::Bencher) {
 
 /// `&&` and `||` of comparisons: each kernel on bytes or words (`fixed`: all true; `random`), and as a
 /// latency chain.
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_flags(_b: &mut bench::Bencher) {
     warm();
@@ -808,6 +877,7 @@ pub fn codegen_flags(_b: &mut bench::Bencher) {
 }
 
 /// Callee-saved registers in a body whose only call is a sibling one: `r_even` on depths below 64.
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_sibling(_b: &mut bench::Bencher) {
     warm();
@@ -825,6 +895,7 @@ pub fn codegen_sibling(_b: &mut bench::Bencher) {
 
 /// Return diamonds: `s_max`, `s_clamp`, `s_cmp3` on words (`fixed`: one value, predictable;
 /// `random`: unpredictable), and as latency chains.
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_select(_b: &mut bench::Bencher) {
     warm();
@@ -883,6 +954,7 @@ pub fn codegen_select(_b: &mut bench::Bencher) {
 /// Arithmetic idioms: conditional negation and increment, quotient and remainder, a signed
 /// remainder test, 32- and 16-bit bit counts, a masked shift, a widening product's high half, a shifted
 /// operand; on unpredictable words and as latency chains.
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_arith(_b: &mut bench::Bencher) {
     warm();
@@ -952,6 +1024,7 @@ pub fn codegen_arith(_b: &mut bench::Bencher) {
 
 /// Arms that return a call or a load: `t_call` on 4 arms (`fixed`: one arm; `random`: any), and
 /// `o_ref` on present and absent references.
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_tail(_b: &mut bench::Bencher) {
     warm();
@@ -999,6 +1072,7 @@ pub fn codegen_tail(_b: &mut bench::Bencher) {
 
 /// Float return diamonds: `p_min`, `p_abs`, `p_clamp01` on signed values from the words, on
 /// unpredictable inputs and as latency chains (the result's bits feed the next input).
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_float(_b: &mut bench::Bencher) {
     warm();
@@ -1032,6 +1106,7 @@ pub fn codegen_float(_b: &mut bench::Bencher) {
 
 /// Switches, ranges, sets and bit fields: each kernel on unpredictable inputs (the
 /// switches' values mostly among their cases) and as a latency chain.
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_switch(_b: &mut bench::Bencher) {
     warm();
@@ -1096,6 +1171,7 @@ pub fn codegen_switch(_b: &mut bench::Bencher) {
 }
 
 /// Byte loops: `f_hash` and `m_count` on the first 1 to 64 bytes of a buffer.
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_loops(_b: &mut bench::Bencher) {
     warm();
@@ -1120,6 +1196,7 @@ pub fn codegen_loops(_b: &mut bench::Bencher) {
 
 /// Constant strings, powers, slices and boxes: `s_eq` and `s_starts` on strings of 4 to 7 bytes, `n_pow`, `q_slsum` on
 /// the first 0 to 63 elements of an array, `h_box`.
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_misc(_b: &mut bench::Bencher) {
     warm();
@@ -1153,6 +1230,7 @@ pub fn codegen_misc(_b: &mut bench::Bencher) {
 
 /// Iterator pipelines: `i_fold`, `i_mapsum`, `i_filter`, `i_any` and `i_max` on the first 0 to 255 elements of
 /// an array, `i_zip` on two such prefixes of different lengths.
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_iters(_b: &mut bench::Bencher) {
     warm();

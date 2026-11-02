@@ -8092,3 +8092,312 @@ b2: unlikely
     assert_eq(word_at(&obj, x + word_at(&obj, p + 8, 4) + 1, 1), 0);
     assert(word_at(&obj, x + word_at(&obj, p + 20, 4) + 1, 1) > 0, "the stub's prologue");
 }
+
+// Only a single-use right operand can become an SSE memory operand. A write between the load and
+// arithmetic must keep the old value; a left operand must keep subtraction and division order.
+@test
+fn scalar_float_loads_fold_into_the_right_operand() {
+    let ops: []str = ["fadd", "fsub", "fmul", "fdiv"];
+    let types: []str = ["f32", "f64"];
+    let ctypes: []str = ["float", "double"];
+    let results: []str = ["10", "6", "16", "4"];
+    let mut lir = String::from_str("lir ptr 8\n");
+    let mut drv = String::new();
+    let mut main = String::from_str("int main(void) {\n");
+    for t in 0..types.len() {
+        for op in 0..ops.len() {
+            lir.format_into(
+                "sym @f{}{} fn global\nfn @f{}{}\n  sig (ptr, {}) -> {}\nb0(v0: ptr, v1: {}):\n  v2 = load.{} v0 align 0\n  v3 = {}.{} v1, v2\n  ret v3\n",
+                t,
+                op,
+                t,
+                op,
+                types[t],
+                types[t],
+                types[t],
+                types[t],
+                ops[op],
+                types[t],
+            );
+            drv.format_into("{} f{}{}({} *, {});\n", ctypes[t], t, op, ctypes[t], ctypes[t]);
+            main.format_into(
+                "  {{ {} x = 2; if (f{}{}(&x, 8) != {}) return {}; }}\n",
+                ctypes[t],
+                t,
+                op,
+                results[op],
+                1 + t * 4 + op,
+            );
+        }
+    }
+    lir.push_str(
+        M"(sym @left fn global
+sym @write fn global
+fn @left
+  sig (ptr, f64) -> f64
+b0(v0: ptr, v1: f64):
+  v2 = load.f64 v0 align 0
+  v3 = fsub.f64 v2, v1
+  ret v3
+fn @write
+  sig (ptr, f64) -> f64
+b0(v0: ptr, v1: f64):
+  v2 = load.f64 v0 align 0
+  store v1, v0 align 0
+  v3 = fdiv.f64 v1, v2
+  ret v3
+)",
+    );
+    drv.push_str("double left(double *, double);\ndouble write(double *, double);\n");
+    main.push_str("  double x = 2; if (left(&x, 8) != -6 || write(&x, 8) != 4 || x != 8) return 9;\n  return 0;\n}\n");
+    drv.push_str(&main);
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(&lir, tgt::axis_index("windows", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "x64 object",
+    );
+    let section = coff_section(&obj, ".text");
+    let start = section as u32;
+    let end = start + (section >> 32) as u32;
+    let mut folded: u32 = 0;
+    for i in start..end.saturating_sub(4) {
+        if obj[i as usize] != 0xF2 && obj[i as usize] != 0xF3 {
+            continue;
+        }
+        let mut j = i + 1;
+        if obj[j as usize] >= 0x40 && obj[j as usize] <= 0x4F {
+            j += 1;
+        }
+        let op = obj[(j + 1) as usize];
+        if obj[j as usize] == 0x0F && (op == 0x58 || op == 0x59 || op == 0x5C || op == 0x5E) && (obj[(j + 2) as usize] & 0xC0) != 0xC0 {
+            folded += 1;
+        }
+    }
+    assert_eq(folded, 8);
+    if cli::has_cc() {
+        assert_eq(run_native(&lir, &drv), 0);
+    }
+}
+
+// Reversed accesses separated by integer arithmetic pair even when the loaded values live in the
+// next block. A store between loads must keep the second load after that store.
+@test
+fn separated_reversed_accesses_pair_without_crossing_memory() {
+    let lir = M"(lir ptr 8
+sym @pair fn global
+sym @barrier fn global
+fn @pair
+  sig (ptr, ptr, i64) -> i64
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = load.f64 v0+8 align 3
+  v4 = add.i64 v2, v2
+  v5 = load.f64 v0 align 3
+  jmp b1
+b1:
+  store v3, v1+8 align 3
+  v6 = add.i64 v4, v2
+  store v5, v1 align 3
+  ret v6
+fn @barrier
+  sig (ptr, f64) -> f64
+b0(v0: ptr, v1: f64):
+  v2 = load.f64 v0+8 align 3
+  store v1, v0 align 3
+  v3 = load.f64 v0 align 3
+  v4 = fsub.f64 v2, v3
+  ret v4
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "arm64 object",
+    );
+    let sh = word_at(&obj, 40, 4);
+    let mut loads: u32 = 0;
+    let mut stores: u32 = 0;
+    for s in 0..word_at(&obj, 60, 2) {
+        let h = sh + s * word_at(&obj, 58, 2);
+        if (word_at(&obj, h + 8, 4) & 4) == 0 {
+            continue;
+        }
+        let at = word_at(&obj, h + 24, 4);
+        for i in 0..word_at(&obj, h + 32, 4) / 4 {
+            let w = word_at(&obj, at + 4 * i, 4);
+            // Offset-mode LDP/STP of doubles through a general base, excluding frame saves.
+            if (w >> 5 & 31) != 31 && (w >> 5 & 31) != 29 {
+                loads += ((w & 0xFFC00000) == 0x6D400000) as u32;
+                stores += ((w & 0xFFC00000) == 0x6D000000) as u32;
+            }
+        }
+    }
+    assert_eq(loads, 1);
+    assert_eq(stores, 1);
+    if cli::has_cc() {
+        assert_eq(
+            run_native(
+                lir,
+                M"(#include <stdint.h>
+int64_t pair(double *, double *, int64_t);
+double barrier(double *, double);
+int main(void) {
+  double a[2] = {2, 8}, b[2] = {0, 0};
+  if (pair(a, b, 7) != 21 || b[0] != 2 || b[1] != 8) return 1;
+  if (barrier(a, 3) != 5 || a[0] != 3) return 2;
+  return 0;
+}
+)",
+            ),
+            0,
+        );
+    }
+}
+
+// Long-lived homes must leave room for operands and a distinct result, including multi-instruction
+// vector operations. The first sixteen values have more uses, so the arithmetic operands spill.
+@test
+fn xmm_homes_leave_room_for_instruction_temporaries() {
+    let types: []str = ["f32", "f64", "v4i32"];
+    let mut lir = String::from_str("lir ptr 8\n");
+    let mut drv = String::from_str("#include <stdint.h>\n");
+    let mut main = String::from_str("int main(void) {\n");
+    for ty in 0..types.len() {
+        for op in 0..3 {
+            if ty == 2 && op != 0 {
+                continue;
+            }
+            lir.format_into(
+                "sym @f{}{} fn global\nfn @f{}{}\n  sig (ptr, ptr) -> void\nb0(v0: ptr, v1: ptr):\n",
+                ty,
+                op,
+                ty,
+                op,
+            );
+            for k in 0..20 {
+                lir.format_into("  v{} = load.{} v0+{} align 0\n", 2 + k, types[ty], k * 16);
+            }
+            lir.push_str("  jmp b1\nb1:\n");
+            if ty == 2 {
+                lir.push_str("  v22 = mulhs.v4i32 v18, v19\n  store v22, v1+320 align 0\n");
+            } else if op == 0 {
+                lir.format_into("  v22 = fadd.{} v18, v19\n  store v22, v1+320 align 0\n", types[ty]);
+            } else if op == 1 {
+                lir.format_into("  v22 = fma.{} v18, v19, v20\n  store v22, v1+320 align 0\n", types[ty]);
+            } else {
+                lir.format_into(
+                    "  v22 = fcmp.olt v18, v19\n  v23 = select.{} v22, v20, v21\n  store v23, v1+320 align 0\n",
+                    types[ty],
+                );
+            }
+            lir.push_str("  jmp b2\nb2:\n");
+            for k in 0..20 {
+                for _ in 0..(if k < 16 {
+                    3
+                } else {
+                    1
+                }) {
+                    lir.format_into("  store v{}, v1+{} align 0\n", k + 2, k * 16);
+                }
+            }
+            lir.push_str("  ret\n");
+            // FMA emission is checked on both x64 ABIs without requiring FMA3 on the test host.
+            if op == 1 {
+                continue;
+            }
+            let ct = if ty == 0 {
+                "float"
+            } else if ty == 1 {
+                "double"
+            } else {
+                "int32_t"
+            };
+            let stride = if ty == 1 {
+                2
+            } else {
+                4
+            };
+            drv.format_into("void f{}{}({} *, {} *);\n", ty, op, ct, ct);
+            main.format_into(
+                "  {{ {} a[84], b[84] = {{0}}; for (int i = 0; i < 84; ++i) a[i] = i + 1; f{}{}(a, b);\n",
+                ct,
+                ty,
+                op,
+            );
+            main.format_into("    for (int i = 0; i < 20; ++i) if (b[i*{}] != a[i*{}]) return 1;\n", stride, stride);
+            if ty == 2 {
+                main.push_str("    for (int i = 80; i < 84; ++i) if (b[i] != 0) return 2;\n");
+            } else if op == 0 {
+                main.format_into("    if (b[20*{}] != a[16*{}] + a[17*{}]) return 3;\n", stride, stride, stride);
+            } else {
+                main.format_into("    if (b[20*{}] != a[18*{}]) return 4;\n", stride, stride);
+            }
+            main.push_str("  }\n");
+        }
+    }
+    main.push_str("  return 0;\n}\n");
+    drv.push_str(&main);
+    for os in ["windows", "linux"] {
+        let mut obj = Vector::<u8>::new();
+        assert(
+            object_of(&lir, tgt::axis_index(os, false), tgt::axis_index("x86_64", true), 0, &mut obj),
+            "xmm pressure object",
+        );
+    }
+    if cli::has_cc() {
+        assert_eq(run_native(&lir, &drv), 0);
+    }
+}
+
+// Values loaded before a branch remain live across either a bypass edge or a loop with many heavier
+// values. Stores check each old value independently, so a wrong spill cannot hide in a checksum.
+@test
+fn split_register_homes_survive_bypass_edges_and_loops() {
+    let mut lir = String::from_str(
+        "lir ptr 8\nsym @f fn global\nfn @f\n  sig (ptr, ptr, i64) -> void\nb0(v0: ptr, v1: ptr, v2: i64):\n",
+    );
+    for k in 0..32 {
+        lir.format_into("  v{} = load.i64 v0+{} align 3\n", 3 + k, k * 8);
+    }
+    lir.push_str("  v35 = iconst.i64 0\n  v36 = icmp.eq v2, v35\n  br v36, b3, b1\nb1:\n");
+    for k in 0..32 {
+        lir.format_into("  v{} = load.i64 v0+{} align 3\n", 37 + k, (32 + k) * 8);
+    }
+    lir.push_str("  jmp b2(v2)\nb2(v69: i64):\n");
+    for k in 0..32 {
+        lir.format_into("  v{} = add.i64 v{}, v69\n  store v{}, v1+{} align 3\n", 70 + k, 37 + k, 70 + k, (32 + k) * 8);
+    }
+    lir.push_str(
+        "  v102 = iconst.i64 1\n  v103 = sub.i64 v69, v102\n  v104 = icmp.ne v103, v35\n  br v104, b2(v103), b3\nb3:\n",
+    );
+    for k in 0..32 {
+        // Reverse reads force different next-use distances under register pressure.
+        lir.format_into("  store v{}, v1+{} align 3\n", 34 - k, (31 - k) * 8);
+    }
+    lir.push_str("  ret\n");
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(&lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "x64 pressure object",
+    );
+    if cli::has_cc() {
+        assert_eq(
+            run_native(
+                &lir,
+                M"(#include <stdint.h>
+void f(uint64_t *, uint64_t *, uint64_t);
+int main(void) {
+  uint64_t a[64], b[64];
+  for (int i = 0; i < 64; ++i) a[i] = (uint64_t)i * UINT64_C(0x9E3779B97F4A7C15);
+  for (int n = 0; n < 4; ++n) {
+    for (int i = 0; i < 64; ++i) b[i] = 0;
+    f(a, b, (uint64_t)n);
+    for (int i = 0; i < 32; ++i) if (a[i] != b[i]) return 1;
+    for (int i = 32; i < 64; ++i) if (b[i] != (n ? a[i] + 1 : 0)) return 2;
+  }
+  return 0;
+}
+)",
+            ),
+            0,
+        );
+    }
+}

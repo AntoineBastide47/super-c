@@ -19,8 +19,9 @@ contract, not a development convenience.
 ## The Fixpoint Contract
 
 Gen-1 (the compiler built by itself) compiles its own source to produce gen-2. The
-emitted C from gen-1 and gen-2 must be **byte-identical**. Any non-empty diff is a
-semantic regression.
+native binaries produced at the same path with the same options must be
+**byte-identical**. The gate also compares C emission and native objects across
+worker counts. Any difference is a correctness failure.
 
 The current documentation baseline is recorded in `skills/README.md` as a git tag.
 

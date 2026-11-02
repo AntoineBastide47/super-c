@@ -225,6 +225,7 @@ pub unsafe fn sc_rt_stk_release(r: *mut void) {
 }
 
 // The destructor of a thread's region (`stk_release_at_exit`): the thread is exiting.
+@platform(!wasm)
 fn stk_exit(r: *mut void) {
     if unsafe STK_SLOT == r {
         unsafe STK_SLOT = null;

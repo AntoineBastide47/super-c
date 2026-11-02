@@ -146,7 +146,7 @@ pub unsafe fn set_handler(s: Signal, handler: fn(i32)) Result<Unit, IoError> {
 /// Safety: `handler` calls only async-signal-safe functions and touches only atomic or volatile state.
 @platform(wasm)
 pub unsafe fn set_handler(_s: Signal, _handler: fn(i32)) Result<Unit, IoError> {
-    return Result::<Unit, IoError>::Err(error::unsupported(IoOp::Signal));
+    return Err(error::unsupported(IoOp::Signal));
 }
 
 // Make `h` the action of `s`: SIG_DFL (null), SIG_IGN (1) or a handler's address.
@@ -163,7 +163,7 @@ fn install(s: Signal, h: *mut void) Result<Unit, IoError> {
 }
 @platform(wasm)
 fn install(_s: Signal, _h: *mut void) Result<Unit, IoError> {
-    return Result::<Unit, IoError>::Err(error::unsupported(IoOp::Signal));
+    return Err(error::unsupported(IoOp::Signal));
 }
 
 /// Add `routine` to the console event handlers: the last added runs first, and one that returns nonzero

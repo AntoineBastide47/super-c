@@ -293,7 +293,7 @@ fn asm_host_function() {
         let m = if ARCH == Arch::AArch64 {
             h::asm_match(&code, "mulw", ["mul"], ["bl", "x0"])
         } else {
-            h::asm_match(code.as_str(), "mulw", ["imul"], ["call", "rax"])
+            h::asm_match(&code, "mulw", ["imul"], ["call", "rax"])
         };
         assert(m.len() == 0, m.as_str());
     }
