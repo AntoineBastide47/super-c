@@ -376,6 +376,8 @@ extend Printer {
             out.push_str(".unchecked");
         } else if t.op == O_VEXTRACT || t.op == O_VINSERT {
             out.format_into(".{}", t.aux);
+        } else if t.op == O_VUNZIP && t.aux != 0 {
+            out.push_str(".odd");
         } else if t.op == O_SYS {
             out.push_byte(b'.');
             out.push_str(sys_name(t.aux));

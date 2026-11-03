@@ -3558,23 +3558,41 @@ fn ones_of(b: &Body, v: Value, bits: u32, depth: u32) u64 {
 // `ones_of` looks through at most ONES_DEPTH instructions.
 const ONES_DEPTH: u32 = 4;
 
-/// Whether `t` of `b` reverses the lanes of a vector of two or more lanes: a `swizzle` of indexes `n - 1` down
-/// to 0 of one operand of its type (the vectorizer's reversed accesses).
-pub(package) fn reversal(b: &Body, t: Inst) bool {
+/// How `t` of `b` moves the lanes of a 16-byte vector or a vector of 8 bytes, a `swizzle` of constant
+/// indexes of one operand of its type: PERM_REV8 reverses the lanes within each 8 bytes, PERM_SWAP8 swaps
+/// the two 8-byte halves, both reverse them all; 0 for another swizzle or another
+/// instruction.
+pub(package) fn lane_perm(b: &Body, t: Inst) u8 {
     if t.op != O_VOP || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SWIZZLE as u32 || t.b != 1 || t.c == VNONE {
-        return false;
+        return 0;
     }
     let n = lanes(t.ty);
-    if n < 2 || b.type_of(b.pool[t.a as usize]) != t.ty || b.pool[t.c as usize] != n {
-        return false;
+    let nb = type_bytes(t.ty, 8);
+    let eb = type_bytes(lane_type(t.ty), 8);
+    if n < 2 || nb != 8 && nb != 16 || b.type_of(b.pool[t.a as usize]) != t.ty || b.pool[t.c as usize] != n {
+        return 0;
+    }
+    // Lane `k` from `k ^ s`: `s` the lanes of 8 bytes less one within them, of 8 bytes across them.
+    let m = 8 / eb;
+    let s = b.pool[(t.c + 1) as usize];
+    let rev = m > 1 && (s & m - 1) == m - 1;
+    let swap = n > m && (s & ~(m - 1)) == n - m;
+    let want = rev as u32 * (m - 1) | swap as u32 * (n - m);
+    if !rev && !swap || s != want {
+        return 0;
     }
     for k in 0..n {
-        if b.pool[(t.c + 1 + k) as usize] != n - 1 - k {
-            return false;
+        if b.pool[(t.c + 1 + k) as usize] != (k ^ s) {
+            return 0;
         }
     }
-    return true;
+    return rev as u8 * PERM_REV8 | swap as u8 * PERM_SWAP8;
 }
+
+/// `lane_perm`: the lanes reversed within each 8 bytes.
+pub(package) const PERM_REV8: u8 = 1;
+/// `lane_perm`: the two 8-byte halves swapped.
+pub(package) const PERM_SWAP8: u8 = 2;
 
 /// Whether `t` of `b` is a scalar float `fadd` of lanes 0 and 1 (in either order) of one float vector of two
 /// lanes (`FOLD_LANE_PAIR`).

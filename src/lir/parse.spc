@@ -1067,6 +1067,9 @@ extend<'a> Parser<'a> {
         } else if op == O_MEMCPY && pi < self.parts.len() && self.parts[pi] == "overlap" {
             t.aux = MEM_OVERLAP;
             pi += 1;
+        } else if op == O_VUNZIP && pi < self.parts.len() && self.parts[pi] == "odd" {
+            t.aux = 1;
+            pi += 1;
         } else if op == O_LSHR && pi < self.parts.len() && self.parts[pi] == "exact" {
             t.aux = SH_EXACT;
             pi += 1;

@@ -510,7 +510,7 @@ extend Eval {
             let wa = self.word(&f, b, t.a);
             let wb = self.word(&f, b, t.b);
             for k in 0..n {
-                let j = 2 * k;
+                let j = 2 * k + t.aux as u32;
                 let x = if j < n {
                     get_lane(&self.vals, wa, j, lb)
                 } else {

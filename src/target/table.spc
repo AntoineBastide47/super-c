@@ -31,13 +31,13 @@ pub(package) struct Isa {
     /// apart (wasm's does), so a vector load and store over different slices may share one loop.
     pub(package) merge_apart: bool,
     /// The bytes of a vector the native backend computes in one register, 0 when it computes vectors
-    /// lane by lane in memory (wasm32): the LIR vectorizer runs only with registers.
+    /// lane by lane in memory: the LIR vectorizer runs only with registers.
     pub(package) vector_bytes: u8,
     /// How the native backend converts a vector to one of the same lane count (an integer to a float of
     /// its width and back, an integer or a float to twice or half its width) and shifts each lane by its
-    /// own amount (`lir::ir::Package::vops`): 0 lane by lane, 1 (x86-64) in registers but a 64-bit integer
-    /// to or from f64, an unsigned integer to or from a float, and a shift of 16-byte vectors or of lanes
-    /// of 1, 2 or (arithmetic) 8 bytes, 2 each in registers.
+    /// own amount (`lir::ir::Package::vops`): 0 lane by lane, 1 (x86-64, wasm32) in registers but a 64-bit
+    /// integer to or from f64, an unsigned integer to or from a float, and a shift of 16-byte vectors or of
+    /// lanes of 1, 2 or (arithmetic) 8 bytes (wasm32: every shift), 2 each in registers.
     pub(package) vector_ops: u8,
     /// The lane sizes whose vectors' high products the native backend computes in registers, a bit per size
     /// in bytes (1, 2, 4): `lir::ir::Package::vec_mulh`.
@@ -46,7 +46,8 @@ pub(package) struct Isa {
     /// and C's `fmin` and `fmax` of float vectors in registers: `lir::ir::Package::vfloat`.
     pub(package) vector_float: bool,
     /// The native backend rounds float vectors to an integer (floor, ceil, trunc) in registers on every
-    /// processor (arm64's FRINT); else only on one with SSE4.1 (x86-64's ROUNDPS): `lir::ir::Package::vround`.
+    /// processor (arm64's FRINT, wasm32's SIMD128); else only on one with SSE4.1 (x86-64's ROUNDPS):
+    /// `lir::ir::Package::vround`.
     pub(package) vector_round: bool,
     /// One instruction gives the high half of a 64-bit product (UMULH, MUL's rdx): the optimizer divides
     /// a 64-bit value by a constant with a product (`lir::ir::Package::mul_high`).
@@ -70,8 +71,8 @@ pub(package) struct Isa {
     /// passes as its address), wasm none that passes as an address.
     pub(package) arg_copy: u32,
     /// The vector copies a vectorized loop interleaves on the target's cores but Apple's, which take 4
-    /// (`lir::loops::Budgets.vector`): 2 on arm64 (Neoverse), 4 on x86-64, where the vector remainder
-    /// loop pays for 4.
+    /// (`lir::loops::Budgets.vector`): 2 on arm64 (Neoverse) and wasm32 (each copy is code size, which a
+    /// wasm module ships), 4 on x86-64, where the vector remainder loop pays for 4.
     pub(package) vector_copies: u32,
     /// The vector registers a vectorized loop's reductions hold over all its copies
     /// (`lir::ir::Package::vec_accs`): fewer copies interleave when theirs need more (a reduction of lanes
@@ -303,11 +304,11 @@ pub(package) const ISAS: [Isa; 3] = [
         mask_fold: false,
         scalar_fma: false,
         merge_apart: true,
-        vector_bytes: 0,
-        vector_ops: 0,
-        vector_mulh: 0,
-        vector_float: false,
-        vector_round: false,
+        vector_bytes: 16,
+        vector_ops: 1,
+        vector_mulh: 7,
+        vector_float: true,
+        vector_round: true,
         mul_high: false,
         bswap: false,
         bitrev: false,
@@ -315,11 +316,11 @@ pub(package) const ISAS: [Isa; 3] = [
         ccmp: false,
         post_index: false,
         arg_copy: 0,
-        vector_copies: 4,
-        vector_accs: 0,
-        vector_sat: 0,
-        vector_absd: 0,
-        vector_sumw: 0,
+        vector_copies: 2,
+        vector_accs: 8,
+        vector_sat: 3,
+        vector_absd: 7,
+        vector_sumw: 0x8CE,
         access_pairs: false,
         sum_trees: false,
         pairs: false,
@@ -550,7 +551,8 @@ const fn apple(t: Target, sdk: str<'static>) Target {
 // The baselines: a macOS aarch64 machine is at least the M1 (Apple clang's default CPU, `apple-m1`), an
 // iOS one the A7 the iOS 13 floor allows; macOS x86_64 and the iOS simulator are `core2` (Apple clang's
 // default `penryn` adds SSE4.1, but GCC on Darwin and clang for deployment targets before 10.12 stop at
-// `core2`); Android x86_64 has its ABI's SSE4.2 and POPCNT.
+// `core2`); Android x86_64 has its ABI's SSE4.2 and POPCNT; wasm32 has SIMD128, which every major engine
+// runs.
 const fn targets() [Target; 11] {
     let mut mac_a64 = apple(
         a64(
@@ -585,6 +587,7 @@ const fn targets() [Target; 11] {
     win_a64.long_bytes = 4;
     win_a64.long_double_bits = 64;
     let mut wasm = row(ISA_WASM, CC_WASM, OBJ_WASM, OS_WASI, "wasm32-wasip1", 10);
+    wasm.features = feats("simd128", ISA_WASM);
     wasm.long_bytes = 4;
     wasm.page_bytes = 65536;
     return [

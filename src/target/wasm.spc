@@ -220,6 +220,8 @@ pub(package) const I64_EXTEND32_S: u8 = 0xC4;
 pub(package) const SIMD: u8 = 0xFD;
 pub(package) const V128_LOAD: u32 = 0x00;
 pub(package) const V128_STORE: u32 = 0x0B;
+pub(package) const V128_CONST: u32 = 0x0C;
+pub(package) const I8X16_SHUFFLE: u32 = 0x0D;
 
 /// The bytes of one function body or data segment, and the relocations it holds.
 pub(package) struct Code {

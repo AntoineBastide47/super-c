@@ -38,8 +38,7 @@ fn a_program_without_vectors_emits_the_same_c() {
         "relaxed-simd changes nothing",
     );
     let vsrc = "fn main(args: Vector<str>) i32 {\n    let v = f32x4::splat(args.len() as f32);\n    return (v + v).get(0) as i32 - 2;\n}\n";
-    assert(!emitted(vsrc, "--target=wasm").contains("__sc_si_"), "no entry without the feature");
-    assert(emitted(vsrc, "--target=wasm --target-feature=+simd128").contains("__sc_si_"), "an entry with it");
+    assert(emitted(vsrc, "--target=wasm").contains("__sc_si_"), "an entry: every build has simd128");
 }
 
 // A call of a `std::simd::wasm` operation names the feature the build lacks.
@@ -56,8 +55,8 @@ fn arch_operations_need_their_feature() {
         "relaxed",
     );
     assert(!r.out_has("`pmin_f32x4` needs"), "simd128 is there");
-    let n = p.compile_flags("--target=wasm", "main.spc");
-    assert(!n.ok() && n.out_has("`pmin_f32x4` needs `+simd128` (`--target-feature=+simd128`)"), "simd128");
+    let n = p.compile_flags("--target=wasm --target-feature=-simd128", "main.spc");
+    assert(!n.ok() && n.out_has("target feature 'simd128' is part of every wasm32 build"), "simd128 stays");
 }
 
 const RELEASE: [str; 3] = ["--profile=release", "--target=wasm", "--target-feature=+simd128"];
@@ -319,7 +318,7 @@ fn split_memory_operations_read_before_they_write() {
         "overlapping split store and load",
         "import std::simd;\nfn main(args: Vector<str>) i32 {\n    let k = args.len();\n    let mut big = u8x64::splat(0);\n    for i in 0usize..64 {\n        big.set(i, i as u8);\n    }\n    let base = &mut big as *mut u8x64 as *mut u8;\n    let pv = base as *mut u8x32;\n    unsafe simd::store_unaligned::<u8, 32>(base + 8 * k, *pv);\n    unsafe {\n        *pv = simd::load_unaligned::<u8, 32>(base + 20 * k);\n    }\n    for i in 0usize..64 {\n        print(\"{} \", big.get(i));\n    }\n    println(\"\");\n    return 0;\n}\n",
         [],
-        ["--target-feature=-simd128"],
+        ["SC_SIMD_SCALAR=1"],
     );
 }
 

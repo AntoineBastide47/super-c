@@ -2122,10 +2122,16 @@ static int check64(lanes_fn f, int n, int exact) {
   }
   return 0;
 }
+/* wasm32's `fminf` is C code (musl's), which gives the second of two NaNs. */
+#ifdef __wasm__
+#define EXACT 0
+#else
+#define EXACT 1
+#endif
 int main(void) {
   int e;
-  if ((e = check32(v_v4f32, 4, 1)) != 0) return e;
-  if ((e = check64(v_v2f64, 2, 1)) != 0) return 10 + e;
+  if ((e = check32(v_v4f32, 4, EXACT)) != 0) return e;
+  if ((e = check64(v_v2f64, 2, EXACT)) != 0) return 10 + e;
   if ((e = check32(v_v8f32, 8, 0)) != 0) return 20 + e;
   if ((e = check64(v_v4f64, 4, 0)) != 0) return 30 + e;
   if ((e = check32(v_v16f32, 16, 0)) != 0) return 40 + e;
@@ -2137,6 +2143,7 @@ int main(void) {
     assert_eq(run_sse41(&lir, drv), 0);
     assert_eq(run_fma(&lir, drv), 0);
     assert_eq(run_zmm(&lir, drv), 0);
+    assert_eq(run_wasm(&lir, drv), 0);
 }
 
 // Vector extensions to lanes twice as wide, zero and sign (x86-64: SSE2's unpacking, SSE4.1's `pmovzx`
@@ -4104,9 +4111,10 @@ fn lane_compares_and_selects_run() {
     assert_eq(run_wasm(&lir, &decl), 0);
 }
 
-// The even lanes of two vectors (`vunzip`) of every lane width, in vector registers (8 and 16 bytes) and
-// in memory (32 and 64 bytes; ymm and zmm registers with AVX2 and AVX-512): lane k is lane 2k of the two
-// operands' lanes in order, its bits unchanged (lanes with the sign bit set included).
+// The even and odd lanes of two vectors (`vunzip`, `vunzip.odd`) of every lane width, in vector registers
+// (8 and 16 bytes) and in memory (32 and 64 bytes; ymm and zmm registers with AVX2 and AVX-512): lane k is
+// lane 2k (2k + 1) of the two operands' lanes in order, its bits unchanged (lanes with the sign bit set
+// included).
 @test
 fn even_lanes_of_two_vectors_run() {
     let names: []str = [
@@ -4152,25 +4160,29 @@ fn even_lanes_of_two_vectors_run() {
         "double",
     ];
     let nl: []u32 = [16, 8, 4, 2, 4, 2, 8, 8, 32, 16, 4, 8, 4, 64, 32, 16, 8, 16, 8];
+    let eb: []u32 = [1, 2, 4, 8, 4, 8, 1, 4, 1, 2, 8, 4, 8, 1, 2, 4, 8, 4, 8];
     let mut lir = String::from_str("lir ptr 8\n");
     let mut drv = String::from_str("#include <stdint.h>\n#include <string.h>\n");
     let mut body = String::from_str("int main(void) {\n  int r = 0;\n");
     for k in 0..names.len() {
         lir.format_into(
-            "sym @u{} fn global\nfn @u{}\n  sig (ptr, ptr, ptr) -> void\nb0(v0: ptr, v1: ptr, v2: ptr):\n  v3 = load.{} v1 align 0\n  v4 = load.{} v2 align 0\n  v5 = vunzip.{} v3, v4\n  store v5, v0 align 0\n  ret\n",
+            "sym @u{} fn global\nfn @u{}\n  sig (ptr, ptr, ptr) -> void\nb0(v0: ptr, v1: ptr, v2: ptr):\n  v3 = load.{} v1 align 0\n  v4 = load.{} v2 align 0\n  v5 = vunzip.{} v3, v4\n  v6 = vunzip.odd.{} v3, v4\n  store v5, v0 align 0\n  store v6, v0+{} align 0\n  ret\n",
             k,
             k,
             names[k],
             names[k],
             names[k],
+            names[k],
+            nl[k] * eb[k],
         );
         drv.format_into("void u{}(void *, const void *, const void *);\n", k);
         body.format_into(
-            "  {{\n    {} a[64], b[64], o[64];\n    for (int i = 0; i < 64; i++) {{ a[i] = ({})(i * 37 - 100); b[i] = ({})(i * 53 + 7); }}\n    u{}(o, a, b);\n    for (int i = 0; i < {}; i++) if (memcmp(&o[i], 2 * i < {} ? &a[2 * i] : &b[2 * i - {}], sizeof o[i]) != 0) r = {};\n  }}\n",
+            "  {{\n    {} a[64], b[64], o[128];\n    for (int i = 0; i < 64; i++) {{ a[i] = ({})(i * 37 - 100); b[i] = ({})(i * 53 + 7); }}\n    u{}(o, a, b);\n    for (int i = 0; i < {}; i++) for (int p = 0; p < 2; p++) if (memcmp(&o[p * {} + i], 2 * i + p < {} ? &a[2 * i + p] : &b[2 * i + p - {}], sizeof o[i]) != 0) r = {};\n  }}\n",
             cty[k],
             cty[k],
             cty[k],
             k,
+            nl[k],
             nl[k],
             nl[k],
             nl[k],
@@ -9481,6 +9493,243 @@ fn coff_section(b: &Vector<u8>, name: str) u64 {
         }
     }
     return 0;
+}
+
+// Vector forms wasm32 computes in SIMD128 registers that the other run tests reach in memory alone: an
+// extension of a vector of 8 bytes whose lanes a lane loop computed (wasm32: `i16x8.load8x8_s` from its
+// home), a shuffle of two vectors' lanes, a float tree sum, and the NaN-propagating minimum and maximum
+// (a NaN operand's bits, the first one's before the second's; -0 below +0) and C's `fmin` (the other
+// operand of a NaN, the first of two with its quiet bit set).
+@test
+fn vector_forms_of_simd128_run() {
+    let lir = M"(lir ptr 8
+sym @forms fn global
+fn @forms
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v8i8 v0 align 0
+  v4 = vop.count_ones.v8i8 (v3)
+  v5 = sext.v8i16 v4
+  store v5, v2 align 0
+  v6 = sext.v8i16 v3
+  store v6, v2+16 align 0
+  v7 = load.v4i32 v0 align 0
+  v8 = load.v4i32 v1 align 0
+  v9 = vop.shuffle.v4i32 (v7, v8) lanes [3, 6, 5, 0]
+  store v9, v2+32 align 0
+  v10 = load.v4f32 v0 align 0
+  v11 = load.v4f32 v1 align 0
+  v12 = vop.reduce_add_tree.f32 (v10)
+  store v12, v2+48 align 0
+  v13 = vop.minimum.v4f32 (v10, v11)
+  store v13, v2+64 align 0
+  v14 = vop.maximum.v4f32 (v10, v11)
+  store v14, v2+80 align 0
+  v15 = vop.min.num.v4f32 (v10, v11)
+  store v15, v2+96 align 0
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void forms(const void *, const void *, void *);
+static const uint32_t F[8] = {0x00000000u, 0x80000000u, 0x3F800000u, 0xC0400000u, 0x7FC00001u, 0xFFA00000u, 0x41200000u, 0x3E800000u};
+static int nan32(uint32_t x) { return (x & 0x7FFFFFFFu) > 0x7F800000u; }
+static float f32v(uint32_t u) { float x; memcpy(&x, &u, 4); return x; }
+static uint32_t b32(float x) { uint32_t u; memcpy(&u, &x, 4); return u; }
+/* The minimum (`lo`) or maximum: a NaN operand, `x` first; of equal values the one of the side's sign. */
+static uint32_t ext(uint32_t x, uint32_t y, int lo) {
+  if (nan32(x)) return x;
+  if (nan32(y)) return y;
+  float a = f32v(x), b = f32v(y);
+  if (a == b) return lo ? (x | y) : (x & y);
+  return (lo ? a < b : a > b) ? x : y;
+}
+/* A signaling NaN gives what the scalar instruction gives (arm64's FMINNM: the default NaN); wasm32 has none. */
+#ifdef __wasm__
+#define WASM 1
+#else
+#define WASM 0
+#endif
+static int snan(uint32_t x) { return nan32(x) && (x & 0x00400000u) == 0; }
+static uint32_t num(uint32_t x, uint32_t y) {
+  if (nan32(x) && nan32(y)) return x | 0x00400000u;
+  return ext(nan32(x) ? y : x, nan32(y) ? x : y, 1);
+}
+int main(void) {
+  for (int r = 0; r < 64; r++) {
+    uint32_t a[4], b[4], o[28];
+    for (int k = 0; k < 4; k++) { a[k] = F[(r + k) % 8]; b[k] = F[(r / 8 + 3 * k) % 8]; }
+    if (r % 2 == 1) { a[0] = 0x9E3779B9u * (uint32_t)r; a[1] = 0x80FF7F01u; }
+    forms(a, b, o);
+    const int8_t *ab = (const int8_t *)a;
+    const int16_t *h = (const int16_t *)o;
+    for (int k = 0; k < 8; k++) {
+      if (h[k] != (int16_t)(int8_t)__builtin_popcount((uint8_t)ab[k])) return 1;
+      if (h[8 + k] != (int16_t)ab[k]) return 2;
+    }
+    if (o[8] != a[3] || o[9] != b[2] || o[10] != b[1] || o[11] != a[0]) return 3;
+    float s = (f32v(a[0]) + f32v(a[2])) + (f32v(a[1]) + f32v(a[3]));
+    if (o[12] != b32(s) && !(nan32(o[12]) && nan32(b32(s)))) return 4;
+    for (int k = 0; k < 4; k++) {
+      if (o[16 + k] != ext(a[k], b[k], 1)) return 5;
+      if (o[20 + k] != ext(a[k], b[k], 0)) return 6;
+      if (o[24 + k] != num(a[k], b[k]) && (WASM || !snan(a[k]) && !snan(b[k]))) return 7;
+    }
+  }
+  return 0;
+}
+)";
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Swaps of a vector's lanes (`lv::lane_perm`: the 8-byte halves, the lanes within each 8 bytes, both) are
+// one shuffle in registers: x86-64's PSHUFD (immediates 0x4E, 0xB1, 0x1B), arm64's EXT and REV64. They run.
+@test
+fn lane_swaps_run_in_registers() {
+    let src = M"(lir ptr 8
+sym @sw fn global
+fn @sw
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4f32 v0 align 0
+  v3 = vop.swizzle.v4f32 (v2) lanes [2, 3, 0, 1]
+  v4 = vop.swizzle.v4f32 (v2) lanes [1, 0, 3, 2]
+  v5 = vop.swizzle.v4f32 (v2) lanes [3, 2, 1, 0]
+  v6 = load.v2f64 v0 align 0
+  v7 = vop.swizzle.v2f64 (v6) lanes [1, 0]
+  store v3, v1 align 0
+  store v4, v1+16 align 0
+  store v5, v1+32 align 0
+  store v7, v1+48 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(src, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the x86-64 object",
+    );
+    // PSHUFD: 66 [REX] 0F 70 /r ib.
+    let mut seen: u32 = 0;
+    for x in 0..obj.len() - 4 {
+        if obj[x] == 0x0F && obj[x + 1] == 0x70 && (obj[x - 1] == 0x66 || obj[x - 2] == 0x66) {
+            let ib = obj[x + 3];
+            seen |= (ib == 0x4E) as u32 | (ib == 0xB1) as u32 << 1 | (ib == 0x1B) as u32 << 2;
+        }
+    }
+    assert_eq(seen, 7);
+    let mut arm = Vector::<u8>::new();
+    assert(
+        object_of(src, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut arm),
+        "the arm64 object",
+    );
+    // EXT #8 (16 bytes) and REV64 of 4-byte lanes (16 bytes).
+    assert(
+        elf_text_count(&arm, 0xFFE0FC00, 0x6E004000) >= 2 && elf_text_count(&arm, 0xFFFFFC00, 0x4EA00800) >= 2,
+        "EXT and REV64",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <string.h>\nvoid sw(const void *, void *);\nint main(void) {\n  float a[4] = {1, 2, 3, 4}, o[16];\n  double d[2];\n  sw(a, o);\n  float w[12] = {3, 4, 1, 2, 2, 1, 4, 3, 4, 3, 2, 1};\n  if (memcmp(o, w, sizeof w) != 0) return 1;\n  double e[2];\n  memcpy(e, a, 16);\n  memcpy(d, o + 12, 16);\n  return d[0] == e[1] && d[1] == e[0] ? 0 : 2;\n}\n";
+    assert_eq(run_native(src, drv), 0);
+}
+
+// x86-64: an intrinsic whose instructions write vector registers alone (`floorf`'s ROUNDSS with SSE4.1) is
+// no call for the register allocation: the loop around it keeps its pointers and count in scratch
+// registers, so the body saves none and sets no frame up (its first instruction no push). It runs.
+@test
+fn vector_intrinsics_in_a_loop_are_no_calls() {
+    let src = M"(lir ptr 8
+sym @floorf fn global
+sym @fl fn global
+fn @fl
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 4
+  v8 = load.f32 v7 align 2
+  v9 = call.f32 @floorf(v8) : (f32) -> f32
+  v10 = ptradd v0, v5 * 4
+  store v9, v10 align 2
+  v11 = add.i64 v5, v4
+  jmp b1(v11)
+b3:
+  ret
+)";
+    let mut win = Vector::<u8>::new();
+    assert(
+        object_of(src, tgt::axis_index("windows", false), tgt::axis_index("x86_64", true), SSE41 | OMIT_FP, &mut win),
+        "the Microsoft x64 object",
+    );
+    let at = (coff_section(&win, ".text") as u32) as usize;
+    let first = win[at];
+    assert(first != 0x53 && first != 0x55 && first != 0x56 && first != 0x57 && first != 0x41, "no register saved");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <math.h>\nvoid fl(float *, const float *, long long);\nint main(void) {\n  float a[9], d[9];\n  for (int k = 0; k < 9; k++) a[k] = (float)k * 0.75f - 3.1f;\n  fl(d, a, 9);\n  for (int k = 0; k < 9; k++) if (d[k] != floorf(a[k])) return k + 1;\n  return 0;\n}\n";
+    assert_eq(run_native(src, drv), 0);
+    assert_eq(run_sse41(src, drv), 0);
+}
+
+// x86-64: a parameter live across intrinsics that write vector registers alone (`fabs`), in a body that
+// calls nothing else: it takes no home in a register the intrinsics write (Microsoft x64's xmm0, where it
+// arrives). Each object builds, and it runs.
+@test
+fn a_value_across_vector_intrinsics_keeps_a_home_they_do_not_write() {
+    let src = M"(lir ptr 8
+sym @fabs fn global
+sym @past fn global
+fn @past
+  sig (f64) -> i8
+b0(v0: f64):
+  v1 = fconst.f64 0x0
+  v2 = fconst.f64 0x3690000000000000
+  v3 = call.f64 @fabs(v0) : (f64) -> f64
+  v4 = fconst.f64 0x47effffff0000000
+  v5 = fcmp.oge v3, v4
+  br v5, b4, b1
+b1:
+  v6 = fcmp.une v0, v1
+  br v6, b2, b3(v6)
+b2:
+  v7 = call.f64 @fabs(v0) : (f64) -> f64
+  v8 = fcmp.ole v7, v2
+  ret v8
+b3(v9: i8):
+  ret v9
+b4:
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(src, tgt::axis_index("windows", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the Microsoft x64 object",
+    );
+    assert(
+        object_of(src, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the System V object",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int8_t past(double);
+int main(void) {
+  return past(1.0) == 0 && past(-1e39) == 1 && past(1e-46) == 1 && past(0.0) == 0 && past(3e38) == 0 ? 0 : 1;
+}
+)";
+    assert_eq(run_native(src, drv), 0);
 }
 
 // x86-64: code that ends in a call that does not return (a panic) has no epilogue after it, in a body that

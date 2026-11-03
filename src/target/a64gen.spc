@@ -1112,8 +1112,8 @@ extend Gen {
     // its vector operands and result need no memory.
     fn vop_reg(self: &Self, t: Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
-        if lv::reversal(self.b(), t) {
-            return in_vreg(t.ty) && (type_bytes(t.ty, 8) == 8 || type_bytes(t.ty, 8) == 16);
+        if lv::lane_perm(self.b(), t) != 0 {
+            return in_vreg(t.ty);
         }
         if t.b == 0 || t.c != VNONE {
             return false;
@@ -9239,12 +9239,13 @@ extend Gen {
         }
     }
 
-    // The even lanes of `t.a ++ t.b` into vector `i`: UZP1; a vector outside a v register moves each lane.
+    // The even lanes of `t.a ++ t.b` into vector `i`: UZP1 (the odd ones, `aux` 1: UZP2); a vector outside a v
+    // register moves each lane.
     fn vunzip(self: &mut Self, i: u32, t: Inst) {
         let nb = type_bytes(t.ty, 8);
         let lt = lane_type(t.ty);
         if in_vreg(t.ty) {
-            self.neon_reg(0x0E001800 | vsize(type_bytes(lt, 8)) << 22, i, t.a, t.b, VNONE, nb);
+            self.neon_reg(0x0E001800 | t.aux as u32 << 14 | vsize(type_bytes(lt, 8)) << 22, i, t.a, t.b, VNONE, nb);
             return;
         }
         self.sync(t.a);
@@ -9253,10 +9254,11 @@ extend Gen {
         let n = lanes(t.ty);
         let x = self.tmp(false);
         for k in 0..n {
-            if 2 * k < n {
-                self.ld_lane(x, t.a, 2 * k, lt, false, true);
+            let j = 2 * k + t.aux as u32;
+            if j < n {
+                self.ld_lane(x, t.a, j, lt, false, true);
             } else {
-                self.ld_lane(x, t.b, 2 * k - n, lt, false, true);
+                self.ld_lane(x, t.b, j - n, lt, false, true);
             }
             self.st_lane(x, d, k, lt, true);
         }
@@ -10119,21 +10121,22 @@ extend Gen {
             self.masked_in_reg(i, sc == core::SIMD_STORE_MASKED_PTR, &ops, &tys);
             return true;
         }
-        if self.vop_reg(t) && lv::reversal(self.b(), t) {
-            // The lanes reversed: REV64 within each 8 bytes (lanes below 8 bytes), then EXT #8 swaps the
+        let perm = lv::lane_perm(self.b(), t);
+        if self.vop_reg(t) && perm != 0 {
+            // The lanes moved (`lv::lane_perm`): REV64 reverses them within each 8 bytes, then EXT #8 swaps the
             // halves of a 16-byte vector.
             let nb = type_bytes(t.ty, 8);
-            let eb = type_bytes(lane_type(t.ty), 8);
             let rx = self.vec_use(ops[0], V0 + 30);
             let rd = self.def_step(i);
+            let eb = type_bytes(lane_type(t.ty), 8);
             let mut src = rx;
-            if eb < 8 {
+            if (perm & lv::PERM_REV8) != 0 {
                 self.emit(
                     0x0E200800 | a::on(nb == 16, 1u32 << 30) | vsize(eb) << 22 | (src - V0) as u32 << 5 | (rd - V0) as u32,
                 );
                 src = rd;
             }
-            if nb == 16 {
+            if (perm & lv::PERM_SWAP8) != 0 {
                 self.emit(0x6E000000 | (src - V0) as u32 << 16 | 8 << 11 | (src - V0) as u32 << 5 | (rd - V0) as u32);
             }
             return true;

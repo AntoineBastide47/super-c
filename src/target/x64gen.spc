@@ -1449,9 +1449,18 @@ extend Gen {
             bare = bare && !self.cret[x];
         }
         bare = bare && leaf;
+        // The registers the body's intrinsics write (`intrin_clob`): an intrinsic that writes vector
+        // registers alone is no call (`calls`), so a body of them alone is bare.
+        let mut iclob: u64 = 0;
+        for x in 0..ni {
+            let t = b.insts[x];
+            if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
+                iclob |= self.intrin_clob(t, self.intrinsic(t.a));
+            }
+        }
         // An xmm home: Microsoft x64's callee-saved ones, but in a body that calls nothing that returns
         // its caller-saved xmm0..xmm3 first (`vscr`); System V's caller-saved ones, xmm4..xmm7 too in such a
-        // body.
+        // body. None that an intrinsic writes.
         self.vscr = if self.win && bare {
             VSCR_WIN_BARE
         } else if self.win {
@@ -1460,7 +1469,7 @@ extend Gen {
             VSCR_SYSV_BARE
         } else {
             VSCR_SYSV
-        };
+        } & ~iclob;
         self.vec_homes();
         self.want.truncate(0);
         let vw = lv::WANT_V | if !self.win {
@@ -1900,10 +1909,11 @@ extend Gen {
     }
 
     // `clobbers` of `t` but a vector operation the body computes in registers (`ext_reg`, `idiom_reg`,
-    // `float_reg`), and a
+    // `float_reg`) and an intrinsic that writes vector registers alone (`intrin_clob`), and a
     // thread-local address that calls `__tls_get_addr` (`tls_call`).
     fn calls(self: &Self, t: Inst) bool {
-        return Gen::clobbers(self.b(), t) && !self.ext_reg(t) && !self.idiom_reg(t) && !self.float_reg(t) || self.tls_call(
+        let vec_intrin = t.op == O_CALL && self.intrinsic(t.a).len() != 0 && (self.intrin_clob(t, self.intrinsic(t.a)) & 0xFFFF) == 0;
+        return Gen::clobbers(self.b(), t) && !self.ext_reg(t) && !self.idiom_reg(t) && !self.float_reg(t) && !vec_intrin || self.tls_call(
             t,
         );
     }
@@ -7232,6 +7242,46 @@ extend Gen {
         }
     }
 
+    // The registers intrinsic call `t` writes when its instructions are `tx`: its arguments' and result's
+    // (`ab::intrinsic_layout`) and those `tx` names.
+    fn intrin_clob(self: &Self, t: Inst, tx: str) u64 {
+        let gp: [u8; 8] = [x::RDI, x::RSI, x::RDX, x::RCX, x::R8, x::R9, x::R10, x::R11];
+        let mut lay = ab::CallLayout::new();
+        ab::intrinsic_layout(self.b(), t.b, self.ptr, gp[0..8], x::RAX, &mut lay);
+        let mut m: u64 = 0;
+        for q in 0..lay.parts.len() {
+            let pa = lay.parts[q];
+            m |= bit(
+                pa.reg + if pa.v {
+                    V0
+                } else {
+                    0
+                },
+            );
+        }
+        let mut j: usize = 0;
+        while j < tx.len() {
+            if tx.byte_at(j) != b'%' {
+                j += 1;
+                continue;
+            }
+            let st = j + 1;
+            j = st;
+            while j < tx.len() {
+                let ch = tx.byte_at(j);
+                if !(ch >= b'a' && ch <= b'z' || ch >= b'0' && ch <= b'9') {
+                    break;
+                }
+                j += 1;
+            }
+            let r = x64_clobber(tx.slice(st, j));
+            if r != NOREG {
+                m |= bit(r);
+            }
+        }
+        return m;
+    }
+
     fn call_layout(self: &mut Self, t: Inst) {
         let b = self.b();
         if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
@@ -7370,37 +7420,7 @@ extend Gen {
         if tpl.len() != 0 {
             // An intrinsic writes the registers it names and its arguments' and result's: the others
             // keep their values.
-            self.clob = 0;
-            for q in 0..self.lay.parts.len() {
-                let pa = self.lay.parts[q];
-                self.clob |= bit(
-                    pa.reg + if pa.v {
-                        V0
-                    } else {
-                        0
-                    },
-                );
-            }
-            let mut j: usize = 0;
-            while j < tx.len() {
-                if tx.byte_at(j) != b'%' {
-                    j += 1;
-                    continue;
-                }
-                let st = j + 1;
-                j = st;
-                while j < tx.len() {
-                    let ch = tx.byte_at(j);
-                    if !(ch >= b'a' && ch <= b'z' || ch >= b'0' && ch <= b'9') {
-                        break;
-                    }
-                    j += 1;
-                }
-                let r = x64_clobber(tx.slice(st, j));
-                if r != NOREG {
-                    self.clob |= bit(r);
-                }
-            }
+            self.clob = self.intrin_clob(t, tx);
         }
         // A vector argument a register holds whole stays there: the template reads it under that
         // register's name in place of its argument register (`ren`), which it must not write and no part
@@ -10977,10 +10997,19 @@ extend Gen {
         }
     }
 
+    // The even lanes of `t.a ++ t.b` into vector `i` (the odd ones for `aux` 1): SHUFPS 0x88 (0xDD),
+    // PUNPCKLQDQ (PUNPCKHQDQ); 1- and 2-byte lanes shifted into place, sign-extended and packed (the odd
+    // ones only shifted down); a vector outside a register moves each lane.
     fn vunzip(self: &mut Self, i: u32, t: Inst) {
         let lt = lane_type(t.ty);
         let eb = type_bytes(lt, 8);
         let n = lanes(t.ty);
+        let odd = t.aux != 0;
+        let sel: u32 = if odd {
+            0xDD
+        } else {
+            0x88
+        };
         if type_bytes(t.ty, 8) == 64 && self.in_reg(t.ty) {
             // AVX-512: as AVX2 in each 16-byte block, which leaves the 8-byte quarters of the result's
             // first operand and second operand alternating; `vpermq` 0xD8 pairs them in each 32-byte half,
@@ -10990,9 +11019,9 @@ extend Gen {
             let rd = self.vec_def(i) - V0;
             if eb == 4 {
                 self.c.evex_rr(0, 1, 0xC6, false, rd, rx, ry);
-                self.c.byte(0x88);
+                self.c.byte(sel);
             } else if eb == 8 {
-                self.c.evex_rr(0x66, 1, 0x6C, true, rd, rx, ry);
+                self.c.evex_rr(0x66, 1, 0x6C + odd as u32, true, rd, rx, ry);
             } else {
                 let s = self.tmp(true) - V0;
                 let sh: u32 = if eb == 1 {
@@ -11001,9 +11030,13 @@ extend Gen {
                     0x72
                 };
                 for (r, a) in [(rd, rx), (s, ry)] {
-                    self.c.evex_rr(0x66, 1, sh, false, 6, r, a);
-                    self.c.byte(eb * 8);
-                    self.c.evex_rr(0x66, 1, sh, false, 4, r, r);
+                    if odd {
+                        self.c.evex_rr(0x66, 1, sh, false, 4, r, a);
+                    } else {
+                        self.c.evex_rr(0x66, 1, sh, false, 6, r, a);
+                        self.c.byte(eb * 8);
+                        self.c.evex_rr(0x66, 1, sh, false, 4, r, r);
+                    }
                     self.c.byte(eb * 8);
                 }
                 self.c.evex_rr(
@@ -11034,9 +11067,9 @@ extend Gen {
             let rd = self.vec_def(i) - V0;
             if eb == 4 {
                 self.c.vex_rr(0, 1, 0xC6, false, true, rd, rx, ry);
-                self.c.byte(0x88);
+                self.c.byte(sel);
             } else if eb == 8 {
-                self.c.vex_rr(0x66, 1, 0x6C, false, true, rd, rx, ry);
+                self.c.vex_rr(0x66, 1, 0x6C + odd as u32, false, true, rd, rx, ry);
             } else {
                 let s = self.tmp(true) - V0;
                 let sh: u32 = if eb == 1 {
@@ -11044,14 +11077,16 @@ extend Gen {
                 } else {
                     0x72
                 };
-                self.c.vex_rr(0x66, 1, sh, false, true, 6, rd, rx);
-                self.c.byte(eb * 8);
-                self.c.vex_rr(0x66, 1, sh, false, true, 4, rd, rd);
-                self.c.byte(eb * 8);
-                self.c.vex_rr(0x66, 1, sh, false, true, 6, s, ry);
-                self.c.byte(eb * 8);
-                self.c.vex_rr(0x66, 1, sh, false, true, 4, s, s);
-                self.c.byte(eb * 8);
+                for (r, a) in [(rd, rx), (s, ry)] {
+                    if odd {
+                        self.c.vex_rr(0x66, 1, sh, false, true, 4, r, a);
+                    } else {
+                        self.c.vex_rr(0x66, 1, sh, false, true, 6, r, a);
+                        self.c.byte(eb * 8);
+                        self.c.vex_rr(0x66, 1, sh, false, true, 4, r, r);
+                    }
+                    self.c.byte(eb * 8);
+                }
                 self.c.vex_rr(
                     0x66,
                     1,
@@ -11078,9 +11113,9 @@ extend Gen {
                 self.c.vmov(rd - V0, rx - V0);
                 if eb == 4 {
                     self.c.sse_rr(0, 0x0FC6, rd - V0, ry - V0);
-                    self.c.byte(0x88);
+                    self.c.byte(sel);
                 } else {
-                    self.c.sse_rr(0x66, 0x0F6C, rd - V0, ry - V0);
+                    self.c.sse_rr(0x66, 0x0F6C + odd as u32, rd - V0, ry - V0);
                 }
                 return;
             }
@@ -11094,8 +11129,10 @@ extend Gen {
             self.c.vmov(rd - V0, rx - V0);
             self.c.vmov(s - V0, ry - V0);
             for r in [rd, s] {
-                self.c.sse_rr(0x66, sh, 6, r - V0);
-                self.c.byte(eb * 8);
+                if !odd {
+                    self.c.sse_rr(0x66, sh, 6, r - V0);
+                    self.c.byte(eb * 8);
+                }
                 self.c.sse_rr(0x66, sh, 4, r - V0);
                 self.c.byte(eb * 8);
             }
@@ -11116,10 +11153,11 @@ extend Gen {
         let d = self.mdef(i);
         let xr = self.tmp(false);
         for k in 0..n {
-            if 2 * k < n {
-                self.ld_lane(xr, t.a, 2 * k, lt, false, true);
+            let j = 2 * k + t.aux as u32;
+            if j < n {
+                self.ld_lane(xr, t.a, j, lt, false, true);
             } else {
-                self.ld_lane(xr, t.b, 2 * k - n, lt, false, true);
+                self.ld_lane(xr, t.b, j - n, lt, false, true);
             }
             self.st_lane(xr, d, k, lt, true);
         }
@@ -12023,7 +12061,7 @@ extend Gen {
             unsafe ops[k as usize] = v;
             unsafe tys[k as usize] = self.vt(v);
         }
-        if lv::reversal(self.b(), t) && self.idiom_reg(t) {
+        if lv::lane_perm(self.b(), t) != 0 && self.idiom_reg(t) {
             self.reverse_lanes(i, t, ops[0]);
             return true;
         }
@@ -13461,11 +13499,11 @@ extend Gen {
 
     // Whether `O_VOP` `t` is a saturating sum or difference, or an absolute difference, of two vectors of
     // integer lanes of 1 or 2 bytes in registers (16 bytes; 32 and 64 with AVX2 and AVX-512), which
-    // `idiom_lanes` computes there; or the reversal of a 16-byte vector's lanes of 2 to 8 bytes in an xmm
-    // register (`lv::reversal`, `reverse_lanes`).
+    // `idiom_lanes` computes there; or a move of the lanes of 2 to 8 bytes of a vector in an xmm register
+    // (`lv::lane_perm`, `reverse_lanes`).
     fn idiom_reg(self: &Self, t: Inst) bool {
-        if lv::reversal(self.b(), t) {
-            return type_bytes(t.ty, 8) == 16 && in_vreg(t.ty) && type_bytes(lane_type(t.ty), 8) >= 2;
+        if lv::lane_perm(self.b(), t) != 0 {
+            return in_vreg(t.ty) && type_bytes(lane_type(t.ty), 8) >= 2;
         }
         let code = (t.aux & VOP_CODE) as u32;
         if t.op != O_VOP || t.b != 2 || !is_vec(t.ty) || code < core::OP_SIMD || code >= core::OP_CMP_LANES {
@@ -13691,23 +13729,29 @@ extend Gen {
         self.c.byte(imm);
     }
 
-    // Vector `i`: the lanes of vector `v` reversed (`idiom_reg`): PSHUFD of the dwords (4-byte lanes) or of
-    // the qword pairs (8-byte ones); 2-byte lanes reversed in each qword first (PSHUFLW, PSHUFHW).
+    // Vector `i`: the lanes of vector `v` moved by `lv::lane_perm` (`idiom_reg`): 2-byte lanes reversed in each
+    // qword (PSHUFLW, PSHUFHW); 4-byte ones by PSHUFD of the dwords; the qwords swapped by PSHUFD.
     fn reverse_lanes(self: &mut Self, i: u32, t: Inst, v: Value) {
+        let f = lv::lane_perm(self.b(), t);
         let eb = type_bytes(lane_type(t.ty), 8);
         let rx = self.vec_use(v, self.vs0) - V0;
         let rd = self.vec_def(i) - V0;
         let mut src = rx;
-        if eb == 2 {
+        if eb == 2 && (f & lv::PERM_REV8) != 0 {
             self.c.sse_rr(0xF2, 0x0F70, rd, src);
             self.c.byte(0x1B);
             self.c.sse_rr(0xF3, 0x0F70, rd, rd);
             self.c.byte(0x1B);
+            if (f & lv::PERM_SWAP8) == 0 {
+                return;
+            }
             src = rd;
         }
         self.c.sse_rr(0x66, 0x0F70, rd, src);
         self.c.byte(
-            if eb == 4 {
+            if eb == 4 && f == lv::PERM_REV8 {
+                0xB1u8
+            } else if eb == 4 && f != lv::PERM_SWAP8 {
                 0x1Bu8
             } else {
                 0x4Eu8

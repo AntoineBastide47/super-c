@@ -1095,15 +1095,11 @@ pub(package) fn expect_runs(label: str, src: str, args: []str, msgs: []str) {
         }
         assert(ok, label);
     }
-    // The scalar lowering and the hardware entries give the same results: in the lane without the
-    // wasm feature, on an aarch64 host (Neon in every build) with the planner off.
+    // The scalar lowering and the hardware entries give the same results with the planner off: in the
+    // lane (simd128 in every wasm32 build), on an aarch64 host (Neon in every build).
     let neon = !simd_lane() && unsafe shim::sc_host_arch() == 1;
     if simd_lane() || neon {
-        let scalar: [str; 1] = if neon {
-            ["SC_SIMD_SCALAR=1"]
-        } else {
-            ["--target-feature=-simd128"]
-        };
+        let scalar: [str; 1] = ["SC_SIMD_SCALAR=1"];
         let a = diff_build(src, scalar);
         let d = if a.built {
             same_runs(&a, &b, args)

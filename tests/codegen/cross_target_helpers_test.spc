@@ -22,7 +22,7 @@ fn sdk_flags_carry_the_triple() {
     assert(ios.as_str().contains("-target"), "ios sdk flags include a target triple");
     let mut wasm = String::new();
     util::push_sdk_flags(&mut wasm, 3, 2, tgt::baseline(3, 2));
-    assert(!wasm.as_str().contains("-msimd128"), "wasm32 has no feature by default");
+    assert(wasm.as_str().ends_with(" -msimd128"), "wasm32 has simd128 in every build");
     // The features' flags follow the triple, in table order.
     let mut rel = String::new();
     util::push_sdk_flags(&mut rel, 3, 2, cf::close(cf::with(tgt::baseline(3, 2), cf::F_RELAXED_SIMD)));

@@ -215,8 +215,48 @@ fn a_constant_every_call_passes_makes_a_copy_without_it() {
     assert(s.ok() && c.contains("sig (i32) -> i32"), "the recursion's copy takes the count alone");
 }
 
+// A release build's vectorized loop interleaves the target's count of vector copies: its first vector
+// loop's block loads 2 vectors per pass on wasm32 (each copy is module size) and arm64 Linux, 4 on x86-64
+// Linux. The link may fail without the target's sysroot; the optimizer prints before it.
+@test
+fn vector_loops_interleave_the_targets_copies() {
+    let cases: [(str, u32); 3] = [
+        ("--target=wasm", 2),
+        ("--target=linux --arch=aarch64", 2),
+        ("--target=linux --arch=x86_64", 4),
+    ];
+    for k in 0..3usize {
+        let (flags, want) = unsafe cases[k];
+        let p = cli::proj_new();
+        p.mkfile(
+            "main.spc",
+            "@noinline\nfn vsum(s: []u32) u32 {\n    let mut t: u32 = 0;\n    for i in 0..s.len() {\n        t += s[i];\n    }\n    return t;\n}\n\nfn main(args: Vector<str>) i32 {\n    let v: [u32; 3] = [1, 2, args.len() as u32];\n    return vsum(v[0..3]) as i32 - 4;\n}\n",
+        );
+        let r = cli::superc_env_in(
+            p.dir(),
+            "SC_LIR_PRINT",
+            "vsum",
+            format("build --profile=release {} main.spc -o app", flags).as_str(),
+        );
+        let f = printed(r.text(), "vsum");
+        let at = f.find("load.v4i32");
+        if at < 0 {
+            r.show();
+        }
+        assert(at >= 0, flags);
+        let rest = f.slice(at as usize, f.len());
+        let block = rest.slice(0, rest.find("br ") as usize);
+        let mut n: u32 = 0;
+        for l in block.lines() {
+            n += l.contains("load.v4i32") as u32;
+        }
+        assert_eq(n, want);
+    }
+}
+
 // Loops of C float functions: `max` and `min` reductions, `mul_add`, `floor` and `abs` per element. Built in
-// release, the reductions keep a lane per extreme (`vop.max`, `vop.min`), `mul_add` is a fused multiply-add
+// release, the reductions keep a lane per extreme (`vop.max`, `vop.min`) and take the lanes into one by
+// halves (lane swaps, `vop.swizzle`), `mul_add` is a fused multiply-add
 // per lane (`vop.fma`), `floor` and `abs` lanes too; their results match the debug build's calls bit for
 // bit, through NaNs and zeros of both signs at every position and length.
 const FLOAT_CALLS: str = M"(@noinline
@@ -309,10 +349,14 @@ fn float_function_loops_vectorize_with_the_calls_results() {
     }
     // The lanes of arm64 and of each x86-64 level (a cross build prints its bodies before its link).
     let a = float_calls_printed("--target=macos --arch=aarch64");
-    let ok = printed(&a, "fl_top").contains("vop.max.num") && printed(&a, "fl_low").contains("vop.min.num") && printed(
+    // Each vector exit takes its lanes into one by lane swaps, then calls once.
+    let top = String::from_str(printed(&a, "fl_top"));
+    let ok = top.contains("lanes [2, 3, 0, 1]") && top.contains("lanes [1, 0, 3, 2]") && count_of(&top, "@fmaxf(") <= 3 && printed(
         &a,
-        "fl_fused",
-    ).contains("vop.fma") && !printed(&a, "fl_fused").contains("call") && printed(&a, "fl_round").contains("vop.floor") && printed(
+        "fl_top",
+    ).contains("vop.max.num") && printed(&a, "fl_low").contains("vop.min.num") && printed(&a, "fl_fused").contains(
+        "vop.fma",
+    ) && !printed(&a, "fl_fused").contains("call") && printed(&a, "fl_round").contains("vop.floor") && printed(
         &a,
         "fl_round",
     ).contains("vop.abs");

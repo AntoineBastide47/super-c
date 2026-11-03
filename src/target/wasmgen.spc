@@ -2,7 +2,9 @@
 //
 // wasm has no registers: every scalar value is a local of its wasm type (i8, i16, i32 and pointers in i32
 // locals, zero-extended as the evaluator keeps them), constants and addresses rematerialize at each use,
-// and i128 and vector values live in frame memory. Values share a local (a frame home) when their live
+// and i128 and vector values live in frame memory but a vector of 4, 8 or 16 bytes with simd128
+// (`Package.vector`), which lives in the low bytes of a v128 local unless an instruction computes it lane by
+// lane (`vec_homes`). Values share a local (a frame home) when their live
 // ranges, in the analysis pass's layout positions (`codegen::live`), do not overlap; a block parameter's
 // range starts at its block and covers the edges into it, which write it (it takes an argument's local
 // when one is free), and a value whose range ends in its own block frees its local at its last use.
@@ -89,6 +91,8 @@ pub(package) struct Gen {
     nwp: u32, // the wasm parameters
     locals: Vector<u8>, // the types of the locals past the parameters
     local_of: Vector<u32>, // per value index, its local (NONE: rematerialized, in memory, or unused)
+    simd: bool, // vectors of up to 16 bytes compute in v128 values (`Package.vector`: simd128)
+    vreg: Vector<bool>, // per value index, a vector in a v128 local (`vec_homes`)
     home: Vector<u32>, // per value index, the frame offset of a memory value (NONE: none)
     remat: Vector<bool>, // per instruction
     free: Vector<Vector<u32>>, // per class, the free locals
@@ -208,6 +212,8 @@ extend Gen {
             nwp: 0,
             locals: Vector::<u8>::new(),
             local_of: Vector::<u32>::new(),
+            simd: pkg.vector >= 16,
+            vreg: Vector::<bool>::new(),
             home: Vector::<u32>::new(),
             remat: Vector::<bool>::new(),
             free: free,
@@ -472,6 +478,7 @@ extend Gen {
         // The wasm parameters: the result's pointer, the fixed parameters' values, the variadic buffer.
         wa::encode(&self.me, &mut self.enc);
         self.nwp = self.enc[0];
+        self.vec_homes();
         if !self.frame_layout() {
             return false;
         }
@@ -627,7 +634,7 @@ extend Gen {
                 }
             } else if t.op == O_MULO && t.ty == T_I64 {
                 area = ast_max(area, 16);
-            } else if t.op == O_VOP {
+            } else if t.op == O_VOP && !(self.simd && self.vop_form(t)) {
                 // A 64-bit lane product's high word (compiler-rt) or a halving reduction's copy.
                 area = ast_max(area, 64);
             } else if t.op == O_JMP || t.op == O_BR || t.op == O_SWITCH {
@@ -637,7 +644,7 @@ extend Gen {
                     let mut n: u32 = 0;
                     for q in 0..b.edge_nargs(self.succ[e]) {
                         let a = b.edge_arg(self.succ[e], q);
-                        if in_mem(self.vt(a)) {
+                        if self.mem_v(a) {
                             n += type_bytes(self.vt(a), 4) + 15 & ~15u32;
                         }
                     }
@@ -860,7 +867,9 @@ extend Gen {
             if x < ni as usize {
                 // A memory result needs its home even unused: the instruction writes it.
                 let t = b.insts[x];
-                need[x] = t.ty != T_NONE && !self.remat[x] && !self.lv.pfold[x] && (self.lv.uses[x] != 0 || in_mem(t.ty));
+                need[x] = t.ty != T_NONE && !self.remat[x] && !self.lv.pfold[x] && (self.lv.uses[x] != 0 || self.mem_x(
+                    x as u32,
+                ));
             } else {
                 need[x] = self.lv.uses[x] != 0 || x < (ni + b.params.len() as u32) as usize;
             }
@@ -924,11 +933,10 @@ extend Gen {
             let k = self.lv.order[q];
             let blk = b.blocks[k as usize];
             for i in blk.start..blk.start + blk.len {
-                let t = b.insts[i as usize];
                 // A memory result takes its home before its operands free theirs: a lowering may write
                 // the result's lanes before it reads every operand lane (a gather's fallback lanes).
                 let own = one[i as usize];
-                let early = own && in_mem(t.ty);
+                let early = own && self.mem_x(i);
                 if early {
                     self.take(i);
                 }
@@ -962,7 +970,7 @@ extend Gen {
     // A local or home for value `x`.
     fn take(self: &mut Self, x: u32) {
         let t = self.xty(x);
-        if in_mem(t) {
+        if self.mem_x(x) {
             let sz = type_bytes(t, 4) + 15 & ~15u32;
             for q in 0..self.free_home.len() {
                 if (self.free_home[q] >> 32) as u32 == sz {
@@ -975,7 +983,7 @@ extend Gen {
             self.home_top += sz;
             return;
         }
-        let wt = wa::wtype(t);
+        let wt = self.wty(x);
         let k = class_of(wt) as usize;
         let mut l = self.arg_local(x, k);
         if l == NONE {
@@ -1074,9 +1082,8 @@ extend Gen {
 
     // Value `x`'s local or home is free.
     fn release(self: &mut Self, x: u32) {
-        let t = self.xty(x);
         if self.home[x as usize] != NONE {
-            let sz = type_bytes(t, 4) + 15 & ~15u32;
+            let sz = type_bytes(self.xty(x), 4) + 15 & ~15u32;
             self.free_home.push(sz as u64 << 32 | self.home[x as usize] as u64);
             return;
         }
@@ -1087,8 +1094,27 @@ extend Gen {
         self.gone[x as usize] = true;
         self.lref[l as usize] -= 1;
         if self.lref[l as usize] == 0 {
-            self.free.index_mut(class_of(wa::wtype(t)) as usize).push(l);
+            self.free.index_mut(class_of(self.wty(x)) as usize).push(l);
         }
+    }
+
+    // Whether value index `x` lives in frame memory: an i128, or a vector not in a v128 local.
+    const fn mem_x(self: &Self, x: u32) bool {
+        return in_mem(self.xty(x)) && !self.vreg[x as usize];
+    }
+
+    // Whether value `v` lives in frame memory (`mem_x`).
+    const fn mem_v(self: &Self, v: Value) bool {
+        let x = self.vx(v);
+        return in_mem(self.vt(v)) && (x == NONE || !self.vreg[x as usize]);
+    }
+
+    // The wasm type of value index `x`'s local.
+    const fn wty(self: &Self, x: u32) u8 {
+        if self.vreg[x as usize] {
+            return w::V128;
+        }
+        return wa::wtype(self.xty(x));
     }
 
     // The LIR type of value index `x`.
@@ -1125,6 +1151,9 @@ extend Gen {
                 self.local_of[x as usize] = wp;
                 wp += 1;
             } else if pa.kind == wa::P_DIRECT {
+                wp += 1;
+            } else if pa.kind == wa::P_V128 && self.vreg[x as usize] {
+                self.local_of[x as usize] = wp;
                 wp += 1;
             } else if pa.kind == wa::P_I128 {
                 wp += 2;
@@ -1573,6 +1602,15 @@ extend Gen {
     // Copy `n` bytes from `sl + soff` to `dl + doff` (both locals holding addresses).
     fn copy_mem(self: &mut Self, dl: u32, doff: u32, sl: u32, soff: u32, n: u32) {
         let mut k: u32 = 0;
+        while self.simd && k + 16 <= n {
+            self.c.local(w::LOCAL_GET, dl);
+            self.c.local(w::LOCAL_GET, sl);
+            self.sop(w::V128_LOAD);
+            self.c.memarg(0, soff + k);
+            self.sop(w::V128_STORE);
+            self.c.memarg(0, doff + k);
+            k += 16;
+        }
         while k + 8 <= n {
             self.c.local(w::LOCAL_GET, dl);
             self.c.local(w::LOCAL_GET, sl);
@@ -1636,12 +1674,25 @@ extend Gen {
             if self.local_of[i as usize] == NONE && self.home[i as usize] == NONE {
                 return true;
             }
+            if self.simd && (t.b == 2 || vfit(t.ty)) {
+                self.vpre(i);
+                self.vconst(b.words[t.a as usize], pick64(t.b == 2, b.words[t.a as usize + t.b as usize - 1], 0));
+                self.vpost(i);
+                return true;
+            }
             let h = self.home[i as usize];
             for k in 0..t.b {
                 self.c.local(w::LOCAL_GET, self.fp);
                 self.c.i64_const(b.words[(t.a + k) as usize] as i64);
                 self.store_op(T_I64, h + 8 * k);
             }
+            return true;
+        }
+        if op == O_VEXTRACT && !self.mem_v(t.a) {
+            self.vget(t.a);
+            self.lane_op(VL_EXTRACT, t.ty);
+            self.c.op(t.aux as u8);
+            self.put(i);
             return true;
         }
         if op == O_VEXTRACT {
@@ -2637,6 +2688,27 @@ extend Gen {
     fn bitcast(self: &mut Self, i: u32, t: Inst) bool {
         let from = self.vt(t.a);
         let to = t.ty;
+        if self.simd && self.cast_fits(t) {
+            // A scalar is lane 0 of the vector; an i128 is in memory.
+            let vin = is_vec(from) || from == T_I128;
+            let sc = pick8(vin, to, from);
+            let lt = pick8(is_float(sc), sc, pick8(type_bytes(sc, 4) == 8, T_I64, T_I32));
+            self.vpre(i);
+            if vin {
+                self.vget(t.a);
+            } else {
+                self.get(t.a);
+                self.lane_op(VL_SPLAT, lt);
+            }
+            if is_vec(to) || to == T_I128 {
+                self.vpost(i);
+            } else {
+                self.lane_op(VL_EXTRACT, lt);
+                self.c.op(0);
+                self.put(i);
+            }
+            return true;
+        }
         let mf = in_mem(from);
         let mt = in_mem(to);
         if mf && mt {
@@ -2992,6 +3064,19 @@ extend Gen {
         } else {
             15u32
         };
+        if self.vreg[i as usize] {
+            // `v128.load`, `v128.load64_zero` or `v128.load32_zero`.
+            let n = type_bytes(t.ty, 4);
+            self.get(t.a);
+            if off < 0 {
+                self.c.i32_const(off);
+                self.c.op(w::I32_ADD);
+            }
+            self.sop(pick32(n == 16, w::V128_LOAD, pick32(n == 8, 0x5D, 0x5C)));
+            self.c.memarg(pick32(al < log2u(n), al, log2u(n)), pick32(off < 0, 0, off as u32));
+            self.put(i);
+            return true;
+        }
         if in_mem(t.ty) {
             if self.home[i as usize] == NONE {
                 return true;
@@ -3032,7 +3117,7 @@ extend Gen {
         } else {
             15u32
         };
-        if in_mem(vt) {
+        if self.mem_v(t.b) {
             let a = self.tmp(w::I32);
             self.addr_into(t.a, off, a);
             let h = self.mhome(t.b);
@@ -3046,6 +3131,17 @@ extend Gen {
         } else {
             self.c.i32_const(off);
             self.c.op(w::I32_ADD);
+        }
+        if is_vec(vt) {
+            // `v128.store`, or `v128.store64_lane` or `v128.store32_lane` of lane 0.
+            let n = type_bytes(vt, 4);
+            self.get(t.b);
+            self.sop(pick32(n == 16, w::V128_STORE, pick32(n == 8, 0x5B, 0x5A)));
+            self.c.memarg(pick32(al < log2u(n), al, log2u(n)), o);
+            if n != 16 {
+                self.c.op(0);
+            }
+            return true;
         }
         self.get(t.b);
         self.store_al(vt, o, al);
@@ -3131,6 +3227,15 @@ extend Gen {
     }
 
     fn select_op(self: &mut Self, i: u32, t: Inst) bool {
+        if self.simd && vfit(t.ty) {
+            self.vpre(i);
+            self.vget(t.b);
+            self.vget(t.c);
+            self.get_cond(t.a, false);
+            self.c.op(w::SELECT);
+            self.vpost(i);
+            return true;
+        }
         if in_mem(t.ty) {
             let d = self.home[i as usize];
             if d == NONE {
@@ -3352,13 +3457,13 @@ extend Gen {
         let ni = b.insts.len() as u32;
         let mut nmem: u32 = 0;
         for k in 0..n {
-            if in_mem(self.vt(b.edge_arg(e, k))) {
+            if self.mem_v(b.edge_arg(e, k)) {
                 nmem += 1;
             }
         }
         for k in 0..n {
             let a = b.edge_arg(e, k);
-            if !in_mem(self.vt(a)) && !self.in_place(a, ni + blk.param_start + k) {
+            if !self.mem_v(a) && !self.in_place(a, ni + blk.param_start + k) {
                 self.get(a);
             }
         }
@@ -3367,7 +3472,7 @@ extend Gen {
             k -= 1;
             let a = b.edge_arg(e, k);
             let x = ni + blk.param_start + k;
-            if in_mem(self.vt(a)) || self.in_place(a, x) {
+            if self.mem_v(a) || self.in_place(a, x) {
                 continue;
             }
             let l = self.local_of[x as usize];
@@ -3386,7 +3491,7 @@ extend Gen {
         for k in 0..n {
             let a = b.edge_arg(e, k);
             let ty = self.vt(a);
-            if !in_mem(ty) {
+            if !self.mem_v(a) {
                 continue;
             }
             let src = self.mhome(a);
@@ -3408,7 +3513,7 @@ extend Gen {
         for k in 0..n {
             let a = b.edge_arg(e, k);
             let ty = self.vt(a);
-            if !in_mem(ty) {
+            if !self.mem_v(a) {
                 continue;
             }
             let dst = self.home[(ni + blk.param_start + k) as usize];
@@ -3650,11 +3755,7 @@ extend Gen {
             self.c.local(w::LOCAL_GET, self.fp);
             self.load_op(r.ty, self.res_slot);
         } else if r.kind == wa::P_V128 {
-            let h = self.mhome(t.a);
-            self.c.local(w::LOCAL_GET, self.fp);
-            self.c.simd(w::V128_LOAD);
-            self.c.memarg(4, h);
-            self.obj().simd = true;
+            self.vget(t.a);
         } else if (r.kind == wa::P_I128 || r.kind == wa::P_REF) && (rt & AGG) == 0 {
             // A memory value: its bytes to the prepended pointer.
             let h = self.mhome(t.a);
@@ -3922,11 +4023,7 @@ extend Gen {
                     self.get(v);
                 }
             } else if pa.kind == wa::P_V128 {
-                let h = self.mhome(v);
-                self.c.local(w::LOCAL_GET, self.fp);
-                self.c.simd(w::V128_LOAD);
-                self.c.memarg(4, h);
-                self.obj().simd = true;
+                self.vget(v);
             }
         }
         if self.cs.variadic {
@@ -3974,6 +4071,8 @@ extend Gen {
             self.get(b.pool[(t.c + np) as usize]);
             self.c.local(w::LOCAL_GET, tv);
             self.store_op(r.ty, 0);
+        } else if r.kind == wa::P_V128 && !self.mem_x(i) {
+            self.put(i);
         } else if r.kind == wa::P_V128 {
             let tv = self.tmp(w::V128);
             self.c.local(w::LOCAL_SET, tv);
@@ -4217,7 +4316,13 @@ extend Gen {
 
     fn vector(self: &mut Self, i: u32, t: Inst) bool {
         let op = t.op;
+        if self.simd && op != O_VOP && self.vform(t) {
+            return self.vinst(i, t);
+        }
         if op == O_VOP {
+            if self.simd && self.vop_form(t) {
+                return self.vop_reg(i, t);
+            }
             return self.vop(i, t);
         }
         if op == O_SPLAT {
@@ -4311,16 +4416,17 @@ extend Gen {
             return true;
         }
         if op == O_VUNZIP {
-            // Lane k is lane 2k of `a ++ b`.
+            // Lane k is lane 2k (2k + 1 for the odd lanes) of `a ++ b`.
             let lt = lane_type(t.ty);
             let n = lanes(t.ty);
             let d = self.vdef(i);
             let x = self.tmp(w::I64);
             for k in 0..n {
-                if 2 * k < n {
-                    self.ld_lane(t.a, 2 * k, lt, false, true);
+                let j = 2 * k + t.aux as u32;
+                if j < n {
+                    self.ld_lane(t.a, j, lt, false, true);
                 } else {
-                    self.ld_lane(t.b, 2 * k - n, lt, false, true);
+                    self.ld_lane(t.b, j - n, lt, false, true);
                 }
                 self.c.local(w::LOCAL_SET, x);
                 self.st_lane(x, d, k, lt, true);
@@ -6337,6 +6443,1019 @@ extend Gen {
             self.c.local(w::LOCAL_SET, x);
             self.st_lane(x, d, k, lt, true);
         }
+    }
+}
+
+// ---- SIMD128 ----
+//
+// With simd128 (`simd`) a vector of 4, 8 or 16 bytes (`vfit`) computes in the low bytes of v128 values,
+// whatever the bytes past it hold: an instruction with a SIMD128 form (`vform`) reads its vector operands
+// from their v128 locals or their homes (`vget`; a home holds 16 bytes) and writes its result to its local
+// or home (`vpre`, `vpost`); a conversion to or from a 32-byte vector reads or writes that vector's home.
+// The lane loops above compute the other instructions, whose vectors `vec_homes` keeps in memory. The
+// semantics are the lane loops': a float to integer conversion saturates (NaN to 0), a shift's count past
+// the lane width is undefined.
+
+// Per lane size (1, 2, 4, 8 bytes), the SIMD128 codes of the integer lanes (NOP: none). A shift's arithmetic
+// form follows it, then its logical one; an extraction is the unsigned one.
+const NOP: u32 = 0xFFFF;
+const V_ADD: [u32; 4] = [0x6E, 0x8E, 0xAE, 0xCE];
+const V_SUB: [u32; 4] = [0x71, 0x91, 0xB1, 0xD1];
+const V_MUL: [u32; 4] = [NOP, 0x95, 0xB5, 0xD5];
+const V_NEG: [u32; 4] = [0x61, 0x81, 0xA1, 0xC1];
+const V_SHL: [u32; 4] = [0x6B, 0x8B, 0xAB, 0xCB];
+const V_SPLAT: [u32; 4] = [0x0F, 0x10, 0x11, 0x12];
+const V_EXTRACT: [u32; 4] = [0x16, 0x19, 0x1B, 0x1D];
+const V_REPLACE: [u32; 4] = [0x17, 0x1A, 0x1C, 0x1E];
+const V_EQ: [u32; 4] = [0x23, 0x2D, 0x37, 0xD6];
+// Per narrow lane size (1, 2, 4 bytes): the products of the low lanes in lanes of twice the size, signed
+// (+1: the high lanes; +2: unsigned); the low lanes extended to twice their size, signed (+1: the high
+// lanes; +2: unsigned).
+const V_EXTMUL: [u32; 3] = [0x9C, 0xBC, 0xDC];
+const V_EXTEND: [u32; 3] = [0x87, 0xA7, 0xC7];
+// Per integer condition (C_EQ .. C_UGE), its comparison's offset from the lanes' `eq`: 1, 2 and 4-byte lanes
+// (eq, ne, lt_s, lt_u, gt_s, gt_u, le_s, le_u, ge_s, ge_u), 8-byte lanes (eq, ne, lt_s, gt_s, le_s, ge_s).
+const V_CMP: [u32; 10] = [0, 1, 2, 6, 4, 8, 3, 7, 5, 9];
+const V_CMP64: [u32; 6] = [0, 1, 2, 4, 3, 5];
+
+// The lane operations of `lane_op`.
+const VL_SPLAT: u8 = 0;
+const VL_EXTRACT: u8 = 1;
+const VL_REPLACE: u8 = 2;
+
+// Whether `t` is a vector of 4, 8 or 16 bytes: one a v128 value holds.
+const fn vfit(t: u8) bool {
+    let n = type_bytes(t, 4);
+    return is_vec(t) && (n == 4 || n == 8 || n == 16);
+}
+
+// log2 of the bytes of scalar type `t`.
+const fn size_log(t: u8) u32 {
+    return log2u(type_bytes(t, 4));
+}
+
+const fn pick32(c: bool, a: u32, b: u32) u32 {
+    if c {
+        return a;
+    }
+    return b;
+}
+
+extend Gen {
+    // `vreg`: per value index, whether it is a vector in a v128 local (`vfit`): with simd128, one no
+    // instruction defines or reads in memory. An instruction with a SIMD128 form (`vform`, `vop_form`), a
+    // load, a store, a select, a bitcast of a vector to or from one of its size, a lane's extraction, a
+    // call or a return that passes it as a v128, and an edge take either; an edge's argument and its
+    // parameter live alike.
+    fn vec_homes(self: &mut Self) {
+        let b = self.b();
+        let n = self.lv.end.len();
+        let ni = b.insts.len();
+        self.vreg.truncate(0);
+        for x in 0..n {
+            self.vreg.push(self.simd && vfit(self.xty(x as u32)));
+        }
+        if !self.simd {
+            return;
+        }
+        let e0 = ni + b.blocks[0].param_start as usize;
+        for k in 0..b.pool[b.sig as usize] as usize {
+            if self.me.params[k].kind != wa::P_V128 {
+                self.vreg[e0 + k] = false;
+            }
+        }
+        for i in 0..ni {
+            let t = b.insts[i];
+            let op = t.op;
+            if op == O_JMP || op == O_BR || op == O_SWITCH || op == O_LOAD || op == O_STORE || op == O_WCONST || op == O_VEXTRACT {
+                continue;
+            }
+            if op == O_SELECT || op == O_BITCAST {
+                if op == O_SELECT && vfit(t.ty) || op == O_BITCAST && self.cast_fits(t) {
+                    continue;
+                }
+            } else if op == O_RET {
+                if self.me.ret.kind == wa::P_V128 {
+                    continue;
+                }
+            } else if op == O_CALL || op == O_CALLIND {
+                self.call_homes(i as u32, t);
+                continue;
+            } else if op == O_VOP && self.vop_form(t) || (is_vec(t.ty) || op == O_VCMP) && op != O_VOP && op != O_VAARG && self.vform(
+                t,
+            ) {
+                continue;
+            }
+            self.vreg[i] = false;
+            lv::each_use(b, t, &mut self.uses);
+            for k in 0..self.uses.len() {
+                let x = self.vx(self.uses[k]);
+                if x != NONE {
+                    self.vreg[x as usize] = false;
+                }
+            }
+        }
+        // Each round unmarks a value or ends: at most n + 1 rounds.
+        for _ in 0..n + 1 {
+            let mut changed = false;
+            for k in 0..b.blocks.len() {
+                let bk = b.blocks[k];
+                b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut self.succ);
+                for q in 0..self.succ.len() {
+                    let e = self.succ[q];
+                    let ps = ni as u32 + b.blocks[b.edge_target(e) as usize].param_start;
+                    for j in 0..b.edge_nargs(e) {
+                        let ax = self.vx(b.edge_arg(e, j));
+                        if ax != NONE && self.vreg[ax as usize] != self.vreg[(ps + j) as usize] {
+                            self.vreg[ax as usize] = false;
+                            self.vreg[(ps + j) as usize] = false;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    // `vec_homes` of call `i`: a vector it passes or returns other than as a fixed v128 lives in memory.
+    fn call_homes(self: &mut Self, i: u32, t: Inst) {
+        let b = self.b();
+        let tpl = if t.op == O_CALL {
+            self.intrinsic(t.a)
+        } else {
+            ""
+        };
+        wa::classify(
+            b,
+            t.b,
+            if tpl.len() != 0 {
+                16u32
+            } else {
+                self.vregs
+            },
+            &mut self.cs,
+        );
+        if self.cs.ret.kind != wa::P_V128 {
+            self.vreg[i as usize] = false;
+        }
+        let np = b.pool[t.b as usize];
+        for k in 0..np {
+            let x = self.vx(b.pool[(t.c + k) as usize]);
+            if x != NONE && (k >= self.cs.nfixed || self.cs.params[k as usize].kind != wa::P_V128) {
+                self.vreg[x as usize] = false;
+            }
+        }
+        if t.op == O_CALLIND {
+            let x = self.vx(t.a);
+            if x != NONE {
+                self.vreg[x as usize] = false;
+            }
+        }
+    }
+
+    // A SIMD128 instruction: the prefix and `code`.
+    fn sop(self: &mut Self, code: u32) {
+        self.c.simd(code);
+        self.obj().simd = true;
+    }
+
+    // `v128.const` of the words `lo`, `hi`.
+    fn vconst(self: &mut Self, lo: u64, hi: u64) {
+        self.sop(w::V128_CONST);
+        self.c.u64le(lo);
+        self.c.u64le(hi);
+    }
+
+    // `i8x16.shuffle` of the two v128 values on the stack: result byte j is byte `idx[j]` of their 32 bytes.
+    fn shuffle(self: &mut Self, idx: &[u8; 16]) {
+        self.sop(w::I8X16_SHUFFLE);
+        for j in 0..16usize {
+            self.c.op(idx[j]);
+        }
+    }
+
+    // Push 16-byte value `v` as a v128: its local, or a load of its home.
+    fn vget(self: &mut Self, v: Value) {
+        if !self.mem_v(v) {
+            self.get(v);
+            return;
+        }
+        let h = self.mhome(v);
+        self.c.local(w::LOCAL_GET, self.fp);
+        self.sop(w::V128_LOAD);
+        self.c.memarg(4, h);
+    }
+
+    // Push 16-byte value `v` twice.
+    fn vget2(self: &mut Self, v: Value) {
+        if !self.mem_v(v) {
+            self.get(v);
+            self.get(v);
+            return;
+        }
+        let x = self.tmp(w::V128);
+        self.vget(v);
+        self.c.local(w::LOCAL_TEE, x);
+        self.c.local(w::LOCAL_GET, x);
+    }
+
+    // Before a 16-byte result of instruction `i` on the stack: its home's base, when it has one.
+    fn vpre(self: &mut Self, i: u32) {
+        if self.mem_x(i) && self.home[i as usize] != NONE {
+            self.c.local(w::LOCAL_GET, self.fp);
+        }
+    }
+
+    // Pop the 16-byte result of instruction `i` into its local or home (`vpre`).
+    fn vpost(self: &mut Self, i: u32) {
+        if !self.mem_x(i) {
+            self.put(i);
+        } else if self.home[i as usize] == NONE {
+            self.c.op(w::DROP);
+        } else {
+            self.sop(w::V128_STORE);
+            self.c.memarg(4, self.home[i as usize]);
+        }
+    }
+
+    // The lane operation `kind` (VL_*) on lanes of `lt`; an extraction or a replacement takes its lane next.
+    fn lane_op(self: &mut Self, kind: u8, lt: u8) {
+        let code = if is_float(lt) {
+            let f = pick32(lt == T_F64, 1, 0);
+            if kind == VL_SPLAT {
+                0x13 + f
+            } else {
+                0x1F + 2 * f + (kind - VL_EXTRACT) as u32
+            }
+        } else {
+            let k = size_log(lt) as usize;
+            if kind == VL_SPLAT {
+                V_SPLAT[k]
+            } else if kind == VL_EXTRACT {
+                V_EXTRACT[k]
+            } else {
+                V_REPLACE[k]
+            }
+        };
+        self.sop(code);
+    }
+
+    // Whether instruction `t` (not an O_VOP) has a SIMD128 form: its 16-byte vector operands and result may
+    // live in v128 locals or in memory.
+    fn vform(self: &Self, t: Inst) bool {
+        let op = t.op;
+        if op >= O_SEXT && op <= O_UITOFP {
+            return self.conv_form(t);
+        }
+        if op == O_VCMP {
+            return vfit(self.vt(t.a));
+        }
+        if !vfit(t.ty) {
+            return false;
+        }
+        if op == O_ADD || op == O_SUB || op == O_MUL || op >= O_AND && op <= O_XOR || op == O_NEG || op == O_NOT || op == O_VSUMW {
+            return true;
+        }
+        if op == O_SHL || op == O_LSHR || op == O_ASHR {
+            return self.uniform(t.b);
+        }
+        if op == O_MULHS || op == O_MULHU {
+            return lane_type(t.ty) != T_I64;
+        }
+        return op >= O_FADD && op <= O_FNEG || op == O_FSQRT || op == O_SPLAT || op == O_VSEL || op == O_VINSERT || op == O_VZIPLO || op == O_VZIPHI || op == O_VUNZIP;
+    }
+
+    // Whether vector `v` holds one value in every lane: a splat, or a wide constant whose lanes repeat.
+    const fn uniform(self: &Self, v: Value) bool {
+        if (v & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        let b = self.b();
+        let t = b.insts[v as usize];
+        if t.op == O_SPLAT {
+            return true;
+        }
+        if t.op != O_WCONST || t.b != 2 || b.words[t.a as usize] != b.words[t.a as usize + 1] {
+            return false;
+        }
+        let lb = type_bits(lane_type(t.ty), 4) as u64;
+        let x = b.words[t.a as usize];
+        return lb == 64 || (x >> lb | x << 64 - lb) == x;
+    }
+
+    // Push the i32 count of a shift by uniform vector `v` (lanes of `lt`): its lane 0.
+    fn shift_count(self: &mut Self, v: Value, lt: u8) {
+        let t = self.b().insts[v as usize];
+        if t.op == O_WCONST {
+            self.c.i32_const((self.b().words[t.a as usize] & 0x3F) as i32);
+            return;
+        }
+        self.vget(v);
+        self.lane_op(VL_EXTRACT, lt);
+        self.c.op(0);
+        if lt == T_I64 {
+            self.c.op(w::I32_WRAP_I64);
+        }
+    }
+
+    // Instruction `i` (`vform`) in SIMD128.
+    fn vinst(self: &mut Self, i: u32, t: Inst) bool {
+        let op = t.op;
+        if op >= O_SEXT && op <= O_UITOFP {
+            self.vconv(i, t);
+            return true;
+        }
+        let lt = lane_type(t.ty);
+        let k = size_log(lt) as usize;
+        let mut idx: [u8; 16] = [0; 16];
+        self.vpre(i);
+        if op == O_VCMP {
+            self.vcmp_reg(t);
+        } else if op == O_SPLAT {
+            self.get(t.a);
+            self.lane_op(VL_SPLAT, lt);
+        } else if op == O_VINSERT {
+            self.vget(t.a);
+            self.get(t.b);
+            self.lane_op(VL_REPLACE, lt);
+            self.c.op(t.aux as u8);
+        } else if op == O_VSEL {
+            self.vget(t.b);
+            self.vget(t.c);
+            self.vget(t.a);
+            self.sop(0x52);
+        } else if op == O_VZIPLO || op == O_VZIPHI || op == O_VUNZIP {
+            // Lane j of a zip is lane j / 2 (plus half the lanes for the high halves) of `a` (j even) or `b`;
+            // of an unzip lane 2j + aux of `a ++ b`. `b`'s lanes start at byte 16.
+            let eb = type_bytes(lt, 4);
+            let n = lanes(t.ty);
+            let nr = 16 / eb;
+            let h = pick32(op == O_VZIPHI, n / 2, 0);
+            for j in 0..16u32 {
+                let ln = j / eb;
+                let s2 = 2 * ln + t.aux as u32;
+                let src = if op != O_VUNZIP {
+                    (ln & 1) * nr + h + ln / 2
+                } else if s2 < n {
+                    s2
+                } else {
+                    pick32(s2 < 2 * n, nr + s2 - n, 0)
+                };
+                unsafe idx[j as usize] = (src * eb + j % eb) as u8;
+            }
+            self.vget(t.a);
+            self.vget(t.b);
+            self.shuffle(&idx);
+        } else if op == O_VSUMW {
+            self.vget(t.a);
+            self.vsum_pairs(t.b, lane_type(self.vt(t.b)), lt);
+            self.sop(V_ADD[k]);
+        } else if op == O_MULHS || op == O_MULHU {
+            // The double-width products of the low and high lanes, then each one's high half.
+            let u = pick32(op == O_MULHU, 2, 0);
+            let eb = 1u32 << k as u32;
+            self.vget(t.a);
+            self.vget(t.b);
+            self.sop(V_EXTMUL[k] + u);
+            self.vget(t.a);
+            self.vget(t.b);
+            self.sop(V_EXTMUL[k] + u + 1);
+            for j in 0..16u32 {
+                unsafe idx[j as usize] = (j / eb * 2 * eb + eb + j % eb) as u8;
+            }
+            self.shuffle(&idx);
+        } else if op >= O_FADD && op <= O_FNEG || op == O_FSQRT {
+            let f = lt == T_F64;
+            let swap = (op == O_FADD || op == O_FMUL) && (t.b & (VPARAM | VFLAG)) == 0 && t.b + 1 == i;
+            self.vget(pick_v(swap, t.b, t.a));
+            if op == O_FNEG {
+                self.sop(pick32(f, 0xED, 0xE1));
+            } else if op == O_FSQRT {
+                self.sop(pick32(f, 0xEF, 0xE3));
+            } else {
+                self.vget(pick_v(swap, t.a, t.b));
+                self.sop(pick32(f, 0xF0, 0xE4) + (op - O_FADD) as u32);
+            }
+        } else if op == O_NOT {
+            self.vget(t.a);
+            self.sop(0x4D);
+        } else if op == O_NEG {
+            self.vget(t.a);
+            self.sop(V_NEG[k]);
+        } else if op >= O_SHL && op <= O_ASHR {
+            self.vget(t.a);
+            self.shift_count(t.b, lt);
+            self.sop(V_SHL[k] + pick32(op == O_SHL, 0, pick32(op == O_ASHR, 1, 2)));
+        } else if op == O_MUL && k == 0 {
+            // Bytes: the low bytes of the 16-bit products.
+            self.vget(t.a);
+            self.vget(t.b);
+            self.sop(V_EXTMUL[0] + 2);
+            self.vget(t.a);
+            self.vget(t.b);
+            self.sop(V_EXTMUL[0] + 3);
+            for j in 0..16u32 {
+                unsafe idx[j as usize] = (2 * j) as u8;
+            }
+            self.shuffle(&idx);
+        } else {
+            // A commutative operation reads the value the instruction before computed first: it stays on the
+            // stack (`stack_values`).
+            let swap = op != O_SUB && (t.b & (VPARAM | VFLAG)) == 0 && t.b + 1 == i;
+            self.vget(pick_v(swap, t.b, t.a));
+            self.vget(pick_v(swap, t.a, t.b));
+            let code = if op == O_ADD {
+                V_ADD[k]
+            } else if op == O_SUB {
+                V_SUB[k]
+            } else if op == O_MUL {
+                V_MUL[k]
+            } else if op == O_AND {
+                0x4Eu32
+            } else if op == O_OR {
+                0x50u32
+            } else {
+                0x51u32
+            };
+            self.sop(code);
+        }
+        self.vpost(i);
+        return true;
+    }
+
+    // The lane-wise comparison `t` of 16-byte vectors (`O_VCMP`): its mask on the stack. Unsigned 8-byte lanes
+    // compare as signed with their sign bits flipped.
+    fn vcmp_reg(self: &mut Self, t: Inst) {
+        let lt = lane_type(self.vt(t.a));
+        let c = t.aux;
+        if is_float(lt) {
+            self.vget(t.a);
+            self.vget(t.b);
+            let off = if c == C_OEQ {
+                0u32
+            } else if c == C_UNE {
+                1u32
+            } else if c == C_OLT {
+                2u32
+            } else if c == C_OGT {
+                3u32
+            } else if c == C_OLE {
+                4u32
+            } else {
+                5u32
+            };
+            self.sop(pick32(lt == T_F64, 0x47, 0x41) + off);
+            return;
+        }
+        let k = size_log(lt) as usize;
+        if lt != T_I64 {
+            self.vget(t.a);
+            self.vget(t.b);
+            self.sop(V_EQ[k] + V_CMP[c as usize]);
+            return;
+        }
+        let un = c >= C_ULT;
+        let sc = if un {
+            c - 4
+        } else {
+            c
+        };
+        self.vget(t.a);
+        if un {
+            self.vconst(1u64 << 63, 1u64 << 63);
+            self.sop(0x51);
+        }
+        self.vget(t.b);
+        if un {
+            self.vconst(1u64 << 63, 1u64 << 63);
+            self.sop(0x51);
+        }
+        self.sop(V_EQ[3] + V_CMP64[sc as usize]);
+    }
+
+    // Push 16-byte integer vector `v` (lanes of `nl`) with its runs of adjacent lanes summed into lanes of
+    // `lt`, zero-extended (`O_VSUMW`): each step doubles the lane width, at most three.
+    fn vsum_pairs(self: &mut Self, v: Value, nl: u8, lt: u8) {
+        self.vget(v);
+        let mut eb = type_bytes(nl, 4);
+        while eb < type_bytes(lt, 4) {
+            if eb == 1 {
+                self.sop(0x7D);
+            } else if eb == 2 {
+                self.sop(0x7F);
+            } else {
+                // Each 8-byte lane: its low 4 bytes plus its high 4.
+                let x = self.tmp(w::V128);
+                self.c.local(w::LOCAL_TEE, x);
+                self.vconst(0xFFFFFFFF, 0xFFFFFFFF);
+                self.sop(0x4E);
+                self.c.local(w::LOCAL_GET, x);
+                self.c.i32_const(32);
+                self.sop(V_SHL[3] + 2);
+                self.sop(V_ADD[3]);
+            }
+            eb *= 2;
+        }
+    }
+
+    // Whether bitcast `t` has a SIMD128 form: between a vector that fits a v128 (`vfit`) and a vector or an
+    // i128 of its size, or a scalar of its size (lane 0).
+    const fn cast_fits(self: &Self, t: Inst) bool {
+        let from = self.vt(t.a);
+        let n = type_bytes(t.ty, 4);
+        if n != type_bytes(from, 4) || !vfit(t.ty) && !vfit(from) {
+            return false;
+        }
+        let other = pick8(vfit(t.ty), from, t.ty);
+        return is_vec(other) || other == T_I128 || is_float(other) || other == T_I32 || other == T_I64;
+    }
+
+    // Whether conversion `t` has a SIMD128 form (`vconv`): between vectors that fit a v128 (`vfit`, or of
+    // 2 bytes), or between a 16-byte vector and a 32-byte one.
+    fn conv_form(self: &Self, t: Inst) bool {
+        let op = t.op;
+        let st = self.vt(t.a);
+        if !is_vec(st) || !is_vec(t.ty) {
+            return false;
+        }
+        let fb = type_bytes(st, 4);
+        let tb = type_bytes(t.ty, 4);
+        let fe = type_bytes(lane_type(st), 4);
+        let te = type_bytes(lane_type(t.ty), 4);
+        if fb == 32 || tb == 32 {
+            // Halves: an integer to twice its width and back, f32 to f64 and back, i32 to f64, f64 to i32.
+            let wide = op == O_SEXT || op == O_ZEXT || op == O_FPEXT || (op == O_SITOFP || op == O_UITOFP) && fe == 4;
+            let narrow = op == O_TRUNC || op == O_FPTRUNC || (op == O_FPTOSI || op == O_FPTOUI) && te == 4;
+            return fb == 16 && tb == 32 && wide && te == 2 * fe || fb == 32 && tb == 16 && narrow && fe == 2 * te;
+        }
+        if fb > 16 || tb > 16 {
+            return false;
+        }
+        if op == O_SITOFP || op == O_UITOFP {
+            return te == 4 && fe <= 4 || te == 8 && fe == 4;
+        }
+        if op == O_FPTOSI || op == O_FPTOUI {
+            return te == 4 && (fe == 4 || fe == 8);
+        }
+        // O_SEXT, O_ZEXT, O_TRUNC, O_FPEXT, O_FPTRUNC.
+        return true;
+    }
+
+    // Push vector `v` (lanes of `fl`, at most 16 bytes) as a v128 of its low lanes extended to `te` bytes
+    // (signed `sg`): a vector of 8 bytes in memory takes the first step in its load (`i16x8.load8x8_s` ..);
+    // each step doubles the lane width, at most three.
+    fn vext_low(self: &mut Self, v: Value, fl: u8, sg: bool, te: u32) {
+        let mut e = type_bytes(fl, 4);
+        if !self.mem_v(v) || type_bytes(self.vt(v), 4) != 8 || e >= te {
+            self.vget(v);
+        } else {
+            self.c.local(w::LOCAL_GET, self.fp);
+            self.sop(1 + 2 * log2u(e) + pick32(sg, 0, 1));
+            self.c.memarg(3, self.mhome(v));
+            e *= 2;
+        }
+        while e < te {
+            self.sop(V_EXTEND[log2u(e) as usize] + pick32(sg, 0, 2));
+            e *= 2;
+        }
+    }
+
+    // Conversion `t` (`conv_form`) into instruction `i`.
+    fn vconv(self: &mut Self, i: u32, t: Inst) {
+        let op = t.op;
+        let st = self.vt(t.a);
+        let fl = lane_type(st);
+        let fb = type_bytes(st, 4);
+        let tb = type_bytes(t.ty, 4);
+        let fe = type_bytes(fl, 4);
+        let te = type_bytes(lane_type(t.ty), 4);
+        let sg = op == O_SEXT || op == O_SITOFP || op == O_FPTOSI;
+        let mut idx: [u8; 16] = [0; 16];
+        if tb == 32 {
+            // A widening of 16 bytes: the low lanes' result, then the high lanes'.
+            let h = self.home[i as usize];
+            if h == NONE {
+                return;
+            }
+            let x = self.vlocal(t.a);
+            for j in 0..16u32 {
+                unsafe idx[j as usize] = (8 + j % 8) as u8;
+            }
+            for half in 0..2u32 {
+                self.c.local(w::LOCAL_GET, self.fp);
+                self.c.local(w::LOCAL_GET, x);
+                if op == O_SEXT || op == O_ZEXT {
+                    self.sop(V_EXTEND[log2u(fe) as usize] + half + pick32(sg, 0, 2));
+                } else {
+                    if half == 1 {
+                        self.c.local(w::LOCAL_GET, x);
+                        self.shuffle(&idx);
+                    }
+                    self.sop(
+                        if op == O_FPEXT {
+                            0x5Fu32
+                        } else {
+                            pick32(sg, 0xFE, 0xFF)
+                        },
+                    );
+                }
+                self.sop(w::V128_STORE);
+                self.c.memarg(4, h + 16 * half);
+            }
+            return;
+        }
+        self.vpre(i);
+        if fb == 32 {
+            // A narrowing of 32 bytes: each half's lanes, then the bytes of both.
+            let h = self.mhome(t.a);
+            for half in 0..2u32 {
+                self.c.local(w::LOCAL_GET, self.fp);
+                self.sop(w::V128_LOAD);
+                self.c.memarg(4, h + 16 * half);
+                if op == O_FPTRUNC {
+                    self.sop(0x5E);
+                } else if op != O_TRUNC {
+                    self.sop(pick32(sg, 0xFC, 0xFD));
+                }
+            }
+            for j in 0..16u32 {
+                unsafe idx[j as usize] = if op == O_TRUNC {
+                    (j / te * fe + j % te) as u8
+                } else {
+                    (j + pick32(j >= 8, 8, 0)) as u8
+                };
+            }
+            self.shuffle(&idx);
+        } else if op == O_SEXT || op == O_ZEXT {
+            self.vext_low(t.a, fl, sg, te);
+        } else if op == O_TRUNC {
+            // Each lane's low bytes.
+            self.vget2(t.a);
+            for j in 0..16u32 {
+                unsafe idx[j as usize] = (j / te % (16 / fe) * fe + j % te) as u8;
+            }
+            self.shuffle(&idx);
+        } else if op == O_FPEXT {
+            self.vget(t.a);
+            self.sop(0x5F);
+        } else if op == O_FPTRUNC {
+            self.vget(t.a);
+            self.sop(0x5E);
+        } else if op == O_SITOFP || op == O_UITOFP {
+            if te == 8 {
+                self.vget(t.a);
+                self.sop(pick32(sg, 0xFE, 0xFF));
+            } else {
+                self.vext_low(t.a, fl, sg, 4);
+                self.sop(pick32(sg, 0xFA, 0xFB));
+            }
+        } else {
+            self.vget(t.a);
+            self.sop(pick32(fe == 8, pick32(sg, 0xFC, 0xFD), pick32(sg, 0xF8, 0xF9)));
+        }
+        self.vpost(i);
+    }
+}
+
+// Per narrow lane size (1, 2, 4 bytes): the signed minimum (+1: unsigned; +2: the maximums); per size (1, 2
+// bytes) the signed saturating sum (+1: unsigned; +3: the differences).
+const V_MIN: [u32; 3] = [0x76, 0x96, 0xB6];
+const V_SAT: [u32; 2] = [0x6F, 0x8F];
+
+extend Gen {
+    // A local holding 16-byte value `v`: its own, or a scratch one loaded from its home.
+    fn vlocal(self: &mut Self, v: Value) u32 {
+        let x = self.vx(v);
+        if !self.mem_v(v) && x != NONE && self.local_of[x as usize] != NONE {
+            return self.local_of[x as usize];
+        }
+        let l = self.tmp(w::V128);
+        self.vget(v);
+        self.c.local(w::LOCAL_SET, l);
+        return l;
+    }
+
+    // The conversion instruction `vop` cast `t` (`core::OP_CAST`) computes; an O_NOP one when it keeps the
+    // lanes' kind and width.
+    const fn cast_inst(self: &Self, t: Inst) Inst {
+        let a = self.b().pool[t.a as usize];
+        let fl = lane_type(self.vt(a));
+        let tl = lane_type(t.ty);
+        let fe = type_bytes(fl, 4);
+        let te = type_bytes(tl, 4);
+        let sg = (t.aux & VOP_SIGNED) != 0;
+        let op = if is_float(fl) && is_float(tl) {
+            pick8(fe < te, O_FPEXT, pick8(fe > te, O_FPTRUNC, 0))
+        } else if is_float(tl) {
+            pick8(sg, O_SITOFP, O_UITOFP)
+        } else if is_float(fl) {
+            pick8((t.aux & VOP_DSIGNED) != 0, O_FPTOSI, O_FPTOUI)
+        } else {
+            pick8(fe < te, pick8(sg, O_SEXT, O_ZEXT), pick8(fe > te, O_TRUNC, 0))
+        };
+        return Inst { op: op, ty: t.ty, aux: 0, a: a, b: 0, c: 0 };
+    }
+
+    // Whether `vop` `t` has a SIMD128 form (`vop_reg`): its 16-byte vector operands and result may live in
+    // v128 locals or in memory.
+    fn vop_form(self: &Self, t: Inst) bool {
+        let b = self.b();
+        let code = (t.aux & VOP_CODE) as u32;
+        if t.b == 0 {
+            return false;
+        }
+        let t0 = self.vt(b.pool[t.a as usize]);
+        if code == core::OP_CAST {
+            let ct = self.cast_inst(t);
+            return ct.op != 0 && self.conv_form(ct);
+        }
+        if code == core::OP_SHL_SCALAR || code == core::OP_SHR_SCALAR {
+            return vfit(t0) && t0 == t.ty;
+        }
+        if code < core::OP_SIMD || code >= core::OP_CMP_LANES {
+            return false;
+        }
+        let c = (code - core::OP_SIMD) as u8;
+        let rule = core::simd_op(c).rule;
+        if rule == core::SR_INDEX {
+            let two = c == core::SIMD_SHUFFLE && t.b == 2 && self.vt(b.pool[t.a as usize + 1]) == t0;
+            return (c == core::SIMD_SWIZZLE && t.b == 1 || two) && t.c != VNONE && vfit(t0) && vfit(t.ty) && lane_type(
+                t0,
+            ) == lane_type(t.ty);
+        }
+        if t.c != VNONE || !vfit(t0) {
+            return false;
+        }
+        if rule == core::SR_BITCAST {
+            return vfit(t.ty) && type_bytes(t.ty, 4) == type_bytes(t0, 4);
+        }
+        let lt = lane_type(t0);
+        let fl = is_float(lt);
+        if rule == core::SR_REDUCE {
+            let tree = c == core::SIMD_REDUCE_ADD_TREE || c == core::SIMD_REDUCE_MUL_TREE;
+            let mul = c == core::SIMD_REDUCE_MUL || c == core::SIMD_REDUCE_MUL_ORD || c == core::SIMD_REDUCE_MUL_TREE;
+            let any = c == core::SIMD_REDUCE_ADD || c == core::SIMD_REDUCE_ADD_ORD || c >= core::SIMD_REDUCE_AND && c <= core::SIMD_REDUCE_XOR || c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX;
+            return t.ty == lt && t.b == 1 && (tree || !fl && (any || mul && lt != T_I8));
+        }
+        if rule != core::SR_VEC && c != core::SIMD_ABS_DIFF || t.ty != t0 || t.b == 2 && self.vt(
+            b.pool[t.a as usize + 1],
+        ) != t0 || t.b > 2 {
+            return false;
+        }
+        if fl {
+            return c == core::SIMD_MIN || c == core::SIMD_MAX || c == core::SIMD_MINIMUM || c == core::SIMD_MAXIMUM || c == core::SIMD_ABS || c >= core::SIMD_SQRT && c <= core::SIMD_ROUND_EVEN;
+        }
+        let eb = type_bytes(lt, 4);
+        return c == core::SIMD_WRAP_ADD || c == core::SIMD_WRAP_SUB || c == core::SIMD_WRAP_NEG || c == core::SIMD_WRAP_MUL && eb > 1 || c == core::SIMD_MIN || c == core::SIMD_MAX || c == core::SIMD_WRAP_ABS || c == core::SIMD_ABS && (t.aux & VOP_SIGNED) == 0 || (c == core::SIMD_SAT_ADD || c == core::SIMD_SAT_SUB) && eb <= 2 || c == core::SIMD_ABS_DIFF && eb <= 4;
+    }
+
+    // `vop` `t` (`vop_form`) into instruction `i`.
+    fn vop_reg(self: &mut Self, i: u32, t: Inst) bool {
+        let b = self.b();
+        let code = (t.aux & VOP_CODE) as u32;
+        let sg = (t.aux & VOP_SIGNED) != 0;
+        let a = b.pool[t.a as usize];
+        if code == core::OP_CAST {
+            self.vconv(i, self.cast_inst(t));
+            return true;
+        }
+        let lt = lane_type(self.vt(a));
+        let k = size_log(lt) as usize;
+        if code == core::OP_SHL_SCALAR || code == core::OP_SHR_SCALAR {
+            self.vpre(i);
+            self.vget(a);
+            self.get(b.pool[t.a as usize + 1]);
+            if self.vt(b.pool[t.a as usize + 1]) == T_I64 {
+                self.c.op(w::I32_WRAP_I64);
+            }
+            self.sop(V_SHL[k] + pick32(code == core::OP_SHL_SCALAR, 0, pick32(sg, 1, 2)));
+            self.vpost(i);
+            return true;
+        }
+        let c = (code - core::OP_SIMD) as u8;
+        let rule = core::simd_op(c).rule;
+        if rule == core::SR_REDUCE {
+            self.vreduce_reg(i, c, a, lt, sg);
+            return true;
+        }
+        self.vpre(i);
+        if rule == core::SR_INDEX {
+            // Lane j is lane idx[j] of `a` (`a ++ b` for a shuffle, `b`'s lanes from byte 16).
+            let eb = type_bytes(lt, 4);
+            let n = lanes(self.vt(a));
+            let cnt = b.pool[t.c as usize];
+            let mut idx: [u8; 16] = [0; 16];
+            for j in 0..16u32 {
+                let x = if j / eb < cnt {
+                    b.pool[(t.c + 1 + j / eb) as usize]
+                } else {
+                    0
+                };
+                unsafe idx[j as usize] = (pick32(x < n, x, 16 / eb + x - n) * eb + j % eb) as u8;
+            }
+            if t.b == 2 {
+                self.vget(a);
+                self.vget(b.pool[t.a as usize + 1]);
+            } else {
+                self.vget2(a);
+            }
+            self.shuffle(&idx);
+        } else if rule == core::SR_BITCAST {
+            self.vget(a);
+        } else {
+            let y = if t.b == 2 {
+                b.pool[t.a as usize + 1]
+            } else {
+                VNONE
+            };
+            self.vec_rule(c, a, y, lt, sg);
+        }
+        self.vpost(i);
+        return true;
+    }
+
+    // Push the lane rule `c` (`core::SR_VEC`) of 16-byte vectors `a` and `y` (VNONE for one operand), lanes
+    // of `lt` (signed `sg`).
+    fn vec_rule(self: &mut Self, c: u8, a: Value, y: Value, lt: u8, sg: bool) {
+        let k = size_log(lt) as usize;
+        let f = pick32(lt == T_F64, 1, 0);
+        if is_float(lt) && (c == core::SIMD_MIN || c == core::SIMD_MAX || c == core::SIMD_MINIMUM || c == core::SIMD_MAXIMUM) {
+            self.float_minmax(c, a, y, lt == T_F64);
+            return;
+        }
+        if c == core::SIMD_MIN || c == core::SIMD_MAX || c == core::SIMD_ABS_DIFF {
+            let x = self.vlocal(a);
+            let z = self.vlocal(y);
+            if c == core::SIMD_ABS_DIFF {
+                // The larger lane less the smaller.
+                self.int_minmax(x, z, lt, sg, true);
+                self.int_minmax(x, z, lt, sg, false);
+                self.sop(V_SUB[k]);
+            } else {
+                self.int_minmax(x, z, lt, sg, c == core::SIMD_MAX);
+            }
+            return;
+        }
+        self.vget(a);
+        if y != VNONE {
+            self.vget(y);
+        }
+        let code = if is_float(lt) {
+            if c == core::SIMD_ABS {
+                0xE0 + 12 * f
+            } else if c == core::SIMD_SQRT {
+                0xE3 + 12 * f
+            } else if c == core::SIMD_CEIL {
+                pick32(f == 1, 0x74, 0x67)
+            } else if c == core::SIMD_FLOOR {
+                pick32(f == 1, 0x75, 0x68)
+            } else if c == core::SIMD_TRUNC {
+                pick32(f == 1, 0x7A, 0x69)
+            } else {
+                pick32(f == 1, 0x94, 0x6A)
+            }
+        } else if c == core::SIMD_WRAP_ADD {
+            V_ADD[k]
+        } else if c == core::SIMD_WRAP_SUB {
+            V_SUB[k]
+        } else if c == core::SIMD_WRAP_MUL {
+            V_MUL[k]
+        } else if c == core::SIMD_WRAP_NEG {
+            V_NEG[k]
+        } else if c == core::SIMD_SAT_ADD || c == core::SIMD_SAT_SUB {
+            V_SAT[k] + pick32(c == core::SIMD_SAT_SUB, 3, 0) + pick32(sg, 0, 1)
+        } else if sg {
+            // A signed lane's absolute value, the lowest value its own.
+            0x60 + 0x20 * k as u32
+        } else {
+            // An unsigned lane is its absolute value.
+            NOP
+        };
+        if code != NOP {
+            self.sop(code);
+        }
+    }
+
+    // Push the lane-wise minimum (`max`: maximum) of v128 locals `x` and `z` (lanes of `lt`, signed `sg`).
+    // 8-byte lanes select by a comparison, unsigned ones with their sign bits flipped.
+    fn int_minmax(self: &mut Self, x: u32, z: u32, lt: u8, sg: bool, max: bool) {
+        let k = size_log(lt) as usize;
+        if k < 3 {
+            self.c.local(w::LOCAL_GET, x);
+            self.c.local(w::LOCAL_GET, z);
+            self.sop(V_MIN[k] + pick32(max, 2, 0) + pick32(sg, 0, 1));
+            return;
+        }
+        // bitselect(x, z, x > z) is the maximum; bitselect(z, x, x > z) the minimum.
+        self.c.local(w::LOCAL_GET, pick32(max, x, z));
+        self.c.local(w::LOCAL_GET, pick32(max, z, x));
+        let ls: [u32; 2] = [x, z];
+        for q in 0..2usize {
+            self.c.local(w::LOCAL_GET, ls[q]);
+            if !sg {
+                self.vconst(1u64 << 63, 1u64 << 63);
+                self.sop(0x51);
+            }
+        }
+        self.sop(V_EQ[3] + V_CMP64[C_SGT as usize]);
+        self.sop(0x52);
+    }
+
+    // Push the float lane rule `c` (SIMD_MIN, SIMD_MAX, SIMD_MINIMUM, SIMD_MAXIMUM) of 16-byte vectors `a`
+    // and `y` (f64 lanes when `dd`) by the lane loops' `fminmax`: SIMD128's `min` or `max`, which orders -0
+    // below +0, past the NaNs. SIMD_MIN and SIMD_MAX take the other operand of a NaN, and of two NaNs `a`
+    // with its quiet bit set; SIMD_MINIMUM and SIMD_MAXIMUM take a NaN operand, `a` first.
+    fn float_minmax(self: &mut Self, c: u8, a: Value, y: Value, dd: bool) {
+        let x = self.vlocal(a);
+        let z = self.vlocal(y);
+        let ne = pick32(dd, 0x48, 0x42);
+        let num = c == core::SIMD_MIN || c == core::SIMD_MAX;
+        let an = self.tmp(w::V128);
+        self.c.local(w::LOCAL_GET, x);
+        self.c.local(w::LOCAL_GET, x);
+        self.sop(ne);
+        self.c.local(w::LOCAL_SET, an);
+        // `a`'s lanes where the second mask holds (SIMD_MIN, SIMD_MAX: `y`'s NaNs; else `a`'s).
+        self.c.local(w::LOCAL_GET, x);
+        if num {
+            self.c.local(w::LOCAL_GET, an);
+            let qb = pick64(dd, 1u64 << 51, 0x0040000000400000);
+            self.vconst(qb, qb);
+            self.sop(0x4E);
+            self.sop(0x50);
+        }
+        // `y`'s lanes where the first holds (SIMD_MIN, SIMD_MAX: `a`'s NaNs; else `y`'s), else the minimum or
+        // maximum.
+        self.c.local(w::LOCAL_GET, z);
+        self.c.local(w::LOCAL_GET, x);
+        self.c.local(w::LOCAL_GET, z);
+        self.sop(pick32(dd, 0xF4, 0xE8) + pick32(c == core::SIMD_MIN || c == core::SIMD_MINIMUM, 0, 1));
+        for q in 0..2u32 {
+            if num == (q == 0) {
+                self.c.local(w::LOCAL_GET, an);
+            } else {
+                self.c.local(w::LOCAL_GET, z);
+                self.c.local(w::LOCAL_GET, z);
+                self.sop(ne);
+            }
+            self.sop(0x52);
+        }
+    }
+
+    // Reduction `c` (`vop_form`) of vector `a` (lanes of `lt`, signed `sg`) into instruction `i`:
+    // each step folds the upper half of the lanes it has left into the lower half, at most four; then lane 0.
+    fn vreduce_reg(self: &mut Self, i: u32, c: u8, a: Value, lt: u8, sg: bool) {
+        let eb = type_bytes(lt, 4);
+        let k = size_log(lt) as usize;
+        let f = pick32(lt == T_F64, 1, 0);
+        let add = c == core::SIMD_REDUCE_ADD || c == core::SIMD_REDUCE_ADD_ORD || c == core::SIMD_REDUCE_ADD_TREE;
+        let code = if is_float(lt) {
+            pick32(add, 0xE4, 0xE6) + 12 * f
+        } else if add {
+            V_ADD[k]
+        } else if c == core::SIMD_REDUCE_AND {
+            0x4Eu32
+        } else if c == core::SIMD_REDUCE_OR {
+            0x50u32
+        } else if c == core::SIMD_REDUCE_XOR {
+            0x51u32
+        } else {
+            V_MUL[k]
+        };
+        let pair = (c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX) && k == 3;
+        let acc = self.tmp(w::V128);
+        let s = self.tmp(w::V128);
+        self.vget(a);
+        let mut idx: [u8; 16] = [0; 16];
+        let mut h = lanes(self.vt(a)) / 2;
+        while h != 0 {
+            for j in 0..16u32 {
+                unsafe idx[j as usize] = (j + h * eb & 15) as u8;
+            }
+            self.c.local(pick8(pair, w::LOCAL_SET, w::LOCAL_TEE), acc);
+            self.c.local(w::LOCAL_GET, acc);
+            if pair {
+                self.c.local(w::LOCAL_GET, acc);
+                self.shuffle(&idx);
+                self.c.local(w::LOCAL_SET, s);
+                self.int_minmax(acc, s, lt, sg, c == core::SIMD_REDUCE_MAX);
+            } else {
+                self.c.local(w::LOCAL_GET, acc);
+                self.shuffle(&idx);
+                if c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX {
+                    self.sop(V_MIN[k] + pick32(c == core::SIMD_REDUCE_MAX, 2, 0) + pick32(sg, 0, 1));
+                } else {
+                    self.sop(code);
+                }
+            }
+            h /= 2;
+        }
+        self.lane_op(VL_EXTRACT, lt);
+        self.c.op(0);
+        self.put(i);
     }
 }
 

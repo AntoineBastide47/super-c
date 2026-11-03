@@ -289,7 +289,8 @@ pub(package) const O_SPLAT: u8 = 74;
 pub(package) const O_VCMP: u8 = 75;
 /// Per lane, the bits of `b` where mask `a` (`mask_type` of the result) has ones, else those of `c`.
 pub(package) const O_VSEL: u8 = 76;
-/// The even lanes of vectors `a` then `b` (of the result's type): lane k is lane 2k of `a ++ b`.
+/// The even lanes of vectors `a` then `b` (of the result's type): lane k is lane 2k of `a ++ b`; with `aux` 1
+/// (`.odd`) the odd lanes, lane 2k + 1.
 pub(package) const O_VUNZIP: u8 = 77;
 /// The f32 value of the IEEE binary16 encoding `a` (an i16): exact (`Package.half`).
 pub(package) const O_HTOF: u8 = 78;

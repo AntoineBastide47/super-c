@@ -38,7 +38,7 @@ const KEYS: [Key; 31] = [
     Key { sec: "", name: "const-eval-memory", doc: "compile-time evaluation memory budget (B, or NK/NM/NG)" },
     Key { sec: "", name: "default-profile", doc: "profile used when none is named" },
     Key { sec: "", name: "std_internals", doc: "name std's unstable pub(package) internals (std::platform)" },
-    Key { sec: "", name: "target-features", doc: "CPU features to enable, e.g. [\"simd128\"] (default: none)" },
+    Key { sec: "", name: "target-features", doc: "CPU features to enable, e.g. [\"relaxed-simd\"] (default: none)" },
     Key {
         sec: "",
         name: "target-cpu",

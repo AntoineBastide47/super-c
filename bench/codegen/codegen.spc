@@ -646,6 +646,7 @@ fn p_clamp01(x: f32) f32 {
 
 // Vector loops (`codegen_vectors`).
 
+@arch(!wasm32)
 @ordered
 struct V3 {
     pub x: f32,
@@ -653,6 +654,7 @@ struct V3 {
     pub z: f32,
 }
 
+@arch(!wasm32)
 @noinline
 fn f_min(s: []mut f32, k: f32) {
     for i in 0..s.len() {
@@ -660,6 +662,7 @@ fn f_min(s: []mut f32, k: f32) {
     }
 }
 
+@arch(!wasm32)
 @noinline
 fn w_fmaxr(s: []f32) f32 {
     let mut m: f32 = 0.0;
@@ -669,6 +672,7 @@ fn w_fmaxr(s: []f32) f32 {
     return m;
 }
 
+@arch(!wasm32)
 @noinline
 fn m_u8sum(s: []u8) u32 {
     let mut t: u32 = 0;
@@ -678,6 +682,7 @@ fn m_u8sum(s: []u8) u32 {
     return t;
 }
 
+@arch(!wasm32)
 @noinline
 fn x_aosw(v: []mut V3, d: f32) {
     for k in 0..v.len() {
@@ -687,11 +692,13 @@ fn x_aosw(v: []mut V3, d: f32) {
     }
 }
 
+@arch(!wasm32)
 @noinline
 fn z_fold(s: []u32) u32 {
     return iter::fold(s.iter(), 0u32, |a: u32, x: &u32| a + *x);
 }
 
+@arch(!wasm32)
 @noinline
 fn w_condsum(s: []i32) i32 {
     let mut t: i32 = 0;
@@ -703,6 +710,7 @@ fn w_condsum(s: []i32) i32 {
     return t;
 }
 
+@arch(!wasm32)
 @noinline
 fn w_cmpcount(a: []u32, b: []u32) usize {
     let mut n: usize = 0;
@@ -714,6 +722,7 @@ fn w_cmpcount(a: []u32, b: []u32) usize {
     return n;
 }
 
+@arch(!wasm32)
 @noinline
 fn w_sad(a: []u8, b: []u8) u32 {
     let mut t: u32 = 0;
@@ -728,6 +737,7 @@ fn w_sad(a: []u8, b: []u8) u32 {
     return t;
 }
 
+@arch(!wasm32)
 @noinline
 fn w_sat(s: []mut u8, k: u8) {
     for i in 0..s.len() {
@@ -740,6 +750,7 @@ fn w_sat(s: []mut u8, k: u8) {
     }
 }
 
+@arch(!wasm32)
 @noinline
 fn i_mac128(s: []u64, k: u64) u128 {
     let mut t: u128 = 0;
@@ -1405,6 +1416,7 @@ pub fn codegen_iters(_b: &mut bench::Bencher) {
 /// Vector loops: each kernel on the first 512 to 1023 elements of a 1024-element array (so the vector loop
 /// and its remainders both run). A kernel that writes its array returns 0, so the two sides' sums agree
 /// whatever count of rounds each runs.
+@arch(!wasm32)
 @bench(log_results = false)
 pub fn codegen_vectors(_b: &mut bench::Bencher) {
     warm();

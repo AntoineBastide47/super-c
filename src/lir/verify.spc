@@ -341,7 +341,13 @@ extend Verifier {
             );
         }
         if op == O_VUNZIP || op == O_VZIPLO || op == O_VZIPHI {
-            return self.need(name, b, i, is_vec(t.ty) && ta == t.ty && tb == t.ty, "two vectors of the result's type");
+            return self.need(
+                name,
+                b,
+                i,
+                is_vec(t.ty) && ta == t.ty && tb == t.ty && (t.aux == 0 || op == O_VUNZIP && t.aux == 1),
+                "two vectors of the result's type",
+            );
         }
         if op == O_VSUMW {
             return self.need(

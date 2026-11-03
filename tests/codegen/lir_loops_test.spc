@@ -1092,9 +1092,10 @@ b0(v0: i64):
     }
 }
 
-// Loads of every 2nd element vectorize: the vectors from each field on, their even lanes (`vunzip`), and
-// the loop runs the last iteration, so no vector reads past the element it reads; the 2 interleaved
-// copies (4 `vunzip`), whose 8 lanes leave too few for one vector at a time (`EPI_LANES`). A sum through
+// Loads of every 2nd element vectorize: the vectors from the first field on, their even lanes (`vunzip`) and
+// odd lanes (`vunzip.odd`), the two fields' loads one pair per copy, and the loop runs the last iteration,
+// so no vector reads past the element it reads; the 2 interleaved copies (4 loads, 2 `vunzip` of each
+// parity), whose 8 lanes leave too few for one vector at a time (`EPI_LANES`). A sum through
 // indices a load gives (a gather) interleaves scalar copies.
 @test
 fn strided_and_gathered_loads_vectorize() {
@@ -1209,7 +1210,12 @@ b0(v0: i64):
 )";
     let (b, a) = optimized(src, VECTOR);
     let m = text_of(&a, "mag");
-    assert(count(&m, "vunzip.v4i32") == 4 && m.contains("mul.v4i32"), m.as_str());
+    assert(
+        count(&m, "vunzip.v4i32") == 2 && count(&m, "vunzip.odd.v4i32") == 2 && count(&m, "load.v4i32") == 4 && m.contains(
+            "mul.v4i32",
+        ),
+        m.as_str(),
+    );
     let g = text_of(&a, "gsum");
     assert_eq(count(&g, "load.i64"), 3);
     // `mag` reads 64 words as 32 pairs.

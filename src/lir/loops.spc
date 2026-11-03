@@ -3328,11 +3328,17 @@ extend LoopOpt {
 
     // Vector `v` of type `ty`, its lanes in reverse order (a `swizzle` of indexes `lanes - 1` down to 0).
     fn vreverse(self: &mut Self, b: &mut Body, v: Value, ty: u8, l: u32) Value {
+        return self.vswap(b, v, ty, lanes(ty) - 1, l);
+    }
+
+    // Vector `v` of type `ty` with lane `k` from lane `k ^ s` (a `swizzle`; `s` all ones below the lane
+    // count reverses them, a power of 2 swaps blocks of `s` lanes).
+    fn vswap(self: &mut Self, b: &mut Body, v: Value, ty: u8, s: u32, l: u32) Value {
         let n = lanes(ty);
         let ix = b.pool.len() as u32;
         b.pool.push(n);
         for k in 0..n {
-            b.pool.push(n - 1 - k);
+            b.pool.push(k ^ s);
         }
         let vs: []Value = [v];
         let at = b.pool_list(vs);
@@ -3791,9 +3797,23 @@ extend LoopOpt {
                         nt.c = (((t.c as i32) as i64 + (cc * self.vlanes * step) as i64) as i32) as u32;
                         let eb = type_bytes(t.ty, 8);
                         if t.op == O_LOAD && step != eb && !self.vone {
-                            // The vectors from the element on, each lane its own element's, then the
-                            // even lanes of each pair until one vector is left.
+                            // The element `e` of its group of the step's bytes: past the lowest offset
+                            // another load of its type through the address reads, less than a step below.
+                            // The vectors from the group's first element on, each lane its own element's,
+                            // then the lanes of each pair of the parity of `e`'s next bit until one vector
+                            // is left: the group's loads read the same vectors, which the optimizer
+                            // merges.
+                            let mut lo = (t.c as i32) as i64;
+                            for y in 0..self.vacc.len() {
+                                let o = b.insts[self.vacc[y] as usize];
+                                let d = (t.c as i32) as i64 - (o.c as i32) as i64;
+                                if o.op == O_LOAD && o.a == t.a && o.ty == t.ty && d > 0 && d < step as i64 && d % eb as i64 == 0 {
+                                    lo = lo.min(o.c as i32);
+                                }
+                            }
+                            let mut e = (((t.c as i32) as i64 - lo) / eb as i64) as u32;
                             nt.a = self.vval(b, u, c, t.a);
+                            nt.c = (((nt.c as i32) as i64 - (e * eb) as i64) as i32) as u32;
                             let mut parts = Vector::<Value>::new();
                             for j in 0..step / eb {
                                 let mut lt = nt;
@@ -3801,6 +3821,8 @@ extend LoopOpt {
                                 parts.push(self.vi(b, lt, b.locs[i as usize]));
                             }
                             while parts.len() > 1 {
+                                let odd = (e & 1) as u16;
+                                e >>= 1;
                                 let mut next = Vector::<Value>::new();
                                 for q in 0..parts.len() / 2 {
                                     next.push(
@@ -3809,7 +3831,7 @@ extend LoopOpt {
                                             Inst {
                                                 op: O_VUNZIP,
                                                 ty: nt.ty,
-                                                aux: 0,
+                                                aux: odd,
                                                 a: parts[2 * q],
                                                 b: parts[2 * q + 1],
                                                 c: VNONE,
@@ -4118,16 +4140,21 @@ extend LoopOpt {
             }
             let r0 = VPARAM | gps + (pv & ~VPARAM) - hb.param_start;
             if fr != 0 {
-                // Each lane into the start value through the call.
+                // The lanes into one by halves (each lane with the one `s` away, `s` halving: every lane
+                // then holds the extreme), lane 0 into the start value through the call.
                 let t = b.insts[self.vrup[r as usize] as usize];
-                let mut red = r0;
-                for k in 0..self.vlanes {
-                    let e = self.vi(b, Inst { op: O_VEXTRACT, ty: rt, aux: k as u16, a: acc, b: VNONE, c: VNONE }, l0);
-                    let ops = [red, e];
+                let mut s = self.vlanes / 2;
+                while s > 0 {
+                    let w = self.vswap(b, acc, vt, s, l0);
+                    let ops = [acc, w];
                     let at2 = b.pool_list(ops[0..2]);
-                    red = self.vi(b, Inst { op: O_CALL, ty: rt, aux: 2, a: t.a, b: t.b, c: at2 }, l0);
+                    acc = self.vi(b, Inst { op: O_VOP, ty: vt, aux: lane_code(fr), a: at2, b: 2, c: VNONE }, l0);
+                    s /= 2;
                 }
-                self.args.push(red);
+                let e = self.vi(b, Inst { op: O_VEXTRACT, ty: rt, aux: 0, a: acc, b: VNONE, c: VNONE }, l0);
+                let ops = [r0, e];
+                let at2 = b.pool_list(ops[0..2]);
+                self.args.push(self.vi(b, Inst { op: O_CALL, ty: rt, aux: 2, a: t.a, b: t.b, c: at2 }, l0));
                 continue;
             }
             if self.vone {

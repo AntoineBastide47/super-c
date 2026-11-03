@@ -50,15 +50,17 @@ static_assert(ops_match(), "std::simd::Op follows the compiler's operation table
 // implies; a name of another instruction set or an unknown one is an error listing the valid names.
 @test
 fn feature_lists_apply_in_order_and_close() {
-    let mut s = tgt::baseline(3, 2);
+    let base = tgt::baseline(3, 2);
+    let mut s = cf::CpuFeatureSet { w: [0, 0] };
     let mut err = String::new();
-    assert(cf::is_empty(s), "wasm32 has no baseline feature");
+    assert(cf::has(base, cf::F_SIMD128) && !cf::has(base, cf::F_RELAXED_SIMD), "wasm32's baseline is simd128");
     assert(cf::apply("+relaxed-simd", 3, 2, true, &mut s, &mut err), "a known name");
     assert(!cf::has(s, cf::F_SIMD128) && cf::has(cf::close(s), cf::F_SIMD128), "relaxed-simd implies simd128");
     assert(cf::apply("simd128,-relaxed-simd", 3, 2, true, &mut s, &mut err), "in order");
     assert(cf::has(s, cf::F_SIMD128) && !cf::has(s, cf::F_RELAXED_SIMD), "the later item wins");
-    assert(cf::apply("+relaxed-simd,-simd128", 3, 2, true, &mut s, &mut err), "a disabled implication");
-    assert(cf::has(cf::close(s), cf::F_SIMD128), "the closure runs after the list");
+    assert(!cf::apply("+relaxed-simd,-simd128", 3, 2, true, &mut s, &mut err), "a baseline feature");
+    assert_eq(err.as_str(), "target feature 'simd128' is part of every wasm32 build");
+    err.clear();
     assert(!cf::apply("+simd128,+neon", 3, 2, true, &mut s, &mut err), "another instruction set's feature");
     assert_eq(err.as_str(), "no target feature 'neon' for wasm32; the wasm32 features are: simd128, relaxed-simd");
     err.clear();
@@ -481,8 +483,8 @@ fn feature_sets_rebuild() {
     let runs: [str; 4] = [
         "build --target=wasm",
         "build --target=wasm",
-        "build --target=wasm --target-feature=+simd128",
-        "build --target=wasm --target-feature=+simd128",
+        "build --target=wasm --target-feature=+relaxed-simd",
+        "build --target=wasm --target-feature=+relaxed-simd",
     ];
     for i in 0usize..4 {
         let r = cli::superc_env_in(root, "SC_BUILD_STATS", "-", unsafe runs[i]);
@@ -501,19 +503,21 @@ fn outside_callers_and_implied_features() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "import std::cpu;\n@arch(wasm32)\n@target_feature([cpu::Feature::Simd128])\n@export(\"exported\")\npub fn exported() i32 {\n    return 1;\n}\n@arch(wasm32)\n@target_feature([cpu::Feature::Simd128])\nfn main() i32 {\n    return 0;\n}\n",
+        "import std::cpu;\n@arch(wasm32)\n@target_feature([cpu::Feature::RelaxedSimd])\n@export(\"exported\")\npub fn exported() i32 {\n    return 1;\n}\n@arch(wasm32)\n@target_feature([cpu::Feature::RelaxedSimd])\nfn main() i32 {\n    return 0;\n}\n",
     );
     let r = p.compile_flags("--target=wasm", "main.spc");
-    assert(!r.ok(), "the build lacks simd128");
+    assert(!r.ok(), "the build lacks relaxed-simd");
     assert(
-        r.out_has("`main` needs `+simd128` (`--target-feature=+simd128`); it is called from outside the program"),
+        r.out_has(
+            "`main` needs `+relaxed-simd` (`--target-feature=+relaxed-simd`); it is called from outside the program",
+        ),
         "main",
     );
     assert(
         r.out_has("a '@export' function cannot need CPU features: C code calls it without a check"),
         "an exported function",
     );
-    let r2 = p.compile_flags("--target=wasm --target-feature=+simd128", "main.spc");
+    let r2 = p.compile_flags("--target=wasm --target-feature=+relaxed-simd", "main.spc");
     assert(!r2.ok() && !r2.out_has("`main` needs"), "with the feature, the export alone fails");
     p.mkfile(
         "main.spc",
