@@ -206,7 +206,7 @@ pub(package) struct Opt {
     extra: Vector<u32>, // the constants the walk made, which the entry block starts with
     aggp: u64, // the entry parameters whose loads move to the entry's start (`agg_params`)
     aggint: u64, // per such parameter `k` below 32 and 8-byte chunk `c`, bit 2k + c: an integer load reads it
-    // The largest aggregate parameter or result the target passes in registers: at most 16 bytes, at most
+    // The largest aggregate parameter the target passes in registers: at most 16 bytes, at most
     // `Package.arg_copy` (wasm32 none, Microsoft x64 8 bytes).
     aggregs: u32,
     aggload: [u32; 64], // per such chunk, its load this walk made at the entry's start (`agg_chunk`), NONE
@@ -3727,14 +3727,14 @@ extend Opt {
 
     // Store or constant fill `i`, the last before block `blk`'s `ret`, of the run of them before it (past
     // instructions that touch no memory and loads of the body's own slots) to the address of an aggregate result the
-    // target returns in registers (`aggregs`, `ret_part`): each 8-byte chunk (of 1, 2, 4 or 8 bytes) whose every leaf byte (of the result's
+    // target returns in registers (`Package.ret_regs`, `ret_part`): each 8-byte chunk (of 1, 2, 4 or 8 bytes) whose every leaf byte (of the result's
     // layout; the others are padding) two or more of the run write, each byte once, one of them with an
     // integer, is one store of their values joined (bits of a float as an integer, a fill's bytes as a
     // constant, each shifted to its offset, padding 0). The targets return such a chunk in one integer
     // register, which the code generator moves the store's value into (`ret_stores`). Whether it did.
     fn ret_chunks(self: &mut Self, pk: &Package, b: &mut Body, blk: u32, i: u32) bool {
         let rt = b.pool[b.sig as usize + 2];
-        if b.sig == NONE || (rt & AGG) == 0 || b.pool[(rt & ~AGG) as usize] > self.aggregs {
+        if b.sig == NONE || (rt & AGG) == 0 || b.pool[(rt & ~AGG) as usize] > pk.ret_regs {
             return false;
         }
         let size = b.pool[(rt & ~AGG) as usize];
@@ -3899,11 +3899,11 @@ extend Opt {
         return true;
     }
 
-    // `rslot`: per slot of `b`, the call whose aggregate result the target returns in registers (`aggregs`) it
-    // receives, when that
+    // `rslot`: per slot of `b`, the call whose aggregate result the target returns in registers
+    // (`Package.ret_regs`) it receives, when that
     // call is the only use of the slot's addresses but loads (not volatile) of them; NONE else. `rload`
     // emptied.
-    fn result_slots(self: &mut Self, b: &Body) {
+    fn result_slots(self: &mut Self, pk: &Package, b: &Body) {
         let ns = b.slots.len();
         fill(&mut self.rslot, ns, NONE);
         fill(&mut self.rload, 2 * ns, NONE);
@@ -3932,7 +3932,7 @@ extend Opt {
                         continue;
                     }
                     // The result's address of a call (its last operand), once.
-                    let call = (t.op == O_CALL || t.op == O_CALLIND) && (b.pool[t.b as usize + 2] & AGG) != 0 && b.pool[(b.pool[t.b as usize + 2] & ~AGG) as usize] <= self.aggregs && b.pool[(t.c + b.pool[t.b as usize]) as usize] == v;
+                    let call = (t.op == O_CALL || t.op == O_CALLIND) && (b.pool[t.b as usize + 2] & AGG) != 0 && b.pool[(b.pool[t.b as usize + 2] & ~AGG) as usize] <= pk.ret_regs && b.pool[(t.c + b.pool[t.b as usize]) as usize] == v;
                     let mut once = true;
                     for r in 0..nu {
                         once = once && (r == q || self.ops[(u0 + r) as usize] != v);
@@ -4069,7 +4069,7 @@ extend Opt {
         self.aggregs = pk.arg_copy.min(16);
         self.aggp = self.agg_params(b);
         self.aggload = [NONE; 64];
-        self.result_slots(b);
+        self.result_slots(pk, b);
         for k in 0..nb {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
@@ -7672,7 +7672,8 @@ extend Opt {
     }
 
     // `and` `i` (block `k`) of `x != 0` and `(x & (x - 1)) == 0`, either order, `x` an integer: whether `x`
-    // is a power of two, in place `(x ^ (x - 1)) >u x - 1`; the `or` of their opposites `<=u` (LLVM's
+    // is a power of two, in place `popcnt(x) == 1` where the target counts bits in one instruction
+    // (`Package.popcnt`), else `(x ^ (x - 1)) >u x - 1`; the `or` of their opposites `!=`, `<=u` (LLVM's
     // expansion of `ctpop(x) == 1` without a population count). Whether it did.
     fn pow2_test(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
@@ -7685,6 +7686,24 @@ extend Opt {
             };
             let x = zero_test(b, p, neg);
             let d = low_clear(b, pk.ptr_bytes, z, neg, x);
+            if x != VNONE && d != VNONE && pk.popcnt && b.type_of(x) != T_I128 {
+                let ty = b.type_of(x);
+                let c = self.before(b, k, i, Inst { op: O_POPCNT, ty: ty, aux: 0, a: x, b: VNONE, c: VNONE });
+                let one = self.constant(b, ty, 1);
+                b.insts[i as usize] = Inst {
+                    op: O_ICMP,
+                    ty: t.ty,
+                    aux: if neg {
+                        C_NE
+                    } else {
+                        C_EQ
+                    },
+                    a: c,
+                    b: one,
+                    c: VNONE,
+                };
+                return true;
+            }
             if x != VNONE && d != VNONE {
                 let ty = b.type_of(x);
                 let xd = self.before(b, k, i, Inst { op: O_XOR, ty: ty, aux: 0, a: x, b: d, c: VNONE });

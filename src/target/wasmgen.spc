@@ -466,7 +466,8 @@ extend Gen {
             return self.refuse("a data model whose pointers are not 32-bit");
         }
         intrin::of_symbols(self.p(), b, "wasm32", &mut self.itpl);
-        self.lv.fold_ops = lv::FOLD_FREE_ZEXT | lv::FOLD_CMP;
+        // A shift's count masked to the width is the shift's own (wasm shifts take the count modulo it).
+        self.lv.fold_ops = lv::FOLD_FREE_ZEXT | lv::FOLD_CMP | lv::FOLD_SHAMT;
         self.lv.run(b);
         self.sh.run(b, &self.lv);
         wa::classify(b, b.sig, self.vregs, &mut self.me);
@@ -2313,6 +2314,19 @@ extend Gen {
         return true;
     }
 
+    // The local `get` reads value `v` from, NONE when it makes it otherwise (a constant, a fold) or has none.
+    fn plain_local(self: &Self, v: Value) u32 {
+        if v == VNONE || (v & VFLAG) != 0 || (v & VPARAM) == 0 && (self.remat[v as usize] || self.lv.pfold[v as usize]) {
+            return NONE;
+        }
+        let x = self.vx(v);
+        return if x == NONE {
+            NONE
+        } else {
+            self.local_of[x as usize]
+        };
+    }
+
     // A checked operation: its wrapped value and its flag (1 when the exact result does not fit).
     fn ovf(self: &mut Self, i: u32, t: Inst) bool {
         let ty = t.ty;
@@ -2423,12 +2437,32 @@ extend Gen {
             }
             return true;
         }
-        // 32 or 64 bits, add or subtract: the wrapped value, and the flag from its operands.
-        self.get(t.a);
-        self.c.local(w::LOCAL_TEE, ra);
-        self.get(t.b);
-        self.c.local(w::LOCAL_TEE, rb);
+        // 32 or 64 bits, add or subtract: the wrapped value, and the flag from its operands. An operand in a
+        // local is read there again (an unsigned sum does not read its second again); the value goes to its
+        // own local when that is neither operand's.
         let add = op == O_ADDO;
+        let la = self.plain_local(t.a);
+        let lb = self.plain_local(t.b);
+        self.get(t.a);
+        let xa = if la != NONE {
+            la
+        } else {
+            self.c.local(w::LOCAL_TEE, ra);
+            ra
+        };
+        self.get(t.b);
+        let xb = if lb != NONE || add && !signed {
+            lb
+        } else {
+            self.c.local(w::LOCAL_TEE, rb);
+            rb
+        };
+        let li = self.local_of[i as usize];
+        let x = if li != NONE && li != la && (li != lb || add && !signed) {
+            li
+        } else {
+            r
+        };
         let o = if add {
             w::I32_ADD
         } else {
@@ -2440,29 +2474,29 @@ extend Gen {
             0u8
         };
         self.c.op(o + d);
-        self.c.local(w::LOCAL_SET, r);
+        self.c.local(w::LOCAL_SET, x);
         if fl != NONE {
             if signed {
-                // add: (a ^ r) & (b ^ r) < 0; sub: (a ^ b) & (a ^ r) < 0.
-                self.c.local(w::LOCAL_GET, ra);
+                // add: (a ^ x) & (b ^ x) < 0; sub: (a ^ b) & (a ^ x) < 0.
+                self.c.local(w::LOCAL_GET, xa);
                 self.c.local(
                     w::LOCAL_GET,
                     if add {
-                        r
+                        x
                     } else {
-                        rb
+                        xb
                     },
                 );
                 self.c.op(w::I32_XOR + d);
                 self.c.local(
                     w::LOCAL_GET,
                     if add {
-                        rb
+                        xb
                     } else {
-                        ra
+                        xa
                     },
                 );
-                self.c.local(w::LOCAL_GET, r);
+                self.c.local(w::LOCAL_GET, x);
                 self.c.op(w::I32_XOR + d);
                 self.c.op(w::I32_AND + d);
                 if wide {
@@ -2473,8 +2507,8 @@ extend Gen {
                     self.c.op(w::I32_LT_S);
                 }
             } else if add {
-                self.c.local(w::LOCAL_GET, r);
-                self.c.local(w::LOCAL_GET, ra);
+                self.c.local(w::LOCAL_GET, x);
+                self.c.local(w::LOCAL_GET, xa);
                 self.c.op(
                     if wide {
                         w::I64_LT_U
@@ -2483,8 +2517,8 @@ extend Gen {
                     },
                 );
             } else {
-                self.c.local(w::LOCAL_GET, ra);
-                self.c.local(w::LOCAL_GET, rb);
+                self.c.local(w::LOCAL_GET, xa);
+                self.c.local(w::LOCAL_GET, xb);
                 self.c.op(
                     if wide {
                         w::I64_LT_U
@@ -2495,9 +2529,9 @@ extend Gen {
             }
             self.c.local(w::LOCAL_SET, fl);
         }
-        if self.local_of[i as usize] != NONE {
-            self.c.local(w::LOCAL_GET, r);
-            self.c.local(w::LOCAL_SET, self.local_of[i as usize]);
+        if li != NONE && x != li {
+            self.c.local(w::LOCAL_GET, x);
+            self.c.local(w::LOCAL_SET, li);
         }
         return true;
     }

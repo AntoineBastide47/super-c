@@ -505,6 +505,29 @@ extend Live {
         return k < np && b.blocks[0].param_start == 0 && (b.pool[b.sig as usize + 3 + k] & (SIG_SEXT | AGG)) == 0;
     }
 
+    // `FOLD_SHAMT`: a 32- or 64-bit shift's count that an `and` with the width's mask (`& 31`, `& 63`) makes,
+    // read only there, folds into the shift, which takes the count modulo the width.
+    fn shift_counts(self: &mut Self, b: &Body) {
+        if (self.fold_ops & FOLD_SHAMT) == 0 {
+            return;
+        }
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            let bits = type_bits(t.ty, 8);
+            if t.op < O_SHL || t.op > O_ASHR || !is_int(t.ty) || bits != 32 && bits != 64 || self.pfold[i] {
+                continue;
+            }
+            let m = t.b;
+            if (m & (VPARAM | VFLAG)) != 0 || m == VNONE || b.insts[m as usize].op != O_AND || self.count[m as usize] != 1 || self.pfold[m as usize] {
+                continue;
+            }
+            let k = int_const(b, b.insts[m as usize].b);
+            if k != u64::MAX && (k & (bits - 1) as u64) == (bits - 1) as u64 {
+                self.pfold[m as usize] = true;
+            }
+        }
+    }
+
     fn folds(self: &mut Self, b: &Body) {
         let ni = b.insts.len();
         self.fold.truncate(0);
@@ -781,6 +804,7 @@ extend Live {
             }
         }
         if self.fold_max == 0 {
+            self.shift_counts(b);
             return;
         }
         for i in 0..ni {
@@ -842,23 +866,7 @@ extend Live {
                 }
             }
         }
-        if (self.fold_ops & FOLD_SHAMT) != 0 {
-            for i in 0..ni {
-                let t = b.insts[i];
-                let bits = type_bits(t.ty, 8);
-                if t.op < O_SHL || t.op > O_ASHR || !is_int(t.ty) || bits != 32 && bits != 64 || self.pfold[i] {
-                    continue;
-                }
-                let m = t.b;
-                if (m & (VPARAM | VFLAG)) != 0 || m == VNONE || b.insts[m as usize].op != O_AND || self.count[m as usize] != 1 || self.pfold[m as usize] {
-                    continue;
-                }
-                let k = int_const(b, b.insts[m as usize].b);
-                if k != u64::MAX && (k & (bits - 1) as u64) == (bits - 1) as u64 {
-                    self.pfold[m as usize] = true;
-                }
-            }
-        }
+        self.shift_counts(b);
         if (self.fold_ops & FOLD_SHOP) != 0 {
             for i in 0..ni {
                 let t = b.insts[i];

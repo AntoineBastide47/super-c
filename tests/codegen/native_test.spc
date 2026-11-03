@@ -2311,7 +2311,8 @@ int main(void) {
 // on the operand stack (`wasmgen::stack_order`): `inord`'s two shifts feed its difference with no local
 // (local.get 0, i32.const 24, i32.shr_u, local.get 0, i32.const 8, i32.shl, i32.sub, end); `rev` reads
 // them the other way, so the first one made goes through its local. `comm`'s sum reads them the other way
-// too, but a sum reads either first: both stay (i32.shl, local.get 0, i32.const 24, i32.shr_u, i32.add). All
+// too, but a sum reads either first: both stay (i32.shl, local.get 0, i32.const 24, i32.shr_u, i32.add).
+// `shm`'s count masked to 31 is the shift's own (`lv::FOLD_SHAMT`: its body local.get 0, local.get 1, i32.shl). All
 // give the C results.
 @test
 fn values_read_in_order_stay_on_the_wasm_stack() {
@@ -2320,6 +2321,7 @@ sym @inord fn global
 sym @rev fn global
 sym @twice fn global
 sym @comm fn global
+sym @shm fn global
 fn @inord
   sig (i32) -> i32
 b0(v0: i32):
@@ -2357,6 +2359,13 @@ b0(v0: i32):
   v4 = lshr.i32 v0, v3
   v5 = add.i32 v4, v2
   ret v5
+fn @shm
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 31
+  v3 = and.i32 v1, v2
+  v4 = shl.i32 v0, v3
+  ret v4
 )";
     let mut obj = Vector::<u8>::new();
     let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
@@ -2373,11 +2382,15 @@ b0(v0: i32):
     assert(holds(&obj, tee[0..2]) && holds(&obj, sub[0..2]), "twice");
     let comm: [u8; 7] = [0x74, 0x20, 0x00, 0x41, 0x18, 0x76, 0x6A];
     assert(holds(&obj, comm[0..7]), "comm");
+    // The whole body: its size (7), no locals, the code.
+    let shm: [u8; 8] = [0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x74, 0x0B];
+    assert(holds(&obj, shm[0..8]), "shm");
     let drv = M"(#include <stdint.h>
 int32_t inord(int32_t);
 int32_t rev(int32_t);
 int32_t twice(int32_t);
 int32_t comm(int32_t);
+int32_t shm(int32_t, int32_t);
 int main(void) {
   int32_t xs[4] = {0x12345678, -1, 7, -0x7fffffff};
   for (int k = 0; k < 4; k++) {
@@ -2385,6 +2398,9 @@ int main(void) {
     if ((uint32_t)inord(xs[k]) != (x >> 24) - (x << 8) || (uint32_t)rev(xs[k]) != (x << 8) - (x >> 24)) return 1;
     if ((uint32_t)twice(xs[k]) != ((x >> 24) - (x << 8)) * (x >> 24)) return 2;
     if ((uint32_t)comm(xs[k]) != (x >> 24) + (x << 8)) return 3;
+    for (int n = 0; n < 70; n += 13) {
+      if ((uint32_t)shm(xs[k], n) != x << (n & 31)) return 4;
+    }
   }
   return 0;
 }
@@ -10285,6 +10301,74 @@ fn coff_section(b: &Vector<u8>, name: str) u64 {
         }
     }
     return 0;
+}
+
+// Checked sums and differences, unsigned and signed, of 32 and 64 bits, each value or its flag chosen (wasm32
+// reads the operands from their locals and writes the value to its own, which may be the second operand's):
+// on the edges of each range they give what C's overflow builtins do.
+@test
+fn checked_sums_and_differences_choose_by_their_flags() {
+    let lir = M"(lir ptr 8
+sym @au fn global
+sym @as fn global
+sym @su fn global
+sym @ss fn global
+fn @au
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 -1
+  v3, v4 = addo.u.i32 v0, v1
+  v5 = select.i32 v4, v2, v3
+  ret v5
+fn @as
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 77
+  v3, v4 = addo.s.i64 v0, v1
+  v5 = select.i64 v4, v2, v3
+  ret v5
+fn @su
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 5
+  v3, v4 = subo.u.i64 v0, v1
+  v5 = select.i64 v4, v2, v3
+  ret v5
+fn @ss
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 9
+  v3, v4 = subo.s.i32 v0, v1
+  v5 = select.i32 v4, v2, v3
+  ret v5
+)";
+    let drv = M"(#include <stdint.h>
+uint32_t au(uint32_t, uint32_t);
+int64_t as(int64_t, int64_t);
+uint64_t su(uint64_t, uint64_t);
+int32_t ss(int32_t, int32_t);
+int main(void) {
+  static const uint64_t v[8] = {0, 1, 2, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x7FFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF};
+  for (int i = 0; i < 8; i++)
+    for (int k = 0; k < 8; k++) {
+      uint32_t r32;
+      uint64_t r64;
+      int32_t s32;
+      int64_t s64;
+      uint32_t a = (uint32_t)v[i], b = (uint32_t)v[k];
+      if (au(a, b) != (__builtin_add_overflow(a, b, &r32) ? 0xFFFFFFFF : r32)) return 1;
+      if (as((int64_t)v[i], (int64_t)v[k]) != (__builtin_add_overflow((int64_t)v[i], (int64_t)v[k], &s64) ? 77 : s64)) return 2;
+      if (su(v[i], v[k]) != (__builtin_sub_overflow(v[i], v[k], &r64) ? 5 : r64)) return 3;
+      if (ss((int32_t)a, (int32_t)b) != (__builtin_sub_overflow((int32_t)a, (int32_t)b, &s32) ? 9 : s32)) return 4;
+    }
+  return 0;
+}
+)";
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // A wasm32 block parameter shares the local of an argument that its block never reads (here `x`, which the

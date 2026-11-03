@@ -52,6 +52,12 @@ pub(package) struct Isa {
     /// The native backend rounds float vectors halfway away from zero in one instruction (arm64's FRINTA):
     /// `lir::ir::Package::vround_away`.
     pub(package) vector_round_away: bool,
+    /// Every processor counts an integer's set bits in one instruction (wasm32's `popcnt`; x86-64 only with
+    /// the `popcnt` feature): `lir::ir::Package::popcnt`.
+    pub(package) popcount: bool,
+    /// The largest aggregate result the native backend returns in registers, under every calling convention
+    /// of the instruction set (`lir::ir::Package::ret_regs`): 16 bytes in two registers, none on wasm32.
+    pub(package) ret_regs: u32,
     /// One instruction gives the high half of a 64-bit product (UMULH, MUL's rdx): the optimizer divides
     /// a 64-bit value by a constant with a product (`lir::ir::Package::mul_high`).
     pub(package) mul_high: bool,
@@ -248,6 +254,8 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_float: true,
         vector_round: false,
         vector_round_away: false,
+        popcount: false,
+        ret_regs: 16,
         mul_high: true,
         bswap: true,
         bitrev: false,
@@ -287,6 +295,8 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_float: true,
         vector_round: true,
         vector_round_away: true,
+        popcount: false,
+        ret_regs: 16,
         mul_high: true,
         bswap: true,
         bitrev: true,
@@ -326,6 +336,8 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_float: true,
         vector_round: true,
         vector_round_away: false,
+        popcount: true,
+        ret_regs: 0,
         mul_high: false,
         bswap: false,
         bitrev: false,
@@ -672,6 +684,8 @@ const UNKNOWN_ISA: Isa = Isa {
     vector_float: false,
     vector_round: false,
     vector_round_away: false,
+    popcount: false,
+    ret_regs: 0,
     mul_high: false,
     bswap: false,
     bitrev: false,

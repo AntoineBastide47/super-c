@@ -625,6 +625,7 @@ extend CEmit {
             };
             l.pkg.hfa_regs = tgt::callconv_of(pk.build_target, pk.arch).hfa_regs;
             l.pkg.apairs = tgt::isa(pk.arch).access_pairs;
+            l.pkg.ret_regs = tgt::isa(pk.arch).ret_regs;
             l.pkg.sum_trees = tgt::isa(pk.arch).sum_trees;
             l.pkg.vops = tgt::isa(pk.arch).vector_ops;
             l.pkg.vec_mulh = tgt::isa(pk.arch).vector_mulh;
@@ -648,7 +649,7 @@ extend CEmit {
             };
             l.pkg.pairs = tgt::isa(pk.arch).pairs;
             l.pkg.align_loops = pk.opt > 0 && pk.opt != bman::OPT_S && pk.opt != bman::OPT_Z;
-            l.pkg.popcnt = feature(pk, "popcnt");
+            l.pkg.popcnt = tgt::isa(pk.arch).popcount || feature(pk, "popcnt");
             l.pkg.sse41 = feature(pk, "sse4.1");
             l.pkg.lse = feature(pk, "lse");
             l.pkg.rcpc = feature(pk, "rcpc");

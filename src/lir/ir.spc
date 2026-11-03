@@ -1616,6 +1616,9 @@ pub(package) struct Package {
     /// (`target::table::Isa::arg_copy`): the optimizer passes the source of a copy into such an argument
     /// in place of the copy.
     pub(package) arg_copy: u32,
+    /// The largest aggregate result the native backend returns in registers (`target::table::Isa::ret_regs`):
+    /// 16 bytes in two registers, none on wasm32 (through memory).
+    pub(package) ret_regs: u32,
     /// Whether the calling convention passes a homogeneous float aggregate parameter or result (`homogeneous`)
     /// one element per register (AAPCS64): the packing of straight-line values (`lir::slp`) loads and stores
     /// no vector of its elements, which the native backend reads from and returns in their registers.
@@ -1632,8 +1635,8 @@ pub(package) struct Package {
     /// The native backend starts each loop at a 16-byte boundary, as compilers do for speed but not size
     /// (x86-64: a loop's branches then share fewer fetch blocks and decoded-instruction cache lines).
     pub(package) align_loops: bool,
-    /// The processor counts set bits in one instruction where that is optional (x86-64 `popcnt`, from
-    /// x86-64-v2 or `-mpopcnt`).
+    /// The processor counts set bits in one instruction: wasm32's every one, x86-64's where that is optional
+    /// (`popcnt`, from x86-64-v2 or `-mpopcnt`).
     pub(package) popcnt: bool,
     /// The processor has SSE4.1 (x86-64 `roundsd`, from x86-64-v2 or `-msse4.1`): the C library's exact
     /// roundings are instructions (`target::x64intrin::SSE41_ROWS`).
@@ -1765,6 +1768,7 @@ extend Package {
             ccmp: true,
             postinc: false,
             arg_copy: 0,
+            ret_regs: 16,
             hfa_regs: false,
             apairs: true,
             sum_trees: true,

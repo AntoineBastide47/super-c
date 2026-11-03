@@ -85,15 +85,16 @@ fn verified(p: &Package) {
     }
 }
 
-// `optimized` for a target that passes and returns aggregates of up to `copy` bytes by value
-// (`Package.arg_copy`; at most 16 in registers).
-fn optimized_copy(text: str, copy: u32) (Package, Package) {
+// `optimized` for a target that passes aggregates of up to `copy` bytes by value (`Package.arg_copy`; at
+// most 16 in registers) and returns those of up to `ret` bytes in registers (`Package.ret_regs`).
+fn optimized_copy(text: str, copy: u32, ret: u32) (Package, Package) {
     let mut err = String::new();
     let q = lparse::parse(text, &mut err);
     assert(q.is_some(), err.as_str());
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
     after.arg_copy = copy;
+    after.ret_regs = ret;
     let none = Vector::<bool>::new();
     lopt::optimize(
         &mut after,
@@ -2634,11 +2635,11 @@ b4(v9: i64):
 
 // Whether an integer is a power of two, `x != 0 && (x & (x - 1)) == 0` in either order, is one unsigned
 // comparison `(x ^ (x - 1)) >u x - 1`, and its negation `x == 0 || (x & (x - 1)) != 0` the opposite one
-// (`pow2_test`). Each result is the one of the body before.
+// (`pow2_test`); where the target counts bits in one instruction (`Package.popcnt`), `popcnt(x) == 1` and
+// `!= 1`. Each result is the one of the body before.
 @test
 fn power_of_two_tests_compare_once() {
-    let (b, a) = optimized(
-        M"(lir ptr 8
+    let src = M"(lir ptr 8
 sym @is fn global
 sym @isnt fn global
 fn @is
@@ -2663,8 +2664,8 @@ b0(v0: i64):
   v6 = icmp.ne v5, v1
   v7 = or.i8 v3, v6
   ret v7
-)",
-    );
+)";
+    let (b, a) = optimized(src);
     let s = text_of(&a, "is");
     assert(s.contains("xor.i32") && s.contains("icmp.ugt") && !s.contains(" and."), s.as_str());
     let n = text_of(&a, "isnt");
@@ -2675,6 +2676,38 @@ b0(v0: i64):
         let p = xs[k] != 0 && (xs[k] & xs[k] - 1) == 0;
         same_result(&b, &a, "is", x, p as u64);
         same_result(&b, &a, "isnt", x, (!p) as u64);
+    }
+    let mut err = String::new();
+    let mut c = lparse::parse(src, &mut err).unwrap();
+    c.popcnt = true;
+    let none = Vector::<bool>::new();
+    lopt::optimize(
+        &mut c,
+        &none,
+        lopt::Config {
+            inline: il::SPEED,
+            loops: lu::Budgets {
+                peel: 0,
+                partial: 0,
+                version: 0,
+                unswitch: 0,
+                rotate: 0,
+                vector: 0,
+                interleave: 0,
+                fin: 0,
+            },
+        },
+    );
+    verified(&c);
+    let cs = text_of(&c, "is");
+    let cn = text_of(&c, "isnt");
+    assert(cs.contains("popcnt.i32") && cs.contains("icmp.eq") && !cs.contains("xor"), cs.as_str());
+    assert(cn.contains("popcnt.i64") && cn.contains("icmp.ne") && !cn.contains("xor"), cn.as_str());
+    for k in 0..8 {
+        let x: []u64 = [xs[k]];
+        let p = xs[k] != 0 && (xs[k] & xs[k] - 1) == 0;
+        same_result(&b, &c, "is", x, p as u64);
+        same_result(&b, &c, "isnt", x, (!p) as u64);
     }
 }
 
@@ -2784,6 +2817,7 @@ b4:
   ret
 )",
         16,
+        16,
     );
     let d = text_of(&a, "dig");
     assert(!d.contains("memset") && !d.contains("load"), d.as_str());
@@ -2815,8 +2849,8 @@ b4:
 // Small aggregates by value whose fields share an 8-byte chunk, which a target that passes and returns them
 // in registers (16 bytes) takes in one integer register: each field of a parameter comes from one load of its
 // chunk, the result's stores before a return join into one store per chunk (a float's bits among them), and a
-// 4-byte fill of zero is a store. A target that passes them by address (`Package.arg_copy` 0, wasm32) keeps
-// the fields' loads and stores.
+// 4-byte fill of zero is a store. A target that passes and returns them through memory (wasm32) keeps the
+// fields' loads and stores; one that returns them through memory alone, the result's stores.
 @test
 fn aggregate_fields_in_one_chunk_load_and_store_whole() {
     let src = M"(lir ptr 8
@@ -2904,7 +2938,7 @@ b0(v0: i64):
   v20 = zext.i64 v19
   ret v20
 )";
-    let (b, a) = optimized_copy(src, 16);
+    let (b, a) = optimized_copy(src, 16, 16);
     let p = text_of(&a, "padd");
     assert(!p.contains("load.i32") && p.contains("load.i64") && p.contains("lshr.i64"), "each parameter is one load");
     assert(p.contains("or.i64") && p.find("store") == p.rfind("store"), "the result is one store");
@@ -2919,10 +2953,15 @@ b0(v0: i64):
     same_result(&b, &a, "use", x, 21 * 16 + 3 + 1000 + 9);
     let y: []u64 = [2];
     same_result(&b, &a, "use", y, 7 * 16 + 3);
-    let (_, w) = optimized_copy(src, 0);
+    let (_, w) = optimized_copy(src, 0, 0);
     let wp = text_of(&w, "padd");
     assert(!wp.contains("load.i64") && !wp.contains("lshr") && !wp.contains("or.i64"), wp.as_str());
     same_result(&b, &w, "use", x, 21 * 16 + 3 + 1000 + 9);
+    // Passed in registers but returned through memory: the parameters' chunks, the result's two stores.
+    let (_, m) = optimized_copy(src, 16, 0);
+    let mp = text_of(&m, "padd");
+    assert(mp.contains("lshr") && !mp.contains("or.i64") && mp.find("store") != mp.rfind("store"), mp.as_str());
+    same_result(&b, &m, "use", x, 21 * 16 + 3 + 1000 + 9);
 }
 
 // A copy out of the memory a call writes its aggregate result into merges that memory with the copy's
