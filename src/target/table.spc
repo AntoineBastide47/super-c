@@ -61,7 +61,8 @@ pub(package) struct Isa {
     /// One instruction gives the high half of a 64-bit product (UMULH, MUL's rdx): the optimizer divides
     /// a 64-bit value by a constant with a product (`lir::ir::Package::mul_high`).
     pub(package) mul_high: bool,
-    /// One instruction reverses the bytes of an integer (REV, BSWAP): `lir::ir::Package::bswap`.
+    /// The bytes of an integer reverse in one instruction (REV, BSWAP) or a few (wasm32's rotates):
+    /// `lir::ir::Package::bswap`.
     pub(package) bswap: bool,
     /// One instruction reverses the bits of an integer (RBIT): `lir::ir::Package::bitrev`.
     pub(package) bitrev: bool,
@@ -339,7 +340,7 @@ pub(package) const ISAS: [Isa; 3] = [
         popcount: true,
         ret_regs: 0,
         mul_high: false,
-        bswap: false,
+        bswap: true,
         bitrev: false,
         vector_ucmp: true,
         ccmp: false,

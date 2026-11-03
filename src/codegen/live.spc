@@ -42,6 +42,9 @@ pub(package) const FOLD_MULL: u64 = 1024;
 pub(package) const FOLD_SHOP: u64 = 2048;
 pub(package) const FOLD_FCMP: u64 = 4096;
 pub(package) const FOLD_BLEN: u64 = 8192;
+/// A select between a value and that value plus 1, the sum read only there: the sum folds in (wasm32's
+/// `x + c`).
+pub(package) const FOLD_SINC: u64 = 274877906944;
 pub(package) const FOLD_CARRY: u64 = 16384;
 pub(package) const FOLD_FSEL: u64 = 32768;
 pub(package) const FOLD_NOT: u64 = 65536;
@@ -505,6 +508,29 @@ extend Live {
         return k < np && b.blocks[0].param_start == 0 && (b.pool[b.sig as usize + 3 + k] & (SIG_SEXT | AGG)) == 0;
     }
 
+    // `FOLD_SINC`: a select of a value and its sum with 1 (either side), that sum read only there, folds the sum
+    // in (`inc_side`).
+    fn select_incs(self: &mut Self, b: &Body) {
+        if (self.fold_ops & FOLD_SINC) == 0 {
+            return;
+        }
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if t.op != O_SELECT || t.ty != T_I32 && t.ty != T_I64 {
+                continue;
+            }
+            let s = inc_side(b, t);
+            let x = if s == 1 {
+                t.b
+            } else {
+                t.c
+            };
+            if s != 0 && self.count[x as usize] == 1 && !self.pfold[x as usize] {
+                self.pfold[x as usize] = true;
+            }
+        }
+    }
+
     // `FOLD_SHAMT`: a 32- or 64-bit shift's count that an `and` with the width's mask (`& 31`, `& 63`) makes,
     // read only there, folds into the shift, which takes the count modulo the width.
     fn shift_counts(self: &mut Self, b: &Body) {
@@ -803,6 +829,7 @@ extend Live {
                 }
             }
         }
+        self.select_incs(b);
         if self.fold_max == 0 {
             self.shift_counts(b);
             return;
@@ -3361,6 +3388,25 @@ pub(package) fn shl_source(b: &Body, pfold: &Vector<bool>, v: Value) Value {
         return v;
     }
     return b.insts[v as usize].a;
+}
+
+/// For select `t`, the side that is the other plus 1 (an `add` of it and constant 1): 1 for its true side, 2
+/// for its false side, 0 when neither is.
+pub(package) fn inc_side(b: &Body, t: Inst) u8 {
+    for q in 0..2u8 {
+        let (s, o) = if q == 0 {
+            (t.b, t.c)
+        } else {
+            (t.c, t.b)
+        };
+        if (s & (VPARAM | VFLAG)) == 0 && s != VNONE && b.insts[s as usize].op == O_ADD && b.insts[s as usize].a == o && int_const(
+            b,
+            b.insts[s as usize].b,
+        ) == 1 {
+            return q + 1;
+        }
+    }
+    return 0;
 }
 
 /// The amount a shift with amount operand `v` takes: the operand of `v` when `v` is a mask folded into the

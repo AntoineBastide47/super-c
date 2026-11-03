@@ -2373,8 +2373,9 @@ b0(v0: i32, v1: i32):
         object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
         "the wasm object",
     );
-    let inord: [u8; 12] = [0x20, 0x00, 0x41, 0x18, 0x76, 0x20, 0x00, 0x41, 0x08, 0x74, 0x6B, 0x0B];
-    assert(holds(&obj, inord[0..12]), "inord");
+    // The whole body: its size (13), no locals (the shifts' went with their accesses), the code.
+    let inord: [u8; 14] = [0x0D, 0x00, 0x20, 0x00, 0x41, 0x18, 0x76, 0x20, 0x00, 0x41, 0x08, 0x74, 0x6B, 0x0B];
+    assert(holds(&obj, inord[0..14]), "inord");
     // `twice` reads its first shift again after the difference: its write stays, a `local.tee` (i32.shr_u,
     // local.tee), and the difference takes it from the stack (i32.shl, i32.sub).
     let tee: [u8; 2] = [0x76, 0x22];
@@ -10301,6 +10302,128 @@ fn coff_section(b: &Vector<u8>, name: str) u64 {
         }
     }
     return 0;
+}
+
+// Byte swaps of 16, 32 and 64 bits (wasm32 has no instruction: rotates and masks, `byte_swap`) give C's
+// `__builtin_bswap16`, `32` and `64`.
+@test
+fn byte_swaps_of_each_width_run() {
+    let lir = M"(lir ptr 8
+sym @sw16 fn global
+sym @sw32 fn global
+sym @sw64 fn global
+fn @sw16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = bswap.i16 v0
+  ret v1
+fn @sw32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = bswap.i32 v0
+  ret v1
+fn @sw64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = bswap.i64 v0
+  ret v1
+)";
+    let drv = M"(#include <stdint.h>
+uint16_t sw16(uint16_t);
+uint32_t sw32(uint32_t);
+uint64_t sw64(uint64_t);
+int main(void) {
+  uint64_t x = 0x0123456789ABCDEFull;
+  for (int k = 0; k < 64; k++) {
+    x = x * 6364136223846793005ull + 1442695040888963407ull;
+    if (sw16((uint16_t)x) != __builtin_bswap16((uint16_t)x)) return 1;
+    if (sw32((uint32_t)x) != __builtin_bswap32((uint32_t)x)) return 2;
+    if (sw64(x) != __builtin_bswap64(x)) return 3;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
+// A select of a value and that value plus 1 is the value plus the condition on wasm32 (`lv::FOLD_SINC`):
+// `@up` is local.get 0, local.get 0, local.get 1, i32.lt_u, i32.add; `@down` takes the sum on its false side
+// (the condition inverted) and `@up64` widens the condition; `@nz`'s test with 0 adds 1, not the tested
+// value. All give the C results.
+@test
+fn selects_of_a_value_and_its_increment_add_the_condition() {
+    let lir = M"(lir ptr 8
+sym @up fn global
+sym @down fn global
+sym @up64 fn global
+sym @nz fn global
+fn @up
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 1
+  v3 = icmp.ult v0, v1
+  v4 = add.i32 v0, v2
+  v5 = select.i32 v3, v4, v0
+  ret v5
+fn @down
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 1
+  v3 = icmp.slt v0, v1
+  v4 = add.i32 v0, v2
+  v5 = select.i32 v3, v0, v4
+  ret v5
+fn @up64
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = icmp.ne v0, v1
+  v4 = add.i64 v0, v2
+  v5 = select.i64 v3, v4, v0
+  ret v5
+fn @nz
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 1
+  v3 = iconst.i32 0
+  v4 = icmp.ne v1, v3
+  v5 = add.i32 v0, v2
+  v6 = select.i32 v4, v5, v0
+  ret v6
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let up: [u8; 9] = [0x20, 0x00, 0x20, 0x00, 0x20, 0x01, 0x49, 0x6A, 0x0B];
+    assert(holds(&obj, up[0..9]), "up");
+    let drv = M"(#include <stdint.h>
+int32_t up(int32_t, int32_t);
+int32_t down(int32_t, int32_t);
+int64_t up64(int64_t, int64_t);
+int32_t nz(int32_t, int32_t);
+int main(void) {
+  static const int32_t v[5] = {-2147483647 - 1, -1, 0, 5, 2147483647};
+  for (int i = 0; i < 5; i++)
+    for (int k = 0; k < 5; k++) {
+      int32_t x = v[i], y = v[k];
+      if (up(x, y) != ((uint32_t)x < (uint32_t)y ? (int32_t)((uint32_t)x + 1) : x)) return 1;
+      if (down(x, y) != (x < y ? x : (int32_t)((uint32_t)x + 1))) return 2;
+      if (up64(x, y) != (x != y ? (int64_t)x + 1 : (int64_t)x)) return 3;
+      if (nz(x, y) != (y != 0 ? (int32_t)((uint32_t)x + 1) : x)) return 4;
+    }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
 }
 
 // Checked sums and differences, unsigned and signed, of 32 and 64 bits, each value or its flag chosen (wasm32

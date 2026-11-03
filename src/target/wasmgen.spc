@@ -467,7 +467,7 @@ extend Gen {
         }
         intrin::of_symbols(self.p(), b, "wasm32", &mut self.itpl);
         // A shift's count masked to the width is the shift's own (wasm shifts take the count modulo it).
-        self.lv.fold_ops = lv::FOLD_FREE_ZEXT | lv::FOLD_CMP | lv::FOLD_SHAMT;
+        self.lv.fold_ops = lv::FOLD_FREE_ZEXT | lv::FOLD_CMP | lv::FOLD_SHAMT | lv::FOLD_SINC;
         self.lv.run(b);
         self.sh.run(b, &self.lv);
         wa::classify(b, b.sig, self.vregs, &mut self.me);
@@ -528,6 +528,7 @@ extend Gen {
         self.c.op(w::END);
         if !self.asm_code {
             self.stack_values();
+            self.drop_locals();
         }
         return self.finish(s);
     }
@@ -542,6 +543,7 @@ extend Gen {
     // relocations and the line rows move with the code.
     fn stack_values(self: &mut Self) {
         let n = self.c.acc.len();
+        self.cuts.truncate(0);
         if n < 2 {
             return;
         }
@@ -658,6 +660,61 @@ extend Gen {
             m += 1;
         }
         self.rows.truncate(m);
+    }
+
+    // The locals that no access reads or writes once `stack_values` cut its accesses go; the others keep their
+    // order. Only when every index is one LEB byte (below 128), so the code keeps its length.
+    fn drop_locals(self: &mut Self) {
+        let nw = self.nwp as usize;
+        let nl = nw + self.locals.len();
+        let n = self.c.acc.len();
+        if self.locals.len() == 0 || nl > 128 {
+            return;
+        }
+        let mut used = Vector::<bool>::with_capacity(nl);
+        used.resize_default(nl);
+        let mut alive = Vector::<bool>::with_capacity(n);
+        // The accesses and the cuts in code order, neither cut overlapping another.
+        let mut q: usize = 0;
+        for i in 0..n {
+            let at = (self.c.acc[i] >> 32) as u32;
+            while q < self.cuts.len() && (self.cuts[q] & 0xFFFFFFFF) as u32 <= at {
+                q += 1;
+            }
+            let cut = q < self.cuts.len() && (self.cuts[q] >> 32) as u32 <= at;
+            alive.push(!cut);
+            if !cut {
+                used[(self.c.acc[i] & 0xFFFFFFFF) as usize] = true;
+            }
+        }
+        let mut gone = false;
+        for l in nw..nl {
+            gone = gone || !used[l];
+        }
+        if !gone {
+            return;
+        }
+        let mut to = Vector::<u32>::with_capacity(nl);
+        let mut kept = Vector::<u8>::with_capacity(self.locals.len());
+        for l in 0..nl {
+            if l < nw {
+                to.push(l as u32);
+            } else if used[l] {
+                to.push((nw + kept.len()) as u32);
+                kept.push(self.locals[l - nw]);
+            } else {
+                to.push(NONE);
+            }
+        }
+        let mut cur = Cursor { q: 0, d: 0 };
+        for i in 0..n {
+            if !alive[i] {
+                continue;
+            }
+            let at = self.moved(&mut cur, (self.c.acc[i] >> 32) as u32);
+            self.c.bytes[at as usize + 1] = to[(self.c.acc[i] & 0xFFFFFFFF) as usize] as u8;
+        }
+        self.locals = kept;
     }
 
     // Whether a control instruction (`Code.ctl`) lies between code bytes `a` and `b`: a binary search.
@@ -1916,6 +1973,9 @@ extend Gen {
         if op == O_CLZ || op == O_CTZ || op == O_POPCNT {
             return self.bit_count(i, t);
         }
+        if op == O_BSWAP {
+            return self.byte_swap(i, t);
+        }
         if op == O_ADDO || op == O_SUBO || op == O_MULO {
             return self.ovf(i, t);
         }
@@ -2284,6 +2344,61 @@ extend Gen {
         self.c.i64_const(0xFFFFFFFF);
         self.c.op(w::I64_AND);
         self.c.local(w::LOCAL_SET, lo);
+    }
+
+    // The bytes of `t.a` reversed (`O_BSWAP`; wasm has no instruction for it). 32 bits: the even bytes rotated
+    // right by 8 or the value rotated right by 24, each kept to its bytes `0x00FF00FF` (LLVM's form); 16: the
+    // two bytes swapped; 64: bytes, then halves of 32 bits swapped in pairs, then the words rotated.
+    fn byte_swap(self: &mut Self, i: u32, t: Inst) bool {
+        if t.ty == T_I16 {
+            let x = self.tmp(w::I32);
+            self.get(t.a);
+            self.c.local(w::LOCAL_TEE, x);
+            self.c.i32_const(8);
+            self.c.op(w::I32_SHL);
+            self.c.local(w::LOCAL_GET, x);
+            self.c.i32_const(8);
+            self.c.op(w::I32_SHR_U);
+            self.c.op(w::I32_OR);
+            self.c.i32_const(0xFFFF);
+            self.c.op(w::I32_AND);
+        } else if t.ty == T_I32 {
+            let x = self.tmp(w::I32);
+            self.get(t.a);
+            self.c.local(w::LOCAL_TEE, x);
+            self.c.i32_const(0x00FF00FF);
+            self.c.op(w::I32_AND);
+            self.c.i32_const(8);
+            self.c.op(w::I32_ROTR);
+            self.c.local(w::LOCAL_GET, x);
+            self.c.i32_const(24);
+            self.c.op(w::I32_ROTR);
+            self.c.i32_const(0x00FF00FF);
+            self.c.op(w::I32_AND);
+            self.c.op(w::I32_OR);
+        } else {
+            let x = self.tmp(w::I64);
+            self.get(t.a);
+            let steps: [(i64, i64); 2] = [(0x00FF00FF00FF00FF, 8), (0x0000FFFF0000FFFF, 16)];
+            for k in 0..2usize {
+                let (m, s) = steps[k];
+                self.c.local(w::LOCAL_TEE, x);
+                self.c.i64_const(m);
+                self.c.op(w::I64_AND);
+                self.c.i64_const(s);
+                self.c.op(w::I64_SHL);
+                self.c.local(w::LOCAL_GET, x);
+                self.c.i64_const(s);
+                self.c.op(w::I64_SHR_U);
+                self.c.i64_const(m);
+                self.c.op(w::I64_AND);
+                self.c.op(w::I64_OR);
+            }
+            self.c.i64_const(32);
+            self.c.op(w::I64_ROTL);
+        }
+        self.put(i);
+        return true;
     }
 
     fn bit_count(self: &mut Self, i: u32, t: Inst) bool {
@@ -2699,8 +2814,9 @@ extend Gen {
         );
     }
 
-    // Push branch or select condition `v`, negated when `neg`.
-    fn get_cond(self: &mut Self, v: Value, neg: bool) {
+    // Push branch or select condition `v`, negated when `neg`: any nonzero value for true when `truth`
+    // (`cmp_push`), else 1.
+    fn get_cond(self: &mut Self, v: Value, neg: bool, truth: bool) {
         if (v & (VPARAM | VFLAG)) == 0 && self.lv.pfold[v as usize] && self.b().insts[v as usize].op == O_ICMP {
             let t = self.b().insts[v as usize];
             self.cmp_push(
@@ -2710,7 +2826,7 @@ extend Gen {
                 } else {
                     t.aux
                 },
-                true,
+                truth,
             );
             return;
         }
@@ -3477,7 +3593,7 @@ extend Gen {
             self.vpre(i);
             self.vget(t.b);
             self.vget(t.c);
-            self.get_cond(t.a, false);
+            self.get_cond(t.a, false, true);
             self.c.op(w::SELECT);
             self.vpost(i);
             return true;
@@ -3503,6 +3619,21 @@ extend Gen {
             self.c.op(w::END);
             return true;
         }
+        // A value or it plus 1 (`lv::FOLD_SINC`): the value plus the condition as 0 or 1 (inverted for the
+        // false side).
+        let s = self.inc_fold(t);
+        if s != 0 {
+            self.get(pick_v(s == 1, t.c, t.b));
+            self.get_cond(t.a, s == 2, false);
+            if t.ty == T_I64 {
+                self.c.op(w::I64_EXTEND_I32_U);
+                self.c.op(w::I64_ADD);
+            } else {
+                self.c.op(w::I32_ADD);
+            }
+            self.put(i);
+            return true;
+        }
         // A constant true side under a comparison that folds in goes second, the comparison inverted: the
         // false side, computed last, may stay on the stack.
         let a = t.a;
@@ -3511,10 +3642,17 @@ extend Gen {
         ) && !self.is_remat(t.c);
         self.get(pick_v(swap, t.c, t.b));
         self.get(pick_v(swap, t.b, t.c));
-        self.get_cond(a, swap);
+        self.get_cond(a, swap, true);
         self.c.op(w::SELECT);
         self.put(i);
         return true;
+    }
+
+    // The side (1 or 2) of select `t` that is the other side plus 1, that sum folded into it (`lv::FOLD_SINC`);
+    // else 0.
+    fn inc_fold(self: &Self, t: Inst) u8 {
+        let s = lv::inc_side(self.b(), t);
+        return pick8(s != 0 && self.lv.pfold[pick_v(s == 1, t.b, t.c) as usize], s, 0);
     }
 
     // Whether `v` rematerializes at each use.
@@ -3936,7 +4074,7 @@ extend Gen {
                 return self.edge(x, t.c);
             }
             if self.brable(x, tf) && b.edge_nargs(t.c) == 0 {
-                self.get_cond(t.a, true);
+                self.get_cond(t.a, true, true);
                 let d = self.depth(tf, self.sh.back(x, tf));
                 self.c.op(w::BR_IF);
                 self.c.uleb(d);
