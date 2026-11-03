@@ -85,6 +85,13 @@ pub(package) struct Gen {
     nxt: Vector<u32>, // `stack_values`: per local access, the next of its local (NONE: none)
     last_of: Vector<u32>, // `stack_values`: per local, its access seen last
     cuts: Vector<u64>, // `stack_values`: the code ranges it removes, start << 32 | end
+    /// `stack_order`: the writes (`Code.acc` indices) of the values the block's code so far leaves on the
+    /// operand stack for a later instruction, the last on top.
+    pend: Vector<u32>,
+    /// `stack_order`: per value it keeps on the stack, its write's and its read's `Code.acc` indices and the
+    /// reader's first access.
+    held: Vector<u32>,
+    is_held: Vector<bool>, // `stack_values`: per local access, whether `held` holds it
     me: wa::WSig, // the body's own signature
     cs: wa::WSig, // a call's
     enc: Vector<u8>,
@@ -213,6 +220,9 @@ extend Gen {
             nxt: Vector::<u32>::new(),
             last_of: Vector::<u32>::new(),
             cuts: Vector::<u64>::new(),
+            pend: Vector::<u32>::new(),
+            held: Vector::<u32>::new(),
+            is_held: Vector::<bool>::new(),
             me: wa::WSig::new(),
             cs: wa::WSig::new(),
             enc: Vector::<u8>::new(),
@@ -473,6 +483,7 @@ extend Gen {
         self.labels.truncate(0);
         self.asm_code = false;
         self.ret_end = NONE;
+        self.held.truncate(0);
         self.tasks.truncate(0);
         for k in 0..CL_N as usize {
             self.free.index_mut(k).truncate(0);
@@ -523,10 +534,11 @@ extend Gen {
     // The values an instruction or an edge writes to their local that the code reads at once (`local.set l`
     // then `local.get l`, adjacent bytes: the read runs right after the write, and only then) stay on the
     // operand stack. Both go when one instruction reads the value (VW_ONE) and `l` is not read again, or
-    // its next access in the code writes it with no control instruction between (`Code.ctl`): every path
-    // from the read runs that write before any other read of `l`; or when a `return` follows the read,
-    // which ends its path. Else the write becomes `local.tee l`. The scratch locals of one instruction's
-    // code, which its own loops may carry, stay. The relocations and the line rows move with the code.
+    // its next access in the code writes it with no control instruction between (`Code.ctl`; past one, the
+    // write may not run on the path of a later read): every path from the read runs that write before any
+    // other read of `l`; or when a `return` follows the read, which ends its path. Else the write becomes
+    // `local.tee l`. The scratch locals of one instruction's code, which its own loops may carry, stay. The
+    // relocations and the line rows move with the code.
     fn stack_values(self: &mut Self) {
         let n = self.c.acc.len();
         if n < 2 {
@@ -543,12 +555,40 @@ extend Gen {
             self.nxt[i] = self.last_of[l];
             self.last_of[l] = i as u32;
         }
+        // The values `stack_order` holds whose local the whole code (the tasks' too) reads past the read, or
+        // writes past a control instruction, go through it: those and the reader's later held operands.
+        fill(&mut self.is_held, n, false);
+        let mut h: usize = 0;
+        while h < self.held.len() {
+            let (s, g, grp) = (self.held[h], self.held[h + 1], self.held[h + 2]);
+            let k = self.nxt[g as usize];
+            let gat = (self.c.acc[g as usize] >> 32) as u32;
+            if self.nxt[s as usize] != g || k != NONE && ((self.c.acc_op[k as usize] & VW_OP) == w::LOCAL_GET || self.ctl_within(
+                gat,
+                (self.c.acc[k as usize] >> 32) as u32,
+            )) {
+                while h < self.held.len() && self.held[h + 2] == grp {
+                    h += 3;
+                }
+                continue;
+            }
+            self.is_held[s as usize] = true;
+            self.is_held[g as usize] = true;
+            h += 3;
+        }
         self.cuts.truncate(0);
-        // The first control instruction past the read the step sees.
+        for i in 0..n {
+            if self.is_held[i] {
+                let l = (self.c.acc[i] & 0xFFFFFFFF) as u32;
+                let at = (self.c.acc[i] >> 32) as u32;
+                self.cuts.push(at as u64 << 32 | (at + 1 + uleb_len(l)) as u64);
+            }
+        }
+        // The first control instruction past the read `stack_values` looks at: reads go in code order.
         let mut cq: usize = 0;
         for i in 0..n - 1 {
             let j = self.nxt[i];
-            if (self.c.acc_op[i] & ~VW_ONE) != (w::LOCAL_SET | VW_VALUE) || j == NONE || (self.c.acc_op[j as usize] & VW_OP) != w::LOCAL_GET {
+            if self.is_held[i] || (self.c.acc_op[i] & ~VW_ONE) != (w::LOCAL_SET | VW_VALUE) || j == NONE || (self.c.acc_op[j as usize] & VW_OP) != w::LOCAL_GET {
                 continue;
             }
             let l = (self.c.acc[i] & 0xFFFFFFFF) as u32;
@@ -562,9 +602,10 @@ extend Gen {
             while cq < self.c.ctl.len() && self.c.ctl[cq] < jat {
                 cq += 1;
             }
-            let written = k == NONE || (self.c.acc_op[k as usize] & VW_OP) != w::LOCAL_GET && (cq == self.c.ctl.len() || self.c.ctl[cq] >= (self.c.acc[k as usize] >> 32) as u32);
+            // A write past a control instruction may not run on the path of a later read.
+            let past = k != NONE && cq < self.c.ctl.len() && self.c.ctl[cq] < (self.c.acc[k as usize] >> 32) as u32;
             // A read a `return` takes next ends its path: nothing reads the write again.
-            if self.c.bytes[(jat + len) as usize] != w::RETURN && ((self.c.acc_op[i] & VW_ONE) == 0 || !written) {
+            if self.c.bytes[(jat + len) as usize] != w::RETURN && ((self.c.acc_op[i] & VW_ONE) == 0 || past || k != NONE && (self.c.acc_op[k as usize] & VW_OP) == w::LOCAL_GET) {
                 self.c.bytes[at as usize] = w::LOCAL_TEE;
                 self.cuts.push(jat as u64 << 32 | (jat + len) as u64);
             } else {
@@ -574,6 +615,7 @@ extend Gen {
         if self.cuts.len() == 0 {
             return;
         }
+        self.cuts.sort();
         // The code without the cuts, which follow in order.
         let mut out: usize = 0;
         let mut q: usize = 0;
@@ -610,6 +652,21 @@ extend Gen {
             m += 1;
         }
         self.rows.truncate(m);
+    }
+
+    // Whether a control instruction (`Code.ctl`) lies between code bytes `a` and `b`: a binary search.
+    fn ctl_within(self: &Self, a: u32, b: u32) bool {
+        let mut lo: usize = 0;
+        let mut hi = self.c.ctl.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.c.ctl[mid] <= a {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo < self.c.ctl.len() && self.c.ctl[lo] < b;
     }
 
     // Code byte `o` past the cuts (`stack_values`), `o` at least the last one `at` saw: less the bytes cut
@@ -816,6 +873,9 @@ const WALK_BUDGET: u32 = 16384;
 const VW_VALUE: u8 = 0x80;
 const VW_ONE: u8 = 0x40;
 const VW_OP: u8 = 0x3F;
+
+// At most PEND_MAX values wait on the operand stack (`Gen::stack_order`); the oldest leaves past them.
+const PEND_MAX: usize = 32;
 
 // The bytes of `x` as an unsigned LEB128.
 const fn uleb_len(x: u32) u32 {
@@ -1435,7 +1495,7 @@ extend Gen {
             self.load_op(T_I32, self.canary);
             self.guard();
             self.c.op(w::I32_NE);
-            self.c.op(w::IF);
+            self.open_if();
             self.c.op(w::BLOCK_EMPTY);
             self.call_rt("__stack_chk_fail", [], []);
             self.c.op(w::UNREACHABLE);
@@ -2770,7 +2830,7 @@ extend Gen {
         self.c.local(w::LOCAL_GET, x);
         self.c.local(w::LOCAL_GET, x);
         self.c.op(pick8(fd, w::F64_NE, w::F32_NE));
-        self.c.op(w::IF);
+        self.open_if();
         self.c.op(rt);
         self.int_const(wide, 0);
         self.c.op(w::ELSE);
@@ -2781,7 +2841,7 @@ extend Gen {
         }
         self.c.f64_const(fl::f64_bits(lo - 1.0));
         self.c.op(w::F64_LE);
-        self.c.op(w::IF);
+        self.open_if();
         self.c.op(rt);
         self.int_const(wide, trunc_to(mn, tb));
         self.c.op(w::ELSE);
@@ -2791,7 +2851,7 @@ extend Gen {
         }
         self.c.f64_const(fl::f64_bits(hi));
         self.c.op(w::F64_GE);
-        self.c.op(w::IF);
+        self.open_if();
         self.c.op(rt);
         self.int_const(wide, trunc_to(mx, tb));
         self.c.op(w::ELSE);
@@ -3160,7 +3220,7 @@ extend Gen {
         self.c.local(w::LOCAL_GET, n);
         self.c.i64_const(64);
         self.c.op(w::I64_GE_U);
-        self.c.op(w::IF);
+        self.open_if();
         self.c.op(w::BLOCK_EMPTY);
         if left {
             self.c.local(w::LOCAL_GET, al);
@@ -3313,7 +3373,7 @@ extend Gen {
                 },
             );
             self.c.local(w::LOCAL_TEE, hit);
-            self.c.op(w::IF);
+            self.open_if();
             self.c.op(w::BLOCK_EMPTY);
             self.c.local(w::LOCAL_GET, a);
             self.get(t.c);
@@ -3374,7 +3434,7 @@ extend Gen {
             let hb = self.mhome(t.b);
             let hc = self.mhome(t.c);
             self.get(t.a);
-            self.c.op(w::IF);
+            self.open_if();
             self.c.op(w::BLOCK_EMPTY);
             if d != hb {
                 self.copy_mem(self.fp, d, self.fp, hb, n);
@@ -3485,6 +3545,10 @@ extend Gen {
         return 0;
     }
 
+    fn open_if(self: &mut Self) {
+        self.c.op(w::IF);
+    }
+
     fn open(self: &mut Self, op: u8, kind: u8, blk: u32) {
         self.c.op(op);
         self.c.op(w::BLOCK_EMPTY);
@@ -3533,22 +3597,104 @@ extend Gen {
         if self.cold_entry.len() != 0 && self.cold_entry[x as usize] {
             self.open_frame();
         }
+        self.pend.truncate(0);
         for i in blk.start..blk.start + blk.len - 1 {
             if dbg {
                 self.row(self.b().locs[i as usize]);
             }
+            let (a0, s0, o0) = (self.c.acc.len() as u32, self.c.len(), self.c.ctl.len());
             if !self.inst(i) {
                 return false;
             }
             self.end_inst();
+            self.stack_order(a0, s0, self.c.ctl.len() != o0);
         }
         let ti = blk.start + blk.len - 1;
         if dbg {
             self.row(self.b().locs[ti as usize]);
         }
+        let (a0, s0) = (self.c.acc.len() as u32, self.c.len());
         let ok = self.terminator(x, ti);
         self.end_inst();
+        self.stack_order(a0, s0, true);
         return ok;
+    }
+
+    // The code of one instruction, from local access `a0` and code byte `s0` (`ctl`: it holds control
+    // instructions or ends the block): the values it reads first, in the order they were written, stay on the operand stack
+    // (`held`) when the writes still on it (`pend`) end in them. Each instruction's code starts and ends at
+    // an empty operand stack, so the code between a write and its read runs above the value: equal to the
+    // code that reads it from the local. After control instructions, no written value waits; the
+    // code's last access, the write of a value one instruction reads, waits for that instruction.
+    fn stack_order(self: &mut Self, a0: u32, s0: u32, ctl: bool) {
+        let a1 = self.c.acc.len() as u32;
+        // The reads at the code's start, in a row: the first `m` take the last `m` waiting writes.
+        let mut m: u32 = 0;
+        let mut at = s0;
+        while a0 + m < a1 && m < self.pend.len() as u32 {
+            let g = a0 + m;
+            let l = (self.c.acc[g as usize] & 0xFFFFFFFF) as u32;
+            if (self.c.acc_op[g as usize] & VW_OP) != w::LOCAL_GET || (self.c.acc[g as usize] >> 32) as u32 != at {
+                break;
+            }
+            at += 1 + uleb_len(l);
+            m += 1;
+        }
+        // The longest run that ends the waiting writes in order, its values read once in the code.
+        while m != 0 {
+            let base = self.pend.len() - m as usize;
+            let mut ok = true;
+            for q in 0..m {
+                let s = self.pend[base + q as usize];
+                let l = self.c.acc[s as usize] & 0xFFFFFFFF;
+                ok = ok && (self.c.acc[(a0 + q) as usize] & 0xFFFFFFFF) == l;
+                // A later read of the local before a write needs the value there; past control instructions, a
+                // write may not run on the path of a later read.
+                let mut r = a0 + q + 1;
+                while ok && r < a1 && ((self.c.acc[r as usize] & 0xFFFFFFFF) != l || ctl || (self.c.acc_op[r as usize] & VW_OP) != w::LOCAL_SET) {
+                    ok = (self.c.acc[r as usize] & 0xFFFFFFFF) != l;
+                    r += 1;
+                }
+            }
+            if ok {
+                break;
+            }
+            m -= 1;
+        }
+        for q in 0..m {
+            let s = self.pend[self.pend.len() - m as usize + q as usize];
+            self.held.push(s);
+            self.held.push(a0 + q);
+            self.held.push(a0);
+        }
+        self.pend.truncate(self.pend.len() - m as usize);
+        if ctl {
+            self.pend.truncate(0);
+        }
+        // A write whose local the code reaches otherwise no longer waits: the read is not the value's.
+        for r in a0 + m..a1 {
+            let l = self.c.acc[r as usize] & 0xFFFFFFFF;
+            let mut k: usize = 0;
+            for q in 0..self.pend.len() {
+                let s = self.pend[q];
+                if (self.c.acc[s as usize] & 0xFFFFFFFF) != l {
+                    self.pend[k] = s;
+                    k += 1;
+                }
+            }
+            self.pend.truncate(k);
+        }
+        if a1 > a0 {
+            let s = a1 - 1;
+            let l = (self.c.acc[s as usize] & 0xFFFFFFFF) as u32;
+            let end = (self.c.acc[s as usize] >> 32) as u32 + 1 + uleb_len(l);
+            if !ctl && self.c.acc_op[s as usize] == (w::LOCAL_SET | VW_VALUE | VW_ONE) && end == self.c.len() {
+                if self.pend.len() == PEND_MAX {
+                    let _ = self.pend.remove(0);
+                }
+                self.pend.push(s);
+            }
+        }
     }
 
     // A line row at the next code byte for location `loc` (a `lines` index) when it differs from the last.
@@ -4436,7 +4582,7 @@ extend Gen {
 
     // The panic of lane `k` with the message of vector rule `c` when the i32 condition on the stack holds.
     fn lane_trap_if(self: &mut Self, k: u32, msg: str) {
-        self.c.op(w::IF);
+        self.open_if();
         self.c.op(w::BLOCK_EMPTY);
         self.c.i64_const(k);
         let m = self.cstr(msg);
@@ -5740,7 +5886,7 @@ extend Gen {
             // And the integer back equals the source: only in range is the conversion defined.
             self.c.local(w::LOCAL_SET, fr);
             self.c.local(w::LOCAL_GET, fr);
-            self.c.op(w::IF);
+            self.open_if();
             self.c.op(w::BLOCK_EMPTY);
             self.ld_lane_to(x, ops[0], k, bt, bs, false);
             self.c.local(w::LOCAL_GET, va);
@@ -5888,7 +6034,7 @@ extend Gen {
             self.c.local(w::LOCAL_GET, x);
             self.c.op(w::I64_LT_U);
             self.c.op(w::I32_OR);
-            self.c.op(w::IF);
+            self.open_if();
             self.c.op(w::BLOCK_EMPTY);
             self.c.local(w::LOCAL_GET, x);
             self.c.local(w::LOCAL_GET, st);
@@ -5901,7 +6047,7 @@ extend Gen {
         if sl && !cs && !unchecked {
             for k in 0..n {
                 self.lane_active(act, k);
-                self.c.op(w::IF);
+                self.open_if();
                 self.c.op(w::BLOCK_EMPTY);
                 if gat {
                     self.ld_lane_to(ix, ops[1], k, lane_type(tys[1]), false, false);
@@ -5938,7 +6084,7 @@ extend Gen {
         }
         for k in 0..n {
             self.lane_active(act, k);
-            self.c.op(w::IF);
+            self.open_if();
             self.c.op(w::BLOCK_EMPTY);
             // The element's address into `a`: lane k's pointer, or the base plus the element's index.
             if ptrs {
@@ -6013,7 +6159,7 @@ extend Gen {
     // The bounds trap of lane `k` when the i32 condition on the stack holds: element `x` (+ k from start
     // when `start`) of `len`.
     fn lane_oob_if(self: &mut Self, k: u32, x: u32, len: u32, start: bool) {
-        self.c.op(w::IF);
+        self.open_if();
         self.c.op(w::BLOCK_EMPTY);
         self.c.i64_const(k);
         self.c.local(w::LOCAL_GET, x);
@@ -6384,7 +6530,7 @@ extend Gen {
                 self.c.local(w::LOCAL_GET, fa);
                 self.c.local(w::LOCAL_GET, fa);
                 self.c.op(w::F32_EQ + cd);
-                self.c.op(w::IF);
+                self.open_if();
                 self.c.op(w::BLOCK_EMPTY);
                 if k == 0 {
                     self.c.i32_const(1);
@@ -6414,7 +6560,7 @@ extend Gen {
                 }
                 self.c.local(w::LOCAL_SET, take);
                 self.c.local(w::LOCAL_GET, take);
-                self.c.op(w::IF);
+                self.open_if();
                 self.c.op(w::BLOCK_EMPTY);
                 self.c.local(w::LOCAL_GET, fa);
                 self.c.local(w::LOCAL_SET, fb);
@@ -6480,7 +6626,7 @@ extend Gen {
             };
             for k in 0..n {
                 self.lane_active(m, k);
-                self.c.op(w::IF);
+                self.open_if();
                 self.c.op(w::BLOCK_EMPTY);
                 self.c.local(w::LOCAL_GET, self.fp);
                 self.c.local(w::LOCAL_GET, ix);

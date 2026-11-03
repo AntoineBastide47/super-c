@@ -2259,6 +2259,108 @@ b0(v0: ptr, v1: ptr, v2: ptr):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A wasm32 switch whose compares read a loaded value one after another while a case's block writes the
+// value's local (it holds the merge block's parameter there): the value stays in its local
+// (`wasmgen::stack_values`, `ctl_at`), for the compares past that case's `if`. Every case gives its result.
+@test
+fn a_wasm_switch_keeps_its_value_past_a_cases_write() {
+    let lir = M"(lir ptr 8
+sym @code fn global
+fn @code
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  v2 = iconst.i32 1
+  v3 = iconst.i32 2
+  v4 = iconst.i32 3
+  switch v1 [0 -> b2, 9 -> b1(v2), 10 -> b1(v3), -3 -> b1(v4)] else b3
+b1(v5: i32):
+  ret v5
+b2:
+  v6 = load.i32 v0+4 align 2
+  jmp b1(v6)
+b3:
+  v7 = load.i32 v0+4 align 2
+  v8 = add.i32 v7, v7
+  jmp b1(v8)
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let drv = M"(#include <stdint.h>
+int32_t code(const int32_t *);
+int main(void) {
+  int32_t p[5][2] = {{0, 5}, {9, 0}, {10, 0}, {-3, 0}, {7, 4}};
+  int32_t want[5] = {5, 1, 2, 3, 8};
+  for (int k = 0; k < 5; k++) {
+    if (code(p[k]) != want[k]) return 1 + k;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
+// wasm32 values whose one reader comes later in their block and reads them in the order they were made stay
+// on the operand stack (`wasmgen::stack_order`): `inord`'s two shifts feed its difference with no local
+// (local.get 0, i32.const 24, i32.shr_u, local.get 0, i32.const 8, i32.shl, i32.sub, end); `rev` reads
+// them the other way, so the first one made goes through its local. Both give the C results.
+@test
+fn values_read_in_order_stay_on_the_wasm_stack() {
+    let lir = M"(lir ptr 8
+sym @inord fn global
+sym @rev fn global
+fn @inord
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 24
+  v2 = lshr.i32 v0, v1
+  v3 = iconst.i32 8
+  v4 = shl.i32 v0, v3
+  v5 = sub.i32 v2, v4
+  ret v5
+fn @rev
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 24
+  v2 = lshr.i32 v0, v1
+  v3 = iconst.i32 8
+  v4 = shl.i32 v0, v3
+  v5 = sub.i32 v4, v2
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let inord: [u8; 12] = [0x20, 0x00, 0x41, 0x18, 0x76, 0x20, 0x00, 0x41, 0x08, 0x74, 0x6B, 0x0B];
+    assert(holds(&obj, inord[0..12]), "inord");
+    let drv = M"(#include <stdint.h>
+int32_t inord(int32_t);
+int32_t rev(int32_t);
+int main(void) {
+  int32_t xs[4] = {0x12345678, -1, 7, -0x7fffffff};
+  for (int k = 0; k < 4; k++) {
+    uint32_t x = (uint32_t)xs[k];
+    if ((uint32_t)inord(xs[k]) != (x >> 24) - (x << 8) || (uint32_t)rev(xs[k]) != (x << 8) - (x >> 24)) return 1;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
 // A select whose side truncates a 64-bit value to 8 bits that its condition bounds (`live::bounded_side`)
 // builds on wasm32 and gives the value below the bound, 0 above.
 @test
