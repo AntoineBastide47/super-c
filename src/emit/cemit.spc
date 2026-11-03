@@ -17817,8 +17817,8 @@ extend CEmit {
                 let mut ns = NODE_NONE;
                 let mut nn = NODE_NONE;
                 let nk = self.mg.niche_ty(rm0, rt0, &mut ndm, &mut ndn, &mut ns, &mut nn);
-                if nk != lay::NK_NONE {
-                    // The discriminant is a test of the payload's pointer word.
+                if nk.kind != lay::NK_NONE {
+                    // The discriminant is a test of the payload's niche word.
                     let mut v = self.sget();
                     for _d in 0..derefs {
                         v.push_str("(*");
@@ -18479,15 +18479,25 @@ extend CEmit {
             let mut ndn = NODE_NONE;
             let mut ns = NODE_NONE;
             let mut nn = NODE_NONE;
-            if self.mg.niche_ty(nrm, nrt, &mut ndm, &mut ndn, &mut ns, &mut nn) != lay::NK_NONE {
-                // No tag: `none` is the all-zero value, `some` its payload alone.
+            let nk = self.mg.niche_ty(nrm, nrt, &mut ndm, &mut ndn, &mut ns, &mut nn);
+            if nk.kind != lay::NK_NONE {
+                // No tag: `none` is the value whose niche word is its `none` value (all-zero for a
+                // pointer), `some` its payload alone.
                 dst.push_str("(");
                 let mut ok = self.ty_c(b.module, rv.target, "", dst);
                 if !ok {
                     return false;
                 }
                 if rv.item.node != ns {
-                    dst.push_str("){ 0 }");
+                    dst.push_str("){ ");
+                    if nk.none == 0 {
+                        dst.push_str("0");
+                    } else {
+                        self.mg.niche_path(am, ns, nk.kind, ".", dst);
+                        dst.push_str(" = ");
+                        mbe::niche_none(nk, dst);
+                    }
+                    dst.push_str(" }");
                     return true;
                 }
                 dst.push_str("){ .payload.");
@@ -19175,7 +19185,7 @@ extend CEmit {
                 let mut ns = NODE_NONE;
                 let mut nn = NODE_NONE;
                 let nk = self.mg.niche(am, decl, &mut ns, &mut nn);
-                if nk != lay::NK_NONE {
+                if nk.kind != lay::NK_NONE {
                     body.push_str("  switch (");
                     self.mg.niche_discr(am, decl, ns, nn, nk, "self", true, &mut body);
                     body.push_str(") {\n");

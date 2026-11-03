@@ -67,8 +67,9 @@ pub(package) struct EnumLayout {
 }
 
 // The niche of a payload enum of `Ast::niche_shape`: its `some` variant's payload keeps the
-// discriminant, and a null first pointer word of the payload is `none`. Every stage that lays out,
-// reads or writes an enum (this service, the C emitter, the LIR lowering) decides it the same way.
+// discriminant, and one value no payload holds of a word of the payload (`niche_word`) is `none`. Every
+// stage that lays out, reads or writes an enum (this service, the C emitter, the LIR lowering) decides it
+// the same way.
 /// No niche: the enum keeps its tag.
 pub(package) const NK_NONE: u8 = 0;
 /// The payload is a reference: never null.
@@ -76,22 +77,129 @@ pub(package) const NK_REF: u8 = 1;
 /// The payload is a std `Box` of a value that is not `dyn`: its pointer is null only when it owns
 /// nothing (a `zeroed` seed or a box freed in place), and such a value reads as `none`.
 pub(package) const NK_BOX: u8 = 2;
+/// The payload is a `bool`: its byte is 0 or 1, and 2 is `none`.
+pub(package) const NK_BOOL: u8 = 3;
+/// The payload is a payload-less enum of implicit discriminants 0 to n - 1 that no C code reads, n below
+/// its integer's range: n is `none`.
+pub(package) const NK_ENUM: u8 = 4;
+/// The payload is a `str`, a `[]T` or a `[]mut T`: no view is `usize::MAX` elements long, and that
+/// length is `none`.
+pub(package) const NK_VIEW: u8 = 5;
 
-/// The niche kind of a payload of concrete type `t` of `a` (`boxd`: the prelude `Box`). For
-/// NK_BOX the caller checks, under its own substitution, that the box's value is not `dyn`.
-pub(package) const fn niche_kind(a: &Ast, boxd: loader::LookupHit, t: TypeId) u8 {
+/// The declarations whose values keep a niche (`niche_kind`): the prelude `Box`, `Slice`, `SliceMut`
+/// and `str`.
+pub(package) struct NicheDecls {
+    pub(package) boxd: loader::LookupHit,
+    pub(package) slice: loader::LookupHit,
+    pub(package) slice_mut: loader::LookupHit,
+    pub(package) strd: loader::LookupHit,
+}
+
+extend NicheDecls as Copy {}
+
+/// `NicheDecls` of package `p`.
+pub(package) fn niche_decls(p: &loader::Package) NicheDecls {
+    return NicheDecls {
+        boxd: p.prelude_lookup("Box", true),
+        slice: p.prelude_lookup("Slice", true),
+        slice_mut: p.prelude_lookup("SliceMut", true),
+        strd: p.prelude_lookup("str", true),
+    };
+}
+
+// Whether declaration `(m, n)` is `h`.
+const fn is_decl(h: loader::LookupHit, m: ModuleId, n: NodeId) bool {
+    return h.node != NODE_NONE && h.mid == m && h.node == n;
+}
+
+/// The niche kind of a payload of concrete type `t` of `a` in package `p`. For NK_BOX the caller checks,
+/// under its own substitution, that the box's value is not `dyn`.
+pub(package) fn niche_kind(p: &loader::Package, a: &Ast, d: NicheDecls, t: TypeId) u8 {
     let y = *a.type_at(t);
     if y.kind == TypeKind::TYPE_REFERENCE {
         return NK_REF;
     }
-    if y.kind != TypeKind::TYPE_INSTANCE || boxd.node == NODE_NONE {
+    if y.kind == TypeKind::TYPE_BUILTIN {
+        return if unsafe y.as_data.builtin == BuiltinType::BT_BOOL {
+            NK_BOOL
+        } else {
+            NK_NONE
+        };
+    }
+    if y.kind == TypeKind::TYPE_ENUM {
+        let ea = unsafe &*p.module_ast_const(y.module);
+        let dn = y.as_data.decl;
+        let n = ea.ext(dn).aggregate.members.len as u64;
+        if ea.enum_has_payload(dn) || ea.enum_explicit(dn) || c_enum(p, y.module, dn) {
+            return NK_NONE;
+        }
+        let w = (ea.enum_int(dn) & ~ENUM_INT_SIGNED) as u64;
+        return if w >= 8 || n < 1u64 << 8 * w {
+            NK_ENUM
+        } else {
+            NK_NONE
+        };
+    }
+    if y.kind == TypeKind::TYPE_STRUCT {
+        return if is_decl(d.strd, y.module, y.as_data.decl) {
+            NK_VIEW
+        } else {
+            NK_NONE
+        };
+    }
+    if y.kind != TypeKind::TYPE_INSTANCE {
         return NK_NONE;
     }
     let it = *a.instance(y.as_data.inst);
-    if it.module != boxd.mid || it.decl != boxd.node || it.n == 0 {
+    if is_decl(d.strd, it.module, it.decl) || is_decl(d.slice, it.module, it.decl) || is_decl(
+        d.slice_mut,
+        it.module,
+        it.decl,
+    ) {
+        return NK_VIEW;
+    }
+    if !is_decl(d.boxd, it.module, it.decl) || it.n == 0 {
         return NK_NONE;
     }
     return NK_BOX;
+}
+
+/// A niche enum's niche (`niche_kind`): its kind, and the word of the payload that keeps the
+/// discriminant, its offset and size in bytes and the value of it that is `none` (every other value is
+/// `some`).
+pub(package) struct Niche {
+    pub(package) kind: u8,
+    pub(package) off: u32,
+    pub(package) bytes: u32,
+    pub(package) none: u64,
+}
+
+extend Niche as Copy {}
+
+/// No niche: the enum keeps its tag.
+pub(package) const NO_NICHE: Niche = Niche { kind: NK_NONE, off: 0, bytes: 0, none: 0 };
+
+/// The niche of kind `k` (`niche_kind`) of a payload of concrete type `t` of `a` in package `p`.
+pub(package) fn niche_of(p: &loader::Package, a: &Ast, k: u8, t: TypeId) Niche {
+    let ptr = target_for(p.arch).ptr as u32;
+    if k == NK_BOOL {
+        return Niche { kind: k, off: 0, bytes: 1, none: 2 };
+    }
+    if k == NK_ENUM {
+        let y = *a.type_at(t);
+        let ea = unsafe &*p.module_ast_const(y.module);
+        let dn = y.as_data.decl;
+        return Niche {
+            kind: k,
+            off: 0,
+            bytes: ea.enum_int(dn) & ~ENUM_INT_SIGNED,
+            none: ea.ext(dn).aggregate.members.len,
+        };
+    }
+    if k == NK_VIEW {
+        return Niche { kind: k, off: ptr, bytes: ptr, none: ~0u64 >> (64 - 8 * ptr) as u64 };
+    }
+    return Niche { kind: k, off: 0, bytes: ptr, none: 0 };
 }
 
 /// The integer a value of payload-less enum `dn` of module `dm` is (`Ast::enum_int`): the C enum, an
@@ -260,7 +368,7 @@ pub(package) struct Svc {
     /// The compile-time evaluation this service answers for (null: none). A member of an item the
     /// reader does not see checked (`Interp::visible_node`) is pending.
     pub(package) ev: *const iri::Interp,
-    boxd: loader::LookupHit, // the prelude `Box`, looked up on the first niche query (`box_on`)
+    nd: NicheDecls, // looked up on the first niche query (`box_on`)
     box_on: bool,
     /// Lay out a generic parameter no env binds as its default, when that names a struct or enum without
     /// generic parameters: the layout of a generic declaration's default instance (LSP hover).
@@ -278,7 +386,12 @@ extend Svc {
             active: Vector::<u64>::new(),
             steps: Vector::<ConstStep>::new(),
             ms: Vector::<MemberAt>::new(),
-            boxd: loader::LookupHit { node: NODE_NONE, mid: 0 },
+            nd: NicheDecls {
+                boxd: loader::LookupHit { node: NODE_NONE, mid: 0 },
+                slice: loader::LookupHit { node: NODE_NONE, mid: 0 },
+                slice_mut: loader::LookupHit { node: NODE_NONE, mid: 0 },
+                strd: loader::LookupHit { node: NODE_NONE, mid: 0 },
+            },
         };
     }
 
@@ -335,12 +448,12 @@ extend Svc {
             return false;
         }
         if !self.box_on {
-            self.boxd = self.p().prelude_lookup("Box", true);
+            self.nd = niche_decls(self.p());
             self.box_on = true;
         }
-        let k = niche_kind(self.a(rm), self.boxd, rt);
+        let k = niche_kind(self.p(), self.a(rm), self.nd, rt);
         if k != NK_BOX {
-            return k == NK_REF;
+            return k != NK_NONE;
         }
         let it = *self.a(rm).instance(self.a(rm).type_at(rt).as_data.inst);
         let mut vm: ModuleId = 0;

@@ -1090,7 +1090,7 @@ extend Lower {
                 self.lms.truncate(b0);
                 return false;
             }
-            if el.niche == lay::NK_NONE {
+            if el.niche.kind == lay::NK_NONE {
                 let tag_t = ast::pick(a.enum_tag_is_byte(dn), T_I8, T_I32);
                 out.push(
                     FieldAt {
@@ -1250,7 +1250,7 @@ extend Lower {
         let mut ns = NODE_NONE;
         let mut nn = NODE_NONE;
         let nk = c.mg.niche(dm, dn, &mut ns, &mut nn);
-        if nk != lay::NK_NONE {
+        if nk.kind != lay::NK_NONE {
             let mt = a.member_ty(unsafe a.list(a.at_const(ns).as_data.variant.payload)[0]);
             let mut ti = TyI { cls: 0 };
             if !self.ty(c, dm, mt, &mut ti) {
@@ -1407,9 +1407,9 @@ struct EnumL {
     pub(package) tag: u8,
     pub(package) size: u32,
     pub(package) align: u32,
-    /// The niche kind (`lay::niche_kind`): no tag, a null first pointer word of the payload is
-    /// `none`; `some` and `none` are the two variants.
-    pub(package) niche: u8,
+    /// The niche (`lay::Niche`): no tag, the payload's niche word holding its `none` value is `none`;
+    /// `some` and `none` are the two variants.
+    pub(package) niche: lay::Niche,
     pub(package) some: NodeId,
     pub(package) none: NodeId,
     pub(package) vm: ModuleId, // the module of `some` and `none`
@@ -1708,6 +1708,14 @@ extend Lower {
         }
         let k = self.iconst(self.ptr_int(), n);
         let _ = self.inst(O_MEMCPY, T_NONE, MEM_OVERLAP, dst, src, k);
+    }
+
+    // Whether the niche enum at `addr` of niche `k` is `some`: its niche word is not its `none` value.
+    fn niche_some(self: &mut Self, k: lay::Niche, addr: Value) Value {
+        let ty = niche_int(k);
+        let w = self.load(ty, addr, k.off, false);
+        let z = self.iconst(ty, k.none);
+        return self.icmp(C_NE, w, z);
     }
 
     fn memset0(self: &mut Self, dst: Value, n: u32) {
@@ -5053,16 +5061,13 @@ extend Lower {
         if val || !self.enum_of(c, rm, rt, &mut el) {
             return self.fail_v("discriminant");
         }
-        if el.niche != lay::NK_NONE {
-            // The payload's first pointer word: null is `none`.
+        if el.niche.kind != lay::NK_NONE {
             let mut ds: i64 = 0;
             let mut dn: i64 = 0;
             if !self.variant_value(c, el.vm, el.some, &mut ds) || !self.variant_value(c, el.vm, el.none, &mut dn) {
                 return VNONE;
             }
-            let w = self.load(self.ptr_int(), addr, 0, false);
-            let z = self.iconst(self.ptr_int(), 0);
-            let set = self.icmp(C_NE, w, z);
+            let set = self.niche_some(el.niche, addr);
             let vs = self.iconst(ti.mty, ds as u64);
             let vn = self.iconst(ti.mty, dn as u64);
             return self.inst(O_SELECT, ti.mty, 0, set, vs, vn);
@@ -5650,12 +5655,16 @@ extend Lower {
             if !self.variant_value(c, rv.item.module, rv.item.node, &mut d) || !self.enum_of(c, rm, rt, &mut el) {
                 return false;
             }
-            if el.niche != lay::NK_NONE && rv.item.node != el.some {
-                // A niche enum has no tag: `none` is the all-zero value.
+            if el.niche.kind != lay::NK_NONE && rv.item.node != el.some {
+                // A niche enum has no tag: `none` is zero but its niche word, which holds its `none` value.
                 self.memset0(dst, el.size);
+                if el.niche.none != 0 {
+                    let w = self.iconst(niche_int(el.niche), el.niche.none);
+                    self.store(w, dst, el.niche.off, false);
+                }
                 return true;
             }
-            if el.niche == lay::NK_NONE {
+            if el.niche.kind == lay::NK_NONE {
                 let tag = self.iconst(el.tag, d as u64);
                 self.store(tag, dst, 0, false);
             }
@@ -9326,6 +9335,14 @@ extend Lower {
                 put_le(&mut d.bytes, off, dv as u64, lay::bare_int(Lower::p(c), dm, dn) & ~ast::ENUM_INT_SIGNED);
                 return true;
             }
+            let mut el = EnumL { ok: false };
+            if !self.enum_shape(c, dm, dn, &mut el) {
+                return false;
+            }
+            if el.niche.kind != lay::NK_NONE && vid != el.some {
+                put_le(&mut d.bytes, off + el.niche.off, el.niche.none, el.niche.bytes);
+                return true;
+            }
             let mut fl = Vector::<FieldAt>::new();
             if !self.decl_fields(c, dm, dn, &mut fl) {
                 return false;
@@ -9535,6 +9552,19 @@ extend Lower {
         }
         return self.fail("static-place");
     }
+}
+
+// The integer type of niche `k`'s word.
+const fn niche_int(k: lay::Niche) u8 {
+    return if k.bytes == 1 {
+        T_I8
+    } else if k.bytes == 2 {
+        T_I16
+    } else if k.bytes == 4 {
+        T_I32
+    } else {
+        T_I64
+    };
 }
 
 // `v`'s low `n` bytes, little-endian, at `off` of `b`.
@@ -11405,11 +11435,9 @@ extend Lower {
             if !self.enum_of(c, rm, rt, &mut el) {
                 return self.fail("glue-enum");
             }
-            if el.niche != lay::NK_NONE {
-                // Only `some` has members: it holds when the payload's pointer word is not null.
-                let w = self.load(self.ptr_int(), me, 0, false);
-                let z = self.iconst(self.ptr_int(), 0);
-                tag = self.icmp(C_NE, w, z);
+            if el.niche.kind != lay::NK_NONE {
+                // Only `some` has members: it holds when the payload's niche word is not its `none` value.
+                tag = self.niche_some(el.niche, me);
             } else {
                 tag = self.load(el.tag, me, 0, false);
             }
@@ -11442,7 +11470,7 @@ extend Lower {
                 let mut skip = NONE;
                 if is_enum && v != NODE_NONE {
                     let mut hit = tag;
-                    if el.niche == lay::NK_NONE {
+                    if el.niche.kind == lay::NK_NONE {
                         let mut d: i64 = 0;
                         if !self.variant_value(c, dm, v, &mut d) {
                             return false;

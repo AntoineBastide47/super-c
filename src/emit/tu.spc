@@ -697,7 +697,8 @@ extend TuEmit {
         // A niche enum keeps its discriminant in its payload: no tag member.
         let mut ns = NODE_NONE;
         let mut nn = NODE_NONE;
-        if self.mg.niche(it.m, it.decl, &mut ns, &mut nn) == lay::NK_NONE {
+        let nk = self.mg.niche(it.m, it.decl, &mut ns, &mut nn);
+        if nk.kind == lay::NK_NONE {
             if unsafe (*da).enum_tag_is_byte(it.decl) {
                 body.push_str("  uint8_t tag;\n");
             } else {
@@ -774,6 +775,10 @@ extend TuEmit {
             body.truncate(hold);
             body.push_str("};\n");
             return true;
+        }
+        if nk.kind == lay::NK_BOOL {
+            // The `bool`'s byte, which holds 2 for `none` (`Mangler::niche_path`).
+            body.push_str("    uint8_t __sc_niche;\n");
         }
         body.push_str("  } payload;\n};\n");
         return true;

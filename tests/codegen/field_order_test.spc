@@ -341,7 +341,7 @@ fn main() i32 {
 }
 )";
 
-const ENUMS_EXPECTED: str = M"(Color 1 Neg 1 High 1 Wide 2 Big 4 Px 4 Option<Color> 2 [Color; 5] 5
+const ENUMS_EXPECTED: str = M"(Color 1 Neg 1 High 1 Wide 2 Big 4 Px 4 Option<Color> 1 [Color; 5] 5
 ByExtern 4 HoldsByExport 8 HoldsViaVoid 2
 brg -6 201 200 300 70000 g 1 1
 )";

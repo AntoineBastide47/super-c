@@ -573,6 +573,83 @@ fn main() i32 {
     h::expect_c("a niche constant", SRC, "Option__ptr_i32 NR = {0};");
 }
 
+// A two-variant enum whose one payload is a `bool`, a payload-less enum of implicit discriminants or a
+// view (`str`, `[]T`, `[]mut T`) keeps its discriminant in a value no payload holds: the `bool`'s byte 2,
+// the enum's count of values, a length of `usize::MAX`. It has no tag and the size of the payload. Every
+// read and write agrees on it in the native backend and in C: construction, matching, a write through
+// the payload, generic code, vectors of them, constants. An enum of explicit discriminants keeps its tag.
+@test
+fn invalid_value_niches() {
+    const SRC: str = M"(enum Color { R, G, B }
+enum Code { A = 1, B = 2 }
+const NB: Option<bool> = Option::None;
+const SB: Option<bool> = Option::Some(false);
+const NC: Option<Color> = Option::None;
+const SC: Option<Color> = Option::Some(Color::B);
+const NS: Option<str> = Option::None;
+const SS: Option<str> = Option::Some("abc");
+fn pick(k: i32) Option<bool> {
+    if k == 0 { return Option::None; }
+    return Option::Some(k == 2);
+}
+fn view(s: str, k: usize) Option<str> {
+    if k == 0 { return Option::None; }
+    return Option::Some(s.slice(0, k));
+}
+fn bytes(v: []mut u8, k: i32) Option<[]mut u8> {
+    if k == 0 { return Option::None; }
+    return Option::Some(v);
+}
+fn some_count<T>(v: &Vector<Option<T>>) i32 {
+    let mut n = 0;
+    for i in 0..v.len() { n += v[i].is_some() as i32; }
+    return n;
+}
+fn main() i32 {
+    static_assert(sizeof(Option<bool>) == 1, "Option<bool> is a byte");
+    static_assert(sizeof(Option<Color>) == sizeof(Color), "Option<Color> is a Color");
+    static_assert(sizeof(Option<str>) == sizeof(str), "Option<str> is a str");
+    static_assert(sizeof(Option<[]u8>) == sizeof([]u8), "Option<[]u8> is a view");
+    static_assert(sizeof(Option<Code>) > sizeof(Code), "explicit discriminants keep the tag");
+    let mut s = 0;
+    for k in 0..3 {
+        if let Some(b) = pick(k) { s += 1 + b as i32; } else { s += 10; }
+    }
+    let mut o = pick(2);
+    if let Some(r) = &mut o { *r = false; }
+    if let Some(b) = o { s += 100 * (!b) as i32; }
+    if NB.is_none() { s += 1000; }
+    if let Some(b) = SB { s += 2000 * (!b) as i32; }
+    if NC.is_none() { s += 10000; }
+    if let Some(c) = SC { s += 20000 * c as i32; }
+    if let Some(t) = view("hello", 3) { s += 100000 * t.len() as i32; }
+    if view("hello", 0).is_none() { s += 1000000; }
+    if NS.is_none() { s += 2000000; }
+    if let Some(t) = SS { s += 4000000 * t.len() as i32; }
+    let mut buf = Vector::<u8>::new();
+    buf.push(5);
+    if let Some(w) = bytes(buf.index_range_mut(0..1), 1) { w[0] = 9; }
+    if bytes(buf.index_range_mut(0..0), 1).is_some() && bytes(buf.index_range_mut(0..1), 0).is_none() { s += buf[0] as i32 * 100000000; }
+    let mut v = Vector::<Option<bool>>::new();
+    for k in 0..7 { v.push(pick(k % 3)); }
+    let mut w = Vector::<Option<Color>>::new();
+    w.push(Option::Some(Color::R));
+    w.push(Option::None);
+    if some_count(&v) != 4 || some_count(&w) != 1 { return 1; }
+    return s - (10 + 1 + 2 + 100 + 1000 + 2000 + 10000 + 40000 + 300000 + 1000000 + 2000000 + 12000000 + 900000000);
+}
+)";
+    let r = h::compile_and_run(SRC);
+    assert(r.built && r.exit == 0, "invalid-value niches through the native backend");
+    if cli::has_cc() {
+        let rc = h::compile_and_run_c(SRC);
+        assert(rc.built && rc.exit == 0, "invalid-value niches through C");
+    }
+    h::expect_c("a bool niche's byte", SRC, "    uint8_t __sc_niche;\n  } payload;");
+    h::expect_c("a bool niche constant", SRC, "Option__bool NB = { .payload.__sc_niche = 2 };");
+    h::expect_c("a view niche constant", SRC, ".len = (size_t)-1 };");
+}
+
 // Constants local to different bodies may share a name: each has its own C symbol.
 fn local_constants_of_one_name(b: &mut h::ExitBatch) {
     exit_case(

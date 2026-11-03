@@ -403,6 +403,7 @@ pub(package) struct Mangler {
     pub(package) mangle: bool,
     ph_global: loader::LookupHit,
     ph_box: loader::LookupHit, // the prelude `Box` (`niche`)
+    nd: lay::NicheDecls, // the declarations whose values keep a niche (`niche`)
     // Per-module short-prefix verdicts (1 = short), a pure function of the package's module path
     // list, so every TU agrees: `short_ok` points into `short_own` (filled on first use) or into
     // the table of the mangler `share_short` took it from, which outlives this one.
@@ -723,6 +724,7 @@ extend Mangler {
             mangle: user_mods > 1,
             ph_global: p.prelude_lookup("Global", true),
             ph_box: p.prelude_lookup("Box", true),
+            nd: lay::niche_decls(p),
             short_own: Vector::<u8>::new(),
             short_ok: null,
             subs: Vector::<MSub>::new(),
@@ -3316,30 +3318,30 @@ extend Mangler {
         self.lib_escape(out, start);
     }
 
-    /// The niche kind (`lay::niche_kind`) of payload enum `(m, decl)` under the substitution stack, with its
-    /// `some` and `none` variants; NK_NONE when the enum keeps its tag.
-    pub(package) fn niche(self: &Self, m: ModuleId, decl: NodeId, some: &mut NodeId, none: &mut NodeId) u8 {
+    /// The niche (`lay::niche_kind`, `lay::niche_of`) of payload enum `(m, decl)` under the substitution
+    /// stack, with its `some` and `none` variants; NO_NICHE when the enum keeps its tag.
+    pub(package) fn niche(self: &Self, m: ModuleId, decl: NodeId, some: &mut NodeId, none: &mut NodeId) lay::Niche {
         let a = unsafe &*self.p().module_ast_const(m);
         if !a.niche_shape(decl, some, none) {
-            return lay::NK_NONE;
+            return lay::NO_NICHE;
         }
         let pty = a.member_ty(unsafe a.list(a.at_const(*some).as_data.variant.payload)[0]);
         let mut rm = m;
         let mut rt = TYPE_NONE;
         if pty == TYPE_NONE || !self.resolve(m, pty, &mut rm, &mut rt) {
-            return lay::NK_NONE;
+            return lay::NO_NICHE;
         }
         let ra = unsafe &*self.p().module_ast_const(rm);
-        let k = lay::niche_kind(ra, self.ph_box, rt);
+        let k = lay::niche_kind(self.p(), ra, self.nd, rt);
         if k == lay::NK_BOX {
             let it = *ra.instance(ra.type_at(rt).as_data.inst);
             let mut vm = rm;
             let mut vt = TYPE_NONE;
             if !self.resolve(rm, it.args[0], &mut vm, &mut vt) || unsafe (*self.p().module_ast_const(vm)).type_at(vt).kind == TypeKind::TYPE_DYN {
-                return lay::NK_NONE;
+                return lay::NO_NICHE;
             }
         }
-        return k;
+        return lay::niche_of(self.p(), ra, k, rt);
     }
 
     /// `niche` for enum type `(rm, rt)`, with its declaration in `dm`/`dn`: an instance's arguments
@@ -3352,7 +3354,7 @@ extend Mangler {
         dn: &mut NodeId,
         some: &mut NodeId,
         none: &mut NodeId,
-    ) u8 {
+    ) lay::Niche {
         let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
         let mut it = TyInstance { n: 0 };
         if y.kind == TypeKind::TYPE_ENUM {
@@ -3363,11 +3365,11 @@ extend Mangler {
             *dm = it.module;
             *dn = it.decl;
         } else {
-            return lay::NK_NONE;
+            return lay::NO_NICHE;
         }
         let a = unsafe &*self.p().module_ast_const(*dm);
         if !a.niche_shape(*dn, some, none) {
-            return lay::NK_NONE;
+            return lay::NO_NICHE;
         }
         let mut pm: ModuleId = 0;
         let mut pt = TYPE_NONE;
@@ -3380,10 +3382,10 @@ extend Mangler {
             &mut pm,
             &mut pt,
         ) {
-            return lay::NK_NONE;
+            return lay::NO_NICHE;
         }
         let pa = unsafe &*self.p().module_ast_const(pm);
-        let k = lay::niche_kind(pa, self.ph_box, pt);
+        let k = lay::niche_kind(self.p(), pa, self.nd, pt);
         if k == lay::NK_BOX {
             let bi = *pa.instance(pa.type_at(pt).as_data.inst);
             let mut vm: ModuleId = 0;
@@ -3395,10 +3397,10 @@ extend Mangler {
                 self.resolve(pm, bi.args[0], &mut vm, &mut vt)
             };
             if !ok || unsafe (*self.p().module_ast_const(vm)).type_at(vt).kind == TypeKind::TYPE_DYN {
-                return lay::NK_NONE;
+                return lay::NO_NICHE;
             }
         }
-        return k;
+        return lay::niche_of(self.p(), pa, k, pt);
     }
 
     // Member type `t` (pool `dm`) of declaration `(dm, dn)` in its instance `it` (types of `am`;
@@ -3493,12 +3495,17 @@ extend Mangler {
     }
 
     /// The C member path from a value of niche enum `(m, decl)` to its niche word, after `sep` (`.` or
-    /// `->`): `payload.<some>.<member>`, then the box's pointer field for NK_BOX.
+    /// `->`): `payload.<some>.<member>`, then the box's pointer field for NK_BOX or the view's length for
+    /// NK_VIEW; a `bool`'s byte (NK_BOOL) is the union's `__sc_niche`, which holds 2 as well.
     pub(package) fn niche_path(self: &mut Self, m: ModuleId, some: NodeId, kind: u8, sep: str, out: &mut String) {
         let a = unsafe &*self.p().module_ast_const(m);
         let vd = unsafe a.at_const(some).as_data.variant;
         out.push_str(sep);
         out.push_str("payload.");
+        if kind == lay::NK_BOOL {
+            out.push_str("__sc_niche");
+            return;
+        }
         self.ident(m, a.at_const(vd.name).as_data.name.text, out);
         let pid = unsafe a.list(vd.payload)[0];
         if vd.struct_payload && a.at_const(pid).kind == NodeKind::NODE_FIELD {
@@ -3506,6 +3513,24 @@ extend Mangler {
             self.ident(m, a.at_const(a.at_const(pid).as_data.field.name).as_data.name.text, out);
         } else {
             out.push_str("._0");
+        }
+        if kind == lay::NK_VIEW {
+            // `str`, `Slice` and `SliceMut` name their length `len`, their second field.
+            let sa = unsafe &*self.p().module_ast_const(self.nd.strd.mid);
+            let ms = sa.ext(self.nd.strd.node).aggregate.members;
+            let mut n: u32 = 0;
+            for i in 0..ms.len {
+                let fid = unsafe sa.list(ms)[i as usize];
+                if sa.at_const(fid).kind == NodeKind::NODE_FIELD {
+                    n += 1;
+                    if n == 2 {
+                        out.push_str(".");
+                        self.field_ident(self.nd.strd.mid, fid, out);
+                        return;
+                    }
+                }
+            }
+            return;
         }
         if kind != lay::NK_BOX {
             return;
@@ -3522,23 +3547,25 @@ extend Mangler {
         }
     }
 
-    /// `(<v><path> != 0 ? <some> : <none>)`: the discriminant of value `v` of niche enum `(m, decl)`
-    /// (`niche` kind `k`; `arrow`: `v` points at the value).
+    /// `(<v><path> != <none value> ? <some> : <none>)`: the discriminant of value `v` of niche enum
+    /// `(m, decl)` (niche `k`; `arrow`: `v` points at the value).
     pub(package) fn niche_discr(
         self: &mut Self,
         m: ModuleId,
         decl: NodeId,
         some: NodeId,
         none: NodeId,
-        k: u8,
+        k: lay::Niche,
         v: str,
         arrow: bool,
         out: &mut String,
     ) {
         out.push_str("(");
         out.push_str(v);
-        self.niche_path(m, some, k, if_s(arrow, "->", "."), out);
-        out.push_str(" != 0 ? ");
+        self.niche_path(m, some, k.kind, if_s(arrow, "->", "."), out);
+        out.push_str(" != ");
+        niche_none(k, out);
+        out.push_str(" ? ");
         self.enum_tag(m, decl, some, out);
         out.push_str(" : ");
         self.enum_tag(m, decl, none, out);
@@ -4472,6 +4499,15 @@ fn sig_ty(fa: *const Ast, y: &Ty, cf: *const ClosureFact, ret: bool, i: u32) Typ
 }
 
 /// `a` when `c` holds, else `b`.
+/// The C value of niche `k`'s word that is `none` (`lay::Niche.none`): a view's length `(size_t)-1`.
+pub(package) fn niche_none(k: lay::Niche, out: &mut String) {
+    if k.kind == lay::NK_VIEW {
+        out.push_str("(size_t)-1");
+    } else {
+        out.format_into("{}", k.none);
+    }
+}
+
 pub(package) const fn if_s(c: bool, a: str<'static>, b: str<'static>) str<'static> {
     if c {
         return a;

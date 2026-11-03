@@ -7104,18 +7104,27 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
                 pay.push(k);
             }
         }
-        if nk != lay::NK_NONE && pay.len() == 0 {
-            // A niche enum has no tag: `none` is the all-zero value.
-            out.push_str("{0}");
+        if nk.kind != lay::NK_NONE && pay.len() == 0 {
+            // A niche enum has no tag: `some` of a zero payload is the all-zero value, `none` the value
+            // whose niche word is its `none` value.
+            if vid == ns || nk.none == 0 {
+                out.push_str("{0}");
+            } else {
+                out.push_str("{ ");
+                cem.mg.niche_path(dm, ns, nk.kind, ".", out);
+                out.push_str(" = ");
+                mbe::niche_none(nk, out);
+                out.push_str(" }");
+            }
             return true;
         }
         out.push_str("{ ");
-        if nk == lay::NK_NONE {
+        if nk.kind == lay::NK_NONE {
             out.push_str(".tag = ");
             cem.mg.enum_tag(dm, dn, vid, out);
         }
         if pay.len() != 0 {
-            out.push_str(mbe::if_s(nk == lay::NK_NONE, ", .payload.", ".payload."));
+            out.push_str(mbe::if_s(nk.kind == lay::NK_NONE, ", .payload.", ".payload."));
             cem.mg.ident(dm, a.at_const(a.at_const(vid).as_data.variant.name).as_data.name.text, out);
             out.push_str(" = { ");
             for i in 0..pay.len() {
