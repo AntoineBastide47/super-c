@@ -104,7 +104,9 @@ pub(package) const FOLD_LANE_MUL: u64 = 8589934592;
 /// the shift reads the narrow value's register (`shl_source`). Neither may fold into anything else.
 pub(package) const FOLD_ZSHL: u64 = 17179869184;
 /// `FOLD_FREE_ZEXT`: a zero extension of an 8- or 16-bit integer to 16 or 32 bits, for a target that keeps
-/// every narrow integer zero-extended in a 32-bit location (wasm): each use reads its operand.
+/// every narrow integer zero-extended in a 32-bit location (wasm): each use reads its operand. So does a
+/// truncation of such a location to 8 or 16 bits whose operand fits (`fits_low`), or that only select
+/// sides read where the condition bounds the operand (`bounded_side`).
 pub(package) const FOLD_FREE_ZEXT: u64 = 68719476736;
 /// `FOLD_VSAD`: an unsigned absolute difference of byte vectors (`vop` `SIMD_ABS_DIFF`) that one widening
 /// sum into 8-byte lanes (`O_VSUMW`) alone reads folds into it: the sum takes the two vectors (x86-64
@@ -239,10 +241,12 @@ pub(package) struct Live {
     cand: Vector<u64>,
     act: Vector<u32>,
     cnt: Vector<u32>,
+    stepped: Vector<u64>, // `plan`: header parameter << 32 | the step that shares its register (`step_partner`)
     pub(package) rpo: Vector<u32>, // per block, its reverse postorder number (NONE: unreachable)
     succ: Vector<u32>,
     stack: Vector<u32>,
     work: Vector<u32>,
+    breaks: Vector<u32>, // `plan`: per layout position `q`, the blocks at 1 to `q` that do not keep the register state (`continues`)
     /// Per instruction of the body, its use count: operands, call and vector arguments, edge arguments (`folds`).
     pub(package) count: Vector<u32>,
     keys: Vector<u64>,
@@ -293,10 +297,12 @@ extend Live {
             cand: Vector::<u64>::new(),
             act: Vector::<u32>::new(),
             cnt: Vector::<u32>::new(),
+            stepped: Vector::<u64>::new(),
             rpo: Vector::<u32>::new(),
             succ: Vector::<u32>::new(),
             stack: Vector::<u32>::new(),
             work: Vector::<u32>::new(),
+            breaks: Vector::<u32>::new(),
             count: Vector::<u32>::new(),
             keys: Vector::<u64>::new(),
             rd: Vector::<Value>::new(),
@@ -322,6 +328,40 @@ extend Live {
             };
         }
         return v;
+    }
+
+    /// Whether the block at layout position `q` of `b` keeps the register state: its only predecessor is
+    /// the block before it in the layout.
+    pub(package) const fn continues(self: &Self, b: &Body, q: u32) bool {
+        if q == 0 {
+            return true;
+        }
+        let k = self.order[q as usize];
+        if self.npred[k as usize] != 1 {
+            return false;
+        }
+        let pb = b.blocks[self.order[q as usize - 1] as usize];
+        let t = b.insts[(pb.start + pb.len - 1) as usize];
+        let ne: u32 = if t.op == O_JMP {
+            1
+        } else if t.op == O_BR {
+            2
+        } else if t.op == O_SWITCH {
+            t.aux as u32 + 1
+        } else {
+            0
+        };
+        for e in 0..ne {
+            if b.edge_target(edge_of(b, t, e)) == k {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Value index `x`'s uses less the edges that write it (a block parameter's).
+    pub(package) const fn reads(self: &Self, x: u32) u32 {
+        return self.uses[x as usize] - self.wn[x as usize];
     }
 
     /// Analyze `b`.
@@ -708,12 +748,35 @@ extend Live {
             }
         }
         if (self.fold_ops & FOLD_FREE_ZEXT) != 0 {
+            // A truncation's uses as a select's side its condition bounds (`bounded_side`).
+            fill(&mut self.cnd, ni, 0);
             for i in 0..ni {
                 let t = b.insts[i];
-                if t.op == O_ZEXT && (t.ty == T_I16 || t.ty == T_I32) && (b.type_of(t.a) == T_I8 || b.type_of(t.a) == T_I16) && b.type_of(
-                    t.a,
-                ) != t.ty {
+                if t.op == O_SELECT && !is_vec(t.ty) {
+                    if bounded_side(b, t.a, t.b, true) {
+                        self.cnd[t.b as usize] += 1;
+                    }
+                    if bounded_side(b, t.a, t.c, false) {
+                        self.cnd[t.c as usize] += 1;
+                    }
+                }
+            }
+            for i in 0..ni {
+                let t = b.insts[i];
+                if t.op != O_ZEXT && t.op != O_TRUNC {
+                    continue;
+                }
+                let ft = b.type_of(t.a);
+                if t.op == O_ZEXT && (t.ty == T_I16 || t.ty == T_I32) && (ft == T_I8 || ft == T_I16) && ft != t.ty {
                     self.pfold[i] = true;
+                }
+                if t.op == O_TRUNC && (t.ty == T_I8 || t.ty == T_I16) && (ft == T_I16 || ft == T_I32) && ft != t.ty {
+                    self.pfold[i] = self.count[i] != 0 && (self.cnd[i] == self.count[i] || fits_low(
+                        b,
+                        t.a,
+                        type_mask(t.ty),
+                        FITS_DEPTH,
+                    ));
                 }
             }
         }
@@ -2075,6 +2138,13 @@ extend Live {
             for q in 1..np {
                 self.work[q] = self.work[q].max(self.work[q - 1]);
             }
+            // A value whose register prefix enters only blocks that keep the register state gains nothing
+            // from a cut: the generator keeps it in its register without a home, and stores it only when it
+            // must.
+            fill(&mut self.breaks, np, 0);
+            for q in 1..np {
+                self.breaks[q] = self.breaks[q - 1] + (!self.continues(b, q as u32)) as u32;
+            }
         }
         fill(&mut self.share, n, NONE);
         fill(&mut self.shared_by, n, NONE);
@@ -2176,18 +2246,31 @@ extend Live {
         }
         self.cand.sort();
         self.act.truncate(0);
+        self.stepped.truncate(0);
         fill(&mut self.cnt, 4, 0);
         for c in 0..self.cand.len() {
             let x = (self.cand[c] & 0xFFFFFFFF) as u32;
             let s = (self.cand[c] >> 32) as u32;
-            // The ranges that ended before this one starts give their registers back.
+            // The ranges that ended before this one starts give their registers back, but to a step that
+            // shares one and lives on (`step_partner`), which holds it from there.
             let mut j: usize = 0;
             while j < self.act.len() {
                 let a = self.act[j];
-                if self.stop[a as usize] < s {
-                    self.leave(j, want);
-                } else {
+                if self.stop[a as usize] >= s {
                     j += 1;
+                    continue;
+                }
+                let mut h = NONE;
+                for q in 0..self.stepped.len() {
+                    if (self.stepped[q] >> 32) as u32 == a {
+                        h = (self.stepped[q] & 0xFFFFFFFF) as u32;
+                    }
+                }
+                if h != NONE && self.home[h as usize] != HOME_NONE && self.stop[h as usize] >= s {
+                    self.act[j] = h;
+                    j += 1;
+                } else {
+                    self.leave(j, want);
                 }
             }
             // A parameter of a block after a loop shares the register of the loop's parameter it continues
@@ -2205,6 +2288,22 @@ extend Live {
                     self.stop[ep as usize] = self.stop[ep as usize].max(self.stop[x as usize]);
                     self.share[x as usize] = ep;
                     self.shared_by[ep as usize] = x;
+                    continue;
+                }
+            }
+            // A loop's step or accumulator takes the register of the header parameter it replaces
+            // (`step_partner`): that parameter's range ends where it starts.
+            let sp = self.step_partner(b, x);
+            if sp != NONE && self.home[sp as usize] != HOME_NONE && (want[x as usize] & WANT_V) == (want[sp as usize] & WANT_V) && (want[x as usize] & Live::want_of(
+                self.home[sp as usize],
+            )) != 0 && (want[x as usize] & WANT_SCRATCH) != 0 {
+                let mut j: usize = 0;
+                while j < self.act.len() && self.act[j] != sp {
+                    j += 1;
+                }
+                if j < self.act.len() {
+                    self.home[x as usize] = self.home[sp as usize];
+                    self.stepped.push(sp as u64 << 32 | x as u64);
                     continue;
                 }
             }
@@ -2239,7 +2338,7 @@ extend Live {
                     }
                     let block = lo;
                     let d = self.pos[self.def_blk[a as usize] as usize] as usize;
-                    if self.split && self.work[block] <= block as u32 && d < block && self.start[a as usize] < self.base[block] && self.share[a as usize] == NONE && self.shared_by[a as usize] == NONE && a < nv as u32 && !(a >= ni as u32 && agg_param(
+                    if self.split && self.work[block] <= block as u32 && d < block && self.breaks[block] > self.breaks[d] && self.start[a as usize] < self.base[block] && self.share[a as usize] == NONE && self.shared_by[a as usize] == NONE && a < nv as u32 && !(a >= ni as u32 && agg_param(
                         b,
                         VPARAM | a - ni as u32,
                     )) {
@@ -2252,6 +2351,12 @@ extend Live {
                             self.home[sx as usize] = HOME_NONE;
                             self.share[sx as usize] = NONE;
                             self.shared_by[a as usize] = NONE;
+                        }
+                    }
+                    // So do the steps that share it.
+                    for q in 0..self.stepped.len() {
+                        if (self.stepped[q] >> 32) as u32 == a {
+                            self.home[(self.stepped[q] & 0xFFFFFFFF) as usize] = HOME_NONE;
                         }
                     }
                     h = self.fits(x, want, caps, NONE);
@@ -2405,6 +2510,35 @@ extend Live {
             (O_ADD, O_ADDO)
         };
         return (t.op == plain || t.op == ovf && self.cnd[i as usize] == 0) && is_int(t.ty) && (bits == 32 || bits == 64);
+    }
+
+    // The loop header parameter instruction `x` replaces, when it may take that parameter's register as
+    // the generators' `def_step` and `step_reg` do: the back edge that ends `x`'s block passes `x` to it
+    // (`back_param`), its range ends in that block, nothing after `x` there reads it, and `x` reads it as
+    // its first operand alone if at all. NONE when not.
+    fn step_partner(self: &mut Self, b: &Body, x: u32) u32 {
+        if x as usize >= b.insts.len() {
+            return NONE;
+        }
+        let k = self.def_blk[x as usize];
+        if k == NONE || self.pos[k as usize] == NONE {
+            return NONE;
+        }
+        let bk = b.blocks[k as usize];
+        let px = self.back_param(b, b.insts[(bk.start + bk.len - 1) as usize], x, self.pos[k as usize]);
+        if px == NONE || self.end[px as usize] != self.pos[k as usize] {
+            return NONE;
+        }
+        let pv = VPARAM | px - b.insts.len() as u32;
+        let a = self.ua[x as usize];
+        let mut n: u32 = 0;
+        for u in a..a + self.un[x as usize] {
+            n += (self.uv[u as usize] == pv) as u32;
+        }
+        if n > 1 || n == 1 && b.insts[x as usize].a != pv || self.reads_after(b, k, x, pv) {
+            return NONE;
+        }
+        return px;
     }
 
     // The header parameter of a loop that parameter value `x` of `b`, of a block laid out after the loop,
@@ -3472,6 +3606,75 @@ pub(package) const fn remat_inst(p: &Package, b: &Body, v: Value) bool {
     }
     let t = b.insts[v as usize];
     return t.op == O_ICONST || t.op == O_FCONST || t.op == O_SLOTADDR || t.op == O_SYMADDR && !tls_sym(p, b, t.a);
+}
+
+// How deep `fits_low` looks through operations.
+const FITS_DEPTH: u32 = 4;
+
+// The mask of integer type `t`'s bits, of up to 32.
+const fn type_mask(t: u8) u64 {
+    return (1u64 << type_bits(t, 4) as u64) - 1;
+}
+
+// Whether every value integer `v` of `b` (of up to 32 bits) takes is at most low-bit mask `m`, as a
+// constant, a zero extension, an `and`, a right shift, a remainder or quotient by a constant, or a select
+// shows it, `depth` instructions deep.
+fn fits_low(b: &Body, v: Value, m: u64, depth: u32) bool {
+    let ty = b.type_of(v);
+    if type_bits(ty, 4) > 32 {
+        return false;
+    }
+    let tm = type_mask(ty);
+    if tm <= m {
+        return true;
+    }
+    if (v & (VPARAM | VFLAG)) != 0 || depth == 0 {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_ICONST {
+        return (int_const(b, v) & tm) <= m;
+    }
+    if t.op == O_ZEXT || t.op == O_UDIV && int_const(b, t.b) != u64::MAX {
+        return fits_low(b, t.a, m, depth - 1);
+    }
+    if t.op == O_AND {
+        return fits_low(b, t.a, m, depth - 1) || fits_low(b, t.b, m, depth - 1);
+    }
+    if t.op == O_SELECT {
+        return fits_low(b, t.b, m, depth - 1) && fits_low(b, t.c, m, depth - 1);
+    }
+    if t.op != O_LSHR && t.op != O_UREM {
+        return false;
+    }
+    let k = int_const(b, t.b);
+    if t.op == O_LSHR && k < type_bits(ty, 4) as u64 {
+        return tm >> k <= m || fits_low(b, t.a, m, depth - 1);
+    }
+    return t.op == O_UREM && (k & tm) != 0 && ((k & tm) - 1 <= m || fits_low(b, t.a, m, depth - 1));
+}
+
+// Whether `side`, a truncation of a 16- or 32-bit integer to 8 or 16 bits, is the side of a select on
+// condition `c` that the select takes only where `c` bounds the truncated value within the narrow type
+// (true side `on_true`): the side is that value, whatever the truncation clears.
+fn bounded_side(b: &Body, c: Value, side: Value, on_true: bool) bool {
+    if ((c | side) & (VPARAM | VFLAG)) != 0 || b.insts[side as usize].op != O_TRUNC || b.insts[c as usize].op != O_ICMP {
+        return false;
+    }
+    let s = b.insts[side as usize];
+    let q = b.insts[c as usize];
+    let k = int_const(b, q.b);
+    let ft = b.type_of(q.a);
+    if q.a != s.a || k == u64::MAX || ft != T_I16 && ft != T_I32 {
+        return false;
+    }
+    let m = type_mask(s.ty);
+    let kk = k & type_mask(ft);
+    // Taken when the value is at most `m`: true below or at, false above.
+    if on_true {
+        return q.aux == C_ULT && kk <= m + 1 || q.aux == C_ULE && kk <= m;
+    }
+    return q.aux == C_UGT && kk <= m || q.aux == C_UGE && kk <= m + 1;
 }
 
 /// Whether `v` of `b` is an integer constant; its bits in `out`.

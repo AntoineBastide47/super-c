@@ -2890,32 +2890,7 @@ extend Gen {
     // Whether the block at position `q` keeps the register state: its only predecessor is the block
     // before it in the layout.
     const fn continues(self: &Self, q: u32) bool {
-        if q == 0 {
-            return true;
-        }
-        let b = self.b();
-        let k = self.lv.order[q as usize];
-        if self.lv.npred[k as usize] != 1 {
-            return false;
-        }
-        let pk = self.lv.order[q as usize - 1];
-        let pb = b.blocks[pk as usize];
-        let t = b.insts[(pb.start + pb.len - 1) as usize];
-        let ne: u32 = if t.op == O_JMP {
-            1
-        } else if t.op == O_BR {
-            2
-        } else if t.op == O_SWITCH {
-            t.aux as u32 + 1
-        } else {
-            0
-        };
-        for e in 0..ne {
-            if b.edge_target(lv::edge_of(b, t, e)) == k {
-                return true;
-            }
-        }
-        return false;
+        return self.lv.continues(self.b(), q);
     }
 
     // Before a block's branch: every value live into a successor that does not keep the register state

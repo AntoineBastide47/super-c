@@ -4,8 +4,8 @@
 // locals, zero-extended as the evaluator keeps them), constants and addresses rematerialize at each use,
 // and i128 and vector values live in frame memory. Values share a local (a frame home) when their live
 // ranges, in the analysis pass's layout positions (`codegen::live`), do not overlap; a block parameter's
-// range covers its predecessors, whose edges write it, and a value whose range ends in its own block
-// frees its local at its last use.
+// range starts at its block and covers the edges into it, which write it (it takes an argument's local
+// when one is free), and a value whose range ends in its own block frees its local at its last use.
 //
 // The frame is on the linear stack below the imported global `__stack_pointer`: the call area (copies of
 // arguments, variadic buffers, results in memory) at its base, then the LIR slots, the entry's spills and
@@ -92,6 +92,13 @@ pub(package) struct Gen {
     home: Vector<u32>, // per value index, the frame offset of a memory value (NONE: none)
     remat: Vector<bool>, // per instruction
     free: Vector<Vector<u32>>, // per class, the free locals
+    lref: Vector<u32>, // `assign`: per local, the values holding it
+    gone: Vector<bool>, // `assign`: per value index, whether its local or home is released
+    seen: Vector<u32>, // `dead_from`: per block, the walk that reached it
+    walk: u32, // `dead_from`: the walks so far
+    budget: u32, // `dead_from`: the instructions the body's walks may still read
+    wstack: Vector<u32>,
+    wsucc: Vector<u32>,
     free_home: Vector<u64>, // size << 32 | offset of a free home
     scratch: Vector<Vector<u32>>, // per class, the scratch locals (live within one instruction)
     nscr: Vector<u32>, // per class, the scratch locals the current instruction took
@@ -204,6 +211,13 @@ extend Gen {
             home: Vector::<u32>::new(),
             remat: Vector::<bool>::new(),
             free: free,
+            lref: Vector::<u32>::new(),
+            gone: Vector::<bool>::new(),
+            seen: Vector::<u32>::new(),
+            walk: 0,
+            budget: 0,
+            wstack: Vector::<u32>::new(),
+            wsucc: Vector::<u32>::new(),
             free_home: Vector::<u64>::new(),
             scratch: scratch,
             nscr: nscr,
@@ -426,7 +440,7 @@ extend Gen {
             return self.refuse("a data model whose pointers are not 32-bit");
         }
         intrin::of_symbols(self.p(), b, "wasm32", &mut self.itpl);
-        self.lv.fold_ops = lv::FOLD_FREE_ZEXT;
+        self.lv.fold_ops = lv::FOLD_FREE_ZEXT | lv::FOLD_CMP;
         self.lv.run(b);
         self.sh.run(b, &self.lv);
         wa::classify(b, b.sig, self.vregs, &mut self.me);
@@ -493,9 +507,9 @@ extend Gen {
     // then `local.get l`, adjacent bytes: the read runs right after the write, and only then) stay on the
     // operand stack. Both go when one instruction reads the value (VW_ONE) and `l` is not read again, or
     // its next access in the code writes it with no control instruction between (`Code.ctl`): every path
-    // from the read runs that write before any other read of `l`. Else the write becomes `local.tee l`.
-    // The scratch locals of one instruction's code, which its own loops may carry, stay. The relocations
-    // and the line rows move with the code.
+    // from the read runs that write before any other read of `l`; or when a `return` follows the read,
+    // which ends its path. Else the write becomes `local.tee l`. The scratch locals of one instruction's
+    // code, which its own loops may carry, stay. The relocations and the line rows move with the code.
     fn stack_values(self: &mut Self) {
         let n = self.c.acc.len();
         if n < 2 {
@@ -532,7 +546,8 @@ extend Gen {
                 cq += 1;
             }
             let written = k == NONE || (self.c.acc_op[k as usize] & VW_OP) != w::LOCAL_GET && (cq == self.c.ctl.len() || self.c.ctl[cq] >= (self.c.acc[k as usize] >> 32) as u32);
-            if (self.c.acc_op[i] & VW_ONE) == 0 || !written {
+            // A read a `return` takes next ends its path: nothing reads the write again.
+            if self.c.bytes[(jat + len) as usize] != w::RETURN && ((self.c.acc_op[i] & VW_ONE) == 0 || !written) {
                 self.c.bytes[at as usize] = w::LOCAL_TEE;
                 self.cuts.push(jat as u64 << 32 | (jat + len) as u64);
             } else {
@@ -743,6 +758,13 @@ const fn int_cmp64(c: u8, sg: bool) u8 {
     return pick8(sg, w::I64_GE_S, w::I64_GE_U);
 }
 
+const fn pick_v(c: bool, a: Value, b: Value) Value {
+    if c {
+        return a;
+    }
+    return b;
+}
+
 const fn pick8(c: bool, a: u8, b: u8) u8 {
     if c {
         return a;
@@ -755,6 +777,9 @@ struct Cursor {
     q: usize,
     d: u32,
 }
+
+// The instructions the walks of `Gen::dead_from` may read per body.
+const WALK_BUDGET: u32 = 16384;
 
 // The marks `Gen::value_write` puts on a local access's opcode (`Code.acc_op`): the write of a value, of one
 // read; the opcode's bits.
@@ -791,10 +816,16 @@ extend Gen {
         let n = self.lv.end.len();
         fill(&mut self.local_of, n, NONE);
         fill(&mut self.home, n, NONE);
-        let np = b.blocks.len();
+        fill(&mut self.gone, n, false);
+        fill(&mut self.lref, self.nwp as usize, 0);
+        fill(&mut self.seen, b.blocks.len(), 0);
+        self.walk = 0;
+        self.budget = WALK_BUDGET;
         let npos = self.lv.order.len();
-        // Ranges: from the definition's position to `end`; a block parameter's start widened over its
-        // predecessors (`Live::ranges` widened its end).
+        // Ranges: from the definition's position to `end` (`Live::ranges` widened a block parameter's end
+        // over the edges into it). A block parameter's range starts at its block: an edge writes it on its
+        // own path, past the branch, where no value its source's position holds lives on (that value would
+        // live in the target's position).
         let mut start = Vector::<u32>::new();
         let mut end = Vector::<u32>::new();
         fill(&mut start, n, NONE);
@@ -807,33 +838,23 @@ extend Gen {
             }
         }
         let ni = b.insts.len() as u32;
-        for k in 0..np {
-            if self.lv.pos[k] == NONE {
-                continue;
-            }
-            let t = b.insts[(b.blocks[k].start + b.blocks[k].len - 1) as usize];
-            b.succ_edges(t, &mut self.succ);
-            for e in 0..self.succ.len() {
-                let tb = b.blocks[b.edge_target(self.succ[e]) as usize];
-                let q = self.lv.pos[k];
-                for j in 0..tb.param_len as u32 {
-                    let x = (ni + tb.param_start + j) as usize;
-                    if start[x] == NONE {
-                        continue;
-                    }
-                    if q < start[x] {
-                        start[x] = q;
-                    }
-                }
-            }
-        }
         // The entry's parameters: where the convention passes them.
         self.entry_params();
-        // Which values need storage: a used result that does not rematerialize, a parameter.
+        let e0 = ni + b.blocks[0].param_start;
+        let e1 = e0 + b.pool[b.sig as usize];
+        // Which values need storage: a used result that does not rematerialize, a parameter. An entry
+        // parameter in its wasm parameter frees it past its range.
         let mut need = Vector::<bool>::new();
         need.resize_default(n);
         for x in 0..n {
-            if start[x] == NONE || self.local_of[x] != NONE || self.home[x] != NONE {
+            if start[x] == NONE || self.home[x] != NONE {
+                continue;
+            }
+            if self.local_of[x] != NONE {
+                need[x] = x as u32 >= e0 && x as u32 < e1;
+                if need[x] {
+                    self.lref[self.local_of[x] as usize] = 1;
+                }
                 continue;
             }
             if x < ni as usize {
@@ -844,8 +865,17 @@ extend Gen {
                 need[x] = self.lv.uses[x] != 0 || x < (ni + b.params.len() as u32) as usize;
             }
         }
-        // A value whose range is one position and is no parameter is freed at its last use; the others
-        // when the position past their range starts.
+        // A value whose range is one position is freed at its last use (`one`) when it is an instruction's
+        // result or an entry parameter in its wasm parameter that no edge writes; the others when the
+        // position past their range starts.
+        let mut one = Vector::<bool>::new();
+        one.resize_default(n);
+        for x in 0..n {
+            let ep = x as u32 >= e0 && x as u32 < e1 && self.local_of[x] != NONE && self.lv.uses[x] != 0 && self.lv.reads(
+                x as u32,
+            ) == self.lv.uses[x];
+            one[x] = need[x] && start[x] == end[x] && (x < ni as usize || ep);
+        }
         let mut by_start = Vector::<u32>::new();
         let mut by_end = Vector::<u32>::new();
         let mut s_at = Vector::<u32>::new();
@@ -853,7 +883,7 @@ extend Gen {
         let mut e_at = Vector::<u32>::new();
         fill(&mut e_at, npos + 2, 0);
         for x in 0..n {
-            if need[x] && !(start[x] == end[x] && x < ni as usize) {
+            if need[x] && !one[x] {
                 s_at[start[x] as usize + 1] += 1;
                 e_at[end[x] as usize + 2] += 1;
             }
@@ -871,7 +901,7 @@ extend Gen {
         let mut ef = Vector::<u32>::with_capacity(npos + 2);
         ef.extend_copy(&e_at);
         for x in 0..n {
-            if need[x] && !(start[x] == end[x] && x < ni as usize) {
+            if need[x] && !one[x] {
                 by_start[sf[start[x] as usize] as usize] = x as u32;
                 sf[start[x] as usize] += 1;
                 // Freed when position end + 1 starts.
@@ -886,7 +916,10 @@ extend Gen {
                 self.release(by_end[j as usize]);
             }
             for j in s_at[q]..s_at[q + 1] {
-                self.take(by_start[j as usize]);
+                let x = by_start[j as usize];
+                if self.local_of[x as usize] == NONE {
+                    self.take(x);
+                }
             }
             let k = self.lv.order[q];
             let blk = b.blocks[k as usize];
@@ -894,7 +927,7 @@ extend Gen {
                 let t = b.insts[i as usize];
                 // A memory result takes its home before its operands free theirs: a lowering may write
                 // the result's lanes before it reads every operand lane (a gather's fallback lanes).
-                let own = need[i as usize] && start[i as usize] == end[i as usize];
+                let own = one[i as usize];
                 let early = own && in_mem(t.ty);
                 if early {
                     self.take(i);
@@ -903,7 +936,7 @@ extend Gen {
                 self.uses.extend_from_slice(self.lv.uses_of(i));
                 for u in 0..self.uses.len() {
                     let x = self.vx(self.uses[u]);
-                    if x == NONE || x >= ni || !need[x as usize] || start[x as usize] != end[x as usize] {
+                    if x == NONE || !one[x as usize] {
                         continue;
                     }
                     if left[x as usize] == 0 {
@@ -920,12 +953,6 @@ extend Gen {
                     }
                     if self.lv.uses[i as usize] == 0 {
                         self.release(i);
-                    }
-                }
-                if let Some(fx) = self.lv.flag_of.get(&i) {
-                    let f = (*fx) as usize;
-                    if need[f] && start[f] == end[f] {
-                        self.take(f as u32);
                     }
                 }
             }
@@ -950,11 +977,99 @@ extend Gen {
         }
         let wt = wa::wtype(t);
         let k = class_of(wt) as usize;
-        if let Some(l) = self.free.index_mut(k).pop() {
-            self.local_of[x as usize] = l;
-            return;
+        let mut l = self.arg_local(x, k);
+        if l == NONE {
+            l = (if let Some(f) = self.free.index_mut(k).pop() {
+                f
+            } else {
+                self.lref.push(0);
+                self.new_local(wt)
+            });
         }
-        self.local_of[x as usize] = self.new_local(wt);
+        self.lref[l as usize] += 1;
+        self.local_of[x as usize] = l;
+    }
+
+    // For block parameter `x` (class `k`), the local of an argument an edge into its block passes it, so
+    // that edge moves nothing: a free one (off the free list), or the argument's own when no code the
+    // block reaches reads the argument (`dead_from`), which both then hold. NONE when there is none.
+    fn arg_local(self: &mut Self, x: u32, k: usize) u32 {
+        let b = self.b();
+        let ni = b.insts.len() as u32;
+        if x < ni || x >= ni + b.params.len() as u32 {
+            return NONE;
+        }
+        let tb = self.lv.def_blk[x as usize];
+        let q = x - ni - b.blocks[tb as usize].param_start;
+        for p in self.lv.pat[tb as usize]..self.lv.pat[tb as usize + 1] {
+            let pb = b.blocks[self.lv.preds[p as usize] as usize];
+            b.succ_edges(b.insts[(pb.start + pb.len - 1) as usize], &mut self.succ);
+            for e in 0..self.succ.len() {
+                if b.edge_target(self.succ[e]) != tb {
+                    continue;
+                }
+                let ax = self.vx(b.edge_arg(self.succ[e], q));
+                if ax == NONE || self.local_of[ax as usize] == NONE {
+                    continue;
+                }
+                let l = self.local_of[ax as usize];
+                if !self.gone[ax as usize] {
+                    // Only while the argument alone holds it: a parameter that took it already (an edge
+                    // passing one value to two parameters) lives on beside this one.
+                    if self.lref[l as usize] == 1 && self.dead_from(tb, ax) {
+                        return l;
+                    }
+                    continue;
+                }
+                if self.lref[l as usize] != 0 {
+                    continue;
+                }
+                let fr = self.free.index_mut(k);
+                for f in 0..fr.len() {
+                    if fr[f] == l {
+                        let _ = fr.swap_remove(f);
+                        return l;
+                    }
+                }
+            }
+        }
+        return NONE;
+    }
+
+    // Whether no code block `k` reaches (`k` too) reads value index `ax`. False past the body's walk
+    // budget.
+    fn dead_from(self: &mut Self, k: u32, ax: u32) bool {
+        let b = self.b();
+        self.walk += 1;
+        self.wstack.truncate(0);
+        self.wstack.push(k);
+        self.seen[k as usize] = self.walk;
+        // Each step reads one block, which the walk marks once; the budget bounds the instructions.
+        while let Some(y) = self.wstack.pop() {
+            let blk = b.blocks[y as usize];
+            if blk.len > self.budget {
+                self.budget = 0;
+                return false;
+            }
+            self.budget -= blk.len;
+            for i in blk.start..blk.start + blk.len {
+                let us = self.lv.uses_of(i);
+                for u in 0..us.len() {
+                    if self.vx(us[u]) == ax {
+                        return false;
+                    }
+                }
+            }
+            b.succ_edges(b.insts[(blk.start + blk.len - 1) as usize], &mut self.wsucc);
+            for e in 0..self.wsucc.len() {
+                let z = b.edge_target(self.wsucc[e]);
+                if self.seen[z as usize] != self.walk {
+                    self.seen[z as usize] = self.walk;
+                    self.wstack.push(z);
+                }
+            }
+        }
+        return true;
     }
 
     // Value `x`'s local or home is free.
@@ -966,10 +1081,14 @@ extend Gen {
             return;
         }
         let l = self.local_of[x as usize];
-        if l == NONE || l < self.nwp {
+        if l == NONE {
             return;
         }
-        self.free.index_mut(class_of(wa::wtype(t)) as usize).push(l);
+        self.gone[x as usize] = true;
+        self.lref[l as usize] -= 1;
+        if self.lref[l as usize] == 0 {
+            self.free.index_mut(class_of(wa::wtype(t)) as usize).push(l);
+        }
     }
 
     // The LIR type of value index `x`.
@@ -1227,9 +1346,15 @@ extend Gen {
             self.remat_value(v);
             return;
         }
-        // A zero extension of a narrow integer, which its locals hold so already (`lv::FOLD_FREE_ZEXT`).
+        // A comparison only conditions read (`lv::FOLD_CMP`); a zero extension or a truncation the locals
+        // hold so already (`lv::FOLD_FREE_ZEXT`).
         if (v & (VPARAM | VFLAG)) == 0 && self.lv.pfold[v as usize] {
-            self.get(self.b().insts[v as usize].a);
+            let t = self.b().insts[v as usize];
+            if t.op == O_ICMP {
+                self.cmp_push(t, t.aux, true);
+            } else {
+                self.get(t.a);
+            }
             return;
         }
         let x = self.vx(v);
@@ -1351,7 +1476,7 @@ extend Gen {
     // VW_ONE when one instruction or edge reads it, which no loop keeps).
     fn value_write(self: &mut Self, x: u32) {
         let n = self.c.acc_op.len();
-        self.c.acc_op[n - 1] = w::LOCAL_SET | VW_VALUE | pick8(self.lv.uses[x as usize] == 1, VW_ONE, 0);
+        self.c.acc_op[n - 1] = w::LOCAL_SET | VW_VALUE | pick8(self.lv.reads(x) == 1, VW_ONE, 0);
     }
 
     // The frame offset of memory value `v`.
@@ -2160,18 +2285,6 @@ extend Gen {
     fn icmp(self: &mut Self, i: u32, t: Inst) bool {
         let ty = self.vt(t.a);
         let c = t.aux;
-        let ops: []u8 = [
-            w::I32_EQ,
-            w::I32_NE,
-            w::I32_LT_S,
-            w::I32_LE_S,
-            w::I32_GT_S,
-            w::I32_GE_S,
-            w::I32_LT_U,
-            w::I32_LE_U,
-            w::I32_GT_U,
-            w::I32_GE_U,
-        ];
         if ty == T_I128 {
             let al = self.tmp(w::I64);
             let ah = self.tmp(w::I64);
@@ -2238,21 +2351,44 @@ extend Gen {
             self.put(i);
             return true;
         }
+        self.cmp_push(t, c, false);
+        self.put(i);
+        return true;
+    }
+
+    // Push scalar integer comparison `t` under condition `c` (its own or the inverse). With `truth`, for a
+    // reader that tests for nonzero only (a select's or a branch's condition), a 32-bit value's
+    // inequality with 0 is the value.
+    fn cmp_push(self: &mut Self, t: Inst, c: u16, truth: bool) {
+        let ty = self.vt(t.a);
         // An equality with 0: `eqz`.
         let mut z: u64 = 1;
-        let x = if c == C_EQ && self.const_of(t.b, &mut z) && z == 0 {
+        let x = if (c == C_EQ || c == C_NE) && self.const_of(t.b, &mut z) && z == 0 {
             t.a
-        } else if c == C_EQ && self.const_of(t.a, &mut z) && z == 0 {
+        } else if (c == C_EQ || c == C_NE) && self.const_of(t.a, &mut z) && z == 0 {
             t.b
         } else {
             VNONE
         };
-        if x != VNONE {
+        if x != VNONE && (c == C_EQ || truth && ty != T_I64) {
             self.get(x);
-            self.c.op(pick8(ty == T_I64, w::I64_EQZ, w::I32_EQZ));
-            self.put(i);
-            return true;
+            if c == C_EQ {
+                self.c.op(pick8(ty == T_I64, w::I64_EQZ, w::I32_EQZ));
+            }
+            return;
         }
+        let ops: []u8 = [
+            w::I32_EQ,
+            w::I32_NE,
+            w::I32_LT_S,
+            w::I32_LE_S,
+            w::I32_GT_S,
+            w::I32_GE_S,
+            w::I32_LT_U,
+            w::I32_LE_U,
+            w::I32_GT_U,
+            w::I32_GE_U,
+        ];
         let signed = c >= C_SLT && c <= C_SGE;
         self.get_ext(t.a, signed);
         self.get_ext(t.b, signed);
@@ -2264,8 +2400,27 @@ extend Gen {
                 o
             },
         );
-        self.put(i);
-        return true;
+    }
+
+    // Push branch or select condition `v`, negated when `neg`.
+    fn get_cond(self: &mut Self, v: Value, neg: bool) {
+        if (v & (VPARAM | VFLAG)) == 0 && self.lv.pfold[v as usize] && self.b().insts[v as usize].op == O_ICMP {
+            let t = self.b().insts[v as usize];
+            self.cmp_push(
+                t,
+                if neg {
+                    opposite(t.aux)
+                } else {
+                    t.aux
+                },
+                true,
+            );
+            return;
+        }
+        self.get(v);
+        if neg {
+            self.c.op(w::I32_EQZ);
+        }
     }
 
     fn fcmp(self: &mut Self, i: u32, t: Inst) bool {
@@ -2997,12 +3152,23 @@ extend Gen {
             self.c.op(w::END);
             return true;
         }
-        self.get(t.b);
-        self.get(t.c);
-        self.get(t.a);
+        // A constant true side under a comparison that folds in goes second, the comparison inverted: the
+        // false side, computed last, may stay on the stack.
+        let a = t.a;
+        let swap = (a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[a as usize] && self.b().insts[a as usize].op == O_ICMP && self.is_remat(
+            t.b,
+        ) && !self.is_remat(t.c);
+        self.get(pick_v(swap, t.c, t.b));
+        self.get(pick_v(swap, t.b, t.c));
+        self.get_cond(a, swap);
         self.c.op(w::SELECT);
         self.put(i);
         return true;
+    }
+
+    // Whether `v` rematerializes at each use.
+    const fn is_remat(self: &Self, v: Value) bool {
+        return (v & (VPARAM | VFLAG)) == 0 && self.remat[v as usize];
     }
 
     fn va_arg(self: &mut Self, i: u32, t: Inst) bool {
@@ -3192,7 +3358,7 @@ extend Gen {
         }
         for k in 0..n {
             let a = b.edge_arg(e, k);
-            if !in_mem(self.vt(a)) {
+            if !in_mem(self.vt(a)) && !self.in_place(a, ni + blk.param_start + k) {
                 self.get(a);
             }
         }
@@ -3200,10 +3366,10 @@ extend Gen {
         while k > 0 {
             k -= 1;
             let a = b.edge_arg(e, k);
-            if in_mem(self.vt(a)) {
+            let x = ni + blk.param_start + k;
+            if in_mem(self.vt(a)) || self.in_place(a, x) {
                 continue;
             }
-            let x = ni + blk.param_start + k;
             let l = self.local_of[x as usize];
             if l == NONE {
                 self.c.op(w::DROP);
@@ -3255,6 +3421,12 @@ extend Gen {
         }
     }
 
+    // Whether argument `a` is in parameter `x`'s local already (`arg_local`).
+    const fn in_place(self: &Self, a: Value, x: u32) bool {
+        let ax = self.vx(a);
+        return ax != NONE && self.local_of[x as usize] != NONE && self.local_of[ax as usize] == self.local_of[x as usize];
+    }
+
     fn terminator(self: &mut Self, x: u32, i: u32) bool {
         let b = self.b();
         let t = b.insts[i as usize];
@@ -3273,8 +3445,7 @@ extend Gen {
                 return self.edge(x, t.c);
             }
             if self.brable(x, tf) && b.edge_nargs(t.c) == 0 {
-                self.get(t.a);
-                self.c.op(w::I32_EQZ);
+                self.get_cond(t.a, true);
                 let d = self.depth(tf, self.sh.back(x, tf));
                 self.c.op(w::BR_IF);
                 self.c.uleb(d);

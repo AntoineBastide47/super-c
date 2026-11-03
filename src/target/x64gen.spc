@@ -922,8 +922,9 @@ extend Gen {
     }
 
     // Whether commutative instruction `i` should write over its second operand `b` (in `rb`), not its first
-    // (in `ra`): `b` dies here, and the return or call after takes `i` in `rb` (`next_reg`, `ret_want`; a
-    // jump's would place a parameter's home, which may take `rb`).
+    // (in `ra`): `b` dies here, and the return or call after, or the result part the stores before the
+    // return move it into (`ret_part`), takes `i` in `rb` (`next_reg`, `ret_want`; a jump's would place a
+    // parameter's home, which may take `rb`).
     fn swaps(self: &mut Self, i: u32, b: Value, ra: u8, rb: u8) bool {
         let xb = self.vx(b);
         let bd = self.b();
@@ -933,7 +934,7 @@ extend Gen {
         } else {
             O_JMP
         };
-        if nx != O_RET && nx != O_CALL && nx != O_CALLIND || ra == rb || self.owner[rb as usize] != xb || self.lv.uses[xb as usize] != 0 || self.lv.end[xb as usize] != self.pos || self.va[xb as usize].home == H_FIXED {
+        if nx != O_RET && nx != O_CALL && nx != O_CALLIND && self.ret_part(i) == NOREG || ra == rb || self.owner[rb as usize] != xb || self.lv.uses[xb as usize] != 0 || self.lv.end[xb as usize] != self.pos || self.va[xb as usize].home == H_FIXED {
             return false;
         }
         // `b` holds `rb` until the instruction writes it.
@@ -3674,24 +3675,7 @@ extend Gen {
     // Whether the block at position `q` keeps the register state: its only predecessor is the block
     // before it in the layout.
     const fn continues(self: &Self, q: u32) bool {
-        if q == 0 {
-            return true;
-        }
-        let b = self.b();
-        let k = self.lv.order[q as usize];
-        if self.lv.npred[k as usize] != 1 {
-            return false;
-        }
-        let pk = self.lv.order[q as usize - 1];
-        let pb = b.blocks[pk as usize];
-        let t = b.insts[(pb.start + pb.len - 1) as usize];
-        let ne = nedges(t);
-        for e in 0..ne {
-            if b.edge_target(lv::edge_of(b, t, e)) == k {
-                return true;
-            }
-        }
-        return false;
+        return self.lv.continues(self.b(), q);
     }
 
     // Before a block's branch: every value live into a successor that does not keep the register state

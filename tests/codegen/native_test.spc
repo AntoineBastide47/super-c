@@ -3104,10 +3104,10 @@ b0(v0: i32):
         object_of(&t, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
         "the wasm object",
     );
-    // local.get 0, local.get 0, i32.mul, then: i32.const 1, i32.add, end; local.tee 1, local.get 1, i32.add,
-    // end; and local.get 0, i32.eqz, end.
+    // local.get 0, local.get 0, i32.mul, then: i32.const 1, i32.add, end; local.tee 0 (the parameter's
+    // local, free past the product), local.get 0, i32.add, end; and local.get 0, i32.eqz, end.
     let sq1: [u8; 9] = [0x20, 0x00, 0x20, 0x00, 0x6C, 0x41, 0x01, 0x6A, 0x0B];
-    let tw: [u8; 11] = [0x20, 0x00, 0x20, 0x00, 0x6C, 0x22, 0x01, 0x20, 0x01, 0x6A, 0x0B];
+    let tw: [u8; 11] = [0x20, 0x00, 0x20, 0x00, 0x6C, 0x22, 0x00, 0x20, 0x00, 0x6A, 0x0B];
     let isz: [u8; 4] = [0x20, 0x00, 0x45, 0x0B];
     assert(holds(&obj, sq1[0..9]), "sq1");
     assert(holds(&obj, tw[0..11]), "tw");
@@ -3121,6 +3121,330 @@ int main(void) {
     if (sq1(x) != x * x + 1 || tw(x) != 2 * x * x || isz(x) != (x == 0)) return 1;
   }
   return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
+// wasm32 locals: a loop's parameters take the entry parameters' locals their first edge passes, so that edge
+// and an exit's edge into a block that returns its parameter move nothing; a truncation of a value that
+// fits, or one a select takes only where its condition bounds the value, masks nothing; a parameter one
+// instruction reads right after its only edge, and a value a return reads right after its write, stay on
+// the stack; a comparison only
+// a select reads is computed at the select, inverted when a constant true side goes second. Each runs as
+// before.
+@test
+fn wasm_locals_follow_their_values() {
+    let lir = M"(lir ptr 8
+sym @gcd fn global
+sym @sat fn global
+sym @hi8 fn global
+sym @mid8 fn global
+sym @pick fn global
+sym @sat2 fn global
+sym @sw fn global
+fn @gcd
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.eq v1, v2
+  br v3, b3, b1(v0, v1)
+b1(v4: i32, v5: i32):
+  v6 = urem.i32 v4, v5
+  v7 = icmp.eq v6, v2
+  br v7, b2(v5), b1(v5, v6)
+b2(v8: i32):
+  ret v8
+b3:
+  ret v0
+fn @sat
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = iconst.i32 255
+  v3 = iconst.i8 -1
+  v4 = zext.i32 v0
+  v5 = zext.i32 v1
+  v6 = add.i32 v4, v5
+  v7 = trunc.i8 v6
+  v8 = icmp.ugt v6, v2
+  v9 = select.i8 v8, v3, v7
+  ret v9
+fn @hi8
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = iconst.i32 24
+  v2 = lshr.i32 v0, v1
+  v3 = trunc.i8 v2
+  ret v3
+fn @mid8
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = iconst.i32 16
+  v2 = lshr.i32 v0, v1
+  v3 = trunc.i8 v2
+  ret v3
+fn @pick
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 7
+  v2 = iconst.i32 0
+  v3 = icmp.eq v0, v2
+  br v3, b1(v1), b2
+b1(v4: i32):
+  ret v4
+b2:
+  v5 = iconst.i32 9
+  ret v5
+fn @sat2
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = iconst.i32 256
+  v3 = iconst.i8 -1
+  v4 = zext.i32 v0
+  v5 = zext.i32 v1
+  v6 = add.i32 v4, v5
+  v7 = trunc.i8 v6
+  v8 = icmp.ult v6, v2
+  v9 = select.i8 v8, v7, v3
+  ret v9
+fn @sw
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 2
+  v3 = iconst.i32 5
+  v4 = iconst.i32 3
+  v5 = iconst.i32 1
+  switch v0 [0 -> b4, 1 -> b3, 2 -> b2] else b1
+b1:
+  v6 = sub.i32 v1, v2
+  ret v6
+b2:
+  v7 = xor.i32 v1, v3
+  ret v7
+b3:
+  v8 = mul.i32 v1, v4
+  ret v8
+b4:
+  v9 = add.i32 v1, v5
+  ret v9
+)";
+    let mut obj = Vector::<u8>::new();
+    let t = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&t, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    // pick: if, i32.const 7, return: the edge's write and the return's read of the parameter go.
+    let pick: [u8; 5] = [0x04, 0x40, 0x41, 0x07, 0x0F];
+    assert(holds(&obj, pick[0..5]), "pick");
+    // gcd: end of the early return, loop, local.get 0, local.get 1, i32.rem_u (no copy into the loop's
+    // locals); i32.eqz, if, local.get 1, return (no copy into the exit's).
+    let gcd_in: [u8; 8] = [0x0B, 0x03, 0x40, 0x20, 0x00, 0x20, 0x01, 0x70];
+    let gcd_out: [u8; 6] = [0x45, 0x04, 0x40, 0x20, 0x01, 0x0F];
+    // sat: local.get 0, local.get 1, i32.add, local.tee 1, i32.const 255, local.get 1, i32.const 255,
+    // i32.le_u, select, end.
+    let sat: [u8; 17] = [
+        0x20,
+        0x00,
+        0x20,
+        0x01,
+        0x6A,
+        0x22,
+        0x01,
+        0x41,
+        0xFF,
+        0x01,
+        0x20,
+        0x01,
+        0x41,
+        0xFF,
+        0x01,
+        0x4D,
+        0x1B,
+    ];
+    // hi8: local.get 0, i32.const 24, i32.shr_u, end; mid8 masks: i32.const 16, i32.shr_u, i32.const 255,
+    // i32.and.
+    // sat2: i32.add, local.tee 1, i32.const 255, local.get 1, i32.const 256, i32.lt_u, select.
+    let sat2: [u8; 13] = [0x6A, 0x22, 0x01, 0x41, 0xFF, 0x01, 0x20, 0x01, 0x41, 0x80, 0x02, 0x49, 0x1B];
+    // sw: local.get 1, i32.const 1, i32.add, return: the sum, whose local the switch's value had, stays
+    // on the stack though the next compare reads that local.
+    let sw: [u8; 6] = [0x20, 0x01, 0x41, 0x01, 0x6A, 0x0F];
+    let hi8: [u8; 6] = [0x20, 0x00, 0x41, 0x18, 0x76, 0x0B];
+    let mid8: [u8; 7] = [0x41, 0x10, 0x76, 0x41, 0xFF, 0x01, 0x71];
+    assert(holds(&obj, gcd_in[0..8]), "gcd's loop");
+    assert(holds(&obj, gcd_out[0..6]), "gcd's exit");
+    assert(holds(&obj, sat[0..17]), "sat");
+    assert(holds(&obj, sat2[0..13]), "sat2");
+    assert(holds(&obj, sw[0..6]), "sw");
+    assert(holds(&obj, hi8[0..6]), "hi8");
+    assert(holds(&obj, mid8[0..7]), "mid8");
+    let drv = M"(#include <stdint.h>
+uint32_t gcd(uint32_t, uint32_t);
+uint8_t sat(uint8_t, uint8_t);
+uint8_t hi8(uint32_t);
+uint8_t mid8(uint32_t);
+int32_t pick(int32_t);
+uint8_t sat2(uint8_t, uint8_t);
+uint32_t sw(uint32_t, uint32_t);
+static uint32_t ref(uint32_t a, uint32_t b) { while (b) { uint32_t r = a % b; a = b; b = r; } return a; }
+int main(void) {
+  for (uint32_t a = 0; a < 40; a++) {
+    for (uint32_t b = 0; b < 40; b++) {
+      if (gcd(a * 7, b * 3) != ref(a * 7, b * 3)) return 1;
+      unsigned s = (a * 13 + b * 7) & 255, u = (a * 5 + b * 11) & 255;
+      if (sat(s, u) != (s + u > 255 ? 255 : s + u) || sat2(s, u) != sat(s, u)) return 2;
+      uint32_t x = a * 0x9E3779B9u + b * 0x85EBCA6Bu;
+      if (hi8(x) != (x >> 24) || mid8(x) != ((x >> 16) & 255)) return 3;
+      if (pick((int32_t)a - 3) != (a == 3 ? 7 : 9)) return 4;
+      uint32_t e = a % 5;
+      if (sw(e, b) != (e == 0 ? b + 1 : e == 1 ? b * 3 : e == 2 ? (b ^ 5) : b - 2)) return 5;
+    }
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
+// x86-64: a commutative operation whose result the return's part takes writes over the operand already in
+// that register (`or rax, rdx`, no copy after); a loop's products that replace its header parameters share
+// their registers in the plan, so the invariant bound and the exit's parameters keep registers too (no
+// frame for slots). Each runs as before.
+@test
+fn x86_results_and_loop_steps_keep_their_registers() {
+    let lir = M"(lir ptr 8
+sym @dm fn global
+sym @fact fn global
+fn @dm
+  layout l0 size 8 align 2 [0 i32, 4 i32]
+  sig (i32, i32) -> l0
+b0(v0: i32, v1: i32, v2: ptr):
+  v3 = iconst.i64 32
+  v4 = udiv.i32 v0, v1
+  v5 = mul.i32 v4, v1
+  v6 = sub.i32 v0, v5
+  v7 = zext.i64 v6
+  v8 = shl.i64 v7, v3
+  v9 = zext.i64 v4
+  v10 = or.i64 v8, v9
+  store v10, v2 align 2
+  ret
+fn @fact
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = iconst.i64 0
+  v3 = iconst.i64 -4
+  v4 = and.i64 v0, v3
+  v5 = icmp.ne v4, v2
+  br v5, b3, b2(v0, v1)
+b1(v6: i64, v7: i64):
+  v8 = mul.i64 v7, v6
+  v9 = sub.i64 v6, v1
+  v10 = icmp.eq v9, v2
+  br v10, b7, b1(v9, v8)
+b2(v11: i64, v12: i64):
+  v13 = icmp.eq v11, v2
+  br v13, b6(v12), b1(v11, v12)
+b3:
+  v14 = sub.i64 v0, v4
+  v15 = iconst.i64 2
+  v16 = iconst.i64 3
+  v17 = iconst.i64 4
+  jmp b4(v0, v1, v1, v1, v1)
+b4(v18: i64, v19: i64, v20: i64, v21: i64, v22: i64):
+  v23 = sub.i64 v18, v1
+  v24 = sub.i64 v18, v15
+  v25 = sub.i64 v18, v16
+  v26 = mul.i64 v19, v18
+  v27 = mul.i64 v20, v23
+  v28 = mul.i64 v21, v24
+  v29 = mul.i64 v22, v25
+  v30 = sub.i64 v18, v17
+  v31 = icmp.ugt v30, v14
+  br v31, b4(v30, v26, v27, v28, v29), b5
+b5:
+  v32 = mul.i64 v26, v27
+  v33 = mul.i64 v32, v28
+  v34 = mul.i64 v33, v29
+  jmp b2(v14, v34)
+b6(v35: i64):
+  ret v35
+b7:
+  ret v8
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the x86-64 object",
+    );
+    // dm: or rax, rdx; leave; ret. fact: no `sub rsp, imm8` (no slot).
+    let orr: [u8; 5] = [0x48, 0x09, 0xD0, 0xC9, 0xC3];
+    let sub_rsp: [u8; 3] = [0x48, 0x83, 0xEC];
+    assert(holds(&obj, orr[0..5]), "dm's or");
+    assert(!holds(&obj, sub_rsp[0..3]), "fact's slots");
+    let drv = M"(#include <stdint.h>
+struct qr { uint32_t q, r; };
+struct qr dm(uint32_t, uint32_t);
+uint64_t fact(uint64_t);
+int main(void) {
+  for (uint32_t a = 0; a < 50; a++) {
+    struct qr x = dm(a * 977u + 13u, a % 7u + 1u);
+    if (x.q != (a * 977u + 13u) / (a % 7u + 1u) || x.r != (a * 977u + 13u) % (a % 7u + 1u)) return 1;
+    uint64_t f = 1;
+    for (uint64_t k = 1; k <= a; k++) f *= k;
+    if (fact(a) != f) return 2;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
+// wasm32: an edge that passes one value to two parameters of a loop header, the value live on past the
+// loop on another path: each parameter takes its own local, though the value's local may go to one.
+@test
+fn wasm_one_argument_to_two_parameters_keeps_two_locals() {
+    let lir = M"(lir ptr 8
+sym @two fn global
+fn @two
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.sle v0, v2
+  br v3, b4, b1(v2, v1, v1)
+b1(v4: i32, v5: i32, v6: i32):
+  v7 = icmp.slt v4, v0
+  br v7, b2, b3
+b2:
+  v8 = add.i32 v5, v4
+  v9 = iconst.i32 1
+  v10 = shl.i32 v6, v9
+  v11 = add.i32 v10, v9
+  v12 = add.i32 v4, v9
+  jmp b1(v12, v8, v11)
+b3:
+  v13 = iconst.i32 1000
+  v14 = mul.i32 v5, v13
+  v15 = add.i32 v14, v6
+  ret v15
+b4:
+  v16 = sub.i32 v2, v1
+  ret v16
+)";
+    let drv = M"(#include <stdint.h>
+int32_t two(int32_t, int32_t);
+int main(void) {
+  return two(5, 3) == 13127 && two(0, 3) == -3 && two(2, 10) == 11043 ? 0 : 1;
 }
 )";
     if cli::has_cc() {
