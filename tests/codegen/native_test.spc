@@ -10335,6 +10335,56 @@ fn coff_section(b: &Vector<u8>, name: str) u64 {
     return 0;
 }
 
+// A wasm32 local that no access left reads loses its writes (`stack_values`): `@cls`'s byte differences,
+// each tested once in a branch, share a local whose write before the first branch stayed a `local.tee`; it
+// goes (i32.const 65, i32.sub, i32.const 255, i32.and, i32.const 25, i32.le_u) and so does the local. Each
+// gives the C result.
+@test
+fn locals_nothing_reads_lose_their_writes() {
+    let lir = M"(lir ptr 8
+sym @cls fn global
+fn @cls
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 65
+  v2 = sub.i8 v0, v1
+  v3 = iconst.i8 25
+  v4 = icmp.ule v2, v3
+  br v4, b3, b1
+b1:
+  v5 = iconst.i8 97
+  v6 = sub.i8 v0, v5
+  v7 = icmp.ule v6, v3
+  br v7, b3, b2
+b2:
+  v8 = iconst.i8 0
+  ret v8
+b3:
+  v9 = iconst.i8 1
+  ret v9
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let test: [u8; 11] = [0x41, 0xC1, 0x00, 0x6B, 0x41, 0xFF, 0x01, 0x71, 0x41, 0x19, 0x4D];
+    assert(holds(&obj, test[0..11]), "cls");
+    let drv = M"(#include <stdint.h>
+uint8_t cls(uint8_t);
+int main(void) {
+  for (int c = 0; c < 256; c++)
+    if (cls((uint8_t)c) != ((c >= 65 && c <= 90) || (c >= 97 && c <= 122))) return 1;
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
 // A store's value that only it reads is computed after the store's address on wasm32 (`lv::FOLD_SINK`):
 // `@make`'s sums (local.get 0, local.get 1, i32.const 1, i32.add, i32.store), `@add`'s sum of two loads.
 // `@keep`'s load comes before a store to its address, so it stays there (the old value). A select computes its

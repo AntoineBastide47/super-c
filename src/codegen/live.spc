@@ -1029,9 +1029,10 @@ extend Live {
         }
         self.select_incs(b);
         self.widenings(b);
-        self.sinks(b);
         if self.fold_max == 0 {
             self.shift_counts(b);
+            // Last: the values that stay where they are include every other fold.
+            self.sinks(b);
             return;
         }
         for i in 0..ni {
@@ -1350,6 +1351,7 @@ extend Live {
                 }
             }
         }
+        self.sinks(b);
     }
 
     /// The immediate amount vector shift `t` of `b` takes (`FOLD_VSHIMM`), else NONE.

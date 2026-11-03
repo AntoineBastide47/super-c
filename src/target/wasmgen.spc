@@ -631,10 +631,44 @@ extend Gen {
                 self.cuts.push(at as u64 << 32 | (jat + len) as u64);
             }
         }
+        // A local no access that stays reads: its writes go, a `local.tee` whole, a `local.set` to `drop`.
+        self.cuts.sort();
+        let mut read = Vector::<bool>::with_capacity(nl);
+        read.resize_default(nl);
+        let mut alive = Vector::<bool>::with_capacity(n);
+        let mut r: usize = 0;
+        for i in 0..n {
+            let at = (self.c.acc[i] >> 32) as u32;
+            while r < self.cuts.len() && (self.cuts[r] & 0xFFFFFFFF) as u32 <= at {
+                r += 1;
+            }
+            let cut = r < self.cuts.len() && (self.cuts[r] >> 32) as u32 <= at;
+            alive.push(!cut);
+            if !cut && self.c.bytes[at as usize] == w::LOCAL_GET {
+                read[(self.c.acc[i] & 0xFFFFFFFF) as usize] = true;
+            }
+        }
+        let ncut = self.cuts.len();
+        for i in 0..n {
+            let l = (self.c.acc[i] & 0xFFFFFFFF) as u32;
+            if !alive[i] || read[l as usize] {
+                continue;
+            }
+            let at = (self.c.acc[i] >> 32) as u32;
+            let end = at + 1 + uleb_len(l);
+            if self.c.bytes[at as usize] == w::LOCAL_TEE {
+                self.cuts.push(at as u64 << 32 | end as u64);
+            } else if self.c.bytes[at as usize] == w::LOCAL_SET {
+                self.c.bytes[at as usize] = w::DROP;
+                self.cuts.push((at + 1) as u64 << 32 | end as u64);
+            }
+        }
         if self.cuts.len() == 0 {
             return;
         }
-        self.cuts.sort();
+        if self.cuts.len() != ncut {
+            self.cuts.sort();
+        }
         // The code without the cuts, which follow in order.
         let mut out: usize = 0;
         let mut q: usize = 0;
@@ -692,7 +726,8 @@ extend Gen {
             while q < self.cuts.len() && (self.cuts[q] & 0xFFFFFFFF) as u32 <= at {
                 q += 1;
             }
-            let cut = q < self.cuts.len() && (self.cuts[q] >> 32) as u32 <= at;
+            // A cut from the byte after the opcode leaves a `drop` (`stack_values`): no access either.
+            let cut = q < self.cuts.len() && (self.cuts[q] >> 32) as u32 <= at + 1;
             alive.push(!cut);
             if !cut {
                 used[(self.c.acc[i] & 0xFFFFFFFF) as usize] = true;
