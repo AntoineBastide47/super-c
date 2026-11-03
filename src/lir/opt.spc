@@ -6082,6 +6082,14 @@ extend Opt {
         ) || const_of(b, t.a) == Some(0u64) && nonnull(b, t.b, pk.ptr_bytes)) {
             t = iconst(t.ty, (t.aux == C_NE) as u64);
         }
+        // An unsigned compare with a constant that the largest value of its other side settles (`umax_cmp`): a
+        // shift amount masked below the width, a bit count, a remainder.
+        if t.op == O_ICMP && t.aux >= C_ULT && t.aux <= C_UGE {
+            let r = umax_cmp(b, t, pk.ptr_bytes);
+            if r.is_some() {
+                t = iconst(t.ty, r.unwrap() as u64);
+            }
+        }
         // An equality of a value from before the block with a constant that the branches into the block
         // settle (`entry_fact`): the `None` test of an `Option` a loop that stops on `Some` returns. So is
         // `x <u 1`, which is `x == 0`, and `x >=u 1` (a bounds check of index 0 after a length test).
@@ -11965,6 +11973,107 @@ const fn droppable(t: Inst) bool {
 }
 
 // ---- Folding ------------------------------------------------------------------------------------------
+
+// `umax_of` looks through at most UMAX_DEPTH instructions.
+const UMAX_DEPTH: u32 = 4;
+
+// Whether unsigned compare `t` of `b` (pointers `ptr` bytes) of an integer and a constant holds whatever the
+// integer is, from the largest value it can hold (`umax_of`); None when that does not settle it.
+const fn umax_cmp(b: &Body, t: Inst, ptr: u32) Option<bool> {
+    let ty = b.type_of(t.a);
+    let ka = const_of(b, t.a);
+    let kb = const_of(b, t.b);
+    if !is_int(ty) || ty == T_I128 || ka.is_some() == kb.is_some() {
+        return None;
+    }
+    let all = ones_below(type_bits(ty, ptr));
+    // `x op c`, or `c op x` read as `x op' c` with the operands swapped (`<` becomes `>`).
+    let (c, m, op) = if kb.is_some() {
+        (kb.unwrap() & all, umax_of(b, t.a, ptr, UMAX_DEPTH), t.aux)
+    } else {
+        (
+            ka.unwrap() & all,
+            umax_of(b, t.b, ptr, UMAX_DEPTH),
+            if t.aux < C_UGT {
+                t.aux + 2
+            } else {
+                t.aux - 2
+            }
+        )
+    };
+    if op == C_ULT && m < c || op == C_ULE && m <= c {
+        return Some(true);
+    }
+    if op == C_UGT && m <= c || op == C_UGE && m < c {
+        return Some(false);
+    }
+    return None;
+}
+
+// The `n` low bits set (`n` at most 64).
+const fn ones_below(n: u32) u64 {
+    return if n >= 64 {
+        0xFFFFFFFFFFFFFFFF
+    } else {
+        (1u64 << n) - 1
+    };
+}
+
+// The largest unsigned value integer `v` of `b` (pointers `ptr` bytes) can hold, from its form up to `depth`
+// instructions deep: a constant, a mask, a zero extension, a bit count, a quotient or a remainder, a right
+// shift; else its type's largest.
+const fn umax_of(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
+    let all = ones_below(type_bits(b.type_of(v), ptr));
+    let k = const_of(b, v);
+    if k.is_some() {
+        return k.unwrap() & all;
+    }
+    if (v & (VPARAM | VFLAG)) != 0 || depth == 0 {
+        return all;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_AND {
+        let x = umax_of(b, t.a, ptr, depth - 1);
+        let y = umax_of(b, t.b, ptr, depth - 1);
+        return if x < y {
+            x
+        } else {
+            y
+        };
+    }
+    if t.op == O_ZEXT {
+        return umax_of(b, t.a, ptr, depth - 1);
+    }
+    if t.op == O_CLZ || t.op == O_CTZ || t.op == O_POPCNT {
+        return type_bits(b.type_of(t.a), ptr);
+    }
+    if t.op == O_UDIV || t.op == O_LSHR {
+        let x = umax_of(b, t.a, ptr, depth - 1);
+        let s = const_of(b, t.b);
+        if s.is_none() {
+            return x;
+        }
+        let d = s.unwrap() & all;
+        return if t.op == O_UDIV && d != 0 {
+            x / d
+        } else if t.op == O_LSHR && d < 64 {
+            x >> d
+        } else {
+            x
+        };
+    }
+    if t.op == O_UREM {
+        // Below the divisor, which is not 0 when the remainder is computed.
+        let x = umax_of(b, t.a, ptr, depth - 1);
+        let y = umax_of(b, t.b, ptr, depth - 1);
+        return if y != 0 && y - 1 < x {
+            y - 1
+        } else {
+            x
+        };
+    }
+    return all;
+}
 
 // The integer constant value `v` is (up to 64 bits, truncated to its type), if it is one.
 const fn const_of(b: &Body, v: Value) Option<u64> {

@@ -3207,6 +3207,49 @@ b0:
     same_result(&b, &a, "drive", none, 114);
 }
 
+// An unsigned compare with a constant folds when the largest value of its other side settles it: a shift
+// amount masked below 32 is below 32 (its overflow check goes), a bit count of a 32-bit value is at most 32,
+// a value shifted right by 28 is below 16 (with the constant on the left too). A compare the bound does not settle
+// stays: a bit count against 32 can be equal.
+@test
+fn compares_the_largest_value_settles_fold() {
+    let text = M"(lir ptr 8
+sym @shmask fn global
+fn @shmask
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 31
+  v3 = iconst.i32 32
+  v4 = iconst.i32 16
+  v5 = iconst.i32 0
+  v6 = iconst.i32 28
+  v7 = and.i32 v1, v2
+  v8 = icmp.uge v7, v3
+  br v8, b3, b1
+b1:
+  v9 = clz.i32 v0
+  v10 = icmp.ugt v9, v3
+  br v10, b3, b2
+b2:
+  v11 = lshr.i32 v0, v6
+  v12 = icmp.ugt v4, v11
+  v13 = icmp.uge v9, v3
+  v14 = zext.i32 v13
+  v15 = shl.i32 v0, v7
+  v16 = add.i32 v15, v14
+  br v12, b4(v16), b3
+b3:
+  ret v5
+b4(v17: i32):
+  ret v17
+)";
+    let (b, a) = optimized(text);
+    let s = text_of(&a, "shmask");
+    assert(!s.contains("icmp.ugt") && s.contains("icmp.uge") && !s.contains("select") && !s.contains("br "), s.as_str());
+    same_result(&b, &a, "shmask", [3, 33], 6);
+    same_result(&b, &a, "shmask", [0, 2], 1);
+}
+
 // A reference is never null (`nonnull`, through `ptrtoint`): a test of `select(c, 0, p)` against null, an
 // `Option` of the reference, is the test of `c`, and the `Some` side reads `p` itself. Without the fact
 // the select stays.
