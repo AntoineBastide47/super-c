@@ -1,8 +1,8 @@
 # The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
 # content, run on demand from the Actions tab. Edit the job for the next investigation; do not remove
 # the file. Current probe: the code generation benchmarks (bench/codegen), each kernel as Super-C
-# compiles it against the same kernel compiled by clang -O2, on Linux x86-64, Linux arm64 and
-# Windows x86-64; then the same benchmarks built by the latest release's compiler (the "before").
+# compiles it against the same kernel compiled by clang -O2, on Linux x86-64 (3 runners), Linux arm64
+# and Windows x86-64 (2 runners); then the same benchmarks built by the latest release's compiler (the "before").
 # No test suite runs.
 name: Debug
 on:
@@ -13,16 +13,18 @@ concurrency:
   group: debug-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  # Each target on several runners at once: the machines differ, so a ratio holds when it holds on each.
   codegen:
-    name: codegen (${{ matrix.target }})
+    name: codegen (${{ matrix.target }} ${{ matrix.run }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: linux
-          - os: windows-latest
-            target: windows
+          - { os: ubuntu-latest, target: linux, run: 1 }
+          - { os: ubuntu-latest, target: linux, run: 2 }
+          - { os: ubuntu-latest, target: linux, run: 3 }
+          - { os: windows-latest, target: windows, run: 1 }
+          - { os: windows-latest, target: windows, run: 2 }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -60,6 +62,7 @@ jobs:
 
       - name: Code generation benchmarks (this tree's compiler)
         run: |
+          grep -m1 'model name' /proc/cpuinfo || true
           "./super-c${BINEXT:-}" bench --filter=codegen_
 
       - name: Code generation benchmarks (the latest release's compiler)

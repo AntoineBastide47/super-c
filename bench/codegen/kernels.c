@@ -74,3 +74,14 @@ F size_t c_i_filter(const uint32_t *s, size_t n) { size_t r = 0; for (size_t k =
 F uint32_t c_i_zip(const uint32_t *a, size_t na, const uint32_t *b, size_t nb) { size_t n = na < nb ? na : nb; uint32_t t = 0; for (size_t k = 0; k < n; k++) t += a[k] * b[k]; return t; }
 F bool c_i_any(const uint32_t *s, size_t n, uint32_t c) { for (size_t k = 0; k < n; k++) if (s[k] == c) return true; return false; }
 F uint32_t c_i_max(const uint32_t *s, size_t n) { uint32_t m = 0; for (size_t k = 0; k < n; k++) m = s[k] > m ? s[k] : m; return m; }
+typedef struct { float x, y, z; } V3;
+F void c_f_min(float *s, size_t n, float k) { for (size_t i = 0; i < n; i++) s[i] = __builtin_fminf(s[i], k); }
+F float c_w_fmaxr(const float *s, size_t n) { float m = 0; for (size_t i = 0; i < n; i++) m = __builtin_fmaxf(m, s[i]); return m; }
+F uint32_t c_m_u8sum(const uint8_t *s, size_t n) { uint32_t t = 0; for (size_t k = 0; k < n; k++) t += s[k]; return t; }
+F void c_x_aosw(V3 *restrict v, size_t n, float d) { for (size_t k = 0; k < n; k++) { v[k].x += d; v[k].y += d; v[k].z += d; } }
+F uint32_t c_z_fold(const uint32_t *s, size_t n) { uint32_t t = 0; for (size_t k = 0; k < n; k++) t += s[k]; return t; }
+F int32_t c_w_condsum(const int32_t *s, size_t n) { uint32_t t = 0; for (size_t i = 0; i < n; i++) if (s[i] > 0) t += (uint32_t)s[i]; return (int32_t)t; }
+F size_t c_w_cmpcount(const uint32_t *a, const uint32_t *b, size_t n) { size_t c = 0; for (size_t i = 0; i < n; i++) if (a[i] == b[i]) c++; return c; }
+F uint32_t c_w_sad(const uint8_t *a, const uint8_t *b, size_t n) { uint32_t t = 0; for (size_t i = 0; i < n; i++) { int32_t x = (int32_t)a[i] - (int32_t)b[i]; t += (uint32_t)(x < 0 ? -x : x); } return t; }
+F void c_w_sat(uint8_t *s, size_t n, uint8_t k) { for (size_t i = 0; i < n; i++) { uint16_t v = (uint16_t)s[i] + k; s[i] = v > 255 ? 255 : (uint8_t)v; } }
+F unsigned __int128 c_i_mac128(const uint64_t *s, size_t n, uint64_t k) { unsigned __int128 t = 0; for (size_t i = 0; i < n; i++) t += (unsigned __int128)s[i] * k; return t; }

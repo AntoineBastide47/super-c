@@ -67,6 +67,16 @@ extern "C" {
     fn c_i_zip(a: *const u32, na: usize, b: *const u32, nb: usize) u32;
     fn c_i_any(s: *const u32, n: usize, c: u32) bool;
     fn c_i_max(s: *const u32, n: usize) u32;
+    fn c_f_min(s: *mut f32, n: usize, k: f32);
+    fn c_w_fmaxr(s: *const f32, n: usize) f32;
+    fn c_m_u8sum(s: *const u8, n: usize) u32;
+    fn c_x_aosw(v: *mut V3, n: usize, d: f32);
+    fn c_z_fold(s: *const u32, n: usize) u32;
+    fn c_w_condsum(s: *const i32, n: usize) i32;
+    fn c_w_cmpcount(a: *const u32, b: *const u32, n: usize) usize;
+    fn c_w_sad(a: *const u8, b: *const u8, n: usize) u32;
+    fn c_w_sat(s: *mut u8, n: usize, k: u8);
+    fn c_i_mac128(s: *const u64, n: usize, k: u64) u128;
 }
 
 @arch(x86_64)
@@ -126,6 +136,16 @@ extern "C" {
     fn c_i_zip(a: *const u32, na: usize, b: *const u32, nb: usize) u32;
     fn c_i_any(s: *const u32, n: usize, c: u32) bool;
     fn c_i_max(s: *const u32, n: usize) u32;
+    fn c_f_min(s: *mut f32, n: usize, k: f32);
+    fn c_w_fmaxr(s: *const f32, n: usize) f32;
+    fn c_m_u8sum(s: *const u8, n: usize) u32;
+    fn c_x_aosw(v: *mut V3, n: usize, d: f32);
+    fn c_z_fold(s: *const u32, n: usize) u32;
+    fn c_w_condsum(s: *const i32, n: usize) i32;
+    fn c_w_cmpcount(a: *const u32, b: *const u32, n: usize) usize;
+    fn c_w_sad(a: *const u8, b: *const u8, n: usize) u32;
+    fn c_w_sat(s: *mut u8, n: usize, k: u8);
+    fn c_i_mac128(s: *const u64, n: usize, k: u64) u128;
 }
 
 // Recursion whose result an associative operation combines with the recursive call.
@@ -622,6 +642,111 @@ fn p_clamp01(x: f32) f32 {
         return 1.0;
     }
     return x;
+}
+
+// Vector loops (`codegen_vectors`).
+
+@ordered
+struct V3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+@noinline
+fn f_min(s: []mut f32, k: f32) {
+    for i in 0..s.len() {
+        s[i] = s[i].min(k);
+    }
+}
+
+@noinline
+fn w_fmaxr(s: []f32) f32 {
+    let mut m: f32 = 0.0;
+    for i in 0..s.len() {
+        m = m.max(s[i]);
+    }
+    return m;
+}
+
+@noinline
+fn m_u8sum(s: []u8) u32 {
+    let mut t: u32 = 0;
+    for k in 0..s.len() {
+        t += s[k];
+    }
+    return t;
+}
+
+@noinline
+fn x_aosw(v: []mut V3, d: f32) {
+    for k in 0..v.len() {
+        v[k].x += d;
+        v[k].y += d;
+        v[k].z += d;
+    }
+}
+
+@noinline
+fn z_fold(s: []u32) u32 {
+    return iter::fold(s.iter(), 0u32, |a: u32, x: &u32| a + *x);
+}
+
+@noinline
+fn w_condsum(s: []i32) i32 {
+    let mut t: i32 = 0;
+    for i in 0..s.len() {
+        if s[i] > 0 {
+            t = t.wrapping_add(s[i]);
+        }
+    }
+    return t;
+}
+
+@noinline
+fn w_cmpcount(a: []u32, b: []u32) usize {
+    let mut n: usize = 0;
+    for i in 0..a.len() {
+        if a[i] == b[i] {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+@noinline
+fn w_sad(a: []u8, b: []u8) u32 {
+    let mut t: u32 = 0;
+    for i in 0..a.len() {
+        let x = a[i] as i32 - b[i] as i32;
+        t += if x < 0 {
+            -x
+        } else {
+            x
+        } as u32;
+    }
+    return t;
+}
+
+@noinline
+fn w_sat(s: []mut u8, k: u8) {
+    for i in 0..s.len() {
+        let v = s[i] as u16 + k as u16;
+        s[i] = if v > 255 {
+            255
+        } else {
+            v as u8
+        };
+    }
+}
+
+@noinline
+fn i_mac128(s: []u64, k: u64) u128 {
+    let mut t: u128 = 0;
+    for i in 0..s.len() {
+        t += s[i] as u128 * k;
+    }
+    return t;
 }
 
 // `CALLS` inputs below `max`: all `max - 1` (`fixed`), or uniform (`random`, a fixed seed).
@@ -1274,5 +1399,149 @@ pub fn codegen_iters(_b: &mut bench::Bencher) {
         "random",
         time(&xs, |x: u32| i_max(nums[0..(x % 256) as usize]) as u64),
         time(&xs, |x: u32| (unsafe c_i_max(&nums[0], (x % 256) as usize)) as u64),
+    );
+}
+
+/// Vector loops: each kernel on the first 512 to 1023 elements of a 1024-element array (so the vector loop
+/// and its remainders both run). A kernel that writes its array returns 0, so the two sides' sums agree
+/// whatever count of rounds each runs.
+@bench(log_results = false)
+pub fn codegen_vectors(_b: &mut bench::Bencher) {
+    warm();
+    let xs = inputs(0xFFFFFFFF, true);
+    let mut fl = Vector::<f32>::with_capacity(1024);
+    let mut fc: [f32; 1024] = [0.0; 1024];
+    let mut bytes: [u8; 1024] = [0; 1024];
+    let mut bytes2: [u8; 1024] = [0; 1024];
+    let mut sat = Vector::<u8>::with_capacity(1024);
+    let mut satc: [u8; 1024] = [0; 1024];
+    let mut words: [u32; 1024] = [0; 1024];
+    let mut words2: [u32; 1024] = [0; 1024];
+    let mut ints: [i32; 1024] = [0; 1024];
+    let mut wide: [u64; 1024] = [0; 1024];
+    let mut vs = Vector::<V3>::with_capacity(1024);
+    let mut vc = Vector::<V3>::with_capacity(1024);
+    for i in 0..1024usize {
+        let h = (i as u64 * 2654435761) as u32;
+        fl.push((h % 1000) as f32 * 0.25);
+        fc[i] = fl[i];
+        bytes[i] = h as u8;
+        bytes2[i] = (h >> 8) as u8;
+        sat.push((h >> 16) as u8);
+        satc[i] = sat[i];
+        words[i] = h % 7;
+        words2[i] = (h >> 3) % 7;
+        ints[i] = h as i32;
+        wide[i] = h as u64 * 0x9E3779B97F4A7C15;
+        vs.push(V3 { x: fl[i], y: 1.0, z: 2.0 });
+        vc.push(V3 { x: fl[i], y: 1.0, z: 2.0 });
+    }
+    row(
+        "f_min",
+        "random",
+        time(
+            &xs,
+            |x: u32| {
+                f_min(fl.index_range_mut(0..(512 + x % 512) as usize), 100.0);
+                return 0;
+            },
+        ),
+        time(
+            &xs,
+            |x: u32| {
+                unsafe c_f_min(&mut fc[0], (512 + x % 512) as usize, 100.0);
+                return 0;
+            },
+        ),
+    );
+    row(
+        "w_fmaxr",
+        "random",
+        time(&xs, |x: u32| w_fmaxr(fl[0..(512 + x % 512) as usize]).to_bits() as u64),
+        time(&xs, |x: u32| (unsafe c_w_fmaxr(&fl[0], (512 + x % 512) as usize)).to_bits() as u64),
+    );
+    row(
+        "m_u8sum",
+        "random",
+        time(&xs, |x: u32| m_u8sum(bytes[0..(512 + x % 512) as usize]) as u64),
+        time(&xs, |x: u32| (unsafe c_m_u8sum(&bytes[0], (512 + x % 512) as usize)) as u64),
+    );
+    row(
+        "x_aosw",
+        "random",
+        time(
+            &xs,
+            |x: u32| {
+                x_aosw(vs.index_range_mut(0..(512 + x % 512) as usize), 0.5);
+                return 0;
+            },
+        ),
+        time(
+            &xs,
+            |x: u32| {
+                unsafe c_x_aosw(vc.as_mut_ptr(), (512 + x % 512) as usize, 0.5);
+                return 0;
+            },
+        ),
+    );
+    row(
+        "z_fold",
+        "random",
+        time(&xs, |x: u32| z_fold(words[0..(512 + x % 512) as usize]) as u64),
+        time(&xs, |x: u32| (unsafe c_z_fold(&words[0], (512 + x % 512) as usize)) as u64),
+    );
+    row(
+        "w_condsum",
+        "random",
+        time(&xs, |x: u32| (w_condsum(ints[0..(512 + x % 512) as usize]) as u32) as u64),
+        time(&xs, |x: u32| ((unsafe c_w_condsum(&ints[0], (512 + x % 512) as usize)) as u32) as u64),
+    );
+    row(
+        "w_cmpcount",
+        "random",
+        time(&xs, |x: u32| w_cmpcount(words[0..(512 + x % 512) as usize], words2[0..1024]) as u64),
+        time(&xs, |x: u32| (unsafe c_w_cmpcount(&words[0], &words2[0], (512 + x % 512) as usize)) as u64),
+    );
+    row(
+        "w_sad",
+        "random",
+        time(&xs, |x: u32| w_sad(bytes[0..(512 + x % 512) as usize], bytes2[0..1024]) as u64),
+        time(&xs, |x: u32| (unsafe c_w_sad(&bytes[0], &bytes2[0], (512 + x % 512) as usize)) as u64),
+    );
+    row(
+        "w_sat",
+        "random",
+        time(
+            &xs,
+            |x: u32| {
+                w_sat(sat.index_range_mut(0..(512 + x % 512) as usize), 3);
+                return 0;
+            },
+        ),
+        time(
+            &xs,
+            |x: u32| {
+                unsafe c_w_sat(&mut satc[0], (512 + x % 512) as usize, 3);
+                return 0;
+            },
+        ),
+    );
+    row(
+        "i_mac128",
+        "random",
+        time(
+            &xs,
+            |x: u32| {
+                let r = i_mac128(wide[0..(512 + x % 512) as usize], 0xFFFFFFFB);
+                return (r ^ r >> 64) as u64;
+            },
+        ),
+        time(
+            &xs,
+            |x: u32| {
+                let r = unsafe c_i_mac128(&wide[0], (512 + x % 512) as usize, 0xFFFFFFFB);
+                return (r ^ r >> 64) as u64;
+            },
+        ),
     );
 }
