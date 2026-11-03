@@ -795,7 +795,7 @@ extend Live {
                 b.type_of(t.b)
             };
             let n = type_bytes(ty, 8); // the targets that fold have 8-byte pointers
-            let sc = p.aux as u32;
+            let sc = scale_of(p);
             // A vector of 8 or 16 bytes lives in a register; another is memory.
             let reg = !is_vec(ty) && ty != T_I128 || n == 8 || n == 16;
             self.fold[i] = p.op == O_PTRADD && p.b != VNONE && p.c == 0 && self.count[t.a as usize] == 1 && reg && (sc == 1 || sc == n && n <= self.fold_max);
@@ -1320,7 +1320,9 @@ extend Live {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
                 let p = b.insts[i as usize];
-                if p.op != O_PTRADD || p.b == VNONE || p.c != 0 || p.aux != 1 && p.aux != 2 && p.aux != 4 && p.aux != 8 || self.pfold[i as usize] || self.count[i as usize] == 0 {
+                if p.op != O_PTRADD || p.b == VNONE || p.c != 0 || scale_of(p) != 1 && scale_of(p) != 2 && scale_of(p) != 4 && scale_of(
+                    p,
+                ) != 8 || self.pfold[i as usize] || self.count[i as usize] == 0 {
                     continue;
                 }
                 let mut n: u32 = 0;
@@ -3555,6 +3557,24 @@ fn ones_of(b: &Body, v: Value, bits: u32, depth: u32) u64 {
 
 // `ones_of` looks through at most ONES_DEPTH instructions.
 const ONES_DEPTH: u32 = 4;
+
+/// Whether `t` of `b` reverses the lanes of a vector of two or more lanes: a `swizzle` of indexes `n - 1` down
+/// to 0 of one operand of its type (the vectorizer's reversed accesses).
+pub(package) fn reversal(b: &Body, t: Inst) bool {
+    if t.op != O_VOP || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SWIZZLE as u32 || t.b != 1 || t.c == VNONE {
+        return false;
+    }
+    let n = lanes(t.ty);
+    if n < 2 || b.type_of(b.pool[t.a as usize]) != t.ty || b.pool[t.c as usize] != n {
+        return false;
+    }
+    for k in 0..n {
+        if b.pool[(t.c + 1 + k) as usize] != n - 1 - k {
+            return false;
+        }
+    }
+    return true;
+}
 
 /// Whether `t` of `b` is a scalar float `fadd` of lanes 0 and 1 (in either order) of one float vector of two
 /// lanes (`FOLD_LANE_PAIR`).

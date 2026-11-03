@@ -568,7 +568,7 @@ extend Promoter {
                     };
                     if ix >= 0 {
                         self.dslot[i] = self.dslot[t.a as usize];
-                        self.doff[i] = self.doff[t.a as usize] + (t.c as i32) as i64 + ix * t.aux as i64;
+                        self.doff[i] = self.doff[t.a as usize] + (t.c as i32) as i64 + ix * scale_of(t) as i64;
                     }
                 }
             }

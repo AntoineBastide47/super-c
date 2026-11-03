@@ -1288,12 +1288,16 @@ extend<'a> Parser<'a> {
                 if !self.inst_value(1, &mut t.b) || !self.expect(b'*', "expected '*'") || !self.uint(&mut sc) {
                     return false;
                 }
-                if sc == 0 || sc > 65535 {
-                    return self.fail("a scale is 1 to 65535");
+                if sc == 0 || sc > PTR_SCALE as u32 {
+                    return self.fail("a scale is 1 to 32767");
                 }
                 t.aux = sc as u16;
             }
-            return self.offset(&mut t.c);
+            if !self.offset(&mut t.c) {
+                return false;
+            }
+            t.aux |= ast::pick(self.keyword("nonnull"), PTR_NONNULL, 0);
+            return true;
         }
         if f == F_LOAD || f == F_STORE {
             if f == F_STORE && (!self.inst_value(1, &mut t.b) || !self.expect(b',', "expected ','")) {

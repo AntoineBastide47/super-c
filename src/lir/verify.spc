@@ -476,7 +476,9 @@ extend Verifier {
             );
         }
         if op == O_PTRADD {
-            let ix_ok = t.b == VNONE || (tb == T_I64 || tb == T_I32) && type_bytes(tb, p.ptr_bytes) == p.ptr_bytes && t.aux != 0;
+            let ix_ok = t.b == VNONE || (tb == T_I64 || tb == T_I32) && type_bytes(tb, p.ptr_bytes) == p.ptr_bytes && scale_of(
+                t,
+            ) != 0;
             if t.ty != T_PTR || ta != T_PTR || !ix_ok {
                 return self.fail_at(
                     name,

@@ -560,8 +560,17 @@ extend Gen {
     }
 
     // Whether `v` is an instruction value the generator recomputes at each use.
+    // A local-exec thread-local address (`tls_local`) too: two instructions from the thread pointer, no
+    // call, so no register or slot holds it.
     const fn remat_inst(self: &Self, v: Value) bool {
-        return lv::remat_inst(unsafe &*self.pkg, self.b(), v);
+        if lv::remat_inst(unsafe &*self.pkg, self.b(), v) {
+            return true;
+        }
+        if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
+            return false;
+        }
+        let t = self.b().insts[v as usize];
+        return t.op == O_SYMADDR && self.tls_sym(t.a) && !self.win && self.tls_local(t.a);
     }
 
     // Whether body symbol `s` is a thread-local variable.
@@ -4582,7 +4591,7 @@ extend Gen {
             let p = self.b().insts[v as usize];
             let rb = self.reg(p.a);
             let ri = self.reg(p.b);
-            return x::ix(rb, ri, (p.aux as u32).trailing_zeros() as u8, off as i32);
+            return x::ix(rb, ri, scale_of(p).trailing_zeros() as u8, off as i32);
         }
         if (v & (VPARAM | VFLAG)) == 0 && self.va[v as usize].home == H_REMAT && self.va[v as usize].reg == NOREG {
             let it = self.b().insts[v as usize];
@@ -6136,7 +6145,7 @@ extend Gen {
         let ity = self.vt(t.b);
         let ib = type_bits(ity, self.ptr);
         let ri = self.reg(t.b);
-        let scale = t.aux as u32;
+        let scale = scale_of(t);
         let rd = self.def_pass(i, t.a);
         // The index sign-extended to 64 bits, scaled.
         let mut idx = ri;
@@ -11950,6 +11959,10 @@ extend Gen {
             unsafe ops[k as usize] = v;
             unsafe tys[k as usize] = self.vt(v);
         }
+        if lv::reversal(self.b(), t) && self.idiom_reg(t) {
+            self.reverse_lanes(i, t, ops[0]);
+            return true;
+        }
         // `vlanes` and `vmem` sync their operands past their register forms; every other form here first.
         let simd = code >= core::OP_SIMD && code < core::OP_CMP_LANES;
         let rule = if simd {
@@ -13380,8 +13393,12 @@ extend Gen {
 
     // Whether `O_VOP` `t` is a saturating sum or difference, or an absolute difference, of two vectors of
     // integer lanes of 1 or 2 bytes in registers (16 bytes; 32 and 64 with AVX2 and AVX-512), which
-    // `idiom_lanes` computes there.
+    // `idiom_lanes` computes there; or the reversal of a 16-byte vector's lanes of 2 to 8 bytes in an xmm
+    // register (`lv::reversal`, `reverse_lanes`).
     fn idiom_reg(self: &Self, t: Inst) bool {
+        if lv::reversal(self.b(), t) {
+            return type_bytes(t.ty, 8) == 16 && in_vreg(t.ty) && type_bytes(lane_type(t.ty), 8) >= 2;
+        }
         let code = (t.aux & VOP_CODE) as u32;
         if t.op != O_VOP || t.b != 2 || !is_vec(t.ty) || code < core::OP_SIMD || code >= core::OP_CMP_LANES {
             return false;
@@ -13393,6 +13410,30 @@ extend Gen {
         let lt = lane_type(t.ty);
         let nb = type_bytes(t.ty, 8);
         return is_int(lt) && type_bytes(lt, 8) <= 2 && (nb == 16 && in_vreg(t.ty) || nb > 16 && self.in_reg(t.ty));
+    }
+
+    // Vector `i`: the lanes of vector `v` reversed (`idiom_reg`): PSHUFD of the dwords (4-byte lanes) or of
+    // the qword pairs (8-byte ones); 2-byte lanes reversed in each qword first (PSHUFLW, PSHUFHW).
+    fn reverse_lanes(self: &mut Self, i: u32, t: Inst, v: Value) {
+        let eb = type_bytes(lane_type(t.ty), 8);
+        let rx = self.vec_use(v, self.vs0) - V0;
+        let rd = self.vec_def(i) - V0;
+        let mut src = rx;
+        if eb == 2 {
+            self.c.sse_rr(0xF2, 0x0F70, rd, src);
+            self.c.byte(0x1B);
+            self.c.sse_rr(0xF3, 0x0F70, rd, rd);
+            self.c.byte(0x1B);
+            src = rd;
+        }
+        self.c.sse_rr(0x66, 0x0F70, rd, src);
+        self.c.byte(
+            if eb == 4 {
+                0x1Bu8
+            } else {
+                0x4Eu8
+            },
+        );
     }
 
     // Idiom `t` (`idiom_reg`: rule `c`, signed `sg`) of `ops` into vector `i`: PADDUS, PADDS, PSUBUS or PSUBS;
@@ -13655,8 +13696,8 @@ extend Gen {
 
     // xmm `dst` = the lanes' minimum (`lo`) or maximum of xmm `a` and `src`, lanes of `lb` (8 to 32) bits,
     // signed with `sg`; ymm registers with `y` (AVX2); `src` kept, `a` too unless it is `dst`, which it is
-    // without AVX. One `pmin`/`pmax` where the target has it (SSE2: signed words, unsigned bytes; AVX2: all
-    // of them); unsigned words through the saturating difference; else a `pcmpgt` mask (of the lanes with
+    // without AVX. One `pmin`/`pmax` where the target has it (SSE2: signed words, unsigned bytes; SSE4.1 and
+    // AVX2: all of them); unsigned words through the saturating difference; else a `pcmpgt` mask (of the lanes with
     // the sign bit flipped, unsigned) that picks each lane by `src ^ ((dst ^ src) & mask)`.
     fn lane_ext(self: &mut Self, lo: bool, sg: bool, lb: u32, y: bool, dst: u8, a: u8, src: u8) {
         if self.avx {
@@ -13689,6 +13730,20 @@ extend Gen {
                 a,
                 src,
             );
+            return;
+        }
+        if unsafe (*self.pkg).sse41 && lb <= 32 && !(lb == 16 && sg || lb == 8 && !sg) {
+            // SSE4.1: pminsb, pminsd, pminuw, pminud (66 0F38 38..3B); the maximum 4 above.
+            let base: u32 = if lb == 8 {
+                0x38
+            } else if lb == 32 && sg {
+                0x39
+            } else if lb == 16 {
+                0x3A
+            } else {
+                0x3B
+            };
+            self.c.sse_rr(0x66, 0x0F3800 + base + (!lo) as u32 * 4, dst, src);
             return;
         }
         if lb == 16 && sg || lb == 8 && !sg {

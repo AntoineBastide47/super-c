@@ -184,7 +184,7 @@ pub(package) const F_UN: u8 = 5; // a = value
 pub(package) const F_BIN: u8 = 6; // a, b = values
 pub(package) const F_CMP: u8 = 7; // aux = condition, a, b = values
 pub(package) const F_TRI: u8 = 8; // a, b, c = values
-pub(package) const F_PTRADD: u8 = 9; // a = base, b = index value or VNONE, aux = scale, c = byte offset (i32)
+pub(package) const F_PTRADD: u8 = 9; // a = base, b = index value or VNONE, aux = scale | PTR_NONNULL, c = byte offset (i32)
 pub(package) const F_LOAD: u8 = 10; // a = address, c = byte offset (i32), aux = MEM_* flags
 pub(package) const F_STORE: u8 = 11; // a = address, b = value, c = byte offset (i32), aux = MEM_* flags
 pub(package) const F_CALL: u8 = 12; // a = body symbol, b = signature (pool), c = arguments (pool), aux = count
@@ -611,9 +611,17 @@ pub(package) const COND_NAMES: [str<'static>; 19] = [
 pub(package) const OV_SIGNED: u16 = 1;
 /// `O_FPTOSI`, `O_FPTOUI`: no saturation; the value must be a number in the result's range.
 pub(package) const CV_UNCHECKED: u16 = 1;
-/// `O_PTRADD`'s `aux` is the scale; `O_LOAD`, `O_STORE`: log2 of the alignment in bits 0 to 3, then
-/// MEM_VOLATILE, then the type tag in bits 8 to 11 (`MEM_TBAA`).
+/// `O_PTRADD`'s `aux` is the scale (`PTR_SCALE`, read through `scale_of`) and PTR_NONNULL; `O_LOAD`,
+/// `O_STORE`: log2 of the alignment in bits 0 to 3, then MEM_VOLATILE, then the type tag in bits 8 to 11
+/// (`MEM_TBAA`).
 pub(package) const MEM_VOLATILE: u16 = 16;
+/// The scale bits of an `O_PTRADD`'s `aux`.
+pub(package) const PTR_SCALE: u16 = 0x7FFF;
+/// `O_PTRADD`: the address a reference takes (`&place`, the text's `nonnull`), never null: unsafe code
+/// that makes a null reference has undefined behavior. The lowering sets it on the instruction it makes
+/// for the reference, so each use of the value runs where the reference is made; a transform that makes
+/// another value from one drops it (`scale_of`, `aux & PTR_SCALE`).
+pub(package) const PTR_NONNULL: u16 = 0x8000;
 /// The type tag of a load or store (`-fstrict-aliasing`): 0 for an access that may touch any object,
 /// else `tbaa_of` its type, which the lowering gives an access of a typed place outside a union. Two
 /// accesses with different tags, neither 0, touch different objects.
@@ -634,6 +642,11 @@ pub(package) const fn tbaa_of(ty: u8) u16 {
     } else {
         t
     };
+}
+
+/// The scale of `O_PTRADD` `t`.
+pub(package) const fn scale_of(t: Inst) u32 {
+    return t.aux & PTR_SCALE;
 }
 
 /// The type tag of load or store `t` (`MEM_TBAA`).
@@ -775,6 +788,9 @@ pub(package) const VOP_SIGNED: u16 = 256;
 pub(package) const VOP_DSIGNED: u16 = 512;
 /// A float to integer conversion that does not saturate: the lanes are not NaN and fit.
 pub(package) const VOP_UNCHECKED: u16 = 1024;
+/// A float SIMD_MIN or SIMD_MAX that computes C's `fmin` or `fmax` per lane (the vectorized call): a lane
+/// with a signaling NaN gives what the target's scalar instruction gives, as the call (arm64 `fminnm`).
+pub(package) const VOP_NUM: u16 = 2048;
 /// The operation code of a `vop` (an `ir::core::OP_*` code).
 pub(package) const VOP_CODE: u16 = 255;
 
@@ -1568,6 +1584,9 @@ pub(package) struct Package {
     /// Whether the native backend joins two accesses of adjacent bytes (`target::table::Isa`): the
     /// vectorizer keeps each access's copies together (`lir::loops`).
     pub(package) apairs: bool,
+    /// Whether the optimizer regroups a chain of additions into a tree (`target::table::Isa::sum_trees`,
+    /// `lir::opt::Opt::reassociate`).
+    pub(package) sum_trees: bool,
     /// Whether the optimizer splits each 128-bit integer into its two 64-bit words (`lir::pairs`), which
     /// the native backend keeps in registers (`target::table::Isa`); it needs `mul_high`.
     pub(package) pairs: bool,
@@ -1703,6 +1722,7 @@ extend Package {
             arg_copy: 0,
             hfa_regs: false,
             apairs: true,
+            sum_trees: true,
             pairs: false,
             align_loops: false,
             popcnt: false,

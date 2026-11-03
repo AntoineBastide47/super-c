@@ -46,7 +46,7 @@ const RUN_MAX: usize = 16;
 const SAME_MAX: u32 = 16;
 // `Opt::sb` for an instruction more than one other block reads.
 const MANY: u32 = 0xFFFFFFFE;
-// `slice_of` looks through at most NONNULL_STEPS offsets.
+// `slice_of` looks through at most NONNULL_STEPS offsets, `nonnull` as many conversions.
 const NONNULL_STEPS: u32 = 4;
 // `zero_unless_zero` looks through at most ZERO_TEST_DEPTH extensions and negations.
 const ZERO_TEST_DEPTH: u32 = 4;
@@ -214,6 +214,13 @@ pub(package) struct Opt {
     hoisted: Vector<u64>, // block << 32 | instruction, in the order they moved
     pnew: Vector<bool>, // per block, a preheader `preheaders` made
     touched: Vector<bool>, // per block, one `promote_places` changed: a preheader or a block of a loop
+    // `reassociate`'s scratch: per value its uses and its one user (NONE: an edge's or none), a chain's
+    // nodes and leaves, the partial sums (depth << 32 | value).
+    rcount: Vector<u32>,
+    ruser: Vector<u32>,
+    rnodes: Vector<u32>,
+    rleaves: Vector<u32>,
+    rsums: Vector<u64>,
     pre: Vector<u64>, // instruction << 32 | an instruction the walk made to run right before it, in order
     unbiased: Map<u32, u32>, // per indexed address with an offset, the address without it (`visit`)
     merged: bool, // the last rebuild merged blocks
@@ -436,6 +443,11 @@ extend Opt {
             hoisted: Vector::<u64>::new(),
             pnew: Vector::<bool>::new(),
             touched: Vector::<bool>::new(),
+            rcount: Vector::<u32>::new(),
+            ruser: Vector::<u32>::new(),
+            rnodes: Vector::<u32>::new(),
+            rleaves: Vector::<u32>::new(),
+            rsums: Vector::<u64>::new(),
             pre: Vector::<u64>::new(),
             unbiased: Map::<u32, u32>::new(),
             merged: false,
@@ -1671,6 +1683,155 @@ extend Opt {
         return any;
     }
 
+    /// Regroup each integer sum of `b` that a chain of additions makes, each used once by the next in its
+    /// block (`a + b + c + d`), into a tree of less depth where its leaves allow: on the positions of the
+    /// chain's additions, in order, each adds the two partial sums of least depth there (ties: the earliest),
+    /// and the last gives the chain's value (the MachineCombiner's reassociation; exact, as an integer sum
+    /// wraps). A chain of fewer than 4 leaves or more than 64, or one no regrouping makes shallower, stays.
+    pub(package) fn reassociate(self: &mut Self, b: &mut Body) {
+        let ni = b.insts.len();
+        fill(&mut self.rcount, ni, 0);
+        fill(&mut self.ruser, ni, NONE);
+        let mut ops = Vector::<Value>::new();
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                lv::uses(b, t, &mut ops);
+                if t.op == O_JMP || t.op == O_BR || t.op == O_SWITCH {
+                    b.succ_edges(t, &mut self.edges);
+                    for q in 0..self.edges.len() {
+                        for x in 0..b.edge_nargs(self.edges[q]) {
+                            ops.push(b.edge_arg(self.edges[q], x));
+                        }
+                    }
+                }
+                for q in 0..ops.len() {
+                    let v = ops[q];
+                    if v != VNONE && (v & (VPARAM | VFLAG)) == 0 {
+                        self.rcount[v as usize] += 1;
+                        self.ruser[v as usize] = if t.op == O_JMP || t.op == O_BR || t.op == O_SWITCH {
+                            NONE
+                        } else {
+                            i
+                        };
+                    }
+                }
+            }
+        }
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            // Each root once; a chain's nodes precede its root.
+            for r in bk.start..bk.start + bk.len {
+                if !self.sum_node(b, bk, r) || self.chained(b, bk, r) {
+                    continue;
+                }
+                // The chain's nodes and leaves: at most the block's instructions each.
+                self.rnodes.truncate(0);
+                self.rleaves.truncate(0);
+                self.rnodes.push(r);
+                let mut at: usize = 0;
+                while at < self.rnodes.len() {
+                    let t = b.insts[self.rnodes[at] as usize];
+                    for v in [t.a, t.b] {
+                        if (v & (VPARAM | VFLAG)) == 0 && self.chained(b, bk, v) && self.ruser[v as usize] == self.rnodes[at] {
+                            self.rnodes.push(v);
+                        } else {
+                            self.rleaves.push(v);
+                        }
+                    }
+                    at += 1;
+                }
+                let nl = self.rleaves.len();
+                if nl < 4 || nl > 64 {
+                    continue;
+                }
+                // The chain's depth now, by its nodes from the root down: each node's below its parent.
+                self.rsums.truncate(0);
+                self.rnodes.sort();
+                for x in 0..self.rnodes.len() {
+                    let t = b.insts[self.rnodes[x] as usize];
+                    let mut d: u32 = 0;
+                    for v in [t.a, t.b] {
+                        for y in 0..x {
+                            if self.rnodes[y] == v {
+                                d = d.max((self.rsums[y] >> 32) as u32);
+                            }
+                        }
+                    }
+                    self.rsums.push((d + 1) as u64 << 32 | self.rnodes[x] as u64);
+                }
+                let depth = (self.rsums[self.rsums.len() - 1] >> 32) as u32;
+                if self.regroup(b, bk, false) >= depth {
+                    continue;
+                }
+                let _ = self.regroup(b, bk, true);
+            }
+        }
+    }
+
+    // `reassociate`'s regrouping of chain `rnodes` (in order) over `rleaves` in block `bk`: written into the
+    // nodes when `write`; the depth of the result.
+    fn regroup(self: &mut Self, b: &mut Body, bk: Block, write: bool) u32 {
+        self.rsums.truncate(0);
+        let mut used: u64 = 0;
+        let mut last: u32 = 0;
+        for x in 0..self.rnodes.len() {
+            let p = self.rnodes[x];
+            // The leaves defined before the node, each once (at most 64, `reassociate`).
+            for y in 0..self.rleaves.len() {
+                let v = self.rleaves[y];
+                let inside = (v & (VPARAM | VFLAG)) == 0 && v >= bk.start && v < bk.start + bk.len;
+                if (used >> y as u64 & 1) == 0 && (!inside || v < p) {
+                    used |= 1u64 << y as u64;
+                    self.rsums.push(v);
+                }
+            }
+            // The two of least depth, the earlier first on a tie.
+            let mut pick: [usize; 2] = [0, 0];
+            for z in 0..2usize {
+                let mut best = self.rsums.len();
+                for q in 0..self.rsums.len() {
+                    if (best == self.rsums.len() || self.rsums[q] >> 32 < self.rsums[best] >> 32) && !(z == 1 && q == pick[0]) {
+                        best = q;
+                    }
+                }
+                pick[z] = best;
+            }
+            let (s0, s1) = (self.rsums[pick[0]], self.rsums[pick[1]]);
+            let d = ((s0 >> 32).max(s1 >> 32) + 1) as u32;
+            if write {
+                let t = b.insts[p as usize];
+                b.insts[p as usize] = Inst { op: O_ADD, ty: t.ty, aux: 0, a: s0 as u32, b: s1 as u32, c: VNONE };
+            }
+            let hi = pick[0].max(pick[1]);
+            let lo = pick[0].min(pick[1]);
+            let _ = self.rsums.remove(hi);
+            let _ = self.rsums.remove(lo);
+            self.rsums.push(d as u64 << 32 | p as u64);
+            last = d;
+        }
+        return last;
+    }
+
+    // Whether instruction `i` of block `bk` is an integer addition `reassociate` may regroup.
+    const fn sum_node(self: &Self, b: &Body, bk: Block, i: u32) bool {
+        let t = b.insts[i as usize];
+        return i >= bk.start && i < bk.start + bk.len && t.op == O_ADD && is_int(t.ty) && t.ty != T_I128 && !is_vec(
+            t.ty,
+        );
+    }
+
+    // Whether value `v` is a chain's inner node in block `bk` (`reassociate`): an addition `sum_node` whose
+    // one use is another such addition of its type.
+    const fn chained(self: &Self, b: &Body, bk: Block, v: Value) bool {
+        if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || !self.sum_node(b, bk, v) || self.rcount[v as usize] != 1 {
+            return false;
+        }
+        let u = self.ruser[v as usize];
+        return u != NONE && self.sum_node(b, bk, u) && b.insts[u as usize].ty == b.insts[v as usize].ty;
+    }
+
     // The store that names the place `promote_places` keeps in a register for loop `h`: an innermost loop
     // with a preheader no earlier loop's change touched, whose blocks end in jumps and branches and hold no
     // call nor other access of memory but loads and stores. The place: a store's address from outside the
@@ -2355,7 +2516,7 @@ extend Opt {
                 self.ooffs[i] = if o == OFF_ANY || n.is_none() {
                     OFF_ANY
                 } else {
-                    o + n.unwrap() as i64 * t.aux as i64 + (t.c as i32) as i64
+                    o + n.unwrap() as i64 * scale_of(t) as i64 + (t.c as i32) as i64
                 };
                 changed = true;
             }
@@ -5431,6 +5592,37 @@ extend Opt {
         return true;
     }
 
+    // Value `v` read in block `k`: when it is a select of another block whose condition the branches into
+    // `k` decide (`cond`, `order_decided`, or an equality with a constant `entry_fact` settles), the arm it
+    // takes there (the pointer of an `Option` of a reference that a `None` test left).
+    fn select_arm(self: &Self, pk: &Package, b: &Body, k: u32, v: Value) Value {
+        if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || v as usize >= self.blk_of.len() || self.blk_of[v as usize] == k || b.insts[v as usize].op != O_SELECT {
+            return v;
+        }
+        let s = b.insts[v as usize];
+        let mut c = switch self.cond.get(&(s.a as u64)) {
+            Some(x) => Option::<u64>::Some(*x),
+            None => self.order_decided(b, s.a),
+        };
+        if c.is_none() && is_op(b, s.a, O_ICMP) {
+            let e = b.insts[s.a as usize];
+            let kb = const_of(b, e.b);
+            if (e.aux == C_EQ || e.aux == C_NE) && kb.is_some() && const_of(b, e.a).is_none() {
+                let r = self.entry_fact(pk, b, k, e.a, kb.unwrap(), THREAD_DEPTH);
+                if r.is_some() {
+                    c = Some((r.unwrap() == (e.aux == C_EQ)) as u64);
+                }
+            }
+        }
+        return if c.is_none() {
+            v
+        } else if c.unwrap() != 0 {
+            s.b
+        } else {
+            s.c
+        };
+    }
+
     // Whether value `a` (no instruction of block `k`) equals constant `c` where `k` starts: for a parameter
     // of `k`, its argument on every edge into `k` (at most IMPLY_FAN of them, `implied`), else along the
     // one edge into `k`, `depth` blocks back; None when the branches do not settle it.
@@ -5785,6 +5977,14 @@ extend Opt {
         if lv::operand_c(f) {
             t.c = self.val(t.c);
         }
+        if !is_terminator(t.op) {
+            if lv::operand_a(f) {
+                t.a = self.select_arm(pk, b, k, t.a);
+            }
+            if lv::operand_b(f) {
+                t.b = self.select_arm(pk, b, k, t.b);
+            }
+        }
         if f == F_CALL || f == F_CALLIND {
             for q in 0..t.aux as u32 {
                 let at = (t.c + q) as usize;
@@ -5867,11 +6067,12 @@ extend Opt {
             b.insts[i as usize] = t;
             return !same(t, t0);
         }
-        // A reference parameter is never null.
-        if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (const_of(b, t.b) == Some(0u64) && ref_param(b, t.a) || const_of(
+        // A reference is never null (`nonnull`).
+        if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (const_of(b, t.b) == Some(0u64) && nonnull(
             b,
             t.a,
-        ) == Some(0u64) && ref_param(b, t.b)) {
+            pk.ptr_bytes,
+        ) || const_of(b, t.a) == Some(0u64) && nonnull(b, t.b, pk.ptr_bytes)) {
             t = iconst(t.ty, (t.aux == C_NE) as u64);
         }
         // An equality of a value from before the block with a constant that the branches into the block
@@ -5935,7 +6136,7 @@ extend Opt {
                         b,
                         self.blk_of[t.a as usize],
                         t.a,
-                        Inst { op: O_PTRADD, ty: pa.ty, aux: pa.aux, a: pa.a, b: pa.b, c: 0 },
+                        Inst { op: O_PTRADD, ty: pa.ty, aux: pa.aux & PTR_SCALE, a: pa.a, b: pa.b, c: 0 },
                     );
                     self.unbiased.insert(t.a, q);
                 }
@@ -5962,7 +6163,7 @@ extend Opt {
                         b,
                         self.blk_of[t.a as usize],
                         t.a,
-                        Inst { op: O_PTRADD, ty: pa.ty, aux: pa.aux, a: pa.a, b: pa.b, c: 0 },
+                        Inst { op: O_PTRADD, ty: pa.ty, aux: pa.aux & PTR_SCALE, a: pa.a, b: pa.b, c: 0 },
                     );
                     self.unbiased.insert(t.a, q);
                 }
@@ -6384,7 +6585,13 @@ extend Opt {
             }
             let p = self.preh[h as usize];
             let at = b.blocks[p as usize].start + b.blocks[p as usize].len - 1;
-            let q = self.placed(b, p, at, Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux, a: t.a, b: y, c: 0 }, false);
+            let q = self.placed(
+                b,
+                p,
+                at,
+                Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux & PTR_SCALE, a: t.a, b: y, c: 0 },
+                false,
+            );
             b.insts[i as usize] = Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux, a: q, b: x, c: t.c };
             return;
         }
@@ -8773,7 +8980,7 @@ extend Opt {
 
     // Value-number pure instruction `i` of block `k`: an equal one of a dominating block replaces it, else
     // it enters the scope and moves out of the loops it does not vary in. Whether it went or moved.
-    fn number(self: &mut Self, pk: &Package, b: &Body, k: u32, i: u32) bool {
+    fn number(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
         let h = value_hash(b, t);
         let found = switch self.pure.get(&h) {
@@ -8781,6 +8988,11 @@ extend Opt {
             None => NONE,
         };
         if found != NONE && same_value(b, as_plain(b.insts[found as usize]), t) {
+            // A reference's address (`PTR_NONNULL`) that stands for another address too says nothing more:
+            // its fact holds where a reference is made.
+            if t.op == O_PTRADD && (t.aux & PTR_NONNULL) == 0 {
+                b.insts.index_mut(found as usize).aux &= PTR_SCALE;
+            }
             self.repl[i as usize] = found;
             return true;
         }
@@ -10492,6 +10704,9 @@ extend Run {
         if p.postinc {
             let _ = sc.o.pointer_ivs(p, b);
         }
+        if p.sum_trees {
+            sc.o.reassociate(b);
+        }
         let _ = sc.o.split_exits(p, b);
         if ret_edges(b) {
             sc.o.forget();
@@ -11395,7 +11610,7 @@ fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>, poff: &mut Vector<
                         } else {
                             n.unwrap() as i64
                         };
-                        let d = o.wrapping_add(x.wrapping_mul(t.aux)).wrapping_add(t.c as i32);
+                        let d = o.wrapping_add(x.wrapping_mul(scale_of(t))).wrapping_add(t.c as i32);
                         if d >= -SPAN_MAX && d <= SPAN_MAX {
                             doff[i] = d;
                         }
@@ -12367,9 +12582,10 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             return VNONE;
         }
     }
-    // A null test of `select(c, 0, p)` (or `select(c, p, 0)`), `p` an element address of a slice
-    // parameter, which is not null where `c` (its opposite) implies the slice is not empty: the test is the
-    // condition or its opposite (an iterator's `next` as a pointer or null, `slice_of`).
+    // A null test of `select(c, 0, p)` (or `select(c, p, 0)`), `p` never null (`nonnull`: an `Option` of a
+    // reference) or an element address of a slice parameter, which is not null where `c` (its opposite)
+    // implies the slice is not empty: the test is the condition or its opposite (an iterator's `next` as a
+    // pointer or null, `slice_of`).
     if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && const_of(b, t.b) == Some(0u64) && is_op(b, t.a, O_SELECT) {
         let s = b.insts[t.a as usize];
         let (p, when) = if const_of(b, s.b) == Some(0u64) {
@@ -12380,7 +12596,8 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             (VNONE, false)
         };
         let sl = slice_of(b, p);
-        if p != VNONE && sl != VNONE && len_set(b, ptr, sl, s.a, when) {
+        let set = p != VNONE && sl != VNONE && len_set(b, ptr, sl, s.a, when);
+        if set || p != VNONE && nonnull(b, p, ptr) && (t.aux == C_NE == when || is_op(b, s.a, O_ICMP)) {
             if t.aux == C_NE == when {
                 return s.a;
             }
@@ -12545,7 +12762,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         // would fail the verifier's check of slot accesses.
         let ix = const_of(b, t.b);
         if ix.is_some() && !slot_based(b, t.a) {
-            let off = (t.c as i32) as i64 + le::sign_ext(ix.unwrap(), type_bits(b.type_of(t.b), ptr)) * t.aux as i64;
+            let off = (t.c as i32) as i64 + le::sign_ext(ix.unwrap(), type_bits(b.type_of(t.b), ptr)) * scale_of(t) as i64;
             if off >= -0x80000000 && off <= 0x7FFFFFFF {
                 t.b = VNONE;
                 t.c = off as u32;
@@ -12578,7 +12795,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
                 } else {
                     kv
                 };
-                let off = (t.c as i32) as i64 + d * t.aux as i64;
+                let off = (t.c as i32) as i64 + d * scale_of(t) as i64;
                 if kv > -0x80000000 && kv < 0x80000000 && off >= -0x80000000 && off <= 0x7FFFFFFF {
                     t.b = x.a;
                     t.c = off as u32;
@@ -12602,8 +12819,8 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             } else {
                 Option::<u64>::None
             };
-            if f.is_some() && f.unwrap() != 0 && t.aux as u64 * f.unwrap() <= 0xFFFF {
-                t.aux = (t.aux as u64 * f.unwrap()) as u16;
+            if f.is_some() && f.unwrap() != 0 && scale_of(t) as u64 * f.unwrap() <= PTR_SCALE as u64 {
+                t.aux = (scale_of(t) as u64 * f.unwrap()) as u16 | t.aux & PTR_NONNULL;
                 t.b = x2.a;
             }
         }
@@ -13809,6 +14026,30 @@ const fn inner(b: &Body, k: u32) bool {
     return k < b.refs.len() as u32 && (b.refs[k as usize] & REF_INNER) != 0;
 }
 
+// Whether value `v` of `b` is never null: a reference parameter (`ref_param`), the address a reference
+// takes (`PTR_NONNULL`) or a slot's, as a pointer or an integer as wide (`ptrtoint`, `inttoptr`), through at
+// most NONNULL_STEPS conversions.
+fn nonnull(b: &Body, v: Value, ptr: u32) bool {
+    let mut x = v;
+    for _ in 0..NONNULL_STEPS {
+        if ref_param(b, x) {
+            return true;
+        }
+        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        let t = b.insts[x as usize];
+        if t.op == O_PTRADD && (t.aux & PTR_NONNULL) != 0 || t.op == O_SLOTADDR {
+            return true;
+        }
+        if t.op != O_PTRTOINT && t.op != O_INTTOPTR || type_bits(t.ty, ptr) != ptr * 8 || type_bits(b.type_of(t.a), ptr) != ptr * 8 {
+            return false;
+        }
+        x = t.a;
+    }
+    return false;
+}
+
 // Whether value `v` is a reference parameter of `b` (`Body.refs`), not a view: never null.
 fn ref_param(b: &Body, v: Value) bool {
     if v == VNONE || (v & VPARAM) == 0 || (v & VFLAG) != 0 {
@@ -13973,6 +14214,10 @@ const fn same(t: Inst, u: Inst) bool {
 
 // The hash of pure instruction `t` of `b`, a wide constant's by its words.
 fn value_hash(b: &Body, t: Inst) u64 {
+    if t.op == O_PTRADD {
+        // Of the address alone: one a reference takes (`PTR_NONNULL`) is the same value.
+        return hash(Inst { op: t.op, ty: t.ty, aux: t.aux & PTR_SCALE, a: t.a, b: t.b, c: t.c });
+    }
     if t.op != O_WCONST {
         return hash(t);
     }
@@ -14193,6 +14438,12 @@ const fn as_plain(t: Inst) Inst {
 
 // Whether pure instructions `t` and `u` of `b` compute one value: equal, or wide constants of equal words.
 fn same_value(b: &Body, t: Inst, u: Inst) bool {
+    if t.op == O_PTRADD && u.op == O_PTRADD {
+        return same(
+            Inst { op: t.op, ty: t.ty, aux: t.aux & PTR_SCALE, a: t.a, b: t.b, c: t.c },
+            Inst { op: u.op, ty: u.ty, aux: u.aux & PTR_SCALE, a: u.a, b: u.b, c: u.c },
+        );
+    }
     if t.op != O_WCONST || u.op != O_WCONST {
         return same(t, u);
     }
@@ -15140,7 +15391,7 @@ fn counter_step(b: &Body, v: Value, q: Value) u32 {
 }
 
 // The constant positive byte step of pointer parameter `q` that `v` (what a loop passes it back) takes,
-// `ptradd q, k * scale + c` of a constant `k` or none (the step up to 0xFFFF); else 0.
+// `ptradd q, k * scale + c` of a constant `k` or none (the step up to PTR_SCALE); else 0.
 fn ptr_step(b: &Body, v: Value, q: Value) u32 {
     if !is_op(b, v, O_PTRADD) || b.insts[v as usize].a != q {
         return 0;
@@ -15152,9 +15403,9 @@ fn ptr_step(b: &Body, v: Value, q: Value) u32 {
         if k.is_none() || k.unwrap() > 0xFFFF {
             return 0;
         }
-        s += k.unwrap() as i64 * t.aux as i64;
+        s += k.unwrap() as i64 * scale_of(t) as i64;
     }
-    return if s > 0 && s <= 0xFFFF {
+    return if s > 0 && s <= PTR_SCALE as i64 {
         s as u32
     } else {
         0

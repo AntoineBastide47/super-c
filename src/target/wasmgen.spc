@@ -1728,8 +1728,8 @@ extend Gen {
             self.get(t.a);
             if t.b != VNONE {
                 self.get(t.b);
-                if t.aux != 1 {
-                    self.c.i32_const(t.aux);
+                if scale_of(t) != 1 {
+                    self.c.i32_const(scale_of(t) as i32);
                     self.c.op(w::I32_MUL);
                 }
                 self.c.op(w::I32_ADD);

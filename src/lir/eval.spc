@@ -653,7 +653,7 @@ extend Eval {
             let mut p = self.val(&f, b, t.a);
             if t.b != VNONE {
                 let ix = sign_ext(self.val(&f, b, t.b), type_bits(b.type_of(t.b), ptr));
-                p = p.wrapping_add((ix as u64).wrapping_mul(t.aux));
+                p = p.wrapping_add((ix as u64).wrapping_mul(scale_of(t)));
             }
             self.vals[dst as usize] = p.wrapping_add(((t.c as i32) as i64) as u64);
             return true;

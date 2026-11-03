@@ -1526,7 +1526,7 @@ extend Lower {
         if ix != VNONE && scale == 0 {
             return self.ptradd(base, VNONE, 0, off);
         }
-        if ix != VNONE && scale > 65535 {
+        if ix != VNONE && scale > PTR_SCALE as u32 {
             let s = self.iconst(self.ptr_int(), scale);
             let k = self.arith(O_MUL, ix, s);
             return self.inst(O_PTRADD, T_PTR, 1, base, k, off);
@@ -3729,8 +3729,17 @@ extend Lower {
         if rv.kind == irc::RV_USE {
             return self.operand(c, b, rv.a);
         }
-        if rv.kind == irc::RV_REF || rv.kind == irc::RV_ADDR {
+        if rv.kind == irc::RV_ADDR {
             return self.place_addr(c, b, rv.a);
+        }
+        if rv.kind == irc::RV_REF {
+            // A reference is never null: the address made for it here says so (`PTR_NONNULL`).
+            let n = self.b.insts.len() as u32;
+            let a = self.place_addr(c, b, rv.a);
+            if (a & (VPARAM | VFLAG)) == 0 && a != VNONE && a >= n && self.b.insts[a as usize].op == O_PTRADD {
+                self.b.insts.index_mut(a as usize).aux |= PTR_NONNULL;
+            }
+            return a;
         }
         if rv.kind == irc::RV_CAST {
             return self.cast(c, b, rv, ti);
@@ -7109,6 +7118,11 @@ extend Lower {
         ) == ti.mty {
             // The C library's square root, correctly rounded as the instruction is.
             r = self.inst(O_FSQRT, ti.mty, 0, args[0], VNONE, VNONE);
+        } else if fv == VNONE && ext && self.pkg.fma && ti.cls == VC_SCALAR && args.len() == 3 && (nm == "fma" && ti.mty == T_F64 || nm == "fmaf" && ti.mty == T_F32) && self.vty(
+            args[0],
+        ) == ti.mty && self.vty(args[1]) == ti.mty && self.vty(args[2]) == ti.mty {
+            // The C library's fused multiply-add on a processor that has the instruction: one rounding too.
+            r = self.inst(O_FMA, ti.mty, 0, args[0], args[1], args[2]);
         } else if fv != VNONE || !self.rt_prim(nm, &args, &mut r) && !self.mem_intrin(c, nm, &args, &tys, ti, &mut r) && !self.lanes_intrin(
             c,
             nm,

@@ -10,6 +10,7 @@ import lir::inline as il;
 import lir::loops as lu;
 import tests::harness as h;
 import tests::cli_harness as cli;
+import target::table as tgt;
 
 // Package text `text` read, then optimized: each body verifies before and after.
 fn optimized(text: str) (Package, Package) {
@@ -210,6 +211,82 @@ fn a_constant_every_call_passes_makes_a_copy_without_it() {
         s.show();
     }
     assert(s.ok() && c.contains("sig (i32) -> i32"), "the recursion's copy takes the count alone");
+}
+
+// Loops of C float functions: `max` and `min` reductions and `mul_add` per element. Built in release, the
+// reductions keep a lane per extreme (`vop.max`, `vop.min`) and `mul_add` is one `fma` instruction; their
+// results match the debug build's calls bit for bit, through NaNs and zeros of both signs at every position
+// and length.
+const FLOAT_CALLS: str = M"(@noinline
+fn fl_top(s: []f32, m0: f32) f32 {
+    let mut m = m0;
+    for i in 0..s.len() {
+        m = m.max(s[i]);
+    }
+    return m;
+}
+
+@noinline
+fn fl_low(s: []f64) f64 {
+    let mut m: f64 = 1.0e300;
+    for i in 0..s.len() {
+        m = s[i].min(m);
+    }
+    return m;
+}
+
+@noinline
+fn fl_fused(s: []mut f64, a: f64, b: f64) {
+    for i in 0..s.len() {
+        s[i] = s[i].mul_add(a, b);
+    }
+}
+
+fn main() i32 {
+    let odd: [f32; 4] = [f32::NAN, -0.0, 0.0, -3.5];
+    let mut h: u64 = 0;
+    for n in 0..41usize {
+        for k in 0..4usize {
+            let mut a = Vector::<f32>::new();
+            let mut d = Vector::<f64>::new();
+            for i in 0..n {
+                let v = if (i * 7 + k) % 5 == 0 {
+                    odd[(i + k) % 4]
+                } else {
+                    ((i * 13 + k * 5) % 17) as f32 - 8.0
+                };
+                a.push(v);
+                d.push(v as f64 * 0.75);
+            }
+            h = h.wrapping_mul(31) ^ fl_top(&a, odd[k]).to_bits() as u64;
+            h = h.wrapping_mul(31) ^ fl_low(&d).to_bits();
+            fl_fused(&mut d, 1.0 / 3.0, -0.0);
+            for i in 0..n {
+                h = h.wrapping_mul(31) ^ d[i].to_bits();
+            }
+        }
+    }
+    println("{}", h);
+    return 0;
+}
+)";
+
+@test
+fn float_function_loops_vectorize_with_the_calls_results() {
+    h::expect_same_output("float function loops", FLOAT_CALLS, ["--profile=debug"], ["--profile=release"]);
+    if tgt::isa(tgt::host_isa()).name != "aarch64" || cli::on_wasm() {
+        return; // the lanes' forms of arm64, whose vectors compute these
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", FLOAT_CALLS);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "fl_", "build -O2 main.spc -o app");
+    let ok = r.ok() && printed(r.text(), "fl_top").contains("vop.max") && printed(r.text(), "fl_low").contains(
+        "vop.min",
+    ) && printed(r.text(), "fl_fused").contains("= fma.f64") && !printed(r.text(), "fl_fused").contains("call");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "the reductions keep lanes and the fused multiply-add is an instruction");
 }
 
 // An `Option` built on each side of a join and taken apart after it (`o.map(f).unwrap_or(0)`): each jump into
@@ -3033,6 +3110,147 @@ b0:
     // tally 0, then 3 + 5 + 3; other, called, fenced and pointed the same each; pointed's slot 3.
     let none: []u64 = [];
     same_result(&b, &a, "drive", none, 58);
+}
+
+// A chain of additions whose leaves are all at hand regroups into a balanced tree (`reassociate`): the
+// pairs of parameters add first, and the sum is the same. A partial sum used twice (`v9`) is a leaf, its own
+// chain too short to regroup.
+@test
+fn a_chain_of_additions_regroups_into_a_tree() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @sum8 fn global noinline
+sym @drive fn global
+fn @sum8
+  sig (i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64):
+  v8 = add.i64 v0, v1
+  v9 = add.i64 v8, v2
+  v10 = add.i64 v9, v3
+  v11 = add.i64 v10, v4
+  v12 = add.i64 v11, v5
+  v13 = add.i64 v12, v6
+  v14 = add.i64 v13, v7
+  v15 = mul.i64 v14, v9
+  ret v15
+fn @drive
+  sig () -> i64
+b0:
+  v0 = iconst.i64 1
+  v1 = iconst.i64 2
+  v2 = iconst.i64 3
+  v3 = iconst.i64 4
+  v4 = iconst.i64 5
+  v5 = iconst.i64 6
+  v6 = iconst.i64 7
+  v7 = iconst.i64 -9
+  v8 = call.i64 @sum8(v0, v1, v2, v3, v4, v5, v6, v7) : (i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+  ret v8
+)",
+    );
+    let t = text_of(&a, "sum8");
+    assert(t.contains("add.i64 v7, v6") && t.contains("add.i64 v5, v4") && t.contains("add.i64 v8, v2"), t.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 114);
+}
+
+// A reference is never null (`nonnull`, through `ptrtoint`): a test of `select(c, 0, p)` against null, an
+// `Option` of the reference, is the test of `c`, and the `Some` side reads `p` itself. Without the fact
+// the select stays.
+@test
+fn a_null_test_of_a_selected_reference_tests_the_condition() {
+    let text = M"(lir ptr 8
+sym @last fn global noinline
+sym @plain fn global noinline
+sym @drive fn global
+fn @last
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i32 0
+  v3 = load.i64 v0+8 align 3
+  v4 = load.ptr v0 align 3
+  v5 = ptradd v4, v3 * 4-4 nonnull
+  v6 = ptrtoint.i64 v5
+  v7 = icmp.eq v3, v1
+  v8 = select.i64 v7, v1, v6
+  v9 = icmp.ne v8, v1
+  br v9, b1, b2
+b1:
+  v10 = inttoptr.ptr v8
+  v11 = load.i32 v10 align 2
+  ret v11
+b2:
+  ret v2
+fn @plain
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i32 0
+  v3 = load.i64 v0+8 align 3
+  v4 = load.ptr v0 align 3
+  v5 = ptradd v4, v3 * 4-4
+  v6 = ptrtoint.i64 v5
+  v7 = icmp.eq v3, v1
+  v8 = select.i64 v7, v1, v6
+  v9 = icmp.ne v8, v1
+  br v9, b1, b2
+b1:
+  v10 = inttoptr.ptr v8
+  v11 = load.i32 v10 align 2
+  ret v11
+b2:
+  ret v2
+fn @drive
+  sig () -> i32
+  slot s0 size 16 align 3
+  slot s1 size 8 align 2
+b0:
+  v0 = slotaddr s0
+  v1 = slotaddr s1
+  v2 = iconst.i32 5
+  v3 = iconst.i32 7
+  v4 = iconst.i64 2
+  v5 = iconst.i64 0
+  store v2, v1 align 2
+  store v3, v1+4 align 2
+  store v1, v0 align 3
+  store v4, v0+8 align 3
+  v6 = call.i32 @last(v0) : (ptr) -> i32
+  v7 = call.i32 @plain(v0) : (ptr) -> i32
+  store v5, v0+8 align 3
+  v8 = call.i32 @last(v0) : (ptr) -> i32
+  v9 = add.i32 v6, v7
+  v10 = add.i32 v9, v8
+  ret v10
+)";
+    let (b, a) = optimized(text);
+    let l = text_of(&a, "last");
+    assert(!l.contains("select"), l.as_str());
+    let p = text_of(&a, "plain");
+    assert(p.contains("select"), p.as_str());
+    // A plain address equal to a reference's takes its place without the fact: its null test stays.
+    let (_, a2) = optimized(
+        M"(lir ptr 8
+sym @twin fn global
+fn @twin
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = ptradd v0, v1 * 4 nonnull
+  v4 = ptrtoint.i64 v3
+  v5 = ptradd v0, v1 * 4
+  v6 = ptrtoint.i64 v5
+  v7 = icmp.eq v6, v2
+  v8 = zext.i64 v7
+  v9 = add.i64 v4, v8
+  ret v9
+)",
+    );
+    let w = text_of(&a2, "twin");
+    assert(w.contains("icmp.eq"), w.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 14);
 }
 
 // A thread-local variable a loop reads and writes stays in a register across it as a `static mut` does: a

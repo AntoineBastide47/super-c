@@ -4129,6 +4129,82 @@ int main(void) {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// The address a reference takes is never null (`PTR_NONNULL`): a switch on `Vector::last`, a `None` test of
+// an `Option` of a reference, tests the length, and the `Some` side reads the element through no select.
+@test
+fn a_switch_on_an_optional_reference_tests_the_length() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "@noinline\nfn last(v: &Vector<u32>) u32 {\n    return switch v.last() { Some(x) => *x, None => 0 };\n}\n\nfn main() i32 {\n    let v = Vector::<u32>::new();\n    return last(&v) as i32;\n}\n",
+    );
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "last", "build -O2 main.spc -o app");
+    let ok = r.ok() && r.out_has("fn @") && !r.out_has("select");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "no select");
+}
+
+// A loop that reads `s[n - 1 - k]` with its check hoisted vectorizes: each vector loads the elements below
+// and reverses its lanes (a `swizzle`; arm64 `rev64` and `ext`, x86-64 `pshufd`), for lanes of 1 to 8 bytes,
+// with each element in its place.
+@test
+fn reversed_accesses_vectorize() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(@noinline
+fn rev8(d: []mut u8, s: []u8) { let n = d.len(); for k in 0..n { d[k] = s[n - 1 - k]; } }
+@noinline
+fn rev16(d: []mut u16, s: []u16) { let n = d.len(); for k in 0..n { d[k] = s[n - 1 - k]; } }
+@noinline
+fn rev32(d: []mut u32, s: []u32) { let n = d.len(); for k in 0..n { d[k] = s[n - 1 - k]; } }
+@noinline
+fn rev64(d: []mut u64, s: []u64) { let n = d.len(); for k in 0..n { d[k] = s[n - 1 - k] + 1; } }
+
+fn main() i32 {
+    let mut a = Vector::<u8>::new();
+    let mut b = Vector::<u8>::new();
+    let mut c = Vector::<u16>::new();
+    let mut e = Vector::<u16>::new();
+    let mut f = Vector::<u32>::new();
+    let mut g = Vector::<u32>::new();
+    let mut h = Vector::<u64>::new();
+    let mut q = Vector::<u64>::new();
+    for k in 0..67usize {
+        a.push((k * 3 + 1) as u8);
+        c.push((k * 5 + 2) as u16);
+        f.push((k * 7 + 3) as u32);
+        h.push((k * 11 + 4) as u64);
+        b.push(0);
+        e.push(0);
+        g.push(0);
+        q.push(0);
+    }
+    rev8(b.as_mut_slice(), a.as_slice());
+    rev16(e.as_mut_slice(), c.as_slice());
+    rev32(g.as_mut_slice(), f.as_slice());
+    rev64(q.as_mut_slice(), h.as_slice());
+    for k in 0..67usize {
+        if b[k] != a[66 - k] || e[k] != c[66 - k] || g[k] != f[66 - k] || q[k] != h[66 - k] + 1 {
+            return 1;
+        }
+    }
+    return 0;
+}
+)",
+    );
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "rev32", "build --profile=release main.spc -o app");
+    let ok = r.ok() && r.out_has("swizzle");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "a swizzle");
+    let mut cmd = format("\"{}/app\"", p.dir());
+    assert_eq(cli::run_with(cmd.cstr(), null, null, null, ""), 0);
+}
+
 // On an arm64 host, `reduce_add_tree` of an `f32x4` (its Neon entry's `vget_low_f32` and `vget_lane_f32`)
 // lowers to a vector's low half and lane reads at constant indexes (`intrin::lane_read`), through no slot.
 @test
@@ -6175,13 +6251,11 @@ b0(v0: ptr, v1: ptr):
 }
 
 // The minimum and maximum of a vector's integer lanes and the lanes' minimum and maximum of two vectors,
-// signed and unsigned, of every lane width (x86-64: `pminsw`, `pmaxub`, AVX2's `pmin`/`pmax`, else a
-// `pcmpgt` mask; 64-bit lanes by one `cmov`), in xmm and in ymm registers.
+// signed and unsigned, of every lane width (x86-64: `pminsw`, `pmaxub`, SSE4.1's and AVX2's `pmin`/`pmax`
+// (`pmaxud` in the SSE4.1 object), else a `pcmpgt` mask; 64-bit lanes by one `cmov`), in xmm and in ymm
+// registers.
 @test
 fn vector_minimums_and_maximums_of_every_lane_width_run() {
-    if !cli::has_cc() {
-        return; // a C driver links it
-    }
     let lir = M"(lir ptr 8
 sym @mm fn global
 fn @mm
@@ -6253,6 +6327,19 @@ b0(v0: ptr, v1: ptr, v2: ptr):
   store v38, v2+120 align 0
   ret
 )";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), SSE41, &mut obj),
+        "the SSE4.1 object",
+    );
+    let mut pmaxud = false;
+    for x in 0..obj.len() - 3 {
+        pmaxud = pmaxud || obj[x] == 0x66 && obj[x + 1] == 0x0F && obj[x + 2] == 0x38 && obj[x + 3] == 0x3F;
+    }
+    assert(pmaxud, "pmaxud");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let drv = "#include <stdint.h>\n#include <string.h>\nvoid mm(const void *, const void *, void *);\n#define RED(T, n, at) { T x[n]; memcpy(x, a, 16); T lo = x[0], hi = x[0]; for (int i = 1; i < n; i++) { if (x[i] < lo) lo = x[i]; if (x[i] > hi) hi = x[i]; } T r0, r1; memcpy(&r0, o + at, sizeof(T)); memcpy(&r1, o + at + 8, sizeof(T)); if (r0 != lo || r1 != hi) return at / 8 + 1; }\n#define LANE(T, n, at) { T x[n], y[n], r[n]; memcpy(x, a, 16); memcpy(y, b, 16); memcpy(r, o + at, 16); for (int i = 0; i < n; i++) if (r[i] != (x[i] < y[i] ? x[i] : y[i])) return at / 16 + 40; memcpy(r, o + at + 16, 16); for (int i = 0; i < n; i++) if (r[i] != (x[i] > y[i] ? x[i] : y[i])) return at / 16 + 60; }\nint main(void) {\n  unsigned char a[16], b[16], o[320];\n  for (int i = 0; i < 16; i++) { a[i] = (unsigned char)(i * 73 + 129); b[i] = (unsigned char)(i * 151 + 7); }\n  mm(a, b, o);\n  RED(int8_t, 16, 0) RED(uint8_t, 16, 16) RED(int16_t, 8, 32) RED(uint16_t, 8, 48)\n  RED(int32_t, 4, 64) RED(uint32_t, 4, 80) RED(int64_t, 2, 96) RED(uint64_t, 2, 112)\n  LANE(int8_t, 16, 128) LANE(uint8_t, 16, 160) LANE(int16_t, 8, 192) LANE(uint16_t, 8, 224)\n  LANE(int32_t, 4, 256) LANE(uint32_t, 4, 288)\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wide(lir, drv), 0);
@@ -6372,6 +6459,7 @@ b0(v0: ptr, v1: ptr):
 )";
     let drv = "#include <stdint.h>\n#include <string.h>\nint32_t anyn(const void *, const void *);\n#define T(U, at) { U x[8 / sizeof(U)], y[8 / sizeof(U)]; memcpy(x, a, 8); memcpy(y, b, 8); int e = 0, o = 0; for (unsigned i = 0; i < 8 / sizeof(U); i++) { e |= x[i] == y[i]; o |= x[i] < y[i] || x[i] == y[i]; } want |= e << at | o << (at + 1); }\nstatic int check(const unsigned char *a, const unsigned char *b) {\n  int want = 0;\n  T(uint8_t, 0) T(uint16_t, 2) T(uint32_t, 4)\n  return anyn(a, b) == want;\n}\nint main(void) {\n  unsigned char a[8], b[8];\n  for (int i = 0; i < 8; i++) { a[i] = (unsigned char)(i * 37 + 3); b[i] = a[i]; }\n  if (!check(a, b)) return 1;\n  for (int i = 0; i < 8; i++) b[i] = (unsigned char)(a[i] - 1);\n  if (!check(a, b)) return 2;\n  b[7] = a[7];\n  if (!check(a, b)) return 3;\n  b[7] = (unsigned char)(a[7] + 1);\n  if (!check(a, b)) return 4;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_sse41(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }
 
@@ -9786,11 +9874,16 @@ data @t size 8 align 3
         "the x86-64 object",
     );
     // mov r64, fs:[0]: the segment prefix, REX.W, the load, a ModRM of an absolute address, the SIB of none.
-    let mut fs0 = false;
+    // The address is rematerialized at each use (the load and the store after the loop): no register or
+    // slot holds it across the loop.
+    let mut fs0: u32 = 0;
     for i in 0..obj.len() - 4 {
-        fs0 = fs0 || obj[i] == 0x64 && (obj[i + 1] & 0xFB) == 0x48 && obj[i + 2] == 0x8B && (obj[i + 3] & 0xC7) == 0x04 && obj[i + 4] == 0x25;
+        fs0 += (obj[i] == 0x64 && (obj[i + 1] & 0xFB) == 0x48 && obj[i + 2] == 0x8B && (obj[i + 3] & 0xC7) == 0x04 && obj[i + 4] == 0x25) as u32;
     }
-    assert(fs0 && !unsafe str::from_raw(obj.as_ptr(), obj.len()).contains("__tls_get_addr"), "a local-exec address");
+    assert(
+        fs0 == 2 && !unsafe str::from_raw(obj.as_ptr(), obj.len()).contains("__tls_get_addr"),
+        "local-exec addresses",
+    );
     let oses: [str; 2] = ["macos", "linux"];
     for os in oses {
         assert(
@@ -9814,6 +9907,49 @@ int main(void) {
   if (spread(a, 2) != 30) return 1;
   if (spread(a, 1) != 45) return 2;
   return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Two loads of 8 bytes through one address, the second of the bytes before the first, and of two types of
+// one access kind (`i64`, `ptr`), pair into one `ldp` on arm64, the first loaded into the second register.
+@test
+fn loads_of_descending_offsets_pair() {
+    let lir = M"(lir ptr 8
+sym @diff fn global
+fn @diff
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0+8 align 3
+  v2 = load.ptr v0 align 3
+  v3 = load.i64 v2 align 3
+  v4 = sub.i64 v3, v1
+  ret v4
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("macos", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // LDP (64-bit, signed offset).
+    let mut n: u32 = 0;
+    for i in 0..obj.len() / 4 {
+        let w = obj[4 * i] as u32 | obj[4 * i + 1] as u32 << 8 | obj[4 * i + 2] as u32 << 16 | obj[4 * i + 3] as u32 << 24;
+        n += ((w & 0xFFC00000) == 0xA9400000) as u32;
+    }
+    assert_eq(n, 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+struct S { const int64_t *p; int64_t n; };
+int64_t diff(const struct S *);
+int main(void) {
+  int64_t a[1] = {100};
+  struct S s = {a, 30};
+  return diff(&s) == 70 ? 0 : 1;
 }
 )";
     assert_eq(run_native(lir, drv), 0);

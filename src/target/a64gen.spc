@@ -1112,6 +1112,9 @@ extend Gen {
     // its vector operands and result need no memory.
     fn vop_reg(self: &Self, t: Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
+        if lv::reversal(self.b(), t) {
+            return in_vreg(t.ty) && (type_bytes(t.ty, 8) == 8 || type_bytes(t.ty, 8) == 16);
+        }
         if t.b == 0 || t.c != VNONE {
             return false;
         }
@@ -1157,6 +1160,7 @@ extend Gen {
             c,
             lt,
             (t.aux & VOP_SIGNED) != 0,
+            (t.aux & VOP_NUM) != 0,
             &mut un,
             &mut fma,
         ) != NONE;
@@ -1750,7 +1754,7 @@ extend Gen {
             return (
                 rn,
                 rm,
-                p.aux != 1,
+                scale_of(p) != 1,
                 if x.op == O_ZEXT {
                     2u32
                 } else {
@@ -1759,7 +1763,7 @@ extend Gen {
             );
         }
         let rm = self.reg(p.b);
-        return (rn, rm, p.aux != 1, 3);
+        return (rn, rm, scale_of(p) != 1, 3);
     }
 
     // An access `m` of register `rt` at `rn` + `rm` extended by `opt` (`a::ldst_ext`), scaled by its size
@@ -5069,7 +5073,7 @@ extend Gen {
         let ity = self.vt(t.b);
         let ib = type_bits(ity, self.ptr);
         let ri = self.reg(t.b) as u32;
-        let scale = t.aux as u32;
+        let scale = scale_of(t);
         let rd = self.def(i) as u32;
         // The index sign-extended to 64 bits.
         let mut idx = ri;
@@ -5098,8 +5102,9 @@ extend Gen {
         return true;
     }
 
-    // A matching access within eight instructions. Crossing memory or control flow is forbidden;
-    // a store's source must already exist where the pair executes.
+    // A matching access within eight instructions: one of the same access kind (`mkind`: an `i64` and a
+    // `ptr` pair), the bytes after or before through the same address value. Crossing memory or control
+    // flow is forbidden; a store's source must already exist where the pair executes.
     fn pair_next(self: &Self, i: u32) u32 {
         let b = self.b();
         let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
@@ -5132,7 +5137,7 @@ extend Gen {
                     self.vt(u.b)
                 };
                 let delta = (u.c as i32) as i64 - (t.c as i32) as i64;
-                if u.a != t.a || ty != uy || delta != size && delta != -size || (u.aux & MEM_VOLATILE) != 0 || self.lv.fold[j as usize] {
+                if u.a != t.a || mkind(uy, load) != m || delta != size && delta != -size || (u.aux & MEM_VOLATILE) != 0 || self.lv.fold[j as usize] {
                     return NONE;
                 }
                 if load {
@@ -8925,16 +8930,21 @@ const fn neon_cmp(c: u16, lt: u8) (u32, bool) {
     return (a::v3op(false, op, s, 0, 0, 0), c == C_SLT || c == C_SLE || c == C_ULT || c == C_ULE);
 }
 
-// The NEON instruction (as `neon_of_op`) of lane rule `c` (a `SIMD_*` code) on lanes of `lt`, signed `sg`;
-// `un` set for one operand, `fma` for an accumulation into operand 2.
-const fn neon_of_simd(c: u8, lt: u8, sg: bool, un: &mut bool, fma: &mut bool) u32 {
+// The NEON instruction (as `neon_of_op`) of lane rule `c` (a `SIMD_*` code) on lanes of `lt`, signed `sg`,
+// a float min or max as C's (`num`: VOP_NUM); `un` set for one operand, `fma` for an accumulation into
+// operand 2.
+const fn neon_of_simd(c: u8, lt: u8, sg: bool, num: bool, un: &mut bool, fma: &mut bool) u32 {
     let eb = type_bytes(lt, 8);
     let s = vsize(eb);
     let sz = (lt == T_F64) as u32;
     *un = false;
     *fma = false;
     if is_float(lt) {
-        // min and max keep a signaling NaN's bits, which the vector instructions quiet: lanes.
+        // min and max keep a signaling NaN's bits, which the vector instructions quiet: lanes; C's (`num`)
+        // are the instructions, as the scalar call.
+        if num && (c == core::SIMD_MIN || c == core::SIMD_MAX) {
+            return a::v3op(false, a::V3_FMAXNM, (c == core::SIMD_MIN) as u32 * 2 | sz, 0, 0, 0);
+        }
         if c == core::SIMD_FMA {
             *fma = true;
             return a::v3op(false, a::V3_FMLA, sz, 0, 0, 0);
@@ -10109,6 +10119,25 @@ extend Gen {
             self.masked_in_reg(i, sc == core::SIMD_STORE_MASKED_PTR, &ops, &tys);
             return true;
         }
+        if self.vop_reg(t) && lv::reversal(self.b(), t) {
+            // The lanes reversed: REV64 within each 8 bytes (lanes below 8 bytes), then EXT #8 swaps the
+            // halves of a 16-byte vector.
+            let nb = type_bytes(t.ty, 8);
+            let eb = type_bytes(lane_type(t.ty), 8);
+            let rx = self.vec_use(ops[0], V0 + 30);
+            let rd = self.def_step(i);
+            let mut src = rx;
+            if eb < 8 {
+                self.emit(
+                    0x0E200800 | a::on(nb == 16, 1u32 << 30) | vsize(eb) << 22 | (src - V0) as u32 << 5 | (rd - V0) as u32,
+                );
+                src = rd;
+            }
+            if nb == 16 {
+                self.emit(0x6E000000 | (src - V0) as u32 << 16 | 8 << 11 | (src - V0) as u32 << 5 | (rd - V0) as u32);
+            }
+            return true;
+        }
         if rule == core::SR_REDUCE && in_vreg(tys[0]) && self.reduce_reg(i, t, sc, sg, ops[0], tys[0]) {
             return true;
         }
@@ -10307,7 +10336,7 @@ extend Gen {
         let w = if mask || rule != core::SR_VEC || nb < 8 {
             NONE
         } else {
-            neon_of_simd(c, lt, sg, &mut un, &mut fma)
+            neon_of_simd(c, lt, sg, (t.aux & VOP_NUM) != 0, &mut un, &mut fma)
         };
         if w != NONE && in_vreg(t.ty) {
             if fma {

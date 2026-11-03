@@ -87,6 +87,9 @@ pub(package) struct Isa {
     /// Two accesses of adjacent bytes through one address are one instruction (arm64's `ldp`, `stp`):
     /// `lir::ir::Package::apairs`.
     pub(package) access_pairs: bool,
+    /// A sum chain regroups into a tree (`lir::opt::Opt::reassociate`): the processor runs independent
+    /// additions at once and has the registers for the partial sums (`lir::ir::Package::sum_trees`).
+    pub(package) sum_trees: bool,
     /// The native backend keeps a 64-bit integer in one register: the optimizer splits a 128-bit one into
     /// its two words (`lir::ir::Package::pairs`).
     pub(package) pairs: bool,
@@ -240,6 +243,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_absd: 3,
         vector_sumw: 0x8,
         access_pairs: false,
+        sum_trees: false,
         pairs: true,
         half_cvt: false,
         switch_tree: true,
@@ -275,6 +279,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_absd: 7,
         vector_sumw: 0x8CE,
         access_pairs: true,
+        sum_trees: true,
         pairs: true,
         half_cvt: true,
         switch_tree: true,
@@ -310,6 +315,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_absd: 0,
         vector_sumw: 0,
         access_pairs: false,
+        sum_trees: false,
         pairs: false,
         half_cvt: false,
         switch_tree: false,
@@ -650,6 +656,7 @@ const UNKNOWN_ISA: Isa = Isa {
     vector_absd: 0,
     vector_sumw: 0,
     access_pairs: false,
+    sum_trees: false,
     pairs: false,
     half_cvt: false,
     switch_tree: false,

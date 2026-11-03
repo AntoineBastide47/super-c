@@ -457,9 +457,12 @@ extend Printer {
             if t.b != VNONE {
                 out.push_str(", ");
                 self.val(t.b, out);
-                out.format_into(" * {}", t.aux);
+                out.format_into(" * {}", scale_of(t));
             }
             push_offset(t.c, out);
+            if (t.aux & PTR_NONNULL) != 0 {
+                out.push_str(" nonnull");
+            }
         } else if f == F_LOAD {
             out.push_byte(b' ');
             self.val(t.a, out);
