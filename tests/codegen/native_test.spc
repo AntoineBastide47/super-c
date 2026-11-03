@@ -10335,6 +10335,137 @@ fn coff_section(b: &Vector<u8>, name: str) u64 {
     return 0;
 }
 
+// A store's value that only it reads is computed after the store's address on wasm32 (`lv::FOLD_SINK`):
+// `@make`'s sums (local.get 0, local.get 1, i32.const 1, i32.add, i32.store), `@add`'s sum of two loads.
+// `@keep`'s load comes before a store to its address, so it stays there (the old value). All give the C
+// results.
+@test
+fn store_values_follow_their_addresses() {
+    let lir = M"(lir ptr 8
+sym @make fn global
+sym @add fn global
+sym @keep fn global
+fn @make
+  sig (ptr, i32) -> void
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i32 1
+  v3 = iconst.i32 2
+  v4 = add.i32 v1, v2
+  v5 = add.i32 v1, v3
+  store v1, v0 align 2
+  store v4, v0+4 align 2
+  store v5, v0+8 align 2
+  ret
+fn @add
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.i32 v1 align 2
+  v4 = load.i32 v2 align 2
+  v5 = add.i32 v3, v4
+  store v5, v0 align 2
+  ret
+fn @keep
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.i32 v0 align 2
+  v3 = iconst.i32 5
+  store v3, v0 align 2
+  store v2, v1 align 2
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let make: [u8; 9] = [0x20, 0x00, 0x20, 0x01, 0x41, 0x01, 0x6A, 0x36, 0x02];
+    assert(holds(&obj, make[0..9]), "make");
+    // local.get 0, local.get 1, i32.load, local.get 2, i32.load, i32.add, i32.store.
+    let add: [u8; 14] = [0x20, 0x00, 0x20, 0x01, 0x28, 0x02, 0x00, 0x20, 0x02, 0x28, 0x02, 0x00, 0x6A, 0x36];
+    assert(holds(&obj, add[0..14]), "add");
+    let drv = M"(#include <stdint.h>
+void make(uint32_t *, uint32_t);
+void add(uint32_t *, const uint32_t *, const uint32_t *);
+void keep(uint32_t *, uint32_t *);
+int main(void) {
+  uint32_t q[3], x = 40, y = 2, s, a = 9, b = 0;
+  make(q, 7);
+  if (q[0] != 7 || q[1] != 8 || q[2] != 9) return 1;
+  add(&s, &x, &y);
+  if (s != 42) return 2;
+  keep(&a, &b);
+  if (a != 5 || b != 9) return 3;
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
+// wasm32 extends a 64-bit operand at its one use in its block (`lv::FOLD_WIDEN`), no local: `@space`'s
+// byte count of a shift is local.get 0, i64.extend_i32_u, i64.shr_u; its truncation, which only an `and`
+// with a byte reads, is i32.wrap_i64 with no mask (`lv::FOLD_FREE_ZEXT`). `@wide` sign-extends. Both give
+// the C results.
+@test
+fn extensions_to_64_bits_happen_at_their_use() {
+    let lir = M"(lir ptr 8
+sym @space fn global
+sym @wide fn global
+fn @space
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i64 63
+  v2 = iconst.i64 4294977024
+  v3 = iconst.i8 32
+  v4 = icmp.ule v0, v3
+  v5 = zext.i64 v0
+  v6 = and.i64 v5, v1
+  v7 = lshr.i64 v2, v6
+  v8 = trunc.i8 v7
+  v9 = and.i8 v4, v8
+  ret v9
+fn @wide
+  sig (i32, i64) -> i64
+b0(v0: i32, v1: i64):
+  v2 = iconst.i64 3
+  v3 = mul.i64 v1, v2
+  v4 = sext.i64 v0
+  v5 = add.i64 v3, v4
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    // local.get 0, i64.extend_i32_u, i64.shr_u, i32.wrap_i64, i32.and, end.
+    let sp: [u8; 7] = [0x20, 0x00, 0xAD, 0x88, 0xA7, 0x71, 0x0B];
+    assert(holds(&obj, sp[0..7]), "space");
+    // local.get 0, i64.extend_i32_s, i64.add.
+    let wd: [u8; 4] = [0x20, 0x00, 0xAC, 0x7C];
+    assert(holds(&obj, wd[0..4]), "wide");
+    let drv = M"(#include <stdint.h>
+uint8_t space(uint8_t);
+int64_t wide(int32_t, int64_t);
+int main(void) {
+  for (int c = 0; c < 256; c++)
+    if (space((uint8_t)c) != (c == 32 || c == 9 || c == 10 || c == 13)) return 1;
+  static const int32_t xs[4] = {-5, 0, 7, -2147483647 - 1};
+  for (int k = 0; k < 4; k++)
+    if (wide(xs[k], 1000000000000ll) != 3000000000000ll + xs[k]) return 2;
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
 // An `or` reduction whose uses test it against 0 alone is wasm32's `v128.any_true` (`truth_only`): `@has`
 // branches on it through a folded comparison. `@bits` returns the reduction, which keeps every bit. Both
 // give the C results.
@@ -10589,7 +10720,7 @@ int main(void) {
 // A select of a value and that value plus 1 is the value plus the condition on wasm32 (`lv::FOLD_SINC`):
 // `@up` is local.get 0, local.get 0, local.get 1, i32.lt_u, i32.add; `@down` takes the sum on its false side
 // (the condition inverted) and `@up64` widens the condition; `@nz`'s test with 0 adds 1, not the tested
-// value. All give the C results.
+// value, and `@raw`'s condition, any nonzero byte, stays a select. All give the C results.
 @test
 fn selects_of_a_value_and_its_increment_add_the_condition() {
     let lir = M"(lir ptr 8
@@ -10597,6 +10728,7 @@ sym @up fn global
 sym @down fn global
 sym @up64 fn global
 sym @nz fn global
+sym @raw fn global
 fn @up
   sig (i32, i32) -> i32
 b0(v0: i32, v1: i32):
@@ -10630,6 +10762,13 @@ b0(v0: i32, v1: i32):
   v5 = add.i32 v0, v2
   v6 = select.i32 v4, v5, v0
   ret v6
+fn @raw
+  sig (i32, i8) -> i32
+b0(v0: i32, v1: i8):
+  v2 = iconst.i32 1
+  v3 = add.i32 v0, v2
+  v4 = select.i32 v1, v3, v0
+  ret v4
 )";
     let mut obj = Vector::<u8>::new();
     let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
@@ -10644,6 +10783,7 @@ int32_t up(int32_t, int32_t);
 int32_t down(int32_t, int32_t);
 int64_t up64(int64_t, int64_t);
 int32_t nz(int32_t, int32_t);
+int32_t raw(int32_t, int8_t);
 int main(void) {
   static const int32_t v[5] = {-2147483647 - 1, -1, 0, 5, 2147483647};
   for (int i = 0; i < 5; i++)
@@ -10653,6 +10793,7 @@ int main(void) {
       if (down(x, y) != (x < y ? x : (int32_t)((uint32_t)x + 1))) return 2;
       if (up64(x, y) != (x != y ? (int64_t)x + 1 : (int64_t)x)) return 3;
       if (nz(x, y) != (y != 0 ? (int32_t)((uint32_t)x + 1) : x)) return 4;
+      if (raw(x, (int8_t)k) != (k != 0 ? (int32_t)((uint32_t)x + 1) : x)) return 5;
     }
   return 0;
 }

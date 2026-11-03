@@ -45,6 +45,15 @@ pub(package) const FOLD_BLEN: u64 = 8192;
 /// A select between a value and that value plus 1, the sum read only there: the sum folds in (wasm32's
 /// `x + c`).
 pub(package) const FOLD_SINC: u64 = 274877906944;
+/// A zero extension of an integer of 32 bits or fewer, or a sign extension of a 32-bit one, to 64 bits that
+/// one instruction of its block reads: that instruction extends its operand (wasm32's `i64.extend_i32_*` at
+/// the use, no local; a narrow integer's location holds it zero-extended).
+pub(package) const FOLD_WIDEN: u64 = 549755813888;
+/// A store's value that one instruction of its block makes and only the store reads: an integer operation
+/// that cannot trap (no division) or a scalar load, whose operands are parameters, constants, values of
+/// more uses or (for the operation) such loads, no instruction between a load and the store writing memory.
+/// The store computes it after its address (wasm32's tree order: no local between).
+pub(package) const FOLD_SINK: u64 = 1099511627776;
 pub(package) const FOLD_CARRY: u64 = 16384;
 pub(package) const FOLD_FSEL: u64 = 32768;
 pub(package) const FOLD_NOT: u64 = 65536;
@@ -109,7 +118,9 @@ pub(package) const FOLD_ZSHL: u64 = 17179869184;
 /// `FOLD_FREE_ZEXT`: a zero extension of an 8- or 16-bit integer to 16 or 32 bits, for a target that keeps
 /// every narrow integer zero-extended in a 32-bit location (wasm): each use reads its operand. So does a
 /// truncation of such a location to 8 or 16 bits whose operand fits (`fits_low`), or that only select
-/// sides read where the condition bounds the operand (`bounded_side`).
+/// sides read where the condition bounds the operand (`bounded_side`), or only `and`s with another value
+/// of its type that is no truncation (zero-extended, it clears the bits above); of a 64-bit integer, for
+/// those `and`s, each use reads its operand's low word.
 pub(package) const FOLD_FREE_ZEXT: u64 = 68719476736;
 /// `FOLD_VSAD`: an unsigned absolute difference of byte vectors (`vop` `SIMD_ABS_DIFF`) that one widening
 /// sum into 8-byte lanes (`O_VSUMW`) alone reads folds into it: the sum takes the two vectors (x86-64
@@ -214,6 +225,7 @@ pub(package) struct Live {
     pub(package) fold_max: u32,
     pub(package) fold: Vector<bool>,
     pub(package) pfold: Vector<bool>,
+    pub(package) sunk: Vector<bool>, // per instruction, a store computes it after its address (`FOLD_SINK`)
     pub(package) carry: Vector<u8>, // per instruction, its CARRY_* part of a `FOLD_ADC` sum
     /// Per instruction, the comparisons of the `and` or `or` of flags it is when `FOLD_CCMP` folds them into
     /// conditional comparisons (`folds`), else 0.
@@ -232,6 +244,7 @@ pub(package) struct Live {
     /// signedness (Apple arm64), so their registers' low 32 bits are their values extended.
     pub(package) ext_args: bool,
     cnd: Vector<u32>, // `folds`' scratch: per instruction, its uses as a condition
+    andu: Vector<u32>, // `folds`' scratch: per instruction, its uses as an operand of a narrow `and`
     // `plan`'s scratch: per layout position its first instruction's ordinal; per block its frequency; per
     // value its range's first and last ordinals, its weight and its uses by instructions and edges; the
     // candidates by start, the values holding a register, and the count per file and home.
@@ -284,6 +297,7 @@ extend Live {
             fold_max: 0,
             fold: Vector::<bool>::new(),
             pfold: Vector::<bool>::new(),
+            sunk: Vector::<bool>::new(),
             carry: Vector::<u8>::new(),
             conj: Vector::<u8>::new(),
             relay: Vector::<u32>::new(),
@@ -291,6 +305,7 @@ extend Live {
             fold_ops: 0,
             ext_args: false,
             cnd: Vector::<u32>::new(),
+            andu: Vector::<u32>::new(),
             base: Vector::<u32>::new(),
             freq: Vector::<u64>::new(),
             start: Vector::<u32>::new(),
@@ -533,6 +548,116 @@ extend Live {
 
     // `FOLD_SHAMT`: a 32- or 64-bit shift's count that an `and` with the width's mask (`& 31`, `& 63`) makes,
     // read only there, folds into the shift, which takes the count modulo the width.
+    // `FOLD_SINK`: the values stores compute after their addresses (`sinkable`).
+    fn sinks(self: &mut Self, b: &Body) {
+        if (self.fold_ops & FOLD_SINK) == 0 {
+            return;
+        }
+        for k in 0..b.blocks.len() {
+            if self.rpo[k] == NONE {
+                continue;
+            }
+            let bk = b.blocks[k];
+            for s in bk.start..bk.start + bk.len {
+                let st = b.insts[s as usize];
+                if st.op != O_STORE || !self.sinkable(b, st.b, bk.start, s, 2) {
+                    continue;
+                }
+                let v = st.b;
+                self.pfold[v as usize] = true;
+                self.sunk[v as usize] = true;
+                let t = b.insts[v as usize];
+                if t.op != O_LOAD {
+                    for o in [t.a, t.b] {
+                        if self.sinkable(b, o, bk.start, s, 1) {
+                            self.pfold[o as usize] = true;
+                            self.sunk[o as usize] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Whether value `v` may move to store `s` of the block from `lo` (`FOLD_SINK`): one instruction there that
+    // only the store reads, a load (`depth` 1 or 2) or an operation (`depth` 2) whose operands stay where they
+    // are or are such loads.
+    fn sinkable(self: &Self, b: &Body, v: Value, lo: u32, s: u32, depth: u32) bool {
+        if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || v < lo || v >= s || self.count[v as usize] != 1 || self.pfold[v as usize] {
+            return false;
+        }
+        let t = b.insts[v as usize];
+        if !is_int(t.ty) || t.ty == T_I128 {
+            return false;
+        }
+        if t.op == O_LOAD {
+            if (t.aux & MEM_VOLATILE) != 0 || !self.stays(b, t.a) {
+                return false;
+            }
+            for j in v + 1..s {
+                if writes_memory(b.insts[j as usize]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        let un = t.op == O_NEG || t.op == O_NOT;
+        if depth < 2 || !un && (t.op < O_ADD || t.op > O_ASHR || t.op >= O_SDIV && t.op <= O_UREM) {
+            return false;
+        }
+        return (self.stays(b, t.a) || self.sinkable(b, t.a, lo, s, 1)) && (un || self.stays(b, t.b) || self.sinkable(
+            b,
+            t.b,
+            lo,
+            s,
+            1,
+        ));
+    }
+
+    // Whether value `v` is read where it is (`sinkable`): a parameter, a constant or an address, a value of
+    // more uses, or a folded one.
+    fn stays(self: &Self, b: &Body, v: Value) bool {
+        if (v & VPARAM) != 0 {
+            return (v & VFLAG) == 0;
+        }
+        if v == VNONE || (v & VFLAG) != 0 {
+            return false;
+        }
+        let op = b.insts[v as usize].op;
+        return op == O_ICONST || op == O_SYMADDR || op == O_SLOTADDR || self.count[v as usize] > 1 || self.pfold[v as usize];
+    }
+
+    // `FOLD_WIDEN`: the extensions of 32-bit integers to 64 bits that one instruction of their own block reads.
+    fn widenings(self: &mut Self, b: &Body) {
+        if (self.fold_ops & FOLD_WIDEN) == 0 {
+            return;
+        }
+        let mut us = Vector::<Value>::new();
+        for k in 0..b.blocks.len() {
+            if self.rpo[k] == NONE {
+                continue;
+            }
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                each_use(b, b.insts[i as usize], &mut us);
+                for q in 0..us.len() {
+                    let x = us[q];
+                    if (x & (VPARAM | VFLAG)) != 0 || x == VNONE || x < bk.start || x >= i || self.count[x as usize] != 1 || self.pfold[x as usize] {
+                        continue;
+                    }
+                    let e = b.insts[x as usize];
+                    if e.ty != T_I64 || e.op != O_ZEXT && e.op != O_SEXT {
+                        continue;
+                    }
+                    let ft = b.type_of(e.a);
+                    if e.op == O_ZEXT && (ft == T_I8 || ft == T_I16 || ft == T_I32) || ft == T_I32 {
+                        self.pfold[x as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+
     fn shift_counts(self: &mut Self, b: &Body) {
         if (self.fold_ops & FOLD_SHAMT) == 0 {
             return;
@@ -560,6 +685,8 @@ extend Live {
         self.fold.resize_default(ni);
         self.pfold.truncate(0);
         self.pfold.resize_default(ni);
+        self.sunk.truncate(0);
+        self.sunk.resize_default(ni);
         fill(&mut self.conj, ni, 0);
         fill(&mut self.carry, ni, CARRY_NONE);
         if self.fold_max == 0 && self.fold_ops == 0 {
@@ -799,6 +926,7 @@ extend Live {
         if (self.fold_ops & FOLD_FREE_ZEXT) != 0 {
             // A truncation's uses as a select's side its condition bounds (`bounded_side`).
             fill(&mut self.cnd, ni, 0);
+            fill(&mut self.andu, ni, 0);
             for i in 0..ni {
                 let t = b.insts[i];
                 if t.op == O_SELECT && !is_vec(t.ty) {
@@ -807,6 +935,16 @@ extend Live {
                     }
                     if bounded_side(b, t.a, t.c, false) {
                         self.cnd[t.c as usize] += 1;
+                    }
+                }
+                // An `and` of two narrow values clears the bits above in one when the other is no truncation
+                // (which may keep them, folded).
+                if t.op == O_AND && (t.ty == T_I8 || t.ty == T_I16) && t.a != t.b {
+                    for (x, y) in [(t.a, t.b), (t.b, t.a)] {
+                        let trunc = (y & (VPARAM | VFLAG)) == 0 && y != VNONE && b.insts[y as usize].op == O_TRUNC;
+                        if (x & (VPARAM | VFLAG)) == 0 && x != VNONE && !trunc {
+                            self.andu[x as usize] += 1;
+                        }
                     }
                 }
             }
@@ -820,16 +958,21 @@ extend Live {
                     self.pfold[i] = true;
                 }
                 if t.op == O_TRUNC && (t.ty == T_I8 || t.ty == T_I16) && (ft == T_I16 || ft == T_I32) && ft != t.ty {
-                    self.pfold[i] = self.count[i] != 0 && (self.cnd[i] == self.count[i] || fits_low(
+                    self.pfold[i] = self.count[i] != 0 && (self.cnd[i] == self.count[i] || self.andu[i] == self.count[i] || fits_low(
                         b,
                         t.a,
                         type_mask(t.ty),
                         FITS_DEPTH,
                     ));
                 }
+                if t.op == O_TRUNC && (t.ty == T_I8 || t.ty == T_I16) && ft == T_I64 {
+                    self.pfold[i] = self.count[i] != 0 && self.andu[i] == self.count[i];
+                }
             }
         }
         self.select_incs(b);
+        self.widenings(b);
+        self.sinks(b);
         if self.fold_max == 0 {
             self.shift_counts(b);
             return;
@@ -3391,8 +3534,13 @@ pub(package) fn shl_source(b: &Body, pfold: &Vector<bool>, v: Value) Value {
 }
 
 /// For select `t`, the side that is the other plus 1 (an `add` of it and constant 1): 1 for its true side, 2
-/// for its false side, 0 when neither is.
+/// for its false side, 0 when neither is or when the condition may be other than 0 or 1 (neither a comparison
+/// nor a flag: a select reads any nonzero value as true).
 pub(package) fn inc_side(b: &Body, t: Inst) u8 {
+    let c = t.a;
+    if (c & VPARAM) != 0 || (c & VFLAG) == 0 && b.insts[c as usize].op != O_ICMP {
+        return 0;
+    }
     for q in 0..2u8 {
         let (s, o) = if q == 0 {
             (t.b, t.c)

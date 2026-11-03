@@ -471,7 +471,7 @@ extend Gen {
         }
         intrin::of_symbols(self.p(), b, "wasm32", &mut self.itpl);
         // A shift's count masked to the width is the shift's own (wasm shifts take the count modulo it).
-        self.lv.fold_ops = lv::FOLD_FREE_ZEXT | lv::FOLD_CMP | lv::FOLD_SHAMT | lv::FOLD_SINC;
+        self.lv.fold_ops = lv::FOLD_FREE_ZEXT | lv::FOLD_CMP | lv::FOLD_SHAMT | lv::FOLD_SINC | lv::FOLD_WIDEN | lv::FOLD_SINK;
         self.lv.run(b);
         self.sh.run(b, &self.lv);
         wa::classify(b, b.sig, self.vregs, &mut self.me);
@@ -1641,13 +1641,26 @@ extend Gen {
             return;
         }
         // A comparison only conditions read (`lv::FOLD_CMP`); a zero extension or a truncation the locals
-        // hold so already (`lv::FOLD_FREE_ZEXT`).
+        // hold so already, a 64-bit value's truncation its low word (`lv::FOLD_FREE_ZEXT`); an extension to
+        // 64 bits at its use (`lv::FOLD_WIDEN`).
         if (v & (VPARAM | VFLAG)) == 0 && self.lv.pfold[v as usize] {
             let t = self.b().insts[v as usize];
             if t.op == O_ICMP {
                 self.cmp_push(t, t.aux, true);
+            } else if self.lv.sunk[v as usize] {
+                // A store's value it computes after its address (`lv::FOLD_SINK`).
+                if t.op == O_LOAD {
+                    self.load_push(t);
+                } else {
+                    self.int_push(t);
+                }
             } else {
                 self.get(t.a);
+                if t.ty == T_I64 && (t.op == O_ZEXT || t.op == O_SEXT) {
+                    self.c.op(pick8(t.op == O_ZEXT, w::I64_EXTEND_I32_U, w::I64_EXTEND_I32_S));
+                } else if t.op == O_TRUNC && self.vt(t.a) == T_I64 {
+                    self.c.op(w::I32_WRAP_I64);
+                }
             }
             return;
         }
@@ -2127,6 +2140,13 @@ extend Gen {
 
     // The scalar integer operations O_ADD .. O_NOT.
     fn int_op(self: &mut Self, i: u32, t: Inst) bool {
+        self.int_push(t);
+        self.put(i);
+        return true;
+    }
+
+    // Push the value of integer operation `t`.
+    fn int_push(self: &mut Self, t: Inst) {
         let op = t.op;
         let ty = t.ty;
         let wide = ty == T_I64;
@@ -2194,8 +2214,6 @@ extend Gen {
         if !wide && !keeps {
             self.canon(ty);
         }
-        self.put(i);
-        return true;
     }
 
     // The high half of a product (`O_MULHU`, `O_MULHS`): up to 32 bits, the extended operands' 64-bit
@@ -3460,17 +3478,21 @@ extend Gen {
             self.copy_mem(self.fp, self.home[i as usize], a, 0, type_bytes(t.ty, 4));
             return true;
         }
-        if off >= 0 {
-            self.get(t.a);
-            self.load_al(t.ty, off as u32, al);
-        } else {
-            self.get(t.a);
-            self.c.i32_const(off);
-            self.c.op(w::I32_ADD);
-            self.load_al(t.ty, 0, al);
-        }
+        self.load_push(t);
         self.put(i);
         return true;
+    }
+
+    // Push the value of scalar load `t`.
+    fn load_push(self: &mut Self, t: Inst) {
+        let off = t.c as i32;
+        let al = (t.aux & 15) as u32;
+        self.get(t.a);
+        if off < 0 {
+            self.c.i32_const(off);
+            self.c.op(w::I32_ADD);
+        }
+        self.load_al(t.ty, pick32(off < 0, 0, off as u32), al);
     }
 
     // Local `a` = the address in `v` plus `off`.
