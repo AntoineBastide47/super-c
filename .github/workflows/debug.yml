@@ -3,7 +3,7 @@
 # the file. Current probe: the code generation benchmarks (bench/codegen), each kernel as Super-C
 # compiles it against the same kernel compiled by clang -O2, on Linux x86-64 (3 runners), Linux arm64
 # and Windows x86-64 (2 runners); then the same benchmarks built by the latest release's compiler (the "before").
-# No test suite runs.
+# The test suite runs on Windows x86-64 alone (3 shards), where the code generator's Microsoft x64 paths run.
 name: Debug
 on:
   workflow_dispatch
@@ -70,6 +70,40 @@ jobs:
         run: |
           rm -rf build/bench
           "./super-c-boot${BINEXT:-}" bench --filter=codegen_
+
+  # The test suite on Windows x86-64, with this tree's compiler, in 3 shards.
+  test-windows:
+    name: test (windows ${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/3", "2/3", "3/3"]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: windows
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: windows
+
+      - name: Build the compiler
+        run: |
+          set -eu
+          "./super-c-boot${BINEXT:-}" build --bootstrap-tags
+          [ -f "./super-c${BINEXT:-}" ] || mv ./super-c "./super-c${BINEXT:-}"
+
+      - name: Run the test suite
+        run: |
+          set -eu
+          SC_LEAK_CHECK=fatal "./super-c${BINEXT:-}" test --quiet --test-shard=${{ matrix.shard }}
 
   # Linux arm64: no release ships a Linux arm64 compiler, so the x86-64 runner cross-builds this tree's
   # compiler against the arm64 C library, and the arm64 runner benchmarks with it.

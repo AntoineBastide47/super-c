@@ -225,7 +225,9 @@ pub(package) struct Opt {
     unbiased: Map<u32, u32>, // per indexed address with an offset, the address without it (`visit`)
     merged: bool, // the last rebuild merged blocks
     selected: bool, // the last walk made selects (`diamond`), which no walk simplified
-    refold: bool, // the last walk folded a value its readers saw before (`null_test`, `merge_exits`)
+    // The last walk folded a value its readers saw before (`null_test`, `merge_exits`), or made instructions
+    // it did not visit (`copysign_bits`).
+    refold: bool,
     rethru: bool, // `thread` made a jump a return (`ret_folded`)
     // The last walk dropped a store in a loop, whose loads may leave it now, or one before a call, whose
     // loads may move past it (`sink_load`).
@@ -6453,6 +6455,8 @@ extend Opt {
             return true;
         } else if t.op == O_CALL && call_alloc(pk, b, t) == ALLOC_MEMCMP && self.memcmp_eq(pk, b, k, i) {
             return true;
+        } else if t.op == O_CALL && self.copysign_bits(pk, b, k, i) {
+            return true;
         } else if t.op == O_CALL && t.ty != T_NONE && (pk.syms[b.syms[t.a as usize] as usize].fx & (FX_WRITE | FX_ARG)) == 0 {
             // A call of a function that writes no memory gives what an earlier one with the same
             // arguments gave, when it reads none either, or none was written since (the untagged
@@ -8401,6 +8405,43 @@ extend Opt {
     // than the overlapping ones (5 bytes as 4 and 1, 7 as two overlapping 4), a narrower pair extended to
     // the widest. Another is the order of the first pair that differs, compared as big-endian
     // numbers (`Package.bswap`). A load of read-only data folds to its constant. Whether it did.
+    // Call `i` of block `k` of C's `copysign` or `copysignf`: the magnitude's bits and the sign's bit, in
+    // integer operations every target computes in registers and the vectorizer widens.
+    fn copysign_bits(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        if t.aux != 2 || t.ty != T_F64 && t.ty != T_F32 {
+            return false;
+        }
+        let s = pk.syms[b.syms[t.a as usize] as usize];
+        let n = pk.spell(s.name);
+        let want = if t.ty == T_F64 {
+            "copysign"
+        } else {
+            "copysignf"
+        };
+        if s.kind != SK_FUNC || s.def != NONE || n != want {
+            return false;
+        }
+        let (it, sign) = if t.ty == T_F64 {
+            (T_I64, 1u64 << 63)
+        } else {
+            (T_I32, 1u64 << 31)
+        };
+        let x = self.val(b.pool[t.c as usize]);
+        let y = self.val(b.pool[t.c as usize + 1]);
+        let xb = self.made(pk, b, k, i, Inst { op: O_BITCAST, ty: it, aux: 0, a: x, b: VNONE, c: VNONE });
+        let yb = self.made(pk, b, k, i, Inst { op: O_BITCAST, ty: it, aux: 0, a: y, b: VNONE, c: VNONE });
+        let mag = self.constant(b, it, sign - 1);
+        let sgn = self.constant(b, it, sign);
+        let xa = self.made(pk, b, k, i, Inst { op: O_AND, ty: it, aux: 0, a: xb, b: mag, c: VNONE });
+        let ya = self.made(pk, b, k, i, Inst { op: O_AND, ty: it, aux: 0, a: yb, b: sgn, c: VNONE });
+        let o = self.made(pk, b, k, i, Inst { op: O_OR, ty: it, aux: 0, a: xa, b: ya, c: VNONE });
+        b.insts[i as usize] = Inst { op: O_BITCAST, ty: t.ty, aux: 0, a: o, b: VNONE, c: VNONE };
+        // The next walk hoists what the loop does not change, before the loop transforms read it.
+        self.refold = true;
+        return true;
+    }
+
     fn memcmp_eq(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
         let bk = b.blocks[k as usize];
@@ -12076,6 +12117,13 @@ const UMAX_DEPTH: u32 = 4;
 // Whether unsigned compare `t` of `b` (pointers `ptr` bytes) of an integer and a constant holds whatever the
 // integer is, from the largest value it can hold (`umax_of`); None when that does not settle it.
 const fn umax_cmp(b: &Body, t: Inst, ptr: u32) Option<bool> {
+    // The unsigned minimum of two values is at most each (`umin_of`): `min(x, y) <= y`, `y < min(x, y)`.
+    if t.aux == C_ULE && umin_of(b, t.a, t.b) || t.aux == C_UGE && umin_of(b, t.b, t.a) {
+        return Some(true);
+    }
+    if t.aux == C_UGT && umin_of(b, t.a, t.b) || t.aux == C_ULT && umin_of(b, t.b, t.a) {
+        return Some(false);
+    }
     let ty = b.type_of(t.a);
     let ka = const_of(b, t.a);
     let kb = const_of(b, t.b);
@@ -12106,6 +12154,20 @@ const fn umax_cmp(b: &Body, t: Inst, ptr: u32) Option<bool> {
     return None;
 }
 
+// Whether value `v` of `b` is the unsigned minimum of `w` and another value: `select(x <u y, x, y)` (or
+// `<=u`) with `w` one of `x` and `y`.
+const fn umin_of(b: &Body, v: Value, w: Value) bool {
+    if (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SELECT {
+        return false;
+    }
+    let s = b.insts[v as usize];
+    if (s.a & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let c = b.insts[s.a as usize];
+    return c.op == O_ICMP && (c.aux == C_ULT || c.aux == C_ULE) && c.a == s.b && c.b == s.c && (w == s.b || w == s.c);
+}
+
 // The `n` low bits set (`n` at most 64).
 const fn ones_below(n: u32) u64 {
     return if n >= 64 {
@@ -12116,8 +12178,8 @@ const fn ones_below(n: u32) u64 {
 }
 
 // The largest unsigned value integer `v` of `b` (pointers `ptr` bytes) can hold, from its form up to `depth`
-// instructions deep: a constant, a mask, a zero extension, a bit count, a quotient or a remainder, a right
-// shift; else its type's largest.
+// instructions deep: a constant, a mask, a zero extension, a select, a bit count, a quotient or a remainder,
+// a right shift, a view parameter's length; else its type's largest.
 const fn umax_of(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
     let all = ones_below(type_bits(b.type_of(v), ptr));
     let k = const_of(b, v);
@@ -12140,6 +12202,15 @@ const fn umax_of(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
     if t.op == O_ZEXT {
         return umax_of(b, t.a, ptr, depth - 1);
     }
+    if t.op == O_SELECT {
+        let x = umax_of(b, t.b, ptr, depth - 1);
+        let y = umax_of(b, t.c, ptr, depth - 1);
+        return if x > y {
+            x
+        } else {
+            y
+        };
+    }
     if t.op == O_CLZ || t.op == O_CTZ || t.op == O_POPCNT {
         return type_bits(b.type_of(t.a), ptr);
     }
@@ -12157,6 +12228,14 @@ const fn umax_of(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
         } else {
             x
         };
+    }
+    if t.op == O_LOAD && t.c == ptr && is_int(t.ty) && type_bytes(t.ty, ptr) == ptr && (t.aux & MEM_VOLATILE) == 0 {
+        // A view parameter's length (`REF_INNER`, its element's bytes in REF_BYTES): no object is larger than
+        // `isize::MAX` bytes.
+        let q = entry_param(b, t.a);
+        if q != NONE && q as usize < b.refs.len() && (b.refs[q as usize] & REF_INNER) != 0 && (b.refs[q as usize] & REF_BYTES) != 0 {
+            return (all >> 1) / (b.refs[q as usize] & REF_BYTES) as u64;
+        }
     }
     if t.op == O_UREM {
         // Below the divisor, which is not 0 when the remainder is computed.

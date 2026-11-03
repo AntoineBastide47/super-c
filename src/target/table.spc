@@ -67,8 +67,9 @@ pub(package) struct Isa {
     pub(package) post_index: bool,
     /// The largest aggregate a call passes by value through a copy the backend makes (in registers, or
     /// on the stack), so the caller may pass the address of any bytes equal to it
-    /// (`lir::ir::Package::arg_copy`): x86-64 copies each one, arm64 those of at most 16 bytes (a larger one
-    /// passes as its address), wasm none that passes as an address.
+    /// (`lir::ir::Package::arg_copy`): x86-64 copies each one (but under Microsoft x64, `CallConv.arg_copy`),
+    /// arm64 those of at most 16 bytes (a larger one passes as its address), wasm none that passes as an
+    /// address.
     pub(package) arg_copy: u32,
     /// The vector copies a vectorized loop interleaves on the target's cores but Apple's, which take 4
     /// (`lir::loops::Budgets.vector`): 2 on arm64 (Neoverse) and wasm32 (each copy is code size, which a
@@ -122,6 +123,9 @@ pub(package) struct CallConv {
     pub(package) vector_copies: u8,
     /// A homogeneous float aggregate passes one element per register (`lir::ir::Package::hfa_regs`).
     pub(package) hfa_regs: bool,
+    /// The largest aggregate the backend copies, 0 for the instruction set's (`Isa.arg_copy`): 8 under
+    /// Microsoft x64, which passes a larger one as its address (`lir::ir::Package::arg_copy`).
+    pub(package) arg_copy: u32,
 }
 
 /// An object format: the object writer, relocations, section names and the linker.
@@ -332,12 +336,12 @@ pub(package) const ISAS: [Isa; 3] = [
 ];
 
 pub(package) const CALLCONVS: [CallConv; 6] = [
-    CallConv { name: "sysv", va_list_bytes: 24, vector_copies: 0, hfa_regs: false },
-    CallConv { name: "win64", va_list_bytes: 8, vector_copies: 2, hfa_regs: false },
-    CallConv { name: "aapcs64", va_list_bytes: 32, vector_copies: 0, hfa_regs: true },
-    CallConv { name: "apple-aapcs64", va_list_bytes: 8, vector_copies: 0, hfa_regs: true },
-    CallConv { name: "win-aapcs64", va_list_bytes: 8, vector_copies: 0, hfa_regs: true },
-    CallConv { name: "wasm-c", va_list_bytes: 4, vector_copies: 0, hfa_regs: false },
+    CallConv { name: "sysv", va_list_bytes: 24, vector_copies: 0, hfa_regs: false, arg_copy: 0 },
+    CallConv { name: "win64", va_list_bytes: 8, vector_copies: 2, hfa_regs: false, arg_copy: 8 },
+    CallConv { name: "aapcs64", va_list_bytes: 32, vector_copies: 0, hfa_regs: true, arg_copy: 0 },
+    CallConv { name: "apple-aapcs64", va_list_bytes: 8, vector_copies: 0, hfa_regs: true, arg_copy: 0 },
+    CallConv { name: "win-aapcs64", va_list_bytes: 8, vector_copies: 0, hfa_regs: true, arg_copy: 0 },
+    CallConv { name: "wasm-c", va_list_bytes: 4, vector_copies: 0, hfa_regs: false, arg_copy: 0 },
 ];
 
 pub(package) const OBJFORMATS: [ObjFormat; 4] = [

@@ -215,6 +215,68 @@ fn a_constant_every_call_passes_makes_a_copy_without_it() {
     assert(s.ok() && c.contains("sig (i32) -> i32"), "the recursion's copy takes the count alone");
 }
 
+// A view's length is at most `isize::MAX` over its element's bytes (`ref p0 4 inner`), so it never passes
+// `usize::MAX - 8`; a length of an element size unknown (`ref p1 0 inner`) may. The minimum of two values is
+// at most each, and a select is at most the larger of its sides: `min(len0, len2) <= usize::MAX - 8`.
+@test
+fn view_lengths_and_minimums_settle_compares() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @lens fn global noinline
+sym @drive fn global
+fn @lens
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0, l0, l0) -> i8
+  ref p0 4 inner readonly
+  ref p1 0 inner readonly
+  ref p2 8 inner readonly
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.i64 v0+8 align 3
+  v4 = load.i64 v1+8 align 3
+  v5 = load.i64 v2+8 align 3
+  v6 = iconst.i64 -9
+  v7 = icmp.ugt v3, v6
+  v8 = icmp.ugt v4, v6
+  v9 = icmp.ult v3, v4
+  v10 = select.i64 v9, v3, v4
+  v11 = icmp.ule v10, v4
+  v12 = icmp.ult v3, v5
+  v13 = select.i64 v12, v3, v5
+  v14 = icmp.ule v13, v6
+  v15 = xor.i8 v7, v8
+  v16 = and.i8 v15, v11
+  v17 = and.i8 v16, v14
+  ret v17
+fn @drive
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig () -> i64
+  slot s0 size 16 align 3
+  slot s1 size 16 align 3
+b0:
+  v0 = slotaddr s0
+  v1 = slotaddr s1
+  v2 = iconst.i64 0
+  v3 = iconst.i64 3
+  v4 = iconst.i64 -1
+  store v2, v0 align 3
+  store v3, v0+8 align 3
+  store v2, v1 align 3
+  store v4, v1+8 align 3
+  v5 = call.i8 @lens(v0, v1, v0) : (l0, l0, l0) -> i8
+  v6 = call.i8 @lens(v0, v0, v0) : (l0, l0, l0) -> i8
+  v7 = zext.i64 v5
+  v8 = zext.i64 v6
+  v9 = add.i64 v7, v7
+  v10 = add.i64 v9, v8
+  ret v10
+)",
+    );
+    let l = text_of(&a, "lens");
+    assert(count_of(&l, "icmp.ugt") == 1 && count_of(&l, "icmp.ule") == 0 && count_of(&l, "select") == 0, l.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 2);
+}
+
 // A tail recursion over a slice whose every call passes one constant accumulator: its copy without it
 // (`drop_params`, whose entry jumps to the old one) still copies the slice into a slot (`param_slots`), so
 // its loop carries the slice in registers and stores nothing.

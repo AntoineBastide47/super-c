@@ -188,7 +188,7 @@ fn main() i32 {
     assert(r.ok(), "the program builds and returns 0");
     let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
     assert(head_of(&text, "main__pair_sum").contains("ref p0 24 readonly"), text.as_str());
-    assert(head_of(&text, "main__text_len").contains("ref p0 0 inner readonly"), text.as_str());
+    assert(head_of(&text, "main__text_len").contains("ref p0 1 inner readonly"), text.as_str());
     assert(!head_of(&text, "main__counted").contains("readonly"), text.as_str());
 }
 

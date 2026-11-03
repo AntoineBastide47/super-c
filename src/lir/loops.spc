@@ -2672,6 +2672,16 @@ extend LoopOpt {
         ) && self.lane_size(value_type(b, t.a), ptr) && self.lane_size(t.ty, ptr) {
             return self.lane_operands(b, u, t, true);
         }
+        // An integer's or a float's bits as the other of one size: the vector register's bits as they are.
+        if op == O_BITCAST && (is_int(t.ty) && t.ty != T_I128 || is_float(t.ty)) && (is_int(value_type(b, t.a)) && value_type(
+            b,
+            t.a,
+        ) != T_I128 || is_float(value_type(b, t.a))) && type_bytes(t.ty, ptr) == type_bytes(value_type(b, t.a), ptr) && self.lane_size(
+            t.ty,
+            ptr,
+        ) {
+            return self.lane_operands(b, u, t, true);
+        }
         // An integer constant in the body (`cond_step`'s 0): one value for every lane, made before the loop.
         if op == O_ICONST && is_int(t.ty) && t.ty != T_I128 {
             return if self.lane_size(t.ty, ptr) {

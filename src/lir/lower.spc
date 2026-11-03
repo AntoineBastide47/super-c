@@ -2665,15 +2665,22 @@ extend Lower {
         if !self.named_field(c, rm, rt, "ptr", &mut f) || f.off != 0 {
             return 0;
         }
-        if excl {
-            return REF_INNER | REF_NOALIAS;
-        }
-        // The element type: the pointer's.
+        // The element type: the pointer's. Its size, when it has one, bounds the length (no object is larger
+        // than `isize::MAX` bytes): REF_BYTES of a view.
         let mut pm = f.m;
         let mut pt = f.t;
         let py = Lower::resolved(c, f.m, f.t, &mut pm, &mut pt);
+        let mut ei = TyI { cls: 0, mty: T_NONE, size: 0, align: 1 };
+        let size = if py.kind == TypeKind::TYPE_POINTER && self.ty(c, pm, py.as_data.elem, &mut ei) && ei.cls != VC_ZST && ei.size <= REF_BYTES {
+            ei.size
+        } else {
+            0u32
+        };
+        if excl {
+            return REF_INNER | REF_NOALIAS | size;
+        }
         return if py.kind == TypeKind::TYPE_POINTER && self.frozen_top(c, pm, py.as_data.elem) {
-            REF_INNER | REF_READONLY
+            REF_INNER | REF_READONLY | size
         } else {
             0u32
         };

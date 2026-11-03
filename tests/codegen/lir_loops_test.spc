@@ -892,6 +892,163 @@ fn a_loop_dividing_by_a_constant_vectorizes() {
     }
 }
 
+// A float's bits as an integer of one size and back (C's `copysign`: the magnitude's bits, the sign's
+// bit) are the vector register's bits: the loop vectorizes. A call of `copysign` or `copysignf` becomes
+// those bits (`copysign_bits`), so its loop vectorizes too, and computes what the bits do. Each driver fills 128
+// doubles, copies the sign of `-1.0` onto the first `n`, and sums their bits times 31 each step.
+@test
+fn a_loop_of_float_bits_vectorizes() {
+    let src = M"(lir ptr 8
+sym @copysign fn global
+sym @copysignf fn global
+sym @cf fn global
+sym @k fn global noinline
+sym @kc fn global noinline
+sym @drive fn global
+sym @drivec fn global
+fn @k
+  sig (ptr, i64, f64) -> void
+b0(v0: ptr, v1: i64, v2: f64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 9223372036854775807
+  v6 = iconst.i64 -9223372036854775808
+  v7 = bitcast.i64 v2
+  v8 = and.i64 v7, v6
+  jmp b1(v3)
+b1(v9: i64):
+  v10 = icmp.ult v9, v1
+  br v10, b2, b3
+b2:
+  v11 = ptradd v0, v9 * 8
+  v12 = load.f64 v11 align 3
+  v13 = bitcast.i64 v12
+  v14 = and.i64 v13, v5
+  v15 = or.i64 v14, v8
+  v16 = bitcast.f64 v15
+  store v16, v11 align 3
+  v17 = add.i64 v9, v4
+  jmp b1(v17)
+b3:
+  ret
+fn @kc
+  sig (ptr, i64, f64) -> void
+b0(v0: ptr, v1: i64, v2: f64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v1
+  br v6, b2, b3
+b2:
+  v7 = ptradd v0, v5 * 8
+  v8 = load.f64 v7 align 3
+  v9 = call.f64 @copysign(v8, v2) : (f64, f64) -> f64
+  store v9, v7 align 3
+  v10 = add.i64 v5, v4
+  jmp b1(v10)
+b3:
+  ret
+fn @drive
+  sig (i64, i64) -> i64
+  slot s0 size 1024 align 4
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 128
+  v6 = iconst.i64 -7046029254386353131
+  v7 = iconst.i64 31
+  v8 = fconst.f64 0xbff0000000000000
+  jmp b1(v3, v1)
+b1(v9: i64, v10: i64):
+  v11 = icmp.ult v9, v5
+  br v11, b2, b3
+b2:
+  v12 = mul.i64 v10, v6
+  v13 = add.i64 v12, v1
+  v14 = ptradd v2, v9 * 8
+  store v13, v14 align 3
+  v15 = add.i64 v9, v4
+  jmp b1(v15, v13)
+b3:
+  call @k(v2, v0, v8) : (ptr, i64, f64) -> void
+  jmp b4(v3, v3)
+b4(v16: i64, v17: i64):
+  v18 = icmp.ult v16, v5
+  br v18, b5, b6
+b5:
+  v19 = ptradd v2, v16 * 8
+  v20 = load.i64 v19 align 3
+  v21 = mul.i64 v17, v7
+  v22 = add.i64 v21, v20
+  v23 = add.i64 v16, v4
+  jmp b4(v23, v22)
+b6:
+  ret v17
+fn @cf
+  sig (f32, f32) -> f32
+b0(v0: f32, v1: f32):
+  v2 = call.f32 @copysignf(v0, v1) : (f32, f32) -> f32
+  ret v2
+fn @drivec
+  sig (i64, i64) -> i64
+  slot s0 size 1024 align 4
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 128
+  v6 = iconst.i64 -7046029254386353131
+  v7 = iconst.i64 31
+  v8 = fconst.f64 0xbff0000000000000
+  jmp b1(v3, v1)
+b1(v9: i64, v10: i64):
+  v11 = icmp.ult v9, v5
+  br v11, b2, b3
+b2:
+  v12 = mul.i64 v10, v6
+  v13 = add.i64 v12, v1
+  v14 = ptradd v2, v9 * 8
+  store v13, v14 align 3
+  v15 = add.i64 v9, v4
+  jmp b1(v15, v13)
+b3:
+  call @kc(v2, v0, v8) : (ptr, i64, f64) -> void
+  jmp b4(v3, v3)
+b4(v16: i64, v17: i64):
+  v18 = icmp.ult v16, v5
+  br v18, b5, b6
+b5:
+  v19 = ptradd v2, v16 * 8
+  v20 = load.i64 v19 align 3
+  v21 = mul.i64 v17, v7
+  v22 = add.i64 v21, v20
+  v23 = add.i64 v16, v4
+  jmp b4(v23, v22)
+b6:
+  ret v17
+)";
+    let (b, a) = optimized(src, VECTOR);
+    for name in ["k", "kc"] {
+        let k = text_of(&a, name);
+        assert((k.contains("bitcast.v2i64") || k.contains("bitcast.v4i64")) && !k.contains("call"), k.as_str());
+    }
+    let lens: [u64; 5] = [0, 1, 5, 17, 128];
+    for n in lens {
+        let args: []u64 = [n, 0x5DEECE66D];
+        let want = run_value(&b, "drive", args);
+        same_outcome(&b, &a, "drive", args, want, false);
+        assert_eq(run_value(&a, "drivec", args), want);
+    }
+    // `copysignf`: 1.5 with the sign of -0.0 is -1.5; -1.5 with the sign of 2.0 is 1.5.
+    assert(!text_of(&a, "cf").contains("call"), text_of(&a, "cf").as_str());
+    let neg: []u64 = [0x3FC00000, 0x80000000];
+    let pos: []u64 = [0xBFC00000, 0x40000000];
+    assert_eq(run_value(&a, "cf", neg) & 0xFFFFFFFF, 0xBFC00000);
+    assert_eq(run_value(&a, "cf", pos) & 0xFFFFFFFF, 0x3FC00000);
+}
+
 // A loop of a 32-bit counter vectorizes where it indexes through its extension to 64 bits, which does not
 // wrap in the loop: a zero extension under `i <s n` from 0 or under `i <u n`, a sign extension under
 // `i <s n`. A sign extension under `i <u n`, a start below 0 and an extension the body also computes with

@@ -7380,7 +7380,19 @@ extend Gen {
             return false;
         }
         for k in 0..b.pool[t.b as usize] {
-            let passed = self.va[self.vx(b.pool[(t.c + k) as usize]) as usize].home == H_PASSED;
+            let a = b.pool[(t.c + k) as usize];
+            let passed = self.va[self.vx(a) as usize].home == H_PASSED;
+            // An aggregate passed by reference whose address is the caller's (an entry parameter but an
+            // aggregate that arrives in registers, which this frame holds) outlives the frame.
+            let q = if (a & VPARAM) != 0 && (a & ~VPARAM) >= e0 && (a & ~VPARAM) - e0 < b.pool[b.sig as usize] {
+                (a & ~VPARAM) - e0
+            } else {
+                NONE
+            };
+            let theirs = q != NONE && !((b.pool[(b.sig + 3 + q) as usize] & AGG) != 0 && self.self_lay.locs[q as usize].kind == ab::L_REG);
+            if self.lay.locs[k as usize].kind == ab::L_REF_REG && self.by_address(t.b, k) && theirs {
+                continue;
+            }
             if (b.pool[(t.b + 3 + k) as usize] & AGG) != 0 && !passed || self.lay.locs[k as usize].kind != ab::L_REG {
                 return false;
             }
@@ -7501,18 +7513,19 @@ extend Gen {
         let nops = np + ((rt & AGG) != 0) as u32;
         for k in 0..nops {
             let v = b.pool[(t.c + k) as usize];
-            if k == np || self.lay.locs[k as usize].kind != ab::L_REG || (b.pool[(sig + 3 + k) as usize] & AGG) != 0 {
+            let ref_agg = k < np && self.lay.locs[k as usize].kind == ab::L_REF_REG && self.by_address(sig, k);
+            if !ref_agg && (k == np || self.lay.locs[k as usize].kind != ab::L_REG || (b.pool[(sig + 3 + k) as usize] & AGG) != 0) {
                 other.push(self.vx(v));
             }
         }
         if t.op == O_CALLIND {
             other.push(self.vx(t.a));
         }
-        // The values read after the move: an aggregate's address passed by reference, the callee, the
-        // result's address.
+        // The values read after the move: a memory value passed by reference, the callee, the result's
+        // address. (An aggregate's address passed by reference moves with the scalars.)
         let mut late = Vector::<u32>::new();
         for k in 0..nops {
-            if k == np || self.lay.locs[k as usize].kind == ab::L_REF_REG {
+            if k == np || self.lay.locs[k as usize].kind == ab::L_REF_REG && !self.by_address(sig, k) {
                 late.push(self.vx(b.pool[(t.c + k) as usize]));
             }
         }
@@ -7552,10 +7565,10 @@ extend Gen {
                 keep.push(x);
                 continue;
             }
-            if !shared && loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) == 0 && (!in_mem(vty) || self.lay.whole_vreg(
-                loc,
+            let ref_agg = loc.kind == ab::L_REF_REG && self.by_address(sig, k);
+            if !shared && (ref_agg || loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) == 0 && (!in_mem(
                 vty,
-            )) && self.va[x as usize].reg != NOREG {
+            ) || self.lay.whole_vreg(loc, vty))) && self.va[x as usize].reg != NOREG {
                 keep.push(x);
             }
         }
@@ -7614,8 +7627,13 @@ extend Gen {
         for k in 0..np {
             let loc = self.lay.locs[k as usize];
             if loc.kind == ab::L_REF_STACK {
-                let at = self.ref_copy(b.pool[(t.c + k) as usize], b.pool[(sig + 3 + k) as usize]);
-                self.c.lea(S0, x::at(x::RSP, at));
+                if self.by_address(sig, k) {
+                    // An aggregate's address as it is (`L_REF_REG`'s rule).
+                    self.materialize(b.pool[(t.c + k) as usize], S0);
+                } else {
+                    let at = self.ref_copy(b.pool[(t.c + k) as usize], b.pool[(sig + 3 + k) as usize]);
+                    self.c.lea(S0, x::at(x::RSP, at));
+                }
                 self.c.store(8, S0, x::at(x::RSP, loc.off as i32));
                 continue;
             }
@@ -7726,6 +7744,25 @@ extend Gen {
                 relayed[k as usize] = true;
                 continue;
             }
+            if loc.kind == ab::L_REF_REG && self.by_address(sig, k) {
+                // An aggregate's address passed by reference: a scalar of the move, but a frame address,
+                // which the argument loop makes.
+                let src = self.loc_of(self.vx(v));
+                if src.kind != LC_VAL {
+                    let pa = self.lay.parts[loc.p0 as usize];
+                    self.mv.push(
+                        Mv {
+                            src: src,
+                            dst: Lc { kind: LC_REG, reg: pa.reg, off: 0, val: NONE },
+                            v: false,
+                            bytes: 8,
+                            done: false,
+                        },
+                    );
+                    relayed[k as usize] = true;
+                }
+                continue;
+            }
             if loc.kind != ab::L_REG || (b.pool[(sig + 3 + k) as usize] & AGG) != 0 || in_mem(vty) && !self.lay.whole_vreg(
                 loc,
                 vty,
@@ -7796,6 +7833,12 @@ extend Gen {
         for k in 0..np {
             let loc = self.lay.locs[k as usize];
             if relayed[k as usize] {
+                continue;
+            }
+            if loc.kind == ab::L_REF_REG && self.by_address(sig, k) {
+                // An aggregate's address passes as it is: the LIR copies a by-value argument that the callee
+                // may write (as `a64gen::ref_arg`).
+                self.materialize(b.pool[(t.c + k) as usize], self.lay.parts[loc.p0 as usize].reg);
                 continue;
             }
             if loc.kind == ab::L_REF_REG {
@@ -8008,6 +8051,16 @@ extend Gen {
         let at = self.slot_alloc(sz, 16);
         self.copy_mem(x::RSP, at, base, off, sz);
         return at as i32;
+    }
+
+    // Whether argument `k` of a call of signature `sig` passes as an aggregate's address as it is: one
+    // larger than the backend copies (`Package.arg_copy`), which the LIR copies when the callee may write
+    // it, and Microsoft x64 passes by reference.
+    const fn by_address(self: &Self, sig: u32, k: u32) bool {
+        let b = self.b();
+        let pt = b.pool[(sig + 3 + k) as usize];
+        let kd = self.lay.locs[k as usize].kind;
+        return (pt & AGG) != 0 && (kd == ab::L_REF_REG || kd == ab::L_REF_STACK) && b.pool[(pt & ~AGG) as usize] > unsafe (*self.pkg).arg_copy;
     }
 
     // A call of C function `name` with the integer or pointer values `vs` in the argument registers and

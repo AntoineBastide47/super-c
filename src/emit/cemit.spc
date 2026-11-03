@@ -618,7 +618,11 @@ extend CEmit {
             l.pkg.vucmp = tgt::isa(pk.arch).vector_ucmp;
             l.pkg.ccmp = tgt::isa(pk.arch).ccmp;
             l.pkg.postinc = tgt::isa(pk.arch).post_index;
-            l.pkg.arg_copy = tgt::isa(pk.arch).arg_copy;
+            l.pkg.arg_copy = if tgt::callconv_of(pk.build_target, pk.arch).arg_copy != 0 {
+                tgt::callconv_of(pk.build_target, pk.arch).arg_copy
+            } else {
+                tgt::isa(pk.arch).arg_copy
+            };
             l.pkg.hfa_regs = tgt::callconv_of(pk.build_target, pk.arch).hfa_regs;
             l.pkg.apairs = tgt::isa(pk.arch).access_pairs;
             l.pkg.sum_trees = tgt::isa(pk.arch).sum_trees;

@@ -176,6 +176,12 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.rcpc = (opts & RCPC) != 0;
     p.fma = (opts & FMA) != 0;
     p.bitrev = isa == tgt::axis_index("aarch64", true);
+    // The aggregates the backend copies, as a build sets them (`CEmit`).
+    p.arg_copy = if tgt::callconv_of(os, isa).arg_copy != 0 {
+        tgt::callconv_of(os, isa).arg_copy
+    } else {
+        tgt::isa(isa).arg_copy
+    };
     if (opts & WIDE) != 0 {
         p.vector = 32;
     }
@@ -10101,6 +10107,78 @@ b2: cold
     }
     let drv = "#include <stdint.h>\n#include <stdlib.h>\nint32_t q(int32_t, int32_t);\nvoid __sc_panic(const char *m) { (void)m; exit(7); }\nint main(void) {\n  if (q(17, 5) != 3) return 1;\n  q(1, 0);\n  return 2;\n}\n";
     assert_eq(run_native(src, drv), 7);
+}
+
+// Microsoft x64 passes an aggregate of 40 bytes by reference: the address the LIR passes goes as it is (the
+// LIR copies a by-value argument the callee may write). A read-only referent's (`@copyref`) is the caller's,
+// so the call is a sibling jump, the whole body (sibling calls on, no frame pointer); a slot of the frame
+// (`@local`) keeps the frame and a call. One of 6 bytes (`@smallref`), within the 8 the backend copies
+// (`Package.arg_copy`), passes as the address of a copy in the frame: a call.
+@test
+fn microsoft_x64_passes_an_aggregates_address_as_it_is() {
+    let src = M"(lir ptr 8
+sym @copyref fn global
+sym @smallref fn global
+sym @local fn global
+sym @take fn global noinline
+sym @take6 fn global noinline
+fn @copyref
+  layout l0 size 40 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64]
+  sig (ptr) -> i64
+  ref p0 40 readonly
+b0(v0: ptr):
+  v1 = call.i64 @take(v0) : (l0) -> i64
+  ret v1
+fn @smallref
+  layout l0 size 6 align 1 [0 i16, 2 i16, 4 i16]
+  sig (ptr) -> i64
+  ref p0 6 readonly
+b0(v0: ptr):
+  v1 = call.i64 @take6(v0) : (l0) -> i64
+  ret v1
+fn @local
+  layout l0 size 40 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64]
+  sig (i64) -> i64
+  slot s0 size 40 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3
+  store v0, v1+8 align 3
+  store v0, v1+16 align 3
+  store v0, v1+24 align 3
+  store v0, v1+32 align 3
+  v2 = call.i64 @take(v1) : (l0) -> i64
+  ret v2
+fn @take
+  layout l0 size 40 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64]
+  sig (l0) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  v2 = load.i64 v0+32 align 3
+  v3 = add.i64 v1, v2
+  ret v3
+fn @take6
+  layout l0 size 6 align 1 [0 i16, 2 i16, 4 i16]
+  sig (l0) -> i64
+b0(v0: ptr):
+  v1 = load.i16 v0 align 1
+  v2 = zext.i64 v1
+  ret v2
+)";
+    let mut win = Vector::<u8>::new();
+    assert(
+        object_of(src, tgt::axis_index("windows", false), tgt::axis_index("x86_64", true), OMIT_FP | TAIL, &mut win),
+        "the Microsoft x64 object",
+    );
+    let t = coff_section(&win, ".text");
+    let (n, at) = ((t >> 32) as u32, t as u32);
+    // `@copyref` first: `jmp rel32` (E9) at its start; `@smallref`'s and `@local`'s calls (E8 rel32) after.
+    assert(n > 5 && win[at as usize] == 0xE9, "a sibling jump is the whole of copyref");
+    let mut calls: u32 = 0;
+    for x in at..at + n - 5 {
+        calls += (win[x as usize] == 0xE8 && word_at(&win, x + 1, 4) == 0) as u32;
+    }
+    assert(calls == 2, "smallref and local call");
 }
 
 // Shrink-wrapped under Microsoft x64: the warm code, which keeps no frame, has no function table entry
