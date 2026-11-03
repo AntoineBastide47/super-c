@@ -2312,8 +2312,9 @@ int main(void) {
 // (local.get 0, i32.const 24, i32.shr_u, local.get 0, i32.const 8, i32.shl, i32.sub, end); `rev` reads
 // them the other way, so the first one made goes through its local. `comm`'s sum reads them the other way
 // too, but a sum reads either first: both stay (i32.shl, local.get 0, i32.const 24, i32.shr_u, i32.add).
-// `shm`'s count masked to 31 is the shift's own (`lv::FOLD_SHAMT`: its body local.get 0, local.get 1, i32.shl). All
-// give the C results.
+// `shm`'s count masked to 31 is the shift's own (`lv::FOLD_SHAMT`: its body local.get 0, local.get 1, i32.shl).
+// `qeq` compares two loads, then writes the second's local again inside an `if`: both stay on the stack, the
+// second's write a `local.tee`. All give the C results.
 @test
 fn values_read_in_order_stay_on_the_wasm_stack() {
     let lir = M"(lir ptr 8
@@ -2322,6 +2323,7 @@ sym @rev fn global
 sym @twice fn global
 sym @comm fn global
 sym @shm fn global
+sym @qeq fn global
 fn @inord
   sig (i32) -> i32
 b0(v0: i32):
@@ -2366,6 +2368,27 @@ b0(v0: i32, v1: i32):
   v3 = and.i32 v1, v2
   v4 = shl.i32 v0, v3
   ret v4
+fn @qeq
+  sig (ptr, ptr) -> i8
+b0(v0: ptr, v1: ptr):
+  v2 = load.i32 v0 align 2
+  v3 = load.i32 v1 align 2
+  v4 = icmp.eq v2, v3
+  br v4, b1, b4
+b1:
+  v5 = load.i32 v0+4 align 2
+  v6 = load.i32 v1+4 align 2
+  v7 = icmp.eq v5, v6
+  br v7, b2, b3(v7)
+b2:
+  v8 = load.i32 v0+8 align 2
+  v9 = load.i32 v1+8 align 2
+  v10 = icmp.eq v8, v9
+  ret v10
+b3(v11: i8):
+  ret v11
+b4:
+  ret v4
 )";
     let mut obj = Vector::<u8>::new();
     let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
@@ -2386,13 +2409,21 @@ b0(v0: i32, v1: i32):
     // The whole body: its size (7), no locals, the code.
     let shm: [u8; 8] = [0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x74, 0x0B];
     assert(holds(&obj, shm[0..8]), "shm");
+    // local.get 0, i32.load, local.get 1, i32.load, local.tee, i32.eq.
+    let qeq: [u8; 13] = [0x20, 0x00, 0x28, 0x02, 0x00, 0x20, 0x01, 0x28, 0x02, 0x00, 0x22, 0x03, 0x46];
+    assert(holds(&obj, qeq[0..13]), "qeq");
     let drv = M"(#include <stdint.h>
 int32_t inord(int32_t);
 int32_t rev(int32_t);
 int32_t twice(int32_t);
 int32_t comm(int32_t);
 int32_t shm(int32_t, int32_t);
+_Bool qeq(const uint32_t *, const uint32_t *);
 int main(void) {
+  static const uint32_t q[4][3] = {{1, 2, 3}, {1, 2, 3}, {1, 2, 4}, {0, 2, 3}};
+  for (int i = 0; i < 4; i++)
+    for (int k = 0; k < 4; k++)
+      if (qeq(q[i], q[k]) != (q[i][0] == q[k][0] && q[i][1] == q[k][1] && q[i][2] == q[k][2])) return 5;
   int32_t xs[4] = {0x12345678, -1, 7, -0x7fffffff};
   for (int k = 0; k < 4; k++) {
     uint32_t x = (uint32_t)xs[k];
@@ -10302,6 +10333,212 @@ fn coff_section(b: &Vector<u8>, name: str) u64 {
         }
     }
     return 0;
+}
+
+// An `or` reduction whose uses test it against 0 alone is wasm32's `v128.any_true` (`truth_only`): `@has`
+// branches on it through a folded comparison. `@bits` returns the reduction, which keeps every bit. Both
+// give the C results.
+@test
+fn or_reductions_tested_against_zero_ask_whether_a_lane_is_set() {
+    let lir = M"(lir ptr 8
+sym @has fn global
+sym @bits fn global
+fn @has
+  sig (ptr, i8) -> i32
+b0(v0: ptr, v1: i8):
+  v2 = splat.v16i8 v1
+  v3 = iconst.i8 0
+  v4 = load.v16i8 v0 align 0
+  v5 = vcmp.eq.v16i8 v4, v2
+  v6 = vop.reduce_or.i8 (v5)
+  v7 = icmp.eq v6, v3
+  br v7, b1, b2
+b1:
+  v8 = iconst.i32 7
+  ret v8
+b2:
+  v9 = iconst.i32 9
+  ret v9
+fn @bits
+  sig (ptr) -> i8
+b0(v0: ptr):
+  v1 = load.v16i8 v0 align 0
+  v2 = vop.reduce_or.i8 (v1)
+  ret v2
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    // `@has`: i8x16.eq, v128.any_true.
+    let any: [u8; 4] = [0xFD, 0x23, 0xFD, 0x53];
+    assert(holds(&obj, any[0..4]), "has");
+    let drv = M"(#include <stdint.h>
+int32_t has(const uint8_t *, uint8_t);
+uint8_t bits(const uint8_t *);
+int main(void) {
+  uint8_t s[16];
+  for (int k = 0; k < 16; k++) s[k] = (uint8_t)(k * 3);
+  for (int c = 0; c < 60; c++) {
+    int in = 0;
+    for (int k = 0; k < 16; k++) in |= s[k] == c;
+    if (has(s, (uint8_t)c) != (in ? 9 : 7)) return 1;
+  }
+  uint8_t o = 0;
+  for (int k = 0; k < 16; k++) o |= s[k];
+  if (bits(s) != o) return 2;
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
+// A loop's back edge with arguments is a `br_if` after its moves on wasm32 when the exit reads none of the
+// locals they write (`early_moves`): `@bits` counts set bits, its exit reading the new sum. `@old` exits
+// with the parameters' old values (it may not move them first) and `@swap` swaps its two parameters, its
+// exit reading the first, which one move writes. `@early` leaves before its loop with 0 for the exit's
+// parameter: a `br_if` after that move, though the loop's sum takes the same local (the loop's values are not
+// live where it starts). `@pref`'s back edge and exit both qualify: the exit, whose argument is in its
+// parameter's local already, branches (`br_if 1`), the back edge's move after it. All give the C results.
+@test
+fn loops_branch_back_after_their_moves_when_the_exit_allows() {
+    let lir = M"(lir ptr 8
+sym @bits fn global
+sym @old fn global
+sym @swap fn global
+sym @early fn global
+sym @pref fn global
+fn @bits
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 1
+  jmp b1(v0, v1)
+b1(v3: i32, v4: i32):
+  v5 = and.i32 v3, v2
+  v6 = add.i32 v4, v5
+  v7 = lshr.i32 v3, v2
+  v8 = icmp.ne v7, v1
+  br v8, b1(v7, v6), b2
+b2:
+  ret v6
+fn @old
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 1
+  jmp b1(v0, v1)
+b1(v3: i32, v4: i32):
+  v5 = and.i32 v3, v2
+  v6 = add.i32 v4, v5
+  v7 = lshr.i32 v3, v2
+  v8 = icmp.ne v7, v1
+  br v8, b1(v7, v6), b2
+b2:
+  v9 = iconst.i32 1000
+  v10 = mul.i32 v4, v9
+  v11 = add.i32 v10, v3
+  ret v11
+fn @swap
+  sig (i32, i32, i32) -> i32
+b0(v0: i32, v1: i32, v2: i32):
+  v3 = iconst.i32 1
+  jmp b1(v0, v1, v2)
+b1(v4: i32, v5: i32, v6: i32):
+  v7 = sub.i32 v6, v3
+  v8 = icmp.ne v7, v3
+  br v8, b1(v5, v4, v7), b2
+b2:
+  ret v4
+fn @early
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 2
+  v3 = iconst.i32 1
+  v4 = icmp.ult v0, v2
+  br v4, b3(v1), b1(v0, v1)
+b1(v5: i32, v6: i32):
+  v7 = add.i32 v6, v5
+  v8 = sub.i32 v5, v3
+  v9 = icmp.ugt v8, v3
+  br v9, b1(v8, v7), b2
+b2:
+  jmp b3(v7)
+b3(v10: i32):
+  v11 = add.i32 v10, v0
+  ret v11
+fn @pref
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = icmp.eq v1, v2
+  br v4, b2(v1), b1(v2)
+b1(v5: i32):
+  v6 = add.i32 v5, v3
+  v7 = icmp.ult v6, v0
+  br v7, b1(v6), b2(v6)
+b2(v8: i32):
+  v9 = add.i32 v8, v1
+  ret v9
+)";
+    let drv = M"(#include <stdint.h>
+uint32_t bits(uint32_t);
+uint32_t old(uint32_t);
+uint32_t swap(uint32_t, uint32_t, uint32_t);
+uint32_t early(uint32_t);
+uint32_t pref(uint32_t, uint32_t);
+int main(void) {
+  for (uint32_t n = 0; n < 6; n++)
+    for (uint32_t m = 0; m < 3; m++)
+      if (pref(n, m) != (m == 0 ? 0 : (n > 1 ? n : 1) + m)) return 5;
+  for (uint32_t n = 0; n < 9; n++)
+    if (early(n) != (n < 2 ? 0 : n * (n + 1) / 2 - 1) + n) return 4;
+  static const uint32_t v[6] = {1, 2, 3, 0x80000000u, 0xFFFFFFFFu, 0x12345678u};
+  for (int i = 0; i < 6; i++) {
+    uint32_t x = v[i], s = 0;
+    for (;;) {
+      uint32_t n = s + (x & 1);
+      if ((x >> 1) == 0) {
+        if (old(v[i]) != s * 1000 + x) return 2;
+        s = n;
+        break;
+      }
+      s = n;
+      x >>= 1;
+    }
+    if (bits(v[i]) != s) return 1;
+  }
+  for (uint32_t n = 2; n < 8; n++)
+    if (swap(7, 9, n) != ((n - 2) % 2 ? 9 : 7)) return 3;
+  return 0;
+}
+)";
+    // `@bits`'s back edge is `br_if 0`, its exit after it: the sum (in local 0), `return`.
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let tail: [u8; 5] = [0x0D, 0x00, 0x20, 0x00, 0x0F];
+    assert(holds(&obj, tail[0..5]), "bits");
+    // `@early`: i32.lt_u, i32.const 0, local.set 1, br_if 0.
+    let early: [u8; 7] = [0x49, 0x41, 0x00, 0x21, 0x01, 0x0D, 0x00];
+    assert(holds(&obj, early[0..7]), "early");
+    // `@pref`: i32.ge_u, br_if 1, local.get 3, local.set 2, br 0.
+    let pref: [u8; 9] = [0x4F, 0x0D, 0x01, 0x20, 0x03, 0x21, 0x02, 0x0C, 0x00];
+    assert(holds(&obj, pref[0..9]), "pref");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
 }
 
 // Byte swaps of 16, 32 and 64 bits (wasm32 has no instruction: rotates and masks, `byte_swap`) give C's

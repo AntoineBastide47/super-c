@@ -111,6 +111,9 @@ pub(package) struct Gen {
     wstack: Vector<u32>,
     wsucc: Vector<u32>,
     free_home: Vector<u64>, // size << 32 | offset of a free home
+    // Per value of the body at hand, whether a use reads more than whether it is 0 (`truth_only`); empty until
+    // the first question.
+    not_truth: Vector<bool>,
     scratch: Vector<Vector<u32>>, // per class, the scratch locals (live within one instruction)
     nscr: Vector<u32>, // per class, the scratch locals the current instruction took
     fp: u32, // the frame base local, NONE without a frame
@@ -242,6 +245,7 @@ extend Gen {
             wstack: Vector::<u32>::new(),
             wsucc: Vector::<u32>::new(),
             free_home: Vector::<u64>::new(),
+            not_truth: Vector::<bool>::new(),
             scratch: scratch,
             nscr: nscr,
             fp: NONE,
@@ -492,6 +496,7 @@ extend Gen {
             self.nscr[k] = 0;
         }
         self.free_home.truncate(0);
+        self.not_truth.truncate(0);
         self.remat.truncate(0);
         for k in 0..b.insts.len() {
             let op = b.insts[k].op;
@@ -509,6 +514,7 @@ extend Gen {
         if self.err.len() != 0 {
             return false;
         }
+        self.budget = WALK_BUDGET;
         self.prologue();
         self.body_at = self.c.bytes.len() as u32;
         self.tasks.push(Task { kind: TK_TREE, a: 0, b: 0, x: 0 });
@@ -566,20 +572,25 @@ extend Gen {
             let (s, g, grp) = (self.held[h], self.held[h + 1], self.held[h + 2]);
             let k = self.nxt[g as usize];
             let gat = (self.c.acc[g as usize] >> 32) as u32;
-            // A value of more reads (no VW_ONE) keeps its write as a `local.tee`: its later reads see it.
-            let one = (self.c.acc_op[s as usize] & VW_ONE) != 0;
-            if self.nxt[s as usize] != g || one && k != NONE && ((self.c.acc_op[k as usize] & VW_OP) == w::LOCAL_GET || self.ctl_within(
-                gat,
-                (self.c.acc[k as usize] >> 32) as u32,
-            )) {
+            if self.nxt[s as usize] != g {
                 while h < self.held.len() && self.held[h + 2] == grp {
                     h += 3;
                 }
                 continue;
             }
+            // The write goes when one instruction reads the value (VW_ONE) and the local's next access, if
+            // any, writes it with no control instruction between, or a `return` follows the read, which ends
+            // its path; else it stays as a `local.tee`, which leaves the local as it was.
+            let one = (self.c.acc_op[s as usize] & VW_ONE) != 0;
+            let after = gat + 1 + uleb_len((self.c.acc[g as usize] & 0xFFFFFFFF) as u32);
+            let ret = after as usize < self.c.bytes.len() && self.c.bytes[after as usize] == w::RETURN;
+            let keep = !one || !ret && k != NONE && ((self.c.acc_op[k as usize] & VW_OP) == w::LOCAL_GET || self.ctl_within(
+                gat,
+                (self.c.acc[k as usize] >> 32) as u32,
+            ));
             self.is_held[s as usize] = true;
             self.is_held[g as usize] = true;
-            if !one {
+            if keep {
                 self.c.bytes[(self.c.acc[s as usize] >> 32) as usize] = w::LOCAL_TEE;
             }
             h += 3;
@@ -928,7 +939,8 @@ struct Cursor {
     d: u32,
 }
 
-// The instructions the walks of `Gen::dead_from` may read per body.
+// The instructions the walks of `Gen::dead_from` may read per body, while it takes locals and again while it
+// emits the code.
 const WALK_BUDGET: u32 = 16384;
 
 // The marks `Gen::value_write` puts on a local access's opcode (`Code.acc_op`): the write of a value, of one
@@ -4050,6 +4062,64 @@ extend Gen {
         }
     }
 
+    // Whether the moves of edge `e` (no memory value among its arguments) may run before the branch on the
+    // path of edge `o` too: no value of a local they write is an argument of `o` or read in code its target
+    // reaches (`dead_from`) where it may hold that local: a value whose definition does not strictly dominate
+    // the target is not live there (edge `o` writes the target's own parameters). The locals they write; NONE
+    // when they may not.
+    fn early_moves(self: &mut Self, e: u32, o: u32) u32 {
+        let b = self.b();
+        let ni = b.insts.len() as u32;
+        let ps = b.blocks[b.edge_target(e) as usize].param_start;
+        let n = b.edge_nargs(e);
+        let mut wr: u64 = 0;
+        for k in 0..n {
+            let a = b.edge_arg(e, k);
+            let l = self.local_of[(ni + ps + k) as usize];
+            if self.mem_v(a) || l >= 64 {
+                return NONE;
+            }
+            if l != NONE && !self.in_place(a, ni + ps + k) {
+                wr |= 1u64 << l as u64;
+            }
+        }
+        if wr == 0 {
+            return pick32(n != 0, 0, NONE);
+        }
+        let tg = b.edge_target(o);
+        for v in 0..self.local_of.len() {
+            let l = self.local_of[v];
+            if l == NONE || l >= 64 || (wr >> l as u64 & 1) == 0 {
+                continue;
+            }
+            for k in 0..b.edge_nargs(o) {
+                if self.vx(b.edge_arg(o, k)) == v as u32 {
+                    return NONE;
+                }
+            }
+            let d = self.lv.def_blk[v];
+            if d != NONE && d != tg && self.dominates(d, tg) && !self.dead_from(tg, v as u32) {
+                return NONE;
+            }
+        }
+        return wr.count_ones() as u32;
+    }
+
+    // Whether block `d` dominates block `k` (`k`'s dominators come before it in reverse postorder); true past
+    // the walk budget (`dead_from` then answers).
+    fn dominates(self: &mut Self, d: u32, k: u32) bool {
+        let mut x = k;
+        // Each step goes one level up the dominator tree and takes one of the budget.
+        while x != d && self.sh.rpo[x as usize] > self.sh.rpo[d as usize] {
+            if self.budget == 0 {
+                return true;
+            }
+            self.budget -= 1;
+            x = self.sh.idom[x as usize];
+        }
+        return x == d;
+    }
+
     // Whether argument `a` is in parameter `x`'s local already (`arg_local`).
     const fn in_place(self: &Self, a: Value, x: u32) bool {
         let ax = self.vx(a);
@@ -4079,6 +4149,33 @@ extend Gen {
                 self.c.op(w::BR_IF);
                 self.c.uleb(d);
                 return self.edge(x, t.b);
+            }
+            // An edge with arguments to a label: the condition, the edge's moves above it, then a `br_if`,
+            // when the other path reads none of the locals they write (a loop's back edge, its exit after);
+            // of two such edges, the one that writes fewer.
+            let wt = if self.brable(x, tt) {
+                self.early_moves(t.b, t.c)
+            } else {
+                NONE
+            };
+            let wf = if self.brable(x, tf) {
+                self.early_moves(t.c, t.b)
+            } else {
+                NONE
+            };
+            if wt != NONE || wf != NONE {
+                let inv = wf < wt;
+                let (e, o, tg) = if inv {
+                    (t.c, t.b, tf)
+                } else {
+                    (t.b, t.c, tt)
+                };
+                self.get_cond(t.a, inv, true);
+                self.moves(e);
+                let d = self.depth(tg, self.sh.back(x, tg));
+                self.c.op(w::BR_IF);
+                self.c.uleb(d);
+                return self.edge(x, o);
             }
             // The true edge inside an `if`; the false one after it.
             self.get(t.a);
@@ -7929,6 +8026,55 @@ extend Gen {
         }
     }
 
+    // Whether every use of instruction `i`'s value tests whether it is 0: a branch's or a select's condition,
+    // a comparison with 0 for (in)equality. One pass over the body answers for every value.
+    fn truth_only(self: &mut Self, i: u32) bool {
+        let b = self.b();
+        let n = b.insts.len();
+        if self.not_truth.len() == 0 {
+            fill(&mut self.not_truth, n, false);
+            for j in 0..n {
+                let t = b.insts[j];
+                let us = self.lv.uses_of(j as u32);
+                for u in 0..us.len() {
+                    let x = us[u];
+                    if (x & (VPARAM | VFLAG)) != 0 || x == VNONE {
+                        continue;
+                    }
+                    // A condition's comparison folded into it reads `x` there. A select that adds its
+                    // condition (`inc_fold`) reads it whole.
+                    let at_cond = t.op == O_BR || t.op == O_SELECT && t.b != x && t.c != x && self.inc_fold(t) == 0;
+                    let c = if at_cond && (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] {
+                        b.insts[t.a as usize]
+                    } else {
+                        t
+                    };
+                    let mut k: u64 = 1;
+                    let other = if c.a == x {
+                        c.b
+                    } else {
+                        c.a
+                    };
+                    let zero_cmp = c.op == O_ICMP && (c.aux == C_EQ || c.aux == C_NE) && self.const_of(other, &mut k) && k == 0;
+                    let cond = at_cond && t.a == x;
+                    if !zero_cmp && !cond {
+                        self.not_truth[x as usize] = true;
+                        continue;
+                    }
+                    // A second read of `x` in one instruction (an edge's argument) reads it whole.
+                    let mut occ: u32 = 0;
+                    for q in 0..us.len() {
+                        occ += pick32(us[q] == x, 1, 0);
+                    }
+                    if occ != 1 {
+                        self.not_truth[x as usize] = true;
+                    }
+                }
+            }
+        }
+        return self.lv.uses[i as usize] != 0 && !self.not_truth[i as usize];
+    }
+
     // Reduction `c` (`vop_form`) of vector `a` (lanes of `lt`, signed `sg`) into instruction `i`:
     // each step folds the upper half of the lanes it has left into the lower half, at most four; then lane 0.
     fn vreduce_reg(self: &mut Self, i: u32, c: u8, a: Value, lt: u8, sg: bool) {
@@ -7949,6 +8095,17 @@ extend Gen {
         } else {
             V_MUL[k]
         };
+        // An `or` of 16 bytes whose uses test it against 0 alone: whether a lane is not 0 (in an 8-byte vector,
+        // the register's upper lanes are not its own).
+        if c == core::SIMD_REDUCE_OR && type_bytes(self.vt(a), 4) == 16 && self.truth_only(i) {
+            self.vget(a);
+            self.sop(0x53);
+            if lt == T_I64 {
+                self.c.op(w::I64_EXTEND_I32_U);
+            }
+            self.put(i);
+            return;
+        }
         let pair = (c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX) && k == 3;
         let acc = self.tmp(w::V128);
         let s = self.tmp(w::V128);

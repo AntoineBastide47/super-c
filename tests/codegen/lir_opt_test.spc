@@ -249,6 +249,123 @@ fn a_constant_every_call_passes_makes_a_copy_without_it() {
     assert(s.ok() && c.contains("sig (i32) -> i32"), "the recursion's copy takes the count alone");
 }
 
+// A copy loop goes, a `memcpy` in its place, whatever the numbers of its instructions: `mem_run` reads the
+// other instructions' operands and the edges' arguments, not their other fields (with 4, 6 or 8 stores before
+// it, an edge's or a constant's field equals the load's number). `@run` copies 5 bytes after `@c4`'s stores.
+@test
+fn copy_loops_go_whatever_their_numbers() {
+    let (b, a) = optimized_loops(
+        M"(lir ptr 4
+sym @c4 fn global noinline
+sym @c6 fn global noinline
+sym @c8 fn global noinline
+sym @run fn global
+sym @buf data global
+sym @src data global
+sym @pad data global
+fn @c4
+  sig (ptr, ptr, i32, ptr) -> void
+  ref p0 0 noalias
+  ref p1 0 readonly
+b0(v0: ptr, v1: ptr, v2: i32, v3: ptr):
+  store v2, v3+0 align 0
+  store v2, v3+4 align 0
+  store v2, v3+8 align 0
+  store v2, v3+12 align 0
+  v4 = iconst.i32 0
+  v5 = iconst.i32 1
+  jmp b1(v4)
+b1(v6: i32):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 1
+  v9 = load.i8 v8 align 0
+  v10 = ptradd v0, v6 * 1
+  store v9, v10 align 0
+  v11 = add.i32 v6, v5
+  jmp b1(v11)
+b3:
+  ret
+fn @c6
+  sig (ptr, ptr, i32, ptr) -> void
+  ref p0 0 noalias
+  ref p1 0 readonly
+b0(v0: ptr, v1: ptr, v2: i32, v3: ptr):
+  store v2, v3+0 align 0
+  store v2, v3+4 align 0
+  store v2, v3+8 align 0
+  store v2, v3+12 align 0
+  store v2, v3+16 align 0
+  store v2, v3+20 align 0
+  v4 = iconst.i32 0
+  v5 = iconst.i32 1
+  jmp b1(v4)
+b1(v6: i32):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 1
+  v9 = load.i8 v8 align 0
+  v10 = ptradd v0, v6 * 1
+  store v9, v10 align 0
+  v11 = add.i32 v6, v5
+  jmp b1(v11)
+b3:
+  ret
+fn @c8
+  sig (ptr, ptr, i32, ptr) -> void
+  ref p0 0 noalias
+  ref p1 0 readonly
+b0(v0: ptr, v1: ptr, v2: i32, v3: ptr):
+  store v2, v3+0 align 0
+  store v2, v3+4 align 0
+  store v2, v3+8 align 0
+  store v2, v3+12 align 0
+  store v2, v3+16 align 0
+  store v2, v3+20 align 0
+  store v2, v3+24 align 0
+  store v2, v3+28 align 0
+  v4 = iconst.i32 0
+  v5 = iconst.i32 1
+  jmp b1(v4)
+b1(v6: i32):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 1
+  v9 = load.i8 v8 align 0
+  v10 = ptradd v0, v6 * 1
+  store v9, v10 align 0
+  v11 = add.i32 v6, v5
+  jmp b1(v11)
+b3:
+  ret
+fn @run
+  sig (i32) -> i64
+b0(v0: i32):
+  v1 = symaddr @buf
+  v2 = symaddr @src
+  v3 = symaddr @pad
+  call @c4(v1, v2, v0, v3) : (ptr, ptr, i32, ptr) -> void
+  v4 = load.i64 v1 align 3
+  ret v4
+data @buf size 8 align 3 bytes aaaaaaaaaaaaaaaa
+data @src size 8 align 3 bytes 0001020304050607
+data @pad size 32 align 3 bytes 0000000000000000000000000000000000000000000000000000000000000000
+)",
+        0,
+        false,
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 512 },
+    );
+    for name in ["c4", "c6", "c8"] {
+        let c = text_of(&a, name);
+        assert(c.contains("memcpy") && !c.contains("load.i8"), c.as_str());
+    }
+    let five: []u64 = [5];
+    same_result(&b, &a, "run", five, 0xAAAAAA0403020100u64);
+}
+
 // A view's length is at most `isize::MAX` over its element's bytes (`ref p0 4 inner`), so it never passes
 // `usize::MAX - 8`; a length of an element size unknown (`ref p1 0 inner`) may. The minimum of two values is
 // at most each, and a select is at most the larger of its sides: `min(len0, len2) <= usize::MAX - 8`.

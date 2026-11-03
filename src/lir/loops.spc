@@ -1097,7 +1097,7 @@ extend LoopOpt {
     // reads, its bytes apart from the store's (a copy). The loop is one block, or a header that exits (`eb`)
     // and a latch: a store in the header runs once more than the back edge, one in the latch as often.
     // None else.
-    fn mem_run(self: &Self, b: &Body, ptr: u32, cl: Classes, h: u32, eb: u32, st: u32, ld: u32) Option<MemRun> {
+    fn mem_run(self: &mut Self, b: &Body, ptr: u32, cl: Classes, h: u32, eb: u32, st: u32, ld: u32) Option<MemRun> {
         let none = Option::<MemRun>::None;
         if self.lblocks.len() > 2 {
             return none;
@@ -1158,13 +1158,27 @@ extend LoopOpt {
         if t.b != ld || l.ty != ty || (l.aux & MEM_VOLATILE) != 0 || !self.apart(cl, st, ld) {
             return none;
         }
-        // The store alone reads the load.
+        // The store alone reads the load: no other instruction's operand, no edge's argument.
         for j in 0..self.lblocks.len() {
             let bk = b.blocks[self.lblocks[j] as usize];
             for i in bk.start..bk.start + bk.len {
+                if i == st {
+                    continue;
+                }
                 let u = b.insts[i as usize];
-                if i != st && (u.a == ld || u.b == ld || u.c == ld) {
-                    return none;
+                lv::uses(b, u, &mut self.uses);
+                for q in 0..self.uses.len() {
+                    if self.uses[q] == ld {
+                        return none;
+                    }
+                }
+                b.succ_edges(u, &mut self.edges);
+                for e in 0..self.edges.len() {
+                    for q in 0..b.edge_nargs(self.edges[e]) {
+                        if b.edge_arg(self.edges[e], q) == ld {
+                            return none;
+                        }
+                    }
                 }
             }
         }
