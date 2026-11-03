@@ -4923,6 +4923,76 @@ int main(void) {
     }
 }
 
+// A value the home plan gives a caller-saved register that none is free for when it is made takes a
+// callee-saved one, which no later home takes over (Microsoft x64): `@ipow`'s `b^8`, which its unrolled loop
+// multiplies by, stays in a register; nothing goes to the stack (`mov [rsp + d], r`, `mov r, [rsp + d]`).
+// It gives the C result.
+@test
+fn x86_homes_without_a_free_scratch_register_take_a_callee_saved_one() {
+    let lir = M"(lir ptr 8
+sym @ipow fn global
+fn @ipow
+  sig (i64, i32) -> i64
+b0(v0: i64, v1: i32):
+  v2 = iconst.i64 1
+  v3 = iconst.i32 0
+  v4 = iconst.i32 1
+  v5 = iconst.i32 -8
+  v6 = and.i32 v1, v5
+  v7 = icmp.ne v6, v3
+  br v7, b3, b2(v1, v2)
+b1(v8: i32, v9: i64):
+  v10 = mul.i64 v9, v0
+  v11 = sub.i32 v8, v4
+  v12 = icmp.eq v11, v3
+  br v12, b7, b1(v11, v10)
+b2(v13: i32, v14: i64): novec
+  v15 = icmp.eq v13, v3
+  br v15, b5(v14), b1(v13, v14)
+b3:
+  v16 = sub.i32 v1, v6
+  v17 = mul.i64 v0, v0
+  v18 = mul.i64 v17, v17
+  v19 = mul.i64 v18, v18
+  v20 = iconst.i32 8
+  jmp b4(v6, v2)
+b4(v21: i32, v22: i64): novec
+  v23 = mul.i64 v22, v19
+  v24 = sub.i32 v21, v20
+  v25 = icmp.ne v24, v3
+  br v25, b4(v24, v23), b6
+b5(v26: i64):
+  ret v26
+b6:
+  jmp b2(v16, v23)
+b7:
+  ret v10
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, OMIT_FP, &mut obj), "the Microsoft x64 object");
+    let mut stack = false;
+    for x in 0..obj.len() - 2 {
+        // 89 or 8B, ModRM with a disp8 and a SIB byte, the SIB of [rsp].
+        stack = stack || (obj[x] == 0x89 || obj[x] == 0x8B) && (obj[x + 1] & 0xC7) == 0x44 && obj[x + 2] == 0x24;
+    }
+    assert(!stack, "ipow");
+    let drv = M"(#include <stdint.h>
+int64_t ipow(int64_t, int32_t);
+int main(void) {
+  for (int e = 0; e < 40; e++) {
+    int64_t r = 1;
+    for (int k = 0; k < e; k++) r = (int64_t)((uint64_t)r * 3u);
+    if (ipow(3, e) != r) return 1;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A comparison of the operands of the subtraction just emitted reads its flags (x86-64): `@absd`'s
 // `b - a` is the comparison of `a` and `b` the other way, `@satsub`'s `a - b` that comparison itself; no
 // `cmp`. They give the C results.

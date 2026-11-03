@@ -2330,8 +2330,10 @@ extend Gen {
         } else {
             NOREG
         };
+        // None free (a home the plan saw end in this block holds on to its end): a callee-saved one, which a
+        // later home may not take over.
         if r == NOREG {
-            return NOREG;
+            return self.take_fixed(x, vr);
         }
         if r != prefer {
             self.evict(r);
