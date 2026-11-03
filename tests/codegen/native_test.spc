@@ -2310,12 +2310,13 @@ int main(void) {
 // wasm32 values whose one reader comes later in their block and reads them in the order they were made stay
 // on the operand stack (`wasmgen::stack_order`): `inord`'s two shifts feed its difference with no local
 // (local.get 0, i32.const 24, i32.shr_u, local.get 0, i32.const 8, i32.shl, i32.sub, end); `rev` reads
-// them the other way, so the first one made goes through its local. Both give the C results.
+// them the other way, so the first one made goes through its local. All give the C results.
 @test
 fn values_read_in_order_stay_on_the_wasm_stack() {
     let lir = M"(lir ptr 8
 sym @inord fn global
 sym @rev fn global
+sym @twice fn global
 fn @inord
   sig (i32) -> i32
 b0(v0: i32):
@@ -2334,6 +2335,16 @@ b0(v0: i32):
   v4 = shl.i32 v0, v3
   v5 = sub.i32 v4, v2
   ret v5
+fn @twice
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 24
+  v2 = lshr.i32 v0, v1
+  v3 = iconst.i32 8
+  v4 = shl.i32 v0, v3
+  v5 = sub.i32 v2, v4
+  v6 = mul.i32 v5, v2
+  ret v6
 )";
     let mut obj = Vector::<u8>::new();
     let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
@@ -2343,14 +2354,21 @@ b0(v0: i32):
     );
     let inord: [u8; 12] = [0x20, 0x00, 0x41, 0x18, 0x76, 0x20, 0x00, 0x41, 0x08, 0x74, 0x6B, 0x0B];
     assert(holds(&obj, inord[0..12]), "inord");
+    // `twice` reads its first shift again after the difference: its write stays, a `local.tee` (i32.shr_u,
+    // local.tee), and the difference takes it from the stack (i32.shl, i32.sub).
+    let tee: [u8; 2] = [0x76, 0x22];
+    let sub: [u8; 2] = [0x74, 0x6B];
+    assert(holds(&obj, tee[0..2]) && holds(&obj, sub[0..2]), "twice");
     let drv = M"(#include <stdint.h>
 int32_t inord(int32_t);
 int32_t rev(int32_t);
+int32_t twice(int32_t);
 int main(void) {
   int32_t xs[4] = {0x12345678, -1, 7, -0x7fffffff};
   for (int k = 0; k < 4; k++) {
     uint32_t x = (uint32_t)xs[k];
     if ((uint32_t)inord(xs[k]) != (x >> 24) - (x << 8) || (uint32_t)rev(xs[k]) != (x << 8) - (x >> 24)) return 1;
+    if ((uint32_t)twice(xs[k]) != ((x >> 24) - (x << 8)) * (x >> 24)) return 2;
   }
   return 0;
 }

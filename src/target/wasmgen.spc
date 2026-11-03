@@ -563,7 +563,9 @@ extend Gen {
             let (s, g, grp) = (self.held[h], self.held[h + 1], self.held[h + 2]);
             let k = self.nxt[g as usize];
             let gat = (self.c.acc[g as usize] >> 32) as u32;
-            if self.nxt[s as usize] != g || k != NONE && ((self.c.acc_op[k as usize] & VW_OP) == w::LOCAL_GET || self.ctl_within(
+            // A value of more reads (no VW_ONE) keeps its write as a `local.tee`: its later reads see it.
+            let one = (self.c.acc_op[s as usize] & VW_ONE) != 0;
+            if self.nxt[s as usize] != g || one && k != NONE && ((self.c.acc_op[k as usize] & VW_OP) == w::LOCAL_GET || self.ctl_within(
                 gat,
                 (self.c.acc[k as usize] >> 32) as u32,
             )) {
@@ -574,11 +576,14 @@ extend Gen {
             }
             self.is_held[s as usize] = true;
             self.is_held[g as usize] = true;
+            if !one {
+                self.c.bytes[(self.c.acc[s as usize] >> 32) as usize] = w::LOCAL_TEE;
+            }
             h += 3;
         }
         self.cuts.truncate(0);
         for i in 0..n {
-            if self.is_held[i] {
+            if self.is_held[i] && self.c.bytes[(self.c.acc[i] >> 32) as usize] != w::LOCAL_TEE {
                 let l = (self.c.acc[i] & 0xFFFFFFFF) as u32;
                 let at = (self.c.acc[i] >> 32) as u32;
                 self.cuts.push(at as u64 << 32 | (at + 1 + uleb_len(l)) as u64);
@@ -3625,49 +3630,60 @@ extend Gen {
     // (`held`) when the writes still on it (`pend`) end in them. Each instruction's code starts and ends at
     // an empty operand stack, so the code between a write and its read runs above the value: equal to the
     // code that reads it from the local. After control instructions, no written value waits; the
-    // code's last access, the write of a value one instruction reads, waits for that instruction.
+    // code's last access, the write of a value, waits for the instruction that reads it first (a value
+    // of more reads keeps its write, as `local.tee`, for the others).
     fn stack_order(self: &mut Self, a0: u32, s0: u32, ctl: bool) {
         let a1 = self.c.acc.len() as u32;
-        // The reads at the code's start, in a row: the first `m` take the last `m` waiting writes.
+        // The reads at the code's start, in a row, take waiting writes of their locals in the order they wait
+        // (each local waits once): the first read's and those above it it matches stay on the stack, the other
+        // writes above it leave the wait (no value of theirs is on the stack, none may come above these).
         let mut m: u32 = 0;
         let mut at = s0;
-        while a0 + m < a1 && m < self.pend.len() as u32 {
+        let mut first: usize = self.pend.len();
+        let mut prev: usize = 0;
+        while a0 + m < a1 && m as usize < self.pend.len() {
             let g = a0 + m;
-            let l = (self.c.acc[g as usize] & 0xFFFFFFFF) as u32;
+            let l = self.c.acc[g as usize] & 0xFFFFFFFF;
             if (self.c.acc_op[g as usize] & VW_OP) != w::LOCAL_GET || (self.c.acc[g as usize] >> 32) as u32 != at {
                 break;
             }
-            at += 1 + uleb_len(l);
-            m += 1;
-        }
-        // The longest run that ends the waiting writes in order, its values read once in the code.
-        while m != 0 {
-            let base = self.pend.len() - m as usize;
-            let mut ok = true;
-            for q in 0..m {
-                let s = self.pend[base + q as usize];
-                let l = self.c.acc[s as usize] & 0xFFFFFFFF;
-                ok = ok && (self.c.acc[(a0 + q) as usize] & 0xFFFFFFFF) == l;
-                // A later read of the local before a write needs the value there; past control instructions, a
-                // write may not run on the path of a later read.
-                let mut r = a0 + q + 1;
-                while ok && r < a1 && ((self.c.acc[r as usize] & 0xFFFFFFFF) != l || ctl || (self.c.acc_op[r as usize] & VW_OP) != w::LOCAL_SET) {
-                    ok = (self.c.acc[r as usize] & 0xFFFFFFFF) != l;
-                    r += 1;
+            let mut p = NONE as usize;
+            for k in (if m == 0 {
+                0
+            } else {
+                prev + 1
+            })..self.pend.len() {
+                if (self.c.acc[self.pend[k] as usize] & 0xFFFFFFFF) == l {
+                    p = k;
                 }
             }
-            if ok {
+            if p == NONE as usize {
                 break;
             }
-            m -= 1;
-        }
-        for q in 0..m {
-            let s = self.pend[self.pend.len() - m as usize + q as usize];
+            // A later read of the local before a write needs the value there; past control instructions, a
+            // write may not run on the path of a later read. (A value of more reads keeps its write, a
+            // `local.tee`.)
+            let s = self.pend[p];
+            let mut ok = true;
+            let mut r = g + 1;
+            while ok && (self.c.acc_op[s as usize] & VW_ONE) != 0 && r < a1 && ((self.c.acc[r as usize] & 0xFFFFFFFF) != l || ctl || (self.c.acc_op[r as usize] & VW_OP) != w::LOCAL_SET) {
+                ok = (self.c.acc[r as usize] & 0xFFFFFFFF) != l;
+                r += 1;
+            }
+            if !ok {
+                break;
+            }
+            if m == 0 {
+                first = p;
+            }
             self.held.push(s);
-            self.held.push(a0 + q);
+            self.held.push(g);
             self.held.push(a0);
+            prev = p;
+            at += 1 + uleb_len(l as u32);
+            m += 1;
         }
-        self.pend.truncate(self.pend.len() - m as usize);
+        self.pend.truncate(first);
         if ctl {
             self.pend.truncate(0);
         }
@@ -3688,7 +3704,7 @@ extend Gen {
             let s = a1 - 1;
             let l = (self.c.acc[s as usize] & 0xFFFFFFFF) as u32;
             let end = (self.c.acc[s as usize] >> 32) as u32 + 1 + uleb_len(l);
-            if !ctl && self.c.acc_op[s as usize] == (w::LOCAL_SET | VW_VALUE | VW_ONE) && end == self.c.len() {
+            if !ctl && (self.c.acc_op[s as usize] & ~VW_ONE) == (w::LOCAL_SET | VW_VALUE) && end == self.c.len() {
                 if self.pend.len() == PEND_MAX {
                     let _ = self.pend.remove(0);
                 }
