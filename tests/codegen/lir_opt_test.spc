@@ -10280,6 +10280,154 @@ b2(v8: i32):
     }
 }
 
+// A comparison the branches decide is a constant where they decide it: `@eq3` (three fields compared, each
+// load after the test before it) returns its first test on that test's false edge and passes its second
+// along the second's false edge: both 0 (`iconst.i8 0`); `@ret1` has the return alone, `@edge1` the edges
+// alone (both false ones into one block). The results stay.
+@test
+fn decided_comparisons_are_constants() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @eq3 fn global noinline
+sym @ret1 fn global noinline
+sym @edge1 fn global noinline
+sym @same fn global
+sym @differ fn global
+sym @x data global
+sym @y data global
+fn @eq3
+  sig (ptr, ptr) -> i8
+b0(v0: ptr, v1: ptr):
+  v2 = load.i32 v0 align 2
+  v3 = load.i32 v1 align 2
+  v4 = icmp.eq v2, v3
+  br v4, b1, b4
+b1:
+  v5 = load.i32 v0+4 align 2
+  v6 = load.i32 v1+4 align 2
+  v7 = icmp.eq v5, v6
+  br v7, b2, b3(v7)
+b2:
+  v8 = load.i32 v0+8 align 2
+  v9 = load.i32 v1+8 align 2
+  v10 = icmp.eq v8, v9
+  ret v10
+b3(v11: i8):
+  ret v11
+b4:
+  ret v4
+fn @ret1
+  sig (ptr, ptr) -> i8
+b0(v0: ptr, v1: ptr):
+  v2 = load.i32 v0 align 2
+  v3 = load.i32 v1 align 2
+  v4 = icmp.eq v2, v3
+  br v4, b1, b2
+b1:
+  v5 = load.i32 v0+4 align 2
+  v6 = load.i32 v1+4 align 2
+  v7 = icmp.eq v5, v6
+  ret v7
+b2:
+  ret v4
+fn @edge1
+  sig (ptr, ptr) -> i8
+b0(v0: ptr, v1: ptr):
+  v2 = load.i32 v0 align 2
+  v3 = load.i32 v1 align 2
+  v4 = icmp.eq v2, v3
+  br v4, b1, b3(v4)
+b1:
+  v5 = load.i32 v0+4 align 2
+  v6 = load.i32 v1+4 align 2
+  v7 = icmp.eq v5, v6
+  br v7, b2, b3(v7)
+b2:
+  v8 = load.i32 v0+8 align 2
+  v9 = load.i32 v1+8 align 2
+  v10 = icmp.eq v8, v9
+  ret v10
+b3(v11: i8):
+  ret v11
+fn @same
+  sig () -> i64
+b0:
+  v0 = symaddr @x
+  v1 = call.i8 @eq3(v0, v0) : (ptr, ptr) -> i8
+  v2 = zext.i64 v1
+  ret v2
+fn @differ
+  sig () -> i64
+b0:
+  v0 = symaddr @x
+  v1 = symaddr @y
+  v2 = call.i8 @eq3(v0, v1) : (ptr, ptr) -> i8
+  v3 = zext.i64 v2
+  ret v3
+data @x size 12 align 2 bytes 010000000200000003000000
+data @y size 12 align 2 bytes 010000000500000003000000
+)",
+    );
+    for name in ["eq3", "ret1", "edge1"] {
+        let e = text_of(&a, name);
+        assert(e.contains("iconst.i8 0"), e.as_str());
+    }
+    let none: []u64 = [];
+    same_result(&b, &a, "same", none, 1);
+    same_result(&b, &a, "differ", none, 0);
+}
+
+// A rewrite along one edge of a branch leaves the terminators that share the edge as they were: the jumps
+// through `@thread`'s empty `b3` share its edge into `b4`, the true path's too, so the branch's comparison
+// becomes 0 along its false edge alone, and `@thread` still returns 1 where it holds.
+@test
+fn edge_rewrites_keep_shared_edges() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @thread fn global noinline
+sym @one fn global
+sym @two fn global
+sym @x data global
+fn @thread
+  sig (i32, ptr) -> i32
+b0(v0: i32, v1: ptr):
+  v2 = iconst.i32 1
+  v3 = icmp.eq v0, v2
+  br v3, b1, b2
+b1:
+  store v0, v1 align 2
+  jmp b3
+b2:
+  jmp b3
+b3:
+  jmp b4(v3)
+b4(v4: i8):
+  v5 = zext.i32 v4
+  ret v5
+fn @one
+  sig () -> i64
+b0:
+  v0 = symaddr @x
+  v1 = iconst.i32 1
+  v2 = call.i32 @thread(v1, v0) : (i32, ptr) -> i32
+  v3 = zext.i64 v2
+  ret v3
+fn @two
+  sig () -> i64
+b0:
+  v0 = symaddr @x
+  v1 = iconst.i32 2
+  v2 = call.i32 @thread(v1, v0) : (i32, ptr) -> i32
+  v3 = zext.i64 v2
+  ret v3
+data @x size 4 align 2 bytes 00000000
+)",
+    );
+    let none: []u64 = [];
+    same_result(&b, &a, "one", none, 1);
+    same_result(&b, &a, "two", none, 0);
+}
+
 // A counted loop whose one effect writes the element after the last one goes, a `memset` or `memcpy` in its
 // place (`final_values`' `mem_run`): a fill of 4-byte elements of one repeated byte, its test at its end
 // (the store runs once more than the back edge), a copy from a read-only source to an exclusive destination,

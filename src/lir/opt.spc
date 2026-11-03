@@ -4236,8 +4236,25 @@ extend Opt {
                             changed = true;
                         }
                     }
+                    // A comparison the branches before the block decide, returned: that constant.
+                    if u.op == O_RET && is_op(b, u.a, O_ICMP) {
+                        let d = self.cond_at(b, k as u32, u.a, THREAD_DEPTH);
+                        if d != 0 {
+                            let c = self.constant(
+                                b,
+                                b.type_of(u.a),
+                                if d == 1 {
+                                    1u64
+                                } else {
+                                    0u64
+                                },
+                            );
+                            b.insts.index_mut(i as usize).a = c;
+                            changed = true;
+                        }
+                    }
                     if u.op == O_BR && self.repl[i as usize] == VNONE && u.b != u.c {
-                        changed = edge_selects(b, u) || changed;
+                        changed = self.edge_selects(b, i) || changed;
                         if self.merge_exits(b, k as u32, i) {
                             changed = true;
                             self.refold = true;
@@ -5955,6 +5972,67 @@ extend Opt {
             }
         }
         return true;
+    }
+
+    // Branch `i` of `b`: each edge argument that is a select on the branch's condition, or on the opposite
+    // comparison, takes the side the edge implies (`select(c, x, y)` passed where `c` holds is `x`); the
+    // branch's comparison itself is 1 along the true edge and 0 along the other (when they differ). An edge
+    // it changes becomes the branch's own first: terminators may share one. Whether any did.
+    fn edge_selects(self: &mut Self, b: &mut Body, i: u32) bool {
+        let t = b.insts[i as usize];
+        let test = is_op(b, t.a, O_ICMP) && !same_edge(b, t.b, t.c);
+        let mut any = false;
+        for q in 0..2u32 {
+            let mut e = if q == 0 {
+                t.b
+            } else {
+                t.c
+            };
+            // Where the edge runs, the condition holds (the true edge) or fails.
+            let holds = q == 0;
+            let mut own = false;
+            for k in 0..b.edge_nargs(e) {
+                let v = b.edge_arg(e, k);
+                let mut w = VNONE;
+                if test && v == t.a {
+                    w = self.constant(
+                        b,
+                        b.type_of(v),
+                        if holds {
+                            1u64
+                        } else {
+                            0u64
+                        },
+                    );
+                } else if is_op(b, v, O_SELECT) {
+                    let s = b.insts[v as usize];
+                    let same = s.a == t.a;
+                    let mut opp = false;
+                    if !same && is_op(b, s.a, O_ICMP) && is_op(b, t.a, O_ICMP) {
+                        let x = b.insts[s.a as usize];
+                        let y = b.insts[t.a as usize];
+                        opp = x.a == y.a && x.b == y.b && x.aux == opposite(y.aux);
+                    }
+                    if same || opp {
+                        w = if same == holds {
+                            s.b
+                        } else {
+                            s.c
+                        };
+                    }
+                }
+                if w == VNONE {
+                    continue;
+                }
+                if !own {
+                    e = own_edge(b, i, q);
+                    own = true;
+                }
+                b.pool[(e + 2 + k) as usize] = w;
+                any = true;
+            }
+        }
+        return any;
     }
 
     // Whether condition `c` holds (1) or fails (2) where block `k` starts, or neither is known (0): `k` has
@@ -12764,45 +12842,6 @@ fn thru_val(b: &Body, jb: Block, e: u32, sub: &[Value; THREAD_BLOCK_MAX as usize
     return (v, true);
 }
 
-// Branch `t` of `b`: each edge argument that is a select on the branch's condition, or on the opposite
-// comparison, takes the side the edge implies (`select(c, x, y)` passed where `c` holds is `x`). Whether
-// any did.
-fn edge_selects(b: &mut Body, t: Inst) bool {
-    let mut any = false;
-    for q in 0..2u32 {
-        let e = if q == 0 {
-            t.b
-        } else {
-            t.c
-        };
-        // Where the edge runs, the condition holds (the true edge) or fails.
-        let holds = q == 0;
-        for k in 0..b.edge_nargs(e) {
-            let v = b.edge_arg(e, k);
-            if !is_op(b, v, O_SELECT) {
-                continue;
-            }
-            let s = b.insts[v as usize];
-            let same = s.a == t.a;
-            let mut opp = false;
-            if !same && is_op(b, s.a, O_ICMP) && is_op(b, t.a, O_ICMP) {
-                let x = b.insts[s.a as usize];
-                let y = b.insts[t.a as usize];
-                opp = x.a == y.a && x.b == y.b && x.aux == opposite(y.aux);
-            }
-            if same || opp {
-                b.pool[(e + 2 + k) as usize] = if same == holds {
-                    s.b
-                } else {
-                    s.c
-                };
-                any = true;
-            }
-        }
-    }
-    return any;
-}
-
 // The slice or `str` parameter (`REF_INNER`: its address at offset 0, its length at the pointers' bytes)
 // whose element pointer address `p` of `b` (maybe as an integer, `ptrtoint`) offsets, through at most
 // NONNULL_STEPS offsets; VNONE when none. A slice that is not empty points at its elements, never null,
@@ -15446,6 +15485,28 @@ fn stored_piece(b: &Body, v: Value, ptr: u32) (Value, u32, u32) {
         return (VNONE, 0, 0);
     }
     return (x, 0, n);
+}
+
+// Edge `q` (0: the true one, 1: the false one) of branch `i` of `b` as a copy only the branch passes:
+// its index.
+fn own_edge(b: &mut Body, i: u32, q: u32) u32 {
+    let t = b.insts[i as usize];
+    let e = if q == 0 {
+        t.b
+    } else {
+        t.c
+    };
+    let mut args = Vector::<Value>::with_capacity(b.edge_nargs(e) as usize);
+    for k in 0..b.edge_nargs(e) {
+        args.push(b.edge_arg(e, k));
+    }
+    let n = b.edge(b.edge_target(e), &args);
+    if q == 0 {
+        b.insts.index_mut(i as usize).b = n;
+    } else {
+        b.insts.index_mut(i as usize).c = n;
+    }
+    return n;
 }
 
 fn same_edge(b: &Body, x: u32, y: u32) bool {

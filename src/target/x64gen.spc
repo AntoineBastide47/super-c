@@ -2144,6 +2144,33 @@ extend Gen {
         let c = b.insts[t.a as usize];
         let dz = type_bits(t.ty, self.ptr) / 8;
         let cb = type_bits(b.type_of(c.a), self.ptr);
+        // `p == 0` is `p <u 1` (CF after `cmp p, 1`), `p != 0` its inverse (`p` in a register: not folded into
+        // the comparison).
+        let mut kz: u64 = 0;
+        let zb = self.const_of(c.b, &mut kz) && kz == 0;
+        let za = !zb && self.const_of(c.a, &mut kz) && kz == 0;
+        let p0 = if zb {
+            c.a
+        } else {
+            c.b
+        };
+        let folded = (p0 & (VPARAM | VFLAG)) == 0 && self.lv.pfold[p0 as usize];
+        if (c.aux == C_EQ || c.aux == C_NE) && (zb || za) && (cb == 32 || cb == 64) && !self.const_of(p0, &mut kz) && !folded {
+            let rp = self.reg(p0);
+            let ro = self.reg(other);
+            let rd = self.def_over(i, other, ro);
+            self.c.alu_ri(x::CMP, cb / 8, rp, 1);
+            if rd != ro {
+                self.c.mov_rr(dz, rd, ro);
+            }
+            if c.aux == C_EQ == inc_b {
+                self.c.alu_ri(x::ADC, dz, rd, 0);
+            } else {
+                self.c.alu_ri(x::SBB, dz, rd, -1);
+            }
+            self.va.index_mut(i as usize).clean = dz == 4;
+            return;
+        }
         if c.aux != C_ULT && c.aux != C_UGT && c.aux != C_ULE && c.aux != C_UGE || cb != 32 && cb != 64 {
             let ro = self.reg(other);
             let rz = self.tmp(false);
@@ -3239,7 +3266,7 @@ extend Gen {
         };
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE
         } else {
             0
@@ -5696,10 +5723,18 @@ extend Gen {
                 self.c.shift_ri(sop, sz, rd, kk as u32);
                 return true;
             }
-            self.vacate(x::RCX);
+            // A count in rcx already stays there.
+            let amt = lv::shift_amount(self.b(), &self.lv.pfold, t.b);
+            if self.owner[x::RCX as usize] == self.vx(amt) {
+                self.lock |= bit(x::RCX);
+            } else {
+                self.vacate(x::RCX);
+            }
             let ra = self.reg(t.a);
-            let rb = self.reg(lv::shift_amount(self.b(), &self.lv.pfold, t.b));
-            self.c.mov_rr(4, x::RCX, rb);
+            let rb = self.reg(amt);
+            if rb != x::RCX {
+                self.c.mov_rr(4, x::RCX, rb);
+            }
             let rd = if small && op != O_SHL {
                 let r = self.def(i);
                 self.c.ext(bits / 8, 4, op == O_ASHR, r, ra);
@@ -7102,10 +7137,22 @@ extend Gen {
             self.c.land(skip, self.c.len());
             return true;
         }
+        // A constant true side (the false side not one, nor dying here in the register a return right after
+        // wants): the constant into the result's register, the false side moved in with the condition inverted.
+        let mut kc: u64 = 0;
+        let rcw = self.va[self.vx(t.c) as usize].reg;
+        if t.b != t.c && self.const_of(t.b, &mut kc) && !self.const_of(t.c, &mut kc) && rcw != NOREG && !(self.dies_here(
+            t.c,
+        ) && self.ret_want(i) == rcw) {
+            let rc = self.reg(t.c);
+            let rd = self.def(i);
+            self.materialize(t.b, rd);
+            self.c.cmov(x::invert(cc), 8, rd, rc);
+            return true;
+        }
         // The false side straight into the result's register: a constant or a spilled value takes no
         // register of its own.
         let rb = self.reg(t.b);
-        let mut kc: u64 = 0;
         // A constant false side when the return right after wants the true side's register, which dies
         // here: the result takes it, and the constant moves in with the condition inverted.
         if t.b != t.c && self.const_of(t.c, &mut kc) && self.dies_here(t.b) && self.ret_want(i) == rb {

@@ -56,6 +56,9 @@ pub(package) const FOLD_WIDEN: u64 = 549755813888;
 /// instruction between a load and its reader writing memory. The reader computes it where it reads it
 /// (wasm32's tree order: no local between).
 pub(package) const FOLD_SINK: u64 = 1099511627776;
+/// The extension or truncation of an integer that a folded shift count mask (`FOLD_SHAMT`) alone reads: the
+/// shift reads the count's low bits from the integer's register (x86-64's `cl`, arm64's register shifts).
+pub(package) const FOLD_SHAMT_EXT: u64 = 2199023255552;
 pub(package) const FOLD_CARRY: u64 = 16384;
 pub(package) const FOLD_FSEL: u64 = 32768;
 pub(package) const FOLD_NOT: u64 = 65536;
@@ -726,6 +729,29 @@ extend Live {
         }
     }
 
+    // `FOLD_SHAMT_EXT`, after every fold but the sinks: the integer it reads is one no other fold takes.
+    fn count_exts(self: &mut Self, b: &Body) {
+        if (self.fold_ops & FOLD_SHAMT_EXT) == 0 {
+            return;
+        }
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if t.op < O_SHL || t.op > O_ASHR || !is_int(t.ty) || self.pfold[i] || !is_inst(t.b) || !self.pfold[t.b as usize] || b.insts[t.b as usize].op != O_AND {
+                continue;
+            }
+            let z = b.insts[t.b as usize].a;
+            if !is_inst(z) || self.pfold[z as usize] || self.count[z as usize] != 1 {
+                continue;
+            }
+            let e = b.insts[z as usize];
+            let sty = b.type_of(e.a);
+            if e.op != O_ZEXT && e.op != O_SEXT && e.op != O_TRUNC || !is_int(sty) || sty == T_I128 || is_inst(e.a) && (self.pfold[e.a as usize] || b.insts[e.a as usize].op == O_ICONST) {
+                continue;
+            }
+            self.pfold[z as usize] = true;
+        }
+    }
+
     fn shift_counts(self: &mut Self, b: &Body) {
         if (self.fold_ops & FOLD_SHAMT) == 0 {
             return;
@@ -1042,6 +1068,7 @@ extend Live {
         self.widenings(b);
         if self.fold_max == 0 {
             self.shift_counts(b);
+            self.count_exts(b);
             // Last: the values that stay where they are include every other fold.
             self.sinks(b);
             return;
@@ -1362,6 +1389,7 @@ extend Live {
                 }
             }
         }
+        self.count_exts(b);
         self.sinks(b);
     }
 
@@ -3632,12 +3660,16 @@ pub(package) fn inc_side(b: &Body, t: Inst) u8 {
 }
 
 /// The amount a shift with amount operand `v` takes: the operand of `v` when `v` is a mask folded into the
-/// shift (`FOLD_SHAMT`), else `v`.
+/// shift (`FOLD_SHAMT`), past a folded extension or truncation (`FOLD_SHAMT_EXT`); else `v`.
 pub(package) fn shift_amount(b: &Body, pfold: &Vector<bool>, v: Value) Value {
     if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || !pfold[v as usize] || b.insts[v as usize].op != O_AND {
         return v;
     }
-    return b.insts[v as usize].a;
+    let z = b.insts[v as usize].a;
+    if is_inst(z) && pfold[z as usize] {
+        return b.insts[z as usize].a;
+    }
+    return z;
 }
 
 /// The value a generator reads rotation `r`'s amount from (`folded`, the folded instructions): the shift's

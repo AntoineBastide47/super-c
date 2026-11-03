@@ -4710,6 +4710,236 @@ fn even_lanes_of_two_vectors_run() {
     assert_eq(run_wasm(&lir, &drv), 0);
 }
 
+// A value plus 1 when another is (or is not) 0 adds the carry of `cmp p, 1` (x86-64): `@nei` (`x + (p != 0)`) and
+// `@eqf` subtract the borrow from `x + 1` (`sbb r, -1`), `@eqi` and `@nef` add it (`adc r, 0`); the zero on
+// either side of the comparison; `@nel`'s loaded value, which the comparison reads from memory, keeps the
+// `setcc`. They give the C results.
+@test
+fn x86_increments_on_a_zero_test_take_the_carry() {
+    let lir = M"(lir ptr 8
+sym @nei fn global
+sym @eqi fn global
+sym @nef fn global
+sym @eqf fn global
+sym @nel fn global
+fn @nei
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = add.i32 v0, v3
+  v5 = icmp.ne v1, v2
+  v6 = select.i32 v5, v4, v0
+  ret v6
+fn @eqi
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = add.i32 v0, v3
+  v5 = icmp.eq v1, v2
+  v6 = select.i32 v5, v4, v0
+  ret v6
+fn @nef
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = add.i32 v0, v3
+  v5 = icmp.ne v2, v1
+  v6 = select.i32 v5, v0, v4
+  ret v6
+fn @eqf
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = add.i32 v0, v3
+  v5 = icmp.eq v2, v1
+  v6 = select.i32 v5, v0, v4
+  ret v6
+fn @nel
+  sig (i32, ptr) -> i32
+b0(v0: i32, v1: ptr):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = add.i32 v0, v3
+  v5 = load.i32 v1 align 2
+  v6 = icmp.ne v5, v2
+  v7 = select.i32 v6, v4, v0
+  ret v7
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, OMIT_FP, &mut obj), "the System V object");
+    // Each: cmp esi, 1; sbb edi, -1 (`@nei`) or adc edi, 0 (`@eqi`, `@nef`); mov rax, rdi; ret; the padding.
+    let seq: [u8; 38] = [
+        0x83,
+        0xFE,
+        0x01,
+        0x83,
+        0xDF,
+        0xFF,
+        0x48,
+        0x89,
+        0xF8,
+        0xC3,
+        0xCC,
+        0xCC,
+        0xCC,
+        0xCC,
+        0xCC,
+        0xCC,
+        0x83,
+        0xFE,
+        0x01,
+        0x83,
+        0xD7,
+        0x00,
+        0x48,
+        0x89,
+        0xF8,
+        0xC3,
+        0xCC,
+        0xCC,
+        0xCC,
+        0xCC,
+        0xCC,
+        0xCC,
+        0x83,
+        0xFE,
+        0x01,
+        0x83,
+        0xD7,
+        0x00,
+    ];
+    assert(holds(&obj, seq[0..38]), "nei, eqi, nef");
+    let drv = M"(#include <stdint.h>
+int32_t nei(int32_t, int32_t);
+int32_t eqi(int32_t, int32_t);
+int32_t nef(int32_t, int32_t);
+int32_t eqf(int32_t, int32_t);
+int32_t nel(int32_t, const int32_t *);
+int main(void) {
+  static const int32_t v[5] = {0, 1, -1, 7, -2147483647 - 1};
+  for (int i = 0; i < 5; i++)
+    for (int k = 0; k < 5; k++) {
+      int32_t x = v[i], p = v[k];
+      int32_t x1 = (int32_t)((uint32_t)x + 1);
+      if (nei(x, p) != (p != 0 ? x1 : x)) return 1;
+      if (eqi(x, p) != (p == 0 ? x1 : x)) return 2;
+      if (nef(x, p) != (0 != p ? x : x1)) return 3;
+      if (eqf(x, p) != (0 == p ? x : x1)) return 4;
+      if (nel(x, &p) != (p != 0 ? x1 : x)) return 5;
+    }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// A shift by a narrow integer the width's mask reads reads the count's low bits where they are (x86-64, arm64):
+// `@space`'s bit table lookup shifts by `cl` as the byte arrived (Microsoft x64), with no extension and no
+// copy out of rcx and back. It gives the C result.
+@test
+fn shift_counts_read_narrow_integers_where_they_are() {
+    let lir = M"(lir ptr 8
+sym @space fn global
+fn @space
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i64 63
+  v2 = iconst.i64 4294977024
+  v3 = iconst.i8 32
+  v4 = icmp.ule v0, v3
+  v5 = zext.i64 v0
+  v6 = and.i64 v5, v1
+  v7 = lshr.i64 v2, v6
+  v8 = trunc.i8 v7
+  v9 = and.i8 v4, v8
+  ret v9
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, OMIT_FP, &mut obj), "the Microsoft x64 object");
+    // setbe al; movabs rdx, 0x100002600; shr rdx, cl; and eax, edx; ret.
+    let seq: [u8; 19] = [
+        0x0F,
+        0x96,
+        0xC0,
+        0x48,
+        0xBA,
+        0x00,
+        0x26,
+        0x00,
+        0x00,
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+        0x48,
+        0xD3,
+        0xEA,
+        0x21,
+        0xD0,
+        0xC3,
+    ];
+    assert(holds(&obj, seq[0..19]), "space");
+    let drv = M"(#include <stdint.h>
+#include <stdbool.h>
+bool space(uint8_t);
+int main(void) {
+  for (int c = 0; c < 256; c++)
+    if (space((uint8_t)c) != (c == 32 || c == 9 || c == 10 || c == 13)) return 1;
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// A select whose true side is a constant takes it in the result's register, the false side moved in with the
+// condition inverted (x86-64): `@sat`'s saturating sum is add, mov eax, -1, cmovae eax, edi, ret (System V),
+// no copy after the `cmov`. It gives the C result.
+@test
+fn x86_constant_true_sides_go_into_the_result() {
+    let lir = M"(lir ptr 8
+sym @sat fn global
+fn @sat
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 -1
+  v3, v4 = addo.u.i32 v0, v1
+  v5 = select.i32 v4, v2, v3
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, OMIT_FP, &mut obj), "the System V object");
+    // mov eax, 0xFFFFFFFF; cmovae rax, rdi; ret.
+    let sel: [u8; 10] = [0xB8, 0xFF, 0xFF, 0xFF, 0xFF, 0x48, 0x0F, 0x43, 0xC7, 0xC3];
+    assert(holds(&obj, sel[0..10]), "sat");
+    let drv = M"(#include <stdint.h>
+uint32_t sat(uint32_t, uint32_t);
+int main(void) {
+  static const uint32_t v[5] = {0, 1, 0x7FFFFFFF, 0xFFFFFFFE, 0xFFFFFFFF};
+  for (int i = 0; i < 5; i++)
+    for (int k = 0; k < 5; k++) {
+      uint32_t s = v[i] + v[k];
+      if (sat(v[i], v[k]) != (s < v[i] ? 0xFFFFFFFF : s)) return 1;
+    }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_sse41(lir, drv), 0);
+    }
+}
+
 // A Microsoft x64 body that calls nothing and keeps no slot or spill needs no home area for callees: `@sum`
 // (a vector loop and its scalar rest, the optimizer's output for a slice's sum) keeps the rest's sum in a
 // callee-saved register (`push rbx`), with no `sub rsp, 32`. It gives the C result.
