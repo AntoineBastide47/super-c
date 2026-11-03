@@ -6231,8 +6231,12 @@ extend Gen {
         }
         let m = self.mem_at(t.a, t.c as i32, &mut rs, &mut radd);
         self.lock = saved;
+        // A scalar over its address when the address dies here (`mov r8, [r8 + 8]`).
+        let ra = self.va[self.vx(t.a) as usize].reg;
         let rd = if self.in_reg(ty) {
             self.vec_def(i)
+        } else if ra != NOREG && ra < V0 && !is_v(ty) {
+            self.def_over(i, t.a, ra)
         } else {
             self.def_pass(i, t.a)
         };
@@ -11857,9 +11861,16 @@ extend Gen {
         let rd = self.def_pass(i, t.a) - V0;
         self.c.vmov(rd, rx);
         self.c.sse_rr(0x66, 0x0FF4, rd, ry);
-        self.c.sse_rr(0x66, 0x0F70, tb, ry);
-        self.c.byte(0xF5);
-        self.c.sse_rr(0x66, 0x0FF4, ta, tb);
+        // A multiplier of one value in every lane (a splat) has its odd lanes in its even ones already.
+        let b = self.b();
+        let splat = (t.b & (VPARAM | VFLAG)) == 0 && (b.insts[t.b as usize].op == O_SPLAT || splat_of(b, t.b).is_some());
+        if splat {
+            self.c.sse_rr(0x66, 0x0FF4, ta, ry);
+        } else {
+            self.c.sse_rr(0x66, 0x0F70, tb, ry);
+            self.c.byte(0xF5);
+            self.c.sse_rr(0x66, 0x0FF4, ta, tb);
+        }
         self.c.sse_rr(0x66, 0x0F70, rd, rd);
         self.c.byte(0xE8);
         self.c.sse_rr(0x66, 0x0F70, ta, ta);

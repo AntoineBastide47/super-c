@@ -57,6 +57,9 @@ extend Pack as Copy {}
 pub(package) struct Slp {
     ptr: u32,
     vb: u32, // the bytes of the widest pack
+    /// A sum's term loads go right before their adds (`term`): a target without paired accesses
+    /// (`Package.apairs`), whose few vector registers would otherwise hold every term at once.
+    pub(package) late_terms: bool,
     packs: Vector<Pack>,
     lv: Vector<Value>,
     // The lanes `build` takes, a stack: each call's from its `at` on.
@@ -96,6 +99,7 @@ extend Slp {
         return Slp {
             ptr: 8,
             vb: VBYTES,
+            late_terms: false,
             packs: Vector::<Pack>::new(),
             lv: Vector::<Value>::new(),
             tmp: Vector::<Value>::new(),
@@ -248,8 +252,19 @@ extend Slp {
                 self.param(b, p as u32);
             }
         }
+        // A sum's terms are made with the sum (`term`), under `late_terms`.
+        let mut term = Vector::<bool>::new();
+        term.resize_default(self.packs.len());
+        for x in 0..self.reds.len() * self.late_terms as usize {
+            let (_, p0, np) = self.reds[x];
+            for q in 0..np {
+                term[self.rpk[(p0 + q) as usize] as usize] = true;
+            }
+        }
         for p in 0..self.packs.len() {
-            let _ = self.vector(b, p as u32);
+            if !term[p] {
+                let _ = self.vector(b, p as u32);
+            }
         }
         for x in 0..self.eargs.len() {
             let (pp, e, ap) = self.eargs[x];
@@ -263,9 +278,9 @@ extend Slp {
             let (r, p0, np) = self.reds[x];
             let t = b.insts[r as usize];
             let k = self.iblk[r as usize];
-            let mut v = self.vector(b, self.rpk[p0 as usize]);
+            let mut v = self.term(b, self.rpk[p0 as usize], k, r);
             for q in 1..np {
-                let w = self.vector(b, self.rpk[(p0 + q) as usize]);
+                let w = self.term(b, self.rpk[(p0 + q) as usize], k, r);
                 v = self.make(b, Inst { op: t.op, ty: b.type_of(v), aux: 0, a: v, b: w, c: VNONE }, k, r, true);
             }
             let one = [v];
@@ -862,6 +877,38 @@ extend Slp {
     fn slot(self: &mut Self, b: &mut Body, k: u32, at: u32, n: u32) Value {
         let s = b.slot(n, 4);
         return self.make(b, Inst { op: O_SLOTADDR, ty: T_PTR, aux: 0, a: s, b: 0, c: 0 }, k, at, false);
+    }
+
+    // The vector of term pack `p` of the sum whose root is `r`, of block `k` (`reds`): a load whose lanes the
+    // sum alone reads is made right before the root, where its add reads it, when nothing from its first
+    // lane to the root writes memory: one term's vector lives at a time, not every one. Else `vector`.
+    fn term(self: &mut Self, b: &mut Body, p: u32, k: u32, r: u32) Value {
+        let pk = self.packs[p as usize];
+        if pk.vec != VNONE || pk.kind != PK_LOAD {
+            return self.vector(b, p);
+        }
+        let l0 = self.lv[pk.lane as usize];
+        let mut first = l0;
+        let mut ok = true;
+        for q in 0..pk.n {
+            let l = self.lv[(pk.lane + q) as usize];
+            first = first.min(l);
+            ok = ok && self.iblk[l as usize] == k && self.uses[l as usize] == 1;
+        }
+        for i in first..r {
+            ok = ok && !writes_memory(b.insts[i as usize]);
+        }
+        if !ok {
+            return self.vector(b, p);
+        }
+        let mut t = b.insts[l0 as usize];
+        let (root, off) = address(b, t);
+        t.ty = vec_type(pk.ty, pk.n);
+        t.a = root;
+        t.c = off as u32;
+        let v = self.make(b, t, k, r, false);
+        self.packs.index_mut(p as usize).vec = v;
+        return v;
     }
 
     // Pack `p`'s vector, made on first use.

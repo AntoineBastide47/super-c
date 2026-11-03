@@ -2259,6 +2259,44 @@ b0(v0: ptr, v1: ptr, v2: ptr):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A product of 32-bit lanes by a splat (a value from outside, a constant) under SSE2: the splat's odd lanes
+// are its even ones, so only the other operand takes a `pshufd` (66 [REX] 0F 70 /r F5), one per product.
+@test
+fn products_of_32_bit_lanes_by_a_splat_run() {
+    let lir = M"(lir ptr 8
+sym @mulk fn global
+fn @mulk
+  sig (ptr, i32, ptr) -> void
+b0(v0: ptr, v1: i32, v2: ptr):
+  v3 = load.v4i32 v0 align 2
+  v4 = splat.v4i32 v1
+  v5 = mul.v4i32 v3, v4
+  v6 = iconst.i32 12345
+  v7 = splat.v4i32 v6
+  v8 = mul.v4i32 v5, v7
+  store v8, v2 align 2
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the x86-64 object",
+    );
+    let mut n: u32 = 0;
+    for x in 0..obj.len() - 5 {
+        // A REX prefix (40..4F) for xmm8 and above may follow 66.
+        let r = ((obj[x + 1] & 0xF0) == 0x40) as usize;
+        n += (obj[x] == 0x66 && obj[x + 1 + r] == 0x0F && obj[x + 2 + r] == 0x70 && obj[x + 4 + r] == 0xF5) as u32;
+    }
+    assert_eq(n, 2);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nvoid mulk(const uint32_t *, uint32_t, uint32_t *);\nint main(void) {\n  uint32_t a[4] = {3, 0xFFFFFFFFu, 0x80000001u, 123456789u};\n  uint32_t d[4];\n  mulk(a, 0x9E3779B9u, d);\n  for (int k = 0; k < 4; k++) if (d[k] != a[k] * 0x9E3779B9u * 12345u) return k + 1;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // Bits of a vector in a register read as another vector type of its size (`bitcast`): the register
 // stays, no memory; halves of 16-bit lanes interleaved with 0 read as 32-bit lanes (a widening).
 @test
@@ -10131,6 +10169,44 @@ b2: cold
     }
     let drv = "#include <stdint.h>\n#include <stdlib.h>\nint32_t q(int32_t, int32_t);\nvoid __sc_panic(const char *m) { (void)m; exit(7); }\nint main(void) {\n  if (q(17, 5) != 3) return 1;\n  q(1, 0);\n  return 2;\n}\n";
     assert_eq(run_native(src, drv), 7);
+}
+
+// A load whose address dies at it takes the address's register (`def_over`): under Microsoft x64, whose
+// caller-saved registers (but the scratch r10 and r11) are rax, rcx, rdx, r8 and r9, a 128-bit sum of two
+// aggregates C's convention (`used`) passes by reference into a third (four words loaded through two dying
+// pointers next to the live result's) needs no spill, so the body keeps no frame (no `sub rsp`, 48 83 EC).
+@test
+fn a_load_takes_its_dying_addresss_register() {
+    let lir = M"(lir ptr 8
+sym @add2 fn global used
+fn @add2
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (l0, l0) -> l0
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.i64 v0 align 3
+  v4 = load.i64 v0+8 align 3
+  v5 = load.i64 v1 align 3
+  v6 = load.i64 v1+8 align 3
+  v7, v8 = addo.u.i64 v3, v5
+  v9, v10 = addo.u.i64 v4, v6
+  v11 = zext.i64 v8
+  v12, v13 = addo.u.i64 v9, v11
+  store v7, v2 align 3
+  store v12, v2+8 align 3
+  ret
+)";
+    let mut win = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("windows", false), tgt::axis_index("x86_64", true), OMIT_FP, &mut win),
+        "the object",
+    );
+    let t = coff_section(&win, ".text");
+    let (n, at) = ((t >> 32) as u32, t as u32);
+    let mut frame = false;
+    for x in at..at + n - 3 {
+        frame = frame || win[x as usize] == 0x48 && win[(x + 1) as usize] == 0x83 && win[(x + 2) as usize] == 0xEC;
+    }
+    assert(!frame, "no frame");
 }
 
 // Microsoft x64 passes an aggregate of 40 bytes by reference: the address the LIR passes goes as it is (the

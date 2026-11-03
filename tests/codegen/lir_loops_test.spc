@@ -5730,7 +5730,8 @@ b5(v13: i32):
 }
 
 // A sum of three vectors' worth of terms (loads from consecutive addresses) packs into three vector loads,
-// two vector adds and one reduction.
+// two vector adds and one reduction. With paired accesses (`Package.apairs`) the loads stay together, which
+// pairs them; without, each load comes right before its add (`Slp::term`), so one term is live at a time.
 @test
 fn a_sum_of_several_vectors_of_terms_packs() {
     let src = M"(lir ptr 8
@@ -5801,11 +5802,36 @@ b0(v0: i64):
     let (b, a) = optimized(src, VECTOR);
     let t = text_of(&a, "sum12");
     assert(count(&t, "load.v4i32") == 3 && count(&t, "add.v4i32") == 2 && t.contains("reduce_add"), t.as_str());
+    assert(loads_in_a_row(&t) == 3, t.as_str());
+    let mut err = String::new();
+    let mut np = lparse::parse(src, &mut err).unwrap();
+    np.apairs = false;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut np, &none, lopt::Config { inline: il::SPEED, loops: VECTOR });
+    let u = text_of(&np, "sum12");
+    assert(count(&u, "load.v4i32") == 3 && loads_in_a_row(&u) == 2, u.as_str());
     let vals: [u64; 3] = [0, 3, 0x7FFFFFFF];
     for k in 0..3usize {
         let args: []u64 = [unsafe vals[k]];
-        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        let want = run_value(&b, "drive", args);
+        same_outcome(&b, &a, "drive", args, want, false);
+        assert_eq(run_value(&np, "drive", args), want);
     }
+}
+
+// The most `load.v4i32` lines of `text` in a row.
+fn loads_in_a_row(text: &String) u32 {
+    let mut most: u32 = 0;
+    let mut run: u32 = 0;
+    for line in text.as_str().split("\n") {
+        run = if line.contains("load.v4i32") {
+            run + 1
+        } else {
+            0
+        };
+        most = most.max(run);
+    }
+    return most;
 }
 
 // Package text `text` read, then optimized with loop budgets `bu` for a target of 16-byte registers that
