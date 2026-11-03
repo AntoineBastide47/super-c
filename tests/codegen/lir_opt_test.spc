@@ -238,7 +238,13 @@ fn vector_loops_interleave_the_targets_copies() {
             "vsum",
             format("build --profile=release {} main.spc -o app", flags).as_str(),
         );
-        let f = printed(r.text(), "vsum");
+        // The root module's names take its prefix when the build has another program module.
+        let f0 = printed(r.text(), "vsum");
+        let f = if f0.len() != 0 {
+            f0
+        } else {
+            printed(r.text(), "main__vsum")
+        };
         let at = f.find("load.v4i32");
         if at < 0 {
             r.show();

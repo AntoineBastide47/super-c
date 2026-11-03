@@ -4,6 +4,7 @@
 // thread, between two instructions: it may only call async-signal-safe functions and store to atomics or
 // `volatile` state, so installing one is `unsafe`. Unstable, internal to std and the compiler.
 import std::platform::error;
+import std::mem::ptr;
 
 @platform(macos | ios)
 type sigset_t = u32;
@@ -133,7 +134,7 @@ pub fn set_default(s: Signal) Result<Unit, IoError> {
 /// process). Children started afterwards inherit an ignored signal.
 @platform(!windows)
 pub fn ignore(s: Signal) Result<Unit, IoError> {
-    return install(s, 1 as *mut void);
+    return install(s, ptr::from_addr_mut::<void>(1)); // SIG_IGN
 }
 
 /// Run `handler(number)` when `s` arrives. Interrupted system calls restart.

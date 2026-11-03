@@ -18,6 +18,7 @@
 /// A growable heap array of T through allocator A; capacity grows geometrically, elements are freed
 /// with the vector.
 pub struct Vector<T, A = Global> {
+    @owned
     ptr: *mut T, // owned storage; null while cap == 0 (private)
     len: usize, // elements in use (private)
     cap: usize, // elements allocated (private)

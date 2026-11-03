@@ -5,6 +5,7 @@
 import stdio;
 import std::platform::fs;
 import lsp::text as text;
+import std::mem::ptr;
 
 // The native handle under a C stream: its descriptor, or on Windows the HANDLE of the C runtime's.
 @platform(!windows)
@@ -147,7 +148,7 @@ fn handle_of(f: *mut stdio::FILE) fs::RawHandle {
 }
 @platform(windows)
 fn handle_of(f: *mut stdio::FILE) fs::RawHandle {
-    return ((unsafe _get_osfhandle(_fileno(f))) as usize) as *mut void;
+    return ptr::from_addr_mut::<void>((unsafe _get_osfhandle(_fileno(f))) as usize);
 }
 
 // Case-insensitive header-name prefix test (`name` is the lowercase spelling with its colon).

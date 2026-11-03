@@ -7,6 +7,8 @@
 // construction returns `None`; an alignment that is not a power of two passed to a helper panics.
 // Import with `import std::mem::layout;`.
 
+import std::mem::ptr;
+
 const ISIZE_MAX: usize = isize::MAX as usize;
 
 /// The size and alignment of a block of memory. Construct it with `new`, `array` or `from_size_align`;
@@ -52,7 +54,7 @@ pub const fn is_aligned<T>(p: *const T, align: usize) bool {
 @always_inline
 pub fn alloc_layout<A: Allocator>(a: &mut A, l: Layout) *mut void {
     if l.size() == 0 {
-        return l.align() as *mut void;
+        return ptr::from_addr_mut::<void>(l.align());
     }
     return unsafe a.alloc(l.size(), l.align());
 }

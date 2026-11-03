@@ -13,6 +13,7 @@ import stdlib;
 import string as cstring;
 import sc_runtime;
 import std::parallel::platform as platform;
+import std::mem::ptr;
 
 // Leak-tracker backtrace suppression (std/rt/base.spc): a coroutine stack has no clean base frame, so the tracker
 // must not unwind it. Brackets each coroutine run slice; a no-op when leak checking is off.
@@ -468,7 +469,7 @@ const fn co_bytes() usize {
 fn co_alloc() *mut Coroutine {
     let mut g = Global {};
     let base = unsafe g.alloc(co_bytes(), 16);
-    let co = ((base as usize + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN) as *mut Coroutine;
+    let co = (unsafe (base as *mut u8 + (CO_ALIGN - base as usize % CO_ALIGN) % CO_ALIGN)) as *mut Coroutine;
     unsafe (*co).base = base;
     return co;
 }
@@ -480,7 +481,7 @@ fn sched_alloc() *mut Scheduler {
     let mut g = Global {};
     let bytes = (sizeof(Scheduler) + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN + CO_ALIGN;
     let base = unsafe g.alloc(bytes, 16);
-    let s = ((base as usize + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN) as *mut Scheduler;
+    let s = (unsafe (base as *mut u8 + (CO_ALIGN - base as usize % CO_ALIGN) % CO_ALIGN)) as *mut Scheduler;
     unsafe (*s).base = base;
     return s;
 }
@@ -644,7 +645,9 @@ fn reg_init() {
 
 // The registry, or null while no pool exists, for a reader not ordered after the pool's start.
 fn reg_load() *mut Registry {
-    return (unsafe atomic::load_ptr(((&mut unsafe G_REG) as *const *mut Registry) as *const usize, 1)) as *mut Registry;
+    return ptr::from_addr_mut::<Registry>(
+        unsafe atomic::load_ptr(((&mut unsafe G_REG) as *const *mut Registry) as *const usize, 1),
+    );
 }
 
 fn reg_slot(r: *mut Registry, idx: usize) *mut TaskSlot {
@@ -892,7 +895,9 @@ fn dq_tail(w: *mut Worker) *mut usize {
 // Slot access. Atomic (relaxed) so a delayed reader and the owner's refill of a reused slot are never an
 // undefined pair: see the memory-order argument above.
 fn slot_load(w: *mut Worker, i: usize) *mut Runnable {
-    return (unsafe atomic::load_ptr((unsafe ((*w).buf + i % DEQUE_CAP)) as *const usize, 0)) as *mut Runnable;
+    return ptr::from_addr_mut::<Runnable>(
+        unsafe atomic::load_ptr((unsafe ((*w).buf + i % DEQUE_CAP)) as *const usize, 0),
+    );
 }
 
 fn slot_store(w: *mut Worker, i: usize, co: *mut Runnable) {
@@ -2342,7 +2347,7 @@ fn build_scheduler() *mut Scheduler {
     // Line-aligned for real: the allocator only promises malloc alignment, so the array sits inside an
     // over-sized block (`deques_base` is what gets freed); see Worker.pad for why the alignment matters.
     let deques_base = unsafe g.alloc(nw * sizeof(Worker) + LINE, 16);
-    let deques = ((deques_base as usize + LINE - 1) / LINE * LINE) as *mut Worker;
+    let deques = (unsafe (deques_base as *mut u8 + (LINE - deques_base as usize % LINE) % LINE)) as *mut Worker;
     let parkers = (unsafe g.alloc(nw * sizeof(Parker), LINE)) as *mut Parker;
     let words = (nw + 63) / 64;
     let idle = (unsafe g.alloc(words * sizeof(u64), alignof(u64))) as *mut u64;

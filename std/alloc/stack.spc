@@ -24,6 +24,7 @@
 // check does not see `Stack` blocks; `Stack::used` gives the bytes the current task holds. WebAssembly
 // cannot reserve address ranges: there `Stack` takes its blocks from `Global`.
 import sc_runtime;
+import std::mem::ptr;
 
 extern "C" {
     fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
@@ -164,12 +165,12 @@ extend Region {
         if unlikely(end > self.commit) {
             self.grow(end);
         }
-        let h = (p - HDR) as *mut usize;
+        let h = ptr::from_addr_mut::<usize>(p - HDR);
         unsafe *h = self.top;
         unsafe *(h + 1) = self.last;
         self.last = p;
         self.top = end;
-        return p as *mut void;
+        return ptr::from_addr_mut::<void>(p);
     }
 
     @always_inline
@@ -182,7 +183,7 @@ extend Region {
         if at == self.last {
             self.pop();
         } else {
-            unsafe *((at - HDR) as *mut usize + 1) |= FREED;
+            unsafe *(ptr::from_addr_mut::<usize>(at - HDR) + 1) |= FREED;
         }
     }
 
@@ -210,7 +211,7 @@ extend Region {
         }
         let q = unsafe self.alloc(new_size, align);
         unsafe memcpy(q, ptr, old_size);
-        unsafe *((at - HDR) as *mut usize + 1) |= FREED;
+        unsafe *(ptr::from_addr_mut::<usize>(at - HDR) + 1) |= FREED;
         return q;
     }
 
@@ -248,7 +249,7 @@ extend Region {
         let base = (self as *mut Region) as usize;
         let page = sc_runtime::sc_rt_page_size();
         let keep = (2 * used + page - 1) / page * page;
-        unsafe sc_runtime::sc_rt_region_decommit((base + keep) as *mut void, self.commit - base - keep);
+        unsafe sc_runtime::sc_rt_region_decommit(ptr::from_addr_mut::<void>(base + keep), self.commit - base - keep);
         self.commit = base + keep;
     }
 
@@ -266,7 +267,7 @@ extend Region {
         if want < end - base {
             want = (end - base + page - 1) / page * page;
         }
-        if !unsafe sc_runtime::sc_rt_region_commit(self.commit as *mut void, want - have) {
+        if !unsafe sc_runtime::sc_rt_region_commit(ptr::from_addr_mut::<void>(self.commit), want - have) {
             panic("Stack: out of memory");
         }
         self.commit = base + want;

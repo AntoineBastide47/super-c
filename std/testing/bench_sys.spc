@@ -24,6 +24,7 @@ import fcntl;
 import filesystem;
 @platform(wasm)
 import time;
+import std::mem::ptr;
 
 // The memory-order codes of `atomic` (std/parallel/atomics.spc `MemoryOrder`).
 const RELAXED: i32 = 0;
@@ -715,7 +716,7 @@ static mut ZONE0: usize = 0;
 
 @platform(macos | ios)
 fn zone0() *mut Zone {
-    let mut z = (unsafe atomic::load_usize(&ZONE0, RELAXED)) as *mut Zone;
+    let mut z = ptr::from_addr_mut::<Zone>(unsafe atomic::load_usize(&ZONE0, RELAXED));
     if z == null {
         z = unsafe malloc_default_zone();
         unsafe atomic::store_usize(&mut ZONE0, z as usize, RELAXED);
@@ -932,7 +933,7 @@ pub unsafe fn sc_bs_cpu_model(buf: *mut char, cap: usize) i32 {
     // RegGetValueA nul-terminates and fails cleanly on overflow.
     let mut len = cap as stdlib::c_ulong;
     let rc = unsafe RegGetValueA(
-        HKEY_LOCAL_MACHINE as *mut void,
+        ptr::from_addr_mut::<void>(HKEY_LOCAL_MACHINE as usize),
         "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0".ptr() as *const char,
         "ProcessorNameString".ptr() as *const char,
         RRF_RT_REG_SZ,

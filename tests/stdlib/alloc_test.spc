@@ -4,6 +4,7 @@
 // alloc, realloc and free sequence that checks block overlap and contents.
 import std::alloc;
 import std::math::random;
+import std::mem::ptr;
 
 // What a `Counting` upstream saw. Every block it hands out comes from `Global`.
 struct Counts {
@@ -59,7 +60,7 @@ const fn pattern(tag: u8, j: usize) u8 {
 }
 
 const fn fill(b: &Live) {
-    let p = b.addr as *mut u8;
+    let p = ptr::from_addr_mut::<u8>(b.addr);
     for j in 0..b.size {
         unsafe p[j] = pattern(b.tag, j);
     }
@@ -118,13 +119,13 @@ fn random_sequence<H: Allocator>(mut h: H, seed: u64) {
             let i = rng.next_u32() as usize % live.len();
             let b = live.swap_remove(i).unwrap();
             assert(intact(&b, b.size), "a block keeps its bytes until it is freed");
-            unsafe h.dealloc(b.addr as *mut void, b.size, b.align);
+            unsafe h.dealloc(ptr::from_addr_mut::<void>(b.addr), b.size, b.align);
         } else if live.len() > 0 && r < 4 {
             let i = rng.next_u32() as usize % live.len();
             let old = live.swap_remove(i).unwrap();
             assert(intact(&old, old.size), "a block keeps its bytes until it is reallocated");
             let size = random_size(&mut rng);
-            let p = unsafe h.realloc(old.addr as *mut void, old.size, size, old.align);
+            let p = unsafe h.realloc(ptr::from_addr_mut::<void>(old.addr), old.size, size, old.align);
             let b = Live { addr: p as usize, size: size, align: old.align, tag: tag };
             let kept = if size < old.size {
                 size
@@ -154,7 +155,7 @@ fn random_sequence<H: Allocator>(mut h: H, seed: u64) {
     }
     while let Some(b) = live.pop() {
         assert(intact(&b, b.size), "a block keeps its bytes until it is freed");
-        unsafe h.dealloc(b.addr as *mut void, b.size, b.align);
+        unsafe h.dealloc(ptr::from_addr_mut::<void>(b.addr), b.size, b.align);
     }
 }
 
@@ -292,7 +293,7 @@ fn arena_rolls_back_the_most_recent_block() {
     // Freeing a block that is not the most recent frees nothing.
     unsafe h.dealloc(y, 50, 4);
     assert((unsafe h.alloc(1, 1)) as usize == z as usize + 30, "y stays used");
-    unsafe h.dealloc((z as usize + 30) as *mut void, 1, 1);
+    unsafe h.dealloc(ptr::from_addr_mut::<void>(z as usize + 30), 1, 1);
     unsafe h.dealloc(z, 30, 2);
     assert(unsafe h.alloc(30, 2) == z, "the cursor moved back to z");
     unsafe h.dealloc(z, 30, 2);

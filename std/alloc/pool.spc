@@ -33,6 +33,8 @@
 // Exhaustion: the upstream allocator decides (`Global` aborts, `NoAlloc` panics); the pool never returns
 // null.
 
+import std::mem::ptr;
+
 extern "C" {
     fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
 }
@@ -140,7 +142,7 @@ extend<A: Allocator> PoolState<A> {
     @noinline
     unsafe fn alloc_unpooled(self: &mut Self, size: usize, align: usize) *mut void {
         if size == 0 {
-            return align as *mut void;
+            return ptr::from_addr_mut::<void>(align);
         }
         self.unpooled += size;
         return unsafe self.upstream.alloc(size, align);

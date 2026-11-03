@@ -26,6 +26,7 @@ import std::time as time;
 import std::parallel::platform as platform;
 import atomic;
 import sc_runtime;
+import std::mem::ptr;
 
 const TASKS: i64 = 8;
 const ROUNDS: i64 = 60;
@@ -469,7 +470,7 @@ fn hunt_park_storm() i64 {
         hs.push(
             thread::spawn(
                 fn() i64 {
-                    let w = addr as *mut i32;
+                    let w = ptr::from_addr_mut::<i32>(addr);
                     for _i in 0..300 {
                         // Some parks end by their deadline, some by an unpark, some find the word already
                         // changed and never sleep.
@@ -486,7 +487,7 @@ fn hunt_park_storm() i64 {
     }
     for _r in 0..300 {
         for t in 0..8usize {
-            let w = (base + t * stride * sizeof(i32)) as *mut i32;
+            let w = ptr::from_addr_mut::<i32>(base + t * stride * sizeof(i32));
             unsafe atomic::store_i32(w, 1, 2);
             if t % 2 == 0 {
                 unsafe sc_runtime::sc_rt_unpark_one(w);

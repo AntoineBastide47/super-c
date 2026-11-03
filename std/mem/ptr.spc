@@ -1,5 +1,6 @@
 // Raw pointer operations (Rust's `core::ptr`; C++ `std::bit_cast`, `std::memcpy` and `std::memmove`):
-// unaligned reads and writes, bulk copies, swaps, fills, pointer distance and bit casts.
+// unaligned reads and writes, bulk copies, swaps, fills, pointer distance, bit casts, and the conversions
+// to `*mut` (`cast_mut`, `from_addr_mut`).
 //
 // Every operation except `bit_cast` is `unsafe`: it reads or writes memory the type system cannot see.
 // Each states its precondition; a violated one is undefined behavior. A pointer must be non-null and,
@@ -84,6 +85,30 @@ pub unsafe const fn write_bytes<T>(dst: *mut T, byte: u8, n: usize) {
 /// `sizeof(T)`.
 pub unsafe const fn offset_from<T>(a: *const T, b: *const T) isize {
     return unsafe (a - b);
+}
+
+// Raw pointer mutability: the explicit conversions to `*mut T` from `*const T` and from an address. The
+// `as` casts are errors everywhere else, as from `&T` to `*mut T`: a shared borrow never becomes a writer
+// by a cast, also not through a number.
+
+/// `p` as a `*mut` pointer. The conversion itself is allowed; a write through the result while a shared
+/// borrow of that memory is live is undefined behavior, unless the memory is inside an `UnsafeCell` (the
+/// optimizer keeps what a shared borrow promises). For C interfaces whose `const` is wrong: a C routine
+/// that returns a mutable pointer into read-only input (`strchr`, `strerror`).
+pub const fn cast_mut<T>(p: *const T) *mut T {
+    return bit_cast::<*mut T, *const T>(p);
+}
+
+/// The `*mut` pointer at address `a`, which must come from a `*mut` pointer (an address kept as a number: a
+/// tagged word, an atomic, a hook). A write through the result while a shared borrow of that memory is live is
+/// undefined behavior, as for `cast_mut`.
+pub const fn from_addr_mut<T>(a: usize) *mut T {
+    return bit_cast::<*mut T, usize>(a);
+}
+
+/// `p` as a `*const` pointer, what a `*mut T` also coerces to.
+pub const fn cast_const<T>(p: *mut T) *const T {
+    return p;
 }
 
 /// The bits of `v` as a `U` (C++ `std::bit_cast`): `f32` to `u32`, `[u8; 8]` to `u64`, and back. A

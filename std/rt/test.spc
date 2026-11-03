@@ -17,6 +17,7 @@ import sc_runtime;
 import fcntl;
 @platform(linux | android)
 import filesystem;
+import std::mem::ptr;
 
 // One test of the table: its wrapper runs it with the global env (null without one).
 type TestFn = fn(*mut void);
@@ -1988,7 +1989,7 @@ fn run_pool(t: &Table, o: &Opts, sel: &Vector<usize>, _genv: *mut void, r: &mut 
             }
             kids.push(
                 Child {
-                    h: ph as *mut void,
+                    h: ptr::from_addr_mut::<void>(ph as usize),
                     test: ti,
                     token: token,
                     start: unsafe GetTickCount64(),
@@ -1996,7 +1997,7 @@ fn run_pool(t: &Table, o: &Opts, sel: &Vector<usize>, _genv: *mut void, r: &mut 
                     late: false,
                 },
             );
-            handles.push(ph as *mut void);
+            handles.push(ptr::from_addr_mut::<void>(ph as usize));
         }
         if kids.len() == 0 {
             continue;

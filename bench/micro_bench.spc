@@ -29,6 +29,7 @@ import std::parallel::blocking as blocking;
 import std::parallel::selector as selector;
 import std::parallel::thread as thread;
 import std::testing::bench as bench;
+import std::mem::ptr;
 
 const SPAWNS: i64 = 2000; // tasks per round for the spawn lanes
 const LATENCY_SPAWNS: i64 = 500; // one-at-a-time spawns per round for the latency lane
@@ -840,7 +841,7 @@ pub fn park_collisions(b: &mut bench::Bencher) {
         handles.push(
             thread::spawn(
                 fn() i64 {
-                    let w = addr as *mut i32;
+                    let w = ptr::from_addr_mut::<i32>(addr);
                     let mut stray: i64 = 0;
                     let mut served: i64 = 0;
                     loop {
@@ -868,7 +869,7 @@ pub fn park_collisions(b: &mut bench::Bencher) {
     while b.running() {
         for _r in 0..PARK_ROUNDS {
             for t in 0..PARK_THREADS as usize {
-                let w = (base + t * stride * sizeof(i32)) as *mut i32;
+                let w = ptr::from_addr_mut::<i32>(base + t * stride * sizeof(i32));
                 unsafe atomic::store_i32(w, 1, 2);
                 unsafe sc_runtime::sc_rt_unpark_one(w);
                 expected = expected + 1;
@@ -882,7 +883,7 @@ pub fn park_collisions(b: &mut bench::Bencher) {
     }
     let mut served: i64 = 0;
     for t in 0..PARK_THREADS as usize {
-        let w = (base + t * stride * sizeof(i32)) as *mut i32;
+        let w = ptr::from_addr_mut::<i32>(base + t * stride * sizeof(i32));
         unsafe atomic::store_i32(w, 2, 2);
         unsafe sc_runtime::sc_rt_unpark_one(w);
     }

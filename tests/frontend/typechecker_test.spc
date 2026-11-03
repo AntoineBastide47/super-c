@@ -2237,6 +2237,11 @@ fn const_pointers_never_become_mut() {
         "cannot cast a '*const' pointer to a '*mut' pointer",
     );
     h::expect_err_msg(
+        "a *const pointer through a number to *mut",
+        "fn main() i32 { let x: i32 = 1; let a = (&x as *const i32) as usize; let q = a as *mut i32; return unsafe *q; }\n",
+        "cannot cast a number to a '*mut' pointer",
+    );
+    h::expect_err_msg(
         "a shared vector's buffer cast to *mut",
         "fn bump(v: &Vector<i32>) { let p = v.as_ptr() as *mut i32; unsafe *p = 1; }\nfn main() i32 { let mut v = Vector::<i32>::new(); v.push(0); bump(&v); return v[0]; }\n",
         "cannot cast a '*const' pointer to a '*mut' pointer",
@@ -2245,10 +2250,10 @@ fn const_pointers_never_become_mut() {
         "an exclusive vector's buffer, a cell's value and a zero-filled cell",
         "struct S { c: UnsafeCell<u64>, n: u32 }\nfn bump(v: &mut Vector<i32>) { let p = v.as_mut_ptr(); unsafe *p = 1; }\nfn main() i32 { let mut v = Vector::<i32>::new(); v.push(0); bump(&mut v); let s = S { n: 2 }; unsafe *s.c.get() = 3; return v[0] + (unsafe *s.c.get()) as i32 + s.n as i32 - 6; }\n",
     );
-    // The program imports std::ptr, which the in-process compile does not load: a build.
+    // The program imports std::mem::ptr, which the in-process compile does not load: a build.
     h::expect_run(
         "the explicit conversion",
-        "import std::ptr;\nfn main() i32 { let x: i32 = 1; let p = &x as *const i32; let q = ptr::cast_mut(p); let r = ptr::cast_const(q); return unsafe *r - 1; }\n",
+        "import std::mem::ptr;\nfn main() i32 { let mut x: i32 = 1; let p = &x as *const i32; let q = ptr::cast_mut(p); let r = ptr::cast_const(q); let w = ptr::from_addr_mut::<i32>((&mut x as *mut i32) as usize); unsafe *w = 2; return unsafe *r - 2; }\n",
         "",
         "",
     );

@@ -25,6 +25,8 @@
 // neither. Exhaustion: the upstream allocator decides (`Global` aborts, `NoAlloc` panics); a size whose
 // chunk does not fit a `usize` panics. The arena never returns null.
 
+import std::mem::ptr;
+
 extern "C" {
     fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
 }
@@ -74,7 +76,7 @@ pub struct ArenaAlloc<'a, A = Global> {
 
 // The address of an empty region: non-null and aligned, never dereferenced.
 const fn empty_region() *mut u8 {
-    return CHUNK_ALIGN as *mut u8;
+    return ptr::from_addr_mut::<u8>(CHUNK_ALIGN);
 }
 
 // The chunk size after `n`: twice as large, up to `CHUNK_SIZE_GROWTH_MAX`.
@@ -138,7 +140,7 @@ extend<A: Allocator> ArenaState<A> {
     @noinline
     unsafe fn alloc_slow(self: &mut Self, size: usize, align: usize) *mut void {
         if size == 0 {
-            return align as *mut void;
+            return ptr::from_addr_mut::<void>(align);
         }
         // The chunk data starts at `CHUNK_ALIGN`, so a larger alignment may need this much padding.
         let mut pad_max: usize = 0;

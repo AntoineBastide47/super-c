@@ -7,6 +7,7 @@
 import string as cstring;
 import stdlib;
 import lsp::text as text;
+import std::mem::ptr;
 
 const MAX_NESTING_DEPTH: usize = 1024;
 
@@ -466,15 +467,15 @@ extend JSONParser {
         self.fail_s(m);
     }
 
-    const fn top(self: &Self) usize {
-        return *self.stack.at(self.stack.len() - 1);
+    const fn top(self: &Self) *mut JSON {
+        return ptr::from_addr_mut::<JSON>(*self.stack.at(self.stack.len() - 1));
     }
 
     // Attach `json` under the pending key of the open object; returns the inserted value's slot (as
     // usize), 0 on error. The slot stays valid while it is the open top of stack: nothing is appended to
     // this object until the child closes.
     fn set_object_value(self: &mut Self, json: JSON) usize {
-        let o = unsafe (*(self.top() as *mut JSON)).members_mut();
+        let o = unsafe (*self.top()).members_mut();
         if !self.comma_detected && o.len() != 0 {
             self.fail("Missing ',' between object members");
             return 0;
@@ -494,7 +495,7 @@ extend JSONParser {
 
     // Add `json` to the open object or array; its slot (as usize), or 0 on an error.
     fn add_value(self: &mut Self, json: JSON) usize {
-        if unsafe (*(self.top() as *mut JSON)).is_object() {
+        if unsafe (*self.top()).is_object() {
             return self.set_object_value(json);
         }
         return self.set_array_value(json);
@@ -503,7 +504,7 @@ extend JSONParser {
     // Append `json` to the open array and return its slot (as usize), 0 on a comma error (which frees
     // `json`). The slot stays valid while it is the open top of stack.
     fn set_array_value(self: &mut Self, json: JSON) usize {
-        let a = unsafe (*(self.top() as *mut JSON)).items_mut();
+        let a = unsafe (*self.top()).items_mut();
         if !self.comma_detected && a.len() != 0 {
             self.fail("Missing ',' between array members");
             return 0;
@@ -698,7 +699,7 @@ extend JSONParser {
                     self.fail("Nesting depth limit exceeded");
                     return i;
                 }
-                let t = self.top() as *mut JSON;
+                let t = self.top();
                 let child = JSON::Obj(Vector::<JSONPair>::with_capacity(8));
                 if unsafe (*t).is_object() || unsafe (*t).is_array() {
                     let slot = self.add_value(child);
@@ -711,7 +712,7 @@ extend JSONParser {
                 }
                 self.found_data = true;
             } else if c == b'}' {
-                let t = self.top() as *mut JSON;
+                let t = self.top();
                 if unsafe (*t).is_object() {
                     if self.pending_key_set {
                         self.fail_s(format("Missing value for key '{}' in object", self.pending_key.as_str()));
@@ -742,7 +743,7 @@ extend JSONParser {
                     self.fail("Nesting depth limit exceeded");
                     return i;
                 }
-                let t = self.top() as *mut JSON;
+                let t = self.top();
                 if unsafe (*t).is_object() || unsafe (*t).is_array() {
                     let slot = self.add_value(JSON::Arr(Vector::<JSON>::with_capacity(8)));
                     if slot == 0 {
@@ -759,7 +760,7 @@ extend JSONParser {
                 }
                 self.found_data = true;
             } else if c == b']' {
-                let t = self.top() as *mut JSON;
+                let t = self.top();
                 if unsafe (*t).is_array() {
                     if self.comma_detected && unsafe (*t).count() != 0 {
                         self.fail("Trailing ',' before closing ']'");
@@ -778,7 +779,7 @@ extend JSONParser {
                 }
                 self.found_data = true;
             } else if c == b':' {
-                if unsafe (*(self.top() as *mut JSON)).is_array() {
+                if unsafe (*self.top()).is_array() {
                     self.fail("Unexpected ':' in an array, did you mean ','?");
                     return i;
                 }
@@ -805,7 +806,7 @@ extend JSONParser {
                     return i;
                 }
                 // The open container holds no member yet, or no container is open.
-                if unsafe (*(self.top() as *mut JSON)).count() == 0 {
+                if unsafe (*self.top()).count() == 0 {
                     self.fail("Unexpected ','");
                     return i;
                 }
@@ -832,7 +833,7 @@ extend JSONParser {
                             text = String::from_str(self.src.slice(i + 1, q));
                         }
                         self.found_data = true;
-                        let t = self.top() as *mut JSON;
+                        let t = self.top();
                         if unsafe (*t).is_object() {
                             if !self.pending_key_set {
                                 if !self.candidate_key_set {
@@ -877,7 +878,7 @@ extend JSONParser {
                     return i;
                 }
             } else if c == b'-' || c >= b'0' && c <= b'9' {
-                let t = self.top() as *mut JSON;
+                let t = self.top();
                 if unsafe (*t).is_object() && !self.pending_key_set {
                     self.fail("Expected a key before adding a number");
                     return i;
@@ -900,7 +901,7 @@ extend JSONParser {
                 }
                 i = q - 1;
             } else if c == b't' || c == b'f' || c == b'n' {
-                let t = self.top() as *mut JSON;
+                let t = self.top();
                 if unsafe (*t).is_object() && !self.pending_key_set {
                     self.fail("Expected a key before adding a boolean or null value");
                     return i;
@@ -969,7 +970,7 @@ pub(package) fn parse(src: str) Result<JSON, String> {
         return Err(String::from_str("Empty input is not valid JSON"));
     }
     if p.stack.len() != 0 {
-        let t = p.top() as *mut JSON;
+        let t = p.top();
         if unsafe (*t).is_object() {
             return Err(String::from_str("Missing closing '}' for object"));
         }

@@ -46,6 +46,7 @@ import atomic;
 import sc_io;
 import std::parallel::runtime as runtime;
 import std::time;
+import std::mem::ptr;
 
 // Interest and readiness bits, as the poller spells them; `CLOSE` marks a command node that reports a
 // closed descriptor rather than a wait.
@@ -529,7 +530,7 @@ fn do_disarm(r: *mut Reactor, n: *mut IoWait, b: &mut Batch) {
 
 // The queue link a tagged node pointer travels on.
 fn cmd_link(v: usize) *mut usize {
-    let n = (v & ~CMD_MASK) as *mut IoWait;
+    let n = ptr::from_addr_mut::<IoWait>(v & ~CMD_MASK);
     let tag = v & CMD_MASK;
     if tag == CMD_DISARM {
         return &mut unsafe (*n).dnext;
@@ -555,7 +556,7 @@ fn drain_commands(r: *mut Reactor, b: &mut Batch) {
     }
     v = prev;
     while v != 0 {
-        let n = (v & ~CMD_MASK) as *mut IoWait;
+        let n = ptr::from_addr_mut::<IoWait>(v & ~CMD_MASK);
         let tag = v & CMD_MASK;
         v = unsafe cmd_link(v)[0];
         if tag == CMD_DISARM {
@@ -756,7 +757,7 @@ fn build_reactor() *mut Reactor {
     for k in 0..REC_INIT {
         unsafe recs[k] = FdRec { rd: null, wr: null, evt: 0, gen: 0, known: 0, stale: 0 };
     }
-    let r = ((base as usize + R_ALIGN - 1) / R_ALIGN * R_ALIGN) as *mut Reactor;
+    let r = (unsafe (base as *mut u8 + (R_ALIGN - base as usize % R_ALIGN) % R_ALIGN)) as *mut Reactor;
     unsafe r[0] = Reactor {
         base: base,
         poller: poller,
@@ -853,10 +854,12 @@ extend DiagLine {
 // The length of a waiter list, read without the reactor's ownership: bounded, since it may be changing.
 fn diag_len(head: usize) u64 {
     let mut n: u64 = 0;
-    let mut w = head as *mut IoWait;
+    let mut w = ptr::from_addr_mut::<IoWait>(head);
     while w != null && n < 100000 {
         n = n + 1;
-        w = (unsafe atomic::load_usize(((&mut (*w).lnext) as *mut *mut IoWait) as *mut usize, 0)) as *mut IoWait;
+        w = ptr::from_addr_mut::<IoWait>(
+            unsafe atomic::load_usize(((&mut (*w).lnext) as *mut *mut IoWait) as *mut usize, 0),
+        );
     }
     return n;
 }
@@ -893,7 +896,9 @@ fn io_diag() {
     l.put(" closes ");
     l.num(unsafe atomic::load_u64(&mut unsafe G_CLOSES, 0));
     l.end();
-    let recs = (unsafe atomic::load_usize(((&mut (*r).recs) as *mut *mut FdRec) as *mut usize, 0)) as *mut FdRec;
+    let recs = ptr::from_addr_mut::<FdRec>(
+        unsafe atomic::load_usize(((&mut (*r).recs) as *mut *mut FdRec) as *mut usize, 0),
+    );
     let nrec = unsafe atomic::load_usize(&mut unsafe (*r).nrec, 0);
     for i in 0..nrec {
         let rec = unsafe (recs + i);

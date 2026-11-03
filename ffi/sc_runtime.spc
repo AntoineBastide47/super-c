@@ -14,6 +14,7 @@ import atomic;
 import errno;
 import stdio;
 import stdlib;
+import std::mem::ptr;
 
 // Parking is the one piece with a per-OS backing LIBRARY: POSIX parks on pthread condition variables
 // (libpthread), except bionic, which keeps those entry points in libc and ships no such library to name.
@@ -1042,7 +1043,7 @@ pub unsafe fn sc_rt_stack_alloc(size: usize) *mut void {
         return null;
     }
     stack_note(total, true);
-    return (m as usize + pg) as *mut void;
+    return unsafe (m as *mut u8 + pg);
 }
 
 /// Release a stack from `sc_rt_stack_alloc` (`usable` and `size` as returned). A release the OS refuses
@@ -1050,7 +1051,7 @@ pub unsafe fn sc_rt_stack_alloc(size: usize) *mut void {
 @platform(macos | ios | linux | android)
 pub unsafe fn sc_rt_stack_free(usable: *mut void, size: usize) {
     let pg = sc_rt_page_size();
-    if fail_hit(FAIL_STACK_RELEASE) || unsafe munmap((usable as usize - pg) as *mut void, size + pg) != 0 {
+    if fail_hit(FAIL_STACK_RELEASE) || unsafe munmap(unsafe (usable as *mut u8 - pg), size + pg) != 0 {
         die("cannot release a task stack");
     }
     stack_note(size + pg, false);
@@ -1761,16 +1762,16 @@ pub unsafe fn sc_rt_stack_alloc(size: usize) *mut void {
     let lim = stk_initial_limit(m + pg, size, pg);
     // The live part, plus one PAGE_GUARD page under it whose first touch asks for more.
     let mut ok = !fail_hit(FAIL_STACK_GUARD);
-    ok = ok && unsafe VirtualAlloc(lim as *mut void, m + pg + size - lim, MEM_COMMIT, PAGE_READWRITE) != null;
+    ok = ok && unsafe VirtualAlloc(ptr::from_addr_mut::<void>(lim), m + pg + size - lim, MEM_COMMIT, PAGE_READWRITE) != null;
     if ok && lim - pg >= m + pg {
-        ok = unsafe VirtualAlloc((lim - pg) as *mut void, pg, MEM_COMMIT, PAGE_READWRITE | PAGE_GUARD) != null;
+        ok = unsafe VirtualAlloc(ptr::from_addr_mut::<void>(lim - pg), pg, MEM_COMMIT, PAGE_READWRITE | PAGE_GUARD) != null;
     }
     if !ok {
-        unsafe VirtualFree(m as *mut void, 0, MEM_RELEASE);
+        unsafe VirtualFree(ptr::from_addr_mut::<void>(m), 0, MEM_RELEASE);
         return null;
     }
     stack_note(size + pg, true);
-    return (m + pg) as *mut void;
+    return ptr::from_addr_mut::<void>(m + pg);
 }
 
 /// Release a stack from `sc_rt_stack_alloc` (`usable` and `size` as returned). A release the OS refuses
@@ -1778,7 +1779,11 @@ pub unsafe fn sc_rt_stack_alloc(size: usize) *mut void {
 @platform(windows)
 pub unsafe fn sc_rt_stack_free(usable: *mut void, size: usize) {
     let pg = sc_rt_page_size();
-    if fail_hit(FAIL_STACK_RELEASE) || unsafe VirtualFree((usable as usize - pg) as *mut void, 0, MEM_RELEASE) == 0 {
+    if fail_hit(FAIL_STACK_RELEASE) || unsafe VirtualFree(
+        ptr::from_addr_mut::<void>(usable as usize - pg),
+        0,
+        MEM_RELEASE,
+    ) == 0 {
         die("cannot release a task stack");
     }
     stack_note(size + pg, false);
@@ -1984,7 +1989,7 @@ pub unsafe fn sc_rt_thread_create(out: *mut *mut void, entry: fn(*mut void) *mut
         unsafe stdlib::free(t);
         return -1;
     }
-    unsafe *out = h as *mut void;
+    unsafe *out = ptr::from_addr_mut::<void>(h);
     return 0;
 }
 
@@ -2545,8 +2550,9 @@ fn forge(f: *mut *mut void, body: *mut void, arg: *mut void, tramp: *mut void) {
 @platform(macos | ios | linux | android)
 pub unsafe fn sc_rt_ctx_init(ctx: *mut void, stack: *mut void, size: usize, entry: fn(*mut void), arg: *mut void) {
     let c = ctx as *mut Ctx;
-    let top = stack as usize + size & ~15usize;
-    let f = (top - CTX_FRAME * 8) as *mut *mut void;
+    // The frame below the stack's end rounded down to 16 bytes, reached from `stack` itself.
+    let below = size - (stack as usize + size & 15);
+    let f = (unsafe (stack as *mut u8 + (below - CTX_FRAME * 8))) as *mut *mut void;
     for i in 0..CTX_FRAME {
         unsafe f[i] = null;
     }

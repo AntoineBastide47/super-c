@@ -7,6 +7,7 @@
 
 /// An owned heap allocation of one T through allocator A; freeing the box frees the value.
 pub struct Box<T, A = Global> {
+    @owned
     ptr: *mut T, // owns one T (private)
     alloc: A, // the allocator the block was obtained through (private; zero-sized for Global)
 }

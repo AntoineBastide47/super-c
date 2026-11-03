@@ -4642,7 +4642,8 @@ fn main() i32 {
     // A wild pointer is a crash, not a stack overflow: the message must not appear.
     p.mkfile(
         "main.spc",
-        M"(import std::parallel::runtime as rt;
+        M"(import std::mem::ptr;
+import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::platform as platform;
 
@@ -4651,7 +4652,7 @@ fn main() i32 {
     wg.add(1);
     let w = wg.clone();
     launch fn() {
-        let bad = (4096 + platform::ncpu()) as *mut i64;
+        let bad = ptr::from_addr_mut::<i64>(4096 + platform::ncpu());
         unsafe *bad = 1;
         w.done();
     };
@@ -4677,7 +4678,8 @@ fn thread_stack_overflow_is_reported() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        M"(import stdlib;
+        M"(import std::mem::ptr;
+import stdlib;
 import std::parallel::thread as thread;
 import std::parallel::platform as platform;
 
@@ -4729,14 +4731,14 @@ fn main() i32 {
         return 0;
     }
     if mode() == "null" {
-        let bad = (platform::ncpu() - platform::ncpu()) as *mut i64;
+        let bad = ptr::from_addr_mut::<i64>(platform::ncpu() - platform::ncpu());
         unsafe *bad = 1;
         return 0;
     }
     if mode() == "wild" {
         let h = thread::spawn(
             fn() i64 {
-                let bad = (4096 + platform::ncpu()) as *mut i64;
+                let bad = ptr::from_addr_mut::<i64>(4096 + platform::ncpu());
                 unsafe *bad = 1;
                 return 0;
             },
@@ -8068,12 +8070,12 @@ fn main() i32 { return 0; }
 }
 
 fn const_fn_semantics_runs(b: &mut h::ExitBatch) {
-    // A dangling-sentinel pointer (`alignof(T) as *mut T`) folds: the shape every ZST buffer in
+    // A dangling-sentinel pointer (`dangling::<T>()`) folds: the shape every ZST buffer in
     // std relies on, and a `const fn` caller with known arguments must evaluate through it.
     b.add(
         "a dangling-sentinel pointer folds",
         M"(extern "C" { fn exit(c: i32) void; }
-const fn dang<T>() *mut T { return alignof(T) as *mut T; }
+const fn dang<T>() *mut T { return dangling::<T>(); }
 const fn probe() i32 {
     let a = dang::<u64>();
     if a == null { return 1; }

@@ -727,7 +727,7 @@ fn stk_take() *mut void {
     for i in 0..STK_CACHE {
         let m = unsafe atomic_swap_usize(&mut STK_CACHED[i], 0, ACQUIRE);
         if m != 0 {
-            return m as *mut void;
+            return addr_mut::<void>(m);
         }
     }
     return null;
@@ -1172,6 +1172,18 @@ struct LkShard {
 // The address of the 64 shards, made by the first switch-on (`lk_made`): zeroed pages from the system, so
 // that no static holds them (a static is evaluated at compile time, within the program's budget).
 static mut LK_TABLE: usize = 0;
+
+// The `*mut` pointer an address kept in an atomic word came from (`std::mem::ptr::from_addr_mut`, which
+// this module cannot import).
+union AddrPtr<T> {
+    a: usize,
+    p: *mut T,
+}
+
+fn addr_mut<T>(a: usize) *mut T {
+    let u = AddrPtr::<T> { a: a };
+    return u.p;
+}
 static mut LK_STATE: i32 = 0; // 0 unprobed, 1 off, 2 report, 3 fatal; any thread probes it
 static mut LK_EPOCH: u32 = 0; // the tag of every allocation recorded from now on (`sc_lk_epoch_set`)
 // Per-thread site-suppression depth for coroutine and fiber stacks.
@@ -1267,7 +1279,7 @@ fn lk_made_shards() usize {
 
 // Shard `h` of the table, which `lk_on` found made.
 fn lk_shard(h: usize) *mut LkShard {
-    return unsafe (atomic_load_usize(&mut LK_TABLE, ACQUIRE) as *mut LkShard + h);
+    return unsafe (addr_mut::<LkShard>(atomic_load_usize(&mut LK_TABLE, ACQUIRE)) + h);
 }
 
 fn lk_shard_for(p: *const void) *mut LkShard {

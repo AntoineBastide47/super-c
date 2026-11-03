@@ -52,6 +52,7 @@ import sc_runtime;
 import stdlib;
 import std::parallel::runtime as runtime;
 import std::parallel::platform as platform;
+import std::mem::ptr;
 
 /// The most threads the blocking pool starts: the effective concurrency limit of `call`.
 pub const MAX_THREADS: usize = 64; // enough concurrent blocking calls for real programs, bounded for safety
@@ -830,7 +831,7 @@ fn wake_push(co: *mut runtime::Coroutine) {
     let hp = (&mut unsafe (*p).wakes) as *mut usize;
     loop {
         let old = unsafe atomic::load_usize(hp, 0);
-        unsafe (*co).run.next = old as *mut runtime::Runnable;
+        unsafe (*co).run.next = ptr::from_addr_mut::<runtime::Runnable>(old);
         if unsafe atomic::cas_usize(hp, old, co as usize, true, 3, 0) {
             if old == 0 {
                 wake_flush(hp);
@@ -849,7 +850,7 @@ fn wake_push(co: *mut runtime::Coroutine) {
 fn wake_flush(hp: *mut usize) {
     let got = unsafe atomic::swap_usize(hp, 0, 3);
     // Pushed last in, first out: reverse into completion order.
-    let tail = got as *mut runtime::Coroutine;
+    let tail = ptr::from_addr_mut::<runtime::Coroutine>(got);
     let mut head: *mut runtime::Coroutine = null;
     let mut cur = tail;
     let mut n: i32 = 0;

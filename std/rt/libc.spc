@@ -26,7 +26,6 @@
 // The WASI preview 1 calls, imported from module `wasi_snapshot_preview1` under their WASI names. A C
 // declaration cannot name an import module, a module-level assembly directive can; the C symbols carry the
 // `sc_wasi_` prefix so no C library name is taken. The types are the wasm types of each import.
-import std::ptr;
 
 asm(M"(
 .functype sc_wasi_args_get (i32, i32) -> (i32)
@@ -649,7 +648,7 @@ pub const fn strsignal(sig: i32) *mut char {
     } else {
         sig as usize
     };
-    return ptr::cast_mut((unsafe SIG_NAMES[i].ptr()) as *const char);
+    return cast_mut((unsafe SIG_NAMES[i].ptr()) as *const char);
 }
 
 /// Make `func` the handler of `sig`; the previous one, or `SIG_ERR` with EINVAL for a signal out of range,
@@ -773,7 +772,7 @@ const fn word(a: usize) usize {
 }
 
 const fn set_word(a: usize, v: usize) {
-    unsafe *(a as *mut usize) = v;
+    unsafe *addr_mut::<usize>(a) = v;
 }
 
 const fn bsize(b: usize) usize {
@@ -983,7 +982,7 @@ fn heap_alloc(n: usize) *mut void {
         }
     }
     take(b, size);
-    return (b + HDR) as *mut void;
+    return addr_mut::<void>(b + HDR);
 }
 
 fn heap_free(p: *mut void) {
@@ -1142,8 +1141,8 @@ pub fn aligned_alloc(align: usize, n: usize) *mut void {
     set_word(nb, total - lead | USED | PREV_USED);
     set_word(b, lead | USED | prev);
     heap_free(raw);
-    let _ = resize_in_place(p as *mut void, block_size(n));
-    return p as *mut void;
+    let _ = resize_in_place(addr_mut::<void>(p), block_size(n));
+    return addr_mut::<void>(p);
 }
 
 /// POSIX's form of `aligned_alloc`: 0 with the block in `*out`, EINVAL or ENOMEM.
@@ -1166,7 +1165,7 @@ pub fn posix_memalign(out: *mut *mut void, align: usize, n: usize) i32 {
 @export("sbrk")
 pub fn sbrk(inc: isize) *mut void {
     if inc == 0 {
-        return (unsafe sc_wasm_memory_size() * PAGE) as *mut void;
+        return addr_mut::<void>(unsafe sc_wasm_memory_size() * PAGE);
     }
     if inc % PAGE as isize != 0 || inc < 0 {
         abort();
@@ -1178,9 +1177,9 @@ pub fn sbrk(inc: isize) *mut void {
     let old = unsafe sc_wasm_memory_grow(inc as usize / PAGE);
     if old < 0 {
         set_errno(ENOMEM);
-        return (~0usize) as *mut void;
+        return addr_mut::<void>(~0usize);
     }
-    return (old as usize * PAGE) as *mut void;
+    return addr_mut::<void>(old as usize * PAGE);
 }
 
 // ---- strings -------------------------------------------------------------------------------------------
@@ -1308,7 +1307,7 @@ pub const fn memchr(p: *const void, c: i32, n: usize) *mut void {
     let b = c as u8;
     for i in 0..n {
         if unsafe s[i] == b {
-            return ptr::cast_mut(unsafe (s + i));
+            return cast_mut(unsafe (s + i));
         }
     }
     return null;
@@ -1371,7 +1370,7 @@ pub const fn strchr(s: *const char, c: i32) *mut char {
     let mut i: usize = 0;
     loop {
         if unsafe p[i] == b {
-            return ptr::cast_mut((unsafe (p + i)) as *const char);
+            return cast_mut((unsafe (p + i)) as *const char);
         }
         if unsafe p[i] == 0 {
             return null;
@@ -1399,7 +1398,7 @@ pub const fn strrchr(s: *const char, c: i32) *mut char {
     while i > 0 {
         i -= 1;
         if unsafe p[i] == b {
-            return ptr::cast_mut((unsafe (p + i)) as *const char);
+            return cast_mut((unsafe (p + i)) as *const char);
         }
     }
     return null;
@@ -1412,12 +1411,12 @@ pub const fn strstr(hay: *const char, needle: *const char) *mut char {
     let nd = needle as *const u8;
     let nl = strlen(needle);
     if nl == 0 {
-        return ptr::cast_mut(hay);
+        return cast_mut(hay);
     }
     let mut i: usize = 0;
     while unsafe h[i] != 0 {
         if unsafe h[i] == unsafe nd[0] && strncmp(unsafe (hay + i), needle, nl) == 0 {
-            return ptr::cast_mut((unsafe (h + i)) as *const char);
+            return cast_mut((unsafe (h + i)) as *const char);
         }
         i += 1;
     }
@@ -1857,7 +1856,7 @@ fn strtox(s: *const char, end: *mut *mut char, base: i32, lim: u64) u64 {
     let mut f = scan_of(0, s as *const u8, null);
     let y = intscan(&mut f, base as u32, lim, true);
     if end != null {
-        unsafe *end = ptr::cast_mut(unsafe (s + f.used()));
+        unsafe *end = cast_mut(unsafe (s + f.used()));
     }
     return y;
 }
@@ -4198,7 +4197,7 @@ pub fn poll(fds: *mut pollfd, nfds: usize, timeout: i32) i32 {
     for i in 0..got {
         let ev = unsafe evs[i];
         if ev.kind == EVENTTYPE_FD_READ || ev.kind == EVENTTYPE_FD_WRITE {
-            let pf = (ev.userdata as usize) as *mut pollfd;
+            let pf = addr_mut::<pollfd>(ev.userdata as usize);
             if ev.error == EBADF as u16 {
                 unsafe (*pf).revents |= POLLNVAL;
             } else if ev.error == EPIPE as u16 {
@@ -5083,7 +5082,7 @@ pub fn setlocale(cat: i32, name: *const char) *mut char {
         if name != null {
             unsafe LOC_CAT[cat as usize] = get_locale(cat, name as *const u8);
         }
-        return ptr::cast_mut(loc_name(unsafe LOC_CAT[cat as usize]) as *const char);
+        return cast_mut(loc_name(unsafe LOC_CAT[cat as usize]) as *const char);
     }
     if name != null {
         let mut part = [0u8; 24];
@@ -5122,7 +5121,7 @@ pub fn setlocale(cat: i32, name: *const char) *mut char {
     }
     unsafe LOC_ALL[k - 1] = 0;
     return if same == 6 {
-        ptr::cast_mut(last as *const char)
+        cast_mut(last as *const char)
     } else {
         ((unsafe &mut LOC_ALL[0]) as *mut u8) as *mut char
     };
@@ -5132,10 +5131,10 @@ pub fn setlocale(cat: i32, name: *const char) *mut char {
 /// numbers.
 @export("localeconv")
 pub fn localeconv() *mut lconv {
-    let e = ptr::cast_mut("".ptr() as *const char);
+    let e = cast_mut("".ptr() as *const char);
     let none = 255 as char;
     unsafe LCONV = lconv {
-        decimal_point: ptr::cast_mut(".".ptr() as *const char),
+        decimal_point: cast_mut(".".ptr() as *const char),
         thousands_sep: e,
         grouping: e,
         int_curr_symbol: e,
@@ -5254,7 +5253,7 @@ pub const fn strerror(code: i32) *mut char {
     } else {
         code as usize
     };
-    return ptr::cast_mut((unsafe ERR_MSG[i].ptr()) as *const char);
+    return cast_mut((unsafe ERR_MSG[i].ptr()) as *const char);
 }
 
 // ---- printf --------------------------------------------------------------------------------------------
@@ -5377,6 +5376,25 @@ const fn imin(a: i32, b: i32) i32 {
 union Bits64 {
     pub f: f64,
     pub u: u64,
+}
+
+// The `*mut` pointer a C interface hands out from a `*const` one (`strchr`'s result), or that an address kept
+// as a number came from (`std::mem::ptr::cast_mut` and `from_addr_mut`, which this module cannot import): a
+// write through it while a shared borrow of that memory is live is undefined behavior.
+union MutPtr<T> {
+    c: *const T,
+    a: usize,
+    m: *mut T,
+}
+
+fn cast_mut<T>(p: *const T) *mut T {
+    let u = MutPtr::<T> { c: p };
+    return u.m;
+}
+
+fn addr_mut<T>(a: usize) *mut T {
+    let u = MutPtr::<T> { a: a };
+    return u.m;
 }
 
 // The decimal digits of a double in base 10^9 words: `BIG` words, of which a double needs at most 128
@@ -6564,19 +6582,19 @@ fn printf_core(o0: *mut Out, fmt: *const char, ap: &mut va_list, nl_arg: *mut Ar
         if t == 110 {
             let q = arg.i as usize;
             if ps == S_BARE {
-                unsafe *(q as *mut i32) = cnt;
+                unsafe *addr_mut::<i32>(q) = cnt;
             } else if ps == S_LPRE {
-                unsafe *(q as *mut isize) = cnt as isize;
+                unsafe *addr_mut::<isize>(q) = cnt as isize;
             } else if ps == S_LLPRE {
-                unsafe *(q as *mut i64) = cnt;
+                unsafe *addr_mut::<i64>(q) = cnt;
             } else if ps == S_HPRE {
-                unsafe *(q as *mut u16) = cnt as u16;
+                unsafe *addr_mut::<u16>(q) = cnt as u16;
             } else if ps == S_HHPRE {
-                unsafe *(q as *mut u8) = cnt as u8;
+                unsafe *addr_mut::<u8>(q) = cnt as u8;
             } else if ps == S_ZTPRE {
-                unsafe *(q as *mut usize) = cnt as usize;
+                unsafe *addr_mut::<usize>(q) = cnt as usize;
             } else if ps == S_JPRE {
-                unsafe *(q as *mut u64) = cnt as u64;
+                unsafe *addr_mut::<u64>(q) = cnt as u64;
             }
             l = 0;
             continue;
@@ -7343,7 +7361,7 @@ fn vscan(f: &mut Scan, fmt: *const char, ap0: va_list) i32 {
                 break;
             }
             if t == 112 && dest != null {
-                unsafe *(dest as *mut *mut void) = (x as usize) as *mut void;
+                unsafe *(dest as *mut *mut void) = addr_mut::<void>(x as usize);
             } else {
                 store_int(dest, size, x);
             }
@@ -8007,7 +8025,7 @@ pub fn strtod(s: *const char, end: *mut *mut char) f64 {
     let mut f = scan_of(0, s as *const u8, null);
     let y = floatscan(&mut f, 1, true);
     if end != null {
-        unsafe *end = ptr::cast_mut(unsafe (s + f.used()));
+        unsafe *end = cast_mut(unsafe (s + f.used()));
     }
     return y;
 }
@@ -8018,7 +8036,7 @@ pub fn strtof(s: *const char, end: *mut *mut char) f32 {
     let mut f = scan_of(0, s as *const u8, null);
     let y = floatscan(&mut f, 0, true);
     if end != null {
-        unsafe *end = ptr::cast_mut(unsafe (s + f.used()));
+        unsafe *end = cast_mut(unsafe (s + f.used()));
     }
     return y as f32;
 }
@@ -8250,7 +8268,7 @@ pub fn bsearch(key: *const void, base: *const void, n: usize, width: usize, cmp:
             b = unsafe (t + width);
             nel -= nel / 2 + 1;
         } else {
-            return ptr::cast_mut(t);
+            return cast_mut(t);
         }
     }
     return null;

@@ -29,6 +29,8 @@ import module::loader as loader;
 import driver_shim as shim;
 @platform(macos | ios | linux | android)
 import unistd;
+@platform(windows)
+import std::mem::ptr;
 
 // The edited document, and the edits: a statement with a type error at the top of the `str_id` body (a
 // body-only edit), and the `str_id` return type (a signature edit; four other modules call it).
@@ -565,6 +567,18 @@ fn restore(saved: &[i32; 2]) {
 @platform(windows | wasm)
 fn restore(_saved: &[i32; 2]) {}
 
+// The handle an integer carried to a thread names (`into_raw` as `usize`): a POSIX descriptor, or the
+// address of a Windows handle.
+@platform(windows)
+fn raw_handle(a: usize) fs::RawHandle {
+    return ptr::from_addr_mut::<void>(a);
+}
+
+@platform(!windows)
+fn raw_handle(a: usize) fs::RawHandle {
+    return a as fs::RawHandle;
+}
+
 // The session: the pipes move onto descriptors 0 and 1, the driver thread runs the script, and this
 // thread runs the server until `exit`; then the descriptors come back.
 fn session() bool {
@@ -602,8 +616,8 @@ fn session() bool {
     let h = thread::spawn(
         fn() Vector<Vector<Sample>> {
             let mut d = Drv {
-                w: unsafe fs::File::from_raw(wfd as fs::RawHandle),
-                r: unsafe fs::File::from_raw(rfd as fs::RawHandle),
+                w: unsafe fs::File::from_raw(raw_handle(wfd)),
+                r: unsafe fs::File::from_raw(raw_handle(rfd)),
                 buf: Vector::<u8>::new(),
                 lo: 0,
                 hi: 0,

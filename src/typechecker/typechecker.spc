@@ -16991,19 +16991,6 @@ extend<'a> TypeChecker<'a> {
         let hit = self.ph_unsafecell;
         return hit.node != NODE_NONE && unsafe (*self.cur_ast()).module == hit.mid && self.current_self == hit.node;
     }
-    // True while checking `std::ptr`, whose `cast_mut` is the explicit `*const` to `*mut` conversion.
-    const fn in_ptr_module(self: &Self) bool {
-        if self.package == null {
-            return false;
-        }
-        let m = self.cur_module() as usize;
-        let p = unsafe &*self.package;
-        if m >= p.modules.len() {
-            return false;
-        }
-        let pth = p.modules[m].path.as_str();
-        return pth == "std::ptr" || pth == "__std::ptr";
-    }
     const fn is_sync_iface(self: &Self, tr: DefId) bool {
         return is_ph(tr, self.ph_sync);
     }
@@ -30772,18 +30759,32 @@ extend TypeChecker {
                 // A `*const` pointer, which an immutable reference gives (`as_ptr`), never becomes a `*mut` one
                 // either: the two casts would launder the shared borrow into mutation the same way. A `*mut`
                 // pointer comes from `&mut` (`as_mut_ptr`), an `UnsafeCell`, a binding that declares it, or
-                // `std::ptr::cast_mut`, the explicit conversion (the one place the cast is allowed).
+                // `std::mem::ptr::cast_mut`, the explicit conversion (a bit cast, no `as`).
                 if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_POINTER && self.type_at(
                     src,
                 ).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 && self.type_at(dst).kind == TypeKind::TYPE_POINTER && self.type_at(
                     dst,
-                ).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !self.in_unsafe_cell() && !self.in_ptr_module() {
+                ).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !self.in_unsafe_cell() {
                     let sp = unsafe (*a).at_const(id).span;
                     self.errors.emit_span(
                         dc::CANNOT_CAST_CONST_POINTER_MUT_POINTER,
                         sp,
                         format(
-                            "cannot cast a '*const' pointer to a '*mut' pointer; take it from '&mut' ('as_mut_ptr'), use 'UnsafeCell' for interior mutability, or 'std::ptr::cast_mut' for a C interface",
+                            "cannot cast a '*const' pointer to a '*mut' pointer; take it from '&mut' ('as_mut_ptr'), use 'UnsafeCell' for interior mutability, or 'std::mem::ptr::cast_mut' for a C interface",
+                        ),
+                    );
+                }
+                // Nor does a number: `p as usize as *mut T` would launder a `*const` pointer the same way. A
+                // `*mut` pointer from an address is `std::mem::ptr::from_addr_mut`, the explicit conversion (a bit cast).
+                if src != TYPE_NONE && dst != TYPE_NONE && self.is_int(src) && self.type_at(dst).kind == TypeKind::TYPE_POINTER && self.type_at(
+                    dst,
+                ).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                    let sp = unsafe (*a).at_const(id).span;
+                    self.errors.emit_span(
+                        dc::CANNOT_CAST_NUMBER_MUT_POINTER,
+                        sp,
+                        format(
+                            "cannot cast a number to a '*mut' pointer; keep the '*mut' pointer, or use 'std::mem::ptr::from_addr_mut' for an address that came from one",
                         ),
                     );
                 }

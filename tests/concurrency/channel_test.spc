@@ -17,6 +17,7 @@ import std::parallel::atomics as atomics;
 import std::parallel::platform as platform;
 import std::time as time;
 import std::testing::bench_sys as sys;
+import std::mem::ptr;
 
 // Exact-destruction counter: every `free` of a Payload bumps it, so a test can prove one destruction.
 static mut G_FREES: i64 = 0;
@@ -851,7 +852,7 @@ fn an_unpark_reaches_only_the_thread_parked_on_that_word() {
         handles.push(
             thread::spawn(
                 fn() i64 {
-                    let w = addr as *mut i32;
+                    let w = ptr::from_addr_mut::<i32>(addr);
                     let mut served: i64 = 0;
                     loop {
                         while unsafe atomic::load_i32(w, 1) == 0 {
@@ -876,7 +877,7 @@ fn an_unpark_reaches_only_the_thread_parked_on_that_word() {
     let mut expected: i64 = 0;
     for _r in 0..3 {
         for t in 0..PARKED as usize {
-            let w = (base + t * stride * sizeof(i32)) as *mut i32;
+            let w = ptr::from_addr_mut::<i32>(base + t * stride * sizeof(i32));
             unsafe atomic::store_i32(w, 1, 2);
             unsafe sc_runtime::sc_rt_unpark_one(w);
             expected = expected + 1;
@@ -895,7 +896,7 @@ fn an_unpark_reaches_only_the_thread_parked_on_that_word() {
     unsafe sc_runtime::sc_rt_unpark_all(&mut lone);
     let mut served: i64 = 0;
     for t in 0..PARKED as usize {
-        let w = (base + t * stride * sizeof(i32)) as *mut i32;
+        let w = ptr::from_addr_mut::<i32>(base + t * stride * sizeof(i32));
         unsafe atomic::store_i32(w, 2, 2);
         unsafe sc_runtime::sc_rt_unpark_one(w);
     }
@@ -935,7 +936,7 @@ fn unpark_all_wakes_every_thread_on_the_word_and_no_other() {
         handles.push(
             thread::spawn(
                 fn() i64 {
-                    let w = addr as *mut i32;
+                    let w = ptr::from_addr_mut::<i32>(addr);
                     while unsafe atomic::load_i32(w, 1) == 0 {
                         unsafe sc_runtime::sc_rt_park(w, 0, -1);
                         if unsafe atomic::load_i32(w, 1) == 0 {
@@ -949,8 +950,8 @@ fn unpark_all_wakes_every_thread_on_the_word_and_no_other() {
         );
     }
     assert(ph::wait_os_parked(6), "every thread is parked");
-    let w0 = base as *mut i32;
-    let w1 = (base + stride * sizeof(i32)) as *mut i32;
+    let w0 = ptr::from_addr_mut::<i32>(base);
+    let w1 = ptr::from_addr_mut::<i32>(base + stride * sizeof(i32));
     unsafe atomic::store_i32(w0, 1, 2);
     unsafe sc_runtime::sc_rt_unpark_all(w0);
     assert(ph::wait_count(&woke, 3), "the three parked on the first word wake");

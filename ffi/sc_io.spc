@@ -13,6 +13,7 @@ import fcntl;
 import sc_runtime;
 import stdlib;
 import unistd;
+import std::mem::ptr;
 
 /// Interest and readiness bits of the poller.
 pub const RD: i32 = 1;
@@ -1518,7 +1519,7 @@ unsafe fn open_socket(family: i32, kind: i32, proto: i32) i32 {
 unsafe fn accept_socket(l: usize) usize {
     let s = unsafe accept(l, null, null);
     if s != INVALID_SOCKET {
-        let _ = unsafe SetHandleInformation(s as *mut void, HANDLE_FLAG_INHERIT, 0);
+        let _ = unsafe SetHandleInformation(ptr::from_addr_mut::<void>(s), HANDLE_FLAG_INHERIT, 0);
     }
     return s;
 }
