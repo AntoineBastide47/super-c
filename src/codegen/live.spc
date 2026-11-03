@@ -49,10 +49,11 @@ pub(package) const FOLD_SINC: u64 = 274877906944;
 /// one instruction of its block reads: that instruction extends its operand (wasm32's `i64.extend_i32_*` at
 /// the use, no local; a narrow integer's location holds it zero-extended).
 pub(package) const FOLD_WIDEN: u64 = 549755813888;
-/// A store's value that one instruction of its block makes and only the store reads: an integer operation
-/// that cannot trap (no division) or a scalar load, whose operands are parameters, constants, values of
-/// more uses or (for the operation) such loads, no instruction between a load and the store writing memory.
-/// The store computes it after its address (wasm32's tree order: no local between).
+/// A store's value, a select's side or its folded comparison's operand that one instruction of its block
+/// makes and only that reads: an integer operation that cannot trap (no division) or a scalar load, whose
+/// operands are parameters, constants, values of more uses or one more level of such values, no
+/// instruction between a load and its reader writing memory. The reader computes it where it reads it
+/// (wasm32's tree order: no local between).
 pub(package) const FOLD_SINK: u64 = 1099511627776;
 pub(package) const FOLD_CARRY: u64 = 16384;
 pub(package) const FOLD_FSEL: u64 = 32768;
@@ -548,11 +549,14 @@ extend Live {
 
     // `FOLD_SHAMT`: a 32- or 64-bit shift's count that an `and` with the width's mask (`& 31`, `& 63`) makes,
     // read only there, folds into the shift, which takes the count modulo the width.
-    // `FOLD_SINK`: the values stores compute after their addresses (`sinkable`).
+    // `FOLD_SINK`: the values stores and selects compute where they read them (`sinkable`): a store's value, a
+    // select's sides and its folded comparison's operands.
     fn sinks(self: &mut Self, b: &Body) {
         if (self.fold_ops & FOLD_SINK) == 0 {
             return;
         }
+        let mut moved = Vector::<Value>::new();
+        let mut us = Vector::<Value>::new();
         for k in 0..b.blocks.len() {
             if self.rpo[k] == NONE {
                 continue;
@@ -560,28 +564,86 @@ extend Live {
             let bk = b.blocks[k];
             for s in bk.start..bk.start + bk.len {
                 let st = b.insts[s as usize];
-                if st.op != O_STORE || !self.sinkable(b, st.b, bk.start, s, 2) {
-                    continue;
+                moved.truncate(0);
+                if st.op == O_STORE {
+                    self.sink(b, st.b, bk.start, s, &mut moved);
+                } else if st.op == O_SELECT && is_int(st.ty) && st.ty != T_I128 {
+                    self.sink(b, st.b, bk.start, s, &mut moved);
+                    self.sink(b, st.c, bk.start, s, &mut moved);
+                    if (st.a & (VPARAM | VFLAG)) == 0 && self.pfold[st.a as usize] && b.insts[st.a as usize].op == O_ICMP {
+                        let c = b.insts[st.a as usize];
+                        self.sink(b, c.a, bk.start, s, &mut moved);
+                        self.sink(b, c.b, bk.start, s, &mut moved);
+                    }
                 }
-                let v = st.b;
-                self.pfold[v as usize] = true;
-                self.sunk[v as usize] = true;
-                let t = b.insts[v as usize];
-                if t.op != O_LOAD {
-                    for o in [t.a, t.b] {
-                        if self.sinkable(b, o, bk.start, s, 1) {
-                            self.pfold[o as usize] = true;
-                            self.sunk[o as usize] = true;
-                        }
+                // The reader's folded instructions stay within FOLD_DEPTH (`uses_at`), else nothing moves.
+                if moved.len() != 0 && self.fold_count(b, s, &mut us) > FOLD_DEPTH {
+                    for q in 0..moved.len() {
+                        self.pfold[moved[q] as usize] = false;
+                        self.sunk[moved[q] as usize] = false;
                     }
                 }
             }
         }
     }
 
-    // Whether value `v` may move to store `s` of the block from `lo` (`FOLD_SINK`): one instruction there that
-    // only the store reads, a load (`depth` 1 or 2) or an operation (`depth` 2) whose operands stay where they
-    // are or are such loads.
+    // Value `v` and the operands it moves with, when it may move to instruction `s` (`sinkable`): each one in
+    // `moved`.
+    fn sink(self: &mut Self, b: &Body, v: Value, lo: u32, s: u32, moved: &mut Vector<Value>) {
+        if !self.sinkable(b, v, lo, s, 2) {
+            return;
+        }
+        self.pfold[v as usize] = true;
+        self.sunk[v as usize] = true;
+        moved.push(v);
+        let t = b.insts[v as usize];
+        if t.op == O_LOAD {
+            return;
+        }
+        for o in [t.a, t.b] {
+            if o != VNONE && !self.stays(b, o) {
+                self.pfold[o as usize] = true;
+                self.sunk[o as usize] = true;
+                moved.push(o);
+            }
+        }
+    }
+
+    // The folded instructions `uses_at` expands in instruction `s`'s uses (`us` its scratch), at most one past
+    // FOLD_DEPTH.
+    fn fold_count(self: &Self, b: &Body, s: u32, us: &mut Vector<Value>) u32 {
+        each_use(b, b.insts[s as usize], us);
+        let mut n: u32 = 0;
+        let mut u: usize = 0;
+        // Each step reads one use; a folded one counts and leaves its operands in its place.
+        while u < us.len() && n <= FOLD_DEPTH {
+            let v = us[u];
+            if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || !self.pfold[v as usize] {
+                u += 1;
+                continue;
+            }
+            n += 1;
+            let p = b.insts[v as usize];
+            us.swap_remove(u);
+            if p.op == O_SPLAT && is_inst(p.a) && self.pfold[p.a as usize] {
+                us.push(p.a);
+            } else if p.op == O_VOP {
+                for q in 0..p.b {
+                    us.push(b.pool[(p.a + q) as usize]);
+                }
+            } else if p.op != O_SPLAT && p.op != O_WCONST {
+                us.push(p.a);
+                if p.b != VNONE && p.op != O_LOAD {
+                    us.push(p.b);
+                }
+            }
+        }
+        return n;
+    }
+
+    // Whether value `v` may move to instruction `s` of the block from `lo` (`FOLD_SINK`): one instruction there
+    // that only `s` reads, a load or an operation (`depth` at least 1) whose operands stay where they are or,
+    // at `depth` 2, are such values too.
     fn sinkable(self: &Self, b: &Body, v: Value, lo: u32, s: u32, depth: u32) bool {
         if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || v < lo || v >= s || self.count[v as usize] != 1 || self.pfold[v as usize] {
             return false;
@@ -602,16 +664,11 @@ extend Live {
             return true;
         }
         let un = t.op == O_NEG || t.op == O_NOT;
-        if depth < 2 || !un && (t.op < O_ADD || t.op > O_ASHR || t.op >= O_SDIV && t.op <= O_UREM) {
+        if !un && (t.op < O_ADD || t.op > O_ASHR || t.op >= O_SDIV && t.op <= O_UREM) {
             return false;
         }
-        return (self.stays(b, t.a) || self.sinkable(b, t.a, lo, s, 1)) && (un || self.stays(b, t.b) || self.sinkable(
-            b,
-            t.b,
-            lo,
-            s,
-            1,
-        ));
+        let ok_a = self.stays(b, t.a) || depth == 2 && self.sinkable(b, t.a, lo, s, 1);
+        return ok_a && (un || self.stays(b, t.b) || depth == 2 && self.sinkable(b, t.b, lo, s, 1));
     }
 
     // Whether value `v` is read where it is (`sinkable`): a parameter, a constant or an address, a value of

@@ -1648,7 +1648,7 @@ extend Gen {
             if t.op == O_ICMP {
                 self.cmp_push(t, t.aux, true);
             } else if self.lv.sunk[v as usize] {
-                // A store's value it computes after its address (`lv::FOLD_SINK`).
+                // A value its reader computes where it reads it (`lv::FOLD_SINK`).
                 if t.op == O_LOAD {
                     self.load_push(t);
                 } else {

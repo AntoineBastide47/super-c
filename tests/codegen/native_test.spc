@@ -10337,14 +10337,18 @@ fn coff_section(b: &Vector<u8>, name: str) u64 {
 
 // A store's value that only it reads is computed after the store's address on wasm32 (`lv::FOLD_SINK`):
 // `@make`'s sums (local.get 0, local.get 1, i32.const 1, i32.add, i32.store), `@add`'s sum of two loads.
-// `@keep`'s load comes before a store to its address, so it stays there (the old value). All give the C
-// results.
+// `@keep`'s load comes before a store to its address, so it stays there (the old value). A select computes its
+// sides and its comparison's operands where it reads them: `@pick` is local.get 1, local.get 2, i32.const 7,
+// i32.add, local.get 0, i32.const 1, i32.and, select. `@deep`'s three sums of loads would fold past
+// FOLD_DEPTH, so none moves. All give the C results.
 @test
 fn store_values_follow_their_addresses() {
     let lir = M"(lir ptr 8
 sym @make fn global
 sym @add fn global
 sym @keep fn global
+sym @pick fn global
+sym @deep fn global
 fn @make
   sig (ptr, i32) -> void
 b0(v0: ptr, v1: i32):
@@ -10372,6 +10376,33 @@ b0(v0: ptr, v1: ptr):
   store v3, v0 align 2
   store v2, v1 align 2
   ret
+fn @pick
+  sig (i32, i32, i32) -> i32
+b0(v0: i32, v1: i32, v2: i32):
+  v3 = iconst.i32 1
+  v4 = and.i32 v0, v3
+  v5 = iconst.i32 0
+  v6 = icmp.ne v4, v5
+  v7 = iconst.i32 7
+  v8 = add.i32 v2, v7
+  v9 = select.i32 v6, v1, v8
+  ret v9
+fn @deep
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  v2 = load.i32 v0+4 align 2
+  v3 = add.i32 v1, v2
+  v4 = load.i32 v0+8 align 2
+  v5 = load.i32 v0+12 align 2
+  v6 = add.i32 v4, v5
+  v7 = load.i32 v0+16 align 2
+  v8 = load.i32 v0+20 align 2
+  v9 = add.i32 v7, v8
+  v10 = iconst.i32 100
+  v11 = icmp.ult v9, v10
+  v12 = select.i32 v11, v3, v6
+  ret v12
 )";
     let mut obj = Vector::<u8>::new();
     let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
@@ -10384,11 +10415,19 @@ b0(v0: ptr, v1: ptr):
     // local.get 0, local.get 1, i32.load, local.get 2, i32.load, i32.add, i32.store.
     let add: [u8; 14] = [0x20, 0x00, 0x20, 0x01, 0x28, 0x02, 0x00, 0x20, 0x02, 0x28, 0x02, 0x00, 0x6A, 0x36];
     assert(holds(&obj, add[0..14]), "add");
+    let pick: [u8; 14] = [0x20, 0x01, 0x20, 0x02, 0x41, 0x07, 0x6A, 0x20, 0x00, 0x41, 0x01, 0x71, 0x1B, 0x0B];
+    assert(holds(&obj, pick[0..14]), "pick");
     let drv = M"(#include <stdint.h>
 void make(uint32_t *, uint32_t);
 void add(uint32_t *, const uint32_t *, const uint32_t *);
 void keep(uint32_t *, uint32_t *);
+uint32_t pick(uint32_t, uint32_t, uint32_t);
+uint32_t deep(const uint32_t *);
 int main(void) {
+  for (uint32_t x = 0; x < 4; x++)
+    if (pick(x, 3, 10) != ((x & 1) ? 3 : 17)) return 4;
+  static const uint32_t d[2][6] = {{1, 2, 3, 4, 50, 49}, {1, 2, 3, 4, 50, 50}};
+  if (deep(d[0]) != 3 || deep(d[1]) != 7) return 5;
   uint32_t q[3], x = 40, y = 2, s, a = 9, b = 0;
   make(q, 7);
   if (q[0] != 7 || q[1] != 8 || q[2] != 9) return 1;
