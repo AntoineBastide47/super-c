@@ -4923,6 +4923,110 @@ int main(void) {
     }
 }
 
+// A comparison of the operands of the subtraction just emitted reads its flags (x86-64): `@absd`'s
+// `b - a` is the comparison of `a` and `b` the other way, `@satsub`'s `a - b` that comparison itself; no
+// `cmp`. They give the C results.
+@test
+fn x86_comparisons_read_a_subtraction_s_flags() {
+    let lir = M"(lir ptr 8
+sym @absd fn global
+sym @satsub fn global
+fn @absd
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = sub.i32 v0, v1
+  v3 = sub.i32 v1, v0
+  v4 = icmp.ugt v0, v1
+  v5 = select.i32 v4, v2, v3
+  ret v5
+fn @satsub
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = sub.i32 v0, v1
+  v3 = iconst.i32 0
+  v4 = icmp.ult v0, v1
+  v5 = select.i32 v4, v3, v2
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, OMIT_FP, &mut obj), "the System V object");
+    // sub ecx, edi; cmovae rax, rcx. sub eax, esi; mov ecx, 0; cmovb rax, rcx.
+    let ab: [u8; 6] = [0x29, 0xF9, 0x48, 0x0F, 0x43, 0xC1];
+    let ss: [u8; 11] = [0x29, 0xF0, 0xB9, 0x00, 0x00, 0x00, 0x00, 0x48, 0x0F, 0x42, 0xC1];
+    assert(holds(&obj, ab[0..6]) && holds(&obj, ss[0..11]), "absd, satsub");
+    let drv = M"(#include <stdint.h>
+uint32_t absd(uint32_t, uint32_t);
+uint32_t satsub(uint32_t, uint32_t);
+int main(void) {
+  static const uint32_t v[5] = {0, 1, 7, 0x80000000u, 0xFFFFFFFFu};
+  for (int i = 0; i < 5; i++)
+    for (int k = 0; k < 5; k++) {
+      uint32_t a = v[i], b = v[k];
+      if (absd(a, b) != (a > b ? a - b : b - a)) return 1;
+      if (satsub(a, b) != (a < b ? 0 : a - b)) return 2;
+    }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// The first of a chain of in-place integer operations that the return takes the last of starts in the
+// return's register (x86-64): `@align`'s sum is `lea rax, [rdi + 15]` before `and rax, -16`, `@sdiv4`'s
+// rounding sum adds into rax, the register of its dying second operand, before `sar eax, 2`; no copy
+// before the `ret`. They give the C results.
+@test
+fn x86_operation_chains_start_in_the_return_register() {
+    let lir = M"(lir ptr 8
+sym @align fn global
+sym @sdiv4 fn global
+fn @align
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 15
+  v2 = iconst.i64 -16
+  v3 = add.i64 v0, v1
+  v4 = and.i64 v3, v2
+  ret v4
+fn @sdiv4
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 31
+  v2 = iconst.i32 30
+  v3 = iconst.i32 2
+  v4 = ashr.i32 v0, v1
+  v5 = lshr.i32 v4, v2
+  v6 = add.i32 v0, v5
+  v7 = ashr.i32 v6, v3
+  ret v7
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, OMIT_FP, &mut obj), "the System V object");
+    // lea rax, [rdi + 15]; and rax, -16; ret. add eax, edi; sar eax, 2; ret.
+    let al: [u8; 9] = [0x48, 0x8D, 0x47, 0x0F, 0x48, 0x83, 0xE0, 0xF0, 0xC3];
+    let sd: [u8; 6] = [0x01, 0xF8, 0xC1, 0xF8, 0x02, 0xC3];
+    assert(holds(&obj, al[0..9]) && holds(&obj, sd[0..6]), "align, sdiv4");
+    let drv = M"(#include <stdint.h>
+int64_t align(int64_t);
+int32_t sdiv4(int32_t);
+int main(void) {
+  static const int32_t v[6] = {0, 1, -1, 7, -7, -2147483647 - 1};
+  for (int i = 0; i < 6; i++) {
+    if (align(v[i]) != ((int64_t)v[i] + 15 & -16)) return 1;
+    if (sdiv4(v[i]) != v[i] / 4) return 2;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A select whose true side is a constant takes it in the result's register, the false side moved in with the
 // condition inverted (x86-64): `@sat`'s saturating sum is add, mov eax, -1, cmovae eax, edi, ret (System V),
 // no copy after the `cmov`. It gives the C result.

@@ -35,6 +35,8 @@ import target::intrin as intrin;
 
 const V0: u8 = 16; // register number of xmm0: general registers are 0..15
 
+// The in-place operations `Gen::chain_ret` follows to a return.
+const CHAIN_STEPS: u32 = 4;
 // Scratch registers; the vector ones are the ABI's (`Gen.vs0`, `Gen.vs1`).
 const S0: u8 = 10; // r10
 const S1: u8 = 11; // r11
@@ -958,8 +960,9 @@ extend Gen {
 
     // Whether commutative instruction `i` should write over its second operand `b` (in `rb`), not its first
     // (in `ra`): `b` dies here, and the return or call after, or the result part the stores before the
-    // return move it into (`ret_part`), takes `i` in `rb` (`next_reg`, `ret_want`; a jump's would place a
-    // parameter's home, which may take `rb`).
+    // return move it into (`ret_part`), or the return after a chain of in-place operations (`chain_ret`),
+    // takes `i` in `rb` (`next_reg`, `ret_want`; a jump's would place a parameter's home, which may take
+    // `rb`).
     fn swaps(self: &mut Self, i: u32, b: Value, ra: u8, rb: u8) bool {
         let xb = self.vx(b);
         let bd = self.b();
@@ -969,7 +972,7 @@ extend Gen {
         } else {
             O_JMP
         };
-        if nx != O_RET && nx != O_CALL && nx != O_CALLIND && self.ret_part(i) == NOREG || ra == rb || self.owner[rb as usize] != xb || self.lv.uses[xb as usize] != 0 || self.lv.end[xb as usize] != self.pos || self.va[xb as usize].home == H_FIXED {
+        if nx != O_RET && nx != O_CALL && nx != O_CALLIND && self.ret_part(i) == NOREG && !self.chain_ret(bd, bk, i) || ra == rb || self.owner[rb as usize] != xb || self.lv.uses[xb as usize] != 0 || self.lv.end[xb as usize] != self.pos || self.va[xb as usize].home == H_FIXED {
             return false;
         }
         // `b` holds `rb` until the instruction writes it.
@@ -1243,9 +1246,12 @@ extend Gen {
         }
         let t = b.insts[v as usize + 1 + ext as usize];
         let mut r = NOREG;
-        if t.op == O_RET {
+        // The first of a chain of in-place operations the return takes the last of (`chain_ret`): the
+        // return's register.
+        let chain = !ext && !fv && self.chain_ret(b, bk, v);
+        if t.op == O_RET || chain {
             let rl = self.self_lay.ret;
-            if t.a == v + ext as u32 && rl.kind == ab::L_REG && rl.n == 1 && self.self_lay.parts[rl.p0 as usize].v == fv && (!vv || self.self_lay.whole_vreg(
+            if (t.a == v + ext as u32 || chain) && rl.kind == ab::L_REG && rl.n == 1 && self.self_lay.parts[rl.p0 as usize].v == fv && (!vv || self.self_lay.whole_vreg(
                 rl,
                 self.vt(v),
             )) {
@@ -1289,6 +1295,31 @@ extend Gen {
             return NOREG;
         }
         return r;
+    }
+
+    // Whether the instructions after `v` in block `bk`, at most CHAIN_STEPS, each read the one before as
+    // their first operand alone and write over it (a 32- or 64-bit integer `add`, `sub`, `and`, `or`, `xor`,
+    // or shift by a constant, none folded), up to a return of the last.
+    const fn chain_ret(self: &Self, b: &Body, bk: Block, v: Value) bool {
+        let mut w = v;
+        for _ in 0..CHAIN_STEPS {
+            if w + 1 >= bk.start + bk.len || self.lv.count[w as usize] != 1 {
+                return false;
+            }
+            let t = b.insts[w as usize + 1];
+            if t.op == O_RET {
+                return w != v && t.a == w;
+            }
+            let mut k: u64 = 0;
+            let alu = t.op == O_ADD || t.op == O_SUB || t.op == O_AND || t.op == O_OR || t.op == O_XOR;
+            let shift = (t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR) && self.const_of(t.b, &mut k);
+            let bits = type_bits(t.ty, self.ptr);
+            if !alu && !shift || t.a != w || t.b == w || !is_int(t.ty) || bits != 32 && bits != 64 || self.lv.pfold[w as usize + 1] {
+                return false;
+            }
+            w += 1;
+        }
+        return false;
     }
 
     // The fixed register of a parameter the back edge ending instruction `v`'s block passes `v` to
@@ -5134,8 +5165,14 @@ extend Gen {
         if imm && k == 0 && (t.aux == C_EQ || t.aux == C_NE) && z.at == self.c.len() && z.pos == self.pos && z.reg == ra && z.sz == sz {
             return icond(t.aux);
         }
-        if self.held_end == self.c.len() && self.held_a == t.a && self.held_b == t.b && self.blk_at[self.lv.order[self.pos as usize] as usize] < self.held_end {
-            return icond(t.aux);
+        if self.held_end == self.c.len() && self.blk_at[self.lv.order[self.pos as usize] as usize] < self.held_end {
+            if self.held_a == t.a && self.held_b == t.b {
+                return icond(t.aux);
+            }
+            // The flags of the operands the other way.
+            if self.held_a == t.b && self.held_b == t.a {
+                return icond(mirror(t.aux));
+            }
         }
         self.zero_for(zi, ra, rb);
         let s0 = self.c.len();
@@ -5675,6 +5712,12 @@ extend Gen {
             }
             self.c.alu_rr(aop, sz, rd, rb);
             self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.pos };
+            if op == O_SUB && !small {
+                // Its flags are a compare's of its operands (`compare`).
+                self.held_a = t.a;
+                self.held_b = t.b;
+                self.held_end = self.c.len();
+            }
             if small && (op == O_AND && (ca || cb) || (op == O_OR || op == O_XOR) && ca && cb) {
                 self.va.index_mut(i as usize).clean = true;
             }
