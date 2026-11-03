@@ -5527,6 +5527,93 @@ fn a_folded_bounded_load_takes_no_bound_as_operand() {
     }
 }
 
+// A signed lane maximum or minimum against zero, either side (x86-64 before SSE4.1: the other operand
+// under its compare mask): 32-bit and 8-bit lanes, the extremes too.
+@test
+fn signed_lane_extremes_against_zero() {
+    let lir = M"(lir ptr 8
+sym @clamp fn global
+fn @clamp
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4i32 v1 align 2
+  v3 = wconst.v4i32 0x0, 0x0
+  v4 = vop.max.s.v4i32 (v2, v3)
+  store v4, v0 align 2
+  v5 = vop.min.s.v4i32 (v3, v2)
+  store v5, v0+16 align 2
+  v6 = load.v16i8 v1+16 align 0
+  v7 = wconst.v16i8 0x0, 0x0
+  v8 = vop.max.s.v16i8 (v7, v6)
+  store v8, v0+32 align 0
+  v9 = vop.min.s.v16i8 (v6, v7)
+  store v9, v0+48 align 0
+  ret
+)";
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\n#include <string.h>\nvoid clamp(uint8_t *, const uint8_t *);\nint main(void) {\n  int32_t w[4] = {5, -7, 0, -2147483647 - 1};\n  int8_t b[16] = {1, -1, 0, 127, -128, 3, -3, 9, -9, 64, -64, 2, -2, 100, -100, 0};\n  uint8_t in[32], out[64];\n  memcpy(in, w, 16);\n  memcpy(in + 16, b, 16);\n  clamp(out, in);\n  int32_t mx[4], mn[4];\n  int8_t bx[16], bn[16];\n  memcpy(mx, out, 16);\n  memcpy(mn, out + 16, 16);\n  memcpy(bx, out + 32, 16);\n  memcpy(bn, out + 48, 16);\n  for (int i = 0; i < 4; i++) if (mx[i] != (w[i] > 0 ? w[i] : 0) || mn[i] != (w[i] < 0 ? w[i] : 0)) return 1 + i;\n  for (int i = 0; i < 16; i++) if (bx[i] != (b[i] > 0 ? b[i] : 0) || bn[i] != (b[i] < 0 ? b[i] : 0)) return 10 + i;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A lane select with a zero side keeps the other side's lanes under the mask (`m ? x : 0`) or under its
+// complement (`m ? 0 : x`): one `pand` or `pandn` on x86-64.
+@test
+fn lane_selects_with_a_zero_side() {
+    let lir = M"(lir ptr 8
+sym @split fn global
+fn @split
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4i32 v1 align 2
+  v3 = wconst.v4i32 0x0, 0x0
+  v4 = vcmp.sgt.v4i32 v2, v3
+  v5 = vsel.v4i32 v4, v2, v3
+  store v5, v0 align 2
+  v6 = vsel.v4i32 v4, v3, v2
+  store v6, v0+16 align 2
+  ret
+)";
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nvoid split(int32_t *, const int32_t *);\nint main(void) {\n  int32_t in[4] = {5, -7, 0, 2147483647}, out[8];\n  split(out, in);\n  for (int i = 0; i < 4; i++) {\n    if (out[i] != (in[i] > 0 ? in[i] : 0)) return 1 + i;\n    if (out[4 + i] != (in[i] > 0 ? 0 : in[i])) return 5 + i;\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// C's `fmin`/`fmax` of lanes against a constant with no NaN and no zero lane (one MINPS/MAXPS on
+// x86-64, the constant either side): a NaN lane gives the constant, every other lane the lesser or
+// greater, zeros and infinities too.
+@test
+fn lane_fmin_and_fmax_of_an_ordinary_constant() {
+    let lir = M"(lir ptr 8
+sym @vmin fn global
+sym @vmax fn global
+fn @vmin
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = load.v4f32 v0 align 2
+  v2 = wconst.v4f32 0xc040000040200000, 0x7149f2ca42c80000
+  v3 = vop.min.num.v4f32 (v1, v2)
+  store v3, v0 align 2
+  ret
+fn @vmax
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = load.v2f64 v0 align 3
+  v2 = wconst.v2f64 0xc004000000000000, 0x4059000000000000
+  v3 = vop.max.num.v2f64 (v2, v1)
+  store v3, v0 align 3
+  ret
+)";
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <string.h>\nvoid vmin(float *);\nvoid vmax(double *);\nint main(void) {\n  float k[4] = {2.5f, -3.0f, 100.0f, 1e30f};\n  float inf = 1.0f / 0.0f, nan = 0.0f / 0.0f;\n  float in[3][4] = {{nan, -0.0f, 200.0f, -inf}, {1.0f, nan, inf, 1e31f}, {-0.0f, 0.0f, 99.0f, nan}};\n  for (int r = 0; r < 3; r++) {\n    float v[4], w[4];\n    memcpy(v, in[r], sizeof v);\n    vmin(v);\n    for (int i = 0; i < 4; i++) w[i] = in[r][i] != in[r][i] ? k[i] : in[r][i] < k[i] ? in[r][i] : k[i];\n    if (memcmp(v, w, sizeof v) != 0) return 1 + r;\n  }\n  double c[2] = {-2.5, 100.0};\n  double dn = 0.0 / 0.0, din = 1.0 / 0.0;\n  double dd[3][2] = {{dn, -0.0}, {din, dn}, {-din, 100.0}};\n  for (int r = 0; r < 3; r++) {\n    double v[2], w[2];\n    memcpy(v, dd[r], sizeof v);\n    vmax(v);\n    for (int i = 0; i < 2; i++) w[i] = dd[r][i] != dd[r][i] ? c[i] : dd[r][i] > c[i] ? dd[r][i] : c[i];\n    if (memcmp(v, w, sizeof v) != 0) return 4 + r;\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
 // Microsoft x64: a loop of C's `fminf` calls (an intrinsic, in xmm registers) beside its vector loop
 // (`min.num`) compiles; the homes the vector loop takes (callee-saved xmm registers) all free.
 @test

@@ -11360,6 +11360,40 @@ extend Gen {
             self.c.byte(0xCA);
             return;
         }
+        // A zero side: the other side under the mask (`pand`) or under its complement (`pandn`).
+        let zc = self.zero_vec(t.c);
+        if (zc || self.zero_vec(t.b)) && (in_vreg(t.ty) || type_bytes(t.ty, 8) == 32 && self.in_reg(t.ty)) {
+            let ymm = type_bytes(t.ty, 8) == 32;
+            let rm = self.vec_use(t.a, self.vs0) - V0;
+            let ro = self.vec_use(
+                if zc {
+                    t.b
+                } else {
+                    t.c
+                },
+                self.vs1,
+            ) - V0;
+            let rd = self.vec_def(i) - V0;
+            let opc: u32 = if zc {
+                0xDB
+            } else {
+                0xDF
+            };
+            if ymm || self.avx {
+                self.c.vex_rr(0x66, 1, opc, false, ymm, rd, rm, ro);
+            } else if rd == ro && !zc {
+                let s = self.tmp(true) - V0;
+                self.c.vmov(s, rm);
+                self.c.sse_rr(0x66, 0x0F00 | opc, s, ro);
+                self.c.vmov(rd, s);
+            } else if rd == ro {
+                self.c.sse_rr(0x66, 0x0FDB, rd, rm);
+            } else {
+                self.c.vmov(rd, rm);
+                self.c.sse_rr(0x66, 0x0F00 | opc, rd, ro);
+            }
+            return;
+        }
         if type_bytes(t.ty, 8) == 32 && self.in_reg(t.ty) {
             let rm = self.vec_use(t.a, self.vs0) - V0;
             let rx = self.vec_use(t.b, self.vs1) - V0;
@@ -12260,6 +12294,37 @@ extend Gen {
             let lo = c == core::SIMD_MIN;
             let rx = self.vec_use(ops[0], self.vs0) - V0;
             let ry = self.vec_use(ops[1], self.vs1) - V0;
+            let zx = self.zero_vec(ops[0]);
+            if nb == 16 && sg && (lb == 8 || lb == 32) && !self.avx && !unsafe (*self.pkg).sse41 && (zx || self.zero_vec(
+                ops[1],
+            )) {
+                // Signed, against zero (no `pmaxsd` or `pmaxsb` before SSE4.1): the other operand's lanes
+                // under the mask of those that win, `x > 0` for the maximum, `0 > x` for the minimum.
+                let (z, x, xv) = if zx {
+                    (rx, ry, ops[1])
+                } else {
+                    (ry, rx, ops[0])
+                };
+                let gt: u32 = if lb == 8 {
+                    0x0F64
+                } else {
+                    0x0F66
+                };
+                let m = self.tmp(true) - V0;
+                let rd = self.def_over(i, xv, x + V0) - V0;
+                if lo {
+                    self.c.vmov(m, z);
+                    self.c.sse_rr(0x66, gt, m, x);
+                } else {
+                    self.c.vmov(m, x);
+                    self.c.sse_rr(0x66, gt, m, z);
+                }
+                if rd != x {
+                    self.c.vmov(rd, x);
+                }
+                self.c.sse_rr(0x66, 0x0FDB, rd, m);
+                return;
+            }
             if nb == 32 {
                 let r = self.vec_def(i) - V0;
                 self.lane_ext(lo, sg, lb, true, r, rx, ry);
@@ -13663,9 +13728,33 @@ extend Gen {
             }
             return;
         }
+        let lo = c == core::SIMD_MIN;
+        // A constant operand with no NaN and no zero lane goes second to MINPS/MAXPS: a NaN lane of the
+        // other gives it, as C's does, and no two zeros tie.
+        let ky = self.ordinary_lanes(ops[1]);
+        if ky || self.ordinary_lanes(ops[0]) {
+            let (p, q, pv) = if ky {
+                (rx, ry, ops[0])
+            } else {
+                (ry, rx, ops[1])
+            };
+            let rd = self.def_over(i, pv, p + V0) - V0;
+            self.fop(
+                nb,
+                dd,
+                if lo {
+                    0x5Du32
+                } else {
+                    0x5Fu32
+                },
+                rd,
+                p,
+                q,
+            );
+            return;
+        }
         // fmax: (y != x | y) & max(y, x), which keeps +0 over -0; fmin: (y == x & y) | min(y, x), which keeps
         // -0. Then y where x is a NaN.
-        let lo = c == core::SIMD_MIN;
         let a = self.tmp(true) - V0;
         let b = self.tmp(true) - V0;
         let e = self.tmp(true) - V0;
@@ -13726,6 +13815,48 @@ extend Gen {
         if rd != a {
             self.fop(nb, dd, 0x28, rd, 0, a);
         }
+    }
+
+    // Whether value `v` is a constant vector (`wconst`) of zero bits.
+    fn zero_vec(self: &Self, v: Value) bool {
+        if (v & (VPARAM | VFLAG)) != 0 || self.b().insts[v as usize].op != O_WCONST {
+            return false;
+        }
+        let t = self.b().insts[v as usize];
+        for k in 0..t.b {
+            if self.b().words[(t.a + k) as usize] != 0 {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Whether value `v` is a constant float vector (`wconst`) whose lanes are neither NaN nor zero.
+    fn ordinary_lanes(self: &Self, v: Value) bool {
+        if (v & (VPARAM | VFLAG)) != 0 || self.b().insts[v as usize].op != O_WCONST {
+            return false;
+        }
+        let t = self.b().insts[v as usize];
+        let dd = lane_type(t.ty) == T_F64;
+        for k in 0..t.b {
+            let w = self.b().words[(t.a + k) as usize];
+            for h in 0..2 - dd as u32 {
+                let m = if dd {
+                    w & 0x7FFFFFFFFFFFFFFF
+                } else {
+                    w >> (32 * h) as u64 & 0x7FFFFFFF
+                };
+                let inf = if dd {
+                    0x7FF0000000000000u64
+                } else {
+                    0x7F800000u64
+                };
+                if m == 0 || m > inf {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     // `rd` = `rx` op `ry` for the float vector instruction `opc` of opcode map 0F (the PS form, PD when

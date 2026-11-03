@@ -3713,7 +3713,8 @@ b0:
 
 // A store into an exclusive reference's referent that a later store overwrites goes across a call that
 // cannot reach that memory (`@over`: one store stays); not when the call takes the reference (`@lent`,
-// whose callee reads it), nor when the reference is a shared one, which the callee may reach (`@shared`).
+// whose callee reads it), nor when the reference is a shared one, which the callee may reach (`@shared`),
+// nor when the call may panic (`@risky`): a panic may unwind to code that reads the first value.
 @test
 fn a_store_a_later_store_overwrites_goes_across_a_call() {
     let (b, a) = optimized(
@@ -3723,6 +3724,8 @@ sym @peek fn global noinline
 sym @over fn global noinline
 sym @lent fn global noinline
 sym @shared fn global noinline
+sym @check fn global noinline
+sym @risky fn global noinline
 sym @drive fn global
 sym @n data global
 data @n size 8 align 3
@@ -3769,6 +3772,27 @@ b0(v0: ptr):
   call @tick() : () -> void
   store v2, v0 align 3
   ret
+fn @check
+  sig (i64) -> void
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1: cold
+  panic "attempt to divide by zero"
+b2:
+  ret
+fn @risky
+  sig (ptr) -> void
+  ref p0 8 noalias
+b0(v0: ptr):
+  v1 = iconst.i64 5
+  v2 = iconst.i64 9
+  v3 = iconst.i64 1
+  store v1, v0 align 3
+  call @check(v3) : (i64) -> void
+  store v2, v0 align 3
+  ret
 fn @drive
   sig () -> i64
   slot s0 size 8 align 3
@@ -3777,6 +3801,7 @@ b0:
   call @over(v0) : (ptr) -> void
   v1 = call.i64 @lent(v0) : (ptr) -> i64
   call @shared(v0) : (ptr) -> void
+  call @risky(v0) : (ptr) -> void
   v2 = load.i64 v0 align 3
   v3 = symaddr @n
   v4 = load.i64 v3 align 3
@@ -3791,6 +3816,8 @@ b0:
     assert(count_of(&l, "store") == 2, l.as_str());
     let s = text_of(&a, "shared");
     assert(count_of(&s, "store") == 2, s.as_str());
+    let k = text_of(&a, "risky");
+    assert(count_of(&k, "store") == 2, k.as_str());
     let none: []u64 = [];
     same_result(&b, &a, "drive", none, 47);
 }
@@ -8940,7 +8967,8 @@ b0(v0: i64):
 // A call's aggregate result that a copy moves from its slot into an exclusive reference's referent, right
 // after the call, through another slot too (`hop`), goes there at once: the call writes that referent and
 // the copies go (`into`, `hop`). They stay when the referent is a shared reference's (`shr`), when another
-// argument reaches it (`lent`), and when the callee keeps its result's address (`kept`).
+// argument reaches it (`lent`), when the callee keeps its result's address (`kept`), and when it may panic
+// (`risky`): a panic may unwind to code that reads the referent the callee left half written.
 @test
 fn a_call_result_copied_into_an_exclusive_referent_goes_there_at_once() {
     let (b, a) = optimized(
@@ -8953,6 +8981,8 @@ sym @hop fn global noinline
 sym @shr fn global noinline
 sym @lent fn global noinline
 sym @kept fn global noinline
+sym @mkp fn global noinline
+sym @risky fn global noinline
 sym @drive fn global
 sym @at data global
 data @at size 8 align 3
@@ -9043,6 +9073,31 @@ b0(v0: ptr, v1: i64):
   call @mkk(v1, v2) : (i64) -> l0
   memcpy.overlap v0, v2, v3
   ret
+fn @mkp
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (i64) -> l0
+b0(v0: i64, v1: ptr):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v0, v2
+  br v3, b1, b2
+b1: cold
+  panic "attempt to divide by zero"
+b2:
+  store v0, v1 align 3
+  store v0, v1+8 align 3
+  store v0, v1+16 align 3
+  ret
+fn @risky
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i64]
+  sig (ptr, i64) -> void
+  ref p0 24 noalias
+  slot s0 size 24 align 3
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 24
+  call @mkp(v1, v2) : (i64) -> l0
+  memcpy.overlap v0, v2, v3
+  ret
 fn @drive
   sig (i64) -> i64
   slot s0 size 24 align 3
@@ -9050,6 +9105,7 @@ b0(v0: i64):
   v1 = slotaddr s0
   v2 = iconst.i64 3
   store v2, v1 align 3
+  call @risky(v1, v0) : (ptr, i64) -> void
   call @into(v1, v0) : (ptr, i64) -> void
   v3 = load.i64 v1+8 align 3
   call @hop(v1, v3) : (ptr, i64) -> void
@@ -9068,7 +9124,7 @@ b0(v0: i64):
         let t = text_of(&a, name);
         assert(t.as_str().find("memcpy") < 0 && t.as_str().find("slotaddr") < 0, t.as_str());
     }
-    for name in ["shr", "lent", "kept"] {
+    for name in ["shr", "lent", "kept", "risky"] {
         let t = text_of(&a, name);
         assert(t.as_str().find("memcpy") >= 0, t.as_str());
     }

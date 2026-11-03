@@ -863,6 +863,8 @@ fn row(name: str, mode: str, sc: Stat, c: Stat) {
         c.spread,
         sc.median / c.median,
     );
+    // Each row reaches a pipe before the next kernel runs: a crash names the row after the last one.
+    unsafe stdio::fflush(null);
     if sc.sum != c.sum {
         bench::fail(format("codegen {} {}: Super-C sums {}, clang {}", name, mode, sc.sum, c.sum).as_str());
     }

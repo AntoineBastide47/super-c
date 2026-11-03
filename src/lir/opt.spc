@@ -4006,10 +4006,9 @@ extend Opt {
             return false;
         }
         if t.op == O_CALL || t.op == O_CALLIND {
-            // A call keeps the stores into an exclusive parameter's referent whose class it does not reach
-            // (`carry`'s test): no pointer it holds points there, and a panic in it ends the program, so no
-            // code reads those bytes before a later store writes them. A call that comes back keeps those
-            // of bytes it does not read either (`call_apart`).
+            // A call that comes back (no `FX_STALL`: a panic may unwind to code that reads those bytes) keeps
+            // the stores into an exclusive parameter's referent whose class it does not reach (`carry`'s
+            // test: no pointer it holds points there), and those of bytes it does not read (`call_apart`).
             let wb = self.write_bits(pk, b, i) | self.sbits;
             let back = t.op == O_CALL && (pk.syms[b.syms[t.a as usize] as usize].fx & FX_STALL) == 0;
             let mut x: usize = 0;
@@ -4019,7 +4018,7 @@ extend Opt {
                 let s = b.insts[j as usize];
                 let c = self.acc(j, s.a);
                 let lo = (s.c as i32) as i64;
-                if c >= CL_NOALIAS && c < CL_FROZEN && (class_bit(c) & wb) == 0 || back && self.call_apart(
+                if back && (c >= CL_NOALIAS && c < CL_FROZEN && (class_bit(c) & wb) == 0 || self.call_apart(
                     pk,
                     b,
                     i,
@@ -4027,7 +4026,7 @@ extend Opt {
                     self.val(s.a),
                     lo,
                     lo + type_bytes(b.type_of(s.b), pk.ptr_bytes) as i64,
-                ) {
+                )) {
                     x += 1;
                 } else {
                     let _ = self.pend.swap_remove(x);
@@ -8923,8 +8922,8 @@ extend Opt {
     // result on between), into an exclusive parameter's referent: the call writes its result there in place
     // of those slots, which nothing else uses, and the copies go. The callee keeps no copy of its result's
     // address (`Sym.esc`) and no other argument reaches that referent, so it neither reads those bytes nor
-    // sees them change but through its result; a panic in it ends the program, so no code reads the bytes
-    // it left half written. Whether it did.
+    // sees them change but through its result; it comes back (no `FX_STALL`), so no panic unwinds to code
+    // that reads the bytes it left half written. Whether it did.
     fn result_into(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst) bool {
         let n = const_of(b, t.c);
         let c = self.acc(i, t.a);
@@ -8963,7 +8962,7 @@ extend Opt {
         let rt = b.pool[u.b as usize + 2];
         if (rt & AGG) == 0 || u.aux != np + 1 || b.pool[(u.c + np) as usize] != src || np >= 64 || n != Option::<u64>::Some(
             b.pool[(rt & ~AGG) as usize],
-        ) || (pk.syms[b.syms[u.a as usize] as usize].esc >> np as u64 & 1) != 0 {
+        ) || (pk.syms[b.syms[u.a as usize] as usize].esc >> np as u64 & 1) != 0 || (pk.syms[b.syms[u.a as usize] as usize].fx & FX_STALL) != 0 {
             return false;
         }
         for q in 0..np {
