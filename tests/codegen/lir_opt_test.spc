@@ -7048,6 +7048,116 @@ b6(v11: i8):
     }
 }
 
+// A place the loop reaches on its first pass only after a check (`d[0] += a[k]` over an exclusive `Vector`
+// `d`: `d.len() == 0` panics) stays in a register through a guard before the loop (`Opt::guarded`): the
+// header's test on the entry values (an empty `a` reads nothing, not even through `d`'s null buffer), then the
+// check, to its panic, then the place's load. The loop stores nothing and its sum vectorizes. Every path
+// gives the original's result: an empty loop, the panic, the sums.
+@test
+fn a_checked_place_stays_in_a_register_through_a_guard() {
+    let src = M"(lir ptr 8
+sym @sum2 fn global
+sym @drive fn global
+fn @sum2
+  sig (ptr, ptr) -> void
+  ref p0 24 noalias
+  ref p1 24 readonly
+  owned p0 0
+  owned p1 0
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = load.i64 v1+8 align 3 tbaa 4
+  v5 = load.ptr v1 align 3 tbaa 8
+  v6 = load.i64 v0+8 align 3 tbaa 4
+  v7 = icmp.eq v6, v2
+  v8 = load.ptr v0 align 3 tbaa 8
+  jmp b1(v2)
+b1(v9: i64):
+  v10 = icmp.ult v9, v4
+  br v10, b3, b2
+b2:
+  ret
+b3:
+  v11 = ptradd v5, v9 * 4
+  v12 = load.i32 v11 align 2 tbaa 3
+  br v7, b5, b4
+b4:
+  v13 = load.i32 v8 align 2 tbaa 3
+  v14 = add.i32 v13, v12
+  store v14, v8 align 2 tbaa 3
+  v15 = add.i64 v9, v3
+  jmp b1(v15)
+b5: cold
+  panic "index out of bounds"
+fn @drive
+  sig (i64, i64) -> i32
+  slot s0 size 24 align 3
+  slot s1 size 24 align 3
+  slot s2 size 64 align 2
+  slot s3 size 4 align 2
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = slotaddr s2
+  v5 = slotaddr s3
+  v6 = iconst.i32 10
+  store v6, v5 align 2
+  v7 = iconst.i64 0
+  v8 = iconst.i64 1
+  v9 = iconst.i64 16
+  jmp b1(v7)
+b1(v10: i64):
+  v11 = icmp.ult v10, v9
+  br v11, b2, b3
+b2:
+  v12 = ptradd v4, v10 * 4
+  v13 = trunc.i32 v10
+  v14 = mul.i32 v13, v13
+  store v14, v12 align 2
+  v15 = add.i64 v10, v8
+  jmp b1(v15)
+b3:
+  v16 = icmp.eq v1, v7
+  v17 = iconst.ptr 0
+  v18 = select.ptr v16, v17, v5
+  store v18, v2 align 3
+  store v1, v2+8 align 3
+  store v4, v3 align 3
+  store v0, v3+8 align 3
+  call @sum2(v2, v3) : (ptr, ptr) -> void
+  v19 = load.i32 v5 align 2
+  ret v19
+)";
+    let bu = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 4, interleave: 4, fin: 0 };
+    let (b, a) = optimized_loops(src, 0, false, bu);
+    // (the length of `a`, the length of `d`): an empty `a` with an empty `d`, one with a non-empty `d`, a
+    // non-empty `a` with an empty `d` (the panic), sums of 1, 4, 5, 13 and 16 squares.
+    let cases: [(u64, u64); 8] = [(0, 0), (0, 1), (3, 0), (1, 1), (4, 1), (5, 1), (13, 1), (16, 1)];
+    for k in 0..8usize {
+        let (n, dl) = unsafe cases[k];
+        let xs: [u64; 2] = [n, dl];
+        let mut e = leval::Eval::new(&b);
+        let o = e.run(b.find_symbol("drive"), xs);
+        let mut e2 = leval::Eval::new(&a);
+        let o2 = e2.run(a.find_symbol("drive"), xs);
+        assert_eq(o2.kind, o.kind);
+        let mut want: u64 = 10;
+        for q in 0..n {
+            want += q * q;
+        }
+        if n != 0 && dl == 0 {
+            assert(o.kind != leval::EV_OK, "the panic");
+        } else {
+            assert_eq(o.kind, leval::EV_OK);
+            assert_eq(o.value & 0xFFFFFFFF, want);
+            assert_eq(o2.value & 0xFFFFFFFF, want);
+        }
+    }
+    let ts = text_of(&a, "sum2");
+    assert(ts.contains("add.v4i32") && count_of(&ts, "store") == 1, ts.as_str());
+}
+
 // Switches lowered (`Package.switch_tree`): a dense one whose edges pass constants to one block left a
 // switch (the backends read a table), one of sparse ranges to range tests, one of three values whose edges
 // pass constants to one block (one through a block that only jumps there) to a table in a register, and

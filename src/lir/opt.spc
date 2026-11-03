@@ -214,6 +214,12 @@ pub(package) struct Opt {
     hoisted: Vector<u64>, // block << 32 | instruction, in the order they moved
     pnew: Vector<bool>, // per block, a preheader `preheaders` made
     touched: Vector<bool>, // per block, one `promote_places` changed: a preheader or a block of a loop
+    /// `place_of`'s guard of a place the loop reaches on its first pass only after tests (`guarded`): per test,
+    /// its condition, the block it leaves to and whether the loop goes on when it holds; empty for none.
+    gchain: Vector<u32>,
+    gcmp: u32, // the header's comparison the guard repeats on the entry values; NONE: no guard
+    gout: u32, // the header's edge out of the loop
+    gstay: bool, // whether the header stays in the loop when its comparison holds
     // `reassociate`'s scratch: per value its uses and its one user (NONE: an edge's or none), a chain's
     // nodes and leaves, the partial sums (depth << 32 | value).
     rcount: Vector<u32>,
@@ -445,6 +451,10 @@ extend Opt {
             hoisted: Vector::<u64>::new(),
             pnew: Vector::<bool>::new(),
             touched: Vector::<bool>::new(),
+            gchain: Vector::<u32>::new(),
+            gcmp: NONE,
+            gout: NONE,
+            gstay: false,
             rcount: Vector::<u32>::new(),
             ruser: Vector::<u32>::new(),
             rnodes: Vector::<u32>::new(),
@@ -1598,9 +1608,17 @@ extend Opt {
             let pre = self.preh[h as usize];
             let pi = b.blocks[pre as usize].start + b.blocks[pre as usize].len - 1;
             let pt = b.insts[pi as usize];
-            let nk = b.add_block(none);
-            b.begin(nk);
             let loc = b.locs[pi as usize];
+            let mut into = NONE;
+            if self.gcmp != NONE && pt.op == O_JMP && b.edge_target(pt.a) == h {
+                into = self.guard_blocks(b, h, pt, loc, pi);
+            }
+            let nk = b.add_block(none);
+            if into != NONE {
+                // The guard's last test into the load.
+                b.pool[into as usize] = nk;
+            }
+            b.begin(nk);
             let sa = b.emit(Inst { op: O_SLOTADDR, ty: T_PTR, aux: 0, a: slot, b: 0, c: 0 }, loc);
             let v = b.emit(Inst { op: O_LOAD, ty: ty, aux: st.aux, a: st.a, b: VNONE, c: st.c }, loc);
             let _ = b.emit(Inst { op: O_STORE, ty: T_NONE, aux: al, a: sa, b: v, c: 0 }, loc);
@@ -1610,7 +1628,9 @@ extend Opt {
                     b.inl.push(b.inl[pi as usize]);
                 }
             }
-            b.insts[pi as usize] = jump(b.edge(nk, noargs));
+            if into == NONE {
+                b.insts[pi as usize] = jump(b.edge(nk, noargs));
+            }
             self.touched[pre as usize] = true;
             let r = self.lb_at[h as usize];
             for q in (r >> 32) as u32..r as u32 {
@@ -1691,6 +1711,88 @@ extend Opt {
             self.kept = K_NONE;
         }
         return any;
+    }
+
+    // The guard of a place the first pass of loop `h` reaches after tests (`guarded`), on the preheader's jump
+    // `pt` (instruction `pi`, location `loc`), which goes to its first block: the header's comparison on the
+    // entry values, to the exit with its arguments' entry values when the loop would not run; each check, to
+    // its block when the run would leave there. The edge its last test continues on (target to set).
+    fn guard_blocks(self: &mut Self, b: &mut Body, h: u32, pt: Inst, loc: u32, pi: u32) u32 {
+        let none: []u8 = [];
+        let noargs: []Value = [];
+        let mut args = Vector::<Value>::with_capacity(b.edge_nargs(pt.a) as usize);
+        for k in 0..b.edge_nargs(pt.a) {
+            args.push(b.edge_arg(pt.a, k));
+        }
+        let c = b.insts[self.gcmp as usize];
+        let g = b.add_block(none);
+        b.insts[pi as usize] = jump(b.edge(g, noargs));
+        b.begin(g);
+        let n0 = b.insts.len();
+        let ca = Opt::entry_of(b, h, args[0..args.len()], c.a);
+        let cb = Opt::entry_of(b, h, args[0..args.len()], c.b);
+        let cv = b.emit(Inst { op: O_ICMP, ty: c.ty, aux: c.aux, a: ca, b: cb, c: VNONE }, loc);
+        self.uargs.truncate(0);
+        for k in 0..b.edge_nargs(self.gout) {
+            self.uargs.push(Opt::entry_of(b, h, args[0..args.len()], b.edge_arg(self.gout, k)));
+        }
+        let xe = b.edge(b.edge_target(self.gout), &self.uargs);
+        // Each test's edge on: its target set when the next block exists (one test per step).
+        let mut on = b.edge(h, noargs);
+        let _ = b.emit(
+            Inst {
+                op: O_BR,
+                ty: T_NONE,
+                aux: 0,
+                a: cv,
+                b: if self.gstay {
+                    on
+                } else {
+                    xe
+                },
+                c: if self.gstay {
+                    xe
+                } else {
+                    on
+                },
+            },
+            loc,
+        );
+        let mut q: usize = 0;
+        while q < self.gchain.len() {
+            let k = b.add_block(none);
+            b.pool[on as usize] = k;
+            b.begin(k);
+            on = b.edge(h, noargs);
+            let side = b.edge(self.gchain[q + 1], noargs);
+            let stay = self.gchain[q + 2] != 0;
+            let _ = b.emit(
+                Inst {
+                    op: O_BR,
+                    ty: T_NONE,
+                    aux: 0,
+                    a: self.gchain[q],
+                    b: if stay {
+                        on
+                    } else {
+                        side
+                    },
+                    c: if stay {
+                        side
+                    } else {
+                        on
+                    },
+                },
+                loc,
+            );
+            q += 3;
+        }
+        if b.inl.len() != 0 {
+            for _ in n0..b.insts.len() {
+                b.inl.push(b.inl[pi as usize]);
+            }
+        }
+        return on;
     }
 
     /// Regroup each integer sum of `b` that a chain of additions makes, each used once by the next in its
@@ -1850,7 +1952,7 @@ extend Opt {
     // access of the loop of another class (neither may be any), of other bytes of the same address, of
     // another object, or of another type tag. A static whose address another pointer may hold stays in
     // memory when an access through such a pointer may touch it. NONE when none.
-    fn place_of(self: &Self, pk: &Package, b: &Body, h: u32) u32 {
+    fn place_of(self: &mut Self, pk: &Package, b: &Body, h: u32) u32 {
         // The blocks the loop tables cover (`nest`'s): `promote_places` adds others.
         if self.inner[h as usize] != h || self.preh[h as usize] == NONE || self.touched[self.preh[h as usize] as usize] {
             return NONE;
@@ -1927,7 +2029,15 @@ extend Opt {
                 }
             }
         }
-        if !read || !self.safe_load(pk, b, Inst { op: O_LOAD, ty: ty, aux: s.aux, a: s.a, b: VNONE, c: s.c }) {
+        self.gcmp = NONE;
+        if !read {
+            return NONE;
+        }
+        if !self.safe_load(pk, b, Inst { op: O_LOAD, ty: ty, aux: s.aux, a: s.a, b: VNONE, c: s.c }) && !self.guarded(
+            b,
+            h,
+            s,
+        ) {
             return NONE;
         }
         return cand;
@@ -1936,6 +2046,130 @@ extend Opt {
     // Whether store `i` of the body writes a `static mut`: a writable data object the package defines
     // (`aobj`), also a thread-local one: a loop that calls nothing has no suspension point, so it runs on one
     // thread and the address from before it is its copy's.
+    // Whether loop `h`'s first pass reaches an access of place `s` (its address and offset) before anything
+    // but pure instructions, given tests the code before the loop can make: none when the header holds the
+    // access (a rotated loop: entering it runs the header); else a header that is one comparison of its
+    // parameters and values from outside and a branch (in and out of the loop, the exit's arguments the same
+    // kinds), then blocks to the access whose branches test a value from outside with one side leaving to a
+    // block that ends in a trap or a panic and reads only values from outside. Those tests (`gcmp`,
+    // `gchain`), on the entry values, guard the place's load before the loop: the header's sends the run to
+    // the exit, nothing loaded; a check's to its block, as the first pass would.
+    fn guarded(self: &mut Self, b: &Body, h: u32, s: Inst) bool {
+        self.gchain.truncate(0);
+        let hb = b.blocks[h as usize];
+        for i in hb.start..hb.start + hb.len {
+            let t = b.insts[i as usize];
+            if (t.op == O_LOAD || t.op == O_STORE) && t.a == s.a && t.c == s.c {
+                return true;
+            }
+        }
+        if hb.len != 2 {
+            return false;
+        }
+        let c = b.insts[hb.start as usize];
+        let tm = b.insts[(hb.start + 1) as usize];
+        if c.op != O_ICMP || tm.op != O_BR || tm.a != hb.start || !self.entry_val(b, h, c.a) || !self.entry_val(
+            b,
+            h,
+            c.b,
+        ) {
+            return false;
+        }
+        let bt = self.in_loop(h, b.edge_target(tm.b));
+        let ct = self.in_loop(h, b.edge_target(tm.c));
+        if bt == ct {
+            return false;
+        }
+        let (into, out) = if bt {
+            (tm.b, tm.c)
+        } else {
+            (tm.c, tm.b)
+        };
+        if b.edge_nargs(into) != 0 {
+            return false;
+        }
+        for k in 0..b.edge_nargs(out) {
+            if !self.entry_val(b, h, b.edge_arg(out, k)) {
+                return false;
+            }
+        }
+        let mut x = b.edge_target(into);
+        // One block per step.
+        for _ in 0..b.blocks.len() {
+            let bk = b.blocks[x as usize];
+            for i in bk.start..bk.start + bk.len - 1 {
+                let t = b.insts[i as usize];
+                if (t.op == O_LOAD || t.op == O_STORE) && t.a == s.a && t.c == s.c {
+                    self.gcmp = hb.start;
+                    self.gout = out;
+                    self.gstay = bt;
+                    return true;
+                }
+                if writes_memory(t) || t.op == O_VAARG {
+                    return false;
+                }
+            }
+            let e = b.insts[(bk.start + bk.len - 1) as usize];
+            if e.op != O_BR || !self.outside(e.a, h) || b.edge_nargs(e.b) != 0 || b.edge_nargs(e.c) != 0 {
+                return false;
+            }
+            let (on, side, stay) = if self.in_loop(h, b.edge_target(e.b)) && self.ends_run(b, h, b.edge_target(e.c)) {
+                (e.b, e.c, true)
+            } else if self.in_loop(h, b.edge_target(e.c)) && self.ends_run(b, h, b.edge_target(e.b)) {
+                (e.c, e.b, false)
+            } else {
+                return false;
+            };
+            self.gchain.push(e.a);
+            self.gchain.push(b.edge_target(side));
+            self.gchain.push(stay as u32);
+            x = b.edge_target(on);
+        }
+        return false;
+    }
+
+    // Whether `v` is a parameter of loop header `h` or a value from outside the loop: on the entry edge, the
+    // edge's argument or itself (`entry_of`).
+    fn entry_val(self: &Self, b: &Body, h: u32, v: Value) bool {
+        let hb = b.blocks[h as usize];
+        return (v & VPARAM) != 0 && (v & ~VPARAM) >= hb.param_start && (v & ~VPARAM) < hb.param_start + hb.param_len as u32 || self.outside(
+            v,
+            h,
+        );
+    }
+
+    // `v` on the edge into header `h` whose arguments `args` are: a parameter's argument, else `v`.
+    fn entry_of(b: &Body, h: u32, args: []Value, v: Value) Value {
+        let hb = b.blocks[h as usize];
+        if (v & VPARAM) != 0 && (v & ~VPARAM) >= hb.param_start && (v & ~VPARAM) < hb.param_start + hb.param_len as u32 {
+            return args[((v & ~VPARAM) - hb.param_start) as usize];
+        }
+        return v;
+    }
+
+    // Whether block `x`, out of loop `h`, ends the run (a trap or a panic) and reads only values from outside
+    // the loop, with no parameter: a guard may jump to it before the loop.
+    fn ends_run(self: &Self, b: &Body, h: u32, x: u32) bool {
+        let bk = b.blocks[x as usize];
+        if self.in_loop(h, x) || bk.param_len != 0 || bk.len == 0 {
+            return false;
+        }
+        let e = b.insts[(bk.start + bk.len - 1) as usize].op;
+        if e != O_UNREACHABLE && e != O_PANIC {
+            return false;
+        }
+        let mut ops = Vector::<Value>::new();
+        for i in bk.start..bk.start + bk.len {
+            lv::uses(b, b.insts[i as usize], &mut ops);
+            for q in 0..ops.len() {
+                if !self.outside(ops[q], h) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     fn static_place(self: &Self, pk: &Package, i: u32) bool {
         let o = self.aobj[i as usize];
         if o == NONE || (o & (lu::OBJ_SLOT | lu::OBJ_PRIVATE | lu::OBJ_FRESH)) != 0 {
