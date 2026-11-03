@@ -9593,9 +9593,9 @@ extend Gen {
         // locals end on one. The vector registers' save area tops the locals, 16-aligned.
         // A System V body that calls nothing (no canary check either) and keeps nothing 16-aligned for
         // other code (no slot aligned past 8, no inline assembly) leaves rsp where it falls.
-        // A Microsoft x64 body that calls nothing and keeps nothing on the stack (no slot, spill, saved
-        // register or frame register) needs neither the callees' home area nor a frame.
-        let bare = self.win && !self.called && self.canary < 0 && (self.opf & lv::OP_ASM) == 0 && npush == 0 && xregs.len() == 0 && omit && fp == NOREG && self.spill_base == self.out_size && self.spill_top == 0 && self.max_align <= 16;
+        // A Microsoft x64 body that calls nothing and keeps nothing on the stack but saved registers (no slot,
+        // spill or frame register) needs neither the callees' home area nor an aligned frame.
+        let bare = self.win && !self.called && self.canary < 0 && (self.opf & lv::OP_ASM) == 0 && omit && fp == NOREG && self.spill_base == self.out_size && self.spill_top == 0 && self.max_align <= 16;
         let b = self.b();
         let mut leaf = !self.win && !self.called && self.canary < 0 && (self.opf & lv::OP_ASM) == 0 || bare;
         for k in 0..b.slots.len() {

@@ -5410,7 +5410,9 @@ extend Lower {
             for i in 0..args.len() {
                 tys.push(self.vty(args[i]));
             }
-            return self.call_sym(&ename, args[0..args.len()], tys[0..tys.len()], ti.mty);
+            // A narrow result of a signed type comes back sign-extended, as the entry's own signature says.
+            let ret = sig_code(ti.mty, rv.target != TYPE_NONE && Lower::signed(c, b.module, rv.target));
+            return self.call_sym(&ename, args[0..args.len()], tys[0..tys.len()], ret);
         }
         if ti.cls == VC_MEM {
             args.push(dst);

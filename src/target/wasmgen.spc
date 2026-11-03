@@ -4795,10 +4795,13 @@ extend Gen {
             self.reloc(w::R_TABLE_NUMBER_LEB, self.table_sym, 0);
             self.c.uleb5(0);
         }
-        // The result.
+        // The result. A narrow one comes extended (the C ABI's `zeroext` and `signext`, `ret`): a signed one
+        // back to its bits zero-extended.
         let r = self.cs.ret;
         if r.kind == wa::P_DIRECT && !r.leaf {
-            self.canon(r.ty);
+            if r.sext {
+                self.canon(r.ty);
+            }
             self.put(i);
         } else if r.kind == wa::P_DIRECT {
             let tv = self.tmp(wa::wtype(r.ty));

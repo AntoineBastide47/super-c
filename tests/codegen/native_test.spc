@@ -4710,6 +4710,84 @@ fn even_lanes_of_two_vectors_run() {
     assert_eq(run_wasm(&lir, &drv), 0);
 }
 
+// A Microsoft x64 body that calls nothing and keeps no slot or spill needs no home area for callees: `@sum`
+// (a vector loop and its scalar rest, the optimizer's output for a slice's sum) keeps the rest's sum in a
+// callee-saved register (`push rbx`), with no `sub rsp, 32`. It gives the C result.
+@test
+fn microsoft_x64_leaves_take_no_home_area() {
+    let lir = M"(lir ptr 8
+sym @sum fn global
+fn @sum
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0) -> i32
+b0(v0: ptr):
+  v1 = load.ptr v0 align 3
+  v2 = iconst.i32 0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = load.i64 v0+8 align 3
+  v6 = iconst.i64 -8
+  v7 = and.i64 v5, v6
+  v8 = icmp.ne v7, v3
+  br v8, b3, b1(v3, v2)
+b1(v9: i64, v10: i32): novec
+  v11 = icmp.ult v9, v5
+  br v11, b2(v9, v10), b7
+b2(v12: i64, v13: i32):
+  v14 = ptradd v1, v12 * 4 inbounds nonnull
+  v15 = load.i32 v14 align 2
+  v16 = add.i32 v13, v15
+  v17 = add.i64 v12, v4
+  v18 = icmp.ult v17, v5
+  br v18, b2(v17, v16), b6(v16)
+b3:
+  v19 = wconst.v4i32 0x0, 0x0
+  v20 = iconst.i64 8
+  jmp b4(v3, v19, v19)
+b4(v21: i64, v22: v4i32, v23: v4i32): novec
+  v24 = ptradd v1, v21 * 4
+  v25 = load.v4i32 v24 align 2
+  v26 = add.v4i32 v22, v25
+  v27 = load.v4i32 v24+16 align 2
+  v28 = add.v4i32 v23, v27
+  v29 = add.i64 v21, v20
+  v30 = icmp.ult v29, v7
+  br v30, b4(v29, v26, v28), b5
+b5:
+  v31 = add.v4i32 v26, v28
+  v32 = vop.reduce_add.i32 (v31)
+  jmp b1(v7, v32)
+b6(v33: i32):
+  ret v33
+b7:
+  ret v10
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, OMIT_FP, &mut obj), "the Microsoft x64 object");
+    let sub: [u8; 4] = [0x48, 0x83, 0xEC, 0x20];
+    let push: [u8; 1] = [0x53];
+    assert(!holds(&obj, sub[0..4]) && holds(&obj, push[0..1]), "sum");
+    let drv = M"(#include <stdint.h>
+struct s { const int32_t *p; int64_t n; };
+int32_t sum(struct s);
+int main(void) {
+  int32_t a[37];
+  for (int k = 0; k < 37; k++) a[k] = k * 3 - 20;
+  for (int n = 0; n <= 37; n++) {
+    struct s v = {a, n};
+    int32_t r = 0;
+    for (int k = 0; k < n; k++) r += a[k];
+    if (sum(v) != r) return 1;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // 16-byte vectors passed and returned in vector registers stay there (arm64, System V; Microsoft x64
 // passes them by reference into registers and returns them through memory): a sum straight into the
 // result's register, a vector passed to a call from its register, a parameter a loop reads from its home
@@ -10333,6 +10411,62 @@ fn coff_section(b: &Vector<u8>, name: str) u64 {
         }
     }
     return 0;
+}
+
+// A narrow call result comes extended (C's `zeroext`, `signext`): an unsigned one is used as it is on wasm32
+// (`@useu`: call, i32.const 300, i32.add, no mask between), a signed one goes back to its bits zero-extended
+// (`@uses` masks it). Both give the C results for C callees.
+@test
+fn narrow_call_results_keep_their_extension() {
+    let lir = M"(lir ptr 8
+sym @gu fn global
+sym @gs fn global
+sym @useu fn global
+sym @uses fn global
+fn @useu
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = call.i8 @gu(v0) : (i32) -> i8
+  v2 = zext.i32 v1
+  v3 = iconst.i32 300
+  v4 = add.i32 v2, v3
+  ret v4
+fn @uses
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = call.i8 @gs(v0) : (i32) -> i8.s
+  v2 = zext.i32 v1
+  v3 = iconst.i32 300
+  v4 = add.i32 v2, v3
+  ret v4
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    // i32.const 300, i32.add right after the call's index (a 5-byte LEB, its relocation).
+    let use_u: [u8; 6] = [0x80, 0x00, 0x41, 0xAC, 0x02, 0x6A];
+    let mask: [u8; 8] = [0x80, 0x00, 0x41, 0xFF, 0x01, 0x71, 0x41, 0xAC];
+    assert(holds(&obj, use_u[0..6]) && holds(&obj, mask[0..8]), "useu, uses");
+    let drv = M"(#include <stdint.h>
+uint8_t gu(int32_t x) { return (uint8_t)(x * 37); }
+int8_t gs(int32_t x) { return (int8_t)(x * 37); }
+int32_t useu(int32_t);
+int32_t uses(int32_t);
+int main(void) {
+  for (int32_t x = 0; x < 20; x++) {
+    if (useu(x) != (uint8_t)(x * 37) + 300) return 1;
+    if (uses(x) != (uint8_t)(int8_t)(x * 37) + 300) return 2;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
 }
 
 // A wasm32 local that no access left reads loses its writes (`stack_values`): `@cls`'s byte differences,
