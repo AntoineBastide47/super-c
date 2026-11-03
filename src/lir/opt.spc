@@ -1256,7 +1256,7 @@ extend Opt {
             } else {
                 0u8
             };
-            let round = f == core::SIMD_FLOOR || f == core::SIMD_CEIL || f == core::SIMD_TRUNC;
+            let round = f == core::SIMD_FLOOR || f == core::SIMD_CEIL || f == core::SIMD_TRUNC || f == lu::ROUND_AWAY;
             self.unr.vfn.push(
                 if round && !pk.vround || f == core::SIMD_FMA && !pk.fma {
                     0u8

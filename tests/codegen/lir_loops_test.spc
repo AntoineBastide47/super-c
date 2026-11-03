@@ -892,6 +892,121 @@ fn a_loop_dividing_by_a_constant_vectorizes() {
     }
 }
 
+// A loop's calls of C's `roundf`, which rounds halfway away from zero, widen where the target rounds lanes
+// (`Package.vround`): no lane operation, but the truncation of `x + copysign(0.5 - ulp, x)`
+// (`ROUND_AWAY`). On halves of both signs, the largest float below 0.5, the halves next to 2^23, -0.0 and
+// a large value, the vector loop gives what `round` does (the driver sums the results' bits times 31 each
+// step, wrapping; 16 elements, so the scalar rest, which calls `roundf`, does not run).
+@test
+fn calls_of_round_widen_to_a_truncation() {
+    let src = M"(lir ptr 8
+sym @roundf fn global
+sym @rd fn global noinline
+sym @drive fn global
+fn @rd
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v2)
+b1(v4: i64):
+  v5 = icmp.ult v4, v1
+  br v5, b2, b3
+b2:
+  v6 = ptradd v0, v4 * 4
+  v7 = load.f32 v6 align 2
+  v8 = call.f32 @roundf(v7) : (f32) -> f32
+  store v8, v6 align 2
+  v9 = add.i64 v4, v3
+  jmp b1(v9)
+b3:
+  ret
+fn @drive
+  sig () -> i64
+  slot s0 size 64 align 4
+b0:
+  v0 = iconst.i64 16
+  v1 = iconst.i64 0
+  v2 = slotaddr s0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 31
+  v5 = fconst.f32 0x3f000000
+  store v5, v2+0 align 2
+  v6 = fconst.f32 0xbf000000
+  store v6, v2+4 align 2
+  v7 = fconst.f32 0x3fc00000
+  store v7, v2+8 align 2
+  v8 = fconst.f32 0xbfc00000
+  store v8, v2+12 align 2
+  v9 = fconst.f32 0x40200000
+  store v9, v2+16 align 2
+  v10 = fconst.f32 0x3effffff
+  store v10, v2+20 align 2
+  v11 = fconst.f32 0xbeffffff
+  store v11, v2+24 align 2
+  v12 = fconst.f32 0x4affffff
+  store v12, v2+28 align 2
+  v13 = fconst.f32 0x4b000000
+  store v13, v2+32 align 2
+  v14 = fconst.f32 0xc0200000
+  store v14, v2+36 align 2
+  v15 = fconst.f32 0x40600000
+  store v15, v2+40 align 2
+  v16 = fconst.f32 0x80000000
+  store v16, v2+44 align 2
+  v17 = fconst.f32 0x7149f2ca
+  store v17, v2+48 align 2
+  v18 = fconst.f32 0x3e800000
+  store v18, v2+52 align 2
+  v19 = fconst.f32 0xbf400000
+  store v19, v2+56 align 2
+  v20 = fconst.f32 0x40f00000
+  store v20, v2+60 align 2
+  call @rd(v2, v0) : (ptr, i64) -> void
+  jmp b1(v1, v1)
+b1(v21: i64, v22: i64):
+  v23 = icmp.ult v21, v0
+  br v23, b2, b3
+b2:
+  v24 = ptradd v2, v21 * 4
+  v25 = load.i32 v24 align 2
+  v26 = zext.i64 v25
+  v27 = mul.i64 v22, v4
+  v28 = add.i64 v27, v26
+  v29 = add.i64 v21, v3
+  jmp b1(v29, v28)
+b3:
+  ret v22
+)";
+    let (_, a) = optimized(src, VECTOR);
+    let k = text_of(&a, "rd");
+    assert(k.contains("vop.trunc.v4f32") && k.contains("fadd.v4f32"), k.as_str());
+    let ins: [u32; 16] = [
+        0x3f000000,
+        0xbf000000,
+        0x3fc00000,
+        0xbfc00000,
+        0x40200000,
+        0x3effffff,
+        0xbeffffff,
+        0x4affffff,
+        0x4b000000,
+        0xc0200000,
+        0x40600000,
+        0x80000000,
+        0x7149f2ca,
+        0x3e800000,
+        0xbf400000,
+        0x40f00000,
+    ];
+    let mut want: u64 = 0;
+    for x in ins {
+        want = want.wrapping_mul(31).wrapping_add(f32::from_bits(x).round().to_bits());
+    }
+    let none: []u64 = [];
+    assert_eq(run_value(&a, "drive", none), want);
+}
+
 // A float's bits as an integer of one size and back (C's `copysign`: the magnitude's bits, the sign's
 // bit) are the vector register's bits: the loop vectorizes. A call of `copysign` or `copysignf` becomes
 // those bits (`copysign_bits`), so its loop vectorizes too, and computes what the bits do. Each driver fills 128

@@ -71,19 +71,13 @@ jobs:
           rm -rf build/bench
           "./super-c-boot${BINEXT:-}" bench --filter=codegen_
 
-  # The test suite on Windows x86-64, with this tree's compiler, in 3 shards; the first shard once more
-  # after the build caches the release compiler filled are cleared (`clean`). A failure lists the objects
-  # that reference a Microsoft x64 entry thunk (`.msabi`) no object defines.
+  # The test suite on Windows x86-64, with this tree's compiler, in 3 shards.
   test-windows:
-    name: test (windows ${{ matrix.shard }}${{ matrix.clean && ' clean' || '' }})
+    name: test (windows ${{ matrix.shard }})
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { shard: "1/3", clean: false }
-          - { shard: "2/3", clean: false }
-          - { shard: "3/3", clean: false }
-          - { shard: "1/3", clean: true }
+        shard: ["1/3", "2/3", "3/3"]
     runs-on: windows-latest
     defaults:
       run:
@@ -95,7 +89,6 @@ jobs:
         with:
           target: windows
           sha: ${{ github.sha }}
-          llvm-mingw: true
 
       - uses: ./.github/actions/bootstrap
         with:
@@ -107,30 +100,10 @@ jobs:
           "./super-c-boot${BINEXT:-}" build --bootstrap-tags
           [ -f "./super-c${BINEXT:-}" ] || mv ./super-c "./super-c${BINEXT:-}"
 
-      - name: Clear the build caches
-        if: matrix.clean
-        run: |
-          rm -rf build "$HOME/.super-c/cache"
-
       - name: Run the test suite
         run: |
           set -eu
           SC_LEAK_CHECK=fatal "./super-c${BINEXT:-}" test --quiet --test-shard=${{ matrix.shard }}
-
-      - name: The undefined entry thunks
-        if: failure()
-        run: |
-          ls "$HOME/.super-c/cache" | head -5 || true
-          find build "$HOME/.super-c/cache" -name '*.o' > objs.txt 2>/dev/null || true
-          wc -l objs.txt
-          while read -r f; do
-            "$LLVM_MINGW/llvm-nm" "$f" 2>/dev/null | grep '\.msabi' | sed "s|^|$f: |"
-          done < objs.txt > thunks.txt
-          grep ' U ' thunks.txt | head -30
-          for s in $(grep ' U ' thunks.txt | awk '{print $NF}' | sort -u | head -5); do
-            echo "== $s"
-            grep -F "$s" thunks.txt | head -6
-          done
 
   # Linux arm64: no release ships a Linux arm64 compiler, so the x86-64 runner cross-builds this tree's
   # compiler against the arm64 C library, and the arm64 runner benchmarks with it.

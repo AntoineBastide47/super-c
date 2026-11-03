@@ -6184,12 +6184,15 @@ int main(void) {
 // passes in two integer registers by position (rcx and rdx, then the next argument in r8) and returns in
 // rax and rdx, where C's convention passes and returns it through memory. A function of that convention
 // whose address the package takes gets a C entry, a thunk that calls it (`w64::thunks`), which the
-// address names; a direct call names the function. Only under Microsoft x64, and the objects build.
+// address names; a direct call names the function. The thunk is local to the object that takes the
+// address: a unit's own part (`Sym.own`) and its other part each have their own. Only under Microsoft
+// x64, and the objects build.
 @test
 fn slices_pass_in_two_registers_between_super_c_functions_on_windows() {
     let lir = M"(lir ptr 8
 sym @sum fn global
 sym @take fn global
+sym @take2 fn global
 sym @call fn global
 fn @sum
   layout l0 size 16 align 3 [0 ptr, 8 i64]
@@ -6203,6 +6206,11 @@ b0(v0: ptr, v1: i32, v2: ptr):
   store v6, v2+8 align 3
   ret
 fn @take
+  sig () -> ptr
+b0:
+  v0 = symaddr @sum
+  ret v0
+fn @take2
   sig () -> ptr
 b0:
   v0 = symaddr @sum
@@ -6263,6 +6271,22 @@ b0(v0: ptr, v1: i64):
     let mut q = lparse::parse(lir, &mut err).unwrap();
     assert(nat::prepare(&mut q, tgt::axis_index("linux", false), x64, &mut err), err.as_str());
     assert(q.find_symbol("sum.msabi") == NONE, "System V needs no entry");
+    // Unit 0: `take` in its own part, `take2` in the other.
+    let mut r = lparse::parse(lir, &mut err).unwrap();
+    for name in ["sum", "take", "take2", "call"] {
+        let s = r.find_symbol(name);
+        r.syms.index_mut(s as usize).unit = 0;
+        r.syms.index_mut(s as usize).own = name != "take2";
+    }
+    assert(nat::prepare(&mut r, tgt::axis_index("windows", false), x64, &mut err), err.as_str());
+    // Named by object, 2 × the unit + 1 for the other part.
+    let to = r.find_symbol("sum.msabi0");
+    let ti = r.find_symbol("sum.msabi1");
+    assert(to != NONE && r.syms[to as usize].own && r.syms[to as usize].unit == 0, "the own part's entry");
+    assert(ti != NONE && !r.syms[ti as usize].own && r.syms[ti as usize].unit == 0, "the other part's entry");
+    let t1 = &r.bodies[r.syms[r.find_symbol("take") as usize].def as usize];
+    let t2 = &r.bodies[r.syms[r.find_symbol("take2") as usize].def as usize];
+    assert(t1.syms[t1.insts[0].a as usize] == to && t2.syms[t2.insts[0].a as usize] == ti, "each part names its own");
     let mut obj = Vector::<u8>::new();
     assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Microsoft x64 object");
     assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the System V object");

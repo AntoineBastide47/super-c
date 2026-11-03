@@ -3903,6 +3903,10 @@ extend LoopOpt {
                         for q in 0..t.aux as u32 {
                             args.push(self.vval(b, u, c, b.pool[(t.c + q) as usize]));
                         }
+                        if self.vfn[t.a as usize] == ROUND_AWAY {
+                            self.vmap[at] = self.vround_away(b, nt.ty, args[0], b.locs[i as usize]);
+                            continue;
+                        }
                         let at2 = b.pool_list(args[0..args.len()]);
                         let code = lane_code(self.vfn[t.a as usize]);
                         self.vmap[at] = self.vi(
@@ -5830,6 +5834,28 @@ extend LoopOpt {
         } else {
             vec_type(t, self.vlanes)
         };
+    }
+
+    // C's `round` of float vector `x` of type `vt`, halfway away from zero (`ROUND_AWAY`): the truncation of
+    // `x` plus the largest float below 0.5 with `x`'s sign, which carries exactly the fractions of at least
+    // one half to the next integer.
+    fn vround_away(self: &mut Self, b: &mut Body, vt: u8, x: Value, l: u32) Value {
+        let d = lane_type(vt) == T_F64;
+        let it = vec_type(ast::pick(d, T_I64, T_I32), lanes(vt));
+        let (half, sign) = if d {
+            (0x3FDFFFFFFFFFFFFFu64, 1u64 << 63)
+        } else {
+            (0x3EFFFFFFu64, 1u64 << 31)
+        };
+        let xi = self.vi(b, Inst { op: O_BITCAST, ty: it, aux: 0, a: x, b: VNONE, c: VNONE }, l);
+        let sm = self.vsplat_const(b, it, sign, l);
+        let s = self.vi(b, Inst { op: O_AND, ty: it, aux: 0, a: xi, b: sm, c: VNONE }, l);
+        let hb = self.vsplat_const(b, it, half, l);
+        let o = self.vi(b, Inst { op: O_OR, ty: it, aux: 0, a: s, b: hb, c: VNONE }, l);
+        let c = self.vi(b, Inst { op: O_BITCAST, ty: vt, aux: 0, a: o, b: VNONE, c: VNONE }, l);
+        let a = self.vi(b, Inst { op: O_FADD, ty: vt, aux: 0, a: x, b: c, c: VNONE }, l);
+        let at = b.pool_list([a][0..1]);
+        return self.vi(b, Inst { op: O_VOP, ty: vt, aux: lane_code(core::SIMD_TRUNC), a: at, b: 1, c: VNONE }, l);
     }
 
     // Vector type `vt` with every lane the low bits of `x`, as a wide constant (scalar copies: `x` as a
@@ -9207,9 +9233,14 @@ const fn lane_code(f: u8) u16 {
     return (core::OP_SIMD + f as u32) as u16 | ast::pick(f == core::SIMD_MIN || f == core::SIMD_MAX, VOP_NUM, 0u16);
 }
 
+/// `lane_fn` of `round`, which rounds halfway away from zero: no lane operation, but the truncation of
+/// `x + copysign(0.5 - ulp, x)` (`LoopOpt::vround_away`), exact for every `x`.
+pub(package) const ROUND_AWAY: u8 = 0xFF;
+
 /// The vector operation (`core::SIMD_*`) a call of C float function `name` computes per lane, 0 for none:
-/// `fabs`, `floor`, `ceil`, `trunc`, `fma`, `fmin` and `fmax` (which ignore a NaN operand, as the lanes'
-/// SIMD_MIN and SIMD_MAX do), and their `f` forms, which set no `errno` (`Package.vfloat`).
+/// `fabs`, `floor`, `ceil`, `trunc`, `round` (ROUND_AWAY), `fma`, `fmin` and `fmax` (which ignore a NaN
+/// operand, as the lanes' SIMD_MIN and SIMD_MAX do), and their `f` forms, which set no `errno`
+/// (`Package.vfloat`).
 pub(package) const fn lane_fn(name: str) u8 {
     let n = if name.ends_with("f") && name != "f" {
         name.slice(0, name.len() - 1)
@@ -9224,6 +9255,8 @@ pub(package) const fn lane_fn(name: str) u8 {
         core::SIMD_CEIL
     } else if n == "trunc" {
         core::SIMD_TRUNC
+    } else if n == "round" {
+        ROUND_AWAY
     } else if n == "fma" {
         core::SIMD_FMA
     } else if n == "fmin" {
