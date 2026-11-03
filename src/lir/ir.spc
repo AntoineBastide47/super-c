@@ -863,6 +863,10 @@ pub(package) struct Sym {
     /// Defined by its unit's own items, not added by the build (an instance, glue, data): a cached
     /// emission of the unit holds it. The text form does not carry it.
     pub(package) own: bool,
+    /// A function only its own module's items may name: a free function without a visibility modifier or
+    /// type parameters, neither `@export`, `@used` nor `main`. Its unit's other bodies may call it, its own
+    /// items' instances too. The text form does not carry it.
+    pub(package) internal: bool,
     /// A C library's symbol (an extern declaration's): it may be in a shared library, so code takes its
     /// address through the linker's address slot. Every other symbol is in the program's image.
     pub(package) ext: bool,
@@ -1796,6 +1800,7 @@ extend Package {
                     ALLOC_NONE
                 },
                 own: false,
+                internal: false,
                 ext: false,
                 sig: NONE,
             },
@@ -1971,6 +1976,7 @@ extend Package {
             self.syms.index_mut(s as usize).noinline = os.noinline;
             self.syms.index_mut(s as usize).cold = os.cold;
             self.syms.index_mut(s as usize).own = os.own;
+            self.syms.index_mut(s as usize).internal = os.internal;
             if os.sect != NONE {
                 self.syms.index_mut(s as usize).sect = self.name(other.spell(os.sect));
             }

@@ -10564,6 +10564,43 @@ fn replayed_unit_keeps_its_parameter_ranges() {
     assert(warm.equals(&cold), "main's object does not depend on the cache");
 }
 
+// A replayed unit's copy of a function without a parameter its calls pass one constant to (`lir::opt`'s
+// `specialize`) stays what a build that renders the unit makes: `main` inlines `five`, which calls the copy
+// of `mode`, and an instance of `other` the second build adds calls `mode` itself with another constant,
+// which the replayed object keeps. The objects match those built without the per-TU cache.
+@test
+fn replayed_unit_keeps_its_specialized_copies() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/b.spc",
+        "static mut S: u32 = 0;\n\n@noinline\nfn mode(x: u32, m: u32) u32 {\n    unsafe S += 1;\n    if m == 3 {\n        return x * 5;\n    }\n    return x / m + x % m;\n}\n\npub fn five(x: u32) u32 {\n    return mode(x, 3) + mode(x + 1, 3);\n}\n\npub fn other<T>(x: u32) u32 {\n    return mode(x, 7);\n}\n",
+    );
+    p.mkfile("src/main.spc", "import b;\n\nfn main() i32 {\n    return (b::five(1) - 15) as i32;\n}\n");
+    let root = p.dir();
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the first build succeeds");
+    assert_eq(p.run_bin(), 0);
+    p.mkfile(
+        "src/main.spc",
+        "import b;\n\nfn main() i32 {\n    return (b::five(1) + b::other::<u8>(20) - 23) as i32;\n}\n",
+    );
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the build that replays `b` succeeds");
+    assert_eq(p.run_bin(), 0);
+    let objs = ["main.o", "b.o", "b__inst.o"];
+    let mut warm = Vector::<String>::new();
+    for o in objs {
+        warm.push(loader::read_file(format("{}/build/release/raw/{}", root, o).as_str()).unwrap_or(String::new()));
+    }
+    assert(warm[0].len() > 0 && warm[1].len() > 0, "the builds write main's and b's objects");
+    let r = cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build --profile=release -o bin");
+    assert(r.ok(), "the build without the cache succeeds");
+    assert_eq(p.run_bin(), 0);
+    for i in 0..3usize {
+        let cold = loader::read_file(format("{}/build/release/raw/{}", root, objs[i]).as_str()).unwrap_or(String::new());
+        assert(warm[i].equals(&cold), objs[i]);
+    }
+}
+
 // A replayed unit's `@cold` function stays `@cold` (`lir::hold`, `Sym.cold`): `main`'s call of `slow`, a
 // body past SHRINK, stays a call, and `main`'s object matches one built without the per-TU cache.
 @test

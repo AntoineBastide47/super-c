@@ -642,7 +642,15 @@ extend TuEmit {
         body.push_str("\n");
         body.push_str(mbe::if_s(has_payload, "#define SUPER_ENUMTAG_", "#define SUPER_ENUM_"));
         body.push_string(&q);
-        body.push_str("\ntypedef enum { ");
+        // A payload-less enum smaller than the C enum names its values in an untyped enum and is its
+        // integer (`lay::bare_int`).
+        let bi = if has_payload {
+            0u8
+        } else {
+            lay::bare_int(self.p(), it.m, it.decl)
+        };
+        let small = bi != 0 && (bi & ~ENUM_INT_SIGNED) < 4;
+        body.push_str(mbe::if_s(small, "\nenum { ", "\ntypedef enum { "));
         let mut first = true;
         let mut cur: i64 = 0 - 1;
         for i in 0..ms.len {
@@ -668,7 +676,13 @@ extend TuEmit {
             body.push_str(" = ");
             body.push_i64(cur);
         }
-        body.push_str(" } ");
+        if small {
+            body.push_str(" };\ntypedef ");
+            body.push_str(mbe::if_s((bi & ENUM_INT_SIGNED) != 0, "int", "uint"));
+            body.push_str(mbe::if_s((bi & ~ENUM_INT_SIGNED) == 1, "8_t ", "16_t "));
+        } else {
+            body.push_str(" } ");
+        }
         body.push_string(&q);
         if has_payload {
             body.push_str("Tag");

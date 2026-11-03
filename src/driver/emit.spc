@@ -15175,18 +15175,23 @@ fn mark_c_reads(p: &mut loader::Package) bool {
             continue;
         }
         let nm = a.at_const(a.ext((added[k] & 0xFFFFFFFFu64) as NodeId).aggregate.name);
-        let mut errs = diag::Errors::new();
-        errs.emit_span(
-            dc::REACHES_C_UNTYPED_POINTER_TAG_ORDERED,
-            nm.span,
+        let name = p.modules[m].source.as_str().slice(
+            nm.as_data.name.text.start as usize,
+            nm.as_data.name.text.end as usize,
+        );
+        let msg = if d.kind == NodeKind::NODE_ENUM {
+            format(
+                "'{}' reaches C through a pointer argument, so its payloads keep their declared order, but a compile-time evaluation already used their reordered layout",
+                name,
+            )
+        } else {
             format(
                 "'{}' reaches C through a pointer argument, so its fields keep their declared order, but a compile-time evaluation already used its reordered layout: tag it '@ordered'",
-                p.modules[m].source.as_str().slice(
-                    nm.as_data.name.text.start as usize,
-                    nm.as_data.name.text.end as usize,
-                ),
-            ),
-        );
+                name,
+            )
+        };
+        let mut errs = diag::Errors::new();
+        errs.emit_span(dc::REACHES_C_UNTYPED_POINTER_TAG_ORDERED, nm.span, msg);
         errs.finalize(&p.modules[m].source, &p.modules[m].file);
         errs.log();
         ok = false;
@@ -15195,12 +15200,16 @@ fn mark_c_reads(p: &mut loader::Package) bool {
 }
 
 // Declaration `r` into `Package.c_shaped` (and `added` unless null) when it is a struct or enum of module
-// `from` on not there yet, and the type nodes of its fields and payloads into `work`.
+// `from` on not there yet, and the type nodes of its fields and payloads into `work`. A payload-less enum
+// that only an untyped pointer reaches (`added`, `mark_c_reads`) keeps its integer (`layout::bare_int`):
+// the typecheck's evaluations lay it out before that pointer is known, and C sees it only as bytes.
 fn c_decl(p: &mut loader::Package, from: usize, r: DefId, work: &mut Vector<DefId>, added: *mut Vector<u64>) {
     let ra = unsafe &*p.module_ast_const(r.module);
     let rk = ra.at_const(r.node).kind;
     let key = r.module as u64 << 32 | r.node as u64;
-    if rk != NodeKind::NODE_STRUCT && rk != NodeKind::NODE_ENUM || r.module as usize < from || p.c_shaped.contains(&key) {
+    if rk != NodeKind::NODE_STRUCT && rk != NodeKind::NODE_ENUM || r.module as usize < from || p.c_shaped.contains(&key) || added != null && rk == NodeKind::NODE_ENUM && !ra.enum_has_payload(
+        r.node,
+    ) {
         return;
     }
     p.c_shaped.insert(key);

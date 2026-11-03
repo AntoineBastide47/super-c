@@ -579,6 +579,41 @@ pub(package) fn held_params(b: &Body, lay: &ab::CallLayout, out: &mut Vector<boo
     }
 }
 
+/// Whether address `v` of `b` may point into the frame: a slot's address or that of an entry parameter
+/// `held` marks (an aggregate whose memory the frame holds), through `ptradd` bases and `select`s, followed
+/// FRAME_DEPTH steps; a block parameter or an integer made a pointer may, being followed no further.
+pub(package) fn frame_based(b: &Body, held: &Vector<bool>, v: Value, depth: u32) bool {
+    if v == VNONE || (v & VFLAG) != 0 {
+        return false;
+    }
+    if depth == 0 {
+        return true;
+    }
+    if (v & VPARAM) != 0 {
+        let p = v & ~VPARAM;
+        let e = b.blocks[0];
+        if p < e.param_start || p >= e.param_start + e.param_len as u32 {
+            return true;
+        }
+        let k = (p - e.param_start) as usize;
+        return k < held.len() && held[k];
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_SLOTADDR || t.op == O_INTTOPTR {
+        return true;
+    }
+    if t.op == O_PTRADD {
+        return frame_based(b, held, t.a, depth - 1);
+    }
+    if t.op == O_SELECT {
+        return frame_based(b, held, t.b, depth - 1) || frame_based(b, held, t.c, depth - 1);
+    }
+    return false;
+}
+
+/// `frame_based` follows at most FRAME_DEPTH steps.
+pub(package) const FRAME_DEPTH: u32 = 8;
+
 /// Per slot of `b`, the uses of its addresses (`lv.uses`, before the code generator consumes any), into
 /// `out`.
 pub(package) fn slot_uses(b: &Body, lv: &lv::Live, out: &mut Vector<u32>) {

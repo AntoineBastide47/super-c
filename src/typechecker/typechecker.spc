@@ -33442,7 +33442,8 @@ extend TypeChecker {
 
     // Every discriminant of enum `id` must be a distinct value in the i32 range of a C enum
     // constant: the tag, every tag test and every switch case take it. An extern enum is C's own
-    // (a C header may alias values), and an enum with no explicit value numbers 0, 1, 2, ..
+    // (a C header may alias values), and an enum with no explicit value numbers 0, 1, 2, .. Records the
+    // smallest integer that holds them (`Ast::enum_int`).
     fn tc_enum_tags(self: &mut Self, id: NodeId) {
         let ceptr = self.cir();
         let a = self.cur_ast();
@@ -33451,20 +33452,20 @@ extend TypeChecker {
             return;
         }
         let ms = agg.members;
-        let mut any = false;
-        for i in 0..ms.len {
-            any = any || unsafe (*a).at_const(unsafe (*a).list(ms)[i as usize]).as_data.variant.value != NODE_NONE;
-        }
-        if !any {
+        if !unsafe (*a).enum_explicit(id) {
             return;
         }
         let m = self.cur_module();
         let mut seen = Map::<i64, NodeId>::new();
         let mut cur: i64 = 0 - 1;
+        let mut lo: i64 = 0;
+        let mut hi: i64 = 0;
+        let mut ok = true;
         self.eng_hold(true);
         for i in 0..ms.len {
             let vid = unsafe (*a).list(ms)[i as usize];
             if !unsafe (*ceptr).discr(m, vid, cur, &mut cur) {
+                ok = false;
                 break; // `tc_discriminant` reported the value
             }
             let nsp = unsafe (*a).at_const(unsafe (*a).at_const(vid).as_data.variant.name).span;
@@ -33474,8 +33475,11 @@ extend TypeChecker {
                     nsp,
                     format("enum discriminant {} is outside the i32 range of a C enum constant", cur),
                 );
+                ok = false;
                 break;
             }
+            lo = pick(i == 0 || cur < lo, cur, lo);
+            hi = pick(i == 0 || cur > hi, cur, hi);
             switch seen.get(&cur) {
                 Some(prev) => {
                     let psp = unsafe (*a).at_const(unsafe (*a).at_const(*prev).as_data.variant.name).span;
@@ -33493,6 +33497,9 @@ extend TypeChecker {
                     seen.insert(cur, vid);
                 },
             }
+        }
+        if ok {
+            unsafe (*a).ext_mut(id).aggregate.discr_int = discr_int(lo, hi);
         }
         self.eng_hold(false);
     }

@@ -112,7 +112,7 @@ fn field_decl(p: &loader::Package, m: ModuleId, t: TypeId, fname: str) NodeId {
     return NODE_NONE;
 }
 
-const PROBES: str = "struct S { pub a: i32, pub b: i64, pub c: u8 }\nstruct Nested { pub s: S, pub t: u16 }\nunion U { pub x: i64, pub y: [u8; 3] }\nenum Plain { A, B, C }\nenum Pay { N, W(i64, i32) }\nstruct Gen<T> { pub v: T, pub k: u8 }\nfn p_s(x: S) { let _ = x; }\nfn p_n(x: Nested) { let _ = x; }\nfn p_u(x: U) { let _ = x; }\nfn p_plain(x: Plain) { let _ = x; }\nfn p_pay(x: Pay) { let _ = x; }\nfn p_gen(x: Gen<i64>) { let _ = x; }\nfn p_arr(x: [i32; 3]) { let _ = x; }\nfn p_iz(x: isize) { let _ = x; }\nfn p_ref(x: &i64) { let _ = x; }\nfn main() i32 { return 0; }";
+const PROBES: str = "struct S { pub a: i32, pub b: i64, pub c: u8 }\nstruct Nested { pub s: S, pub t: u16 }\nunion U { pub x: i64, pub y: [u8; 3] }\nenum Plain { A, B, C }\nenum Signed { Sm = -200, Sn }\nenum Pay { N, W(i64, i32) }\nstruct Gen<T> { pub v: T, pub k: u8 }\nfn p_s(x: S) { let _ = x; }\nfn p_n(x: Nested) { let _ = x; }\nfn p_u(x: U) { let _ = x; }\nfn p_plain(x: Plain) { let _ = x; }\nfn p_signed(x: Signed) { let _ = x; }\nfn p_pay(x: Pay) { let _ = x; }\nfn p_gen(x: Gen<i64>) { let _ = x; }\nfn p_arr(x: [i32; 3]) { let _ = x; }\nfn p_iz(x: isize) { let _ = x; }\nfn p_ref(x: &i64) { let _ = x; }\nfn main() i32 { return 0; }";
 
 @test
 fn c_data_model_sizes() {
@@ -168,7 +168,13 @@ fn enum_shapes() {
     let mut m: ModuleId = 0;
     let tp = probe_ty(&p, "p_plain", &mut m);
     let lp = svc.layout(m, tp);
-    assert(lp.ok && lp.size == 4 && lp.align == 4, "payload-less enum is a bare C enum");
+    assert(lp.ok && lp.size == 1 && lp.align == 1, "payload-less enum is the smallest integer of its discriminants");
+    let tsg = probe_ty(&p, "p_signed", &mut m);
+    let lsg = svc.layout(m, tsg);
+    assert(
+        lsg.ok && lsg.size == 2 && lsg.align == 2,
+        "explicit negative discriminants: the signed integer that holds them",
+    );
     // Pay: tag u32 @0, payload union {i64, i32} at 8 -> 24/8 with the variant struct padded.
     let ty = probe_ty(&p, "p_pay", &mut m);
     let el = svc.enum_layout(m, ty);

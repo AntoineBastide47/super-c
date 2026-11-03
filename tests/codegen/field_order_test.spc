@@ -237,6 +237,130 @@ fn fields_take_their_layout_order_in_both_backends() {
     assert_eq(unsafe str::from_cstr(c.out), EXPECTED);
 }
 
+// A payload-less enum is the smallest integer that holds its discriminants, signed when one is negative,
+// unless C reads it through a signature: an extern function's parameter or an `@export` function's
+// struct keeps the 4-byte C enum. One C reads only through an untyped pointer keeps its integer.
+const ENUMS: str = M"(enum Color { R, G, B }
+
+enum Neg { A = -3, B, C }
+
+enum High { Lo = 200, Hi }
+
+enum Wide { X = 1, Y = 300 }
+
+enum Big { P = 0, Q = 70000 }
+
+struct Px {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub c: Color,
+}
+
+// C reads these through a signature: the C enum.
+enum ByExtern { E0, E1 }
+
+enum ByExport { X0, X1 }
+
+struct HoldsByExport {
+    pub a: u8,
+    pub e: ByExport,
+}
+
+enum ViaVoid { V0, V1 }
+
+struct HoldsViaVoid {
+    pub a: u8,
+    pub v: ViaVoid,
+}
+
+extern "C" {
+    fn eo_never_called(e: ByExtern);
+    @import("memset")
+    fn eo_set(p: *mut void, c: i32, n: usize) *mut void;
+}
+
+@export("eo_exported")
+fn eo_exported(h: *const HoldsByExport) i32 {
+    return unsafe (*h).e as i32;
+}
+
+fn name(c: Color) str<'static> {
+    return switch c {
+        R => "r",
+        G => "g",
+        B => "b",
+    };
+}
+
+static mut SAVED: High = Hi;
+
+fn main() i32 {
+    println(
+        "Color {} Neg {} High {} Wide {} Big {} Px {} Option<Color> {} [Color; 5] {}",
+        sizeof(Color),
+        sizeof(Neg),
+        sizeof(High),
+        sizeof(Wide),
+        sizeof(Big),
+        sizeof(Px),
+        sizeof(Option<Color>),
+        sizeof([Color; 5]),
+    );
+    println("ByExtern {} HoldsByExport {} HoldsViaVoid {}", sizeof(ByExtern), sizeof(HoldsByExport), sizeof(HoldsViaVoid));
+    let mut hv = HoldsViaVoid { a: 1, v: V1 };
+    let _ = unsafe eo_set(&mut hv, 0, 0);
+    let he = HoldsByExport { a: 1, e: X1 };
+    let mut v = Vector::<Color>::new();
+    v.push(Color::B);
+    v.push(Color::R);
+    v.push(Color::G);
+    let mut s = String::new();
+    for c in v.iter() {
+        s.push_str(name(*c));
+    }
+    let n = [Neg::A, Neg::B, Neg::C];
+    let mut sum: i32 = 0;
+    for x in n {
+        sum += x as i32;
+    }
+    let o = Option::<Color>::Some(G);
+    println(
+        "{} {} {} {} {} {} {} {} {}",
+        s.as_str(),
+        sum,
+        unsafe SAVED as i32,
+        High::Lo as u8,
+        Wide::Y as i32,
+        Big::Q as i32,
+        name(o.unwrap()),
+        hv.v as i32,
+        eo_exported(&he),
+    );
+    return 0;
+}
+)";
+
+const ENUMS_EXPECTED: str = M"(Color 1 Neg 1 High 1 Wide 2 Big 4 Px 4 Option<Color> 2 [Color; 5] 5
+ByExtern 4 HoldsByExport 8 HoldsViaVoid 2
+brg -6 201 200 300 70000 g 1 1
+)";
+
+@test
+fn enums_take_their_smallest_integer_in_both_backends() {
+    let n = h::compile_and_run(ENUMS);
+    assert(n.built, "the program builds natively");
+    assert_eq(n.exit, 0);
+    assert_eq(unsafe str::from_cstr(n.out), ENUMS_EXPECTED);
+    if !cli::has_cc() {
+        return; // the C build needs a C compiler
+    }
+    let c = h::compile_and_run_c(ENUMS);
+    assert(c.built, "the program builds through C");
+    assert_eq(c.exit, 0);
+    assert_eq(unsafe str::from_cstr(c.out), ENUMS_EXPECTED);
+}
+
 // `@ordered` is a struct's or a prefix of its fields', where the order is not kept already.
 @test
 fn ordered_tags_are_checked() {
@@ -301,6 +425,41 @@ fn main() i32 {
             "'G' reaches C through a pointer argument, so its fields keep their declared order, but a compile-time evaluation already used its reordered layout: tag it '@ordered'",
         ),
         "the error names the struct and the fix",
+    );
+}
+
+// The same for an enum whose payload the order changes, which takes no '@ordered': the error names no fix.
+@test
+fn a_c_read_after_a_compile_time_payload_layout_is_an_error() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(enum E {
+    V(u8, u64, u8),
+    W,
+}
+
+static_assert(sizeof(E) == 24, "reordered");
+
+extern "C" {
+    @import("memset")
+    fn fo_set(p: *mut void, c: i32, n: usize) *mut void;
+}
+
+fn main() i32 {
+    let mut e = E::W;
+    let _ = unsafe fo_set(&mut e, 0, 0);
+    return 0;
+}
+)",
+    );
+    let r = cli::superc_in(p.dir(), "build main.spc -o bin");
+    assert(r.exit != 0, "the build fails");
+    assert(
+        r.out_has(
+            "'E' reaches C through a pointer argument, so its payloads keep their declared order, but a compile-time evaluation already used their reordered layout",
+        ) && !r.out_has("@ordered"),
+        "the error names the enum and no '@ordered'",
     );
 }
 

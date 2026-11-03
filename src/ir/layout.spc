@@ -94,6 +94,24 @@ pub(package) const fn niche_kind(a: &Ast, boxd: loader::LookupHit, t: TypeId) u8
     return NK_BOX;
 }
 
+/// The integer a value of payload-less enum `dn` of module `dm` is (`Ast::enum_int`): the C enum, an
+/// `int`, for an `extern` enum and one C code reads (`Package::c_shaped`), else the smallest integer
+/// that holds its discriminants. 0 while an explicit discriminant is not checked yet. Every stage that
+/// lays out, reads or writes such an enum (this service, the C emitter, the LIR lowering) asks here.
+pub(package) fn bare_int(p: &loader::Package, dm: ModuleId, dn: NodeId) u8 {
+    if c_enum(p, dm, dn) {
+        return 4 | ENUM_INT_SIGNED;
+    }
+    return (unsafe &*p.module_ast_const(dm)).enum_int(dn);
+}
+
+// Whether enum `dn` of module `dm` keeps the C shape: it is `extern`, or C code reads it.
+fn c_enum(p: &loader::Package, dm: ModuleId, dn: NodeId) bool {
+    return (unsafe &*p.module_ast_const(dm)).ext(dn).aggregate.is_extern || p.c_shaped.contains(
+        &(dm as u64 << 32 | dn as u64),
+    );
+}
+
 const NONE: u32 = 0xFFFFFFFF;
 
 /// `Svc::ordered_prefix` of a type whose whole field list keeps its declared order.
@@ -873,13 +891,26 @@ extend Svc {
         return Layout { ok: true, size: round_up(acc.size, acc.align), align: acc.align };
     }
 
-    // A payload enum's shape under `env` (payload-less enums are a bare 4-byte C enum).
+    // A payload enum's shape under `env` (a payload-less enum is its integer, `bare_int`).
     fn enum_shape(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv, depth: i32) EnumLayout {
         let ap = self.p().module_ast_const(dm);
         let ast = unsafe &*ap;
         let ms = ast.ext(dn).aggregate.members;
         if !ast.enum_has_payload(dn) {
-            return EnumLayout { ok: true, payload_off: 0, size: 4, align: 4 };
+            // An explicit discriminant's integer is known once the enum's check recorded it.
+            let b = if !c_enum(self.p(), dm, dn) && ast.enum_explicit(dn) && self.ev != null && !unsafe (&*self.ev).visible_node(
+                dm,
+                dn,
+            ) {
+                0u64
+            } else {
+                (bare_int(self.p(), dm, dn) & ~ENUM_INT_SIGNED) as u64
+            };
+            if b == 0 {
+                self.pending += 1;
+                return EnumLayout { ok: false };
+            }
+            return EnumLayout { ok: true, payload_off: 0, size: b, align: b };
         }
         let mut sv = NODE_NONE;
         let mut nv = NODE_NONE;

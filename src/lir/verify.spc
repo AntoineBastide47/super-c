@@ -1199,7 +1199,8 @@ pub(package) fn protected(p: u8, b: &Body) bool {
 /// Whether the address of a slot of `b`, or of an entry parameter `held` marks (an aggregate whose memory
 /// the frame holds: one that arrives in registers), through address arithmetic, selects and block
 /// parameters, is used but as an access's or a copy's address or a comparison's operand: a call, a store
-/// of it, a return. True also when the derivation does not settle in FRAME_ROUNDS rounds.
+/// of it, a return; not in a block that ends the program (`panic`, `unreachable`). True also when the
+/// derivation does not settle in FRAME_ROUNDS rounds.
 pub(package) fn frame_escapes(b: &Body, held: []bool) bool {
     let mut any = b.slots.len() != 0;
     for p in 0..held.len() {
@@ -1254,6 +1255,11 @@ pub(package) fn frame_escapes(b: &Body, held: []bool) bool {
     }
     for k in 0..b.blocks.len() {
         let bk = b.blocks[k];
+        // A block that ends the program lets no address outlive the frame.
+        let end = b.insts[(bk.start + bk.len - 1) as usize].op;
+        if end == O_PANIC || end == O_UNREACHABLE {
+            continue;
+        }
         for i in bk.start..bk.start + bk.len {
             let t = b.insts[i as usize];
             if t.op == O_PTRADD || t.op == O_SELECT || t.op == O_ICMP || t.op == O_LOAD || t.op == O_JMP || t.op == O_BR || t.op == O_SWITCH {

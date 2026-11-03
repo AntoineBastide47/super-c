@@ -485,17 +485,16 @@ extend Lower {
             *out = TyI { cls: VC_SCALAR, mty: vt, size: lo.size as u32, align: lo.align as u32 };
             return true;
         }
-        if y.kind == TypeKind::TYPE_ENUM && !Lower::ast(c, y.module).enum_has_payload(y.as_data.decl) {
-            *out = TyI { cls: VC_SCALAR, mty: T_I32, size: 4, align: 4 };
+        let bi = Lower::bare(c, rm, rt);
+        if bi != 0 {
+            let n = (bi & ~ast::ENUM_INT_SIGNED) as u32;
+            *out = TyI {
+                cls: VC_SCALAR,
+                mty: ast::pick(n == 1, T_I8, ast::pick(n == 2, T_I16, T_I32)),
+                size: n,
+                align: n,
+            };
             return true;
-        }
-        if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *Lower::ast(c, rm).instance(y.as_data.inst);
-            let da = Lower::ast(c, it.module);
-            if da.at_const(it.decl).kind == NodeKind::NODE_ENUM && !da.enum_has_payload(it.decl) {
-                *out = TyI { cls: VC_SCALAR, mty: T_I32, size: 4, align: 4 };
-                return true;
-            }
         }
         if y.kind == TypeKind::TYPE_OPAQUE {
             // A C value (`@layout`): the scalar its header's typedef names, which C passes as that scalar
@@ -619,13 +618,32 @@ extend Lower {
             y = Lower::resolved(c, rm, y.as_data.arr.elem, &mut rm, &mut rt);
         }
         if y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_INSTANCE {
-            return true; // a C enum is an int
+            let bi = Lower::bare(c, rm, rt);
+            return bi == 0 || (bi & ast::ENUM_INT_SIGNED) != 0;
         }
         if y.kind != TypeKind::TYPE_BUILTIN {
             return false;
         }
         let bt = y.as_data.builtin;
         return bt == BuiltinType::BT_I8 || bt == BuiltinType::BT_I16 || bt == BuiltinType::BT_I32 || bt == BuiltinType::BT_I64 || bt == BuiltinType::BT_ISIZE;
+    }
+
+    // `lay::bare_int` of resolved `(rm, rt)` when it is a payload-less enum (an instance's declaration's),
+    // else 0.
+    fn bare(c: &cbe::CEmit, rm: ModuleId, rt: TypeId) u8 {
+        let y = *Lower::ast(c, rm).type_at(rt);
+        let mut d = DefId { module: y.module, node: y.as_data.decl };
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *Lower::ast(c, rm).instance(y.as_data.inst);
+            d = DefId { module: it.module, node: it.decl };
+        } else if y.kind != TypeKind::TYPE_ENUM {
+            return 0;
+        }
+        let da = Lower::ast(c, d.module);
+        if da.at_const(d.node).kind != NodeKind::NODE_ENUM || da.enum_has_payload(d.node) {
+            return 0;
+        }
+        return lay::bare_int(Lower::p(c), d.module, d.node);
     }
 
     // The builtin of `(m, t)`, BT_VOID for another kind.
@@ -4756,7 +4774,7 @@ extend Lower {
             } else {
                 self.load(ei.mty, addr, 0, false)
             };
-            return self.int_to(x, ti.mty, true);
+            return self.int_to(x, ti.mty, Lower::signed(c, rm, rt));
         }
         let mut el = EnumL { ok: false };
         if val || !self.enum_of(c, rm, rt, &mut el) {
@@ -7973,6 +7991,12 @@ extend Lower {
         if a.attr_of(n, AttrKind::ATTR_COLD) != null {
             self.pkg.syms.index_mut(s as usize).cold = true;
         }
+        let y = self.pkg.syms[s as usize];
+        if a.at_const(n).kind == NodeKind::NODE_FUNCTION && !vis_exported(a.ext(n).function.vis) && a.ext(n).function.generics.len == 0 && a.member_of.get(
+            &n,
+        ).is_none() && !y.used && y.sect == NONE && self.pkg.spell(y.name) != "main" {
+            self.pkg.syms.index_mut(s as usize).internal = true;
+        }
     }
 
     /// Data symbol `name` belongs to unit `unit`; without a LIR definition the unit does not compile.
@@ -8925,7 +8949,7 @@ extend Lower {
         let a = Lower::ast(c, dm);
         if a.at_const(dn).kind == NodeKind::NODE_ENUM {
             if !a.enum_has_payload(dn) {
-                let tb = ast::pick(a.enum_tag_is_byte(dn), 1u32, 4u32);
+                let tb = (lay::bare_int(Lower::p(c), dm, dn) & ~ast::ENUM_INT_SIGNED) as u32;
                 *out = TyI { cls: VC_MEM, mty: T_NONE, size: tb, align: tb };
                 return true;
             }
@@ -9018,7 +9042,7 @@ extend Lower {
                 return false;
             }
             if !a.enum_has_payload(dn) {
-                put_le(&mut d.bytes, off, dv as u64, ast::pick(a.enum_tag_is_byte(dn), 1u32, 4u32));
+                put_le(&mut d.bytes, off, dv as u64, lay::bare_int(Lower::p(c), dm, dn) & ~ast::ENUM_INT_SIGNED);
                 return true;
             }
             let mut fl = Vector::<FieldAt>::new();

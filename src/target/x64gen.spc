@@ -1844,7 +1844,7 @@ extend Gen {
             let c = self.calls(t) && !lv::dead_end(unsafe &*self.pkg, b, &self.lv, i, &mut self.uses) && !(t.op == O_CALL && self.sib_shape(
                 i as u32,
                 t,
-            ));
+            )) && !self.mem_tail(i as u32, t);
             self.cret[i] = c;
             if c && self.rare(i as u32) {
                 self.rarec[i] = true;
@@ -3173,7 +3173,11 @@ extend Gen {
         for i in 0..b.insts.len() {
             let t = b.insts[i];
             let d = self.lv.def_blk[i];
-            if d == NONE || self.lv.pos[d as usize] == NONE || !self.calls(t) && t.op != O_PANIC {
+            // A copy that may be a sibling call needs no frame (`mem_tail_shape`).
+            if d == NONE || self.lv.pos[d as usize] == NONE || !self.calls(t) && t.op != O_PANIC || self.mem_tail_shape(
+                i as u32,
+                t,
+            ) {
                 continue;
             }
             if !self.lv.rare[d as usize] {
@@ -6623,9 +6627,52 @@ extend Gen {
             "memcpy"
         };
         let vs: [Value; 3] = [t.a, t.b, t.c];
+        if self.mem_tail(i, t) {
+            // Through a copy of the epilogue (`finish`): a jump to the routine.
+            self.rt_args(vs);
+            let at = self.c.jmp32();
+            let os = self.obj().sym(name);
+            self.tails.push(at as u64 << 32 | os as u64);
+            self.tail_ret = i + 1;
+            return true;
+        }
         self.rt_call(name, vs);
-        let _ = i;
         return true;
+    }
+
+    // Whether copy or fill `t`, instruction `i`, calls its C routine as a sibling call (`tail_ok`): of that
+    // shape (`mem_tail_shape`), neither address may point into this frame (`place::frame_based`). Its return
+    // is not emitted (`tail_ret`).
+    fn mem_tail(self: &Self, i: u32, t: Inst) bool {
+        let b = self.b();
+        return self.tail_ok && self.mem_tail_shape(i, t) && !place::frame_based(b, &self.pheld, t.a, place::FRAME_DEPTH) && (t.op == O_MEMSET || !place::frame_based(
+            b,
+            &self.pheld,
+            t.b,
+            place::FRAME_DEPTH,
+        ));
+    }
+
+    // Whether copy or fill `t`, instruction `i`, calls its C routine (no constant size it does inline) right
+    // before the body returns nothing: a sibling call where `mem_tail` holds, which `shrinkable` reads before
+    // `tail_ok` is known (when it fails, the warm code calls, and the body is compiled again unshrunk).
+    fn mem_tail_shape(self: &Self, i: u32, t: Inst) bool {
+        let b = self.b();
+        if t.op != O_MEMCPY && t.op != O_MEMSET || b.pool[b.sig as usize + 2] != T_NONE as u32 {
+            return false;
+        }
+        let mut n: u64 = 0;
+        let lim: u64 = if t.op == O_MEMCPY && t.aux == MEM_OVERLAP {
+            64
+        } else {
+            128
+        };
+        if self.const_of(t.c, &mut n) && n <= lim {
+            return false;
+        }
+        let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
+        let r = b.insts[i as usize + 1];
+        return i + 2 == bk.start + bk.len && r.op == O_RET && r.a == VNONE;
     }
 
     // The condition a `br` or `select` reads from boolean `v` (index `cx`): the flags an instruction left,
@@ -7904,8 +7951,14 @@ extend Gen {
     // A call of C function `name` with the integer or pointer values `vs` in the argument registers and
     // no result.
     fn rt_call(self: &mut Self, name: str, vs: []Value) {
-        // The operands in registers stay there for the parallel move, as a call's arguments do; one that
-        // lives on is in its home too.
+        self.rt_args(vs);
+        self.call_sym(name);
+    }
+
+    // The arguments `vs` of a call of a C routine in its argument registers (`rt_call`): the operands in
+    // registers stay there for the parallel move, as a call's arguments do; one that lives on is in its
+    // home too.
+    fn rt_args(self: &mut Self, vs: []Value) {
         let mut keep = Vector::<u32>::with_capacity(vs.len());
         let mut rs = Vector::<u8>::with_capacity(vs.len());
         for k in 0..vs.len() {
@@ -7926,7 +7979,6 @@ extend Gen {
             }
         }
         self.forget_caller_saved();
-        self.call_sym(name);
     }
 
     // Values `vs` into registers `rs`: the ones in a register or a home as one parallel move (a scratch

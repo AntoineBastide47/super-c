@@ -1307,7 +1307,7 @@ extend Gen {
             // A sibling call does not come back: the body around it may be a leaf.
             let c = Gen::clobbers(b, t) && !lv::dead_end(unsafe &*self.pkg, b, &self.lv, i, &mut self.uses) && !(t.op == O_CALL && self.intrinsic(
                 t.a,
-            ).len() == 0 && self.sib_shape(i as u32, t));
+            ).len() == 0 && self.sib_shape(i as u32, t)) && !self.mem_tail(i as u32, t);
             self.cret[i] = c;
             if c && self.rare(i as u32) {
                 self.rarec[i] = true;
@@ -2377,10 +2377,11 @@ extend Gen {
         for i in 0..b.insts.len() {
             let t = b.insts[i];
             let d = self.lv.def_blk[i];
-            // A vector operation's lane trap and a panic call too: their blocks need the frame.
+            // A vector operation's lane trap and a panic call too: their blocks need the frame. A copy that
+            // may be a sibling call does not (`mem_tail_shape`).
             if d == NONE || self.lv.pos[d as usize] == NONE || !Gen::clobbers(b, t) && !(t.op == O_VOP && !lv::reduces(
                 t,
-            )) && t.op != O_PANIC {
+            )) && t.op != O_PANIC || self.mem_tail_shape(i as u32, t) {
                 continue;
             }
             if !self.lv.rare[d as usize] {
@@ -5831,7 +5832,50 @@ extend Gen {
             "memcpy"
         };
         let vs: [Value; 3] = [t.a, t.b, t.c];
+        if self.mem_tail(i, t) {
+            self.rt_args(vs);
+            let os = self.obj().sym(name);
+            self.tails.push(self.code.len() as u64 << 32 | os as u64);
+            self.emit(a::b(0));
+            self.tail_ret = i + 1;
+            return true;
+        }
         return self.rt_call(i, name, vs, T_NONE);
+    }
+
+    // Whether copy or fill `t`, instruction `i`, calls its C routine as a sibling call (`tail_ok`): of that
+    // shape (`mem_tail_shape`), neither address may point into this frame (`place::frame_based`). Its return
+    // is not emitted (`tail_ret`).
+    fn mem_tail(self: &Self, i: u32, t: Inst) bool {
+        let b = self.b();
+        return self.tail_ok && self.mem_tail_shape(i, t) && !place::frame_based(b, &self.pheld, t.a, place::FRAME_DEPTH) && (t.op == O_MEMSET || !place::frame_based(
+            b,
+            &self.pheld,
+            t.b,
+            place::FRAME_DEPTH,
+        ));
+    }
+
+    // Whether copy or fill `t`, instruction `i`, calls its C routine (no constant size it does inline) right
+    // before the body returns nothing: a sibling call where `mem_tail` holds, which `shrinkable` reads before
+    // `tail_ok` is known (when it fails, the warm code calls, and the body is compiled again unshrunk).
+    fn mem_tail_shape(self: &Self, i: u32, t: Inst) bool {
+        let b = self.b();
+        if t.op != O_MEMCPY && t.op != O_MEMSET || b.pool[b.sig as usize + 2] != T_NONE as u32 {
+            return false;
+        }
+        let mut n: u64 = 0;
+        let lim: u64 = if t.op == O_MEMCPY && t.aux == MEM_OVERLAP {
+            64
+        } else {
+            128
+        };
+        if self.const_of(t.c, &mut n) && n <= lim {
+            return false;
+        }
+        let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
+        let r = b.insts[i as usize + 1];
+        return i + 2 == bk.start + bk.len && r.op == O_RET && r.a == VNONE;
     }
 
     fn select_op(self: &mut Self, i: u32, t: Inst) bool {
@@ -7106,6 +7150,15 @@ extend Gen {
     fn rt_call(self: &mut Self, i: u32, name: str, vs: []Value, rty: u8) bool {
         let _ = i;
         let _ = rty;
+        self.rt_args(vs);
+        let os = self.obj().sym(name);
+        self.reloc(a::R_BRANCH26, os, 0);
+        self.emit(a::bl(0));
+        return true;
+    }
+
+    // The arguments `vs` of a call of a C routine in x0.. (`rt_call`).
+    fn rt_args(self: &mut Self, vs: []Value) {
         // The operands in registers stay there for one parallel move into x0.., as a call's arguments do;
         // one that lives on is in its home too. The constants and addresses follow.
         let mut keep = Vector::<u32>::with_capacity(vs.len());
@@ -7150,10 +7203,6 @@ extend Gen {
                 self.emit(a::uxt(k as u32, k as u32, type_bits(ty, self.ptr)));
             }
         }
-        let os = self.obj().sym(name);
-        self.reloc(a::R_BRANCH26, os, 0);
-        self.emit(a::bl(0));
-        return true;
     }
 
     // A call of compiler-rt routine `name` for instruction `i`: the i128 or float values `x` and `y`

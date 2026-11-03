@@ -635,6 +635,32 @@ pub(package) struct AggregateData {
     pub(package) is_union: bool,
     pub(package) is_tuple: bool,
     pub(package) is_extern: bool,
+    /// An enum with an explicit discriminant: `Ast::enum_int` of its discriminants, which its check
+    /// (`tc_enum_tags`) records; 0 before.
+    pub(package) discr_int: u8,
+}
+/// `Ast::enum_int`: the integer's sign bit, set when a discriminant is negative.
+pub(package) const ENUM_INT_SIGNED: u8 = 0x80;
+
+/// `Ast::enum_int` of discriminants from `lo` to `hi`, which fit i32.
+pub(package) const fn discr_int(lo: i64, hi: i64) u8 {
+    if lo < 0 {
+        let b: u8 = if lo >= -128 && hi <= 127 {
+            1
+        } else if lo >= -32768 && hi <= 32767 {
+            2
+        } else {
+            4
+        };
+        return b | ENUM_INT_SIGNED;
+    }
+    if hi <= 255 {
+        return 1;
+    }
+    if hi <= 65535 {
+        return 2;
+    }
+    return 4 | ENUM_INT_SIGNED;
 }
 pub(package) struct FieldData {
     pub(package) name: NodeId,
@@ -2348,10 +2374,11 @@ extend Ty {
 }
 
 extend Ty as Hash {
-    // Word-wise FNV over Ty's raw storage. Ty is 8-aligned (its `value: i64` forces alignof 8) and power-of-2
-    // sized, so `sizeof(Ty)/8` aligned u64 loads cover every byte the per-byte loop did -- ~8x fewer rounds.
-    // The hash only selects a probe bucket: `eq` stays a full memcmp and intern_type numbers TypeIds in
-    // insertion order, so the hash function never affects interned identity or emitted output.
+    // Word-wise FNV: the header fields as one word, then `as_data`'s raw storage (8-aligned, its `value: i64`
+    // forces it, and whole words: `ty_words`), which every constructor writes in full. Not Ty's own storage:
+    // the header's padding bytes hold whatever the memory held. The hash only selects a probe bucket:
+    // intern_type numbers TypeIds in insertion order, so the hash function never affects interned identity
+    // or emitted output.
     pub fn hash_into<H: Hasher>(self: &Self, h: &mut H) {
         if unsafe TS_COLLIDE {
             h.write_u64(7);
@@ -2360,10 +2387,10 @@ extend Ty as Hash {
         // Every word is mixed down into the low bits the index masks: a multiply-only chain
         // leaves the index a function of the payload's low bits alone, and records that differ
         // only above them (an array's length, a projection's binder) then probe in one chain.
-        // Each word through a copy: the record's fields have other types (`-fstrict-aliasing`).
-        let p = (self as *const Ty) as *const u8;
-        let mut x: u64 = 0xcbf29ce484222325u64;
-        for i in 0..sizeof(Ty) / 8 {
+        // Each word through a copy: the union's fields have other types (`-fstrict-aliasing`).
+        let p = ((&self.as_data) as *const TyAs) as *const u8;
+        let mut x = skey_mix(0xcbf29ce484222325u64, self.head());
+        for i in 0..sizeof(TyAs) / 8 {
             let mut w: u64 = 0;
             unsafe cstring::memcpy((&mut w) as *mut u64, p + i * 8, 8);
             x = skey_mix(x, w);
@@ -2374,9 +2401,22 @@ extend Ty as Hash {
 
 extend Ty as Eq {
     pub fn eq(self: &Self, other: &Self) bool {
-        return unsafe cstring::memcmp(self as *const Ty, other as *const Ty, sizeof(Ty)) == 0;
+        return self.head() == other.head() && unsafe cstring::memcmp(
+            (&self.as_data) as *const TyAs,
+            (&other.as_data) as *const TyAs,
+            sizeof(TyAs),
+        ) == 0;
     }
 }
+
+extend Ty {
+    // The fields but `as_data` as one word (`hash_into`, `eq`).
+    const fn head(self: &Self) u64 {
+        return self.kind as u64 | self.qualifier as u64 << 8 | self.concrete as u64 << 16 | self.module as u64 << 32;
+    }
+}
+
+static_assert(sizeof(TyAs) % 8 == 0, "TyAs must be whole words");
 
 /// The record of kind `k` (an `arr_like` kind) over `elem` and length type `lt` (`ly`): an array with
 /// a constant length in the u32 range holds the count, every other length stays a type.
@@ -5558,6 +5598,28 @@ extend Ast {
         let ms = self.ext(decl).aggregate.members;
         for i in 0..ms.len {
             if self.at_const(unsafe self.list(ms)[i as usize]).as_data.variant.payload.len != 0 {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The smallest integer that holds every discriminant of enum `decl`: its bytes (1, 2 or 4; 4 is
+    /// the C enum, an `int`), with ENUM_INT_SIGNED when one is negative. 0 while an explicit
+    /// discriminant is not checked yet.
+    pub(package) const fn enum_int(self: &Self, decl: NodeId) u8 {
+        let agg = self.ext(decl).aggregate;
+        if self.enum_explicit(decl) {
+            return agg.discr_int;
+        }
+        return discr_int(0, agg.members.len as i64 - 1);
+    }
+
+    /// Whether a variant of enum `decl` has an explicit discriminant.
+    pub(package) const fn enum_explicit(self: &Self, decl: NodeId) bool {
+        let ms = self.ext(decl).aggregate.members;
+        for i in 0..ms.len {
+            if self.at_const(unsafe self.list(ms)[i as usize]).as_data.variant.value != NODE_NONE {
                 return true;
             }
         }

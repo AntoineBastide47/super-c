@@ -1660,15 +1660,15 @@ int main(void) {
 
 // Fills, copies and overlapping moves of run-time sizes (`memset`, `memcpy`, `memcpy` with MEM_OVERLAP):
 // the C routines on arm64 and x86-64, the bulk memory forms on wasm32 (`memory.fill`, `memory.copy`).
+// Right before a return, with sibling calls, the routine is one (no `BL` on arm64), but for a copy out of
+// the frame (`stage`), which the epilogue would free first.
 @test
 fn memory_operations_of_run_time_sizes_run() {
-    if !cli::has_cc() {
-        return; // a C driver links it
-    }
     let lir = M"(lir ptr 8
 sym @fill fn global
 sym @copy fn global
 sym @move fn global
+sym @stage fn global
 fn @fill
   sig (ptr, i8, i64) -> void
 b0(v0: ptr, v1: i8, v2: i64):
@@ -1684,12 +1684,32 @@ fn @move
 b0(v0: ptr, v1: ptr, v2: i64):
   memcpy.overlap v0, v1, v2
   ret
+fn @stage
+  sig (ptr, i64) -> void
+  slot s0 size 64 align 3
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i8 9
+  v4 = iconst.i64 64
+  memset v2, v3, v4
+  memcpy v0, v2, v1
+  ret
 )";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), TAIL, &mut obj),
+        "the arm64 object",
+    );
+    assert_eq(elf_text_count(&obj, 0xFC000000, 0x94000000), 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let drv = M"(#include <stdint.h>
 #include <string.h>
 void fill(uint8_t *, int8_t, int64_t);
 void copy(uint8_t *, const uint8_t *, int64_t);
 void move(uint8_t *, const uint8_t *, int64_t);
+void stage(uint8_t *, int64_t);
 int main(void) {
   for (int64_t n = 0; n < 40; n++) {
     uint8_t a[64], b[64], c[64];
@@ -1701,12 +1721,45 @@ int main(void) {
     for (int k = 0; k < 64; k++) if (b[k] != (k >= 1 && k < 1 + n ? (uint8_t)(k + 1) : (uint8_t)(200 - k))) return 2;
     move(c + 5, c + 1, n);
     for (int k = 0; k < 64; k++) if (c[k] != (k >= 5 && k < 5 + n ? (uint8_t)(k - 4) : (uint8_t)k)) return 3;
+    memset(a, 0, 64);
+    stage(a, n);
+    for (int k = 0; k < 64; k++) if (a[k] != (k < n ? 9 : 0)) return 4;
   }
   return 0;
 }
 )";
     assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_native_with(lir, drv, TAIL), 0);
     assert_eq(run_wasm(lir, drv), 0);
+}
+
+// How many 32-bit words of the `.text` section of ELF object `o` have bits `mask` equal to `want`.
+fn elf_text_count(o: &Vector<u8>, mask: u32, want: u32) u32 {
+    let shoff = le_at(o, 0x28, 8) as usize;
+    let shsize = le_at(o, 0x3A, 2) as usize;
+    let strs = le_at(o, shoff + le_at(o, 0x3E, 2) as usize * shsize + 0x18, 8) as usize;
+    let mut n: u32 = 0;
+    for k in 0..le_at(o, 0x3C, 2) as usize {
+        let sh = shoff + k * shsize;
+        let name = strs + le_at(o, sh, 4) as usize;
+        if !(o[name] == b'.' && o[name + 1] == b't' && o[name + 2] == b'e' && o[name + 3] == b'x' && o[name + 4] == b't' && o[name + 5] == 0) {
+            continue;
+        }
+        let off = le_at(o, sh + 0x18, 8) as usize;
+        for w in 0..le_at(o, sh + 0x20, 8) as usize / 4 {
+            n += ((le_at(o, off + w * 4, 4) as u32 & mask) == want) as u32;
+        }
+    }
+    return n;
+}
+
+// The `n`-byte little-endian integer at `o[at..]`.
+fn le_at(o: &Vector<u8>, at: usize, n: usize) u64 {
+    let mut v: u64 = 0;
+    for k in 0..n {
+        v |= o[at + k] as u64 << (8 * k) as u64;
+    }
+    return v;
 }
 
 // Loops whose exit passes a value the back edge passes on too (a swap: Euclid's remainders, Fibonacci

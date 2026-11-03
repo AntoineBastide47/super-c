@@ -8,6 +8,8 @@ import lir::eval as leval;
 import lir::opt as lopt;
 import lir::inline as il;
 import lir::loops as lu;
+import tests::harness as h;
+import tests::cli_harness as cli;
 
 // Package text `text` read, then optimized: each body verifies before and after.
 fn optimized(text: str) (Package, Package) {
@@ -124,6 +126,90 @@ fn same_result(before: &Package, after: &Package, name: str, args: []u64, want: 
     assert_eq(o2.kind, leval::EV_OK);
     assert_eq(o.value, want);
     assert_eq(o2.value, want);
+}
+
+// A private function whose calls from its module's own functions all pass one constant gets a copy
+// without that parameter (`lir::opt`'s `specialize`): `mode`'s copy only multiplies, `scaled`'s copy keeps
+// calling itself without the scale it passes on, and the instance of `seven`, whose call passes another
+// constant, keeps calling `mode` itself.
+const CONST_ARGS: str = M"(static mut SINK: usize = 0;
+
+@noinline
+fn opr<T>(x: T) T {
+    unsafe SINK += 1;
+    return x;
+}
+
+@noinline
+fn mode(x: u32, m: u32) u32 {
+    if m == 3 {
+        return x * 5;
+    }
+    return x / m + x % m;
+}
+
+@noinline
+fn scaled(n: u32, k: u32) u32 {
+    if n == 0 {
+        return 0;
+    }
+    return k + scaled(n - 1, k);
+}
+
+@noinline
+fn seven<T>(x: u32) u32 {
+    return mode(x, 7);
+}
+
+fn main() i32 {
+    let a = mode(opr::<u32>(10), 3) + mode(opr::<u32>(11), 3);
+    let b = scaled(opr::<u32>(4), 6);
+    let c = seven::<u8>(opr::<u32>(20));
+    println("{} {} {}", a, b, c);
+    return 0;
+}
+)";
+
+// The text of function `name` in `SC_LIR_PRINT` output `out`: to the next function.
+fn printed<'a>(out: str<'a>, name: str) str<'a> {
+    let head = format("fn @{}\n", name);
+    let at = out.find(&head);
+    if at < 0 {
+        return "";
+    }
+    let rest = out.slice(at as usize, out.len());
+    let end = rest.slice(1, rest.len()).find("\nfn @");
+    return if end < 0 {
+        rest
+    } else {
+        rest.slice(0, end as usize + 1)
+    };
+}
+
+@test
+fn a_constant_every_call_passes_makes_a_copy_without_it() {
+    h::expect_same_output("constant arguments", CONST_ARGS, ["--profile=debug"], ["--profile=release"]);
+    let p = cli::proj_new();
+    p.mkfile("main.spc", CONST_ARGS);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "mode", "build -O2 main.spc -o app");
+    let m = printed(r.text(), "mode.cp2");
+    let ok = r.ok() && m.contains("sig (i32) -> i32") && m.contains("mul.i32") && !m.contains("udiv") && printed(
+        r.text(),
+        "mode",
+    ).contains("udiv");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "the copy of mode multiplies; mode keeps its division for the instance's call");
+    // A fresh project: the first build's cache would replay the unit, whose bodies then print nothing.
+    let q = cli::proj_new();
+    q.mkfile("main.spc", CONST_ARGS);
+    let s = cli::superc_env_in(q.dir(), "SC_LIR_PRINT", "scaled", "build -O2 main.spc -o app");
+    let c = printed(s.text(), "scaled.cp2");
+    if !s.ok() || !c.contains("sig (i32) -> i32") {
+        s.show();
+    }
+    assert(s.ok() && c.contains("sig (i32) -> i32"), "the recursion's copy takes the count alone");
 }
 
 // An `Option` built on each side of a join and taken apart after it (`o.map(f).unwrap_or(0)`): each jump into

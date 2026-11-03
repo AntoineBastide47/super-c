@@ -10225,6 +10225,7 @@ extend Run {
     /// The job graph of `pk`'s bodies under `cf`; `pk` keeps no body until `finish`.
     pub(package) fn new(pk: &mut Package, sealed: &Vector<bool>, cf: Config) Run {
         direct_calls(pk);
+        specialize(pk);
         let bodies = replace(&mut pk.bodies, Vector::<Body>::new());
         let n = bodies.len();
         let held = if pk.held.body == NONE {
@@ -14665,6 +14666,357 @@ fn direct_calls(pk: &mut Package) {
         t.op = O_CALL;
         t.a = s;
     }
+}
+
+// Interprocedural constant propagation by copies (GCC's IPA-CP): a function of `Sym.internal` whose
+// direct calls from the own bodies of its unit all pass one constant (`O_ICONST`, `O_FCONST`) to a scalar
+// parameter, but its own calls that pass that parameter on, gets a copy `<name>.cp<mask>` without those
+// parameters: its new entry passes the constants to the old one. Those calls call the copy without them.
+// The function stays for its other callers (its module's instances, which a build renders while the unit
+// replays, and assembly): the decision reads only the unit's own bodies, which a build renders or replays
+// together, so an incremental build makes the copies a full build makes. The copies go before the held
+// bodies (`Package.held`).
+fn specialize(pk: &mut Package) {
+    let n = pk.bodies.len();
+    let held = if pk.held.body == NONE {
+        n
+    } else {
+        pk.held.body as usize
+    };
+    let ns = pk.syms.len();
+    // Per body below `held`, its function's symbol; per symbol, the parameters every call passes one
+    // constant (`mask`, after `seen`), those constants (`vals`, by `symbol << 6 | parameter`), and the
+    // calls from other bodies.
+    let mut owner = Vector::<u32>::new();
+    fill(&mut owner, held, NONE);
+    for s in 0..ns {
+        let y = pk.syms[s];
+        if y.kind == SK_FUNC && y.def != NONE && y.def as usize < held {
+            owner[y.def as usize] = s as u32;
+        }
+    }
+    let mut mask = Vector::<u64>::new();
+    fill(&mut mask, ns, 0);
+    let mut seen = Vector::<bool>::new();
+    fill(&mut seen, ns, false);
+    let mut ext = Vector::<u32>::new();
+    fill(&mut ext, ns, 0);
+    let mut vals = Map::<u64, Inst>::new();
+    for k in 0..held {
+        if owner[k] == NONE || !pk.syms[owner[k] as usize].own {
+            continue;
+        }
+        let b = &pk.bodies[k];
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if t.op != O_CALL {
+                continue;
+            }
+            let s = b.syms[t.a as usize];
+            let f = pk.syms[s as usize];
+            if !f.internal || !f.own || f.def == NONE || f.def as usize >= held || f.unit != pk.syms[owner[k] as usize].unit {
+                continue;
+            }
+            let e = &pk.bodies[f.def as usize];
+            if !seen[s as usize] {
+                seen[s as usize] = true;
+                let np = e.blocks[0].param_len as u32;
+                if e.sig != NONE && !e.naked && e.pool[e.sig as usize] == np && (e.pool[(e.sig + 1) as usize] & SIG_VARIADIC) == 0 {
+                    mask[s as usize] = if np >= 64 {
+                        ~0u64
+                    } else {
+                        (1u64 << np as u64) - 1
+                    };
+                }
+            }
+            if t.aux as u32 != e.blocks[0].param_len as u32 {
+                mask[s as usize] = 0;
+            }
+            if k as u32 != f.def {
+                ext[s as usize] += 1;
+            }
+            for q in 0..(t.aux as u32).min(64) {
+                if (mask[s as usize] >> q as u64 & 1) == 0 {
+                    continue;
+                }
+                let v = b.pool[(t.c + q) as usize];
+                if k as u32 == f.def && v == b.param(0, q) {
+                    continue; // passed on: the copy's own call passes the constant too
+                }
+                let key = s as u64 << 6 | q as u64;
+                let mut c = iconst(T_I8, 0);
+                let fits = const_inst(b, v, &mut c) && c.ty == e.params[(e.blocks[0].param_start + q) as usize] && (e.pool[(e.sig + 3 + q) as usize] & AGG) == 0;
+                let same = switch vals.get(&key) {
+                    Some(w) => same_const(*w, c),
+                    None => true,
+                };
+                if fits && same {
+                    vals.insert(key, c);
+                } else {
+                    mask[s as usize] &= ~(1u64 << q as u64);
+                }
+            }
+        }
+    }
+    // The copies, in symbol order, each of its function's body as the lowering made it; per symbol its
+    // copy's symbol (`copy`).
+    let mut copy = Vector::<u32>::new();
+    fill(&mut copy, ns, NONE);
+    let mut made = Vector::<Body>::new();
+    let mut made_sym = Vector::<u32>::new();
+    let mut made_of = Vector::<u32>::new();
+    for s in 0..ns {
+        let m = mask[s];
+        if m == 0 || ext[s] == 0 {
+            continue;
+        }
+        // Each parameter of the mask passed one constant at least once.
+        let mut all = true;
+        for q in 0..64u32 {
+            all = all && ((m >> q as u64 & 1) == 0 || vals.get(&(s as u64 << 6 | q as u64)).is_some());
+        }
+        if !all {
+            continue;
+        }
+        let f = pk.syms[s];
+        let name = format("{}.cp{}", pk.spell(f.name), m);
+        let mut c = pk.find_symbol(&name);
+        if c == NONE {
+            c = pk.add_symbol(&name, SK_FUNC, SL_GLOBAL);
+        } else if pk.syms[c as usize].kind != SK_FUNC || pk.syms[c as usize].def != NONE {
+            continue;
+        }
+        let y = pk.syms.index_mut(c as usize);
+        y.unit = f.unit;
+        y.own = true;
+        y.cold = f.cold;
+        y.noinline = f.noinline;
+        copy[s] = c;
+        made.push(pk.bodies[f.def as usize].compact());
+        made_sym.push(c);
+        made_of.push(s as u32);
+    }
+    if made.len() == 0 {
+        return;
+    }
+    // The calls that pass the constants call the copies, in the unit's own bodies and the copies; a copy's
+    // own calls that pass the parameters on too.
+    for k in 0..held + made.len() {
+        let caller = if k < held {
+            owner[k]
+        } else {
+            made_sym[k - held]
+        };
+        if caller == NONE || !pk.syms[caller as usize].own {
+            continue;
+        }
+        let unit = pk.syms[caller as usize].unit;
+        let b = if k < held {
+            pk.bodies.index_mut(k)
+        } else {
+            made.index_mut(k - held)
+        };
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if t.op != O_CALL {
+                continue;
+            }
+            let s = b.syms[t.a as usize];
+            if copy[s as usize] == NONE || pk.syms[s as usize].unit != unit {
+                continue;
+            }
+            let m = mask[s as usize];
+            let mut ok = true;
+            for q in 0..(t.aux as u32).min(64) {
+                if (m >> q as u64 & 1) == 0 {
+                    continue;
+                }
+                let v = b.pool[(t.c + q) as usize];
+                let mut c = iconst(T_I8, 0);
+                let own = k >= held && made_of[k - held] == s && v == b.param(0, q);
+                ok = ok && (own || const_inst(b, v, &mut c) && (switch vals.get(&(s as u64 << 6 | q as u64)) {
+                    Some(w) => same_const(*w, c),
+                    None => false,
+                }));
+            }
+            if ok {
+                retarget(b, i as u32, copy[s as usize], m);
+            }
+        }
+    }
+    for j in 0..made.len() {
+        let s = made_of[j];
+        let mut cs = Vector::<Inst>::with_capacity(64);
+        for q in 0..64u32 {
+            cs.push(
+                switch vals.get(&(s as u64 << 6 | q as u64)) {
+                    Some(w) => *w,
+                    None => iconst(T_I8, 0),
+                },
+            );
+        }
+        drop_params(made.index_mut(j), mask[s as usize], &cs);
+    }
+    // Before the held bodies: theirs move up.
+    let k0 = made.len() as u32;
+    if pk.held.body != NONE {
+        for s in 0..pk.syms.len() {
+            let y = pk.syms.index_mut(s);
+            if y.kind == SK_FUNC && y.def != NONE && y.def >= pk.held.body {
+                y.def += k0;
+            }
+        }
+        pk.held.body += k0;
+    }
+    let mut hb = Vector::<Body>::with_capacity(n - held);
+    while pk.bodies.len() > held {
+        hb.push(pk.bodies.pop().unwrap());
+    }
+    for j in 0..made.len() {
+        pk.syms.index_mut(made_sym[j] as usize).def = pk.bodies.len() as u32;
+        pk.bodies.push(replace(made.index_mut(j), Body::new()));
+    }
+    while let Some(b) = hb.pop() {
+        pk.bodies.push(b);
+    }
+}
+
+// Into `out` the constant instruction value `v` of `b` is, when it is a scalar one of at most 64 bits.
+fn const_inst(b: &Body, v: Value, out: &mut Inst) bool {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.op != O_ICONST && t.op != O_FCONST || t.ty == T_I128 || is_vec(t.ty) {
+        return false;
+    }
+    *out = Inst { op: t.op, ty: t.ty, aux: 0, a: t.a, b: t.b, c: VNONE };
+    return true;
+}
+
+// Whether constant instructions `x` and `y` (`const_inst`) are one value of one type.
+const fn same_const(x: Inst, y: Inst) bool {
+    return x.op == y.op && x.ty == y.ty && x.a == y.a && x.b == y.b;
+}
+
+// Make call `i` of `b` a call of symbol `sym` without the arguments of `mask` (`specialize`).
+fn retarget(b: &mut Body, i: u32, sym: u32, mask: u64) {
+    let t = b.insts[i as usize];
+    let mut ls = NONE;
+    for x in 0..b.syms.len() {
+        if b.syms[x] == sym {
+            ls = x as u32;
+        }
+    }
+    if ls == NONE {
+        b.syms.push(sym);
+        ls = b.syms.len() as u32 - 1;
+    }
+    let mut args = Vector::<Value>::with_capacity(t.aux as usize);
+    let mut ps = Vector::<u32>::with_capacity(t.aux as usize);
+    for q in 0..t.aux as u32 {
+        if q >= 64 || (mask >> q as u64 & 1) == 0 {
+            args.push(b.pool[(t.c + q) as usize]);
+            ps.push(b.pool[(t.b + 3 + q) as usize]);
+        }
+    }
+    let gone = t.aux as u32 - args.len() as u32;
+    let fl = b.pool[(t.b + 1) as usize];
+    let ret = b.pool[(t.b + 2) as usize];
+    let sg = b.signature(&ps, (fl & ~SIG_VARIADIC) - gone, false, ret);
+    let c = b.pool_list(&args);
+    let u = b.insts.index_mut(i as usize);
+    u.a = ls;
+    u.aux = args.len() as u8;
+    u.b = sg;
+    u.c = c;
+}
+
+// Drop the entry parameters of `b` that `mask` names (`specialize`): a new entry without them passes
+// their constants `cs` (by parameter) and its own parameters to the old one, which the edges into the
+// entry enter too, and the signature, the reference facts and the `bool` bits lose them.
+fn drop_params(b: &mut Body, mask: u64, cs: &Vector<Inst>) {
+    let e = b.blocks[0];
+    let np = e.param_len as u32;
+    let nb = b.blocks.len() as u32;
+    let mut types = Vector::<u8>::with_capacity(np as usize);
+    let mut ps = Vector::<u32>::with_capacity(np as usize);
+    for q in 0..np {
+        if q >= 64 || (mask >> q as u64 & 1) == 0 {
+            types.push(b.params[(e.param_start + q) as usize]);
+            ps.push(b.pool[(b.sig + 3 + q) as usize]);
+        }
+    }
+    let gone = np - types.len() as u32;
+    let ne = b.add_block(&types);
+    let at = b.locs[e.start as usize];
+    b.begin(ne);
+    let mut args = Vector::<Value>::with_capacity(np as usize);
+    let mut kept: u32 = 0;
+    for q in 0..np {
+        if q < 64 && (mask >> q as u64 & 1) != 0 {
+            args.push(b.emit(cs[q as usize], at));
+        } else {
+            args.push(b.param(ne, kept));
+            kept += 1;
+        }
+    }
+    let _ = b.emit(jump(b.edge(ne, &args)), at);
+    if b.inl.len() != 0 {
+        for _ in 0..gone + 1 {
+            b.inl.push(0);
+        }
+    }
+    // Block `ne` is the old entry once the two swap.
+    let mut es = Vector::<u32>::new();
+    for k in 0..nb {
+        let bk = b.blocks[k as usize];
+        if bk.len == 0 {
+            continue;
+        }
+        b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut es);
+        for x in 0..es.len() {
+            if b.pool[es[x] as usize] == 0 {
+                b.pool[es[x] as usize] = ne;
+            }
+        }
+    }
+    let old = b.blocks[0];
+    b.blocks.set(0, b.blocks[ne as usize]);
+    b.blocks.set(ne as usize, old);
+    let fl = b.pool[(b.sig + 1) as usize];
+    let ret = b.pool[(b.sig + 2) as usize];
+    b.sig = b.signature(&ps, (fl & ~SIG_VARIADIC) - gone, false, ret);
+    // Kept parameter `q`'s new position.
+    let below = |q: u64| q - if q >= 64 {
+        mask.count_ones() as u64
+    } else {
+        (mask & (1u64 << q) - 1).count_ones() as u64
+    };
+    if b.refs.len() != 0 {
+        let mut rs = Vector::<u32>::with_capacity(b.refs.len());
+        for q in 0..b.refs.len() {
+            if q >= 64 || (mask >> q as u64 & 1) == 0 {
+                rs.push(b.refs[q]);
+            }
+        }
+        b.refs = rs;
+    }
+    let mut os = Vector::<u64>::with_capacity(b.owned.len());
+    for x in 0..b.owned.len() {
+        let p = b.owned[x] >> 32;
+        if p >= 64 || (mask >> p & 1) == 0 {
+            os.push(below(p) << 32 | b.owned[x] & 0xFFFFFFFF);
+        }
+    }
+    b.owned = os;
+    let mut bs: u64 = 0;
+    for q in 0..64u64 {
+        if (mask >> q & 1) == 0 && (b.bools >> q & 1) != 0 {
+            bs |= 1u64 << below(q);
+        }
+    }
+    b.bools = bs;
 }
 
 // Whether every argument of edge `e` of `b` is an argument of edge `o` too.
