@@ -2259,6 +2259,101 @@ b0(v0: ptr, v1: ptr, v2: ptr):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A select whose side truncates a 64-bit value to 8 bits that its condition bounds (`live::bounded_side`)
+// builds on wasm32 and gives the value below the bound, 0 above.
+@test
+fn a_bounded_truncation_of_a_64_bit_value_selects() {
+    let lir = M"(lir ptr 8
+sym @lo fn global
+fn @lo
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = iconst.i64 200
+  v2 = icmp.ult v0, v1
+  v3 = trunc.i8 v0
+  v4 = iconst.i8 0
+  v5 = select.i8 v2, v3, v4
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let drv = M"(#include <stdint.h>
+uint8_t lo(uint64_t);
+int main(void) {
+  return lo(199) == 199 && lo(200) == 0 && lo(0x100000005ull) == 0 && lo(7) == 7 ? 0 : 1;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
+// A wasm32 frame only a failure path uses (the slots a rare block that does not return fills, as a panic's
+// message parts; their addresses made in the entry block) is set up where that path starts
+// (`wasmgen::lazy_frame`): the fast path moves no stack pointer, so the object writes `__stack_pointer`
+// (`global.set` and its relocatable index, 24 80 80 80 80 00) once, on the panic path, not twice. Both
+// paths run.
+@test
+fn a_frame_only_a_panic_uses_is_set_up_on_its_path() {
+    let lir = M"(lir ptr 8
+sym @at fn global
+sym @hook fn global
+fn @at
+  layout l0 size 8 align 2 [0 i32, 4 i32]
+  sig (ptr, i32, i32) -> i32
+  slot s0 size 8 align 2
+  slot s1 size 8 align 2
+b0(v0: ptr, v1: i32, v2: i32):
+  v3 = slotaddr s0
+  v4 = slotaddr s1
+  v5 = icmp.ult v2, v1
+  br v5, b1, b2
+b1:
+  v6 = ptradd v0, v2 * 4
+  v7 = load.i32 v6 align 2
+  ret v7
+b2: unlikely
+  store v2, v3 align 2
+  store v1, v3+4 align 2
+  store v1, v4 align 2
+  store v2, v4+4 align 2
+  call @hook(v3, v4) : (l0, l0) -> void
+  unreachable
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let mut sets: u32 = 0;
+    for x in 0..obj.len() - 6 {
+        sets += (obj[x] == 0x24 && obj[x + 1] == 0x80 && obj[x + 2] == 0x80 && obj[x + 3] == 0x80 && obj[x + 4] == 0x80 && obj[x + 5] == 0x00) as u32;
+    }
+    assert(sets <= 1, "no stack pointer write on the fast path");
+    let drv = M"(#include <stdint.h>
+#include <stdlib.h>
+typedef struct { int32_t a, b; } P;
+int32_t at(const int32_t *, int32_t, int32_t);
+void hook(P x, P y) { exit(x.a == 5 && x.b == 3 && y.a == 3 && y.b == 5 ? 7 : 3); }
+int main(void) {
+  int32_t a[3] = {5, 7, 9};
+  if (at(a, 3, 0) + at(a, 3, 2) != 14) return 1;
+  at(a, 3, 5);
+  return 2;
+}
+)";
+    // `run_wasm` gives 0 without a wasi-sdk.
+    if cli::has_cc() && stdlib::get_env("WASI_SDK_PATH").is_some() {
+        assert_eq(run_wasm(lir, drv), 7);
+    }
+}
+
 // A product of 32-bit lanes by a splat (a value from outside, a constant) under SSE2: the splat's odd lanes
 // are its even ones, so only the other operand takes a `pshufd` (66 [REX] 0F 70 /r F5), one per product.
 @test

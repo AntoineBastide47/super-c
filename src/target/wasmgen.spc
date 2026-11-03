@@ -111,6 +111,13 @@ pub(package) struct Gen {
     frame: u32,
     falign: u32,
     call_area: u32,
+    warm_area: u32, // the call area the blocks but the failure paths (`fails`) need
+    /// Per block, whether it is a failure path's: a rare block (`BLOCK_RARE`) that ends in a panic or a
+    /// trap, or whose every successor is a failure path's (`failing`).
+    fails: Vector<bool>,
+    /// Per block, whether it opens the failure paths' frame (`lazy_frame`): a failure-path block that a
+    /// block of no failure path jumps to. Empty: the prologue sets the frame up.
+    cold_entry: Vector<bool>,
     slot_off: Vector<u32>,
     pspill: Vector<u32>, // per entry parameter, the frame offset of its spill (NONE: none)
     home_base: u32,
@@ -232,6 +239,9 @@ extend Gen {
             frame: 0,
             falign: 16,
             call_area: 0,
+            warm_area: 0,
+            fails: Vector::<bool>::new(),
+            cold_entry: Vector::<bool>::new(),
             slot_off: Vector::<u32>::new(),
             pspill: Vector::<u32>::new(),
             home_base: 0,
@@ -621,22 +631,31 @@ extend Gen {
     fn frame_layout(self: &mut Self) bool {
         let b = self.b();
         let mut area: u32 = 0;
+        // Per instruction, whether its block is a failure path's (`fails`).
+        self.failing();
+        let mut cold = Vector::<bool>::with_capacity(b.insts.len());
+        cold.resize_default(b.insts.len());
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                cold[i as usize] = self.fails[k];
+            }
+        }
+        self.warm_area = 0;
         for k in 0..b.insts.len() {
             let t = b.insts[k];
+            let mut need: u32 = 0;
             if t.op == O_CALL || t.op == O_CALLIND {
                 wa::classify(b, t.b, self.vregs, &mut self.cs);
                 if self.cs.unknown {
                     return self.refuse("a call passes an aggregate whose C class is unknown");
                 }
-                let n = self.call_bytes(t);
-                if n > area {
-                    area = n;
-                }
+                need = self.call_bytes(t);
             } else if t.op == O_MULO && t.ty == T_I64 {
-                area = ast_max(area, 16);
+                need = 16;
             } else if t.op == O_VOP && !(self.simd && self.vop_form(t)) {
                 // A 64-bit lane product's high word (compiler-rt) or a halving reduction's copy.
-                area = ast_max(area, 64);
+                need = 64;
             } else if t.op == O_JMP || t.op == O_BR || t.op == O_SWITCH {
                 // An edge passing several memory values goes through the area.
                 b.succ_edges(t, &mut self.succ);
@@ -648,8 +667,12 @@ extend Gen {
                             n += type_bytes(self.vt(a), 4) + 15 & ~15u32;
                         }
                     }
-                    area = ast_max(area, n);
+                    need = ast_max(need, n);
                 }
+            }
+            area = ast_max(area, need);
+            if !cold[k] {
+                self.warm_area = ast_max(self.warm_area, need);
             }
         }
         self.call_area = area + 15 & ~15u32;
@@ -1187,7 +1210,12 @@ extend Gen {
         let needs_frame = self.frame != 0;
         self.fp = NONE;
         self.osp = NONE;
-        if needs_frame {
+        self.cold_entry.truncate(0);
+        if needs_frame && self.lazy_frame() {
+            // The failure paths alone use the frame: each entry into them sets it up (`cold_entry`), and no
+            // return restores it.
+            self.fp = self.new_local(w::I32);
+        } else if needs_frame {
             self.fp = self.new_local(w::I32);
             if self.falign > 16 {
                 self.osp = self.new_local(w::I32);
@@ -1288,6 +1316,107 @@ extend Gen {
         }
     }
 
+    // `fails`: the rare blocks that end in a panic or a trap, then those whose successors all fail, in rounds
+    // (at most one per block).
+    fn failing(self: &mut Self) {
+        let b = self.b();
+        let n = b.blocks.len();
+        fill(&mut self.fails, n, false);
+        for k in 0..n {
+            let bk = b.blocks[k];
+            let op = b.insts[(bk.start + bk.len - 1) as usize].op;
+            self.fails[k] = (bk.flags & BLOCK_RARE) != 0 && (op == O_PANIC || op == O_UNREACHABLE);
+        }
+        let mut changed = true;
+        let mut round: usize = 0;
+        while changed && round < n {
+            changed = false;
+            round += 1;
+            for k in 0..n {
+                let bk = b.blocks[k];
+                if self.fails[k] || (bk.flags & BLOCK_RARE) == 0 {
+                    continue;
+                }
+                b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut self.succ);
+                let mut all = self.succ.len() != 0;
+                for e in 0..self.succ.len() {
+                    all = all && self.fails[b.edge_target(self.succ[e]) as usize];
+                }
+                if all {
+                    self.fails[k] = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    // Whether only the failure paths (`fails`, which do not return nor lead back) use the frame: no
+    // canary, over-aligned frame, entry spill, result slot or variadic buffer, no parameter home, and every
+    // home, read of a slot's address and call area need in a failure path's block. Sets `cold_entry` when so.
+    fn lazy_frame(self: &mut Self) bool {
+        let b = self.b();
+        if self.canary != NONE || self.falign > 16 || self.res_slot != NONE || self.warm_area != 0 || self.me.variadic || self.fails[0] {
+            return false;
+        }
+        for k in 0..self.pspill.len() {
+            if self.pspill[k] != NONE {
+                return false;
+            }
+        }
+        let ni = b.insts.len();
+        for x in ni..self.home.len() {
+            if self.home[x] != NONE {
+                return false;
+            }
+        }
+        let mut entry = Vector::<bool>::with_capacity(b.blocks.len());
+        entry.resize_default(b.blocks.len());
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            let cold = self.fails[k];
+            let tm = b.insts[(bk.start + bk.len - 1) as usize];
+            if cold && tm.op == O_RET {
+                return false;
+            }
+            for i in bk.start..bk.start + bk.len {
+                if cold {
+                    continue;
+                }
+                if self.home[i as usize] != NONE {
+                    return false;
+                }
+                // A slot's address is made where it is read (`remat`): no read of one here.
+                let us = self.lv.uses_of(i);
+                for q in 0..us.len() {
+                    let u = us[q];
+                    if (u & (VPARAM | VFLAG)) == 0 && b.insts[u as usize].op == O_SLOTADDR {
+                        return false;
+                    }
+                }
+            }
+            b.succ_edges(tm, &mut self.succ);
+            for e in 0..self.succ.len() {
+                let s = b.edge_target(self.succ[e]);
+                let sc = self.fails[s as usize];
+                if cold && !sc {
+                    return false;
+                }
+                entry[s as usize] = entry[s as usize] || sc && !cold;
+            }
+        }
+        self.cold_entry = entry;
+        return true;
+    }
+
+    // The frame of a failure path (`lazy_frame`): the stack pointer less the frame, the frame base.
+    fn open_frame(self: &mut Self) {
+        self.sp_access(false);
+        self.c.i32_const(self.frame as i32);
+        self.c.op(w::I32_SUB);
+        self.c.local(w::LOCAL_TEE, self.fp);
+        self.sp_access(true);
+    }
+
     // The value of `__stack_chk_guard` on the operand stack.
     fn guard(self: &mut Self) {
         let k = self.obj().sym("__stack_chk_guard", wo::K_DATA);
@@ -1298,7 +1427,7 @@ extend Gen {
     // Check the canary, then restore the stack pointer before a return: on a mismatch
     // `__stack_chk_fail`, which does not return.
     fn epilogue(self: &mut Self) {
-        if self.fp == NONE {
+        if self.fp == NONE || self.cold_entry.len() != 0 {
             return;
         }
         if self.canary != NONE {
@@ -3401,6 +3530,9 @@ extend Gen {
     fn block_code(self: &mut Self, x: u32) bool {
         let blk = self.b().blocks[x as usize];
         let dbg = self.p().debug;
+        if self.cold_entry.len() != 0 && self.cold_entry[x as usize] {
+            self.open_frame();
+        }
         for i in blk.start..blk.start + blk.len - 1 {
             if dbg {
                 self.row(self.b().locs[i as usize]);

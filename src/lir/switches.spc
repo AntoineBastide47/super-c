@@ -24,15 +24,16 @@ struct Cl {
     e: u32,
 }
 
-/// Lower each `switch` of body `b` (pointers of `ptr` bytes) that has a range or more than LEAF values.
-/// Whether any.
-pub(package) fn lower(b: &mut Body, ptr: u32) bool {
+/// Lower each `switch` of body `b` (pointers of `ptr` bytes) that has a range or more than LEAF values, for a
+/// backend that reads tables of constants and branches through tables whose entries pass arguments when
+/// `tables` (`Package.switch_tables`). Whether any.
+pub(package) fn lower(b: &mut Body, ptr: u32, tables: bool) bool {
     let nb = b.blocks.len();
     let mut any = false;
     for k in 0..nb {
         let bk = b.blocks[k];
         if bk.len != 0 && b.insts[(bk.start + bk.len - 1) as usize].op == O_SWITCH {
-            any = lower_one(b, k as u32, ptr) || any;
+            any = lower_one(b, k as u32, ptr, tables) || any;
         }
     }
     return any;
@@ -40,7 +41,7 @@ pub(package) fn lower(b: &mut Body, ptr: u32) bool {
 
 // The switch ending block `k` as a tree of tests (the module comment), when it has a range or more than
 // LEAF values. Whether it did.
-fn lower_one(b: &mut Body, k: u32, ptr: u32) bool {
+fn lower_one(b: &mut Body, k: u32, ptr: u32, tables: bool) bool {
     let bk = b.blocks[k as usize];
     let at = bk.start + bk.len - 1;
     let t = b.insts[at as usize];
@@ -95,11 +96,15 @@ fn lower_one(b: &mut Body, k: u32, ptr: u32) bool {
         top: top,
     };
     // A dense switch the backends lower to a table stays: one of values (`switch_lookup`), or one of
-    // branches for TABLE_MIN or more clusters.
+    // branches for TABLE_MIN or more clusters; without `tables`, one of branches whose cases pass nothing.
     let mut lk = Lookup::new();
     let mut lo: u64 = 0;
     let mut span: u32 = 0;
-    if cls.len() >= TABLE_MIN as usize && switch_span(b, t, bits, &mut lo, &mut span) || switch_lookup(
+    let mut bare = true;
+    for q in 0..n + 1 {
+        bare = bare && b.edge_nargs(b.switch_edge(t, q)) == 0;
+    }
+    if cls.len() >= TABLE_MIN as usize && (tables || bare) && switch_span(b, t, bits, &mut lo, &mut span) || tables && switch_lookup(
         b,
         t,
         bits,

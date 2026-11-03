@@ -3650,9 +3650,14 @@ pub(package) const fn remat_inst(p: &Package, b: &Body, v: Value) bool {
 // How deep `fits_low` looks through operations.
 const FITS_DEPTH: u32 = 4;
 
-// The mask of integer type `t`'s bits, of up to 32.
+// The mask of integer type `t`'s bits: all of a 64-bit one's.
 const fn type_mask(t: u8) u64 {
-    return (1u64 << type_bits(t, 4) as u64) - 1;
+    let n = type_bits(t, 4);
+    return if n >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << n as u64) - 1
+    };
 }
 
 // Whether every value integer `v` of `b` (of up to 32 bits) takes is at most low-bit mask `m`, as a

@@ -339,6 +339,47 @@ fn vector_loops_interleave_the_targets_copies() {
     }
 }
 
+// A wasm32 release build splits a 128-bit product into 64-bit words (`Package.pairs`: its high word one
+// `mulhu.i64`, which wasmgen computes from 32-bit halves), lowers a switch of ranges to compares (the
+// walk gives its cases arguments, which `br_table` cannot pass) and keeps a signed quotient by 4 (no
+// one-instruction high product: the engine divides by a constant). The link may fail without the target's
+// sysroot; the optimizer prints before it.
+@test
+fn wasm_splits_wide_products_lowers_ranges_and_keeps_quotients() {
+    let names: [str; 3] = ["mh", "cls", "q4"];
+    // A project per function: a second build of one project is cached and prints nothing.
+    for k in 0..3usize {
+        let p = cli::proj_new();
+        p.mkfile(
+            "main.spc",
+            "@noinline\nfn mh(a: u64, b: u64) u64 {\n    return ((a as u128 * b as u128) >> 64) as u64;\n}\n\n@noinline\nfn cls(c: u8) u8 {\n    return switch c {\n        97..=122 => 1,\n        65..=90 => 1,\n        48..=57 => 2,\n        32 | 9 | 10 => 3,\n        _ => 0,\n    };\n}\n\n@noinline\nfn q4(x: i32) i32 {\n    return x / 4;\n}\n\nfn main(args: Vector<str>) i32 {\n    let n = args.len() as u64;\n    return (mh(n, n) + cls(n as u8) as u64) as i32 + q4(n as i32);\n}\n",
+        );
+        let r = cli::superc_env_in(
+            p.dir(),
+            "SC_LIR_PRINT",
+            unsafe names[k],
+            "build --profile=release --target=wasm main.spc -o app",
+        );
+        let f0 = printed(r.text(), unsafe names[k]);
+        let f = if f0.len() != 0 {
+            f0
+        } else {
+            printed(r.text(), format("main__{}", unsafe names[k]).as_str())
+        };
+        let ok = if k == 0 {
+            f.contains("mulhu.i64") && !f.contains("i128")
+        } else if k == 1 {
+            !f.contains("switch") && f.contains("icmp.ule")
+        } else {
+            f.contains("sdiv.i32")
+        };
+        if !ok {
+            r.show();
+        }
+        assert(ok, unsafe names[k]);
+    }
+}
+
 // Loops of C float functions: `max` and `min` reductions, `mul_add`, `floor` and `abs` per element. Built in
 // release, the reductions keep a lane per extreme (`vop.max`, `vop.min`) and take the lanes into one by
 // halves (lane swaps, `vop.swizzle`), `mul_add` is a fused multiply-add
@@ -4694,6 +4735,42 @@ fn quotients_by_constants_give_the_division() {
     }
 }
 
+// Without a one-instruction high product (`Package.mul_high` off: wasm32, whose engines divide by a
+// constant themselves) a scalar quotient or remainder by a constant stays a division, a signed one by a
+// power of two too.
+@test
+fn quotients_by_constants_stay_without_a_high_product() {
+    let src = M"(lir ptr 8
+sym @q fn global
+fn @q
+  sig (i32, i64) -> i64
+b0(v0: i32, v1: i64):
+  v2 = iconst.i32 4
+  v3 = sdiv.i32 v0, v2
+  v4 = iconst.i64 7
+  v5 = urem.i64 v1, v4
+  v6 = sext.i64 v3
+  v7 = add.i64 v5, v6
+  ret v7
+)";
+    let mut err = String::new();
+    let mut p = lparse::parse(src, &mut err).unwrap();
+    p.mul_high = false;
+    let none = Vector::<bool>::new();
+    let bu = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 };
+    lopt::optimize(&mut p, &none, lopt::Config { inline: il::SPEED, loops: bu });
+    let tq = text_of(&p, "q");
+    assert(tq.contains("sdiv.i32") && tq.contains("urem.i64") && !tq.contains("mulh"), tq.as_str());
+    let b = lparse::parse(src, &mut err).unwrap();
+    let xs: [i64; 4] = [-9, 13, 1000003, -2147483648];
+    for k in 0..4usize {
+        let x = unsafe xs[k];
+        let args: [u64; 2] = [x as u64 & 0xFFFFFFFF, x as u64];
+        let want = (x as u64 % 7).wrapping_add(((x as i32 / 4) as i64) as u64);
+        same_result(&b, &p, "q", args, want);
+    }
+}
+
 // Operation `op` of `quotients_by_constants_give_the_division` (`sdiv`, `srem`, `udiv`, `urem`) of `x` by
 // `d`, both sign-extended; unsigned, their bits under `mask`.
 fn divided(op: u32, x: i64, d: i64, mask: u64) u64 {
@@ -6974,12 +7051,14 @@ b6(v11: i8):
 // Switches lowered (`Package.switch_tree`): a dense one whose edges pass constants to one block left a
 // switch (the backends read a table), one of sparse ranges to range tests, one of three values whose edges
 // pass constants to one block (one through a block that only jumps there) to a table in a register, and
-// one of few sparse values left a switch.
+// one of few sparse values left a switch. For a backend without tables (`Package.switch_tables`, wasm32's
+// `br_table`) the dense one lowers too, as does one whose cases reach the block through blocks that only
+// jump there (`classf`: no case passes an argument before the first walk merges those blocks).
 @test
 fn switches_become_range_tests_and_tables() {
-    let (b, a) = optimized_split(
-        M"(lir ptr 8
+    let src = M"(lir ptr 8
 sym @class fn global
+sym @classf fn global
 sym @ranges fn global
 sym @table fn global
 sym @sparse fn global
@@ -6993,6 +7072,24 @@ b0(v0: i8):
   switch v0 [48 -> b1(v2), 49 -> b1(v2), 50 -> b1(v2), 51 -> b1(v2), 52 -> b1(v2), 53 -> b1(v2), 54 -> b1(v2), 55 -> b1(v2), 56 -> b1(v2), 57 -> b1(v2), 65 -> b1(v3), 66 -> b1(v3), 67 -> b1(v3), 68 -> b1(v3), 69 -> b1(v3), 70 -> b1(v3), 71 -> b1(v3), 72 -> b1(v3), 73 -> b1(v3), 74 -> b1(v3), 75 -> b1(v3), 76 -> b1(v3), 77 -> b1(v3), 78 -> b1(v3), 79 -> b1(v3), 80 -> b1(v3), 81 -> b1(v3), 82 -> b1(v3), 83 -> b1(v3), 84 -> b1(v3), 85 -> b1(v3), 86 -> b1(v3), 87 -> b1(v3), 88 -> b1(v3), 89 -> b1(v3), 90 -> b1(v3), 97 -> b1(v3), 98 -> b1(v3), 99 -> b1(v3), 100 -> b1(v3), 101 -> b1(v3), 102 -> b1(v3), 103 -> b1(v3), 104 -> b1(v3), 105 -> b1(v3), 106 -> b1(v3), 107 -> b1(v3), 108 -> b1(v3), 109 -> b1(v3), 110 -> b1(v3), 111 -> b1(v3), 112 -> b1(v3), 113 -> b1(v3), 114 -> b1(v3), 115 -> b1(v3), 116 -> b1(v3), 117 -> b1(v3), 118 -> b1(v3), 119 -> b1(v3), 120 -> b1(v3), 121 -> b1(v3), 122 -> b1(v3), 9 -> b1(v4), 10 -> b1(v4), 32 -> b1(v4)] else b1(v1)
 b1(v5: i32):
   ret v5
+fn @classf
+  sig (i8) -> i32
+b0(v0: i8):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 2
+  v3 = iconst.i32 1
+  v4 = iconst.i32 3
+  switch v0 [48 -> b2, 49 -> b2, 50 -> b2, 51 -> b2, 52 -> b2, 53 -> b2, 54 -> b2, 55 -> b2, 56 -> b2, 57 -> b2, 65 -> b3, 66 -> b3, 67 -> b3, 68 -> b3, 69 -> b3, 70 -> b3, 71 -> b3, 72 -> b3, 73 -> b3, 74 -> b3, 75 -> b3, 76 -> b3, 77 -> b3, 78 -> b3, 79 -> b3, 80 -> b3, 81 -> b3, 82 -> b3, 83 -> b3, 84 -> b3, 85 -> b3, 86 -> b3, 87 -> b3, 88 -> b3, 89 -> b3, 90 -> b3, 97 -> b3, 98 -> b3, 99 -> b3, 100 -> b3, 101 -> b3, 102 -> b3, 103 -> b3, 104 -> b3, 105 -> b3, 106 -> b3, 107 -> b3, 108 -> b3, 109 -> b3, 110 -> b3, 111 -> b3, 112 -> b3, 113 -> b3, 114 -> b3, 115 -> b3, 116 -> b3, 117 -> b3, 118 -> b3, 119 -> b3, 120 -> b3, 121 -> b3, 122 -> b3, 9 -> b4, 10 -> b4, 32 -> b4] else b5
+b1(v5: i32):
+  ret v5
+b2:
+  jmp b1(v2)
+b3:
+  jmp b1(v3)
+b4:
+  jmp b1(v4)
+b5:
+  jmp b1(v1)
 fn @ranges
   sig (i32) -> i32
 b0(v0: i32):
@@ -7030,16 +7127,21 @@ b2:
   v6 = iconst.i32 6
   v7 = mul.i32 v0, v6
   ret v7
-)",
-        0,
-        false,
-        il::SPEED,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
-        false,
-        true,
-    );
+)";
+    let none = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 };
+    let (b, a) = optimized_split(src, 0, false, il::SPEED, none, false, true);
     let tc = text_of(&a, "class");
     assert(tc.contains("switch"), tc.as_str());
+    let mut err = String::new();
+    let mut w = lparse::parse(src, &mut err).unwrap();
+    w.switch_tree = true;
+    w.switch_tables = false;
+    let no = Vector::<bool>::new();
+    lopt::optimize(&mut w, &no, lopt::Config { inline: il::SPEED, loops: none });
+    for name in ["class", "classf"] {
+        let tw = text_of(&w, name);
+        assert(!tw.contains("switch") && tw.contains("icmp.ule"), tw.as_str());
+    }
     for x in 0..256u64 {
         let c = x as u8;
         let want: u64 = if c >= 48 && c <= 57 {
@@ -7053,6 +7155,8 @@ b2:
         };
         let xs: [u64; 1] = [x];
         same_result(&b, &a, "class", xs, want);
+        same_result(&b, &w, "class", xs, want);
+        same_result(&b, &w, "classf", xs, want);
     }
     let tr = text_of(&a, "ranges");
     assert(!tr.contains("switch") && tr.contains("icmp.ule"), tr.as_str());

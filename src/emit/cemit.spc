@@ -652,6 +652,7 @@ extend CEmit {
             l.pkg.lse = feature(pk, "lse");
             l.pkg.rcpc = feature(pk, "rcpc");
             l.pkg.switch_tree = tgt::isa(pk.arch).switch_tree;
+            l.pkg.switch_tables = tgt::isa(pk.arch).switch_tables;
             l.pkg.split = pick((pk.cg & bman::CG_FUNCTION_SECTIONS) != 0, cob::SPLIT_FUNCS, 0u8) | pick(
                 (pk.cg & bman::CG_DATA_SECTIONS) != 0,
                 cob::SPLIT_DATA,

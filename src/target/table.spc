@@ -95,8 +95,9 @@ pub(package) struct Isa {
     /// A sum chain regroups into a tree (`lir::opt::Opt::reassociate`): the processor runs independent
     /// additions at once and has the registers for the partial sums (`lir::ir::Package::sum_trees`).
     pub(package) sum_trees: bool,
-    /// The native backend keeps a 64-bit integer in one register: the optimizer splits a 128-bit one into
-    /// its two words (`lir::ir::Package::pairs`).
+    /// The native backend keeps a 64-bit integer in one register (wasm32 one value) and computes a 64-bit
+    /// high product (`O_MULHU`; wasm32 from 32-bit halves): the optimizer splits a 128-bit integer into its
+    /// two words (`lir::ir::Package::pairs`).
     pub(package) pairs: bool,
     /// Every processor converts IEEE binary16 values to and from f32 (arm64's FCVT); else only one with
     /// its feature does (x86-64's `f16c`). `lir::ir::Package::half`.
@@ -105,6 +106,10 @@ pub(package) struct Isa {
     /// native backend reads from a table of values or branches through a table of branches
     /// (`lir::ir::Package::switch_tree`).
     pub(package) switch_tree: bool,
+    /// The backend reads a switch's constants from a table (`lir::switches::switch_lookup`) and branches
+    /// through a table whose entries pass arguments; else (wasm32's `br_table`) a dense switch stays only
+    /// when its cases pass none (`lir::ir::Package::switch_tables`).
+    pub(package) switch_tables: bool,
     pub(package) simd_backend: str<'static>, // `std/simd/backend/<name>.spc`
     /// The C headers whose functions are the C compiler's intrinsics, space-separated: no object defines
     /// them, so a native backend expands each call from its template (`target::intrin`), and a call of
@@ -256,6 +261,7 @@ pub(package) const ISAS: [Isa; 3] = [
         pairs: true,
         half_cvt: false,
         switch_tree: true,
+        switch_tables: true,
         simd_backend: "x86_64",
         intrinsics: "immintrin.h x86intrin.h",
     },
@@ -293,6 +299,7 @@ pub(package) const ISAS: [Isa; 3] = [
         pairs: true,
         half_cvt: true,
         switch_tree: true,
+        switch_tables: true,
         simd_backend: "aarch64",
         intrinsics: "arm_neon.h arm_acle.h arm_sve.h arm_sme.h",
     },
@@ -327,9 +334,10 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_sumw: 0x8CE,
         access_pairs: false,
         sum_trees: false,
-        pairs: false,
+        pairs: true,
         half_cvt: false,
-        switch_tree: false,
+        switch_tree: true,
+        switch_tables: false,
         simd_backend: "wasm",
         intrinsics: "wasm_simd128.h",
     },
@@ -674,6 +682,7 @@ const UNKNOWN_ISA: Isa = Isa {
     pairs: false,
     half_cvt: false,
     switch_tree: false,
+    switch_tables: false,
     simd_backend: "",
     intrinsics: "",
 };

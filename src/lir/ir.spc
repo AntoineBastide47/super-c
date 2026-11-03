@@ -1623,7 +1623,7 @@ pub(package) struct Package {
     /// `lir::opt::Opt::reassociate`).
     pub(package) sum_trees: bool,
     /// Whether the optimizer splits each 128-bit integer into its two 64-bit words (`lir::pairs`), which
-    /// the native backend keeps in registers (`target::table::Isa`); it needs `mul_high`.
+    /// the native backend keeps in registers (`target::table::Isa`); it needs the backend's 64-bit `mulhu`.
     pub(package) pairs: bool,
     /// The native backend starts each loop at a 16-byte boundary, as compilers do for speed but not size
     /// (x86-64: a loop's branches then share fewer fetch blocks and decoded-instruction cache lines).
@@ -1642,6 +1642,10 @@ pub(package) struct Package {
     /// The optimizer lowers each `switch` with a range or many values to compares and branches
     /// (`lir::switches`): the native backends test a `switch`'s values one by one.
     pub(package) switch_tree: bool,
+    /// The backend reads a switch's constants from a table and branches through a table whose entries pass
+    /// arguments (`target::table::Isa::switch_tables`); else a dense switch stays only when its cases pass
+    /// none (`lir::switches::lower`).
+    pub(package) switch_tables: bool,
     /// The float rewrites the build allows (`FM_*`, `-ffast-math` and its parts), and whether the
     /// processor has a scalar fused multiply-add (`O_FMA` for contraction).
     pub(package) fmath: u8,
@@ -1766,6 +1770,7 @@ extend Package {
             lse: false,
             rcpc: false,
             switch_tree: false,
+            switch_tables: true,
             pic: false,
             no_plt: false,
             debug: false,

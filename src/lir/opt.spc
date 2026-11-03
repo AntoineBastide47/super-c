@@ -8721,7 +8721,8 @@ extend Opt {
     // (Warren, Hacker's Delight, 10-1). Not by 0, nor a signed one by -1 (the minimum's overflow stays the
     // division's), nor an unsigned one by a power of two (`pow2`). A vector's divisor is one constant in
     // every lane, of a size whose high products the backend computes (`Package.vec_mulh`); a scalar of such
-    // a size stays while the loop vectorizer may take it (`defer_div`). Whether it did.
+    // a size stays while the loop vectorizer may take it (`defer_div`); a scalar one stays without
+    // `Package.mul_high`. Whether it did.
     fn divide(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
         if t.op < O_SDIV || t.op > O_UREM || t.ty == T_I128 || t.ty == T_PTR {
@@ -8733,7 +8734,9 @@ extend Opt {
         } else {
             t.ty
         };
-        if !is_int(lt) || vec && (pk.vec_mulh & type_bytes(lt, pk.ptr_bytes) as u8) == 0 {
+        // A scalar one stays where the backend has no one-instruction high product (wasm32, whose engines
+        // divide by a constant themselves).
+        if !is_int(lt) || vec && (pk.vec_mulh & type_bytes(lt, pk.ptr_bytes) as u8) == 0 || !vec && !pk.mul_high {
             return false;
         }
         let c = if vec {
@@ -10760,11 +10763,17 @@ extend Run {
         let inlined = sc.il.run(p, base, r.ok.get_ref(), &r.level, &r.unit, j, r.cf.inline, b);
         // The switches as compares and branches, before the first walk, which simplifies them (a test that
         // returns a value on either side returns a select).
-        let lowered = p.switch_tree && sws::lower(b, p.ptr_bytes);
+        let lowered = p.switch_tree && sws::lower(b, p.ptr_bytes, p.switch_tables);
         if inlined || lowered {
             sc.o.forget();
         }
         let _ = sc.o.run(p, b, inlined || lowered);
+        // Without tables of constants (`Package.switch_tables`), a switch the walk gave arguments (its cases'
+        // forwarding blocks merged into its edges) lowers once more.
+        if p.switch_tree && !p.switch_tables && sws::lower(b, p.ptr_bytes, false) {
+            sc.o.forget();
+            let _ = sc.o.run(p, b, true);
+        }
         if sc.o.tail_self(p, b, j) {
             let _ = sc.o.run(p, b, true);
         }
