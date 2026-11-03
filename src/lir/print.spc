@@ -177,6 +177,9 @@ extend Printer {
                 out.format_into("  bool p{}\n", k);
             }
         }
+        if b.fmath != 0 {
+            out.format_into("  fmath {}\n", b.fmath);
+        }
         for x in 0..b.scopes.len() {
             let sc = b.scopes[x];
             out.push_str("  scope @");
@@ -465,6 +468,9 @@ extend Printer {
                 out.format_into(" * {}", scale_of(t));
             }
             push_offset(t.c, out);
+            if (t.aux & PTR_INBOUNDS) != 0 {
+                out.push_str(" inbounds");
+            }
             if (t.aux & PTR_NONNULL) != 0 {
                 out.push_str(" nonnull");
             }
@@ -664,6 +670,9 @@ extend Printer {
         }
         if t.op == O_LOAD && (t.aux & MEM_BOOL) != 0 {
             out.push_str(" bool");
+        }
+        if t.op == O_LOAD && (t.aux & MEM_RANGE) != 0 {
+            out.format_into(" range {}", t.b);
         }
     }
 }

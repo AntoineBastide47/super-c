@@ -391,7 +391,7 @@ extend Resolver {
             }
             let alias = self.ast.at_const(id).as_data.import_decl.alias;
             let parts = self.ast.at_const(id).as_data.import_decl.path;
-            let glob = self.ast.at_const(id).as_data.import_decl.glob;
+            let glob = unsafe self.ast.at_const(id).as_data.import_decl.glob;
             let m = self.import_target(parts);
             if m < 0 {
                 continue;
@@ -654,7 +654,7 @@ extend Resolver {
         let mut go = true;
         while go {
             let cn = self.ast.at_const(curid);
-            if cn.kind != NodeKind::NODE_MEMBER || !cn.as_data.member.path || cc >= 32 {
+            if cn.kind != NodeKind::NODE_MEMBER || !unsafe cn.as_data.member.path || cc >= 32 {
                 bail = true;
                 go = false;
             } else {
@@ -665,7 +665,7 @@ extend Resolver {
                 if on.kind == NodeKind::NODE_IDENTIFIER {
                     base = o;
                     go = false;
-                } else if on.kind != NodeKind::NODE_MEMBER || !on.as_data.member.path {
+                } else if on.kind != NodeKind::NODE_MEMBER || !unsafe on.as_data.member.path {
                     bail = true;
                     go = false;
                 } else {
@@ -1051,7 +1051,7 @@ extend Resolver {
         let mut i: u32 = 0;
         while i < generics.len {
             let gid = self.child(generics, i);
-            let gp = self.ast.ext(gid).generic_param;
+            let gp = unsafe self.ast.ext(gid).generic_param;
             self.declare(gp.name, gid, Namespace::NS_TYPE);
             // A const-generic param is also a value, so it resolves in value position (e.g. `[T; N]`).
             if gp.is_const {
@@ -1063,7 +1063,7 @@ extend Resolver {
         i = 0;
         while i < generics.len {
             let gid = self.child(generics, i);
-            let gp = self.ast.ext(gid).generic_param;
+            let gp = unsafe self.ast.ext(gid).generic_param;
             self.resolve_bounds(gp.bounds);
             if gp.default_type != NODE_NONE {
                 // A CONST parameter's default is a VALUE: a named constant spelled as a bare path, or
@@ -1189,7 +1189,7 @@ extend Resolver {
             return;
         }
         if kind == NodeKind::NODE_POINTER_TYPE || kind == NodeKind::NODE_REFERENCE_TYPE || kind == NodeKind::NODE_SLICE_TYPE || kind == NodeKind::NODE_DYN_TYPE {
-            let it = self.ast.at_const(id).as_data.indirect_type;
+            let it = unsafe self.ast.at_const(id).as_data.indirect_type;
             if kind == NodeKind::NODE_REFERENCE_TYPE || kind == NodeKind::NODE_SLICE_TYPE {
                 self.resolve_lifetime(it.lifetime);
             }
@@ -1213,7 +1213,7 @@ extend Resolver {
         if kind == NodeKind::NODE_FUNCTION_TYPE {
             // A `for<'a>` function type binds its lifetimes over itself.
             let lt_mark = self.lt_open(id);
-            let ft = self.ast.at_const(id).as_data.function_type;
+            let ft = unsafe self.ast.at_const(id).as_data.function_type;
             let mut i: u32 = 0;
             while i < ft.params.len {
                 let p = self.child(ft.params, i);
@@ -1270,7 +1270,7 @@ extend Resolver {
         let mut i: u32 = 0;
         while i < fd.params.len {
             let pid = self.child(fd.params, i);
-            let param = self.ast.at_const(pid).as_data.parameter;
+            let param = unsafe self.ast.at_const(pid).as_data.parameter;
             self.declare(param.name, pid, Namespace::NS_VALUE);
             self.resolve_type(param.ty);
             i = i + 1;
@@ -1319,7 +1319,7 @@ extend Resolver {
                 self.resolve_type(fld.ty);
             } else {
                 // NODE_VARIANT.
-                let vr = self.ast.at_const(mid).as_data.variant;
+                let vr = unsafe self.ast.at_const(mid).as_data.variant;
                 self.declare(vr.name, mid, Namespace::NS_VALUE);
                 // Explicit discriminant (NODE_NONE when absent).
                 self.resolve_expr(vr.value);
@@ -1367,7 +1367,7 @@ extend Resolver {
                     self.resolve_type_alias(iid);
                 },
                 NODE_CONST => {
-                    let cd = self.ast.at_const(iid).as_data.const_def;
+                    let cd = unsafe self.ast.at_const(iid).as_data.const_def;
                     self.resolve_type(cd.ty);
                     self.resolve_expr(cd.value);
                 },
@@ -1396,7 +1396,7 @@ extend Resolver {
                 self.resolve_function(id);
             },
             NODE_STRUCT | NODE_ENUM => {
-                let ag = self.ast.ext(id).aggregate;
+                let ag = unsafe self.ast.ext(id).aggregate;
                 self.scope_enter();
                 let lt_mark = self.declare_lifetimes(id);
                 self.declare_generics(ag.generics);
@@ -1430,7 +1430,7 @@ extend Resolver {
                 self.scope_exit();
             },
             NODE_EXTEND => {
-                let ex = self.ast.ext(id).extend_def;
+                let ex = unsafe self.ast.ext(id).extend_def;
                 self.scope_enter();
                 let lt_mark = self.declare_lifetimes(id);
                 self.declare_generics(ex.generics);
@@ -1478,7 +1478,7 @@ extend Resolver {
                 self.resolve_type_alias(id);
             },
             NODE_CONST => {
-                let cd = self.ast.at_const(id).as_data.const_def;
+                let cd = unsafe self.ast.at_const(id).as_data.const_def;
                 self.resolve_type(cd.ty);
                 self.resolve_expr(cd.value);
             },
@@ -1533,7 +1533,7 @@ extend Resolver {
                 self.resolve_block(id);
             },
             NODE_LET => {
-                let ld = self.ast.at_const(id).as_data.let_stmt;
+                let ld = unsafe self.ast.at_const(id).as_data.let_stmt;
                 self.resolve_type(ld.ty);
                 self.resolve_expr(ld.value);
                 let nmkind = self.ast.at_const(ld.name).kind;
@@ -1552,7 +1552,7 @@ extend Resolver {
                 }
             },
             NODE_CONST => {
-                let cd = self.ast.at_const(id).as_data.const_def;
+                let cd = unsafe self.ast.at_const(id).as_data.const_def;
                 self.resolve_type(cd.ty);
                 self.resolve_expr(cd.value);
                 self.declare(cd.name, id, Namespace::NS_VALUE);
@@ -1595,7 +1595,7 @@ extend Resolver {
                 let arms = self.ast.at_const(id).as_data.block.statements;
                 for i in 0..arms.len {
                     let a = self.child(arms, i);
-                    let ad = self.ast.at_const(a).as_data.select_arm;
+                    let ad = unsafe self.ast.at_const(a).as_data.select_arm;
                     self.resolve_expr(ad.op);
                     self.resolve_expr(ad.value);
                     self.scope_enter();
@@ -1608,12 +1608,12 @@ extend Resolver {
                 self.resolve_if(id);
             },
             NODE_WHILE => {
-                let wd = self.ast.at_const(id).as_data.while_stmt;
+                let wd = unsafe self.ast.at_const(id).as_data.while_stmt;
                 self.resolve_expr(wd.condition);
                 self.resolve_block(wd.body);
             },
             NODE_FOR | NODE_INLINE_FOR => {
-                let fr = self.ast.ext(id).for_stmt;
+                let fr = unsafe self.ast.ext(id).for_stmt;
                 // Evaluated before the binding is in scope.
                 self.resolve_expr(fr.iterable);
                 self.scope_enter();
@@ -1629,7 +1629,7 @@ extend Resolver {
                 // Sugar marker; `body` is the closure the parser built over the binding, so resolving
                 // it AS a closure is what fills its captures: desugar (which runs after this pass)
                 // could not. The binding is the closure's parameter, not a loop binding.
-                let fr = self.ast.ext(id).for_stmt;
+                let fr = unsafe self.ast.ext(id).for_stmt;
                 self.resolve_expr(fr.iterable);
                 self.resolve_expr(fr.body);
             },
@@ -1680,7 +1680,7 @@ extend Resolver {
                 }
             },
             NODE_ASSIGNMENT => {
-                let bd = self.ast.at_const(id).as_data.binary;
+                let bd = unsafe self.ast.at_const(id).as_data.binary;
                 self.resolve_expr(bd.left);
                 self.resolve_expr(bd.right);
             },
@@ -1825,7 +1825,7 @@ extend Resolver {
                 self.resolve_if(id);
             },
             NODE_RANGE => {
-                let pr = self.ast.at_const(id).as_data.pattern_range;
+                let pr = unsafe self.ast.at_const(id).as_data.pattern_range;
                 self.resolve_expr(pr.start);
                 self.resolve_expr(pr.end);
             },
@@ -1834,7 +1834,7 @@ extend Resolver {
     }
 
     fn resolve_member(self: &mut Self, id: NodeId) {
-        let mb = self.ast.at_const(id).as_data.member;
+        let mb = unsafe self.ast.at_const(id).as_data.member;
         let ms = self.name_span(mb.member);
         if mb.path && self.variant_name(self.source.slice(ms.start as usize, ms.end as usize)) && self.name_resolves(
             ms,
@@ -1923,12 +1923,12 @@ extend Resolver {
             );
             return;
         }
-        let cl = self.ast.ext(id).closure;
+        let cl = unsafe self.ast.ext(id).closure;
         self.scope_enter();
         self.closures.push(ClosureScope { floor: self.symbols.len() as u32, caps: Vector::<NodeId>::new(), node: id });
         for i in 0..cl.params.len {
             let pid = self.child(cl.params, i);
-            let param = self.ast.at_const(pid).as_data.parameter;
+            let param = unsafe self.ast.at_const(pid).as_data.parameter;
             self.declare(param.name, pid, Namespace::NS_VALUE);
             self.closure_param = true;
             self.resolve_type(param.ty);
@@ -2216,7 +2216,7 @@ extend Resolver {
 
     fn leak_generics(self: &mut Self, gs: NodeList, v: u8) {
         for k in 0..gs.len {
-            let g = self.ast.ext(self.child(gs, k)).generic_param;
+            let g = unsafe self.ast.ext(self.child(gs, k)).generic_param;
             self.leak_list(g.bounds, v);
             self.leak_type(g.default_type, v);
             self.leak_type(g.const_type, v);
@@ -2401,7 +2401,7 @@ extend Resolver {
             let nd = *self.ast.at_const(i);
             if nd.kind == NodeKind::NODE_BLOCK {
                 self.ds_block(i, &mut stores);
-            } else if nd.kind == NodeKind::NODE_UNARY && nd.as_data.unary.op == TokenType::Ampersand {
+            } else if nd.kind == NodeKind::NODE_UNARY && unsafe nd.as_data.unary.op == TokenType::Ampersand {
                 self.ds_exempt_borrow(&mut fl, nd.as_data.unary.operand);
             } else if nd.kind == NodeKind::NODE_CLOSURE {
                 self.ds_exempt_caps(&mut fl, self.ast.ext(i).closure.captures);
@@ -2472,12 +2472,12 @@ extend Resolver {
             return NODE_NONE;
         }
         let mut v = self.ast.at_const(sid).as_data.single.value;
-        while self.ast.at_const(v).kind == NodeKind::NODE_UNARY && (self.ast.at_const(v).as_data.unary.op == TokenType::Move || self.ast.at_const(
+        while self.ast.at_const(v).kind == NodeKind::NODE_UNARY && (unsafe self.ast.at_const(v).as_data.unary.op == TokenType::Move || unsafe self.ast.at_const(
             v,
         ).as_data.unary.op == TokenType::Unsafe) {
             v = self.ast.at_const(v).as_data.unary.operand;
         }
-        if self.ast.at_const(v).kind == NodeKind::NODE_ASSIGNMENT && self.ast.at_const(v).as_data.binary.op == TokenType::Equal {
+        if self.ast.at_const(v).kind == NodeKind::NODE_ASSIGNMENT && unsafe self.ast.at_const(v).as_data.binary.op == TokenType::Equal {
             return v;
         }
         return NODE_NONE;
@@ -2499,7 +2499,7 @@ extend Resolver {
         let mut o = operand;
         loop {
             let ok = self.ast.at_const(o).kind;
-            if ok == NodeKind::NODE_MEMBER && !self.ast.at_const(o).as_data.member.path {
+            if ok == NodeKind::NODE_MEMBER && !unsafe self.ast.at_const(o).as_data.member.path {
                 o = self.ast.at_const(o).as_data.member.object;
             } else if ok == NodeKind::NODE_INDEX {
                 o = self.ast.at_const(o).as_data.index.object;

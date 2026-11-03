@@ -592,7 +592,7 @@ extend Bce {
             let t = b.locals.at(lk.l as usize).ty;
             if t != TYPE_NONE {
                 let y = *(unsafe &*(&*self.fx.pkg).module_ast_const(b.module)).type_at(t);
-                if y.kind == TypeKind::TYPE_BUILTIN && bt_is_unsigned(y.as_data.builtin) {
+                if y.kind == TypeKind::TYPE_BUILTIN && bt_is_unsigned(unsafe y.as_data.builtin) {
                     return true;
                 }
             }
@@ -1172,8 +1172,8 @@ extend Bce {
             return false;
         }
         let y = *(unsafe &*(&*self.fx.pkg).module_ast_const(b.module)).type_at(t);
-        return y.kind == TypeKind::TYPE_BUILTIN && bt_int_width(y.as_data.builtin, false) != 0 && bt_is_unsigned(
-            y.as_data.builtin,
+        return y.kind == TypeKind::TYPE_BUILTIN && bt_int_width(unsafe y.as_data.builtin, false) != 0 && bt_is_unsigned(
+            unsafe y.as_data.builtin,
         );
     }
 
@@ -1182,7 +1182,7 @@ extend Bce {
             return false;
         }
         let y = *(unsafe &*(&*self.fx.pkg).module_ast_const(b.module)).type_at(t);
-        return y.kind == TypeKind::TYPE_BUILTIN && bt_int_width(y.as_data.builtin, false) != 0;
+        return y.kind == TypeKind::TYPE_BUILTIN && bt_int_width(unsafe y.as_data.builtin, false) != 0;
     }
 
     /// Prove `index < length` for one IN_BOUNDS site. Returns true when removable; fills the
@@ -1282,8 +1282,8 @@ extend Bce {
         let t0 = b.locals.at(ik.l as usize).ty;
         if t0 != TYPE_NONE {
             let y0 = *(unsafe &*(&*self.fx.pkg).module_ast_const(b.module)).type_at(t0);
-            if y0.kind == TypeKind::TYPE_BUILTIN && bt_is_unsigned(y0.as_data.builtin) {
-                let w0 = bt_int_width(y0.as_data.builtin, false);
+            if y0.kind == TypeKind::TYPE_BUILTIN && bt_is_unsigned(unsafe y0.as_data.builtin) {
+                let w0 = bt_int_width(unsafe y0.as_data.builtin, false);
                 if w0 != 0 && w0 < 40 && 1i64 << w0 as i64 <= len {
                     return true;
                 }
@@ -1304,7 +1304,7 @@ extend Bce {
         if y.kind != TypeKind::TYPE_BUILTIN {
             return false;
         }
-        let bt = y.as_data.builtin;
+        let bt = unsafe y.as_data.builtin;
         let w = bt_int_width(bt, false);
         return (bt == BuiltinType::BT_U8 || bt == BuiltinType::BT_U16 || bt == BuiltinType::BT_U32) && w < 63 && 1i64 << w as i64 <= len;
     }

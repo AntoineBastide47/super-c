@@ -490,7 +490,7 @@ fn import_surface(a: &Ast, src: str, out: &mut String) {
         if n.kind != NodeKind::NODE_IMPORT {
             continue;
         }
-        let im = n.as_data.import_decl;
+        let im = unsafe n.as_data.import_decl;
         for k in 0..im.path.len {
             let sp = a.at_const(unsafe a.list(im.path)[k as usize]).as_data.name.text;
             out.push_str(src.slice(sp.start as usize, sp.end as usize));

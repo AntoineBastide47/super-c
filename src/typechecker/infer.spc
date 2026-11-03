@@ -136,6 +136,13 @@ pub(package) struct InferenceContext {
     /// The place an assignment or a `&mut` writes (past `unsafe` and `move`): its member check
     /// knows the field is written.
     pub(package) write_node: NodeId,
+    /// The place a plain `=` assignment writes: it reads nothing of the place's old value.
+    pub(package) store_node: NodeId,
+    /// The object of the field access being checked (not a method's receiver): a union field read
+    /// there with invalid values is decided by the access around it (`union_cross`).
+    pub(package) member_obj: NodeId,
+    /// Set by a field access `member_obj` whose path crosses a union and whose type has invalid values.
+    pub(package) union_cross: bool,
     pub(package) proj_obj_ok: bool, // one-shot: the identifier being checked is a member's object
     /// Guards tc_coerce_from against re-entering itself through the oracle it hangs off.
     pub(package) coerce_depth: i32,
@@ -164,6 +171,9 @@ extend InferenceContext {
             callee_node: NODE_NONE,
             addr_ctx: false,
             write_node: NODE_NONE,
+            store_node: NODE_NONE,
+            member_obj: NODE_NONE,
+            union_cross: false,
             proj_obj_ok: false,
             coerce_depth: 0,
             sv: Solver::new(),

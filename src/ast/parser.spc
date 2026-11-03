@@ -979,7 +979,7 @@ extend Parser {
                 let name = unsafe self.ast.list(names)[i as usize];
                 let span_start = self.node_span(name).start;
                 let span_end = self.node_span(ty).end;
-                let is_mutable = self.ast.at_const(name).as_data.name.is_mutable;
+                let is_mutable = unsafe self.ast.at_const(name).as_data.name.is_mutable;
                 let param = self.mk(
                     NodeKind::NODE_PARAMETER,
                     Span::new(span_start, span_end),
@@ -1965,7 +1965,7 @@ extend Parser {
             self.reject_derive_here();
             return;
         }
-        let agg = self.ast.ext(decl).aggregate;
+        let agg = unsafe self.ast.ext(decl).aggregate;
         let nsp = self.ast.at_const(agg.name).as_data.name.text;
         // Copied out first: node building below grows the arenas a `list` pointer indexes into.
         let mut gid_copy = Vector::<NodeId>::new();
@@ -2148,12 +2148,12 @@ extend Parser {
             return bc_is_bool(self.bc_const(id));
         }
         if n.kind == NodeKind::NODE_UNARY {
-            return n.as_data.unary.op == TokenType::Bang && self.bc_cond(n.as_data.unary.operand, report);
+            return unsafe n.as_data.unary.op == TokenType::Bang && self.bc_cond(n.as_data.unary.operand, report);
         }
         if n.kind != NodeKind::NODE_BINARY {
             return false;
         }
-        let b = n.as_data.binary;
+        let b = unsafe n.as_data.binary;
         if b.op == TokenType::AmpersandAmpersand || b.op == TokenType::PipePipe {
             return self.bc_cond(b.left, report) && self.bc_cond(b.right, report);
         }
@@ -2171,13 +2171,13 @@ extend Parser {
             if vn.kind != NodeKind::NODE_LITERAL {
                 return false;
             }
-            let t = vn.as_data.literal.token_type;
+            let t = unsafe vn.as_data.literal.token_type;
             if bc_is_bool(k) {
                 return t == TokenType::True || t == TokenType::False;
             }
             return t == TokenType::IntegerLiteral && bc_decimal(self.source, vn.as_data.literal.raw) >= 0;
         }
-        if bc_enum(k).len() == 0 || vn.kind != NodeKind::NODE_MEMBER || !vn.as_data.member.path {
+        if bc_enum(k).len() == 0 || vn.kind != NodeKind::NODE_MEMBER || !unsafe vn.as_data.member.path {
             return false;
         }
         let o = self.ast.at_const(vn.as_data.member.object);
@@ -2225,7 +2225,7 @@ extend Parser {
         if pn.kind != NodeKind::NODE_PATTERN_NAME || pn.as_data.pattern.children.len != 0 {
             return false;
         }
-        let nm = self.ast.at_const(pn.as_data.pattern.name).as_data.name;
+        let nm = unsafe self.ast.at_const(pn.as_data.pattern.name).as_data.name;
         let first = self.source[nm.text.start as usize];
         if nm.is_mutable || first < b'A' || first > b'Z' {
             return false;
@@ -2335,7 +2335,7 @@ extend Parser {
                 return NODE_NONE;
             }
             if !self.check(TokenType::LeftParen) && !self.check(TokenType::LeftBrace) && !self.check(TokenType::At) {
-                if self.ast.at_const(name).as_data.name.is_mutable {
+                if unsafe self.ast.at_const(name).as_data.name.is_mutable {
                     self.errors.emit(
                         dc::CONSTANT_PATTERN_CANNOT_MUT,
                         start,
@@ -2721,7 +2721,7 @@ extend Parser {
         let mut args = NodeList { start: 0, len: 0 };
         let mut cur = chain;
         loop {
-            let mb = self.ast.at_const(cur).as_data.member;
+            let mb = unsafe self.ast.at_const(cur).as_data.member;
             self.ast.push(mb.member);
             let mut obj = mb.object;
             // `Q::<i16>::V { .. }`: the type arguments of an inner segment become the path's.
@@ -2807,7 +2807,7 @@ extend Parser {
                     // A method's turbofish (`x.m::<T>`) stays on its member, so the call keeps the
                     // member callee a method call has.
                     let im = *self.ast.at_const(inner);
-                    if im.kind == NodeKind::NODE_MEMBER && !im.as_data.member.path && im.as_data.member.targs.len == 0 {
+                    if im.kind == NodeKind::NODE_MEMBER && !unsafe im.as_data.member.path && im.as_data.member.targs.len == 0 {
                         self.ast.at(inner).as_data.member.targs = types;
                         self.ast.at(inner).span.end = self.previous_end();
                         continue;
@@ -3099,7 +3099,7 @@ extend Parser {
             return;
         }
         let pd = n.as_data.pattern;
-        if n.kind == NodeKind::NODE_PATTERN_NAME && pd.children.len == 0 && !self.ast.at_const(pd.name).as_data.name.is_mutable {
+        if n.kind == NodeKind::NODE_PATTERN_NAME && pd.children.len == 0 && !unsafe self.ast.at_const(pd.name).as_data.name.is_mutable {
             self.ast.at(b).kind = NODE_PATTERN_LITERAL;
             self.ast.at(b).as_data = NodeAs { single: SingleData { value: pd.name } };
             return;
@@ -3628,7 +3628,7 @@ extend Parser {
             let before = self.current;
             let arm = self.parse_select_arm();
             if arm != NODE_NONE {
-                let k = self.ast.at_const(arm).as_data.select_arm.kind;
+                let k = unsafe self.ast.at_const(arm).as_data.select_arm.kind;
                 if k == SelectArmKind::SELECT_TIMEOUT {
                     timeouts = timeouts + 1;
                 } else if k == SelectArmKind::SELECT_DEFAULT {
@@ -3677,7 +3677,9 @@ extend Parser {
         let mut expr = self.parse_expression();
         let mut binding = NODE_NONE;
         let mut bad = false;
-        if expr != NODE_NONE && self.ast.at_const(expr).kind == NodeKind::NODE_ASSIGNMENT && self.ast.at_const(expr).as_data.binary.op == TokenType::Equal {
+        if expr != NODE_NONE && self.ast.at_const(expr).kind == NodeKind::NODE_ASSIGNMENT && unsafe self.ast.at_const(
+            expr,
+        ).as_data.binary.op == TokenType::Equal {
             let name = self.ast.at_const(expr).as_data.binary.left;
             if self.ast.at_const(name).kind != NodeKind::NODE_IDENTIFIER {
                 self.error_here("a 'select' arm binds a plain name");
@@ -3716,7 +3718,7 @@ extend Parser {
                     op = unsafe self.ast.list(cd.args)[0];
                 }
             } else if ck == NodeKind::NODE_MEMBER {
-                let md = self.ast.at_const(cd.callee).as_data.member;
+                let md = unsafe self.ast.at_const(cd.callee).as_data.member;
                 let mname = self.ast.at_const(md.member).as_data.name.text;
                 if self.span_text_is(mname, "recv") && cd.args.len == 0 {
                     kind = SELECT_RECV;
@@ -4304,6 +4306,8 @@ extend Parser {
             AttrKind::ATTR_ORDERED as i32
         } else if self.text_is(ns, "owned") {
             AttrKind::ATTR_OWNED as i32
+        } else if self.text_is(ns, "associative_math") {
+            AttrKind::ATTR_ASSOCIATIVE_MATH as i32
         } else {
             -1
         };
@@ -4824,9 +4828,9 @@ extend Parser {
                 // FN_EXTERN is set only on a function declared in an extern block.
                 let in_extern = isfn && self.ast.ext(owner).function.is_extern();
                 let def = isfn && !in_extern && self.ast.ext(owner).function.body != NODE_NONE;
-                let stat = ok && self.ast.at_const(owner).kind == NodeKind::NODE_CONST && self.ast.at_const(owner).as_data.const_def.is_static_mut && !self.ast.at_const(
+                let stat = ok && self.ast.at_const(owner).kind == NodeKind::NODE_CONST && unsafe self.ast.at_const(
                     owner,
-                ).as_data.const_def.is_extern;
+                ).as_data.const_def.is_static_mut && !unsafe self.ast.at_const(owner).as_data.const_def.is_extern;
                 let why = if (attr.arg & (UNSAFE_SAFE | UNSAFE_CONST)) != 0 && !in_extern {
                     "'@unsafe(safe)' and '@unsafe(const)' may only be applied to a function in an 'extern \"C\"' block"
                 } else if (attr.arg & UNSAFE_NAKED) != 0 && !def {
@@ -4856,7 +4860,7 @@ extend Parser {
             }
             let place = if attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8 {
                 pick(fnk, "", "may only be applied to a function")
-            } else if attr.kind == AttrKind::ATTR_TAIL_RECURSE as u8 {
+            } else if attr.kind == AttrKind::ATTR_TAIL_RECURSE as u8 || attr.kind == AttrKind::ATTR_ASSOCIATIVE_MATH as u8 {
                 pick(
                     fnk && self.ast.ext(owner).function.body != NODE_NONE,
                     "",
@@ -4864,7 +4868,7 @@ extend Parser {
                 )
             } else if attr.kind == AttrKind::ATTR_THREAD_LOCAL as u8 {
                 pick(
-                    owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_CONST && self.ast.at_const(
+                    owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_CONST && unsafe self.ast.at_const(
                         owner,
                     ).as_data.const_def.is_static_mut,
                     "",
@@ -4912,7 +4916,7 @@ extend Parser {
                 // would change nothing. An extern static's object is its C header's.
                 let ok = owner != NODE_NONE && (self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT || self.ast.at_const(
                     owner,
-                ).kind == NodeKind::NODE_CONST && self.ast.at_const(owner).as_data.const_def.is_static_mut && !self.ast.at_const(
+                ).kind == NodeKind::NODE_CONST && unsafe self.ast.at_const(owner).as_data.const_def.is_static_mut && !unsafe self.ast.at_const(
                     owner,
                 ).as_data.const_def.is_extern);
                 pick(
@@ -5005,7 +5009,7 @@ extend Parser {
             let es = self.ast.at_const(list).as_data.array_literal.elements;
             for i in 0..es.len {
                 let e = *self.ast.at_const(unsafe self.ast.list(es)[i as usize]);
-                if e.kind != NodeKind::NODE_MEMBER || !e.as_data.member.path {
+                if e.kind != NodeKind::NODE_MEMBER || !unsafe e.as_data.member.path {
                     continue;
                 }
                 let nsp = self.ast.at_const(e.as_data.member.member).span;
@@ -5256,6 +5260,10 @@ fn known_attr_name(kind: u8, out: &mut String) {
         out.push_str("owned");
         return;
     }
+    if kind == AttrKind::ATTR_ASSOCIATIVE_MATH as u8 {
+        out.push_str("associative_math");
+        return;
+    }
     if kind == AttrKind::ATTR_LAYOUT as u8 {
         out.push_str("layout");
         return;
@@ -5269,7 +5277,7 @@ fn known_attr_name(kind: u8, out: &mut String) {
 }
 
 // The attributes that are not C-facing, as `known_attributes` gives them.
-const ATTR_NAMES: [str<'static>; 26] = [
+const ATTR_NAMES: [str<'static>; 27] = [
     "emit_macro",
     "bench",
     "test",
@@ -5296,6 +5304,7 @@ const ATTR_NAMES: [str<'static>; 26] = [
     "when",
     "ordered",
     "owned",
+    "associative_math",
 ];
 
 // The C-facing attributes (`@inline`) and their kinds. The first eight take no argument,

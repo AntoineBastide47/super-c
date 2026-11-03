@@ -51,6 +51,8 @@ extend TyI as Copy {}
 // Local kinds.
 const LK_VAR: u8 = 0; // SSA variable `var`
 const LK_MEM: u8 = 1; // memory at `addr` (a slot address, a parameter, the result pointer)
+// `share_plan` takes at most SHARE_MAX locals.
+const SHARE_MAX: usize = 64;
 const LK_ZST: u8 = 2;
 const LK_STATIC: u8 = 3; // an item's storage: `addr` filled on first use
 const LK_CAP: u8 = 4; // a closure capture: env field `var` (its offset); by pointer when `byref`
@@ -199,6 +201,11 @@ pub(package) struct Lower {
     ocache: Map<u64, u64>,
     opool: Vector<u32>,
     zcache: Map<u64, bool>,
+    // Per local of the body, whether a `TM_DROP` drops it (`share_plan`): its drop runs after its
+    // `ST_STORAGE_DEAD`, which drop elaboration puts before the drop.
+    dropped: Vector<bool>,
+    // Per enum declaration (module << 32 | node), its greatest discriminant (`tag_bound`).
+    bcache: Map<u64, u32>,
     // `placed`'s members, a stack: each query appends its own above its callers' and truncates back.
     lms: Vector<lay::MemberAt>,
     bm: ModuleId, // the module of the body being lowered: the pool grounded member types go to
@@ -286,6 +293,8 @@ extend Lower {
             ocache: Map::<u64, u64>::new(),
             opool: Vector::<u32>::new(),
             zcache: Map::<u64, bool>::new(),
+            dropped: Vector::<bool>::new(),
+            bcache: Map::<u64, u32>::new(),
             lms: Vector::<lay::MemberAt>::new(),
             bm: 0,
             fl_depth: 0,
@@ -418,7 +427,7 @@ extend Lower {
         let pb = self.pkg.ptr_bytes;
         let ptr = TyI { cls: VC_SCALAR, mty: T_PTR, size: pb, align: pb };
         if y.kind == TypeKind::TYPE_BUILTIN {
-            let bt = y.as_data.builtin;
+            let bt = unsafe y.as_data.builtin;
             *out = if bt == BuiltinType::BT_VOID {
                 TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 }
             } else if bt == BuiltinType::BT_C32 {
@@ -624,7 +633,7 @@ extend Lower {
         if y.kind != TypeKind::TYPE_BUILTIN {
             return false;
         }
-        let bt = y.as_data.builtin;
+        let bt = unsafe y.as_data.builtin;
         return bt == BuiltinType::BT_I8 || bt == BuiltinType::BT_I16 || bt == BuiltinType::BT_I32 || bt == BuiltinType::BT_I64 || bt == BuiltinType::BT_ISIZE;
     }
 
@@ -657,7 +666,7 @@ extend Lower {
         if y.kind != TypeKind::TYPE_BUILTIN {
             return BT_VOID;
         }
-        return y.as_data.builtin;
+        return unsafe y.as_data.builtin;
     }
 
     // The name of the aggregate declaration of resolved `(rm, rt)` (an instance's generic one), "" else.
@@ -911,7 +920,7 @@ extend Lower {
         let y = Lower::resolved(c, m, t, &mut rm, &mut rt);
         if y.kind == TypeKind::TYPE_BUILTIN {
             // c32, c64: two floats; va_list: pointers.
-            let bt = y.as_data.builtin;
+            let bt = unsafe y.as_data.builtin;
             let ft = ast::pick(bt == BuiltinType::BT_C32, T_F32, T_F64);
             if bt == BuiltinType::BT_C32 || bt == BuiltinType::BT_C64 {
                 out.push((off, ft));
@@ -1122,8 +1131,8 @@ extend Lower {
             self.lms.truncate(b0);
             return true;
         }
-        let is_union = a.ext(dn).aggregate.is_union;
-        let is_tuple = a.ext(dn).aggregate.is_tuple;
+        let is_union = unsafe a.ext(dn).aggregate.is_union;
+        let is_tuple = unsafe a.ext(dn).aggregate.is_tuple;
         let packed = a.attr_of(dn, AttrKind::ATTR_PACKED) != null;
         let mut size: u64 = 0;
         let mut al: u64 = 1;
@@ -1478,6 +1487,16 @@ extend Lower {
         return self.inst(O_LOAD, ty, al | tag, a, VNONE, o);
     }
 
+    // `load_tagged` of a value that is at most `bound` (MEM_RANGE; none when VNONE).
+    fn load_bounded(self: &mut Self, ty: u8, addr: Value, off: u32, packed: bool, tag: u16, bound: u32) Value {
+        if bound == VNONE {
+            return self.load_tagged(ty, addr, off, packed, tag);
+        }
+        let al = ast::pick(packed, 0u16, log2(type_align(ty, self.pkg.ptr_bytes)) as u16);
+        let (a, o) = self.fold_addr(addr, off);
+        return self.inst(O_LOAD, ty, al | tag | MEM_RANGE, a, bound, o);
+    }
+
     fn store_tagged(self: &mut Self, v: Value, addr: Value, off: u32, packed: bool, tag: u16) {
         let ty = self.vty(v);
         let al = ast::pick(packed, 0u16, log2(type_align(ty, self.pkg.ptr_bytes)) as u16);
@@ -1526,12 +1545,13 @@ extend Lower {
         if ix != VNONE && scale == 0 {
             return self.ptradd(base, VNONE, 0, off);
         }
+        // The language's addresses stay in their objects (PTR_INBOUNDS).
         if ix != VNONE && scale > PTR_SCALE as u32 {
             let s = self.iconst(self.ptr_int(), scale);
             let k = self.arith(O_MUL, ix, s);
-            return self.inst(O_PTRADD, T_PTR, 1, base, k, off);
+            return self.inst(O_PTRADD, T_PTR, 1 | PTR_INBOUNDS, base, k, off);
         }
-        return self.inst(O_PTRADD, T_PTR, scale as u16, base, ix, off);
+        return self.inst(O_PTRADD, T_PTR, scale as u16 | PTR_INBOUNDS, base, ix, off);
     }
 
     fn arith(self: &mut Self, op: u8, x: Value, y: Value) Value {
@@ -2067,6 +2087,12 @@ extend Lower {
         let oa = Lower::ast(c, b.owner.module);
         // A naked function's code is its assembly: the generators read its `O_ASM`s alone.
         self.b.naked = cnode == NODE_NONE && b.owner.node != NODE_NONE && (oa.unsafe_claims(b.owner.node) & UNSAFE_NAKED) != 0;
+        // `@associative_math` on the function (its closures' bodies too): its float operations reassociate.
+        self.b.fmath = ast::pick(
+            b.owner.node != NODE_NONE && oa.attr_of(b.owner.node, AttrKind::ATTR_ASSOCIATIVE_MATH) != null,
+            FM_ASSOC,
+            0u8,
+        );
         // Captures: the trailing argument locals of a closure body, read through its env.
         let mut ncaps: u32 = 0;
         let mut nparams = b.args;
@@ -2510,7 +2536,7 @@ extend Lower {
         } else {
             return;
         };
-        if Lower::ast(c, dm).at_const(dn).kind != NodeKind::NODE_STRUCT || Lower::ast(c, dm).ext(dn).aggregate.is_union {
+        if Lower::ast(c, dm).at_const(dn).kind != NodeKind::NODE_STRUCT || unsafe Lower::ast(c, dm).ext(dn).aggregate.is_union {
             return;
         }
         let mut fl = Vector::<FieldAt>::new();
@@ -2565,7 +2591,7 @@ extend Lower {
             y = Lower::resolved(c, em, y.as_data.arr.elem, &mut rm, &mut rt);
         }
         if y.kind == TypeKind::TYPE_BUILTIN {
-            return y.as_data.builtin != BuiltinType::BT_VOID && y.as_data.builtin != BuiltinType::BT_VALIST;
+            return unsafe y.as_data.builtin != BuiltinType::BT_VOID && unsafe y.as_data.builtin != BuiltinType::BT_VALIST;
         }
         if y.kind == TypeKind::TYPE_ENUM && !Lower::ast(c, y.module).enum_has_payload(y.as_data.decl) {
             return true;
@@ -2800,6 +2826,7 @@ extend Lower {
         if (ret & AGG) != 0 {
             self.ret_ptr = self.b.param(b0, pl.len() as u32);
         }
+        let share = self.share_plan(b);
         for l in 0..self.li.len() {
             let info = self.li[l];
             if info.kind != LK_MEM || info.addr != VNONE {
@@ -2809,6 +2836,8 @@ extend Lower {
                 self.ret_ptr
             } else if l as u32 < b.returns {
                 self.ptradd(self.ret_ptr, VNONE, 0, self.ret_off[l])
+            } else if share[l] != NONE && share[l] != l as u32 {
+                self.li[share[l] as usize].addr
             } else {
                 self.new_slot(info.ti)
             };
@@ -2841,6 +2870,188 @@ extend Lower {
         }
         let _ = cap_base;
         return true;
+    }
+
+    // Per local of `b`, the local whose slot it takes (itself, NONE: its own): locals whose storage the core
+    // body's markers bound (`ST_STORAGE_LIVE` to `ST_STORAGE_DEAD`, a scope's user locals) share one slot
+    // of their size and alignment when no point holds two of them live, as the statement temporaries do.
+    // The markers' liveness follows every edge, so a local stays live on every path its storage does
+    // (a cleanup path too). A local a drop reads (`dropped`) is none of them: its drop runs past its
+    // marker. At most SHARE_MAX of them, in local order.
+    fn share_plan(self: &mut Self, b: &irc::CoreBody) Vector<u32> {
+        let nl = self.li.len();
+        let mut out = Vector::<u32>::new();
+        fill(&mut out, nl, NONE);
+        fill(&mut self.dropped, nl, false);
+        for bb in b.blocks.as_slice() {
+            if bb.term.kind == irc::TM_DROP && b.places[bb.term.a as usize].base as usize < nl {
+                self.dropped[b.places[bb.term.a as usize].base as usize] = true;
+            }
+        }
+        // Per local its candidate index (NONE: none): a slot local both markers name.
+        let mut ci = Vector::<u32>::new();
+        fill(&mut ci, nl, NONE);
+        let mut seen = Vector::<u8>::new();
+        fill(&mut seen, nl, 0);
+        for s in b.statements.as_slice() {
+            if (s.kind == irc::ST_STORAGE_LIVE || s.kind == irc::ST_STORAGE_DEAD) && s.a as usize < nl {
+                seen[s.a as usize] |= ast::pick(s.kind == irc::ST_STORAGE_LIVE, 1u8, 2u8);
+            }
+        }
+        let mut cands = Vector::<u32>::new();
+        for l in 0..nl {
+            let info = self.li[l];
+            if seen[l] == 3 && !self.dropped[l] && info.kind == LK_MEM && info.addr == VNONE && l as u32 >= b.returns && cands.len() < SHARE_MAX {
+                ci[l] = cands.len() as u32;
+                cands.push(l as u32);
+            }
+        }
+        if cands.len() < 2 {
+            return out;
+        }
+        // The candidates live at each block's entry: a forward union over the edges.
+        let nb = b.blocks.len();
+        let mut live_in = Vector::<u64>::new();
+        fill(&mut live_in, nb, 0);
+        let mut sv = Vector::<u32>::new();
+        let mut conf = Vector::<u64>::new();
+        fill(&mut conf, cands.len(), 0);
+        // Each round adds a bit or ends: at most one per candidate and block.
+        for _ in 0..SHARE_MAX * nb + 1 {
+            let mut changed = false;
+            for k in 0..nb {
+                let cur = Lower::share_walk(b, k, live_in[k], &ci, &mut conf, false);
+                Lower::succs(b, k as u32, &mut sv);
+                for e in sv.as_slice() {
+                    if (live_in[e as usize] | cur) != live_in[e as usize] {
+                        live_in[e as usize] |= cur;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // Two candidates meet where both are live: at a block's entry or as one's storage starts.
+        for k in 0..nb {
+            let _ = Lower::share_walk(b, k, live_in[k], &ci, &mut conf, true);
+        }
+        // Greedy groups: a candidate joins the first group of its size and alignment none of whose members
+        // it meets.
+        let mut heads = Vector::<u32>::new();
+        let mut members = Vector::<u64>::new();
+        for j in 0..cands.len() {
+            let l = cands[j];
+            let ti = self.li[l as usize].ti;
+            let mut g = NONE;
+            for h in 0..heads.len() {
+                let hi = self.li[heads[h] as usize].ti;
+                if hi.size == ti.size && hi.align == ti.align && (conf[j] & members[h]) == 0 {
+                    g = h as u32;
+                    break;
+                }
+            }
+            if g == NONE {
+                heads.push(l);
+                members.push(1u64 << j as u64);
+                out[l as usize] = l;
+            } else {
+                members[g as usize] |= 1u64 << j as u64;
+                out[l as usize] = heads[g as usize];
+            }
+        }
+        return out;
+    }
+
+    // The candidates (`share_plan`'s `ci`) live at the end of core block `k` of `b` from `live` at its entry;
+    // with `meet`, each live set it passes through recorded in `conf`.
+    fn share_walk(b: &irc::CoreBody, k: usize, live: u64, ci: &Vector<u32>, conf: &mut Vector<u64>, meet: bool) u64 {
+        let bb = b.blocks[k];
+        let mut cur = live;
+        if meet {
+            Lower::share_meet(cur, conf);
+        }
+        for q in 0..bb.stmt_len {
+            let s = b.statements[(bb.stmt_start + q) as usize];
+            if s.a as usize >= ci.len() || ci[s.a as usize] == NONE {
+                continue;
+            }
+            let bit = 1u64 << ci[s.a as usize] as u64;
+            if s.kind == irc::ST_STORAGE_LIVE {
+                cur |= bit;
+                if meet {
+                    Lower::share_meet(cur, conf);
+                }
+            } else if s.kind == irc::ST_STORAGE_DEAD {
+                cur &= ~bit;
+            }
+        }
+        return cur;
+    }
+
+    // Each candidate of live set `cur` meets the others.
+    fn share_meet(cur: u64, conf: &mut Vector<u64>) {
+        for j in 0..conf.len() {
+            if (cur >> j as u64 & 1) != 0 {
+                conf[j] |= cur;
+            }
+        }
+    }
+
+    // The stores into slot `a` (a local's `slotaddr`) of the current block that nothing reads before the
+    // local's storage ends here (`ST_STORAGE_DEAD`: no reference to it is live): from the last back to an
+    // instruction that may read the slot (a load through it or through an address that is no other
+    // slot's), copy from it or stop the program on a path that could read it while unwinding (a call, a
+    // panic, any other access of memory). Each becomes a constant nothing uses, which `tidy` drops.
+    fn dead_stores(self: &mut Self, a: Value) {
+        if a == VNONE || (a & (VPARAM | VFLAG)) != 0 || self.b.insts[a as usize].op != O_SLOTADDR {
+            return;
+        }
+        let s = self.b.insts[a as usize].a;
+        let bk = self.b.blocks[self.b.current() as usize];
+        let mut i = bk.start + bk.len;
+        // Each step goes back one instruction of the block.
+        while i > bk.start {
+            i -= 1;
+            let t = self.b.insts[i as usize];
+            if t.op == O_STORE {
+                if self.slot_of(t.a) == s && (t.aux & MEM_VOLATILE) == 0 {
+                    self.b.insts[i as usize] = Inst { op: O_ICONST, ty: T_I8, aux: 0, a: 0, b: 0, c: VNONE };
+                }
+                continue;
+            }
+            if t.op == O_LOAD {
+                let ls = self.slot_of(t.a);
+                if ls == s || ls == NONE {
+                    return;
+                }
+                continue;
+            }
+            if writes_memory(t) || is_terminator(t.op) || t.op == O_PANIC {
+                return;
+            }
+        }
+    }
+
+    // The slot address value `v` derives from through address arithmetic (at most 8 steps), NONE when none.
+    fn slot_of(self: &Self, v: Value) u32 {
+        let mut x = v;
+        // Each step goes back one `ptradd`.
+        for _ in 0..8 {
+            if x == VNONE || (x & (VPARAM | VFLAG)) != 0 {
+                return NONE;
+            }
+            let t = self.b.insts[x as usize];
+            if t.op == O_SLOTADDR {
+                return t.a;
+            }
+            if t.op != O_PTRADD {
+                return NONE;
+            }
+            x = t.a;
+        }
+        return NONE;
     }
 
     // A slot for type `ti`, addressed in the entry block.
@@ -3214,7 +3425,7 @@ extend Lower {
         let mut fm = b.module;
         let mut ft = last.ty;
         let fy = Lower::resolved(c, b.module, last.ty, &mut fm, &mut ft);
-        if fy.kind == TypeKind::TYPE_BUILTIN && fy.as_data.builtin == BuiltinType::BT_VOID {
+        if fy.kind == TypeKind::TYPE_BUILTIN && unsafe fy.as_data.builtin == BuiltinType::BT_VOID {
             return false;
         }
         let ownt = if pl.proj_len > 1 {
@@ -3291,6 +3502,51 @@ extend Lower {
         return ok;
     }
 
+    // The greatest discriminant of enum type `(m, t)`, the bound of its tag (a value of an enum is one of
+    // its variants); VNONE for another type, a C enum (whose values C may give) or a negative discriminant.
+    fn enum_bound(self: &mut Self, c: &cbe::CEmit, m: ModuleId, t: TypeId) u32 {
+        let mut rm = m;
+        let mut rt = t;
+        let y = Lower::resolved(c, m, t, &mut rm, &mut rt);
+        if y.kind == TypeKind::TYPE_ENUM {
+            return self.tag_bound(c, y.module, y.as_data.decl);
+        }
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return VNONE;
+        }
+        let it = *Lower::ast(c, rm).instance(y.as_data.inst);
+        if Lower::ast(c, it.module).at_const(it.decl).kind != NodeKind::NODE_ENUM {
+            return VNONE;
+        }
+        return self.tag_bound(c, it.module, it.decl);
+    }
+
+    // `enum_bound` of enum declaration `dn` of module `dm`.
+    fn tag_bound(self: &mut Self, c: &cbe::CEmit, dm: ModuleId, dn: NodeId) u32 {
+        let key = dm as u64 << 32 | dn as u64;
+        if let Some(v) = self.bcache.get(&key) {
+            return *v;
+        }
+        let a = Lower::ast(c, dm);
+        let ms = a.ext(dn).aggregate.members;
+        let pk = Lower::p(c);
+        let mut hi: i64 = -1;
+        if !unsafe a.ext(dn).aggregate.is_extern && pk.cir != null {
+            let it = pk.cir as *mut iri::Interp;
+            let mut cur: i64 = -1;
+            for k in 0..ms.len {
+                if !unsafe (*it).discr(dm, unsafe a.list(ms)[k as usize], cur, &mut cur) || cur < 0 {
+                    hi = -1;
+                    break;
+                }
+                hi = hi.max(cur);
+            }
+        }
+        let r = ast::pick(hi < 0 || hi > 0x7FFFFFFF, VNONE, hi as u32);
+        self.bcache.insert(key, r);
+        return r;
+    }
+
     // The address of the aligned sentinel standing for a zero-sized value of `(m, t)`.
     fn sentinel(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId) Value {
         let mut rm = m;
@@ -3336,7 +3592,7 @@ extend Lower {
             return self.fail("static-sym");
         }
         let ia = Lower::ast(c, item.module).at_const(item.node);
-        if ia.kind == NodeKind::NODE_CONST && ia.as_data.const_def.is_extern && !ia.as_data.const_def.is_static_mut {
+        if ia.kind == NodeKind::NODE_CONST && unsafe ia.as_data.const_def.is_extern && !unsafe ia.as_data.const_def.is_static_mut {
             // A C header's constant: its value as the header defines it, the object it names, else only the C
             // compiler knows it.
             let key = item.module as u64 << 32 | item.node as u64;
@@ -3368,7 +3624,7 @@ extend Lower {
             return true;
         }
         *addr = self.symaddr(&sym, SK_DATA);
-        if ia.kind == NodeKind::NODE_CONST && ia.as_data.const_def.is_extern {
+        if ia.kind == NodeKind::NODE_CONST && unsafe ia.as_data.const_def.is_extern {
             self.mark_ext(&sym);
         }
         return true;
@@ -3386,7 +3642,8 @@ extend Lower {
             return self.fail_v("read");
         }
         let zo = ast::pick(p.ti.mty == T_I8 && Lower::builtin(c, p.m, p.t) == BuiltinType::BT_BOOL, MEM_BOOL, 0u16);
-        return self.load_tagged(p.ti.mty, p.addr, 0, p.packed, self.tag_of(p.ti.mty, p.in_union) | zo);
+        let ub = ast::pick(zo == 0 && is_int(p.ti.mty), self.enum_bound(c, p.m, p.t), VNONE);
+        return self.load_bounded(p.ti.mty, p.addr, 0, p.packed, self.tag_of(p.ti.mty, p.in_union) | zo, ub);
     }
 
     fn write(self: &mut Self, p: PlaceRef, v: Value) bool {
@@ -4781,7 +5038,7 @@ extend Lower {
             let x = if val {
                 v
             } else {
-                self.load(ei.mty, addr, 0, false)
+                self.load_bounded(ei.mty, addr, 0, false, 0, self.enum_bound(c, rm, rt))
             };
             return self.int_to(x, ti.mty, Lower::signed(c, rm, rt));
         }
@@ -4803,7 +5060,7 @@ extend Lower {
             let vn = self.iconst(ti.mty, dn as u64);
             return self.inst(O_SELECT, ti.mty, 0, set, vs, vn);
         }
-        let tag = self.load(el.tag, addr, 0, false);
+        let tag = self.load_bounded(el.tag, addr, 0, false, 0, self.enum_bound(c, rm, rt));
         return self.int_to(tag, ti.mty, el.tag != T_I8);
     }
 
@@ -5938,7 +6195,7 @@ extend Lower {
             c.mg.pop_subs(self.binds.len());
             self.err = e0;
         }
-        if py.kind == TypeKind::TYPE_BUILTIN && py.as_data.builtin == BuiltinType::BT_F64 && Lower::builtin(
+        if py.kind == TypeKind::TYPE_BUILTIN && unsafe py.as_data.builtin == BuiltinType::BT_F64 && Lower::builtin(
             c,
             b.module,
             aty,
@@ -6246,6 +6503,9 @@ extend Lower {
     }
 
     fn stmt(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, s: irc::Statement) bool {
+        if s.kind == irc::ST_STORAGE_DEAD && s.a as usize < self.li.len() && self.li[s.a as usize].kind == LK_MEM && !self.dropped[s.a as usize] {
+            self.dead_stores(self.li[s.a as usize].addr);
+        }
         if s.kind != irc::ST_ASSIGN {
             return true;
         }
@@ -9419,7 +9679,7 @@ extend Lower {
         if n.kind != NodeKind::NODE_LITERAL {
             return self.fail("static-element");
         }
-        let tk = n.as_data.literal.token_type;
+        let tk = unsafe n.as_data.literal.token_type;
         if tk == tt::TokenType::StringLiteral || tk == tt::TokenType::ByteStringLiteral || tk == tt::TokenType::MatchertextLiteral {
             if ti.size != 2 * self.pkg.ptr_bytes {
                 return self.fail("static-string");

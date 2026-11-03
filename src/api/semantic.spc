@@ -131,7 +131,7 @@ extend<'s> Symbol<'s> {
             } else {
                 Function
             },
-            NODE_STRUCT => if self.node_ext().aggregate.is_union {
+            NODE_STRUCT => if unsafe self.node_ext().aggregate.is_union {
                 Union
             } else {
                 Struct
@@ -141,7 +141,7 @@ extend<'s> Symbol<'s> {
             NODE_FIELD => Field,
             NODE_INTERFACE => Interface,
             NODE_TYPE_ALIAS => TypeAlias,
-            NODE_CONST => if n.as_data.const_def.is_static_mut {
+            NODE_CONST => if unsafe n.as_data.const_def.is_static_mut {
                 Static
             } else {
                 Const

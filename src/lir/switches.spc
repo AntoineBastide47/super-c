@@ -56,12 +56,14 @@ fn lower_one(b: &mut Body, k: u32, ptr: u32) bool {
     };
     let n = t.aux as u32;
     let dflt = b.switch_edge(t, n);
+    // A case past the greatest value the switched one takes never runs.
+    let top = top_of(b, t.a, all, ptr, 2, true);
     // Per value its first case's edge; a case that leaves as the default does needs no test.
     let mut first = Map::<u64, u32>::new();
     let mut vals = Vector::<u64>::new();
     for q in 0..n {
         let v = b.words[(t.b + q) as usize] & all;
-        if first.get(&v).is_none() {
+        if v <= top && first.get(&v).is_none() {
             first.insert(v, b.switch_edge(t, q));
             vals.push(v);
         }
@@ -90,6 +92,7 @@ fn lower_one(b: &mut Body, k: u32, ptr: u32) bool {
         inl: inl_of(b, at),
         flags: bk.flags & BLOCK_RARE,
         dflt: dflt,
+        top: top,
     };
     // A dense switch the backends lower to a table stays: one of values (`switch_lookup`), or one of
     // branches for TABLE_MIN or more clusters.
@@ -114,7 +117,7 @@ fn lower_one(b: &mut Body, k: u32, ptr: u32) bool {
     if cls.len() == nv && nv <= LEAF && nv != 0 && !bit_testable(b, &cls, 0, cls.len()) {
         return false;
     }
-    let root = build(b, &sw, &cls, 0, cls.len(), 0, all);
+    let root = build(b, &sw, &cls, 0, cls.len(), 0, top);
     b.insts[at as usize] = Inst { op: O_JMP, ty: T_NONE, aux: 0, a: root, b: 0, c: 0 };
     return true;
 }
@@ -312,6 +315,29 @@ pub(package) fn switch_span(b: &Body, t: Inst, bits: u32, min: &mut u64, span: &
     return true;
 }
 
+/// The entries of a table from 0 (`switch_span` gave `min` 0 and `span`) for switch `t` of `b` (its value
+/// `bits` wide, pointers `ptr` bytes) that hold every value the switched one takes (`top_of`): an entry
+/// past `span` is the default's. 0 when that would double the entries or pass TABLE_MAX, or the values are
+/// unknown: the table then needs its bound test.
+pub(package) fn covering_span(b: &Body, t: Inst, bits: u32, ptr: u32, min: u64, span: u32) u32 {
+    if min != 0 {
+        return 0;
+    }
+    let all = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits as u64) - 1
+    };
+    let top = top_of(b, t.a, all, ptr, 2, false);
+    return if top < span as u64 {
+        span
+    } else if top < 2 * span as u64 && top < TABLE_MAX as u64 {
+        (top + 1) as u32
+    } else {
+        0
+    };
+}
+
 /// A switch's lookup table (`switch_lookup`): entry `k` for the case `min + k`, `span` entries; per
 /// parameter of the block the cases enter, a column of its constants at `off[q]` of `bytes`, aligned to
 /// `1 << align_log2`. `holes`: bit `k` set when entry `k` is no case and the default takes it.
@@ -496,7 +522,12 @@ fn table(b: &mut Body, sw: &Sw, vals: &Vector<u64>, first: &Map<u64, u32>, ptr: 
     } else {
         64
     };
-    let hi = vals[n - 1];
+    // A table up to the greatest value the switched one takes needs no range test.
+    let hi = if sw.top > vals[n - 1] && sw.top < 64 && (sw.top + 1) * w <= 64 {
+        sw.top
+    } else {
+        vals[n - 1]
+    };
     let base = if (hi + 1) * w <= 64 {
         0u64
     } else {
@@ -579,6 +610,46 @@ struct Sw {
     inl: u32,
     flags: u16,
     dflt: u32,
+    top: u64, // the greatest value `x` takes (`top_of`)
+}
+
+// The greatest value `v` of `b` takes by the loads' flags (`load_bound`) through `depth` zero extensions,
+// and truncations when `trunc`; `all`, its type's mask, when unknown. Without `trunc` the value's register
+// holds no bits past it.
+fn top_of(b: &Body, v: Value, all: u64, ptr: u32, depth: u32, trunc: bool) u64 {
+    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
+        return all;
+    }
+    let t = b.insts[v as usize];
+    let lb = load_bound(t, all);
+    if lb.is_some() {
+        return lb.unwrap();
+    }
+    if depth == 0 || t.op != O_ZEXT && (t.op != O_TRUNC || !trunc) {
+        return all;
+    }
+    let at = b.type_of(t.a);
+    if !is_int(at) || at == T_PTR || at == T_I128 {
+        return all;
+    }
+    let bits = type_bits(at, ptr);
+    let inner = top_of(
+        b,
+        t.a,
+        if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits as u64) - 1
+        },
+        ptr,
+        depth - 1,
+        trunc,
+    );
+    return if inner < all {
+        inner
+    } else {
+        all
+    };
 }
 
 // The inline mark of instruction `i` of `b`, 0 when the body has none.

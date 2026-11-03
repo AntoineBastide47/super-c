@@ -113,6 +113,9 @@ pub(package) enum AttrKind {
     // `@owned` on a raw pointer field: while a reference to the struct lives, the buffer the field
     // points to is reached only through the field (`lir::ir::Body.owned`).
     ATTR_OWNED,
+    // `@associative_math` on a function with a body: its float sums and products may reassociate
+    // (`lir::ir::Body.fmath`), as the build's `associative-math` allows for every function.
+    ATTR_ASSOCIATIVE_MATH,
 }
 
 /// `@unsafe` claims (`Attr.arg` bits): `safe` makes an extern function callable without `unsafe`;
@@ -1053,7 +1056,7 @@ pub(package) const fn intrinsic_value_name(name: str) bool {
 /// for any other.
 pub(package) const fn tail_value(n: &Node, id: NodeId) NodeId {
     if n.kind == NodeKind::NODE_EXPRESSION_STATEMENT {
-        return pick(n.as_data.single.semi, NODE_NONE, n.as_data.single.value);
+        return pick(unsafe n.as_data.single.semi, NODE_NONE, n.as_data.single.value);
     }
     if n.kind == NodeKind::NODE_BLOCK || n.kind == NodeKind::NODE_IF && n.as_data.if_stmt.else_branch != NODE_NONE {
         return id;
@@ -1097,7 +1100,7 @@ extend Node {
     /// A reference type node or a borrowed `dyn` (`&'a dyn I`, whose object holds only borrows that
     /// outlive `'a`): its lifetime is `indirect_type.lifetime`, its pointee `indirect_type.ty`.
     pub(package) const fn is_ref_type(self: &Self) bool {
-        return self.kind == NodeKind::NODE_REFERENCE_TYPE || self.kind == NodeKind::NODE_DYN_TYPE && self.as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_NONE;
+        return self.kind == NodeKind::NODE_REFERENCE_TYPE || self.kind == NodeKind::NODE_DYN_TYPE && unsafe self.as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_NONE;
     }
 
     /// A type node with a lifetime position in `indirect_type.lifetime`: a reference, a borrowed
@@ -1826,7 +1829,7 @@ pub(package) fn ext_blanket(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: No
 /// `m`) names as its whole target, read through the resolution (resolve-final), so a reader may ask
 /// before the extend is checked. -1 for any other target.
 pub(package) const fn ext_blanket_syn(ea: &Ast, m: ModuleId, ext: NodeId) i32 {
-    let ed = ea.ext(ext).extend_def;
+    let ed = unsafe ea.ext(ext).extend_def;
     let r = ea.resolution_def(ed.target_type);
     if r.module != m || r.node == NODE_NONE {
         return -1;
@@ -3262,7 +3265,7 @@ extend TypePool {
     /// canonical as `Ast::intern_sig_rec` makes it.
     pub(package) fn intern_sig_g(self: &mut Self, it: &TyInstance, qual: u8) TypeId {
         let r0 = *self.at(it.args[0] as usize);
-        if it.module == 1 && r0.kind == TypeKind::TYPE_BUILTIN && r0.as_data.builtin == BuiltinType::BT_VOID {
+        if it.module == 1 && r0.kind == TypeKind::TYPE_BUILTIN && unsafe r0.as_data.builtin == BuiltinType::BT_VOID {
             let mut ps = Vector::<TypeId>::with_capacity((rec_len(it) - 1) as usize);
             for i in 0..rec_len(it) - 1 {
                 let mut c = *it;
@@ -4408,7 +4411,7 @@ extend Ast {
             return TYPE_ERROR;
         }
         let r0 = *self.type_at(it.args[0]);
-        if it.module == 1 && r0.kind == TypeKind::TYPE_BUILTIN && r0.as_data.builtin == BuiltinType::BT_VOID {
+        if it.module == 1 && r0.kind == TypeKind::TYPE_BUILTIN && unsafe r0.as_data.builtin == BuiltinType::BT_VOID {
             let mut ps = Vector::<TypeId>::with_capacity((rec_len(it) - 1) as usize);
             for i in 1..rec_len(it) {
                 ps.push(self.rec_slot(it, i));
@@ -5290,7 +5293,7 @@ extend Ast {
     /// explicit discriminant, one variant without payload (`none`) and one with a single payload
     /// member (`some`). Never an `extern` enum.
     pub(package) const fn niche_shape(self: &Self, decl: NodeId, some: &mut NodeId, none: &mut NodeId) bool {
-        if self.ext(decl).aggregate.is_extern {
+        if unsafe self.ext(decl).aggregate.is_extern {
             return false;
         }
         let ms = self.ext(decl).aggregate.members;
@@ -5486,7 +5489,7 @@ extend Ast {
             let n = self.at_const(e);
             if casts && n.kind == NodeKind::NODE_CAST {
                 e = n.as_data.cast.expression;
-            } else if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == tt::TokenType::Move || n.as_data.unary.op == tt::TokenType::Unsafe) {
+            } else if n.kind == NodeKind::NODE_UNARY && (unsafe n.as_data.unary.op == tt::TokenType::Move || unsafe n.as_data.unary.op == tt::TokenType::Unsafe) {
                 e = n.as_data.unary.operand;
             } else {
                 return e;
@@ -5608,7 +5611,7 @@ extend Ast {
     /// the C enum, an `int`), with ENUM_INT_SIGNED when one is negative. 0 while an explicit
     /// discriminant is not checked yet.
     pub(package) const fn enum_int(self: &Self, decl: NodeId) u8 {
-        let agg = self.ext(decl).aggregate;
+        let agg = unsafe self.ext(decl).aggregate;
         if self.enum_explicit(decl) {
             return agg.discr_int;
         }
@@ -5701,7 +5704,7 @@ extend Ast {
             return false;
         }
         let c = self.at_const(d.callee);
-        if c.kind != NodeKind::NODE_MEMBER || c.as_data.member.path {
+        if c.kind != NodeKind::NODE_MEMBER || unsafe c.as_data.member.path {
             return false;
         }
         let msp = self.at_const(c.as_data.member.member).as_data.name.text;

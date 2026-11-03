@@ -2,12 +2,15 @@
 // form (kernels.c, archived by lib.sh into build/codegen/<arch>/libcodegen.a: run `sh bench/codegen/lib.sh`
 // first), timed on the same inputs in one binary. A row gives the median ns per call of each side, their
 // ratio and each side's spread (p95 - min); a kernel whose two sides give different results fails the run.
-// Inputs come in two modes: `fixed` (one value, predictable branches) and `random` (uniform values).
+// Inputs come in two modes: `fixed` (one value, predictable branches) and `random` (uniform values). lib.sh
+// builds no wasm32 library, so every item is gated to the other targets.
 import stdio;
 import std::testing::bench as bench;
 import std::iter as iter;
 
+@arch(!wasm32)
 const CALLS: usize = 4096; // kernel calls per round
+@arch(!wasm32)
 const ROUNDS: i32 = 30;
 
 @arch(aarch64)

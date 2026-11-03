@@ -503,11 +503,14 @@ extend Verifier {
         }
         if op == O_LOAD || op == O_STORE {
             let vt = ast::pick(op == O_LOAD, t.ty, tb);
-            if ta != T_PTR || vt == T_NONE || op == O_STORE && t.ty != T_NONE || (t.aux & ~(MEM_VOLATILE | MEM_TBAA | MEM_BOOL | 15)) != 0 {
+            if ta != T_PTR || vt == T_NONE || op == O_STORE && t.ty != T_NONE || (t.aux & ~(MEM_VOLATILE | MEM_TBAA | MEM_BOOL | MEM_RANGE | 15)) != 0 {
                 return self.fail_at(name, b, i, "a pointer address and a typed value");
             }
             if (t.aux & MEM_BOOL) != 0 && (op != O_LOAD || vt != T_I8) {
                 return self.fail_at(name, b, i, "a bool load of an i8");
+            }
+            if (t.aux & MEM_RANGE) != 0 && (op != O_LOAD || !is_int(vt) || vt == T_PTR || vt == T_I128) {
+                return self.fail_at(name, b, i, "a bounded load of an integer");
             }
             if tbaa(t) != 0 && tbaa(t) != tbaa_of(vt) as usize {
                 return self.fail_at(name, b, i, "a type tag of the accessed type");

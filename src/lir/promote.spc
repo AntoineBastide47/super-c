@@ -49,6 +49,22 @@ struct Acc {
     pub(package) kind: u8, // W_LOAD: an integer load that may span fields or read part of one (`wide_kind`);
     // W_CSTORE: a store of an integer constant, which may span fields; W_VSTORE: one of another integer,
     // which may span narrower stores
+    pub(package) bound: u32, // a load's `load_bound` (B_NONE: none), B_ANY for another access
+}
+
+// `Acc.bound` and `Fld.bound`: no bound; no load (a store, a copy), which bounds nothing.
+const B_NONE: u32 = 0xFFFFFFFF;
+const B_ANY: u32 = 0xFFFFFFFE;
+
+// The bound of a field two accesses `x` and `y` read alike: theirs when they agree.
+const fn join_bound(x: u32, y: u32) u32 {
+    return if x == B_ANY || x == y {
+        y
+    } else if y == B_ANY {
+        x
+    } else {
+        B_NONE
+    };
 }
 
 extend Acc as Copy {}
@@ -73,6 +89,9 @@ struct Fld {
     pub(package) off: i64,
     pub(package) ty: u8,
     pub(package) w: u8,
+    // The greatest value every load of the field reads (`join_bound`): the field's type's values bound it,
+    // so a load of a copy's source bytes into the field keeps it.
+    pub(package) bound: u32,
 }
 
 // `Acc.kind` and `Fld.w`: an integer load; one that spans other fields; a store of an integer constant;
@@ -618,6 +637,7 @@ extend Promoter {
                     size: 0,
                     ty: t.ty,
                     kind: wide_kind(t.ty),
+                    bound: load_bound(t, u64::MAX).unwrap_or(B_NONE) as u32,
                 },
             );
             return;
@@ -640,6 +660,7 @@ extend Promoter {
                     } else {
                         W_VSTORE
                     },
+                    bound: B_ANY,
                 },
             );
             return;
@@ -864,7 +885,7 @@ extend Promoter {
         for f in self.fat[s as usize]..self.fat[s as usize + 1] {
             let fl = self.flds[f as usize];
             if fl.off >= so && fl.off + size_of(fl.ty, self.ptr) <= so + n {
-                self.accs.push(Acc { slot: d, off: fl.off - so + dof, size: 0, ty: fl.ty, kind: 0 });
+                self.accs.push(Acc { slot: d, off: fl.off - so + dof, size: 0, ty: fl.ty, kind: 0, bound: B_ANY });
             }
         }
     }
@@ -912,11 +933,11 @@ extend Promoter {
         self.mark.extend_copy(&self.fat);
         self.tmp.truncate(0);
         for _ in 0..self.accs.len() {
-            self.tmp.push(Fld { off: 0, ty: T_NONE, w: 0 });
+            self.tmp.push(Fld { off: 0, ty: T_NONE, w: 0, bound: B_ANY });
         }
         for a in 0..self.accs.len() {
             let ac = self.accs[a];
-            self.tmp[self.mark[ac.slot as usize] as usize] = Fld { off: ac.off, ty: ac.ty, w: ac.kind };
+            self.tmp[self.mark[ac.slot as usize] as usize] = Fld { off: ac.off, ty: ac.ty, w: ac.kind, bound: ac.bound };
             self.mark[ac.slot as usize] += 1;
         }
         self.flds.truncate(0);
@@ -963,6 +984,12 @@ extend Promoter {
             let n = self.flds.len();
             // The same bytes as another type that converts to the field's: one field.
             if n > start && self.flds[n - 1].off == f.off && conv_op(f.ty, self.flds[n - 1].ty, self.ptr) != NO_CONV {
+                let same = f.ty == self.flds[n - 1].ty;
+                self.flds.index_mut(n - 1).bound = if same {
+                    join_bound(self.flds[n - 1].bound, f.bound)
+                } else {
+                    B_NONE
+                };
                 continue;
             }
             // A lane of a vector field is part of it; a vector over lane 0 takes its place.
@@ -971,6 +998,7 @@ extend Promoter {
             }
             if n > start && self.flds[n - 1].off == f.off && is_lane(f, self.flds[n - 1]) {
                 self.flds[n - 1] = f;
+                self.flds.index_mut(n - 1).bound = B_NONE;
                 continue;
             }
             if n > start && self.flds[n - 1].off + size_of(self.flds[n - 1].ty, self.ptr) > f.off {
@@ -1067,7 +1095,7 @@ extend Promoter {
                     } else {
                         T_I8
                     };
-                    self.gap.push(Fld { off: p, ty: ty, w: 0 });
+                    self.gap.push(Fld { off: p, ty: ty, w: 0, bound: B_ANY });
                     p += w;
                     if self.gap.len() > FIELDS_MAX as usize {
                         self.cand[s as usize] = false;
@@ -1172,7 +1200,7 @@ extend Promoter {
     const fn lane_at(self: &Self, s: u32, off: i64, ty: u8) (u32, u32) {
         for f in self.fat[s as usize]..self.fat[s as usize + 1] {
             let fl = self.flds[f as usize];
-            if is_lane(fl, Fld { off: off, ty: ty, w: 0 }) {
+            if is_lane(fl, Fld { off: off, ty: ty, w: 0, bound: B_ANY }) {
                 return (f, ((off - fl.off) / size_of(ty, self.ptr)) as u32);
             }
         }
@@ -1631,7 +1659,32 @@ extend Promoter {
                 v = self.value(b, sf);
             } else if t.op == O_MEMCPY {
                 v = (b.insts.len() + self.xins.len()) as u32;
-                self.xins.push((i, Inst { op: O_LOAD, ty: fl.ty, aux: 0, a: t.b, b: 0, c: rel as u32 }));
+                // The field's bound holds for the source's bytes too: the field's type's values (`Fld.bound`).
+                let bd = fl.bound;
+                let fx = if bd >= B_ANY || is_vec(fl.ty) || !is_int(fl.ty) || fl.ty == T_PTR || fl.ty == T_I128 {
+                    0u16
+                } else if bd == 1 && fl.ty == T_I8 {
+                    MEM_BOOL
+                } else {
+                    MEM_RANGE
+                };
+                self.xins.push(
+                    (
+                        i,
+                        Inst {
+                            op: O_LOAD,
+                            ty: fl.ty,
+                            aux: fx,
+                            a: t.b,
+                            b: if fx == MEM_RANGE {
+                                bd
+                            } else {
+                                0
+                            },
+                            c: rel as u32,
+                        }
+                    ),
+                );
             } else {
                 let k = fill_const(fl.ty, cp.byte, self.ptr);
                 if k.op != NO_CONST {
@@ -1816,6 +1869,7 @@ extend Promoter {
         o.owned.truncate(0);
         o.owned.extend_copy(&b.owned);
         o.bools = b.bools;
+        o.fmath = b.fmath;
         // A scope's root: its replacement, renumbered; one in no reached block goes.
         o.scopes.truncate(0);
         for x in 0..b.scopes.len() {

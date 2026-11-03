@@ -1171,7 +1171,7 @@ extend Mangler {
         }
         let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
         let mut v: u64 = 1;
-        if y.kind == TypeKind::TYPE_NEVER || y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_VOID {
+        if y.kind == TypeKind::TYPE_NEVER || y.kind == TypeKind::TYPE_BUILTIN && unsafe y.as_data.builtin == BuiltinType::BT_VOID {
             v = v | 4;
         } else if bound && y.kind != TypeKind::TYPE_BUILTIN && y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE && y.kind != TypeKind::TYPE_FUNCTION && y.kind != TypeKind::TYPE_DYN {
             let lo = self.layout_at(rm, rt, env);
@@ -1950,7 +1950,7 @@ extend Mangler {
         let a = self.p().module_ast_const(pm);
         let y = *unsafe (*a).type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
-            out.push_str(bt_name(y.as_data.builtin));
+            out.push_str(bt_name(unsafe y.as_data.builtin));
             return true;
         }
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
@@ -2622,7 +2622,7 @@ extend Mangler {
         }
         let y = *unsafe (*a).type_at(unsafe (*a).type_of(tn));
         if y.kind == TypeKind::TYPE_BUILTIN {
-            return DefId { module: self.p().core_module, node: self.p().builtin_decl(y.as_data.builtin) };
+            return DefId { module: self.p().core_module, node: self.p().builtin_decl(unsafe y.as_data.builtin) };
         }
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             return DefId { module: y.module, node: y.as_data.decl };
@@ -2669,7 +2669,7 @@ extend Mangler {
             it.decl = y.as_data.decl;
         } else if y.kind == TypeKind::TYPE_BUILTIN {
             it.module = self.p().core_module;
-            it.decl = self.p().builtin_decl(y.as_data.builtin);
+            it.decl = self.p().builtin_decl(unsafe y.as_data.builtin);
         } else if !unsafe (*self.p().module_ast_const(rm)).targs_of(rt, &mut it) {
             return;
         }
@@ -2927,7 +2927,7 @@ extend Mangler {
             return none;
         }
         let mut miss_key = if dd == NODE_NONE {
-            1u64 << 63 | y.as_data.builtin as u64
+            1u64 << 63 | (unsafe y.as_data.builtin) as u64
         } else {
             dm as u64 << 32 | dd as u64
         };
@@ -2941,7 +2941,7 @@ extend Mangler {
         if dd == NODE_NONE {
             // Builtin receivers: their extends usually live in the prelude, but any module
             // may extend a builtin (std::parallel's AtomicOps conformances do).
-            let bt = DefId { module: self.p().core_module, node: self.p().builtin_decl(y.as_data.builtin) };
+            let bt = DefId { module: self.p().core_module, node: self.p().builtin_decl(unsafe y.as_data.builtin) };
             let mut r = self.ext_first(bt);
             while r != EXT_END {
                 let row = *self.ext_rows.at(r as usize);
@@ -3056,7 +3056,7 @@ extend Mangler {
         } else if y.kind == TypeKind::TYPE_BUILTIN {
             // A builtin's conformances target its core declaration.
             it.module = self.p().core_module;
-            it.decl = self.p().builtin_decl(y.as_data.builtin);
+            it.decl = self.p().builtin_decl(unsafe y.as_data.builtin);
         } else if !unsafe (*self.p().module_ast_const(rm)).targs_of(rt, &mut it) {
             return NODE_NONE;
         }
@@ -3464,7 +3464,7 @@ extend Mangler {
         }
         let da = unsafe &*self.p().module_ast_const(dm);
         let n = da.at_const(dn);
-        if n.kind != NodeKind::NODE_STRUCT && n.kind != NodeKind::NODE_ENUM || n.kind == NodeKind::NODE_STRUCT && da.ext(
+        if n.kind != NodeKind::NODE_STRUCT && n.kind != NodeKind::NODE_ENUM || n.kind == NodeKind::NODE_STRUCT && unsafe da.ext(
             dn,
         ).aggregate.is_union {
             return false;
@@ -3473,7 +3473,7 @@ extend Mangler {
         if it.n != 0 {
             nb = self.push_generics(dm, da.ext(dn).aggregate.generics, rm, &it);
         }
-        let is_tuple = da.ext(dn).aggregate.is_tuple;
+        let is_tuple = unsafe da.ext(dn).aggregate.is_tuple;
         let ms = da.ext(dn).aggregate.members;
         let mut hit = false;
         for i in 0..ms.len {
@@ -3496,7 +3496,7 @@ extend Mangler {
     /// `->`): `payload.<some>.<member>`, then the box's pointer field for NK_BOX.
     pub(package) fn niche_path(self: &mut Self, m: ModuleId, some: NodeId, kind: u8, sep: str, out: &mut String) {
         let a = unsafe &*self.p().module_ast_const(m);
-        let vd = a.at_const(some).as_data.variant;
+        let vd = unsafe a.at_const(some).as_data.variant;
         out.push_str(sep);
         out.push_str("payload.");
         self.ident(m, a.at_const(vd.name).as_data.name.text, out);
@@ -3607,7 +3607,7 @@ extend Mangler {
         let a = self.p().module_ast_const(pm);
         let y = *unsafe (*a).type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
-            self.join_decl(bt_c_decl(y.as_data.builtin), decl, out);
+            self.join_decl(bt_c_decl(unsafe y.as_data.builtin), decl, out);
             return true;
         }
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {

@@ -370,11 +370,13 @@ pub(package) struct Classes<'a> {
 extend Classes as Copy {}
 
 /// `Classes.obj`: a data symbol the package defines (its number), a slot (OBJ_SLOT | its number), a slot
-/// no pointer but its accesses' addresses reaches (OBJ_PRIVATE | its number, `lir::opt`'s `privates`).
-/// Two accesses of different objects touch different bytes when neither object is unknown, or one is a
-/// private slot.
+/// no pointer but its accesses' addresses reaches (OBJ_PRIVATE | its number, `lir::opt`'s `privates`), the
+/// block an allocation returns (OBJ_FRESH | the call's instruction). Two accesses of different objects
+/// touch different bytes when neither object is unknown, or one is a private slot: an address stays in
+/// its object (`PTR_INBOUNDS`, the language's pointer rule).
 pub(package) const OBJ_SLOT: u32 = 0x40000000;
 pub(package) const OBJ_PRIVATE: u32 = 0x80000000;
+pub(package) const OBJ_FRESH: u32 = 0x20000000;
 
 /// The instructions a loop transform's copies may take (0: none): full unrolling (all its copies),
 /// partial unrolling (the unrolled loop's copies of the body), versioning on bounds checks and unswitching

@@ -1749,7 +1749,7 @@ pub(package) fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineSt
                 let py0 = *ca.type_at(pt);
                 let sy0 = *ca.type_at(sty);
                 let ptr_like = py0.kind == sy0.kind && (py0.kind == TypeKind::TYPE_REFERENCE || py0.kind == TypeKind::TYPE_POINTER) || py0.kind == TypeKind::TYPE_POINTER && sy0.kind == TypeKind::TYPE_REFERENCE;
-                let to_void = py0.kind == TypeKind::TYPE_POINTER && ca.type_at(py0.as_data.elem).kind == TypeKind::TYPE_BUILTIN && ca.type_at(
+                let to_void = py0.kind == TypeKind::TYPE_POINTER && ca.type_at(py0.as_data.elem).kind == TypeKind::TYPE_BUILTIN && unsafe ca.type_at(
                     py0.as_data.elem,
                 ).as_data.builtin == BuiltinType::BT_VOID;
                 if ptr_like && (py0.as_data.elem == sy0.as_data.elem || to_void) {
@@ -2473,7 +2473,7 @@ fn item_fixed(p: &loader::Package, d: DefId) bool {
     if n.kind == NodeKind::NODE_FUNCTION || n.kind == NodeKind::NODE_GENERIC_PARAM {
         return true;
     }
-    return n.kind == NodeKind::NODE_CONST && !n.as_data.const_def.is_static_mut && !n.as_data.const_def.is_extern;
+    return n.kind == NodeKind::NODE_CONST && !unsafe n.as_data.const_def.is_static_mut && !unsafe n.as_data.const_def.is_extern;
 }
 
 /// Whether local `x` of `b` can change while code that holds no pointer it was given runs: an

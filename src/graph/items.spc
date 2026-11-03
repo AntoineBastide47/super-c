@@ -184,7 +184,7 @@ pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>,
         let meta = *p.idx().items.at(it as usize);
         if meta.owner != loader::ITEM_NONE && !opened[(meta.owner - i0 as u32) as usize] {
             // The extend's header (generics, target, interface) precedes its first member.
-            let ed = a.ext(p.idx().items.at(meta.owner as usize).node).extend_def;
+            let ed = unsafe a.ext(p.idx().items.at(meta.owner as usize).node).extend_def;
             let mut he = ed.target_type;
             if ed.interface_type != NODE_NONE {
                 he = he.max(ed.interface_type);
@@ -623,7 +623,7 @@ fn builtin_names(p: &loader::Package, sch: &mut loader::ItemSched) {
         }
         let a = p.modules.at(m).ast.get_ref();
         let src = p.modules.at(m).source.as_str();
-        let ed = a.ext(it.node).extend_def;
+        let ed = unsafe a.ext(it.node).extend_def;
         if ed.target_type == NODE_NONE || a.at_const(ed.target_type).kind != NodeKind::NODE_TYPE_PATH {
             continue;
         }
@@ -1010,14 +1010,14 @@ fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize, a
             h = mix(h, p.sched.key[it.owner as usize]);
         }
     } else if nd.kind == NodeKind::NODE_STRUCT || nd.kind == NodeKind::NODE_ENUM {
-        let ag = a.ext(it.node).aggregate;
+        let ag = unsafe a.ext(it.node).aggregate;
         h = mix(h, ag.members.len);
         for k in 0..ag.members.len {
             let mem = unsafe a.list(ag.members)[k as usize];
             h = ty_hash(p, sps, c, it.module, a.type_of(mem), h, 0);
         }
     } else if nd.kind == NodeKind::NODE_EXTEND {
-        let ed = a.ext(it.node).extend_def;
+        let ed = unsafe a.ext(it.node).extend_def;
         h = node_hash(p, sps, c, m, ed.target_type, h, 0);
         h = node_hash(p, sps, c, m, ed.interface_type, h, 0);
     } else if nd.kind == NodeKind::NODE_INTERFACE {
@@ -1122,7 +1122,7 @@ fn ty_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: ModuleId,
         return h;
     }
     if k == TypeKind::TYPE_BUILTIN {
-        return mix(h, ty.as_data.builtin as u64);
+        return mix(h, (unsafe ty.as_data.builtin) as u64);
     }
     if k == TypeKind::TYPE_CONST {
         return mix(h, ty.as_data.value as u64);

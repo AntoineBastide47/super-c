@@ -123,7 +123,7 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
     let mut has_default = false;
     for i in 0..arms.len {
         let a = unsafe ast.list(arms)[i as usize];
-        let ad = ast.at_const(a).as_data.select_arm;
+        let ad = unsafe ast.at_const(a).as_data.select_arm;
         let asp = ast.at_const(a).span;
         if ad.kind == SelectArmKind::SELECT_TIMEOUT {
             timeout_body = ad.body;
@@ -157,7 +157,7 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
     while k > 0 {
         k = k - 1;
         let a = unsafe ast.list(arms)[k as usize];
-        let ad = ast.at_const(a).as_data.select_arm;
+        let ad = unsafe ast.at_const(a).as_data.select_arm;
         if ad.kind == SelectArmKind::SELECT_TIMEOUT || ad.kind == SelectArmKind::SELECT_DEFAULT {
             continue;
         }
@@ -212,7 +212,7 @@ fn lower_parallel_for(ast: &mut Ast, package: *const loader::Package, id: NodeId
     if f.node == NODE_NONE {
         return;
     }
-    let fr = ast.ext(id).for_stmt;
+    let fr = unsafe ast.ext(id).for_stmt;
     let span = ast.at_const(id).span;
     let kw = tok::Span::new(span.start, span.start + 8); // the `parallel` keyword's own text
     let call = call_shim(ast, f, kw, fr.iterable, fr.body);
@@ -303,7 +303,7 @@ fn block_of(ast: &mut Ast, statements: NodeList, span: tok::Span) NodeId {
 fn clone_place(ast: &mut Ast, id: NodeId) NodeId {
     let n = *ast.at_const(id);
     let copy = if n.kind == NodeKind::NODE_MEMBER {
-        let md = n.as_data.member;
+        let md = unsafe n.as_data.member;
         let obj = clone_place(ast, md.object);
         add_node(
             ast,

@@ -352,7 +352,7 @@ struct AttrDoc {
     pub(package) doc: str<'static>,
 }
 
-const ATTR_DOCS: [AttrDoc; 38] = [
+const ATTR_DOCS: [AttrDoc; 39] = [
     AttrDoc {
         name: "emit_macro",
         sig: "@emit_macro",
@@ -430,6 +430,11 @@ const ATTR_DOCS: [AttrDoc; 38] = [
         name: "tail_recurse",
         sig: "@tail_recurse",
         doc: "Every call of the function to itself must be a tail call that becomes a jump; one that cannot is an error.",
+    },
+    AttrDoc {
+        name: "associative_math",
+        sig: "@associative_math",
+        doc: "Lets the optimizer reassociate the function's float sums and products, so they vectorize; the rest of the build keeps its float rules.",
     },
     AttrDoc {
         name: "thread_local",
@@ -636,7 +641,7 @@ pub(package) fn reflect_hover(p: &loader::Package, mi: usize, off: u32) Option<S
     for i0 in 1..n {
         let i = unsafe (*a).nth_id(i0);
         let mn = unsafe (*a).at_const(i);
-        if mn.kind != NodeKind::NODE_MEMBER || mn.as_data.member.member != id || mn.as_data.member.path {
+        if mn.kind != NodeKind::NODE_MEMBER || mn.as_data.member.member != id || unsafe mn.as_data.member.path {
             continue;
         }
         let ob = mn.as_data.member.object;
@@ -890,7 +895,7 @@ fn member_at(a: *const Ast, off: u32) NodeId {
     for i0 in 1..n {
         let i = unsafe (*a).nth_id(i0);
         let nd = unsafe (*a).at_const(i);
-        if nd.kind != NodeKind::NODE_MEMBER || nd.as_data.member.path || !unsafe (*a).valid(i) || !unsafe (*a).valid(
+        if nd.kind != NodeKind::NODE_MEMBER || unsafe nd.as_data.member.path || !unsafe (*a).valid(i) || !unsafe (*a).valid(
             nd.as_data.member.object,
         ) {
             continue;
@@ -1075,7 +1080,7 @@ fn qualifier_tokens(p: &loader::Package, a: *const Ast, mi: usize, i: NodeId, ou
         for k in 0..unsafe (*a).at_const(i).as_data.type_path.head {
             segs.push(unsafe (*a).list(unsafe (*a).at_const(i).as_data.type_path.parts)[k as usize]);
         }
-    } else if n.kind == NodeKind::NODE_MEMBER && n.as_data.member.path {
+    } else if n.kind == NodeKind::NODE_MEMBER && unsafe n.as_data.member.path {
         let mut o = n.as_data.member.object;
         // Each step moves to the object of one `::`; the node count bounds the chain.
         for _ in 0..unsafe (*a).nnodes() {
@@ -1084,7 +1089,7 @@ fn qualifier_tokens(p: &loader::Package, a: *const Ast, mi: usize, i: NodeId, ou
                 segs.push(o);
                 break;
             }
-            if on.kind != NodeKind::NODE_MEMBER || !on.as_data.member.path || unsafe (*a).resolution_def(o).node != NODE_NONE {
+            if on.kind != NodeKind::NODE_MEMBER || !unsafe on.as_data.member.path || unsafe (*a).resolution_def(o).node != NODE_NONE {
                 return;
             }
             segs.push(on.as_data.member.member);
@@ -1119,7 +1124,7 @@ fn import_binds(p: &loader::Package, a: *const Ast, mi: usize, name: str) bool {
         if im.kind != NodeKind::NODE_IMPORT {
             continue;
         }
-        let d = im.as_data.import_decl;
+        let d = unsafe im.as_data.import_decl;
         let q = if d.alias != NODE_NONE {
             d.alias
         } else {
@@ -2547,7 +2552,7 @@ pub(package) fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32
         if nd.kind != NodeKind::NODE_LET {
             continue;
         }
-        let ls = nd.as_data.let_stmt;
+        let ls = unsafe nd.as_data.let_stmt;
         if ls.ty != NODE_NONE || ls.value == NODE_NONE || ls.name == NODE_NONE {
             continue;
         }

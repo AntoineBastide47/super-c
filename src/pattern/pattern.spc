@@ -423,7 +423,7 @@ extend<'a> PatCx<'a> {
         if t == TYPE_NONE || self.f.ty(t).kind != TypeKind::TYPE_BUILTIN {
             return false;
         }
-        let bt = self.f.ty(t).as_data.builtin;
+        let bt = unsafe self.f.ty(t).as_data.builtin;
         if bt == BuiltinType::BT_CHAR {
             *uns = true;
             *bits = 8;
@@ -445,7 +445,7 @@ extend<'a> PatCx<'a> {
     // A range pattern: valued as the inclusive interval of its bounds (an open end at its type's
     // extreme; an exclusive one below its end, empty below the type's smallest), else opaque.
     fn norm_range(self: &mut Self, pid: NodeId) u32 {
-        let rd = self.f.node(pid).as_data.pattern_range;
+        let rd = unsafe self.f.node(pid).as_data.pattern_range;
         let mut uns = false;
         let mut bits: u8 = 0;
         let mut lo: i64 = 0;
@@ -491,7 +491,7 @@ extend<'a> PatCx<'a> {
     fn norm_literal(self: &mut Self, pid: NodeId, out: &mut Vector<u32>) {
         let v = self.f.node(pid).as_data.single.value;
         if self.f.node(v).kind == NodeKind::NODE_LITERAL {
-            let ld = self.f.node(v).as_data.literal;
+            let ld = unsafe self.f.node(v).as_data.literal;
             if ld.token_type == tt::TokenType::True || ld.token_type == tt::TokenType::False {
                 let bv: i64 = if ld.token_type == tt::TokenType::True {
                     1
@@ -722,7 +722,7 @@ extend<'a> PatCx<'a> {
         if r.end <= r.start {
             return false;
         }
-        let tk = self.f.node(self.f.node(pid).as_data.single.value).as_data.literal.token_type;
+        let tk = unsafe self.f.node(self.f.node(pid).as_data.single.value).as_data.literal.token_type;
         let text = self.src.slice(r.start as usize, r.end as usize);
         return tk == tt::TokenType::StringLiteral && text.byte_at(0) == b'"' && text.find_byte(b'\\') < 0;
     }

@@ -582,7 +582,7 @@ extend<'t> AggregateSyntax<'t> {
     }
 
     pub fn is_union(self: &Self) bool {
-        return self.n.ast_ext().aggregate.is_union;
+        return unsafe self.n.ast_ext().aggregate.is_union;
     }
 }
 
@@ -607,7 +607,7 @@ extend<'t> ImportSyntax<'t> {
     }
 
     pub fn is_glob(self: &Self) bool {
-        return self.n.ast_node().as_data.import_decl.glob;
+        return unsafe self.n.ast_node().as_data.import_decl.glob;
     }
 }
 
@@ -654,7 +654,7 @@ extend<'t> LetSyntax<'t> {
     }
 
     pub fn is_mutable(self: &Self) bool {
-        return self.n.ast_node().as_data.let_stmt.is_mutable;
+        return unsafe self.n.ast_node().as_data.let_stmt.is_mutable;
     }
 }
 

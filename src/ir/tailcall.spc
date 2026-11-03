@@ -229,7 +229,7 @@ fn arg_kind(ow: &bfx::Owner, b: &ir::CoreBody, o: &ir::Operand, pt: TypeId) u8 {
     let y = *a.type_at(pt);
     let z = *a.type_at(o.ty);
     if y.kind == TypeKind::TYPE_BUILTIN && z.kind == TypeKind::TYPE_BUILTIN {
-        return pick(numeric(y.as_data.builtin) && numeric(z.as_data.builtin), AK_CAST, AK_NONE);
+        return pick(numeric(unsafe y.as_data.builtin) && numeric(unsafe z.as_data.builtin), AK_CAST, AK_NONE);
     }
     if y.fn_sig() && z.kind == TypeKind::TYPE_FUNCTION && !z.fn_sig() {
         return AK_SAME;

@@ -107,7 +107,7 @@ pub(package) fn bare_int(p: &loader::Package, dm: ModuleId, dn: NodeId) u8 {
 
 // Whether enum `dn` of module `dm` keeps the C shape: it is `extern`, or C code reads it.
 fn c_enum(p: &loader::Package, dm: ModuleId, dn: NodeId) bool {
-    return (unsafe &*p.module_ast_const(dm)).ext(dn).aggregate.is_extern || p.c_shaped.contains(
+    return unsafe (unsafe &*p.module_ast_const(dm)).ext(dn).aggregate.is_extern || p.c_shaped.contains(
         &(dm as u64 << 32 | dn as u64),
     );
 }
@@ -552,7 +552,7 @@ extend Svc {
     fn layout_raw(self: &mut Self, m: ModuleId, t: TypeId, env: *const LayoutEnv, depth: i32) Layout {
         let y = *self.a(m).type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
-            let b = y.as_data.builtin;
+            let b = unsafe y.as_data.builtin;
             if b == BuiltinType::BT_BOOL || b == BuiltinType::BT_CHAR || b == BuiltinType::BT_I8 || b == BuiltinType::BT_U8 {
                 return Layout { ok: true, size: 1, align: 1 };
             }
@@ -745,7 +745,7 @@ extend Svc {
     /// else its leading `@ordered` fields. The others follow by alignment, largest first.
     pub(package) fn ordered_prefix(self: &Self, dm: ModuleId, dn: NodeId) u32 {
         let ast = self.a(dm);
-        let agg = ast.ext(dn).aggregate;
+        let agg = unsafe ast.ext(dn).aggregate;
         if agg.is_union || agg.is_extern || self.attr(dm, dn, AttrKind::ATTR_PACKED) != null || self.attr(
             dm,
             dn,
@@ -855,8 +855,8 @@ extend Svc {
         if dkind != NodeKind::NODE_STRUCT {
             return Layout { ok: false };
         }
-        let is_union = ast.ext(dn).aggregate.is_union;
-        let is_tuple = ast.ext(dn).aggregate.is_tuple;
+        let is_union = unsafe ast.ext(dn).aggregate.is_union;
+        let is_tuple = unsafe ast.ext(dn).aggregate.is_tuple;
         let mut acc = LayoutAcc { is_union: is_union };
         acc.packed = self.attr(dm, dn, AttrKind::ATTR_PACKED) != null;
         let fs = ast.ext(dn).aggregate.members;
@@ -1022,7 +1022,7 @@ extend Svc {
     // `ms` from the returned base (NONE without a layout); the caller truncates.
     fn members(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv) u32 {
         self.offsets.insert(dm as u64 << 32 | dn as u64);
-        let agg = self.a(dm).ext(dn).aggregate;
+        let agg = unsafe self.a(dm).ext(dn).aggregate;
         let mut acc = LayoutAcc { is_union: agg.is_union };
         acc.packed = self.attr(dm, dn, AttrKind::ATTR_PACKED) != null;
         let base = self.ordered(

@@ -2259,6 +2259,27 @@ fn const_pointers_never_become_mut() {
     );
 }
 
+// A `bool` or an enum holds only its values: a union read of one needs `unsafe`, and an integer becomes an
+// enum only when it is one of its discriminants (consecutive ones: a range test; others: each value).
+@test
+fn bools_and_enums_hold_only_their_values() {
+    h::expect_err_msg(
+        "a union field read as a bool",
+        "union U { b: bool, n: u8 }\nfn main() i32 { let u = U { n: 2 }; return u.b as i32; }\n",
+        "reading a union field of type 'bool' requires an 'unsafe' block",
+    );
+    h::expect_ok(
+        "the read inside unsafe",
+        "union U { b: bool, n: u8 }\nfn main() i32 { let u = U { n: 1 }; return unsafe (u.b) as i32 - 1; }\n",
+    );
+    h::expect_runs(
+        "an integer that is no discriminant fails",
+        "enum Color { Red, Green, Blue }\nenum Gap { A = 1, B = 5 }\nfn main(args: Vector<str>) i32 {\n    let n = args.len() as i32;\n    let g = (n * 5) as Gap;\n    let c = (n + 1) as Color;\n    return switch c { Red => 0, Green => 1, Blue => 2 } + switch g { A => 10, B => 20 } - 22;\n}\n",
+        ["", "x"],
+        ["", "assertion failed"],
+    );
+}
+
 @test
 fn dyn_t() {
     h::expect_ok(

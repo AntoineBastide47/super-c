@@ -1511,7 +1511,7 @@ extend Facts {
         if n.kind == NodeKind::NODE_FUNCTION {
             return false;
         }
-        return n.kind != NodeKind::NODE_CONST || n.as_data.const_def.is_static_mut || n.as_data.const_def.is_extern;
+        return n.kind != NodeKind::NODE_CONST || unsafe n.as_data.const_def.is_static_mut || unsafe n.as_data.const_def.is_extern;
     }
 
     fn expose(self: &mut Self, da: &Ast, b: &ir::CoreBody, l: u32) {
@@ -1539,7 +1539,7 @@ extend Facts {
         if y.kind != TypeKind::TYPE_BUILTIN {
             return false;
         }
-        let bt = y.as_data.builtin;
+        let bt = unsafe y.as_data.builtin;
         *sg = bt == BuiltinType::BT_I8 || bt == BuiltinType::BT_I16 || bt == BuiltinType::BT_I32 || bt == BuiltinType::BT_I64 || bt == BuiltinType::BT_ISIZE;
         *w = (switch bt {
             BT_I8 | BT_U8 => 8,
@@ -1661,7 +1661,7 @@ extend Facts {
             return false;
         }
         let y = *(unsafe &*(&*self.pkg).module_ast_const(b.module)).type_at(t);
-        return y.kind == TypeKind::TYPE_BUILTIN && bt_int_width(y.as_data.builtin, false) != 0;
+        return y.kind == TypeKind::TYPE_BUILTIN && bt_int_width(unsafe y.as_data.builtin, false) != 0;
     }
 
     /// `dest = copy pl` (written through `dpl`) of an integer field: a copy of an earlier read of the
@@ -3044,13 +3044,13 @@ extend Facts {
         let da = unsafe &*(&*self.pkg).module_ast_const(b.module);
         let y1 = *da.type_at(op.ty);
         let y2 = *da.type_at(rv.target);
-        if y1.kind != TypeKind::TYPE_BUILTIN || y2.kind != TypeKind::TYPE_BUILTIN || !bt_is_unsigned(y1.as_data.builtin) || !bt_is_unsigned(
-            y2.as_data.builtin,
-        ) {
+        if y1.kind != TypeKind::TYPE_BUILTIN || y2.kind != TypeKind::TYPE_BUILTIN || !bt_is_unsigned(
+            unsafe y1.as_data.builtin,
+        ) || !bt_is_unsigned(unsafe y2.as_data.builtin) {
             return false;
         }
-        let w1 = bt_int_width(y1.as_data.builtin, self.pw == 32);
-        return w1 != 0 && w1 <= bt_int_width(y2.as_data.builtin, self.pw == 32);
+        let w1 = bt_int_width(unsafe y1.as_data.builtin, self.pw == 32);
+        return w1 != 0 && w1 <= bt_int_width(unsafe y2.as_data.builtin, self.pw == 32);
     }
 
     // A numeric cast of a whole-local reference or pointer to a reference or pointer type.

@@ -981,7 +981,7 @@ extend tc::TypeChecker {
         let a = self.cur_ast();
         let e = unsafe (*a).peel(e0, true);
         let n = unsafe (*a).at_const(e);
-        if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == TokenType::Ampersand {
+        if n.kind == NodeKind::NODE_UNARY && unsafe n.as_data.unary.op == TokenType::Ampersand {
             return self.place_escape(n.as_data.unary.operand, depth);
         }
         if n.kind == NodeKind::NODE_IDENTIFIER && depth < BORROW_ESCAPE_MAX_DEPTH {
@@ -1487,7 +1487,7 @@ extend tc::TypeChecker {
         let a = self.cur_ast();
         let e = unsafe (*a).peel(arg0, true);
         let n = unsafe (*a).at_const(e);
-        if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == TokenType::Ampersand {
+        if n.kind == NodeKind::NODE_UNARY && unsafe n.as_data.unary.op == TokenType::Ampersand {
             return self.tc_place_base_binding(n.as_data.unary.operand);
         }
         return self.tc_place_base_binding(e);
@@ -1818,7 +1818,7 @@ extend tc::TypeChecker {
         let mut e = e0;
         loop {
             let n = unsafe (*a).at_const(e);
-            if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == TokenType::Move || n.as_data.unary.op == TokenType::Unsafe) {
+            if n.kind == NodeKind::NODE_UNARY && (unsafe n.as_data.unary.op == TokenType::Move || unsafe n.as_data.unary.op == TokenType::Unsafe) {
                 e = n.as_data.unary.operand;
             } else {
                 return n.kind == NodeKind::NODE_CLOSURE;
@@ -1902,7 +1902,7 @@ extend tc::TypeChecker {
                 return pick(d.module == self.cur_module(), d.node, NODE_NONE);
             },
             NODE_MEMBER => {
-                if pn.as_data.member.path {
+                if unsafe pn.as_data.member.path {
                     return NODE_NONE;
                 }
                 return self.tc_place_base_binding(pn.as_data.member.object);
@@ -1911,7 +1911,7 @@ extend tc::TypeChecker {
                 return self.tc_place_base_binding(pn.as_data.index.object);
             },
             NODE_UNARY => {
-                if pn.as_data.unary.op == TokenType::Star {
+                if unsafe pn.as_data.unary.op == TokenType::Star {
                     return self.tc_place_base_binding(pn.as_data.unary.operand);
                 }
                 return NODE_NONE;
@@ -2355,7 +2355,7 @@ extend tc::TypeChecker {
             // Reject a second one (or one already made on some earlier path), and one inside a loop
             // the binding does not belong to (it would re-run against the same binding; use `mut`).
             let ln = unsafe (*a).at_const(ld.node);
-            if ln.kind == NodeKind::NODE_LET && !ln.as_data.let_stmt.is_mutable {
+            if ln.kind == NodeKind::NODE_LET && !unsafe ln.as_data.let_stmt.is_mutable {
                 let sp = unsafe (*a).at_const(bd.left).span;
                 if self.tc_is_late(ld.node) {
                     self.errors.emit_span(
@@ -2885,7 +2885,7 @@ extend tc::TypeChecker {
         }
         let e = unsafe (*a).peel(unsafe (*a).list(args)[(sidx as u32 - skip) as usize], true);
         let n = unsafe (*a).at_const(e);
-        if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == TokenType::Ampersand {
+        if n.kind == NodeKind::NODE_UNARY && unsafe n.as_data.unary.op == TokenType::Ampersand {
             return unsafe (*a).at_const(unsafe (*a).peel(n.as_data.unary.operand, true)).kind == NodeKind::NODE_IDENTIFIER;
         }
         return n.kind == NodeKind::NODE_IDENTIFIER;
@@ -3275,9 +3275,9 @@ extend tc::TypeChecker {
         for _ in 0..unsafe (*a).nnodes() {
             let pn = unsafe (*a).at_const(place);
             let mut base = NODE_NONE;
-            if pn.kind == NodeKind::NODE_UNARY && pn.as_data.unary.op == TokenType::Star {
+            if pn.kind == NodeKind::NODE_UNARY && unsafe pn.as_data.unary.op == TokenType::Star {
                 base = pn.as_data.unary.operand;
-            } else if pn.kind == NodeKind::NODE_MEMBER && !pn.as_data.member.path {
+            } else if pn.kind == NodeKind::NODE_MEMBER && !unsafe pn.as_data.member.path {
                 base = pn.as_data.member.object;
             } else if pn.kind == NodeKind::NODE_INDEX {
                 base = pn.as_data.index.object;

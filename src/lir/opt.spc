@@ -1053,7 +1053,7 @@ extend Opt {
             b,
             pk.ptr_bytes,
             pk.vector.min(64),
-            (pk.fmath & FM_ASSOC) != 0,
+            ((pk.fmath | b.fmath) & FM_ASSOC) != 0,
             pk.hfa_regs,
             &self.wgt,
             &self.blk_of,
@@ -1266,7 +1266,7 @@ extend Opt {
         let any = self.unr.run(
             b,
             pk.ptr_bytes,
-            pk.fmath,
+            pk.fmath | b.fmath,
             pk.vector,
             bu,
             &self.inner,
@@ -1935,7 +1935,7 @@ extend Opt {
     // thread and the address from before it is its copy's.
     fn static_place(self: &Self, pk: &Package, i: u32) bool {
         let o = self.aobj[i as usize];
-        if o == NONE || (o & (lu::OBJ_SLOT | lu::OBJ_PRIVATE)) != 0 {
+        if o == NONE || (o & (lu::OBJ_SLOT | lu::OBJ_PRIVATE | lu::OBJ_FRESH)) != 0 {
             return false;
         }
         let y = pk.syms[o as usize];
@@ -4452,8 +4452,9 @@ extend Opt {
     }
 
     // The greatest unsigned value `v` takes here: a constant's, a bound the branches in scope set
-    // (`order_facts`), or one an `and` with a constant, a right shift, a remainder or quotient by a
-    // constant or a zero extension keeps, `depth` instructions deep; None when unknown.
+    // (`order_facts`), a `bool` or bounded load's (`load_bound`), or one an `and` with a constant, a right
+    // shift, a remainder or quotient by a constant or a zero extension keeps, `depth` instructions deep;
+    // None when unknown.
     fn ubound(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) Option<u64> {
         if v == VNONE || (v & VFLAG) != 0 {
             return None;
@@ -4474,12 +4475,16 @@ extend Opt {
                 Some(c - 1)
             };
         }
-        if (v & VPARAM) != 0 || depth == 0 {
+        if (v & VPARAM) != 0 {
             return best;
         }
         let t = b.insts[v as usize];
         let m = width_mask(t.ty, pk.ptr_bytes);
-        let mut r = Option::<u64>::None;
+        let mut r = load_bound(t, m);
+        if depth == 0 && r.is_none() {
+            return best;
+        }
+        // A load (`r` set) is none of these.
         if t.op == O_AND {
             let x = self.ubound(pk, b, t.a, depth - 1);
             let y = self.ubound(pk, b, t.b, depth - 1);
@@ -4551,7 +4556,8 @@ extend Opt {
 
     // Instruction `i`, which the bounds in scope (`ubound`) decide: a remainder or quotient by a constant
     // above its dividend's bound (the dividend, 0), a right shift that leaves nothing, an `and` with a
-    // low mask that covers its operand's bound, an unsigned comparison with a constant past the bound.
+    // low mask that covers its operand's bound, an integer comparison with a constant that every value
+    // up to the bound answers alike (a signed one when the bound leaves the sign bit clear).
     // Its replacement value (VNONE: none); a constant result rewrites `i` in place.
     fn range_fold(self: &mut Self, pk: &Package, b: &mut Body, i: u32) Value {
         let t = b.insts[i as usize];
@@ -4586,14 +4592,51 @@ extend Opt {
             }
             return VNONE;
         }
-        if t.op == O_ICMP && (t.aux == C_ULT || t.aux == C_UGE) {
+        if t.op == O_ICMP && t.aux <= C_UGE {
             let k = const_of(b, t.b);
-            if k.is_none() || is_vec(b.type_of(t.a)) || b.type_of(t.a) == T_I128 {
+            let at = b.type_of(t.a);
+            if k.is_none() || is_vec(at) || at == T_I128 {
                 return VNONE;
             }
             let x = self.ubound(pk, b, t.a, UB_DEPTH);
-            if x.is_some() && x.unwrap() < (k.unwrap() & width_mask(b.type_of(t.a), pk.ptr_bytes)) {
-                b.insts[i as usize] = iconst(t.ty, (t.aux == C_ULT) as u64);
+            if x.is_none() {
+                return VNONE;
+            }
+            let m = width_mask(at, pk.ptr_bytes);
+            let hi = x.unwrap();
+            let kv = k.unwrap() & m;
+            let mut c = t.aux;
+            if c >= C_SLT && c <= C_SGE {
+                // Values 0 to `hi` without the sign bit compare signed as unsigned, above a negative constant.
+                if hi > m >> 1 {
+                    return VNONE;
+                }
+                if kv > m >> 1 {
+                    b.insts[i as usize] = iconst(t.ty, (c == C_SGT || c == C_SGE) as u64);
+                    return VNONE;
+                }
+                c += C_ULT - C_SLT;
+            }
+            // Decided when every value 0 to `hi` gives one answer.
+            let r: Option<u64> = if c <= C_NE {
+                if kv > hi {
+                    Some((c == C_NE) as u64)
+                } else {
+                    None
+                }
+            } else if c == C_ULT || c == C_UGE {
+                if hi < kv {
+                    Some((c == C_ULT) as u64)
+                } else {
+                    None
+                }
+            } else if hi <= kv {
+                Some((c == C_ULE) as u64)
+            } else {
+                None
+            };
+            if r.is_some() {
+                b.insts[i as usize] = iconst(t.ty, r.unwrap());
             }
         }
         return VNONE;
@@ -6182,8 +6225,10 @@ extend Opt {
                     );
                     self.unbiased.insert(t.a, q);
                 }
+                // `q` may leave the object: no longer in bounds of its base.
                 t.a = q;
                 t.c = off as u32;
+                t.aux &= ~PTR_INBOUNDS;
             }
         }
         b.insts[i as usize] = t;
@@ -6410,7 +6455,7 @@ extend Opt {
                 return true;
             }
         } else if pure_op(t.op) && !tls_addr(pk, b, t) {
-            if pk.fmath != 0 && t.op >= O_FADD && t.op <= O_FDIV && !is_vec(t.ty) {
+            if (pk.fmath | b.fmath) != 0 && t.op >= O_FADD && t.op <= O_FDIV && !is_vec(t.ty) {
                 let r = self.fast_math(pk, b, k, i);
                 if r != VNONE {
                     self.repl[i as usize] = r;
@@ -6607,7 +6652,8 @@ extend Opt {
                 Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux & PTR_SCALE, a: t.a, b: y, c: 0 },
                 false,
             );
-            b.insts[i as usize] = Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux, a: q, b: x, c: t.c };
+            // `q` may leave the object: the address is no longer in bounds of its base.
+            b.insts[i as usize] = Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux & ~PTR_INBOUNDS, a: q, b: x, c: t.c };
             return;
         }
     }
@@ -9052,7 +9098,7 @@ extend Opt {
     // reciprocal, two constants of one operation chain as one (reassociation), a sum of a product as a
     // fused multiply-add (contraction). The replacement, or VNONE.
     fn fast_math(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) Value {
-        let fm = pk.fmath;
+        let fm = pk.fmath | b.fmath;
         let mut t = b.insts[i as usize];
         let op = t.op;
         // A commutative operation takes a constant second.
@@ -9090,8 +9136,13 @@ extend Opt {
             // (x op c1) op c2: x op (c1 op c2).
             if (op == O_FADD || op == O_FMUL) && (fm & FM_ASSOC) != 0 && (t.a & (VPARAM | VFLAG)) == 0 {
                 let x = b.insts[t.a as usize];
-                let c1 = float_const(b, x.b);
-                if x.op == op && x.ty == t.ty && c1.is_some() {
+                // Only an operation of two values has a value second operand (a call's is its signature).
+                let c1 = if x.op == op && x.ty == t.ty {
+                    float_const(b, x.b)
+                } else {
+                    Option::<u64>::None
+                };
+                if c1.is_some() {
                     let r = le::float_op(op, t.ty, c1.unwrap(), c);
                     if regular(t.ty, r) || r == 0 {
                         t.a = x.a;
@@ -9432,8 +9483,9 @@ extend Opt {
     }
 
     // The object address `a` of `b` points into (`lu::Classes.obj`): a slot (`privates`), private or not,
-    // or a data symbol the package defines (not a C library's, which another name may alias), through at
-    // most FRAME_DEPTH steps of address arithmetic; NONE for any other.
+    // a data symbol the package defines (not a C library's, which another name may alias), or the block an
+    // allocation returns (`ALLOC_FRESH`), through at most FRAME_DEPTH steps of address arithmetic; NONE for
+    // any other.
     fn object(self: &Self, pk: &Package, b: &Body, a: Value) u32 {
         if (a & (VPARAM | VFLAG)) != 0 {
             return NONE;
@@ -9457,6 +9509,9 @@ extend Opt {
                 } else {
                     NONE
                 };
+            }
+            if call_alloc(pk, b, t) == ALLOC_FRESH && t.ty == T_PTR && v < lu::OBJ_FRESH {
+                return v | lu::OBJ_FRESH;
             }
             if t.op != O_PTRADD || (t.a & (VPARAM | VFLAG)) != 0 {
                 return NONE;
@@ -12742,6 +12797,11 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             b.insts[i as usize] = f.unwrap();
             return VNONE;
         }
+        let g = in_bounds_test(b, t);
+        if g.is_some() {
+            b.insts[i as usize] = g.unwrap();
+            return VNONE;
+        }
     }
     if is_int(t.ty) && t.ty != T_PTR && (t.op == O_TRUNC || t.op == O_LSHR || t.op == O_SHL || t.op == O_AND || t.op == O_OR) {
         let r = demanded_fold(b, i, ptr);
@@ -12927,8 +12987,10 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
                 };
                 let off = (t.c as i32) as i64 + d * scale_of(t) as i64;
                 if kv > -0x80000000 && kv < 0x80000000 && off >= -0x80000000 && off <= 0x7FFFFFFF {
+                    // The index alone times the scale may overflow: the same address, not in bounds.
                     t.b = x.a;
                     t.c = off as u32;
+                    t.aux &= ~PTR_INBOUNDS;
                 }
             }
             // A pointer-wide index times a constant (a product, or a left shift below the width): the
@@ -12957,6 +13019,10 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         if t.b == VNONE && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_PTRADD && b.insts[t.a as usize].b == VNONE {
             let off = (t.c as i32) as i64 + (b.insts[t.a as usize].c as i32) as i64;
             if off >= -0x80000000 && off <= 0x7FFFFFFF {
+                // In bounds of the inner base when both steps are.
+                if (b.insts[t.a as usize].aux & PTR_INBOUNDS) == 0 {
+                    t.aux &= ~PTR_INBOUNDS;
+                }
                 t.a = b.insts[t.a as usize].a;
                 t.c = off as u32;
             }
@@ -13574,6 +13640,66 @@ fn order_test(b: &Body, t: Inst, ptr: u32) Option<Inst> {
     return None;
 }
 
+// Address `v` of `b` as base, index (VNONE: none), scale and offset: a `ptradd` in bounds of its base
+// (PTR_INBOUNDS), else `v` itself at offset 0.
+fn in_bounds_parts(b: &Body, v: Value) (Value, Value, u32, i64) {
+    if (v & (VPARAM | VFLAG)) == 0 && v != VNONE {
+        let t = b.insts[v as usize];
+        if t.op == O_PTRADD && (t.aux & PTR_INBOUNDS) != 0 {
+            let s = if t.b == VNONE {
+                0u32
+            } else {
+                scale_of(t)
+            };
+            return (t.a, t.b, s, (t.c as i32) as i64);
+        }
+    }
+    return (v, VNONE, 0, 0);
+}
+
+// Comparison `t` of two addresses in bounds of one base (PTR_INBOUNDS, `in_bounds_parts`) as their offsets
+// compare: both in one object of at most `isize::MAX` bytes, so `base + i * s + c` orders as `i * s + c`
+// signed, which no product overflows (LLVM's `inbounds` compares). Of constant offsets alone, or of one
+// index, a constant; of two indices of one type, scale and offset, the indices' comparison (signed for an
+// order: `p + i < p + n` is `i <s n`). None for another comparison.
+fn in_bounds_test(b: &Body, t: Inst) Option<Inst> {
+    if b.type_of(t.a) != T_PTR || t.aux > C_UGE || t.aux >= C_SLT && t.aux <= C_SGE {
+        return None;
+    }
+    let (p, i, s, c) = in_bounds_parts(b, t.a);
+    let (q, n, r, d) = in_bounds_parts(b, t.b);
+    if p != q || p == t.a && q == t.b {
+        return None;
+    }
+    // The signed condition of an unsigned one; `==` and `!=` stay.
+    let sc = if t.aux <= C_NE {
+        t.aux
+    } else {
+        t.aux - (C_ULT - C_SLT)
+    };
+    if i == n {
+        // Equal products: the offsets decide.
+        let hold = if sc == C_EQ {
+            c == d
+        } else if sc == C_NE {
+            c != d
+        } else if sc == C_SLT {
+            c < d
+        } else if sc == C_SLE {
+            c <= d
+        } else if sc == C_SGT {
+            c > d
+        } else {
+            c >= d
+        };
+        return Some(iconst(t.ty, hold as u64));
+    }
+    if i == VNONE || n == VNONE || s != r || c != d || b.type_of(i) != b.type_of(n) {
+        return None;
+    }
+    return Some(Inst { op: O_ICMP, ty: t.ty, aux: sc, a: i, b: n, c: VNONE });
+}
+
 // `zero_bits` follows at most ZB_DEPTH operations.
 const ZB_DEPTH: u32 = 6;
 
@@ -13603,8 +13729,18 @@ fn zero_bits(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
     if t.op == O_ICONST {
         return ~const_of(b, v).unwrap() & m;
     }
-    if t.op == O_ICMP || t.op == O_FCMP || t.op == O_LOAD && (t.aux & MEM_BOOL) != 0 {
+    if t.op == O_ICMP || t.op == O_FCMP {
         return ~1u64 & m;
+    }
+    let lb = load_bound(t, m);
+    if lb.is_some() {
+        // The bits above the bound's highest.
+        let x = lb.unwrap();
+        return if x == 0 {
+            m
+        } else {
+            ~(u64::MAX >> x.leading_zeros() as u64) & m
+        };
     }
     if t.op >= O_CLZ && t.op <= O_POPCNT {
         // A count is at most the width: below twice the width.

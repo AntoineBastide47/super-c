@@ -315,7 +315,8 @@ extend Inliner {
                 let tiny = e.blocks.len() == 1 && e.insts.len() <= 3;
                 // A `@cold` callee stays a call unless it is no bigger than one: its callers' code stays small.
                 let cold = pk.syms[c.syms[t.a as usize] as usize].cold && !small(e, SHRINK);
-                if !warm && !forwarder(e) || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || !small(
+                // A float rewrite the caller allows and the callee does not would apply to the copy.
+                if (c.fmath & ~e.fmath) != 0 || !warm && !forwarder(e) || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || !small(
                     e,
                     bu,
                 ) && !folds_small(e, c, t, bu, &mut self.seen, &mut self.work, &mut self.edges) {
@@ -372,6 +373,7 @@ extend Inliner {
         o.refs.extend_copy(&c.refs);
         o.owned.extend_copy(&c.owned);
         o.bools = c.bools;
+        o.fmath = c.fmath;
         for x in 0..c.scopes.len() {
             let sc = c.scopes[x];
             o.scopes.push(Scope { site: sc.site, group: sc.group, root: self.cval(sc.root) });

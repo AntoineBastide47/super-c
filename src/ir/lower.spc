@@ -554,9 +554,9 @@ extend Lowerer {
         let mut expr = expr0;
         loop {
             let n = self.f.node(expr);
-            if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == tt::TokenType::Move || n.as_data.unary.op == tt::TokenType::Unsafe) {
+            if n.kind == NodeKind::NODE_UNARY && (unsafe n.as_data.unary.op == tt::TokenType::Move || unsafe n.as_data.unary.op == tt::TokenType::Unsafe) {
                 expr = n.as_data.unary.operand;
-            } else if n.kind == NodeKind::NODE_MEMBER && !n.as_data.member.path {
+            } else if n.kind == NodeKind::NODE_MEMBER && !unsafe n.as_data.member.path {
                 expr = n.as_data.member.object;
             } else if n.kind == NodeKind::NODE_INDEX {
                 expr = n.as_data.index.object;
@@ -875,9 +875,9 @@ extend Lowerer {
             if n.kind == NodeKind::NODE_IDENTIFIER {
                 return self.f.res(c);
             }
-            if n.kind == NodeKind::NODE_MEMBER && !n.as_data.member.path {
+            if n.kind == NodeKind::NODE_MEMBER && !unsafe n.as_data.member.path {
                 c = n.as_data.member.object;
-            } else if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == tt::TokenType::Star {
+            } else if n.kind == NodeKind::NODE_UNARY && unsafe n.as_data.unary.op == tt::TokenType::Star {
                 c = n.as_data.unary.operand;
             } else if n.kind == NodeKind::NODE_INDEX {
                 c = n.as_data.index.object;
@@ -902,7 +902,7 @@ extend Lowerer {
             return false;
         }
         if k == NodeKind::NODE_MEMBER {
-            return !n.as_data.member.path && self.may_write(n.as_data.member.object, r, depth + 1);
+            return !unsafe n.as_data.member.path && self.may_write(n.as_data.member.object, r, depth + 1);
         }
         if k == NodeKind::NODE_CAST {
             return self.may_write(n.as_data.cast.expression, r, depth + 1);
@@ -915,7 +915,7 @@ extend Lowerer {
             );
         }
         if k == NodeKind::NODE_UNARY {
-            let u = n.as_data.unary;
+            let u = unsafe n.as_data.unary;
             if u.op == tt::TokenType::Ampersand && u.qualifier == TypeQualifier::TYPE_QUAL_MUT && self.same_def(
                 self.root_binding(u.operand),
                 r,
@@ -932,7 +932,7 @@ extend Lowerer {
             );
         }
         if k == NodeKind::NODE_ASSIGNMENT {
-            let bd = n.as_data.binary;
+            let bd = unsafe n.as_data.binary;
             return self.same_def(self.root_binding(bd.left), r) || self.may_write(bd.left, r, depth + 1) || self.may_write(
                 bd.right,
                 r,
@@ -944,7 +944,7 @@ extend Lowerer {
         }
         let cd = n.as_data.call;
         let cn = self.f.node(cd.callee);
-        if cn.kind == NodeKind::NODE_MEMBER && !cn.as_data.member.path {
+        if cn.kind == NodeKind::NODE_MEMBER && !unsafe cn.as_data.member.path {
             let obj = cn.as_data.member.object;
             if self.same_def(self.root_binding(obj), r) && !self.shared_receiver(id) || self.may_write(
                 obj,
@@ -981,7 +981,9 @@ extend Lowerer {
                     return false;
                 }
                 let pt = fa.at_const(unsafe fa.list(ps)[0]).as_data.parameter.ty;
-                return pt != NODE_NONE && fa.at_const(pt).kind == NodeKind::NODE_REFERENCE_TYPE && fa.at_const(pt).as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_MUT;
+                return pt != NODE_NONE && fa.at_const(pt).kind == NodeKind::NODE_REFERENCE_TYPE && unsafe fa.at_const(
+                    pt,
+                ).as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_MUT;
             },
             None => {
                 return false;
@@ -1253,7 +1255,7 @@ extend Lowerer {
         let params = fd.params;
         for i in 0..params.len {
             let pn = unsafe self.f.list(params)[i as usize];
-            let pd = self.f.node(pn).as_data.parameter;
+            let pd = unsafe self.f.node(pn).as_data.parameter;
             let l = self.body.add_local(
                 self.local_decl(self.nty(pn), ir::LS_ARG, pd.is_mutable, self.f.node(pn).span, pn),
             );
@@ -1303,7 +1305,7 @@ extend Lowerer {
     /// ORIGINAL declaring nodes, so the body's uses resolve to them).
     pub(package) fn lower_closure_body(self: &mut Self, cnode: NodeId) bool {
         self.begin_body(cnode);
-        let cd = self.f.ext(cnode).closure;
+        let cd = unsafe self.f.ext(cnode).closure;
         let sp = self.f.node(cnode).span;
         let rets = cd.returns;
         for i in 0..rets.len {
@@ -1316,7 +1318,7 @@ extend Lowerer {
             // expression body's, or what a block's `return`s give); a unit body keeps zero return
             // slots
             let bt = self.nty(cd.body);
-            if bt != TYPE_NONE && !(self.f.ty(bt).kind == TypeKind::TYPE_BUILTIN && self.f.ty(bt).as_data.builtin == BuiltinType::BT_VOID) {
+            if bt != TYPE_NONE && !(self.f.ty(bt).kind == TypeKind::TYPE_BUILTIN && unsafe self.f.ty(bt).as_data.builtin == BuiltinType::BT_VOID) {
                 let _ = self.body.add_local(self.local_decl(bt, ir::LS_RET, true, sp, NODE_NONE));
                 self.body.returns = 1;
             }
@@ -1364,7 +1366,7 @@ extend Lowerer {
 
     /// Lower a constant/static initializer expression as a one-return body.
     pub(package) fn lower_const(self: &mut Self, cnode: NodeId) bool {
-        let cd = self.f.node(cnode).as_data.const_def;
+        let cd = unsafe self.f.node(cnode).as_data.const_def;
         return self.lower_value_body(cd.value, self.nty(cnode), self.f.node(cnode).span);
     }
 
@@ -1599,7 +1601,7 @@ extend Lowerer {
     }
 
     fn lower_let(self: &mut Self, id: NodeId) {
-        let ld = self.f.node(id).as_data.let_stmt;
+        let ld = unsafe self.f.node(id).as_data.let_stmt;
         let sp = self.f.node(id).span;
         let nk = self.f.node(ld.name).kind;
         self.tp(ir::TP_MARK_PUSH, 0, id);
@@ -1940,7 +1942,7 @@ extend Lowerer {
     }
 
     fn lower_while(self: &mut Self, id: NodeId) {
-        let d = self.f.node(id).as_data.while_stmt;
+        let d = unsafe self.f.node(id).as_data.while_stmt;
         let sp = self.f.node(id).span;
         self.tp(ir::TP_LOOP_PUSH, 0, id);
         // A do-while condition replays FIRST (walk order) but lowers at the TAIL (CFG order): the
@@ -2161,7 +2163,7 @@ extend Lowerer {
         if da.at_const(dn).kind != NodeKind::NODE_STRUCT {
             return NODE_NONE;
         }
-        let ag = da.ext(dn).aggregate;
+        let ag = unsafe da.ext(dn).aggregate;
         let mut k: i64 = 0;
         for i in 0..ag.members.len {
             let fid = unsafe da.list(ag.members)[i as usize];
@@ -2207,7 +2209,7 @@ extend Lowerer {
         if da.at_const(dn).kind != NodeKind::NODE_ENUM {
             return NODE_NONE;
         }
-        let ag = da.ext(dn).aggregate;
+        let ag = unsafe da.ext(dn).aggregate;
         if idx < 0 || idx >= ag.members.len as i64 {
             return NODE_NONE;
         }
@@ -2388,7 +2390,7 @@ extend Lowerer {
             return ir::IR_NONE;
         }
         let fr = *self.proj_frames.at(fi as usize);
-        let md = self.f.node(id).as_data.member;
+        let md = unsafe self.f.node(id).as_data.member;
         let nsp = self.f.node(md.member).as_data.name.text;
         let name = self.src.slice(nsp.start as usize, nsp.end as usize);
         let sp = self.f.node(id).span;
@@ -2559,7 +2561,7 @@ extend Lowerer {
                 let odn = self.proj_owner_decl(fr.owner_st, &mut dmo);
                 let dao = unsafe &*(&*self.pkg).module_ast_const(dmo);
                 let mut fdata: u32 = 0;
-                if dao.at_const(odn).kind == NodeKind::NODE_STRUCT && dao.ext(odn).aggregate.is_union {
+                if dao.at_const(odn).kind == NodeKind::NODE_STRUCT && unsafe dao.ext(odn).aggregate.is_union {
                     fdata = ir::PJ_UNION_FIELD;
                 }
                 let daf = unsafe &*(&*self.pkg).module_ast_const(dmf);
@@ -2622,7 +2624,7 @@ extend Lowerer {
             return -1;
         }
         let cn = *self.f.node(d.callee);
-        if cn.as_data.member.path || cn.as_data.member.object == NODE_NONE {
+        if unsafe cn.as_data.member.path || cn.as_data.member.object == NODE_NONE {
             return -1;
         }
         let mobj = cn.as_data.member.object;
@@ -2766,7 +2768,7 @@ extend Lowerer {
             }
             return -1;
         }
-        if k == NodeKind::NODE_UNARY && self.f.node(cond).as_data.unary.op == tt::TokenType::Bang {
+        if k == NodeKind::NODE_UNARY && unsafe self.f.node(cond).as_data.unary.op == tt::TokenType::Bang {
             let inner = self.binder_cond(self.f.node(cond).as_data.unary.operand);
             if inner >= 0 {
                 return 1 - inner;
@@ -2776,7 +2778,7 @@ extend Lowerer {
         if k != NodeKind::NODE_BINARY {
             return -1;
         }
-        let b = self.f.node(cond).as_data.binary;
+        let b = unsafe self.f.node(cond).as_data.binary;
         {
             let mut mmv: i64 = 0;
             let mut mdm2: ModuleId = 0;
@@ -2802,7 +2804,7 @@ extend Lowerer {
                     b.left
                 };
                 let ln = *self.f.node(mlit2);
-                if ln.kind == NodeKind::NODE_LITERAL && ln.as_data.literal.token_type == tt::TokenType::StringLiteral {
+                if ln.kind == NodeKind::NODE_LITERAL && unsafe ln.as_data.literal.token_type == tt::TokenType::StringLiteral {
                     let want = self.src.slice((ln.span.start + 1) as usize, (ln.span.end - 1) as usize);
                     let mut eqv = false;
                     if mmv >= 0 {
@@ -2833,7 +2835,7 @@ extend Lowerer {
             mem = b.right;
             lit = b.left;
         }
-        if self.f.node(mem).kind != NodeKind::NODE_MEMBER || self.f.node(mem).as_data.member.path {
+        if self.f.node(mem).kind != NodeKind::NODE_MEMBER || unsafe self.f.node(mem).as_data.member.path {
             return -1;
         }
         let obj = self.f.node(mem).as_data.member.object;
@@ -2922,7 +2924,7 @@ extend Lowerer {
                 r
             };
         }
-        if n.kind != NodeKind::NODE_IDENTIFIER && (n.kind != NodeKind::NODE_MEMBER || !n.as_data.member.path) {
+        if n.kind != NodeKind::NODE_IDENTIFIER && (n.kind != NodeKind::NODE_MEMBER || !unsafe n.as_data.member.path) {
             return 0;
         }
         let d = self.f.res(nid);
@@ -2933,7 +2935,7 @@ extend Lowerer {
         if dn.kind == NodeKind::NODE_VARIANT {
             return 1;
         }
-        if dn.kind != NodeKind::NODE_CONST || dn.as_data.const_def.is_static_mut || dn.as_data.const_def.is_extern {
+        if dn.kind != NodeKind::NODE_CONST || unsafe dn.as_data.const_def.is_static_mut || unsafe dn.as_data.const_def.is_extern {
             return 0;
         }
         return if d.module as i32 == bm {
@@ -2997,7 +2999,7 @@ extend Lowerer {
             return -1;
         }
         let ln = self.f.node(pn.as_data.single.value);
-        if ln.kind != NodeKind::NODE_LITERAL || ln.as_data.literal.token_type != tt::TokenType::StringLiteral {
+        if ln.kind != NodeKind::NODE_LITERAL || unsafe ln.as_data.literal.token_type != tt::TokenType::StringLiteral {
             return -1;
         }
         let raw = ln.as_data.literal.raw;
@@ -3013,7 +3015,7 @@ extend Lowerer {
         if n.kind != NodeKind::NODE_BINARY {
             return -1;
         }
-        let bd = n.as_data.binary;
+        let bd = unsafe n.as_data.binary;
         let lk = self.f.node(bd.left).kind;
         let rk = self.f.node(bd.right).kind;
         let lm = lk == NodeKind::NODE_SIZEOF || lk == NodeKind::NODE_ALIGNOF;
@@ -3128,7 +3130,7 @@ extend Lowerer {
         } else {
             mv
         };
-        let op = self.f.node(cond).as_data.binary.op;
+        let op = unsafe self.f.node(cond).as_data.binary.op;
         let mut r = false;
         if op == tt::TokenType::EqualEqual {
             r = a == b;
@@ -3151,7 +3153,7 @@ extend Lowerer {
     // Expand `inline for <bind> in fields/variants/payloads(..)` over the CONCRETE owner: the body
     // lowers once per copy with a frame on the stack. False = owner symbolic (caller falls back).
     fn expand_binder(self: &mut Self, id: NodeId) bool {
-        let d = self.f.ext(id).for_stmt;
+        let d = unsafe self.f.ext(id).for_stmt;
         let pt = self.nty(id);
         if pt == TYPE_NONE || self.f.ty(pt).kind != TypeKind::TYPE_FIELD_PROJECTION {
             return false;
@@ -3300,7 +3302,7 @@ extend Lowerer {
         if n.kind != NodeKind::NODE_MEMBER {
             return false;
         }
-        let md = n.as_data.member;
+        let md = unsafe n.as_data.member;
         if !self.node_name_eq(md.member, "len") {
             return false;
         }
@@ -3308,7 +3310,7 @@ extend Lowerer {
         if objn.kind != NodeKind::NODE_MEMBER {
             return false;
         }
-        let md2 = objn.as_data.member;
+        let md2 = unsafe objn.as_data.member;
         let is_fields = self.node_name_eq(md2.member, "fields");
         if !is_fields && !self.node_name_eq(md2.member, "variants") {
             return false;
@@ -3356,7 +3358,7 @@ extend Lowerer {
     // `payloads` binders: the CONCRETE-owner path expands per copy (expand_binder); a symbolic
     // owner keeps the IN_REFLECT placeholder and flags the body for per-instance re-lowering.
     fn lower_for(self: &mut Self, id: NodeId) {
-        let d = self.f.ext(id).for_stmt;
+        let d = unsafe self.f.ext(id).for_stmt;
         let sp = self.f.node(id).span;
         if self.f.node(d.iterable).kind == NodeKind::NODE_CALL {
             let cd = self.f.node(d.iterable).as_data.call;
@@ -3428,7 +3430,7 @@ extend Lowerer {
             self.fail_at("for-iterable", id);
             return;
         }
-        let rd = self.f.node(d.iterable).as_data.pattern_range;
+        let rd = unsafe self.f.node(d.iterable).as_data.pattern_range;
         let ity = self.nty(id);
         if self.f.node(id).kind == NodeKind::NODE_INLINE_FOR && unsafe (&*self.pkg).cir != null {
             // Physical unroll: inline-for bounds are compile-time constants. A const-generic bound
@@ -3558,7 +3560,7 @@ extend Lowerer {
         if y.kind != TypeKind::TYPE_BUILTIN {
             return false;
         }
-        let bt = y.as_data.builtin as u32;
+        let bt = (unsafe y.as_data.builtin) as u32;
         return bt >= BuiltinType::BT_I8 as u32 && bt <= BuiltinType::BT_USIZE as u32;
     }
 
@@ -3569,7 +3571,7 @@ extend Lowerer {
         }
         let bn = self.f.node(binding);
         if bn.kind == NodeKind::NODE_PATTERN_NAME {
-            return self.f.node(bn.as_data.pattern.name).as_data.name.is_mutable;
+            return unsafe self.f.node(bn.as_data.pattern.name).as_data.name.is_mutable;
         }
         return bn.kind != NodeKind::NODE_IDENTIFIER && bn.kind != NodeKind::NODE_PATTERN_WILDCARD;
     }
@@ -3680,7 +3682,7 @@ extend Lowerer {
     // `for x in r` over a prelude Range VALUE: x from r.start while (r.inclusive ? x <= r.end
     // : x < r.end), stepping by one -- the emitter's established range-value semantics.
     fn lower_for_range_value(self: &mut Self, id: NodeId) {
-        let d = self.f.ext(id).for_stmt;
+        let d = unsafe self.f.ext(id).for_stmt;
         let sp = self.f.node(id).span;
         let rpl = self.lower_place(d.iterable);
         if rpl == ir::IR_NONE {
@@ -3763,7 +3765,7 @@ extend Lowerer {
     // continues while it yields the payload variant. This is the real protocol -- one call
     // terminator, one discriminant read, one downcast per iteration.
     fn lower_for_iter(self: &mut Self, id: NodeId, next_def: DefId) {
-        let d = self.f.ext(id).for_stmt;
+        let d = unsafe self.f.ext(id).for_stmt;
         let sp = self.f.node(id).span;
         let it_pl = self.lower_place(d.iterable);
         if it_pl == ir::IR_NONE {
@@ -3836,7 +3838,7 @@ extend Lowerer {
     // `for` over an indexable sequence (array, slice, sequence value): an index loop over RV_LEN
     // with an explicit element load per iteration.
     fn lower_for_indexed(self: &mut Self, id: NodeId) {
-        let d = self.f.ext(id).for_stmt;
+        let d = unsafe self.f.ext(id).for_stmt;
         let sp = self.f.node(id).span;
         let mut ipl = self.lower_place(d.iterable);
         if ipl == ir::IR_NONE {
@@ -4148,7 +4150,7 @@ extend Lowerer {
             return false;
         }
         let n = self.f.node(id);
-        let star = n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == tt::TokenType::Star;
+        let star = n.kind == NodeKind::NODE_UNARY && unsafe n.as_data.unary.op == tt::TokenType::Star;
         return n.kind == NodeKind::NODE_MEMBER || star || self.f.derefs(id) == null;
     }
 
@@ -4163,7 +4165,7 @@ extend Lowerer {
             let mut aop = NODE_NONE;
             let mut pty = TYPE_NONE;
             let n = self.f.node(id);
-            if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == tt::TokenType::Ampersand {
+            if n.kind == NodeKind::NODE_UNARY && unsafe n.as_data.unary.op == tt::TokenType::Ampersand {
                 let co = self.f.coercion(id);
                 if co != null && unsafe (*co).method.node == NODE_NONE {
                     let target = unsafe (*co).target;
@@ -4208,7 +4210,7 @@ extend Lowerer {
         // `Target*` and read the wrong storage.
         {
             let nk = self.f.node(id).kind;
-            let star = nk == NodeKind::NODE_UNARY && self.f.node(id).as_data.unary.op == tt::TokenType::Star;
+            let star = nk == NodeKind::NODE_UNARY && unsafe self.f.node(id).as_data.unary.op == tt::TokenType::Star;
             if nk != NodeKind::NODE_MEMBER && !star {
                 let du = self.f.derefs(id);
                 if du != null {
@@ -4419,7 +4421,7 @@ extend Lowerer {
         if k == NodeKind::NODE_UNARY {
             // `unsafe`/`move` are transparent over places: keep the operand's PLACE-ness (a
             // `&mut` receiver must mutate the real location, not a value temp)
-            let uop0 = self.f.node(id).as_data.unary.op;
+            let uop0 = unsafe self.f.node(id).as_data.unary.op;
             if uop0 == tt::TokenType::Unsafe || uop0 == tt::TokenType::Move {
                 if uop0 == tt::TokenType::Unsafe {
                     self.note_unsafe(id);
@@ -4427,10 +4429,10 @@ extend Lowerer {
                 let mut inner0 = self.f.node(id).as_data.unary.operand;
                 loop {
                     let inn = self.f.node(inner0);
-                    if inn.kind == NodeKind::NODE_UNARY && (inn.as_data.unary.op == tt::TokenType::Unsafe || inn.as_data.unary.op == tt::TokenType::Move) {
+                    if inn.kind == NodeKind::NODE_UNARY && (unsafe inn.as_data.unary.op == tt::TokenType::Unsafe || unsafe inn.as_data.unary.op == tt::TokenType::Move) {
                         let outer = inner0;
                         inner0 = inn.as_data.unary.operand;
-                        if inn.as_data.unary.op == tt::TokenType::Unsafe {
+                        if unsafe inn.as_data.unary.op == tt::TokenType::Unsafe {
                             self.note_unsafe(outer);
                         }
                         continue;
@@ -4438,7 +4440,7 @@ extend Lowerer {
                     break;
                 }
                 let ik = self.f.node(inner0).kind;
-                let deref0 = ik == NodeKind::NODE_UNARY && self.f.node(inner0).as_data.unary.op == tt::TokenType::Star;
+                let deref0 = ik == NodeKind::NODE_UNARY && unsafe self.f.node(inner0).as_data.unary.op == tt::TokenType::Star;
                 if ik == NodeKind::NODE_IDENTIFIER || ik == NodeKind::NODE_MEMBER || ik == NodeKind::NODE_INDEX || deref0 {
                     let pl = self.lower_place(id);
                     if pl == ir::IR_NONE {
@@ -4470,10 +4472,10 @@ extend Lowerer {
                 let mut e = d.expression;
                 loop {
                     let en = self.f.node(e);
-                    if en.kind == NodeKind::NODE_UNARY && (en.as_data.unary.op == tt::TokenType::Move || en.as_data.unary.op == tt::TokenType::Unsafe) {
+                    if en.kind == NodeKind::NODE_UNARY && (unsafe en.as_data.unary.op == tt::TokenType::Move || unsafe en.as_data.unary.op == tt::TokenType::Unsafe) {
                         let outer = e;
                         e = en.as_data.unary.operand;
-                        if en.as_data.unary.op == tt::TokenType::Unsafe {
+                        if unsafe en.as_data.unary.op == tt::TokenType::Unsafe {
                             self.note_unsafe(outer);
                         }
                     } else {
@@ -4483,7 +4485,7 @@ extend Lowerer {
                 let mut aop = NODE_NONE;
                 {
                     let en = self.f.node(e);
-                    if en.kind == NodeKind::NODE_UNARY && en.as_data.unary.op == tt::TokenType::Ampersand && self.f.coercion(
+                    if en.kind == NodeKind::NODE_UNARY && unsafe en.as_data.unary.op == tt::TokenType::Ampersand && self.f.coercion(
                         e,
                     ) == null {
                         aop = en.as_data.unary.operand;
@@ -4528,6 +4530,9 @@ extend Lowerer {
                     }
                 }
             }
+            // An integer to a plain enum: a value that is no discriminant fails, so no enum holds one (the
+            // optimizer relies on it: `MEM_RANGE`, switch tables).
+            self.check_discriminant(op, cty, self.f.node(id).span);
             let ck = self.cast_kind(self.body.operands.at(op as usize).ty, cty);
             let r = self.rv_out(dest, ir::rv(ir::RV_CAST, op, ck, 0, cty), sp);
             if er9 {
@@ -4623,7 +4628,7 @@ extend Lowerer {
     }
 
     fn lower_literal(self: &mut Self, id: NodeId) ir::OperandId {
-        let d = self.f.node(id).as_data.literal;
+        let d = unsafe self.f.node(id).as_data.literal;
         let ty = self.nty(id);
         let w = self.f.wide_lit(id);
         if w != null {
@@ -4674,7 +4679,7 @@ extend Lowerer {
     }
 
     fn lower_unary(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
-        let d = self.f.node(id).as_data.unary;
+        let d = unsafe self.f.node(id).as_data.unary;
         if d.op == tt::TokenType::Move || d.op == tt::TokenType::Unsafe {
             // `move` or `unsafe` over a value that is not a place (a literal, a closure, a call) is
             // that value: no temporary hides it from the analyses that read it. `lower_expr` noted
@@ -4690,7 +4695,9 @@ extend Lowerer {
             // no temporary holds it only to be dereferenced. A reborrow through a raw pointer holds
             // no loan either way.
             let on = *self.f.node(d.operand);
-            if on.kind == NodeKind::NODE_UNARY && on.as_data.unary.op == tt::TokenType::Star && self.f.derefs(d.operand) == null {
+            if on.kind == NodeKind::NODE_UNARY && unsafe on.as_data.unary.op == tt::TokenType::Star && self.f.derefs(
+                d.operand,
+            ) == null {
                 let inner = on.as_data.unary.operand;
                 let it = self.nty(inner);
                 let ik = self.f.node(inner).kind;
@@ -4784,7 +4791,7 @@ extend Lowerer {
                         let mut ty9 = ty;
                         if (v9 < -2147483648 || v9 > 2147483647) && ty9 != TYPE_NONE {
                             let yv = *self.f.ty(ty9);
-                            if yv.kind == TypeKind::TYPE_BUILTIN && (yv.as_data.builtin == BuiltinType::BT_I32 || yv.as_data.builtin == BuiltinType::BT_I16 || yv.as_data.builtin == BuiltinType::BT_I8) {
+                            if yv.kind == TypeKind::TYPE_BUILTIN && (unsafe yv.as_data.builtin == BuiltinType::BT_I32 || unsafe yv.as_data.builtin == BuiltinType::BT_I16 || unsafe yv.as_data.builtin == BuiltinType::BT_I8) {
                                 ty9 = Ast::builtin(BuiltinType::BT_I64);
                             }
                         }
@@ -5004,7 +5011,7 @@ extend Lowerer {
     // Whether node `id` is an `&&` or `||`.
     const fn short_circuit(self: &Self, id: NodeId) bool {
         let n = self.f.node(id);
-        return n.kind == NodeKind::NODE_BINARY && (n.as_data.binary.op == tt::TokenType::AmpersandAmpersand || n.as_data.binary.op == tt::TokenType::PipePipe);
+        return n.kind == NodeKind::NODE_BINARY && (unsafe n.as_data.binary.op == tt::TokenType::AmpersandAmpersand || unsafe n.as_data.binary.op == tt::TokenType::PipePipe);
     }
 
     // The work of binary node `id` before its left operand: the result place of `&&`/`||`, which is
@@ -5020,7 +5027,7 @@ extend Lowerer {
     // into `rpl`, `lower_binary`); `rpl` is its setup place, and the value lands in `dest`
     // (`rv_out`).
     fn lower_binary_rest(self: &mut Self, id: NodeId, rpl: ir::PlaceId, lop: ir::OperandId, dest: ir::PlaceId) ir::OperandId {
-        let d = self.f.node(id).as_data.binary;
+        let d = unsafe self.f.node(id).as_data.binary;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
         if d.op == tt::TokenType::AmpersandAmpersand || d.op == tt::TokenType::PipePipe {
@@ -5413,7 +5420,7 @@ extend Lowerer {
             Some(v) => {
                 // A field callee (`t.1()`, `w.f()`) whose type names a function item records that
                 // function with no receiver slot: it calls the stored value, like a fn-pointer field.
-                if ck != NodeKind::NODE_MEMBER || self.f.node(d.callee).as_data.member.path || (v & 0xFFu64) != 0 {
+                if ck != NodeKind::NODE_MEMBER || unsafe self.f.node(d.callee).as_data.member.path || (v & 0xFFu64) != 0 {
                     target = DefId { module: ci_module(v), node: ci_decl(v) };
                 }
             },
@@ -5546,7 +5553,7 @@ extend Lowerer {
         }
         let mut argv = self.avget();
         let mut callee_op = ir::IR_NONE;
-        if ck == NodeKind::NODE_MEMBER && !self.f.node(d.callee).as_data.member.path && target.node != NODE_NONE {
+        if ck == NodeKind::NODE_MEMBER && !unsafe self.f.node(d.callee).as_data.member.path && target.node != NODE_NONE {
             let recv = self.f.node(d.callee).as_data.member.object;
             // A receiver that resolved through the checker's auto-deref chain lowers each hop
             // (exactly as `*x` and field access do), so the operand the call carries has the
@@ -5673,7 +5680,7 @@ extend Lowerer {
             // call of its own (`x.m::<u8>().get()`), whose arguments are not this call's. A member of
             // an extend without parameters (`extend String { fn mk() .. }`) binds none, so the
             // qualifier's (`String<Global>`) are not its call's.
-            if tn == 0 && self.f.node(d.callee).kind == NodeKind::NODE_MEMBER && self.f.node(d.callee).as_data.member.path && (target.node == NODE_NONE || unsafe (*(&*self.pkg).module_ast_const(
+            if tn == 0 && self.f.node(d.callee).kind == NodeKind::NODE_MEMBER && unsafe self.f.node(d.callee).as_data.member.path && (target.node == NODE_NONE || unsafe (*(&*self.pkg).module_ast_const(
                 target.module,
             )).extend_arity(target.node) != 0) {
                 let ob9 = self.f.node(d.callee).as_data.member.object;
@@ -5723,14 +5730,14 @@ extend Lowerer {
             // `Type::<Args>::f::<U>()`: the qualifying instance names the receiver of a function
             // whose own arguments are the call's.
             let in9 = self.f.node(d.callee).as_data.specialization.expression;
-            if self.f.node(in9).kind == NodeKind::NODE_MEMBER && self.f.node(in9).as_data.member.path {
+            if self.f.node(in9).kind == NodeKind::NODE_MEMBER && unsafe self.f.node(in9).as_data.member.path {
                 pm9 = in9;
                 let q9 = self.nty(self.f.node(in9).as_data.member.object);
                 if q9 != TYPE_NONE && (self.f.ty(q9).kind == TypeKind::TYPE_INSTANCE || self.f.ty(q9).is_vec()) {
                     impl9 = q9;
                 }
             }
-        } else if ck == NodeKind::NODE_MEMBER && self.f.node(d.callee).as_data.member.path {
+        } else if ck == NodeKind::NODE_MEMBER && unsafe self.f.node(d.callee).as_data.member.path {
             pm9 = d.callee;
             // `Type::<Args>::f(..)`: the qualifying instance names the receiver of an associated
             // function of a generic extend (it has no receiver value), and of a function with
@@ -6033,11 +6040,11 @@ extend Lowerer {
             let k = nd.kind;
             if k == NodeKind::NODE_CALL {
                 let c = nd.as_data.call.callee;
-                if self.f.node(c).kind == NodeKind::NODE_MEMBER && !self.f.node(c).as_data.member.path {
+                if self.f.node(c).kind == NodeKind::NODE_MEMBER && !unsafe self.f.node(c).as_data.member.path {
                     self.chk_nodes.push(self.f.node(c).as_data.member.object);
                 }
             } else if k == NodeKind::NODE_MEMBER {
-                if !nd.as_data.member.path {
+                if !unsafe nd.as_data.member.path {
                     self.chk_nodes.push(nd.as_data.member.object);
                 }
             } else if k == NodeKind::NODE_UNARY {
@@ -6046,7 +6053,7 @@ extend Lowerer {
                 self.chk_nodes.push(nd.as_data.cast.expression);
             } else if k == NodeKind::NODE_BINARY {
                 self.chk_nodes.push(nd.as_data.binary.left);
-                if nd.as_data.binary.op == tt::TokenType::AmpersandAmpersand || nd.as_data.binary.op == tt::TokenType::PipePipe {
+                if unsafe nd.as_data.binary.op == tt::TokenType::AmpersandAmpersand || unsafe nd.as_data.binary.op == tt::TokenType::PipePipe {
                     self.chk_nodes.push(nd.as_data.binary.right);
                 }
             } else if k == NodeKind::NODE_ASSIGNMENT {
@@ -6089,7 +6096,7 @@ extend Lowerer {
             return ir::IR_NONE;
         }
         let dn = unsafe (&*(&*self.pkg).module_ast_const(d.module)).at_const(d.node);
-        if dn.kind != NodeKind::NODE_LET || dn.as_data.let_stmt.value != NODE_NONE || dn.as_data.let_stmt.is_mutable {
+        if dn.kind != NodeKind::NODE_LET || dn.as_data.let_stmt.value != NODE_NONE || unsafe dn.as_data.let_stmt.is_mutable {
             return ir::IR_NONE;
         }
         return self.local_of(d.node);
@@ -6120,7 +6127,7 @@ extend Lowerer {
                     return true;
                 }
                 let dn = unsafe (&*(&*self.pkg).module_ast_const(d.module)).at_const(d.node);
-                if dn.kind != NodeKind::NODE_LET || dn.as_data.let_stmt.value != NODE_NONE || !dn.as_data.let_stmt.is_mutable {
+                if dn.kind != NodeKind::NODE_LET || dn.as_data.let_stmt.value != NODE_NONE || !unsafe dn.as_data.let_stmt.is_mutable {
                     return true;
                 }
                 let l = self.local_of(d.node);
@@ -6130,9 +6137,9 @@ extend Lowerer {
                 let tk = self.f.ty(self.body.locals.at(l as usize).ty).kind;
                 return tk == TypeKind::TYPE_BUILTIN || tk == TypeKind::TYPE_POINTER;
             }
-            if nd.kind == NodeKind::NODE_MEMBER && !nd.as_data.member.path {
+            if nd.kind == NodeKind::NODE_MEMBER && !unsafe nd.as_data.member.path {
                 n = nd.as_data.member.object;
-            } else if nd.kind == NodeKind::NODE_UNARY && nd.as_data.unary.op == tt::TokenType::Star {
+            } else if nd.kind == NodeKind::NODE_UNARY && unsafe nd.as_data.unary.op == tt::TokenType::Star {
                 n = nd.as_data.unary.operand;
             } else if nd.kind == NodeKind::NODE_INDEX {
                 let ik = self.f.node(nd.as_data.index.index).kind;
@@ -6534,6 +6541,69 @@ extend Lowerer {
         return self.unit_op(ty, sp);
     }
 
+    // When integer operand `op` becomes enum `ty` (not a C enum): an assertion that it is one of the
+    // discriminants, as one range test for consecutive values, else one equality per variant.
+    fn check_discriminant(self: &mut Self, op: ir::OperandId, ty: TypeId, sp: tok::Span) {
+        let src = self.body.operands.at(op as usize).ty;
+        if ty == TYPE_NONE || src == TYPE_NONE || self.f.ty(ty).kind != TypeKind::TYPE_ENUM || self.f.ty(src).kind != TypeKind::TYPE_BUILTIN || bt_int_width(
+            unsafe self.f.ty(src).as_data.builtin,
+            false,
+        ) == 0 {
+            return;
+        }
+        let pk = unsafe &*self.pkg;
+        let y = *self.f.ty(ty);
+        let a = unsafe &*pk.module_ast_const(y.module);
+        if unsafe a.ext(y.as_data.decl).aggregate.is_extern || pk.cir == null {
+            return;
+        }
+        let cev = unsafe &mut *(pk.cir as *mut iri::Interp);
+        let ms = a.ext(y.as_data.decl).aggregate.members;
+        let mut vals = Vector::<i64>::with_capacity(ms.len as usize);
+        let mut cur: i64 = -1;
+        for k in 0..ms.len {
+            if !cev.discr(y.module, unsafe a.list(ms)[k as usize], cur, &mut cur) {
+                return;
+            }
+            vals.push(cur);
+        }
+        if vals.len() == 0 {
+            return;
+        }
+        let mut lo = vals[0];
+        let mut hi = vals[0];
+        for v in vals.iter() {
+            lo = lo.min(*v);
+            hi = hi.max(*v);
+        }
+        let signed = !bt_is_unsigned(unsafe self.f.ty(src).as_data.builtin);
+        let mut cond = ir::IR_NONE;
+        if hi - lo + 1 == vals.len() as i64 {
+            let kh = self.kop(ir::CK_INT, src, hi, sp);
+            cond = self.bool_bin(op, kh, tt::TokenType::LessThanEqual, sp);
+            if lo != 0 || signed {
+                let kl = self.kop(ir::CK_INT, src, lo, sp);
+                let ge = self.bool_bin(op, kl, tt::TokenType::GreaterThanEqual, sp);
+                cond = self.bool_bin(cond, ge, tt::TokenType::Ampersand, sp);
+            }
+        } else {
+            for v in vals.iter() {
+                let kv = self.kop(ir::CK_INT, src, *v, sp);
+                let eq = self.bool_bin(op, kv, tt::TokenType::EqualEqual, sp);
+                cond = if cond == ir::IR_NONE {
+                    eq
+                } else {
+                    self.bool_bin(cond, eq, tt::TokenType::Pipe, sp)
+                };
+            }
+        }
+        let mut tm = ir::term0(ir::TM_ASSERT, sp);
+        tm.a = cond;
+        let cont = self.open_block();
+        tm.t0 = cont;
+        self.seal(tm, cont);
+    }
+
     const fn is_intrinsic_callee(self: &Self, callee: NodeId, name: str) bool {
         let mut c = callee;
         if self.f.node(c).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
@@ -6560,7 +6630,7 @@ extend Lowerer {
     }
 
     fn lower_assignment(self: &mut Self, id: NodeId) ir::OperandId {
-        let d = self.f.node(id).as_data.binary;
+        let d = unsafe self.f.node(id).as_data.binary;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
         self.note_mut_bind(d.left);
@@ -6749,7 +6819,7 @@ extend Lowerer {
     }
 
     fn lower_array_or_tuple(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
-        let d = self.f.node(id).as_data.array_literal;
+        let d = unsafe self.f.node(id).as_data.array_literal;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let k = self.f.node(id).kind;
@@ -6874,7 +6944,7 @@ extend Lowerer {
     }
 
     fn lower_range(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
-        let d = self.f.node(id).as_data.pattern_range;
+        let d = unsafe self.f.node(id).as_data.pattern_range;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
         // fixed decl-order slots {start, end, inclusive}: absent bounds are IR_NONE holes
@@ -7049,7 +7119,7 @@ extend Lowerer {
         if masked {
             self.chk_mask += 1;
         }
-        let d = self.f.node(id).as_data.while_stmt;
+        let d = unsafe self.f.node(id).as_data.while_stmt;
         let sp = self.f.node(id).span;
         let head = self.open_block();
         let exit = self.open_block();
@@ -7105,7 +7175,7 @@ extend Lowerer {
         let single = binding != NODE_NONE && self.for_pattern(id) == NODE_NONE;
         let mut m = mutable;
         if single && self.f.node(binding).kind == NodeKind::NODE_PATTERN_NAME {
-            m = m || self.f.node(self.f.node(binding).as_data.pattern.name).as_data.name.is_mutable;
+            m = m || unsafe self.f.node(self.f.node(binding).as_data.pattern.name).as_data.name.is_mutable;
         }
         let l = self.body.add_local(self.local_decl(ty, ir::LS_USER, m, sp, id));
         self.bind(id, l);
@@ -7307,7 +7377,7 @@ extend Lowerer {
         }
         let k = self.f.node(id).kind;
         if k == NodeKind::NODE_MEMBER {
-            let md = self.f.node(id).as_data.member;
+            let md = unsafe self.f.node(id).as_data.member;
             let d2 = self.f.res(md.member);
             if d2.node != NODE_NONE {
                 return d2;
@@ -7356,7 +7426,7 @@ extend Lowerer {
             }
             return none;
         }
-        if n.kind != NodeKind::NODE_MEMBER || !n.as_data.member.path {
+        if n.kind != NodeKind::NODE_MEMBER || !unsafe n.as_data.member.path {
             return none;
         }
         let pd = self.path_res(id);
@@ -7376,10 +7446,10 @@ extend Lowerer {
         // An unresolved member on a resolved ENUM object: member resolution is the checker's act,
         // so a not-yet-checked module's `E::V` (a const initializer demanded early) finds the
         // variant from the object and the member's name.
-        if (d.node == NODE_NONE || self.decl_kind(d) == NodeKind::NODE_ENUM) && self.f.node(id).kind == NodeKind::NODE_MEMBER && self.f.node(
+        if (d.node == NODE_NONE || self.decl_kind(d) == NodeKind::NODE_ENUM) && self.f.node(id).kind == NodeKind::NODE_MEMBER && unsafe self.f.node(
             id,
         ).as_data.member.path {
-            let md0 = self.f.node(id).as_data.member;
+            let md0 = unsafe self.f.node(id).as_data.member;
             let mut od = self.f.res(md0.object);
             if od.node == NODE_NONE && self.decl_kind(d) == NodeKind::NODE_ENUM {
                 od = d;
@@ -7450,9 +7520,9 @@ extend Lowerer {
         }
         let rt = self.reintern_ty(d.module, dt);
         return rt != ty && self.f.ty(rt).kind == TypeKind::TYPE_BUILTIN && self.f.ty(ty).kind == TypeKind::TYPE_BUILTIN && bt_int_width(
-            self.f.ty(rt).as_data.builtin,
+            unsafe self.f.ty(rt).as_data.builtin,
             false,
-        ) != 0 && bt_int_width(self.f.ty(ty).as_data.builtin, false) != 0;
+        ) != 0 && bt_int_width(unsafe self.f.ty(ty).as_data.builtin, false) != 0;
     }
 
     // ---- places -----------------------------------------------------------------------------------
@@ -7463,7 +7533,7 @@ extend Lowerer {
         }
         // `unsafe expr` / `move expr` wrap a place without changing it; peel before shaping.
         if self.f.node(id).kind == NodeKind::NODE_UNARY {
-            let uop = self.f.node(id).as_data.unary.op;
+            let uop = unsafe self.f.node(id).as_data.unary.op;
             if uop == tt::TokenType::Unsafe || uop == tt::TokenType::Move {
                 if uop == tt::TokenType::Unsafe {
                     self.note_unsafe(id);
@@ -7502,7 +7572,7 @@ extend Lowerer {
             return self.place_of_local(l2);
         }
         if k == NodeKind::NODE_MEMBER {
-            let md0 = self.f.node(id).as_data.member;
+            let md0 = unsafe self.f.node(id).as_data.member;
             if !md0.path && md0.object != NODE_NONE && self.f.node(md0.object).kind == NodeKind::NODE_IDENTIFIER {
                 let blid = unsafe (&*self.f.ast).resolution(md0.object);
                 if blid != NODE_NONE && self.f.node(blid).kind == NodeKind::NODE_INLINE_FOR && self.proj_frame_of(blid) >= 0 {
@@ -7516,7 +7586,7 @@ extend Lowerer {
         if k == NodeKind::NODE_INDEX {
             return self.lower_index_place(id);
         }
-        if k == NodeKind::NODE_UNARY && self.f.node(id).as_data.unary.op == tt::TokenType::Star {
+        if k == NodeKind::NODE_UNARY && unsafe self.f.node(id).as_data.unary.op == tt::TokenType::Star {
             let mut base = self.lower_place(self.f.node(id).as_data.unary.operand);
             if base == ir::IR_NONE {
                 return ir::IR_NONE;
@@ -7705,7 +7775,7 @@ extend Lowerer {
     }
 
     fn lower_member_place(self: &mut Self, id: NodeId) ir::PlaceId {
-        let d = self.f.node(id).as_data.member;
+        let d = unsafe self.f.node(id).as_data.member;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
         if d.path {
@@ -7765,9 +7835,9 @@ extend Lowerer {
                 if od.node != NODE_NONE {
                     let da = unsafe &*(&*self.pkg).module_ast_const(od.module);
                     let nd = da.at_const(od.node);
-                    if nd.kind == NodeKind::NODE_STRUCT && da.ext(od.node).aggregate.is_union {
+                    if nd.kind == NodeKind::NODE_STRUCT && unsafe da.ext(od.node).aggregate.is_union {
                         fdata = ir::PJ_UNION_FIELD;
-                    } else if nd.kind == NodeKind::NODE_STRUCT && da.ext(od.node).aggregate.is_tuple {
+                    } else if nd.kind == NodeKind::NODE_STRUCT && unsafe da.ext(od.node).aggregate.is_tuple {
                         // tuple member: the resolution pins the positional TYPE node, not a NODE_FIELD;
                         // emit it as `._<index>` from its ordinal in the member list
                         let ms = da.ext(od.node).aggregate.members;
@@ -7847,7 +7917,7 @@ extend Lowerer {
         // The replay still sees the call boundary, and each by-value argument's consumption is
         // marked explicitly: no IR op survives to carry it.
         let d = self.f.node(id).as_data.call;
-        let recv = self.f.node(d.callee).kind == NodeKind::NODE_MEMBER && !self.f.node(d.callee).as_data.member.path && fd.params.len == d.args.len + 1;
+        let recv = self.f.node(d.callee).kind == NodeKind::NODE_MEMBER && !unsafe self.f.node(d.callee).as_data.member.path && fd.params.len == d.args.len + 1;
         self.tp(ir::TP_CALL_MARK, 0, id);
         if recv && !self.by_ref_param(target, 0) {
             self.tp(ir::TP_CONST_MOVE, 0, self.f.node(d.callee).as_data.member.object);
@@ -7874,7 +7944,7 @@ extend Lowerer {
         }
         let y = *self.f.ty(ty);
         if y.kind == TypeKind::TYPE_BUILTIN {
-            let bt = y.as_data.builtin;
+            let bt = unsafe y.as_data.builtin;
             return bt != BuiltinType::BT_VOID && bt != BuiltinType::BT_VALIST && bt != BuiltinType::BT_C32 && bt != BuiltinType::BT_C64;
         }
         if y.kind == TypeKind::TYPE_ENUM {
@@ -7893,7 +7963,7 @@ extend Lowerer {
         let mut dm: ModuleId = 0;
         let dn = self.proj_owner_decl(ty, &mut dm);
         let da = unsafe &*(&*self.pkg).module_ast_const(dm);
-        if dn == NODE_NONE || da.at_const(dn).kind != NodeKind::NODE_STRUCT || da.ext(dn).aggregate.is_union {
+        if dn == NODE_NONE || da.at_const(dn).kind != NodeKind::NODE_STRUCT || unsafe da.ext(dn).aggregate.is_union {
             return false;
         }
         let ms = da.ext(dn).aggregate.members;
@@ -7901,7 +7971,7 @@ extend Lowerer {
             return false;
         }
         for i in 0..ms.len {
-            if !da.ext(dn).aggregate.is_tuple && da.at_const(unsafe da.list(ms)[i as usize]).kind != NodeKind::NODE_FIELD {
+            if !unsafe da.ext(dn).aggregate.is_tuple && da.at_const(unsafe da.list(ms)[i as usize]).kind != NodeKind::NODE_FIELD {
                 return false;
             }
             if !self.foldable_ty(self.proj_field_ty(ty, i), depth + 1) {
@@ -7936,7 +8006,7 @@ extend Lowerer {
             if y.kind == TypeKind::TYPE_ENUM {
                 return self.fold_variant(ty, l, sp);
             }
-            let bt = y.as_data.builtin;
+            let bt = unsafe y.as_data.builtin;
             if bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64 {
                 if l.kind != iri::LF_FLOAT {
                     return ir::IR_NONE;
@@ -7967,7 +8037,7 @@ extend Lowerer {
         } else {
             let mut dm: ModuleId = 0;
             let dn = self.proj_owner_decl(ty, &mut dm);
-            let ag = (unsafe &*(&*self.pkg).module_ast_const(dm)).ext(dn).aggregate;
+            let ag = unsafe (unsafe &*(&*self.pkg).module_ast_const(dm)).ext(dn).aggregate;
             agg = pick(ag.is_tuple, ir::AGG_TUPLE, ir::AGG_STRUCT);
             item = DefId { module: dm, node: dn };
             for i in 0..ag.members.len {
@@ -8072,7 +8142,7 @@ extend Lowerer {
             let c = n.as_data.call;
             // A `const fn` (a method's receiver too), a variant or a tuple struct.
             let ck = self.f.node(c.callee).kind;
-            if ck == NodeKind::NODE_MEMBER && !self.f.node(c.callee).as_data.member.path {
+            if ck == NodeKind::NODE_MEMBER && !unsafe self.f.node(c.callee).as_data.member.path {
                 if !self.maybe_const(self.f.node(c.callee).as_data.member.object) {
                     return false;
                 }
@@ -8100,7 +8170,7 @@ extend Lowerer {
             }
             return true;
         }
-        if k == NodeKind::NODE_MEMBER && !n.as_data.member.path {
+        if k == NodeKind::NODE_MEMBER && !unsafe n.as_data.member.path {
             return self.maybe_const(n.as_data.member.object);
         }
         if k == NodeKind::NODE_IDENTIFIER || k == NodeKind::NODE_MEMBER || k == NodeKind::NODE_TYPE_PATH || k == NodeKind::NODE_GENERIC_SPECIALIZATION {
@@ -8113,7 +8183,7 @@ extend Lowerer {
                 return true;
             }
             if dk == NodeKind::NODE_CONST {
-                let cd = (unsafe &*(&*self.pkg).module_ast_const(d.module)).at_const(d.node).as_data.const_def;
+                let cd = unsafe (unsafe &*(&*self.pkg).module_ast_const(d.module)).at_const(d.node).as_data.const_def;
                 return cd.value != NODE_NONE && !cd.is_static_mut;
             }
             return false;
@@ -8295,7 +8365,7 @@ extend Lowerer {
         // A temporary object (`mk()[1..3]`) is the scope's to drop, as an operator's left operand.
         self.own_operand(lop, d.object);
         let recv = self.op_recv(md, lop, sp);
-        let rd = self.f.node(d.index).as_data.pattern_range;
+        let rd = unsafe self.f.node(d.index).as_data.pattern_range;
         let ut = Ast::builtin(BuiltinType::BT_USIZE);
         let mut sop = ir::IR_NONE;
         if rd.start != NODE_NONE {
@@ -8413,7 +8483,7 @@ extend Lowerer {
                 let mut q = TypeQualifier::TYPE_QUAL_NONE as u8;
                 if mf.returns.len == 1 {
                     let rn = unsafe (*ma).at_const(unsafe (*ma).slot_type_node(unsafe (*ma).list(mf.returns)[0]));
-                    if rn.kind == NodeKind::NODE_REFERENCE_TYPE && rn.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
+                    if rn.kind == NodeKind::NODE_REFERENCE_TYPE && unsafe rn.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
                         q = TypeQualifier::TYPE_QUAL_MUT as u8;
                     }
                 }
@@ -8444,7 +8514,7 @@ extend Lowerer {
         if self.f.node(d.index).kind == NodeKind::NODE_RANGE {
             // `s[lo..hi]` slicing stays STRUCTURAL: bounds lower directly (start first), so
             // end-openness survives without a Range value
-            let rd = self.f.node(d.index).as_data.pattern_range;
+            let rd = unsafe self.f.node(d.index).as_data.pattern_range;
             let mut sop = ir::IR_NONE;
             if rd.start != NODE_NONE {
                 sop = self.lower_expr(rd.start);
@@ -8865,7 +8935,7 @@ extend Lowerer {
             return;
         }
         if k == NodeKind::NODE_PATTERN_RANGE {
-            let rd = self.f.node(p).as_data.pattern_range;
+            let rd = unsafe self.f.node(p).as_data.pattern_range;
             let rv = self.pat_deref(v);
             if rd.start != NODE_NONE {
                 let lo = self.pattern_bound(rd.start);
@@ -9365,7 +9435,7 @@ extend Lowerer {
                     };
                 }
             } else if ep.kind == pat::PC_RANGE {
-                let rd = self.f.node(ep.node).as_data.pattern_range;
+                let rd = unsafe self.f.node(ep.node).as_data.pattern_range;
                 let mut ok = true;
                 if rd.start != NODE_NONE {
                     let lo = self.pattern_bound(rd.start);

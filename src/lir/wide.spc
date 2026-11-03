@@ -73,6 +73,7 @@ extend Wide {
         out.refs.extend_copy(&b.refs);
         out.owned.extend_copy(&b.owned);
         out.bools = b.bools;
+        out.fmath = b.fmath;
         out.naked = b.naked;
         // The blocks, a wide parameter of a block but the entry as its parts.
         for k in 0..b.blocks.len() {

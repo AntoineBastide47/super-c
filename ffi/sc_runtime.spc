@@ -1858,14 +1858,19 @@ fn stack_veh(ep: *mut EXCEPTION_POINTERS) i32 {
     if want < floor {
         // Room for the report, as the kernel gives it on its own path; it reports whether or not this
         // commits.
-        unsafe VirtualAlloc((dealloc + pg) as *mut void, limit - (dealloc + pg), MEM_COMMIT, PAGE_READWRITE);
+        unsafe VirtualAlloc(
+            ptr::from_addr_mut::<void>(dealloc + pg),
+            limit - (dealloc + pg),
+            MEM_COMMIT,
+            PAGE_READWRITE,
+        );
         unsafe rt_stack_overflow();
     }
-    if unsafe VirtualAlloc(want as *mut void, limit - want, MEM_COMMIT, PAGE_READWRITE) == null {
+    if unsafe VirtualAlloc(ptr::from_addr_mut::<void>(want), limit - want, MEM_COMMIT, PAGE_READWRITE) == null {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     if want - pg >= floor {
-        unsafe VirtualAlloc((want - pg) as *mut void, pg, MEM_COMMIT, PAGE_READWRITE | PAGE_GUARD);
+        unsafe VirtualAlloc(ptr::from_addr_mut::<void>(want - pg), pg, MEM_COMMIT, PAGE_READWRITE | PAGE_GUARD);
     }
     teb_write(TEB_STACK_LIMIT, want); // the switch saves this, so the growth travels with the task
     return EXCEPTION_CONTINUE_EXECUTION;
@@ -2574,7 +2579,7 @@ pub unsafe fn sc_rt_ctx_init(ctx: *mut void, stack: *mut void, size: usize, entr
     let base = stack as usize;
     let top = base + size & ~15usize;
     // 264 bytes of frame plus the return address above it, keeping the forged sp 16-aligned.
-    let f = (top - 272) as *mut *mut void;
+    let f = ptr::from_addr_mut::<*mut void>(top - 272);
     for i in 0..34 {
         unsafe f[i] = null;
     }
@@ -2583,10 +2588,10 @@ pub unsafe fn sc_rt_ctx_init(ctx: *mut void, stack: *mut void, size: usize, entr
     save_fpctl(unsafe (f + 31)); // MXCSR + x87 control word
     unsafe f[24] = body.p; // r12
     unsafe f[25] = arg; // r13
-    unsafe f[28] = top as *mut void; // StackBase: the high end this coroutine runs on
-    unsafe f[29] = stk_initial_limit(base, size, pg) as *mut void; // StackLimit: lowest COMMITTED byte
-    unsafe f[30] = (base - pg) as *mut void; // DeallocationStack: the reservation, guard page included
-    unsafe f[32] = STK_GUARANTEE as *mut void; // GuaranteedStackBytes, read as its low 4 bytes
+    unsafe f[28] = ptr::from_addr_mut::<void>(top); // StackBase: the high end this coroutine runs on
+    unsafe f[29] = ptr::from_addr_mut::<void>(stk_initial_limit(base, size, pg)); // StackLimit: lowest COMMITTED byte
+    unsafe f[30] = ptr::from_addr_mut::<void>(base - pg); // DeallocationStack: the reservation, guard page included
+    unsafe f[32] = ptr::from_addr_mut::<void>(STK_GUARANTEE); // GuaranteedStackBytes, read as its low 4 bytes
     unsafe f[33] = tramp.p; // the return address of the trailing `ret`
     // The ONLY reader of this frame is the switch, which the optimizer cannot see: it would otherwise
     // delete these stores as dead.

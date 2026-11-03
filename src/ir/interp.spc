@@ -1264,7 +1264,7 @@ pub(package) fn interp_master(pkg: *const loader::Package, steps: u32, mem: u64)
 // The type node of field ordinal `ord` of aggregate `dn` (a tuple member is its own type node);
 // NODE_NONE when out of range.
 fn field_type_node(a: &Ast, dn: NodeId, ord: u32) NodeId {
-    let agg = a.ext(dn).aggregate;
+    let agg = unsafe a.ext(dn).aggregate;
     let mut oi: u32 = 0;
     for i in 0..agg.members.len {
         let fid = unsafe a.list(agg.members)[i as usize];
@@ -2421,7 +2421,7 @@ extend Interp {
         if y.kind != TypeKind::TYPE_BUILTIN {
             return false;
         }
-        *out = y.as_data.builtin;
+        *out = unsafe y.as_data.builtin;
         return true;
     }
 
@@ -2596,7 +2596,7 @@ extend Interp {
             let xm = cands.at(ci0).module as usize;
             let iid = cands.at(ci0).node;
             let xa = unsafe &*self.p().module_syntax(xm as ModuleId);
-            let ed = xa.ext(iid).extend_def;
+            let ed = unsafe xa.ext(iid).extend_def;
             let bp = ext_blanket_syn(xa, xm as ModuleId, iid);
             if bp < 0 {
                 continue;
@@ -2876,7 +2876,7 @@ extend Interp {
         let a = unsafe &*self.p().module_ast_const(m);
         let y = *a.type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
-            let b = y.as_data.builtin;
+            let b = unsafe y.as_data.builtin;
             if b == BuiltinType::BT_BOOL {
                 return iv_bool(m, t, false);
             }
@@ -2933,7 +2933,7 @@ extend Interp {
                 return none();
             }
             // A union's zero is its first member's, as C's static initialization.
-            let is_union = da.ext(dn).aggregate.is_union;
+            let is_union = unsafe da.ext(dn).aggregate.is_union;
             if self.user_free(dm, dn) {
                 return none();
             }
@@ -3900,7 +3900,7 @@ extend Interp {
                 let mut rb = BuiltinType::BT_COUNT;
                 let yr = *(unsafe &*self.p().module_ast_const(sm2)).type_at(st2);
                 if yr.kind == TypeKind::TYPE_BUILTIN {
-                    rb = yr.as_data.builtin;
+                    rb = unsafe yr.as_data.builtin;
                 } else if !self.recv_of(sm2, st2, &mut rdm, &mut rdn, &mut rn, &mut ram[0], &mut rat[0]) {
                     return self.fail();
                 }
@@ -4626,7 +4626,7 @@ extend Interp {
             return false;
         }
         let e = *a.type_at(y.as_data.elem);
-        return e.kind == TypeKind::TYPE_BUILTIN && (e.as_data.builtin == BuiltinType::BT_U8 || e.as_data.builtin == BuiltinType::BT_I8 || e.as_data.builtin == BuiltinType::BT_CHAR);
+        return e.kind == TypeKind::TYPE_BUILTIN && (unsafe e.as_data.builtin == BuiltinType::BT_U8 || unsafe e.as_data.builtin == BuiltinType::BT_I8 || unsafe e.as_data.builtin == BuiltinType::BT_CHAR);
     }
 
     // memcpy, or memmove when `mv`: an overlapping move copies from the end down when the
@@ -4776,7 +4776,7 @@ extend Interp {
     /// Field/tuple-member count of aggregate decl `(dm, dn)` -- `type_info::<T>().fields.len`.
     pub(package) fn field_count(self: &Self, dm: ModuleId, dn: NodeId) u32 {
         let a = unsafe &*self.p().module_ast_const(dm);
-        let is_tuple = a.ext(dn).aggregate.is_tuple;
+        let is_tuple = unsafe a.ext(dn).aggregate.is_tuple;
         let ms = a.ext(dn).aggregate.members;
         let mut n: u32 = 0;
         for i in 0..ms.len {
@@ -4805,7 +4805,7 @@ extend Interp {
             }
             return -1;
         }
-        let is_tuple = a.ext(owner).aggregate.is_tuple;
+        let is_tuple = unsafe a.ext(owner).aggregate.is_tuple;
         let mut ord: i64 = 0;
         for i in 0..ms.len {
             let fid = unsafe a.list(ms)[i as usize];
@@ -4976,7 +4976,7 @@ extend Interp {
         if a.at_const(cnode).kind != NodeKind::NODE_CONST {
             return self.bail();
         }
-        let cd = a.at_const(cnode).as_data.const_def;
+        let cd = unsafe a.at_const(cnode).as_data.const_def;
         if cd.value == NODE_NONE || cd.is_extern || cd.is_static_mut {
             return self.bail();
         }
@@ -5231,7 +5231,7 @@ extend Interp {
             if !self.bind_extend(&mut binds, m, ext, n as u8, am, at) {
                 return self.bail();
             }
-        } else if ca.at_const(cnode).as_data.const_def.is_local {
+        } else if unsafe ca.at_const(cnode).as_data.const_def.is_local {
             for i in 0..n {
                 if unsafe pn[i] == NODE_NONE || !self.subst_add(
                     &mut binds,
@@ -5311,7 +5311,7 @@ extend Interp {
         let key = it.module as u64 << 32 | it.node as u64;
         let nd = (unsafe &*self.p().module_ast_const(it.module)).at_const(it.node);
         let is_const = nd.kind == NodeKind::NODE_CONST;
-        let is_static = is_const && nd.as_data.const_def.is_static_mut;
+        let is_static = is_const && unsafe nd.as_data.const_def.is_static_mut;
         switch self.item_cells.get(&key) {
             Some(c) => {
                 // a cell a rolled-back speculation created is gone, or its id names another object
@@ -5396,7 +5396,7 @@ extend Interp {
 
     fn item_queue(self: &mut Self, d: DefId, work: &mut Vector<u64>, ready: &mut Vector<bool>) {
         let nd = (unsafe &*self.p().module_ast_const(d.module)).at_const(d.node);
-        if nd.kind != NodeKind::NODE_CONST || nd.as_data.const_def.value == NODE_NONE || nd.as_data.const_def.is_extern || nd.as_data.const_def.is_static_mut {
+        if nd.kind != NodeKind::NODE_CONST || nd.as_data.const_def.value == NODE_NONE || unsafe nd.as_data.const_def.is_extern || unsafe nd.as_data.const_def.is_static_mut {
             return;
         }
         let key = d.module as u64 << 32 | d.node as u64;
@@ -6330,7 +6330,7 @@ extend Interp {
 
     const fn is_union_decl(self: &Self, dm: ModuleId, dn: NodeId) bool {
         let a = unsafe &*self.p().module_ast_const(dm);
-        return a.at_const(dn).kind == NodeKind::NODE_STRUCT && a.ext(dn).aggregate.is_union;
+        return a.at_const(dn).kind == NodeKind::NODE_STRUCT && unsafe a.ext(dn).aggregate.is_union;
     }
 
     // ---- operands and rvalues ---------------------------------------------------------------------
@@ -8648,7 +8648,7 @@ extend Interp {
             return self.bail();
         }
         let ey = *(unsafe &*self.p().module_ast_const(em)).type_at(et);
-        if ey.kind == TypeKind::TYPE_BUILTIN && ey.as_data.builtin == BuiltinType::BT_VOID {
+        if ey.kind == TypeKind::TYPE_BUILTIN && unsafe ey.as_data.builtin == BuiltinType::BT_VOID {
             return out;
         }
         let blk = self.obj_ptr(pv_obj(v));
@@ -8758,7 +8758,7 @@ extend Interp {
             return true;
         }
         let sy = *(unsafe &*self.p().module_ast_const(sm)).type_at(st);
-        if sy.kind != TypeKind::TYPE_BUILTIN || sy.as_data.builtin == BuiltinType::BT_VOID {
+        if sy.kind != TypeKind::TYPE_BUILTIN || unsafe sy.as_data.builtin == BuiltinType::BT_VOID {
             return true;
         }
         return self.teq(sm, st, em, et) || self.is_ubyte(sm, st) && self.is_ubyte(em, et);
@@ -8768,7 +8768,7 @@ extend Interp {
     // other's storage with the same values.
     const fn is_ubyte(self: &Self, m: ModuleId, t: TypeId) bool {
         let y = *(unsafe &*self.p().module_ast_const(m)).type_at(t);
-        return y.kind == TypeKind::TYPE_BUILTIN && (y.as_data.builtin == BuiltinType::BT_U8 || y.as_data.builtin == BuiltinType::BT_CHAR);
+        return y.kind == TypeKind::TYPE_BUILTIN && (unsafe y.as_data.builtin == BuiltinType::BT_U8 || unsafe y.as_data.builtin == BuiltinType::BT_CHAR);
     }
 
     // Structural type equality across module pools.
@@ -8784,7 +8784,7 @@ extend Interp {
             return false;
         }
         if a.kind == TypeKind::TYPE_BUILTIN {
-            return a.as_data.builtin == b.as_data.builtin;
+            return unsafe a.as_data.builtin == unsafe b.as_data.builtin;
         }
         if a.kind == TypeKind::TYPE_CONST {
             return a.as_data.value == b.as_data.value && a.qualifier == b.qualifier;
@@ -8918,7 +8918,7 @@ extend Interp {
             let xm = cands.at(ci0).module as usize;
             let iid = cands.at(ci0).node;
             let xa = unsafe &*self.p().module_syntax(xm as ModuleId);
-            let ed = xa.ext(iid).extend_def;
+            let ed = unsafe xa.ext(iid).extend_def;
             let tg = xa.resolution_def(ed.target_type);
             if tg.module != rdm || tg.node != rdn {
                 continue;
@@ -9024,7 +9024,7 @@ extend Interp {
             unsafe gp[gn as usize] = DefId { module: it.module, node: unsafe da.list(gens)[gn as usize] };
             gn += 1;
         }
-        let is_tuple = da.ext(it.decl).aggregate.is_tuple;
+        let is_tuple = unsafe da.ext(it.decl).aggregate.is_tuple;
         let ms = da.ext(it.decl).aggregate.members;
         let mut tns = Vector::<NodeId>::new();
         for i in 0..ms.len {
@@ -9140,7 +9140,7 @@ extend Interp {
         let mut ram: [ModuleId; OBJ_ARGS] = [[0] = 0];
         let mut rat: [TypeId; OBJ_ARGS] = [[0] = TYPE_NONE];
         if y.kind == TypeKind::TYPE_BUILTIN {
-            rb = y.as_data.builtin;
+            rb = unsafe y.as_data.builtin;
         } else if !self.recv_of(m, t, &mut rdm, &mut rdn, &mut rn, &mut ram[0], &mut rat[0]) {
             rdn = NODE_NONE;
         }
@@ -9262,7 +9262,7 @@ extend Interp {
                 if xa.at_const(iid).kind != NodeKind::NODE_EXTEND {
                     continue;
                 }
-                let ed = xa.ext(iid).extend_def;
+                let ed = unsafe xa.ext(iid).extend_def;
                 if ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE {
                     continue;
                 }
@@ -9369,14 +9369,14 @@ extend Interp {
         for i in 0..cands.len() {
             let c = *cands.at(i);
             let a = unsafe &*self.p().module_syntax(c.module);
-            let ed = a.ext(c.node).extend_def;
+            let ed = unsafe a.ext(c.node).extend_def;
             let mut hit = false;
             if rdn != NODE_NONE {
                 let tg = a.resolution_def(ed.target_type);
                 hit = tg.module == rdm && tg.node == rdn;
             } else {
                 let tt = self.tof(c.module, a, ed.target_type);
-                hit = tt != TYPE_NONE && a.type_at(tt).kind == TypeKind::TYPE_BUILTIN && a.type_at(tt).as_data.builtin == rb;
+                hit = tt != TYPE_NONE && a.type_at(tt).kind == TypeKind::TYPE_BUILTIN && unsafe a.type_at(tt).as_data.builtin == rb;
             }
             if hit {
                 out.push(c);
@@ -9440,7 +9440,7 @@ extend Interp {
                 if a.at_const(iid).kind != NodeKind::NODE_EXTEND {
                     continue;
                 }
-                let ed = a.ext(iid).extend_def;
+                let ed = unsafe a.ext(iid).extend_def;
                 if ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE {
                     continue;
                 }
@@ -9584,7 +9584,7 @@ extend Interp {
                     let tt = self.tof(mm, a, target);
                     if tt != TYPE_NONE {
                         let ty = a.type_at(tt);
-                        match_recv = ty.kind == TypeKind::TYPE_BUILTIN && ty.as_data.builtin == rb;
+                        match_recv = ty.kind == TypeKind::TYPE_BUILTIN && unsafe ty.as_data.builtin == rb;
                     }
                 }
                 if !match_recv {
@@ -10363,7 +10363,7 @@ extend Interp {
             }
             return fx_meet(c, self.fx_scan_body(m, owner, n.as_data.while_stmt.body, depth + 1));
         }
-        let d = a.ext(id).for_stmt;
+        let d = unsafe a.ext(id).for_stmt;
         let mut acc = self.fx_scan_expr(m, owner, d.iterable, depth + 1, true);
         if acc == FX_NO {
             return FX_NO;
@@ -10469,9 +10469,9 @@ extend Interp {
                         if d.node == NODE_NONE || (unsafe &*self.p().module_ast_const(d.module)).at_const(d.node).kind != NodeKind::NODE_VARIANT {
                             return FX_MAYBE;
                         }
-                        if n.kind == NodeKind::NODE_PATTERN_STRUCT && !(unsafe &*self.p().module_ast_const(d.module)).at_const(
-                            d.node,
-                        ).as_data.variant.struct_payload {
+                        if n.kind == NodeKind::NODE_PATTERN_STRUCT && !unsafe (unsafe &*self.p().module_ast_const(
+                            d.module,
+                        )).at_const(d.node).as_data.variant.struct_payload {
                             return FX_MAYBE;
                         }
                     }
@@ -10507,7 +10507,7 @@ extend Interp {
             },
             NODE_IDENTIFIER => {
                 let d = a.resolution_def(id);
-                if d.node != NODE_NONE && (unsafe &*self.p().module_ast_const(d.module)).at_const(d.node).kind == NodeKind::NODE_CONST && (unsafe &*self.p().module_ast_const(
+                if d.node != NODE_NONE && (unsafe &*self.p().module_ast_const(d.module)).at_const(d.node).kind == NodeKind::NODE_CONST && unsafe (unsafe &*self.p().module_ast_const(
                     d.module,
                 )).at_const(d.node).as_data.const_def.is_static_mut {
                     return self.fx_disq(m, owner, id, "accesses a 'static mut'", deep);
@@ -10515,9 +10515,9 @@ extend Interp {
                 return FX_YES;
             },
             NODE_MEMBER => {
-                if n.as_data.member.path {
+                if unsafe n.as_data.member.path {
                     let d = a.resolution_def(id);
-                    if d.node != NODE_NONE && (unsafe &*self.p().module_ast_const(d.module)).at_const(d.node).kind == NodeKind::NODE_CONST && (unsafe &*self.p().module_ast_const(
+                    if d.node != NODE_NONE && (unsafe &*self.p().module_ast_const(d.module)).at_const(d.node).kind == NodeKind::NODE_CONST && unsafe (unsafe &*self.p().module_ast_const(
                         d.module,
                     )).at_const(d.node).as_data.const_def.is_static_mut {
                         return self.fx_disq(m, owner, id, "accesses a 'static mut'", deep);
@@ -10725,7 +10725,7 @@ extend Interp {
             acc = FX_MAYBE; // calls cap at 8 slots (receiver + args)
         }
         let mut is_path = ck == NodeKind::NODE_IDENTIFIER;
-        if ck == NodeKind::NODE_MEMBER && a.at_const(callee).as_data.member.path {
+        if ck == NodeKind::NODE_MEMBER && unsafe a.at_const(callee).as_data.member.path {
             is_path = true;
         }
         if !is_path {
@@ -11519,7 +11519,7 @@ extend Interp {
         let a0 = unsafe &*self.p().module_ast_const(tm);
         let y = *a0.type_at(tt);
         if y.kind == TypeKind::TYPE_BUILTIN {
-            switch y.as_data.builtin {
+            switch unsafe y.as_data.builtin {
                 BT_VOID => {
                     return 0;
                 },
@@ -11602,10 +11602,10 @@ extend Interp {
             if d.kind != NodeKind::NODE_STRUCT {
                 return 0 - 1;
             }
-            if (unsafe &*self.p().module_ast_const(dm)).ext(dn).aggregate.is_union {
+            if unsafe (unsafe &*self.p().module_ast_const(dm)).ext(dn).aggregate.is_union {
                 return 14;
             }
-            if (unsafe &*self.p().module_ast_const(dm)).ext(dn).aggregate.is_tuple {
+            if unsafe (unsafe &*self.p().module_ast_const(dm)).ext(dn).aggregate.is_tuple {
                 return 12;
             }
             return 13;
@@ -12290,7 +12290,7 @@ extend Interp {
         let yd = self.nominal(tm, tt);
         let mut nm = "";
         if y.kind == TypeKind::TYPE_BUILTIN {
-            nm = bt_name(y.as_data.builtin);
+            nm = bt_name(unsafe y.as_data.builtin);
         } else if yd.node != NODE_NONE {
             let na = unsafe &*self.p().module_ast_const(yd.module);
             let sp = na.at_const(na.ext_name(yd.node)).as_data.name.text;
@@ -12316,7 +12316,7 @@ extend Interp {
                 return none();
             }
             let da2 = unsafe &*self.p().module_ast_const(dm2);
-            let agg = da2.ext(dn2).aggregate;
+            let agg = unsafe da2.ext(dn2).aggregate;
             let is_tuple = agg.is_tuple;
             let fs = agg.members;
             let mut fobjs = Vector::<IVal>::new();
@@ -12428,7 +12428,7 @@ extend Interp {
             let dn3 = yd.node;
             let mut bb2 = BuiltinType::BT_COUNT;
             if y.kind == TypeKind::TYPE_BUILTIN {
-                bb2 = y.as_data.builtin;
+                bb2 = unsafe y.as_data.builtin;
             }
             if dn3 != NODE_NONE || bb2 != BuiltinType::BT_COUNT {
                 let mut hobjs = Vector::<IVal>::new();
@@ -12460,7 +12460,7 @@ extend Interp {
                             let tt2 = self.tof(qm, qa, target);
                             if tt2 != TYPE_NONE {
                                 let ty2 = qa.type_at(tt2);
-                                match_recv = ty2.kind == TypeKind::TYPE_BUILTIN && ty2.as_data.builtin == bb2;
+                                match_recv = ty2.kind == TypeKind::TYPE_BUILTIN && unsafe ty2.as_data.builtin == bb2;
                             }
                         }
                         if !match_recv {

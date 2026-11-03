@@ -858,7 +858,7 @@ fn simp_lit_typed(a: &Ast, src: str, ty: NodeId, v: NodeId) bool {
     if ast_numeric_suffix(src, raw.start, raw.end, &mut sfx) != BuiltinType::BT_COUNT {
         return false;
     }
-    let tk = n.as_data.literal.token_type;
+    let tk = unsafe n.as_data.literal.token_type;
     let ts = a.at_const(ty).span;
     let t = src.slice(ts.start as usize, ts.end as usize);
     return tk == IntegerLiteral && t != "i32" || tk == FloatLiteral && t != "f64";

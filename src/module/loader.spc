@@ -882,7 +882,7 @@ fn named_node(a: &Ast, n0: NodeId) NodeId {
     let mut n = n0;
     loop {
         let nd = a.at_const(n);
-        if nd.kind == NodeKind::NODE_UNARY && (nd.as_data.unary.op == tt::TokenType::Ampersand || nd.as_data.unary.op == tt::TokenType::Move || nd.as_data.unary.op == tt::TokenType::Unsafe) {
+        if nd.kind == NodeKind::NODE_UNARY && (unsafe nd.as_data.unary.op == tt::TokenType::Ampersand || unsafe nd.as_data.unary.op == tt::TokenType::Move || unsafe nd.as_data.unary.op == tt::TokenType::Unsafe) {
             n = nd.as_data.unary.operand;
         } else if nd.kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
             n = nd.as_data.specialization.expression;
@@ -923,7 +923,7 @@ const fn site_arg(a: &Ast, ni: NodeId, p: u32) NodeId {
     let cd = a.at_const(ni).as_data.call;
     let c = a.at_const(cd.callee);
     let mut i = p;
-    if c.kind == NodeKind::NODE_MEMBER && !c.as_data.member.path {
+    if c.kind == NodeKind::NODE_MEMBER && !unsafe c.as_data.member.path {
         if p == 0 {
             return NODE_NONE;
         }
@@ -938,7 +938,7 @@ const fn site_arg(a: &Ast, ni: NodeId, p: u32) NodeId {
 // Is call `ni` a method call through a `dyn` receiver (behind references and pointers)?
 fn dyn_receiver(a: &Ast, ni: NodeId) bool {
     let c = a.at_const(a.at_const(ni).as_data.call.callee);
-    if c.kind != NodeKind::NODE_MEMBER || c.as_data.member.path {
+    if c.kind != NodeKind::NODE_MEMBER || unsafe c.as_data.member.path {
         return false;
     }
     let mut t = a.type_of(c.as_data.member.object);
@@ -998,7 +998,7 @@ fn agg_op_name(a: &Ast, n: &Node) str<'static> {
     if k != TypeKind::TYPE_STRUCT && k != TypeKind::TYPE_INSTANCE && k != TypeKind::TYPE_ENUM && k != TypeKind::TYPE_GENERIC && k != TypeKind::TYPE_MASK {
         return "";
     }
-    let op = n.as_data.binary.op;
+    let op = unsafe n.as_data.binary.op;
     if op == tt::TokenType::EqualEqual || op == tt::TokenType::BangEqual {
         return "eq";
     }
@@ -3397,7 +3397,7 @@ extend Package {
         if n.kind != NodeKind::NODE_BINARY {
             return -1;
         }
-        let b = n.as_data.binary;
+        let b = unsafe n.as_data.binary;
         if b.op == tt::TokenType::AmpersandAmpersand || b.op == tt::TokenType::PipePipe {
             let l = self.bc_eval(mi, b.left);
             let r = self.bc_eval(mi, b.right);
@@ -3441,7 +3441,7 @@ extend Package {
             if xn.kind != NodeKind::NODE_LITERAL {
                 return -1;
             }
-            let t = xn.as_data.literal.token_type;
+            let t = unsafe xn.as_data.literal.token_type;
             let v = if t == tt::TokenType::True {
                 1
             } else if t == tt::TokenType::False {
@@ -3457,7 +3457,7 @@ extend Package {
                 (v == cur) as i32
             };
         }
-        if xn.kind != NodeKind::NODE_MEMBER || !xn.as_data.member.path {
+        if xn.kind != NodeKind::NODE_MEMBER || !unsafe xn.as_data.member.path {
             return -1;
         }
         let sp = a.at_const(xn.as_data.member.member).as_data.name.text;
@@ -4136,7 +4136,7 @@ extend Package {
             } else if nk == NodeKind::NODE_FOR {
                 sites.push(ni);
                 site_named.push(0);
-            } else if !spar && nk == NodeKind::NODE_UNARY && n.as_data.unary.op == tt::TokenType::Question {
+            } else if !spar && nk == NodeKind::NODE_UNARY && unsafe n.as_data.unary.op == tt::TokenType::Question {
                 sites.push(ni);
                 site_named.push(1);
             } else if nk == NodeKind::NODE_BINARY || nk == NodeKind::NODE_ASSIGNMENT {
@@ -4147,7 +4147,7 @@ extend Package {
             } else if nk != NodeKind::NODE_CALL {
                 // The type test first and without a branch on TYPE_NONE (it reads slot 0, the
                 // error type): it is rarely true, while the kind tests are not.
-                if !spar && a.type_at(a.type_of(ni)).kind == TypeKind::TYPE_FUNCTION && (nk == NodeKind::NODE_IDENTIFIER || nk == NodeKind::NODE_MEMBER && n.as_data.member.path || nk == NodeKind::NODE_GENERIC_SPECIALIZATION) {
+                if !spar && a.type_at(a.type_of(ni)).kind == TypeKind::TYPE_FUNCTION && (nk == NodeKind::NODE_IDENTIFIER || nk == NodeKind::NODE_MEMBER && unsafe n.as_data.member.path || nk == NodeKind::NODE_GENERIC_SPECIALIZATION) {
                     sites.push(ni);
                     site_named.push(1);
                 }
@@ -6347,7 +6347,7 @@ extend Package {
             it.decl = y.as_data.decl;
         } else if unsafe (*da).targs_of(t, &mut it) {} else if y.kind == TypeKind::TYPE_BUILTIN {
             it.module = self.core_module;
-            it.decl = self.builtin_decl(y.as_data.builtin);
+            it.decl = self.builtin_decl(unsafe y.as_data.builtin);
         }
         if it.decl == NODE_NONE {
             // A type parameter, `dyn`, a reference, a pointer, an array: conformances the checker
@@ -6501,7 +6501,7 @@ extend Package {
             it.decl = y.as_data.decl;
         } else if unsafe (*da).targs_of(ai.args[0], &mut it) {} else if y.kind == TypeKind::TYPE_BUILTIN {
             it.module = self.core_module;
-            it.decl = self.builtin_decl(y.as_data.builtin);
+            it.decl = self.builtin_decl(unsafe y.as_data.builtin);
         }
         let ia = self.module_ast_const(ai.module);
         let iface = iface_of_member(unsafe &*ia, ai.decl);
@@ -7366,8 +7366,8 @@ extend Package {
             let d = ast.at_const(im.node);
             let ext = switch d.kind {
                 NODE_FUNCTION => ast.ext(im.node).function.is_extern(),
-                NODE_STRUCT | NODE_ENUM => ast.ext(im.node).aggregate.is_extern,
-                NODE_CONST => d.as_data.const_def.is_extern,
+                NODE_STRUCT | NODE_ENUM => unsafe ast.ext(im.node).aggregate.is_extern,
+                NODE_CONST => unsafe d.as_data.const_def.is_extern,
                 _ => false,
             };
             if !ext {
@@ -7405,7 +7405,7 @@ extend Package {
                     if !dup {
                         idx.imports.push(c as ModuleId);
                     }
-                    let mut gdup = !n.as_data.import_decl.glob;
+                    let mut gdup = !unsafe n.as_data.import_decl.glob;
                     for e in idx.mod_globs[m] as usize..idx.globs.len() {
                         gdup = gdup || idx.globs[e] == c as ModuleId;
                     }

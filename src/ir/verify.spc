@@ -112,7 +112,7 @@ const fn op_mark(b: &ir::CoreBody, marks: &Vector<u8>, opid: u32) u8 {
 // The width in bits of a vector type's lanes, 0 when symbolic.
 const fn lane_bits(da: &Ast, y: &Ty) u64 {
     let e = *da.type_at(y.as_data.arr.elem);
-    return pick(e.kind == TypeKind::TYPE_BUILTIN, bt_lane_bits(e.as_data.builtin), 0u32);
+    return pick(e.kind == TypeKind::TYPE_BUILTIN, bt_lane_bits(unsafe e.as_data.builtin), 0u32);
 }
 
 // The lane class of a vector type's lanes: 1 signed integer, 2 unsigned integer, 3 float, 0 symbolic.
@@ -121,7 +121,7 @@ const fn lane_class(da: &Ast, y: &Ty) u8 {
     if e.kind != TypeKind::TYPE_BUILTIN {
         return 0;
     }
-    let bt = e.as_data.builtin;
+    let bt = unsafe e.as_data.builtin;
     if bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64 {
         return 3;
     }
@@ -304,9 +304,9 @@ fn lane_rules(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue, tys: &[TypeId; 4], v: 
         ir::SR_DOT => {
             // A scalar of the lanes' kind, at least as wide.
             let k = lane_class(da, v);
-            let fl = scalar && (res.as_data.builtin == BuiltinType::BT_F32 || res.as_data.builtin == BuiltinType::BT_F64);
+            let fl = scalar && (unsafe res.as_data.builtin == BuiltinType::BT_F32 || unsafe res.as_data.builtin == BuiltinType::BT_F64);
             return tys[1] == vt && (!scalar && k == 0 || scalar && (k == 0 || k == 3 == fl && bt_lane_bits(
-                res.as_data.builtin,
+                unsafe res.as_data.builtin,
             ) as u64 >= lane_bits(da, v)));
         },
         _ => {
@@ -609,7 +609,7 @@ pub(package) fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::
                 let ok = if r.b == ir::CAST_SIMD_ARRAY {
                     v.kind == TypeKind::TYPE_SIMD && o.kind == TypeKind::TYPE_ARRAY && o.as_data.arr.elem == v.as_data.arr.elem
                 } else {
-                    v.kind == TypeKind::TYPE_MASK && o.kind == TypeKind::TYPE_BUILTIN && o.as_data.builtin == BuiltinType::BT_U64
+                    v.kind == TypeKind::TYPE_MASK && o.kind == TypeKind::TYPE_BUILTIN && unsafe o.as_data.builtin == BuiltinType::BT_U64
                 };
                 if !ok {
                     fail = "cast-types";

@@ -1099,7 +1099,7 @@ extend CEmit {
             rit.decl = y.as_data.decl;
         } else if unsafe (*self.p().module_ast_const(rm)).targs_of(rt, &mut rit) {} else if y.kind == TypeKind::TYPE_BUILTIN {
             rit.module = self.p().core_module;
-            rit.decl = self.p().builtin_decl(y.as_data.builtin);
+            rit.decl = self.p().builtin_decl(unsafe y.as_data.builtin);
         }
         if rit.decl == NODE_NONE {
             return none;
@@ -1651,7 +1651,7 @@ extend CEmit {
             // Never-typed temps hold no value (their writers do not return).
             return true;
         }
-        return y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_VOID;
+        return y.kind == TypeKind::TYPE_BUILTIN && unsafe y.as_data.builtin == BuiltinType::BT_VOID;
     }
 
     // A body value with no C storage: unit-like (no value exists) or zero-sized (the value exists
@@ -1664,7 +1664,7 @@ extend CEmit {
         }
         let y = *unsafe (*self.p().module_ast_const(b.module)).type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
-            return y.as_data.builtin == BuiltinType::BT_VOID;
+            return unsafe y.as_data.builtin == BuiltinType::BT_VOID;
         }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_FUNCTION || y.kind == TypeKind::TYPE_DYN {
             return false;
@@ -3441,7 +3441,7 @@ extend CEmit {
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
             return true;
         }
-        return y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin != BuiltinType::BT_VOID;
+        return y.kind == TypeKind::TYPE_BUILTIN && unsafe y.as_data.builtin != BuiltinType::BT_VOID;
     }
 
     // Pure, scalar rvalue kinds whose result is a self-contained C expression (parenthesized or
@@ -5237,7 +5237,7 @@ extend CEmit {
         if y.kind == TypeKind::TYPE_NEVER || y.kind == TypeKind::TYPE_ARRAY && self.arr_n(b, t) <= 0 {
             return false;
         }
-        return !(y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_VOID);
+        return !(y.kind == TypeKind::TYPE_BUILTIN && unsafe y.as_data.builtin == BuiltinType::BT_VOID);
     }
 
     // Whether statement `si` (`dst = src`, both vectors) runs right after the one definition of
@@ -5966,7 +5966,7 @@ extend CEmit {
                 return false;
             }
             let n = unsafe (*self.p().module_ast_const(d.item.module)).at_const(d.item.node);
-            return n.kind == NodeKind::NODE_FUNCTION || n.kind == NodeKind::NODE_GENERIC_PARAM || n.kind == NodeKind::NODE_CONST && !n.as_data.const_def.is_static_mut && !n.as_data.const_def.is_extern;
+            return n.kind == NodeKind::NODE_FUNCTION || n.kind == NodeKind::NODE_GENERIC_PARAM || n.kind == NodeKind::NODE_CONST && !unsafe n.as_data.const_def.is_static_mut && !unsafe n.as_data.const_def.is_extern;
         }
         if esc[l as usize] || self.cap_on && l >= self.cap_base && l < b.returns + b.args {
             return false;
@@ -6859,7 +6859,7 @@ extend CEmit {
             return false;
         }
         let y = self.rty_y(b, t);
-        return y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_BOOL;
+        return y.kind == TypeKind::TYPE_BUILTIN && unsafe y.as_data.builtin == BuiltinType::BT_BOOL;
     }
 
     // The condition text without one redundant enclosing paren pair. An inlined comparison already
@@ -6905,7 +6905,7 @@ extend CEmit {
             return v;
         }
         let y = self.rty_y(b, ty);
-        if y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin as u8 >= BuiltinType::BT_I8 as u8 && y.as_data.builtin as u8 <= BuiltinType::BT_ISIZE as u8 {
+        if y.kind == TypeKind::TYPE_BUILTIN && (unsafe y.as_data.builtin) as u8 >= BuiltinType::BT_I8 as u8 && (unsafe y.as_data.builtin) as u8 <= BuiltinType::BT_ISIZE as u8 {
             return v - 4294967296;
         }
         return v;
@@ -8437,7 +8437,7 @@ extend CEmit {
             self.mg.ident(am, unsafe (*ea).at_const(vn.as_data.variant.name).as_data.name.text, &mut mem);
             mem.push_str(".");
             let pid = unsafe (*ea).list(pl)[i as usize];
-            if vn.as_data.variant.struct_payload && unsafe (*ea).at_const(pid).kind == NodeKind::NODE_FIELD {
+            if unsafe vn.as_data.variant.struct_payload && unsafe (*ea).at_const(pid).kind == NodeKind::NODE_FIELD {
                 self.mg.ident(
                     am,
                     unsafe (*ea).at_const(unsafe (*ea).at_const(pid).as_data.field.name).as_data.name.text,
@@ -9282,7 +9282,7 @@ extend CEmit {
         self.rty(b, rv.target, &mut rm, &mut rt);
         let ry = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
         if ry.kind == TypeKind::TYPE_BUILTIN {
-            rbt = ry.as_data.builtin;
+            rbt = unsafe ry.as_data.builtin;
         } else {
             let _ = self.vec_ty(b, rv.target, &mut rn, &mut rbt);
         }
@@ -10223,7 +10223,7 @@ extend CEmit {
             self.rty(b, rv.target, &mut rm, &mut rt);
             let ry = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
             if ry.kind == TypeKind::TYPE_BUILTIN {
-                r = ry.as_data.builtin;
+                r = unsafe ry.as_data.builtin;
             } else {
                 let mut rn: i64 = 0;
                 if !self.vec_ty(b, rv.target, &mut rn, &mut r) {
@@ -11538,7 +11538,7 @@ extend CEmit {
                 return v == 0 || v == ~0u64 >> (64 - n) as u64;
             }
             let y = b.places.at(st.place as usize).base;
-            let to_u64 = rv.kind == ir::RV_CAST && !cast && self.rty_y(b, rv.target).as_data.builtin == BuiltinType::BT_U64;
+            let to_u64 = rv.kind == ir::RV_CAST && !cast && unsafe self.rty_y(b, rv.target).as_data.builtin == BuiltinType::BT_U64;
             if b.places.at(st.place as usize).proj_len != 0 || self.ml_def[y as usize] != u || rv.kind != ir::RV_USE && !to_u64 {
                 return false;
             }
@@ -11567,7 +11567,7 @@ extend CEmit {
             let st = *b.statements.at(u as usize);
             let rv = *b.rvalues.at(st.rvalue as usize);
             let y = b.places.at(st.place as usize).base;
-            let to_u64 = rv.kind == ir::RV_CAST && !cast && self.rty_y(b, rv.target).as_data.builtin == BuiltinType::BT_U64;
+            let to_u64 = rv.kind == ir::RV_CAST && !cast && unsafe self.rty_y(b, rv.target).as_data.builtin == BuiltinType::BT_U64;
             if b.places.at(st.place as usize).proj_len != 0 || self.ml_def[y as usize] != u || rv.kind != ir::RV_USE && !to_u64 {
                 return ir::IR_NONE;
             }
@@ -11677,7 +11677,7 @@ extend CEmit {
             return false;
         }
         let y = self.rty_y(b, b.locals.at(pl.base as usize).ty);
-        let bt = y.as_data.builtin;
+        let bt = unsafe y.as_data.builtin;
         if y.kind != TypeKind::TYPE_BUILTIN || !bt_is_unsigned(bt) {
             return false;
         }
@@ -12439,13 +12439,13 @@ extend CEmit {
         if y.kind != TypeKind::TYPE_BUILTIN {
             return "";
         }
-        *bt = y.as_data.builtin;
+        *bt = unsafe y.as_data.builtin;
         if t != tt::TokenType::LeftShift && t != tt::TokenType::RightShift && t != tt::TokenType::LeftShiftEqual && t != tt::TokenType::RightShiftEqual {
             // An operand the checker widened (`i32 * i64`) computes at the result's width: a shift
             // keeps its left operand's type, every other scalar operator has the result's.
             let ty = self.rty_y(b, rv.target);
             if ty.kind == TypeKind::TYPE_BUILTIN {
-                *bt = ty.as_data.builtin;
+                *bt = unsafe ty.as_data.builtin;
             }
         }
         let op = switch t {
@@ -12657,7 +12657,7 @@ extend CEmit {
         let mut rt = TYPE_NONE;
         let _ = self.bin_op_ty(b, opid, &mut rm, &mut rt);
         let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
-        return y.kind == TypeKind::TYPE_BUILTIN && self.cmp_side_ty(y.as_data.builtin, s);
+        return y.kind == TypeKind::TYPE_BUILTIN && self.cmp_side_ty(unsafe y.as_data.builtin, s);
     }
 
     // The result of integer comparison `rv` when the range of one operand's C type decides it
@@ -13074,7 +13074,7 @@ extend CEmit {
             return; // an f32 literal is spelled with its suffix already
         }
         let py = *unsafe (*self.p().module_ast_const(pm)).type_at(pt);
-        if py.kind != TypeKind::TYPE_BUILTIN || py.as_data.builtin != BuiltinType::BT_F32 {
+        if py.kind != TypeKind::TYPE_BUILTIN || unsafe py.as_data.builtin != BuiltinType::BT_F32 {
             return;
         }
         let txt = self.const_src(b, &c).slice(c.raw.start as usize, c.raw.end as usize);
@@ -13101,7 +13101,7 @@ extend CEmit {
         if y.kind != TypeKind::TYPE_BUILTIN {
             return BT_VOID;
         }
-        return y.as_data.builtin;
+        return unsafe y.as_data.builtin;
     }
 
     // Peel references/pointers off `t` and answer the receiver instance when it instantiates the
@@ -13425,7 +13425,7 @@ extend CEmit {
     /// header-less block takes a declaration like any static.
     fn header_owned(self: &Self, item: DefId) bool {
         let idn = unsafe (*self.p().module_ast_const(item.module)).at_const(item.node);
-        return idn.kind == NodeKind::NODE_CONST && idn.as_data.const_def.is_extern && self.ext_backed.contains(
+        return idn.kind == NodeKind::NODE_CONST && unsafe idn.as_data.const_def.is_extern && self.ext_backed.contains(
             &skey_mix(0, item.module as u64 << 32 | item.node as u64),
         );
     }
@@ -13435,7 +13435,7 @@ extend CEmit {
     /// program binds with no header), so a binding takes its own key: it never hides the definition.
     fn stat_key(self: &Self, h: u64, item: DefId) u64 {
         let idn = unsafe (*self.p().module_ast_const(item.module)).at_const(item.node);
-        if idn.kind == NodeKind::NODE_CONST && idn.as_data.const_def.is_extern {
+        if idn.kind == NodeKind::NODE_CONST && unsafe idn.as_data.const_def.is_extern {
             return h ^ 0x9e3779b97f4a7c15;
         }
         return h;
@@ -13500,7 +13500,7 @@ extend CEmit {
     // struct may hold an `UnsafeCell`, a pointer would spell a const pointee).
     pub(package) fn stat_ro(self: &Self, item: DefId, em: ModuleId, ty: TypeId) bool {
         let cd = unsafe (*self.p().module_ast_const(item.module)).at_const(item.node);
-        if cd.kind != NodeKind::NODE_CONST || cd.as_data.const_def.is_static_mut || cd.as_data.const_def.is_extern {
+        if cd.kind != NodeKind::NODE_CONST || unsafe cd.as_data.const_def.is_static_mut || unsafe cd.as_data.const_def.is_extern {
             return false;
         }
         let ea = self.p().module_ast_const(em);
@@ -13511,7 +13511,7 @@ extend CEmit {
         }
         let y = *unsafe (*ea).type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
-            return y.as_data.builtin != BuiltinType::BT_VOID && y.as_data.builtin != BuiltinType::BT_VALIST;
+            return unsafe y.as_data.builtin != BuiltinType::BT_VOID && unsafe y.as_data.builtin != BuiltinType::BT_VALIST;
         }
         if y.kind == TypeKind::TYPE_ENUM {
             return !unsafe (*self.p().module_ast_const(y.module)).enum_has_payload(y.as_data.decl);
@@ -15888,7 +15888,7 @@ extend CEmit {
                     let aref = self.bin_op_ty(b, rv.a, &mut rm, &mut rt);
                     if !self.is_str_ty(rm, rt) && !self.op_dispatch_agg(rm, rt) {
                         let yk = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
-                        let is_float = yk.kind == TypeKind::TYPE_BUILTIN && (yk.as_data.builtin == BuiltinType::BT_F32 || yk.as_data.builtin == BuiltinType::BT_F64);
+                        let is_float = yk.kind == TypeKind::TYPE_BUILTIN && (unsafe yk.as_data.builtin == BuiltinType::BT_F32 || unsafe yk.as_data.builtin == BuiltinType::BT_F64);
                         let t = rv.c as tt::TokenType;
                         let mut fop: str<'static> = "";
                         if t == tt::TokenType::EqualEqual {
@@ -16198,7 +16198,7 @@ extend CEmit {
         let mut is_void = rt == TYPE_NONE;
         if !is_void {
             let y = *unsafe (*a).type_at(rt);
-            is_void = y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_VOID;
+            is_void = y.kind == TypeKind::TYPE_BUILTIN && unsafe y.as_data.builtin == BuiltinType::BT_VOID;
         }
         if is_void {
             rty.push_str("void");
@@ -16720,7 +16720,7 @@ extend CEmit {
             return false;
         }
         let e = *unsafe (*fa).type_at(y.as_data.elem);
-        return e.kind == TypeKind::TYPE_BUILTIN && e.as_data.builtin == BuiltinType::BT_VOID;
+        return e.kind == TypeKind::TYPE_BUILTIN && unsafe e.as_data.builtin == BuiltinType::BT_VOID;
     }
 
     // Whether `(b.module, t)` is a pointer or reference to something other than `void`.
@@ -16742,7 +16742,7 @@ extend CEmit {
             et = y.as_data.elem;
         }
         let e = *unsafe (*self.p().module_ast_const(em)).type_at(et);
-        return !(e.kind == TypeKind::TYPE_BUILTIN && e.as_data.builtin == BuiltinType::BT_VOID);
+        return !(e.kind == TypeKind::TYPE_BUILTIN && unsafe e.as_data.builtin == BuiltinType::BT_VOID);
     }
 
     // `wrap_ptr` of resolved `(m, t)`.
@@ -17420,7 +17420,7 @@ extend CEmit {
                     let mut rt9 = pty9;
                     self.rty(b, pty9, &mut rm9, &mut rt9);
                     let y9 = *unsafe (*self.p().module_ast_const(rm9)).type_at(rt9);
-                    let void9 = y9.kind == TypeKind::TYPE_BUILTIN && y9.as_data.builtin == BuiltinType::BT_VOID;
+                    let void9 = y9.kind == TypeKind::TYPE_BUILTIN && unsafe y9.as_data.builtin == BuiltinType::BT_VOID;
                     // A zero-sized FIELD of a sized struct (a flexible array member) sits at its
                     // offset inside that struct: the address is the struct's plus the offset. A
                     // `void` field has no place in it.
@@ -17975,7 +17975,7 @@ extend CEmit {
                 let yA = *unsafe (*self.p().module_ast_const(rmA)).type_at(rtA);
                 let mut promoted = "";
                 if yA.kind == TypeKind::TYPE_BUILTIN {
-                    let bt = yA.as_data.builtin;
+                    let bt = unsafe yA.as_data.builtin;
                     if bt == BuiltinType::BT_F32 {
                         promoted = "double";
                     } else if bt == BuiltinType::BT_BOOL || bt == BuiltinType::BT_CHAR || bt == BuiltinType::BT_I8 || bt == BuiltinType::BT_U8 || bt == BuiltinType::BT_I16 || bt == BuiltinType::BT_U16 {

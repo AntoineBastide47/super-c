@@ -1375,7 +1375,7 @@ extend Gen {
         let mut tk = replace(&mut self.owner().sc_tok_c, Vector::<u64>::new());
         while n < 255 && cur != NODE_NONE {
             let pn = *self.owner().ast_of(cm).at_const(cur);
-            if pn.kind != NodeKind::NODE_REFERENCE_TYPE || pn.as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_MUT {
+            if pn.kind != NodeKind::NODE_REFERENCE_TYPE || unsafe pn.as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_MUT {
                 break;
             }
             tk.truncate(0);
@@ -2631,7 +2631,7 @@ extend Gen {
     // The tokens function type node `fnn` (module `m`) names in its results, and in its parameters
     // when `params`, but for the lifetimes its own `for<..>` binds.
     fn fn_type_tokens(self: &mut Self, m: ModuleId, fnn: NodeId, out: &mut Vector<u64>, depth: i32, params: bool) {
-        let ft = self.owner().ast_of(m).at_const(fnn).as_data.function_type;
+        let ft = unsafe self.owner().ast_of(m).at_const(fnn).as_data.function_type;
         let mark = out.len();
         let first = if params {
             0u32
@@ -3634,7 +3634,7 @@ extend Gen {
         if n.kind == NodeKind::NODE_ARRAY_TYPE {
             return self.names_static(m, n.as_data.array_type.element, stat, depth + 1);
         }
-        if n.kind == NodeKind::NODE_DYN_TYPE && n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE {
+        if n.kind == NodeKind::NODE_DYN_TYPE && unsafe n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE {
             return true; // an owned `dyn I` is `dyn I + 'static`
         }
         let mut es = NodeList { start: 0, len: 0 };
@@ -3915,7 +3915,7 @@ extend Gen {
         let a = self.owner().ast_of(m);
         let n = a.at_const(tn);
         if n.has_lt_slot() {
-            return n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT;
+            return unsafe n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT;
         }
         if n.kind == NodeKind::NODE_ARRAY_TYPE {
             return self.node_holds_mut(m, n.as_data.array_type.element, depth + 1);
@@ -5553,7 +5553,7 @@ extend Owner {
         for i in 0..bs.len {
             let bid = unsafe a.list(bs)[i as usize];
             if a.at_const(bid).kind == NodeKind::NODE_FUNCTION_TYPE {
-                if a.at_const(bid).as_data.function_type.is_move {
+                if unsafe a.at_const(bid).as_data.function_type.is_move {
                     return true;
                 }
                 continue;
@@ -5627,7 +5627,7 @@ extend Owner {
             let bid = unsafe a.list(bs)[i as usize];
             if a.at_const(bid).kind == NodeKind::NODE_FUNCTION_TYPE {
                 *is_fn = true;
-                return a.at_const(bid).as_data.function_type.is_move;
+                return unsafe a.at_const(bid).as_data.function_type.is_move;
             }
             if self.iface_requires_copy(a.resolution_def(bid)) {
                 return false;
@@ -5817,7 +5817,7 @@ extend Owner {
             let mut k: u8 = 0;
             for g in 0..gens.len {
                 let gid = unsafe self.ast_of(om).list(gens)[g as usize];
-                if self.ast_of(om).ext(gid).generic_param.is_lifetime {
+                if unsafe self.ast_of(om).ext(gid).generic_param.is_lifetime {
                     continue;
                 }
                 if k < it.n {
@@ -5845,7 +5845,7 @@ extend Owner {
         if dn.kind != NodeKind::NODE_STRUCT && !is_enum {
             return false;
         }
-        if !is_enum && self.ast_of(om).ext(od).aggregate.is_union {
+        if !is_enum && unsafe self.ast_of(om).ext(od).aggregate.is_union {
             return false;
         }
         let base = self.tys.len();
@@ -5864,7 +5864,7 @@ extend Owner {
     fn push_member_types(self: &mut Self, om: ModuleId, od: NodeId) {
         let is_enum = self.ast_of(om).at_const(od).kind == NodeKind::NODE_ENUM;
         let ms = self.ast_of(om).ext(od).aggregate.members;
-        let is_tuple = self.ast_of(om).ext(od).aggregate.is_tuple;
+        let is_tuple = unsafe self.ast_of(om).ext(od).aggregate.is_tuple;
         for i in 0..ms.len {
             let mid2 = unsafe self.ast_of(om).list(ms)[i as usize];
             let mn = *self.ast_of(om).at_const(mid2);
@@ -5941,12 +5941,12 @@ extend Owner {
             return false;
         }
         let dn = *self.ast_of(om).at_const(od);
-        if dn.kind != NodeKind::NODE_STRUCT || self.ast_of(om).ext(od).aggregate.is_union {
+        if dn.kind != NodeKind::NODE_STRUCT || unsafe self.ast_of(om).ext(od).aggregate.is_union {
             return false;
         }
         {
             let oa = self.ast_of(om);
-            let is_tuple = self.ast_of(om).ext(od).aggregate.is_tuple;
+            let is_tuple = unsafe self.ast_of(om).ext(od).aggregate.is_tuple;
             let ms = self.ast_of(om).ext(od).aggregate.members;
             for i in 0..ms.len {
                 let mid2 = unsafe oa.list(ms)[i as usize];
@@ -6050,7 +6050,7 @@ extend Owner {
             return true;
         }
         let dn = *self.ast_of(om).at_const(od);
-        if dn.kind != NodeKind::NODE_STRUCT && dn.kind != NodeKind::NODE_ENUM || dn.kind == NodeKind::NODE_STRUCT && self.ast_of(
+        if dn.kind != NodeKind::NODE_STRUCT && dn.kind != NodeKind::NODE_ENUM || dn.kind == NodeKind::NODE_STRUCT && unsafe self.ast_of(
             om,
         ).ext(od).aggregate.is_union {
             return true;
@@ -6091,14 +6091,14 @@ extend Owner {
                 continue;
             }
             let dn = *self.ast_of(om).at_const(od);
-            if dn.kind != NodeKind::NODE_STRUCT || self.ast_of(om).ext(od).aggregate.is_union {
+            if dn.kind != NodeKind::NODE_STRUCT || unsafe self.ast_of(om).ext(od).aggregate.is_union {
                 continue;
             }
             let ms = self.ast_of(om).ext(od).aggregate.members;
             let mut all = true;
             for i in 0..ms.len {
                 let m = unsafe self.ast_of(om).list(ms)[i as usize];
-                let c = if self.ast_of(om).ext(od).aggregate.is_tuple {
+                let c = if unsafe self.ast_of(om).ext(od).aggregate.is_tuple {
                     forest.tuple_child(p as u32, i)
                 } else if self.ast_of(om).at_const(m).kind == NodeKind::NODE_FIELD {
                     forest.field_child(p as u32, m)

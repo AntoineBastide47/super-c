@@ -751,7 +751,7 @@ extend TuEmit {
                     return false;
                 }
                 let mut fnm = String::new();
-                if vn.as_data.variant.struct_payload && unsafe (*da).at_const(pid).kind == NodeKind::NODE_FIELD {
+                if unsafe vn.as_data.variant.struct_payload && unsafe (*da).at_const(pid).kind == NodeKind::NODE_FIELD {
                     self.mg.ident(
                         it.m,
                         unsafe (*da).at_const(unsafe (*da).at_const(pid).as_data.field.name).as_data.name.text,

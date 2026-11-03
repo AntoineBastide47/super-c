@@ -113,8 +113,8 @@ fn unsafe_extend() {
     let c = h::parse_ast(src);
     assert(c.errors == 0, "unsafe extend parses");
     assert(item(&c.ast, 0).kind == NodeKind::NODE_EXTEND, "expected an extend");
-    assert(item_ext(&c.ast, 0).extend_def.is_unsafe, "expected the extend to be marked unsafe");
-    assert(!item_ext(&c.ast, 1).extend_def.is_unsafe, "a plain extend stays unmarked");
+    assert(unsafe item_ext(&c.ast, 0).extend_def.is_unsafe, "expected the extend to be marked unsafe");
+    assert(!unsafe item_ext(&c.ast, 1).extend_def.is_unsafe, "a plain extend stays unmarked");
     assert(item_ext(&c.ast, 2).function.is_unsafe(), "unsafe fn still parses after the new branch");
     let bad = h::parse_ast("unsafe struct S {}\n");
     assert(bad.errors > 0, "unsafe on a non-fn, non-extend item is rejected");
@@ -186,12 +186,15 @@ fn precedence() {
         let vals = c.ast.list(rvals);
         let top_id = unsafe vals[0];
         assert(
-            c.ast.at_const(top_id).kind == NodeKind::NODE_BINARY && c.ast.at_const(top_id).as_data.binary.op == TokenType::Plus,
+            c.ast.at_const(top_id).kind == NodeKind::NODE_BINARY && unsafe c.ast.at_const(top_id).as_data.binary.op == TokenType::Plus,
             "top operator is +",
         );
         let right_id = c.ast.at_const(top_id).as_data.binary.right;
         let left_id = c.ast.at_const(top_id).as_data.binary.left;
-        assert(c.ast.at_const(right_id).as_data.binary.op == TokenType::Star, "* is the right child (binds tighter)");
+        assert(
+            unsafe c.ast.at_const(right_id).as_data.binary.op == TokenType::Star,
+            "* is the right child (binds tighter)",
+        );
         assert(c.ast.at_const(left_id).kind == NodeKind::NODE_LITERAL, "left operand is the literal 1");
     }
     {
@@ -205,11 +208,14 @@ fn precedence() {
         let vals = c.ast.list(rvals);
         let top_id = unsafe vals[0];
         assert(
-            c.ast.at_const(top_id).kind == NodeKind::NODE_BINARY && c.ast.at_const(top_id).as_data.binary.op == TokenType::Minus,
+            c.ast.at_const(top_id).kind == NodeKind::NODE_BINARY && unsafe c.ast.at_const(top_id).as_data.binary.op == TokenType::Minus,
             "top operator is -",
         );
         let left_id = c.ast.at_const(top_id).as_data.binary.left;
-        assert(c.ast.at_const(left_id).as_data.binary.op == TokenType::Minus, "- is left-associative (left child is -)");
+        assert(
+            unsafe c.ast.at_const(left_id).as_data.binary.op == TokenType::Minus,
+            "- is left-associative (left child is -)",
+        );
     }
 }
 
@@ -241,7 +247,7 @@ fn bare_instance_constant_argument() {
     let tp = c.ast.at_const(item(&c.ast, 0).as_data.type_alias.ty).as_data.type_path;
     assert(tp.args.len == 2, "two arguments");
     let k = c.ast.at_const(unsafe c.ast.list(tp.args)[0]);
-    assert(k.kind == NodeKind::NODE_MEMBER && k.as_data.member.path, "the constant is a member path");
+    assert(k.kind == NodeKind::NODE_MEMBER && unsafe k.as_data.member.path, "the constant is a member path");
     assert(
         c.ast.at_const(k.as_data.member.object).kind == NodeKind::NODE_GENERIC_SPECIALIZATION,
         "its qualifier is the written instance",
@@ -263,17 +269,23 @@ fn rebuilt_greater_operators() {
     let ge = h::nth_kind(&c.ast, NodeKind::NODE_BINARY, 0);
     let shr = h::nth_kind(&c.ast, NodeKind::NODE_BINARY, 1);
     let assign = h::nth_kind(&c.ast, NodeKind::NODE_ASSIGNMENT, 0);
-    assert(c.ast.at_const(ge).as_data.binary.op == TokenType::GreaterThanEqual, "'>=' is rebuilt");
-    assert(c.ast.at_const(shr).as_data.binary.op == TokenType::RightShift, "'>>' is rebuilt");
-    assert(c.ast.at_const(assign).as_data.binary.op == TokenType::RightShiftEqual, "'>>=' is rebuilt");
+    assert(unsafe c.ast.at_const(ge).as_data.binary.op == TokenType::GreaterThanEqual, "'>=' is rebuilt");
+    assert(unsafe c.ast.at_const(shr).as_data.binary.op == TokenType::RightShift, "'>>' is rebuilt");
+    assert(unsafe c.ast.at_const(assign).as_data.binary.op == TokenType::RightShiftEqual, "'>>=' is rebuilt");
     let gt_shift = h::nth_kind(&c.ast, NodeKind::NODE_BINARY, 3);
     let shift_gt = h::nth_kind(&c.ast, NodeKind::NODE_BINARY, 5);
-    assert(c.ast.at_const(gt_shift).as_data.binary.op == TokenType::GreaterThan, "shift binds inside relational RHS");
-    assert(c.ast.at_const(shift_gt).as_data.binary.op == TokenType::GreaterThan, "shift binds inside relational LHS");
+    assert(
+        unsafe c.ast.at_const(gt_shift).as_data.binary.op == TokenType::GreaterThan,
+        "shift binds inside relational RHS",
+    );
+    assert(
+        unsafe c.ast.at_const(shift_gt).as_data.binary.op == TokenType::GreaterThan,
+        "shift binds inside relational LHS",
+    );
     let compound = h::nth_kind(&c.ast, NodeKind::NODE_ASSIGNMENT, 1);
     let compound_left = c.ast.at_const(compound).as_data.binary.left;
     assert(
-        c.ast.at_const(compound_left).as_data.binary.op == TokenType::Pipe,
+        unsafe c.ast.at_const(compound_left).as_data.binary.op == TokenType::Pipe,
         "binary expression folds before shift assignment",
     );
 }
@@ -391,7 +403,7 @@ fn closures() {
         let let_id = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0);
         let clo_id = c.ast.at_const(let_id).as_data.let_stmt.value;
         assert(c.ast.at_const(clo_id).kind == NodeKind::NODE_CLOSURE, "`|x| e` parses to a closure");
-        assert(c.ast.ext(clo_id).closure.expr_body, "compact closure has an expression body");
+        assert(unsafe c.ast.ext(clo_id).closure.expr_body, "compact closure has an expression body");
         assert(c.ast.ext(clo_id).closure.params.len == 1, "the closure has one parameter");
     }
     // Anonymous `fn(..) Ret { .. }` -> a NODE_CLOSURE with a block body and an explicit return type.
@@ -401,7 +413,7 @@ fn closures() {
         let let_id = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0);
         let clo_id = c.ast.at_const(let_id).as_data.let_stmt.value;
         assert(c.ast.at_const(clo_id).kind == NodeKind::NODE_CLOSURE, "`fn(..) .. {}` parses to a closure");
-        assert(!c.ast.ext(clo_id).closure.expr_body, "anonymous fn has a block body");
+        assert(!unsafe c.ast.ext(clo_id).closure.expr_body, "anonymous fn has a block body");
         assert(c.ast.ext(clo_id).closure.returns.len == 1, "anonymous fn keeps its explicit return type");
     }
     // Infix `|` is still bitwise-or, not a closure.
@@ -437,7 +449,7 @@ fn closures() {
             wbounds.len == 1 && c.ast.at_const(wb0).kind == NodeKind::NODE_FUNCTION_TYPE,
             "`where F: fn(..) ..` parses",
         );
-        assert(!c.ast.at_const(wb0).as_data.function_type.is_move, "a plain fn bound is not `move`");
+        assert(!unsafe c.ast.at_const(wb0).as_data.function_type.is_move, "a plain fn bound is not `move`");
     }
     // `fn move(..) ..`: the ownership-marked bound.
     {
@@ -448,7 +460,7 @@ fn closures() {
         let gbids = c.ast.list(gbounds);
         let gb0 = unsafe gbids[0];
         assert(
-            gbounds.len == 1 && c.ast.at_const(gb0).kind == NodeKind::NODE_FUNCTION_TYPE && c.ast.at_const(gb0).as_data.function_type.is_move,
+            gbounds.len == 1 && c.ast.at_const(gb0).kind == NodeKind::NODE_FUNCTION_TYPE && unsafe c.ast.at_const(gb0).as_data.function_type.is_move,
             "`fn move(..) ..` parses with the move flag",
         );
     }
@@ -460,15 +472,15 @@ fn closures() {
         let d1 = h::nth_kind(&c.ast, NodeKind::NODE_DYN_TYPE, 1);
         let d2 = h::nth_kind(&c.ast, NodeKind::NODE_DYN_TYPE, 2);
         assert(
-            d0 != NODE_NONE && c.ast.at_const(d0).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_CONST,
+            d0 != NODE_NONE && unsafe c.ast.at_const(d0).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_CONST,
             "`&dyn I` is one DYN_TYPE node (const flavor)",
         );
         assert(
-            d1 != NODE_NONE && c.ast.at_const(d1).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT,
+            d1 != NODE_NONE && unsafe c.ast.at_const(d1).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT,
             "`&mut dyn I` carries the mut flavor",
         );
         assert(
-            d2 != NODE_NONE && c.ast.at_const(d2).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE,
+            d2 != NODE_NONE && unsafe c.ast.at_const(d2).as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE,
             "`Box<dyn I>`'s argument parses with the owned flavor",
         );
         assert(h::nth_kind(&c.ast, NodeKind::NODE_REFERENCE_TYPE, 0) == NODE_NONE, "no reference node wraps a dyn type");
@@ -511,14 +523,14 @@ fn bare_conditions_and_ranges() {
     let it2 = c.ast.ext(s2).for_stmt.iterable;
     assert(c.ast.at_const(it2).kind == NodeKind::NODE_RANGE, "0..10 iterable is NODE_RANGE");
     assert(
-        c.ast.at_const(it2).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(it2).as_data.pattern_range.end != NODE_NONE && !c.ast.at_const(
+        c.ast.at_const(it2).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(it2).as_data.pattern_range.end != NODE_NONE && !unsafe c.ast.at_const(
             it2,
         ).as_data.pattern_range.inclusive,
         "0..10 is an exclusive range with both bounds",
     );
     let s3 = unsafe stmts[3];
     let it3 = c.ast.ext(s3).for_stmt.iterable;
-    assert(c.ast.at_const(it3).as_data.pattern_range.inclusive, "1..=5 is inclusive");
+    assert(unsafe c.ast.at_const(it3).as_data.pattern_range.inclusive, "1..=5 is inclusive");
     let s4 = unsafe stmts[4];
     let it4 = c.ast.ext(s4).for_stmt.iterable;
     assert(
@@ -547,7 +559,7 @@ fn question_operator_parse() {
     let let_id = unsafe stmts[0];
     let val_id = c.ast.at_const(let_id).as_data.let_stmt.value;
     assert(
-        c.ast.at_const(val_id).kind == NodeKind::NODE_UNARY && c.ast.at_const(val_id).as_data.unary.op == TokenType::Question,
+        c.ast.at_const(val_id).kind == NodeKind::NODE_UNARY && unsafe c.ast.at_const(val_id).as_data.unary.op == TokenType::Question,
         "g()? parses to a NODE_UNARY with op '?'",
     );
     let operand_id = c.ast.at_const(val_id).as_data.unary.operand;
@@ -567,7 +579,7 @@ fn range_value_expression() {
     let av_id = c.ast.at_const(s0).as_data.let_stmt.value;
     assert(c.ast.at_const(av_id).kind == NodeKind::NODE_RANGE, "let a = 1..5 -> NODE_RANGE value");
     assert(
-        c.ast.at_const(av_id).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(av_id).as_data.pattern_range.end != NODE_NONE && !c.ast.at_const(
+        c.ast.at_const(av_id).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(av_id).as_data.pattern_range.end != NODE_NONE && !unsafe c.ast.at_const(
             av_id,
         ).as_data.pattern_range.inclusive,
         "1..5 has both bounds, exclusive",
@@ -575,7 +587,7 @@ fn range_value_expression() {
     let s1 = unsafe stmts[1];
     let bv_id = c.ast.at_const(s1).as_data.let_stmt.value;
     assert(
-        c.ast.at_const(bv_id).kind == NodeKind::NODE_RANGE && c.ast.at_const(bv_id).as_data.pattern_range.inclusive,
+        c.ast.at_const(bv_id).kind == NodeKind::NODE_RANGE && unsafe c.ast.at_const(bv_id).as_data.pattern_range.inclusive,
         "0..=9 is an inclusive NODE_RANGE value",
     );
 }
@@ -599,7 +611,7 @@ fn switch_pattern_ranges() {
     let a0 = unsafe arms[0];
     let p0 = c.ast.at_const(a0).as_data.match_arm.pattern;
     assert(
-        c.ast.at_const(p0).kind == NodeKind::NODE_PATTERN_RANGE && !c.ast.at_const(p0).as_data.pattern_range.inclusive,
+        c.ast.at_const(p0).kind == NodeKind::NODE_PATTERN_RANGE && !unsafe c.ast.at_const(p0).as_data.pattern_range.inclusive,
         "10..20 is an exclusive pattern range",
     );
     assert(
@@ -609,7 +621,7 @@ fn switch_pattern_ranges() {
     let a1 = unsafe arms[1];
     let p1 = c.ast.at_const(a1).as_data.match_arm.pattern;
     assert(
-        c.ast.at_const(p1).kind == NodeKind::NODE_PATTERN_RANGE && c.ast.at_const(p1).as_data.pattern_range.inclusive,
+        c.ast.at_const(p1).kind == NodeKind::NODE_PATTERN_RANGE && unsafe c.ast.at_const(p1).as_data.pattern_range.inclusive,
         "20..=30 is inclusive",
     );
     let a2 = unsafe arms[2];
@@ -713,7 +725,7 @@ fn unions() {
         let c = h::parse_ast("pub union Bits { pub i: u32, bytes: [u8; 4], }\n");
         assert(c.errors == 0, "union decl parses");
         assert(item(&c.ast, 0).kind == NodeKind::NODE_STRUCT, "union parses as a NODE_STRUCT");
-        assert(item_ext(&c.ast, 0).aggregate.is_union, "union is flagged is_union");
+        assert(unsafe item_ext(&c.ast, 0).aggregate.is_union, "union is flagged is_union");
         assert(item_ext(&c.ast, 0).aggregate.vis == VIS_PUB, "pub union is public");
         let members = item_ext(&c.ast, 0).aggregate.members;
         let fields = c.ast.list(members);
@@ -726,7 +738,7 @@ fn unions() {
     {
         let c = h::parse_ast("struct S { x: i32, }\n");
         assert(c.errors == 0, "struct not union parses");
-        assert(!item_ext(&c.ast, 0).aggregate.is_union, "a struct is not is_union");
+        assert(!unsafe item_ext(&c.ast, 0).aggregate.is_union, "a struct is not is_union");
     }
 }
 
@@ -1144,11 +1156,11 @@ fn lifetimes() {
     assert(c.ast.at_const(c.ast.root).as_data.program.items.len == 4, "lifetimes: expected 4 items");
 
     // Struct Ref<'a>: the lifetime lands in `lifetimes`, NOT in `generics`.
-    let agg = item_ext(&c.ast, 0).aggregate;
+    let agg = unsafe item_ext(&c.ast, 0).aggregate;
     let agg_lts = c.ast.lifetimes_of(item_id(&c.ast, 0));
     assert(agg_lts.len == 1, "struct lifetime param recorded");
     assert(agg.generics.len == 0, "struct lifetime is NOT a generic param (erasure is structural)");
-    assert(c.ast.ext(unsafe c.ast.list(agg_lts)[0]).generic_param.is_lifetime, "param flagged is_lifetime");
+    assert(unsafe c.ast.ext(unsafe c.ast.list(agg_lts)[0]).generic_param.is_lifetime, "param flagged is_lifetime");
 
     // The field's `&'a i32` carries the annotation on the reference type node.
     let fields = agg.members;
@@ -1194,10 +1206,10 @@ fn slice_lifetimes() {
     let x = c.ast.at_const(c.ast.at_const(unsafe c.ast.list(fnd.params)[0]).as_data.parameter.ty);
     assert(x.kind == NodeKind::NODE_SLICE_TYPE, "`[]'a T` is a slice type");
     assert(x.as_data.indirect_type.lifetime != NODE_NONE, "`[]'a T` records its lifetime");
-    assert(x.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE, "`[]'a T` is shared");
+    assert(unsafe x.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE, "`[]'a T` is shared");
     let y = c.ast.at_const(c.ast.at_const(unsafe c.ast.list(fnd.params)[1]).as_data.parameter.ty);
     assert(y.as_data.indirect_type.lifetime != NODE_NONE, "`[]'a mut T` records its lifetime");
-    assert(y.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT, "`[]'a mut T` is mutable");
+    assert(unsafe y.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT, "`[]'a mut T` is mutable");
     let z = c.ast.at_const(c.ast.at_const(unsafe c.ast.list(fnd.params)[2]).as_data.parameter.ty);
     assert(z.as_data.indirect_type.lifetime == NODE_NONE, "`[]T` is elided");
     assert(h::parse_has_error("fn f(x: []mut 'a u8) {}\n"), "the lifetime precedes `mut`");
@@ -1214,11 +1226,11 @@ fn hrtb_and_gat() {
 
     // The bound's lifetimes hang off the BOUND node, not the enclosing function.
     let fnd = item_ext(&c.ast, 0).function;
-    let gp = c.ast.ext(unsafe c.ast.list(fnd.generics)[0]).generic_param;
+    let gp = unsafe c.ast.ext(unsafe c.ast.list(fnd.generics)[0]).generic_param;
     let bound = unsafe c.ast.list(gp.bounds)[0];
     let hr = c.ast.lifetimes_of(bound);
     assert(hr.len == 1, "higher-ranked lifetime recorded on the bound");
-    assert(c.ast.ext(unsafe c.ast.list(hr)[0]).generic_param.is_lifetime, "hrtb param flagged is_lifetime");
+    assert(unsafe c.ast.ext(unsafe c.ast.list(hr)[0]).generic_param.is_lifetime, "hrtb param flagged is_lifetime");
     assert(c.ast.lifetimes_of(item_id(&c.ast, 0)).len == 0, "the function itself declares no lifetime");
 
     // The associated type carries its own lifetime param.
@@ -1434,7 +1446,7 @@ fn method_turbofish_shape() {
     assert(c.errors == 0, "method turbofish parses");
     let c0 = h::nth_kind(&c.ast, NodeKind::NODE_CALL, 0);
     let m0 = c.ast.at_const(c.ast.at_const(c0).as_data.call.callee);
-    assert(m0.kind == NodeKind::NODE_MEMBER && !m0.as_data.member.path, "a method call's callee is its member");
+    assert(m0.kind == NodeKind::NODE_MEMBER && !unsafe m0.as_data.member.path, "a method call's callee is its member");
     assert(m0.as_data.member.targs.len == 3, "the member holds the turbofish, its lifetime included");
     let c1 = h::nth_kind(&c.ast, NodeKind::NODE_CALL, 1);
     let s1 = c.ast.at_const(c.ast.at_const(c1).as_data.call.callee);

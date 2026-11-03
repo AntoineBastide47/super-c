@@ -707,7 +707,7 @@ extend InstGraph {
                 );
             }
         } else if y.kind == TypeKind::TYPE_BUILTIN {
-            d = DefId { module: p.core_module, node: p.builtin_decl(y.as_data.builtin) };
+            d = DefId { module: p.core_module, node: p.builtin_decl(unsafe y.as_data.builtin) };
         }
         let iface = iface_of_member(ia, ai.decl);
         if iface == NODE_NONE {
@@ -745,7 +745,7 @@ extend InstGraph {
             }
             let row = *self.exts.at(ri as usize);
             let ea = unsafe &*p.module_ast_const(row.emod);
-            let ed = ea.ext(row.enode).extend_def;
+            let ed = unsafe ea.ext(row.enode).extend_def;
             if ed.interface_type == NODE_NONE {
                 continue;
             }
@@ -844,7 +844,7 @@ extend InstGraph {
             return String::new();
         }
         let e = *self.g().at(self.subst_intern(a, y.as_data.arr.elem, frame, 0) as usize);
-        let bt = pick(e.kind == TypeKind::TYPE_BUILTIN, e.as_data.builtin, BuiltinType::BT_COUNT);
+        let bt = pick(e.kind == TypeKind::TYPE_BUILTIN, unsafe e.as_data.builtin, BuiltinType::BT_COUNT);
         let tn = pick(bt == BuiltinType::BT_COUNT, "this type", bt_name(bt));
         return vec_err(y.kind == TypeKind::TYPE_MASK, bt, tn, cval_bits(v) as u64);
     }
@@ -1206,7 +1206,7 @@ extend InstGraph {
         let mut ai: u32 = 0;
         for g in 0..gs.len {
             let gp = unsafe da.list(gs)[g as usize];
-            if da.ext(gp).generic_param.is_lifetime || ai >= it.n as u32 {
+            if unsafe da.ext(gp).generic_param.is_lifetime || ai >= it.n as u32 {
                 continue;
             }
             let mut key = ArgKey { ty: TYPE_NONE, val: 0, has_val: false, bt: BT_COUNT };
@@ -1223,7 +1223,7 @@ extend InstGraph {
     // `check_ty` over the member types (fields and variant payloads) of aggregate `decl` in `a`;
     // `span` receives the member that holds the length.
     fn check_decl(self: &mut Self, a: &Ast, decl: NodeId, frame: &Vector<Subst>, depth: i32, span: &mut tok::Span) bool {
-        let is_tuple = a.ext(decl).aggregate.is_tuple;
+        let is_tuple = unsafe a.ext(decl).aggregate.is_tuple;
         let ms = a.ext(decl).aggregate.members;
         for i in 0..ms.len {
             let mid = unsafe a.list(ms)[i as usize];
@@ -1815,7 +1815,7 @@ extend InstGraph {
                 keys.push(self.argkey_subst(a, unsafe it.args[i as usize], frame));
             }
         } else if sy.kind == TypeKind::TYPE_BUILTIN {
-            d = DefId { module: p.core_module, node: p.builtin_decl(sy.as_data.builtin) };
+            d = DefId { module: p.core_module, node: p.builtin_decl(unsafe sy.as_data.builtin) };
         }
         let mut r = pick(d.node == NODE_NONE, IG_NONE, self.ext_first(d));
         let mut bk: usize = 0;
@@ -1846,7 +1846,7 @@ extend InstGraph {
             if !self.conf_bind(ri, sk, &keys, want, &mut ef) {
                 continue;
             }
-            let ed = ea.ext(row.enode).extend_def;
+            let ed = unsafe ea.ext(row.enode).extend_def;
             for j in 0..ed.items.len {
                 let hid = unsafe ea.list(ed.items)[j as usize];
                 if ea.at_const(hid).kind != NodeKind::NODE_FUNCTION || ea.ext(hid).function.generics.len != 0 {
@@ -1989,7 +1989,7 @@ extend InstGraph {
                 keys.push(self.argkey_subst(a, unsafe it.args[i as usize], frame));
             }
         } else if ry.kind == TypeKind::TYPE_BUILTIN {
-            d = DefId { module: p.core_module, node: p.builtin_decl(ry.as_data.builtin) };
+            d = DefId { module: p.core_module, node: p.builtin_decl(unsafe ry.as_data.builtin) };
         }
         let want = pick(t.iface != TYPE_NONE, self.subst_intern(a, t.iface, frame, 0), TYPE_NONE);
         let mn = ca.at_const(ca.ext_name(t.callee.node)).as_data.name.text;
@@ -2009,7 +2009,7 @@ extend InstGraph {
             }
             let row = *self.exts.at(ri as usize);
             let ea = unsafe &*p.module_ast_const(row.emod);
-            let ed = ea.ext(row.enode).extend_def;
+            let ed = unsafe ea.ext(row.enode).extend_def;
             let ir = self.ext_interface(ea, row.enode);
             if ir.module != t.callee.module || ir.node != inode {
                 continue;
@@ -2251,7 +2251,7 @@ extend InstGraph {
             let row = *self.exts.at(x);
             let a = unsafe &*p.module_ast_const(row.emod);
             let src = p.modules.at(row.emod as usize).source.as_str();
-            let ed = a.ext(row.enode).extend_def;
+            let ed = unsafe a.ext(row.enode).extend_def;
             // An interface-conforming extend emits EVERY bodied method per instance (so a demanded
             // interface method's override is always demanded); the method_used gate applies only
             // to plain extends.
@@ -2337,7 +2337,7 @@ extend InstGraph {
         for x in 0..self.exts.len() {
             let row = *self.exts.at(x);
             let a = unsafe &*(&*self.pkg).module_ast_const(row.emod);
-            let ed = a.ext(row.enode).extend_def;
+            let ed = unsafe a.ext(row.enode).extend_def;
             let iface = self.ext_interface(a, row.enode);
             if iface.node == NODE_NONE {
                 continue;
@@ -2459,7 +2459,7 @@ extend InstGraph {
         let row = *self.exts.at(x as usize);
         let a = unsafe &*(&*self.pkg).module_ast_const(row.emod);
         let ia = unsafe &*(&*self.pkg).module_ast_const(iface.module);
-        let ed = a.ext(row.enode).extend_def;
+        let ed = unsafe a.ext(row.enode).extend_def;
         let _ = self.bind_ext_keys(x, &self.keys, start, n, frame);
         let mut pat = a.type_of(ed.target_type);
         if pat == TYPE_NONE && rec == IG_NONE {
@@ -2610,7 +2610,7 @@ extend InstGraph {
         let mut frame = self.take_frame();
         self.bind_generics(a, a.ext(r.def.node).aggregate.generics, r, 0, &mut frame);
         self.check_steps(r.def.module, r.def.node, &frame);
-        let is_tuple = a.ext(r.def.node).aggregate.is_tuple;
+        let is_tuple = unsafe a.ext(r.def.node).aggregate.is_tuple;
         let ms = a.ext(r.def.node).aggregate.members;
         for i in 0..ms.len {
             let mid = unsafe a.list(ms)[i as usize];
@@ -2826,7 +2826,7 @@ extend InstGraph {
         let sh = *self.shapes.at(x as usize);
         let row = *self.exts.at(x as usize);
         let ea = unsafe &*(&*self.pkg).module_ast_const(row.emod);
-        let ed = ea.ext(row.enode).extend_def;
+        let ed = unsafe ea.ext(row.enode).extend_def;
         if !sh.keyed {
             if !self.ext_applies(x, keys, 0, keys.len() as u32) {
                 return false;
@@ -3028,7 +3028,7 @@ extend InstGraph {
         let mut ai = pos;
         for g in 0..gs.len {
             let gp = unsafe a.list(gs)[g as usize];
-            if a.ext(gp).generic_param.is_lifetime {
+            if unsafe a.ext(gp).generic_param.is_lifetime {
                 continue;
             }
             if ai < r.args_len {
@@ -3548,8 +3548,8 @@ extend InstGraph {
         for i in 0..ms.len {
             let mid = unsafe da.list(ms)[i as usize];
             let mk = da.at_const(mid).kind;
-            if mk == NodeKind::NODE_FIELD || da.ext(d.node).aggregate.is_tuple {
-                let tn = da.member_type_node(mid, da.ext(d.node).aggregate.is_tuple);
+            if mk == NodeKind::NODE_FIELD || unsafe da.ext(d.node).aggregate.is_tuple {
+                let tn = da.member_type_node(mid, unsafe da.ext(d.node).aggregate.is_tuple);
                 let mut t = da.type_of(mid);
                 if t == TYPE_NONE && tn != NODE_NONE {
                     t = da.type_of(tn);
@@ -3790,7 +3790,7 @@ extend InstGraph {
                     // the instances its members hold.
                     self.check_members(a, nid);
                 } else if n.kind == NodeKind::NODE_CONST {
-                    if !n.as_data.const_def.is_extern && n.as_data.const_def.value != NODE_NONE {
+                    if !unsafe n.as_data.const_def.is_extern && n.as_data.const_def.value != NODE_NONE {
                         self.clow.retarget(m as ModuleId);
                         if self.clow.relower_const(nid) {
                             // Raw borrow: the walk never lowers through `clow`. The constant is its own
@@ -3975,7 +3975,7 @@ fn cast_ok(p: &loader::Package, a: &Ast, s: TypeId, d: TypeId, to_fn: bool) bool
         return p.fn_value_type(a, s) && d == usz || to_fn && p.fn_value_type(a, d) && s == usz;
     }
     for y in [sy, dy] {
-        let num = y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin != BuiltinType::BT_VOID;
+        let num = y.kind == TypeKind::TYPE_BUILTIN && unsafe y.as_data.builtin != BuiltinType::BT_VOID;
         let ptr = y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE;
         let plain = y.kind == TypeKind::TYPE_ENUM && !(unsafe &*p.module_ast_const(y.module)).enum_has_payload(
             y.as_data.decl,
@@ -3985,8 +3985,8 @@ fn cast_ok(p: &loader::Package, a: &Ast, s: TypeId, d: TypeId, to_fn: bool) bool
         }
     }
     // A complex number casts only to a complex number.
-    return !(sy.kind == TypeKind::TYPE_BUILTIN && tc::bt_is_complex(sy.as_data.builtin) && !(dy.kind == TypeKind::TYPE_BUILTIN && tc::bt_is_complex(
-        dy.as_data.builtin,
+    return !(sy.kind == TypeKind::TYPE_BUILTIN && tc::bt_is_complex(unsafe sy.as_data.builtin) && !(dy.kind == TypeKind::TYPE_BUILTIN && tc::bt_is_complex(
+        unsafe dy.as_data.builtin,
     )));
 }
 

@@ -5463,6 +5463,233 @@ b6:
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Panics with one message share the object's thunk of it (`__sc_pk.<k>`: the message's address, then a
+// jump to `__sc_panic`, in the cold text): each site is one call (arm64 `bl`) and loads no message. Each
+// site still panics with its message.
+@test
+fn panics_of_one_message_share_a_thunk() {
+    let lir = M"(lir ptr 8
+sym @divs fn global
+fn @divs
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = icmp.eq v1, v3
+  br v4, b4, b1
+b1:
+  v5 = udiv.i64 v0, v1
+  v6 = icmp.eq v2, v3
+  br v6, b5, b2
+b2:
+  v7 = udiv.i64 v0, v2
+  v8 = add.i64 v5, v7
+  v9 = icmp.ugt v8, v0
+  br v9, b6, b3
+b3:
+  ret v8
+b4: cold
+  panic "attempt to divide by zero"
+b5: cold
+  panic "attempt to divide by zero"
+b6: cold
+  panic "attempt to add with overflow"
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // In `.text` (the thunks are in the cold text): no `adrp` of a message, one `bl` per site.
+    assert_eq(elf_text_count(&obj, 0x9F000000, 0x90000000), 0);
+    assert_eq(elf_text_count(&obj, 0xFC000000, 0x94000000), 3);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\n#include <stdlib.h>\n#include <stdio.h>\nint64_t divs(int64_t, int64_t, int64_t);\nvoid __sc_panic(const char *m) { puts(m); fflush(stdout); exit(divs(12, 4, 3) == 7 ? 3 : 9); }\nint main(int argc, char **argv) {\n  (void)argv;\n  if (divs(12, 4, 3) != 7) return 1;\n  return (int)divs(1, argc == 1 ? 0 : 1, 1);\n}\n";
+    assert_eq(run_native(lir, drv), 3);
+}
+
+// A bounded load's bound (`range`) is no operand: on x86-64 the load folds into its compare, and a bound
+// that equals a folded value's number is not taken for a use of it (each bound from 0 to 7, so one names
+// the compare whatever the backend's numbering).
+@test
+fn a_folded_bounded_load_takes_no_bound_as_operand() {
+    for k in 0..8u32 {
+        let lir = format(
+            "lir ptr 8\nsym @tagged fn global\nfn @tagged\n  sig (ptr) -> i32\nb0(v0: ptr):\n  v1 = iconst.i8 1\n  v2 = load.i8 v0 align 0 range {}\n  v3 = icmp.ne v2, v1\n  v4 = iconst.i32 5\n  v5 = iconst.i32 7\n  br v3, b1, b2\nb1:\n  ret v4\nb2:\n  ret v5\n",
+            k,
+        );
+        let mut obj = Vector::<u8>::new();
+        assert(
+            object_of(&lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+            "the x86-64 object",
+        );
+    }
+}
+
+// Microsoft x64: a loop of C's `fminf` calls (an intrinsic, in xmm registers) beside its vector loop
+// (`min.num`) compiles; the homes the vector loop takes (callee-saved xmm registers) all free.
+@test
+fn windows_fminf_loops_free_their_vector_homes() {
+    let lir = M"(lir ptr 8
+sym @fminf fn global
+sym @fmin fn global
+fn @fmin
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0) -> void
+  ref p0 0 inner noalias
+b0(v0: ptr):
+  v1 = load.ptr v0 align 3 tbaa 8
+  v2 = fconst.f32 0x42c80000
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = load.i64 v0+8 align 3 tbaa 4
+  v6 = iconst.i64 -8
+  v7 = and.i64 v5, v6
+  v8 = icmp.ne v7, v3
+  br v8, b4, b1(v3)
+b1(v9: i64): novec
+  v10 = icmp.ult v9, v5
+  br v10, b3(v9), b2
+b2:
+  ret
+b3(v11: i64):
+  v12 = ptradd v1, v11 * 4 inbounds nonnull
+  v13 = load.f32 v12 align 2 tbaa 6
+  v14 = call.f32 @fminf(v13, v2) : (f32, f32) -> f32
+  store v14, v12 align 2 tbaa 6
+  v15 = add.i64 v11, v4
+  v16 = icmp.ult v15, v5
+  br v16, b3(v15), b2
+b4:
+  v17 = wconst.v4f32 0x42c8000042c80000, 0x42c8000042c80000
+  v18 = iconst.i64 8
+  jmp b5(v3)
+b5(v19: i64): novec
+  v20 = ptradd v1, v19 * 4
+  v21 = load.v4f32 v20 align 2 tbaa 6
+  v22 = vop.min.num.v4f32 (v21, v17)
+  store v22, v20 align 2 tbaa 6
+  v23 = load.v4f32 v20+16 align 2 tbaa 6
+  v24 = vop.min.num.v4f32 (v23, v17)
+  store v24, v20+16 align 2 tbaa 6
+  v25 = add.i64 v19, v18
+  v26 = icmp.ult v25, v7
+  br v26, b5(v25), b6
+b6:
+  jmp b1(v7)
+)";
+    let mut win = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("windows", false), tgt::axis_index("x86_64", true), SSE41, &mut win),
+        "the Microsoft x64 object",
+    );
+}
+
+// A switch on a bounded load (an enum's tag, `range`) whose table holds every value up to the bound
+// branches through it with no bound test, one whose bound passes the cases takes the default's entries up
+// to it, and one without the bound keeps its test; the `xor` of a `bool` load with 1 returns as loaded,
+// with no zero extension (arm64).
+@test
+fn bounded_switch_tables_take_no_bound_test() {
+    let lir = M"(lir ptr 8
+sym @op fn global
+sym @past fn global
+sym @plain fn global
+sym @not fn global
+fn @op
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = load.i8 v0 align 0 range 4
+  switch v2 [0 -> b1, 1 -> b2, 2 -> b3, 3 -> b4, 4 -> b5] else b6
+b1:
+  v3 = add.i32 v1, v1
+  ret v3
+b2:
+  v4 = mul.i32 v1, v1
+  ret v4
+b3:
+  v5 = sub.i32 v1, v1
+  ret v5
+b4:
+  v6 = iconst.i32 7
+  v7 = xor.i32 v1, v6
+  ret v7
+b5:
+  v8 = iconst.i32 3
+  v9 = shl.i32 v1, v8
+  ret v9
+b6:
+  v10 = iconst.i32 -1
+  ret v10
+fn @past
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = load.i8 v0 align 0 range 5
+  switch v2 [0 -> b1, 1 -> b2, 2 -> b3, 3 -> b4] else b5
+b1:
+  v3 = add.i32 v1, v1
+  ret v3
+b2:
+  v4 = mul.i32 v1, v1
+  ret v4
+b3:
+  v5 = sub.i32 v1, v1
+  ret v5
+b4:
+  v6 = iconst.i32 7
+  v7 = xor.i32 v1, v6
+  ret v7
+b5:
+  v8 = iconst.i32 3
+  v9 = shl.i32 v1, v8
+  ret v9
+fn @plain
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = load.i8 v0 align 0
+  switch v2 [0 -> b1, 1 -> b2, 2 -> b3, 3 -> b4] else b5
+b1:
+  v3 = add.i32 v1, v1
+  ret v3
+b2:
+  v4 = mul.i32 v1, v1
+  ret v4
+b3:
+  v5 = sub.i32 v1, v1
+  ret v5
+b4:
+  v6 = iconst.i32 7
+  v7 = xor.i32 v1, v6
+  ret v7
+b5:
+  v8 = iconst.i32 3
+  v9 = shl.i32 v1, v8
+  ret v9
+fn @not
+  sig (ptr) -> i8
+b0(v0: ptr):
+  v1 = iconst.i8 1
+  v2 = load.i8 v0 align 0 bool
+  v3 = xor.i8 v2, v1
+  ret v3
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // `b.hi` (the bound tests) and `uxtb` (`ubfm w, w, #0, #7`).
+    assert_eq(elf_text_count(&obj, 0xFF00001F, 0x54000008), 1);
+    assert_eq(elf_text_count(&obj, 0xFFFFFC00, 0x53001C00), 0);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint op(const uint8_t *, int);\nint past(const uint8_t *, int);\nint plain(const uint8_t *, int);\nuint8_t not(const uint8_t *);\nint main(void) {\n  int w[6] = {12, 36, 0, 1, 48, 48};\n  for (uint8_t i = 0; i < 6; i++) {\n    if (i < 5 && op(&i, 6) != (i < 4 ? w[i] : 48)) return 1;\n    if (past(&i, 6) != w[i] || plain(&i, 6) != w[i]) return 2;\n  }\n  uint8_t big = 200;\n  if (plain(&big, 6) != 48) return 3;\n  uint8_t t = 1, f = 0;\n  if (not(&t) != 0 || not(&f) != 1) return 4;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // i128 comparisons on the halves, and shifts by 0, 64 and 127.
 @test
 fn wide_integer_compares_and_shifts_run() {

@@ -612,12 +612,19 @@ pub(package) const COND_NAMES: [str<'static>; 19] = [
 pub(package) const OV_SIGNED: u16 = 1;
 /// `O_FPTOSI`, `O_FPTOUI`: no saturation; the value must be a number in the result's range.
 pub(package) const CV_UNCHECKED: u16 = 1;
-/// `O_PTRADD`'s `aux` is the scale (`PTR_SCALE`, read through `scale_of`) and PTR_NONNULL; `O_LOAD`,
+/// `O_PTRADD`'s `aux` is the scale (`PTR_SCALE`, read through `scale_of`), PTR_INBOUNDS and PTR_NONNULL; `O_LOAD`,
 /// `O_STORE`: log2 of the alignment in bits 0 to 3, then MEM_VOLATILE, then the type tag in bits 8 to 11
 /// (`MEM_TBAA`).
 pub(package) const MEM_VOLATILE: u16 = 16;
 /// The scale bits of an `O_PTRADD`'s `aux`.
-pub(package) const PTR_SCALE: u16 = 0x7FFF;
+pub(package) const PTR_SCALE: u16 = 0x3FFF;
+/// `O_PTRADD`: the address stays in the base's allocation (the text's `inbounds`, LLVM's `inbounds`):
+/// the index times the scale plus the offset is an exact signed pointer-wide value, and base and result
+/// address one object (or one past it), which is at most `isize::MAX` bytes. The language's pointer
+/// arithmetic makes such addresses (a pointer outside its object is undefined); the lowering sets it on
+/// each address it makes. A transform that makes another address from one, or rewrites its operands
+/// otherwise than to the same address the same way, drops it (`aux & PTR_SCALE`).
+pub(package) const PTR_INBOUNDS: u16 = 0x4000;
 /// `O_PTRADD`: the address a reference takes (`&place`, the text's `nonnull`), never null: unsafe code
 /// that makes a null reference has undefined behavior. The lowering sets it on the instruction it makes
 /// for the reference, so each use of the value runs where the reference is made; a transform that makes
@@ -656,6 +663,24 @@ pub(package) const fn tbaa(t: Inst) usize {
 }
 /// `O_LOAD`: the value read is 0 or 1 (a `bool`).
 pub(package) const MEM_BOOL: u16 = 32;
+/// `O_LOAD` of an integer: the value read is at most `b`, unsigned (an enum's tag: its greatest
+/// discriminant; the text's `range b`). A copy that keeps the flags and gives `b` VNONE keeps no bound.
+pub(package) const MEM_RANGE: u16 = 64;
+/// The greatest value load `t` (of type mask `m`) reads by its flags: 1 for a `bool`, `b` for a bounded
+/// one (MEM_RANGE); None for another instruction.
+pub(package) const fn load_bound(t: Inst, m: u64) Option<u64> {
+    if t.op != O_LOAD {
+        return None;
+    }
+    if (t.aux & MEM_BOOL) != 0 {
+        return Some(1);
+    }
+    return if (t.aux & MEM_RANGE) != 0 && t.b as u64 < m {
+        Some(t.b)
+    } else {
+        None
+    };
+}
 /// `O_MEMCPY`: the regions may overlap (memmove).
 pub(package) const MEM_OVERLAP: u16 = 1;
 /// A logical right shift (`lshr`) that shifts out only zero bits (the text's `lshr.exact`): its operand's
@@ -1078,6 +1103,9 @@ pub(package) struct Body {
     pub(package) owned: Vector<u64>,
     /// Per signature parameter of the first 64, whether it holds 0 or 1 (a `bool`), a bit each.
     pub(package) bools: u64,
+    /// The float rewrites (`FM_*`) the function allows beyond the package's `fmath`: FM_ASSOC under
+    /// `@associative_math`. A caller allowing one its callee does not inlines no copy of it.
+    pub(package) fmath: u8,
     /// The scopes of the inlined calls' exclusive parameters (`Scope`); empty when there is none.
     pub(package) scopes: Vector<Scope>,
     /// A naked function (`@unsafe(naked)`): its machine code is its `O_ASM` templates alone, in order,
@@ -1145,6 +1173,7 @@ extend Body {
             refs: Vector::<u32>::new(),
             owned: Vector::<u64>::new(),
             bools: 0,
+            fmath: 0,
             scopes: Vector::<Scope>::new(),
             naked: false,
             cur: 0,
@@ -1170,6 +1199,7 @@ extend Body {
         self.refs.truncate(0);
         self.owned.truncate(0);
         self.bools = 0;
+        self.fmath = 0;
         self.scopes.truncate(0);
         self.naked = false;
         self.cur = 0;
@@ -1193,6 +1223,7 @@ extend Body {
             refs: exact(&self.refs),
             owned: exact(&self.owned),
             bools: self.bools,
+            fmath: self.fmath,
             scopes: exact(&self.scopes),
             naked: self.naked,
             cur: 0,

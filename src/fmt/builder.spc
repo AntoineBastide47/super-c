@@ -337,7 +337,7 @@ extend Builder {
         let n = self.nd(id);
         switch n.kind {
             NODE_BINARY => {
-                return par::Parser::precedence(n.as_data.binary.op);
+                return par::Parser::precedence(unsafe n.as_data.binary.op);
             },
             NODE_ASSIGNMENT => {
                 return PREC_ASSIGN;
@@ -346,7 +346,7 @@ extend Builder {
                 return PREC_RANGE;
             },
             NODE_UNARY => {
-                if n.as_data.unary.op == tt::TokenType::Question {
+                if unsafe n.as_data.unary.op == tt::TokenType::Question {
                     return PREC_POSTFIX;
                 }
                 return PREC_UNARY;
@@ -429,7 +429,7 @@ extend Builder {
                 NODE_GENERIC_SPECIALIZATION => n.as_data.specialization.expression,
                 NODE_CAST => n.as_data.cast.expression,
                 NODE_RANGE => n.as_data.pattern_range.start,
-                NODE_UNARY => if n.as_data.unary.op == tt::TokenType::Question {
+                NODE_UNARY => if unsafe n.as_data.unary.op == tt::TokenType::Question {
                     n.as_data.unary.operand
                 } else {
                     NODE_NONE
@@ -703,7 +703,7 @@ extend Builder {
                 if k > i {
                     self.st.push(self.p.txt(", "));
                 }
-                if p.as_data.parameter.is_mutable {
+                if unsafe p.as_data.parameter.is_mutable {
                     self.st.push(self.p.txt("mut "));
                 }
                 self.st.push(self.node_text(p.as_data.parameter.name));
@@ -726,7 +726,7 @@ extend Builder {
                 self.b_type_path(self.nd(id).as_data.type_path, unsafe (*self.ast).type_bindings(id), false);
             },
             NODE_POINTER_TYPE => {
-                if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
+                if unsafe n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
                     self.st.push(self.p.txt("*mut "));
                 } else {
                     self.st.push(self.p.txt("*const "));
@@ -740,7 +740,7 @@ extend Builder {
                     self.st.push(self.node_text(n.as_data.indirect_type.lifetime));
                     self.st.push(self.p.txt(" "));
                 }
-                if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
+                if unsafe n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
                     self.st.push(self.p.txt("mut "));
                 }
                 self.st.push(self.b_type(n.as_data.indirect_type.ty));
@@ -752,7 +752,7 @@ extend Builder {
                     self.st.push(self.node_text(n.as_data.indirect_type.lifetime));
                     self.st.push(self.p.txt(" "));
                 }
-                if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
+                if unsafe n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
                     self.st.push(self.p.txt("mut "));
                 }
                 self.st.push(self.b_type(n.as_data.indirect_type.ty));
@@ -766,7 +766,7 @@ extend Builder {
             },
             NODE_FUNCTION_TYPE => {
                 self.b_hrtb(id);
-                if n.as_data.function_type.is_move {
+                if unsafe n.as_data.function_type.is_move {
                     self.st.push(self.p.txt("fn move"));
                 } else {
                     self.st.push(self.p.txt("fn"));
@@ -783,13 +783,13 @@ extend Builder {
             NODE_DYN_TYPE => {
                 // `&dyn T` / `&mut dyn T` fold the borrow into the dyn node as its qualifier; bare `dyn T`
                 // (as in `Box<dyn T>`) carries TYPE_QUAL_NONE.
-                if n.as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_NONE {
+                if unsafe n.as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_NONE {
                     self.st.push(self.p.txt("&"));
                     if n.as_data.indirect_type.lifetime != NODE_NONE {
                         self.st.push(self.node_text(n.as_data.indirect_type.lifetime));
                         self.st.push(self.p.txt(" "));
                     }
-                    if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
+                    if unsafe n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
                         self.st.push(self.p.txt("mut "));
                     }
                 }
@@ -830,7 +830,7 @@ extend Builder {
             // Function-type params may be bare types.
             return self.b_type(id);
         }
-        if n.as_data.parameter.is_mutable {
+        if unsafe n.as_data.parameter.is_mutable {
             self.st.push(self.p.txt("mut "));
         }
         if n.as_data.parameter.name != NODE_NONE {
@@ -846,7 +846,7 @@ extend Builder {
     }
 
     fn b_generic_param(self: &mut Self, id: NodeId) d::DocId {
-        let g = self.ext(id).generic_param;
+        let g = unsafe self.ext(id).generic_param;
         let v = self.st.len();
         if g.is_const {
             self.st.push(self.p.txt("const "));
@@ -1007,7 +1007,7 @@ extend Builder {
         let v = self.st.len();
         switch n.kind {
             NODE_UNARY => {
-                let u = n.as_data.unary;
+                let u = unsafe n.as_data.unary;
                 if u.op == tt::TokenType::Question {
                     self.st.push(self.b_expr_prec(u.operand, PREC_POSTFIX));
                     self.st.push(self.p.txt("?"));
@@ -1054,7 +1054,7 @@ extend Builder {
                 self.st.push(self.b_expr(l));
                 while self.bin_spine.len() > base {
                     let b = self.bin_spine.pop().unwrap();
-                    let bi = self.nd(b).as_data.binary;
+                    let bi = unsafe self.nd(b).as_data.binary;
                     let pr = par::Parser::precedence(bi.op);
                     if self.expr_prec(l) < pr {
                         let e = self.cat(v);
@@ -1070,7 +1070,7 @@ extend Builder {
                 }
             },
             NODE_ASSIGNMENT => {
-                let bi = n.as_data.binary;
+                let bi = unsafe n.as_data.binary;
                 self.st.push(self.b_expr_prec(bi.left, PREC_RANGE));
                 self.st.push(self.p.txt(" "));
                 self.st.push(self.op_text(bi.op));
@@ -1078,7 +1078,7 @@ extend Builder {
                 self.st.push(self.b_expr_prec(bi.right, PREC_RANGE));
             },
             NODE_RANGE => {
-                let r = n.as_data.pattern_range;
+                let r = unsafe n.as_data.pattern_range;
                 if r.start != NODE_NONE {
                     self.st.push(self.b_range_bound(r.start));
                 }
@@ -1115,7 +1115,7 @@ extend Builder {
             },
             NODE_MEMBER => {
                 self.st.push(self.b_expr_prec(n.as_data.member.object, PREC_POSTFIX));
-                if n.as_data.member.path {
+                if unsafe n.as_data.member.path {
                     self.st.push(self.p.txt("::"));
                 } else {
                     self.st.push(self.p.txt("."));
@@ -1139,7 +1139,7 @@ extend Builder {
                 self.b_turbofish(n.as_data.specialization.types);
             },
             NODE_CLOSURE => {
-                let c = self.ext(id).closure;
+                let c = unsafe self.ext(id).closure;
                 let ps = self.st.len();
                 self.b_each(c.params, 3);
                 // `|..|` has no return-type slot; only the `fn(..) T { .. }` spelling does. Both parse to this
@@ -1219,7 +1219,7 @@ extend Builder {
             NODE_ARRAY_LITERAL => {
                 let az = self.st.len();
                 let elems = n.as_data.array_literal.elements;
-                if n.as_data.array_literal.repeat && elems.len == 2 {
+                if unsafe n.as_data.array_literal.repeat && elems.len == 2 {
                     self.st.push(self.p.txt("["));
                     self.st.push(self.b_expr(self.list_at(elems, 0)));
                     self.st.push(self.p.txt("; "));
@@ -1368,7 +1368,7 @@ extend Builder {
         let mut spec = false;
         loop {
             let n = self.nd(cur);
-            if n.kind == NodeKind::NODE_MEMBER && n.as_data.member.path {
+            if n.kind == NodeKind::NODE_MEMBER && unsafe n.as_data.member.path {
                 cur = n.as_data.member.object;
             } else if n.kind == NodeKind::NODE_GENERIC_SPECIALIZATION && !spec {
                 spec = true;
@@ -1495,7 +1495,7 @@ extend Builder {
         let v = self.st.len();
         switch n.kind {
             NODE_LET => {
-                let l = n.as_data.let_stmt;
+                let l = unsafe n.as_data.let_stmt;
                 if l.is_mutable {
                     self.st.push(self.p.txt("let mut "));
                 } else {
@@ -1599,7 +1599,7 @@ extend Builder {
                 self.st.push(self.b_if(id));
             },
             NODE_WHILE => {
-                let w = n.as_data.while_stmt;
+                let w = unsafe n.as_data.while_stmt;
                 if w.label.end > w.label.start {
                     self.st.push(self.span_doc(w.label));
                     self.st.push(self.p.txt(": "));
@@ -1625,7 +1625,7 @@ extend Builder {
                 }
             },
             NODE_FOR | NODE_INLINE_FOR => {
-                let f = self.ext(id).for_stmt;
+                let f = unsafe self.ext(id).for_stmt;
                 if f.label.end > f.label.start {
                     self.st.push(self.span_doc(f.label));
                     self.st.push(self.p.txt(": "));
@@ -1642,7 +1642,7 @@ extend Builder {
             },
             NODE_PARALLEL_FOR => {
                 // The marker's body is the closure the parser wrapped the block in; print the block.
-                let f = self.ext(id).for_stmt;
+                let f = unsafe self.ext(id).for_stmt;
                 self.st.push(self.p.txt("parallel for "));
                 self.st.push(self.node_text(f.binding));
                 self.st.push(self.p.txt(" in "));
@@ -1652,7 +1652,7 @@ extend Builder {
             },
             NODE_EXPRESSION_STATEMENT => {
                 self.st.push(self.b_expr(n.as_data.single.value));
-                if n.as_data.single.semi {
+                if unsafe n.as_data.single.semi {
                     self.st.push(self.p.txt(";"));
                 }
             },
@@ -1759,7 +1759,7 @@ extend Builder {
 
     fn b_select_arm(self: &mut Self, id: NodeId) d::DocId {
         let n = self.nd(id);
-        let a = n.as_data.select_arm;
+        let a = unsafe n.as_data.select_arm;
         let v = self.st.len();
         if a.binding != NODE_NONE {
             self.st.push(self.b_expr(self.nd(a.binding).as_data.let_stmt.name));
@@ -1964,7 +1964,7 @@ extend Builder {
                 }
             },
             NODE_STRUCT | NODE_ENUM => {
-                let a = self.ext(id).aggregate;
+                let a = unsafe self.ext(id).aggregate;
                 if a.vis != VIS_PRIVATE {
                     self.st.push(self.p.txt(vis_text(a.vis)));
                 }
@@ -2021,7 +2021,7 @@ extend Builder {
                 self.st.push(self.b_item_body(itf.items, n.span));
             },
             NODE_EXTEND => {
-                let e = self.ext(id).extend_def;
+                let e = unsafe self.ext(id).extend_def;
                 if e.is_unsafe {
                     self.st.push(self.p.txt("unsafe "));
                 }
@@ -2051,7 +2051,7 @@ extend Builder {
                 self.st.push(self.p.txt(";"));
             },
             NODE_CONST => {
-                let c = n.as_data.const_def;
+                let c = unsafe n.as_data.const_def;
                 if c.vis != VIS_PRIVATE {
                     self.st.push(self.p.txt(vis_text(c.vis)));
                 }
@@ -2094,7 +2094,7 @@ extend Builder {
                 self.st.push(self.b_item_body(e.items, n.span));
             },
             NODE_IMPORT => {
-                let im = n.as_data.import_decl;
+                let im = unsafe n.as_data.import_decl;
                 self.st.push(self.p.txt("import "));
                 for i in 0..im.path.len {
                     if i > 0 {
@@ -2131,7 +2131,7 @@ extend Builder {
     }
 
     fn b_variant(self: &mut Self, id: NodeId) d::DocId {
-        let va = self.nd(id).as_data.variant;
+        let va = unsafe self.nd(id).as_data.variant;
         let v = self.st.len();
         self.st.push(self.node_text(va.name));
         if va.payload.len > 0 {

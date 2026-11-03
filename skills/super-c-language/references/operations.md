@@ -105,6 +105,25 @@ Floats: `to_bits`/`from_bits`, `classify` (`FpClass`), `next_up`/`next_down`, `m
 | a `bool` whose byte is not 0 or 1 | undefined |
 | a union member read through another member of the same size, both integer or float scalars | defined: the bits reinterpreted (`f32_bits`), NaN payloads included; a constant evaluates it bit for bit |
 
+## Valid values
+
+A value of these types holds one of its valid bit patterns. The optimizer assumes it: a load of
+such a value carries the fact (an enum's tag is at most its greatest discriminant, a `bool` is 0
+or 1), so a comparison the fact decides folds, a `switch` over every variant needs no test of
+its default, and a table indexed by the tag needs no bound test. A value that breaks it is
+undefined. Only `unsafe` code, `std::mem::ptr::cast_mut` and values from C can make one. An
+integer cast to a plain enum (`n as Color`) checks the value outside `unsafe`: a value that is no
+discriminant fails with "assertion failed" (a range test for consecutive discriminants, else one
+test per variant); inside `unsafe` the cast is unchecked. A union member read as a `bool` or an
+enum (or an aggregate holding one) needs `unsafe`.
+
+| Type | Valid values |
+|------|--------------|
+| `bool` | 0 and 1 |
+| an enum, payload-less or tagged | its declared discriminants (an enum with a negative discriminant carries no fact); a C enum (`extern "C"`) takes every value of its C type |
+| `char` | every byte: 0 to 255 (no invalid value) |
+| `&T`, `&mut T` | non-null, aligned to `T`, addressing a live `T` |
+
 ## Floating point
 
 | Rule | Decision |
@@ -113,7 +132,7 @@ Floats: `to_bits`/`from_bits`, `classify` (`FpClass`), `next_up`/`next_down`, `m
 | rounding | round to nearest, ties to even |
 | literal | rounds once from its decimal or hex text to its type (the context's type, `f32` without one); never through the other width |
 | contraction | none: `a * b + c` rounds twice; only an explicit `fma` fuses, unless the build allows it (`-ffp-contract=fast`, `-ffast-math`) |
-| float rewrites | none: the optimizer keeps every float operation as written, unless the build allows a rewrite (`-fassociative-math`, `-freciprocal-math`, `-ffinite-math-only`, `-fno-signed-zeros`, all of them under `-ffast-math`; super-c-binary, "Optimization levels and code-generation flags"), which may change the result's bits |
+| float rewrites | none: the optimizer keeps every float operation as written, unless the build allows a rewrite (`-fassociative-math`, `-freciprocal-math`, `-ffinite-math-only`, `-fno-signed-zeros`, all of them under `-ffast-math`; super-c-binary, "Optimization levels and code-generation flags"), which may change the result's bits. `@associative_math` on a function with a body allows reassociation inside it alone (its closures too): its float sums and products may vectorize; the native build keeps it from inlining a function without it into one with it, and the C output keeps its operations as written |
 | libm calls | run as written: no build folds, merges (`sincos`) or rewrites (`pow(2, x)` to `exp2(x)`) a call of a transcendental function, so every profile gives the same bits, and constant evaluation gives them where the compiler and the program use one libm. `--emit-c` writes `-fno-builtin-<f>` for the `f64` and `f32` names of the transcendental functions (`sin` .. `hypot`, `LIBM_AS_WRITTEN` in `src/build_system/build.spc`) and `-ffp-contract=off` into `__cflags`, so a C compiler keeps them too |
 | `%` | the C `fmod` remainder: the sign of the dividend (`-7.5 % 2.0` is -1.5) |
 | NaN payload of an arithmetic result | not specified |
@@ -124,7 +143,12 @@ Floats: `to_bits`/`from_bits`, `classify` (`FpClass`), `next_up`/`next_down`, `m
 
 | Rule | Decision |
 |------|----------|
-| creation outside `[base, one-past]` of an object | undefined |
+| creation outside `[base, one-past]` of an object | undefined (Rust's `offset` rule, LLVM's `inbounds`): every address arithmetic stays inside its object, so the optimizer compares two addresses of one base as their offsets (`p + i < p + n` is `i < n`, the index times the element size never overflowing) and holds that addresses of different objects (two allocations, two locals, a local and a static) never alias |
+| an object larger than `isize::MAX` bytes | undefined: no allocation, local or static is that large |
+| a write through the result of `std::mem::ptr::cast_mut` or `from_addr_mut` while a shared borrow (`&T`, `[]T`, `str`) of those bytes is live | undefined: the optimizer keeps a shared borrow's loads across every write |
+| a container's buffer (`Vector.ptr`, `Box.ptr`, `@owned` fields) reached by another path while a reference to the container is live | undefined: under a `&mut` the buffer is exclusive, under a `&` read-only, one level deep |
+| a union member or `bit_cast` read that makes a value no valid bit pattern of its type gives (Valid values) | undefined; a union read of a `bool` or an enum needs `unsafe` |
+| a local after its scope ends, or a value after it moved out or was dropped | dead: an access through a pointer to it is undefined. Its storage may hold another value: the optimizer gives locals whose scopes never overlap one stack slot, and drops a store into a local that nothing reads before its scope ends (a call or a panic before the end may read it while unwinding, so a store before one stays) |
 | one-past pointer | can be made, compared, and subtracted; not dereferenced |
 | subtraction | both pointers in one object, the distance an exact multiple of `sizeof(T)`; a zero-sized `T` traps ("pointer distance on a zero-sized element type") |
 | ordered comparison (`< <= > >=`) | defined: compares addresses, across objects too (emitted as a `uintptr_t` comparison) |

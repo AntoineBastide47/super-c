@@ -610,6 +610,15 @@ extend<'a> Parser<'a> {
                 self.body.bools |= 1u64 << k as u64;
                 return self.line_end_loc(&mut loc);
             }
+            if w == "fmath" {
+                // `fmath <bits>`: the float rewrites (`FM_*`) the body allows.
+                let mut k: u32 = 0;
+                if !self.uint(&mut k) || k > 255 {
+                    return self.fail("expected 'fmath <bits>', at most 255");
+                }
+                self.body.fmath = k as u8;
+                return self.line_end_loc(&mut loc);
+            }
             if w == "scope" {
                 // `scope @<site> g<group> v<root>`: an inlined call's exclusive parameter.
                 let mut l = Loc { file: 0, line: 0, col: 0 };
@@ -1296,13 +1305,14 @@ extend<'a> Parser<'a> {
                     return false;
                 }
                 if sc == 0 || sc > PTR_SCALE as u32 {
-                    return self.fail("a scale is 1 to 32767");
+                    return self.fail("a scale is 1 to 16383");
                 }
                 t.aux = sc as u16;
             }
             if !self.offset(&mut t.c) {
                 return false;
             }
+            t.aux |= ast::pick(self.keyword("inbounds"), PTR_INBOUNDS, 0);
             t.aux |= ast::pick(self.keyword("nonnull"), PTR_NONNULL, 0);
             return true;
         }
@@ -1335,6 +1345,12 @@ extend<'a> Parser<'a> {
             }
             if t.op == O_LOAD && self.keyword("bool") {
                 t.aux |= MEM_BOOL;
+            }
+            if t.op == O_LOAD && self.keyword("range") {
+                if !self.uint(&mut t.b) {
+                    return self.fail("expected a bound");
+                }
+                t.aux |= MEM_RANGE;
             }
             return true;
         }

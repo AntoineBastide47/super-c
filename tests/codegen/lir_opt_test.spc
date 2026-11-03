@@ -6974,6 +6974,427 @@ b2:
     assert(ts.contains("switch"), ts.as_str());
 }
 
+// `@associative_math` lets one function's float sums reassociate (`Body.fmath`): its loop's sum keeps a
+// vector of partial sums (`reduce_add`) while the same loop without it adds in order; a function without
+// it inlined into one with it would reassociate too, so it stays a call there. The results match the
+// debug build's (the inputs are halves, exact in any order).
+const ASSOC_FN: str = M"(@noinline
+@associative_math
+fn am_fast(s: []f32) f32 {
+    let mut t: f32 = 0.0;
+    for i in 0..s.len() {
+        t += s[i];
+    }
+    return t;
+}
+
+@noinline
+fn am_exact(s: []f32) f32 {
+    let mut t: f32 = 0.0;
+    for i in 0..s.len() {
+        t += s[i];
+    }
+    return t;
+}
+
+fn am_inner(s: []f32) f32 {
+    let mut t: f32 = 0.0;
+    for i in 0..s.len() {
+        t += s[i];
+    }
+    return t;
+}
+
+@noinline
+@associative_math
+fn am_outer(s: []f32) f32 {
+    return am_inner(s) * 2.0;
+}
+
+fn main() i32 {
+    let mut a: [f32; 64] = [0.0; 64];
+    for i in 0..64 {
+        a[i] = i as f32 * 0.5;
+    }
+    println("{} {} {} {}", am_fast(a[0..64]), am_exact(a[0..64]), am_outer(a[0..64]), am_inner(a[0..9]));
+    return 0;
+}
+)";
+
+@test
+fn associative_math_reassociates_its_function_alone() {
+    h::expect_same_output("associative math", ASSOC_FN, ["--profile=debug"], ["--profile=release"]);
+    let p = cli::proj_new();
+    p.mkfile("main.spc", ASSOC_FN);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "am_", "build -O2 main.spc -o app");
+    let fast = printed(r.text(), "am_fast");
+    let exact = printed(r.text(), "am_exact");
+    let outer = printed(r.text(), "am_outer");
+    let ok = r.ok() && fast.contains("reduce_add") && fast.contains("fmath 1") && !exact.contains("reduce_add") && !exact.contains(
+        "fmath",
+    ) && outer.contains("call") && !outer.contains("reduce_add");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "the attributed function's sum reassociates; the others add in order");
+    let q = cli::proj_new();
+    q.mkfile("main.spc", "@associative_math\nstruct S {\n    x: f32,\n}\n\nfn main() i32 {\n    return 0;\n}\n");
+    let e = cli::superc_in(q.dir(), "build main.spc -o app");
+    assert(!e.ok() && e.text().contains("may only be applied to a function with a body"), e.text());
+}
+
+// Locals of scopes whose storage never overlaps share one slot of their size (`share_plan`): `seq`'s two
+// scopes' locals, one slot; `both`'s locals live at once keep two. A store into a local that nothing reads
+// before its scope ends goes (`dead_stores`: `x.n = 7`), one a call may read stays (`y.n = 9` before `sum`).
+const SCOPE_SLOTS: str = M"(struct Big {
+    a: [u64; 16],
+    n: u64,
+}
+
+@noinline
+fn fill(b: &mut Big, k: u64) {
+    for i in 0..16 {
+        b.a[i] = k + i as u64;
+    }
+}
+
+@noinline
+fn sum(b: &Big) u64 {
+    let mut s = b.n;
+    for i in 0..16 {
+        s += b.a[i];
+    }
+    return s;
+}
+
+@noinline
+fn sc_seq(k: u64) u64 {
+    let mut t: u64 = 0;
+    {
+        let mut x = Big { a: [0; 16], n: 1 };
+        fill(&mut x, k);
+        t += sum(&x);
+        x.n = 7;
+    }
+    {
+        let mut y = Big { a: [0; 16], n: 2 };
+        fill(&mut y, k + 1);
+        y.n = 9;
+        t += sum(&y);
+    }
+    return t;
+}
+
+@noinline
+fn sc_both(k: u64) u64 {
+    let mut x = Big { a: [0; 16], n: 1 };
+    fill(&mut x, k);
+    let mut y = Big { a: [0; 16], n: 2 };
+    fill(&mut y, k + 1);
+    return sum(&x) + sum(&y);
+}
+
+fn main() i32 {
+    println("{} {}", sc_seq(3), sc_both(5));
+    return 0;
+}
+)";
+
+@test
+fn scope_locals_share_slots_and_drop_dead_stores() {
+    h::expect_same_output("scope slots", SCOPE_SLOTS, ["--profile=debug"], ["--profile=release"]);
+    let p = cli::proj_new();
+    p.mkfile("main.spc", SCOPE_SLOTS);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "sc_", "build -O2 main.spc -o app");
+    let seq = printed(r.text(), "sc_seq");
+    let both = printed(r.text(), "sc_both");
+    let ok = r.ok() && seq.contains("slot s0 size 136") && !seq.contains("slot s1") && !seq.contains("iconst.i64 7") && seq.contains(
+        "iconst.i64 9",
+    ) && both.find("size 136") != String::from_str(both).rfind("size 136") as isize;
+    if !ok {
+        r.show();
+    }
+    assert(ok, "the scopes share a slot; the dead store goes, the read one stays; overlapping locals keep two");
+}
+
+// Addresses in bounds of one base (`inbounds`) compare as their offsets: `p + i * 4 <u p + n * 4` is
+// `i <s n`, and two constant offsets decide the comparison. Without the flag, or through a step that may
+// leave the object (`p + 8` not in bounds, then in bounds of that), the comparison stays.
+@test
+fn in_bounds_addresses_compare_as_their_offsets() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @cmp fn global
+sym @plain fn global
+sym @consts fn global
+sym @mixed fn global
+fn @cmp
+  sig (ptr, i64, i64) -> i8
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = ptradd v0, v1 * 4 inbounds
+  v4 = ptradd v0, v2 * 4 inbounds
+  v5 = icmp.ult v3, v4
+  ret v5
+fn @plain
+  sig (ptr, i64, i64) -> i8
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = ptradd v0, v1 * 4
+  v4 = ptradd v0, v2 * 4
+  v5 = icmp.ult v3, v4
+  ret v5
+fn @consts
+  sig (ptr) -> i8
+b0(v0: ptr):
+  v1 = ptradd v0+8 inbounds
+  v2 = ptradd v0+4 inbounds
+  v3 = icmp.ugt v1, v2
+  ret v3
+fn @mixed
+  sig (ptr) -> i8
+b0(v0: ptr):
+  v1 = ptradd v0+8
+  v2 = ptradd v1+8 inbounds
+  v3 = ptradd v0+4 inbounds
+  v4 = icmp.ugt v2, v3
+  ret v4
+)",
+    );
+    let tc = text_of(&a, "cmp");
+    assert(tc.contains("icmp.slt v1, v2") && !tc.contains("ptradd"), tc.as_str());
+    let tp = text_of(&a, "plain");
+    assert(tp.contains("icmp.ult") && tp.contains("ptradd"), tp.as_str());
+    let tk = text_of(&a, "consts");
+    assert(!tk.contains("icmp"), tk.as_str());
+    let tm = text_of(&a, "mixed");
+    assert(tm.contains("icmp.ugt"), tm.as_str());
+    let xs: [u64; 3] = [4096, 3, 9];
+    same_result(&b, &a, "cmp", xs, 1);
+    same_result(&b, &a, "plain", xs, 1);
+    let ys: [u64; 3] = [4096, 9, 3];
+    same_result(&b, &a, "cmp", ys, 0);
+    let p: [u64; 1] = [4096];
+    same_result(&b, &a, "consts", p, 1);
+    same_result(&b, &a, "mixed", p, 1);
+}
+
+// The language's addresses are in bounds of their bases (`inbounds`): two raw pointers one base's
+// arithmetic makes compare as their indices.
+const RAW_COMPARES: str = M"(@noinline
+fn raw_before(p: *const u32, i: usize, n: usize) bool {
+    return unsafe { (p + i) < (p + n) };
+}
+
+fn main() i32 {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    println("{} {}", raw_before(&a[0], 1, 3), raw_before(&a[0], 3, 1));
+    return 0;
+}
+)";
+
+@test
+fn raw_pointers_of_one_base_compare_as_their_indices() {
+    h::expect_same_output("raw compares", RAW_COMPARES, ["--profile=debug"], ["--profile=release"]);
+    let p = cli::proj_new();
+    p.mkfile("main.spc", RAW_COMPARES);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "raw_before", "build -O2 main.spc -o app");
+    let f = printed(r.text(), "raw_before");
+    let ok = r.ok() && f.contains("icmp.slt") && !f.contains("ptradd");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "the comparison of the addresses is one of the indices");
+}
+
+// Enum tags in memory: a payload-less enum's value and a payload enum's tag load with their greatest
+// discriminant (`range`), an enum with a negative discriminant's without. Built in release, a comparison
+// the bound decides folds and a switch over every variant reads a table with no range test; the results
+// match the debug build's for every variant.
+const ENUM_TAGS: str = M"(enum Color {
+    Red,
+    Green,
+    Blue,
+    Black,
+}
+
+enum Shape {
+    Circle(f64),
+    Rect(f64, f64),
+    Dot,
+}
+
+enum Signed {
+    Low = -1,
+    Zero,
+    One,
+}
+
+@noinline
+fn tag_name(c: &Color) i32 {
+    return switch *c {
+        Color::Red => 10,
+        Color::Green => 27,
+        Color::Blue => 33,
+        Color::Black => 41,
+    };
+}
+
+@noinline
+fn tag_small(c: &Color) bool {
+    return (*c as i32) < 4;
+}
+
+@noinline
+fn tag_area(s: &Shape) f64 {
+    return switch *s {
+        Shape::Circle(r) => r * r,
+        Shape::Rect(a, b) => a * b,
+        Shape::Dot => 0.0,
+    };
+}
+
+@noinline
+fn tag_signed(s: &Signed) i32 {
+    return *s as i32 + 1;
+}
+
+fn main() i32 {
+    let cs: [Color; 4] = [Color::Red, Color::Green, Color::Blue, Color::Black];
+    for c in cs {
+        print("{} {} ", tag_name(&c), tag_small(&c));
+    }
+    let ss: [Shape; 3] = [Shape::Circle(2.0), Shape::Rect(2.0, 3.0), Shape::Dot];
+    for s in ss {
+        print("{} ", tag_area(&s));
+    }
+    let gs: [Signed; 3] = [Signed::Low, Signed::Zero, Signed::One];
+    for g in gs {
+        print("{} ", tag_signed(&g));
+    }
+    println("");
+    return 0;
+}
+)";
+
+@test
+fn enum_tags_load_with_their_greatest_discriminant() {
+    h::expect_same_output("enum tags", ENUM_TAGS, ["--profile=debug"], ["--profile=release"]);
+    let p = cli::proj_new();
+    p.mkfile("main.spc", ENUM_TAGS);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "tag_", "build -O2 main.spc -o app");
+    let name = printed(r.text(), "tag_name");
+    let small = printed(r.text(), "tag_small");
+    let area = printed(r.text(), "tag_area");
+    let signed = printed(r.text(), "tag_signed");
+    let ok = r.ok() && name.contains("range 3") && !name.contains("icmp") && !small.contains("icmp") && area.contains(
+        "range 2",
+    ) && signed.contains("load") && !signed.contains("range");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "the tags load bounded; the bound decides the comparisons and the table's range");
+}
+
+// A load of an enum's tag carries its greatest discriminant (`range`): a comparison that every value up to
+// it answers alike folds (a signed one too, the bound clear of the sign bit), and a switch on it lowered
+// to a table in a register spans to the bound, with no range test. The same code on a load without the
+// bound keeps both.
+@test
+fn bounded_loads_decide_comparisons_and_switch_tables() {
+    let (b, a) = optimized_split(
+        M"(lir ptr 8
+sym @cmp fn global noinline
+sym @plain fn global noinline
+sym @name fn global noinline
+sym @plain_name fn global noinline
+sym @drive fn global
+sym @TAG data global
+fn @cmp
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i8 v0 align 0 range 3
+  v2 = zext.i32 v1
+  v3 = iconst.i32 4
+  v4 = icmp.slt v2, v3
+  v5 = iconst.i8 7
+  v6 = icmp.ne v1, v5
+  v7 = and.i8 v4, v6
+  v8 = zext.i32 v7
+  ret v8
+fn @plain
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i8 v0 align 0
+  v2 = zext.i32 v1
+  v3 = iconst.i32 4
+  v4 = icmp.slt v2, v3
+  v5 = iconst.i8 7
+  v6 = icmp.ne v1, v5
+  v7 = and.i8 v4, v6
+  v8 = zext.i32 v7
+  ret v8
+fn @name
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i8 v0 align 0 range 3
+  v2 = iconst.i32 10
+  v3 = iconst.i32 27
+  v4 = iconst.i32 33
+  v5 = iconst.i32 41
+  switch v1 [0 -> b1(v2), 1 -> b1(v3), 2 -> b1(v4)] else b1(v5)
+b1(v6: i32):
+  ret v6
+fn @plain_name
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i8 v0 align 0
+  v2 = iconst.i32 10
+  v3 = iconst.i32 27
+  v4 = iconst.i32 33
+  v5 = iconst.i32 41
+  switch v1 [0 -> b1(v2), 1 -> b1(v3), 2 -> b1(v4)] else b1(v5)
+b1(v6: i32):
+  ret v6
+fn @drive
+  sig (i8) -> i32
+b0(v0: i8):
+  v1 = symaddr @TAG
+  store v0, v1 align 0
+  v2 = call.i32 @name(v1) : (ptr) -> i32
+  v3 = call.i32 @cmp(v1) : (ptr) -> i32
+  v4 = call.i32 @plain(v1) : (ptr) -> i32
+  v5 = call.i32 @plain_name(v1) : (ptr) -> i32
+  v6 = iconst.i32 100
+  v7 = mul.i32 v2, v6
+  v8 = add.i32 v7, v3
+  v9 = mul.i32 v8, v6
+  v10 = add.i32 v9, v4
+  v11 = mul.i32 v10, v6
+  v12 = add.i32 v11, v5
+  ret v12
+data @TAG size 1 align 0
+)",
+        0,
+        false,
+        il::SPEED,
+        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
+        false,
+        true,
+    );
+    let tc = text_of(&a, "cmp");
+    assert(!tc.contains("icmp") && !tc.contains("load"), tc.as_str());
+    let tp = text_of(&a, "plain");
+    assert(tp.contains("icmp"), tp.as_str());
+    let tn = text_of(&a, "name");
+    assert(!tn.contains("icmp") && !tn.contains("select") && tn.contains("lshr"), tn.as_str());
+    let tq = text_of(&a, "plain_name");
+    assert(tq.contains("icmp") && tq.contains("select"), tq.as_str());
+    let names: [u64; 4] = [10, 27, 33, 41];
+    for x in 0..4u64 {
+        let xs: [u64; 1] = [x];
+        same_result(&b, &a, "drive", xs, ((names[x as usize] * 100 + 1) * 100 + 1) * 100 + names[x as usize]);
+    }
+}
+
 // A sum or difference of a constant and another of a constant is one sum (`(x + 1) + 1` is `x + 2`).
 @test
 fn chained_constant_sums_combine() {

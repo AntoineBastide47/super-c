@@ -19,7 +19,7 @@ const fn rt_ast(pkg: *const loader::Package, a: *const Ast, m: ModuleId) *const 
 // Whether closure node `n` returns its body's value without a written result list: an expression
 // body, or a block whose `return`s give one (`ClosureData.ret_infer`).
 pub(module) const fn closure_body_ret(a: &Ast, n: NodeId) bool {
-    return a.ext(n).closure.expr_body || a.ext(n).closure.ret_infer;
+    return unsafe a.ext(n).closure.expr_body || unsafe a.ext(n).closure.ret_infer;
 }
 
 const fn rt_src(pkg: *const loader::Package, a: *const Ast, cur_src: str, m: ModuleId) str {
@@ -523,7 +523,7 @@ fn render_ty(pkg: *const loader::Package, a: *const Ast, cur_src: str, elide: bo
     if ty.kind == TypeKind::TYPE_ERROR {
         out.push_str("_");
     } else if ty.kind == TypeKind::TYPE_BUILTIN {
-        out.push_str(bt_name(ty.as_data.builtin));
+        out.push_str(bt_name(unsafe ty.as_data.builtin));
     } else if ty.kind == TypeKind::TYPE_NEVER {
         out.push_str("never");
     } else if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE {

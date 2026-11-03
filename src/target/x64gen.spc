@@ -1438,7 +1438,9 @@ extend Gen {
         }
         // A body that calls nothing that returns (no instruction `clobbers` but one before a trap or in a
         // rare block, no thread-local address's getter: `tls_call`) and runs no system operation or
-        // variadic access: every register of `xscr` may be a home at once. `bare`: not even in a rare block.
+        // variadic access: every register of `xscr` may be a home at once. `bare`: not even in a rare block,
+        // and no intrinsic (`calls` skips one that writes vector registers alone, but its template writes
+        // xmm0..xmm3 and its arguments' registers, the bare xmm homes).
         let mut leaf = true;
         let mut bare = true;
         for x in 0..ni {
@@ -1446,7 +1448,7 @@ extend Gen {
             leaf = leaf && !(self.cret[x] && !self.rarec[x]) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !self.tls_call(
                 t,
             );
-            bare = bare && !self.cret[x];
+            bare = bare && !self.cret[x] && !(t.op == O_CALL && self.intrinsic(t.a).len() != 0);
         }
         bare = bare && leaf;
         // The registers the body's intrinsics write (`intrin_clob`): an intrinsic that writes vector
@@ -8362,6 +8364,11 @@ extend Gen {
         if own < sws::TABLE_MIN || !sws::switch_span(b, t, 8 * sz, &mut min, &mut span) {
             return false;
         }
+        // A table that holds every value the switched one takes needs no bound test.
+        let cover = sws::covering_span(b, t, 8 * sz, 8, min, span);
+        if cover != 0 {
+            span = cover;
+        }
         let m = if sz == 8 {
             ~0u64
         } else {
@@ -8376,19 +8383,21 @@ extend Gen {
             es[(b.words[(t.b + k) as usize].wrapping_sub(min) & m) as usize] = b.switch_edge(t, k);
         }
         self.switch_index(r, sz, min, span);
-        self.c.alu_ri(
-            x::CMP,
-            if sz == 8 {
-                8
-            } else {
-                4
-            },
-            S0,
-            (span - 1) as i32,
-        );
         // Per edge with moves (the default first), the jumps to land at them.
         let mut ds = Vector::<u32>::new();
-        self.to_default(x::CC_A, d, &mut ds);
+        if cover == 0 {
+            self.c.alu_ri(
+                x::CMP,
+                if sz == 8 {
+                    8
+                } else {
+                    4
+                },
+                S0,
+                (span - 1) as i32,
+            );
+            self.to_default(x::CC_A, d, &mut ds);
+        }
         self.c.lea(S1, x::rip());
         let disp = self.c.rip_at;
         self.c.lea(S1, x::ix(S1, S0, 3, 0));
@@ -9026,8 +9035,41 @@ extend Gen {
 
     // A call of `__sc_panic` with C string `text`.
     fn panic_text(self: &mut Self, text: str) {
-        self.cstr_addr(self.arg(0), text);
-        self.call_sym("__sc_panic");
+        let th = self.panic_thunk(text);
+        self.upper_clear();
+        let at = self.c.call32();
+        self.called = true;
+        self.rels.push(CRel { at: at, kind: x::R_PC32, sym: th, addend: -4 });
+    }
+
+    // The object's thunk of the panic with `text` (`__sc_pk.<the message's symbol>`, local, in the cold
+    // text), made on its first use: the first argument register = the message (`lea`), then a jump to
+    // `__sc_panic`. Its sites call it, 5 bytes each: the jump keeps their return address on the stack, so
+    // `__sc_panic`'s caller is the panicking site itself, as with a direct call.
+    fn panic_thunk(self: &mut Self, text: str) u32 {
+        let os = self.cstr(text);
+        let nm = format("__sc_pk.{}", os);
+        let cold = self.cold_text();
+        let r = self.arg(0);
+        let o = self.obj();
+        let k = o.sym(&nm);
+        if o.syms[k as usize].sec != ob::NOSEC {
+            return k;
+        }
+        let named = o.named(cold, true);
+        let sec = if named == ob::NOSEC {
+            ob::S_TEXT
+        } else {
+            named
+        };
+        let at = o.define(k, sec, 4, 12, ob::SF_FUNC);
+        let ps = o.sym("__sc_panic");
+        // lea r, [rip + disp32]; jmp rel32.
+        let bs: [u8; 12] = [0x48 | (r >> 3 & 1) << 2, 0x8D, (r & 7) << 3 | 5, 0, 0, 0, 0, 0xE9, 0, 0, 0, 0];
+        o.put(sec, bs);
+        o.reloc(sec, x::R_PC32, at as u32 + 3, os, -4);
+        o.reloc(sec, x::R_PLT32, at as u32 + 8, ps, -4);
+        return k;
     }
 
     // The call of `__sc_lane_panic(rdi, msg)`: `lane <rdi>: <msg>`.

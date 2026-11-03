@@ -1443,7 +1443,8 @@ extend Live {
                 }
             } else {
                 out.push(p.a);
-                if p.b != VNONE {
+                // A load's `b` is its bound (`MEM_RANGE`), no operand.
+                if p.b != VNONE && p.op != O_LOAD {
                     out.push(p.b);
                 }
             }

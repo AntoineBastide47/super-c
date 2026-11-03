@@ -1731,6 +1731,65 @@ b3:
     same_outcome(&b, &a, "drive", args, r, false);
 }
 
+// Two allocations' blocks are two objects (`Classes.obj`): addresses stay in their objects, so a loop that
+// reads one and stores into the other vectorizes without a guard on the two ranges, also when both
+// blocks' addresses escape (stored where another pointer reaches them).
+@test
+fn two_allocations_need_no_overlap_guard() {
+    let src = M"(lir ptr 8
+sym @malloc fn global
+sym @fresh fn global
+sym @KEEP data global
+fn @fresh
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = iconst.i64 4
+  v2 = mul.i64 v0, v1
+  v3 = call.ptr @malloc(v2) : (i64) -> ptr
+  v4 = call.ptr @malloc(v2) : (i64) -> ptr
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i32 3
+  jmp b1(v5)
+b1(v8: i64):
+  v9 = icmp.ult v8, v0
+  br v9, b2, b3(v5)
+b2:
+  v10 = ptradd v4, v8 * 4 inbounds
+  v11 = trunc.i32 v8
+  store v11, v10 align 2
+  v12 = add.i64 v8, v6
+  jmp b1(v12)
+b3(v13: i64):
+  v14 = icmp.ult v13, v0
+  br v14, b4, b5
+b4:
+  v15 = ptradd v4, v13 * 4 inbounds
+  v16 = load.i32 v15 align 2
+  v17 = mul.i32 v16, v7
+  v18 = ptradd v3, v13 * 4 inbounds
+  v19 = load.i32 v18 align 2
+  v20 = add.i32 v17, v19
+  store v20, v18 align 2
+  v21 = add.i64 v13, v6
+  jmp b3(v21)
+b5:
+  v22 = ptradd v3+8 inbounds
+  v23 = load.i32 v22 align 2
+  v24 = symaddr @KEEP
+  store v3, v24 align 3
+  store v4, v24+8 align 3
+  ret v23
+data @KEEP size 16 align 3
+)";
+    let (b, a) = optimized(src, VECTOR);
+    let g = text_of(&a, "fresh");
+    assert(g.contains("mul.v4i32") && !g.contains("icmp.ule"), g.as_str());
+    let args: []u64 = [40];
+    let r = run_value(&b, "fresh", args);
+    same_outcome(&b, &a, "fresh", args, r, false);
+}
+
 // A loop that its outer loop's branch enters gets a preheader (LLVM's LoopSimplify), so a nest of
 // counted loops peels from the inside out: the 4 x 4 sum over a matrix leaves no comparison.
 @test

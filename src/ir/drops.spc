@@ -406,10 +406,10 @@ fn member_count(ow: &bf::Owner, mid: ModuleId, ty: TypeId) i64 {
     }
     let oa = ow.ast_of(om);
     let dn = *oa.at_const(od);
-    if dn.kind != NodeKind::NODE_STRUCT || oa.ext(od).aggregate.is_union {
+    if dn.kind != NodeKind::NODE_STRUCT || unsafe oa.ext(od).aggregate.is_union {
         return 0 - 1;
     }
-    if oa.ext(od).aggregate.is_tuple {
+    if unsafe oa.ext(od).aggregate.is_tuple {
         return oa.ext(od).aggregate.members.len;
     }
     let mut n: i64 = 0;

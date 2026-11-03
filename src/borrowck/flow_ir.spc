@@ -3211,7 +3211,7 @@ extend tc::TypeChecker {
                 u.keys.push(0);
                 u.keys.push(bf);
             }
-            let ft = n.as_data.function_type;
+            let ft = unsafe n.as_data.function_type;
             let mut kp: u32 = 0;
             for i in 0..ft.returns.len + ft.params.len {
                 let r = i < ft.returns.len;
@@ -5087,7 +5087,7 @@ extend tc::TypeChecker {
             // An erased object holds borrows its type does not show: an owned `dyn I` only `'static`
             // ones (Rust's default object lifetime), a `&'a dyn I` ones that outlive `'a`.
             let fm = self.bc_uni_fn(u, n.as_data.indirect_type.ty, behind, depth);
-            if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE {
+            if unsafe n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE {
                 u.mark(0, behind);
                 return 1u64 | fm;
             }

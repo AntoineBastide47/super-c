@@ -4513,8 +4513,8 @@ extend Gen {
                     2u32
                 };
                 self.emit(a::logic_imm(sf, opc, rd, ra, li));
-                // A mask within the width clears the bits above it.
-                if small && op == O_AND && (k & 0xFFFFFFFF) >> bits as u64 == 0 {
+                // A mask within the width clears the bits above it; an `or` or `xor` of one keeps them clear.
+                if small && (k & 0xFFFFFFFF) >> bits as u64 == 0 && (op == O_AND || self.va[self.vx(t.a) as usize].clean) {
                     self.va.index_mut(i as usize).clean = true;
                 }
                 return true;
@@ -7518,6 +7518,11 @@ extend Gen {
         if own < sws::TABLE_MIN || !sws::switch_span(b, t, bits, &mut min, &mut span) {
             return false;
         }
+        // A table that holds every value the switched one takes needs no bound test.
+        let cover = sws::covering_span(b, t, bits, 8, min, span);
+        if cover != 0 {
+            span = cover;
+        }
         let m = if bits == 64 {
             ~0u64
         } else {
@@ -7538,10 +7543,12 @@ extend Gen {
             self.switch_index(r, bits, min, span);
             a::IP1
         };
-        self.emit(a::cmp_imm(bits == 64, ix, span - 1));
         // Per edge with moves (the default first), the branches to patch to them.
         let mut ds = Vector::<u32>::new();
-        self.to_default(a::bcond(a::HI, 0), Test { kind: T_CC, cc: a::HI, reg: 0 }, d, &mut ds);
+        if cover == 0 {
+            self.emit(a::cmp_imm(bits == 64, ix, span - 1));
+            self.to_default(a::bcond(a::HI, 0), Test { kind: T_CC, cc: a::HI, reg: 0 }, d, &mut ds);
+        }
         // ADR x16 to the table, three words on; x16 += the index * 4 (UXTW or UXTX); BR x16.
         self.emit(a::adr(false, a::IP0, 12));
         self.emit(a::addsub_ext(true, 0, false, a::IP0, a::IP0, ix, 2 | (bits == 64) as u32, 2));
@@ -8092,14 +8099,45 @@ extend Gen {
 
     // A call of `__sc_panic` with C string `text`.
     fn panic_text(self: &mut Self, text: str) {
-        let os = self.cstr(text);
-        self.reloc(a::R_PAGE21, os, 0);
-        self.emit(a::adr(true, 0, 0));
-        self.reloc(a::R_PAGEOFF12, os, 0);
-        self.emit(a::add_imm(true, 0, 0, 0));
-        let ps = self.obj().sym("__sc_panic");
-        self.reloc(a::R_BRANCH26, ps, 0);
+        let th = self.panic_thunk(text);
+        self.reloc(a::R_BRANCH26, th, 0);
         self.emit(a::bl(0));
+    }
+
+    // The object's thunk of the panic with `text` (`__sc_pk.<the message's symbol>`, local, in the cold
+    // text), made on its first use: `x0` = the message, then a jump to `__sc_panic`. Its sites call it, one
+    // instruction each: the jump keeps their return address in x30, so `__sc_panic`'s caller is the
+    // panicking site itself, as with a direct call.
+    fn panic_thunk(self: &mut Self, text: str) u32 {
+        let os = self.cstr(text);
+        let nm = format("__sc_pk.{}", os);
+        let cold = self.cold_text();
+        let o = self.obj();
+        let k = o.sym(&nm);
+        if o.syms[k as usize].sec != ob::NOSEC {
+            return k;
+        }
+        let named = o.named(cold, true);
+        let sec = if named == ob::NOSEC {
+            ob::S_TEXT
+        } else {
+            named
+        };
+        let at = o.define(k, sec, 2, 12, ob::SF_FUNC);
+        let ps = o.sym("__sc_panic");
+        let ws: [u32; 3] = [a::adr(true, 0, 0), a::add_imm(true, 0, 0, 0), a::b(0)];
+        o.put_words(sec, ws);
+        o.reloc(sec, a::R_PAGE21, at as u32, os, 0);
+        o.reloc(sec, a::R_PAGEOFF12, at as u32 + 4, os, 0);
+        o.reloc(sec, a::R_BRANCH26, at as u32 + 8, ps, 0);
+        // No frame: the return address stays in x30.
+        if self.elf {
+            let none = Vector::<u32>::new();
+            leaf_rules(o, k, 12, &none, &none, 0, 0);
+        } else {
+            o.frames.push(ob::OFrame { sym: k, size: 12, cfi_at: 0, cfi_len: 0, compact: 0x02000000, off: 0 });
+        }
+        return k;
     }
 
     // ---- Prologue, epilogue and output ----
