@@ -1088,7 +1088,8 @@ extend Gen {
 
     // For block parameter `x` (class `k`), the local of an argument an edge into its block passes it, so
     // that edge moves nothing: a free one (off the free list), or the argument's own when no code the
-    // block reaches reads the argument (`dead_from`), which both then hold. NONE when there is none.
+    // block reaches reads the argument (`dead_from`) and no other value holds it (another parameter of the
+    // block may have taken it), which both then hold. NONE when there is none.
     fn arg_local(self: &mut Self, x: u32, k: usize) u32 {
         let b = self.b();
         let ni = b.insts.len() as u32;
@@ -1954,8 +1955,9 @@ extend Gen {
                 self.get(t.a);
                 self.c.op(pick8(d, w::F64_SQRT, w::F32_SQRT));
             } else {
-                self.get(t.a);
-                self.get(t.b);
+                let swap = (op == O_FADD || op == O_FMUL) && self.swap_reads(t.a, t.b);
+                self.get(pick_v(swap, t.b, t.a));
+                self.get(pick_v(swap, t.a, t.b));
                 let base = if d {
                     w::F64_ADD
                 } else {
@@ -2080,11 +2082,14 @@ extend Gen {
                 self.c.op(w::I32_XOR);
             }
         } else {
-            self.get_ext(t.a, signed);
+            // A commutative operation reads first the operand that keeps more values on the stack.
+            let comm = op == O_ADD || op == O_MUL || op >= O_AND && op <= O_XOR;
+            let swap = comm && self.swap_reads(t.a, t.b);
+            self.get_ext(pick_v(swap, t.b, t.a), signed);
             if op == O_ASHR {
                 self.get(t.b);
             } else {
-                self.get_ext(t.b, signed);
+                self.get_ext(pick_v(swap, t.a, t.b), signed);
             }
             let k = op - O_ADD;
             // O_ADD .. O_ASHR in the order of i32.add .. i32.shr_u, but with `lshr` before `ashr`.
@@ -2152,28 +2157,39 @@ extend Gen {
             self.put(i);
             return true;
         }
-        let x = self.tmp(w::I64);
-        let y = self.tmp(w::I64);
-        self.get(t.a);
-        self.c.local(w::LOCAL_SET, x);
-        self.get(t.b);
-        self.c.local(w::LOCAL_SET, y);
-        self.mulh64(sgn, x, y);
+        // A signed one reads the operands again (their signs): in locals.
+        if sgn {
+            let x = self.tmp(w::I64);
+            let y = self.tmp(w::I64);
+            self.get(t.a);
+            self.c.local(w::LOCAL_SET, x);
+            self.get(t.b);
+            self.c.local(w::LOCAL_SET, y);
+            self.mulh64(sgn, x, y, VNONE, VNONE);
+        } else {
+            self.mulh64(false, NONE, NONE, t.a, t.b);
+        }
         self.put(i);
         return true;
     }
 
-    // Push the high 64 bits of the product of i64 locals `x` and `y` (signed `sgn`), from the four products
-    // of their 32-bit halves (wasm has no wider multiply): high = ah * bh + (ah * bl >> 32) + (cross >> 32),
-    // cross = (al * bl >> 32) + (ah * bl & m) + al * bh, less for a signed one each operand where the other
-    // is negative.
-    fn mulh64(self: &mut Self, sgn: bool, x: u32, y: u32) {
+    // Push the high 64 bits of the product of i64 locals `x` and `y` (signed `sgn`; NONE: values `va` and
+    // `vb`, read once), from the four products of their 32-bit halves (wasm has no wider multiply): high =
+    // ah * bh + (ah * bl >> 32) + (cross >> 32), cross = (al * bl >> 32) + (ah * bl & m) + al * bh, less for a
+    // signed one each operand where the other is negative.
+    fn mulh64(self: &mut Self, sgn: bool, x: u32, y: u32, va: Value, vb: Value) {
         let al = self.tmp(w::I64);
         let ah = self.tmp(w::I64);
         let bl = self.tmp(w::I64);
         let bh = self.tmp(w::I64);
         let hl = self.tmp(w::I64);
+        if x == NONE {
+            self.get(va);
+        }
         self.halves(x, al, ah);
+        if y == NONE {
+            self.get(vb);
+        }
         self.halves(y, bl, bh);
         // hl = ah * bl
         self.c.local(w::LOCAL_GET, ah);
@@ -2235,7 +2251,7 @@ extend Gen {
             self.ld_lane_to(x, t.a, k, lt, sgn, false);
             self.ld_lane_to(y, t.b, k, lt, sgn, false);
             if lb == 64 {
-                self.mulh64(sgn, x, y);
+                self.mulh64(sgn, x, y, VNONE, VNONE);
             } else {
                 self.c.local(w::LOCAL_GET, x);
                 self.c.local(w::LOCAL_GET, y);
@@ -2254,9 +2270,11 @@ extend Gen {
         }
     }
 
-    // The 32-bit halves of i64 local `v` into locals `lo` and `hi`.
+    // The 32-bit halves of i64 local `v` (NONE: the value on the stack) into locals `lo` and `hi`.
     fn halves(self: &mut Self, v: u32, lo: u32, hi: u32) {
-        self.c.local(w::LOCAL_GET, v);
+        if v != NONE {
+            self.c.local(w::LOCAL_GET, v);
+        }
         self.c.local(w::LOCAL_TEE, lo);
         self.c.i64_const(32);
         self.c.op(w::I64_SHR_U);
@@ -3623,6 +3641,46 @@ extend Gen {
         self.end_inst();
         self.stack_order(a0, s0, true);
         return ok;
+    }
+
+    // Whether commutative operands `a` and `b` read in the other order take more waiting writes off the
+    // stack (`stack_order`: reads at the code's start take writes in the order they wait).
+    fn swap_reads(self: &Self, a: Value, b: Value) bool {
+        let pa = self.wait_pos(a);
+        let pb = self.wait_pos(b);
+        let ab = if pa == NONE {
+            0
+        } else if pb != NONE && pa < pb {
+            2
+        } else {
+            1
+        };
+        let ba = if pb == NONE {
+            0
+        } else if pa != NONE && pb < pa {
+            2
+        } else {
+            1
+        };
+        return ba > ab;
+    }
+
+    // The position in `pend` of the write of value `v`'s local, NONE when none waits (or `v` has no local).
+    fn wait_pos(self: &Self, v: Value) u32 {
+        if v == VNONE || (v & VFLAG) != 0 || (v & VPARAM) == 0 && (self.remat[v as usize] || self.lv.pfold[v as usize]) {
+            return NONE;
+        }
+        let x = self.vx(v);
+        if x == NONE || self.local_of[x as usize] == NONE {
+            return NONE;
+        }
+        let l = self.local_of[x as usize] as u64;
+        for k in 0..self.pend.len() {
+            if (self.c.acc[self.pend[k] as usize] & 0xFFFFFFFF) == l {
+                return k as u32;
+            }
+        }
+        return NONE;
     }
 
     // The code of one instruction, from local access `a0` and code byte `s0` (`ctl`: it holds control
@@ -7123,7 +7181,7 @@ extend Gen {
             self.shuffle(&idx);
         } else if op >= O_FADD && op <= O_FNEG || op == O_FSQRT {
             let f = lt == T_F64;
-            let swap = (op == O_FADD || op == O_FMUL) && (t.b & (VPARAM | VFLAG)) == 0 && t.b + 1 == i;
+            let swap = (op == O_FADD || op == O_FMUL) && self.swap_reads(t.a, t.b);
             self.vget(pick_v(swap, t.b, t.a));
             if op == O_FNEG {
                 self.sop(pick32(f, 0xED, 0xE1));

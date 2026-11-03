@@ -894,9 +894,11 @@ fn a_loop_dividing_by_a_constant_vectorizes() {
 
 // A loop's calls of C's `roundf`, which rounds halfway away from zero, widen where the target rounds lanes
 // (`Package.vround`): no lane operation, but the truncation of `x + copysign(0.5 - ulp, x)`
-// (`ROUND_AWAY`). On halves of both signs, the largest float below 0.5, the halves next to 2^23, -0.0 and
-// a large value, the vector loop gives what `round` does (the driver sums the results' bits times 31 each
-// step, wrapping; 16 elements, so the scalar rest, which calls `roundf`, does not run).
+// (`ROUND_AWAY`); where the backend rounds halfway away from zero in one instruction
+// (`Package.vround_away`), that lane operation (`round_even` with `.num`). On halves of both signs, the
+// largest float below 0.5, the halves next to 2^23, -0.0 and a large value, both vector loops give what
+// `round` does (the driver sums the results' bits times 31 each step, wrapping; 16 elements, so the scalar
+// rest, which calls `roundf`, does not run).
 @test
 fn calls_of_round_widen_to_a_truncation() {
     let src = M"(lir ptr 8
@@ -1005,6 +1007,14 @@ b3:
     }
     let none: []u64 = [];
     assert_eq(run_value(&a, "drive", none), want);
+    let mut err = String::new();
+    let mut away = lparse::parse(src, &mut err).unwrap();
+    away.vround_away = true;
+    let kept = Vector::<bool>::new();
+    lopt::optimize(&mut away, &kept, lopt::Config { inline: il::SPEED, loops: VECTOR });
+    let ka = text_of(&away, "rd");
+    assert(ka.contains("vop.round_even.num.v4f32") && !ka.contains("vop.trunc"), ka.as_str());
+    assert_eq(run_value(&away, "drive", none), want);
 }
 
 // A float's bits as an integer of one size and back (C's `copysign`: the magnitude's bits, the sign's

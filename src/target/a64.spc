@@ -681,6 +681,7 @@ pub(package) const V2_FNEG: u32 = 0x2F; // size 2|sz
 pub(package) const V2_FABS: u32 = 0x0F; // size 2|sz
 pub(package) const V2_FSQRT: u32 = 0x3F; // size 2|sz
 pub(package) const V2_FRINTN: u32 = 0x18; // size 0|sz
+pub(package) const V2_FRINTA: u32 = 0x38; // size 0|sz
 pub(package) const V2_FRINTM: u32 = 0x19; // size 0|sz
 pub(package) const V2_FRINTP: u32 = 0x18; // size 2|sz
 pub(package) const V2_FRINTZ: u32 = 0x19; // size 2|sz

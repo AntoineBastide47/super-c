@@ -69,17 +69,50 @@ fn optimized_split(text: str, fm: u8, fma: bool, inl: il::Budget, bu: lu::Budget
     after.switch_tree = switches;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut after, &none, lopt::Config { inline: inl, loops: bu });
+    verified(&after);
+    return (before, after);
+}
+
+// Each function of `p` verifies.
+fn verified(p: &Package) {
     let mut v = verify::Verifier::new();
-    for i in 0..after.syms.len() {
-        let s = after.syms[i];
+    for i in 0..p.syms.len() {
+        let s = p.syms[i];
         if s.def != NONE && s.kind == SK_FUNC {
-            let b = &after.bodies[s.def as usize];
-            assert(
-                v.check(&after, after.spell(s.name), b) && v.check_calls(&after, after.spell(s.name), b),
-                v.err.as_str(),
-            );
+            let b = &p.bodies[s.def as usize];
+            assert(v.check(p, p.spell(s.name), b) && v.check_calls(p, p.spell(s.name), b), v.err.as_str());
         }
     }
+}
+
+// `optimized` for a target that passes and returns aggregates of up to `copy` bytes by value
+// (`Package.arg_copy`; at most 16 in registers).
+fn optimized_copy(text: str, copy: u32) (Package, Package) {
+    let mut err = String::new();
+    let q = lparse::parse(text, &mut err);
+    assert(q.is_some(), err.as_str());
+    let before = q.unwrap();
+    let mut after = lparse::parse(text, &mut err).unwrap();
+    after.arg_copy = copy;
+    let none = Vector::<bool>::new();
+    lopt::optimize(
+        &mut after,
+        &none,
+        lopt::Config {
+            inline: il::SPEED,
+            loops: lu::Budgets {
+                peel: 0,
+                partial: 0,
+                version: 0,
+                unswitch: 0,
+                rotate: 0,
+                vector: 0,
+                interleave: 0,
+                fin: 0,
+            },
+        },
+    );
+    verified(&after);
     return (before, after);
 }
 
@@ -2645,15 +2678,15 @@ b0(v0: i64):
     }
 }
 
-// A call's aggregate result in a slot only loads read: each load of part of an 8-byte chunk with an
-// integer field reads that chunk's one load right after the call (`res_chunk`), which the code generators
-// take from the result's register. Before a return, a run of result stores and constant fills (a fill
+// A call's aggregate result in a slot only loads read, on a target that returns it in registers (16 bytes):
+// each load of part of an 8-byte chunk with an integer field reads that chunk's one load right after the call
+// (`res_chunk`), which the code generators take from the result's register. Before a return, a run of result stores and constant fills (a fill
 // of 3 bytes too), past a load of the body's own slot, joins into one store per chunk (`ret_chunks`). A
 // chunk's load after a call that ends its block goes at the block's end, and a parameter chunk's load in
 // an entry block of a jump alone at the entry's start: the bodies verify.
 @test
 fn call_results_load_whole_chunks_and_fills_join() {
-    let (b, a) = optimized(
+    let (b, a) = optimized_copy(
         M"(lir ptr 8
 sym @dig fn global noinline
 sym @both fn global
@@ -2750,6 +2783,7 @@ b4:
   store v20, v2+4 align 2
   ret
 )",
+        16,
     );
     let d = text_of(&a, "dig");
     assert(!d.contains("memset") && !d.contains("load"), d.as_str());
@@ -2778,13 +2812,14 @@ b4:
     same_result(&b, &a, "last", y, 123);
 }
 
-// Small aggregates by value whose fields share an 8-byte chunk, which the targets pass and return in one
-// integer register: each field of a parameter comes from one load of its chunk, the result's stores before
-// a return join into one store per chunk (a float's bits among them), and a 4-byte fill of zero is a store.
+// Small aggregates by value whose fields share an 8-byte chunk, which a target that passes and returns them
+// in registers (16 bytes) takes in one integer register: each field of a parameter comes from one load of its
+// chunk, the result's stores before a return join into one store per chunk (a float's bits among them), and a
+// 4-byte fill of zero is a store. A target that passes them by address (`Package.arg_copy` 0, wasm32) keeps
+// the fields' loads and stores.
 @test
 fn aggregate_fields_in_one_chunk_load_and_store_whole() {
-    let (b, a) = optimized(
-        M"(lir ptr 8
+    let src = M"(lir ptr 8
 sym @padd fn global noinline
 sym @opt fn global noinline
 sym @fi fn global noinline
@@ -2868,8 +2903,8 @@ b0(v0: i64):
   v19 = add.i32 v18, v11
   v20 = zext.i64 v19
   ret v20
-)",
-    );
+)";
+    let (b, a) = optimized_copy(src, 16);
     let p = text_of(&a, "padd");
     assert(!p.contains("load.i32") && p.contains("load.i64") && p.contains("lshr.i64"), "each parameter is one load");
     assert(p.contains("or.i64") && p.find("store") == p.rfind("store"), "the result is one store");
@@ -2884,6 +2919,10 @@ b0(v0: i64):
     same_result(&b, &a, "use", x, 21 * 16 + 3 + 1000 + 9);
     let y: []u64 = [2];
     same_result(&b, &a, "use", y, 7 * 16 + 3);
+    let (_, w) = optimized_copy(src, 0);
+    let wp = text_of(&w, "padd");
+    assert(!wp.contains("load.i64") && !wp.contains("lshr") && !wp.contains("or.i64"), wp.as_str());
+    same_result(&b, &w, "use", x, 21 * 16 + 3 + 1000 + 9);
 }
 
 // A copy out of the memory a call writes its aggregate result into merges that memory with the copy's
@@ -3756,6 +3795,126 @@ b0(v0: i32):
     same_result(&b, &a, "f", small, 2);
     let big: []u64 = [0xF0];
     same_result(&b, &a, "f", big, 1);
+}
+
+// A branch bounds its operand from below too: past `x <=u 1`, `x - 1` is not 0, so its leading zeros are
+// below the width and `clz(x - 1) >=u 32` fails (`@f`); past `0 <u x`, `ctz(x) <u 32` holds
+// (`@h`). Past `x <=u 0` alone `x - 1` may be 0, so `@g`'s test stays. Past `x != 0`, `31 - clz(x)` clears
+// bits of 31 alone: an `xor` (`@l`, whose 0 aborts); so does `-1 - x` of 64 bits, whose mask is every bit (`@n`).
+@test
+fn a_lower_bound_decides_tests_of_leading_and_trailing_zeros() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f fn global
+sym @g fn global
+sym @h fn global
+sym @l fn global
+sym @n fn global
+sym @abort fn global
+fn @f
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 1
+  v2 = iconst.i32 -1
+  v3 = iconst.i32 32
+  v4 = iconst.i32 99
+  v5 = icmp.ule v0, v1
+  br v5, b1, b2
+b1:
+  ret v1
+b2:
+  v6 = add.i32 v0, v2
+  v7 = clz.i32 v6
+  v8 = icmp.uge v7, v3
+  br v8, b3, b4
+b3:
+  ret v4
+b4:
+  ret v7
+fn @g
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 -1
+  v3 = iconst.i32 32
+  v4 = iconst.i32 99
+  v5 = icmp.ule v0, v1
+  br v5, b1, b2
+b1:
+  ret v1
+b2:
+  v6 = add.i32 v0, v2
+  v7 = clz.i32 v6
+  v8 = icmp.uge v7, v3
+  br v8, b3, b4
+b3:
+  ret v4
+b4:
+  ret v7
+fn @h
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 32
+  v3 = iconst.i32 99
+  v4 = icmp.ult v1, v0
+  br v4, b1, b2
+b1:
+  v5 = ctz.i32 v0
+  v6 = icmp.ult v5, v2
+  br v6, b3, b2
+b2:
+  ret v3
+b3:
+  ret v5
+fn @l
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 31
+  v3 = icmp.ne v0, v1
+  br v3, b1, b2
+b1:
+  v4 = clz.i32 v0
+  v5 = sub.i32 v2, v4
+  ret v5
+b2:
+  call @abort() : () -> void
+  unreachable
+fn @n
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 -1
+  v2 = sub.i64 v1, v0
+  ret v2
+)",
+    );
+    let l = text_of(&a, "l");
+    let n = text_of(&a, "n");
+    assert(!n.contains("sub"), n.as_str());
+    assert(l.contains("xor.i32") && !l.contains("sub"), l.as_str());
+    let f = text_of(&a, "f");
+    let g = text_of(&a, "g");
+    let h = text_of(&a, "h");
+    assert(count_of(&f, "icmp") == 1 && !f.contains("99"), f.as_str());
+    assert(count_of(&g, "icmp") == 2, g.as_str());
+    assert(count_of(&h, "icmp") == 1, h.as_str());
+    let xs: [u64; 6] = [0, 1, 2, 3, 0x80000000, 0xFFFFFFFF];
+    let fw: [u64; 6] = [1, 1, 31, 30, 1, 0];
+    let gw: [u64; 6] = [0, 99, 31, 30, 1, 0];
+    let hw: [u64; 6] = [99, 0, 1, 0, 31, 0];
+    let lw: [u64; 6] = [0, 0, 1, 1, 31, 31];
+    for k in 0..6usize {
+        let one: [u64; 1] = [xs[k]];
+        same_result(&b, &a, "f", one[0..1], fw[k]);
+        same_result(&b, &a, "g", one[0..1], gw[k]);
+        same_result(&b, &a, "h", one[0..1], hw[k]);
+        same_result(&b, &a, "n", one[0..1], ~xs[k]);
+        // 0 calls `abort`.
+        if k != 0 {
+            same_result(&b, &a, "l", one[0..1], lw[k]);
+        }
+    }
 }
 
 // A store that a later store to the same bytes overwrites, with no read between, goes (`@rng`: one

@@ -810,19 +810,34 @@ extend Live {
             self.fold_addrs(b);
         }
         // `FOLD_BLEN`: a count of leading zeros of 32 or 64 bits that only `width - clz` reads, the bit
-        // length, folds into it.
+        // length, or `clz ^ (width - 1)`, the top bit's index, folds into it.
         if (self.fold_ops & FOLD_BLEN) != 0 {
             for i in 0..ni {
                 let t = b.insts[i];
-                let c = t.b;
-                if t.op != O_SUB || !is_int(t.ty) || type_bits(t.ty, 8) != 32 && type_bits(t.ty, 8) != 64 || (c & (VPARAM | VFLAG)) != 0 || c == VNONE {
+                let w = type_bits(t.ty, 8) as u64;
+                let sub = t.op == O_SUB;
+                let c = if sub {
+                    t.b
+                } else {
+                    t.a
+                };
+                if !sub && t.op != O_XOR || !is_int(t.ty) || w != 32 && w != 64 || (c & (VPARAM | VFLAG)) != 0 || c == VNONE {
                     continue;
                 }
                 let ci = b.insts[c as usize];
-                if ci.op == O_CLZ && ci.ty == t.ty && self.count[c as usize] == 1 && !self.pfold[c as usize] && int_const(
+                let k = int_const(
                     b,
-                    t.a,
-                ) == type_bits(t.ty, 8) as u64 {
+                    if sub {
+                        t.a
+                    } else {
+                        t.b
+                    },
+                );
+                if ci.op == O_CLZ && ci.ty == t.ty && self.count[c as usize] == 1 && !self.pfold[c as usize] && k == if sub {
+                    w
+                } else {
+                    w - 1
+                } {
                     self.pfold[c as usize] = true;
                 }
             }

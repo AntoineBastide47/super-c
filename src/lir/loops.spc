@@ -263,6 +263,8 @@ pub(package) struct LoopOpt {
     /// The target computes fused multiply-adds of float vectors in registers (`Package.vfloat` and
     /// `Package.fma`): an `O_FMA` is a lane operation (SIMD_FMA).
     pub(package) vfma: bool,
+    /// The target rounds float vectors halfway away from zero in one instruction (`Package.vround_away`).
+    pub(package) vrnda: bool,
     /// The lane sizes whose saturating sums the target computes in registers (`Package.vec_sat`), a bit per
     /// size in bytes (1, 2, 4).
     pub(package) vsat: u8,
@@ -484,6 +486,7 @@ extend LoopOpt {
             vaccs: 0,
             vfn: Vector::<u8>::new(),
             vfma: false,
+            vrnda: false,
             vsat: 0,
             vabsd: 0,
             vsumw: 0,
@@ -5840,6 +5843,15 @@ extend LoopOpt {
     // `x` plus the largest float below 0.5 with `x`'s sign, which carries exactly the fractions of at least
     // one half to the next integer.
     fn vround_away(self: &mut Self, b: &mut Body, vt: u8, x: Value, l: u32) Value {
+        // One instruction where the backend has it (`Package.vround_away`).
+        if self.vrnda {
+            let at = b.pool_list([x][0..1]);
+            return self.vi(
+                b,
+                Inst { op: O_VOP, ty: vt, aux: lane_code(core::SIMD_ROUND_EVEN) | VOP_NUM, a: at, b: 1, c: VNONE },
+                l,
+            );
+        }
         let d = lane_type(vt) == T_F64;
         let it = vec_type(ast::pick(d, T_I64, T_I32), lanes(vt));
         let (half, sign) = if d {

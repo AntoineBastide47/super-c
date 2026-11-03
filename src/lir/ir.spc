@@ -815,7 +815,8 @@ pub(package) const VOP_DSIGNED: u16 = 512;
 /// A float to integer conversion that does not saturate: the lanes are not NaN and fit.
 pub(package) const VOP_UNCHECKED: u16 = 1024;
 /// A float SIMD_MIN or SIMD_MAX that computes C's `fmin` or `fmax` per lane (the vectorized call): a lane
-/// with a signaling NaN gives what the target's scalar instruction gives, as the call (arm64 `fminnm`).
+/// with a signaling NaN gives what the target's scalar instruction gives, as the call (arm64 `fminnm`). A
+/// SIMD_ROUND_EVEN that computes C's `round`: halfway away from zero (arm64 `frinta`, `Package.vround_away`).
 pub(package) const VOP_NUM: u16 = 2048;
 /// The operation code of a `vop` (an `ir::core::OP_*` code).
 pub(package) const VOP_CODE: u16 = 255;
@@ -1589,6 +1590,9 @@ pub(package) struct Package {
     /// Whether it also rounds float vectors to an integer in registers (`target::table::Isa`; x86-64 with
     /// SSE4.1): the loop vectorizer then widens the calls of C's `floor`, `ceil` and `trunc`.
     pub(package) vround: bool,
+    /// Whether the backend rounds float vectors halfway away from zero in one instruction (arm64's FRINTA,
+    /// `target::table::Isa::vector_round_away`): C's `round` widens to SIMD_ROUND_EVEN with VOP_NUM.
+    pub(package) vround_away: bool,
     /// Whether the native backend computes `O_MULHU` of 64-bit integers in one instruction
     /// (`target::table::Isa`): the optimizer then divides by a 64-bit constant with a product.
     pub(package) mul_high: bool,
@@ -1753,6 +1757,7 @@ extend Package {
             vec_sumw: 0x8CE,
             vfloat: true,
             vround: true,
+            vround_away: false,
             mul_high: true,
             bswap: true,
             bitrev: true,

@@ -49,6 +49,9 @@ pub(package) struct Isa {
     /// processor (arm64's FRINT, wasm32's SIMD128); else only on one with SSE4.1 (x86-64's ROUNDPS):
     /// `lir::ir::Package::vround`.
     pub(package) vector_round: bool,
+    /// The native backend rounds float vectors halfway away from zero in one instruction (arm64's FRINTA):
+    /// `lir::ir::Package::vround_away`.
+    pub(package) vector_round_away: bool,
     /// One instruction gives the high half of a 64-bit product (UMULH, MUL's rdx): the optimizer divides
     /// a 64-bit value by a constant with a product (`lir::ir::Package::mul_high`).
     pub(package) mul_high: bool,
@@ -244,6 +247,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_mulh: 6,
         vector_float: true,
         vector_round: false,
+        vector_round_away: false,
         mul_high: true,
         bswap: true,
         bitrev: false,
@@ -282,6 +286,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_mulh: 7,
         vector_float: true,
         vector_round: true,
+        vector_round_away: true,
         mul_high: true,
         bswap: true,
         bitrev: true,
@@ -320,6 +325,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_mulh: 7,
         vector_float: true,
         vector_round: true,
+        vector_round_away: false,
         mul_high: false,
         bswap: false,
         bitrev: false,
@@ -665,6 +671,7 @@ const UNKNOWN_ISA: Isa = Isa {
     vector_mulh: 0,
     vector_float: false,
     vector_round: false,
+    vector_round_away: false,
     mul_high: false,
     bswap: false,
     bitrev: false,

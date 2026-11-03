@@ -2581,7 +2581,7 @@ extend Eval {
                     dsg,
                 );
             } else if fl {
-                r = lane_float(c, a, c2, c3, lt, &mut bit);
+                r = lane_float(c, (t.aux & VOP_NUM) != 0, a, c2, c3, lt, &mut bit);
             } else if !self.lane_int(c, a, c2, lt, sg, rlt, dsg, &mut r, &mut bit) {
                 // The trap names its lane, as a lane check does.
                 let m = replace(&mut self.out.msg, format("lane {}: ", i));
@@ -2845,7 +2845,7 @@ fn lane_changed(a: u64, bt: u8, bs: bool, d: u64, rt: u8, rs: bool) bool {
 
 // Float lane rule `c` on lanes `a`, `c2`, `c3` (bits) of `lt`: the result lane's bits, or a mask code's
 // lane bit in `bit` (the interpreter's `lane_float`, `fminmax` and `fsign_lane`).
-fn lane_float(c: u8, a0: u64, c20: u64, c30: u64, lt: u8, bit: &mut bool) u64 {
+fn lane_float(c: u8, num: bool, a0: u64, c20: u64, c30: u64, lt: u8, bit: &mut bool) u64 {
     let f32l = lt == T_F32;
     let a = to_f64(lt, a0);
     let c2 = to_f64(lt, c20);
@@ -2909,6 +2909,8 @@ fn lane_float(c: u8, a0: u64, c20: u64, c30: u64, lt: u8, bit: &mut bool) u64 {
         math::floor(a)
     } else if c == core::SIMD_TRUNC {
         math::trunc(a)
+    } else if c == core::SIMD_ROUND_EVEN && num {
+        math::round(a)
     } else if c == core::SIMD_ROUND_EVEN {
         math::nearbyint(a)
     } else if c == core::SIMD_FMA {

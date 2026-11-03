@@ -58,6 +58,8 @@ const LOG_COND: u8 = 2;
 const LOG_REL: u8 = 3;
 const LOG_UB: u8 = 4;
 const LOG_EQ: u8 = 5;
+// A lower bound's key in the bounds' table (`ub`, LOG_UB): the value's with this bit.
+const LB_KEY: u64 = 1u64 << 40;
 // `Opt::overwrite` keeps at most PEND_MAX stores.
 const PEND_MAX: u32 = 8;
 // `Opt::ubound` follows at most UB_DEPTH instructions.
@@ -204,6 +206,9 @@ pub(package) struct Opt {
     extra: Vector<u32>, // the constants the walk made, which the entry block starts with
     aggp: u64, // the entry parameters whose loads move to the entry's start (`agg_params`)
     aggint: u64, // per such parameter `k` below 32 and 8-byte chunk `c`, bit 2k + c: an integer load reads it
+    // The largest aggregate parameter or result the target passes in registers: at most 16 bytes, at most
+    // `Package.arg_copy` (wasm32 none, Microsoft x64 8 bytes).
+    aggregs: u32,
     aggload: [u32; 64], // per such chunk, its load this walk made at the entry's start (`agg_chunk`), NONE
     rslot: Vector<u32>, // per slot, the one call whose aggregate result it holds, which only loads read, else NONE
     rcall: bool, // a call has an aggregate result of at most 16 bytes (`operands`; `result_slots`)
@@ -521,6 +526,7 @@ extend Opt {
             extra: Vector::<u32>::new(),
             aggp: 0,
             aggint: 0,
+            aggregs: 0,
             aggload: [NONE; 64],
             rslot: Vector::<u32>::new(),
             rcall: false,
@@ -1259,6 +1265,7 @@ extend Opt {
         self.unr.vabsd = pk.vec_absd;
         self.unr.vsumw = pk.vec_sumw;
         self.unr.vfma = pk.vfloat && pk.fma;
+        self.unr.vrnda = pk.vround_away;
         self.unr.vfn.truncate(0);
         for s in 0..b.syms.len() {
             let sy = pk.syms[b.syms[s] as usize];
@@ -3673,7 +3680,7 @@ extend Opt {
     }
 
     // The entry parameters (bits) that point at a by-value aggregate of at most 16 bytes, which the targets
-    // pass in registers, that only loads outside cold blocks read: their loads may move to the entry's
+    // pass in registers (but `aggregs`), that only loads outside cold blocks read: their loads may move to the entry's
     // start, where the code generator takes each part's register for its load and the aggregate needs no
     // memory.
     fn agg_params(self: &mut Self, b: &Body) u64 {
@@ -3719,15 +3726,15 @@ extend Opt {
     }
 
     // Store or constant fill `i`, the last before block `blk`'s `ret`, of the run of them before it (past
-    // instructions that touch no memory and loads of the body's own slots) to the address of an aggregate result of at most 16 bytes
-    // (`ret_part`): each 8-byte chunk (of 1, 2, 4 or 8 bytes) whose every leaf byte (of the result's
+    // instructions that touch no memory and loads of the body's own slots) to the address of an aggregate result the
+    // target returns in registers (`aggregs`, `ret_part`): each 8-byte chunk (of 1, 2, 4 or 8 bytes) whose every leaf byte (of the result's
     // layout; the others are padding) two or more of the run write, each byte once, one of them with an
     // integer, is one store of their values joined (bits of a float as an integer, a fill's bytes as a
     // constant, each shifted to its offset, padding 0). The targets return such a chunk in one integer
     // register, which the code generator moves the store's value into (`ret_stores`). Whether it did.
     fn ret_chunks(self: &mut Self, pk: &Package, b: &mut Body, blk: u32, i: u32) bool {
         let rt = b.pool[b.sig as usize + 2];
-        if b.sig == NONE || (rt & AGG) == 0 || b.pool[(rt & ~AGG) as usize] > 16 {
+        if b.sig == NONE || (rt & AGG) == 0 || b.pool[(rt & ~AGG) as usize] > self.aggregs {
             return false;
         }
         let size = b.pool[(rt & ~AGG) as usize];
@@ -3844,12 +3851,15 @@ extend Opt {
     // Load `i` (`u`) of an 8-byte chunk of entry aggregate parameter `k` (`aggp`) that an integer load
     // reads (`aggint`), of fewer bytes than the chunk: the chunk's load (1, 2, 4 or 8 bytes) shifted and
     // truncated, an f32's or f64's bits as the float. The targets pass such a chunk in one integer
-    // register, which the code generator takes for the chunk's load (`place::parts_taken`). The
+    // register (an aggregate of at most `aggregs` bytes), which the code generator takes for the chunk's load (`place::parts_taken`). The
     // parameter's bytes are a copy nothing writes: one load at the entry's start serves each part
     // (`aggload`). Whether it did.
     fn agg_chunk(self: &mut Self, pk: &Package, b: &mut Body, blk: u32, i: u32, u: Inst, k: u32) bool {
         let lay = (b.pool[(b.sig + 3 + k) as usize] & ~AGG) as usize;
         let size = b.pool[lay];
+        if size > self.aggregs {
+            return false;
+        }
         let c = u.c / 8;
         let cs = (size - 8 * c).min(8);
         let s = type_bytes(u.ty, pk.ptr_bytes);
@@ -3889,7 +3899,8 @@ extend Opt {
         return true;
     }
 
-    // `rslot`: per slot of `b`, the call whose aggregate result of at most 16 bytes it receives, when that
+    // `rslot`: per slot of `b`, the call whose aggregate result the target returns in registers (`aggregs`) it
+    // receives, when that
     // call is the only use of the slot's addresses but loads (not volatile) of them; NONE else. `rload`
     // emptied.
     fn result_slots(self: &mut Self, b: &Body) {
@@ -3921,7 +3932,7 @@ extend Opt {
                         continue;
                     }
                     // The result's address of a call (its last operand), once.
-                    let call = (t.op == O_CALL || t.op == O_CALLIND) && (b.pool[t.b as usize + 2] & AGG) != 0 && b.pool[(b.pool[t.b as usize + 2] & ~AGG) as usize] <= 16 && b.pool[(t.c + b.pool[t.b as usize]) as usize] == v;
+                    let call = (t.op == O_CALL || t.op == O_CALLIND) && (b.pool[t.b as usize + 2] & AGG) != 0 && b.pool[(b.pool[t.b as usize + 2] & ~AGG) as usize] <= self.aggregs && b.pool[(t.c + b.pool[t.b as usize]) as usize] == v;
                     let mut once = true;
                     for r in 0..nu {
                         once = once && (r == q || self.ops[(u0 + r) as usize] != v);
@@ -4055,6 +4066,7 @@ extend Opt {
         fill(&mut self.end_pstate, nb, 0);
         fill(&mut self.bwrites, nb, 0);
         fill(&mut self.rmark, nb, NONE);
+        self.aggregs = pk.arg_copy.min(16);
         self.aggp = self.agg_params(b);
         self.aggload = [NONE; 64];
         self.result_slots(b);
@@ -4711,6 +4723,10 @@ extend Opt {
             if t.aux == C_EQ && holds || t.aux == C_NE && !holds {
                 self.enter(LOG_EQ, eq_key(t.a, t.b), 1);
             }
+            // `x != 0`: `x` is at least 1 (`lbound`).
+            if (t.aux == C_NE && holds || t.aux == C_EQ && !holds) && const_of(b, t.b) == Some(0u64) && (t.a & VFLAG) == 0 {
+                self.enter(LOG_UB, LB_KEY | t.a as u64, t.b << 1 | 1);
+            }
         }
         let (x, y, neg) = Opt::as_ult(b, c);
         if x == VNONE {
@@ -4721,12 +4737,68 @@ extend Opt {
         if lt {
             self.min_parts(b, x, y, MIN_DEPTH);
         }
-        // A constant side bounds the other: `x <u k`, or `y <=u k` when `k <u y` fails.
+        // A constant side bounds the other: `x <u k`, or `y <=u k` when `k <u y` fails; from below `k <u y`,
+        // or `x >=u k` when `x <u k` fails (`lbound`).
         if lt && const_of(b, y).is_some() && (x & VFLAG) == 0 {
             self.enter(LOG_UB, x, y << 1 | 1);
         } else if !lt && const_of(b, x).is_some() && (y & VFLAG) == 0 {
             self.enter(LOG_UB, y, x << 1);
         }
+        if lt && const_of(b, x).is_some() && (y & VFLAG) == 0 {
+            self.enter(LOG_UB, LB_KEY | y as u64, x << 1 | 1);
+        } else if !lt && const_of(b, y).is_some() && (x & VFLAG) == 0 {
+            self.enter(LOG_UB, LB_KEY | x as u64, y << 1);
+        }
+    }
+
+    // The least unsigned value `v` takes here: a constant's, a bound the branches in scope set
+    // (`order_facts`), or one a subtraction of a constant keeps (`a + k` as `a - d`, which does not wrap
+    // when `a`'s bound is at least `d`), `depth` instructions deep; None when unknown.
+    fn lbound(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) Option<u64> {
+        if v == VNONE || (v & VFLAG) != 0 {
+            return None;
+        }
+        let m = width_mask(b.type_of(v), pk.ptr_bytes);
+        let k = const_of(b, v);
+        if k.is_some() {
+            return Some(k.unwrap() & m);
+        }
+        let mut best = Option::<u64>::None;
+        if let Some(f) = self.ub.get(&(LB_KEY | v as u64)) {
+            let c = const_of(b, *f >> 1).unwrap() & width_mask(b.type_of(*f >> 1), pk.ptr_bytes);
+            // Above the type's greatest value: the block does not run.
+            best = Some(
+                if (*f & 1) == 0 || c == m {
+                    c
+                } else {
+                    c + 1
+                },
+            );
+        }
+        if (v & VPARAM) != 0 || depth == 0 {
+            return best;
+        }
+        let t = b.insts[v as usize];
+        if (t.op == O_ADD || t.op == O_SUB) && !is_vec(t.ty) && t.ty != T_I128 && const_of(b, t.b).is_some() {
+            let kb = const_of(b, t.b).unwrap() & m;
+            let d = if t.op == O_SUB {
+                kb
+            } else {
+                m - kb + 1 & m
+            };
+            let x = self.lbound(pk, b, t.a, depth - 1);
+            if x.is_some() && x.unwrap() >= d {
+                let r = x.unwrap() - d;
+                return Some(
+                    if best.is_some() {
+                        r.max(best.unwrap())
+                    } else {
+                        r
+                    },
+                );
+            }
+        }
+        return best;
     }
 
     // The greatest unsigned value `v` takes here: a constant's, a bound the branches in scope set
@@ -4822,6 +4894,20 @@ extend Opt {
             } else {
                 Some(m)
             };
+        } else if (t.op == O_CLZ || t.op == O_CTZ) && !is_vec(t.ty) && t.ty != T_I128 {
+            // The width, or for an operand of at least `lo` above 0 the zeros above `lo`'s top bit (`clz`),
+            // one less than the width (`ctz`).
+            let w = type_bits(t.ty, pk.ptr_bytes) as u64;
+            let lo = self.lbound(pk, b, t.a, depth - 1);
+            r = Some(
+                if lo.is_none() || lo.unwrap() == 0 {
+                    w
+                } else if t.op == O_CTZ {
+                    w - 1
+                } else {
+                    lo.unwrap().leading_zeros() as u64 - (64 - w)
+                },
+            );
         }
         if r.is_some() && best.is_some() {
             return Some(r.unwrap().min(best.unwrap()));
@@ -4834,12 +4920,26 @@ extend Opt {
 
     // Instruction `i`, which the bounds in scope (`ubound`) decide: a remainder or quotient by a constant
     // above its dividend's bound (the dividend, 0), a right shift that leaves nothing, an `and` with a
-    // low mask that covers its operand's bound, an integer comparison with a constant that every value
+    // low mask that covers its operand's bound, a low mask less a value within it (an `xor`, in place), an integer comparison with a constant that every value
     // up to the bound answers alike (a signed one when the bound leaves the sign bit clear).
     // Its replacement value (VNONE: none); a constant result rewrites `i` in place.
     fn range_fold(self: &mut Self, pk: &Package, b: &mut Body, i: u32) Value {
         let t = b.insts[i as usize];
         if is_vec(t.ty) || t.ty == T_I128 {
+            return VNONE;
+        }
+        // A low mask less a value its bound keeps within the mask clears the value's bits: their `xor`, which
+        // takes the operands in either order.
+        if t.op == O_SUB {
+            let k = const_of(b, t.a);
+            let m = width_mask(t.ty, pk.ptr_bytes);
+            let kv = k.unwrap_or(1) & m;
+            if k.is_some() && (kv & kv.wrapping_add(1)) == 0 {
+                let x = self.ubound(pk, b, t.b, UB_DEPTH);
+                if kv == m || x.is_some() && x.unwrap() <= kv {
+                    b.insts[i as usize] = Inst { op: O_XOR, ty: t.ty, aux: 0, a: t.b, b: t.a, c: VNONE };
+                }
+            }
             return VNONE;
         }
         if t.op == O_UREM || t.op == O_UDIV || t.op == O_LSHR || t.op == O_AND {
@@ -4865,7 +4965,7 @@ extend Opt {
                 b.insts[i as usize] = iconst(t.ty, 0);
                 return VNONE;
             }
-            if t.op == O_AND && (c & c + 1) == 0 && hi <= c {
+            if t.op == O_AND && (c & c.wrapping_add(1)) == 0 && hi <= c {
                 return t.a;
             }
             return VNONE;

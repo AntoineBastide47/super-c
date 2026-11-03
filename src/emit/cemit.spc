@@ -634,6 +634,7 @@ extend CEmit {
             l.pkg.vec_sumw = tgt::isa(pk.arch).vector_sumw;
             l.pkg.vfloat = tgt::isa(pk.arch).vector_float;
             l.pkg.vround = l.pkg.vfloat && (tgt::isa(pk.arch).vector_round || feature(pk, "sse4.1"));
+            l.pkg.vround_away = l.pkg.vfloat && tgt::isa(pk.arch).vector_round_away;
             // binary16: every arm64 processor converts it (FCVT) and one with FEAT_FP16 computes with it;
             // x86-64 converts it with F16C.
             let h16 = cf::find("fp16", pk.arch);

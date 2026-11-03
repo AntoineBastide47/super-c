@@ -5309,7 +5309,7 @@ extend Gen {
     // making 0 count it; popcnt: the bits summed in parallel (SSE2 has no POPCNT).
     fn bit_count(self: &mut Self, i: u32, t: Inst) {
         if self.lv.pfold[i as usize] {
-            return; // the bit length that reads it computes it (`lv::FOLD_BLEN`)
+            return; // the bit length or top bit's index that reads it computes it (`lv::FOLD_BLEN`)
         }
         let bits = type_bits(t.ty, self.ptr);
         let sz = wsz(bits);
@@ -5432,6 +5432,17 @@ extend Gen {
             self.c.alu_ri(x::ADD, 4, rd, 1);
             self.c.test_rr(sz, src, src);
             self.c.cmov(x::CC_E, sz, rd, src);
+            self.va.index_mut(i as usize).clean = true;
+            return true;
+        }
+        // The top bit's index, `clz(x) ^ (width - 1)` with the count folded (`lv::FOLD_BLEN`): bsr, or
+        // 2 * width - 1 for 0 (`bit_count`'s count of 0 xor `width - 1`).
+        if op == O_XOR && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE && self.lv.pfold[t.a as usize] && self.b().insts[t.a as usize].op == O_CLZ {
+            let rx = self.reg(self.b().insts[t.a as usize].a);
+            let rd = self.def(i);
+            self.c.bsx(true, sz, rd, rx);
+            self.c.mov_ri(S1, 2 * bits - 1);
+            self.c.cmov(x::CC_E, sz, rd, S1);
             self.va.index_mut(i as usize).clean = true;
             return true;
         }

@@ -9004,7 +9004,18 @@ const fn neon_of_simd(c: u8, lt: u8, sg: bool, num: bool, un: &mut bool, fma: &m
             return a::v2op(false, a::V2_FRINTZ, 2 | sz, 0, 0);
         }
         if c == core::SIMD_ROUND_EVEN {
-            return a::v2op(false, a::V2_FRINTN, sz, 0, 0);
+            // C's `round` (`num`): halfway away from zero.
+            return a::v2op(
+                false,
+                if num {
+                    a::V2_FRINTA
+                } else {
+                    a::V2_FRINTN
+                },
+                sz,
+                0,
+                0,
+            );
         }
         return NONE;
     }
@@ -10479,7 +10490,7 @@ extend Gen {
                 continue;
             }
             if fl {
-                self.float_rule(c, k, ops, tys, lt, mk, d, x, y, wr, fa, fb, fc);
+                self.float_rule(c, (t.aux & VOP_NUM) != 0, k, ops, tys, lt, mk, d, x, y, wr, fa, fb, fc);
                 continue;
             }
             self.ld_lane(x, ops[0], k, lt, sg && !bitop, false);
@@ -10793,11 +10804,12 @@ extend Gen {
         }
     }
 
-    // Float lane rule `c` on lane `k` (lanes of `lt`): the result lane stored at sp + `d`, or a mask bit
-    // into `mk`.
+    // Float lane rule `c` (C's form: `num`, VOP_NUM) on lane `k` (lanes of `lt`): the result lane stored at
+    // sp + `d`, or a mask bit into `mk`.
     fn float_rule(
         self: &mut Self,
         c: u8,
+        num: bool,
         k: u32,
         ops: &[Value; 4],
         tys: &[u8; 4],
@@ -10900,6 +10912,8 @@ extend Gen {
                 a::FP_RINTM
             } else if c == core::SIMD_TRUNC {
                 a::FP_RINTZ
+            } else if c == core::SIMD_ROUND_EVEN && num {
+                a::FP_RINTA
             } else if c == core::SIMD_ROUND_EVEN {
                 a::FP_RINTN
             } else {

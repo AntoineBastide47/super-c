@@ -2310,13 +2310,16 @@ int main(void) {
 // wasm32 values whose one reader comes later in their block and reads them in the order they were made stay
 // on the operand stack (`wasmgen::stack_order`): `inord`'s two shifts feed its difference with no local
 // (local.get 0, i32.const 24, i32.shr_u, local.get 0, i32.const 8, i32.shl, i32.sub, end); `rev` reads
-// them the other way, so the first one made goes through its local. All give the C results.
+// them the other way, so the first one made goes through its local. `comm`'s sum reads them the other way
+// too, but a sum reads either first: both stay (i32.shl, local.get 0, i32.const 24, i32.shr_u, i32.add). All
+// give the C results.
 @test
 fn values_read_in_order_stay_on_the_wasm_stack() {
     let lir = M"(lir ptr 8
 sym @inord fn global
 sym @rev fn global
 sym @twice fn global
+sym @comm fn global
 fn @inord
   sig (i32) -> i32
 b0(v0: i32):
@@ -2345,6 +2348,15 @@ b0(v0: i32):
   v5 = sub.i32 v2, v4
   v6 = mul.i32 v5, v2
   ret v6
+fn @comm
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 8
+  v2 = shl.i32 v0, v1
+  v3 = iconst.i32 24
+  v4 = lshr.i32 v0, v3
+  v5 = add.i32 v4, v2
+  ret v5
 )";
     let mut obj = Vector::<u8>::new();
     let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
@@ -2359,16 +2371,20 @@ b0(v0: i32):
     let tee: [u8; 2] = [0x76, 0x22];
     let sub: [u8; 2] = [0x74, 0x6B];
     assert(holds(&obj, tee[0..2]) && holds(&obj, sub[0..2]), "twice");
+    let comm: [u8; 7] = [0x74, 0x20, 0x00, 0x41, 0x18, 0x76, 0x6A];
+    assert(holds(&obj, comm[0..7]), "comm");
     let drv = M"(#include <stdint.h>
 int32_t inord(int32_t);
 int32_t rev(int32_t);
 int32_t twice(int32_t);
+int32_t comm(int32_t);
 int main(void) {
   int32_t xs[4] = {0x12345678, -1, 7, -0x7fffffff};
   for (int k = 0; k < 4; k++) {
     uint32_t x = (uint32_t)xs[k];
     if ((uint32_t)inord(xs[k]) != (x >> 24) - (x << 8) || (uint32_t)rev(xs[k]) != (x << 8) - (x >> 24)) return 1;
     if ((uint32_t)twice(xs[k]) != ((x >> 24) - (x << 8)) * (x >> 24)) return 2;
+    if ((uint32_t)comm(xs[k]) != (x >> 24) + (x << 8)) return 3;
   }
   return 0;
 }
@@ -10269,6 +10285,201 @@ fn coff_section(b: &Vector<u8>, name: str) u64 {
         }
     }
     return 0;
+}
+
+// A wasm32 block parameter shares the local of an argument that its block never reads (here `x`, which the
+// unlikely blocks laid out after it read), but only while no other parameter took it: `@two`'s parameters get `x` from different
+// edges (the first parameter from `b1`, the second from `b3`) and stay apart, as in C.
+@test
+fn parameters_given_one_argument_on_two_edges_stay_apart() {
+    let lir = M"(lir ptr 8
+sym @two fn global
+fn @two
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 1
+  v3 = add.i32 v0, v2
+  v4 = iconst.i32 2
+  v5 = add.i32 v1, v4
+  v6 = icmp.slt v0, v1
+  br v6, b1, b2
+b1:
+  v7 = iconst.i32 5
+  jmp b5(v3, v7)
+b2: unlikely
+  v8 = iconst.i32 100
+  v9 = icmp.slt v1, v8
+  br v9, b3, b4
+b3: unlikely
+  jmp b5(v5, v3)
+b4: unlikely
+  v10 = iconst.i32 7
+  v11 = mul.i32 v3, v10
+  ret v11
+b5(v12: i32, v13: i32):
+  v14 = iconst.i32 3
+  v15 = mul.i32 v13, v14
+  v16 = sub.i32 v12, v15
+  ret v16
+)";
+    let drv = M"(#include <stdint.h>
+int32_t two(int32_t, int32_t);
+static int32_t want(int32_t a, int32_t b) {
+  int32_t x = a + 1, y = b + 2;
+  if (a < b) return x - 15;
+  if (b < 100) return y - 3 * x;
+  return x * 7;
+}
+int main(void) {
+  static const int32_t v[6] = {-3, 0, 4, 9, 150, 1000};
+  for (int i = 0; i < 6; i++)
+    for (int k = 0; k < 6; k++)
+      if (two(v[i], v[k]) != want(v[i], v[k])) return 1;
+  return 0;
+}
+)";
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// The high halves of 64-bit products, unsigned and signed (wasm32: four products of 32-bit halves, the
+// unsigned one from its operands as they come), on values with every half all ones, zero or a sign, are
+// C's `__int128` products shifted down.
+@test
+fn high_halves_of_64_bit_products_run() {
+    let lir = M"(lir ptr 8
+sym @hu fn global
+sym @hs fn global
+fn @hu
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = mulhu.i64 v0, v1
+  ret v2
+fn @hs
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = mulhs.i64 v0, v1
+  ret v2
+)";
+    let drv = M"(#include <stdint.h>
+uint64_t hu(uint64_t, uint64_t);
+int64_t hs(int64_t, int64_t);
+static const uint64_t X[8] = {0, 1, 0xFFFFFFFFu, 0x100000000ull, 0xFFFFFFFFFFFFFFFFull, 0x8000000000000000ull, 0x7FFFFFFFFFFFFFFFull, 0x9E3779B97F4A7C15ull};
+int main(void) {
+  for (int i = 0; i < 8; i++) {
+    for (int k = 0; k < 8; k++) {
+      unsigned __int128 u = (unsigned __int128)X[i] * X[k];
+      __int128 s = (__int128)(int64_t)X[i] * (int64_t)X[k];
+      if (hu(X[i], X[k]) != (uint64_t)(u >> 64)) return 1;
+      if (hs((int64_t)X[i], (int64_t)X[k]) != (int64_t)(s >> 64)) return 2;
+    }
+  }
+  return 0;
+}
+)";
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// A count of leading zeros that only `clz ^ (width - 1)` reads, the top bit's index (x86-64: `bsr` alone,
+// `lv::FOLD_BLEN`), of 32 and 64 bits, gives `2 * width - 1` for 0.
+@test
+fn top_bit_indexes_run() {
+    let lir = M"(lir ptr 8
+sym @top32 fn global
+sym @top64 fn global
+fn @top32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 31
+  v2 = clz.i32 v0
+  v3 = xor.i32 v2, v1
+  ret v3
+fn @top64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 63
+  v2 = clz.i64 v0
+  v3 = xor.i64 v2, v1
+  ret v3
+)";
+    let drv = M"(#include <stdint.h>
+int32_t top32(int32_t);
+int64_t top64(int64_t);
+int main(void) {
+  if (top32(0) != 63 || top64(0) != 127) return 1;
+  for (int k = 0; k < 64; k++) {
+    uint64_t x = (1ull << k) | (k > 3 ? 5ull : 0ull);
+    if (top64((int64_t)x) != k) return 2;
+    if (k < 32 && top32((int32_t)(uint32_t)x) != k) return 3;
+  }
+  return 0;
+}
+)";
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// C's `round` of float lanes (`round_even` with `.num`, which the loop vectorizer makes where the backend has
+// the instruction: arm64's FRINTA) rounds halfway away from zero: on halves of both signs, the floats next
+// to 0.5 and to 2^23 and 2^52, -0.0, infinities and a NaN, each lane is the C library's `roundf` or `round`.
+@test
+fn rounded_float_lanes_go_halfway_away_from_zero() {
+    let lir = M"(lir ptr 8
+sym @rnd fn global
+fn @rnd
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4f32 v0 align 0
+  v3 = vop.round_even.num.v4f32 (v2)
+  store v3, v1 align 0
+  v4 = load.v2f64 v0+16 align 0
+  v5 = vop.round_even.num.v2f64 (v4)
+  store v5, v1+16 align 0
+  ret
+)";
+    let drv = M"(#include <math.h>
+#include <stdint.h>
+#include <string.h>
+void rnd(const void *, void *);
+static const uint32_t F[12] = {0x3F000000u, 0xBF000000u, 0x3FC00000u, 0xC0200000u, 0x3EFFFFFFu, 0xBEFFFFFFu, 0x4AFFFFFFu, 0x4B000000u, 0x80000000u, 0x7F800000u, 0x7FC00000u, 0x40600000u};
+static const uint64_t D[8] = {0x3FE0000000000000u, 0xC004000000000000u, 0x3FDFFFFFFFFFFFFFu, 0x432FFFFFFFFFFFFFu, 0xC330000000000000u, 0x8000000000000000u, 0xFFF0000000000000u, 0xC00C000000000000u};
+int main(void) {
+  for (int r = 0; r < 12; r++) {
+    uint8_t in[32], out[32];
+    for (int k = 0; k < 4; k++) memcpy(in + 4 * k, &F[(r + k) % 12], 4);
+    for (int k = 0; k < 2; k++) memcpy(in + 16 + 8 * k, &D[(r + 3 * k) % 8], 8);
+    rnd(in, out);
+    for (int k = 0; k < 4; k++) {
+      float x, y;
+      memcpy(&x, in + 4 * k, 4);
+      memcpy(&y, out + 4 * k, 4);
+      float w = roundf(x);
+      if (memcmp(&y, &w, 4) != 0 && !(isnan(w) && isnan(y))) return 1;
+    }
+    for (int k = 0; k < 2; k++) {
+      double x, y;
+      memcpy(&x, in + 16 + 8 * k, 8);
+      memcpy(&y, out + 16 + 8 * k, 8);
+      double w = round(x);
+      if (memcmp(&y, &w, 8) != 0) return 2;
+    }
+  }
+  return 0;
+}
+)";
+    // Only arm64 has the form (`Package.vround_away`).
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("aarch64", true) {
+        return;
+    }
+    assert_eq(run_native(lir, drv), 0);
 }
 
 // Vector forms wasm32 computes in SIMD128 registers that the other run tests reach in memory alone: an
