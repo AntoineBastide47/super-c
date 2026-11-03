@@ -14098,6 +14098,14 @@ extend Gen {
         let nb = type_bytes(t.ty, 8);
         let dd = lane_type(t.ty) == T_F64;
         let pfx = dd as u32 * 0x66;
+        // SSE4.1's `blendvps` of C's `fmin` and `fmax` takes its mask in xmm0, which no operand holds then.
+        let mm = c == core::SIMD_MIN || c == core::SIMD_MAX;
+        let xmm0 = mm && nb == 16 && !self.avx && unsafe (*self.pkg).sse41 && !self.ordinary_lanes(ops[1]) && !self.ordinary_lanes(
+            ops[0],
+        );
+        if xmm0 {
+            self.vacate(V0);
+        }
         let rx = self.vec_use(ops[0], self.vs0) - V0;
         if c == core::SIMD_ABS {
             let mut ws = Vector::<u64>::new();
@@ -14195,7 +14203,6 @@ extend Gen {
         // -0. Then y where x is a NaN.
         let a = self.tmp(true) - V0;
         let b = self.tmp(true) - V0;
-        let e = self.tmp(true) - V0;
         self.fop_cmp(
             nb,
             dd,
@@ -14244,14 +14251,30 @@ extend Gen {
             b,
             a,
         );
-        self.fop_cmp(nb, dd, 3, a, rx, rx);
-        self.fop(nb, dd, 0x54, e, ry, a);
-        self.fop(nb, dd, 0x55, a, a, b);
-        self.fop(nb, dd, 0x56, a, a, e);
-        // The result takes temporary `a` unless it shares a loop parameter's register.
-        let rd = self.def_over(i, ops[0], a + V0) - V0;
-        if rd != a {
-            self.fop(nb, dd, 0x28, rd, 0, a);
+        // The NaN lanes' mask, then y under it: `vblendvps` (AVX: VEX.66.0F3A 4A, 4B for doubles, the mask's
+        // register in the immediate's high bits), `blendvps` (SSE4.1: 66 0F 38 14, 15, the mask in xmm0), else
+        // `andps`, `andnps`, `orps`.
+        let r = if nb <= 32 && self.avx {
+            self.fop_cmp(nb, dd, 3, a, rx, rx);
+            self.c.vex_rr(0x66, 3, 0x4A + dd as u32, false, nb == 32, a, b, ry);
+            self.c.byte(a << 4);
+            a
+        } else if xmm0 {
+            self.fop_cmp(nb, dd, 3, 0, rx, rx);
+            self.c.sse_rr(0x66, 0x0F3814 + dd as u32, b, ry);
+            b
+        } else {
+            let e = self.tmp(true) - V0;
+            self.fop_cmp(nb, dd, 3, a, rx, rx);
+            self.fop(nb, dd, 0x54, e, ry, a);
+            self.fop(nb, dd, 0x55, a, a, b);
+            self.fop(nb, dd, 0x56, a, a, e);
+            a
+        };
+        // The result takes temporary `r` unless it shares a loop parameter's register.
+        let rd = self.def_over(i, ops[0], r + V0) - V0;
+        if rd != r {
+            self.fop(nb, dd, 0x28, rd, 0, r);
         }
     }
 

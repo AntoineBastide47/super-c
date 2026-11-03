@@ -1960,7 +1960,7 @@ fn bit_counts_with_and_without_popcnt_run() {
 
 // The C library's exact rounding, absolute value, minimum and maximum of f64 and f32, which arm64 expands
 // in place of the call (`frintm`, `frintp`, `frinta`, `frintz`, `fabs`, `fminnm`, `fmaxnm`) and x86-64 too
-// (SSE2's `andpd`, `minsd`, `maxsd`; SSE4.1's `roundsd`), equal the library's on signed zeros, halves, the
+// (SSE2's `andpd`, `minsd`, `maxsd`; SSE4.1's `roundsd`, `blendvpd`), equal the library's on signed zeros, halves, the
 // last fraction below one half, infinities and NaN (a minimum or maximum of two zeros may be either).
 @test
 fn libm_rounding_minimum_and_maximum_calls_run() {
@@ -1969,6 +1969,15 @@ fn libm_rounding_minimum_and_maximum_calls_run() {
     }
     let lir = "lir ptr 8\nsym @floor fn global\nsym @t_floor fn global\nsym @floorf fn global\nsym @t_floorf fn global\nsym @ceil fn global\nsym @t_ceil fn global\nsym @ceilf fn global\nsym @t_ceilf fn global\nsym @round fn global\nsym @t_round fn global\nsym @roundf fn global\nsym @t_roundf fn global\nsym @trunc fn global\nsym @t_trunc fn global\nsym @truncf fn global\nsym @t_truncf fn global\nsym @fabs fn global\nsym @t_fabs fn global\nsym @fabsf fn global\nsym @t_fabsf fn global\nsym @fmin fn global\nsym @t_fmin fn global\nsym @fminf fn global\nsym @t_fminf fn global\nsym @fmax fn global\nsym @t_fmax fn global\nsym @fmaxf fn global\nsym @t_fmaxf fn global\nfn @t_floor\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @floor(v0) : (f64) -> f64\n  ret v1\nfn @t_floorf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @floorf(v0) : (f32) -> f32\n  ret v1\nfn @t_ceil\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @ceil(v0) : (f64) -> f64\n  ret v1\nfn @t_ceilf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @ceilf(v0) : (f32) -> f32\n  ret v1\nfn @t_round\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @round(v0) : (f64) -> f64\n  ret v1\nfn @t_roundf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @roundf(v0) : (f32) -> f32\n  ret v1\nfn @t_trunc\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @trunc(v0) : (f64) -> f64\n  ret v1\nfn @t_truncf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @truncf(v0) : (f32) -> f32\n  ret v1\nfn @t_fabs\n  sig (f64) -> f64\nb0(v0: f64):\n  v1 = call.f64 @fabs(v0) : (f64) -> f64\n  ret v1\nfn @t_fabsf\n  sig (f32) -> f32\nb0(v0: f32):\n  v1 = call.f32 @fabsf(v0) : (f32) -> f32\n  ret v1\nfn @t_fmin\n  sig (f64, f64) -> f64\nb0(v0: f64, v1: f64):\n  v2 = call.f64 @fmin(v0, v1) : (f64, f64) -> f64\n  ret v2\nfn @t_fminf\n  sig (f32, f32) -> f32\nb0(v0: f32, v1: f32):\n  v2 = call.f32 @fminf(v0, v1) : (f32, f32) -> f32\n  ret v2\nfn @t_fmax\n  sig (f64, f64) -> f64\nb0(v0: f64, v1: f64):\n  v2 = call.f64 @fmax(v0, v1) : (f64, f64) -> f64\n  ret v2\nfn @t_fmaxf\n  sig (f32, f32) -> f32\nb0(v0: f32, v1: f32):\n  v2 = call.f32 @fmaxf(v0, v1) : (f32, f32) -> f32\n  ret v2\n";
     let drv = "#include <math.h>\n#include <string.h>\n#include <stdint.h>\ndouble t_floor(double);\nfloat t_floorf(float);\ndouble t_ceil(double);\nfloat t_ceilf(float);\ndouble t_round(double);\nfloat t_roundf(float);\ndouble t_trunc(double);\nfloat t_truncf(float);\ndouble t_fabs(double);\nfloat t_fabsf(float);\ndouble t_fmin(double, double);\nfloat t_fminf(float, float);\ndouble t_fmax(double, double);\nfloat t_fmaxf(float, float);\nstatic int same64(double x, double y) { uint64_t a, b; memcpy(&a, &x, 8); memcpy(&b, &y, 8); return a == b || (x != x && y != y) || (x == 0 && y == 0); }\nstatic int same32(float x, float y) { uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4); return a == b || (x != x && y != y) || (x == 0 && y == 0); }\nstatic int bits64(double x, double y) { uint64_t a, b; memcpy(&a, &x, 8); memcpy(&b, &y, 8); return a == b || (x != x && y != y); }\nstatic int bits32(float x, float y) { uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4); return a == b || (x != x && y != y); }\nint main(void) {\n  double v[14] = {0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999999999999994, 4503599627370497.0, 1e300, -INFINITY, NAN, -3.75};\n  for (int i = 0; i < 14; i++) {\n    double x = v[i];\n    float f = (float)x;\n    if (!bits64(t_floor(x), floor(x))) return 1;\n    if (!bits32(t_floorf(f), floorf(f))) return 2;\n    if (!bits64(t_ceil(x), ceil(x))) return 3;\n    if (!bits32(t_ceilf(f), ceilf(f))) return 4;\n    if (!bits64(t_round(x), round(x))) return 5;\n    if (!bits32(t_roundf(f), roundf(f))) return 6;\n    if (!bits64(t_trunc(x), trunc(x))) return 7;\n    if (!bits32(t_truncf(f), truncf(f))) return 8;\n    if (!bits64(t_fabs(x), fabs(x))) return 9;\n    if (!bits32(t_fabsf(f), fabsf(f))) return 10;\n    for (int j = 0; j < 14; j++) {\n      double y = v[j];\n      float g = (float)y;\n      if (!same64(t_fmin(x, y), fmin(x, y))) return 11;\n      if (!same32(t_fminf(f, g), fminf(f, g))) return 12;\n      if (!same64(t_fmax(x, y), fmax(x, y))) return 13;\n      if (!same32(t_fmaxf(f, g), fmaxf(f, g))) return 14;\n    }\n  }\n  return 0;\n}\n";
+    // SSE4.1's `fmin` and `fmax` (`fminf`, `fmaxf`) blend the NaN's mask in xmm0: BLENDVPS, BLENDVPD.
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), SSE41, &mut obj),
+        "the SSE4.1 object",
+    );
+    let bps: [u8; 4] = [0x66, 0x0F, 0x38, 0x14];
+    let bpd: [u8; 4] = [0x66, 0x0F, 0x38, 0x15];
+    assert(holds(&obj, bps[0..4]) && holds(&obj, bpd[0..4]), "the blends");
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_sse41(lir, drv), 0);
 }
@@ -2038,14 +2047,21 @@ fn float_lane_operations_run() {
         );
     }
     // x86-64's objects: ROUNDPS and ROUNDPD with SSE4.1, a packed unordered comparison (CMPPS 3, of C's
-    // `fmin` and `fmax`), and with AVX2 and FMA3 no call of `fma` or `fmaf`.
+    // `fmin` and `fmax`) whose mask BLENDVPS and BLENDVPD take, and with AVX2 and FMA3 VBLENDVPS and
+    // VBLENDVPD and no call of `fma` or `fmaf`.
     let x64 = tgt::axis_index("x86_64", true);
     let mut obj = Vector::<u8>::new();
     assert(object_of(&regs, tgt::axis_index("linux", false), x64, SSE41, &mut obj), "the x86-64 object");
     let mut rps = false;
     let mut rpd = false;
     let mut unord = false;
+    let mut bps = false;
+    let mut bpd = false;
     for x in 2..obj.len() - 4 {
+        // 66, maybe a REX prefix, 0F 38 14 or 15.
+        let o66 = obj[x - 1] == 0x66 || (obj[x - 1] & 0xF0) == 0x40 && obj[x - 2] == 0x66;
+        bps = bps || o66 && obj[x] == 0x0F && obj[x + 1] == 0x38 && obj[x + 2] == 0x14;
+        bpd = bpd || o66 && obj[x] == 0x0F && obj[x + 1] == 0x38 && obj[x + 2] == 0x15;
         rps = rps || obj[x] == 0x0F && obj[x + 1] == 0x3A && obj[x + 2] == 0x08;
         rpd = rpd || obj[x] == 0x0F && obj[x + 1] == 0x3A && obj[x + 2] == 0x09;
         // The byte before the opcode or its REX prefix: not F3 or F2 (CMPSS, CMPSD).
@@ -2056,14 +2072,20 @@ fn float_lane_operations_run() {
         };
         unord = unord || pre != 0xF3 && pre != 0xF2 && obj[x] == 0x0F && obj[x + 1] == 0xC2 && obj[x + 3] == 0x03;
     }
-    assert(rps && rpd && unord, "packed roundings and comparisons");
+    assert(rps && rpd && unord && bps && bpd, "packed roundings, comparisons and blends");
     let mut wide = Vector::<u8>::new();
     assert(object_of(&regs, tgt::axis_index("linux", false), x64, SSE41 | WIDE | FMA, &mut wide), "the AVX2 object");
     let mut calls = false;
+    let mut vbps = false;
+    let mut vbpd = false;
     for x in 0..wide.len() - 5 {
+        // VEX's three-byte form (C4), the 0F3A map.
+        let v3 = wide[x] == 0xC4 && (wide[x + 1] & 0x1F) == 3;
+        vbps = vbps || v3 && wide[x + 3] == 0x4A;
+        vbpd = vbpd || v3 && wide[x + 3] == 0x4B;
         calls = calls || wide[x] == b'f' && wide[x + 1] == b'm' && wide[x + 2] == b'a' && (wide[x + 3] == 0 || wide[x + 3] == b'f' && wide[x + 4] == 0);
     }
-    assert(!calls, "a fused multiply-add in registers calls nothing");
+    assert(!calls && vbps && vbpd, "a fused multiply-add in registers calls nothing; the blends");
     if !cli::has_cc() {
         return; // a C driver links it
     }

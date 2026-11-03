@@ -753,12 +753,29 @@ pub(package) const ROWS: [(str<'static>, str<'static>); 706] = [
 /// The C library's exact roundings (`floor`, `round`: SSE4.1's `roundsd` and `roundss`, x86-64-v2), in
 /// place of the call when the processor has SSE4.1 (`Package.sse41`), as the rows. `round` rounds half away
 /// from zero: the truncation of the value plus the largest number below 1/2 of its sign, as LLVM's x86
-/// lowering, the constants made in registers.
-pub(package) const SSE41_ROWS: [(str<'static>, str<'static>); 8] = [
+/// lowering, the constants made in registers. `fmin` and `fmax` as the SSE2 rows, the NaN's mask in xmm0
+/// for `blendvps` (`blendvpd`).
+pub(package) const SSE41_ROWS: [(str<'static>, str<'static>); 12] = [
     ("ceil", "roundsd $10, %xmm0, %xmm0"),
     ("ceilf", "roundss $10, %xmm0, %xmm0"),
     ("floor", "roundsd $9, %xmm0, %xmm0"),
     ("floorf", "roundss $9, %xmm0, %xmm0"),
+    (
+        "fmax",
+        "movapd %xmm1, %xmm2\ncmpsd $4, %xmm0, %xmm2\norpd %xmm1, %xmm2\nmovapd %xmm1, %xmm3\nmaxsd %xmm0, %xmm3\nandpd %xmm2, %xmm3\ncmpsd $3, %xmm0, %xmm0\nblendvpd %xmm0, %xmm1, %xmm3\nmovapd %xmm3, %xmm0"
+    ),
+    (
+        "fmaxf",
+        "movaps %xmm1, %xmm2\ncmpss $4, %xmm0, %xmm2\norps %xmm1, %xmm2\nmovaps %xmm1, %xmm3\nmaxss %xmm0, %xmm3\nandps %xmm2, %xmm3\ncmpss $3, %xmm0, %xmm0\nblendvps %xmm0, %xmm1, %xmm3\nmovaps %xmm3, %xmm0"
+    ),
+    (
+        "fmin",
+        "movapd %xmm1, %xmm2\ncmpsd $0, %xmm0, %xmm2\nandpd %xmm1, %xmm2\nmovapd %xmm1, %xmm3\nminsd %xmm0, %xmm3\norpd %xmm2, %xmm3\ncmpsd $3, %xmm0, %xmm0\nblendvpd %xmm0, %xmm1, %xmm3\nmovapd %xmm3, %xmm0"
+    ),
+    (
+        "fminf",
+        "movaps %xmm1, %xmm2\ncmpss $0, %xmm0, %xmm2\nandps %xmm1, %xmm2\nmovaps %xmm1, %xmm3\nminss %xmm0, %xmm3\norps %xmm2, %xmm3\ncmpss $3, %xmm0, %xmm0\nblendvps %xmm0, %xmm1, %xmm3\nmovaps %xmm3, %xmm0"
+    ),
     (
         "round",
         "pcmpeqd %xmm1, %xmm1\npsrlq $2, %xmm1\npcmpeqd %xmm2, %xmm2\npsrlq $63, %xmm2\npsllq $53, %xmm2\npxor %xmm2, %xmm1\npsllq $10, %xmm2\nandpd %xmm0, %xmm2\norpd %xmm2, %xmm1\naddsd %xmm0, %xmm1\nroundsd $11, %xmm1, %xmm0"
