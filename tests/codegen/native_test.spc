@@ -2456,6 +2456,185 @@ int main(void) {
     }
 }
 
+// A function with run-time copies (`lir::lower`'s CPU-level check: the level byte, then a call of the copy
+// with the entry's parameters) is on x86-64 a check that jumps to the copy with the arguments as they arrived
+// (`x64gen::dispatcher`: cmp byte ptr [rip + level], 1 (80 3D, a relocation, 01); jae rel32 (0F 83)), then
+// the body without the check, under a local name. Both sides run: the level byte 0 adds, 1 takes the copy,
+// which subtracts. On Microsoft x64 a vector result's body keeps the result's pointer in rcx (mov rax, rcx:
+// 48 89 C8), no slot (no mov [rbp + d], rcx: 48 89 4D; nor mov [rsp + d], rcx: 48 89 4C 24).
+@test
+fn a_copys_check_jumps_with_the_arguments_as_they_arrived() {
+    let lir = M"(lir ptr 8
+sym @__sc_simd_lv data global
+sym @pick fn global
+sym @pick_hi fn global
+data @__sc_simd_lv size 1 align 0
+fn @pick_hi
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = sub.i64 v0, v1
+  ret v2
+fn @pick
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = symaddr @__sc_simd_lv
+  v3 = iconst.i8 1
+  v4 = aload.i8 v2 relaxed
+  v5 = icmp.uge v4, v3
+  br v5, b2, b1
+b1:
+  v6 = add.i64 v0, v1
+  ret v6
+b2:
+  v7 = call.i64 @pick_hi(v0, v1) : (i64, i64) -> i64
+  ret v7
+)";
+    let chk: [u8; 2] = [0x80, 0x3D];
+    let jae: [u8; 3] = [0x01, 0x0F, 0x83];
+    let x64 = tgt::axis_index("x86_64", true);
+    let oss: [str; 2] = ["linux", "windows"];
+    for k in 0..2usize {
+        let mut obj = Vector::<u8>::new();
+        assert(object_of(lir, tgt::axis_index(unsafe oss[k], false), x64, 0, &mut obj), unsafe oss[k]);
+        assert(holds(&obj, chk[0..2]) && holds(&obj, jae[0..3]), unsafe oss[k]);
+    }
+    let vec = M"(lir ptr 8
+sym @__sc_simd_lv data global
+sym @vadd fn global
+sym @vadd_hi fn global
+data @__sc_simd_lv size 1 align 0
+fn @vadd_hi
+  sig (v4f32, v4f32) -> v4f32
+b0(v0: v4f32, v1: v4f32):
+  v2 = fsub.v4f32 v0, v1
+  ret v2
+fn @vadd
+  sig (v4f32, v4f32) -> v4f32
+b0(v0: v4f32, v1: v4f32):
+  v2 = symaddr @__sc_simd_lv
+  v3 = iconst.i8 1
+  v4 = aload.i8 v2 relaxed
+  v5 = icmp.uge v4, v3
+  br v5, b2, b1
+b1:
+  v6 = fadd.v4f32 v0, v1
+  ret v6
+b2:
+  v7 = call.v4f32 @vadd_hi(v0, v1) : (v4f32, v4f32) -> v4f32
+  ret v7
+)";
+    let mut wo = Vector::<u8>::new();
+    assert(object_of(vec, tgt::axis_index("windows", false), x64, 0, &mut wo), "the Microsoft x64 object");
+    let kept: [u8; 3] = [0x48, 0x89, 0xC8];
+    let spill: [u8; 3] = [0x48, 0x89, 0x4D];
+    let spsp: [u8; 4] = [0x48, 0x89, 0x4C, 0x24];
+    assert(
+        holds(&wo, chk[0..2]) && holds(&wo, kept[0..3]) && !holds(&wo, spill[0..3]) && !holds(&wo, spsp[0..4]),
+        "the vector body",
+    );
+    let drv = M"(#include <stdint.h>
+extern unsigned char __sc_simd_lv;
+int64_t pick(int64_t, int64_t);
+int main(void) {
+  if (pick(5, 3) != 8) return 1;
+  __sc_simd_lv = 1;
+  if (pick(5, 3) != 2) return 2;
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// x86-64: a 64-bit product and its high half of the same operands in one block are one `mul` (rdx:rax,
+// `x64gen::twin_product`), the low half first or the high one: no `imul r64, r/m64` (REX.W 0F AF) stays.
+// Both give C's 128-bit product's halves.
+@test
+fn a_product_and_its_high_half_are_one_mul() {
+    let lir = M"(lir ptr 8
+sym @lohi fn global
+sym @hilo fn global
+fn @lohi
+  sig (i64, i64, ptr) -> i64
+b0(v0: i64, v1: i64, v2: ptr):
+  v3 = mul.i64 v0, v1
+  v4 = mulhu.i64 v0, v1
+  store v4, v2 align 3
+  ret v3
+fn @hilo
+  sig (i64, i64, ptr) -> i64
+b0(v0: i64, v1: i64, v2: ptr):
+  v3 = mulhu.i64 v1, v0
+  v4 = mul.i64 v0, v1
+  store v3, v2 align 3
+  ret v4
+)";
+    let imul: [u8; 3] = [0x48, 0x0F, 0xAF];
+    let x64 = tgt::axis_index("x86_64", true);
+    let oss: [str; 2] = ["linux", "windows"];
+    for k in 0..2usize {
+        let mut obj = Vector::<u8>::new();
+        assert(object_of(lir, tgt::axis_index(unsafe oss[k], false), x64, 0, &mut obj), unsafe oss[k]);
+        assert(!holds(&obj, imul[0..3]), unsafe oss[k]);
+    }
+    let drv = M"(#include <stdint.h>
+int64_t lohi(int64_t, int64_t, int64_t *);
+int64_t hilo(int64_t, int64_t, int64_t *);
+int main(void) {
+  uint64_t xs[4] = {3, 0xFFFFFFFFFFFFFFFFull, 0x123456789ABCDEFull, 0x8000000000000001ull};
+  for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {
+    unsigned __int128 p = (unsigned __int128)xs[i] * xs[j];
+    int64_t h1 = 0, h2 = 0;
+    if ((uint64_t)lohi((int64_t)xs[i], (int64_t)xs[j], &h1) != (uint64_t)p || (uint64_t)h1 != (uint64_t)(p >> 64)) return 1;
+    if ((uint64_t)hilo((int64_t)xs[i], (int64_t)xs[j], &h2) != (uint64_t)p || (uint64_t)h2 != (uint64_t)(p >> 64)) return 2;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// System V: a body with a result in memory that calls an intrinsic keeps the result's pointer in its slot
+// (`x64gen::kept_sret` takes no body with a call): the intrinsic's code reads its argument in edi (`movd
+// %edi, %xmm`), which the call moves there over the pointer (mov rdi, rsi: 48 89 F7). The slot's store (mov
+// [rsp + d], rdi: 48 89 3C 24 or 48 89 7C 24) stays; the result arrives whole on an x86-64 host.
+@test
+fn a_result_pointer_stays_in_its_slot_past_an_intrinsic() {
+    let lir = M"(lir ptr 8
+sym @_mm_cvtsi32_si128 fn global
+sym @mk fn global
+fn @mk
+  sig (i32) -> v8i32
+b0(v0: i32):
+  v1 = call.v2i64 @_mm_cvtsi32_si128(v0) : (i32) -> v2i64
+  v2 = vextract.0.i64 v1
+  v3 = trunc.i32 v2
+  v4 = splat.v8i32 v3
+  ret v4
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    let mv: [u8; 3] = [0x48, 0x89, 0xF7];
+    let at0: [u8; 4] = [0x48, 0x89, 0x3C, 0x24];
+    let atd: [u8; 4] = [0x48, 0x89, 0x7C, 0x24];
+    assert(holds(&obj, mv[0..3]) && (holds(&obj, at0[0..4]) || holds(&obj, atd[0..4])), "the pointer's slot");
+    let drv = M"(#include <stdint.h>
+typedef struct { int32_t v[8]; } V8;
+V8 mk(int32_t);
+int main(void) {
+  V8 r = mk(-77);
+  for (int k = 0; k < 8; k++) if (r.v[k] != -77) return 1 + k;
+  return 0;
+}
+)";
+    if cli::has_cc() && tgt::host_isa() == tgt::axis_index("x86_64", true) {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A product of 32-bit lanes by a splat (a value from outside, a constant) under SSE2: the splat's odd lanes
 // are its even ones, so only the other operand takes a `pshufd` (66 [REX] 0F 70 /r F5), one per product.
 @test
@@ -10309,6 +10488,74 @@ int main(void) {
 }
 )";
     assert_eq(run_native(src, drv), 0);
+}
+
+// x86-64: a 64-bit product and its high half of the same operands are one `mul` (rdx:rax). Under
+// Microsoft x64 the arguments arrive in rcx, rdx, r8 and r9, so the `mul` moves what rax and rdx hold
+// aside: it holds rdx:rax, the two registers they move to and its operands (`need`). A saturating 128-bit
+// product; both objects build.
+@test
+fn a_paired_product_has_room_for_the_values_it_moves_aside() {
+    let lir = M"(lir ptr 8
+sym @sat fn global
+fn @sat
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (ptr, ptr) -> l0
+  ref p0 16 readonly
+  ref p1 16 readonly
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = iconst.i64 0
+  v4 = load.i64 v0 align 3 tbaa 4
+  v5 = load.i64 v0+8 align 3 tbaa 4
+  v6 = load.i64 v1 align 3 tbaa 4
+  v7 = load.i64 v1+8 align 3 tbaa 4
+  v8 = mul.i64 v4, v6
+  v9 = mulhu.i64 v4, v6
+  v10 = mul.i64 v4, v7
+  v11 = mulhu.i64 v4, v7
+  v12, v13 = addo.u.i64 v10, v9
+  v14 = zext.i64 v13
+  v15 = add.i64 v11, v14
+  v16 = mul.i64 v5, v6
+  v17 = mulhu.i64 v5, v6
+  v18, v19 = addo.u.i64 v12, v16
+  v20 = zext.i64 v19
+  v21 = add.i64 v15, v17
+  v22 = add.i64 v21, v20
+  v23 = icmp.ult v18, v12
+  v24 = icmp.ult v22, v15
+  v25 = icmp.eq v22, v15
+  v26 = select.i8 v25, v23, v24
+  v27 = zext.i64 v26
+  v28 = mul.i64 v5, v7
+  v29 = mulhu.i64 v5, v7
+  v30, v31 = addo.u.i64 v28, v22
+  v32 = zext.i64 v31
+  v33 = add.i64 v29, v32
+  v34 = add.i64 v33, v27
+  v35 = icmp.ne v30, v3
+  v36 = icmp.ne v34, v3
+  v37 = or.i8 v35, v36
+  br v37, b1, b2
+b1:
+  v38 = iconst.i64 -1
+  store v38, v2 align 0
+  store v38, v2+8 align 0
+  ret
+b2:
+  store v8, v2 align 0
+  store v18, v2+8 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("windows", false), tgt::axis_index("x86_64", true), TAIL | OMIT_FP, &mut obj),
+        "the Microsoft x64 object",
+    );
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), TAIL | OMIT_FP, &mut obj),
+        "the System V object",
+    );
 }
 
 // x86-64: code that ends in a call that does not return (a panic) has no epilogue after it, in a body that
