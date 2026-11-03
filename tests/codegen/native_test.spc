@@ -19,7 +19,8 @@ import module::loader;
 // on macOS arm64, whose every processor has FEAT_FP16, else conversions), 64-byte vectors (x86-64's zmm
 // registers with AVX-512), `popcnt`, SSE4.1's roundings (`Package.sse41`), arm64's LSE atomics and RCpc
 // acquire loads (`Package.lse`, `Package.rcpc`); equal edges of a body sharing one record, as the
-// optimizer's rewrites may leave them (`SHARE`); and no frame pointer kept (`Package.omit_fp`).
+// optimizer's rewrites may leave them (`SHARE`); no frame pointer kept (`Package.omit_fp`); and a fused
+// multiply-add (`Package.fma`: x86-64's FMA3).
 const TAIL: u32 = 1;
 const WIDE: u32 = 2;
 const HALF: u32 = 4;
@@ -30,6 +31,7 @@ const LSE: u32 = 64;
 const RCPC: u32 = 128;
 const SHARE: u32 = 256;
 const OMIT_FP: u32 = 512;
+const FMA: u32 = 1024;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -93,6 +95,24 @@ fn run_x64_feature(text: str, driver: str, name: str, opt: u32) i32 {
     return run_native_with(text, &d, opt);
 }
 
+// `run_native` with 32-byte vectors, SSE4.1 and FMA3 on an x86-64 host: the driver's `main` returns 0 first on a
+// processor without AVX2 or FMA3. 0 on another host.
+fn run_fma(text: str, driver: str) i32 {
+    if tgt::host_isa() != tgt::axis_index("x86_64", true) {
+        return 0;
+    }
+    let head = "int main(void) {\n";
+    let at = driver.find(head);
+    assert(at >= 0, "the driver's main");
+    let d = format(
+        "{}{}  if (!__builtin_cpu_supports(\"avx2\") || !__builtin_cpu_supports(\"fma\")) return 0;\n{}",
+        driver.slice(0, at as usize),
+        head,
+        driver.slice(at as usize + head.len(), driver.len()),
+    );
+    return run_native_with(text, &d, WIDE | SSE41 | FMA);
+}
+
 // `run_native` with 64-byte vectors on an x86-64 host: under the emulator command `SC_SDE` names (Intel
 // SDE, as CI's AVX-512 lane runs), else the driver's `main` returns 0 first on a processor without
 // AVX-512 BW. 0 on another host.
@@ -154,6 +174,7 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.sse41 = (opts & SSE41) != 0;
     p.lse = (opts & LSE) != 0;
     p.rcpc = (opts & RCPC) != 0;
+    p.fma = (opts & FMA) != 0;
     p.bitrev = isa == tgt::axis_index("aarch64", true);
     if (opts & WIDE) != 0 {
         p.vector = 32;
@@ -1944,6 +1965,178 @@ fn libm_rounding_minimum_and_maximum_calls_run() {
     let drv = "#include <math.h>\n#include <string.h>\n#include <stdint.h>\ndouble t_floor(double);\nfloat t_floorf(float);\ndouble t_ceil(double);\nfloat t_ceilf(float);\ndouble t_round(double);\nfloat t_roundf(float);\ndouble t_trunc(double);\nfloat t_truncf(float);\ndouble t_fabs(double);\nfloat t_fabsf(float);\ndouble t_fmin(double, double);\nfloat t_fminf(float, float);\ndouble t_fmax(double, double);\nfloat t_fmaxf(float, float);\nstatic int same64(double x, double y) { uint64_t a, b; memcpy(&a, &x, 8); memcpy(&b, &y, 8); return a == b || (x != x && y != y) || (x == 0 && y == 0); }\nstatic int same32(float x, float y) { uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4); return a == b || (x != x && y != y) || (x == 0 && y == 0); }\nstatic int bits64(double x, double y) { uint64_t a, b; memcpy(&a, &x, 8); memcpy(&b, &y, 8); return a == b || (x != x && y != y); }\nstatic int bits32(float x, float y) { uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4); return a == b || (x != x && y != y); }\nint main(void) {\n  double v[14] = {0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999999999999994, 4503599627370497.0, 1e300, -INFINITY, NAN, -3.75};\n  for (int i = 0; i < 14; i++) {\n    double x = v[i];\n    float f = (float)x;\n    if (!bits64(t_floor(x), floor(x))) return 1;\n    if (!bits32(t_floorf(f), floorf(f))) return 2;\n    if (!bits64(t_ceil(x), ceil(x))) return 3;\n    if (!bits32(t_ceilf(f), ceilf(f))) return 4;\n    if (!bits64(t_round(x), round(x))) return 5;\n    if (!bits32(t_roundf(f), roundf(f))) return 6;\n    if (!bits64(t_trunc(x), trunc(x))) return 7;\n    if (!bits32(t_truncf(f), truncf(f))) return 8;\n    if (!bits64(t_fabs(x), fabs(x))) return 9;\n    if (!bits32(t_fabsf(f), fabsf(f))) return 10;\n    for (int j = 0; j < 14; j++) {\n      double y = v[j];\n      float g = (float)y;\n      if (!same64(t_fmin(x, y), fmin(x, y))) return 11;\n      if (!same32(t_fminf(f, g), fminf(f, g))) return 12;\n      if (!same64(t_fmax(x, y), fmax(x, y))) return 13;\n      if (!same32(t_fmaxf(f, g), fmaxf(f, g))) return 14;\n    }\n  }\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_sse41(lir, drv), 0);
+}
+
+// The float lane operations the loop vectorizer makes of C's calls (`vop.abs`, `floor`, `ceil`, `trunc`,
+// `min.num`, `max.num`, `fma`) equal the library's lane by lane through signed zeros, halves, infinities,
+// subnormals and quiet and signaling NaNs; a minimum or maximum of a vector in one register equals the
+// scalar call's bits (x86-64: the packed forms of its expansion; arm64: FMINNM and FMAXNM). x86-64
+// computes them in registers with SSE2 and SSE4.1, AVX2 and FMA3, AVX-512.
+@test
+fn float_lane_operations_run() {
+    let mut lir = String::from_str(
+        "lir ptr 8\nsym @fminf fn global\nsym @fmaxf fn global\nsym @fmin fn global\nsym @fmax fn global\n",
+    );
+    let tys: [str; 6] = ["v4f32", "v8f32", "v16f32", "v2f64", "v4f64", "v8f64"];
+    let nbs: [u32; 6] = [16, 32, 64, 16, 32, 64];
+    // The bodies of vectors of at most 32 bytes, which x86-64 holds in registers with AVX2.
+    let mut regs = String::from_str("lir ptr 8\n");
+    for q in 0..6usize {
+        let t = tys[q];
+        let mut one = String::new();
+        one.format_into(
+            "sym @v_{} fn global\nfn @v_{}\n  sig (ptr, ptr, ptr, ptr) -> void\nb0(v0: ptr, v1: ptr, v2: ptr, v3: ptr):\n  v4 = load.{} v0 align 0\n  v5 = load.{} v1 align 0\n  v6 = load.{} v2 align 0\n  v7 = vop.abs.{} (v4)\n  v8 = vop.floor.{} (v4)\n  v9 = vop.ceil.{} (v4)\n  v10 = vop.trunc.{} (v4)\n  v11 = vop.min.num.{} (v4, v5)\n  v12 = vop.max.num.{} (v4, v5)\n  v13 = vop.fma.{} (v4, v5, v6)\n",
+            t,
+            t,
+            t,
+            t,
+            t,
+            t,
+            t,
+            t,
+            t,
+            t,
+            t,
+            t,
+        );
+        for k in 0..7u32 {
+            one.format_into("  store v{}, v3+{} align 0\n", 7 + k, k * nbs[q]);
+        }
+        one.push_str("  ret\n");
+        lir.push_str(&one);
+        if nbs[q] <= 32 {
+            regs.push_str(&one);
+        }
+    }
+    let names: [str; 4] = ["fminf", "fmaxf", "fmin", "fmax"];
+    for q in 0..4usize {
+        let ft = if q < 2 {
+            "f32"
+        } else {
+            "f64"
+        };
+        lir.format_into(
+            "sym @s{} fn global\nfn @s{}\n  sig ({}, {}) -> {}\nb0(v0: {}, v1: {}):\n  v2 = call.{} @{}(v0, v1) : ({}, {}) -> {}\n  ret v2\n",
+            names[q].slice(1, names[q].len()),
+            names[q].slice(1, names[q].len()),
+            ft,
+            ft,
+            ft,
+            ft,
+            ft,
+            ft,
+            names[q],
+            ft,
+            ft,
+            ft,
+        );
+    }
+    // x86-64's objects: ROUNDPS and ROUNDPD with SSE4.1, a packed unordered comparison (CMPPS 3, of C's
+    // `fmin` and `fmax`), and with AVX2 and FMA3 no call of `fma` or `fmaf`.
+    let x64 = tgt::axis_index("x86_64", true);
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(&regs, tgt::axis_index("linux", false), x64, SSE41, &mut obj), "the x86-64 object");
+    let mut rps = false;
+    let mut rpd = false;
+    let mut unord = false;
+    for x in 2..obj.len() - 4 {
+        rps = rps || obj[x] == 0x0F && obj[x + 1] == 0x3A && obj[x + 2] == 0x08;
+        rpd = rpd || obj[x] == 0x0F && obj[x + 1] == 0x3A && obj[x + 2] == 0x09;
+        // The byte before the opcode or its REX prefix: not F3 or F2 (CMPSS, CMPSD).
+        let pre = if (obj[x - 1] & 0xF0) == 0x40 {
+            obj[x - 2]
+        } else {
+            obj[x - 1]
+        };
+        unord = unord || pre != 0xF3 && pre != 0xF2 && obj[x] == 0x0F && obj[x + 1] == 0xC2 && obj[x + 3] == 0x03;
+    }
+    assert(rps && rpd && unord, "packed roundings and comparisons");
+    let mut wide = Vector::<u8>::new();
+    assert(object_of(&regs, tgt::axis_index("linux", false), x64, SSE41 | WIDE | FMA, &mut wide), "the AVX2 object");
+    let mut calls = false;
+    for x in 0..wide.len() - 5 {
+        calls = calls || wide[x] == b'f' && wide[x + 1] == b'm' && wide[x + 2] == b'a' && (wide[x + 3] == 0 || wide[x + 3] == b'f' && wide[x + 4] == 0);
+    }
+    assert(!calls, "a fused multiply-add in registers calls nothing");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <math.h>
+#include <string.h>
+#include <stdint.h>
+typedef void (*lanes_fn)(const void *, const void *, const void *, void *);
+void v_v4f32(const void *, const void *, const void *, void *);
+void v_v8f32(const void *, const void *, const void *, void *);
+void v_v16f32(const void *, const void *, const void *, void *);
+void v_v2f64(const void *, const void *, const void *, void *);
+void v_v4f64(const void *, const void *, const void *, void *);
+void v_v8f64(const void *, const void *, const void *, void *);
+float sminf(float, float);
+float smaxf(float, float);
+double smin(double, double);
+double smax(double, double);
+static const uint32_t F[16] = {0x00000000u, 0x80000000u, 0x3F000000u, 0xBF000000u, 0x40200000u, 0xC0200000u, 0x3EFFFFFFu, 0x4B000001u, 0x7F800000u, 0xFF800000u, 0x7FC00000u, 0x7FA00000u, 0xFFC00001u, 0x00000001u, 0xC0700000u, 0x3FC00000u};
+static const uint64_t D[16] = {0x0u, 0x8000000000000000u, 0x3FE0000000000000u, 0xBFE0000000000000u, 0x4004000000000000u, 0xC004000000000000u, 0x3FDFFFFFFFFFFFFFu, 0x4330000000000001u, 0x7FF0000000000000u, 0xFFF0000000000000u, 0x7FF8000000000000u, 0x7FF4000000000000u, 0xFFF8000000000001u, 0x1u, 0xC00E000000000000u, 0x3FF8000000000000u};
+static int nan32(uint32_t x) { return (x & 0x7FFFFFFFu) > 0x7F800000u; }
+static int nan64(uint64_t x) { return (x & 0x7FFFFFFFFFFFFFFFu) > 0x7FF0000000000000u; }
+static uint32_t b32(float x) { uint32_t u; memcpy(&u, &x, 4); return u; }
+static uint64_t b64(double x) { uint64_t u; memcpy(&u, &x, 8); return u; }
+static float f32v(uint32_t u) { float x; memcpy(&x, &u, 4); return x; }
+static double f64v(uint64_t u) { double x; memcpy(&x, &u, 8); return x; }
+/* Lanes of `n` floats; a minimum or maximum equals the scalar call's bits (`exact`), else a NaN may be any. */
+static int check32(lanes_fn f, int n, int exact) {
+  uint32_t a[16], b[16], c[16], o[7 * 16];
+  for (int r = 0; r < 256; r++) {
+    for (int k = 0; k < n; k++) { a[k] = F[(r + k) % 16]; b[k] = F[(r / 16 + k) % 16]; c[k] = F[(r * 7 + k) % 16]; }
+    f(a, b, c, o);
+    for (int k = 0; k < n; k++) {
+      float x = f32v(a[k]), y = f32v(b[k]), z = f32v(c[k]);
+      uint32_t lo = b32(sminf(x, y)), hi = b32(smaxf(x, y)), m = b32(fmaf(x, y, z));
+      if (o[k] != b32(fabsf(x)) && !(nan32(o[k]) && nan32(a[k]))) return 1;
+      if (o[n + k] != b32(floorf(x)) && !(nan32(o[n + k]) && nan32(a[k]))) return 2;
+      if (o[2 * n + k] != b32(ceilf(x)) && !(nan32(o[2 * n + k]) && nan32(a[k]))) return 3;
+      if (o[3 * n + k] != b32(truncf(x)) && !(nan32(o[3 * n + k]) && nan32(a[k]))) return 4;
+      if (o[4 * n + k] != lo && (exact || !(nan32(o[4 * n + k]) && nan32(lo)))) return 5;
+      if (o[5 * n + k] != hi && (exact || !(nan32(o[5 * n + k]) && nan32(hi)))) return 6;
+      if (o[6 * n + k] != m && !(nan32(o[6 * n + k]) && nan32(m))) return 7;
+    }
+  }
+  return 0;
+}
+static int check64(lanes_fn f, int n, int exact) {
+  uint64_t a[8], b[8], c[8], o[7 * 8];
+  for (int r = 0; r < 256; r++) {
+    for (int k = 0; k < n; k++) { a[k] = D[(r + k) % 16]; b[k] = D[(r / 16 + k) % 16]; c[k] = D[(r * 7 + k) % 16]; }
+    f(a, b, c, o);
+    for (int k = 0; k < n; k++) {
+      double x = f64v(a[k]), y = f64v(b[k]), z = f64v(c[k]);
+      uint64_t lo = b64(smin(x, y)), hi = b64(smax(x, y)), m = b64(fma(x, y, z));
+      if (o[k] != b64(fabs(x)) && !(nan64(o[k]) && nan64(a[k]))) return 1;
+      if (o[n + k] != b64(floor(x)) && !(nan64(o[n + k]) && nan64(a[k]))) return 2;
+      if (o[2 * n + k] != b64(ceil(x)) && !(nan64(o[2 * n + k]) && nan64(a[k]))) return 3;
+      if (o[3 * n + k] != b64(trunc(x)) && !(nan64(o[3 * n + k]) && nan64(a[k]))) return 4;
+      if (o[4 * n + k] != lo && (exact || !(nan64(o[4 * n + k]) && nan64(lo)))) return 5;
+      if (o[5 * n + k] != hi && (exact || !(nan64(o[5 * n + k]) && nan64(hi)))) return 6;
+      if (o[6 * n + k] != m && !(nan64(o[6 * n + k]) && nan64(m))) return 7;
+    }
+  }
+  return 0;
+}
+int main(void) {
+  int e;
+  if ((e = check32(v_v4f32, 4, 1)) != 0) return e;
+  if ((e = check64(v_v2f64, 2, 1)) != 0) return 10 + e;
+  if ((e = check32(v_v8f32, 8, 0)) != 0) return 20 + e;
+  if ((e = check64(v_v4f64, 4, 0)) != 0) return 30 + e;
+  if ((e = check32(v_v16f32, 16, 0)) != 0) return 40 + e;
+  if ((e = check64(v_v8f64, 8, 0)) != 0) return 50 + e;
+  return 0;
+}
+)";
+    assert_eq(run_native(&lir, drv), 0);
+    assert_eq(run_sse41(&lir, drv), 0);
+    assert_eq(run_fma(&lir, drv), 0);
+    assert_eq(run_zmm(&lir, drv), 0);
 }
 
 // Vector extensions to lanes twice as wide, zero and sign (x86-64: SSE2's unpacking, SSE4.1's `pmovzx`
@@ -9288,6 +9481,63 @@ fn coff_section(b: &Vector<u8>, name: str) u64 {
         }
     }
     return 0;
+}
+
+// x86-64: code that ends in a call that does not return (a panic) has no epilogue after it, in a body that
+// only panics and after a shrink-wrapped rare panic; under Microsoft x64 a trap follows such a last call, so
+// its return address stays in the function for the unwinder. The division still runs.
+@test
+fn code_that_ends_in_a_panic_has_no_epilogue() {
+    let src = M"(lir ptr 8
+sym @p fn global
+sym @q fn global
+fn @p
+  sig (i64) -> i64
+b0(v0: i64):
+  panic "no value"
+fn @q
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.eq v1, v2
+  br v3, b2, b1
+b1:
+  v4 = udiv.i32 v0, v1
+  ret v4
+b2: cold
+  panic "attempt to divide by zero"
+)";
+    let x64 = tgt::axis_index("x86_64", true);
+    // With and without a frame pointer: after each call (E8 rel32) no `leave`, `pop rbp`, `add rsp` or `ret`.
+    for opts in [0u32, OMIT_FP] {
+        let mut obj = Vector::<u8>::new();
+        assert(object_of(src, tgt::axis_index("linux", false), x64, opts, &mut obj), "the x86-64 object");
+        let mut epi = false;
+        for x in 0..obj.len() - 8 {
+            let e = obj[x + 5];
+            epi = epi || obj[x] == 0xE8 && word_at(&obj, x as u32 + 1, 4) == 0 && (e == 0xC9 || e == 0x5D || e == 0xC3 || e == 0x48 && obj[x + 6] == 0x83 && obj[x + 7] == 0xC4);
+        }
+        assert(!epi, "no epilogue after a panic");
+    }
+    let mut win = Vector::<u8>::new();
+    assert(object_of(src, tgt::axis_index("windows", false), x64, 0, &mut win), "the Microsoft x64 object");
+    let t = coff_section(&win, ".text");
+    let (n, at) = ((t >> 32) as u32, t as u32);
+    // Each call (E8 rel32) is followed by a trap or by the shrink-wrapped stub's `sub rsp`.
+    let mut calls: u32 = 0;
+    let mut trapped: u32 = 0;
+    for x in at..at + n - 5 {
+        if win[x as usize] == 0xE8 && word_at(&win, x + 1, 4) == 0 {
+            calls += 1;
+            trapped += (win[(x + 5) as usize] == 0xCC) as u32;
+        }
+    }
+    assert(calls >= 2 && trapped >= 2, "a trap after each last call");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\n#include <stdlib.h>\nint32_t q(int32_t, int32_t);\nvoid __sc_panic(const char *m) { (void)m; exit(7); }\nint main(void) {\n  if (q(17, 5) != 3) return 1;\n  q(1, 0);\n  return 2;\n}\n";
+    assert_eq(run_native(src, drv), 7);
 }
 
 // Shrink-wrapped under Microsoft x64: the warm code, which keeps no frame, has no function table entry

@@ -13,15 +13,15 @@ import module::loader as loader;
 /// Lower module `i` to HIR in place: the Ast never leaves its slot, so shim lookups that land back on
 /// this module read the live tree. Safe to call after resolve errors: unresolved markers are skipped.
 pub(package) fn lower_module(p: &mut loader::Package, i: usize) {
-    p.modules[i].ast.hir_base = p.modules[i].ast.nodes.len() as u32;
-    p.modules[i].ast.hir_body = p.modules[i].ast.b.nodes.len() as u32;
+    p.modules[i].ast.get_mut().hir_base = p.modules[i].ast.get_mut().nodes.len() as u32;
+    p.modules[i].ast.get_mut().hir_body = p.modules[i].ast.get_mut().b.nodes.len() as u32;
     // No markers parsed: the arena already is the HIR.
-    if p.modules[i].ast.sugar_marks == 0 {
+    if p.modules[i].ast.get_ref().sugar_marks == 0 {
         return;
     }
     // The SugarItem table answers from the package index.
     p.ensure_index();
-    let aptr = (&mut p.modules[i].ast) as *mut Ast;
+    let aptr = p.modules[i].ast.get_mut() as *mut Ast;
     desugar_ast(unsafe &mut *aptr, p);
 }
 

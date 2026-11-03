@@ -8348,14 +8348,14 @@ import stdlib;
 import string as cstring;
 import unistd;
 const fn clen(s: str) usize { return unsafe cstring::strlen(s.ptr() as *const char); }
-const fn tail(p: *mut char) usize { return unsafe cstring::strlen(p); }
+const fn tail(p: *const char) usize { return unsafe cstring::strlen(p); }
 const L: usize = clen("hello");
 static_assert(L == 5, "strlen folds over a literal");
 static_assert(tail(unsafe cstring::strchr("a/b/c".ptr() as *const char, 47)) == 4, "strchr");
 static_assert(tail(unsafe cstring::strrchr("a/b/c".ptr() as *const char, 47)) == 2, "strrchr");
 static_assert(tail(unsafe cstring::strstr("abcdef".ptr() as *const char, "cd".ptr() as *const char)) == 4, "strstr");
 static_assert(unsafe cstring::strstr("abc".ptr() as *const char, "x".ptr() as *const char) == null, "strstr miss");
-static_assert(tail(unsafe cstring::memchr("hello".ptr() as *const void, 108, 5) as *mut char) == 3, "memchr");
+static_assert(tail(unsafe cstring::memchr("hello".ptr() as *const void, 108, 5) as *const char) == 3, "memchr");
 static_assert(unsafe stdlib::abs(-4) == 4 && unsafe stdlib::llabs(-9) == 9, "abs and llabs");
 fn main() i32 {
     if unistd::getpid() <= 0 {

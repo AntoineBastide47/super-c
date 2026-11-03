@@ -381,7 +381,7 @@ extend Resolver {
         if self.package == null {
             return;
         }
-        let pm = self.package as *mut loader::Package;
+        let pm = self.package;
         let mut glob_seen = Vector::<bool>::new(); // by module id: in glob_mids
         let items = self.ast.at_const(self.ast.root).as_data.program.items;
         for i in 0..items.len {
@@ -518,7 +518,7 @@ extend Resolver {
         if self.glob_mids.len() == 0 {
             return miss;
         }
-        let pm = self.package as *mut loader::Package;
+        let pm = self.package;
         unsafe (*pm).ensure_index();
         let pkg = unsafe &*self.package;
         let sym = pkg.idx().syms.find(self.source.slice(name.start as usize, name.end as usize));
@@ -563,7 +563,7 @@ extend Resolver {
 
     // `mid::name` as this module sees it (`Package::qual_lookup`).
     fn qual_hit(self: &Self, mid: ModuleId, name: tok::Span, want_type: bool, amb: &mut bool) loader::LookupHit {
-        unsafe (*(self.package as *mut loader::Package)).ensure_index();
+        unsafe (*self.package).ensure_index();
         let pkg = unsafe &*self.package;
         let sym = pkg.idx().syms.find(self.source.slice(name.start as usize, name.end as usize));
         if sym == loader::SYM_NONE {
@@ -2115,9 +2115,10 @@ extend Resolver {
             self.resolve_item(cid);
             if t0 != 0 {
                 // Item-schedule measurement: the resolve cost of this item.
-                let pm = self.package as *mut loader::Package;
-                unsafe (*pm).icost_rs.push(self.ast.module as u64 << 32 | cid as u64);
-                unsafe (*pm).icost_rs.push(std::parallel::platform::now_ns() - t0);
+                let pm = self.package;
+                let ic = unsafe &mut *(*pm).icost_rs.get();
+                ic.push(self.ast.module as u64 << 32 | cid as u64);
+                ic.push(std::parallel::platform::now_ns() - t0);
             }
         }
         self.scope_exit();

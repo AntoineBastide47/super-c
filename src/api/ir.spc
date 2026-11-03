@@ -47,7 +47,7 @@ pub fn hir_nodes(s: &ses::Session, file: str, start: u32, end: u32) Result<Vecto
         },
     };
     let p = s.package();
-    let a = &p.modules[m].ast;
+    let a = p.modules[m].ast.get_ref();
     let src = p.modules[m].source.as_str();
     let mut ids = Vector::<NodeId>::new();
     let n = a.nnodes();
@@ -163,7 +163,7 @@ pub fn core_function(s: &mut ses::Session, file: str, off: u32) Result<CoreFunct
         },
     };
     let d = feat::def_at(s.package(), m, off);
-    if d.node == NODE_NONE || s.package().modules[d.module as usize].ast.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+    if d.node == NODE_NONE || s.package().modules[d.module as usize].ast.get_ref().at_const(d.node).kind != NodeKind::NODE_FUNCTION {
         return Err(ApiError::at(Code::InvalidArgument, "no function is named here", file, off, off));
     }
     let mut body = ir::CoreBody::new(d, d.module);
@@ -189,7 +189,7 @@ fn user_move(b: &ir::CoreBody, op: u32, start: u32, end: u32, out: &mut Vector<P
 // The owned view of body `b`.
 fn materialize(s: &ses::Session, b: &ir::CoreBody) CoreFunction {
     let p = s.package();
-    let a = &p.modules[b.module as usize].ast;
+    let a = p.modules[b.module as usize].ast.get_ref();
     let src = p.modules[b.module as usize].source.as_str();
     let mut f = CoreFunction { text: irp::print_body(b), generic: b.is_generic };
     for i in 0..b.locals.len() {

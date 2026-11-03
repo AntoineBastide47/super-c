@@ -22,7 +22,7 @@ fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let mut r = res::Resolver::new(
-        unsafe &mut *((&mut m.ast) as *mut Ast),
+        unsafe &mut *(m.ast.get_mut() as *mut Ast),
         unsafe str::from_raw(src as *const u8, len),
         pkg,
     );
@@ -40,7 +40,7 @@ fn t_check(p: &mut loader::Package, i: usize) bool {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
     t.check();
     let had = t.has_errors();
     if had {
@@ -56,7 +56,7 @@ fn t_prod(p: &mut loader::Package, i: usize, last: bool, old_errs: &mut Vector<u
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
     t.borrowck_solo();
     if last {
         for e in 0..t.errors.errors.len() {

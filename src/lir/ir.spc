@@ -1550,10 +1550,13 @@ pub(package) struct Package {
     /// per pair of lane sizes (`lir::loops::sumw_bit`): the loop vectorizer sums a narrower value's lanes
     /// into accumulators of such lanes.
     pub(package) vec_sumw: u16,
-    /// Whether the native backend computes the absolute value, the roundings to an integer and the fused
-    /// multiply-add of float vectors in registers (`target::table::Isa`): the loop vectorizer then widens
-    /// the calls of C's `fabs`, `floor`, `ceil`, `trunc` and `fma` (`lir::loops::lane_fn`).
+    /// Whether the native backend computes the absolute value, C's `fmin` and `fmax`, and the fused
+    /// multiply-add (with `fma`) of float vectors in registers (`target::table::Isa`): the loop vectorizer
+    /// then widens the calls of C's `fabs`, `fmin`, `fmax` and `fma` (`lir::loops::lane_fn`).
     pub(package) vfloat: bool,
+    /// Whether it also rounds float vectors to an integer in registers (`target::table::Isa`; x86-64 with
+    /// SSE4.1): the loop vectorizer then widens the calls of C's `floor`, `ceil` and `trunc`.
+    pub(package) vround: bool,
     /// Whether the native backend computes `O_MULHU` of 64-bit integers in one instruction
     /// (`target::table::Isa`): the optimizer then divides by a 64-bit constant with a product.
     pub(package) mul_high: bool,
@@ -1713,6 +1716,7 @@ extend Package {
             vec_absd: 7,
             vec_sumw: 0x8CE,
             vfloat: true,
+            vround: true,
             mul_high: true,
             bswap: true,
             bitrev: true,

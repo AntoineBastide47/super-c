@@ -1072,7 +1072,7 @@ extend Mangler {
             return false;
         }
         let pa = self.p().module_ast_const(pm);
-        let da = self.p().module_ast_const(dm) as *mut Ast;
+        let da = self.p().module_ast_ptr(dm);
         let y = *unsafe (*pa).type_at(t);
         if unsafe (*pa).type_concrete(t) {
             *out = unsafe (*da).reintern(unsafe &*pa, t);
@@ -4359,7 +4359,7 @@ extend Mangler {
             return false;
         }
         // A vector's or mask's anchor names its methods only: its storage is not the struct.
-        if self.agg_on && self.p().tt.deref().vec_of(it.module, it.decl, &it.args[0]).kind == TypeKind::TYPE_ERROR {
+        if self.agg_on && self.p().tt.deref().get_ref().vec_of(it.module, it.decl, &it.args[0]).kind == TypeKind::TYPE_ERROR {
             let h9 = fnv(out.as_str().slice(base9, out.len()));
             let new9 = switch self.agg_seen.get(&h9) {
                 Some(_v) => false,

@@ -2056,7 +2056,7 @@ extend Lowerer {
             return rt;
         }
         let oa = unsafe &*(&*self.pkg).module_ast_const(rm);
-        let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+        let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
         return sa.reintern(oa, rt);
     }
 
@@ -2101,7 +2101,7 @@ extend Lowerer {
             if e == y.as_data.arr.elem && lt == y.as_data.arr.len {
                 return t;
             }
-            let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+            let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
             return sa.intern_array(y.kind, e, lt);
         }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
@@ -2111,7 +2111,7 @@ extend Lowerer {
             }
             let mut nt = y;
             nt.as_data.elem = e;
-            let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+            let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
             return sa.intern_type(nt);
         }
         if y.kind == TypeKind::TYPE_INSTANCE || y.fn_sig() {
@@ -2125,7 +2125,7 @@ extend Lowerer {
                 }
             }
             if changed {
-                let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+                let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
                 if y.fn_sig() {
                     return sa.intern_sig_rec(&na, y.qualifier);
                 }
@@ -4353,7 +4353,7 @@ extend Lowerer {
         } else {
             TypeQualifier::TYPE_QUAL_CONST as u8
         };
-        let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+        let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
         let pt = sa.intern_type(Ty { kind: TYPE_POINTER, qualifier: q, as_data: TyAs { elem: y.as_data.elem } });
         let r = self.copy_op(self.rv_temp(ir::rv(ir::RV_CAST, op, self.cast_kind(ot, pt), 0, pt), sp));
         self.tp(ir::TP_CAST_ERASE, 0, e);
@@ -4744,7 +4744,7 @@ extend Lowerer {
                     pick(mutable == 1, TypeQualifier::TYPE_QUAL_MUT as u8, TypeQualifier::TYPE_QUAL_NONE as u8)
                 };
                 let pty = self.body.places.at(pl as usize).ty;
-                let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+                let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
                 bty = sa.intern_type(Ty { kind: TYPE_REFERENCE, qualifier: q, as_data: TyAs { elem: pty } });
             }
             return self.rv_out(dest, ir::rv(rk, pl, mutable, 0, bty), sp);
@@ -5191,7 +5191,7 @@ extend Lowerer {
                 } else {
                     ro.data
                 };
-                let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+                let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
                 let rty = sa.intern_type(
                     Ty { kind: TYPE_REFERENCE, as_data: TyAs { elem: self.body.places.at(pl as usize).ty } },
                 );
@@ -5751,7 +5751,7 @@ extend Lowerer {
         ) != NODE_NONE {
             let od9 = self.f.res(self.f.node(pm9).as_data.member.object);
             if od9.node != NODE_NONE && (self.decl_kind(od9) == NodeKind::NODE_GENERIC_PARAM || self.decl_kind(od9) == NodeKind::NODE_INTERFACE) {
-                let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+                let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
                 impl9 = sa.intern_type(Ty { kind: TYPE_GENERIC, module: od9.module, as_data: TyAs { decl: od9.node } });
             } else {
                 impl9 = self.nty(self.f.node(pm9).as_data.member.object);
@@ -6786,7 +6786,7 @@ extend Lowerer {
                 return ir::IR_NONE;
             }
             let elem = self.f.instance(self.f.ty(ty).as_data.inst).args[0];
-            let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+            let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
             let aty = sa.intern_type(
                 Ty { kind: TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: n as u32 } } },
             );
@@ -6863,7 +6863,7 @@ extend Lowerer {
             aty = self.vec_array_ty(ty);
         } else if self.slice_view(ty) {
             let elem = self.f.instance(self.f.ty(ty).as_data.inst).args[0];
-            let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+            let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
             aty = sa.intern_type(
                 Ty { kind: TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: argv.len() as u32 } } },
             );
@@ -7671,7 +7671,7 @@ extend Lowerer {
     // pool): a constant for a constant, else the form `(r - k) / c` (`xarg_solve_lin`), bare when it
     // is one parameter of type `bt`. TYPE_NONE when it does not solve.
     fn ext_form_arg(self: &mut Self, x: &XArg, r: TypeId, bt: BuiltinType) TypeId {
-        let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+        let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
         let y = *self.f.ty(r);
         if y.kind == TypeKind::TYPE_CONST {
             let mut q = i128::zero();
@@ -8240,7 +8240,7 @@ extend Lowerer {
     /// `[T; N]` for vector type `Simd<T, N>` `t`, in this pool.
     fn vec_array_ty(self: &mut Self, t: TypeId) TypeId {
         let y = *self.f.ty(t);
-        let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+        let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
         return sa.intern_array(TypeKind::TYPE_ARRAY, y.as_data.arr.elem, y.as_data.arr.len);
     }
 
@@ -8417,7 +8417,7 @@ extend Lowerer {
                         q = TypeQualifier::TYPE_QUAL_MUT as u8;
                     }
                 }
-                let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+                let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
                 let rty = sa.intern_type(Ty { kind: TYPE_REFERENCE, qualifier: q, as_data: TyAs { elem: ty } });
                 let res = self.lower_op_call_from(
                     id,

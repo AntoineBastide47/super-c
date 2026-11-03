@@ -1024,7 +1024,7 @@ fn write_exports(p: &loader::Package, gen: str) bool {
         if !md.has_ast || md.prelude || md.path.as_str().starts_with("std::") {
             continue;
         }
-        let a = &p.modules[m].ast;
+        let a = p.modules[m].ast.get_ref();
         let src = p.modules[m].source.as_str();
         for i in 0..a.attrs.len() {
             let at = a.attrs.at(i);

@@ -12,11 +12,17 @@ import lir::loops as lu;
 
 // Package text `text` read, then optimized with loop budgets `bu`: each body verifies after.
 fn optimized(text: str, bu: lu::Budgets) (Package, Package) {
+    return optimized_fma(text, bu, false);
+}
+
+// `optimized` for a processor with a fused multiply-add when `fma` (`Package.fma`).
+fn optimized_fma(text: str, bu: lu::Budgets, fma: bool) (Package, Package) {
     let mut err = String::new();
     let q = lparse::parse(text, &mut err);
     assert(q.is_some(), err.as_str());
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
+    after.fma = fma;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: bu });
     let mut v = verify::Verifier::new();
@@ -5269,7 +5275,8 @@ data @w size 64 align 3 bytes 21c0a9dc5920318c312059dca9c021ccc100895c79e0918cd1
 }
 
 // A loop's calls of C's float functions (`floorf`, `fmaf`) widen to vector operations where the target computes
-// them in registers (`lane_fn`, `Package.vfloat`); a call of another function stays.
+// them in registers (`lane_fn`, `Package.vfloat`; `fmaf` on a processor with a fused multiply-add,
+// `Package.fma`); a call of another function stays.
 @test
 fn calls_of_float_functions_widen() {
     let src = M"(lir ptr 8
@@ -5337,13 +5344,16 @@ b2:
 b3:
   ret
 )";
-    let (_, a) = optimized(src, VECTOR);
+    let (_, a) = optimized_fma(src, VECTOR, true);
     let f = text_of(&a, "fl");
     assert(f.contains("vop.floor.v4f32"), f.as_str());
     let m = text_of(&a, "fm");
     assert(m.contains("vop.fma.v4f32"), m.as_str());
     let c = text_of(&a, "co");
     assert(!c.contains("v4f32") && c.contains("call.f32 @cosf"), c.as_str());
+    let (_, n) = optimized(src, VECTOR);
+    let s = text_of(&n, "fm");
+    assert(!s.contains("vop.fma") && s.contains("call.f32 @fmaf"), s.as_str());
 }
 
 // A sum a branch of the loop adds to (`if s[i] > 0 { t += s[i] }`), if-converted, is the step

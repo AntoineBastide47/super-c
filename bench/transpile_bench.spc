@@ -507,8 +507,8 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
                     src_lines += 1;
                 }
             }
-            nodes += md.ast.nodes.len();
-            decls += md.ast.at_const(md.ast.root).as_data.program.items.len as usize;
+            nodes += md.ast.get_ref().nodes.len();
+            decls += md.ast.get_ref().at_const(md.ast.get_ref().root).as_data.program.items.len as usize;
             srcs.push(String::from_str(s));
         }
     }

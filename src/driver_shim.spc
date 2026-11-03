@@ -377,7 +377,7 @@ pub(package) unsafe fn sc_jobserver_init(capacity: i32) i32 {
         return 0;
     }
     // No FD_CLOEXEC: every process the tree starts inherits the descriptor.
-    let fd = unsafe mkstemp(path.cstr() as *mut char);
+    let fd = unsafe mkstemp(path.cstr_mut());
     if fd < 0 {
         return 0;
     }

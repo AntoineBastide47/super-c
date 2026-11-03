@@ -446,7 +446,7 @@ extend Svc {
     // `env`: the written member types compute each of them.
     fn steps_hold(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv) bool {
         let mut ss = replace(&mut self.steps, Vector::<ConstStep>::new());
-        unsafe (*(self.p().module_ast_const(dm) as *mut Ast)).steps_of(dn, &mut ss);
+        unsafe (*self.p().module_ast_ptr(dm)).steps_of(dn, &mut ss);
         let mut ok = true;
         for i in 0..ss.len() {
             let s = ss.at(i);

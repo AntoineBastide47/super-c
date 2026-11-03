@@ -27,7 +27,7 @@ pub(package) fn read_append(path: str, out: &mut Vector<u8>) bool {
     let mut at: usize = 0;
     // Bounded by the file's size: each step reads at least one byte or stops.
     while at < n {
-        let r = f.read(unsafe SliceMut::<u8> { ptr: out.as_ptr() as *mut u8 + at0 + at, len: n - at });
+        let r = f.read(unsafe SliceMut::<u8> { ptr: out.as_mut_ptr() + at0 + at, len: n - at });
         if r.is_err() || r.unwrap() == 0 {
             out.truncate(at0);
             return false;

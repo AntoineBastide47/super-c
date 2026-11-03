@@ -24,7 +24,7 @@ fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let mut r = res::Resolver::new(
-        unsafe &mut *((&mut m.ast) as *mut Ast),
+        unsafe &mut *(m.ast.get_mut() as *mut Ast),
         unsafe str::from_raw(src as *const u8, len),
         pkg,
     );
@@ -41,7 +41,7 @@ fn t_typecheck(p: &mut loader::Package, i: usize) bool {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
     t.check();
     let had = t.has_errors();
     if had {
@@ -315,7 +315,7 @@ fn borrow_pass_keeps_elaborated_bodies() {
     let m = &mut p.modules[u as usize];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
     let mut ow = bfx::Owner::new(pkg);
     let mut ctx = bfi::BorrowCtx::new();
     ctx.keep = &mut keep;

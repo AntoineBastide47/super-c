@@ -391,6 +391,9 @@ extend Printer {
             if (t.aux & VOP_UNCHECKED) != 0 {
                 out.push_str(".unchecked");
             }
+            if (t.aux & VOP_NUM) != 0 {
+                out.push_str(".num");
+            }
         }
         if t.ty != T_NONE && (f != F_CMP || t.op == O_VCMP) && t.op != O_ACAS && t.op != O_SLOTADDR && t.op != O_SYMADDR && t.op != O_RETADDR && t.op != O_PTRADD {
             out.push_byte(b'.');

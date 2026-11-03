@@ -74,7 +74,7 @@ fn module_index(s: &ses::Session, file: str) Result<usize, ApiError> {
 }
 
 fn ast_of(p: &loader::Package, m: u32) &Ast {
-    return &p.modules[m as usize].ast;
+    return p.modules[m as usize].ast.get_ref();
 }
 
 // The text of name node `nm` of module `m`.

@@ -21,7 +21,7 @@ pub(package) struct Loc {
 }
 
 const fn mod_ast(p: &loader::Package, m: usize) *const Ast {
-    return &p.modules.at(m).ast;
+    return p.modules.at(m).ast.get_ref();
 }
 
 /// The innermost node whose span contains `off` (ties prefer the later, more specific node). Linear over

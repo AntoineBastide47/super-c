@@ -260,6 +260,9 @@ pub(package) struct LoopOpt {
     pub(package) vaccs: u32,
     /// Per symbol of the body, the vector operation a call of it computes per lane (`lane_fn`), 0 for none.
     pub(package) vfn: Vector<u8>,
+    /// The target computes fused multiply-adds of float vectors in registers (`Package.vfloat` and
+    /// `Package.fma`): an `O_FMA` is a lane operation (SIMD_FMA).
+    pub(package) vfma: bool,
     /// The lane sizes whose saturating sums the target computes in registers (`Package.vec_sat`), a bit per
     /// size in bytes (1, 2, 4).
     pub(package) vsat: u8,
@@ -478,6 +481,7 @@ extend LoopOpt {
             vmulh: 0,
             vaccs: 0,
             vfn: Vector::<u8>::new(),
+            vfma: false,
             vsat: 0,
             vabsd: 0,
             vsumw: 0,
@@ -2796,6 +2800,23 @@ extend LoopOpt {
                 0
             };
         }
+        // A fused multiply-add: its three operands lanes or invariants.
+        if op == O_FMA && self.vfma && !self.vone && self.lane_size(t.ty, ptr) {
+            let ops = [t.a, t.b, t.c];
+            let mut lane = false;
+            for q in 0..3usize {
+                let k = self.kind(b, u, ops[q]);
+                if k != VK_LANE && k != VK_INV && self.defined_in(ops[q]) {
+                    return 0;
+                }
+                lane = lane || k == VK_LANE;
+            }
+            return if lane {
+                VK_LANE
+            } else {
+                0
+            };
+        }
         let float_op = op >= O_FADD && op <= O_FNEG || op == O_FSQRT;
         if !(is_int(t.ty) && t.ty != T_I128 && int_op || is_float(t.ty) && float_op) || !self.lane_size(t.ty, ptr) {
             return 0;
@@ -3560,6 +3581,10 @@ extend LoopOpt {
                 } else if t.op == O_SELECT {
                     self.vsplat(b, u, t.b, l0);
                     self.vsplat(b, u, t.c, l0);
+                } else if t.op == O_FMA {
+                    self.vsplat(b, u, t.a, l0);
+                    self.vsplat(b, u, t.b, l0);
+                    self.vsplat(b, u, t.c, l0);
                 } else if t.op == O_CALL {
                     for q in 0..t.aux as u32 {
                         self.vsplat(b, u, b.pool[(t.c + q) as usize], l0);
@@ -3826,6 +3851,17 @@ extend LoopOpt {
                         let at3 = b.pool_list(sv[0..3]);
                         let code = (core::OP_SIMD + core::SIMD_STORE_MASKED_PTR as u32) as u16;
                         self.vmap[at] = self.vi(b, Inst { op: O_VOP, ty: T_NONE, aux: code, a: at3, b: 3, c: VNONE }, l);
+                        continue;
+                    }
+                    if t.op == O_FMA && !self.vone {
+                        let ops = [self.vval(b, u, c, t.a), self.vval(b, u, c, t.b), self.vval(b, u, c, t.c)];
+                        let at3 = b.pool_list(ops[0..3]);
+                        let code = (core::OP_SIMD + core::SIMD_FMA as u32) as u16;
+                        self.vmap[at] = self.vi(
+                            b,
+                            Inst { op: O_VOP, ty: nt.ty, aux: code, a: at3, b: 3, c: VNONE },
+                            b.locs[i as usize],
+                        );
                         continue;
                     }
                     if t.op == O_CALL {

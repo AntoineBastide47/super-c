@@ -222,6 +222,12 @@ extend<T, A: Allocator> Vector<T, A> {
         return self.ptr;
     }
 
+    /// Raw mutable pointer to the buffer, from the exclusive borrow (`as_ptr`'s never writes); invalidated
+    /// as `as_ptr`'s.
+    pub const fn as_mut_ptr(self: &mut Vector<T, A>) *mut T {
+        return self.ptr;
+    }
+
     /// Insert `value` at `index`, shifting later elements right. Panics when `index > len`.
     pub const fn insert(self: &mut Vector<T, A>, index: usize, value: T) {
         if index > self.len {

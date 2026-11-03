@@ -349,7 +349,7 @@ fn dup_conf_key(a: &Ast, id: NodeId) ConfKey {
 pub(package) fn dup_conformance_index(p: &loader::Package) Map<ConfKey, u64> {
     let mut idx = Map::<ConfKey, u64>::new();
     for j in 0..p.modules.len() {
-        let a = &p.modules[j].ast;
+        let a = p.modules[j].ast.get_ref();
         let items = a.at_const(a.root).as_data.program.items;
         for k in 0..items.len {
             let id = unsafe a.list(items)[k as usize];
@@ -1653,7 +1653,7 @@ extend<'a> TypeChecker<'a> {
         };
         t.icx.sv.ast = ast;
         for i in 0..unsafe (&*package).modules.len() {
-            t.has_reg = t.has_reg || unsafe (&*package).modules[i].ast.has_c_value;
+            t.has_reg = t.has_reg || unsafe (&*package).modules[i].ast.get_ref().has_c_value;
         }
         if unsafe (&*ast).last_use.len() != 0 {
             t.last_use_view = unsafe (&*ast).last_use.as_ptr();
@@ -1683,7 +1683,7 @@ extend<'a> TypeChecker<'a> {
     pub(package) const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
         if m != self.cur_module() {
             // Asts live in place in the module table, so the slot IS the live tree.
-            return unsafe &mut (*self.package).modules[m as usize].ast;
+            return unsafe (*self.package).modules[m as usize].ast.get();
         }
         return self.ast;
     }
@@ -16991,6 +16991,19 @@ extend<'a> TypeChecker<'a> {
         let hit = self.ph_unsafecell;
         return hit.node != NODE_NONE && unsafe (*self.cur_ast()).module == hit.mid && self.current_self == hit.node;
     }
+    // True while checking `std::ptr`, whose `cast_mut` is the explicit `*const` to `*mut` conversion.
+    const fn in_ptr_module(self: &Self) bool {
+        if self.package == null {
+            return false;
+        }
+        let m = self.cur_module() as usize;
+        let p = unsafe &*self.package;
+        if m >= p.modules.len() {
+            return false;
+        }
+        let pth = p.modules[m].path.as_str();
+        return pth == "std::ptr" || pth == "__std::ptr";
+    }
     const fn is_sync_iface(self: &Self, tr: DefId) bool {
         return is_ph(tr, self.ph_sync);
     }
@@ -30753,6 +30766,24 @@ extend TypeChecker {
                         sp,
                         format(
                             "cannot cast an immutable reference to a '*mut' pointer; use '&mut', or 'UnsafeCell' for interior mutability",
+                        ),
+                    );
+                }
+                // A `*const` pointer, which an immutable reference gives (`as_ptr`), never becomes a `*mut` one
+                // either: the two casts would launder the shared borrow into mutation the same way. A `*mut`
+                // pointer comes from `&mut` (`as_mut_ptr`), an `UnsafeCell`, a binding that declares it, or
+                // `std::ptr::cast_mut`, the explicit conversion (the one place the cast is allowed).
+                if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_POINTER && self.type_at(
+                    src,
+                ).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 && self.type_at(dst).kind == TypeKind::TYPE_POINTER && self.type_at(
+                    dst,
+                ).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !self.in_unsafe_cell() && !self.in_ptr_module() {
+                    let sp = unsafe (*a).at_const(id).span;
+                    self.errors.emit_span(
+                        dc::CANNOT_CAST_CONST_POINTER_MUT_POINTER,
+                        sp,
+                        format(
+                            "cannot cast a '*const' pointer to a '*mut' pointer; take it from '&mut' ('as_mut_ptr'), use 'UnsafeCell' for interior mutability, or 'std::ptr::cast_mut' for a C interface",
                         ),
                     );
                 }

@@ -17,12 +17,12 @@ extern "C" {
     pub fn memcmp(a: *const void, b: *const void, n: usize) i32;
     /// First occurrence of the low byte of `value` in `n` bytes, or null.
     @unsafe(const)
-    pub fn memchr(s: *const void, value: i32, n: usize) *mut void {
+    pub fn memchr(s: *const void, value: i32, n: usize) *const void {
         let p = s as *const u8;
         let b = value as u8;
         for i in 0..n {
             if unsafe p[i] == b {
-                return (unsafe (p + i)) as *mut void;
+                return (unsafe (p + i)) as *const void;
             }
         }
         return null;
@@ -43,13 +43,13 @@ extern "C" {
     pub fn strncmp(a: *const char, b: *const char, n: usize) i32;
     /// First occurrence of `c` (or the terminator when `c` is 0), or null.
     @unsafe(const)
-    pub fn strchr(s: *const char, c: i32) *mut char {
+    pub fn strchr(s: *const char, c: i32) *const char {
         let want = c as u8;
         let mut i: usize = 0;
         loop {
             let ch = (unsafe s[i]) as u8;
             if ch == want {
-                return (unsafe (s + i)) as *mut char;
+                return unsafe (s + i);
             }
             if ch == 0 {
                 return null;
@@ -59,7 +59,7 @@ extern "C" {
     }
     /// Last occurrence of `c`, or null.
     @unsafe(const)
-    pub fn strrchr(s: *const char, c: i32) *mut char {
+    pub fn strrchr(s: *const char, c: i32) *const char {
         let want = c as u8;
         let mut last: *const char = null;
         let mut i: usize = 0;
@@ -69,14 +69,14 @@ extern "C" {
                 last = unsafe (s + i);
             }
             if ch == 0 {
-                return last as *mut char;
+                return last;
             }
             i += 1;
         }
     }
     /// First occurrence of `needle`, or null.
     @unsafe(const)
-    pub fn strstr(haystack: *const char, needle: *const char) *mut char {
+    pub fn strstr(haystack: *const char, needle: *const char) *const char {
         let mut i: usize = 0;
         loop {
             let mut j: usize = 0;
@@ -84,7 +84,7 @@ extern "C" {
                 j += 1;
             }
             if (unsafe needle[j]) as u8 == 0 {
-                return (unsafe (haystack + i)) as *mut char;
+                return unsafe (haystack + i);
             }
             if (unsafe haystack[i]) as u8 == 0 {
                 return null;

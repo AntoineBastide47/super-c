@@ -535,9 +535,10 @@ pub(package) const WILDCARD_TYPE_NOT_ALLOWED: u16 = 528;
 pub(package) const REDUNDANT_ENUM_QUALIFIER: u16 = 529;
 pub(package) const VIEW_METHOD_ARGUMENT: u16 = 530;
 pub(package) const BLOCK_ENDS_IN_SEMICOLON: u16 = 531;
+pub(package) const CANNOT_CAST_CONST_POINTER_MUT_POINTER: u16 = 532;
 
 /// The number of codes, `NONE` included.
-pub(package) const COUNT: u16 = 532;
+pub(package) const COUNT: u16 = 533;
 
 /// The stable name of `code` (`mismatched_types_expected_found`), empty for `NONE` or an unknown code.
 pub(package) const fn name(code: u16) str<'static> {
@@ -1072,6 +1073,7 @@ pub(package) const fn name(code: u16) str<'static> {
         529 => "redundant_enum_qualifier",
         530 => "view_method_argument",
         531 => "block_ends_in_semicolon",
+        532 => "cannot_cast_const_pointer_mut_pointer",
         _ => "",
     };
 }

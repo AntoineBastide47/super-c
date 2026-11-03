@@ -198,7 +198,7 @@ fn save_into(q: &loader::Package, e: &iri::Interp, w: &mut Writer) {
     q.method_used.save(w);
     q.always_methods.save(w);
     q.c_shaped.save(w);
-    q.tt.deref().save(w);
+    q.tt.deref().get_ref().save(w);
     q.pub_map.save(w);
     q.publications.save(w);
     q.tt_class.save(w);
@@ -230,7 +230,7 @@ pub(package) fn load(p: &mut loader::Package, e: &mut iri::Interp, img: str) boo
     p.method_used.load(&mut r);
     p.always_methods.load(&mut r);
     p.c_shaped.load(&mut r);
-    p.tt.deref_mut().load(&mut r);
+    p.tt.deref_mut().get_mut().load(&mut r);
     p.pub_map.load(&mut r);
     p.publications.load(&mut r);
     p.tt_class.load(&mut r);

@@ -1141,7 +1141,7 @@ fn stk_boot() {
 // One recorded block.
 struct LkEnt {
     pub ptr: *mut void,
-    pub site: *const void,
+    pub site: *mut void,
     pub size: usize,
     pub epoch: u32, // `LK_EPOCH` when the block was recorded
     pub aligned: u32, // 1: from sc_lk_aligned_alloc, released by `lk_release_block`
@@ -1390,7 +1390,7 @@ const fn lk_erase(s: *mut LkShard, entry: *mut LkEnt) {
 }
 
 // Keep freed block `entry` (freed at `site`) in the history, releasing the oldest one when it is full.
-fn lk_remember_free(s: *mut LkShard, entry: LkEnt, site: *const void) {
+fn lk_remember_free(s: *mut LkShard, entry: LkEnt, site: *mut void) {
     unsafe {
         if (*s).freed_count == LK_FREED_HISTORY {
             lk_release_block(&(*s).freed[(*s).freed_next]);
@@ -1434,7 +1434,7 @@ fn lk_bt_resume() {
     unsafe LK_BT_OFF -= 1;
 }
 
-fn lk_capture(p: *mut void, n: usize, site: *const void) LkEnt {
+fn lk_capture(p: *mut void, n: usize, site: *mut void) LkEnt {
     return LkEnt {
         ptr: p,
         site: if unsafe LK_BT_OFF == 0 {
@@ -1457,12 +1457,11 @@ extern "C" "execinfo.h" {
 
 // The allocation site `site` on stderr: its symbol where the platform names one, else its address.
 @platform(macos | ios | linux)
-fn lk_site_print(site: *const void) {
+fn lk_site_print(site: *mut void) {
     if site == null {
         return;
     }
-    let at = site as *mut void;
-    let syms = unsafe backtrace_symbols(&at, 1);
+    let syms = unsafe backtrace_symbols(&site, 1);
     if syms != null {
         put("    ");
         put(unsafe *syms);
@@ -1471,12 +1470,12 @@ fn lk_site_print(site: *const void) {
         return;
     }
     put("    ");
-    put_hex(at as u64);
+    put_hex(site as u64);
     put("\n");
 }
 // No runtime DWARF symbolizer: an ASLR-stable offset from the image base, which `addr2line` resolves.
 @platform(windows)
-fn lk_site_print(site: *const void) {
+fn lk_site_print(site: *mut void) {
     if site == null {
         return;
     }
@@ -1487,7 +1486,7 @@ fn lk_site_print(site: *const void) {
 }
 // bionic declares <execinfo.h> only from API 33, and wasm has no frame walk: the address alone.
 @platform(android | wasm)
-fn lk_site_print(site: *const void) {
+fn lk_site_print(site: *mut void) {
     if site == null {
         return;
     }
@@ -1504,7 +1503,7 @@ fn lk_fatal_stop() {
 }
 
 // Report the double free of `p`; `snap` holds the entry recorded when the block was first freed.
-fn lk_double(p: *const void, snap: LkEnt, site: *const void) {
+fn lk_double(p: *const void, snap: LkEnt, site: *mut void) {
     put("== super-c double free: ");
     put_hex(p as u64);
     put(" (");
@@ -1772,7 +1771,7 @@ fn lk_insert(s: *mut LkShard, e: LkEnt) bool {
 }
 
 // Record new block `p` of `n` bytes allocated at `site`.
-fn lk_track(p: *mut void, n: usize, site: *const void, aligned: u32) {
+fn lk_track(p: *mut void, n: usize, site: *mut void, aligned: u32) {
     if p == null || !lk_on() {
         return;
     }
@@ -1789,7 +1788,7 @@ fn lk_track(p: *mut void, n: usize, site: *const void, aligned: u32) {
 // The code address an allocation entry returns to: its caller's call site. Each entry is `@noinline`, so
 // the address is in its caller in every profile.
 @intrinsic("frame.return_address")
-const fn return_address() *const void;
+const fn return_address() *mut void;
 
 @export("sc_lk_malloc")
 @noinline
@@ -1936,7 +1935,7 @@ unsafe fn lk_realloc(p: *mut void, n: usize) *mut void {
 
 // Unrecord block `p` freed at `site`, reporting a double free. True when the caller must not release the
 // block: the freed history holds it, or it was freed before.
-fn lk_untrack(p: *mut void, site: *const void) bool {
+fn lk_untrack(p: *mut void, site: *mut void) bool {
     if p == null || !lk_on() {
         return false;
     }

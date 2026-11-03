@@ -101,7 +101,7 @@ const fn neg(x: Pair) Pair {
 
 // The 128-bit product of `a` and `b`, from 32-bit pieces. No product or sum here overflows, and none is
 // checked: wasm's check of a 64-bit product calls `__multi3`, this routine's caller.
-@platform(linux | android | windows | wasm)
+@platform(wasm)
 const fn mul64(a: u64, b: u64) Pair {
     let a0 = a & 0xFFFFFFFF;
     let a1 = a >> 32;
@@ -190,7 +190,7 @@ fn sdivmod(a: Pair, b: Pair, rem: bool) Pair {
     );
 }
 
-@platform(linux | android | windows | wasm)
+@platform(wasm)
 fn mul(a: Pair, b: Pair) Pair {
     let p = mul64(a.lo, b.lo);
     return Pair { lo: p.lo, hi: p.hi.wrapping_add(a.lo.wrapping_mul(b.hi)).wrapping_add(a.hi.wrapping_mul(b.lo)) };

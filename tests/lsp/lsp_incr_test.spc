@@ -366,7 +366,7 @@ fn diags_equal(a: &Vector<an::DiagRec>, b: &Vector<an::DiagRec>) bool {
 // (target module << 32 | target decl's span start): node-id independent, so it compares across a
 // spliced arena and a fresh one.
 fn probe_res(p: &loader::Package, mid: usize, needle: str) u64 {
-    let a = &p.modules.at(mid).ast;
+    let a = p.modules.at(mid).ast.get_ref();
     let src = p.modules.at(mid).source.as_str();
     for i0 in 1..a.nnodes() {
         let i = a.nth_id(i0);
@@ -947,7 +947,10 @@ fn release_reference_record_names_referencers() {
     let am = mod_of(&p, "/a.spc");
     let bm = mod_of(&p, "/b.spc");
     let cm = mod_of(&p, "/c.spc");
-    assert(p.modules.at(bm).ast.b.released && p.modules.at(am).ast.b.released, "closed modules release");
+    assert(
+        p.modules.at(bm).ast.get_ref().b.released && p.modules.at(am).ast.get_ref().b.released,
+        "closed modules release",
+    );
     let cee = probe_decl(&p, cm, "cee");
     assert(cee != NODE_NONE, "cee declares in c");
     assert(an::refers(&p, bm, cm as u32, cee, cee), "b names cee from its released body");
@@ -955,12 +958,12 @@ fn release_reference_record_names_referencers() {
     an::ensure_bodies(&mut p, bm);
     let locs = feat::references_of_def(&p, DefId { module: cm as ModuleId, node: cee }, false);
     assert(locs.len() == 1 && locs.at(0).module as usize == bm, "the one call site, in b");
-    assert(p.modules.at(am).ast.b.released, "a stays released");
+    assert(p.modules.at(am).ast.get_ref().b.released, "a stays released");
 }
 
 // The declaration node named `needle` in module `mid` (a function's name node resolves to it).
 fn probe_decl(p: &loader::Package, mid: usize, needle: str) NodeId {
-    let a = &p.modules.at(mid).ast;
+    let a = p.modules.at(mid).ast.get_ref();
     let src = p.modules.at(mid).source.as_str();
     for i0 in 1..a.nnodes() {
         let i = a.nth_id(i0);
@@ -1021,15 +1024,15 @@ fn release_closed_bodies_after_compile() {
     let mut diags = Vector::<an::DiagRec>::new();
     let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
     let dm = mod_of(&p, "/d.spc");
-    assert(p.modules.at(dm).ast.b.released, "a module without a buffer releases its bodies");
-    assert(p.modules.at(dm).ast.b.nodes.len() == 0, "the released arena is empty");
-    assert(p.modules.at(dm).ast.nodes.len() > 1, "the module arena stays");
+    assert(p.modules.at(dm).ast.get_ref().b.released, "a module without a buffer releases its bodies");
+    assert(p.modules.at(dm).ast.get_ref().b.nodes.len() == 0, "the released arena is empty");
+    assert(p.modules.at(dm).ast.get_ref().nodes.len() > 1, "the module arena stays");
     // Opening the document (same text) parses the bodies back and re-analyzes that module only.
     ov(&ws, "d.spc", D0, &mut ovf, &mut ovt);
     let mut st = an::RecompileStats {};
     round(&ws, &mut p, &mut diags, &ovf, &ovt, &mut st, "reopen");
     assert(st.reparsed == 0 && st.bodies_back == 1 && st.analyzed == 1, "opening parses one module back");
-    assert(!p.modules.at(dm).ast.b.released, "an open document keeps its bodies");
+    assert(!p.modules.at(dm).ast.get_ref().b.released, "an open document keeps its bodies");
     let mut rd = Vector::<an::DiagRec>::new();
     let rp = fresh(&ws, &ovf, &ovt, &mut rd);
     assert(probe_res(&p, dm, "w") != 0, "the local resolves in the parsed-back body");
@@ -1061,9 +1064,9 @@ fn release_feature_query_parses_back_then_releases() {
     let mut diags = Vector::<an::DiagRec>::new();
     let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
     let am = mod_of(&p, "/a.spc");
-    assert(p.modules.at(am).ast.b.released, "released before the query");
+    assert(p.modules.at(am).ast.get_ref().b.released, "released before the query");
     an::ensure_bodies(&mut p, am);
-    assert(!p.modules.at(am).ast.b.released, "the query parsed the bodies back");
+    assert(!p.modules.at(am).ast.get_ref().b.released, "the query parsed the bodies back");
     let mut rd = Vector::<an::DiagRec>::new();
     let mut rp = fresh(&ws, &ovf, &ovt, &mut rd);
     let ram = mod_of(&rp, "/a.spc");
@@ -1078,7 +1081,7 @@ fn release_feature_query_parses_back_then_releases() {
     let mut st = an::RecompileStats {};
     let ok = recompile_ov(&ws, &mut p, &ovf, &ovt, &mut diags, &mut st);
     assert(ok && st.analyzed == 0, "a no-op round");
-    assert(p.modules.at(am).ast.b.released, "released again after the round");
+    assert(p.modules.at(am).ast.get_ref().b.released, "released again after the round");
 }
 
 @test
@@ -1107,8 +1110,8 @@ pub fn bee(extra: i32) i32 {
     assert(ok && st2.analyzed == 0, "a no-op round");
     let am = mod_of(&p, "/a.spc");
     let bm = mod_of(&p, "/b.spc");
-    assert(!p.modules.at(bm).ast.b.released, "the open document keeps its bodies");
-    assert(p.modules.at(am).ast.b.released, "the closed importer releases again after the round");
+    assert(!p.modules.at(bm).ast.get_ref().b.released, "the open document keeps its bodies");
+    assert(p.modules.at(am).ast.get_ref().b.released, "the closed importer releases again after the round");
 }
 
 // A `const fn` whose body calls a plain function of another module: an array length in an open
@@ -1148,7 +1151,7 @@ fn release_engine_demand_parses_back_and_reruns() {
     let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
     assert(diags.len() == 0, "the full analysis evaluates the length");
     let dm = mod_of(&p, "/d.spc");
-    assert(p.modules.at(dm).ast.b.released, "the plain callee's module releases");
+    assert(p.modules.at(dm).ast.get_ref().b.released, "the plain callee's module releases");
     // Open a.spc and edit its body: the fold demands d's plain body.
     let a1 = M"(import c;
 
@@ -1167,7 +1170,7 @@ fn main() i32 {
     assert(diags_equal(&diags, &rd), "the demand round reports the fold like a fresh analysis");
     assert(st.passes == 1, "one extra pass after the demand");
     assert(st.bodies_back == 2, "a opened and d demanded");
-    assert(!p.modules.at(dm).ast.b.released, "a demanded module stays live");
+    assert(!p.modules.at(dm).ast.get_ref().b.released, "a demanded module stays live");
     assert(dm < p.body_hold.len() && p.body_hold[dm], "and is held across rounds");
     // The next edit needs no parse-back and no extra pass.
     let a2 = M"(import c;
@@ -1194,7 +1197,7 @@ fn main() i32 {
 // its span, the declaration it resolves to (module path, declaration span) and its type. The body
 // arena takes part when `bodies` is set.
 fn state_lines(p: &loader::Package, m: usize, bodies: bool) Vector<String> {
-    let a = &p.modules.at(m).ast;
+    let a = p.modules.at(m).ast.get_ref();
     let src = p.modules.at(m).source.as_str();
     let mut out = Vector::<String>::new();
     let nn = if bodies {
@@ -1249,15 +1252,15 @@ fn state_equal(p: &loader::Package, q: &loader::Package) bool {
             eprintln("state_equal: {}: the sources differ", mi.file.as_str());
             return false;
         }
-        let bodies = !mi.ast.b.released && !mj.ast.b.released;
-        if mi.ast.nodes.len() != mj.ast.nodes.len() || bodies && mi.ast.b.nodes.len() != mj.ast.b.nodes.len() {
+        let bodies = !mi.ast.get_ref().b.released && !mj.ast.get_ref().b.released;
+        if mi.ast.get_ref().nodes.len() != mj.ast.get_ref().nodes.len() || bodies && mi.ast.get_ref().b.nodes.len() != mj.ast.get_ref().b.nodes.len() {
             eprintln(
                 "state_equal: {}: arenas {}+{} vs {}+{}",
                 mi.file.as_str(),
-                mi.ast.nodes.len(),
-                mi.ast.b.nodes.len(),
-                mj.ast.nodes.len(),
-                mj.ast.b.nodes.len(),
+                mi.ast.get_ref().nodes.len(),
+                mi.ast.get_ref().b.nodes.len(),
+                mj.ast.get_ref().nodes.len(),
+                mj.ast.get_ref().b.nodes.len(),
             );
             return false;
         }
@@ -1304,7 +1307,7 @@ fn state_equal(p: &loader::Package, q: &loader::Package) bool {
 // path, declaration span) and successors.
 fn summary_lines(p: &loader::Package, m: usize) Vector<String> {
     let s = p.recur.mods.at(m);
-    let a = &p.modules.at(m).ast;
+    let a = p.modules.at(m).ast.get_ref();
     let mut out = Vector::<String>::new();
     for fi in 0..s.fns.len() {
         let fs = *s.fns.at(fi);
@@ -1752,7 +1755,7 @@ fn borrow_round_stops_and_resumes() {
     assert(borrow_errors(&diags) == 0, "the analysis alone reports no borrow record");
     assert(dm < p.bc_pending.len(), "the module has a borrow-check record");
     assert(p.bc_pending[dm], "the analysis owes the borrow check");
-    assert(!p.modules.at(dm).ast.b.released, "a module that owes its borrow check keeps its bodies");
+    assert(!p.modules.at(dm).ast.get_ref().b.released, "a module that owes its borrow check keeps its bodies");
     let fv = Vector::<str>::new();
     let r = an::borrowck_pending(&mut p, &mut diags, &fv, always_stop, null);
     assert(r.canceled, "a stop ends the round");
@@ -1764,7 +1767,7 @@ fn borrow_round_stops_and_resumes() {
     assert(r2.changed, "the next round changes the records");
     assert(borrow_errors(&diags) == 1, "the borrow record lands");
     assert(!p.bc_pending[dm], "nothing is owed after the round");
-    assert(p.modules.at(dm).ast.b.released, "the closed module releases its bodies after its check");
+    assert(p.modules.at(dm).ast.get_ref().b.released, "the closed module releases its bodies after its check");
 }
 
 // A body edit that changes a function's result attributability (a returned parameter becomes a
@@ -1825,7 +1828,7 @@ pub fn bee() i32 {
     assert(st.analyzed == 1, "the body edit re-analyzes its own module alone");
     assert(p.item_ret_attr(cm as ModuleId, pick) == 0, "a returned local does not attribute the result");
     assert(p.bc_pending[bm], "the caller owes its borrow check again");
-    assert(!p.modules.at(bm).ast.b.released, "and its bodies are live for it");
+    assert(!p.modules.at(bm).ast.get_ref().b.released, "and its bodies are live for it");
     settle(&mut p, &ovf, &mut diags);
     let mut rd = Vector::<an::DiagRec>::new();
     let rp = fresh(&ws, &ovf, &ovt, &mut rd);

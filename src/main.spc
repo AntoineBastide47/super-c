@@ -142,7 +142,7 @@ fn read_stdin() String {
     buf.resize_default(cap);
     let sin = stdio::stdin();
     loop {
-        let n = unsafe stdio::fread(buf.as_ptr() as *mut u8, 1, cap, sin);
+        let n = unsafe stdio::fread(buf.as_mut_ptr(), 1, cap, sin);
         if n > 0 {
             s.push_bytes(buf[0..n]);
         }
@@ -1141,7 +1141,7 @@ fn simp_probe(
     let mut any = false;
     for m in 0..p.modules.len() {
         if p.modules[m].has_ast && m < p.lint_set.len() && p.lint_set[m] {
-            let a = p.module_ast_const(m as ModuleId) as *mut Ast;
+            let a = p.module_ast_ptr(m as ModuleId);
             unsafe (*a).simp_cands = simp_cands(unsafe &*a, &p.modules[m].source);
             any = any || unsafe (*a).simp_cands.len() != 0;
         }
@@ -1160,7 +1160,7 @@ fn simp_probe(
         if !p.modules[m].has_ast || m >= p.lint_set.len() || !p.lint_set[m] {
             continue;
         }
-        let a = p.module_ast_const(m as ModuleId) as *mut Ast;
+        let a = p.module_ast_ptr(m as ModuleId);
         let cs = replace(unsafe &mut (*a).simp_cands, Vector::<SimpCand>::new());
         let spans = simp_fn_spans(unsafe &*a);
         let mut fns = Vector::<u32>::new();

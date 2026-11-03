@@ -1133,6 +1133,10 @@ extend<'a> Parser<'a> {
                 t.aux |= VOP_UNCHECKED;
                 pi += 1;
             }
+            if pi < self.parts.len() && self.parts[pi] == "num" {
+                t.aux |= VOP_NUM;
+                pi += 1;
+            }
         }
         if op == O_ACAS {
             t.ty = T_I8;

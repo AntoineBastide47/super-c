@@ -634,7 +634,7 @@ pub(package) fn tt_id(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<
         None => {},
     }
     let e = tab.at(idx as usize);
-    let a = unsafe &mut *(p.module_ast_const(am) as *mut Ast);
+    let a = unsafe &mut *p.module_ast_ptr(am);
     let mut id = TYPE_NONE;
     if e.tag == TT_RAW {
         let mut ty = Ty { kind: TypeKind::TYPE_ERROR, concrete: false };

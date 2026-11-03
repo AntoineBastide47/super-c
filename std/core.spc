@@ -7260,6 +7260,9 @@ pub struct UnsafeCell<T> {
     value: T,
 }
 
+// Zero is a cell's value when it is its content's.
+unsafe extend<T> UnsafeCell<T> as Zeroable {}
+
 extend<T> UnsafeCell<T> {
     /// Wrap `value` in a cell.
     pub const fn new(value: T) UnsafeCell<T> {
@@ -7273,6 +7276,10 @@ extend<T> UnsafeCell<T> {
     /// A shared borrow of the contained value.
     pub const fn get_ref(self: &UnsafeCell<T>) &T {
         return &self.value;
+    }
+    /// An exclusive borrow of the contained value, through the exclusive borrow of the cell.
+    pub const fn get_mut(self: &mut UnsafeCell<T>) &mut T {
+        return &mut self.value;
     }
     /// Consume the cell and return the contained value.
     pub const fn into_inner(self: UnsafeCell<T>) T {

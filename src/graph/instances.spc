@@ -1451,7 +1451,7 @@ extend InstGraph {
 
     // The package type table (the graph is the serial stage that may append to it).
     const fn g(self: &Self) &mut TypePool {
-        return unsafe &mut *((&*self.pkg).tt.as_ptr() as *mut TypePool);
+        return unsafe &mut *(&*self.pkg).tt.deref().get();
     }
 
     // Whether usize and isize are 32-bit on the target.

@@ -43,7 +43,10 @@ pub(package) struct Module {
     /// The file's mtime from the stat taken before the read (`read_file_mt`); 0 when the source is not
     /// a file's.
     pub(package) mtime: i64,
-    pub(package) ast: Ast, // parsed AST; after hir::lower runs it IS the module's HIR (desugared, resolved)
+    // The parsed AST; after hir::lower runs it IS the module's HIR (desugared, resolved). In a cell: the
+    // parallel stages change a module's tree through the shared package, under its write lock
+    // (`module_ast_ptr`, `wl_take`).
+    pub(package) ast: UnsafeCell<Ast>,
     pub(package) has_ast: bool,
     pub(package) prelude: bool, // part of the auto-imported std prelude
     /// The vector backend file (`std/simd/backend/<isa>.spc`): its entries render apart, so the
@@ -116,7 +119,7 @@ pub(package) struct ItemSched {
     /// borrow pass reads them at every call, so a callee's body syntax can be released before its
     /// callers are analyzed.
     pub(package) ret_attr: Vector<u8>,
-    pub(package) dyn_edges: Set<u64>, // caller item << 32 | callee item, recorded by the master engine
+    pub(package) dyn_edges: UnsafeCell<Set<u64>>, // caller item << 32 | callee item, recorded by the master engine
     pub(package) by_node: Vector<u32>,
     /// Per item: the declaration node of the top-level item before it in node order (0 for a
     /// module's first), the exclusive start of the item's own module-arena range; a member
@@ -147,7 +150,7 @@ pub(package) struct ItemSched {
 extend ItemSched {
     /// Approximate owned bytes.
     pub(package) const fn retained(self: &Self) usize {
-        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.bnames.capacity() * 2 + self.cdep_off.capacity() + self.cdep.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.len() * 16;
+        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.bnames.capacity() * 2 + self.cdep_off.capacity() + self.cdep.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.get_ref().len() * 16;
     }
 }
 
@@ -299,8 +302,8 @@ pub(package) struct Package {
     /// holder (`wl_eng`, its task token) takes a module's lock in `module_ast_const`, and drops the
     /// locks it took (`wl_got`) with the engine lock (`wl_eng_end`).
     pub(package) wl_on: bool,
-    pub(package) wl_eng: usize,
-    pub(package) wl_got: Vector<u32>,
+    pub(package) wl_eng: UnsafeCell<usize>,
+    pub(package) wl_got: UnsafeCell<Vector<u32>>,
     /// The emission's inline-candidate store (`ir::inline::InlineStore`), set for the emission's
     /// lifetime by `cemit_package`; null outside it.
     pub(package) inl_store: *const void,
@@ -357,7 +360,8 @@ pub(package) struct Package {
     /// The package type table: every published type, one final id each (`Ast::intern_type_i`).
     /// Boxed so the module Asts can hold its address while the package moves. `bind_types` puts
     /// the modules under it; until then (the LSP, standalone checks) they keep module-local pools.
-    pub(package) tt: Box<TypePool>,
+    // In a cell: the instance graph adds types through the shared package (`InstGraph::g`).
+    pub(package) tt: Box<UnsafeCell<TypePool>>,
     /// The map of the last `publish_types`: per module, provisional pool index to final type id.
     /// Read through `map_type`.
     pub(package) pub_map: Vector<Vector<TypeId>>,
@@ -427,11 +431,11 @@ pub(package) struct Package {
     /// syntax while `cur_item` was checking.
     pub(package) icost_on: bool,
     pub(package) icost_tc: Vector<u64>,
-    pub(package) icost_rs: Vector<u64>, // per resolved item (module << 32 | item node, ns)
+    pub(package) icost_rs: UnsafeCell<Vector<u64>>, // per resolved item (module << 32 | item node, ns)
     pub(package) icost_bc: Vector<u64>,
     pub(package) icost_lw: Vector<u64>, // per body lowered to Core IR (owner key, ns)
     pub(package) icost_mod: Vector<u64>,
-    pub(package) ctfe_edges: Vector<u64>,
+    pub(package) ctfe_edges: UnsafeCell<Vector<u64>>,
     /// LSP: modules whose body syntax the constant engine read in some analysis round (a fold's
     /// or a `const fn` scan's callee); their bodies stay live when their documents are closed, so
     /// the next round needs no parse-back. Indexed by module; shorter than the module table means
@@ -2681,7 +2685,7 @@ extend Package {
         if m == a.module {
             return a.lifetimes_of(d).len;
         }
-        return self.modules.at(m as usize).ast.lifetimes_of(d).len;
+        return self.modules.at(m as usize).ast.get_ref().lifetimes_of(d).len;
     }
 
     /// Append the flags (`LTF_*`) of the lifetime positions of type `t` (read through `a`) in walk
@@ -2863,7 +2867,7 @@ extend Package {
     /// header of the runtime module, of a block with a function that needs no CPU feature. Its macros would rename the identifiers of
     /// other files, so the inliner splices no use of its items into another module (`ir::inline`).
     pub(package) fn extern_header_scoped(self: &Self, m: ModuleId, nid: NodeId) bool {
-        let a = &self.modules[m as usize].ast;
+        let a = self.modules[m as usize].ast.get_ref();
         let eb = a.at_const(nid).as_data.extern_block;
         if eb.header == NODE_NONE {
             return false;
@@ -2899,7 +2903,7 @@ extend Package {
             if !self.modules[m].has_ast {
                 continue;
             }
-            let a = &self.modules[m].ast;
+            let a = self.modules[m].ast.get_ref();
             let its = a.at_const(a.root).as_data.program.items;
             for i in 0..its.len {
                 let b = unsafe a.list(its)[i as usize];
@@ -2923,7 +2927,7 @@ extend Package {
     /// The CPU features function `f` of module `m` states (`@target_feature`, `@simd_impl`); empty for
     /// another.
     pub(package) fn fn_features(self: &Self, m: ModuleId, f: NodeId) cf::CpuFeatureSet {
-        let a = &self.modules[m as usize].ast;
+        let a = self.modules[m as usize].ast.get_ref();
         let ks: [AttrKind; 2] = [AttrKind::ATTR_TARGET_FEATURE, AttrKind::ATTR_SIMD_IMPL];
         for k in ks {
             if a.attr_of(f, k) != null {
@@ -3186,7 +3190,7 @@ extend Package {
             replace(&mut parsed.ast, Ast::new(0)),
             true,
         );
-        self.modules[id as usize].ast.module = id as ModuleId;
+        self.modules[id as usize].ast.get_mut().module = id as ModuleId;
         self.modules[id as usize].prelude = true;
         self.build_module = id;
     }
@@ -3203,7 +3207,7 @@ extend Package {
         if !self.is_root_module(m) {
             return false;
         }
-        let a = &self.modules[m as usize].ast;
+        let a = self.modules[m as usize].ast.get_ref();
         let nm = a.at_const(a.ext_name(f)).as_data.name.text;
         if self.modules[m as usize].source.as_str().slice(nm.start as usize, nm.end as usize) != "main" {
             return false;
@@ -3283,9 +3287,9 @@ extend Package {
     /// span and the identifiers of its removed text (`Ast.bc_cuts`, `Ast.bc_names`).
     pub(package) fn prune_build_sites(self: &mut Self, mi: usize) {
         let mut names = Vector::<u64>::new();
-        let ns = self.modules[mi].ast.bc_sites.len();
+        let ns = self.modules[mi].ast.get_ref().bc_sites.len();
         for i in 0..ns {
-            let a = &self.modules[mi].ast;
+            let a = self.modules[mi].ast.get_ref();
             let id = a.bc_sites[i];
             let n = *a.at_const(id);
             let mut take = NODE_NONE;
@@ -3307,12 +3311,12 @@ extend Package {
             let mut ks = n.span.end;
             let mut ke = n.span.end;
             if take != NODE_NONE {
-                ks = self.modules[mi].ast.at_const(take).span.start;
-                ke = self.modules[mi].ast.at_const(take).span.end;
+                ks = self.modules[mi].ast.get_ref().at_const(take).span.start;
+                ke = self.modules[mi].ast.get_ref().at_const(take).span.end;
             }
             bc_scan_names(&self.modules[mi].source, n.span.start, ks, &mut names);
             bc_scan_names(&self.modules[mi].source, ke, n.span.end, &mut names);
-            let ast = &mut self.modules[mi].ast;
+            let ast = self.modules[mi].ast.get_mut();
             // The branches not taken, as written (an inner site decided first keeps its span in its cut).
             if n.kind == NodeKind::NODE_IF {
                 for b in [n.as_data.if_stmt.then_branch, n.as_data.if_stmt.else_branch] {
@@ -3362,7 +3366,7 @@ extend Package {
             }
         }
         if names.len() != 0 {
-            let all = &mut self.modules[mi].ast.bc_names;
+            let all = &mut self.modules[mi].ast.get_mut().bc_names;
             for k in 0..names.len() {
                 all.push(names[k]);
             }
@@ -3373,7 +3377,7 @@ extend Package {
 
     // A build-constant condition of module `mi`: 1 true, 0 false, -1 not decided here.
     fn bc_eval(self: &Self, mi: usize, id: NodeId) i32 {
-        let n = *self.modules[mi].ast.at_const(id);
+        let n = *self.modules[mi].ast.get_ref().at_const(id);
         if n.kind == NodeKind::NODE_IDENTIFIER {
             let k = self.bc_const(mi, id);
             return if bc_is_bool(k) {
@@ -3430,7 +3434,7 @@ extend Package {
         if cur < 0 {
             return -1;
         }
-        let a = &self.modules[mi].ast;
+        let a = self.modules[mi].ast.get_ref();
         let src = self.modules[mi].source.as_str();
         let xn = a.at_const(x);
         if bc_is_bool(k) || k == BC_POINTER_WIDTH {
@@ -3468,7 +3472,7 @@ extend Package {
         if cur < 0 {
             return NODE_NONE;
         }
-        let a = &self.modules[mi].ast;
+        let a = self.modules[mi].ast.get_ref();
         for i in 0..arms.len {
             let arm = a.at_const(unsafe a.list(arms)[i as usize]).as_data.match_arm;
             let pn = a.at_const(arm.pattern);
@@ -3486,7 +3490,7 @@ extend Package {
     }
 
     fn bc_arm_hit(self: &Self, mi: usize, k: i32, cur: i64, pat: NodeId) bool {
-        let a = &self.modules[mi].ast;
+        let a = self.modules[mi].ast.get_ref();
         let pn = a.at_const(pat);
         if pn.kind == NodeKind::NODE_PATTERN_WILDCARD {
             return true;
@@ -3497,7 +3501,7 @@ extend Package {
 
     // The build constant (`BC_*`) identifier `id` of module `mi` names, -1 for any other node.
     fn bc_const(self: &Self, mi: usize, id: NodeId) i32 {
-        let n = self.modules[mi].ast.at_const(id);
+        let n = self.modules[mi].ast.get_ref().at_const(id);
         if n.kind != NodeKind::NODE_IDENTIFIER {
             return -1;
         }
@@ -3514,14 +3518,14 @@ extend Package {
         let arch = self.arch; // the instruction-set axis rides on the package, so no caller has to thread it
         let when = self.when_index();
         let m = &mut self.modules[mi];
-        let root = m.ast.root;
-        if m.ast.at_const(root).kind != NodeKind::NODE_PROGRAM {
+        let root = m.ast.get_mut().root;
+        if m.ast.get_mut().at_const(root).kind != NodeKind::NODE_PROGRAM {
             return;
         }
         // The owners of a gate that fails, sorted for the per-item probe: O(A + I log A).
         let mut dropped = Vector::<NodeId>::new();
-        for k in 0..m.ast.attrs.len() {
-            let at = m.ast.attrs.at(k);
+        for k in 0..m.ast.get_mut().attrs.len() {
+            let at = m.ast.get_mut().attrs.at(k);
             if at.kind == AttrKind::ATTR_PLATFORM as u8 && (at.arg >> target as u32 & 1u32) == 0 {
                 dropped.push(at.owner);
             }
@@ -3535,78 +3539,85 @@ extend Package {
             }
         }
         if dropped.len() == 0 {
-            m.ast.settle_dead();
+            m.ast.get_mut().settle_dead();
             return;
         }
         dropped.sort();
-        let items = m.ast.at_const(root).as_data.program.items;
+        let items = m.ast.get_mut().at_const(root).as_data.program.items;
         let mut w: u32 = 0;
         for j in 0..items.len {
-            let id = unsafe m.ast.list(items)[j as usize];
+            let id = unsafe m.ast.get_mut().list(items)[j as usize];
             if dropped.binary_search(&id).is_err() {
-                m.ast.children.set((items.start + w) as usize, id);
+                m.ast.get_mut().children.set((items.start + w) as usize, id);
                 w = w + 1;
                 // A kept extend or extern block loses its gated members, as the program loses its gated
                 // items (an interface member takes no attribute).
-                let n = *m.ast.at_const(id);
+                let n = *m.ast.get_mut().at_const(id);
                 let is_ext = n.kind == NodeKind::NODE_EXTEND;
                 if is_ext || n.kind == NodeKind::NODE_EXTERN_BLOCK {
                     let its = if is_ext {
-                        m.ast.ext(id).extend_def.items
+                        m.ast.get_mut().ext(id).extend_def.items
                     } else {
                         n.as_data.extern_block.items
                     };
                     let mut kept: u32 = 0;
                     for k in 0..its.len {
-                        let mid = unsafe m.ast.list(its)[k as usize];
+                        let mid = unsafe m.ast.get_mut().list(its)[k as usize];
                         if dropped.binary_search(&mid).is_err() {
-                            m.ast.children.set((its.start + kept) as usize, mid);
+                            m.ast.get_mut().children.set((its.start + kept) as usize, mid);
                             kept = kept + 1;
                         } else {
-                            let _ = m.ast.member_of.remove(&mid);
-                            let msp = item_span(&m.source, &m.ast, mid);
-                            m.ast.bc_dead.push(msp);
+                            let _ = m.ast.get_mut().member_of.remove(&mid);
+                            let msp = item_span(&m.source, m.ast.get_ref(), mid);
+                            m.ast.get_mut().bc_dead.push(msp);
                         }
                     }
                     if is_ext {
-                        m.ast.ext_mut(id).extend_def.items.len = kept;
+                        m.ast.get_mut().ext_mut(id).extend_def.items.len = kept;
                     } else {
-                        m.ast.at(id).as_data.extern_block.items.len = kept;
+                        m.ast.get_mut().at(id).as_data.extern_block.items.len = kept;
                     }
                 }
             } else {
                 // A dropped container's members no longer have one.
-                let n = *m.ast.at_const(id);
-                m.ast.bc_dead.push(item_span(&m.source, &m.ast, id));
+                let n = *m.ast.get_mut().at_const(id);
+                let sp = item_span(&m.source, m.ast.get_ref(), id);
+                m.ast.get_mut().bc_dead.push(sp);
                 if n.kind == NodeKind::NODE_EXTEND {
-                    m.ast.set_members(NODE_NONE, m.ast.ext(id).extend_def.items);
+                    let its = m.ast.get_ref().ext(id).extend_def.items;
+                    m.ast.get_mut().set_members(NODE_NONE, its);
                 } else if n.kind == NodeKind::NODE_INTERFACE {
-                    m.ast.set_members(NODE_NONE, m.ast.ext(id).interface_def.items);
+                    let its = m.ast.get_ref().ext(id).interface_def.items;
+                    m.ast.get_mut().set_members(NODE_NONE, its);
                 }
             }
         }
-        m.ast.at(root).as_data.program.items.len = w;
-        m.ast.settle_dead();
+        m.ast.get_mut().at(root).as_data.program.items.len = w;
+        m.ast.get_mut().settle_dead();
     }
 
     /// Put every module under the package type table (package identity): each module's pool then
     /// holds only its provisional types, published in batches by `publish_types`.
     pub(package) fn bind_types(self: &mut Self) {
-        if self.tt.deref().len() == 0 {
-            self.tt.deref_mut().seed();
-            self.tt_class.resize_default(self.tt.deref().len());
+        if self.tt.deref().get_ref().len() == 0 {
+            self.tt.deref_mut().get_mut().seed();
+            self.tt_class.resize_default(self.tt.deref().get_ref().len());
         }
-        let gp = self.tt.deref_mut() as *mut TypePool;
+        let gp = self.tt.deref_mut().get_mut() as *mut TypePool;
         for i in 0..self.modules.len() {
             if self.modules[i].has_ast {
-                self.modules[i].ast.gt.p = gp;
+                self.modules[i].ast.get_mut().gt.p = gp;
                 if self.modules[i].prelude && basename_of(&self.modules[i].file) == "simd.spc" {
-                    self.tt.deref_mut().simd = self.top_struct(i as ModuleId, "Simd", NodeKind::NODE_STRUCT);
-                    self.tt.deref_mut().mask = self.top_struct(i as ModuleId, "Mask", NodeKind::NODE_STRUCT);
-                    self.tt.deref_mut().simd_op = self.top_struct(i as ModuleId, "Op", NodeKind::NODE_ENUM);
+                    self.tt.deref_mut().get_mut().simd = self.top_struct(i as ModuleId, "Simd", NodeKind::NODE_STRUCT);
+                    self.tt.deref_mut().get_mut().mask = self.top_struct(i as ModuleId, "Mask", NodeKind::NODE_STRUCT);
+                    self.tt.deref_mut().get_mut().simd_op = self.top_struct(i as ModuleId, "Op", NodeKind::NODE_ENUM);
                 }
                 if self.modules[i].prelude && basename_of(&self.modules[i].file) == "cpu.spc" {
-                    self.tt.deref_mut().cpu_feature = self.top_struct(i as ModuleId, "Feature", NodeKind::NODE_ENUM);
+                    self.tt.deref_mut().get_mut().cpu_feature = self.top_struct(
+                        i as ModuleId,
+                        "Feature",
+                        NodeKind::NODE_ENUM,
+                    );
                 }
             }
         }
@@ -3614,7 +3625,7 @@ extend Package {
 
     // The top-level struct or enum (`kind`) `name` of module `m`, or node NODE_NONE.
     fn top_struct(self: &Self, m: ModuleId, name: str, kind: NodeKind) DefId {
-        let a = &self.modules[m as usize].ast;
+        let a = self.modules[m as usize].ast.get_ref();
         let items = a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
             let id = unsafe a.list(items)[i as usize];
@@ -3641,8 +3652,8 @@ extend Package {
     /// index` each): the constant, the term count, the divisor, the types, then each term's
     /// parameter and coefficient.
     const fn clin_less(self: &Self, x: u64, y: u64) bool {
-        let a = self.modules[(x >> 32) as usize].ast.pool.const_lin_at((x & 0xFFFFFFFFu64) as usize);
-        let b = self.modules[(y >> 32) as usize].ast.pool.const_lin_at((y & 0xFFFFFFFFu64) as usize);
+        let a = self.modules[(x >> 32) as usize].ast.get_ref().pool.const_lin_at((x & 0xFFFFFFFFu64) as usize);
+        let b = self.modules[(y >> 32) as usize].ast.get_ref().pool.const_lin_at((y & 0xFFFFFFFFu64) as usize);
         if a.k != b.k {
             return a.k < b.k;
         }
@@ -3699,8 +3710,8 @@ extend Package {
             let mut refs = Vector::<u64>::new(); // module << 32 | pool index
             for m in 0..n {
                 let mut cmap = Vector::<u32>::new();
-                if self.modules[m].has_ast && self.modules[m].ast.gt.p != null {
-                    let a = &self.modules[m].ast;
+                if self.modules[m].has_ast && self.modules[m].ast.get_ref().gt.p != null {
+                    let a = self.modules[m].ast.get_ref();
                     for pi in 0..a.pool.nclin() {
                         cmap.push(0xFFFFFFFFu32);
                         refs.push(m as u64 << 32 | pi as u64);
@@ -3718,22 +3729,22 @@ extend Package {
                 }
                 refs.set(j, v);
             }
-            let g = self.tt.deref_mut();
+            let g = self.tt.deref_mut().get_mut();
             for i in 0..refs.len() {
                 let m = (refs[i] >> 32) as usize;
                 let pi = (refs[i] & 0xFFFFFFFFu64) as usize;
-                let ci = g.insert_clin(self.modules[m].ast.pool.const_lin_at(pi));
+                let ci = g.insert_clin(self.modules[m].ast.get_ref().pool.const_lin_at(pi));
                 cpre.index_mut(m).set(pi, ci);
             }
         }
         {
-            let g = self.tt.deref_mut();
+            let g = self.tt.deref_mut().get_mut();
             for m in 0..n {
                 let mut map = Vector::<TypeId>::new();
                 let mut imap = Vector::<u32>::new();
                 let mut cmap = replace(cpre.index_mut(m), Vector::<u32>::new());
-                if self.modules[m].has_ast && self.modules[m].ast.gt.p != null {
-                    let a = &mut self.modules[m].ast;
+                if self.modules[m].has_ast && self.modules[m].ast.get_ref().gt.p != null {
+                    let a = self.modules[m].ast.get_mut();
                     let np = a.pool.len();
                     map.reserve(np);
                     for _ in 0..a.pool.ninst() {
@@ -3854,7 +3865,7 @@ extend Package {
         }
         let mut keys = Vector::<PubKey>::new();
         {
-            let g = self.tt.deref_mut();
+            let g = self.tt.deref_mut().get_mut();
             for gi in 0..ngroups {
                 let cls = gi / (maxd as usize + 1);
                 let grp = groups.at(gi);
@@ -3903,7 +3914,7 @@ extend Package {
                 }
             }
             if map.len() != 0 {
-                self.modules[m].ast.publish_remap(&map, &imap);
+                self.modules[m].ast.get_mut().publish_remap(&map, &imap);
             }
             self.pub_map.push(map);
         }
@@ -3914,7 +3925,7 @@ extend Package {
     /// children as final ids; `I module decl n args` for an instance record): the identity every
     /// module shares, compared across worker counts and edits by the validation gates.
     pub(package) fn type_table_dump(self: &Self, out: &mut String) {
-        let g = self.tt.deref();
+        let g = self.tt.deref().get_ref();
         for t in 0..g.len() {
             let y = g.at(t);
             let cls: u8 = if t < self.tt_class.len() {
@@ -3971,7 +3982,7 @@ extend Package {
     /// Validation after a publication: no module table may still name a provisional id.
     pub(package) fn check_published(self: &Self) bool {
         for m in 0..self.modules.len() {
-            if self.modules.at(m).has_ast && self.modules.at(m).ast.has_provisional() {
+            if self.modules.at(m).has_ast && self.modules.at(m).ast.get_ref().has_provisional() {
                 eprintln("type-validate: module {} still holds a provisional type id after publication", m);
                 return false;
             }
@@ -3985,6 +3996,7 @@ extend Package {
             index: UnsafeCell::<PkgIndex>::new(PkgIndex {}),
             clo_lists: UnsafeCell::<Vector<Vector<ModuleId>>>::new(Vector::<Vector<ModuleId>>::new()),
             clo_built: UnsafeCell::<Vector<bool>>::new(Vector::<bool>::new()),
+            wl_got: UnsafeCell::<Vector<u32>>::new(Vector::<u32>::new()),
             arch: if unsafe G_ARCH < 0 {
                 unsafe shim::sc_host_arch()
             } else {
@@ -4003,7 +4015,7 @@ extend Package {
             rt_libm: -1,
             rt_lanes: -1,
             root: -1,
-            tt: Box::<TypePool>::new(TypePool::new()),
+            tt: Box::<UnsafeCell<TypePool>>::new(UnsafeCell::<TypePool>::new(TypePool::new())),
             ok: true,
             jobs: 1, // serial unless a driver opts in: a bare Package must never launch tasks
         };
@@ -5185,41 +5197,46 @@ extend Package {
     /// live IN PLACE in the module table for their whole life: a stage mutates its module's Ast through a
     /// raw pointer into this slot, never by moving it out, so this read is always the live tree.
     pub(package) const fn module_ast_const(self: &Self, mid: ModuleId) *const Ast {
+        return self.module_ast_ptr(mid);
+    }
+
+    /// `module_ast_const` for a change: the tree lives in a cell (`Module.ast`), which the parallel stages
+    /// change under the module's write lock.
+    pub(package) const fn module_ast_ptr(self: &Self, mid: ModuleId) *mut Ast {
         if self.wl_on {
             self.wl_take(mid);
         }
-        return &self.modules[mid as usize].ast;
+        return self.modules[mid as usize].ast.get();
     }
 
     /// Module `mid`'s syntax and resolutions without its write lock (`module_ast_const`): what a scan
     /// over every module reads before it picks a candidate; both are frozen in a parallel stage.
     pub(package) const fn module_syntax(self: &Self, mid: ModuleId) *const Ast {
-        return &self.modules[mid as usize].ast;
+        return self.modules[mid as usize].ast.get();
     }
 
     // Take module `mid`'s write lock when the running task holds the engine lock and not yet the
     // module's lock.
     fn wl_take(self: &Self, mid: ModuleId) {
-        if unsafe atomic::load_usize(&self.wl_eng, 0) != Ast::itok() {
+        if unsafe atomic::load_usize(self.wl_eng.get(), 0) != Ast::itok() {
             return;
         }
-        let mp = (self as *const Package) as *mut Package;
-        let a = unsafe &mut (*mp).modules[mid as usize].ast;
+        let a = unsafe &mut *self.modules[mid as usize].ast.get();
         if a.wl_held() {
             return;
         }
         a.wl_wait();
-        unsafe (*mp).wl_got.push(mid);
+        unsafe (*self.wl_got.get()).push(mid);
     }
 
     /// Before the running task waits for the engine lock: release the module write lock it holds
     /// as a checker, and return that module (-1 for none). A holder of a write lock never waits
     /// for the engine lock, so the engine's wait for a write lock ends.
-    pub(package) fn wl_eng_begin(self: &mut Self) i64 {
+    pub(package) fn wl_eng_begin(self: &Self) i64 {
         let tok = Ast::itok();
         for m in 0..self.modules.len() {
-            if unsafe atomic::load_usize(&self.modules[m].ast.wl_owner, 0) == tok {
-                self.modules[m].ast.wl_leave();
+            if unsafe atomic::load_usize(&self.modules[m].ast.get_ref().wl_owner, 0) == tok {
+                unsafe (*self.modules[m].ast.get()).wl_leave();
                 return m as i64;
             }
         }
@@ -5227,17 +5244,18 @@ extend Package {
     }
 
     /// The running task now holds the engine lock: the modules it reads from here on are locked.
-    pub(package) fn wl_eng_hold(self: &mut Self) {
-        unsafe atomic::store_usize(&mut self.wl_eng, Ast::itok(), 0);
+    pub(package) fn wl_eng_hold(self: &Self) {
+        unsafe atomic::store_usize(self.wl_eng.get(), Ast::itok(), 0);
     }
 
     /// Before the engine lock's release: drop every write lock the engine took.
-    pub(package) fn wl_eng_end(self: &mut Self) {
-        unsafe atomic::store_usize(&mut self.wl_eng, 0, 0);
-        for i in 0..self.wl_got.len() {
-            self.modules[self.wl_got[i] as usize].ast.wl_leave();
+    pub(package) fn wl_eng_end(self: &Self) {
+        unsafe atomic::store_usize(self.wl_eng.get(), 0, 0);
+        let got = unsafe &mut *self.wl_got.get();
+        for i in 0..got.len() {
+            unsafe (*self.modules[got[i] as usize].ast.get()).wl_leave();
         }
-        self.wl_got.clear();
+        got.clear();
     }
 
     /// Whether interface method `f`'s first parameter is of type `Self` (behind references or
@@ -5283,7 +5301,7 @@ extend Package {
         let mut b: usize = 0;
         for i in 0..self.modules.len() {
             let m = self.modules.at(i);
-            b += m.source.capacity() + m.ast.retained_bytes();
+            b += m.source.capacity() + m.ast.get_ref().retained_bytes();
         }
         for i in 0..self.def_refs.len() {
             b += self.def_refs.at(i).capacity() * 16;
@@ -5340,7 +5358,7 @@ extend Package {
     pub(package) fn set_item_state(self: &mut Self, it: ItemId, st: u8) {
         let cur = self.item_state_at(it);
         assert(st >= cur, "item readiness states only move up");
-        unsafe atomic::store_u8(unsafe (self.sched.state.as_ptr() as *mut u8 + it as usize), st, 2);
+        unsafe atomic::store_u8(unsafe (self.sched.state.as_mut_ptr() + it as usize), st, 2);
     }
 
     /// Record the result-attributability verdict of function `node` of module `m` (`ItemSched.ret_attr`).
@@ -5350,7 +5368,7 @@ extend Package {
             return;
         }
         unsafe atomic::store_u8(
-            unsafe (self.sched.ret_attr.as_ptr() as *mut u8 + it as usize),
+            unsafe (self.sched.ret_attr.as_mut_ptr() + it as usize),
             if v {
                 1u8
             } else {
@@ -5412,9 +5430,9 @@ extend Package {
     pub(package) fn release_bodies(self: &mut Self) {
         for i in 0..self.modules.len() {
             if self.modules[i].has_ast {
-                self.modules[i].ast.release_bodies();
-                if !self.modules[i].ast.call_info_rel.on {
-                    self.modules[i].ast.release_body_facts();
+                self.modules[i].ast.get_mut().release_bodies();
+                if !self.modules[i].ast.get_ref().call_info_rel.on {
+                    self.modules[i].ast.get_mut().release_body_facts();
                 }
             }
         }
@@ -5514,7 +5532,7 @@ extend Package {
         ) as usize;
         self.root = id as i32;
         if ok {
-            self.modules[id].ast.module = id as ModuleId;
+            self.modules[id].ast.get_mut().module = id as ModuleId;
         } else {
             self.ok = false;
         }
@@ -5550,7 +5568,7 @@ extend Package {
                 source: source,
                 src_id: src_id,
                 mtime: mtime,
-                ast: ast,
+                ast: UnsafeCell::<Ast>::new(ast),
                 has_ast: has_ast,
                 prelude: false,
                 pkg: pkg,
@@ -5560,8 +5578,8 @@ extend Package {
         );
         // A module loaded after `bind_types` (an import resolved on demand) joins the package
         // identity at once: every module of a bound package interns into the one table.
-        if has_ast && self.tt.deref().len() != 0 {
-            self.modules[id as usize].ast.gt.p = self.tt.deref_mut();
+        if has_ast && self.tt.deref().get_ref().len() != 0 {
+            self.modules[id as usize].ast.get_mut().gt.p = self.tt.deref_mut().get_mut();
         }
         return id;
     }
@@ -5760,7 +5778,7 @@ extend Package {
             offs: Vector::<u32>::new(),
             next: 0,
         };
-        let ap = (&self.modules.at(id as usize).ast) as *const Ast;
+        let ap = self.modules.at(id as usize).ast.get_ref() as *const Ast;
         let src = self.modules.at(id as usize).source.as_str();
         let mp = self.modules.at(id as usize).path.as_str();
         let mf = self.modules.at(id as usize).file.as_str();
@@ -6113,7 +6131,7 @@ extend Package {
             replace(&mut u.ast, Ast::new(0)),
             true,
         );
-        self.modules[id as usize].ast.module = id as ModuleId;
+        self.modules[id as usize].ast.get_mut().module = id as ModuleId;
         let log = replace(&mut us.units.index_mut(ui).log, String::new());
         self.print_log(id, &log);
         *expand = true;
@@ -6241,7 +6259,7 @@ extend Package {
             self.ok = false;
             return id;
         }
-        self.modules[id as usize].ast.module = id as ModuleId;
+        self.modules[id as usize].ast.get_mut().module = id as ModuleId;
         return id;
     }
 
@@ -6259,7 +6277,7 @@ extend Package {
             let is_core = self.modules[i].has_ast && self.modules[i].prelude && basename_of(&self.modules[i].file) == "core.spc";
             if is_core {
                 for b in 0..BT_COUNT_N {
-                    let id = self.modules[i].ast.add_ext(
+                    let id = self.modules[i].ast.get_mut().add_ext(
                         NodeKind::NODE_STRUCT,
                         tok::Span::empty(),
                         NodeExt { aggregate: AggregateData { name: NODE_NONE, vis: VIS_PUB } },
@@ -6322,7 +6340,7 @@ extend Package {
                 return true;
             }
         }
-        let da = self.module_ast_const(dm) as *mut Ast;
+        let da = self.module_ast_ptr(dm);
         let y = *unsafe (*da).type_at(t);
         let mut it = TyInstance { module: y.module, decl: NODE_NONE, n: 0 };
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
@@ -6430,7 +6448,7 @@ extend Package {
     ) bool {
         let ea = self.module_ast_const(em);
         let gens = unsafe (*ea).ext(ext).extend_def.generics;
-        let da = self.module_ast_const(dm) as *mut Ast;
+        let da = self.module_ast_ptr(dm);
         let mut g: u32 = 0;
         while g < gens.len && g < ln {
             let v = unsafe la[g as usize];
@@ -6476,7 +6494,7 @@ extend Package {
         if depth > 16 {
             return false;
         }
-        let da = self.module_ast_const(dm) as *mut Ast;
+        let da = self.module_ast_ptr(dm);
         let y = *unsafe (*da).type_at(ai.args[0]);
         let mut it = TyInstance { module: y.module, decl: NODE_NONE, n: 0 };
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
@@ -6594,7 +6612,7 @@ extend Package {
         ln: &mut u32,
     ) bool {
         let ea = self.module_ast_const(em);
-        let da = self.module_ast_const(dm) as *mut Ast;
+        let da = self.module_ast_ptr(dm);
         let gens = unsafe (*ea).ext(ext).extend_def.generics;
         if gens.len > 8 {
             return false;
@@ -6686,7 +6704,7 @@ extend Package {
             return false;
         }
         let ea = self.module_ast_const(em);
-        let da = self.module_ast_const(dm) as *mut Ast;
+        let da = self.module_ast_ptr(dm);
         let py = *unsafe (*ea).type_at(pt);
         if py.kind == TypeKind::TYPE_GENERIC && py.module == em {
             for i in 0..gens.len {
@@ -6769,7 +6787,7 @@ extend Package {
             return false;
         }
         let pa = self.module_ast_const(pm);
-        let da = self.module_ast_const(dm) as *mut Ast;
+        let da = self.module_ast_ptr(dm);
         let y = *unsafe (*pa).type_at(t);
         if unsafe (*pa).type_concrete(t) {
             *out = unsafe (*da).reintern(unsafe &*pa, t);
@@ -7571,7 +7589,7 @@ extend Package {
     /// `mid`'s cached [mid, transitive imports...] list (built on first use; imports are load-final).
     /// The LSP's incremental rebuild reads it to decide which modules an edit can reach. NOTE: the
     /// implicit prelude is NOT in the list: a prelude edit must be treated as reaching everything.
-    pub(package) fn module_closure(self: &mut Self, mid: ModuleId) *const Vector<ModuleId> {
+    pub(package) fn module_closure(self: &Self, mid: ModuleId) *const Vector<ModuleId> {
         self.ensure_closure(mid);
         return self.clo_lists.get_ref().at(mid as usize);
     }
@@ -7647,7 +7665,7 @@ extend Package {
         if !self.modules[from].has_ast {
             return;
         }
-        let ra = &self.modules[from].ast;
+        let ra = self.modules[from].ast.get_ref();
         let nb = ra.nodes.len();
         for i in 0..ra.nnodes() {
             let d = ra.resolution_def(Ast::nth_id_n(nb, i));
@@ -7670,7 +7688,7 @@ extend Package {
             let word = self.mod_refs[from as usize * self.mod_refs_w + to as usize / 64];
             return (word & 1u64 << (to as usize % 64) as u64) != 0;
         }
-        let ra = &self.modules[from as usize].ast;
+        let ra = self.modules[from as usize].ast.get_ref();
         let nb9 = ra.nodes.len();
         let nn9 = ra.nnodes();
         for i in 0..nn9 {
@@ -7685,7 +7703,7 @@ extend Package {
     // The user module a type argument's layout is complete in, or MODULE_NONE (self-contained / builtin).
     // `am` names the module whose Ast pool `t` lives in (re-derived each call so no borrow spans a recursion).
     fn type_user_home(self: &Self, am: ModuleId, t: TypeId) ModuleId {
-        let y = *self.modules[am as usize].ast.type_at(t);
+        let y = *self.modules[am as usize].ast.get_ref().type_at(t);
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_ARRAY {
             return self.type_user_home(am, y.as_data.elem);
         }
@@ -7699,7 +7717,7 @@ extend Package {
             return 0xFFFF;
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *self.modules[am as usize].ast.instance(y.as_data.inst);
+            let it = *self.modules[am as usize].ast.get_ref().instance(y.as_data.inst);
             return self.instance_home_in(am, &it);
         }
         return 0xFFFF;
@@ -7868,7 +7886,7 @@ extend Package {
     pub(package) const fn names_vectors(self: &Self) bool {
         for i in 0..self.modules.len() {
             let md = &self.modules[i];
-            if md.has_ast && md.ast.names_vectors && !(md.prelude && basename_of(&md.file) == "simd.spc") {
+            if md.has_ast && md.ast.get_ref().names_vectors && !(md.prelude && basename_of(&md.file) == "simd.spc") {
                 return true;
             }
         }

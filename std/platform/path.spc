@@ -112,6 +112,14 @@ extend NativePath {
         }
         return &self.inline[0];
     }
+    /// `ptr` to write in place (`CreateProcessW` may change its command line).
+    @platform(windows)
+    pub fn ptr_mut(self: &mut NativePath) *mut u16 {
+        if self.heap.len() != 0 {
+            return self.heap.as_mut_ptr();
+        }
+        return &mut self.inline[0];
+    }
 
     // Copy `p` (no NUL inside) with its terminator: false when it is not representable.
     @platform(!windows)

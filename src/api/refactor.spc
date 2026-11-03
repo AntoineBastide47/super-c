@@ -141,7 +141,7 @@ extend OrganizeImports as Refactoring {
         let mut unused = Vector::<NodeId>::new();
         emit::unused_imports(s.package_mut(), m, &mut unused);
         let p = s.package();
-        let a = &p.modules[m].ast;
+        let a = p.modules[m].ast.get_ref();
         let src = src_of(s, m);
         let mut kept = Vector::<String>::new();
         let mut spans = Vector::<(u32, u32)>::new(); // every import's whole lines
@@ -394,7 +394,7 @@ fn fn_at(s: &ses::Session, sel: &Selection) DefId {
         },
     };
     let d = feat::def_at(s.package(), m, sel.start);
-    if d.node == NODE_NONE || s.package().modules[d.module as usize].ast.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+    if d.node == NODE_NONE || s.package().modules[d.module as usize].ast.get_ref().at_const(d.node).kind != NodeKind::NODE_FUNCTION {
         return DefId { module: 0, node: NODE_NONE };
     }
     return d;
@@ -441,7 +441,7 @@ extend ChangeSignature as Refactoring {
         let mut has_self = false;
         let mut prange = syn::TextRange { start: 0, end: 0 };
         {
-            let a = &s.package().modules[d.module as usize].ast;
+            let a = s.package().modules[d.module as usize].ast.get_ref();
             let src = src_of(s, d.module as usize);
             let ps = a.ext(d.node).function.params;
             for i in 0..ps.len {
@@ -566,7 +566,7 @@ pub struct ImplementMembers {}
 
 // The `extend .. as ..` node at `off` of module `m` and the interface it names, or NODE_NONE.
 fn conformance_at(p: &loader::Package, m: usize, off: u32) (NodeId, DefId) {
-    let a = &p.modules[m].ast;
+    let a = p.modules[m].ast.get_ref();
     let mut ext = NODE_NONE;
     let mut blen: u32 = 0xFFFFFFFF;
     let items = a.at_const(a.root).as_data.program.items;
@@ -586,7 +586,7 @@ fn conformance_at(p: &loader::Package, m: usize, off: u32) (NodeId, DefId) {
         return (NODE_NONE, DefId { module: 0, node: NODE_NONE });
     }
     let idf = a.resolution_def(it);
-    if idf.node == NODE_NONE || p.modules[idf.module as usize].ast.at_const(idf.node).kind != NodeKind::NODE_INTERFACE {
+    if idf.node == NODE_NONE || p.modules[idf.module as usize].ast.get_ref().at_const(idf.node).kind != NodeKind::NODE_INTERFACE {
         return (NODE_NONE, DefId { module: 0, node: NODE_NONE });
     }
     return (ext, idf);
@@ -594,7 +594,7 @@ fn conformance_at(p: &loader::Package, m: usize, off: u32) (NodeId, DefId) {
 
 // The names of the methods interface `idf` requires that extend `ext` of module `m` does not define.
 fn missing_methods(p: &loader::Package, m: usize, ext: NodeId, idf: DefId) Vector<String> {
-    let a = &p.modules[m].ast;
+    let a = p.modules[m].ast.get_ref();
     let src = p.modules[m].source.as_str();
     let mut have = Vector::<String>::new();
     let es = a.ext(ext).extend_def.items;
@@ -605,7 +605,7 @@ fn missing_methods(p: &loader::Package, m: usize, ext: NodeId, idf: DefId) Vecto
             have.push(String::from_str(src.slice(sp.start as usize, sp.end as usize)));
         }
     }
-    let ia = &p.modules[idf.module as usize].ast;
+    let ia = p.modules[idf.module as usize].ast.get_ref();
     let isrc = p.modules[idf.module as usize].source.as_str();
     let mut out = Vector::<String>::new();
     let ms = ia.ext(idf.node).interface_def.items;
@@ -686,7 +686,7 @@ fn item_at(p: &loader::Package, m: usize, off: u32) NodeId {
     if it == loader::ITEM_NONE || p.idx().items[it as usize].owner != loader::ITEM_NONE {
         return NODE_NONE;
     }
-    let k = p.modules[m].ast.at_const(d.node).kind;
+    let k = p.modules[m].ast.get_ref().at_const(d.node).kind;
     if k == NodeKind::NODE_EXTEND || k == NodeKind::NODE_IMPORT {
         return NODE_NONE;
     }
@@ -697,7 +697,7 @@ fn item_at(p: &loader::Package, m: usize, off: u32) NodeId {
 // feed.
 fn item_bytes(p: &loader::Package, m: usize, node: NodeId) (u32, u32) {
     let src = p.modules[m].source.as_str();
-    let sp = p.modules[m].ast.at_const(node).span;
+    let sp = p.modules[m].ast.get_ref().at_const(node).span;
     let mut start = line_start(src, sp.start);
     // Each step takes one line above.
     for _ in 0..src.len() {
@@ -716,7 +716,7 @@ fn item_bytes(p: &loader::Package, m: usize, node: NodeId) (u32, u32) {
 
 // Whether module `m` imports module path `path` (an import line names it).
 fn imports_path(p: &loader::Package, m: usize, path: str) bool {
-    let a = &p.modules[m].ast;
+    let a = p.modules[m].ast.get_ref();
     let src = p.modules[m].source.as_str();
     let items = a.at_const(a.root).as_data.program.items;
     for i in 0..items.len {
@@ -808,7 +808,7 @@ extend MoveItem as Refactoring {
         let mut inner = Vector::<Edit>::new();
         let mut needs_a = false;
         {
-            let a = &p.modules[ma].ast;
+            let a = p.modules[ma].ast.get_ref();
             let n = a.nnodes();
             for i0 in 1..n {
                 let i = a.nth_id(i0);

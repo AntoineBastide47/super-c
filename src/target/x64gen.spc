@@ -332,6 +332,7 @@ pub(package) struct Gen {
     blk_at: Vector<u32>, // per block, its first byte, NONE before it is compiled
     fix: Vector<u64>, // displacement field << 32 | block: a branch to patch
     epi: Vector<u32>, // jumps to the epilogue (their displacement fields)
+    stop: u32, // the end of the last terminator that does not fall through (a panic, a trap), NONE before one
     // The sibling calls (`sibling`): each one's jump's displacement field << 32 | its callee's object
     // symbol (NONE: the callee in r11); whether the body may make them; the return they replace.
     tails: Vector<u64>,
@@ -501,6 +502,7 @@ extend Gen {
             blk_at: Vector::<u32>::new(),
             fix: Vector::<u64>::new(),
             epi: Vector::<u32>::new(),
+            stop: NONE,
             tails: Vector::<u64>::new(),
             tail_ok: false,
             tail_ret: NONE,
@@ -1659,7 +1661,8 @@ extend Gen {
 
     // `vmem`: per value, whether it is a vector some instruction defines or reads in memory: any but a
     // vector load, a lane-wise operation with an SSE form (its operands too; a product or high product of
-    // 32-bit lanes, `mul_lanes32`, `mulh_lanes32`; an integer minimum or maximum, `ext_reg`), a bitcast
+    // 32-bit lanes, `mul_lanes32`, `mulh_lanes32`; an integer minimum or maximum, `ext_reg`; a float lane
+    // operation, `float_reg`), a bitcast
     // between register vectors, a reduction in registers (`reduce_reg`), a store of it, and an edge argument
     // (a return reads its vector in memory).
     fn vec_homes(self: &mut Self) {
@@ -1689,7 +1692,7 @@ extend Gen {
                 lane_type(t.ty),
             ) != NONE || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a)) || self.reduce_reg(t) || self.ext_reg(
                 t,
-            ) || t.op == O_VOP && (self.lv.pfold[i] || self.idiom_reg(t)) || self.sumw_reg(t) || t.op == O_MUL && is_vec(
+            ) || t.op == O_VOP && (self.lv.pfold[i] || self.idiom_reg(t) || self.float_reg(t)) || self.sumw_reg(t) || t.op == O_MUL && is_vec(
                 t.ty,
             ) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(t.ty, 8) == 16 && in_vreg(t.ty) || (t.op == O_MULHS || t.op == O_MULHU) && is_vec(
                 t.ty,
@@ -1896,10 +1899,13 @@ extend Gen {
         }
     }
 
-    // `clobbers` of `t` but a vector operation the body computes in registers (`ext_reg`), and a
+    // `clobbers` of `t` but a vector operation the body computes in registers (`ext_reg`, `idiom_reg`,
+    // `float_reg`), and a
     // thread-local address that calls `__tls_get_addr` (`tls_call`).
     fn calls(self: &Self, t: Inst) bool {
-        return Gen::clobbers(self.b(), t) && !self.ext_reg(t) && !self.idiom_reg(t) || self.tls_call(t);
+        return Gen::clobbers(self.b(), t) && !self.ext_reg(t) && !self.idiom_reg(t) && !self.float_reg(t) || self.tls_call(
+            t,
+        );
     }
 
     const fn clobbers(b: &Body, t: Inst) bool {
@@ -2163,7 +2169,7 @@ extend Gen {
     // scalar division, product's high half or 64-bit unsigned product with overflow takes rax and rdx, a
     // scalar shift by a register rcx; a signed or narrow overflow check, an atomic, a system operation, inline assembly, a call that comes back (`cret`: not
     // a sibling call or one before a trap), a thread-local address, a 128-bit value, a lane-wise operation
-    // but one in xmm registers (`reduce_reg`, `ext_reg`, `FOLD_ANY`), a vector shift by no immediate
+    // but one in xmm registers (`reduce_reg`, `ext_reg`, `idiom_reg`, `float_reg`, `FOLD_ANY`), a vector shift by no immediate
     // (`Live::vshimm`) take all three, as does an aggregate or second register return.
     fn homes_free(self: &Self, b: &Body) u64 {
         let all = bit(x::RAX) | bit(x::RCX) | bit(x::RDX);
@@ -2186,7 +2192,7 @@ extend Gen {
             let shift = op == O_SHL || op == O_LSHR || op == O_ASHR;
             if t.ty == T_I128 || (op == O_CALL || op == O_CALLIND) && self.cret[i] || op == O_ASM || op == O_SYS || op == O_VOP && !self.reduce_reg(
                 t,
-            ) && !self.ext_reg(t) && !self.idiom_reg(t) && !self.lv.pfold[i] || op == O_VASTART || op == O_VAARG || op == O_MEMCPY || op == O_MEMSET || is_vec(
+            ) && !self.ext_reg(t) && !self.idiom_reg(t) && !self.float_reg(t) && !self.lv.pfold[i] || op == O_VASTART || op == O_VAARG || op == O_MEMCPY || op == O_MEMSET || is_vec(
                 t.ty,
             ) && (op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM) || op >= O_ADDO && op <= O_MULO && (t.aux == OV_SIGNED || type_bits(
                 t.ty,
@@ -3069,6 +3075,7 @@ extend Gen {
         self.held_end = NONE;
         self.fix.truncate(0);
         self.epi.truncate(0);
+        self.stop = NONE;
         self.tails.truncate(0);
         self.tail_ret = NONE;
         self.div_pair = NONE;
@@ -8893,10 +8900,12 @@ extend Gen {
                 self.c.bsx(false, 8, self.arg(0), r);
                 self.lane_panic_call(m);
             }
+            self.stop = self.c.len();
             return true;
         }
         if op == O_UNREACHABLE {
             self.c.ud2();
+            self.stop = self.c.len();
             return true;
         }
         let _ = i;
@@ -9036,6 +9045,46 @@ extend Gen {
             }
         }
         assert(false, "x64gen: a dropped jump is a jump");
+    }
+
+    // Whether a jump reaches the epilogue at `body_n` once `finish` placed its copies (`sw`: shrink-wrapped,
+    // the warm code before `ra`; `short`: the epilogue fits a jump's place): a jump to it the warm code's `ret`
+    // or the epilogue's copy does not take, or a branch of the framed code to it or past the blocks, through
+    // blocks that are one jump alone (at most 8 steps, as `finish`).
+    fn epi_reached(self: &Self, sw: bool, ra: u32, body_n: u32, short: bool) bool {
+        for q in 0..self.epi.len() {
+            if !(sw && self.epi[q] < ra) && !short {
+                return true;
+            }
+        }
+        let mut thru = Map::<u32, u32>::new();
+        for q in 0..self.fix.len() {
+            let at = (self.fix[q] >> 32) as u32;
+            if self.c.b[at as usize - 1] == 0xE9 {
+                thru.insert(at - 1, self.blk_at[(self.fix[q] as u32) as usize]);
+            }
+        }
+        for q in 0..self.fix.len() {
+            let at = (self.fix[q] >> 32) as u32;
+            if sw && at < ra {
+                continue;
+            }
+            let mut to = self.blk_at[(self.fix[q] as u32) as usize];
+            for _ in 0..8 {
+                switch thru.get(&to) {
+                    Some(x) => {
+                        to = *x;
+                    },
+                    None => {
+                        break;
+                    },
+                }
+            }
+            if to >= body_n {
+                return true;
+            }
+        }
+        return false;
     }
 
     fn finish(self: &mut Self, s: u32) bool {
@@ -9189,6 +9238,9 @@ extend Gen {
             pl
         };
         let body_n = self.c.len();
+        // Whether the body's last code falls into the epilogue: not a panic, a trap or a jump.
+        let nj = self.c.jumps.len();
+        let falls = body_n == 0 || self.stop != body_n && !(nj != 0 && self.c.jumps[nj - 1] + 4 == body_n && self.c.b[body_n as usize - 5] == 0xE9);
         // Before the epilogue proper, which Microsoft x64's unwinder reads instruction by instruction; not
         // when the result is a 32-byte vector in ymm0.
         if !ymm_parts(&self.self_lay) {
@@ -9251,6 +9303,19 @@ extend Gen {
             self.c.ret();
         }
         let epi_end = self.c.len();
+        // The epilogue's bytes, which its copies (the warm code's `ret`, the sibling calls, the exit stubs, the
+        // jumps it replaces) take; it stays at `body_n` only when code reaches it there (`epi_reached`).
+        let mut tpl = Vector::<u8>::with_capacity((epi_end - body_n) as usize);
+        tpl.extend_from_slice(self.c.b[body_n as usize..epi_end as usize]);
+        let en = epi_end - body_n;
+        if !(falls || ends || self.canary >= 0 || self.epi_reached(sw, ra, body_n, en <= 5)) {
+            self.c.b.truncate(body_n as usize);
+            // Microsoft x64's unwinder looks a frame's return address up as it is: after a last call that does
+            // not return, a trap keeps it in the function's code.
+            if self.win && self.stop == body_n {
+                self.c.byte(0xCC);
+            }
+        }
         if sw {
             // The warm code's jumps to the epilogue become its `ret`, with the upper halves' clear before.
             let mut keep = Vector::<u32>::with_capacity(self.epi.len());
@@ -9263,7 +9328,7 @@ extend Gen {
                 let n = core_at - body_n;
                 for k in 0..5u32 {
                     self.c.b[(at - 1 + k) as usize] = if k < n {
-                        self.c.b[(body_n + k) as usize]
+                        tpl[k as usize]
                     } else if k == n {
                         0xC3
                     } else {
@@ -9294,13 +9359,12 @@ extend Gen {
             let to = self.c.len();
             self.c.land(at, to);
             for k in body_n..core_end {
-                self.c.byte(self.c.b[k as usize]);
+                self.c.byte(tpl[(k - body_n) as usize]);
             }
             self.tail_jump(os);
         }
         // An epilogue no longer than a jump (no canary check) takes each jump's place, the bytes left over
         // traps after its `ret`.
-        let en = epi_end - body_n;
         if en <= 5 && self.canary < 0 && self.epi.len() != 0 {
             let mut keep = Vector::<u32>::with_capacity(self.c.jumps.len());
             let mut q: usize = 0;
@@ -9309,7 +9373,7 @@ extend Gen {
                 if q < self.epi.len() && self.epi[q] == at {
                     for k in 0..5u32 {
                         self.c.b[(at - 1 + k) as usize] = if k < en {
-                            self.c.b[(body_n + k) as usize]
+                            tpl[k as usize]
                         } else {
                             0xCC
                         };
@@ -9368,7 +9432,7 @@ extend Gen {
                 if wret == NONE {
                     wret = self.c.len();
                     for k in body_n..core_at {
-                        self.c.byte(self.c.b[k as usize]);
+                        self.c.byte(tpl[(k - body_n) as usize]);
                     }
                     self.c.ret();
                 }
@@ -9398,7 +9462,7 @@ extend Gen {
                         // then the jump.
                         let e = self.c.len();
                         for k in core_at..core_end {
-                            self.c.byte(self.c.b[k as usize]);
+                            self.c.byte(tpl[(k - body_n) as usize]);
                         }
                         let j = self.c.jmp32();
                         self.c.land(j, to);
@@ -12031,6 +12095,10 @@ extend Gen {
             self.vrearrange(i, t, c, &ops, &tys);
             return true;
         }
+        if self.float_reg(t) {
+            self.float_lanes(i, t, c, &ops);
+            return true;
+        }
         if c == core::SIMD_FMA && is_float(lane_type(tys[0])) {
             self.vec_call2(i, ops[0], ops[1], ops[2], "fma");
             return true;
@@ -13410,6 +13478,217 @@ extend Gen {
         let lt = lane_type(t.ty);
         let nb = type_bytes(t.ty, 8);
         return is_int(lt) && type_bytes(lt, 8) <= 2 && (nb == 16 && in_vreg(t.ty) || nb > 16 && self.in_reg(t.ty));
+    }
+
+    // Whether `O_VOP` `t` is a lane operation of float vectors in registers (8 or 16 bytes; 32 and 64 with
+    // AVX2 and AVX-512) that `float_lanes` computes there: the absolute value, floor, ceil and trunc
+    // (SSE4.1, which AVX has), the fused multiply-add (the processor's `fma`), C's `fmin` and `fmax`
+    // (VOP_NUM).
+    fn float_reg(self: &Self, t: Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        if t.op != O_VOP || !is_vec(t.ty) || !is_float(lane_type(t.ty)) || code < core::OP_SIMD || code >= core::OP_CMP_LANES {
+            return false;
+        }
+        let c = (code - core::OP_SIMD) as u8;
+        let nb = type_bytes(t.ty, 8);
+        let p = unsafe &*self.pkg;
+        let round = c == core::SIMD_FLOOR || c == core::SIMD_CEIL || c == core::SIMD_TRUNC;
+        let num = (c == core::SIMD_MIN || c == core::SIMD_MAX) && (t.aux & VOP_NUM) != 0;
+        if !(c == core::SIMD_ABS || round && (p.sse41 || nb > 16) || c == core::SIMD_FMA && p.fma || num) || !(in_vreg(
+            t.ty,
+        ) || nb > 16 && self.in_reg(t.ty)) {
+            return false;
+        }
+        for k in 0..t.b {
+            if self.vt(self.b().pool[(t.a + k) as usize]) != t.ty {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Float lane operation `t` (`float_reg`: rule `c`) of `ops` into vector `i`: ANDPS of the lanes and their
+    // magnitude mask; ROUNDPS (VRNDSCALEPS on 64 bytes); VFMADD213PS or VFMADD231PS; C's `fmax` and `fmin`
+    // as their scalar rows' (`target::x64intrin`) packed forms, so each lane gives what the call gives.
+    // The PD forms for f64 lanes.
+    fn float_lanes(self: &mut Self, i: u32, t: Inst, c: u8, ops: &[Value; 4]) {
+        let nb = type_bytes(t.ty, 8);
+        let dd = lane_type(t.ty) == T_F64;
+        let pfx = dd as u32 * 0x66;
+        let rx = self.vec_use(ops[0], self.vs0) - V0;
+        if c == core::SIMD_ABS {
+            let mut ws = Vector::<u64>::new();
+            for _ in 0..(nb / 8).max(2) {
+                ws.push(
+                    if dd {
+                        0x7FFFFFFFFFFFFFFFu64
+                    } else {
+                        0x7FFFFFFF7FFFFFFFu64
+                    },
+                );
+            }
+            let k = self.const_sym(&ws);
+            let rd = self.def_over(i, ops[0], rx + V0) - V0;
+            if nb <= 16 {
+                self.c.vmov(rd, rx);
+                self.c.rm(pfx, 0x0F54, false, rd, x::rip(), false);
+                self.reloc_rip(x::R_PC32, k, 0);
+                return;
+            }
+            let s = self.vs1 - V0;
+            self.c.vload(nb, s, x::rip());
+            self.reloc_rip(x::R_PC32, k, 0);
+            self.fop(nb, dd, 0x54, rd, rx, s);
+            return;
+        }
+        if c == core::SIMD_FLOOR || c == core::SIMD_CEIL || c == core::SIMD_TRUNC {
+            let imm: u32 = if c == core::SIMD_FLOOR {
+                9
+            } else if c == core::SIMD_CEIL {
+                10
+            } else {
+                11
+            };
+            let rd = self.def_over(i, ops[0], rx + V0) - V0;
+            if nb <= 16 && !self.avx {
+                self.c.sse_rr(0x66, 0x0F3A08 + dd as u32, rd, rx);
+            } else if nb <= 32 {
+                self.c.vex_rr(0x66, 3, 0x08 + dd as u32, false, nb == 32, rd, 0, rx);
+            } else {
+                self.c.evex_rr(0x66, 3, 0x08 + dd as u32, dd, rd, 0, rx);
+            }
+            self.c.byte(imm);
+            return;
+        }
+        let ry = self.vec_use(ops[1], self.vs1) - V0;
+        if c == core::SIMD_FMA {
+            // x * y + z: VFMADD213 over a register that holds x or y, VFMADD231 over one that holds z.
+            let zs = self.tmp(true);
+            let rz = self.vec_use(ops[2], zs) - V0;
+            let rd = self.def_over(i, ops[0], rx + V0) - V0;
+            let (opc, s1, s2) = if rd == rz && rd != rx && rd != ry {
+                (0xB8u32, rx, ry)
+            } else if rd == ry && rd != rx {
+                (0xA8u32, rx, rz)
+            } else {
+                (0xA8u32, ry, rz)
+            };
+            if rd != rx && rd != ry && rd != rz {
+                self.fop(nb, dd, 0x28, rd, 0, rx);
+            }
+            if nb == 64 {
+                self.c.evex_rr(0x66, 2, opc, dd, rd, s1, s2);
+            } else {
+                self.c.vex_rr(0x66, 2, opc, dd, nb == 32, rd, s1, s2);
+            }
+            return;
+        }
+        // fmax: (y != x | y) & max(y, x), which keeps +0 over -0; fmin: (y == x & y) | min(y, x), which keeps
+        // -0. Then y where x is a NaN.
+        let lo = c == core::SIMD_MIN;
+        let a = self.tmp(true) - V0;
+        let b = self.tmp(true) - V0;
+        let e = self.tmp(true) - V0;
+        self.fop_cmp(
+            nb,
+            dd,
+            if lo {
+                0u32
+            } else {
+                4u32
+            },
+            a,
+            ry,
+            rx,
+        );
+        self.fop(
+            nb,
+            dd,
+            if lo {
+                0x54u32
+            } else {
+                0x56u32
+            },
+            a,
+            a,
+            ry,
+        );
+        self.fop(
+            nb,
+            dd,
+            if lo {
+                0x5Du32
+            } else {
+                0x5Fu32
+            },
+            b,
+            ry,
+            rx,
+        );
+        self.fop(
+            nb,
+            dd,
+            if lo {
+                0x56u32
+            } else {
+                0x54u32
+            },
+            b,
+            b,
+            a,
+        );
+        self.fop_cmp(nb, dd, 3, a, rx, rx);
+        self.fop(nb, dd, 0x54, e, ry, a);
+        self.fop(nb, dd, 0x55, a, a, b);
+        self.fop(nb, dd, 0x56, a, a, e);
+        // The result takes temporary `a` unless it shares a loop parameter's register.
+        let rd = self.def_over(i, ops[0], a + V0) - V0;
+        if rd != a {
+            self.fop(nb, dd, 0x28, rd, 0, a);
+        }
+    }
+
+    // `rd` = `rx` op `ry` for the float vector instruction `opc` of opcode map 0F (the PS form, PD when
+    // `dd`) on `nb` bytes: VEX.256 on 32, EVEX.512 on 64; VEX.128 on 16 or fewer with AVX2, else SSE (`rx`
+    // copied into `rd` first, through a temporary when `rd` holds `ry`). `opc` 0x28 (MOVAPS) copies `ry`.
+    fn fop(self: &mut Self, nb: u32, dd: bool, opc: u32, rd: u8, rx: u8, ry: u8) {
+        let pfx = dd as u32 * 0x66;
+        if nb == 64 {
+            self.c.evex_rr(pfx, 1, opc, dd, rd, rx, ry);
+            return;
+        }
+        if nb == 32 || self.avx {
+            if opc != 0x28 || rd != ry {
+                self.c.vex_rr(pfx, 1, opc, false, nb == 32, rd, rx, ry);
+            }
+            return;
+        }
+        if opc == 0x28 {
+            self.c.vmov(rd, ry);
+            return;
+        }
+        if rd == ry && rd != rx {
+            let s = self.tmp(true) - V0;
+            self.c.vmov(s, ry);
+            self.c.vmov(rd, rx);
+            self.c.sse_rr(pfx, 0x0F00 | opc, rd, s);
+            return;
+        }
+        self.c.vmov(rd, rx);
+        self.c.sse_rr(pfx, 0x0F00 | opc, rd, ry);
+    }
+
+    // `rd` = the lane masks of comparison predicate `imm` (CMPPS's) of `rx` and `ry`, as `fop`; on 64 bytes
+    // through mask register k1 (VPMOVM2D, VPMOVM2Q).
+    fn fop_cmp(self: &mut Self, nb: u32, dd: bool, imm: u32, rd: u8, rx: u8, ry: u8) {
+        if nb == 64 {
+            self.c.evex_rr(dd as u32 * 0x66, 1, 0xC2, dd, 1, rx, ry);
+            self.c.byte(imm);
+            self.c.evex_rr(0xF3, 2, 0x38, dd, rd, 0, 1);
+            return;
+        }
+        self.fop(nb, dd, 0xC2, rd, rx, ry);
+        self.c.byte(imm);
     }
 
     // Vector `i`: the lanes of vector `v` reversed (`idiom_reg`): PSHUFD of the dwords (4-byte lanes) or of

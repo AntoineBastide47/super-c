@@ -26,7 +26,7 @@ fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let mut r = res::Resolver::new(
-        unsafe &mut *((&mut m.ast) as *mut Ast),
+        unsafe &mut *(m.ast.get_mut() as *mut Ast),
         unsafe str::from_raw(src as *const u8, len),
         pkg,
     );
@@ -43,7 +43,7 @@ fn t_typecheck(p: &mut loader::Package, i: usize) bool {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
     t.check();
     let had = t.has_errors();
     if had {
@@ -59,7 +59,7 @@ fn t_borrowck(p: &mut loader::Package, i: usize) bool {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
     t.borrowck_solo();
     let had = t.has_errors();
     if had {
@@ -577,7 +577,7 @@ fn memory_intrinsics_evaluate_at_compile_time() {
     // copy a heap buffer. The constants and the run-time calls agree.
     run_leak_checked(
         "memory intrinsics in constants",
-        "import string;\nconst fn moved(right: bool) u32 {\n    let mut a: [u8; 6] = [1, 2, 3, 4, 5, 6];\n    let p = &mut a as *mut [u8; 6] as *mut u8;\n    if right {\n        unsafe string::memmove(unsafe (p + 1), p, 4);\n    } else {\n        unsafe string::memmove(p, unsafe (p + 1), 4);\n    }\n    let mut r: u32 = 0;\n    for x in a {\n        r = r * 10 + x as u32;\n    }\n    return r;\n}\nconst fn filled() u32 {\n    let mut a = Vector::<u8>::new();\n    let mut b = Vector::<u8>::new();\n    for i in 1..5 {\n        a.push(i as u8);\n        b.push(0);\n    }\n    let q = b.as_ptr() as *mut u8;\n    unsafe string::memset(q, 7, 2);\n    unsafe string::memcpy(unsafe (q + 2), a.as_ptr(), 2);\n    let mut r: u32 = 0;\n    for x in b.iter() {\n        r = r * 10 + *x as u32;\n    }\n    return r;\n}\nconst R: u32 = moved(true);\nconst L: u32 = moved(false);\nconst F: u32 = filled();\nstatic_assert(R == 112346, \"memmove to a higher address\");\nstatic_assert(L == 234556, \"memmove to a lower address\");\nstatic_assert(F == 7712, \"memset then memcpy\");\nfn main(argv: Vector<str>) i32 {\n    let right = argv.len() == 1;\n    if moved(right) != R || moved(!right) != L || filled() != F {\n        return 1;\n    }\n    return 0;\n}\n",
+        "import string;\nconst fn moved(right: bool) u32 {\n    let mut a: [u8; 6] = [1, 2, 3, 4, 5, 6];\n    let p = &mut a as *mut [u8; 6] as *mut u8;\n    if right {\n        unsafe string::memmove(unsafe (p + 1), p, 4);\n    } else {\n        unsafe string::memmove(p, unsafe (p + 1), 4);\n    }\n    let mut r: u32 = 0;\n    for x in a {\n        r = r * 10 + x as u32;\n    }\n    return r;\n}\nconst fn filled() u32 {\n    let mut a = Vector::<u8>::new();\n    let mut b = Vector::<u8>::new();\n    for i in 1..5 {\n        a.push(i as u8);\n        b.push(0);\n    }\n    let q = b.as_mut_ptr();\n    unsafe string::memset(q, 7, 2);\n    unsafe string::memcpy(unsafe (q + 2), a.as_ptr(), 2);\n    let mut r: u32 = 0;\n    for x in b.iter() {\n        r = r * 10 + *x as u32;\n    }\n    return r;\n}\nconst R: u32 = moved(true);\nconst L: u32 = moved(false);\nconst F: u32 = filled();\nstatic_assert(R == 112346, \"memmove to a higher address\");\nstatic_assert(L == 234556, \"memmove to a lower address\");\nstatic_assert(F == 7712, \"memset then memcpy\");\nfn main(argv: Vector<str>) i32 {\n    let right = argv.len() == 1;\n    if moved(right) != R || moved(!right) != L || filled() != F {\n        return 1;\n    }\n    return 0;\n}\n",
         0,
     );
 }

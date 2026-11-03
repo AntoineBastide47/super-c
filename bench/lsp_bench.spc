@@ -680,7 +680,7 @@ fn print_retained(p: &loader::Package, when: str) {
     let mut tables: usize = 0;
     for i in 0..p.modules.len() {
         let m = p.modules.at(i);
-        let a = &m.ast;
+        let a = m.ast.get_ref();
         let d = a.nodes.retained() + a.children.retained();
         let bb = a.b.retained();
         src += m.source.capacity();
@@ -688,7 +688,7 @@ fn print_retained(p: &loader::Package, when: str) {
         body += bb;
         tables += a.retained_bytes() - d - bb;
     }
-    let types = p.tt.retained();
+    let types = p.tt.get_ref().retained();
     let index = p.retained_bytes() - src - decl - body - tables + p.sched.retained();
     unsafe stdio::printf(
         "  retained MiB %s: sources %.1f, declaration syntax %.1f, bodies %.1f, declaration tables %.1f, types %.1f, indexes %.1f, old generations 0 (total %.1f)\n".ptr() as *const char,

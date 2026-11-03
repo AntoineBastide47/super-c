@@ -27,7 +27,7 @@ pub interface Sync {}
 /// Marker: all-zero bytes are a valid, empty value of the type whatever its private fields hold, so a
 /// struct literal that omits a field of the type zero-fills it (each field's own type must still be
 /// valid as zero). Nothing verifies the claim: it is asserted with `unsafe extend T as Zeroable {}`.
-/// std's containers assert it (`str`, `String`, `Vector`, `Array`, `Map`, `Set`); `Slice` and
+/// std's containers assert it (`str`, `String`, `Vector`, `Array`, `Map`, `Set`, `UnsafeCell`); `Slice` and
 /// `SliceMut` need no assertion, their fields are public.
 pub interface Zeroable {}
 

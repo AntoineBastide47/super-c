@@ -1202,7 +1202,7 @@ fn js_lock(i: i32, lock: bool) i32 {
 @platform(macos | ios | linux | android)
 fn js_make(n: i32) bool {
     let mut path = tmp_template("super-c-jobs-XXXXXX");
-    let fd = unsafe mkstemp(path.cstr() as *mut char);
+    let fd = unsafe mkstemp(path.cstr_mut());
     if fd < 0 {
         return false;
     }
@@ -1247,7 +1247,7 @@ const DIAG_TREE: usize = 64;
 @platform(macos | ios | linux | android)
 fn cap_open(path: &mut String) i32 {
     *path = tmp_template("sc-test-XXXXXX");
-    let fd = unsafe mkstemp(path.cstr() as *mut char);
+    let fd = unsafe mkstemp(path.cstr_mut());
     if fd < 0 {
         return -1;
     }

@@ -244,8 +244,8 @@ extend Liveness {
         let bound = c.nblocks as u64 + 128 * c.succ.len() as u64 * w as u64;
         // Rows are sized once above; every `base/succ*w + k` is `< nblocks*w = row.len()`, so the
         // per-word inner loop indexes unchecked (super-c has no BCE pass, so this drops it by hand).
-        let pin = lv.live_in.as_ptr() as *mut u64;
-        let pout = lv.live_out.as_ptr() as *mut u64;
+        let pin = lv.live_in.as_mut_ptr();
+        let pout = lv.live_out.as_mut_ptr();
         let puse = f.luse.as_ptr();
         let pdef = f.ldef.as_ptr();
         while lv.s_queue.len() != 0 {
@@ -322,7 +322,7 @@ const fn bit_get(v: &Vector<u64>, i: u32) bool {
 const fn bit_set(v: &mut Vector<u64>, i: u32) {
     let w = (i / 64) as usize;
     unsafe {
-        let p = v.as_ptr() as *mut u64 + w;
+        let p = v.as_mut_ptr() + w;
         *p = *p | 1u64 << (i & 63) as u64;
     }
 }
@@ -330,7 +330,7 @@ const fn bit_set(v: &mut Vector<u64>, i: u32) {
 const fn bit_clear(v: &mut Vector<u64>, i: u32) {
     let w = (i / 64) as usize;
     unsafe {
-        let p = v.as_ptr() as *mut u64 + w;
+        let p = v.as_mut_ptr() + w;
         *p = *p & ~(1u64 << (i & 63) as u64);
     }
 }
@@ -614,12 +614,12 @@ extend MoveFlow {
         // Raw row pointers: mf.mi/di/mm and ctx.mi/di/mm are sized once above and never grow inside
         // the fixpoint (errors only accumulate under `fused`/reporting replays), so these stay
         // valid. Every `base/tb + k` is `< nblocks*w = row.len()`, so the per-word loops index unchecked.
-        let pmi = mf.mi.as_ptr() as *mut u64;
-        let pdi = mf.di.as_ptr() as *mut u64;
-        let pmm = mf.mm.as_ptr() as *mut u64;
-        let qmi = mf.s_ctx.mi.as_ptr() as *mut u64;
-        let qdi = mf.s_ctx.di.as_ptr() as *mut u64;
-        let qmm = mf.s_ctx.mm.as_ptr() as *mut u64;
+        let pmi = mf.mi.as_mut_ptr();
+        let pdi = mf.di.as_mut_ptr();
+        let pmm = mf.mm.as_mut_ptr();
+        let qmi = mf.s_ctx.mi.as_mut_ptr();
+        let qdi = mf.s_ctx.di.as_mut_ptr();
+        let qmm = mf.s_ctx.mm.as_mut_ptr();
         loop {
             let mut bi: u32 = 0;
             let mut sweep = false;

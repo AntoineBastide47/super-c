@@ -253,7 +253,7 @@ extend Interp {
     pub(package) fn remap_types(self: &mut Self, p: &loader::Package) {
         // objects past objs_live are dead: obj_new rewrites their slots and types before reuse
         for i in 0..self.objs_live {
-            let o = self.objs.index_mut(i);
+            let o = self.objs.get_mut().index_mut(i);
             for s in 0..o.slots.len() {
                 let v = o.slots.index_mut(s);
                 v.ty = rm_ty(p, v.tm, v.ty);
@@ -925,7 +925,8 @@ pub(package) struct Interp {
     pub(package) steps: u32,
     pub(package) max_steps: u32,
     pub(package) max_slots: u64,
-    pub(package) objs: Vector<IObj>,
+    // The objects, in a cell: `obj_ptr` gives one to change through the shared interpreter.
+    pub(package) objs: UnsafeCell<Vector<IObj>>,
     pub(package) objs_live: usize, // ids in use: live, dead, or on `free_ids`
     pub(package) live_slots: u64, // the budget's charge: slots and headers (`OBJ_SLOTS`) of every charged object
     pub(package) free_ids: Vector<u32>, // released ids `obj_new` reuses
@@ -975,7 +976,7 @@ pub(package) struct Interp {
     /// The borrow checker's kept lowerings, readable between borrow checking and emission (null
     /// otherwise): a non-generic body found there executes in place, with no lowering and no box.
     /// A per-task engine copies the pointer without counting as a viewer (the master counts).
-    pub(package) keep_view: *const irl::Keep,
+    pub(package) keep_view: *mut irl::Keep,
     /// While set, a kept hit becomes an owned compact copy in `bodies` instead of a view slot: the
     /// view closes before emission and the released syntax cannot lower the body again.
     pub(package) copy_kept: bool,
@@ -1115,7 +1116,7 @@ pub(package) fn interp_new(pkg: *const loader::Package) Interp {
         steps: 0,
         max_steps: IT_DEFAULT_STEPS,
         max_slots: IT_DEFAULT_SLOTS,
-        objs: Vector::<IObj>::new(),
+        objs: UnsafeCell::<Vector<IObj>>::new(Vector::<IObj>::new()),
         objs_live: 0,
         live_slots: 0,
         free_ids: Vector::<u32>::new(),
@@ -1357,7 +1358,7 @@ extend Interp {
     /// IT_RETAIN_SLOTS.
     fn eval_reset(self: &mut Self) {
         if self.slot_cap > IT_RETAIN_SLOTS {
-            self.objs.clear();
+            self.objs.get_mut().clear();
             self.slot_cap = 0;
         }
         self.steps = 0;
@@ -1527,7 +1528,7 @@ extend Interp {
         if id == 0 || id as usize > self.objs_live {
             return null;
         }
-        return unsafe (self.objs.as_ptr() as *mut IObj + (id - 1) as usize);
+        return unsafe ((*self.objs.get()).as_mut_ptr() + (id - 1) as usize);
     }
 
     // A new `n`-slot object of decl (dm, dn); 0 = failed.
@@ -1554,9 +1555,9 @@ extend Interp {
             self.objs_live += 1;
             id = self.objs_live as u32;
         }
-        if id as usize <= self.objs.len() {
+        if id as usize <= self.objs.get_ref().len() {
             // reuse a retained object: refit its slot vector, zero the metadata push{} would zero
-            let o = unsafe (self.objs.as_ptr() as *mut IObj + (id - 1) as usize);
+            let o = unsafe (self.objs.get_mut().as_mut_ptr() + (id - 1) as usize);
             unsafe (*o).slots.clear();
             if len != 0 {
                 let c0 = unsafe (*o).slots.capacity();
@@ -1591,7 +1592,7 @@ extend Interp {
                 }
             }
             self.slot_cap += slots.capacity() as u64;
-            self.objs.push(IObj { slots: slots, uactive: -1, dn: NODE_NONE });
+            self.objs.get_mut().push(IObj { slots: slots, uactive: -1, dn: NODE_NONE });
         }
         unsafe (*self.obj_ptr(id)).lvl = self.lvl;
         self.alog.push(id);
@@ -2055,7 +2056,7 @@ extend Interp {
         let nm = self.p().modules.len();
         for mm in 0..nm {
             let md = self.p().modules.at(mm);
-            if md.prelude || md.ast.nodes.len() == 0 {
+            if md.prelude || md.ast.get_ref().nodes.len() == 0 {
                 continue;
             }
             let a = unsafe &*self.p().module_ast_const(mm as ModuleId);
@@ -2089,7 +2090,7 @@ extend Interp {
             return false;
         }
         let a = unsafe &*self.p().module_ast_const(m);
-        let da = self.p().module_ast_const(dm) as *mut Ast;
+        let da = self.p().module_ast_ptr(dm);
         if a.type_concrete(t) {
             *out = unsafe (*da).reintern(a, t);
             return true;
@@ -2279,7 +2280,7 @@ extend Interp {
 
     fn steps_fail_of(self: &mut Self, m: ModuleId, owner: NodeId) u32 {
         let mut ss = replace(&mut self.csteps, Vector::<ConstStep>::new());
-        unsafe (*(self.p().module_ast_const(m) as *mut Ast)).steps_of(owner, &mut ss);
+        unsafe (*self.p().module_ast_ptr(m)).steps_of(owner, &mut ss);
         let ptr32 = lay::target_for(self.p().arch).ptr == 4;
         let mut r: u32 = 0;
         for i in 0..ss.len() {
@@ -2557,7 +2558,7 @@ extend Interp {
                 let ly = *pa.type_at(py.as_data.arr.len);
                 if ly.kind == TypeKind::TYPE_GENERIC && ly.module == gm {
                     let bt = self.p().const_param_bt(gm, ly.as_data.decl);
-                    let ct = unsafe (*(self.p().module_ast_const(rm) as *mut Ast)).const_value(ay.as_data.arr.len, bt);
+                    let ct = unsafe (*self.p().module_ast_ptr(rm)).const_value(ay.as_data.arr.len, bt);
                     return self.iunify(pm, py.as_data.arr.len, rm, ct, gm, gens, list, depth + 1);
                 }
                 return true;
@@ -2858,7 +2859,7 @@ extend Interp {
             ) {
                 return false;
             }
-            let ct = unsafe (*(self.p().module_ast_const(rm) as *mut Ast)).const_value(cval_bits(q), bt);
+            let ct = unsafe (*self.p().module_ast_ptr(rm)).const_value(cval_bits(q), bt);
             if !self.subst_add(list, xm, gid, rm, ct) {
                 return false;
             }
@@ -3181,10 +3182,10 @@ extend Interp {
         }
         if self.p().icost_on && self.cur_item != loader::ITEM_NONE {
             // Item-schedule measurement: a dynamic evaluation edge from the checking item.
-            let pm = self.pkg as *mut loader::Package;
             let ci = self.p().idx().items.at(self.cur_item as usize);
-            unsafe (*pm).ctfe_edges.push(ci.module as u64 << 32 | ci.node as u64);
-            unsafe (*pm).ctfe_edges.push(m as u64 << 32 | fnode as u64);
+            let ce = unsafe &mut *self.p().ctfe_edges.get();
+            ce.push(ci.module as u64 << 32 | ci.node as u64);
+            ce.push(m as u64 << 32 | fnode as u64);
         }
         let mut lw = self.lowerer(m, fnode);
         for i in 0..binds.len() {
@@ -3292,8 +3293,7 @@ extend Interp {
         if caller == loader::ITEM_NONE || callee == loader::ITEM_NONE || caller == callee {
             return;
         }
-        let pm = self.pkg as *mut loader::Package;
-        unsafe (*pm).sched.dyn_edges.insert(caller as u64 << 32 | callee as u64);
+        unsafe (*self.p().sched.dyn_edges.get()).insert(caller as u64 << 32 | callee as u64);
     }
 
     /// Name the reader of the evaluations that follow (under the engine lock): the item under
@@ -3453,7 +3453,7 @@ extend Interp {
                 self.body_plain.set(i, PLAIN_NONE);
             }
         }
-        let kp = self.keep_view as *mut irl::Keep;
+        let kp = self.keep_view;
         assert(unsafe (*kp).viewers > 0);
         unsafe (*kp).viewers -= 1;
         self.keep_view = null;
@@ -3474,7 +3474,7 @@ extend Interp {
     pub(package) fn release_pass(self: &mut Self, mark: BodyMark) {
         assert(self.nframes == 0 && self.in_run == 0 && self.ndepth == 0, "release_pass runs between evaluations");
         assert(mark.slots <= self.body_slot.len() && mark.boxes <= self.bodies.len(), "a mark of this cache");
-        self.objs = Vector::<IObj>::new();
+        self.objs = UnsafeCell::<Vector<IObj>>::new(Vector::<IObj>::new());
         self.slot_cap = 0;
         self.objs_live = 0;
         self.live_slots = 0;
@@ -10924,7 +10924,7 @@ extend Interp {
             self.elock_depth += 1;
             return;
         }
-        let pm = self.pkg as *mut loader::Package;
+        let pm = self.pkg;
         let own = if unsafe (*pm).wl_on {
             unsafe (*pm).wl_eng_begin()
         } else {
@@ -10945,7 +10945,7 @@ extend Interp {
         }
         self.elock_depth -= 1;
         if self.elock_depth == 0 {
-            let pm = self.pkg as *mut loader::Package;
+            let pm = self.pkg;
             let own = self.wl_own;
             if unsafe (*pm).wl_on {
                 unsafe (*pm).wl_eng_end();
@@ -10953,7 +10953,7 @@ extend Interp {
             unsafe atomic::store_usize(&mut self.elock_owner, 0, 0);
             self.elock_sem.release();
             if own >= 0 {
-                unsafe (*pm).modules[own as usize].ast.wl_enter();
+                unsafe (*(*pm).modules[own as usize].ast.get()).wl_enter();
             }
         }
     }

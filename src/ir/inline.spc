@@ -338,7 +338,7 @@ fn unify(
     if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.arr_like() {
         unify(pkg, km, y.as_data.elem, cm, z.as_data.elem, binds, depth + 1);
         if y.arr_sym() {
-            let ca = unsafe &mut *(p.module_ast_const(cm) as *mut Ast);
+            let ca = unsafe &mut *p.module_ast_ptr(cm);
             // A count binds a bare length parameter as a value of that parameter's type.
             let ly = *(unsafe &*p.module_ast_const(km)).type_at(y.as_data.arr.len);
             let zl = if z.arr_sym() {
@@ -391,7 +391,7 @@ fn xty(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bind
 fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, binds: &Vector<GBind>, depth: u32) TypeId {
     let p = unsafe &*pkg;
     let ka = unsafe &*p.module_ast_const(km);
-    let ca = unsafe &mut *(p.module_ast_const(cm) as *mut Ast);
+    let ca = unsafe &mut *p.module_ast_ptr(cm);
     let y = *ka.type_at(kt);
     return switch y.kind {
         TYPE_GENERIC => {

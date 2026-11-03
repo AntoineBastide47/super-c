@@ -290,7 +290,7 @@ pub(package) fn compile_ast(src: str, stop: i32) CompiledAst {
     }
     // Detach the user module's AST for inspection beside the package that holds its types.
     p.cir = null;
-    let ast = replace(&mut p.modules[uidx].ast, Ast::new(0));
+    let ast = replace(p.modules[uidx].ast.get_mut(), Ast::new(0));
     return CompiledAst { errors: rr.errors, stage: stop, ast: ast, pkg: p };
 }
 
@@ -1698,7 +1698,7 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let aptr = (&mut m.ast) as *mut Ast;
+    let aptr = m.ast.get_mut() as *mut Ast;
     let mut rr = res::Resolver::new(unsafe &mut *aptr, unsafe str::from_raw(src as *const u8, len), pkg);
     rr.resolve();
     if i == cap {
@@ -1717,7 +1717,7 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
     t.check();
     if i == cap {
         let c = t.errors.errors.len();
@@ -1737,7 +1737,7 @@ fn h_borrowck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled,
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
     let mut ow = bfx::Owner::new(pkg);
     let mut ctx = bfi::BorrowCtx::new();
     ctx.keep = keep;

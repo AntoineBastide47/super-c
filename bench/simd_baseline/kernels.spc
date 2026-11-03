@@ -909,11 +909,11 @@ extend Input {
     fn call(self: &mut Input, k: usize, table: &Kernels) u64 {
         let n = self.floats;
         let n_bytes = self.bytes_p.len();
-        let out = self.out_f32.as_ptr() as *mut f32;
-        let out_u8 = self.out_u8.as_ptr() as *mut u8;
+        let out = self.out_f32.as_mut_ptr();
+        let out_u8 = self.out_u8.as_mut_ptr();
         return switch k {
             0 => {
-                table.saxpy_f32(1.5, self.mixed.as_ptr(), self.saxpy_y.as_ptr() as *mut f32, n);
+                table.saxpy_f32(1.5, self.mixed.as_ptr(), self.saxpy_y.as_mut_ptr(), n);
                 0
             },
             1 => bits(table.dot_f32_ordered(self.finite_a.as_ptr(), self.finite_b.as_ptr(), n)),

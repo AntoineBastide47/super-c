@@ -2226,6 +2226,34 @@ fn unsafe_cell_is_not_sync() {
     );
 }
 
+// Immutable never becomes mutable: neither an immutable reference nor a `*const` pointer casts to `*mut`,
+// so `as_ptr()` of a shared borrow cannot be written through. A `*mut` comes from `&mut` (`as_mut_ptr`) or an
+// `UnsafeCell`, and a struct literal zero-fills an omitted cell of a zero-valid type.
+@test
+fn const_pointers_never_become_mut() {
+    h::expect_err_msg(
+        "a *const pointer cast to *mut",
+        "fn main() i32 { let x: i32 = 1; let p = &x as *const i32; let q = p as *mut i32; return unsafe *q; }\n",
+        "cannot cast a '*const' pointer to a '*mut' pointer",
+    );
+    h::expect_err_msg(
+        "a shared vector's buffer cast to *mut",
+        "fn bump(v: &Vector<i32>) { let p = v.as_ptr() as *mut i32; unsafe *p = 1; }\nfn main() i32 { let mut v = Vector::<i32>::new(); v.push(0); bump(&v); return v[0]; }\n",
+        "cannot cast a '*const' pointer to a '*mut' pointer",
+    );
+    h::expect_ok(
+        "an exclusive vector's buffer, a cell's value and a zero-filled cell",
+        "struct S { c: UnsafeCell<u64>, n: u32 }\nfn bump(v: &mut Vector<i32>) { let p = v.as_mut_ptr(); unsafe *p = 1; }\nfn main() i32 { let mut v = Vector::<i32>::new(); v.push(0); bump(&mut v); let s = S { n: 2 }; unsafe *s.c.get() = 3; return v[0] + (unsafe *s.c.get()) as i32 + s.n as i32 - 6; }\n",
+    );
+    // The program imports std::ptr, which the in-process compile does not load: a build.
+    h::expect_run(
+        "the explicit conversion",
+        "import std::ptr;\nfn main() i32 { let x: i32 = 1; let p = &x as *const i32; let q = ptr::cast_mut(p); let r = ptr::cast_const(q); return unsafe *r - 1; }\n",
+        "",
+        "",
+    );
+}
+
 @test
 fn dyn_t() {
     h::expect_ok(

@@ -81,7 +81,7 @@ fn spans_of(p: &loader::Package, m: usize) Spans {
     if !p.modules.at(m).has_ast {
         return sp;
     }
-    let a = &p.modules.at(m).ast;
+    let a = p.modules.at(m).ast.get_ref();
     for i in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
         let it = p.idx().items.at(i);
         let s = a.at_const(it.node).span;
@@ -160,7 +160,7 @@ pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>,
     if !p.modules.at(m).has_ast {
         return;
     }
-    let a = &p.modules.at(m).ast;
+    let a = p.modules.at(m).ast.get_ref();
     let i0 = p.idx().mod_items[m] as usize;
     let i1 = p.idx().mod_items[m + 1] as usize;
     let nl = i1 - i0;
@@ -321,7 +321,7 @@ pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>,
                 let mut t = p.item_of(d.module, d.node);
                 if t == loader::ITEM_NONE {
                     let dm = d.module as usize;
-                    t = owner_at(p, sps, &mut tc, d.module, p.modules.at(dm).ast.at_const(d.node).span.start);
+                    t = owner_at(p, sps, &mut tc, d.module, p.modules.at(dm).ast.get_ref().at_const(d.node).span.start);
                 }
                 tk.set(slot, dkey);
                 tv.set(slot, t);
@@ -460,9 +460,11 @@ pub(package) fn open(p: &mut loader::Package) {
                 prev = meta.node;
             }
             if p.modules.at(m).has_ast {
-                let nd = p.modules.at(m).ast.at_const(meta.node);
-                if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(p.modules.at(m).ast.ext(meta.node).function.body) {
-                    let b = p.modules.at(m).ast.ext(meta.node).function.body & NODE_BODY_MASK;
+                let nd = p.modules.at(m).ast.get_ref().at_const(meta.node);
+                if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(
+                    p.modules.at(m).ast.get_ref().ext(meta.node).function.body,
+                ) {
+                    let b = p.modules.at(m).ast.get_ref().ext(meta.node).function.body & NODE_BODY_MASK;
                     bmax = bmax.max(b);
                 }
             }
@@ -485,7 +487,7 @@ pub(package) fn open(p: &mut loader::Package) {
     loop {
         switch it.next() {
             Some(e) => {
-                sch.dyn_edges.insert(*e);
+                sch.dyn_edges.get_mut().insert(*e);
             },
             None => {
                 break;
@@ -523,7 +525,7 @@ pub(package) fn build(p: &mut loader::Package, edges: &Vector<u64>) {
         if it.kind != loader::ItemKind::IK_EXTEND as u8 || !p.modules.at(it.module as usize).has_ast {
             continue;
         }
-        let a = &p.modules.at(it.module as usize).ast;
+        let a = p.modules.at(it.module as usize).ast.get_ref();
         let tn = a.ext(it.node).extend_def.target_type;
         if tn == NODE_NONE {
             continue;
@@ -619,7 +621,7 @@ fn builtin_names(p: &loader::Package, sch: &mut loader::ItemSched) {
         if it.kind != loader::ItemKind::IK_EXTEND as u8 || !p.modules.at(m).has_ast || p.modules.at(m).prelude {
             continue;
         }
-        let a = &p.modules.at(m).ast;
+        let a = p.modules.at(m).ast.get_ref();
         let src = p.modules.at(m).source.as_str();
         let ed = a.ext(it.node).extend_def;
         if ed.target_type == NODE_NONE || a.at_const(ed.target_type).kind != NodeKind::NODE_TYPE_PATH {
@@ -652,7 +654,7 @@ fn builtin_names(p: &loader::Package, sch: &mut loader::ItemSched) {
             if fi.kind != loader::ItemKind::IK_INTERFACE as u8 || fi.name != sym || !p.modules.at(fi.module as usize).has_ast {
                 continue;
             }
-            let fa = &p.modules.at(fi.module as usize).ast;
+            let fa = p.modules.at(fi.module as usize).ast.get_ref();
             let fsrc = p.modules.at(fi.module as usize).source.as_str();
             let its = fa.ext(fi.node).interface_def.items;
             for k in 0..its.len {
@@ -680,7 +682,7 @@ pub(package) fn builtin_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>
         return;
     }
     let mut c = cache_none();
-    let a = &p.modules.at(m).ast;
+    let a = p.modules.at(m).ast.get_ref();
     let src = p.modules.at(m).source.as_str();
     let nm = a.nodes.len();
     let nb = if a.b.released {
@@ -819,7 +821,7 @@ pub(package) fn owner_of(p: &loader::Package, m: ModuleId, node: NodeId) loader:
         // one before it, and the items before the first body repeat 0, the first body's own
         // block id when it is one node. The owner is the first position at or past the search
         // that owns a body.
-        let a = &p.modules.at(m as usize).ast;
+        let a = p.modules.at(m as usize).ast.get_ref();
         while lo < p.idx().mod_items[m as usize + 1] as usize {
             let nd = a.at_const(p.idx().items.at(p.sched.by_node[lo] as usize).node);
             if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(
@@ -917,8 +919,8 @@ pub(package) fn finalize(p: &mut loader::Package) {
     }
     // A set iterates in an order its insertion history shapes: sort the dynamic edges, so the rows
     // do not depend on the order the engine recorded them in (worker count and timing).
-    let mut dynv = Vector::<u64>::with_capacity(p.sched.dyn_edges.len());
-    for e in p.sched.dyn_edges.iter() {
+    let mut dynv = Vector::<u64>::with_capacity(p.sched.dyn_edges.get_ref().len());
+    for e in p.sched.dyn_edges.get_ref().iter() {
         dynv.push(*e);
     }
     dynv.sort();
@@ -926,7 +928,7 @@ pub(package) fn finalize(p: &mut loader::Package) {
         edges.push(dynv[i]);
     }
     build_final(p, &edges);
-    p.sched.dyn_edges = Set::<u64>::new();
+    p.sched.dyn_edges = UnsafeCell::<Set<u64>>::new(Set::<u64>::new());
     let t1 = plat::now_ns();
     p.ensure_sigs();
     let mut hashes = Vector::<u64>::new();
@@ -941,7 +943,7 @@ pub(package) fn finalize(p: &mut loader::Package) {
         if m != am {
             am = m;
             akeys.clear();
-            let attrs = &p.modules.at(m).ast.attrs;
+            let attrs = &p.modules.at(m).ast.get_ref().attrs;
             for k in 0..attrs.len() {
                 akeys.push(attrs.at(k).owner as u64 << 32 | k as u64);
             }
@@ -961,7 +963,7 @@ pub(package) fn finalize(p: &mut loader::Package) {
 fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize, akeys: &Vector<u64>) u64 {
     let it = *p.idx().items.at(i);
     let m = it.module as usize;
-    let a = &p.modules.at(m).ast;
+    let a = p.modules.at(m).ast.get_ref();
     let mut h = mix(mix(p.sched.key[i], it.kind), it.vis);
     let mut k = switch akeys.binary_search(&(it.node as u64 << 32)) {
         Ok(x) => x,
@@ -1049,7 +1051,7 @@ fn node_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: usize, 
     if id == NODE_NONE {
         return mix(h, 0);
     }
-    let a = &p.modules.at(m).ast;
+    let a = p.modules.at(m).ast.get_ref();
     if !a.valid(id) {
         return h;
     }
@@ -1068,7 +1070,7 @@ fn decl_key(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: usize, n
     if it != loader::ITEM_NONE {
         return p.sched.key[it as usize];
     }
-    let a = &p.modules.at(m).ast;
+    let a = p.modules.at(m).ast.get_ref();
     if !a.valid(node) {
         return 0;
     }
@@ -1086,7 +1088,7 @@ fn ty_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: ModuleId,
     if t == TYPE_NONE || depth > 32 {
         return mix(h, 0xFF);
     }
-    let a = &p.modules.at(m as usize).ast;
+    let a = p.modules.at(m as usize).ast.get_ref();
     let ty = *a.type_at(t);
     let k = ty.kind;
     h = mix(mix(h, k as u64), ty.qualifier);
@@ -1485,13 +1487,13 @@ pub(package) fn report(p: &mut loader::Package, task_ns: u64) {
         );
     }
     eprint("\n");
-    frontier_line(p, "resolve (per item)", &p.icost_rs, task_ns);
+    frontier_line(p, "resolve (per item)", p.icost_rs.get_ref(), task_ns);
     let mut dn: usize = 0;
     let mut dx: usize = 0;
     let mut k3: usize = 0;
-    while k3 + 1 < p.ctfe_edges.len() {
+    while k3 + 1 < p.ctfe_edges.get_ref().len() {
         dn += 1;
-        if p.ctfe_edges[k3] >> 32 != p.ctfe_edges[k3 + 1] >> 32 {
+        if p.ctfe_edges.get_ref()[k3] >> 32 != p.ctfe_edges.get_ref()[k3 + 1] >> 32 {
             dx += 1;
         }
         k3 += 2;

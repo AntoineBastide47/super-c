@@ -79,7 +79,7 @@ fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let mut r = res::Resolver::new(
-        unsafe &mut *((&mut m.ast) as *mut Ast),
+        unsafe &mut *(m.ast.get_mut() as *mut Ast),
         unsafe str::from_raw(src as *const u8, len),
         pkg,
     );

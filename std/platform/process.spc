@@ -380,7 +380,7 @@ pub fn spawn(cmd: Command) Result<Child, IoError> {
             return invalid::<Child>(IoOp::Spawn);
         }
     }
-    let base = text.as_ptr() as *mut char;
+    let base = text.as_mut_ptr() as *mut char;
     let mut ptrs = Vector::<*mut char>::with_capacity(offs.len() + 2);
     for i in 0..nargs {
         ptrs.push(unsafe (base + *offs.at(i)));
@@ -420,7 +420,7 @@ pub fn spawn(cmd: Command) Result<Child, IoError> {
             win_quote_into(&mut line, cmd.argv[i]);
         }
     }
-    let wline = path::native(&line, IoOp::Spawn)?;
+    let mut wline = path::native(&line, IoOp::Spawn)?;
     let mut block = Vector::<u16>::new();
     let mut flags: u32 = 0;
     if let Some(env) = cmd.env {
@@ -476,7 +476,7 @@ pub fn spawn(cmd: Command) Result<Child, IoError> {
         null
     };
     let mut pi = unsafe zeroed::<PROCESS_INFORMATION>();
-    let ok = unsafe CreateProcessW(app, wline.ptr() as *mut u16, null, null, 1, flags, envp, dir, &mut si, &mut pi) != 0;
+    let ok = unsafe CreateProcessW(app, wline.ptr_mut(), null, null, 1, flags, envp, dir, &mut si, &mut pi) != 0;
     if !ok {
         return fail::<Child>(IoOp::Spawn);
     }

@@ -68,7 +68,7 @@ extend Reader {
         }
         let old = self.buf.len();
         self.buf.resize_default(old + FILL);
-        let r = read_raw(self.f, (unsafe (self.buf.as_ptr() + old)) as *mut u8, FILL);
+        let r = read_raw(self.f, unsafe (self.buf.as_mut_ptr() + old), FILL);
         if r <= 0 {
             self.buf.truncate(old);
             self.eof = true;

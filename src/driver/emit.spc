@@ -153,7 +153,7 @@ extend TypeMarks {
         if t == TYPE_NONE || (t & TYPE_PROV) != 0 || self.state[t as usize] != TM_UNSET {
             return;
         }
-        mark_type_modules(p, am, t, unsafe (self.rows.as_ptr() as *mut u64 + t as usize * self.w));
+        mark_type_modules(p, am, t, unsafe (self.rows.as_mut_ptr() + t as usize * self.w));
         self.state.set(t as usize, pick(ast_type_mentions_builtin(p, am, t), TM_CORE, TM_SET));
     }
 
@@ -338,7 +338,7 @@ fn compute_emit_live(p: &loader::Package) Vector<bool> {
         }
     }
     let w = (n + 63) / 64;
-    let ntt = p.tt.deref().len();
+    let ntt = p.tt.deref().get_ref().len();
     let mut tm = TypeMarks { w: w, rows: Vector::<u64>::new(), state: Vector::<u8>::new() };
     tm.rows.resize_default(ntt * w);
     tm.state.resize_default(ntt);
@@ -358,7 +358,7 @@ fn compute_emit_live(p: &loader::Package) Vector<bool> {
                 continue;
             }
             wg.add(1);
-            let t = LiveTask { p: pv, tm: tv, row: unsafe (rows.as_ptr() as *mut u64 + m * w), m: m as u64 };
+            let t = LiveTask { p: pv, tm: tv, row: unsafe (rows.as_mut_ptr() + m * w), m: m as u64 };
             let wgc = wg.clone();
             launch || {
                 emit_live_row(
@@ -374,7 +374,7 @@ fn compute_emit_live(p: &loader::Package) Vector<bool> {
     } else {
         for m in 0..n {
             if p.modules[m].has_ast {
-                emit_live_row(p, &tm, m, unsafe (rows.as_ptr() as *mut u64 + m * w));
+                emit_live_row(p, &tm, m, unsafe (rows.as_mut_ptr() + m * w));
             }
         }
     }
@@ -424,7 +424,7 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let aptr = (&mut m.ast) as *mut Ast;
+    let aptr = m.ast.get_mut() as *mut Ast;
     let mut r = resolver::Resolver::new(unsafe &mut *aptr, unsafe str::from_raw(src as *const u8, len), pkg);
     r.lint = lint;
     r.resolve();
@@ -460,7 +460,7 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool, dup_
         let m = &mut p.modules[i];
         let src = m.source.as_str().ptr() as *const char;
         let len = m.source.len();
-        let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+        let mut t = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
         t.check_cross_module_dup_conformances(dup_idx);
         t.check_cross_module_dup_items();
         if t.has_errors() {
@@ -478,7 +478,7 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool, dup_
     loop {
         let mut ends = Vector::<u32>::new();
         for i in 0..n {
-            ends.push((unsafe p.modules[i].ast.proj_obs).len() as u32);
+            ends.push((unsafe p.modules[i].ast.get_ref().proj_obs).len() as u32);
         }
         let mut grew = false;
         for i in 0..n {
@@ -486,7 +486,7 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool, dup_
             let m = &mut p.modules[i];
             let src = m.source.as_str().ptr() as *const char;
             let len = m.source.len();
-            let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+            let mut t = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
             if t.discharge_foreign_obligations(starts.as_ptr()) {
                 grew = true;
             }
@@ -507,12 +507,12 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool, dup_
     for i in 0..pick(p.ok, n, 0) {
         let pkg = p as *mut loader::Package;
         let m = &mut p.modules[i];
-        if (unsafe m.ast.dmd_uses).len() == 0 {
+        if (unsafe m.ast.get_ref().dmd_uses).len() == 0 {
             continue;
         }
         let src = m.source.as_str().ptr() as *const char;
         let len = m.source.len();
-        let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+        let mut t = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
         t.run_dmd_uses();
         if t.has_errors() {
             t.errors.finalize(unsafe str::from_raw(src as *const u8, len), &p.modules[i].file);
@@ -547,7 +547,7 @@ fn rs_run_one(t: RsTask) {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let aptr = (&mut m.ast) as *mut Ast;
+    let aptr = m.ast.get_mut() as *mut Ast;
     let mut r = resolver::Resolver::new(unsafe &mut *aptr, unsafe str::from_raw(src as *const u8, len), pkg);
     r.lint = t.lint && lint_reported(p, i, -1);
     r.resolve();
@@ -572,7 +572,7 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
         let _ = p.module_closure(i as ModuleId);
     }
     for i in 0..n {
-        p.modules[i].ast.freeze_nodes();
+        p.modules[i].ast.get_mut().freeze_nodes();
     }
     let mut outs = Vector::<RsOut>::with_capacity(n);
     for _ in 0..n {
@@ -596,7 +596,7 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
     }
     wg.wait_masked();
     for i in 0..n {
-        p.modules[i].ast.thaw_nodes(); // all four arrays: a body arena a lowering spilled into included
+        p.modules[i].ast.get_mut().thaw_nodes(); // all four arrays: a body arena a lowering spilled into included
     }
     let mut edges = replace(&mut p.carry.rs_edges, Vector::<u64>::new());
     for i in from..n {
@@ -692,7 +692,7 @@ fn tc_job(ctx: *mut void, j: u32) {
         }
         if p.jobs != 1 {
             let _g = (unsafe &*(st.lease + meta.module as usize)).lock();
-            let a = (&mut p.modules[meta.module as usize].ast) as *mut Ast;
+            let a = p.modules[meta.module as usize].ast.get_mut() as *mut Ast;
             unsafe (*a).wl_enter();
             tc_item(st, it, meta);
             unsafe (*a).wl_leave();
@@ -711,7 +711,7 @@ fn tc_item(st: &TcStage, it: loader::ItemId, meta: loader::ItemMeta) {
         let mm = &mut p.modules[m];
         let src = mm.source.as_str().ptr() as *const char;
         let len = mm.source.len();
-        let mut t = tc::TypeChecker::new(&mut mm.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+        let mut t = tc::TypeChecker::new(mm.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
         t.lint = unsafe st.lint[m];
         t.check_open();
         chk.push(Box::new(t));
@@ -921,8 +921,8 @@ fn typecheck_stage(
         for i in 0..n {
             // Pin the syntax arrays: a checker synthesizes nodes while other tasks read
             // pre-existing ones.
-            p.modules[i].ast.freeze_nodes();
-            p.modules[i].ast.freeze_resolutions();
+            p.modules[i].ast.get_mut().freeze_nodes();
+            p.modules[i].ast.get_mut().freeze_resolutions();
         }
     }
     let mut outs = Vector::<TcOut>::with_capacity(ni);
@@ -979,8 +979,8 @@ fn typecheck_stage(
     }
     if par {
         for i in 0..n {
-            p.modules[i].ast.thaw_nodes();
-            p.modules[i].ast.thaw_resolutions();
+            p.modules[i].ast.get_mut().thaw_nodes();
+            p.modules[i].ast.get_mut().thaw_resolutions();
         }
         p.wl_on = false;
         set_stage_locks(p, false);
@@ -993,7 +993,7 @@ fn typecheck_stage(
             let mm = &mut p.modules[m];
             let src = mm.source.as_str().ptr() as *const char;
             let len = mm.source.len();
-            let mut t = tc::TypeChecker::new(&mut mm.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+            let mut t = tc::TypeChecker::new(mm.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
             t.lint = lint[m];
             t.check_open();
             t.check_orphans();
@@ -1097,7 +1097,7 @@ fn typecheck_stage(
 // one left is a checker defect whose silent acceptance would reach the later passes.
 fn assert_no_error_type(p: &loader::Package) {
     for i in p.root_module as usize..p.modules.len() {
-        let a = &p.modules[i].ast;
+        let a = p.modules[i].ast.get_ref();
         if !p.modules[i].has_ast {
             continue;
         }
@@ -1124,7 +1124,7 @@ fn assert_no_error_type(p: &loader::Package) {
 
 @cold
 fn error_type_abort(p: &loader::Package, m: usize, n: NodeId) {
-    let sp = p.modules[m].ast.at_const(n).span;
+    let sp = p.modules[m].ast.get_ref().at_const(n).span;
     eprint("internal error: {}: offset {}: TYPE_ERROR without a diagnostic\n", p.modules[m].file.as_str(), sp.start);
     panic("a checked module holds TYPE_ERROR without a diagnostic");
 }
@@ -1147,7 +1147,7 @@ fn dup_run_one(t: DupTask) {
     let m = &mut p.modules[t.i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut tck = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut tck = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
     tck.check_cross_module_dup_conformances(unsafe &*t.idx);
     tck.check_cross_module_dup_items();
     if tck.has_errors() {
@@ -1178,7 +1178,7 @@ pub(package) fn build_simd_table(p: &mut loader::Package, n: usize) String {
     let mut first = String::new();
     p.simd_table.clear();
     for i in 0..n {
-        let a = &p.modules[i].ast;
+        let a = p.modules[i].ast.get_ref();
         for k in 0..a.attrs.len() {
             let at = *a.attrs.at(k);
             if at.kind != AttrKind::ATTR_SIMD_IMPL as u8 || !at.expr {
@@ -1204,8 +1204,8 @@ pub(package) fn build_simd_table(p: &mut loader::Package, n: usize) String {
         if x.key != y.key || x.fs.w[0] != y.fs.w[0] || x.fs.w[1] != y.fs.w[1] {
             continue;
         }
-        let ya = &p.modules[y.module as usize].ast;
-        let xa = &p.modules[x.module as usize].ast;
+        let ya = p.modules[y.module as usize].ast.get_ref();
+        let xa = p.modules[x.module as usize].ast.get_ref();
         let xn = xa.at_const(xa.ext_name(x.node)).as_data.name.text;
         let mut errs = diag::Errors::new();
         errs.emit_span(
@@ -1235,7 +1235,7 @@ pub(package) fn build_simd_table(p: &mut loader::Package, n: usize) String {
 pub(package) fn check_feature_calls(p: &mut loader::Package, n: usize) {
     p.fn_union = p.features;
     for i in 0..n {
-        let a = &p.modules[i].ast;
+        let a = p.modules[i].ast.get_ref();
         for k in 0..a.attrs.len() {
             let at = *a.attrs.at(k);
             // The entries a function of the program may call render; a binding's features say what
@@ -1257,7 +1257,7 @@ pub(package) fn check_feature_calls(p: &mut loader::Package, n: usize) {
 /// The errors of module `i`'s functions that need CPU features (`check_feature_calls`) into `errs`: the
 /// uses beyond their callers' features, and the functions called from outside the program.
 pub(package) fn feature_errors(p: &loader::Package, i: usize, errs: &mut diag::Errors) {
-    let a = &p.modules[i].ast;
+    let a = p.modules[i].ast.get_ref();
     for k in 0..a.attrs.len() {
         let at = *a.attrs.at(k);
         if at.kind != AttrKind::ATTR_TARGET_FEATURE as u8 {
@@ -1309,7 +1309,7 @@ fn feature_use(p: &loader::Package, m: usize, fc: &FeatureCall) u8 {
     if cf::contains(have, p.fn_features(fc.callee.module, fc.callee.node)) {
         return 0;
     }
-    let ca = &p.modules[fc.callee.module as usize].ast;
+    let ca = p.modules[fc.callee.module as usize].ast.get_ref();
     let inl = ca.ext(fc.callee.node).function.is_extern() || ca.attr_of(fc.callee.node, AttrKind::ATTR_ALWAYS_INLINE) != null;
     return pick(!tgt::isa(p.arch).fn_features || inl, 2u8, 1u8);
 }
@@ -1330,7 +1330,7 @@ fn lint_feature_unsafe(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
 /// whose feature does not imply its function's, and an `unsafe` marker whose only reason is such a call
 /// where no such call needs it (`feature_use`: "unnecessary 'unsafe'", with the prefix form's removal).
 pub(package) fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Errors) {
-    let a = &p.modules[m].ast;
+    let a = p.modules[m].ast.get_ref();
     // A dispatch row runs its function where the machine has the row's feature: that feature, with the
     // build's and what they imply, must hold the function's.
     for k in 0..a.feature_rows.len() {
@@ -1407,7 +1407,7 @@ fn feature_err(
             miss.push_str(cf::row(k).name);
         }
     }
-    let ca = &p.modules[m as usize].ast;
+    let ca = p.modules[m as usize].ast.get_ref();
     let nm = ca.at_const(ca.ext_name(f)).as_data.name.text;
     let fname = p.modules[m as usize].source.as_str().slice(nm.start as usize, nm.end as usize);
     if !tgt::isa(p.arch).fn_features || why.len() != 0 {
@@ -1446,7 +1446,7 @@ const fn set_stage_locks(p: &mut loader::Package, on: bool) {
         unsafe (*cirp).elock_on = on;
     }
     for i in 0..p.modules.len() {
-        p.modules[i].ast.ilock_on = on;
+        p.modules[i].ast.get_mut().ilock_on = on;
     }
 }
 
@@ -1457,8 +1457,8 @@ fn dup_conformances_par(p: &mut loader::Package, idx: &Map<tc::ConfKey, u64>) bo
     let n = p.modules.len();
     set_stage_locks(p, true);
     for i in 0..n {
-        p.modules[i].ast.freeze_nodes();
-        p.modules[i].ast.freeze_resolutions();
+        p.modules[i].ast.get_mut().freeze_nodes();
+        p.modules[i].ast.get_mut().freeze_resolutions();
     }
     let mut douts = Vector::<diag::Errors>::new();
     for _ in 0..n {
@@ -1479,8 +1479,8 @@ fn dup_conformances_par(p: &mut loader::Package, idx: &Map<tc::ConfKey, u64>) bo
         wgd.wait();
     }
     for i in 0..n {
-        p.modules[i].ast.thaw_nodes();
-        p.modules[i].ast.thaw_resolutions();
+        p.modules[i].ast.get_mut().thaw_nodes();
+        p.modules[i].ast.get_mut().thaw_resolutions();
     }
     set_stage_locks(p, false);
     let mut ok = true;
@@ -1503,7 +1503,7 @@ fn facts_snapshot(p: &loader::Package, out: &mut Vector<facts::FactsWatermark>) 
         return;
     }
     for i in 0..p.modules.len() {
-        out.push(facts::watermark(&p.modules[i].ast));
+        out.push(facts::watermark(p.modules[i].ast.get_ref()));
     }
 }
 
@@ -1516,7 +1516,7 @@ fn facts_verify(p: &loader::Package, wms: &Vector<facts::FactsWatermark>, stage:
     let mut d: u32 = 0;
     for i in 0..p.modules.len() {
         if i < wms.len() {
-            d += facts::watermark_check(&p.modules[i].ast, wms.at(i), i as u32, stage == "codegen");
+            d += facts::watermark_check(p.modules[i].ast.get_ref(), wms.at(i), i as u32, stage == "codegen");
         }
     }
     if d != 0 {
@@ -2372,7 +2372,7 @@ fn inst_recs(p: &loader::Package) InstRecs {
             if !p.modules[om].has_ast {
                 continue;
             }
-            let a = &p.modules[om].ast;
+            let a = p.modules[om].ast.get_ref();
             for ii in 0..a.ninstances() {
                 let d = a.used_instance(ii).module as usize;
                 if d != om && (a.gt.p == null || (a.used_inst[ii] & TYPE_PROV) != 0) {
@@ -2453,7 +2453,9 @@ fn cemit_layout_asserts(
         } else {
             TypeKind::TYPE_STRUCT
         };
-        let t = (&mut p.modules[m as usize].ast).intern_type(Ty { kind: tkind, module: m, as_data: TyAs { decl: nid } });
+        let t = p.modules[m as usize].ast.get_mut().intern_type(
+            Ty { kind: tkind, module: m, as_data: TyAs { decl: nid } },
+        );
         let lo = svc.layout(m, t);
         if !lo.ok {
             continue;
@@ -2489,8 +2491,10 @@ fn cemit_layout_asserts(
         let r1 = recs.off[m as usize + 1] as usize;
         let mut tids = Vector::<TypeId>::with_capacity(r1 - r0);
         for k in r0..r1 {
-            let it = *p.modules[(recs.rec[k] >> 32) as usize].ast.used_instance((recs.rec[k] & 0xFFFFFFFF) as usize);
-            tids.push((&mut p.modules[m as usize].ast).intern_instance(it.module, it.decl, &it.args[0], it.n));
+            let it = *p.modules[(recs.rec[k] >> 32) as usize].ast.get_ref().used_instance(
+                (recs.rec[k] & 0xFFFFFFFF) as usize,
+            );
+            tids.push(p.modules[m as usize].ast.get_mut().intern_instance(it.module, it.decl, &it.args[0], it.n));
         }
         tids.sort();
         tids.dedup();
@@ -3135,7 +3139,7 @@ fn cemit_seed_fn(
                 }
             }
             if wok {
-                let a9 = unsafe &mut *(p.module_ast_const(m as ModuleId) as *mut Ast);
+                let a9 = unsafe &mut *p.module_ast_ptr(m as ModuleId);
                 let st9 = a9.intern_type(
                     Ty { kind: TYPE_STRUCT, module: m as ModuleId, as_data: TyAs { decl: tgt.node } },
                 );
@@ -4896,7 +4900,7 @@ pub(package) fn cemit_package(
         let mut est_nodes: usize = 0;
         for m in 0..p.modules.len() {
             if p.modules[m].has_ast {
-                est_nodes += p.modules[m].ast.nnodes();
+                est_nodes += p.modules[m].ast.get_ref().nnodes();
             }
             if module_emits(p, live, m) {
                 acc.ch.bufs.index_mut(m).reserve(2 * p.modules[m].source.len());
@@ -6086,7 +6090,7 @@ pub(package) fn cemit_package(
                 tdecl.close(sd_own9);
                 sd_own9 = ti_owner(&mut cem, p.core_module, em9, ty9);
                 cem.mg.mark_ctx = mbe::CTX_INST | sd_own9 as i64;
-                let a9 = unsafe &mut *(p.module_ast_const(em9) as *mut Ast);
+                let a9 = unsafe &mut *p.module_ast_ptr(em9);
                 let rty9 = a9.intern_type(Ty { kind: TYPE_STRUCT, module: tih.mid, as_data: TyAs { decl: tih.node } });
                 let sr = cdit.eval_type_info_export(em9, rty9, em9, ty9);
                 let mut ok9b = sr.ok;
@@ -6114,7 +6118,7 @@ pub(package) fn cemit_package(
                 if !p.modules[m9].has_ast {
                     continue;
                 }
-                let a9 = unsafe &mut *(p.module_ast_const(m9 as ModuleId) as *mut Ast);
+                let a9 = unsafe &mut *p.module_ast_ptr(m9 as ModuleId);
                 if a9.metas.len() == 0 {
                     continue;
                 }
@@ -6382,7 +6386,7 @@ pub(package) fn cemit_package(
 /// published under a final package id and every retained store remapped: the module tables, the
 /// constant engine, and the kept lowerings.
 pub(package) fn publish_checkpoint(p: &mut loader::Package, keep: *mut irl::Keep) {
-    if p.tt.deref().len() == 0 {
+    if p.tt.deref().get_ref().len() == 0 {
         return; // module-local identity (no bind_types): nothing to publish
     }
     p.publish_types();
@@ -6427,8 +6431,8 @@ fn syntax_stats_report(p: &loader::Package, label: str) {
         }
         modules += 1;
         src += m.source.capacity();
-        m.ast.syntax_stats(&mut st);
-        let r = m.ast.retained_bytes() + m.source.capacity();
+        m.ast.get_ref().syntax_stats(&mut st);
+        let r = m.ast.get_ref().retained_bytes() + m.source.capacity();
         if r > big {
             big = r;
             big_m = i;
@@ -6454,10 +6458,10 @@ fn syntax_stats_report(p: &loader::Package, label: str) {
         src / 1024,
         p.modules.at(big_m).path.as_str(),
         big / 1024,
-        p.modules.at(big_m).ast.nodes.len(),
-        p.modules.at(big_m).ast.nodes.retained() / sizeof(Node),
-        p.modules.at(big_m).ast.b.nodes.len(),
-        p.modules.at(big_m).ast.b.nodes.retained() / sizeof(Node),
+        p.modules.at(big_m).ast.get_ref().nodes.len(),
+        p.modules.at(big_m).ast.get_ref().nodes.retained() / sizeof(Node),
+        p.modules.at(big_m).ast.get_ref().b.nodes.len(),
+        p.modules.at(big_m).ast.get_ref().b.nodes.retained() / sizeof(Node),
     );
 }
 
@@ -6469,7 +6473,7 @@ fn ty_stats_report(p: &loader::Package) {
     let mut pool_bytes: u64 = 0;
     let mut index_bytes: u64 = 0;
     let mut nominal: u64 = 0;
-    let g = p.tt.deref();
+    let g = p.tt.deref().get_ref();
     for t in 1..g.len() {
         let k = g.at(t).kind;
         if k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM || k == TypeKind::TYPE_OPAQUE || k == TypeKind::TYPE_FUNCTION || k == TypeKind::TYPE_GENERIC {
@@ -7471,7 +7475,7 @@ fn cemit_simd_entries(
         }
         skips += 1;
         if sc.refused.len() == r0 {
-            let fsp = p.modules[en.module as usize].ast.at_const(en.node).span;
+            let fsp = p.modules[en.module as usize].ast.get_ref().at_const(en.node).span;
             sc.refused.push(cbe::Refusal { m: en.module, start: fsp.start, end: fsp.end, why: why });
         }
     }
@@ -7512,7 +7516,7 @@ fn cemit_simd_entries(
 // (`cemit_extern_includes`), and with `lacking` it may not compile (`<wasm_simd128.h>` without
 // `-msimd128`) while no call can name its functions.
 fn extern_block_gated(p: &loader::Package, m: ModuleId, items: NodeList, lacking: bool) bool {
-    let a = &p.modules[m as usize].ast;
+    let a = p.modules[m as usize].ast.get_ref();
     let mut fns = false;
     for j in 0..items.len {
         let f = unsafe a.list(items)[j as usize];
@@ -7846,7 +7850,7 @@ fn extern_block_aliases(
     names: &mut Vector<String>,
     defs: &mut String,
 ) {
-    let a = &p.modules[m as usize].ast;
+    let a = p.modules[m as usize].ast.get_ref();
     let src = p.modules[m as usize].source.as_str();
     let mut c = String::new();
     for j in 0..items.len {
@@ -7917,7 +7921,7 @@ fn extern_c_name(p: &loader::Package, m: ModuleId, decl: NodeId, out: &mut Strin
 // The C name of extern type `decl` of module `m`: the `@import` pin, else the name, after `struct `,
 // `union ` or `enum ` for a header type.
 fn extern_c_raw(p: &loader::Package, m: ModuleId, decl: NodeId, out: &mut String) {
-    let a = &p.modules[m as usize].ast;
+    let a = p.modules[m as usize].ast.get_ref();
     let src = p.modules[m as usize].source.as_str();
     let at = a.attr_of(decl, AttrKind::ATTR_IMPORT);
     if at != null {
@@ -7949,7 +7953,7 @@ fn extern_c_raw(p: &loader::Package, m: ModuleId, decl: NodeId, out: &mut String
 // complex type, a pointer (no arithmetic type, the size of a pointer), an extern type by exact type,
 // an array by its length at each level and then its element.
 fn header_field_check(p: &loader::Package, m: ModuleId, t0: TypeId, e0: str, cond: &mut String, desc: &mut String) {
-    let a = &p.modules[m as usize].ast;
+    let a = p.modules[m as usize].ast.get_ref();
     let mut t = t0;
     let mut e = String::from_str(e0);
     for _ in 0..64 {
@@ -8060,7 +8064,7 @@ fn header_field_check(p: &loader::Package, m: ModuleId, t0: TypeId, e0: str, con
 // The check of constant `cid` of an extern block of module `m` (`c_macro`): its C name, the `@import`
 // pin or its own, has the constant's value in C.
 fn header_const_check(p: &loader::Package, m: ModuleId, cid: NodeId, out: &mut String) {
-    let a = &p.modules[m as usize].ast;
+    let a = p.modules[m as usize].ast.get_ref();
     let src = p.modules[m as usize].source.as_str();
     let ns = a.at_const(a.at_const(cid).as_data.const_def.name).as_data.name.text;
     let name = src.slice(ns.start as usize, ns.end as usize);
@@ -8108,7 +8112,7 @@ fn header_const_check(p: &loader::Package, m: ModuleId, cid: NodeId, out: &mut S
 // access spells it. A wrong declaration fails the C compile with a message that names it, in every
 // unit, once: the checks go into the forward header.
 fn header_type_checks(p: &loader::Package, m: ModuleId, items: NodeList, out: &mut String) {
-    let a = &p.modules[m as usize].ast;
+    let a = p.modules[m as usize].ast.get_ref();
     let src = p.modules[m as usize].source.as_str();
     let mut svc = lay::Svc::new(p);
     for j in 0..items.len {
@@ -11956,7 +11960,7 @@ const fn abi_eq(want: str, got: str, ptr: str) bool {
 // The C name of header-type field `fid` of module `m` as every access spells it (`Mangler::field_ident`),
 // appended to `out`: its `@import` pin, else its own name.
 fn field_c_name(p: &loader::Package, m: ModuleId, fid: NodeId, out: &mut String) {
-    let a = &p.modules[m as usize].ast;
+    let a = p.modules[m as usize].ast.get_ref();
     let src = p.modules[m as usize].source.as_str();
     let pin = a.attr_of(fid, AttrKind::ATTR_IMPORT);
     if pin != null {
@@ -11991,7 +11995,7 @@ const fn hf_entry<'a>(facts: str<'a>, name: str) str<'a> {
 // The C names of the extern types type `t` (pool of module `m`) names through its arrays, each added to
 // `out` once: the shapes `check_agg` asks the header for.
 fn sc_shape_names(p: &loader::Package, m: ModuleId, t0: TypeId, out: &mut Vector<String>) {
-    let a = &p.modules[m as usize].ast;
+    let a = p.modules[m as usize].ast.get_ref();
     let mut t = t0;
     for _ in 0..64 {
         let y = *a.type_at(t);
@@ -12016,7 +12020,7 @@ fn sc_shape_names(p: &loader::Package, m: ModuleId, t0: TypeId, out: &mut Vector
 // The shape of type `t` (pool of module `m`) as `bindgen::c_shape` gives a C type's, appended to `out`: an
 // extern type's from the header's shapes `smap` (`?` without one), `?` for a complex type.
 fn sc_shape(p: &loader::Package, m: ModuleId, t0: TypeId, smap: &Map<String, String>, out: &mut String) {
-    let a = &p.modules[m as usize].ast;
+    let a = p.modules[m as usize].ast.get_ref();
     let pb = lay::target_for(p.arch).ptr;
     let mut t = t0;
     for _ in 0..64 {
@@ -13077,7 +13081,7 @@ struct BcStage {
     pub(package) p: *mut loader::Package,
     pub(package) jobs: *const Vector<BcJob>,
     pub(package) outs: *mut Option<Box<diag::Errors>>, // per item
-    pub(package) slots: *mut psync::Mutex<BcPool>,
+    pub(package) slots: *const psync::Mutex<BcPool>,
     pub(package) master: *mut irl::Keep, // null = discard the lowerings
     pub(package) validate: bool,
 }
@@ -13120,7 +13124,7 @@ fn bc_job(ctx: *mut void, j: u32) {
     let mm = &mut p.modules[m];
     let src = mm.source.as_str().ptr() as *const char;
     let len = mm.source.len();
-    let mut tck = tc::TypeChecker::new(&mut mm.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut tck = tc::TypeChecker::new(mm.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
     // The serial path lowers straight into the package keep; a parallel job keeps its own and
     // publishes it under the evaluator's lock (its lookups read the index).
     let mut keep = irl::Keep::new();
@@ -13173,7 +13177,7 @@ fn bc_job(ctx: *mut void, j: u32) {
     // the per-instance static_asserts (`graph_inst_asserts`).
     p.set_module_states(m, loader::IS_IR_READY);
     // The shared last-use table served the type check and this pass.
-    let _ = replace(&mut p.modules[m].ast.last_use, Vector::<NodeId>::new());
+    let _ = replace(&mut p.modules[m].ast.get_mut().last_use, Vector::<NodeId>::new());
 }
 
 /// The borrow jobs: one per module with syntax, its items in source order.
@@ -13241,11 +13245,11 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
     let mut pre = BcPre {
         p: p,
         cx: &cx,
-        refs: refs.as_ptr() as *mut u64,
+        refs: refs.as_mut_ptr(),
         w: w,
-        bodies: bodies.as_ptr() as *mut usize,
+        bodies: bodies.as_mut_ptr(),
         scans: if reach {
-            scans.as_ptr() as *mut loader::ReachScan
+            scans.as_mut_ptr()
         } else {
             null
         },
@@ -13298,7 +13302,7 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
         p: p,
         jobs: &jobs,
         outs: outs.index_mut(0),
-        slots: ((&slots) as *const psync::Mutex<BcPool>) as *mut psync::Mutex<BcPool>,
+        slots: &slots,
         master: keep,
         validate: stdlib::getenv("SC_BC_VALIDATE") != null,
     };
@@ -13402,7 +13406,7 @@ fn flush_const_err(ctx: *mut void, m: ModuleId, decl: NodeId, msg: *const char) 
 fn flush_err(ctx: *mut void, code: u16, m: ModuleId, id: NodeId, msg: String) {
     let p = ctx as *mut loader::Package;
     let mut errs = diag::Errors::new();
-    errs.emit_span(code, unsafe (*p).modules[m as usize].ast.at_const(id).span, msg);
+    errs.emit_span(code, unsafe (*p).modules[m as usize].ast.get_ref().at_const(id).span, msg);
     errs.finalize(unsafe (*p).modules[m as usize].source.as_str(), unsafe (*p).modules[m as usize].file.as_str());
     errs.log();
     unsafe (*p).ok = false;
@@ -13820,7 +13824,7 @@ const fn lint_item_name(a: *const Ast, iid: NodeId) NodeId {
 fn bc_removed_names(p: &loader::Package) Vector<u64> {
     let mut all = Vector::<u64>::new();
     for m in 0..p.modules.len() {
-        let ns = &p.modules[m].ast.bc_names;
+        let ns = &p.modules[m].ast.get_ref().bc_names;
         for k in 0..ns.len() {
             all.push(ns[k]);
         }
@@ -14502,7 +14506,7 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
     for m in 0..nm {
         starts.push(total);
         if p.modules[m].has_ast {
-            total = total + p.modules[m].ast.nnodes();
+            total = total + p.modules[m].ast.get_ref().nnodes();
         }
     }
     let mut used = Vector::<bool>::new();
@@ -14530,10 +14534,10 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
         }
         for k in 0..an {
             let d = unsafe (*a).resolution_def(unsafe (*a).nth_id(k));
-            if d.node != NODE_NONE && d.module as usize < nm && p.modules[d.module as usize].has_ast && p.modules[d.module as usize].ast.valid(
+            if d.node != NODE_NONE && d.module as usize < nm && p.modules[d.module as usize].has_ast && p.modules[d.module as usize].ast.get_ref().valid(
                 d.node,
             ) {
-                let slot = starts[d.module as usize] + p.modules[d.module as usize].ast.dense(d.node);
+                let slot = starts[d.module as usize] + p.modules[d.module as usize].ast.get_ref().dense(d.node);
                 used.set(slot, true);
                 if !init_src[k] {
                     read.set(slot, true);
@@ -14683,7 +14687,7 @@ fn ap_job(ctx: *mut void, j: u32) {
         p.cir as *mut iri::Interp
     } else {
         own.push(ap_engine_take(st));
-        own.index_mut(0).as_ptr() as *mut iri::Interp
+        own.index_mut(0).deref_mut()
     };
     for k in job.lo as usize..job.hi as usize {
         let it = p.sched.by_node[k] as usize;
@@ -14779,7 +14783,7 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
     // from the modules' `used` records.
     let mut marks = Vector::<u64>::with_capacity(n);
     for m in 0..n {
-        marks.push(p.modules[m].ast.used_mark());
+        marks.push(p.modules[m].ast.get_ref().used_mark());
     }
     let mut g = sch::Jobs::independent(jobs.len());
     sch::run_jobs(&mut g, p.jobs, ap_job, &mut st, null);
@@ -14787,7 +14791,7 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
         set_stage_locks(p, false);
     }
     for m in 0..n {
-        p.modules[m].ast.used_rollback(marks[m]);
+        p.modules[m].ast.get_mut().used_rollback(marks[m]);
     }
     for i in 0..engines.len() {
         unsafe (*cirp).st_absorb(engines.at(i).get());
@@ -15165,7 +15169,7 @@ fn mark_c_reads(p: &mut loader::Package) bool {
     let mut ok = true;
     for k in 0..added.len() {
         let m = (added[k] >> 32) as usize;
-        let a = &p.modules[m].ast;
+        let a = p.modules[m].ast.get_ref();
         let d = a.at_const((added[k] & 0xFFFFFFFFu64) as NodeId);
         // What the typecheck read of the reordered layout: the size (the order changed it), an offset, or
         // for an enum any of its payload layouts.
@@ -15377,7 +15381,7 @@ fn check_prelude(q: &mut loader::Package, target: i32) bool {
         c.state.push(q.sched.state[i]);
         c.ret_attr.push(q.sched.ret_attr[i]);
     }
-    let mut it = q.sched.dyn_edges.iter();
+    let mut it = q.sched.dyn_edges.get_ref().iter();
     loop {
         switch it.next() {
             Some(d) => {
@@ -15530,7 +15534,7 @@ pub(package) fn run_package(
     // check re-resolves (the reader of `seeds`).
     for m in 0..n {
         if p.modules[m].has_ast {
-            p.modules[m].ast.release_checked_tables();
+            p.modules[m].ast.get_mut().release_checked_tables();
         }
     }
     // An ERROR on every build, over the user modules, like the always-panics check.

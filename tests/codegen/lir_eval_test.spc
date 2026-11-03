@@ -250,8 +250,8 @@ fn main() i32 {
     let mut x: u64 = 1;
     let y: u32 = 2;
     let mut o = Outer { tag: 3, i: Inner { p: &mut x, n: 0 }, q: &y };
-    let z = cell::Cell::<u32>::new(4);
-    let c = Cells { c: (&z as *const cell::Cell<u32>) as *mut cell::Cell<u32> };
+    let mut z = cell::Cell::<u32>::new(4);
+    let c = Cells { c: &mut z };
     return (take(&mut o) + look(&o) + cells(&c) as u64 - 10) as i32;
 }
 )",

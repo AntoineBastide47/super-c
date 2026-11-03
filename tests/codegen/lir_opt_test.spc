@@ -11,6 +11,8 @@ import lir::loops as lu;
 import tests::harness as h;
 import tests::cli_harness as cli;
 import target::table as tgt;
+import std::cpu;
+import std::cpu::detect as detect;
 
 // Package text `text` read, then optimized: each body verifies before and after.
 fn optimized(text: str) (Package, Package) {
@@ -213,10 +215,10 @@ fn a_constant_every_call_passes_makes_a_copy_without_it() {
     assert(s.ok() && c.contains("sig (i32) -> i32"), "the recursion's copy takes the count alone");
 }
 
-// Loops of C float functions: `max` and `min` reductions and `mul_add` per element. Built in release, the
-// reductions keep a lane per extreme (`vop.max`, `vop.min`) and `mul_add` is one `fma` instruction; their
-// results match the debug build's calls bit for bit, through NaNs and zeros of both signs at every position
-// and length.
+// Loops of C float functions: `max` and `min` reductions, `mul_add`, `floor` and `abs` per element. Built in
+// release, the reductions keep a lane per extreme (`vop.max`, `vop.min`), `mul_add` is a fused multiply-add
+// per lane (`vop.fma`), `floor` and `abs` lanes too; their results match the debug build's calls bit for
+// bit, through NaNs and zeros of both signs at every position and length.
 const FLOAT_CALLS: str = M"(@noinline
 fn fl_top(s: []f32, m0: f32) f32 {
     let mut m = m0;
@@ -242,6 +244,13 @@ fn fl_fused(s: []mut f64, a: f64, b: f64) {
     }
 }
 
+@noinline
+fn fl_round(s: []mut f32) {
+    for i in 0..s.len() {
+        s[i] = (s[i] * 0.3).floor().abs();
+    }
+}
+
 fn main() i32 {
     let odd: [f32; 4] = [f32::NAN, -0.0, 0.0, -3.5];
     let mut h: u64 = 0;
@@ -261,8 +270,10 @@ fn main() i32 {
             h = h.wrapping_mul(31) ^ fl_top(&a, odd[k]).to_bits() as u64;
             h = h.wrapping_mul(31) ^ fl_low(&d).to_bits();
             fl_fused(&mut d, 1.0 / 3.0, -0.0);
+            fl_round(&mut a);
             for i in 0..n {
                 h = h.wrapping_mul(31) ^ d[i].to_bits();
+                h = h.wrapping_mul(31) ^ a[i].to_bits() as u64;
             }
         }
     }
@@ -274,19 +285,61 @@ fn main() i32 {
 @test
 fn float_function_loops_vectorize_with_the_calls_results() {
     h::expect_same_output("float function loops", FLOAT_CALLS, ["--profile=debug"], ["--profile=release"]);
-    if tgt::isa(tgt::host_isa()).name != "aarch64" || cli::on_wasm() {
-        return; // the lanes' forms of arm64, whose vectors compute these
+    if cli::on_wasm() {
+        return;
     }
+    // x86-64 runs its packed forms at each level: SSE2's (the roundings stay calls), SSE4.1's ROUNDPS, AVX2's
+    // and FMA3's. Not on the vector lane, which builds every program for wasm32.
+    let x86 = tgt::isa(tgt::host_isa()).name == "x86_64" && !h::simd_lane();
+    if x86 && detect::has_level(cpu::Level::V2) {
+        h::expect_same_output(
+            "float function loops, x86-64-v2",
+            FLOAT_CALLS,
+            ["--profile=debug"],
+            ["--profile=release", "--target-cpu=x86-64-v2"],
+        );
+    }
+    if x86 && detect::has_level(cpu::Level::V3) {
+        h::expect_same_output(
+            "float function loops, x86-64-v3",
+            FLOAT_CALLS,
+            ["--profile=debug"],
+            ["--profile=release", "--target-cpu=x86-64-v3"],
+        );
+    }
+    // The lanes of arm64 and of each x86-64 level (a cross build prints its bodies before its link).
+    let a = float_calls_printed("--target=macos --arch=aarch64");
+    let ok = printed(&a, "fl_top").contains("vop.max.num") && printed(&a, "fl_low").contains("vop.min.num") && printed(
+        &a,
+        "fl_fused",
+    ).contains("vop.fma") && !printed(&a, "fl_fused").contains("call") && printed(&a, "fl_round").contains("vop.floor") && printed(
+        &a,
+        "fl_round",
+    ).contains("vop.abs");
+    let x1 = float_calls_printed("--target=linux --arch=x86_64 --target-cpu=x86-64");
+    let x2 = float_calls_printed("--target=linux --arch=x86_64 --target-cpu=x86-64-v2");
+    let x3 = float_calls_printed("--target=linux --arch=x86_64 --target-cpu=x86-64-v3");
+    let ox = printed(&x1, "fl_top").contains("vop.max.num") && printed(&x1, "fl_low").contains("vop.min.num") && !printed(
+        &x1,
+        "fl_round",
+    ).contains("vop.floor") && printed(&x2, "fl_round").contains("vop.floor") && printed(&x2, "fl_round").contains(
+        "vop.abs",
+    ) && !printed(&x2, "fl_fused").contains("vop.fma") && printed(&x3, "fl_fused").contains("vop.fma");
+    if !ok || !ox {
+        eprintln("{}\n{}\n{}\n{}", a.as_str(), x1.as_str(), x2.as_str(), x3.as_str());
+    }
+    assert(ok, "arm64: the reductions keep lanes; the fused multiply-adds, floors and absolute values are lanes");
+    assert(ox, "x86-64: the same, the floors with SSE4.1 and the fused multiply-adds with FMA3 alone");
+}
+
+// What the release build of FLOAT_CALLS in a fresh project prints of its bodies `fl_*` (`SC_LIR_PRINT`),
+// with target flags `flags`.
+fn float_calls_printed(flags: str) String {
     let p = cli::proj_new();
     p.mkfile("main.spc", FLOAT_CALLS);
-    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "fl_", "build -O2 main.spc -o app");
-    let ok = r.ok() && printed(r.text(), "fl_top").contains("vop.max") && printed(r.text(), "fl_low").contains(
-        "vop.min",
-    ) && printed(r.text(), "fl_fused").contains("= fma.f64") && !printed(r.text(), "fl_fused").contains("call");
-    if !ok {
-        r.show();
-    }
-    assert(ok, "the reductions keep lanes and the fused multiply-add is an instruction");
+    let args = format("build -O2 {} main.spc -o app", flags);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "fl_", &args);
+    return String::from_str(r.text());
 }
 
 // An `Option` built on each side of a join and taken apart after it (`o.map(f).unwrap_or(0)`): each jump into
@@ -9433,6 +9486,107 @@ b3:
     }
     let w: [u64; 2] = [5, 0xFFFFFFFFFFFFFFFF];
     same_result(&b, &a, "from", w[0..2], 5);
+}
+
+// A test `i + 3 <u n` of a counter from 0 by 2 becomes `i <u n - min(n, 3)` (`offset_test`) where a branch
+// before the loop bounds `n` by `max - 1`: each sum stays below `n + 2`. Not without that bound, nor with it
+// for a step by 4, whose sums may wrap past `max - 3`.
+@test
+fn tests_of_a_counter_by_a_wider_step_become_counted_under_a_bound() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @step2 fn global
+sym @open2 fn global
+sym @step4 fn global
+fn @step2
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 3
+  v3 = iconst.i64 2
+  v4 = iconst.i64 -2
+  v5 = icmp.ule v0, v4
+  br v5, b1, b5
+b1:
+  jmp b2(v1, v1)
+b2(v6: i64, v7: i64):
+  v8 = add.i64 v6, v2
+  v9 = icmp.ult v8, v0
+  br v9, b3, b4
+b3:
+  v10 = add.i64 v7, v6
+  v11 = add.i64 v6, v3
+  jmp b2(v11, v10)
+b4:
+  ret v7
+b5:
+  ret v1
+fn @open2
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 3
+  v3 = iconst.i64 2
+  jmp b1(v1, v1)
+b1(v4: i64, v5: i64):
+  v6 = add.i64 v4, v2
+  v7 = icmp.ult v6, v0
+  br v7, b2, b3
+b2:
+  v8 = add.i64 v5, v4
+  v9 = add.i64 v4, v3
+  jmp b1(v9, v8)
+b3:
+  ret v5
+fn @step4
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 3
+  v3 = iconst.i64 4
+  v4 = iconst.i64 -2
+  v5 = icmp.ule v0, v4
+  br v5, b1, b5
+b1:
+  jmp b2(v1, v1)
+b2(v6: i64, v7: i64):
+  v8 = add.i64 v6, v2
+  v9 = icmp.ult v8, v0
+  br v9, b3, b4
+b3:
+  v10 = add.i64 v7, v6
+  v11 = add.i64 v6, v3
+  jmp b2(v11, v10)
+b4:
+  ret v7
+b5:
+  ret v1
+)",
+    );
+    let s2 = text_of(&a, "step2");
+    assert(s2.contains("select.i64"), s2.as_str());
+    let o2 = text_of(&a, "open2");
+    assert(!o2.contains("select"), o2.as_str());
+    let s4 = text_of(&a, "step4");
+    assert(!s4.contains("select"), s4.as_str());
+    for n in [0u64, 1, 2, 3, 4, 5, 6, 9, 10, 11] {
+        let x: [u64; 1] = [n];
+        let mut w2: u64 = 0;
+        let mut i: u64 = 0;
+        while i + 3 < n {
+            w2 += i;
+            i += 2;
+        }
+        let mut w4: u64 = 0;
+        i = 0;
+        while i + 3 < n {
+            w4 += i;
+            i += 4;
+        }
+        same_result(&b, &a, "step2", x[0..1], w2);
+        same_result(&b, &a, "open2", x[0..1], w2);
+        same_result(&b, &a, "step4", x[0..1], w4);
+    }
 }
 
 // Block parameters that pass one another around a loop and its join, every other value they take one

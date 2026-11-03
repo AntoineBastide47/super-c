@@ -699,6 +699,15 @@ extend<A: Allocator> String<A> {
         return &self.repr.small.data[0];
     }
 
+    /// Raw mutable pointer to the bytes, from the exclusive borrow (`as_ptr`'s never writes); a write keeps
+    /// them UTF-8. Invalidated by any reallocating mutation.
+    pub const fn as_mut_ptr(self: &mut String<A>) *mut u8 {
+        if self.is_large() {
+            return self.repr.large.ptr;
+        }
+        return &mut self.repr.small.data[0];
+    }
+
     /// Borrowed iterators over the bytes: delegate to the `str` view: valid until the next mutation, and
     /// only while `self` is alive (bind the String to a `let`; do not iterate a temporary's iterator).
     pub const fn bytes(self: &String<A>) Bytes {
@@ -729,6 +738,13 @@ extend<A: Allocator> String<A> {
         let p = self.data_ptr();
         unsafe p[len] = 0;
         return self.as_ptr() as *const char;
+    }
+
+    /// `cstr` to write in place (a C routine that fills a template, `mkstemp`'s `XXXXXX`); a write keeps the
+    /// bytes UTF-8.
+    pub fn cstr_mut(self: &mut String<A>) *mut char {
+        let _ = self.cstr();
+        return self.as_mut_ptr() as *mut char;
     }
 
     /// Number of UTF-8 scalar values: every byte that is not a 0b10xxxxxx continuation starts one.

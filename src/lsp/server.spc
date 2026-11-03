@@ -1257,7 +1257,7 @@ extend Server {
         // The code the build settings remove from each open document: a hint the client fades.
         for i in 0..self.docs.len() {
             let mi = self.root_module(r, &self.docs.at(i).path);
-            if mi < 0 || root.pkg.modules.at(mi as usize).ast.bc_dead.len() == 0 {
+            if mi < 0 || root.pkg.modules.at(mi as usize).ast.get_ref().bc_dead.len() == 0 {
                 continue;
             }
             let m = mi as usize;
@@ -1269,7 +1269,7 @@ extend Server {
             }
             let src = root.pkg.modules.at(m).source.as_str();
             lm.update(r, m as u32, src);
-            let dead = &root.pkg.modules.at(m).ast.bc_dead;
+            let dead = &root.pkg.modules.at(m).ast.get_ref().bc_dead;
             for k in 0..dead.len() {
                 let sp = dead[k];
                 let range = range_json(src, &lm.ls, sp.start, sp.end - sp.start);

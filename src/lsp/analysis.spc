@@ -312,7 +312,7 @@ fn lsp_resolve_module(p: &mut loader::Package, i: usize, lint: bool, diags: &mut
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let aptr = (&mut m.ast) as *mut Ast;
+    let aptr = m.ast.get_mut() as *mut Ast;
     let mut r = resolver::Resolver::new(unsafe &mut *aptr, unsafe str::from_raw(src as *const u8, len), pkg);
     r.lint = lint;
     r.resolve();
@@ -330,7 +330,7 @@ fn lsp_typecheck_module(p: &mut loader::Package, i: usize, lint: bool, diags: &m
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(m.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
     t.check();
     t.bc_record_ret_attr();
@@ -532,9 +532,9 @@ const SLOT_NONE: u32 = 0xFFFFFFFF;
 
 // True when the item at `by_node` position `k` is a function with a body in the body arena.
 const fn slot_has_body(p: &loader::Package, m: usize, k: usize) bool {
-    let nd = p.modules[m].ast.at_const(slot_node(p, k as u32));
+    let nd = p.modules[m].ast.get_ref().at_const(slot_node(p, k as u32));
     return nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(
-        p.modules[m].ast.ext(slot_node(p, k as u32)).function.body,
+        p.modules[m].ast.get_ref().ext(slot_node(p, k as u32)).function.body,
     );
 }
 
@@ -609,7 +609,7 @@ const fn ref_edge_cmp(a: &loader::RefEdge, b: &loader::RefEdge) i32 {
 fn record_refs(p: &mut loader::Package, i: usize) {
     let mut v = Vector::<loader::RefEdge>::new();
     {
-        let a = &p.modules[i].ast;
+        let a = p.modules[i].ast.get_ref();
         let nb = a.nodes.len();
         let nn = a.nnodes();
         // The owner of a run of nodes repeats: re-searched only past the current slot's range.
@@ -731,7 +731,7 @@ fn ref_owners(p: &loader::Package, m: usize, dm: u32, lo: u32, hi: u32, out: &mu
 // the edit touched an extend's own bytes (its target, interface, generics or braces): the
 // conformance it declares reaches modules that never name it.
 fn touched_items(p: &loader::Package, i: usize, ws: u32, we: u32, out: &mut Vector<u32>) bool {
-    let a = &p.modules[i].ast;
+    let a = p.modules[i].ast.get_ref();
     let i0 = p.idx().mod_items[i] as usize;
     let i1 = p.idx().mod_items[i + 1] as usize;
     // Items by source start; a member follows its extend's start.
@@ -812,8 +812,8 @@ const fn plain_fn(p: &loader::Package, m: usize, k: u32) bool {
     if it.kind != loader::ItemKind::IK_FUNCTION as u8 && it.kind != loader::ItemKind::IK_METHOD as u8 {
         return false;
     }
-    let nd = p.modules[m].ast.at_const(it.node);
-    return nd.kind == NodeKind::NODE_FUNCTION && !p.modules[m].ast.ext(it.node).function.is_const();
+    let nd = p.modules[m].ast.get_ref().at_const(it.node);
+    return nd.kind == NodeKind::NODE_FUNCTION && !p.modules[m].ast.get_ref().ext(it.node).function.is_const();
 }
 
 // Item-level invalidation over the recorded references. The items an edit touched start
@@ -961,9 +961,9 @@ fn pristine_parse(p: &mut loader::Package, i: usize, target: i32) Ast {
     assert(!ps.has_errors(), "an analyzed module parses again");
     let mut na = ps.take_ast();
     na.module = i as ModuleId;
-    let own = replace(&mut p.modules[i].ast, na);
+    let own = replace(p.modules[i].ast.get_mut(), na);
     p.platform_filter_module(i, target);
-    return replace(&mut p.modules[i].ast, own);
+    return replace(p.modules[i].ast.get_mut(), own);
 }
 
 // The one plain function whose body block strictly encloses the byte window [ws, we) of the OLD
@@ -1020,7 +1020,7 @@ pub(package) fn recompile(
     // error) holds no semantic state to extend: an empty per-node type table on a parsed module
     // marks it. Hand such rounds to the full path.
     for i in 0..n {
-        if p.modules[i].has_ast && p.modules[i].ast.nodes.len() > 1 && p.modules[i].ast.types.len() == 0 {
+        if p.modules[i].has_ast && p.modules[i].ast.get_ref().nodes.len() > 1 && p.modules[i].ast.get_ref().types.len() == 0 {
             return false;
         }
     }
@@ -1035,7 +1035,7 @@ pub(package) fn recompile(
     // stable, so importers keep their analyses) and the module re-analyzes.
     let mut opened = Vector::<usize>::new();
     for i in 0..n {
-        if ovk[i] >= 0 && p.modules[i].has_ast && p.modules[i].ast.b.released {
+        if ovk[i] >= 0 && p.modules[i].has_ast && p.modules[i].ast.get_ref().b.released {
             reparse_bodies(p, i);
             st.bodies_back += 1;
             opened.push(i);
@@ -1106,7 +1106,7 @@ pub(package) fn recompile(
             we = (os.len() - s0) as u32;
             delta = nv.len() as i64 - os.len() as i64;
         }
-        let cand = body_candidate(&p.modules[i].ast, ws, we);
+        let cand = body_candidate(p.modules[i].ast.get_ref(), ws, we);
         let mut ns9 = String::from_str(ov_texts[k]);
         let mut lx9 = lex::Lexer::new(&mut ns9, &file);
         lx9.scan_tokens();
@@ -1121,19 +1121,19 @@ pub(package) fn recompile(
         let na = ps.take_ast();
         let mut osur = String::new();
         let mut nsur = String::new();
-        import_surface(&p.modules[i].ast, &p.modules[i].source, &mut osur);
+        import_surface(p.modules[i].ast.get_ref(), &p.modules[i].source, &mut osur);
         import_surface(&na, &ns9, &mut nsur);
         if osur.as_str() != nsur.as_str() {
             return false;
         }
         let oldp = pristine_parse(p, i, target);
-        let _ = replace(&mut p.modules[i].ast, na);
-        p.modules[i].ast.module = i as ModuleId;
+        let _ = replace(p.modules[i].ast.get_mut(), na);
+        p.modules[i].ast.get_mut().module = i as ModuleId;
         p.modules[i].src_id = dutil::str_id(&ns9);
         p.modules[i].mtime = 0;
         p.modules[i].source = ns9;
         p.platform_filter_module(i, target);
-        if same_shape(&oldp, &p.modules[i].ast) {
+        if same_shape(&oldp, p.modules[i].ast.get_ref()) {
             if cand != NODE_NONE {
                 body_sliced.set(c, true);
                 body_fn.set(c, cand);
@@ -1247,7 +1247,7 @@ pub(package) fn recompile(
     // 5) re-run the pipeline over the affected set only, mirroring run_pipeline's phase order. A
     // closed importer's released bodies come back for its re-analysis (and go again below).
     for m in 0..n {
-        if aff[m] && p.modules[m].has_ast && p.modules[m].ast.b.released {
+        if aff[m] && p.modules[m].has_ast && p.modules[m].ast.get_ref().b.released {
             reparse_bodies(p, m);
             st.bodies_back += 1;
         }
@@ -1307,7 +1307,7 @@ pub(package) fn recompile(
             ) {
                 continue;
             }
-            if p.modules[q].ast.b.released {
+            if p.modules[q].ast.get_ref().b.released {
                 ensure_bodies(p, q);
                 st.bodies_back += 1;
             }
@@ -1569,7 +1569,7 @@ fn typecheck_set(
         p.cir = null;
         let mut back = false;
         for m in 0..cirv.body_missing.len() {
-            if cirv.body_missing[m] && p.modules[m].has_ast && p.modules[m].ast.b.released {
+            if cirv.body_missing[m] && p.modules[m].has_ast && p.modules[m].ast.get_ref().b.released {
                 reparse_bodies(p, m);
                 hold_bodies(p, m);
                 st.bodies_back += 1;
@@ -1617,7 +1617,7 @@ fn flush_rec(ctx: *mut void, code: u16, m: ModuleId, id: NodeId, msg: String) {
     let fx = unsafe &*(ctx as *const FlushCtx);
     let mm = unsafe &(*fx.p).modules[m as usize];
     let mut errs = diag::Errors::new();
-    errs.emit_span(code, mm.ast.at_const(id).span, msg);
+    errs.emit_span(code, mm.ast.get_ref().at_const(id).span, msg);
     errs.finalize(&mm.source, &mm.file);
     drain_errors(&errs, m, PH_ANALYSIS, unsafe &mut *fx.nd);
 }
@@ -1681,7 +1681,7 @@ fn reparse_bodies(p: &mut loader::Package, i: usize) {
     ps.build_ast();
     assert(!ps.has_errors(), "a parsed module parses again");
     let mut na = ps.take_ast();
-    let _ = replace(&mut p.modules[i].ast.b, replace(&mut na.b, BodyArena::new()));
+    let _ = replace(&mut p.modules[i].ast.get_mut().b, replace(&mut na.b, BodyArena::new()));
     p.prune_build_sites(i);
 }
 
@@ -1700,8 +1700,8 @@ fn hold_bodies(p: &mut loader::Package, m: usize) {
 fn release_closed(p: &mut loader::Package, ovk: &Vector<i64>) {
     for i in 0..p.modules.len() {
         let held = kept(p, i) || i < p.bc_pending.len() && p.bc_pending[i];
-        if ovk[i] < 0 && p.modules[i].has_ast && !p.modules[i].ast.b.released && !held {
-            p.modules[i].ast.release_bodies();
+        if ovk[i] < 0 && p.modules[i].has_ast && !p.modules[i].ast.get_ref().b.released && !held {
+            p.modules[i].ast.get_mut().release_bodies();
         }
     }
 }
@@ -1728,12 +1728,12 @@ pub(package) fn hydrate_refs(p: &mut loader::Package, d: DefId) {
 /// Parse back and re-analyze module `i`'s released bodies for a feature that reads closed
 /// documents' bodies (references, call hierarchy). The next analysis round releases them again.
 pub(package) fn ensure_bodies(p: &mut loader::Package, i: usize) {
-    if !p.modules[i].has_ast || !p.modules[i].ast.b.released {
+    if !p.modules[i].has_ast || !p.modules[i].ast.get_ref().b.released {
         return;
     }
     reparse_bodies(p, i);
     // The records are discarded: the retained ones came from the same source and imports.
-    let typed = p.modules[i].ast.types.len() != 0;
+    let typed = p.modules[i].ast.get_ref().types.len() != 0;
     let mut nd = Vector::<DiagRec>::new();
     let mut st = RecompileStats {};
     if lsp_resolve_module(p, i, false, &mut nd) && typed {
@@ -1776,7 +1776,7 @@ fn lsp_unused_items(p: &mut loader::Package, root_file: str, lint_dir: str, diag
     }
     let prelude = unused_prelude(p, root_file, lint_dir);
     for m in 0..n {
-        if p.modules[m].has_ast && (!p.modules[m].prelude || prelude) && (p.modules[m].ast.types.len() == 0 || m >= p.item_edges.len()) {
+        if p.modules[m].has_ast && (!p.modules[m].prelude || prelude) && (p.modules[m].ast.get_ref().types.len() == 0 || m >= p.item_edges.len()) {
             return;
         }
     }
@@ -1839,7 +1839,7 @@ fn build_final_edges(p: &mut loader::Package) {
 /// diagnostics are dropped. False when it does not lower: no body, or a module whose analysis left no types.
 pub(package) fn lower_item(p: &mut loader::Package, d: DefId, out: &mut core::CoreBody) bool {
     let m = d.module as usize;
-    if m >= p.modules.len() || !p.modules[m].has_ast || p.modules[m].ast.types.len() == 0 {
+    if m >= p.modules.len() || !p.modules[m].has_ast || p.modules[m].ast.get_ref().types.len() == 0 {
         return false;
     }
     ensure_bodies(p, m);
@@ -1854,7 +1854,7 @@ pub(package) fn lower_item(p: &mut loader::Package, d: DefId, out: &mut core::Co
         let mm = &mut p.modules[m];
         let src = mm.source.as_str().ptr() as *const char;
         let len = mm.source.len();
-        let mut t = tc::TypeChecker::new(&mut mm.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+        let mut t = tc::TypeChecker::new(mm.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
         let mut bodies = Vector::<irl::Lowerer>::new();
         t.bc_item(d.node, &mut ow, &mut ctx, &mut bodies);
     }
@@ -1887,7 +1887,7 @@ fn bc_ready(p: &mut loader::Package, m: usize, err: &Vector<bool>) bool {
     let clo = unsafe &*p.module_closure(m as ModuleId);
     for j in 0..clo.len() {
         let c = clo[j] as usize;
-        if err[c] || p.modules[c].has_ast && p.modules[c].ast.types.len() == 0 {
+        if err[c] || p.modules[c].has_ast && p.modules[c].ast.get_ref().types.len() == 0 {
             return false;
         }
     }
@@ -1907,7 +1907,7 @@ fn bc_module(
     let pkg = p as *mut loader::Package;
     let mut items = Vector::<NodeId>::new();
     {
-        let a = &p.modules[m].ast;
+        let a = p.modules[m].ast.get_ref();
         let pl = a.at_const(a.root).as_data.program.items;
         for i in 0..pl.len {
             items.push(unsafe a.list(pl)[i as usize]);
@@ -1917,7 +1917,7 @@ fn bc_module(
     let src = mm.source.as_str().ptr() as *const char;
     let len = mm.source.len();
     let file = mm.file.clone();
-    let mut t = tc::TypeChecker::new(&mut mm.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(mm.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
     let mut bodies = Vector::<irl::Lowerer>::new();
     for k in 0..items.len() {
         if stop(sctx, false) {
@@ -1934,7 +1934,7 @@ fn bc_module(
 fn parse_back_demanded(p: &mut loader::Package, cirv: &iri::Interp) bool {
     let mut back = false;
     for m in 0..cirv.body_missing.len() {
-        if cirv.body_missing[m] && m < p.modules.len() && p.modules[m].has_ast && p.modules[m].ast.b.released {
+        if cirv.body_missing[m] && m < p.modules.len() && p.modules[m].has_ast && p.modules[m].ast.get_ref().b.released {
             ensure_bodies(p, m);
             hold_bodies(p, m);
             back = true;
@@ -1998,8 +1998,8 @@ pub(package) fn borrowck_pending(
             p.bc_pending.set(m, false);
             p.recur.mods.set(m, recur::Sums::new());
             p.recur.stale = true;
-            if ovk[m] < 0 && !kept(p, m) && !p.modules[m].ast.b.released {
-                p.modules[m].ast.release_bodies();
+            if ovk[m] < 0 && !kept(p, m) && !p.modules[m].ast.get_ref().b.released {
+                p.modules[m].ast.get_mut().release_bodies();
             }
             continue;
         }
@@ -2036,8 +2036,8 @@ pub(package) fn borrowck_pending(
         p.recur.mods.set(m, sz.take());
         p.recur.stale = true;
         out.checked = true;
-        if ovk[m] < 0 && !kept(p, m) && !p.modules[m].ast.b.released {
-            p.modules[m].ast.release_bodies();
+        if ovk[m] < 0 && !kept(p, m) && !p.modules[m].ast.get_ref().b.released {
+            p.modules[m].ast.get_mut().release_bodies();
         }
     }
     reach_off(p);
@@ -2051,7 +2051,7 @@ pub(package) fn borrowck_pending(
 // check lowers with the build's cancellation checks (`reach_for`): a check after a self call is one of
 // its errors (`it can accept a task cancellation`), and no other record depends on the checks.
 fn reach_reads(p: &loader::Package, m: usize) bool {
-    let a = &p.modules.at(m).ast;
+    let a = p.modules.at(m).ast.get_ref();
     for k in 0..a.attrs.len() {
         if a.attrs.at(k).kind == AttrKind::ATTR_TAIL_RECURSE as u8 {
             return p.find("std::parallel::runtime") >= 0;
@@ -2107,7 +2107,7 @@ fn reach_settle(p: &mut loader::Package, root_file: str, lint_dir: str, st: &mut
         if p.bc_pending[m] {
             continue;
         }
-        if p.modules[m].ast.b.released {
+        if p.modules[m].ast.get_ref().b.released {
             ensure_bodies(p, m);
             st.bodies_back += 1;
         }
@@ -2212,7 +2212,7 @@ fn stats_line(p: &loader::Package, what: str, t0: i64, st: &RecompileStats) {
     let mut released: usize = 0;
     let mut held: usize = 0;
     for i in 0..p.modules.len() {
-        if p.modules[i].has_ast && p.modules[i].ast.b.released {
+        if p.modules[i].has_ast && p.modules[i].ast.get_ref().b.released {
             released += 1;
         }
         if i < p.body_hold.len() && p.body_hold[i] {

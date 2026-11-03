@@ -1245,14 +1245,21 @@ extend Opt {
         self.unr.vsat = pk.vec_sat;
         self.unr.vabsd = pk.vec_absd;
         self.unr.vsumw = pk.vec_sumw;
+        self.unr.vfma = pk.vfloat && pk.fma;
         self.unr.vfn.truncate(0);
         for s in 0..b.syms.len() {
             let sy = pk.syms[b.syms[s] as usize];
+            let f = if pk.vfloat && sy.kind == SK_FUNC && sy.def == NONE {
+                lu::lane_fn(pk.spell(sy.name))
+            } else {
+                0u8
+            };
+            let round = f == core::SIMD_FLOOR || f == core::SIMD_CEIL || f == core::SIMD_TRUNC;
             self.unr.vfn.push(
-                if pk.vfloat && sy.kind == SK_FUNC && sy.def == NONE {
-                    lu::lane_fn(pk.spell(sy.name))
-                } else {
+                if round && !pk.vround || f == core::SIMD_FMA && !pk.fma {
                     0u8
+                } else {
+                    f
                 },
             );
         }
@@ -3862,7 +3869,7 @@ extend Opt {
             }
             if self.inner[k] == k as u32 {
                 changed = self.same_params(b, k as u32) || changed;
-                changed = self.offset_test(b, k as u32) || changed;
+                changed = self.offset_test(pk, b, k as u32) || changed;
             }
             self.pend.truncate(0);
             let mut called = false;
@@ -9741,11 +9748,12 @@ extend Opt {
     }
 
     // Header `h`'s exit test `q + c <u n`, before a body of other blocks, of a counter `q` that starts at a
-    // constant and steps by 1, `c` a nonzero constant whose sum with the start does not wrap, `n` from outside
-    // the loop: `q <u n - min(n, c)`, the difference made in the preheader. Each sum the test reads is at most
-    // `n`, so none wraps and both tests agree; the header then only tests its counter, a counted loop (LLVM's
-    // IndVarSimplify). Whether it did.
-    fn offset_test(self: &mut Self, b: &mut Body, h: u32) bool {
+    // constant and steps by a constant `d`, `c` a nonzero constant whose sum with the start does not wrap, `n`
+    // from outside the loop, at most `max - d + 1` (any `n` for a step by 1; else a bound the branches in
+    // scope set, `ubound`): `q <u n - min(n, c)`, the difference made in the preheader. Each sum the test
+    // reads is below `n + d`, so none wraps and both tests agree; the header then only tests its counter, a
+    // counted loop (LLVM's IndVarSimplify). Whether it did.
+    fn offset_test(self: &mut Self, pk: &Package, b: &mut Body, h: u32) bool {
         let p = self.preh[h as usize];
         let th = term(b, h);
         if p == NONE || th.op != O_BR || (th.a & (VPARAM | VFLAG)) != 0 || th.a == VNONE || b.edge_target(th.b) == h || b.edge_target(
@@ -9774,7 +9782,8 @@ extend Opt {
         }
         let kc = off.unwrap();
         let qi = (s.a & ~VPARAM) - hb.param_start;
-        // The start from the preheader, a step by 1 from each other edge into the header.
+        // The start from the preheader, one step `d` from each other edge into the header.
+        let mut d: u64 = 0;
         for j in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
             let pb = self.preds[j as usize];
             b.succ_edges(term(b, pb), &mut self.edges);
@@ -9795,22 +9804,31 @@ extend Opt {
                     return false;
                 }
                 let u = b.insts[x as usize];
-                let one = u.op == O_ADD && u.ty == s.ty && (u.a == s.a && const_of(b, u.b).unwrap_or(0) == 1 || u.b == s.a && const_of(
-                    b,
-                    u.a,
-                ).unwrap_or(0) == 1);
-                if !one {
+                let k = if u.op != O_ADD || u.ty != s.ty {
+                    0u64
+                } else if u.a == s.a {
+                    const_of(b, u.b).unwrap_or(0) & top
+                } else if u.b == s.a {
+                    const_of(b, u.a).unwrap_or(0) & top
+                } else {
+                    0u64
+                };
+                if k == 0 || d != 0 && k != d {
                     return false;
                 }
+                d = k;
             }
         }
-        let at = b.blocks[p as usize].start + b.blocks[p as usize].len - 1;
         let n = self.val(c.b);
+        if d != 1 && (d == 0 || self.ubound(pk, b, n, UB_DEPTH).unwrap_or(top) > top - d + 1) {
+            return false;
+        }
+        let at = b.blocks[p as usize].start + b.blocks[p as usize].len - 1;
         let kv = self.constant(b, s.ty, kc);
         let zv = self.constant(b, s.ty, 0);
         let ge = self.placed(b, p, at, Inst { op: O_ICMP, ty: T_I8, aux: C_UGE, a: n, b: kv, c: VNONE }, false);
-        let d = self.placed(b, p, at, Inst { op: O_SUB, ty: s.ty, aux: 0, a: n, b: kv, c: VNONE }, false);
-        let n2 = self.placed(b, p, at, Inst { op: O_SELECT, ty: s.ty, aux: 0, a: ge, b: d, c: zv }, false);
+        let dv = self.placed(b, p, at, Inst { op: O_SUB, ty: s.ty, aux: 0, a: n, b: kv, c: VNONE }, false);
+        let n2 = self.placed(b, p, at, Inst { op: O_SELECT, ty: s.ty, aux: 0, a: ge, b: dv, c: zv }, false);
         b.insts[th.a as usize] = Inst { op: O_ICMP, ty: c.ty, aux: C_ULT, a: s.a, b: n2, c: VNONE };
         return true;
     }
@@ -10401,7 +10419,7 @@ pub(package) struct Run {
     /// The bodies by level: a serial order every edge runs forward in.
     pub(package) order: Vector<u32>,
     pk: *const Package,
-    bodies: Vector<Body>,
+    bodies: UnsafeCell<Vector<Body>>,
     // The first held body (`Package.held`), the body count without any.
     held: u32,
     // Per body, its direct calls before optimization, as bodies in instruction order:
@@ -10415,10 +10433,10 @@ pub(package) struct Run {
     bunit: Vector<u32>, // per body, its function's `Sym.unit` (NONE: none)
     level: Vector<u32>,
     // Per body, whether a caller may inline it: written by the body's job, read by its callers' jobs.
-    ok: Vector<bool>,
+    ok: UnsafeCell<Vector<bool>>,
     // Per body whose loop transforms or packing made vectors, its final form: `bodies` holds the form
     // before them, which callers inline (`job`), until `finish` swaps the two (`inlined`).
-    finals: Vector<Option<Body>>,
+    finals: UnsafeCell<Vector<Option<Body>>>,
     inline: bool,
     cf: Config,
     // `SC_LIR_PRINT`: each optimized body whose function's name holds it prints to stderr (a debugging aid).
@@ -10552,8 +10570,8 @@ extend Run {
             edges: edges,
             order: order,
             pk: pkp,
-            bodies: bodies,
-            finals: finals,
+            bodies: UnsafeCell::<Vector<Body>>::new(bodies),
+            finals: UnsafeCell::<Vector<Option<Body>>>::new(finals),
             held: held,
             call_at: call_at,
             calls: calls,
@@ -10562,7 +10580,7 @@ extend Run {
             unit: unit,
             bunit: bunit,
             level: level,
-            ok: ok,
+            ok: UnsafeCell::<Vector<bool>>::new(ok),
             // SC_LIR_INLINE=0 inlines nothing (a debugging aid).
             inline: !stdlib::env_is("SC_LIR_INLINE", "0"),
             cf: cf,
@@ -10580,7 +10598,8 @@ extend Run {
             return;
         }
         let p = unsafe &*r.pk;
-        let base = r.bodies.as_ptr() as *mut Body;
+        // The jobs at one level write their own bodies, results and flags at once: through the cells.
+        let base = unsafe (*r.bodies.get()).as_mut_ptr();
         let mut sc = r.take();
         let b = unsafe &mut *(base + j as usize);
         sc.o.forget();
@@ -10592,7 +10611,7 @@ extend Run {
         // The inliner reads the rare blocks, the loop transforms and the code generators too: marked before
         // the inlining (a copy takes its call's marks) and once the transforms made their blocks.
         sc.o.estimate(p, b);
-        let inlined = sc.il.run(p, base, &r.ok, &r.level, &r.unit, j, r.cf.inline, b);
+        let inlined = sc.il.run(p, base, r.ok.get_ref(), &r.level, &r.unit, j, r.cf.inline, b);
         // The switches as compares and branches, before the first walk, which simplifies them (a test that
         // returns a value on either side returns a select).
         let lowered = p.switch_tree && sws::lower(b, p.ptr_bytes);
@@ -10723,12 +10742,12 @@ extend Run {
             if pre.is_some() {
                 let fin = replace(b, pre.unwrap());
                 b.compact_pool(&mut sc.o.cps);
-                unsafe *(r.finals.as_ptr() as *mut Option<Body> + j as usize) = Some(fin);
+                unsafe *((*r.finals.get()).as_mut_ptr() + j as usize) = Some(fin);
             } else if packed(b) {
                 fits = false;
             }
         }
-        unsafe *(r.ok.as_ptr() as *mut bool + j as usize) = fits && il::bounded(b, r.cf.inline);
+        unsafe *((*r.ok.get()).as_mut_ptr() + j as usize) = fits && il::bounded(b, r.cf.inline);
         r.give(sc);
     }
 
@@ -10779,14 +10798,16 @@ extend Run {
     /// Give the bodies back to `pk`, the package `new` took them from, in their final forms, their constant
     /// slots in read-only data (`const_slots`).
     pub(package) fn finish(self: &mut Self, pk: &mut Package) {
-        for j in 0..self.finals.len() {
-            let f = replace(&mut self.finals[j], Option::<Body>::None);
+        let finals = self.finals.get_mut();
+        let bodies = self.bodies.get_mut();
+        for j in 0..finals.len() {
+            let f = replace(finals.index_mut(j), Option::<Body>::None);
             if f.is_some() {
-                let pre = replace(&mut self.bodies[j], f.unwrap());
-                self.finals[j] = Some(pre);
+                let pre = replace(bodies.index_mut(j), f.unwrap());
+                finals.set(j, Some(pre));
             }
         }
-        pk.bodies = replace(&mut self.bodies, Vector::<Body>::new());
+        pk.bodies = replace(bodies, Vector::<Body>::new());
         const_slots(pk);
         symbol_tables(pk);
         // The calls through a method a constant table holds (`fold_ptr`): the jobs, which ran at once, did
@@ -10797,7 +10818,7 @@ extend Run {
     /// After `finish`, the form of body `k` its callers inlined: the one before the loop transforms and
     /// the packing when those made vectors or rotated its loops, else `pk`'s.
     pub(package) fn inlined<'a>(self: &'a Self, pk: &'a Package, k: u32) &'a Body {
-        if let Some(b) = self.finals.at(k as usize) {
+        if let Some(b) = self.finals.get_ref().at(k as usize) {
             return b;
         }
         return &pk.bodies[k as usize];
@@ -10810,7 +10831,7 @@ extend Run {
     }
 
     pub(package) const fn inlinable(self: &Self, k: u32) bool {
-        return self.ok[k as usize];
+        return self.ok.get_ref()[k as usize];
     }
 
     /// The parameters whose memory a call of body `k` may write (`FX_ARG`), a bit each.

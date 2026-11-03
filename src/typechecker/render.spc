@@ -12,7 +12,7 @@ fn rt_tuple(pkg: *const loader::Package, m: ModuleId) bool {
 // TypeChecker::mod_ast): foreign modules come from the package, the current one from `a` itself.
 const fn rt_ast(pkg: *const loader::Package, a: *const Ast, m: ModuleId) *const Ast {
     if m != unsafe (*a).module {
-        return unsafe &(*pkg).modules[m as usize].ast;
+        return unsafe (*pkg).modules[m as usize].ast.get_ref();
     }
     return a;
 }

@@ -629,6 +629,7 @@ extend CEmit {
             l.pkg.vec_absd = tgt::isa(pk.arch).vector_absd;
             l.pkg.vec_sumw = tgt::isa(pk.arch).vector_sumw;
             l.pkg.vfloat = tgt::isa(pk.arch).vector_float;
+            l.pkg.vround = l.pkg.vfloat && (tgt::isa(pk.arch).vector_round || feature(pk, "sse4.1"));
             // binary16: every arm64 processor converts it (FCVT) and one with FEAT_FP16 computes with it;
             // x86-64 converts it with F16C.
             let h16 = cf::find("fp16", pk.arch);
@@ -1233,7 +1234,7 @@ extend CEmit {
                         ptr32,
                         &mut q,
                     ) {
-                        let ct = unsafe (*(self.p().module_ast_const(am) as *mut Ast)).const_value(cval_bits(q), gbt);
+                        let ct = unsafe (*self.p().module_ast_ptr(am)).const_value(cval_bits(q), gbt);
                         self.push_bind(snap, em, gid, am, ct, g0);
                     }
                 }
@@ -15511,7 +15512,7 @@ extend CEmit {
                 let ly = *unsafe (*self.p().module_ast_const(dm)).type_at(dy.as_data.arr.len);
                 if ly.kind == TypeKind::TYPE_GENERIC && ly.module == gm {
                     let bt = self.p().const_param_bt(gm, ly.as_data.decl);
-                    let ct = unsafe (*(self.p().module_ast_const(am) as *mut Ast)).const_value(ay.as_data.arr.len, bt);
+                    let ct = unsafe (*self.p().module_ast_ptr(am)).const_value(ay.as_data.arr.len, bt);
                     self.unify_bind(dm, dy.as_data.arr.len, am, ct, gm, gens, out_p, out_m, out_t, depth + 1);
                 }
             }
