@@ -50,7 +50,8 @@ pub(package) const FOLD_SINC: u64 = 274877906944;
 /// the use, no local; a narrow integer's location holds it zero-extended).
 pub(package) const FOLD_WIDEN: u64 = 549755813888;
 /// A store's value, a select's side or its folded comparison's operand that one instruction of its block
-/// makes and only that reads: an integer operation that cannot trap (no division) or a scalar load, whose
+/// makes and only that reads: an integer operation that cannot trap (no division), a select or a scalar load,
+/// whose
 /// operands are parameters, constants, values of more uses or one more level of such values, no
 /// instruction between a load and its reader writing memory. The reader computes it where it reads it
 /// (wasm32's tree order: no local between).
@@ -600,7 +601,12 @@ extend Live {
         if t.op == O_LOAD {
             return;
         }
-        for o in [t.a, t.b] {
+        let oc = if t.op == O_SELECT {
+            t.c
+        } else {
+            VNONE
+        };
+        for o in [t.a, t.b, oc] {
             if o != VNONE && !self.stays(b, o) {
                 self.pfold[o as usize] = true;
                 self.sunk[o as usize] = true;
@@ -636,6 +642,9 @@ extend Live {
                 if p.b != VNONE && p.op != O_LOAD {
                     us.push(p.b);
                 }
+                if p.op == O_SELECT {
+                    us.push(p.c);
+                }
             }
         }
         return n;
@@ -664,11 +673,13 @@ extend Live {
             return true;
         }
         let un = t.op == O_NEG || t.op == O_NOT;
-        if !un && (t.op < O_ADD || t.op > O_ASHR || t.op >= O_SDIV && t.op <= O_UREM) {
+        let sel = t.op == O_SELECT;
+        if !un && !sel && (t.op < O_ADD || t.op > O_ASHR || t.op >= O_SDIV && t.op <= O_UREM) {
             return false;
         }
         let ok_a = self.stays(b, t.a) || depth == 2 && self.sinkable(b, t.a, lo, s, 1);
-        return ok_a && (un || self.stays(b, t.b) || depth == 2 && self.sinkable(b, t.b, lo, s, 1));
+        let ok_b = un || self.stays(b, t.b) || depth == 2 && self.sinkable(b, t.b, lo, s, 1);
+        return ok_a && ok_b && (!sel || self.stays(b, t.c) || depth == 2 && self.sinkable(b, t.c, lo, s, 1));
     }
 
     // Whether value `v` is read where it is (`sinkable`): a parameter, a constant or an address, a value of
@@ -1698,6 +1709,10 @@ extend Live {
                 // A load's `b` is its bound (`MEM_RANGE`), no operand.
                 if p.b != VNONE && p.op != O_LOAD {
                     out.push(p.b);
+                }
+                // A select moves with its sides (`FOLD_SINK`).
+                if p.op == O_SELECT {
+                    out.push(p.c);
                 }
             }
         }

@@ -44,6 +44,7 @@ const LB_IF: u8 = 2;
 struct Label {
     pub(package) kind: u8,
     pub(package) blk: u32,
+    pub(package) at: u32, // the code byte of its block type
 }
 
 extend Label as Copy {}
@@ -82,6 +83,8 @@ pub(package) struct Gen {
     body_at: u32, // where the body starts past the prologue
     asm_code: bool, // the body holds assembled code, whose local accesses `Code::local` does not see
     ret_end: u32, // the code byte past the last `return`
+    loop_end: u32, // the code byte past the last `end` that closed a loop
+    loop_at: u32, // that loop's block type byte
     nxt: Vector<u32>, // `stack_values`: per local access, the next of its local (NONE: none)
     last_of: Vector<u32>, // `stack_values`: per local, its access seen last
     cuts: Vector<u64>, // `stack_values`: the code ranges it removes, start << 32 | end
@@ -220,6 +223,8 @@ extend Gen {
             body_at: 0,
             asm_code: false,
             ret_end: NONE,
+            loop_end: NONE,
+            loop_at: NONE,
             nxt: Vector::<u32>::new(),
             last_of: Vector::<u32>::new(),
             cuts: Vector::<u64>::new(),
@@ -488,6 +493,7 @@ extend Gen {
         self.labels.truncate(0);
         self.asm_code = false;
         self.ret_end = NONE;
+        self.loop_end = NONE;
         self.held.truncate(0);
         self.tasks.truncate(0);
         for k in 0..CL_N as usize {
@@ -525,9 +531,20 @@ extend Gen {
                 return false;
             }
         }
-        // A return that ends the code: the function's end returns the values.
+        // A return that ends the code: the function's end returns the values. One that ends the outermost
+        // loop, which ends the code: the loop gives them (a branch to a loop carries no value), no return.
         if self.ret_end == self.c.len() {
             let _ = self.c.bytes.pop();
+        } else if self.loop_end == self.c.len() && self.ret_end != NONE && self.ret_end + 1 == self.c.len() && self.labels.len() == 0 {
+            let r = self.me.ret;
+            self.c.bytes[self.loop_at as usize] = if r.kind == wa::P_DIRECT {
+                wa::wtype(r.ty)
+            } else if r.kind == wa::P_V128 {
+                w::V128
+            } else {
+                w::BLOCK_EMPTY
+            };
+            self.cut_byte(self.ret_end - 1);
         } else {
             self.c.op(w::UNREACHABLE);
         }
@@ -761,6 +778,36 @@ extend Gen {
             self.c.bytes[at as usize + 1] = to[(self.c.acc[i] & 0xFFFFFFFF) as usize] as u8;
         }
         self.locals = kept;
+    }
+
+    // Remove code byte `o`, the last instruction's but one: the control positions, relocations and line rows past
+    // it move back.
+    fn cut_byte(self: &mut Self, o: u32) {
+        let _ = self.c.bytes.remove(o as usize);
+        let mut k: usize = 0;
+        for q in 0..self.c.ctl.len() {
+            let x = self.c.ctl[q];
+            if x != o {
+                self.c.ctl[k] = if x > o {
+                    x - 1
+                } else {
+                    x
+                };
+                k += 1;
+            }
+        }
+        self.c.ctl.truncate(k);
+        for q in 0..self.rels.len() {
+            if self.rels[q].off > o {
+                self.rels.index_mut(q).off -= 1;
+            }
+        }
+        for q in 0..self.rows.len() {
+            let x = (self.rows[q] >> 32) as u32;
+            if x > o {
+                self.rows[q] = (x - 1) as u64 << 32 | self.rows[q] & 0xFFFFFFFF;
+            }
+        }
     }
 
     // Whether a control instruction (`Code.ctl`) lies between code bytes `a` and `b`: a binary search.
@@ -1686,6 +1733,8 @@ extend Gen {
                 // A value its reader computes where it reads it (`lv::FOLD_SINK`).
                 if t.op == O_LOAD {
                     self.load_push(t);
+                } else if t.op == O_SELECT {
+                    self.select_push(t);
                 } else {
                     self.int_push(t);
                 }
@@ -3688,6 +3737,13 @@ extend Gen {
             self.c.op(w::END);
             return true;
         }
+        self.select_push(t);
+        self.put(i);
+        return true;
+    }
+
+    // Push the value of scalar select `t`.
+    fn select_push(self: &mut Self, t: Inst) {
         // A value or it plus 1 (`lv::FOLD_SINC`): the value plus the condition as 0 or 1 (inverted for the
         // false side).
         let s = self.inc_fold(t);
@@ -3700,8 +3756,7 @@ extend Gen {
             } else {
                 self.c.op(w::I32_ADD);
             }
-            self.put(i);
-            return true;
+            return;
         }
         // A constant true side under a comparison that folds in goes second, the comparison inverted: the
         // false side, computed last, may stay on the stack.
@@ -3713,8 +3768,6 @@ extend Gen {
         self.get(pick_v(swap, t.b, t.c));
         self.get_cond(a, swap, true);
         self.c.op(w::SELECT);
-        self.put(i);
-        return true;
     }
 
     // The side (1 or 2) of select `t` that is the other side plus 1, that sum folded into it (`lv::FOLD_SINC`);
@@ -3816,7 +3869,7 @@ extend Gen {
     fn open(self: &mut Self, op: u8, kind: u8, blk: u32) {
         self.c.op(op);
         self.c.op(w::BLOCK_EMPTY);
-        self.labels.push(Label { kind: kind, blk: blk });
+        self.labels.push(Label { kind: kind, blk: blk, at: self.c.len() - 1 });
     }
 
     fn task(self: &mut Self, tk: Task) bool {
@@ -3845,7 +3898,11 @@ extend Gen {
         }
         if tk.kind == TK_END {
             self.c.op(w::END);
-            let _ = self.labels.pop();
+            let l = self.labels.pop().unwrap();
+            if l.kind == LB_LOOP {
+                self.loop_end = self.c.len();
+                self.loop_at = l.at;
+            }
             return true;
         }
         if tk.kind == TK_EDGE {

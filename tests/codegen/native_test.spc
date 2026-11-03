@@ -10389,8 +10389,10 @@ int main(void) {
 // `@make`'s sums (local.get 0, local.get 1, i32.const 1, i32.add, i32.store), `@add`'s sum of two loads.
 // `@keep`'s load comes before a store to its address, so it stays there (the old value). A select computes its
 // sides and its comparison's operands where it reads them: `@pick` is local.get 1, local.get 2, i32.const 7,
-// i32.add, local.get 0, i32.const 1, i32.and, select. `@deep`'s three sums of loads would fold past
-// FOLD_DEPTH, so none moves. All give the C results.
+// i32.add, local.get 0, i32.const 1, i32.and, select. `@clamp`'s inner select moves into the outer one's false
+// side (local.get 1, local.get 2, local.get 0, ... select, ... select, no local); `@live`'s inner false side
+// lives to the outer select (`uses_at`), past a value of its own local. `@deep`'s three sums of
+// loads would fold past FOLD_DEPTH, so none moves. All give the C results.
 @test
 fn store_values_follow_their_addresses() {
     let lir = M"(lir ptr 8
@@ -10399,6 +10401,8 @@ sym @add fn global
 sym @keep fn global
 sym @pick fn global
 sym @deep fn global
+sym @clamp fn global
+sym @live fn global
 fn @make
   sig (ptr, i32) -> void
 b0(v0: ptr, v1: i32):
@@ -10453,6 +10457,26 @@ b0(v0: ptr):
   v11 = icmp.ult v9, v10
   v12 = select.i32 v11, v3, v6
   ret v12
+fn @clamp
+  sig (i32, i32, i32) -> i32
+b0(v0: i32, v1: i32, v2: i32):
+  v3 = icmp.slt v0, v1
+  v4 = icmp.sgt v0, v2
+  v5 = select.i32 v4, v2, v0
+  v6 = select.i32 v3, v1, v5
+  ret v6
+fn @live
+  sig (ptr, i32, i32) -> i32
+b0(v0: ptr, v1: i32, v2: i32):
+  v3 = iconst.i32 1
+  v4 = add.i32 v1, v3
+  store v4, v0 align 2
+  v5 = mul.i32 v2, v2
+  v6 = icmp.sgt v2, v1
+  v7 = select.i32 v6, v2, v4
+  v8 = icmp.slt v5, v1
+  v9 = select.i32 v8, v5, v7
+  ret v9
 )";
     let mut obj = Vector::<u8>::new();
     let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
@@ -10467,13 +10491,24 @@ b0(v0: ptr):
     assert(holds(&obj, add[0..14]), "add");
     let pick: [u8; 14] = [0x20, 0x01, 0x20, 0x02, 0x41, 0x07, 0x6A, 0x20, 0x00, 0x41, 0x01, 0x71, 0x1B, 0x0B];
     assert(holds(&obj, pick[0..14]), "pick");
+    let clamp: [u8; 7] = [0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x00];
+    assert(holds(&obj, clamp[0..7]), "clamp");
     let drv = M"(#include <stdint.h>
 void make(uint32_t *, uint32_t);
 void add(uint32_t *, const uint32_t *, const uint32_t *);
 void keep(uint32_t *, uint32_t *);
 uint32_t pick(uint32_t, uint32_t, uint32_t);
 uint32_t deep(const uint32_t *);
+int32_t clamp(int32_t, int32_t, int32_t);
+int32_t live(int32_t *, int32_t, int32_t);
 int main(void) {
+  for (int32_t x = -3; x < 4; x++)
+    for (int32_t y = -3; y < 4; y++) {
+      int32_t m;
+      if (live(&m, x, y) != (y * y < x ? y * y : y > x ? y : x + 1) || m != x + 1) return 7;
+    }
+  for (int32_t x = -3; x < 4; x++)
+    if (clamp(x, -1, 2) != (x < -1 ? -1 : x > 2 ? 2 : x)) return 6;
   for (uint32_t x = 0; x < 4; x++)
     if (pick(x, 3, 10) != ((x & 1) ? 3 : 17)) return 4;
   static const uint32_t d[2][6] = {{1, 2, 3, 4, 50, 49}, {1, 2, 3, 4, 50, 50}};
@@ -10740,15 +10775,17 @@ int main(void) {
   return 0;
 }
 )";
-    // `@bits`'s back edge is `br_if 0`, its exit after it: the sum (in local 0), `return`.
+    // `@bits`'s back edge is `br_if 0`, its exit after it: the sum (in local 0), which the loop (`loop
+    // (result i32)`, the code's end) gives, no `return` and no `unreachable` after it.
     let mut obj = Vector::<u8>::new();
     let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
     assert(
         object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
         "the wasm object",
     );
-    let tail: [u8; 5] = [0x0D, 0x00, 0x20, 0x00, 0x0F];
-    assert(holds(&obj, tail[0..5]), "bits");
+    let head: [u8; 2] = [0x03, 0x7F];
+    let tail: [u8; 6] = [0x0D, 0x00, 0x20, 0x00, 0x0B, 0x0B];
+    assert(holds(&obj, head[0..2]) && holds(&obj, tail[0..6]), "bits");
     // `@early`: i32.lt_u, i32.const 0, local.set 1, br_if 0.
     let early: [u8; 7] = [0x49, 0x41, 0x00, 0x21, 0x01, 0x0D, 0x00];
     assert(holds(&obj, early[0..7]), "early");
