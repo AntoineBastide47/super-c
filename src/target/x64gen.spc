@@ -569,6 +569,19 @@ extend Gen {
         return lv::tls_sym(unsafe &*self.pkg, self.b(), s);
     }
 
+    // Whether instruction `t` is the address of a thread-local variable that calls `__tls_get_addr`
+    // (`tls_addr`): one of a shared library or another object's, on Linux.
+    const fn tls_call(self: &Self, t: Inst) bool {
+        return t.op == O_SYMADDR && self.tls_sym(t.a) && !self.win && !self.tls_local(t.a);
+    }
+
+    // Whether thread-local body symbol `s` is at a fixed offset from the thread pointer the link sets
+    // (local-exec): one the package defines, in an executable.
+    const fn tls_local(self: &Self, s: u32) bool {
+        let p = unsafe &*self.pkg;
+        return !p.pic && !p.syms[self.b().syms[s as usize] as usize].ext;
+    }
+
     // Whether `v` is an integer constant; its bits in `out`.
     const fn const_of(self: &Self, v: Value, out: &mut u64) bool {
         return lv::const_of(self.b(), v, out);
@@ -1412,15 +1425,15 @@ extend Gen {
             }
         }
         // A body that calls nothing that returns (no instruction `clobbers` but one before a trap or in a
-        // rare block, no thread-local address's getter) and runs no system operation or variadic access:
-        // every register of `xscr` may be a home at once. `bare`: not even in a rare block.
+        // rare block, no thread-local address's getter: `tls_call`) and runs no system operation or
+        // variadic access: every register of `xscr` may be a home at once. `bare`: not even in a rare block.
         let mut leaf = true;
         let mut bare = true;
         for x in 0..ni {
             let t = b.insts[x];
-            leaf = leaf && !(self.cret[x] && !self.rarec[x]) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !(t.op == O_SYMADDR && !self.remat_inst(
-                x as u32,
-            ));
+            leaf = leaf && !(self.cret[x] && !self.rarec[x]) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !self.tls_call(
+                t,
+            );
             bare = bare && !self.cret[x];
         }
         bare = bare && leaf;
@@ -1873,9 +1886,10 @@ extend Gen {
         }
     }
 
-    // `clobbers` of `t` but a vector operation the body computes in registers (`ext_reg`).
+    // `clobbers` of `t` but a vector operation the body computes in registers (`ext_reg`), and a
+    // thread-local address that calls `__tls_get_addr` (`tls_call`).
     fn calls(self: &Self, t: Inst) bool {
-        return Gen::clobbers(self.b(), t) && !self.ext_reg(t) && !self.idiom_reg(t);
+        return Gen::clobbers(self.b(), t) && !self.ext_reg(t) && !self.idiom_reg(t) || self.tls_call(t);
     }
 
     const fn clobbers(b: &Body, t: Inst) bool {
@@ -2167,9 +2181,10 @@ extend Gen {
             ) && (op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM) || op >= O_ADDO && op <= O_MULO && (t.aux == OV_SIGNED || type_bits(
                 t.ty,
                 8,
-            ) < 32) || op >= O_ALOAD && op <= O_FENCE || op == O_SYMADDR && !self.remat_inst(i as u32) || shift && is_vec(
-                t.ty,
-            ) && self.lv.vshimm(b, t) == NONE {
+            ) < 32) || op >= O_ALOAD && op <= O_FENCE || self.tls_call(t) || shift && is_vec(t.ty) && self.lv.vshimm(
+                b,
+                t,
+            ) == NONE {
                 return 0;
             }
             if op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM || op == O_MULO && type_bits(t.ty, 8) == 64 {
@@ -2634,6 +2649,18 @@ extend Gen {
             self.win_tls_addr(r, os, addend);
             return;
         }
+        if ps.kind == SK_TLS && self.tls_local(s) {
+            // mov r, fs:[0]; lea r, [r + x@tpoff]
+            self.obj().syms.index_mut(os as usize).flags |= ob::SF_TLS;
+            self.c.byte(0x64);
+            self.c.byte(0x48 | r >> 3 << 2);
+            self.c.byte(0x8B);
+            self.c.byte((r & 7) << 3 | 4);
+            self.c.byte(0x25);
+            self.c.d32(0);
+            self.lea_rel(r, x::R_TPOFF32, os, addend);
+            return;
+        }
         if ps.kind == SK_TLS {
             self.tls_addr(os);
             if r != x::RAX {
@@ -2691,7 +2718,12 @@ extend Gen {
         self.c.byte(0x25);
         self.c.d32(0x58);
         self.c.rm(0, 0x8B, true, r, x::ix(r, S0, 3, 0), false);
-        // lea r, [r + disp32], the displacement the variable's section offset
+        // The displacement: the variable's section offset.
+        self.lea_rel(r, x::R_SECREL, os, addend);
+    }
+
+    // lea r, [r + disp32], the displacement relocation `kind` of object symbol `os` plus `addend`.
+    fn lea_rel(self: &mut Self, r: u8, kind: u8, os: u32, addend: i64) {
         self.c.byte(0x48 | r >> 3 << 2 | r >> 3);
         self.c.byte(0x8D);
         self.c.byte(0x80 | (r & 7) << 3 | r & 7);
@@ -2700,7 +2732,7 @@ extend Gen {
         }
         let at = self.c.len();
         self.c.d32(0);
-        self.rels.push(CRel { at: at, kind: x::R_SECREL, sym: os, addend: addend });
+        self.rels.push(CRel { at: at, kind: kind, sym: os, addend: addend });
     }
 
     // rax = the address of thread-local variable `os` (general dynamic, which the linker relaxes): the
@@ -3497,6 +3529,14 @@ extend Gen {
             if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
                 continue;
             }
+            // A thread-local address before it that calls `__tls_get_addr` (`tls_call`) takes the registers too.
+            let mut gd = false;
+            for q in b.blocks[0].start..i {
+                gd = gd || self.tls_call(b.insts[q as usize]);
+            }
+            if gd {
+                continue;
+            }
             self.call_layout(t);
             let mut same = false;
             for j in 0..b.pool[t.b as usize] {
@@ -4201,7 +4241,7 @@ extend Gen {
             }
             return true;
         }
-        if op == O_SYMADDR && self.win {
+        if op == O_SYMADDR && (self.win || self.tls_local(t.a)) {
             // A thread-local variable's address: from the thread's block.
             let rd = self.def(i);
             self.sym_addr(rd, t.a, t.b as i32);

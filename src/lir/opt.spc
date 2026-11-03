@@ -1763,14 +1763,15 @@ extend Opt {
     }
 
     // Whether store `i` of the body writes a `static mut`: a writable data object the package defines
-    // (`aobj`), not a thread's own (a thread-local address is no value across code).
+    // (`aobj`), also a thread-local one: a loop that calls nothing has no suspension point, so it runs on one
+    // thread and the address from before it is its copy's.
     fn static_place(self: &Self, pk: &Package, i: u32) bool {
         let o = self.aobj[i as usize];
         if o == NONE || (o & (lu::OBJ_SLOT | lu::OBJ_PRIVATE)) != 0 {
             return false;
         }
         let y = pk.syms[o as usize];
-        return y.kind == SK_DATA && y.def != NONE && !pk.data[y.def as usize].readonly;
+        return (y.kind == SK_DATA || y.kind == SK_TLS) && y.def != NONE && !pk.data[y.def as usize].readonly;
     }
 
     // Give each loop header no preheader enters one (LLVM's LoopSimplify): a block that the jumps and
@@ -9425,7 +9426,7 @@ extend Opt {
     }
 
     // Whether load `t` cannot fault wherever its address is defined: it reads inside a slot, a data
-    // symbol of the package, an aggregate the caller passes by reference or a reference parameter's
+    // symbol of the package (a thread-local one's copy), an aggregate the caller passes by reference or a reference parameter's
     // referent (an entry block parameter: valid for the whole call).
     fn safe_load(self: &Self, pk: &Package, b: &Body, t: Inst) bool {
         if (t.a & VFLAG) != 0 {
@@ -9455,7 +9456,7 @@ extend Opt {
                 size = b.slots[a.a as usize].size;
             } else if a.op == O_SYMADDR {
                 let s = pk.syms[b.syms[a.a as usize] as usize];
-                if s.kind == SK_DATA && s.def != NONE {
+                if (s.kind == SK_DATA || s.kind == SK_TLS) && s.def != NONE {
                     size = pk.data[s.def as usize].size;
                     off += a.b as i32;
                 }

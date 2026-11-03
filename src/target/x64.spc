@@ -6,8 +6,9 @@
 
 /// Relocation kinds (`codegen::obj::ORel.kind`): a 32-bit PC-relative field (its addend counts from the
 /// field: -4 and less), a call through the PLT, the address slot of a symbol in the GOT (relaxable), the
-/// thread-local general-dynamic descriptor, a 64-bit absolute address, and (COFF) a 32-bit offset from
-/// the start of the target's section (a thread-local's offset in the thread's block).
+/// thread-local general-dynamic descriptor, a 64-bit absolute address, (COFF) a 32-bit offset from
+/// the start of the target's section (a thread-local's offset in the thread's block), and (ELF) a
+/// thread-local's 32-bit offset from the thread pointer (local-exec).
 pub(package) const R_PC32: u8 = 1;
 pub(package) const R_PLT32: u8 = 2;
 pub(package) const R_GOTPCRELX: u8 = 3;
@@ -15,6 +16,7 @@ pub(package) const R_REX_GOTPCRELX: u8 = 4;
 pub(package) const R_TLSGD: u8 = 5;
 pub(package) const R_ABS64: u8 = 6;
 pub(package) const R_SECREL: u8 = 7;
+pub(package) const R_TPOFF32: u8 = 8;
 
 pub(package) const RAX: u8 = 0;
 pub(package) const RCX: u8 = 1;

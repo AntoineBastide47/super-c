@@ -9412,3 +9412,193 @@ int main(void) {
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }
+
+// A thread-local variable's address in an executable on x86-64 Linux is the thread pointer plus an offset
+// the link sets (local-exec: `mov fs:[0]` and a `lea`), with no call of `__tls_get_addr`. On arm64 the
+// getter keeps x1..x15, so the values a loop carries in a body that calls nothing else stay in them: no
+// callee-saved register is saved.
+@test
+fn thread_local_addresses_take_no_call_in_an_executable() {
+    let lir = M"(lir ptr 8
+sym @t tls global
+sym @spread fn global
+fn @spread
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = symaddr @t
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3, v3, v3, v3, v3, v3)
+b1(v5: i64, v6: i64, v7: i64, v8: i64, v9: i64, v10: i64):
+  v11 = icmp.ult v5, v1
+  br v11, b2, b3
+b2:
+  v12 = load.i64 v0+0 align 3
+  v13 = load.i64 v0+8 align 3
+  v14 = load.i64 v0+16 align 3
+  v15 = load.i64 v0+24 align 3
+  v16 = load.i64 v0+32 align 3
+  v17 = add.i64 v6, v12
+  v18 = add.i64 v7, v13
+  v19 = add.i64 v8, v14
+  v20 = add.i64 v9, v15
+  v21 = add.i64 v10, v16
+  v22 = add.i64 v5, v4
+  jmp b1(v22, v17, v18, v19, v20, v21)
+b3:
+  v23 = load.i64 v2 align 3
+  v24 = add.i64 v23, v6
+  v25 = add.i64 v24, v7
+  v26 = add.i64 v25, v8
+  v27 = add.i64 v26, v9
+  v28 = add.i64 v27, v10
+  store v28, v2 align 3
+  ret v28
+data @t size 8 align 3
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the x86-64 object",
+    );
+    // mov r64, fs:[0]: the segment prefix, REX.W, the load, a ModRM of an absolute address, the SIB of none.
+    let mut fs0 = false;
+    for i in 0..obj.len() - 4 {
+        fs0 = fs0 || obj[i] == 0x64 && (obj[i + 1] & 0xFB) == 0x48 && obj[i + 2] == 0x8B && (obj[i + 3] & 0xC7) == 0x04 && obj[i + 4] == 0x25;
+    }
+    assert(fs0 && !unsafe str::from_raw(obj.as_ptr(), obj.len()).contains("__tls_get_addr"), "a local-exec address");
+    let oses: [str; 2] = ["macos", "linux"];
+    for os in oses {
+        assert(
+            object_of(lir, tgt::axis_index(os, false), tgt::axis_index("aarch64", true), 0, &mut obj),
+            "the arm64 object",
+        );
+        // No store of a pair from x19..x28 (stp, signed offset or pre-index).
+        for i in 0..obj.len() / 4 {
+            let w = obj[4 * i] as u32 | obj[4 * i + 1] as u32 << 8 | obj[4 * i + 2] as u32 << 16 | obj[4 * i + 3] as u32 << 24;
+            let stp = (w & 0xFFC00000) == 0xA9000000 || (w & 0xFFC00000) == 0xA9800000;
+            assert(!(stp && (w & 31) >= 19 && (w & 31) <= 28), os);
+        }
+    }
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t spread(const int64_t *, int64_t);
+int main(void) {
+  int64_t a[5] = {1, 2, 3, 4, 5};
+  if (spread(a, 2) != 30) return 1;
+  if (spread(a, 1) != 45) return 2;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// An aggregate parameter a call takes on in the registers it arrives in keeps its parts when a
+// thread-local address before the call runs a getter that writes x0 (arm64) or calls `__tls_get_addr`.
+@test
+fn aggregates_passed_on_survive_a_thread_local_address() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @t tls global
+sym @g fn global
+sym @f fn global
+fn @f
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0) -> i64
+b0(v0: ptr):
+  v1 = symaddr @t
+  v2 = load.i64 v1 align 3
+  v3 = iconst.i64 1
+  v4 = add.i64 v2, v3
+  store v4, v1 align 3
+  v5 = call.i64 @g(v0) : (l0) -> i64
+  ret v5
+data @t size 8 align 3
+)";
+    let drv = M"(#include <stdint.h>
+struct S { const int64_t *p; int64_t n; };
+int64_t f(struct S);
+int64_t g(struct S s) { return s.p[0] + s.n; }
+int main(void) {
+  int64_t a[1] = {40};
+  struct S s = {a, 2};
+  if (f(s) != 42) return 1;
+  if (f(s) != 42) return 2;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// A sum of lanes 0 and 1 of a float vector of two lanes, each read once, adds them pairwise on arm64
+// (`faddp`, `lv::FOLD_LANE_PAIR`) in either order, with the vector in its register; a lane read twice
+// stays a lane read.
+@test
+fn sums_of_two_lanes_add_them_pairwise() {
+    let lir = M"(lir ptr 8
+sym @pair32 fn global
+sym @pair64 fn global
+sym @twice fn global
+fn @pair32
+  sig (ptr) -> f32
+b0(v0: ptr):
+  v1 = load.v2f32 v0 align 2
+  v2 = vextract.1.f32 v1
+  v3 = vextract.0.f32 v1
+  v4 = fadd.f32 v2, v3
+  ret v4
+fn @pair64
+  sig (ptr) -> f64
+b0(v0: ptr):
+  v1 = load.v2f64 v0 align 3
+  v2 = vextract.0.f64 v1
+  v3 = vextract.1.f64 v1
+  v4 = fadd.f64 v2, v3
+  ret v4
+fn @twice
+  sig (ptr) -> f32
+b0(v0: ptr):
+  v1 = load.v2f32 v0 align 2
+  v2 = vextract.0.f32 v1
+  v3 = vextract.1.f32 v1
+  v4 = fadd.f32 v2, v3
+  v5 = fadd.f32 v4, v2
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("macos", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // FADDP (scalar) of 2S and of 2D.
+    let mut n: u32 = 0;
+    for i in 0..obj.len() / 4 {
+        let w = obj[4 * i] as u32 | obj[4 * i + 1] as u32 << 8 | obj[4 * i + 2] as u32 << 16 | obj[4 * i + 3] as u32 << 24;
+        n += ((w & 0xFFBFFC00) == 0x7E30D800) as u32;
+    }
+    assert_eq(n, 2);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+float pair32(const float *);
+double pair64(const double *);
+float twice(const float *);
+int main(void) {
+  float f[2] = {1.5f, 2.25f};
+  double d[2] = {-3.5, 0.125};
+  if (pair32(f) != 3.75f) return 1;
+  if (pair64(d) != -3.375) return 2;
+  if (twice(f) != 5.25f) return 3;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}

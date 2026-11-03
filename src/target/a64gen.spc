@@ -335,6 +335,11 @@ extend Gen {
         return lv::remat_inst(unsafe &*self.pkg, self.b(), v);
     }
 
+    // Whether `t` adds the two lanes of a vector it reads in its register (`lv::FOLD_LANE_PAIR`).
+    const fn lane_pair(self: &Self, t: Inst) bool {
+        return lv::lane_pair(self.b(), t) && self.lv.pfold[t.a as usize];
+    }
+
     // Whether body symbol `s` is a thread-local variable.
     const fn tls_sym(self: &Self, s: u32) bool {
         return lv::tls_sym(unsafe &*self.pkg, self.b(), s);
@@ -954,16 +959,16 @@ extend Gen {
         // A body that calls nothing that returns (no instruction `clobbers` but one before a trap, no
         // thread-local address's getter) and runs no system operation or variadic access: its homes may
         // take x0..x8; x2..x8 when it calls in rare blocks only, as a call's result arrives in x0 and x1,
-        // where a home saved around it (`save_scratch`) would come back.
+        // where a home saved around it (`save_scratch`) would come back, or calls a getter, which keeps
+        // x1..x15 (`sym_addr`).
         let mut leaf = true;
         let mut rare = true;
         for x in 0..ni {
             let t = b.insts[x];
             let calls = self.cret[x];
-            let other = t.op == O_SYS || t.op == O_VASTART || t.op == O_VAARG || t.op == O_SYMADDR && !self.remat_inst(
-                x as u32,
-            );
-            leaf = leaf && !calls && !other;
+            let other = t.op == O_SYS || t.op == O_VASTART || t.op == O_VAARG;
+            let getter = t.op == O_SYMADDR && !self.remat_inst(x as u32);
+            leaf = leaf && !calls && !other && !getter;
             rare = rare && !(calls && !self.rarec[x]) && !other;
         }
         self.scr = if leaf {
@@ -1555,12 +1560,13 @@ extend Gen {
         }
         // Code that may branch past a lane reads a vector from its home: a vector in a register reaches
         // it first, but for the instructions with register forms (`vop`, `vec_arith` and `vec_mulh` sync their others;
-        // a splat of a lane, `lv::FOLD_LANE`) and calls (a vector passed in memory goes through `mloc`).
+        // a splat of a lane, `lv::FOLD_LANE`; a sum of two lanes, `lv::FOLD_LANE_PAIR`) and calls (a vector passed in
+        // memory goes through `mloc`).
         let reg_form = t.op == O_STORE || t.op == O_SPLAT || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(
             t.ty,
         ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT || t.op == O_VSUMW) || t.op == O_VEXTRACT || self.conv_reg(
             t,
-        ) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.vt(t.a));
+        ) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.vt(t.a)) || self.lane_pair(t);
         if !reg_form && !is_terminator(t.op) {
             for k in 0..self.uses.len() {
                 self.sync(self.uses[k]);
@@ -2190,7 +2196,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR;
         self.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -2732,6 +2738,14 @@ extend Gen {
             }
             let t = b.insts[i as usize];
             if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
+                continue;
+            }
+            // A thread-local address's getter before it writes x0 (`sym_addr`).
+            let mut getter = false;
+            for q in b.blocks[0].start..i {
+                getter = getter || b.insts[q as usize].op == O_SYMADDR && !self.remat_inst(q);
+            }
+            if getter {
                 continue;
             }
             self.call_layout(t);
@@ -3482,8 +3496,13 @@ extend Gen {
             self.evict(0);
             self.lock |= bit(0);
             self.sym_addr(0, t.a, t.b as i32);
-            let rd = self.def(i);
-            self.emit(a::mov_reg(true, rd, 0));
+            let x = self.vx(i);
+            if self.fix_class(x) != FIX_NONE {
+                let rd = self.def(i);
+                self.emit(a::mov_reg(true, rd, 0));
+            } else {
+                self.bind(x, 0);
+            }
             return true;
         }
         if op == O_SPLAT {
@@ -3640,6 +3659,13 @@ extend Gen {
                 return self.vec_arith(i, t);
             }
             let d = t.ty == T_F64;
+            if self.lane_pair(t) {
+                // The two lanes of a vector (`lv::FOLD_LANE_PAIR`): FADDP (scalar), sz the lanes' size.
+                let rv = self.vec_use(self.b().insts[t.a as usize].a, V0 + 30);
+                let rd = self.def_step(i);
+                self.emit(0x7E30D800 | a::on(d, 1u32 << 22) | (rv - V0) as u32 << 5 | (rd - V0) as u32);
+                return true;
+            }
             let ra = self.reg(t.a);
             if op == O_FNEG || op == O_FSQRT {
                 let rd = self.def_step(i);

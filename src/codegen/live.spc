@@ -110,6 +110,9 @@ pub(package) const FOLD_FREE_ZEXT: u64 = 68719476736;
 /// sum into 8-byte lanes (`O_VSUMW`) alone reads folds into it: the sum takes the two vectors (x86-64
 /// `psadbw`).
 pub(package) const FOLD_VSAD: u64 = 34359738368;
+/// `FOLD_LANE_PAIR`: lanes 0 and 1 of one float vector of two lanes (8 or 16 bytes), each read with one use,
+/// that a scalar `fadd` adds, fold into it: the sum adds the vector's lanes pairwise (arm64 `faddp`).
+pub(package) const FOLD_LANE_PAIR: u64 = 137438953472;
 /// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
 /// flags keep, a folded sum or extension, the sum with the carry.
 pub(package) const CARRY_NONE: u8 = 0;
@@ -532,6 +535,10 @@ extend Live {
             ) == 16) && is_inst(t.b) && b.insts[t.b as usize].op == O_SPLAT && self.count[t.b as usize] == 1 && is_inst(
                 b.insts[t.b as usize].a,
             ) && self.pfold[b.insts[t.b as usize].a as usize] {
+                self.pfold[t.b as usize] = true;
+            }
+            if (self.fold_ops & FOLD_LANE_PAIR) != 0 && lane_pair(b, t) && self.count[t.a as usize] == 1 && self.count[t.b as usize] == 1 {
+                self.pfold[t.a as usize] = true;
                 self.pfold[t.b as usize] = true;
             }
             if (self.fold_ops & FOLD_VSAD) != 0 && t.op == O_VSUMW {
@@ -3414,6 +3421,20 @@ fn ones_of(b: &Body, v: Value, bits: u32, depth: u32) u64 {
 
 // `ones_of` looks through at most ONES_DEPTH instructions.
 const ONES_DEPTH: u32 = 4;
+
+/// Whether `t` of `b` is a scalar float `fadd` of lanes 0 and 1 (in either order) of one float vector of two
+/// lanes (`FOLD_LANE_PAIR`).
+pub(package) const fn lane_pair(b: &Body, t: Inst) bool {
+    if t.op != O_FADD || is_vec(t.ty) || !is_inst(t.a) || !is_inst(t.b) {
+        return false;
+    }
+    let x = b.insts[t.a as usize];
+    let y = b.insts[t.b as usize];
+    return x.op == O_VEXTRACT && y.op == O_VEXTRACT && x.a == y.a && x.aux + y.aux == 1 && lanes(b.type_of(x.a)) == 2 && type_bytes(
+        t.ty,
+        8,
+    ) >= 4;
+}
 
 // Value `v` is an instruction's (no parameter, no flag, not VNONE).
 const fn is_inst(v: Value) bool {

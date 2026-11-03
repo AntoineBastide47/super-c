@@ -3035,6 +3035,60 @@ b0:
     same_result(&b, &a, "drive", none, 58);
 }
 
+// A thread-local variable a loop reads and writes stays in a register across it as a `static mut` does: a
+// loop that calls nothing has no suspension point, so the address from before it stays the thread's.
+@test
+fn a_thread_local_a_loop_updates_stays_in_a_register() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @count tls global
+sym @tally fn global noinline
+sym @drive fn global
+fn @tally
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = symaddr @count
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.slt v5, v1
+  br v6, b2, b3
+b2:
+  v7 = ptradd v0, v5 * 8
+  v8 = load.i64 v7 align 3 tbaa 4
+  v9 = trunc.i32 v8
+  v10 = load.i32 v2 align 2 tbaa 3
+  v11 = add.i32 v10, v9
+  store v11, v2 align 2 tbaa 3
+  v12 = add.i64 v5, v4
+  jmp b1(v12)
+b3:
+  ret
+fn @drive
+  sig () -> i32
+  slot s0 size 24 align 3
+b0:
+  v0 = slotaddr s0
+  v1 = iconst.i64 3
+  v2 = iconst.i64 5
+  store v1, v0 align 3
+  store v2, v0+8 align 3
+  store v1, v0+16 align 3
+  call @tally(v0, v1) : (ptr, i64) -> void
+  call @tally(v0, v1) : (ptr, i64) -> void
+  v3 = symaddr @count
+  v4 = load.i32 v3 align 2
+  ret v4
+data @count size 4 align 2
+)",
+    );
+    let t = text_of(&a, "tally");
+    assert(!stored_in_loop(&t) && t.as_str().find("icmp.ne") >= 0, t.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 22);
+}
+
 // Whether body text `t` stores to `@count` in the block that loads its loop's elements (`load.i64`).
 fn stored_in_loop(t: &String) bool {
     let s = t.as_str();

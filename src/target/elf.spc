@@ -41,6 +41,7 @@ const R_X86_64_32: u32 = 10;
 const R_X86_64_PC32: u32 = 2;
 const R_X86_64_PLT32: u32 = 4;
 const R_X86_64_TLSGD: u32 = 19;
+const R_X86_64_TPOFF32: u32 = 23;
 const R_X86_64_GOTPCRELX: u32 = 41;
 const R_X86_64_REX_GOTPCRELX: u32 = 42;
 
@@ -153,6 +154,9 @@ const fn rel_type(k: u8) u32 {
     }
     if k == x::R_TLSGD {
         return R_X86_64_TLSGD;
+    }
+    if k == x::R_TPOFF32 {
+        return R_X86_64_TPOFF32;
     }
     assert(k == x::R_ABS64, "elf: a relocation kind COFF alone takes");
     return R_X86_64_64;
