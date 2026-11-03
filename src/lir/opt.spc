@@ -3274,8 +3274,9 @@ extend Opt {
     // that only loads and stores at constant offsets and copies of a constant size address, and that a store
     // or a copy in a loop writes: each becomes a slot that a new entry block copies the aggregate into and
     // passes to the old one, for that parameter, which promotion then turns into values: a loop a tail
-    // recursion made carries them in registers. Once per body; not when an edge enters the entry. Whether
-    // any did.
+    // recursion made carries them in registers. A parameter of the block the entry jumps to alone (an entry
+    // a copy without constant parameters added, `drop_params`) that the jump passes one of them stands for
+    // it. Once per body; not when an edge enters the entry. Whether any did.
     fn param_slots(self: &mut Self, pk: &Package, b: &mut Body) bool {
         if b.sig == NONE || !self.pslots {
             return false;
@@ -3293,6 +3294,38 @@ extend Opt {
         if cand == 0 {
             return false;
         }
+        // The jump that ends the entry when it enters a block no other edge enters: its parameters that
+        // receive entry parameters (`fwd`: per entry parameter, that block parameter or VNONE).
+        let mut fwd = Vector::<Value>::new();
+        fill(&mut fwd, np as usize, VNONE);
+        let tm = b.insts[(e.start + e.len - 1) as usize];
+        let mut fj = NONE;
+        if tm.op == O_JMP {
+            let s = b.edge_target(tm.a);
+            let mut preds: u32 = 0;
+            for k in 0..b.blocks.len() {
+                let bk = b.blocks[k];
+                if bk.len == 0 {
+                    continue;
+                }
+                b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut self.edges);
+                for x in 0..self.edges.len() {
+                    preds += (b.edge_target(self.edges[x]) == s) as u32;
+                }
+            }
+            if preds == 1 && s != 0 {
+                fj = e.start + e.len - 1;
+                for q in 0..b.edge_nargs(tm.a) {
+                    let v = b.edge_arg(tm.a, q);
+                    if (v & VPARAM) != 0 && (v & ~VPARAM) >= e.param_start && (v & ~VPARAM) < e.param_start + np && fwd[((v & ~VPARAM) - e.param_start) as usize] == VNONE {
+                        fwd.set(((v & ~VPARAM) - e.param_start) as usize, b.param(s, q));
+                    } else if (v & VPARAM) != 0 && (v & ~VPARAM) >= e.param_start && (v & ~VPARAM) < e.param_start + np {
+                        // Passed twice: two names of one aggregate.
+                        cand &= ~(1u64 << ((v & ~VPARAM) - e.param_start) as u64);
+                    }
+                }
+            }
+        }
         // Only where a loop writes it: elsewhere the walk forwards its stores to its loads.
         self.tables(pk, b, K_NEST);
         let mut looped: u64 = 0;
@@ -3308,8 +3341,9 @@ extend Opt {
                 } else {
                     VNONE
                 };
-                if a != VNONE && (a & VPARAM) != 0 && (a & ~VPARAM) >= e.param_start && (a & ~VPARAM) < e.param_start + np {
-                    looped |= 1u64 << ((a & ~VPARAM) - e.param_start) as u64;
+                let k = entry_of(e, &fwd, a);
+                if k != NONE {
+                    looped |= 1u64 << k as u64;
                 }
             }
         }
@@ -3328,13 +3362,21 @@ extend Opt {
                         return false;
                     }
                     for q in 0..b.edge_nargs(self.edges[x]) {
-                        self.fuses.push(b.edge_arg(self.edges[x], q));
+                        let v = b.edge_arg(self.edges[x], q);
+                        // The entry's jump passing a parameter on to its stand-in is no use of it.
+                        if i as u32 != fj || entry_of(e, &fwd, v) == NONE || fwd[entry_of(e, &fwd, v) as usize] != b.param(
+                            b.edge_target(self.edges[x]),
+                            q,
+                        ) {
+                            self.fuses.push(v);
+                        }
                     }
                 }
             }
             for u in 0..self.fuses.len() {
                 let v = self.fuses[u];
-                if v == VNONE || (v & VPARAM) == 0 || (v & ~VPARAM) < e.param_start || (v & ~VPARAM) >= e.param_start + np {
+                let k = entry_of(e, &fwd, v);
+                if k == NONE {
                     continue;
                 }
                 let ok = t.op == O_LOAD && t.a == v || t.op == O_STORE && t.a == v && t.b != v || t.op == O_MEMCPY && t.a == v != (t.b == v) && const_of(
@@ -3342,7 +3384,7 @@ extend Opt {
                     t.c,
                 ).is_some();
                 if !ok {
-                    cand &= ~(1u64 << ((v & ~VPARAM) - e.param_start) as u64);
+                    cand &= ~(1u64 << k as u64);
                 }
             }
         }
@@ -15396,6 +15438,23 @@ fn specialize(pk: &mut Package) {
     while let Some(b) = hb.pop() {
         pk.bodies.push(b);
     }
+}
+
+// The entry parameter of entry block `e` that value `v` is, or stands for (`fwd`, `param_slots`); NONE for
+// another value.
+fn entry_of(e: Block, fwd: &Vector<Value>, v: Value) u32 {
+    if v == VNONE || (v & VPARAM) == 0 {
+        return NONE;
+    }
+    if (v & ~VPARAM) >= e.param_start && (v & ~VPARAM) < e.param_start + fwd.len() as u32 {
+        return (v & ~VPARAM) - e.param_start;
+    }
+    for k in 0..fwd.len() {
+        if fwd[k] == v {
+            return k as u32;
+        }
+    }
+    return NONE;
 }
 
 // Into `out` the constant instruction value `v` of `b` is, when it is a scalar one of at most 64 bits.

@@ -84,4 +84,7 @@ F int32_t c_w_condsum(const int32_t *s, size_t n) { uint32_t t = 0; for (size_t 
 F size_t c_w_cmpcount(const uint32_t *a, const uint32_t *b, size_t n) { size_t c = 0; for (size_t i = 0; i < n; i++) if (a[i] == b[i]) c++; return c; }
 F uint32_t c_w_sad(const uint8_t *a, const uint8_t *b, size_t n) { uint32_t t = 0; for (size_t i = 0; i < n; i++) { int32_t x = (int32_t)a[i] - (int32_t)b[i]; t += (uint32_t)(x < 0 ? -x : x); } return t; }
 F void c_w_sat(uint8_t *s, size_t n, uint8_t k) { for (size_t i = 0; i < n; i++) { uint16_t v = (uint16_t)s[i] + k; s[i] = v > 255 ? 255 : (uint8_t)v; } }
-F unsigned __int128 c_i_mac128(const uint64_t *s, size_t n, uint64_t k) { unsigned __int128 t = 0; for (size_t i = 0; i < n; i++) t += (unsigned __int128)s[i] * k; return t; }
+// Super-C's `u128` is a struct of two 64-bit limbs, low first: C returns it as that struct (Microsoft x64
+// returns `unsigned __int128` in xmm0, a 16-byte struct through memory; System V both in rax:rdx).
+typedef struct { uint64_t lo, hi; } U128;
+F U128 c_i_mac128(const uint64_t *s, size_t n, uint64_t k) { unsigned __int128 t = 0; for (size_t i = 0; i < n; i++) t += (unsigned __int128)s[i] * k; return (U128){(uint64_t)t, (uint64_t)(t >> 64)}; }

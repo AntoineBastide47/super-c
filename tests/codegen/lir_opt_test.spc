@@ -215,6 +215,23 @@ fn a_constant_every_call_passes_makes_a_copy_without_it() {
     assert(s.ok() && c.contains("sig (i32) -> i32"), "the recursion's copy takes the count alone");
 }
 
+// A tail recursion over a slice whose every call passes one constant accumulator: its copy without it
+// (`drop_params`, whose entry jumps to the old one) still copies the slice into a slot (`param_slots`), so
+// its loop carries the slice in registers and stores nothing.
+@test
+fn a_tail_recursions_copy_carries_its_slice_in_registers() {
+    let src = "@noinline\nfn slsum(s: []u32, acc: u32) u32 {\n    if s.len() == 0 {\n        return acc;\n    }\n    return slsum(s[1..s.len()], acc.wrapping_add(s[0]));\n}\n\nfn main(args: Vector<str>) i32 {\n    let v: [u32; 64] = [3; 64];\n    return slsum(v[0..args.len() * 10], 0) as i32;\n}\n";
+    let p = cli::proj_new();
+    p.mkfile("main.spc", src);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "slsum", "build -O2 main.spc -o app");
+    let c = printed(r.text(), "slsum.cp2");
+    let ok = r.ok() && c.contains("sig (l0) -> i32") && !c.contains("store");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "the copy stores nothing");
+}
+
 // A release build's vectorized loop interleaves the target's count of vector copies: its first vector
 // loop's block loads 2 vectors per pass on wasm32 (each copy is module size) and arm64 Linux, 4 on x86-64
 // Linux. The link may fail without the target's sysroot; the optimizer prints before it.
