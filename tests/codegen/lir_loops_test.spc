@@ -294,11 +294,12 @@ b5:
     same_outcome(&b, &a, "sum", short, 0, true);
 }
 
-// `i <u len` checks on the counter of a loop that runs while `i <u n` hold wherever `n <=u len`: the
-// loop gets a copy without them, which a test before it enters; with `n` past `len` the loop runs and
-// panics as before.
+// `i <u len` checks on the counter of a loop that runs while `i <u n` hold wherever `i <u min(n, len)`:
+// a loop that sums gets a copy without them that runs to that bound (a select of the two), then the loop
+// with the checks at its end where `len <u n`, whose check fails there: its back edge is unreachable.
+// With `n` past `len` it panics as before, after the same iterations.
 @test
-fn bounds_checks_version_the_loop() {
+fn bounds_checks_clip_a_reduction() {
     let src = M"(lir ptr 8
 sym @sum fn global
 fn @sum
@@ -324,13 +325,61 @@ b5:
 )";
     let (b, a) = optimized(src, VERSION);
     let t = text_of(&a, "sum");
-    assert(t.contains("icmp.ule") && count(&t, "panic") == 1, t.as_str());
+    assert(
+        t.contains("select.i64") && t.contains("unreachable") && !t.contains("icmp.ule") && count(&t, "panic") == 1,
+        t.as_str(),
+    );
     let fits: []u64 = [5, 10];
     same_outcome(&b, &a, "sum", fits, 10, false);
     let exact: []u64 = [5, 5];
     same_outcome(&b, &a, "sum", exact, 10, false);
     let past: []u64 = [5, 3];
     same_outcome(&b, &a, "sum", past, 0, true);
+    let none: []u64 = [0, 0];
+    same_outcome(&b, &a, "sum", none, 0, false);
+}
+
+// The checks of `i + c <u len`, `c` from before the loop, clip a loop that sums at `len > c ? len - c :
+// 0`: past it `i + c` is `len`, or `c` past `len` from the start, and the check fails.
+@test
+fn offset_checks_clip_a_reduction() {
+    let src = M"(lir ptr 8
+sym @sum fn global
+fn @sum
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3, v3)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b5
+b2:
+  v8 = add.i64 v5, v2
+  v9 = icmp.ult v8, v1
+  br v9, b3, b4
+b3:
+  v10 = add.i64 v6, v8
+  v11 = add.i64 v5, v4
+  jmp b1(v11, v10)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v6
+)";
+    let (b, a) = optimized(src, VERSION);
+    let t = text_of(&a, "sum");
+    assert(t.contains("unreachable") && count(&t, "panic") == 1, t.as_str());
+    let fits: []u64 = [5, 10, 3];
+    same_outcome(&b, &a, "sum", fits, 25, false);
+    let exact: []u64 = [5, 8, 3];
+    same_outcome(&b, &a, "sum", exact, 25, false);
+    let past: []u64 = [5, 7, 3];
+    same_outcome(&b, &a, "sum", past, 0, true);
+    let before: []u64 = [5, 2, 3];
+    same_outcome(&b, &a, "sum", before, 0, true);
+    let none: []u64 = [0, 0, 9];
+    same_outcome(&b, &a, "sum", none, 0, false);
 }
 
 // A signed loop test versions only from a start of at least 0 by steps of 1: from -1 its counter would
@@ -486,6 +535,126 @@ b6:
     same_outcome(&b, &a, "mix", plus, 6, false);
     let minus: []u64 = [4, 0];
     same_outcome(&b, &a, "mix", minus, 0x3FFFFFFFFFFFFFF, false);
+}
+
+// The sides of a branch on a value the loop does not change that differ in one constant take one side
+// over the select of the constants before the loop: `bump` adds 3 or subtracts 3 from each element (each
+// side loads the array's address), `scale` multiplies by 3 or 5. Neither branch is left.
+@test
+fn sides_that_differ_in_a_constant_merge() {
+    let src = M"(lir ptr 8
+sym @bump fn global
+sym @scale fn global
+sym @drive fn global
+fn @bump
+  sig (ptr, i64, i8) -> void
+b0(v0: ptr, v1: i64, v2: i8):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 3
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v1
+  br v7, b2, b6
+b2:
+  br v2, b3, b4
+b3:
+  v8 = load.ptr v0 align 3
+  v9 = ptradd v8, v6 * 4
+  v10 = load.i32 v9 align 2
+  v11 = add.i32 v10, v5
+  store v11, v9 align 2
+  jmp b5
+b4:
+  v12 = load.ptr v0 align 3
+  v13 = ptradd v12, v6 * 4
+  v14 = load.i32 v13 align 2
+  v15 = sub.i32 v14, v5
+  store v15, v13 align 2
+  jmp b5
+b5:
+  v16 = add.i64 v6, v4
+  jmp b1(v16)
+b6:
+  ret
+fn @scale
+  sig (i64, i8) -> i64
+b0(v0: i64, v1: i8):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 3
+  v5 = iconst.i64 5
+  jmp b1(v2, v3)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b6
+b2:
+  br v1, b3, b4
+b3:
+  v9 = mul.i64 v7, v4
+  jmp b5(v9)
+b4:
+  v10 = mul.i64 v7, v5
+  jmp b5(v10)
+b5(v11: i64):
+  v12 = add.i64 v6, v3
+  jmp b1(v12, v11)
+b6:
+  ret v7
+fn @drive
+  sig (i64, i8) -> i64
+  slot s0 size 256 align 3
+  slot s1 size 8 align 3
+b0(v0: i64, v1: i8):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  store v2, v3 align 3
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 64
+  jmp b1(v4)
+b1(v7: i64):
+  v8 = icmp.ult v7, v6
+  br v8, b2, b3
+b2:
+  v9 = ptradd v2, v7 * 4
+  v10 = trunc.i32 v7
+  store v10, v9 align 2
+  v11 = add.i64 v7, v5
+  jmp b1(v11)
+b3:
+  call @bump(v3, v0, v1) : (ptr, i64, i8) -> void
+  jmp b4(v4, v4)
+b4(v12: i64, v13: i64):
+  v14 = icmp.ult v12, v6
+  br v14, b5, b6
+b5:
+  v15 = ptradd v2, v12 * 4
+  v16 = load.i32 v15 align 2
+  v17 = sext.i64 v16
+  v18 = mul.i64 v17, v12
+  v19 = add.i64 v13, v18
+  v20 = add.i64 v12, v5
+  jmp b4(v20, v19)
+b6:
+  ret v13
+)";
+    let (b, a) = optimized(src, UNSWITCH);
+    let u = text_of(&a, "bump");
+    assert(!u.contains("br v2,") && u.contains("select.i32"), u.as_str());
+    let s = text_of(&a, "scale");
+    assert(!s.contains("br v1,") && s.contains("select.i64"), s.as_str());
+    let up: []u64 = [4, 1];
+    same_outcome(&b, &a, "scale", up, 81, false);
+    let down: []u64 = [4, 0];
+    same_outcome(&b, &a, "scale", down, 625, false);
+    let lens: [u64; 3] = [0, 5, 64];
+    for k in 0..3usize {
+        for f in 0..2u64 {
+            let args: []u64 = [unsafe lens[k], f];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
 }
 
 // A loop whose header tests before each iteration rotates: the test runs once before the loop and again

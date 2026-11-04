@@ -428,6 +428,51 @@ b0:
     same_result(&b, &a, "drive", none, 2);
 }
 
+const BUMP: str = M"(@noinline
+fn bump(s: []mut u32, f: bool) {
+    for k in 0..s.len() {
+        if f {
+            s[k] += 1;
+        } else {
+            s[k] -= 1;
+        }
+    }
+}
+
+fn main(args: Vector<str>) i32 {
+    let mut v = Vector::<u32>::new();
+    for k in 0..37u32 {
+        v.push(k * 3 + 5);
+    }
+    bump(v.as_mut_slice(), true);
+    bump(v.as_mut_slice(), args.len() == 0);
+    bump(v.as_mut_slice(), true);
+    let mut t: u32 = 0;
+    for k in 0..37usize {
+        t += v[k] * (k as u32 + 1);
+    }
+    println("{}", t);
+    return 0;
+}
+)";
+
+// A loop whose branch on a parameter adds 1 on one side and subtracts 1 on the other adds the select of 1
+// and -1 before it: one vector loop, no copy per side, though each side's load of the slice's address
+// stays its own until the loop transforms run. Both profiles print the same sum.
+@test
+fn sides_that_add_and_subtract_one_merge() {
+    h::expect_same_output("merged sides", BUMP, ["--profile=debug"], ["--profile=release"]);
+    let p = cli::proj_new();
+    p.mkfile("main.spc", BUMP);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "bump", "build --profile=release main.spc -o app");
+    let m = printed(r.text(), "bump");
+    let ok = r.ok() && m.contains("select.i32") && m.contains("add.v4i32") && !m.contains("sub.v4i32");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "one loop adds the select");
+}
+
 // A tail recursion over a slice whose every call passes one constant accumulator: its copy without it
 // (`drop_params`, whose entry jumps to the old one) still copies the slice into a slot (`param_slots`), so
 // its loop carries the slice in registers and stores nothing.

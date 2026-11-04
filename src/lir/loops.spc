@@ -163,6 +163,15 @@ pub(package) struct LoopOpt {
     goff: Vector<u64>,
     gbase: Vector<Value>,
     gcond: u16,
+    // `checks`: the exit test's bound and comparison, whether its in-loop side is the taken edge, whether
+    // every check is of the counter plus a constant or a value from before the loop (`q + c <u len`);
+    // `clip_ok` of that loop and its latch.
+    gn: Value,
+    gcmp: u16,
+    gin: bool,
+    gplain: bool,
+    gclip: bool,
+    gu: u32,
     // Rotation: the header's values the body uses (`hvals`), and per header parameter, instruction and
     // flag its index there (NONE: not used); the body's parameters' first new number and old range; the
     // header copy's parameters and instructions.
@@ -428,6 +437,12 @@ extend LoopOpt {
             gbase: Vector::<Value>::new(),
             gy: Vector::<Value>::new(),
             gcond: 0,
+            gn: VNONE,
+            gcmp: 0,
+            gin: false,
+            gplain: false,
+            gclip: false,
+            gu: NONE,
             hvals: Vector::<Value>::new(),
             hp: Vector::<u32>::new(),
             hi: Vector::<u32>::new(),
@@ -593,6 +608,18 @@ extend LoopOpt {
                 continue;
             }
             let u = self.latch;
+            // The two sides of a branch on a value from before the loop that differ in one constant: one
+            // side over the select of the constants (`merge_sides`), no branch; within the unswitching
+            // budget, the transform it replaces.
+            let g = if bu.unswitch != 0 {
+                self.invariant_branch(b)
+            } else {
+                VNONE
+            };
+            if g != VNONE && self.merge_sides(b, h, p, g) {
+                any = true;
+                continue;
+            }
             // Fields a loop updates alike: one loop over them all, which a later round vectorizes.
             if bu.vector != 0 && self.reroll(b, ptr, h, p, u) {
                 any = true;
@@ -714,6 +741,8 @@ extend LoopOpt {
             }
             if size <= bu.version && self.checks(b, ptr, h, p, u) {
                 if self.close(b, h, dpre, dpost) {
+                    self.gclip = self.clip_ok(b, h, u, dpre, dpost);
+                    self.gu = u;
                     self.version(b, h, p, VNONE);
                     any = true;
                 }
@@ -6779,6 +6808,10 @@ extend LoopOpt {
         if !self.grev && (self.defined_in(n) || n == VNONE) {
             return false;
         }
+        self.gn = n;
+        self.gcmp = cond;
+        self.gin = in_taken;
+        self.gplain = true;
         if ne && !self.grev {
             let qi = (q & ~VPARAM) - hb.param_start;
             if !self.steps_by_one(b, h, u, q, qi) {
@@ -6829,6 +6862,7 @@ extend LoopOpt {
             // `x <u len` holds on the edge that does not fail, `x` of `q` (counting down, `x` is `q - 1`).
             let (mut sa, oa, ba) = self.affine(b, ptr, bc.a, q);
             let (mut sb, ob, bb) = self.affine(b, ptr, bc.b, q);
+            let (fa, fb) = (sa, sb);
             if self.grev {
                 sa = ast::pick(self.down_of(b, bc.a, q), 0u8, 0xFFu8);
                 sb = ast::pick(self.down_of(b, bc.b, q), 0u8, 0xFFu8);
@@ -6899,6 +6933,9 @@ extend LoopOpt {
             }
             if at == self.gx.len() && at == MAX_CHECKS {
                 continue;
+            }
+            if rsh != 0xFF || sh != 0 || ast::pick(on_a, fa, fb) == 0xFF || base != VNONE && off != 0 {
+                self.gplain = false;
             }
             self.fixes.push(k);
             self.fside.push(
@@ -7337,6 +7374,364 @@ extend LoopOpt {
         return VNONE;
     }
 
+    // Whether `checks`' loop `h`, latch `u`, takes `clip` (`dpre`, `dpost`: the dominator tree's numbers):
+    // a value it carries besides the counter (a reduction: the loop with the checks keeps no copy of its
+    // recurrence, which pays for the lengths that stay live through the copy), an exit test `q <u n`, no
+    // wrap test, every check of `q + c` with a length of `n`'s type, each in a block every iteration that
+    // reaches the latch runs (one that dominates it).
+    fn clip_ok(self: &Self, b: &Body, h: u32, u: u32, dpre: []u32, dpost: []u32) bool {
+        if b.blocks[h as usize].param_len < 2 || !self.gplain || self.gcmp != C_ULT || self.grev || self.hn.len() != 0 || self.gq != NONE || self.gn == VNONE {
+            return false;
+        }
+        for k in 0..self.gy.len() {
+            if self.gy[k] == VNONE || value_type(b, self.gy[k]) != value_type(b, self.gn) {
+                return false;
+            }
+        }
+        for j in 0..self.fixes.len() {
+            let k = self.fixes[j] as usize;
+            if k >= dpre.len() || u as usize >= dpre.len() || !(dpre[k] <= dpre[u as usize] && dpost[u as usize] <= dpost[k]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // `version` of loop `h` (preheader `p`) that `clip_ok` takes, its copy `hc` made without the checks:
+    // no guard. The copy runs while the counter is below `m`, the least of the exit test's bound `n` and
+    // each check's `len > c ? len - c : 0`, where every check holds; its exit enters the loop with the
+    // checks where `m < n` (`q + c` at `len` there or `c` past it, so that check fails in that iteration:
+    // the loop's back edge never runs, an `unreachable`), else the loop's exit (LLVM's inductive range
+    // check elimination).
+    fn clip(self: &mut Self, b: &mut Body, h: u32, p: u32, hc: u32) {
+        let hb = b.blocks[h as usize];
+        let l0 = b.locs[hb.start as usize];
+        let n = self.gn;
+        let ty = value_type(b, n);
+        let gb = b.blocks.len() as u32;
+        let ps = b.params.len() as u32;
+        for q in 0..hb.param_len as u32 {
+            let pt = b.params[(hb.param_start + q) as usize];
+            b.params.push(pt);
+        }
+        let start = b.insts.len() as u32;
+        let mut m = n;
+        for k in 0..self.gy.len() {
+            let mut y = self.gy[k];
+            if self.goff[k] != 0 || self.gbase[k] != VNONE {
+                let c0 = if self.gbase[k] != VNONE {
+                    self.gbase[k]
+                } else {
+                    vpush(b, iconst_of(ty, self.goff[k]), l0)
+                };
+                let zero = vpush(b, iconst_of(ty, 0), l0);
+                let gt = vpush(b, Inst { op: O_ICMP, ty: T_I8, aux: C_UGT, a: y, b: c0, c: 0 }, l0);
+                let s1 = vpush(b, bin(O_SUB, ty, y, c0), l0);
+                y = vpush(b, Inst { op: O_SELECT, ty: ty, aux: 0, a: gt, b: s1, c: zero }, l0);
+            }
+            let lt = vpush(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: y, b: m, c: 0 }, l0);
+            m = vpush(b, Inst { op: O_SELECT, ty: ty, aux: 0, a: lt, b: y, c: m }, l0);
+        }
+        self.args.truncate(0);
+        for q in 0..hb.param_len as u32 {
+            self.args.push(VPARAM | ps + q);
+        }
+        let ein = b.edge(gb + 1, &self.args);
+        let _ = vpush(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: ein, b: 0, c: 0 }, l0);
+        self.close_block(b, gb, start, ps, hb.param_len, hb.flags, p);
+        self.jump_block(b, hc, h, p);
+        self.jump_block(b, h, h, p);
+        let pe = term(b, p).a;
+        b.pool[pe as usize] = gb;
+        b.blocks.index_mut(gb as usize + 2).flags |= BLOCK_UNLIKELY;
+        b.blocks.index_mut(h as usize).flags |= BLOCK_NOVEC;
+        // The copy's exit test against `m`.
+        let cb = b.blocks[hc as usize];
+        let ti = (cb.start + cb.len - 1) as usize;
+        let mut tc = b.insts[ti];
+        let ci = b.insts[tc.a as usize];
+        b.insts.index_mut(tc.a as usize).a = ast::pick(ci.a == n, m, ci.a);
+        b.insts.index_mut(tc.a as usize).b = ast::pick(ci.b == n, m, ci.b);
+        // Its exit into a block that tests `m < n`: the loop with the checks at the copy's values, else
+        // the exit.
+        let eo = ast::pick(self.gin, tc.c, tc.b);
+        let et = b.edge_target(eo);
+        let na = b.edge_nargs(eo);
+        let tb = b.blocks.len() as u32;
+        let tps = b.params.len() as u32;
+        for q in 0..hb.param_len as u32 {
+            let pt = b.params[(hb.param_start + q) as usize];
+            b.params.push(pt);
+        }
+        let eb = b.blocks[et as usize];
+        for q in 0..na {
+            let pt = b.params[(eb.param_start + q) as usize];
+            b.params.push(pt);
+        }
+        let start2 = b.insts.len() as u32;
+        let lt = vpush(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: m, b: n, c: 0 }, l0);
+        self.args.truncate(0);
+        for q in 0..hb.param_len as u32 {
+            self.args.push(VPARAM | tps + q);
+        }
+        let e1 = b.edge(gb + 2, &self.args);
+        self.args.truncate(0);
+        for q in 0..na {
+            self.args.push(VPARAM | tps + hb.param_len as u32 + q);
+        }
+        let e2 = b.edge(et, &self.args);
+        let _ = vpush(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: lt, b: e1, c: e2 }, l0);
+        self.close_block(b, tb, start2, tps, hb.param_len + na as u16, cb.flags, p);
+        self.args.truncate(0);
+        for q in 0..hb.param_len as u32 {
+            self.args.push(VPARAM | cb.param_start + q);
+        }
+        for q in 0..na {
+            self.args.push(b.edge_arg(eo, q));
+        }
+        let ne = b.edge(tb, &self.args);
+        if self.gin {
+            tc.c = ne;
+        } else {
+            tc.b = ne;
+        }
+        b.insts[ti] = tc;
+        // The back edge of the loop with the checks: unreachable.
+        let ub = b.blocks.len() as u32;
+        let start3 = b.insts.len() as u32;
+        let _ = vpush(b, Inst { op: O_UNREACHABLE, ty: T_NONE, aux: 0, a: VNONE, b: VNONE, c: VNONE }, l0);
+        self.close_block(b, ub, start3, b.params.len() as u32, 0, hb.flags | BLOCK_UNLIKELY, p);
+        let u = self.gu;
+        let ub2 = b.blocks[u as usize];
+        let ui = (ub2.start + ub2.len - 1) as usize;
+        let mut tu = b.insts[ui];
+        let none: [Value; 0] = [];
+        let to_u = b.edge(ub, none[0..0]);
+        if tu.op == O_JMP && b.edge_target(tu.a) == h {
+            tu.a = to_u;
+        } else if tu.op == O_BR {
+            if b.edge_target(tu.b) == h {
+                tu.b = to_u;
+            }
+            if b.edge_target(tu.c) == h {
+                tu.c = to_u;
+            }
+        }
+        b.insts[ui] = tu;
+    }
+
+    // Block `k` of the instructions from `start` on and `n` parameters from `ps` (flags `fl`), dominated as
+    // `p` is: the per-block and per-instruction tables too.
+    fn close_block(self: &mut Self, b: &mut Body, k: u32, start: u32, ps: u32, n: u16, fl: u16, p: u32) {
+        let len = b.insts.len() as u32 - start;
+        if b.inl.len() != 0 {
+            for _ in 0..len {
+                b.inl.push(0);
+            }
+        }
+        b.blocks.push(Block { start: start, len: len, param_start: ps, param_len: n, flags: fl });
+        for _ in 0..len {
+            self.owner.push(k);
+        }
+        for _ in 0..n {
+            self.powner.push(k);
+        }
+        self.inl.push(false);
+        self.proxy.push(self.proxy[p as usize]);
+    }
+
+    // Whether value `x` of a block that starts at `sa` and holds `n` instructions is `y` of one that starts
+    // at `sb`: the same value defined before both (or two loads of one block that read the same memory,
+    // nothing between them writing any), or the same instruction of each.
+    fn same_val(self: &Self, b: &Body, x: Value, y: Value, sa: u32, sb: u32, n: u32) bool {
+        let xi = x & ~VFLAG;
+        let yi = y & ~VFLAG;
+        let ina = x != VNONE && (x & VPARAM) == 0 && xi >= sa && xi < sa + n;
+        let inb = y != VNONE && (y & VPARAM) == 0 && yi >= sb && yi < sb + n;
+        if ina || inb {
+            return ina && inb && (x & VFLAG) == (y & VFLAG) && xi - sa == yi - sb;
+        }
+        if x == y {
+            return true;
+        }
+        if (x & (VPARAM | VFLAG)) != 0 || (y & (VPARAM | VFLAG)) != 0 || x == VNONE || y == VNONE || self.owner[x as usize] != self.owner[y as usize] {
+            return false;
+        }
+        let tx = b.insts[x as usize];
+        let ty = b.insts[y as usize];
+        if tx.op != O_LOAD || ty.op != tx.op || ty.ty != tx.ty || ty.aux != tx.aux || ty.a != tx.a || ty.c != tx.c {
+            return false;
+        }
+        let (lo, hi) = if x < y {
+            (x, y)
+        } else {
+            (y, x)
+        };
+        for j in lo + 1..hi {
+            let f = op_info(b.insts[j as usize].op).form;
+            if f != F_IMM && f != F_UN && f != F_BIN && f != F_CMP && f != F_TRI && f != F_PTRADD && f != F_LOAD {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Merge the sides `a` and `b` (the taken one first) of the branch of block `k` on `g`, defined before
+    // loop `h`: blocks without parameters that only that branch enters, of the same instructions but at
+    // one (`same_val`), each jumping to one block with the same arguments; the one that differs reads an
+    // integer constant (`ka` and `kb`) where the other's reads its own, or adds one constant where the other
+    // subtracts one. The constants (added: the subtracted one negated) and their select on `g` go into a
+    // block before `h`, which the preheader `p` enters; `k` jumps to `a`, which reads the select there.
+    // Whether it did.
+    fn merge_sides(self: &mut Self, b: &mut Body, h: u32, p: u32, g: Value) bool {
+        let k = self.fixes[0];
+        let t = term(b, k);
+        let sa = b.edge_target(t.b);
+        let sb = b.edge_target(t.c);
+        if t.op != O_BR || sa == sb || sa == h || sb == h || !self.inl[sa as usize] || !self.inl[sb as usize] || b.edge_nargs(
+            t.b,
+        ) != 0 || b.edge_nargs(t.c) != 0 {
+            return false;
+        }
+        // Each side's one entry is the branch.
+        let mut na = 0u32;
+        let mut nb = 0u32;
+        for j in 0..self.lblocks.len() {
+            b.succ_edges(term(b, self.lblocks[j]), &mut self.edges);
+            for e in 0..self.edges.len() {
+                let x = b.edge_target(self.edges[e]);
+                na += ast::pick(x == sa, 1u32, 0u32);
+                nb += ast::pick(x == sb, 1u32, 0u32);
+            }
+        }
+        let ba = b.blocks[sa as usize];
+        let bb = b.blocks[sb as usize];
+        if na != 1 || nb != 1 || ba.len != bb.len || ba.param_len != 0 || bb.param_len != 0 {
+            return false;
+        }
+        let n = ba.len;
+        let ta = b.insts[(ba.start + n - 1) as usize];
+        let tb = b.insts[(bb.start + n - 1) as usize];
+        if ta.op != O_JMP || tb.op != O_JMP || b.edge_target(ta.a) != b.edge_target(tb.a) || b.edge_nargs(ta.a) != b.edge_nargs(
+            tb.a,
+        ) {
+            return false;
+        }
+        for q in 0..b.edge_nargs(ta.a) {
+            if !self.same_val(b, b.edge_arg(ta.a, q), b.edge_arg(tb.a, q), ba.start, bb.start, n) {
+                return false;
+            }
+        }
+        // The one instruction that differs (`at`), the operand its select replaces (`slot`: 0, 1 or 2 for
+        // `a`, `b`, `c`), and the constants each side reads there.
+        let mut at = NONE;
+        let mut slot = 0u32;
+        let mut ka = 0u64;
+        let mut kb = 0u64;
+        let mut kty = T_NONE;
+        let mut flip = false;
+        for m in 0..n - 1 {
+            let x = b.insts[(ba.start + m) as usize];
+            let y = b.insts[(bb.start + m) as usize];
+            let f = op_info(x.op).form;
+            if f != F_IMM && f != F_UN && f != F_BIN && f != F_CMP && f != F_TRI && f != F_PTRADD && f != F_LOAD && f != F_STORE {
+                return false;
+            }
+            let vals = f == F_UN || f == F_BIN || f == F_CMP || f == F_TRI || f == F_PTRADD || f == F_LOAD || f == F_STORE;
+            let two = f == F_BIN || f == F_CMP || f == F_TRI || f == F_PTRADD || f == F_STORE;
+            let sa0 = !vals || self.same_val(b, x.a, y.a, ba.start, bb.start, n);
+            let sb0 = !two || self.same_val(b, x.b, y.b, ba.start, bb.start, n);
+            let sc0 = if f == F_TRI {
+                self.same_val(b, x.c, y.c, ba.start, bb.start, n)
+            } else {
+                x.c == y.c
+            };
+            let raw = f != F_IMM || x.a == y.a && x.b == y.b;
+            if x.op == y.op && x.ty == y.ty && x.aux == y.aux && sa0 && sb0 && sc0 && raw {
+                continue;
+            }
+            if at != NONE {
+                return false;
+            }
+            at = m;
+            let addsub = x.op == O_ADD && y.op == O_SUB || x.op == O_SUB && y.op == O_ADD;
+            if addsub && x.ty == y.ty && is_int(x.ty) && !is_vec(x.ty) && x.aux == y.aux && sa0 && is_const(b, x.b) && is_const(
+                b,
+                y.b,
+            ) {
+                // x - c adds -c.
+                flip = true;
+                slot = 1;
+                kty = x.ty;
+                ka = ast::pick(x.op == O_ADD, raw_const(b, x.b), 0u64.wrapping_sub(raw_const(b, x.b)));
+                kb = ast::pick(y.op == O_ADD, raw_const(b, y.b), 0u64.wrapping_sub(raw_const(b, y.b)));
+                continue;
+            }
+            if x.op != y.op || x.ty != y.ty || x.aux != y.aux || f != F_BIN && f != F_CMP && f != F_TRI && f != F_STORE || f != F_TRI && x.c != y.c {
+                return false;
+            }
+            // One operand: two constants, the rest the same.
+            let (ox, oy, s) = if !sa0 && sb0 && sc0 {
+                (x.a, y.a, 0u32)
+            } else if sa0 && !sb0 && sc0 {
+                (x.b, y.b, 1u32)
+            } else if sa0 && sb0 && !sc0 && f == F_TRI {
+                (x.c, y.c, 2u32)
+            } else {
+                return false;
+            };
+            if !is_const(b, ox) || !is_const(b, oy) || b.insts[ox as usize].ty != b.insts[oy as usize].ty {
+                return false;
+            }
+            slot = s;
+            kty = b.insts[ox as usize].ty;
+            ka = raw_const(b, ox);
+            kb = raw_const(b, oy);
+        }
+        if at == NONE {
+            return false;
+        }
+        // The select's block before the loop, with the header's parameters.
+        let hb = b.blocks[h as usize];
+        let l0 = b.locs[hb.start as usize];
+        let sk = b.blocks.len() as u32;
+        let ps = b.params.len() as u32;
+        for q in 0..hb.param_len as u32 {
+            let pt = b.params[(hb.param_start + q) as usize];
+            b.params.push(pt);
+        }
+        let start = b.insts.len() as u32;
+        let ca = vpush(b, iconst_of(kty, ka), l0);
+        let cb = vpush(b, iconst_of(kty, kb), l0);
+        let sel = vpush(b, Inst { op: O_SELECT, ty: kty, aux: 0, a: g, b: ca, c: cb }, l0);
+        self.args.truncate(0);
+        for q in 0..hb.param_len as u32 {
+            self.args.push(VPARAM | ps + q);
+        }
+        let e = b.edge(h, &self.args);
+        let _ = vpush(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: e, b: 0, c: 0 }, l0);
+        let pf = b.blocks[p as usize].flags;
+        self.close_block(b, sk, start, ps, hb.param_len, pf, p);
+        let pe = term(b, p).a;
+        b.pool[pe as usize] = sk;
+        // The side that stays reads the select.
+        let ai = (ba.start + at) as usize;
+        let mut x = b.insts[ai];
+        if flip {
+            x.op = O_ADD;
+        }
+        if slot == 0 {
+            x.a = sel;
+        } else if slot == 1 {
+            x.b = sel;
+        } else {
+            x.c = sel;
+        }
+        b.insts[ai] = x;
+        fix_branch(b, k, 0);
+        return true;
+    }
+
     // Version loop `h` (preheader `p`): a copy of it whose back edge enters its own header, and a guard
     // block the preheader enters instead, which enters the copy when the guard holds and the loop
     // otherwise, each through a block that only jumps (its preheader). The guard is `g`, or with VNONE the
@@ -7358,6 +7753,10 @@ extend LoopOpt {
             if g != VNONE {
                 fix_branch(b, k, 1 - side);
             }
+        }
+        if g == VNONE && self.gclip {
+            self.clip(b, h, p, hc);
+            return;
         }
         // The guard block: the header's parameters, the guard, the branch.
         let hb = b.blocks[h as usize];

@@ -5750,6 +5750,134 @@ int main(void) {
     }
 }
 
+// Whether `bytes` holds an x86-64 `movaps` between two registers (0F 28, a register ModRM byte).
+fn movaps_rr(bytes: &Vector<u8>) bool {
+    for at in 0..bytes.len() - 2 {
+        if bytes[at] == 0x0F && bytes[at + 1] == 0x28 && bytes[at + 2] >= 0xC0 {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A scalar float operation reads lane 0 of a vector in the vector's register: `@l0` adds lanes 0 and 1
+// to `x` with no copy of lane 0 (arm64 `fmov s, s`, x86-64 `movaps`). `@m0` and `@m1` read lane 0 of an
+// 8- and a 16-byte vector after a call, which leaves them in their slots: a vector register takes each
+// back. They give the C results.
+@test
+fn scalar_float_operations_read_lane_0_in_the_vectors_register() {
+    let one = M"(lir ptr 8
+sym @l0 fn global
+fn @l0
+  sig (ptr, f32) -> f32
+b0(v0: ptr, v1: f32):
+  v2 = load.v4f32 v0 align 2
+  v3 = vextract.0.f32 v2
+  v4 = fadd.f32 v1, v3
+  v5 = vextract.1.f32 v2
+  v6 = fadd.f32 v4, v5
+  ret v6
+)";
+    let lir = M"(lir ptr 8
+sym @l0 fn global
+sym @m0 fn global
+sym @m1 fn global
+sym @g fn global
+fn @m0
+  sig (ptr, f32) -> f32
+b0(v0: ptr, v1: f32):
+  v2 = load.v2f32 v0 align 2
+  call @g() : () -> void
+  v3 = vextract.0.f32 v2
+  v4 = fadd.f32 v1, v3
+  ret v4
+fn @m1
+  sig (ptr, f64) -> f64
+b0(v0: ptr, v1: f64):
+  v2 = load.v2f64 v0 align 3
+  call @g() : () -> void
+  v3 = vextract.0.f64 v2
+  v4 = fmul.f64 v3, v1
+  ret v4
+fn @l0
+  sig (ptr, f32) -> f32
+b0(v0: ptr, v1: f32):
+  v2 = load.v4f32 v0 align 2
+  v3 = vextract.0.f32 v2
+  v4 = fadd.f32 v1, v3
+  v5 = vextract.1.f32 v2
+  v6 = fadd.f32 v4, v5
+  ret v6
+)";
+    let drv = M"(float l0(const float *, float);
+float m0(const float *, float);
+double m1(const double *, double);
+void g(void) {}
+int main(void) {
+  static const float a[4] = {1.5f, 2.25f, 3.0f, 4.0f};
+  static const double d[2] = {2.5, 7.0};
+  return l0(a, 0.5f) != 4.25f || m0(a, 0.25f) != 1.75f || m1(d, 3.0) != 7.5;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(one, tgt::axis_index("macos", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    let mut w: usize = 0;
+    // Each word: no FMOV (register) of a single.
+    while w + 4 <= obj.len() {
+        let x = obj[w] as u32 | obj[w + 1] as u32 << 8 | obj[w + 2] as u32 << 16 | obj[w + 3] as u32 << 24;
+        assert((x & 0xFFFFFC00) != 0x1E204000, "an fmov");
+        w += 4;
+    }
+    let mut xo = Vector::<u8>::new();
+    assert(object_of(one, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut xo), "the object");
+    assert(!movaps_rr(&xo), "a movaps");
+    let mut xa = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut xa), "all");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// x86-64: `@bs` sums the bytes with `psadbw` in the zeros' register, no copy of the bytes (`movaps`). It
+// gives the C results.
+@test
+fn x86_byte_sums_take_the_zeros_register() {
+    let lir = M"(lir ptr 8
+sym @bs fn global
+fn @bs
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v16i8 v1 align 0
+  v3 = load.v2i64 v0 align 3
+  v4 = vsumw.v2i64 v3, v2
+  store v4, v0 align 3
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+void bs(uint64_t *, const uint8_t *);
+int main(void) {
+  static uint8_t b[16];
+  uint64_t s[2] = {7, 9}, w0 = 7, w1 = 9;
+  for (int k = 0; k < 16; k++) {
+    b[k] = (uint8_t)(k * 37 + 200);
+    if (k < 8) w0 += b[k]; else w1 += b[k];
+  }
+  bs(s, b);
+  return s[0] != w0 || s[1] != w1;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    let sad: [u8; 2] = [0x0F, 0xF6];
+    assert(holds(&obj, sad[0..2]) && !movaps_rr(&obj), "bs");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A select of a value plus 1 and the value under a test against 0 adds the test's 0 or 1, not the
 // tested value (a quotient rounded up: `q + (r != 0)`). It gives the C results.
 @test

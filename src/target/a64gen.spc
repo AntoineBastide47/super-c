@@ -1061,7 +1061,7 @@ extend Gen {
                 // A returned vector no one register takes is read in memory.
                 self.vmem[self.vx(t.a) as usize] = true;
             }
-            if reg_op || is_terminator(t.op) {
+            if reg_op || is_terminator(t.op) || lv::lane0_op(b, &self.lv.pfold, t) {
                 continue;
             }
             // A call takes a vector argument it passes whole in a register from that register.
@@ -1421,6 +1421,19 @@ extend Gen {
 
     // Value `v` in a register of its file, locked for the current instruction.
     fn reg(self: &mut Self, v: Value) u8 {
+        // Lane 0 of a vector its user reads in the vector's register (`lv::FOLD_LANE0`), a spilled one
+        // loaded into a vector temporary.
+        if (v & (VPARAM | VFLAG)) == 0 && v != VNONE && self.lv.pfold[v as usize] {
+            let w = lv::lane0_of(self.b(), v);
+            if w != VNONE {
+                let s = if self.va[self.vx(w) as usize].reg != NOREG {
+                    NOREG
+                } else {
+                    self.tmp(true)
+                };
+                return self.vec_use(w, s);
+            }
+        }
         let x = self.vx(v);
         let va = self.va[x as usize];
         if va.reg != NOREG {
@@ -1579,7 +1592,11 @@ extend Gen {
             t.ty,
         ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT || t.op == O_VSUMW) || t.op == O_VEXTRACT || self.conv_reg(
             t,
-        ) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.vt(t.a)) || self.lane_pair(t);
+        ) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.vt(t.a)) || self.lane_pair(t) || lv::lane0_op(
+            self.b(),
+            &self.lv.pfold,
+            t,
+        );
         if !reg_form && !is_terminator(t.op) {
             for k in 0..self.uses.len() {
                 self.sync(self.uses[k]);
@@ -2221,7 +2238,7 @@ extend Gen {
         self.bp = &p.bodies[ps.def as usize];
         let b = self.b();
         self.lv.fold_max = 16;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR;
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR;
         self.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.

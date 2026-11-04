@@ -143,6 +143,10 @@ pub(package) const FOLD_VSAD: u64 = 34359738368;
 /// `FOLD_LANE_PAIR`: lanes 0 and 1 of one float vector of two lanes (8 or 16 bytes), each read with one use,
 /// that a scalar `fadd` adds, fold into it: the sum adds the vector's lanes pairwise (arm64 `faddp`).
 pub(package) const FOLD_LANE_PAIR: u64 = 137438953472;
+/// `FOLD_LANE0`: lane 0 of a float vector of 8 or 16 bytes, read with one use, an operand of a scalar `fadd`,
+/// `fsub`, `fmul` or `fdiv` of the lane's type: the operation reads the vector's register, whose low lane
+/// the scalar is (`lane0_of`).
+pub(package) const FOLD_LANE0: u64 = 17592186044416;
 /// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
 /// flags keep, a folded sum or extension, the sum with the carry.
 pub(package) const CARRY_NONE: u8 = 0;
@@ -924,6 +928,20 @@ extend Live {
             if (self.fold_ops & FOLD_LANE_PAIR) != 0 && lane_pair(b, t) && self.count[t.a as usize] == 1 && self.count[t.b as usize] == 1 {
                 self.pfold[t.a as usize] = true;
                 self.pfold[t.b as usize] = true;
+            }
+            if (self.fold_ops & FOLD_LANE0) != 0 && (t.op == O_FADD || t.op == O_FSUB || t.op == O_FMUL || t.op == O_FDIV) && !is_vec(
+                t.ty,
+            ) {
+                for side in 0..2u32 {
+                    let x = if side == 0 {
+                        t.a
+                    } else {
+                        t.b
+                    };
+                    if lane0_of(b, x) != VNONE && self.count[x as usize] == 1 && !self.pfold[x as usize] && b.insts[x as usize].ty == t.ty {
+                        self.pfold[x as usize] = true;
+                    }
+                }
             }
             if (self.fold_ops & FOLD_VSAD) != 0 && t.op == O_VSUMW {
                 let p = self.vsad_diff(b, t);
@@ -4086,6 +4104,35 @@ pub(package) const fn lane_pair(b: &Body, t: Inst) bool {
         t.ty,
         8,
     ) >= 4;
+}
+
+/// Whether scalar float operation `t` reads an operand as lane 0 of a vector in the vector's register
+/// (`FOLD_LANE0`, folded per `pfold`).
+pub(package) const fn lane0_op(b: &Body, pfold: &Vector<bool>, t: Inst) bool {
+    if t.op != O_FADD && t.op != O_FSUB && t.op != O_FMUL && t.op != O_FDIV || is_vec(t.ty) {
+        return false;
+    }
+    return is_inst(t.a) && pfold[t.a as usize] && lane0_of(b, t.a) != VNONE || is_inst(t.b) && pfold[t.b as usize] && lane0_of(
+        b,
+        t.b,
+    ) != VNONE;
+}
+
+/// The float vector of 8 or 16 bytes whose lane 0 value `v` reads (`vextract`), VNONE when not one.
+pub(package) const fn lane0_of(b: &Body, v: Value) Value {
+    if !is_inst(v) {
+        return VNONE;
+    }
+    let t = b.insts[v as usize];
+    if t.op != O_VEXTRACT || t.aux != 0 || !is_float(t.ty) {
+        return VNONE;
+    }
+    let vb = type_bytes(b.type_of(t.a), 8);
+    return if vb == 8 || vb == 16 {
+        t.a
+    } else {
+        VNONE
+    };
 }
 
 // Value `v` is an instruction's (no parameter, no flag, not VNONE).

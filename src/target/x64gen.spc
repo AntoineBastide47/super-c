@@ -1799,7 +1799,7 @@ extend Gen {
             )) {
                 self.vmem[self.vx(t.a) as usize] = true;
             }
-            if reg_op || is_terminator(t.op) {
+            if reg_op || is_terminator(t.op) || lv::lane0_op(b, &self.lv.pfold, t) {
                 continue;
             }
             // A call takes a vector argument it passes whole in a register from that register.
@@ -2410,6 +2410,19 @@ extend Gen {
 
     // Value `v` in a register of its file, locked for the current instruction.
     fn reg(self: &mut Self, v: Value) u8 {
+        // Lane 0 of a vector its user reads in the vector's register (`lv::FOLD_LANE0`), a spilled one
+        // loaded into a vector temporary.
+        if (v & (VPARAM | VFLAG)) == 0 && v != VNONE && self.lv.pfold[v as usize] {
+            let w = lv::lane0_of(self.b(), v);
+            if w != VNONE {
+                let s = if self.va[self.vx(w) as usize].reg != NOREG {
+                    NOREG
+                } else {
+                    self.tmp(true)
+                };
+                return self.vec_use(w, s);
+            }
+        }
         let x = self.vx(v);
         let va = self.va[x as usize];
         if va.reg != NOREG {
@@ -2588,7 +2601,11 @@ extend Gen {
             t.ty,
         ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VSUMW) || t.op == O_VEXTRACT || t.op == O_VINSERT || self.conv_reg(
             t,
-        ) || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a));
+        ) || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.vt(t.a)) || lv::lane0_op(
+            self.b(),
+            &self.lv.pfold,
+            t,
+        );
         if !reg_form && !is_terminator(t.op) {
             for k in 0..self.uses.len() {
                 self.sync(self.uses[k]);
@@ -3331,7 +3348,7 @@ extend Gen {
         };
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE
         } else {
             0
@@ -14664,10 +14681,10 @@ extend Gen {
                 let ry = self.vec_use(self.b().pool[(d.a + 1) as usize], self.vs1) - V0;
                 self.op3(1, 0xF6, false, nb, s, rx, ry);
             } else {
+                // The zeros' register takes the sums: |0 - b| is |b - 0|, no copy of the bytes.
                 let rb = self.vec_use(t.b, self.vs1) - V0;
-                let z = self.tmp(true) - V0;
-                self.op3(1, 0xEF, false, nb, z, z, z);
-                self.op3(1, 0xF6, false, nb, s, rb, z);
+                self.op3(1, 0xEF, false, nb, s, s, s);
+                self.op3(1, 0xF6, false, nb, s, s, rb);
             }
             let ra = self.vec_use(t.a, self.vs0);
             let rd = self.def_over(i, t.a, ra) - V0;
