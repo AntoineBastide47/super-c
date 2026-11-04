@@ -4993,6 +4993,158 @@ int main(void) {
     }
 }
 
+// A comparison of the registers the block's last instruction subtracted (either way) sets the flags there
+// (arm64's `subs`): `@absd` and `@satsub` compare nothing. They give the C results.
+@test
+fn arm64_comparisons_read_a_subtraction_s_flags() {
+    let lir = M"(lir ptr 8
+sym @absd fn global
+sym @satsub fn global
+fn @absd
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = sub.i32 v0, v1
+  v3 = sub.i32 v1, v0
+  v4 = icmp.ugt v0, v1
+  v5 = select.i32 v4, v2, v3
+  ret v5
+fn @satsub
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = sub.i32 v0, v1
+  v3 = iconst.i32 0
+  v4 = icmp.ult v0, v1
+  v5 = select.i32 v4, v3, v2
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // subs w3, w1, w0; csel x0, x2, x3, lo (6B000023 9A833040). subs w2, w0, w1; csel x0, xzr, x2, lo
+    // (6B010002 9A8233E0).
+    let ab: [u8; 8] = [0x23, 0x00, 0x00, 0x6B, 0x40, 0x30, 0x83, 0x9A];
+    let ss: [u8; 8] = [0x02, 0x00, 0x01, 0x6B, 0xE0, 0x33, 0x82, 0x9A];
+    assert(holds(&obj, ab[0..8]) && holds(&obj, ss[0..8]), "absd, satsub");
+    let drv = M"(#include <stdint.h>
+uint32_t absd(uint32_t, uint32_t);
+uint32_t satsub(uint32_t, uint32_t);
+int main(void) {
+  static const uint32_t v[5] = {0, 1, 7, 0x80000000u, 0xFFFFFFFFu};
+  for (int i = 0; i < 5; i++)
+    for (int k = 0; k < 5; k++) {
+      uint32_t a = v[i], b = v[k];
+      if (absd(a, b) != (a > b ? a - b : b - a)) return 1;
+      if (satsub(a, b) != (a < b ? 0 : a - b)) return 2;
+    }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// A mask of the low bits of a right shift within the width is `ubfx` (arm64): `@byte1`'s
+// `(x >> 8) & 0xff` is `ubfx w0, w0, #8, #8`; `@top`'s `(x >> 28) & 0xff`, past the width, ands the
+// shifted register. They give the C results.
+@test
+fn arm64_masked_right_shifts_extract_fields() {
+    let lir = M"(lir ptr 8
+sym @byte1 fn global
+sym @top fn global
+fn @byte1
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 8
+  v2 = iconst.i32 255
+  v3 = lshr.i32 v0, v1
+  v4 = and.i32 v3, v2
+  ret v4
+fn @top
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 28
+  v2 = iconst.i32 255
+  v3 = lshr.i32 v0, v1
+  v4 = and.i32 v3, v2
+  ret v4
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // ubfx w0, w0, #8, #8 (53083C00).
+    let f: [u8; 4] = [0x00, 0x3C, 0x08, 0x53];
+    assert(holds(&obj, f[0..4]), "byte1");
+    let drv = M"(#include <stdint.h>
+uint32_t byte1(uint32_t);
+uint32_t top(uint32_t);
+int main(void) {
+  static const uint32_t v[4] = {0, 0x12345678u, 0xFFFFFFFFu, 0x80000100u};
+  for (int i = 0; i < 4; i++) {
+    if (byte1(v[i]) != (v[i] >> 8 & 0xff)) return 1;
+    if (top(v[i]) != (v[i] >> 28 & 0xff)) return 2;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// A value whose truncation the block returns next is made in the return's register (`@lz`'s count:
+// `clz x0, x0`), and 0 - x reads the zero register (`@lowbit`: `neg`, no 0 made). arm64; they give the C
+// results.
+@test
+fn returned_truncations_and_negations_take_no_extra_register() {
+    let lir = M"(lir ptr 8
+sym @lz fn global
+sym @lowbit fn global
+fn @lz
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = clz.i64 v0
+  v2 = trunc.i32 v1
+  ret v2
+fn @lowbit
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = sub.i64 v1, v0
+  v3 = and.i64 v0, v2
+  ret v3
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // clz x0, x0 (DAC01000); neg x1, x0 (CB0003E1), little-endian words.
+    let lz: [u8; 4] = [0x00, 0x10, 0xC0, 0xDA];
+    let ng: [u8; 4] = [0xE1, 0x03, 0x00, 0xCB];
+    assert(holds(&obj, lz[0..4]) && holds(&obj, ng[0..4]), "lz, lowbit");
+    let drv = M"(#include <stdint.h>
+int32_t lz(uint64_t);
+uint64_t lowbit(uint64_t);
+int main(void) {
+  static const uint64_t v[5] = {1, 2, 0x80, 0x8000000000000000u, 0x00F0F00000000000u};
+  for (int i = 0; i < 5; i++) {
+    if (lz(v[i]) != __builtin_clzll(v[i])) return 1;
+    if (lowbit(v[i]) != (v[i] & -v[i])) return 2;
+  }
+  if (lz(0) != 64) return 3;
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A comparison of the operands of the subtraction just emitted reads its flags (x86-64): `@absd`'s
 // `b - a` is the comparison of `a` and `b` the other way, `@satsub`'s `a - b` that comparison itself; no
 // `cmp`. They give the C results.

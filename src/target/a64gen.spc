@@ -4047,6 +4047,25 @@ extend Gen {
         } else {
             self.reg(t.b)
         };
+        // The block's last instruction subtracted these registers (either way): it sets the flags (`subs`).
+        let n = self.code.len();
+        let bk = self.lv.order[self.pos as usize];
+        if !small && n != 0 && self.blk_at[bk as usize] < n as u32 {
+            let w = self.code[n - 1];
+            let rd = w & 31;
+            let (rn, rm) = (w >> 5 & 31, w >> 16 & 31);
+            let sub = (w & 0xFFE0FC00) == (a::addsub_reg(sf, 1, false, 0, 0, 0, 0, 0) & 0xFFE0FC00);
+            if sub && rd != 31 && rd != ra as u32 && rd != rb as u32 && (rn == ra as u32 && rm == rb as u32 || rn == rb as u32 && rm == ra as u32) {
+                self.code[n - 1] = w | 1u32 << 29;
+                return icond(
+                    if rn == ra as u32 {
+                        c
+                    } else {
+                        mirror(c)
+                    },
+                );
+            }
+        }
         self.emit_cmp(a::addsub_reg(sf, 1, true, a::ZR, ra, rb, 0, 0));
         return icond(c);
     }
@@ -4408,9 +4427,16 @@ extend Gen {
             self.va.index_mut(i as usize).clean = op == O_LSHR;
             return true;
         }
-        // An operand shifted by a constant (`lv::FOLD_SHOP`): the shifted register form.
+        // An operand shifted by a constant (`lv::FOLD_SHOP`): the shifted register form, but for a mask of the
+        // low bits of a right shift within the width, which `ubfx` takes (`lv::FOLD_UBFX`, below).
         let sv = lv::shop_side(self.b(), &self.lv.pfold, t);
-        if sv != VNONE {
+        let mut km: u64 = 0;
+        let mut ks: u64 = 0;
+        let field = op == O_AND && sv == t.a && self.const_of(t.b, &mut km) && km != 0 && km != u64::MAX && (km & km + 1) == 0 && self.b().insts[sv as usize].op == O_LSHR && self.const_of(
+            self.b().insts[sv as usize].b,
+            &mut ks,
+        ) && ks + (km + 1).trailing_zeros() as u64 <= bits as u64;
+        if sv != VNONE && !field {
             let s = self.b().insts[sv as usize];
             let o = if sv == t.b {
                 t.a
@@ -4572,8 +4598,13 @@ extend Gen {
         let div = op >= O_SDIV && op <= O_UREM;
         let sgn = op == O_SDIV || op == O_SREM || op == O_ASHR;
         let ext_a = small && (div || op == O_LSHR || op == O_ASHR);
+        // 0 - b reads the zero register (`neg`).
+        let mut kz: u64 = 0;
+        let zsub = op == O_SUB && self.const_of(t.a, &mut kz) && kz == 0;
         let ra = if ext_a {
             self.ext(t.a, sgn, bits)
+        } else if zsub {
+            a::ZR as u8
         } else {
             self.reg(t.a)
         };

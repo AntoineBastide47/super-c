@@ -84,15 +84,16 @@ pub(package) const fn in_vreg(t: u8) bool {
     return is_vec(t) && (type_bytes(t, 8) == 8 || type_bytes(t, 8) == 16);
 }
 
-/// Whether instruction `v` of `b` (in block `bk`) is followed by a zero extension of it alone, which
-/// the block returns next (a narrow result widened for the return).
+/// Whether instruction `v` of `b` (in block `bk`) is followed by a zero extension or a truncation of it
+/// alone, which the block returns next (a narrow result widened for the return, a wide one cut to it):
+/// either reads `v` in the return's register.
 pub(package) const fn zext_returned(b: &Body, bk: Block, v: u32) bool {
     if v + 2 >= bk.start + bk.len {
         return false;
     }
     let z = b.insts[v as usize + 1];
     let r = b.insts[v as usize + 2];
-    return z.op == O_ZEXT && z.a == v && r.op == O_RET && r.a == v + 1;
+    return (z.op == O_ZEXT || z.op == O_TRUNC && is_int(z.ty)) && z.a == v && r.op == O_RET && r.a == v + 1;
 }
 
 /// Whether instruction `v` of `b` (in block `bk`) is followed by a plain store of it, then a return of it
