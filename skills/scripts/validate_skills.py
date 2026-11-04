@@ -105,8 +105,14 @@ def check_source_references(errors: list[str]) -> None:
                 errors.append(f"{doc.relative_to(ROOT)}: missing source path {match.group(1)}")
 
 
+def skill_text(name: str) -> str:
+    skill = SKILLS / name
+    docs = [skill / "SKILL.md", *sorted((skill / "references").glob("*.md"))]
+    return "\n".join(doc.read_text(encoding="utf-8") for doc in docs)
+
+
 def check_claims(errors: list[str]) -> None:
-    binary = (SKILLS / "super-c-binary/SKILL.md").read_text(encoding="utf-8")
+    binary = skill_text("super-c-binary")
     source = source_text()
     main_source = (ROOT / "src/main.spc").read_text(encoding="utf-8")
 
@@ -119,7 +125,7 @@ def check_claims(errors: list[str]) -> None:
     for name in sorted(documented_env - source_env):
         errors.append(f"super-c-binary: documented environment variable is absent from source: {name}")
 
-    language = (SKILLS / "super-c-language/SKILL.md").read_text(encoding="utf-8")
+    language = skill_text("super-c-language")
     documented_attributes = {
         match.split("(", 1)[0]
         for match in ATTRIBUTE_RE.findall(language)
@@ -135,7 +141,7 @@ def check_claims(errors: list[str]) -> None:
             continue
         errors.append(f"super-c-language: documented attribute is absent from source: {attribute}")
 
-    internals = (SKILLS / "super-c-compiler-internals/SKILL.md").read_text(encoding="utf-8")
+    internals = skill_text("super-c-compiler-internals")
     required_symbols = ("run_package", "platform_filter", "hir::lower_module", "cemit_package")
     for symbol in required_symbols:
         if symbol not in source and symbol not in internals:

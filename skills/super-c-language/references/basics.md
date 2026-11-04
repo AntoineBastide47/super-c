@@ -1,0 +1,176 @@
+# Bindings, Functions, Structs and Enums
+
+## Bindings and Mutability
+
+Mutability is a property of the **binding**, not the type.
+
+```superc
+let x: i32 = 10;               // immutable binding, explicit type
+let mut sum = 0;                // mutable binding, inferred type
+let (div, mod) = divmod(p);     // destructuring
+```
+
+An annotation on a destructuring binding types its names: `let (x, y): (i32, i32) = (a, b);`
+widens `i16` values as `let t: (i32, i32) = (a, b);` does. A tuple a call returns does not convert:
+its annotation must name its element types (`mismatched types: expected '(i32, i16)', found '(i16,
+i16)'`).
+
+A local whose initializer leaves generic arguments open keeps them open, and its later uses in the
+same body fill them in: `let mut v = Vector::new(); v.push(x);`, `let mut o = None; o = Some(3);`,
+`let c = |a| a + 1; c(2);` (a closure parameter takes its type from the first call). An unsuffixed
+literal gives no evidence and takes the final type (`v.push(1); v.push(2u8);` is `Vector<u8>`), else
+its default. Two typed uses that disagree are "conflicting types for 'T' of 'v'" at the second, a
+member of a value whose whole type no use has given yet is "the type of 'x' must be known here", and
+a parameter no use fixes stays "cannot infer the generic argument". `_` leaves one type to this
+inference in a local's annotation (`let v: Vector<_> = ..`) and in a call's type arguments
+(`f::<_, u8>(..)`) only. Parameters, results, fields and constants are never inferred.
+
+An immutable binding forbids reassignment, `&mut self` method calls, and `&mut` borrows.
+The rule reaches through a user `Deref`: `*b` is an assignable place when `b`'s type defines
+`deref_mut` (`Box<T>`); `*b = v` and `&mut *b` call `deref_mut` and need `b` mutable. A type
+with `deref` only gives a read-only `*b`.
+Split initialization is legal: `let x: T; x = v;` (assign-once enforced, binding stays
+non-`mut`).
+
+## Functions
+
+```superc
+fn add(a: i32, b: i32) i32 { return a + b; }
+```
+
+The return type follows the parameter list with no arrow. `void` is the implicit return
+type when omitted. The program entry is the root module's top-level `main`, declared
+`fn main() i32` or `fn main(args: Vector<str>) i32`. A `main` in another module, or a method
+named `main`, is an ordinary function of any signature.
+
+A parenthesized return list (`fn f() (A, B)`) returns the tuple `(A, B)`: a call is an ordinary
+value (`let t = f();`, `assert_eq(pair(), (1, 2))`, `f().0`), and `let (a, b) = f();` destructures
+it. `return (a, b);` returns the tuple, and so does its sugar `return a, b;`. Named results (`(a: i64, b: i64)`) bind
+`a` and `b` in the body, and a bare `return;` returns their tuple. A register type (`@value`) is no
+tuple element, so it is never one of several results.
+
+A block in value position (an `if` or `else` branch, a `switch` arm block, `{ .. }`, `unsafe { ..
+}`) is a value block: its value is its last expression, written without `;` (`{ x + 1 }`); an
+assignment there is no value. A value block's last `if` with an `else`, `switch` or block is its
+value too (`{ prep(); if c { 1 } else { 2 } }`). A block whose last statement is no such expression
+(`{ x + 1; }`) is `void`. Where a value is expected (a context type, a `let` initializer, a branch or
+arm the others give a value) such a last `;` is "this block ends in ';', so it has no value: remove
+the ';'".
+
+A function or closure body gives its results with `return`: a last expression without `;`
+(`fn k() i32 { x + 1 }`) is "a function body gives its result with 'return': write 'return x +
+1;'".
+
+A direct call of a function to itself whose result the function returns as it is becomes a
+jump in every profile, so the recursion runs in one frame. It stays a call when a drop, a
+`defer` block or a cancellation check runs after it, when it calls another instance (other
+generic arguments), when an argument may hold a borrow of a local of the call, or when the
+function takes a raw address of a local. `@tail_recurse` on the function makes each such call
+an error that names the reason; a call to the function from one of its closures and a function
+that never calls itself are errors too. A function returning a tuple converts when it returns the
+call's tuple, also rebuilt from its elements in order (`let (a, b) = f(..); return (a, b);`).
+
+A function or closure with results cannot reach the end of its body ("function 'f' can reach the
+end of its body without returning a value"): every path ends in a `return`, a call of a `!` or
+`@noreturn` function, a `loop` no `break` leaves, or an `if`, `switch`, block or `unsafe` block
+whose every way out is one of these. A `while` or a `for` can run no iteration, so it does not end
+a path.
+
+`return pair();` returns the call's tuple: its type must be the function's result type exactly (no
+widening: "mismatched types: expected '(i32, i32)', found '(i32, i64)'").
+
+## Structs and Methods
+
+```superc
+struct Counter { pub n: i32 }
+
+extend Counter {
+    fn get(self: &Counter) i32 { return self.n; }
+    fn bump(self: &mut Counter) { self.n = self.n + 1; }
+}
+```
+
+Fields are private to their file by default, as items are: code in the declaring file names them, code in
+another file does not; `pub` exposes them everywhere. One `extend` block per
+type at file end. Interface conformance blocks (`extend T as I { .. }`) stay separate. A method's
+`self` is the extend's target (`Self`), a reference to it, or a raw pointer to it.
+
+A method or associated constant is defined once for any one instance of its type: a second item of
+the name (a method or a constant, any signature) in a plain `extend` that applies to a common
+instance, in any module, is "duplicate definition of 'f' for 'X'" at the later one. Disjoint extends
+(`extend P<u8>`, `extend P<i32>`) and distinct conformances may each define the name (see the
+generics section of [types.md](types.md)).
+
+A struct literal names each field once ("field 'x' is initialized twice"). A field it omits is
+zero-filled, so it must be visible at the literal and its type valid as zero bytes: scalars, raw
+pointers, vectors, arrays, unions and structs of such, an enum without payloads or written
+discriminants, an extern opaque type with a layout (`@layout`, `@value`: C's static
+initialization), and a type asserting `Zeroable` (`unsafe extend T as Zeroable {}`: its private fields
+hold no invariant at zero, each field's type still checked), as std's `str`, `String`, `Vector`, `Array`,
+`Map` and `Set` do ("asserting 'Zeroable' requires 'unsafe extend'"). Else it is "missing field 'f': an
+omitted field is zero-filled, and zero is not a valid value of its type here" (a `&T`, `Box`, `fn`
+field, ...). A union literal sets one member.
+`unsafe zeroed::<T>()` is the all-zero value of any type. The address of a zero-sized field
+(`&s.tail` of a `[T; 0]` field) is its offset inside `s`; the address of any other zero-sized value
+is a shared sentinel.
+
+An item name may not contain `__` after its leading underscores or start with `__sc`, and a type
+name may not start with `ptr_`, `ptrm_`, `slice_`, `dyn_`, `dynm_`, `dynb_`, `arr<N>`, `fn<N>`,
+`fnm<N>` or `fnt<N>`: the generated C symbols use these spellings ("the name '..' is reserved for
+the symbols the compiler generates").
+
+## Enums and Pattern Matching
+
+```superc
+enum Shape {
+    Circle(i32),
+    Rect { w: i32, h: i32 },
+    Unit,
+}
+
+fn area(s: Shape) i32 {
+    return switch s {
+        Circle(r)     => r * r * 3,
+        Rect { w, h } => w * h,
+        Unit          => 0,
+    };
+}
+```
+
+`switch` is exhaustive and usable as an expression. A `switch` that starts a statement ends at its
+`}`, as `if` and `loop` do (a `;` after it is "a 'switch' statement ends at its '}': remove the
+';'"): its arms are statements, so arm values
+of different types do not join, and `switch x { .. }.len()` there does not continue as an
+expression. Arms combine alternatives with `|`.
+
+A variant is written bare (`Circle(r)`, `None`) or qualified (`Shape::Circle(r)`, `Option::None`)
+in values and in patterns. A bare value resolves through the expected type (a return, an annotated
+`let`, an argument, a field, an array element, the other side of `==` or `!=`, an assignment
+target); without one only the prelude's `Some`, `None`, `Ok` and `Err` resolve, and a variant of
+another enum is "cannot find value". A local or an item that a bare variant in scope also names is
+an error that names both ("'Unit' names both a local and the variant 'Shape::Unit': rename one"). A
+pattern's bare variant resolves through the matched type; a qualified one must name a variant of
+the matched type ("pattern 'F::A' does not name a variant of the matched type 'E'"). A variant has
+priority over an associated constant of the same name. A qualified variant value whose bare name
+resolves to it is a lint warning with a fix ("write 'Some': the variant resolves without its enum
+here"); a unit-variant pattern (`None =>`) binds no local, so `None => None` is the variant. A qualified path without a payload that
+names no variant is a constant pattern: a builtin limit (`i64::MAX`) takes
+the matched type like a literal, and an associated constant (`Lim::HI`) keeps its type, which must be
+the matched type or widen to it; a range bound may name a constant (`0..=LIMIT`). Integer values and
+ranges cover their type: `i64::MIN..=-1` and `0..=i64::MAX` make an `i64` switch exhaustive, and a
+`_` after such a cover is an unreachable arm. A tuple
+pattern (`(a, _)`, `(Some(x), mut n)`) destructures a tuple in arms, `if let` and `while let`.
+A pattern matched against a reference (`&T` or `&mut T`, at the top or nested, as in
+`Option<&E>`) reads the referent: literal and range sub-patterns test the value, and
+names bound inside bind by `&` (or `&mut` through a `&mut` with no `&` above it), so
+nothing is moved out through the reference. A literal pattern and each range bound take the
+matched value's type like `let x: T = lit` does: `9223372036854775808..` against a `u64` is a `u64`,
+and `300` against a `u8` is "integer literal is out of range for 'u8'". A method name without a call
+(`v.m`) is an error; `Type::m` is a function value.
+Payload-less enums lower to C `enum`s; payload-bearing ones to tagged unions whose tag is
+one byte when the enum has at most 256 variants and no explicit discriminant, and the
+4-byte C enum otherwise. A niche enum has no tag: see Enums in `references/types.md`. A payload-less variant of either kind may take an explicit
+discriminant (`enum P { A(i32), B = 9, C }`: tags 0, 9, 10); the stored tag, matches,
+`type_info` and the derived `Ord` (discriminant first, then payloads) use it. Discriminants
+of one enum must differ and fit i32; an `extern` enum is exempt. Only a payload-less
+enum casts to an integer.

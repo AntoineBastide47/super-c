@@ -26,6 +26,7 @@ Follow these rules for all tasks unless the current user message gives a more sp
 - Complete the full requested task.
 - Do not stop mid-task to report progress. Continue until the task is complete or blocked on input only the user can provide.
 - Do not defer a sub-item silently. List anything not done, with the reason.
+- For a task with several steps, keep its done and open items in a checklist file and update the file after each item, so that a new session can continue from the file without the old conversation.
 - When a plan's gate conflicts with the request, finish the independent work, then ask one question with a current, after, and delta table.
 - Change only the files and code that are necessary for the task.
 - Preserve existing behavior unless the task requires a behavior change.
@@ -71,6 +72,10 @@ Follow these rules for all tasks unless the current user message gives a more sp
 - Do not add a tool when the existing project tool can solve the problem well.
 - Keep dependencies minimal.
 - Treat every new dependency as a supply-chain, versioning, build, and maintenance cost and risk.
+- Keep tool output small at the source: search before you read, read a line range around the hit, and filter long command output to the lines you need.
+- When a tool saves a large output to a file, search that file with `grep -n`. Never read it whole.
+- To replace an existing scratch file, read it first or write a file with a new name: a write over a file you did not read fails.
+- Wait for long work (CI runs, remote jobs, long local runs) with a command that blocks until the work ends, started in the background or in a monitor, and continue other work meanwhile. Never wait with `sleep`, a loop of sleeps, a scheduled wake-up, or by ending the turn.
 
 ## 7. Defects, Verification, and Completion
 
@@ -161,7 +166,7 @@ If natural and correct code fails because of such a defect:
 
 ## 2. Skills
 
-The `skills/` directory is the project's reference documentation, packaged as agent skills. Read [skills/README.md](skills/README.md) for precedence, validation, and maintenance rules. Before working in an area, read the matching skill and its required references. The skills are authoritative for their areas. This file keeps only the working rules no skill covers.
+The `skills/` directory is the project's reference documentation, packaged as agent skills. Read [skills/README.md](skills/README.md) for precedence, validation, and maintenance rules. Before working in an area, load the matching skill: Claude Code lists them through the links in `.claude/skills/`, so use the Skill tool, or read the `SKILL.md`. Each `SKILL.md` holds the checklist and hard rules and ends with an index of its reference files: read only the reference files the task needs. The skills are authoritative for their areas. This file keeps only the working rules no skill covers.
 
 | Area | Skill |
 |------|-------|
@@ -187,6 +192,13 @@ The `skills/` directory is the project's reference documentation, packaged as ag
   - After a plain build: run `cmp super-c build/debug/super-c`.
   - After `check.sh`: run `cmp super-c build/bootstrap/test/super-c`.
 
+### Monitoring CI
+
+- Watch every CI run you start, and every run the user asks about, until it ends. Run `sh ci/wait-run.sh <run-id>` with Bash `run_in_background` (or as a Monitor command) and keep working on the task. The script returns when the run ends and prints the conclusion, the failed jobs, and only their failure reports. Read its result as soon as the notification arrives, and act on it.
+- Get the id of a run you dispatched with `gh run list --workflow=<file> --branch=<branch> --limit=1 --json databaseId,createdAt`. Check that `createdAt` is after the dispatch.
+- Never guess when a run ends. Do not `sleep` before a check, do not loop over sleeps, do not use ScheduleWakeup, CronCreate or `/loop`, and do not end the turn to wait. Each sleep costs a turn and its full context and gives no signal when the run fails early; the blocked wait reports the end and the failures at once.
+- Read CI logs only through the output of `ci/wait-run.sh`, or `gh run view <id> --log-failed` filtered with `grep`. Never print a whole job log.
+
 ## 4. Code
 
 - An unsatisfied interface bound in your own snippet means the snippet is wrong. Do not add std conformances unasked.
@@ -194,6 +206,16 @@ The `skills/` directory is the project's reference documentation, packaged as ag
 ## 5. Tooling
 
 - Use Super-C's own compiler, formatter, test runner, build system, LSP server, and benchmark harness when they fit the task.
+
+### Code Search
+
+Many files under `src/` have more than 10,000 lines (`git ls-files 'src/*.spc' | xargs wc -l | sort -n | tail` lists the largest). Never read or `cat` such a file whole. Find the lines first, then read only them:
+
+- Search tracked files with `git grep`, not `grep -r`: it skips `build/` and ignored files. Always name the paths: `git grep -n -w name -- src std`.
+- Count before you list: `git grep -c -w name -- src` prints the hits per file. Then search one file, or cap the hits per file with `-m`: `git grep -n -m 5 -w name -- src`.
+- Find a definition: `git grep -n -E '^ *[a-z ]*fn name[(<]' -- src std`.
+- Print one function: `sed -n -E '/^[a-z ]*fn name[(<]/,/^}/p' file` at the top level, `sed -n -E '/^    [a-z ]*fn name[(<]/,/^    }/p' file` for a method in an `extend` block.
+- Read around a hit with the Read tool (`offset` and `limit`) or `sed -n 'A,Bp' file`, at most about 200 lines. Write the line numbers that `grep -n` printed. Do not compute a range in a shell variable (`n=$(grep ...); sed -n "$n,..."`).
 
 ## 6. Dependencies
 
