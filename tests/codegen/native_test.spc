@@ -5358,6 +5358,59 @@ int main(void) {
     }
 }
 
+// wasm32: a value its reader takes off the stack leaves no write to its local even when the local's next
+// write comes past a control instruction, if every read of that local sees a write before it with none
+// between: `@mx`'s second load each round (`v128.load` at offset 16, no `local.tee`), whose local the
+// maximum after the loop takes. It gives the C result.
+@test
+fn wasm_stack_values_drop_writes_no_read_sees() {
+    let lir = M"(lir ptr 8
+sym @mx fn global
+fn @mx
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 8
+  v4 = load.v4i32 v0 align 2
+  jmp b1(v2, v4, v4)
+b1(v5: i32, v6: v4i32, v7: v4i32):
+  v8 = ptradd v0, v5 * 4
+  v9 = load.v4i32 v8 align 2
+  v10 = vop.max.s.v4i32 (v9, v6)
+  v11 = load.v4i32 v8+16 align 2
+  v12 = vop.max.s.v4i32 (v11, v7)
+  v13 = add.i32 v5, v3
+  v14 = icmp.ult v13, v1
+  br v14, b1(v13, v10, v12), b2
+b2:
+  v15 = vop.max.s.v4i32 (v12, v10)
+  v16 = vop.reduce_max.s.i32 (v15)
+  ret v16
+)";
+    let drv = M"(#include <stdint.h>
+int32_t mx(const int32_t *, int32_t);
+int main(void) {
+  static int32_t a[24];
+  for (int i = 0; i < 24; i++) a[i] = (i * 37) % 23 - 11;
+  a[13] = 99;
+  return mx(a, 24) != 99;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let ld: [u8; 4] = [0x00, 0x02, 0x10, 0x22];
+    assert(!holds(&obj, ld[0..4]), "mx");
+    let ld0: [u8; 3] = [0x00, 0x02, 0x10];
+    assert(holds(&obj, ld0[0..3]), "the load");
+    if cli::has_cc() {
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
 // A select of a value plus 1 and the value under a test against 0 adds the test's 0 or 1, not the
 // tested value (a quotient rounded up: `q + (r != 0)`). It gives the C results.
 @test
@@ -5394,13 +5447,15 @@ int main(void) {
 }
 
 // wasm32: a loop's new value takes the local of the parameter it passes to when nothing reads that
-// parameter after it: `@bits`'s back edge moves nothing. `@fib` reads its parameter `b` after its sum
+// parameter after it: `@bits`'s back edge moves nothing, nor `@bx`'s, whose sum the exit edge passes
+// too (no `local.get x`, `local.set y`). `@fib` reads its parameter `b` after its sum
 // (`b | 0`, passed on as `a`): the sum keeps its own local. They give the C results.
 @test
 fn wasm_loop_values_take_their_parameters_locals() {
     let lir = M"(lir ptr 8
 sym @bits fn global
 sym @fib fn global
+sym @bx fn global
 fn @bits
   sig (i32) -> i32
 b0(v0: i32):
@@ -5431,14 +5486,29 @@ b2:
   jmp b1(v9, v7, v8)
 b3:
   ret v3
+fn @bx
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 1
+  jmp b1(v0, v1)
+b1(v3: i32, v4: i32):
+  v5 = and.i32 v3, v2
+  v6 = add.i32 v4, v5
+  v7 = lshr.i32 v3, v2
+  v8 = icmp.ne v7, v1
+  br v8, b1(v7, v6), b2(v6)
+b2(v9: i32):
+  ret v9
 )";
     let drv = M"(#include <stdint.h>
 uint32_t bits(uint32_t);
 uint32_t fib(uint32_t);
+uint32_t bx(uint32_t);
 int main(void) {
   static const uint32_t v[5] = {0, 1, 7, 0x80000001u, 0xFFFFFFFFu};
   for (int i = 0; i < 5; i++)
-    if (bits(v[i]) != (uint32_t)__builtin_popcount(v[i])) return 1;
+    if (bits(v[i]) != (uint32_t)__builtin_popcount(v[i]) || bx(v[i]) != bits(v[i])) return 1;
   uint32_t a = 0, b = 1;
   for (uint32_t n = 0; n < 40; n++) {
     if (fib(n) != a) return 2;
@@ -5460,6 +5530,19 @@ int main(void) {
     );
     let tail: [u8; 5] = [0x76, 0x22, 0x01, 0x0D, 0x00];
     assert(holds(&obj, tail[0..5]), "bits");
+    let xs = lir.find("fn @bx") as usize;
+    let wx = format("lir ptr 4\nsym @bx fn global\n{}", lir.slice(xs, lir.len()));
+    obj.truncate(0);
+    assert(
+        object_of(&wx, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    for x in 0..4u8 {
+        for y in 0..4u8 {
+            let cp: [u8; 4] = [0x20, x, 0x21, y];
+            assert(x == y || !holds(&obj, cp[0..4]), "bx");
+        }
+    }
     if cli::has_cc() {
         assert_eq(run_native(lir, drv), 0);
         assert_eq(run_wasm(lir, drv), 0);
@@ -5475,7 +5558,8 @@ int main(void) {
 // `@sx`'s store of `a * x[2] + p[0]` computes the whole sum after its address (`f32.add` then
 // `f32.store`, no local), and `@vx`'s of `y * x + p` on four lanes too, `x` from the block before
 // (`f32x4.add` then `v128.store`). `@dq`'s sum of the quotient and the remainder made right before it
-// computes the remainder after the quotient (`i32.mul`, `i32.sub`, `i32.add`).
+// computes the remainder after the quotient (`i32.mul`, `i32.sub`, `i32.add`), and `@tb`'s shift its
+// count past its folded mask (`i64.extend_i32_u`, `i64.shl`, `i64.shr_u`).
 // They give the C results.
 @test
 fn wasm_second_operands_compute_where_they_are_read() {
@@ -5483,6 +5567,25 @@ fn wasm_second_operands_compute_where_they_are_read() {
 sym @np fn global
 sym @dm fn global
 sym @dq fn global
+sym @tb fn global
+fn @tb
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i64 0
+  v2 = iconst.i32 4
+  v3 = icmp.ule v0, v2
+  v4 = zext.i64 v0
+  v5 = iconst.i64 3
+  v6 = shl.i64 v4, v5
+  v7 = iconst.i64 63
+  v8 = and.i64 v6, v7
+  v9 = iconst.i64 23136248074
+  v10 = lshr.i64 v9, v8
+  v11 = iconst.i64 255
+  v12 = and.i64 v10, v11
+  v13 = select.i64 v3, v12, v1
+  v14 = trunc.i32 v13
+  ret v14
 fn @dq
   sig (i32, i32) -> i32
 b0(v0: i32, v1: i32):
@@ -5567,6 +5670,7 @@ b0(v0: i32, v1: i32):
 uint32_t np(uint32_t);
 uint32_t dm(uint32_t, uint32_t);
 uint32_t dq(uint32_t, uint32_t);
+uint32_t tb(uint32_t);
 uint32_t bs(uint32_t);
 uint32_t chk(uint32_t, uint32_t);
 uint64_t mh(uint64_t, uint64_t);
@@ -5574,6 +5678,9 @@ uint32_t two(const uint32_t *);
 void sx(float *, const float *, float);
 void vx(float *, const float *, const float *);
 int main(void) {
+  static const uint32_t tv[6] = {10, 33, 7, 99, 5, 0};
+  for (uint32_t i = 0; i < 9; i++)
+    if (tb(i) != tv[i < 5 ? i : 5]) return 9;
   float vp[4] = {1.0f, 2.0f, -3.0f, 0.5f};
   static const float vxs[4] = {2.0f, 4.0f, 8.0f, 16.0f};
   static const float vys[4] = {0.5f, -1.0f, 0.25f, 2.0f};
@@ -5626,6 +5733,8 @@ int main(void) {
     assert(holds(&obj, vst[0..5]), "vx");
     let dq: [u8; 3] = [0x6C, 0x6B, 0x6A];
     assert(holds(&obj, dq[0..3]), "dq");
+    let tb: [u8; 7] = [0x20, 0x00, 0xAD, 0x42, 0x03, 0x86, 0x88];
+    assert(holds(&obj, tb[0..7]), "tb");
     for k in 0..8u8 {
         let cp: [u8; 3] = [0x20, k, 0x22];
         assert(!holds(&obj, cp[0..3]), "two");
@@ -12253,8 +12362,9 @@ int main(void) {
 // with the parameters' old values (it may not move them first) and `@swap` swaps its two parameters, its
 // exit reading the first, which one move writes. `@early` leaves before its loop with 0 for the exit's
 // parameter: a `br_if` after that move, though the loop's sum takes the same local (the loop's values are not
-// live where it starts). `@pref`'s back edge and exit both qualify: the exit, whose argument is in its
-// parameter's local already, branches (`br_if 1`), the back edge's move after it. All give the C results.
+// live where it starts). `@pref`'s back edge and exit both qualify (its test reads the old count, so the
+// sum keeps a local of its own): the exit, whose argument is in its parameter's local already, branches
+// (`br_if 1`), the back edge's move after it. All give the C results.
 @test
 fn loops_branch_back_after_their_moves_when_the_exit_allows() {
     let lir = M"(lir ptr 8
@@ -12332,7 +12442,7 @@ b0(v0: i32, v1: i32):
   br v4, b2(v1), b1(v2)
 b1(v5: i32):
   v6 = add.i32 v5, v3
-  v7 = icmp.ult v6, v0
+  v7 = icmp.ult v5, v0
   br v7, b1(v6), b2(v6)
 b2(v8: i32):
   v9 = add.i32 v8, v1
@@ -12347,7 +12457,7 @@ uint32_t pref(uint32_t, uint32_t);
 int main(void) {
   for (uint32_t n = 0; n < 6; n++)
     for (uint32_t m = 0; m < 3; m++)
-      if (pref(n, m) != (m == 0 ? 0 : (n > 1 ? n : 1) + m)) return 5;
+      if (pref(n, m) != (m == 0 ? 0 : n + 1 + m)) return 5;
   for (uint32_t n = 0; n < 9; n++)
     if (early(n) != (n < 2 ? 0 : n * (n + 1) / 2 - 1) + n) return 4;
   static const uint32_t v[6] = {1, 2, 3, 0x80000000u, 0xFFFFFFFFu, 0x12345678u};

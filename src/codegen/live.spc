@@ -591,7 +591,13 @@ extend Live {
                     b,
                     st.a,
                 ) {
-                    self.sink(b, st.b, bk.start, s, &mut moved);
+                    // A shift reads its count past a folded mask (`shift_amount`).
+                    let sb = if st.op >= O_SHL && st.op <= O_ASHR {
+                        shift_amount(b, &self.pfold, st.b)
+                    } else {
+                        st.b
+                    };
+                    self.sink(b, sb, bk.start, s, &mut moved);
                 } else if st.op == O_SELECT && is_int(st.ty) && st.ty != T_I128 {
                     self.sink(b, st.b, bk.start, s, &mut moved);
                     self.sink(b, st.c, bk.start, s, &mut moved);

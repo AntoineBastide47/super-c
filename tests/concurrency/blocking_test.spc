@@ -76,13 +76,14 @@ fn hold_open(gate: &arc::Arc<atomics::Atomic<i64>>, v: i64) i64 {
     return v;
 }
 
-// Wait, bounded, until the pool reports no call queued or running. A caller is woken before the thread
-// that ran its call has counted itself out, so the count may lag a returned call by a few instructions.
+// Wait, bounded, until the pool reports no call queued or running and no thread starting. A caller is
+// woken before the thread that ran its call has counted itself out, so the count may lag a returned call
+// by a few instructions; a thread created for the last calls may still be starting after they return.
 fn wait_quiet() bool {
     let deadline = platform::now_ns() + 5000000000;
     loop {
         let s = blocking::stats();
-        if s.queued == 0 && s.running == 0 {
+        if s.queued == 0 && s.running == 0 && s.starting == 0 {
             return true;
         }
         if platform::now_ns() > deadline {

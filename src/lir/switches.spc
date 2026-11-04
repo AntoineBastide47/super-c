@@ -690,16 +690,46 @@ fn build(b: &mut Body, sw: &Sw, cls: &Vector<Cl>, l: usize, r: usize, lo: u64, h
         let _ = emit(b, sw, Inst { op: O_BR, ty: T_NONE, aux: 0, a: lt, b: left, c: right });
         return b.edge(k, []);
     }
+    // Two clusters of one edge and one width whose values differ in one bit `m` alone, which neither
+    // crosses, are one test of the value without that bit (`x & ~m`; LLVM's InstCombine of two such
+    // ranges): its mask in `mk`, the other cluster gone.
+    let mut mk: [u64; LEAF] = [0; LEAF];
+    let mut gone: [bool; LEAF] = [false; LEAF];
+    for p in l..r {
+        for q in p + 1..r {
+            let (a, c) = (cls[p], cls[q]);
+            let m = a.lo ^ c.lo;
+            if !gone[p - l] && !gone[q - l] && mk[p - l] == 0 && m.count_ones() == 1 && (c.hi ^ a.hi) == m && (a.lo ^ a.hi) < m && same_edge(
+                b,
+                a.e,
+                c.e,
+            ) {
+                mk[p - l] = m;
+                gone[q - l] = true;
+            }
+        }
+    }
     // One test per cluster, the widest first (the likeliest on spread values), the last falling to the
     // default.
     let mut order = StaticVector::<usize, LEAF>::new();
     for j in l..r {
-        order.push(j);
+        if !gone[j - l] {
+            order.push(j);
+        }
     }
     order.as_mut_slice().sort_stable_by(
         |x: &usize, y: &usize| {
-            let wx = cls[*x].hi - cls[*x].lo;
-            let wy = cls[*y].hi - cls[*y].lo;
+            // A merged cluster's width counts both (each below its bit: no overflow).
+            let wx = if mk[*x - l] != 0 {
+                2 * (cls[*x].hi - cls[*x].lo) + 1
+            } else {
+                cls[*x].hi - cls[*x].lo
+            };
+            let wy = if mk[*y - l] != 0 {
+                2 * (cls[*y].hi - cls[*y].lo) + 1
+            } else {
+                cls[*y].hi - cls[*y].lo
+            };
             return if wx > wy {
                 -1
             } else if wx < wy {
@@ -709,13 +739,31 @@ fn build(b: &mut Body, sw: &Sw, cls: &Vector<Cl>, l: usize, r: usize, lo: u64, h
             };
         },
     );
+    let bits = type_bits(sw.ty, 8);
+    let all = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits as u64) - 1
+    };
     let mut next = sw.dflt;
-    let mut j = r - l;
+    let mut j = order.len();
     while j > 0 {
         j -= 1;
         let c = cls[order[j]];
+        let m = mk[order[j] - l];
         let k = open(b, sw);
-        let ok = if c.lo == c.hi {
+        let ok = if m != 0 {
+            let km = konst(b, sw, sw.ty, all & ~m);
+            let xm = emit(b, sw, Inst { op: O_AND, ty: sw.ty, aux: 0, a: sw.x, b: km, c: 0 });
+            let kl = konst(b, sw, sw.ty, c.lo & ~m);
+            if c.lo == c.hi {
+                emit(b, sw, Inst { op: O_ICMP, ty: T_I8, aux: C_EQ, a: xm, b: kl, c: 0 })
+            } else {
+                let d = emit(b, sw, Inst { op: O_SUB, ty: sw.ty, aux: 0, a: xm, b: kl, c: 0 });
+                let kn = konst(b, sw, sw.ty, c.hi - c.lo);
+                emit(b, sw, Inst { op: O_ICMP, ty: T_I8, aux: C_ULE, a: d, b: kn, c: 0 })
+            }
+        } else if c.lo == c.hi {
             let kv = konst(b, sw, sw.ty, c.lo);
             emit(b, sw, Inst { op: O_ICMP, ty: T_I8, aux: C_EQ, a: sw.x, b: kv, c: 0 })
         } else if c.lo == lo {

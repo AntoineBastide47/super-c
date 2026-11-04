@@ -589,6 +589,29 @@ extend Gen {
             self.nxt[i] = self.last_of[l];
             self.last_of[l] = i as u32;
         }
+        // Per local, whether some read of it does not see a write of it in straight-line code (a read
+        // covered so is the access before it, with no control instruction between): only then may a
+        // write's value reach a read past a control instruction.
+        let mut uncov = Vector::<bool>::with_capacity(nl);
+        uncov.resize_default(nl);
+        let mut prev = Vector::<u32>::new();
+        fill(&mut prev, nl, NONE);
+        let mut seen = Vector::<bool>::with_capacity(nl); // per local, whether its last access saw a write so
+        seen.resize_default(nl);
+        for q in 0..n {
+            let l = (self.c.acc[q] & 0xFFFFFFFF) as usize;
+            let p = prev[l];
+            let get = (self.c.acc_op[q] & VW_OP) == w::LOCAL_GET;
+            let cov = p != NONE && seen[l] && !self.ctl_within(
+                (self.c.acc[p as usize] >> 32) as u32,
+                (self.c.acc[q] >> 32) as u32,
+            );
+            if get && !cov {
+                uncov[l] = true;
+            }
+            seen[l] = !get || cov;
+            prev[l] = q as u32;
+        }
         // The values `stack_order` holds whose local the whole code (the tasks' too) reads past the read, or
         // writes past a control instruction, go through it: those and the reader's later held operands.
         fill(&mut self.is_held, n, false);
@@ -604,15 +627,16 @@ extend Gen {
                 continue;
             }
             // The write goes when one instruction reads the value (VW_ONE) and the local's next access, if
-            // any, writes it with no control instruction between, or a `return` follows the read, which ends
-            // its path; else it stays as a `local.tee`, which leaves the local as it was.
+            // any, writes it with no control instruction between or every read of the local follows its own
+            // write (`uncov`), or a `return` follows the read, which ends its path; else it stays as a
+            // `local.tee`, which leaves the local as it was.
             let one = (self.c.acc_op[s as usize] & VW_ONE) != 0;
             let after = gat + 1 + uleb_len((self.c.acc[g as usize] & 0xFFFFFFFF) as u32);
             let ret = after as usize < self.c.bytes.len() && self.c.bytes[after as usize] == w::RETURN;
             let keep = !one || !ret && k != NONE && ((self.c.acc_op[k as usize] & VW_OP) == w::LOCAL_GET || self.ctl_within(
                 gat,
                 (self.c.acc[k as usize] >> 32) as u32,
-            ));
+            ) && uncov[(self.c.acc[g as usize] & 0xFFFFFFFF) as usize]);
             self.is_held[s as usize] = true;
             self.is_held[g as usize] = true;
             if keep {
@@ -646,8 +670,9 @@ extend Gen {
             while cq < self.c.ctl.len() && self.c.ctl[cq] < jat {
                 cq += 1;
             }
-            // A write past a control instruction may not run on the path of a later read.
-            let past = k != NONE && cq < self.c.ctl.len() && self.c.ctl[cq] < (self.c.acc[k as usize] >> 32) as u32;
+            // A write past a control instruction may not run on the path of a later read, unless every read
+            // of the local follows its own write.
+            let past = k != NONE && cq < self.c.ctl.len() && self.c.ctl[cq] < (self.c.acc[k as usize] >> 32) as u32 && uncov[l as usize];
             // A read a `return` takes next ends its path: nothing reads the write again.
             if self.c.bytes[(jat + len) as usize] != w::RETURN && ((self.c.acc_op[i] & VW_ONE) == 0 || past || k != NONE && (self.c.acc_op[k as usize] & VW_OP) == w::LOCAL_GET) {
                 self.c.bytes[at as usize] = w::LOCAL_TEE;
@@ -1224,35 +1249,46 @@ extend Gen {
         }
     }
 
-    // Instruction `i` of the block at position `q` takes the local of the block parameter `p` an edge out of
-    // the block passes it to, so the edge moves nothing (a loop's new value into its parameter's local):
-    // when `p` is the only parameter it goes to, of its type, holds the local alone, its range ends in the
-    // block and nothing after `i` there reads it (no edge passes it on). Whether it did.
+    // Instruction `i` of the block at position `q` takes the local of a block parameter `p` an edge out of
+    // the block passes it to, so that edge moves nothing (a loop's new value into its parameter's local):
+    // the first of at most 4 such parameters of its type that holds its local alone, whose range ends in
+    // the block and that nothing after `i` there reads (no edge passes it on). Whether it did.
     fn join_param(self: &mut Self, i: u32, q: u32) bool {
         if self.mem_x(i) {
             return false;
         }
         let b = self.b();
-        let k = self.lv.order[q as usize];
-        let bk = b.blocks[k as usize];
+        let bk = b.blocks[self.lv.order[q as usize] as usize];
         let ti = bk.start + bk.len - 1;
         let ni = b.insts.len() as u32;
+        // The candidates first: `take` reuses `succ`.
+        let mut cand: [u32; 4] = [NONE; 4];
+        let mut nc: usize = 0;
         b.succ_edges(b.insts[ti as usize], &mut self.succ);
-        let mut p = NONE;
         for e in 0..self.succ.len() {
             let ed = self.succ[e];
-            let tb = b.blocks[b.edge_target(ed) as usize];
+            let ps = ni + b.blocks[b.edge_target(ed) as usize].param_start;
             for a in 0..b.edge_nargs(ed) {
-                if b.edge_arg(ed, a) == i {
-                    let px = ni + tb.param_start + a;
-                    if p != NONE && p != px {
-                        return false;
-                    }
-                    p = px;
+                if b.edge_arg(ed, a) == i && nc < 4 {
+                    cand[nc] = ps + a;
+                    nc += 1;
                 }
             }
         }
-        if p == NONE || self.wty(p) != self.wty(i) || self.lv.end[p as usize] != q {
+        for c in 0..nc {
+            if self.join_to(i, cand[c], q, ti) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // `join_param` of instruction `i` to parameter `p`, the block at position `q` ending at instruction `ti`.
+    fn join_to(self: &mut Self, i: u32, p: u32, q: u32, ti: u32) bool {
+        let b = self.b();
+        let k = self.lv.order[q as usize];
+        let ni = b.insts.len() as u32;
+        if self.wty(p) != self.wty(i) || self.lv.end[p as usize] != q {
             return false;
         }
         // A parameter of this block that the position's start has not placed yet takes its local first.

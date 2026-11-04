@@ -7478,7 +7478,8 @@ b3:
 // pass constants to one block (one through a block that only jumps there) to a table in a register, and
 // one of few sparse values left a switch. For a backend without tables (`Package.switch_tables`, wasm32's
 // `br_table`) the dense one lowers too, as does one whose cases reach the block through blocks that only
-// jump there (`classf`: no case passes an argument before the first walk merges those blocks).
+// jump there (`classf`: no case passes an argument before the first walk merges those blocks); their two
+// letter ranges, which differ in bit 5 alone, are one test of the value without it (`and.i8`).
 @test
 fn switches_become_range_tests_and_tables() {
     let src = M"(lir ptr 8
@@ -7565,7 +7566,7 @@ b2:
     lopt::optimize(&mut w, &no, lopt::Config { inline: il::SPEED, loops: none });
     for name in ["class", "classf"] {
         let tw = text_of(&w, name);
-        assert(!tw.contains("switch") && tw.contains("icmp.ule"), tw.as_str());
+        assert(!tw.contains("switch") && tw.contains("icmp.ule") && tw.contains("and.i8 v0"), tw.as_str());
     }
     for x in 0..256u64 {
         let c = x as u8;
