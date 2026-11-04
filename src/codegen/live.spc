@@ -3529,6 +3529,19 @@ pub(package) fn rmw_load(b: &Body, folded: &Vector<bool>, t: Inst) Value {
     return VNONE;
 }
 
+/// Whether edges `e` and `f` of `b` go to one block with the same arguments.
+pub(package) fn same_edge(b: &Body, e: u32, f: u32) bool {
+    if b.edge_target(e) != b.edge_target(f) || b.edge_nargs(e) != b.edge_nargs(f) {
+        return false;
+    }
+    for q in 0..b.edge_nargs(e) {
+        if b.edge_arg(e, q) != b.edge_arg(f, q) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Whether instruction `t` may write memory: a store, a call, a block copy or fill, an atomic operation,
 // inline assembly, a system call or a variadic access.
 const fn writes_mem(t: Inst) bool {

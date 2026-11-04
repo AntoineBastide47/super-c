@@ -1676,6 +1676,18 @@ extend Gen {
         }
         for q in 0..self.lv.late.len() {
             let e = self.lv.late[q] as u32;
+            // An earlier stub of an edge alike (one target, the same arguments) serves: each is entered with
+            // the late homes.
+            let mut same = NONE;
+            for p in 0..q {
+                if same == NONE && lv::same_edge(self.b(), self.lv.late[p] as u32, e) {
+                    same = p as u32;
+                }
+            }
+            if same != NONE {
+                self.blk_at[nb + q] = self.blk_at[nb + same as usize];
+                continue;
+            }
             self.blk_at[nb + q] = self.code.len() as u32;
             self.edge_moves(e);
             self.goto(self.b().edge_target(e), true);

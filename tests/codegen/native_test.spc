@@ -5322,6 +5322,132 @@ int main(void) {
     }
 }
 
+// Late edges alike (one target, the same arguments) share one stub of moves: `@find`'s two edges into
+// the scalar search from 0 (`b1(v3)`, from the entry and the first vector block) take one stub that
+// zeroes the counter. x86-64 has two stubs of `xor r32, r32` then a jump (the other one starts the vector
+// loop), arm64 one of `mov x, #0` then `b`. It finds the C index.
+@test
+fn alike_late_edges_share_one_stub() {
+    let lir = M"(lir ptr 8
+sym @find fn global
+fn @find
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0, i8) -> i64
+b0(v0: ptr, v1: i8):
+  v2 = load.ptr v0 align 3
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = load.i64 v0+8 align 3
+  v6 = iconst.i64 -32
+  v7 = and.i64 v5, v6
+  v8 = icmp.ne v7, v3
+  br v8, b4, b1(v3)
+b1(v9: i64): novec
+  v10 = icmp.ult v9, v5
+  br v10, b3(v9), b2
+b2:
+  ret v5
+b3(v11: i64):
+  v12 = ptradd v2, v11 * 1 inbounds nonnull
+  v13 = load.i8 v12 align 0
+  v14 = icmp.eq v13, v1
+  v15 = add.i64 v11, v4
+  br v14, b6, b7
+b4:
+  v16 = splat.v16i8 v1
+  v17 = iconst.i8 0
+  v18 = iconst.i64 32
+  v19 = load.v16i8 v2 align 0
+  v20 = vcmp.eq.v16i8 v19, v16
+  v21 = load.v16i8 v2+16 align 0
+  v22 = vcmp.eq.v16i8 v21, v16
+  v23 = or.v16i8 v20, v22
+  v24 = vop.reduce_or.i8 (v23)
+  v25 = icmp.eq v24, v17
+  br v25, b5(v3), b1(v3)
+b5(v26: i64):
+  v27 = add.i64 v26, v18
+  v28 = icmp.ult v27, v7
+  br v28, b8, b9
+b6:
+  ret v11
+b7: novec
+  v29 = icmp.ult v15, v5
+  br v29, b3(v15), b2
+b8: novec
+  v30 = ptradd v2, v26 * 1
+  v31 = load.v16i8 v30+32 align 0
+  v32 = vcmp.eq.v16i8 v31, v16
+  v33 = load.v16i8 v30+48 align 0
+  v34 = vcmp.eq.v16i8 v33, v16
+  v35 = or.v16i8 v32, v34
+  v36 = vop.reduce_or.i8 (v35)
+  v37 = icmp.eq v36, v17
+  br v37, b5(v27), b1(v27)
+b9:
+  jmp b1(v7)
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), OMIT_FP, &mut obj),
+        "the System V object",
+    );
+    // xor r32, r32 (REX.RB for r8 to r15) then jmp.
+    let mut zx: u32 = 0;
+    let mut x: usize = 0;
+    while x + 4 <= obj.len() {
+        let r = obj[x] == 0x45;
+        let o = if r {
+            x + 1
+        } else {
+            x
+        };
+        let m = obj[o + 1];
+        if (obj[o] == 0x31 || obj[o] == 0x33) && m >= 0xC0 && (m >> 3 & 7) == (m & 7) && (obj[o + 2] == 0xEB || obj[o + 2] == 0xE9) {
+            zx += 1;
+        }
+        x += 1;
+    }
+    assert_eq(zx, 2);
+    let mut ao = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut ao),
+        "the arm64 object",
+    );
+    // MOVZ x, #0 (D2800000 under the register field) then B.
+    let mut za: u32 = 0;
+    let mut y: usize = 0;
+    while y + 8 <= ao.len() {
+        let w = ao[y] as u32 | ao[y + 1] as u32 << 8 | ao[y + 2] as u32 << 16 | ao[y + 3] as u32 << 24;
+        let n = ao[y + 4] as u32 | ao[y + 5] as u32 << 8 | ao[y + 6] as u32 << 16 | ao[y + 7] as u32 << 24;
+        if (w & 0xFFFFFFE0) == 0xD2800000 && (n & 0xFC000000) == 0x14000000 {
+            za += 1;
+        }
+        y += 4;
+    }
+    assert_eq(za, 1);
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+typedef struct { const uint8_t *p; int64_t n; } S;
+int64_t find(S, uint8_t);
+int main(void) {
+  static uint8_t a[100];
+  for (int i = 0; i < 100; i++) a[i] = (uint8_t)(i * 7 + 3);
+  for (int64_t n = 0; n <= 100; n += 11)
+    for (int c = 0; c < 256; c += 5) {
+      int64_t w = n;
+      for (int64_t k = 0; k < n; k++) if (a[k] == c) { w = k; break; }
+      S s = {a, n};
+      if (find(s, (uint8_t)c) != w) return 1;
+    }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A count read only where its operand is not 0 (`.nz`) takes no fix-up for 0 on x86-64: `@top`'s top bit
 // index after `x == 0` is `bsr eax, edi` and the return, `@low`'s `ctz` on a select's arm for `x != 0` a
 // `bsf` with no `tzcnt` preset. They give the C results.
