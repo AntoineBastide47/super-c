@@ -5310,11 +5310,86 @@ int main(void) {
     }
 }
 
+// wasm32: a loop's new value takes the local of the parameter it passes to when nothing reads that
+// parameter after it: `@bits`'s back edge moves nothing. `@fib` reads its parameter `b` after its sum
+// (`b | 0`, passed on as `a`): the sum keeps its own local. They give the C results.
+@test
+fn wasm_loop_values_take_their_parameters_locals() {
+    let lir = M"(lir ptr 8
+sym @bits fn global
+sym @fib fn global
+fn @bits
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 1
+  jmp b1(v0, v1)
+b1(v3: i32, v4: i32):
+  v5 = and.i32 v3, v2
+  v6 = add.i32 v4, v5
+  v7 = lshr.i32 v3, v2
+  v8 = icmp.ne v7, v1
+  br v8, b1(v7, v6), b2
+b2:
+  ret v6
+fn @fib
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 1
+  jmp b1(v1, v2, v0)
+b1(v3: i32, v4: i32, v5: i32):
+  v6 = icmp.eq v5, v1
+  br v6, b3, b2
+b2:
+  v7 = add.i32 v3, v4
+  v8 = sub.i32 v5, v2
+  v9 = or.i32 v4, v1
+  jmp b1(v9, v7, v8)
+b3:
+  ret v3
+)";
+    let drv = M"(#include <stdint.h>
+uint32_t bits(uint32_t);
+uint32_t fib(uint32_t);
+int main(void) {
+  static const uint32_t v[5] = {0, 1, 7, 0x80000001u, 0xFFFFFFFFu};
+  for (int i = 0; i < 5; i++)
+    if (bits(v[i]) != (uint32_t)__builtin_popcount(v[i])) return 1;
+  uint32_t a = 0, b = 1;
+  for (uint32_t n = 0; n < 40; n++) {
+    if (fib(n) != a) return 2;
+    uint32_t s = a + b;
+    a = b;
+    b = s;
+  }
+  return 0;
+}
+)";
+    // `@bits` alone: its loop ends `i32.shr_u`, `local.tee 1`, `br_if 0` (the shift into its parameter's
+    // local, the sum in its own: no moves).
+    let fb = lir.find("fn @fib") as usize;
+    let w = format("lir ptr 4\nsym @bits fn global\n{}", lir.slice(lir.find("fn @bits") as usize, fb));
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let tail: [u8; 5] = [0x76, 0x22, 0x01, 0x0D, 0x00];
+    assert(holds(&obj, tail[0..5]), "bits");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
 // wasm32: an operation whose first operand stays (a constant, a parameter) computes its second where it
 // reads it, no local between: `@np`'s `-1 >> clz(x - 1)` is `i32.const -1`, `local.get 0`, `i32.const 1`,
 // `i32.sub`, `i32.clz`, `i32.shr_u`. `@bs`'s byte swap reads its parameter's local twice, no copy. `@chk`'s
-// overflow flag, which only the select reads, is computed there (`local.get 0`, `i32.lt_u`, `select`). They
-// give the C results.
+// overflow flag, which only the select reads, is computed there (`local.get 0`, `i32.lt_u`, `select`).
+// `@mh`'s 64-bit high product splits each parameter from its own local (`local.get 0`, `i64.const 32`,
+// `i64.shr_u`), no copy; `@two`'s lane sums read the vector's own local (no `local.get`, `local.tee`).
+// They give the C results.
 @test
 fn wasm_second_operands_compute_where_they_are_read() {
     let lir = M"(lir ptr 8
@@ -5322,6 +5397,21 @@ sym @np fn global
 sym @dm fn global
 sym @bs fn global
 sym @chk fn global
+sym @mh fn global
+sym @two fn global
+fn @two
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.v4i32 v0 align 2
+  v2 = vop.reduce_add.i32 (v1)
+  v3 = vop.reduce_xor.i32 (v1)
+  v4 = add.i32 v2, v3
+  ret v4
+fn @mh
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = mulhu.i64 v0, v1
+  ret v2
 fn @chk
   sig (i32, i32) -> i32
 b0(v0: i32, v1: i32):
@@ -5358,7 +5448,15 @@ uint32_t np(uint32_t);
 uint32_t dm(uint32_t, uint32_t);
 uint32_t bs(uint32_t);
 uint32_t chk(uint32_t, uint32_t);
+uint64_t mh(uint64_t, uint64_t);
+uint32_t two(const uint32_t *);
 int main(void) {
+  static const uint32_t q[4] = {5, 0xFFFFFFF0u, 77, 1u << 31};
+  if (two(q) != (q[0] + q[1] + q[2] + q[3]) + (q[0] ^ q[1] ^ q[2] ^ q[3])) return 6;
+  static const uint64_t m[4] = {0, 3, 0xFFFFFFFFull, 0xFEDCBA9876543210ull};
+  for (int i = 0; i < 4; i++)
+    for (int k = 0; k < 4; k++)
+      if (mh(m[i], m[k] + 5) != (uint64_t)(((unsigned __int128)m[i] * (m[k] + 5)) >> 64)) return 5;
   static const uint32_t c[5] = {0, 1, 0x7FFFFFFFu, 0x80000000u, 0xFFFFFFFFu};
   for (int i = 0; i < 5; i++)
     for (int k = 0; k < 5; k++) {
@@ -5387,6 +5485,13 @@ int main(void) {
     assert(holds(&obj, bs[0..6]), "bs");
     let ck: [u8; 4] = [0x20, 0x00, 0x49, 0x1B];
     assert(holds(&obj, ck[0..4]), "chk");
+    let mh: [u8; 5] = [0x20, 0x00, 0x42, 0x20, 0x88];
+    let tee: [u8; 3] = [0x20, 0x00, 0x22];
+    assert(holds(&obj, mh[0..5]) && !holds(&obj, tee[0..3]), "mh");
+    for k in 0..8u8 {
+        let cp: [u8; 3] = [0x20, k, 0x22];
+        assert(!holds(&obj, cp[0..3]), "two");
+    }
     if cli::has_cc() {
         assert_eq(run_native(lir, drv), 0);
         assert_eq(run_wasm(lir, drv), 0);

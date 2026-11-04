@@ -1170,7 +1170,10 @@ extend Gen {
             }
             for j in s_at[q]..s_at[q + 1] {
                 let x = by_start[j as usize];
-                if self.local_of[x as usize] == NONE {
+                if self.local_of[x as usize] == NONE && !(x < ni && self.lv.def_blk[x as usize] == self.lv.order[q] && self.join_param(
+                    x,
+                    q as u32,
+                )) {
                     self.take(x);
                 }
             }
@@ -1200,7 +1203,7 @@ extend Gen {
                     }
                 }
                 if own {
-                    if !early {
+                    if !early && !self.join_param(i, q as u32) {
                         self.take(i);
                     }
                     if self.lv.uses[i as usize] == 0 {
@@ -1209,6 +1212,62 @@ extend Gen {
                 }
             }
         }
+    }
+
+    // Instruction `i` of the block at position `q` takes the local of the block parameter `p` an edge out of
+    // the block passes it to, so the edge moves nothing (a loop's new value into its parameter's local):
+    // when `p` is the only parameter it goes to, of its type, holds the local alone, its range ends in the
+    // block and nothing after `i` there reads it (no edge passes it on). Whether it did.
+    fn join_param(self: &mut Self, i: u32, q: u32) bool {
+        if self.mem_x(i) {
+            return false;
+        }
+        let b = self.b();
+        let k = self.lv.order[q as usize];
+        let bk = b.blocks[k as usize];
+        let ti = bk.start + bk.len - 1;
+        let ni = b.insts.len() as u32;
+        b.succ_edges(b.insts[ti as usize], &mut self.succ);
+        let mut p = NONE;
+        for e in 0..self.succ.len() {
+            let ed = self.succ[e];
+            let tb = b.blocks[b.edge_target(ed) as usize];
+            for a in 0..b.edge_nargs(ed) {
+                if b.edge_arg(ed, a) == i {
+                    let px = ni + tb.param_start + a;
+                    if p != NONE && p != px {
+                        return false;
+                    }
+                    p = px;
+                }
+            }
+        }
+        if p == NONE || self.wty(p) != self.wty(i) || self.lv.end[p as usize] != q {
+            return false;
+        }
+        // A parameter of this block that the position's start has not placed yet takes its local first.
+        if self.local_of[p as usize] == NONE && self.lv.def_blk[p as usize] == k && !self.mem_x(p) {
+            self.take(p);
+        }
+        if self.local_of[p as usize] == NONE {
+            return false;
+        }
+        let l = self.local_of[p as usize];
+        if self.lref[l as usize] != 1 {
+            return false;
+        }
+        let pv = VPARAM | p - ni;
+        for j in i + 1..ti + 1 {
+            lv::each_use(b, b.insts[j as usize], &mut self.uses);
+            for u in 0..self.uses.len() {
+                if self.uses[u] == pv {
+                    return false;
+                }
+            }
+        }
+        self.lref[l as usize] += 1;
+        self.local_of[i as usize] = l;
+        return true;
     }
 
     // A local or home for value `x`.
@@ -2348,17 +2407,15 @@ extend Gen {
             self.put(i);
             return true;
         }
-        // A signed one reads the operands again (their signs): in locals.
+        // A signed one reads the operands again (their signs): in locals, their own when they have them.
+        let la = self.plain_local(t.a);
+        let lb = self.plain_local(t.b);
         if sgn {
-            let x = self.tmp(w::I64);
-            let y = self.tmp(w::I64);
-            self.get(t.a);
-            self.c.local(w::LOCAL_SET, x);
-            self.get(t.b);
-            self.c.local(w::LOCAL_SET, y);
+            let x = self.local_for(t.a, la);
+            let y = self.local_for(t.b, lb);
             self.mulh64(sgn, x, y, VNONE, VNONE);
         } else {
-            self.mulh64(false, NONE, NONE, t.a, t.b);
+            self.mulh64(false, la, lb, t.a, t.b);
         }
         self.put(i);
         return true;
@@ -2463,14 +2520,18 @@ extend Gen {
 
     // The 32-bit halves of i64 local `v` (NONE: the value on the stack) into locals `lo` and `hi`.
     fn halves(self: &mut Self, v: u32, lo: u32, hi: u32) {
-        if v != NONE {
+        // From local `v`, read twice; else from the stack, through `lo`.
+        let src = if v != NONE {
             self.c.local(w::LOCAL_GET, v);
-        }
-        self.c.local(w::LOCAL_TEE, lo);
+            v
+        } else {
+            self.c.local(w::LOCAL_TEE, lo);
+            lo
+        };
         self.c.i64_const(32);
         self.c.op(w::I64_SHR_U);
         self.c.local(w::LOCAL_SET, hi);
-        self.c.local(w::LOCAL_GET, lo);
+        self.c.local(w::LOCAL_GET, src);
         self.c.i64_const(0xFFFFFFFF);
         self.c.op(w::I64_AND);
         self.c.local(w::LOCAL_SET, lo);
@@ -2560,6 +2621,17 @@ extend Gen {
             self.get(t.a);
             self.c.op(w::I32_POPCNT);
         }
+    }
+
+    // 64-bit value `v` in a local: its own (`own`, from `plain_local`), else a scratch one it is written to.
+    fn local_for(self: &mut Self, v: Value, own: u32) u32 {
+        if own != NONE {
+            return own;
+        }
+        let x = self.tmp(w::I64);
+        self.get(v);
+        self.c.local(w::LOCAL_SET, x);
+        return x;
     }
 
     // 32-bit value `v` on the stack and a local holding it: its own (`own`, from `plain_local`), else a
@@ -8292,6 +8364,17 @@ extend Gen {
         let pair = (c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX) && k == 3;
         let acc = self.tmp(w::V128);
         let s = self.tmp(w::V128);
+        // The first step reads a vector in its own local there (no copy to `acc`).
+        let own = if pair || self.mem_v(a) {
+            NONE
+        } else {
+            self.plain_local(a)
+        };
+        let mut src = if own != NONE {
+            own
+        } else {
+            acc
+        };
         self.vget(a);
         let mut idx: [u8; 16] = [0; 16];
         let mut h = lanes(self.vt(a)) / 2;
@@ -8299,15 +8382,17 @@ extend Gen {
             for j in 0..16u32 {
                 unsafe idx[j as usize] = (j + h * eb & 15) as u8;
             }
-            self.c.local(pick8(pair, w::LOCAL_SET, w::LOCAL_TEE), acc);
-            self.c.local(w::LOCAL_GET, acc);
+            if src == acc {
+                self.c.local(pick8(pair, w::LOCAL_SET, w::LOCAL_TEE), acc);
+            }
+            self.c.local(w::LOCAL_GET, src);
             if pair {
                 self.c.local(w::LOCAL_GET, acc);
                 self.shuffle(&idx);
                 self.c.local(w::LOCAL_SET, s);
                 self.int_minmax(acc, s, lt, sg, c == core::SIMD_REDUCE_MAX);
             } else {
-                self.c.local(w::LOCAL_GET, acc);
+                self.c.local(w::LOCAL_GET, src);
                 self.shuffle(&idx);
                 if c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX {
                     self.sop(V_MIN[k] + pick32(c == core::SIMD_REDUCE_MAX, 2, 0) + pick32(sg, 0, 1));
@@ -8315,6 +8400,7 @@ extend Gen {
                     self.sop(code);
                 }
             }
+            src = acc;
             h /= 2;
         }
         self.lane_op(VL_EXTRACT, lt);
