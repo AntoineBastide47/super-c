@@ -66,6 +66,8 @@ pub(package) const FOLD_SHAMT_EXT: u64 = 2199023255552;
 /// operand of a `sub`), each read only there, with no write between the load and the store: both fold into
 /// the store, which reads and writes the memory (x86-64's `add [m], r`; `rmw_load`).
 pub(package) const FOLD_RMW: u64 = 4398046511104;
+/// Under `FOLD_SINK`, vectors of at most 16 bytes move too (a target that holds them in registers).
+pub(package) const FOLD_VSINK: u64 = 8796093022208;
 pub(package) const FOLD_CARRY: u64 = 16384;
 pub(package) const FOLD_FSEL: u64 = 32768;
 pub(package) const FOLD_NOT: u64 = 65536;
@@ -166,6 +168,8 @@ pub(package) const CS_NOT: u8 = 3;
 const CCMP_MAX: u8 = 3;
 // The most folded instructions `uses_at` expands for one use: a comparison of a test of a field, say.
 const FOLD_DEPTH: u32 = 8;
+// The levels of values a sunk value moves with (`FOLD_SINK`): its operands, theirs, and so on.
+const SINK_DEPTH: u32 = 4;
 
 /// `Live::plan`'s homes per value: no register for the whole range, a callee-saved one, a caller-saved one.
 pub(package) const HOME_NONE: u8 = 0;
@@ -563,8 +567,8 @@ extend Live {
     // `FOLD_SINK`: the values stores, selects and integer operations compute where they read them
     // (`sinkable`): a store's value, a select's sides and its folded comparison's operands, an operation's
     // second operand past a first that stays (which the set and get of `stack_values` cannot keep on the
-    // stack: the first operand comes between). A commutative operation reads a value made right before it
-    // first (`swap_reads`): that one stays.
+    // stack: the first operand comes between); a vector shift's count stays (one not the same in every lane
+    // makes the shift go through memory).
     fn sinks(self: &mut Self, b: &Body) {
         if (self.fold_ops & FOLD_SINK) == 0 {
             return;
@@ -581,9 +585,12 @@ extend Live {
                 moved.truncate(0);
                 if st.op == O_STORE {
                     self.sink(b, st.b, bk.start, s, &mut moved);
-                } else if (st.op == O_SUB || st.op >= O_SHL && st.op <= O_ASHR || (st.op == O_ADD || st.op == O_MUL || st.op >= O_AND && st.op <= O_XOR) && st.b + 1 != s) && is_int(
+                } else if (st.op == O_SUB || st.op >= O_SHL && st.op <= O_ASHR || st.op == O_ADD || st.op == O_MUL || st.op >= O_AND && st.op <= O_XOR) && (is_int(
                     st.ty,
-                ) && st.ty != T_I128 && !self.pfold[s as usize] && self.stays(b, st.a) {
+                ) || is_vec(st.ty) && (self.fold_ops & FOLD_VSINK) != 0 && (st.op < O_SHL || st.op > O_ASHR)) && st.ty != T_I128 && !self.pfold[s as usize] && self.stays(
+                    b,
+                    st.a,
+                ) {
                     self.sink(b, st.b, bk.start, s, &mut moved);
                 } else if st.op == O_SELECT && is_int(st.ty) && st.ty != T_I128 {
                     self.sink(b, st.b, bk.start, s, &mut moved);
@@ -608,26 +615,32 @@ extend Live {
     // Value `v` and the operands it moves with, when it may move to instruction `s` (`sinkable`): each one in
     // `moved`.
     fn sink(self: &mut Self, b: &Body, v: Value, lo: u32, s: u32, moved: &mut Vector<Value>) {
-        if !self.sinkable(b, v, lo, s, 2) {
-            return;
+        if self.sinkable(b, v, lo, s, SINK_DEPTH) {
+            self.mark_sunk(b, v, lo, moved);
         }
+    }
+
+    // Value `v`, which `sinkable` allows, and the operands it moves with (those not `fixed`, each `sinkable`
+    // one level less deep): each one sunk, in `moved`.
+    fn mark_sunk(self: &mut Self, b: &Body, v: Value, lo: u32, moved: &mut Vector<Value>) {
         self.pfold[v as usize] = true;
         self.sunk[v as usize] = true;
         moved.push(v);
         let t = b.insts[v as usize];
-        if t.op == O_LOAD {
-            return;
-        }
+        // A load's and a pointer sum's last field is an offset, not a value.
+        let ob = if t.op == O_LOAD {
+            VNONE
+        } else {
+            t.b
+        };
         let oc = if t.op == O_SELECT {
             t.c
         } else {
             VNONE
         };
-        for o in [t.a, t.b, oc] {
-            if o != VNONE && !self.stays(b, o) {
-                self.pfold[o as usize] = true;
-                self.sunk[o as usize] = true;
-                moved.push(o);
+        for o in [t.a, ob, oc] {
+            if o != VNONE && !self.fixed(b, o, lo) {
+                self.mark_sunk(b, o, lo, moved);
             }
         }
     }
@@ -668,18 +681,28 @@ extend Live {
     }
 
     // Whether value `v` may move to instruction `s` of the block from `lo` (`FOLD_SINK`): one instruction there
-    // that only `s` reads, a load or an operation (`depth` at least 1) whose operands stay where they are or,
-    // at `depth` 2, are such values too.
+    // that only `s` reads, a load or an operation whose operands are `fixed` or, `depth` above 1, such values
+    // one level less deep. A vector of at most 16 bytes moves under `FOLD_VSINK`.
     fn sinkable(self: &Self, b: &Body, v: Value, lo: u32, s: u32, depth: u32) bool {
         if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || v < lo || v >= s || self.count[v as usize] != 1 || self.pfold[v as usize] {
             return false;
         }
         let t = b.insts[v as usize];
-        if !is_int(t.ty) || t.ty == T_I128 {
+        let fl = t.ty == T_F32 || t.ty == T_F64;
+        let n = type_bytes(t.ty, 8);
+        let vec = is_vec(t.ty) && (self.fold_ops & FOLD_VSINK) != 0 && (n == 4 || n == 8 || n == 16);
+        if !is_int(t.ty) && !fl && !vec && !(t.op == O_PTRADD && t.ty == T_PTR) || t.ty == T_I128 {
             return false;
         }
+        let deep = depth > 1;
         if t.op == O_LOAD {
-            if (t.aux & MEM_VOLATILE) != 0 || !self.stays(b, t.a) {
+            if (t.aux & MEM_VOLATILE) != 0 || !self.fixed(b, t.a, lo) && !(deep && self.sinkable(
+                b,
+                t.a,
+                lo,
+                s,
+                depth - 1,
+            )) {
                 return false;
             }
             for j in v + 1..s {
@@ -689,14 +712,29 @@ extend Live {
             }
             return true;
         }
-        let un = t.op == O_NEG || t.op == O_NOT || t.op >= O_CLZ && t.op <= O_POPCNT;
+        let un = t.op == O_NEG || t.op == O_NOT || t.op >= O_CLZ && t.op <= O_POPCNT || t.op == O_FNEG || t.op == O_FSQRT;
         let sel = t.op == O_SELECT;
-        if !un && !sel && (t.op < O_ADD || t.op > O_ASHR || t.op >= O_SDIV && t.op <= O_UREM) {
+        let fop = t.op >= O_FADD && t.op <= O_FDIV;
+        let pa = t.op == O_PTRADD;
+        // A float value: a float operation or a select. A vector: lane arithmetic.
+        if fl && !fop && !sel && t.op != O_FNEG && t.op != O_FSQRT {
             return false;
         }
-        let ok_a = self.stays(b, t.a) || depth == 2 && self.sinkable(b, t.a, lo, s, 1);
-        let ok_b = un || self.stays(b, t.b) || depth == 2 && self.sinkable(b, t.b, lo, s, 1);
-        return ok_a && ok_b && (!sel || self.stays(b, t.c) || depth == 2 && self.sinkable(b, t.c, lo, s, 1));
+        if vec && !fop && t.op != O_FNEG && t.op != O_FSQRT && t.op != O_ADD && t.op != O_SUB && t.op != O_MUL && t.op != O_NEG && t.op != O_NOT && (t.op < O_AND || t.op > O_XOR) {
+            return false;
+        }
+        if !un && !sel && !fop && !pa && (t.op < O_ADD || t.op > O_ASHR || t.op >= O_SDIV && t.op <= O_UREM) {
+            return false;
+        }
+        let ok_a = self.fixed(b, t.a, lo) || deep && self.sinkable(b, t.a, lo, s, depth - 1);
+        let ok_b = un || pa && t.b == VNONE || self.fixed(b, t.b, lo) || deep && self.sinkable(b, t.b, lo, s, depth - 1);
+        return ok_a && ok_b && (!sel || self.fixed(b, t.c, lo) || deep && self.sinkable(b, t.c, lo, s, depth - 1));
+    }
+
+    // Whether value `v` is where a value moved within the block from `lo` reads it: it `stays`, or another
+    // block defines it (in its local).
+    fn fixed(self: &Self, b: &Body, v: Value, lo: u32) bool {
+        return self.stays(b, v) || (v & (VPARAM | VFLAG)) == 0 && v != VNONE && v < lo;
     }
 
     // Whether value `v` is read where it is (`sinkable`): a parameter, a constant or an address, a value of

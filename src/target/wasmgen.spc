@@ -480,7 +480,11 @@ extend Gen {
         }
         intrin::of_symbols(self.p(), b, "wasm32", &mut self.itpl);
         // A shift's count masked to the width is the shift's own (wasm shifts take the count modulo it).
-        self.lv.fold_ops = lv::FOLD_FREE_ZEXT | lv::FOLD_CMP | lv::FOLD_SHAMT | lv::FOLD_SINC | lv::FOLD_WIDEN | lv::FOLD_SINK;
+        self.lv.fold_ops = lv::FOLD_FREE_ZEXT | lv::FOLD_CMP | lv::FOLD_SHAMT | lv::FOLD_SINC | lv::FOLD_WIDEN | lv::FOLD_SINK | pick64(
+            self.simd,
+            lv::FOLD_VSINK,
+            0,
+        );
         self.lv.run(b);
         self.sh.run(b, &self.lv);
         wa::classify(b, b.sig, self.vregs, &mut self.me);
@@ -1181,9 +1185,15 @@ extend Gen {
             let blk = b.blocks[k as usize];
             for i in blk.start..blk.start + blk.len {
                 // A memory result takes its home before its operands free theirs: a lowering may write
-                // the result's lanes before it reads every operand lane (a gather's fallback lanes).
+                // the result's lanes before it reads every operand lane (a gather's fallback lanes). So
+                // does a signed 32- or 64-bit sum or difference whose overflow flag is read: the flag reads
+                // the operands after the value is written (`ovf`).
                 let own = one[i as usize];
-                let early = own && self.mem_x(i);
+                let ti = b.insts[i as usize];
+                let early = own && (self.mem_x(i) || (ti.op == O_ADDO || ti.op == O_SUBO) && ti.aux == OV_SIGNED && type_bits(
+                    ti.ty,
+                    4,
+                ) >= 32 && self.lv.flag_of.get(&i).is_some());
                 if early {
                     self.take(i);
                 }
@@ -1802,10 +1812,21 @@ extend Gen {
                 self.cmp_push(t, t.aux, true);
             } else if self.lv.sunk[v as usize] {
                 // A value its reader computes where it reads it (`lv::FOLD_SINK`).
-                if t.op == O_LOAD {
+                if is_vec(t.ty) {
+                    assert(self.vreg[v as usize], "wasmgen: a moved vector in memory");
+                    if t.op == O_LOAD {
+                        self.vload_push(t);
+                    } else {
+                        self.vpush(v, t);
+                    }
+                } else if t.op == O_LOAD {
                     self.load_push(t);
                 } else if t.op == O_SELECT {
                     self.select_push(t);
+                } else if t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT {
+                    self.float_push(t);
+                } else if t.op == O_PTRADD {
+                    self.ptradd_push(t);
                 } else {
                     self.int_push(t);
                 }
@@ -2182,30 +2203,7 @@ extend Gen {
             return true;
         }
         if op >= O_FADD && op <= O_FNEG || op == O_FSQRT {
-            let d = t.ty == T_F64;
-            if op == O_FNEG {
-                self.get(t.a);
-                self.c.op(
-                    if d {
-                        w::F64_NEG
-                    } else {
-                        w::F32_NEG
-                    },
-                );
-            } else if op == O_FSQRT {
-                self.get(t.a);
-                self.c.op(pick8(d, w::F64_SQRT, w::F32_SQRT));
-            } else {
-                let swap = (op == O_FADD || op == O_FMUL) && self.swap_reads(t.a, t.b);
-                self.get(pick_v(swap, t.b, t.a));
-                self.get(pick_v(swap, t.a, t.b));
-                let base = if d {
-                    w::F64_ADD
-                } else {
-                    w::F32_ADD
-                };
-                self.c.op(base + (op - O_FADD));
-            }
+            self.float_push(t);
             self.put(i);
             return true;
         }
@@ -2213,19 +2211,7 @@ extend Gen {
             return self.convert(i, t);
         }
         if op == O_PTRADD {
-            self.get(t.a);
-            if t.b != VNONE {
-                self.get(t.b);
-                if scale_of(t) != 1 {
-                    self.c.i32_const(scale_of(t) as i32);
-                    self.c.op(w::I32_MUL);
-                }
-                self.c.op(w::I32_ADD);
-            }
-            if t.c != 0 {
-                self.c.i32_const(t.c as i32);
-                self.c.op(w::I32_ADD);
-            }
+            self.ptradd_push(t);
             self.put(i);
             return true;
         }
@@ -2301,6 +2287,41 @@ extend Gen {
     }
 
     // Push the value of integer operation `t`.
+    // Scalar float operation `t` (O_FADD .. O_FNEG, O_FSQRT) onto the stack.
+    fn float_push(self: &mut Self, t: Inst) {
+        let op = t.op;
+        let d = t.ty == T_F64;
+        if op == O_FNEG {
+            self.get(t.a);
+            self.c.op(pick8(d, w::F64_NEG, w::F32_NEG));
+        } else if op == O_FSQRT {
+            self.get(t.a);
+            self.c.op(pick8(d, w::F64_SQRT, w::F32_SQRT));
+        } else {
+            let swap = (op == O_FADD || op == O_FMUL) && self.swap_reads(t.a, t.b);
+            self.get(pick_v(swap, t.b, t.a));
+            self.get(pick_v(swap, t.a, t.b));
+            self.c.op(pick8(d, w::F64_ADD, w::F32_ADD) + (op - O_FADD));
+        }
+    }
+
+    // Pointer sum `t` onto the stack: the base, the index times its scale, the offset.
+    fn ptradd_push(self: &mut Self, t: Inst) {
+        self.get(t.a);
+        if t.b != VNONE {
+            self.get(t.b);
+            if scale_of(t) != 1 {
+                self.c.i32_const(scale_of(t) as i32);
+                self.c.op(w::I32_MUL);
+            }
+            self.c.op(w::I32_ADD);
+        }
+        if t.c != 0 {
+            self.c.i32_const(t.c as i32);
+            self.c.op(w::I32_ADD);
+        }
+    }
+
     fn int_push(self: &mut Self, t: Inst) {
         let op = t.op;
         if op >= O_CLZ && op <= O_POPCNT {
@@ -3670,23 +3691,28 @@ extend Gen {
         self.c.op(w::END);
     }
 
-    fn load(self: &mut Self, i: u32, t: Inst) bool {
+    // Vector load `t` onto the stack: `v128.load`, `v128.load64_zero` or `v128.load32_zero`.
+    fn vload_push(self: &mut Self, t: Inst) {
         let off = t.c as i32;
         let al = if t.op == O_LOAD {
             (t.aux & 15) as u32
         } else {
             15u32
         };
+        let n = type_bytes(t.ty, 4);
+        self.get(t.a);
+        if off < 0 {
+            self.c.i32_const(off);
+            self.c.op(w::I32_ADD);
+        }
+        self.sop(pick32(n == 16, w::V128_LOAD, pick32(n == 8, 0x5D, 0x5C)));
+        self.c.memarg(pick32(al < log2u(n), al, log2u(n)), pick32(off < 0, 0, off as u32));
+    }
+
+    fn load(self: &mut Self, i: u32, t: Inst) bool {
+        let off = t.c as i32;
         if self.vreg[i as usize] {
-            // `v128.load`, `v128.load64_zero` or `v128.load32_zero`.
-            let n = type_bytes(t.ty, 4);
-            self.get(t.a);
-            if off < 0 {
-                self.c.i32_const(off);
-                self.c.op(w::I32_ADD);
-            }
-            self.sop(pick32(n == 16, w::V128_LOAD, pick32(n == 8, 0x5D, 0x5C)));
-            self.c.memarg(pick32(al < log2u(n), al, log2u(n)), pick32(off < 0, 0, off as u32));
+            self.vload_push(t);
             self.put(i);
             return true;
         }
@@ -7644,10 +7670,18 @@ extend Gen {
             self.vconv(i, t);
             return true;
         }
+        self.vpre(i);
+        self.vpush(i, t);
+        self.vpost(i);
+        return true;
+    }
+
+    // Instruction `i` (`vform`, not a conversion) onto the stack.
+    fn vpush(self: &mut Self, i: u32, t: Inst) {
+        let op = t.op;
         let lt = lane_type(t.ty);
         let k = size_log(lt) as usize;
         let mut idx: [u8; 16] = [0; 16];
-        self.vpre(i);
         if op == O_VCMP {
             self.vcmp_reg(t);
         } else if op == O_SPLAT {
@@ -7758,8 +7792,6 @@ extend Gen {
             };
             self.sop(code);
         }
-        self.vpost(i);
-        return true;
     }
 
     // The lane-wise comparison `t` of 16-byte vectors (`O_VCMP`): its mask on the stack. Unsigned 8-byte lanes
