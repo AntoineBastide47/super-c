@@ -595,7 +595,7 @@ extend Live {
                     let sb = if st.op >= O_SHL && st.op <= O_ASHR {
                         shift_amount(b, &self.pfold, st.b)
                     } else {
-                        st.b
+                        self.read_of(b, st.b)
                     };
                     self.sink(b, sb, bk.start, s, &mut moved);
                 } else if st.op == O_SELECT && is_int(st.ty) && st.ty != T_I128 {
@@ -720,6 +720,8 @@ extend Live {
         }
         let un = t.op == O_NEG || t.op == O_NOT || t.op >= O_CLZ && t.op <= O_POPCNT || t.op == O_FNEG || t.op == O_FSQRT;
         let sel = t.op == O_SELECT;
+        // An integer comparison as a value (0 or 1).
+        let cmp = t.op == O_ICMP && (is_int(b.type_of(t.a)) || b.type_of(t.a) == T_PTR) && b.type_of(t.a) != T_I128;
         let fop = t.op >= O_FADD && t.op <= O_FDIV;
         let pa = t.op == O_PTRADD;
         // A float value: a float operation or a select. A vector: lane arithmetic.
@@ -729,12 +731,26 @@ extend Live {
         if vec && !fop && t.op != O_FNEG && t.op != O_FSQRT && t.op != O_ADD && t.op != O_SUB && t.op != O_MUL && t.op != O_NEG && t.op != O_NOT && (t.op < O_AND || t.op > O_XOR) {
             return false;
         }
-        if !un && !sel && !fop && !pa && (t.op < O_ADD || t.op > O_ASHR || t.op >= O_SDIV && t.op <= O_UREM) {
+        if !un && !sel && !fop && !pa && !cmp && (t.op < O_ADD || t.op > O_ASHR || t.op >= O_SDIV && t.op <= O_UREM) {
             return false;
         }
         let ok_a = self.fixed(b, t.a, lo) || deep && self.sinkable(b, t.a, lo, s, depth - 1);
         let ok_b = un || pa && t.b == VNONE || self.fixed(b, t.b, lo) || deep && self.sinkable(b, t.b, lo, s, depth - 1);
         return ok_a && ok_b && (!sel || self.fixed(b, t.c, lo) || deep && self.sinkable(b, t.c, lo, s, depth - 1));
+    }
+
+    // The value a read of `v` reads: past a folded extension or truncation of one read (each read of it reads
+    // its operand: `FOLD_FREE_ZEXT`, `FOLD_WIDEN`).
+    fn read_of(self: &Self, b: &Body, v: Value) Value {
+        if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || !self.pfold[v as usize] || self.count[v as usize] != 1 {
+            return v;
+        }
+        let t = b.insts[v as usize];
+        return if t.op == O_ZEXT || t.op == O_TRUNC {
+            t.a
+        } else {
+            v
+        };
     }
 
     // Whether value `v` is where a value moved within the block from `lo` reads it: it `stays`, or another

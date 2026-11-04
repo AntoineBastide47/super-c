@@ -5312,11 +5312,14 @@ int main(void) {
 
 // wasm32: a signed sum whose overflow flag is read takes a local of its own, apart from its operands'
 // locals, which the flag reads after the sum: no copy (`local.get x`, `local.set y`). The flag, which only
-// the select reads, is computed there (`i32.const 0`, `i32.lt_s`, `select`). It gives the C results.
+// the select reads, is computed there as `(b < 0) ^ (sum < a)` (`i32.lt_s`, `i32.xor`, `select`). `@sd`'s
+// difference flags `(b < 0) ^ (a < d)`, `@s64`'s 64-bit sum likewise. They give the C results.
 @test
 fn wasm_signed_overflow_sums_take_their_own_local() {
     let lir = M"(lir ptr 8
 sym @ss fn global
+sym @sd fn global
+sym @s64 fn global
 fn @ss
   sig (i32, i32) -> i32
 b0(v0: i32, v1: i32):
@@ -5327,9 +5330,25 @@ b0(v0: i32, v1: i32):
   v6, v7 = addo.s.i32 v0, v1
   v8 = select.i32 v7, v5, v6
   ret v8
+fn @sd
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 7
+  v3, v4 = subo.s.i32 v0, v1
+  v5 = select.i32 v4, v2, v3
+  ret v5
+fn @s64
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 7
+  v3, v4 = addo.s.i64 v0, v1
+  v5 = select.i64 v4, v2, v3
+  ret v5
 )";
     let drv = M"(#include <stdint.h>
 int32_t ss(int32_t, int32_t);
+int32_t sd(int32_t, int32_t);
+int64_t s64(int64_t, int64_t);
 int main(void) {
   static const int32_t v[6] = {0, 1, -1, 1000, INT32_MAX, INT32_MIN};
   for (int i = 0; i < 6; i++)
@@ -5337,6 +5356,11 @@ int main(void) {
       int64_t s = (int64_t)v[i] + v[k];
       int32_t e = s > INT32_MAX ? INT32_MAX : s < INT32_MIN ? INT32_MIN : (int32_t)s;
       if (ss(v[i], v[k]) != e) return 1;
+      int64_t d = (int64_t)v[i] - v[k];
+      if (sd(v[i], v[k]) != (d > INT32_MAX || d < INT32_MIN ? 7 : (int32_t)d)) return 2;
+      int64_t a = (int64_t)v[i] << 32 | (uint32_t)v[k], b = (int64_t)v[k] << 32 | (uint32_t)v[i];
+      int64_t r;
+      if (s64(a, b) != (__builtin_add_overflow(a, b, &r) ? 7 : r)) return 3;
     }
   return 0;
 }
@@ -5353,8 +5377,8 @@ int main(void) {
             assert(x == y || !holds(&obj, cp[0..4]), "a copy");
         }
     }
-    let sel: [u8; 4] = [0x41, 0x00, 0x48, 0x1B];
-    assert(holds(&obj, sel[0..4]), "the flag at the select");
+    let sel: [u8; 3] = [0x48, 0x73, 0x1B];
+    assert(holds(&obj, sel[0..3]), "the flag at the select");
     if cli::has_cc() {
         assert_eq(run_native(lir, drv), 0);
         assert_eq(run_wasm(lir, drv), 0);
@@ -5416,11 +5440,13 @@ int main(void) {
 
 // wasm32: a `br` to the code right after the `end`s that follow it goes (those labels of no block type, the
 // last not a loop's): `@up`'s loop exit falls out of the loop and its block (`i32.lt_u`, `br_if 0`, `end`,
-// `end`, no `br 1`). It gives the C results.
+// `end`, no `br 1`). `@fb`'s loop branches back on the inverted exit test, its edges moving nothing, and
+// falls to the exit (`i32.ge_u`, `br_if 0`, `end`, `end`). They give the C results.
 @test
 fn wasm_branches_to_the_code_after_their_ends_go() {
     let lir = M"(lir ptr 8
 sym @up fn global
+sym @fb fn global
 fn @up
   sig (i32, i32) -> i32
 b0(v0: i32, v1: i32):
@@ -5435,13 +5461,39 @@ b1(v5: i32):
 b2(v8: i32):
   v9 = add.i32 v8, v1
   ret v9
+fn @fb
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 2
+  v3 = iconst.i32 1
+  v4 = icmp.ult v0, v2
+  br v4, b2(v1, v0), b1(v0, v1)
+b1(v5: i32, v6: i32):
+  v7 = sub.i32 v5, v3
+  v8 = call.i32 @fb(v7) : (i32) -> i32
+  v9 = add.i32 v6, v8
+  v10 = sub.i32 v5, v2
+  v11 = icmp.ult v10, v2
+  br v11, b2(v9, v10), b1(v10, v9)
+b2(v12: i32, v13: i32):
+  v14 = add.i32 v12, v13
+  ret v14
 )";
     let drv = M"(#include <stdint.h>
 uint32_t up(uint32_t, uint32_t);
+uint32_t fb(uint32_t);
 int main(void) {
   for (uint32_t n = 0; n < 6; n++)
     for (uint32_t m = 0; m < 3; m++)
       if (up(n, m) != (m == 0 ? 0 : (n > 1 ? n : 1) + m)) return 1;
+  uint32_t f0 = 0, f1 = 1;
+  for (uint32_t n = 0; n < 20; n++) {
+    if (fb(n) != f0) return 2;
+    uint32_t s = f0 + f1;
+    f0 = f1;
+    f1 = s;
+  }
   return 0;
 }
 )";
@@ -5453,6 +5505,8 @@ int main(void) {
     );
     let tail: [u8; 5] = [0x49, 0x0D, 0x00, 0x0B, 0x0B];
     assert(holds(&obj, tail[0..5]), "up");
+    let fb: [u8; 5] = [0x4F, 0x0D, 0x00, 0x0B, 0x0B];
+    assert(holds(&obj, fb[0..5]), "fb");
     if cli::has_cc() {
         assert_eq(run_native(lir, drv), 0);
         assert_eq(run_wasm(lir, drv), 0);
@@ -5849,7 +5903,9 @@ int main(void) {
 // count past its folded mask (`i64.extend_i32_u`, `i64.shl`, `i64.shr_u`). `@rv`'s lane reversal reads its
 // vector once, a scratch local as the shuffle's unread second operand (no `local.tee x`, `local.get x`).
 // `@p5`'s `x * (x * x)^2` computes the moved square of the square first, the square on the stack
-// (`i32.mul`, `local.tee 1`, `local.get 1`, `i32.mul`, `local.get 0`, `i32.mul`).
+// (`i32.mul`, `local.tee 1`, `local.get 1`, `i32.mul`, `local.get 0`, `i32.mul`). `@ce`'s `a + (b == c)`
+// computes the comparison in the sum, past its free extension (`i32.eq`, `i32.add`), as `@cl`'s `a + (*p
+// == c)` does with the load too, and `@cz`'s `a + (b != 0)` adds 0 or 1, not `b`.
 // They give the C results.
 @test
 fn wasm_second_operands_compute_where_they_are_read() {
@@ -5860,6 +5916,32 @@ sym @dq fn global
 sym @tb fn global
 sym @rv fn global
 sym @p5 fn global
+sym @ce fn global
+sym @cz fn global
+sym @cl fn global
+fn @ce
+  sig (i32, i32, i32) -> i32
+b0(v0: i32, v1: i32, v2: i32):
+  v3 = icmp.eq v1, v2
+  v4 = zext.i32 v3
+  v5 = add.i32 v0, v4
+  ret v5
+fn @cl
+  sig (i32, ptr, i32) -> i32
+b0(v0: i32, v1: ptr, v2: i32):
+  v3 = load.i32 v1 align 2
+  v4 = icmp.eq v3, v2
+  v5 = zext.i32 v4
+  v6 = add.i32 v0, v5
+  ret v6
+fn @cz
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.ne v1, v2
+  v4 = zext.i32 v3
+  v5 = add.i32 v0, v4
+  ret v5
 fn @p5
   sig (i32) -> i32
 b0(v0: i32):
@@ -5979,6 +6061,9 @@ uint32_t dq(uint32_t, uint32_t);
 uint32_t tb(uint32_t);
 void rv(uint32_t *);
 uint32_t p5(uint32_t);
+uint32_t ce(uint32_t, uint32_t, uint32_t);
+uint32_t cz(uint32_t, uint32_t);
+uint32_t cl(uint32_t, const uint32_t *, uint32_t);
 uint32_t bs(uint32_t);
 uint32_t chk(uint32_t, uint32_t);
 uint64_t mh(uint64_t, uint64_t);
@@ -5988,6 +6073,9 @@ void vx(float *, const float *, const float *);
 int main(void) {
   for (uint32_t x = 0; x < 40; x += 3)
     if (p5(x * 0x9E3779B9u) != (x * 0x9E3779B9u) * (x * 0x9E3779B9u) * (x * 0x9E3779B9u) * (x * 0x9E3779B9u) * (x * 0x9E3779B9u)) return 11;
+  static const uint32_t cv = 41;
+  if (ce(5, 7, 7) != 6 || ce(5, 7, 8) != 5 || cz(5, 9) != 6 || cz(5, 0) != 5) return 12;
+  if (cl(5, &cv, 41) != 6 || cl(5, &cv, 40) != 5) return 13;
   uint32_t r4[4] = {1, 2, 3, 4};
   rv(r4);
   if (r4[0] != 4 || r4[1] != 3 || r4[2] != 2 || r4[3] != 1) return 10;
@@ -6055,6 +6143,10 @@ int main(void) {
     }
     let p5: [u8; 9] = [0x6C, 0x22, 0x01, 0x20, 0x01, 0x6C, 0x20, 0x00, 0x6C];
     assert(holds(&obj, p5[0..9]), "p5");
+    let ce: [u8; 8] = [0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x46, 0x6A];
+    assert(holds(&obj, ce[0..8]), "ce");
+    let cl: [u8; 11] = [0x20, 0x00, 0x20, 0x01, 0x28, 0x02, 0x00, 0x20, 0x02, 0x46, 0x6A];
+    assert(holds(&obj, cl[0..11]), "cl");
     for k in 0..8u8 {
         let cp: [u8; 3] = [0x20, k, 0x22];
         assert(!holds(&obj, cp[0..3]), "two");

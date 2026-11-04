@@ -1898,7 +1898,8 @@ extend Gen {
         if (v & (VPARAM | VFLAG)) == 0 && self.lv.pfold[v as usize] {
             let t = self.b().insts[v as usize];
             if t.op == O_ICMP {
-                self.cmp_push(t, t.aux, true);
+                // A condition's truth, or a moved comparison's 0 or 1 (`lv::FOLD_SINK`).
+                self.cmp_push(t, t.aux, !self.lv.sunk[v as usize]);
             } else if self.lv.sunk[v as usize] {
                 // A value its reader computes where it reads it (`lv::FOLD_SINK`).
                 if is_vec(t.ty) {
@@ -2938,27 +2939,19 @@ extend Gen {
     // Push the overflow flag of the 32- or 64-bit (`wide`) sum or difference (`add`), signed or not, whose
     // value is in local `x` and operands in `xa` and `xb` (an unsigned sum reads no `xb`).
     fn ovf_flag(self: &mut Self, add: bool, signed: bool, wide: bool, x: u32, xa: u32, xb: u32) {
-        let d = if wide {
-            w::I64_ADD - w::I32_ADD
-        } else {
-            0u8
-        };
         if signed {
-            // add: (a ^ x) & (b ^ x) < 0; sub: (a ^ b) & (a ^ x) < 0.
-            self.c.local(w::LOCAL_GET, xa);
-            self.c.local(w::LOCAL_GET, pick32(add, x, xb));
-            self.c.op(w::I32_XOR + d);
-            self.c.local(w::LOCAL_GET, pick32(add, xb, xa));
-            self.c.local(w::LOCAL_GET, x);
-            self.c.op(w::I32_XOR + d);
-            self.c.op(w::I32_AND + d);
+            // add: (b < 0) ^ (x < a); sub: (b < 0) ^ (a < x).
+            self.c.local(w::LOCAL_GET, xb);
             if wide {
                 self.c.i64_const(0);
-                self.c.op(w::I64_LT_S);
             } else {
                 self.c.i32_const(0);
-                self.c.op(w::I32_LT_S);
             }
+            self.c.op(pick8(wide, w::I64_LT_S, w::I32_LT_S));
+            self.c.local(w::LOCAL_GET, pick32(add, x, xa));
+            self.c.local(w::LOCAL_GET, pick32(add, xa, x));
+            self.c.op(pick8(wide, w::I64_LT_S, w::I32_LT_S));
+            self.c.op(w::I32_XOR);
         } else {
             // add: x < a; sub: a < b.
             self.c.local(w::LOCAL_GET, pick32(add, x, xa));
@@ -4640,6 +4633,19 @@ extend Gen {
     }
 
     // Whether argument `a` is in parameter `x`'s local already (`arg_local`).
+    // Whether edge `e` moves no value: each argument already in its parameter's local.
+    fn no_moves(self: &Self, e: u32) bool {
+        let b = self.b();
+        let ps = b.insts.len() as u32 + b.blocks[b.edge_target(e) as usize].param_start;
+        for k in 0..b.edge_nargs(e) {
+            let a = b.edge_arg(e, k);
+            if self.mem_v(a) || !self.in_place(a, ps + k) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     const fn in_place(self: &Self, a: Value, x: u32) bool {
         let ax = self.vx(a);
         return ax != NONE && self.local_of[x as usize] != NONE && self.local_of[ax as usize] == self.local_of[x as usize];
@@ -4655,6 +4661,26 @@ extend Gen {
         if op == O_BR {
             let tt = b.edge_target(t.b);
             let tf = b.edge_target(t.c);
+            // A back edge and another edge to a label, neither moving a value: the back edge
+            // branches (its condition inverted for free when the true edge is the other: a folded
+            // comparison), the other's `br` after it, which may fall through (`dead_brs`).
+            let cmp = (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] && b.insts[t.a as usize].op == O_ICMP;
+            let bt = self.sh.back(x, tt) && !self.sh.back(x, tf);
+            let bf = self.sh.back(x, tf) && !self.sh.back(x, tt) && cmp;
+            if bt || bf {
+                let (eb, eo) = if bt {
+                    (t.b, t.c)
+                } else {
+                    (t.c, t.b)
+                };
+                if self.no_moves(eb) && self.no_moves(eo) && self.brable(x, b.edge_target(eo)) {
+                    self.get_cond(t.a, bf, true);
+                    let d = self.depth(b.edge_target(eb), true);
+                    self.c.op(w::BR_IF);
+                    self.c.uleb(d);
+                    return self.edge(x, eo);
+                }
+            }
             if self.brable(x, tt) && b.edge_nargs(t.b) == 0 {
                 self.get(t.a);
                 let d = self.depth(tt, self.sh.back(x, tt));
