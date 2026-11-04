@@ -1250,7 +1250,7 @@ extend Gen {
         let ret = v + 1 < bk.start + bk.len && b.insts[v as usize + 1].op == O_RET;
         if v + 1 >= bk.start + bk.len || self.lv.uses[v as usize] != 1 || self.lv.end[v as usize] != self.pos || !is_int(
             self.vt(v),
-        ) && self.vt(v) != T_PTR && !fv || bits < 32 && !ext && !ret || bits > 64 && !vv || self.va[v as usize].home != H_NONE {
+        ) && self.vt(v) != T_PTR && !fv || bits < 32 && !ext && !ret && !self.chain_ret(b, bk, v) || bits > 64 && !vv || self.va[v as usize].home != H_NONE {
             return NOREG;
         }
         let t = b.insts[v as usize + 1 + ext as usize];
@@ -1308,8 +1308,9 @@ extend Gen {
 
     // Whether the instructions after `v` in block `bk`, at most CHAIN_STEPS, each read the one before as
     // their first operand alone and write over it (a 32- or 64-bit integer `add`, `sub`, `and`, `or`, `xor`,
-    // or shift by a constant; or a select of it as its false side, which a `cmov` writes over), past
-    // folded instructions, up to a return of the last.
+    // or shift by a constant; an `add`, `and`, `or`, `xor` or `mul` of it as its second operand alone,
+    // which `swaps` writes over; a truncation; or a select of it as its false side, which a `cmov` writes
+    // over), past folded instructions, up to a return of the last.
     const fn chain_ret(self: &Self, b: &Body, bk: Block, v: Value) bool {
         let mut w = v;
         let end = bk.start + bk.len;
@@ -1333,8 +1334,13 @@ extend Gen {
             let alu = t.op == O_ADD || t.op == O_SUB || t.op == O_AND || t.op == O_OR || t.op == O_XOR;
             let shift = (t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR) && self.const_of(t.b, &mut k);
             let bits = type_bits(t.ty, self.ptr);
+            // A truncation keeps the register.
+            let tr = t.op == O_TRUNC && t.a == w && is_int(t.ty);
             let sel = t.op == O_SELECT && t.c == w && t.b != w && t.a != w;
-            if !sel && (!alu && !shift || t.a != w || t.b == w) || !is_int(t.ty) || bits != 32 && bits != 64 {
+            // A commutative operation of it as its second operand writes over it (`swaps`).
+            let comm = (t.op == O_ADD || t.op == O_AND || t.op == O_OR || t.op == O_XOR || t.op == O_MUL) && t.b == w && t.a != w;
+            // 8 and 16 bits: the low bits of 32-bit `alu` operations (a narrow result returns as it is).
+            if !sel && !comm && !tr && (!alu && !shift || t.a != w || t.b == w) || !is_int(t.ty) || bits != 32 && bits != 64 && (shift || sel || bits > 64) {
                 return false;
             }
             w = j;
@@ -3348,7 +3354,7 @@ extend Gen {
         };
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_XBFX_EXT | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE
         } else {
             0
@@ -5760,7 +5766,9 @@ extend Gen {
             // register, where `add` would take a copy first or after.
             if kc {
                 let sum = op == O_ADD || op == O_SUB && k != -2147483648;
-                let n = if sum {
+                // An `and` of the low 8 or 16 bits is a `movzx`, which writes any register too.
+                let zx = op == O_AND && (k == 0xFF || k == 0xFFFF);
+                let n = if sum || zx {
                     self.next_reg(i)
                 } else {
                     NOREG
@@ -5770,6 +5778,16 @@ extend Gen {
                 } else {
                     self.def_over(i, t.a, ra)
                 };
+                if rd != ra && zx {
+                    let w: u32 = if k == 0xFF {
+                        1
+                    } else {
+                        2
+                    };
+                    self.c.ext(w, 4, false, rd, ra);
+                    self.va.index_mut(i as usize).clean = true;
+                    return true;
+                }
                 if rd != ra && sum {
                     self.lea_to(
                         sz,
@@ -5865,6 +5883,38 @@ extend Gen {
             };
             let mut kk: u64 = 0;
             if self.const_of(t.b, &mut kk) && kk < bits as u64 {
+                // A field of 8, 16 or 32 bits that a folded left shift by `l` and this shift extract
+                // (`lv::FOLD_XBFX_EXT`): `shr` by `kk - l`, then `movsx`/`movzx` into the register the next
+                // instruction wants.
+                let ta = t.a;
+                if op != O_SHL && (ta & (VPARAM | VFLAG)) == 0 && ta != VNONE && self.lv.pfold[ta as usize] && self.b().insts[ta as usize].op == O_SHL {
+                    let s = self.b().insts[ta as usize];
+                    let mut l: u64 = 0;
+                    let _ = self.const_of(s.b, &mut l);
+                    let w = bits - kk as u32;
+                    let rs = self.reg(s.a);
+                    let n = self.next_reg(i);
+                    let rd = if n != NOREG && n != rs {
+                        self.def(i)
+                    } else {
+                        self.def_over(i, s.a, rs)
+                    };
+                    // The shift over a source that dies here, else over the result's register.
+                    let mut from = rs;
+                    if kk > l {
+                        if rd != rs && !self.dies_here(s.a) {
+                            self.move_reg(t.ty, rd, rs);
+                            from = rd;
+                        }
+                        self.c.shift_ri(x::SHR, sz, from, (kk - l) as u32);
+                    }
+                    if w == 32 && op == O_LSHR {
+                        self.c.mov_rr(4, rd, from);
+                    } else {
+                        self.c.ext(w / 8, sz, op == O_ASHR, rd, from);
+                    }
+                    return true;
+                }
                 let src = lv::shl_source(self.b(), &self.lv.pfold, t.a);
                 let ra = self.reg(src);
                 let rd = if small && op != O_SHL {
@@ -6360,7 +6410,13 @@ extend Gen {
                 self.va.index_mut(i as usize).clean = true;
                 return true;
             }
-            let rd = self.def_over(i, t.a, ra);
+            // `movsx`/`movzx` write any register: the one the next instruction wants (`next_reg`).
+            let n = self.next_reg(i);
+            let rd = if n != NOREG && n != ra {
+                self.def(i)
+            } else {
+                self.def_over(i, t.a, ra)
+            };
             if op == O_SEXT {
                 self.c.ext(fb / 8, wsz(tb), true, rd, ra);
             } else {

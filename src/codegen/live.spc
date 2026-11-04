@@ -147,6 +147,9 @@ pub(package) const FOLD_LANE_PAIR: u64 = 137438953472;
 /// `fsub`, `fmul` or `fdiv` of the lane's type: the operation reads the vector's register, whose low lane
 /// the scalar is (`lane0_of`).
 pub(package) const FOLD_LANE0: u64 = 17592186044416;
+/// `FOLD_XBFX_EXT`: `FOLD_XBFX` for a field of 8 or 16 bits (32 of a 64-bit value) alone, which a right
+/// shift and an extension of its low bits extract (x86-64 `shr`, `movsx`/`movzx`).
+pub(package) const FOLD_XBFX_EXT: u64 = 35184372088832;
 /// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
 /// flags keep, a folded sum or extension, the sum with the carry.
 pub(package) const CARRY_NONE: u8 = 0;
@@ -1376,7 +1379,8 @@ extend Live {
         }
         // `FOLD_XBFX`: a left shift by a constant whose one use is a right shift of 32 or 64 bits by at least
         // as much folds into it: a field extracted, sign- or zero-extended (arm64 `sbfx`, `ubfx`).
-        if (self.fold_ops & FOLD_XBFX) != 0 {
+        let ext_only = (self.fold_ops & FOLD_XBFX) == 0;
+        if (self.fold_ops & (FOLD_XBFX | FOLD_XBFX_EXT)) != 0 {
             for i in 0..ni {
                 let t = b.insts[i];
                 let bits = type_bits(t.ty, 8);
@@ -1392,7 +1396,9 @@ extend Live {
                 } else {
                     u64::MAX
                 };
-                if l != u64::MAX && k != u64::MAX && l <= k && k < bits as u64 && self.count[t.a as usize] == 1 && !self.pfold[t.a as usize] && !(is_inst(
+                let w = (bits as u64).wrapping_sub(k);
+                let ext = w == 8 || w == 16 || w == 32 && bits == 64;
+                if l != u64::MAX && k != u64::MAX && l <= k && k < bits as u64 && (ext || !ext_only) && self.count[t.a as usize] == 1 && !self.pfold[t.a as usize] && !(is_inst(
                     s.a,
                 ) && self.pfold[s.a as usize]) {
                     self.pfold[t.a as usize] = true;

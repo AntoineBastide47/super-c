@@ -5878,6 +5878,178 @@ int main(void) {
     }
 }
 
+// Whether `bytes` holds an x86-64 64-bit copy into rax (`mov rax, r`: REX.W 89, a register ModRM byte
+// whose destination is rax).
+fn copies_into_rax(bytes: &Vector<u8>) bool {
+    for at in 0..bytes.len() - 2 {
+        let m = bytes[at + 2];
+        if (bytes[at] == 0x48 || bytes[at] == 0x4C) && bytes[at + 1] == 0x89 && m >= 0xC0 && (m & 7) == 0 && m != 0xC0 {
+            return true;
+        }
+    }
+    return false;
+}
+
+// x86-64: a returned value is made in the return register through the steps before the return: a
+// commutative one reading it second (`@or0`'s `or` of two tests of 8 bits, `@bf`'s field), a truncation
+// (`@mh`), an `and` of the low 8 bits as `movzx` (`@bf`) and an extension (`@mh`) into it. `@sx`'s field
+// of 8 bits that a left and a right shift extract is `shr` and `movsx`; `@sv`'s right shift by a variable
+// extracts no field. No copy into rax; they give the C results.
+@test
+fn x86_returned_chains_make_their_values_in_the_return_register() {
+    let lir = M"(lir ptr 8
+sym @or0 fn global
+sym @mh fn global
+sym @bf fn global
+sym @sx fn global
+fn @or0
+  sig (i32, i32) -> i8
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.eq v0, v2
+  v4 = icmp.eq v1, v2
+  v5 = or.i8 v3, v4
+  ret v5
+fn @mh
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i64 32
+  v3 = zext.i64 v0
+  v4 = zext.i64 v1
+  v5 = mul.i64 v3, v4
+  v6 = lshr.i64 v5, v2
+  v7 = trunc.i32 v6
+  ret v7
+fn @bf
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 -65281
+  v3 = iconst.i32 255
+  v4 = iconst.i32 8
+  v5 = and.i32 v0, v2
+  v6 = and.i32 v1, v3
+  v7 = shl.i32 v6, v4
+  v8 = or.i32 v5, v7
+  ret v8
+fn @sx
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 20
+  v2 = iconst.i32 24
+  v3 = shl.i32 v0, v1
+  v4 = ashr.i32 v3, v2
+  ret v4
+)";
+    let drv = M"(#include <stdint.h>
+_Bool or0(uint32_t, uint32_t);
+uint32_t mh(uint32_t, uint32_t);
+uint32_t bf(uint32_t, uint32_t);
+int32_t sx(uint32_t);
+int main(void) {
+  static const uint32_t v[4] = {0, 1, 0x89ABCDEFu, 0xFFFFFFFFu};
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++) {
+      uint32_t x = v[i], y = v[j];
+      if (or0(x, y) != (x == 0 || y == 0)) return 1;
+      if (mh(x, y) != (uint32_t)(((uint64_t)x * y) >> 32)) return 2;
+      if (bf(x, y) != ((x & 0xffff00ffu) | ((y & 0xffu) << 8))) return 3;
+    }
+  for (int i = 0; i < 4; i++)
+    if (sx(v[i]) != ((int32_t)(v[i] << 20) >> 24)) return 4;
+  return 0;
+}
+)";
+    let sv = M"(lir ptr 8
+sym @sv fn global
+fn @sv
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 3
+  v3 = shl.i32 v0, v2
+  v4 = lshr.i32 v3, v1
+  ret v4
+)";
+    let svd = M"(#include <stdint.h>
+uint32_t sv(uint32_t, uint32_t);
+int main(void) {
+  for (uint32_t n = 0; n < 32; n++)
+    if (sv(0x89ABCDEFu, n) != (0x89ABCDEFu << 3) >> n) return 1;
+  return 0;
+}
+)";
+    let mut so = Vector::<u8>::new();
+    assert(object_of(sv, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut so), "sv");
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    // shr edi, 4; movsx eax, dil.
+    let sx: [u8; 7] = [0xC1, 0xEF, 0x04, 0x40, 0x0F, 0xBE, 0xC7];
+    assert(holds(&obj, sx[0..7]) && !copies_into_rax(&obj), "or0, mh, bf, sx");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_native(sv, svd), 0);
+    }
+}
+
+// arm64: values the return takes in result registers keep off those registers until then (`@qm`'s third
+// field goes straight into w1, no `mov x1`); a block that a `cbz` alone enters starts with that register
+// 0 (`@zr` returns 0 with no `mov w0, #0`). They give the C results.
+@test
+fn arm64_result_parts_and_cbz_zeros_need_no_moves() {
+    let lir = M"(lir ptr 8
+sym @qm fn global
+sym @zr fn global
+fn @qm
+  layout l0 size 12 align 2 [0 i32, 4 i32, 8 i32]
+  sig (i32) -> l0
+b0(v0: i32, v1: ptr):
+  v2 = iconst.i64 32
+  v3 = iconst.i32 1
+  v4 = iconst.i32 2
+  v5 = add.i32 v0, v3
+  v6 = add.i32 v0, v4
+  v7 = zext.i64 v5
+  v8 = shl.i64 v7, v2
+  v9 = zext.i64 v0
+  v10 = or.i64 v8, v9
+  store v10, v1 align 2
+  store v6, v1+8 align 2
+  ret
+fn @zr
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1:
+  ret v1
+b2:
+  v3 = iconst.i32 5
+  v4 = mul.i32 v0, v3
+  ret v4
+)";
+    let drv = M"(#include <stdint.h>
+struct q { uint32_t a, b, c; };
+struct q qm(uint32_t);
+int32_t zr(int32_t);
+int main(void) {
+  struct q r = qm(41);
+  return r.a != 41 || r.b != 42 || r.c != 43 || zr(0) != 0 || zr(3) != 15;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("macos", false), tgt::axis_index("aarch64", true), 0, &mut obj), "the object");
+    let mut w: usize = 0;
+    // Each word: no `mov x1, xN` or `mov w1, wN` (ORR from the zero register), no `mov w0, #0`.
+    while w + 4 <= obj.len() {
+        let x = obj[w] as u32 | obj[w + 1] as u32 << 8 | obj[w + 2] as u32 << 16 | obj[w + 3] as u32 << 24;
+        assert((x & 0x7FE0FFFF) != 0x2A0003E1 && x != 0x52800000, "a move");
+        w += 4;
+    }
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A select of a value plus 1 and the value under a test against 0 adds the test's 0 or 1, not the
 // tested value (a quotient rounded up: `q + (r != 0)`). It gives the C results.
 @test

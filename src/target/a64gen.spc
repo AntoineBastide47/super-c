@@ -112,6 +112,7 @@ pub(package) struct Gen {
     csr: u64, // callee-saved registers the body uses
     rows: Vector<u64>, // with debug information, per change of location: its code word << 32 | its `lines` index
     rstore: Vector<u32>, // per instruction, 1 + the result part a store moves into its register (`ret_stores`), else 0
+    rparts: u64, // the registers of the result parts when stores move values into them (`rstore`), which `alloc` takes last
     rload: Vector<u32>, // per call, the loads after it its result's registers give (`res_relays`)
     suse: Vector<u32>, // per slot, the uses of its addresses (`place::slot_uses`)
     pos: u32, // the layout position of the block being compiled
@@ -159,6 +160,12 @@ pub(package) struct Gen {
     late_va: Vector<(u32, Va)>,
     stubs_out: bool, // the late edges' stubs are in the code
     blk_at: Vector<u32>, // per block, its first word, NONE before it is compiled
+    // Per block, 1 + a register its one entry, a `cbz`, leaves 0 (+ 256 for all 64 bits), else 0; the
+    // current block's (NOREG: none), 0 until its first word (`zat`): a constant 0 there needs no move.
+    zin: Vector<u32>,
+    zreg: u8,
+    zwide: bool,
+    zat: u32,
     fix: Vector<u64>, // word << 32 | block: a branch to patch
     // A conditional branch to a block is an inverted one over a `B`: the function is past the 1 MiB a
     // conditional branch reaches (`func`).
@@ -231,6 +238,7 @@ extend Gen {
             csr: 0,
             rows: Vector::<u64>::new(),
             rstore: Vector::<u32>::new(),
+            rparts: 0,
             rload: Vector::<u32>::new(),
             suse: Vector::<u32>::new(),
             pos: 0,
@@ -270,6 +278,10 @@ extend Gen {
             late_va: Vector::<(u32, Va)>::new(),
             stubs_out: false,
             blk_at: Vector::<u32>::new(),
+            zin: Vector::<u32>::new(),
+            zreg: NOREG,
+            zwide: false,
+            zat: 0,
             fix: Vector::<u64>::new(),
             far: false,
             shrink: false,
@@ -364,6 +376,11 @@ extend Gen {
         let high = open & ~self.held & vscr();
         if vreg && high != 0 {
             return high.trailing_zeros() as u8;
+        }
+        // The result parts' registers last: the values the return takes there go there (`ret_part`).
+        let pref = open & ~self.held & ~self.rparts;
+        if pref != 0 {
+            return pref.trailing_zeros() as u8;
         }
         if (open & ~self.held) != 0 {
             let r = (open & ~self.held).trailing_zeros() as u32;
@@ -1503,6 +1520,13 @@ extend Gen {
             return;
         }
         let i = self.b().insts[v as usize];
+        // A 0 the block's entry left in `r`, before any of its words.
+        if i.op == O_ICONST && i.a == 0 && i.b == 0 && r == self.zreg && self.code.len() as u32 == self.zat && (self.zwide || type_bytes(
+            t,
+            self.ptr,
+        ) < 8) {
+            return;
+        }
         if i.op == O_ICONST {
             self.mov_imm(r, i.b as u64 << 32 | i.a as u64, type_bytes(t, self.ptr) == 8);
         } else if i.op == O_FCONST {
@@ -2280,6 +2304,7 @@ extend Gen {
         self.held = 0;
         // Past the blocks, one per late edge: its stub (`lv::Live::late`).
         fill(&mut self.blk_at, b.blocks.len() + self.lv.late.len(), NONE);
+        fill(&mut self.zin, b.blocks.len(), 0);
         self.late_va.truncate(0);
         self.stubs_out = self.lv.late.len() == 0;
         self.code.truncate(0);
@@ -2890,6 +2915,18 @@ extend Gen {
             }
         }
         let bk = b.blocks[k as usize];
+        let zk = if k as usize < self.zin.len() {
+            self.zin[k as usize]
+        } else {
+            0
+        };
+        self.zreg = if zk == 0 {
+            NOREG
+        } else {
+            (zk - 1 & 255) as u8
+        };
+        self.zwide = zk > 256;
+        self.zat = self.code.len() as u32;
         let dbg = unsafe (*self.pkg).debug;
         for i in bk.start..bk.start + bk.len {
             if dbg {
@@ -5586,6 +5623,7 @@ extend Gen {
         let b = self.b();
         let ni = b.insts.len();
         fill(&mut self.rstore, ni, 0);
+        self.rparts = 0;
         let rt = b.pool[b.sig as usize + 2];
         if self.self_lay.ret.kind != ab::L_REG || (rt & AGG) == 0 {
             return;
@@ -5621,6 +5659,17 @@ extend Gen {
                 }
                 self.rstore[i as usize] = self.part_store(t, pv) + 1;
             }
+        }
+        let rl = self.self_lay.ret;
+        for q in 0..rl.n as u32 {
+            let pa = self.self_lay.parts[(rl.p0 + q) as usize];
+            self.rparts |= bit(
+                pa.reg + if pa.v {
+                    V0
+                } else {
+                    0
+                },
+            );
         }
     }
 
@@ -7516,6 +7565,15 @@ extend Gen {
 
     // A conditional branch on `test` to block `k`.
     fn cbranch(self: &mut Self, test: Test, k: u32) {
+        // A `cbz` that alone enters a block without parameters leaves its register 0 there (a late edge's
+        // stub, past the blocks, is none).
+        if test.kind == T_CBZ && k as usize < self.zin.len() && self.lv.npred[k as usize] == 1 && self.b().blocks[k as usize].param_len == 0 {
+            self.zin[k as usize] = test.reg + 1 + if test.cc == 64 {
+                256
+            } else {
+                0
+            };
+        }
         if self.far {
             let w = self.code.len() as u32;
             self.emit_test(invert_test(test));
