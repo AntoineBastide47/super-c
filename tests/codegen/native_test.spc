@@ -5659,6 +5659,43 @@ int main(void) {
     }
 }
 
+// x86-64: a returned `lea` sum takes the return register over an operand that dies there: `@sw`'s swap of
+// adjacent bit pairs ends in `lea eax, [rax + 2*rdi]`, no copy after it. It gives the C results.
+@test
+fn x86_returned_lea_sums_write_over_a_dying_operand() {
+    let lir = M"(lir ptr 8
+sym @sw fn global
+fn @sw
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 1
+  v2 = iconst.i32 1431655765
+  v3 = lshr.i32 v0, v1
+  v4 = and.i32 v3, v2
+  v5 = and.i32 v0, v2
+  v6 = shl.i32 v5, v1
+  v7 = add.i32 v4, v6
+  ret v7
+)";
+    let drv = M"(#include <stdint.h>
+uint32_t sw(uint32_t);
+int main(void) {
+  static const uint32_t v[4] = {0, 1, 0x80000000u, 0x12345678u};
+  for (int i = 0; i < 4; i++)
+    if (sw(v[i]) != (((v[i] >> 1) & 0x55555555u) | ((v[i] & 0x55555555u) << 1))) return 1;
+  return 0;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    // lea eax, [rax + 2*rdi].
+    let lea: [u8; 3] = [0x8D, 0x04, 0x78];
+    assert(holds(&obj, lea[0..3]), "sw");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A select of a value plus 1 and the value under a test against 0 adds the test's 0 or 1, not the
 // tested value (a quotient rounded up: `q + (r != 0)`). It gives the C results.
 @test

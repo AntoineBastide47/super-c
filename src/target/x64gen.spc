@@ -1114,7 +1114,16 @@ extend Gen {
         } else {
             self.reg(f.index)
         };
-        let rd = self.def(i);
+        // The register a return right after wants, when an operand dying here holds it: the `lea` reads
+        // it before it writes.
+        let want = self.ret_want(i);
+        let rd = if want != NOREG && want == rb && self.dies_here(f.base) {
+            self.def_over(i, f.base, rb)
+        } else if want != NOREG && want == ri && self.dies_here(f.index) {
+            self.def_over(i, f.index, ri)
+        } else {
+            self.def(i)
+        };
         let d = f.disp as i32;
         let m = if ri == NOREG {
             x::at(rb, d)
