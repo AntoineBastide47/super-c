@@ -3588,12 +3588,25 @@ pub(package) fn cs_kind(b: &Body, v: Value, other: Value) u8 {
     if other == VNONE {
         return CS_NONE;
     }
+    if neg_sub(b, v, other) {
+        return CS_NEG;
+    }
     let (k, x) = cs_base(b, v);
     return if x == other {
         k
     } else {
         CS_NONE
     };
+}
+
+/// Whether `v` is `y - x` and `other` is `x - y`, of one integer type: `v` negates `other`.
+pub(package) fn neg_sub(b: &Body, v: Value, other: Value) bool {
+    if !is_inst(v) || !is_inst(other) {
+        return false;
+    }
+    let s = b.insts[v as usize];
+    let o = b.insts[other as usize];
+    return s.op == O_SUB && o.op == O_SUB && s.ty == o.ty && is_int(s.ty) && s.ty != T_I128 && s.a == o.b && s.b == o.a;
 }
 
 /// `cs_kind` of `v` with the value it adds 1 to, negates or inverts: that kind and value, else

@@ -5066,21 +5066,13 @@ int main(void) {
     }
 }
 
-// A comparison of the registers the block's last instruction subtracted (either way) sets the flags there
-// (arm64's `subs`): `@absd` and `@satsub` compare nothing. They give the C results.
+// A comparison of the registers the block's last instruction subtracted sets the flags there (arm64's
+// `subs`): `@satsub` compares nothing (`@absd` of `arm64_selects_of_opposite_differences_negate_one` the
+// same). It gives the C results.
 @test
 fn arm64_comparisons_read_a_subtraction_s_flags() {
     let lir = M"(lir ptr 8
-sym @absd fn global
 sym @satsub fn global
-fn @absd
-  sig (i32, i32) -> i32
-b0(v0: i32, v1: i32):
-  v2 = sub.i32 v0, v1
-  v3 = sub.i32 v1, v0
-  v4 = icmp.ugt v0, v1
-  v5 = select.i32 v4, v2, v3
-  ret v5
 fn @satsub
   sig (i32, i32) -> i32
 b0(v0: i32, v1: i32):
@@ -5095,21 +5087,17 @@ b0(v0: i32, v1: i32):
         object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
         "the arm64 object",
     );
-    // subs w3, w1, w0; csel x0, x2, x3, lo (6B000023 9A833040). subs w2, w0, w1; csel x0, xzr, x2, lo
-    // (6B010002 9A8233E0).
-    let ab: [u8; 8] = [0x23, 0x00, 0x00, 0x6B, 0x40, 0x30, 0x83, 0x9A];
+    // subs w2, w0, w1; csel x0, xzr, x2, lo (6B010002 9A8233E0).
     let ss: [u8; 8] = [0x02, 0x00, 0x01, 0x6B, 0xE0, 0x33, 0x82, 0x9A];
-    assert(holds(&obj, ab[0..8]) && holds(&obj, ss[0..8]), "absd, satsub");
+    assert(holds(&obj, ss[0..8]), "satsub");
     let drv = M"(#include <stdint.h>
-uint32_t absd(uint32_t, uint32_t);
 uint32_t satsub(uint32_t, uint32_t);
 int main(void) {
   static const uint32_t v[5] = {0, 1, 7, 0x80000000u, 0xFFFFFFFFu};
   for (int i = 0; i < 5; i++)
     for (int k = 0; k < 5; k++) {
       uint32_t a = v[i], b = v[k];
-      if (absd(a, b) != (a > b ? a - b : b - a)) return 1;
-      if (satsub(a, b) != (a < b ? 0 : a - b)) return 2;
+      if (satsub(a, b) != (a < b ? 0 : a - b)) return 1;
     }
   return 0;
 }
@@ -5314,6 +5302,109 @@ int main(void) {
     if (align(v[i]) != ((int64_t)v[i] + 15 & -16)) return 1;
     if (sdiv4(v[i]) != v[i] / 4) return 2;
   }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// An arm64 return of a narrow value a register holds extends from that register into w0: `@sat`'s select
+// extends from its register, with no `mov x0, x` then `uxtb w0, w0`. It gives the C results.
+@test
+fn arm64_narrow_returns_extend_from_their_register() {
+    let lir = M"(lir ptr 8
+sym @sat fn global
+fn @sat
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = iconst.i32 255
+  v3 = iconst.i8 -1
+  v4 = zext.i32 v0
+  v5 = zext.i32 v1
+  v6 = add.i32 v4, v5
+  v7 = trunc.i8 v6
+  v8 = icmp.ugt v6, v2
+  v9 = select.i8 v8, v3, v7
+  ret v9
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // MOV x0, xm (ORR x0, xzr, xm) then UXTB w0, w0.
+    let mut mv: u32 = 0;
+    let mut x: usize = 0;
+    while x + 8 <= obj.len() {
+        let w = obj[x] as u32 | obj[x + 1] as u32 << 8 | obj[x + 2] as u32 << 16 | obj[x + 3] as u32 << 24;
+        let n = obj[x + 4] as u32 | obj[x + 5] as u32 << 8 | obj[x + 6] as u32 << 16 | obj[x + 7] as u32 << 24;
+        if (w & 0xFFE0FFFF) == 0xAA0003E0 && n == 0x53001C00 {
+            mv += 1;
+        }
+        x += 4;
+    }
+    assert_eq(mv, 0);
+    let drv = M"(#include <stdint.h>
+uint8_t sat(uint8_t, uint8_t);
+int main(void) {
+  static const int v[5] = {0, 1, 127, 128, 255};
+  for (int i = 0; i < 5; i++)
+    for (int k = 0; k < 5; k++) {
+      int s = v[i] + v[k];
+      if (sat((uint8_t)v[i], (uint8_t)v[k]) != (s > 255 ? 255 : s)) return 1;
+    }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// An arm64 select between `x - y` and `y - x` is one subtraction and `csneg`: `@absd`'s `a > b ? a - b :
+// b - a` is `subs` (the comparison's flags) and `cneg`, no second subtraction. It gives the C result.
+@test
+fn arm64_selects_of_opposite_differences_negate_one() {
+    let lir = M"(lir ptr 8
+sym @absd fn global
+fn @absd
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = sub.i32 v0, v1
+  v3 = sub.i32 v1, v0
+  v4 = icmp.ugt v0, v1
+  v5 = select.i32 v4, v2, v3
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // SUB or SUBS (32-bit, shifted register), and CSNEG (32-bit).
+    let mut subs: u32 = 0;
+    let mut csneg: u32 = 0;
+    let mut x: usize = 0;
+    while x + 4 <= obj.len() {
+        let w = obj[x] as u32 | obj[x + 1] as u32 << 8 | obj[x + 2] as u32 << 16 | obj[x + 3] as u32 << 24;
+        if (w & 0xDF200000) == 0x4B000000 {
+            subs += 1;
+        }
+        if (w & 0xFFE00C00) == 0x5A800400 {
+            csneg += 1;
+        }
+        x += 4;
+    }
+    assert(subs == 1 && csneg == 1, "absd");
+    let drv = M"(#include <stdint.h>
+uint32_t absd(uint32_t, uint32_t);
+int main(void) {
+  static const uint32_t v[5] = {0, 1, 7, 0x80000000u, 0xFFFFFFFFu};
+  for (int i = 0; i < 5; i++)
+    for (int k = 0; k < 5; k++)
+      if (absd(v[i], v[k]) != (v[i] > v[k] ? v[i] - v[k] : v[k] - v[i])) return 1;
   return 0;
 }
 )";

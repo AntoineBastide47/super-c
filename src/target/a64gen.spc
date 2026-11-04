@@ -1526,6 +1526,15 @@ extend Gen {
             self.b(),
             v,
         ) || self.arrived_ext(v, false);
+        // In a register and to extend: the extension reads it.
+        if va.reg != NOREG && (signed || !clean) {
+            if signed {
+                self.emit(a::sxt(false, r, va.reg, bits));
+            } else {
+                self.emit(a::uxt(r, va.reg, bits));
+            }
+            return;
+        }
         self.materialize(v, r);
         if signed {
             self.emit(a::sxt(false, r, r, bits));
@@ -6013,8 +6022,13 @@ extend Gen {
             } else {
                 (t.c, t.b, cc)
             };
-            // The other side, or the zero register when it is 0 and the side is of another value.
-            let (kind, base) = lv::cs_base(b, side);
+            // The other side, or the zero register when it is 0 and the side is of another value; `y - x`
+            // against `x - y` negates it (`lv::neg_sub`).
+            let (kind, base) = if lv::neg_sub(b, side, x) {
+                (lv::CS_NEG, x)
+            } else {
+                lv::cs_base(b, side)
+            };
             let rx = if base == x {
                 self.reg(x) as u32
             } else {

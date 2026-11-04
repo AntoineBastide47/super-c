@@ -10377,6 +10377,104 @@ data @y size 12 align 2 bytes 010000000500000003000000
     same_result(&b, &a, "differ", none, 0);
 }
 
+// Outside loops, an operation of truncations from one wider type (or constants) is the truncation of the
+// wide operation: `@sum2`'s `add.i32` of two truncated `i64`s an `add.i64`, `@pick`'s `select.i32` of one and
+// a constant a `select.i64`. `@narrow`'s `select.i8` and the `add.i32` in `@loop`'s loop stay. The results
+// stay.
+@test
+fn operations_of_truncations_outside_loops_are_wide() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @sum2 fn global noinline
+sym @pick fn global noinline
+sym @narrow fn global noinline
+sym @loop fn global noinline
+sym @run fn global
+sym @arr data global
+fn @sum2
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = trunc.i32 v0
+  v3 = trunc.i32 v1
+  v4 = add.i32 v2, v3
+  v5 = zext.i64 v4
+  v6 = xor.i64 v5, v0
+  ret v6
+fn @pick
+  sig (i8, i64) -> i32
+b0(v0: i8, v1: i64):
+  v2 = trunc.i32 v1
+  v3 = iconst.i32 -7
+  v4 = select.i32 v0, v2, v3
+  ret v4
+fn @narrow
+  sig (i8, i32) -> i8
+b0(v0: i8, v1: i32):
+  v2 = trunc.i8 v1
+  v3 = iconst.i8 3
+  v4 = select.i8 v0, v2, v3
+  ret v4
+fn @loop
+  sig (i64, ptr) -> i32
+b0(v0: i64, v1: ptr):
+  v2 = iconst.i64 0
+  v3 = iconst.i32 0
+  jmp b1(v2, v3)
+b1(v4: i64, v5: i32): novec
+  v6 = icmp.ult v4, v0
+  br v6, b2, b3
+b2:
+  v7 = trunc.i32 v4
+  v8 = ptradd v1, v4 * 8
+  v9 = load.i64 v8 align 3
+  v10 = trunc.i32 v9
+  v11 = add.i32 v7, v10
+  v12 = add.i32 v5, v11
+  v13 = iconst.i64 1
+  v14 = add.i64 v4, v13
+  jmp b1(v14, v12)
+b3:
+  ret v5
+fn @run
+  sig () -> i64
+b0:
+  v0 = iconst.i64 4294967301
+  v1 = iconst.i64 8589934599
+  v2 = iconst.i64 12884901897
+  v3 = iconst.i8 1
+  v4 = iconst.i8 0
+  v5 = iconst.i32 511
+  v6 = iconst.i64 4
+  v7 = symaddr @arr
+  v8 = call.i64 @sum2(v0, v1) : (i64, i64) -> i64
+  v9 = call.i32 @pick(v3, v2) : (i8, i64) -> i32
+  v10 = call.i32 @pick(v4, v2) : (i8, i64) -> i32
+  v11 = call.i8 @narrow(v3, v5) : (i8, i32) -> i8
+  v12 = call.i32 @loop(v6, v7) : (i64, ptr) -> i32
+  v13 = zext.i64 v9
+  v14 = zext.i64 v10
+  v15 = zext.i64 v11
+  v16 = zext.i64 v12
+  v17 = add.i64 v8, v13
+  v18 = add.i64 v17, v14
+  v19 = add.i64 v18, v15
+  v20 = add.i64 v19, v16
+  ret v20
+data @arr size 32 align 3 bytes 0100000000000000020000000000000003000000000000000400000000000000
+)",
+    );
+    let s = text_of(&a, "sum2");
+    let p = text_of(&a, "pick");
+    let n = text_of(&a, "narrow");
+    let l = text_of(&a, "loop");
+    assert(s.contains("add.i64") && !s.contains("add.i32"), s.as_str());
+    assert(p.contains("select.i64"), p.as_str());
+    assert(n.contains("select.i8"), n.as_str());
+    assert(l.find("add.i32") != l.rfind("add.i32"), l.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "run", none, 8589934874);
+}
+
 // A count read only where its operand is not 0 is `.nz`: `@guard`'s `clz`, the arm for `x != 0` of a
 // select on `x == 0`; `@above`'s `ctz` of `x - 1` after `x >u 1` (a store keeps the branch); `@plain`'s
 // (no test) stays, and so does `@bit`'s narrowed `ctz` of `x | 2^32` (`x` may be 0); `@wide`'s count of a

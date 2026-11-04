@@ -5944,6 +5944,70 @@ extend Opt {
         return true;
     }
 
+    // Select or `add`, `sub`, `and`, `or`, `xor` `i` of block `k` (in no loop) whose operands are
+    // truncations from one wider integer type, or constants, at least one a truncation: the truncation of
+    // that operation on the wide values (a constant sign-extended), whose result dies there, where a
+    // truncation of a value that stays live takes a copy. Outside loops, so a vector loop keeps its narrow
+    // lanes; a select of 32 bits or more, as wasm masks a narrower truncation the narrow select needs not.
+    // Whether it did.
+    fn wide_trunc(self: &mut Self, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        let sel = t.op == O_SELECT;
+        let alu = t.op == O_ADD || t.op == O_SUB || t.op == O_AND || t.op == O_OR || t.op == O_XOR;
+        if !sel && !alu || self.inner[k as usize] != NONE || !is_int(t.ty) || t.ty == T_PTR || t.ty == T_I128 || sel && type_bits(
+            t.ty,
+            8,
+        ) < 32 {
+            return false;
+        }
+        let (x, y) = if sel {
+            (t.b, t.c)
+        } else {
+            (t.a, t.b)
+        };
+        let xy = [x, y];
+        let mut wt: u8 = 0;
+        for q in 0..2u32 {
+            let v = xy[q as usize];
+            if is_op(b, v, O_TRUNC) {
+                let w = b.type_of(b.insts[v as usize].a);
+                if wt != 0 && w != wt || !is_int(w) || w == T_PTR || w == T_I128 {
+                    return false;
+                }
+                wt = w;
+            } else if const_of(b, v).is_none() {
+                return false;
+            }
+        }
+        if wt == 0 {
+            return false;
+        }
+        let bits = type_bits(t.ty, 8);
+        let mut wide = [VNONE, VNONE];
+        for q in 0..2u32 {
+            let v = xy[q as usize];
+            wide[q as usize] = if is_op(b, v, O_TRUNC) {
+                b.insts[v as usize].a
+            } else {
+                let c = const_of(b, v).unwrap();
+                let s = if bits < 64 && (c >> (bits - 1) as u64 & 1) != 0 {
+                    c | u64::MAX << bits as u64
+                } else {
+                    c
+                };
+                self.constant(b, wt, s)
+            };
+        }
+        let u = if sel {
+            Inst { op: O_SELECT, ty: wt, aux: 0, a: t.a, b: wide[0], c: wide[1] }
+        } else {
+            Inst { op: t.op, ty: wt, aux: 0, a: wide[0], b: wide[1], c: VNONE }
+        };
+        let w = self.before(b, k, i, u);
+        b.insts[i as usize] = Inst { op: O_TRUNC, ty: t.ty, aux: 0, a: w, b: VNONE, c: VNONE };
+        return true;
+    }
+
     // The parameters of loop header `k` (at most SAME_MAX) that equal an earlier one of its own: each edge
     // into `k` passes the two one value, or the same operation of each with one other operand (`i + 1` and
     // `j + 1`, two counters a `zip` steps together), so by induction they are equal; the later one is the
@@ -7000,6 +7064,9 @@ extend Opt {
             }
             if b.insts[i as usize].op == O_SELECT {
                 nonzero_arm(b, i);
+            }
+            if self.wide_trunc(b, k, i) {
+                return true;
             }
             if b.insts[i as usize].op == O_SELECT && self.sign_select(pk, b, k, i) {
                 return true;
