@@ -4993,6 +4993,79 @@ int main(void) {
     }
 }
 
+// Apple's arm64 convention has the caller extend an argument of 8 or 16 bits to 32 (zero, or sign for a
+// signed one): `@sat8`'s and `@diff8`'s extensions of their parameters are their registers there (no
+// `uxtb`, `sxtb`), and elsewhere (Linux) they extend. They give the C results.
+@test
+fn apple_arm64_narrow_parameters_arrive_extended() {
+    let lir = M"(lir ptr 8
+sym @sat8 fn global
+sym @diff8 fn global
+fn @sat8
+  sig (i8, i8) -> i32
+b0(v0: i8, v1: i8):
+  v2 = zext.i32 v0
+  v3 = zext.i32 v1
+  v4 = add.i32 v2, v3
+  v5 = iconst.i32 255
+  v6 = icmp.ult v4, v5
+  v7 = select.i32 v6, v4, v5
+  ret v7
+fn @diff8
+  sig (i8.s, i8.s) -> i32
+b0(v0: i8, v1: i8):
+  v2 = sext.i32 v0
+  v3 = sext.i32 v1
+  v4 = sub.i32 v2, v3
+  ret v4
+)";
+    let a64 = tgt::axis_index("aarch64", true);
+    let mut mac = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("macos", false), a64, 0, &mut mac), "the macOS object");
+    let mut lin = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, 0, &mut lin), "the Linux object");
+    // UXTB and SXTB: UBFM and SBFM of bits 0 to 7 (53001C00, 13001C00 under the register fields).
+    let mut ext_mac: u32 = 0;
+    let mut ext_lin: u32 = 0;
+    for q in 0..2usize {
+        let o = if q == 0 {
+            &mac
+        } else {
+            &lin
+        };
+        let mut x: usize = 0;
+        while x + 4 <= o.len() {
+            let w = o[x] as u32 | o[x + 1] as u32 << 8 | o[x + 2] as u32 << 16 | o[x + 3] as u32 << 24;
+            let e = (w & 0xFFFFFC00) == 0x53001C00 || (w & 0xFFFFFC00) == 0x13001C00;
+            if e && q == 0 {
+                ext_mac += 1;
+            }
+            if e && q == 1 {
+                ext_lin += 1;
+            }
+            x += 4;
+        }
+    }
+    assert(ext_mac == 0 && ext_lin >= 4, "sat8, diff8");
+    let drv = M"(#include <stdint.h>
+int32_t sat8(uint8_t, uint8_t);
+int32_t diff8(int8_t, int8_t);
+int main(void) {
+  static const int v[5] = {0, 1, 127, 128, 255};
+  for (int i = 0; i < 5; i++)
+    for (int k = 0; k < 5; k++) {
+      int s = v[i] + v[k];
+      if (sat8((uint8_t)v[i], (uint8_t)v[k]) != (s < 255 ? s : 255)) return 1;
+      if (diff8((int8_t)v[i], (int8_t)v[k]) != (int8_t)v[i] - (int8_t)v[k]) return 2;
+    }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A comparison of the registers the block's last instruction subtracted (either way) sets the flags there
 // (arm64's `subs`): `@absd` and `@satsub` compare nothing. They give the C results.
 @test

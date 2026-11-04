@@ -1525,7 +1525,7 @@ extend Gen {
         let clean = va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG) || self.lv.zero_param(
             self.b(),
             v,
-        );
+        ) || self.arrived_ext(v, false);
         self.materialize(v, r);
         if signed {
             self.emit(a::sxt(false, r, r, bits));
@@ -3809,7 +3809,7 @@ extend Gen {
         let s = self.narrow_src(v);
         let r = self.reg(s);
         let x = self.vx(v);
-        if s == v && !signed && self.va[x as usize].clean {
+        if s == v && (!signed && self.va[x as usize].clean || self.arrived_ext(v, signed)) {
             return r;
         }
         let d = self.tmp(false);
@@ -3819,6 +3819,24 @@ extend Gen {
             self.emit(a::uxt(d, r, bits));
         }
         return d;
+    }
+
+    // Whether `v` is an entry parameter of 8 or 16 bits in a register that the caller extended to 32 bits as
+    // `signed` asks (Apple's arm64 convention: sign-extended when the signature says so, `SIG_SEXT`, else
+    // zero-extended).
+    const fn arrived_ext(self: &Self, v: Value, signed: bool) bool {
+        if !self.apple || (v & (VPARAM | VFLAG)) != VPARAM {
+            return false;
+        }
+        let b = self.b();
+        let k = (v & ~VPARAM) as usize;
+        let np = b.pool[b.sig as usize] as usize;
+        if k >= np || b.blocks[0].param_start != 0 || k >= b.blocks[0].param_len as usize || self.self_lay.locs[k].kind != ab::L_REG {
+            return false;
+        }
+        let f = b.pool[b.sig as usize + 3 + k];
+        let ty = self.vt(v);
+        return (ty == T_I8 || ty == T_I16) && (f & AGG) == 0 && (f & SIG_SEXT) != 0 == signed;
     }
 
     // The value whose low bits value `v` is: the source of a folded truncation (`lv::FOLD_TRUNC`), else `v`.
@@ -4924,6 +4942,13 @@ extend Gen {
             let ra = self.reg(t.a);
             let _ = self.def_from(i, t.a, ra);
             self.va.index_mut(i as usize).clean = true;
+            return true;
+        }
+        // A 32-bit extension of a parameter the caller extended so (`arrived_ext`) is its register; the bits
+        // above 32 are unknown (not `clean`).
+        if (op == O_SEXT || op == O_ZEXT) && tb == 32 && self.arrived_ext(t.a, op == O_SEXT) {
+            let ra = self.reg(t.a);
+            let _ = self.def_from(i, t.a, ra);
             return true;
         }
         if op == O_SEXT || op == O_ZEXT {
