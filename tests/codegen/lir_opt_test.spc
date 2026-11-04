@@ -10377,6 +10377,77 @@ data @y size 12 align 2 bytes 010000000500000003000000
     same_result(&b, &a, "differ", none, 0);
 }
 
+// A select of two loads alike that only it reads, with no write between, is one load of the selected
+// address: `@pick` loads once; `@kept` (a store between) and `@both` (a load read again) keep two. The
+// results stay.
+@test
+fn selects_of_loads_load_the_selected_address() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @pick fn global noinline
+sym @kept fn global noinline
+sym @both fn global noinline
+sym @run fn global
+sym @x data global
+sym @y data global
+fn @pick
+  sig (i8, ptr, ptr) -> i32
+b0(v0: i8, v1: ptr, v2: ptr):
+  v3 = load.i32 v1+4 align 2
+  v4 = load.i32 v2+4 align 2
+  v5 = select.i32 v0, v3, v4
+  ret v5
+fn @kept
+  sig (i8, ptr, ptr) -> i32
+b0(v0: i8, v1: ptr, v2: ptr):
+  v3 = load.i32 v1+4 align 2
+  v4 = iconst.i32 9
+  store v4, v1 align 2
+  v5 = load.i32 v2+4 align 2
+  v6 = select.i32 v0, v3, v5
+  ret v6
+fn @both
+  sig (i8, ptr, ptr) -> i32
+b0(v0: i8, v1: ptr, v2: ptr):
+  v3 = load.i32 v1+4 align 2
+  v4 = load.i32 v2+4 align 2
+  v5 = select.i32 v0, v3, v4
+  v6 = add.i32 v5, v3
+  ret v6
+fn @run
+  sig () -> i64
+b0:
+  v0 = symaddr @x
+  v1 = symaddr @y
+  v2 = iconst.i8 1
+  v3 = iconst.i8 0
+  v4 = call.i32 @pick(v2, v0, v1) : (i8, ptr, ptr) -> i32
+  v5 = call.i32 @pick(v3, v0, v1) : (i8, ptr, ptr) -> i32
+  v6 = call.i32 @kept(v3, v0, v1) : (i8, ptr, ptr) -> i32
+  v7 = call.i32 @both(v3, v0, v1) : (i8, ptr, ptr) -> i32
+  v8 = iconst.i32 1000
+  v9 = mul.i32 v4, v8
+  v10 = add.i32 v9, v5
+  v11 = mul.i32 v10, v8
+  v12 = add.i32 v11, v6
+  v13 = mul.i32 v12, v8
+  v14 = add.i32 v13, v7
+  v15 = zext.i64 v14
+  ret v15
+data @x size 8 align 2 bytes 0000000003000000
+data @y size 8 align 2 bytes 0000000005000000
+)",
+    );
+    let p = text_of(&a, "pick");
+    let k = text_of(&a, "kept");
+    let o = text_of(&a, "both");
+    assert(p.find("load") == p.rfind("load"), p.as_str());
+    assert(k.find("load") != k.rfind("load"), k.as_str());
+    assert(o.find("load") != o.rfind("load"), o.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "run", none, 3005005008);
+}
+
 // A rewrite along one edge of a branch leaves the terminators that share the edge as they were: the jumps
 // through `@thread`'s empty `b3` share its edge into `b4`, the true path's too, so the branch's comparison
 // becomes 0 along its false edge alone, and `@thread` still returns 1 where it holds.

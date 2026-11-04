@@ -4221,6 +4221,9 @@ extend Opt {
                         changed = true;
                         self.refold = true;
                     }
+                    if u.op == O_SELECT && self.repl[i as usize] == VNONE && self.select_loads(pk, b, k as u32, i) {
+                        changed = true;
+                    }
                     if u.op == O_SELECT && self.repl[i as usize] == VNONE && is_int(u.ty) && u.ty != T_PTR && u.ty != T_I128 {
                         changed = self.select_step(b, k as u32, i) || changed;
                     }
@@ -5900,6 +5903,38 @@ extend Opt {
             return true;
         }
         return false;
+    }
+
+    // Select `i` of block `k` between two loads of its block alike (type, offset, flags; not volatile, no
+    // bound) that only it reads, with no write from the first to it: one load of the selected address
+    // (both ran, so the one left reads nothing new). Whether it did.
+    fn select_loads(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        if !is_op(b, t.b, O_LOAD) || !is_op(b, t.c, O_LOAD) || t.b == t.c || !self.made_in(t.b, k) || !self.made_in(
+            t.c,
+            k,
+        ) {
+            return false;
+        }
+        let x = b.insts[t.b as usize];
+        let y = b.insts[t.c as usize];
+        if x.ty != t.ty || y.ty != t.ty || x.aux != y.aux || x.c != y.c || (x.aux & (MEM_VOLATILE | MEM_RANGE)) != 0 || !is_int(
+            t.ty,
+        ) && t.ty != T_PTR && t.ty != T_F32 && t.ty != T_F64 {
+            return false;
+        }
+        let first = t.b.min(t.c);
+        for j in first + 1..i {
+            if writes(pk, b, b.insts[j as usize]) {
+                return false;
+            }
+        }
+        if !only_use(b, t.b, i) || !only_use(b, t.c, i) {
+            return false;
+        }
+        let s = self.before(b, k, i, Inst { op: O_SELECT, ty: b.type_of(x.a), aux: 0, a: t.a, b: x.a, c: y.a });
+        b.insts[i as usize] = Inst { op: O_LOAD, ty: t.ty, aux: x.aux, a: s, b: VNONE, c: x.c };
+        return true;
     }
 
     // The parameters of loop header `k` (at most SAME_MAX) that equal an earlier one of its own: each edge
@@ -15485,6 +15520,34 @@ fn stored_piece(b: &Body, v: Value, ptr: u32) (Value, u32, u32) {
         return (VNONE, 0, 0);
     }
     return (x, 0, n);
+}
+
+// Whether instruction `at` of `b` is the one use of value `v`: no other instruction or edge reads it.
+fn only_use(b: &Body, v: Value, at: u32) bool {
+    let mut us = Vector::<Value>::new();
+    let mut es = Vector::<u32>::new();
+    for j in 0..b.insts.len() as u32 {
+        let t = b.insts[j as usize];
+        if j != at {
+            lv::uses(b, t, &mut us);
+            for q in 0..us.len() {
+                if us[q] == v {
+                    return false;
+                }
+            }
+        }
+        if t.op == O_JMP || t.op == O_BR || t.op == O_SWITCH {
+            b.succ_edges(t, &mut es);
+            for e in 0..es.len() {
+                for q in 0..b.edge_nargs(es[e]) {
+                    if b.edge_arg(es[e], q) == v {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
 }
 
 // Edge `q` (0: the true one, 1: the false one) of branch `i` of `b` as a copy only the branch passes:
