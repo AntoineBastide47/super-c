@@ -1299,14 +1299,24 @@ extend Gen {
 
     // Whether the instructions after `v` in block `bk`, at most CHAIN_STEPS, each read the one before as
     // their first operand alone and write over it (a 32- or 64-bit integer `add`, `sub`, `and`, `or`, `xor`,
-    // or shift by a constant, none folded), up to a return of the last.
+    // or shift by a constant; or a select of it as its false side, which a `cmov` writes over), past
+    // folded instructions, up to a return of the last.
     const fn chain_ret(self: &Self, b: &Body, bk: Block, v: Value) bool {
         let mut w = v;
+        let end = bk.start + bk.len;
         for _ in 0..CHAIN_STEPS {
-            if w + 1 >= bk.start + bk.len || self.lv.count[w as usize] != 1 {
+            if self.lv.count[w as usize] != 1 {
                 return false;
             }
-            let t = b.insts[w as usize + 1];
+            // The next instruction that emits code here: a folded one (a select's comparison) comes later.
+            let mut j = w + 1;
+            while j < end && self.lv.pfold[j as usize] {
+                j += 1;
+            }
+            if j >= end {
+                return false;
+            }
+            let t = b.insts[j as usize];
             if t.op == O_RET {
                 return w != v && t.a == w;
             }
@@ -1314,10 +1324,11 @@ extend Gen {
             let alu = t.op == O_ADD || t.op == O_SUB || t.op == O_AND || t.op == O_OR || t.op == O_XOR;
             let shift = (t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR) && self.const_of(t.b, &mut k);
             let bits = type_bits(t.ty, self.ptr);
-            if !alu && !shift || t.a != w || t.b == w || !is_int(t.ty) || bits != 32 && bits != 64 || self.lv.pfold[w as usize + 1] {
+            let sel = t.op == O_SELECT && t.c == w && t.b != w && t.a != w;
+            if !sel && (!alu && !shift || t.a != w || t.b == w) || !is_int(t.ty) || bits != 32 && bits != 64 {
                 return false;
             }
-            w += 1;
+            w = j;
         }
         return false;
     }
@@ -6690,11 +6701,12 @@ extend Gen {
         }
         let m = self.mem_at(t.a, t.c as i32, &mut rs, &mut radd);
         self.lock = saved;
-        // A scalar over its address when the address dies here (`mov r8, [r8 + 8]`).
+        // A scalar over its address when the address dies here (`mov r8, [r8 + 8]`), unless the next
+        // instruction takes it in another register (a return's).
         let ra = self.va[self.vx(t.a) as usize].reg;
         let rd = if self.in_reg(ty) {
             self.vec_def(i)
-        } else if ra != NOREG && ra < V0 && !is_v(ty) {
+        } else if ra != NOREG && ra < V0 && !is_v(ty) && (nr == NOREG || nr == ra) {
             self.def_over(i, t.a, ra)
         } else {
             self.def_pass(i, t.a)

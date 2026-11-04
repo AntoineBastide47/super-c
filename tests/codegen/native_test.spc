@@ -5529,6 +5529,136 @@ int main(void) {
     }
 }
 
+// x86-64: a value a returned select takes as its false side, past the select's folded comparison, is
+// made in the return register: `@od`'s `b + 7` is `lea eax, [rdx + 7]`, the `cmovne` writes over it, no
+// `mov rax, rdx`. It gives the C results.
+@test
+fn x86_returned_selects_make_their_false_side_in_the_return_register() {
+    let lir = M"(lir ptr 8
+sym @od fn global
+fn @od
+  sig (i32, i32, i32) -> i32
+b0(v0: i32, v1: i32, v2: i32):
+  v3 = iconst.i32 1
+  v4 = iconst.i32 0
+  v5 = iconst.i32 7
+  v6 = and.i32 v0, v3
+  v7 = add.i32 v2, v5
+  v8 = icmp.ne v6, v4
+  v9 = select.i32 v8, v1, v7
+  ret v9
+)";
+    let drv = M"(#include <stdint.h>
+uint32_t od(uint32_t, uint32_t, uint32_t);
+int main(void) {
+  return od(3, 10, 20) != 10 || od(4, 10, 20) != 27;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    let lea: [u8; 3] = [0x8D, 0x42, 0x07];
+    let mv: [u8; 3] = [0x48, 0x89, 0xD0];
+    assert(holds(&obj, lea[0..3]) && !holds(&obj, mv[0..3]), "od");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// arm64: `max(y, 0)` is `bic rd, y, y, asr #31`, no comparison: `@mz`'s `x < 0 ? 0 : x`, and `@cp`'s
+// clamp to 0..255, whose upper bound's select has `x`'s sign. `@ncp`'s inner select takes 7 where
+// `x > -5`, which a negative `x` may be: a comparison. They give the C results.
+@test
+fn arm64_maxima_with_zero_clear_the_sign_bits() {
+    let lir = M"(lir ptr 8
+sym @mz fn global
+sym @cp fn global
+sym @ncp fn global
+fn @mz
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.slt v0, v1
+  v3 = select.i32 v2, v1, v0
+  ret v3
+fn @cp
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 255
+  v3 = icmp.sgt v0, v2
+  v4 = select.i32 v3, v2, v0
+  v5 = icmp.slt v0, v1
+  v6 = select.i32 v5, v1, v4
+  ret v6
+fn @ncp
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 -5
+  v3 = iconst.i32 7
+  v4 = icmp.sgt v0, v2
+  v5 = select.i32 v4, v3, v0
+  v6 = icmp.slt v0, v1
+  v7 = select.i32 v6, v1, v5
+  ret v7
+)";
+    let drv = M"(#include <stdint.h>
+int32_t mz(int32_t);
+int32_t cp(int32_t);
+int32_t ncp(int32_t);
+int main(void) {
+  static const int32_t v[7] = {-2147483647 - 1, -9, -3, 0, 5, 300, 2147483647};
+  for (int i = 0; i < 7; i++) {
+    int32_t x = v[i];
+    if (mz(x) != (x < 0 ? 0 : x)) return 1;
+    if (cp(x) != (x < 0 ? 0 : x > 255 ? 255 : x)) return 2;
+    if (ncp(x) != (x < 0 ? 0 : x > -5 ? 7 : x)) return 3;
+  }
+  return 0;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("macos", false), tgt::axis_index("aarch64", true), 0, &mut obj), "the object");
+    // bic w0, w0, w0, asr #31.
+    let bic: [u8; 4] = [0x00, 0x7C, 0xA0, 0x0A];
+    assert(holds(&obj, bic[0..4]), "mz");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// x86-64: a returned load whose address dies in another register loads into the return register:
+// `@sl`'s `mov eax, [rdx]` after the `cmov` of the addresses, no `mov rax, rdx`. It gives the C results.
+@test
+fn x86_returned_loads_load_into_the_return_register() {
+    let lir = M"(lir ptr 8
+sym @sl fn global
+fn @sl
+  sig (i32, ptr, ptr) -> i32
+b0(v0: i32, v1: ptr, v2: ptr):
+  v3 = iconst.i32 0
+  v4 = icmp.ne v0, v3
+  v5 = select.ptr v4, v1, v2
+  v6 = load.i32 v5 align 2
+  ret v6
+)";
+    let drv = M"(#include <stdint.h>
+int32_t sl(int32_t, const int32_t *, const int32_t *);
+int main(void) {
+  static const int32_t p = 5, q = 9;
+  return sl(1, &p, &q) != 5 || sl(0, &p, &q) != 9;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    let ld: [u8; 2] = [0x8B, 0x02];
+    let mv: [u8; 3] = [0x48, 0x89, 0xD0];
+    assert(holds(&obj, ld[0..2]) && !holds(&obj, mv[0..3]), "sl");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A select of a value plus 1 and the value under a test against 0 adds the test's 0 or 1, not the
 // tested value (a quotient rounded up: `q + (r != 0)`). It gives the C results.
 @test

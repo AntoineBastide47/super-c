@@ -5961,8 +5961,70 @@ extend Gen {
         return i + 2 == bk.start + bk.len && r.op == O_RET && r.a == VNONE;
     }
 
+    // The `y` of 32- or 64-bit select `t` that is `max(y, 0)` on a folded signed comparison of a value `x`
+    // with 0 (`x < 0 ? 0 : y`, `x <= 0 ? 0 : y`, `x > 0 ? y : 0`, `x >= 0 ? y : 0`), `y` either `x` or of
+    // its sign (`same_sign`); VNONE when not.
+    fn max_zero(self: &Self, t: Inst) Value {
+        let bits = type_bits(t.ty, self.ptr);
+        if !is_int(t.ty) || bits != 32 && bits != 64 || (t.a & (VPARAM | VFLAG)) != 0 || !self.lv.pfold[t.a as usize] || self.lv.conj[t.a as usize] != 0 {
+            return VNONE;
+        }
+        let c = self.b().insts[t.a as usize];
+        let mut z: u64 = 1;
+        if c.op != O_ICMP || !self.const_of(c.b, &mut z) || z != 0 || self.vt(c.a) != t.ty {
+            return VNONE;
+        }
+        let mut k: u64 = 1;
+        let low = (c.aux == C_SLT || c.aux == C_SLE) && self.const_of(t.b, &mut k) && k == 0;
+        let high = (c.aux == C_SGT || c.aux == C_SGE) && self.const_of(t.c, &mut k) && k == 0;
+        let y = if low {
+            t.c
+        } else if high {
+            t.b
+        } else {
+            return VNONE;
+        };
+        return if y == c.a || self.same_sign(y, c.a) {
+            y
+        } else {
+            VNONE
+        };
+    }
+
+    // Whether value `y` is negative exactly when `x` is, `x` where so: `y` a select of `x` and a constant
+    // at least 0 that it takes only where `x > k` (`k` at least -1) or `x >= k` (`k` at least 0), as a
+    // clamp's upper bound.
+    fn same_sign(self: &Self, y: Value, x: Value) bool {
+        if (y & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        let s = self.b().insts[y as usize];
+        if s.op != O_SELECT || s.c != x || (s.a & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        let q = self.b().insts[s.a as usize];
+        let bits = type_bits(s.ty, self.ptr);
+        let mut kv: u64 = 0;
+        let mut kq: u64 = 0;
+        if q.op != O_ICMP || q.a != x || !self.const_of(s.b, &mut kv) || !self.const_of(q.b, &mut kq) {
+            return false;
+        }
+        let kvs = lp_sext(kv, bits);
+        let kqs = lp_sext(kq, bits);
+        return kvs >= 0 && (q.aux == C_SGT && kqs >= -1 || q.aux == C_SGE && kqs >= 0);
+    }
+
     fn select_op(self: &mut Self, i: u32, t: Inst) bool {
         let ty = t.ty;
+        // `max(x, 0)`: `bic rd, x, x, asr #(bits - 1)`, no comparison.
+        let mz = self.max_zero(t);
+        if mz != VNONE {
+            let bits = type_bits(ty, self.ptr);
+            let rx = self.reg(mz) as u32;
+            let rd = self.def_step(i) as u32;
+            self.emit(a::logic_reg(bits == 64, 0, true, rd, rx, rx, 2, bits - 1));
+            return true;
+        }
         let cx = self.vx(t.a);
         let fc = self.folded_cmp(t.a);
         let cc = if fc != NONE {
