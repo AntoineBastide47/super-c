@@ -107,7 +107,7 @@ pub(package) struct Gen {
     remat: Vector<bool>, // per instruction
     // The flag of an unsigned sum (`ovf`) the next instruction reads, computed there from the sum's and its
     // first operand's locals: the sum's instruction, the two locals, whether 64-bit; NONE as the first.
-    lazy: (u32, u32, u32, bool),
+    lazy: (u32, u32, u32, u32),
     free: Vector<Vector<u32>>, // per class, the free locals
     lref: Vector<u32>, // `assign`: per local, the values holding it
     gone: Vector<bool>, // `assign`: per value index, whether its local or home is released
@@ -143,6 +143,9 @@ pub(package) struct Gen {
     res_slot: u32, // the frame offset of an aggregate result passed as one scalar (NONE)
     canary: u32, // the frame offset of the stack canary above the LIR slots (NONE)
     labels: Vector<Label>,
+    brs: Vector<u64>, // per `br` in the code, its code byte << 32 | its depth
+    end_at: Vector<u32>, // per `end` of a label in the code, its code byte (ascending)
+    end_lb: Vector<Label>, // per `end_at`, the label it closes
     tasks: Vector<Task>,
     mk_at: Vector<u32>, // per block, its merge children's start in `mk` (ascending reverse postorder)
     mk: Vector<u32>,
@@ -244,7 +247,7 @@ extend Gen {
             vreg: Vector::<bool>::new(),
             home: Vector::<u32>::new(),
             remat: Vector::<bool>::new(),
-            lazy: (NONE, NONE, NONE, false),
+            lazy: (NONE, NONE, NONE, NONE),
             free: free,
             lref: Vector::<u32>::new(),
             gone: Vector::<bool>::new(),
@@ -274,6 +277,9 @@ extend Gen {
             res_slot: NONE,
             canary: NONE,
             labels: Vector::<Label>::new(),
+            brs: Vector::<u64>::new(),
+            end_at: Vector::<u32>::new(),
+            end_lb: Vector::<Label>::new(),
             tasks: Vector::<Task>::new(),
             mk_at: Vector::<u32>::new(),
             mk: Vector::<u32>::new(),
@@ -499,6 +505,9 @@ extend Gen {
         self.rows.truncate(0);
         self.locals.truncate(0);
         self.labels.truncate(0);
+        self.brs.truncate(0);
+        self.end_at.truncate(0);
+        self.end_lb.truncate(0);
         self.asm_code = false;
         self.ret_end = NONE;
         self.loop_end = NONE;
@@ -698,6 +707,8 @@ extend Gen {
                 read[(self.c.acc[i] & 0xFFFFFFFF) as usize] = true;
             }
         }
+        self.dead_brs();
+        self.cuts.sort();
         let ncut = self.cuts.len();
         for i in 0..n {
             let l = (self.c.acc[i] & 0xFFFFFFFF) as u32;
@@ -839,6 +850,49 @@ extend Gen {
             let x = (self.rows[q] >> 32) as u32;
             if x > o {
                 self.rows[q] = (x - 1) as u64 << 32 | self.rows[q] & 0xFFFFFFFF;
+            }
+        }
+        for q in 0..self.brs.len() {
+            if (self.brs[q] >> 32) as u32 > o {
+                self.brs[q] -= 1u64 << 32;
+            }
+        }
+        for q in 0..self.end_at.len() {
+            if self.end_at[q] > o {
+                self.end_at[q] -= 1;
+            }
+        }
+    }
+
+    // `stack_values`' cuts of the `br`s that fall through: a `br d` the `end`s of its `d + 1` innermost labels
+    // follow at once, each of no block type, the last not a loop's, goes where the code after those ends
+    // runs. Each `br` looks at `d + 1` ends.
+    fn dead_brs(self: &mut Self) {
+        for q in 0..self.brs.len() {
+            let p = (self.brs[q] >> 32) as u32;
+            let d = self.brs[q] as u32;
+            let at = p + 1 + uleb_len(d);
+            // The first `end` at `at`: a binary search.
+            let mut lo: usize = 0;
+            let mut hi = self.end_at.len();
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                if self.end_at[mid] < at {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            let mut ok = lo + d as usize < self.end_at.len();
+            let mut j: u32 = 0;
+            while ok && j <= d {
+                let k = lo + j as usize;
+                let l = self.end_lb[k];
+                ok = self.end_at[k] == at + j && self.c.bytes[l.at as usize] == w::BLOCK_EMPTY && (j < d || l.kind != LB_LOOP);
+                j += 1;
+            }
+            if ok {
+                self.cuts.push(p as u64 << 32 | at as u64);
             }
         }
     }
@@ -1828,10 +1882,9 @@ extend Gen {
     // Push scalar value `v`.
     fn get(self: &mut Self, v: Value) {
         if (v & VFLAG) != 0 && (v & VPARAM) == 0 && (v & ~VFLAG) == self.lazy.0 {
-            let (_, x, xa, wide) = self.lazy;
-            self.c.local(w::LOCAL_GET, x);
-            self.c.local(w::LOCAL_GET, xa);
-            self.c.op(pick8(wide, w::I64_LT_U, w::I32_LT_U));
+            let (i, x, xa, xb) = self.lazy;
+            let t = self.b().insts[i as usize];
+            self.ovf_flag(t.op == O_ADDO, t.aux == OV_SIGNED, t.ty == T_I64, x, xa, xb);
             self.lazy.0 = NONE;
             return;
         }
@@ -2864,64 +2917,15 @@ extend Gen {
         };
         self.c.op(o + d);
         self.c.local(w::LOCAL_SET, x);
-        // An unsigned sum's flag that only the next instruction reads, a select, with nothing
-        // written between: computed there (`lazy`), from the sum's and the first operand's own locals.
-        if fl != NONE && add && !signed && x == li && la != NONE && self.next_reads_flag(i) {
-            self.lazy = (i, x, xa, wide);
+        // A flag that only the next instruction reads, a select, with nothing written between: computed
+        // there (`lazy`), from the value's and the operands' own locals (an unsigned sum reads no second).
+        if fl != NONE && x == li && la != NONE && (add && !signed || lb != NONE) && self.next_reads_flag(i) {
+            self.value_write(i);
+            self.lazy = (i, x, xa, xb);
             return true;
         }
         if fl != NONE {
-            if signed {
-                // add: (a ^ x) & (b ^ x) < 0; sub: (a ^ b) & (a ^ x) < 0.
-                self.c.local(w::LOCAL_GET, xa);
-                self.c.local(
-                    w::LOCAL_GET,
-                    if add {
-                        x
-                    } else {
-                        xb
-                    },
-                );
-                self.c.op(w::I32_XOR + d);
-                self.c.local(
-                    w::LOCAL_GET,
-                    if add {
-                        xb
-                    } else {
-                        xa
-                    },
-                );
-                self.c.local(w::LOCAL_GET, x);
-                self.c.op(w::I32_XOR + d);
-                self.c.op(w::I32_AND + d);
-                if wide {
-                    self.c.i64_const(0);
-                    self.c.op(w::I64_LT_S);
-                } else {
-                    self.c.i32_const(0);
-                    self.c.op(w::I32_LT_S);
-                }
-            } else if add {
-                self.c.local(w::LOCAL_GET, x);
-                self.c.local(w::LOCAL_GET, xa);
-                self.c.op(
-                    if wide {
-                        w::I64_LT_U
-                    } else {
-                        w::I32_LT_U
-                    },
-                );
-            } else {
-                self.c.local(w::LOCAL_GET, xa);
-                self.c.local(w::LOCAL_GET, xb);
-                self.c.op(
-                    if wide {
-                        w::I64_LT_U
-                    } else {
-                        w::I32_LT_U
-                    },
-                );
-            }
+            self.ovf_flag(add, signed, wide, x, xa, xb);
             self.c.local(w::LOCAL_SET, fl);
         }
         if li != NONE && x != li {
@@ -2929,6 +2933,38 @@ extend Gen {
             self.c.local(w::LOCAL_SET, li);
         }
         return true;
+    }
+
+    // Push the overflow flag of the 32- or 64-bit (`wide`) sum or difference (`add`), signed or not, whose
+    // value is in local `x` and operands in `xa` and `xb` (an unsigned sum reads no `xb`).
+    fn ovf_flag(self: &mut Self, add: bool, signed: bool, wide: bool, x: u32, xa: u32, xb: u32) {
+        let d = if wide {
+            w::I64_ADD - w::I32_ADD
+        } else {
+            0u8
+        };
+        if signed {
+            // add: (a ^ x) & (b ^ x) < 0; sub: (a ^ b) & (a ^ x) < 0.
+            self.c.local(w::LOCAL_GET, xa);
+            self.c.local(w::LOCAL_GET, pick32(add, x, xb));
+            self.c.op(w::I32_XOR + d);
+            self.c.local(w::LOCAL_GET, pick32(add, xb, xa));
+            self.c.local(w::LOCAL_GET, x);
+            self.c.op(w::I32_XOR + d);
+            self.c.op(w::I32_AND + d);
+            if wide {
+                self.c.i64_const(0);
+                self.c.op(w::I64_LT_S);
+            } else {
+                self.c.i32_const(0);
+                self.c.op(w::I32_LT_S);
+            }
+        } else {
+            // add: x < a; sub: a < b.
+            self.c.local(w::LOCAL_GET, pick32(add, x, xa));
+            self.c.local(w::LOCAL_GET, pick32(add, xa, xb));
+            self.c.op(pick8(wide, w::I64_LT_U, w::I32_LT_U));
+        }
     }
 
     // Whether instruction `i`'s flag has one reader, the next instruction of its block, a select on it.
@@ -3941,6 +3977,36 @@ extend Gen {
         return true;
     }
 
+    // Whether 32-bit select `t` is `c ? -1 : x` for strict comparisons `c` and `x` (`x` zero-extended or
+    // not) of the same two values that never both hold: `a < b` and `a > b` (or `b < a`), signed or unsigned.
+    fn minus_or_bit(self: &Self, t: Inst) bool {
+        let b = self.b();
+        let mut z: u64 = 0;
+        if t.ty != T_I32 || !self.const_of(t.b, &mut z) || z as u32 != 0xFFFFFFFF || (t.a & (VPARAM | VFLAG)) != 0 || (t.c & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        let mut x = b.insts[t.c as usize];
+        if x.op == O_ZEXT && (x.a & (VPARAM | VFLAG)) == 0 {
+            x = b.insts[x.a as usize];
+        }
+        let c = b.insts[t.a as usize];
+        if c.op != O_ICMP || x.op != O_ICMP {
+            return false;
+        }
+        let other = if c.aux == C_SLT {
+            C_SGT
+        } else if c.aux == C_SGT {
+            C_SLT
+        } else if c.aux == C_ULT {
+            C_UGT
+        } else if c.aux == C_UGT {
+            C_ULT
+        } else {
+            return false;
+        };
+        return x.a == c.a && x.b == c.b && x.aux == other || x.a == c.b && x.b == c.a && x.aux == c.aux;
+    }
+
     // Push the value of scalar select `t`.
     fn select_push(self: &mut Self, t: Inst) {
         // A value or it plus 1 (`lv::FOLD_SINC`): the value plus the condition as 0 or 1 (inverted for the
@@ -3955,6 +4021,14 @@ extend Gen {
             } else {
                 self.c.op(w::I32_ADD);
             }
+            return;
+        }
+        // -1 or a 0 or 1 that holds only when the condition does not (a three-way comparison): that bit less
+        // the condition's.
+        if self.minus_or_bit(t) {
+            self.get(t.c);
+            self.get_cond(t.a, false, false);
+            self.c.op(w::I32_SUB);
             return;
         }
         // A constant true side under a comparison that folds in goes second, the comparison inverted: the
@@ -4096,8 +4170,10 @@ extend Gen {
             return self.block_code(x);
         }
         if tk.kind == TK_END {
+            self.end_at.push(self.c.len());
             self.c.op(w::END);
             let l = self.labels.pop().unwrap();
+            self.end_lb.push(l);
             if l.kind == LB_LOOP {
                 self.loop_end = self.c.len();
                 self.loop_at = l.at;
@@ -4118,17 +4194,33 @@ extend Gen {
             self.open_frame();
         }
         self.pend.truncate(0);
+        // The previous instruction's code without control instructions, for `pre_push` (NONE: none).
+        let mut pa0 = NONE;
+        let mut ps0 = NONE;
         for i in blk.start..blk.start + blk.len - 1 {
             if dbg {
                 self.row(self.b().locs[i as usize]);
             }
-            let (a0, s0, o0) = (self.c.acc.len() as u32, self.c.len(), self.c.ctl.len());
+            let (a00, s00, o0) = (self.c.acc.len() as u32, self.c.len(), self.c.ctl.len());
             if !self.inst(i) {
                 return false;
             }
             assert(self.lazy.0 == NONE || self.lazy.0 == i, "wasmgen: a sum's flag its reader did not read");
             self.end_inst();
-            self.stack_order(a0, s0, self.c.ctl.len() != o0);
+            let ctl = self.c.ctl.len() != o0;
+            let (a0, s0) = if !ctl && ps0 != NONE && ps0 < s00 {
+                self.pre_push(pa0, ps0, a00, s00)
+            } else {
+                (a00, s00)
+            };
+            self.stack_order(a0, s0, ctl);
+            if ctl {
+                pa0 = NONE;
+                ps0 = NONE;
+            } else if s0 < self.c.len() {
+                pa0 = a0;
+                ps0 = s0;
+            }
         }
         let ti = blk.start + blk.len - 1;
         if dbg {
@@ -4163,8 +4255,17 @@ extend Gen {
         return ba > ab;
     }
 
-    // The position in `pend` of the write of value `v`'s local, NONE when none waits (or `v` has no local).
+    // The position in `pend` of the write of value `v`'s local, NONE when none waits (or `v` has no local). A
+    // moved integer operation's (`lv::FOLD_SINK`) is its first operand's, which its code reads first.
     fn wait_pos(self: &Self, v: Value) u32 {
+        if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && self.lv.sunk[v as usize] {
+            let t = self.b().insts[v as usize];
+            let comm = t.op == O_ADD || t.op == O_MUL || t.op >= O_AND && t.op <= O_XOR;
+            if is_int(t.ty) && t.op >= O_ADD && t.op <= O_ASHR {
+                return self.wait_pos(pick_v(comm && self.swap_reads(t.a, t.b), t.b, t.a));
+            }
+            return NONE;
+        }
         if v == VNONE || (v & VFLAG) != 0 || (v & VPARAM) == 0 && (self.remat[v as usize] || self.lv.pfold[v as usize]) {
             return NONE;
         }
@@ -4179,6 +4280,109 @@ extend Gen {
             }
         }
         return NONE;
+    }
+
+    // An instruction's code (from local access `a0` and code byte `s0`, the previous one's from `pa0` and
+    // `ps0`, neither with control instructions) that pushes a constant or a local's value first, then reads
+    // the value whose write ends the previous code, the one write waiting (`pend`): that push goes before
+    // the previous code, so the write and the read meet (`stack_order`, `stack_values`). The previous code
+    // reads no waiting value nor that local, and the constant has no relocation. The current code's new
+    // start.
+    fn pre_push(self: &mut Self, pa0: u32, ps0: u32, a0: u32, s0: u32) (u32, u32) {
+        let a1 = self.c.acc.len() as u32;
+        if s0 >= self.c.len() || self.pend.len() != 1 || self.pend[0] + 1 != a0 || a0 == pa0 || (self.c.acc_op[(a0 - 1) as usize] & VW_OP) != w::LOCAL_SET {
+            return (a0, s0);
+        }
+        let l = self.c.acc[(a0 - 1) as usize] & 0xFFFFFFFF;
+        let op = self.c.bytes[s0 as usize];
+        // The push's length and whether it is the code's first local access.
+        let (lc, get) = if op == w::I32_CONST || op == w::I64_CONST {
+            let mut k = s0 + 1;
+            while k < self.c.len() && (self.c.bytes[k as usize] & 0x80) != 0 {
+                k += 1;
+            }
+            (k + 1 - s0, false)
+        } else if op == w::LOCAL_GET && a0 < a1 && (self.c.acc[a0 as usize] >> 32) as u32 == s0 && (self.c.acc[a0 as usize] & 0xFFFFFFFF) != l {
+            (1 + uleb_len((self.c.acc[a0 as usize] & 0xFFFFFFFF) as u32), true)
+        } else {
+            return (a0, s0);
+        };
+        // The read of the value right after the push.
+        let r = a0 + get as u32;
+        if r >= a1 || (self.c.acc_op[r as usize] & VW_OP) != w::LOCAL_GET || (self.c.acc[r as usize] & 0xFFFFFFFF) != l || (self.c.acc[r as usize] >> 32) as u32 != s0 + lc {
+            return (a0, s0);
+        }
+        if get {
+            let x = self.c.acc[a0 as usize] & 0xFFFFFFFF;
+            for q in pa0..a0 {
+                if (self.c.acc[q as usize] & 0xFFFFFFFF) == x {
+                    return (a0, s0);
+                }
+            }
+        }
+        for q in 0..self.held.len() / 3 {
+            let g = self.held[3 * q + 1];
+            if g >= pa0 && g < a0 {
+                return (a0, s0);
+            }
+        }
+        for q in 0..self.rels.len() {
+            let o = self.rels[q].off;
+            if o >= s0 && o < s0 + lc {
+                return (a0, s0);
+            }
+        }
+        // The push's bytes before the previous code; that code, its accesses, relocations and rows after.
+        let mut tmp: [u8; 16] = [0; 16];
+        for k in 0..lc {
+            tmp[k as usize] = self.c.bytes[(s0 + k) as usize];
+        }
+        let mut k = s0;
+        while k > ps0 {
+            k -= 1;
+            self.c.bytes[(k + lc) as usize] = self.c.bytes[k as usize];
+        }
+        for k in 0..lc {
+            self.c.bytes[(ps0 + k) as usize] = tmp[k as usize];
+        }
+        for q in pa0..a0 {
+            self.c.acc[q as usize] += lc as u64 << 32;
+        }
+        for q in 0..self.rels.len() {
+            let o = self.rels[q].off;
+            if o >= ps0 && o < s0 {
+                self.rels.index_mut(q).off = o + lc;
+            }
+        }
+        // The previous code's row stays at its start (the push takes its line); those in it and the current
+        // code's at its start move with the code.
+        for q in 0..self.rows.len() {
+            let o = (self.rows[q] >> 32) as u32;
+            if o > ps0 && o <= s0 {
+                self.rows[q] += lc as u64 << 32;
+            }
+        }
+        if !get {
+            return (a0, s0 + lc);
+        }
+        // The push's access moves before the previous code's: those and the waiting write one later.
+        let ga = self.c.acc[a0 as usize] & 0xFFFFFFFF | ps0 as u64 << 32;
+        let gop = self.c.acc_op[a0 as usize];
+        let mut q = a0;
+        while q > pa0 {
+            self.c.acc[q as usize] = self.c.acc[(q - 1) as usize];
+            self.c.acc_op[q as usize] = self.c.acc_op[(q - 1) as usize];
+            q -= 1;
+        }
+        self.c.acc[pa0 as usize] = ga;
+        self.c.acc_op[pa0 as usize] = gop;
+        for q in 0..self.held.len() {
+            if self.held[q] >= pa0 && self.held[q] < a0 {
+                self.held[q] += 1;
+            }
+        }
+        self.pend[0] += 1;
+        return (a0 + 1, s0 + lc);
     }
 
     // The code of one instruction, from local access `a0` and code byte `s0` (`ctl`: it holds control
@@ -4289,6 +4493,7 @@ extend Gen {
         self.moves(e);
         if self.brable(s, t) {
             let d = self.depth(t, self.sh.back(s, t));
+            self.brs.push(self.c.len() as u64 << 32 | d as u64);
             self.c.op(w::BR);
             self.c.uleb(d);
             return true;
@@ -7587,16 +7792,11 @@ extend Gen {
         self.c.memarg(4, h);
     }
 
-    // Push 16-byte value `v` twice.
-    fn vget2(self: &mut Self, v: Value) {
-        if !self.mem_v(v) {
-            self.get(v);
-            self.get(v);
-            return;
-        }
-        let x = self.tmp(w::V128);
+    // Push 16-byte value `v`, then a second operand for a shuffle that reads no lane of it: a scratch local
+    // (wasm locals start as zero).
+    fn vget_one(self: &mut Self, v: Value) {
         self.vget(v);
-        self.c.local(w::LOCAL_TEE, x);
+        let x = self.tmp(w::V128);
         self.c.local(w::LOCAL_GET, x);
     }
 
@@ -8037,7 +8237,7 @@ extend Gen {
             self.vext_low(t.a, fl, sg, te);
         } else if op == O_TRUNC {
             // Each lane's low bytes.
-            self.vget2(t.a);
+            self.vget_one(t.a);
             for j in 0..16u32 {
                 unsafe idx[j as usize] = (j / te % (16 / fe) * fe + j % te) as u8;
             }
@@ -8204,7 +8404,7 @@ extend Gen {
                 self.vget(a);
                 self.vget(b.pool[t.a as usize + 1]);
             } else {
-                self.vget2(a);
+                self.vget_one(a);
             }
             self.shuffle(&idx);
         } else if rule == core::SR_BITCAST {

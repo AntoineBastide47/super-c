@@ -5311,7 +5311,8 @@ int main(void) {
 }
 
 // wasm32: a signed sum whose overflow flag is read takes a local of its own, apart from its operands'
-// which the flag reads after the sum: no copy (`local.get x`, `local.set y`). It gives the C results.
+// locals, which the flag reads after the sum: no copy (`local.get x`, `local.set y`). The flag, which only
+// the select reads, is computed there (`i32.const 0`, `i32.lt_s`, `select`). It gives the C results.
 @test
 fn wasm_signed_overflow_sums_take_their_own_local() {
     let lir = M"(lir ptr 8
@@ -5352,6 +5353,8 @@ int main(void) {
             assert(x == y || !holds(&obj, cp[0..4]), "a copy");
         }
     }
+    let sel: [u8; 4] = [0x41, 0x00, 0x48, 0x1B];
+    assert(holds(&obj, sel[0..4]), "the flag at the select");
     if cli::has_cc() {
         assert_eq(run_native(lir, drv), 0);
         assert_eq(run_wasm(lir, drv), 0);
@@ -5407,6 +5410,121 @@ int main(void) {
     let ld0: [u8; 3] = [0x00, 0x02, 0x10];
     assert(holds(&obj, ld0[0..3]), "the load");
     if cli::has_cc() {
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
+// wasm32: a `br` to the code right after the `end`s that follow it goes (those labels of no block type, the
+// last not a loop's): `@up`'s loop exit falls out of the loop and its block (`i32.lt_u`, `br_if 0`, `end`,
+// `end`, no `br 1`). It gives the C results.
+@test
+fn wasm_branches_to_the_code_after_their_ends_go() {
+    let lir = M"(lir ptr 8
+sym @up fn global
+fn @up
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = icmp.eq v1, v2
+  br v4, b2(v1), b1(v2)
+b1(v5: i32):
+  v6 = add.i32 v5, v3
+  v7 = icmp.ult v6, v0
+  br v7, b1(v6), b2(v6)
+b2(v8: i32):
+  v9 = add.i32 v8, v1
+  ret v9
+)";
+    let drv = M"(#include <stdint.h>
+uint32_t up(uint32_t, uint32_t);
+int main(void) {
+  for (uint32_t n = 0; n < 6; n++)
+    for (uint32_t m = 0; m < 3; m++)
+      if (up(n, m) != (m == 0 ? 0 : (n > 1 ? n : 1) + m)) return 1;
+  return 0;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let tail: [u8; 5] = [0x49, 0x0D, 0x00, 0x0B, 0x0B];
+    assert(holds(&obj, tail[0..5]), "up");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
+// wasm32: a select of -1 and a comparison's bit under a comparison of the same values that never holds with
+// it is that bit less the condition's: `@c3` (`a > b` less `a < b`: `i32.gt_s`, ..., `i32.lt_s`,
+// `i32.sub`) and `@c3u` (`b <u a` less `a <u b`). `@c3n`'s `<=` and `>=` both hold for equal values: a
+// select. They give the C results.
+@test
+fn wasm_three_way_comparisons_subtract_their_bits() {
+    let lir = M"(lir ptr 8
+sym @c3 fn global
+sym @c3u fn global
+sym @c3n fn global
+fn @c3
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 -1
+  v3 = icmp.slt v0, v1
+  v4 = icmp.sgt v0, v1
+  v5 = zext.i32 v4
+  v6 = select.i32 v3, v2, v5
+  ret v6
+fn @c3u
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 -1
+  v3 = icmp.ult v0, v1
+  v4 = icmp.ult v1, v0
+  v5 = zext.i32 v4
+  v6 = select.i32 v3, v2, v5
+  ret v6
+fn @c3n
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 -1
+  v3 = icmp.sle v0, v1
+  v4 = icmp.sge v0, v1
+  v5 = zext.i32 v4
+  v6 = select.i32 v3, v2, v5
+  ret v6
+)";
+    let drv = M"(#include <stdint.h>
+int32_t c3(int32_t, int32_t);
+int32_t c3u(uint32_t, uint32_t);
+int32_t c3n(int32_t, int32_t);
+int main(void) {
+  static const int32_t v[5] = {-7, -1, 0, 1, 2147483647};
+  for (int i = 0; i < 5; i++)
+    for (int k = 0; k < 5; k++) {
+      int32_t a = v[i], b = v[k];
+      uint32_t ua = (uint32_t)a, ub = (uint32_t)b;
+      if (c3(a, b) != (a < b ? -1 : a > b)) return 1;
+      if (c3u(ua, ub) != (ua < ub ? -1 : ub < ua)) return 2;
+      if (c3n(a, b) != (a <= b ? -1 : a >= b)) return 3;
+    }
+  return 0;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let s: [u8; 7] = [0x4A, 0x20, 0x00, 0x20, 0x01, 0x48, 0x6B];
+    let u: [u8; 11] = [0x20, 0x01, 0x20, 0x00, 0x49, 0x20, 0x00, 0x20, 0x01, 0x49, 0x6B];
+    assert(holds(&obj, s[0..7]) && holds(&obj, u[0..11]), "c3");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
         assert_eq(run_wasm(lir, drv), 0);
     }
 }
@@ -5552,14 +5670,19 @@ int main(void) {
 // wasm32: an operation whose first operand stays (a constant, a parameter) computes its second where it
 // reads it, no local between: `@np`'s `-1 >> clz(x - 1)` is `i32.const -1`, `local.get 0`, `i32.const 1`,
 // `i32.sub`, `i32.clz`, `i32.shr_u`. `@bs`'s byte swap reads its parameter's local twice, no copy. `@chk`'s
-// overflow flag, which only the select reads, is computed there (`local.get 0`, `i32.lt_u`, `select`).
+// overflow flag, which only the select reads, is computed there (`local.get 0`, `i32.lt_u`, `select`), and
+// the select's constant goes before the sum, which stays on the stack (`i32.const 0`, ..., `i32.add`,
+// `local.tee`).
 // `@mh`'s 64-bit high product splits each parameter from its own local (`local.get 0`, `i64.const 32`,
 // `i64.shr_u`), no copy; `@two`'s lane sums read the vector's own local (no `local.get`, `local.tee`).
 // `@sx`'s store of `a * x[2] + p[0]` computes the whole sum after its address (`f32.add` then
 // `f32.store`, no local), and `@vx`'s of `y * x + p` on four lanes too, `x` from the block before
 // (`f32x4.add` then `v128.store`). `@dq`'s sum of the quotient and the remainder made right before it
 // computes the remainder after the quotient (`i32.mul`, `i32.sub`, `i32.add`), and `@tb`'s shift its
-// count past its folded mask (`i64.extend_i32_u`, `i64.shl`, `i64.shr_u`).
+// count past its folded mask (`i64.extend_i32_u`, `i64.shl`, `i64.shr_u`). `@rv`'s lane reversal reads its
+// vector once, a scratch local as the shuffle's unread second operand (no `local.tee x`, `local.get x`).
+// `@p5`'s `x * (x * x)^2` computes the moved square of the square first, the square on the stack
+// (`i32.mul`, `local.tee 1`, `local.get 1`, `i32.mul`, `local.get 0`, `i32.mul`).
 // They give the C results.
 @test
 fn wasm_second_operands_compute_where_they_are_read() {
@@ -5568,6 +5691,22 @@ sym @np fn global
 sym @dm fn global
 sym @dq fn global
 sym @tb fn global
+sym @rv fn global
+sym @p5 fn global
+fn @p5
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = mul.i32 v0, v0
+  v2 = mul.i32 v1, v1
+  v3 = mul.i32 v0, v2
+  ret v3
+fn @rv
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = load.v4i32 v0 align 2
+  v2 = vop.swizzle.v4i32 (v1) lanes [3, 2, 1, 0]
+  store v2, v0 align 2
+  ret
 fn @tb
   sig (i32) -> i32
 b0(v0: i32):
@@ -5671,6 +5810,8 @@ uint32_t np(uint32_t);
 uint32_t dm(uint32_t, uint32_t);
 uint32_t dq(uint32_t, uint32_t);
 uint32_t tb(uint32_t);
+void rv(uint32_t *);
+uint32_t p5(uint32_t);
 uint32_t bs(uint32_t);
 uint32_t chk(uint32_t, uint32_t);
 uint64_t mh(uint64_t, uint64_t);
@@ -5678,6 +5819,11 @@ uint32_t two(const uint32_t *);
 void sx(float *, const float *, float);
 void vx(float *, const float *, const float *);
 int main(void) {
+  for (uint32_t x = 0; x < 40; x += 3)
+    if (p5(x * 0x9E3779B9u) != (x * 0x9E3779B9u) * (x * 0x9E3779B9u) * (x * 0x9E3779B9u) * (x * 0x9E3779B9u) * (x * 0x9E3779B9u)) return 11;
+  uint32_t r4[4] = {1, 2, 3, 4};
+  rv(r4);
+  if (r4[0] != 4 || r4[1] != 3 || r4[2] != 2 || r4[3] != 1) return 10;
   static const uint32_t tv[6] = {10, 33, 7, 99, 5, 0};
   for (uint32_t i = 0; i < 9; i++)
     if (tb(i) != tv[i < 5 ? i : 5]) return 9;
@@ -5723,7 +5869,8 @@ int main(void) {
     let bs: [u8; 6] = [0x78, 0x20, 0x00, 0x41, 0x18, 0x78];
     assert(holds(&obj, bs[0..6]), "bs");
     let ck: [u8; 4] = [0x20, 0x00, 0x49, 0x1B];
-    assert(holds(&obj, ck[0..4]), "chk");
+    let ck0: [u8; 8] = [0x41, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6A, 0x22];
+    assert(holds(&obj, ck[0..4]) && holds(&obj, ck0[0..8]), "chk");
     let mh: [u8; 5] = [0x20, 0x00, 0x42, 0x20, 0x88];
     let tee: [u8; 3] = [0x20, 0x00, 0x22];
     assert(holds(&obj, mh[0..5]) && !holds(&obj, tee[0..3]), "mh");
@@ -5735,6 +5882,12 @@ int main(void) {
     assert(holds(&obj, dq[0..3]), "dq");
     let tb: [u8; 7] = [0x20, 0x00, 0xAD, 0x42, 0x03, 0x86, 0x88];
     assert(holds(&obj, tb[0..7]), "tb");
+    for k in 0..8u8 {
+        let tg: [u8; 6] = [0x22, k, 0x20, k, 0xFD, 0x0D];
+        assert(!holds(&obj, tg[0..6]), "rv");
+    }
+    let p5: [u8; 9] = [0x6C, 0x22, 0x01, 0x20, 0x01, 0x6C, 0x20, 0x00, 0x6C];
+    assert(holds(&obj, p5[0..9]), "p5");
     for k in 0..8u8 {
         let cp: [u8; 3] = [0x20, k, 0x22];
         assert(!holds(&obj, cp[0..3]), "two");
