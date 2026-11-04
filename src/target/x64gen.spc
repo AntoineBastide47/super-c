@@ -1114,16 +1114,24 @@ extend Gen {
         } else {
             self.reg(f.index)
         };
-        // The register a return right after wants, when an operand dying here holds it: the `lea` reads
-        // it before it writes.
+        // The register a return right after wants, when an operand dying here holds it, or the one a step
+        // shares (`def_shared`): the `lea` reads its operands before it writes.
         let want = self.ret_want(i);
-        let rd = if want != NOREG && want == rb && self.dies_here(f.base) {
+        let mut rd = if want != NOREG && want == rb && self.dies_here(f.base) {
             self.def_over(i, f.base, rb)
         } else if want != NOREG && want == ri && self.dies_here(f.index) {
             self.def_over(i, f.index, ri)
+        } else if f.base != VNONE {
+            self.def_shared(i, f.base)
         } else {
-            self.def(i)
+            NOREG
         };
+        if rd == NOREG && f.index != VNONE {
+            rd = self.def_shared(i, f.index);
+        }
+        if rd == NOREG {
+            rd = self.def(i);
+        }
         let d = f.disp as i32;
         let m = if ri == NOREG {
             x::at(rb, d)

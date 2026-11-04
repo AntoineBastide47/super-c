@@ -6050,6 +6050,74 @@ int main(void) {
     }
 }
 
+// Whether `bytes` holds an x86-64 64-bit copy between two registers (REX.W 89 or 8B, a register ModRM
+// byte) but the frame's `mov rbp, rsp`.
+fn reg_copies(bytes: &Vector<u8>) bool {
+    for at in 0..bytes.len() - 2 {
+        let m = bytes[at + 2];
+        if (bytes[at] & 0xFA) == 0x48 && (bytes[at + 1] == 0x89 || bytes[at + 1] == 0x8B) && m >= 0xC0 && !(bytes[at] == 0x48 && bytes[at + 1] == 0x89 && m == 0xE5) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// x86-64: a loop's sums that one `lea` makes (`acc + s[i] * 5 + 72`, two accumulators) take their header
+// parameters' registers, so the back edge moves nothing (no register copy). It gives the C results.
+@test
+fn x86_lea_steps_take_their_parameters_registers() {
+    let lir = M"(lir ptr 8
+sym @lacc fn global
+fn @lacc
+  sig (ptr, i64, ptr) -> void
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 72
+  v6 = iconst.i64 5
+  jmp b1(v3, v3, v3)
+b1(v7: i64, v8: i64, v9: i64):
+  v10 = icmp.ult v7, v1
+  br v10, b2, b3
+b2:
+  v11 = ptradd v0, v7 * 8
+  v12 = load.i64 v11 align 3
+  v13 = mul.i64 v12, v6
+  v14 = add.i64 v13, v5
+  v15 = add.i64 v8, v14
+  v16 = load.i64 v11+8 align 3
+  v17 = add.i64 v16, v5
+  v18 = add.i64 v9, v17
+  v19 = add.i64 v7, v4
+  jmp b1(v19, v15, v18)
+b3:
+  store v8, v2 align 3
+  store v9, v2+8 align 3
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+void lacc(const uint64_t *, int64_t, uint64_t *);
+int main(void) {
+  static uint64_t s[10];
+  uint64_t a = 0, b = 0;
+  for (int k = 0; k < 10; k++) s[k] = (uint64_t)k * 0x9E3779B97F4A7C15u + 3;
+  for (int k = 0; k < 9; k++) {
+    a += s[k] * 5 + 72;
+    b += s[k + 1] + 72;
+  }
+  uint64_t r[2] = {0, 0};
+  lacc(s, 9, r);
+  return r[0] != a || r[1] != b;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    assert(!reg_copies(&obj), "a copy");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A select of a value plus 1 and the value under a test against 0 adds the test's 0 or 1, not the
 // tested value (a quotient rounded up: `q + (r != 0)`). It gives the C results.
 @test
@@ -13328,6 +13396,7 @@ int64_t up64(int64_t, int64_t);
 int32_t nz(int32_t, int32_t);
 int32_t raw(int32_t, int8_t);
 int main(void) {
+  if (raw(5, 2) != 6 || raw(5, -128) != 6 || raw(5, 0) != 5) return 4;
   static const int32_t v[5] = {-2147483647 - 1, -1, 0, 5, 2147483647};
   for (int i = 0; i < 5; i++)
     for (int k = 0; k < 5; k++) {

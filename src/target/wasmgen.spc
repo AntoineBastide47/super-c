@@ -1357,8 +1357,9 @@ extend Gen {
             return false;
         }
         let pv = VPARAM | p - ni;
+        // A folded or moved value reads it where its reader is (`uses_at`).
         for j in i + 1..ti + 1 {
-            lv::each_use(b, b.insts[j as usize], &mut self.uses);
+            self.lv.uses_at(b, j, &mut self.uses);
             for u in 0..self.uses.len() {
                 if self.uses[u] == pv {
                     return false;
