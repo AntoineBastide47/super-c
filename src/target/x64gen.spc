@@ -3299,7 +3299,7 @@ extend Gen {
         };
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE
         } else {
             0
@@ -6969,6 +6969,34 @@ extend Gen {
         }
         let n = type_bytes(ty, self.ptr);
         let mut k: i32 = 0;
+        // A folded read-modify-write (`lv::FOLD_RMW`): the operation on the memory.
+        if (t.b & (VPARAM | VFLAG)) == 0 && t.b != VNONE && self.lv.pfold[t.b as usize] && lv::rmw_load(
+            self.b(),
+            &self.lv.pfold,
+            t,
+        ) != VNONE {
+            let o = self.b().insts[t.b as usize];
+            let l = lv::rmw_load(self.b(), &self.lv.pfold, t);
+            let other = if o.a == l {
+                o.b
+            } else {
+                o.a
+            };
+            let imm = self.imm32_of(other, n * 8, &mut k);
+            let r = if imm {
+                NOREG
+            } else {
+                self.reg(other)
+            };
+            let m = self.mem_at(t.a, t.c as i32, &mut rs, &mut radd);
+            if imm {
+                self.c.alu_mi(alu_of(o.op), n, m, k);
+            } else {
+                self.c.alu_mr(alu_of(o.op), n, m, r);
+            }
+            self.mem_rel(rs, radd);
+            return true;
+        }
         if !is_v(ty) && self.imm32_of(t.b, n * 8, &mut k) {
             if n == 8 && k == 0 && (t.aux & MEM_VOLATILE) == 0 && self.zero_run(t) {
                 return true;

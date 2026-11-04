@@ -59,6 +59,10 @@ pub(package) const FOLD_SINK: u64 = 1099511627776;
 /// The extension or truncation of an integer that a folded shift count mask (`FOLD_SHAMT`) alone reads: the
 /// shift reads the count's low bits from the integer's register (x86-64's `cl`, arm64's register shifts).
 pub(package) const FOLD_SHAMT_EXT: u64 = 2199023255552;
+/// A store of an integer `add`, `sub`, `and`, `or` or `xor` of a load of the same address (the first
+/// operand of a `sub`), each read only there, with no write between the load and the store: both fold into
+/// the store, which reads and writes the memory (x86-64's `add [m], r`; `rmw_load`).
+pub(package) const FOLD_RMW: u64 = 4398046511104;
 pub(package) const FOLD_CARRY: u64 = 16384;
 pub(package) const FOLD_FSEL: u64 = 32768;
 pub(package) const FOLD_NOT: u64 = 65536;
@@ -1338,6 +1342,31 @@ extend Live {
                 let s = carry_inc(b, &self.pfold, i as u32);
                 if s != VNONE && self.count[s as usize] == 1 {
                     self.pfold[s as usize] = true;
+                }
+            }
+        }
+        // `FOLD_RMW` before `FOLD_LDOP`, which would fold the load into the operation alone.
+        if (self.fold_ops & FOLD_RMW) != 0 {
+            for k in 0..b.blocks.len() {
+                let bk = b.blocks[k];
+                for i in bk.start..bk.start + bk.len {
+                    let t = b.insts[i as usize];
+                    if t.op != O_STORE || !is_inst(t.b) || (t.aux & MEM_VOLATILE) != 0 {
+                        continue;
+                    }
+                    let v = t.b;
+                    let l = rmw_load(b, &self.pfold, t);
+                    if l == VNONE || v < bk.start || self.count[v as usize] != 1 || self.count[l as usize] != 1 || l < bk.start {
+                        continue;
+                    }
+                    let mut clear = true;
+                    for j in l + 1..i {
+                        clear = clear && !writes_mem(b.insts[j as usize]);
+                    }
+                    if clear {
+                        self.pfold[l as usize] = true;
+                        self.pfold[v as usize] = true;
+                    }
                 }
             }
         }
@@ -3465,6 +3494,37 @@ pub(package) fn not_side(b: &Body, folded: &Vector<bool>, t: Inst) Value {
     }
     if is_inst(t.a) && folded[t.a as usize] && inversion(b, t.a) != VNONE {
         return t.a;
+    }
+    return VNONE;
+}
+
+/// The load store `t` of `b` reads, modifies and writes back (`FOLD_RMW`): its value an integer `add`, `sub`,
+/// `and`, `or` or `xor`, not folded, of a load (its first operand for a `sub`) of the store's address and
+/// offset, of the operation's type, neither volatile nor bounded, nor folded; the other operand no folded
+/// value. VNONE when not.
+pub(package) fn rmw_load(b: &Body, folded: &Vector<bool>, t: Inst) Value {
+    let v = t.b;
+    if !is_inst(v) {
+        return VNONE;
+    }
+    let o = b.insts[v as usize];
+    let alu = o.op == O_ADD || o.op == O_SUB || o.op == O_AND || o.op == O_OR || o.op == O_XOR;
+    if !alu || !is_int(o.ty) || o.ty == T_I128 || o.ty == T_PTR {
+        return VNONE;
+    }
+    for q in 0..2u32 {
+        let (l, other) = if q == 0 {
+            (o.a, o.b)
+        } else {
+            (o.b, o.a)
+        };
+        if q == 1 && o.op == O_SUB || !is_inst(l) || l == other || is_inst(other) && folded[other as usize] && !folded[v as usize] {
+            continue;
+        }
+        let x = b.insts[l as usize];
+        if x.op == O_LOAD && x.a == t.a && x.c == t.c && x.ty == o.ty && (x.aux & (MEM_VOLATILE | MEM_RANGE)) == 0 && folded[l as usize] == folded[v as usize] {
+            return l;
+        }
     }
     return VNONE;
 }

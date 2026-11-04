@@ -5322,6 +5322,98 @@ int main(void) {
     }
 }
 
+// A store of an operation on a load of its own address is one instruction on the memory (x86-64):
+// `@inc` is `add dword ptr [rdi + 4], 5`, `@dec` `sub dword ptr [rdi + 8], esi`, `@orb` `or byte ptr [rdi],
+// sil`; `@between` (a store between) and `@twice` (the load read again) load first. They give the C
+// results.
+@test
+fn x86_stores_of_operations_on_their_loads_modify_memory() {
+    let lir = M"(lir ptr 8
+sym @inc fn global
+sym @dec fn global
+sym @orb fn global
+sym @between fn global
+sym @twice fn global
+fn @inc
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = load.i32 v0+4 align 2
+  v2 = iconst.i32 5
+  v3 = add.i32 v1, v2
+  store v3, v0+4 align 2
+  ret
+fn @dec
+  sig (ptr, i32) -> void
+b0(v0: ptr, v1: i32):
+  v2 = load.i32 v0+8 align 2
+  v3 = sub.i32 v2, v1
+  store v3, v0+8 align 2
+  ret
+fn @orb
+  sig (ptr, i8) -> void
+b0(v0: ptr, v1: i8):
+  v2 = load.i8 v0 align 0
+  v3 = or.i8 v1, v2
+  store v3, v0 align 0
+  ret
+fn @between
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.i32 v0 align 2
+  v3 = iconst.i32 1
+  v4 = add.i32 v2, v3
+  v5 = iconst.i32 7
+  store v5, v1 align 2
+  store v4, v0 align 2
+  ret
+fn @twice
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  v2 = iconst.i32 3
+  v3 = add.i32 v1, v2
+  store v3, v0 align 2
+  ret v1
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, OMIT_FP, &mut obj), "the System V object");
+    // add dword ptr [rdi + 4], 5; sub dword ptr [rdi + 8], esi; or byte ptr [rdi], sil.
+    let inc: [u8; 4] = [0x83, 0x47, 0x04, 0x05];
+    let dec: [u8; 3] = [0x29, 0x77, 0x08];
+    let orb: [u8; 3] = [0x40, 0x08, 0x37];
+    assert(holds(&obj, inc[0..4]) && holds(&obj, dec[0..3]) && holds(&obj, orb[0..3]), "inc, dec, orb");
+    // No add dword ptr [rdi], 1 or 3.
+    let bw: [u8; 3] = [0x83, 0x07, 0x01];
+    let tw: [u8; 3] = [0x83, 0x07, 0x03];
+    assert(!holds(&obj, bw[0..3]) && !holds(&obj, tw[0..3]), "between, twice");
+    let drv = M"(#include <stdint.h>
+void inc(int32_t *);
+void dec(int32_t *, int32_t);
+void orb(uint8_t *, uint8_t);
+void between(int32_t *, int32_t *);
+int32_t twice(int32_t *);
+int main(void) {
+  int32_t a[3] = {1, 2, 3};
+  inc(a);
+  dec(a, 10);
+  if (a[1] != 7 || a[2] != -7) return 1;
+  uint8_t b = 0x21;
+  orb(&b, 0x14);
+  if (b != 0x35) return 2;
+  int32_t c = 4;
+  between(&c, &c);
+  if (c != 5) return 3;
+  int32_t d = 9;
+  if (twice(&d) != 9 || d != 12) return 4;
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A mask of the low bits of a right shift is a field (x86-64): `@byte1`'s bits 8 to 15 of rcx are
 // `movzx eax, ch` (Microsoft x64); `@f12` shifts and masks, `@f40` (no 32-bit mask) shifts up and down,
 // `@zero1` tests its field. They give the C results.
