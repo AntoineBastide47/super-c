@@ -686,6 +686,10 @@ pub(package) const MEM_OVERLAP: u16 = 1;
 /// A logical right shift (`lshr`) that shifts out only zero bits (the text's `lshr.exact`): its operand's
 /// integer values are multiples of 2^amount, so it divides a polynomial (`lir::loops`' final values).
 pub(package) const SH_EXACT: u16 = 1;
+/// A `clz` or `ctz` whose result is read only where its operand is not 0 (the text's `clz.nz`): its result
+/// for 0 is any value, so a target whose bit scan leaves 0 undefined takes no fix-up (x86-64's `bsr`,
+/// `bsf`). A rewrite that reads the count where the operand may be 0 drops the flag.
+pub(package) const CNT_NONZERO: u16 = 1;
 
 /// Atomic memory orders (`aux` bits 0 to 2 of the atomic opcodes; `O_ACAS`: the failure order in bits
 /// 3 to 5, then ACAS_WEAK; `O_ARMW`: the operation in bits 4 to 7).

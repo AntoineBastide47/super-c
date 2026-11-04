@@ -10377,6 +10377,133 @@ data @y size 12 align 2 bytes 010000000500000003000000
     same_result(&b, &a, "differ", none, 0);
 }
 
+// A count read only where its operand is not 0 is `.nz`: `@guard`'s `clz`, the arm for `x != 0` of a
+// select on `x == 0`; `@above`'s `ctz` of `x - 1` after `x >u 1` (a store keeps the branch); `@plain`'s
+// (no test) stays, and so does `@bit`'s narrowed `ctz` of `x | 2^32` (`x` may be 0); `@wide`'s count of a
+// zero extension narrows marked. The results stay.
+@test
+fn counts_of_operands_above_zero_are_marked() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @guard fn global noinline
+sym @above fn global noinline
+sym @plain fn global noinline
+sym @top fn global noinline
+sym @bit fn global noinline
+sym @wide fn global noinline
+sym @run fn global
+sym @cell data global
+fn @guard
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.eq v0, v1
+  br v2, b2, b1
+b1:
+  v3 = clz.i32 v0
+  ret v3
+b2:
+  v4 = iconst.i32 99
+  ret v4
+fn @above
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = icmp.ule v0, v1
+  br v2, b2, b1
+b1:
+  v3 = sub.i64 v0, v1
+  v4 = ctz.i64 v3
+  ret v4
+b2:
+  v5 = iconst.i64 77
+  v6 = symaddr @cell
+  store v5, v6 align 3
+  ret v5
+fn @plain
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = clz.i32 v0
+  ret v1
+fn @wide
+  sig (i32) -> i64
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.eq v0, v1
+  br v2, b2, b1
+b1:
+  v3 = zext.i64 v0
+  v4 = clz.i64 v3
+  ret v4
+b2: unlikely
+  v5 = call.i32 @plain(v0) : (i32) -> i32
+  unreachable
+fn @bit
+  sig (i32) -> i64
+b0(v0: i32):
+  v1 = zext.i64 v0
+  v2 = iconst.i64 4294967296
+  v3 = or.i64 v1, v2
+  v4 = ctz.nz.i64 v3
+  ret v4
+fn @top
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 31
+  v3 = icmp.eq v0, v1
+  br v3, b2, b1
+b1:
+  v4 = clz.i32 v0
+  v5 = xor.i32 v4, v2
+  ret v5
+b2: unlikely
+  v6 = call.i32 @plain(v0) : (i32) -> i32
+  unreachable
+fn @run
+  sig () -> i64
+b0:
+  v0 = iconst.i32 0
+  v1 = iconst.i32 4096
+  v2 = iconst.i64 1
+  v3 = iconst.i64 9
+  v4 = call.i32 @guard(v0) : (i32) -> i32
+  v5 = call.i32 @guard(v1) : (i32) -> i32
+  v6 = call.i64 @above(v2) : (i64) -> i64
+  v7 = call.i64 @above(v3) : (i64) -> i64
+  v8 = call.i32 @plain(v0) : (i32) -> i32
+  v9 = iconst.i64 1000
+  v10 = zext.i64 v4
+  v11 = mul.i64 v10, v9
+  v12 = zext.i64 v5
+  v13 = add.i64 v11, v12
+  v14 = mul.i64 v13, v9
+  v15 = add.i64 v14, v6
+  v16 = mul.i64 v15, v9
+  v17 = add.i64 v16, v7
+  v18 = mul.i64 v17, v9
+  v19 = zext.i64 v8
+  v20 = add.i64 v18, v19
+  ret v20
+data @cell size 8 align 3 bytes 0000000000000000
+)",
+    );
+    let g = text_of(&a, "guard");
+    let o = text_of(&a, "above");
+    let p = text_of(&a, "plain");
+    assert(g.contains("clz.nz.i32"), g.as_str());
+    assert(o.contains("ctz.nz.i64"), o.as_str());
+    assert(!p.contains(".nz"), p.as_str());
+    let q = text_of(&a, "top");
+    assert(q.contains("clz.nz.i32"), q.as_str());
+    let w = text_of(&a, "wide");
+    assert(w.contains("clz.nz.i32"), w.as_str());
+    let n = text_of(&a, "bit");
+    assert(n.contains("ctz.i32") && !n.contains(".nz"), n.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "run", none, 99019077003032);
+}
+
 // A select of two loads alike that only it reads, with no write between, is one load of the selected
 // address: `@pick` loads once; `@kept` (a store between) and `@both` (a load read again) keep two. The
 // results stay.

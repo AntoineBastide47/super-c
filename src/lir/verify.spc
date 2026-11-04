@@ -429,7 +429,7 @@ extend Verifier {
                 name,
                 b,
                 i,
-                is_int(t.ty) && t.ty != T_I128 && ta == t.ty,
+                is_int(t.ty) && t.ty != T_I128 && ta == t.ty && (t.aux == 0 || t.aux == CNT_NONZERO && op != O_POPCNT),
                 "an integer operand of the result's type, up to 64 bits",
             );
         }

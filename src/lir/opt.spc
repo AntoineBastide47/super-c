@@ -4772,8 +4772,8 @@ extend Opt {
     }
 
     // The least unsigned value `v` takes here: a constant's, a bound the branches in scope set
-    // (`order_facts`), or one a subtraction of a constant keeps (`a + k` as `a - d`, which does not wrap
-    // when `a`'s bound is at least `d`), `depth` instructions deep; None when unknown.
+    // (`order_facts`), or one a subtraction of a constant (`a + k` as `a - d`, which does not wrap when
+    // `a`'s bound is at least `d`) or a zero extension keeps, `depth` instructions deep; None when unknown.
     fn lbound(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) Option<u64> {
         if v == VNONE || (v & VFLAG) != 0 {
             return None;
@@ -4816,6 +4816,13 @@ extend Opt {
                         r
                     },
                 );
+            }
+        }
+        // A zero extension keeps its operand's bound.
+        if t.op == O_ZEXT && !is_vec(t.ty) {
+            let x = self.lbound(pk, b, t.a, depth - 1);
+            if x.is_some() && (best.is_none() || x.unwrap() > best.unwrap()) {
+                return x;
             }
         }
         return best;
@@ -6991,6 +6998,9 @@ extend Opt {
                 let _ = self.number(pk, b, k, i);
                 return true;
             }
+            if b.insts[i as usize].op == O_SELECT {
+                nonzero_arm(b, i);
+            }
             if b.insts[i as usize].op == O_SELECT && self.sign_select(pk, b, k, i) {
                 return true;
             }
@@ -7023,6 +7033,13 @@ extend Opt {
             let lop = b.insts[i as usize].op;
             if lop == O_VCMP && self.signed_vcmp(pk, b, k, i) {
                 return true;
+            }
+            // A count whose operand the bounds in scope keep above 0 (`CNT_NONZERO`).
+            if (lop == O_CLZ || lop == O_CTZ) && b.insts[i as usize].aux == 0 {
+                let lo = self.lbound(pk, b, t.a, UB_DEPTH);
+                if lo.is_some() && lo.unwrap() != 0 {
+                    b.insts.index_mut(i as usize).aux = CNT_NONZERO;
+                }
             }
             if lop >= O_CLZ && lop <= O_POPCNT && self.narrow_count(pk, b, k, i) || lop == O_TRUNC && self.narrow_const(
                 pk,
@@ -7968,7 +7985,10 @@ extend Opt {
         }
         let mut x = b.insts[t.a as usize];
         let wide = type_bits(t.ty, pk.ptr_bytes);
+        // The narrow count keeps `CNT_NONZERO` but of the bit above (its narrow operand may be 0).
+        let mut aux = t.aux;
         if t.op == O_CTZ && x.op == O_OR {
+            aux = 0;
             // The bit right above the narrow value, the other operand a zero extension.
             let (e, c) = if const_of(b, x.b).is_some() {
                 (x.a, const_of(b, x.b))
@@ -7991,7 +8011,7 @@ extend Opt {
         if !is_int(nt) || narrow < 8 || narrow >= wide || nt == T_I128 {
             return false;
         }
-        let n = self.before(b, k, i, Inst { op: t.op, ty: nt, aux: 0, a: x.a, b: VNONE, c: VNONE });
+        let n = self.before(b, k, i, Inst { op: t.op, ty: nt, aux: aux, a: x.a, b: VNONE, c: VNONE });
         let z = self.before(b, k, i, Inst { op: O_ZEXT, ty: t.ty, aux: 0, a: n, b: VNONE, c: VNONE });
         if t.op != O_CLZ {
             self.repl[i as usize] = z;
@@ -15520,6 +15540,32 @@ fn stored_piece(b: &Body, v: Value, ptr: u32) (Value, u32, u32) {
         return (VNONE, 0, 0);
     }
     return (x, 0, n);
+}
+
+// Select `i` of `b` on `x == 0` (or `x != 0`) whose arm for `x != 0` is a count of `x` only it reads: the
+// count is `CNT_NONZERO` (its value for 0 is never taken).
+fn nonzero_arm(b: &mut Body, i: u32) {
+    let t = b.insts[i as usize];
+    if !is_op(b, t.a, O_ICMP) {
+        return;
+    }
+    let c = b.insts[t.a as usize];
+    if c.aux != C_EQ && c.aux != C_NE || const_of(b, c.b) != Some(0u64) {
+        return;
+    }
+    let arm = if c.aux == C_EQ {
+        t.c
+    } else {
+        t.b
+    };
+    if !is_op(b, arm, O_CLZ) && !is_op(b, arm, O_CTZ) || b.insts[arm as usize].a != c.a || b.insts[arm as usize].aux != 0 || !only_use(
+        b,
+        arm,
+        i,
+    ) {
+        return;
+    }
+    b.insts.index_mut(arm as usize).aux = CNT_NONZERO;
 }
 
 // Whether instruction `at` of `b` is the one use of value `v`: no other instruction or edge reads it.

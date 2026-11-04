@@ -5322,6 +5322,63 @@ int main(void) {
     }
 }
 
+// A count read only where its operand is not 0 (`.nz`) takes no fix-up for 0 on x86-64: `@top`'s top bit
+// index after `x == 0` is `bsr eax, edi` and the return, `@low`'s `ctz` on a select's arm for `x != 0` a
+// `bsf` with no `tzcnt` preset. They give the C results.
+@test
+fn x86_counts_of_nonzero_operands_take_no_fix_up() {
+    let lir = M"(lir ptr 8
+sym @top fn global
+sym @low fn global
+fn @top
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 31
+  v3 = icmp.eq v0, v1
+  br v3, b2, b1
+b1:
+  v4 = clz.nz.i32 v0
+  v5 = xor.i32 v4, v2
+  ret v5
+b2:
+  ret v1
+fn @low
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 99
+  v3 = icmp.eq v0, v1
+  v4 = ctz.nz.i32 v0
+  v5 = select.i32 v3, v2, v4
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, OMIT_FP, &mut obj), "the System V object");
+    // bsr eax, edi; ret. bsf eax, edi with no F3 (tzcnt) before.
+    let bsr: [u8; 4] = [0x0F, 0xBD, 0xC7, 0xC3];
+    let bsf: [u8; 3] = [0x0F, 0xBC, 0xC7];
+    let tz: [u8; 4] = [0xF3, 0x0F, 0xBC, 0xC7];
+    assert(holds(&obj, bsr[0..4]) && holds(&obj, bsf[0..3]) && !holds(&obj, tz[0..4]), "top, low");
+    let drv = M"(#include <stdint.h>
+int32_t top(int32_t);
+int32_t low(int32_t);
+int main(void) {
+  static const uint32_t v[6] = {0, 1, 2, 0x80000000u, 0x00F00000u, 0xFFFFFFFFu};
+  for (int i = 0; i < 6; i++) {
+    uint32_t x = v[i];
+    if (top((int32_t)x) != (x == 0 ? 0 : 31 - __builtin_clz(x))) return 1;
+    if (low((int32_t)x) != (x == 0 ? 99 : __builtin_ctz(x))) return 2;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A store of an operation on a load of its own address is one instruction on the memory (x86-64):
 // `@inc` is `add dword ptr [rdi + 4], 5`, `@dec` `sub dword ptr [rdi + 8], esi`, `@orb` `or byte ptr [rdi],
 // sil`; `@between` (a store between) and `@twice` (the load read again) load first. They give the C

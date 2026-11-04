@@ -5403,6 +5403,14 @@ extend Gen {
             self.popcount(rd, r, sz);
             return;
         }
+        // An operand not 0 (`CNT_NONZERO`): bsf, or bsr and the flip to a count of zeros.
+        if t.aux == CNT_NONZERO {
+            self.c.bsx(t.op == O_CLZ, sz, rd, r);
+            if t.op == O_CLZ {
+                self.c.alu_ri(x::XOR, 4, rd, (bits - 1) as i32);
+            }
+            return;
+        }
         // `tzcnt` (bsf with F3) into the width preset: the count where the processor has it, else bsf,
         // which every x86-64 processor makes keep the destination for 0 (as clang relies on).
         if t.op == O_CTZ && bits >= 32 && rd != r {
@@ -5488,6 +5496,12 @@ extend Gen {
         if op == O_SUB && (t.b & (VPARAM | VFLAG)) == 0 && t.b != VNONE && self.lv.pfold[t.b as usize] && self.b().insts[t.b as usize].op == O_CLZ {
             let rx = self.reg(self.b().insts[t.b as usize].a);
             let rd = self.def(i);
+            if self.b().insts[t.b as usize].aux == CNT_NONZERO {
+                self.c.bsx(true, sz, rd, rx);
+                self.c.alu_ri(x::ADD, 4, rd, 1);
+                self.va.index_mut(i as usize).clean = true;
+                return true;
+            }
             let src = if rd == rx {
                 self.c.mov_rr(sz, S0, rx);
                 S0
@@ -5507,8 +5521,10 @@ extend Gen {
             let rx = self.reg(self.b().insts[t.a as usize].a);
             let rd = self.def(i);
             self.c.bsx(true, sz, rd, rx);
-            self.c.mov_ri(S1, 2 * bits - 1);
-            self.c.cmov(x::CC_E, sz, rd, S1);
+            if self.b().insts[t.a as usize].aux != CNT_NONZERO {
+                self.c.mov_ri(S1, 2 * bits - 1);
+                self.c.cmov(x::CC_E, sz, rd, S1);
+            }
             self.va.index_mut(i as usize).clean = true;
             return true;
         }

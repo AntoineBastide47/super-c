@@ -1082,6 +1082,9 @@ extend<'a> Parser<'a> {
         } else if op == O_LSHR && pi < self.parts.len() && self.parts[pi] == "exact" {
             t.aux = SH_EXACT;
             pi += 1;
+        } else if (op == O_CLZ || op == O_CTZ) && pi < self.parts.len() && self.parts[pi] == "nz" {
+            t.aux = CNT_NONZERO;
+            pi += 1;
         } else if (op == O_FPTOSI || op == O_FPTOUI) && pi < self.parts.len() && self.parts[pi] == "unchecked" {
             t.aux = CV_UNCHECKED;
             pi += 1;

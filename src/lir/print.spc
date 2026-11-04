@@ -375,6 +375,8 @@ extend Printer {
             out.push_str(".overlap");
         } else if t.op == O_LSHR && t.aux == SH_EXACT {
             out.push_str(".exact");
+        } else if (t.op == O_CLZ || t.op == O_CTZ) && t.aux == CNT_NONZERO {
+            out.push_str(".nz");
         } else if (t.op == O_FPTOSI || t.op == O_FPTOUI) && t.aux == CV_UNCHECKED {
             out.push_str(".unchecked");
         } else if t.op == O_VEXTRACT || t.op == O_VINSERT {
