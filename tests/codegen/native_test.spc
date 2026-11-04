@@ -8908,6 +8908,48 @@ b0(v0: ptr, v1: ptr):
     assert_eq(run_wide(wide, wdrv), 0);
 }
 
+// An arm64 table switch from case 0 with one column indexes the table with the scrutinee: `@t32` loads
+// `ldr w0, [x16, w0, uxtw #2]` with no copy to x17. The other table switches (`lf` below) run.
+@test
+fn arm64_table_switches_from_zero_index_with_the_scrutinee() {
+    let lir = M"(lir ptr 8
+sym @t32 fn global
+fn @t32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 11
+  v2 = iconst.i32 -7
+  v3 = iconst.i32 300
+  v4 = iconst.i32 5
+  v5 = iconst.i32 0
+  switch v0 [0 -> b1(v1), 1 -> b1(v2), 2 -> b1(v3), 3 -> b1(v4)] else b1(v5)
+b1(v6: i32):
+  ret v6
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("macos", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the macOS object",
+    );
+    // ldr w0, [x16, w0, uxtw #2]; no mov w17, w0.
+    let ld: [u8; 4] = [0x00, 0x5A, 0x60, 0xB8];
+    let mv: [u8; 4] = [0xF1, 0x03, 0x00, 0x2A];
+    assert(holds(&obj, ld[0..4]) && !holds(&obj, mv[0..4]), "t32");
+    let drv = M"(#include <stdint.h>
+int32_t t32(int32_t);
+int main(void) {
+  static const int32_t w[4] = {11, -7, 300, 5};
+  for (int64_t x = -3; x < 8; x++)
+    if (t32((int32_t)x) != (x >= 0 && x < 4 ? w[x] : 0)) return 1;
+  if (t32(-2147483647 - 1) != 0 || t32(2147483647) != 0) return 2;
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // Switches whose dense cases all pass constants to one block read the values from a table: signed i8
 // cases, i16 cases with a hole the default (elsewhere) takes, two columns (f64, i32), i64 cases from 2^40,
 // i32 cases near the top of the unsigned range, f32 values whose holes take the default's, and twelve

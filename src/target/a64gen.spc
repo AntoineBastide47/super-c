@@ -7501,14 +7501,28 @@ extend Gen {
         }
         let d = b.switch_edge(t, t.aux);
         let to = b.edge_target(b.switch_edge(t, 0));
-        self.switch_index(r, bits, lk.min, lk.span);
+        // With no bias and one column, the scrutinee is the index (32 bits of it zero-extended): the
+        // column's one load is the last read of it.
+        let direct = lk.min == 0 && b.blocks[to as usize].param_len == 1;
+        let ix = if direct {
+            r
+        } else {
+            self.switch_index(r, bits, lk.min, lk.span);
+            a::IP1
+        };
+        // The load's index extension: UXTX (LSL) of 64 bits, UXTW of 32.
+        let ext: u32 = if bits == 64 || !direct {
+            3
+        } else {
+            2
+        };
         let mut stubs = Vector::<u32>::new();
-        self.emit(a::cmp_imm(bits == 64, a::IP1, lk.span - 1));
+        self.emit(a::cmp_imm(bits == 64, ix, lk.span - 1));
         self.to_default(a::bcond(a::HI, 0), Test { kind: T_CC, cc: a::HI, reg: 0 }, d, &mut stubs);
         if lk.holes != 0 {
             // A hole's bit of the mask, shifted to bit 0.
             self.mov_imm(a::IP0 as u8, lk.holes, true);
-            self.emit(a::dp2(true, a::DP2_LSRV, a::IP0, a::IP0, a::IP1));
+            self.emit(a::dp2(true, a::DP2_LSRV, a::IP0, a::IP0, ix));
             self.to_default(a::tbz(true, a::IP0, 0, 0), Test { kind: T_TBNZ, cc: 0, reg: a::IP0 }, d, &mut stubs);
         }
         let k = self.table_sym(&lk);
@@ -7537,10 +7551,10 @@ extend Gen {
                 } else {
                     pva.reg as u32
                 };
-                self.emit(a::ldst_reg(mkind(ty, true), true, rt, a::IP0, a::IP1, true));
+                self.emit(a::ldst_ext(mkind(ty, true), true, rt, a::IP0, ix, true, ext));
             } else {
                 let m = a::M_VB + e.trailing_zeros() as u32;
-                self.emit(a::ldst_reg(m, true, 30, a::IP0, a::IP1, true));
+                self.emit(a::ldst_ext(m, true, 30, a::IP0, ix, true, ext));
                 self.mem(m, false, V0 + 30, a::SP as u8, pva.off);
             }
         }
