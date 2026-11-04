@@ -105,6 +105,10 @@ pub(package) struct Isa {
     /// A sum chain regroups into a tree (`lir::opt::Opt::reassociate`): the processor runs independent
     /// additions at once and has the registers for the partial sums (`lir::ir::Package::sum_trees`).
     pub(package) sum_trees: bool,
+    /// The instructions a halving step of a vector's lane sum takes past the scalar addition it replaces
+    /// (`lir::ir::Package::vec_reduce`): 0 on arm64 (ADDV) and x86-64 (PSHUFD, PADDD in registers), 4 on
+    /// wasm32, whose shuffle reads its operand twice (a `local.tee` and two `local.get`).
+    pub(package) vector_reduce: u8,
     /// The native backend keeps a 64-bit integer in one register (wasm32 one value) and computes a 64-bit
     /// high product (`O_MULHU`; wasm32 from 32-bit halves): the optimizer splits a 128-bit integer into its
     /// two words (`lir::ir::Package::pairs`).
@@ -271,6 +275,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_sumw: 0x8,
         access_pairs: false,
         sum_trees: false,
+        vector_reduce: 0,
         pairs: true,
         half_cvt: false,
         switch_tree: true,
@@ -312,6 +317,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_sumw: 0x8CE,
         access_pairs: true,
         sum_trees: true,
+        vector_reduce: 0,
         pairs: true,
         half_cvt: true,
         switch_tree: true,
@@ -353,6 +359,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_sumw: 0x8CE,
         access_pairs: false,
         sum_trees: false,
+        vector_reduce: 4,
         pairs: true,
         half_cvt: false,
         switch_tree: true,
@@ -701,6 +708,7 @@ const UNKNOWN_ISA: Isa = Isa {
     vector_sumw: 0,
     access_pairs: false,
     sum_trees: false,
+    vector_reduce: 0,
     pairs: false,
     half_cvt: false,
     switch_tree: false,

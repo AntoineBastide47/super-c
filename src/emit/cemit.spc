@@ -627,6 +627,7 @@ extend CEmit {
             l.pkg.apairs = tgt::isa(pk.arch).access_pairs;
             l.pkg.ret_regs = tgt::isa(pk.arch).ret_regs;
             l.pkg.sum_trees = tgt::isa(pk.arch).sum_trees;
+            l.pkg.vec_reduce = tgt::isa(pk.arch).vector_reduce;
             l.pkg.vops = tgt::isa(pk.arch).vector_ops;
             l.pkg.vec_mulh = tgt::isa(pk.arch).vector_mulh;
             l.pkg.vec_accs = tgt::isa(pk.arch).vector_accs;

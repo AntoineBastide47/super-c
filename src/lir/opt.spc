@@ -1068,6 +1068,7 @@ extend Opt {
         }
         let before = self.weigh(pk, b);
         self.slp.late_terms = !pk.apairs;
+        self.slp.red_step = pk.vec_reduce;
         if !self.slp.plan(
             b,
             pk.ptr_bytes,

@@ -49,8 +49,11 @@ pub(package) const FOLD_SINC: u64 = 274877906944;
 /// one instruction of its block reads: that instruction extends its operand (wasm32's `i64.extend_i32_*` at
 /// the use, no local; a narrow integer's location holds it zero-extended).
 pub(package) const FOLD_WIDEN: u64 = 549755813888;
-/// A store's value, a select's side or its folded comparison's operand that one instruction of its block
-/// makes and only that reads: an integer operation that cannot trap (no division), a select or a scalar load,
+/// A store's value, a select's side or its folded comparison's operand, or an integer operation's second
+/// operand when its first stays (a parameter, a constant, a value of more uses; for a commutative one, the
+/// second not made right before it, which it reads first), that one instruction of
+/// its block makes and only that reads: an integer operation that cannot trap (no division), a bit count,
+/// a select or a scalar load,
 /// whose
 /// operands are parameters, constants, values of more uses or one more level of such values, no
 /// instruction between a load and its reader writing memory. The reader computes it where it reads it
@@ -557,8 +560,11 @@ extend Live {
 
     // `FOLD_SHAMT`: a 32- or 64-bit shift's count that an `and` with the width's mask (`& 31`, `& 63`) makes,
     // read only there, folds into the shift, which takes the count modulo the width.
-    // `FOLD_SINK`: the values stores and selects compute where they read them (`sinkable`): a store's value, a
-    // select's sides and its folded comparison's operands.
+    // `FOLD_SINK`: the values stores, selects and integer operations compute where they read them
+    // (`sinkable`): a store's value, a select's sides and its folded comparison's operands, an operation's
+    // second operand past a first that stays (which the set and get of `stack_values` cannot keep on the
+    // stack: the first operand comes between). A commutative operation reads a value made right before it
+    // first (`swap_reads`): that one stays.
     fn sinks(self: &mut Self, b: &Body) {
         if (self.fold_ops & FOLD_SINK) == 0 {
             return;
@@ -574,6 +580,10 @@ extend Live {
                 let st = b.insts[s as usize];
                 moved.truncate(0);
                 if st.op == O_STORE {
+                    self.sink(b, st.b, bk.start, s, &mut moved);
+                } else if (st.op == O_SUB || st.op >= O_SHL && st.op <= O_ASHR || (st.op == O_ADD || st.op == O_MUL || st.op >= O_AND && st.op <= O_XOR) && st.b + 1 != s) && is_int(
+                    st.ty,
+                ) && st.ty != T_I128 && !self.pfold[s as usize] && self.stays(b, st.a) {
                     self.sink(b, st.b, bk.start, s, &mut moved);
                 } else if st.op == O_SELECT && is_int(st.ty) && st.ty != T_I128 {
                     self.sink(b, st.b, bk.start, s, &mut moved);
@@ -679,7 +689,7 @@ extend Live {
             }
             return true;
         }
-        let un = t.op == O_NEG || t.op == O_NOT;
+        let un = t.op == O_NEG || t.op == O_NOT || t.op >= O_CLZ && t.op <= O_POPCNT;
         let sel = t.op == O_SELECT;
         if !un && !sel && (t.op < O_ADD || t.op > O_ASHR || t.op >= O_SDIV && t.op <= O_UREM) {
             return false;

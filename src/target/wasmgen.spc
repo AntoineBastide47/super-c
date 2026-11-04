@@ -105,6 +105,9 @@ pub(package) struct Gen {
     vreg: Vector<bool>, // per value index, a vector in a v128 local (`vec_homes`)
     home: Vector<u32>, // per value index, the frame offset of a memory value (NONE: none)
     remat: Vector<bool>, // per instruction
+    // The flag of an unsigned sum (`ovf`) the next instruction reads, computed there from the sum's and its
+    // first operand's locals: the sum's instruction, the two locals, whether 64-bit; NONE as the first.
+    lazy: (u32, u32, u32, bool),
     free: Vector<Vector<u32>>, // per class, the free locals
     lref: Vector<u32>, // `assign`: per local, the values holding it
     gone: Vector<bool>, // `assign`: per value index, whether its local or home is released
@@ -241,6 +244,7 @@ extend Gen {
             vreg: Vector::<bool>::new(),
             home: Vector::<u32>::new(),
             remat: Vector::<bool>::new(),
+            lazy: (NONE, NONE, NONE, false),
             free: free,
             lref: Vector::<u32>::new(),
             gone: Vector::<bool>::new(),
@@ -1718,6 +1722,14 @@ extend Gen {
 extend Gen {
     // Push scalar value `v`.
     fn get(self: &mut Self, v: Value) {
+        if (v & VFLAG) != 0 && (v & VPARAM) == 0 && (v & ~VFLAG) == self.lazy.0 {
+            let (_, x, xa, wide) = self.lazy;
+            self.c.local(w::LOCAL_GET, x);
+            self.c.local(w::LOCAL_GET, xa);
+            self.c.op(pick8(wide, w::I64_LT_U, w::I32_LT_U));
+            self.lazy.0 = NONE;
+            return;
+        }
         if (v & (VPARAM | VFLAG)) == 0 && self.remat[v as usize] {
             self.remat_value(v);
             return;
@@ -2232,6 +2244,10 @@ extend Gen {
     // Push the value of integer operation `t`.
     fn int_push(self: &mut Self, t: Inst) {
         let op = t.op;
+        if op >= O_CLZ && op <= O_POPCNT {
+            self.count_push(t);
+            return;
+        }
         let ty = t.ty;
         let wide = ty == T_I64;
         let signed = op == O_SDIV || op == O_SREM || op == O_ASHR;
@@ -2464,10 +2480,10 @@ extend Gen {
     // right by 8 or the value rotated right by 24, each kept to its bytes `0x00FF00FF` (LLVM's form); 16: the
     // two bytes swapped; 64: bytes, then halves of 32 bits swapped in pairs, then the words rotated.
     fn byte_swap(self: &mut Self, i: u32, t: Inst) bool {
+        // The operand's own local, when it has one, serves as the copy the two halves read.
+        let own = self.plain_local(t.a);
         if t.ty == T_I16 {
-            let x = self.tmp(w::I32);
-            self.get(t.a);
-            self.c.local(w::LOCAL_TEE, x);
+            let x = self.copy_of(t.a, own);
             self.c.i32_const(8);
             self.c.op(w::I32_SHL);
             self.c.local(w::LOCAL_GET, x);
@@ -2477,9 +2493,7 @@ extend Gen {
             self.c.i32_const(0xFFFF);
             self.c.op(w::I32_AND);
         } else if t.ty == T_I32 {
-            let x = self.tmp(w::I32);
-            self.get(t.a);
-            self.c.local(w::LOCAL_TEE, x);
+            let x = self.copy_of(t.a, own);
             self.c.i32_const(0x00FF00FF);
             self.c.op(w::I32_AND);
             self.c.i32_const(8);
@@ -2516,6 +2530,13 @@ extend Gen {
     }
 
     fn bit_count(self: &mut Self, i: u32, t: Inst) bool {
+        self.count_push(t);
+        self.put(i);
+        return true;
+    }
+
+    // Bit count `t` onto the stack.
+    fn count_push(self: &mut Self, t: Inst) {
         let ty = t.ty;
         let bits = type_bits(ty, 4);
         if ty == T_I64 {
@@ -2539,8 +2560,18 @@ extend Gen {
             self.get(t.a);
             self.c.op(w::I32_POPCNT);
         }
-        self.put(i);
-        return true;
+    }
+
+    // 32-bit value `v` on the stack and a local holding it: its own (`own`, from `plain_local`), else a
+    // scratch one it is written to.
+    fn copy_of(self: &mut Self, v: Value, own: u32) u32 {
+        self.get(v);
+        if own != NONE {
+            return own;
+        }
+        let x = self.tmp(w::I32);
+        self.c.local(w::LOCAL_TEE, x);
+        return x;
     }
 
     // The local `get` reads value `v` from, NONE when it makes it otherwise (a constant, a fold) or has none.
@@ -2704,6 +2735,12 @@ extend Gen {
         };
         self.c.op(o + d);
         self.c.local(w::LOCAL_SET, x);
+        // An unsigned sum's flag that only the next instruction reads, a select, with nothing
+        // written between: computed there (`lazy`), from the sum's and the first operand's own locals.
+        if fl != NONE && add && !signed && x == li && la != NONE && self.next_reads_flag(i) {
+            self.lazy = (i, x, xa, wide);
+            return true;
+        }
         if fl != NONE {
             if signed {
                 // add: (a ^ x) & (b ^ x) < 0; sub: (a ^ b) & (a ^ x) < 0.
@@ -2761,6 +2798,34 @@ extend Gen {
         if li != NONE && x != li {
             self.c.local(w::LOCAL_GET, x);
             self.c.local(w::LOCAL_SET, li);
+        }
+        return true;
+    }
+
+    // Whether instruction `i`'s flag has one reader, the next instruction of its block, a select on it.
+    fn next_reads_flag(self: &Self, i: u32) bool {
+        let b = self.b();
+        let k = self.lv.def_blk[i as usize];
+        let bk = b.blocks[k as usize];
+        let f = VFLAG | i;
+        if i + 1 >= bk.start + bk.len {
+            return false;
+        }
+        let n = b.insts[i as usize + 1];
+        if n.op != O_SELECT || n.a != f || n.b == f || n.c == f {
+            return false;
+        }
+        let mut us = Vector::<Value>::new();
+        for j in 0..b.insts.len() as u32 {
+            if j == i + 1 {
+                continue;
+            }
+            lv::each_use(b, b.insts[j as usize], &mut us);
+            for q in 0..us.len() {
+                if us[q] == f {
+                    return false;
+                }
+            }
         }
         return true;
     }
@@ -3927,6 +3992,7 @@ extend Gen {
             if !self.inst(i) {
                 return false;
             }
+            assert(self.lazy.0 == NONE || self.lazy.0 == i, "wasmgen: a sum's flag its reader did not read");
             self.end_inst();
             self.stack_order(a0, s0, self.c.ctl.len() != o0);
         }

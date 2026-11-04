@@ -5310,6 +5310,89 @@ int main(void) {
     }
 }
 
+// wasm32: an operation whose first operand stays (a constant, a parameter) computes its second where it
+// reads it, no local between: `@np`'s `-1 >> clz(x - 1)` is `i32.const -1`, `local.get 0`, `i32.const 1`,
+// `i32.sub`, `i32.clz`, `i32.shr_u`. `@bs`'s byte swap reads its parameter's local twice, no copy. `@chk`'s
+// overflow flag, which only the select reads, is computed there (`local.get 0`, `i32.lt_u`, `select`). They
+// give the C results.
+@test
+fn wasm_second_operands_compute_where_they_are_read() {
+    let lir = M"(lir ptr 8
+sym @np fn global
+sym @dm fn global
+sym @bs fn global
+sym @chk fn global
+fn @chk
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3, v4 = addo.u.i32 v0, v1
+  v5 = select.i32 v4, v2, v3
+  ret v5
+fn @bs
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = bswap.i32 v0
+  ret v1
+fn @np
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 1
+  v2 = sub.i32 v0, v1
+  v3 = clz.i32 v2
+  v4 = iconst.i32 -1
+  v5 = lshr.i32 v4, v3
+  v6 = add.i32 v5, v1
+  ret v6
+fn @dm
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = udiv.i32 v0, v1
+  v3 = mul.i32 v2, v1
+  v4 = sub.i32 v0, v3
+  v5 = add.i32 v4, v2
+  ret v5
+)";
+    let drv = M"(#include <stdint.h>
+uint32_t np(uint32_t);
+uint32_t dm(uint32_t, uint32_t);
+uint32_t bs(uint32_t);
+uint32_t chk(uint32_t, uint32_t);
+int main(void) {
+  static const uint32_t c[5] = {0, 1, 0x7FFFFFFFu, 0x80000000u, 0xFFFFFFFFu};
+  for (int i = 0; i < 5; i++)
+    for (int k = 0; k < 5; k++) {
+      uint32_t s = c[i] + c[k];
+      if (chk(c[i], c[k]) != (s < c[i] ? 0 : s)) return 4;
+    }
+  if (bs(0x12345678u) != 0x78563412u || bs(0xFF00u) != 0xFF0000u) return 3;
+  for (uint32_t x = 2; x < 70000; x += 997)
+    if (np(x) != (0xFFFFFFFFu >> __builtin_clz(x - 1)) + 1) return 1;
+  for (uint32_t a = 0; a < 1000; a += 37)
+    for (uint32_t b = 1; b < 50; b += 7)
+      if (dm(a, b) != a / b + a % b) return 2;
+  return 0;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let np: [u8; 9] = [0x41, 0x7F, 0x20, 0x00, 0x41, 0x01, 0x6B, 0x67, 0x76];
+    assert(holds(&obj, np[0..9]), "np");
+    // i32.rotr, local.get 0, i32.const 24, i32.rotr.
+    let bs: [u8; 6] = [0x78, 0x20, 0x00, 0x41, 0x18, 0x78];
+    assert(holds(&obj, bs[0..6]), "bs");
+    let ck: [u8; 4] = [0x20, 0x00, 0x49, 0x1B];
+    assert(holds(&obj, ck[0..4]), "chk");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
 // An arm64 return of a narrow value a register holds extends from that register into w0: `@sat`'s select
 // extends from its register, with no `mov x0, x` then `uxtb w0, w0`. It gives the C results.
 @test

@@ -11576,6 +11576,65 @@ b0(v0: i32):
     same_result(&b, &a, "three", x[0..1], 22);
 }
 
+// A sum of four adjacent loads packs into a vector and its lane sum (`reduce_add`) where a halving step of
+// the lane sum costs nothing past the addition it replaces (`Package.vec_reduce` 0), not where it costs 4
+// (wasm32's shuffle through a local). The result stays.
+@test
+fn lane_sums_pack_where_they_are_cheap() {
+    let text = M"(lir ptr 8
+sym @sum4 fn global noinline
+sym @drive fn global
+sym @arr data global
+fn @sum4
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  v2 = load.i32 v0+4 align 2
+  v3 = load.i32 v0+8 align 2
+  v4 = load.i32 v0+12 align 2
+  v5 = add.i32 v1, v2
+  v6 = add.i32 v5, v3
+  v7 = add.i32 v6, v4
+  ret v7
+fn @drive
+  sig () -> i32
+b0:
+  v0 = symaddr @arr
+  v1 = call.i32 @sum4(v0) : (ptr) -> i32
+  ret v1
+data @arr size 16 align 2 bytes 07000000fdffffffa0860100ffffff7f
+)";
+    let mut err = String::new();
+    let b = lparse::parse(text, &mut err).unwrap();
+    let none = Vector::<bool>::new();
+    let steps: [u8; 2] = [0, 4];
+    for k in 0..2usize {
+        let mut a = lparse::parse(text, &mut err).unwrap();
+        a.vec_reduce = steps[k];
+        lopt::optimize(
+            &mut a,
+            &none,
+            lopt::Config {
+                inline: il::SPEED,
+                loops: lu::Budgets {
+                    peel: 0,
+                    partial: 0,
+                    version: 0,
+                    unswitch: 0,
+                    rotate: 0,
+                    vector: 4,
+                    interleave: 4,
+                    fin: 0,
+                },
+            },
+        );
+        let t = text_of(&a, "sum4");
+        assert(t.contains("reduce_add") == (k == 0), t.as_str());
+        let none_args: []u64 = [];
+        same_result(&b, &a, "drive", none_args, 2147583651);
+    }
+}
+
 // The element-wise sum of two aggregates of four `f32`s into a third: where the calling convention passes
 // such an aggregate one element per register (`Package.hfa_regs`, AAPCS64), its loads and the result's
 // stores stay scalars, which the native backend takes from and returns in those registers; elsewhere they

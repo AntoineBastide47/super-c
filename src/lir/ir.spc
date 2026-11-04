@@ -1633,6 +1633,9 @@ pub(package) struct Package {
     /// Whether the optimizer regroups a chain of additions into a tree (`target::table::Isa::sum_trees`,
     /// `lir::opt::Opt::reassociate`).
     pub(package) sum_trees: bool,
+    /// The instructions a halving step of a vector's lane sum takes past the scalar addition it replaces
+    /// (`target::table::Isa::vector_reduce`): SLP counts them against a sum's vectors (`lir::slp`).
+    pub(package) vec_reduce: u8,
     /// Whether the optimizer splits each 128-bit integer into its two 64-bit words (`lir::pairs`), which
     /// the native backend keeps in registers (`target::table::Isa`); it needs the backend's 64-bit `mulhu`.
     pub(package) pairs: bool,
@@ -1776,6 +1779,7 @@ extend Package {
             hfa_regs: false,
             apairs: true,
             sum_trees: true,
+            vec_reduce: 0,
             pairs: false,
             align_loops: false,
             popcnt: false,

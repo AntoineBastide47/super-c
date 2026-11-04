@@ -60,6 +60,8 @@ pub(package) struct Slp {
     /// A sum's term loads go right before their adds (`term`): a target without paired accesses
     /// (`Package.apairs`), whose few vector registers would otherwise hold every term at once.
     pub(package) late_terms: bool,
+    /// The instructions a halving step of a sum's reduction adds (`Package.vec_reduce`).
+    pub(package) red_step: u64,
     packs: Vector<Pack>,
     lv: Vector<Value>,
     // The lanes `build` takes, a stack: each call's from its `at` on.
@@ -100,6 +102,7 @@ extend Slp {
             ptr: 8,
             vb: VBYTES,
             late_terms: false,
+            red_step: 0,
             packs: Vector::<Pack>::new(),
             lv: Vector::<Value>::new(),
             tmp: Vector::<Value>::new(),
@@ -233,6 +236,12 @@ extend Slp {
         for g in 0..self.groups.len() {
             let (s0, vp) = self.groups[g];
             gain += (self.packs[vp as usize].n - 1) as u64 * w[self.iblk[self.stores[s0 as usize] as usize] as usize];
+        }
+        // A sum's reduction: `red_step` per halving of its lanes.
+        for x in 0..self.reds.len() {
+            let (r, p0, _) = self.reds[x];
+            let lanes = self.packs[self.rpk[p0 as usize] as usize].n;
+            cost += self.red_step * lanes.trailing_zeros() as u64 * w[self.iblk[r as usize] as usize];
         }
         return gain > cost;
     }
