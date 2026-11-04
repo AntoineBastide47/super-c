@@ -3299,7 +3299,7 @@ extend Gen {
         };
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE
         } else {
             0
@@ -5610,6 +5610,50 @@ extend Gen {
         if (op == O_ADD || op == O_SUB || lv::is_sum_or(self.b(), t)) && (self.folded(t.a) || self.folded(t.b)) {
             let f = lv::lea_of(self.b(), &self.lv.pfold, i);
             self.lea_sum(i, sz, f);
+            return true;
+        }
+        // A field of a folded right shift (`lv::FOLD_UBFX`): bits 8 to 15 of rax..rbx by `movzx` of the
+        // high byte register (no REX prefix, so into one of the first 8 registers); else a copy shifted
+        // down, masked by `and` (a 32-bit immediate) or by a shift up and down. Before the memory operand
+        // forms below: the shift has no register.
+        if op == O_AND && (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] && self.b().insts[t.a as usize].op == O_LSHR {
+            let s = self.b().insts[t.a as usize];
+            let mut sh: u64 = 0;
+            let _ = self.const_of(s.b, &mut sh);
+            let mut km: u64 = 0;
+            let _ = self.const_of(t.b, &mut km);
+            let m = if bits >= 64 {
+                km
+            } else {
+                km & (1u64 << bits as u64) - 1
+            };
+            let w = (m + 1).trailing_zeros() as u32;
+            let fz = bits.max(32) / 8;
+            let rs = self.reg(s.a);
+            if sh == 8 && w == 8 && rs < 4 {
+                let rd = self.def(i);
+                if rd < 8 {
+                    self.c.byte(0x0F);
+                    self.c.byte(0xB6);
+                    self.c.byte(0xC0 | rd as u32 << 3 | rs as u32 + 4);
+                    self.va.index_mut(i as usize).clean = true;
+                    return true;
+                }
+                self.move_reg(t.ty, rd, rs);
+                self.c.shift_ri(x::SHR, fz, rd, 8);
+                self.c.ext(1, 4, false, rd, rd);
+                self.va.index_mut(i as usize).clean = true;
+                return true;
+            }
+            let rd = self.def_from(i, s.a, rs);
+            if w < 32 {
+                self.c.shift_ri(x::SHR, fz, rd, sh as u32);
+                self.c.alu_ri(x::AND, 4, rd, m as i32);
+            } else {
+                self.c.shift_ri(x::SHL, fz, rd, fz * 8 - sh as u32 - w);
+                self.c.shift_ri(x::SHR, fz, rd, fz * 8 - w);
+            }
+            self.va.index_mut(i as usize).clean = true;
             return true;
         }
         let alu = op == O_ADD || op == O_SUB || op == O_AND || op == O_OR || op == O_XOR;

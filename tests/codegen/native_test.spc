@@ -5322,6 +5322,82 @@ int main(void) {
     }
 }
 
+// A mask of the low bits of a right shift is a field (x86-64): `@byte1`'s bits 8 to 15 of rcx are
+// `movzx eax, ch` (Microsoft x64); `@f12` shifts and masks, `@f40` (no 32-bit mask) shifts up and down,
+// `@zero1` tests its field. They give the C results.
+@test
+fn x86_fields_of_right_shifts_extract() {
+    let lir = M"(lir ptr 8
+sym @byte1 fn global
+sym @f12 fn global
+sym @f40 fn global
+sym @zero1 fn global
+fn @byte1
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 8
+  v2 = iconst.i32 255
+  v3 = lshr.i32 v0, v1
+  v4 = and.i32 v3, v2
+  ret v4
+fn @f12
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 20
+  v2 = iconst.i32 4095
+  v3 = lshr.i32 v0, v1
+  v4 = and.i32 v3, v2
+  ret v4
+fn @f40
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 4
+  v2 = iconst.i64 1099511627775
+  v3 = lshr.i64 v0, v1
+  v4 = and.i64 v3, v2
+  ret v4
+fn @zero1
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 8
+  v2 = iconst.i32 255
+  v3 = iconst.i32 0
+  v4 = lshr.i32 v0, v1
+  v5 = and.i32 v4, v2
+  v6 = icmp.eq v5, v3
+  v7 = iconst.i32 7
+  v8 = select.i32 v6, v7, v0
+  ret v8
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, OMIT_FP, &mut obj), "the Microsoft x64 object");
+    // movzx eax, ch; ret.
+    let mz: [u8; 4] = [0x0F, 0xB6, 0xC5, 0xC3];
+    assert(holds(&obj, mz[0..4]), "byte1");
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, OMIT_FP, &mut obj), "the System V object");
+    let drv = M"(#include <stdint.h>
+uint32_t byte1(uint32_t);
+uint32_t f12(uint32_t);
+uint64_t f40(uint64_t);
+uint32_t zero1(uint32_t);
+int main(void) {
+  static const uint64_t v[5] = {0, 0x12345678u, 0xFFFFFFFFu, 0x80000100u, 0xFEDCBA9876543210u};
+  for (int i = 0; i < 5; i++) {
+    uint32_t x = (uint32_t)v[i];
+    if (byte1(x) != (x >> 8 & 0xff)) return 1;
+    if (f12(x) != (x >> 20 & 0xfff)) return 2;
+    if (f40(v[i]) != (v[i] >> 4 & 0xFFFFFFFFFFu)) return 3;
+    if (zero1(x) != ((x >> 8 & 0xff) == 0 ? 7 : x)) return 4;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A select whose true side is a constant takes it in the result's register, the false side moved in with the
 // condition inverted (x86-64): `@sat`'s saturating sum is add, mov eax, -1, cmovae eax, edi, ret (System V),
 // no copy after the `cmov`. It gives the C result.
