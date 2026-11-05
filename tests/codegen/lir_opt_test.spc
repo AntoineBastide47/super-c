@@ -3216,6 +3216,49 @@ b0(v0: i64):
     same_result(&b, &a, "fwd", x, 8);
 }
 
+// A copy of a call's aggregate result into an exclusive parameter's referent at an address made after the
+// call keeps the call's slot: the call cannot take an address that does not exist yet, so the body still
+// verifies (each use after its definition) and gives the same result.
+@test
+fn a_result_copied_to_an_address_made_after_the_call_keeps_its_slot() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @mk fn global noinline
+sym @put fn global noinline
+sym @drive fn global
+fn @mk
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64) -> l0
+b0(v0: i64, v1: ptr):
+  store v0, v1 align 3
+  store v0, v1+8 align 3
+  ret
+fn @put
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (ptr, i64) -> void
+  ref p0 24 noalias
+  slot s0 size 16 align 3
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 16
+  call @mk(v1, v2) : (i64) -> l0
+  v4 = ptradd v0+8
+  memcpy v4, v2, v3
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 24 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  call @put(v1, v0) : (ptr, i64) -> void
+  v2 = load.i64 v1+16 align 3
+  ret v2
+)",
+    );
+    let x: []u64 = [7];
+    same_result(&b, &a, "drive", x, 7);
+}
+
 // The float rewrites `-ffast-math` allows: `x * 1` and `x + 0` go, a division by a constant becomes a
 // product by its reciprocal, two constants of an addition chain fold, and a product added becomes one
 // fused multiply-add, but for a loop's accumulator, and so does a product less a constant or a constant

@@ -7634,7 +7634,9 @@ extend LoopOpt {
             let x = b.insts[(ba.start + m) as usize];
             let y = b.insts[(bb.start + m) as usize];
             let f = op_info(x.op).form;
-            if f != F_IMM && f != F_UN && f != F_BIN && f != F_CMP && f != F_TRI && f != F_PTRADD && f != F_LOAD && f != F_STORE {
+            if f != F_IMM && f != F_UN && f != F_BIN && f != F_CMP && f != F_TRI && f != F_PTRADD && f != F_LOAD && f != F_STORE || op_info(
+                y.op,
+            ).form != f {
                 return false;
             }
             let vals = f == F_UN || f == F_BIN || f == F_CMP || f == F_TRI || f == F_PTRADD || f == F_LOAD || f == F_STORE;

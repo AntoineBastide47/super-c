@@ -270,6 +270,27 @@ fn emit_stamp_keys_on_the_compiler_content() {
     assert(!again.out_has("phase load"), "the new compiler's own tree is reused");
 }
 
+// The emit stamp records the optimization level and the code-generation flags: a build at another level
+// or with another flag transpiles again, and the same build skips the transpile. `phase load` prints only
+// when the build transpiles.
+@test
+fn emit_stamp_keys_on_the_level_and_the_flags() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
+    let root = p.dir();
+    let builds: []str = ["run -O2", "run -O2", "run -O1", "run -O1 -fno-inline", "run -O1", "run -O1"];
+    let loads: []bool = [true, false, true, true, true, false];
+    for i in 0..builds.len() {
+        let r = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", builds[i]);
+        assert_eq(r.exit, 3);
+        assert(r.out_has("phase load") == loads[i], builds[i]);
+    }
+}
+
 // `--transpiler` runs the transpile step through another command (here the compiler under test itself)
 // and the engine links its objects: the program runs, the tree equals the one the engine's own
 // frontend writes, and the emit stamp keys on the transpiler, so an unchanged build skips the transpile

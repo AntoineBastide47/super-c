@@ -49,7 +49,8 @@ that emitted the tree (a different compiler at the same path with the same mtime
 as does the per-TU cache, keyed on the same hash; a WASI guest hashes the module file its absolute
 argv[0] names, as `wasmtime run --dir=/ --argv0 <abs path>` gives it, and keeps neither stamp nor
 cache when argv[0] is relative), the std directory (a build under another std tree transpiles
-again, `stamp_opt_line`), the loaded module files and
+again, `stamp_opt_line`), the profile's `opt-level` and code-generation flags with the command line's
+`-O` and `-f` flags over them (`profile_codegen`), the loaded module files and
 the `.spc` listing of every directory the loader searched, so a new file that would shadow an
 import also makes the stamp stale. A module and `build.toml` are recorded as the build read them (the
 content hash of the text read, the mtime of the stat before the read), so an edit made during the

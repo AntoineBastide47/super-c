@@ -537,6 +537,90 @@ b6:
     same_outcome(&b, &a, "mix", minus, 0x3FFFFFFFFFFFFFF, false);
 }
 
+// The sides of a branch on a value the loop does not change whose instructions differ in form (an
+// addition, a call) do not merge, and their operands are read by the form of each: the call's signature
+// and arguments, past the body's last instruction in its pool (the long call before the loop), are no
+// values.
+@test
+fn sides_of_different_forms_stay_apart() {
+    let mut params = String::new();
+    let mut types = String::new();
+    let mut args = String::new();
+    for q in 0..40 {
+        params.format_into(
+            "{}v{}: i64",
+            if q == 0 {
+                ""
+            } else {
+                ", "
+            },
+            q,
+        );
+        types.push_str(
+            if q == 0 {
+                "i64"
+            } else {
+                ", i64"
+            },
+        );
+        args.push_str(
+            if q == 0 {
+                "v3"
+            } else {
+                ", v3"
+            },
+        );
+    }
+    let src = format(
+        M"(lir ptr 8
+sym @mark fn global noinline
+sym @next fn global noinline
+sym @mix fn global
+fn @mark
+  sig ({}) -> void
+b0({}):
+  ret
+fn @next
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = mul.i64 v0, v0
+  ret v1
+fn @mix
+  sig (i64, i64, i8) -> i64
+b0(v0: i64, v1: i64, v2: i8):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  call @mark({}) : ({}) -> void
+  jmp b1(v3, v0)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b6
+b2:
+  br v2, b3, b4
+b3:
+  v8 = add.i64 v6, v4
+  jmp b5(v8)
+b4:
+  v9 = call.i64 @next(v6) : (i64) -> i64
+  jmp b5(v9)
+b5(v10: i64):
+  v11 = add.i64 v5, v4
+  jmp b1(v11, v10)
+b6:
+  ret v6
+)",
+        types.as_str(),
+        params.as_str(),
+        args.as_str(),
+        types.as_str(),
+    );
+    let (b, a) = optimized(&src, UNSWITCH);
+    let plus: []u64 = [5, 3, 1];
+    same_outcome(&b, &a, "mix", plus, 8, false);
+    let squares: []u64 = [2, 2, 0];
+    same_outcome(&b, &a, "mix", squares, 16, false);
+}
+
 // The sides of a branch on a value the loop does not change that differ in one constant take one side
 // over the select of the constants before the loop: `bump` adds 3 or subtracts 3 from each element (each
 // side loads the array's address), `scale` multiplies by 3 or 5. Neither branch is left.

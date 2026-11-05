@@ -9572,11 +9572,12 @@ extend Opt {
 
     // Copy `t`, instruction `i` of block `k`, of a call's whole aggregate result from the slot that call
     // writes it to, right after the call (pure instructions and whole copies between slots that pass the
-    // result on between), into an exclusive parameter's referent: the call writes its result there in place
-    // of those slots, which nothing else uses, and the copies go. The callee keeps no copy of its result's
-    // address (`Sym.esc`) and no other argument reaches that referent, so it neither reads those bytes nor
-    // sees them change but through its result; it comes back (no `FX_STALL`), so no panic unwinds to code
-    // that reads the bytes it left half written. Whether it did.
+    // result on between), into an exclusive parameter's referent whose address exists before the call (not
+    // one of those pure instructions): the call writes its result there in place of those slots, which
+    // nothing else uses, and the copies go. The callee keeps no copy of its result's address (`Sym.esc`) and
+    // no other argument reaches that referent, so it neither reads those bytes nor sees them change but
+    // through its result; it comes back (no `FX_STALL`), so no panic unwinds to code that reads the bytes it
+    // left half written. Whether it did.
     fn result_into(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst) bool {
         let n = const_of(b, t.c);
         let c = self.acc(i, t.a);
@@ -9608,7 +9609,8 @@ extend Opt {
             src = w.b;
         }
         let u = b.insts[j as usize];
-        if j == i || u.op != O_CALL || self.repl[j as usize] != VNONE {
+        let late = (t.a & (VPARAM | VFLAG)) == 0 && self.blk_of[t.a as usize] == k && t.a > j;
+        if j == i || u.op != O_CALL || self.repl[j as usize] != VNONE || late {
             return false;
         }
         let np = b.pool[u.b as usize];

@@ -562,8 +562,20 @@ fn stamp_push_dir(out: &mut String, dir: str, h: u64) bool {
     return true;
 }
 
+// The `opt-level` and the code-generation flags (`mf::cg_effective`) of profile `name` of `m`, the
+// command line's over them, as `apply_profile` sets them: OPT_NONE and 0 for an unknown name.
+const fn profile_codegen(m: &mf::Manifest, name: str) (i32, u64) {
+    let pi = m.profile_index(name);
+    if pi < 0 {
+        return (mf::OPT_NONE, 0u64);
+    }
+    let prof = m.profiles.at(pi as usize);
+    return (prof.opt, mf::cg_effective(prof.opt, prof.cg_on, prof.cg_off));
+}
+
 // The emission options record: target, arch, CPU features, bootstrap tags, lint, the emitted C unit
-// count, the root directory and the emission-mode environment switches.
+// count, the root directory, the emission-mode environment switches and the profile's `opt-level` and
+// code-generation flags (`profile_codegen`).
 fn stamp_opt_line(
     out: &mut String,
     target: i32,
@@ -576,6 +588,7 @@ fn stamp_opt_line(
     ccount: u64,
     root_dir: str,
     std_dir: str,
+    cg: (i32, u64),
 ) {
     out.push_str("opt\t");
     out.push_u64(target as u64);
@@ -599,6 +612,7 @@ fn stamp_opt_line(
         stamp_push_env(out, inl::emit_mode_env(i));
     }
     stamp_push_env(out, "SC_UNITY_MAX");
+    out.format_into("\tO{} {}", cg.0, cg.1);
     // The steps and hooks: a stamp of other extensions must not skip their stages.
     out.format_into("\text {}\n", ext::id());
 }
@@ -619,6 +633,7 @@ fn stamp_write(
     path: str,
     p: &loader::Package,
     m: &mf::Manifest,
+    prof_name: str,
     std_dir: str,
     root_dir: str,
     target: i32,
@@ -646,6 +661,7 @@ fn stamp_write(
         ccount,
         root_dir,
         std_dir,
+        profile_codegen(m, prof_name),
     );
     // The manifest is loaded from the working directory (main.spc): its shard policy and flags shape
     // the emitted tree.
@@ -700,6 +716,7 @@ fn stamp_fresh(
     path: str,
     root_dir: str,
     std_dir: str,
+    cg: (i32, u64),
     target: i32,
     arch: i32,
     feats: cf::CpuFeatureSet,
@@ -760,7 +777,7 @@ fn stamp_fresh(
             // Every field but the unit count must match this build's options.
             ccount = stamp_u64(line, 6);
             let mut want = String::new();
-            stamp_opt_line(&mut want, target, arch, feats, width, disp, bootstrap, lint, ccount, root_dir, std_dir);
+            stamp_opt_line(&mut want, target, arch, feats, width, disp, bootstrap, lint, ccount, root_dir, std_dir, cg);
             if want.as_str().slice(0, want.len() - 1) != line {
                 return false;
             }
@@ -1006,7 +1023,20 @@ fn emit_closure(
         rc = 1;
     }
     if rc == 0 && cid != 0 {
-        stamp_write(stamp, &p, m, cx.std_dir, root_dir, cx.target, cx.bootstrap_tags, cx.lint, p.unit_files, cid, &sl);
+        stamp_write(
+            stamp,
+            &p,
+            m,
+            prof_name,
+            cx.std_dir,
+            root_dir,
+            cx.target,
+            cx.bootstrap_tags,
+            cx.lint,
+            p.unit_files,
+            cid,
+            &sl,
+        );
     }
     // The stamp record is the last output of the emission; the package's teardown that follows
     // belongs to the sync phase.
@@ -1317,6 +1347,7 @@ pub(package) fn transpile_step(
         &stamp_path,
         root_dir,
         cx.std_dir,
+        profile_codegen(m, prof_name),
         cx.target,
         m.arch,
         features_for(m, prof_name, cx.target_features),
