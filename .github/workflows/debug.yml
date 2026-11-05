@@ -4,6 +4,8 @@
 # compiles it against the same kernel compiled by clang -O2, on Linux x86-64 (3 runners), Linux arm64
 # and Windows x86-64 (2 runners); then the same benchmarks built by the latest release's compiler (the "before").
 # The test suite runs on Windows x86-64 alone (3 shards), where the code generator's Microsoft x64 paths run.
+# The native tests run under Intel SDE (AVX-512), as built and again with every value that may live in
+# xmm16..xmm31 put there first.
 name: Debug
 on:
   workflow_dispatch
@@ -70,6 +72,59 @@ jobs:
         run: |
           rm -rf build/bench
           "./super-c-boot${BINEXT:-}" bench --filter=codegen_
+
+  # The native tests under Intel SDE (an emulated Sapphire Rapids, as the release's AVX-512 lane): this tree's
+  # compiler, then the same with the homes taking xmm16..xmm31 before xmm0..xmm15 (`Live::fits`), so every
+  # value whose instructions all have EVEX forms runs from an upper register.
+  avx512:
+    name: avx512 (linux, sde)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: linux
+
+      - name: Build the compiler
+        run: |
+          set -eu
+          ./super-c-boot build --bootstrap-tags
+
+      - name: Install Intel SDE
+        run: |
+          set -eu
+          f=sde-external-10.13.1-2026-07-28-lin.tar.xz
+          curl -fsSL --retry 3 -o "$f" "https://github.com/petarpetrovt/setup-sde/releases/download/binaries/$f"
+          echo "94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50  $f" | sha256sum -c -
+          mkdir sde
+          tar -xJf "$f" -C sde --strip-components=1
+
+      - name: Native tests under SDE
+        run: |
+          set -eu
+          SC_SDE="$PWD/sde/sde64 -spr --" SC_TEST_CC=cc SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=1800 --filter=native_test
+
+      - name: Native tests under SDE, xmm16..xmm31 first
+        run: |
+          set -eu
+          python3 - <<'EOF'
+          p = 'src/codegen/live.spc'
+          s = open(p).read()
+          a = "        if (w & WANT_SCRATCH) != 0 && s < sc {\n            return HOME_SCRATCH;\n        }\n"
+          b = "        if (w & WANT_UPPER) != 0 && u < caps.vu {\n            return HOME_UPPER;\n        }\n"
+          assert s.count(a + b) == 1
+          open(p, 'w').write(s.replace(a + b, b + a))
+          EOF
+          SC_SDE="$PWD/sde/sde64 -spr --" SC_TEST_CC=cc SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=1800 --filter=native_test
 
   # The test suite on Windows x86-64, with this tree's compiler, in 3 shards.
   test-windows:

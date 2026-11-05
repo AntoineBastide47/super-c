@@ -1210,6 +1210,208 @@ fn x64_word_immediates_to_memory_round_trip() {
     assert_eq(insts, 3);
 }
 
+// SSE and AVX operations on xmm16..xmm31 take their EVEX forms: W per lane width, the legacy two-operand
+// forms' destination as the first source (shifts by an immediate: as V'vvvv), 8-bit displacements in units
+// of the operand's bytes. The bytes are LLVM's (`llvm-mc -show-encoding`).
+@test
+fn x64_upper_vector_registers_take_evex_forms() {
+    let mut c = x::Code::new();
+    c.vmov(16, 9); // vmovaps xmm16, xmm9
+    c.vex_rm(0, 1, 0x58, false, false, 17, 17, x::ix(x::RDI, x::RAX, 2, 0xA0)); // vaddps xmm17, xmm17, [rdi+4*rax+0xa0]
+    c.vload(16, 20, x::at(x::RSP, 48)); // vmovdqu32 xmm20, [rsp+48]
+    c.vstore(8, 21, x::at(x::RBP, -8)); // vmovq [rbp-8], xmm21
+    c.vload(4, 22, x::at(x::RAX, 0x200)); // vmovss xmm22, [rax+0x200]
+    c.sse_rr(0xF2, 0x0F58, 18, 3); // vaddsd xmm18, xmm18, xmm3
+    c.sse_rr(0x66, 0x0F72, 2, 19); // vpsrld xmm19, xmm19, 5
+    c.byte(5);
+    c.sse_rr(0x66, 0x0F73, 6, 25); // vpsllq xmm25, xmm25, 1
+    c.byte(1);
+    c.vex_rr(0x66, 1, 0xD4, false, true, 16, 31, 2); // vpaddq ymm16, ymm31, ymm2
+    c.movd_to_x(8, 23, x::RCX); // vmovq xmm23, rcx
+    c.cvtsi2f(true, 4, 24, x::R9); // vcvtsi2sd xmm24, xmm24, r9d
+    c.vfma231(false, 26, 27, 1); // vfmadd231ss xmm26, xmm27, xmm1
+    c.ymov(true, 28, x::at(x::R12, 64)); // vmovdqu32 ymm28, [r12+64]
+    c.vones(16, 29); // vpternlogd xmm29, xmm29, xmm29, 0xff
+    c.sse_rr(0xF3, 0x0F10, 30, 4); // vmovss xmm30, xmm30, xmm4
+    c.sse_rr(0x66, 0x0F70, 18, 18); // vpshufd xmm18, xmm18, 0
+    c.byte(0);
+    c.movd_from_x(4, x::RAX, 20); // vmovd eax, xmm20
+    c.zmov(false, 16, x::at(x::RSP, 128)); // vmovdqu64 [rsp+128], zmm16
+    c.cvtf2si(false, 8, x::R10, 19); // vcvttss2si r10, xmm19
+    c.sse_rr(0x66, 0x0F2E, 21, 22); // vucomisd xmm21, xmm22
+    c.vex_rr(0x66, 2, 0x18, false, true, 16, 0, 5); // vbroadcastss ymm16, xmm5
+    c.sse_rr(0x66, 0x0FEF, 17, 17); // vpxord xmm17, xmm17, xmm17
+    c.sse_rr(0x66, 0x0F59, 16, 17); // vmulpd xmm16, xmm16, xmm17
+    c.sse_rr(0x66, 0x0F14, 23, 23); // vunpcklpd xmm23, xmm23, xmm23
+    let want = [
+        0x62u8,
+        0xC1,
+        0x7C,
+        0x08,
+        0x28,
+        0xC1,
+        0x62,
+        0xE1,
+        0x74,
+        0x00,
+        0x58,
+        0x4C,
+        0x87,
+        0x0A,
+        0x62,
+        0xE1,
+        0x7E,
+        0x08,
+        0x6F,
+        0x64,
+        0x24,
+        0x03,
+        0x62,
+        0xE1,
+        0xFD,
+        0x08,
+        0xD6,
+        0x6D,
+        0xFF,
+        0x62,
+        0xE1,
+        0x7E,
+        0x08,
+        0x10,
+        0xB0,
+        0x00,
+        0x02,
+        0x00,
+        0x00,
+        0x62,
+        0xE1,
+        0xEF,
+        0x00,
+        0x58,
+        0xD3,
+        0x62,
+        0xB1,
+        0x65,
+        0x00,
+        0x72,
+        0xD3,
+        0x05,
+        0x62,
+        0x91,
+        0xB5,
+        0x00,
+        0x73,
+        0xF1,
+        0x01,
+        0x62,
+        0xE1,
+        0x85,
+        0x20,
+        0xD4,
+        0xC2,
+        0x62,
+        0xE1,
+        0xFD,
+        0x08,
+        0x6E,
+        0xF9,
+        0x62,
+        0x41,
+        0x3F,
+        0x00,
+        0x2A,
+        0xC1,
+        0x62,
+        0x62,
+        0x25,
+        0x00,
+        0xB9,
+        0xD1,
+        0x62,
+        0x41,
+        0x7E,
+        0x28,
+        0x6F,
+        0x64,
+        0x24,
+        0x02,
+        0x62,
+        0x03,
+        0x15,
+        0x00,
+        0x25,
+        0xED,
+        0xFF,
+        0x62,
+        0x61,
+        0x0E,
+        0x00,
+        0x10,
+        0xF4,
+        0x62,
+        0xA1,
+        0x7D,
+        0x08,
+        0x70,
+        0xD2,
+        0x00,
+        0x62,
+        0xE1,
+        0x7D,
+        0x08,
+        0x7E,
+        0xE0,
+        0x62,
+        0xE1,
+        0xFE,
+        0x48,
+        0x7F,
+        0x44,
+        0x24,
+        0x02,
+        0x62,
+        0x31,
+        0xFE,
+        0x08,
+        0x2C,
+        0xD3,
+        0x62,
+        0xA1,
+        0xFD,
+        0x08,
+        0x2E,
+        0xEE,
+        0x62,
+        0xE2,
+        0x7D,
+        0x28,
+        0x18,
+        0xC5,
+        0x62,
+        0xA1,
+        0x75,
+        0x00,
+        0xEF,
+        0xC9,
+        0x62,
+        0xA1,
+        0xFD,
+        0x00,
+        0x59,
+        0xC1,
+        0x62,
+        0xA1,
+        0xC5,
+        0x00,
+        0x14,
+        0xFF,
+    ];
+    assert_eq(c.b.len(), 161);
+    for k in 0..161usize {
+        assert(c.b[k] == unsafe want[k], format("byte {} of the EVEX forms", k).as_str());
+    }
+}
+
 @test
 fn x64_rows_round_trip() {
     let mut text = String::new();

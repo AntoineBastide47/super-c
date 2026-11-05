@@ -182,18 +182,22 @@ const FOLD_DEPTH: u32 = 8;
 // The levels of values a sunk value moves with (`FOLD_SINK`): its operands, theirs, and so on.
 const SINK_DEPTH: u32 = 4;
 
-/// `Live::plan`'s homes per value: no register for the whole range, a callee-saved one, a caller-saved one.
+/// `Live::plan`'s homes per value: no register for the whole range, a callee-saved one, a caller-saved one, a
+/// caller-saved one of the vector file's upper registers (x86-64's xmm16..xmm31, which only EVEX encodes).
 pub(package) const HOME_NONE: u8 = 0;
 pub(package) const HOME_CALLEE: u8 = 1;
 pub(package) const HOME_SCRATCH: u8 = 2;
+pub(package) const HOME_UPPER: u8 = 3;
 /// `Live::plan`'s request per value: it may take a callee-saved register, a caller-saved one; it is of the
-/// vector file (else the general one).
+/// vector file (else the general one); it may take an upper register (every instruction that reads or writes
+/// it has an encoding for one).
 pub(package) const WANT_CALLEE: u8 = 1;
 pub(package) const WANT_SCRATCH: u8 = 2;
 pub(package) const WANT_V: u8 = 4;
+pub(package) const WANT_UPPER: u8 = 8;
 
 /// The registers `Live::plan` gives out at once per file (`x`: general, `v`: vector): callee-saved,
-/// caller-saved, and both together.
+/// caller-saved, and all together; and the vector file's upper registers (`vu`), which `vj` counts too.
 pub(package) struct Caps {
     pub(package) xc: u32,
     pub(package) xs: u32,
@@ -201,6 +205,7 @@ pub(package) struct Caps {
     pub(package) vc: u32,
     pub(package) vs: u32,
     pub(package) vj: u32,
+    pub(package) vu: u32,
 }
 
 extend Caps as Copy {}
@@ -2858,7 +2863,7 @@ extend Live {
         self.cand.sort();
         self.act.truncate(0);
         self.stepped.truncate(0);
-        fill(&mut self.cnt, 4, 0);
+        fill(&mut self.cnt, 5, 0);
         for c in 0..self.cand.len() {
             let x = (self.cand[c] & 0xFFFFFFFF) as u32;
             let s = (self.cand[c] >> 32) as u32;
@@ -3036,15 +3041,24 @@ extend Live {
     }
 
     // The home value `x` takes with `want`'s request among the registers taken (`cnt`), those of value
-    // `without` given back: a caller-saved one first; HOME_NONE when its file has none to give.
+    // `without` given back: a caller-saved one first, then an upper one; HOME_NONE when its file has none to
+    // give.
     const fn fits(self: &Self, x: u32, want: &Vector<u8>, caps: Caps, without: u32) u8 {
         let w = want[x as usize];
         let vf = (w & WANT_V) != 0;
         let mut c = self.cnt[Live::slot(w, HOME_CALLEE)];
         let mut s = self.cnt[Live::slot(w, HOME_SCRATCH)];
+        let mut u = if vf {
+            self.cnt[Live::slot(w, HOME_UPPER)]
+        } else {
+            0
+        };
         if without != NONE {
-            if self.home[without as usize] == HOME_CALLEE {
+            let h = self.home[without as usize];
+            if h == HOME_CALLEE {
                 c -= 1;
+            } else if h == HOME_UPPER {
+                u -= 1;
             } else {
                 s -= 1;
             }
@@ -3056,11 +3070,14 @@ extend Live {
         } else {
             (caps.xc, caps.xs, caps.xj)
         };
-        if c + s >= jc {
+        if c + s + u >= jc {
             return HOME_NONE;
         }
         if (w & WANT_SCRATCH) != 0 && s < sc {
             return HOME_SCRATCH;
+        }
+        if (w & WANT_UPPER) != 0 && u < caps.vu {
+            return HOME_UPPER;
         }
         if (w & WANT_CALLEE) != 0 && c < cc {
             return HOME_CALLEE;
@@ -3483,12 +3500,14 @@ extend Live {
     const fn want_of(h: u8) u8 {
         return if h == HOME_CALLEE {
             WANT_CALLEE
+        } else if h == HOME_UPPER {
+            WANT_UPPER
         } else {
             WANT_SCRATCH
         };
     }
 
-    // `cnt`'s entry of the file of request `w` and home `h`.
+    // `cnt`'s entry of the file of request `w` and home `h` (HOME_UPPER: the vector file's alone, entry 4).
     const fn slot(w: u8, h: u8) usize {
         return ((w & WANT_V) != 0) as usize * 2 + (h - 1) as usize;
     }

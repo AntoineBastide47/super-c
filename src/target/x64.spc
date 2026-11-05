@@ -464,8 +464,13 @@ extend Code {
     }
 
     /// `op reg, rm` (register direct) with mandatory prefix `pfx` (0: none) and REX.W `w`; `byte` when `rm`
-    /// is a byte register (`reg` is an opcode digit or a wider register).
+    /// is a byte register (`reg` is an opcode digit or a wider register). An SSE operation on xmm16..xmm31
+    /// takes its EVEX form (`sse_evex`).
     pub(package) fn rr(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, rm: u8, byte: bool) {
+        if (reg | rm) >= 16 {
+            self.sse_evex(pfx, op, w, reg, rm, rip(), false);
+            return;
+        }
         if pfx != 0 {
             self.byte(pfx);
         }
@@ -476,6 +481,10 @@ extend Code {
 
     /// `op reg, [m]` with mandatory prefix `pfx` and REX.W `w`.
     pub(package) fn rm(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, m: Mem, byte: bool) {
+        if reg >= 16 {
+            self.sse_evex(pfx, op, w, reg, 0, m, true);
+            return;
+        }
         if op == 0xFF && reg == 2 {
             self.stack_use();
         }
@@ -1131,6 +1140,12 @@ extend Code {
     /// (ModRM.rm, an xmm or a general register), its legacy prefix `pfx` (0, 0x66, 0xF3 or 0xF2), opcode map
     /// `mm` (1: 0F, 2: 0F38, 3: 0F3A), opcode `op`, VEX.W `w`, 256 bits when `l`.
     pub(package) fn vex_rr(self: &mut Self, pfx: u32, mm: u32, op: u32, w: bool, l: bool, dst: u8, src1: u8, src2: u8) {
+        if (dst | src1 | src2) >= 16 {
+            let f = evex_form(pfx, map_op(mm, op), dst, w, false);
+            assert(f != EV_NONE, "x64: a VEX operation without an EVEX form on xmm16..xmm31");
+            self.evex_r(pfx, mm, op, ev_w(f, w), l as u32, dst, src1, src2);
+            return;
+        }
         let r = (~(dst as u32) >> 3 & 1) << 7;
         let b = (~(src2 as u32) >> 3 & 1) << 5;
         let tail = (~(src1 as u32) & 15) << 3 | l as u32 << 2 | pp_of(pfx);
@@ -1148,6 +1163,12 @@ extend Code {
 
     /// `vex_rr` with its second source at `m` (no alignment needed).
     pub(package) fn vex_rm(self: &mut Self, pfx: u32, mm: u32, op: u32, w: bool, l: bool, dst: u8, src1: u8, m: Mem) {
+        if (dst | src1) >= 16 {
+            let f = evex_form(pfx, map_op(mm, op), dst, w, true);
+            assert(f != EV_NONE, "x64: a VEX operation without an EVEX form on xmm16..xmm31");
+            self.evex_m(pfx, mm, op, ev_w(f, w), l as u32, dst, src1, m, ev_n(f, 16u32 << l as u32, w));
+            return;
+        }
         let r = (~(dst as u32) >> 3 & 1) << 7;
         let x = if m.index != NOREG {
             (~(m.index as u32) >> 3 & 1) << 6
@@ -1173,17 +1194,82 @@ extend Code {
     }
 
     /// An EVEX.512 instruction on registers, as `vex_rr` on zmm registers (or a mask or general register
-    /// where the opcode takes one), all below 16, unmasked; EVEX.W `w`.
+    /// where the opcode takes one), unmasked; EVEX.W `w`.
     pub(package) fn evex_rr(self: &mut Self, pfx: u32, mm: u32, op: u32, w: bool, dst: u8, src1: u8, src2: u8) {
+        self.evex_r(pfx, mm, op, w, 2, dst, src1, src2);
+    }
+
+    /// Every bit of the low `n` bytes (16, 32, 64) of xmm `r` set: `vpternlogd r, r, r, 0xFF` (EVEX.66.0F3A.W0
+    /// 25), for zmm registers and xmm16..xmm31, which `pcmpeqd` cannot write.
+    pub(package) fn vones(self: &mut Self, n: u32, r: u8) {
+        self.evex_r(0x66, 3, 0x25, false, n / 32, r, r, r);
+        self.byte(0xFF);
+    }
+
+    // The EVEX prefix (unmasked, no broadcast or rounding): legacy prefix `pfx`, opcode map `mm`, EVEX.W `w`,
+    // vector length `ll` (0: 128 bits, 1: 256, 2: 512), ModRM.reg `reg`, `v` in V'vvvv (0 for none), and the
+    // ModRM.rm extension bits `x` and `b` (inverted, as the prefix holds them).
+    fn evex_p(self: &mut Self, pfx: u32, mm: u32, w: bool, ll: u32, reg: u8, v: u8, x: u32, b: u32) {
         self.byte(0x62);
-        // P0: R X B R' 0 0 m m, the register bits inverted (R' and X set: no register above 15).
-        self.byte((~(dst as u32) >> 3 & 1) << 7 | 1u32 << 6 | (~(src2 as u32) >> 3 & 1) << 5 | 1u32 << 4 | mm);
+        // P0: R X B R' 0 m m m.
+        self.byte((~(reg as u32) >> 3 & 1) << 7 | x << 6 | b << 5 | (~(reg as u32) >> 4 & 1) << 4 | mm);
         // P1: W vvvv 1 pp.
-        self.byte(w as u32 << 7 | (~(src1 as u32) & 15) << 3 | 4 | pp_of(pfx));
-        // P2: z L'L b V' aaa: 512 bits, V' set, no mask.
-        self.byte(2u32 << 5 | 1u32 << 3);
+        self.byte(w as u32 << 7 | (~(v as u32) & 15) << 3 | 4 | pp_of(pfx));
+        // P2: z L'L b V' aaa.
+        self.byte(ll << 5 | (~(v as u32) >> 4 & 1) << 3);
+    }
+
+    // An EVEX instruction on registers: `reg` (ModRM.reg), `v` (V'vvvv), `rm` (ModRM.rm, an xmm or a general
+    // register: EVEX.X holds its fifth bit).
+    fn evex_r(self: &mut Self, pfx: u32, mm: u32, op: u32, w: bool, ll: u32, reg: u8, v: u8, rm: u8) {
+        self.evex_p(pfx, mm, w, ll, reg, v, ~(rm as u32) >> 4 & 1, ~(rm as u32) >> 3 & 1);
         self.byte(op);
-        self.modrm_rr(dst, src2);
+        self.modrm_rr(reg, rm);
+    }
+
+    // `evex_r` with ModRM.rm memory operand `m`, its 8-bit displacement counted in `n`-byte units.
+    fn evex_m(self: &mut Self, pfx: u32, mm: u32, op: u32, w: bool, ll: u32, reg: u8, v: u8, m: Mem, n: i32) {
+        let x = if m.index != NOREG {
+            ~(m.index as u32) >> 3 & 1
+        } else {
+            1u32
+        };
+        let b = if m.base != RIP && m.base != NOREG {
+            ~(m.base as u32) >> 3 & 1
+        } else {
+            1u32
+        };
+        self.evex_p(pfx, mm, w, ll, reg, v, x, b);
+        self.byte(op);
+        self.modrm_n(reg, m, n);
+    }
+
+    // `rr` (`rm` when `mem`, at `m`) of an SSE operation with a register of xmm16..xmm31: its EVEX.128 form
+    // (`evex_form`), the destination its first source too where the legacy form reads it.
+    fn sse_evex(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, rm: u8, m: Mem, mem: bool) {
+        let f = evex_form(pfx, op, reg, w, mem);
+        assert(f != EV_NONE, "x64: an SSE operation without an EVEX form on xmm16..xmm31");
+        let sh = f & EV_SHAPE;
+        let v = if sh == EV_NDS {
+            reg
+        } else if sh == EV_NDD || sh == EV_NDM {
+            rm
+        } else {
+            0
+        };
+        let mm = op >> 8 & 0xFF;
+        let map = if mm == 0x0F {
+            1u32
+        } else if mm == 0x38 {
+            2u32
+        } else {
+            3u32
+        };
+        if mem {
+            self.evex_m(pfx, map, op & 0xFF, ev_w(f, w), 0, reg, v, m, ev_n(f, 16, w));
+        } else {
+            self.evex_r(pfx, map, op & 0xFF, ev_w(f, w), 0, reg, v, rm);
+        }
     }
 
     /// vzeroupper: the ymm registers' upper halves zeroed, before code of the legacy SSE encoding.
@@ -1245,6 +1331,10 @@ extend Code {
 
     /// vfmadd231sd (`d`) or vfmadd231ss: xmm `dst` = xmm `a` * xmm `b` + xmm `dst` (VEX.LIG.66.0F38 B9).
     pub(package) fn vfma231(self: &mut Self, d: bool, dst: u8, a: u8, b: u8) {
+        if (dst | a | b) >= 16 {
+            self.evex_r(0x66, 2, 0xB9, d, 0, dst, a, b);
+            return;
+        }
         self.byte(0xC4);
         self.byte((~(dst as u32) >> 3 & 1) << 7 | 1u32 << 6 | (~(b as u32) >> 3 & 1) << 5 | 2);
         self.byte(
@@ -1262,6 +1352,25 @@ extend Code {
 
     /// vmovdqu of 32 bytes (VEX.256): ymm `r` from (`load`) or to `m`.
     pub(package) fn ymov(self: &mut Self, load: bool, r: u8, m: Mem) {
+        if r >= 16 {
+            // vmovdqu32 (EVEX.256.F3.0F.W0).
+            self.evex_m(
+                0xF3,
+                1,
+                if load {
+                    0x6Fu32
+                } else {
+                    0x7Fu32
+                },
+                false,
+                1,
+                r,
+                0,
+                m,
+                32,
+            );
+            return;
+        }
         // Map 0F, prefix F3, L = 1: the two-byte form unless the index or the base needs its REX bit.
         let rb = (~(r as u32) >> 3 & 1) << 7;
         let xb = if m.index != NOREG {
@@ -1295,32 +1404,21 @@ extend Code {
     /// vmovdqu64 of 64 bytes (EVEX.512): zmm `r` from (`load`) or to `m`. Its 8-bit displacement counts
     /// in 64-byte units.
     pub(package) fn zmov(self: &mut Self, load: bool, r: u8, m: Mem) {
-        let rr = (~(r as u32) >> 3 & 1) << 7;
-        let xx = if m.index != NOREG {
-            (~(m.index as u32) >> 3 & 1) << 6
-        } else {
-            1u32 << 6
-        };
-        let bb = if m.base != RIP && m.base != NOREG {
-            (~(m.base as u32) >> 3 & 1) << 5
-        } else {
-            1u32 << 5
-        };
-        self.byte(0x62);
-        // P0: R X B R' 0 0 m m (map 0F); R' set (inverted) for registers below 16.
-        self.byte(rr | xx | bb | 1u32 << 4 | 1);
-        // P1: W vvvv 1 pp (W1, vvvv unused, pp = F3).
-        self.byte(0x80 | 0x78 | 4 | 2);
-        // P2: z L'L b V' aaa (512 bits, V' set).
-        self.byte(2u32 << 5 | 1u32 << 3);
-        self.byte(
+        self.evex_m(
+            0xF3,
+            1,
             if load {
                 0x6Fu32
             } else {
                 0x7Fu32
             },
+            true,
+            2,
+            r,
+            0,
+            m,
+            64,
         );
-        self.modrm_n(r, m, 64);
     }
 }
 
@@ -1334,6 +1432,306 @@ const fn pp_of(pfx: u32) u32 {
         3
     } else {
         0
+    };
+}
+
+// `evex_form`: EVEX.W (0, 1, or the operation's REX.W or VEX.W); the legacy form's operand shape (`EV_MOV`:
+// no V'vvvv; `EV_NDS`: the destination, ModRM.reg, is the first source too; `EV_NDD`: the destination,
+// ModRM.rm, is V'vvvv, ModRM.reg an opcode digit; `EV_NDM`: the destination, ModRM.rm, is the first
+// source too); and the unit of the 8-bit displacement (the tuple's N): the vector's bytes, half, a quarter or
+// an eighth of them, 1, 2, 4, 8 or 16 bytes, or 4 bytes with W0 and 8 with W1.
+const EV_NONE: u32 = 0xFFFFFFFF;
+const EV_W0: u32 = 0;
+const EV_W1: u32 = 1;
+const EV_WW: u32 = 2;
+const EV_SHAPE: u32 = 12;
+const EV_MOV: u32 = 0;
+const EV_NDS: u32 = 4;
+const EV_NDD: u32 = 8;
+const EV_NDM: u32 = 12;
+const EV_FULL: u32 = 0;
+const EV_HALF: u32 = 16;
+const EV_QUARTER: u32 = 32;
+const EV_EIGHTH: u32 = 48;
+const EV_N1: u32 = 64;
+const EV_N2: u32 = 80;
+const EV_N4: u32 = 96;
+const EV_N8: u32 = 112;
+const EV_N16: u32 = 128;
+const EV_NW: u32 = 144;
+
+// The opcode `op` of VEX map `mm` (1: 0F, 2: 0F 38, 3: 0F 3A) as `evex_form` takes it.
+const fn map_op(mm: u32, op: u32) u32 {
+    return if mm == 1 {
+        0x0F00 | op
+    } else if mm == 2 {
+        0x0F3800 | op
+    } else {
+        0x0F3A00 | op
+    };
+}
+
+// EVEX.W of form `f` for an operation of REX.W or VEX.W `w`.
+const fn ev_w(f: u32, w: bool) bool {
+    return (f & 3) == EV_W1 || (f & 3) == EV_WW && w;
+}
+
+// The unit of form `f`'s 8-bit displacement on `vl`-byte vectors, W `w`.
+const fn ev_n(f: u32, vl: u32, w: bool) i32 {
+    let k = f >> 4;
+    return if k < 4 {
+        (vl >> k) as i32
+    } else if k < 9 {
+        1i32 << (k - 4) as i32
+    } else if w {
+        8
+    } else {
+        4
+    };
+}
+
+// The EVEX form of SSE or AVX operation `op` (`0F xx`, `0F 38 xx`, `0F 3A xx`) of legacy prefix (VEX.pp) `pfx`,
+// ModRM.reg `dg` (an opcode digit), REX.W or VEX.W `w`, on a memory operand when `mem` (`EV_*`). EV_NONE for
+// an operation without one of the same result: comparisons into vectors (EVEX's write mask registers),
+// blends on vector masks, mask extractions, `ptest`, horizontal sums, `vperm2i128`.
+const fn evex_form(pfx: u32, op: u32, dg: u8, w: bool, mem: bool) u32 {
+    let o = op & 0xFF;
+    let map = op >> 8;
+    let p66 = pfx == 0x66;
+    let ss = pfx == 0xF3;
+    let sd = pfx == 0xF2;
+    let n0 = pfx == 0;
+    if map == 0x0F {
+        // Floats: single (no prefix, F3) W0, double (66, F2) W1; the scalar ones (F3, F2) read 4 or 8 bytes.
+        let fw = if p66 || sd {
+            EV_W1
+        } else {
+            EV_W0
+        };
+        let fs = if ss {
+            EV_N4
+        } else if sd {
+            EV_N8
+        } else {
+            EV_FULL
+        };
+        if o == 0x10 || o == 0x11 {
+            return if (ss || sd) && mem {
+                fw | fs
+            } else if ss || sd {
+                fw | fs | if o == 0x10 {
+                    EV_NDS
+                } else {
+                    EV_NDM
+                }
+            } else {
+                fw
+            };
+        }
+        if (o == 0x12 || o == 0x16) && (n0 || p66 && mem) {
+            return fw | EV_NDS | if mem {
+                EV_N8
+            } else {
+                EV_FULL
+            };
+        }
+        if o == 0x12 && sd {
+            return EV_W1 | EV_N8;
+        }
+        if (o == 0x12 || o == 0x16) && ss {
+            return EV_W0;
+        }
+        if (o == 0x13 || o == 0x17) && (n0 || p66) {
+            return fw | EV_N8;
+        }
+        if (o == 0x14 || o == 0x15 || o >= 0x54 && o <= 0x57 || o == 0xC6) && (n0 || p66) {
+            return fw | EV_NDS;
+        }
+        if (o == 0x28 || o == 0x29) && (n0 || p66) {
+            return fw;
+        }
+        if o == 0x2A && (ss || sd) {
+            return EV_WW | EV_NDS | EV_NW;
+        }
+        if (o == 0x2C || o == 0x2D) && (ss || sd) {
+            return EV_WW | fs;
+        }
+        if (o == 0x2E || o == 0x2F) && (n0 || p66) {
+            return fw | if p66 {
+                EV_N8
+            } else {
+                EV_N4
+            };
+        }
+        if o == 0x51 {
+            return fw | fs | if ss || sd {
+                EV_NDS
+            } else {
+                EV_MOV
+            };
+        }
+        if o >= 0x58 && o <= 0x5F && o != 0x5A && o != 0x5B {
+            return fw | fs | EV_NDS;
+        }
+        if o == 0x5A {
+            return if n0 {
+                EV_W0 | EV_HALF
+            } else if p66 {
+                EV_W1
+            } else {
+                fw | fs | EV_NDS
+            };
+        }
+        if o == 0x5B {
+            return EV_W0;
+        }
+        if o == 0xE6 && !n0 {
+            return if ss {
+                EV_W0 | EV_HALF
+            } else {
+                EV_W1
+            };
+        }
+        if (o == 0x6E || o == 0x7E) && p66 {
+            return EV_WW | EV_NW;
+        }
+        if o == 0x7E && ss || o == 0xD6 && p66 {
+            return EV_W1 | EV_N8;
+        }
+        if (o == 0x6F || o == 0x7F) && (p66 || ss) {
+            return EV_W0;
+        }
+        if o == 0x70 && !n0 {
+            return EV_W0;
+        }
+        if !p66 {
+            return EV_NONE;
+        }
+        // Shifts by an immediate: `psrlq` and `psllq` (73 /2, /6) take W1.
+        if o >= 0x71 && o <= 0x73 && !mem {
+            return EV_NDD | if o == 0x73 && (dg == 2 || dg == 6) {
+                EV_W1
+            } else {
+                EV_W0
+            };
+        }
+        if o == 0xC4 {
+            return EV_W0 | EV_NDS | EV_N2;
+        }
+        if o == 0xC5 && !mem {
+            return EV_W0;
+        }
+        // The integer lane operations; those of 64-bit lanes take W1, shifts by a vector read 16 bytes.
+        let lane = o >= 0x60 && o <= 0x6D && (o < 0x64 || o > 0x66) || o >= 0xD1 && o <= 0xFE && o != 0xD6 && o != 0xD7 && o != 0xE6 && o != 0xE7 && o != 0xF0 && o != 0xF7;
+        if lane {
+            let q = o == 0xD4 || o == 0xFB || o == 0xF4 || o == 0x6C || o == 0x6D || o == 0xD3 || o == 0xF3;
+            let sh = o == 0xD1 || o == 0xD2 || o == 0xD3 || o == 0xE1 || o == 0xE2 || o == 0xF1 || o == 0xF2 || o == 0xF3;
+            return EV_NDS | if q {
+                EV_W1
+            } else {
+                EV_W0
+            } | if sh {
+                EV_N16
+            } else {
+                EV_FULL
+            };
+        }
+        return EV_NONE;
+    }
+    if !p66 {
+        return EV_NONE;
+    }
+    if map == 0x0F38 {
+        if o == 0x00 || o == 0x04 || o == 0x0B || o == 0x2B || o >= 0x38 && o <= 0x40 || o == 0x16 || o == 0x36 || o == 0x0C {
+            return EV_W0 | EV_NDS;
+        }
+        if o == 0x28 || o == 0x0D {
+            return EV_W1 | EV_NDS;
+        }
+        if o == 0x1C || o == 0x1D || o == 0x1E {
+            return EV_W0;
+        }
+        // `pmovsx`, `pmovzx`: from half (bw, wd, dq), a quarter (bd, wq) or an eighth (bq) of the vector.
+        if o >= 0x20 && o <= 0x25 || o >= 0x30 && o <= 0x35 {
+            let k = o & 0xF;
+            return if k == 1 || k == 4 {
+                EV_QUARTER
+            } else if k == 2 {
+                EV_EIGHTH
+            } else {
+                EV_HALF
+            };
+        }
+        if o == 0x13 {
+            return EV_W0 | EV_HALF;
+        }
+        if o == 0x18 || o == 0x58 {
+            return EV_W0 | EV_N4;
+        }
+        if o == 0x19 || o == 0x59 {
+            return EV_W1 | EV_N8;
+        }
+        if o == 0x78 {
+            return EV_W0 | EV_N1;
+        }
+        if o == 0x79 {
+            return EV_W0 | EV_N2;
+        }
+        if o == 0x1A || o == 0x5A {
+            return EV_W0 | EV_N16;
+        }
+        if o == 0x45 || o == 0x47 {
+            return EV_WW | EV_NDS;
+        }
+        if o == 0x46 && !w {
+            return EV_W0 | EV_NDS;
+        }
+        // The fused multiply-adds (96..9F, A6..AF, B6..BF): single or double by W; the scalar ones (odd, 9 and
+        // up) read one lane.
+        let lo = o & 0xF;
+        if o >= 0x96 && o <= 0xBF && lo >= 6 {
+            return EV_WW | EV_NDS | if lo >= 9 && (lo & 1) == 1 {
+                EV_NW
+            } else {
+                EV_FULL
+            };
+        }
+        return EV_NONE;
+    }
+    // 0F 3A: `round` as `vrndscale` (the same immediate's low bits), lane inserts and extracts, AVX2
+    // permutations, 128-bit inserts and extracts (`vinsertf32x4`, `vextracti32x4`), `vcvtps2ph`.
+    return if o == 0x08 || o == 0x04 {
+        EV_W0
+    } else if o == 0x09 || o == 0x00 || o == 0x01 || o == 0x05 {
+        EV_W1
+    } else if o == 0x0A {
+        EV_W0 | EV_NDS | EV_N4
+    } else if o == 0x0B {
+        EV_W1 | EV_NDS | EV_N8
+    } else if o == 0x0F {
+        EV_W0 | EV_NDS
+    } else if o == 0x14 {
+        EV_W0 | EV_N1
+    } else if o == 0x15 {
+        EV_W0 | EV_N2
+    } else if o == 0x16 {
+        EV_WW | EV_NW
+    } else if o == 0x17 {
+        EV_W0 | EV_N4
+    } else if o == 0x20 {
+        EV_W0 | EV_NDS | EV_N1
+    } else if o == 0x21 {
+        EV_W0 | EV_NDS | EV_N4
+    } else if o == 0x22 {
+        EV_WW | EV_NDS | EV_NW
+    } else if o == 0x18 || o == 0x38 {
+        EV_W0 | EV_NDS | EV_N16
+    } else if o == 0x19 || o == 0x39 {
+        EV_W0 | EV_N16
+    } else if o == 0x1D {
+        EV_W0 | EV_HALF
+    } else {
+        EV_NONE
     };
 }
 

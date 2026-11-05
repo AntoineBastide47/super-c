@@ -6646,6 +6646,116 @@ b0(v0: i32):
     }
 }
 
+// x86-64 with AVX-512 keeps a loop's values in xmm16..xmm31 too (EVEX forms): 22 accumulators (10 `v4f32`
+// sums, 6 `v4i32` sums and xors of loads shifted by an immediate, 4 `f64` sums, 2 `v2f64` differences) stay
+// in registers, no frame (no `sub rsp`: 48 83 EC or 48 81 EC), where SSE2's 16 registers spill. It gives the
+// C results.
+@test
+fn a_loops_many_accumulators_take_the_upper_vector_registers() {
+    let mut t = String::from(
+        "lir ptr 8\nsym @acc fn global\nfn @acc\n  sig (ptr, i64, ptr) -> void\nb0(v0: ptr, v1: i64, v2: ptr):\n  v3 = iconst.i64 0\n  v4 = iconst.i64 1\n  v5 = iconst.i32 3\n  v6 = splat.v4i32 v5\n  v7 = fconst.f32 0x0\n  v8 = splat.v4f32 v7\n  v9 = iconst.i32 0\n  v10 = splat.v4i32 v9\n  v11 = fconst.f64 0x0\n  v12 = splat.v2f64 v11\n  jmp b1(v3, v0",
+    );
+    let ty: [str; 4] = ["v4f32", "v4i32", "f64", "v2f64"];
+    let zero: [u32; 4] = [8, 10, 11, 12];
+    // Accumulator `k`'s kind (an index of `ty`) and offset in a 320-byte record.
+    let kind = |k: u32| if k < 10 {
+        0u32
+    } else if k < 16 {
+        1u32
+    } else if k < 20 {
+        2u32
+    } else {
+        3u32
+    };
+    let off = |k: u32| if k < 16 {
+        16 * k
+    } else if k < 20 {
+        256 + 8 * (k - 16)
+    } else {
+        288 + 16 * (k - 20)
+    };
+    for k in 0..22u32 {
+        t.format_into(", v{}", unsafe zero[kind(k) as usize]);
+    }
+    t.push_str(")\nb1(v13: i64, v14: ptr");
+    for k in 0..22u32 {
+        t.format_into(", v{}: {}", 15 + k, unsafe ty[kind(k) as usize]);
+    }
+    t.push_str("):\n  v37 = icmp.ult v13, v1\n  br v37, b2, b3\nb2:\n");
+    let mut n: u32 = 38;
+    let mut next = Vector::<u32>::new();
+    for k in 0..22u32 {
+        let tk = unsafe ty[kind(k) as usize];
+        t.format_into("  v{} = load.{} v14+{} align 2\n", n, tk, off(k));
+        let x = n;
+        n += 1;
+        if kind(k) == 1 && (k - 10) % 2 == 1 {
+            t.format_into("  v{} = shl.v4i32 v{}, v6\n  v{} = xor.v4i32 v{}, v{}\n", n, x, n + 1, 15 + k, n);
+            n += 2;
+        } else {
+            let op = if kind(k) == 1 {
+                "add"
+            } else if kind(k) == 3 {
+                "fsub"
+            } else {
+                "fadd"
+            };
+            t.format_into("  v{} = {}.{} v{}, v{}\n", n, op, tk, 15 + k, x);
+            n += 1;
+        }
+        next.push(n - 1);
+    }
+    t.format_into("  v{} = add.i64 v13, v4\n  v{} = ptradd v14+320\n  jmp b1(v{}, v{}", n, n + 1, n, n + 1);
+    for k in 0..22usize {
+        t.format_into(", v{}", next[k]);
+    }
+    t.push_str(")\nb3:\n");
+    for k in 0..22u32 {
+        t.format_into("  store v{}, v2+{} align 2\n", 15 + k, off(k));
+    }
+    t.push_str("  ret\n");
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+typedef struct { float f[40]; uint32_t u[24]; double d[8]; } B;
+void acc(const B *, int64_t, B *);
+static void fill(B *b, int it) {
+  for (int j = 0; j < 40; j++) b->f[j] = (float)((it * 7 + j) % 13) - 6.0f;
+  for (int j = 0; j < 24; j++) b->u[j] = (uint32_t)it * 2654435761u + (uint32_t)j * 40503u;
+  for (int j = 0; j < 8; j++) b->d[j] = (double)((it * 5 + j) % 11) * 0.5;
+}
+int main(void) {
+  static B in[5];
+  B out, ref;
+  for (int it = 0; it < 5; it++) fill(&in[it], it);
+  fill(&out, 9);
+  memset(&ref, 0, sizeof ref);
+  for (int it = 0; it < 5; it++) {
+    for (int j = 0; j < 40; j++) ref.f[j] += in[it].f[j];
+    for (int j = 0; j < 24; j++) ref.u[j] = j / 4 % 2 == 0 ? ref.u[j] + in[it].u[j] : ref.u[j] ^ in[it].u[j] << 3;
+    for (int j = 0; j < 4; j++) ref.d[j] += in[it].d[j];
+    for (int j = 4; j < 8; j++) ref.d[j] -= in[it].d[j];
+  }
+  acc(in, 5, &out);
+  return memcmp(&out, &ref, sizeof out) != 0;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    let (linux, x64) = (tgt::axis_index("linux", false), tgt::axis_index("x86_64", true));
+    let s8: [u8; 3] = [0x48, 0x83, 0xEC];
+    let s32: [u8; 3] = [0x48, 0x81, 0xEC];
+    assert(object_of(&t, linux, x64, 0, &mut obj), "the SSE2 object");
+    assert(holds(&obj, s8[0..3]) || holds(&obj, s32[0..3]), "SSE2 spills");
+    assert(object_of(&t, linux, x64, Z512, &mut obj), "the AVX-512 object");
+    assert(!holds(&obj, s8[0..3]) && !holds(&obj, s32[0..3]), "no frame with AVX-512");
+    assert(object_of(&t, tgt::axis_index("windows", false), x64, Z512, &mut obj), "the Microsoft x64 AVX-512 object");
+    if !cli::has_cc() {
+        return;
+    }
+    assert_eq(run_native(&t, drv), 0);
+    assert_eq(run_wide(&t, drv), 0);
+    assert_eq(run_zmm(&t, drv), 0);
+}
+
 // A second loop's parameters share the registers of the values its one entry passes, also when those
 // continue the first loop's parameters (`Live::entry_partner` through `Live::root`): a 128-bit sum of
 // products over an unrolled loop and its remainder loop keeps every value in a register on x86-64 without

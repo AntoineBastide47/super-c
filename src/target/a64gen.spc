@@ -1064,7 +1064,7 @@ extend Gen {
         } else {
             (10u32, 8u32, 12u32)
         };
-        self.lv.plan(b, &self.want, lv::Caps { xc: xc, xs: xs, xj: 16, vc: vc, vs: vs, vj: vc + vs });
+        self.lv.plan(b, &self.want, lv::Caps { xc: xc, xs: xs, xj: 16, vc: vc, vs: vs, vj: vc + vs, vu: 0 });
         for x in 0..ni {
             if self.lconst[x] && self.fix_class(x as u32) != FIX_NONE {
                 self.va.index_mut(x).home = H_NONE;

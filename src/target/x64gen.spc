@@ -33,7 +33,7 @@ import std::float as fl;
 import target::assembler as asmr;
 import target::intrin as intrin;
 
-const V0: u8 = 16; // register number of xmm0: general registers are 0..15
+const V0: u8 = 16; // register number of xmm0: general registers are 0..15, xmm0..xmm31 16..47
 
 // The in-place operations `Gen::chain_ret` follows to a return.
 const CHAIN_STEPS: u32 = 4;
@@ -69,9 +69,10 @@ const VSCR_SYSV_BARE: u64 = 0x3FF00000; // xmm4..xmm13
 const ARGS_SYSV: u64 = 0xFF03C6; // rdi rsi rdx rcx r8 r9, xmm0..xmm7
 const ARGS_WIN: u64 = 0xF0306; // rcx rdx r8 r9, xmm0..xmm3
 
-// `Gen::fix_class`: no fixed register, a callee-saved one, a caller-saved one.
+// `Gen::fix_class`: no fixed register, a callee-saved one, a caller-saved one, one of xmm16..xmm31.
 const FIX_NONE: u8 = 0;
 const FIX_CALLEE: u8 = 1;
+const FIX_UPPER: u8 = 3;
 const FIX_SCRATCH: u8 = 2;
 const XFIX_WIN: u64 = 0xF0C8; // rbx rsi rdi r12 r13 r14 r15
 const VALLOC_WIN: u64 = 0x3FCF0000; // xmm0..xmm3, xmm6..xmm13
@@ -81,6 +82,9 @@ const VSAVE_WIN: u64 = 0xFFC00000; // xmm6..xmm15
 // The callee-saved xmm registers a value may hold for its whole range (Microsoft x64), in the order taken:
 // xmm14 and xmm15 (no temporary's), then xmm8..xmm13 (no intrinsic's template names xmm8 and up).
 const VFIX_WIN: [u8; 8] = [30, 31, 24, 25, 26, 27, 28, 29];
+// xmm16..xmm31 (AVX-512): caller-saved under both ABIs. Only EVEX encodes them, so they hold homes alone
+// (`FIX_UPPER`), of values whose instructions all have EVEX forms (`Gen.vlow`).
+const VUPPER: u64 = 0xFFFF00000000;
 
 // `Gen::bytes_only` follows at most this many logic operations.
 const BYTES_DEPTH: u32 = 3;
@@ -243,6 +247,8 @@ pub(package) struct Gen {
     xhome: u64, // the body's caller-saved homes: `xscr`, with rax, rcx and rdx in a leaf that allows them
     vscr: u64,
     vfix: u64, // the callee-saved xmm registers a value may hold for its whole range (Microsoft x64)
+    vlow: Vector<bool>, // per value index, whether it stays out of xmm16..xmm31 (`upper_marks`)
+    on_edge: bool, // a terminator places its edges' parameter homes: each register's value has an owner
     vs0: u8, // the vector scratch registers
     vs1: u8,
     // ---- per body ----
@@ -396,8 +402,8 @@ pub(package) struct Gen {
 
 extend Gen {
     pub(package) fn new(pkg: &Package, o: &mut ob::Obj, win: bool) Gen {
-        let mut owner = Vector::<u32>::with_capacity(32);
-        for _ in 0..32 {
+        let mut owner = Vector::<u32>::with_capacity(48);
+        for _ in 0..48 {
             owner.push(NONE);
         }
         return Gen {
@@ -444,6 +450,8 @@ extend Gen {
             } else {
                 VSCR_SYSV
             },
+            vlow: Vector::<bool>::new(),
+            on_edge: false,
             vfix: if win {
                 0xFF000000
             } else {
@@ -743,6 +751,42 @@ extend Gen {
         self.set_owner(r, NONE);
     }
 
+    // Free register `r` for a home (`take_scratch`, `take_fixed`): while a terminator places its edges'
+    // parameter homes (`on_edge`, `edge_homes`, `edge_moves`; elsewhere a register may hold a value no
+    // `owner` names, a call's result), a value there that lives on or that the edge passes moves to a free
+    // temporary register of its file, outside the homes first, when one is; else to its home (`evict`).
+    fn evict_home(self: &mut Self, r: u8) {
+        let x = self.owner[r as usize];
+        if !self.on_edge || x == NONE || self.va[x as usize].home == H_FIXED || !self.live_on(x) && !self.read_now(x) {
+            self.evict(r);
+            return;
+        }
+        let vr = r >= V0;
+        let free = if vr {
+            self.valloc
+        } else {
+            self.xalloc
+        } & ~(self.held | self.lock | self.tmps | self.fixed_busy | self.resv);
+        if free == 0 {
+            self.evict(r);
+            return;
+        }
+        let out = free & ~if vr {
+            self.vscr
+        } else {
+            self.xhome
+        };
+        let r2 = if out != 0 {
+            out.trailing_zeros() as u8
+        } else {
+            free.trailing_zeros() as u8
+        };
+        self.move_reg(self.xty(x), r2, r);
+        self.set_owner(r, NONE);
+        self.set_owner(r2, x);
+        self.va.index_mut(x as usize).reg = r2;
+    }
+
     // Whether evicting register `r`'s value stores it (`evict`).
     fn stores(self: &Self, r: u8) bool {
         let x = self.owner[r as usize];
@@ -904,7 +948,10 @@ extend Gen {
             self.lock |= bit(r);
             return r;
         }
-        let n = self.next_reg(v);
+        let mut n = self.next_reg(v);
+        if n != NOREG && !self.up_ok(x, n) {
+            n = NOREG;
+        }
         if n != NOREG && (self.fixed_busy & bit(n)) != 0 {
             // A jump's parameter home (`jump_reg`): `v` holds it until the jump, which moves nothing; the
             // parameter keeps the register's ownership.
@@ -1277,7 +1324,7 @@ extend Gen {
         if sr == NOREG {
             sr = self.fwd_reg(v, a);
         }
-        if sr == NOREG {
+        if sr == NOREG || !self.up_ok(self.vx(v), sr) {
             return NOREG;
         }
         // The parameter keeps the register, which its release frees; a `v` that outlives its block takes
@@ -1555,7 +1602,77 @@ extend Gen {
         if fc == FIX_SCRATCH {
             return self.take_scratch(x, vr, prefer);
         }
+        if fc == FIX_UPPER {
+            return self.take_upper(x, prefer);
+        }
         return NOREG;
+    }
+
+    // Give value index `x` a free register of xmm16..xmm31 as its home (`prefer` when it is one), else a
+    // caller-saved one (`take_scratch`). Those registers hold nothing but homes.
+    fn take_upper(self: &mut Self, x: u32, prefer: u8) u8 {
+        let open = VUPPER & ~self.fixed_busy & ~self.lock & ~self.tmps;
+        if open == 0 {
+            return self.take_scratch(x, true, prefer);
+        }
+        let r = if prefer != NOREG && (open & bit(prefer)) != 0 {
+            prefer
+        } else {
+            open.trailing_zeros() as u8
+        };
+        self.evict(r);
+        self.fixed_busy |= bit(r);
+        self.set_owner(r, x);
+        let va = self.va.index_mut(x as usize);
+        va.reg = r;
+        va.home = H_FIXED;
+        va.dirty = false;
+        return r;
+    }
+
+    // Whether value index `x` may take register `r`: one of xmm16..xmm31 only when it may live there (`vlow`).
+    const fn up_ok(self: &Self, x: u32, r: u8) bool {
+        return r < V0 + 16 || !self.vlow[x as usize];
+    }
+
+    // `vlow` over the body's `n` value indexes (AVX-512): a value that an instruction without EVEX forms for
+    // its operands and result (`upper_op`) reads (through the operands that fold into it, `lv::uses_of`)
+    // or writes stays in xmm0..xmm15.
+    fn upper_marks(self: &mut Self, n: usize) {
+        fill(&mut self.vlow, n, false);
+        if !self.z512 {
+            return;
+        }
+        let ni = self.b().insts.len();
+        for i in 0..ni {
+            if self.lv.pfold[i] || self.upper_op(i as u32) {
+                continue;
+            }
+            self.vlow[i] = true;
+            let us = self.lv.uses_of(i as u32);
+            for k in 0..us.len() {
+                let x = self.vx(us[k]);
+                if x != NONE {
+                    self.vlow[x as usize] = true;
+                }
+            }
+        }
+    }
+
+    // Whether instruction `i` encodes its operations on the vector-file values it reads and writes with EVEX
+    // forms when they are in xmm16..xmm31 (`x::evex_form`): constants, splats, loads, stores, float arithmetic,
+    // fused multiply-adds, scalar float comparisons (`ucomis`), integer and lane-wise integer arithmetic,
+    // scalar conversions, bit casts, returns and the edges' moves. Not comparisons of vectors, selects, lane
+    // inserts and extracts, the other lane-wise operations, calls.
+    fn upper_op(self: &Self, i: u32) bool {
+        let t = self.b().insts[i as usize];
+        let op = t.op;
+        if op >= O_SEXT && op <= O_INTTOPTR {
+            return op == O_BITCAST || !is_vec(t.ty) && !is_vec(self.vt(t.a));
+        }
+        return op == O_FCONST || op == O_ICONST || op == O_WCONST || op == O_SPLAT || op == O_LOAD || op == O_STORE || op == O_FMA || op >= O_FADD && op <= O_FNEG || op == O_FSQRT || op == O_FCMP || op >= O_ADD && op <= O_NOT || op == O_PTRADD || is_terminator(
+            op,
+        );
     }
 
     // Which register value index `x` holds for its whole range (`plan_homes`).
@@ -1648,6 +1765,7 @@ extend Gen {
             VSCR_SYSV
         } & ~iclob;
         self.vec_homes();
+        self.upper_marks(n);
         self.want.truncate(0);
         let vw = lv::WANT_V | if !self.win {
             lv::WANT_SCRATCH
@@ -1688,6 +1806,14 @@ extend Gen {
                 w = 0;
             } else if self.shrink && (w & lv::WANT_CALLEE) != 0 {
                 w = w & ~lv::WANT_CALLEE | lv::WANT_SCRATCH;
+            }
+            // AVX-512: one of xmm16..xmm31 too, for a value no call's range crosses whose instructions all
+            // encode it (`vlow`).
+            if self.z512 && (w & lv::WANT_V) != 0 && (w & (lv::WANT_CALLEE | lv::WANT_SCRATCH)) != 0 && !self.vlow[x] && !self.crosses_call(
+                x as u32,
+                true,
+            ) {
+                w |= lv::WANT_UPPER;
             }
             self.want.push(w);
         }
@@ -1748,6 +1874,11 @@ extend Gen {
         } else {
             (0u32, self.vscr.count_ones() as u32)
         };
+        let vu: u32 = if self.z512 {
+            16
+        } else {
+            0
+        };
         self.lv.plan(
             b,
             &self.want,
@@ -1761,7 +1892,9 @@ extend Gen {
                 xj: most,
                 vc: vc,
                 vs: vs,
-                vj: (vc + vs).min((self.valloc | self.vfix).count_ones() as u32 - vd),
+                // The upper registers hold only homes: the cap leaves `vd` of the others for operands.
+                vj: (vc + vs).min((self.valloc | self.vfix).count_ones() as u32 - vd) + vu,
+                vu: vu,
             },
         );
         for x in 0..ni {
@@ -2046,7 +2179,7 @@ extend Gen {
             return 0;
         }
         let mut m = self.held & self.fixed_busy & ~self.xfix & ~self.vsave();
-        // Each step clears one register's bit: at most 32 steps.
+        // Each step clears one register's bit: at most 48 steps.
         while m != 0 {
             let r = m.trailing_zeros() as u8;
             m &= m - 1;
@@ -2483,7 +2616,7 @@ extend Gen {
             return self.take_fixed(x, vr);
         }
         if r != prefer {
-            self.evict(r);
+            self.evict_home(r);
         }
         self.fixed_busy |= bit(r);
         self.set_owner(r, x);
@@ -2506,7 +2639,7 @@ extend Gen {
             let open = self.vfix & ~self.fixed_busy & ~self.lock & ~self.tmps;
             for r in VFIX_WIN {
                 if (open & bit(r)) != 0 {
-                    self.evict(r);
+                    self.evict_home(r);
                     self.fixed_busy |= bit(r);
                     self.csr |= bit(r);
                     self.set_owner(r, x);
@@ -2521,7 +2654,7 @@ extend Gen {
         }
         for r in 0..16u32 {
             if self.fixed_free(r as u8) {
-                self.evict(r as u8);
+                self.evict_home(r as u8);
                 self.fixed_busy |= bit(r as u8);
                 self.csr |= bit(r as u8);
                 self.set_owner(r as u8, x);
@@ -3557,8 +3690,8 @@ extend Gen {
                 self.va.index_mut(k).home = H_REMAT;
             }
         }
-        fill(&mut self.owner, 32, NONE);
-        fill(&mut self.heir, 32, NONE);
+        fill(&mut self.owner, 48, NONE);
+        fill(&mut self.heir, 48, NONE);
         self.held = 0;
         // Past the blocks, one per late edge: its stub (`lv::Live::late`).
         fill(&mut self.blk_at, b.blocks.len() + self.lv.late.len(), NONE);
@@ -4352,14 +4485,14 @@ extend Gen {
                 if r != NOREG {
                     self.free_home(b.edge_arg(ed, q), r);
                 }
-                self.param_home(
-                    x,
-                    if r != NOREG {
-                        r
-                    } else {
-                        self.dying_reg(b.edge_arg(ed, q))
-                    },
-                );
+                let pr = if r != NOREG {
+                    r
+                } else {
+                    self.dying_reg(b.edge_arg(ed, q))
+                };
+                self.on_edge = true;
+                self.param_home(x, pr);
+                self.on_edge = false;
                 if hd && r != NOREG && self.va[x as usize].reg != r {
                     self.fixed_busy |= bit(r);
                 }
@@ -4455,7 +4588,7 @@ extend Gen {
             }
         }
         let px = back_share(self.b(), &self.lv, &self.va, x);
-        if px != NONE {
+        if px != NONE && (self.va[px as usize].home != H_FIXED || self.up_ok(x, self.va[px as usize].reg)) {
             // The header parameter keeps the register's ownership and the slot: its range holds this
             // block's.
             let pva = self.va[px as usize];
@@ -4498,7 +4631,9 @@ extend Gen {
         self.mv.truncate(0);
         for q in 0..n {
             let px = ni + tb.param_start + q;
+            self.on_edge = true;
             self.param_home(px, NOREG);
+            self.on_edge = false;
             let av = b.edge_arg(e, q);
             let ax = self.vx(av);
             if ax == px {
@@ -8147,7 +8282,7 @@ extend Gen {
     // registers, until `forget_caller_saved`.
     fn spill_around_call(self: &mut Self, keep: &Vector<u32>) {
         let mut m = self.held & ~self.xfix & self.clob;
-        // Each step clears one register's bit: at most 32 steps.
+        // Each step clears one register's bit: at most 48 steps.
         while m != 0 {
             let r = m.trailing_zeros() as u8;
             m &= m - 1;
@@ -8175,7 +8310,7 @@ extend Gen {
     // After a call: the caller-saved registers hold no value.
     fn forget_caller_saved(self: &mut Self) {
         let mut m = self.held & ~self.xfix & self.clob;
-        // Each step clears one register's bit: at most 32 steps.
+        // Each step clears one register's bit: at most 48 steps.
         while m != 0 {
             let r = m.trailing_zeros() as u8;
             m &= m - 1;
@@ -11442,12 +11577,14 @@ extend Gen {
         }
         let nb = type_bytes(t.ty, 8);
         let rd = self.vec_def(i) - V0;
+        // Every bit set: `vpternlogd` 0xFF on zmm registers and xmm16..xmm31, which `pcmpeqd` cannot write.
+        if ones && (nb == 64 || rd >= 16) {
+            self.c.vones(nb, rd);
+            return;
+        }
         if nb == 64 {
             if zero {
                 self.c.evex_rr(0x66, 1, 0xEF, false, rd, rd, rd);
-            } else if ones {
-                self.c.evex_rr(0x66, 3, 0x25, false, rd, rd, rd);
-                self.c.byte(0xFF);
             } else {
                 self.wconst_load(rd, t);
             }
