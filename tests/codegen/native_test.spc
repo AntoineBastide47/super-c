@@ -9666,12 +9666,13 @@ b0(v0: i64):
 }
 
 // x86-64: the loads an `add` and its `adc` (a `sub` and its `sbb`) read alone fold into them (`add r, [m]`,
-// `adc r, [m]`), also of a 16-byte aggregate parameter that Microsoft x64 passes by reference; the load the
-// two halves of one 64-bit product read is `mul`'s memory operand.
+// `adc r, [m]`), also of a 16-byte aggregate parameter that Microsoft x64 passes by reference, but not of
+// one Super-C's own convention passes in registers there; the load the two halves of one 64-bit product
+// read is `mul`'s memory operand.
 @test
 fn sums_with_a_carry_and_wide_products_read_memory() {
     let lir = M"(lir ptr 8
-sym @add128 fn global
+sym @add128 fn global used
 sym @addp fn global
 sym @mac fn global
 fn @addp
@@ -9713,10 +9714,33 @@ b0(v0: ptr, v1: i64, v2: ptr):
   store v5, v2+8 align 3
   ret
 )";
+    let own = M"(lir ptr 8
+sym @add128 fn global
+fn @add128
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (l0, l0) -> l0
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.i64 v0 align 3
+  v4 = load.i64 v0+8 align 3
+  v5 = load.i64 v1 align 3
+  v6 = load.i64 v1+8 align 3
+  v7, v8 = addo.u.i64 v3, v5
+  v9, v10 = addo.u.i64 v4, v6
+  v11 = zext.i64 v8
+  v12, v13 = addo.u.i64 v9, v11
+  store v7, v2 align 3
+  store v12, v2+8 align 3
+  ret
+)";
     let x64 = tgt::axis_index("x86_64", true);
-    for os in ["windows", "linux"] {
+    for os in ["windows", "linux", "own"] {
         let mut obj = Vector::<u8>::new();
-        assert(object_of(lir, tgt::axis_index(os, false), x64, 0, &mut obj), os);
+        let (src, sys) = if os == "own" {
+            (own, "windows")
+        } else {
+            (lir, os)
+        };
+        assert(object_of(src, tgt::axis_index(sys, false), x64, 0, &mut obj), os);
         // REX.W, then `adc r64, r/m64` (13), `add r64, r/m64` (03), `sbb r64, r/m64` (1B), `sub r64, r/m64`
         // (2B) or `mul r/m64` (F7 /4), a memory operand. System V passes `add128`'s operands in registers.
         let mut adc = false;
@@ -9734,7 +9758,10 @@ b0(v0: ptr, v1: i64, v2: ptr):
                 mul = mul || obj[k + 1] == 0xF7 && (m & 0x38) == 0x20;
             }
         }
-        assert(sbb && sub && mul && (adc && add) == (os == "windows"), os);
+        assert(
+            (sbb && sub && mul) == (os != "own") && (adc && add) == (os == "windows") && !(adc || add) == (os != "windows"),
+            os,
+        );
     }
     let drv = "#include <stdint.h>\ntypedef struct { uint64_t lo, hi; } U;\nU add128(U, U);\nvoid mac(const uint64_t *, uint64_t, uint64_t *);\nvoid addp(const uint64_t *, const uint64_t *, uint64_t *);\nint main(void) {\n  U a = { ~0ull, 1 }, b = { 2, 3 };\n  U r = add128(a, b);\n  if (r.lo != 1 || r.hi != 5) return 1;\n  uint64_t p[2] = { 1, 7 }, q[2] = { 2, 3 }, d[2];\n  addp(p, q, d);\n  if (d[0] != ~0ull || d[1] != 3) return 3;\n  uint64_t x = 0xFFFFFFFFFFFFFFFFull, o[2];\n  mac(&x, 3, o);\n  if (o[0] != 0xFFFFFFFFFFFFFFFDull || o[1] != 2) return 2;\n  return 0;\n}\n";
     if cli::has_cc() && tgt::host_isa() == x64 {

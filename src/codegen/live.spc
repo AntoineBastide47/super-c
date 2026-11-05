@@ -280,9 +280,10 @@ pub(package) struct Live {
     /// instruction from its operands, which live to it (`uses_at`), and the instruction emits nothing
     /// (`pfold`).
     pub(package) fold_ops: u64,
-    /// The most bytes of an aggregate parameter that arrives in registers (`Package.arg_copy`): a larger one's
-    /// loads read memory, which an operation may read in their place (`FOLD_LDOP`). None by default.
-    pub(package) arg_copy: u32,
+    /// Per entry parameter (the first 64), whether the aggregate it points to arrives in memory (by reference
+    /// or on the stack, as the body's calling convention passes it): its loads read memory, which an operation
+    /// may read in their place (`FOLD_LDOP`). None by default.
+    pub(package) mem_params: u64,
     /// Whether the calling convention has the caller extend 8- and 16-bit arguments to 32 bits by their
     /// signedness (Apple arm64), so their registers' low 32 bits are their values extended.
     pub(package) ext_args: bool,
@@ -354,7 +355,7 @@ extend Live {
             relay: Vector::<u32>::new(),
             relayed: Vector::<u64>::new(),
             fold_ops: 0,
-            arg_copy: 0xFFFFFFFF,
+            mem_params: 0,
             ext_args: false,
             in_place: false,
             cnd: Vector::<u32>::new(),
@@ -3336,15 +3337,14 @@ extend Live {
         }
     }
 
-    // Whether value `v` of `b` is an aggregate parameter that arrives in registers (`arg_copy`), or the
-    // pointer to an aggregate result: its loads are no memory reads.
+    // Whether value `v` of `b` is an aggregate parameter that does not arrive in memory (`mem_params`), or
+    // the pointer to an aggregate result: its loads may be no memory reads.
     fn reg_param(self: &Self, b: &Body, v: Value) bool {
         if !agg_param(b, v) {
             return false;
         }
         let q = (v & ~VPARAM) - b.blocks[0].param_start;
-        let np = b.pool[b.sig as usize];
-        return q == np || b.pool[(b.pool[(b.sig + 3 + q) as usize] & ~AGG) as usize] <= self.arg_copy;
+        return q >= 64 || (self.mem_params >> q as u64 & 1) == 0;
     }
 
     // Whether instruction `i` of `b` is a sum (`sub`: difference) of two integers of 32 or 64 bits that

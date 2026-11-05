@@ -3679,7 +3679,17 @@ extend Gen {
         };
         let b = self.b();
         self.lv.fold_max = 8;
-        self.lv.arg_copy = unsafe (*self.pkg).arg_copy;
+        // The parameters' places, which the folds read (`lv::Live::mem_params`).
+        classify(self.win, self.sc_self, b, b.sig, self.ptr, self.vregs, &mut self.self_lay);
+        self.lv.mem_params = 0;
+        if !self.self_lay.unknown {
+            for k in 0..self.self_lay.locs.len().min(64) {
+                let kd = self.self_lay.locs[k].kind;
+                if kd == ab::L_STACK || kd == ab::L_REF_REG || kd == ab::L_REF_STACK {
+                    self.lv.mem_params |= 1u64 << k as u64;
+                }
+            }
+        }
         self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_XBFX_EXT | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE | lv::FOLD_VLDOP
         } else {
@@ -3814,7 +3824,6 @@ extend Gen {
         } else {
             0
         };
-        classify(self.win, self.sc_self, b, b.sig, self.ptr, self.vregs, &mut self.self_lay);
         if self.self_lay.unknown {
             return self.refuse("the signature passes an aggregate whose C class is unknown");
         }
