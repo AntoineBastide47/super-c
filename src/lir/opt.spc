@@ -3481,6 +3481,7 @@ extend Opt {
         used.resize_default(ni);
         for i in 0..ni {
             let t = b.insts[i];
+            self.uses.truncate(0);
             lv::uses_into(b, t, &mut self.uses);
             if is_terminator(t.op) {
                 b.succ_edges(t, &mut self.edges);
@@ -8301,16 +8302,20 @@ extend Opt {
         return true;
     }
 
-    // The allocations (`ALLOC_FRESH` by the name, at most FRESH_MAX) whose pointer only stores write
-    // through, equalities with null test and one free (`ALLOC_FREE`) takes, which every path from the
-    // allocation to a return or back to it passes once: they go with their stores and free, and the tests
-    // fold as for a block that exists (LLVM InstCombine's removal of unused allocations). The runtime's
-    // leak tracker counts such a pair as nothing either. Whether any went.
+    // The allocations (`ALLOC_FRESH` by the name, a `realloc` of null alone, at most FRESH_MAX) whose pointer
+    // only stores write through, equalities with null test and one free (`ALLOC_FREE`) takes, which every
+    // path from the allocation to a return or back to it passes once: they go with their stores and free, and
+    // the tests fold as for a block that exists (LLVM InstCombine's removal of unused allocations). The
+    // runtime's leak tracker counts such a pair as nothing either. Whether any went.
     pub(package) fn dead_allocs(self: &mut Self, pk: &Package, b: &mut Body) bool {
         self.fresh.truncate(0);
         for i in 0..b.insts.len() {
             let t = b.insts[i];
-            if t.op == O_CALL && t.ty == T_PTR && self.fresh.len() < FRESH_MAX && named_alloc(pk, b, t) == ALLOC_FRESH {
+            if t.op == O_CALL && t.ty == T_PTR && self.fresh.len() < FRESH_MAX && named_alloc(pk, b, t) == ALLOC_FRESH && !grows_block(
+                pk,
+                b,
+                t,
+            ) {
                 self.fresh.push(i as u32);
             }
         }
@@ -10243,8 +10248,9 @@ extend Opt {
     // a scope's class aside), nor a store bytes of its own address apart from its own, nor a call bytes
     // its arguments reach none of (`call_apart`). A place moves only along the states a load of it reads:
     // the untagged accesses' and its type's tag's; another tag's state may be its number by chance and then
-    // miss the writes of the place's own tag.
-    fn carry(self: &mut Self, pk: &Package, b: &Body, i: u32, before: [u32; TBAA_TAGS]) {
+    // miss the writes of the place's own tag. A store of part of an integer constant's place that no write
+    // followed keeps the rest (`constant_rest`).
+    fn carry(self: &mut Self, pk: &Package, b: &mut Body, i: u32, before: [u32; TBAA_TAGS]) {
         let t = b.insts[i as usize];
         let wb = self.write_bits(pk, b, i);
         let n = self.recent.len();
@@ -10281,6 +10287,33 @@ extend Opt {
             ));
             if (other_class || other_bytes || apart) && self.recall(p.addr, p.off, p.ty, to) == VNONE {
                 self.remember(p.addr, p.off, p.ty, p.val, to);
+            } else if t.op == O_STORE && t.a == p.addr && !other_bytes && before[0] == p.state {
+                let tn = type_bytes(b.type_of(t.b), pk.ptr_bytes) as i64;
+                self.constant_rest(b, p, lo, tlo.max(lo).min(hi));
+                self.constant_rest(b, p, (tlo + tn).max(lo).min(hi), hi);
+            }
+        }
+    }
+
+    // Bytes `lo..hi` of place `p` that holds an integer constant, which a store of the bytes next to them
+    // just wrote over and no write came between: a place of their own, of the constant's bytes there
+    // (little-endian), in the states a load of them reads (a vector's length and capacity, which one store
+    // of both set, keep the length when a store sets the capacity). None when they are not 1, 2, 4 or 8.
+    fn constant_rest(self: &mut Self, b: &mut Body, p: Place, lo: i64, hi: i64) {
+        let n = hi - lo;
+        let kv = const_of(b, p.val);
+        if n != 1 && n != 2 && n != 4 && n != 8 || kv.is_none() || !is_int(p.ty) || p.ty == T_PTR || p.ty == T_I128 {
+            return;
+        }
+        let ty = int_type_of(n as u32);
+        let sh = 8 * (lo - (p.off as i32) as i64) as u64;
+        let v = self.constant(b, ty, kv.unwrap() >> sh & ~0u64 >> 64 - 8 * n as u64);
+        let off = (lo as i32) as u32;
+        let tags: [usize; 2] = [0, tbaa_of(ty) as usize];
+        for g in tags {
+            let st = unsafe self.tstate[g];
+            if self.recall(p.addr, off, ty, st) == VNONE {
+                self.remember(p.addr, off, ty, v, st);
             }
         }
     }
@@ -11443,6 +11476,20 @@ extend Run {
             sc.o.forget();
         }
         let _ = sc.o.run(p, b, inlined || lowered);
+        // The calls a callee's copy brought from a rare block of the callee that the walk left in a warm one
+        // (a branch that folds with the caller's values: a vector known empty grows) inline as the caller's
+        // own did. Two runs: the first folds the copies' branches and merges their blocks, the second forwards
+        // the memory across the merged blocks (an allocation's pointer stored in a slot, read back).
+        if r.inline && warm_copies(b, &mut sc.il.only) {
+            let more = sc.il.run(p, base, r.ok.get_ref(), &r.level, &r.unit, j, r.cf.inline, b);
+            sc.il.only.truncate(0);
+            if more {
+                sc.o.forget();
+                let _ = sc.o.run(p, b, true);
+                sc.o.forget();
+                let _ = sc.o.run(p, b, true);
+            }
+        }
         // The calls through a method of a constant table the walk read (`fold_ptr`, a known `&dyn`) inline as
         // the direct ones did.
         if r.inline && r.direct_known(p, j, b, &mut sc.il.only) {
@@ -11715,6 +11762,31 @@ extend Run {
         }
         return any;
     }
+}
+
+// Each direct call of `b` that an inlined copy brought (`Body.inl`) in a block that is not rare, marked in
+// `only` (per instruction). Whether any.
+fn warm_copies(b: &Body, only: &mut Vector<bool>) bool {
+    fill(only, b.insts.len(), false);
+    let mut any = false;
+    if b.inl.len() != 0 {
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            if (bk.flags & BLOCK_RARE) != 0 {
+                continue;
+            }
+            for i in bk.start..bk.start + bk.len {
+                if b.insts[i as usize].op == O_CALL && b.inl[i as usize] != 0 {
+                    only[i as usize] = true;
+                    any = true;
+                }
+            }
+        }
+    }
+    if !any {
+        only.truncate(0);
+    }
+    return any;
 }
 
 // Whether `b` holds a vector value or stores one.
@@ -15192,6 +15264,13 @@ const fn header_read(b: &Body, t: Inst, v: Value) bool {
 // the package defines: its own code (wasm's C library, the runtime's leak tracker) reads what it writes.
 // The `Sym.alloc` of call `t`'s function by its name alone, whether the package defines it or not
 // (`dead_allocs`): ALLOC_NONE for another instruction.
+// Whether allocation call `t` (`ALLOC_FRESH`) is a `realloc` of a block that may exist (its pointer not the
+// null constant), which frees that block: `dead_allocs` keeps it.
+fn grows_block(pk: &Package, b: &Body, t: Inst) bool {
+    let name = pk.spell(pk.syms[b.syms[t.a as usize] as usize].name);
+    return name.ends_with("realloc") && const_of(b, b.pool[t.c as usize]) != Some(0u64);
+}
+
 fn named_alloc(pk: &Package, b: &Body, t: Inst) u8 {
     return if t.op == O_CALL {
         pk.syms[b.syms[t.a as usize] as usize].alloc

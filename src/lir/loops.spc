@@ -5444,7 +5444,7 @@ extend LoopOpt {
     fn read_in(self: &Self, b: &Body, start: u32, v: Value) bool {
         let mut us = Vector::<Value>::new();
         for i in start..b.insts.len() as u32 {
-            lv::uses_into(b, b.insts[i as usize], &mut us);
+            lv::uses(b, b.insts[i as usize], &mut us);
             for q in 0..us.len() {
                 if us[q] == v {
                     return true;

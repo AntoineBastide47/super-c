@@ -281,6 +281,9 @@ pub(package) struct Live {
     /// Whether the calling convention has the caller extend 8- and 16-bit arguments to 32 bits by their
     /// signedness (Apple arm64), so their registers' low 32 bits are their values extended.
     pub(package) ext_args: bool,
+    /// Whether the code generator emits each block where reverse postorder puts it (wasm's structured
+    /// code): then no block is rare to the layout, and no range stretches to a rare block placed last.
+    pub(package) in_place: bool,
     cnd: Vector<u32>, // `folds`' scratch: per instruction, its uses as a condition
     andu: Vector<u32>, // `folds`' scratch: per instruction, its uses as an operand of a narrow `and`
     // `plan`'s scratch: per layout position its first instruction's ordinal; per block its frequency; per
@@ -347,6 +350,7 @@ extend Live {
             relayed: Vector::<u64>::new(),
             fold_ops: 0,
             ext_args: false,
+            in_place: false,
             cnd: Vector::<u32>::new(),
             andu: Vector::<u32>::new(),
             base: Vector::<u32>::new(),
@@ -2240,11 +2244,11 @@ extend Live {
     }
 
     // `rare`: the reachable blocks the entry reaches only through a block marked rare, that block included;
-    // none when the entry is marked.
+    // none when the entry is marked or the generator emits the blocks in place (`in_place`).
     fn rare_blocks(self: &mut Self, b: &Body) {
         let nb = b.blocks.len();
         self.rare.truncate(0);
-        let marked = (b.blocks[0].flags & BLOCK_RARE) != 0;
+        let marked = (b.blocks[0].flags & BLOCK_RARE) != 0 || self.in_place;
         for k in 0..nb {
             self.rare.push(self.rpo[k] != NONE && !marked);
         }

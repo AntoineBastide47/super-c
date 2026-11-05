@@ -2339,9 +2339,10 @@ fn leak_tracker() {
 
 // A leak's site is the function that asked for the block, in every profile: the tracker's entry
 // points never inline into their caller (whose return address would name the caller's caller), and
-// `Global`'s methods inline into the container that calls them. Only macOS prints a site by name:
-// `backtrace_symbols` elsewhere prints an offset for a function the binary does not export. The
-// release build keeps its symbols (`strip = false`): a stripped binary names no function.
+// `Global`'s methods inline into the container that calls them. The push is onto a vector of unknown
+// capacity: one known empty takes the growth inline (the caller then asks for the block). Only macOS
+// prints a site by name: `backtrace_symbols` elsewhere prints an offset for a function the binary does
+// not export. The release build keeps its symbols (`strip = false`): a stripped binary names no function.
 @test
 fn leak_sites_name_the_allocating_function() {
     if PLATFORM != Platform::MacOS {
@@ -2350,7 +2351,7 @@ fn leak_sites_name_the_allocating_function() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "extern \"C\" { fn malloc(n: usize) *mut void; }\n@noinline\nfn leak_site(n: usize) usize {\n    let pt = unsafe malloc(48 + n);\n    return (pt != null) as usize + n;\n}\nfn main(args: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    forget(v);\n    return (leak_site(args.len()) - 2) as i32;\n}\n",
+        "extern \"C\" { fn malloc(n: usize) *mut void; }\n@noinline\nfn leak_site(n: usize) usize {\n    let pt = unsafe malloc(48 + n);\n    return (pt != null) as usize + n;\n}\n@noinline\nfn one_more(v: &mut Vector<i32>) {\n    v.push(1);\n}\nfn main(args: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    one_more(&mut v);\n    forget(v);\n    return (leak_site(args.len()) - 2) as i32;\n}\n",
     );
     p.mkfile("build.toml", "bin = \"bin\"\nroot = \"main.spc\"\n\n[profile.release]\nstrip = false\n");
     let root = p.dir();

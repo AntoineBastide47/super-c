@@ -318,11 +318,19 @@ extend Inliner {
                 let tiny = e.blocks.len() == 1 && e.insts.len() <= 3;
                 // A `@cold` callee stays a call unless it is no bigger than one: its callers' code stays small.
                 let cold = pk.syms[c.syms[t.a as usize] as usize].cold && !small(e, SHRINK);
+                // A call in a rare block (`BLOCK_RARE`) takes the callees no bigger than it: a copy there grows the
+                // code for a path that seldom runs (a caller's second round takes it once that path is the
+                // caller's warm one, `Run::warm_copies`).
+                let cb = if (bk.flags & BLOCK_RARE) != 0 {
+                    SHRINK
+                } else {
+                    bu
+                };
                 // A float rewrite the caller allows and the callee does not would apply to the copy.
                 if (c.fmath & ~e.fmath) != 0 || !warm && !forwarder(e) || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || !small(
                     e,
-                    bu,
-                ) && !folds_small(e, c, t, bu, &mut self.seen, &mut self.work, &mut self.edges) {
+                    cb,
+                ) && !folds_small(e, c, t, cb, &mut self.seen, &mut self.work, &mut self.edges) {
                     self.cmap[i as usize] = ni;
                     ni += 1;
                     continue;

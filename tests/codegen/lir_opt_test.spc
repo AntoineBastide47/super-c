@@ -456,6 +456,51 @@ fn main(args: Vector<str>) i32 {
 }
 )";
 
+const TWO_PUSHES: str<'static> = M"(@noinline
+fn two(x: u32) u32 {
+    let mut v = Vector::<u32>::new();
+    v.push(x);
+    v.push(x + 1);
+    return v[0] + v[1];
+}
+@noinline
+fn two_more(v: &mut Vector<u32>, x: u32) {
+    v.push(x);
+}
+fn main() i32 {
+    let mut v = Vector::<u32>::new();
+    for i in 0..100 {
+        two_more(&mut v, i as u32);
+    }
+    println("{} {}", two(20), v[99]);
+    return 0;
+}
+)";
+
+// A vector's growth stays out of line where its capacity is unknown (`push` marks it unlikely: a rare
+// block takes no copy bigger than its call), and inlines where the caller's values fold its branch: a
+// vector known empty (`Run::job`'s second round over the copies' calls in warm blocks). Two pushes onto a
+// new vector then keep nothing of it: no allocation, free, growth or bounds check, the sum of `x` and
+// `x + 1`. A push onto a vector of unknown capacity calls the growth. Both profiles print the same.
+@test
+fn a_new_vectors_first_growth_inlines_and_its_buffer_goes() {
+    h::expect_same_output("two pushes", TWO_PUSHES, ["--profile=debug"], ["--profile=release"]);
+    let p = cli::proj_new();
+    p.mkfile("main.spc", TWO_PUSHES);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "two", "build --profile=release main.spc -o app");
+    let m = printed(r.text(), "two");
+    let ok = r.ok() && m.len() != 0 && !m.contains("call") && !m.contains("load") && !m.contains("store") && !m.contains(
+        "slot",
+    );
+    let g = printed(r.text(), "two_more");
+    let out = g.contains("grow_for") && !g.contains("realloc");
+    if !ok || !out {
+        r.show();
+    }
+    assert(ok, "no allocation, growth, free or memory access");
+    assert(out, "a push onto a vector of unknown capacity calls the growth");
+}
+
 // A loop whose branch on a parameter adds 1 on one side and subtracts 1 on the other adds the select of 1
 // and -1 before it: one vector loop, no copy per side, though each side's load of the slice's address
 // stays its own until the loop transforms run. Both profiles print the same sum.
@@ -8464,9 +8509,101 @@ data @w size 64 align 0 bytes 68656c6c6f68656c6c6f68656c6c6f68656c6c6f6874747068
     }
 }
 
+// An unused call of a function that writes no memory goes whatever body the optimizer ran before: the
+// list of an instruction's values starts empty (`@kept`'s return reads its call `v1`, the number of
+// `@dead`'s call).
+@test
+fn an_unused_pure_call_goes_after_any_body() {
+    let (_b, a) = optimized(
+        M"(lir ptr 8
+sym @square fn global noinline
+sym @kept fn global
+sym @dead fn global
+fn @square
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = mul.i32 v0, v0
+  ret v1
+fn @kept
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = call.i32 @square(v0) : (i32) -> i32
+  ret v1
+fn @dead
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = call.i32 @square(v0) : (i32) -> i32
+  v2 = iconst.i32 1
+  v3 = add.i32 v0, v2
+  ret v3
+)",
+    );
+    let d = text_of(&a, "dead");
+    assert(!d.contains("call"), d.as_str());
+}
+
+// A store of part of a constant's bytes keeps the others: one store set two 4-byte fields (a vector's
+// length and capacity on a 32-bit target), a store sets one, a load of the other reads the constant's
+// part, low or high. A call or a store of another type between the stores may write them: the load
+// does not read the constant's part.
+@test
+fn a_partly_overwritten_constant_keeps_its_other_bytes() {
+    let (_b, a) = optimized(
+        M"(lir ptr 4
+sym @low fn global
+sym @high fn global
+sym @called fn global
+sym @tagged fn global
+sym @opaque fn global
+fn @low
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i64 30064771077
+  store v2, v0 align 3
+  store v1, v0+4 align 2
+  v3 = load.i32 v0 align 2
+  ret v3
+fn @high
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i64 30064771077
+  store v2, v0 align 3
+  store v1, v0 align 2
+  v3 = load.i32 v0+4 align 2
+  ret v3
+fn @called
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i64 30064771077
+  store v2, v0 align 3
+  call @opaque() : () -> void
+  store v1, v0+4 align 2
+  v3 = load.i32 v0 align 2
+  ret v3
+fn @tagged
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i64 30064771077
+  store v2, v0 align 3
+  v3 = iconst.i16 9
+  store v3, v0 align 1 tbaa 2
+  store v1, v0+4 align 2
+  v4 = load.i32 v0 align 2
+  ret v4
+)",
+    );
+    let l = text_of(&a, "low");
+    assert(!l.contains("load") && l.contains("iconst.i32 5"), l.as_str());
+    let h = text_of(&a, "high");
+    assert(!h.contains("load") && h.contains("iconst.i32 7"), h.as_str());
+    assert(text_of(&a, "called").contains("load"), text_of(&a, "called").as_str());
+    assert(!text_of(&a, "tagged").contains("iconst.i32 5"), text_of(&a, "tagged").as_str());
+}
+
 // An allocation only stores write through, a null test reads and one free takes on every path to a return
-// goes with them, its test folding as for a block that exists. One freed twice, or not on every path, or
-// whose pointer a load reads, stays.
+// goes with them, its test folding as for a block that exists; so does a `realloc` of null. One freed twice,
+// or not on every path, or whose pointer a load reads, stays, and so does a `realloc` of a block that may
+// exist, which frees that block.
 @test
 fn an_unread_allocation_goes() {
     let (b, a) = optimized(
@@ -8477,6 +8614,9 @@ sym @abort fn global
 sym @boxed fn global
 sym @twice fn global
 sym @leaks fn global
+sym @realloc fn global
+sym @fresh fn global
+sym @grows fn global
 fn @boxed
   sig (i32) -> i32
 b0(v0: i32):
@@ -8517,12 +8657,31 @@ b1:
 b2:
   call @free(v3) : (ptr) -> void
   ret v0
+fn @fresh
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.ptr 0
+  v2 = iconst.i64 4
+  v3 = call.ptr @realloc(v1, v2) : (ptr, i64) -> ptr
+  store v0, v3 align 2
+  call @free(v3) : (ptr) -> void
+  ret v0
+fn @grows
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i64 8
+  v3 = call.ptr @realloc(v0, v2) : (ptr, i64) -> ptr
+  store v1, v3 align 2
+  call @free(v3) : (ptr) -> void
+  ret v1
 )",
     );
     let t = text_of(&a, "boxed");
     assert(!t.contains("call") && !t.contains("store"), t.as_str());
     assert(text_of(&a, "twice").contains("@malloc"), text_of(&a, "twice").as_str());
     assert(text_of(&a, "leaks").contains("@malloc"), text_of(&a, "leaks").as_str());
+    assert(!text_of(&a, "fresh").contains("call"), text_of(&a, "fresh").as_str());
+    assert(text_of(&a, "grows").contains("@realloc"), text_of(&a, "grows").as_str());
     let x: []u64 = [41];
     same_result(&b, &a, "boxed", x, 42);
 }

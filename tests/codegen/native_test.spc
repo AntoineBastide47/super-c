@@ -2676,6 +2676,70 @@ int main(void) {
     }
 }
 
+// A wasm32 loop with an unlikely block inside emits that block in place, so the values live across it
+// keep their ranges (`live::in_place`): the counter's next value takes the counter's local, and the back
+// edge moves nothing (local.get L, i32.const 1, i32.add, local.tee L). Both targets give the C result.
+@test
+fn a_wasm_loops_rare_block_keeps_its_counters_local() {
+    let lir = M"(lir ptr 8
+sym @slow fn global noinline
+sym @count fn global
+fn @slow
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = iconst.i32 1000
+  store v1, v0 align 2
+  ret
+fn @count
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = icmp.ne v1, v2
+  br v4, b1(v2, v2), b4(v2)
+b1(v5: i32, v6: i32):
+  v7 = load.i32 v0 align 2
+  v8 = icmp.eq v7, v5
+  br v8, b2, b3
+b2: unlikely
+  call @slow(v0) : (ptr) -> void
+  jmp b3
+b3:
+  v9 = add.i32 v6, v5
+  v10 = add.i32 v5, v3
+  v11 = icmp.ult v10, v1
+  br v11, b1(v10, v9), b4(v9)
+b4(v12: i32):
+  ret v12
+)";
+    let mut obj = Vector::<u8>::new();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let mut joined = false;
+    for l in 0..8u8 {
+        let step: [u8; 7] = [0x20, l, 0x41, 0x01, 0x6A, 0x22, l];
+        joined = joined || holds(&obj, step[0..7]);
+    }
+    assert(joined, "the counter's next value takes its local");
+    let drv = M"(#include <stdint.h>
+int32_t count(int32_t *, int32_t);
+int main(void) {
+  int32_t f = 3;
+  /* 0..9 sum to 45; slow runs at i = 3 and sets the flag past the loop. */
+  if (count(&f, 10) != 45 || f != 1000) return 1;
+  if (count(&f, 0) != 0) return 2;
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
 // A select whose side truncates a 64-bit value to 8 bits that its condition bounds (`live::bounded_side`)
 // builds on wasm32 and gives the value below the bound, 0 above.
 @test

@@ -491,6 +491,8 @@ extend Gen {
             lv::FOLD_VSINK,
             0,
         );
+        // The structured code emits a rare block where reverse postorder puts it.
+        self.lv.in_place = true;
         self.lv.run(b);
         self.sh.run(b, &self.lv);
         wa::classify(b, b.sig, self.vregs, &mut self.me);

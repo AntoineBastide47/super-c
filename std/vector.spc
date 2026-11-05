@@ -85,16 +85,14 @@ extend<T, A: Allocator> Vector<T, A> {
             self.cap = ~(0 as usize);
             return;
         }
-        // `cap - len` cannot wrap, where `len + additional` could.
-        if additional <= self.cap - self.len {
-            return;
+        // `cap - len` cannot wrap, where `len + additional` could. The growth stays out of line where the
+        // capacity is unknown (a rare block takes no copy bigger than its call).
+        if unlikely(additional > self.cap - self.len) {
+            self.grow_for(additional);
         }
-        self.grow_for(additional);
     }
 
-    // The growth path of `reserve`, out of line so the check above stays small enough to inline into
-    // every `push`.
-    @noinline
+    // The growth path of `reserve`.
     const fn grow_for(self: &mut Vector<T, A>, additional: usize) {
         // The most elements whose byte size fits a usize.
         let max_cap = ~(0 as usize) / sizeof(T);
@@ -138,7 +136,7 @@ extend<T, A: Allocator> Vector<T, A> {
     pub const fn push(self: &mut Vector<T, A>, value: T) {
         // Only a full vector grows (a zero-sized `T`'s first push sets the capacity to the maximum, so
         // `reserve` then sees only the length overflow).
-        if self.len == self.cap {
+        if unlikely(self.len == self.cap) {
             self.reserve(1);
         }
         unsafe self.ptr[self.len] = value;
