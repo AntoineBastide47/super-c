@@ -1183,6 +1183,87 @@ fn x64_generated_code_round_trips() {
     x64_generated("windows");
 }
 
+// `relax` drops a jump nothing reaches (`dead`), and then the jump before it, whose target follows it; the
+// positions move with the code.
+@test
+fn x64_relax_drops_dead_jumps_and_jumps_to_the_next_byte() {
+    let mut c = x::Code::new();
+    let j1 = c.jmp32(); // past the dead jump
+    let j2 = c.jmp32(); // a block of one jump that no branch reaches
+    let x_at = c.len();
+    c.ret();
+    let y_at = c.len();
+    c.ret();
+    c.land(j1, x_at);
+    c.land(j2, y_at);
+    c.dead.push(j2);
+    let mut at = Vector::<u32>::new();
+    at.push(x_at);
+    at.push(y_at);
+    let none = Vector::<u8>::new();
+    let heads = Vector::<u32>::new();
+    c.relax(&mut at, &heads, 0, x::NO_INS, none[0..0]);
+    assert_eq(c.b.len(), 2);
+    assert(c.b[0] == 0xC3 && c.b[1] == 0xC3, "the two returns alone");
+    assert(at[0] == 0 && at[1] == 1, "the positions");
+}
+
+// `unreached` marks a jump after a jump that nothing reaches, not one a branch or a table entry reaches.
+@test
+fn x64_unreached_jumps_are_the_ones_nothing_reaches() {
+    for k in 0..3u32 {
+        let mut c = x::Code::new();
+        let j0 = c.jcc32(x::CC_E); // to the end, or (k == 1) to the candidate
+        let j1 = c.jmp32();
+        let j2 = c.jmp32(); // the candidate
+        let end = c.len();
+        c.ret();
+        c.land(
+            j0,
+            if k == 1 {
+                j2 - 1
+            } else {
+                end
+            },
+        );
+        c.land(j1, end);
+        c.land(j2, end);
+        let mut cands = Vector::<u32>::new();
+        cands.push(j2);
+        let mut also = Vector::<u32>::new();
+        if k == 2 {
+            also.push(j2 - 1);
+        }
+        c.unreached(&cands, &also);
+        assert_eq(c.dead.len(), (k == 0) as usize);
+    }
+}
+
+// Bytes `relax` inserts before a position: a jump from before it lands at them, one from past it past them.
+@test
+fn x64_relax_inserts_bytes_that_only_earlier_jumps_enter() {
+    let mut c = x::Code::new();
+    let j1 = c.jcc32(x::CC_NE); // from before: into the inserted bytes
+    c.ret();
+    let i_at = c.len();
+    c.ret();
+    let j2 = c.jmp32(); // from past: to the code after them
+    c.land(j1, i_at);
+    c.land(j2, i_at);
+    let mut at = Vector::<u32>::new();
+    at.push(i_at);
+    let pro: [u8; 4] = [0x48, 0x83, 0xEC, 0x08]; // sub rsp, 8
+    let heads = Vector::<u32>::new();
+    c.relax(&mut at, &heads, 0, i_at, pro[0..4]);
+    // jne +1; ret; sub rsp, 8; ret; jmp -3
+    let want: [u8; 10] = [0x75, 0x01, 0xC3, 0x48, 0x83, 0xEC, 0x08, 0xC3, 0xEB, 0xFD];
+    assert_eq(c.b.len(), 10);
+    for k in 0..10usize {
+        assert(c.b[k] == want[k], "the bytes");
+    }
+    assert_eq(at[0], 7);
+}
+
 // A 16-bit operation on memory with an immediate takes a 16-bit immediate past 8 bits (the operand-size
 // prefix sizes it): each instruction the encoder writes decodes to one row and assembles back to its bytes.
 @test

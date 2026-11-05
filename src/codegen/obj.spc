@@ -91,9 +91,13 @@ pub(package) struct OSym {
 }
 
 /// A relocation at byte `off` of section `sec`: the kind's field there holds symbol `sym` plus `addend`.
+/// `part`: through the section part that holds `sym` (ELF: its section symbol, the addend from the part's
+/// start), as a read-only table's reference into code must not take a global symbol, which a shared object
+/// may interpose.
 pub(package) struct ORel {
     pub(package) sec: u8,
     pub(package) kind: u8,
+    pub(package) part: bool,
     pub(package) off: u32,
     pub(package) sym: u32,
     pub(package) addend: i64,
@@ -318,7 +322,12 @@ extend Obj {
     }
 
     pub(package) fn reloc(self: &mut Self, s: u8, kind: u8, off: u32, sym: u32, addend: i64) {
-        self.rels.push(ORel { sec: s, kind: kind, off: off, sym: sym, addend: addend });
+        self.rels.push(ORel { sec: s, kind: kind, part: false, off: off, sym: sym, addend: addend });
+    }
+
+    /// A relocation through the part that holds `sym` (`ORel.part`).
+    pub(package) fn reloc_part(self: &mut Self, s: u8, kind: u8, off: u32, sym: u32, addend: i64) {
+        self.rels.push(ORel { sec: s, kind: kind, part: true, off: off, sym: sym, addend: addend });
     }
 
     /// The spelling of symbol `k`.

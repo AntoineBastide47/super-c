@@ -44,6 +44,8 @@ const FF_ROUND: u8 = 2;
 // Scratch registers; the vector ones are the ABI's (`Gen.vs0`, `Gen.vs1`).
 const S0: u8 = 10; // r10
 const S1: u8 = 11; // r11
+// A jump table entry's target that is a position in the code, not a block (`Gen.jt`).
+const JT_CODE: u32 = 0x80000000;
 // A division looks this many instructions ahead for its remainder (`int_op`).
 const DIV_REACH: u32 = 8;
 // `zero_run` takes runs of ZERO_RUN to ZERO_RUN_MAX stores.
@@ -365,6 +367,9 @@ pub(package) struct Gen {
     stubs_out: bool, // the late edges' stubs are in the code
     blk_at: Vector<u32>, // per block, its first byte, NONE before it is compiled
     fix: Vector<u64>, // displacement field << 32 | block: a branch to patch
+    // The jump tables' entries (`jump_table`): the entry's and its table's read-only data offsets, the
+    // dispatch's position, the target block (or JT_CODE | a position in the code).
+    jt: Vector<(u32, u32, u32, u32)>,
     epi: Vector<u32>, // jumps to the epilogue (their displacement fields)
     stop: u32, // the end of the last terminator that does not fall through (a panic, a trap), NONE before one
     // The sibling calls (`sibling`): each one's jump's displacement field << 32 | its callee's object
@@ -553,6 +558,7 @@ extend Gen {
             stubs_out: false,
             blk_at: Vector::<u32>::new(),
             fix: Vector::<u64>::new(),
+            jt: Vector::<(u32, u32, u32, u32)>::new(),
             epi: Vector::<u32>::new(),
             stop: NONE,
             tails: Vector::<u64>::new(),
@@ -2193,8 +2199,8 @@ extend Gen {
         return self.lv.rare[self.lv.def_blk[i as usize] as usize];
     }
 
-    // Before instruction `i` of a rare block that calls and returns: each scratch home whose value lives
-    // past it into a slot of its own (`csave`). The count saved.
+    // Before instruction `i` of a rare block or a shrink-wrapped body that calls and returns: each scratch
+    // home whose value lives past it into a slot of its own (`csave`). The count saved.
     fn save_scratch(self: &mut Self, i: u32) usize {
         if !self.rarec[i as usize] {
             return 0;
@@ -2244,7 +2250,9 @@ extend Gen {
                 t,
             )) && !self.mem_tail(i as u32, t);
             self.cret[i] = c;
-            if c && self.rare(i as u32) {
+            // Shrink-wrapped, every call saves the scratch homes that live past it (`shrinkable` let none
+            // outside rare blocks have one).
+            if c && (self.rare(i as u32) || self.shrink) {
                 self.rarec[i] = true;
             } else if c {
                 self.cpre[i + 1] = 1;
@@ -3671,6 +3679,7 @@ extend Gen {
         };
         let b = self.b();
         self.lv.fold_max = 8;
+        self.lv.arg_copy = unsafe (*self.pkg).arg_copy;
         self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_XBFX_EXT | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE | lv::FOLD_VLDOP
         } else {
@@ -3724,6 +3733,7 @@ extend Gen {
         self.cmp_at = NONE;
         self.held_end = NONE;
         self.fix.truncate(0);
+        self.jt.truncate(0);
         self.epi.truncate(0);
         self.stop = NONE;
         self.tails.truncate(0);
@@ -3890,13 +3900,14 @@ extend Gen {
         return ok;
     }
 
-    // Whether the body may set its frame up in its rare blocks alone (`shrink`): every call (one that does
-    // not return too, a panic's: it needs the frame's alignment) is in a rare block (`Live::rare`), there is one, and
-    // the body reads no return address, variadic argument or inline assembly, runs no system operation,
-    // aligns no slot past 16 bytes and has no canary. The rare blocks connected to one with a call by edges
-    // between rare blocks set the frame up: `Live::after`, which the layout puts after the others. Under
-    // Microsoft x64 no edge leaves them for the warm code: its unwinder reads an epilogue only where it
-    // ends in `ret` or a jump out of the function.
+    // Whether the body may set its frame up in some blocks alone (`shrink`): every call (one that does not
+    // return too, a panic's: it needs the frame's alignment) is in a rare block (`Live::rare`), or in a block
+    // outside loops that no value lives across a call of (at most WARM_CALLS of those calls), and a block
+    // without one returns; there is one, and the body reads no return address, variadic argument or inline
+    // assembly, runs no system operation, aligns no slot past 16 bytes and has no canary. Those blocks, and
+    // the rare blocks connected to one with a call by edges between rare blocks, set the frame up:
+    // `Live::after`, which the layout puts after the others. Under Microsoft x64 no edge leaves them for the
+    // warm code: its unwinder reads an epilogue only where it ends in `ret` or a jump out of the function.
     fn shrinkable(self: &mut Self) bool {
         let b = self.b();
         if self.prot || self.opf != 0 {
@@ -3910,6 +3921,7 @@ extend Gen {
         let mut framed = Vector::<bool>::new();
         framed.resize_default(b.blocks.len());
         let mut any = false;
+        let mut warm: u32 = 0;
         for i in 0..b.insts.len() {
             let t = b.insts[i];
             let d = self.lv.def_blk[i];
@@ -3921,7 +3933,15 @@ extend Gen {
                 continue;
             }
             if !self.lv.rare[d as usize] {
-                return false;
+                warm += 1;
+                if warm > lv::WARM_CALLS || self.lv.inner[d as usize] != NONE || self.lv.lives_across(
+                    unsafe &*self.pkg,
+                    b,
+                    d,
+                    i as u32,
+                ) {
+                    return false;
+                }
             }
             framed[d as usize] = true;
             any = true;
@@ -3930,6 +3950,17 @@ extend Gen {
             return false;
         }
         self.lv.set_after(b, &framed);
+        if warm != 0 {
+            let mut ret = false;
+            for k in 0..b.blocks.len() {
+                let bk = b.blocks[k];
+                ret = ret || !self.lv.after[k] && self.lv.pos[k] != NONE && b.insts[(bk.start + bk.len - 1) as usize].op == O_RET;
+            }
+            if !ret {
+                self.lv.after.truncate(0);
+                return false;
+            }
+        }
         if self.win {
             let mut es = Vector::<u32>::new();
             for k in 0..b.blocks.len() {
@@ -6371,8 +6402,14 @@ extend Gen {
     fn wide_mul(self: &mut Self, i: u32, t: Inst, va0: Value, vb0: Value, lo: u32) {
         let sgn = t.op == O_MULHS;
         // MUL or IMUL: rdx:rax = rax * the operand, the second operand put in rax; an operand rax
-        // holds is that one, and stays there when it dies here (at `lo`: `i`'s reads alone are left).
-        let (va, vb) = if self.va[self.vx(va0) as usize].reg == x::RAX {
+        // holds is that one, and stays there when it dies here (at `lo`: `i`'s reads alone are left). A load
+        // that folds into it (`lv::Live::wide_load`) is the operand, read in memory.
+        let folded = self.ld_folded(va0) || self.ld_folded(vb0);
+        let (va, vb) = if folded && self.ld_folded(va0) {
+            (va0, vb0)
+        } else if folded {
+            (vb0, va0)
+        } else if self.va[self.vx(va0) as usize].reg == x::RAX {
             (vb0, va0)
         } else {
             (va0, vb0)
@@ -6386,19 +6423,29 @@ extend Gen {
             self.vacate(x::RAX);
         }
         self.vacate(x::RDX);
-        let ra = self.reg(va);
-        if !stays {
-            self.materialize(vb, x::RAX);
+        let ext = if sgn {
+            x::IMUL1
+        } else {
+            x::MUL
+        };
+        if folded {
+            if !stays {
+                self.materialize(vb, x::RAX);
+                self.lock |= bit(x::RAX) | bit(x::RDX);
+            }
+            let lt = self.b().insts[va as usize];
+            let mut rs: u32 = NONE;
+            let mut radd: i64 = 0;
+            let m = self.mem_at(lt.a, lt.c as i32, &mut rs, &mut radd);
+            self.c.rm(0, 0xF7, true, ext as u8, m, false);
+            self.mem_rel(rs, radd);
+        } else {
+            let ra = self.reg(va);
+            if !stays {
+                self.materialize(vb, x::RAX);
+            }
+            self.c.unary(ext, 8, ra);
         }
-        self.c.unary(
-            if sgn {
-                x::IMUL1
-            } else {
-                x::MUL
-            },
-            8,
-            ra,
-        );
         if stays {
             self.va.index_mut(xb as usize).reg = NOREG;
             self.va.index_mut(xb as usize).dirty = false;
@@ -6581,6 +6628,36 @@ extend Gen {
             self.c.imul_rr(8, rd, S1);
             self.c.mov_rr(8, S1, rd);
             self.c.shift_ri(x::SHR, 8, S1, 32);
+        } else if op != O_MULO && (self.ld_folded(t.b) || op == O_ADDO && self.ld_folded(t.a)) {
+            // An operand load that folds into the sum or difference (`lv::Live::carry_load`): it reads the
+            // memory.
+            let (l, o) = if self.ld_folded(t.b) {
+                (t.b, t.a)
+            } else {
+                (t.a, t.b)
+            };
+            let lt = self.b().insts[l as usize];
+            let ro = self.reg(o);
+            let mut rs: u32 = NONE;
+            let mut radd: i64 = 0;
+            let m = self.mem_at(lt.a, lt.c as i32, &mut rs, &mut radd);
+            let rd = self.def_from(i, o, ro);
+            self.c.alu_rm(
+                if op == O_ADDO {
+                    x::ADD
+                } else {
+                    x::SUB
+                },
+                sz,
+                rd,
+                m,
+            );
+            self.mem_rel(rs, radd);
+            cc = if signed {
+                x::CC_O
+            } else {
+                x::CC_B
+            };
         } else {
             let ra = self.reg(t.a);
             let mut k: i32 = 0;
@@ -6630,6 +6707,28 @@ extend Gen {
         let s = b.insts[h as usize];
         let bits = type_bits(t.ty, self.ptr);
         self.keep_flags = true;
+        let op = if sub {
+            x::SBB
+        } else {
+            x::ADC
+        };
+        // An operand load that folds into it (`lv::Live::carry_load`): it reads the memory.
+        if self.ld_folded(s.b) || !sub && self.ld_folded(s.a) {
+            let (l, o) = if self.ld_folded(s.b) {
+                (s.b, s.a)
+            } else {
+                (s.a, s.b)
+            };
+            let lt = b.insts[l as usize];
+            let ro = self.reg(o);
+            let mut rs: u32 = NONE;
+            let mut radd: i64 = 0;
+            let m = self.mem_at(lt.a, lt.c as i32, &mut rs, &mut radd);
+            let rd = self.def_from(i, o, ro);
+            self.c.alu_rm(op, wsz(bits), rd, m);
+            self.mem_rel(rs, radd);
+            return;
+        }
         let ra = self.reg(s.a);
         let mut k: i32 = 0;
         let imm = self.imm32_of(s.b, bits, &mut k);
@@ -6639,11 +6738,6 @@ extend Gen {
             self.reg(s.b)
         };
         let rd = self.def_from(i, s.a, ra);
-        let op = if sub {
-            x::SBB
-        } else {
-            x::ADC
-        };
         if imm {
             self.c.alu_ri(op, wsz(bits), rd, k);
         } else {
@@ -9580,9 +9674,9 @@ extend Gen {
     }
 
     // A dense switch (`sws::switch_span`) of at least TABLE_MIN cases that go elsewhere than the default: the
-    // bound test to the default, then a jump through a table of jumps, one per entry, each 8 bytes (`jmp
-    // rel32`, kept long, then `int3`s): to its case's block, or its moves past the table; an entry no case
-    // takes to the default's. Whether it did.
+    // bound test to the default, then a jump through a read-only table of 32-bit offsets from the table, one
+    // per entry (clang's): to its case's block, or its moves past the dispatch; an entry no case takes to the
+    // default's. `finish` writes the entries as relocations (`jt`). Whether it did.
     fn jump_table(self: &mut Self, t: Inst, r: u8, sz: u32) bool {
         let b = self.b();
         let n = t.aux as u32;
@@ -9633,45 +9727,52 @@ extend Gen {
             );
             self.to_default(x::CC_A, d, &mut ds);
         }
+        // lea r11, [rip + table]; movsxd r10, [r11 + 4*r10]; add r10, r11; jmp r10
+        let mut zs = Vector::<u8>::new();
+        zs.resize_default(4 * span as usize);
+        let tk = self.rodata_sym(&zs, 2);
+        let tat = self.obj().syms[tk as usize].off as u32;
         self.c.lea(S1, x::rip());
-        let disp = self.c.rip_at;
-        self.c.lea(S1, x::ix(S1, S0, 3, 0));
-        // jmp r11
+        self.reloc_rip(x::R_PC32, tk, 0);
+        let from = self.c.len();
+        self.c.rm(0, 0x63, true, S0, x::ix(S1, S0, 2, 0), false);
+        self.c.alu_rr(x::ADD, 8, S0, S1);
         self.c.byte(0x41);
         self.c.byte(0xFF);
-        self.c.byte(0xE3);
-        self.c.patch32(disp, self.c.len() - (disp + 4));
+        self.c.byte(0xE2);
+        // Per edge with moves (the default first), the entries that go to them.
         let mut cs = Vector::<u64>::new();
+        let mut dx = Vector::<u32>::new();
         for x in 0..span {
             let e = es[x as usize];
-            let j = self.c.jmp32_long();
-            for _ in 0..3 {
-                self.c.byte(0xCC);
-            }
             if !self.moves_needed(e) {
-                self.fix.push(j as u64 << 32 | b.edge_target(e) as u64);
+                self.jt.push((tat + 4 * x, tat, from, b.edge_target(e)));
             } else if e == d {
-                ds.push(j);
+                dx.push(x);
             } else {
-                cs.push(j as u64 << 32 | e as u64);
+                cs.push(x as u64 << 32 | e as u64);
             }
         }
-        let total = cs.len() + if ds.len() != 0 {
+        let total = cs.len() + if ds.len() + dx.len() != 0 {
             1
         } else {
             0
         };
         let mut done: usize = 0;
-        if ds.len() != 0 {
+        if ds.len() + dx.len() != 0 {
             for q in 0..ds.len() {
                 self.c.land(ds[q], self.c.len());
+            }
+            for q in 0..dx.len() {
+                self.jt.push((tat + 4 * dx[q], tat, from, JT_CODE | self.c.len()));
             }
             self.edge_moves(d);
             done += 1;
             self.goto(b.edge_target(d), done < total);
         }
         for q in 0..cs.len() {
-            self.c.land((cs[q] >> 32) as u32, self.c.len());
+            let x = (cs[q] >> 32) as u32;
+            self.jt.push((tat + 4 * x, tat, from, JT_CODE | self.c.len()));
             let e = cs[q] as u32;
             self.edge_moves(e);
             done += 1;
@@ -10370,12 +10471,12 @@ extend Gen {
                 thru.insert(at - 1, self.blk_at[(self.fix[q] as u32) as usize]);
             }
         }
-        for q in 0..self.fix.len() {
-            let at = (self.fix[q] >> 32) as u32;
-            if sw && at < ra {
+        for q in 0..self.fix.len() + self.jt.len() {
+            let (at, k) = self.branch_of(q);
+            if sw && at < ra || k == NONE {
                 continue;
             }
-            let mut to = self.blk_at[(self.fix[q] as u32) as usize];
+            let mut to = self.blk_at[k as usize];
             for _ in 0..8 {
                 switch thru.get(&to) {
                     Some(x) => {
@@ -10391,6 +10492,23 @@ extend Gen {
             }
         }
         return false;
+    }
+
+    // Branch `q` of the body: `fix[q]`, then the jump table entries (`jt`): its position (a table entry's: its
+    // dispatch's) and target block, NONE for an entry to a position in the code.
+    fn branch_of(self: &Self, q: usize) (u32, u32) {
+        if q < self.fix.len() {
+            return ((self.fix[q] >> 32) as u32, self.fix[q] as u32);
+        }
+        let (_, _, from, to) = self.jt[q - self.fix.len()];
+        return (
+            from,
+            if (to & JT_CODE) != 0 {
+                NONE
+            } else {
+                to
+            }
+        );
     }
 
     fn finish(self: &mut Self, s: u32) bool {
@@ -10418,8 +10536,9 @@ extend Gen {
         let mut ends = false;
         let nt = self.tails.len();
         let mut reached = false;
-        for q in 0..self.fix.len() {
-            reached = reached || self.blk_at[(self.fix[q] as u32) as usize] >= self.c.len();
+        for q in 0..self.fix.len() + self.jt.len() {
+            let k = self.branch_of(q).1;
+            reached = reached || k != NONE && self.blk_at[k as usize] >= self.c.len();
         }
         if !sw && nt != 0 && !reached && self.epi.len() == 0 && self.canary < 0 && (self.tails[nt - 1] >> 32) as u32 + 4 == self.c.len() {
             ends = true;
@@ -10715,9 +10834,17 @@ extend Gen {
         let mut wret = NONE;
         // The jumps that became `ret`s.
         let mut rets = Vector::<u32>::new();
-        for q in 0..self.fix.len() {
-            let at = (self.fix[q] >> 32) as u32;
-            let mut to = self.blk_at[(self.fix[q] as u32) as usize];
+        // Whether the prologue goes before the first framed block.
+        let mut inl = false;
+        // Per jump table entry, its target's position.
+        let mut jto = Vector::<u32>::with_capacity(self.jt.len());
+        for q in 0..self.fix.len() + self.jt.len() {
+            let (at, k) = self.branch_of(q);
+            if k == NONE {
+                jto.push(self.jt[q - self.fix.len()].3 & ~JT_CODE);
+                continue;
+            }
+            let mut to = self.blk_at[k as usize];
             for _ in 0..8 {
                 switch thru.get(&to) {
                     Some(x) => {
@@ -10743,6 +10870,10 @@ extend Gen {
                     self.c.ret();
                 }
                 to = wret;
+            } else if sw && at < ra && to == ra && q < self.fix.len() {
+                // A jump into the first framed block: the prologue goes before it (`relax`), the warm code's
+                // jumps land there; a table's entry takes a stub.
+                inl = true;
             } else if sw && at < ra && to >= ra {
                 to = (switch enter.get(&to) {
                     Some(e) => *e,
@@ -10777,6 +10908,10 @@ extend Gen {
                     },
                 });
             }
+            if q >= self.fix.len() {
+                jto.push(to);
+                continue;
+            }
             if !sw && self.c.b[at as usize - 1] == 0xE9 && to < self.c.len() && self.c.b[to as usize] == 0xC3 {
                 // A jump to a `ret`: that `ret`, the bytes after it traps.
                 self.c.b[at as usize - 1] = 0xC3;
@@ -10807,6 +10942,13 @@ extend Gen {
         for q in 0..self.epi.len() {
             self.c.land(self.epi[q], body_n);
         }
+        // A block of one jump that every branch went past (`thru`): `relax` drops it when nothing reaches it,
+        // and then the jump before it when that one reaches what follows.
+        let mut cands = Vector::<u32>::new();
+        for q in 0..self.fix.len() {
+            cands.push((self.fix[q] >> 32) as u32);
+        }
+        self.c.unreached(&cands, &jto);
         // Every jump that reaches in 2 bytes takes them; the relocations move with the code.
         // The line rows and the epilogue's start move with them.
         let mut ats = Vector::<u32>::with_capacity(self.rels.len() + self.rows.len() + 1);
@@ -10816,6 +10958,7 @@ extend Gen {
         for q in 0..self.rows.len() {
             ats.push(ast_min((self.rows[q] >> 32) as u32, body_n));
         }
+        ats.extend_from_slice(&jto);
         ats.extend_from_slice(&stubs);
         ats.push(tails_end);
         ats.push(ra);
@@ -10830,14 +10973,32 @@ extend Gen {
                 }
             }
             heads.sort();
+            if inl {
+                if let Ok(h) = heads.binary_search(&ra) {
+                    let _ = heads.remove(h);
+                }
+            }
         }
-        self.c.relax(&mut ats, &heads, lead);
+        let ins_at = if inl {
+            ra
+        } else {
+            x::NO_INS
+        };
+        let ins_n = if inl {
+            pl
+        } else {
+            0
+        };
+        self.c.relax(&mut ats, &heads, lead, ins_at, pro.b[0..ins_n as usize]);
         for q in 0..self.rels.len() {
             self.rels.index_mut(q).at = ats[q];
         }
         let nr = self.rels.len();
         for q in 0..self.rows.len() {
             self.rows[q] = ats[nr + q] as u64 << 32 | self.rows[q] & 0xFFFFFFFF;
+        }
+        for q in 0..jto.len() {
+            jto[q] = ats[nr + self.rows.len() + q];
         }
         let body_end = ats[ats.len() - 1];
         let framed_at = ats[ats.len() - 2];
@@ -10888,27 +11049,48 @@ extend Gen {
             let r = self.rels[q];
             o.reloc(sec, r.kind, at as u32 + lead + r.at, r.sym, r.addend);
         }
+        // Each jump table entry: its target less the table's start.
+        for q in 0..jto.len() {
+            let (e, t, _, _) = self.jt[q];
+            o.reloc_part(ob::S_RODATA, x::R_PC32, e, k2, lead + jto[q] + e - t);
+        }
         if p.debug {
             dw::rows(o, self.b(), k2, size, lead, &self.rows, body_end, 1);
         }
         let c0 = o.cfi.len() as u32;
         if self.win && sw {
             // Shrink-wrapped: the warm code, no entry (a leaf's rule: rsp at the return address); the framed
-            // code with its epilogue and sibling calls, its prologue done (0 bytes); each entry stub with
-            // its prologue.
-            let mut zs = Vector::<u32>::new();
-            zs.resize_default(regs.len());
-            let mut zx = Vector::<u32>::new();
-            zx.resize_default(xregs.len());
-            win_unwind(&mut o.cfi, 0, !omit, &zs, &regs, 0, local, &zx, &xregs, xsave, fp, 0);
+            // code with its epilogue and sibling calls, from the prologue before it when it is there (`inl`),
+            // else its prologue done (0 bytes); each entry stub with its prologue.
+            if inl {
+                win_unwind(
+                    &mut o.cfi,
+                    pl,
+                    !omit,
+                    &push_at,
+                    &regs,
+                    alloc_end,
+                    local,
+                    &xsave_at,
+                    &xregs,
+                    xsave,
+                    fp,
+                    fp_at,
+                );
+            } else {
+                let mut zs = Vector::<u32>::new();
+                zs.resize_default(regs.len());
+                let mut zx = Vector::<u32>::new();
+                zx.resize_default(xregs.len());
+                win_unwind(&mut o.cfi, 0, !omit, &zs, &regs, 0, local, &zx, &xregs, xsave, fp, 0);
+            }
+            let fa = if inl {
+                framed_at - pl
+            } else {
+                framed_at
+            };
             o.frames.push(
-                ob::OFrame {
-                    sym: k2,
-                    size: framed_end - framed_at,
-                    cfi_at: c0,
-                    cfi_len: o.cfi.len() as u32 - c0,
-                    off: framed_at,
-                },
+                ob::OFrame { sym: k2, size: framed_end - fa, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0, off: fa },
             );
             for q in 0..ns / 2 {
                 let c1 = o.cfi.len() as u32;

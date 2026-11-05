@@ -236,8 +236,8 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         iy.size = y.size;
         iy.flags = 0;
         let at = tv.len() as u32;
-        tv_rel.push(ob::ORel { sec: TV, kind: a::R_ABS64, off: at, sym: boot, addend: 0 });
-        tv_rel.push(ob::ORel { sec: TV, kind: a::R_ABS64, off: at + 16, sym: ik, addend: 0 });
+        tv_rel.push(ob::ORel { sec: TV, kind: a::R_ABS64, part: false, off: at, sym: boot, addend: 0 });
+        tv_rel.push(ob::ORel { sec: TV, kind: a::R_ABS64, part: false, off: at + 16, sym: ik, addend: 0 });
         for _ in 0..24 {
             tv.push(0);
         }

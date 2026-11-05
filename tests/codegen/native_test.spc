@@ -1780,6 +1780,52 @@ fn elf_text_count(o: &Vector<u8>, mask: u32, want: u32) u32 {
     return n;
 }
 
+// The file offset and size of the `.text` section of ELF object `o`.
+fn elf_text(o: &Vector<u8>) (usize, usize) {
+    let shoff = le_at(o, 0x28, 8) as usize;
+    let shsize = le_at(o, 0x3A, 2) as usize;
+    let strs = le_at(o, shoff + le_at(o, 0x3E, 2) as usize * shsize + 0x18, 8) as usize;
+    for k in 0..le_at(o, 0x3C, 2) as usize {
+        let sh = shoff + k * shsize;
+        let name = strs + le_at(o, sh, 4) as usize;
+        if o[name] == b'.' && o[name + 1] == b't' && o[name + 2] == b'e' && o[name + 3] == b'x' && o[name + 4] == b't' && o[name + 5] == 0 {
+            return (le_at(o, sh + 0x18, 8) as usize, le_at(o, sh + 0x20, 8) as usize);
+        }
+    }
+    return (0, 0);
+}
+
+// The relocations of the read-only data of ELF object `o` (`.rela.rodata`): how many, and how many of them
+// name a section symbol.
+fn elf_rodata_rels(o: &Vector<u8>) (u32, u32) {
+    let shoff = le_at(o, 0x28, 8) as usize;
+    let shsize = le_at(o, 0x3A, 2) as usize;
+    let strs = le_at(o, shoff + le_at(o, 0x3E, 2) as usize * shsize + 0x18, 8) as usize;
+    let want = ".rela.rodata";
+    let mut n: u32 = 0;
+    let mut secs: u32 = 0;
+    for k in 0..le_at(o, 0x3C, 2) as usize {
+        let sh = shoff + k * shsize;
+        let name = strs + le_at(o, sh, 4) as usize;
+        let mut same = o[name + want.len()] == 0;
+        for c in 0..want.len() {
+            same = same && o[name + c] == want.byte_at(c);
+        }
+        if !same {
+            continue;
+        }
+        let symtab = shoff + le_at(o, sh + 0x28, 4) as usize * shsize;
+        let syms = le_at(o, symtab + 0x18, 8) as usize;
+        let off = le_at(o, sh + 0x18, 8) as usize;
+        for r in 0..le_at(o, sh + 0x20, 8) as usize / 24 {
+            let y = (le_at(o, off + r * 24 + 8, 8) >> 32) as usize;
+            n += 1;
+            secs += ((o[syms + y * 24 + 4] & 0xF) == 3) as u32;
+        }
+    }
+    return (n, secs);
+}
+
 // The `n`-byte little-endian integer at `o[at..]`.
 fn le_at(o: &Vector<u8>, at: usize, n: usize) u64 {
     let mut v: u64 = 0;
@@ -9490,9 +9536,210 @@ b6:
   v12 = iconst.i32 -1
   ret v12
 )";
+    // x86-64: each jump table is offsets from its start in the read-only data, each entry relocated through
+    // the code's section symbol (a global function symbol there would need a dynamic relocation in a shared
+    // object).
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    let (n, secs) = elf_rodata_rels(&obj);
+    assert(n >= 6 && secs == n, "the tables' entries");
     let drv = "#include <stdint.h>\nint dense(int);\nint sparse(int64_t);\nint wide(int64_t);\nint machine(int);\nint from0(int64_t);\nint byte0(uint8_t);\nint main(void) {\n  int f[6] = {10, 20, 30, 10, 40, -1};\n  for (int i = 0; i < 6; i++) if (from0(i) != f[i]) return 7;\n  if (from0(-1) != -1 || from0((int64_t)1 << 32) != -1) return 8;\n  for (int i = 0; i < 256; i++) if (byte0((uint8_t)i) != (i < 4 ? i + 1 : -1)) return 9;\n  int d[10] = {-1, -1, 10, 20, 30, 20, -1, 107, 10, -1};\n  for (int i = 0; i < 10; i++) if (dense(i) != d[i]) return 1;\n  if (dense(-2) != -1 || dense(1 << 30) != -1) return 2;\n  if (sparse(0) != 1 || sparse(1000) != 2 || sparse(-5) != 3 || sparse((int64_t)1 << 40) != 2 || sparse(5) != 4) return 3;\n  int w[7] = {3, 1, 2, 1, 2, 3, 1};\n  for (int i = 0; i < 7; i++) if (wide(9 + i) != w[i]) return 4;\n  if (wide(((int64_t)1 << 33) + 10) != 3 || wide(-1) != 3) return 5;\n  if (machine(3) != 111 || machine(0) != 0 || machine(9) != -1) return 6;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
+}
+
+// x86-64 shrink-wrapping of a call outside rare blocks that no value lives across: the entry tests and
+// returns without a frame, and the frame's set-up runs before the call's block alone (in place, not in a
+// stub, which jumps to the block). The block the call's block alone reaches comes after it. A
+// value that lives across the call keeps the frame at the entry.
+@test
+fn a_warm_call_sets_the_frame_up_in_its_block_alone() {
+    let lir = M"(lir ptr 8
+sym @half fn global
+sym @leaf fn global
+fn @half
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b2, b1
+b1:
+  v3 = call.i64 @leaf(v0) : (i64) -> i64
+  v4 = icmp.eq v3, v1
+  br v4, b2, b3
+b2:
+  ret v1
+b3:
+  v5 = add.i64 v3, v3
+  ret v5
+fn @leaf
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = lshr.i64 v0, v1
+  ret v2
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    // `half` starts with `test rdi, rdi`, not a push or `sub rsp`.
+    let (off, _) = elf_text(&obj);
+    assert(obj[off] == 0x48 && obj[off + 1] == 0x85 && obj[off + 2] == 0xFF, "no frame before the test");
+    // `push rbp; mov rbp, rsp`, not followed by a jump (a stub's).
+    let pro: [u8; 4] = [0x55, 0x48, 0x89, 0xE5];
+    assert(holds(&obj, pro[0..4]), "the prologue");
+    let mut stub = false;
+    for k in 0..obj.len() - 4 {
+        stub = stub || obj[k] == 0x55 && obj[k + 1] == 0x48 && obj[k + 2] == 0x89 && obj[k + 3] == 0xE5 && (obj[k + 4] == 0xE9 || obj[k + 4] == 0xEB);
+    }
+    assert(!stub, "the prologue in place");
+    let kept = M"(lir ptr 8
+sym @keep fn global
+sym @leaf fn global ext
+fn @keep
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b2, b1
+b1:
+  v3 = call.i64 @leaf(v0) : (i64) -> i64
+  v4 = add.i64 v3, v0
+  ret v4
+b2:
+  ret v1
+)";
+    let mut ko = Vector::<u8>::new();
+    assert(
+        object_of(kept, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut ko),
+        "the kept object",
+    );
+    let (ko0, _) = elf_text(&ko);
+    assert(!(ko[ko0] == 0x48 && ko[ko0 + 1] == 0x85), "the frame first");
+    let drv = "#include <stdint.h>\nint64_t half(int64_t);\nint main(void) {\n  if (half(0) != 0 || half(1) != 0 || half(10) != 10 || half(-4) != -4) return 1;\n  return 0;\n}\n";
+    if cli::has_cc() && tgt::host_isa() == tgt::axis_index("x86_64", true) {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// A shrink-wrapped body whose jump table, in the warm code, enters the first framed block: the entry takes
+// the prologue (a stub), as a jump into that block takes the prologue before it. Each case runs.
+@test
+fn a_jump_table_enters_framed_code_through_the_prologue() {
+    let lir = M"(lir ptr 8
+sym @pick fn global
+sym @leaf fn global
+fn @pick
+  sig (i64) -> i64
+b0(v0: i64):
+  switch v0 [0 -> b1, 1 -> b2, 2 -> b3, 3 -> b4, 4 -> b5] else b6
+b1:
+  v1 = call.i64 @leaf(v0) : (i64) -> i64
+  ret v1
+b2:
+  v2 = iconst.i64 20
+  ret v2
+b3:
+  v3 = iconst.i64 30
+  ret v3
+b4:
+  v4 = iconst.i64 40
+  ret v4
+b5:
+  v5 = iconst.i64 50
+  ret v5
+b6:
+  v6 = iconst.i64 -1
+  ret v6
+fn @leaf
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 7
+  v2 = add.i64 v0, v1
+  ret v2
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    let drv = "#include <stdint.h>\nint64_t pick(int64_t);\nint main(void) {\n  int64_t w[7] = { -1, 7, 20, 30, 40, 50, -1 };\n  for (int i = -1; i < 6; i++) if (pick(i) != w[i + 1]) return 1 + i + 1;\n  return 0;\n}\n";
+    if cli::has_cc() && tgt::host_isa() == tgt::axis_index("x86_64", true) {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// x86-64: the loads an `add` and its `adc` (a `sub` and its `sbb`) read alone fold into them (`add r, [m]`,
+// `adc r, [m]`), also of a 16-byte aggregate parameter that Microsoft x64 passes by reference; the load the
+// two halves of one 64-bit product read is `mul`'s memory operand.
+@test
+fn sums_with_a_carry_and_wide_products_read_memory() {
+    let lir = M"(lir ptr 8
+sym @add128 fn global
+sym @addp fn global
+sym @mac fn global
+fn @addp
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.i64 v0 align 3
+  v4 = load.i64 v1 align 3
+  v5 = load.i64 v0+8 align 3
+  v6 = load.i64 v1+8 align 3
+  v7, v8 = subo.u.i64 v3, v4
+  v9, v10 = subo.u.i64 v5, v6
+  v11 = zext.i64 v8
+  v12, v13 = subo.u.i64 v9, v11
+  store v7, v2 align 3
+  store v12, v2+8 align 3
+  ret
+fn @add128
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (l0, l0) -> l0
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.i64 v0 align 3
+  v4 = load.i64 v0+8 align 3
+  v5 = load.i64 v1 align 3
+  v6 = load.i64 v1+8 align 3
+  v7, v8 = addo.u.i64 v3, v5
+  v9, v10 = addo.u.i64 v4, v6
+  v11 = zext.i64 v8
+  v12, v13 = addo.u.i64 v9, v11
+  store v7, v2 align 3
+  store v12, v2+8 align 3
+  ret
+fn @mac
+  sig (ptr, i64, ptr) -> void
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = load.i64 v0 align 3
+  v4 = mul.i64 v3, v1
+  v5 = mulhu.i64 v3, v1
+  store v4, v2 align 3
+  store v5, v2+8 align 3
+  ret
+)";
+    let x64 = tgt::axis_index("x86_64", true);
+    for os in ["windows", "linux"] {
+        let mut obj = Vector::<u8>::new();
+        assert(object_of(lir, tgt::axis_index(os, false), x64, 0, &mut obj), os);
+        // REX.W, then `adc r64, r/m64` (13), `add r64, r/m64` (03), `sbb r64, r/m64` (1B), `sub r64, r/m64`
+        // (2B) or `mul r/m64` (F7 /4), a memory operand. System V passes `add128`'s operands in registers.
+        let mut adc = false;
+        let mut add = false;
+        let mut sbb = false;
+        let mut sub = false;
+        let mut mul = false;
+        for k in 0..obj.len() - 2 {
+            let m = obj[k + 2];
+            if (obj[k] & 0xF8) == 0x48 && m < 0xC0 {
+                adc = adc || obj[k + 1] == 0x13;
+                add = add || obj[k + 1] == 0x03;
+                sbb = sbb || obj[k + 1] == 0x1B;
+                sub = sub || obj[k + 1] == 0x2B;
+                mul = mul || obj[k + 1] == 0xF7 && (m & 0x38) == 0x20;
+            }
+        }
+        assert(sbb && sub && mul && (adc && add) == (os == "windows"), os);
+    }
+    let drv = "#include <stdint.h>\ntypedef struct { uint64_t lo, hi; } U;\nU add128(U, U);\nvoid mac(const uint64_t *, uint64_t, uint64_t *);\nvoid addp(const uint64_t *, const uint64_t *, uint64_t *);\nint main(void) {\n  U a = { ~0ull, 1 }, b = { 2, 3 };\n  U r = add128(a, b);\n  if (r.lo != 1 || r.hi != 5) return 1;\n  uint64_t p[2] = { 1, 7 }, q[2] = { 2, 3 }, d[2];\n  addp(p, q, d);\n  if (d[0] != ~0ull || d[1] != 3) return 3;\n  uint64_t x = 0xFFFFFFFFFFFFFFFFull, o[2];\n  mac(&x, 3, o);\n  if (o[0] != 0xFFFFFFFFFFFFFFFDull || o[1] != 2) return 2;\n  return 0;\n}\n";
+    if cli::has_cc() && tgt::host_isa() == x64 {
+        assert_eq(run_native(lir, drv), 0);
+    }
 }
 
 // Panics with one message share the object's thunk of it (`__sc_pk.<k>`: the message's address, then a
@@ -15336,9 +15583,9 @@ b0(v0: ptr):
 }
 
 // Shrink-wrapped under Microsoft x64: the warm code, which keeps no frame, has no function table entry
-// (an entry's absence is a leaf's rule); the framed code after it has one whose prologue is done (0
-// bytes), and the stub that sets the frame up on the edge into it one with its prologue. The rare path
-// leaves through its own epilogue: no edge goes back to the warm code.
+// (an entry's absence is a leaf's rule); the framed code after it has one from the prologue the edge into
+// it runs before it, which its unwind information holds, as a whole function's. The rare path leaves
+// through its own epilogue: no edge goes back to the warm code.
 @test
 fn shrink_wrapped_windows_code_has_its_unwind_entries() {
     let src = M"(lir ptr 8
@@ -15362,16 +15609,12 @@ b2: unlikely
     assert(object_of(src, tgt::axis_index("windows", false), tgt::axis_index("x86_64", true), 0, &mut obj), "object");
     let pd = coff_section(&obj, ".pdata");
     let xd = coff_section(&obj, ".xdata");
-    assert_eq(pd >> 32, 24);
+    assert_eq(pd >> 32, 12);
     let p = pd as u32;
     let x = xd as u32;
-    // (start, end, unwind information) twice: the framed code, then the stub right after it.
-    assert(
-        word_at(&obj, p, 4) > 0 && word_at(&obj, p + 4, 4) == word_at(&obj, p + 12, 4),
-        "two entries in a row past the warm code",
-    );
-    assert_eq(word_at(&obj, x + word_at(&obj, p + 8, 4) + 1, 1), 0);
-    assert(word_at(&obj, x + word_at(&obj, p + 20, 4) + 1, 1) > 0, "the stub's prologue");
+    // (start, end, unwind information): the framed code past the warm code, its prologue first.
+    assert(word_at(&obj, p, 4) > 0, "an entry past the warm code");
+    assert(word_at(&obj, x + word_at(&obj, p + 8, 4) + 1, 1) > 0, "the prologue");
 }
 
 // Only a single-use right operand can become an SSE memory operand. A write between the load and

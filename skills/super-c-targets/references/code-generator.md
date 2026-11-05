@@ -12,7 +12,8 @@ set first: it states the value, register and frame model.
 
 1. Analysis: set `Live.fold_ops` to the `FOLD_*` patterns the backend fuses into their users, then
    `Live::run`. It gives the block layout (reverse postorder, each loop contiguous, rare blocks last:
-   `Live::rare`, a block the entry reaches only through a `BLOCK_RARE` one), the loop nesting, each
+   `Live::rare`, a block the entry reaches only through a `BLOCK_RARE` one; none under `Live::in_place`,
+   which wasm sets because its structured code emits each block where reverse postorder puts it), the loop nesting, each
    value's last live position, use count and next-use chain. `end_inst` calls `Live::advance`
    after emission, so unread current operands remain near uses during allocation. Eviction
    prefers no store, then the farthest next use. A folded instruction emits no code; its user reads its
@@ -41,15 +42,28 @@ the reason. Never emit code for an unsupported case.
 
 ## Rare code
 
-Shrink-wrapping (`shrinkable`): when every call is in a rare block, the warm code keeps no frame and
-returns with `ret`; the rare blocks joined by edges to one with a call set the frame up
-(`Live::after`, laid out last), the prologue on each edge into them, the epilogue on each edge out.
-Not with a canary, a slot aligned past 16 bytes, inline assembly, a return address or variadic
-access; nor when the entry's code uses the frame (a parameter's register parts stored into its slot):
-it runs in the warm entry block (`frame_use` at the entry's layout position). Microsoft x64: no edge may leave them for the warm code (its unwinder reads an epilogue only
-where it ends in `ret` or a jump out); the warm code has no function table entry (a leaf's rule), the
-framed code one with a prologue of 0 bytes, each entry stub one with its prologue (`OFrame.off`). A
-`@cold` function's code goes to its own section (`cold_text`).
+Shrink-wrapping (`shrinkable`): when every call is in a rare block (x86-64: or in a block outside loops
+that no value lives across a call of, `Live::lives_across`, at most `lv::WARM_CALLS` such calls, with a
+return in the warm code), the warm code keeps no frame and returns with `ret`; the blocks with a call,
+the rare blocks joined by edges to one, and the blocks the entry reaches only through those set the
+frame up (`Live::after`, laid out last), the prologue on each edge into them, the epilogue on each edge
+out. Every call of a shrink-wrapped body saves the scratch homes live past it (`save_scratch`). x86-64:
+the warm jumps into the first framed block take the prologue `relax` inserts before it (a jump table's
+entry takes a stub); the other entries take stubs. arm64 keeps the frame in rare blocks alone: there a
+warm return between the entry and the framed code writes x0, which would move the parameters off their
+registers. Not with a canary, a slot aligned past 16 bytes, inline assembly, a return address or
+variadic access; nor when the entry's code uses the frame (a parameter's register parts stored into its
+slot): it runs in the warm entry block (`frame_use` at the entry's layout position). Microsoft x64: no
+edge may leave them for the warm code (its unwinder reads an epilogue only where it ends in `ret` or a
+jump out); the warm code has no function table entry (a leaf's rule), the framed code one from the
+prologue before it (else with a prologue of 0 bytes), each entry stub one with its prologue
+(`OFrame.off`). A `@cold` function's code goes to its own section (`cold_text`).
+
+x86-64 branches: `Code::relax` gives each jump its 2-byte form where it reaches, drops the jumps no code
+runs (`Code::unreached`: a block of one jump every branch went past) and each jump to the next byte, and
+inserts the shrink-wrapped prologue. A dense switch is a jump table: a read-only table of 32-bit offsets
+from its start, `lea`, `movsxd`, `add`, `jmp` (clang's), each entry a relocation through the code's
+section symbol (`ob::ORel.part`: no global symbol a shared object could interpose).
 
 ## Values and ops
 

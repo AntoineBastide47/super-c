@@ -164,6 +164,8 @@ pub(package) const CARRY_ADC: u8 = 3;
 pub(package) const MASK_DEPTH: u32 = 8;
 // `Live::ldop_user` looks this many instructions past a load for its use.
 const LDOP_REACH: u32 = 16;
+/// The most calls outside rare blocks a shrink-wrapped body makes (`lives_across` reads every value per call).
+pub(package) const WARM_CALLS: u32 = 4;
 // The terminator of block `k` of `b`.
 const fn term_of(b: &Body, k: u32) Inst {
     let bk = b.blocks[k as usize];
@@ -278,6 +280,9 @@ pub(package) struct Live {
     /// instruction from its operands, which live to it (`uses_at`), and the instruction emits nothing
     /// (`pfold`).
     pub(package) fold_ops: u64,
+    /// The most bytes of an aggregate parameter that arrives in registers (`Package.arg_copy`): a larger one's
+    /// loads read memory, which an operation may read in their place (`FOLD_LDOP`). None by default.
+    pub(package) arg_copy: u32,
     /// Whether the calling convention has the caller extend 8- and 16-bit arguments to 32 bits by their
     /// signedness (Apple arm64), so their registers' low 32 bits are their values extended.
     pub(package) ext_args: bool,
@@ -349,6 +354,7 @@ extend Live {
             relay: Vector::<u32>::new(),
             relayed: Vector::<u64>::new(),
             fold_ops: 0,
+            arg_copy: 0xFFFFFFFF,
             ext_args: false,
             in_place: false,
             cnd: Vector::<u32>::new(),
@@ -1575,11 +1581,14 @@ extend Live {
         if (self.fold_ops & FOLD_VLDOP) != 0 && t.op == O_LOAD && is_vec(t.ty) {
             return self.vldop_user(b, i, end);
         }
-        if t.op != O_LOAD || (t.aux & MEM_VOLATILE) != 0 || !(is_int(t.ty) || is_float(t.ty)) || t.ty == T_I128 || self.count[i as usize] != 1 || self.pfold[i as usize] || agg_param(
+        if t.op != O_LOAD || (t.aux & MEM_VOLATILE) != 0 || !(is_int(t.ty) || is_float(t.ty)) || t.ty == T_I128 || self.count[i as usize] > 2 || self.pfold[i as usize] || self.reg_param(
             b,
             t.a,
         ) || result_load(b, i) {
             return false;
+        }
+        if self.count[i as usize] == 2 {
+            return self.wide_load(b, i, end);
         }
         let mut u = i + 1;
         while u < end && u <= i + LDOP_REACH {
@@ -1639,12 +1648,51 @@ extend Live {
         return false;
     }
 
+    // Whether 64-bit load `i` of `b` (its block ending before `end`), read twice, is an operand of a 64-bit
+    // product and its high half alone (x86-64's one `mul` of the memory gives both), within LDOP_REACH
+    // instructions with no write of memory from it to them.
+    fn wide_load(self: &Self, b: &Body, i: u32, end: u32) bool {
+        if b.insts[i as usize].ty != T_I64 {
+            return false;
+        }
+        let mut lo = false;
+        let mut hi = false;
+        let mut other = VNONE;
+        let mut u = i + 1;
+        while u < end && u <= i + LDOP_REACH && !(lo && hi) {
+            let x = b.insts[u as usize];
+            if writes_mem(x) {
+                return false;
+            }
+            if x.a == i || x.b == i {
+                let o = if x.a == i {
+                    x.b
+                } else {
+                    x.a
+                };
+                if x.ty != T_I64 || o == i || other != VNONE && o != other || is_inst(o) && self.pfold[o as usize] || self.pfold[u as usize] {
+                    return false;
+                }
+                other = o;
+                if x.op == O_MUL && !lo {
+                    lo = true;
+                } else if (x.op == O_MULHU || x.op == O_MULHS) && !hi {
+                    hi = true;
+                } else {
+                    return false;
+                }
+            }
+            u += 1;
+        }
+        return lo && hi;
+    }
+
     /// `FOLD_VLDOP`: whether vector load `i` of `b` (its block ending before `end`) folds into its one use,
     /// as `ldop_user`.
     fn vldop_user(self: &Self, b: &Body, i: u32, end: u32) bool {
         let t = b.insts[i as usize];
         let n = type_bytes(t.ty, 8);
-        if (t.aux & MEM_VOLATILE) != 0 || n != 16 && n != 32 || self.count[i as usize] != 1 || self.pfold[i as usize] || agg_param(
+        if (t.aux & MEM_VOLATILE) != 0 || n != 16 && n != 32 || self.count[i as usize] != 1 || self.pfold[i as usize] || self.reg_param(
             b,
             t.a,
         ) || result_load(b, i) {
@@ -1728,7 +1776,8 @@ extend Live {
     }
 
     /// The rare blocks of `b` (`rare`) that edges between rare blocks connect to one of `framed` (per block:
-    /// it holds a call that needs the frame): `after`, which the next `run` lays out last.
+    /// it holds a call that needs the frame), the other blocks of `framed`, and the blocks the entry reaches
+    /// only through those: `after`, which the next `run` lays out last.
     pub(package) fn set_after(self: &mut Self, b: &Body, framed: &Vector<bool>) {
         // Per block, its component's root (union by index, paths halved: each step shortens a path).
         let nb = b.blocks.len();
@@ -1763,8 +1812,65 @@ extend Live {
         }
         self.after.truncate(0);
         for k in 0..nb {
-            self.after.push(self.rare[k] && fr[find_root(&mut root, k as u32) as usize]);
+            self.after.push(self.rare[k] && fr[find_root(&mut root, k as u32) as usize] || framed[k]);
         }
+        // The blocks the entry reaches through the others alone (each pushed once).
+        let mut seen = Vector::<bool>::new();
+        seen.resize_default(nb);
+        let mut work = Vector::<u32>::new();
+        if nb != 0 && !self.after[0] {
+            seen[0] = true;
+            work.push(0);
+        }
+        while let Some(k) = work.pop() {
+            let bk = b.blocks[k as usize];
+            b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut es);
+            for e in 0..es.len() {
+                let s = b.edge_target(es[e]) as usize;
+                if !seen[s] && !self.after[s] {
+                    seen[s] = true;
+                    work.push(s as u32);
+                }
+            }
+        }
+        for k in 0..nb {
+            if self.rpo[k] != NONE && !seen[k] {
+                self.after[k] = true;
+            }
+        }
+    }
+
+    /// Whether a value of `b` made before call `i` of block `d` (in an earlier block of the layout, or in `d`)
+    /// is live past it: in a later block, or read after it in `d`; not one the code makes again where it is
+    /// read (`remat_inst`), nor the result's address, whose stores the return's registers take.
+    pub(package) fn lives_across(self: &mut Self, p: &Package, b: &Body, d: u32, i: u32) bool {
+        let ni = b.insts.len() as u32;
+        let pd = self.pos[d as usize];
+        let res = if (b.pool[b.sig as usize + 2] & AGG) != 0 {
+            ni + b.blocks[0].param_start + b.pool[b.sig as usize]
+        } else {
+            NONE
+        };
+        for x in 0..self.end.len() as u32 {
+            let k = self.def_blk[x as usize];
+            if x == i || x == res || k == NONE || self.pos[k as usize] == NONE || x < ni && remat_inst(p, b, x) {
+                continue;
+            }
+            let before = if k == d {
+                x >= ni || x < i
+            } else {
+                self.pos[k as usize] < pd
+            };
+            let v = if x < ni {
+                x
+            } else {
+                VPARAM | x - ni
+            };
+            if before && (self.end[x as usize] > pd || self.end[x as usize] == pd && self.reads_after(b, d, i, v)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Whether an instruction of block `k` of `b` after instruction `i`, its terminator's edges included,
@@ -3187,10 +3293,58 @@ extend Live {
                     self.carry[z as usize] = CARRY_PART;
                     self.carry[h as usize] = CARRY_PART;
                     self.carry[i as usize] = CARRY_ADC;
+                    if (self.fold_ops & FOLD_LDOP) != 0 {
+                        self.carry_load(b, lo, lo);
+                        self.carry_load(b, h, i);
+                    }
                     break;
                 }
             }
         }
+    }
+
+    // `FOLD_LDOP` for the `add` and `adc` of a sum with a carry (`carries`): an operand of sum or difference
+    // `s` (a difference's second) that a load alone gives, of its width, with no write of memory from the load
+    // to `at`, where the operation reads it, folds into it.
+    fn carry_load(self: &mut Self, b: &Body, s: u32, at: u32) {
+        let t = b.insts[s as usize];
+        let sub = t.op == O_SUB || t.op == O_SUBO;
+        for side in 0..2u32 {
+            let o = if side == 0 {
+                t.b
+            } else {
+                t.a
+            };
+            if side == 1 && sub || !is_inst(o) || o > s || self.count[o as usize] != 1 || self.pfold[o as usize] {
+                continue;
+            }
+            let l = b.insts[o as usize];
+            if l.op != O_LOAD || l.ty != t.ty || (l.aux & MEM_VOLATILE) != 0 || self.reg_param(b, l.a) || result_load(
+                b,
+                o,
+            ) {
+                continue;
+            }
+            let mut clear = true;
+            for j in o + 1..at {
+                clear = clear && !writes_mem(b.insts[j as usize]);
+            }
+            if clear {
+                self.pfold[o as usize] = true;
+                return;
+            }
+        }
+    }
+
+    // Whether value `v` of `b` is an aggregate parameter that arrives in registers (`arg_copy`), or the
+    // pointer to an aggregate result: its loads are no memory reads.
+    fn reg_param(self: &Self, b: &Body, v: Value) bool {
+        if !agg_param(b, v) {
+            return false;
+        }
+        let q = (v & ~VPARAM) - b.blocks[0].param_start;
+        let np = b.pool[b.sig as usize];
+        return q == np || b.pool[(b.pool[(b.sig + 3 + q) as usize] & ~AGG) as usize] <= self.arg_copy;
     }
 
     // Whether instruction `i` of `b` is a sum (`sub`: difference) of two integers of 32 or 64 bits that

@@ -348,7 +348,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             let len = (n + 4 + 7 & ~7u32) - 4;
             ob::w32(&mut body, len);
             ob::w32(&mut body, (at + 4) as u32);
-            eh_rels.push(ob::ORel { sec: 0, kind: x::R_PC32, off: (at + 8) as u32, sym: fr.sym, addend: 0 });
+            eh_rels.push(ob::ORel { sec: 0, kind: x::R_PC32, part: true, off: (at + 8) as u32, sym: fr.sym, addend: 0 });
             ob::w32(&mut body, 0);
             ob::w32(&mut body, fr.size);
             body.push(0);
@@ -388,12 +388,20 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         syms.push(0);
     }
     let mut nsym: u32 = 1;
-    // A section symbol per part with frames: `.eh_frame` refers to a function through it, as a relocation
-    // against a global symbol would make the read-only section need one in a shared object.
+    // A section symbol per part with frames or a relocation through it (`ob::ORel.part`): `.eh_frame` and
+    // the jump tables refer to a function through it, as a relocation against a global symbol would make
+    // the read-only section need one in a shared object.
     let mut secsym = Vector::<u32>::new();
     secsym.resize_default(parts.len());
-    for f in 0..o.frames.len() {
-        let y = o.syms[o.frames[f].sym as usize];
+    for f in 0..o.frames.len() + o.rels.len() {
+        let k = if f < o.frames.len() {
+            o.frames[f].sym
+        } else if o.rels[f - o.frames.len()].part {
+            o.rels[f - o.frames.len()].sym
+        } else {
+            continue;
+        };
+        let y = o.syms[k as usize];
         let q = ob::part_at(&parts, &first, y.sec, y.off) as usize;
         if secsym[q] == 0 {
             secsym[q] = nsym;
@@ -511,8 +519,15 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
                 rel_type(x.kind)
             };
             ob::w64(&mut body, x.off as u64 - pt.lo);
-            ob::w64(&mut body, symix[x.sym as usize] as u64 << 32 | ty as u64);
-            ob::w64(&mut body, x.addend as u64);
+            if x.part {
+                let y = o.syms[x.sym as usize];
+                let qs = ob::part_at(&parts, &first, y.sec, y.off) as usize;
+                ob::w64(&mut body, secsym[qs] as u64 << 32 | ty as u64);
+                ob::w64(&mut body, (x.addend + (y.off - parts[qs].lo) as i64) as u64);
+            } else {
+                ob::w64(&mut body, symix[x.sym as usize] as u64 << 32 | ty as u64);
+                ob::w64(&mut body, x.addend as u64);
+            }
             n += 1;
         }
         if n == 0 {

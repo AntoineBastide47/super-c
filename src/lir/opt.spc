@@ -8964,14 +8964,6 @@ extend Opt {
         return fold_ptr(pk, b, i, self.unit);
     }
 
-    // Call `i` of block `k` of the C library's `memcmp` of a count up to MEMCMP_MAX bytes that is a constant
-    // or that a branch into the block settles: loads of both sides, the widest power of two of at most 8
-    // bytes, up to MEMCMP_LOADS each, the last overlapping the one before for a count it does not divide
-    // (LLVM ExpandMemCmp). A result whose one reader is an equality with 0 right after is whether a pair
-    // differs: then the widest power of two that fits each remaining count, unless that takes more loads
-    // than the overlapping ones (5 bytes as 4 and 1, 7 as two overlapping 4), a narrower pair extended to
-    // the widest. Another is the order of the first pair that differs, compared as big-endian
-    // numbers (`Package.bswap`). A load of read-only data folds to its constant. Whether it did.
     // Call `i` of block `k` of C's `copysign` or `copysignf`: the magnitude's bits and the sign's bit, in
     // integer operations every target computes in registers and the vectorizer widens.
     fn copysign_bits(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
@@ -9009,6 +9001,14 @@ extend Opt {
         return true;
     }
 
+    // Call `i` of block `k` of the C library's `memcmp` of a count up to MEMCMP_MAX bytes that is a constant
+    // or that a branch into the block settles: loads of both sides, the widest power of two of at most 8
+    // bytes, up to MEMCMP_LOADS each, the last overlapping the one before for a count it does not divide
+    // (LLVM ExpandMemCmp). A result whose one reader is an equality with 0 right after is whether a pair
+    // differs: then the widest power of two that fits each remaining count, unless that takes more loads
+    // than the overlapping ones (5 bytes as 4 and 1, 7 as two overlapping 4), a narrower pair extended to
+    // the widest. Another is the order of the first pair that differs, compared as big-endian
+    // numbers (`Package.bswap`). A load of read-only data folds to its constant. Whether it did.
     fn memcmp_eq(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
         let bk = b.blocks[k as usize];
@@ -15262,10 +15262,6 @@ const fn header_read(b: &Body, t: Inst, v: Value) bool {
     return rule == core::SR_LOAD && c != core::SIMD_LOAD_RAW || rule == core::SR_STORE && c != core::SIMD_STORE_RAW || (rule == core::SR_MLOAD || rule == core::SR_MSTORE) && c < core::SIMD_GATHER_PTR;
 }
 
-// The `Sym.alloc` of the function call `t` calls, ALLOC_NONE for any other instruction and for a function
-// the package defines: its own code (wasm's C library, the runtime's leak tracker) reads what it writes.
-// The `Sym.alloc` of call `t`'s function by its name alone, whether the package defines it or not
-// (`dead_allocs`): ALLOC_NONE for another instruction.
 // Whether allocation call `t` (`ALLOC_FRESH`) is a `realloc` of a block that may exist (its pointer not the
 // null constant), which frees that block: `dead_allocs` keeps it.
 fn grows_block(pk: &Package, b: &Body, t: Inst) bool {
@@ -15273,6 +15269,8 @@ fn grows_block(pk: &Package, b: &Body, t: Inst) bool {
     return name.ends_with("realloc") && const_of(b, b.pool[t.c as usize]) != Some(0u64);
 }
 
+// The `Sym.alloc` of call `t`'s function by its name alone, whether the package defines it or not
+// (`dead_allocs`): ALLOC_NONE for another instruction.
 fn named_alloc(pk: &Package, b: &Body, t: Inst) u8 {
     return if t.op == O_CALL {
         pk.syms[b.syms[t.a as usize] as usize].alloc
@@ -15281,6 +15279,8 @@ fn named_alloc(pk: &Package, b: &Body, t: Inst) u8 {
     };
 }
 
+// The `Sym.alloc` of the function call `t` calls, ALLOC_NONE for any other instruction and for a function
+// the package defines: its own code (wasm's C library, the runtime's leak tracker) reads what it writes.
 fn call_alloc(pk: &Package, b: &Body, t: Inst) u8 {
     if t.op != O_CALL {
         return ALLOC_NONE;
