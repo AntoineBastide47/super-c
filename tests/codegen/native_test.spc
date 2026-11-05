@@ -9769,6 +9769,80 @@ b0(v0: ptr, v1: ptr, v2: ptr):
     }
 }
 
+// A 64-bit load, a constant whose high word is the load's number, then two reads of the load by no product
+// pair: the load-fold analysis reads only a product's operands as values (a constant's fields are bits).
+@test
+fn a_load_read_twice_after_a_constant_compiles() {
+    let lir = M"(lir ptr 8
+sym @twice fn global
+fn @twice
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = load.i64 v0 align 3
+  v3 = iconst.i64 4096
+  v4 = add.i64 v2, v1
+  v5 = sub.i64 v2, v3
+  v6 = mul.i64 v4, v5
+  ret v6
+)";
+    for os in ["windows", "linux"] {
+        let mut obj = Vector::<u8>::new();
+        assert(object_of(lir, tgt::axis_index(os, false), tgt::axis_index("x86_64", true), 0, &mut obj), os);
+    }
+}
+
+// AVX-512: a float that lives past its block may be in xmm16..xmm31; its saturating conversion to an
+// integer reads its sign with an instruction EVEX encodes there (`movq`, not `movmskpd`).
+@test
+fn a_saturating_conversion_reads_an_upper_register() {
+    let lir = M"(lir ptr 8
+sym @cv fn global
+fn @cv
+  sig (f64, i64) -> i64
+b0(v0: f64, v1: i64):
+  v2 = fadd.f64 v0, v0
+  v3 = fadd.f64 v2, v0
+  v4 = fadd.f64 v3, v0
+  v5 = fadd.f64 v4, v0
+  v6 = fadd.f64 v5, v0
+  v7 = fadd.f64 v6, v0
+  v8 = fadd.f64 v7, v0
+  v9 = fadd.f64 v8, v0
+  v10 = fadd.f64 v9, v0
+  v11 = fadd.f64 v10, v0
+  v12 = iconst.i64 0
+  v13 = icmp.eq v1, v12
+  br v13, b2, b1
+b1:
+  v14 = fptosi.i64 v2
+  v15 = fptosi.i64 v3
+  v16 = add.i64 v14, v15
+  v17 = fptosi.i64 v4
+  v18 = add.i64 v16, v17
+  v19 = fptosi.i64 v5
+  v20 = add.i64 v18, v19
+  v21 = fptosi.i64 v6
+  v22 = add.i64 v20, v21
+  v23 = fptosi.i64 v7
+  v24 = add.i64 v22, v23
+  v25 = fptosi.i64 v8
+  v26 = add.i64 v24, v25
+  v27 = fptosi.i64 v9
+  v28 = add.i64 v26, v27
+  v29 = fptosi.i64 v10
+  v30 = add.i64 v28, v29
+  v31 = fptosi.i64 v11
+  v32 = add.i64 v30, v31
+  ret v32
+b2:
+  ret v12
+)";
+    for os in ["windows", "linux"] {
+        let mut obj = Vector::<u8>::new();
+        assert(object_of(lir, tgt::axis_index(os, false), tgt::axis_index("x86_64", true), Z512, &mut obj), os);
+    }
+}
+
 // Panics with one message share the object's thunk of it (`__sc_pk.<k>`: the message's address, then a
 // jump to `__sc_panic`, in the cold text): each site is one call (arm64 `bl`) and loads no message. Each
 // site still panics with its message.

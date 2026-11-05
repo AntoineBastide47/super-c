@@ -1665,7 +1665,10 @@ extend Live {
             if writes_mem(x) {
                 return false;
             }
-            if x.a == i || x.b == i {
+            // A product's operands are values; another instruction's fields may be no values (a call's
+            // symbol, a load's bound), and a use of `i` there leaves one of the two halves unfound.
+            let prod = x.op == O_MUL || x.op == O_MULHU || x.op == O_MULHS;
+            if prod && (x.a == i || x.b == i) {
                 let o = if x.a == i {
                     x.b
                 } else {
@@ -1677,7 +1680,7 @@ extend Live {
                 other = o;
                 if x.op == O_MUL && !lo {
                     lo = true;
-                } else if (x.op == O_MULHU || x.op == O_MULHS) && !hi {
+                } else if x.op != O_MUL && !hi {
                     hi = true;
                 } else {
                     return false;

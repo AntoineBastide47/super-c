@@ -7060,21 +7060,16 @@ extend Gen {
             ra - V0,
         );
         let nan = self.c.jcc32(x::CC_P);
-        // The sign of the float: negative keeps the lowest value, positive takes the highest.
-        self.c.rr(
-            if d {
-                0x66u32
-            } else {
-                0u32
-            },
-            0x0F50,
-            false,
-            S1,
-            ra - V0,
-            false,
-        );
-        self.c.test_ri(1, S1, 1);
-        let neg = self.c.jcc32(x::CC_NE);
+        // The sign of the float: negative keeps the lowest value, positive takes the highest. Its bits in
+        // S1 (`movd`/`movq`, which EVEX encodes on xmm16..xmm31, unlike `movmskps`).
+        let fb: u32 = if d {
+            8
+        } else {
+            4
+        };
+        self.c.movd_from_x(fb, S1, ra - V0);
+        self.c.test_rr(fb, S1, S1);
+        let neg = self.c.jcc32(x::CC_S);
         self.c.alu_ri(x::SUB, sz, rd, 1);
         let out = self.c.jmp32();
         self.c.land(nan, self.c.len());
