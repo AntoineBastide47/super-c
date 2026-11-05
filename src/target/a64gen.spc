@@ -138,6 +138,10 @@ pub(package) struct Gen {
     ends_at: Vector<u32>,
     cpre: Vector<u32>, // per instruction index, the calls that return before it (`call_tables`)
     cpos: Vector<u32>, // per layout position, the blocks before it that hold one
+    // As `cpre` and `cpos` for the instructions that may write an argument register: a call (a sibling or
+    // an intrinsic one too), a return, a panic, a system operation, a variadic access, a thread-local getter.
+    hpre: Vector<u32>,
+    hpos: Vector<u32>,
     cond: Cond, // the flags the instruction just compiled left for the next one
     pend: Cond, // the flags the instruction being compiled may read
     // Frame.
@@ -265,6 +269,8 @@ extend Gen {
             ends_at: Vector::<u32>::new(),
             cpre: Vector::<u32>::new(),
             cpos: Vector::<u32>::new(),
+            hpre: Vector::<u32>::new(),
+            hpos: Vector::<u32>::new(),
             cond: Cond { inst: NONE, cc: 0, cc2: NONE },
             pend: Cond { inst: NONE, cc: 0, cc2: NONE },
             out_size: 0,
@@ -1342,6 +1348,7 @@ extend Gen {
         let b = self.b();
         let ni = b.insts.len();
         fill(&mut self.cpre, ni + 1, 0);
+        fill(&mut self.hpre, ni + 1, 0);
         self.rarec.truncate(0);
         self.rarec.resize_default(ni);
         fill(&mut self.cret, ni, false);
@@ -1349,6 +1356,9 @@ extend Gen {
             // An intrinsic's template writes x0, x1 and v0 to v4 and its arguments' registers: no
             // scratch home.
             let t = b.insts[i];
+            self.hpre[i + 1] = (Gen::clobbers(b, t) || t.op == O_RET || t.op == O_PANIC || t.op == O_SYS || t.op == O_VASTART || t.op == O_VAARG || t.op == O_SYMADDR && !self.remat_inst(
+                i as u32,
+            )) as u32;
             // A sibling call does not come back: the body around it may be a leaf.
             let c = Gen::clobbers(b, t) && !lv::dead_end(unsafe &*self.pkg, b, &self.lv, i, &mut self.uses) && !(t.op == O_CALL && self.intrinsic(
                 t.a,
@@ -1362,19 +1372,57 @@ extend Gen {
         }
         let nq = self.lv.order.len();
         fill(&mut self.cpos, nq + 1, 0);
+        fill(&mut self.hpos, nq + 1, 0);
         for q in 0..nq {
             let bk = b.blocks[self.lv.order[q] as usize];
             self.cpos[q + 1] = self.cpos[q];
+            self.hpos[q + 1] = self.hpos[q];
             for i in bk.start..bk.start + bk.len {
                 if self.cpre[i as usize + 1] != 0 {
                     self.cpos[q + 1] = self.cpos[q] + 1;
-                    break;
+                }
+                if self.hpre[i as usize + 1] != 0 {
+                    self.hpos[q + 1] = self.hpos[q] + 1;
                 }
             }
+            self.cpos[q + 1] = self.cpos[q + 1].min(self.cpos[q] + 1);
+            self.hpos[q + 1] = self.hpos[q + 1].min(self.hpos[q] + 1);
         }
         for i in 0..ni {
             self.cpre[i + 1] += self.cpre[i];
+            self.hpre[i + 1] += self.hpre[i];
         }
+    }
+
+    // Whether entry parameter value index `x`, arriving in argument register `r`, may keep it as its home:
+    // no instruction that may write an argument register (`hpre`) runs from the entry to the end of its
+    // range (`Live::last_read`), and nothing else holds `r`.
+    fn quiet_arg(self: &Self, x: u32, r: u8) bool {
+        let b = self.b();
+        let ni = b.insts.len() as u32;
+        let arg = r < 8 || r >= V0 && r < V0 + 8;
+        if x < ni || !arg || self.lv.def_blk[x as usize] != 0 || self.lv.pos[0] != 0 || ((self.fixed_busy | self.lock) & bit(
+            r,
+        )) != 0 {
+            return false;
+        }
+        let e = self.lv.end[x as usize];
+        let l = self.lv.last_read(b, x);
+        // Its last read too (a call there writes its result over the arguments), but a return, whose moves
+        // read it first.
+        let past = (l != NONE && b.insts[l as usize].op != O_RET) as usize;
+        let tail = if l != NONE {
+            self.hpre[l as usize + past] == self.hpre[b.blocks[self.lv.order[e as usize] as usize].start as usize]
+        } else {
+            self.hpos[e as usize + 1] == self.hpos[e as usize]
+        };
+        // No loop parameter shares its register (`Live::share`): that one's range is longer.
+        for y in 0..self.lv.share.len() {
+            if self.lv.share[y] == x {
+                return false;
+            }
+        }
+        return self.hpos[e as usize] == 0 && tail;
     }
 
     // Whether instruction `t` of `b` may call a function that returns, which writes the caller-saved
@@ -1430,8 +1478,9 @@ extend Gen {
             self.scr
         } & ~self.fixed_busy;
         let open = set & ~(self.lock | self.tmps);
-        // A free one first.
-        let r = if prefer != NOREG && (set & bit(prefer)) != 0 {
+        // A free one first; the argument register an entry parameter arrives in when nothing writes it in its
+        // range (`quiet_arg`).
+        let r = if prefer != NOREG && ((set & bit(prefer)) != 0 || self.quiet_arg(x, prefer)) {
             prefer
         } else if (open & ~self.held) != 0 {
             (open & ~self.held).trailing_zeros() as u8
@@ -2799,7 +2848,13 @@ extend Gen {
         }
         for q in mark..self.taken.len() {
             let i = self.taken[q] as u32;
-            let pa = self.self_lay.parts[(loc.p0 + (self.taken[q] >> 32) as u32) as usize];
+            let part = (self.taken[q] >> 32) as u32;
+            let pa = self.self_lay.parts[(loc.p0 + (part & ~place::SPAN)) as usize];
+            if (part & place::SPAN) != 0 {
+                // Two 8-byte vector parts as one vector in the first's register: INS Vd.D[1], Vn.D[0].
+                let p1 = self.self_lay.parts[(loc.p0 + (part & ~place::SPAN) + 1) as usize];
+                self.emit(0x6E180400 | p1.reg as u32 << 5 | pa.reg as u32);
+            }
             self.entry_reg(
                 i,
                 pa.reg + if pa.v {
@@ -5265,7 +5320,8 @@ extend Gen {
 
     // A matching access within eight instructions: one of the same access kind (`mkind`: an `i64` and a
     // `ptr` pair), the bytes after or before through the same address value. Crossing memory or control
-    // flow is forbidden; a store's source must already exist where the pair executes.
+    // flow is forbidden; a store's source must already exist where the pair executes. A load passes the
+    // loads it does not pair with (but a volatile one) and never takes one an earlier pair took (`stepped`).
     fn pair_next(self: &Self, i: u32) u32 {
         let b = self.b();
         let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
@@ -5298,7 +5354,12 @@ extend Gen {
                     self.vt(u.b)
                 };
                 let delta = (u.c as i32) as i64 - (t.c as i32) as i64;
-                if u.a != t.a || mkind(uy, load) != m || delta != size && delta != -size || (u.aux & MEM_VOLATILE) != 0 || self.lv.fold[j as usize] {
+                if u.a != t.a || mkind(uy, load) != m || delta != size && delta != -size || (u.aux & MEM_VOLATILE) != 0 || self.lv.fold[j as usize] || load && self.stepped.contains(
+                    &j,
+                ) {
+                    if load && (u.aux & MEM_VOLATILE) == 0 {
+                        continue;
+                    }
                     return NONE;
                 }
                 if load {
@@ -6161,7 +6222,7 @@ extend Gen {
 
     // Integer select `t`, instruction `i`, on condition `cc` as one conditional instruction from one side
     // (`csinc`, `csinv`, `csneg`): a folded side that is the other plus 1, negated or inverted
-    // (`lv::FOLD_CSEL`), or a side 1 or all ones, the other no constant (the zero register gives it).
+    // (`lv::FOLD_CSEL`), or a side 1 or all ones, the other no constant 0 (the zero register gives it).
     // Whether it did.
     fn cond_sel(self: &mut Self, i: u32, t: Inst, cc: u32) bool {
         let bits = type_bits(t.ty, self.ptr);
@@ -6212,8 +6273,9 @@ extend Gen {
         let mut kc: u64 = 0;
         let cb = self.const_of(t.b, &mut kb);
         let cc2 = self.const_of(t.c, &mut kc);
-        let ob = cb && !cc2 && ((kb & m) == 1 || (kb & m) == m);
-        let oc = cc2 && !cb && ((kc & m) == 1 || (kc & m) == m);
+        // The other side may be a constant too, but 0, which `csel` with the zero register or `cset` takes.
+        let ob = cb && !(cc2 && (kc & m) == 0) && ((kb & m) == 1 || (kb & m) == m);
+        let oc = cc2 && !(cb && (kb & m) == 0) && ((kc & m) == 1 || (kc & m) == m);
         if !ob && !oc {
             return false;
         }
@@ -8067,6 +8129,22 @@ extend Gen {
         } else {
             NONE
         };
+        // The side a register test takes when the register is 0, which that edge alone enters with no move,
+        // starts with it 0 (`zin`), also when it falls through: a constant 0 there needs no move.
+        if test.kind == T_CBZ || test.kind == T_CBNZ {
+            let (zt, zm) = if test.kind == T_CBZ {
+                (tt, mt)
+            } else {
+                (tf, mf)
+            };
+            if !zm && zt < b.blocks.len() as u32 && self.lv.npred[zt as usize] == 1 && b.blocks[zt as usize].param_len == 0 {
+                self.zin[zt as usize] = test.reg + 1 + if test.cc == 64 {
+                    256
+                } else {
+                    0
+                };
+            }
+        }
         if !mt && !mf {
             if tt == next {
                 self.cbranch(invert_test(test), tf);

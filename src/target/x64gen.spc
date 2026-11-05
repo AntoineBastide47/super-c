@@ -274,6 +274,10 @@ pub(package) struct Gen {
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
     csave: Vector<(u8, i64)>, // the scratch homes saved around a rare call (`save_scratch`)
     fused: u32, // the last instruction an earlier one did (`rmw`), NONE
+    // The value of a loop step's chain that holds its header parameter's register `chain_r` (`def_over`),
+    // NONE.
+    chain_x: u32,
+    chain_r: u8,
     cmp_at: u32, // the code byte the last compare starts at (`reflag`), NONE
     // The operands of the last plain compare and the code length up to which its flags hold (past only a
     // `setcc` and `movzx` of its value), NONE: a compare of the same values there sets nothing.
@@ -473,6 +477,8 @@ extend Gen {
             taken: Vector::<u64>::new(),
             csave: Vector::<(u8, i64)>::new(),
             fused: NONE,
+            chain_x: NONE,
+            chain_r: NOREG,
             cmp_at: NONE,
             held_a: VNONE,
             held_b: VNONE,
@@ -923,7 +929,7 @@ extend Gen {
         while j > v + 1 && self.rstore[j as usize - 1] != 0 {
             j -= 1;
             if b.insts[j as usize].b == v {
-                let pa = self.self_lay.parts[(self.self_lay.ret.p0 + self.rstore[j as usize] - 1) as usize];
+                let pa = self.self_lay.parts[(self.self_lay.ret.p0 + (self.rstore[j as usize] - 1 & ~place::SPAN)) as usize];
                 return pa.reg + if pa.v {
                     V0
                 } else {
@@ -1172,6 +1178,25 @@ extend Gen {
             let own = self.owner[ra as usize];
             let temp = own == NONE && (self.tmps & bit(ra)) != 0;
             let dies = own == xa && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
+            // A loop header parameter whose last read this is, which only the back edge writes on, and each
+            // value after it on the way to the one that edge passes (`step_chain`): `v` holds the register,
+            // which the parameter keeps (owner, home) for that value (`step_reg`), as a jump's parameter home.
+            let first = own == xa && !temp && !dies && self.step_chain(x, xa, ra);
+            let next = self.chain_x == xa && self.chain_r == ra && self.va[xa as usize].reg == ra && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
+            if first || next {
+                if next {
+                    self.va.index_mut(xa as usize).reg = NOREG;
+                    self.va.index_mut(xa as usize).dirty = false;
+                }
+                self.chain_x = x;
+                self.chain_r = ra;
+                self.lock |= bit(ra);
+                let w = self.va.index_mut(x as usize);
+                w.reg = ra;
+                w.dirty = true;
+                w.clean = false;
+                return ra;
+            }
             if temp || dies {
                 if dies {
                     // A register home (a caller-saved one, which `take_scratch` would evict a value from)
@@ -1188,6 +1213,45 @@ extend Gen {
             }
         }
         return self.def(v);
+    }
+
+    // Whether instruction `x`, which reads header parameter value index `xa` (its home `ra`) last in its block,
+    // starts a chain that ends in the value its block's back edge passes to `xa`: each value of the chain
+    // but that one has one use, the next one's first operand and only operand of it, no folded one, and the
+    // chain stays in the block (at most its length) with no call. Only that edge's write of `xa` is left (one
+    // use).
+    fn step_chain(self: &Self, x: u32, xa: u32, ra: u8) bool {
+        let b = self.b();
+        let ni = b.insts.len() as u32;
+        let va = self.va[xa as usize];
+        if xa < ni || va.home != H_FIXED || va.reg != ra || self.lv.uses[xa as usize] != 1 || self.lv.end[xa as usize] != self.pos {
+            return false;
+        }
+        let k = self.lv.def_blk[x as usize];
+        let bk = b.blocks[k as usize];
+        let last = bk.start + bk.len - 1;
+        let mut us = Vector::<Value>::with_capacity(4);
+        let mut cur = x;
+        for u in x + 1..last {
+            let t = b.insts[u as usize];
+            // A call between would write the register (a caller-saved one).
+            if self.calls(t) {
+                return false;
+            }
+            lv::each_use(b, t, &mut us);
+            let mut n: u32 = 0;
+            for q in 0..us.len() {
+                n += (us[q] == cur) as u32;
+            }
+            if n == 0 {
+                continue;
+            }
+            if n != 1 || t.a != cur || self.lv.uses[cur as usize] != 1 || self.lv.pfold[u as usize] {
+                return false;
+            }
+            cur = u;
+        }
+        return self.lv.back_param(b, b.insts[last as usize], cur, self.pos) == xa;
     }
 
     // The register `step_reg` or `fwd_reg` gives value `v`, which reads `a` before it writes, taken for
@@ -3300,6 +3364,39 @@ fn strip_dispatch(b: &mut Body, n: usize) {
         b.insts[at as usize] = Inst { op: O_JMP, ty: T_NONE, aux: 0, a: tm.c, b: 0, c: 0 };
         k = b.edge_target(tm.c);
     }
+    // The body's first block, which the entry's jump alone enters and which follows it in the instructions:
+    // one block with the entry (the jump a dead constant), so the parameters live in one block in the
+    // registers they arrive in; its own place holds a new `unreachable`.
+    let e = b.blocks[0];
+    let tj = b.insts[(e.start + e.len - 1) as usize];
+    if k == 0 || tj.op != O_JMP || b.edge_nargs(tj.a) != 0 || b.edge_target(tj.a) != k {
+        return;
+    }
+    let bk = b.blocks[k as usize];
+    if bk.param_len != 0 || bk.start != e.start + e.len {
+        return;
+    }
+    let mut es = Vector::<u32>::new();
+    for j in 0..b.blocks.len() {
+        let bj = b.blocks[j];
+        b.succ_edges(b.insts[(bj.start + bj.len - 1) as usize], &mut es);
+        for q in 0..es.len() {
+            if b.edge_target(es[q]) == k && j != 0 {
+                return;
+            }
+        }
+    }
+    b.insts[(e.start + e.len - 1) as usize] = Inst { op: O_ICONST, ty: T_I8, aux: 0, a: 0, b: 0, c: 0 };
+    b.blocks.index_mut(0).len = e.len + bk.len;
+    b.blocks.index_mut(0).flags = bk.flags;
+    let u = b.insts.len() as u32;
+    b.insts.push(Inst { op: O_UNREACHABLE, ty: T_NONE, aux: 0, a: VNONE, b: VNONE, c: VNONE });
+    b.locs.push(b.locs[(e.start + e.len - 1) as usize]);
+    if b.inl.len() != 0 {
+        b.inl.push(b.inl[(e.start + e.len - 1) as usize]);
+    }
+    b.blocks.index_mut(k as usize).start = u;
+    b.blocks.index_mut(k as usize).len = 1;
 }
 
 extend Gen {
@@ -3409,7 +3506,7 @@ extend Gen {
         let b = self.b();
         self.lv.fold_max = 8;
         self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_XBFX_EXT | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
-            lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE
+            lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE | lv::FOLD_VLDOP
         } else {
             0
         };
@@ -3945,7 +4042,13 @@ extend Gen {
         }
         for q in mark..self.taken.len() {
             let i = self.taken[q] as u32;
-            let pa = self.self_lay.parts[(loc.p0 + (self.taken[q] >> 32) as u32) as usize];
+            let part = (self.taken[q] >> 32) as u32;
+            let pa = self.self_lay.parts[(loc.p0 + (part & ~place::SPAN)) as usize];
+            if (part & place::SPAN) != 0 {
+                // Two 8-byte vector parts as one vector in the first's register (`punpcklqdq`).
+                let p1 = self.self_lay.parts[(loc.p0 + (part & ~place::SPAN) + 1) as usize];
+                self.c.sse_rr(0x66, 0x0F6C, pa.reg, p1.reg);
+            }
             self.entry_reg(
                 i,
                 pa.reg + if pa.v {
@@ -4062,6 +4165,7 @@ extend Gen {
             w.dirty = false;
             self.split_at += 1;
         }
+        self.chain_x = NONE;
         let k = self.lv.order[q as usize];
         let b = self.b();
         self.blk_at[k as usize] = self.c.len();
@@ -4868,6 +4972,18 @@ extend Gen {
                 self.c.rm(fpfx(d), fop(op), false, rd - V0, m, false);
                 self.mem_rel(rs, add);
                 return true;
+            }
+            // A constant second operand in no register: read from its read-only data (`fconst`), no load first.
+            if (t.b & (VPARAM | VFLAG)) == 0 && self.b().insts[t.b as usize].op == O_FCONST && self.va[t.b as usize].reg == NOREG {
+                let c = self.b().insts[t.b as usize];
+                let bits = c.b as u64 << 32 | c.a as u64;
+                if bits != 0 {
+                    let rd = self.def_from(i, t.a, ra);
+                    let k = self.const_sym([bits]);
+                    self.c.rm(fpfx(d), fop(op), false, rd - V0, x::rip(), false);
+                    self.reloc_rip(x::R_PC32, k, 0);
+                    return true;
+                }
             }
             let rb = self.reg(t.b);
             let rd = self.def_from(i, t.a, ra);
@@ -7009,13 +7125,18 @@ extend Gen {
         }
     }
 
-    // The result part store `t` writes whole through the result's address `pv`, else NONE.
+    // The result part store `t` writes whole through the result's address `pv` (two for a 16-byte vector
+    // of two 8-byte vector parts: `place::span_part`), else NONE.
     fn part_store(self: &Self, t: Inst, pv: Value) u32 {
         if t.op != O_STORE || t.a != pv || t.b == pv || (t.aux & MEM_VOLATILE) != 0 {
             return NONE;
         }
         let ty = self.vt(t.b);
         let rl = self.self_lay.ret;
+        let sp = place::span_part(&self.self_lay, self.ptr, rl, ty, t.c);
+        if sp != NONE {
+            return sp;
+        }
         for q in 0..rl.n as u32 {
             let pa = self.self_lay.parts[(rl.p0 + q) as usize];
             if pa.off == t.c && pa.size as u32 == type_bytes(ty, self.ptr) && pa.v == is_v(ty) && !in_mem(ty) {
@@ -7039,7 +7160,38 @@ extend Gen {
         let mut j = end;
         while j > i {
             j -= 1;
-            let q = self.rstore[j as usize] - 1;
+            let sq = self.rstore[j as usize] - 1;
+            let q = sq & ~place::SPAN;
+            let v = b.insts[j as usize].b;
+            // A vector over two parts: its high half into a vector temporary for the second (`pshufd`).
+            if (sq & place::SPAN) != 0 && (seen >> q + 1 & 1) == 0 {
+                seen |= 1u32 << q + 1;
+                let p1 = self.self_lay.parts[(rl.p0 + q + 1) as usize];
+                let rv = self.reg(v);
+                // Into the part's register itself when nothing holds it.
+                let pr = p1.reg + V0;
+                let free = ((self.held | self.lock | self.tmps | self.fixed_busy | move_regs(&self.mv)) & bit(pr)) == 0;
+                let th = if free {
+                    pr
+                } else {
+                    self.tmp(true)
+                };
+                self.c.sse_rr(0x66, 0x0F70, th - V0, rv - V0);
+                self.c.byte(0xEE);
+                if free {
+                    self.lock |= bit(pr);
+                } else {
+                    self.mv.push(
+                        Mv {
+                            src: Lc { kind: LC_REG, reg: th, off: 0, val: NONE },
+                            dst: Lc { kind: LC_REG, reg: pr, off: 0, val: NONE },
+                            v: true,
+                            bytes: 8,
+                            done: false,
+                        },
+                    );
+                }
+            }
             if (seen >> q & 1) != 0 {
                 continue;
             }
@@ -7050,7 +7202,6 @@ extend Gen {
             } else {
                 0
             };
-            let v = b.insts[j as usize].b;
             let src = self.loc_of(self.vx(v));
             if src.kind == LC_VAL {
                 vals.push(r as u64 << 32 | v as u64);
@@ -10955,8 +11106,8 @@ extend Gen {
         let pfx = w >> 16;
         let mm = w >> 8 & 0xFF;
         let opc = w & 0xFF;
-        let rx = self.vec_use(xv, self.vs0) - V0;
         if yv == VNONE {
+            let rx = self.vec_use(xv, self.vs0) - V0;
             let rd = self.vec_def(i) - V0;
             let s = self.vs1 - V0;
             if op == O_NEG {
@@ -10980,17 +11131,41 @@ extend Gen {
             }
             return;
         }
-        let ry = self.vec_use(yv, self.vs1) - V0;
-        // A loop's accumulator: the result takes the back edge's parameter register (three operands: it
-        // may be either source's).
+        self.vex_op(pfx, mm, opc, true, i, xv, yv);
+    }
+
+    // VEX lane operation `i` (`pfx`, `mm`, `opc`; `l`: 32 bytes) of `xv` and `yv` into a register: `yv` read in
+    // memory when it is a folded load (`lv::FOLD_VLDOP`). A loop's accumulator takes the back edge's parameter
+    // register (three operands: it may be either source's), else the result goes over an operand's register
+    // that dies here.
+    fn vex_op(self: &mut Self, pfx: u32, mm: u32, opc: u32, l: bool, i: u32, xv: Value, yv: Value) {
+        let rx = self.vec_use(xv, self.vs0);
+        if self.ld_folded(yv) {
+            let lt = self.b().insts[yv as usize];
+            let mut rs: u32 = NONE;
+            let mut radd: i64 = 0;
+            let m = self.mem_at(lt.a, lt.c as i32, &mut rs, &mut radd);
+            let mut r = self.def_shared(i, xv);
+            if r == NOREG {
+                r = self.def_over(i, xv, rx);
+            }
+            self.c.vex_rm(pfx, mm, opc, false, l, r - V0, rx - V0, m);
+            self.mem_rel(rs, radd);
+            return;
+        }
+        let ry = self.vec_use(yv, self.vs1);
         let mut r = self.def_shared(i, xv);
         if r == NOREG {
             r = self.def_shared(i, yv);
         }
         if r == NOREG {
-            r = self.vec_def(i);
+            r = if !self.dies_here(xv) && self.dies_here(yv) {
+                self.def_over(i, yv, ry)
+            } else {
+                self.def_over(i, xv, rx)
+            };
         }
-        self.c.vex_rr(pfx, mm, opc, false, true, r - V0, rx, ry);
+        self.c.vex_rr(pfx, mm, opc, false, l, r - V0, rx - V0, ry - V0);
     }
 
     // AVX-512 operation `w` (`evex_of_op`) of 64-byte vectors `xv` and `yv` (VNONE for one operand: `neg`
@@ -11138,6 +11313,12 @@ extend Gen {
             let rd = self.vec_def(i);
             self.c.sse_rr(0x66, 0x0FEF, rd - V0, rd - V0);
             self.c.sse_rr(pfx, opc, rd - V0, rb - V0);
+            return;
+        }
+        // With AVX the VEX form's three operands (`vaddps rd, rx, ry`, the first operand first, as the two-operand
+        // form): no copy of the first operand, the result over either operand's register when it dies here.
+        if self.avx && yv != VNONE && op != O_NOT && op != O_FNEG {
+            self.vex_op(pfx, 1, opc & 0xFF, false, i, xv, yv);
             return;
         }
         let rx = self.vec_use(xv, self.vs0);

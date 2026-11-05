@@ -469,11 +469,31 @@ pub(package) fn relay_parts<G: Relays + Mover>(g: &mut G, i: u32, v: Value, loc:
     return any;
 }
 
+/// `parts_taken`'s mark of a 16-byte vector load of two 8-byte vector register parts, the first's number below.
+pub(package) const SPAN: u32 = 0x80000000;
+
+/// The 16-byte vector access `t` (pointers `ptr` bytes) spans, whole, vector register parts `q` and `q + 1` of
+/// 8 bytes each of location `loc` of call layout `lay` (System V's two eightbytes of floats): `q | SPAN`, else
+/// NONE.
+pub(package) fn span_part(lay: &ab::CallLayout, ptr: u32, loc: ab::ALoc, ty: u8, off: u32) u32 {
+    if !is_vec(ty) || type_bytes(ty, ptr) != 16 {
+        return NONE;
+    }
+    for q in 0..(loc.n as u32).max(1) - 1 {
+        let p0 = lay.parts[(loc.p0 + q) as usize];
+        let p1 = lay.parts[(loc.p0 + q + 1) as usize];
+        if p0.v && p1.v && p0.size == 8 && p1.size == 8 && p0.off == off && p1.off == off + 8 {
+            return q | SPAN;
+        }
+    }
+    return NONE;
+}
+
 /// Whether every use of parameter value index `x` of `b` (an aggregate the body takes in registers, `loc`
 /// of its own layout `lay`, pointers `ptr` bytes) is a load in the entry block, before any instruction
-/// that `clobbers` registers, of one whole part of 4 bytes or more, no two of the same part: then each
-/// load takes its part's register, appended to `taken` (part << 32 | load); else `taken` stays as it was.
-/// `uses` is scratch.
+/// that `clobbers` registers, of one whole part of 4 bytes or more, or a 16-byte vector of two 8-byte vector
+/// parts (`span_part`), no two of the same part: then each load takes its part's register, appended to
+/// `taken` (part << 32 | load); else `taken` stays as it was. `uses` is scratch.
 pub(package) fn parts_taken(
     b: &Body,
     lv: &lv::Live,
@@ -503,19 +523,27 @@ pub(package) fn parts_taken(
             }
             continue;
         }
-        if t.op != O_LOAD || reads != 1 || (t.aux & MEM_VOLATILE) != 0 || lv.fold[i as usize] || is_vec(t.ty) || t.ty == T_I128 {
+        if t.op != O_LOAD || reads != 1 || (t.aux & MEM_VOLATILE) != 0 || lv.fold[i as usize] || t.ty == T_I128 {
             taken.truncate(mark);
             return false;
         }
-        let mut part = NONE;
+        let mut part = span_part(lay, ptr, loc, t.ty, t.c);
         for q in 0..loc.n as u32 {
             let pa = lay.parts[(loc.p0 + q) as usize];
-            if pa.off == t.c && pa.size as u32 == type_bytes(t.ty, ptr) && pa.v == is_v(t.ty) && type_bytes(t.ty, ptr) >= 4 {
+            if pa.off == t.c && pa.size as u32 == type_bytes(t.ty, ptr) && pa.v == is_v(t.ty) && type_bytes(t.ty, ptr) >= 4 && !is_vec(
+                t.ty,
+            ) {
                 part = q;
             }
         }
+        // The parts a load takes: one, or two for a span.
+        let lo = part & ~SPAN;
+        let hi = lo + ((part & SPAN) != 0) as u32;
         for q in mark..taken.len() {
-            if taken[q] >> 32 == part as u64 {
+            let o = (taken[q] >> 32) as u32;
+            let olo = o & ~SPAN;
+            let ohi = olo + ((o & SPAN) != 0) as u32;
+            if part != NONE && olo <= hi && lo <= ohi {
                 part = NONE;
             }
         }

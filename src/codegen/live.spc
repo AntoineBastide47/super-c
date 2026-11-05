@@ -150,6 +150,10 @@ pub(package) const FOLD_LANE0: u64 = 17592186044416;
 /// `FOLD_XBFX_EXT`: `FOLD_XBFX` for a field of 8 or 16 bits (32 of a 64-bit value) alone, which a right
 /// shift and an extension of its low bits extract (x86-64 `shr`, `movsx`/`movzx`).
 pub(package) const FOLD_XBFX_EXT: u64 = 35184372088832;
+/// `FOLD_VLDOP`: `FOLD_LDOP` for a load of a 16- or 32-byte vector, the second operand of a lane `fadd`,
+/// `fsub`, `fmul`, `fdiv`, `add`, `sub`, `and`, `or` or `xor` of its type (x86-64's VEX forms, which read
+/// memory of any alignment: `vaddps x, x, [m]`).
+pub(package) const FOLD_VLDOP: u64 = 70368744177664;
 /// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
 /// flags keep, a folded sum or extension, the sum with the carry.
 pub(package) const CARRY_NONE: u8 = 0;
@@ -1556,6 +1560,9 @@ extend Live {
     /// whose operation's result is stored back in place (the generator's read-modify-write).
     fn ldop_user(self: &Self, b: &Body, i: u32, end: u32) bool {
         let t = b.insts[i as usize];
+        if (self.fold_ops & FOLD_VLDOP) != 0 && t.op == O_LOAD && is_vec(t.ty) {
+            return self.vldop_user(b, i, end);
+        }
         if t.op != O_LOAD || (t.aux & MEM_VOLATILE) != 0 || !(is_int(t.ty) || is_float(t.ty)) || t.ty == T_I128 || self.count[i as usize] != 1 || self.pfold[i as usize] || agg_param(
             b,
             t.a,
@@ -1616,6 +1623,36 @@ extend Live {
             if writes_mem(y) {
                 return false;
             }
+        }
+        return false;
+    }
+
+    /// `FOLD_VLDOP`: whether vector load `i` of `b` (its block ending before `end`) folds into its one use,
+    /// as `ldop_user`.
+    fn vldop_user(self: &Self, b: &Body, i: u32, end: u32) bool {
+        let t = b.insts[i as usize];
+        let n = type_bytes(t.ty, 8);
+        if (t.aux & MEM_VOLATILE) != 0 || n != 16 && n != 32 || self.count[i as usize] != 1 || self.pfold[i as usize] || agg_param(
+            b,
+            t.a,
+        ) || result_load(b, i) {
+            return false;
+        }
+        let mut u = i + 1;
+        // At most LDOP_REACH steps.
+        while u < end && u <= i + LDOP_REACH {
+            let x = b.insts[u as usize];
+            if x.a == i || x.b == i || x.c == i {
+                let fl = x.op >= O_FADD && x.op <= O_FDIV && is_float(lane_type(t.ty));
+                let int = (x.op == O_ADD || x.op == O_SUB || x.op == O_AND || x.op == O_OR || x.op == O_XOR) && !is_float(
+                    lane_type(t.ty),
+                );
+                return (fl || int) && x.ty == t.ty && x.b == i && x.a != i && !self.pfold[u as usize] && !(is_inst(x.a) && self.pfold[x.a as usize]);
+            }
+            if writes_mem(x) {
+                return false;
+            }
+            u += 1;
         }
         return false;
     }

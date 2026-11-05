@@ -2847,6 +2847,16 @@ b2:
         holds(&wo, chk[0..2]) && holds(&wo, kept[0..3]) && !holds(&wo, spill[0..3]) && !holds(&wo, spsp[0..4]),
         "the vector body",
     );
+    // System V: the body without the check is one block with its entry (`strip_dispatch`), so the arguments
+    // stay where they arrive: `addps xmm0, xmm1` (0F 58 C1), no `movaps` copy (0F 28, a register ModRM).
+    let mut lo = Vector::<u8>::new();
+    assert(object_of(vec, tgt::axis_index("linux", false), x64, 0, &mut lo), "the System V object");
+    let add01: [u8; 3] = [0x0F, 0x58, 0xC1];
+    let mut copies = false;
+    for at in 0..lo.len() - 2 {
+        copies = copies || lo[at] == 0x0F && lo[at + 1] == 0x28 && lo[at + 2] >= 0xC0;
+    }
+    assert(holds(&lo, add01[0..3]) && !copies, "the System V vector body");
     let drv = M"(#include <stdint.h>
 extern unsigned char __sc_simd_lv;
 int64_t pick(int64_t, int64_t);
@@ -6397,6 +6407,243 @@ fn reg_copies(bytes: &Vector<u8>) bool {
         }
     }
     return false;
+}
+
+// A 16-byte vector of a System V aggregate passed in two 8-byte xmm halves is one `punpcklqdq` of them (66 0F
+// 6C), and one stored to a result of two such halves gives the high one by `pshufd` (66 0F 70): no copy
+// through the stack (`movdqu`, F3 0F 6F or 7F). It gives the C results.
+@test
+fn vectors_over_two_register_halves_stay_in_registers() {
+    let lir = M"(lir ptr 8
+sym @v4add fn global
+fn @v4add
+  layout l0 size 16 align 2 [0 f32, 4 f32, 8 f32, 12 f32]
+  sig (l0, l0) -> l0
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v4f32 v0 align 2
+  v4 = load.v4f32 v1 align 2
+  v5 = fadd.v4f32 v3, v4
+  store v5, v2 align 2
+  ret
+)";
+    let drv = "typedef struct { float x, y, z, w; } V4;\nV4 v4add(V4, V4);\nint main(void) {\n  V4 a = {1, 2, 3, 4}, b = {10, 20, 30, 40};\n  V4 r = v4add(a, b);\n  return !(r.x == 11 && r.y == 22 && r.z == 33 && r.w == 44);\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    let unpck: [u8; 3] = [0x66, 0x0F, 0x6C];
+    let shuf: [u8; 3] = [0x66, 0x0F, 0x70];
+    let ld: [u8; 3] = [0xF3, 0x0F, 0x6F];
+    let st: [u8; 3] = [0xF3, 0x0F, 0x7F];
+    assert(
+        holds(&obj, unpck[0..3]) && holds(&obj, shuf[0..3]) && !holds(&obj, ld[0..3]) && !holds(&obj, st[0..3]),
+        "the halves",
+    );
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// arm64: the side of a `cbnz` taken when the register is 0, which that branch alone enters, starts with it 0
+// (`zin`): its `return 0` moves nothing (no `mov w0, #0`, 52800000). A parameter whose range holds no
+// instruction that writes an argument register keeps the register it arrives in (`quiet_arg`): `@half`'s
+// `n` stays in x0 across its blocks (no `mov xN, x0`). x86-64 reads a float constant operand from its data
+// (`mulsd xmm0, [rip + d]`: F2 0F 59 05). They give the C results.
+@test
+fn zero_sides_argument_homes_and_constant_operands() {
+    let lir = M"(lir ptr 8
+sym @deref fn global
+sym @half fn global
+sym @scale fn global
+fn @deref
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = iconst.ptr 0
+  v2 = icmp.ne v0, v1
+  br v2, b1, b2
+b1:
+  v3 = load.i32 v0 align 2
+  ret v3
+b2:
+  v4 = iconst.i32 0
+  ret v4
+fn @half
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 1
+  v3 = icmp.eq v0, v1
+  br v3, b2, b1
+b1:
+  v4 = sub.i32 v0, v2
+  v5 = call.i32 @half(v4) : (i32) -> i32
+  v6 = add.i32 v5, v2
+  ret v6
+b2:
+  ret v2
+fn @scale
+  sig (f64) -> f64
+b0(v0: f64):
+  v1 = fconst.f64 0x4004000000000000
+  v2 = fmul.f64 v0, v1
+  ret v2
+)";
+    let drv = "#include <stdint.h>\nint32_t deref(const int32_t *);\nint32_t half(int32_t);\ndouble scale(double);\nint main(void) {\n  int32_t x = 7;\n  if (deref(&x) != 7 || deref(0) != 0) return 1;\n  if (half(0) != 1 || half(9) != 10) return 2;\n  if (scale(2.0) != 5.0) return 3;\n  return 0;\n}\n";
+    let mut a64 = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut a64), "the object");
+    assert_eq(elf_text_count(&a64, 0xFFFFFFFF, 0x52800000), 0);
+    assert_eq(elf_text_count(&a64, 0xFFFFFFE0, 0xAA0003E0), 0);
+    let mut x64 = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut x64), "the object");
+    let mulk: [u8; 4] = [0xF2, 0x0F, 0x59, 0x05];
+    assert(holds(&x64, mulk[0..4]), "a constant operand");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// x86-64 with AVX: a lane operation is the VEX form of three operands, no copy of its first operand (no
+// `movaps`, 0F 28 with a register ModRM), and a vector load its one use reads second folds into it
+// (`lv::FOLD_VLDOP`): `vaddps x, x, [m]` (C5, 58, a memory ModRM), 16 and 32 bytes.
+@test
+fn avx_lane_operations_take_three_operands_and_read_memory() {
+    let lir = M"(lir ptr 8
+sym @mix fn global
+sym @mix8 fn global
+fn @mix
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4f32 v0 align 2
+  v3 = load.v4f32 v1 align 2
+  v4 = fadd.v4f32 v2, v3
+  v5 = fmul.v4f32 v4, v2
+  store v5, v0 align 2
+  ret
+fn @mix8
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8f32 v0 align 2
+  v3 = load.v8f32 v1 align 2
+  v4 = fadd.v8f32 v2, v3
+  v5 = fmul.v8f32 v4, v2
+  store v5, v0 align 2
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), WIDE, &mut obj),
+        "the object",
+    );
+    // A VEX prefix of map 0F (C5, or C4 with map 1): its L bit, opcode and ModRM's mod; 58 (vaddps) with a
+    // memory operand, 59 (vmulps) with a register one.
+    let mut mem = [0u32; 2];
+    let mut mul = 0u32;
+    let mut copies = false;
+    for at in 0..obj.len() - 4 {
+        let c4 = obj[at] == 0xC4 && (obj[at + 1] & 0x1F) == 1;
+        if obj[at] == 0xC5 || c4 {
+            let k = at + 1 + c4 as usize;
+            if obj[k + 1] == 0x58 && obj[k + 2] >> 6 != 3 {
+                mem[(obj[k] >> 2 & 1) as usize] += 1;
+            }
+            if obj[k + 1] == 0x59 && obj[k + 2] >> 6 == 3 {
+                mul += 1;
+            }
+        }
+        copies = copies || obj[at] == 0x0F && obj[at + 1] == 0x28 && obj[at + 2] >= 0xC0;
+    }
+    assert(mem[0] == 1 && mem[1] == 1 && mul == 2 && !copies, "the VEX forms");
+}
+
+// x86-64: a loop's chain of sums from its accumulator to the value the back edge passes it stays in the
+// accumulator's register (`x64gen::step_chain`): every `addss` (F3, maybe a REX, 0F 58) writes one register,
+// and at most one register `movaps` (0F 28, the result into xmm0) is left. It gives the C sum.
+@test
+fn a_loops_chain_of_sums_stays_in_its_accumulators_register() {
+    let lir = M"(lir ptr 8
+sym @sum2 fn global
+fn @sum2
+  sig (ptr, i64) -> f32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = fconst.f32 0x0
+  v4 = iconst.i64 2
+  jmp b1(v2, v3)
+b1(v5: i64, v6: f32):
+  v7 = ptradd v0, v5 * 4
+  v8 = load.f32 v7 align 2
+  v9 = load.f32 v7+4 align 2
+  v10 = fadd.f32 v6, v8
+  v11 = fadd.f32 v10, v9
+  v12 = add.i64 v5, v4
+  v13 = icmp.ult v12, v1
+  br v13, b1(v12, v11), b2
+b2:
+  ret v11
+)";
+    let drv = "float sum2(const float *, long);\nint main(void) {\n  float a[6] = {1, 2, 3, 4, 5, 6};\n  return sum2(a, 6) != 21.0f;\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    let mut dst = Vector::<u32>::new();
+    let mut copies = 0u32;
+    for at in 0..obj.len() - 4 {
+        let rex = (obj[at + 1] & 0xF0) == 0x40;
+        let k = at + 1 + rex as usize;
+        if obj[at] == 0xF3 && obj[k] == 0x0F && obj[k + 1] == 0x58 {
+            let r = if rex {
+                (obj[at + 1] >> 2 & 1) as u32
+            } else {
+                0
+            };
+            dst.push(r << 3 | (obj[k + 2] >> 3 & 7) as u32);
+        }
+        copies += (obj[at] == 0x0F && obj[at + 1] == 0x28 && obj[at + 2] >= 0xC0) as u32;
+    }
+    assert(dst.len() == 2 && dst[0] == dst[1] && copies <= 1, "the chain");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// arm64: a load pairs with a later load of the bytes beside it through the same address when nothing between
+// writes memory (`a64gen::load_partner`): four 4-byte loads in any order are two `ldp` (29400000, mask
+// FFC00000) and no `ldr` (B9400000). A select of two constants, one of them 1, is the other's `mov` and
+// `csinc` against the zero register (1A9F0400, mask FFFF0C00): one `movz` (52800000, mask FF800000). They
+// give the C results.
+@test
+fn later_loads_pair_and_constant_selects_take_csinc() {
+    let lir = M"(lir ptr 8
+sym @sum4 fn global
+sym @pick fn global
+fn @sum4
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0+12 align 2
+  v2 = load.i32 v0 align 2
+  v3 = add.i32 v1, v2
+  v4 = load.i32 v0+4 align 2
+  v5 = add.i32 v3, v4
+  v6 = load.i32 v0+8 align 2
+  v7 = add.i32 v5, v6
+  ret v7
+fn @pick
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.ne v0, v1
+  v3 = iconst.i32 9
+  v4 = iconst.i32 1
+  v5 = select.i32 v2, v3, v4
+  ret v5
+)";
+    let drv = "#include <stdint.h>\nint32_t sum4(const int32_t *);\nint32_t pick(int32_t);\nint main(void) {\n  int32_t a[4] = {1, 2, 3, 4};\n  return !(sum4(a) == 10 && pick(5) == 9 && pick(0) == 1);\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj), "the object");
+    assert_eq(elf_text_count(&obj, 0xFFC00000, 0x29400000), 2);
+    assert_eq(elf_text_count(&obj, 0xFFC00000, 0xB9400000), 0);
+    assert_eq(elf_text_count(&obj, 0xFFFF0C00, 0x1A9F0400), 1);
+    assert_eq(elf_text_count(&obj, 0xFF800000, 0x52800000), 1);
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
 }
 
 // An atomic's result takes the register of an operand that dies there: x86-64 `lock xadd` returns the old

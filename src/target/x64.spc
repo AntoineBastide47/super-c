@@ -1139,6 +1139,32 @@ extend Code {
         self.modrm_rr(dst, src2);
     }
 
+    /// `vex_rr` with its second source at `m` (no alignment needed).
+    pub(package) fn vex_rm(self: &mut Self, pfx: u32, mm: u32, op: u32, w: bool, l: bool, dst: u8, src1: u8, m: Mem) {
+        let r = (~(dst as u32) >> 3 & 1) << 7;
+        let x = if m.index != NOREG {
+            (~(m.index as u32) >> 3 & 1) << 6
+        } else {
+            1u32 << 6
+        };
+        let b = if m.base != RIP && m.base != NOREG {
+            (~(m.base as u32) >> 3 & 1) << 5
+        } else {
+            1u32 << 5
+        };
+        let tail = (~(src1 as u32) & 15) << 3 | l as u32 << 2 | pp_of(pfx);
+        if mm == 1 && !w && x != 0 && b != 0 {
+            self.byte(0xC5);
+            self.byte(r | tail);
+        } else {
+            self.byte(0xC4);
+            self.byte(r | x | b | mm);
+            self.byte(w as u32 << 7 | tail);
+        }
+        self.byte(op);
+        self.modrm_m(dst, m);
+    }
+
     /// An EVEX.512 instruction on registers, as `vex_rr` on zmm registers (or a mask or general register
     /// where the opcode takes one), all below 16, unmasked; EVEX.W `w`.
     pub(package) fn evex_rr(self: &mut Self, pfx: u32, mm: u32, op: u32, w: bool, dst: u8, src1: u8, src2: u8) {
