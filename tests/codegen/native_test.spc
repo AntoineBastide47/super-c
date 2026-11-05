@@ -6646,6 +6646,279 @@ b0(v0: i32):
     }
 }
 
+// A second loop's parameters share the registers of the values its one entry passes, also when those
+// continue the first loop's parameters (`Live::entry_partner` through `Live::root`): a 128-bit sum of
+// products over an unrolled loop and its remainder loop keeps every value in a register on x86-64 without
+// a frame pointer, no frame below the saved registers (no `sub rsp`: 48 83 EC or 48 81 EC). It gives the C
+// sum.
+@test
+fn a_remainder_loop_takes_its_entrys_registers() {
+    let lir = M"(lir ptr 8
+sym @mac fn global
+fn @mac
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  layout l1 size 16 align 3 [0 i64, 8 i64]
+  sig (l0, i64) -> l1
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = load.i64 v0+8 align 3
+  v4 = load.ptr v0 align 3
+  v5 = iconst.i64 4
+  v6 = iconst.i64 0
+  v7 = iconst.i64 1
+  v8 = iconst.i64 -4
+  v9 = and.i64 v3, v8
+  v10 = icmp.ne v9, v6
+  br v10, b3(v6, v6, v6), b1(v6, v6, v6)
+b1(v11: i64, v12: i64, v13: i64):
+  v14 = icmp.ult v11, v3
+  br v14, b2(v11, v12, v13), b4(v12, v13)
+b2(v15: i64, v16: i64, v17: i64):
+  v18 = ptradd v4, v15 * 8
+  v19 = load.i64 v18 align 3
+  v20 = mul.i64 v19, v1
+  v21 = mulhu.i64 v19, v1
+  v22, v23 = addo.u.i64 v16, v20
+  v24, v25 = addo.u.i64 v17, v21
+  v26 = zext.i64 v23
+  v27, v28 = addo.u.i64 v24, v26
+  v29 = add.i64 v15, v7
+  v30 = icmp.ult v29, v3
+  br v30, b2(v29, v22, v27), b4(v22, v27)
+b3(v31: i64, v32: i64, v33: i64):
+  v34 = ptradd v4, v31 * 8
+  v35 = load.i64 v34 align 3
+  v36 = mul.i64 v35, v1
+  v37 = mulhu.i64 v35, v1
+  v38, v39 = addo.u.i64 v32, v36
+  v40, v41 = addo.u.i64 v33, v37
+  v42 = zext.i64 v39
+  v43, v44 = addo.u.i64 v40, v42
+  v45 = load.i64 v34+8 align 3
+  v46 = mul.i64 v45, v1
+  v47 = mulhu.i64 v45, v1
+  v48, v49 = addo.u.i64 v38, v46
+  v50, v51 = addo.u.i64 v43, v47
+  v52 = zext.i64 v49
+  v53, v54 = addo.u.i64 v50, v52
+  v55 = load.i64 v34+16 align 3
+  v56 = mul.i64 v55, v1
+  v57 = mulhu.i64 v55, v1
+  v58, v59 = addo.u.i64 v48, v56
+  v60, v61 = addo.u.i64 v53, v57
+  v62 = zext.i64 v59
+  v63, v64 = addo.u.i64 v60, v62
+  v65 = load.i64 v34+24 align 3
+  v66 = mul.i64 v65, v1
+  v67 = mulhu.i64 v65, v1
+  v68, v69 = addo.u.i64 v58, v66
+  v70, v71 = addo.u.i64 v63, v67
+  v72 = zext.i64 v69
+  v73, v74 = addo.u.i64 v70, v72
+  v75 = add.i64 v31, v5
+  v76 = icmp.ne v75, v9
+  br v76, b3(v75, v68, v73), b1(v75, v68, v73)
+b4(v77: i64, v78: i64):
+  store v77, v2 align 3
+  store v78, v2+8 align 3
+  ret
+)";
+    let drv = "#include <stdint.h>\ntypedef struct { const uint64_t *p; int64_t n; } S;\ntypedef struct { uint64_t lo, hi; } R;\nR mac(S, uint64_t);\nint main(void) {\n  uint64_t s[7] = {~0ull, 2, ~0ull, 4, 5, ~0ull, 7};\n  unsigned __int128 t = 0;\n  for (int i = 0; i < 7; i++) t += (unsigned __int128)s[i] * 0x123456789abcdefull;\n  R r = mac((S){s, 7}, 0x123456789abcdefull);\n  return !(r.lo == (uint64_t)t && r.hi == (uint64_t)(t >> 64));\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), OMIT_FP, &mut obj),
+        "the object",
+    );
+    let s8: [u8; 3] = [0x48, 0x83, 0xEC];
+    let s32: [u8; 3] = [0x48, 0x81, 0xEC];
+    assert(!holds(&obj, s8[0..3]) && !holds(&obj, s32[0..3]), "no frame below the saved registers");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// arm64: a select side that is another value plus 1, negated or inverted folds into the select
+// (`lv::FOLD_CSEL`): `csinc` from that value (9A800400, mask FFE00C00), no `add` (91000000, mask
+// FF800000), and `csneg` (DA800400) for a negation. They give the C results.
+@test
+fn a_select_side_stepped_from_any_value_is_one_conditional_step() {
+    let lir = M"(lir ptr 8
+sym @up fn global
+sym @flip fn global
+fn @up
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = icmp.ult v0, v1
+  v4 = iconst.i64 1
+  v5 = add.i64 v2, v4
+  v6 = select.i64 v3, v5, v0
+  ret v6
+fn @flip
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = icmp.slt v0, v1
+  v4 = neg.i64 v2
+  v5 = select.i64 v3, v1, v4
+  ret v5
+)";
+    let drv = "#include <stdint.h>\nint64_t up(int64_t, int64_t, int64_t);\nint64_t flip(int64_t, int64_t, int64_t);\nint main(void) {\n  return !(up(1, 2, 5) == 6 && up(3, 2, 5) == 3 && flip(1, 2, 7) == 2 && flip(3, 2, 7) == -7);\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), OMIT_FP, &mut obj),
+        "the object",
+    );
+    assert_eq(elf_text_count(&obj, 0xFFE00C00, 0x9A800400), 1);
+    assert_eq(elf_text_count(&obj, 0xFFE00C00, 0xDA800400), 1);
+    assert_eq(elf_text_count(&obj, 0xFF800000, 0x91000000), 0);
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// Two selects on one boolean in a block test it once when nothing between writes the flags: one arm64
+// `tst wN, #0xff` (ANDS WZR, 7200001F with Rn, mask FFFFFC1F) and one x86-64 `test r8, 0xff` (F6 /0 FF).
+// They give the C results.
+@test
+fn selects_on_one_boolean_test_it_once() {
+    let lir = M"(lir ptr 8
+sym @two fn global
+fn @two
+  sig (i8, i32, i32) -> i32
+b0(v0: i8, v1: i32, v2: i32):
+  v3 = iconst.i32 7
+  v4 = select.i32 v0, v1, v3
+  v5 = iconst.i32 9
+  v6 = select.i32 v0, v2, v5
+  v7 = add.i32 v4, v6
+  ret v7
+)";
+    let drv = "#include <stdint.h>\nint32_t two(_Bool, int32_t, int32_t);\nint main(void) {\n  return !(two(1, 3, 4) == 7 && two(0, 3, 4) == 16);\n}\n";
+    let mut a64 = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut a64), "the object");
+    assert_eq(elf_text_count(&a64, 0xFFFFFC1F, 0x72001C1F), 1);
+    let mut x64 = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut x64), "the object");
+    let mut tests = 0u32;
+    for at in 0..x64.len() - 2 {
+        tests += (x64[at] == 0xF6 && (x64[at + 1] & 0xF8) == 0xC0 && x64[at + 2] == 0xFF) as u32;
+    }
+    assert_eq(tests, 1);
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// x86-64: `fabs`, `fabsf`, `round` and `roundf` read their masks from the body's constants, in any
+// registers: `andpd`/`andps` with a rip-relative mask for the magnitudes, `orpd`/`orps` with the half below
+// 0.5 for the roundings, no mask built in a register (`pcmpeqd`). They give the C library's results.
+@test
+fn float_magnitudes_and_roundings_read_their_masks() {
+    let lir = M"(lir ptr 8
+sym @fabs fn global
+sym @fabsf fn global
+sym @round fn global
+sym @roundf fn global
+sym @mag fn global
+sym @magf fn global
+sym @rnd fn global
+sym @rndf fn global
+fn @mag
+  sig (f64, f64) -> f64
+b0(v0: f64, v1: f64):
+  v2 = call.f64 @fabs(v1) : (f64) -> f64
+  v3 = fadd.f64 v0, v2
+  ret v3
+fn @magf
+  sig (f32) -> f32
+b0(v0: f32):
+  v1 = call.f32 @fabsf(v0) : (f32) -> f32
+  ret v1
+fn @rnd
+  sig (f64, f64) -> f64
+b0(v0: f64, v1: f64):
+  v2 = call.f64 @round(v1) : (f64) -> f64
+  v3 = fsub.f64 v0, v2
+  ret v3
+fn @rndf
+  sig (f32) -> f32
+b0(v0: f32):
+  v1 = call.f32 @roundf(v0) : (f32) -> f32
+  ret v1
+)";
+    let drv = "#include <math.h>\ndouble mag(double, double);\nfloat magf(float);\ndouble rnd(double, double);\nfloat rndf(float);\nint main(void) {\n  double v[8] = {0.5, -0.5, 1.5, -2.5, 0.49999999999999994, -0.0, 4503599627370497.0, -7.25};\n  for (int i = 0; i < 8; i++) {\n    double x = v[i];\n    float f = (float)x;\n    if (mag(1.0, x) != 1.0 + fabs(x) || magf(f) != fabsf(f)) return 1;\n    if (rnd(1.0, x) != 1.0 - round(x) || rndf(f) != roundf(f)) return 2;\n  }\n  return 0;\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), SSE41, &mut obj),
+        "the object",
+    );
+    // Each `and` (0F 54) or `or` (0F 56) of a rip-relative operand (ModRM 00 reg 101), each `pcmpeqd`
+    // (0F 76).
+    let mut ands = 0u32;
+    let mut ors = 0u32;
+    let mut ones = 0u32;
+    for at in 0..obj.len() - 2 {
+        let rip = (obj[at + 2] & 0xC7) == 0x05;
+        ands += (obj[at] == 0x0F && obj[at + 1] == 0x54 && rip) as u32;
+        ors += (obj[at] == 0x0F && obj[at + 1] == 0x56 && rip) as u32;
+        ones += (obj[at] == 0x0F && obj[at + 1] == 0x76) as u32;
+    }
+    assert(ands == 2 && ors == 2 && ones == 0, "the masks");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// x86-64: a select between two constants on a boolean in a register is `movzx` and `lea` when their
+// difference is 1, 2, 3, 4, 5, 8 or 9: no `cmov` (0F 40 to 4F) nor `test` (F6 /0) but `@back`'s (3 - 7
+// wraps); `[4*r + 3]` takes the SIB form without a base (8D, ModRM 00 reg 100, SIB base 101). They give the
+// C results.
+@test
+fn a_select_of_constants_on_a_boolean_is_a_scaled_sum() {
+    let lir = M"(lir ptr 8
+sym @pick4 fn global
+sym @pick3 fn global
+sym @back fn global
+fn @pick4
+  sig (i8) -> i32
+b0(v0: i8):
+  v1 = iconst.i32 7
+  v2 = iconst.i32 3
+  v3 = select.i32 v0, v1, v2
+  ret v3
+fn @pick3
+  sig (i8) -> i64
+b0(v0: i8):
+  v1 = iconst.i64 -2
+  v2 = iconst.i64 -5
+  v3 = select.i64 v0, v1, v2
+  ret v3
+fn @back
+  sig (i8) -> i32
+b0(v0: i8):
+  v1 = iconst.i32 3
+  v2 = iconst.i32 7
+  v3 = select.i32 v0, v1, v2
+  ret v3
+)";
+    let drv = "#include <stdint.h>\nint32_t pick4(_Bool);\nint64_t pick3(_Bool);\nint32_t back(_Bool);\nint main(void) {\n  return !(pick4(1) == 7 && pick4(0) == 3 && pick3(1) == -2 && pick3(0) == -5 && back(1) == 3 && back(0) == 7);\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), OMIT_FP, &mut obj),
+        "the object",
+    );
+    let mut cmovs = 0u32;
+    let mut tests = 0u32;
+    let mut nobase = 0u32;
+    for at in 0..obj.len() - 2 {
+        cmovs += (obj[at] == 0x0F && (obj[at + 1] & 0xF0) == 0x40 && obj[at + 2] >= 0xC0) as u32;
+        tests += (obj[at] == 0xF6 && (obj[at + 1] & 0xF8) == 0xC0) as u32;
+        nobase += (obj[at] == 0x8D && (obj[at + 1] & 0xC7) == 0x04 && (obj[at + 2] & 7) == 5) as u32;
+    }
+    assert(cmovs == 1 && tests == 1 && nobase == 1, "the scaled sums");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // An atomic's result takes the register of an operand that dies there: x86-64 `lock xadd` returns the old
 // value in the register the constant was built in (no copy), arm64's compare-and-swap sets its flag in the
 // pointer's register, which the return takes (no `mov x0`; an exclusive-access loop's old value cannot take

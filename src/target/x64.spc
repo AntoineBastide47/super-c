@@ -427,6 +427,13 @@ extend Code {
             self.d32(m.disp as u32);
             return;
         }
+        if m.base == NOREG {
+            // No base: a SIB byte with base 101 under mod 00, then a 32-bit displacement.
+            self.byte(rg | 4);
+            self.byte(m.scale as u32 << 6 | (m.index as u32 & 7) << 3 | 5);
+            self.d32(m.disp as u32);
+            return;
+        }
         let base = m.base as u32 & 7;
         let d8 = m.disp % n8 == 0 && m.disp / n8 >= -128 && m.disp / n8 < 128;
         // rbp and r13 as a base take a displacement even when it is 0.

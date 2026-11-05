@@ -1284,11 +1284,9 @@ extend Live {
                 if t.op != O_SELECT || !is_int(t.ty) || t.ty == T_I128 || is_vec(t.ty) {
                     continue;
                 }
-                // A side the other plus 1, negated or inverted, or such a value of anything when the other is 0
-                // (the zero register).
-                let zb = is_const_val(b, t.b) && const_val(b, t.b) == 0;
-                let zc = is_const_val(b, t.c) && const_val(b, t.c) == 0;
-                if is_inst(t.b) && self.count[t.b as usize] == 1 && !self.pfold[t.b as usize] && (cs_kind(b, t.b, t.c) != CS_NONE || zc && cs_base(
+                // A side that is a value plus 1, negated or inverted (the other side's difference negated too):
+                // the select computes it from that value.
+                if is_inst(t.b) && self.count[t.b as usize] == 1 && !self.pfold[t.b as usize] && (cs_kind(b, t.b, t.c) != CS_NONE || cs_base(
                     b,
                     t.b,
                 ).0 != CS_NONE) {
@@ -1297,7 +1295,7 @@ extend Live {
                     b,
                     t.c,
                     t.b,
-                ) != CS_NONE || zb && cs_base(b, t.c).0 != CS_NONE) {
+                ) != CS_NONE || cs_base(b, t.c).0 != CS_NONE) {
                     self.pfold[t.c as usize] = true;
                 }
             }
@@ -2911,13 +2909,15 @@ extend Live {
             if ip != NONE && self.shared_by[ip as usize] == NONE && self.home[ip as usize] != HOME_NONE && (want[x as usize] & WANT_V) == (want[ip as usize] & WANT_V) && (want[x as usize] & Live::want_of(
                 self.home[ip as usize],
             )) != 0 {
+                // A value that shares another's register holds it through the active root (`share`).
+                let r = self.root(ip);
                 let mut j: usize = 0;
-                while j < self.act.len() && self.act[j] != ip {
+                while j < self.act.len() && self.act[j] != r {
                     j += 1;
                 }
                 if j < self.act.len() {
                     self.home[x as usize] = self.home[ip as usize];
-                    self.stop[ip as usize] = self.stop[ip as usize].max(self.stop[x as usize]);
+                    self.stop[r as usize] = self.stop[r as usize].max(self.stop[x as usize]);
                     self.share[x as usize] = ip;
                     self.shared_by[ip as usize] = x;
                     continue;

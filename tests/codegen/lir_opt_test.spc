@@ -11937,3 +11937,68 @@ b0:
     assert(!ws.contains("slotaddr"), ws.as_str());
     same_result(&wb, &wa, "site", none, 3 + 0x69 + 5);
 }
+
+// A call cannot reach a slot whose address has not escaped on any path before it (`Opt::slot_escapes`):
+// `@f`'s field load after `@ext` takes the stored value, though `@take` lets the slot escape later; `@g`
+// passes the slot to `@take` first, so its load after `@ext` stays, and so does `@h`'s in a loop whose
+// earlier iteration passed it.
+@test
+fn a_call_before_a_slots_escape_keeps_its_fields() {
+    let (_b, a) = optimized(
+        M"(lir ptr 8
+sym @ext fn global
+sym @take fn global
+sym @f fn global
+sym @g fn global
+sym @h fn global
+fn @f
+  sig (i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3
+  v2 = call.i64 @ext() : () -> i64
+  v3 = load.i64 v1 align 3
+  v4 = add.i64 v3, v2
+  store v4, v1+8 align 3
+  call @take(v1) : (ptr) -> void
+  v5 = load.i64 v1+8 align 3
+  ret v5
+fn @g
+  sig (i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3
+  call @take(v1) : (ptr) -> void
+  v2 = call.i64 @ext() : () -> i64
+  v3 = load.i64 v1 align 3
+  v4 = add.i64 v3, v2
+  ret v4
+fn @h
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3
+  jmp b1(v0)
+b1(v2: i64):
+  store v2, v1 align 3
+  v3 = call.i64 @ext() : () -> i64
+  v4 = load.i64 v1 align 3
+  call @take(v1) : (ptr) -> void
+  v5 = add.i64 v2, v4
+  v6 = icmp.ult v5, v3
+  br v6, b1(v5), b2
+b2:
+  ret v5
+)",
+    );
+    let f = text_of(&a, "f");
+    let g = text_of(&a, "g");
+    let h = text_of(&a, "h");
+    assert(h.as_str().find("load.i64") > h.as_str().find("call.i64 @ext"), h.as_str());
+    // `@f`: its one load is the one after `@take`; `@g`: a load after `@ext`.
+    assert(f.as_str().find("load.i64") > f.as_str().find("call @take"), f.as_str());
+    assert(g.as_str().find("load.i64") > g.as_str().find("call.i64 @ext"), g.as_str());
+}

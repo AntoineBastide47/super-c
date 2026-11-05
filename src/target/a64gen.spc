@@ -119,6 +119,11 @@ pub(package) struct Gen {
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
     paired: u32, // the last access the one before it took into an `ldp` or `stp` (NONE: none)
+    // The bool value a select's `tst` tested in this block, the code index and word of that `tst`
+    // (`select_op`), NONE.
+    btest_x: u32,
+    btest_at: u32,
+    btest_w: u32,
     stepped: Vector<u32>, // accesses paired early and pointer steps taken as post-index updates
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
     csave: Vector<(u8, i64)>, // the scratch homes saved around a rare call (`save_scratch`)
@@ -250,6 +255,9 @@ extend Gen {
             pos: 0,
             cur: 0,
             paired: NONE,
+            btest_x: NONE,
+            btest_at: 0,
+            btest_w: 0,
             stepped: Vector::<u32>::new(),
             taken: Vector::<u64>::new(),
             csave: Vector::<(u8, i64)>::new(),
@@ -2969,6 +2977,7 @@ extend Gen {
             w.dirty = false;
             self.split_at += 1;
         }
+        self.btest_x = NONE;
         let k = self.lv.order[q as usize];
         let b = self.b();
         self.blk_at[k as usize] = self.code.len() as u32;
@@ -6171,6 +6180,30 @@ extend Gen {
         return kvs >= 0 && (q.aux == C_SGT && kqs >= -1 || q.aux == C_SGE && kqs >= 0);
     }
 
+    // Whether the flags the word `w` at code index `at` set still hold: it is there, and each word after it
+    // writes no flags, as it is a move of an immediate, an `add`, `sub` or logical operation that sets no
+    // flags, a conditional select, a load or a store.
+    const fn flags_kept(self: &Self, at: u32, w: u32) bool {
+        let n = self.code.len() as u32;
+        if at >= n || self.code[at as usize] != w {
+            return false;
+        }
+        for k in at + 1..n {
+            let x = self.code[k as usize];
+            let movw = (x & 0x1F800000) == 0x12800000;
+            let logi = (x & 0x1F800000) == 0x12000000 && (x >> 29 & 3) != 3;
+            let logr = (x & 0x1F000000) == 0x0A000000 && (x >> 29 & 3) != 3;
+            let addi = (x & 0x1F000000) == 0x11000000 && (x >> 29 & 1) == 0;
+            let addr = (x & 0x1F000000) == 0x0B000000 && (x >> 29 & 1) == 0;
+            let csel = (x & 0x1FE00000) == 0x1A800000 && (x >> 29 & 1) == 0;
+            let ldst = (x & 0x0A000000) == 0x08000000;
+            if !(movw || logi || logr || addi || addr || csel || ldst) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     fn select_op(self: &mut Self, i: u32, t: Inst) bool {
         let ty = t.ty;
         // `max(x, 0)`: `bic rd, x, x, asr #(bits - 1)`, no comparison.
@@ -6188,9 +6221,15 @@ extend Gen {
             fc
         } else if self.pend.inst == cx && self.pend.inst != NONE {
             self.pend.cc
+        } else if self.btest_x == cx && self.flags_kept(self.btest_at, self.btest_w) {
+            // An earlier select of the block tested it, and nothing since wrote the flags.
+            a::NE
         } else {
             let rc = self.reg(t.a);
             self.emit(a::logic_imm(false, 3, a::ZR, rc, a::logical_imm(0xFF, false)));
+            self.btest_x = cx;
+            self.btest_at = self.code.len() as u32 - 1;
+            self.btest_w = self.code[self.btest_at as usize];
             a::NE
         };
         if in_mem(ty) {
@@ -6221,7 +6260,7 @@ extend Gen {
     }
 
     // Integer select `t`, instruction `i`, on condition `cc` as one conditional instruction from one side
-    // (`csinc`, `csinv`, `csneg`): a folded side that is the other plus 1, negated or inverted
+    // (`csinc`, `csinv`, `csneg`): a folded side that is a value plus 1, negated or inverted
     // (`lv::FOLD_CSEL`), or a side 1 or all ones, the other no constant 0 (the zero register gives it).
     // Whether it did.
     fn cond_sel(self: &mut Self, i: u32, t: Inst, cc: u32) bool {
@@ -6241,18 +6280,14 @@ extend Gen {
             } else {
                 (t.c, t.b, cc)
             };
-            // The other side, or the zero register when it is 0 and the side is of another value; `y - x`
-            // against `x - y` negates it (`lv::neg_sub`).
+            // The other side (the zero register for 0), and the value the side steps from; `y - x` against
+            // `x - y` negates it (`lv::neg_sub`).
             let (kind, base) = if lv::neg_sub(b, side, x) {
                 (lv::CS_NEG, x)
             } else {
                 lv::cs_base(b, side)
             };
-            let rx = if base == x {
-                self.reg(x) as u32
-            } else {
-                a::ZR
-            };
+            let rx = self.reg_or_zr(x, t.ty) as u32;
             let rm = if base == x {
                 rx
             } else {

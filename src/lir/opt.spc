@@ -129,6 +129,10 @@ pub(package) struct Opt {
     pred_at: Vector<u32>,
     preds: Vector<u32>,
     edges: Vector<u32>,
+    // Per instruction of the body `memory` saw, the slots (bit: slot index, the first 64) whose address may
+    // have escaped before it on some path (`slot_escapes`); per block, those on its entry.
+    sl_at: Vector<u64>,
+    sl_in: Vector<u64>,
     // Reverse postorder, immediate dominators and the dominator tree (children as ranges; preorder and
     // postorder numbers for the dominance test).
     rpo: Vector<u32>,
@@ -391,6 +395,8 @@ extend Opt {
             succ_at: Vector::<u32>::new(),
             succs: Vector::<u32>::new(),
             pred_at: Vector::<u32>::new(),
+            sl_at: Vector::<u64>::new(),
+            sl_in: Vector::<u64>::new(),
             preds: Vector::<u32>::new(),
             edges: Vector::<u32>::new(),
             rpo: Vector::<u32>::new(),
@@ -3347,6 +3353,7 @@ extend Opt {
         self.lst.truncate(0);
         self.privates(pk, b);
         self.classes(pk, b);
+        self.slot_escapes(b);
         // The classes of the loads' and stores' accesses before the walk forwards their addresses: a
         // parameter an inlined body's accesses go through, a scope's, becomes the caller's pointer.
         fill(&mut self.acls, b.insts.len(), CL_MANY);
@@ -10262,15 +10269,16 @@ extend Opt {
                 b.type_of(t.b),
                 pk.ptr_bytes,
             ) as i64);
-            let apart = !other_class && !other_bytes && t.op == O_CALL && self.call_apart(
+            let hi = lo + type_bytes(p.ty, pk.ptr_bytes) as i64;
+            let apart = !other_class && !other_bytes && (t.op == O_CALL && self.call_apart(pk, b, i, t, p.addr, lo, hi) || self.slot_apart(
                 pk,
                 b,
                 i,
                 t,
                 p.addr,
                 lo,
-                lo + type_bytes(p.ty, pk.ptr_bytes) as i64,
-            );
+                hi,
+            ));
             if (other_class || other_bytes || apart) && self.recall(p.addr, p.off, p.ty, to) == VNONE {
                 self.remember(p.addr, p.off, p.ty, p.val, to);
             }
@@ -10319,6 +10327,119 @@ extend Opt {
     // `a`, of an exclusive class (a parameter's, an inlined call's or an allocation's) but a scope's: the
     // call reaches that class only through its arguments of it (`arg_bits`), each `a`'s base at a constant
     // offset, through which the callee reaches only bytes apart from those (`Sym.span`).
+    // `sl_at`, `sl_in` for `b`: a slot's address escapes where a value it derives (`slot_of`) is used other
+    // than as a load's or store's address, a copy's or fill's address or a pointer sum's base (a call's
+    // argument, a stored value, a block argument, a comparison or a select's operand, a return, a
+    // conversion), and stays escaped on every path from there (a forward pass over the blocks: each block's
+    // entry set grows at most 64 times).
+    fn slot_escapes(self: &mut Self, b: &Body) {
+        let nb = b.blocks.len();
+        let ni = b.insts.len();
+        fill(&mut self.sl_at, ni, 0);
+        fill(&mut self.sl_in, nb, 0);
+        let mut bout = Vector::<u64>::with_capacity(nb);
+        bout.resize_default(nb);
+        let mut bgen = Vector::<u64>::with_capacity(nb);
+        bgen.resize_default(nb);
+        for k in 0..nb {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                let mut e: u64 = 0;
+                for u in self.ops_at[i as usize]..self.ops_at[i as usize + 1] {
+                    let v = self.ops[u as usize];
+                    let q = slot_of(b, v);
+                    if q >= 64 {
+                        continue;
+                    }
+                    let addr = (t.op == O_LOAD || t.op == O_STORE || t.op == O_PTRADD) && u == self.ops_at[i as usize] && v == t.a;
+                    let mem = (t.op == O_MEMCPY && u < self.ops_at[i as usize] + 2 || t.op == O_MEMSET && u == self.ops_at[i as usize]) && (v == t.a || v == t.b && t.op == O_MEMCPY);
+                    if !addr && !mem {
+                        e |= 1u64 << q as u64;
+                    }
+                }
+                bgen[k] |= e;
+                self.sl_at[i as usize] = e;
+            }
+        }
+        // A worklist of blocks whose entry set grew (each at most 64 times).
+        let mut work = Vector::<u32>::with_capacity(nb);
+        let mut queued = Vector::<bool>::with_capacity(nb);
+        queued.resize_default(nb);
+        for k in 0..nb {
+            work.push(k as u32);
+            queued[k] = true;
+        }
+        while work.len() != 0 {
+            let k = work.pop().unwrap() as usize;
+            queued[k] = false;
+            let out = self.sl_in[k] | bgen[k];
+            if out == bout[k] && k != 0 {
+                continue;
+            }
+            bout[k] = out;
+            for x in self.succ_at[k]..self.succ_at[k + 1] {
+                let s = self.succs[x as usize] as usize;
+                if (self.sl_in[s] | out) != self.sl_in[s] {
+                    self.sl_in[s] |= out;
+                    if !queued[s] {
+                        queued[s] = true;
+                        work.push(s as u32);
+                    }
+                }
+            }
+        }
+        // Per instruction, the escapes before it: its block's entry set and those of the instructions before
+        // it there.
+        for k in 0..nb {
+            let bk = b.blocks[k];
+            let mut acc = self.sl_in[k];
+            for i in bk.start..bk.start + bk.len {
+                let e = self.sl_at[i as usize];
+                self.sl_at[i as usize] = acc;
+                acc |= e;
+            }
+        }
+    }
+
+    // Whether write `t`, instruction `i` of `b`, a call or a store, touches none of the bytes `[lo, hi)` past
+    // address `a` in a slot whose address has not escaped before it (`sl_at`): a store through no value that
+    // slot derives; a call none of whose arguments that slot derives, or each at a constant offset from the
+    // same address, through which the callee reaches only bytes apart from those (`Sym.span`).
+    fn slot_apart(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst, a: Value, lo: i64, hi: i64) bool {
+        let q = slot_of(b, a);
+        if q >= 64 || i as usize >= self.sl_at.len() || (self.sl_at[i as usize] >> q as u64 & 1) != 0 {
+            return false;
+        }
+        if t.op == O_STORE {
+            return slot_of(b, t.a) != q;
+        }
+        if t.op != O_CALL {
+            return false;
+        }
+        let sy = pk.syms[b.syms[t.a as usize] as usize];
+        let (base, off) = address_of(b, a);
+        for k in 0..t.aux as u32 {
+            let v = b.pool[(t.c + k) as usize];
+            if slot_of(b, v) != q {
+                continue;
+            }
+            let (vb, vo) = address_of(b, v);
+            let s = if sy.span != NONE && k as u64 < pk.spans[sy.span as usize] {
+                pk.spans[(sy.span + 1 + k) as usize]
+            } else {
+                SPAN_ANY
+            };
+            if s == SPAN_NONE {
+                continue;
+            }
+            if vb != base || s == SPAN_ANY || span_lo(s) + vo < off + hi && off + lo < span_hi(s) + vo {
+                return false;
+            }
+        }
+        return true;
+    }
+
     fn call_apart(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst, a: Value, lo: i64, hi: i64) bool {
         let c = self.class(a);
         if c < CL_NOALIAS || c >= CL_FROZEN || (class_bit(c) & self.sbits) != 0 {
@@ -15105,6 +15226,26 @@ fn write_tag(pk: &Package, b: &Body, t: Inst) usize {
     } else {
         0usize
     };
+}
+
+// The slot index whose address value `v` of `b` derives through pointer sums (at most 8), NONE else.
+const fn slot_of(b: &Body, v: Value) u32 {
+    let mut x = v;
+    // Each step leaves one pointer sum.
+    for _ in 0..8 {
+        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 {
+            return NONE;
+        }
+        let t = b.insts[x as usize];
+        if t.op == O_SLOTADDR {
+            return t.a;
+        }
+        if t.op != O_PTRADD {
+            return NONE;
+        }
+        x = t.a;
+    }
+    return NONE;
 }
 
 // `writes_memory`, but for a call of a function whose body writes no memory outside its frame

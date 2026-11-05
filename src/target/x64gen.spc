@@ -37,6 +37,10 @@ const V0: u8 = 16; // register number of xmm0: general registers are 0..15
 
 // The in-place operations `Gen::chain_ret` follows to a return.
 const CHAIN_STEPS: u32 = 4;
+// The float functions `call` computes in place (`Gen::float_fn`): none, `fabs`, `round`.
+const FF_NONE: u8 = 0;
+const FF_ABS: u8 = 1;
+const FF_ROUND: u8 = 2;
 // Scratch registers; the vector ones are the ABI's (`Gen.vs0`, `Gen.vs1`).
 const S0: u8 = 10; // r10
 const S1: u8 = 11; // r11
@@ -278,6 +282,11 @@ pub(package) struct Gen {
     // NONE.
     chain_x: u32,
     chain_r: u8,
+    // The boolean value whose low byte the block's last `test` of one (`cond_of`) tested, that `test`'s
+    // first byte and its end, NONE.
+    btest_x: u32,
+    btest_at: u32,
+    btest_end: u32,
     cmp_at: u32, // the code byte the last compare starts at (`reflag`), NONE
     // The operands of the last plain compare and the code length up to which its flags hold (past only a
     // `setcc` and `movzx` of its value), NONE: a compare of the same values there sets nothing.
@@ -479,6 +488,9 @@ extend Gen {
             fused: NONE,
             chain_x: NONE,
             chain_r: NOREG,
+            btest_x: NONE,
+            btest_at: 0,
+            btest_end: 0,
             cmp_at: NONE,
             held_a: VNONE,
             held_b: VNONE,
@@ -4166,6 +4178,7 @@ extend Gen {
             self.split_at += 1;
         }
         self.chain_x = NONE;
+        self.btest_x = NONE;
         let k = self.lv.order[q as usize];
         let b = self.b();
         self.blk_at[k as usize] = self.c.len();
@@ -7538,10 +7551,68 @@ extend Gen {
             self.keep_flags = true;
             return self.pend.cc;
         }
+        // An earlier `test` of it in the block, and nothing since wrote the flags.
+        if self.btest_x == cx && self.flags_kept() {
+            self.keep_flags = true;
+            return x::CC_NE;
+        }
         let r = self.reg(v);
+        let at = self.c.len();
         self.c.test_ri(1, r, 0xFF);
+        self.btest_x = cx;
+        self.btest_at = at;
+        self.btest_end = self.c.len();
         self.keep_flags = true;
         return x::CC_NE;
+    }
+
+    // Whether the flags of the `test` `cond_of` noted still hold: its bytes are a `test` of a byte with 0xFF
+    // there (A8 FF, or F6 /0 FF maybe after a REX), and each instruction after it writes no flags, as it is
+    // a `mov` of an immediate or between registers or a `cmov` between registers.
+    const fn flags_kept(self: &Self) bool {
+        let n = self.c.len();
+        let (at, end) = (self.btest_at, self.btest_end);
+        if end > n || end < at + 2 || self.c.b[end as usize - 1] != 0xFF {
+            return false;
+        }
+        let al = end == at + 2 && self.c.b[at as usize] == 0xA8;
+        let rm = end >= at + 3 && self.c.b[end as usize - 3] == 0xF6 && (self.c.b[end as usize - 2] & 0xF8) == 0xC0;
+        if !al && !rm {
+            return false;
+        }
+        let mut p = end;
+        // Each step passes one instruction of at least 2 bytes.
+        while p < n {
+            let rex = self.c.b[p as usize] >= 0x40 && self.c.b[p as usize] <= 0x4F;
+            let w = rex && (self.c.b[p as usize] & 8) != 0;
+            let q = p + rex as u32;
+            if q >= n {
+                return false;
+            }
+            let op = self.c.b[q as usize];
+            let m = if q + 1 < n {
+                self.c.b[q as usize + 1]
+            } else {
+                0
+            };
+            let len: u32 = if op >= 0xB8 && op <= 0xBF {
+                if w {
+                    9
+                } else {
+                    5
+                }
+            } else if op == 0xC7 && m >= 0xC0 && (m & 0x38) == 0 {
+                6
+            } else if (op == 0x89 || op == 0x8B) && m >= 0xC0 {
+                2
+            } else if op == 0x0F && (m & 0xF0) == 0x40 && q + 2 < n && self.c.b[q as usize + 2] >= 0xC0 {
+                3
+            } else {
+                return false;
+            };
+            p = q + len;
+        }
+        return p == n;
     }
 
     fn select_op(self: &mut Self, i: u32, t: Inst) bool {
@@ -7562,7 +7633,7 @@ extend Gen {
             self.fsel(i, t);
             return true;
         }
-        if self.abs_select(i, t) {
+        if self.abs_select(i, t) || self.bool_lea(i, t) {
             return true;
         }
         let cx = self.vx(t.a);
@@ -7650,6 +7721,66 @@ extend Gen {
             self.c.mov_rr(8, rd, rs);
         }
         self.c.cmov(c1, 8, rd, ro);
+        return true;
+    }
+
+    // Select `i` (`t`) of 32 or 64 bits on a boolean in a register, whose flags no instruction left, between
+    // constants `k1` (true) and `k0` (false), `k1 - k0` 1, 2, 3, 4, 5, 8 or 9 and `k0` within a sign-extended
+    // 32 bits: `k0 + b * (k1 - k0)` by `movzx` and `lea`, no test nor `cmov`. Whether it did.
+    fn bool_lea(self: &mut Self, i: u32, t: Inst) bool {
+        let ty = t.ty;
+        let mut k1: u64 = 0;
+        let mut k0: u64 = 0;
+        let folded = (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize];
+        if ty != T_I32 && ty != T_I64 || folded || self.pend.inst == self.vx(t.a) && self.pend.inst != NONE || !self.const_of(
+            t.b,
+            &mut k1,
+        ) || !self.const_of(t.c, &mut k0) {
+            return false;
+        }
+        let w = ty == T_I64;
+        let m = if w {
+            u64::MAX
+        } else {
+            0xFFFFFFFFu64
+        };
+        // `k1 - k0` modulo the type's width, with no overflow (`k1 < k0` wraps).
+        let (a1, a0) = (k1 & m, k0 & m);
+        let d = if a1 >= a0 {
+            a1 - a0
+        } else {
+            a1 + (m - a0) + 1
+        };
+        let k = if w {
+            k0 as i64
+        } else {
+            ((k0 as u32) as i32) as i64
+        };
+        if k < -2147483648 || k > 2147483647 || d == 0 || d > 9 || d == 6 || d == 7 {
+            return false;
+        }
+        let rb = self.reg(t.a);
+        let rd = self.def(i);
+        self.c.ext(1, 4, false, rd, rb);
+        if d == 1 && k == 0 {
+            return true;
+        }
+        let mem = if d == 1 {
+            x::at(rd, k as i32)
+        } else if d == 4 || d == 8 {
+            x::ix(NOREG, rd, d.trailing_zeros() as u8, k as i32)
+        } else {
+            x::ix(rd, rd, (d - 1).trailing_zeros() as u8, k as i32)
+        };
+        self.lea_to(
+            if w {
+                8
+            } else {
+                4
+            },
+            rd,
+            mem,
+        );
         return true;
     }
 
@@ -8137,6 +8268,29 @@ extend Gen {
         return self.win && y.kind == SK_FUNC && !y.ext && !y.used;
     }
 
+    // The float function intrinsic body symbol `s` is (`FF_*`) and its float's bytes: `fabs` and `round` 8,
+    // `fabsf` and `roundf` 4; FF_NONE for another.
+    const fn float_fn(self: &Self, s: u32) (u8, u32) {
+        let p = unsafe &*self.pkg;
+        let nm = p.spell(p.syms[self.b().syms[s as usize] as usize].name);
+        let n = if nm.starts_with("__sc_x_") {
+            nm.slice(7, nm.len())
+        } else {
+            nm
+        };
+        return if n == "fabs" {
+            (FF_ABS, 8)
+        } else if n == "fabsf" {
+            (FF_ABS, 4)
+        } else if n == "round" {
+            (FF_ROUND, 8)
+        } else if n == "roundf" {
+            (FF_ROUND, 4)
+        } else {
+            (FF_NONE, 0u32)
+        };
+    }
+
     // The instructions of the intrinsic body symbol `s` names (`target::intrin`, `itpl`); empty for another
     // function.
     const fn intrinsic(self: &Self, s: u32) str<'static> {
@@ -8228,6 +8382,61 @@ extend Gen {
         } else {
             ""
         };
+        // `fabs`, `fabsf`, `round` and `roundf` in any registers, their masks read from the body's constants:
+        // no template's fixed registers.
+        let (fk, fw) = if tpl.len() != 0 {
+            self.float_fn(t.a)
+        } else {
+            (FF_NONE, 0u32)
+        };
+        if fk != FF_NONE {
+            let d = fw == 8;
+            let a = b.pool[t.c as usize];
+            let ra = self.reg(a);
+            if fk == FF_ABS {
+                let rd = self.def_from(i, a, ra);
+                self.fsign(d, true, rd);
+                return true;
+            }
+            // Half away from 0: the integer part of `x + copysign(0.5 - ulp, x)` (`roundsd` 11).
+            let sb = if d {
+                0x8000000000000000u64
+            } else {
+                0x8000000080000000u64
+            };
+            let half = if d {
+                0x3FDFFFFFFFFFFFFFu64
+            } else {
+                0x3EFFFFFF3EFFFFFFu64
+            };
+            let pfx: u32 = if d {
+                0x66
+            } else {
+                0
+            };
+            let s = self.tmp(true);
+            let ks = self.const_sym([sb, sb]);
+            self.c.vload(16, s - V0, x::rip());
+            self.reloc_rip(x::R_PC32, ks, 0);
+            self.c.sse_rr(pfx, 0x0F54, s - V0, ra - V0);
+            let kh = self.const_sym([half, half]);
+            self.c.rm(pfx, 0x0F56, false, s - V0, x::rip(), false);
+            self.reloc_rip(x::R_PC32, kh, 0);
+            self.c.sse_rr(fpfx(d), 0x0F58, s - V0, ra - V0);
+            let rd = self.def_over(i, a, ra);
+            self.c.sse_rr(
+                0x66,
+                if d {
+                    0x0F3A0B
+                } else {
+                    0x0F3A0A
+                },
+                rd - V0,
+                s - V0,
+            );
+            self.c.byte(11);
+            return true;
+        }
         self.call_layout(t);
         self.clob = ~0u64;
         // An intrinsic's instructions, its constant arguments in place.
