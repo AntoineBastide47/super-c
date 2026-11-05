@@ -10508,6 +10508,34 @@ fn replayed_unit_inlines_the_form_before_vectors() {
     assert(warm.equals(&cold), "main's object does not depend on the cache");
 }
 
+// A replayed unit's inlinable function whose constant aggregate argument went to read-only data of its
+// object gives its callers the form before (`lir::opt::Run::inlined`, `const_slots`): `main` makes the data
+// its own, as the build that renders `b` does, in place of naming the data `b`'s object holds alone. Its
+// object matches one built without the per-TU cache.
+@test
+fn replayed_unit_inlines_the_form_before_its_constant_data() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/b.spc",
+        "pub struct P {\n    a: i64,\n    b: i64,\n    c: i64,\n    d: i64,\n    e: i64,\n}\n\n@noinline\npub fn sum(p: P) i64 {\n    return p.a + p.b * 3 + p.c * 7 + p.d * 11 + p.e * 13;\n}\n\npub fn pick(k: i64) i64 {\n    return sum(P { a: 1, b: 2, c: 3, d: 4, e: 5 }) + k;\n}\n",
+    );
+    let head = "import b;\n\nfn main() i32 {\n    let f: fn(i64) i64 = b::pick;\n";
+    p.mkfile("src/main.spc", format("{}    return (b::pick(3) + f(1) - 278) as i32;\n}}\n", head).as_str());
+    let root = p.dir();
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the first build succeeds");
+    p.mkfile("src/main.spc", format("{}    return (b::pick(3) + f(1) - 279 + 1) as i32;\n}}\n", head).as_str());
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the build that replays `b` succeeds");
+    assert_eq(p.run_bin(), 0);
+    let obj = format("{}/build/release/raw/main.o", root);
+    let warm = loader::read_file(&obj).unwrap_or(String::new());
+    assert(warm.len() > 0, "the build writes main's object");
+    let r = cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build --profile=release -o bin");
+    assert(r.ok(), "the build without the cache succeeds");
+    let cold = loader::read_file(&obj).unwrap_or(String::new());
+    assert(warm.equals(&cold), "main's object does not depend on the cache");
+}
+
 // A replayed unit's function that no caller inlines keeps the effects its unit's build found (`lir::hold`,
 // `Sym.fx`): `main` reads the static again after the call to `bump`, which writes it, and its object
 // matches one built without the per-TU cache.

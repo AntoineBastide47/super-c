@@ -370,6 +370,22 @@ pub(package) fn c_target(target: i32, arch: i32, sysroot: str, out: &mut CTarget
     return true;
 }
 
+/// The C environment of `target` on `arch` with the built-in headers alone, no C library (`c_target` found no
+/// sysroot): a header that includes only built-in ones (the SIMD types) preprocesses under it.
+pub(package) fn builtin_target(target: i32, arch: i32, out: &mut CTarget) bool {
+    let to = tgt::target_of(target, arch);
+    if to.is_none() {
+        return false;
+    }
+    let rows: []data::Row = data::ROWS;
+    let row = &rows[to.unwrap().cenv as usize];
+    *out = CTarget::new();
+    out.sys_dirs.push(String::from_str(BUILTIN_DIR));
+    fill_tables(row, out);
+    fill_headers(arch, out);
+    return true;
+}
+
 // ---- The C dialect --------------------------------------------------------------------------------
 
 // Drops the `#define` lines of macro `name` from `predefs`.

@@ -11457,7 +11457,16 @@ fn native_header_facts(p: &mut loader::Package) {
     }
     // One C environment for every scan: each would build the same.
     let mut env = ct::CTarget::new();
-    if miss != 0 && bg::header_env(p.build_target, p.arch, &sysroot, &flags, &mut env) {
+    // Without a sysroot, the built-in headers alone (`libc` false): a header that preprocesses then needs no C
+    // library (the SIMD types).
+    let mut libc = true;
+    if miss != 0 && !bg::header_env(p.build_target, p.arch, &sysroot, &flags, &mut env) {
+        libc = false;
+        if !bg::builtin_env(p.build_target, p.arch, &flags, &mut env) {
+            miss = 0;
+        }
+    }
+    if miss != 0 {
         for q in 0..tasks.len() {
             tasks.index_mut(q).env = &env;
         }
@@ -11493,12 +11502,15 @@ fn native_header_facts(p: &mut loader::Package) {
     for q in 0..tasks.len() {
         let t = tasks.index_mut(q);
         let k = t.k as usize;
-        if !t.hit && t.env == null {
-            // No C environment for the target (no sysroot): a C compile reads no header either, so the
-            // functions are the library's exports. Nothing is recorded: a sysroot may appear.
+        if !t.hit && (t.env == null || !libc && !t.ok) {
+            // No C environment for the target, or a header that needs the C library without a sysroot: a C
+            // compile reads no header either, so the functions are the library's exports.
             continue;
         }
-        hf_write(&mut rec, t);
+        // Nothing is recorded without a sysroot: one may appear, and the headers then read the C library's.
+        if libc || t.hit {
+            hf_write(&mut rec, t);
+        }
         for j in 0..t.read.len() {
             let h = fnv(&t.read[j]);
             if hseen.contains(&h) && p.header_files.contains(&t.read[j]) {

@@ -27956,35 +27956,57 @@ extend TypeChecker {
         if self.lint {
             self.tc_lint_unnecessary_deref(obj_node);
         }
+        let e0 = self.errors.errors.len();
+        let w0 = self.errors.warns.len();
+        let f0 = self.errors.fixes.len();
         let t = self.check_member_of(id, obj_node, obj, prefer_method, want, crossed);
-        if t != TYPE_NONE && self.through_raw_pointer(obj) {
-            self.tc_raw_member(id, obj_node, obj);
+        if !self.through_raw_pointer(obj) {
+            return t;
         }
-        return t;
+        // Through a raw pointer, a member the pointee has, or that a generic conformance offers it, is
+        // the explicit `(*p).m` form's: that error replaces the ones its lookup or bounds gave.
+        let a = self.cur_ast();
+        let name = self.name_span(unsafe (*a).at_const(id).as_data.member.member);
+        let offered = t != TYPE_NONE || self.tc_blanket_named(self.source.slice(name.start as usize, name.end as usize)).node != NODE_NONE;
+        if !offered || self.raw_self_method(id, obj) {
+            return t;
+        }
+        self.errors.errors.truncate(e0);
+        self.errors.warns.truncate(w0);
+        self.errors.fixes.truncate(f0);
+        self.tc_raw_member(id, obj_node, t == TYPE_NONE);
+        return TYPE_ERROR;
+    }
+
+    // Whether member `id` resolved to a method whose `self` is the raw pointer type `obj` itself (no
+    // dereference).
+    fn raw_self_method(self: &mut Self, id: NodeId, obj: TypeId) bool {
+        let a = self.cur_ast();
+        let hit = unsafe (*a).resolution_def(unsafe (*a).at_const(id).as_data.member.member);
+        if hit.node == NODE_NONE {
+            return false;
+        }
+        let ha = self.mod_ast(hit.module);
+        if unsafe (*ha).at_const(hit.node).kind != NodeKind::NODE_FUNCTION || unsafe (*ha).ext(hit.node).function.params.len == 0 {
+            return false;
+        }
+        let p0 = unsafe (*ha).list(unsafe (*ha).ext(hit.node).function.params)[0];
+        let oy = *self.type_at(obj);
+        return self.type_at(self.decl_type_in(hit.module, p0)).kind == TypeKind::TYPE_POINTER && oy.kind == TypeKind::TYPE_POINTER && !self.through_raw_pointer(
+            oy.as_data.elem,
+        );
     }
 
     // A member reached through a raw pointer: no auto-dereference, so a field or a method whose
-    // `self` is not the raw pointer type itself is an error naming the explicit `(*p).m` form.
+    // `self` is not the raw pointer type itself is an error naming the explicit `(*p).m` form (`blanket`: a
+    // method a generic conformance offers).
     @cold
-    fn tc_raw_member(self: &mut Self, id: NodeId, obj_node: NodeId, obj: TypeId) {
+    fn tc_raw_member(self: &mut Self, id: NodeId, obj_node: NodeId, blanket: bool) {
         let a = self.cur_ast();
         let mn = unsafe (*a).at_const(id).as_data.member.member;
         let hit = unsafe (*a).resolution_def(mn);
-        let mut is_fn = false;
-        if hit.node != NODE_NONE {
-            let ha = self.mod_ast(hit.module);
-            let hn = unsafe (*ha).at_const(hit.node);
-            is_fn = hn.kind == NodeKind::NODE_FUNCTION;
-            if is_fn && unsafe (*ha).ext(hit.node).function.params.len != 0 {
-                let p0 = unsafe (*ha).list(unsafe (*ha).ext(hit.node).function.params)[0];
-                let oy = *self.type_at(obj);
-                if self.type_at(self.decl_type_in(hit.module, p0)).kind == TypeKind::TYPE_POINTER && oy.kind == TypeKind::TYPE_POINTER && !self.through_raw_pointer(
-                    oy.as_data.elem,
-                ) {
-                    return;
-                }
-            }
-        }
+        // A method's form: the member resolved to a function, or a generic conformance offers it (`blanket`).
+        let is_fn = blanket || hit.node != NODE_NONE && unsafe (*self.mod_ast(hit.module)).at_const(hit.node).kind == NodeKind::NODE_FUNCTION;
         let sp = unsafe (*a).at_const(obj_node).span;
         let name = self.name_span(mn);
         let form = if is_fn {

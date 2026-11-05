@@ -10,6 +10,7 @@ import std::platform::fs;
 import std::platform::process;
 import driver::util as dutil;
 import module::loader as loader;
+import bindgen::bindgen as bg;
 import bindgen::ctarget as ct;
 import bindgen::ctarget_data as data;
 import target::table as tgt;
@@ -1096,4 +1097,73 @@ fn sysroot_discovery_reads_the_environment() {
         assert(t.sys_dirs[1].as_str().ends_with("/mingw/x86_64-w64-mingw32/include"), t.sys_dirs[1].as_str());
         assert(!ct::c_target(0, 1, "", &mut t), "no aarch64 toolchain in PATH");
     }
+}
+
+// Without a sysroot, the built-in headers alone (`ct::builtin_target`) give the SIMD register types' classes:
+// their headers include no C library header. A C library header is not found.
+@test
+fn builtin_headers_class_the_simd_types_without_a_sysroot() {
+    let mut env = ct::CTarget::new();
+    assert(bg::builtin_env(2, 0, "", &mut env), "the environment of linux x86_64");
+    assert_eq(env.sys_dirs.len(), 1usize);
+    let none: []str = [];
+    let types: []str = ["__m128", "__m128i", "__m128d", "__m256"];
+    let mut vals = Vector::<i64>::new();
+    let mut oks = Vector::<bool>::new();
+    let mut objs = Vector::<String>::new();
+    let mut sts = Vector::<bool>::new();
+    let mut sigs = Vector::<String>::new();
+    let mut cls = Vector::<u8>::new();
+    let mut lays = Vector::<String>::new();
+    let mut szs = Vector::<u64>::new();
+    let mut afacts = Vector::<String>::new();
+    let mut shapes = Vector::<String>::new();
+    let mut read = Vector::<String>::new();
+    let ok = bg::header_facts(
+        &env,
+        "#include <immintrin.h>\n",
+        none,
+        &mut vals,
+        &mut oks,
+        &mut objs,
+        none,
+        &mut sts,
+        &mut sigs,
+        types,
+        &mut cls,
+        &mut lays,
+        &mut szs,
+        none,
+        &mut afacts,
+        none,
+        &mut shapes,
+        &mut read,
+    );
+    assert(ok, "immintrin.h preprocesses");
+    assert_eq(cls.len(), 4usize);
+    assert(
+        cls[0] == bg::SC_VF32 && cls[1] == bg::SC_V64 && cls[2] == bg::SC_VF64 && cls[3] == bg::SC_VF32,
+        "the classes",
+    );
+    let lib = bg::header_facts(
+        &env,
+        "#include <stdlib.h>\n",
+        none,
+        &mut vals,
+        &mut oks,
+        &mut objs,
+        none,
+        &mut sts,
+        &mut sigs,
+        none,
+        &mut cls,
+        &mut lays,
+        &mut szs,
+        none,
+        &mut afacts,
+        none,
+        &mut shapes,
+        &mut read,
+    );
+    assert(!lib, "no C library");
 }

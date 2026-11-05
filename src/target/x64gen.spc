@@ -266,6 +266,7 @@ pub(package) struct Gen {
     rows: Vector<u64>, // with debug information, per change of location: its code byte << 32 | its `lines` index
     rstore: Vector<u32>, // per instruction, 1 + the result part a store moves into its register (`ret_stores`), else 0
     rload: Vector<u32>, // per call, the loads after it its result's registers give (`res_relays`)
+    rslot: Vector<bool>, // per slot, whether a call's result relays it (`rload`): no memory
     suse: Vector<u32>, // per slot, the uses of its addresses (`place::slot_uses`)
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
@@ -464,6 +465,7 @@ extend Gen {
             rows: Vector::<u64>::new(),
             rstore: Vector::<u32>::new(),
             rload: Vector::<u32>::new(),
+            rslot: Vector::<bool>::new(),
             suse: Vector::<u32>::new(),
             pos: 0,
             cur: 0,
@@ -869,6 +871,14 @@ extend Gen {
             self.lock |= bit(va.reg);
             self.va.index_mut(x as usize).clean = false;
             return va.reg;
+        }
+        // A loop step the home plan gives its header parameter's register (`lv::step_op`): every emitter
+        // of such an instruction reads that operand first.
+        if (v & (VPARAM | VFLAG)) == 0 && lv::step_op(self.b().insts[v as usize]) {
+            let sr = self.def_shared(v, self.b().insts[v as usize].a);
+            if sr != NOREG {
+                return sr;
+            }
         }
         let vr = is_v(self.vt(v)) || self.in_reg(self.vt(v));
         let r = self.take_home(x, vr, NOREG);
@@ -1625,6 +1635,26 @@ extend Gen {
             }
         }
         let most = self.xfix.count_ones() as u32 + self.xalloc.count_ones() as u32 - nd;
+        // Per block, the registers its own largest need leaves (`Live::jcap`).
+        self.lv.jcap.truncate(0);
+        for p in 0..self.lv.order.len() {
+            let k = self.lv.order[p] as usize;
+            let bk = b.blocks[k];
+            let mut bn: u32 = 4;
+            let mut calls = false;
+            for i in bk.start..bk.start + bk.len {
+                let ni = self.need(i);
+                bn = bn.max(
+                    ni + if k == 0 && !calls {
+                        pins
+                    } else {
+                        0
+                    },
+                );
+                calls = calls || Gen::clobbers(b, b.insts[i as usize]);
+            }
+            self.lv.jcap.push(self.xfix.count_ones() as u32 + self.xalloc.count_ones() as u32 - bn);
+        }
         self.xhome = self.xscr;
         if leaf {
             self.xhome |= self.homes_free(b);
@@ -1907,7 +1937,14 @@ extend Gen {
         if e <= dp {
             return pre[self.lv.last[x as usize] as usize] > pre[from as usize];
         }
-        return pre[(bk.start + bk.len) as usize] > pre[from as usize] || pos[e as usize + 1] > pos[dp as usize + 1];
+        // In its last block, up to its last use when its range ends there (`last_read`).
+        let l = self.lv.last_read(b, x);
+        let tail = if l != NONE {
+            pre[l as usize] > pre[b.blocks[self.lv.order[e as usize] as usize].start as usize]
+        } else {
+            pos[e as usize + 1] > pos[e as usize]
+        };
+        return pre[(bk.start + bk.len) as usize] > pre[from as usize] || pos[e as usize] > pos[dp as usize + 1] || tail;
     }
 
     // The code section of a `@cold` function (`Sym.cold`): apart from the other functions', which the
@@ -2691,11 +2728,12 @@ extend Gen {
         w.dirty = false;
     }
 
-    // Whether the code so far ends with a `jmp` (a return's to the epilogue too): nothing falls past it.
-    const fn ends_jump(self: &Self) bool {
+    // Whether no block falls into layout position `q`: the code so far ends with a `jmp` (a return's to the
+    // epilogue too), which nothing falls past, and the block before `q` has code (an empty one falls through).
+    const fn ends_jump(self: &Self, q: u32) bool {
         let n = self.c.len();
         let nj = self.c.jumps.len();
-        return nj != 0 && self.c.jumps[nj - 1] + 4 == n && self.c.b[(n - 5) as usize] == 0xE9;
+        return q != 0 && self.blk_at[self.lv.order[q as usize - 1] as usize] != n && nj != 0 && self.c.jumps[nj - 1] + 4 == n && self.c.b[(n - 5) as usize] == 0xE9;
     }
 
     // Whether every late edge's target lies before layout position `q` (`lv::Live::late`).
@@ -3087,12 +3125,20 @@ extend Gen as Mover {
         // outside the moves; the scratch registers are the moves' own. rax, which no argument takes, when
         // it holds nothing, no pending move names it and none rematerializes a value (a thread-local
         // address's comes in rax).
+        // r11 (S1) when no pending move copies memory to memory (`copy_mem` takes it) and none names it.
         let mut vals = false;
+        let mut mm = false;
         for q in 0..self.mv.len() {
-            vals = vals || !self.mv[q].done && self.mv[q].src.kind == LC_VAL;
+            let p = self.mv[q];
+            vals = vals || !p.done && p.src.kind == LC_VAL;
+            mm = mm || !p.done && p.src.kind == LC_MEM && p.dst.kind == LC_MEM;
         }
-        if !m.v && !vals && ((self.held | self.lock | self.tmps | self.fixed_busy | move_regs(&self.mv)) & bit(x::RAX)) == 0 {
+        let busy = self.held | self.lock | self.tmps | self.fixed_busy | move_regs(&self.mv);
+        if !m.v && !vals && (busy & bit(x::RAX)) == 0 {
             return Lc { kind: LC_REG, reg: x::RAX, off: 0, val: NONE };
+        }
+        if !m.v && !vals && !mm && (busy & bit(S1)) == 0 {
+            return Lc { kind: LC_REG, reg: S1, off: 0, val: NONE };
         }
         let s = self.slot_alloc(64, 16) as i32;
         return Lc { kind: LC_MEM, reg: x::RSP, off: s, val: NONE };
@@ -3681,10 +3727,19 @@ extend Gen {
         self.sret_off = -1;
         self.save_off = -1;
         fill(&mut self.slot_off, b.slots.len(), 0);
+        // A slot whose stores relay (`arg_relays`) or that a call's result in registers relays to the loads
+        // after it (`res_relays`) has no memory access.
+        self.res_relays();
+        fill(&mut self.rslot, b.slots.len(), false);
+        for i in 0..b.insts.len() {
+            if self.rload[i] != 0 {
+                let t = b.insts[i];
+                self.rslot[b.insts[b.pool[(t.c + b.pool[t.b as usize]) as usize] as usize].a as usize] = true;
+            }
+        }
         let mut at = out;
         for k in 0..b.slots.len() {
-            // A slot whose stores relay (`arg_relays`) has no memory access.
-            if self.lv.relays_slot(b, k as u32) {
+            if self.rslot[k] || self.lv.relays_slot(b, k as u32) {
                 continue;
             }
             let sl = b.slots[k];
@@ -3739,7 +3794,6 @@ extend Gen {
             self.c.store(8, S1, x::at(x::RSP, self.canary as i32));
         }
         self.ret_stores();
-        self.res_relays();
         let np = b.pool[b.sig as usize];
         let ni = b.insts.len() as u32;
         let e0 = b.blocks[0].param_start;
@@ -3990,7 +4044,7 @@ extend Gen {
     // Compile the block at layout position `q`.
     fn block(self: &mut Self, q: u32) bool {
         // The late edges' stubs at the first place no block falls into, once their targets are compiled.
-        if !self.stubs_out && self.ends_jump() && self.late_ready(q) {
+        if !self.stubs_out && self.ends_jump(q) && self.late_ready(q) {
             self.late_stubs();
         }
         self.pos = q;
@@ -4278,6 +4332,8 @@ extend Gen {
                 va.reg = spa.reg;
                 va.dirty = false;
                 self.heir[spa.reg as usize] = x;
+                // The register stays a home (an argument that dies at this edge gave it up, `free_home`).
+                self.fixed_busy |= bit(spa.reg);
                 return;
             }
         }
@@ -7683,8 +7739,8 @@ extend Gen {
             }
             let rv = self.reg(t.b);
             if r == RMW_XCHG || r == RMW_ADD || r == RMW_SUB {
-                let rd = self.def(i);
-                self.c.mov_rr(8, rd, rv);
+                // The old value replaces the operand in its register when the operand dies here.
+                let rd = self.def_from(i, t.b, rv);
                 if r == RMW_XCHG {
                     self.c.xchg_m(sz, rd, m);
                 } else {
@@ -7721,6 +7777,8 @@ extend Gen {
         let rn = self.reg(t.c);
         self.c.mov_rr(8, x::RAX, re);
         self.c.lock_cmpxchg(sz, rn, m);
+        // The value rax got back is no result: the flag may take rax.
+        self.lock &= ~bit(x::RAX);
         self.cond_value(i, x::CC_E, NONE, false);
         return true;
     }

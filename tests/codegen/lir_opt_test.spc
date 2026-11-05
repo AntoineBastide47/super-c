@@ -8759,6 +8759,57 @@ data @wtbl size 16 align 3 bytes 00000000000000000000000000000000 reloc 8 @area
     same_result(&b, &a, "f", x, 21);
 }
 
+// A body waits for the functions of the read-only tables it names (`Calls`): a call through one that the
+// walk makes direct (`fold_ptr`) inlines as a direct call does (`Run::direct_known`). `@f`'s call of `@area`
+// through `@vtbl` is gone, the product in its place; `@g`'s, through the writable `@wtbl`, stays.
+@test
+fn a_method_a_constant_table_holds_inlines() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @area fn global
+sym @vtbl data global
+sym @wtbl data global
+sym @f fn global
+sym @g fn global
+fn @area
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  v2 = iconst.i32 3
+  v3 = mul.i32 v1, v2
+  ret v3
+fn @f
+  sig (i32) -> i32
+  slot s0 size 4 align 2
+b0(v0: i32):
+  v1 = slotaddr s0
+  store v0, v1 align 2
+  v2 = symaddr @vtbl
+  v3 = load.ptr v2+8 align 3
+  v4 = call.ind.i32 v3(v1) : (ptr) -> i32
+  ret v4
+fn @g
+  sig (i32) -> i32
+  slot s0 size 4 align 2
+b0(v0: i32):
+  v1 = slotaddr s0
+  store v0, v1 align 2
+  v2 = symaddr @wtbl
+  v3 = load.ptr v2+8 align 3
+  v4 = call.ind.i32 v3(v1) : (ptr) -> i32
+  ret v4
+data @vtbl size 16 align 3 ro bytes 00000000000000000000000000000000 reloc 8 @area
+data @wtbl size 16 align 3 bytes 00000000000000000000000000000000 reloc 8 @area
+)",
+    );
+    let f = text_of(&a, "f");
+    assert(!f.contains("call") && f.contains("mul.i32") && !f.contains("slotaddr"), f.as_str());
+    let g = text_of(&a, "g");
+    assert(g.contains("call.ind"), g.as_str());
+    let x: []u64 = [7];
+    same_result(&b, &a, "f", x, 21);
+}
+
 // A load of a slot that spans several writes (a tag byte and a payload word, one path filling the payload)
 // is a load of each written place combined: the slot then holds values, and the bits each reader takes
 // come from their writes.
@@ -11765,4 +11816,124 @@ b0(v0: i32):
         let x: []u64 = [7];
         same_result(&b, &a, "drive", x, 14);
     }
+}
+
+// A slot of constant stores that a direct call takes as an aggregate its callee only loads from goes to
+// read-only data, the address in it a relocation, the stores and the values only they read gone: `@site`'s
+// two string-like pairs (one stored whole as `or` of the address's zero extension and the length above
+// it, one field by field) become data. `@poke` writes its parameter, so `@other`'s pair stays a slot.
+// Both give the results they gave.
+@test
+fn constant_aggregate_arguments_a_callee_only_reads_go_to_data() {
+    let text = M"(lir ptr 4
+sym @msg data global
+sym @take fn global noinline
+sym @poke fn global noinline
+sym @site fn global
+sym @other fn global
+data @msg size 4 align 0 ro bytes 68692100
+fn @take
+  layout l0 size 8 align 2 [0 ptr, 4 i32]
+  sig (l0, l0) -> i32
+b0(v0: ptr, v1: ptr):
+  v2 = load.i32 v0+4 align 2
+  v3 = load.ptr v1 align 2
+  v4 = load.i8 v3+1 align 0
+  v5 = zext.i32 v4
+  v6 = add.i32 v2, v5
+  v7 = load.i32 v1+4 align 2
+  v8 = add.i32 v6, v7
+  ret v8
+fn @poke
+  layout l0 size 8 align 2 [0 ptr, 4 i32]
+  sig (l0) -> i32
+b0(v0: ptr):
+  v1 = iconst.i32 9
+  store v1, v0+4 align 2
+  v2 = load.i32 v0+4 align 2
+  ret v2
+fn @site
+  layout l0 size 8 align 2 [0 ptr, 4 i32]
+  sig () -> i32
+  slot s0 size 8 align 2
+  slot s1 size 8 align 2
+b0:
+  v0 = slotaddr s0
+  v1 = symaddr @msg
+  v2 = ptrtoint.i32 v1
+  v3 = zext.i64 v2
+  v4 = iconst.i64 12884901888
+  v5 = or.i64 v3, v4
+  store v5, v0 align 2
+  v6 = slotaddr s1
+  store v1, v6 align 2
+  v7 = iconst.i32 5
+  store v7, v6+4 align 2
+  v8 = call.i32 @take(v0, v6) : (l0, l0) -> i32
+  ret v8
+fn @other
+  layout l0 size 8 align 2 [0 ptr, 4 i32]
+  sig () -> i32
+  slot s0 size 8 align 2
+b0:
+  v0 = slotaddr s0
+  v1 = symaddr @msg
+  store v1, v0 align 2
+  v2 = iconst.i32 3
+  store v2, v0+4 align 2
+  v3 = call.i32 @poke(v0) : (l0) -> i32
+  ret v3
+)";
+    let (b, a) = optimized(text);
+    let s = text_of(&a, "site");
+    assert(
+        !s.contains("slotaddr") && !s.contains("or.i64") && !s.contains("ptrtoint") && s.contains("@site.const0") && s.contains(
+            "@site.const1",
+        ),
+        s.as_str(),
+    );
+    let o = text_of(&a, "other");
+    assert(o.contains("slotaddr"), o.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "other", none, 9);
+    // With 8-byte pointers (which the evaluator keeps whole) `@site` gives the sum it gave.
+    let wide = M"(lir ptr 8
+sym @msg data global
+sym @take fn global noinline
+sym @site fn global
+data @msg size 4 align 0 ro bytes 68692100
+fn @take
+  layout l0 size 16 align 3 [0 ptr, 8 i32]
+  sig (l0, l0) -> i32
+b0(v0: ptr, v1: ptr):
+  v2 = load.i32 v0+8 align 3
+  v3 = load.ptr v1 align 3
+  v4 = load.i8 v3+1 align 0
+  v5 = zext.i32 v4
+  v6 = add.i32 v2, v5
+  v7 = load.i32 v1+8 align 3
+  v8 = add.i32 v6, v7
+  ret v8
+fn @site
+  layout l0 size 16 align 3 [0 ptr, 8 i32]
+  sig () -> i32
+  slot s0 size 16 align 3
+  slot s1 size 16 align 3
+b0:
+  v0 = slotaddr s0
+  v1 = symaddr @msg
+  store v1, v0 align 3
+  v2 = iconst.i32 3
+  store v2, v0+8 align 3
+  v3 = slotaddr s1
+  store v1, v3 align 3
+  v4 = iconst.i32 5
+  store v4, v3+8 align 3
+  v5 = call.i32 @take(v0, v3) : (l0, l0) -> i32
+  ret v5
+)";
+    let (wb, wa) = optimized(wide);
+    let ws = text_of(&wa, "site");
+    assert(!ws.contains("slotaddr"), ws.as_str());
+    same_result(&wb, &wa, "site", none, 3 + 0x69 + 5);
 }

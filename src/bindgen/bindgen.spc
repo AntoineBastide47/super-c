@@ -683,6 +683,11 @@ pub(package) fn header_env(target: i32, arch: i32, sysroot: str, flags: str, env
     return ct::c_target(target, arch, sysroot, env) && ct::apply_c_flags(flags, env);
 }
 
+/// `header_env` with the built-in headers alone (`ct::builtin_target`), for a target without a sysroot.
+pub(package) fn builtin_env(target: i32, arch: i32, flags: str, env: &mut ct::CTarget) bool {
+    return ct::builtin_target(target, arch, env) && ct::apply_c_flags(flags, env);
+}
+
 /// The facts of the C headers whose `#include` lines are `pre` (in a C unit's order) under C environment
 /// `env` (`header_env`) that a native build reads: the
 /// values of the integer constants `names` it defines (macros, which may name enumerators and other

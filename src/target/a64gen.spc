@@ -114,6 +114,7 @@ pub(package) struct Gen {
     rstore: Vector<u32>, // per instruction, 1 + the result part a store moves into its register (`ret_stores`), else 0
     rparts: u64, // the registers of the result parts when stores move values into them (`rstore`), which `alloc` takes last
     rload: Vector<u32>, // per call, the loads after it its result's registers give (`res_relays`)
+    rslot: Vector<bool>, // per slot, whether a call's result relays it (`rload`): no memory
     suse: Vector<u32>, // per slot, the uses of its addresses (`place::slot_uses`)
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
@@ -240,6 +241,7 @@ extend Gen {
             rstore: Vector::<u32>::new(),
             rparts: 0,
             rload: Vector::<u32>::new(),
+            rslot: Vector::<bool>::new(),
             suse: Vector::<u32>::new(),
             pos: 0,
             cur: 0,
@@ -776,26 +778,36 @@ extend Gen {
     // that only gives them another type: `ra` itself when `a` dies here and `v` takes no fixed home, else
     // a copy of it.
     fn def_from(self: &mut Self, v: Value, a: Value, ra: u8) u8 {
+        if self.takes(v, a, ra) {
+            return ra;
+        }
+        let rd = self.def(v);
+        self.move_reg(self.vt(v), rd, ra);
+        return rd;
+    }
+
+    // Whether value `v`, which takes no fixed home, takes register `ra` of its operand `a`: `ra` holds a
+    // temporary, or `a`, which dies here. Bound to it when so.
+    fn takes(self: &mut Self, v: Value, a: Value, ra: u8) bool {
         let x = self.vx(v);
         let xa = self.vx(a);
         let t = self.vt(v);
         let fixed = self.va[x as usize].home == H_FIXED || self.fix_class(x) != FIX_NONE;
-        if !fixed && ((XALLOC | valloc()) & bit(ra)) != 0 && (is_v(t) || is_vec(t)) == ra >= V0 {
-            let own = self.owner[ra as usize];
-            let temp = own == NONE && (self.tmps & bit(ra)) != 0;
-            let dies = own == xa && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
-            if temp || dies {
-                if dies {
-                    self.drop_reg(xa);
-                }
-                self.tmps &= ~bit(ra);
-                self.bind(x, ra);
-                return ra;
-            }
+        if fixed || ((XALLOC | valloc()) & bit(ra)) == 0 || (is_v(t) || is_vec(t)) != ra >= V0 {
+            return false;
         }
-        let rd = self.def(v);
-        self.move_reg(t, rd, ra);
-        return rd;
+        let own = self.owner[ra as usize];
+        let temp = own == NONE && (self.tmps & bit(ra)) != 0;
+        let dies = own == xa && self.lv.uses[xa as usize] == 0 && self.lv.end[xa as usize] == self.pos;
+        if !temp && !dies {
+            return false;
+        }
+        if dies {
+            self.drop_reg(xa);
+        }
+        self.tmps &= ~bit(ra);
+        self.bind(x, ra);
+        return true;
     }
 
     // `def` of instruction `i`, one machine instruction that reads its operands before it writes its
@@ -1201,7 +1213,14 @@ extend Gen {
         if e <= dp {
             return self.cpre[self.lv.last[x as usize] as usize] > self.cpre[from as usize];
         }
-        return self.cpre[(bk.start + bk.len) as usize] > self.cpre[from as usize] || self.cpos[e as usize + 1] > self.cpos[dp as usize + 1];
+        // In its last block, up to its last use when its range ends there (`last_read`).
+        let l = self.lv.last_read(b, x);
+        let tail = if l != NONE {
+            self.cpre[l as usize] > self.cpre[b.blocks[self.lv.order[e as usize] as usize].start as usize]
+        } else {
+            self.cpos[e as usize + 1] > self.cpos[e as usize]
+        };
+        return self.cpre[(bk.start + bk.len) as usize] > self.cpre[from as usize] || self.cpos[e as usize] > self.cpos[dp as usize + 1] || tail;
     }
 
     // Whether instruction `i` is in a rare block (`Live::rare`): when it calls, the scratch homes that live past
@@ -1687,10 +1706,11 @@ extend Gen {
         w.dirty = false;
     }
 
-    // Whether the code so far ends with a branch that nothing falls past: `b`, `br` or `ret`.
-    const fn ends_jump(self: &Self) bool {
+    // Whether no block falls into layout position `q`: the code so far ends with a branch that nothing
+    // falls past (`b`, `br` or `ret`), and the block before `q` has code (an empty one falls through).
+    const fn ends_jump(self: &Self, q: u32) bool {
         let n = self.code.len();
-        if n == 0 {
+        if n == 0 || q == 0 || self.blk_at[self.lv.order[q as usize - 1] as usize] == n as u32 {
             return false;
         }
         let w = self.code[n - 1];
@@ -2525,10 +2545,19 @@ extend Gen {
         self.max_align = 16;
         self.sret_off = -1;
         fill(&mut self.slot_off, b.slots.len(), 0);
+        // A slot whose stores relay (`arg_relays`) or that a call's result in registers relays to the loads
+        // after it (`res_relays`) has no memory access.
+        self.res_relays();
+        fill(&mut self.rslot, b.slots.len(), false);
+        for i in 0..b.insts.len() {
+            if self.rload[i] != 0 {
+                let t = b.insts[i];
+                self.rslot[b.insts[b.pool[(t.c + b.pool[t.b as usize]) as usize] as usize].a as usize] = true;
+            }
+        }
         let mut at = out;
         for k in 0..b.slots.len() {
-            // A slot whose stores relay (`arg_relays`) has no memory access.
-            if self.lv.relays_slot(b, k as u32) {
+            if self.rslot[k] || self.lv.relays_slot(b, k as u32) {
                 continue;
             }
             let sl = b.slots[k];
@@ -2590,7 +2619,6 @@ extend Gen {
             self.mem(a::M_X, false, a::IP0 as u8, a::SP, self.canary);
         }
         self.ret_stores();
-        self.res_relays();
         if self.va_save != NONE {
             // The argument registers the fixed parameters leave, where `va_arg` reads them.
             for r in self.self_lay.named_gp as u32..8 {
@@ -2868,7 +2896,7 @@ extend Gen {
     // Compile the block at layout position `q`.
     fn block(self: &mut Self, q: u32) bool {
         // The late edges' stubs at the first place no block falls into, once their targets are compiled.
-        if !self.stubs_out && self.ends_jump() && self.late_ready(q) {
+        if !self.stubs_out && self.ends_jump(q) && self.late_ready(q) {
             self.late_stubs();
         }
         self.pos = q;
@@ -3182,6 +3210,8 @@ extend Gen {
                 va.reg = spa.reg;
                 va.dirty = false;
                 self.heir[spa.reg as usize] = x;
+                // The register stays a home (an argument that dies at this edge gave it up, `free_home`).
+                self.fixed_busy |= bit(spa.reg);
                 return;
             }
         }
@@ -6418,7 +6448,16 @@ extend Gen {
         let rel2 = rel || fo == MO_SEQ_CST;
         let re = self.reg(t.b) as u32;
         let rn = self.reg(t.c) as u32;
-        let rd = self.def(i) as u32;
+        // Written by the last instruction, after every read: a dying operand's register may take it.
+        let rd = if self.takes(i, t.a, rp as u8) {
+            rp
+        } else if self.takes(i, t.b, re as u8) {
+            re
+        } else if self.takes(i, t.c, rn as u8) {
+            rn
+        } else {
+            self.def(i) as u32
+        };
         if unsafe (*self.pkg).lse {
             self.emit(a::mov_reg(true, a::IP0, re));
             self.emit(a::cas(size, acq2, rel2, a::IP0, rn, rp));

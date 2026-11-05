@@ -218,6 +218,8 @@ pub(package) struct Inliner {
     edges: Vector<u32>,
     seen: Vector<bool>, // `folds_small`'s scratch
     work: Vector<u32>,
+    /// Per caller instruction, whether `run` may inline its call; empty: every call.
+    pub(package) only: Vector<bool>,
 }
 
 // The bases of one callee copy's tables in the new body.
@@ -244,6 +246,7 @@ extend Inliner {
             seen: Vector::<bool>::new(),
             work: Vector::<u32>::new(),
             edges: Vector::<u32>::new(),
+            only: Vector::<bool>::new(),
         };
     }
 
@@ -304,7 +307,7 @@ extend Inliner {
                 } else {
                     NONE
                 };
-                if callee == NONE || level[callee as usize] >= level[ci as usize] || !ok[callee as usize] || unit[callee as usize] != NONE && unit[callee as usize] != unit[ci as usize] {
+                if callee == NONE || self.only.len() != 0 && !self.only[i as usize] || level[callee as usize] >= level[ci as usize] || !ok[callee as usize] || unit[callee as usize] != NONE && unit[callee as usize] != unit[ci as usize] {
                     self.cmap[i as usize] = ni;
                     ni += 1;
                     continue;

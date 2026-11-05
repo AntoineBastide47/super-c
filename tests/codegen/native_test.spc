@@ -1832,6 +1832,217 @@ b2(v11: i64):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A value a loop's entry edge passes that no block the loop reaches reads takes the same register as the
+// loop's parameter (`lv::Live::entry_partner`; arm64), its early return laid out before the loop
+// (`early_returns`): `@gcd`'s `a`, which that return reads, is the loop's first parameter in x0, so only the
+// loop's two moves stay (no copy on the entry or the exit). It gives the C results.
+@test
+fn loop_parameters_take_the_registers_of_values_dead_in_the_loop() {
+    let lir = M"(lir ptr 8
+sym @gcd fn global
+fn @gcd
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.eq v1, v2
+  br v3, b3, b1(v0, v1)
+b1(v4: i32, v5: i32):
+  v6 = urem.i32 v4, v5
+  v7 = icmp.eq v6, v2
+  br v7, b2(v5), b1(v5, v6)
+b2(v8: i32):
+  ret v8
+b3:
+  ret v0
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj), "the object");
+    // Register copies (`mov`: ORR with the zero register, either width).
+    assert_eq(elf_text_count(&obj, 0x7FE0FFE0, 0x2A0003E0), 2);
+    let drv = "#include <stdint.h>\nuint32_t gcd(uint32_t, uint32_t);\nint main(void) {\n  for (uint32_t a = 0; a < 40; a++)\n    for (uint32_t b = 0; b < 40; b++) {\n      uint32_t x = a, y = b;\n      while (y != 0) { uint32_t r = x % y; x = y; y = r; }\n      if (gcd(a, b) != x) return 1;\n    }\n  return 0;\n}\n";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+        assert_eq(run_wasm(lir, drv), 0);
+    }
+}
+
+// An edge that passes only constants past a loop has its moves in a stub at the first place no block falls
+// into (`lv::Live::late`); a block with no code falls into the next, so that is not such a place: `b27`,
+// whose arguments already sit in `b1`'s parameter registers (`lv::Live::entry_partner`), has none after
+// loop `b14` ends with a jump. The stub of `b0`'s edge to `b27` went between them and jumped to itself
+// (arm64: a `b` one word back, to its move). It gives the C results.
+@test
+fn late_edge_stubs_skip_blocks_without_code() {
+    let lir = M"(lir ptr 8
+sym @sv fn global
+sym @sift fn global
+sym @oops fn global
+sym @tick fn global
+sym @cancel fn global
+sym @slot data global
+sym @msg data global
+fn @sv
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (ptr, i64, i8) -> void
+  ref p0 24 noalias
+  owned p0 0
+  bool p2
+  slot s0 size 16 align 3
+b0(v0: ptr, v1: i64, v2: i8):
+  v3 = iconst.i32 0
+  v4 = iconst.i32 2048
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i32 1
+  v8 = slotaddr s0
+  v9 = symaddr @msg
+  v10 = iconst.i64 33
+  v11 = load.i64 v0+8 align 3 tbaa 4
+  v12 = sub.i64 v11, v1
+  v13 = lshr.i64 v12, v6
+  v14 = icmp.ne v13, v5
+  br v14, b14(v4, v13), b27(v4)
+b1(v15: i64, v16: i32):
+  v17 = icmp.ugt v15, v6
+  br v17, b3, b2
+b2:
+  ret
+b3:
+  v18 = sub.i32 v16, v7
+  v19 = icmp.eq v18, v3
+  br v19, b23, b24(v18, v3)
+b4:
+  v20 = sub.i64 v15, v6
+  v21 = add.i64 v1, v20
+  v22 = load.i64 v0+8 align 3 tbaa 4
+  v23 = icmp.ult v1, v21
+  v24 = select.i64 v23, v21, v1
+  v25 = icmp.ule v22, v24
+  br v25, b6, b5
+b5:
+  v26 = load.ptr v0 align 3 tbaa 8
+  v27 = ptradd v26, v1 * 8
+  v28 = load.i64 v27 align 3 tbaa 4
+  v29 = ptradd v26, v21 * 8
+  v30 = load.i64 v29 align 3 tbaa 4
+  store v30, v27 align 3 tbaa 4
+  store v28, v29 align 3 tbaa 4
+  call @sift(v0, v1, v5, v20, v2) : (ptr, i64, i64, i64, i8) -> void
+  jmp b1(v20, v77)
+b6: unlikely
+  store v9, v8 align 3
+  store v10, v8+8 align 3
+  call @oops(v8) : (l0) -> void
+  unreachable
+b7:
+  v31 = iconst.ptr 0
+  v32 = symaddr @slot
+  v33 = load.ptr v32 align 3 tbaa 8
+  v34 = icmp.ne v33, v31
+  br v34, b8, b10
+b8:
+  v35 = load.i32 v33+32 align 2 tbaa 3
+  v36 = icmp.ne v35, v3
+  v37 = select.ptr v36, v31, v33
+  v38 = icmp.eq v37, v31
+  br v38, b10, b9
+b9:
+  store v3, v37+316 align 2 tbaa 3
+  v39 = load.i32 v37+304 align 2 tbaa 3
+  v40 = add.i32 v39, v7
+  store v40, v37+304 align 2 tbaa 3
+  jmp b10
+b10:
+  v41 = symaddr @slot
+  v42 = load.ptr v41 align 3 tbaa 8
+  v43 = icmp.ne v42, v31
+  br v43, b11, b13
+b11:
+  v44 = load.i32 v42+32 align 2 tbaa 3
+  v45 = icmp.ne v44, v3
+  v46 = select.ptr v45, v31, v42
+  v47 = icmp.eq v46, v31
+  br v47, b13, b12
+b12:
+  v48 = load.i32 v46+304 align 2 tbaa 3
+  v49 = sub.i32 v48, v7
+  store v49, v46+304 align 2 tbaa 3
+  store v7, v46+316 align 2 tbaa 3
+  ret
+b13:
+  ret
+b14(v50: i32, v51: i64):
+  v52 = sub.i32 v50, v7
+  v53 = icmp.eq v52, v3
+  br v53, b25, b26(v52, v3)
+b15:
+  v54 = sub.i64 v51, v6
+  call @sift(v0, v1, v54, v12, v2) : (ptr, i64, i64, i64, i8) -> void
+  v55 = icmp.ne v54, v5
+  br v55, b14(v82, v54), b27(v82)
+b16:
+  v56 = iconst.ptr 0
+  v57 = symaddr @slot
+  v58 = load.ptr v57 align 3 tbaa 8
+  v59 = icmp.ne v58, v56
+  br v59, b17, b19
+b17:
+  v60 = load.i32 v58+32 align 2 tbaa 3
+  v61 = icmp.ne v60, v3
+  v62 = select.ptr v61, v56, v58
+  v63 = icmp.eq v62, v56
+  br v63, b19, b18
+b18:
+  store v3, v62+316 align 2 tbaa 3
+  v64 = load.i32 v62+304 align 2 tbaa 3
+  v65 = add.i32 v64, v7
+  store v65, v62+304 align 2 tbaa 3
+  jmp b19
+b19:
+  v66 = symaddr @slot
+  v67 = load.ptr v66 align 3 tbaa 8
+  v68 = icmp.ne v67, v56
+  br v68, b20, b22
+b20:
+  v69 = load.i32 v67+32 align 2 tbaa 3
+  v70 = icmp.ne v69, v3
+  v71 = select.ptr v70, v56, v67
+  v72 = icmp.eq v71, v56
+  br v72, b22, b21
+b21:
+  v73 = load.i32 v71+304 align 2 tbaa 3
+  v74 = sub.i32 v73, v7
+  store v74, v71+304 align 2 tbaa 3
+  store v7, v71+316 align 2 tbaa 3
+  ret
+b22:
+  ret
+b23: unlikely
+  v75 = call.i32 @tick() : () -> i32
+  v76 = call.i32 @cancel() : () -> i32
+  jmp b24(v75, v76)
+b24(v77: i32, v78: i32):
+  v79 = icmp.eq v78, v7
+  br v79, b7, b4
+b25: unlikely
+  v80 = call.i32 @tick() : () -> i32
+  v81 = call.i32 @cancel() : () -> i32
+  jmp b26(v80, v81)
+b26(v82: i32, v83: i32):
+  v84 = icmp.eq v83, v7
+  br v84, b16, b15
+b27(v85: i32):
+  jmp b1(v12, v85)
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj), "the object");
+    assert_eq(elf_text_count(&obj, 0xFFFFFFFF, 0x17FFFFFF), 0);
+    let drv = "#include <stdint.h>\n#include <stdlib.h>\nstruct V { int64_t *p; uint64_t n; };\nstruct M { const void *s; int64_t n; };\nvoid sv(struct V *, uint64_t, uint8_t);\nvoid *slot = 0;\nchar msg[33];\nstatic uint64_t l[64], c;\nvoid sift(struct V *v, uint64_t f, uint64_t k, uint64_t n, uint8_t u) { l[c++] = k * 1000 + n + f * 100000 + u * 10000000; }\nvoid oops(struct M m) { exit(3); }\nint tick(void) { return 2048; }\nint cancel(void) { return 0; }\nint main(void) {\n  static int64_t a[40], w[40];\n  for (uint64_t len = 0; len < 40; len++)\n    for (uint64_t f = 0; f <= len && f < 3; f++) {\n      struct V v = {a, len};\n      for (uint64_t i = 0; i < len; i++) a[i] = w[i] = (int64_t)(i * 7 % 13);\n      c = 0;\n      sv(&v, f, (uint8_t)(len & 1));\n      uint64_t n = len - f, q = 0, x = f * 100000 + (len & 1) * 10000000;\n      for (uint64_t k = n / 2; k > 0; k--, q++)\n        if (l[q] != (k - 1) * 1000 + n + x) return 1;\n      for (uint64_t e = n; e > 1; e--, q++) {\n        int64_t s = w[f]; w[f] = w[f + e - 1]; w[f + e - 1] = s;\n        if (l[q] != e - 1 + x) return 2;\n      }\n      if (c != q) return 4;\n      for (uint64_t i = 0; i < len; i++)\n        if (a[i] != w[i]) return 5;\n    }\n  return 0;\n}\n";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A branch on an `and` of two comparisons whose second operand lives in memory across a call, its false
 // edge the next block: the jump after the first comparison does not take that block, which keeps the
 // registers the second comparison leaves (x86-64 `branch_conj`).
@@ -6050,6 +6261,132 @@ int main(void) {
     }
 }
 
+// Whether `bytes` holds an x86-64 64-bit `mov` between a register and `[rsp + d]` (REX.W 89 or 8B, a
+// ModRM byte with a SIB byte of rsp alone).
+fn rsp_moves(bytes: &Vector<u8>) bool {
+    for at in 0..bytes.len() - 3 {
+        let r = bytes[at];
+        let m = bytes[at + 2];
+        if (r & 0xF8) == 0x48 && (bytes[at + 1] == 0x89 || bytes[at + 1] == 0x8B) && m < 0xC0 && (m & 7) == 4 && bytes[at + 3] == 0x24 {
+            return true;
+        }
+    }
+    return false;
+}
+
+// x86-64: the registers a loop's values take are capped by the largest need of the loop's blocks, not of
+// the body: `@acc`'s last block multiplies with an overflow test, which needs 8 registers, while its loop keeps 7 values,
+// all in registers (no `[rsp]` move). It gives the C results.
+@test
+fn x86_loop_homes_take_their_blocks_cap() {
+    let lir = M"(lir ptr 8
+sym @acc fn global
+fn @acc
+  sig (ptr, i64, ptr) -> void
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3, v3, v3, v3, v3)
+b1(v5: i64, v6: i64, v7: i64, v8: i64, v9: i64):
+  v10 = icmp.ult v5, v1
+  br v10, b2, b3
+b2:
+  v11 = ptradd v0, v5 * 8
+  v12 = load.i64 v11 align 3
+  v13 = add.i64 v6, v12
+  v14 = xor.i64 v7, v12
+  v15 = sub.i64 v8, v12
+  v16 = or.i64 v9, v12
+  v17 = add.i64 v5, v4
+  jmp b1(v17, v13, v14, v15, v16)
+b3:
+  v18 = add.i64 v6, v7
+  v19 = add.i64 v18, v8
+  v20 = add.i64 v19, v9
+  store v20, v2 align 3
+  jmp b4
+b4:
+  v21 = load.i64 v2 align 3
+  v22, v23 = mulo.u.i64 v21, v21
+  v24 = zext.i64 v23
+  v25 = add.i64 v22, v24
+  store v25, v2+8 align 3
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+void acc(const uint64_t *, int64_t, uint64_t *);
+int main(void) {
+  static uint64_t s[9];
+  uint64_t a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0;
+  for (int k = 0; k < 9; k++) {
+    s[k] = (uint64_t)k * 0x9E3779B97F4A7C15u + 3;
+    a += s[k]; b ^= s[k]; c -= s[k]; d |= s[k];
+  }
+  uint64_t r[2] = {5, 7};
+  acc(s, 9, r);
+  uint64_t w = a + b + c + d;
+  (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h;
+  uint64_t q;
+  int o = __builtin_mul_overflow(w, w, &q);
+  return r[0] != w || r[1] != q + (uint64_t)o;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    assert(!rsp_moves(&obj), "a spill");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// A call's aggregate result in registers that loads alone read stays in those registers: the loads fold
+// into no memory operand (`lv::result_load`) and its slot has no memory (`rslot`); the swap of the two parts
+// for the return breaks its cycle through r11 (x86-64 `scratch`). `n`, read before the call only, takes no
+// callee-saved register (its range ends at its last read in the call's block, `lv::Live::last_read`): arm64
+// saves no x19. It gives the C results.
+@test
+fn call_results_in_registers_stay_there() {
+    let lir = M"(lir ptr 8
+sym @fp fn global
+fn @fp
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i32) -> l0
+  slot s0 size 16 align 3
+b0(v0: i32, v1: ptr):
+  v2 = slotaddr s0
+  v3 = iconst.i32 0
+  v4 = iconst.i32 1
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = icmp.eq v0, v3
+  br v7, b2, b1
+b1:
+  v8 = sub.i32 v0, v4
+  call @fp(v8, v2) : (i32) -> l0
+  v9 = load.i64 v2 align 3
+  v10 = load.i64 v2+8 align 3
+  v11 = add.i64 v9, v10
+  store v10, v1 align 3
+  store v11, v1+8 align 3
+  ret
+b2:
+  store v5, v1 align 3
+  store v6, v1+8 align 3
+  ret
+)";
+    let drv = "#include <stdint.h>\ntypedef struct { uint64_t a, b; } P;\nP fp(uint32_t);\nint main(void) {\n  uint64_t a = 0, b = 1;\n  for (uint32_t n = 0; n < 60; n++) {\n    P p = fp(n);\n    if (p.a != a || p.b != b) return 1;\n    uint64_t t = a + b; a = b; b = t;\n  }\n  return 0;\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    assert(!rsp_moves(&obj), "a store of the result");
+    let mut a64 = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut a64), "the object");
+    // `stp xN, x19, [sp, #-d]!`: x19 saved.
+    assert_eq(elf_text_count(&a64, 0xFFC07C00, 0xA9804C00), 0);
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // Whether `bytes` holds an x86-64 64-bit copy between two registers (REX.W 89 or 8B, a register ModRM
 // byte) but the frame's `mov rbp, rsp`.
 fn reg_copies(bytes: &Vector<u8>) bool {
@@ -6060,6 +6397,53 @@ fn reg_copies(bytes: &Vector<u8>) bool {
         }
     }
     return false;
+}
+
+// An atomic's result takes the register of an operand that dies there: x86-64 `lock xadd` returns the old
+// value in the register the constant was built in (no copy), arm64's compare-and-swap sets its flag in the
+// pointer's register, which the return takes (no `mov x0`; an exclusive-access loop's old value cannot take
+// the address's register, which the loop reads again). They give the C results.
+@test
+fn atomic_results_take_dying_operands_registers() {
+    let swap = M"(sym @swap fn global
+fn @swap
+  sig (ptr, i32, i32) -> i8
+b0(v0: ptr, v1: i32, v2: i32):
+  v3 = acas v0, v1, v2 seq_cst seq_cst
+  ret v3
+)";
+    let lir = format(
+        M"(lir ptr 8
+sym @inc fn global
+fn @inc
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = iconst.i64 1
+  v2 = armw.add.i64 v1, v0 relaxed
+  ret v2
+{})",
+        swap,
+    );
+    let drv = "#include <stdint.h>\nint64_t inc(int64_t *);\nint8_t swap(int32_t *, int32_t, int32_t);\nint main(void) {\n  int64_t c = 41;\n  if (inc(&c) != 41 || c != 42) return 1;\n  int32_t x = 5;\n  if (swap(&x, 4, 9) != 0 || x != 5) return 2;\n  if (swap(&x, 5, 9) != 1 || x != 9) return 3;\n  return 0;\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(&lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    let mut a64 = Vector::<u8>::new();
+    let one = format("lir ptr 8\n{}", swap);
+    assert(
+        object_of(&one, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut a64),
+        "the object",
+    );
+    // `mov rax, rcx` (the old value copied) after `xadd`.
+    let mut copied = false;
+    for at in 0..obj.len() - 2 {
+        copied = copied || obj[at] == 0x48 && (obj[at + 1] == 0x89 && obj[at + 2] == 0xC8 || obj[at + 1] == 0x8B && obj[at + 2] == 0xC1);
+    }
+    assert(!copied, "a copy of the old value");
+    // `mov x0, xN`.
+    assert_eq(elf_text_count(&a64, 0xFFE0FFFF, 0xAA0003E0), 0);
+    if cli::has_cc() {
+        assert_eq(run_native(&lir, drv), 0);
+    }
 }
 
 // x86-64: a loop's sums that one `lea` makes (`acc + s[i] * 5 + 72`, two accumulators) take their header

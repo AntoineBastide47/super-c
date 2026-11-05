@@ -131,6 +131,7 @@ lifetime must be declared to outlive the storage's (`fn fill<'x>(w: &mut Vector<
   array (`a[lo..hi]`) checks its bounds at run time ("range out of bounds") and needs no `unsafe`.
   A field of a concrete instance has the instance's length (`Buf<i32, 4>.d` is `[i32; 4]`)
 - Every call to an `extern "C"` function
+- A read, write or borrow of a `static mut` (data races below)
 - A `Slice`/`SliceMut` literal (`unsafe SliceMut::<T> { ptr: p, len: n }`, Rust's
   `from_raw_parts`), and a write or `&mut` of a view's `ptr` or `len` field ("writing a field of a
   slice view")
@@ -159,6 +160,17 @@ in the same call (`h4(r, r as *mut i32)`) is not checked. A reference going into
 (an argument, a struct field, an array or tuple element) becomes the pointer there: the borrow is
 checked where it is made (it reads the place, so the place must be initialized) and ends at once, so
 `f(&mut a[0], &mut a[1])` with `*mut` parameters is accepted.
+
+A data race is undefined behavior (the C and Rust rule): two accesses to one non-atomic object from
+two threads, at least one of them a write, with no happens-before order between them. An atomic
+store with release order read by an atomic load with acquire order, a `Mutex` or `RwLock` release
+and the next acquisition, a thread's or task's start and join, and a channel's send and the receive
+of that value give that order. A relaxed atomic access is never a data race but orders no other
+access. The rule covers a `static mut`, a `@thread_local` one whose address reached another thread,
+and any memory a raw pointer reaches. So the optimizer may keep a `static mut` in a register through
+code with no synchronizing operation, no coroutine suspension point and no call that may access it:
+a loop loads it once and stores it once on each exit (a panic exit too), and no other thread sees
+the values in between.
 
 A reference casts only to a pointer to its own referent type (`&x as *const T` for `x: T`).
 Viewing the memory as another type is a second cast, from that pointer:

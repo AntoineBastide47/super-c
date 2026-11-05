@@ -6547,6 +6547,25 @@ fn raw_pointer_no_auto_deref() {
         ).as_str(),
         "no auto-dereference through a raw pointer",
     );
+    // A method a generic conformance offers the pointee, whose bounds the pointee meets or not: the one error
+    // names the explicit form (no error of the call it would make, nor of the bounds).
+    let grow = "interface Lane {}\nextend f32 as Lane {}\ninterface Grow { fn add(self: &Self, k: usize) Self; }\nextend<T: Lane + Copy> T as Grow { fn add(self: &Self, k: usize) T { return *self; } }\n";
+    expect_one_err(
+        "a generic conformance's method through a raw pointer",
+        format(
+            "{}fn f(p: *const f32, k: usize) *const f32 {{ return p.add(k); }}\nfn main() i32 {{ return 0; }}\n",
+            grow,
+        ).as_str(),
+        "no auto-dereference through a raw pointer: write '(*p).add(..)' inside 'unsafe'",
+    );
+    expect_one_err(
+        "a generic conformance's method outside its bounds through a raw pointer",
+        format(
+            "{}fn f(p: *const [u32; 4], k: usize) *const [u32; 4] {{ return p.add(k); }}\nfn main() i32 {{ return 0; }}\n",
+            grow,
+        ).as_str(),
+        "no auto-dereference through a raw pointer: write '(*p).add(..)' inside 'unsafe'",
+    );
     h::expect_err_msg(
         "explicit dereference still needs unsafe",
         format("{}fn main() i32 {{ let mut p = P {{ v: 1 }}; let q = &mut p as *mut P; return (*q).v; }}\n", decl).as_str(),

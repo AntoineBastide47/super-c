@@ -621,11 +621,12 @@ typedef __bf16 __m128bh __attribute__((__vector_size__(16), __aligned__(16)));
         name: "mm_malloc.h",
         arch: 1,
         text: M"(/* <mm_malloc.h>: aligned allocation for the SIMD intrinsics headers, over malloc. The alignment is a
-   power of two. */
+   power of two. It declares `malloc` and `free` as <stdlib.h> does: the SIMD types need no C library. */
 #ifndef __SC_MM_MALLOC_H
 #define __SC_MM_MALLOC_H
-#include <stdlib.h>
-static __inline__ void *_mm_malloc(size_t __size, size_t __align) {
+void *malloc(__SIZE_TYPE__);
+void free(void *);
+static __inline__ void *_mm_malloc(__SIZE_TYPE__ __size, __SIZE_TYPE__ __align) {
     void *__raw;
     char *__p;
     if (__align < sizeof(void *)) {
