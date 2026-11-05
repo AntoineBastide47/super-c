@@ -8444,7 +8444,7 @@ b0(v0: ptr, v1: ptr):
 // A `memcmp` of a small count whose result only an equality with 0 reads is a compare of loads (a 4-byte
 // and a 1-byte one each for 5 bytes, one for 4); a count a branch into the block settles counts too, and a
 // load of read-only bytes is their constant. A result an ordering reads is the order of the first pair of
-// loads that differs (17 bytes: three pairs); a count past 32 bytes keeps the call.
+// loads that differs (17 bytes: three pairs); an equality past 64 bytes keeps the call.
 @test
 fn small_memory_compares_expand() {
     let (b, a) = optimized(
@@ -8513,7 +8513,7 @@ fn @huge
 b0(v0: i64):
   v1 = symaddr @s
   v2 = symaddr @w
-  v3 = iconst.i64 33
+  v3 = iconst.i64 65
   v4 = iconst.i32 0
   v5 = ptradd v2, v0 * 1
   v6 = call.i32 @memcmp(v5, v1, v3) : (ptr, ptr, i64) -> i32
@@ -12203,4 +12203,319 @@ b2:
     // `@f`: its one load is the one after `@take`; `@g`: a load after `@ext`.
     assert(f.as_str().find("load.i64") > f.as_str().find("call @take"), f.as_str());
     assert(g.as_str().find("load.i64") > g.as_str().find("call.i64 @ext"), g.as_str());
+}
+
+// `optimized` for a target of `vector`-byte vectors that chains conditional comparisons when `ccmp` and
+// pairs no accesses.
+fn optimized_target(text: str, vector: u32, ccmp: bool) (Package, Package) {
+    let mut err = String::new();
+    let q = lparse::parse(text, &mut err);
+    assert(q.is_some(), err.as_str());
+    let before = q.unwrap();
+    let mut after = lparse::parse(text, &mut err).unwrap();
+    after.vector = vector;
+    after.ccmp = ccmp;
+    after.apairs = false;
+    let none = Vector::<bool>::new();
+    // Straight-line values pack where vectors interleave (`lir::slp`).
+    let nv: u32 = if vector != 0 {
+        2
+    } else {
+        0
+    };
+    lopt::optimize(
+        &mut after,
+        &none,
+        lopt::Config {
+            inline: il::SPEED,
+            loops: lu::Budgets {
+                peel: 0,
+                partial: 0,
+                version: 0,
+                unswitch: 0,
+                rotate: 0,
+                vector: nv,
+                interleave: nv,
+                fin: 0,
+            },
+        },
+    );
+    verified(&after);
+    return (before, after);
+}
+
+const WIDE_EQ: str = M"(lir ptr 8
+sym @memcmp fn global
+sym @s data global
+sym @w data global
+sym @eq40 fn global
+sym @chain fn global
+fn @eq40
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = symaddr @s
+  v2 = symaddr @w
+  v3 = iconst.i64 40
+  v4 = iconst.i32 0
+  v5 = ptradd v2, v0 * 1
+  v6 = call.i32 @memcmp(v5, v1, v3) : (ptr, ptr, i64) -> i32
+  v7 = icmp.eq v6, v4
+  ret v7
+fn @chain
+  sig (i64, i64, i64) -> i8
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = symaddr @s
+  v4 = symaddr @w
+  v5 = iconst.i64 40
+  v6 = iconst.i32 0
+  v7 = iconst.i8 0
+  v8 = icmp.eq v0, v5
+  br v8, b1, b4
+b1:
+  v9 = icmp.eq v1, v5
+  br v9, b2, b4
+b2:
+  v10 = icmp.eq v0, v1
+  br v10, b3, b4
+b3:
+  v11 = ptradd v4, v2 * 1
+  v12 = call.i32 @memcmp(v11, v3, v0) : (ptr, ptr, i64) -> i32
+  v13 = icmp.eq v12, v6
+  ret v13
+b4:
+  ret v7
+data @s size 64 align 0 ro bytes 68656c6c6f68656c6c6f68656c6c6f68656c6c6f68656c6c6f68656c6c6f68656c6c6f68656c6c6f000000000000000000000000000000000000000000000000
+data @w size 80 align 0 bytes 68656c6c6f68656c6c6f68656c6c6f68656c6c6f68656c6c6f68656c6c6f68656c6c6f68656c6c6f00000000000000000000000000000000000000000000000000000000000000000000000000000000
+)";
+
+// An equality `memcmp` of up to 64 bytes expands: in 8-byte pairs, or where the target computes 16-byte
+// vectors and chains no conditional comparisons, in 16-byte pairs (the last overlapping), its read-only
+// side constants; a count the branches up the chain of blocks into the call settle (each length tested
+// against 40, then against each other, which folds) counts too. A `memcmp` the package defines (wasm32's C
+// library) expands as the C library's does.
+@test
+fn equalities_of_up_to_64_bytes_expand() {
+    let (b, a) = optimized_target(WIDE_EQ, 0, true);
+    let e = text_of(&a, "eq40");
+    assert(!e.contains("call") && count_of(&e, "load.i64") == 5, e.as_str());
+    let c = text_of(&a, "chain");
+    assert(!c.contains("call") && !c.contains("icmp.eq v0, v1"), c.as_str());
+    let (_vb, va) = optimized_target(WIDE_EQ, 16, false);
+    let v = text_of(&va, "eq40");
+    assert(
+        !v.contains("call") && count_of(&v, "load.v16i8") == 3 && count_of(&v, "wconst.v16i8") == 3 && v.contains(
+            "reduce_or",
+        ),
+        v.as_str(),
+    );
+    let (_db, da) = optimized_target(
+        M"(lir ptr 8
+sym @memcmp fn global
+sym @five fn global
+fn @memcmp
+  sig (ptr, ptr, i64) -> i32
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i32 1
+  ret v3
+fn @five
+  sig (ptr, ptr) -> i8
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.i64 5
+  v3 = iconst.i32 0
+  v4 = call.i32 @memcmp(v0, v1, v2) : (ptr, ptr, i64) -> i32
+  v5 = icmp.eq v4, v3
+  ret v5
+)",
+        0,
+        true,
+    );
+    let f = text_of(&da, "five");
+    assert(!f.contains("call"), f.as_str());
+    for q in 0..2u64 {
+        let o: []u64 = [q];
+        same_result(&b, &a, "eq40", o, 1 - q);
+        same_result(&b, &va, "eq40", o, 1 - q);
+        let ch: []u64 = [40, 40, q];
+        same_result(&b, &a, "chain", ch, 1 - q);
+    }
+}
+
+// Two sides of a branch that copy one aggregate or another into one place and return: one copy of the
+// select of the two sources. Same instructions with three differences keep the branch.
+@test
+fn a_choice_of_two_aggregates_copies_once() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @pick fn global
+fn @pick
+  sig (i8, ptr, ptr, ptr) -> i64
+b0(v0: i8, v1: ptr, v2: ptr, v3: ptr):
+  v4 = iconst.i64 16
+  br v0, b1, b2
+b1:
+  memcpy v1, v2, v4
+  v5 = load.i64 v1 align 3
+  ret v5
+b2:
+  memcpy v1, v3, v4
+  v6 = load.i64 v1 align 3
+  ret v6
+)",
+    );
+    let p = text_of(&a, "pick");
+    assert(count_of(&p, "memcpy") == 1 && p.contains("select.ptr") && !p.contains("br "), p.as_str());
+    let _ = b;
+}
+
+// A call's aggregate result copied into the body's own aggregate result: the call writes the body's
+// result (the caller passes memory no other pointer of the call reaches, an `sret`), the copy goes.
+@test
+fn a_result_passed_on_is_written_in_place() {
+    let (_b, a) = optimized(
+        M"(lir ptr 8
+sym @make fn global noinline
+sym @fwd fn global
+fn @make
+  layout l0 size 32 align 3 [0 i64, 8 i64, 16 i64, 24 i64]
+  sig (i64) -> l0
+b0(v0: i64, v1: ptr):
+  store v0, v1 align 3
+  store v0, v1+24 align 3
+  ret
+fn @fwd
+  layout l0 size 32 align 3 [0 i64, 8 i64, 16 i64, 24 i64]
+  sig (i64) -> l0
+  slot s0 size 32 align 3
+b0(v0: i64, v1: ptr):
+  v2 = slotaddr s0
+  v3 = iconst.i64 32
+  call @make(v0, v2) : (i64) -> l0
+  memcpy.overlap v1, v2, v3
+  ret
+)",
+    );
+    let f = text_of(&a, "fwd");
+    assert(!f.contains("memcpy") && f.contains("call @make(v0, v1)"), f.as_str());
+}
+
+// Stores of a value and of that value plus 1 to 7 at consecutive places pack as vector sums of the value
+// in every lane and the constants (the value's lane adds 0), on a target of 16-byte vectors; on a target
+// that pairs scalar stores (`Package.apairs`) the scalar stores stay, which take as few instructions.
+@test
+fn a_value_and_its_neighbours_pack_with_an_identity_lane() {
+    let text = M"(lir ptr 8
+sym @mk fn global
+fn @mk
+  sig (i64, ptr) -> void
+b0(v0: i64, v1: ptr):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 2
+  v4 = iconst.i64 3
+  v5 = iconst.i64 4
+  v6 = iconst.i64 5
+  v7 = iconst.i64 6
+  v8 = iconst.i64 7
+  v9 = add.i64 v0, v2
+  v10 = add.i64 v0, v3
+  v11 = add.i64 v0, v4
+  v12 = add.i64 v0, v5
+  v13 = add.i64 v0, v6
+  v14 = add.i64 v0, v7
+  v15 = add.i64 v0, v8
+  store v0, v1 align 3
+  store v9, v1+8 align 3
+  store v10, v1+16 align 3
+  store v11, v1+24 align 3
+  store v12, v1+32 align 3
+  store v13, v1+40 align 3
+  store v14, v1+48 align 3
+  store v15, v1+56 align 3
+  ret
+)";
+    let (b, a) = optimized_target(text, 16, false);
+    let m = text_of(&a, "mk");
+    assert(count_of(&m, "add.v2i64") == 4 && count_of(&m, "store") == 4, m.as_str());
+    let mut err = String::new();
+    let mut p = lparse::parse(text, &mut err).unwrap();
+    p.vector = 16;
+    p.apairs = true;
+    let none = Vector::<bool>::new();
+    lopt::optimize(
+        &mut p,
+        &none,
+        lopt::Config {
+            inline: il::SPEED,
+            loops: lu::Budgets {
+                peel: 0,
+                partial: 0,
+                version: 0,
+                unswitch: 0,
+                rotate: 0,
+                vector: 2,
+                interleave: 2,
+                fin: 0,
+            },
+        },
+    );
+    let q = text_of(&p, "mk");
+    assert(!q.contains("v2i64"), q.as_str());
+    let _ = b;
+}
+
+// A by-value aggregate argument that the call reads from its copy's source (the callee writes and keeps
+// no parameter; x86-64 passes it in memory, which the backend copies): the copy into a slot nothing else
+// reads goes, also when the walk that passed the source changed nothing else in the body.
+@test
+fn a_copy_an_argument_no_longer_reads_goes() {
+    let (_b, a) = optimized_copy(
+        M"(lir ptr 8
+sym @mkb fn global used noinline
+sym @bump fn global used noinline
+sym @relay fn global used noinline
+fn @mkb
+  layout l0 size 64 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64, 40 i64, 48 i64, 56 i64]
+  sig (i64) -> l0
+b0(v0: i64, v1: ptr):
+  store v0, v1 align 3
+  store v0, v1+56 align 3
+  ret
+fn @bump
+  layout l0 size 64 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64, 40 i64, 48 i64, 56 i64]
+  sig (l0) -> l0
+b0(v0: ptr, v1: ptr):
+  v2 = load.v2i64 v0 align 0
+  v3 = load.v2i64 v0+16 align 0
+  v4 = load.v2i64 v0+32 align 0
+  v5 = load.v2i64 v0+48 align 0
+  v6 = wconst.v2i64 0x1, 0x0
+  v7 = add.v2i64 v2, v6
+  store v7, v1 align 0
+  store v3, v1+16 align 0
+  store v4, v1+32 align 0
+  store v5, v1+48 align 0
+  ret
+fn @relay
+  layout l0 size 64 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64, 40 i64, 48 i64, 56 i64]
+  sig (i64) -> i64
+  slot s0 size 64 align 3
+  slot s1 size 64 align 3
+  slot s2 size 64 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = iconst.i64 64
+  call @mkb(v0, v1) : (i64) -> l0
+  memcpy.overlap v3, v1, v4
+  call @bump(v3, v2) : (l0) -> l0
+  v5 = load.i64 v2 align 3
+  v6 = load.i64 v2+56 align 3
+  v7 = add.i64 v5, v6
+  ret v7
+)",
+        0xFFFFFFFF,
+        16,
+    );
+    let r = text_of(&a, "relay");
+    assert(!r.contains("memcpy") && r.contains("call @bump(v1"), r.as_str());
 }

@@ -154,6 +154,13 @@ pub(package) const FOLD_XBFX_EXT: u64 = 35184372088832;
 /// `fsub`, `fmul`, `fdiv`, `add`, `sub`, `and`, `or` or `xor` of its type (x86-64's VEX forms, which read
 /// memory of any alignment: `vaddps x, x, [m]`).
 pub(package) const FOLD_VLDOP: u64 = 70368744177664;
+/// `FOLD_ANY_BITS`: with `FOLD_ANY`, the `or` of the lanes of any integer vector (not only a lane mask) that
+/// equalities with 0 alone read folds into each: they test all its bits (x86-64's SSE4.1 `ptest`).
+pub(package) const FOLD_ANY_BITS: u64 = 140737488355328;
+/// `FOLD_VCMEM`: a 16-byte vector constant that the instructions of its block alone read, each as the
+/// second operand of a lane operation of `FOLD_VLDOP`'s, folds into each: they read it from the constant
+/// data, which aligns it (x86-64's `pxor x, [rip + k]`).
+pub(package) const FOLD_VCMEM: u64 = 281474976710656;
 /// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
 /// flags keep, a folded sum or extension, the sum with the carry.
 pub(package) const CARRY_NONE: u8 = 0;
@@ -177,10 +184,12 @@ pub(package) const CS_NONE: u8 = 0;
 pub(package) const CS_INC: u8 = 1;
 pub(package) const CS_NEG: u8 = 2;
 pub(package) const CS_NOT: u8 = 3;
-// A chain of conditional comparisons (`FOLD_CCMP`) holds at most this many comparisons.
-const CCMP_MAX: u8 = 3;
-// The most folded instructions `uses_at` expands for one use: a comparison of a test of a field, say.
-const FOLD_DEPTH: u32 = 8;
+// A chain of conditional comparisons (`FOLD_CCMP`) holds at most this many comparisons: 8, as clang's
+// expansion of a `memcmp` equality of 64 bytes in 8-byte pairs.
+const CCMP_MAX: u8 = 8;
+// The most folded instructions `uses_at` expands for one use: a longest chain's comparisons and the `and`s
+// or `or`s that join them, and a comparison of a test of a field.
+const FOLD_DEPTH: u32 = 2 * CCMP_MAX as u32 + 2;
 // The levels of values a sunk value moves with (`FOLD_SINK`): its operands, theirs, and so on.
 const SINK_DEPTH: u32 = 4;
 
@@ -1521,6 +1530,28 @@ extend Live {
                 }
             }
         }
+        if (self.fold_ops & FOLD_VCMEM) != 0 {
+            fill(&mut self.cnd, ni, 0);
+            for k in 0..b.blocks.len() {
+                let bk = b.blocks[k];
+                for i in bk.start..bk.start + bk.len {
+                    let t = b.insts[i as usize];
+                    if !is_vec(t.ty) || type_bytes(t.ty, 8) != 16 || !Self::vop_mem(t, t.ty) || !is_inst(t.b) || t.a == t.b || t.b < bk.start || self.pfold[i as usize] || is_inst(
+                        t.a,
+                    ) && self.pfold[t.a as usize] {
+                        continue;
+                    }
+                    if b.insts[t.b as usize].op == O_WCONST {
+                        self.cnd[t.b as usize] += 1;
+                    }
+                }
+            }
+            for i in 0..ni {
+                if b.insts[i].op == O_WCONST && type_bytes(b.insts[i].ty, 8) == 16 && self.count[i] != 0 && self.cnd[i] == self.count[i] && !self.pfold[i] {
+                    self.pfold[i] = true;
+                }
+            }
+        }
         // Last: its parts fold no other operand.
         if (self.fold_ops & FOLD_ADC) != 0 {
             self.carries(b);
@@ -1691,6 +1722,15 @@ extend Live {
         return lo && hi;
     }
 
+    // Whether instruction `x` is a lane operation of `FOLD_VLDOP` on 16- or 32-byte vectors of type `ty`.
+    fn vop_mem(x: Inst, ty: u8) bool {
+        let fl = x.op >= O_FADD && x.op <= O_FDIV && is_float(lane_type(ty));
+        let int = (x.op == O_ADD || x.op == O_SUB || x.op == O_AND || x.op == O_OR || x.op == O_XOR) && !is_float(
+            lane_type(ty),
+        );
+        return (fl || int) && x.ty == ty;
+    }
+
     /// `FOLD_VLDOP`: whether vector load `i` of `b` (its block ending before `end`) folds into its one use,
     /// as `ldop_user`.
     fn vldop_user(self: &Self, b: &Body, i: u32, end: u32) bool {
@@ -1707,11 +1747,7 @@ extend Live {
         while u < end && u <= i + LDOP_REACH {
             let x = b.insts[u as usize];
             if x.a == i || x.b == i || x.c == i {
-                let fl = x.op >= O_FADD && x.op <= O_FDIV && is_float(lane_type(t.ty));
-                let int = (x.op == O_ADD || x.op == O_SUB || x.op == O_AND || x.op == O_OR || x.op == O_XOR) && !is_float(
-                    lane_type(t.ty),
-                );
-                return (fl || int) && x.ty == t.ty && x.b == i && x.a != i && !self.pfold[u as usize] && !(is_inst(x.a) && self.pfold[x.a as usize]);
+                return Self::vop_mem(x, t.ty) && x.b == i && x.a != i && !self.pfold[u as usize] && !(is_inst(x.a) && self.pfold[x.a as usize]);
             }
             if writes_mem(x) {
                 return false;
@@ -2191,7 +2227,9 @@ extend Live {
         } else {
             0
         };
-        return (self.fold_ops & f) != 0 && lane_mask(b, v, MASK_DEPTH);
+        return (self.fold_ops & f) != 0 && (lane_mask(b, v, MASK_DEPTH) || (self.fold_ops & FOLD_ANY_BITS) != 0 && is_int(
+            lane_type(b.type_of(v)),
+        ));
     }
 
     // Whether `v` is an equality with 0 of an `and` `FOLD_TST` folds, which this use alone reads: a chain's

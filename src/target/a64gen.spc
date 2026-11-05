@@ -130,6 +130,7 @@ pub(package) struct Gen {
     rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
     cret: Vector<bool>, // per instruction, a call that returns (`clobbers`, not `dead_end`; `call_tables`)
     hform: Vector<bool>, // per instruction, whether it computes in binary16 (`half_forms`)
+    kcon: Vector<(u64, u64, u32)>, // the body's 16-byte read-only constants: their words, their symbol
     shared: Vector<u32>, // the block parameters that share a header parameter's slot (`back_share`)
     scr: u64, // the x registers that may be scratch homes (`plan_homes`): XSCR_LEAF, XSCR_RARE or XSCR
     dying: Vector<u32>, // values whose register frees after the current instruction
@@ -264,6 +265,7 @@ extend Gen {
             rarec: Vector::<bool>::new(),
             cret: Vector::<bool>::new(),
             hform: Vector::<bool>::new(),
+            kcon: Vector::<(u64, u64, u32)>::new(),
             shared: Vector::<u32>::new(),
             scr: XSCR,
             dying: Vector::<u32>::new(),
@@ -2353,6 +2355,7 @@ extend Gen {
         let p = unsafe &*self.pkg;
         let ps = p.syms[s as usize];
         self.bp = &p.bodies[ps.def as usize];
+        self.kcon.truncate(0);
         let b = self.b();
         self.lv.fold_max = 16;
         self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR;
@@ -3379,9 +3382,18 @@ extend Gen {
     // Copy `n` bytes from `sb` + `so` to `db` + `do` (registers or sp) through x16 and v30.
     fn copy_mem(self: &mut Self, db: u32, do0: i64, sb: u32, so0: i64, n: u32) {
         let mut at: u32 = 0;
-        // Chunks of 16, 8, 4, 2 and 1 bytes: at most n / 16 + 4 steps.
+        // Chunks of 32 (one LDP and one STP of q30 and q31, as clang's, where the pair forms reach both
+        // offsets), 16, 8, 4, 2 and 1 bytes: at most n / 16 + 4 steps.
         while at < n {
             let left = n - at;
+            if left >= 32 && qpair_fits(so0 + at as i64) && qpair_fits(do0 + at as i64) {
+                self.frame_use(sb);
+                self.frame_use(db);
+                self.emit(a::ldstp(a::M_VQ, true, 2, 30, 31, sb, (so0 + at as i64) as i32));
+                self.emit(a::ldstp(a::M_VQ, false, 2, 30, 31, db, (do0 + at as i64) as i32));
+                at += 32;
+                continue;
+            }
             let step = if left >= 16 {
                 16u32
             } else if left >= 8 {
@@ -3992,8 +4004,15 @@ extend Gen {
         return (self.reg(v), off);
     }
 
-    // Value `v` (an integer of `bits` bits, 8 or 16) in a register extended to 32 bits.
+    // Value `v` (an integer of `bits` bits, 8 or 16) in a register extended to 32 bits: a constant moved
+    // in as its extension (`materialize_ext`).
     fn ext(self: &mut Self, v: Value, signed: bool, bits: u32) u8 {
+        let mut k: u64 = 0;
+        if self.const_of(v, &mut k) {
+            let d = self.tmp(false);
+            self.materialize_ext(v, d, signed, bits);
+            return d;
+        }
         let s = self.narrow_src(v);
         let r = self.reg(s);
         let x = self.vx(v);
@@ -4128,6 +4147,8 @@ extend Gen {
             self.compare(self.b().insts[first as usize])
         };
         let l = self.b().insts[leaf as usize];
+        // The leaf's extensions free after its comparison: a long chain's temporaries do not add up.
+        let t0 = self.tmps;
         let c = l.aux;
         let ty = self.vt(l.a);
         let bits = type_bits(ty, self.ptr);
@@ -4164,6 +4185,7 @@ extend Gen {
                     kv
                 };
                 self.emit(a::ccmp(sf, kv < 0, true, ra, m as u32, nzcv, run));
+                self.tmps = t0;
                 return lc;
             }
         }
@@ -4173,6 +4195,7 @@ extend Gen {
             self.reg(l.b)
         } as u32;
         self.emit(a::ccmp(sf, false, false, ra, rb, nzcv, run));
+        self.tmps = t0;
         return lc;
     }
 
@@ -6032,9 +6055,11 @@ extend Gen {
                 self.copy_mem(db, doff, sb, soff, n as u32);
                 return true;
             }
-            // Every chunk into a register first.
+            // Every chunk into a register first; two 16-byte chunks by one LDP and one STP where the pair
+            // forms reach both offsets.
             let mut regs = Vector::<u8>::new();
             let mut at: u32 = 0;
+            let pairs = qpair_fits(soff) && qpair_fits(doff) && qpair_fits(soff + 32) && qpair_fits(doff + 32);
             while at as u64 < n {
                 let left = n as u32 - at;
                 let step = if left >= 16 {
@@ -6049,6 +6074,15 @@ extend Gen {
                     1u32
                 };
                 let r = self.tmp(step == 16);
+                if pairs && left >= 32 {
+                    let r2 = self.tmp(true);
+                    self.frame_use(sb);
+                    self.emit(a::ldstp(a::M_VQ, true, 2, r - V0, r2 - V0, sb, (soff + at as i64) as i32));
+                    regs.push(r);
+                    regs.push(r2);
+                    at += 32;
+                    continue;
+                }
                 self.mem(
                     if step == 16 {
                         a::M_VQ
@@ -6064,7 +6098,8 @@ extend Gen {
                 at += step;
             }
             at = 0;
-            for q in 0..regs.len() {
+            let mut q: usize = 0;
+            while q < regs.len() {
                 let left = n as u32 - at;
                 let step = if left >= 16 {
                     16u32
@@ -6077,6 +6112,15 @@ extend Gen {
                 } else {
                     1u32
                 };
+                if pairs && left >= 32 {
+                    self.frame_use(db);
+                    self.emit(
+                        a::ldstp(a::M_VQ, false, 2, regs[q] - V0, regs[q + 1] - V0, db, (doff + at as i64) as i32),
+                    );
+                    q += 2;
+                    at += 32;
+                    continue;
+                }
                 self.mem(
                     if step == 16 {
                         a::M_VQ
@@ -6088,6 +6132,7 @@ extend Gen {
                     db,
                     doff + at as i64,
                 );
+                q += 1;
                 at += step;
             }
             return true;
@@ -7403,8 +7448,13 @@ extend Gen {
         }
         let r = b.insts[i as usize + 1];
         let rt = b.pool[t.b as usize + 2];
-        // An aggregate result into memory its address operand names, from a body that returns nothing.
-        let into = (rt & AGG) != 0 && b.pool[b.sig as usize + 2] == T_NONE as u32 && t.ty == T_NONE;
+        // An aggregate result into memory its address operand names, from a body that returns nothing; or
+        // into this body's own result memory, of the body's result code (`fwd`), both in memory: the callee
+        // writes it and returns as this body would.
+        let into0 = (rt & AGG) != 0 && b.pool[b.sig as usize + 2] == T_NONE as u32 && t.ty == T_NONE;
+        let own = VPARAM | b.blocks[0].param_start + b.pool[b.sig as usize];
+        let fwd = (rt & AGG) != 0 && rt == b.pool[b.sig as usize + 2] && t.ty == T_NONE && b.pool[(t.c + b.pool[t.b as usize]) as usize] == own && self.self_lay.ret.kind == ab::L_SRET;
+        let into = into0 || fwd;
         if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || (rt != b.pool[b.sig as usize + 2] || (rt & AGG) != 0) && !into {
             return false;
         }
@@ -9080,6 +9130,12 @@ const fn reduce_in_reg(c: u8, vt: u8, ty: u8) bool {
     return c == core::SIMD_REDUCE_AND || c == core::SIMD_REDUCE_OR || c == core::SIMD_REDUCE_XOR || (c == core::SIMD_REDUCE_ADD || c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX) && !(eb == 8 && (c != core::SIMD_REDUCE_ADD || n != 2));
 }
 
+// Whether an LDP or STP of two q registers reaches offset `off`: a multiple of 16 within its signed 7-bit
+// immediate.
+const fn qpair_fits(off: i64) bool {
+    return off % 16 == 0 && off >= -1024 && off <= 1008;
+}
+
 // Pair `j` of the callee-saved pairs whose lower registers are `xs` then `vs`: its access size and lower
 // register.
 fn pair_at(xs: &Vector<u32>, vs: &Vector<u32>, j: u32) (u32, u32) {
@@ -9640,8 +9696,9 @@ extend Gen {
     }
 
     // Vector constant `t` into a v register for `i`: by one MOVI when a byte repeats, every byte is 0 or all
-    // ones, or each 2- or 4-byte lane holds one byte (`movi_of`); else each 8-byte word through ip0 (DUP of
-    // the narrowest element that repeats when one word repeats, else FMOV then INS).
+    // ones, or each 2- or 4-byte lane holds one byte (`movi_of`); by DUP of the narrowest element that
+    // repeats through ip0 when one word repeats; else 16 bytes by ADRP and LDR of read-only data
+    // (`const_sym`), as clang's constant pool, and 8 through ip0 and FMOV.
     fn wconst_reg(self: &mut Self, i: u32, t: Inst) {
         let b = self.b();
         let q = type_bytes(t.ty, 8) == 16;
@@ -9683,13 +9740,40 @@ extend Gen {
             self.emit(0x0E000C00 | a::on(q, 1u32 << 30) | e << 16 | a::IP0 << 5 | rd as u32);
             return;
         }
+        if q {
+            let k = self.const_sym(w0, w1);
+            self.reloc(a::R_PAGE21, k, 0);
+            self.emit(a::adr(true, a::IP1, 0));
+            self.reloc(a::R_PAGEOFF12, k, 0);
+            self.emit(a::ldst_uimm(a::M_VQ, true, rd, a::IP1, 0));
+            return;
+        }
         self.mov_imm(a::IP0 as u8, w0, true);
         self.emit(a::fmov_gv(true, true, rd, a::IP0 as u8));
-        if q {
-            self.mov_imm(a::IP0 as u8, w1, true);
-            // INS Vd.D[1], ip0.
-            self.emit(0x4E181C00 | a::IP0 << 5 | rd as u32);
+    }
+
+    // The local read-only symbol of the object holding words `w0` and `w1` (little-endian), 16-byte aligned:
+    // one per contents in a body (`kcon`).
+    fn const_sym(self: &mut Self, w0: u64, w1: u64) u32 {
+        for q in 0..self.kcon.len() {
+            let (x0, x1, k) = self.kcon[q];
+            if x0 == w0 && x1 == w1 {
+                return k;
+            }
         }
+        let mut bs: [u8; 16] = [0; 16];
+        for k in 0..8u64 {
+            bs[k as usize] = (w0 >> 8 * k) as u8;
+            bs[8 + k as usize] = (w1 >> 8 * k) as u8;
+        }
+        let o = self.obj();
+        let nm = format("__sc_k.{}", o.syms.len());
+        let k = o.sym(&nm);
+        let at = o.define(k, ob::S_RODATA, 4, 16, 0);
+        o.put(ob::S_RODATA, bs[0..16]);
+        o.pad_to(ob::S_RODATA, at + 16);
+        self.kcon.push((w0, w1, k));
+        return k;
     }
 
     // The even lanes of `t.a ++ t.b` into vector `i`: UZP1 (the odd ones, `aux` 1: UZP2); a vector outside a v

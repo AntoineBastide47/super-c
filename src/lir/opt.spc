@@ -78,9 +78,12 @@ const PSLOT_MAX: u32 = 64;
 const FRESH_MAX: usize = 16;
 // `flag_next` moves a flag's definition at most FLAG_REACH instructions.
 const FLAG_REACH: u32 = 8;
-// `memcmp_eq` expands counts of at most MEMCMP_MAX bytes, in at most MEMCMP_LOADS loads a side.
+// `memcmp_eq` expands counts of at most MEMCMP_MAX bytes (MEMCMP_EQ_MAX for an equality), in at most
+// MEMCMP_LOADS loads a side (MEMCMP_EQ_LOADS).
 const MEMCMP_MAX: u64 = 32;
 const MEMCMP_LOADS: u32 = 4;
+const MEMCMP_EQ_MAX: u64 = 64;
+const MEMCMP_EQ_LOADS: u32 = 8;
 const MIN_DEPTH: u32 = 3;
 // `Opt::private_load`'s answers besides a value, and the memory state of the loads it keeps.
 const PRIV_NONE: Value = VNONE;
@@ -110,6 +113,9 @@ const THREAD_BLOCK_MAX: u32 = 8;
 // `twins` compares blocks of at most TWIN_MAX instructions.
 const TWIN_MAX: u32 = 16;
 const THREAD_DEPTH: u32 = 4;
+// `cond_fact` and `eq_const` read conditions joined by `and` and `or` this many levels deep: a chain of
+// conditional comparisons (`codegen::live`'s, 8).
+const CCMP_DEPTH: u32 = 8;
 // `Opt::implied` follows a parameter back through at most IMPLY_FAN edges into its block.
 const IMPLY_FAN: u32 = 4;
 // A write carries at most RECENT_MAX of the places known last into its memory state (`Opt::carry`).
@@ -247,6 +253,9 @@ pub(package) struct Opt {
     // The last walk dropped a store in a loop, whose loads may leave it now, or one before a call, whose
     // loads may move past it (`sink_load`).
     unstored: bool,
+    // The walk gave a call's argument the source of the copy it took (`copied_args`): a change of the call's
+    // arguments in the pool, which its instruction does not show.
+    rewrote: bool,
     pre_at: Vector<u32>, // the rebuild's ranges of `pre_list` per instruction
     pre_list: Vector<u32>,
     // The scoped tables: a pure instruction's hash to the instruction, a memory place's hash to its
@@ -478,6 +487,7 @@ extend Opt {
             refold: false,
             rethru: false,
             unstored: false,
+            rewrote: false,
             pre_at: Vector::<u32>::new(),
             pre_list: Vector::<u32>::new(),
             pure: Map::<u64, u32>::new(),
@@ -1074,6 +1084,7 @@ extend Opt {
         }
         let before = self.weigh(pk, b);
         self.slp.late_terms = !pk.apairs;
+        self.slp.pairs = pk.apairs;
         self.slp.red_step = pk.vec_reduce;
         if !self.slp.plan(
             b,
@@ -2569,7 +2580,7 @@ extend Opt {
     }
 
     // The alias class of every address value: CL_NOALIAS + k for one that comes from exclusive reference
-    // parameter k (`Body.refs`) through address arithmetic, selects and block parameters, CL_OTHER for one
+    // parameter k (`Body.refs`, or the aggregate result's pointer) through address arithmetic, selects and block parameters, CL_OTHER for one
     // that comes from none, CL_MANY for one that may come from several. Two accesses of different classes,
     // neither CL_MANY, touch different bytes: the language makes the parameter the only path to its
     // referent during the call. A parameter whose value escapes (any use but as an access's address,
@@ -2601,6 +2612,13 @@ extend Opt {
             if (b.refs[k] & REF_NOALIAS) != 0 && k < (CL_FROZEN - CL_NOALIAS) as usize && k < e.param_len as usize {
                 seeds |= 1u64 << k as u64;
             }
+        }
+        // The pointer to an aggregate result, the parameter after the signature's: the caller passes memory
+        // no other pointer of the call reaches (a slot of its own, its own result, an exclusive parameter's
+        // referent no other argument reaches: `result_into`), as C callers do (an `sret` is `noalias`).
+        let np = b.pool[b.sig as usize];
+        if (b.pool[b.sig as usize + 2] & AGG) != 0 && np < (CL_FROZEN - CL_NOALIAS) as u32 && np < e.param_len as u32 {
+            seeds |= 1u64 << np as u64;
         }
         let mut cand: u64 = 0;
         if b.scopes.len() != 0 {
@@ -4096,6 +4114,7 @@ extend Opt {
             }
         }
         let mut states: u32 = 0;
+        self.rewrote = false;
         let mut changed = self.param_cycles(b);
         // Preorder over the dominator tree: block << 1 enters a block, n << 33 | 1 closes its scope at log
         // length n.
@@ -4311,7 +4330,7 @@ extend Opt {
                 self.stack.push(self.kids[c as usize] as u64 << 1);
             }
         }
-        return changed;
+        return changed || self.rewrote;
     }
 
     // Instruction `i`, which stays, in the walk's order within its block: a store drops each earlier one
@@ -4508,24 +4527,7 @@ extend Opt {
             let y = self.val(b.edge_arg(e1, q));
             let mut v = x;
             if x != y {
-                v = b.insts.len() as u32;
-                b.insts.push(
-                    Inst { op: O_SELECT, ty: b.params[(jb.param_start + q) as usize], aux: 0, a: t.a, b: x, c: y },
-                );
-                b.locs.push(b.locs[i as usize]);
-                if b.inl.len() != 0 {
-                    b.inl.push(b.inl[i as usize]);
-                }
-                self.repl.push(VNONE);
-                self.frepl.push(VNONE);
-                self.moved.push(true);
-                self.blk_of.push(k);
-                self.hoisted.push(k as u64 << 32 | v as u64);
-                // Its operands are final: simplified now, as no later walk may see it (the rewalk's own).
-                let r = simplify(pk, b, v);
-                if r != VNONE {
-                    v = r;
-                }
+                v = self.side_select(pk, b, k, i, b.params[(jb.param_start + q) as usize], t.a, x, y);
             }
             if only {
                 self.prepl[(jb.param_start + q) as usize] = v;
@@ -4592,8 +4594,15 @@ extend Opt {
         if x == y {
             return x;
         }
+        return self.side_select(pk, b, k, i, ty, t.a, x, y);
+    }
+
+    // The select of `x` and `y` of type `ty` on condition `c`, with instruction `i`'s location, at the end of
+    // block `k` (`hoisted`): its operands are final, so it is simplified now, as no later walk may see it
+    // (the rewalk's own). The value it is.
+    fn side_select(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, ty: u8, c: Value, x: Value, y: Value) Value {
         let v = b.insts.len() as u32;
-        b.insts.push(Inst { op: O_SELECT, ty: ty, aux: 0, a: t.a, b: x, c: y });
+        b.insts.push(Inst { op: O_SELECT, ty: ty, aux: 0, a: c, b: x, c: y });
         b.locs.push(b.locs[i as usize]);
         if b.inl.len() != 0 {
             b.inl.push(b.inl[i as usize]);
@@ -4609,6 +4618,100 @@ extend Opt {
         } else {
             v
         };
+    }
+
+    // Branch `t`, instruction `i` ending block `k`, whose sides each enter a block of no parameters that `k`
+    // alone enters along an edge of no arguments, the two the same instructions but for 1 to MAX_SELECTS
+    // operands from outside both (integers of up to 64 bits, pointers or scalar floats): the first side, its
+    // differing operands the selects on the condition at the end of `k` (`side_select`), as LLVM's
+    // SimplifyCFG sinks the code two predecessors share. A choice of two aggregates copies once. The edge
+    // `k` then jumps along; NONE when not.
+    fn twin_sides(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst) u32 {
+        let s0 = b.edge_target(t.b);
+        let s1 = b.edge_target(t.c);
+        if s0 == s1 || s0 == k || s1 == k || b.edge_nargs(t.b) != 0 || b.edge_nargs(t.c) != 0 {
+            return NONE;
+        }
+        let x = b.blocks[s0 as usize];
+        let y = b.blocks[s1 as usize];
+        let rare = (x.flags | y.flags) & ~b.blocks[k as usize].flags & BLOCK_RARE;
+        let one0 = self.pred_at[s0 as usize + 1] - self.pred_at[s0 as usize] == 1;
+        let one1 = self.pred_at[s1 as usize + 1] - self.pred_at[s1 as usize] == 1;
+        if rare != 0 || !one0 || !one1 || x.len != y.len || x.len > TWIN_MAX || x.param_len != 0 || y.param_len != 0 {
+            return NONE;
+        }
+        // Each difference: the first side's instruction << 2 | its operand (0 to 2).
+        let mut diffs = StaticVector::<u32, 2>::new();
+        for j in 0..x.len {
+            let s = b.insts[(x.start + j) as usize];
+            let u = b.insts[(y.start + j) as usize];
+            if s.op != u.op || s.ty != u.ty || s.aux != u.aux {
+                return NONE;
+            }
+            let f = op_info(s.op).form;
+            if f == F_JMP {
+                if b.edge_target(s.a) != b.edge_target(u.a) {
+                    return NONE;
+                }
+                for q in 0..b.edge_nargs(s.a) {
+                    if !twin_val(x, y, b.edge_arg(s.a, q), b.edge_arg(u.a, q)) {
+                        return NONE;
+                    }
+                }
+                continue;
+            }
+            if f > F_STORE && f != F_OVF && f != F_RET {
+                return NONE;
+            }
+            for q in 0..3u32 {
+                let (v, w, val) = if q == 0 {
+                    (s.a, u.a, lv::operand_a(f))
+                } else if q == 1 {
+                    (s.b, u.b, lv::operand_b(f))
+                } else {
+                    (s.c, u.c, lv::operand_c(f))
+                };
+                if !val && v == w || val && twin_val(x, y, v, w) {
+                    continue;
+                }
+                let ty = if val && v != VNONE && w != VNONE && b.type_of(v) == b.type_of(w) {
+                    b.type_of(v)
+                } else {
+                    T_NONE
+                };
+                let sel = is_int(ty) && ty != T_I128 || ty == T_PTR || ty == T_F32 || ty == T_F64;
+                if !sel || in_block(b, v & ~VFLAG, s0) || in_block(b, w & ~VFLAG, s1) || diffs.len() as u32 == MAX_SELECTS || f == F_RET {
+                    return NONE;
+                }
+                diffs.push(j << 2 | q);
+            }
+        }
+        if diffs.len() == 0 {
+            return NONE;
+        }
+        for d in 0..diffs.len() {
+            let at = (x.start + (diffs[d] >> 2)) as usize;
+            let q = diffs[d] & 3;
+            let s = b.insts[at];
+            let u = b.insts[(y.start + (diffs[d] >> 2)) as usize];
+            let (v, w) = if q == 0 {
+                (s.a, u.a)
+            } else if q == 1 {
+                (s.b, u.b)
+            } else {
+                (s.c, u.c)
+            };
+            let c = self.side_select(pk, b, k, i, b.type_of(v), t.a, self.val(v), self.val(w));
+            if q == 0 {
+                b.insts.index_mut(at).a = c;
+            } else if q == 1 {
+                b.insts.index_mut(at).b = c;
+            } else {
+                b.insts.index_mut(at).c = c;
+            }
+        }
+        self.selected = true;
+        return t.b;
     }
 
     // The value the block edge `e` enters returns as a side `ret_diamond` takes (one predecessor, at most
@@ -5813,7 +5916,8 @@ extend Opt {
     }
 
     // Whether value `a` equals constant `c` where edge `e` of block `k`'s terminator leaves, as the
-    // branches before it settle: `k`'s branch on an equality of `a` with a constant, else what holds where
+    // branches before it settle: `k`'s branch on an equality of `a` with a constant (or on an `and` of
+    // conditions that holds along the edge, an `or` that does not: `cond_fact`), else what holds where
     // `k` starts (`entry_fact`); None when they do not.
     fn implied(self: &Self, pk: &Package, b: &Body, k: u32, e: u32, a: Value, c: u64, depth: u32) Option<bool> {
         let m = width_mask(b.type_of(a), pk.ptr_bytes);
@@ -5822,27 +5926,10 @@ extend Opt {
             return Some((ka.unwrap() & m) == (c & m));
         }
         let t = term(b, k);
-        if t.op == O_BR && (e == t.b || e == t.c) && !same_edge(b, t.b, t.c) && (t.a & (VPARAM | VFLAG)) == 0 {
-            let ci = b.insts[t.a as usize];
-            if ci.op == O_ICMP && (ci.aux == C_EQ || ci.aux == C_NE) {
-                let other = if ci.a == a {
-                    ci.b
-                } else if ci.b == a {
-                    ci.a
-                } else {
-                    VNONE
-                };
-                let k2 = const_of(b, other);
-                if k2.is_some() {
-                    // Along the edge `a == k2` holds, or `a != k2`.
-                    let same = (k2.unwrap() & m) == (c & m);
-                    if ci.aux == C_EQ == (e == t.b) {
-                        return Some(same);
-                    }
-                    if same {
-                        return Some(false);
-                    }
-                }
+        if t.op == O_BR && (e == t.b || e == t.c) && !same_edge(b, t.b, t.c) {
+            let r = cond_fact(b, t.a, e == t.b, a, c, m, CCMP_DEPTH);
+            if r.is_some() {
+                return r;
             }
         }
         return self.entry_fact(pk, b, k, a, c, depth);
@@ -6649,6 +6736,8 @@ extend Opt {
                     },
                 );
             } else if t.op == O_BR {
+                // The if-conversions first, which speculate the sides; then sides that differ in operands
+                // alone.
                 let e = self.diamond(pk, b, k, i, t);
                 if e != NONE {
                     t = jump(e);
@@ -6656,6 +6745,11 @@ extend Opt {
                     let r = self.ret_diamond(pk, b, k, i, t);
                     if r != NONE {
                         t = Inst { op: O_RET, ty: T_NONE, aux: 0, a: r, b: VNONE, c: VNONE };
+                    } else {
+                        let e2 = self.twin_sides(pk, b, k, i, t);
+                        if e2 != NONE {
+                            t = jump(e2);
+                        }
                     }
                 }
             } else if t.op == O_SWITCH && c.is_some() {
@@ -6733,6 +6827,21 @@ extend Opt {
                 let r = self.entry_fact(pk, b, k, a, kc.unwrap(), THREAD_DEPTH);
                 if r.is_some() {
                     t = iconst(t.ty, (r.unwrap() == (t.aux == C_EQ)) as u64);
+                }
+            } else if kc.is_none() && !local && is_int(b.type_of(t.a)) {
+                // Two values from before the block (`a` is the second) that the branches into it settle to
+                // constants (`count_fact`): two lengths each tested against 32, then against each other.
+                let la = (t.a & VFLAG) != 0 || (t.a & VPARAM) == 0 && (t.a as usize >= self.blk_of.len() || self.blk_of[t.a as usize] == k);
+                let x = if la {
+                    Option::<u64>::None
+                } else {
+                    self.count_fact(pk, b, k, t.a)
+                };
+                if x.is_some() {
+                    let y = self.count_fact(pk, b, k, t.b);
+                    if y.is_some() {
+                        t = iconst(t.ty, (x.unwrap() == y.unwrap() == (t.aux == C_EQ)) as u64);
+                    }
                 }
             }
         }
@@ -6981,7 +7090,7 @@ extend Opt {
             i,
         )) {
             return true;
-        } else if t.op == O_CALL && call_alloc(pk, b, t) == ALLOC_MEMCMP && self.memcmp_eq(pk, b, k, i) {
+        } else if t.op == O_CALL && named_alloc(pk, b, t) == ALLOC_MEMCMP && self.memcmp_eq(pk, b, k, i) {
             return true;
         } else if t.op == O_CALL && self.copysign_bits(pk, b, k, i) {
             return true;
@@ -9001,14 +9110,17 @@ extend Opt {
         return true;
     }
 
-    // Call `i` of block `k` of the C library's `memcmp` of a count up to MEMCMP_MAX bytes that is a constant
-    // or that a branch into the block settles: loads of both sides, the widest power of two of at most 8
-    // bytes, up to MEMCMP_LOADS each, the last overlapping the one before for a count it does not divide
-    // (LLVM ExpandMemCmp). A result whose one reader is an equality with 0 right after is whether a pair
-    // differs: then the widest power of two that fits each remaining count, unless that takes more loads
-    // than the overlapping ones (5 bytes as 4 and 1, 7 as two overlapping 4), a narrower pair extended to
-    // the widest. Another is the order of the first pair that differs, compared as big-endian
-    // numbers (`Package.bswap`). A load of read-only data folds to its constant. Whether it did.
+    // Call `i` of block `k` of the C library's `memcmp` (by its name: wasm32's C library is the package's own)
+    // of a count up to MEMCMP_MAX bytes that is a constant or that a branch into the block settles: loads of
+    // both sides, the widest power of two of at most 8 bytes, up to MEMCMP_LOADS each, the last overlapping
+    // the one before for a count it does not divide (LLVM ExpandMemCmp). A result whose one reader is an
+    // equality with 0 right after is whether a pair differs: then the widest power of two that fits each
+    // remaining count, unless that takes more loads than the overlapping ones (5 bytes as 4 and 1, 7 as two
+    // overlapping 4), a narrower pair extended to the widest; past 16 bytes, where the target computes
+    // 16-byte vectors (`Package.vector`) and chains no conditional comparisons (`Package.ccmp`), the `or` of
+    // 16-byte pairs' differences (the last overlapping), its lanes' `or` tested. Another is the order of the
+    // first pair that differs, compared as big-endian numbers (`Package.bswap`). A load of read-only data
+    // folds to its constant. Whether it did.
     fn memcmp_eq(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
         let bk = b.blocks[k as usize];
@@ -9030,12 +9142,43 @@ extend Opt {
         if n.is_none() {
             n = self.count_fact(pk, b, k, nv);
         }
-        if n.is_none() || n.unwrap() > MEMCMP_MAX {
+        if n.is_none() || n.unwrap() > if eq {
+            MEMCMP_EQ_MAX
+        } else {
+            MEMCMP_MAX
+        } {
             return false;
         }
         let c = n.unwrap() as u32;
         if c == 0 {
             b.insts[i as usize] = iconst(T_I32, 0);
+            return true;
+        }
+        if eq && c > 16 && pk.vector >= 16 && !pk.ccmp {
+            // The `or` of the 16-byte pairs' differences, the last pair overlapping the one before; whether
+            // a lane of it is not 0.
+            let vt = vec_type(T_I8, 16);
+            let mut d = VNONE;
+            for q in 0..(c + 15) / 16 {
+                let off = (16 * q).min(c - 16);
+                let x = self.made(pk, b, k, i, Inst { op: O_LOAD, ty: vt, aux: 0, a: pa, b: VNONE, c: off });
+                let _ = fold_data(pk, b, x);
+                let y = self.made(pk, b, k, i, Inst { op: O_LOAD, ty: vt, aux: 0, a: pb, b: VNONE, c: off });
+                let _ = fold_data(pk, b, y);
+                let z = self.made(pk, b, k, i, Inst { op: O_XOR, ty: vt, aux: 0, a: x, b: y, c: VNONE });
+                d = if d == VNONE {
+                    z
+                } else {
+                    self.made(pk, b, k, i, Inst { op: O_OR, ty: vt, aux: 0, a: d, b: z, c: VNONE })
+                };
+            }
+            let one = [d];
+            let at = b.pool_list(one[0..1]);
+            let rc = (core::OP_SIMD + core::SIMD_REDUCE_OR as u32) as u16;
+            let r = self.made(pk, b, k, i, Inst { op: O_VOP, ty: T_I8, aux: rc, a: at, b: 1, c: VNONE });
+            let zero = self.constant(b, T_I8, 0);
+            let ne = self.made(pk, b, k, i, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: r, b: zero, c: VNONE });
+            b.insts[i as usize] = Inst { op: O_ZEXT, ty: T_I32, aux: 0, a: ne, b: VNONE, c: VNONE };
             return true;
         }
         let w: u32 = if c >= 8 {
@@ -9048,7 +9191,11 @@ extend Opt {
             1
         };
         let parts = (c + w - 1) / w;
-        if parts > MEMCMP_LOADS || !eq && w > 1 && !pk.bswap {
+        if parts > if eq {
+            MEMCMP_EQ_LOADS
+        } else {
+            MEMCMP_LOADS
+        } || !eq && w > 1 && !pk.bswap {
             return false;
         }
         let ty = if w == 8 {
@@ -9060,8 +9207,8 @@ extend Opt {
         } else {
             T_I8
         };
-        let mut la = StaticVector::<Value, 4>::new();
-        let mut lb = StaticVector::<Value, 4>::new();
+        let mut la = StaticVector::<Value, 8>::new();
+        let mut lb = StaticVector::<Value, 8>::new();
         for q in 0..parts {
             let off = (q * w).min(c - w);
             let x = self.made(pk, b, k, i, Inst { op: O_LOAD, ty: ty, aux: 0, a: pa, b: VNONE, c: off });
@@ -9209,25 +9356,30 @@ extend Opt {
         return true;
     }
 
-    // The constant that value `n` (no instruction of block `k`) equals where `k` starts, by the equality
-    // the branch of `k`'s one predecessor tests (`entry_fact`); None when none settles it.
+    // The constant that value `n` (no instruction of block `k`) equals where `k` starts, by the first
+    // equality of `n` with a constant that a branch's condition holds up the chain of one-predecessor
+    // blocks into `k` (THREAD_DEPTH of them; `eq_const`, `entry_fact` settles it); None when none does.
     fn count_fact(self: &Self, pk: &Package, b: &Body, k: u32, n: Value) Option<u64> {
-        if self.pred_at[k as usize + 1] - self.pred_at[k as usize] != 1 {
-            return None;
+        let mut q = k;
+        for _ in 0..THREAD_DEPTH {
+            if self.pred_at[q as usize + 1] - self.pred_at[q as usize] != 1 {
+                return None;
+            }
+            let src = self.preds[self.pred_at[q as usize] as usize];
+            let st = term(b, src);
+            if st.op == O_BR && !same_edge(b, st.b, st.c) {
+                let c = eq_const(b, st.a, b.edge_target(st.b) == q, n, CCMP_DEPTH);
+                if c.is_some() {
+                    return if self.entry_fact(pk, b, k, n, c.unwrap(), THREAD_DEPTH) == Some(true) {
+                        c
+                    } else {
+                        None
+                    };
+                }
+            }
+            q = src;
         }
-        let st = term(b, self.preds[self.pred_at[k as usize] as usize]);
-        if st.op != O_BR || (st.a & (VPARAM | VFLAG)) != 0 || st.a == VNONE {
-            return None;
-        }
-        let ci = b.insts[st.a as usize];
-        if ci.op != O_ICMP || ci.aux != C_EQ && ci.aux != C_NE || ci.a != n {
-            return None;
-        }
-        let c = const_of(b, ci.b);
-        if c.is_none() || self.entry_fact(pk, b, k, n, c.unwrap(), THREAD_DEPTH) != Some(true) {
-            return None;
-        }
-        return c;
+        return None;
     }
 
     // An instruction for block `k` that runs right before instruction `at` (`pre`), its operands final;
@@ -9566,6 +9718,7 @@ extend Opt {
                 continue;
             }
             b.pool[(t.c + k) as usize] = c.b;
+            self.rewrote = true;
         }
         return t;
     }
@@ -15205,10 +15358,12 @@ fn fold_ptr(pk: &Package, b: &mut Body, i: u32, unit: u32) bool {
 }
 
 // A load of read-only data of the package at a constant place clear of its relocations: rewritten to the
-// constant it reads. Whether instruction `i` folded.
+// constant it reads (a 16-byte vector's where the target computes them in registers, `Package.vector`).
+// Whether instruction `i` folded.
 fn fold_data(pk: &Package, b: &mut Body, i: u32) bool {
     let t = b.insts[i as usize];
-    if (t.a & (VPARAM | VFLAG)) != 0 || is_vec(t.ty) || t.ty == T_PTR || t.ty == T_I128 || b.insts[t.a as usize].op != O_SYMADDR {
+    let vec = is_vec(t.ty) && type_bytes(t.ty, 8) == 16 && pk.vector >= 16;
+    if (t.a & (VPARAM | VFLAG)) != 0 || is_vec(t.ty) && !vec || t.ty == T_PTR || t.ty == T_I128 || b.insts[t.a as usize].op != O_SYMADDR {
         return false;
     }
     let at = b.insts[t.a as usize];
@@ -15229,6 +15384,21 @@ fn fold_data(pk: &Package, b: &mut Body, i: u32) bool {
         }
     }
     // Little-endian, as every native target.
+    if vec {
+        let w = b.words.len() as u32;
+        for h in 0..2i64 {
+            let mut v: u64 = 0;
+            for q in 0..8i64 {
+                let at = off + 8 * h + q;
+                if at < d.nbytes as i64 {
+                    v |= pk.bytes[(d.bytes as i64 + at) as usize] as u64 << (8 * q) as u64;
+                }
+            }
+            b.words.push(v);
+        }
+        b.insts[i as usize] = Inst { op: O_WCONST, ty: t.ty, aux: 0, a: w, b: 2, c: VNONE };
+        return true;
+    }
     let mut v: u64 = 0;
     for q in 0..n {
         if off + q < d.nbytes as i64 {
@@ -15270,7 +15440,7 @@ fn grows_block(pk: &Package, b: &Body, t: Inst) bool {
 }
 
 // The `Sym.alloc` of call `t`'s function by its name alone, whether the package defines it or not
-// (`dead_allocs`): ALLOC_NONE for another instruction.
+// (`dead_allocs`, `memcmp_eq`): ALLOC_NONE for another instruction.
 fn named_alloc(pk: &Package, b: &Body, t: Inst) u8 {
     return if t.op == O_CALL {
         pk.syms[b.syms[t.a as usize] as usize].alloc
@@ -16928,6 +17098,73 @@ fn outside(b: &Body, v: Value, k: u32) bool {
         return q < bk.param_start || q >= bk.param_start + bk.param_len as u32;
     }
     return !in_block(b, v, k);
+}
+
+// Whether value `a` equals constant `c` (`m` its type's mask) where condition `v` is `want` (true: not 0):
+// an equality or inequality of `a` with a constant settles it, as each operand of an `and` that holds and
+// of an `or` that does not, `depth` levels down. None when they do not.
+fn cond_fact(b: &Body, v: Value, want: bool, a: Value, c: u64, m: u64, depth: u32) Option<bool> {
+    if depth == 0 || v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return None;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) {
+        let k2: Option<u64> = if t.a == a {
+            const_of(b, t.b)
+        } else if t.b == a {
+            const_of(b, t.a)
+        } else {
+            None
+        };
+        if k2.is_none() {
+            return None;
+        }
+        let same = (k2.unwrap() & m) == (c & m);
+        // `a == k2` holds, or `a != k2`.
+        if t.aux == C_EQ == want {
+            return Some(same);
+        }
+        return if same {
+            Some(false)
+        } else {
+            None
+        };
+    }
+    if t.ty == T_I8 && (t.op == O_AND && want || t.op == O_OR && !want) {
+        let r = cond_fact(b, t.a, want, a, c, m, depth - 1);
+        return if r.is_some() {
+            r
+        } else {
+            cond_fact(b, t.b, want, a, c, m, depth - 1)
+        };
+    }
+    return None;
+}
+
+// The constant that value `n` equals where condition `v` is `want` (`cond_fact`'s conditions), if one does.
+fn eq_const(b: &Body, v: Value, want: bool, n: Value, depth: u32) Option<u64> {
+    if depth == 0 || v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return None;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_ICMP && t.aux == C_EQ == want && (t.aux == C_EQ || t.aux == C_NE) {
+        return if t.a == n {
+            const_of(b, t.b)
+        } else if t.b == n {
+            const_of(b, t.a)
+        } else {
+            None
+        };
+    }
+    if t.ty == T_I8 && (t.op == O_AND && want || t.op == O_OR && !want) {
+        let r = eq_const(b, t.a, want, n, depth - 1);
+        return if r.is_some() {
+            r
+        } else {
+            eq_const(b, t.b, want, n, depth - 1)
+        };
+    }
+    return None;
 }
 
 // Whether instruction value `v` of `b` is one of block `k`'s.

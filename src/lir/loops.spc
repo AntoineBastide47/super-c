@@ -250,6 +250,9 @@ pub(package) struct LoopOpt {
     vstrided: bool, // a vector load reads every 2nd or 4th element: the loop runs the last iteration
     vgroups: bool, // stores write every 2nd or 4th element, each group of them every element (`store_groups`)
     vind: Vector<u32>, // the truncations of the counter the plan reads as lanes (`vclass`)
+    vctr: bool, // the plan reads the counter itself as lanes, an operand of a lane operation (`vclass`)
+    vptr: u32, // the plan's pointer bytes
+    vctrv: Vector<Value>, // per copy, the counter's lanes (`vector_ctr`)
     vqc: Vector<Value>, // scalar copies: each copy's counter value
     vic: Vector<u64>, // the order the copies' instructions go in: copy << 32 | body instruction
     vpow: Vector<Value>, // scalar copies: per reduction, the power its invariant factor takes (`vpowers`), VNONE
@@ -490,6 +493,9 @@ extend LoopOpt {
             vstrided: false,
             vgroups: false,
             vind: Vector::<u32>::new(),
+            vctr: false,
+            vptr: 8,
+            vctrv: Vector::<Value>::new(),
             vqc: Vector::<Value>::new(),
             vic: Vector::<u64>::new(),
             vpow: Vector::<Value>::new(),
@@ -635,6 +641,14 @@ extend LoopOpt {
                     last = 0;
                 }
                 if n != 0 && (n - last) * self.residual(b) + last <= bu.peel {
+                    // Iterations that fill two vectors or more vectorize first, as LLVM's vectorizer runs
+                    // before its full unrolling: a later round may peel the vector loop.
+                    let vok = bu.vector != 0 && vec >= VBYTES && (b.blocks[h as usize].flags & (BLOCK_EPI | BLOCK_NOVEC)) == 0;
+                    if vok && self.vplan(b, ptr, fmath, h, p, u, cl, false) && !self.vone && n >= 2 * self.vlanes {
+                        self.vectorize(b, h, p, u, self.vcopies(b, bu.vector));
+                        any = true;
+                        continue;
+                    }
                     if self.close(b, h, dpre, dpost) {
                         self.peel(b, h, p, n);
                         any = true;
@@ -2093,6 +2107,8 @@ extend LoopOpt {
         self.vbytes = self.vmax;
         self.vgroups = false;
         self.vind.truncate(0);
+        self.vctr = false;
+        self.vptr = ptr;
         if !self.counted(b, h, u) {
             if self.lblocks.len() != 2 || u == h {
                 return self.no("its body is not one block", 0);
@@ -2308,6 +2324,11 @@ extend LoopOpt {
                 }
                 continue;
             }
+            // A lane operation reads the counter's lanes (`ctr_kind`).
+            let ti = b.insts[i as usize];
+            if self.vctr && self.vk[x] == VK_LANE && (ti.a == q || ti.b == q) {
+                continue;
+            }
             self.outside_uses(b, b.insts[i as usize]);
             // Scalar copies read their own counter (`vqc`), but not in an address they gather through.
             if contains(&self.uses, q) && (!one || self.vgat.len() != 0) {
@@ -2385,7 +2406,7 @@ extend LoopOpt {
         }
         // Counting down, each vector holds its elements in order: no lane may stand for its iteration.
         if self.vrev {
-            if self.vind.len() != 0 || self.vgroups || self.vstrided || self.vgat.len() != 0 {
+            if self.vind.len() != 0 || self.vctr || self.vgroups || self.vstrided || self.vgat.len() != 0 {
                 return self.no("a loop counting down reads its counter or a stride per lane", 0);
             }
             for x in 0..self.vacc.len() {
@@ -2883,18 +2904,22 @@ extend LoopOpt {
         if op == O_MUL && type_bytes(t.ty, ptr) == 8 && !self.vone {
             return 0;
         }
-        return self.lane_operands(b, u, t, op == O_NEG || op == O_NOT || op == O_FNEG || op == O_FSQRT);
+        let k = self.lane_operands(b, u, t, op == O_NEG || op == O_NOT || op == O_FNEG || op == O_FSQRT);
+        if k != 0 && !self.vone && (t.a == self.viv || t.b == self.viv) {
+            self.vctr = true;
+        }
+        return k;
     }
 
     // The kind of lane operation `t` of body `u` (`unary`: one operand): a mask for a comparison, else a lane
     // value, when an operand is a lane value and each is one, an invariant load or from outside the loop;
     // else 0.
     fn lane_operands(self: &Self, b: &Body, u: u32, t: Inst, unary: bool) u8 {
-        let ka = self.kind(b, u, t.a);
+        let ka = self.ctr_kind(b, u, t, t.a);
         let kb = if unary {
             0u8
         } else {
-            self.kind(b, u, t.b)
+            self.ctr_kind(b, u, t, t.b)
         };
         let la = ka == VK_LANE;
         let lb = kb == VK_LANE;
@@ -2907,6 +2932,19 @@ extend LoopOpt {
         } else {
             VK_LANE
         };
+    }
+
+    // The kind of operand `v` of lane operation `t` of body `u` (`kind`): a lane value for the counter, of
+    // `t`'s type stepping by 1 (`vector_ctr` makes its lanes), in vectors; a pointer-wide one not in a sum or
+    // difference, which computes an index (it addresses and bounds elements as consecutive ones).
+    fn ctr_kind(self: &Self, b: &Body, u: u32, t: Inst, v: Value) u8 {
+        if !self.vone && v == self.viv && v != VNONE && self.vqk == 1 && value_type(b, v) == t.ty && (type_bytes(
+            t.ty,
+            8,
+        ) < self.vptr || t.op != O_ADD && t.op != O_SUB) && t.op != O_ICMP {
+            return VK_LANE;
+        }
+        return self.kind(b, u, v);
     }
 
     // Whether scalar type `ty` has the plan's lane size, setting it when unset. Scalar copies mix lane
@@ -3738,6 +3776,12 @@ extend LoopOpt {
                 }
             }
             ri = j;
+        }
+        // The counter's lanes per copy (`vctr`), before the body's.
+        self.vctrv.truncate(0);
+        for c in 0..nv * self.vctr as u32 {
+            let v = self.vector_ctr(b, qt, vi, c, l0);
+            self.vctrv.push(v);
         }
         // With an early exit, the latch block's start: past the exit test.
         let mut ls: u32 = 0;
@@ -5774,10 +5818,16 @@ extend LoopOpt {
     // Copy `c` of truncation `t` of the counter, in the vector loop whose counter is `vi`: the truncated
     // counter in every lane plus the lane's iteration, `c * vlanes` up.
     fn vector_ind(self: &mut Self, b: &mut Body, t: Inst, vi: Value, c: u32, l: u32) Value {
-        let vt = vec_type(t.ty, self.vlanes);
         let s = self.vi(b, Inst { op: O_TRUNC, ty: t.ty, aux: 0, a: vi, b: VNONE, c: VNONE }, l);
+        return self.vector_ctr(b, t.ty, s, c, l);
+    }
+
+    // Copy `c` of counter `s` of type `ty` (the vector loop's, or its truncation): `s` in every lane plus
+    // the lane's iteration, `c * vlanes` up.
+    fn vector_ctr(self: &mut Self, b: &mut Body, ty: u8, s: Value, c: u32, l: u32) Value {
+        let vt = vec_type(ty, self.vlanes);
         let sv = self.vi(b, Inst { op: O_SPLAT, ty: vt, aux: 0, a: s, b: VNONE, c: VNONE }, l);
-        let lb = type_bits(t.ty, 8);
+        let lb = type_bits(ty, 8);
         let nw = (self.vlanes * lb + 63) / 64;
         let w = b.words.len() as u32;
         for _ in 0..nw {
@@ -5965,6 +6015,9 @@ extend LoopOpt {
     fn vval(self: &Self, b: &Body, u: u32, c: u32, v: Value) Value {
         if self.vone && v == self.viv {
             return self.vqc[c as usize];
+        }
+        if self.vctr && v == self.viv {
+            return self.vctrv[c as usize];
         }
         if self.in_body(b, u, v) {
             let ub = b.blocks[u as usize];

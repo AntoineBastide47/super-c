@@ -745,3 +745,26 @@ fn rotations_of_every_shape_match_the_definition() {
     s.as_mut_slice().rotate_left(1300);
     assert(*s.at(700) == first, "owned rotation");
 }
+
+// Slices of integers and booleans compare their bytes (one `memcmp`): equal, different at each position,
+// of different lengths, empty; a slice of other elements compares them one by one.
+@test
+fn slices_of_integers_compare_their_bytes() {
+    let a: [u32; 5] = [1, 2, 3, 4, 5];
+    let mut b: [u32; 5] = [1, 2, 3, 4, 5];
+    assert(a[0..5] == b[0..5] && a[0..0] == b[0..0] && a[0..4] != b[0..5]);
+    for k in 0..5 {
+        b[k] = 9;
+        assert(a[0..5] != b[0..5]);
+        b[k] = a[k];
+    }
+    let x: [bool; 3] = [true, false, true];
+    let y: [bool; 3] = [true, false, false];
+    assert(x[0..3] != y[0..3] && x[0..2] == y[0..2]);
+    let s: [i64; 2] = [-1, 7];
+    let t: [i64; 2] = [-1, 7];
+    assert(s[0..2] == t[0..2]);
+    let f: [f64; 2] = [0.0, 1.0];
+    let g: [f64; 2] = [-0.0, 1.0];
+    assert(f[0..2] == g[0..2]);
+}

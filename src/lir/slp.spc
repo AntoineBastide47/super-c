@@ -7,7 +7,9 @@
 // across the back edge), and the N terms of a sum (a tree of integer adds, or float adds the build
 // reassociates, each but the root with one use: one vector reduction), or a multiple of N of them up to
 // SUM_PACKS packs (their vectors added, then one reduction). The lanes of a pack's operand
-// form a pack in turn: N instructions of one operation in one block, N loads from consecutive addresses
+// form a pack in turn: N instructions of one operation in one block (an `add`, `or` or `xor`, also with
+// other values among them, each the operation of itself and 0: LLVM's copyable elements), N loads from
+// consecutive addresses
 // with no write between them (one vector load), N parameters of one block other than the entry (one
 // vector parameter; each edge into the block passes the pack of its arguments), one value (a splat) or
 // any values (a gather through memory). A value a pack holds in another arrangement is gathered. The
@@ -49,6 +51,8 @@ struct Pack {
     pub(package) blk: u32, // PK_GATHER: the block it runs in, right before instruction `at` (NONE: at its end)
     pub(package) at: u32,
     pub(package) vec: Value, // its vector once made (VNONE: not yet)
+    pub(package) tpl: Value, // PK_OP: its first lane of the operation (`identity`); else its first lane
+    pub(package) real: u32, // PK_OP: its lanes of the operation; else `n`
 }
 
 extend Pack as Copy {}
@@ -60,6 +64,9 @@ pub(package) struct Slp {
     /// A sum's term loads go right before their adds (`term`): a target without paired accesses
     /// (`Package.apairs`), whose few vector registers would otherwise hold every term at once.
     pub(package) late_terms: bool,
+    /// The target joins two scalar accesses of adjacent bytes into one (`Package.apairs`): a seed's
+    /// scalar stores take half as many instructions.
+    pub(package) pairs: bool,
     /// The instructions a halving step of a sum's reduction adds (`Package.vec_reduce`).
     pub(package) red_step: u64,
     packs: Vector<Pack>,
@@ -102,6 +109,7 @@ extend Slp {
             ptr: 8,
             vb: VBYTES,
             late_terms: false,
+            pairs: false,
             red_step: 0,
             packs: Vector::<Pack>::new(),
             lv: Vector::<Value>::new(),
@@ -219,8 +227,17 @@ extend Slp {
             let pk = self.packs[p];
             let l0 = self.lv[pk.lane as usize];
             if pk.kind == PK_OP || pk.kind == PK_LOAD {
-                gain += (pk.n - 1) as u64 * w[self.iblk[l0 as usize] as usize];
+                gain += (pk.real - 1) as u64 * w[self.iblk[pk.tpl as usize] as usize];
             } else if pk.kind == PK_SPLAT || pk.kind == PK_GATHER {
+                // Splats of one value are one (the optimizer numbers them).
+                let mut again = false;
+                for x in 0..p * (pk.kind == PK_SPLAT) as usize {
+                    let o = self.packs[x];
+                    again = again || o.kind == PK_SPLAT && o.n == pk.n && o.ty == pk.ty && self.lv[o.lane as usize] == l0;
+                }
+                if again {
+                    continue;
+                }
                 let k = if pk.kind == PK_GATHER {
                     pk.blk
                 } else {
@@ -235,7 +252,11 @@ extend Slp {
         }
         for g in 0..self.groups.len() {
             let (s0, vp) = self.groups[g];
-            gain += (self.packs[vp as usize].n - 1) as u64 * w[self.iblk[self.stores[s0 as usize] as usize] as usize];
+            gain += (self.packs[vp as usize].n - 1) as u64 * w[self.iblk[self.stores[s0 as usize] as usize] as usize] / if self.pairs {
+                2u64
+            } else {
+                1u64
+            };
         }
         // A sum's reduction: `red_step` per halving of its lanes.
         for x in 0..self.reds.len() {
@@ -618,30 +639,57 @@ extend Slp {
             }
             return p;
         }
-        let kind = self.isomorphic(b, at, n, ty);
+        let mut kind = self.isomorphic(b, at, n, ty);
+        // The lanes that are no instruction of the operation (`ids`, a bit each), when they are its identity.
+        let mut ids: u64 = 0;
         if kind == 0 {
-            return self.add(PK_GATHER, ty, at, n, ublk, uat);
+            ids = self.identity(b, at, n, ty);
+            if ids == 0 {
+                return self.add(PK_GATHER, ty, at, n, ublk, uat);
+            }
+            kind = PK_OP;
         }
         let p = self.add(kind, ty, at, n, NONE, NONE);
-        let mut last = l0;
+        let mut last: u32 = 0;
+        let mut tpl = VNONE;
         for q in 0..n {
             let v = self.tmp[(at + q) as usize];
-            self.iown[v as usize] = p;
-            last = last.max(v);
+            if (ids >> q as u64 & 1) == 0 {
+                self.iown[v as usize] = p;
+                last = last.max(v);
+                tpl = tpl.min(v);
+            }
         }
+        self.packs.index_mut(p as usize).tpl = tpl;
+        self.packs.index_mut(p as usize).real = n - ids.count_ones() as u32;
         if kind == PK_LOAD {
             return p;
         }
-        // The operands' packs, for the vector instruction right before the last lane.
+        // The operands' packs, for the vector instruction right before the last lane: an identity lane's
+        // operands are its value and 0 (VNONE, `lane_bits`).
         for q in 0..n {
-            self.tmp.push(b.insts[self.tmp[(at + q) as usize] as usize].a);
+            let v = self.tmp[(at + q) as usize];
+            self.tmp.push(
+                if (ids >> q as u64 & 1) != 0 {
+                    v
+                } else {
+                    b.insts[v as usize].a
+                },
+            );
         }
         let pa = self.build(b, top as u32, n, ty, self.iblk[last as usize], last, depth + 1);
         self.tmp.truncate(top);
         self.packs.index_mut(p as usize).a = pa;
-        if !unary(b.insts[l0 as usize].op) {
+        if !unary(b.insts[tpl as usize].op) {
             for q in 0..n {
-                self.tmp.push(b.insts[self.tmp[(at + q) as usize] as usize].b);
+                let v = self.tmp[(at + q) as usize];
+                self.tmp.push(
+                    if (ids >> q as u64 & 1) != 0 {
+                        VNONE
+                    } else {
+                        b.insts[v as usize].b
+                    },
+                );
             }
             let pb = self.build(b, top as u32, n, ty, self.iblk[last as usize], last, depth + 1);
             self.tmp.truncate(top);
@@ -655,7 +703,21 @@ extend Slp {
         for q in 0..n {
             self.lv.push(self.tmp[(at + q) as usize]);
         }
-        self.packs.push(Pack { kind: kind, ty: ty, n: n, lane: lane, a: NONE, b: NONE, blk: blk, at: uat, vec: VNONE });
+        self.packs.push(
+            Pack {
+                kind: kind,
+                ty: ty,
+                n: n,
+                lane: lane,
+                a: NONE,
+                b: NONE,
+                blk: blk,
+                at: uat,
+                vec: VNONE,
+                tpl: self.tmp[at as usize],
+                real: n,
+            },
+        );
         return self.packs.len() as u32 - 1;
     }
 
@@ -775,6 +837,68 @@ extend Slp {
         };
     }
 
+    // The lanes of `tmp[at .. at + n]` of type `ty` that are each the operation of itself and 0 (a bit
+    // each), when the others, at least half, are distinct instructions of one `add`, `or` or `xor` of one
+    // block, its flags and type, no pack's: such a lane is an entry parameter or an instruction of that
+    // block before the last of the others, and no other lane. 0 when not.
+    fn identity(self: &Self, b: &Body, at: u32, n: u32, ty: u8) u64 {
+        if !is_int(ty) || n > 64 {
+            return 0;
+        }
+        // The operation (0: none yet), its flags and block.
+        let mut op0: u8 = 0;
+        let mut aux0: u16 = 0;
+        let mut k = NONE;
+        let mut last: u32 = 0;
+        let mut ids: u64 = 0;
+        for q in 0..n {
+            let v = self.tmp[(at + q) as usize];
+            let inst = v != VNONE && (v & (VPARAM | VFLAG)) == 0;
+            let t = if inst {
+                b.insts[v as usize]
+            } else {
+                Inst { op: O_ICONST, ty: T_NONE, aux: 0, a: 0, b: 0, c: VNONE }
+            };
+            let op = t.op == O_ADD || t.op == O_OR || t.op == O_XOR;
+            if op && t.ty == ty && self.iown[v as usize] == NONE && (op0 == 0 || t.op == op0 && t.aux == aux0 && self.iblk[v as usize] == k) {
+                for r in 0..q {
+                    if self.tmp[(at + r) as usize] == v {
+                        return 0;
+                    }
+                }
+                op0 = t.op;
+                aux0 = t.aux;
+                k = self.iblk[v as usize];
+                last = last.max(v);
+            } else {
+                ids |= 1u64 << q as u64;
+            }
+        }
+        if op0 == 0 || ids.count_ones() as u32 > n / 2 {
+            return 0;
+        }
+        for q in 0..n {
+            let v = self.tmp[(at + q) as usize];
+            if (ids >> q as u64 & 1) == 0 {
+                continue;
+            }
+            if v == VNONE || (v & VFLAG) != 0 || b.type_of(v) != ty {
+                return 0;
+            }
+            let entry = (v & VPARAM) != 0 && self.pblk[(v & ~VPARAM) as usize] == 0;
+            let before = (v & VPARAM) == 0 && self.iblk[v as usize] == k && v < last && self.iown[v as usize] == NONE;
+            if !entry && !before {
+                return 0;
+            }
+            for r in 0..n {
+                if r != q && (ids >> r as u64 & 1) == 0 && self.tmp[(at + r) as usize] == v {
+                    return 0;
+                }
+            }
+        }
+        return ids;
+    }
+
     // Whether `v` is the address of an aggregate parameter or result whose elements pass in registers, one
     // each (`hfa`): a vector of them is built lane by lane and taken apart again.
     const fn in_regs(self: &Self, b: &Body, v: Value) bool {
@@ -801,7 +925,7 @@ extend Slp {
     // Whether the lanes of splat or gather `pk` are constants.
     const fn consts(self: &Self, b: &Body, pk: Pack) bool {
         for q in 0..pk.n {
-            if const_bits(b, self.lv[(pk.lane + q) as usize]).is_none() {
+            if lane_bits(b, self.lv[(pk.lane + q) as usize]).is_none() {
                 return false;
             }
         }
@@ -936,11 +1060,14 @@ extend Slp {
             } else {
                 self.vector(b, pk.b)
             };
-            let mut last = l0;
-            for q in 1..pk.n {
-                last = last.max(self.lv[(pk.lane + q) as usize]);
+            let mut last = pk.tpl;
+            for q in 0..pk.n {
+                let l = self.lv[(pk.lane + q) as usize];
+                if (l & VPARAM) == 0 && self.iown[l as usize] == p {
+                    last = last.max(l);
+                }
             }
-            let mut t = b.insts[l0 as usize];
+            let mut t = b.insts[pk.tpl as usize];
             t.ty = vt;
             t.a = va;
             if pk.b != NONE {
@@ -976,7 +1103,10 @@ extend Slp {
                 let size = type_bytes(pk.ty, self.ptr);
                 let sa = self.slot(b, k, at, pk.n * size);
                 for q in 0..pk.n {
-                    let x = self.lv[(pk.lane + q) as usize];
+                    let mut x = self.lv[(pk.lane + q) as usize];
+                    if x == VNONE {
+                        x = self.make(b, Inst { op: O_ICONST, ty: pk.ty, aux: 0, a: 0, b: 0, c: VNONE }, k, at, false);
+                    }
                     let _ = self.make(
                         b,
                         Inst { op: O_STORE, ty: T_NONE, aux: size.trailing_zeros() as u16, a: sa, b: x, c: q * size },
@@ -1001,7 +1131,7 @@ extend Slp {
             b.words.push(0);
         }
         for q in 0..pk.n {
-            let mut x = const_bits(b, self.lv[(pk.lane + q) as usize]).unwrap();
+            let mut x = lane_bits(b, self.lv[(pk.lane + q) as usize]).unwrap();
             if lb < 64 {
                 x &= (1u64 << lb as u64) - 1;
             }
@@ -1094,6 +1224,16 @@ const fn plain_load(b: &Body, v: Value, ty: u8) bool {
     }
     let t = b.insts[v as usize];
     return t.op == O_LOAD && t.ty == ty && (t.aux & MEM_VOLATILE) == 0;
+}
+
+// The bits of a lane `v` of a splat or gather: 0 for VNONE (an identity lane's second operand), else a
+// constant's (`const_bits`).
+fn lane_bits(b: &Body, v: Value) Option<u64> {
+    return if v == VNONE {
+        Some(0u64)
+    } else {
+        const_bits(b, v)
+    };
 }
 
 // The bits of constant `v` (an integer's or a float's), if it is one.

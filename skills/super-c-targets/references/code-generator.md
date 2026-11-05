@@ -88,6 +88,23 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   for 32-bit ones: the even and odd lanes' `pmuludq` (signed `pmuldq` with SSE4.1, else a correction)
   merged by a mask, `vpblendd` with AVX2, `vpandq`/`vporq` with AVX-512). Any other form computes lane by
   lane through memory.
+- Vector constants: x86-64 loads one from the body's read-only constants (`const_sym`, aligned to its
+  size); a 16-byte one that lane operations of its block alone read, each as its second operand, is their
+  memory operand (`lv::FOLD_VCMEM`: `pxor x, [rip + k]`). arm64 builds one of a repeating byte or
+  element (MOVI, DUP) and loads any other of 16 bytes (ADRP, LDR q of `const_sym`'s data). A comparison
+  with 0 of the `or` of a vector's lanes tests the register (`lv::FOLD_ANY`: `pmovmskb` of a lane mask;
+  with SSE4.1 `ptest` of any integer vector, `lv::FOLD_ANY_BITS`).
+- Inline copies: arm64 moves 32 bytes at a time by LDP and STP of two q registers where the pair forms
+  reach both offsets (`qpair_fits`; an overlapping copy loads every chunk first). Load folds of an
+  aggregate parameter (`lv::FOLD_LDOP`) read only one the body's own convention passes in memory
+  (`Live::mem_params`): Super-C's convention on Windows passes 16 bytes in two registers.
+- Sibling calls: a call right before the return whose result is the body's (or nothing), with every
+  argument in registers; also a call that writes the body's own aggregate result (its result pointer
+  passed on, both results in memory), which returns as the body would. arm64 joins up to 8 integer
+  comparisons into one conditional-comparison chain (`lv::FOLD_CCMP`); each leaf's extension frees after
+  its `ccmp`.
+- A saturating float-to-integer conversion reads the float's sign with `movq`/`movd`, which EVEX
+  encodes on xmm16..xmm31 (`movmskpd` has no EVEX form).
 - arm64 pairs loads or stores at adjacent offsets in either order across up to seven pure
   scalar instructions (`pair_next`). It never crosses another memory operation or control
   flow. A store source must already exist; a second load can take its planned register home,

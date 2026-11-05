@@ -31,8 +31,8 @@ Before any optimization work, understand these non-negotiable constraints:
    natively: the LIR optimizer (`lir::opt`, super-c-compiler-internals, "LIR") inlines
    small bodies across modules, numbers values, forwards loads and stores, promotes the
    loads of private memory one store writes, moves invariant code out of loops and folds
-   constants and branches, lowers eligible fixed-size `memcmp` equality checks
-   (`memcmp_eq`), forwards copied arguments (`copy_arg`), and forwards private-copy loads
+   constants and branches, expands a `memcmp` of a known count (`memcmp_eq`: at most 32
+   bytes, 64 for an equality), forwards copied arguments (`copied_args`), and forwards private-copy loads
    (`private_load`); at 2 and 3 it also vectorizes counted loops over slices, and every level's
    passes and flags are in the binary skill ("Optimization levels and code-generation
    flags"). If a target shows ~0 samples under the build's optimizer, the optimization will

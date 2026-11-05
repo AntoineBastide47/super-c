@@ -1573,6 +1573,7 @@ fn seq_bisect<T, P: SortProbe<T>>(v: *const T, n: usize, cmp: P) Result<usize, u
 extern "C" {
     fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
     fn memmove(dst: *mut void, src: *const void, n: usize) *mut void;
+    fn memcmp(a: *const void, b: *const void, n: usize) i32;
 }
 
 /// Restore the max-heap order of `v` after its first element changed (a heap's top, modified in
@@ -1755,6 +1756,12 @@ extend<T: Eq> Slice<T> as Eq {
     pub fn eq(self: &Slice<T>, other: &Slice<T>) bool {
         if self.len != other.len {
             return false;
+        }
+        // Integers and booleans are equal when their bytes are: one `memcmp`, which the optimizer expands
+        // for a length it knows.
+        let k = type_info::<T>().kind;
+        if k == TypeTag::Int || k == TypeTag::Uint || k == TypeTag::Bool {
+            return self.len == 0 || unsafe memcmp(self.ptr, other.ptr, self.len * sizeof(T)) == 0;
         }
         for i in 0..self.len {
             if unsafe self.ptr[i] != unsafe other.ptr[i] {

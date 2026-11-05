@@ -1429,8 +1429,9 @@ b6:
 
 // A loop of a 32-bit counter vectorizes where it indexes through its extension to 64 bits, which does not
 // wrap in the loop: a zero extension under `i <s n` from 0 or under `i <u n`, a sign extension under
-// `i <s n`. A sign extension under `i <u n`, a start below 0 and an extension the body also computes with
-// keep the loop scalar. Each kernel adds 7 to the first `n` elements; the drivers sum them.
+// `i <s n`. A sign extension under `i <u n` and a start below 0 keep the loop scalar. Each kernel adds 7 to
+// the first `n` elements (the last adds the counter's truncated extension, the counter itself: its lanes);
+// the drivers sum them.
 @test
 fn a_narrow_counter_indexes_through_its_extension() {
     // (start, comparison, extension, an extra use of the extension, vectorizes)
@@ -1440,7 +1441,7 @@ fn a_narrow_counter_indexes_through_its_extension() {
         (0, "ult", "zext", false, true),
         (0, "ult", "sext", false, false),
         (-4, "slt", "sext", false, false),
-        (0, "slt", "zext", true, false),
+        (0, "slt", "zext", true, true),
     ];
     let mut src = String::from_str("lir ptr 8\n");
     let mut body = String::new();
@@ -6365,4 +6366,42 @@ fn byte_idioms_vectorize_at_their_lanes() {
             same_outcome(&b0, &a0, "drive", args, want, false);
         }
     }
+}
+
+// A counted loop of 64 iterations, within the peeling budget, that fills two vectors or more vectorizes
+// first: its product of an invariant and the counter reads the counter's lanes (the counter in every lane
+// plus the lane's iteration). The stores then are vector stores, not 64 scalar ones.
+@test
+fn a_loop_that_fills_vectors_vectorizes_before_it_peels() {
+    let (b, a) = optimized_for(
+        M"(lir ptr 8
+sym @fill fn global
+fn @fill
+  sig (ptr, i32) -> void
+  ref p0 256 noalias
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 64
+  v4 = iconst.i32 1
+  jmp b1(v2)
+b1(v5: i32):
+  v6 = icmp.slt v5, v3
+  br v6, b3, b2
+b2:
+  ret
+b3:
+  v7 = mul.i32 v1, v5
+  v8 = zext.i64 v5
+  v9 = ptradd v0, v8 * 4 inbounds
+  store v7, v9 align 2
+  v10 = add.i32 v5, v4
+  jmp b1(v10)
+)",
+        lu::Budgets { peel: 300, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 1, interleave: 1, fin: 0 },
+        16,
+        0,
+    );
+    let f = text_of(&a, "fill");
+    assert(f.contains("mul.v4i32") && count(&f, "store") < 64, f.as_str());
+    let _ = b;
 }

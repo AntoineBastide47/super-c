@@ -2885,8 +2885,10 @@ extend Gen {
         }
         // Code that may branch past a lane reads a vector from its home: a vector in a register reaches
         // it first, but for the instructions with register forms (`vop` and `vec_arith` sync their others;
-        // a splat of a lane, `lv::FOLD_LANE`) and calls (a vector passed in memory goes through `mloc`).
-        let reg_form = t.op == O_STORE || t.op == O_SPLAT || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(
+        // a splat of a lane, `lv::FOLD_LANE`; a comparison of a folded lane `or`, `lv::FOLD_ANY`) and calls
+        // (a vector passed in memory goes through `mloc`).
+        let any = t.op == O_ICMP && (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] && self.b().insts[t.a as usize].op == O_VOP;
+        let reg_form = any || t.op == O_STORE || t.op == O_SPLAT || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(
             t.ty,
         ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VSUMW) || t.op == O_VEXTRACT || t.op == O_VINSERT || self.conv_reg(
             t,
@@ -3690,8 +3692,12 @@ extend Gen {
                 }
             }
         }
-        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_XBFX_EXT | lv::FOLD_ZSHL | lv::FOLD_VSAD | if self.avx {
+        self.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_XBFX_EXT | lv::FOLD_ZSHL | lv::FOLD_VSAD | lv::FOLD_VCMEM | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE | lv::FOLD_VLDOP
+        } else {
+            0
+        } | if unsafe (*self.pkg).sse41 {
+            lv::FOLD_ANY_BITS
         } else {
             0
         };
@@ -4972,7 +4978,7 @@ extend Gen {
             return true;
         }
         if (op == O_SPLAT || op == O_WCONST) && self.lv.pfold[i as usize] {
-            return true; // its shifts take it as an immediate (`lv::FOLD_VSHIMM`)
+            return true; // its shifts take it as an immediate (`lv::FOLD_VSHIMM`), its users read it (`lv::FOLD_VCMEM`)
         }
         if op == O_VEXTRACT && self.lv.pfold[i as usize] {
             return true; // its splat reads the lane (`lv::FOLD_LANE`)
@@ -5562,11 +5568,20 @@ extend Gen {
         let bits = type_bits(ty, self.ptr);
         let sz = bits / 8;
         if (t.a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[t.a as usize] && self.b().insts[t.a as usize].op == O_VOP {
-            // The `or` of a lane mask's lanes is 0 when no byte's sign bit is set: `pmovmskb`, `test`.
+            // The `or` of a lane mask's lanes is 0 when no byte's sign bit is set: `pmovmskb`, `test`; of
+            // another vector's when no bit is (`lv::FOLD_ANY_BITS`): `ptest`.
             let n = self.b().insts[t.a as usize];
             let v = self.b().pool[n.a as usize];
             let rv = self.vec_use(v, self.vs0) - V0;
             self.zero_for(zi, S0, NOREG);
+            if !lane_mask(self.b(), v, lv::MASK_DEPTH) {
+                if type_bytes(self.vt(v), 8) == 32 {
+                    self.c.vex_rr(0x66, 2, 0x17, false, true, rv, 0, rv);
+                } else {
+                    self.c.sse_rr(0x66, 0x0F3817, rv, rv);
+                }
+                return icond(t.aux);
+            }
             if type_bytes(self.vt(v), 8) == 32 {
                 self.c.vex_rr(0x66, 1, 0xD7, false, true, S0, 0, rv);
             } else {
@@ -8578,8 +8593,13 @@ extend Gen {
         }
         let r = b.insts[i as usize + 1];
         let rt = b.pool[t.b as usize + 2];
-        // An aggregate result into memory its address operand names, from a body that returns nothing.
-        let into = (rt & AGG) != 0 && b.pool[b.sig as usize + 2] == T_NONE as u32 && t.ty == T_NONE;
+        // An aggregate result into memory its address operand names, from a body that returns nothing; or
+        // into this body's own result memory, of the body's result code (`fwd`), both in memory: the callee
+        // writes it and returns as this body would.
+        let into0 = (rt & AGG) != 0 && b.pool[b.sig as usize + 2] == T_NONE as u32 && t.ty == T_NONE;
+        let own = VPARAM | b.blocks[0].param_start + b.pool[b.sig as usize];
+        let fwd = (rt & AGG) != 0 && rt == b.pool[b.sig as usize + 2] && t.ty == T_NONE && b.pool[(t.c + b.pool[t.b as usize]) as usize] == own && self.self_lay.ret.kind == ab::L_SRET;
+        let into = into0 || fwd;
         if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || (rt != b.pool[b.sig as usize + 2] || (rt & AGG) != 0) && !into {
             return false;
         }
@@ -11694,6 +11714,16 @@ extend Gen {
     // that dies here.
     fn vex_op(self: &mut Self, pfx: u32, mm: u32, opc: u32, l: bool, i: u32, xv: Value, yv: Value) {
         let rx = self.vec_use(xv, self.vs0);
+        if self.vc_folded(yv) {
+            let mut r = self.def_shared(i, xv);
+            if r == NOREG {
+                r = self.def_over(i, xv, rx);
+            }
+            let k = self.vc_sym(yv);
+            self.c.vex_rm(pfx, mm, opc, false, l, r - V0, rx - V0, x::rip());
+            self.reloc_rip(x::R_PC32, k, 0);
+            return;
+        }
         if self.ld_folded(yv) {
             let lt = self.b().insts[yv as usize];
             let mut rs: u32 = NONE;
@@ -11860,6 +11890,18 @@ extend Gen {
         self.c.byte(0xD8);
     }
 
+    // Whether `v` is a vector constant its users read from the constant data (`lv::FOLD_VCMEM`).
+    const fn vc_folded(self: &Self, v: Value) bool {
+        return v != VNONE && (v & (VPARAM | VFLAG)) == 0 && self.lv.pfold[v as usize] && self.b().insts[v as usize].op == O_WCONST;
+    }
+
+    // The constant data symbol of vector constant `v` (`const_sym`).
+    fn vc_sym(self: &mut Self, v: Value) u32 {
+        let t = self.b().insts[v as usize];
+        let b = self.b();
+        return self.const_sym(b.words[t.a as usize..(t.a + t.b) as usize]);
+    }
+
     // `sse` of one register's width on `xv` and `yv` into a register that holds result `i`.
     fn sse_reg(self: &mut Self, w: u32, op: u8, lt: u8, i: u32, xv: Value, yv: Value) {
         let pfx = w >> 16;
@@ -11878,6 +11920,18 @@ extend Gen {
             return;
         }
         let rx = self.vec_use(xv, self.vs0);
+        if self.vc_folded(yv) {
+            // The constant read from the constant data (`lv::FOLD_VCMEM`).
+            let mut rd = self.def_shared(i, xv);
+            if rd == NOREG {
+                rd = self.def_over(i, xv, rx);
+            }
+            self.c.vmov(rd - V0, rx - V0);
+            let k = self.vc_sym(yv);
+            self.c.rm(pfx, opc, false, rd - V0, x::rip(), false);
+            self.reloc_rip(x::R_PC32, k, 0);
+            return;
+        }
         let ry = if yv != VNONE {
             self.vec_use(yv, self.vs1)
         } else {

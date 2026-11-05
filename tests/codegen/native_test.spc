@@ -16451,3 +16451,146 @@ int main(void) {
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }
+
+// x86-64 with SSE4.1: the `or` of 16-byte differences tested against 0 is `ptest` of the register (no copy
+// of it to memory), and a vector constant that one lane operation reads is its memory operand (`pxor x,
+// [rip + k]`, the constant aligned in read-only data).
+@test
+fn a_vector_difference_tests_with_ptest_and_reads_its_constant() {
+    let lir = M"(lir ptr 8
+sym @diff fn global
+fn @diff
+  sig (ptr) -> i8
+b0(v0: ptr):
+  v1 = load.v16i8 v0 align 0
+  v2 = load.v16i8 v0+16 align 0
+  v3 = wconst.v16i8 0x6f6c6c6568, 0x6c6c6568
+  v4 = xor.v16i8 v1, v3
+  v5 = xor.v16i8 v2, v1
+  v6 = or.v16i8 v4, v5
+  v7 = vop.reduce_or.i8 (v6)
+  v8 = iconst.i8 0
+  v9 = icmp.ne v7, v8
+  ret v9
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), SSE41, &mut obj),
+        "the object",
+    );
+    let (at, n) = elf_text(&obj);
+    let t = obj[at..at + n];
+    let mut ptest = false;
+    let mut stored = false;
+    let mut pxor_rip = false;
+    for k in 0..t.len() - 4 {
+        // 66 [REX] 0F 38 17: `ptest`; 66 [REX] 0F 7F or F3 [REX] 0F 7F: a vector store; 66 [REX] 0F EF with
+        // ModRM mod 00, r/m 101: `pxor` of a RIP-relative operand.
+        let o = if (t[k + 1] & 0xF0) == 0x40 {
+            k + 2
+        } else {
+            k + 1
+        };
+        if o + 3 < t.len() && t[o] == 0x0F {
+            ptest = ptest || t[k] == 0x66 && t[o + 1] == 0x38 && t[o + 2] == 0x17;
+            stored = stored || (t[k] == 0x66 || t[k] == 0xF3) && t[o + 1] == 0x7F;
+            pxor_rip = pxor_rip || t[k] == 0x66 && t[o + 1] == 0xEF && (t[o + 2] & 0xC7) == 0x05;
+        }
+    }
+    assert(ptest && !stored && pxor_rip, "ptest, no store, pxor of a constant");
+}
+
+// arm64: a vector constant of two different words loads from read-only data (`adrp`, `ldr q`), not two
+// built words and an `ins`; an inline copy of 64 bytes moves 32 at a time (`ldp q` and `stp q`); a body that
+// passes its own aggregate result to a call of the same result right before its return jumps to the
+// callee (x86-64 too).
+@test
+fn arm64_constants_load_copies_pair_and_results_pass_on() {
+    let lir = M"(lir ptr 8
+sym @k fn global
+sym @cp fn global
+sym @make fn global
+sym @fwd fn global
+fn @k
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = wconst.v2i64 0x1234567890, 0xabcdef0123
+  store v1, v0 align 0
+  ret
+fn @cp
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.i64 64
+  memcpy v0, v1, v2
+  ret
+fn @make
+  layout l0 size 64 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64, 40 i64, 48 i64, 56 i64]
+  sig (i64) -> l0
+b0(v0: i64, v1: ptr):
+  store v0, v1 align 3
+  ret
+fn @fwd
+  layout l0 size 64 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64, 40 i64, 48 i64, 56 i64]
+  sig (i64) -> l0
+b0(v0: i64, v1: ptr):
+  v2 = iconst.i64 1
+  v3 = add.i64 v0, v2
+  call @make(v3, v1) : (i64) -> l0
+  ret
+)";
+    let mut a64 = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), TAIL, &mut a64), "arm64");
+    // LDR Qt, [Xn, #imm] (0x3DC00000), INS Vd.D[1] (0x4E181C00), LDP and STP of q registers (signed offset:
+    // 0xAD400000, 0xAD000000), BL (0x94000000).
+    assert(
+        elf_text_count(&a64, 0xFFC00000, 0x3DC00000) >= 1 && elf_text_count(&a64, 0xFFFFFC00, 0x4E181C00) == 0,
+        "a constant load",
+    );
+    assert(
+        elf_text_count(&a64, 0xFFC00000, 0xAD400000) == 2 && elf_text_count(&a64, 0xFFC00000, 0xAD000000) == 2,
+        "q pairs",
+    );
+    assert(elf_text_count(&a64, 0xFC000000, 0x94000000) == 0, "a jump to make");
+    let mut x = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), TAIL, &mut x), "x86-64");
+    let (xt, xn) = elf_text(&x);
+    let t = x[xt..xt + xn];
+    let mut call = false;
+    for k in 0..t.len() {
+        call = call || t[k] == 0xE8;
+    }
+    assert(!call, "no call");
+}
+
+// arm64: an equality of four 8-byte pairs is one chain of conditional comparisons (`cmp` and three `ccmp`),
+// no `cset` and `and` before its end.
+@test
+fn arm64_compares_four_pairs_in_one_chain() {
+    let lir = M"(lir ptr 8
+sym @eq4 fn global
+fn @eq4
+  sig (ptr, ptr) -> i8
+b0(v0: ptr, v1: ptr):
+  v2 = load.i64 v0 align 3
+  v3 = load.i64 v1 align 3
+  v4 = load.i64 v0+8 align 3
+  v5 = load.i64 v1+8 align 3
+  v6 = load.i64 v0+16 align 3
+  v7 = load.i64 v1+16 align 3
+  v8 = load.i64 v0+24 align 3
+  v9 = load.i64 v1+24 align 3
+  v10 = icmp.eq v2, v3
+  v11 = icmp.eq v4, v5
+  v12 = icmp.eq v6, v7
+  v13 = icmp.eq v8, v9
+  v14 = and.i8 v10, v11
+  v15 = and.i8 v14, v12
+  v16 = and.i8 v15, v13
+  ret v16
+)";
+    let mut a64 = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut a64), "arm64");
+    // CCMP (register, 64-bit): 0xFA400000; CSET is CSINC (0x1A800400 family): one.
+    assert_eq(elf_text_count(&a64, 0xFFE00C10, 0xFA400000), 3);
+    assert_eq(elf_text_count(&a64, 0x7FE00C00, 0x1A800400), 1);
+}
