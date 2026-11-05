@@ -6756,6 +6756,72 @@ int main(void) {
     assert_eq(run_zmm(&t, drv), 0);
 }
 
+// A loop's entry values made for the entry edge alone take their header parameters' registers
+// (`Live::entry_partner`): 20 `v4f32` sums loaded before the loop, more than the temporaries, spill none
+// with AVX-512 (no `sub rsp`: 48 83 EC or 48 81 EC). It gives the C sums.
+@test
+fn a_loops_loaded_entry_values_take_its_registers() {
+    let mut t = String::from(
+        "lir ptr 8\nsym @sums fn global\nfn @sums\n  sig (ptr, i64, ptr) -> void\nb0(v0: ptr, v1: i64, v2: ptr):\n  v3 = iconst.i64 0\n  v4 = iconst.i64 1\n",
+    );
+    for k in 0..20u32 {
+        t.format_into("  v{} = load.v4f32 v2+{} align 2\n", 5 + k, 16 * k);
+    }
+    t.push_str("  jmp b1(v3, v0");
+    for k in 0..20u32 {
+        t.format_into(", v{}", 5 + k);
+    }
+    t.push_str(")\nb1(v25: i64, v26: ptr");
+    for k in 0..20u32 {
+        t.format_into(", v{}: v4f32", 27 + k);
+    }
+    t.push_str("):\n  v47 = icmp.ult v25, v1\n  br v47, b2, b3\nb2:\n");
+    for k in 0..20u32 {
+        t.format_into(
+            "  v{} = load.v4f32 v26+{} align 2\n  v{} = fadd.v4f32 v{}, v{}\n",
+            48 + 2 * k,
+            16 * k,
+            49 + 2 * k,
+            27 + k,
+            48 + 2 * k,
+        );
+    }
+    t.push_str("  v88 = add.i64 v25, v4\n  v89 = ptradd v26+320\n  jmp b1(v88, v89");
+    for k in 0..20u32 {
+        t.format_into(", v{}", 49 + 2 * k);
+    }
+    t.push_str(")\nb3:\n");
+    for k in 0..20u32 {
+        t.format_into("  store v{}, v2+{} align 2\n", 27 + k, 16 * k);
+    }
+    t.push_str("  ret\n");
+    let mut obj = Vector::<u8>::new();
+    let s8: [u8; 3] = [0x48, 0x83, 0xEC];
+    let s32: [u8; 3] = [0x48, 0x81, 0xEC];
+    assert(
+        object_of(&t, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), Z512, &mut obj),
+        "the AVX-512 object",
+    );
+    assert(!holds(&obj, s8[0..3]) && !holds(&obj, s32[0..3]), "no frame with AVX-512");
+    let drv = M"(#include <stdint.h>
+void sums(const float *, int64_t, float *);
+int main(void) {
+  static float in[3][80];
+  float out[80], ref[80];
+  for (int i = 0; i < 3; i++) for (int j = 0; j < 80; j++) in[i][j] = (float)((i * 7 + j) % 13) - 6.0f;
+  for (int j = 0; j < 80; j++) out[j] = ref[j] = (float)(j % 5);
+  for (int i = 0; i < 3; i++) for (int j = 0; j < 80; j++) ref[j] += in[i][j];
+  sums(&in[0][0], 3, out);
+  for (int j = 0; j < 80; j++) if (out[j] != ref[j]) return 1;
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(&t, drv), 0);
+        assert_eq(run_zmm(&t, drv), 0);
+    }
+}
+
 // A second loop's parameters share the registers of the values its one entry passes, also when those
 // continue the first loop's parameters (`Live::entry_partner` through `Live::root`): a 128-bit sum of
 // products over an unrolled loop and its remainder loop keeps every value in a register on x86-64 without
@@ -12582,12 +12648,41 @@ b0(v0: i64, v1: i64, v2: ptr):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
-// Float to integer conversions saturate, NaN to 0, as the evaluator defines them.
+// wasm32: a wide constant that only vector shifts read, as their count, is never made: no `v128.const`
+// (FD 0C). The shifts give the C results.
+@test
+fn a_constant_shift_count_makes_no_vector() {
+    let lir = M"(lir ptr 4
+sym @sh fn global
+fn @sh
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = load.v4i32 v0 align 2
+  v2 = wconst.v4i32 0x300000003, 0x300000003
+  v3 = ashr.v4i32 v1, v2
+  v4 = shl.v4i32 v3, v2
+  store v4, v0 align 2
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let vc: [u8; 2] = [0xFD, 0x0C];
+    assert(!holds(&obj, vc[0..2]), "no v128.const");
+    let drv = "#include <stdint.h>\nvoid sh(int32_t *);\nint main(void) {\n  int32_t a[4] = {-17, 17, 100, -1};\n  sh(a);\n  return !(a[0] == -24 && a[1] == 16 && a[2] == 96 && a[3] == -8);\n}\n";
+    let t8 = format("lir ptr 8\n{}", lir.slice(10, lir.len()));
+    if cli::has_cc() {
+        assert_eq(run_native(&t8, drv), 0);
+        assert_eq(run_wasm(&t8, drv), 0);
+    }
+}
+
+// Float to integer conversions saturate, NaN to 0, as the evaluator defines them. wasm32 converts to 32 and
+// 64 bits with `trunc_sat` (`i32.trunc_sat_f64_s` FC 02, `i64.trunc_sat_f64_s` FC 06, `_u` FC 07).
 @test
 fn float_to_integer_conversions_saturate() {
-    if !cli::has_cc() {
-        return; // a C driver links it
-    }
     let lir = M"(lir ptr 8
 sym @conv fn global
 fn @conv
@@ -12605,6 +12700,17 @@ b0(v0: f64, v1: ptr):
   store v5, v1+24 align 3
   ret
 )";
+    let mut obj = Vector::<u8>::new();
+    let t4 = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&t4, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    let sat: [u8; 6] = [0xFC, 0x02, 0xFC, 0x06, 0xFC, 0x07];
+    assert(holds(&obj, sat[0..2]) && holds(&obj, sat[2..4]) && holds(&obj, sat[4..6]), "trunc_sat");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let drv = "#include <stdint.h>\n#include <math.h>\nvoid conv(double, uint64_t *);\nint main(void) {\n  double in[7] = {NAN, 1e20, -1e20, -0.5, 300.0, 2147483647.5, 1.8e19};\n  uint64_t want[7][4] = {\n    {0, 0, 0, 0},\n    {0x7fffffff, 255, 0x7fffffffffffffffULL, 0xffffffffffffffffULL},\n    {0x80000000, 0, 0x8000000000000000ULL, 0},\n    {0, 0, 0, 0},\n    {300, 255, 300, 300},\n    {0x7fffffff, 255, 2147483647, 2147483647},\n    {0x7fffffff, 255, 0x7fffffffffffffffULL, 18000000000000000000ULL},\n  };\n  for (int i = 0; i < 7; i++) {\n    uint64_t o[4];\n    conv(in[i], o);\n    for (int k = 0; k < 4; k++) if (o[k] != want[i][k]) return 1 + i;\n  }\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);

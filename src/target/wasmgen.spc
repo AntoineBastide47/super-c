@@ -523,7 +523,25 @@ extend Gen {
         self.remat.truncate(0);
         for k in 0..b.insts.len() {
             let op = b.insts[k].op;
-            self.remat.push(op == O_ICONST || op == O_FCONST || op == O_SYMADDR || op == O_SLOTADDR || op == O_RETADDR);
+            // A wide constant that only vector shifts in v128 values read, as their count (`shift_count`: an
+            // immediate), is never made.
+            let count = self.simd && op == O_WCONST && self.lv.uses[k] != 0;
+            self.remat.push(
+                op == O_ICONST || op == O_FCONST || op == O_SYMADDR || op == O_SLOTADDR || op == O_RETADDR || count,
+            );
+        }
+        if self.simd {
+            for k in 0..b.insts.len() {
+                let t = b.insts[k];
+                lv::each_use(b, t, &mut self.uses);
+                let shift = (t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR) && self.vform(t);
+                for u in 0..self.uses.len() {
+                    let v = self.uses[u];
+                    if (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_WCONST && !(shift && t.b == v && t.a != v) {
+                        self.remat[v as usize] = false;
+                    }
+                }
+            }
         }
         // The wasm parameters: the result's pointer, the fixed parameters' values, the variadic buffer.
         wa::encode(&self.me, &mut self.enc);
@@ -3286,9 +3304,18 @@ extend Gen {
         return self.fp_to_int(i, t);
     }
 
-    // A float to an integer: truncated, saturating (NaN is 0) unless unchecked, as the evaluator converts.
+    // A float to an integer: truncated, saturating (NaN is 0) unless unchecked, as the evaluator converts. To
+    // 32 or 64 bits that is `trunc_sat` (0xFC 0..7) on the operand as it comes.
     fn fp_to_int(self: &mut Self, i: u32, t: Inst) bool {
         let fd = self.vt(t.a) == T_F64;
+        let tb = type_bits(t.ty, 4);
+        if t.aux != CV_UNCHECKED && (tb == 32 || tb == 64) {
+            self.get(t.a);
+            self.c.op(0xFC);
+            self.c.uleb(pick8(tb == 64, 4, 0) + pick8(fd, 2, 0) + pick8(t.op == O_FPTOSI, 0, 1));
+            self.put(i);
+            return true;
+        }
         let x = self.tmp(pick8(fd, w::F64, w::F32));
         self.get(t.a);
         self.c.local(w::LOCAL_SET, x);

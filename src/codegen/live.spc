@@ -182,6 +182,11 @@ const FOLD_DEPTH: u32 = 8;
 // The levels of values a sunk value moves with (`FOLD_SINK`): its operands, theirs, and so on.
 const SINK_DEPTH: u32 = 4;
 
+/// Whether LIR operation `op` keeps its operand's bits: a pointer to or from an integer, a bit cast.
+pub(package) const fn free_conv(op: u8) bool {
+    return op == O_PTRTOINT || op == O_INTTOPTR || op == O_BITCAST;
+}
+
 /// `Live::plan`'s homes per value: no register for the whole range, a callee-saved one, a caller-saved one, a
 /// caller-saved one of the vector file's upper registers (x86-64's xmm16..xmm31, which only EVEX encodes).
 pub(package) const HOME_NONE: u8 = 0;
@@ -3325,7 +3330,7 @@ extend Live {
     // `x`'s type, when no block the header reaches reads that value or passes it (it is dead at the header)
     // and the layout puts its uses before the loop (`early_returns`): its register may then hold `x` too,
     // as on the loop's path the value is dead and on the others the loop does not run. NONE else.
-    fn entry_partner(self: &mut Self, b: &Body, x: u32) u32 {
+    pub(package) fn entry_partner(self: &mut Self, b: &Body, x: u32) u32 {
         let ni = b.insts.len() as u32;
         if x < ni || x >= ni + b.params.len() as u32 {
             return NONE;

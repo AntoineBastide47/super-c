@@ -1050,6 +1050,22 @@ extend Gen {
             }
             self.want.push(w);
         }
+        // The value the one entry into a loop passes a header parameter that asks for a home (`Live::
+        // entry_partner`), when that edge is its one use and it asked for none, asks for the parameter's: it
+        // shares that register, made there with no move, and a preheader of more such values than temporaries
+        // spills none. Not a conversion that keeps its operand's bits, which takes that register (`def_over`).
+        for x in ni..nv {
+            if (self.want[x] & (lv::WANT_CALLEE | lv::WANT_SCRATCH)) == 0 {
+                continue;
+            }
+            let y = self.lv.entry_partner(b, x as u32);
+            if y == NONE || y as usize >= ni || self.lv.count[y as usize] != 1 || lv::free_conv(b.insts[y as usize].op) || self.want[y as usize] != 0 || self.vmem[y as usize] || self.remat_inst(
+                y,
+            ) && !self.lconst[y as usize] || self.crosses_call(y) {
+                continue;
+            }
+            self.want[y as usize] = self.want[x];
+        }
         // Six of x0..x15 stay for temporaries in a leaf (no call's arguments, no masked vector access),
         // ten of them else.
         let xs: u32 = if self.scr != XSCR {
@@ -3266,7 +3282,10 @@ extend Gen {
         // parameter's range ends (`release`).
         let sp = self.lv.share[x as usize];
         if sp != NONE {
-            self.param_home(sp, NOREG);
+            // A parameter takes its home here; an instruction (a loop's entry value) took its own when made.
+            if sp as usize >= self.b().insts.len() {
+                self.param_home(sp, NOREG);
+            }
             let spa = self.va[sp as usize];
             if spa.home == H_FIXED {
                 let va = self.va.index_mut(x as usize);
