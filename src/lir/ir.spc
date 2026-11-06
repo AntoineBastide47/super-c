@@ -478,8 +478,21 @@ pub(package) fn fill<T: Clone + Default + Eq>(v: &mut Vector<T>, n: usize, x: T)
 /// Whether `t` may write memory or order memory accesses: a store, a copy, a fill, an atomic or a fence,
 /// a call, inline assembly, a system operation, a vector operation or a variadic access.
 pub(package) const fn writes_memory(t: Inst) bool {
-    let op = t.op;
-    return op == O_STORE || op == O_MEMCPY || op == O_MEMSET || op >= O_ALOAD && op <= O_FENCE || op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_SYS || op >= O_VOP && op <= O_VAEND;
+    return WRITES_MEMORY[t.op as usize];
+}
+
+// `writes_memory` per operation; a byte indexes the 256 entries.
+const WRITES_MEMORY: [bool; 256] = writes_memory_ops();
+
+const fn writes_memory_ops() [bool; 256] {
+    let mut t = [false; 256];
+    for k in 0..256u32 {
+        let op = k as u8;
+        unsafe {
+            t[k as usize] = op == O_STORE || op == O_MEMCPY || op == O_MEMSET || op >= O_ALOAD && op <= O_FENCE || op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_SYS || op >= O_VOP && op <= O_VAEND;
+        }
+    }
+    return t;
 }
 
 /// The address of load or store `t` of `b` as a base under at most 8 constant offsets (`ptradd`s without

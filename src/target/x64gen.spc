@@ -323,7 +323,7 @@ pub(package) struct Gen {
     opf: u8, // the body's `lv::op_flags`
     rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
     cret: Vector<bool>, // per instruction, a call that returns (`clobbers`, not `dead_end`; `call_tables`)
-    shared: Vector<u32>, // the block parameters that share a header parameter's slot (`back_share`)
+    shared: Vector<u32>, // the values that share another's slot, which that one frees (`back_share`, `step_slot`)
     dying: Vector<u32>, // values whose register frees after the current instruction
     wparams: Vector<u32>, // the parameters the current terminator's edges write
     want: Vector<u8>, // per value, its request to `Live::plan`
@@ -899,7 +899,21 @@ extend Gen {
         let t = self.xty(x);
         let n = type_bytes(t, self.ptr);
         if va.home == H_NONE {
-            let off = self.slot_alloc(n, type_align(t, self.ptr));
+            // A step takes the slot of the parameter it replaces (`step_slot`): the one of the two that ends
+            // last frees it.
+            let px = step_slot(self.b(), &self.lv, &self.va, x);
+            let off = if px != NONE {
+                self.shared.push(
+                    if self.lv.end[x as usize] >= self.lv.end[px as usize] {
+                        px
+                    } else {
+                        x
+                    },
+                );
+                self.va[px as usize].off as u32
+            } else {
+                self.slot_alloc(n, type_align(t, self.ptr))
+            };
             self.va.index_mut(x as usize).home = H_SLOT;
             self.va.index_mut(x as usize).off = off as i32;
         }
@@ -3026,7 +3040,8 @@ extend Gen {
         }
     }
 
-    // Whether block parameter `x` shares a header parameter's slot (`back_share`).
+    // Whether value index `x` shares another value's slot, which that one frees (`back_share`,
+    // `step_slot`).
     fn is_shared(self: &Self, x: u32) bool {
         for k in 0..self.shared.len() {
             if self.shared[k] == x {
@@ -4483,8 +4498,8 @@ extend Gen {
         }
     }
 
-    // Every edge leaving a register prefix writes the suffix's stack home, including edges that
-    // skip the cut's block. No edge can return from the suffix to the prefix.
+    // Every edge leaving a register prefix for a block that reads the value writes the suffix's stack
+    // home, including edges that skip the cut's block. No edge can return from the suffix to the prefix.
     fn save_splits(self: &mut Self, t: Inst, ne: u32) {
         let b = self.b();
         let mut end = self.pos;
@@ -4493,11 +4508,12 @@ extend Gen {
         }
         for j in self.split_at..self.lv.splits.len() {
             let entry = self.lv.splits[j];
-            if (entry >> 32) as u32 > end {
+            let cut = (entry >> 32) as u32;
+            if cut > end {
                 break;
             }
             let x = entry as u32;
-            if self.lv.pos[self.lv.def_blk[x as usize] as usize] > self.pos {
+            if self.lv.pos[self.lv.def_blk[x as usize] as usize] > self.pos || !self.lv.enters_split(b, t, ne, x, cut) {
                 continue;
             }
             let ty = self.xty(x);
@@ -4718,9 +4734,10 @@ extend Gen {
             } else {
                 Lc { kind: LC_MEM, reg: x::RSP, off: pva.off, val: px }
             };
-            // A home the argument shares (`back_share`) already holds it.
+            // A home the argument shares (`back_share`, `step_slot`) already holds it.
             let src = self.loc_of(ax);
-            if src.kind == dst.kind && src.reg == dst.reg && src.off == dst.off && src.kind != LC_VAL {
+            let ava = self.va[ax as usize];
+            if src.kind == dst.kind && src.reg == dst.reg && src.off == dst.off && src.kind != LC_VAL || dst.kind == LC_MEM && ava.home == H_SLOT && ava.off == dst.off && !ava.dirty {
                 continue;
             }
             self.mv.push(

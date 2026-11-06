@@ -256,6 +256,7 @@ pub(package) struct Live {
     pub(package) end: Vector<u32>, // per value, the last layout position it is live in
     pub(package) uses: Vector<u32>, // per value, its use count, one more when a loop keeps it past its last use
     pub(package) last: Vector<u32>, // per value, the highest instruction index that uses it (0: none)
+    sole: Vector<u32>, // per block parameter, the one instruction that reads it (NONE: none; READERS: more)
     wpos: Vector<u32>, // per block parameter, the last layout position of a block whose edge writes it, NONE: none
     wn: Vector<u32>, // per block parameter, how many edges write it
     pub(package) flag_of: Map<u32, u32>, // an instruction with a used flag -> the flag's value index
@@ -387,6 +388,7 @@ extend Live {
             cnt: Vector::<u32>::new(),
             stepped: Vector::<u64>::new(),
             kept: Vector::<bool>::new(),
+            sole: Vector::<u32>::new(),
             jcap: Vector::<u32>::new(),
             jmin: Vector::<u32>::new(),
             rpo: Vector::<u32>::new(),
@@ -419,6 +421,18 @@ extend Live {
             };
         }
         return v;
+    }
+
+    /// Whether one of the `ne` edges of terminator `t` enters a block where split value `x` is live in its
+    /// stack home: at or past its cut `cut` and within its range.
+    pub(package) const fn enters_split(self: &Self, b: &Body, t: Inst, ne: u32, x: u32, cut: u32) bool {
+        for e in 0..ne {
+            let sp = self.pos[b.edge_target(edge_of(b, t, e)) as usize];
+            if sp >= cut && sp <= self.end[x as usize] {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Whether the block at layout position `q` of `b` keeps the register state: its only predecessor is
@@ -1944,6 +1958,122 @@ extend Live {
         return found;
     }
 
+    /// Whether instruction `m` of `b`, a reader of block parameter value index `px` of its type, may keep its
+    /// value in `px`'s stack slot (the generators' `step_slot`): `m` is the one instruction that reads `px`,
+    /// and each loop around `m`'s block holds `px`'s (`m` runs once per value of `px`), so `px` is dead from
+    /// `m` on; and an edge of a block in `m`'s range that writes that slot with another value leaves a block
+    /// where `m` is dead. Such an edge enters `px`'s block, or a block whose jump passes one of its
+    /// parameters to `px` (which may share the slot: `place::back_share`).
+    pub(package) fn slot_partner(self: &Self, b: &Body, m: u32, px: u32) bool {
+        let d = self.def_blk[m as usize];
+        let h = self.def_blk[px as usize];
+        if self.sole[px as usize] != m || d == NONE || h == NONE || self.pos[d as usize] == NONE || self.pos[h as usize] == NONE {
+            return false;
+        }
+        let ph = self.pos[h as usize];
+        let mut l = self.inner[d as usize];
+        // Each step leaves one loop.
+        while l != NONE {
+            if ph < self.pos[l as usize] || ph > self.lend[l as usize] {
+                return false;
+            }
+            l = self.parent[l as usize];
+        }
+        let ni = b.insts.len() as u32;
+        let q = px - ni - b.blocks[h as usize].param_start;
+        let lo = self.pos[d as usize];
+        let hi = self.end[m as usize];
+        // Per layout position of the range, whether `m` is live into its block: filled for the first edge
+        // that needs it.
+        let mut live = Vector::<bool>::new();
+        for p in lo..hi + 1 {
+            let t = term_of(b, self.order[p as usize]);
+            let mut other = false;
+            for e in 0..edge_count(t) {
+                let ed = edge_of(b, t, e);
+                let j = b.edge_target(ed);
+                if j == h {
+                    other = other || b.edge_arg(ed, q) != m;
+                    continue;
+                }
+                let jt = term_of(b, j);
+                if jt.op != O_JMP || b.edge_target(jt.a) != h {
+                    continue;
+                }
+                let jb = b.blocks[j as usize];
+                let a = b.edge_arg(jt.a, q);
+                other = other || (a & VPARAM) != 0 && (a & ~VPARAM) >= jb.param_start && (a & ~VPARAM) < jb.param_start + jb.param_len as u32 && b.edge_arg(
+                    ed,
+                    (a & ~VPARAM) - jb.param_start,
+                ) != m;
+            }
+            if !other {
+                continue;
+            }
+            if live.len() == 0 {
+                self.live_into(b, m, d, lo, hi, &mut live);
+            }
+            // The edges' moves may run before the branch: `m` is dead past every edge.
+            for e in 0..edge_count(t) {
+                let ed = edge_of(b, t, e);
+                let sp = self.pos[b.edge_target(ed) as usize];
+                if sp >= lo && sp <= hi && live[(sp - lo) as usize] {
+                    return false;
+                }
+                for a in 0..b.edge_nargs(ed) {
+                    if b.edge_arg(ed, a) == m {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    // Per layout position `lo..=hi` (the range of instruction `m` of block `d`) into `out`: whether `m` is
+    // live into the block there, a backward fixpoint over the range's reads of `m` (it is dead outside the
+    // range, and into `d`, which defines it).
+    fn live_into(self: &Self, b: &Body, m: u32, d: u32, lo: u32, hi: u32, out: &mut Vector<bool>) {
+        let n = (hi - lo + 1) as usize;
+        fill(out, n, false);
+        let mut reads = Vector::<bool>::with_capacity(n);
+        for p in lo..hi + 1 {
+            let bk = b.blocks[self.order[p as usize] as usize];
+            let mut r = false;
+            for i in bk.start..bk.start + bk.len {
+                let us = self.uses_of(i);
+                for u in 0..us.len() {
+                    r = r || us[u] == m;
+                }
+            }
+            reads.push(r);
+        }
+        let mut changed = true;
+        let mut passes: usize = 0;
+        // Each pass that changes marks one more block: at most `n` of them, and one that settles.
+        while changed && passes <= n {
+            changed = false;
+            passes += 1;
+            for k in 0..n {
+                let p = hi - k as u32;
+                let blk = self.order[p as usize];
+                if blk == d || out[n - 1 - k] {
+                    continue;
+                }
+                let mut l = reads[n - 1 - k];
+                let t = term_of(b, blk);
+                for e in 0..edge_count(t) {
+                    let sp = self.pos[b.edge_target(edge_of(b, t, e)) as usize];
+                    l = l || sp >= lo && sp <= hi && out[(sp - lo) as usize];
+                }
+                if l {
+                    out[n - 1 - k] = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+
     // `FOLD_XADDR` over `b`: each address `ptradd` that the loads and stores of its block alone read, as
     // their address, folds into them all.
     fn fold_addrs(self: &mut Self, b: &Body) {
@@ -2725,6 +2855,7 @@ extend Live {
         fill(&mut self.end, n, 0);
         fill(&mut self.uses, n, 0);
         fill(&mut self.last, n, 0);
+        fill(&mut self.sole, n, NONE);
         fill(&mut self.wpos, n, NONE);
         fill(&mut self.wn, n, 0);
         for k in 0..b.blocks.len() {
@@ -2765,6 +2896,13 @@ extend Live {
                     self.uses[x as usize] += 1;
                     if i > self.last[x as usize] {
                         self.last[x as usize] = i;
+                    }
+                    if x as usize >= ni && x as usize < nv && self.sole[x as usize] != i {
+                        self.sole[x as usize] = if self.sole[x as usize] == NONE {
+                            i
+                        } else {
+                            READERS
+                        };
                     }
                     let mut e = p as u32;
                     // A use in a loop the definition is outside of keeps the value to the loop's end.
@@ -3855,6 +3993,9 @@ pub(package) fn reads_slot(b: &Body, t: Inst, s: u32, us: &mut Vector<Value>) bo
 // `reads_before` follows at most BACK_SCAN blocks.
 const BACK_SCAN: u32 = 32;
 
+// `Live.sole`: two or more instructions read the parameter.
+const READERS: u32 = 0xFFFFFFFE;
+
 /// `op_flags` bits: the body holds an `O_RETADDR`, an `O_VASTART`, an `O_ASM`, an `O_SYS`.
 pub(package) const OP_RETADDR: u8 = 1;
 pub(package) const OP_VASTART: u8 = 2;
@@ -3988,6 +4129,19 @@ const fn contains_u32(xs: &Vector<u32>, x: u32) bool {
 }
 
 /// Edge `k` of terminator `t` (`jmp`: 0; `br`: 0 taken, 1 not; `switch`: its cases, then the default).
+/// The number of edges of terminator `t` (`edge_of`).
+pub(package) const fn edge_count(t: Inst) u32 {
+    return if t.op == O_JMP {
+        1
+    } else if t.op == O_BR {
+        2
+    } else if t.op == O_SWITCH {
+        t.aux as u32 + 1
+    } else {
+        0
+    };
+}
+
 pub(package) const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
     if t.op == O_JMP {
         return t.a;

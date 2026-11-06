@@ -264,6 +264,32 @@ pub(package) fn back_share(b: &Body, lv: &lv::Live, va: &Vector<Va>, x: u32) u32
     return px;
 }
 
+/// The block parameter whose stack slot instruction `x` of `b` (homes `va`), spilled without a home, may
+/// take as its own (`lv::Live::slot_partner`): a parameter `x` reads, in a slot of its own, of `x`'s type,
+/// a value in a register. NONE else.
+pub(package) fn step_slot(b: &Body, lv: &lv::Live, va: &Vector<Va>, x: u32) u32 {
+    let ni = b.insts.len() as u32;
+    if x >= ni {
+        return NONE;
+    }
+    let us = lv.uses_of(x);
+    for k in 0..us.len() {
+        let v = us[k];
+        if (v & (VPARAM | VFLAG)) != VPARAM || v == VNONE {
+            continue;
+        }
+        let px = ni + (v & ~VPARAM);
+        let ty = lv::xty(b, px);
+        if va[px as usize].home != H_SLOT || lv.cut[px as usize] != NONE || ty != lv::xty(b, x) || in_mem(ty) {
+            continue;
+        }
+        if lv.slot_partner(b, x, px) {
+            return px;
+        }
+    }
+    return NONE;
+}
+
 /// A line row at code position `at` for location `loc` (a `lines` index) into `rows` when it differs from
 /// the last: code position << 32 | location.
 pub(package) fn row(rows: &mut Vector<u64>, at: u64, loc: u32) {

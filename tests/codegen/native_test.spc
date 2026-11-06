@@ -16027,6 +16027,85 @@ int main(void) {
     }
 }
 
+// A loop counter that register pressure leaves in the stack, read only by its decrement (a preemption
+// tick's shape) and stored before a branch in the loop, keeps the decrement in its own slot
+// (`place::step_slot`): the back edge copies no slot to another (arm64: no `ldr` of w16 or x16 from sp).
+// It gives the C results.
+@test
+fn spilled_loop_parameters_take_their_steps_in_their_own_slots() {
+    let mut lir = String::from_str(
+        "lir ptr 8\nsym @f fn global\nfn @f\n  sig (ptr, i32) -> i64\nb0(v0: ptr, v1: i32):\n",
+    );
+    for k in 0..32 {
+        lir.format_into("  v{} = load.i64 v0+{} align 3\n", 2 + k, k * 8);
+    }
+    lir.push_str(
+        "  v34 = iconst.i32 0\n  v35 = iconst.i32 1\n  v36 = iconst.i64 0\n  jmp b1(v1, v36)\nb1(v37: i32, v38: i64):\n  v39 = sub.i32 v37, v35\n  v40 = icmp.eq v39, v34\n  br v40, b6, b2\nb2:\n",
+    );
+    // Each loaded value is read four times per iteration: all are heavier than the counter and its decrement,
+    // which a branch makes the loop store (`b3` and `b4` do not keep the register state).
+    let mut x: u32 = 38;
+    for r in 0..4u32 {
+        if r == 2 {
+            lir.format_into(
+                "  v105 = iconst.i64 1\n  v106 = and.i64 v{}, v105\n  v107 = icmp.eq v106, v36\n  br v107, b3, b4\nb3:\n",
+                x,
+            );
+        }
+        let v = if r < 2 {
+            41 + r * 32
+        } else {
+            108 + (r - 2) * 32
+        };
+        for k in 0..32u32 {
+            lir.format_into(
+                "  v{} = {}.i64 v{}, v{}\n",
+                v + k,
+                if r % 2 == 0 {
+                    "add"
+                } else {
+                    "xor"
+                },
+                x,
+                2 + k,
+            );
+            x = v + k;
+        }
+    }
+    lir.format_into("  jmp b5(v{})\nb4:\n  jmp b5(v104)\nb5(v172: i64):\n  jmp b1(v39, v172)\nb6:\n  ret v38\n", x);
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(&lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the object",
+    );
+    assert_eq(elf_text_count(&obj, 0xBFC003FF, 0xB94003F0), 0);
+    if cli::has_cc() {
+        assert_eq(
+            run_native(
+                &lir,
+                M"(#include <stdint.h>
+uint64_t f(const uint64_t *, uint32_t);
+int main(void) {
+  uint64_t a[32];
+  for (int i = 0; i < 32; ++i) a[i] = (uint64_t)(i + 1) * UINT64_C(0x9E3779B97F4A7C15);
+  for (uint32_t n = 1; n < 6; ++n) {
+    uint64_t acc = 0;
+    for (uint32_t c = n; c - 1 != 0; --c)
+      for (int r = 0; r < 2 && (r == 0 || (acc & 1) == 0); ++r) {
+        for (int i = 0; i < 32; ++i) acc += a[i];
+        for (int i = 0; i < 32; ++i) acc ^= a[i];
+      }
+    if (f(a, n) != acc) return (int)n;
+  }
+  return 0;
+}
+)",
+            ),
+            0,
+        );
+    }
+}
+
 // Stack parameters of a body that keeps no frame are read through sp (`a64gen` `sp_args`): a leaf's ten
 // integers, a leaf's aggregate past the argument registers; a body that calls, and one whose values
 // outlive a call, set up a frame and read them through x29 (`fp_args`).

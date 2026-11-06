@@ -8936,9 +8936,6 @@ fn op_fact(b: &Body, ptr: u32, t: Inst, fa: Poly, fb: Poly, w: u32) Poly {
     return p_of(PS_NO);
 }
 
-// Whether instruction `t` of a loop computes its value without an effect and without a trap, so the loop
-// may not run: the arithmetic, comparisons, conversions and selects of scalars, a division by a constant
-// it may take (not 0, a signed one not -1).
 // A fill or copy of consecutive elements (`LoopOpt::mem_run`): the destination `dst + r * scale + doff`,
 // `r` header parameter `idx`; a fill's byte (`byte`, else the constant `k`), a copy's source `src + r *
 // scale + soff`.
@@ -8957,7 +8954,10 @@ struct MemRun {
 
 extend MemRun as Copy {}
 
-fn cf_pure(b: &Body, t: Inst) bool {
+/// Whether instruction `t` of a loop computes its value without an effect and without a trap, so the loop
+/// may not run: the arithmetic, comparisons, conversions and selects of scalars, a division by a constant
+/// it may take (not 0, a signed one not -1).
+pub(package) fn cf_pure(b: &Body, t: Inst) bool {
     let op = t.op;
     if is_vec(t.ty) || op == O_ADDO || op == O_SUBO || op == O_MULO {
         return false;
