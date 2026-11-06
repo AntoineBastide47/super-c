@@ -7467,9 +7467,12 @@ fn cemit_simd_entries(
             // The backend file emits no unit: its helpers (`reg`, `vec`) splice into the entry
             // whatever the inlining switch says, and a call left would name no definition.
             let off = dow.inl.off;
+            let li = dow.lir_inlines;
             dow.inl.off = false;
+            dow.lir_inlines = false;
             dow.apply_drops(&mut lw);
             dow.inl.off = off;
+            dow.lir_inlines = li;
             for k in 0..lw.body.blocks.len() {
                 let t = lw.body.blocks.at(k).term;
                 ok = ok && !(t.kind == irc::TM_CALL && t.callee.module == en.module);
@@ -8303,6 +8306,9 @@ struct DropCtx {
     pub(package) mv: bdf::MoveFlow,
     pub(package) el: ird::ElabCtx,
     pub(package) inl: inl::InlineCtx,
+    // A native build whose LIR optimizer runs: that optimizer inlines the callees (`lir::inline`), so the
+    // Core IR's inliner runs where an emission needs its splices alone (a backend file's entry).
+    pub(package) lir_inlines: bool,
     pub(package) bce: bce::Bce,
     pub(package) core_ir: bool, // SC_CORE_IR development re-verification
     pub(package) bce_stats: bool, // SC_BCE_STATS per-owner report lines
@@ -8324,6 +8330,7 @@ extend DropCtx {
             mv: bdf::MoveFlow::empty(),
             el: ird::ElabCtx::empty(),
             inl: inl::InlineCtx::new((unsafe (&*p).inl_store) as *const inl::InlineStore),
+            lir_inlines: unsafe (&*p).native && unsafe (&*p).lir_opt,
             bce: bce::Bce::new(),
             core_ir: stdlib::getenv("SC_CORE_IR") != null,
             bce_stats: stdlib::getenv("SC_BCE_STATS") != null,
@@ -8374,7 +8381,7 @@ extend DropCtx {
             }
         }
         let mut ist = inl::InlineStats::new();
-        if allow_inline && !self.inl.off {
+        if allow_inline && !self.inl.off && !self.lir_inlines {
             let im = self.pr.start();
             inl::run(lw, &mut self.inl, &mut ist);
             if self.inl.stats_on && ist.considered != 0 {

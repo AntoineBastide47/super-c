@@ -180,15 +180,36 @@ const fn mask(ty: u8) u64 {
 }
 
 /// The facts of an inlinable body that each call of it reads (`Run.ok`, set once the body is final):
-/// callers may inline it, it is `small` within SHRINK, `small` within the run's budget, a `forwarder`.
+/// callers may inline it, it is `small` within SHRINK, `small` within the run's budget, a `forwarder`, it
+/// computes with floats (`floats`).
 pub(package) const IL_OK: u8 = 1;
 pub(package) const IL_SHRINK: u8 = 2;
 pub(package) const IL_SMALL: u8 = 4;
 pub(package) const IL_FWD: u8 = 8;
+pub(package) const IL_FLOAT: u8 = 16;
 
 /// The `IL_*` facts of inlinable body `b` under budget `bu`.
 pub(package) const fn facts(b: &Body, bu: Budget) u8 {
-    return IL_OK | small(b, SHRINK) as u8 * IL_SHRINK | small(b, bu) as u8 * IL_SMALL | forwarder(b) as u8 * IL_FWD;
+    return IL_OK | small(b, SHRINK) as u8 * IL_SHRINK | small(b, bu) as u8 * IL_SMALL | forwarder(b) as u8 * IL_FWD | floats(
+        b,
+    ) as u8 * IL_FLOAT;
+}
+
+/// Whether body `b` has an instruction a float rewrite (`Body.fmath`) may change: a float result, scalar or
+/// in lanes, or a float comparison.
+const fn floats(b: &Body) bool {
+    for i in 0..b.insts.len() {
+        let t = b.insts[i];
+        let ty = if is_vec(t.ty) {
+            lane_type(t.ty)
+        } else {
+            t.ty
+        };
+        if is_float(ty) || t.op == O_FCMP {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// Whether body `b` fits budget `bu`.
@@ -340,8 +361,9 @@ extend Inliner {
                 } else {
                     (bu, IL_SMALL)
                 };
-                // A float rewrite the caller allows and the callee does not would apply to the copy.
-                if (c.fmath & ~e.fmath) != 0 || !warm && (f & IL_FWD) == 0 || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || (f & cf) == 0 && !folds_small(
+                // A float rewrite the caller allows and the callee does not would apply to the copy (of a
+                // callee that computes with floats).
+                if (c.fmath & ~e.fmath) != 0 && (f & IL_FLOAT) != 0 || !warm && (f & IL_FWD) == 0 || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || (f & cf) == 0 && !folds_small(
                     e,
                     c,
                     t,

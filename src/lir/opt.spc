@@ -1015,19 +1015,27 @@ extend Opt {
         if self.ptr_params(pk, b) {
             self.forget();
         }
-        let slotted = self.param_slots(pk, b);
         // `thread` computes the graph and the dominators: they stand when it moves no edge (`kept`).
-        let threaded = !light && self.thread(pk, b) || slotted;
+        let threaded = !light && self.thread(pk, b);
         self.tables(pk, b, K_NEST);
         // The walk hoists into preheaders: the memory facts are those of the body that has them.
         let entered = self.preheaders(b, false);
         self.tables(pk, b, K_SLOTS);
-        let changed = self.walk(pk, b) || force || threaded || entered || self.unused_call(b);
+        let mut changed = self.walk(pk, b) || force || threaded || entered || self.unused_call(b);
         if entered {
             self.unenter(b);
         }
         if changed {
             self.rebuild(b);
+        }
+        // The by-value aggregate parameters a loop writes, once the walk forwarded the parameters an inlined
+        // body's entry takes (their uses are then their own): slots (`param_slots`), whose addresses one
+        // more walk forwards for the promotion.
+        if self.param_slots(pk, b) {
+            self.tables(pk, b, K_SLOTS);
+            let _ = self.walk(pk, b);
+            self.rebuild(b);
+            changed = true;
         }
         if light {
             let w = self.rewalk(pk, b);
@@ -5343,7 +5351,7 @@ extend Opt {
             if lv::operand_c(f) {
                 t.c = self.val(t.c);
             }
-            b.insts[x as usize] = t;
+            b.insts[x as usize] = unguarded(t);
             self.moved[x as usize] = true;
             self.blk_of[x as usize] = k;
             self.hoisted.push(k as u64 << 32 | x as u64);
@@ -7634,6 +7642,10 @@ extend Opt {
             // A load that may fault leaves only the loop whose every entry runs it.
             let safe = self.safe_load(pk, b, t);
             if (safe || self.runs_first(b, k, i)) && self.hoist(pk, b, k, i, true, p == PRIV_KEPT, !safe) {
+                // Out of a header into its preheader, which always enters it, the load keeps its guard.
+                if self.inner[k as usize] != k || self.preh[k as usize] != self.blk_of[i as usize] {
+                    b.insts[i as usize] = unguarded(b.insts[i as usize]);
+                }
                 return true;
             }
             if safe && self.sink_load(pk, b, k, i, t) {

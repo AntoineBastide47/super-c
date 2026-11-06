@@ -702,6 +702,15 @@ pub(package) const fn load_bound(t: Inst, m: u64) Option<u64> {
         None
     };
 }
+/// Instruction `t` moved above the branch that guards it: a load there may read the bytes of another
+/// variant (an `Err`'s where the guard tested for `Ok`), so it keeps no bound (`MEM_BOOL`, `MEM_RANGE`).
+pub(package) const fn unguarded(t: Inst) Inst {
+    let mut u = t;
+    if t.op == O_LOAD {
+        u.aux = t.aux & ~(MEM_BOOL | MEM_RANGE);
+    }
+    return u;
+}
 /// `O_MEMCPY`: the regions may overlap (memmove).
 pub(package) const MEM_OVERLAP: u16 = 1;
 /// A logical right shift (`lshr`) that shifts out only zero bits (the text's `lshr.exact`): its operand's

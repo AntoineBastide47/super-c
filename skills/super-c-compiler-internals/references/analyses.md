@@ -38,7 +38,7 @@ Per package, in `Run::new`:
 | Calls of each body: callee, argument roots | `calls_of` | `Calls` | `Run::new` |
 | Memory effects, written and escaping parameters | `effects` (over `Calls`; a worklist over the callers of each body, `rc`, and the bodies that pass to its parameters, `rp`), `own_effects`, `own_escapes`, `stalls` (counts over `rc`) | `Sym.fx`, `Sym.esc`, `Run.wargs` | end of the build |
 | Call-graph levels and job edges; the bodies whose job finished | `levels`; each job's end | `Run.level`, `Run.edges`, `Run.order`; `Run.fin` (`await_marked` waits on it) | end of the build |
-| Inliner shape test; a finished body's inliner facts (inlinable, `small` within `SHRINK` and the run's budget, `forwarder`) | `Run::new`; `il::facts` after the job (a held body's in `Run::new`) | `Run.shape`; `Run.ok` (`IL_*`) | end of the build |
+| Inliner shape test; a finished body's inliner facts (inlinable, `small` within `SHRINK` and the run's budget, `forwarder`, computes with floats) | `Run::new`; `il::facts` after the job (a held body's in `Run::new`) | `Run.shape`; `Run.ok` (`IL_*`) | end of the build |
 
 Per body, on `Opt` (`Run::job` runs the passes in order). `Opt::tables(pk, b, want)` computes
 only the levels `kept` lacks (`K_GRAPH` < `K_DOM` < `K_NEST` < `K_MEM` < `K_SLOTS`); every change to

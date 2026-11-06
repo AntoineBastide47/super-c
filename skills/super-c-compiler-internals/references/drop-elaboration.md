@@ -71,8 +71,9 @@ lowered itself (a per-instance re-lowering, a macro wrapper) and does so BEFORE 
 inliner, and the inliner's callees are elaborated bodies: a splice carries the callee's
 drops, flag temps (`TM_DROP.args_start` rebases with the locals) and markers, so no
 ownership analysis ever runs on a merged body. Elaboration runs once per kept lowering;
-instances share it as they share the lowering. The inliner's callees come from the
-package's `InlineStore` (`src/ir/inline.spc`): every kept env-free lowering is vetted once
+instances share it as they share the lowering. A native build whose LIR optimizer runs
+skips this inliner (`DropCtx.lir_inlines`: the LIR inliner inlines) but for a backend file's entry. The
+inliner's callees come from the package's `InlineStore` (`src/ir/inline.spc`): every kept env-free lowering is vetted once
 at the start of `cemit_package` (the size gate reads `CoreBody.inline_size_ok`, recorded
 before the rewrite; an `@always_inline` callee passes it, as std's view `index_range` methods do so
 their guards fold against the caller's facts), and the accepted ones are copied compact; no task

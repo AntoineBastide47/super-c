@@ -232,7 +232,8 @@ so NaN handling uses an operation they keep (`fmax(x, x)` quiets) or comparisons
 intrinsic (GCC spells `vaddq_s8` as C arithmetic, undefined on overflow).
 Entry calls spell `__sc_si_<symbol>(..)`. `cemit_simd_entries` renders every entry the
 features of `fn_union` allow (a TU-cache replay or a macro expansion may call any of them), splices
-the file's helpers into each entry whatever `SC_INLINE` says (a call left is a build error),
+the file's helpers into each entry whatever `SC_INLINE` says, and in a native build whose LIR optimizer
+inlines (`DropCtx.lir_inlines`) (a call left is a build error),
 renders a constant an entry addresses (a shuffle table) with the core module's definitions
 (`emit_owner`) and declares it in each entry header that names it, then renders each one with a
 scratch emitter as a `static inline __attribute__((always_inline))` function into a lazily written

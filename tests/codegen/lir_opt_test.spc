@@ -4589,6 +4589,124 @@ b0(v0: ptr):
     assert(text_of(&a, "keep") == text_of(&one, "keep"), text_of(&a, "keep").as_str());
 }
 
+// A `bool` payload read only under its tag's test is 0 or 1 there alone: `Err(2)`'s payload byte is 2,
+// so the read leaves its test without its bound where promotion reads it at the copy (`@copied`), where
+// if-conversion moves it (`@moved`, whose slot a call takes) and where it leaves a loop (`@looped`), and
+// `x ? 0 : f` stays a choice.
+@test
+fn a_payload_read_leaves_its_test_without_its_bound() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @peek fn global noinline
+sym @copied fn global noinline
+sym @moved fn global noinline
+sym @looped fn global noinline
+sym @drive fn global
+fn @peek
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = iconst.i8 0
+  store v1, v0+8 align 0
+  ret
+fn @copied
+  sig (ptr) -> i8
+  slot s0 size 12 align 2
+  slot s1 size 1 align 0
+b0(v0: ptr):
+  v1 = slotaddr s0
+  v2 = iconst.i64 12
+  memcpy v1, v0, v2
+  v3 = load.i8 v1 align 0 range 1
+  v4 = iconst.i8 0
+  v5 = icmp.ne v3, v4
+  v6 = slotaddr s1
+  br v5, b2, b1
+b1:
+  v7 = load.i8 v1+4 align 0 bool
+  store v7, v6 align 0
+  jmp b3
+b2:
+  store v4, v6 align 0
+  jmp b3
+b3:
+  v8 = load.i8 v6 align 0
+  ret v8
+fn @moved
+  sig (ptr) -> i8
+  slot s0 size 12 align 2
+b0(v0: ptr):
+  v1 = slotaddr s0
+  v2 = iconst.i64 12
+  memcpy v1, v0, v2
+  call @peek(v1) : (ptr) -> void
+  v3 = load.i8 v1 align 0 range 1
+  v4 = iconst.i8 0
+  v5 = icmp.ne v3, v4
+  br v5, b2, b1
+b1:
+  v6 = load.i8 v1+4 align 0 bool
+  jmp b3(v6)
+b2:
+  jmp b3(v4)
+b3(v7: i8):
+  ret v7
+fn @looped
+  sig (ptr, i64) -> i8
+  slot s0 size 12 align 2
+  slot s1 size 1 align 0
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 12
+  memcpy v2, v0, v3
+  call @peek(v2) : (ptr) -> void
+  v4 = load.i8 v2 align 0 range 1
+  v5 = iconst.i8 0
+  v6 = icmp.ne v4, v5
+  v7 = iconst.i64 0
+  v8 = slotaddr s1
+  jmp b1(v7, v5)
+b1(v9: i64, v10: i8):
+  v11 = icmp.ult v9, v1
+  br v11, b2, b6
+b2:
+  br v6, b4, b3
+b3:
+  v12 = load.i8 v2+4 align 0 bool
+  store v12, v8 align 0
+  jmp b5
+b4:
+  store v5, v8 align 0
+  jmp b5
+b5:
+  v13 = load.i8 v8 align 0
+  v14 = or.i8 v10, v13
+  v15 = iconst.i64 1
+  v16 = add.i64 v9, v15
+  jmp b1(v16, v14)
+b6:
+  ret v10
+fn @drive
+  sig () -> i8
+  slot s0 size 12 align 2
+b0:
+  v0 = slotaddr s0
+  v1 = iconst.i8 1
+  store v1, v0 align 0
+  v2 = iconst.i32 2
+  store v2, v0+4 align 2
+  v3 = call.i8 @copied(v0) : (ptr) -> i8
+  v4 = call.i8 @moved(v0) : (ptr) -> i8
+  v5 = iconst.i64 3
+  v6 = call.i8 @looped(v0, v5) : (ptr, i64) -> i8
+  v7 = or.i8 v3, v4
+  v8 = or.i8 v7, v6
+  ret v8
+)",
+    );
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 0);
+}
+
 // A store into an exclusive reference's referent that a later store overwrites goes across a call that
 // cannot reach that memory (`@over`: one store stays); not when the call takes the reference (`@lent`,
 // whose callee reads it), nor when the reference is a shared one, which the callee may reach (`@shared`),
