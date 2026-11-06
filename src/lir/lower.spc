@@ -5615,9 +5615,12 @@ extend Lower {
             if rv.b == TYPE_NONE {
                 return self.fail("type-name");
             }
+            // Grounded through the instance's bindings: `Self` of `W<T>` spells `W<u32>`.
             let mut rm = b.module;
             let mut rt = TYPE_NONE;
-            let _ = Lower::resolved(c, b.module, rv.b, &mut rm, &mut rt);
+            if !c.mg.ground(b.module, rv.b, b.module, &mut rt) {
+                let _ = Lower::resolved(c, b.module, rv.b, &mut rm, &mut rt);
+            }
             let mut nm = String::new();
             rnd::render_qualified_name(c.pkg, Lower::p(c).module_ast_const(rm), rt, &mut nm);
             let n = self.iconst(self.ptr_int(), nm.len() as u64);

@@ -428,6 +428,59 @@ b0:
     same_result(&b, &a, "drive", none, 2);
 }
 
+// Two exit tests become one (`merge_exits`): the second's copy reads the values the walk gave its operands
+// before it (the slot's load is the stored `n`), not the instructions they replaced: the store a later one
+// overwrote goes, and the load would read the later value.
+@test
+fn merged_exit_tests_read_the_forwarded_values() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @sink fn global noinline
+sym @g fn global noinline
+sym @drive fn global
+fn @sink
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  v2 = iconst.i64 1
+  v3 = add.i64 v1, v2
+  store v3, v0 align 3
+  ret
+fn @g
+  sig (i64, i64, i64) -> i32
+  slot s0 size 8 align 3
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = slotaddr s0
+  store v2, v3 align 3
+  v4 = load.i64 v3 align 3
+  v5 = iconst.i64 7
+  store v5, v3 align 3
+  call @sink(v3) : (ptr) -> void
+  v6 = icmp.ugt v0, v1
+  br v6, b2, b1
+b1:
+  v7 = icmp.ugt v1, v4
+  br v7, b2, b3
+b2:
+  v8 = iconst.i32 1
+  ret v8
+b3:
+  v9 = iconst.i32 0
+  ret v9
+fn @drive
+  sig () -> i32
+b0:
+  v0 = iconst.i64 1
+  v1 = iconst.i64 8
+  v2 = iconst.i64 10
+  v3 = call.i32 @g(v0, v1, v2) : (i64, i64, i64) -> i32
+  ret v3
+)",
+    );
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 0);
+}
+
 const BUMP: str = M"(@noinline
 fn bump(s: []mut u32, f: bool) {
     for k in 0..s.len() {

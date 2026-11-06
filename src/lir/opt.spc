@@ -8478,7 +8478,9 @@ extend Opt {
             if !quiet || !outside(c2.a) || !outside(c2.b) {
                 continue;
             }
-            // Where `k` leaves: on `c1` true (side 0) or false; `s` alike. The second condition in `k`'s sense.
+            // Where `k` leaves: on `c1` true (side 0) or false; `s` alike. The second condition in `k`'s sense,
+            // of the values the walk gave its operands: `s` comes after `k`, and the copy, made at the end of
+            // `k`, no visit reads (`placed`).
             let k_true = side == 0;
             let same = k_true == ex2_true;
             let c2k = self.placed(
@@ -8493,8 +8495,8 @@ extend Opt {
                     } else {
                         opposite(c2.aux)
                     },
-                    a: c2.a,
-                    b: c2.b,
+                    a: self.val(c2.a),
+                    b: self.val(c2.b),
                     c: VNONE,
                 },
                 false,

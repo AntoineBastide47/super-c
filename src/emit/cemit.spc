@@ -17972,9 +17972,12 @@ extend CEmit {
                 if rv.b == TYPE_NONE {
                     return self.fail("type-name");
                 }
+                // Grounded through the instance's bindings: `Self` of `W<T>` spells `W<u32>`.
                 let mut rm = b.module;
                 let mut rt = rv.b;
-                self.rty(b, rv.b, &mut rm, &mut rt);
+                if !self.mg.ground(b.module, rv.b, b.module, &mut rt) {
+                    self.rty(b, rv.b, &mut rm, &mut rt);
+                }
                 let mut nm = self.sget();
                 rnd::render_qualified_name(self.p(), self.p().module_ast_const(rm), rt, &mut nm);
                 let mut lit = self.sget();

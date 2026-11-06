@@ -1410,6 +1410,18 @@ fn qualified_name_spells_each_instance() {
     );
 }
 
+// A method of an instance that is called, not inlined, spells `Self` through the instance's bindings: the
+// shared lowering names `W<T>`, the instance `W<u32>`.
+@test
+fn qualified_name_of_self_in_a_called_method() {
+    let r = h::compile_and_run(
+        "struct W<T> {\n    pub x: T,\n}\nextend<T> W<T> {\n    @noinline\n    pub fn name(self: &W<T>) str {\n        return type_info::<Self>().qualified_name;\n    }\n}\nfn main() i32 {\n    let w = W::<u32> { x: 1 };\n    println(\"{}\", w.name());\n    return 0;\n}\n",
+    );
+    assert(r.built, "the method builds");
+    assert_eq(r.exit, 0);
+    assert_eq(unsafe str::from_cstr(r.out), "W<u32>\n");
+}
+
 // `panic_parts(head, tail)` panics with `head` then `tail`, at run time and at compile time.
 @test
 fn panic_parts_joins_its_message() {
