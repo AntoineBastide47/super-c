@@ -1118,6 +1118,10 @@ extend Gen {
         let ni = b.insts.len();
         self.vmem.truncate(0);
         self.vmem.resize_default(self.lv.end.len());
+        // Only a vector is read or defined in memory.
+        if !lv::has_vectors(b) {
+            return;
+        }
         for i in 0..ni {
             let t = b.insts[i];
             let mut un = false;
@@ -1402,17 +1406,23 @@ extend Gen {
             // An intrinsic's template writes x0, x1 and v0 to v4 and its arguments' registers: no
             // scratch home.
             let t = b.insts[i];
-            self.hpre[i + 1] = (Gen::clobbers(b, t) || t.op == O_RET || t.op == O_PANIC || t.op == O_SYS || t.op == O_VASTART || t.op == O_VAARG || t.op == O_SYMADDR && !self.remat_inst(
+            let cl = Gen::clobbers(b, t);
+            self.hpre[i + 1] = (cl || t.op == O_RET || t.op == O_PANIC || t.op == O_SYS || t.op == O_VASTART || t.op == O_VAARG || t.op == O_SYMADDR && !self.remat_inst(
                 i as u32,
             )) as u32;
+            if !cl {
+                continue;
+            }
+            let intr = t.op == O_CALL && self.intrinsic(t.a).len() != 0;
             // A sibling call does not come back: the body around it may be a leaf.
-            let c = Gen::clobbers(b, t) && !lv::dead_end(unsafe &*self.pkg, b, &self.lv, i, &mut self.uses) && !(t.op == O_CALL && self.intrinsic(
-                t.a,
-            ).len() == 0 && self.sib_shape(i as u32, t)) && !self.mem_tail(i as u32, t);
+            let c = !lv::dead_end(unsafe &*self.pkg, b, &self.lv, i, &mut self.uses) && !(t.op == O_CALL && !intr && self.sib_shape(
+                i as u32,
+                t,
+            )) && !self.mem_tail(i as u32, t);
             self.cret[i] = c;
             if c && self.rare(i as u32) {
                 self.rarec[i] = true;
-            } else if c && !(t.op == O_CALL && self.intrinsic(t.a).len() != 0) {
+            } else if c && !intr {
                 self.cpre[i + 1] = 1;
             }
         }
@@ -5114,8 +5124,8 @@ extend Gen {
         }
         // The flag: kept for the sum with it (`lv::FOLD_ADC`), for the branch right after, or set into its own
         // register.
-        if let Some(fx) = self.lv.flag_of.get(&i) {
-            let f = *fx;
+        let f = self.lv.flag_of[i as usize];
+        if f != NONE {
             if self.lv.carry[i as usize] == lv::CARRY_LO {
                 // The flags hold it.
             } else if self.fusable(i, VFLAG | i) {
@@ -7038,12 +7048,11 @@ extend Gen {
             }
         }
         // The values of the stores this call takes in place of its aggregates' memory (`arg_relays`).
-        for q in 0..self.lv.relayed.len() {
-            if (self.lv.relayed[q] >> 32) as u32 == i {
-                let x = self.vx(b.insts[(self.lv.relayed[q] & 0xFFFFFFFF) as usize].b);
-                if self.va[x as usize].reg != NOREG {
-                    keep.push(x);
-                }
+        let (lo, hi) = self.lv.relayed_of(i);
+        for q in lo..hi {
+            let x = self.vx(b.insts[(self.lv.relayed[q as usize] & 0xFFFFFFFF) as usize].b);
+            if self.va[x as usize].reg != NOREG {
+                keep.push(x);
             }
         }
         // An indirect call's target that no argument is and that dies at the call, in a register the

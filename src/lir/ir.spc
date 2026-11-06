@@ -150,7 +150,15 @@ pub(package) const fn type_align(t: u8, ptr: u32) u32 {
 
 pub(package) const fn type_bytes(t: u8, ptr: u32) u32 {
     if is_vec(t) {
-        return type_bytes(lane_type(t), ptr) * lanes(t);
+        // A lane of 2^e bytes (`ELEM_I8` .. `ELEM_I64`: e = 0 .. 3; `ELEM_F32`, `ELEM_F64`: 2, 3), 2^(t & 7)
+        // lanes.
+        let e = (t >> 3 & 7) as u32;
+        let lane = if e >= ELEM_F32 as u32 {
+            e - 2
+        } else {
+            e
+        };
+        return 1u32 << lane + (t & 7) as u32;
     }
     if t == T_PTR {
         return ptr;

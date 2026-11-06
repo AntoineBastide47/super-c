@@ -257,9 +257,15 @@ pub(package) struct Live {
     pub(package) uses: Vector<u32>, // per value, its use count, one more when a loop keeps it past its last use
     pub(package) last: Vector<u32>, // per value, the highest instruction index that uses it (0: none)
     sole: Vector<u32>, // per block parameter, the one instruction that reads it (NONE: none; READERS: more)
+    // `entry_partner`'s search, once per loop header (`ep_head`; NONE: none yet): per value index the
+    // generation (`ep_gen`) of the last header whose reached blocks read it (`ep_read`), and the blocks seen.
+    ep_read: Vector<u32>,
+    ep_gen: u32,
+    ep_head: u32,
+    ep_seen: Vector<bool>,
     wpos: Vector<u32>, // per block parameter, the last layout position of a block whose edge writes it, NONE: none
     wn: Vector<u32>, // per block parameter, how many edges write it
-    pub(package) flag_of: Map<u32, u32>, // an instruction with a used flag -> the flag's value index
+    pub(package) flag_of: Vector<u32>, // per instruction, the value index of its flag, NONE when none is used
     pub(package) home: Vector<u8>, // per value, its HOME_* (`plan`)
     pub(package) split: bool, // permit a register prefix followed by a stack home
     pub(package) cut: Vector<u32>, // per value, the first layout block outside its register prefix, NONE otherwise
@@ -289,6 +295,9 @@ pub(package) struct Live {
     /// (`uses_at`).
     pub(package) relay: Vector<u32>,
     pub(package) relayed: Vector<u64>,
+    /// Per instruction, the first of its entries in `relayed`, NONE for none (empty without any): a call's
+    /// entries are adjacent (`relayed_of`).
+    pub(package) relay_lo: Vector<u32>,
     /// The instructions that fold into their uses (`FOLD_*`, the target's): each use computes the folded
     /// instruction from its operands, which live to it (`uses_at`), and the instruction emits nothing
     /// (`pfold`).
@@ -354,7 +363,7 @@ extend Live {
             last: Vector::<u32>::new(),
             wpos: Vector::<u32>::new(),
             wn: Vector::<u32>::new(),
-            flag_of: Map::<u32, u32>::new(),
+            flag_of: Vector::<u32>::new(),
             home: Vector::<u8>::new(),
             split: false,
             cut: Vector::<u32>::new(),
@@ -370,6 +379,7 @@ extend Live {
             conj: Vector::<u8>::new(),
             relay: Vector::<u32>::new(),
             relayed: Vector::<u64>::new(),
+            relay_lo: Vector::<u32>::new(),
             fold_ops: 0,
             mem_params: 0,
             ret_regs: NONE,
@@ -389,6 +399,10 @@ extend Live {
             stepped: Vector::<u64>::new(),
             kept: Vector::<bool>::new(),
             sole: Vector::<u32>::new(),
+            ep_read: Vector::<u32>::new(),
+            ep_gen: 0,
+            ep_head: NONE,
+            ep_seen: Vector::<bool>::new(),
             jcap: Vector::<u32>::new(),
             jmin: Vector::<u32>::new(),
             rpo: Vector::<u32>::new(),
@@ -415,10 +429,7 @@ extend Live {
             return b.insts.len() as u32 + (v & ~VPARAM);
         }
         if (v & VFLAG) != 0 {
-            return switch self.flag_of.get(&(v & ~VFLAG)) {
-                Some(k) => *k,
-                None => NONE,
-            };
+            return self.flag_of[(v & ~VFLAG) as usize];
         }
         return v;
     }
@@ -2214,11 +2225,23 @@ extend Live {
                 }
             }
         }
-        for q in 0..self.relayed.len() {
-            if (self.relayed[q] >> 32) as u32 == i {
-                out.push(b.insts[(self.relayed[q] & 0xFFFFFFFF) as usize].b);
-            }
+        let (lo, hi) = self.relayed_of(i);
+        for q in lo..hi {
+            out.push(b.insts[(self.relayed[q as usize] & 0xFFFFFFFF) as usize].b);
         }
+    }
+
+    /// The range of `relayed` that holds call `i`'s stores (`relay_lo`).
+    pub(package) const fn relayed_of(self: &Self, i: u32) (u32, u32) {
+        if self.relay_lo.len() == 0 || self.relay_lo[i as usize] == NONE {
+            return (0, 0);
+        }
+        let lo = self.relay_lo[i as usize];
+        let mut hi = lo;
+        while hi as usize < self.relayed.len() && (self.relayed[hi as usize] >> 32) as u32 == i {
+            hi += 1;
+        }
+        return (lo, hi);
     }
 
     // `FOLD_CCMP`: each `and` or `or` of flags whose operands are comparisons of integers of up to 64 bits
@@ -2834,17 +2857,27 @@ extend Live {
     fn ranges(self: &mut Self, b: &Body) {
         let ni = b.insts.len();
         let nv = ni + b.params.len();
-        self.flag_of.clear();
-        // The flags with a use get indexes after the parameters; `work` lists their instructions.
+        fill(&mut self.flag_of, ni, NONE);
+        // The flags with a use get indexes after the parameters; `work` lists their instructions. Only a
+        // checked operation has one (`F_OVF`).
         let mut nf: u32 = 0;
         self.work.truncate(0);
+        let mut checked = false;
         for k in 0..ni {
+            checked = checked || op_info(b.insts[k].op).form == F_OVF;
+        }
+        let scan = if checked {
+            ni
+        } else {
+            0
+        };
+        for k in 0..scan {
             let t = b.insts[k];
             each_use(b, t, &mut self.succ);
             for u in 0..self.succ.len() {
                 let v = self.succ[u];
-                if (v & (VPARAM | VFLAG)) == VFLAG && !self.flag_of.contains_key(&(v & ~VFLAG)) {
-                    self.flag_of.insert(v & ~VFLAG, nv as u32 + nf);
+                if (v & (VPARAM | VFLAG)) == VFLAG && self.flag_of[(v & ~VFLAG) as usize] == NONE {
+                    self.flag_of[(v & ~VFLAG) as usize] = nv as u32 + nf;
                     self.work.push(v & ~VFLAG);
                     nf += 1;
                 }
@@ -2856,6 +2889,9 @@ extend Live {
         fill(&mut self.uses, n, 0);
         fill(&mut self.last, n, 0);
         fill(&mut self.sole, n, NONE);
+        fill(&mut self.ep_read, nv, 0);
+        self.ep_gen = 0;
+        self.ep_head = NONE;
         fill(&mut self.wpos, n, NONE);
         fill(&mut self.wn, n, 0);
         for k in 0..b.blocks.len() {
@@ -2881,10 +2917,38 @@ extend Live {
         fill(&mut self.ua, ni, 0);
         fill(&mut self.un, ni, 0);
         self.uv.truncate(0);
-        for p in 0..self.order.len() {
+        let np = self.order.len();
+        self.freq.truncate(0);
+        self.freq.resize_default(b.blocks.len());
+        for p in 0..np {
+            let k = self.order[p] as usize;
+            if (b.blocks[k].flags & BLOCK_COLD) != 0 {
+                continue;
+            }
+            let mut f: u64 = 1;
+            let mut h = self.inner[k];
+            // Each step leaves one loop, at most 5.
+            for _ in 0..5 {
+                if h == NONE {
+                    break;
+                }
+                f *= 8;
+                h = self.parent[h as usize];
+            }
+            self.freq[k] = if self.rare[k] {
+                f / 8
+            } else {
+                f
+            };
+        }
+        fill(&mut self.au, n, 0);
+        fill(&mut self.wt, n, 0);
+        for p in 0..np {
             let k = self.order[p];
             let bk = b.blocks[k as usize];
+            let f = self.freq[k as usize];
             for i in bk.start..bk.start + bk.len {
+                self.wt[i as usize] += f;
                 let mut us = replace(&mut self.succ, Vector::<u32>::new());
                 self.uses_at(b, i, &mut us);
                 self.ua[i as usize] = self.uv.len() as u32;
@@ -2894,6 +2958,8 @@ extend Live {
                 for u in 0..self.succ.len() {
                     let x = self.vix(b, self.succ[u]);
                     self.uses[x as usize] += 1;
+                    self.wt[x as usize] += f;
+                    self.au[x as usize] += 1;
                     if i > self.last[x as usize] {
                         self.last[x as usize] = i;
                     }
@@ -2929,6 +2995,8 @@ extend Live {
                     let x = ni + (sb.param_start + q) as usize;
                     self.uses[x] += 1;
                     self.wn[x] += 1;
+                    self.wt[x] += f;
+                    self.au[x] += 1;
                     if self.wpos[x] == NONE || p as u32 > self.wpos[x] {
                         self.wpos[x] = p as u32;
                     }
@@ -3080,38 +3148,11 @@ extend Live {
                 w *= 2;
             }
         }
-        self.freq.truncate(0);
-        self.freq.resize_default(b.blocks.len());
-        for p in 0..np {
-            let k = self.order[p] as usize;
-            if (b.blocks[k].flags & BLOCK_COLD) != 0 {
-                continue;
-            }
-            let mut f: u64 = 1;
-            let mut h = self.inner[k];
-            // Each step leaves one loop, at most 5.
-            for _ in 0..5 {
-                if h == NONE {
-                    break;
-                }
-                f *= 8;
-                h = self.parent[h as usize];
-            }
-            self.freq[k] = if self.rare[k] {
-                f / 8
-            } else {
-                f
-            };
-        }
         fill(&mut self.start, n, NONE);
         fill(&mut self.stop, n, 0);
-        fill(&mut self.au, n, 0);
-        self.wt.truncate(0);
-        self.wt.resize_default(n);
         for p in 0..np {
             let k = self.order[p];
             let bk = b.blocks[k as usize];
-            let f = self.freq[k as usize];
             for q in 0..bk.param_len as u32 {
                 let x = ni + (bk.param_start + q) as usize;
                 if self.base[p] < self.start[x] {
@@ -3120,13 +3161,6 @@ extend Live {
             }
             for i in bk.start..bk.start + bk.len {
                 self.start[i as usize] = self.base[p] + i - bk.start;
-                self.wt[i as usize] += f;
-                let a = self.ua[i as usize];
-                for u in a..a + self.un[i as usize] {
-                    let x = self.vix(b, self.uv[u as usize]) as usize;
-                    self.wt[x] += f;
-                    self.au[x] += 1;
-                }
             }
             // The terminator's edges write their targets' parameters; a late edge's moves wait past the last
             // block (`late`).
@@ -3135,8 +3169,6 @@ extend Live {
             let lt = self.late_target(b, k);
             for q in 0..self.succ.len() {
                 let x = self.succ[q] as usize;
-                self.wt[x] += f;
-                self.au[x] += 1;
                 if o < self.start[x] && (lt == NONE || self.def_blk[x] != lt) {
                     self.start[x] = o;
                 }
@@ -3732,40 +3764,49 @@ extend Live {
         if ty != b.params[(x - ni) as usize] || self.end[self.vix(b, y) as usize] >= self.pos[k as usize] {
             return NONE;
         }
-        // The blocks the header reaches, each listed once: none reads `y`.
-        let nb = b.blocks.len();
-        let mut seen = Vector::<bool>::with_capacity(nb);
-        seen.resize_default(nb);
-        seen[k as usize] = true;
+        // No block the header reaches reads `y` or passes it (`reads_from`, once per header).
+        if self.ep_head != k {
+            self.reads_from(b, k);
+        }
+        let yx = self.vix(b, y);
+        return if self.ep_read[yx as usize] == self.ep_gen {
+            NONE
+        } else {
+            yx
+        };
+    }
+
+    // `ep_read`: the values the blocks loop header `k` of `b` reaches read or pass (`uses_at`: edge
+    // arguments too), marked with a new generation. Each block enters the walk once.
+    fn reads_from(self: &mut Self, b: &Body, k: u32) {
+        self.ep_gen += 1;
+        self.ep_head = k;
+        fill(&mut self.ep_seen, b.blocks.len(), false);
+        self.ep_seen[k as usize] = true;
         self.stack.truncate(0);
         self.stack.push(k);
         while self.stack.len() != 0 {
             let c = self.stack.pop().unwrap();
             let bk = b.blocks[c as usize];
             for i in bk.start..bk.start + bk.len {
-                each_use(b, b.insts[i as usize], &mut self.succ);
-                for u in 0..self.succ.len() {
-                    if self.succ[u] == y {
-                        return NONE;
+                let a = self.ua[i as usize];
+                for u in a..a + self.un[i as usize] {
+                    let v = self.uv[u as usize];
+                    if v != VNONE && (v & VFLAG) == 0 {
+                        let x = self.vix(b, v);
+                        self.ep_read[x as usize] = self.ep_gen;
                     }
                 }
             }
             b.succ_edges(term_of(b, c), &mut self.succ);
             for e in 0..self.succ.len() {
-                let ed = self.succ[e];
-                for a in 0..b.edge_nargs(ed) {
-                    if b.edge_arg(ed, a) == y {
-                        return NONE;
-                    }
-                }
-                let s = b.edge_target(ed);
-                if !seen[s as usize] {
-                    seen[s as usize] = true;
+                let s = b.edge_target(self.succ[e]);
+                if !self.ep_seen[s as usize] {
+                    self.ep_seen[s as usize] = true;
                     self.stack.push(s);
                 }
             }
         }
-        return self.vix(b, y);
     }
 
     // The loop block `k` of `b` leaves: its innermost one, or for a lone jump whose one predecessor is in a
@@ -4129,6 +4170,21 @@ const fn contains_u32(xs: &Vector<u32>, x: u32) bool {
 }
 
 /// Edge `k` of terminator `t` (`jmp`: 0; `br`: 0 taken, 1 not; `switch`: its cases, then the default).
+/// Whether a value of `b` (an instruction or a block parameter) is a vector.
+pub(package) fn has_vectors(b: &Body) bool {
+    for i in 0..b.insts.len() {
+        if is_vec(b.insts[i].ty) {
+            return true;
+        }
+    }
+    for q in 0..b.params.len() {
+        if is_vec(b.params[q]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// The number of edges of terminator `t` (`edge_of`).
 pub(package) const fn edge_count(t: Inst) u32 {
     return if t.op == O_JMP {

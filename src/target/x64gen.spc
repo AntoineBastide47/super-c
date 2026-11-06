@@ -2056,7 +2056,13 @@ extend Gen {
         self.vmem.truncate(0);
         self.vmem.resize_default(self.lv.end.len());
         fill(&mut self.vreg, ni, false);
-        for i in 0..ni {
+        // Only a vector is read or defined in memory, or computed in a register.
+        let scan = if lv::has_vectors(b) {
+            ni
+        } else {
+            0
+        };
+        for i in 0..scan {
             let t = b.insts[i];
             let mut un = false;
             let arith = t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU;
@@ -6791,8 +6797,8 @@ extend Gen {
     // The overflow flag of instruction `i` is condition `cc`: for the branch right after, or set into its
     // own register.
     fn flag_of(self: &mut Self, i: u32, cc: u32) {
-        if let Some(fx) = self.lv.flag_of.get(&i) {
-            let f = *fx;
+        let f = self.lv.flag_of[i as usize];
+        if f != NONE {
             if self.lv.carry[i as usize] == lv::CARRY_LO {
                 // The flags keep it for the sum with it (`lv::FOLD_ADC`).
             } else if self.fusable(i, VFLAG | i) {
@@ -8893,12 +8899,11 @@ extend Gen {
             }
         }
         // The values of the stores this call takes in place of its aggregates' memory (`arg_relays`).
-        for q in 0..self.lv.relayed.len() {
-            if (self.lv.relayed[q] >> 32) as u32 == i {
-                let x = self.vx(b.insts[(self.lv.relayed[q] & 0xFFFFFFFF) as usize].b);
-                if self.va[x as usize].reg != NOREG {
-                    keep.push(x);
-                }
+        let (lo, hi) = self.lv.relayed_of(i);
+        for q in lo..hi {
+            let x = self.vx(b.insts[(self.lv.relayed[q as usize] & 0xFFFFFFFF) as usize].b);
+            if self.va[x as usize].reg != NOREG {
+                keep.push(x);
             }
         }
         // A sibling call's return is not emitted: only its arguments read the values after it.

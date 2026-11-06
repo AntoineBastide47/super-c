@@ -1292,7 +1292,7 @@ extend Gen {
                 let early = own && (self.mem_x(i) || (ti.op == O_ADDO || ti.op == O_SUBO) && ti.aux == OV_SIGNED && type_bits(
                     ti.ty,
                     4,
-                ) >= 32 && self.lv.flag_of.get(&i).is_some());
+                ) >= 32 && self.lv.flag_of[i as usize] != NONE);
                 if early {
                     self.take(i);
                 }
@@ -2796,10 +2796,7 @@ extend Gen {
         let ty = t.ty;
         let op = t.op;
         let signed = t.aux == OV_SIGNED;
-        let fx = switch self.lv.flag_of.get(&i) {
-            Some(k) => *k,
-            None => NONE,
-        };
+        let fx = self.lv.flag_of[i as usize];
         let fl = if fx == NONE {
             NONE
         } else {

@@ -354,25 +354,8 @@ pub(package) fn arg_relays<G: Relays>(g: &mut G) {
     let ni = b.insts.len();
     g.live().relay.truncate(0);
     g.live().relayed.truncate(0);
-    // Each slot's address uses: operands, call arguments and edge arguments.
-    let mut uses = Vector::<u32>::new();
-    uses.resize_default(b.slots.len());
-    let mut calls = false;
+    g.live().relay_lo.truncate(0);
     let mut us = Vector::<Value>::new();
-    for i in 0..ni {
-        let t = b.insts[i];
-        calls = calls || t.op == O_CALL || t.op == O_CALLIND;
-        lv::each_use(b, t, &mut us);
-        for q in 0..us.len() {
-            let v = us[q];
-            if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_SLOTADDR {
-                uses[b.insts[v as usize].a as usize] += 1;
-            }
-        }
-    }
-    if !calls {
-        return;
-    }
     let mut stores = Vector::<u32>::new();
     // The groups: per argument, its slot << 32 | its call; per store, its group << 32 | the store
     // (bit 31: a part's value). `covered`: per slot, the uses its groups account for.
@@ -384,7 +367,7 @@ pub(package) fn arg_relays<G: Relays>(g: &mut G) {
         let bk = b.blocks[k];
         for c in bk.start..bk.start + bk.len {
             let t = b.insts[c as usize];
-            if t.op != O_CALL && t.op != O_CALLIND || !g.lay_call(t) {
+            if t.op != O_CALL && t.op != O_CALLIND || !slot_agg_arg(b, t) || !g.lay_call(t) {
                 continue;
             }
             let np = b.pool[t.b as usize];
@@ -435,6 +418,21 @@ pub(package) fn arg_relays<G: Relays>(g: &mut G) {
             }
         }
     }
+    if groups.len() == 0 {
+        return;
+    }
+    // Each slot's address uses: operands, call arguments and edge arguments.
+    let mut uses = Vector::<u32>::new();
+    uses.resize_default(b.slots.len());
+    for i in 0..ni {
+        lv::each_use(b, b.insts[i], &mut us);
+        for q in 0..us.len() {
+            let v = us[q];
+            if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_SLOTADDR {
+                uses[b.insts[v as usize].a as usize] += 1;
+            }
+        }
+    }
     // A slot whose every address use its groups account for: their stores relay.
     let l = g.live();
     for z in 0..gst.len() {
@@ -454,6 +452,30 @@ pub(package) fn arg_relays<G: Relays>(g: &mut G) {
             l.relayed.push(c as u64 << 32 | st as u64);
         }
     }
+    if l.relayed.len() == 0 {
+        return;
+    }
+    fill(&mut l.relay_lo, ni, NONE);
+    for q in 0..l.relayed.len() {
+        let c = (l.relayed[q] >> 32) as usize;
+        if l.relay_lo[c] == NONE {
+            l.relay_lo[c] = q as u32;
+        } else {
+            assert((l.relayed[q - 1] >> 32) as usize == c, "arg_relays: a call's relayed stores are adjacent");
+        }
+    }
+}
+
+// Whether call `t` of `b` passes an aggregate as a slot's address (`arg_relays`' arguments, before their
+// layout).
+fn slot_agg_arg(b: &Body, t: Inst) bool {
+    for q in 0..b.pool[t.b as usize] {
+        let v = b.pool[(t.c + q) as usize];
+        if (b.pool[(t.b + 3 + q) as usize] & AGG) != 0 && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_SLOTADDR {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// Aggregate argument `v` (`loc`) of call `i` taken from its relayed stores' values (`arg_relays`): into
@@ -466,11 +488,9 @@ pub(package) fn relay_parts<G: Relays + Mover>(g: &mut G, i: u32, v: Value, loc:
     }
     let s = b.insts[v as usize].a;
     let mut any = false;
-    for q in 0..g.live().relayed.len() {
-        let rq = g.live().relayed[q];
-        if (rq >> 32) as u32 != i {
-            continue;
-        }
+    let (lo, hi) = g.live().relayed_of(i);
+    for q in lo..hi {
+        let rq = g.live().relayed[q as usize];
         let st = b.insts[(rq & 0xFFFFFFFF) as usize];
         if b.insts[st.a as usize].a != s {
             continue;
