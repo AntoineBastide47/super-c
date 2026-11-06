@@ -190,22 +190,11 @@ pub(package) struct Lower {
     fids: Vector<u32>, // per module, its source's file id (`file_of`; NONE: not yet)
     b: Body,
     li: Vector<LInfo>,
-    tcache: Map<u64, TyI>, // the classes of concrete types, for every body
-    fcache: Map<u64, u64>, // the members of concrete aggregates (`fields_of`): start << 32 | count in `fpool`
-    // The register leaves of concrete aggregates (`layout_of`): start << 32 | count in `lpool`.
-    lcache: Map<u64, u64>,
-    lpool: Vector<(u32, u8)>,
-    fpool: Vector<FieldAt>,
-    // Per concrete referent (shared << 48 | module << 32 | type), its `owned_fields`: start << 32 | count
-    // in `opool` (`owned_of`); per concrete type (module << 32 | type), whether it is `frozen`.
-    ocache: Map<u64, u64>,
-    opool: Vector<u32>,
-    zcache: Map<u64, bool>,
+    cc: LCaches,
+    fenum: EnumL, // the shape the last `decl_fields` of an enum placed
     // Per local of the body, whether a `TM_DROP` drops it (`share_plan`): its drop runs after its
     // `ST_STORAGE_DEAD`, which drop elaboration puts before the drop.
     dropped: Vector<bool>,
-    // Per enum declaration (module << 32 | node), its greatest discriminant (`tag_bound`).
-    bcache: Map<u64, u32>,
     // `placed`'s members, a stack: each query appends its own above its callers' and truncates back.
     lms: Vector<lay::MemberAt>,
     bm: ModuleId, // the module of the body being lowered: the pool grounded member types go to
@@ -231,6 +220,8 @@ pub(package) struct Lower {
     lblk: Vector<u32>, // per core block: its LIR block, NONE when unreachable
     npred: Vector<u32>, // per core block (and the virtual entry): predecessor range in `preds`
     preds: Vector<u32>,
+    sat: Vector<u32>, // per core block: successor range in `sl` (`cfg`), unreachable blocks too
+    sl: Vector<u32>,
     // The body's branch hints (`likely`, `unlikely`): value << 1 | 1 for a likely value, 0 for an unlikely one.
     hints: Vector<u64>,
     edges: Vector<DEdge>,
@@ -285,16 +276,9 @@ extend Lower {
             fids: Vector::<u32>::new(),
             b: Body::new(),
             li: Vector::<LInfo>::new(),
-            tcache: Map::<u64, TyI>::new(),
-            fcache: Map::<u64, u64>::new(),
-            lcache: Map::<u64, u64>::new(),
-            lpool: Vector::<(u32, u8)>::new(),
-            fpool: Vector::<FieldAt>::new(),
-            ocache: Map::<u64, u64>::new(),
-            opool: Vector::<u32>::new(),
-            zcache: Map::<u64, bool>::new(),
+            cc: LCaches::new(),
+            fenum: EnumL { ok: false },
             dropped: Vector::<bool>::new(),
-            bcache: Map::<u64, u32>::new(),
             lms: Vector::<lay::MemberAt>::new(),
             bm: 0,
             fl_depth: 0,
@@ -319,6 +303,8 @@ extend Lower {
             lblk: Vector::<u32>::new(),
             npred: Vector::<u32>::new(),
             preds: Vector::<u32>::new(),
+            sat: Vector::<u32>::new(),
+            sl: Vector::<u32>::new(),
             hints: Vector::<u64>::new(),
             edges: Vector::<DEdge>::new(),
             cur: 0,
@@ -399,7 +385,7 @@ extend Lower {
             return true;
         }
         let key = Lower::tkey(c, m, t);
-        switch self.tcache.get(&key) {
+        switch self.cc.tcache.get(&key) {
             Some(v) => {
                 *out = *v;
                 return true;
@@ -411,7 +397,7 @@ extend Lower {
         }
         // A type naming a parameter means what the bindings in place make it.
         if Lower::ast(c, m).type_concrete(t) {
-            self.tcache.insert(key, *out);
+            self.cc.tcache.insert(key, *out);
         }
         return true;
     }
@@ -821,16 +807,16 @@ extend Lower {
             // A concrete aggregate's leaves are the same in every body: found once.
             let (gm, gt) = self.grounded(c, m, t);
             let key = Lower::tkey(c, gm, gt);
-            if let Some(v) = self.lcache.get(&key) {
+            if let Some(v) = self.cc.lcache.get(&key) {
                 let at = (*v >> 32) as usize;
-                leaves.extend_from_slice(self.lpool[at..at + (*v & 0xFFFFFFFF) as usize]);
+                leaves.extend_from_slice(self.cc.lpool[at..at + (*v & 0xFFFFFFFF) as usize]);
             } else {
                 if !self.leaves(c, m, t, 0, &mut leaves, 0) {
                     leaves.truncate(ast::pick(leaves.len() > 16, 16usize, 0usize));
                 }
                 if self.err.len() == 0 && Lower::ast(c, gm).type_concrete(gt) {
-                    self.lcache.insert(key, self.lpool.len() as u64 << 32 | leaves.len() as u64);
-                    self.lpool.extend_copy(&leaves);
+                    self.cc.lcache.insert(key, self.cc.lpool.len() as u64 << 32 | leaves.len() as u64);
+                    self.cc.lpool.extend_copy(&leaves);
                 }
             }
         }
@@ -996,10 +982,10 @@ extend Lower {
         let (rm, rt) = self.grounded(c, rm0, rt0);
         // A concrete aggregate's members are the same in every body.
         let key = Lower::tkey(c, rm, rt);
-        if let Some(v) = self.fcache.get(&key) {
+        if let Some(v) = self.cc.fcache.get(&key) {
             let at = (*v >> 32) as usize;
             for k in 0..(*v & 0xFFFFFFFF) as usize {
-                out.push(self.fpool[at + k]);
+                out.push(self.cc.fpool[at + k]);
             }
             return true;
         }
@@ -1008,12 +994,29 @@ extend Lower {
             return false;
         }
         if Lower::ast(c, rm).type_concrete(rt) {
-            self.fcache.insert(key, self.fpool.len() as u64 << 32 | (out.len() - n0) as u64);
+            self.cc.fcache.insert(key, self.cc.fpool.len() as u64 << 32 | (out.len() - n0) as u64);
             for k in n0..out.len() {
-                self.fpool.push(out[k]);
+                self.cc.fpool.push(out[k]);
+            }
+            // An enum's shape, which its `decl_fields` placed last (the members' own came before).
+            if Lower::is_enum(c, rm, rt) {
+                self.cc.ecache.insert(key, self.fenum);
             }
         }
         return true;
+    }
+
+    // Whether type `(rm, rt)` is an enum or an instance of one.
+    fn is_enum(c: &cbe::CEmit, rm: ModuleId, rt: TypeId) bool {
+        let y = *Lower::ast(c, rm).type_at(rt);
+        if y.kind == TypeKind::TYPE_ENUM {
+            return true;
+        }
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let it = *Lower::ast(c, rm).instance(y.as_data.inst);
+        return Lower::ast(c, it.module).at_const(it.decl).kind == NodeKind::NODE_ENUM;
     }
 
     fn fields_of_i(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, out: &mut Vector<FieldAt>) bool {
@@ -1129,6 +1132,7 @@ extend Lower {
                 }
             }
             self.lms.truncate(b0);
+            self.fenum = el;
             return true;
         }
         let is_union = unsafe a.ext(dn).aggregate.is_union;
@@ -1320,9 +1324,9 @@ extend Lower {
     ) bool {
         // A concrete aggregate's members, found before: read in place.
         let (gm, gt) = self.grounded(c, rm, rt);
-        if let Some(v) = self.fcache.get(&Lower::tkey(c, gm, gt)) {
+        if let Some(v) = self.cc.fcache.get(&Lower::tkey(c, gm, gt)) {
             let at = (*v >> 32) as usize;
-            if member_in(self.fpool[at..at + (*v & 0xFFFFFFFF) as usize], pj, variant, out) {
+            if member_in(self.cc.fpool[at..at + (*v & 0xFFFFFFFF) as usize], pj, variant, out) {
                 return true;
             }
             return self.fail("member");
@@ -1401,6 +1405,51 @@ extend FieldAt as Copy {}
 // An enum value's payload of at most this many bytes is zeroed where its variant leaves it.
 const ENUM_ZERO_MAX: u32 = 32;
 
+/// The facts of concrete types a lowering keeps for every body (each key a type `tkey` names, or an enum
+/// declaration): the same in every lowering of the build, so the shards of a parallel emission pass sets
+/// on to each other (`Lower::swap_caches`, through the driver's pooled task contexts).
+pub(package) struct LCaches {
+    tcache: Map<u64, TyI>, // the classes of concrete types
+    fcache: Map<u64, u64>, // the members of concrete aggregates (`fields_of`): start << 32 | count in `fpool`
+    fpool: Vector<FieldAt>,
+    ecache: Map<u64, EnumL>, // the shapes of concrete payload enums (`enum_of`, `fields_of`)
+    // The register leaves of concrete aggregates (`layout_of`): start << 32 | count in `lpool`.
+    lcache: Map<u64, u64>,
+    lpool: Vector<(u32, u8)>,
+    // Per concrete referent (shared << 48 | module << 32 | type), its `owned_fields`: start << 32 | count
+    // in `opool` (`owned_of`); per concrete type (module << 32 | type), whether it is `frozen`.
+    ocache: Map<u64, u64>,
+    opool: Vector<u32>,
+    zcache: Map<u64, bool>,
+    // Per enum declaration (module << 32 | node), its greatest discriminant (`tag_bound`).
+    bcache: Map<u64, u32>,
+}
+
+extend LCaches {
+    pub(package) fn new() LCaches {
+        return LCaches {
+            tcache: Map::<u64, TyI>::new(),
+            fcache: Map::<u64, u64>::new(),
+            fpool: Vector::<FieldAt>::new(),
+            ecache: Map::<u64, EnumL>::new(),
+            lcache: Map::<u64, u64>::new(),
+            lpool: Vector::<(u32, u8)>::new(),
+            ocache: Map::<u64, u64>::new(),
+            opool: Vector::<u32>::new(),
+            zcache: Map::<u64, bool>::new(),
+            bcache: Map::<u64, u32>::new(),
+        };
+    }
+}
+
+extend Lower {
+    /// Exchange this lowering's caches with set `cc`.
+    pub(package) fn swap_caches(self: &mut Self, cc: &mut LCaches) {
+        let mine = replace(&mut self.cc, LCaches::new());
+        self.cc = replace(cc, mine);
+    }
+}
+
 struct EnumL {
     pub(package) ok: bool,
     pub(package) payload_off: u32,
@@ -1414,6 +1463,8 @@ struct EnumL {
     pub(package) none: NodeId,
     pub(package) vm: ModuleId, // the module of `some` and `none`
 }
+
+extend EnumL as Copy {}
 
 /// `v` rounded up to a multiple of `a`.
 pub(package) const fn round_up(v: u32, a: u32) u32 {
@@ -2318,22 +2369,29 @@ extend Lower {
         let sig_tys = Vector::<u8>::new();
         let _ = sig_tys;
         self.order.truncate(0);
+        // The successors of every block, once.
+        self.sat.truncate(0);
+        self.sl.truncate(0);
+        for k in 0..nb {
+            self.sat.push(self.sl.len() as u32);
+            Lower::succs(b, k as u32, &mut self.sl);
+        }
+        self.sat.push(self.sl.len() as u32);
         let mut post = Vector::<u32>::new();
         let mut stack = Vector::<u64>::new();
         let mut seen = Vector::<bool>::new();
         seen.resize_default(nb);
         seen[b.entry as usize] = true;
         stack.push(b.entry as u64 << 32);
-        let mut succ = Vector::<u32>::new();
         // Each block enters once and each edge is taken once.
         while stack.len() != 0 {
             let top = stack.len() - 1;
             let blk = (stack[top] >> 32) as u32;
             let next = stack[top] as u32;
-            Lower::succs(b, blk, &mut succ);
-            if next as usize < succ.len() {
+            let e = self.sat[blk as usize] + next;
+            if e < self.sat[blk as usize + 1] {
                 stack[top] = blk as u64 << 32 | (next + 1) as u64;
-                let s = succ[next as usize];
+                let s = self.sl[e as usize];
                 if s as usize >= nb {
                     return self.fail("successor");
                 }
@@ -2354,9 +2412,8 @@ extend Lower {
         pairs.push(b.entry as u64 << 32 | self.virt as u64);
         for k in 0..self.order.len() {
             let blk = self.order[k];
-            Lower::succs(b, blk, &mut succ);
-            for j in 0..succ.len() {
-                pairs.push(succ[j] as u64 << 32 | blk as u64);
+            for e in self.sat[blk as usize]..self.sat[blk as usize + 1] {
+                pairs.push(self.sl[e as usize] as u64 << 32 | blk as u64);
             }
         }
         pairs.sort();
@@ -2445,9 +2502,8 @@ extend Lower {
         return x;
     }
 
-    // The successors of core block `blk`.
+    // The successors of core block `blk`, appended to `out`.
     fn succs(b: &irc::CoreBody, blk: u32, out: &mut Vector<u32>) {
-        out.truncate(0);
         let t = b.blocks[blk as usize].term;
         if t.kind == irc::TM_SWITCH {
             for k in 0..t.sw_len {
@@ -2502,10 +2558,10 @@ extend Lower {
         // A concrete referent's fields are the same in every body: found once.
         let (gm, gt) = self.grounded(c, rm, y.as_data.elem);
         let key = Lower::tkey(c, gm, gt) ^ shared as u64 << 62;
-        if let Some(v) = self.ocache.get(&key) {
+        if let Some(v) = self.cc.ocache.get(&key) {
             let at = (*v >> 32) as usize;
             for x in at..at + (*v & 0xFFFFFFFF) as usize {
-                self.b.owned.push(k << 32 | self.opool[x] as u64);
+                self.b.owned.push(k << 32 | self.cc.opool[x] as u64);
             }
             return;
         }
@@ -2515,8 +2571,8 @@ extend Lower {
             self.b.owned.push(k << 32 | offs[x] as u64);
         }
         if Lower::ast(c, gm).type_concrete(gt) {
-            self.ocache.insert(key, self.opool.len() as u64 << 32 | offs.len() as u64);
-            self.opool.extend_copy(&offs);
+            self.cc.ocache.insert(key, self.cc.opool.len() as u64 << 32 | offs.len() as u64);
+            self.cc.opool.extend_copy(&offs);
         }
     }
 
@@ -2573,12 +2629,12 @@ extend Lower {
     fn frozen_top(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId) bool {
         let (gm, gt) = self.grounded(c, m, t);
         let key = Lower::tkey(c, gm, gt);
-        if let Some(z) = self.zcache.get(&key) {
+        if let Some(z) = self.cc.zcache.get(&key) {
             return *z;
         }
         let z = self.frozen(c, m, t, FROZEN_DEPTH);
         if Lower::ast(c, gm).type_concrete(gt) {
-            self.zcache.insert(key, z);
+            self.cc.zcache.insert(key, z);
         }
         return z;
     }
@@ -2924,22 +2980,42 @@ extend Lower {
         if cands.len() < 2 {
             return out;
         }
-        // The candidates live at each block's entry: a forward union over the edges.
+        // The candidates live at each block's entry: a forward union over the edges (`cfg`'s successors),
+        // each block's markers as one step, `live & keep | born` (`share_walk`'s set at its end).
         let nb = b.blocks.len();
         let mut live_in = Vector::<u64>::new();
         fill(&mut live_in, nb, 0);
-        let mut sv = Vector::<u32>::new();
+        let mut keep = Vector::<u64>::new();
+        fill(&mut keep, nb, ~0u64);
+        let mut born = Vector::<u64>::new();
+        fill(&mut born, nb, 0);
+        for k in 0..nb {
+            let bb = b.blocks[k];
+            for q in 0..bb.stmt_len {
+                let s = b.statements[(bb.stmt_start + q) as usize];
+                if s.a as usize >= nl || ci[s.a as usize] == NONE {
+                    continue;
+                }
+                let bit = 1u64 << ci[s.a as usize] as u64;
+                if s.kind == irc::ST_STORAGE_LIVE {
+                    born[k] |= bit;
+                } else if s.kind == irc::ST_STORAGE_DEAD {
+                    keep[k] &= ~bit;
+                    born[k] &= ~bit;
+                }
+            }
+        }
         let mut conf = Vector::<u64>::new();
         fill(&mut conf, cands.len(), 0);
         // Each round adds a bit or ends: at most one per candidate and block.
         for _ in 0..SHARE_MAX * nb + 1 {
             let mut changed = false;
             for k in 0..nb {
-                let cur = Lower::share_walk(b, k, live_in[k], &ci, &mut conf, false);
-                Lower::succs(b, k as u32, &mut sv);
-                for e in sv.as_slice() {
-                    if (live_in[e as usize] | cur) != live_in[e as usize] {
-                        live_in[e as usize] |= cur;
+                let cur = live_in[k] & keep[k] | born[k];
+                for e in self.sat[k]..self.sat[k + 1] {
+                    let t = self.sl[e as usize] as usize;
+                    if (live_in[t] | cur) != live_in[t] {
+                        live_in[t] |= cur;
                         changed = true;
                     }
                 }
@@ -2950,7 +3026,7 @@ extend Lower {
         }
         // Two candidates meet where both are live: at a block's entry or as one's storage starts.
         for k in 0..nb {
-            let _ = Lower::share_walk(b, k, live_in[k], &ci, &mut conf, true);
+            Lower::share_walk(b, k, live_in[k], &ci, &mut conf);
         }
         // Greedy groups: a candidate joins the first group of its size and alignment none of whose members
         // it meets.
@@ -2979,14 +3055,12 @@ extend Lower {
         return out;
     }
 
-    // The candidates (`share_plan`'s `ci`) live at the end of core block `k` of `b` from `live` at its entry;
-    // with `meet`, each live set it passes through recorded in `conf`.
-    fn share_walk(b: &irc::CoreBody, k: usize, live: u64, ci: &Vector<u32>, conf: &mut Vector<u64>, meet: bool) u64 {
+    // Each set of the candidates (`share_plan`'s `ci`) live in core block `k` of `b`, from `live` at its
+    // entry, recorded in `conf`.
+    fn share_walk(b: &irc::CoreBody, k: usize, live: u64, ci: &Vector<u32>, conf: &mut Vector<u64>) {
         let bb = b.blocks[k];
         let mut cur = live;
-        if meet {
-            Lower::share_meet(cur, conf);
-        }
+        Lower::share_meet(cur, conf);
         for q in 0..bb.stmt_len {
             let s = b.statements[(bb.stmt_start + q) as usize];
             if s.a as usize >= ci.len() || ci[s.a as usize] == NONE {
@@ -2995,14 +3069,11 @@ extend Lower {
             let bit = 1u64 << ci[s.a as usize] as u64;
             if s.kind == irc::ST_STORAGE_LIVE {
                 cur |= bit;
-                if meet {
-                    Lower::share_meet(cur, conf);
-                }
+                Lower::share_meet(cur, conf);
             } else if s.kind == irc::ST_STORAGE_DEAD {
                 cur &= ~bit;
             }
         }
-        return cur;
     }
 
     // Each candidate of live set `cur` meets the others.
@@ -3496,8 +3567,25 @@ extend Lower {
         return NONE;
     }
 
-    // The shape of payload enum `(rm, rt)`.
-    fn enum_of(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, out: &mut EnumL) bool {
+    // The shape of payload enum `(rm, rt)`; a concrete one's is the same in every body (grounded first,
+    // as `fields_of`).
+    fn enum_of(self: &mut Self, c: &mut cbe::CEmit, rm0: ModuleId, rt0: TypeId, out: &mut EnumL) bool {
+        let (rm, rt) = self.grounded(c, rm0, rt0);
+        let key = Lower::tkey(c, rm, rt);
+        if let Some(v) = self.cc.ecache.get(&key) {
+            *out = *v;
+            return true;
+        }
+        if !self.enum_of_i(c, rm, rt, out) {
+            return false;
+        }
+        if Lower::ast(c, rm).type_concrete(rt) {
+            self.cc.ecache.insert(key, *out);
+        }
+        return true;
+    }
+
+    fn enum_of_i(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, out: &mut EnumL) bool {
         let y = *Lower::ast(c, rm).type_at(rt);
         if y.kind == TypeKind::TYPE_ENUM {
             return self.enum_shape(c, y.module, y.as_data.decl, out);
@@ -3539,7 +3627,7 @@ extend Lower {
     // `enum_bound` of enum declaration `dn` of module `dm`.
     fn tag_bound(self: &mut Self, c: &cbe::CEmit, dm: ModuleId, dn: NodeId) u32 {
         let key = dm as u64 << 32 | dn as u64;
-        if let Some(v) = self.bcache.get(&key) {
+        if let Some(v) = self.cc.bcache.get(&key) {
             return *v;
         }
         let a = Lower::ast(c, dm);
@@ -3558,7 +3646,7 @@ extend Lower {
             }
         }
         let r = ast::pick(hi < 0 || hi > 0x7FFFFFFF, VNONE, hi as u32);
-        self.bcache.insert(key, r);
+        self.cc.bcache.insert(key, r);
         return r;
     }
 
@@ -9821,6 +9909,8 @@ struct Tidy {
     pub(package) slast: Vector<u32>, // its last use so far, and that use's block
     pub(package) slastb: Vector<u32>,
     pub(package) sesc: Vector<bool>, // its address goes beyond a load, a store, a copy or a fill of it
+    pub(package) uat: Vector<u32>, // per instruction, its uses (`inst_uses`) in `ul`: `ul[uat[i]..uat[i + 1]]`
+    pub(package) ul: Vector<Value>,
 }
 
 extend Tidy {
@@ -9847,6 +9937,8 @@ extend Tidy {
             smap: Vector::<u32>::new(),
             srep: Vector::<u32>::new(),
             snuse: Vector::<u32>::new(),
+            uat: Vector::<u32>::new(),
+            ul: Vector::<Value>::new(),
             sseen: Vector::<u32>::new(),
             sblk: Vector::<u32>::new(),
             sfirst: Vector::<u32>::new(),
@@ -9945,18 +10037,28 @@ extend Lower {
     // The tidy body, then slot forwarding over its merged blocks, which a second pass applies.
     fn tidy(self: &mut Self) {
         fill(&mut self.td.kill, self.b.insts.len(), false);
-        self.tidy_pass();
-        if self.forward_slots() {
-            self.tidy_pass();
+        self.tidy_pass(false);
+        // The first pass left every block reached; a forwarding moves no edge.
+        let forwarded = self.forward_slots();
+        if forwarded {
+            self.tidy_pass(true);
         }
-        self.drop_unused_slots();
+        self.drop_unused_slots(!forwarded && self.b.slots.len() >= 2);
     }
 
-    fn tidy_pass(self: &mut Self) {
+    // One tidy pass; with `reached`, every block of the body is reached (no `tidy_reach`).
+    fn tidy_pass(self: &mut Self, reached: bool) {
         let nb = self.b.blocks.len();
         let ni = self.b.insts.len();
         self.fold_conversions();
-        self.tidy_reach();
+        if reached {
+            self.td.bmap.truncate(0);
+            for k in 0..nb {
+                self.td.bmap.push(k as u32);
+            }
+        } else {
+            self.tidy_reach();
+        }
         // Liveness: the instructions with an effect in a reached block, then what they use.
         fill(&mut self.td.imap, ni, NONE);
         self.td.work.truncate(0);
@@ -10144,13 +10246,19 @@ extend Lower {
         fill(&mut self.td.snuse, ns, 0);
         fill(&mut self.td.sblk, ns, NONE);
         fill(&mut self.td.sesc, ns, false);
-        // A tidy pass ran: every block is reached.
+        // A tidy pass ran: every block is reached, and the blocks hold the instructions in order. Each
+        // instruction's uses, once (`uat`, `ul`).
         let nb = self.b.blocks.len();
+        fill(&mut self.td.uat, ni + 1, 0);
+        self.td.ul.truncate(0);
         for k in 0..nb {
             let bk = self.b.blocks[k];
             for i in bk.start..bk.start + bk.len {
                 let t = self.b.insts[i as usize];
                 inst_uses(&self.b, t, &mut self.td.uses);
+                self.td.uat[i as usize] = self.td.ul.len() as u32;
+                self.td.ul.extend_copy(&self.td.uses);
+                self.td.uat[i as usize + 1] = self.td.ul.len() as u32;
                 for q in 0..self.td.uses.len() {
                     let u = self.td.uses[q];
                     if !self.is_slot_addr(u) {
@@ -10188,9 +10296,8 @@ extend Lower {
                     any = true;
                     continue;
                 }
-                inst_uses(&self.b, t, &mut self.td.uses);
-                for q in 0..self.td.uses.len() {
-                    let u = self.td.uses[q];
+                for q in self.td.uat[i as usize]..self.td.uat[i as usize + 1] {
+                    let u = self.td.ul[q as usize];
                     if !self.is_slot_addr(u) {
                         continue;
                     }
@@ -10276,13 +10383,23 @@ extend Lower {
         panic("a slot forwarding chain is acyclic");
     }
 
-    // Drop the slots no instruction takes the address of, and renumber the others in order.
-    fn drop_unused_slots(self: &mut Self) {
+    // Drop the slots no instruction takes the address of, and renumber the others in order. With
+    // `counted`, `forward_slots` counted each slot's uses (`snuse`) on this body: a tidy pass left a
+    // `slotaddr` only where something uses it.
+    fn drop_unused_slots(self: &mut Self, counted: bool) {
         let ns = self.b.slots.len();
         fill(&mut self.td.smap, ns, NONE);
-        for i in 0..self.b.insts.len() {
-            if self.b.insts[i].op == O_SLOTADDR {
-                self.td.smap[self.b.insts[i].a as usize] = 0;
+        if counted {
+            for sl in 0..ns {
+                if self.td.snuse[sl] != 0 {
+                    self.td.smap[sl] = 0;
+                }
+            }
+        } else {
+            for i in 0..self.b.insts.len() {
+                if self.b.insts[i].op == O_SLOTADDR {
+                    self.td.smap[self.b.insts[i].a as usize] = 0;
+                }
             }
         }
         let mut n: u32 = 0;

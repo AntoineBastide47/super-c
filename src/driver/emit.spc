@@ -3333,10 +3333,10 @@ const fn cap_zero() CapMark {
 }
 
 extend SeedShard {
-    /// A shard rendering into `ch`. A `used` one collects demands, skips the environments and
+    /// A shard of `proto`'s emission rendering into `ch`. A `used` one collects demands, skips the environments and
     /// extern-backed keys the master already has, and marks symbol uses as context `ctx`.
     fn new(
-        p: *const loader::Package,
+        proto: &cbe::CEmit,
         ch: TuBufs,
         used: bool,
         env_defined: &Vector<u64>,
@@ -3345,7 +3345,7 @@ extend SeedShard {
         pred: *const Set<u64>,
     ) SeedShard {
         let mut sh = SeedShard {
-            cem: cbe::CEmit::new(p),
+            cem: cbe::CEmit::new_like(proto),
             acc: SeedAcc::new(ch),
             used: used,
             dmarks: Vector::<CapMark>::new(),
@@ -3424,6 +3424,7 @@ fn cemit_seed_task(t: SeedTask) {
     let g9 = t.g;
     let mut cl_cache = Map::<u64, u64>::new();
     let mut clws = Vector::<irl::Lowerer>::new();
+    o.cem.swap_caches(&mut dow.lc);
     cemit_seed_module(
         p,
         &mut o.cem,
@@ -3440,6 +3441,7 @@ fn cemit_seed_task(t: SeedTask) {
     if t.ctl != null {
         (unsafe &*t.ctl).release(t.est);
     }
+    o.cem.swap_caches(&mut dow.lc);
     dctx_put(dow);
 }
 
@@ -3857,12 +3859,14 @@ fn cemit_drain_task(t: DrainTask) {
     let lwc = unsafe &*t.lwc;
     let clc = unsafe &*t.clc;
     let clws0 = unsafe &*t.clw;
+    o.cem.swap_caches(&mut dow.lc);
     for w in t.lo..t.hi {
         let di = (unsafe t.widx[w as usize]) as usize;
         let li = unsafe t.wli[w as usize];
         cemit_drain_slice_one(p, t.g, o, dem, lws, cfs, lwc, clc, clws0, di, li, t.kl, t.verbose, &mut dow);
         o.dmarks.push(o.cap_of());
     }
+    o.cem.swap_caches(&mut dow.lc);
     dctx_put(dow);
 }
 
@@ -4958,7 +4962,7 @@ pub(package) fn cemit_package(
             } else {
                 String::new()
             };
-            let mut sh = SeedShard::new(p, TuBufs::one(m, buf), used, &em.env_defined, &ext_keys, m as i64, predp);
+            let mut sh = SeedShard::new(&cem, TuBufs::one(m, buf), used, &em.env_defined, &ext_keys, m as i64, predp);
             sh.cem.mg.share_short(&mut em.mg);
             sh.cem.mg.rec_on = used && tuc.on;
             shards.push(sh);
@@ -5300,7 +5304,7 @@ pub(package) fn cemit_package(
             }
             let mut dsh = Vector::<SeedShard>::new();
             for _i in 0..nsl9 {
-                let mut sh = SeedShard::new(p, TuBufs::new(0), true, &em.env_defined, &ext_keys, -1, predp);
+                let mut sh = SeedShard::new(&cem, TuBufs::new(0), true, &em.env_defined, &ext_keys, -1, predp);
                 sh.cem.mg.share_short(&mut em.mg);
                 for ei in 0..envh9.len() {
                     sh.cem.env_skip.insert(envh9[ei], 1);
@@ -8305,6 +8309,9 @@ struct DropCtx {
     pub(package) validate: bool, // SC_BC_VALIDATE: every body elaborated here is verified like a kept one
     /// Emission counters (SC_CEMIT_STATS): acquisition, re-lowering, inlining, drop preparation.
     pub(package) pr: prb::Probe,
+    /// The lowering caches the task's shard uses while it runs (`cbe::CEmit::swap_caches`), kept for the
+    /// next task.
+    pub(package) lc: lw::LCaches,
 }
 
 extend DropCtx {
@@ -8322,6 +8329,7 @@ extend DropCtx {
             bce_stats: stdlib::getenv("SC_BCE_STATS") != null,
             validate: stdlib::getenv("SC_BC_VALIDATE") != null,
             pr: prb::Probe::new(stdlib::getenv("SC_CEMIT_STATS") != null, stdlib::getenv("SC_BUILD_MEM") != null),
+            lc: lw::LCaches::new(),
         };
     }
 

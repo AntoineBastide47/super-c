@@ -179,6 +179,18 @@ const fn mask(ty: u8) u64 {
     };
 }
 
+/// The facts of an inlinable body that each call of it reads (`Run.ok`, set once the body is final):
+/// callers may inline it, it is `small` within SHRINK, `small` within the run's budget, a `forwarder`.
+pub(package) const IL_OK: u8 = 1;
+pub(package) const IL_SHRINK: u8 = 2;
+pub(package) const IL_SMALL: u8 = 4;
+pub(package) const IL_FWD: u8 = 8;
+
+/// The `IL_*` facts of inlinable body `b` under budget `bu`.
+pub(package) const fn facts(b: &Body, bu: Budget) u8 {
+    return IL_OK | small(b, SHRINK) as u8 * IL_SHRINK | small(b, bu) as u8 * IL_SMALL | forwarder(b) as u8 * IL_FWD;
+}
+
 /// Whether body `b` fits budget `bu`.
 pub(package) const fn small(b: &Body, bu: Budget) bool {
     let mut warm: u32 = 0;
@@ -251,14 +263,15 @@ extend Inliner {
     }
 
     /// Inline into `c`, body `ci` of `bodies`, the calls of the bodies of a lower `level` that `ok` marks
-    /// (`ok` is read for those only: a body of another level may be in the works), a body with a `unit`
+    /// (`IL_*` facts, `facts` under `bu`; read for those only: a body of another level may be in the works),
+    /// a body with a `unit`
     /// (per body: its unit when the unit keeps its bodies, else NONE) into a body of that unit only.
     /// Whether any inlined.
     pub(package) fn run(
         self: &mut Self,
         pk: &Package,
         bodies: *const Body,
-        ok: &Vector<bool>,
+        ok: &Vector<u8>,
         level: &Vector<u32>,
         unit: &Vector<u32>,
         ci: u32,
@@ -279,7 +292,7 @@ extend Inliner {
         self: &mut Self,
         pk: &Package,
         bodies: *const Body,
-        ok: &Vector<bool>,
+        ok: &Vector<u8>,
         level: &Vector<u32>,
         unit: &Vector<u32>,
         ci: u32,
@@ -307,30 +320,36 @@ extend Inliner {
                 } else {
                     NONE
                 };
-                if callee == NONE || self.only.len() != 0 && !self.only[i as usize] || level[callee as usize] >= level[ci as usize] || !ok[callee as usize] || unit[callee as usize] != NONE && unit[callee as usize] != unit[ci as usize] {
+                if callee == NONE || self.only.len() != 0 && !self.only[i as usize] || level[callee as usize] >= level[ci as usize] || (ok[callee as usize] & IL_OK) == 0 || unit[callee as usize] != NONE && unit[callee as usize] != unit[ci as usize] {
                     self.cmap[i as usize] = ni;
                     ni += 1;
                     continue;
                 }
                 let e = unsafe &*(bodies + callee as usize);
+                let f = ok[callee as usize];
                 // A callee of one block and at most 3 instructions (a field read) is no bigger than its
                 // call: CALLER_MAX does not stop it. A failure path takes forwarders alone.
                 let tiny = e.blocks.len() == 1 && e.insts.len() <= 3;
                 // A `@cold` callee stays a call unless it is no bigger than one: its callers' code stays small.
-                let cold = pk.syms[c.syms[t.a as usize] as usize].cold && !small(e, SHRINK);
+                let cold = pk.syms[c.syms[t.a as usize] as usize].cold && (f & IL_SHRINK) == 0;
                 // A call in a rare block (`BLOCK_RARE`) takes the callees no bigger than it: a copy there grows the
                 // code for a path that seldom runs (a caller's second round takes it once that path is the
                 // caller's warm one, `Run::warm_copies`).
-                let cb = if (bk.flags & BLOCK_RARE) != 0 {
-                    SHRINK
+                let (cb, cf) = if (bk.flags & BLOCK_RARE) != 0 {
+                    (SHRINK, IL_SHRINK)
                 } else {
-                    bu
+                    (bu, IL_SMALL)
                 };
                 // A float rewrite the caller allows and the callee does not would apply to the copy.
-                if (c.fmath & ~e.fmath) != 0 || !warm && !forwarder(e) || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || !small(
+                if (c.fmath & ~e.fmath) != 0 || !warm && (f & IL_FWD) == 0 || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || (f & cf) == 0 && !folds_small(
                     e,
+                    c,
+                    t,
                     cb,
-                ) && !folds_small(e, c, t, cb, &mut self.seen, &mut self.work, &mut self.edges) {
+                    &mut self.seen,
+                    &mut self.work,
+                    &mut self.edges,
+                ) {
                     self.cmap[i as usize] = ni;
                     ni += 1;
                     continue;

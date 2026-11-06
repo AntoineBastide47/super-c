@@ -565,12 +565,22 @@ pub(package) struct Demand {
 extend CEmit {
     /// An emitter over `pkg` (which must outlive it) with empty buffers and gates.
     pub(package) fn new(pkg: *const loader::Package) CEmit {
-        let mut mg = mbe::Mangler::new(pkg);
+        let pk = unsafe &*pkg;
+        return CEmit::make(pkg, mbe::Mangler::new(pkg), backends_of(pk), pk.names_vectors());
+    }
+
+    /// An emitter as `new` makes for `proto`'s package (a shard of `proto`'s emission), the package's
+    /// constants taken from `proto`.
+    pub(package) fn new_like(proto: &CEmit) CEmit {
+        return CEmit::make(proto.pkg, mbe::Mangler::new_like(&proto.mg), proto.backends.clone(), proto.vec_prog);
+    }
+
+    fn make(pkg: *const loader::Package, mg0: mbe::Mangler, backends: Vector<u8>, vec_prog: bool) CEmit {
+        let mut mg = mg0;
         // The emitted text's type uses decide each unit's definition headers.
         mg.tn_on = true;
         let pk = unsafe &*pkg;
         let simd_on = mg.vec_regs;
-        let backends = backends_of(pk);
         let mut any = false;
         for i in 0..backends.len() {
             any = any || (backends[i] & BK_LIR) != 0;
@@ -685,7 +695,7 @@ extend CEmit {
             backends: backends,
             snap_out: null,
             simd_on: simd_on,
-            vec_prog: pk.names_vectors(),
+            vec_prog: vec_prog,
             no_split: native_on(pk),
             render_all: false,
             disp: Vector::<String>::new(),
@@ -1969,6 +1979,16 @@ extend CEmit {
             return l.take_pend_c();
         }
         return false;
+    }
+
+    /// Exchange this emitter's lowering caches with set `cc` (`lw::LCaches`); none without a lowering.
+    pub(package) fn swap_caches(self: &mut Self, cc: &mut lw::LCaches) {
+        if self.lir.is_none() {
+            return;
+        }
+        let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        l.deref_mut().swap_caches(cc);
+        self.lir = Some(l);
     }
 
     /// Move `other`'s LIR into this emitter's.

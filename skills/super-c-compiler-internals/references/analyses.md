@@ -13,15 +13,20 @@ file is authoritative for where to look first.
 |------|----------|-----------|-------------|
 | Core CFG, RPO, idom | `ir::facts` `build_cfg` (bce) | facts state, per body | bce folds an edge |
 | C control-flow shape (RPO, idom, postdominators, loops) | `emit::cflow` `build_into` | `cem.cf_ext` | read only by the C renderer; not built in a native build |
-| LIR lowering CFG and dominators | `Lower::cfg`, `Lower::dominators` | `Lower`, per body | end of `Lower::body` |
+| LIR lowering CFG (every core block's successors, which `share_plan` reads too) and dominators | `Lower::cfg`, `Lower::dominators` | `Lower` (`sat`, `sl`, `order`, `preds`, `idom`), per body | end of `Lower::body` |
+| Storage-marker liveness, one step per block (`live & keep \| born`) | `Lower::share_plan` | locals, per body | end of `share_plan` |
 | Address exposure, argument modes | `Lower::scan` (`arg_mode`) | `Lower`, per body | end of `Lower::body` |
-| Type classes | `Lower::ty` | `Lower.tcache` (`Lower::tkey`: a final type id alone, a provisional one with its module) | whole build |
-| Field lists | `Lower::fields_of` (`member` reads `fpool` in place) | `fcache`, `fpool` | whole build |
-| Register leaves of an aggregate | `Lower::layout_of` (`leaves`) | `lcache`, `lpool` | whole build |
+| Type classes | `Lower::ty` | `Lower.cc.tcache` (`Lower::tkey`: a final type id alone, a provisional one with its module) | whole build |
+| Field lists | `Lower::fields_of` (`member` reads `fpool` in place) | `cc.fcache`, `cc.fpool` | whole build |
+| Shapes of payload enums | `Lower::enum_of`; `fields_of` stores the shape its `decl_fields` placed | `cc.ecache` | whole build |
+| Register leaves of an aggregate | `Lower::layout_of` (`leaves`) | `cc.lcache`, `cc.lpool` | whole build |
 | Static asserts of a module; instances checked | `cemit_inst_asserts` (graph, checker queue, drain) | `Interp` (`sa_list`, `sa_done`) | whole build |
 | Layouts (size, align, offsets) | `ir::layout` `Svc` | one cache per `Svc` owner (each `Mangler`, `Lowerer`, interpreter) | whole build |
-| `@owned` fields of a concrete referent | `owned_of` (`owned_fields`) | `ocache`, `opool` | whole build |
-| Frozen (no `UnsafeCell`) of a concrete type | `frozen_top` (`frozen`) | `zcache` | whole build |
+| `@owned` fields of a concrete referent | `owned_of` (`owned_fields`) | `cc.ocache`, `cc.opool` | whole build |
+| Frozen (no `UnsafeCell`) of a concrete type | `frozen_top` (`frozen`) | `cc.zcache` | whole build |
+| The caches above (`lw::LCaches`) in a parallel emission | each shard task takes the set of its pooled task context and gives it back (`CEmit::swap_caches`) | `DropCtx.lc` | whole build |
+| Package constants of an emitter (backends, `names_vectors`, the mangler's prelude lookups, niche declarations and C library names) | `CEmit::new`, `Mangler::new`; a shard copies the master's (`CEmit::new_like`, `Mangler::new_like`) | each emitter; the C library names one `Arc` | whole build |
+| Uses of each instruction during slot forwarding | `forward_slots` (`inst_uses`) | `Tidy.uat`, `Tidy.ul` | the forwarding; `drop_unused_slots` reads its slot use counts (`snuse`) when nothing forwarded |
 | Package part of the native cache key | `nat_base` | a local per loop (a module's key: its emission key xor it) | per loop |
 
 ## optimize (`lir::opt` `Run`, `S_LOWERED` to the end of the `lir_opt` block)
@@ -31,31 +36,34 @@ Per package, in `Run::new`:
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
 | Calls of each body: callee, argument roots | `calls_of` | `Calls` | `Run::new` |
-| Memory effects, written and escaping parameters | `effects` (over `Calls`), `own_effects`, `own_escapes` | `Sym.fx`, `Sym.esc`, `Run.wargs` | end of the build |
-| Call-graph levels and job edges | `levels` | `Run.level`, `Run.edges`, `Run.order` | end of the build |
-| Inliner shape test | `Run::new` | `Run.shape`; after a job, `Run.ok` | end of the build |
+| Memory effects, written and escaping parameters | `effects` (over `Calls`; a worklist over the callers of each body, `rc`, and the bodies that pass to its parameters, `rp`), `own_effects`, `own_escapes`, `stalls` (counts over `rc`) | `Sym.fx`, `Sym.esc`, `Run.wargs` | end of the build |
+| Call-graph levels and job edges; the bodies whose job finished | `levels`; each job's end | `Run.level`, `Run.edges`, `Run.order`; `Run.fin` (`await_marked` waits on it) | end of the build |
+| Inliner shape test; a finished body's inliner facts (inlinable, `small` within `SHRINK` and the run's budget, `forwarder`) | `Run::new`; `il::facts` after the job (a held body's in `Run::new`) | `Run.shape`; `Run.ok` (`IL_*`) | end of the build |
 
 Per body, on `Opt` (`Run::job` runs the passes in order). `Opt::tables(pk, b, want)` computes
-only the levels `kept` lacks (`K_GRAPH` < `K_DOM` < `K_NEST` < `K_MEM`); every change to the body
-sets `kept = K_NONE`, and `forget` runs at a job's start and after inlining:
+only the levels `kept` lacks (`K_GRAPH` < `K_DOM` < `K_NEST` < `K_MEM` < `K_SLOTS`); every change to
+the body sets `kept = K_NONE`, and `forget` runs at a job's start and after inlining. `preheaders`
+keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and in `loop_opts`
+`unpreheaders` takes back the tables `save_tables` copied:
 
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
 | Successors, RPO, predecessors; block of each instruction; operand lists (CSR) | `Opt::graph` (`block_map`, `operands`) | `Opt` (`pred_at`, `preds`, `pblock`, `blk_of`, `ops_at`, `ops`, `ops_dst`) | `K_GRAPH`: any change |
 | Dominator tree and its pre/post numbers | `Opt::dominators` | `Opt` (`dpre`, `dpost`) | `K_DOM`: any change |
 | Loop nesting, preheaders, loop blocks in block order | `Opt::nest` | `Opt` (`inner`, `lparent`, `preh`, `lb_at`, `lbs`) | `K_NEST`: any change |
-| Private slots, alias classes and their scope roots' bases, frozen memory, per-block and per-loop writes and tags | `Opt::memory` (`privates`, `classes`, `root_bases`, `frozen`, `bw`, `bt`, `bpw`, `bst`) | `Opt` (`cbase` among them) | `K_MEM`: any change |
-| Slot base, offset, escape | `Opt::slot_writes` | `Opt` | any instruction change |
+| Private slots and the slot each address derives, alias classes and their scope roots' bases, slot escapes, frozen memory, per-block and per-loop writes and tags | `Opt::memory` (`privates`, `classes`, `slot_escapes`, `root_bases`, `frozen`, `bw`, `bt`, `bpw`, `bst`) | `Opt` (`pder`, which `slot_escapes` and `slot_apart` read through `der_slot`; `cbase` among them) | `K_MEM`: any change |
+| Slot base, offset, escape | `Opt::slot_writes` | `Opt` | `K_SLOTS`: any change |
 | Slots an instruction still addresses | `Opt::rebuild`, `emit` | `Opt.sused` | the next rebuild |
 | The pool records a body names (dead ones dropped) | `Body::compact_pool`, at the end of `Run::job` | `Body.pool` | the next pass that adds records |
 | Rare blocks | `Opt::estimate` | `BLOCK_RARE` flags on the body | any block change; codegen reads them too |
 | Loop weights | `Opt::weigh` | `Opt` | any edge or block change |
 | Unsigned upper bound of a value | `Opt::ubound` | not stored | per call |
+| A loop's blocks and the block of each instruction for the loop transforms | `LoopOpt::shape` (from `Opt`'s `lb_at`, `lbs`), `LoopOpt::candidates` (a copy of `blk_of`, `pblock`, which the transforms extend) | `LoopOpt` (`inl`, `lblocks`, `owner`, `powner`) | the loop's transform |
 | Loop counter, trip count, exit test | `LoopOpt::counted_by`, `trip`, `cf_test` (`lir::loops`) | `LoopOpt`, per loop | the loop's transform |
 | Header counts and shape test of a loop | `LoopOpt::header_counts` | caller | the loop's transform |
 | Closed form's leaving values and their targets | `LoopOpt::close_plan` (no change), then `close_apply` | `LoopOpt` (`lout`, `tgt_of`, `tused`, `cf_leave`) | `close_apply` |
-| Promotion candidates | `Promoter::collect`, `Promoter::merges` (`lir::promote`) | `Promoter` | the promotion |
-| SLP predecessor tables | `Slp::plan` (`lir::slp`; block map from `Opt`) | `Slp` | the packing |
+| Promotion candidates, the slots addresses derive (`collect`, for `merges` too) | `Promoter::collect`, `Promoter::merges` (`lir::promote`; graph and operand lists from `Opt`) | `Promoter` | the promotion |
+| SLP predecessor tables | `Slp::plan` (`lir::slp`; block map and use counts from `Opt`'s `blk_of`, `pblock`, `ops`) | `Slp` | the packing |
 | Operand lists of one instruction | `lir::verify` `uses`, `uses_into` | caller's vector | per call |
 
 A pass that returns false must leave the body unchanged; the next pass then reuses the facts
@@ -102,8 +110,14 @@ not copy their pattern into new code.
   definitions and of the extern headers' checks, which only the C backend reads, and spells each
   callee's symbol again per calling module for the cross-unit edges (which choose the objects too);
   `Svc` holds one copy per owner.
+- lower: `dead_stores` scans back from the block's end for each storage end (about one
+  instruction per call in the self-build).
 - optimize: `LoopOpt` analyses a rejected loop again in each round; the exit test has four
-  decoders (`cf_test`, `trip`, `counted_by`, `checks`), and `top_of` repeats part of `ubound`.
+  decoders (`cf_test`, `trip`, `counted_by`, `checks`), and `top_of` repeats part of `ubound`;
+  `Slp::plan` builds every block's in-edges (`graph`'s predecessors hold no edge ids and cover the
+  reached blocks only); `return_slot` builds operand lists after a `run`'s rebuild left no tables;
+  `thread`'s header test repeats `nest`'s; `only_use`, `only_in` and `only_step` scan the whole body
+  per query.
 - codegen: `Live::rare_blocks` repeats the optimizer's `BLOCK_RARE` when `lir_opt` ran; each
   object compiles its own copy of the unowned package data it names (string literals; weak with
   `-fdata-sections`, so the link keeps one); a64gen and x64gen hold parallel copies of the

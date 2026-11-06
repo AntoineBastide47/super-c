@@ -9,6 +9,7 @@ import module::loader as loader;
 import ir::interp as iri;
 import ir::cpu_features as cf;
 import stdlib;
+import std::parallel::arc;
 
 // The C spelling of a builtin in declarations (usize is size_t, NOT uintptr_t; c32/c64 are the
 // _Complex pair). "void" doubles as the fallback.
@@ -544,7 +545,7 @@ pub(package) struct Mangler {
     /// zero-sized, bit2 unit/never. One resolve+layout then serves every emission gate probe.
     zmemo: Map<u64, u64>,
     zenv: Vector<lay::LayoutEnv>, // layout_at scratch: one frame per visible binding
-    lib_names: Set<str<'static>>, // C_LIB_NAMES, indexed
+    lib_names: arc::Arc<Set<str<'static>>>, // C_LIB_NAMES, indexed (one set for an emission's shards)
     // Direct-mapped cache of `ident` escape verdicts, one module << 48 | span start << 16 | length
     // << 1 | escaped per slot: a name spells about 6 times, mostly close together, and the keyword
     // and macro tests cost more than the probe.
@@ -719,12 +720,42 @@ extend Mangler {
                 w = i + 1;
             }
         }
+        return Mangler::make(
+            pkg,
+            user_mods > 1,
+            p.prelude_lookup("Global", true),
+            p.prelude_lookup("Box", true),
+            lay::niche_decls(p),
+            arc::Arc::<Set<str<'static>>>::new(lib_names),
+        );
+    }
+
+    /// A mangler as `new` makes for `proto`'s package, the package's constants taken from `proto`.
+    pub(package) fn new_like(proto: &Mangler) Mangler {
+        return Mangler::make(
+            proto.pkg,
+            proto.mangle,
+            loader::LookupHit { node: proto.ph_global.node, mid: proto.ph_global.mid },
+            loader::LookupHit { node: proto.ph_box.node, mid: proto.ph_box.mid },
+            proto.nd,
+            proto.lib_names.clone(),
+        );
+    }
+
+    fn make(
+        pkg: *const loader::Package,
+        mangle: bool,
+        ph_global: loader::LookupHit,
+        ph_box: loader::LookupHit,
+        nd: lay::NicheDecls,
+        lib_names: arc::Arc<Set<str<'static>>>,
+    ) Mangler {
         return Mangler {
             pkg: pkg,
-            mangle: user_mods > 1,
-            ph_global: p.prelude_lookup("Global", true),
-            ph_box: p.prelude_lookup("Box", true),
-            nd: lay::niche_decls(p),
+            mangle: mangle,
+            ph_global: ph_global,
+            ph_box: ph_box,
+            nd: nd,
             short_own: Vector::<u8>::new(),
             short_ok: null,
             subs: Vector::<MSub>::new(),
@@ -1898,12 +1929,12 @@ extend Mangler {
     /// Whether a header the emitted C always includes declares `name` (`C_LIB_NAMES`, `c_lib_family`).
     /// Whether a header the emitted C includes declares `name` at the build's POSIX level.
     pub(package) fn c_lib_declared(self: &Self, name: str) bool {
-        return c_lib_family(name) || self.lib_names.contains(&name) && !word_in(C_EXT_NAMES, name);
+        return c_lib_family(name) || self.lib_names.get().contains(&name) && !word_in(C_EXT_NAMES, name);
     }
 
     fn lib_escape(self: &Self, out: &mut String, st: usize) {
         let sym = out.as_str().slice(st, out.len());
-        if escaped_stem(sym, |w: str| c_lib_family(w) || self.lib_names.contains(&w)) {
+        if escaped_stem(sym, |w: str| c_lib_family(w) || self.lib_names.get().contains(&w)) {
             out.push_str("_");
         }
     }

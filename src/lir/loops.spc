@@ -574,8 +574,10 @@ extend LoopOpt {
 
     /// Transform the innermost loops of `b` within budgets `bu` (`inner`: per block its innermost loop's
     /// header, NONE outside loops; `lparent`: per header the header of the loop around it; `preh`: per
-    /// header its preheader, NONE without one; `dpre` and `dpost`: per block its preorder and postorder
-    /// numbers in the dominator tree); pointers are `ptr` bytes, the float rewrites `fmath` allows
+    /// header its preheader, NONE without one; `lb_at` and `lbs`: per header its loop's blocks in block
+    /// order, `lbs[lb_at[h] >> 32..lb_at[h] as u32]`; `iblk` and `pblk`: per instruction and parameter its
+    /// block, every one in one; `dpre` and `dpost`: per block its preorder and postorder numbers in the
+    /// dominator tree); pointers are `ptr` bytes, the float rewrites `fmath` allows
     /// (`FM_*`), and `vec` the bytes of the widest vector the target holds in a register (0: none). A loop
     /// goes when its final values have a closed form, else peels when its trip count is known, else
     /// vectorizes, else unrolls and jams the loop around it, else unrolls partially, else versions on its
@@ -590,11 +592,15 @@ extend LoopOpt {
         inner: []u32,
         lparent: []u32,
         preh: []u32,
+        lb_at: []u64,
+        lbs: []u32,
+        iblk: []u32,
+        pblk: []u32,
         dpre: []u32,
         dpost: []u32,
         cl: Classes,
     ) bool {
-        let cand = self.candidates(b, inner, lparent, preh);
+        let cand = self.candidates(b, inner, lparent, preh, iblk, pblk);
         let mut any = false;
         self.vbytes = vec;
         self.vmax = vec;
@@ -605,7 +611,7 @@ extend LoopOpt {
         for c in 0..cand.len() {
             let h = cand[c];
             let p = preh[h as usize];
-            let size = self.shape(b, inner, h);
+            let size = self.shape(b, lb_at, lbs, h);
             if size == 0 {
                 continue;
             }
@@ -743,7 +749,7 @@ extend LoopOpt {
                     continue;
                 }
                 // The inner loop's tables again.
-                let _ = self.shape(b, inner, h);
+                let _ = self.shape(b, lb_at, lbs, h);
             }
             if bu.partial != 0 && self.counted(b, h, u) {
                 let k = self.unroll_factor(b, h, u, bu.partial);
@@ -782,14 +788,18 @@ extend LoopOpt {
         inner: []u32,
         lparent: []u32,
         preh: []u32,
+        lb_at: []u64,
+        lbs: []u32,
+        iblk: []u32,
+        pblk: []u32,
         dpre: []u32,
         dpost: []u32,
     ) bool {
-        let cand = self.candidates(b, inner, lparent, preh);
+        let cand = self.candidates(b, inner, lparent, preh, iblk, pblk);
         let mut any = false;
         for c in 0..cand.len() {
             let h = cand[c];
-            if self.shape(b, inner, h) == 0 || self.latch == h {
+            if self.shape(b, lb_at, lbs, h) == 0 || self.latch == h {
                 continue;
             }
             let body = self.rotatable(b, h, max);
@@ -801,25 +811,20 @@ extend LoopOpt {
         return any;
     }
 
-    // The tables `run` and `rotate` share set for `b`; the headers of its innermost loops with a
-    // preheader.
-    fn candidates(self: &mut Self, b: &Body, inner: []u32, lparent: []u32, preh: []u32) Vector<u32> {
+    // The tables `run` and `rotate` share set for `b` (`owner`, `powner`: `iblk`'s and `pblk`'s, which the
+    // transforms extend); the headers of its innermost loops with a preheader.
+    fn candidates(self: &mut Self, b: &Body, inner: []u32, lparent: []u32, preh: []u32, iblk: []u32, pblk: []u32) Vector<
+        u32
+    > {
         let nb = b.blocks.len();
         self.proxy.truncate(0);
         for k in 0..nb {
             self.proxy.push(k as u32);
         }
-        fill(&mut self.owner, b.insts.len(), 0);
-        fill(&mut self.powner, b.params.len(), 0);
-        for k in 0..nb {
-            let bk = b.blocks[k];
-            for i in bk.start..bk.start + bk.len {
-                self.owner[i as usize] = k as u32;
-            }
-            for q in 0..bk.param_len as u32 {
-                self.powner[(bk.param_start + q) as usize] = k as u32;
-            }
-        }
+        self.owner.truncate(0);
+        self.owner.extend_from_slice(iblk);
+        self.powner.truncate(0);
+        self.powner.extend_from_slice(pblk);
         // A header with a loop inside it is not innermost.
         fill(&mut self.inl, nb, false);
         for k in 0..nb {
@@ -6576,19 +6581,19 @@ extend LoopOpt {
         return b.edge(tg, &self.args);
     }
 
-    // The instruction count of loop `h` when it qualifies, else 0; sets `inl` and `lblocks` to its blocks
-    // and `latch` to the block of its one back edge. `inner` covers the blocks before the first transform;
-    // the blocks after them are in no loop.
-    fn shape(self: &mut Self, b: &Body, inner: []u32, h: u32) u32 {
-        let nb = b.blocks.len();
+    // The instruction count of innermost loop `h` when it qualifies, else 0; sets `inl` and `lblocks` to
+    // its blocks (`lbs[lb_at[h] >> 32..lb_at[h] as u32]`) and `latch` to the block of its one back edge.
+    // `lbs` covers the blocks before the first transform; the blocks after them are in no loop.
+    fn shape(self: &mut Self, b: &Body, lb_at: []u64, lbs: []u32, h: u32) u32 {
+        fill(&mut self.inl, b.blocks.len(), false);
         self.lblocks.truncate(0);
         let mut size: u32 = 0;
-        for k in 0..nb {
-            self.inl[k] = k < inner.len() && inner[k] == h;
-            if self.inl[k] {
-                self.lblocks.push(k as u32);
-                size += b.blocks[k].len;
-            }
+        let r = lb_at[h as usize];
+        for q in (r >> 32) as u32..r as u32 {
+            let k = lbs[q as usize];
+            self.inl[k as usize] = true;
+            self.lblocks.push(k);
+            size += b.blocks[k as usize].len;
         }
         let mut backs: u32 = 0;
         for j in 0..self.lblocks.len() {

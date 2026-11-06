@@ -73,7 +73,6 @@ pub(package) struct Slp {
     lv: Vector<Value>,
     // The lanes `build` takes, a stack: each call's from its `at` on.
     tmp: Vector<Value>,
-    tmp2: Vector<Value>,
     iown: Vector<u32>, // per instruction, its PK_OP or PK_LOAD pack (NONE: none)
     pown: Vector<u32>, // per block parameter, its PK_PARAM pack (NONE: none)
     iblk: Vector<u32>, // per instruction, its block
@@ -114,7 +113,6 @@ extend Slp {
             packs: Vector::<Pack>::new(),
             lv: Vector::<Value>::new(),
             tmp: Vector::<Value>::new(),
-            tmp2: Vector::<Value>::new(),
             iown: Vector::<u32>::new(),
             pown: Vector::<u32>::new(),
             iblk: Vector::<u32>::new(),
@@ -142,8 +140,9 @@ extend Slp {
     }
 
     /// The packs of body `b` (`ptr` its pointer size, `vb` the bytes of the widest vector, `w` per block the
-    /// weight of an instruction there): whether the instructions they save outweigh the splats and gathers
-    /// they add. `b` stays as it is.
+    /// weight of an instruction there; per instruction its block `iblk` and its operands
+    /// `ops[ops_at[i]..ops_arg[i]]`, per parameter its block `pblk`): whether the instructions they save
+    /// outweigh the splats and gathers they add. `b` stays as it is.
     pub(package) fn plan(
         self: &mut Self,
         b: &Body,
@@ -154,6 +153,9 @@ extend Slp {
         w: []u64,
         iblk: []u32,
         pblk: []u32,
+        ops_at: []u32,
+        ops_arg: []u32,
+        ops: []Value,
     ) bool {
         self.ptr = ptr;
         self.vb = vb;
@@ -209,9 +211,8 @@ extend Slp {
         // Each instruction's uses, for the sums.
         fill(&mut self.uses, ni, 0);
         for i in 0..ni {
-            lv::uses(b, b.insts[i], &mut self.tmp2);
-            for q in 0..self.tmp2.len() {
-                let v = self.tmp2[q];
+            for q in ops_at[i]..ops_arg[i] {
+                let v = ops[q as usize];
                 if v != VNONE && (v & (VPARAM | VFLAG)) == 0 {
                     self.uses[v as usize] += 1;
                 }
