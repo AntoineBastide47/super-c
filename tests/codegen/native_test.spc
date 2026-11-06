@@ -16503,7 +16503,7 @@ b0(v0: ptr):
 // arm64: a vector constant of two different words loads from read-only data (`adrp`, `ldr q`), not two
 // built words and an `ins`; an inline copy of 64 bytes moves 32 at a time (`ldp q` and `stp q`); a body that
 // passes its own aggregate result to a call of the same result right before its return jumps to the
-// callee (x86-64 too).
+// callee and saves no register for the return it does not emit (x86-64 too).
 @test
 fn arm64_constants_load_copies_pair_and_results_pass_on() {
     let lir = M"(lir ptr 8
@@ -16551,15 +16551,80 @@ b0(v0: i64, v1: ptr):
         "q pairs",
     );
     assert(elf_text_count(&a64, 0xFC000000, 0x94000000) == 0, "a jump to make");
+    // STR Xt, [Xn, #imm] (0xF9000000): `make`'s store alone, no save of x8.
+    assert(elf_text_count(&a64, 0xFFC00000, 0xF9000000) == 1, "no save of the result pointer");
     let mut x = Vector::<u8>::new();
     assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), TAIL, &mut x), "x86-64");
     let (xt, xn) = elf_text(&x);
     let t = x[xt..xt + xn];
     let mut call = false;
+    let mut save = false;
     for k in 0..t.len() {
         call = call || t[k] == 0xE8;
+        // `mov [rsp], rdi`: 48 89 3C 24.
+        save = save || k + 4 <= t.len() && t[k] == 0x48 && t[k + 1] == 0x89 && t[k + 2] == 0x3C && t[k + 3] == 0x24;
     }
-    assert(!call, "no call");
+    assert(!call && !save, "no call and no save of rdi");
+}
+
+// arm64: a parameter that lives past a call in a callee-saved register, passed first to that call before
+// any other instruction runs, is read where it arrived: no `mov x0, x19` after `mov x19, x0`. Not in a loop
+// header the entry falls into without code, nor in an entry block a branch enters: a later iteration's x0
+// holds another value.
+@test
+fn arm64_a_parameter_passes_from_the_register_it_arrived_in() {
+    let lir = M"(lir ptr 8
+sym @h fn global
+sym @t fn global
+sym @arg fn global
+sym @agg fn global
+sym @loop fn global
+sym @head fn global
+fn @arg
+  sig (ptr) -> void
+b0(v0: ptr):
+  call @h(v0) : (ptr) -> void
+  v1 = iconst.i64 7
+  store v1, v0 align 3
+  ret
+fn @agg
+  layout l0 size 64 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64, 40 i64, 48 i64, 56 i64]
+  sig (ptr) -> void
+b0(v0: ptr):
+  call @t(v0) : (l0) -> void
+  v1 = iconst.i64 7
+  store v1, v0 align 3
+  ret
+fn @loop
+  sig (ptr) -> void
+b0(v0: ptr):
+  jmp b1
+b1:
+  call @h(v0) : (ptr) -> void
+  v1 = load.i64 v0 align 3
+  v2 = iconst.i64 0
+  v3 = icmp.ne v1, v2
+  br v3, b1, b2
+b2:
+  ret
+fn @head
+  sig (ptr) -> void
+b0(v0: ptr):
+  call @h(v0) : (ptr) -> void
+  v1 = load.i64 v0 align 3
+  v2 = iconst.i64 0
+  v3 = icmp.ne v1, v2
+  br v3, b0(v0), b1
+b1:
+  ret
+)";
+    let mut a64 = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), TAIL, &mut a64), "arm64");
+    // MOV X19, X0 (ORR X19, XZR, X0: 0xAA0003F3) in each body, MOV X0, X19 (0xAA1303E0) in the loops alone.
+    assert(
+        elf_text_count(&a64, 0xFFFFFFFF, 0xAA0003F3) == 4 && elf_text_count(&a64, 0xFFFFFFFF, 0xAA1303E0) == 2,
+        "the arrival register passes",
+    );
 }
 
 // arm64: an equality of four 8-byte pairs is one chain of conditional comparisons (`cmp` and three `ccmp`),

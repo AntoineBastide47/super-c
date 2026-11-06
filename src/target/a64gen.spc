@@ -161,6 +161,10 @@ pub(package) struct Gen {
     // record when its code calls nothing (`finish`).
     frameless: bool,
     sret_off: i64, // the slot of x8 for a vector result in memory, -1 when none
+    // The parameter each of x0..x8 arrived with when the entry moved it into its home (`entry_reg`), NONE
+    // for none, valid while the code ends at `arr_at` (no instruction ran since).
+    arrived: Vector<u32>,
+    arr_at: u32,
     canary: i64, // the stack canary's slot above the LIR slots, -1 when none
     // The register save area of a variadic body under the standard convention (x0..x7 at its start,
     // then q0..q7), NONE when none.
@@ -291,6 +295,8 @@ extend Gen {
             max_align: 16,
             frameless: false,
             sret_off: -1,
+            arrived: Vector::new(),
+            arr_at: NONE,
             canary: -1,
             va_save: NONE,
             late_va: Vector::<(u32, Va)>::new(),
@@ -2408,6 +2414,8 @@ extend Gen {
         self.epi.truncate(0);
         self.tails.truncate(0);
         self.tail_ret = NONE;
+        fill(&mut self.arrived, 9, NONE);
+        self.arr_at = NONE;
         self.rels.truncate(0);
         self.free_slots.truncate(0);
         self.taken.truncate(0);
@@ -2831,6 +2839,12 @@ extend Gen {
                 self.va.index_mut(x as usize).off = off as i32;
             }
         }
+        // Not for an entry block that is a loop's header, which a branch enters with other values.
+        self.arr_at = if self.lv.npred[0] == 0 {
+            self.code.len() as u32
+        } else {
+            NONE
+        };
         return true;
     }
 
@@ -2967,12 +2981,22 @@ extend Gen {
         let f = self.take_home(x, is_v(t) || in_vreg(t), r);
         if f != NOREG {
             self.move_reg(t, f, r);
+            if r <= 8 {
+                self.arrived[r as usize] = x;
+            }
             return;
         }
         self.set_owner(r, x);
         let va = self.va.index_mut(x as usize);
         va.reg = r;
         va.dirty = true;
+    }
+
+    // Whether register `r` still holds value index `x`, the parameter that arrived in it: in the entry block,
+    // no instruction ran since the entry moved it into its home (a later block may start at that position
+    // when the entry block emits no code).
+    const fn arrived_in(self: &Self, x: u32, r: u8) bool {
+        return r <= 8 && self.code.len() as u32 == self.arr_at && self.lv.def_blk[self.cur as usize] == 0 && self.arrived[r as usize] == x;
     }
 
     // Compile the block at layout position `q`.
@@ -6738,14 +6762,15 @@ extend Gen {
     fn spill_for_call(self: &mut Self) {
         let none = Vector::<u32>::new();
         self.clob = ~0u64;
-        self.spill_around_call(&none);
+        self.spill_around_call(&none, true);
         self.forget_caller_saved();
     }
 
-    // Before a call: every value in a caller-saved register that lives past the call or that the call
-    // reads is in its home, and only the values `keep` (the register arguments' sources) keep their
-    // registers, until `forget_caller_saved`.
-    fn spill_around_call(self: &mut Self, keep: &Vector<u32>) {
+    // Before a call: every value in a caller-saved register that the call reads, or that lives past a call
+    // that comes `back` (not a sibling call, after which no code of the body runs), is in its home, and
+    // only the values `keep` (the register arguments' sources) keep their registers, until
+    // `forget_caller_saved`.
+    fn spill_around_call(self: &mut Self, keep: &Vector<u32>, back: bool) {
         let mut m = self.held & ~(XFIX | vfix()) & self.clob;
         // Each step clears one register's bit: at most 64 steps.
         while m != 0 {
@@ -6759,7 +6784,7 @@ extend Gen {
             for k in 0..keep.len() {
                 kept = kept || keep[k] == x;
             }
-            let mut used = self.live_on(x);
+            let mut used = back && self.live_on(x);
             for k in 0..self.uses.len() {
                 used = used || !kept && self.vx(self.uses[k]) == x;
             }
@@ -7045,7 +7070,9 @@ extend Gen {
                 keep.push(x);
             }
         }
-        self.spill_around_call(&keep);
+        // A sibling call's return is not emitted: only its arguments read the values after it.
+        let back = !self.sib_shape(i, t);
+        self.spill_around_call(&keep, back);
         let mut rvals = Vector::<u64>::new();
         // The registers the template reads in place of its argument registers hold no temporary.
         for j in 0..to.len() {
@@ -7116,6 +7143,12 @@ extend Gen {
                 loc,
                 vty,
             )) && src.kind != LC_VAL;
+            if refmv[k as usize] && self.arrived_in(x, self.lay.parts[loc.p0 as usize].reg) {
+                // The address is still in the register it arrived in.
+                moved.push(true);
+                clean.push(true);
+                continue;
+            }
             if refmv[k as usize] {
                 self.mv.push(
                     Mv {
@@ -7212,6 +7245,9 @@ extend Gen {
                 continue;
             }
             let pa = self.lay.parts[loc.p0 as usize];
+            if !pa.v && self.arrived_in(x, pa.reg) {
+                continue;
+            }
             self.mv.push(
                 Mv {
                     src: src,
@@ -7590,7 +7626,7 @@ extend Gen {
             }
         }
         self.clob = ~0u64;
-        self.spill_around_call(&keep);
+        self.spill_around_call(&keep, true);
         self.mv.truncate(0);
         let mut vals = Vector::<bool>::with_capacity(vs.len());
         for k in 0..vs.len() {

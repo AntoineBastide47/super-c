@@ -8410,14 +8410,15 @@ extend Gen {
     fn spill_for_call(self: &mut Self) {
         let none = Vector::<u32>::new();
         self.clob = ~0u64;
-        self.spill_around_call(&none);
+        self.spill_around_call(&none, true);
         self.forget_caller_saved();
     }
 
-    // Before a call: every value in a caller-saved register that lives past the call or that the call
-    // reads is in its home, and only the values `keep` (the register arguments' sources) keep their
-    // registers, until `forget_caller_saved`.
-    fn spill_around_call(self: &mut Self, keep: &Vector<u32>) {
+    // Before a call: every value in a caller-saved register that the call reads, or that lives past a call
+    // that comes `back` (not a sibling call, after which no code of the body runs), is in its home, and
+    // only the values `keep` (the register arguments' sources) keep their registers, until
+    // `forget_caller_saved`.
+    fn spill_around_call(self: &mut Self, keep: &Vector<u32>, back: bool) {
         let mut m = self.held & ~self.xfix & self.clob;
         // Each step clears one register's bit: at most 48 steps.
         while m != 0 {
@@ -8431,7 +8432,7 @@ extend Gen {
             for k in 0..keep.len() {
                 kept = kept || keep[k] == xv;
             }
-            if self.live_on(xv) || self.read_now(xv) && !kept {
+            if back && self.live_on(xv) || self.read_now(xv) && !kept {
                 self.spill(xv);
             }
             if !kept {
@@ -8881,7 +8882,9 @@ extend Gen {
                 }
             }
         }
-        self.spill_around_call(&keep);
+        // A sibling call's return is not emitted: only its arguments read the values after it.
+        let back = !((t.op == O_CALL || !self.win) && self.sib_shape(i, t));
+        self.spill_around_call(&keep, back);
         let mut rvals = Vector::<u64>::new();
         // The registers the template reads in place of its argument registers hold no temporary.
         for j in 0..to.len() {
@@ -9384,7 +9387,7 @@ extend Gen {
             rs.push(self.arg(k as u32));
         }
         self.clob = ~0u64;
-        self.spill_around_call(&keep);
+        self.spill_around_call(&keep, true);
         self.args_to(vs, rs[0..rs.len()]);
         // A narrow integer (a 32-bit size, a fill byte) extends to the register's width, as C reads it.
         for k in 0..vs.len() {

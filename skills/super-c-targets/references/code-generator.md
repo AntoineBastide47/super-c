@@ -100,7 +100,10 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   (`Live::mem_params`): Super-C's convention on Windows passes 16 bytes in two registers.
 - Sibling calls: a call right before the return whose result is the body's (or nothing), with every
   argument in registers; also a call that writes the body's own aggregate result (its result pointer
-  passed on, both results in memory), which returns as the body would. arm64 joins up to 8 integer
+  passed on, both results in memory), which returns as the body would. Before a sibling call only the
+  values the call reads go to their homes (`spill_around_call`, `back`): no code of the body runs after
+  it. arm64: a parameter a call of the entry block takes before any instruction ran is read in the
+  register it arrived in (`arrived_in`), not in its home; not where a branch enters the entry block. arm64 joins up to 8 integer
   comparisons into one conditional-comparison chain (`lv::FOLD_CCMP`); each leaf's extension frees after
   its `ccmp`.
 - A saturating float-to-integer conversion reads the float's sign with `movq`/`movd`, which EVEX
