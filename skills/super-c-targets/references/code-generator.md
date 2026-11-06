@@ -93,7 +93,12 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   memory operand (`lv::FOLD_VCMEM`: `pxor x, [rip + k]`). arm64 builds one of a repeating byte or
   element (MOVI, DUP) and loads any other of 16 bytes (ADRP, LDR q of `const_sym`'s data). A comparison
   with 0 of the `or` of a vector's lanes tests the register (`lv::FOLD_ANY`: `pmovmskb` of a lane mask;
-  with SSE4.1 `ptest` of any integer vector, `lv::FOLD_ANY_BITS`).
+  with SSE4.1 `ptest` of any integer vector, `lv::FOLD_ANY_BITS`). With SSE4.1 a product of 32-bit lanes
+  reads such a constant or a folded load as its memory operand (`lv::FOLD_VMUL`, `pmulld x, [m]`).
+- Load folds (`lv::FOLD_LDOP`): a load of a call's aggregate result right after the call stays a load
+  only when registers may return that result (`Live::ret_regs`, the largest such result: 16 bytes on
+  x86-64), whose registers the generator then takes; a slot copied to the stack as a by-value argument is
+  read at its offset from the stack pointer.
 - Inline copies: arm64 moves 32 bytes at a time by LDP and STP of two q registers where the pair forms
   reach both offsets (`qpair_fits`; an overlapping copy loads every chunk first). Load folds of an
   aggregate parameter (`lv::FOLD_LDOP`) read only one the body's own convention passes in memory

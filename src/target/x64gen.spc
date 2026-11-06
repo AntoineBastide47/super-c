@@ -3684,6 +3684,8 @@ extend Gen {
         // The parameters' places, which the folds read (`lv::Live::mem_params`).
         classify(self.win, self.sc_self, b, b.sig, self.ptr, self.vregs, &mut self.self_lay);
         self.lv.mem_params = 0;
+        // No convention of x86-64 returns an aggregate of more than 16 bytes in registers.
+        self.lv.ret_regs = 16;
         if !self.self_lay.unknown {
             for k in 0..self.self_lay.locs.len().min(64) {
                 let kd = self.self_lay.locs[k].kind;
@@ -3697,7 +3699,7 @@ extend Gen {
         } else {
             0
         } | if unsafe (*self.pkg).sse41 {
-            lv::FOLD_ANY_BITS
+            lv::FOLD_ANY_BITS | lv::FOLD_VMUL
         } else {
             0
         };
@@ -8947,8 +8949,13 @@ extend Gen {
             let pt = b.pool[(sig + 3 + k) as usize];
             let vty = self.vt(v);
             if (pt & AGG) != 0 {
-                // From the address's register when one holds it.
+                // From the address's register when one holds it, a slot or frame address as its offset.
                 let rv = self.va[self.vx(v) as usize].reg;
+                let (fr, fb, at) = self.frame_addr(v);
+                if fr {
+                    self.copy_mem(x::RSP, loc.off, fb, at, loc.size);
+                    continue;
+                }
                 if rv == NOREG {
                     self.materialize(v, S1);
                 }
@@ -13300,6 +13307,35 @@ extend Gen {
     // both hold operands): `ta` from the start, `tb` once the operands are read but `y` (which it may
     // overwrite in its scratch register, its last read).
     fn mul_lanes32(self: &mut Self, i: u32, t: Inst) {
+        if self.vc_folded(t.b) || self.ld_folded(t.b) {
+            // The second operand in memory (`lv::FOLD_VMUL`, with SSE4.1): the constant data or the load's.
+            let rx = self.vec_use(t.a, self.vs0);
+            let mut rs: u32 = NONE;
+            let mut radd: i64 = 0;
+            let m = if self.vc_folded(t.b) {
+                rs = self.vc_sym(t.b);
+                x::rip()
+            } else {
+                let lt = self.b().insts[t.b as usize];
+                self.mem_at(lt.a, lt.c as i32, &mut rs, &mut radd)
+            };
+            let mut rd = self.def_shared(i, t.a);
+            if rd == NOREG {
+                rd = self.def_over(i, t.a, rx);
+            }
+            if self.avx {
+                self.c.vex_rm(0x66, 2, 0x40, false, false, rd - V0, rx - V0, m);
+            } else {
+                self.c.vmov(rd - V0, rx - V0);
+                self.c.rm(0x66, 0x0F3840, false, rd - V0, m, false);
+            }
+            if self.vc_folded(t.b) {
+                self.reloc_rip(x::R_PC32, rs, 0);
+            } else {
+                self.mem_rel(rs, radd);
+            }
+            return;
+        }
         let rx = self.vec_use(t.a, self.vs0) - V0;
         let ry = self.vec_use(t.b, self.vs1) - V0;
         if self.avx {

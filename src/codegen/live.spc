@@ -161,6 +161,9 @@ pub(package) const FOLD_ANY_BITS: u64 = 140737488355328;
 /// second operand of a lane operation of `FOLD_VLDOP`'s, folds into each: they read it from the constant
 /// data, which aligns it (x86-64's `pxor x, [rip + k]`).
 pub(package) const FOLD_VCMEM: u64 = 281474976710656;
+/// `FOLD_VMUL`: with `FOLD_VLDOP` and `FOLD_VCMEM`, a product of 32-bit lanes is such a lane operation
+/// (x86-64's SSE4.1 `pmulld x, [m]`).
+pub(package) const FOLD_VMUL: u64 = 562949953421312;
 /// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
 /// flags keep, a folded sum or extension, the sum with the carry.
 pub(package) const CARRY_NONE: u8 = 0;
@@ -293,6 +296,9 @@ pub(package) struct Live {
     /// or on the stack, as the body's calling convention passes it): its loads read memory, which an operation
     /// may read in their place (`FOLD_LDOP`). None by default.
     pub(package) mem_params: u64,
+    /// The size of the largest aggregate result a call of the target returns in registers, which the
+    /// generator may take from them (`result_load`); a larger one comes back in memory. All by default.
+    pub(package) ret_regs: u32,
     /// Whether the calling convention has the caller extend 8- and 16-bit arguments to 32 bits by their
     /// signedness (Apple arm64), so their registers' low 32 bits are their values extended.
     pub(package) ext_args: bool,
@@ -365,6 +371,7 @@ extend Live {
             relayed: Vector::<u64>::new(),
             fold_ops: 0,
             mem_params: 0,
+            ret_regs: NONE,
             ext_args: false,
             in_place: false,
             cnd: Vector::<u32>::new(),
@@ -1536,7 +1543,7 @@ extend Live {
                 let bk = b.blocks[k];
                 for i in bk.start..bk.start + bk.len {
                     let t = b.insts[i as usize];
-                    if !is_vec(t.ty) || type_bytes(t.ty, 8) != 16 || !Self::vop_mem(t, t.ty) || !is_inst(t.b) || t.a == t.b || t.b < bk.start || self.pfold[i as usize] || is_inst(
+                    if !is_vec(t.ty) || type_bytes(t.ty, 8) != 16 || !self.vop_mem(t, t.ty) || !is_inst(t.b) || t.a == t.b || t.b < bk.start || self.pfold[i as usize] || is_inst(
                         t.a,
                     ) && self.pfold[t.a as usize] {
                         continue;
@@ -1616,7 +1623,7 @@ extend Live {
         if t.op != O_LOAD || (t.aux & MEM_VOLATILE) != 0 || !(is_int(t.ty) || is_float(t.ty)) || t.ty == T_I128 || self.count[i as usize] > 2 || self.pfold[i as usize] || self.reg_param(
             b,
             t.a,
-        ) || result_load(b, i) {
+        ) || result_load(b, i, self.ret_regs) {
             return false;
         }
         if self.count[i as usize] == 2 {
@@ -1722,13 +1729,18 @@ extend Live {
         return lo && hi;
     }
 
-    // Whether instruction `x` is a lane operation of `FOLD_VLDOP` on 16- or 32-byte vectors of type `ty`.
-    fn vop_mem(x: Inst, ty: u8) bool {
+    // Whether instruction `x` is a lane operation of `FOLD_VLDOP` on 16- or 32-byte vectors of type `ty`
+    // (a product of 32-bit lanes under `FOLD_VMUL`).
+    fn vop_mem(self: &Self, x: Inst, ty: u8) bool {
         let fl = x.op >= O_FADD && x.op <= O_FDIV && is_float(lane_type(ty));
         let int = (x.op == O_ADD || x.op == O_SUB || x.op == O_AND || x.op == O_OR || x.op == O_XOR) && !is_float(
             lane_type(ty),
         );
-        return (fl || int) && x.ty == ty;
+        let mul = x.op == O_MUL && (self.fold_ops & FOLD_VMUL) != 0 && is_int(lane_type(ty)) && type_bytes(
+            lane_type(ty),
+            8,
+        ) == 4;
+        return (fl || int || mul) && x.ty == ty;
     }
 
     /// `FOLD_VLDOP`: whether vector load `i` of `b` (its block ending before `end`) folds into its one use,
@@ -1739,7 +1751,7 @@ extend Live {
         if (t.aux & MEM_VOLATILE) != 0 || n != 16 && n != 32 || self.count[i as usize] != 1 || self.pfold[i as usize] || self.reg_param(
             b,
             t.a,
-        ) || result_load(b, i) {
+        ) || result_load(b, i, self.ret_regs) {
             return false;
         }
         let mut u = i + 1;
@@ -1747,7 +1759,7 @@ extend Live {
         while u < end && u <= i + LDOP_REACH {
             let x = b.insts[u as usize];
             if x.a == i || x.b == i || x.c == i {
-                return Self::vop_mem(x, t.ty) && x.b == i && x.a != i && !self.pfold[u as usize] && !(is_inst(x.a) && self.pfold[x.a as usize]);
+                return self.vop_mem(x, t.ty) && x.b == i && x.a != i && !self.pfold[u as usize] && !(is_inst(x.a) && self.pfold[x.a as usize]);
             }
             if writes_mem(x) {
                 return false;
@@ -3364,6 +3376,7 @@ extend Live {
             if l.op != O_LOAD || l.ty != t.ty || (l.aux & MEM_VOLATILE) != 0 || self.reg_param(b, l.a) || result_load(
                 b,
                 o,
+                self.ret_regs,
             ) {
                 continue;
             }
@@ -4218,16 +4231,17 @@ const fn writes_mem(t: Inst) bool {
 // Whether value `v` of `b` is an entry parameter of aggregate type (a pointer to its bytes), or the
 // pointer to an aggregate result (the parameter after the signature's).
 // Whether load `i` of `b` reads the aggregate result of the call right before it, past loads of that result
-// alone: the generator may take the value from the result's register (`place::result_loads`). At most
-// LDOP_REACH steps back.
-fn result_load(b: &Body, i: u32) bool {
+// alone, of at most `regs` bytes (`Live::ret_regs`): the generator may take the value from the result's
+// register (`place::result_loads`). At most LDOP_REACH steps back.
+fn result_load(b: &Body, i: u32, regs: u32) bool {
     let a = b.insts[i as usize].a;
     let mut k = i;
     while k > 0 && k + LDOP_REACH > i {
         k -= 1;
         let t = b.insts[k as usize];
         if t.op == O_CALL || t.op == O_CALLIND {
-            return (b.pool[t.b as usize + 2] & AGG) != 0 && b.pool[(t.c + b.pool[t.b as usize]) as usize] == a;
+            let rt = b.pool[t.b as usize + 2];
+            return (rt & AGG) != 0 && b.pool[(rt & ~AGG) as usize] <= regs && b.pool[(t.c + b.pool[t.b as usize]) as usize] == a;
         }
         if t.op != O_LOAD || t.a != a {
             return false;

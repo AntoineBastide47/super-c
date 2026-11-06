@@ -6370,7 +6370,9 @@ fn byte_idioms_vectorize_at_their_lanes() {
 
 // A counted loop of 64 iterations, within the peeling budget, that fills two vectors or more vectorizes
 // first: its product of an invariant and the counter reads the counter's lanes (the counter in every lane
-// plus the lane's iteration). The stores then are vector stores, not 64 scalar ones.
+// plus the lane's iteration). The stores then are vector stores, not 64 scalar ones. The vector iterations
+// divide the count, so the vector loop ends with them (no overlapping last one) and peels: 16 stores, no
+// branch, and each iteration's counter lanes a constant.
 @test
 fn a_loop_that_fills_vectors_vectorizes_before_it_peels() {
     let (b, a) = optimized_for(
@@ -6402,6 +6404,9 @@ b3:
         0,
     );
     let f = text_of(&a, "fill");
-    assert(f.contains("mul.v4i32") && count(&f, "store") < 64, f.as_str());
+    assert(
+        f.contains("mul.v4i32") && count(&f, "store") == 16 && !f.contains("br ") && !f.contains("add.v4i32"),
+        f.as_str(),
+    );
     let _ = b;
 }

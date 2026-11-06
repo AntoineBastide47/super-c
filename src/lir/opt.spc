@@ -60,8 +60,9 @@ const LOG_UB: u8 = 4;
 const LOG_EQ: u8 = 5;
 // A lower bound's key in the bounds' table (`ub`, LOG_UB): the value's with this bit.
 const LB_KEY: u64 = 1u64 << 40;
-// `Opt::overwrite` keeps at most PEND_MAX stores.
+// `Opt::overwrite` keeps at most PEND_MAX stores, and a fill of at most FILL_MAX bytes.
 const PEND_MAX: u32 = 8;
+const FILL_MAX: u32 = 512;
 // `Opt::ubound` follows at most UB_DEPTH instructions.
 const UB_DEPTH: u32 = 4;
 // An if-conversion makes at most MAX_SELECTS selects; a minimum's operands are followed MIN_DEPTH deep.
@@ -305,6 +306,8 @@ pub(package) struct Opt {
     rstack: Vector<u32>,
     stack: Vector<u64>,
     pend: Vector<u32>, // the walk's block's stores no instruction since may read (`overwrite`)
+    fillp: u32, // the fill of `pend` whose bytes `fillc` marks the later stores of (NONE: none)
+    fillc: Vector<u64>,
     work: Vector<u32>,
     // The rebuild.
     bmap: Vector<u32>, // per block, its new number (NONE: unreached)
@@ -527,6 +530,8 @@ extend Opt {
             tags: Vector::<u16>::new(),
             stack: Vector::<u64>::new(),
             pend: Vector::<u32>::new(),
+            fillp: NONE,
+            fillc: Vector::<u64>::new(),
             work: Vector::<u32>::new(),
             bmap: Vector::<u32>::new(),
             in_at: Vector::<u32>::new(),
@@ -4191,6 +4196,7 @@ extend Opt {
                 changed = self.offset_test(pk, b, k as u32) || changed;
             }
             self.pend.truncate(0);
+            self.fillp = NONE;
             let mut called = false;
             for i in bk.start..bk.start + bk.len {
                 // A write starts a new state for its tag's accesses and the untagged ones; an untagged
@@ -4335,10 +4341,11 @@ extend Opt {
 
     // Instruction `i`, which stays, in the walk's order within its block: a store drops each earlier one
     // of `pend` it writes all bytes of through the same address (no instruction between reads memory or
-    // leaves the block), then joins `pend`; a call keeps those it cannot read: the ones of a class it does
-    // not reach, and, for a call that comes back (no `FX_STALL`), the ones whose bytes it does not read
-    // (`call_apart`); any other instruction but a pure one that cannot trap empties `pend`. Whether it
-    // dropped any.
+    // leaves the block), then joins `pend`; a fill of at most FILL_MAX bytes joins an empty `pend`, and goes
+    // once the stores through its address after it wrote each of its bytes (`fillc`); a call keeps the
+    // stores it cannot read: the ones of a class it does not reach, and, for a call that comes back (no
+    // `FX_STALL`), the ones whose bytes it does not read (`call_apart`); any other instruction but a pure one
+    // that cannot trap empties `pend`. Whether it dropped any.
     fn overwrite(self: &mut Self, pk: &Package, b: &Body, i: u32) bool {
         let t = b.insts[i as usize];
         if pure_op(t.op) && !tls_addr(pk, b, t) && (t.op < O_SDIV || t.op > O_UREM) {
@@ -4355,6 +4362,10 @@ extend Opt {
             while x < self.pend.len() {
                 let j = self.pend[x];
                 let s = b.insts[j as usize];
+                if s.op == O_MEMSET {
+                    let _ = self.pend.swap_remove(x);
+                    continue;
+                }
                 let c = self.acc(j, s.a);
                 let lo = (s.c as i32) as i64;
                 if back && (c >= CL_NOALIAS && c < CL_FROZEN && (class_bit(c) & wb) == 0 || self.call_apart(
@@ -4373,6 +4384,18 @@ extend Opt {
             }
             return false;
         }
+        let n = if t.op == O_MEMSET && (t.aux & MEM_VOLATILE) == 0 {
+            const_of(b, t.c).unwrap_or(0)
+        } else {
+            0
+        };
+        if n != 0 && n <= FILL_MAX as u64 {
+            self.pend.truncate(0);
+            self.pend.push(i);
+            self.fillp = i;
+            fill(&mut self.fillc, (n as usize + 63) / 64, 0);
+            return false;
+        }
         if t.op != O_STORE || (t.aux & MEM_VOLATILE) != 0 {
             self.pend.truncate(0);
             return false;
@@ -4386,6 +4409,30 @@ extend Opt {
         while x < self.pend.len() {
             let j = self.pend[x];
             let s = b.insts[j as usize];
+            if s.op == O_MEMSET {
+                // The fill's bytes this store writes; all of them: it goes.
+                let fl = const_of(b, s.c).unwrap_or(0) as i64;
+                if j != self.fillp || self.repl[j as usize] != VNONE || self.val(s.a) != a {
+                    x += 1;
+                    continue;
+                }
+                // Each step marks one byte, at most FILL_MAX.
+                for q in lo.max(0)..hi.min(fl) {
+                    self.fillc[(q / 64) as usize] |= 1u64 << (q % 64) as u64;
+                }
+                let mut all = true;
+                for q in 0..fl {
+                    all = all && (self.fillc[(q / 64) as usize] >> (q % 64) as u64 & 1) != 0;
+                }
+                if all {
+                    self.repl[j as usize] = DROPPED;
+                    dropped = true;
+                    let _ = self.pend.swap_remove(x);
+                } else {
+                    x += 1;
+                }
+                continue;
+            }
             let slo = (s.c as i32) as i64;
             if self.repl[j as usize] == VNONE && self.val(s.a) == a && lo <= slo && slo + type_bytes(
                 b.type_of(s.b),
@@ -4405,7 +4452,15 @@ extend Opt {
             }
         }
         if self.pend.len() as u32 >= PEND_MAX {
+            // The fill stays: the cap bounds the stores.
+            let mut fp = false;
+            for x in 0..self.pend.len() {
+                fp = fp || self.pend[x] == self.fillp;
+            }
             self.pend.truncate(0);
+            if fp {
+                self.pend.push(self.fillp);
+            }
         }
         self.pend.push(i);
         return dropped;
@@ -8411,6 +8466,110 @@ extend Opt {
         return true;
     }
 
+    // The return slot (C++'s named return value, LLVM's sret promotion): the body's result pointer (the
+    // parameter after the signature's) is read only by one whole copy into it from a slot, right before a
+    // return, and that slot's address only addresses loads, stores, copies and fills of a slot no more
+    // aligned than the result: the slot is the result's memory, and the copy goes. The caller passes memory
+    // no other pointer of the call reaches. Not in a body that may unwind (a `panic`, a call of a body that
+    // may not come back, an indirect call), which would leave that memory half written for the code a panic
+    // unwinds to (`result_into` passes real objects as results). Whether it did.
+    pub(package) fn return_slot(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        if b.sig == NONE || (b.pool[b.sig as usize + 2] & AGG) == 0 {
+            return false;
+        }
+        let np = b.pool[b.sig as usize];
+        let e = b.blocks[0];
+        if e.param_len as u32 <= np {
+            return false;
+        }
+        let rp = VPARAM | e.param_start + np;
+        let l = (b.pool[b.sig as usize + 2] & ~AGG) as usize;
+        let size = b.pool[l];
+        let mut cp = NONE;
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                if t.op == O_PANIC || t.op == O_CALLIND || t.op == O_CALL && (pk.syms[b.syms[t.a as usize] as usize].fx & FX_STALL) != 0 {
+                    return false;
+                }
+                self.fuses.truncate(0);
+                lv::uses_into(b, t, &mut self.fuses);
+                if is_terminator(t.op) {
+                    b.succ_edges(t, &mut self.edges);
+                    for g in 0..self.edges.len() {
+                        for q in 0..b.edge_nargs(self.edges[g]) {
+                            self.fuses.push(b.edge_arg(self.edges[g], q));
+                        }
+                    }
+                }
+                for u in 0..self.fuses.len() {
+                    if self.fuses[u] != rp {
+                        continue;
+                    }
+                    let last = i + 2 == bk.start + bk.len && b.insts[i as usize + 1].op == O_RET;
+                    if cp != NONE || t.op != O_MEMCPY || t.a != rp || t.b == rp || (t.aux & MEM_VOLATILE) != 0 || const_of(
+                        b,
+                        t.c,
+                    ) != Option::<u64>::Some(size) || !last || !is_op(b, t.b, O_SLOTADDR) {
+                        return false;
+                    }
+                    cp = i;
+                }
+            }
+        }
+        if cp == NONE {
+            return false;
+        }
+        let s = b.insts[b.insts[cp as usize].b as usize].a;
+        if b.slots[s as usize].size != size || b.slots[s as usize].align_log2 as u32 > b.pool[l + 1] {
+            return false;
+        }
+        // Each use of the slot's address: an access's address, a copy's or fill's memory.
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                self.fuses.truncate(0);
+                lv::uses_into(b, t, &mut self.fuses);
+                if is_terminator(t.op) {
+                    b.succ_edges(t, &mut self.edges);
+                    for g in 0..self.edges.len() {
+                        for q in 0..b.edge_nargs(self.edges[g]) {
+                            self.fuses.push(b.edge_arg(self.edges[g], q));
+                        }
+                    }
+                }
+                for u in 0..self.fuses.len() {
+                    let v = self.fuses[u];
+                    if slot_of(b, v) != s {
+                        continue;
+                    }
+                    let addr = (t.op == O_LOAD || t.op == O_STORE || t.op == O_PTRADD || t.op == O_MEMSET) && v == t.a && t.b != v && (t.op != O_STORE || t.b != v) || t.op == O_MEMCPY && v == t.a != (v == t.b);
+                    if !addr || is_terminator(t.op) {
+                        return false;
+                    }
+                }
+            }
+        }
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if (t.op == O_LOAD || t.op == O_STORE || t.op == O_PTRADD || t.op == O_MEMSET || t.op == O_MEMCPY) && is_op(
+                b,
+                t.a,
+                O_SLOTADDR,
+            ) && b.insts[t.a as usize].a == s {
+                b.insts.index_mut(i).a = rp;
+            }
+            if t.op == O_MEMCPY && is_op(b, t.b, O_SLOTADDR) && b.insts[t.b as usize].a == s {
+                b.insts.index_mut(i).b = rp;
+            }
+        }
+        b.insts[cp as usize] = iconst(T_I8, 0);
+        self.kept = K_NONE;
+        return true;
+    }
+
     // The allocations (`ALLOC_FRESH` by the name, a `realloc` of null alone, at most FRESH_MAX) whose pointer
     // only stores write through, equalities with null test and one free (`ALLOC_FREE`) takes, which every
     // path from the allocation to a return or back to it passes once: they go with their stores and free, and
@@ -11661,6 +11820,9 @@ extend Run {
             sc.o.forget();
             let _ = sc.o.run(p, b, true);
         }
+        if sc.o.return_slot(p, b) {
+            let _ = sc.o.run(p, b, true);
+        }
         if sc.o.tail_self(p, b, j) {
             let _ = sc.o.run(p, b, true);
         }
@@ -13854,7 +14016,8 @@ fn vec_minmax(b: &mut Body, i: u32) bool {
 }
 
 // Vector instruction `i` of `b` (integer lanes), in place: a sum with a negation a difference, a
-// difference with one a sum; an `xor` of two constants (`vec_words`) a wide constant.
+// difference with one a sum; a sum, difference, product, `and`, `or` or `xor` of two constants
+// (`vec_words`) a wide constant, lane by lane, wrapping.
 fn simplify_vec(b: &mut Body, i: u32) {
     let t = b.insts[i as usize];
     let lt = lane_type(t.ty);
@@ -13906,10 +14069,37 @@ fn simplify_vec(b: &mut Body, i: u32) {
             }
         }
     }
-    if t.op == O_XOR && nb % 8 == 0 && vec_words(b, t.a, t.ty, &mut x) && vec_words(b, t.b, t.ty, &mut y) {
+    let lanewise = t.op == O_ADD || t.op == O_SUB || t.op == O_MUL || t.op == O_AND || t.op == O_OR || t.op == O_XOR;
+    if lanewise && nb % 8 == 0 && vec_words(b, t.a, t.ty, &mut x) && vec_words(b, t.b, t.ty, &mut y) {
         let at = b.words.len() as u32;
+        let bits = 8 * type_bytes(lt, 8);
+        let m = if bits == 64 {
+            ~0u64
+        } else {
+            (1u64 << bits as u64) - 1
+        };
         for q in 0..nb / 8 {
-            b.words.push(x[q as usize] ^ y[q as usize]);
+            let mut w: u64 = 0;
+            // Each step computes one lane of the word.
+            for l in 0..64 / bits {
+                let sh = (l * bits) as u64;
+                let (p, r) = (x[q as usize] >> sh & m, y[q as usize] >> sh & m);
+                let v = if t.op == O_ADD {
+                    p.wrapping_add(r)
+                } else if t.op == O_SUB {
+                    p.wrapping_sub(r)
+                } else if t.op == O_MUL {
+                    p.wrapping_mul(r)
+                } else if t.op == O_AND {
+                    p & r
+                } else if t.op == O_OR {
+                    p | r
+                } else {
+                    p ^ r
+                };
+                w |= (v & m) << sh;
+            }
+            b.words.push(w);
         }
         b.insts[i as usize] = Inst { op: O_WCONST, ty: t.ty, aux: 0, a: at, b: nb / 8, c: VNONE };
     }

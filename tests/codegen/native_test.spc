@@ -16452,6 +16452,82 @@ int main(void) {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// x86-64 with SSE4.1: a product of 32-bit lanes by a constant reads it from the constant data (`pmulld x,
+// [rip + k]`); a load of a call's 64-byte result, which comes back in memory, is the memory operand of the
+// `add` that reads it; a slot copied to the stack as a by-value argument is read at its offset from rsp
+// (no `lea r11`).
+@test
+fn x86_64_products_results_and_arguments_read_memory() {
+    let lir = M"(lir ptr 8
+sym @pm fn global
+sym @mk fn global
+sym @use fn global
+sym @chain fn global
+fn @pm
+  sig (ptr, i32) -> void
+b0(v0: ptr, v1: i32):
+  v2 = splat.v4i32 v1
+  v3 = wconst.v4i32 0x200000001, 0x400000003
+  v4 = mul.v4i32 v2, v3
+  store v4, v0 align 2
+  ret
+fn @mk
+  layout l0 size 64 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64, 40 i64, 48 i64, 56 i64]
+  sig (i64) -> l0
+b0(v0: i64, v1: ptr):
+  store v0, v1 align 3
+  store v0, v1+56 align 3
+  ret
+fn @use
+  layout l0 size 64 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64, 40 i64, 48 i64, 56 i64]
+  sig (l0) -> l0
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.i64 64
+  memcpy v1, v0, v2
+  ret
+fn @chain
+  layout l0 size 64 align 3 [0 i64, 8 i64, 16 i64, 24 i64, 32 i64, 40 i64, 48 i64, 56 i64]
+  sig (i64) -> i64
+  slot s0 size 64 align 3
+  slot s1 size 64 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  call @mk(v0, v1) : (i64) -> l0
+  call @use(v1, v2) : (l0) -> l0
+  v3 = load.i64 v2 align 3
+  v4 = load.i64 v2+56 align 3
+  v5 = add.i64 v3, v4
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), SSE41, &mut obj),
+        "the object",
+    );
+    let (at, n) = elf_text(&obj);
+    let t = obj[at..at + n];
+    let mut pmulld_rip = false;
+    let mut add_mem = false;
+    let mut lea_r11 = false;
+    for k in 0..t.len() - 4 {
+        // 66 [REX] 0F 38 40 with ModRM mod 00, r/m 101: `pmulld` of a RIP-relative operand.
+        let o = if (t[k + 1] & 0xF0) == 0x40 {
+            k + 2
+        } else {
+            k + 1
+        };
+        if o + 3 < t.len() && t[k] == 0x66 && t[o] == 0x0F && t[o + 1] == 0x38 && t[o + 2] == 0x40 {
+            pmulld_rip = pmulld_rip || (t[o + 3] & 0xC7) == 0x05;
+        }
+        // REX.W 03 /r with an rsp-based operand (ModRM r/m 100, SIB 24): `add r64, [rsp + d]`.
+        add_mem = add_mem || (t[k] & 0xF8) == 0x48 && t[k + 1] == 0x03 && (t[k + 2] & 0xC7) != 0x04 && (t[k + 2] & 0x07) == 0x04 && (t[k + 2] & 0xC0) != 0xC0 && t[k + 3] == 0x24;
+        // 4C 8D /r with reg r11 (ModRM reg 011): `lea r11, [m]`.
+        lea_r11 = lea_r11 || t[k] == 0x4C && t[k + 1] == 0x8D && (t[k + 2] & 0x38) == 0x18;
+    }
+    assert(pmulld_rip && add_mem && !lea_r11, "pmulld of a constant, add of the result's memory, no lea r11");
+}
+
 // x86-64 with SSE4.1: the `or` of 16-byte differences tested against 0 is `ptest` of the register (no copy
 // of it to memory), and a vector constant that one lane operation reads is its memory operand (`pxor x,
 // [rip + k]`, the constant aligned in read-only data).

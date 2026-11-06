@@ -4279,6 +4279,263 @@ b0:
     same_result(&b, &a, "drive", none, 24790);
 }
 
+// Lane operations of two constant vectors (a splat of a constant, a wide constant) are a wide constant,
+// lane by lane and wrapping: a product, a difference, a sum, an `and`, an `or`.
+@test
+fn lane_operations_of_constants_fold() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @lanes fn global noinline
+fn @lanes
+  sig () -> i64
+  slot s0 size 16 align 4
+b0:
+  v0 = iconst.i32 -3
+  v1 = splat.v4i32 v0
+  v2 = wconst.v4i32 0x200000001, 0x7fffffff80000000
+  v3 = mul.v4i32 v1, v2
+  v4 = sub.v4i32 v3, v2
+  v5 = add.v4i32 v4, v1
+  v6 = and.v4i32 v5, v2
+  v7 = or.v4i32 v6, v4
+  v8 = slotaddr s0
+  store v7, v8 align 4
+  v9 = load.i64 v8 align 3
+  v10 = load.i64 v8+8 align 3
+  v11 = xor.i64 v9, v10
+  ret v11
+)",
+    );
+    let l = text_of(&a, "lanes");
+    assert(!l.contains(".v4i32 v"), l.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "lanes", none, 0xFFFFFFFD7FFFFFFD);
+}
+
+// A body whose result pointer only a whole copy from one slot right before its return reads builds the
+// result in place (`@build`: no copy and no slot, the loop's stores through the result pointer); not when
+// it may unwind (`@may_panic`), nor when the result pointer has another use (`@peek`). Each slot is written
+// in a loop, which the walk does not forward into the copy.
+@test
+fn a_result_built_in_a_slot_is_built_in_place() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @build fn global noinline
+sym @may_panic fn global noinline
+sym @peek fn global noinline
+sym @drive fn global
+fn @build
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64) -> l0
+  slot s0 size 16 align 3
+b0(v0: i64, v1: ptr):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 2
+  v6 = iconst.i64 16
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v5
+  br v8, b2, b3
+b2:
+  v9 = ptradd v2, v7 * 8
+  v10 = add.i64 v0, v7
+  store v10, v9 align 3
+  v11 = add.i64 v7, v4
+  jmp b1(v11)
+b3:
+  memcpy v1, v2, v6
+  ret
+fn @may_panic
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64) -> l0
+  slot s0 size 16 align 3
+b0(v0: i64, v1: ptr):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 2
+  v6 = iconst.i64 16
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v5
+  br v8, b2, b3
+b2:
+  v9 = ptradd v2, v7 * 8
+  v10 = add.i64 v0, v7
+  store v10, v9 align 3
+  v11 = add.i64 v7, v4
+  v12 = icmp.eq v10, v6
+  br v12, b4, b1(v11)
+b3:
+  memcpy v1, v2, v6
+  ret
+b4:
+  panic "sixteen"
+fn @peek
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64) -> l0
+  slot s0 size 16 align 3
+b0(v0: i64, v1: ptr):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 2
+  v6 = iconst.i64 16
+  v7 = load.i64 v1+8 align 3
+  jmp b1(v3)
+b1(v8: i64):
+  v9 = icmp.ult v8, v5
+  br v9, b2, b3
+b2:
+  v10 = ptradd v2, v8 * 8
+  v11 = add.i64 v7, v8
+  store v11, v10 align 3
+  v12 = add.i64 v8, v4
+  jmp b1(v12)
+b3:
+  memcpy v1, v2, v6
+  ret
+fn @drive
+  layout l0 size 16 align 3 [0 i64, 8 i64]
+  sig (i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  call @build(v0, v1) : (i64) -> l0
+  v2 = load.i64 v1 align 3
+  v3 = load.i64 v1+8 align 3
+  call @may_panic(v0, v1) : (i64) -> l0
+  v4 = load.i64 v1+8 align 3
+  call @peek(v0, v1) : (i64) -> l0
+  v5 = load.i64 v1+8 align 3
+  v6 = add.i64 v2, v3
+  v7 = add.i64 v6, v4
+  v8 = add.i64 v7, v5
+  ret v8
+)",
+    );
+    let bt = text_of(&a, "build");
+    assert(!bt.contains("memcpy") && !bt.contains("slotaddr"), bt.as_str());
+    let mp = text_of(&a, "may_panic");
+    assert(mp.contains("memcpy"), mp.as_str());
+    let pk = text_of(&a, "peek");
+    assert(pk.contains("memcpy"), pk.as_str());
+    // build: 5, 6; may_panic: 5, 6; peek: the result's second word (6) plus 0, plus 1.
+    let args: []u64 = [5];
+    same_result(&b, &a, "drive", args, 5 + 6 + 6 + 7);
+}
+
+// A fill whose bytes the stores through its address after it all write, with no read between, goes
+// (`@cover`, more stores than `overwrite` keeps); a byte no store writes (`@gap`) or a load between
+// (`@read`) keeps it.
+@test
+fn a_fill_later_stores_overwrite_goes() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @cover fn global noinline
+sym @gap fn global noinline
+sym @read fn global noinline
+sym @drive fn global
+fn @cover
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i8 0
+  v3 = iconst.i64 80
+  memset v0, v2, v3
+  store v1, v0+8 align 3
+  store v1, v0+0 align 3
+  store v1, v0+16 align 3
+  store v1, v0+24 align 3
+  store v1, v0+32 align 3
+  store v1, v0+40 align 3
+  store v1, v0+48 align 3
+  store v1, v0+56 align 3
+  store v1, v0+64 align 3
+  store v1, v0+72 align 3
+  ret
+fn @gap
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i8 0
+  v3 = iconst.i64 24
+  memset v0, v2, v3
+  store v1, v0 align 3
+  v4 = trunc.i32 v1
+  store v4, v0+8 align 3
+  store v1, v0+16 align 3
+  ret
+fn @read
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i8 0
+  v3 = iconst.i64 16
+  memset v0, v2, v3
+  store v1, v0 align 3
+  v4 = load.i64 v0+8 align 3
+  store v1, v0+8 align 3
+  ret v4
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 80 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  call @cover(v1, v0) : (ptr, i64) -> void
+  v2 = load.i64 v1+16 align 3
+  v3 = iconst.i64 -1
+  call @gap(v1, v3) : (ptr, i64) -> void
+  v4 = load.i64 v1+8 align 3
+  v5 = call.i64 @read(v1, v0) : (ptr, i64) -> i64
+  v6 = add.i64 v2, v4
+  v7 = add.i64 v6, v5
+  ret v7
+)",
+    );
+    assert(!text_of(&a, "cover").contains("memset"), text_of(&a, "cover").as_str());
+    assert(text_of(&a, "gap").contains("memset"), text_of(&a, "gap").as_str());
+    assert(text_of(&a, "read").contains("memset"), text_of(&a, "read").as_str());
+    let args: []u64 = [5];
+    same_result(&b, &a, "drive", args, 5 + 0xFFFFFFFF);
+}
+
+// A body's stores past the ones `overwrite` keeps go as they do alone after a body whose last fill has
+// the index of one of them (`@fill`): the fill of an earlier body is not one of the later's.
+@test
+fn an_earlier_bodys_fill_keeps_no_store_of_a_later_one() {
+    let keep = M"(fn @keep
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i8 0
+  v3 = iconst.i64 16
+  store v1, v0 align 3
+  store v3, v0+8 align 3
+  store v3, v0+16 align 3
+  store v3, v0+24 align 3
+  store v3, v0+32 align 3
+  store v3, v0+40 align 3
+  store v3, v0+48 align 3
+  store v3, v0+56 align 3
+  store v2, v0+64 align 0
+  store v1, v0 align 3
+  ret
+)";
+    let fill = M"(lir ptr 8
+sym @fill fn global noinline
+sym @keep fn global noinline
+fn @fill
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = iconst.i8 0
+  v2 = iconst.i64 16
+  memset v0, v1, v2
+  ret
+)";
+    let (_, a) = optimized(format("{}{}", fill, keep).as_str());
+    let (_, one) = optimized(format("lir ptr 8\nsym @keep fn global noinline\n{}", keep).as_str());
+    assert(text_of(&a, "keep") == text_of(&one, "keep"), text_of(&a, "keep").as_str());
+}
+
 // A store into an exclusive reference's referent that a later store overwrites goes across a call that
 // cannot reach that memory (`@over`: one store stays); not when the call takes the reference (`@lent`,
 // whose callee reads it), nor when the reference is a shared one, which the callee may reach (`@shared`),

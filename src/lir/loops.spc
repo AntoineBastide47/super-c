@@ -3561,6 +3561,21 @@ extend LoopOpt {
         let qt = b.params[(self.viv & ~VPARAM) as usize];
         let step = self.vlanes * nv;
         let nred = self.vred.len() as u32;
+        // A constant count of iterations, from a constant start, that the vector iterations divide ends with
+        // them: no overlapping last one, and the loop that runs the rest runs no iteration.
+        if self.vtail {
+            let init = b.edge_arg(term(b, p).a, (self.viv & ~VPARAM) - hb.param_start);
+            let top = 1u64 << (type_bits(qt, 8) - 1) as u64;
+            if is_const(b, init) && is_const(b, self.vn) {
+                let (i, n) = (
+                    raw_const(b, init) & mask_of(type_bits(qt, 8)),
+                    raw_const(b, self.vn) & mask_of(type_bits(qt, 8))
+                );
+                if i <= n && n < top && (n - i) % step as u64 == 0 {
+                    self.vtail = false;
+                }
+            }
+        }
         // The block numbers: guard, vector preheader, vector loop, (with an early exit, the vector loop's
         // latch,) vector exit, the loop's new preheader.
         let g = b.blocks.len() as u32;
