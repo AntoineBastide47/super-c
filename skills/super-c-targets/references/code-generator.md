@@ -11,7 +11,8 @@ set first: it states the value, register and frame model.
 ## Per body
 
 1. Analysis: set `Live.fold_ops` to the `FOLD_*` patterns the backend fuses into their users, then
-   `Live::run`. It gives the block layout (reverse postorder, each loop contiguous, rare blocks last:
+   `Live::run` (`Live::analyze`, then `Live::relayout`; arm64 runs the two apart, with `shrinkable`
+   between them, so a shrink-wrapped body is laid out once). It gives the block layout (reverse postorder, each loop contiguous, rare blocks last:
    `Live::rare`, a block the entry reaches only through a `BLOCK_RARE` one; none under `Live::in_place`,
    which wasm sets because its structured code emits each block where reverse postorder puts it), the loop nesting, each
    value's last live position, use count and next-use chain. `end_inst` calls `Live::advance`
@@ -29,13 +30,15 @@ set first: it states the value, register and frame model.
    crosses. `cut` and sorted `splits` describe these prefixes; `home_at` selects the class at
    the current layout position. Shared homes, aggregate entry pointers and shrink-wrapped
    functions do not split. Reserve the suffix stack slots before emission. Every edge that
-   leaves a prefix, including one that skips the cut block, writes the suffix slot (`save_splits`).
+   leaves a prefix for a block that reads the value, including one that skips the cut block, writes
+   the suffix slot (`save_splits`).
 4. Blocks in layout order, each instruction emitted by its op. A value live past its block is in its
    home before the branch; an edge moves the block arguments (`edge_homes`).
 5. `finish`: branch fixups, relocations into the object, call frame rows, line rows. arm64 retries a
    body whose conditional branch is out of range with every one of them over an unconditional branch.
    A retry (`again`: that one, or a shrink-wrap attempt that failed) keeps the relays, the canary, the
-   operation flags and `Live`'s analysis, and redoes only the layout and the ranges (`Live::relayout`).
+   operation flags and `Live`'s analysis, and redoes only the layout and the ranges (`Live::relayout`;
+   arm64: after `shrinkable`).
 
 A body the backend cannot compile fails with a reason (`refuse`): the build reports the function and
 the reason. Never emit code for an unsupported case.

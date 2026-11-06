@@ -264,6 +264,19 @@ pub(package) fn back_share(b: &Body, lv: &lv::Live, va: &Vector<Va>, x: u32) u32
     return px;
 }
 
+/// Whether `b` has a call, copy or fill right before a return: the only place a sibling call may be (the
+/// generators' `sib_shape`, `mem_tail_shape`), which `tail_ok`'s frame test (`lir::verify::frame_escapes`)
+/// serves.
+pub(package) fn tail_candidate(b: &Body) bool {
+    for i in 1..b.insts.len() {
+        let op = b.insts[i - 1].op;
+        if (op == O_CALL || op == O_CALLIND || op == O_MEMCPY || op == O_MEMSET) && b.insts[i].op == O_RET {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// The block parameter whose stack slot instruction `x` of `b` (homes `va`), spilled without a home, may
 /// take as its own (`lv::Live::slot_partner`): a parameter `x` reads, in a slot of its own, of `x`'s type,
 /// a value in a register. NONE else.

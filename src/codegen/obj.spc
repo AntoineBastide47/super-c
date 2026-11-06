@@ -303,6 +303,12 @@ extend Obj {
     /// Append `ws` to section `s` as little-endian words.
     pub(package) fn put_words(self: &mut Self, s: u8, ws: []u32) {
         let sec = self.secs.index_mut(s as usize);
+        // A little-endian host holds the words as their bytes: one copy.
+        if ENDIAN == Endian::Little {
+            sec.bytes.extend_from_slice(unsafe Slice::<u8> { ptr: ws.as_ptr() as *const u8, len: 4 * ws.len() });
+            sec.size = sec.bytes.len() as u64;
+            return;
+        }
         sec.bytes.reserve(4 * ws.len());
         for i in 0..ws.len() {
             let w = ws[i];

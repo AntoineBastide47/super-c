@@ -393,11 +393,12 @@ pub(package) struct Gen {
     // Calls.
     lay: ab::CallLayout,
     // Per symbol of the body at hand, its intrinsic's instructions (`intrin::of_symbols`); per signature
-    // and convention a call of it takes, its layout (`call_layout`: `lays[q]` for `lay_sig[q]`, the
-    // signature | `sc_conv` << 32, the first `nlay`).
+    // and convention a call of it takes, its layout (`call_layout`: `lays[lay_at[2 * s + c]]` for signature
+    // `s` and `sc_conv` `c`, NONE before its first call; the first `nlay`).
     itpl: Vector<str<'static>>,
     lays: Vector<ab::CallLayout>,
-    lay_sig: Vector<u64>,
+    lay_at: Vector<u32>,
+    nlay: usize,
     self_lay: ab::CallLayout,
     uses: Vector<Value>,
     mv: Vector<Mv>,
@@ -576,7 +577,8 @@ extend Gen {
             lay: ab::CallLayout::new(),
             itpl: Vector::<str<'static>>::new(),
             lays: Vector::<ab::CallLayout>::new(),
-            lay_sig: Vector::<u64>::new(),
+            lay_at: Vector::<u32>::new(),
+            nlay: 0,
             self_lay: ab::CallLayout::new(),
             uses: Vector::<Value>::new(),
             mv: Vector::<Mv>::new(),
@@ -3735,7 +3737,8 @@ extend Gen {
             if unsafe (*self.pkg).sse41 {
                 intrin::x64_sse41(unsafe &*self.pkg, b, &mut self.itpl);
             }
-            self.lay_sig.truncate(0);
+            fill(&mut self.lay_at, 2 * b.pool.len(), NONE);
+            self.nlay = 0;
             arg_relays(self);
             self.prot = lver::protected(unsafe (*self.pkg).protect, b);
             self.opf = lv::op_flags(b);
@@ -3859,7 +3862,10 @@ extend Gen {
         // Sibling calls leave the frame first: none with a canary to check, variadic arguments in it, or the
         // address of a slot or of an aggregate parameter that arrives in registers that may outlive it.
         place::held_params(b, &self.self_lay, &mut self.pheld);
-        self.tail_ok = p.tail && self.canary < 0 && !va && !lver::frame_escapes(b, &self.pheld);
+        self.tail_ok = p.tail && self.canary < 0 && !va && place::tail_candidate(b) && !lver::frame_escapes(
+            b,
+            &self.pheld,
+        );
         self.pass_parts();
         self.bucket_ends();
         self.call_tables();
@@ -8543,14 +8549,13 @@ extend Gen {
     fn lay_index(self: &mut Self, t: Inst) usize {
         let b = self.b();
         let sc = t.op == O_CALL && self.sc_conv(b.syms[t.a as usize]);
-        let key = t.b as u64 | sc as u64 << 32;
-        for q in 0..self.lay_sig.len() {
-            if self.lay_sig[q] == key {
-                return q;
-            }
+        let key = (2 * t.b + sc as u32) as usize;
+        if self.lay_at[key] != NONE {
+            return self.lay_at[key] as usize;
         }
-        let q = self.lay_sig.len();
-        self.lay_sig.push(key);
+        let q = self.nlay;
+        self.nlay += 1;
+        self.lay_at[key] = q as u32;
         if q == self.lays.len() {
             self.lays.push(ab::CallLayout::new());
         }

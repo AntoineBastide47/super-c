@@ -204,16 +204,26 @@ pub(package) struct Gen {
     // (NONE: the callee in x16); whether the body may make them; the return they replace.
     tails: Vector<u64>,
     tail_ok: bool,
+    // `call`'s scratch, per argument: an intrinsic's constants (`cimm`, `cknown`), a renamed argument
+    // register (`cren`), a reference that moves with the scalars (`crefmv`), the moved and clean values.
+    cimm: Vector<i64>,
+    cknown: Vector<bool>,
+    cren: Vector<bool>,
+    crefmv: Vector<bool>,
+    cmoved: Vector<bool>,
+    cclean: Vector<bool>,
     tail_ret: u32,
     rels: Vector<CRel>,
     osym: Vector<u32>, // per package symbol, its object symbol in this generator's object (NONE until used)
     // Calls.
     lay: ab::CallLayout,
     // Per symbol of the body at hand, its intrinsic's instructions (`intrin::of_symbols`); per signature
-    // a call of it takes, its layout (`call_layout`: `lays[q]` for `lay_sig[q]`, the first `nlay`).
+    // a call of it takes, its layout (`call_layout`: `lays[lay_at[s]]` for signature `s`, NONE before its
+    // first call; the first `nlay`).
     itpl: Vector<str<'static>>,
     lays: Vector<ab::CallLayout>,
-    lay_sig: Vector<u32>,
+    lay_at: Vector<u32>,
+    nlay: usize,
     self_lay: ab::CallLayout,
     uses: Vector<Value>,
     mv: Vector<Mv>,
@@ -319,13 +329,20 @@ extend Gen {
             epi: Vector::<u32>::new(),
             tails: Vector::<u64>::new(),
             tail_ok: false,
+            cimm: Vector::<i64>::new(),
+            cknown: Vector::<bool>::new(),
+            cren: Vector::<bool>::new(),
+            crefmv: Vector::<bool>::new(),
+            cmoved: Vector::<bool>::new(),
+            cclean: Vector::<bool>::new(),
             tail_ret: NONE,
             rels: Vector::<CRel>::new(),
             osym: Vector::<u32>::new(),
             lay: ab::CallLayout::new(),
             itpl: Vector::<str<'static>>::new(),
             lays: Vector::<ab::CallLayout>::new(),
-            lay_sig: Vector::<u32>::new(),
+            lay_at: Vector::<u32>::new(),
+            nlay: 0,
             self_lay: ab::CallLayout::new(),
             uses: Vector::<Value>::new(),
             mv: Vector::<Mv>::new(),
@@ -2396,20 +2413,21 @@ extend Gen {
         if self.again {
             self.again = false;
             self.lv.after.truncate(0);
-            self.lv.relayout(b);
         } else {
             intrin::of_symbols(unsafe &*self.pkg, b, "aarch64", &mut self.itpl);
-            self.lay_sig.truncate(0);
+            fill(&mut self.lay_at, b.pool.len(), NONE);
+            self.nlay = 0;
             arg_relays(self);
             self.prot = lver::protected(unsafe (*self.pkg).protect, b);
             self.opf = lv::op_flags(b);
             self.lv.after.truncate(0);
-            self.lv.run(b);
+            self.lv.analyze(b);
         }
+        // The layout once shrink-wrapping chose the blocks it puts last (`shrinkable`, `after`).
         self.shrink = !self.no_shrink && self.shrinkable();
         self.shrink_bad = false;
+        self.lv.relayout(b);
         if self.shrink {
-            self.lv.relayout(b);
             // A shrink-wrapped body places no code past its blocks: each late edge moves in place.
             self.lv.late.truncate(0);
         }
@@ -2463,10 +2481,9 @@ extend Gen {
         // Sibling calls leave the frame first: none with a canary to check, variadic arguments in it, or the
         // address of a slot or of an aggregate parameter that arrives in registers that may outlive it.
         place::held_params(b, &self.self_lay, &mut self.pheld);
-        self.tail_ok = unsafe (*self.pkg).tail && self.canary < 0 && (self.opf & lv::OP_VASTART) == 0 && !lver::frame_escapes(
+        self.tail_ok = unsafe (*self.pkg).tail && self.canary < 0 && (self.opf & lv::OP_VASTART) == 0 && place::tail_candidate(
             b,
-            &self.pheld,
-        );
+        ) && !lver::frame_escapes(b, &self.pheld);
         self.pass_parts();
         self.bucket_ends();
         self.call_tables();
@@ -2492,7 +2509,9 @@ extend Gen {
             let kd = self.self_lay.locs[k].kind;
             stacked = stacked || kd == ab::L_STACK || kd == ab::L_REF_STACK;
         }
-        self.sp_args = stacked && self.frameless && !self.no_sp_args && self.canary < 0 && !self.shrink;
+        // A try through sp fails on a frame that already holds slots or spills, or on a call that links
+        // (`calls_before`): none is made then.
+        self.sp_args = stacked && self.frameless && !self.no_sp_args && self.canary < 0 && !self.shrink && self.spill_base + self.spill_top == 0 && !self.links();
         self.frameless = self.frameless && (!stacked || self.sp_args);
         // The entry's code runs in the entry block, warm: its frame use fails the shrink-wrapped try.
         self.pos = self.lv.pos[0];
@@ -2528,6 +2547,22 @@ extend Gen {
         let ok = self.func(s, local);
         self.far = false;
         return ok;
+    }
+
+    // Whether a call that returns, in a laid-out block, branches with a link (`BL`, `BLR`; `call_tables`'
+    // `cret`): an intrinsic's does not, nor a sibling call's.
+    fn links(self: &mut Self) bool {
+        let b = self.b();
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if !self.cret[i] || self.lv.pos[self.lv.def_blk[i] as usize] == NONE {
+                continue;
+            }
+            if t.op == O_CALL && self.intrinsic(t.a).len() == 0 || t.op == O_CALLIND && !self.sib_shape(i as u32, t) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Function `s`, tried with its stack parameters read through sp, needs a frame: once more, through x29.
@@ -2581,7 +2616,7 @@ extend Gen {
             let d = self.lv.def_blk[i];
             // A vector operation's lane trap and a panic call too: their blocks need the frame. A copy that
             // may be a sibling call does not (`mem_tail_shape`).
-            if d == NONE || self.lv.pos[d as usize] == NONE || !Gen::clobbers(b, t) && !(t.op == O_VOP && !lv::reduces(
+            if d == NONE || self.lv.rpo[d as usize] == NONE || !Gen::clobbers(b, t) && !(t.op == O_VOP && !lv::reduces(
                 t,
             )) && t.op != O_PANIC || self.mem_tail_shape(i as u32, t) {
                 continue;
@@ -6860,14 +6895,14 @@ extend Gen {
         // An intrinsic's instructions, its constant arguments in place.
         let mut text = String::new();
         if tpl.len() != 0 {
-            let mut imm = Vector::<i64>::with_capacity(np as usize);
-            let mut known = Vector::<bool>::with_capacity(np as usize);
+            self.cimm.truncate(0);
+            self.cknown.truncate(0);
             for k in 0..np {
                 let mut u: u64 = 0;
-                known.push(self.const_of(b.pool[(t.c + k) as usize], &mut u));
-                imm.push(u as i64);
+                self.cknown.push(self.const_of(b.pool[(t.c + k) as usize], &mut u));
+                self.cimm.push(u as i64);
             }
-            if !intrin::expand(tpl, imm[0..imm.len()], known[0..known.len()], &mut text) {
+            if !intrin::expand(tpl, self.cimm[0..self.cimm.len()], self.cknown[0..self.cknown.len()], &mut text) {
                 return self.refuse("an intrinsic's immediate argument of no constant value");
             }
         }
@@ -6908,7 +6943,7 @@ extend Gen {
         // register's name in place of its argument register (`ren`), which it must not write and no part
         // or other name may be. A written one is renamed only when it is the result's and the argument
         // dies here: the result is then in the argument's register (`rres`).
-        let mut ren = Vector::<bool>::with_capacity(np as usize);
+        self.cren.truncate(0);
         let mut from = Vector::<u32>::new();
         let mut to = Vector::<u32>::new();
         let mut rres = NOREG;
@@ -6937,7 +6972,7 @@ extend Gen {
                     rres = vr;
                 }
             }
-            ren.push(ok);
+            self.cren.push(ok);
             if ok {
                 from.push(pr);
                 to.push(vr - V0);
@@ -7002,7 +7037,7 @@ extend Gen {
         let mut keep = Vector::<u32>::new();
         // An aggregate's address passed by reference, or the result's address, that a register holds and no
         // other operand is moves with the scalars.
-        let mut refmv = Vector::<bool>::with_capacity(nops as usize);
+        self.crefmv.truncate(0);
         for k in 0..nops {
             let v = b.pool[(t.c + k) as usize];
             let x = self.vx(v);
@@ -7015,9 +7050,9 @@ extend Gen {
             } else {
                 self.lay.locs[k as usize].kind == ab::L_REF_REG && (b.pool[(sig + 3 + k) as usize] & AGG) != 0
             };
-            refmv.push(tpl.len() == 0 && by_ref && self.va[x as usize].reg != NOREG && n == 1);
+            self.crefmv.push(tpl.len() == 0 && by_ref && self.va[x as usize].reg != NOREG && n == 1);
         }
-        let resmv = nops > np && refmv[np as usize];
+        let resmv = nops > np && self.crefmv[np as usize];
         if resmv {
             keep.push(self.vx(b.pool[(t.c + np) as usize]));
         }
@@ -7036,7 +7071,7 @@ extend Gen {
             for q in 0..late.len() {
                 after = after || late[q] == x;
             }
-            if tpl.len() == 0 && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && self.parts_moved(v, loc, &late) || refmv[k as usize] || loc.kind == ab::L_STACK && !after && self.va[x as usize].reg != NOREG {
+            if tpl.len() == 0 && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && self.parts_moved(v, loc, &late) || self.crefmv[k as usize] || loc.kind == ab::L_STACK && !after && self.va[x as usize].reg != NOREG {
                 keep.push(x);
                 continue;
             }
@@ -7156,8 +7191,8 @@ extend Gen {
         }
         // The scalars from registers and homes as one parallel move; a narrow one then extends in place.
         self.mv.truncate(0);
-        let mut moved = Vector::<bool>::with_capacity(np as usize);
-        let mut clean = Vector::<bool>::with_capacity(np as usize);
+        self.cmoved.truncate(0);
+        self.cclean.truncate(0);
         for k in 0..np {
             let loc = self.lay.locs[k as usize];
             let v = b.pool[(t.c + k) as usize];
@@ -7169,13 +7204,13 @@ extend Gen {
                 loc,
                 vty,
             )) && src.kind != LC_VAL;
-            if refmv[k as usize] && self.arrived_in(x, self.lay.parts[loc.p0 as usize].reg) {
+            if self.crefmv[k as usize] && self.arrived_in(x, self.lay.parts[loc.p0 as usize].reg) {
                 // The address is still in the register it arrived in.
-                moved.push(true);
-                clean.push(true);
+                self.cmoved.push(true);
+                self.cclean.push(true);
                 continue;
             }
-            if refmv[k as usize] {
+            if self.crefmv[k as usize] {
                 self.mv.push(
                     Mv {
                         src: src,
@@ -7185,8 +7220,8 @@ extend Gen {
                         done: false,
                     },
                 );
-                moved.push(true);
-                clean.push(true);
+                self.cmoved.push(true);
+                self.cclean.push(true);
                 continue;
             }
             if va.home == H_PASSED {
@@ -7214,8 +7249,8 @@ extend Gen {
                         },
                     );
                 }
-                moved.push(true);
-                clean.push(true);
+                self.cmoved.push(true);
+                self.cclean.push(true);
                 continue;
             }
             if loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && relay_parts(
@@ -7225,8 +7260,8 @@ extend Gen {
                 loc,
                 &mut rvals,
             ) {
-                moved.push(true);
-                clean.push(true);
+                self.cmoved.push(true);
+                self.cclean.push(true);
                 continue;
             }
             if tpl.len() == 0 && loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && self.parts_moved(
@@ -7256,17 +7291,17 @@ extend Gen {
                         },
                     );
                 }
-                moved.push(true);
-                clean.push(true);
+                self.cmoved.push(true);
+                self.cclean.push(true);
                 continue;
             }
-            moved.push(mv);
-            if ren[k as usize] {
+            self.cmoved.push(mv);
+            if self.cren[k as usize] {
                 // Read where it is.
-                clean.push(false);
+                self.cclean.push(false);
                 continue;
             }
-            clean.push(va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG));
+            self.cclean.push(va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG));
             if !mv {
                 continue;
             }
@@ -7316,15 +7351,15 @@ extend Gen {
             let pt = b.pool[(sig + 3 + k) as usize];
             let agg = (pt & AGG) != 0;
             let vty = self.vt(v);
-            if moved[k as usize] && agg {
+            if self.cmoved[k as usize] && agg {
                 continue;
             }
-            if moved[k as usize] {
+            if self.cmoved[k as usize] {
                 // Moved: only a narrow integer's extension is left.
                 let r = self.lay.parts[loc.p0 as usize].reg;
                 if loc.ext == 2 {
                     self.emit(a::sxt(false, r, r, type_bits(vty, self.ptr)));
-                } else if loc.ext != 0 && !clean[k as usize] {
+                } else if loc.ext != 0 && !self.cclean[k as usize] {
                     self.emit(a::uxt(r, r, type_bits(vty, self.ptr)));
                 }
                 continue;
@@ -7578,13 +7613,12 @@ extend Gen {
     // The index in `lays` of the layout of call `t` (no intrinsic), `self.lay` unchanged: once per
     // signature in the body, which gives the layout.
     fn lay_index(self: &mut Self, t: Inst) usize {
-        for q in 0..self.lay_sig.len() {
-            if self.lay_sig[q] == t.b {
-                return q;
-            }
+        if self.lay_at[t.b as usize] != NONE {
+            return self.lay_at[t.b as usize] as usize;
         }
-        let q = self.lay_sig.len();
-        self.lay_sig.push(t.b);
+        let q = self.nlay;
+        self.nlay += 1;
+        self.lay_at[t.b as usize] = q as u32;
         if q == self.lays.len() {
             self.lays.push(ab::CallLayout::new());
         }

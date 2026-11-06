@@ -29,8 +29,9 @@ iterator do). Loops in `std::parallel`, in the substrate `ffi/sc_runtime.spc` an
 `std::rt` never tick (`loader::runtime_path`): a tick inside a spinlock, a parked wait or a signal
 handler is a fault.
 
-The tick is a function-local countdown (`__sc_spc`, budget 2048): every iteration takes one,
-and the iteration that takes the last one calls the hook and resets it. A counted loop is an
+The tick is a function-local countdown (`__sc_spc`): every iteration takes one, and the hook
+runs each time its low 11 bits (`TICK_MASK`) reach 0, once in 2048 ticks. The counter is never
+reset, so no path merges two counts. A counted loop is an
 exclusive range over a builtin integer whose binding the body cannot assign, or a
 non-consuming `for` over an array, slice or sequence value (index against the length read at
 entry). Its safepoint sits at the top of each iteration, before a slice element's load. When

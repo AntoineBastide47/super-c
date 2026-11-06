@@ -257,6 +257,17 @@ pub(package) struct Live {
     pub(package) uses: Vector<u32>, // per value, its use count, one more when a loop keeps it past its last use
     pub(package) last: Vector<u32>, // per value, the highest instruction index that uses it (0: none)
     sole: Vector<u32>, // per block parameter, the one instruction that reads it (NONE: none; READERS: more)
+    // `folds`: the instructions grouped by opcode, each group in index order (`by_op[op_at[o]..op_at[o + 1]]`),
+    // and the instructions of the opcodes a pass reads (`scan_ops`).
+    op_at: Vector<u32>,
+    by_op: Vector<u32>,
+    op_cur: Vector<u32>,
+    scan: Vector<u32>,
+    // `block_ops`, once per `folds` (`iblk_ok`): per instruction, its block (NONE: none), and whether the
+    // blocks hold ascending ranges.
+    iblk: Vector<u32>,
+    iblk_ok: bool,
+    iblk_asc: bool,
     // `entry_partner`'s search, once per loop header (`ep_head`; NONE: none yet): per value index the
     // generation (`ep_gen`) of the last header whose reached blocks read it (`ep_read`), and the blocks seen.
     ep_read: Vector<u32>,
@@ -344,6 +355,7 @@ pub(package) struct Live {
     pub(package) count: Vector<u32>,
     keys: Vector<u64>,
     rd: Vector<Value>, // `reads_after`'s scratch
+    ru: Vector<Value>, // `ranges`' scratch
 }
 
 extend Live {
@@ -399,6 +411,13 @@ extend Live {
             stepped: Vector::<u64>::new(),
             kept: Vector::<bool>::new(),
             sole: Vector::<u32>::new(),
+            op_at: Vector::<u32>::new(),
+            by_op: Vector::<u32>::new(),
+            op_cur: Vector::<u32>::new(),
+            scan: Vector::<u32>::new(),
+            iblk: Vector::<u32>::new(),
+            iblk_ok: false,
+            iblk_asc: false,
             ep_read: Vector::<u32>::new(),
             ep_gen: 0,
             ep_head: NONE,
@@ -413,6 +432,7 @@ extend Live {
             count: Vector::<u32>::new(),
             keys: Vector::<u64>::new(),
             rd: Vector::<Value>::new(),
+            ru: Vector::<Value>::new(),
             ua: Vector::<u32>::new(),
             pat: Vector::<u32>::new(),
             preds: Vector::<u32>::new(),
@@ -480,8 +500,15 @@ extend Live {
         return self.uses[x as usize] - self.wn[x as usize];
     }
 
-    /// Analyze `b`.
+    /// Analyze `b`: `analyze`, then the layout and the live ranges (`relayout`).
     pub(package) fn run(self: &mut Self, b: &Body) {
+        self.analyze(b);
+        self.relayout(b);
+    }
+
+    /// `run` but the layout and the live ranges, which a generator makes once it chose the blocks laid out
+    /// last (`after`): the reverse postorder, the rare blocks, the loops, the folds and `def_blk`.
+    pub(package) fn analyze(self: &mut Self, b: &Body) {
         let nb = b.blocks.len();
         fill(&mut self.npred, nb, 0);
         fill(&mut self.rpo, nb, NONE);
@@ -501,7 +528,23 @@ extend Live {
         self.rare_blocks(b);
         self.loops(b);
         self.folds(b);
-        self.relayout(b);
+        self.def_blocks(b, b.insts.len() + b.params.len());
+    }
+
+    // `def_blk` for the `n` value indexes of `b`: each instruction's and block parameter's block (NONE for
+    // the others, a used flag's).
+    fn def_blocks(self: &mut Self, b: &Body, n: usize) {
+        fill(&mut self.def_blk, n, NONE);
+        let ni = b.insts.len();
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                self.def_blk[i as usize] = k as u32;
+            }
+            for q in 0..bk.param_len as u32 {
+                self.def_blk[ni + (bk.param_start + q) as usize] = k as u32;
+            }
+        }
     }
 
     /// The layout of `b` and the live ranges again, for another `after`: the rest of `run`'s analysis stands.
@@ -627,7 +670,9 @@ extend Live {
         if (self.fold_ops & FOLD_SINC) == 0 {
             return;
         }
-        for i in 0..b.insts.len() {
+        self.scan_ops([O_SELECT]);
+        for q in 0..self.scan.len() {
+            let i = self.scan[q] as usize;
             let t = b.insts[i];
             if t.op != O_SELECT || t.ty != T_I32 && t.ty != T_I64 {
                 continue;
@@ -890,7 +935,9 @@ extend Live {
         if (self.fold_ops & FOLD_SHAMT_EXT) == 0 {
             return;
         }
-        for i in 0..b.insts.len() {
+        self.scan_ops([O_SHL, O_LSHR, O_ASHR]);
+        for q in 0..self.scan.len() {
+            let i = self.scan[q] as usize;
             let t = b.insts[i];
             if t.op < O_SHL || t.op > O_ASHR || !is_int(t.ty) || self.pfold[i] || !is_inst(t.b) || !self.pfold[t.b as usize] || b.insts[t.b as usize].op != O_AND {
                 continue;
@@ -908,11 +955,84 @@ extend Live {
         }
     }
 
+    // `by_op` and `op_at` for `b` (`folds`).
+    fn group_ops(self: &mut Self, b: &Body) {
+        let ni = b.insts.len();
+        self.iblk_ok = false;
+        fill(&mut self.op_at, 257, 0);
+        for i in 0..ni {
+            self.op_at[b.insts[i].op as usize + 1] += 1;
+        }
+        for o in 0..256usize {
+            self.op_at[o + 1] += self.op_at[o];
+        }
+        fill(&mut self.op_cur, 256, 0);
+        fill(&mut self.by_op, ni, 0);
+        for i in 0..ni {
+            let o = b.insts[i].op as usize;
+            self.by_op[(self.op_at[o] + self.op_cur[o]) as usize] = i as u32;
+            self.op_cur[o] += 1;
+        }
+    }
+
+    // `scan`: the instructions of opcode `op` in the blocks, in block order then instruction order, and `iblk`
+    // their blocks. When the blocks hold ascending ranges (a rebuilt body's do), that order is the index
+    // order of `by_op`; else a walk of the blocks gives it.
+    fn block_ops(self: &mut Self, b: &Body, op: u8) {
+        if !self.iblk_ok {
+            self.iblk_ok = true;
+            fill(&mut self.iblk, b.insts.len(), NONE);
+            self.iblk_asc = true;
+            for k in 0..b.blocks.len() {
+                let bk = b.blocks[k];
+                self.iblk_asc = self.iblk_asc && (k == 0 || bk.start >= b.blocks[k - 1].start + b.blocks[k - 1].len);
+                for i in bk.start..bk.start + bk.len {
+                    self.iblk[i as usize] = k as u32;
+                }
+            }
+        }
+        self.scan.truncate(0);
+        if self.iblk_asc {
+            let o = op as usize;
+            for j in self.op_at[o]..self.op_at[o + 1] {
+                let i = self.by_op[j as usize];
+                if self.iblk[i as usize] != NONE {
+                    self.scan.push(i);
+                }
+            }
+            return;
+        }
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                if b.insts[i as usize].op == op {
+                    self.scan.push(i);
+                }
+            }
+        }
+    }
+
+    // `scan`: the instructions of the opcodes `ops` lists (each once), in index order (`by_op`).
+    fn scan_ops(self: &mut Self, ops: []u8) {
+        self.scan.truncate(0);
+        for k in 0..ops.len() {
+            let o = ops[k] as usize;
+            for j in self.op_at[o]..self.op_at[o + 1] {
+                self.scan.push(self.by_op[j as usize]);
+            }
+        }
+        if ops.len() > 1 {
+            self.scan.sort();
+        }
+    }
+
     fn shift_counts(self: &mut Self, b: &Body) {
         if (self.fold_ops & FOLD_SHAMT) == 0 {
             return;
         }
-        for i in 0..b.insts.len() {
+        self.scan_ops([O_SHL, O_LSHR, O_ASHR]);
+        for q in 0..self.scan.len() {
+            let i = self.scan[q] as usize;
             let t = b.insts[i];
             let bits = type_bits(t.ty, 8);
             if t.op < O_SHL || t.op > O_ASHR || !is_int(t.ty) || bits != 32 && bits != 64 || self.pfold[i] {
@@ -942,6 +1062,7 @@ extend Live {
         if self.fold_max == 0 && self.fold_ops == 0 {
             return;
         }
+        self.group_ops(b);
         // The use count of each instruction, and its uses as a condition.
         fill(&mut self.count, ni, 0);
         fill(&mut self.cnd, ni, 0);
@@ -958,14 +1079,18 @@ extend Live {
                 self.cnd[t.a as usize] += 1;
             }
         }
-        for i in 0..ni {
+        self.scan_ops([O_ICMP, O_FCMP]);
+        for q in 0..self.scan.len() {
+            let i = self.scan[q] as usize;
             let t = b.insts[i];
             let fc = (self.fold_ops & FOLD_FCMP) != 0 && t.op == O_FCMP && !is_vec(b.type_of(t.a)) && t.aux != C_ONE && t.aux != C_UEQ;
             self.pfold[i] = (self.fold_ops & FOLD_CMP) != 0 && (t.op == O_ICMP && b.type_of(t.a) != T_I128 || fc) && self.count[i] != 0 && self.cnd[i] == self.count[i];
         }
         // An `and`'s uses as an equality with 0.
         fill(&mut self.cnd, ni, 0);
-        for i in 0..ni {
+        self.scan_ops([O_ICMP]);
+        for q in 0..self.scan.len() {
+            let i = self.scan[q] as usize;
             let t = b.insts[i];
             if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (t.a & (VPARAM | VFLAG)) == 0 && (b.insts[t.a as usize].op == O_AND || b.insts[t.a as usize].op == O_VOP) && int_const(
                 b,
@@ -974,7 +1099,9 @@ extend Live {
                 self.cnd[t.a as usize] += 1;
             }
         }
-        for i in 0..ni {
+        self.scan_ops([O_ADD, O_SUB, O_AND, O_OR, O_XOR, O_VOP, O_SPLAT, O_FMUL, O_FADD, O_FSUB, O_FDIV, O_VSUMW]);
+        for q in 0..self.scan.len() {
+            let i = self.scan[q] as usize;
             let t = b.insts[i];
             if (self.fold_ops & FOLD_VMLA) != 0 && (t.op == O_ADD || t.op == O_SUB) && is_vec(t.ty) {
                 let mut p = self.vmla_mul(b, t);
@@ -1191,7 +1318,9 @@ extend Live {
             // A truncation's uses as a select's side its condition bounds (`bounded_side`).
             fill(&mut self.cnd, ni, 0);
             fill(&mut self.andu, ni, 0);
-            for i in 0..ni {
+            self.scan_ops([O_SELECT, O_AND]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 if t.op == O_SELECT && !is_vec(t.ty) {
                     if bounded_side(b, t.a, t.b, true) {
@@ -1212,7 +1341,9 @@ extend Live {
                     }
                 }
             }
-            for i in 0..ni {
+            self.scan_ops([O_ZEXT, O_TRUNC]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 if t.op != O_ZEXT && t.op != O_TRUNC {
                     continue;
@@ -1243,7 +1374,9 @@ extend Live {
             self.sinks(b);
             return;
         }
-        for i in 0..ni {
+        self.scan_ops([O_LOAD, O_STORE]);
+        for q in 0..self.scan.len() {
+            let i = self.scan[q] as usize;
             let t = b.insts[i];
             if t.op != O_LOAD && t.op != O_STORE || (t.aux & MEM_VOLATILE) != 0 || t.c != 0 || (t.a & (VPARAM | VFLAG)) != 0 {
                 continue;
@@ -1272,7 +1405,9 @@ extend Live {
         // `FOLD_BLEN`: a count of leading zeros of 32 or 64 bits that only `width - clz` reads, the bit
         // length, or `clz ^ (width - 1)`, the top bit's index, folds into it.
         if (self.fold_ops & FOLD_BLEN) != 0 {
-            for i in 0..ni {
+            self.scan_ops([O_SUB, O_XOR]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 let w = type_bits(t.ty, 8) as u64;
                 let sub = t.op == O_SUB;
@@ -1304,7 +1439,9 @@ extend Live {
         }
         self.shift_counts(b);
         if (self.fold_ops & FOLD_SHOP) != 0 {
-            for i in 0..ni {
+            self.scan_ops([O_ADD, O_SUB, O_AND, O_OR, O_XOR]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 let bits = type_bits(t.ty, 8);
                 let ops = t.op == O_ADD || t.op == O_SUB || t.op == O_AND || t.op == O_OR || t.op == O_XOR;
@@ -1328,7 +1465,9 @@ extend Live {
             }
         }
         if (self.fold_ops & FOLD_MULL) != 0 {
-            for i in 0..ni {
+            self.scan_ops([O_MUL]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 if t.op != O_MUL || t.ty != T_I64 || self.pfold[i] || mull_ext(b, t) == 0 {
                     continue;
@@ -1341,7 +1480,9 @@ extend Live {
             }
         }
         if (self.fold_ops & FOLD_CSEL) != 0 {
-            for i in 0..ni {
+            self.scan_ops([O_SELECT]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 if t.op != O_SELECT || !is_int(t.ty) || t.ty == T_I128 || is_vec(t.ty) {
                     continue;
@@ -1363,7 +1504,9 @@ extend Live {
             }
         }
         if (self.fold_ops & FOLD_BRCONJ) != 0 {
-            for i in 0..ni {
+            self.scan_ops([O_BR]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 if t.op != O_BR || !is_inst(t.a) {
                     continue;
@@ -1386,7 +1529,9 @@ extend Live {
         // whose every use is the condition of a select of floats of its type folds into the selects.
         if (self.fold_ops & FOLD_FSEL) != 0 {
             fill(&mut self.cnd, ni, 0);
-            for i in 0..ni {
+            self.scan_ops([O_SELECT]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 if t.op == O_SELECT && (t.ty == T_F32 || t.ty == T_F64) && is_inst(t.a) && b.insts[t.a as usize].op == O_FCMP && b.type_of(
                     b.insts[t.a as usize].a,
@@ -1394,7 +1539,9 @@ extend Live {
                     self.cnd[t.a as usize] += 1;
                 }
             }
-            for i in 0..ni {
+            self.scan_ops([O_FCMP]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 if t.op == O_FCMP && !is_vec(b.type_of(t.a)) && t.aux != C_ONE && t.aux != C_UEQ && self.count[i] != 0 && self.cnd[i] == self.count[i] {
                     self.pfold[i] = true;
@@ -1405,7 +1552,9 @@ extend Live {
         // at most 64 bits, whose other operand and the inverted value fold nothing, folds into it (arm64
         // `bic`, `orn`, `eon`: `not_side`).
         if (self.fold_ops & FOLD_NOT) != 0 {
-            for i in 0..ni {
+            self.scan_ops([O_AND, O_OR, O_XOR]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 if t.op != O_AND && t.op != O_OR && t.op != O_XOR || !is_int(t.ty) || t.ty == T_I128 || self.pfold[i] {
                     continue;
@@ -1429,7 +1578,9 @@ extend Live {
         // `FOLD_TRUNC`: a narrow truncation of a value that folds nothing, read by comparisons alone.
         if (self.fold_ops & FOLD_TRUNC) != 0 {
             fill(&mut self.cnd, ni, 0);
-            for i in 0..ni {
+            self.scan_ops([O_ICMP]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 if t.op != O_ICMP {
                     continue;
@@ -1440,7 +1591,9 @@ extend Live {
                     }
                 }
             }
-            for i in 0..ni {
+            self.scan_ops([O_TRUNC]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 let bits = type_bits(t.ty, 8);
                 if t.op == O_TRUNC && (bits == 8 || bits == 16) && (t.a & VFLAG) == 0 && is_int(b.type_of(t.a)) && b.type_of(
@@ -1454,7 +1607,9 @@ extend Live {
         // as much folds into it: a field extracted, sign- or zero-extended (arm64 `sbfx`, `ubfx`).
         let ext_only = (self.fold_ops & FOLD_XBFX) == 0;
         if (self.fold_ops & (FOLD_XBFX | FOLD_XBFX_EXT)) != 0 {
-            for i in 0..ni {
+            self.scan_ops([O_LSHR, O_ASHR]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 let bits = type_bits(t.ty, 8);
                 if t.op != O_LSHR && t.op != O_ASHR || !is_int(t.ty) || bits != 32 && bits != 64 || self.pfold[i] || !is_inst(
@@ -1481,7 +1636,9 @@ extend Live {
         // `FOLD_BFI`: an insertion of a field (`bfi_of`) whose three inner instructions each have this one use
         // folds them (arm64 `bfi`); the shift may be a shifted operand already (`FOLD_SHOP`).
         if (self.fold_ops & FOLD_BFI) != 0 {
-            for i in 0..ni {
+            self.scan_ops([O_OR]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let f = bfi_of(b, b.insts[i]);
                 if f.x == VNONE || self.pfold[i] {
                     continue;
@@ -1505,7 +1662,9 @@ extend Live {
         // use) on a folded integer comparison: the side folds into the select, an add of the condition
         // (`carry_inc`).
         if (self.fold_ops & FOLD_CARRY) != 0 {
-            for i in 0..ni {
+            self.scan_ops([O_SELECT]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let s = carry_inc(b, &self.pfold, i as u32);
                 if s != VNONE && self.count[s as usize] == 1 {
                     self.pfold[s as usize] = true;
@@ -1514,48 +1673,53 @@ extend Live {
         }
         // `FOLD_RMW` before `FOLD_LDOP`, which would fold the load into the operation alone.
         if (self.fold_ops & FOLD_RMW) != 0 {
-            for k in 0..b.blocks.len() {
-                let bk = b.blocks[k];
-                for i in bk.start..bk.start + bk.len {
-                    let t = b.insts[i as usize];
-                    if t.op != O_STORE || !is_inst(t.b) || (t.aux & MEM_VOLATILE) != 0 {
-                        continue;
-                    }
-                    let v = t.b;
-                    let l = rmw_load(b, &self.pfold, t);
-                    if l == VNONE || v < bk.start || self.count[v as usize] != 1 || self.count[l as usize] != 1 || l < bk.start {
-                        continue;
-                    }
-                    let mut clear = true;
-                    for j in l + 1..i {
-                        clear = clear && !writes_mem(b.insts[j as usize]);
-                    }
-                    if clear {
-                        self.pfold[l as usize] = true;
-                        self.pfold[v as usize] = true;
-                    }
+            self.block_ops(b, O_STORE);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q];
+                let bk = b.blocks[self.iblk[i as usize] as usize];
+                let t = b.insts[i as usize];
+                if !is_inst(t.b) || (t.aux & MEM_VOLATILE) != 0 {
+                    continue;
+                }
+                let v = t.b;
+                let l = rmw_load(b, &self.pfold, t);
+                if l == VNONE || v < bk.start || self.count[v as usize] != 1 || self.count[l as usize] != 1 || l < bk.start {
+                    continue;
+                }
+                let mut clear = true;
+                for j in l + 1..i {
+                    clear = clear && !writes_mem(b.insts[j as usize]);
+                }
+                if clear {
+                    self.pfold[l as usize] = true;
+                    self.pfold[v as usize] = true;
                 }
             }
         }
+        // `ldop_user` reads loads alone.
         if (self.fold_ops & FOLD_LDOP) != 0 {
-            for k in 0..b.blocks.len() {
-                let bk = b.blocks[k];
-                for i in bk.start..bk.start + bk.len {
-                    if self.ldop_user(b, i, bk.start + bk.len) {
-                        self.pfold[i as usize] = true;
-                    }
+            self.block_ops(b, O_LOAD);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q];
+                let bk = b.blocks[self.iblk[i as usize] as usize];
+                if self.ldop_user(b, i, bk.start + bk.len) {
+                    self.pfold[i as usize] = true;
                 }
             }
         }
         if (self.fold_ops & (FOLD_VSHIMM | FOLD_VSHIMM_ALL)) != 0 {
             fill(&mut self.cnd, ni, 0);
-            for i in 0..ni {
+            self.scan_ops([O_SHL, O_LSHR, O_ASHR]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 if self.vshimm(b, t) != NONE && t.a != t.b {
                     self.cnd[t.b as usize] += 1;
                 }
             }
-            for i in 0..ni {
+            self.scan_ops([O_SPLAT, O_WCONST]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let op = b.insts[i].op;
                 if (op == O_SPLAT || op == O_WCONST) && self.count[i] != 0 && self.cnd[i] == self.count[i] {
                     self.pfold[i] = true;
@@ -1578,7 +1742,9 @@ extend Live {
                     }
                 }
             }
-            for i in 0..ni {
+            self.scan_ops([O_WCONST]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 if b.insts[i].op == O_WCONST && type_bytes(b.insts[i].ty, 8) == 16 && self.count[i] != 0 && self.cnd[i] == self.count[i] && !self.pfold[i] {
                     self.pfold[i] = true;
                 }
@@ -1589,7 +1755,9 @@ extend Live {
             self.carries(b);
         }
         if (self.fold_ops & FOLD_ZSHL) != 0 {
-            for i in 0..ni {
+            self.scan_ops([O_SHL]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
                 let t = b.insts[i];
                 if t.op != O_SHL || !is_int(t.ty) || t.ty == T_I128 || self.pfold[i] || !is_inst(t.a) {
                     continue;
@@ -2252,15 +2420,18 @@ extend Live {
     fn conj_folds(self: &mut Self, b: &Body) {
         let ni = b.insts.len();
         fill(&mut self.cnd, ni, 0);
-        for i in 0..ni {
-            let t = b.insts[i];
-            if (t.op == O_SELECT || t.op == O_BR) && (t.a & (VPARAM | VFLAG)) == 0 {
+        self.scan_ops([O_SELECT, O_BR]);
+        for q in 0..self.scan.len() {
+            let t = b.insts[self.scan[q] as usize];
+            if (t.a & (VPARAM | VFLAG)) == 0 {
                 self.cnd[t.a as usize] += 1;
             }
         }
-        for i in 0..ni {
+        self.scan_ops([O_AND, O_OR]);
+        for q in 0..self.scan.len() {
+            let i = self.scan[q] as usize;
             let t = b.insts[i];
-            if t.op != O_AND && t.op != O_OR || t.ty != T_I8 || self.pfold[i] || self.count[i] == 0 {
+            if t.ty != T_I8 || self.pfold[i] || self.count[i] == 0 {
                 continue;
             }
             let mut na = self.conj_part(b, t.a);
@@ -2884,7 +3055,7 @@ extend Live {
             }
         }
         let n = nv + nf as usize;
-        fill(&mut self.def_blk, n, NONE);
+        self.def_blocks(b, n);
         fill(&mut self.end, n, 0);
         fill(&mut self.uses, n, 0);
         fill(&mut self.last, n, 0);
@@ -2894,15 +3065,6 @@ extend Live {
         self.ep_head = NONE;
         fill(&mut self.wpos, n, NONE);
         fill(&mut self.wn, n, 0);
-        for k in 0..b.blocks.len() {
-            let bk = b.blocks[k];
-            for i in bk.start..bk.start + bk.len {
-                self.def_blk[i as usize] = k as u32;
-            }
-            for q in 0..bk.param_len as u32 {
-                self.def_blk[ni + (bk.param_start + q) as usize] = k as u32;
-            }
-        }
         for f in 0..nf as usize {
             self.def_blk[nv + f] = self.def_blk[self.work[f] as usize];
         }
@@ -2943,20 +3105,20 @@ extend Live {
         }
         fill(&mut self.au, n, 0);
         fill(&mut self.wt, n, 0);
+        // Each instruction's uses (`uses_at`), into a scratch taken out for the walk.
+        let mut us = replace(&mut self.ru, Vector::<u32>::new());
         for p in 0..np {
             let k = self.order[p];
             let bk = b.blocks[k as usize];
             let f = self.freq[k as usize];
             for i in bk.start..bk.start + bk.len {
                 self.wt[i as usize] += f;
-                let mut us = replace(&mut self.succ, Vector::<u32>::new());
                 self.uses_at(b, i, &mut us);
                 self.ua[i as usize] = self.uv.len() as u32;
                 self.un[i as usize] = us.len() as u32;
                 self.uv.extend_copy(&us);
-                self.succ = us;
-                for u in 0..self.succ.len() {
-                    let x = self.vix(b, self.succ[u]);
+                for u in 0..us.len() {
+                    let x = self.vix(b, us[u]);
                     self.uses[x as usize] += 1;
                     self.wt[x as usize] += f;
                     self.au[x as usize] += 1;
@@ -3006,6 +3168,7 @@ extend Live {
                 }
             }
         }
+        self.ru = us;
         self.rare_entries(b, &mut kept);
         fill(&mut self.next, n, NONE);
         fill(&mut self.use_next, self.uv.len(), NONE);
@@ -3455,6 +3618,12 @@ extend Live {
     // `FOLD_ADC`: each sum or difference with a carry or borrow (`carry_of`), its parts marked (`carry`).
     fn carries(self: &mut Self, b: &Body) {
         let ni = b.insts.len();
+        // A carry comes from a checked sum or difference (`by_op`).
+        let ao = O_ADDO as usize;
+        let so = O_SUBO as usize;
+        if self.op_at[ao + 1] == self.op_at[ao] && self.op_at[so + 1] == self.op_at[so] {
+            return;
+        }
         // The uses of each instruction's flag.
         fill(&mut self.cnd, ni, 0);
         for i in 0..ni {
@@ -3466,7 +3635,10 @@ extend Live {
                 }
             }
         }
-        for i in 0..ni as u32 {
+        // `wrapping`'s operations.
+        self.scan_ops([O_ADD, O_ADDO, O_SUB, O_SUBO]);
+        for q in 0..self.scan.len() {
+            let i = self.scan[q];
             let t = b.insts[i as usize];
             let sub = t.op == O_SUB || t.op == O_SUBO;
             if !self.wrapping(b, i, sub) {

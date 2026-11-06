@@ -73,7 +73,7 @@ above. Recompute a fact only after a change that the "Valid until" column names.
 
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
-| RPO, predecessors of reached blocks (CSR), loop nesting, rare blocks, fold decisions, use counts | `Live::run` (`reverse_postorder`, `loops`, `rare_blocks`, `folds`) | `Live` (`rpo`, `npred`, `pat`, `preds`, `inner`, `pfold`, `count`) | end of the function, retries included |
+| RPO, predecessors of reached blocks (CSR), loop nesting, rare blocks, fold decisions, use counts | `Live::analyze` (`reverse_postorder`, `loops`, `rare_blocks`, `folds`; `Live::run` adds `relayout`) | `Live` (`rpo`, `npred`, `pat`, `preds`, `inner`, `pfold`, `count`) | end of the function, retries included |
 | Block layout, live ranges, last uses, folded use lists (CSR) | `Live::relayout` (`layout`, `ranges`; `uses_of`) | `Live` (`pos`, `end`, `ua`, `un`, `uv`) | a change of the layout (`after`) |
 | Rare blocks | `Live::rare_blocks` (none under `Live::in_place`: wasm) | `Live` | end of the function; the optimizer's `BLOCK_RARE` holds the same fact only when `lir_opt` ran |
 | Next use of each folded operand | `Live::ranges`, reverse walk of the existing operand CSR; `Live::advance` consumes it | `Live.next`, `use_next`; native eviction scoring reads `next` | layout change; cursors advance once per instruction |
@@ -82,7 +82,7 @@ above. Recompute a fact only after a change that the "Valid until" column names.
 | Special operations of the body | `lv::op_flags` | `Gen.opf` | end of the function, retries included |
 | Stack canary | `lver::protected` | `Gen.prot` | end of the function, retries included |
 | Wasm structure (idom, loop headers, forward edges) | `codegen::structure` `Shape::run` (reads `Live`'s `rpo`, `pat`, `preds`) | `Shape` | end of the function |
-| Call layout of a signature | `call_layout` (a64gen, x64gen), `cc::classify` | `Gen` (`lays`, `lay_sig`) | end of the function |
+| Call layout of a signature | `call_layout` (a64gen, x64gen), `cc::classify` | `Gen` (`lays`, `lay_at`) | end of the function |
 | Intrinsic template of each body symbol | `intrin::of_symbols` | `Gen.itpl` | end of the function |
 | Calls that return, clobber, dead ends | `call_tables` | `Gen` (`cret`, `cpre`, `rarec`) | end of the function |
 | Object symbol of a package symbol | `osym_of` (wasm `pkg_osym`) | `Gen.osym` | end of the object |
