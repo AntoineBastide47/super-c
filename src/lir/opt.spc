@@ -255,7 +255,7 @@ pub(package) struct Opt {
     rsums: Vector<u64>,
     pre: Vector<u64>, // instruction << 32 | an instruction the walk made to run right before it, in order
     unbiased: Map<u32, u32>, // per indexed address with an offset, the address without it (`visit`)
-    merged: bool, // the last rebuild merged blocks
+    merged: bool, // the last rebuild left a block one edge enters that several entered at the walk
     selected: bool, // the last walk made selects (`diamond`), which no walk simplified
     // The last walk folded a value its readers saw before (`null_test`, `merge_exits`), or made instructions
     // it did not visit (`copysign_bits`).
@@ -1105,13 +1105,14 @@ extend Opt {
         return true;
     }
 
-    // Blocks the last rebuild merged are one block now, the selects the last walk made are new, a fold of
-    // the last walk came after its readers (`refold`), a jump this `run` made a return left the values it
-    // passed dead, which the walk counted where it would make two returns one (`rethru`, `ret_diamond`), and
-    // a loop may write less: one more walk numbers and forwards across the blocks (a load the second
-    // repeats), simplifies the selects and hoists the loads. Whether it ran.
+    // A block the last rebuild left with one predecessor of several (`merged`), instructions the last walk
+    // hoisted into blocks it had visited, the selects the last walk made are new, a fold of the last walk
+    // came after its readers (`refold`), a jump this `run` made a return left the values it passed dead,
+    // which the walk counted where it would make two returns one (`rethru`, `ret_diamond`), and a loop may
+    // write less: one more walk forwards into that block, numbers the hoisted instructions (a load the
+    // preheader's dominator holds), simplifies the selects and hoists the loads. Whether it ran.
     fn rewalk(self: &mut Self, pk: &Package, b: &mut Body) bool {
-        if !self.merged && !self.selected && !self.unstored && !self.refold && !self.rethru {
+        if !self.merged && self.hoisted.len() == 0 && !self.selected && !self.unstored && !self.refold && !self.rethru {
             return false;
         }
         self.rethru = false;
@@ -11750,11 +11751,19 @@ extend Opt {
         // The heads: the reached blocks no other continues, numbered in order; a merged block takes its
         // head's number.
         fill(&mut self.done, nb, false);
-        self.merged = false;
         for k in 0..nb {
             if self.nxt[k] != NONE {
                 self.done[self.nxt[k] as usize] = true;
+            }
+        }
+        // A reached block one edge enters now that several entered at the walk (the walk's tables, or a
+        // block it made): the next walk gives it that edge's arguments and its predecessor's facts
+        // (`forward_params`, the memory states). A block that kept its one edge saw them already.
+        self.merged = false;
+        for k in 1..nb {
+            if self.bmap[k] != NONE && self.in_at[k + 1] - self.in_at[k] == 1 && (k + 1 >= self.pred_at.len() || self.pred_at[k + 1] - self.pred_at[k] != 1) {
                 self.merged = true;
+                break;
             }
         }
         let mut nk: u32 = 0;
@@ -12162,6 +12171,7 @@ pub(package) struct Run {
     // Per body, the parameters whose memory a call of it may write (`effects`).
     wargs: Vector<u64>,
     shape: Vector<bool>,
+    always: Vector<bool>, // per body, whether its function is `@always_inline` (`Sym.always`)
     unit: Vector<u32>,
     bunit: Vector<u32>, // per body, its function's `Sym.unit` (NONE: none)
     level: Vector<u32>,
@@ -12232,6 +12242,8 @@ extend Run {
         let calls = replace(&mut cs.callee, Vector::<u32>::new());
         let mut shape = Vector::<bool>::with_capacity(n);
         shape.resize_default(n);
+        let mut always = Vector::<bool>::with_capacity(n);
+        always.resize_default(n);
         let mut ok = Vector::<u8>::with_capacity(n);
         ok.resize_default(n);
         let mut unit = Vector::<u32>::with_capacity(n);
@@ -12244,6 +12256,7 @@ extend Run {
             let sy = p.syms[s];
             if sy.kind == SK_FUNC && sy.def != NONE {
                 bunit[sy.def as usize] = sy.unit;
+                always[sy.def as usize] = sy.always;
                 if sy.def < held {
                     shape[sy.def as usize] = il::shape_ok(p, s as u32, &bodies[sy.def as usize]);
                 }
@@ -12319,6 +12332,7 @@ extend Run {
             wargs: wargs,
             shape: shape,
             unit: unit,
+            always: always,
             bunit: bunit,
             level: level,
             ok: UnsafeCell::<Vector<u8>>::new(ok),
@@ -12427,7 +12441,7 @@ extend Run {
             let _ = sc.o.run(p, b, true);
         }
         let snap = r.inline && r.shape[j as usize] && bu.vector != 0 && !packed(b);
-        let pre = if snap && il::bounded(b, r.cf.inline) {
+        let pre = if snap && (il::bounded(b, r.cf.inline) || r.always[j as usize]) {
             Option::<Body>::Some(b.compact())
         } else {
             Option::<Body>::None
@@ -12527,7 +12541,8 @@ extend Run {
                 fits = false;
             }
         }
-        unsafe *((*r.ok.get()).as_mut_ptr() + j as usize) = if fits && il::bounded(b, r.cf.inline) {
+        // An `@always_inline` body inlines whatever its size.
+        unsafe *((*r.ok.get()).as_mut_ptr() + j as usize) = if fits && (il::bounded(b, r.cf.inline) || r.always[j as usize]) {
             il::facts(b, r.cf.inline)
         } else {
             0u8
@@ -17556,6 +17571,7 @@ fn specialize(pk: &mut Package) {
         y.own = true;
         y.cold = f.cold;
         y.noinline = f.noinline;
+        y.always = f.always;
         copy[s] = c;
         made.push(pk.bodies[f.def as usize].compact());
         made_sym.push(c);

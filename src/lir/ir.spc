@@ -934,6 +934,8 @@ pub(package) struct Sym {
     pub(package) used: bool,
     /// A function the optimizer never inlines (`@noinline`).
     pub(package) noinline: bool,
+    /// A function the optimizer inlines into every call it may whatever its size (`@always_inline`).
+    pub(package) always: bool,
     /// A function that runs rarely (`@cold`): the blocks that call it are unlikely, and its object places its
     /// code apart from the other functions'. Its own body is optimized as any other.
     pub(package) cold: bool,
@@ -1757,6 +1759,8 @@ pub(package) const HELD_SHAPE: u8 = 1;
 pub(package) const HELD_OK: u8 = 2;
 /// The function is `@cold` (`Sym.cold`): a replayed unit's functions are not lowered, which marks it.
 pub(package) const HELD_COLD: u8 = 4;
+/// The function is `@always_inline` (`Sym.always`), for the same reason.
+pub(package) const HELD_ALWAYS: u8 = 8;
 
 extend Held {
     pub(package) fn new() Held {
@@ -1897,6 +1901,7 @@ extend Package {
                 sect: NONE,
                 used: false,
                 noinline: false,
+                always: false,
                 cold: false,
                 fx: FX_READ | FX_WRITE | FX_STALL,
                 esc: ~0u64,
@@ -2082,6 +2087,7 @@ extend Package {
             self.syms.index_mut(s as usize).unit = os.unit;
             self.syms.index_mut(s as usize).used = os.used;
             self.syms.index_mut(s as usize).noinline = os.noinline;
+            self.syms.index_mut(s as usize).always = os.always;
             self.syms.index_mut(s as usize).cold = os.cold;
             self.syms.index_mut(s as usize).own = os.own;
             self.syms.index_mut(s as usize).internal = os.internal;

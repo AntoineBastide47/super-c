@@ -454,6 +454,7 @@ extend<'a> Parser<'a> {
             }
             self.pkg.syms.index_mut(s as usize).used = self.keyword("used");
             self.pkg.syms.index_mut(s as usize).noinline = self.keyword("noinline");
+            self.pkg.syms.index_mut(s as usize).always = self.keyword("always");
             self.pkg.syms.index_mut(s as usize).cold = self.keyword("cold");
             self.pkg.syms.index_mut(s as usize).ext = self.keyword("ext");
             if self.keyword("section") {

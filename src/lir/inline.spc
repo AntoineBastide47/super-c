@@ -15,7 +15,8 @@ import lir::verify as lv;
 pub(package) const CALLER_MAX: u32 = 8000;
 
 /// The inline budgets: a callee inlines when it holds at most `warm` instructions outside rare blocks
-/// (`BLOCK_RARE`) and `all` in all; a `@cold` one, within SHRINK. `optimize`'s levels: none, the callees
+/// (`BLOCK_RARE`) and `all` in all; a `@cold` one, within SHRINK; an `@always_inline` one (`Sym.always`)
+/// whatever its size, up to CALLER_MAX. `optimize`'s levels: none, the callees
 /// no bigger than their calls (`SHRINK`), and past them by optimization level (scaled as LLVM's and GCC's
 /// thresholds: for size a fifth of the speed one, at the highest level half again).
 pub(package) struct Budget {
@@ -351,8 +352,11 @@ extend Inliner {
                 // A callee of one block and at most 3 instructions (a field read) is no bigger than its
                 // call: CALLER_MAX does not stop it. A failure path takes forwarders alone.
                 let tiny = e.blocks.len() == 1 && e.insts.len() <= 3;
+                // An `@always_inline` callee passes the size, cold and rare-path gates (the Core IR's
+                // inliner, which a native build skips, did as much: `ir::inline::always_native`).
+                let always = pk.syms[c.syms[t.a as usize] as usize].always;
                 // A `@cold` callee stays a call unless it is no bigger than one: its callers' code stays small.
-                let cold = pk.syms[c.syms[t.a as usize] as usize].cold && (f & IL_SHRINK) == 0;
+                let cold = pk.syms[c.syms[t.a as usize] as usize].cold && (f & IL_SHRINK) == 0 && !always;
                 // A call in a rare block (`BLOCK_RARE`) takes the callees no bigger than it: a copy there grows the
                 // code for a path that seldom runs (a caller's second round takes it once that path is the
                 // caller's warm one, `Run::warm_copies`).
@@ -363,7 +367,7 @@ extend Inliner {
                 };
                 // A float rewrite the caller allows and the callee does not would apply to the copy (of a
                 // callee that computes with floats).
-                if (c.fmath & ~e.fmath) != 0 && (f & IL_FLOAT) != 0 || !warm && (f & IL_FWD) == 0 || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || (f & cf) == 0 && !folds_small(
+                if (c.fmath & ~e.fmath) != 0 && (f & IL_FLOAT) != 0 || !warm && (f & IL_FWD) == 0 && !always || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || (f & cf) == 0 && !always && !folds_small(
                     e,
                     c,
                     t,

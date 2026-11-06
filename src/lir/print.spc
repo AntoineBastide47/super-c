@@ -45,6 +45,9 @@ pub(package) fn print_package(p: &Package, out: &mut String) {
         if s.noinline {
             out.push_str(" noinline");
         }
+        if s.always {
+            out.push_str(" always");
+        }
         if s.cold {
             out.push_str(" cold");
         }

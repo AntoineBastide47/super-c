@@ -8390,6 +8390,9 @@ extend Lower {
         if a.attr_of(n, AttrKind::ATTR_NOINLINE) != null {
             self.pkg.syms.index_mut(s as usize).noinline = true;
         }
+        if a.attr_of(n, AttrKind::ATTR_ALWAYS_INLINE) != null {
+            self.pkg.syms.index_mut(s as usize).always = true;
+        }
         if a.attr_of(n, AttrKind::ATTR_COLD) != null {
             self.pkg.syms.index_mut(s as usize).cold = true;
         }

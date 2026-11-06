@@ -588,6 +588,99 @@ fn a_tail_recursions_copy_carries_its_slice_in_registers() {
     assert(ok, "the copy stores nothing");
 }
 
+// A callee past the inline budget (75 instructions against `FAST`'s 60) inlines when it is `@always_inline`
+// (`Sym.always`) and stays a call otherwise.
+const ALWAYS_INLINE: str = M"(@always_inline
+fn mix(x: u64) u64 {
+    let mut h = x;
+    h = (h ^ (h >> 7)).wrapping_mul(0x9E3779B97F4A7C15);
+    h = (h ^ (h >> 8)).wrapping_mul(0xC37D6E4ACEB75933);
+    h = (h ^ (h >> 9)).wrapping_mul(0xE8C362DC1E24364F);
+    h = (h ^ (h >> 10)).wrapping_mul(0xE09576D6D91136D);
+    h = (h ^ (h >> 11)).wrapping_mul(0x334F4BFEBCFDF089);
+    h = (h ^ (h >> 12)).wrapping_mul(0x589540900C6ACDA7);
+    h = (h ^ (h >> 13)).wrapping_mul(0x7DDB35215BD7AAC3);
+    h = (h ^ (h >> 14)).wrapping_mul(0xA32129B2AB4487E1);
+    h = (h ^ (h >> 15)).wrapping_mul(0xC8671E43FAB164FD);
+    h = (h ^ (h >> 16)).wrapping_mul(0xEDAD12D54A1E421B);
+    h = (h ^ (h >> 17)).wrapping_mul(0x12F30766998B1F37);
+    h = (h ^ (h >> 18)).wrapping_mul(0x3838FBF7E8F7FC55);
+    h = (h ^ (h >> 19)).wrapping_mul(0x5D7EF0893864D971);
+    h = (h ^ (h >> 20)).wrapping_mul(0x82C4E51A87D1B68F);
+    h = (h ^ (h >> 21)).wrapping_mul(0xA80AD9ABD73E93AB);
+    h = (h ^ (h >> 22)).wrapping_mul(0xCD50CE3D26AB70C9);
+    h = (h ^ (h >> 23)).wrapping_mul(0xF296C2CE76184DE5);
+    h = (h ^ (h >> 24)).wrapping_mul(0x17DCB75FC5852B03);
+    h = (h ^ (h >> 25)).wrapping_mul(0x3D22ABF114F2081F);
+    h = (h ^ (h >> 26)).wrapping_mul(0x6268A082645EE53D);
+    h = (h ^ (h >> 27)).wrapping_mul(0x87AE9513B3CBC259);
+    h = (h ^ (h >> 28)).wrapping_mul(0xACF489A503389F77);
+    h = (h ^ (h >> 29)).wrapping_mul(0xD23A7E3652A57C93);
+    h = (h ^ (h >> 30)).wrapping_mul(0xF78072C7A21259B1);
+    h = (h ^ (h >> 31)).wrapping_mul(0x1CC66758F17F36CD);
+    return h;
+}
+
+fn mix_plain(x: u64) u64 {
+    let mut h = x;
+    h = (h ^ (h >> 7)).wrapping_mul(0x9E3779B97F4A7C15);
+    h = (h ^ (h >> 8)).wrapping_mul(0xC37D6E4ACEB75933);
+    h = (h ^ (h >> 9)).wrapping_mul(0xE8C362DC1E24364F);
+    h = (h ^ (h >> 10)).wrapping_mul(0xE09576D6D91136D);
+    h = (h ^ (h >> 11)).wrapping_mul(0x334F4BFEBCFDF089);
+    h = (h ^ (h >> 12)).wrapping_mul(0x589540900C6ACDA7);
+    h = (h ^ (h >> 13)).wrapping_mul(0x7DDB35215BD7AAC3);
+    h = (h ^ (h >> 14)).wrapping_mul(0xA32129B2AB4487E1);
+    h = (h ^ (h >> 15)).wrapping_mul(0xC8671E43FAB164FD);
+    h = (h ^ (h >> 16)).wrapping_mul(0xEDAD12D54A1E421B);
+    h = (h ^ (h >> 17)).wrapping_mul(0x12F30766998B1F37);
+    h = (h ^ (h >> 18)).wrapping_mul(0x3838FBF7E8F7FC55);
+    h = (h ^ (h >> 19)).wrapping_mul(0x5D7EF0893864D971);
+    h = (h ^ (h >> 20)).wrapping_mul(0x82C4E51A87D1B68F);
+    h = (h ^ (h >> 21)).wrapping_mul(0xA80AD9ABD73E93AB);
+    h = (h ^ (h >> 22)).wrapping_mul(0xCD50CE3D26AB70C9);
+    h = (h ^ (h >> 23)).wrapping_mul(0xF296C2CE76184DE5);
+    h = (h ^ (h >> 24)).wrapping_mul(0x17DCB75FC5852B03);
+    h = (h ^ (h >> 25)).wrapping_mul(0x3D22ABF114F2081F);
+    h = (h ^ (h >> 26)).wrapping_mul(0x6268A082645EE53D);
+    h = (h ^ (h >> 27)).wrapping_mul(0x87AE9513B3CBC259);
+    h = (h ^ (h >> 28)).wrapping_mul(0xACF489A503389F77);
+    h = (h ^ (h >> 29)).wrapping_mul(0xD23A7E3652A57C93);
+    h = (h ^ (h >> 30)).wrapping_mul(0xF78072C7A21259B1);
+    h = (h ^ (h >> 31)).wrapping_mul(0x1CC66758F17F36CD);
+    return h;
+}
+
+@noinline
+fn forced_mix(x: u64) u64 {
+    return mix(x) ^ mix(x + 1);
+}
+
+@noinline
+fn plain_mix(x: u64) u64 {
+    return mix_plain(x) ^ mix_plain(x + 1);
+}
+
+fn main(args: Vector<str>) i32 {
+    let n = args.len() as u64;
+    return ((forced_mix(n) ^ plain_mix(n)) & 1) as i32;
+}
+)";
+
+@test
+fn an_always_inline_callee_inlines_whatever_its_size() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", ALWAYS_INLINE);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "_mix", "build -O3 main.spc -o app");
+    let forced = printed(r.text(), "forced_mix");
+    let plain = printed(r.text(), "plain_mix");
+    let ok = r.ok() && forced.len() != 0 && !forced.contains("call") && plain.contains("@mix_plain(");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "the forced callee inlines, the other stays a call");
+}
+
 // A release build's vectorized loop interleaves the target's count of vector copies: its first vector
 // loop's block loads 2 vectors per pass on wasm32 (each copy is module size) and arm64 Linux, 4 on x86-64
 // Linux. The link may fail without the target's sysroot; the optimizer prints before it.

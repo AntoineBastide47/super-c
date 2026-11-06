@@ -170,8 +170,7 @@ pub(package) struct CalleeInfo {
     pub(package) demand: bool, // a generic body with a per-instantiation static_assert: the splice keeps the demand
     pub(package) big: bool, // past the size gate, with a switch on a const-generic parameter: sized per call (`live_size`)
     pub(package) vec_only: bool, // inlines into a caller that holds a vector only (`vet_body`)
-    /// `@always_inline` in a native build, whose backend inlines nothing: past the size, budget and
-    /// vector gates (`always_native`).
+    /// `@always_inline` in a native build: past the size, budget and vector gates (`always_native`).
     pub(package) always: bool,
 }
 
@@ -183,8 +182,8 @@ fn always_inline(p: &loader::Package, d: DefId) bool {
     ) != null;
 }
 
-/// Whether `d` is `@always_inline` in a native build of `pkg`: the splice is its only inlining, so it
-/// also passes the budget and the vector gates (the C compiler inlines it in a C build).
+/// Whether `d` is `@always_inline` in a native build of `pkg`: the splice also passes the budget and the
+/// vector gates (the C compiler inlines it in a C build; the LIR inliner, `Sym.always`, past this one).
 pub(package) fn always_native(pkg: *const loader::Package, d: DefId) bool {
     let p = unsafe &*pkg;
     return p.native && always_inline(p, d);
