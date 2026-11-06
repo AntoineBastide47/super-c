@@ -1127,7 +1127,8 @@ pub(package) fn uses(b: &Body, t: Inst, out: &mut Vector<Value>) {
     uses_into(b, t, out);
 }
 
-/// `uses`, appended to `out`.
+/// `uses`, appended to `out`. Inline: the passes over a body call it per instruction.
+@always_inline
 pub(package) fn uses_into(b: &Body, t: Inst, out: &mut Vector<Value>) {
     let f = op_info(t.op).form;
     if operand_a(f) && t.a != VNONE {

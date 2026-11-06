@@ -42,7 +42,9 @@ Per package, in `Run::new`:
 
 Per body, on `Opt` (`Run::job` runs the passes in order). `Opt::tables(pk, b, want)` computes
 only the levels `kept` lacks (`K_GRAPH` < `K_DOM` < `K_NEST` < `K_MEM` < `K_SLOTS`); every change to
-the body sets `kept = K_NONE`, and `forget` runs at a job's start and after inlining. `preheaders`
+the body sets `kept = K_NONE`, and `forget` runs at a job's start and after inlining. `thread`, which
+moves edges alone, keeps `K_GRAPH` (`cfg` and the predecessors again, the operands of the terminators
+and of its rewrites spliced in, `splice_ops`); `estimate` computes `cfg` alone. `preheaders`
 keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and in `loop_opts`
 `unpreheaders` takes back the tables `save_tables` copied:
 

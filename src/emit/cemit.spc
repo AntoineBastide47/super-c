@@ -193,6 +193,9 @@ pub(package) struct CEmit {
     /// Each module's backends (`backends_of`): BK_C, plus BK_LIR where LIR lowers its bodies too.
     pub(package) backends: Vector<u8>,
     snap_out: *mut Vector<mbe::MSub>, // `callee_binds`: where `callee_sym` puts a generic callee's bindings
+    // Whether `callee_sym` put them (`snap_out`) and the destination type did not name the receiver
+    // instance: the bindings a call without it (`callee_binds`) takes.
+    snap_took: bool,
     pub(package) out: String, // the reusable output buffer (caller-owned lifecycle, cleared per TU)
     pub(package) err: str<'static>, // first unsupported-construct reason ("" = ok)
     pub(package) refused: Vector<Refusal>, // every body `emit_fn`/`emit_closure` refused, for the driver's report
@@ -694,6 +697,7 @@ extend CEmit {
             lir: lir,
             backends: backends,
             snap_out: null,
+            snap_took: false,
             simd_on: simd_on,
             vec_prog: vec_prog,
             no_split: native_on(pk),
@@ -16929,6 +16933,7 @@ extend CEmit {
         let mut rit = TyInstance { decl: NODE_NONE };
         let mut rpm = b.module; // the pool the receiver instance (and its args) live in
         let mut recv_targs = false; // the call's bound args NAME the receiver (turbofish assoc fn)
+        let mut dest_inst = false; // the destination type names the receiver instance
         if is_minst {
             // A generic extend's method emits per receiver instance: `<InstName>__<method>`.
             let tgt = self.mg.method_target(callee.module, callee.node);
@@ -16941,9 +16946,25 @@ extend CEmit {
                 // `Type::<Args>::f::<U>()`: the qualifying instance (`Terminator.recv`) names the
                 // receiver, and the call's bound args are the function's own.
                 rit = self.recv_inst(b, impl_ty, tgt, &mut rpm);
+                // A qualifier without the arguments the extend's target fixes (`V::new` of `extend<T>
+                // V<T, 3>`) names no instance of its own: the destination's type does.
+                let ta = self.p().module_ast_const(tgt.module);
+                let tk = unsafe (*ta).at_const(tgt.node).kind;
+                if rit.decl != NODE_NONE && (tk == NodeKind::NODE_STRUCT || tk == NodeKind::NODE_ENUM) && rit.n as u32 < unsafe (*ta).ext(
+                    tgt.node,
+                ).aggregate.generics.len {
+                    let mut dpm = rpm;
+                    let d = self.recv_inst(b, dest_ty, tgt, &mut dpm);
+                    if d.decl != NODE_NONE {
+                        rit = d;
+                        rpm = dpm;
+                        dest_inst = true;
+                    }
+                }
             }
             if rit.decl == NODE_NONE {
                 rit = self.recv_inst(b, dest_ty, tgt, &mut rpm);
+                dest_inst = rit.decl != NODE_NONE;
             }
             if rit.decl == NODE_NONE && targs_len != 0 && tgt.node != NODE_NONE {
                 // `Type::<Args>::assoc()`: no receiver value or typed dest; the checker's bound
@@ -17060,6 +17081,7 @@ extend CEmit {
         }
         if self.snap_out != null {
             // The bindings the callee's instance reads (`callee_binds`).
+            self.snap_took = !dest_inst;
             *unsafe &mut *self.snap_out = self.callee_snap(
                 b,
                 callee,
@@ -17256,6 +17278,26 @@ extend CEmit {
         self.snap_out = out;
         let _ = self.term_callee_sym(b, t, false, &mut s);
         self.snap_out = null;
+    }
+
+    /// `term_callee_sym` of call `t` of body `b` with its destination type, putting the callee's bindings
+    /// into `out` as `callee_binds` does (`out` cleared first). Whether they are `callee_binds`' (into
+    /// `took`): not when the destination type named the receiver instance, or when no binding was made.
+    pub(package) fn term_callee_sym_binds(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        t: &ir::Terminator,
+        dst: &mut String,
+        out: &mut Vector<mbe::MSub>,
+        took: &mut bool,
+    ) bool {
+        out.clear();
+        self.snap_out = out;
+        self.snap_took = false;
+        let ok = self.term_callee_sym(b, t, true, dst);
+        self.snap_out = null;
+        *took = self.snap_took;
+        return ok;
     }
 
     // `*(T const volatile *)(p)`: the object of type `t` pointer operand `p` addresses, as a volatile

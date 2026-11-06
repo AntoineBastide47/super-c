@@ -7247,6 +7247,7 @@ extend Lower {
         let mut name = String::new();
         let mut fv = VNONE;
         let mut first: u32 = 0;
+        let mut snapped = false; // `binds` holds the callee's bindings (`bind_callee`)
         let mut pcallee = t.callee;
         let mut nfixed = NONE;
         let mut variadic = t.is_variadic;
@@ -7322,7 +7323,13 @@ extend Lower {
                 tys.push(T_PTR);
                 first = 1;
             } else {
-                if !c.term_callee_sym(b, &t, true, &mut name) {
+                // A generic callee's bindings come with its symbol (`bind_callee`).
+                let ok = if self.generic_callee(c, t.callee) {
+                    c.term_callee_sym_binds(b, &t, &mut name, &mut self.binds, &mut snapped)
+                } else {
+                    c.term_callee_sym(b, &t, true, &mut name)
+                };
+                if !ok {
                     return self.fail("callee-sym");
                 }
                 // An intrinsic the backend expands is a call of its name (`target::intrin`).
@@ -7358,7 +7365,7 @@ extend Lower {
         }
         // A generic callee's parameter types read the bindings of its instance (`arg_mode`); the
         // arguments read the caller's.
-        self.bind_callee(c, b, &t);
+        self.bind_callee(c, b, &t, snapped);
         for i in first..t.args_len {
             let opid = b.oper_pool[(t.args_start + i) as usize];
             if variadic && nfixed == NONE && t.callee.node != NODE_NONE {
@@ -9862,22 +9869,29 @@ extend Lower {
         }
     }
 
-    // `binds`: the bindings of the instance generic call `t` calls (`CEmit::callee_binds`) past the
-    // active ones; empty for a concrete callee.
-    fn bind_callee(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, t: &irc::Terminator) {
-        self.binds.clear();
-        let cl = t.callee;
+    // Whether `cl` is a generic function or a method of a generic or keyed extend: a call of it binds the
+    // callee's generic parameters (`bind_callee`).
+    fn generic_callee(self: &Self, c: &mut cbe::CEmit, cl: DefId) bool {
         if cl.node == NODE_NONE {
-            return;
+            return false;
         }
         let fd = Lower::ast(c, cl.module).at_const(cl.node);
-        if fd.kind != NodeKind::NODE_FUNCTION || Lower::ast(c, cl.module).ext(cl.node).function.generics.len == 0 && !c.mg.in_generic_extend(
+        return fd.kind == NodeKind::NODE_FUNCTION && (Lower::ast(c, cl.module).ext(cl.node).function.generics.len != 0 || c.mg.in_generic_extend(
             cl.module,
             cl.node,
-        ) && !c.mg.in_keyed_extend(cl.module, cl.node) {
+        ) || c.mg.in_keyed_extend(cl.module, cl.node));
+    }
+
+    // `binds`: the bindings of the instance generic call `t` calls (`CEmit::callee_binds`; `snapped`:
+    // already there, from its symbol) past the active ones; empty for a concrete callee.
+    fn bind_callee(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, t: &irc::Terminator, snapped: bool) {
+        if !self.generic_callee(c, t.callee) {
+            self.binds.clear();
             return;
         }
-        c.callee_binds(b, t, &mut self.binds);
+        if !snapped {
+            c.callee_binds(b, t, &mut self.binds);
+        }
         let base = c.mg.subs.len();
         // Keep the callee's own: the active ones lead the copy.
         let mut k: usize = 0;

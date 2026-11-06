@@ -150,6 +150,12 @@ fn argument_count_picks_an_associated_function(b: &mut h::ExitBatch) {
         "struct V<T, const N: usize> { pub e: [T; N] }\nextend<T: Copy> V<T, 2> { pub fn new(x: T, y: T) V<T, 2> { return V::<T, 2> { e: [x, y] }; } }\nextend<T: Copy> V<T, 3> { pub fn new(x: T, y: T, z: T) V<T, 3> { return V::<T, 3> { e: [x, y, z] }; } }\nfn main() i32 { let a = V::new(1, 2); let b = V::new(1, 2, 3); return a.e[1] + b.e[2] * 10; }\n",
         32,
     );
+    // Called, not inlined: each instance's symbol names the argument its extend fixes.
+    b.add(
+        "V::new with 2 and 3 arguments, not inlined",
+        "struct V<T, const N: usize> { pub e: [T; N] }\nextend<T: Copy> V<T, 2> { @noinline pub fn new(x: T, y: T) V<T, 2> { return V::<T, 2> { e: [x, y] }; } }\nextend<T: Copy> V<T, 3> { @noinline pub fn new(x: T, y: T, z: T) V<T, 3> { return V::<T, 3> { e: [x, y, z] }; } }\nfn main() i32 { let a = V::new(1, 2); let b = V::new(1, 2, 3); return a.e[1] + b.e[2] * 10; }\n",
+        32,
+    );
 }
 
 fn operators_of_generic_shapes(b: &mut h::ExitBatch) {
