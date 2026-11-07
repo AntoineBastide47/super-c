@@ -56,6 +56,8 @@ const SHARE_MAX: usize = 64;
 const LK_ZST: u8 = 2;
 const LK_STATIC: u8 = 3; // an item's storage: `addr` filled on first use
 const LK_CAP: u8 = 4; // a closure capture: env field `var` (its offset); by pointer when `byref`
+// The member lists `Lower::give_fields` keeps: one per nesting level of the callers.
+const FIELD_LISTS: usize = 16;
 
 struct LInfo {
     pub(package) kind: u8,
@@ -253,6 +255,8 @@ pub(package) struct Lower {
     hint: TyI, // the type an untyped constant operand takes: its destination's
     upack: Map<u32, u64>, // per untyped local a call fills: its layout (NONE: zero-sized) << 32 | its offsets in `uoffs`
     uoffs: Vector<u32>,
+    ls: LScratch, // the bodies' scratch the lowering reuses
+    lent: bool, // it holds a cache set `swap_caches` gave it, to give back at the next call
 }
 
 extend Lower {
@@ -335,6 +339,8 @@ extend Lower {
             hint: TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 },
             upack: Map::<u32, u64>::new(),
             uoffs: Vector::<u32>::new(),
+            ls: LScratch::new(),
+            lent: false,
         };
     }
 
@@ -805,7 +811,9 @@ extend Lower {
     // none, which `abi::unknown_class` reads; past 16 leaves it is no register aggregate, and the first 16
     // say so.
     fn layout_of(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId, ti: TyI) u32 {
-        let mut leaves = Vector::<(u32, u8)>::new();
+        // Taken from `lo_leaves` and given back: a nested call finds it empty and makes its own.
+        let mut leaves = replace(&mut self.ls.lo_leaves, Vector::<(u32, u8)>::new());
+        leaves.truncate(0);
         if ti.size <= 64 {
             // A concrete aggregate's leaves are the same in every body: found once.
             let (gm, gt) = self.grounded(c, m, t);
@@ -823,7 +831,9 @@ extend Lower {
                 }
             }
         }
-        return self.layout(ti.size, log2(ti.align), &leaves);
+        let r = self.layout(ti.size, log2(ti.align), &leaves);
+        self.ls.lo_leaves = leaves;
+        return r;
     }
 
     // The body's layout record of `size` bytes aligned to `1 << al_log2` with `leaves`: one record per
@@ -957,7 +967,7 @@ extend Lower {
         // Structs, unions, tuples, enums with payloads and closure envs: each member at its offset, in
         // offset order (the calling conventions classify the leaves by offset; `fields_of` lists members in
         // declared order).
-        let mut fl = Vector::<FieldAt>::new();
+        let mut fl = self.take_fields();
         if !self.fields_of(c, rm, rt, &mut fl) {
             return false;
         }
@@ -972,6 +982,7 @@ extend Lower {
                 return false;
             }
         }
+        self.give_fields(fl);
         return true;
     }
 
@@ -1007,6 +1018,20 @@ extend Lower {
             }
         }
         return true;
+    }
+
+    // An empty member list for `fields_of`, whose buffer `give_fields` took back from an earlier one (a
+    // nested caller's too).
+    fn take_fields(self: &mut Self) Vector<FieldAt> {
+        let mut v = self.ls.fls.pop().unwrap_or(Vector::<FieldAt>::new());
+        v.truncate(0);
+        return v;
+    }
+
+    fn give_fields(self: &mut Self, v: Vector<FieldAt>) {
+        if self.ls.fls.len() < FIELD_LISTS {
+            self.ls.fls.push(v);
+        }
     }
 
     // Whether type `(rm, rt)` is an enum or an instance of one.
@@ -1334,14 +1359,16 @@ extend Lower {
             }
             return self.fail("member");
         }
-        let mut fl = Vector::<FieldAt>::new();
+        let mut fl = self.take_fields();
         if !self.fields_of(c, rm, rt, &mut fl) {
             if self.dbg {
                 eprint("member-of: kind {} err {}\n", Lower::ast(c, rm).type_at(rt).kind as u32, self.err);
             }
             return self.fail("member-of");
         }
-        if member_in(&fl, pj, variant, out) {
+        let hit = member_in(&fl, pj, variant, out);
+        self.give_fields(fl);
+        if hit {
             return true;
         }
         return self.fail("member");
@@ -1350,7 +1377,6 @@ extend Lower {
     // The offset and machine type of a field named `name` of aggregate `(rm, rt)` (`ptr`, `len`,
     // `data`, `cap`); false when it has none.
     fn named_field(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, name: str, out: &mut FieldAt) bool {
-        let mut fl = Vector::<FieldAt>::new();
         let y = *Lower::ast(c, rm).type_at(rt);
         if y.kind == TypeKind::TYPE_DYN || y.kind == TypeKind::TYPE_SLICE {
             let second = name == "len" || name == "vt";
@@ -1364,6 +1390,7 @@ extend Lower {
             };
             return name == "ptr" || name == "len" || name == "data" || name == "vt";
         }
+        let mut fl = self.take_fields();
         if !self.fields_of(c, rm, rt, &mut fl) {
             return false;
         }
@@ -1383,9 +1410,11 @@ extend Lower {
             let sp = a.at_const(a.at_const(f.node).as_data.field.name).as_data.name.text;
             if src.slice(sp.start as usize, sp.end as usize) == name {
                 *out = f;
+                self.give_fields(fl);
                 return true;
             }
         }
+        self.give_fields(fl);
         return false;
     }
 }
@@ -1426,6 +1455,26 @@ pub(package) struct LCaches {
     zcache: Map<u64, bool>,
     // Per enum declaration (module << 32 | node), its greatest discriminant (`tag_bound`).
     bcache: Map<u64, u32>,
+    // The bodies' scratch of the lowering that gave the set back (`Lower::swap_caches`): the next one to
+    // take the set reuses its buffers, not a shard's empty ones.
+    parked: Parked,
+}
+
+// The buffers `Lower::swap_caches` hands on with a cache set: emptied at each body, so any lowering can
+// take them between bodies. `cv` stays: its entries hold the lowering's own view numbers.
+struct Parked {
+    pub(package) b: Body,
+    pub(package) td: Tidy,
+    pub(package) li: Vector<LInfo>,
+    pub(package) phis: Vector<Phi>,
+    pub(package) phi_ops: Vector<Value>,
+    pub(package) defs: Map<u64, Value>,
+    pub(package) panics: Map<u64, u32>,
+    pub(package) sym_map: Map<u32, u32>,
+    pub(package) lays: Map<u64, u32>,
+    pub(package) zeros: Map<u32, Value>,
+    pub(package) upack: Map<u32, u64>,
+    pub(package) ls: LScratch,
 }
 
 extend LCaches {
@@ -1441,15 +1490,145 @@ extend LCaches {
             opool: Vector::<u32>::new(),
             zcache: Map::<u64, bool>::new(),
             bcache: Map::<u64, u32>::new(),
+            parked: Parked {
+                b: Body::empty(),
+                td: Tidy::new(),
+                li: Vector::<LInfo>::new(),
+                phis: Vector::<Phi>::new(),
+                phi_ops: Vector::<Value>::new(),
+                defs: Map::<u64, Value>::new(),
+                panics: Map::<u64, u32>::new(),
+                sym_map: Map::<u32, u32>::new(),
+                lays: Map::<u64, u32>::new(),
+                zeros: Map::<u32, Value>::new(),
+                upack: Map::<u32, u64>::new(),
+                ls: LScratch::new(),
+            },
         };
     }
 }
 
 extend Lower {
-    /// Exchange this lowering's caches with set `cc`.
+    /// Exchange this lowering's caches with set `cc`. The calls come in pairs, a task's start and its end:
+    /// at the start the lowering also takes the bodies' scratch the set parks, at the end it parks its own
+    /// there, so the scratch goes on with the set.
     pub(package) fn swap_caches(self: &mut Self, cc: &mut LCaches) {
+        if self.lent {
+            self.trade();
+        }
         let mine = replace(&mut self.cc, LCaches::new());
         self.cc = replace(cc, mine);
+        if !self.lent {
+            self.trade();
+        }
+        self.lent = !self.lent;
+    }
+
+    // Exchange the bodies' scratch with the one the cache set parks.
+    fn trade(self: &mut Self) {
+        let pk = &mut self.cc.parked;
+        self.b = replace(&mut pk.b, replace(&mut self.b, Body::empty()));
+        self.td = replace(&mut pk.td, replace(&mut self.td, Tidy::new()));
+        self.li = replace(&mut pk.li, replace(&mut self.li, Vector::<LInfo>::new()));
+        self.phis = replace(&mut pk.phis, replace(&mut self.phis, Vector::<Phi>::new()));
+        self.phi_ops = replace(&mut pk.phi_ops, replace(&mut self.phi_ops, Vector::<Value>::new()));
+        self.defs = replace(&mut pk.defs, replace(&mut self.defs, Map::<u64, Value>::new()));
+        self.panics = replace(&mut pk.panics, replace(&mut self.panics, Map::<u64, u32>::new()));
+        self.sym_map = replace(&mut pk.sym_map, replace(&mut self.sym_map, Map::<u32, u32>::new()));
+        self.lays = replace(&mut pk.lays, replace(&mut self.lays, Map::<u64, u32>::new()));
+        self.zeros = replace(&mut pk.zeros, replace(&mut self.zeros, Map::<u32, Value>::new()));
+        self.upack = replace(&mut pk.upack, replace(&mut self.upack, Map::<u32, u64>::new()));
+        self.ls = replace(&mut pk.ls, replace(&mut self.ls, LScratch::new()));
+    }
+}
+
+// A lowering's reused buffers of the steps of one body (`call_term`, `cfg`, `share_plan`, `entry`, `finish`,
+// `body_i`, `layout_of`), each emptied or refilled where it is used.
+struct LScratch {
+    pub(package) lmap: Vector<u32>, // `Body::compact_lines`'s scratch
+    // `call_term`'s and `emit_call`'s buffers, reused from call to call.
+    pub(package) ct_args: Vector<Value>,
+    pub(package) ct_tys: Vector<u32>,
+    pub(package) ct_name: String,
+    pub(package) ct_all: Vector<Value>,
+    // `cfg`'s: the blocks in postorder, the search's stack, the blocks seen, the edges as `to << 32 | from`.
+    pub(package) cf_post: Vector<u32>,
+    pub(package) cf_stack: Vector<u64>,
+    pub(package) cf_seen: Vector<bool>,
+    pub(package) cf_pairs: Vector<u64>,
+    pub(package) sh_out: Vector<u32>, // `share_plan`'s result
+    pub(package) sh_scratch: ShareScratch,
+    // `entry`'s: the signature's parameter codes, the entry block's parameter types, their locals, the
+    // result types.
+    pub(package) en_ptys: Vector<u32>,
+    pub(package) en_etys: Vector<u8>,
+    pub(package) en_pl: Vector<u32>,
+    pub(package) en_tys: Vector<TypeId>,
+    // `finish`'s: per phi its parameter, the live phis as `block << 32 | phi`, an edge's arguments.
+    pub(package) fi_pidx: Vector<u32>,
+    pub(package) fi_byblk: Vector<u64>,
+    pub(package) fi_args: Vector<Value>,
+    pub(package) bi_mem: Vector<bool>, // `body_i`'s: per local, whether it needs memory (`scan`)
+    pub(package) lo_leaves: Vector<(u32, u8)>, // `layout_of`'s
+    pub(package) fls: Vector<Vector<FieldAt>>, // member lists given back (`take_fields`)
+}
+
+extend LScratch {
+    fn new() LScratch {
+        return LScratch {
+            lmap: Vector::<u32>::new(),
+            ct_args: Vector::<Value>::new(),
+            ct_tys: Vector::<u32>::new(),
+            ct_name: String::new(),
+            ct_all: Vector::<Value>::new(),
+            cf_post: Vector::<u32>::new(),
+            cf_stack: Vector::<u64>::new(),
+            cf_seen: Vector::<bool>::new(),
+            cf_pairs: Vector::<u64>::new(),
+            sh_out: Vector::<u32>::new(),
+            sh_scratch: ShareScratch::new(),
+            en_ptys: Vector::<u32>::new(),
+            en_etys: Vector::<u8>::new(),
+            en_pl: Vector::<u32>::new(),
+            en_tys: Vector::<TypeId>::new(),
+            fi_pidx: Vector::<u32>::new(),
+            fi_byblk: Vector::<u64>::new(),
+            fi_args: Vector::<Value>::new(),
+            bi_mem: Vector::<bool>::new(),
+            lo_leaves: Vector::<(u32, u8)>::new(),
+            fls: Vector::<Vector<FieldAt>>::new(),
+        };
+    }
+}
+
+// `Lower::share_plan`'s scratch, reused from body to body: per local its candidate index and its markers;
+// the candidates; per block the candidates live at its entry, those its markers keep and start; per
+// candidate the ones it meets; the groups' first locals and members.
+struct ShareScratch {
+    pub(package) ci: Vector<u32>,
+    pub(package) seen: Vector<u8>,
+    pub(package) cands: Vector<u32>,
+    pub(package) live_in: Vector<u64>,
+    pub(package) keep: Vector<u64>,
+    pub(package) born: Vector<u64>,
+    pub(package) conf: Vector<u64>,
+    pub(package) heads: Vector<u32>,
+    pub(package) members: Vector<u64>,
+}
+
+extend ShareScratch {
+    fn new() ShareScratch {
+        return ShareScratch {
+            ci: Vector::<u32>::new(),
+            seen: Vector::<u8>::new(),
+            cands: Vector::<u32>::new(),
+            live_in: Vector::<u64>::new(),
+            keep: Vector::<u64>::new(),
+            born: Vector::<u64>::new(),
+            conf: Vector::<u64>::new(),
+            heads: Vector::<u32>::new(),
+            members: Vector::<u64>::new(),
+        };
     }
 }
 
@@ -2083,6 +2262,8 @@ extend Lower {
             return false;
         }
         self.tidy();
+        // The statements whose instructions the tidy removed leave their locations.
+        self.b.compact_lines(&mut self.ls.lmap);
         let s = if s0 != NONE {
             s0
         } else {
@@ -2110,7 +2291,7 @@ extend Lower {
         self.li.truncate(0);
         self.var_ty.truncate(0);
         self.spc = NONE;
-        self.defs.clear();
+        self.defs.clear_keeping(KEEP_SLOTS);
         self.phis.truncate(0);
         self.phi_ops.truncate(0);
         self.lblk.truncate(0);
@@ -2118,18 +2299,18 @@ extend Lower {
         self.preds.truncate(0);
         self.hints.truncate(0);
         self.edges.truncate(0);
-        self.panics.clear();
+        self.panics.clear_keeping(KEEP_SLOTS);
         self.pan_list.truncate(0);
         self.pan_loc.truncate(0);
-        self.sym_map.clear();
-        self.zeros.clear();
-        self.lays.clear();
+        self.sym_map.clear_keeping(KEEP_SLOTS);
+        self.zeros.clear_keeping(KEEP_SLOTS);
+        self.lays.clear_keeping(KEEP_SLOTS);
         self.loc = 0;
         self.ret_ptr = VNONE;
         self.env = VNONE;
         self.temps_free.truncate(0);
         self.temps_used.truncate(0);
-        self.upack.clear();
+        self.upack.clear_keeping(KEEP_SLOTS);
         self.uoffs.truncate(0);
     }
 
@@ -2175,11 +2356,12 @@ extend Lower {
         // Which locals need memory (a projection other than through a pointer, an address taken), and
         // which have their address escape (then no result is written straight into them).
         let n = b.locals.len();
-        let mut mem = Vector::<bool>::new();
-        mem.resize_default(n);
+        let mut mem = replace(&mut self.ls.bi_mem, Vector::<bool>::new());
+        fill(&mut mem, n, false);
         self.escaped.truncate(0);
         self.escaped.resize_default(n);
         if !self.scan(c, b, &mut mem) || !self.untyped(c, b) {
+            self.ls.bi_mem = mem;
             return false;
         }
         for l in 0..n {
@@ -2188,12 +2370,14 @@ extend Lower {
             if d.storage == irc::LS_STATIC_REF {
                 info.kind = LK_STATIC;
                 if !self.ty(c, b.module, d.ty, &mut info.ti) {
+                    self.ls.bi_mem = mem;
                     return false;
                 }
             } else if ncaps != 0 && l as u32 >= cap_base && l as u32 < cap_base + ncaps {
                 info.kind = LK_CAP;
                 info.byref = (byref_caps >> (l as u32 - cap_base) as u64 & 1) != 0;
                 if !self.ty(c, b.module, d.ty, &mut info.ti) {
+                    self.ls.bi_mem = mem;
                     return false;
                 }
             } else if d.ty == TYPE_NONE && self.upack.contains_key(&(l as u32)) {
@@ -2215,6 +2399,7 @@ extend Lower {
                     if self.dbg {
                         eprint("lir-debug local {} of {}\n", l, b.locals.len());
                     }
+                    self.ls.bi_mem = mem;
                     return false;
                 }
                 if info.ti.cls == VC_ZST {
@@ -2227,6 +2412,7 @@ extend Lower {
             }
             self.li.push(info);
         }
+        self.ls.bi_mem = mem;
         if !self.cfg(b) {
             return false;
         }
@@ -2368,9 +2554,6 @@ extend Lower {
         for k in 0..nb {
             self.lblk[k] = NONE;
         }
-        // The entry block: the signature's parameters, then a jump into the core entry.
-        let sig_tys = Vector::<u8>::new();
-        let _ = sig_tys;
         self.order.truncate(0);
         // The successors of every block, once.
         self.sat.truncate(0);
@@ -2380,52 +2563,51 @@ extend Lower {
             Lower::succs(b, k as u32, &mut self.sl);
         }
         self.sat.push(self.sl.len() as u32);
-        let mut post = Vector::<u32>::new();
-        let mut stack = Vector::<u64>::new();
-        let mut seen = Vector::<bool>::new();
-        seen.resize_default(nb);
-        seen[b.entry as usize] = true;
-        stack.push(b.entry as u64 << 32);
+        self.ls.cf_post.truncate(0);
+        self.ls.cf_stack.truncate(0);
+        fill(&mut self.ls.cf_seen, nb, false);
+        self.ls.cf_seen[b.entry as usize] = true;
+        self.ls.cf_stack.push(b.entry as u64 << 32);
         // Each block enters once and each edge is taken once.
-        while stack.len() != 0 {
-            let top = stack.len() - 1;
-            let blk = (stack[top] >> 32) as u32;
-            let next = stack[top] as u32;
+        while self.ls.cf_stack.len() != 0 {
+            let top = self.ls.cf_stack.len() - 1;
+            let blk = (self.ls.cf_stack[top] >> 32) as u32;
+            let next = self.ls.cf_stack[top] as u32;
             let e = self.sat[blk as usize] + next;
             if e < self.sat[blk as usize + 1] {
-                stack[top] = blk as u64 << 32 | (next + 1) as u64;
+                self.ls.cf_stack[top] = blk as u64 << 32 | (next + 1) as u64;
                 let s = self.sl[e as usize];
                 if s as usize >= nb {
                     return self.fail("successor");
                 }
-                if !seen[s as usize] {
-                    seen[s as usize] = true;
-                    stack.push(s as u64 << 32);
+                if !self.ls.cf_seen[s as usize] {
+                    self.ls.cf_seen[s as usize] = true;
+                    self.ls.cf_stack.push(s as u64 << 32);
                 }
                 continue;
             }
-            post.push(blk);
-            stack.truncate(top);
+            self.ls.cf_post.push(blk);
+            self.ls.cf_stack.truncate(top);
         }
-        for k in 0..post.len() {
-            self.order.push(post[post.len() - 1 - k]);
+        for k in 0..self.ls.cf_post.len() {
+            self.order.push(self.ls.cf_post[self.ls.cf_post.len() - 1 - k]);
         }
         // Predecessors, each once, by block; the virtual entry block precedes the core entry.
-        let mut pairs = Vector::<u64>::new();
-        pairs.push(b.entry as u64 << 32 | self.virt as u64);
+        self.ls.cf_pairs.truncate(0);
+        self.ls.cf_pairs.push(b.entry as u64 << 32 | self.virt as u64);
         for k in 0..self.order.len() {
             let blk = self.order[k];
             for e in self.sat[blk as usize]..self.sat[blk as usize + 1] {
-                pairs.push(self.sl[e as usize] as u64 << 32 | blk as u64);
+                self.ls.cf_pairs.push(self.sl[e as usize] as u64 << 32 | blk as u64);
             }
         }
-        pairs.sort();
+        self.ls.cf_pairs.sort();
         self.npred.resize_default(nb + 2);
         let mut j: usize = 0;
         for k in 0..nb + 2 {
             self.npred[k] = self.preds.len() as u32;
-            while j < pairs.len() && (pairs[j] >> 32) as usize == k {
-                let pr = pairs[j] as u32;
+            while j < self.ls.cf_pairs.len() && (self.ls.cf_pairs[j] >> 32) as usize == k {
+                let pr = self.ls.cf_pairs[j] as u32;
                 if self.preds.len() as u32 == self.npred[k] || self.preds[self.preds.len() - 1] != pr {
                     self.preds.push(pr);
                 }
@@ -2606,7 +2788,7 @@ extend Lower {
         if Lower::ast(c, dm).at_const(dn).kind != NodeKind::NODE_STRUCT || unsafe Lower::ast(c, dm).ext(dn).aggregate.is_union {
             return;
         }
-        let mut fl = Vector::<FieldAt>::new();
+        let mut fl = self.take_fields();
         if !self.fields_of(c, rm, rt, &mut fl) {
             return;
         }
@@ -2626,6 +2808,7 @@ extend Lower {
                 self.owned_fields(c, f.m, f.t, base + f.off, frozen, depth - 1, out);
             }
         }
+        self.give_fields(fl);
     }
 
     // `frozen` at FROZEN_DEPTH, once per concrete type.
@@ -2678,16 +2861,19 @@ extend Lower {
         if Lower::p(c).is_prelude_item(d, "UnsafeCell") {
             return false;
         }
-        let mut fl = Vector::<FieldAt>::new();
+        let mut fl = self.take_fields();
         if !self.fields_of(c, rm, rt, &mut fl) {
             return false;
         }
+        let mut all = true;
         for k in 0..fl.len() {
             if fl[k].t != TYPE_NONE && !self.frozen(c, fl[k].m, fl[k].t, depth - 1) {
-                return false;
+                all = false;
+                break;
             }
         }
-        return true;
+        self.give_fields(fl);
+        return all;
     }
 
     // `Body.refs` of aggregate parameter local `l`: REF_INNER | REF_NOALIAS for a by-value `[]mut T` the
@@ -2763,9 +2949,12 @@ extend Lower {
         cap_base: u32,
         variadic: bool,
     ) bool {
-        let mut ptys = Vector::<u32>::new();
-        let mut etys = Vector::<u8>::new();
-        let mut pl = Vector::<u32>::new();
+        let mut ptys = replace(&mut self.ls.en_ptys, Vector::<u32>::new());
+        let mut etys = replace(&mut self.ls.en_etys, Vector::<u8>::new());
+        let mut pl = replace(&mut self.ls.en_pl, Vector::<u32>::new());
+        ptys.truncate(0);
+        etys.truncate(0);
+        pl.truncate(0);
         self.b.refs.truncate(0);
         self.b.owned.truncate(0);
         self.b.bools = 0;
@@ -2808,12 +2997,17 @@ extend Lower {
         if !any_ref {
             self.b.refs.truncate(0);
         }
-        let mut tys = Vector::<TypeId>::with_capacity(b.returns as usize);
+        let mut tys = replace(&mut self.ls.en_tys, Vector::<TypeId>::new());
+        tys.truncate(0);
         for r in 0..b.returns {
             tys.push(b.locals[r as usize].ty);
         }
         let ret = self.rets_code(c, b.module, &tys);
+        self.ls.en_tys = tys;
         if ret == NONE {
+            self.ls.en_ptys = ptys;
+            self.ls.en_etys = etys;
+            self.ls.en_pl = pl;
             return false;
         }
         if (ret & AGG) != 0 {
@@ -2900,7 +3094,10 @@ extend Lower {
         if (ret & AGG) != 0 {
             self.ret_ptr = self.b.param(b0, pl.len() as u32);
         }
-        let share = self.share_plan(b);
+        let mut share = replace(&mut self.ls.sh_out, Vector::<u32>::new());
+        let mut ss = replace(&mut self.ls.sh_scratch, ShareScratch::new());
+        self.share_plan(b, &mut share, &mut ss);
+        self.ls.sh_scratch = ss;
         for l in 0..self.li.len() {
             let info = self.li[l];
             if info.kind != LK_MEM || info.addr != VNONE {
@@ -2917,6 +3114,7 @@ extend Lower {
             };
             self.li.index_mut(l).addr = a;
         }
+        self.ls.sh_out = share;
         if c.ticks_on(b) {
             self.spc = self.var_ty.len() as u32;
             self.var_ty.push(T_I32);
@@ -2943,6 +3141,9 @@ extend Lower {
             }
         }
         let _ = cap_base;
+        self.ls.en_ptys = ptys;
+        self.ls.en_etys = etys;
+        self.ls.en_pl = pl;
         return true;
     }
 
@@ -2952,10 +3153,9 @@ extend Lower {
     // The markers' liveness follows every edge, so a local stays live on every path its storage does
     // (a cleanup path too). A local a drop reads (`dropped`) is none of them: its drop runs past its
     // marker. At most SHARE_MAX of them, in local order.
-    fn share_plan(self: &mut Self, b: &irc::CoreBody) Vector<u32> {
+    fn share_plan(self: &mut Self, b: &irc::CoreBody, out: &mut Vector<u32>, ss: &mut ShareScratch) {
         let nl = self.li.len();
-        let mut out = Vector::<u32>::new();
-        fill(&mut out, nl, NONE);
+        fill(out, nl, NONE);
         fill(&mut self.dropped, nl, false);
         for bb in b.blocks.as_slice() {
             if bb.term.kind == irc::TM_DROP && b.places[bb.term.a as usize].base as usize < nl {
@@ -2963,62 +3163,56 @@ extend Lower {
             }
         }
         // Per local its candidate index (NONE: none): a slot local both markers name.
-        let mut ci = Vector::<u32>::new();
-        fill(&mut ci, nl, NONE);
-        let mut seen = Vector::<u8>::new();
-        fill(&mut seen, nl, 0);
+        fill(&mut ss.ci, nl, NONE);
+        fill(&mut ss.seen, nl, 0);
         for s in b.statements.as_slice() {
             if (s.kind == irc::ST_STORAGE_LIVE || s.kind == irc::ST_STORAGE_DEAD) && s.a as usize < nl {
-                seen[s.a as usize] |= ast::pick(s.kind == irc::ST_STORAGE_LIVE, 1u8, 2u8);
+                ss.seen[s.a as usize] |= ast::pick(s.kind == irc::ST_STORAGE_LIVE, 1u8, 2u8);
             }
         }
-        let mut cands = Vector::<u32>::new();
+        ss.cands.truncate(0);
         for l in 0..nl {
             let info = self.li[l];
-            if seen[l] == 3 && !self.dropped[l] && info.kind == LK_MEM && info.addr == VNONE && l as u32 >= b.returns && cands.len() < SHARE_MAX {
-                ci[l] = cands.len() as u32;
-                cands.push(l as u32);
+            if ss.seen[l] == 3 && !self.dropped[l] && info.kind == LK_MEM && info.addr == VNONE && l as u32 >= b.returns && ss.cands.len() < SHARE_MAX {
+                ss.ci[l] = ss.cands.len() as u32;
+                ss.cands.push(l as u32);
             }
         }
-        if cands.len() < 2 {
-            return out;
+        if ss.cands.len() < 2 {
+            return;
         }
         // The candidates live at each block's entry: a forward union over the edges (`cfg`'s successors),
         // each block's markers as one step, `live & keep | born` (`share_walk`'s set at its end).
         let nb = b.blocks.len();
-        let mut live_in = Vector::<u64>::new();
-        fill(&mut live_in, nb, 0);
-        let mut keep = Vector::<u64>::new();
-        fill(&mut keep, nb, ~0u64);
-        let mut born = Vector::<u64>::new();
-        fill(&mut born, nb, 0);
+        fill(&mut ss.live_in, nb, 0);
+        fill(&mut ss.keep, nb, ~0u64);
+        fill(&mut ss.born, nb, 0);
         for k in 0..nb {
             let bb = b.blocks[k];
             for q in 0..bb.stmt_len {
                 let s = b.statements[(bb.stmt_start + q) as usize];
-                if s.a as usize >= nl || ci[s.a as usize] == NONE {
+                if s.a as usize >= nl || ss.ci[s.a as usize] == NONE {
                     continue;
                 }
-                let bit = 1u64 << ci[s.a as usize] as u64;
+                let bit = 1u64 << ss.ci[s.a as usize] as u64;
                 if s.kind == irc::ST_STORAGE_LIVE {
-                    born[k] |= bit;
+                    ss.born[k] |= bit;
                 } else if s.kind == irc::ST_STORAGE_DEAD {
-                    keep[k] &= ~bit;
-                    born[k] &= ~bit;
+                    ss.keep[k] &= ~bit;
+                    ss.born[k] &= ~bit;
                 }
             }
         }
-        let mut conf = Vector::<u64>::new();
-        fill(&mut conf, cands.len(), 0);
+        fill(&mut ss.conf, ss.cands.len(), 0);
         // Each round adds a bit or ends: at most one per candidate and block.
         for _ in 0..SHARE_MAX * nb + 1 {
             let mut changed = false;
             for k in 0..nb {
-                let cur = live_in[k] & keep[k] | born[k];
+                let cur = ss.live_in[k] & ss.keep[k] | ss.born[k];
                 for e in self.sat[k]..self.sat[k + 1] {
                     let t = self.sl[e as usize] as usize;
-                    if (live_in[t] | cur) != live_in[t] {
-                        live_in[t] |= cur;
+                    if (ss.live_in[t] | cur) != ss.live_in[t] {
+                        ss.live_in[t] |= cur;
                         changed = true;
                     }
                 }
@@ -3029,33 +3223,32 @@ extend Lower {
         }
         // Two candidates meet where both are live: at a block's entry or as one's storage starts.
         for k in 0..nb {
-            Lower::share_walk(b, k, live_in[k], &ci, &mut conf);
+            Lower::share_walk(b, k, ss.live_in[k], &ss.ci, &mut ss.conf);
         }
         // Greedy groups: a candidate joins the first group of its size and alignment none of whose members
         // it meets.
-        let mut heads = Vector::<u32>::new();
-        let mut members = Vector::<u64>::new();
-        for j in 0..cands.len() {
-            let l = cands[j];
+        ss.heads.truncate(0);
+        ss.members.truncate(0);
+        for j in 0..ss.cands.len() {
+            let l = ss.cands[j];
             let ti = self.li[l as usize].ti;
             let mut g = NONE;
-            for h in 0..heads.len() {
-                let hi = self.li[heads[h] as usize].ti;
-                if hi.size == ti.size && hi.align == ti.align && (conf[j] & members[h]) == 0 {
+            for h in 0..ss.heads.len() {
+                let hi = self.li[ss.heads[h] as usize].ti;
+                if hi.size == ti.size && hi.align == ti.align && (ss.conf[j] & ss.members[h]) == 0 {
                     g = h as u32;
                     break;
                 }
             }
             if g == NONE {
-                heads.push(l);
-                members.push(1u64 << j as u64);
+                ss.heads.push(l);
+                ss.members.push(1u64 << j as u64);
                 out[l as usize] = l;
             } else {
-                members[g as usize] |= 1u64 << j as u64;
-                out[l as usize] = heads[g as usize];
+                ss.members[g as usize] |= 1u64 << j as u64;
+                out[l as usize] = ss.heads[g as usize];
             }
         }
-        return out;
     }
 
     // Each set of the candidates (`share_plan`'s `ci`) live in core block `k` of `b`, from `live` at its
@@ -5745,7 +5938,7 @@ extend Lower {
             }
             return true;
         }
-        let mut fl = Vector::<FieldAt>::new();
+        let mut fl = self.take_fields();
         if !self.fields_of(c, rm, rt, &mut fl) {
             return self.fail("aggregate-fields");
         }
@@ -5762,6 +5955,7 @@ extend Lower {
                     let w = self.iconst(niche_int(el.niche), el.niche.none);
                     self.store(w, dst, el.niche.off, false);
                 }
+                self.give_fields(fl);
                 return true;
             }
             if el.niche.kind == lay::NK_NONE {
@@ -5812,6 +6006,7 @@ extend Lower {
                 let pa = self.ptradd(dst, VNONE, 0, end);
                 self.memset0(pa, el.size - end);
             }
+            self.give_fields(fl);
             return true;
         }
         // Struct and tuple members in declaration order; an omitted member is 0.
@@ -5845,6 +6040,7 @@ extend Lower {
                 return false;
             }
         }
+        self.give_fields(fl);
         return true;
     }
 
@@ -6560,7 +6756,8 @@ extend Lower {
         dst: Value,
     ) Value {
         let mut ret = T_NONE as u32;
-        let mut all = Vector::<Value>::with_capacity(args.len() + 1);
+        let mut all = replace(&mut self.ls.ct_all, Vector::<Value>::new());
+        all.truncate(0);
         all.extend_copy(args);
         let mut out = VNONE;
         if ti.cls == VC_SCALAR {
@@ -6582,6 +6779,7 @@ extend Lower {
             let k = self.sym(name, SK_FUNC);
             self.inst(O_CALL, rty, all.len() as u16, k, sg, at)
         };
+        self.ls.ct_all = all;
         return ast::pick(ti.cls == VC_SCALAR, r, out);
     }
 }
@@ -7245,9 +7443,29 @@ extend Lower {
             self.after_call(c, t);
             return true;
         }
-        let mut args = Vector::<Value>::new();
-        let mut tys = Vector::<u32>::new();
-        let mut name = String::new();
+        let mut args = replace(&mut self.ls.ct_args, Vector::<Value>::new());
+        let mut tys = replace(&mut self.ls.ct_tys, Vector::<u32>::new());
+        let mut name = replace(&mut self.ls.ct_name, String::new());
+        args.truncate(0);
+        tys.truncate(0);
+        name.clear();
+        let ok = self.call_term_in(c, b, t, &mut args, &mut tys, &mut name);
+        self.ls.ct_args = args;
+        self.ls.ct_tys = tys;
+        self.ls.ct_name = name;
+        return ok;
+    }
+
+    // `call_term` with its argument values and types and the callee's name in the buffers it passes.
+    fn call_term_in(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        b: &irc::CoreBody,
+        t: irc::Terminator,
+        args: &mut Vector<Value>,
+        tys: &mut Vector<u32>,
+        name: &mut String,
+    ) bool {
         let mut fv = VNONE;
         let mut first: u32 = 0;
         let mut snapped = false; // `binds` holds the callee's bindings (`bind_callee`)
@@ -7280,7 +7498,7 @@ extend Lower {
                 cy.as_data.decl,
             ) != null {
                 // A closure's type names its body: a direct call, which the optimizer may inline.
-                c.mg.closure_sym(cy.module, cy.as_data.decl, &mut name);
+                c.mg.closure_sym(cy.module, cy.as_data.decl, name);
                 if Lower::closure_caps(c, cy) != 0 {
                     let mut ei = TyI { cls: 0 };
                     if !self.ty(c, cm, ctt, &mut ei) {
@@ -7328,9 +7546,9 @@ extend Lower {
             } else {
                 // A generic callee's bindings come with its symbol (`bind_callee`).
                 let ok = if self.generic_callee(c, t.callee) {
-                    c.term_callee_sym_binds(b, &t, &mut name, &mut self.binds, &mut snapped)
+                    c.term_callee_sym_binds(b, &t, name, &mut self.binds, &mut snapped)
                 } else {
-                    c.term_callee_sym(b, &t, true, &mut name)
+                    c.term_callee_sym(b, &t, true, name)
                 };
                 if !ok {
                     return self.fail("callee-sym");
@@ -7339,8 +7557,8 @@ extend Lower {
                 let isa = tgt::isa(Lower::p(c).arch).name;
                 if Lower::p(c).c_fns.contains(&(t.callee.module as u64 << 32 | t.callee.node as u64)) && !intrin::has(
                     isa,
-                    &name,
-                ) && intrin::lane_form(isa, &name) == 0 {
+                    name.as_str(),
+                ) && intrin::lane_form(isa, name.as_str()) == 0 {
                     // Named as the extern block declares it.
                     let ca = Lower::ast(c, t.callee.module);
                     let nm = ca.at_const(ca.ext_name(t.callee.node)).as_data.name.text;
@@ -7377,7 +7595,7 @@ extend Lower {
                     nfixed = args.len() as u32;
                 }
             }
-            if !self.call_arg(c, b, t.callee, pcallee, i, opid, &mut args, &mut tys) {
+            if !self.call_arg(c, b, t.callee, pcallee, i, opid, args, tys) {
                 self.binds.clear();
                 self.ind_t = TYPE_NONE;
                 return false;
@@ -7416,7 +7634,7 @@ extend Lower {
                 let _ = if fv != VNONE {
                     self.inst(O_CALLIND, T_NONE, args.len() as u16, fv, sg, at)
                 } else {
-                    let k = self.sym(&name, SK_FUNC);
+                    let k = self.sym(name.as_str(), SK_FUNC);
                     self.inst(O_CALL, T_NONE, args.len() as u16, k, sg, at)
                 };
                 self.after_call(c, t);
@@ -7469,7 +7687,7 @@ extend Lower {
                 let _ = if fv != VNONE {
                     self.inst(O_CALLIND, T_NONE, args.len() as u16, fv, sg, at)
                 } else {
-                    let k = self.sym(&name, SK_FUNC);
+                    let k = self.sym(name.as_str(), SK_FUNC);
                     self.inst(O_CALL, T_NONE, args.len() as u16, k, sg, at)
                 };
                 for r in 0..t.dests_len {
@@ -7511,14 +7729,14 @@ extend Lower {
         ) == ti.mty && self.vty(args[1]) == ti.mty && self.vty(args[2]) == ti.mty {
             // The C library's fused multiply-add on a processor that has the instruction: one rounding too.
             r = self.inst(O_FMA, ti.mty, 0, args[0], args[1], args[2]);
-        } else if fv != VNONE || !self.rt_prim(nm, &args, &mut r) && !self.mem_intrin(c, nm, &args, &tys, ti, &mut r) && !self.lanes_intrin(
+        } else if fv != VNONE || !self.rt_prim(nm, &*args, &mut r) && !self.mem_intrin(c, nm, &*args, &*tys, ti, &mut r) && !self.lanes_intrin(
             c,
             nm,
-            &args,
+            &*args,
             ti,
             &mut r,
         ) {
-            r = self.emit_call(nm, fv, &args, &tys, nfixed, variadic, ti, c, b.module, dty, dst);
+            r = self.emit_call(nm, fv, &*args, &*tys, nfixed, variadic, ti, c, b.module, dty, dst);
             if ext && fv == VNONE {
                 self.mark_ext(nm);
             }
@@ -8207,9 +8425,10 @@ extend Lower {
         }
         // Block parameters: the entry's, then each core block's live phis.
         let np0 = self.b.blocks[0].param_len as u32;
-        let mut pidx = Vector::<u32>::new();
-        pidx.resize_default(self.phis.len());
-        let mut byblk = Vector::<u64>::new();
+        let mut pidx = replace(&mut self.ls.fi_pidx, Vector::<u32>::new());
+        fill(&mut pidx, self.phis.len(), 0);
+        let mut byblk = replace(&mut self.ls.fi_byblk, Vector::<u64>::new());
+        byblk.truncate(0);
         for i in 0..self.phis.len() {
             if self.phis[i].repl == VNONE {
                 byblk.push(self.phis[i].blk as u64 << 32 | i as u64);
@@ -8240,6 +8459,8 @@ extend Lower {
             }
         }
         if self.b.params.len() > 0x3FFFFFFF {
+            self.ls.fi_pidx = pidx;
+            self.ls.fi_byblk = byblk;
             return self.fail("parameters");
         }
         // Operands: a phi's value becomes its parameter (or its replacement's).
@@ -8266,7 +8487,7 @@ extend Lower {
             }
         }
         // Edges: each passes its target's phis their values at the end of its source.
-        let mut args = Vector::<Value>::new();
+        let mut args = replace(&mut self.ls.fi_args, Vector::<Value>::new());
         for i in 0..self.b.insts.len() {
             let t = self.b.insts[i];
             if t.op == O_JMP {
@@ -8285,6 +8506,9 @@ extend Lower {
                 }
             }
         }
+        self.ls.fi_pidx = pidx;
+        self.ls.fi_byblk = byblk;
+        self.ls.fi_args = args;
         return self.err.len() == 0;
     }
 
@@ -8424,7 +8648,7 @@ extend Lower {
 
     /// Move `other`'s bodies, data and refusals into this lowering.
     pub(package) fn absorb(self: &mut Self, other: &mut Lower) {
-        let _ = self.pkg.absorb(&other.pkg);
+        let _ = self.pkg.absorb_move(&mut other.pkg);
         for i in 0..other.conly.len() {
             self.conly.push(other.conly[i]);
             self.conly_why.push(replace(other.conly_why.index_mut(i), String::new()));
@@ -8805,7 +9029,7 @@ extend Lower {
         if self.fl_depth >= 8 {
             return lay::Layout { ok: false };
         }
-        let mut fl = Vector::<FieldAt>::new();
+        let mut fl = self.take_fields();
         self.fl_depth += 1;
         let ok = self.fields_of(c, rm, rt, &mut fl);
         self.fl_depth -= 1;
@@ -8834,6 +9058,7 @@ extend Lower {
                 al = ti.align;
             }
         }
+        self.give_fields(fl);
         return lay::Layout { ok: true, size: round_up(size as u32, al as u32), align: al };
     }
 }
@@ -9796,7 +10021,7 @@ extend Lower {
             let mut rm = m;
             let mut rt = TYPE_NONE;
             let _ = Lower::resolved(c, m, t, &mut rm, &mut rt);
-            let mut fl = Vector::<FieldAt>::new();
+            let mut fl = self.take_fields();
             if !self.fields_of(c, rm, rt, &mut fl) {
                 return false;
             }
@@ -9826,6 +10051,7 @@ extend Lower {
                     return self.fail("static-field");
                 }
             }
+            self.give_fields(fl);
             return true;
         }
         if n.kind != NodeKind::NODE_LITERAL {

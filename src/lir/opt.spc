@@ -847,8 +847,8 @@ extend Opt {
         }
         self.tables(pk, b, K_MEM);
         self.fresh(b);
-        self.pure.clear();
-        self.made.clear();
+        self.pure.clear_keeping(KEEP_SLOTS);
+        self.made.clear_keeping(KEEP_SLOTS);
         let mut any = false;
         for h in 0..b.blocks.len() as u32 {
             let hb = b.blocks[h as usize];
@@ -4091,7 +4091,7 @@ extend Opt {
         self.extra.truncate(0);
         self.hoisted.truncate(0);
         self.pre.truncate(0);
-        self.unbiased.clear();
+        self.unbiased.clear_keeping(KEEP_SLOTS);
     }
 
     // The entry parameters that point at a by-value aggregate of at most PSLOT_MAX bytes (the body's own copy)
@@ -4616,7 +4616,7 @@ extend Opt {
         self.kept = K_NONE;
         let nb = b.blocks.len();
         self.fresh(b);
-        self.made.clear();
+        self.made.clear_keeping(KEEP_SLOTS);
         self.selected = false;
         self.refold = false;
         self.unstored = false;
@@ -4633,12 +4633,12 @@ extend Opt {
             self.repl[(r >> 32) as usize] = r as u32;
         }
         self.trepl.truncate(0);
-        self.pure.clear();
-        self.mem.clear();
-        self.cond.clear();
-        self.rel.clear();
-        self.ub.clear();
-        self.eqs.clear();
+        self.pure.clear_keeping(KEEP_SLOTS);
+        self.mem.clear_keeping(KEEP_SLOTS);
+        self.cond.clear_keeping(KEEP_SLOTS);
+        self.rel.clear_keeping(KEEP_SLOTS);
+        self.ub.clear_keeping(KEEP_SLOTS);
+        self.eqs.clear_keeping(KEEP_SLOTS);
         self.log.truncate(0);
         self.places.truncate(0);
         fill(&mut self.end_state, nb * TBAA_TAGS, 0);

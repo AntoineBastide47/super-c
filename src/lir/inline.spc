@@ -452,11 +452,11 @@ extend Inliner {
             let sc = c.scopes[x];
             o.scopes.push(Scope { site: sc.site, group: sc.group, root: self.cval(sc.root) });
         }
-        self.smap.clear();
+        self.smap.clear_keeping(KEEP_SLOTS);
         for k in 0..c.syms.len() {
             self.smap.insert(c.syms[k], k as u32);
         }
-        self.mmap.clear();
+        self.mmap.clear_keeping(KEEP_SLOTS);
         for k in 0..c.msgs.len() {
             self.mmap.insert(c.msgs[k], k as u32);
         }

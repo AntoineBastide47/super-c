@@ -3418,6 +3418,9 @@ struct SeedTask {
 unsafe extend SeedTask as Send {}
 
 fn cemit_seed_task(t: SeedTask) {
+    // A task preempted while it holds a pooled context would make its worker's next task take another,
+    // whose caches fill again: one context per task in flight, not per worker.
+    prt::preempt_mask_enter();
     let mut dow = dctx_take(t.p);
     let p = unsafe &mut *t.p;
     let o = unsafe &mut *t.out;
@@ -3443,6 +3446,7 @@ fn cemit_seed_task(t: SeedTask) {
     }
     o.cem.swap_caches(&mut dow.lc);
     dctx_put(dow);
+    prt::preempt_mask_exit();
 }
 
 // Lower `lw`'s definition `node` again under the instantiation `subs` (a reflection binder or a
@@ -3849,7 +3853,8 @@ unsafe extend DrainTask as Send {}
 fn cemit_drain_task(t: DrainTask) {
     // One drop/inline context for the whole task: the inliner's vetted-callee cache is the
     // expensive part (each miss lowers and copies the callee); per-demand contexts rebuilt it
-    // from nothing.
+    // from nothing. One context per task in flight (`cemit_seed_task`).
+    prt::preempt_mask_enter();
     let mut dow = dctx_take(t.p);
     let p = unsafe &mut *t.p;
     let o = unsafe &mut *t.out;
@@ -3868,6 +3873,7 @@ fn cemit_drain_task(t: DrainTask) {
     }
     o.cem.swap_caches(&mut dow.lc);
     dctx_put(dow);
+    prt::preempt_mask_exit();
 }
 
 fn cemit_drain_slice_one(
@@ -4129,6 +4135,8 @@ struct LowTask {
 unsafe extend LowTask as Send {}
 
 fn cemit_low_task(t: LowTask) {
+    // One context per task in flight (`cemit_seed_task`).
+    prt::preempt_mask_enter();
     let mut dow2 = dctx_take(t.p);
     let p = unsafe &mut *t.p;
     let res = t.res;
@@ -4155,6 +4163,7 @@ fn cemit_low_task(t: LowTask) {
         unsafe t.oks[i as usize] = ok;
     }
     dctx_put(dow2);
+    prt::preempt_mask_exit();
 }
 
 // The raw casts these launchers take live only for the call: the checker retains a laundered
@@ -4898,7 +4907,8 @@ pub(package) fn cemit_package(
     let mut acc = SeedAcc::new(TuBufs::new(p.modules.len()));
     // Pre-size every buffer from the corpus: a module's C runs about 1.7 bytes per source byte (two
     // leave most modules one allocation), the instance TU under a quarter of the whole, prototypes a
-    // byte per AST node. Growth past an estimate stays geometric.
+    // byte per AST node. Growth past an estimate stays geometric. A native build renders no module's C
+    // into them: none.
     let mut src_total: usize = 0;
     {
         let mut est_nodes: usize = 0;
@@ -4907,11 +4917,15 @@ pub(package) fn cemit_package(
                 est_nodes += p.modules[m].ast.get_ref().nnodes();
             }
             if module_emits(p, live, m) {
-                acc.ch.bufs.index_mut(m).reserve(2 * p.modules[m].source.len());
+                if !p.native {
+                    acc.ch.bufs.index_mut(m).reserve(2 * p.modules[m].source.len());
+                }
                 src_total += p.modules[m].source.len();
             }
         }
-        acc.ch.bufs.index_mut(p.modules.len()).reserve(src_total / 4);
+        if !p.native {
+            acc.ch.bufs.index_mut(p.modules.len()).reserve(src_total / 4);
+        }
         acc.protos.reserve(est_nodes);
     }
     // Chunk provenance: proto_of precedes every chunk append, so prototype line k pairs with chunk k.
@@ -5718,7 +5732,8 @@ pub(package) fn cemit_package(
         cdit.max_steps = unsafe (*cdit.parent).max_steps;
         cdit.max_slots = unsafe (*cdit.parent).max_slots;
     }
-    let mut cdefs = Segs::new();
+    // A native build reads the entries alone (`native_assemble`).
+    let mut cdefs = Segs::keeping(!p.native);
     let mut cd_own9: ModuleId = 0;
     {
         let mut cd_ok: u64 = 0;
@@ -6076,7 +6091,7 @@ pub(package) fn cemit_package(
     } else {
         ""
     };
-    let mut sdefs = Segs::new();
+    let mut sdefs = Segs::keeping(!p.native);
     let mut tdecl = Segs::new();
     let mut sd_own9: ModuleId = 0;
     let mut reg_names = Vector::<String>::new();
@@ -10499,25 +10514,49 @@ struct Segs {
     pub(package) txt: String,
     pub(package) own: Vector<ModuleId>,
     pub(package) end: Vector<u32>,
+    // Without `keep`, `close` and `push_empty` drop the text and count its bytes in `base`: the entries'
+    // owners and ends stay, as a native build reads them alone.
+    keep: bool,
+    base: u32,
 }
 
 extend Segs {
     fn new() Segs {
-        return Segs { txt: String::new(), own: Vector::<ModuleId>::new(), end: Vector::<u32>::new() };
+        return Segs::keeping(true);
+    }
+
+    // `new`, the text kept when `keep`.
+    fn keeping(keep: bool) Segs {
+        return Segs {
+            txt: String::new(),
+            own: Vector::<ModuleId>::new(),
+            end: Vector::<u32>::new(),
+            keep: keep,
+            base: 0,
+        };
     }
 
     // Close the text appended since the last entry as one entry owned by `own` (none when empty).
     fn close(self: &mut Self, own: ModuleId) {
-        if self.txt.len() as u32 != cap_pe(&self.end, self.end.len() as u32) {
+        if self.base + self.txt.len() as u32 != cap_pe(&self.end, self.end.len() as u32) {
             self.own.push(own);
-            self.end.push(self.txt.len() as u32);
+            self.end.push(self.base + self.txt.len() as u32);
+            self.drop_text();
         }
     }
 
     // An empty segment, which `close` would not record.
     fn push_empty(self: &mut Self, own: ModuleId) {
         self.own.push(own);
-        self.end.push(self.txt.len() as u32);
+        self.end.push(self.base + self.txt.len() as u32);
+        self.drop_text();
+    }
+
+    fn drop_text(self: &mut Self) {
+        if !self.keep {
+            self.base += self.txt.len() as u32;
+            self.txt.truncate(0);
+        }
     }
 
     const fn at(self: &Self, i: usize) str {

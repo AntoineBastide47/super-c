@@ -58,7 +58,7 @@ keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and 
 | Private slots and the slot each address derives, alias classes and their scope roots' bases, slot escapes, frozen memory, per-block and per-loop writes and tags | `Opt::memory` (`privates`, `classes`, `slot_escapes`, `root_bases`, `frozen`, `bw`, `bt`, `bpw`, `bst`) | `Opt` (`pder`, which `slot_escapes` and `slot_apart` read through `der_slot`; `cbase` among them) | `K_MEM`: any change |
 | Slot base, offset, escape | `Opt::slot_writes` | `Opt` | `K_SLOTS`: any change |
 | Slots an instruction still addresses | `Opt::rebuild`, `emit` | `Opt.sused` | the next rebuild |
-| The pool records and `lines` entries a body names (dead ones dropped; `compact_lines` keeps equal entries apart) | `Body::compact_pool`, at the end of `Run::job` | `Body.pool`, `Body.lines` | the next pass that adds records |
+| The pool records and `lines` entries a body names (dead ones dropped; `compact_lines` keeps equal entries apart) | `Body::compact_pool`, at the end of `Run::job`; `lines` also in `Lower::body` before `Package::define` | `Body.pool`, `Body.lines` | the next pass that adds records |
 | Rare blocks | `Opt::estimate` | `BLOCK_RARE` flags on the body | any block change; codegen reads them too |
 | Loop weights | `Opt::weigh` | `Opt` | any edge or block change |
 | Unsigned upper bound of a value | `Opt::ubound` | not stored | per call |

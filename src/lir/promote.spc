@@ -310,7 +310,7 @@ extend Promoter {
         fill(&mut self.drop, b.insts.len(), false);
         self.xins.truncate(0);
         self.xwords.truncate(0);
-        self.eargs.clear();
+        self.eargs.clear_keeping(KEEP_SLOTS);
         self.evals.truncate(0);
         for i in 0..b.insts.len() {
             self.drop[i] = self.cdrop[i];
@@ -1431,7 +1431,7 @@ extend Promoter {
             self.drop[i] = self.cdrop[i];
         }
         self.xins.truncate(0);
-        self.eargs.clear();
+        self.eargs.clear_keeping(KEEP_SLOTS);
         self.evals.truncate(0);
         self.log.truncate(0);
         self.stack.truncate(0);

@@ -483,6 +483,10 @@ pub(package) fn fill<T: Clone + Default + Eq>(v: &mut Vector<T>, n: usize, x: T)
     }
 }
 
+/// The slots up to which a map a pass clears per body or per walk keeps its storage (`Map::clear_keeping`):
+/// a large body's would otherwise go with the next small one's clear, and the body after grow it again.
+pub(package) const KEEP_SLOTS: usize = 4096;
+
 /// A table size `n` with room for the additions of the passes that follow (a quarter, and 16): a table
 /// reserved at `n` exactly would double for a few.
 pub(package) const fn grown(n: u32) usize {
@@ -1197,13 +1201,6 @@ fn exact<T: Copy>(v: &Vector<T>) Vector<T> {
     return out;
 }
 
-// `v` in an exact-capacity buffer, when its own has slack.
-fn shrink<T: Copy>(v: &mut Vector<T>) {
-    if v.capacity() > v.len() {
-        *v = exact(v);
-    }
-}
-
 extend Inst as Copy {}
 extend Block as Copy {}
 extend Slot as Copy {}
@@ -1257,7 +1254,9 @@ extend Body {
         self.slots.truncate(0);
         self.syms.truncate(0);
         self.msgs.truncate(0);
-        self.lines.truncate(1);
+        // Entry 0 too, for a body `empty` made.
+        self.lines.truncate(0);
+        self.lines.push(Loc { file: 0, line: 0, col: 0 });
         self.inl.truncate(0);
         self.sig = NONE;
         self.refs.truncate(0);
@@ -1355,11 +1354,11 @@ extend Body {
         self.compact_lines(&mut s.lmap);
     }
 
-    // Keep in `lines` only entry 0 and the entries `locs`, `inl` and `scopes` name, in their order, and
-    // renumber those. Two equal entries stay two: each is a row of its own and an inline site of its own.
+    /// Keep in `lines` only entry 0 and the entries `locs`, `inl` and `scopes` name, in their order, and
+    /// renumber those (`map`: scratch). Two equal entries stay two: each is a row of its own and an inline site of its own.
     // A copy of the body takes its `lines` whole, and the removed instructions' entries, of the body and
     // of each copy it inlined, would go along.
-    fn compact_lines(self: &mut Self, map: &mut Vector<u32>) {
+    pub(package) fn compact_lines(self: &mut Self, map: &mut Vector<u32>) {
         let n = self.lines.len();
         map.truncate(0);
         map.resize_default(n);
@@ -1399,20 +1398,20 @@ extend Body {
     /// Give back every table's growth slack: a body the optimizer finished keeps its tables until code
     /// generation, and the passes' buffers it took (`Opt::rebuild`, the inliner) are sized for larger ones.
     pub(package) fn shrink(self: &mut Self) {
-        shrink(&mut self.insts);
-        shrink(&mut self.locs);
-        shrink(&mut self.blocks);
-        shrink(&mut self.params);
-        shrink(&mut self.pool);
-        shrink(&mut self.words);
-        shrink(&mut self.slots);
-        shrink(&mut self.syms);
-        shrink(&mut self.msgs);
-        shrink(&mut self.lines);
-        shrink(&mut self.inl);
-        shrink(&mut self.refs);
-        shrink(&mut self.owned);
-        shrink(&mut self.scopes);
+        self.insts.shrink_to_fit();
+        self.locs.shrink_to_fit();
+        self.blocks.shrink_to_fit();
+        self.params.shrink_to_fit();
+        self.pool.shrink_to_fit();
+        self.words.shrink_to_fit();
+        self.slots.shrink_to_fit();
+        self.syms.shrink_to_fit();
+        self.msgs.shrink_to_fit();
+        self.lines.shrink_to_fit();
+        self.inl.shrink_to_fit();
+        self.refs.shrink_to_fit();
+        self.owned.shrink_to_fit();
+        self.scopes.shrink_to_fit();
     }
 
     // `compact_pool`'s copy of the `n` words at `at` (an empty range: the copy's end).
@@ -1921,7 +1920,8 @@ extend Package {
             fmath: 0,
             fma: false,
             half: HALF_NONE,
-            names: nm::Names::with_capacity(1 << 14, 1 << 10),
+            // Small: a parallel lowering makes a package per shard, and the tables grow geometrically.
+            names: nm::Names::with_capacity(1 << 8, 1 << 4),
             files: Vector::<u32>::new(),
             syms: Vector::<Sym>::new(),
             msgs: Vector::<u32>::new(),
@@ -2140,6 +2140,20 @@ extend Package {
     /// is one symbol; a name both define keeps this package's definition (an emission two emitters
     /// repeat). False, with this package incomplete, when the data models differ.
     pub(package) fn absorb(self: &mut Self, other: &Package) bool {
+        let mut none = Vector::<Body>::new();
+        return self.absorb_from(other, &mut none);
+    }
+
+    /// `absorb`, the bodies moved out of `other` (each it gives is left empty), not copied.
+    pub(package) fn absorb_move(self: &mut Self, other: &mut Package) bool {
+        let mut bs = replace(&mut other.bodies, Vector::<Body>::new());
+        let ok = self.absorb_from(other, &mut bs);
+        other.bodies = bs;
+        return ok;
+    }
+
+    // `absorb`, the bodies taken from `moved` when it holds `other`'s, else copied from `other`.
+    fn absorb_from(self: &mut Self, other: &Package, moved: &mut Vector<Body>) bool {
         if other.ptr_bytes != self.ptr_bytes {
             return false;
         }
@@ -2184,7 +2198,11 @@ extend Package {
                 self.syms.index_mut(s as usize).sect = self.name(other.spell(os.sect));
             }
             if os.kind == SK_FUNC {
-                let mut b = other.bodies[os.def as usize].compact();
+                let mut b = if moved.len() != 0 {
+                    replace(moved.index_mut(os.def as usize), Body::empty())
+                } else {
+                    other.bodies[os.def as usize].compact()
+                };
                 for k in 0..b.syms.len() {
                     b.syms[k] = smap[b.syms[k] as usize];
                 }

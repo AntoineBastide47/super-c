@@ -288,6 +288,13 @@ extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
     /// entries (an earlier fill grew it) is released instead, so a clear costs O(entries) amortized: a
     /// map that keeps its size never grows past 3 times its entries.
     pub fn clear(self: &mut Map<K, V, A, S>) {
+        self.clear_keeping(64);
+    }
+
+    /// `clear`, the storage kept whenever it has at most `slots` slots: for a map refilled with entry
+    /// counts that vary from fill to fill, whose large fills would otherwise make the small ones after
+    /// them grow it again. A clear then costs O(entries + `slots`).
+    pub fn clear_keeping(self: &mut Map<K, V, A, S>, slots: usize) {
         // An empty map has every slot unused (`remove` shifts entries back, leaving no tombstones).
         if self.len == 0 {
             return;
@@ -305,7 +312,7 @@ extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
                 }
             }
         }
-        if self.cap > 64 && self.cap > 8 * self.len {
+        if self.cap > slots && self.cap > 8 * self.len {
             self.release();
         } else {
             unsafe memset(self.used, 0, self.cap);
