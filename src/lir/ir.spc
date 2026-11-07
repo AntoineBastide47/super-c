@@ -483,6 +483,12 @@ pub(package) fn fill<T: Clone + Default + Eq>(v: &mut Vector<T>, n: usize, x: T)
     }
 }
 
+/// `v` as a copy of `from`, its buffer reused.
+pub(package) fn assign<T: Copy>(v: &mut Vector<T>, from: &Vector<T>) {
+    v.truncate(0);
+    v.extend_copy(from);
+}
+
 /// Whether `t` may write memory or order memory accesses: a store, a copy, a fill, an atomic or a fence,
 /// a call, inline assembly, a system operation, a vector operation or a variadic access.
 pub(package) const fn writes_memory(t: Inst) bool {
@@ -1163,9 +1169,8 @@ pub(package) struct Scope {
     pub(package) root: Value,
 }
 
-// An exact-capacity copy of `v`.
 /// `Body::compact_pool`'s scratch: per old pool index, the copy of the record that starts there (its new
-/// index plus 1 << 32 | its length; 0: none), and the new pool.
+/// index plus 1 << 32 | its length; 0: none), then per `lines` entry its new index; and the new pool.
 pub(package) struct PoolScratch {
     pub(package) map: Vector<u64>,
     pub(package) out: Vector<u32>,
@@ -1177,10 +1182,18 @@ extend PoolScratch {
     }
 }
 
+// An exact-capacity copy of `v`.
 fn exact<T: Copy>(v: &Vector<T>) Vector<T> {
     let mut out = Vector::<T>::with_capacity(v.len());
     out.extend_copy(v);
     return out;
+}
+
+// `v` in an exact-capacity buffer, when its own has slack.
+fn shrink<T: Copy>(v: &mut Vector<T>) {
+    if v.capacity() > v.len() {
+        *v = exact(v);
+    }
 }
 
 extend Inst as Copy {}
@@ -1269,7 +1282,8 @@ extend Body {
 
     /// Keep in the pool only the records the body names: its signature, then per instruction its
     /// signature (with its layouts), argument and operand lists, lane list, `asm` record and edges, each
-    /// copied once in that order. A pass's dead edges and lists go.
+    /// copied once in that order. A pass's dead edges and lists go, and so do the `lines` entries no
+    /// instruction or scope names (`compact_lines`).
     pub(package) fn compact_pool(self: &mut Self, s: &mut PoolScratch) {
         let map = &mut s.map;
         let out = &mut s.out;
@@ -1324,6 +1338,67 @@ extend Body {
             self.insts[i] = t;
         }
         self.pool = exact(out);
+        self.compact_lines(map);
+    }
+
+    // Keep in `lines` only entry 0 and the entries `locs`, `inl` and `scopes` name, in their order, and
+    // renumber those. Two equal entries stay two: each is a row of its own and an inline site of its own.
+    // A copy of the body takes its `lines` whole, and the removed instructions' entries, of the body and
+    // of each copy it inlined, would go along.
+    fn compact_lines(self: &mut Self, map: &mut Vector<u64>) {
+        let n = self.lines.len();
+        map.truncate(0);
+        map.resize_default(n);
+        map[0] = 1;
+        for i in 0..self.locs.len() {
+            map[self.locs[i] as usize] = 1;
+        }
+        for i in 0..self.inl.len() {
+            map[self.inl[i] as usize] = 1;
+        }
+        for k in 0..self.scopes.len() {
+            map[self.scopes[k].site as usize] = 1;
+        }
+        let mut m: usize = 0;
+        for k in 0..n {
+            if map[k] != 0 {
+                self.lines[m] = self.lines[k];
+                map[k] = m as u64;
+                m += 1;
+            }
+        }
+        if m == n {
+            return;
+        }
+        self.lines.truncate(m);
+        for i in 0..self.locs.len() {
+            self.locs[i] = map[self.locs[i] as usize] as u32;
+        }
+        for i in 0..self.inl.len() {
+            self.inl[i] = map[self.inl[i] as usize] as u32;
+        }
+        for k in 0..self.scopes.len() {
+            self.scopes.index_mut(k).site = map[self.scopes[k].site as usize] as u32;
+        }
+    }
+
+    /// Give back every table's growth slack: a body the optimizer finished keeps its tables until code
+    /// generation, and the passes' buffers it took (`Opt::rebuild`, the inliner) are sized for larger ones.
+    pub(package) fn shrink(self: &mut Self) {
+        shrink(&mut self.insts);
+        shrink(&mut self.locs);
+        shrink(&mut self.blocks);
+        shrink(&mut self.params);
+        shrink(&mut self.pool);
+        shrink(&mut self.words);
+        shrink(&mut self.slots);
+        shrink(&mut self.syms);
+        shrink(&mut self.msgs);
+        shrink(&mut self.lines);
+        shrink(&mut self.inl);
+        shrink(&mut self.refs);
+        shrink(&mut self.owned);
+        shrink(&mut self.scopes);
     }
 
     // `compact_pool`'s copy of the `n` words at `at` (an empty range: the copy's end).

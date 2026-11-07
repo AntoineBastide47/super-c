@@ -27,6 +27,7 @@ import ir::core as core;
 import lir::eval as le;
 import lir::verify as lv;
 import std::parallel::sync as psync;
+import std::parallel::runtime as prt;
 import lir::inline as il;
 import lir::promote as pr;
 import lir::loops as lu;
@@ -196,9 +197,10 @@ pub(package) struct Opt {
     hdr: Vector<bool>, // per block, whether it heads a loop (`thread`)
     preader: Vector<u32>, // per block parameter, the block outside its own that reads it (`thread`)
     pcount: Vector<u8>, // per block parameter, how many instructions read it, up to 2 (`thread`)
-    icount: Vector<u8>, // per instruction, how many instructions read it, up to 2 (`thread`)
+    icount: Vector<u8>, // per instruction, how many instructions read it, up to 2 (`readers`)
     ireader: Vector<u32>, // per instruction, the block outside its own that reads it (`thread`)
-    in_or: Vector<bool>, // per instruction, whether an `or` reads it (`thread`, for `bit_set`)
+    in_or: Vector<bool>, // per instruction, whether an `or` reads it (`readers`, for `bit_set`)
+    counted: bool, // `icount` and `in_or` are those of the operand tables (`readers`)
     // `dead_allocs`: the allocations, whether each may go, per block whether a path visited it, the blocks
     // to visit, an instruction's operands.
     fresh: Vector<u32>,
@@ -482,6 +484,7 @@ extend Opt {
             icount: Vector::<u8>::new(),
             ireader: Vector::<u32>::new(),
             in_or: Vector::<bool>::new(),
+            counted: false,
             fresh: Vector::<u32>::new(),
             pslots: true,
             defer_div: false,
@@ -1136,11 +1139,36 @@ extend Opt {
         return round != 0;
     }
 
-    /// Pack body `b`'s isomorphic scalar values into vectors (`lir::slp`), kept when the instruction
-    /// count weighted by loop depth drops; then optimize it again. Whether it changed.
-    pub(package) fn slp(self: &mut Self, pk: &Package, b: &mut Body) bool {
-        if b.naked || pk.vector < 16 {
+    /// Whether body `b` has no loop (`nest`), no quotient kept for the loop vectorizer (`deferred`), no
+    /// 128-bit value, and no `memcmp` call where the walk expands one into vectors (`memcmp_eq`): then the
+    /// loop transforms, the rotation and the splits leave it as it is, and only the packing makes vectors
+    /// in it.
+    pub(package) fn straight(self: &mut Self, pk: &Package, b: &Body) bool {
+        if self.deferred || pk.pairs && pa::has_i128(b) {
             return false;
+        }
+        self.tables(pk, b, K_NEST);
+        if self.lbs.len() != 0 {
+            return false;
+        }
+        if pk.vector < 16 || pk.ccmp {
+            return true;
+        }
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if t.op == O_CALL && named_alloc(pk, b, t) == ALLOC_MEMCMP {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Pack body `b`'s isomorphic scalar values into vectors (`lir::slp`), kept when the instruction
+    /// count weighted by loop depth drops; then optimize it again. The body before the packing when it
+    /// kept one, else None.
+    pub(package) fn slp(self: &mut Self, pk: &Package, b: &mut Body) Option<Body> {
+        if b.naked || pk.vector < 16 {
+            return None;
         }
         let before = self.weigh(pk, b);
         self.slp.late_terms = !pk.apairs;
@@ -1159,7 +1187,7 @@ extend Opt {
             &self.ops_arg,
             &self.ops,
         ) {
-            return false;
+            return None;
         }
         let saved = b.compact();
         let ni = b.insts.len();
@@ -1179,9 +1207,9 @@ extend Opt {
         if self.weigh(pk, b) >= before {
             *b = saved;
             self.kept = K_NONE;
-            return false;
+            return None;
         }
-        return true;
+        return Some(saved);
     }
 
     /// Mark the rare blocks of body `b` past the lowering's marks (`BLOCK_COLD`, `BLOCK_UNLIKELY`): a block
@@ -2523,6 +2551,7 @@ extend Opt {
         self.ops_arg.truncate(0);
         self.ops.truncate(0);
         self.ops_dst.truncate(0);
+        self.counted = false;
         let ni0 = oat.len() - 1;
         let mut c: usize = 0;
         let mut i: usize = 0;
@@ -2947,10 +2976,35 @@ extend Opt {
         self.ops.truncate(0);
         self.ops_dst.truncate(0);
         self.rcall = false;
+        self.counted = false;
         for i in 0..ni {
             self.operands_of(b, i);
         }
         self.ops_at.push(self.ops.len() as u32);
+    }
+
+    // Per instruction of `b`, how many instructions read it, up to 2 (`icount`), and whether an `or` reads
+    // it (`in_or`), from the operand tables; nothing when they are those of these tables already.
+    fn readers(self: &mut Self, b: &Body) {
+        if self.counted {
+            return;
+        }
+        self.counted = true;
+        let ni = b.insts.len();
+        fill(&mut self.icount, ni, 0);
+        fill(&mut self.in_or, ni, false);
+        for i in 0..ni {
+            let is_or = b.insts[i].op == O_OR;
+            for u in self.ops_at[i]..self.ops_at[i + 1] {
+                let v = self.ops[u as usize];
+                if v == VNONE || (v & VPARAM) != 0 {
+                    continue;
+                }
+                let x = (v & ~VFLAG) as usize;
+                self.icount[x] = (self.icount[x] + 1).min(2);
+                self.in_or[x] = self.in_or[x] || is_or;
+            }
+        }
     }
 
     // Instruction `i`'s entries of `operands`, appended.
@@ -4550,6 +4604,7 @@ extend Opt {
         self.kept = K_NONE;
         let nb = b.blocks.len();
         self.fresh(b);
+        self.readers(b);
         self.made.clear();
         self.selected = false;
         self.refold = false;
@@ -5913,22 +5968,19 @@ extend Opt {
                 }
             }
         }
-        // Per parameter and per instruction: how many instructions read it (up to 2), the last one for a
-        // parameter, and the nearest block that dominates every block outside its own that reads it
-        // (`preader`, `ireader`: NONE for none, MULTI for a reader no path reaches). An edge's argument is
-        // read in its terminator's block; one of the value's own block is read inside it (`through` checks
-        // the edge it threads along).
+        // Per parameter and per instruction: how many instructions read it (up to 2; `readers` for an
+        // instruction), the last one for a parameter, and the nearest block that dominates every block
+        // outside its own that reads it (`preader`, `ireader`: NONE for none, MULTI for a reader no path
+        // reaches). An edge's argument is read in its terminator's block; one of the value's own block is
+        // read inside it (`through` checks the edge it threads along).
+        self.readers(b);
         fill(&mut self.pcount, b.params.len(), 0);
         fill(&mut self.puser, b.params.len(), NONE);
         fill(&mut self.preader, b.params.len(), NONE);
-        fill(&mut self.icount, b.insts.len(), 0);
         fill(&mut self.ireader, b.insts.len(), NONE);
-        fill(&mut self.in_or, b.insts.len(), false);
         for k in 0..nb {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
-                let ti = b.insts[i as usize];
-                let is_or = ti.op == O_OR;
                 let u0 = self.ops_at[i as usize];
                 for u in 0..self.ops_at[i as usize + 1] - u0 {
                     let v = self.ops[(u0 + u) as usize];
@@ -5944,8 +5996,6 @@ extend Opt {
                         }
                     } else {
                         let x = (v & ~VFLAG) as usize;
-                        self.icount[x] = (self.icount[x] + 1).min(2);
-                        self.in_or[x] = self.in_or[x] || is_or;
                         if self.blk_of[x] != k as u32 {
                             self.ireader[x] = self.reader(self.ireader[x], k as u32);
                         }
@@ -11948,13 +11998,15 @@ extend Opt {
             }
         }
         b.scopes.truncate(ns);
-        self.insts = replace(&mut b.insts, replace(&mut self.insts, Vector::<Inst>::new()));
-        self.locs = replace(&mut b.locs, replace(&mut self.locs, Vector::<u32>::new()));
+        // Copied into the body's own buffers, which hold the input and so fit the output: a swap would hand
+        // the body this scratch's buffers, sized for the largest body yet, and the scratch would grow anew.
+        assign(&mut b.insts, &self.insts);
+        assign(&mut b.locs, &self.locs);
         if b.inl.len() != 0 {
-            self.inls = replace(&mut b.inl, replace(&mut self.inls, Vector::<u32>::new()));
+            assign(&mut b.inl, &self.inls);
         }
-        self.blocks = replace(&mut b.blocks, replace(&mut self.blocks, Vector::<Block>::new()));
-        self.params = replace(&mut b.params, replace(&mut self.params, Vector::<u8>::new()));
+        assign(&mut b.blocks, &self.blocks);
+        assign(&mut b.params, &self.params);
         self.drop_slots(b);
     }
 
@@ -12200,7 +12252,14 @@ extend Run {
     pub(package) fn new(pk: &mut Package, sealed: &Vector<bool>, cf: Config) Run {
         direct_calls(pk);
         specialize(pk);
-        let bodies = replace(&mut pk.bodies, Vector::<Body>::new());
+        // The jobs hold the bodies for the whole phase: in a table of their count, not one the lowering's
+        // merges grew by doubling.
+        let mut bodies = Vector::<Body>::with_capacity(pk.bodies.len());
+        while let Some(b) = pk.bodies.pop() {
+            bodies.push(b);
+        }
+        bodies.reverse();
+        pk.bodies = Vector::<Body>::new();
         let n = bodies.len();
         let held = if pk.held.body == NONE {
             n as u32
@@ -12357,14 +12416,12 @@ extend Run {
         let p = unsafe &*r.pk;
         // The jobs at one level write their own bodies, results and flags at once: through the cells.
         let base = unsafe (*r.bodies.get()).as_mut_ptr();
+        // A job preempted while it holds a scratch would make its worker's next job take another: one
+        // scratch per job in flight, not per worker.
+        prt::preempt_mask_enter();
         let mut sc = r.take();
         let b = unsafe &mut *(base + j as usize);
-        sc.o.forget();
-        sc.o.pslots = true;
-        sc.o.unit = r.bunit[j as usize];
-        // Scalar quotients by a constant stay for the loop vectorizer until the loop transforms ran.
-        sc.o.defer_div = r.cf.loops.vector != 0 && p.vector != 0 && p.vec_mulh != 0;
-        sc.o.deferred = false;
+        r.ready(p, j, &mut sc, true, false);
         // The inliner reads the rare blocks, the loop transforms and the code generators too: marked before
         // the inlining (a copy takes its call's marks) and once the transforms made their blocks.
         sc.o.estimate(p, b);
@@ -12380,8 +12437,18 @@ extend Run {
         // (a branch that folds with the caller's values: a vector known empty grows) inline as the caller's
         // own did. Two runs: the first folds the copies' branches and merges their blocks, the second forwards
         // the memory across the merged blocks (an allocation's pointer stored in a slot, read back).
-        if r.inline && warm_copies(b, &mut sc.il.only) {
-            r.await_marked(p, j, b, &sc.il.only);
+        let warm = r.inline && warm_copies(b, &mut sc.il.only);
+        if warm && !r.marked_done(p, j, b, &sc.il.only) {
+            // While the job waits, its scratch serves another job, and the job takes one back after.
+            let only = replace(&mut sc.il.only, Vector::<bool>::new());
+            let (pslots, deferred) = (sc.o.pslots, sc.o.deferred);
+            r.give(sc);
+            r.await_marked(p, j, b, &only);
+            sc = r.take();
+            r.ready(p, j, &mut sc, pslots, deferred);
+            sc.il.only = only;
+        }
+        if warm {
             let more = sc.il.run(p, base, r.ok.get_ref(), &r.level, &r.unit, j, r.cf.inline, b);
             sc.il.only.truncate(0);
             if more {
@@ -12394,10 +12461,11 @@ extend Run {
         // The calls through a method of a constant table the walk read (`fold_ptr`, a known `&dyn`) inline as
         // the direct ones did.
         if r.inline && r.direct_known(p, j, b, &mut sc.il.only) {
+            // The memory facts the walk kept know those calls as indirect ones: also when none inlines.
+            sc.o.forget();
             let more = sc.il.run(p, base, r.ok.get_ref(), &r.level, &r.unit, j, r.cf.inline, b);
             sc.il.only.truncate(0);
             if more {
-                sc.o.forget();
                 let _ = sc.o.run(p, b, true);
             }
         }
@@ -12441,7 +12509,11 @@ extend Run {
             let _ = sc.o.run(p, b, true);
         }
         let snap = r.inline && r.shape[j as usize] && bu.vector != 0 && !packed(b);
-        let pre = if snap && (il::bounded(b, r.cf.inline) || r.always[j as usize]) {
+        let want = snap && (il::bounded(b, r.cf.inline) || r.always[j as usize]);
+        // A straight body (`Opt::straight`) keeps this form until the packing, which copies it: that copy
+        // serves.
+        let straight = want && sc.o.straight(p, b);
+        let mut pre = if want && !straight {
             Option::<Body>::Some(b.compact())
         } else {
             Option::<Body>::None
@@ -12493,7 +12565,10 @@ extend Run {
         }
         // Then the packing of straight-line values into vectors, on the loops' final shape.
         if bu.vector != 0 {
-            let _ = sc.o.slp(p, b);
+            let form = sc.o.slp(p, b);
+            if straight {
+                pre = form;
+            }
         }
         // Once the walks forwarded the loads of the allocations' blocks; the run folds their null tests.
         let placed = sc.o.promote_places(p, b);
@@ -12531,13 +12606,16 @@ extend Run {
         // Its callers copy its pool when they inline it, and the code generators read it: the passes'
         // dead records go.
         b.compact_pool(&mut sc.o.cps);
+        b.shrink();
         let mut fits = r.inline && r.shape[j as usize];
         if snap && (packed(b) || rotated) {
             if pre.is_some() {
                 let fin = replace(b, pre.unwrap());
                 b.compact_pool(&mut sc.o.cps);
+                b.shrink();
                 unsafe *((*r.finals.get()).as_mut_ptr() + j as usize) = Some(fin);
             } else if packed(b) {
+                assert(!straight, "opt: only the packing makes vectors in a straight body");
                 fits = false;
             }
         }
@@ -12548,28 +12626,59 @@ extend Run {
             0u8
         };
         r.give(sc);
+        prt::preempt_mask_exit();
         // Its body, facts and final form are written: the bodies waiting to inline it go on.
         let mut g = r.fin.lock();
         g.get_mut()[j as usize] = true;
         r.fin_cv.notify_all();
     }
 
-    // Wait until the job of each body of a lower level than body `j` that a call of `b` marked in `only`
-    // reaches has finished (the copies brought those calls; no edge of `j` names their callees). Such a
-    // body waits for bodies of lower levels alone, so the wait ends.
+    // Scratch `sc` set for body `j`: no analyses of another body, `param_slots` still to look at the body
+    // (`pslots`), a quotient kept for the loop vectorizer (`deferred`).
+    fn ready(self: &Self, p: &Package, j: u32, sc: &mut Box<Scratch>, pslots: bool, deferred: bool) {
+        sc.o.forget();
+        sc.o.pslots = pslots;
+        sc.o.unit = self.bunit[j as usize];
+        // Scalar quotients by a constant stay for the loop vectorizer until the loop transforms ran.
+        sc.o.defer_div = self.cf.loops.vector != 0 && p.vector != 0 && p.vec_mulh != 0;
+        sc.o.deferred = deferred;
+    }
+
+    // The body a call of `b` that `only` marks at instruction `i` reaches when its level is lower than body
+    // `j`'s (the copies brought those calls; no edge of `j` names their callees), else NONE.
+    fn marked_callee(self: &Self, p: &Package, j: u32, b: &Body, only: &Vector<bool>, i: usize) u32 {
+        let c = if only[i] {
+            call_target(p, b, b.insts[i])
+        } else {
+            NONE
+        };
+        return if c == NONE || self.level[c as usize] >= self.level[j as usize] {
+            NONE
+        } else {
+            c
+        };
+    }
+
+    // Whether the job of each body `marked_callee` names has finished.
+    fn marked_done(self: &Self, p: &Package, j: u32, b: &Body, only: &Vector<bool>) bool {
+        let g = self.fin.lock();
+        for i in 0..only.len() {
+            let c = self.marked_callee(p, j, b, only, i);
+            if c != NONE && !g.get()[c as usize] {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Wait until the job of each body `marked_callee` names has finished. Such a body waits for bodies of
+    // lower levels alone, so the wait ends.
     fn await_marked(self: &Self, p: &Package, j: u32, b: &Body, only: &Vector<bool>) {
         let g = self.fin.lock();
         for i in 0..only.len() {
-            let c = if only[i] {
-                call_target(p, b, b.insts[i])
-            } else {
-                NONE
-            };
-            if c == NONE || self.level[c as usize] >= self.level[j as usize] {
-                continue;
-            }
+            let c = self.marked_callee(p, j, b, only, i);
             // Each wakeup follows a job's end; the job of `c` ends once.
-            while !g.get()[c as usize] {
+            while c != NONE && !g.get()[c as usize] {
                 self.fin_cv.wait_masked(&g);
             }
         }

@@ -179,6 +179,7 @@ pub struct Coroutine {
     pub park_phase: u32, // atomic: park token | PH_*; see park_begin and worker_main
     pub park_cancellable: i32, // atomic: may the CURRENT park be claimed with a cancel wake?
     pub cmask: i32, // cancellation-mask depth; only the task's own thread touches it
+    pub pmask: i32, // preemption-mask depth (`preempt_mask_enter`); only the task's own thread touches it
     pub wait_kind: i32, // atomic WK_* while parked, for diagnostics
     pub wait_obj: usize, // atomic: address identifying the wait object, for diagnostics
     pub handoff: i32, // atomic COUNT of park hand-off tails still running on this block; see worker_main
@@ -2615,6 +2616,7 @@ pub unsafe fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inl
     unsafe (*co).park_phase = pst & ~WR_MASK | PH_NOT_PARKING;
     unsafe (*co).park_cancellable = 0;
     unsafe (*co).cmask = 0;
+    unsafe (*co).pmask = 0;
     unsafe (*co).wait_kind = WK_NONE;
     unsafe (*co).wait_obj = 0;
     unsafe (*co).handoff = 0;
@@ -3130,6 +3132,30 @@ pub fn cancel_mask_exit() {
     unsafe (*co).cmask = unsafe (*co).cmask - 1;
 }
 
+/// Enter a preemption-masked region: the loop safepoints inside it never yield the worker, while the
+/// task's own waits still park it. A task that holds memory it took for this region (a scratch) then
+/// keeps the worker until it gives the memory back, so a worker holds one such task's memory at a time,
+/// not one per task preempted mid-region. Re-entrant.
+pub fn preempt_mask_enter() {
+    let co = current();
+    if co == null {
+        return;
+    }
+    unsafe (*co).pmask = unsafe (*co).pmask + 1;
+}
+
+/// Leave a preemption-masked region.
+pub fn preempt_mask_exit() {
+    let co = current();
+    if co == null {
+        return;
+    }
+    if unsafe (*co).pmask <= 0 {
+        panic("preempt_mask_exit without a matching preempt_mask_enter");
+    }
+    unsafe (*co).pmask = unsafe (*co).pmask - 1;
+}
+
 /// Record what the current task is about to wait on, for diagnostics and shutdown reports.
 pub fn wait_note(kind: i32, obj: usize) {
     let co = current();
@@ -3428,6 +3454,9 @@ fn preempt_yield() {
     let co = current();
     if co == null {
         // A plain thread, or a job: neither can park.
+        return;
+    }
+    if unsafe (*co).pmask != 0 {
         return;
     }
     let s = unsafe G_SCHED;

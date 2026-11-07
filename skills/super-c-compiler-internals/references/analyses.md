@@ -42,7 +42,8 @@ Per package, in `Run::new`:
 
 Per body, on `Opt` (`Run::job` runs the passes in order). `Opt::tables(pk, b, want)` computes
 only the levels `kept` lacks (`K_GRAPH` < `K_DOM` < `K_NEST` < `K_MEM` < `K_SLOTS`); every change to
-the body sets `kept = K_NONE`, and `forget` runs at a job's start and after inlining. `thread`, which
+the body sets `kept = K_NONE`, and `forget` runs at a job's start, after inlining, after `direct_known`
+makes calls direct, and when a job takes a scratch back after its wait (`Run::ready`). `thread`, which
 moves edges alone, keeps `K_GRAPH` (`cfg` and the predecessors again, the operands of the terminators
 and of its rewrites spliced in, `splice_ops`); `estimate` computes `cfg` alone. `preheaders`
 keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and in `loop_opts`
@@ -51,12 +52,13 @@ keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and 
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
 | Successors, RPO, predecessors; block of each instruction; operand lists (CSR) | `Opt::graph` (`block_map`, `operands`) | `Opt` (`pred_at`, `preds`, `pblock`, `blk_of`, `ops_at`, `ops`, `ops_dst`) | `K_GRAPH`: any change |
+| Per instruction, its readers up to 2, and whether an `or` reads it | `Opt::readers` (from `ops`), at the start of `thread` and of the walk | `Opt` (`icount`, `in_or`; `counted`) | the next `operands` or `splice_ops` |
 | Dominator tree and its pre/post numbers | `Opt::dominators` | `Opt` (`dpre`, `dpost`) | `K_DOM`: any change |
 | Loop nesting, preheaders, loop blocks in block order | `Opt::nest` | `Opt` (`inner`, `lparent`, `preh`, `lb_at`, `lbs`) | `K_NEST`: any change |
 | Private slots and the slot each address derives, alias classes and their scope roots' bases, slot escapes, frozen memory, per-block and per-loop writes and tags | `Opt::memory` (`privates`, `classes`, `slot_escapes`, `root_bases`, `frozen`, `bw`, `bt`, `bpw`, `bst`) | `Opt` (`pder`, which `slot_escapes` and `slot_apart` read through `der_slot`; `cbase` among them) | `K_MEM`: any change |
 | Slot base, offset, escape | `Opt::slot_writes` | `Opt` | `K_SLOTS`: any change |
 | Slots an instruction still addresses | `Opt::rebuild`, `emit` | `Opt.sused` | the next rebuild |
-| The pool records a body names (dead ones dropped) | `Body::compact_pool`, at the end of `Run::job` | `Body.pool` | the next pass that adds records |
+| The pool records and `lines` entries a body names (dead ones dropped; `compact_lines` keeps equal entries apart) | `Body::compact_pool`, at the end of `Run::job` | `Body.pool`, `Body.lines` | the next pass that adds records |
 | Rare blocks | `Opt::estimate` | `BLOCK_RARE` flags on the body | any block change; codegen reads them too |
 | Loop weights | `Opt::weigh` | `Opt` | any edge or block change |
 | Unsigned upper bound of a value | `Opt::ubound` | not stored | per call |

@@ -254,6 +254,10 @@ pub(package) struct Inliner {
     work: Vector<u32>,
     /// Per caller instruction, whether `run` may inline its call; empty: every call.
     pub(package) only: Vector<bool>,
+    // The new body's instruction, block and parameter counts (`plan`).
+    ni: u32,
+    nb: u32,
+    np: u32,
 }
 
 // The bases of one callee copy's tables in the new body.
@@ -281,6 +285,9 @@ extend Inliner {
             work: Vector::<u32>::new(),
             edges: Vector::<u32>::new(),
             only: Vector::<bool>::new(),
+            ni: 0,
+            nb: 0,
+            np: 0,
         };
     }
 
@@ -411,12 +418,16 @@ extend Inliner {
                 self.sites.push(s);
             }
         }
+        self.ni = ni;
+        self.nb = nb;
+        self.np = np;
         return self.sites.len() != 0;
     }
 
     // The new body, in the numbering `plan` chose.
     fn build(self: &mut Self, bodies: *const Body, c: &Body) Body {
         let mut o = Body::new();
+        self.reserve(bodies, c, &mut o);
         o.pool.extend_copy(&c.pool);
         o.words.extend_copy(&c.words);
         o.slots.extend_copy(&c.slots);
@@ -509,6 +520,43 @@ extend Inliner {
             );
         }
         return o;
+    }
+
+    // Each table of the new body `o` at its size (the instructions, blocks and parameters `plan` numbered,
+    // the copies' tables), or at a bound (the jumps' and returns' edges, the symbols and messages, the
+    // sites' own `lines` entries), so that no copy grows a table by doubling. The instruction, block,
+    // parameter and pool tables take a quarter more: the first walk adds constants and hoisted copies, the
+    // loop passes preheaders, and a full table would double for those few.
+    fn reserve(self: &Self, bodies: *const Body, c: &Body, o: &mut Body) {
+        let mut pool = c.pool.len();
+        let mut words = c.words.len();
+        let mut slots = c.slots.len();
+        let mut lines = c.lines.len();
+        let mut syms = c.syms.len();
+        let mut msgs = c.msgs.len();
+        for x in 0..self.sites.len() {
+            let s = self.sites[x];
+            let e = unsafe &*(bodies + s.callee as usize);
+            // The jump's edge passes the call's arguments; a `ret`, a block's terminator, passes one value.
+            pool += e.pool.len() + 2 + c.insts[s.inst as usize].aux as usize + 3 * e.blocks.len();
+            words += e.words.len();
+            slots += e.slots.len();
+            lines += e.lines.len(); // entry 0 is the caller's own; one for the site's scopes
+            syms += e.syms.len();
+            msgs += e.msgs.len();
+        }
+        let ni = grown(self.ni);
+        o.insts.reserve_exact(ni);
+        o.locs.reserve_exact(ni);
+        o.inl.reserve_exact(ni);
+        o.blocks.reserve_exact(grown(self.nb));
+        o.params.reserve_exact(grown(self.np));
+        o.pool.reserve_exact(grown(pool as u32));
+        o.words.reserve_exact(words);
+        o.slots.reserve_exact(slots);
+        o.lines.reserve_exact(lines);
+        o.syms.reserve_exact(syms);
+        o.msgs.reserve_exact(msgs);
     }
 
     // The new value of caller value `v`.
@@ -820,6 +868,11 @@ const fn ev(s: Site, v: Value) Value {
         return VPARAM | s.pbase + (v & ~VPARAM);
     }
     return s.vbase + (v & ~VFLAG) | v & VFLAG;
+}
+
+// A table size `n` with room for the passes' additions.
+const fn grown(n: u32) usize {
+    return n as usize + n as usize / 4 + 16;
 }
 
 // `v` grown to `n` entries, the new ones false.
