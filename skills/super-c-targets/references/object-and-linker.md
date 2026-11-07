@@ -26,7 +26,10 @@ A writer:
 - places thread-local variables as the format's TLS model needs (Mach-O descriptors in
   `__thread_vars`, ELF `STT_TLS` in `.tdata` or `.tbss`, COFF `.tls$`);
 - attaches the DWARF 4 sections `src/codegen/dwarf.spc` builds (`attach`); wasm takes them as custom
-  sections.
+  sections;
+- lays the object out before it writes a byte (each section's offset, the string tables and headers
+  at their counts), then writes `out` once at its size (Mach-O, ELF): a body buffer grown by doubling
+  and copied into `out` cost the ELF writer about 110 MiB per self-build.
 
 Check it with the platform's own tools on the test objects (the system linker links them, `objdump` or
 `otool` reads them) and with `tests/codegen/debug_info_test.spc`, which also checks that debug

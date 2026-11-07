@@ -76,9 +76,7 @@ const CIE_A64: [u8; 24] = [20, 0, 0, 0, 0, 0, 0, 0, 1, 0x7A, 0x52, 0, 4, 0x78, 3
 // Append `s` and a NUL to string table `t`; its offset.
 fn add_str(t: &mut Vector<u8>, s: str) u32 {
     let at = t.len() as u32;
-    for i in 0..s.len() {
-        t.push(s.byte_at(i));
-    }
+    push_bytes(t, s);
     t.push(0);
     return at;
 }
@@ -240,20 +238,16 @@ struct Shdr {
 extend Shdr as Copy {}
 
 /// Write object `o` as an ELF relocatable object for arm64 (`a64`) or x86-64 into `out`, its sections split
-/// at their symbols as `split` asks (`lir::SPLIT_*`).
+/// at their symbols as `split` asks (`lir::SPLIT_*`). The layout comes first (each section's offset in the
+/// data after the 64-byte header, the section names, the symbols), then the bytes, into `out` at its size.
 pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
-    let mut shstr = Vector::<u8>::new();
-    shstr.push(0);
-    let mut hdrs = Vector::<Shdr>::new();
-    hdrs.push(Shdr { name: 0, ty: 0, flags: 0, off: 0, size: 0, link: 0, info: 0, align: 0, entsize: 0 });
-    // The data that follows the header, the section bytes in header order.
-    let mut body = Vector::<u8>::new();
     let mut parts = Vector::<ob::Part>::new();
     let mut first = Vector::<u32>::new();
     ob::parts_of(o, split, &mut parts, &mut first);
+    let np = parts.len();
     // A part with a symbol the link must keep stays through garbage collection.
     let mut retain = Vector::<bool>::new();
-    retain.resize_default(parts.len());
+    retain.resize_default(np);
     for y in 0..o.syms.len() {
         let sy = o.syms[y];
         if (sy.flags & ob::SF_USED) != 0 && sy.sec != ob::NOSEC {
@@ -263,7 +257,56 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             }
         }
     }
-    for q in 0..parts.len() {
+    // Each part's relocations, in object order: `byp[pfirst[q] .. pfirst[q + 1]]` are part `q`'s.
+    let mut pfirst = Vector::<u32>::new();
+    pfirst.resize_default(np + 1);
+    let mut rpart = Vector::<u32>::with_capacity(o.rels.len());
+    for r in 0..o.rels.len() {
+        let x = o.rels[r];
+        let q = ob::part_at(&parts, &first, x.sec, x.off);
+        rpart.push(q);
+        if q != ob::NONE32 {
+            pfirst[q as usize + 1] += 1;
+        }
+    }
+    let eh = o.frames.len() != 0;
+    let mut nrela: u32 = eh as u32;
+    for q in 0..np {
+        nrela += (pfirst[q + 1] != 0) as u32;
+        pfirst[q + 1] += pfirst[q];
+    }
+    let mut byp = Vector::<u32>::new();
+    byp.resize_default(pfirst[np] as usize);
+    let mut fill = Vector::<u32>::new();
+    fill.extend_copy(&pfirst);
+    for r in 0..o.rels.len() {
+        let q = rpart[r];
+        if q != ob::NONE32 {
+            byp[fill[q as usize] as usize] = r as u32;
+            fill[q as usize] += 1;
+        }
+    }
+    // The section names and headers at their counts: the null header, a part's, `.note.GNU-stack`,
+    // `.eh_frame`, a part's relocations', `.eh_frame`'s, `.symtab`, `.strtab`, `.shstrtab`.
+    let mut nsh: usize = 1 + ".note.GNU-stack".len() + ".symtab".len() + ".strtab".len() + ".shstrtab".len() + 4;
+    if eh {
+        nsh += ".eh_frame".len() + ".rela.eh_frame".len() + 2;
+    }
+    for q in 0..np {
+        let n = part_name_len(o, parts[q]) + 1;
+        nsh += n;
+        if pfirst[q + 1] != pfirst[q] {
+            nsh += ".rela".len() + n;
+        }
+    }
+    let mut shstr = Vector::<u8>::with_capacity(nsh);
+    shstr.push(0);
+    let nhdr = 1 + np + 1 + eh as usize + nrela as usize + 3;
+    let mut hdrs = Vector::<Shdr>::with_capacity(nhdr);
+    hdrs.push(Shdr { name: 0, ty: 0, flags: 0, off: 0, size: 0, link: 0, info: 0, align: 0, entsize: 0 });
+    // `pos`: the data laid out so far, in header order.
+    let mut pos: u64 = 0;
+    for q in 0..np {
         let pt = parts[q];
         let s = &o.secs[pt.k as usize];
         let mut name: str = "";
@@ -276,23 +319,14 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         let al = 1u64 << s.align_log2 as u64;
         let mut off: u64 = 0;
         if ty != SHT_NOBITS {
-            while body.len() as u64 % al != 0 {
-                body.push(0);
-            }
-            off = body.len() as u64;
-            for j in pt.lo as usize..pt.hi as usize {
-                body.push(s.bytes[j]);
-            }
-        }
-        let mut full = String::from_str(name);
-        if pt.sym != ob::NONE32 {
-            full.push_byte(b'.');
-            full.push_str(o.name_of(pt.sym));
+            pos = up(pos, al);
+            off = pos;
+            pos += pt.hi - pt.lo;
         }
         parts.index_mut(q).hdr = hdrs.len() as u32;
         hdrs.push(
             Shdr {
-                name: add_str(&mut shstr, &full),
+                name: add_part_name(&mut shstr, o, "", name, pt.sym),
                 ty: ty,
                 flags: fl,
                 off: off,
@@ -310,13 +344,12 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             },
         );
     }
-    let gnu_stack = hdrs.len() as u32;
     hdrs.push(
         Shdr {
             name: add_str(&mut shstr, ".note.GNU-stack"),
             ty: SHT_PROGBITS,
             flags: 0,
-            off: body.len() as u64,
+            off: pos,
             size: 0,
             link: 0,
             info: 0,
@@ -324,40 +357,25 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             entsize: 0,
         },
     );
-    let _ = gnu_stack;
-    // .eh_frame: the common entry, then each function's entry with its PC-relative start.
-    let mut eh_rels = Vector::<ob::ORel>::new();
+    // .eh_frame: the common entry, then each function's entry with its PC-relative start; an entry is its
+    // length field and that many bytes (`fde_len`).
+    let mut eh_rels = Vector::<ob::ORel>::with_capacity(o.frames.len());
     let mut eh_sec: u32 = 0;
-    if o.frames.len() != 0 {
-        while body.len() % 8 != 0 {
-            body.push(0);
-        }
-        let start = body.len();
+    if eh {
+        pos = up(pos, 8);
+        let start = pos;
         let cie: []u8 = if a64 {
             CIE_A64
         } else {
             CIE
         };
-        body.extend_from_slice(cie);
+        pos += cie.len() as u64;
         for f in 0..o.frames.len() {
             let fr = o.frames[f];
-            let at = body.len() - start;
-            // length, CIE pointer, pc_begin, pc_range, augmentation size 0, the rules, then padding: the
-            // entry with its length field a multiple of 8 bytes.
-            let n = 4 + 4 + 4 + 1 + fr.cfi_len;
-            let len = (n + 4 + 7 & ~7u32) - 4;
-            ob::w32(&mut body, len);
-            ob::w32(&mut body, (at + 4) as u32);
-            eh_rels.push(ob::ORel { sec: 0, kind: x::R_PC32, part: true, off: (at + 8) as u32, sym: fr.sym, addend: 0 });
-            ob::w32(&mut body, 0);
-            ob::w32(&mut body, fr.size);
-            body.push(0);
-            for j in 0..fr.cfi_len {
-                body.push(o.cfi[(fr.cfi_at + j) as usize]);
-            }
-            for _ in n..len {
-                body.push(0);
-            }
+            eh_rels.push(
+                ob::ORel { sec: 0, kind: x::R_PC32, part: true, off: (pos - start + 8) as u32, sym: fr.sym, addend: 0 },
+            );
+            pos += 4 + fde_len(fr.cfi_len) as u64;
         }
         eh_sec = hdrs.len() as u32;
         hdrs.push(
@@ -369,8 +387,8 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
                     SHT_X86_64_UNWIND
                 },
                 flags: SHF_ALLOC,
-                off: start as u64,
-                size: (body.len() - start) as u64,
+                off: start,
+                size: pos - start,
                 link: 0,
                 info: 0,
                 align: 8,
@@ -389,7 +407,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     strtab.push(0);
     let mut symix = Vector::<u32>::new();
     symix.resize_default(o.syms.len());
-    let mut syms = Vector::<u8>::with_capacity(24 * (1 + parts.len() + o.syms.len()));
+    let mut syms = Vector::<u8>::with_capacity(24 * (1 + np + o.syms.len()));
     for _ in 0..24 {
         syms.push(0);
     }
@@ -398,7 +416,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     // the jump tables refer to a function through it, as a relocation against a global symbol would make
     // the read-only section need one in a shared object.
     let mut secsym = Vector::<u32>::new();
-    secsym.resize_default(parts.len());
+    secsym.resize_default(np);
     for f in 0..o.frames.len() + o.rels.len() {
         let k = if f < o.frames.len() {
             o.frames[f].sym
@@ -473,87 +491,25 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             ob::w64(&mut syms, y.size);
         }
     }
-    // Each part's relocations, in object order: `byp[pfirst[q] .. pfirst[q + 1]]` are part `q`'s.
-    let mut pfirst = Vector::<u32>::new();
-    pfirst.resize_default(parts.len() + 1);
-    let mut rpart = Vector::<u32>::with_capacity(o.rels.len());
-    for r in 0..o.rels.len() {
-        let x = o.rels[r];
-        let q = ob::part_at(&parts, &first, x.sec, x.off);
-        rpart.push(q);
-        if q != ob::NONE32 {
-            pfirst[q as usize + 1] += 1;
-        }
-    }
-    let mut nrela: u32 = (eh_sec != 0) as u32;
-    for q in 0..parts.len() {
-        nrela += (pfirst[q + 1] != 0) as u32;
-        pfirst[q + 1] += pfirst[q];
-    }
-    let mut byp = Vector::<u32>::new();
-    byp.resize_default(pfirst[parts.len()] as usize);
-    let mut fill = Vector::<u32>::new();
-    fill.extend_copy(&pfirst);
-    for r in 0..o.rels.len() {
-        let q = rpart[r];
-        if q != ob::NONE32 {
-            byp[fill[q as usize] as usize] = r as u32;
-            fill[q as usize] += 1;
-        }
-    }
     let symtab = hdrs.len() as u32 + nrela;
-    // Relocation sections.
-    for q in 0..parts.len() {
+    // Relocation sections, each at the next multiple of 8 (a part without relocations pads too).
+    let rela0 = hdrs.len();
+    for q in 0..np {
         let pt = parts[q];
-        let mut n: u32 = 0;
-        while body.len() % 8 != 0 {
-            body.push(0);
-        }
-        let start = body.len();
-        for j in pfirst[q]..pfirst[q + 1] {
-            let x = o.rels[byp[j as usize] as usize];
-            let abs32 = if a64 {
-                R_AARCH64_ABS32
-            } else {
-                R_X86_64_32
-            };
-            let ty = if x.kind == ob::R_SECOFF32 {
-                abs32
-            } else if a64 {
-                rel_type_a64(x.kind, word_at(o, x.sec, x.off))
-            } else {
-                rel_type(x.kind)
-            };
-            ob::w64(&mut body, x.off as u64 - pt.lo);
-            if x.part {
-                let y = o.syms[x.sym as usize];
-                let qs = ob::part_at(&parts, &first, y.sec, y.off) as usize;
-                ob::w64(&mut body, secsym[qs] as u64 << 32 | ty as u64);
-                ob::w64(&mut body, (x.addend + (y.off - parts[qs].lo) as i64) as u64);
-            } else {
-                ob::w64(&mut body, symix[x.sym as usize] as u64 << 32 | ty as u64);
-                ob::w64(&mut body, x.addend as u64);
-            }
-            n += 1;
-        }
+        pos = up(pos, 8);
+        let n = pfirst[q + 1] - pfirst[q];
         if n == 0 {
             continue;
         }
-        let mut nm = String::from_str(".rela");
         let mut name: str = "";
         let mut ty: u32 = 0;
         let _ = sec_info(o, pt.k, &mut name, &mut ty);
-        nm.push_str(name);
-        if pt.sym != ob::NONE32 {
-            nm.push_byte(b'.');
-            nm.push_str(o.name_of(pt.sym));
-        }
         hdrs.push(
             Shdr {
-                name: add_str(&mut shstr, &nm),
+                name: add_part_name(&mut shstr, o, ".rela", name, pt.sym),
                 ty: SHT_RELA,
                 flags: SHF_INFO_LINK,
-                off: start as u64,
+                off: pos,
                 size: n * 24,
                 link: symtab,
                 info: pt.hdr,
@@ -561,31 +517,16 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
                 entsize: 24,
             },
         );
+        pos += n as u64 * 24;
     }
-    if eh_sec != 0 {
-        while body.len() % 8 != 0 {
-            body.push(0);
-        }
-        let start = body.len();
-        for r in 0..eh_rels.len() {
-            let x = eh_rels[r];
-            let y = o.syms[x.sym as usize];
-            ob::w64(&mut body, x.off);
-            let pc32 = if a64 {
-                R_AARCH64_PREL32
-            } else {
-                R_X86_64_PC32
-            };
-            let q = ob::part_at(&parts, &first, y.sec, y.off) as usize;
-            ob::w64(&mut body, secsym[q] as u64 << 32 | pc32 as u64);
-            ob::w64(&mut body, y.off - parts[q].lo);
-        }
+    if eh {
+        pos = up(pos, 8);
         hdrs.push(
             Shdr {
                 name: add_str(&mut shstr, ".rela.eh_frame"),
                 ty: SHT_RELA,
                 flags: SHF_INFO_LINK,
-                off: start as u64,
+                off: pos,
                 size: (eh_rels.len() * 24) as u64,
                 link: symtab,
                 info: eh_sec,
@@ -593,17 +534,16 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
                 entsize: 24,
             },
         );
+        pos += (eh_rels.len() * 24) as u64;
     }
-    assert(hdrs.len() as u32 == symtab, "elf: the relocation sections counted differ from those written");
-    while body.len() % 8 != 0 {
-        body.push(0);
-    }
+    assert(hdrs.len() as u32 == symtab, "elf: the relocation sections counted differ from those laid out");
+    pos = up(pos, 8);
     hdrs.push(
         Shdr {
             name: add_str(&mut shstr, ".symtab"),
             ty: SHT_SYMTAB,
             flags: 0,
-            off: body.len() as u64,
+            off: pos,
             size: syms.len() as u64,
             link: symtab + 1,
             info: first_global,
@@ -611,13 +551,13 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             entsize: 24,
         },
     );
-    body.extend_from_slice(&syms);
+    pos += syms.len() as u64;
     hdrs.push(
         Shdr {
             name: add_str(&mut shstr, ".strtab"),
             ty: SHT_STRTAB,
             flags: 0,
-            off: body.len() as u64,
+            off: pos,
             size: strtab.len() as u64,
             link: 0,
             info: 0,
@@ -625,7 +565,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             entsize: 0,
         },
     );
-    body.extend_from_slice(&strtab);
+    pos += strtab.len() as u64;
     let shstrndx = hdrs.len() as u32;
     let shname = add_str(&mut shstr, ".shstrtab");
     hdrs.push(
@@ -633,7 +573,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             name: shname,
             ty: SHT_STRTAB,
             flags: 0,
-            off: body.len() as u64,
+            off: pos,
             size: shstr.len() as u64,
             link: 0,
             info: 0,
@@ -641,13 +581,16 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             entsize: 0,
         },
     );
-    body.extend_from_slice(&shstr);
-    while body.len() % 8 != 0 {
-        body.push(0);
-    }
+    pos += shstr.len() as u64;
+    pos = up(pos, 8);
+    assert(
+        shstr.len() == nsh && hdrs.len() == nhdr,
+        "elf: the section names or headers counted differ from those laid out",
+    );
     // The header, the data at offset 64, then the section headers.
+    let size = 64 + pos as usize + 64 * hdrs.len();
     out.truncate(0);
-    out.reserve(64 + body.len() + 64 * hdrs.len());
+    out.reserve_exact(size);
     // The identification: magic, 64 bits, little-endian, version 1, the System V ABI, padding.
     ob::w64(out, 0x00010102464C457F);
     ob::w64(out, 0);
@@ -663,7 +606,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     ob::w32(out, 1);
     ob::w64(out, 0);
     ob::w64(out, 0);
-    ob::w64(out, 64 + body.len() as u64);
+    ob::w64(out, 64 + pos);
     ob::w32(out, 0);
     ob::w16(out, 64);
     ob::w16(out, 0);
@@ -671,7 +614,94 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     ob::w16(out, 64);
     ob::w16(out, hdrs.len() as u32);
     ob::w16(out, shstrndx);
-    out.extend_from_slice(&body);
+    for q in 0..np {
+        let pt = parts[q];
+        let h = hdrs[pt.hdr as usize];
+        if h.ty != SHT_NOBITS {
+            pad_to(out, h.off);
+            out.extend_from_slice(o.secs[pt.k as usize].bytes[pt.lo as usize..pt.hi as usize]);
+        }
+    }
+    if eh {
+        pad_to(out, hdrs[eh_sec as usize].off);
+        let start = out.len();
+        let cie: []u8 = if a64 {
+            CIE_A64
+        } else {
+            CIE
+        };
+        out.extend_from_slice(cie);
+        for f in 0..o.frames.len() {
+            let fr = o.frames[f];
+            let at = out.len() - start;
+            // length, CIE pointer, pc_begin, pc_range, augmentation size 0, the rules, then padding.
+            let len = fde_len(fr.cfi_len);
+            ob::w32(out, len);
+            ob::w32(out, (at + 4) as u32);
+            ob::w32(out, 0);
+            ob::w32(out, fr.size);
+            out.push(0);
+            out.extend_from_slice(o.cfi[fr.cfi_at as usize..(fr.cfi_at + fr.cfi_len) as usize]);
+            for _ in 4 + 4 + 4 + 1 + fr.cfi_len..len {
+                out.push(0);
+            }
+        }
+    }
+    let mut ri = rela0;
+    for q in 0..np {
+        let pt = parts[q];
+        if pfirst[q + 1] == pfirst[q] {
+            continue;
+        }
+        pad_to(out, hdrs[ri].off);
+        ri += 1;
+        for j in pfirst[q]..pfirst[q + 1] {
+            let x = o.rels[byp[j as usize] as usize];
+            let abs32 = if a64 {
+                R_AARCH64_ABS32
+            } else {
+                R_X86_64_32
+            };
+            let ty = if x.kind == ob::R_SECOFF32 {
+                abs32
+            } else if a64 {
+                rel_type_a64(x.kind, word_at(o, x.sec, x.off))
+            } else {
+                rel_type(x.kind)
+            };
+            ob::w64(out, x.off as u64 - pt.lo);
+            if x.part {
+                let y = o.syms[x.sym as usize];
+                let qs = ob::part_at(&parts, &first, y.sec, y.off) as usize;
+                ob::w64(out, secsym[qs] as u64 << 32 | ty as u64);
+                ob::w64(out, (x.addend + (y.off - parts[qs].lo) as i64) as u64);
+            } else {
+                ob::w64(out, symix[x.sym as usize] as u64 << 32 | ty as u64);
+                ob::w64(out, x.addend as u64);
+            }
+        }
+    }
+    if eh {
+        pad_to(out, hdrs[ri].off);
+        for r in 0..eh_rels.len() {
+            let x = eh_rels[r];
+            let y = o.syms[x.sym as usize];
+            ob::w64(out, x.off);
+            let pc32 = if a64 {
+                R_AARCH64_PREL32
+            } else {
+                R_X86_64_PC32
+            };
+            let q = ob::part_at(&parts, &first, y.sec, y.off) as usize;
+            ob::w64(out, secsym[q] as u64 << 32 | pc32 as u64);
+            ob::w64(out, y.off - parts[q].lo);
+        }
+    }
+    pad_to(out, hdrs[symtab as usize].off);
+    out.extend_from_slice(&syms);
+    out.extend_from_slice(&strtab);
+    out.extend_from_slice(&shstr);
+    pad_to(out, pos);
     for i in 0..hdrs.len() {
         let h = hdrs[i];
         ob::w32(out, h.name);
@@ -691,5 +721,58 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         ob::w32(out, h.info);
         ob::w64(out, h.align);
         ob::w64(out, h.entsize);
+    }
+    assert(out.len() == size, "elf: the object written differs from its layout");
+}
+
+// `p` rounded up to a multiple of `al` (a power of two).
+const fn up(p: u64, al: u64) u64 {
+    return p + al - 1 & ~(al - 1);
+}
+
+// Zeros onto `out` up to data offset `off` (after the 64-byte header).
+fn pad_to(out: &mut Vector<u8>, off: u64) {
+    while out.len() as u64 < 64 + off {
+        out.push(0);
+    }
+}
+
+// The bytes after the length field of a frame entry with `cfi` bytes of rules: CIE pointer, pc_begin,
+// pc_range, augmentation size 0 and the rules, padded so the entry with its length field is a multiple of 8.
+const fn fde_len(cfi: u32) u32 {
+    let n = 4 + 4 + 4 + 1 + cfi;
+    return (n + 4 + 7 & ~7u32) - 4;
+}
+
+// The bytes of part `pt`'s section name: its section's name, then `.` and its symbol's when it has one.
+fn part_name_len(o: &ob::Obj, pt: ob::Part) usize {
+    let mut name: str = "";
+    let mut ty: u32 = 0;
+    let _ = sec_info(o, pt.k, &mut name, &mut ty);
+    return if pt.sym != ob::NONE32 {
+        name.len() + 1 + o.name_of(pt.sym).len()
+    } else {
+        name.len()
+    };
+}
+
+// Append `pre`, `name`, then `.` and symbol `sym`'s name when it is one, and a NUL to string table `t`; its
+// offset.
+fn add_part_name(t: &mut Vector<u8>, o: &ob::Obj, pre: str, name: str, sym: u32) u32 {
+    let at = t.len() as u32;
+    push_bytes(t, pre);
+    push_bytes(t, name);
+    if sym != ob::NONE32 {
+        t.push(b'.');
+        push_bytes(t, o.name_of(sym));
+    }
+    t.push(0);
+    return at;
+}
+
+// Append the bytes of `s` to `t`.
+fn push_bytes(t: &mut Vector<u8>, s: str) {
+    for i in 0..s.len() {
+        t.push(s.byte_at(i));
     }
 }
