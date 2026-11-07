@@ -58,7 +58,8 @@ own waits (a lock, a semaphore, a channel) still park it. A task that holds pool
 whole region (the compiler's optimizer scratch, borrow slot or emission context) masks it, so a
 worker holds one such task's memory at a time, not one per task preempted mid-region. A task
 that parks while it holds the memory still lets its worker start another: the compiler's pools
-of that kind also cap their items at the worker count (`BcPool.cap`, `G_DSEM`), and a task that
+of that kind also cap their items at the worker count (`BcPool.cap`, `G_DSEM`) or take no parking
+lock while they hold one (the optimizer's scratch pool: a spin lock), and a capped pool's task that
 finds none waits before it takes anything.
 
 Reachability (`Package::reach_solve`, over one scan per module, `Package::co_scan`) starts at

@@ -28,6 +28,7 @@ import lir::eval as le;
 import lir::verify as lv;
 import std::parallel::sync as psync;
 import std::parallel::runtime as prt;
+import sc_runtime;
 import lir::inline as il;
 import lir::promote as pr;
 import lir::loops as lu;
@@ -12281,16 +12282,20 @@ pub(package) struct Run {
     // Per body, whether a caller may inline it: written by the body's job, read by its callers' jobs.
     ok: UnsafeCell<Vector<u8>>, // per body, its inliner facts (`il::facts`; 0: callers may not inline it)
     // Per body whose loop transforms or packing made vectors, its final form: `bodies` holds the form
-    // before them, which callers inline (`job`), until `finish` swaps the two (`inlined`).
-    finals: UnsafeCell<Vector<Option<Body>>>,
+    // before them, which callers inline (`job`), until `finish` swaps the two (`take_inlined`). Boxed: few
+    // bodies have one, and the table holds a pointer per body.
+    finals: UnsafeCell<Vector<Option<Box<Body>>>>,
     inline: bool,
     cf: Config,
     // `SC_LIR_PRINT`: each optimized body whose function's name holds it prints to stderr (a debugging aid).
     print: String,
     // `SC_VEC_REPORT=1`: each loop the vectorizer left prints its location and why (a debugging aid).
     report: bool,
-    // Scratch a job takes and gives back: it grows once per worker, not once per body.
-    free: psync::Mutex<Vector<Box<Scratch>>>,
+    // Scratch a job takes and gives back: it grows once per worker, not once per body. Under a spin lock
+    // (`free_lock`): a job that parked on a lock while it holds a scratch would let its worker start a job
+    // that makes another.
+    free: UnsafeCell<Vector<Box<Scratch>>>,
+    free_lock: UnsafeCell<i32>,
 }
 
 // Keep the buffers of `x`, a body a job is done with, as the spare of a rebuild of `sc` whose own are
@@ -12319,14 +12324,17 @@ extend Run {
     pub(package) fn new(pk: &mut Package, sealed: &Vector<bool>, cf: Config) Run {
         direct_calls(pk);
         specialize(pk);
-        // The jobs hold the bodies for the whole phase: in a table of their count, not one the lowering's
-        // merges grew by doubling.
-        let mut bodies = Vector::<Body>::with_capacity(pk.bodies.len());
-        while let Some(b) = pk.bodies.pop() {
-            bodies.push(b);
+        // The jobs hold the bodies for the whole phase: in a table of about their count (the merges reserve
+        // it, `lir_reserve`), not one that grew by doubling.
+        let mut bodies = replace(&mut pk.bodies, Vector::<Body>::new());
+        if bodies.capacity() - bodies.len() > bodies.len() / 8 {
+            let mut fit = Vector::<Body>::with_capacity(bodies.len());
+            while let Some(b) = bodies.pop() {
+                fit.push(b);
+            }
+            fit.reverse();
+            bodies = fit;
         }
-        bodies.reverse();
-        pk.bodies = Vector::<Body>::new();
         let n = bodies.len();
         let held = if pk.held.body == NONE {
             n as u32
@@ -12442,16 +12450,16 @@ extend Run {
         for k in 0..n {
             fin.push(k as u32 >= held);
         }
-        let mut finals = Vector::<Option<Body>>::with_capacity(n);
+        let mut finals = Vector::<Option<Box<Body>>>::with_capacity(n);
         for _ in 0..n {
-            finals.push(Option::<Body>::None);
+            finals.push(Option::<Box<Body>>::None);
         }
         return Run {
             edges: edges,
             order: order,
             pk: pkp,
             bodies: UnsafeCell::<Vector<Body>>::new(bodies),
-            finals: UnsafeCell::<Vector<Option<Body>>>::new(finals),
+            finals: UnsafeCell::<Vector<Option<Box<Body>>>>::new(finals),
             held: held,
             call_at: call_at,
             calls: calls,
@@ -12469,7 +12477,8 @@ extend Run {
             cf: cf,
             print: stdlib::get_env("SC_LIR_PRINT").unwrap_or(String::new()),
             report: stdlib::env_is("SC_VEC_REPORT", "1"),
-            free: psync::Mutex::<Vector<Box<Scratch>>>::new(Vector::<Box<Scratch>>::new()),
+            free: UnsafeCell::<Vector<Box<Scratch>>>::new(Vector::<Box<Scratch>>::new()),
+            free_lock: UnsafeCell::<i32>::new(0),
         };
     }
 
@@ -12487,8 +12496,9 @@ extend Run {
         // scratch per job in flight, not per worker.
         prt::preempt_mask_enter();
         let mut sc = r.take();
-        // The passes work on the body out of the package, which gets it back at the end as one exact-size
-        // copy: the rebuilds swap it with the scratch's spares, whose buffers it then keeps (`recycle`).
+        // The passes work on the body out of the package, which gets it back at the end at about its size
+        // (`take_compact`): the rebuilds swap it with the scratch's spares, whose buffers it then keeps
+        // (`recycle`).
         let pb = unsafe &mut *(base + j as usize);
         let mut wb = replace(pb, Body::empty());
         let b = &mut wb;
@@ -12686,7 +12696,7 @@ extend Run {
                 if keep {
                     let fin = replace(b, s);
                     b.compact_pool(&mut sc.o.cps);
-                    unsafe *((*r.finals.get()).as_mut_ptr() + j as usize) = Some(fin.compact());
+                    unsafe *((*r.finals.get()).as_mut_ptr() + j as usize) = Some(Box::new(fin.compact()));
                     recycle(&mut sc, fin);
                 } else {
                     recycle(&mut sc, s);
@@ -12705,7 +12715,7 @@ extend Run {
         } else {
             0u8
         };
-        *pb = b.compact();
+        *pb = b.take_compact();
         recycle(&mut sc, wb);
         unsafe *((*r.ok.get()).as_mut_ptr() + j as usize) = facts;
         r.give(sc);
@@ -12742,9 +12752,14 @@ extend Run {
         };
     }
 
-    // Whether the job of each body `marked_callee` names has finished.
+    // Whether the job of each body `marked_callee` names has finished; false while another job holds the
+    // lock: the caller holds a scratch, and waits without it (`await_marked`).
     fn marked_done(self: &Self, p: &Package, j: u32, b: &Body, only: &Vector<bool>) bool {
-        let g = self.fin.lock();
+        let held = self.fin.try_lock();
+        if held.is_none() {
+            return false;
+        }
+        let g = held.unwrap();
         for i in 0..only.len() {
             let c = self.marked_callee(p, j, b, only, i);
             if c != NONE && !g.get()[c as usize] {
@@ -12796,10 +12811,12 @@ extend Run {
     // A scratch from the free list, or a new one. The lock is held for this call only, never while a
     // body is optimized.
     fn take(self: &Self) Box<Scratch> {
-        let mut g = self.free.lock();
-        switch g.get_mut().pop() {
-            Some(x) => {
-                return x;
+        unsafe sc_runtime::sc_rt_spin_lock(self.free_lock.get());
+        let x = unsafe (*self.free.get()).pop();
+        unsafe sc_runtime::sc_rt_spin_unlock(self.free_lock.get());
+        switch x {
+            Some(sc) => {
+                return sc;
             },
             None => {},
         }
@@ -12807,8 +12824,9 @@ extend Run {
     }
 
     fn give(self: &Self, sc: Box<Scratch>) {
-        let mut g = self.free.lock();
-        g.get_mut().push(sc);
+        unsafe sc_runtime::sc_rt_spin_lock(self.free_lock.get());
+        unsafe (*self.free.get()).push(sc);
+        unsafe sc_runtime::sc_rt_spin_unlock(self.free_lock.get());
     }
 
     /// Give the bodies back to `pk`, the package `new` took them from, in their final forms, their constant
@@ -12817,10 +12835,12 @@ extend Run {
         let finals = self.finals.get_mut();
         let bodies = self.bodies.get_mut();
         for j in 0..finals.len() {
-            let f = replace(finals.index_mut(j), Option::<Body>::None);
+            let f = replace(finals.index_mut(j), Option::<Box<Body>>::None);
             if f.is_some() {
-                let pre = replace(bodies.index_mut(j), f.unwrap());
-                finals.set(j, Some(pre));
+                let mut bx = f.unwrap();
+                let pre = replace(bodies.index_mut(j), bx.replace(Body::empty()));
+                bx.set(pre);
+                finals.set(j, Some(bx));
             }
         }
         pk.bodies = replace(bodies, Vector::<Body>::new());
@@ -12831,13 +12851,18 @@ extend Run {
         direct_calls(pk);
     }
 
-    /// After `finish`, the form of body `k` its callers inlined: the one before the loop transforms and
-    /// the packing when those made vectors or rotated its loops, else `pk`'s.
-    pub(package) fn inlined<'a>(self: &'a Self, pk: &'a Package, k: u32) &'a Body {
-        if let Some(b) = self.finals.get_ref().at(k as usize) {
-            return b;
+    /// After `finish`, the form of body `k` its callers inlined, moved out: the one before the loop
+    /// transforms and the packing when those made vectors or rotated its loops, else `pk`'s, which the
+    /// caller gives back (true). Each body once.
+    pub(package) fn take_inlined(self: &mut Self, pk: &mut Package, k: u32) (Body, bool) {
+        let f = replace(self.finals.get_mut().index_mut(k as usize), Option::<Box<Body>>::None);
+        if f.is_some() {
+            let mut bx = f.unwrap();
+            return (bx.replace(Body::empty()), false);
         }
-        return &pk.bodies[k as usize];
+        let b = replace(pk.bodies.index_mut(k as usize), Body::empty());
+        assert(b.lines.len() != 0, "hold: a body taken twice");
+        return (b, true);
     }
 
     /// Whether body `k` passed the inliner's shape test, and whether its callers may inline it (after its
@@ -12947,7 +12972,7 @@ pub(package) fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
 // a read-only table of its own (LLVM's switch to lookup table): a load in place of a branch per case. A
 // body that took one is optimized again, which removes the cases' blocks. Its form before, the one its
 // callers inlined, stays in `pre` (`Run::inlined`) unless an earlier one does.
-fn symbol_tables(pk: &mut Package, pre: &mut Vector<Option<Body>>) {
+fn symbol_tables(pk: &mut Package, pre: &mut Vector<Option<Box<Body>>>) {
     let held = if pk.held.body == NONE {
         pk.bodies.len()
     } else {
@@ -13004,7 +13029,7 @@ fn symbol_tables(pk: &mut Package, pre: &mut Vector<Option<Body>>) {
                 continue;
             }
             if !took && pre.at(j).is_none() {
-                pre.set(j, Some(pk.bodies[j].compact()));
+                pre.set(j, Some(Box::new(pk.bodies[j].compact())));
             }
             sws::use_symbol_table(pk.bodies.index_mut(j), k as u32, &st, d, ptr);
             took = true;
@@ -13036,7 +13061,7 @@ const OFF_NONE: u64 = 0xFFFFFFFFFFFFFFFF;
 // they read become unused constants. A body's form before, the one its callers inlined, stays in `pre`
 // (`Run::inlined`) unless an earlier one does: a unit that inlines it from a record then makes the data its
 // own.
-fn const_slots(pk: &mut Package, pre: &mut Vector<Option<Body>>) {
+fn const_slots(pk: &mut Package, pre: &mut Vector<Option<Box<Body>>>) {
     let held = if pk.held.body == NONE {
         pk.bodies.len()
     } else {
@@ -13089,7 +13114,7 @@ fn const_slots(pk: &mut Package, pre: &mut Vector<Option<Body>>) {
                 continue;
             }
             if pre.at(k).is_none() {
-                pre.set(k, Some(pk.bodies[k].compact()));
+                pre.set(k, Some(Box::new(pk.bodies[k].compact())));
             }
             let b = pk.bodies.index_mut(k);
             let r = b.ref_sym(d);
@@ -13486,9 +13511,37 @@ struct Calls {
     pub(package) bits: Vector<u64>,
 }
 
-// `Calls` of `bodies`, each body's instructions read once.
+// `Calls` of `bodies`: each body's instructions read twice, the first time to size the lists.
 fn calls_of(p: &Package, bodies: &Vector<Body>, held: u32, cs: &mut Calls) {
     let hd = &p.held;
+    // The lists at once, at their most: a held body's calls, every `call` instruction with its arguments,
+    // and every relocation of the read-only tables a body names.
+    let (mut nc, mut na) = (bodies.len() + 1, 1usize);
+    for k in 0..bodies.len() {
+        if k as u32 >= held {
+            let h = k - held as usize;
+            nc += (hd.at[h + 1] - hd.at[h]) as usize;
+            continue;
+        }
+        let b = &bodies[k];
+        for i in 0..b.insts.len() {
+            if b.insts[i].op == O_CALL {
+                nc += 1;
+                na += (b.insts[i].aux as usize).min(64);
+            }
+        }
+        for x in 0..b.syms.len() {
+            let sy = p.syms[b.syms[x] as usize];
+            if sy.kind == SK_DATA && sy.def != NONE {
+                nc += p.data[sy.def as usize].nrelocs as usize;
+            }
+        }
+    }
+    cs.callee.reserve_exact(nc);
+    cs.live.reserve_exact(nc);
+    cs.arg_at.reserve_exact(nc);
+    cs.arg.reserve_exact(na);
+    cs.bits.reserve_exact(na);
     let mut ends = Vector::<bool>::new();
     for k in 0..bodies.len() {
         cs.at.push(cs.callee.len() as u32);
@@ -17868,6 +17921,7 @@ fn specialize(pk: &mut Package) {
     while pk.bodies.len() > held {
         hb.push(pk.bodies.pop().unwrap());
     }
+    pk.bodies.reserve_exact(made.len());
     for j in 0..made.len() {
         pk.syms.index_mut(made_sym[j] as usize).def = pk.bodies.len() as u32;
         pk.bodies.push(replace(made.index_mut(j), Body::empty()));

@@ -167,7 +167,7 @@ pub(package) struct HData {
 
 extend HData as Persist {}
 
-/// A unit's held record (`save`, `read`).
+/// A unit's held record (`record`, `read`).
 pub(package) struct Rec {
     pub(package) names: Vector<String>,
     pub(package) funcs: Vector<HFunc>,
@@ -177,6 +177,16 @@ pub(package) struct Rec {
 }
 
 extend Rec as Persist {}
+
+// A body of the package a record holds while it is written (`Held`): the record's function `func`, body
+// `body`, with the package's symbols, messages and line files.
+struct Lent {
+    func: u32,
+    body: u32,
+    syms: Vector<u32>,
+    msgs: Vector<u32>,
+    files: Vector<u32>,
+}
 
 // A record under construction: spellings get indices in first-use order.
 struct Saver {
@@ -218,10 +228,22 @@ extend Saver {
     }
 }
 
-/// The record of every unit `want` marks into `out` (indexed by unit), from `pk` after `r` optimized its
-/// bodies and gave them back: each unit's own functions and data definitions (`Sym.own`), in symbol
-/// order.
-pub(package) fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut Vector<String>) {
+/// What the records of the units `want` marks hold (`units`): per unit, its own function symbols and
+/// data definition symbols (`Sym.own`), in symbol order; per body, its function symbol.
+pub(package) struct Units {
+    bsym: Vector<u32>,
+    fs: Vector<Vector<u32>>,
+    ds: Vector<Vector<u32>>,
+}
+
+/// A unit's record while it is written: it holds the package's bodies it lent until `restore`.
+pub(package) struct Held {
+    sv: Saver,
+    lent: Vector<Lent>,
+}
+
+/// The `Units` of `pk` for the units `want` marks.
+pub(package) fn units(pk: &Package, want: &Vector<bool>) Units {
     let n = want.len();
     let nb = pk.bodies.len();
     let mut bsym = Vector::<u32>::with_capacity(nb);
@@ -249,130 +271,168 @@ pub(package) fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut
             ds.index_mut(sy.unit as usize).push(s as u32);
         }
     }
-    out.truncate(0);
-    out.resize_default(n);
-    for u in 0..n {
-        if !want[u] {
-            continue;
-        }
-        let mut sv = Saver {
-            rec: Rec {
-                names: Vector::<String>::new(),
-                funcs: Vector::<HFunc>::with_capacity(fs.at(u).len()),
-                data: Vector::<HData>::with_capacity(ds.at(u).len()),
-                free: Vector::<HData>::new(),
-                decls: Vector::<Body>::new(),
+    return Units { bsym: bsym, fs: fs, ds: ds };
+}
+
+/// The record of unit `u` of `us`, from `pk` after `r` optimized its bodies and gave them back. It takes
+/// the inlined forms `r` kept (`Run::take_inlined`) and holds `pk`'s bodies until `restore`.
+pub(package) fn record(pk: &mut Package, r: &mut lopt::Run, us: &Units, u: usize) Held {
+    let mut sv = Saver {
+        rec: Rec {
+            names: Vector::<String>::new(),
+            funcs: Vector::<HFunc>::with_capacity(us.fs.at(u).len()),
+            data: Vector::<HData>::with_capacity(us.ds.at(u).len()),
+            free: Vector::<HData>::new(),
+            decls: Vector::<Body>::new(),
+        },
+        ids: Map::<u32, u32>::new(),
+    };
+    // The free data the inlinable bodies name, then the free data their relocations reach.
+    let mut free = Vector::<u32>::new();
+    let mut seen = Set::<u32>::new();
+    // Per package signature, its index in `decls`: each one recorded once.
+    let mut sigs = Map::<u32, u32>::new();
+    // The package's bodies the record holds, with their own symbols, messages and line files.
+    let mut lent = Vector::<Lent>::new();
+    for q in 0..us.fs.at(u).len() {
+        let s = us.fs.at(u)[q];
+        let sy = pk.syms[s as usize];
+        let k = sy.def;
+        let ok = r.inlinable(k);
+        let mut f = HFunc {
+            name: sv.name(pk, sy.name),
+            flags: if r.shape_of(k) {
+                HELD_SHAPE
+            } else {
+                0u8
+            } | if ok {
+                HELD_OK
+            } else {
+                0u8
+            } | if sy.cold {
+                HELD_COLD
+            } else {
+                0u8
+            } | if sy.always {
+                HELD_ALWAYS
+            } else {
+                0u8
             },
-            ids: Map::<u32, u32>::new(),
+            fx: sy.fx,
+            wargs: r.wargs_of(k),
+            esc: sy.esc,
+            spans: Vector::<u64>::new(),
+            calls: Vector::<u32>::new(),
+            body: Body::new(),
+            refs: Vector::<HRef>::new(),
         };
-        // The free data the inlinable bodies name, then the free data their relocations reach.
-        let mut free = Vector::<u32>::new();
-        let mut seen = Set::<u32>::new();
-        // Per package signature, its index in `decls`: each one recorded once.
-        let mut sigs = Map::<u32, u32>::new();
-        for q in 0..fs.at(u).len() {
-            let s = fs.at(u)[q];
-            let sy = pk.syms[s as usize];
-            let k = sy.def;
-            let ok = r.inlinable(k);
-            let mut f = HFunc {
-                name: sv.name(pk, sy.name),
-                flags: if r.shape_of(k) {
-                    HELD_SHAPE
-                } else {
-                    0u8
-                } | if ok {
-                    HELD_OK
-                } else {
-                    0u8
-                } | if sy.cold {
-                    HELD_COLD
-                } else {
-                    0u8
-                } | if sy.always {
-                    HELD_ALWAYS
-                } else {
-                    0u8
-                },
-                fx: sy.fx,
-                wargs: r.wargs_of(k),
-                esc: sy.esc,
-                spans: Vector::<u64>::new(),
-                calls: Vector::<u32>::new(),
-                body: Body::new(),
-                refs: Vector::<HRef>::new(),
-            };
-            if sy.span != NONE {
-                let n = pk.spans[sy.span as usize] as usize;
-                f.spans.extend_from_slice(pk.spans[sy.span as usize + 1..sy.span as usize + 1 + n]);
-            }
-            let cs = r.calls_of(k);
-            for c in 0..cs.len() {
-                f.calls.push(sv.name(pk, pk.syms[bsym[cs[c] as usize] as usize].name));
-            }
-            if ok {
-                f.body = r.inlined(pk, k).compact();
-                for i in 0..f.body.syms.len() {
-                    let ry = pk.syms[f.body.syms[i] as usize];
-                    if ry.kind != SK_FUNC && ry.def != NONE && ry.unit == NONE && !seen.contains(&f.body.syms[i]) {
-                        seen.insert(f.body.syms[i]);
-                        free.push(f.body.syms[i]);
-                    }
-                    let mut sig = NONE;
-                    if ry.sig != NONE {
-                        sig = (switch sigs.get(&ry.sig) {
-                            Some(x) => *x,
-                            None => {
-                                let x = sv.rec.decls.len() as u32;
-                                sv.rec.decls.push(pk.decls[ry.sig as usize].compact());
-                                sigs.insert(ry.sig, x);
-                                x
-                            },
-                        });
-                    }
-                    f.refs.push(HRef { name: sv.name(pk, ry.name), kind: ry.kind, ext: ry.ext, sig: sig });
-                }
-                f.body.syms.truncate(0);
-                for i in 0..f.body.msgs.len() {
-                    f.body.msgs[i] = sv.name(pk, pk.msgs[f.body.msgs[i] as usize]);
-                }
-                for i in 1..f.body.lines.len() {
-                    f.body.lines.index_mut(i).file = sv.name(pk, pk.files[f.body.lines[i].file as usize]);
-                }
-            }
-            sv.rec.funcs.push(f);
+        if sy.span != NONE {
+            let n = pk.spans[sy.span as usize] as usize;
+            f.spans.extend_from_slice(pk.spans[sy.span as usize + 1..sy.span as usize + 1 + n]);
         }
-        for q in 0..ds.at(u).len() {
-            let hd = sv.data(pk, ds.at(u)[q]);
-            sv.rec.data.push(hd);
+        let cs = r.calls_of(k);
+        for c in 0..cs.len() {
+            f.calls.push(sv.name(pk, pk.syms[us.bsym[cs[c] as usize] as usize].name));
         }
-        // Each free definition once: the list grows as the relocations reach new ones.
-        let mut q: usize = 0;
-        while q < free.len() {
-            let d = pk.data[pk.syms[free[q] as usize].def as usize];
-            for j in d.relocs..d.relocs + d.nrelocs {
-                let t = pk.relocs[j as usize].sym;
-                let ty = pk.syms[t as usize];
-                if ty.kind != SK_FUNC && ty.def != NONE && ty.unit == NONE && !seen.contains(&t) {
-                    seen.insert(t);
-                    free.push(t);
+        if ok {
+            let (b, of_pk) = r.take_inlined(pk, k);
+            f.body = b;
+            for i in 0..f.body.syms.len() {
+                let ry = pk.syms[f.body.syms[i] as usize];
+                if ry.kind != SK_FUNC && ry.def != NONE && ry.unit == NONE && !seen.contains(&f.body.syms[i]) {
+                    seen.insert(f.body.syms[i]);
+                    free.push(f.body.syms[i]);
                 }
+                let mut sig = NONE;
+                if ry.sig != NONE {
+                    sig = (switch sigs.get(&ry.sig) {
+                        Some(x) => *x,
+                        None => {
+                            let x = sv.rec.decls.len() as u32;
+                            sv.rec.decls.push(pk.decls[ry.sig as usize].compact());
+                            sigs.insert(ry.sig, x);
+                            x
+                        },
+                    });
+                }
+                f.refs.push(HRef { name: sv.name(pk, ry.name), kind: ry.kind, ext: ry.ext, sig: sig });
             }
-            let hd = sv.data(pk, free[q]);
-            sv.rec.free.push(hd);
-            q += 1;
+            let syms = replace(&mut f.body.syms, Vector::<u32>::new());
+            if of_pk {
+                let mut l = Lent {
+                    func: sv.rec.funcs.len() as u32,
+                    body: k,
+                    syms: syms,
+                    msgs: Vector::<u32>::with_capacity(f.body.msgs.len()),
+                    files: Vector::<u32>::with_capacity(f.body.lines.len()),
+                };
+                l.msgs.extend_copy(&f.body.msgs);
+                for i in 0..f.body.lines.len() {
+                    l.files.push(f.body.lines[i].file);
+                }
+                lent.push(l);
+            }
+            for i in 0..f.body.msgs.len() {
+                f.body.msgs[i] = sv.name(pk, pk.msgs[f.body.msgs[i] as usize]);
+            }
+            for i in 1..f.body.lines.len() {
+                f.body.lines.index_mut(i).file = sv.name(pk, pk.files[f.body.lines[i].file as usize]);
+            }
         }
-        // A sizing pass first: the record is then written into one allocation of its size.
+        sv.rec.funcs.push(f);
+    }
+    for q in 0..us.ds.at(u).len() {
+        let hd = sv.data(pk, us.ds.at(u)[q]);
+        sv.rec.data.push(hd);
+    }
+    // Each free definition once: the list grows as the relocations reach new ones.
+    let mut q: usize = 0;
+    while q < free.len() {
+        let d = pk.data[pk.syms[free[q] as usize].def as usize];
+        for j in d.relocs..d.relocs + d.nrelocs {
+            let t = pk.relocs[j as usize].sym;
+            let ty = pk.syms[t as usize];
+            if ty.kind != SK_FUNC && ty.def != NONE && ty.unit == NONE && !seen.contains(&t) {
+                seen.insert(t);
+                free.push(t);
+            }
+        }
+        let hd = sv.data(pk, free[q]);
+        sv.rec.free.push(hd);
+        q += 1;
+    }
+    return Held { sv: sv, lent: lent };
+}
+
+extend Held {
+    /// The bytes `write` gives.
+    pub(package) fn size(self: &Self) usize {
         let mut sz = Writer::sizing();
-        sv.rec.save(&mut sz);
-        let mut w = Writer::new();
-        w.buf.reserve_exact(sz.len());
-        sv.rec.save(&mut w);
-        out.set(u, replace(&mut w.buf, String::new()));
+        self.sv.rec.save(&mut sz);
+        return sz.len();
+    }
+
+    pub(package) fn write(self: &Self, w: &mut Writer) {
+        self.sv.rec.save(w);
+    }
+
+    /// Give `pk` the bodies the record holds back, as they were.
+    pub(package) fn restore(self: &mut Self, pk: &mut Package) {
+        for x in 0..self.lent.len() {
+            let l = self.lent.index_mut(x);
+            let mut b = replace(&mut self.sv.rec.funcs.index_mut(l.func as usize).body, Body::empty());
+            b.syms = replace(&mut l.syms, Vector::<u32>::new());
+            b.msgs = replace(&mut l.msgs, Vector::<u32>::new());
+            for i in 0..b.lines.len() {
+                b.lines.index_mut(i).file = l.files[i];
+            }
+            pk.bodies.set(l.body as usize, b);
+        }
+        self.lent.truncate(0);
     }
 }
 
-/// Record `img` (from `save`, 16-byte aligned) for a package of `ptr_bytes`-byte pointers; None when it
+/// Record `img` (from `Held::write`, 16-byte aligned) for a package of `ptr_bytes`-byte pointers; None when it
 /// does not read or names past its tables.
 pub(package) fn read(img: str, ptr_bytes: u32) Option<Rec> {
     let mut r = Reader::new(img.ptr(), img.len());

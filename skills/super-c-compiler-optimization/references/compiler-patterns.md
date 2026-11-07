@@ -127,7 +127,8 @@ A per-body map that a large body would otherwise free and the next one regrow cl
 A pass that rebuilds a whole body (the inliner, promote, a snapshot) builds into a spare body and
 swaps it in. In the LIR optimizer every rebuild works on scratch bodies: `Run::job` takes the body out
 of the package, the rebuilds swap it with the scratch's spares, and the job writes it back once at its
-exact size (`Body::compact`); `recycle` then keeps the larger buffers as the spares, so they grow to
+size (`Body::take_compact`: a table at most an eighth over its length moves, any other is copied
+exact); `recycle` then keeps the larger buffers as the spares, so they grow to
 the largest body and stop allocating. A per-body output buffer that a later pass trims costs its size
 twice. A pass on a scratch body writes its result into the body's own buffers: an exact-size copy
 there (`Body::compact_pool` made one of the pool) puts a small buffer among the spares, and the next
@@ -137,7 +138,9 @@ Parallel stages pool their scratch per worker, not per task. A pool item a task 
 run needs both guards: the task masks preemption (`preempt_mask_enter`, super-c-concurrency), and the
 pool caps its items at the worker count, because a task that parks on a lock while it holds one lets
 its worker start another (the borrow slots were 181 for 204 module jobs before the cap: `BcPool.cap`;
-the emission contexts, `G_DSEM`). A table that depends on the package alone is built once and read by
+the emission contexts, `G_DSEM`). The optimizer's scratch pool instead takes no lock that parks while a
+job holds a scratch: the pool is under a spin lock and `marked_done` only tries the `fin` lock (the
+scratches were 20 to 135 per jobs=18 build before, 18 after). A table that depends on the package alone is built once and read by
 every shard (`CEmit::prepare_shared`, `Mangler::prepare_shared`: a shard's `base`), not rebuilt in each.
 
 ## Fixed-Array Replacement

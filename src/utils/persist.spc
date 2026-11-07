@@ -5,25 +5,45 @@
 // in one copy.
 // Raw pointers have no conformance: a type holding one writes its own `save` and `load`, or keeps the
 // pointer in a wrapper that does. The image is only ever read by the compiler binary that wrote it.
+import stdio;
 import string as cstring;
 import std::mem::cell;
 
+// A file writer's `buf` goes to its file each time it holds this many bytes.
+const WRITE_CHUNK: usize = 1 << 16;
+
 /// The image being written. A sizing writer writes nothing and counts the bytes a save gives
-/// (`len`), so the save can then write into one allocation of that size.
+/// (`len`), so the save can then write into one allocation of that size. A file writer (`to_file`)
+/// passes them on to its file in chunks of WRITE_CHUNK bytes.
 pub(package) struct Writer {
     pub(package) buf: String,
     sizing: bool,
     size: usize,
+    file: *mut stdio::FILE, // null: none
+    sent: usize, // the bytes gone to `file`
+    failed: bool, // whether a write to `file` fell short
 }
 
 extend Writer {
     pub(package) fn new() Writer {
-        return Writer { buf: String::new(), sizing: false, size: 0 };
+        return Writer { buf: String::new(), sizing: false, size: 0, file: null, sent: 0, failed: false };
     }
 
     /// A writer that only counts.
     pub(package) fn sizing() Writer {
-        return Writer { buf: String::new(), sizing: true, size: 0 };
+        return Writer { buf: String::new(), sizing: true, size: 0, file: null, sent: 0, failed: false };
+    }
+
+    /// A writer into the open file `f`, which `finish` closes.
+    pub(package) fn to_file(f: *mut stdio::FILE) Writer {
+        return Writer {
+            buf: String::with_capacity(WRITE_CHUNK + 16), // past the chunk: at most a `u64` or a padding
+            sizing: false,
+            size: 0,
+            file: f,
+            sent: 0,
+            failed: false,
+        };
     }
 
     /// The bytes written (counted, for a sizing writer).
@@ -31,7 +51,7 @@ extend Writer {
         if self.sizing {
             return self.size;
         }
-        return self.buf.len();
+        return self.sent + self.buf.len();
     }
 
     /// Append the `n` bytes at `p`.
@@ -39,6 +59,15 @@ extend Writer {
         if self.sizing {
             self.size += n;
             return;
+        }
+        // A file writer's `buf` keeps its size: what would not fit goes to the file, a large block straight.
+        if self.file != null && self.buf.len() + n > WRITE_CHUNK {
+            self.send();
+            if n >= WRITE_CHUNK {
+                self.failed = self.failed || unsafe stdio::fwrite(p, 1, n, self.file) != n;
+                self.sent += n;
+                return;
+            }
         }
         self.buf.push_str(unsafe str::from_raw(p, n));
     }
@@ -52,6 +81,7 @@ extend Writer {
         for i in 0..8 {
             self.buf.push_byte((v >> (i * 8) as u64) as u8);
         }
+        self.spill();
     }
 
     /// Pad to a multiple of 16 bytes, so the bytes that follow can be read in place.
@@ -60,9 +90,33 @@ extend Writer {
             self.size = (self.size + 15) / 16 * 16;
             return;
         }
-        while self.buf.len() % 16 != 0 {
+        while self.len() % 16 != 0 {
             self.buf.push_byte(0);
         }
+        self.spill();
+    }
+
+    /// A file writer's last bytes to its file, which it closes; whether every byte went there.
+    pub(package) fn finish(self: &mut Writer) bool {
+        self.send();
+        let closed = unsafe stdio::fclose(self.file) == 0;
+        self.file = null;
+        return closed && !self.failed;
+    }
+
+    // A file writer's `buf` to its file once it holds WRITE_CHUNK bytes.
+    fn spill(self: &mut Writer) {
+        if self.file != null && self.buf.len() >= WRITE_CHUNK {
+            self.send();
+        }
+    }
+
+    // `buf` to the file.
+    fn send(self: &mut Writer) {
+        let n = self.buf.len();
+        self.failed = self.failed || unsafe stdio::fwrite(self.buf.as_str().ptr(), 1, n, self.file) != n;
+        self.sent += n;
+        self.buf.truncate(0);
     }
 }
 

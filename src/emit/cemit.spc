@@ -2044,11 +2044,11 @@ extend CEmit {
         return 0;
     }
 
-    /// Room in this emitter's LIR for `n` more bodies, the `lir_bodies` of the shards it absorbs: the
-    /// absorbs then grow no table step by step.
+    /// Room in this emitter's LIR for exactly `n` more bodies, the `lir_bodies` of the shards it absorbs:
+    /// the absorbs then grow no table step by step, and the optimizer keeps the table (`Run::new`).
     pub(package) fn lir_reserve(self: &mut Self, n: usize) {
         if let Some(l) = &mut self.lir {
-            l.pkg.bodies.reserve(n);
+            l.pkg.bodies.reserve_exact(n);
         }
     }
 

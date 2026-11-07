@@ -1827,8 +1827,7 @@ pub(package) struct CemitOut {
     pub(package) edges: Vector<u64>, // (spelling TU << 32 | owner module): cross-TU symbol references
     /// Next per-TU cache image + its path ("" = caching off): run_package persists it only after a
     /// fully successful emission, so a failed build never publishes sections it did not finish.
-    pub(package) tuc_img: String,
-    pub(package) tuc_parts: Vector<String>, // the image's rest after `tuc_img` (`tuc::Tuc.parts`)
+    pub(package) tuc_ok: bool, // whether the image's temporary file holds it in full (`tuc::image_begin`)
     pub(package) tuc_path: String,
     /// The emission cache's module keys and hits (empty when it is off), for the native objects' reuse.
     pub(package) tuc_keys: Vector<u64>,
@@ -1876,8 +1875,7 @@ extend CemitOut {
             len_faults: false,
             refused: Vector::<cbe::Refusal>::new(),
             edges: Vector::<u64>::new(),
-            tuc_img: String::new(),
-            tuc_parts: Vector::<String>::new(),
+            tuc_ok: false,
             tuc_path: String::new(),
             tuc_keys: Vector::<u64>::new(),
             tuc_hit: Vector::<bool>::new(),
@@ -6317,10 +6315,11 @@ pub(package) fn cemit_package(
     o.main_argv = acc.main_argv;
     prd.merge(&dow.pr);
     prd.merge(&cem.pr);
-    // Per module, the held record this build writes (`lir::hold`; empty: the previous one when it
-    // replays), under its native key.
-    let mut recs = Vector::<String>::new();
+    // Per module, the native key its held record goes under (`lir::hold`). Whether the next image's
+    // temporary file holds it in full (`tuc::image_begin`), and whether this build wrote it yet.
     let mut nks = Vector::<u64>::new();
+    let mut img_ok = false;
+    let mut img_done = false;
     if tuc.on {
         let base = nat_base(p);
         for m in 0..p.modules.len() {
@@ -6358,20 +6357,42 @@ pub(package) fn cemit_package(
         let mut g = sch::Jobs::from_edges(r.order.len(), &r.edges, replace(&mut r.order, Vector::<u32>::new()));
         sch::run_jobs(&mut g, p.jobs, lopt::job, &mut r, null);
         r.finish(pkg);
+        // Each module this build emitted writes its own record, one at a time: no record waits in memory
+        // for the publication.
         if tuc.on {
-            let mut want = Vector::<bool>::with_capacity(p.modules.len());
-            for m in 0..p.modules.len() {
-                want.push(!tuc.hit[m]);
+            img_done = true;
+            if let Some(mut w) = tuc::image_begin(&mut tuc) {
+                let mut want = Vector::<bool>::with_capacity(p.modules.len());
+                for m in 0..p.modules.len() {
+                    want.push(!tuc.hit[m]);
+                }
+                let us = lhold::units(pkg, &want);
+                for m in 0..p.modules.len() {
+                    if tuc.hit[m] {
+                        tuc::held_old(&tuc, &mut w, m, nks[m]);
+                        continue;
+                    }
+                    let mut h = lhold::record(pkg, &mut r, &us, m);
+                    tuc::held_head(&tuc, &mut w, m, nks[m], h.size());
+                    h.write(&mut w);
+                    h.restore(pkg);
+                }
+                img_ok = w.finish();
             }
-            lhold::save(pkg, &r, &want, &mut recs);
         }
         pkg.drop_held();
         cem.lir_put(l);
     }
+    if tuc.on && !img_done {
+        if let Some(mut w) = tuc::image_begin(&mut tuc) {
+            for m in 0..p.modules.len() {
+                tuc::held_old(&tuc, &mut w, m, nks[m]);
+            }
+            img_ok = w.finish();
+        }
+    }
     if tuc.on {
-        tuc::held_put(&mut tuc, &mut recs, &nks);
-        o.tuc_img = replace(&mut tuc.out, String::new());
-        o.tuc_parts = replace(&mut tuc.parts, Vector::<String>::new());
+        o.tuc_ok = img_ok;
         o.tuc_path = replace(&mut tuc.path, String::new());
         o.tuc_keys = replace(&mut tuc.keys, Vector::<u64>::new());
         o.tuc_hit = replace(&mut tuc.hit, Vector::<bool>::new());
@@ -16317,8 +16338,10 @@ pub(package) fn run_package(
     }
     // Publish the per-TU cache only after a fully successful emission; keep[] shields it from pruning.
     // Atomic: the reader checks only bounds, so a torn image would replay sections of corrupt content.
-    if !err && co.skips == 0 && co.tuc_path.len() != 0 {
-        if write_file_atomic_list(&co.tuc_path, &co.tuc_img, &co.tuc_parts) {
+    // An image this build does not publish leaves no temporary file.
+    if co.tuc_path.len() != 0 {
+        let tmp = tmp_of(&co.tuc_path);
+        if settle(&tmp, &co.tuc_path, !err && co.skips == 0 && co.tuc_ok) {
             keep.push(String::from_str(&co.tuc_path));
         }
     }

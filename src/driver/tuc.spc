@@ -17,6 +17,8 @@ import ir::inline as inl;
 import module::loader as loader;
 import std::platform::fs;
 import driver::util as *;
+import stdio;
+import utils::persist as *;
 import stdlib;
 import build_system::ext as ext;
 
@@ -91,10 +93,9 @@ pub(package) struct Tuc {
     pub(package) hoff: Vector<u64>,
     pub(package) hlen: Vector<u64>,
     pub(package) hnat: Vector<u64>,
-    pub(package) out: String, // next cache image, assembled section by section in module order
-    // The rest of the next image after `out` (`held_put`): per module its held record's header, then the
-    // record. The image file is `out` followed by these.
-    pub(package) parts: Vector<String>,
+    // The next cache image's sections, assembled section by section in module order; the held records
+    // follow them in its file (`image_begin`).
+    pub(package) out: String,
     pub(package) path: String,
     // Scratch of the live section `sec_rec` writes, reused across sections.
     pub(package) tt: TtRec,
@@ -320,31 +321,44 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
     }
 }
 
-/// Put after the next image's sections (`parts`) every module's held record (`lir::hold`): `recs[m]`,
-/// taken, when it is not empty, else module `m`'s record in the previous image when the module replays,
-/// else none; each under the module's key and native key `nat[m]`, from a multiple of 16 bytes on.
-pub(package) fn held_put(t: &mut Tuc, recs: &mut Vector<String>, nat: &Vector<u64>) {
-    let mut at = t.out.len();
-    t.parts.reserve_exact(2 * t.keys.len());
-    for m in 0..t.keys.len() {
-        let rec = if m < recs.len() && recs.at(m).len() != 0 {
-            replace(recs.index_mut(m), String::new())
-        } else if t.hit[m] {
-            String::from_str(held_of(t, m, nat[m]))
-        } else {
-            String::new()
-        };
-        let mut h = String::with_capacity(HELD_HEAD + 15);
-        w64(&mut h, t.keys[m]);
-        w64(&mut h, nat[m]);
-        w32(&mut h, rec.len() as u32);
-        while (at + h.len()) % 16 != 0 {
-            h.push_byte(0);
-        }
-        at += h.len() + rec.len();
-        t.parts.push(h);
-        t.parts.push(rec);
+/// The next image's temporary file (`tmp_of` its path), opened with `out`, the image's sections, written
+/// into it; every module's held record follows in module order (`held_head` and the record, or
+/// `held_old`), then `Writer::finish`. None when it does not open.
+pub(package) fn image_begin(t: &mut Tuc) Option<Writer> {
+    let tmp = tmp_of(&t.path);
+    let f = stdio::fopen(&tmp, "wb");
+    if f == null {
+        return None;
     }
+    let mut w = Writer::to_file(f);
+    w.bytes(t.out.as_str().ptr(), t.out.len());
+    t.out = String::new();
+    return Some(w);
+}
+
+/// Into `w`, module `m`'s held record header: the module's key, native key `nat` and the record's length
+/// `len`, padded so that the record starts at a multiple of 16 bytes.
+pub(package) fn held_head(t: &Tuc, w: &mut Writer, m: usize, nat: u64, len: usize) {
+    let mut h = String::with_capacity(HELD_HEAD + 15);
+    w64(&mut h, t.keys[m]);
+    w64(&mut h, nat);
+    w32(&mut h, len as u32);
+    while (w.len() + h.len()) % 16 != 0 {
+        h.push_byte(0);
+    }
+    w.bytes(h.as_str().ptr(), h.len());
+}
+
+/// Into `w`, module `m`'s held record when the module replays (the previous image's, under native key
+/// `nat`), else none, with its header.
+pub(package) fn held_old(t: &Tuc, w: &mut Writer, m: usize, nat: u64) {
+    let rec = if t.hit[m] {
+        held_of(t, m, nat)
+    } else {
+        ""
+    };
+    held_head(t, w, m, nat, rec.len());
+    w.bytes(rec.ptr(), rec.len());
 }
 
 // A held record's header: the module's key, its native key and the record's length.
@@ -383,7 +397,6 @@ pub(package) fn tuc_setup(
         hlen: Vector::<u64>::new(),
         hnat: Vector::<u64>::new(),
         out: String::new(),
-        parts: Vector::<String>::new(),
         path: String::new(),
         tt: tt_new(),
         xs: Vector::<u32>::new(),

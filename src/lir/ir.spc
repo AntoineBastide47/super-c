@@ -1194,6 +1194,15 @@ extend PoolScratch {
     }
 }
 
+// `v` itself when its spare capacity is at most an eighth of its length (`v` left empty), else an exact
+// copy of it.
+fn settle<T: Copy>(v: &mut Vector<T>) Vector<T> {
+    if v.capacity() - v.len() <= v.len() >> 3 {
+        return replace(v, Vector::<T>::new());
+    }
+    return exact(v);
+}
+
 // An exact-capacity copy of `v`.
 fn exact<T: Copy>(v: &Vector<T>) Vector<T> {
     let mut out = Vector::<T>::with_capacity(v.len());
@@ -1311,6 +1320,30 @@ extend Body {
             bools: self.bools,
             fmath: self.fmath,
             scopes: exact(&self.scopes),
+            naked: self.naked,
+            cur: 0,
+        };
+    }
+    /// `compact`, with the tables that are about full moved out of `self` instead of copied (`settle`).
+    pub(package) fn take_compact(self: &mut Self) Body {
+        return Body {
+            insts: settle(&mut self.insts),
+            locs: settle(&mut self.locs),
+            blocks: settle(&mut self.blocks),
+            params: settle(&mut self.params),
+            pool: settle(&mut self.pool),
+            words: settle(&mut self.words),
+            slots: settle(&mut self.slots),
+            syms: settle(&mut self.syms),
+            msgs: settle(&mut self.msgs),
+            lines: settle(&mut self.lines),
+            inl: settle(&mut self.inl),
+            sig: self.sig,
+            refs: settle(&mut self.refs),
+            owned: settle(&mut self.owned),
+            bools: self.bools,
+            fmath: self.fmath,
+            scopes: settle(&mut self.scopes),
             naked: self.naked,
             cur: 0,
         };
