@@ -52,7 +52,7 @@ keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and 
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
 | Successors, RPO, predecessors; block of each instruction; operand lists (CSR) | `Opt::graph` (`block_map`, `operands`) | `Opt` (`pred_at`, `preds`, `pblock`, `blk_of`, `ops_at`, `ops`, `ops_dst`) | `K_GRAPH`: any change |
-| Per instruction, its readers up to 2, and whether an `or` reads it | `Opt::readers` (from `ops`), at the start of `thread` and of the walk | `Opt` (`icount`, `in_or`; `counted`) | the next `operands` or `splice_ops` |
+| Per instruction, its readers up to 2, and whether an `or` reads it | `thread`'s walk over `ops`, or `Opt::readers` (from `ops`) where the walk first reads them | `Opt` (`icount`, `in_or`; `counted`) | the next `operands` or `splice_ops` |
 | Dominator tree and its pre/post numbers | `Opt::dominators` | `Opt` (`dpre`, `dpost`) | `K_DOM`: any change |
 | Loop nesting, preheaders, loop blocks in block order | `Opt::nest` | `Opt` (`inner`, `lparent`, `preh`, `lb_at`, `lbs`) | `K_NEST`: any change |
 | Private slots and the slot each address derives, alias classes and their scope roots' bases, slot escapes, frozen memory, per-block and per-loop writes and tags | `Opt::memory` (`privates`, `classes`, `slot_escapes`, `root_bases`, `frozen`, `bw`, `bt`, `bpw`, `bst`) | `Opt` (`pder`, which `slot_escapes` and `slot_apart` read through `der_slot`; `cbase` among them) | `K_MEM`: any change |

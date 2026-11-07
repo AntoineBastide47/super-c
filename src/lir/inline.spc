@@ -254,6 +254,8 @@ pub(package) struct Inliner {
     work: Vector<u32>,
     /// Per caller instruction, whether `run` may inline its call; empty: every call.
     pub(package) only: Vector<bool>,
+    spare: Body, // the body `run` builds into (`build`)
+    args: Vector<Value>, // an edge's arguments, before `Body::edge` copies them
     // The new body's instruction, block and parameter counts (`plan`).
     ni: u32,
     nb: u32,
@@ -285,6 +287,8 @@ extend Inliner {
             work: Vector::<u32>::new(),
             edges: Vector::<u32>::new(),
             only: Vector::<bool>::new(),
+            spare: Body::empty(),
+            args: Vector::<Value>::new(),
             ni: 0,
             nb: 0,
             np: 0,
@@ -310,8 +314,11 @@ extend Inliner {
         if !self.plan(pk, bodies, ok, level, unit, ci, bu, c) {
             return false;
         }
-        let out = self.build(bodies, c);
-        *c = out;
+        // Into the spare body, which then holds the caller's old tables for the next call: their buffers
+        // are reused, not freed and grown again.
+        let mut o = replace(&mut self.spare, Body::empty());
+        self.build(bodies, c, &mut o);
+        self.spare = replace(c, o);
         return true;
     }
 
@@ -424,10 +431,10 @@ extend Inliner {
         return self.sites.len() != 0;
     }
 
-    // The new body, in the numbering `plan` chose.
-    fn build(self: &mut Self, bodies: *const Body, c: &Body) Body {
-        let mut o = Body::new();
-        self.reserve(bodies, c, &mut o);
+    // The new body into `o`, in the numbering `plan` chose.
+    fn build(self: &mut Self, bodies: *const Body, c: &Body, o: &mut Body) {
+        o.clear();
+        self.reserve(bodies, c, o);
         o.pool.extend_copy(&c.pool);
         o.words.extend_copy(&c.words);
         o.slots.extend_copy(&c.slots);
@@ -467,11 +474,12 @@ extend Inliner {
                     let t = c.insts[i as usize];
                     let e = unsafe &*(bodies + s.callee as usize);
                     // The part before the call jumps to the copy's entry with the call's arguments.
-                    let mut args = Vector::<u32>::with_capacity(t.aux as usize);
+                    self.args.truncate(0);
                     for q in 0..t.aux as u32 {
-                        args.push(self.cval(c.pool[(t.c + q) as usize]));
+                        let a = self.cval(c.pool[(t.c + q) as usize]);
+                        self.args.push(a);
                     }
-                    let edge = o.edge(s.bbase, &args);
+                    let edge = o.edge(s.bbase, &self.args);
                     o.insts.push(Inst { op: O_JMP, ty: T_NONE, aux: 0, a: edge, b: 0, c: 0 });
                     o.locs.push(c.locs[i as usize]);
                     o.inl.push(site_of(c, i, false));
@@ -489,9 +497,9 @@ extend Inliner {
                         // A site of its own: the copy's instructions alone hold it (`Scope`).
                         o.lines.push(c.lines[site as usize]);
                         site = o.lines.len() as u32 - 1;
-                        Inliner::scopes(e, s, site, &mut o);
+                        Inliner::scopes(e, s, site, o);
                     }
-                    self.copy(e, s, c.locs[i as usize], site, &mut o);
+                    self.copy(e, s, c.locs[i as usize], site, o);
                     // The continuation: the call's result as its parameter.
                     start = o.insts.len() as u32;
                     if s.kparam == NONE {
@@ -504,7 +512,7 @@ extend Inliner {
                     }
                     continue;
                 }
-                let t = self.caller_inst(c, c.insts[i as usize], &mut o);
+                let t = self.caller_inst(c, c.insts[i as usize], o);
                 o.insts.push(t);
                 o.locs.push(c.locs[i as usize]);
                 o.inl.push(site_of(c, i, false));
@@ -519,7 +527,6 @@ extend Inliner {
                 },
             );
         }
-        return o;
     }
 
     // Each table of the new body `o` at its size (the instructions, blocks and parameters `plan` numbered,
@@ -744,11 +751,11 @@ extend Inliner {
         let f = op_info(t.op).form;
         if t.op == O_RET {
             // A jump to the continuation, with the result.
-            let mut args = Vector::<u32>::new();
+            self.args.truncate(0);
             if s.kparam != NONE {
-                args.push(ev(s, t.a));
+                self.args.push(ev(s, t.a));
             }
-            return Inst { op: O_JMP, ty: T_NONE, aux: 0, a: o.edge(s.kblock, &args), b: 0, c: 0 };
+            return Inst { op: O_JMP, ty: T_NONE, aux: 0, a: o.edge(s.kblock, &self.args), b: 0, c: 0 };
         }
         if lv::operand_a(f) {
             t.a = ev(s, t.a);
@@ -868,11 +875,6 @@ const fn ev(s: Site, v: Value) Value {
         return VPARAM | s.pbase + (v & ~VPARAM);
     }
     return s.vbase + (v & ~VFLAG) | v & VFLAG;
-}
-
-// A table size `n` with room for the passes' additions.
-const fn grown(n: u32) usize {
-    return n as usize + n as usize / 4 + 16;
 }
 
 // `v` grown to `n` entries, the new ones false.

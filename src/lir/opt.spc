@@ -241,6 +241,8 @@ pub(package) struct Opt {
     nofx: Vector<bool>, // per instruction, a call that writes no memory and comes back: it goes when unused
     hoisted: Vector<u64>, // block << 32 | instruction, in the order they moved
     pnew: Vector<bool>, // per block, a preheader `preheaders` made
+    ptypes: Vector<u8>, // `preheaders`: a new preheader's parameter types
+    pargs: Vector<Value>, // `preheaders`: its jump's arguments
     touched: Vector<bool>, // per block, one `promote_places` changed: a preheader or a block of a loop
     /// `place_of`'s guard of a place the loop reaches on its first pass only after tests (`guarded`): per test,
     /// its condition, the block it leaves to and whether the loop goes on when it holds; empty for none.
@@ -506,6 +508,8 @@ extend Opt {
             nofx: Vector::<bool>::new(),
             hoisted: Vector::<u64>::new(),
             pnew: Vector::<bool>::new(),
+            ptypes: Vector::<u8>::new(),
+            pargs: Vector::<Value>::new(),
             touched: Vector::<bool>::new(),
             gchain: Vector::<u32>::new(),
             gcmp: NONE,
@@ -1075,7 +1079,7 @@ extend Opt {
             let w = self.rewalk(pk, b);
             return self.settle(pk, b) || w || r;
         }
-        let nb = replace(&mut self.pbody, Body::new());
+        let nb = replace(&mut self.pbody, Body::empty());
         self.pbody = replace(b, nb);
         self.block_map(b);
         self.operands(b);
@@ -1241,7 +1245,7 @@ extend Opt {
             b.blocks.index_mut(k).flags = f;
         }
         let n = self.order.len();
-        let mut seen = Vector::<bool>::new();
+        let mut seen = replace(&mut self.seen, Vector::<bool>::new());
         // Each round but the last adds a mark to a block: at most two per block.
         for _ in 0..2 * n + 1 {
             let mut changed = false;
@@ -1274,6 +1278,7 @@ extend Opt {
             changed = self.unreached(b, BLOCK_COLD, BLOCK_COLD, &mut seen) || changed;
             changed = self.unreached(b, BLOCK_RARE, BLOCK_UNLIKELY, &mut seen) || changed;
             if !changed {
+                self.seen = seen;
                 return;
             }
         }
@@ -1763,7 +1768,7 @@ extend Opt {
         }
         self.tables(pk, b, K_GRAPH);
         self.pairs.run(b, &self.order, &self.rpo, &mut self.pbody);
-        let nb = replace(&mut self.pbody, Body::new());
+        let nb = replace(&mut self.pbody, Body::empty());
         self.pbody = replace(b, nb);
         self.kept = K_NONE;
         return true;
@@ -1777,7 +1782,7 @@ extend Opt {
         }
         self.tables(pk, b, K_GRAPH);
         self.wide.run(b, pk.vector, &self.order, &self.rpo, &mut self.pbody);
-        let nb = replace(&mut self.pbody, Body::new());
+        let nb = replace(&mut self.pbody, Body::empty());
         self.pbody = replace(b, nb);
         self.kept = K_NONE;
         return true;
@@ -2488,26 +2493,26 @@ extend Opt {
                 continue;
             }
             let hb = b.blocks[h as usize];
-            let mut types = Vector::<u8>::with_capacity(hb.param_len as usize);
-            let mut args = Vector::<Value>::with_capacity(hb.param_len as usize);
+            self.ptypes.truncate(0);
+            self.pargs.truncate(0);
             if n == 1 {
                 for q in 0..b.edge_nargs(one) {
-                    args.push(b.edge_arg(one, q));
+                    self.pargs.push(b.edge_arg(one, q));
                 }
             } else {
                 for q in hb.param_start..hb.param_start + hb.param_len as u32 {
-                    types.push(b.params[q as usize]);
+                    self.ptypes.push(b.params[q as usize]);
                 }
             }
             let loc = b.locs[hb.start as usize];
-            let x = b.add_block(&types);
-            for q in 0..types.len() as u32 {
-                args.push(b.param(x, q));
+            let x = b.add_block(&self.ptypes);
+            for q in 0..self.ptypes.len() as u32 {
+                self.pargs.push(b.param(x, q));
             }
             b.begin(x);
             self.pnew.push(true);
             self.phd.push(h);
-            let into = b.edge(h, &args);
+            let into = b.edge(h, &self.pargs);
             let _ = b.emit(jump(into), loc);
             if b.inl.len() != 0 {
                 b.inl.push(0);
@@ -2983,26 +2988,33 @@ extend Opt {
         self.ops_at.push(self.ops.len() as u32);
     }
 
-    // Per instruction of `b`, how many instructions read it, up to 2 (`icount`), and whether an `or` reads
-    // it (`in_or`), from the operand tables; nothing when they are those of these tables already.
+    // Per instruction of `b` the operand tables cover, how many instructions read it, up to 2 (`icount`),
+    // and whether an `or` reads it (`in_or`); nothing when they are those of these tables already. The
+    // walk asks at its first use: the instructions it appended since have no entries, and an instruction's
+    // readers come after it in the walk's order, so when the walk asks about it, it rewrote none of them.
     fn readers(self: &mut Self, b: &Body) {
         if self.counted {
             return;
         }
         self.counted = true;
-        let ni = b.insts.len();
+        let ni = self.ops_at.len() - 1;
         fill(&mut self.icount, ni, 0);
         fill(&mut self.in_or, ni, false);
         for i in 0..ni {
             let is_or = b.insts[i].op == O_OR;
             for u in self.ops_at[i]..self.ops_at[i + 1] {
+                // VNONE has the VPARAM bit too.
                 let v = self.ops[u as usize];
-                if v == VNONE || (v & VPARAM) != 0 {
+                if (v & VPARAM) != 0 {
                     continue;
                 }
                 let x = (v & ~VFLAG) as usize;
-                self.icount[x] = (self.icount[x] + 1).min(2);
-                self.in_or[x] = self.in_or[x] || is_or;
+                if self.icount[x] < 2 {
+                    self.icount[x] += 1;
+                }
+                if is_or {
+                    self.in_or[x] = true;
+                }
             }
         }
     }
@@ -4604,7 +4616,6 @@ extend Opt {
         self.kept = K_NONE;
         let nb = b.blocks.len();
         self.fresh(b);
-        self.readers(b);
         self.made.clear();
         self.selected = false;
         self.refold = false;
@@ -5972,8 +5983,14 @@ extend Opt {
         // instruction), the last one for a parameter, and the nearest block that dominates every block
         // outside its own that reads it (`preader`, `ireader`: NONE for none, MULTI for a reader no path
         // reaches). An edge's argument is read in its terminator's block; one of the value's own block is
-        // read inside it (`through` checks the edge it threads along).
-        self.readers(b);
+        // read inside it (`through` checks the edge it threads along). The instructions' counts as
+        // `readers` makes them, in this walk over the operands when they are not those of the tables.
+        let count = !self.counted;
+        if count {
+            self.counted = true;
+            fill(&mut self.icount, b.insts.len(), 0);
+            fill(&mut self.in_or, b.insts.len(), false);
+        }
         fill(&mut self.pcount, b.params.len(), 0);
         fill(&mut self.puser, b.params.len(), NONE);
         fill(&mut self.preader, b.params.len(), NONE);
@@ -5981,6 +5998,7 @@ extend Opt {
         for k in 0..nb {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
+                let is_or = count && b.insts[i as usize].op == O_OR;
                 let u0 = self.ops_at[i as usize];
                 for u in 0..self.ops_at[i as usize + 1] - u0 {
                     let v = self.ops[(u0 + u) as usize];
@@ -5996,6 +6014,12 @@ extend Opt {
                         }
                     } else {
                         let x = (v & ~VFLAG) as usize;
+                        if count && self.icount[x] < 2 {
+                            self.icount[x] += 1;
+                        }
+                        if is_or {
+                            self.in_or[x] = true;
+                        }
                         if self.blk_of[x] != k as u32 {
                             self.ireader[x] = self.reader(self.ireader[x], k as u32);
                         }
@@ -7775,13 +7799,16 @@ extend Opt {
             // A truncation of an addition, subtraction, product or bitwise operation of two values extended
             // from its type, which it alone reads, is that operation on them: the result's low bits are
             // those of the operands'. (Another reader keeps the wide operation; the truncation is free.)
-            if t.op == O_TRUNC && is_int(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE && (t.a as usize >= self.icount.len() || self.icount[t.a as usize] == 1) {
+            if t.op == O_TRUNC && is_int(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE {
                 let w = b.insts[t.a as usize];
                 if w.op >= O_ADD && w.op <= O_XOR && !(w.op >= O_SDIV && w.op <= O_UREM) {
                     let x = ext_from(b, w.a, t.ty);
                     let y = ext_from(b, w.b, t.ty);
                     if x != VNONE && y != VNONE {
-                        b.insts[i as usize] = Inst { op: w.op, ty: t.ty, aux: 0, a: x, b: y, c: VNONE };
+                        self.readers(b);
+                        if t.a as usize >= self.icount.len() || self.icount[t.a as usize] == 1 {
+                            b.insts[i as usize] = Inst { op: w.op, ty: t.ty, aux: 0, a: x, b: y, c: VNONE };
+                        }
                     }
                 }
             }
@@ -8293,12 +8320,14 @@ extend Opt {
     // 0 when every constant is below 64. Whether it did.
     fn bit_set(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
-        if is_vec(t.ty) || i as usize < self.in_or.len() && self.in_or[i as usize] {
+        if is_vec(t.ty) {
             return false;
         }
         let mut x = VNONE;
         let mut vals = StaticVector::<u64, SET_MAX>::new();
         let mut stack = StaticVector::<Value, SET_MAX>::new();
+        // The tree's values, one per step, whose readers (`readers`) are checked once its shape is one.
+        let mut nodes = StaticVector::<Value, 32>::new();
         stack.push(t.a);
         stack.push(t.b);
         // Each step takes a value off the stack; an `or` puts back two: at most 2 * SET_MAX steps.
@@ -8307,9 +8336,10 @@ extend Opt {
                 break;
             }
             let v = stack.pop().unwrap();
-            if (v & (VPARAM | VFLAG)) != 0 || v as usize < self.icount.len() && self.icount[v as usize] != 1 {
+            if (v & (VPARAM | VFLAG)) != 0 {
                 return false;
             }
+            nodes.push(v);
             let u = b.insts[v as usize];
             if u.op == O_OR && u.ty == t.ty {
                 if stack.len() + 2 > SET_MAX {
@@ -8332,6 +8362,16 @@ extend Opt {
         let ty = b.type_of(x);
         if stack.len() != 0 || vals.len() < 3 || !is_int(ty) || ty == T_I128 {
             return false;
+        }
+        self.readers(b);
+        if i as usize < self.in_or.len() && self.in_or[i as usize] {
+            return false;
+        }
+        for q in 0..nodes.len() {
+            let v = nodes[q];
+            if v as usize < self.icount.len() && self.icount[v as usize] != 1 {
+                return false;
+            }
         }
         let m = width_mask(ty, pk.ptr_bytes);
         let mut lo = u64::MAX;
@@ -9837,6 +9877,7 @@ extend Opt {
             return false;
         }
         let mut eq = false;
+        self.readers(b);
         if i as usize < self.icount.len() && self.icount[i as usize] == 1 && i + 1 < bk.start + bk.len {
             let u = b.insts[i as usize + 1];
             eq = u.op == O_ICMP && (u.aux == C_EQ || u.aux == C_NE) && (u.a == i && const_of(b, u.b) == Some(0u64) || u.b == i && const_of(
@@ -11685,7 +11726,7 @@ extend Opt {
         let nb = b.blocks.len();
         // The walk's removable calls (`nofx`) hold for this rebuild alone: another runs on renumbered
         // instructions.
-        let nofx = replace(&mut self.nofx, Vector::<bool>::new());
+        let mut nofx = replace(&mut self.nofx, Vector::<bool>::new());
         let npar = b.params.len();
         fill(&mut self.sused, b.slots.len(), NONE);
         self.reach(b);
@@ -12008,6 +12049,9 @@ extend Opt {
         assign(&mut b.blocks, &self.blocks);
         assign(&mut b.params, &self.params);
         self.drop_slots(b);
+        // Empty, its buffer kept for the next walk's.
+        nofx.truncate(0);
+        self.nofx = nofx;
     }
 
     // Drop the slots no emitted instruction takes the address of (promoted, merged or dead ones; `sused`),
@@ -12927,7 +12971,7 @@ fn symbol_tables(pk: &mut Package, pre: &mut Vector<Option<Body>>) {
             took = true;
         }
         if took {
-            let mut b = replace(pk.bodies.index_mut(j), Body::new());
+            let mut b = replace(pk.bodies.index_mut(j), Body::empty());
             o.forget();
             o.unit = pk.syms[owner[j] as usize].unit;
             let _ = o.run(pk, &mut b, true);
@@ -13513,6 +13557,7 @@ fn effects(
     let mut pass = Vector::<u64>::new();
     let mut poff = Vector::<i64>::new();
     let mut at = Vector::<u32>::with_capacity(held + 1);
+    let mut fs = FxScratch::new();
     for k in 0..n {
         sp_at.push(sp.len() as u32);
         if k >= held {
@@ -13524,12 +13569,12 @@ fn effects(
             continue;
         }
         let mut w: u64 = 0;
-        fx.push(own_effects(p, &bodies[k], &mut w));
+        fx.push(own_effects(p, &bodies[k], &mut w, &mut fs));
         wargs.push(w);
         at.push(pass.len() as u32);
         let np = (bodies[k].blocks[0].param_len as u64).min(64);
         esc.push(
-            own_escapes(p, &bodies[k], &mut pass, &mut poff, sp) | if np < 64 {
+            own_escapes(p, &bodies[k], &mut pass, &mut poff, sp, &mut fs) | if np < 64 {
                 ~0u64 << np
             } else {
                 0u64
@@ -13791,8 +13836,8 @@ fn stalls(fx: &mut Vector<u8>, cs: &Calls, rc_at: &Vector<u32>, rc: &Vector<u32>
 
 // The flags (`FX_*`) of body `b`'s own instructions (`effects`), and into `w` the parameters whose memory
 // they may write: a call of a body counts for none here.
-fn own_effects(p: &Package, b: &Body, w: &mut u64) u8 {
-    let mut f: u8 = if has_cycle(b) {
+fn own_effects(p: &Package, b: &Body, w: &mut u64, fs: &mut FxScratch) u8 {
+    let mut f: u8 = if has_cycle(b, fs) {
         FX_STALL
     } else {
         0
@@ -13837,40 +13882,61 @@ fn own_effects(p: &Package, b: &Body, w: &mut u64) u8 {
     return f;
 }
 
+// `effects`'s scratch, reused from body to body.
+struct FxScratch {
+    state: Vector<u8>, // `has_cycle`
+    path: Vector<u64>,
+    es: Vector<u32>,
+    der: Vector<u32>, // `own_escapes`
+    doff: Vector<i64>,
+    uses: Vector<Value>,
+    edges: Vector<u32>,
+}
+
+extend FxScratch {
+    fn new() FxScratch {
+        return FxScratch {
+            state: Vector::<u8>::new(),
+            path: Vector::<u64>::new(),
+            es: Vector::<u32>::new(),
+            der: Vector::<u32>::new(),
+            doff: Vector::<i64>::new(),
+            uses: Vector::<Value>::new(),
+            edges: Vector::<u32>::new(),
+        };
+    }
+}
+
 // Whether a block of `b` reaches itself (a loop): a depth-first walk that meets a block on its path.
-fn has_cycle(b: &Body) bool {
+fn has_cycle(b: &Body, fs: &mut FxScratch) bool {
     let nb = b.blocks.len();
     // Per block: 0 unseen, 1 on the walk's path, 2 done.
-    let mut state = Vector::<u8>::with_capacity(nb);
-    for _ in 0..nb {
-        state.push(0);
-    }
+    fill(&mut fs.state, nb, 0);
     // The path: a block and its next edge to take, each block on it once.
-    let mut path = Vector::<u64>::with_capacity(nb);
-    let mut es = Vector::<u32>::new();
-    state[0] = 1;
-    path.push(0);
+    fs.path.truncate(0);
+    fs.state[0] = 1;
+    fs.path.push(0);
     // Each step takes an edge or leaves a block: at most the edges and blocks.
-    while path.len() != 0 {
-        let top = path[path.len() - 1];
+    while fs.path.len() != 0 {
+        let top = fs.path[fs.path.len() - 1];
         let k = (top & 0xFFFFFFFF) as u32;
         let e = (top >> 32) as u32;
         let bk = b.blocks[k as usize];
-        b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut es);
-        if e as usize >= es.len() {
-            state[k as usize] = 2;
-            let _ = path.pop();
+        b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut fs.es);
+        if e as usize >= fs.es.len() {
+            fs.state[k as usize] = 2;
+            let _ = fs.path.pop();
             continue;
         }
-        let at = path.len() - 1;
-        path[at] = e as u64 + 1 << 32 | k as u64;
-        let s = b.edge_target(es[e as usize]);
-        if state[s as usize] == 1 {
+        let at = fs.path.len() - 1;
+        fs.path[at] = e as u64 + 1 << 32 | k as u64;
+        let s = b.edge_target(fs.es[e as usize]);
+        if fs.state[s as usize] == 1 {
             return true;
         }
-        if state[s as usize] == 0 {
-            state[s as usize] = 1;
-            path.push(s);
+        if fs.state[s as usize] == 0 {
+            fs.state[s as usize] = 1;
+            fs.path.push(s);
         }
     }
     return false;
@@ -13884,26 +13950,29 @@ fn has_cycle(b: &Body) bool {
 // (OFF_ANY: not constant): it escapes when that parameter does. Into `span`, per parameter of the first
 // 64, the bytes its accesses touch (`Sym.span`'s entries). A block that ends the program counts for
 // nothing.
-fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>, poff: &mut Vector<i64>, span: &mut Vector<u64>) u64 {
+fn own_escapes(
+    p: &Package,
+    b: &Body,
+    pass: &mut Vector<u64>,
+    poff: &mut Vector<i64>,
+    span: &mut Vector<u64>,
+    fs: &mut FxScratch,
+) u64 {
     let ni = b.insts.len();
     // Per instruction, the parameter its value is address arithmetic on (NONE: none) and the constant
     // offset (`doff`, OFF_ANY: not constant or past SPAN_MAX). Each pass sets at least one more or ends: at
     // most `ni + 1`.
-    let mut der = Vector::<u32>::with_capacity(ni);
-    let mut doff = Vector::<i64>::with_capacity(ni);
-    for _ in 0..ni {
-        der.push(NONE);
-        doff.push(OFF_ANY);
-    }
+    fill(&mut fs.der, ni, NONE);
+    fill(&mut fs.doff, ni, OFF_ANY);
     for _ in 0..ni + 1 {
         let mut changed = false;
         for i in 0..ni {
             let t = b.insts[i];
-            if t.op == O_PTRADD && der[i] == NONE {
-                let k = param_of(b, &der, t.a);
+            if t.op == O_PTRADD && fs.der[i] == NONE {
+                let k = param_of(b, &fs.der, t.a);
                 if k != NONE {
-                    der[i] = k;
-                    let o = off_of(&doff, t.a);
+                    fs.der[i] = k;
+                    let o = off_of(&fs.doff, t.a);
                     let n = if t.b == VNONE {
                         Option::<u64>::Some(0)
                     } else {
@@ -13918,7 +13987,7 @@ fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>, poff: &mut Vector<
                         };
                         let d = o.wrapping_add(x.wrapping_mul(scale_of(t))).wrapping_add(t.c as i32);
                         if d >= -SPAN_MAX && d <= SPAN_MAX {
-                            doff[i] = d;
+                            fs.doff[i] = d;
                         }
                     }
                     changed = true;
@@ -13936,8 +14005,6 @@ fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>, poff: &mut Vector<
         span.push(SPAN_NONE);
     }
     let mut out: u64 = 0;
-    let mut uses = Vector::<Value>::new();
-    let mut edges = Vector::<u32>::new();
     for k in 0..b.blocks.len() {
         let bk = b.blocks[k];
         let end = b.insts[(bk.start + bk.len - 1) as usize].op;
@@ -13949,31 +14016,31 @@ fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>, poff: &mut Vector<
             let c = call_target(p, b, t);
             if c != NONE {
                 for q in 0..t.aux as u32 {
-                    let x = param_of(b, &der, b.pool[(t.c + q) as usize]);
+                    let x = param_of(b, &fs.der, b.pool[(t.c + q) as usize]);
                     if x == NONE {
                         continue;
                     }
                     if q < 64 {
                         pass.push(c as u64 << 32 | q as u64 << 8 | x as u64);
-                        poff.push(off_of(&doff, b.pool[(t.c + q) as usize]));
+                        poff.push(off_of(&fs.doff, b.pool[(t.c + q) as usize]));
                     } else {
                         out |= 1u64 << x as u64;
                     }
                 }
                 continue;
             }
-            lv::uses(b, t, &mut uses);
+            lv::uses(b, t, &mut fs.uses);
             if is_terminator(t.op) {
-                b.succ_edges(t, &mut edges);
-                for d in 0..edges.len() {
-                    for a in 0..b.edge_nargs(edges[d]) {
-                        uses.push(b.edge_arg(edges[d], a));
+                b.succ_edges(t, &mut fs.edges);
+                for d in 0..fs.edges.len() {
+                    for a in 0..b.edge_nargs(fs.edges[d]) {
+                        fs.uses.push(b.edge_arg(fs.edges[d], a));
                     }
                 }
             }
-            for u in 0..uses.len() {
-                let v = uses[u];
-                let x = param_of(b, &der, v);
+            for u in 0..fs.uses.len() {
+                let v = fs.uses[u];
+                let x = param_of(b, &fs.der, v);
                 let cmp = t.op == O_ICMP && x != NONE && !(b.sig != NONE && x < b.pool[b.sig as usize] && (b.pool[(b.sig + 3 + x) as usize] & AGG) != 0);
                 let kept = t.op == O_LOAD && t.a == v && u == 0 || t.op == O_STORE && t.a == v && t.b != v || t.op == O_MEMCPY && (t.a == v || t.b == v) && t.c != v || t.op == O_MEMSET && t.a == v && t.b != v && t.c != v || t.op == O_PTRADD && t.a == v && t.b != v || cmp;
                 if x != NONE && !kept {
@@ -13984,7 +14051,7 @@ fn own_escapes(p: &Package, b: &Body, pass: &mut Vector<u64>, poff: &mut Vector<
                 }
                 // An access: its bytes from the parameter, any when the offset or a copy's count is not
                 // constant.
-                let o = off_of(&doff, v);
+                let o = off_of(&fs.doff, v);
                 let (lo, n) = if t.op == O_LOAD {
                     ((t.c as i32) as i64, type_bytes(t.ty, p.ptr_bytes) as i64)
                 } else if t.op == O_STORE {
@@ -14109,9 +14176,11 @@ fn write_effect(b: &Body, v: Value, w: &mut u64) u8 {
 const ROOT_FRAME: u8 = 0;
 const ROOT_ARGS: u8 = 1;
 const ROOT_ANY: u8 = 2;
+// `root`'s work list: each of its at most FRAME_DEPTH steps takes one value and puts back at most two.
+const ROOT_WORK: usize = FRAME_DEPTH as usize + 1;
 
 fn root(b: &Body, v: Value, w: &mut u64) u8 {
-    let mut work = Vector::<Value>::new();
+    let mut work = StaticVector::<Value, ROOT_WORK>::new();
     work.push(v);
     let mut steps: u32 = 0;
     let mut r = ROOT_FRAME;
@@ -17764,7 +17833,7 @@ fn specialize(pk: &mut Package) {
     }
     for j in 0..made.len() {
         pk.syms.index_mut(made_sym[j] as usize).def = pk.bodies.len() as u32;
-        pk.bodies.push(replace(made.index_mut(j), Body::new()));
+        pk.bodies.push(replace(made.index_mut(j), Body::empty()));
     }
     while let Some(b) = hb.pop() {
         pk.bodies.push(b);

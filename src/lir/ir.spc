@@ -483,6 +483,12 @@ pub(package) fn fill<T: Clone + Default + Eq>(v: &mut Vector<T>, n: usize, x: T)
     }
 }
 
+/// A table size `n` with room for the additions of the passes that follow (a quarter, and 16): a table
+/// reserved at `n` exactly would double for a few.
+pub(package) const fn grown(n: u32) usize {
+    return n as usize + n as usize / 4 + 16;
+}
+
 /// `v` as a copy of `from`, its buffer reused.
 pub(package) fn assign<T: Copy>(v: &mut Vector<T>, from: &Vector<T>) {
     v.truncate(0);
@@ -1170,15 +1176,17 @@ pub(package) struct Scope {
 }
 
 /// `Body::compact_pool`'s scratch: per old pool index, the copy of the record that starts there (its new
-/// index plus 1 << 32 | its length; 0: none), then per `lines` entry its new index; and the new pool.
+/// index plus 1 << 32 | its length; 0: none), the new pool, and per `lines` entry whether the body names
+/// it, then its new index (`compact_lines`).
 pub(package) struct PoolScratch {
     pub(package) map: Vector<u64>,
     pub(package) out: Vector<u32>,
+    pub(package) lmap: Vector<u32>,
 }
 
 extend PoolScratch {
     pub(package) fn new() PoolScratch {
-        return PoolScratch { map: Vector::<u64>::new(), out: Vector::<u32>::new() };
+        return PoolScratch { map: Vector::<u64>::new(), out: Vector::<u32>::new(), lmap: Vector::<u32>::new() };
     }
 }
 
@@ -1207,7 +1215,15 @@ extend Reloc as Copy {}
 
 extend Body {
     pub(package) fn new() Body {
-        let mut b = Body {
+        let mut b = Body::empty();
+        b.lines.push(Loc { file: 0, line: 0, col: 0 });
+        return b;
+    }
+
+    /// A body without even the "no location" entry `new` makes: it allocates nothing, a placeholder until
+    /// a body is moved in or built into it (`clear` then the tables).
+    pub(package) fn empty() Body {
+        return Body {
             insts: Vector::<Inst>::new(),
             locs: Vector::<u32>::new(),
             blocks: Vector::<Block>::new(),
@@ -1228,8 +1244,6 @@ extend Body {
             naked: false,
             cur: 0,
         };
-        b.lines.push(Loc { file: 0, line: 0, col: 0 });
-        return b;
     }
 
     /// Empty the body for the next one, keeping every table's capacity.
@@ -1338,14 +1352,14 @@ extend Body {
             self.insts[i] = t;
         }
         self.pool = exact(out);
-        self.compact_lines(map);
+        self.compact_lines(&mut s.lmap);
     }
 
     // Keep in `lines` only entry 0 and the entries `locs`, `inl` and `scopes` name, in their order, and
     // renumber those. Two equal entries stay two: each is a row of its own and an inline site of its own.
     // A copy of the body takes its `lines` whole, and the removed instructions' entries, of the body and
     // of each copy it inlined, would go along.
-    fn compact_lines(self: &mut Self, map: &mut Vector<u64>) {
+    fn compact_lines(self: &mut Self, map: &mut Vector<u32>) {
         let n = self.lines.len();
         map.truncate(0);
         map.resize_default(n);
@@ -1363,7 +1377,7 @@ extend Body {
         for k in 0..n {
             if map[k] != 0 {
                 self.lines[m] = self.lines[k];
-                map[k] = m as u64;
+                map[k] = m as u32;
                 m += 1;
             }
         }
@@ -1372,13 +1386,13 @@ extend Body {
         }
         self.lines.truncate(m);
         for i in 0..self.locs.len() {
-            self.locs[i] = map[self.locs[i] as usize] as u32;
+            self.locs[i] = map[self.locs[i] as usize];
         }
         for i in 0..self.inl.len() {
-            self.inl[i] = map[self.inl[i] as usize] as u32;
+            self.inl[i] = map[self.inl[i] as usize];
         }
         for k in 0..self.scopes.len() {
-            self.scopes.index_mut(k).site = map[self.scopes[k].site as usize] as u32;
+            self.scopes.index_mut(k).site = map[self.scopes[k].site as usize];
         }
     }
 

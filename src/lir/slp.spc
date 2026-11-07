@@ -73,6 +73,8 @@ pub(package) struct Slp {
     lv: Vector<Value>,
     // The lanes `build` takes, a stack: each call's from its `at` on.
     tmp: Vector<Value>,
+    opened: Vector<bool>, // `red_seeds`: per instruction of the block, an add another add opens
+    open: Vector<Value>, // `red_seeds`: the terms still to open
     iown: Vector<u32>, // per instruction, its PK_OP or PK_LOAD pack (NONE: none)
     pown: Vector<u32>, // per block parameter, its PK_PARAM pack (NONE: none)
     iblk: Vector<u32>, // per instruction, its block
@@ -113,6 +115,8 @@ extend Slp {
             packs: Vector::<Pack>::new(),
             lv: Vector::<Value>::new(),
             tmp: Vector::<Value>::new(),
+            opened: Vector::<bool>::new(),
+            open: Vector::<Value>::new(),
             iown: Vector::<u32>::new(),
             pown: Vector::<u32>::new(),
             iblk: Vector::<u32>::new(),
@@ -360,16 +364,13 @@ extend Slp {
     fn red_seeds(self: &mut Self, b: &Body, k: u32) {
         let bk = b.blocks[k as usize];
         // The adds another add of the block opens (`inner`): no root.
-        let mut opened = Vector::<bool>::with_capacity(bk.len as usize);
-        for _ in 0..bk.len {
-            opened.push(false);
-        }
+        fill(&mut self.opened, bk.len as usize, false);
         for i in bk.start..bk.start + bk.len - 1 {
             let t = b.insts[i as usize];
             if t.op == O_ADD || t.op == O_FADD {
                 for o in [t.a, t.b] {
                     if self.inner(b, o, k, t) {
-                        opened[(o - bk.start) as usize] = true;
+                        self.opened[(o - bk.start) as usize] = true;
                     }
                 }
             }
@@ -377,7 +378,7 @@ extend Slp {
         for i in bk.start..bk.start + bk.len - 1 {
             let t = b.insts[i as usize];
             let fl = t.op == O_FADD && self.assoc;
-            if t.op != O_ADD && !fl || self.iown[i as usize] != NONE || opened[(i - bk.start) as usize] {
+            if t.op != O_ADD && !fl || self.iown[i as usize] != NONE || self.opened[(i - bk.start) as usize] {
                 continue;
             }
             let n = self.lane_count(t.ty);
@@ -386,19 +387,19 @@ extend Slp {
             }
             // The terms, left to right: a stack of the values still to open.
             let at = self.tmp.len();
-            let mut open = Vector::<Value>::with_capacity(8);
-            open.push(i);
+            self.open.truncate(0);
+            self.open.push(i);
             let mut ok = true;
             // Each step opens one add or takes one term: at most 2 * n * SUM_PACKS + 1 steps.
             let mut steps: u32 = 0;
-            while open.len() != 0 && ok && steps <= 2 * n * SUM_PACKS + 1 {
+            while self.open.len() != 0 && ok && steps <= 2 * n * SUM_PACKS + 1 {
                 steps += 1;
-                let v = open.pop().unwrap();
+                let v = self.open.pop().unwrap();
                 if v == i || self.inner(b, v, k, t) {
                     // Its right term after its left.
                     let x = b.insts[v as usize];
-                    open.push(x.b);
-                    open.push(x.a);
+                    self.open.push(x.b);
+                    self.open.push(x.a);
                 } else if (self.tmp.len() - at) as u32 == n * SUM_PACKS {
                     ok = false;
                 } else {
@@ -415,7 +416,7 @@ extend Slp {
             } else {
                 0u32
             };
-            if ok && open.len() == 0 && got >= 2 && np != 0 {
+            if ok && self.open.len() == 0 && got >= 2 && np != 0 {
                 // Kept when no pack it makes gathers; else its packs go.
                 let np0 = self.packs.len();
                 let nl0 = self.lv.len();

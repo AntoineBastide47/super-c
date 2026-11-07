@@ -1822,6 +1822,16 @@ extend Promoter {
             }
         }
         o.clear();
+        // Each table at the size the numbering gave (`grown`): the walk that follows adds constants and
+        // hoisted copies.
+        o.insts.reserve_exact(grown(n));
+        o.locs.reserve_exact(grown(n));
+        if b.inl.len() != 0 {
+            o.inl.reserve_exact(grown(n));
+        }
+        o.params.reserve_exact(grown(np));
+        o.blocks.reserve_exact(grown(b.blocks.len() as u32));
+        o.pool.reserve_exact(grown(b.pool.len() as u32));
         o.pool.extend_copy(&b.pool);
         o.words.extend_copy(&b.words);
         o.words.extend_copy(&self.xwords);
